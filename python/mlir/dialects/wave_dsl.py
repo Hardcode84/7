@@ -31,7 +31,18 @@ from __future__ import annotations
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 
-from mlir._mlir_libs._waveDialectsNanobind import register_dialects
+from mlir._mlir_libs._waveDialectsNanobind import (
+    BufferAddressSpaceAttr,
+    FragmentType,
+    GlobalAddressSpaceAttr,
+    MaskType,
+    MemTokenType,
+    PrivateAddressSpaceAttr,
+    PtrType,
+    SharedAddressSpaceAttr,
+    SimdType,
+    register_dialects,
+)
 from mlir.dialects import arith, func, gpu, memref, scf, wave, waveamd
 from mlir.ir import (
     Attribute,
@@ -77,7 +88,7 @@ def index_type() -> IndexType:
 
 
 def simd_type(element_type: Type | None = None, width: int = 32) -> Type:
-    return Type.parse(f"!wave.simd<{element_type or i32()}, {width}>")
+    return SimdType.get(element_type or i32(), width=width)
 
 
 def vector_type(elements: int, element_type: Type | None = None) -> Type:
@@ -90,31 +101,47 @@ def vector_type(elements: int, element_type: Type | None = None) -> Type:
 
 
 def mask_type(width: int = 32) -> Type:
-    return Type.parse(f"!wave.mask<{width}>")
+    return MaskType.get(width=width, context=_current_context())
 
 
 def mem_token_type() -> Type:
-    return Type.parse("!wave.mem.token")
+    return MemTokenType.get(context=_current_context())
+
+
+def global_address_space() -> Attribute:
+    return GlobalAddressSpaceAttr.get(context=_current_context())
+
+
+def shared_address_space() -> Attribute:
+    return SharedAddressSpaceAttr.get(context=_current_context())
+
+
+def private_address_space() -> Attribute:
+    return PrivateAddressSpaceAttr.get(context=_current_context())
+
+
+def buffer_address_space() -> Attribute:
+    return BufferAddressSpaceAttr.get(context=_current_context())
 
 
 def ptr_type(
-    element_type: Type | None = None, address_space: str = "#wave.global"
+    element_type: Type | None = None,
+    address_space: Attribute | None = None,
 ) -> Type:
-    return Type.parse(f"!wave.ptr<{element_type or i32()}, {address_space}>")
+    return PtrType.get(element_type or i32(),
+                       address_space or global_address_space())
 
 
 def buffer_ptr_type(element_type: Type | None = None) -> Type:
-    return ptr_type(element_type, "#waveamd.buffer")
+    return ptr_type(element_type, buffer_address_space())
 
 
 def simd_ptr_type(
     element_type: Type | None = None,
-    address_space: str = "#wave.global",
+    address_space: Attribute | None = None,
     width: int = 32,
 ) -> Type:
-    return Type.parse(
-        f"!wave.simd<!wave.ptr<{element_type or i32()}, {address_space}>, {width}>"
-    )
+    return simd_type(ptr_type(element_type, address_space), width=width)
 
 
 def fragment_type(
@@ -125,10 +152,26 @@ def fragment_type(
     wave_size: int = 32,
     registers: int = 4,
 ) -> Type:
-    return Type.parse(
-        f"!waveamd.fragment<{role}, {element_type}, {rows}, {columns}, "
-        f"{wave_size}, {registers}>"
+    return FragmentType.get(
+        role,
+        element_type,
+        rows=rows,
+        columns=columns,
+        wave_size=wave_size,
+        registers=registers,
+        context=_current_context(),
     )
+
+
+def _current_context() -> Context:
+    """Return the active MLIR context for the current thread.
+
+    The typed `MemTokenType.get(...)` etc. require an explicit
+    `MlirContext`. Inside a `ModuleBuilder` / `with ctx` block, MLIR
+    Python keeps the active context on a thread-local; surface that to
+    the type helpers so callers don't have to pass `ctx` everywhere.
+    """
+    return Context.current
 
 
 def unranked_memref_type(element_type: Type) -> Type:
@@ -390,20 +433,9 @@ class FunctionBuilder:
 
         Returns ``(fragment, token)``.
         """
-        frag_text = str(frag_type)
-        # Parse "!waveamd.fragment<role, T, M, N, W, R>" -> wave size +
-        # register count. Avoids depending on a typed FragmentType binding,
-        # which the generated Python dialect does not currently expose.
-        try:
-            payload = frag_text.split("<", 1)[1].rsplit(">", 1)[0]
-            parts = [p.strip() for p in payload.split(",")]
-            wave_size = int(parts[4])
-            registers = int(parts[5])
-        except (IndexError, ValueError) as exc:
-            raise ValueError(
-                f"fragment_load: expected fragment type, got {frag_text!r}"
-            ) from exc
-        load_type = simd_type(vector_type(registers, i32()), width=wave_size)
+        frag = FragmentType(frag_type)
+        load_type = simd_type(vector_type(frag.registers, i32()),
+                              width=frag.wave_size)
         regs, token = self.load(ptr, load_type, after=after)
         return self.fragment_pack(regs, frag_type), token
 
@@ -479,24 +511,37 @@ def module() -> ModuleBuilder:
 
 
 __all__ = [
+    "BufferAddressSpaceAttr",
     "F16Type",
     "F32Type",
+    "FragmentType",
     "FunctionBuilder",
+    "GlobalAddressSpaceAttr",
     "IndexType",
     "IntegerType",
+    "MaskType",
     "MemRefType",
+    "MemTokenType",
     "ModuleBuilder",
+    "PrivateAddressSpaceAttr",
+    "PtrType",
+    "SharedAddressSpaceAttr",
+    "SimdType",
+    "buffer_address_space",
     "buffer_ptr_type",
     "f16",
     "f32",
     "fragment_type",
+    "global_address_space",
     "i8",
     "i32",
     "index_type",
     "mask_type",
     "mem_token_type",
     "module",
+    "private_address_space",
     "ptr_type",
+    "shared_address_space",
     "simd_ptr_type",
     "simd_type",
     "unranked_memref_type",

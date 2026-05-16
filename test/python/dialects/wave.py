@@ -93,6 +93,48 @@ def test_waveamd_load_and_fragment_pack():
         print(m.module)
 
 
+# CHECK-LABEL: TEST: test_typed_bindings
+@run
+def test_typed_bindings():
+    with w.module():
+        i32, f32 = w.i32(), w.f32()
+        global_addr = w.global_address_space()
+        buffer_addr = w.buffer_address_space()
+
+        simd = w.simd_type(i32)
+        assert w.SimdType.isinstance(simd)
+        casted = w.SimdType(simd)
+        assert casted.element_type == i32 and casted.width == 32
+
+        ptr = w.ptr_type(f32, global_addr)
+        assert w.PtrType.isinstance(ptr)
+        casted_ptr = w.PtrType(ptr)
+        assert casted_ptr.element_type == f32
+        assert casted_ptr.address_space == global_addr
+
+        mask = w.mask_type(32)
+        assert w.MaskType.isinstance(mask)
+        assert w.MaskType(mask).width == 32
+
+        tok = w.mem_token_type()
+        assert w.MemTokenType.isinstance(tok)
+
+        bptr = w.buffer_ptr_type(f32)
+        assert w.PtrType(bptr).address_space == buffer_addr
+
+        frag = w.fragment_type(2, f32, registers=8)
+        assert w.FragmentType.isinstance(frag)
+        casted_frag = w.FragmentType(frag)
+        assert casted_frag.role == 2
+        assert casted_frag.element_type == f32
+        assert casted_frag.rows == 16
+        assert casted_frag.columns == 16
+        assert casted_frag.wave_size == 32
+        assert casted_frag.registers == 8
+        print("ok")
+        # CHECK: ok
+
+
 # CHECK-LABEL: TEST: test_waveamd_buffer_pointer_type
 @run
 def test_waveamd_buffer_pointer_type():
