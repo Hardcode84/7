@@ -8,6 +8,7 @@
 
 #include "mlir/Dialect/Wave/IR/Wave.h"
 
+#include "mlir/Conversion/ConvertToLLVM/ToLLVMInterface.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/GPU/IR/GPUDialect.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
@@ -27,6 +28,11 @@ void WaveDialect::initialize() {
 #define GET_OP_LIST
 #include "mlir/Dialect/Wave/IR/WaveOps.cpp.inc"
       >();
+  // The actual interface implementation lives in MLIRWaveToLLVM and is
+  // attached lazily via `registerConvertWaveToLLVMInterface`. Promising it
+  // here keeps the dialect honest if anyone reaches for it before the
+  // extension has run.
+  declarePromisedInterface<ConvertToLLVMPatternInterface, WaveDialect>();
 }
 
 void WaveDialect::registerAttributes() {

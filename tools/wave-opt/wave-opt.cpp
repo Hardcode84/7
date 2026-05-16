@@ -12,6 +12,7 @@
 #include "mlir/InitAllPasses.h"
 #include "mlir/Tools/mlir-opt/MlirOptMain.h"
 
+#include "mlir/Conversion/WaveToLLVM/WaveToLLVM.h"
 #include "mlir/Dialect/Wave/IR/Wave.h"
 #include "mlir/Dialect/Wave/IR/WaveAMD.h"
 #include "mlir/Dialect/Wave/Transforms/Passes.h"
@@ -26,6 +27,7 @@ int main(int argc, char **argv) {
   registry.insert<mlir::wave::WaveDialect, mlir::waveamd::WaveAMDDialect,
                   mlir::wavemachine::WaveMachineDialect>();
   mlir::wave::registerWavePasses();
+  mlir::wave::registerConvertWaveToLLVMInterface(registry);
 
   return mlir::asMainReturnCode(
       mlir::MlirOptMain(argc, argv, "Wave optimizer driver\n", registry));
