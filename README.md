@@ -27,20 +27,23 @@ examples/wave/                    # small DSL examples
 docs/                             # Explicit Wave Programming Model proposal
 ```
 
-## Known build deps (not yet satisfied)
+## Known build deps
 
 The imported transforms reach into AMDGPU internals that aren't part of
-the public MLIR/LLVM install surface, **and** rely on a small upstream
-LLVM patch from the `wave-dsl` branch that isn't merged yet:
+the public MLIR/LLVM install surface — `lib/Target/AMDGPU/*` headers and
+their TableGen output. The top-level `CMakeLists.txt` points
+`LLVM_MAIN_SRC_DIR` and `LLVM_BINARY_DIR` at the bootstrap LLVM source
+and build trees (`build/_deps/llvm-project`, `build/llvm-build`) so the
+imported `target_include_directories(... lib/Target/AMDGPU)` lines
+resolve. Override `WAVE_LLVM_PROJECT_SRC_DIR` /
+`WAVE_LLVM_PROJECT_BUILD_DIR` if you bootstrapped LLVM elsewhere.
 
-- `AMDGPUInsertDelayAlu`, `SIInstrInfo`, `AMDGPUBaseInfo` exposing shared
-  hazard-delay encodings (see commit
-  `6490bb708b51` "Share AMDGPU hazard delay encodings").
-
-Until that lands upstream (or we vendor / patch it locally), `cmake
---build build` will fail to compile `WaveAMDHazardWaits.cpp` and the
-AMDGPU translation. The CMake configure step does work and produces
-TableGen output.
+`WaveAMDHazardWaits.cpp` originally referenced `llvm::AMDGPU::SNop` /
+`llvm::AMDGPU::SDelayAlu` helpers added by the (still-unmerged) upstream
+commit `6490bb708b51` "Share AMDGPU hazard delay encodings". Those
+helpers are vendored locally in that translation unit under
+`amdgpu_compat::`; once upstream lands, delete the vendored block and
+restore the `llvm::AMDGPU::` qualifications.
 
 Python bindings (`MLIR_ENABLE_BINDINGS_PYTHON`) and a `wave-opt` /
 `wave-translate` tool driver are TODO.

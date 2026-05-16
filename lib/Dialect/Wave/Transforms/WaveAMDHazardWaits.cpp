@@ -29,6 +29,73 @@ using namespace mlir;
 
 namespace {
 
+//===----------------------------------------------------------------------===//
+// Vendored AMDGPU hazard-delay encodings.
+//
+// Mirrors `llvm::AMDGPU::SNop` and `llvm::AMDGPU::SDelayAlu`, introduced
+// upstream on the wave-dsl branch in commit 6490bb708b51 ("[mlir][wave]
+// Share AMDGPU hazard delay encodings") but not yet merged into
+// llvm/llvm-project main. When that commit lands, delete this block and
+// replace `amdgpu_compat::` with `llvm::AMDGPU::` at the call sites below.
+//===----------------------------------------------------------------------===//
+namespace amdgpu_compat {
+namespace SDelayAlu {
+
+enum class DelayType { None, VALU, TRANS32, SALU };
+
+inline unsigned encodeDelay(DelayType Type, unsigned Count) {
+  switch (Type) {
+  case DelayType::None:
+    return 0;
+  case DelayType::VALU:
+    assert(Count < 5 && "VALU dependency id must fit s_delay_alu");
+    return Count;
+  case DelayType::TRANS32:
+    assert(Count < 4 && "TRANS32 dependency id must fit s_delay_alu");
+    return Count + 4;
+  case DelayType::SALU:
+    assert(Count < 4 && "SALU cycle id must fit s_delay_alu");
+    return Count + 8;
+  }
+  llvm_unreachable("unknown s_delay_alu delay type");
+}
+
+inline unsigned encode(DelayType Type0, unsigned Count0, unsigned Skip = 0,
+                       DelayType Type1 = DelayType::None,
+                       unsigned Count1 = 0) {
+  unsigned Encoded = encodeDelay(Type0, Count0);
+  unsigned Second = encodeDelay(Type1, Count1);
+  if (!Second)
+    return Encoded;
+  assert(Skip < 8 && "skip count must fit s_delay_alu");
+  return Encoded | (Skip << 4) | (Second << 7);
+}
+
+} // namespace SDelayAlu
+
+namespace SNop {
+
+inline unsigned getBitWidth(const llvm::MCSubtargetInfo &STI) {
+  llvm::AMDGPU::IsaVersion Version = llvm::AMDGPU::getIsaVersion(STI.getCPU());
+  if (Version.Major >= 12)
+    return 7;
+  if (Version.Major >= 8)
+    return 4;
+  return 3;
+}
+
+inline unsigned getMaxCount(const llvm::MCSubtargetInfo &STI) {
+  return 1u << getBitWidth(STI);
+}
+
+inline unsigned encodeCount(unsigned Count) {
+  assert(Count > 0 && "S_NOP count must be non-zero");
+  return Count - 1;
+}
+
+} // namespace SNop
+} // namespace amdgpu_compat
+
 static wavemachine::ImmType getImmType(MLIRContext *ctx) {
   return wavemachine::ImmType::get(ctx);
 }
@@ -57,13 +124,13 @@ static Operation *createInstrNoResult(OpBuilder &builder, Location loc,
 
 static void insertNoops(OpBuilder &builder, Location loc, unsigned count,
                         const llvm::MCSubtargetInfo &sti) {
-  unsigned maxCount = llvm::AMDGPU::SNop::getMaxCount(sti);
+  unsigned maxCount = amdgpu_compat::SNop::getMaxCount(sti);
   while (count > 0) {
     unsigned chunk = std::min(count, maxCount);
     count -= chunk;
     createInstrNoResult(
         builder, loc, "s_nop",
-        createImm(builder, loc, llvm::AMDGPU::SNop::encodeCount(chunk)));
+        createImm(builder, loc, amdgpu_compat::SNop::encodeCount(chunk)));
   }
 }
 
@@ -128,8 +195,8 @@ struct WaveAMDHazardWaitsPass
     unsigned defaultLgkmcnt =
         llvm::AMDGPU::decodeLgkmcnt(isaVersion,
                                     llvm::AMDGPU::getWaitcntBitMask(isaVersion));
-    unsigned valuDep1 = llvm::AMDGPU::SDelayAlu::encode(
-        llvm::AMDGPU::SDelayAlu::DelayType::VALU, 1);
+    unsigned valuDep1 = amdgpu_compat::SDelayAlu::encode(
+        amdgpu_compat::SDelayAlu::DelayType::VALU, 1);
     for (func::FuncOp func : module.getOps<func::FuncOp>()) {
       bool pendingLgkmWait = false;
       for (Operation &op : llvm::make_early_inc_range(func.getBody().front())) {
