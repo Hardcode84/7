@@ -22,6 +22,14 @@ This exercises every LDS code path -- tuple ``ds_store_b32`` /
 the matmul kernel context while keeping the round-trip a pure
 identity over each fragment.
 
+Setting ``use_buffer=True`` instead wraps the A and B kernel inputs in
+``waveamd.make_buffer`` at the very top of the kernel, turning the
+subsequent per-K-step fragment loads into tuple ``buffer_load_b32``
+ops (lowered to ``buffer_load_dword ..., 0 offen offset:i*4``). The C
+fragment store stays on the global path, so the lit/integration tests
+can exercise the buffer load lowering end-to-end without disturbing
+the existing fragment_store codegen.
+
 Tile-to-wave mapping:
   * The grid is launched 2-D as ``(M_blocks, N_blocks)`` and each
     workgroup runs ``BM * BN`` waves (one wave per 16x16 output tile).
@@ -63,6 +71,7 @@ class _MatmulConfig:
     BM: int
     BN: int
     use_lds: bool = False
+    use_buffer: bool = False
 
     def __post_init__(self) -> None:
         for dim, val in (("M", self.M), ("N", self.N), ("K", self.K)):
@@ -154,9 +163,25 @@ class _TileCoords:
     c_ptr: dsl.Value  # per-lane pointer into C for this wave's tile
 
 
+def _wrap_in_buffer(
+    bld: dsl.FunctionBuilder, ptr: dsl.Value, num_elements: int
+) -> dsl.Value:
+    """Build a ``!wave.ptr<f16, #waveamd.buffer>`` from a global f16 pointer.
+
+    The buffer descriptor's NUM_RECORDS field is set in bytes (the
+    32-bit/format flag in :func:`MakeBufferRsrcOp` => byte-stride
+    addressing), so we pass ``num_elements * 2``.
+    """
+    range_bytes = bld.constant(dsl.i32(), num_elements * 2)
+    return bld.make_buffer(ptr, range_bytes, dsl.buffer_ptr_type(dsl.f16()))
+
+
 def _emit_tile_coords(bld: dsl.FunctionBuilder, cfg: _MatmulConfig) -> _TileCoords:
     """Compute the per-wave (lane, A/B/C base ptrs) from workitem ids."""
     a_arg, b_arg, c_arg = bld.args
+    if cfg.use_buffer:
+        a_arg = _wrap_in_buffer(bld, a_arg, cfg.a_elements)
+        b_arg = _wrap_in_buffer(bld, b_arg, cfg.b_elements)
 
     wi = bld.workitem_id(axis=0)  # element[L] = wave_id_in_wg * 32 + L
     lane = bld.lane_id()  # element[L] = L
@@ -411,6 +436,7 @@ def build_wmma_f16_matmul_module(
     BM: int = 1,
     BN: int = 1,
     use_lds: bool = False,
+    use_buffer: bool = False,
 ) -> Module:
     """Return an MLIR :class:`Module` for the tiled WMMA f16 matmul.
 
@@ -426,6 +452,14 @@ def build_wmma_f16_matmul_module(
     ``wave.lds_size`` so the AMDGPU lowering programs the right
     ``group_segment_fixed_size``.
 
+    When ``use_buffer=True`` the A and B inputs are wrapped in
+    ``waveamd.make_buffer`` so every per-K-step fragment load comes
+    out as a tuple ``buffer_load_b32`` (``buffer_load_dword ..., 0
+    offen offset:i*4``). The C output stays on the global pointer
+    path. ``use_lds`` and ``use_buffer`` are independent: enabling
+    both stages the buffer-loaded fragments through LDS just like the
+    global-loaded ones.
+
     See the module docstring for shape constraints.
 
     Note: the returned :class:`Module` is bound to a fresh MLIR
@@ -434,7 +468,9 @@ def build_wmma_f16_matmul_module(
     callers can keep using the module (e.g. printing, pass-managing)
     without further setup.
     """
-    cfg = _MatmulConfig(M=M, N=N, K=K, BM=BM, BN=BN, use_lds=use_lds)
+    cfg = _MatmulConfig(
+        M=M, N=N, K=K, BM=BM, BN=BN, use_lds=use_lds, use_buffer=use_buffer
+    )
     bld = dsl.ModuleBuilder()
     with bld:
         bld.declare_external(

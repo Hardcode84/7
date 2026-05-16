@@ -652,10 +652,38 @@ private:
         return failure();
       return success();
     }
-    if (isa<wavemachine::BufferStoreB32Op>(op)) {
-      emitLine(Twine("buffer_store_dword ") + operandString(1) + ", " +
-               operandString(0) + ", " + physReg(op.getOperand(2)) +
-               ", 0 offen");
+    // MUBUF OFFEN variants (BUFFER_{LOAD,STORE}_DWORD_OFFEN) take the
+    // operands in the order vdata/vdst, vaddr, srsrc, soffset, offset,
+    // cpol. The SGPR descriptor (`srsrc`) is the 4-tuple from
+    // `make_buffer_rsrc`, the per-lane VGPR offset is fed through
+    // `vaddr` with the `offen` flag, and `soffset` is a hard-zero
+    // immediate; `cpol` is the unset cache-policy.
+    if (isa<wavemachine::BufferStoreB32Op>(op))
+      return emitMC(
+          llvm::AMDGPU::BUFFER_STORE_DWORD_OFFEN_gfx11,
+          {toMCOperand(op.getOperand(1)), toMCOperand(op.getOperand(0)),
+           toMCOperand(op.getOperand(2)), llvm::MCOperand::createImm(0),
+           llvm::MCOperand::createImm(0), llvm::MCOperand::createImm(0)});
+    if (isa<wavemachine::BufferLoadB32Op>(op))
+      return emitMC(
+          llvm::AMDGPU::BUFFER_LOAD_DWORD_OFFEN_gfx11,
+          {toMCOperand(op.getResult(0)), toMCOperand(op.getOperand(0)),
+           toMCOperand(op.getOperand(1)), llvm::MCOperand::createImm(0),
+           llvm::MCOperand::createImm(0), llvm::MCOperand::createImm(0)});
+    // Tuple buffer loads expand into N consecutive `buffer_load_dword`
+    // instructions sharing the same vaddr / descriptor, with the
+    // per-component byte offset folded into the `offset:i*4` immediate.
+    if (isa<wavemachine::BufferLoadTupleB32Op>(op)) {
+      auto regType = cast<wavemachine::RegType>(op.getResult(0).getType());
+      for (unsigned i = 0, e = regType.getWidth(); i != e; ++i)
+        if (failed(emitMC(llvm::AMDGPU::BUFFER_LOAD_DWORD_OFFEN_gfx11,
+                          {toMCVGPRComponent(op.getResult(0), i),
+                           toMCOperand(op.getOperand(0)),
+                           toMCOperand(op.getOperand(1)),
+                           llvm::MCOperand::createImm(0),
+                           llvm::MCOperand::createImm(i * 4),
+                           llvm::MCOperand::createImm(0)})))
+          return failure();
       return success();
     }
     if (isa<wavemachine::GlobalStoreTupleB32Op>(op)) {

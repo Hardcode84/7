@@ -346,6 +346,33 @@ def WaveMachine_BufferStoreB32Op
   let assemblyFormat = "$offset `,` $value `,` $descriptor (`after` $dependency^)? attr-dict `:` functional-type(operands, results)";
   let hasVerifier = 1;
 }
+def WaveMachine_BufferLoadB32Op
+    : WaveMachine_Op<"buffer_load_b32", [WaveMachine_VMEMLoad]> {
+  let summary = "buffer 32-bit load through an SGPR descriptor and VGPR offset";
+  let arguments = (ins WaveMachine_VGPR1:$offset, WaveMachine_SGPR4:$descriptor,
+                       Optional<WaveMachine_MemToken>:$dependency);
+  let results = (outs WaveMachine_VGPR1:$result,
+                      Variadic<WaveMachine_MemToken>:$tokens);
+  let assemblyFormat = "$offset `,` $descriptor (`after` $dependency^)? attr-dict `:` functional-type(operands, results)";
+  let hasVerifier = 1;
+}
+def WaveMachine_BufferLoadTupleB32Op
+    : WaveMachine_Op<"buffer_load_tuple_b32", [WaveMachine_VMEMLoad]> {
+  let summary = "buffer load of N consecutive 32-bit values into a VGPR tuple";
+  let description = [{
+    Loads `N` consecutive dwords from `descriptor[offset + i*4]` into the
+    `N` components of a single VGPR tuple result of width `N`. Expands to
+    `N` `buffer_load_dword` instructions (each with a `offset:i*4`
+    immediate) in the AMDGPU printer; the tuple width is the result
+    register width.
+  }];
+  let arguments = (ins WaveMachine_VGPR1:$offset, WaveMachine_SGPR4:$descriptor,
+                       Optional<WaveMachine_MemToken>:$dependency);
+  let results = (outs WaveMachine_VGPR:$result,
+                      Variadic<WaveMachine_MemToken>:$tokens);
+  let assemblyFormat = "$offset `,` $descriptor (`after` $dependency^)? attr-dict `:` functional-type(operands, results)";
+  let hasVerifier = 1;
+}
 def WaveMachine_GlobalStoreTupleB32Op
     : WaveMachine_Op<"global_store_tuple_b32", [WaveMachine_VMEMStore]> {
   let summary = "global 32-bit store of a VGPR tuple component";

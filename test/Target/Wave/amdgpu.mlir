@@ -160,6 +160,27 @@ func.func @wave_lds_tuple_echo(%in: !wave.ptr<i32, #wave.global>,
 // CHECK: .amdhsa_kernel wave_lds_tuple_echo
 // CHECK: .amdhsa_group_segment_fixed_size 1024
 
+// A tuple-width wave.load through a buffer pointer lowers to N
+// consecutive buffer_load_dword instructions sharing the same VGPR
+// vaddr and SGPR descriptor, with `offset:i*4` folded into each.
+// CHECK-LABEL: wave_buffer_tuple_load:
+func.func @wave_buffer_tuple_load(%in: !wave.ptr<i32, #wave.global>,
+                                  %out: !wave.ptr<i32, #wave.global>)
+    attributes {wave.kernel} {
+  %range = arith.constant 1024 : i32
+  %buffer = waveamd.make_buffer %in, %range : !wave.ptr<i32, #wave.global>, i32 -> !wave.ptr<i32, #waveamd.buffer>
+  %lane = wave.lane_id : !wave.simd<i32, 32>
+  %iptrs = wave.ptr_add %buffer, %lane : !wave.ptr<i32, #waveamd.buffer>, !wave.simd<i32, 32> -> !wave.simd<!wave.ptr<i32, #waveamd.buffer>, 32>
+  // CHECK: buffer_load_b32 v{{[0-9]+}}, {{v[0-9]+}}, {{s\[[0-9]+:[0-9]+\]}}, 0 offen{{$}}
+  // CHECK: buffer_load_b32 v{{[0-9]+}}, {{v[0-9]+}}, {{s\[[0-9]+:[0-9]+\]}}, 0 offen offset:4
+  // CHECK: buffer_load_b32 v{{[0-9]+}}, {{v[0-9]+}}, {{s\[[0-9]+:[0-9]+\]}}, 0 offen offset:28
+  %v, %tok = wave.load %iptrs : (!wave.simd<!wave.ptr<i32, #waveamd.buffer>, 32>) -> (!wave.simd<vector<8xi32>, 32>, !wave.mem.token)
+  %optrs = wave.ptr_add %out, %lane : !wave.ptr<i32, #wave.global>, !wave.simd<i32, 32> -> !wave.simd<!wave.ptr<i32, #wave.global>, 32>
+  %frag = waveamd.fragment_pack %v : !wave.simd<vector<8xi32>, 32> -> !waveamd.fragment<2, f32, 16, 16, 32, 8>
+  %final_token = waveamd.fragment_store %frag -> %optrs after %tok : (!waveamd.fragment<2, f32, 16, 16, 32, 8>, !wave.simd<!wave.ptr<i32, #wave.global>, 32>, !wave.mem.token) -> !wave.mem.token
+  return
+}
+
 // NOTE: NT_AMDGPU_METADATA
 // NOTE: amdhsa.kernels:
 // NOTE: .name:           wave_kernel

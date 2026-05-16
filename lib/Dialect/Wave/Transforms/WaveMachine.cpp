@@ -614,45 +614,11 @@ private:
     return 1;
   }
 
-  LogicalResult selectLoad(LoadOp op) {
-    auto baseIt = pointerBases.find(op.getPtr());
-    auto offsetIt = pointerOffsets.find(op.getPtr());
-    auto bufferIt = pointerBuffers.find(op.getPtr());
-    if (baseIt == pointerBases.end() || offsetIt == pointerOffsets.end())
-      return op.emitError("WaveMachine backend expects selected wave pointer");
-    if (bufferIt != pointerBuffers.end() && bufferIt->second)
-      return op.emitError(
-          "buffer-pointer loads are not yet supported by the WaveMachine "
-          "backend; route through a global pointer for now");
-
-    auto simdType = cast<SimdType>(op.getValue().getType());
-    unsigned registers = loadRegisterCount(simdType);
-
-    if (isSharedPointer(op.getPtr().getType())) {
-      Value addr = ensureVGPRForVSrc1(
-          op.getLoc(),
-          addByteOffsets(op.getLoc(), baseIt->second, offsetIt->second));
-      SmallVector<Value> operands{addr};
-      if (Value dependency = op.getDependency())
-        operands.push_back(expect(dependency, op));
-      StringRef opcode = registers == 1 ? "ds_load_b32" : "ds_load_tuple_b32";
-      SmallVector<Type, 2> resultTypes{
-          getRegType(op.getContext(), wavemachine::RegClass::VGPR, registers),
-          getMemTokenType(op.getContext())};
-      Operation *load =
-          createWMOp(builder, op.getLoc(), opcode, operands, resultTypes);
-      values[op.getValue()] = load->getResult(0);
-      values[op.getToken()] = load->getResult(1);
-      eraseIfTopLevel(op);
-      return success();
-    }
-
-    SmallVector<Value> operands{offsetIt->second, baseIt->second};
-    if (Value dependency = op.getDependency())
-      operands.push_back(expect(dependency, op));
-
-    StringRef opcode =
-        registers == 1 ? "global_load_b32" : "global_load_tuple_b32";
+  // Build the WaveMachine load op with `opcode` and rebind the original
+  // value/token to the produced VGPR tuple and memory token. Shared by
+  // every variant of `selectLoad` (LDS / global / buffer).
+  void finalizeLoad(LoadOp op, StringRef opcode, ArrayRef<Value> operands,
+                    unsigned registers) {
     SmallVector<Type, 2> resultTypes{
         getRegType(op.getContext(), wavemachine::RegClass::VGPR, registers),
         getMemTokenType(op.getContext())};
@@ -661,7 +627,50 @@ private:
     values[op.getValue()] = load->getResult(0);
     values[op.getToken()] = load->getResult(1);
     eraseIfTopLevel(op);
+  }
+
+  LogicalResult selectSharedLoad(LoadOp op, Value base, Value offset,
+                                 unsigned registers) {
+    Value addr = ensureVGPRForVSrc1(op.getLoc(),
+                                    addByteOffsets(op.getLoc(), base, offset));
+    SmallVector<Value> operands{addr};
+    if (Value dependency = op.getDependency())
+      operands.push_back(expect(dependency, op));
+    finalizeLoad(op, registers == 1 ? "ds_load_b32" : "ds_load_tuple_b32",
+                 operands, registers);
     return success();
+  }
+
+  LogicalResult selectGlobalOrBufferLoad(LoadOp op, Value base, Value offset,
+                                         bool isBuffer, unsigned registers) {
+    SmallVector<Value> operands{offset, base};
+    if (Value dependency = op.getDependency())
+      operands.push_back(expect(dependency, op));
+    StringRef opcode;
+    if (isBuffer)
+      opcode = registers == 1 ? "buffer_load_b32" : "buffer_load_tuple_b32";
+    else
+      opcode = registers == 1 ? "global_load_b32" : "global_load_tuple_b32";
+    finalizeLoad(op, opcode, operands, registers);
+    return success();
+  }
+
+  LogicalResult selectLoad(LoadOp op) {
+    auto baseIt = pointerBases.find(op.getPtr());
+    auto offsetIt = pointerOffsets.find(op.getPtr());
+    auto bufferIt = pointerBuffers.find(op.getPtr());
+    if (baseIt == pointerBases.end() || offsetIt == pointerOffsets.end())
+      return op.emitError("WaveMachine backend expects selected wave pointer");
+
+    auto simdType = cast<SimdType>(op.getValue().getType());
+    unsigned registers = loadRegisterCount(simdType);
+
+    if (isSharedPointer(op.getPtr().getType()))
+      return selectSharedLoad(op, baseIt->second, offsetIt->second, registers);
+
+    bool isBuffer = bufferIt != pointerBuffers.end() && bufferIt->second;
+    return selectGlobalOrBufferLoad(op, baseIt->second, offsetIt->second,
+                                    isBuffer, registers);
   }
 
   LogicalResult selectLdsBase(LdsBaseOp op) {

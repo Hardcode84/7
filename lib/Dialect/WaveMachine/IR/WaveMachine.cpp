@@ -126,6 +126,23 @@ LogicalResult GlobalLoadTupleB32Op::verify() {
   return success();
 }
 
+LogicalResult BufferLoadB32Op::verify() {
+  if (getTokens().size() > 1)
+    return emitOpError("produces at most one memory token");
+  return success();
+}
+
+LogicalResult BufferLoadTupleB32Op::verify() {
+  if (getTokens().size() > 1)
+    return emitOpError("produces at most one memory token");
+  auto resultType = cast<RegType>(getResult().getType());
+  if (!isVGPR(resultType))
+    return emitOpError("result must be a VGPR tuple");
+  if (resultType.getWidth() < 1)
+    return emitOpError("result tuple width must be at least 1");
+  return success();
+}
+
 LogicalResult DsLoadTupleB32Op::verify() {
   if (getTokens().size() > 1)
     return emitOpError("produces at most one memory token");
