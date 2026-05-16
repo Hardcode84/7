@@ -423,6 +423,8 @@ private:
     auto bufferIt = pointerBuffers.find(op.getPtr());
     if (baseIt == pointerBases.end() || offsetIt == pointerOffsets.end())
       return op.emitError("WaveMachine backend expects selected wave pointer");
+    auto simdType = cast<SimdType>(op.getValue().getType());
+    unsigned registers = loadRegisterCount(simdType);
     if (isSharedPointer(op.getPtr().getType())) {
       Value addr = ensureVGPRForVSrc1(
           op.getLoc(),
@@ -430,12 +432,16 @@ private:
       SmallVector<Value> operands{addr, expect(op.getValue(), op)};
       if (Value dependency = op.getDependency())
         operands.push_back(expect(dependency, op));
-      Operation *store = createWMOp(builder, op.getLoc(), "ds_store_b32",
-                                    operands, getMemTokenType(op.getContext()));
+      StringRef opcode = registers == 1 ? "ds_store_b32" : "ds_store_tuple_b32";
+      Operation *store = createWMOp(builder, op.getLoc(), opcode, operands,
+                                    getMemTokenType(op.getContext()));
       values[op.getToken()] = store->getResult(0);
       eraseIfTopLevel(op);
       return success();
     }
+    if (registers != 1)
+      return op.emitError("global/buffer tuple stores are not supported by "
+                          "the WaveMachine backend yet");
     SmallVector<Value> operands{offsetIt->second, expect(op.getValue(), op),
                                 baseIt->second};
     if (Value dependency = op.getDependency())
@@ -623,20 +629,18 @@ private:
     unsigned registers = loadRegisterCount(simdType);
 
     if (isSharedPointer(op.getPtr().getType())) {
-      if (registers != 1)
-        return op.emitError(
-            "LDS tuple loads are not supported by the WaveMachine backend yet");
       Value addr = ensureVGPRForVSrc1(
           op.getLoc(),
           addByteOffsets(op.getLoc(), baseIt->second, offsetIt->second));
       SmallVector<Value> operands{addr};
       if (Value dependency = op.getDependency())
         operands.push_back(expect(dependency, op));
+      StringRef opcode = registers == 1 ? "ds_load_b32" : "ds_load_tuple_b32";
       SmallVector<Type, 2> resultTypes{
-          getRegType(op.getContext(), wavemachine::RegClass::VGPR, 1),
+          getRegType(op.getContext(), wavemachine::RegClass::VGPR, registers),
           getMemTokenType(op.getContext())};
-      Operation *load = createWMOp(builder, op.getLoc(), "ds_load_b32",
-                                   operands, resultTypes);
+      Operation *load =
+          createWMOp(builder, op.getLoc(), opcode, operands, resultTypes);
       values[op.getValue()] = load->getResult(0);
       values[op.getToken()] = load->getResult(1);
       eraseIfTopLevel(op);

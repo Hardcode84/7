@@ -126,5 +126,27 @@ LogicalResult GlobalLoadTupleB32Op::verify() {
   return success();
 }
 
+LogicalResult DsLoadTupleB32Op::verify() {
+  if (getTokens().size() > 1)
+    return emitOpError("produces at most one memory token");
+  auto resultType = cast<RegType>(getResult().getType());
+  if (!isVGPR(resultType))
+    return emitOpError("result must be a VGPR tuple");
+  if (resultType.getWidth() < 1)
+    return emitOpError("result tuple width must be at least 1");
+  return success();
+}
+
+LogicalResult DsStoreTupleB32Op::verify() {
+  if (getNumResults() > 1)
+    return emitOpError("produces at most one memory token");
+  auto valueType = cast<RegType>(getValue().getType());
+  if (!isVGPR(valueType))
+    return emitOpError("value must be a VGPR tuple");
+  if (valueType.getWidth() < 1)
+    return emitOpError("value tuple width must be at least 1");
+  return success();
+}
+
 #define GET_OP_CLASSES
 #include "mlir/Dialect/WaveMachine/IR/WaveMachineOps.cpp.inc"

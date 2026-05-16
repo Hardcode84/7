@@ -673,12 +673,36 @@ private:
                      toMCOperand(op.getOperand(0)),
                      llvm::MCOperand::createImm(getIntAttr(&op, "offset", 0)),
                      llvm::MCOperand::createImm(0)});
+    if (isa<wavemachine::DsLoadTupleB32Op>(op)) {
+      auto regType = cast<wavemachine::RegType>(op.getResult(0).getType());
+      int64_t baseOffset = getIntAttr(&op, "offset", 0);
+      for (unsigned i = 0, e = regType.getWidth(); i != e; ++i)
+        if (failed(emitMC(llvm::AMDGPU::DS_READ_B32_gfx11,
+                          {toMCVGPRComponent(op.getResult(0), i),
+                           toMCOperand(op.getOperand(0)),
+                           llvm::MCOperand::createImm(baseOffset + i * 4),
+                           llvm::MCOperand::createImm(0)})))
+          return failure();
+      return success();
+    }
     if (isa<wavemachine::DsStoreB32Op>(op))
       return emitMC(llvm::AMDGPU::DS_WRITE_B32_gfx11,
                     {toMCOperand(op.getOperand(0)),
                      toMCOperand(op.getOperand(1)),
                      llvm::MCOperand::createImm(getIntAttr(&op, "offset", 0)),
                      llvm::MCOperand::createImm(0)});
+    if (isa<wavemachine::DsStoreTupleB32Op>(op)) {
+      auto regType = cast<wavemachine::RegType>(op.getOperand(1).getType());
+      int64_t baseOffset = getIntAttr(&op, "offset", 0);
+      for (unsigned i = 0, e = regType.getWidth(); i != e; ++i)
+        if (failed(emitMC(llvm::AMDGPU::DS_WRITE_B32_gfx11,
+                          {toMCOperand(op.getOperand(0)),
+                           toMCVGPRComponent(op.getOperand(1), i),
+                           llvm::MCOperand::createImm(baseOffset + i * 4),
+                           llvm::MCOperand::createImm(0)})))
+          return failure();
+      return success();
+    }
     if (isa<wavemachine::SBarrierOp>(op))
       return emitMC(llvm::AMDGPU::S_BARRIER_gfx11, {});
     if (isa<wavemachine::SEndpgmOp>(op))

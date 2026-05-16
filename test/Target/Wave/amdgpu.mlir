@@ -128,6 +128,38 @@ func.func @wave_lds_echo(%out: !wave.ptr<i32, #wave.global>)
 // CHECK: .amdhsa_kernel wave_lds_echo
 // CHECK: .amdhsa_group_segment_fixed_size 128
 
+// A tuple-width wave.load/store through a shared pointer lowers to
+// N consecutive ds_read_b32 / ds_write_b32 instructions, with `offset:i*4`
+// folded into the immediate field on each instruction.
+// CHECK-LABEL: wave_lds_tuple_echo:
+func.func @wave_lds_tuple_echo(%in: !wave.ptr<i32, #wave.global>,
+                               %out: !wave.ptr<i32, #wave.global>)
+    attributes {wave.kernel, wave.lds_size = 1024 : i64} {
+  %lane = wave.lane_id : !wave.simd<i32, 32>
+  %ip = wave.ptr_add %in, %lane : !wave.ptr<i32, #wave.global>, !wave.simd<i32, 32> -> !wave.simd<!wave.ptr<i32, #wave.global>, 32>
+  // CHECK: global_load_b32
+  %v, %tok = wave.load %ip : (!wave.simd<!wave.ptr<i32, #wave.global>, 32>) -> (!wave.simd<vector<8xi32>, 32>, !wave.mem.token)
+  %lds = wave.lds_base : !wave.ptr<i32, #wave.shared>
+  %lds_ptrs = wave.ptr_add %lds, %lane : !wave.ptr<i32, #wave.shared>, !wave.simd<i32, 32> -> !wave.simd<!wave.ptr<i32, #wave.shared>, 32>
+  // CHECK: ds_store_b32 {{v[0-9]+}}, {{v[0-9]+}}
+  // CHECK: ds_store_b32 {{v[0-9]+}}, {{v[0-9]+}} offset:4
+  // CHECK: ds_store_b32 {{v[0-9]+}}, {{v[0-9]+}} offset:28
+  %store_token = wave.store %v -> %lds_ptrs after %tok : (!wave.simd<vector<8xi32>, 32>, !wave.simd<!wave.ptr<i32, #wave.shared>, 32>, !wave.mem.token) -> !wave.mem.token
+  // CHECK: s_waitcnt lgkmcnt(0)
+  // CHECK: s_barrier
+  %barrier_token = wave.barrier %store_token : (!wave.mem.token) -> !wave.mem.token
+  // CHECK: ds_load_b32 {{v[0-9]+}}, {{v[0-9]+}}
+  // CHECK: ds_load_b32 {{v[0-9]+}}, {{v[0-9]+}} offset:4
+  // CHECK: ds_load_b32 {{v[0-9]+}}, {{v[0-9]+}} offset:28
+  %loaded:2 = wave.load %lds_ptrs after %barrier_token : (!wave.simd<!wave.ptr<i32, #wave.shared>, 32>, !wave.mem.token) -> (!wave.simd<vector<8xi32>, 32>, !wave.mem.token)
+  %op = wave.ptr_add %out, %lane : !wave.ptr<i32, #wave.global>, !wave.simd<i32, 32> -> !wave.simd<!wave.ptr<i32, #wave.global>, 32>
+  %frag = waveamd.fragment_pack %loaded#0 : !wave.simd<vector<8xi32>, 32> -> !waveamd.fragment<2, f32, 16, 16, 32, 8>
+  %final_token = waveamd.fragment_store %frag -> %op after %loaded#1 : (!waveamd.fragment<2, f32, 16, 16, 32, 8>, !wave.simd<!wave.ptr<i32, #wave.global>, 32>, !wave.mem.token) -> !wave.mem.token
+  return
+}
+// CHECK: .amdhsa_kernel wave_lds_tuple_echo
+// CHECK: .amdhsa_group_segment_fixed_size 1024
+
 // NOTE: NT_AMDGPU_METADATA
 // NOTE: amdhsa.kernels:
 // NOTE: .name:           wave_kernel

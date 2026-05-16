@@ -122,28 +122,6 @@ LogicalResult WorkitemIdOp::verify() {
   return success();
 }
 
-LogicalResult StoreOp::verify() {
-  auto simdType = cast<SimdType>(getValue().getType());
-  Type ptrType = getPtr().getType();
-  Type ptrElementType;
-  if (auto wavePtr = dyn_cast<PtrType>(ptrType)) {
-    ptrElementType = wavePtr.getElementType();
-  } else if (auto ptrSimdType = dyn_cast<SimdType>(ptrType)) {
-    auto wavePtr = dyn_cast<PtrType>(ptrSimdType.getElementType());
-    if (!wavePtr)
-      return emitOpError("pointer SIMD element type must be a wave pointer");
-    if (ptrSimdType.getWidth() != simdType.getWidth())
-      return emitOpError("pointer SIMD width must match value SIMD width");
-    ptrElementType = wavePtr.getElementType();
-  } else {
-    return emitOpError("expected wave pointer operand");
-  }
-
-  if (simdType.getElementType() != ptrElementType)
-    return emitOpError("SIMD element type must match pointer element type");
-  return success();
-}
-
 namespace {
 // Decode a SIMD result element type into a (per-lane payload size in bits,
 // transport element bit-width). For a scalar result, the transport width
@@ -176,6 +154,42 @@ decodeLoadShape(Type resultElementType,
   if (bits != 32)
     return emitError("scalar result element type must be 32 bits wide for now");
   return LoadShape{bits, bits};
+}
+
+LogicalResult StoreOp::verify() {
+  auto emit = [this](const Twine &msg) { return emitOpError(msg); };
+  auto simdType = cast<SimdType>(getValue().getType());
+  Type ptrType = getPtr().getType();
+  Type ptrElementType;
+  if (auto wavePtr = dyn_cast<PtrType>(ptrType)) {
+    ptrElementType = wavePtr.getElementType();
+  } else if (auto ptrSimdType = dyn_cast<SimdType>(ptrType)) {
+    auto wavePtr = dyn_cast<PtrType>(ptrSimdType.getElementType());
+    if (!wavePtr)
+      return emit("pointer SIMD element type must be a wave pointer");
+    if (ptrSimdType.getWidth() != simdType.getWidth())
+      return emit("pointer SIMD width must match value SIMD width");
+    ptrElementType = wavePtr.getElementType();
+  } else {
+    return emit("expected wave pointer operand");
+  }
+
+  if (!ptrElementType.isIntOrFloat())
+    return emit("pointer element type must be integer or float");
+  unsigned ptrBits = ptrElementType.getIntOrFloatBitWidth();
+  if (ptrBits != 16 && ptrBits != 32)
+    return emit("only 16- and 32-bit pointer element types are supported");
+
+  // Scalar SIMD values store one element per lane (legacy path, no
+  // shape decoding required). Vector SIMD values stage a tuple of
+  // `N` 32-bit transport elements per lane, like `wave.load`.
+  FailureOr<LoadShape> shape = decodeLoadShape(simdType.getElementType(), emit);
+  if (failed(shape))
+    return failure();
+  if (shape->payloadBits % ptrBits != 0)
+    return emit("per-lane payload must be a multiple of the pointer "
+                "element bit width");
+  return success();
 }
 
 LogicalResult LoadOp::verify() {

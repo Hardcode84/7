@@ -11,7 +11,16 @@ Python bindings (see :mod:`wave_dsl`). It returns a live
 
 The kernel reads A and B from global memory through ``wave.load`` +
 ``waveamd.fragment_pack`` (the ``fragment_load`` DSL helper) and stores
-the f32 accumulator with ``waveamd.fragment_store``.
+the f32 accumulator with ``waveamd.fragment_store``. Optionally each
+per-K-step A/B fragment can be staged through LDS (``use_lds=True``):
+the global tuple load is followed by a tuple ``wave.store`` to a
+per-wave LDS slot, a workgroup ``wave.barrier``, and a tuple
+``wave.load`` from the same slot before the ``fragment_pack`` / ``mma``.
+This exercises every LDS code path -- tuple ``ds_store_b32`` /
+``ds_load_b32`` sequences, ``s_barrier``, and the kernel's
+``wave.lds_size`` -> ``group_segment_fixed_size`` propagation -- in
+the matmul kernel context while keeping the round-trip a pure
+identity over each fragment.
 
 Tile-to-wave mapping:
   * The grid is launched 2-D as ``(M_blocks, N_blocks)`` and each
@@ -42,6 +51,10 @@ def _is_power_of_two(value: int) -> bool:
     return value > 0 and (value & (value - 1)) == 0
 
 
+_LDS_DWORDS_PER_FRAG = 8 * 32  # 8 registers/lane * 32 lanes (== 1024 bytes)
+_LDS_DWORDS_PER_LANE = 8  # 8 dwords/lane in the fragment tuple
+
+
 @dataclass(frozen=True)
 class _MatmulConfig:
     M: int
@@ -49,6 +62,7 @@ class _MatmulConfig:
     K: int
     BM: int
     BN: int
+    use_lds: bool = False
 
     def __post_init__(self) -> None:
         for dim, val in (("M", self.M), ("N", self.N), ("K", self.K)):
@@ -109,6 +123,13 @@ class _MatmulConfig:
     def log2_BN(self) -> int:
         return self.BN.bit_length() - 1
 
+    @property
+    def lds_bytes(self) -> int:
+        """Per-workgroup LDS arena (A and B fragment slots, one per wave)."""
+        if not self.use_lds:
+            return 0
+        return 2 * self.waves_per_workgroup * _LDS_DWORDS_PER_FRAG * 4
+
 
 _KERNEL_NAME = "wmma_f16_matmul_tiled"
 _GPU_MODULE_NAME = "kernels"
@@ -116,6 +137,151 @@ _F16_PTR_HELPER = "wave_memref_to_ptr_global_f16"
 _F32_PTR_HELPER = "wave_memref_to_ptr_global_f32"
 _PRINT_HELPER = "printMemrefF32"
 _MMA_KIND = "wmma.f32.16x16x16.f16"
+
+
+def _splat_const(bld: dsl.FunctionBuilder, value: int) -> dsl.Value:
+    return bld.splat(bld.constant(dsl.i32(), value))
+
+
+@dataclass(frozen=True)
+class _TileCoords:
+    """Per-wave coordinates derived from `workitem_id` / `workgroup_id`."""
+
+    wave_id: dsl.Value  # wave id within the workgroup, broadcast to lanes
+    lane: dsl.Value  # lane id within the wave
+    a_lane_base: dsl.Value  # per-lane pointer into A for this wave's tile
+    b_lane_base: dsl.Value  # per-lane pointer into B for this wave's tile
+    c_ptr: dsl.Value  # per-lane pointer into C for this wave's tile
+
+
+def _emit_tile_coords(bld: dsl.FunctionBuilder, cfg: _MatmulConfig) -> _TileCoords:
+    """Compute the per-wave (lane, A/B/C base ptrs) from workitem ids."""
+    a_arg, b_arg, c_arg = bld.args
+
+    wi = bld.workitem_id(axis=0)  # element[L] = wave_id_in_wg * 32 + L
+    lane = bld.lane_id()  # element[L] = L
+    wg_m = bld.workgroup_id(axis=0)  # scalar i32: 0..M_blocks-1
+    wg_n = bld.workgroup_id(axis=1)  # scalar i32: 0..N_blocks-1
+
+    # wave_id_in_wg = wi >> 5 (uniform across the wave since L < 32).
+    wave_id = bld.binary("shri", wi, _splat_const(bld, 5))
+
+    # (m_wave, n_wave) decomposition. BN is a power of 2 so:
+    #   n_wave = wave_id & (BN - 1)
+    #   m_wave = wave_id >> log2(BN)
+    n_wave = bld.binary("andi", wave_id, _splat_const(bld, cfg.BN - 1))
+    m_wave = bld.binary("shri", wave_id, _splat_const(bld, cfg.log2_BN))
+
+    # Global (m_tile, n_tile) for this wave:
+    #   m_tile = wg_m * BM + m_wave
+    #   n_tile = wg_n * BN + n_wave
+    m_tile = bld.binary(
+        "addi",
+        bld.binary("muli", bld.splat(wg_m), _splat_const(bld, cfg.BM)),
+        m_wave,
+    )
+    n_tile = bld.binary(
+        "addi",
+        bld.binary("muli", bld.splat(wg_n), _splat_const(bld, cfg.BN)),
+        n_wave,
+    )
+
+    # Per-lane row offset (L % 16) * K, per-tile offset tile * (16 * K),
+    # both in f16 elements (`ptr_add` scales by the pointer elt size).
+    lane_mod16 = bld.binary("andi", lane, _splat_const(bld, 15))
+    lane_row_off = bld.binary("muli", lane_mod16, _splat_const(bld, cfg.K))
+    tile_stride = _splat_const(bld, 16 * cfg.K)
+    m_tile_off = bld.binary("muli", m_tile, tile_stride)
+    n_tile_off = bld.binary("muli", n_tile, tile_stride)
+    a_lane_base = bld.ptr_add(a_arg, bld.binary("addi", m_tile_off, lane_row_off))
+    b_lane_base = bld.ptr_add(b_arg, bld.binary("addi", n_tile_off, lane_row_off))
+
+    # C output offset (in f32 elements):
+    # total_wave_id = (wg_m * N_blocks + wg_n) * waves_per_wg + wave_id_in_wg
+    # c_off = total_wave_id * 256  (256 = 1 << 8)
+    wg_linear = bld.binary(
+        "addi",
+        bld.binary("muli", bld.splat(wg_m), _splat_const(bld, cfg.N_blocks)),
+        bld.splat(wg_n),
+    )
+    wave_offset_within_grid = bld.binary(
+        "muli", wg_linear, _splat_const(bld, cfg.waves_per_workgroup)
+    )
+    total_wave_id = bld.binary("addi", wave_offset_within_grid, wave_id)
+    c_off = bld.binary("shli", total_wave_id, _splat_const(bld, 8))
+    c_ptr = bld.ptr_add(c_arg, c_off)
+
+    return _TileCoords(
+        wave_id=wave_id,
+        lane=lane,
+        a_lane_base=a_lane_base,
+        b_lane_base=b_lane_base,
+        c_ptr=c_ptr,
+    )
+
+
+@dataclass(frozen=True)
+class _LdsStaging:
+    """Per-wave LDS slots for the matmul fragment round-trip."""
+
+    reg_simd_type: dsl.Type
+    a_lds_ptrs: dsl.Value
+    b_lds_ptrs: dsl.Value
+
+
+def _emit_lds_staging(
+    bld: dsl.FunctionBuilder, cfg: _MatmulConfig, coords: _TileCoords
+) -> _LdsStaging:
+    """Materialize per-wave A/B LDS slot pointers.
+
+    Offsets are in i32 ELEMENTS (`lds_base()` is `!wave.ptr<i32,
+    shared>` and `wave.ptr_add` scales by the pointer element size).
+    Each wave's A/B slot is 256 i32 elements (== 1024 bytes == one
+    8-register WMMA fragment), with lane L occupying 8 contiguous
+    dwords at `slot + L*8`. The B slabs live
+    `waves_per_wg * 256` elements after the A slabs.
+    """
+    reg_simd_type = dsl.simd_type(dsl.vector_type(8, dsl.i32()), width=32)
+    lds = bld.lds_base()
+    wave_slot_base = bld.binary(
+        "muli", coords.wave_id, _splat_const(bld, _LDS_DWORDS_PER_FRAG)
+    )
+    lane_in_slot = bld.binary("shli", coords.lane, _splat_const(bld, 3))
+    a_lds_off = bld.binary("addi", wave_slot_base, lane_in_slot)
+    b_slot_offset = _splat_const(bld, cfg.waves_per_workgroup * _LDS_DWORDS_PER_FRAG)
+    b_lds_off = bld.binary(
+        "addi",
+        bld.binary("addi", b_slot_offset, wave_slot_base),
+        lane_in_slot,
+    )
+    return _LdsStaging(
+        reg_simd_type=reg_simd_type,
+        a_lds_ptrs=bld.ptr_add(lds, a_lds_off),
+        b_lds_ptrs=bld.ptr_add(lds, b_lds_off),
+    )
+
+
+def _load_fragments_through_lds(
+    bld: dsl.FunctionBuilder,
+    a_ptr: dsl.Value,
+    b_ptr: dsl.Value,
+    a_type: dsl.Type,
+    b_type: dsl.Type,
+    staging: _LdsStaging,
+) -> tuple[dsl.Value, dsl.Value]:
+    """Round-trip the A and B fragments through their LDS slots.
+
+    Returns the packed `(a_frag, b_frag)` after the workgroup
+    `wave.barrier` so the caller can feed them directly into `mma`.
+    """
+    a_regs, a_glob_tok = bld.load(a_ptr, staging.reg_simd_type)
+    a_store_tok = bld.store(a_regs, staging.a_lds_ptrs, after=a_glob_tok)
+    b_regs, b_glob_tok = bld.load(b_ptr, staging.reg_simd_type)
+    b_store_tok = bld.store(b_regs, staging.b_lds_ptrs, after=b_glob_tok)
+    barrier_tok = bld.barrier(a_store_tok, b_store_tok)
+    a_regs2, _ = bld.load(staging.a_lds_ptrs, staging.reg_simd_type, after=barrier_tok)
+    b_regs2, _ = bld.load(staging.b_lds_ptrs, staging.reg_simd_type, after=barrier_tok)
+    return bld.fragment_pack(a_regs2, a_type), bld.fragment_pack(b_regs2, b_type)
 
 
 def _emit_kernel(bld: dsl.FunctionBuilder, cfg: _MatmulConfig) -> None:
@@ -131,86 +297,31 @@ def _emit_kernel(bld: dsl.FunctionBuilder, cfg: _MatmulConfig) -> None:
         ``((workgroup_id_x * N_blocks + workgroup_id_y) * waves_per_wg
           + wave_id_in_wg) * 256``.
     """
-    a_arg, b_arg, c_arg = bld.args
-    i32 = dsl.i32()
+    coords = _emit_tile_coords(bld, cfg)
 
-    def splat_const(value: int) -> dsl.Value:
-        return bld.splat(bld.constant(i32, value))
-
-    # ---- decompose workitem_id and workgroup id into per-wave coords ----
-    wi = bld.workitem_id(axis=0)  # element[L] = wave_id_in_wg * 32 + L
-    lane = bld.lane_id()  # element[L] = L
-    wg_m = bld.workgroup_id(axis=0)  # scalar i32: 0..M_blocks-1
-    wg_n = bld.workgroup_id(axis=1)  # scalar i32: 0..N_blocks-1
-
-    # wave_id_in_wg = wi >> 5 (uniform across the wave since L < 32).
-    wave_id = bld.binary("shri", wi, splat_const(5))
-
-    # (m_wave, n_wave) decomposition. BN is a power of 2 so:
-    #   n_wave = wave_id & (BN - 1)
-    #   m_wave = wave_id >> log2(BN)
-    n_wave = bld.binary("andi", wave_id, splat_const(cfg.BN - 1))
-    m_wave = bld.binary("shri", wave_id, splat_const(cfg.log2_BN))
-
-    # Global (m_tile, n_tile) for this wave:
-    #   m_tile = wg_m * BM + m_wave
-    #   n_tile = wg_n * BN + n_wave
-    m_tile = bld.binary(
-        "addi",
-        bld.binary("muli", bld.splat(wg_m), splat_const(cfg.BM)),
-        m_wave,
-    )
-    n_tile = bld.binary(
-        "addi",
-        bld.binary("muli", bld.splat(wg_n), splat_const(cfg.BN)),
-        n_wave,
-    )
-
-    # ---- per-lane row offset (L % 16) * K (in f16 elements) ----
-    lane_mod16 = bld.binary("andi", lane, splat_const(15))
-    lane_row_off = bld.binary("muli", lane_mod16, splat_const(cfg.K))
-
-    # ---- per-tile offset = tile * (16 * K) (in f16 elements) ----
-    tile_stride = splat_const(16 * cfg.K)
-    m_tile_off = bld.binary("muli", m_tile, tile_stride)
-    n_tile_off = bld.binary("muli", n_tile, tile_stride)
-
-    a_lane_base = bld.ptr_add(a_arg, bld.binary("addi", m_tile_off, lane_row_off))
-    b_lane_base = bld.ptr_add(b_arg, bld.binary("addi", n_tile_off, lane_row_off))
-
-    # ---- C output offset (in f32 elements) ----
-    # total_wave_id = (wg_m * N_blocks + wg_n) * waves_per_wg + wave_id_in_wg
-    # c_off = total_wave_id * 256  (256 = 1 << 8)
-    wg_linear = bld.binary(
-        "addi",
-        bld.binary("muli", bld.splat(wg_m), splat_const(cfg.N_blocks)),
-        bld.splat(wg_n),
-    )
-    wave_offset_within_grid = bld.binary(
-        "muli", wg_linear, splat_const(cfg.waves_per_workgroup)
-    )
-    total_wave_id = bld.binary("addi", wave_offset_within_grid, wave_id)
-    c_off = bld.binary("shli", total_wave_id, splat_const(8))
-    c_ptr = bld.ptr_add(c_arg, c_off)
-
-    # ---- fragment types ----
     a_type = dsl.fragment_type(0, dsl.f16(), 16, 16, 32, 8)
     b_type = dsl.fragment_type(1, dsl.f16(), 16, 16, 32, 8)
     acc_type = dsl.fragment_type(2, dsl.f32(), 16, 16, 32, 8)
 
-    # ---- K-loop: load A and B tiles, accumulate, advance pointers ------
-    acc = bld.fragment_fill(bld.constant(i32, 0), acc_type)
-    c16 = splat_const(16)
-    a_ptr_iter = a_lane_base
-    b_ptr_iter = b_lane_base
+    staging = _emit_lds_staging(bld, cfg, coords) if cfg.use_lds else None
+
+    acc = bld.fragment_fill(bld.constant(dsl.i32(), 0), acc_type)
+    c16 = _splat_const(bld, 16)
+    a_ptr_iter = coords.a_lane_base
+    b_ptr_iter = coords.b_lane_base
     for _ in range(cfg.k_steps):
-        a_frag, _atok = bld.fragment_load(a_ptr_iter, a_type)
-        b_frag, _btok = bld.fragment_load(b_ptr_iter, b_type)
+        if staging is not None:
+            a_frag, b_frag = _load_fragments_through_lds(
+                bld, a_ptr_iter, b_ptr_iter, a_type, b_type, staging
+            )
+        else:
+            a_frag, _atok = bld.fragment_load(a_ptr_iter, a_type)
+            b_frag, _btok = bld.fragment_load(b_ptr_iter, b_type)
         acc = bld.mma(_MMA_KIND, a_frag, b_frag, acc)
         a_ptr_iter = bld.ptr_add(a_ptr_iter, c16)
         b_ptr_iter = bld.ptr_add(b_ptr_iter, c16)
 
-    bld.fragment_store(acc, c_ptr)
+    bld.fragment_store(acc, coords.c_ptr)
 
 
 def _emit_host(bld: dsl.FunctionBuilder, cfg: _MatmulConfig) -> None:
@@ -293,7 +404,13 @@ def _emit_host(bld: dsl.FunctionBuilder, cfg: _MatmulConfig) -> None:
 
 
 def build_wmma_f16_matmul_module(
-    M: int, N: int, K: int, *, BM: int = 1, BN: int = 1
+    M: int,
+    N: int,
+    K: int,
+    *,
+    BM: int = 1,
+    BN: int = 1,
+    use_lds: bool = False,
 ) -> Module:
     """Return an MLIR :class:`Module` for the tiled WMMA f16 matmul.
 
@@ -301,6 +418,13 @@ def build_wmma_f16_matmul_module(
     with a per-axis 1.0/2.0 split, see :func:`_emit_host`), plus an
     ``MxN`` f32 output buffer, registers them with the GPU runtime, and
     launches the kernel.
+
+    When ``use_lds=True`` each per-K-step A/B fragment is round-tripped
+    through a per-wave LDS slot (identity transport) so the kernel
+    exercises tuple ``ds_store_b32`` / ``ds_load_b32`` and
+    ``s_barrier``; the kernel function is tagged with
+    ``wave.lds_size`` so the AMDGPU lowering programs the right
+    ``group_segment_fixed_size``.
 
     See the module docstring for shape constraints.
 
@@ -310,7 +434,7 @@ def build_wmma_f16_matmul_module(
     callers can keep using the module (e.g. printing, pass-managing)
     without further setup.
     """
-    cfg = _MatmulConfig(M=M, N=N, K=K, BM=BM, BN=BN)
+    cfg = _MatmulConfig(M=M, N=N, K=K, BM=BM, BN=BN, use_lds=use_lds)
     bld = dsl.ModuleBuilder()
     with bld:
         bld.declare_external(
@@ -334,9 +458,10 @@ def build_wmma_f16_matmul_module(
             dsl.ptr_type(dsl.f16()),
             dsl.ptr_type(dsl.f32()),
         ]
+        lds_size = cfg.lds_bytes if cfg.use_lds else None
         with (
             bld.gpu_module(_GPU_MODULE_NAME) as gmod,
-            gmod.kernel(_KERNEL_NAME, kernel_inputs) as fb,
+            gmod.kernel(_KERNEL_NAME, kernel_inputs, lds_size=lds_size) as fb,
         ):
             _emit_kernel(fb, cfg)
 

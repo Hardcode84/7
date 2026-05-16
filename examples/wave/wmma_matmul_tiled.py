@@ -89,6 +89,12 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         default=1,
         help="waves per workgroup along N tiles (only 1 supported for now)",
     )
+    parser.add_argument(
+        "--use-lds",
+        action="store_true",
+        help="round-trip each per-K-step A/B fragment through a per-wave "
+        "LDS slot (exercises ds_store_b32 / ds_load_b32 / s_barrier)",
+    )
     return parser.parse_args(argv)
 
 
@@ -98,7 +104,12 @@ def main(argv: list[str] | None = None) -> int:
     from mlir.dialects.wave_matmul import build_wmma_f16_matmul_module
 
     module = build_wmma_f16_matmul_module(
-        M=args.m, N=args.n, K=args.k, BM=args.bm, BN=args.bn
+        M=args.m,
+        N=args.n,
+        K=args.k,
+        BM=args.bm,
+        BN=args.bn,
+        use_lds=args.use_lds,
     )
     sys.stdout.write(str(module))
     return 0

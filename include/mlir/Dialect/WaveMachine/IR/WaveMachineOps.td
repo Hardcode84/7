@@ -374,6 +374,24 @@ def WaveMachine_DsLoadB32Op
   let assemblyFormat = "$addr (`after` $dependency^)? attr-dict `:` functional-type(operands, results)";
 }
 
+def WaveMachine_DsLoadTupleB32Op
+    : WaveMachine_Op<"ds_load_tuple_b32", [WaveMachine_SMEMLoad]> {
+  let summary = "LDS load of N consecutive 32-bit values into a VGPR tuple";
+  let description = [{
+    Loads `N` consecutive dwords from LDS at `addr + offset + i*4` for
+    `i` in `[0, N)` into the `N` components of a single VGPR tuple
+    result of width `N`. Expands to `N` `ds_read_b32` instructions in
+    the AMDGPU printer; the tuple width is the result register width.
+  }];
+  let arguments = (ins WaveMachine_VGPR1:$addr,
+                       Optional<WaveMachine_MemToken>:$dependency,
+                       DefaultValuedAttr<I64Attr, "0">:$offset);
+  let results = (outs WaveMachine_VGPR:$result,
+                      Variadic<WaveMachine_MemToken>:$tokens);
+  let assemblyFormat = "$addr (`after` $dependency^)? attr-dict `:` functional-type(operands, results)";
+  let hasVerifier = 1;
+}
+
 def WaveMachine_DsStoreB32Op
     : WaveMachine_Op<"ds_store_b32", [WaveMachine_SMEMLoad]> {
   let summary = "LDS 32-bit store";
@@ -382,6 +400,23 @@ def WaveMachine_DsStoreB32Op
                        DefaultValuedAttr<I64Attr, "0">:$offset);
   let results = (outs Variadic<WaveMachine_MemToken>:$tokens);
   let assemblyFormat = "$addr `,` $value (`after` $dependency^)? attr-dict `:` functional-type(operands, results)";
+}
+
+def WaveMachine_DsStoreTupleB32Op
+    : WaveMachine_Op<"ds_store_tuple_b32", [WaveMachine_SMEMLoad]> {
+  let summary = "LDS store of a VGPR tuple as N consecutive 32-bit values";
+  let description = [{
+    Stores the `N` components of the `value` VGPR tuple to LDS at
+    `addr + offset + i*4` for `i` in `[0, N)`. Expands to `N`
+    `ds_write_b32` instructions in the AMDGPU printer; the tuple
+    width is the value register width.
+  }];
+  let arguments = (ins WaveMachine_VGPR1:$addr, WaveMachine_VGPR:$value,
+                       Optional<WaveMachine_MemToken>:$dependency,
+                       DefaultValuedAttr<I64Attr, "0">:$offset);
+  let results = (outs Variadic<WaveMachine_MemToken>:$tokens);
+  let assemblyFormat = "$addr `,` $value (`after` $dependency^)? attr-dict `:` functional-type(operands, results)";
+  let hasVerifier = 1;
 }
 
 def WaveMachine_SBarrierOp : WaveMachine_Op<"s_barrier"> {
