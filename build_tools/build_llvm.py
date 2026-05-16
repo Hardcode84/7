@@ -135,7 +135,7 @@ def configure_and_build(
         str(build_dir),
         f"-DCMAKE_BUILD_TYPE={build_type}",
         f"-DCMAKE_INSTALL_PREFIX={install_dir}",
-        "-DLLVM_ENABLE_PROJECTS=mlir",
+        "-DLLVM_ENABLE_PROJECTS=mlir;lld",
         "-DLLVM_TARGETS_TO_BUILD=AMDGPU;X86",
         "-DLLVM_ENABLE_ASSERTIONS=ON",
         "-DLLVM_ENABLE_RTTI=ON",
