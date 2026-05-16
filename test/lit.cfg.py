@@ -9,11 +9,27 @@ from lit.llvm.subst import ToolSubst
 
 config.name = "wave-mlir"
 config.test_format = lit.formats.ShTest(not llvm_config.use_lit_shell)
-config.suffixes = [".mlir"]
+config.suffixes = [".mlir", ".py"]
 
-# Python bindings aren't wired into CMake yet; skip the bindings test
-# until they are.
-config.excludes = ["python", "Inputs"]
+# Exclude lit's own config files (they share the `.py` suffix); also drop
+# build-system staging dirs that we never want walked.
+config.excludes = ["Inputs", "lit.cfg.py", "lit.site.cfg.py"]
+
+# Surface the staged Wave Python bindings to the test runners. The
+# build target `WavePythonModules` drops everything (the upstream
+# `mlir.*` modules + our `wave` / `waveamd` dialect bindings + the
+# `_waveDialectsNanobind` nanobind extension) into
+# `<build>/python_packages/wave_mlir`, so we prepend that path to
+# PYTHONPATH when it exists.
+_wave_python_root = str(
+    Path(config.wave_mlir_obj_root) / "python_packages" / "wave_mlir"
+)
+if Path(_wave_python_root).is_dir():
+    llvm_config.with_environment("PYTHONPATH", _wave_python_root, append_path=True)
+    config.available_features.add("wave-python-bindings")
+else:
+    # Without the bindings, the dialect-Python smoke tests cannot run.
+    config.excludes = [*config.excludes, "python"]
 
 config.test_source_root = str(Path(__file__).parent)
 config.test_exec_root = str(Path(config.wave_mlir_obj_root) / "test")
@@ -21,6 +37,7 @@ config.test_exec_root = str(Path(config.wave_mlir_obj_root) / "test")
 config.substitutions.append(("%PATH%", config.environment["PATH"]))
 config.substitutions.append(("%shlibext", config.llvm_shlib_ext))
 config.substitutions.append(("%python", f'"{sys.executable}"'))
+config.substitutions.append(("%PYTHON", f'"{sys.executable}"'))
 
 llvm_config.with_system_environment(["HOME", "INCLUDE", "LIB", "TMP", "TEMP"])
 

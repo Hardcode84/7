@@ -26,35 +26,40 @@ Example:
 from __future__ import annotations
 
 import argparse
-import os
 import sys
+from pathlib import Path
 
 
 def _ensure_package_on_path() -> None:
     """Allow running the script directly from a source checkout.
 
     When invoked as ``python examples/wave/wmma_matmul_tiled.py`` the
-    repo-root ``python/`` directory must be importable so that
-    ``mlir.dialects.wave_matmul`` resolves. We only prepend it if the
+    built ``python_packages/wave_mlir`` tree must be importable so that
+    ``mlir.dialects.wave_matmul`` resolves alongside the upstream
+    bindings and our nanobind extension. We only prepend it if the
     module is not already importable, so installed setups remain
     untouched.
     """
     try:
         import mlir.dialects.wave_matmul  # noqa: F401
+
         return
     except ImportError:
         pass
-    here = os.path.dirname(os.path.abspath(__file__))
-    candidate = os.path.normpath(os.path.join(here, "..", "..", "python"))
-    if os.path.isdir(os.path.join(candidate, "mlir", "dialects")):
-        sys.path.insert(0, candidate)
+    repo_root = Path(__file__).resolve().parents[2]
+    for path in [repo_root / "build" / "python_packages" / "wave_mlir"]:
+        if (path / "mlir" / "dialects").is_dir():
+            sys.path.insert(0, str(path))
+            return
 
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n", 1)[0])
     parser.add_argument("--m", type=int, default=64, help="output rows (mult of 16)")
     parser.add_argument("--n", type=int, default=64, help="output cols (mult of 16)")
-    parser.add_argument("--k", type=int, default=32, help="contraction dim (mult of 16)")
+    parser.add_argument(
+        "--k", type=int, default=32, help="contraction dim (mult of 16)"
+    )
     parser.add_argument(
         "--bm", type=int, default=1, help="waves per workgroup along M tiles"
     )
@@ -69,11 +74,10 @@ def main(argv: list[str] | None = None) -> int:
     _ensure_package_on_path()
     from mlir.dialects.wave_matmul import build_wmma_iu8_matmul_module
 
-    sys.stdout.write(
-        build_wmma_iu8_matmul_module(
-            M=args.m, N=args.n, K=args.k, BM=args.bm, BN=args.bn
-        )
+    module = build_wmma_iu8_matmul_module(
+        M=args.m, N=args.n, K=args.k, BM=args.bm, BN=args.bn
     )
+    sys.stdout.write(str(module))
     return 0
 
 

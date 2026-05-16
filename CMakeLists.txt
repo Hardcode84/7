@@ -84,4 +84,32 @@ add_subdirectory(include)
 add_subdirectory(lib)
 add_subdirectory(runtime)
 add_subdirectory(tools)
+
+option(WAVE_ENABLE_PYTHON_BINDINGS
+  "Build the Wave/WaveAMD MLIR Python bindings."
+  "${MLIR_ENABLE_BINDINGS_PYTHON}")
+if(WAVE_ENABLE_PYTHON_BINDINGS)
+  if(NOT MLIR_ENABLE_BINDINGS_PYTHON)
+    message(FATAL_ERROR
+      "WAVE_ENABLE_PYTHON_BINDINGS=ON requires the underlying MLIR install "
+      "to be built with -DMLIR_ENABLE_BINDINGS_PYTHON=ON (rerun "
+      "build_tools/build_llvm.py --python-bindings).")
+  endif()
+  # `add_mlir_python_modules` expects `MLIR_BINARY_DIR` to point at the
+  # tree where the staged python package is written. We use the wave-mlir
+  # build dir so everything lives under `build/python_packages/...`.
+  set(MLIR_BINARY_DIR "${CMAKE_BINARY_DIR}")
+  include(MLIRDetectPythonEnv)
+  mlir_configure_python_dev_packages()
+  if(NOT MLIR_PYTHON_PACKAGE_PREFIX)
+    set(MLIR_PYTHON_PACKAGE_PREFIX "mlir" CACHE STRING "" FORCE)
+  endif()
+  if(NOT MLIR_BINDINGS_PYTHON_INSTALL_PREFIX)
+    set(MLIR_BINDINGS_PYTHON_INSTALL_PREFIX
+        "python_packages/wave_mlir/${MLIR_PYTHON_PACKAGE_PREFIX}"
+        CACHE STRING "" FORCE)
+  endif()
+  add_subdirectory(python)
+endif()
+
 add_subdirectory(test)
