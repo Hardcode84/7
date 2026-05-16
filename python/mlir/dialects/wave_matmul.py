@@ -34,9 +34,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from mlir.dialects import wave_dsl as dsl
 from mlir.ir import Module
-
-from . import wave_dsl as dsl
 
 
 def _is_power_of_two(value: int) -> bool:
@@ -63,13 +62,9 @@ class _MatmulConfig:
                 f"decomposition); got BN={self.BN}"
             )
         if (self.M // 16) % self.BM != 0:
-            raise ValueError(
-                f"BM (={self.BM}) must divide M/16 (={self.M // 16})"
-            )
+            raise ValueError(f"BM (={self.BM}) must divide M/16 (={self.M // 16})")
         if (self.N // 16) % self.BN != 0:
-            raise ValueError(
-                f"BN (={self.BN}) must divide N/16 (={self.N // 16})"
-            )
+            raise ValueError(f"BN (={self.BN}) must divide N/16 (={self.N // 16})")
         if self.waves_per_workgroup > 32:
             raise ValueError(
                 f"BM * BN must be <= 32 (RDNA3 workgroup wave cap); "
@@ -143,10 +138,10 @@ def _emit_kernel(bld: dsl.FunctionBuilder, cfg: _MatmulConfig) -> None:
         return bld.splat(bld.constant(i32, value))
 
     # ---- decompose workitem_id and workgroup id into per-wave coords ----
-    wi = bld.workitem_id(axis=0)            # element[L] = wave_id_in_wg * 32 + L
-    lane = bld.lane_id()                     # element[L] = L
-    wg_m = bld.workgroup_id(axis=0)          # scalar i32: 0..M_blocks-1
-    wg_n = bld.workgroup_id(axis=1)          # scalar i32: 0..N_blocks-1
+    wi = bld.workitem_id(axis=0)  # element[L] = wave_id_in_wg * 32 + L
+    lane = bld.lane_id()  # element[L] = L
+    wg_m = bld.workgroup_id(axis=0)  # scalar i32: 0..M_blocks-1
+    wg_n = bld.workgroup_id(axis=1)  # scalar i32: 0..N_blocks-1
 
     # wave_id_in_wg = wi >> 5 (uniform across the wave since L < 32).
     wave_id = bld.binary("shri", wi, splat_const(5))
@@ -180,12 +175,8 @@ def _emit_kernel(bld: dsl.FunctionBuilder, cfg: _MatmulConfig) -> None:
     m_tile_off = bld.binary("muli", m_tile, tile_stride)
     n_tile_off = bld.binary("muli", n_tile, tile_stride)
 
-    a_lane_base = bld.ptr_add(
-        a_arg, bld.binary("addi", m_tile_off, lane_row_off)
-    )
-    b_lane_base = bld.ptr_add(
-        b_arg, bld.binary("addi", n_tile_off, lane_row_off)
-    )
+    a_lane_base = bld.ptr_add(a_arg, bld.binary("addi", m_tile_off, lane_row_off))
+    b_lane_base = bld.ptr_add(b_arg, bld.binary("addi", n_tile_off, lane_row_off))
 
     # ---- C output offset (in f32 elements) ----
     # total_wave_id = (wg_m * N_blocks + wg_n) * waves_per_wg + wave_id_in_wg

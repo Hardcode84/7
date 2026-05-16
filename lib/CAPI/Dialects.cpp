@@ -71,8 +71,7 @@ bool mlirWaveTypeIsAPtr(MlirType type) {
 
 MlirType mlirWavePtrTypeGet(MlirType elementType, MlirAttribute addressSpace) {
   Type elt = unwrap(elementType);
-  return wrap(
-      wave::PtrType::get(elt.getContext(), elt, unwrap(addressSpace)));
+  return wrap(wave::PtrType::get(elt.getContext(), elt, unwrap(addressSpace)));
 }
 
 MlirType mlirWavePtrTypeGetElementType(MlirType type) {
@@ -132,8 +131,7 @@ int64_t mlirWaveAMDFragmentTypeGetRole(MlirType type) {
 }
 
 MlirType mlirWaveAMDFragmentTypeGetElementType(MlirType type) {
-  return wrap(
-      llvm::cast<waveamd::FragmentType>(unwrap(type)).getElementType());
+  return wrap(llvm::cast<waveamd::FragmentType>(unwrap(type)).getElementType());
 }
 
 int64_t mlirWaveAMDFragmentTypeGetRows(MlirType type) {

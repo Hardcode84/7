@@ -25,18 +25,16 @@ static void bindAddressSpaceAttr(nb::module_ &m, const char *name,
   mlir_attribute_subclass(m, name, isaFn)
       .def_classmethod(
           "get",
-          [getFn](nb::object &cls, MlirContext ctx) {
-            return cls(getFn(ctx));
-          },
+          [getFn](nb::object &cls, MlirContext ctx) { return cls(getFn(ctx)); },
           nb::arg("cls"), nb::arg("context"));
 }
 
-NB_MODULE(_waveDialectsNanobind, m) {
-  // Single `register_dialects(context, load=True)` entry point that exposes
-  // both the user-facing `wave` / `waveamd` dialects and the lower-level
-  // `wavemachine` dialect. Callers normally only need the first two, but we
-  // wire the third one too so a Python-built module can be round-tripped
-  // through the WaveMachine pipeline without re-registering out-of-band.
+// Single `register_dialects(context, load=True)` entry point that exposes
+// both the user-facing `wave` / `waveamd` dialects and the lower-level
+// `wavemachine` dialect. Callers normally only need the first two, but we
+// wire the third one too so a Python-built module can be round-tripped
+// through the WaveMachine pipeline without re-registering out-of-band.
+static void bindRegisterDialects(nb::module_ &m) {
   m.def(
       "register_dialects",
       [](MlirContext ctx, bool load) {
@@ -53,11 +51,9 @@ NB_MODULE(_waveDialectsNanobind, m) {
         }
       },
       nb::arg("context"), nb::arg("load") = true);
+}
 
-  //===-------------------------------------------------------------------===//
-  // Wave types
-  //===-------------------------------------------------------------------===//
-
+static void bindSimdType(nb::module_ &m) {
   mlir_type_subclass(m, "SimdType", mlirWaveTypeIsASimd)
       .def_classmethod(
           "get",
@@ -68,9 +64,12 @@ NB_MODULE(_waveDialectsNanobind, m) {
       .def_property_readonly(
           "element_type",
           [](MlirType self) { return mlirWaveSimdTypeGetElementType(self); })
-      .def_property_readonly(
-          "width", [](MlirType self) { return mlirWaveSimdTypeGetWidth(self); });
+      .def_property_readonly("width", [](MlirType self) {
+        return mlirWaveSimdTypeGetWidth(self);
+      });
+}
 
+static void bindMaskType(nb::module_ &m) {
   mlir_type_subclass(m, "MaskType", mlirWaveTypeIsAMask)
       .def_classmethod(
           "get",
@@ -78,9 +77,12 @@ NB_MODULE(_waveDialectsNanobind, m) {
             return cls(mlirWaveMaskTypeGet(ctx, width));
           },
           nb::arg("cls"), nb::arg("width") = 32, nb::arg("context"))
-      .def_property_readonly(
-          "width", [](MlirType self) { return mlirWaveMaskTypeGetWidth(self); });
+      .def_property_readonly("width", [](MlirType self) {
+        return mlirWaveMaskTypeGetWidth(self);
+      });
+}
 
+static void bindMemTokenType(nb::module_ &m) {
   mlir_type_subclass(m, "MemTokenType", mlirWaveTypeIsAMemToken)
       .def_classmethod(
           "get",
@@ -88,11 +90,14 @@ NB_MODULE(_waveDialectsNanobind, m) {
             return cls(mlirWaveMemTokenTypeGet(ctx));
           },
           nb::arg("cls"), nb::arg("context"));
+}
 
+static void bindPtrType(nb::module_ &m) {
   mlir_type_subclass(m, "PtrType", mlirWaveTypeIsAPtr)
       .def_classmethod(
           "get",
-          [](nb::object &cls, MlirType elementType, MlirAttribute addressSpace) {
+          [](nb::object &cls, MlirType elementType,
+             MlirAttribute addressSpace) {
             return cls(mlirWavePtrTypeGet(elementType, addressSpace));
           },
           nb::arg("cls"), nb::arg("element_type"), nb::arg("address_space"))
@@ -102,11 +107,55 @@ NB_MODULE(_waveDialectsNanobind, m) {
       .def_property_readonly("address_space", [](MlirType self) {
         return mlirWavePtrTypeGetAddressSpace(self);
       });
+}
 
-  //===-------------------------------------------------------------------===//
-  // Wave address-space attributes
-  //===-------------------------------------------------------------------===//
+static void bindFragmentType(nb::module_ &m) {
+  mlir_type_subclass(m, "FragmentType", mlirWaveAMDTypeIsAFragment)
+      .def_classmethod(
+          "get",
+          [](nb::object &cls, int64_t role, MlirType elementType, int64_t rows,
+             int64_t columns, int64_t waveSize, int64_t registers,
+             MlirContext ctx) {
+            return cls(mlirWaveAMDFragmentTypeGet(
+                ctx, role, elementType, rows, columns, waveSize, registers));
+          },
+          nb::arg("cls"), nb::arg("role"), nb::arg("element_type"),
+          nb::arg("rows") = 16, nb::arg("columns") = 16,
+          nb::arg("wave_size") = 32, nb::arg("registers") = 4,
+          nb::arg("context"))
+      .def_property_readonly(
+          "role",
+          [](MlirType self) { return mlirWaveAMDFragmentTypeGetRole(self); })
+      .def_property_readonly("element_type",
+                             [](MlirType self) {
+                               return mlirWaveAMDFragmentTypeGetElementType(
+                                   self);
+                             })
+      .def_property_readonly(
+          "rows",
+          [](MlirType self) { return mlirWaveAMDFragmentTypeGetRows(self); })
+      .def_property_readonly(
+          "columns",
+          [](MlirType self) { return mlirWaveAMDFragmentTypeGetColumns(self); })
+      .def_property_readonly("wave_size",
+                             [](MlirType self) {
+                               return mlirWaveAMDFragmentTypeGetWaveSize(self);
+                             })
+      .def_property_readonly("registers", [](MlirType self) {
+        return mlirWaveAMDFragmentTypeGetRegisters(self);
+      });
+}
 
+NB_MODULE(_waveDialectsNanobind, m) {
+  bindRegisterDialects(m);
+
+  // Wave types.
+  bindSimdType(m);
+  bindMaskType(m);
+  bindMemTokenType(m);
+  bindPtrType(m);
+
+  // Wave address-space attributes.
   bindAddressSpaceAttr(m, "GlobalAddressSpaceAttr",
                        mlirWaveAttributeIsAGlobalAddressSpace,
                        mlirWaveGlobalAddressSpaceAttrGet);
@@ -117,47 +166,8 @@ NB_MODULE(_waveDialectsNanobind, m) {
                        mlirWaveAttributeIsAPrivateAddressSpace,
                        mlirWavePrivateAddressSpaceAttrGet);
 
-  //===-------------------------------------------------------------------===//
-  // WaveAMD types and attributes
-  //===-------------------------------------------------------------------===//
-
-  mlir_type_subclass(m, "FragmentType", mlirWaveAMDTypeIsAFragment)
-      .def_classmethod(
-          "get",
-          [](nb::object &cls, int64_t role, MlirType elementType, int64_t rows,
-             int64_t columns, int64_t waveSize, int64_t registers,
-             MlirContext ctx) {
-            return cls(mlirWaveAMDFragmentTypeGet(ctx, role, elementType, rows,
-                                                  columns, waveSize,
-                                                  registers));
-          },
-          nb::arg("cls"), nb::arg("role"), nb::arg("element_type"),
-          nb::arg("rows") = 16, nb::arg("columns") = 16,
-          nb::arg("wave_size") = 32, nb::arg("registers") = 4,
-          nb::arg("context"))
-      .def_property_readonly(
-          "role",
-          [](MlirType self) { return mlirWaveAMDFragmentTypeGetRole(self); })
-      .def_property_readonly(
-          "element_type",
-          [](MlirType self) {
-            return mlirWaveAMDFragmentTypeGetElementType(self);
-          })
-      .def_property_readonly(
-          "rows",
-          [](MlirType self) { return mlirWaveAMDFragmentTypeGetRows(self); })
-      .def_property_readonly(
-          "columns",
-          [](MlirType self) { return mlirWaveAMDFragmentTypeGetColumns(self); })
-      .def_property_readonly(
-          "wave_size",
-          [](MlirType self) {
-            return mlirWaveAMDFragmentTypeGetWaveSize(self);
-          })
-      .def_property_readonly("registers", [](MlirType self) {
-        return mlirWaveAMDFragmentTypeGetRegisters(self);
-      });
-
+  // WaveAMD types and attributes.
+  bindFragmentType(m);
   bindAddressSpaceAttr(m, "BufferAddressSpaceAttr",
                        mlirWaveAMDAttributeIsABufferAddressSpace,
                        mlirWaveAMDBufferAddressSpaceAttrGet);

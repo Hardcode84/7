@@ -66,10 +66,9 @@ mlirWavePrivateAddressSpaceAttrGet(MlirContext ctx);
 //===----------------------------------------------------------------------===//
 
 MLIR_CAPI_EXPORTED bool mlirWaveAMDTypeIsAFragment(MlirType type);
-MLIR_CAPI_EXPORTED MlirType
-mlirWaveAMDFragmentTypeGet(MlirContext ctx, int64_t role, MlirType elementType,
-                           int64_t rows, int64_t columns, int64_t waveSize,
-                           int64_t registers);
+MLIR_CAPI_EXPORTED MlirType mlirWaveAMDFragmentTypeGet(
+    MlirContext ctx, int64_t role, MlirType elementType, int64_t rows,
+    int64_t columns, int64_t waveSize, int64_t registers);
 MLIR_CAPI_EXPORTED int64_t mlirWaveAMDFragmentTypeGetRole(MlirType type);
 MLIR_CAPI_EXPORTED MlirType
 mlirWaveAMDFragmentTypeGetElementType(MlirType type);

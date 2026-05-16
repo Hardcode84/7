@@ -345,8 +345,7 @@ private:
     // must be a VGPR -- materialize operands that would otherwise land
     // in vsrc1 as an SGPR or literal. `v_mul_lo_u32` is VOP3-only so
     // it has no such restriction.
-    if (machineOpcode == "v_lshlrev_b32" ||
-        machineOpcode == "v_lshrrev_b32") {
+    if (machineOpcode == "v_lshlrev_b32" || machineOpcode == "v_lshrrev_b32") {
       lhs = ensureVGPRForVSrc1(op.getLoc(), lhs);
     } else if (machineOpcode != "v_mul_lo_u32") {
       if (isImm(rhs))
@@ -431,9 +430,8 @@ private:
       SmallVector<Value> operands{addr, expect(op.getValue(), op)};
       if (Value dependency = op.getDependency())
         operands.push_back(expect(dependency, op));
-      Operation *store =
-          createWMOp(builder, op.getLoc(), "ds_store_b32", operands,
-                     getMemTokenType(op.getContext()));
+      Operation *store = createWMOp(builder, op.getLoc(), "ds_store_b32",
+                                    operands, getMemTokenType(op.getContext()));
       values[op.getToken()] = store->getResult(0);
       eraseIfTopLevel(op);
       return success();
@@ -676,9 +674,8 @@ private:
     SmallVector<Value> operands;
     for (Value dependency : op.getDependencies())
       operands.push_back(expect(dependency, op));
-    Operation *barrier =
-        createWMOp(builder, op.getLoc(), "s_barrier", operands,
-                   getMemTokenType(op.getContext()));
+    Operation *barrier = createWMOp(builder, op.getLoc(), "s_barrier", operands,
+                                    getMemTokenType(op.getContext()));
     values[op.getToken()] = barrier->getResult(0);
     eraseIfTopLevel(op);
     return success();

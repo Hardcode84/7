@@ -30,6 +30,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
+from types import TracebackType
 
 from mlir._mlir_libs._waveDialectsNanobind import (
     BufferAddressSpaceAttr,
@@ -46,6 +47,7 @@ from mlir._mlir_libs._waveDialectsNanobind import (
 from mlir.dialects import arith, func, gpu, memref, scf, wave, waveamd
 from mlir.ir import (
     Attribute,
+    Block,
     Context,
     F16Type,
     F32Type,
@@ -138,8 +140,7 @@ def ptr_type(
     element_type: Type | None = None,
     address_space: Attribute | None = None,
 ) -> Type:
-    return PtrType.get(element_type or i32(),
-                       address_space or global_address_space())
+    return PtrType.get(element_type or i32(), address_space or global_address_space())
 
 
 def buffer_ptr_type(element_type: Type | None = None) -> Type:
@@ -229,14 +230,21 @@ class ModuleBuilder:
         self._ip.__enter__()
         return self
 
-    def __exit__(self, exc_type, exc, tb) -> None:
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> None:
+        assert self._ip is not None
         self._ip.__exit__(exc_type, exc, tb)
         self.location.__exit__(exc_type, exc, tb)
         self.context.__exit__(exc_type, exc, tb)
 
     def __str__(self) -> str:
         assert self.module is not None
-        return self.module.operation.get_asm(assume_verified=True)
+        asm: str = self.module.operation.get_asm(assume_verified=True)
+        return asm
 
     # --- GPU module / kernel -----------------------------------------------
 
@@ -327,12 +335,12 @@ class _GpuModuleBuilder:
 class FunctionBuilder:
     """Per-function helper that wires common arith / Wave / WaveAMD ops."""
 
-    def __init__(self, block) -> None:
+    def __init__(self, block: Block) -> None:
         self.block = block
 
     @property
-    def args(self):
-        return self.block.arguments
+    def args(self) -> Sequence[Value]:
+        return list(self.block.arguments)
 
     # --- arith / index constants ------------------------------------------
 
@@ -468,8 +476,7 @@ class FunctionBuilder:
         Returns ``(fragment, token)``.
         """
         frag = FragmentType(frag_type)
-        load_type = simd_type(vector_type(frag.registers, i32()),
-                              width=frag.wave_size)
+        load_type = simd_type(vector_type(frag.registers, i32()), width=frag.wave_size)
         regs, token = self.load(ptr, load_type, after=after)
         return self.fragment_pack(regs, frag_type), token
 

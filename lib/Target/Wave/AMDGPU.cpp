@@ -528,10 +528,9 @@ private:
       // v_mul_lo_u32 is VOP3-only on RDNA3; operand placement is
       // unconstrained so we emit (vdst, src0, src1) as-is without the
       // VOP2 swap dance.
-      return emitMC(
-          llvm::AMDGPU::V_MUL_LO_U32_e64_gfx11,
-          {toMCOperand(result()), toMCOperand(op.getOperand(0)),
-           toMCOperand(op.getOperand(1))});
+      return emitMC(llvm::AMDGPU::V_MUL_LO_U32_e64_gfx11,
+                    {toMCOperand(result()), toMCOperand(op.getOperand(0)),
+                     toMCOperand(op.getOperand(1))});
     if (isa<wavemachine::VCmpEqU32Op, wavemachine::VCmpNeU32Op,
             wavemachine::VCmpLtU32Op, wavemachine::VCmpLeU32Op,
             wavemachine::VCmpGtU32Op, wavemachine::VCmpGeU32Op>(op)) {
@@ -617,12 +616,11 @@ private:
     // -- the SADDR variants put the SGPR base first, unlike the *non*-SADDR
     // store variants we use elsewhere.
     if (isa<wavemachine::GlobalLoadB32Op>(op))
-      return emitMC(llvm::AMDGPU::GLOBAL_LOAD_DWORD_SADDR_gfx11,
-                    {toMCOperand(op.getResult(0)),
-                     toMCOperand(op.getOperand(1)),
-                     toMCOperand(op.getOperand(0)),
-                     llvm::MCOperand::createImm(0),
-                     llvm::MCOperand::createImm(0)});
+      return emitMC(
+          llvm::AMDGPU::GLOBAL_LOAD_DWORD_SADDR_gfx11,
+          {toMCOperand(op.getResult(0)), toMCOperand(op.getOperand(1)),
+           toMCOperand(op.getOperand(0)), llvm::MCOperand::createImm(0),
+           llvm::MCOperand::createImm(0)});
     if (isa<wavemachine::GlobalLoadTupleB32Op>(op)) {
       auto regType = cast<wavemachine::RegType>(op.getResult(0).getType());
       for (unsigned i = 0, e = regType.getWidth(); i != e; ++i)

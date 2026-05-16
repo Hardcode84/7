@@ -203,8 +203,8 @@ LogicalResult LoadOp::verify() {
   if (ptrBits != 16 && ptrBits != 32)
     return emit("only 16- and 32-bit pointer element types are supported");
 
-  FailureOr<LoadShape> shape = decodeLoadShape(resultSimd.getElementType(),
-                                               emit);
+  FailureOr<LoadShape> shape =
+      decodeLoadShape(resultSimd.getElementType(), emit);
   if (failed(shape))
     return failure();
 

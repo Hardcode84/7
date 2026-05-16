@@ -6,7 +6,7 @@ add_mlir_public_c_api_library(WaveCAPI
   Dialects.cpp
 
   LINK_LIBS PUBLIC
-  MLIRWaveDialect
   MLIRWaveAMDDialect
+  MLIRWaveDialect
   MLIRWaveMachineDialect
 )
