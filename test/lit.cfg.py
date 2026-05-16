@@ -13,7 +13,7 @@ config.suffixes = [".mlir"]
 
 # Python bindings aren't wired into CMake yet; skip the bindings test
 # until they are.
-config.excludes = ["python"]
+config.excludes = ["python", "Inputs"]
 
 config.test_source_root = str(Path(__file__).parent)
 config.test_exec_root = str(Path(config.wave_mlir_obj_root) / "test")
@@ -65,6 +65,11 @@ for name, env_key in [
         if path and Path(path).exists():
             config.substitutions.append((f"%{name}", path))
             break
+
+# Wave host-side runtime helpers (memref -> wave.ptr glue).
+_wave_runtime = Path(config.wave_mlir_obj_root) / "lib" / "libwave_runtime.so"
+if _wave_runtime.exists():
+    config.substitutions.append(("%wave_runtime", str(_wave_runtime)))
 
 # Tool search order: our build's bin first (wave-opt, wave-translate),
 # then the LLVM install (llvm-mc, ld.lld, llvm-readelf, FileCheck if

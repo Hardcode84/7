@@ -1,95 +1,63 @@
 // REQUIRES: host-supports-amdgpu
-// XFAIL: *
-// FIXME: This e2e test passes a memref directly to wave.store, which the
-// Wave dialect intentionally does not support (wave.store takes only
-// `!wave.ptr` / `!wave.simd<!wave.ptr>`). Re-author once a memref ->
-// !wave.ptr bridge exists, or drop the test in favour of a hipcc-based
-// e2e path along the lines of Target/Wave/wavemachine-buffer-hw.mlir.
+//
+// Kernel side: wave dialect -> AMDGPU asm -> object -> HSACO.
+// RUN: wave-translate --wave-to-amdgpu-asm %S/Inputs/wave_kernel.mlir \
+// RUN:   | llvm-mc -triple=amdgcn-amd-amdhsa -mcpu=%chip -filetype=obj -o %t.o
+// RUN: ld.lld -shared %t.o -o %t.hsaco
+//
+// Host side: replace the stub `gpu.binary` with the freshly built HSACO,
+// lower to LLVM, and run with the GPU runtime + our `memref_to_wave_ptr`
+// shim.
 // RUN: wave-opt %s \
-// RUN: | wave-opt -convert-wave-to-rocdl -convert-scf-to-cf \
-// RUN: | wave-opt -gpu-kernel-outlining \
-// RUN: | wave-opt -pass-pipeline='builtin.module(gpu.module(strip-debuginfo,convert-gpu-to-rocdl{use-bare-ptr-memref-call-conv=true}),rocdl-attach-target{chip=%chip})' \
-// RUN: | wave-opt -gpu-to-llvm=use-bare-pointers-for-kernels=true -reconcile-unrealized-casts -gpu-module-to-binary \
-// RUN: | mlir-runner \
-// RUN:   --shared-libs=%mlir_rocm_runtime \
-// RUN:   --shared-libs=%mlir_runner_utils \
-// RUN:   --entry-point-result=void \
-// RUN: | FileCheck %s
+// RUN:   --wave-attach-gpu-binary='path=%t.hsaco symbol=kernels chip=%chip' \
+// RUN:   --convert-scf-to-cf \
+// RUN:   --gpu-to-llvm=use-bare-pointers-for-kernels=true \
+// RUN:   --convert-to-llvm \
+// RUN:   --reconcile-unrealized-casts \
+// RUN:   | mlir-runner \
+// RUN:       --shared-libs=%mlir_rocm_runtime \
+// RUN:       --shared-libs=%mlir_runner_utils \
+// RUN:       --shared-libs=%wave_runtime \
+// RUN:       --entry-point-result=void \
+// RUN:   | FileCheck %s
 
-func.func @write_lane_ids(%dst : memref<32xi32>) {
-  %c1 = arith.constant 1 : index
-  %c32 = arith.constant 32 : index
-  gpu.launch blocks(%bx, %by, %bz) in (%grid_x = %c1, %grid_y = %c1, %grid_z = %c1)
-             threads(%tx, %ty, %tz) in (%block_x = %c32, %block_y = %c1, %block_z = %c1) {
-    %lane = wave.lane_id : !wave.simd<i32, 32>
-    wave.store %lane -> %dst[%tx] : (!wave.simd<i32, 32>, memref<32xi32>, index) -> ()
-    gpu.terminator
-  }
-  return
-}
+module attributes {gpu.container_module} {
 
-func.func @write_masked_values(%dst : memref<32xi32>) {
-  %c1 = arith.constant 1 : index
-  %c32 = arith.constant 32 : index
-  %c8_i32 = arith.constant 8 : i32
-  %c100_i32 = arith.constant 100 : i32
-  gpu.launch blocks(%bx, %by, %bz) in (%grid_x = %c1, %grid_y = %c1, %grid_z = %c1)
-             threads(%tx, %ty, %tz) in (%block_x = %c32, %block_y = %c1, %block_z = %c1) {
-    %lane = wave.lane_id : !wave.simd<i32, 32>
-    %limit = wave.splat %c8_i32 : i32 -> !wave.simd<i32, 32>
-    %base = wave.splat %c100_i32 : i32 -> !wave.simd<i32, 32>
-    %active = wave.cmpi ult %lane, %limit : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.mask<32>
-    %value = wave.binary "addi" %lane, %base : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
-    wave.where %active {
-      wave.store %value -> %dst[%tx] : (!wave.simd<i32, 32>, memref<32xi32>, index) -> ()
-      wave.yield
-    } : !wave.mask<32>
-    gpu.terminator
-  }
-  return
-}
+// Stub: `gpu.launch_func` verifies against a same-named container at parse
+// time, so we declare an empty `gpu.binary` and let `wave-attach-gpu-binary`
+// rewrite its `objects` attr with the real HSACO bytes.
+gpu.binary @kernels [#gpu.object<#rocdl.target<chip = "gfx1100">, bin = "">]
 
-// CHECK: [0, 1, 2, 3, 4, 5, 6, 7
-// CHECK-SAME: 8, 9, 10, 11, 12, 13, 14, 15
-// CHECK-SAME: 16, 17, 18, 19, 20, 21, 22, 23
-// CHECK-SAME: 24, 25, 26, 27, 28, 29, 30, 31]
-// CHECK: [100, 101, 102, 103, 104, 105, 106, 107
-// CHECK-SAME: 0, 0, 0, 0, 0, 0, 0, 0
-// CHECK-SAME: 0, 0, 0, 0, 0, 0, 0, 0
-// CHECK-SAME: 0, 0, 0, 0, 0, 0, 0, 0]
+func.func private @wave_memref_to_ptr_global_i32(memref<32xi32>)
+    -> !wave.ptr<i32, #wave.global> attributes {llvm.emit_c_interface}
+
+func.func private @printMemrefI32(memref<*xi32>)
+    attributes {llvm.emit_c_interface}
+
+// CHECK: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31]
 func.func @main() {
   %c0 = arith.constant 0 : index
   %c1 = arith.constant 1 : index
   %c32 = arith.constant 32 : index
   %zero = arith.constant 0 : i32
 
-  %laneStorage = memref.alloc() : memref<32xi32>
-  %maskedStorage = memref.alloc() : memref<32xi32>
-  %lanes = memref.cast %laneStorage : memref<32xi32> to memref<?xi32>
-  %masked = memref.cast %maskedStorage : memref<32xi32> to memref<?xi32>
-
+  %storage = memref.alloc() : memref<32xi32>
   scf.for %i = %c0 to %c32 step %c1 {
-    memref.store %zero, %lanes[%i] : memref<?xi32>
-    memref.store %zero, %masked[%i] : memref<?xi32>
+    memref.store %zero, %storage[%i] : memref<32xi32>
   }
 
-  %lanesUnranked = memref.cast %lanes : memref<?xi32> to memref<*xi32>
-  %maskedUnranked = memref.cast %masked : memref<?xi32> to memref<*xi32>
-  gpu.host_register %lanesUnranked : memref<*xi32>
-  gpu.host_register %maskedUnranked : memref<*xi32>
+  %unranked = memref.cast %storage : memref<32xi32> to memref<*xi32>
+  gpu.host_register %unranked : memref<*xi32>
 
-  %lanesDevice = call @mgpuMemGetDeviceMemRef1dInt32(%lanes) : (memref<?xi32>) -> (memref<?xi32>)
-  %maskedDevice = call @mgpuMemGetDeviceMemRef1dInt32(%masked) : (memref<?xi32>) -> (memref<?xi32>)
-  %lanesDeviceStatic = memref.cast %lanesDevice : memref<?xi32> to memref<32xi32>
-  %maskedDeviceStatic = memref.cast %maskedDevice : memref<?xi32> to memref<32xi32>
+  %p = func.call @wave_memref_to_ptr_global_i32(%storage)
+      : (memref<32xi32>) -> !wave.ptr<i32, #wave.global>
 
-  call @write_lane_ids(%lanesDeviceStatic) : (memref<32xi32>) -> ()
-  call @write_masked_values(%maskedDeviceStatic) : (memref<32xi32>) -> ()
+  gpu.launch_func @kernels::@write_lane_ids
+      blocks in (%c1, %c1, %c1) threads in (%c32, %c1, %c1)
+      args(%p : !wave.ptr<i32, #wave.global>)
 
-  call @printMemrefI32(%lanesUnranked) : (memref<*xi32>) -> ()
-  call @printMemrefI32(%maskedUnranked) : (memref<*xi32>) -> ()
+  func.call @printMemrefI32(%unranked) : (memref<*xi32>) -> ()
   return
 }
 
-func.func private @mgpuMemGetDeviceMemRef1dInt32(%ptr : memref<?xi32>) -> (memref<?xi32>)
-func.func private @printMemrefI32(%ptr : memref<*xi32>)
+}
