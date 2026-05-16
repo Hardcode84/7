@@ -1,8 +1,9 @@
-// RUN: mlir-opt %s \
-// RUN: | mlir-opt -convert-wave-to-rocdl -convert-scf-to-cf \
-// RUN: | mlir-opt -gpu-kernel-outlining \
-// RUN: | mlir-opt -pass-pipeline='builtin.module(gpu.module(strip-debuginfo,convert-gpu-to-rocdl{use-bare-ptr-memref-call-conv=true}),rocdl-attach-target{chip=%chip})' \
-// RUN: | mlir-opt -gpu-to-llvm=use-bare-pointers-for-kernels=true -reconcile-unrealized-casts -gpu-module-to-binary \
+// REQUIRES: host-supports-amdgpu
+// RUN: wave-opt %s \
+// RUN: | wave-opt -convert-wave-to-rocdl -convert-scf-to-cf \
+// RUN: | wave-opt -gpu-kernel-outlining \
+// RUN: | wave-opt -pass-pipeline='builtin.module(gpu.module(strip-debuginfo,convert-gpu-to-rocdl{use-bare-ptr-memref-call-conv=true}),rocdl-attach-target{chip=%chip})' \
+// RUN: | wave-opt -gpu-to-llvm=use-bare-pointers-for-kernels=true -reconcile-unrealized-casts -gpu-module-to-binary \
 // RUN: | mlir-runner \
 // RUN:   --shared-libs=%mlir_rocm_runtime \
 // RUN:   --shared-libs=%mlir_runner_utils \

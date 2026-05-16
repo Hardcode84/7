@@ -76,3 +76,5 @@ set(LLVM_BINARY_DIR "${WAVE_LLVM_PROJECT_BUILD_DIR}")
 
 add_subdirectory(include)
 add_subdirectory(lib)
+add_subdirectory(tools)
+add_subdirectory(test)

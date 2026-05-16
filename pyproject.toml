@@ -24,6 +24,11 @@ target-version = "py312"
 [tool.ruff.lint]
 select = ["B", "C4", "E", "F", "I", "PIE", "PTH", "RET", "RUF", "SIM", "UP"]
 
+[tool.ruff.lint.per-file-ignores]
+# lit injects `config` and `lit_config` into the module namespace before
+# evaluating the file; they aren't importable names.
+"test/lit.cfg.py" = ["F821"]
+
 [tool.mypy]
 python_version = "3.12"
 strict = true

@@ -34,6 +34,7 @@ path = [
     "**/*.md",
     "**/*.toml",
     "**/*.json",
+    "**/*.in",
     "LICENSE.TXT",
     "llvm-commit.txt",
 ]

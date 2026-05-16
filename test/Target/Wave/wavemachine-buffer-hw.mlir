@@ -1,5 +1,5 @@
 // REQUIRES: host-supports-amdgpu
-// RUN: mlir-translate --wave-to-amdgpu-asm %s | llvm-mc -triple=amdgcn-amd-amdhsa -mcpu=gfx1100 -filetype=obj -o %t.o
+// RUN: wave-translate --wave-to-amdgpu-asm %s | llvm-mc -triple=amdgcn-amd-amdhsa -mcpu=gfx1100 -filetype=obj -o %t.o
 // RUN: ld.lld -shared %t.o -o %t.hsaco
 // RUN: /opt/rocm/bin/hipcc %S/wave_buffer_runner.cpp -o %t.runner
 // RUN: env LD_LIBRARY_PATH=/opt/rocm/lib %t.runner %t.hsaco | FileCheck %s --check-prefix=HW

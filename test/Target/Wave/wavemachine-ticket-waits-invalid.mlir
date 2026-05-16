@@ -1,4 +1,4 @@
-// RUN: mlir-opt --waveamd-insert-ticket-waits -split-input-file -verify-diagnostics %s
+// RUN: wave-opt --waveamd-insert-ticket-waits -split-input-file -verify-diagnostics %s
 
 module attributes {wavemachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 

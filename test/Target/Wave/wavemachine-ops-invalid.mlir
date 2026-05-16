@@ -1,4 +1,4 @@
-// RUN: mlir-opt -split-input-file -verify-diagnostics %s
+// RUN: wave-opt -split-input-file -verify-diagnostics %s
 
 func.func @bad_v_add_operand_count(%x: !wavemachine.reg<vgpr, 1>) {
   // expected-error @below {{'wavemachine.v_add_u32' op expected 2 operands}}

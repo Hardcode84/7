@@ -1,4 +1,4 @@
-// RUN: mlir-opt --waveamd-abi-lowering -split-input-file -verify-diagnostics %s
+// RUN: wave-opt --waveamd-abi-lowering -split-input-file -verify-diagnostics %s
 
 func.func @missing_pointer_attr() attributes {wave.kernel} {
   // expected-error @below {{'wavemachine.arg' op requires attribute 'pointer'}}

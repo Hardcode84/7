@@ -1,4 +1,4 @@
-// RUN: mlir-opt %s | FileCheck %s
+// RUN: wave-opt %s | FileCheck %s
 
 // CHECK-LABEL: func.func @address_spaces
 // CHECK-SAME: !wave.ptr<i32, #wave.global>

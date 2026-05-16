@@ -1,4 +1,4 @@
-// RUN: mlir-opt %s -convert-wave-to-gpu | FileCheck %s
+// RUN: wave-opt %s -convert-wave-to-gpu -allow-unregistered-dialect | FileCheck %s
 
 // CHECK-LABEL: func.func @lower_to_gpu
 func.func @lower_to_gpu(%pred: i1, %value: i32, %out: memref<i32>) -> i32 {
@@ -19,7 +19,7 @@ func.func @lower_to_gpu(%pred: i1, %value: i32, %out: memref<i32>) -> i32 {
   // CHECK: gpu.subgroup_broadcast {{.*}}, first_active_lane : i32
   %first = wave.read_first %sum : !wave.simd<i32, 32> -> i32
   // CHECK: memref.store
-  wave.store %sum -> %out[] : (!wave.simd<i32, 32>, memref<i32>) -> ()
+  %tok = wave.store %sum -> %out : (!wave.simd<i32, 32>, memref<i32>) -> !wave.mem.token
 
   // CHECK: scf.if {{.*}} {
   wave.where %laneMask {

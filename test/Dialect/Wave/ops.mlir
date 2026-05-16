@@ -1,5 +1,5 @@
-// RUN: mlir-opt %s | FileCheck %s
-// RUN: mlir-opt %s | mlir-opt | FileCheck %s
+// RUN: wave-opt %s | FileCheck %s
+// RUN: wave-opt %s | wave-opt | FileCheck %s
 
 // CHECK-LABEL: func.func @wave_ops
 func.func @wave_ops(%pred: i1, %value: i32, %out: memref<i32>) -> i32 {
@@ -20,7 +20,7 @@ func.func @wave_ops(%pred: i1, %value: i32, %out: memref<i32>) -> i32 {
   // CHECK: wave.read_first {{.*}} : !wave.simd<i32, 32> -> i32
   %first = wave.read_first %sum : !wave.simd<i32, 32> -> i32
   // CHECK: wave.store
-  wave.store %sum -> %out[] : (!wave.simd<i32, 32>, memref<i32>) -> ()
+  %tok = wave.store %sum -> %out : (!wave.simd<i32, 32>, memref<i32>) -> !wave.mem.token
 
   // CHECK: wave.where
   wave.where %mask {

@@ -1,4 +1,4 @@
-// RUN: mlir-opt --waveamd-reg-alloc -split-input-file -verify-diagnostics %s
+// RUN: wave-opt --waveamd-reg-alloc -split-input-file -verify-diagnostics %s
 
 module attributes {wavemachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 

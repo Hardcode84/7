@@ -1,4 +1,4 @@
-// RUN: mlir-opt -split-input-file -verify-diagnostics %s
+// RUN: wave-opt -split-input-file -verify-diagnostics %s
 
 func.func @bad_fill_source(%x: i16) {
   // expected-error @below {{source must be an i32 bit pattern}}

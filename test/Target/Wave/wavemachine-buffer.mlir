@@ -1,7 +1,7 @@
-// RUN: mlir-opt --waveamd-to-wavemachine %s | FileCheck %s --check-prefix=SELECT
-// RUN: mlir-opt --waveamd-to-wavemachine --waveamd-abi-lowering --waveamd-reg-alloc %s | FileCheck %s --check-prefix=PIPELINE
-// RUN: mlir-translate --wave-to-amdgpu-asm %s | FileCheck %s --check-prefix=ASM
-// RUN: mlir-translate --wave-to-amdgpu-asm %s | llvm-mc -triple=amdgcn-amd-amdhsa -mcpu=gfx1100 -filetype=obj -o /dev/null
+// RUN: wave-opt --waveamd-to-wavemachine %s | FileCheck %s --check-prefix=SELECT
+// RUN: wave-opt --waveamd-to-wavemachine --waveamd-abi-lowering --waveamd-reg-alloc %s | FileCheck %s --check-prefix=PIPELINE
+// RUN: wave-translate --wave-to-amdgpu-asm %s | FileCheck %s --check-prefix=ASM
+// RUN: wave-translate --wave-to-amdgpu-asm %s | llvm-mc -triple=amdgcn-amd-amdhsa -mcpu=gfx1100 -filetype=obj -o /dev/null
 
 module attributes {wavemachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
