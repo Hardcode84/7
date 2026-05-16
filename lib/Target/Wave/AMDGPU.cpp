@@ -110,7 +110,7 @@ private:
     mcii.reset(target->createMCInstrInfo());
     sti.reset(target->createMCSubtargetInfo(triple, "gfx1100", ""));
     mcContext = std::make_unique<llvm::MCContext>(
-        triple, *mai, mri.get(), sti.get());
+        triple, *mai, *mri, *sti);
     unsigned asmVariant = mai->getOutputAssemblerDialect();
     instPrinter.reset(target->createMCInstPrinter(triple, asmVariant, *mai,
                                                  *mcii, *mri));
