@@ -86,7 +86,7 @@ _RUNTIME_HELPER = "wave_memref_to_ptr_global_i32"
 _PRINT_HELPER = "printMemrefI32"
 
 
-def _emit_kernel(builder: dsl.FunctionBuilder, cfg: _MatmulConfig) -> None:
+def _emit_kernel(bld: dsl.FunctionBuilder, cfg: _MatmulConfig) -> None:
     """Populate the tiled matmul kernel body.
 
     Each wave owns one 16x16 output tile. The kernel computes:
@@ -100,63 +100,63 @@ def _emit_kernel(builder: dsl.FunctionBuilder, cfg: _MatmulConfig) -> None:
     ``waveamd.mma`` whose A/B operands come from ``waveamd.fragment_fill``
     of an all-ones i8 vector, so the per-element output is exactly ``K``.
     """
-    ones_i8x4 = builder.constant_i32(0x01010101)
-    acc_init = builder.constant_i32(0)
-    neg32 = builder.constant_i32(-32)
-    c3 = builder.constant_i32(3)
-    wg_shift = builder.constant_i32(cfg.log2_workgroup_i32_stride)
+    ones_i8x4 = bld.constant_i32(0x01010101)
+    acc_init = bld.constant_i32(0)
+    neg32 = bld.constant_i32(-32)
+    c3 = bld.constant_i32(3)
+    wg_shift = bld.constant_i32(cfg.log2_workgroup_i32_stride)
 
-    wi = builder.workitem_id(axis=0)
-    vneg32 = builder.splat(neg32)
-    wave_base = builder.binary("andi", wi, vneg32)
-    v3 = builder.splat(c3)
-    wave_off = builder.binary("shli", wave_base, v3)
+    wi = bld.workitem_id(axis=0)
+    vneg32 = bld.splat(neg32)
+    wave_base = bld.binary("andi", wi, vneg32)
+    v3 = bld.splat(c3)
+    wave_off = bld.binary("shli", wave_base, v3)
 
-    wg = builder.workgroup_id(axis=0)
-    vwg = builder.splat(wg)
-    vshift = builder.splat(wg_shift)
-    wg_off = builder.binary("shli", vwg, vshift)
+    wg = bld.workgroup_id(axis=0)
+    vwg = bld.splat(wg)
+    vshift = bld.splat(wg_shift)
+    wg_off = bld.binary("shli", vwg, vshift)
 
-    total = builder.binary("addi", wg_off, wave_off)
-    ptr = builder.ptr_add(builder.args[0], total)
+    total = bld.binary("addi", wg_off, wave_off)
+    ptr = bld.ptr_add(bld.args[0], total)
 
     a_type = dsl.fragment_type(0, dsl.i8(), 16, 16, 32, 4)
     b_type = dsl.fragment_type(1, dsl.i8(), 16, 16, 32, 4)
     acc_type = dsl.fragment_type(2, dsl.i32(), 16, 16, 32, 8)
 
-    acc = builder.fragment_fill(acc_init, acc_type)
+    acc = bld.fragment_fill(acc_init, acc_type)
     for _ in range(cfg.k_steps):
-        a = builder.fragment_fill(ones_i8x4, a_type)
-        b = builder.fragment_fill(ones_i8x4, b_type)
-        acc = builder.mma("wmma.i32.16x16x16.iu8", a, b, acc)
+        a = bld.fragment_fill(ones_i8x4, a_type)
+        b = bld.fragment_fill(ones_i8x4, b_type)
+        acc = bld.mma("wmma.i32.16x16x16.iu8", a, b, acc)
 
-    builder.fragment_store(acc, ptr)
+    bld.fragment_store(acc, ptr)
 
 
-def _emit_host(builder: dsl.FunctionBuilder, cfg: _MatmulConfig) -> None:
+def _emit_host(bld: dsl.FunctionBuilder, cfg: _MatmulConfig) -> None:
     """Populate the host ``main`` that allocates, launches, and prints."""
-    c0 = builder.constant_index(0)
-    c1 = builder.constant_index(1)
-    blocks = builder.constant_index(cfg.num_workgroups)
-    threads = builder.constant_index(cfg.threads_per_workgroup)
-    ctotal = builder.constant_index(cfg.total_elements)
-    zero = builder.constant_i32(0)
+    c0 = bld.constant_index(0)
+    c1 = bld.constant_index(1)
+    blocks = bld.constant_index(cfg.num_workgroups)
+    threads = bld.constant_index(cfg.threads_per_workgroup)
+    ctotal = bld.constant_index(cfg.total_elements)
+    zero = bld.constant_i32(0)
 
-    storage = builder.alloc([cfg.total_elements], dsl.i32())
-    with builder.for_loop(c0, ctotal, c1) as i:
-        builder.memref_store(zero, storage, [i])
-    unranked = builder.cast_unranked(storage)
-    builder.host_register(unranked)
+    storage = bld.alloc([cfg.total_elements], dsl.i32())
+    with bld.for_loop(c0, ctotal, c1) as i:
+        bld.memref_store(zero, storage, [i])
+    unranked = bld.cast_unranked(storage)
+    bld.host_register(unranked)
 
-    [ptr] = builder.call(_RUNTIME_HELPER, [storage], [dsl.ptr_type()])
-    builder.launch(
+    [ptr] = bld.call(_RUNTIME_HELPER, [storage], [dsl.ptr_type()])
+    bld.launch(
         _GPU_MODULE_NAME,
         _KERNEL_NAME,
         grid=(blocks, c1, c1),
         block=(threads, c1, c1),
         operands=[ptr],
     )
-    builder.call(_PRINT_HELPER, [unranked])
+    bld.call(_PRINT_HELPER, [unranked])
 
 
 def build_wmma_iu8_matmul_module(
@@ -179,34 +179,34 @@ def build_wmma_iu8_matmul_module(
 
     Note: the returned :class:`Module` is bound to a fresh MLIR
     :class:`Context` owned by the temporary :class:`ModuleBuilder`. The
-    builder's ``__exit__`` releases all thread-local handles before
-    returning, so callers can keep using the module (e.g. printing,
-    pass-managing) without further setup.
+    ``__exit__`` releases all thread-local handles before returning, so
+    callers can keep using the module (e.g. printing, pass-managing)
+    without further setup.
     """
     cfg = _MatmulConfig(M=M, N=N, K=K, BM=BM, BN=BN)
-    builder = dsl.ModuleBuilder()
-    with builder:
-        builder.declare_external(
+    bld = dsl.ModuleBuilder()
+    with bld:
+        bld.declare_external(
             _RUNTIME_HELPER,
             [dsl.MemRefType.get([cfg.total_elements], dsl.i32())],
             [dsl.ptr_type()],
         )
-        builder.declare_external(
+        bld.declare_external(
             _PRINT_HELPER,
             [dsl.unranked_memref_type(dsl.i32())],
             [],
         )
 
         with (
-            builder.gpu_module(_GPU_MODULE_NAME) as gmod,
+            bld.gpu_module(_GPU_MODULE_NAME) as gmod,
             gmod.kernel(_KERNEL_NAME, [dsl.ptr_type()]) as fb,
         ):
             _emit_kernel(fb, cfg)
 
-        with builder.host_main() as fb:
+        with bld.host_main() as fb:
             _emit_host(fb, cfg)
 
-    return builder.module
+    return bld.module
 
 
 __all__ = ["build_wmma_iu8_matmul_module"]

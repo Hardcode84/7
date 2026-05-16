@@ -15,15 +15,15 @@ Usage::
 
     from mlir.dialects import wave_dsl as dsl
 
-    with dsl.module() as builder:
-        with builder.gpu_module("kernels"):
-            with builder.kernel("k", [dsl.ptr_type()]):
+    with dsl.module() as bld:
+        with bld.gpu_module("kernels"):
+            with bld.kernel("k", [dsl.ptr_type()]):
                 ...
 
-        with builder.host_main():
+        with bld.host_main():
             ...
 
-    print(str(builder.module))
+    print(str(bld.module))
 """
 
 from __future__ import annotations
