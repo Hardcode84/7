@@ -17,6 +17,28 @@ python/              # Python bindings + tracing DSL
 test/                # FileCheck and integration tests
 ```
 
+## Building
+
+LLVM/MLIR is pulled at the commit pinned in `llvm-commit.txt`. There is no
+submodule; the dep is fetched and built by a helper script.
+
+```bash
+# Fetch + build LLVM/MLIR into build/llvm-install (one-off, slow).
+python build_tools/build_llvm.py -j$(nproc)
+
+# Configure and build the dialect.
+cmake -S . -B build -G Ninja
+cmake --build build
+```
+
+Environment overrides (skip the bootstrap when you already have LLVM):
+
+| Variable | Meaning |
+|---|---|
+| `LLVM_INSTALL_DIR` | path to an existing LLVM install (`lib/cmake/{llvm,mlir}`) |
+| `LLVM_PROJECT_SOURCE_DIR` | existing `llvm-project` source checkout (will be built) |
+| `LLVM_COMMIT` | override the pinned commit |
+
 ## Development
 
 Pre-commit covers formatting and licensing checks:

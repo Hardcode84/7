@@ -39,3 +39,9 @@ path = "LICENSE.TXT"
 precedence = "override"
 SPDX-FileCopyrightText = "2026 wave-mlir contributors"
 SPDX-License-Identifier = "Apache-2.0 WITH LLVM-exception"
+
+[[annotations]]
+path = "llvm-commit.txt"
+precedence = "override"
+SPDX-FileCopyrightText = "2026 wave-mlir contributors"
+SPDX-License-Identifier = "Apache-2.0 WITH LLVM-exception"
