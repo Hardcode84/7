@@ -1,0 +1,18 @@
+# SPDX-FileCopyrightText: 2026 wave-mlir contributors
+#
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+
+# Lizard complexity / length whitelist.
+#
+# Format: <relative_path>:<function_name>, one entry per line.
+# C++ qualifiers are written as-is (Class::method, ns::ns::func).
+# Multiple overloads of the same name share one entry.
+# Blank lines and lines starting with "#" are ignored.
+#
+# Every entry below names a function that exceeds the limits set in
+# .pre-commit-config.yaml (CCN > 10 or length > 100 lines). This file is
+# the regression baseline: new C/C++ code must respect the limits.
+#
+# Goal: keep this file empty. To close out a function, refactor it under
+# the thresholds and delete its line. Adding a new entry should be
+# accompanied by an explicit justification in the commit message.

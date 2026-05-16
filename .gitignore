@@ -1,0 +1,22 @@
+# Build / install
+build/
+build-*/
+install/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+
+# Tool caches
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
+# IDE
+.vscode/
+.idea/
+
+# Compile-commands
+compile_commands.json

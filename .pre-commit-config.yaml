@@ -1,0 +1,65 @@
+default_language_version:
+  python: python3.12
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: check-added-large-files
+      - id: check-merge-conflict
+      - id: check-toml
+      - id: check-yaml
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+
+  - repo: https://github.com/pre-commit/mirrors-clang-format
+    rev: v22.1.3
+    hooks:
+      - id: clang-format
+        types_or: [c, c++]
+
+  - repo: https://github.com/Hardcode84/3
+    rev: b9e06135de091a05e60831c40b3b1edb8cf39088
+    hooks:
+      - id: sort-cmake-lists
+
+  - repo: https://github.com/Hardcode84/6
+    rev: 030626f25acb8a963c0ecd49a66684e860c4e14a
+    hooks:
+      - id: tgenfmt
+        name: Run tgenfmt on TableGen files
+
+  - repo: https://github.com/psf/black
+    rev: 26.3.1
+    hooks:
+      - id: black
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.15.11
+    hooks:
+      - id: ruff
+        args: [--fix, --exit-non-zero-on-fix]
+
+  # TODO: re-enable once the Python tree lands.
+  # - repo: https://github.com/pre-commit/mirrors-mypy
+  #   rev: v1.20.1
+  #   hooks:
+  #     - id: mypy
+  #       args: [--config-file=pyproject.toml]
+  #       additional_dependencies: [numpy]
+  #       pass_filenames: false
+
+  - repo: https://github.com/fsfe/reuse-tool
+    rev: v6.2.0
+    hooks:
+      - id: reuse
+
+  - repo: local
+    hooks:
+      - id: lizard
+        name: lizard
+        entry: lizard
+        language: python
+        additional_dependencies: [lizard==1.21.6]
+        types_or: [python, c, c++]
+        args: [-l, python, -l, cpp, -C, "10", -L, "100", -W, whitelizard.txt]
