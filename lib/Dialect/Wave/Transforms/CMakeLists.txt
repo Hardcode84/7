@@ -4,6 +4,7 @@ add_mlir_dialect_library(MLIRWaveTransforms
   WaveAMDMetadata.cpp
   WaveAMDRegAlloc.cpp
   WaveAMDResourceInfo.cpp
+  WaveAttachGPUBinary.cpp
   WaveMachine.cpp
   WaveMachineWaitcnt.cpp
   WaveToROCDL.cpp

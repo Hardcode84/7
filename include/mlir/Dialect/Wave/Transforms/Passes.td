@@ -112,4 +112,38 @@ def WaveAMDMetadata
   ];
 }
 
+def WaveAttachGPUBinary
+    : Pass<"wave-attach-gpu-binary", "ModuleOp"> {
+  let summary = "Embed a pre-compiled GPU binary as a `gpu.binary` op";
+  let description = [{
+    Reads a pre-compiled GPU binary (e.g. a HSACO produced by
+    `wave-translate` + `llvm-mc` + `ld.lld`) and emits a top-level
+    `gpu.binary @<symbol>` op carrying it as a `#gpu.object<..., bin = "...">`
+    attribute. Use this pass to splice externally compiled kernels into a
+    host MLIR module ahead of `gpu.launch_func` lowering, without going
+    through the in-tree `gpu-module-to-binary` path.
+
+    The pass takes the binary file path, the symbol name to mint, and the
+    AMDGPU chip / target triple needed to construct the `#rocdl.target`
+    attribute.
+  }];
+
+  let dependentDialects = [
+    "gpu::GPUDialect",
+    "ROCDL::ROCDLDialect"
+  ];
+
+  let options = [
+    Option<"path", "path", "std::string", /*default=*/"\"\"",
+           "Path to the pre-compiled GPU binary (e.g. HSACO).">,
+    Option<"symbol", "symbol", "std::string", /*default=*/"\"wave_kernels\"",
+           "Symbol name for the emitted `gpu.binary` op.">,
+    Option<"chip", "chip", "std::string", /*default=*/"\"gfx1100\"",
+           "AMDGPU chip identifier (e.g. gfx1100) for the `#rocdl.target`.">,
+    Option<"triple", "triple", "std::string",
+           /*default=*/"\"amdgcn-amd-amdhsa\"",
+           "Target triple for the `#rocdl.target` attribute.">
+  ];
+}
+
 #endif // MLIR_DIALECT_WAVE_TRANSFORMS_PASSES_TD
