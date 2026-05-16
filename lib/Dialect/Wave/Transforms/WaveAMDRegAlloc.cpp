@@ -137,8 +137,7 @@ struct WaveAMDRegAllocPass
                                "and VGPR register classes");
         if (regType.getIndex() >= 0)
           continue;
-        SmallVector<LiveInterval> &bucket =
-            isSGPR(regType) ? sgprs : vgprs;
+        SmallVector<LiveInterval> &bucket = isSGPR(regType) ? sgprs : vgprs;
         unsigned index = bucket.size();
         bucket.push_back(LiveInterval{op, positions[op], positions[op]});
         if (isSGPR(regType))
@@ -169,12 +168,12 @@ struct WaveAMDRegAllocPass
   LogicalResult allocateClass(func::FuncOp func,
                               MutableArrayRef<LiveInterval> intervals,
                               unsigned numPhys, unsigned reserved) {
-    llvm::stable_sort(intervals, [](const LiveInterval &lhs,
-                                   const LiveInterval &rhs) {
-      if (lhs.start != rhs.start)
-        return lhs.start < rhs.start;
-      return lhs.def->isBeforeInBlock(rhs.def);
-    });
+    llvm::stable_sort(intervals,
+                      [](const LiveInterval &lhs, const LiveInterval &rhs) {
+                        if (lhs.start != rhs.start)
+                          return lhs.start < rhs.start;
+                        return lhs.def->isBeforeInBlock(rhs.def);
+                      });
 
     SmallVector<LiveInterval> active;
     SmallVector<bool> used(numPhys, false);
@@ -201,11 +200,13 @@ struct WaveAMDRegAllocPass
     for (LiveInterval interval : intervals) {
       expireOld(interval.start);
       unsigned width =
-          cast<wavemachine::RegType>(interval.def->getResult(0).getType()).getWidth();
+          cast<wavemachine::RegType>(interval.def->getResult(0).getType())
+              .getWidth();
       std::optional<unsigned> phys =
           findFreeContiguous(used, width, /*align=*/width);
       if (!phys)
-        return func.emitError("WaveMachine register allocator ran out of registers");
+        return func.emitError(
+            "WaveMachine register allocator ran out of registers");
       auto oldType =
           cast<wavemachine::RegType>(interval.def->getResult(0).getType());
       interval.def->getResult(0).setType(wavemachine::RegType::get(
@@ -221,9 +222,8 @@ struct WaveAMDRegAllocPass
     return success();
   }
 
-  static std::optional<unsigned> findFreeContiguous(ArrayRef<bool> used,
-                                                    unsigned width,
-                                                    unsigned align) {
+  static std::optional<unsigned>
+  findFreeContiguous(ArrayRef<bool> used, unsigned width, unsigned align) {
     for (unsigned i = 0, e = used.size(); i + width <= e; ++i) {
       if (i % align)
         continue;

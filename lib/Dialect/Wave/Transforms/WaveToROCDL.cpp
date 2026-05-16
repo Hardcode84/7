@@ -159,9 +159,8 @@ struct CmpILowering : OpRewritePattern<CmpIOp> {
     if (isa<SimdType>(op.getLhs().getType()) ||
         isa<SimdType>(op.getRhs().getType()))
       return failure();
-    Value result = arith::CmpIOp::create(rewriter, op.getLoc(),
-                                         op.getPredicate(), op.getLhs(),
-                                         op.getRhs());
+    Value result = arith::CmpIOp::create(
+        rewriter, op.getLoc(), op.getPredicate(), op.getLhs(), op.getRhs());
     rewriter.replaceOp(op, result);
     return success();
   }
@@ -174,8 +173,8 @@ struct ReadFirstLowering : OpRewritePattern<ReadFirstOp> {
                                 PatternRewriter &rewriter) const override {
     if (isa<SimdType>(op.getSource().getType()))
       return failure();
-    rewriter.replaceOpWithNewOp<ROCDL::ReadfirstlaneOp>(
-        op, op.getType(), op.getSource());
+    rewriter.replaceOpWithNewOp<ROCDL::ReadfirstlaneOp>(op, op.getType(),
+                                                        op.getSource());
     return success();
   }
 };
@@ -235,11 +234,10 @@ struct ConvertWaveToROCDLPass
       return signalPassFailure();
 
     RewritePatternSet boundaryPatterns(&getContext());
-    boundaryPatterns
-        .add<BallotLowering, ReadFirstLowering, WhereLowering>(
-            &getContext());
-    if (failed(applyPatternsGreedily(getOperation(),
-                                     std::move(boundaryPatterns))))
+    boundaryPatterns.add<BallotLowering, ReadFirstLowering, WhereLowering>(
+        &getContext());
+    if (failed(
+            applyPatternsGreedily(getOperation(), std::move(boundaryPatterns))))
       signalPassFailure();
   }
 };

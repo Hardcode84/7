@@ -65,10 +65,9 @@ def test_waveamd_buffer_pointer_type():
             range_bytes = f.constant_i32(128)
             buffer = f.make_buffer(out, range_bytes, w.buffer_ptr_type(w.i32()))
             lane = f.lane_id()
-            ptrs = f.ptr_add(buffer, lane, w.simd_type(w.buffer_ptr_type(w.i32())))
+            f.ptr_add(buffer, lane, w.simd_type(w.buffer_ptr_type(w.i32())))
         # CHECK: func.func @buffer_ptr_kernel
         # CHECK: waveamd.make_buffer
         # CHECK: !wave.ptr<i32, #waveamd.buffer>
         # CHECK: !wave.simd<!wave.ptr<i32, #waveamd.buffer>, 32>
         print(m.module)
-

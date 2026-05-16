@@ -40,7 +40,8 @@ struct WaveAMDResourceInfoPass
       for (Operation &op : func.getBody().front()) {
         if (op.getNumResults() == 0)
           continue;
-        auto regType = dyn_cast<wavemachine::RegType>(op.getResult(0).getType());
+        auto regType =
+            dyn_cast<wavemachine::RegType>(op.getResult(0).getType());
         if (!regType)
           continue;
         int64_t index = regType.getIndex();
@@ -56,7 +57,8 @@ struct WaveAMDResourceInfoPass
           maxVGPR = std::max(maxVGPR, end);
       }
       func->setAttr("wavemachine.sgpr_count",
-                    builder.getI64IntegerAttr(std::max(maxSGPR, func->hasAttr("wave.kernel") ? 6u : 1u)));
+                    builder.getI64IntegerAttr(std::max(
+                        maxSGPR, func->hasAttr("wave.kernel") ? 6u : 1u)));
       func->setAttr("wavemachine.vgpr_count",
                     builder.getI64IntegerAttr(std::max(maxVGPR, 1u)));
     }

@@ -9,6 +9,7 @@
 #include "mlir/Target/Wave/AMDGPU.h"
 
 #include "MCTargetDesc/AMDGPUMCTargetDesc.h"
+#include "lld/Common/Driver.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Wave/IR/Wave.h"
 #include "mlir/Dialect/Wave/IR/WaveAMD.h"
@@ -19,7 +20,6 @@
 #include "mlir/IR/Diagnostics.h"
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Target/LLVM/ROCDL/Utils.h"
-#include "lld/Common/Driver.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Config/Targets.h"
@@ -112,7 +112,8 @@ private:
     });
     llvm::Triple triple("amdgcn-amd-amdhsa");
     std::string error;
-    const llvm::Target *target = llvm::TargetRegistry::lookupTarget(triple, error);
+    const llvm::Target *target =
+        llvm::TargetRegistry::lookupTarget(triple, error);
     if (!target)
       return op->emitError("failed to lookup AMDGPU target: ") << error;
     llvm::MCTargetOptions mcOptions;
@@ -120,11 +121,10 @@ private:
     mai.reset(target->createMCAsmInfo(*mri, triple, mcOptions));
     mcii.reset(target->createMCInstrInfo());
     sti.reset(target->createMCSubtargetInfo(triple, "gfx1100", ""));
-    mcContext = std::make_unique<llvm::MCContext>(
-        triple, *mai, *mri, *sti);
+    mcContext = std::make_unique<llvm::MCContext>(triple, *mai, *mri, *sti);
     unsigned asmVariant = mai->getOutputAssemblerDialect();
-    instPrinter.reset(target->createMCInstPrinter(triple, asmVariant, *mai,
-                                                 *mcii, *mri));
+    instPrinter.reset(
+        target->createMCInstPrinter(triple, asmVariant, *mai, *mcii, *mri));
     if (!instPrinter)
       return op->emitError("failed to create AMDGPU MCInstPrinter");
     return success();
@@ -161,7 +161,8 @@ private:
 
   LogicalResult emitFunction(func::FuncOp func) {
     if (!func.getBody().hasOneBlock())
-      return func.emitError("WaveMachine AMDGPU emitter supports one-block funcs");
+      return func.emitError(
+          "WaveMachine AMDGPU emitter supports one-block funcs");
 
     os << "\n\t.globl\t" << func.getSymName() << "\n";
     os << "\t.p2align\t8\n";
@@ -190,8 +191,9 @@ private:
       for (auto [index, arg] : llvm::enumerate(func.getArguments())) {
         bool isBuffer = isa<wave::PtrType>(arg.getType());
         unsigned size = kernelArgSize(arg.getType());
-        info.args.push_back(KernelArgInfo{("arg" + Twine(index)).str(), offset,
-                                          size, isBuffer && !isBufferPointer(arg.getType())});
+        info.args.push_back(
+            KernelArgInfo{("arg" + Twine(index)).str(), offset, size,
+                          isBuffer && !isBufferPointer(arg.getType())});
         offset += size;
       }
       kernels.push_back(info);
@@ -201,7 +203,8 @@ private:
   }
 
   unsigned getKernelArgSize(func::FuncOp func) const {
-    if (auto attr = func->getAttrOfType<IntegerAttr>("wavemachine.kernarg_size"))
+    if (auto attr =
+            func->getAttrOfType<IntegerAttr>("wavemachine.kernarg_size"))
       return attr.getInt();
     unsigned size = 0;
     for (BlockArgument arg : func.getArguments())
@@ -365,8 +368,7 @@ private:
     case 4:
       return llvm::AMDGPU::VGPR0_VGPR1_VGPR2_VGPR3 + phys;
     case 8:
-      return llvm::AMDGPU::
-                 VGPR0_VGPR1_VGPR2_VGPR3_VGPR4_VGPR5_VGPR6_VGPR7 +
+      return llvm::AMDGPU::VGPR0_VGPR1_VGPR2_VGPR3_VGPR4_VGPR5_VGPR6_VGPR7 +
              phys;
     default:
       llvm_unreachable("unsupported VGPR tuple width");
@@ -387,7 +389,7 @@ private:
         component >= regType.getWidth())
       llvm_unreachable("expected valid SGPR tuple component");
     return llvm::MCOperand::createReg(llvm::AMDGPU::SGPR0 + getPhys(value) +
-                                     component);
+                                      component);
   }
 
   llvm::MCOperand toMCOperand(Value value) {
@@ -429,7 +431,9 @@ private:
   }
 
   LogicalResult emitOperation(Operation &op) {
-    auto operandString = [&](unsigned i) { return operandToString(op.getOperand(i)); };
+    auto operandString = [&](unsigned i) {
+      return operandToString(op.getOperand(i));
+    };
     auto result = [&]() { return op.getResult(0); };
     StringRef name = op.getName().getStringRef();
 
@@ -454,35 +458,29 @@ private:
       return success();
     }
     if (isa<wavemachine::WmmaI32_16x16x16_IU8Op>(op))
-      return emitMC(llvm::AMDGPU::V_WMMA_I32_16X16X16_IU8_twoaddr_w32_gfx11,
-                    {toMCOperand(result()),
-                     llvm::MCOperand::createImm(0),
-                     toMCOperand(op.getOperand(0)),
-                     llvm::MCOperand::createImm(0),
-                     toMCOperand(op.getOperand(1)),
-                     llvm::MCOperand::createImm(0),
-                     toMCOperand(op.getOperand(2)),
-                     llvm::MCOperand::createImm(0),
-                     llvm::MCOperand::createImm(0),
-                     llvm::MCOperand::createImm(0)});
+      return emitMC(
+          llvm::AMDGPU::V_WMMA_I32_16X16X16_IU8_twoaddr_w32_gfx11,
+          {toMCOperand(result()), llvm::MCOperand::createImm(0),
+           toMCOperand(op.getOperand(0)), llvm::MCOperand::createImm(0),
+           toMCOperand(op.getOperand(1)), llvm::MCOperand::createImm(0),
+           toMCOperand(op.getOperand(2)), llvm::MCOperand::createImm(0),
+           llvm::MCOperand::createImm(0), llvm::MCOperand::createImm(0)});
     if (isa<wavemachine::WmmaF32_16x16x16_F16Op>(op))
-      return emitMC(llvm::AMDGPU::V_WMMA_F32_16X16X16_F16_twoaddr_w32_gfx11,
-                    {toMCOperand(result()),
-                     llvm::MCOperand::createImm(0),
-                     toMCOperand(op.getOperand(0)),
-                     llvm::MCOperand::createImm(0),
-                     toMCOperand(op.getOperand(1)),
-                     llvm::MCOperand::createImm(0),
-                     toMCOperand(op.getOperand(2)),
-                     llvm::MCOperand::createImm(0),
-                     llvm::MCOperand::createImm(0)});
+      return emitMC(
+          llvm::AMDGPU::V_WMMA_F32_16X16X16_F16_twoaddr_w32_gfx11,
+          {toMCOperand(result()), llvm::MCOperand::createImm(0),
+           toMCOperand(op.getOperand(0)), llvm::MCOperand::createImm(0),
+           toMCOperand(op.getOperand(1)), llvm::MCOperand::createImm(0),
+           toMCOperand(op.getOperand(2)), llvm::MCOperand::createImm(0),
+           llvm::MCOperand::createImm(0)});
     if (isa<wavemachine::VAddU32Op>(op)) {
       Value lhs = op.getOperand(0);
       Value rhs = op.getOperand(1);
       if (isSGPR(rhs))
         std::swap(lhs, rhs);
-      return emitMC(llvm::AMDGPU::V_ADD_NC_U32_e32_gfx11,
-                    {toMCOperand(result()), toMCOperand(lhs), toMCOperand(rhs)});
+      return emitMC(
+          llvm::AMDGPU::V_ADD_NC_U32_e32_gfx11,
+          {toMCOperand(result()), toMCOperand(lhs), toMCOperand(rhs)});
     }
     if (isa<wavemachine::VAndB32Op, wavemachine::VOrB32Op,
             wavemachine::VXorB32Op>(op)) {
@@ -491,11 +489,11 @@ private:
       if (isSGPR(rhs))
         std::swap(lhs, rhs);
       unsigned opcode =
-          isa<wavemachine::VAndB32Op>(op) ? llvm::AMDGPU::V_AND_B32_e32_gfx11
+          isa<wavemachine::VAndB32Op>(op)  ? llvm::AMDGPU::V_AND_B32_e32_gfx11
           : isa<wavemachine::VOrB32Op>(op) ? llvm::AMDGPU::V_OR_B32_e32_gfx11
                                            : llvm::AMDGPU::V_XOR_B32_e32_gfx11;
-      return emitMC(opcode,
-                    {toMCOperand(result()), toMCOperand(lhs), toMCOperand(rhs)});
+      return emitMC(
+          opcode, {toMCOperand(result()), toMCOperand(lhs), toMCOperand(rhs)});
     }
     if (isa<wavemachine::VLshlrevB32Op>(op))
       return emitMC(llvm::AMDGPU::V_LSHLREV_B32_e32_gfx11,
@@ -504,13 +502,17 @@ private:
     if (isa<wavemachine::VCmpEqU32Op, wavemachine::VCmpNeU32Op,
             wavemachine::VCmpLtU32Op, wavemachine::VCmpLeU32Op,
             wavemachine::VCmpGtU32Op, wavemachine::VCmpGeU32Op>(op)) {
-      unsigned opcode =
-          isa<wavemachine::VCmpEqU32Op>(op) ? llvm::AMDGPU::V_CMP_EQ_U32_e64_gfx11
-          : isa<wavemachine::VCmpNeU32Op>(op) ? llvm::AMDGPU::V_CMP_NE_U32_e64_gfx11
-          : isa<wavemachine::VCmpLtU32Op>(op) ? llvm::AMDGPU::V_CMP_LT_U32_e64_gfx11
-          : isa<wavemachine::VCmpLeU32Op>(op) ? llvm::AMDGPU::V_CMP_LE_U32_e64_gfx11
-          : isa<wavemachine::VCmpGtU32Op>(op) ? llvm::AMDGPU::V_CMP_GT_U32_e64_gfx11
-                                               : llvm::AMDGPU::V_CMP_GE_U32_e64_gfx11;
+      unsigned opcode = isa<wavemachine::VCmpEqU32Op>(op)
+                            ? llvm::AMDGPU::V_CMP_EQ_U32_e64_gfx11
+                        : isa<wavemachine::VCmpNeU32Op>(op)
+                            ? llvm::AMDGPU::V_CMP_NE_U32_e64_gfx11
+                        : isa<wavemachine::VCmpLtU32Op>(op)
+                            ? llvm::AMDGPU::V_CMP_LT_U32_e64_gfx11
+                        : isa<wavemachine::VCmpLeU32Op>(op)
+                            ? llvm::AMDGPU::V_CMP_LE_U32_e64_gfx11
+                        : isa<wavemachine::VCmpGtU32Op>(op)
+                            ? llvm::AMDGPU::V_CMP_GT_U32_e64_gfx11
+                            : llvm::AMDGPU::V_CMP_GE_U32_e64_gfx11;
       return emitMC(opcode,
                     {toMCOperand(result()), toMCOperand(op.getOperand(0)),
                      toMCOperand(op.getOperand(1))});
@@ -523,23 +525,26 @@ private:
       return success();
     }
     if (isa<wavemachine::SLoadB32Op>(op))
-      return emitMC(llvm::AMDGPU::S_LOAD_B32_IMM_gfx11,
-                    {toMCOperand(result()),
-                     llvm::MCOperand::createReg(
-                         namedPhysReg(op.getAttrOfType<StringAttr>("base").getValue())),
-                     toMCOperand(op.getOperand(0)), llvm::MCOperand::createImm(0)});
+      return emitMC(
+          llvm::AMDGPU::S_LOAD_B32_IMM_gfx11,
+          {toMCOperand(result()),
+           llvm::MCOperand::createReg(
+               namedPhysReg(op.getAttrOfType<StringAttr>("base").getValue())),
+           toMCOperand(op.getOperand(0)), llvm::MCOperand::createImm(0)});
     if (isa<wavemachine::SLoadB64Op>(op))
-      return emitMC(llvm::AMDGPU::S_LOAD_B64_IMM_gfx11,
-                    {toMCOperand(result()),
-                     llvm::MCOperand::createReg(
-                         namedPhysReg(op.getAttrOfType<StringAttr>("base").getValue())),
-                     toMCOperand(op.getOperand(0)), llvm::MCOperand::createImm(0)});
+      return emitMC(
+          llvm::AMDGPU::S_LOAD_B64_IMM_gfx11,
+          {toMCOperand(result()),
+           llvm::MCOperand::createReg(
+               namedPhysReg(op.getAttrOfType<StringAttr>("base").getValue())),
+           toMCOperand(op.getOperand(0)), llvm::MCOperand::createImm(0)});
     if (isa<wavemachine::SLoadB128Op>(op))
-      return emitMC(llvm::AMDGPU::S_LOAD_B128_IMM_gfx11,
-                    {toMCOperand(result()),
-                     llvm::MCOperand::createReg(
-                         namedPhysReg(op.getAttrOfType<StringAttr>("base").getValue())),
-                     toMCOperand(op.getOperand(0)), llvm::MCOperand::createImm(0)});
+      return emitMC(
+          llvm::AMDGPU::S_LOAD_B128_IMM_gfx11,
+          {toMCOperand(result()),
+           llvm::MCOperand::createReg(
+               namedPhysReg(op.getAttrOfType<StringAttr>("base").getValue())),
+           toMCOperand(op.getOperand(0)), llvm::MCOperand::createImm(0)});
     if (isa<wavemachine::SWaitcntOp>(op))
       return emitMCValues(llvm::AMDGPU::S_WAITCNT_gfx11, op.getOperands());
     if (isa<wavemachine::SWaitcntVscntOp>(op))
@@ -569,10 +574,11 @@ private:
       return emitMC(llvm::AMDGPU::V_READFIRSTLANE_B32_gfx11,
                     {toMCOperand(result()), toMCOperand(op.getOperand(0))});
     if (isa<wavemachine::GlobalStoreB32Op>(op))
-      return emitMC(llvm::AMDGPU::GLOBAL_STORE_DWORD_SADDR_gfx11,
-                    {toMCOperand(op.getOperand(0)), toMCOperand(op.getOperand(1)),
-                     toMCOperand(op.getOperand(2)), llvm::MCOperand::createImm(0),
-                     llvm::MCOperand::createImm(0)});
+      return emitMC(
+          llvm::AMDGPU::GLOBAL_STORE_DWORD_SADDR_gfx11,
+          {toMCOperand(op.getOperand(0)), toMCOperand(op.getOperand(1)),
+           toMCOperand(op.getOperand(2)), llvm::MCOperand::createImm(0),
+           llvm::MCOperand::createImm(0)});
     if (isa<wavemachine::MakeBufferRsrcOp>(op)) {
       constexpr uint32_t gfx11Format32Float = 22;
       constexpr uint32_t defaultRsrcFlags =
@@ -608,7 +614,8 @@ private:
                      llvm::MCOperand::createImm(0)});
     }
     if (isa<wavemachine::SEndpgmOp>(op))
-      return emitMC(llvm::AMDGPU::S_ENDPGM_gfx11, {llvm::MCOperand::createImm(0)});
+      return emitMC(llvm::AMDGPU::S_ENDPGM_gfx11,
+                    {llvm::MCOperand::createImm(0)});
     if (isa<wavemachine::SSetpcB64Op>(op)) {
       emitLine(StringRef("s_setpc_b64 s[30:31]"));
       return success();
@@ -649,9 +656,9 @@ LogicalResult mlir::wave::translateWaveToAMDGPU(Operation *op,
 // system linker insists on file paths) and returning the produced HSACO as
 // a memory buffer. Temp files are removed on scope exit so they never leak
 // to user-visible paths.
-static LogicalResult linkElfToHsacoInProcess(
-    Operation *opForDiag, ArrayRef<char> objBytes,
-    SmallVectorImpl<char> &out) {
+static LogicalResult linkElfToHsacoInProcess(Operation *opForDiag,
+                                             ArrayRef<char> objBytes,
+                                             SmallVectorImpl<char> &out) {
   SmallString<128> objPath;
   int objFd = -1;
   if (llvm::sys::fs::createTemporaryFile("wave_obj", "o", objFd, objPath))
@@ -671,8 +678,8 @@ static LogicalResult linkElfToHsacoInProcess(
   llvm::raw_string_ostream stderrOS(stderrStr);
   std::string objStr(objPath.str());
   std::string hsacoStr(hsacoPath.str());
-  std::array<const char *, 5> args = {"ld.lld",     "-shared", objStr.c_str(),
-                                       "-o",         hsacoStr.c_str()};
+  std::array<const char *, 5> args = {"ld.lld", "-shared", objStr.c_str(), "-o",
+                                      hsacoStr.c_str()};
   bool ok = lld::elf::link(args, llvm::nulls(), stderrOS,
                            /*exitEarly=*/false,
                            /*disableOutput=*/false);
@@ -688,9 +695,8 @@ static LogicalResult linkElfToHsacoInProcess(
 }
 
 LogicalResult mlir::wave::compileWaveToHSACO(Operation *op, StringRef triple,
-                                              StringRef chip,
-                                              StringRef features,
-                                              SmallVectorImpl<char> &out) {
+                                             StringRef chip, StringRef features,
+                                             SmallVectorImpl<char> &out) {
   auto module = dyn_cast<ModuleOp>(op);
   if (!module)
     return op->emitError("compileWaveToHSACO expects a module operation");
@@ -702,8 +708,8 @@ LogicalResult mlir::wave::compileWaveToHSACO(Operation *op, StringRef triple,
 
   auto errCallback = [&] { return op->emitError(); };
   FailureOr<SmallVector<char, 0>> elf =
-      ROCDL::assembleIsa(StringRef(isaStorage.data(), isaStorage.size()), triple,
-                         chip, features, errCallback);
+      ROCDL::assembleIsa(StringRef(isaStorage.data(), isaStorage.size()),
+                         triple, chip, features, errCallback);
   if (failed(elf))
     return failure();
 

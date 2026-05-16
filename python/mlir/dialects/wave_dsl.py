@@ -4,6 +4,7 @@
 
 from contextlib import contextmanager
 
+from mlir.dialects import arith, func, wave, waveamd
 from mlir.ir import (
     Context,
     F16Type,
@@ -16,7 +17,6 @@ from mlir.ir import (
     Type,
     UnitAttr,
 )
-from mlir.dialects import arith, func, wave, waveamd
 
 
 def simd_type(element_type=None, width=32):
@@ -154,8 +154,8 @@ def module():
 __all__ = [
     "F16Type",
     "F32Type",
-    "IntegerType",
     "IndexType",
+    "IntegerType",
     "ModuleBuilder",
     "buffer_ptr_type",
     "fragment_type",

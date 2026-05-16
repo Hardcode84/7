@@ -6,11 +6,12 @@
 //
 //===----------------------------------------------------------------------===//
 //
-// Type-conversion-only bridge: maps `!wave.ptr<T, #wave.{global,shared,private}>`
-// onto `!llvm.ptr<addrspace>` so host code can hold and forward Wave pointers
-// (kernel ABI handles) through the standard convert-to-llvm pipeline. The
-// device-side wave ops (wave.store, wave.ptr_add, ...) are never LLVM-lowered;
-// they are consumed by wave-translate on the kernel side.
+// Type-conversion-only bridge: maps `!wave.ptr<T,
+// #wave.{global,shared,private}>` onto `!llvm.ptr<addrspace>` so host code can
+// hold and forward Wave pointers (kernel ABI handles) through the standard
+// convert-to-llvm pipeline. The device-side wave ops (wave.store, wave.ptr_add,
+// ...) are never LLVM-lowered; they are consumed by wave-translate on the
+// kernel side.
 //
 //===----------------------------------------------------------------------===//
 

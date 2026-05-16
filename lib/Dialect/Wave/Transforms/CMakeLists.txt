@@ -7,8 +7,8 @@ add_mlir_dialect_library(MLIRWaveTransforms
   WaveAttachGPUBinary.cpp
   WaveMachine.cpp
   WaveMachineWaitcnt.cpp
-  WaveToROCDL.cpp
   WaveToGPU.cpp
+  WaveToROCDL.cpp
 
   ADDITIONAL_HEADER_DIRS
   ${MLIR_MAIN_INCLUDE_DIR}/mlir/Dialect/Wave
@@ -17,6 +17,7 @@ add_mlir_dialect_library(MLIRWaveTransforms
   MLIRWaveTransformsIncGen
 
   LINK_COMPONENTS
+
   AMDGPUUtils
   TargetParser
 
@@ -25,8 +26,8 @@ add_mlir_dialect_library(MLIRWaveTransforms
   MLIRArithDialect
   MLIRGPUDialect
   MLIRIR
-  MLIRROCDLDialect
   MLIRPass
+  MLIRROCDLDialect
   MLIRSCFDialect
   MLIRTransformUtils
   MLIRWaveAMDDialect

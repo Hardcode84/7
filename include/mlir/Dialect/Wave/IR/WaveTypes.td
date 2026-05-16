@@ -9,8 +9,8 @@
 #ifndef MLIR_DIALECT_WAVE_IR_WAVETYPES_TD
 #define MLIR_DIALECT_WAVE_IR_WAVETYPES_TD
 
-include "mlir/Dialect/Wave/IR/WaveBase.td"
 include "mlir/Dialect/Wave/IR/WaveAttrs.td"
+include "mlir/Dialect/Wave/IR/WaveBase.td"
 include "mlir/IR/AttrTypeBase.td"
 
 class Wave_Type<string name, string typeMnemonic, list<Trait> traits = [],

@@ -50,8 +50,8 @@ static bool isVGPR(Type type) {
 static LogicalResult verifyVGPRWidth(Operation *op, Value value, int64_t width,
                                      StringRef name) {
   if (!isRegClassWidth(value.getType(), RegClass::VGPR, width))
-    return op->emitOpError() << name << " must be !wavemachine.reg<vgpr, "
-                             << width << ">";
+    return op->emitOpError()
+           << name << " must be !wavemachine.reg<vgpr, " << width << ">";
   return success();
 }
 
@@ -59,7 +59,8 @@ LogicalResult VMovB32TupleOp::verify() {
   auto resultType = cast<RegType>(getResult().getType());
   if (auto registers = (*this)->getAttrOfType<IntegerAttr>("registers")) {
     if (registers.getInt() != resultType.getWidth())
-      return emitOpError("registers attribute must match result register width");
+      return emitOpError(
+          "registers attribute must match result register width");
   }
   return success();
 }

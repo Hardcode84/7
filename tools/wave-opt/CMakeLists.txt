@@ -20,8 +20,8 @@ target_link_libraries(wave-opt PRIVATE
   MLIRTargetWave
   MLIRWaveAMDDialect
   MLIRWaveDialect
-  MLIRWaveToLLVM
   MLIRWaveMachineDialect
+  MLIRWaveToLLVM
   MLIRWaveTransforms
 )
 

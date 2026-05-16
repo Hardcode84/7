@@ -61,8 +61,7 @@ inline unsigned encodeDelay(DelayType Type, unsigned Count) {
 }
 
 inline unsigned encode(DelayType Type0, unsigned Count0, unsigned Skip = 0,
-                       DelayType Type1 = DelayType::None,
-                       unsigned Count1 = 0) {
+                       DelayType Type1 = DelayType::None, unsigned Count1 = 0) {
   unsigned Encoded = encodeDelay(Type0, Count0);
   unsigned Second = encodeDelay(Type1, Count1);
   if (!Second)
@@ -111,9 +110,9 @@ static Operation *createWMOp(OpBuilder &builder, Location loc, StringRef name,
 }
 
 static Value createImm(OpBuilder &builder, Location loc, int64_t value) {
-  Operation *op =
-      createWMOp(builder, loc, "imm", {}, getImmType(builder.getContext()),
-                 {builder.getNamedAttr("value", builder.getI64IntegerAttr(value))});
+  Operation *op = createWMOp(
+      builder, loc, "imm", {}, getImmType(builder.getContext()),
+      {builder.getNamedAttr("value", builder.getI64IntegerAttr(value))});
   return op->getResult(0);
 }
 
@@ -192,9 +191,8 @@ struct WaveAMDHazardWaitsPass
     bool hasDelayAlu = llvm::AMDGPU::isGFX11Plus(**sti);
     llvm::AMDGPU::IsaVersion isaVersion =
         llvm::AMDGPU::getIsaVersion((*sti)->getCPU());
-    unsigned defaultLgkmcnt =
-        llvm::AMDGPU::decodeLgkmcnt(isaVersion,
-                                    llvm::AMDGPU::getWaitcntBitMask(isaVersion));
+    unsigned defaultLgkmcnt = llvm::AMDGPU::decodeLgkmcnt(
+        isaVersion, llvm::AMDGPU::getWaitcntBitMask(isaVersion));
     unsigned valuDep1 = amdgpu_compat::SDelayAlu::encode(
         amdgpu_compat::SDelayAlu::DelayType::VALU, 1);
     for (func::FuncOp func : module.getOps<func::FuncOp>()) {

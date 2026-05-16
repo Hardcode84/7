@@ -78,7 +78,8 @@ LogicalResult FragmentFillOp::verify() {
       (!fragmentType.getElementType().isIntOrFloat() ||
        fragmentType.getElementType().getIntOrFloatBitWidth() != 32 ||
        fragmentType.getRegisters() != 8))
-    return emitOpError("accumulator fragments must be 32-bit fragments with 8 registers");
+    return emitOpError(
+        "accumulator fragments must be 32-bit fragments with 8 registers");
   return success();
 }
 
@@ -116,18 +117,24 @@ LogicalResult MmaOp::verify() {
 
   if (getKind() == "wmma.i32.16x16x16.iu8") {
     if (!isIU8AB(aType, 0))
-      return emitOpError("A operand must be a 16x16 i8 wave32 fragment with 4 registers");
+      return emitOpError(
+          "A operand must be a 16x16 i8 wave32 fragment with 4 registers");
     if (!isIU8AB(bType, 1))
-      return emitOpError("B operand must be a 16x16 i8 wave32 fragment with 4 registers");
+      return emitOpError(
+          "B operand must be a 16x16 i8 wave32 fragment with 4 registers");
     if (!isI32Acc(accType))
-      return emitOpError("accumulator must be a 16x16 i32 wave32 fragment with 8 registers");
+      return emitOpError(
+          "accumulator must be a 16x16 i32 wave32 fragment with 8 registers");
   } else {
     if (!isF16AB(aType, 0))
-      return emitOpError("A operand must be a 16x16 f16 wave32 fragment with 8 registers");
+      return emitOpError(
+          "A operand must be a 16x16 f16 wave32 fragment with 8 registers");
     if (!isF16AB(bType, 1))
-      return emitOpError("B operand must be a 16x16 f16 wave32 fragment with 8 registers");
+      return emitOpError(
+          "B operand must be a 16x16 f16 wave32 fragment with 8 registers");
     if (!isF32Acc(accType))
-      return emitOpError("accumulator must be a 16x16 f32 wave32 fragment with 8 registers");
+      return emitOpError(
+          "accumulator must be a 16x16 f32 wave32 fragment with 8 registers");
   }
   if (resultType != accType)
     return emitOpError("result type must match accumulator type");
@@ -139,7 +146,8 @@ LogicalResult FragmentStoreOp::verify() {
   if (fragmentType.getRole() != 2 ||
       (!fragmentType.getElementType().isInteger(32) &&
        !fragmentType.getElementType().isF32()))
-    return emitOpError("only 32-bit accumulator fragment stores are supported for now");
+    return emitOpError(
+        "only 32-bit accumulator fragment stores are supported for now");
   Type ptrType = getPtr().getType();
   Type ptrElementType;
   if (auto wavePtr = dyn_cast<wave::PtrType>(ptrType)) {

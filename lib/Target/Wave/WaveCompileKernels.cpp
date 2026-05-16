@@ -1,4 +1,5 @@
-//===- WaveCompileKernels.cpp - In-process Wave -> HSACO splice ------------===//
+//===- WaveCompileKernels.cpp - In-process Wave -> HSACO splice
+//------------===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
 // See https://llvm.org/LICENSE.txt for license information.
@@ -73,8 +74,8 @@ private:
     SmallVector<char, 0> hsaco;
     if (failed(wave::compileWaveToHSACO(staging.getOperation(), triple, chip,
                                         features, hsaco)))
-      return gpuMod.emitError(
-          "in-process wave-to-HSACO compilation failed for `gpu.module @")
+      return gpuMod.emitError("in-process wave-to-HSACO compilation failed for "
+                              "`gpu.module @")
              << gpuMod.getSymName() << "`";
 
     // 3. Replace `gpu.module @X` with a `gpu.binary @X [#gpu.object<...>]`

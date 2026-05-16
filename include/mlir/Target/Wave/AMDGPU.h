@@ -28,8 +28,8 @@ LogicalResult translateWaveToAMDGPU(Operation *op, raw_ostream &os);
 /// `wavemachine.target` string attribute compatible with the WaveMachine
 /// backend; `op` is mutated in place by the pipeline. `triple`, `chip`, and
 /// `features` describe the assembler/linker target.
-LogicalResult compileWaveToHSACO(Operation *op, StringRef triple, StringRef chip,
-                                 StringRef features,
+LogicalResult compileWaveToHSACO(Operation *op, StringRef triple,
+                                 StringRef chip, StringRef features,
                                  SmallVectorImpl<char> &out);
 
 /// Register the `wave-to-amdgpu-asm` mlir-translate entry point.

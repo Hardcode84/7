@@ -123,7 +123,10 @@ def WaveMachine_ImmOp : WaveMachine_Op<"imm", [Pure]> {
   let assemblyFormat = "$value attr-dict `:` type($result)";
 }
 
-def WaveMachine_TokenOp : WaveMachine_Op<"token", [Pure, WaveMachine_TokenTrait]> {
+def WaveMachine_TokenOp : WaveMachine_Op<"token", [
+  Pure,
+  WaveMachine_TokenTrait
+]> {
   let summary = "empty machine memory token";
   let results = (outs WaveMachine_MemToken:$result);
   let assemblyFormat = "attr-dict `:` type($result)";

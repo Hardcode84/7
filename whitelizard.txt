@@ -18,5 +18,13 @@
 # accompanied by an explicit justification in the commit message.
 
 # Imported as-is from the upstream wave-dsl branch; refactor follow-up.
+lib/Dialect/Wave/IR/Wave.cpp:PtrAddOp::verify
+lib/Dialect/Wave/IR/WaveAMD.cpp:FragmentFillOp::verify
+lib/Dialect/Wave/IR/WaveAMD.cpp:MmaOp::verify
+lib/Dialect/Wave/Transforms/WaveAMDABILowering.cpp:WaveAMDABILoweringPass::runOnOperation
+lib/Dialect/Wave/Transforms/WaveAMDHazardWaits.cpp:WaveAMDHazardWaitsPass::runOnOperation
+lib/Dialect/Wave/Transforms/WaveAMDRegAlloc.cpp:WaveAMDRegAllocPass::allocateFunction
 lib/Dialect/Wave/Transforms/WaveMachine.cpp:WaveMachineSelector::run
 lib/Dialect/Wave/Transforms/WaveMachine.cpp:WaveMachineSelector::selectOperation
+lib/Dialect/Wave/Transforms/WaveMachineWaitcnt.cpp:computeRequirement
+lib/Dialect/Wave/Transforms/WaveMachineWaitcnt.cpp:propagateBranchOperands

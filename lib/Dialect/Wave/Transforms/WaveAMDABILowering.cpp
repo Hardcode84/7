@@ -38,9 +38,9 @@ static Operation *createWMOp(OpBuilder &builder, Location loc, StringRef name,
 }
 
 static Value createImm(OpBuilder &builder, Location loc, int64_t value) {
-  Operation *op =
-      createWMOp(builder, loc, "imm", {}, getImmType(builder.getContext()),
-                 {builder.getNamedAttr("value", builder.getI64IntegerAttr(value))});
+  Operation *op = createWMOp(
+      builder, loc, "imm", {}, getImmType(builder.getContext()),
+      {builder.getNamedAttr("value", builder.getI64IntegerAttr(value))});
   return op->getResult(0);
 }
 
@@ -74,7 +74,8 @@ struct WaveAMDABILoweringPass
                        "to have one result");
           return signalPassFailure();
         }
-        auto regType = dyn_cast<wavemachine::RegType>(op.getResult(0).getType());
+        auto regType =
+            dyn_cast<wavemachine::RegType>(op.getResult(0).getType());
         if (!regType || !isSGPR(regType)) {
           op.emitError("waveamd-abi-lowering expects kernel arguments "
                        "to be SGPR WaveMachine registers");

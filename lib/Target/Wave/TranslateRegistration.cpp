@@ -33,8 +33,7 @@ void mlir::wave::registerWaveToAMDGPUTranslation() {
       },
       [](DialectRegistry &registry) {
         registry.insert<arith::ArithDialect, func::FuncDialect,
-                        waveamd::WaveAMDDialect,
-                        wave::WaveDialect,
+                        waveamd::WaveAMDDialect, wave::WaveDialect,
                         wavemachine::WaveMachineDialect>();
       });
 }

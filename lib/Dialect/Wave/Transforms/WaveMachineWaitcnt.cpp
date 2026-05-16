@@ -1,4 +1,5 @@
-//===- WaveMachineWaitcnt.cpp - WaveMachine waitcnt insertion ----*- C++ -*-===//
+//===- WaveMachineWaitcnt.cpp - WaveMachine waitcnt insertion ----*- C++
+//-*-===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
 // See https://llvm.org/LICENSE.txt for license information.
@@ -53,8 +54,8 @@ namespace {
 //    the corresponding tickets to be complete.
 // 5. After the solver reaches a fixpoint, a second pass over WaveMachine ops
 //    computes the minimum threshold for each required counter and inserts only
-//    the waitcnt operations. Pipeline hazards such as s_delay_alu are handled by
-//    the separate WaveMachine hazard pass.
+//    the waitcnt operations. Pipeline hazards such as s_delay_alu are handled
+//    by the separate WaveMachine hazard pass.
 
 enum class CounterKind { Vmem, Lgkm, Vscnt };
 
@@ -191,17 +192,15 @@ public:
   }
 
   void print(raw_ostream &os) const override {
-    os << "vmem=" << scoreboard.vmem.lastTicket << " lgkm="
-       << scoreboard.lgkm.lastTicket << " vscnt="
-       << scoreboard.vscnt.lastTicket << " values="
-       << scoreboard.valueTickets.size();
+    os << "vmem=" << scoreboard.vmem.lastTicket
+       << " lgkm=" << scoreboard.lgkm.lastTicket
+       << " vscnt=" << scoreboard.vscnt.lastTicket
+       << " values=" << scoreboard.valueTickets.size();
   }
 
   ChangeResult reset() {
-    if (scoreboard.vmem.lastTicket == -1 &&
-        scoreboard.lgkm.lastTicket == -1 &&
-        scoreboard.vscnt.lastTicket == -1 &&
-        scoreboard.valueTickets.empty())
+    if (scoreboard.vmem.lastTicket == -1 && scoreboard.lgkm.lastTicket == -1 &&
+        scoreboard.vscnt.lastTicket == -1 && scoreboard.valueTickets.empty())
       return ChangeResult::NoChange;
     scoreboard = WaitcntScoreboard();
     return ChangeResult::Change;
@@ -270,9 +269,8 @@ static FailureOr<llvm::AMDGPU::IsaVersion> getIsaVersion(Operation *op) {
 static unsigned encodeWaitcnt(std::optional<unsigned> vmcnt,
                               std::optional<unsigned> lgkmcnt,
                               const llvm::AMDGPU::IsaVersion &isaVersion) {
-  return llvm::AMDGPU::encodeWaitcnt(
-      isaVersion, vmcnt.value_or(~0u), /*expcnt=*/~0u,
-      lgkmcnt.value_or(~0u));
+  return llvm::AMDGPU::encodeWaitcnt(isaVersion, vmcnt.value_or(~0u),
+                                     /*expcnt=*/~0u, lgkmcnt.value_or(~0u));
 }
 
 static wavemachine::ImmType getImmType(MLIRContext *ctx) {
@@ -291,9 +289,9 @@ static Operation *createWMOp(OpBuilder &builder, Location loc, StringRef name,
 }
 
 static Value createImm(OpBuilder &builder, Location loc, int64_t value) {
-  Operation *op =
-      createWMOp(builder, loc, "imm", {}, getImmType(builder.getContext()),
-                 {builder.getNamedAttr("value", builder.getI64IntegerAttr(value))});
+  Operation *op = createWMOp(
+      builder, loc, "imm", {}, getImmType(builder.getContext()),
+      {builder.getNamedAttr("value", builder.getI64IntegerAttr(value))});
   return op->getResult(0);
 }
 
@@ -310,8 +308,8 @@ static std::optional<unsigned> getImmediate(Value value) {
       def->getAttrOfType<IntegerAttr>("value").getInt());
 }
 
-static WaitRequirement
-computeRequirement(Operation *op, const WaitcntScoreboard &scoreboard) {
+static WaitRequirement computeRequirement(Operation *op,
+                                          const WaitcntScoreboard &scoreboard) {
   WaitRequirement requirement;
   if (isTokenOnly(op))
     return requirement;
@@ -607,10 +605,11 @@ public:
     propagateIfChanged(after, after->join(next));
   }
 
-  void visitRegionBranchControlFlowTransfer(
-      RegionBranchOpInterface branch, std::optional<unsigned> regionFrom,
-      std::optional<unsigned> regionTo, const WaitcntState &before,
-      WaitcntState *after) override {
+  void visitRegionBranchControlFlowTransfer(RegionBranchOpInterface branch,
+                                            std::optional<unsigned> regionFrom,
+                                            std::optional<unsigned> regionTo,
+                                            const WaitcntState &before,
+                                            WaitcntState *after) override {
     WaitcntState next = before;
     WaitcntScoreboard &scoreboard = next.mutate();
     RegionSuccessor successor =
@@ -654,13 +653,14 @@ private:
       int64_t shift[3];
       computeTicketShift(source, successor, blockOrder, shift);
       propagateBranchOperands(op, successor, successorState, shift);
-      auto *blockState =
-          getLattice(getProgramPointBefore(successor));
-      propagateIfChanged(blockState, blockState->joinScoreboard(successorState));
-      auto *blockLive = getOrCreate<Executable>(getProgramPointBefore(successor));
+      auto *blockState = getLattice(getProgramPointBefore(successor));
+      propagateIfChanged(blockState,
+                         blockState->joinScoreboard(successorState));
+      auto *blockLive =
+          getOrCreate<Executable>(getProgramPointBefore(successor));
       propagateIfChanged(blockLive, blockLive->setToLive());
-      auto *edgeLive = getOrCreate<Executable>(
-          getLatticeAnchor<CFGEdge>(source, successor));
+      auto *edgeLive =
+          getOrCreate<Executable>(getLatticeAnchor<CFGEdge>(source, successor));
       propagateIfChanged(edgeLive, edgeLive->setToLive());
     }
   }
@@ -700,15 +700,15 @@ static WaitcntScoreboard
 getEffectiveStateBefore(Operation *op, DataFlowSolver &solver,
                         const DenseMap<Block *, unsigned> &blockOrder) {
   WaitcntScoreboard effective;
-  if (auto *state = solver.lookupState<WaitcntState>(
-          solver.getProgramPointBefore(op)))
+  if (auto *state =
+          solver.lookupState<WaitcntState>(solver.getProgramPointBefore(op)))
     effective.merge(state->get());
 
   Block *block = op->getBlock();
   if (!block)
     return effective;
-  if (auto *blockState = solver.lookupState<WaitcntState>(
-          solver.getProgramPointBefore(block)))
+  if (auto *blockState =
+          solver.lookupState<WaitcntState>(solver.getProgramPointBefore(block)))
     effective.merge(blockState->get());
   if (block->isEntryBlock())
     return effective;
