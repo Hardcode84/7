@@ -18,7 +18,15 @@
 using namespace mlir;
 
 void mlir::wave::registerWaveToAMDGPUTranslation() {
-  TranslateFromMLIRRegistration reg(
+  // Some LLVM installs ship a modified `InitAllTranslations.h` that already
+  // invokes this function from inside `mlir::registerAllTranslations()`
+  // (notably the wave-dsl branch). Guard against double registration so the
+  // standalone tool works against both stock LLVM and such installs.
+  static bool registered = false;
+  if (registered)
+    return;
+  registered = true;
+  static TranslateFromMLIRRegistration reg(
       "wave-to-amdgpu-asm", "translate Wave dialect directly to AMDGPU ISA",
       [](Operation *op, raw_ostream &output) {
         return wave::translateWaveToAMDGPU(op, output);
