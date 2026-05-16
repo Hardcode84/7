@@ -47,6 +47,9 @@ _chip = _detect_amdgpu_chip()
 if _chip:
     config.available_features.add("host-supports-amdgpu")
     config.substitutions.append(("%chip", _chip))
+    # WMMA (`v_wmma_*`) instructions exist on gfx11 and gfx12 only.
+    if _chip.startswith(("gfx11", "gfx12")):
+        config.available_features.add("host-supports-amdgpu-wmma")
 
 # Runtime shared libs for the MLIR GPU integration tests.
 for name, env_key in [
