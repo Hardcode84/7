@@ -3,11 +3,13 @@
 #  See https://llvm.org/LICENSE.txt for license information.
 #  SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-"""Emit a tiled WMMA iu8 matmul MLIR module for a given shape.
+"""Emit a tiled WMMA f16xf16xf32 matmul MLIR module for a given shape.
 
-The kernel uses ``waveamd.fragment_fill`` to broadcast a 1-fill into both A
-and B fragments, so the host can check the result element-wise against
-``K`` (each output element is :math:`\\sum_{k=0}^{K-1} 1 \\cdot 1 = K`).
+The kernel uses ``waveamd.fragment_fill`` to broadcast a 1.0-fill into
+both A and B f16 fragments, accumulates into an f32 fragment, and writes
+the f32 output buffer. The host can check the result element-wise
+against ``K`` (each output element is
+:math:`\\sum_{k=0}^{K-1} 1.0 \\cdot 1.0 = K`).
 
 Pipe the output through ``wave-opt --wave-compile-kernels='chip=<gfx>'`` and
 the standard host-lowering passes followed by ``mlir-runner``.
@@ -72,9 +74,9 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(sys.argv[1:] if argv is None else argv)
     _ensure_package_on_path()
-    from mlir.dialects.wave_matmul import build_wmma_iu8_matmul_module
+    from mlir.dialects.wave_matmul import build_wmma_f16_matmul_module
 
-    module = build_wmma_iu8_matmul_module(
+    module = build_wmma_f16_matmul_module(
         M=args.m, N=args.n, K=args.k, BM=args.bm, BN=args.bn
     )
     sys.stdout.write(str(module))

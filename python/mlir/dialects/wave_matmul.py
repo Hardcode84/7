@@ -2,14 +2,12 @@
 #  See https://llvm.org/LICENSE.txt for license information.
 #  SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-"""Builder for the tiled WMMA iu8 matmul kernel + host driver.
+"""Builder for the tiled WMMA f16xf16xf32 matmul kernel + host driver.
 
 This module assembles the module *programmatically* through the MLIR
 Python bindings (see :mod:`wave_dsl`). It returns a live
-:class:`mlir.ir.Module` whose textual form is identical to the textual
-emitter that used to live here; the user-visible behaviour is unchanged
-but everything now flows through the proper IR builders (with
-verification, type checks and so on).
+:class:`mlir.ir.Module` that everything else (``wave-opt``,
+``mlir-runner``, ...) can consume.
 """
 
 from __future__ import annotations
@@ -80,10 +78,16 @@ class _MatmulConfig:
         return (256 * self.waves_per_workgroup).bit_length() - 1
 
 
-_KERNEL_NAME = "wmma_iu8_matmul_tiled"
+_KERNEL_NAME = "wmma_f16_matmul_tiled"
 _GPU_MODULE_NAME = "kernels"
-_RUNTIME_HELPER = "wave_memref_to_ptr_global_i32"
-_PRINT_HELPER = "printMemrefI32"
+_RUNTIME_HELPER = "wave_memref_to_ptr_global_f32"
+_PRINT_HELPER = "printMemrefF32"
+_MMA_KIND = "wmma.f32.16x16x16.f16"
+
+# (f16)1.0 packed twice into one i32, the source bit pattern that
+# `waveamd.fragment_fill` uses to broadcast a constant into each
+# 32-bit register of an A/B f16 fragment.
+_F16_ONES_BITS = 0x3C003C00
 
 
 def _emit_kernel(bld: dsl.FunctionBuilder, cfg: _MatmulConfig) -> None:
@@ -98,9 +102,12 @@ def _emit_kernel(bld: dsl.FunctionBuilder, cfg: _MatmulConfig) -> None:
 
     The K-loop is unrolled in Python: each step chains a
     ``waveamd.mma`` whose A/B operands come from ``waveamd.fragment_fill``
-    of an all-ones i8 vector, so the per-element output is exactly ``K``.
+    of an all-ones f16 vector, so the per-element output is exactly
+    ``K`` (as an f32).
     """
-    ones_i8x4 = bld.constant_i32(0x01010101)
+    ones_f16x2 = bld.constant_i32(_F16_ONES_BITS)
+    # (f32)0.0 shares its bit pattern with i32 zero, so fragment_fill can
+    # still take an i32 source even though the accumulator is f32.
     acc_init = bld.constant_i32(0)
     neg32 = bld.constant_i32(-32)
     c3 = bld.constant_i32(3)
@@ -120,15 +127,15 @@ def _emit_kernel(bld: dsl.FunctionBuilder, cfg: _MatmulConfig) -> None:
     total = bld.binary("addi", wg_off, wave_off)
     ptr = bld.ptr_add(bld.args[0], total)
 
-    a_type = dsl.fragment_type(0, dsl.i8(), 16, 16, 32, 4)
-    b_type = dsl.fragment_type(1, dsl.i8(), 16, 16, 32, 4)
-    acc_type = dsl.fragment_type(2, dsl.i32(), 16, 16, 32, 8)
+    a_type = dsl.fragment_type(0, dsl.f16(), 16, 16, 32, 8)
+    b_type = dsl.fragment_type(1, dsl.f16(), 16, 16, 32, 8)
+    acc_type = dsl.fragment_type(2, dsl.f32(), 16, 16, 32, 8)
 
     acc = bld.fragment_fill(acc_init, acc_type)
     for _ in range(cfg.k_steps):
-        a = bld.fragment_fill(ones_i8x4, a_type)
-        b = bld.fragment_fill(ones_i8x4, b_type)
-        acc = bld.mma("wmma.i32.16x16x16.iu8", a, b, acc)
+        a = bld.fragment_fill(ones_f16x2, a_type)
+        b = bld.fragment_fill(ones_f16x2, b_type)
+        acc = bld.mma(_MMA_KIND, a, b, acc)
 
     bld.fragment_store(acc, ptr)
 
@@ -140,15 +147,15 @@ def _emit_host(bld: dsl.FunctionBuilder, cfg: _MatmulConfig) -> None:
     blocks = bld.constant_index(cfg.num_workgroups)
     threads = bld.constant_index(cfg.threads_per_workgroup)
     ctotal = bld.constant_index(cfg.total_elements)
-    zero = bld.constant_i32(0)
+    zero = bld.constant_f32(0.0)
 
-    storage = bld.alloc([cfg.total_elements], dsl.i32())
+    storage = bld.alloc([cfg.total_elements], dsl.f32())
     with bld.for_loop(c0, ctotal, c1) as i:
         bld.memref_store(zero, storage, [i])
     unranked = bld.cast_unranked(storage)
     bld.host_register(unranked)
 
-    [ptr] = bld.call(_RUNTIME_HELPER, [storage], [dsl.ptr_type()])
+    [ptr] = bld.call(_RUNTIME_HELPER, [storage], [dsl.ptr_type(dsl.f32())])
     bld.launch(
         _GPU_MODULE_NAME,
         _KERNEL_NAME,
@@ -159,17 +166,17 @@ def _emit_host(bld: dsl.FunctionBuilder, cfg: _MatmulConfig) -> None:
     bld.call(_PRINT_HELPER, [unranked])
 
 
-def build_wmma_iu8_matmul_module(
+def build_wmma_f16_matmul_module(
     M: int, N: int, K: int, *, BM: int = 1, BN: int = 1
 ) -> Module:
-    """Return an MLIR :class:`Module` for the tiled WMMA iu8 matmul.
+    """Return an MLIR :class:`Module` for the tiled WMMA f16 matmul.
 
     The kernel multiplies ``MxK`` by ``KxN`` (both filled with ones via
-    ``waveamd.fragment_fill``) and writes the result into an
-    ``MxN``-element ``i32`` buffer. The output layout is "tile block":
-    each 16x16 tile occupies 256 contiguous i32 elements (1024 bytes),
-    so the host-side check is trivially ``output[i] == K`` for all
-    ``i``.
+    ``waveamd.fragment_fill``, the A/B operands are f16) and writes the
+    result into an ``MxN``-element ``f32`` buffer using
+    ``wmma.f32.16x16x16.f16``. The output layout is "tile block": each
+    16x16 tile occupies 256 contiguous f32 elements (1024 bytes), so
+    the host-side check is trivially ``output[i] == K`` for all ``i``.
 
     Constraints:
       * ``M``, ``N``, ``K`` are positive multiples of 16.
@@ -188,18 +195,18 @@ def build_wmma_iu8_matmul_module(
     with bld:
         bld.declare_external(
             _RUNTIME_HELPER,
-            [dsl.MemRefType.get([cfg.total_elements], dsl.i32())],
-            [dsl.ptr_type()],
+            [dsl.MemRefType.get([cfg.total_elements], dsl.f32())],
+            [dsl.ptr_type(dsl.f32())],
         )
         bld.declare_external(
             _PRINT_HELPER,
-            [dsl.unranked_memref_type(dsl.i32())],
+            [dsl.unranked_memref_type(dsl.f32())],
             [],
         )
 
         with (
             bld.gpu_module(_GPU_MODULE_NAME) as gmod,
-            gmod.kernel(_KERNEL_NAME, [dsl.ptr_type()]) as fb,
+            gmod.kernel(_KERNEL_NAME, [dsl.ptr_type(dsl.f32())]) as fb,
         ):
             _emit_kernel(fb, cfg)
 
@@ -209,4 +216,4 @@ def build_wmma_iu8_matmul_module(
     return bld.module
 
 
-__all__ = ["build_wmma_iu8_matmul_module"]
+__all__ = ["build_wmma_f16_matmul_module"]

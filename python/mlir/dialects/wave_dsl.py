@@ -63,6 +63,14 @@ def i32() -> IntegerType:
     return IntegerType.get_signless(32)
 
 
+def f16() -> F16Type:
+    return F16Type.get()
+
+
+def f32() -> F32Type:
+    return F32Type.get()
+
+
 def index_type() -> IndexType:
     return IndexType.get()
 
@@ -261,6 +269,9 @@ class FunctionBuilder:
     def constant_index(self, value: int) -> Value:
         return self.constant(value, index_type())
 
+    def constant_f32(self, value: float) -> Value:
+        return arith.ConstantOp(f32(), float(value)).result
+
     # --- Wave ops ----------------------------------------------------------
 
     def lane_id(self, element_type: Type | None = None, width: int = 32) -> Value:
@@ -403,6 +414,8 @@ __all__ = [
     "MemRefType",
     "ModuleBuilder",
     "buffer_ptr_type",
+    "f16",
+    "f32",
     "fragment_type",
     "i8",
     "i32",
