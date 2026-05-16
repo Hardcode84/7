@@ -1,4 +1,10 @@
 // REQUIRES: host-supports-amdgpu
+// XFAIL: *
+// FIXME: This e2e test passes a memref directly to wave.store, which the
+// Wave dialect intentionally does not support (wave.store takes only
+// `!wave.ptr` / `!wave.simd<!wave.ptr>`). Re-author once a memref ->
+// !wave.ptr bridge exists, or drop the test in favour of a hipcc-based
+// e2e path along the lines of Target/Wave/wavemachine-buffer-hw.mlir.
 // RUN: wave-opt %s \
 // RUN: | wave-opt -convert-wave-to-rocdl -convert-scf-to-cf \
 // RUN: | wave-opt -gpu-kernel-outlining \
