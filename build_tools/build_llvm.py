@@ -144,6 +144,8 @@ def configure_and_build(
         "-DLLVM_INCLUDE_BENCHMARKS=OFF",
         "-DLLVM_INCLUDE_EXAMPLES=OFF",
         "-DLLVM_INCLUDE_DOCS=OFF",
+        # MLIR ROCm runner library (used by mlir-runner integration tests).
+        "-DMLIR_ENABLE_ROCM_RUNNER=ON",
         f"-DMLIR_ENABLE_BINDINGS_PYTHON={'ON' if enable_python_bindings else 'OFF'}",
     ]
     run(cmake_args)
