@@ -48,6 +48,7 @@ from mlir.ir import (
     UnitAttr,
     UnrankedMemRefType,
     Value,
+    VectorType,
 )
 
 # ---------------------------------------------------------------------------
@@ -77,6 +78,15 @@ def index_type() -> IndexType:
 
 def simd_type(element_type: Type | None = None, width: int = 32) -> Type:
     return Type.parse(f"!wave.simd<{element_type or i32()}, {width}>")
+
+
+def vector_type(elements: int, element_type: Type | None = None) -> Type:
+    """Build a 1-D MLIR vector type.
+
+    Handy when composing ``simd_type(vector_type(R, i32()))`` for the
+    multi-register ``wave.load`` / ``waveamd.fragment_pack`` shape.
+    """
+    return VectorType.get([elements], element_type or i32())
 
 
 def mask_type(width: int = 32) -> Type:
@@ -317,6 +327,23 @@ class FunctionBuilder:
     def store(self, value: Value, ptr: Value, *, after: Value | None = None) -> Value:
         return wave.StoreOp(mem_token_type(), value, ptr, dependency=after).token
 
+    def load(
+        self,
+        ptr: Value,
+        result_type: Type,
+        *,
+        after: Value | None = None,
+    ) -> tuple[Value, Value]:
+        """Emit ``wave.load`` and return ``(value, token)``.
+
+        ``result_type`` is the SIMD result type and is what drives the
+        lowering: a plain ``!wave.simd<T, W>`` produces a single per-lane
+        dword load; a ``!wave.simd<vector<R x T>, W>`` produces ``R``
+        consecutive dword loads merged into one VGPR tuple.
+        """
+        op = wave.LoadOp(result_type, mem_token_type(), ptr, dependency=after)
+        return op.value, op.token
+
     def wait(self, *tokens: Value) -> None:
         wave.WaitOp(list(tokens))
 
@@ -333,6 +360,52 @@ class FunctionBuilder:
 
     def fragment_fill(self, value: Value, frag_type: Type) -> Value:
         return waveamd.FragmentFillOp(frag_type, value).result
+
+    def fragment_pack(self, registers: Value, frag_type: Type) -> Value:
+        """Bind a SIMD-of-vector value into a WMMA fragment.
+
+        ``registers`` must be ``!wave.simd<vector<R x T>, W>`` where ``R``
+        equals the fragment's per-lane register count and ``T`` is 32 bits
+        wide; ``W`` must match the fragment wave size. The op is a
+        zero-cost rename in the AMDGPU lowering (no instructions
+        emitted): the same VGPR tuple becomes the fragment.
+        """
+        return waveamd.FragmentPackOp(frag_type, registers).result
+
+    def fragment_load(
+        self,
+        ptr: Value,
+        frag_type: Type,
+        *,
+        after: Value | None = None,
+    ) -> tuple[Value, Value]:
+        """Load a fragment by stitching a tuple ``wave.load`` and pack.
+
+        ``ptr`` must already encode the per-lane base address (typically
+        a ``!wave.simd<!wave.ptr<T, space>, W>`` produced by
+        ``ptr_add`` of a uniform base and a lane-varying offset). The
+        helper widens the load to the fragment's register count and
+        threads the resulting memory token back to the caller so it can
+        be chained into a subsequent ``mma`` or store.
+
+        Returns ``(fragment, token)``.
+        """
+        frag_text = str(frag_type)
+        # Parse "!waveamd.fragment<role, T, M, N, W, R>" -> wave size +
+        # register count. Avoids depending on a typed FragmentType binding,
+        # which the generated Python dialect does not currently expose.
+        try:
+            payload = frag_text.split("<", 1)[1].rsplit(">", 1)[0]
+            parts = [p.strip() for p in payload.split(",")]
+            wave_size = int(parts[4])
+            registers = int(parts[5])
+        except (IndexError, ValueError) as exc:
+            raise ValueError(
+                f"fragment_load: expected fragment type, got {frag_text!r}"
+            ) from exc
+        load_type = simd_type(vector_type(registers, i32()), width=wave_size)
+        regs, token = self.load(ptr, load_type, after=after)
+        return self.fragment_pack(regs, frag_type), token
 
     def mma(self, kind: str, a: Value, b: Value, acc: Value) -> Value:
         return waveamd.MmaOp(acc.type, kind, a, b, acc).result
@@ -427,4 +500,5 @@ __all__ = [
     "simd_ptr_type",
     "simd_type",
     "unranked_memref_type",
+    "vector_type",
 ]

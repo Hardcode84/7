@@ -30,6 +30,11 @@ func.func @wave_ops(%pred: i1, %value: i32, %out: !wave.ptr<i32, #wave.global>) 
   // CHECK: wave.store
   %tok = wave.store %sum -> %out : (!wave.simd<i32, 32>, !wave.ptr<i32, #wave.global>) -> !wave.mem.token
 
+  // CHECK: wave.load {{.*}} : (!wave.ptr<i32, #wave.global>) -> (!wave.simd<i32, 32>, !wave.mem.token)
+  %ld, %ld_tok = wave.load %out : (!wave.ptr<i32, #wave.global>) -> (!wave.simd<i32, 32>, !wave.mem.token)
+  // CHECK: wave.load {{.*}} after {{.*}} : (!wave.ptr<i32, #wave.global>, !wave.mem.token) -> (!wave.simd<vector<8xi32>, 32>, !wave.mem.token)
+  %ld8, %ld8_tok = wave.load %out after %ld_tok : (!wave.ptr<i32, #wave.global>, !wave.mem.token) -> (!wave.simd<vector<8xi32>, 32>, !wave.mem.token)
+
   // CHECK: wave.where
   wave.where %mask {
     wave.yield

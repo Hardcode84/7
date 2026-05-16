@@ -46,3 +46,35 @@ func.func @bad_fragment_store_pointer(%out: !wave.ptr<index, #wave.global>, %x: 
   %store_token = waveamd.fragment_store %acc -> %ptr : (!waveamd.fragment<2, i32, 16, 16, 32, 8>, !wave.ptr<index, #wave.global>) -> !wave.mem.token
   return
 }
+
+// -----
+
+func.func @fragment_pack_bad_width(%v: !wave.simd<vector<8xi32>, 64>) {
+  // expected-error @below {{operand SIMD width must match fragment wave size}}
+  %frag = waveamd.fragment_pack %v : !wave.simd<vector<8xi32>, 64> -> !waveamd.fragment<2, f32, 16, 16, 32, 8>
+  return
+}
+
+// -----
+
+func.func @fragment_pack_not_vector(%v: !wave.simd<i32, 32>) {
+  // expected-error @below {{operand SIMD element type must be a 1-D vector}}
+  %frag = waveamd.fragment_pack %v : !wave.simd<i32, 32> -> !waveamd.fragment<2, f32, 16, 16, 32, 8>
+  return
+}
+
+// -----
+
+func.func @fragment_pack_bad_vector_element(%v: !wave.simd<vector<16xf16>, 32>) {
+  // expected-error @below {{operand vector element type must be 32 bits wide}}
+  %frag = waveamd.fragment_pack %v : !wave.simd<vector<16xf16>, 32> -> !waveamd.fragment<2, f32, 16, 16, 32, 8>
+  return
+}
+
+// -----
+
+func.func @fragment_pack_register_mismatch(%v: !wave.simd<vector<4xi32>, 32>) {
+  // expected-error @below {{operand vector element count (4) must match fragment register count (8)}}
+  %frag = waveamd.fragment_pack %v : !wave.simd<vector<4xi32>, 32> -> !waveamd.fragment<2, f32, 16, 16, 32, 8>
+  return
+}

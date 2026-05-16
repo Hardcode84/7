@@ -75,6 +75,25 @@ static bool is16x16Fragment(FragmentType type) {
 }
 } // namespace
 
+LogicalResult FragmentPackOp::verify() {
+  auto fragmentType = cast<FragmentType>(getResult().getType());
+  auto simdType = cast<wave::SimdType>(getRegisters().getType());
+  if (simdType.getWidth() != fragmentType.getWaveSize())
+    return emitOpError("operand SIMD width must match fragment wave size");
+  auto vectorType = dyn_cast<VectorType>(simdType.getElementType());
+  if (!vectorType || vectorType.getRank() != 1)
+    return emitOpError("operand SIMD element type must be a 1-D vector");
+  Type vectorElement = vectorType.getElementType();
+  if (!vectorElement.isIntOrFloat() ||
+      vectorElement.getIntOrFloatBitWidth() != 32)
+    return emitOpError("operand vector element type must be 32 bits wide");
+  if (vectorType.getNumElements() != fragmentType.getRegisters())
+    return emitOpError("operand vector element count (")
+           << vectorType.getNumElements() << ") must match fragment register "
+           << "count (" << fragmentType.getRegisters() << ")";
+  return success();
+}
+
 LogicalResult FragmentFillOp::verify() {
   auto fragmentType = cast<FragmentType>(getResult().getType());
   if (!getSource().getType().isInteger(32))

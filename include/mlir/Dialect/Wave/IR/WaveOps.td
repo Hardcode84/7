@@ -212,6 +212,41 @@ def Wave_StoreOp : Wave_Op<"store", [MemoryEffects<[MemWrite]>]> {
   let hasVerifier = 1;
 }
 
+def Wave_LoadOp : Wave_Op<"load", [MemoryEffects<[MemRead]>]> {
+  let summary = "load a lane-varying SIMD value from memory";
+  let description = [{
+    Each active lane loads from the address derived from `$ptr`:
+
+    * With a plain `!wave.ptr<T, space>`, every lane reads the same
+      pointer (a wave-uniform broadcast load).
+    * With `!wave.simd<!wave.ptr<T, space>, W>`, each lane reads from its
+      own pointer.
+
+    The result shape is driven entirely by the result SIMD type:
+
+    * `!wave.simd<T, W>` -- each lane loads exactly one `T` element. The
+      pointer element type must be 32 bits wide (the only width the
+      lowering currently supports).
+    * `!wave.simd<vector<N x T'>, W>` -- each lane loads `N` consecutive
+      32-bit transport elements `T'` starting at its pointer. The total
+      per-lane payload is `N * 32` bits; the pointer element type may be
+      any 16- or 32-bit type as long as `N * 32 % bitwidth(T_ptr) == 0`,
+      i.e. the destination tuple covers an integer number of pointer
+      elements.
+
+    Memory ordering follows the usual Wave token discipline: the optional
+    `dependency` token sequences this load after a prior memory op, and
+    the returned token can be threaded into a later consumer to express
+    a happens-before constraint.
+  }];
+
+  let arguments = (ins AnyType:$ptr,
+                       Optional<Wave_MemToken>:$dependency);
+  let results = (outs Wave_Simd:$value, Wave_MemToken:$token);
+  let assemblyFormat = "$ptr (`after` $dependency^)? attr-dict `:` functional-type(operands, results)";
+  let hasVerifier = 1;
+}
+
 def Wave_WhereOp : Wave_Op<"where", [
     SingleBlockImplicitTerminator<"YieldOp">,
     RecursiveMemoryEffects,

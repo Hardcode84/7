@@ -56,6 +56,43 @@ def test_waveamd_matrix_kernel():
         print(m.module)
 
 
+# CHECK-LABEL: TEST: test_waveamd_load_and_fragment_pack
+@run
+def test_waveamd_load_and_fragment_pack():
+    with w.module() as m:
+        with m.function(
+            "load_pack_kernel",
+            [w.ptr_type(w.i32()), w.ptr_type(w.i32())],
+            kernel=True,
+        ) as f:
+            in_ptr, out_ptr = f.args
+            lane = f.lane_id()
+            simd_in = f.ptr_add(in_ptr, lane, w.simd_ptr_type(w.i32()))
+            base = f.constant_index(0)
+            scalar_out = f.ptr_add(out_ptr, base)
+
+            tuple_t = w.simd_type(w.vector_type(8, w.i32()))
+            acc_t = w.fragment_type(2, w.f32(), registers=8)
+            regs, tok = f.load(simd_in, tuple_t)
+            frag = f.fragment_pack(regs, acc_t)
+            f.fragment_store(frag, scalar_out, after=tok)
+
+            scalar_t = w.simd_type(w.i32())
+            simd_out = f.ptr_add(out_ptr, lane, w.simd_ptr_type(w.i32()))
+            scalar, scalar_tok = f.load(simd_in, scalar_t, after=tok)
+            f.store(scalar, simd_out, after=scalar_tok)
+
+            packed_frag, pack_tok = f.fragment_load(simd_in, acc_t, after=scalar_tok)
+            f.fragment_store(packed_frag, scalar_out, after=pack_tok)
+        # CHECK: func.func @load_pack_kernel
+        # CHECK: wave.load {{.*}} -> (!wave.simd<vector<8xi32>, 32>, !wave.mem.token)
+        # CHECK: waveamd.fragment_pack {{.*}} -> !waveamd.fragment<2, f32, 16, 16, 32, 8>
+        # CHECK: wave.load {{.*}} after {{.*}} -> (!wave.simd<i32, 32>, !wave.mem.token)
+        # CHECK: wave.load {{.*}} -> (!wave.simd<vector<8xi32>, 32>, !wave.mem.token)
+        # CHECK: waveamd.fragment_pack
+        print(m.module)
+
+
 # CHECK-LABEL: TEST: test_waveamd_buffer_pointer_type
 @run
 def test_waveamd_buffer_pointer_type():

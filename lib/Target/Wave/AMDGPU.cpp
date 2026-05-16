@@ -597,6 +597,29 @@ private:
           {toMCOperand(op.getOperand(0)), toMCOperand(op.getOperand(1)),
            toMCOperand(op.getOperand(2)), llvm::MCOperand::createImm(0),
            llvm::MCOperand::createImm(0)});
+    // GLOBAL_LOAD_DWORD_SADDR encodes its MC operands as
+    //   vdst, saddr, vaddr, offset, cpol
+    // -- the SADDR variants put the SGPR base first, unlike the *non*-SADDR
+    // store variants we use elsewhere.
+    if (isa<wavemachine::GlobalLoadB32Op>(op))
+      return emitMC(llvm::AMDGPU::GLOBAL_LOAD_DWORD_SADDR_gfx11,
+                    {toMCOperand(op.getResult(0)),
+                     toMCOperand(op.getOperand(1)),
+                     toMCOperand(op.getOperand(0)),
+                     llvm::MCOperand::createImm(0),
+                     llvm::MCOperand::createImm(0)});
+    if (isa<wavemachine::GlobalLoadTupleB32Op>(op)) {
+      auto regType = cast<wavemachine::RegType>(op.getResult(0).getType());
+      for (unsigned i = 0, e = regType.getWidth(); i != e; ++i)
+        if (failed(emitMC(llvm::AMDGPU::GLOBAL_LOAD_DWORD_SADDR_gfx11,
+                          {toMCVGPRComponent(op.getResult(0), i),
+                           toMCOperand(op.getOperand(1)),
+                           toMCOperand(op.getOperand(0)),
+                           llvm::MCOperand::createImm(i * 4),
+                           llvm::MCOperand::createImm(0)})))
+          return failure();
+      return success();
+    }
     if (isa<wavemachine::MakeBufferRsrcOp>(op)) {
       constexpr uint32_t gfx11Format32Float = 22;
       constexpr uint32_t defaultRsrcFlags =

@@ -42,6 +42,32 @@ def WaveAMD_FragmentFillOp : WaveAMD_Op<"fragment_fill", [Pure]> {
   let hasVerifier = 1;
 }
 
+def WaveAMD_FragmentPackOp : WaveAMD_Op<"fragment_pack", [Pure]> {
+  let summary = "bind per-lane register groups into a wave-cooperative fragment";
+  let description = [{
+    Bitcast-style assembly of a `!waveamd.fragment<role, T, M, N, W, R>`
+    from a `!wave.simd<vector<R x i32>, W>` whose per-lane vector holds
+    the `R` 32-bit registers of the destination fragment in canonical
+    WMMA order.
+
+    The op is a zero-cost rename at the WaveMachine level: the input and
+    output share the same physical `R`-wide VGPR tuple. It exists so the
+    DSL can build fragments out of the result of `wave.load` (or any
+    other producer of per-lane register tuples) without forcing the
+    target to grow a dedicated `fragment_load` opcode.
+
+    Verifier constraints:
+
+    * The SIMD width must match the fragment wave size.
+    * The per-lane vector must hold exactly `R` 32-bit elements.
+  }];
+
+  let arguments = (ins Wave_Simd:$registers);
+  let results = (outs WaveAMD_Fragment:$result);
+  let assemblyFormat = "$registers attr-dict `:` qualified(type($registers)) `->` qualified(type($result))";
+  let hasVerifier = 1;
+}
+
 def WaveAMD_MmaOp : WaveAMD_Op<"mma", [Pure]> {
   let summary = "AMD wave-cooperative matrix multiply-accumulate";
   let arguments = (ins StrAttr:$kind,

@@ -233,8 +233,11 @@ private:
         .Case<WaitOp>([&](auto o) { return selectWait(o); })
         .Case<WhereOp>([&](auto o) { return selectWhere(o); })
         .Case<StoreOp>([&](auto o) { return selectStore(o); })
+        .Case<LoadOp>([&](auto o) { return selectLoad(o); })
         .Case<waveamd::FragmentFillOp>(
             [&](auto o) { return selectFragmentFill(o); })
+        .Case<waveamd::FragmentPackOp>(
+            [&](auto o) { return selectFragmentPack(o); })
         .Case<waveamd::MmaOp>([&](auto o) { return selectMma(o); })
         .Case<waveamd::FragmentStoreOp>(
             [&](auto o) { return selectFragmentStore(o); })
@@ -549,6 +552,56 @@ private:
                    fragmentType.getRegisters()),
         {builder.getNamedAttr("registers", builder.getI64IntegerAttr(
                                                fragmentType.getRegisters()))});
+    eraseIfTopLevel(op);
+    return success();
+  }
+
+  // FragmentPack is a no-op rename at the WaveMachine level: the per-lane
+  // register tuple selected for the source SIMD value already has the
+  // exact register width required by the destination fragment.
+  LogicalResult selectFragmentPack(waveamd::FragmentPackOp op) {
+    values[op.getResult()] = expect(op.getRegisters(), op);
+    eraseIfTopLevel(op);
+    return success();
+  }
+
+  // Compute the per-lane register count for a wave.load result. Returns 1
+  // for scalar results and the vector element count for tuple results.
+  // The verifier guarantees the vector element width is 32 bits, so this
+  // count directly maps to the destination VGPR tuple width.
+  unsigned loadRegisterCount(SimdType simdType) {
+    if (auto vecTy = dyn_cast<VectorType>(simdType.getElementType()))
+      return vecTy.getNumElements();
+    return 1;
+  }
+
+  LogicalResult selectLoad(LoadOp op) {
+    auto baseIt = pointerBases.find(op.getPtr());
+    auto offsetIt = pointerOffsets.find(op.getPtr());
+    auto bufferIt = pointerBuffers.find(op.getPtr());
+    if (baseIt == pointerBases.end() || offsetIt == pointerOffsets.end())
+      return op.emitError("WaveMachine backend expects selected wave pointer");
+    if (bufferIt != pointerBuffers.end() && bufferIt->second)
+      return op.emitError(
+          "buffer-pointer loads are not yet supported by the WaveMachine "
+          "backend; route through a global pointer for now");
+
+    auto simdType = cast<SimdType>(op.getValue().getType());
+    unsigned registers = loadRegisterCount(simdType);
+
+    SmallVector<Value> operands{offsetIt->second, baseIt->second};
+    if (Value dependency = op.getDependency())
+      operands.push_back(expect(dependency, op));
+
+    StringRef opcode =
+        registers == 1 ? "global_load_b32" : "global_load_tuple_b32";
+    SmallVector<Type, 2> resultTypes{
+        getRegType(op.getContext(), wavemachine::RegClass::VGPR, registers),
+        getMemTokenType(op.getContext())};
+    Operation *load =
+        createWMOp(builder, op.getLoc(), opcode, operands, resultTypes);
+    values[op.getValue()] = load->getResult(0);
+    values[op.getToken()] = load->getResult(1);
     eraseIfTopLevel(op);
     return success();
   }

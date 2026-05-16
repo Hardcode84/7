@@ -288,8 +288,27 @@ def WaveMachine_GlobalLoadB32Op
   let summary = "global 32-bit load through an SGPR base";
   let arguments = (ins WaveMachine_VGPR1:$offset, WaveMachine_SGPR2:$base,
                        Optional<WaveMachine_MemToken>:$dependency);
-  let results = (outs WaveMachine_VGPR1:$result);
+  let results = (outs WaveMachine_VGPR1:$result,
+                      Variadic<WaveMachine_MemToken>:$tokens);
   let assemblyFormat = "$offset `,` $base (`after` $dependency^)? attr-dict `:` functional-type(operands, results)";
+  let hasVerifier = 1;
+}
+
+def WaveMachine_GlobalLoadTupleB32Op
+    : WaveMachine_Op<"global_load_tuple_b32", [WaveMachine_VMEMLoad]> {
+  let summary = "global load of N consecutive 32-bit values into a VGPR tuple";
+  let description = [{
+    Loads `N` consecutive dwords from `base + offset + i*4` into the `N`
+    components of a single VGPR tuple result of width `N`. Expands to `N`
+    `global_load_dword` instructions in the AMDGPU printer; the tuple
+    width is therefore the result register width.
+  }];
+  let arguments = (ins WaveMachine_VGPR1:$offset, WaveMachine_SGPR2:$base,
+                       Optional<WaveMachine_MemToken>:$dependency);
+  let results = (outs WaveMachine_VGPR:$result,
+                      Variadic<WaveMachine_MemToken>:$tokens);
+  let assemblyFormat = "$offset `,` $base (`after` $dependency^)? attr-dict `:` functional-type(operands, results)";
+  let hasVerifier = 1;
 }
 
 def WaveMachine_MakeBufferRsrcOp
