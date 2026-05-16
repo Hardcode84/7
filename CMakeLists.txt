@@ -42,5 +42,37 @@ endif()
 message(STATUS "Using LLVMConfig.cmake in: ${LLVM_DIR}")
 message(STATUS "Using MLIRConfig.cmake in: ${MLIR_DIR}")
 
+list(APPEND CMAKE_MODULE_PATH "${MLIR_CMAKE_DIR}")
+list(APPEND CMAKE_MODULE_PATH "${LLVM_CMAKE_DIR}")
+
+include(TableGen)
+include(AddLLVM)
+include(AddMLIR)
+include(HandleLLVMOptions)
+
+include_directories(${LLVM_INCLUDE_DIRS})
+include_directories(${MLIR_INCLUDE_DIRS})
+include_directories(${PROJECT_SOURCE_DIR}/include)
+include_directories(${PROJECT_BINARY_DIR}/include)
+
 set(LLVM_RUNTIME_OUTPUT_INTDIR ${CMAKE_BINARY_DIR}/bin)
 set(LLVM_LIBRARY_OUTPUT_INTDIR ${CMAKE_BINARY_DIR}/lib)
+
+# Wave transforms and the AMDGPU target translation reach into AMDGPU's
+# internal headers (SIDefines, AMDGPUMCTargetDesc, ...) which aren't part
+# of the public MLIR/LLVM install. Point at the llvm-project source and
+# build trees provided by build_tools/build_llvm.py; override if you
+# bootstrapped LLVM elsewhere.
+set(WAVE_LLVM_PROJECT_SRC_DIR
+    "${CMAKE_SOURCE_DIR}/build/_deps/llvm-project"
+    CACHE PATH "llvm-project source directory (AMDGPU internal headers)")
+set(WAVE_LLVM_PROJECT_BUILD_DIR
+    "${CMAKE_SOURCE_DIR}/build/llvm-build"
+    CACHE PATH "llvm-project build directory (AMDGPU TableGen output)")
+
+# The imported CMakeLists reference these names directly.
+set(LLVM_MAIN_SRC_DIR "${WAVE_LLVM_PROJECT_SRC_DIR}/llvm")
+set(LLVM_BINARY_DIR "${WAVE_LLVM_PROJECT_BUILD_DIR}")
+
+add_subdirectory(include)
+add_subdirectory(lib)

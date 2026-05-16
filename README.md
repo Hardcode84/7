@@ -3,19 +3,47 @@
 Standalone MLIR **Wave** dialect: an explicit wave-level programming model for
 AMDGPU, extracted from an in-tree LLVM/MLIR prototype.
 
-Status: scaffolding only. The dialect sources live on a branch of
-`llvm/llvm-project` (`wave-dsl`) and will be imported here as the extraction
-progresses.
+Status: code imported from `llvm/llvm-project` branch `wave-dsl`
+(tip `469ba96be262`). CMake glue is wired but **the build is not yet
+green out-of-tree** — see "Known build deps" below.
 
-## Layout (planned)
+## Layout
+
+Mirrors the in-tree MLIR layout so that `#include "mlir/Dialect/Wave/..."`
+references resolve without rewriting:
 
 ```
-include/wave/        # Wave dialect IR + transforms headers
-include/wavemachine/ # WaveMachine machine-level dialect headers
-lib/                 # Implementations and lowerings
-python/              # Python bindings + tracing DSL
-test/                # FileCheck and integration tests
+include/mlir/Dialect/Wave/        # Wave dialect IR + transforms (.h / .td)
+include/mlir/Dialect/WaveMachine/ # WaveMachine machine-level dialect
+include/mlir/Target/Wave/         # AMDGPU translation entry points
+lib/Dialect/Wave/{IR,Transforms}/ # Dialect impl, WaveAMD* passes,
+                                  # WaveToGPU, WaveToROCDL, WaveMachine,
+                                  # waitcnt
+lib/Dialect/WaveMachine/IR/       # WaveMachine impl
+lib/Target/Wave/                  # AMDGPU assembly backend + translation
+python/mlir/dialects/             # Wave / WaveAMD bindings + wave_dsl tracer
+test/{Dialect,Conversion,Target,Integration,python}/
+examples/wave/                    # small DSL examples
+docs/                             # Explicit Wave Programming Model proposal
 ```
+
+## Known build deps (not yet satisfied)
+
+The imported transforms reach into AMDGPU internals that aren't part of
+the public MLIR/LLVM install surface, **and** rely on a small upstream
+LLVM patch from the `wave-dsl` branch that isn't merged yet:
+
+- `AMDGPUInsertDelayAlu`, `SIInstrInfo`, `AMDGPUBaseInfo` exposing shared
+  hazard-delay encodings (see commit
+  `6490bb708b51` "Share AMDGPU hazard delay encodings").
+
+Until that lands upstream (or we vendor / patch it locally), `cmake
+--build build` will fail to compile `WaveAMDHazardWaits.cpp` and the
+AMDGPU translation. The CMake configure step does work and produces
+TableGen output.
+
+Python bindings (`MLIR_ENABLE_BINDINGS_PYTHON`) and a `wave-opt` /
+`wave-translate` tool driver are TODO.
 
 ## Building
 
