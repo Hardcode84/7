@@ -55,6 +55,7 @@ from mlir.ir import (
     Location,
     MemRefType,
     Module,
+    ShapedType,
     Type,
     UnitAttr,
     UnrankedMemRefType,
@@ -176,6 +177,16 @@ def _current_context() -> Context:
 
 def unranked_memref_type(element_type: Type) -> Type:
     return UnrankedMemRefType.get(element_type, Attribute.parse("0"))
+
+
+def dynamic_1d_memref_type(element_type: Type) -> Type:
+    """Build a ``memref<?xT>`` (1-D, dynamic-size) shape-erased memref.
+
+    Useful when declaring a runtime helper that takes any 1-D buffer of
+    ``element_type``; callers can ``memref_cast`` the static-shape
+    storage they hold over to this type.
+    """
+    return MemRefType.get([ShapedType.get_dynamic_size()], element_type)
 
 
 # ---------------------------------------------------------------------------
@@ -312,18 +323,8 @@ class FunctionBuilder:
 
     # --- arith / index constants ------------------------------------------
 
-    def constant(self, value: int, result_type: Type | None = None) -> Value:
-        result_type = result_type or i32()
+    def constant(self, result_type: Type, value: int | float) -> Value:
         return arith.ConstantOp(result_type, value).result
-
-    def constant_i32(self, value: int) -> Value:
-        return self.constant(value, i32())
-
-    def constant_index(self, value: int) -> Value:
-        return self.constant(value, index_type())
-
-    def constant_f32(self, value: float) -> Value:
-        return arith.ConstantOp(f32(), float(value)).result
 
     # --- Wave ops ----------------------------------------------------------
 
@@ -469,6 +470,9 @@ class FunctionBuilder:
 
     def cast_unranked(self, buf: Value) -> Value:
         return memref.CastOp(unranked_memref_type(buf.type.element_type), buf).result
+
+    def memref_cast(self, buf: Value, result_type: Type) -> Value:
+        return memref.CastOp(result_type, buf).result
 
     @contextmanager
     def for_loop(self, lower: Value, upper: Value, step: Value) -> Iterator[Value]:

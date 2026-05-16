@@ -5,10 +5,11 @@
 
 """Emit a tiled WMMA f16xf16xf32 matmul MLIR module for a given shape.
 
-The kernel uses ``waveamd.fragment_fill`` to broadcast a 1.0-fill into
-both A and B f16 fragments, accumulates into an f32 fragment, and writes
-the f32 output buffer. The host can check the result element-wise
-against ``K`` (each output element is
+The kernel allocates host-side ``MxK`` (A) and ``NxK`` (B) f16 buffers
+filled with 1.0 and an ``MxN`` f32 output, then issues ``wave.load`` +
+``waveamd.fragment_pack`` per K-tile, accumulates with ``waveamd.mma``,
+and stores the f32 accumulator. With the all-ones fill the host can
+check the result element-wise against ``K`` (each output element is
 :math:`\\sum_{k=0}^{K-1} 1.0 \\cdot 1.0 = K`).
 
 Pipe the output through ``wave-opt --wave-compile-kernels='chip=<gfx>'`` and
@@ -16,13 +17,17 @@ the standard host-lowering passes followed by ``mlir-runner``.
 
 Example:
 
-    wmma_matmul_tiled.py --m=64 --n=64 --k=32 --bm=2 --bn=2 \\
+    wmma_matmul_tiled.py --m=16 --n=64 --k=32 \\
         | wave-opt --wave-compile-kernels='chip=gfx1100' \\
             --convert-scf-to-cf \\
             --gpu-to-llvm=use-bare-pointers-for-kernels=true \\
             --convert-to-llvm \\
             --reconcile-unrealized-casts \\
         | mlir-runner --shared-libs=...
+
+Shape constraints (see :mod:`mlir.dialects.wave_matmul` for the
+rationale): ``M = 16``, ``N`` and ``K`` are power-of-two multiples of
+16, ``BM = BN = 1``.
 """
 
 from __future__ import annotations
@@ -57,16 +62,32 @@ def _ensure_package_on_path() -> None:
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n", 1)[0])
-    parser.add_argument("--m", type=int, default=64, help="output rows (mult of 16)")
-    parser.add_argument("--n", type=int, default=64, help="output cols (mult of 16)")
     parser.add_argument(
-        "--k", type=int, default=32, help="contraction dim (mult of 16)"
+        "--m", type=int, default=16, help="output rows (only 16 supported for now)"
     )
     parser.add_argument(
-        "--bm", type=int, default=1, help="waves per workgroup along M tiles"
+        "--n",
+        type=int,
+        default=64,
+        help="output cols (power-of-two multiple of 16)",
     )
     parser.add_argument(
-        "--bn", type=int, default=1, help="waves per workgroup along N tiles"
+        "--k",
+        type=int,
+        default=32,
+        help="contraction dim (power-of-two multiple of 16)",
+    )
+    parser.add_argument(
+        "--bm",
+        type=int,
+        default=1,
+        help="waves per workgroup along M tiles (only 1 supported for now)",
+    )
+    parser.add_argument(
+        "--bn",
+        type=int,
+        default=1,
+        help="waves per workgroup along N tiles (only 1 supported for now)",
     )
     return parser.parse_args(argv)
 

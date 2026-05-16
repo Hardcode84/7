@@ -36,12 +36,13 @@
 // ---------------------------------------------------------------------------
 // Loading inputs
 // ---------------------------------------------------------------------------
-// The dialect currently only provides `waveamd.fragment_fill`, which broadcasts
-// a single i32 bit pattern across every VGPR slot of every lane in the
-// fragment. The two kernels below therefore compute *constant* matmuls:
-// A and B end up filled with a uniform value chosen via the bit pattern.
-// A future `waveamd.fragment_load` would read a real tile from global memory;
-// the rest of the WMMA + store sequence shown here would not change.
+// `waveamd.fragment_fill` broadcasts a single i32 bit pattern across every
+// VGPR slot of every lane in the fragment, so the kernels below compute
+// *constant* matmuls: A and B end up filled with a uniform value chosen via
+// the bit pattern. For a real-memory load, pair a `wave.load` returning a
+// `!wave.simd<vector<R x i32>, W>` with `waveamd.fragment_pack` (see the
+// `fragment_load` helper in `mlir.dialects.wave_dsl` and the worked
+// kernel in `mlir.dialects.wave_matmul`).
 
 module attributes {gpu.container_module} {
 

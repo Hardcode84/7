@@ -457,6 +457,15 @@ private:
       return rhs;
     if (rhsImm && *rhsImm == 0)
       return lhs;
+    // v_add_nc_u32_e32 lays operands out as `vdst, vsrc0, vsrc1`, and the
+    // VOP2 encoding only allows SGPR/literal in vsrc0 (vsrc1 must be a
+    // VGPR). Hoist literals out of the rhs slot the same way
+    // `selectBinary` does, otherwise the asm printer will produce
+    // `v_add_nc_u32_e32 v, v, <literal>` which the assembler rejects.
+    if (isImm(rhs))
+      rhs = ensureVGPRForVSrc1(loc, rhs);
+    if (!isVGPR(lhs) && !isVGPR(rhs))
+      lhs = ensureVGPRForVSrc1(loc, lhs);
     return createInstr(
         builder, loc, "v_add_u32", {lhs, rhs},
         getRegType(builder.getContext(), wavemachine::RegClass::VGPR));

@@ -35,9 +35,9 @@ def test_waveamd_matrix_kernel():
     with w.module() as m:
         with m.function("matrix_kernel", [w.ptr_type(w.i32())], kernel=True) as f:
             (out,) = f.args
-            zero = f.constant_i32(0)
-            seven = f.constant_i32(7)
-            base = f.constant_index(0)
+            zero = f.constant(w.i32(), 0)
+            seven = f.constant(w.i32(), 7)
+            base = f.constant(w.index_type(), 0)
             a_t = w.fragment_type(0, w.i8(), registers=4)
             b_t = w.fragment_type(1, w.i8(), registers=4)
             acc_t = w.fragment_type(2, w.i32(), registers=8)
@@ -68,7 +68,7 @@ def test_waveamd_load_and_fragment_pack():
             in_ptr, out_ptr = f.args
             lane = f.lane_id()
             simd_in = f.ptr_add(in_ptr, lane, w.simd_ptr_type(w.i32()))
-            base = f.constant_index(0)
+            base = f.constant(w.index_type(), 0)
             scalar_out = f.ptr_add(out_ptr, base)
 
             tuple_t = w.simd_type(w.vector_type(8, w.i32()))
@@ -141,7 +141,7 @@ def test_waveamd_buffer_pointer_type():
     with w.module() as m:
         with m.function("buffer_ptr_kernel", [w.ptr_type(w.i32())], kernel=True) as f:
             (out,) = f.args
-            range_bytes = f.constant_i32(128)
+            range_bytes = f.constant(w.i32(), 128)
             buffer = f.make_buffer(out, range_bytes, w.buffer_ptr_type(w.i32()))
             lane = f.lane_id()
             f.ptr_add(buffer, lane, w.simd_type(w.buffer_ptr_type(w.i32())))
