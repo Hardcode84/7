@@ -102,6 +102,32 @@ func.func @wave_shri_muli(%x: i32) -> i32 {
   return %first : i32
 }
 
+// A barrier with no dependencies emits a bare `s_barrier`. With
+// dependencies on prior LDS stores the waitcnt pass inserts an
+// `s_waitcnt lgkmcnt(0)` ahead of the barrier.
+// CHECK-LABEL: wave_lds_echo:
+func.func @wave_lds_echo(%out: !wave.ptr<i32, #wave.global>)
+    attributes {wave.kernel, wave.lds_size = 128 : i64} {
+  // CHECK: v_mbcnt_lo_u32_b32 [[LANE:v[0-9]+]], -1, 0
+  %lane = wave.lane_id : !wave.simd<i32, 32>
+  // CHECK: v_lshlrev_b32_e32 [[BYTE:v[0-9]+]], 2, [[LANE]]
+  %lds = wave.lds_base : !wave.ptr<i32, #wave.shared>
+  %lds_ptrs = wave.ptr_add %lds, %lane : !wave.ptr<i32, #wave.shared>, !wave.simd<i32, 32> -> !wave.simd<!wave.ptr<i32, #wave.shared>, 32>
+  // CHECK: ds_store_b32 [[BYTE]], [[LANE]]
+  %store_token = wave.store %lane -> %lds_ptrs : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<i32, #wave.shared>, 32>) -> !wave.mem.token
+  // CHECK: s_waitcnt lgkmcnt(0)
+  // CHECK: s_barrier
+  %barrier_token = wave.barrier %store_token : (!wave.mem.token) -> !wave.mem.token
+  // CHECK: ds_load_b32 [[VAL:v[0-9]+]], [[BYTE]]
+  %loaded:2 = wave.load %lds_ptrs after %barrier_token : (!wave.simd<!wave.ptr<i32, #wave.shared>, 32>, !wave.mem.token) -> (!wave.simd<i32, 32>, !wave.mem.token)
+  // CHECK: global_store_b32 [[BYTE]], [[VAL]]
+  %out_ptrs = wave.ptr_add %out, %lane : !wave.ptr<i32, #wave.global>, !wave.simd<i32, 32> -> !wave.simd<!wave.ptr<i32, #wave.global>, 32>
+  %final_token = wave.store %loaded#0 -> %out_ptrs : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<i32, #wave.global>, 32>) -> !wave.mem.token
+  return
+}
+// CHECK: .amdhsa_kernel wave_lds_echo
+// CHECK: .amdhsa_group_segment_fixed_size 128
+
 // NOTE: NT_AMDGPU_METADATA
 // NOTE: amdhsa.kernels:
 // NOTE: .name:           wave_kernel

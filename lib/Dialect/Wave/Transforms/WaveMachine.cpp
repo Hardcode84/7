@@ -169,6 +169,13 @@ private:
     return ptr && isa<waveamd::BufferAddressSpaceAttr>(ptr.getAddressSpace());
   }
 
+  bool isSharedPointer(Type type) {
+    if (auto simd = dyn_cast<SimdType>(type))
+      type = simd.getElementType();
+    auto ptr = dyn_cast<PtrType>(type);
+    return ptr && isa<SharedAddressSpaceAttr>(ptr.getAddressSpace());
+  }
+
   unsigned pointerBaseWidth(Type type) { return isBufferPointer(type) ? 4 : 2; }
 
   void materializeArgument(BlockArgument arg, size_t index) {
@@ -234,6 +241,8 @@ private:
         .Case<WhereOp>([&](auto o) { return selectWhere(o); })
         .Case<StoreOp>([&](auto o) { return selectStore(o); })
         .Case<LoadOp>([&](auto o) { return selectLoad(o); })
+        .Case<LdsBaseOp>([&](auto o) { return selectLdsBase(o); })
+        .Case<BarrierOp>([&](auto o) { return selectBarrier(o); })
         .Case<waveamd::FragmentFillOp>(
             [&](auto o) { return selectFragmentFill(o); })
         .Case<waveamd::FragmentPackOp>(
@@ -415,6 +424,20 @@ private:
     auto bufferIt = pointerBuffers.find(op.getPtr());
     if (baseIt == pointerBases.end() || offsetIt == pointerOffsets.end())
       return op.emitError("WaveMachine backend expects selected wave pointer");
+    if (isSharedPointer(op.getPtr().getType())) {
+      Value addr = ensureVGPRForVSrc1(
+          op.getLoc(),
+          addByteOffsets(op.getLoc(), baseIt->second, offsetIt->second));
+      SmallVector<Value> operands{addr, expect(op.getValue(), op)};
+      if (Value dependency = op.getDependency())
+        operands.push_back(expect(dependency, op));
+      Operation *store =
+          createWMOp(builder, op.getLoc(), "ds_store_b32", operands,
+                     getMemTokenType(op.getContext()));
+      values[op.getToken()] = store->getResult(0);
+      eraseIfTopLevel(op);
+      return success();
+    }
     SmallVector<Value> operands{offsetIt->second, expect(op.getValue(), op),
                                 baseIt->second};
     if (Value dependency = op.getDependency())
@@ -601,6 +624,27 @@ private:
     auto simdType = cast<SimdType>(op.getValue().getType());
     unsigned registers = loadRegisterCount(simdType);
 
+    if (isSharedPointer(op.getPtr().getType())) {
+      if (registers != 1)
+        return op.emitError(
+            "LDS tuple loads are not supported by the WaveMachine backend yet");
+      Value addr = ensureVGPRForVSrc1(
+          op.getLoc(),
+          addByteOffsets(op.getLoc(), baseIt->second, offsetIt->second));
+      SmallVector<Value> operands{addr};
+      if (Value dependency = op.getDependency())
+        operands.push_back(expect(dependency, op));
+      SmallVector<Type, 2> resultTypes{
+          getRegType(op.getContext(), wavemachine::RegClass::VGPR, 1),
+          getMemTokenType(op.getContext())};
+      Operation *load = createWMOp(builder, op.getLoc(), "ds_load_b32",
+                                   operands, resultTypes);
+      values[op.getValue()] = load->getResult(0);
+      values[op.getToken()] = load->getResult(1);
+      eraseIfTopLevel(op);
+      return success();
+    }
+
     SmallVector<Value> operands{offsetIt->second, baseIt->second};
     if (Value dependency = op.getDependency())
       operands.push_back(expect(dependency, op));
@@ -614,6 +658,28 @@ private:
         createWMOp(builder, op.getLoc(), opcode, operands, resultTypes);
     values[op.getValue()] = load->getResult(0);
     values[op.getToken()] = load->getResult(1);
+    eraseIfTopLevel(op);
+    return success();
+  }
+
+  LogicalResult selectLdsBase(LdsBaseOp op) {
+    Value baseValue = createImm(builder, op.getLoc(), 0);
+    pointerBases[op.getResult()] = baseValue;
+    pointerOffsets[op.getResult()] =
+        createImm(builder, op.getLoc(), op.getOffset());
+    values[op.getResult()] = baseValue;
+    eraseIfTopLevel(op);
+    return success();
+  }
+
+  LogicalResult selectBarrier(BarrierOp op) {
+    SmallVector<Value> operands;
+    for (Value dependency : op.getDependencies())
+      operands.push_back(expect(dependency, op));
+    Operation *barrier =
+        createWMOp(builder, op.getLoc(), "s_barrier", operands,
+                   getMemTokenType(op.getContext()));
+    values[op.getToken()] = barrier->getResult(0);
     eraseIfTopLevel(op);
     return success();
   }

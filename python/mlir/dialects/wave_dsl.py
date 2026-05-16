@@ -51,6 +51,7 @@ from mlir.ir import (
     F32Type,
     IndexType,
     InsertionPoint,
+    IntegerAttr,
     IntegerType,
     Location,
     MemRefType,
@@ -74,6 +75,14 @@ def i8() -> IntegerType:
 
 def i32() -> IntegerType:
     return IntegerType.get_signless(32)
+
+
+def i64() -> IntegerType:
+    return IntegerType.get_signless(64)
+
+
+def i64_attr(value: int) -> IntegerAttr:
+    return IntegerAttr.get(i64(), value)
 
 
 def f16() -> F16Type:
@@ -301,10 +310,14 @@ class _GpuModuleBuilder:
         name: str,
         inputs: Sequence[Type],
         results: Sequence[Type] = (),
+        *,
+        lds_size: int | None = None,
     ) -> Iterator[FunctionBuilder]:
         op = func.FuncOp(name, (list(inputs), list(results)))
         op.attributes["gpu.kernel"] = UnitAttr.get()
         op.attributes["wave.kernel"] = UnitAttr.get()
+        if lds_size is not None:
+            op.attributes["wave.lds_size"] = i64_attr(lds_size)
         block = op.add_entry_block()
         with InsertionPoint(block):
             yield FunctionBuilder(block)
@@ -399,6 +412,26 @@ class FunctionBuilder:
 
     def join(self, *tokens: Value) -> Value:
         return wave.JoinOp(mem_token_type(), list(tokens)).result
+
+    def lds_base(
+        self,
+        element_type: Type | None = None,
+        *,
+        offset: int = 0,
+    ) -> Value:
+        """Return a pointer to the start of the workgroup's LDS arena.
+
+        ``element_type`` defaults to ``i32``; the byte offset into the
+        arena (``offset``) defaults to 0. Combine with ``ptr_add`` to
+        materialize per-lane addresses, or with a uniform offset to
+        partition the arena.
+        """
+        ty = ptr_type(element_type or i32(), shared_address_space())
+        return wave.LdsBaseOp(ty, offset=offset).result
+
+    def barrier(self, *dependencies: Value) -> Value:
+        """Emit a workgroup-wide barrier sequenced after ``dependencies``."""
+        return wave.BarrierOp(mem_token_type(), list(dependencies)).token
 
     # --- WaveAMD ops -------------------------------------------------------
 

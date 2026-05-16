@@ -64,6 +64,7 @@ struct KernelInfo {
   unsigned kernargSize = 0;
   unsigned sgprCount = 0;
   unsigned vgprCount = 0;
+  unsigned ldsSize = 0;
   SmallVector<KernelArgInfo> args;
 };
 
@@ -187,6 +188,7 @@ private:
       info.kernargSize = getKernelArgSize(func);
       info.sgprCount = getIntAttr(func, "wavemachine.sgpr_count", 6);
       info.vgprCount = getIntAttr(func, "wavemachine.vgpr_count", 1);
+      info.ldsSize = getIntAttr(func, "wavemachine.lds_size", 0);
       unsigned offset = 0;
       for (auto [index, arg] : llvm::enumerate(func.getArguments())) {
         bool isBuffer = isa<wave::PtrType>(arg.getType());
@@ -216,6 +218,7 @@ private:
     unsigned kernargSize = getKernelArgSize(func);
     unsigned sgprCount = getIntAttr(func, "wavemachine.sgpr_count", 6);
     unsigned vgprCount = getIntAttr(func, "wavemachine.vgpr_count", 1);
+    unsigned ldsSize = getIntAttr(func, "wavemachine.lds_size", 0);
     bool usesWgY = false;
     bool usesWgZ = false;
     func.walk([&](Operation *op) {
@@ -227,7 +230,7 @@ private:
     os << "\t.section\t.rodata,\"a\",@progbits\n";
     os << "\t.p2align\t6, 0x0\n";
     os << "\t.amdhsa_kernel " << func.getSymName() << "\n";
-    os << "\t\t.amdhsa_group_segment_fixed_size 0\n";
+    os << "\t\t.amdhsa_group_segment_fixed_size " << ldsSize << "\n";
     os << "\t\t.amdhsa_private_segment_fixed_size 0\n";
     os << "\t\t.amdhsa_kernarg_size " << kernargSize << "\n";
     os << "\t\t.amdhsa_user_sgpr_count 2\n";
@@ -296,7 +299,7 @@ private:
           os << "        .value_kind:     by_value\n";
         }
       }
-      os << "    .group_segment_fixed_size: 0\n";
+      os << "    .group_segment_fixed_size: " << kernel.ldsSize << "\n";
       os << "    .kernarg_segment_align: 8\n";
       os << "    .kernarg_segment_size: " << kernel.kernargSize << "\n";
       os << "    .max_flat_workgroup_size: 1024\n";
@@ -666,6 +669,20 @@ private:
                      llvm::MCOperand::createImm(component * 4),
                      llvm::MCOperand::createImm(0)});
     }
+    if (isa<wavemachine::DsLoadB32Op>(op))
+      return emitMC(llvm::AMDGPU::DS_READ_B32_gfx11,
+                    {toMCOperand(op.getResult(0)),
+                     toMCOperand(op.getOperand(0)),
+                     llvm::MCOperand::createImm(getIntAttr(&op, "offset", 0)),
+                     llvm::MCOperand::createImm(0)});
+    if (isa<wavemachine::DsStoreB32Op>(op))
+      return emitMC(llvm::AMDGPU::DS_WRITE_B32_gfx11,
+                    {toMCOperand(op.getOperand(0)),
+                     toMCOperand(op.getOperand(1)),
+                     llvm::MCOperand::createImm(getIntAttr(&op, "offset", 0)),
+                     llvm::MCOperand::createImm(0)});
+    if (isa<wavemachine::SBarrierOp>(op))
+      return emitMC(llvm::AMDGPU::S_BARRIER_gfx11, {});
     if (isa<wavemachine::SEndpgmOp>(op))
       return emitMC(llvm::AMDGPU::S_ENDPGM_gfx11,
                     {llvm::MCOperand::createImm(0)});

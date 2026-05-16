@@ -357,4 +357,44 @@ def WaveMachine_GlobalStoreTupleB32Op
   let hasVerifier = 1;
 }
 
+// LDS ("group_segment_fixed_size") loads and stores share the same
+// per-workgroup arena: the address operand is a 32-bit byte offset into
+// LDS and an optional immediate `offset:imm` is folded into the
+// hardware instruction. Both kinds drain through `lgkmcnt`; we model
+// that by tagging them with the SMEM-load trait, which the waitcnt pass
+// already routes to the LGKM counter.
+def WaveMachine_DsLoadB32Op
+    : WaveMachine_Op<"ds_load_b32", [WaveMachine_SMEMLoad]> {
+  let summary = "LDS 32-bit load";
+  let arguments = (ins WaveMachine_VGPR1:$addr,
+                       Optional<WaveMachine_MemToken>:$dependency,
+                       DefaultValuedAttr<I64Attr, "0">:$offset);
+  let results = (outs WaveMachine_VGPR1:$result,
+                      Variadic<WaveMachine_MemToken>:$tokens);
+  let assemblyFormat = "$addr (`after` $dependency^)? attr-dict `:` functional-type(operands, results)";
+}
+
+def WaveMachine_DsStoreB32Op
+    : WaveMachine_Op<"ds_store_b32", [WaveMachine_SMEMLoad]> {
+  let summary = "LDS 32-bit store";
+  let arguments = (ins WaveMachine_VGPR1:$addr, WaveMachine_VGPR1:$value,
+                       Optional<WaveMachine_MemToken>:$dependency,
+                       DefaultValuedAttr<I64Attr, "0">:$offset);
+  let results = (outs Variadic<WaveMachine_MemToken>:$tokens);
+  let assemblyFormat = "$addr `,` $value (`after` $dependency^)? attr-dict `:` functional-type(operands, results)";
+}
+
+def WaveMachine_SBarrierOp : WaveMachine_Op<"s_barrier"> {
+  let summary = "workgroup-wide barrier";
+  let description = [{
+    Synchronizes all waves of the workgroup. Surrounding waitcnts must
+    be inserted by `wave-amd-insert-ticket-waits` based on the
+    dependencies passed through the higher-level `wave.barrier`.
+  }];
+
+  let arguments = (ins Variadic<WaveMachine_MemToken>:$dependencies);
+  let results = (outs Variadic<WaveMachine_MemToken>:$tokens);
+  let assemblyFormat = "$dependencies attr-dict `:` functional-type(operands, results)";
+}
+
 #endif // MLIR_DIALECT_WAVEMACHINE_IR_WAVEMACHINEOPS_TD

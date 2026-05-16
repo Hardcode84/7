@@ -462,7 +462,9 @@ static LogicalResult validateWaveMachineOp(Operation *op) {
       func && func->hasAttr("wave.kernel") && isa<wavemachine::ArgOp>(op))
     return op->emitError("waveamd-insert-ticket-waits expects "
                          "ABI-lowered kernel arguments");
-  if (isSMEMLoad(op) && !op->getAttrOfType<StringAttr>("base"))
+  if (isa<wavemachine::SLoadB32Op, wavemachine::SLoadB64Op,
+          wavemachine::SLoadB128Op>(op) &&
+      !op->getAttrOfType<StringAttr>("base"))
     return op->emitError("waveamd-insert-ticket-waits expects scalar "
                          "memory loads to carry a base register attribute");
   return success();

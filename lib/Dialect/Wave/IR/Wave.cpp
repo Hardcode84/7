@@ -277,6 +277,15 @@ verifyPtrAddResult(Type resultType, Type pointerType, int64_t simdWidth,
   return success();
 }
 
+LogicalResult LdsBaseOp::verify() {
+  auto ptrType = dyn_cast<PtrType>(getResult().getType());
+  if (!ptrType)
+    return emitOpError("result must be a wave pointer");
+  if (!isa<SharedAddressSpaceAttr>(ptrType.getAddressSpace()))
+    return emitOpError("result pointer must live in the shared address space");
+  return success();
+}
+
 LogicalResult PtrAddOp::verify() {
   auto emit = [this](const Twine &msg) { return emitOpError(msg); };
   auto base = verifyPtrAddBase(getBase().getType(), emit);

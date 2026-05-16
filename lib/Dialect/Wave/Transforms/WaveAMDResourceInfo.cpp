@@ -77,6 +77,9 @@ struct WaveAMDResourceInfoPass
           builder.getI64IntegerAttr(std::max(regs.sgpr, sgprBaseline)));
       func->setAttr("wavemachine.vgpr_count",
                     builder.getI64IntegerAttr(std::max(regs.vgpr, 1u)));
+      if (auto ldsAttr = func->getAttrOfType<IntegerAttr>("wave.lds_size"))
+        func->setAttr("wavemachine.lds_size",
+                      builder.getI64IntegerAttr(ldsAttr.getInt()));
     }
   }
 };

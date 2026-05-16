@@ -214,7 +214,8 @@ private:
   }
   // True for scalar memory loads missing the required `base` attribute.
   static bool isMalformedSMEMLoad(Operation &op) {
-    return op.hasTrait<OpTrait::wavemachine::SMEMLoadOp>() &&
+    return isa<wavemachine::SLoadB32Op, wavemachine::SLoadB64Op,
+               wavemachine::SLoadB128Op>(op) &&
            !op.getAttrOfType<StringAttr>("base");
   }
 

@@ -189,6 +189,44 @@ def Wave_WaitOp : Wave_Op<"wait", []> {
   let assemblyFormat = "$dependencies attr-dict `:` type($dependencies)";
 }
 
+def Wave_LdsBaseOp : Wave_Op<"lds_base", [Pure]> {
+  let summary = "base pointer to the kernel's workgroup-local LDS arena";
+  let description = [{
+    Returns a wave-uniform pointer to the start of the workgroup-local LDS
+    arena reserved for this kernel. The pointer addresses element type
+    `T` at the offset given by the optional `offset` attribute (in bytes
+    from the start of the arena, default 0).
+
+    The kernel is expected to carry a `wave.lds_size` integer attribute
+    expressing the total number of bytes of LDS reserved; lowering uses
+    that value to populate `group_segment_fixed_size` on the kernel
+    descriptor.
+  }];
+
+  let arguments = (ins DefaultValuedAttr<I64Attr, "0">:$offset);
+  let results = (outs Wave_Ptr:$result);
+  let assemblyFormat = "attr-dict `:` qualified(type($result))";
+  let hasVerifier = 1;
+}
+
+def Wave_BarrierOp : Wave_Op<"barrier", [MemoryEffects<[MemWrite, MemRead]>]> {
+  let summary = "workgroup-wide barrier";
+  let description = [{
+    Synchronizes all waves of the workgroup. Lowering must ensure that
+    all memory operations preceding the barrier in any wave are visible
+    to all waves after the barrier, via the usual hardware fences
+    (`s_waitcnt lgkmcnt(0)` before `s_barrier` on RDNA3).
+
+    The optional `dependencies` carry token-level ordering: a barrier
+    that depends on an earlier LDS store cannot be moved above it, and
+    the returned token sequences subsequent LDS loads after the barrier.
+  }];
+
+  let arguments = (ins Variadic<Wave_MemToken>:$dependencies);
+  let results = (outs Wave_MemToken:$token);
+  let assemblyFormat = "($dependencies^)? attr-dict `:` functional-type(operands, results)";
+}
+
 def Wave_PtrAddOp : Wave_Op<"ptr_add", [Pure]> {
   let summary = "add an element offset to a Wave pointer";
   let arguments = (ins AnyType:$base, AnyType:$offset);
