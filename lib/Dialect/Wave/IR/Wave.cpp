@@ -127,51 +127,83 @@ LogicalResult StoreOp::verify() {
   return success();
 }
 
-LogicalResult PtrAddOp::verify() {
-  Type baseType = getBase().getType();
-  Type offsetType = getOffset().getType();
-  Type resultType = getResult().getType();
-
+namespace {
+// Successful decomposition of `wave.ptr_add`'s base operand into the
+// underlying `!wave.ptr` type plus the SIMD lane width (0 for a scalar
+// base pointer).
+struct PtrAddBase {
   Type pointerType;
-  int64_t pointerWidth = 0;
-  if (auto basePtr = dyn_cast<PtrType>(baseType)) {
-    pointerType = basePtr;
-  } else if (auto baseSimd = dyn_cast<SimdType>(baseType)) {
+  int64_t simdWidth;
+};
+} // namespace
+
+// Validate the base operand type and return `(pointerType, simdWidth)`.
+static FailureOr<PtrAddBase>
+verifyPtrAddBase(Type baseType,
+                 function_ref<InFlightDiagnostic(const Twine &)> emitError) {
+  if (auto basePtr = dyn_cast<PtrType>(baseType))
+    return PtrAddBase{basePtr, 0};
+  if (auto baseSimd = dyn_cast<SimdType>(baseType)) {
     if (!isa<PtrType>(baseSimd.getElementType()))
-      return emitOpError("base SIMD element type must be a wave pointer");
-    pointerType = baseSimd.getElementType();
-    pointerWidth = baseSimd.getWidth();
-  } else {
-    return emitOpError("base must be a wave pointer or SIMD of wave pointers");
+      return emitError("base SIMD element type must be a wave pointer");
+    return PtrAddBase{baseSimd.getElementType(), baseSimd.getWidth()};
   }
+  return emitError("base must be a wave pointer or SIMD of wave pointers");
+}
 
-  int64_t offsetWidth = 0;
-  if (offsetType.isIndex()) {
-    offsetWidth = 0;
-  } else if (auto intType = dyn_cast<IntegerType>(offsetType)) {
+// Validate the offset operand type and return its SIMD lane width
+// (0 for non-SIMD offsets).
+static FailureOr<int64_t>
+verifyPtrAddOffset(Type offsetType,
+                   function_ref<InFlightDiagnostic(const Twine &)> emitError) {
+  if (offsetType.isIndex())
+    return int64_t{0};
+  if (auto intType = dyn_cast<IntegerType>(offsetType)) {
     if (intType.getWidth() != 32 && intType.getWidth() != 64)
-      return emitOpError("integer offset must be i32 or i64");
-  } else if (auto offsetSimd = dyn_cast<SimdType>(offsetType)) {
+      return emitError("integer offset must be i32 or i64");
+    return int64_t{0};
+  }
+  if (auto offsetSimd = dyn_cast<SimdType>(offsetType)) {
     if (!offsetSimd.getElementType().isInteger(32))
-      return emitOpError("SIMD offset element type must be i32");
-    offsetWidth = offsetSimd.getWidth();
-  } else {
-    return emitOpError("offset must be index, integer, or i32 SIMD");
+      return emitError("SIMD offset element type must be i32");
+    return offsetSimd.getWidth();
   }
+  return emitError("offset must be index, integer, or i32 SIMD");
+}
 
-  if (pointerWidth && offsetWidth && pointerWidth != offsetWidth)
-    return emitOpError("base and offset SIMD widths must match");
-
-  if (offsetWidth || pointerWidth) {
-    int64_t width = offsetWidth ? offsetWidth : pointerWidth;
-    auto resultSimd = dyn_cast<SimdType>(resultType);
-    if (!resultSimd || resultSimd.getElementType() != pointerType ||
-        resultSimd.getWidth() != width)
-      return emitOpError("result must be a SIMD of the wave pointer type");
-  } else if (resultType != pointerType) {
-    return emitOpError("result must match base pointer type");
-  }
+// Check that `resultType` matches `pointerType` when both base and offset are
+// scalar, or is a SIMD-of-pointer with the expected lane width otherwise.
+static LogicalResult
+verifyPtrAddResult(Type resultType, Type pointerType, int64_t simdWidth,
+                   function_ref<InFlightDiagnostic(const Twine &)> emitError) {
+  if (simdWidth == 0)
+    return resultType == pointerType
+               ? success()
+               : LogicalResult(
+                     emitError("result must match base pointer type"));
+  auto resultSimd = dyn_cast<SimdType>(resultType);
+  if (!resultSimd || resultSimd.getElementType() != pointerType ||
+      resultSimd.getWidth() != simdWidth)
+    return emitError("result must be a SIMD of the wave pointer type");
   return success();
+}
+
+LogicalResult PtrAddOp::verify() {
+  auto emit = [this](const Twine &msg) { return emitOpError(msg); };
+  auto base = verifyPtrAddBase(getBase().getType(), emit);
+  if (failed(base))
+    return failure();
+  auto offsetWidth = verifyPtrAddOffset(getOffset().getType(), emit);
+  if (failed(offsetWidth))
+    return failure();
+
+  int64_t pointerWidth = base->simdWidth;
+  if (pointerWidth && *offsetWidth && pointerWidth != *offsetWidth)
+    return emit("base and offset SIMD widths must match");
+
+  int64_t resultWidth = std::max<int64_t>(pointerWidth, *offsetWidth);
+  return verifyPtrAddResult(getResult().getType(), base->pointerType,
+                            resultWidth, emit);
 }
 
 #define GET_OP_CLASSES

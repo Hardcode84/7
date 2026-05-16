@@ -54,38 +54,99 @@ LogicalResult MakeBufferOp::verify() {
   return success();
 }
 
+namespace {
+// Layout constraints for an A or B operand fragment.
+static bool isValidABFragment(FragmentType type) {
+  bool isIU8 = type.getElementType().isInteger(8) && type.getRegisters() == 4;
+  bool isF16 = type.getElementType().isF16() && type.getRegisters() == 8;
+  return isIU8 || isF16;
+}
+// Layout constraints for an accumulator fragment.
+static bool isValidAccFragment(FragmentType type) {
+  Type elt = type.getElementType();
+  return elt.isIntOrFloat() && elt.getIntOrFloatBitWidth() == 32 &&
+         type.getRegisters() == 8;
+}
+static bool isValidFragmentRole(int64_t role) {
+  return role == 0 || role == 1 || role == 2;
+}
+static bool is16x16Fragment(FragmentType type) {
+  return type.getRows() == 16 && type.getColumns() == 16;
+}
+} // namespace
+
 LogicalResult FragmentFillOp::verify() {
   auto fragmentType = cast<FragmentType>(getResult().getType());
   if (!getSource().getType().isInteger(32))
     return emitOpError("source must be an i32 bit pattern");
   if (fragmentType.getWaveSize() != 32)
     return emitOpError("only wave32 fragments are supported for now");
-  if (fragmentType.getRole() != 0 && fragmentType.getRole() != 1 &&
-      fragmentType.getRole() != 2)
+  int64_t role = fragmentType.getRole();
+  if (!isValidFragmentRole(role))
     return emitOpError("fragment role must be 0 (A), 1 (B), or 2 (acc)");
-  if (fragmentType.getRows() != 16 || fragmentType.getColumns() != 16)
+  if (!is16x16Fragment(fragmentType))
     return emitOpError("only 16x16 fragments are supported for now");
-  if (fragmentType.getRole() == 0 || fragmentType.getRole() == 1) {
-    bool isIU8 = fragmentType.getElementType().isInteger(8) &&
-                 fragmentType.getRegisters() == 4;
-    bool isF16 = fragmentType.getElementType().isF16() &&
-                 fragmentType.getRegisters() == 8;
-    if (!isIU8 && !isF16)
-      return emitOpError("A/B fragments must be i8 fragments with 4 registers "
-                         "or f16 fragments with 8 registers");
-  }
-  if (fragmentType.getRole() == 2 &&
-      (!fragmentType.getElementType().isIntOrFloat() ||
-       fragmentType.getElementType().getIntOrFloatBitWidth() != 32 ||
-       fragmentType.getRegisters() != 8))
+  if (role != 2 && !isValidABFragment(fragmentType))
+    return emitOpError("A/B fragments must be i8 fragments with 4 registers "
+                       "or f16 fragments with 8 registers");
+  if (role == 2 && !isValidAccFragment(fragmentType))
     return emitOpError(
         "accumulator fragments must be 32-bit fragments with 8 registers");
   return success();
 }
 
+namespace {
+// Expected fragment-operand layout for a single WMMA kind.
+struct WmmaShape {
+  StringRef kind;
+  // Predicate that returns true iff a fragment matches the A/B operand
+  // shape (the predicate also pins the operand `role`).
+  bool (*matchAB)(FragmentType, int64_t role);
+  // Predicate for the accumulator operand.
+  bool (*matchAcc)(FragmentType);
+  StringRef abError;
+  StringRef accError;
+};
+
+static bool isWmma16x16x16(FragmentType type) {
+  return type.getRows() == 16 && type.getColumns() == 16 &&
+         type.getWaveSize() == 32;
+}
+static bool matchIU8AB(FragmentType type, int64_t role) {
+  return type.getRole() == role && type.getElementType().isInteger(8) &&
+         type.getRegisters() == 4 && isWmma16x16x16(type);
+}
+static bool matchI32Acc(FragmentType type) {
+  return type.getRole() == 2 && type.getElementType().isInteger(32) &&
+         type.getRegisters() == 8 && isWmma16x16x16(type);
+}
+static bool matchF16AB(FragmentType type, int64_t role) {
+  return type.getRole() == role && type.getElementType().isF16() &&
+         type.getRegisters() == 8 && isWmma16x16x16(type);
+}
+static bool matchF32Acc(FragmentType type) {
+  return type.getRole() == 2 && type.getElementType().isF32() &&
+         type.getRegisters() == 8 && isWmma16x16x16(type);
+}
+
+static constexpr WmmaShape kWmmaShapes[] = {
+    {"wmma.i32.16x16x16.iu8", matchIU8AB, matchI32Acc,
+     "must be a 16x16 i8 wave32 fragment with 4 registers",
+     "accumulator must be a 16x16 i32 wave32 fragment with 8 registers"},
+    {"wmma.f32.16x16x16.f16", matchF16AB, matchF32Acc,
+     "must be a 16x16 f16 wave32 fragment with 8 registers",
+     "accumulator must be a 16x16 f32 wave32 fragment with 8 registers"},
+};
+} // namespace
+
 LogicalResult MmaOp::verify() {
-  if (getKind() != "wmma.i32.16x16x16.iu8" &&
-      getKind() != "wmma.f32.16x16x16.f16")
+  const WmmaShape *shape = nullptr;
+  for (const WmmaShape &candidate : kWmmaShapes)
+    if (candidate.kind == getKind()) {
+      shape = &candidate;
+      break;
+    }
+  if (!shape)
     return emitOpError("unsupported matrix operation kind");
 
   auto aType = cast<FragmentType>(getA().getType());
@@ -93,49 +154,12 @@ LogicalResult MmaOp::verify() {
   auto accType = cast<FragmentType>(getAcc().getType());
   auto resultType = cast<FragmentType>(getResult().getType());
 
-  auto isIU8AB = [](FragmentType type, int64_t role) {
-    return type.getRole() == role && type.getElementType().isInteger(8) &&
-           type.getRows() == 16 && type.getColumns() == 16 &&
-           type.getWaveSize() == 32 && type.getRegisters() == 4;
-  };
-  auto isI32Acc = [](FragmentType type) {
-    return type.getRole() == 2 && type.getElementType().isInteger(32) &&
-           type.getRows() == 16 && type.getColumns() == 16 &&
-           type.getWaveSize() == 32 && type.getRegisters() == 8;
-  };
-
-  auto isF16AB = [](FragmentType type, int64_t role) {
-    return type.getRole() == role && type.getElementType().isF16() &&
-           type.getRows() == 16 && type.getColumns() == 16 &&
-           type.getWaveSize() == 32 && type.getRegisters() == 8;
-  };
-  auto isF32Acc = [](FragmentType type) {
-    return type.getRole() == 2 && type.getElementType().isF32() &&
-           type.getRows() == 16 && type.getColumns() == 16 &&
-           type.getWaveSize() == 32 && type.getRegisters() == 8;
-  };
-
-  if (getKind() == "wmma.i32.16x16x16.iu8") {
-    if (!isIU8AB(aType, 0))
-      return emitOpError(
-          "A operand must be a 16x16 i8 wave32 fragment with 4 registers");
-    if (!isIU8AB(bType, 1))
-      return emitOpError(
-          "B operand must be a 16x16 i8 wave32 fragment with 4 registers");
-    if (!isI32Acc(accType))
-      return emitOpError(
-          "accumulator must be a 16x16 i32 wave32 fragment with 8 registers");
-  } else {
-    if (!isF16AB(aType, 0))
-      return emitOpError(
-          "A operand must be a 16x16 f16 wave32 fragment with 8 registers");
-    if (!isF16AB(bType, 1))
-      return emitOpError(
-          "B operand must be a 16x16 f16 wave32 fragment with 8 registers");
-    if (!isF32Acc(accType))
-      return emitOpError(
-          "accumulator must be a 16x16 f32 wave32 fragment with 8 registers");
-  }
+  if (!shape->matchAB(aType, 0))
+    return emitOpError("A operand ") << shape->abError;
+  if (!shape->matchAB(bType, 1))
+    return emitOpError("B operand ") << shape->abError;
+  if (!shape->matchAcc(accType))
+    return emitOpError(shape->accError);
   if (resultType != accType)
     return emitOpError("result type must match accumulator type");
   return success();

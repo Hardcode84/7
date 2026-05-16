@@ -179,6 +179,13 @@ static std::optional<unsigned> getImmediate(Value value) {
       def->getAttrOfType<IntegerAttr>("value").getInt());
 }
 
+struct HazardConfig {
+  bool hasDelayAlu;
+  llvm::AMDGPU::IsaVersion isaVersion;
+  unsigned defaultLgkmcnt;
+  unsigned valuDep1;
+};
+
 struct WaveAMDHazardWaitsPass
     : public wave::impl::WaveAMDHazardWaitsBase<WaveAMDHazardWaitsPass> {
   void runOnOperation() override {
@@ -188,54 +195,81 @@ struct WaveAMDHazardWaitsPass
         createSubtargetInfo(module);
     if (failed(sti))
       return signalPassFailure();
-    bool hasDelayAlu = llvm::AMDGPU::isGFX11Plus(**sti);
-    llvm::AMDGPU::IsaVersion isaVersion =
-        llvm::AMDGPU::getIsaVersion((*sti)->getCPU());
-    unsigned defaultLgkmcnt = llvm::AMDGPU::decodeLgkmcnt(
-        isaVersion, llvm::AMDGPU::getWaitcntBitMask(isaVersion));
-    unsigned valuDep1 = amdgpu_compat::SDelayAlu::encode(
-        amdgpu_compat::SDelayAlu::DelayType::VALU, 1);
-    for (func::FuncOp func : module.getOps<func::FuncOp>()) {
-      bool pendingLgkmWait = false;
-      for (Operation &op : llvm::make_early_inc_range(func.getBody().front())) {
-        if (op.getName().getDialectNamespace() !=
-            wavemachine::WaveMachineDialect::getDialectNamespace())
-          continue;
-        if (func->hasAttr("wave.kernel") && isa<wavemachine::ArgOp>(op)) {
-          op.emitError("waveamd-insert-hazard-waits expects ABI-lowered kernel "
-                       "arguments");
-          return signalPassFailure();
-        }
-        if (op.hasTrait<OpTrait::wavemachine::SMEMLoadOp>() &&
-            !op.getAttrOfType<StringAttr>("base")) {
-          op.emitError("waveamd-insert-hazard-waits expects scalar memory "
-                       "loads to carry a base register attribute");
-          return signalPassFailure();
-        }
+    HazardConfig cfg{llvm::AMDGPU::isGFX11Plus(**sti),
+                     llvm::AMDGPU::getIsaVersion((*sti)->getCPU()), 0,
+                     amdgpu_compat::SDelayAlu::encode(
+                         amdgpu_compat::SDelayAlu::DelayType::VALU, 1)};
+    cfg.defaultLgkmcnt = llvm::AMDGPU::decodeLgkmcnt(
+        cfg.isaVersion, llvm::AMDGPU::getWaitcntBitMask(cfg.isaVersion));
+    for (func::FuncOp func : module.getOps<func::FuncOp>())
+      if (failed(processFunction(func, builder, cfg, **sti)))
+        return signalPassFailure();
+  }
 
-        if (op.hasTrait<OpTrait::wavemachine::VALUOp>() && pendingLgkmWait) {
-          builder.setInsertionPoint(&op);
-          if (hasDelayAlu) {
-            createInstrNoResult(builder, op.getLoc(), "s_delay_alu",
-                                createImm(builder, op.getLoc(), valuDep1));
-          } else {
-            insertNoops(builder, op.getLoc(), /*count=*/1, **sti);
-          }
-          pendingLgkmWait = false;
-        }
+private:
+  // True for ops that must not appear in `wave.kernel` funcs at this stage
+  // (ABI lowering should have replaced them).
+  static bool isUnloweredKernelArg(Operation &op, func::FuncOp func) {
+    return func->hasAttr("wave.kernel") && isa<wavemachine::ArgOp>(op);
+  }
+  // True for scalar memory loads missing the required `base` attribute.
+  static bool isMalformedSMEMLoad(Operation &op) {
+    return op.hasTrait<OpTrait::wavemachine::SMEMLoadOp>() &&
+           !op.getAttrOfType<StringAttr>("base");
+  }
 
-        if (isa<wavemachine::SWaitcntOp>(op)) {
-          auto imm = getImmediate(op.getOperand(0));
-          if (!imm)
-            continue;
-          unsigned vm = 0;
-          unsigned exp = 0;
-          unsigned lg = 0;
-          llvm::AMDGPU::decodeWaitcnt(isaVersion, *imm, vm, exp, lg);
-          pendingLgkmWait = hasDelayAlu ? lg != defaultLgkmcnt : true;
-        }
-      }
+  // Emit the VALU-after-SMEM mitigation right before `op`.
+  void insertValuMitigation(Operation &op, OpBuilder &builder,
+                            const HazardConfig &cfg,
+                            const llvm::MCSubtargetInfo &sti) {
+    builder.setInsertionPoint(&op);
+    if (cfg.hasDelayAlu) {
+      createInstrNoResult(builder, op.getLoc(), "s_delay_alu",
+                          createImm(builder, op.getLoc(), cfg.valuDep1));
+    } else {
+      insertNoops(builder, op.getLoc(), /*count=*/1, sti);
     }
+  }
+
+  // Decide whether `op` (a `s_waitcnt`) cleared the LGKM counter; returns
+  // the new `pendingLgkmWait` state, or `std::nullopt` to leave it
+  // unchanged (immediate not statically known).
+  std::optional<bool> recomputePendingLgkm(Operation &op,
+                                           const HazardConfig &cfg) {
+    auto imm = getImmediate(op.getOperand(0));
+    if (!imm)
+      return std::nullopt;
+    unsigned vm = 0, exp = 0, lg = 0;
+    llvm::AMDGPU::decodeWaitcnt(cfg.isaVersion, *imm, vm, exp, lg);
+    return cfg.hasDelayAlu ? lg != cfg.defaultLgkmcnt : true;
+  }
+
+  LogicalResult processFunction(func::FuncOp func, OpBuilder &builder,
+                                const HazardConfig &cfg,
+                                const llvm::MCSubtargetInfo &sti) {
+    bool pendingLgkmWait = false;
+    for (Operation &op : llvm::make_early_inc_range(func.getBody().front())) {
+      if (op.getName().getDialectNamespace() !=
+          wavemachine::WaveMachineDialect::getDialectNamespace())
+        continue;
+      if (isUnloweredKernelArg(op, func))
+        return op.emitError(
+            "waveamd-insert-hazard-waits expects ABI-lowered kernel arguments");
+      if (isMalformedSMEMLoad(op))
+        return op.emitError(
+            "waveamd-insert-hazard-waits expects scalar memory loads to "
+            "carry a base register attribute");
+
+      if (op.hasTrait<OpTrait::wavemachine::VALUOp>() && pendingLgkmWait) {
+        insertValuMitigation(op, builder, cfg, sti);
+        pendingLgkmWait = false;
+      }
+
+      if (isa<wavemachine::SWaitcntOp>(op))
+        if (auto newState = recomputePendingLgkm(op, cfg))
+          pendingLgkmWait = *newState;
+    }
+    return success();
   }
 };
 

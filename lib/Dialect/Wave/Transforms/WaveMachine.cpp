@@ -21,6 +21,7 @@
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringSwitch.h"
+#include "llvm/ADT/TypeSwitch.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/MathExtras.h"
 #include "llvm/TargetParser/TargetParser.h"
@@ -111,35 +112,17 @@ public:
 
     Block &block = func.getBody().front();
     builder.setInsertionPointToStart(&block);
-    for (auto [index, arg] : llvm::enumerate(func.getArguments())) {
-      Type type = arg.getType();
-      bool isPtr = isa<PtrType>(type);
-      wavemachine::RegClass regClass = isa<SimdType>(type)
-                                           ? wavemachine::RegClass::VGPR
-                                           : wavemachine::RegClass::SGPR;
-      unsigned width = isPtr ? pointerBaseWidth(type) : 1;
-      Operation *argOp = createWMOp(
-          builder, func.getLoc(), "arg", {},
-          getRegType(func.getContext(), regClass, width),
-          {builder.getNamedAttr("index", builder.getI64IntegerAttr(index)),
-           builder.getNamedAttr("pointer", builder.getBoolAttr(isPtr))});
-      values[arg] = argOp->getResult(0);
-      if (isPtr) {
-        pointerBases[arg] = argOp->getResult(0);
-        pointerOffsets[arg] = createImm(builder, func.getLoc(), 0);
-        pointerBuffers[arg] = isBufferPointer(type);
-      }
-    }
+    for (auto [index, arg] : llvm::enumerate(func.getArguments()))
+      materializeArgument(arg, index);
 
     SmallVector<Operation *> topLevelOps;
     for (Operation &op : llvm::make_early_inc_range(block))
       if (!isWaveMachineOp(&op))
         topLevelOps.push_back(&op);
 
-    for (Operation *op : topLevelOps) {
+    for (Operation *op : topLevelOps)
       if (failed(selectOperation(op)))
         return failure();
-    }
 
     for (Operation *op : llvm::reverse(opsToErase))
       op->erase();
@@ -169,6 +152,26 @@ private:
 
   unsigned pointerBaseWidth(Type type) { return isBufferPointer(type) ? 4 : 2; }
 
+  void materializeArgument(BlockArgument arg, size_t index) {
+    Type type = arg.getType();
+    bool isPtr = isa<PtrType>(type);
+    wavemachine::RegClass regClass = isa<SimdType>(type)
+                                         ? wavemachine::RegClass::VGPR
+                                         : wavemachine::RegClass::SGPR;
+    unsigned width = isPtr ? pointerBaseWidth(type) : 1;
+    Operation *argOp = createWMOp(
+        builder, func.getLoc(), "arg", {},
+        getRegType(func.getContext(), regClass, width),
+        {builder.getNamedAttr("index", builder.getI64IntegerAttr(index)),
+         builder.getNamedAttr("pointer", builder.getBoolAttr(isPtr))});
+    values[arg] = argOp->getResult(0);
+    if (!isPtr)
+      return;
+    pointerBases[arg] = argOp->getResult(0);
+    pointerOffsets[arg] = createImm(builder, func.getLoc(), 0);
+    pointerBuffers[arg] = isBufferPointer(type);
+  }
+
   std::string makeLabel(StringRef stem) {
     return (Twine(".Lwave_") + func.getSymName() + "_" + stem + "_" +
             Twine(nextLabel++))
@@ -191,50 +194,35 @@ private:
   LogicalResult selectOperation(Operation *op) {
     if (op->getBlock()->getParentOp() == func)
       builder.setInsertionPoint(op);
-    if (auto constant = dyn_cast<arith::ConstantIntOp>(op))
-      return selectConstant(constant);
-    if (auto constant = dyn_cast<arith::ConstantIndexOp>(op))
-      return selectConstantIndex(constant);
-    if (auto laneId = dyn_cast<LaneIdOp>(op))
-      return selectLaneId(laneId);
-    if (auto splat = dyn_cast<SplatOp>(op))
-      return selectSplat(splat);
-    if (auto binary = dyn_cast<BinaryOp>(op))
-      return selectBinary(binary);
-    if (auto cmp = dyn_cast<CmpIOp>(op))
-      return selectCmp(cmp);
-    if (auto ballot = dyn_cast<BallotOp>(op))
-      return selectBallot(ballot);
-    if (auto readFirst = dyn_cast<ReadFirstOp>(op))
-      return selectReadFirst(readFirst);
-    if (auto ptrAdd = dyn_cast<PtrAddOp>(op))
-      return selectPtrAdd(ptrAdd);
-    if (auto makeBuffer = dyn_cast<waveamd::MakeBufferOp>(op))
-      return selectMakeBuffer(makeBuffer);
-    if (auto token = dyn_cast<TokenOp>(op))
-      return selectToken(token);
-    if (auto after = dyn_cast<AfterOp>(op))
-      return selectTokenJoin(after);
-    if (auto join = dyn_cast<JoinOp>(op))
-      return selectTokenJoin(join);
-    if (auto wait = dyn_cast<WaitOp>(op))
-      return selectWait(wait);
-    if (auto where = dyn_cast<WhereOp>(op))
-      return selectWhere(where);
-    if (auto store = dyn_cast<StoreOp>(op))
-      return selectStore(store);
-    if (auto fill = dyn_cast<waveamd::FragmentFillOp>(op))
-      return selectFragmentFill(fill);
-    if (auto mma = dyn_cast<waveamd::MmaOp>(op))
-      return selectMma(mma);
-    if (auto fragmentStore = dyn_cast<waveamd::FragmentStoreOp>(op))
-      return selectFragmentStore(fragmentStore);
-    if (auto ret = dyn_cast<func::ReturnOp>(op))
-      return selectReturn(ret);
-    if (isa<YieldOp>(op))
-      return success();
-
-    return op->emitError("unsupported operation in WaveMachine selection");
+    return llvm::TypeSwitch<Operation *, LogicalResult>(op)
+        .Case<arith::ConstantIntOp>([&](auto o) { return selectConstant(o); })
+        .Case<arith::ConstantIndexOp>(
+            [&](auto o) { return selectConstantIndex(o); })
+        .Case<LaneIdOp>([&](auto o) { return selectLaneId(o); })
+        .Case<SplatOp>([&](auto o) { return selectSplat(o); })
+        .Case<BinaryOp>([&](auto o) { return selectBinary(o); })
+        .Case<CmpIOp>([&](auto o) { return selectCmp(o); })
+        .Case<BallotOp>([&](auto o) { return selectBallot(o); })
+        .Case<ReadFirstOp>([&](auto o) { return selectReadFirst(o); })
+        .Case<PtrAddOp>([&](auto o) { return selectPtrAdd(o); })
+        .Case<waveamd::MakeBufferOp>(
+            [&](auto o) { return selectMakeBuffer(o); })
+        .Case<TokenOp>([&](auto o) { return selectToken(o); })
+        .Case<AfterOp, JoinOp>([&](auto o) { return selectTokenJoin(o); })
+        .Case<WaitOp>([&](auto o) { return selectWait(o); })
+        .Case<WhereOp>([&](auto o) { return selectWhere(o); })
+        .Case<StoreOp>([&](auto o) { return selectStore(o); })
+        .Case<waveamd::FragmentFillOp>(
+            [&](auto o) { return selectFragmentFill(o); })
+        .Case<waveamd::MmaOp>([&](auto o) { return selectMma(o); })
+        .Case<waveamd::FragmentStoreOp>(
+            [&](auto o) { return selectFragmentStore(o); })
+        .Case<func::ReturnOp>([&](auto o) { return selectReturn(o); })
+        .Case<YieldOp>([&](auto) { return success(); })
+        .Default([&](auto) {
+          return op->emitError(
+              "unsupported operation in WaveMachine selection");
+        });
   }
 
   LogicalResult selectConstant(arith::ConstantIntOp op) {

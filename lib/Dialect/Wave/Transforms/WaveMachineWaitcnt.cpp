@@ -308,32 +308,39 @@ static std::optional<unsigned> getImmediate(Value value) {
       def->getAttrOfType<IntegerAttr>("value").getInt());
 }
 
+static const CounterState &counterFor(const WaitcntScoreboard &scoreboard,
+                                      CounterKind kind) {
+  switch (kind) {
+  case CounterKind::Vmem:
+    return scoreboard.vmem;
+  case CounterKind::Lgkm:
+    return scoreboard.lgkm;
+  case CounterKind::Vscnt:
+    return scoreboard.vscnt;
+  }
+  llvm_unreachable("unknown CounterKind");
+}
+
+static void collectOperandWaits(Value operand,
+                                const WaitcntScoreboard &scoreboard,
+                                WaitRequirement &requirement) {
+  auto it = scoreboard.valueTickets.find(operand);
+  if (it == scoreboard.valueTickets.end())
+    return;
+  for (Ticket ticket : it->second) {
+    if (auto wait =
+            counterFor(scoreboard, ticket.counter).computeWait(ticket.value))
+      requirement.add(ticket.counter, *wait);
+  }
+}
+
 static WaitRequirement computeRequirement(Operation *op,
                                           const WaitcntScoreboard &scoreboard) {
   WaitRequirement requirement;
   if (isTokenOnly(op))
     return requirement;
-  for (Value operand : op->getOperands()) {
-    auto it = scoreboard.valueTickets.find(operand);
-    if (it == scoreboard.valueTickets.end())
-      continue;
-    for (Ticket ticket : it->second) {
-      const CounterState *counter = nullptr;
-      switch (ticket.counter) {
-      case CounterKind::Vmem:
-        counter = &scoreboard.vmem;
-        break;
-      case CounterKind::Lgkm:
-        counter = &scoreboard.lgkm;
-        break;
-      case CounterKind::Vscnt:
-        counter = &scoreboard.vscnt;
-        break;
-      }
-      if (auto wait = counter->computeWait(ticket.value))
-        requirement.add(ticket.counter, *wait);
-    }
-  }
+  for (Value operand : op->getOperands())
+    collectOperandWaits(operand, scoreboard, requirement);
   if (isa<wavemachine::SEndpgmOp>(op)) {
     if (auto wait = scoreboard.vscnt.computeWait(scoreboard.vscnt.lastTicket))
       requirement.add(CounterKind::Vscnt, *wait);
@@ -670,30 +677,51 @@ private:
   const llvm::AMDGPU::IsaVersion &isaVersion;
 };
 
+// Map the successor block arguments through `BranchOpInterface`, if present.
+// Returns true iff the interface produced at least one edge into `successor`.
+static bool tryPropagateViaInterface(BranchOpInterface branch, Block *successor,
+                                     WaitcntScoreboard &scoreboard,
+                                     ArrayRef<int64_t> ticketShift) {
+  if (!branch)
+    return false;
+  bool mapped = false;
+  for (auto [index, target] : llvm::enumerate(branch->getSuccessors())) {
+    if (target != successor)
+      continue;
+    SuccessorOperands operands = branch.getSuccessorOperands(index);
+    unsigned limit =
+        std::min<unsigned>(operands.size(), successor->getNumArguments());
+    for (unsigned i = 0; i < limit; ++i)
+      propagateTicket(scoreboard, operands[i], successor->getArgument(i),
+                      ticketShift);
+    mapped = true;
+  }
+  return mapped;
+}
+
+// Fallback for plain terminators with one successor: assume operands map
+// positionally onto the block arguments.
+static void propagateImplicitSuccessorOperands(Operation *terminator,
+                                               Block *successor,
+                                               WaitcntScoreboard &scoreboard,
+                                               ArrayRef<int64_t> ticketShift) {
+  if (terminator->getNumSuccessors() != 1 ||
+      terminator->getSuccessor(0) != successor ||
+      terminator->getNumOperands() < successor->getNumArguments())
+    return;
+  for (auto [argIndex, arg] : llvm::enumerate(successor->getArguments()))
+    propagateTicket(scoreboard, terminator->getOperand(argIndex), arg,
+                    ticketShift);
+}
+
 static void propagateBranchOperands(Operation *terminator, Block *successor,
                                     WaitcntScoreboard &scoreboard,
                                     ArrayRef<int64_t> ticketShift) {
-  bool mappedSuccessorOperands = false;
-  if (auto branch = dyn_cast<BranchOpInterface>(terminator)) {
-    for (auto [index, target] : llvm::enumerate(branch->getSuccessors())) {
-      if (target != successor)
-        continue;
-      SuccessorOperands operands = branch.getSuccessorOperands(index);
-      for (auto [argIndex, arg] : llvm::enumerate(successor->getArguments())) {
-        if (argIndex >= operands.size())
-          break;
-        propagateTicket(scoreboard, operands[argIndex], arg, ticketShift);
-      }
-      mappedSuccessorOperands = true;
-    }
-  }
-  if (!mappedSuccessorOperands && terminator->getNumSuccessors() == 1 &&
-      terminator->getSuccessor(0) == successor &&
-      terminator->getNumOperands() >= successor->getNumArguments()) {
-    for (auto [argIndex, arg] : llvm::enumerate(successor->getArguments()))
-      propagateTicket(scoreboard, terminator->getOperand(argIndex), arg,
-                      ticketShift);
-  }
+  if (tryPropagateViaInterface(dyn_cast<BranchOpInterface>(terminator),
+                               successor, scoreboard, ticketShift))
+    return;
+  propagateImplicitSuccessorOperands(terminator, successor, scoreboard,
+                                     ticketShift);
 }
 
 static WaitcntScoreboard

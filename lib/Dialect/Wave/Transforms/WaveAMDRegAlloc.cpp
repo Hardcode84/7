@@ -115,6 +115,65 @@ struct WaveAMDRegAllocPass
     }
   }
 
+  struct LiveIntervalSet {
+    SmallVector<LiveInterval> sgprs;
+    SmallVector<LiveInterval> vgprs;
+    DenseMap<Value, unsigned> sgprIntervals;
+    DenseMap<Value, unsigned> vgprIntervals;
+  };
+
+  // Record a single result definition into the appropriate live-interval
+  // bucket. Returns failure for unsupported register classes.
+  static LogicalResult recordDefinition(Operation *op, Value result,
+                                        unsigned pos,
+                                        LiveIntervalSet &intervals) {
+    if (!isReg(result))
+      return success();
+    auto regType = cast<wavemachine::RegType>(result.getType());
+    if (!isSGPR(regType) && !isVGPR(regType))
+      return op->emitError("waveamd-reg-alloc supports only SGPR and "
+                           "VGPR register classes");
+    if (regType.getIndex() >= 0)
+      return success();
+    bool sgpr = isSGPR(regType);
+    auto &bucket = sgpr ? intervals.sgprs : intervals.vgprs;
+    auto &table = sgpr ? intervals.sgprIntervals : intervals.vgprIntervals;
+    unsigned index = bucket.size();
+    bucket.push_back(LiveInterval{op, pos, pos});
+    table[result] = index;
+    return success();
+  }
+
+  // Walk `op`'s operands and bump matching intervals' `end` to `pos`.
+  static void extendIntervalsForUses(Operation *op, unsigned pos,
+                                     LiveIntervalSet &intervals) {
+    for (Value operand : op->getOperands()) {
+      if (auto it = intervals.sgprIntervals.find(operand);
+          it != intervals.sgprIntervals.end())
+        intervals.sgprs[it->second].end =
+            std::max(intervals.sgprs[it->second].end, pos);
+      if (auto it = intervals.vgprIntervals.find(operand);
+          it != intervals.vgprIntervals.end())
+        intervals.vgprs[it->second].end =
+            std::max(intervals.vgprs[it->second].end, pos);
+    }
+  }
+
+  static LogicalResult
+  buildIntervals(ArrayRef<Operation *> orderedOps,
+                 const DenseMap<Operation *, unsigned> &positions,
+                 LiveIntervalSet &intervals) {
+    for (Operation *op : orderedOps) {
+      unsigned pos = positions.lookup(op);
+      for (Value result : op->getResults())
+        if (failed(recordDefinition(op, result, pos, intervals)))
+          return failure();
+    }
+    for (Operation *op : orderedOps)
+      extendIntervalsForUses(op, positions.lookup(op), intervals);
+    return success();
+  }
+
   LogicalResult allocateFunction(func::FuncOp func, RegisterLimits limits) {
     SmallVector<Operation *> orderedOps;
     DenseMap<Operation *, unsigned> positions;
@@ -123,46 +182,15 @@ struct WaveAMDRegAllocPass
       orderedOps.push_back(&op);
     }
 
-    SmallVector<LiveInterval> sgprs;
-    SmallVector<LiveInterval> vgprs;
-    DenseMap<Value, unsigned> sgprIntervals;
-    DenseMap<Value, unsigned> vgprIntervals;
-    for (Operation *op : orderedOps) {
-      for (Value result : op->getResults()) {
-        if (!isReg(result))
-          continue;
-        auto regType = cast<wavemachine::RegType>(result.getType());
-        if (!isSGPR(regType) && !isVGPR(regType))
-          return op->emitError("waveamd-reg-alloc supports only SGPR "
-                               "and VGPR register classes");
-        if (regType.getIndex() >= 0)
-          continue;
-        SmallVector<LiveInterval> &bucket = isSGPR(regType) ? sgprs : vgprs;
-        unsigned index = bucket.size();
-        bucket.push_back(LiveInterval{op, positions[op], positions[op]});
-        if (isSGPR(regType))
-          sgprIntervals[result] = index;
-        else
-          vgprIntervals[result] = index;
-      }
-    }
+    LiveIntervalSet intervals;
+    if (failed(buildIntervals(orderedOps, positions, intervals)))
+      return failure();
 
-    for (Operation *op : orderedOps) {
-      unsigned pos = positions[op];
-      for (Value operand : op->getOperands()) {
-        if (auto it = sgprIntervals.find(operand); it != sgprIntervals.end())
-          sgprs[it->second].end = std::max(sgprs[it->second].end, pos);
-        if (auto it = vgprIntervals.find(operand); it != vgprIntervals.end())
-          vgprs[it->second].end = std::max(vgprs[it->second].end, pos);
-      }
-    }
-
-    if (failed(allocateClass(func, sgprs, limits.numSGPR,
+    if (failed(allocateClass(func, intervals.sgprs, limits.numSGPR,
                              func->hasAttr("wave.kernel") ? 2 : 0)))
       return failure();
-    if (failed(allocateClass(func, vgprs, limits.numVGPR, /*reserved=*/0)))
-      return failure();
-    return success();
+    return allocateClass(func, intervals.vgprs, limits.numVGPR,
+                         /*reserved=*/0);
   }
 
   LogicalResult allocateClass(func::FuncOp func,
