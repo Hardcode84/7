@@ -1,15 +1,13 @@
 // REQUIRES: host-supports-amdgpu
 //
-// Kernel side: wave dialect -> AMDGPU asm -> object -> HSACO.
-// RUN: wave-translate --wave-to-amdgpu-asm %S/Inputs/wave_kernel.mlir \
-// RUN:   | llvm-mc -triple=amdgcn-amd-amdhsa -mcpu=%chip -filetype=obj -o %t.o
-// RUN: ld.lld -shared %t.o -o %t.hsaco
+// Single-file e2e: the GPU kernel lives in a `gpu.module @kernels` carrying
+// wave dialect ops; `--wave-compile-kernels` drives the wave-to-AMDGPU
+// pipeline, assembles, and links to a HSACO entirely in-process, then
+// replaces the source `gpu.module` with the corresponding `gpu.binary`. No
+// user-visible filesystem intermediates.
 //
-// Host side: replace the stub `gpu.binary` with the freshly built HSACO,
-// lower to LLVM, and run with the GPU runtime + our `memref_to_wave_ptr`
-// shim.
 // RUN: wave-opt %s \
-// RUN:   --wave-attach-gpu-binary='path=%t.hsaco symbol=kernels chip=%chip' \
+// RUN:   --wave-compile-kernels='chip=%chip' \
 // RUN:   --convert-scf-to-cf \
 // RUN:   --gpu-to-llvm=use-bare-pointers-for-kernels=true \
 // RUN:   --convert-to-llvm \
@@ -23,10 +21,25 @@
 
 module attributes {gpu.container_module} {
 
-// Stub: `gpu.launch_func` verifies against a same-named container at parse
-// time, so we declare an empty `gpu.binary` and let `wave-attach-gpu-binary`
-// rewrite its `objects` attr with the real HSACO bytes.
-gpu.binary @kernels [#gpu.object<#rocdl.target<chip = "gfx1100">, bin = "">]
+gpu.module @kernels {
+  // `gpu.kernel` is required by `gpu.launch_func`'s symbol verifier;
+  // `wave.kernel` is the marker `--wave-compile-kernels` watches for to
+  // pick up the func as a Wave kernel.
+  func.func @write_lane_ids(%dst: !wave.ptr<i32, #wave.global>)
+      attributes {gpu.kernel, wave.kernel} {
+    %range = arith.constant 128 : i32
+    %buffer = waveamd.make_buffer %dst, %range
+        : !wave.ptr<i32, #wave.global>, i32 -> !wave.ptr<i32, #waveamd.buffer>
+    %lane = wave.lane_id : !wave.simd<i32, 32>
+    %ptrs = wave.ptr_add %buffer, %lane
+        : !wave.ptr<i32, #waveamd.buffer>, !wave.simd<i32, 32>
+        -> !wave.simd<!wave.ptr<i32, #waveamd.buffer>, 32>
+    %tok = wave.store %lane -> %ptrs
+        : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<i32, #waveamd.buffer>, 32>)
+        -> !wave.mem.token
+    return
+  }
+}
 
 func.func private @wave_memref_to_ptr_global_i32(memref<32xi32>)
     -> !wave.ptr<i32, #wave.global> attributes {llvm.emit_c_interface}

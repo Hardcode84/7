@@ -112,6 +112,44 @@ def WaveAMDMetadata
   ];
 }
 
+def WaveCompileKernels
+    : Pass<"wave-compile-kernels", "ModuleOp"> {
+  let summary = "Compile wave kernels in `gpu.module` ops to in-place `gpu.binary`";
+  let description = [{
+    Walks `gpu.module` ops whose body contains at least one `func.func` with
+    a `wave.kernel` attribute, drives the wave-to-AMDGPU backend in-memory to
+    produce AMDGPU assembly, assembles it to an ELF object with the LLVM MC
+    APIs, links the object to a HSACO blob using lld in-process, and replaces
+    the source `gpu.module` with a `gpu.binary` of the same symbol carrying
+    the result as a `#gpu.object<#rocdl.target, ...>` attribute.
+
+    This is the in-tree analog of the
+    `wave-translate | llvm-mc | ld.lld | wave-attach-gpu-binary` shell
+    pipeline, but everything runs in-process so there are no
+    user-visible filesystem intermediates.
+  }];
+
+  let dependentDialects = [
+    "arith::ArithDialect",
+    "func::FuncDialect",
+    "gpu::GPUDialect",
+    "ROCDL::ROCDLDialect",
+    "wave::WaveDialect",
+    "waveamd::WaveAMDDialect",
+    "wavemachine::WaveMachineDialect"
+  ];
+
+  let options = [
+    Option<"chip", "chip", "std::string", /*default=*/"\"gfx1100\"",
+           "AMDGPU chip identifier (e.g. gfx1100) for the `#rocdl.target`.">,
+    Option<"triple", "triple", "std::string",
+           /*default=*/"\"amdgcn-amd-amdhsa\"",
+           "Target triple for the `#rocdl.target` attribute.">,
+    Option<"features", "features", "std::string", /*default=*/"\"\"",
+           "Target features string forwarded to the AMDGPU MC assembler.">
+  ];
+}
+
 def WaveAttachGPUBinary
     : Pass<"wave-attach-gpu-binary", "ModuleOp"> {
   let summary = "Embed a pre-compiled GPU binary as a `gpu.binary` op";

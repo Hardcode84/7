@@ -17,6 +17,7 @@ target_link_libraries(wave-opt PRIVATE
   MLIRRegisterAllDialects
   MLIRRegisterAllExtensions
   MLIRRegisterAllPasses
+  MLIRTargetWave
   MLIRWaveAMDDialect
   MLIRWaveDialect
   MLIRWaveToLLVM

@@ -18,6 +18,8 @@
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/Diagnostics.h"
 #include "mlir/Pass/PassManager.h"
+#include "mlir/Target/LLVM/ROCDL/Utils.h"
+#include "lld/Common/Driver.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Config/Targets.h"
@@ -31,9 +33,15 @@
 #include "llvm/MC/MCSubtargetInfo.h"
 #include "llvm/MC/MCTargetOptions.h"
 #include "llvm/MC/TargetRegistry.h"
+#include "llvm/Support/FileSystem.h"
+#include "llvm/Support/FileUtilities.h"
+#include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/TargetSelect.h"
+#include "llvm/Support/raw_ostream.h"
 #include "llvm/TargetParser/Triple.h"
 #include <algorithm>
+
+LLD_HAS_DRIVER(elf)
 
 using namespace mlir;
 
@@ -98,6 +106,9 @@ private:
       llvm::InitializeAllTargetInfos();
       llvm::InitializeAllTargetMCs();
       llvm::InitializeAllAsmPrinters();
+      // The `wave-compile-kernels` pass round-trips through MC asm parsing
+      // (`ROCDL::assembleIsa`), so the asm parser needs registering too.
+      llvm::InitializeAllAsmParsers();
     });
     llvm::Triple triple("amdgcn-amd-amdhsa");
     std::string error;
@@ -632,4 +643,69 @@ LogicalResult mlir::wave::translateWaveToAMDGPU(Operation *op,
   if (failed(runWaveMachinePipeline(module)))
     return failure();
   return WaveAMDGPUEmitter(os).emit(module);
+}
+
+// In-process lld driver wrapping the ELF input bytes in a temp file (the
+// system linker insists on file paths) and returning the produced HSACO as
+// a memory buffer. Temp files are removed on scope exit so they never leak
+// to user-visible paths.
+static LogicalResult linkElfToHsacoInProcess(
+    Operation *opForDiag, ArrayRef<char> objBytes,
+    SmallVectorImpl<char> &out) {
+  SmallString<128> objPath;
+  int objFd = -1;
+  if (llvm::sys::fs::createTemporaryFile("wave_obj", "o", objFd, objPath))
+    return opForDiag->emitError("failed to create temporary ELF object file");
+  llvm::FileRemover removeObj(objPath);
+  {
+    llvm::raw_fd_ostream os(objFd, /*shouldClose=*/true);
+    os.write(objBytes.data(), objBytes.size());
+  }
+
+  SmallString<128> hsacoPath;
+  if (llvm::sys::fs::createTemporaryFile("wave_kernels", "hsaco", hsacoPath))
+    return opForDiag->emitError("failed to create temporary HSACO file");
+  llvm::FileRemover removeHsaco(hsacoPath);
+
+  std::string stderrStr;
+  llvm::raw_string_ostream stderrOS(stderrStr);
+  std::string objStr(objPath.str());
+  std::string hsacoStr(hsacoPath.str());
+  std::array<const char *, 5> args = {"ld.lld",     "-shared", objStr.c_str(),
+                                       "-o",         hsacoStr.c_str()};
+  bool ok = lld::elf::link(args, llvm::nulls(), stderrOS,
+                           /*exitEarly=*/false,
+                           /*disableOutput=*/false);
+  if (!ok)
+    return opForDiag->emitError("lld failed: ") << stderrStr;
+
+  auto buf = llvm::MemoryBuffer::getFile(hsacoPath, /*IsText=*/false);
+  if (std::error_code ec = buf.getError())
+    return opForDiag->emitError("failed to read HSACO blob: ") << ec.message();
+  StringRef bytes = (*buf)->getBuffer();
+  out.assign(bytes.begin(), bytes.end());
+  return success();
+}
+
+LogicalResult mlir::wave::compileWaveToHSACO(Operation *op, StringRef triple,
+                                              StringRef chip,
+                                              StringRef features,
+                                              SmallVectorImpl<char> &out) {
+  auto module = dyn_cast<ModuleOp>(op);
+  if (!module)
+    return op->emitError("compileWaveToHSACO expects a module operation");
+
+  SmallString<8192> isaStorage;
+  llvm::raw_svector_ostream isaOS(isaStorage);
+  if (failed(translateWaveToAMDGPU(module, isaOS)))
+    return failure();
+
+  auto errCallback = [&] { return op->emitError(); };
+  FailureOr<SmallVector<char, 0>> elf =
+      ROCDL::assembleIsa(StringRef(isaStorage.data(), isaStorage.size()), triple,
+                         chip, features, errCallback);
+  if (failed(elf))
+    return failure();
+
+  return linkElfToHsacoInProcess(op, *elf, out);
 }

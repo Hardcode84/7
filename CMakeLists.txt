@@ -30,6 +30,7 @@ list(PREPEND CMAKE_PREFIX_PATH "${LLVM_INSTALL_DIR}")
 
 find_package(LLVM CONFIG)
 find_package(MLIR CONFIG)
+find_package(LLD CONFIG)
 if(NOT LLVM_FOUND OR NOT MLIR_FOUND)
   message(FATAL_ERROR
     "Could not find LLVM/MLIR at '${LLVM_INSTALL_DIR}'.\n"
@@ -37,6 +38,11 @@ if(NOT LLVM_FOUND OR NOT MLIR_FOUND)
     "    python build_tools/build_llvm.py\n"
     "Or point at an existing install:\n"
     "    cmake -S . -B build -DLLVM_INSTALL_DIR=/path/to/llvm-install")
+endif()
+if(NOT LLD_FOUND)
+  message(FATAL_ERROR
+    "Could not find LLD at '${LLVM_INSTALL_DIR}'. The wave-compile-kernels "
+    "pass links lld in-process; rebuild LLVM with `-DLLVM_ENABLE_PROJECTS=...;lld`.")
 endif()
 
 message(STATUS "Using LLVMConfig.cmake in: ${LLVM_DIR}")

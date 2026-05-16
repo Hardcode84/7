@@ -23,6 +23,15 @@ namespace wave {
 /// source Wave operations directly.
 LogicalResult translateWaveToAMDGPU(Operation *op, raw_ostream &os);
 
+/// Run the wave-to-AMDGPU pipeline plus in-process assembly and linking,
+/// producing a HSACO blob in memory. `op` must be a `ModuleOp` carrying a
+/// `wavemachine.target` string attribute compatible with the WaveMachine
+/// backend; `op` is mutated in place by the pipeline. `triple`, `chip`, and
+/// `features` describe the assembler/linker target.
+LogicalResult compileWaveToHSACO(Operation *op, StringRef triple, StringRef chip,
+                                 StringRef features,
+                                 SmallVectorImpl<char> &out);
+
 /// Register the `wave-to-amdgpu-asm` mlir-translate entry point.
 void registerWaveToAMDGPUTranslation();
 

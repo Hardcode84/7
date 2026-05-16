@@ -11,6 +11,20 @@
 
 #include "mlir/Pass/Pass.h"
 
+// The tablegen-generated pass base classes expand each `dependentDialects`
+// entry into an inline `registry.insert<X>()` call. Two-phase lookup
+// resolves those non-dependent names at template-definition time, so the
+// referenced dialect headers must be visible wherever this header is
+// included.
+#include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/GPU/IR/GPUDialect.h"
+#include "mlir/Dialect/LLVMIR/ROCDLDialect.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
+#include "mlir/Dialect/Wave/IR/Wave.h"
+#include "mlir/Dialect/Wave/IR/WaveAMD.h"
+#include "mlir/Dialect/WaveMachine/IR/WaveMachine.h"
+
 namespace mlir {
 namespace wave {
 
