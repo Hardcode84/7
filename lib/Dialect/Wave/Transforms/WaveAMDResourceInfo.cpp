@@ -32,35 +32,51 @@ static bool isVGPR(wavemachine::RegType type) {
 
 struct WaveAMDResourceInfoPass
     : public wave::impl::WaveAMDResourceInfoBase<WaveAMDResourceInfoPass> {
+  // Walk a kernel func's allocated WaveMachine register results and
+  // return the highest end-of-register for each class. Sets `failed` if
+  // any result still has an unallocated `-1` index.
+  struct MaxRegs {
+    unsigned sgpr;
+    unsigned vgpr;
+  };
+  MaxRegs collectMaxRegs(func::FuncOp func, bool &failed) {
+    bool isKernel = func->hasAttr("wave.kernel");
+    MaxRegs out{isKernel ? 5u : 0u, isKernel ? 1u : 0u};
+    for (Operation &op : func.getBody().front()) {
+      if (op.getNumResults() == 0)
+        continue;
+      auto regType = dyn_cast<wavemachine::RegType>(op.getResult(0).getType());
+      if (!regType)
+        continue;
+      int64_t index = regType.getIndex();
+      if (index < 0) {
+        op.emitError(
+            "waveamd-resource-info requires allocated register results");
+        failed = true;
+        return out;
+      }
+      unsigned end = index + regType.getWidth();
+      if (isSGPR(regType))
+        out.sgpr = std::max(out.sgpr, end);
+      if (isVGPR(regType))
+        out.vgpr = std::max(out.vgpr, end);
+    }
+    return out;
+  }
+
   void runOnOperation() override {
     OpBuilder builder(getOperation().getContext());
     for (func::FuncOp func : getOperation().getOps<func::FuncOp>()) {
-      unsigned maxSGPR = func->hasAttr("wave.kernel") ? 2 : 0;
-      unsigned maxVGPR = 0;
-      for (Operation &op : func.getBody().front()) {
-        if (op.getNumResults() == 0)
-          continue;
-        auto regType =
-            dyn_cast<wavemachine::RegType>(op.getResult(0).getType());
-        if (!regType)
-          continue;
-        int64_t index = regType.getIndex();
-        if (index < 0) {
-          op.emitError("waveamd-resource-info requires allocated register "
-                       "results");
-          return signalPassFailure();
-        }
-        unsigned end = index + regType.getWidth();
-        if (isSGPR(regType))
-          maxSGPR = std::max(maxSGPR, end);
-        if (isVGPR(regType))
-          maxVGPR = std::max(maxVGPR, end);
-      }
-      func->setAttr("wavemachine.sgpr_count",
-                    builder.getI64IntegerAttr(std::max(
-                        maxSGPR, func->hasAttr("wave.kernel") ? 6u : 1u)));
+      bool failed = false;
+      MaxRegs regs = collectMaxRegs(func, failed);
+      if (failed)
+        return signalPassFailure();
+      unsigned sgprBaseline = func->hasAttr("wave.kernel") ? 6u : 1u;
+      func->setAttr(
+          "wavemachine.sgpr_count",
+          builder.getI64IntegerAttr(std::max(regs.sgpr, sgprBaseline)));
       func->setAttr("wavemachine.vgpr_count",
-                    builder.getI64IntegerAttr(std::max(maxVGPR, 1u)));
+                    builder.getI64IntegerAttr(std::max(regs.vgpr, 1u)));
     }
   }
 };

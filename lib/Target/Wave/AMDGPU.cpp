@@ -216,6 +216,14 @@ private:
     unsigned kernargSize = getKernelArgSize(func);
     unsigned sgprCount = getIntAttr(func, "wavemachine.sgpr_count", 6);
     unsigned vgprCount = getIntAttr(func, "wavemachine.vgpr_count", 1);
+    bool usesWgY = false;
+    bool usesWgZ = false;
+    func.walk([&](Operation *op) {
+      if (isa<wavemachine::SWorkgroupIdYOp>(op))
+        usesWgY = true;
+      if (isa<wavemachine::SWorkgroupIdZOp>(op))
+        usesWgZ = true;
+    });
     os << "\t.section\t.rodata,\"a\",@progbits\n";
     os << "\t.p2align\t6, 0x0\n";
     os << "\t.amdhsa_kernel " << func.getSymName() << "\n";
@@ -228,8 +236,10 @@ private:
     os << "\t\t.amdhsa_uses_dynamic_stack 0\n";
     os << "\t\t.amdhsa_enable_private_segment 0\n";
     os << "\t\t.amdhsa_system_sgpr_workgroup_id_x 1\n";
-    os << "\t\t.amdhsa_system_sgpr_workgroup_id_y 0\n";
-    os << "\t\t.amdhsa_system_sgpr_workgroup_id_z 0\n";
+    os << "\t\t.amdhsa_system_sgpr_workgroup_id_y " << (usesWgY ? 1 : 0)
+       << "\n";
+    os << "\t\t.amdhsa_system_sgpr_workgroup_id_z " << (usesWgZ ? 1 : 0)
+       << "\n";
     os << "\t\t.amdhsa_system_sgpr_workgroup_info 0\n";
     os << "\t\t.amdhsa_system_vgpr_workitem_id 0\n";
     os << "\t\t.amdhsa_next_free_vgpr " << vgprCount << "\n";
@@ -439,6 +449,14 @@ private:
 
     if (isa<wavemachine::ImmOp, wavemachine::ArgOp, wavemachine::TokenOp,
             wavemachine::TokenJoinOp, wavemachine::WaitOp>(&op))
+      return success();
+    // Preloaded values delivered by the HSA loader: the SSA value already
+    // lives in its pinned register (s2/s3/s4 or v0) at kernel entry, so
+    // there is nothing to emit here. The descriptor flips the matching
+    // `.amdhsa_system_sgpr_workgroup_id_*` / `.amdhsa_system_vgpr_workitem_id`
+    // bits to make the loader perform the preload.
+    if (isa<wavemachine::SWorkgroupIdXOp, wavemachine::SWorkgroupIdYOp,
+            wavemachine::SWorkgroupIdZOp, wavemachine::VWorkitemIdXOp>(&op))
       return success();
     if (isa<wavemachine::LabelOp>(op)) {
       os << op.getAttrOfType<StringAttr>("name").str() << ":\n";

@@ -15,6 +15,14 @@ func.func @wave_ops(%pred: i1, %value: i32, %out: !wave.ptr<i32, #wave.global>) 
   %subgroup = wave.subgroup_id
   // CHECK: wave.subgroup_size
   %size = wave.subgroup_size
+  // CHECK: wave.workgroup_id 0
+  %wg_x = wave.workgroup_id 0
+  // CHECK: wave.workgroup_id 1
+  %wg_y = wave.workgroup_id 1
+  // CHECK: wave.workgroup_id 2
+  %wg_z = wave.workgroup_id 2
+  // CHECK: wave.workitem_id 0 : !wave.simd<i32, 32>
+  %wi_x = wave.workitem_id 0 : !wave.simd<i32, 32>
   // CHECK: wave.ballot {{.*}} : !wave.mask<32> -> i32
   %bits = wave.ballot %mask : !wave.mask<32> -> i32
   // CHECK: wave.read_first {{.*}} : !wave.simd<i32, 32> -> i32

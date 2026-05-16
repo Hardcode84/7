@@ -106,6 +106,12 @@ class FunctionBuilder:
     def lane_id(self, element_type=None, width=32):
         return wave.LaneIdOp(simd_type(element_type, width)).result
 
+    def workgroup_id(self, axis=0):
+        return wave.WorkgroupIdOp(i32(), axis).result
+
+    def workitem_id(self, axis=0, element_type=None, width=32):
+        return wave.WorkitemIdOp(simd_type(element_type, width), axis).result
+
     def splat(self, value, element_type=None, width=32):
         return wave.SplatOp(simd_type(element_type or value.type, width), value).result
 

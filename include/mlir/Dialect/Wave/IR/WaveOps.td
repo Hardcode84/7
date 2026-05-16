@@ -54,6 +54,35 @@ def Wave_SubgroupIdOp : Wave_Op<"subgroup_id", [Pure]> {
   let assemblyFormat = "attr-dict";
 }
 
+def Wave_WorkgroupIdOp : Wave_Op<"workgroup_id", [Pure]> {
+  let summary = "id of the current workgroup along the given grid axis";
+  let description = [{
+    Returns the wave-uniform workgroup id along axis 0 (`x`), 1 (`y`),
+    or 2 (`z`). The value is materialized from a preloaded scalar register
+    on AMDGPU targets.
+  }];
+
+  let arguments = (ins I64Attr:$axis);
+  let results = (outs I32:$result);
+  let assemblyFormat = "$axis attr-dict";
+  let hasVerifier = 1;
+}
+
+def Wave_WorkitemIdOp : Wave_Op<"workitem_id", [Pure]> {
+  let summary = "id of the current workitem along the given workgroup axis";
+  let description = [{
+    Returns the per-lane workitem id along axis 0 (`x`), 1 (`y`), or 2
+    (`z`), as a `!wave.simd<i32, 32>`. Lane `L` of wave `W` sees
+    `workitem_id_x = W * 32 + L` for axis 0; axis 1 / 2 are populated only
+    when the target requests them through the kernel descriptor.
+  }];
+
+  let arguments = (ins I64Attr:$axis);
+  let results = (outs Wave_Simd:$result);
+  let assemblyFormat = "$axis attr-dict `:` qualified(type($result))";
+  let hasVerifier = 1;
+}
+
 def Wave_SubgroupSizeOp : Wave_Op<"subgroup_size", [Pure]> {
   let summary = "number of lanes in the current subgroup";
   let description = [{

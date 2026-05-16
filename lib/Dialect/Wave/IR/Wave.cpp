@@ -105,6 +105,23 @@ LogicalResult ReadFirstOp::verify() {
   return success();
 }
 
+LogicalResult WorkgroupIdOp::verify() {
+  if (getAxis() > 2)
+    return emitOpError("axis must be 0 (x), 1 (y), or 2 (z)");
+  return success();
+}
+
+LogicalResult WorkitemIdOp::verify() {
+  if (getAxis() > 2)
+    return emitOpError("axis must be 0 (x), 1 (y), or 2 (z)");
+  auto simdType = cast<SimdType>(getResult().getType());
+  if (!simdType.getElementType().isInteger(32))
+    return emitOpError("result SIMD element type must be i32");
+  if (simdType.getWidth() != 32)
+    return emitOpError("only wave32 workitem_id is supported for now");
+  return success();
+}
+
 LogicalResult StoreOp::verify() {
   auto simdType = cast<SimdType>(getValue().getType());
   Type ptrType = getPtr().getType();

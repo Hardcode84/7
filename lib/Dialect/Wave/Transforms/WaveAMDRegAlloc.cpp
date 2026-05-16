@@ -186,11 +186,17 @@ struct WaveAMDRegAllocPass
     if (failed(buildIntervals(orderedOps, positions, intervals)))
       return failure();
 
-    if (failed(allocateClass(func, intervals.sgprs, limits.numSGPR,
-                             func->hasAttr("wave.kernel") ? 2 : 0)))
+    // For `wave.kernel` funcs, the HSA loader preloads s[0:1] = kernarg
+    // pointer (always) and s2/s3/s4 = workgroup_id.x/y/z (conditional on
+    // the kernel descriptor flags; we reserve unconditionally to keep
+    // the allocator simple). v0 always holds the packed workitem_id, so
+    // reserve it too.
+    unsigned sgprReserved = func->hasAttr("wave.kernel") ? 5 : 0;
+    unsigned vgprReserved = func->hasAttr("wave.kernel") ? 1 : 0;
+    if (failed(
+            allocateClass(func, intervals.sgprs, limits.numSGPR, sgprReserved)))
       return failure();
-    return allocateClass(func, intervals.vgprs, limits.numVGPR,
-                         /*reserved=*/0);
+    return allocateClass(func, intervals.vgprs, limits.numVGPR, vgprReserved);
   }
 
   LogicalResult allocateClass(func::FuncOp func,

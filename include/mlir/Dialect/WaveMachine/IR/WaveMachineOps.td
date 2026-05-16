@@ -163,6 +163,24 @@ def WaveMachine_LabelOp : WaveMachine_Op<"label"> {
 def WaveMachine_VMbcntLoOp
     : WaveMachine_ZeroOperandResult<"v_mbcnt_lo", WaveMachine_VGPR1,
                                     [WaveMachine_VALU]>;
+
+// Preloaded workgroup ids live in fixed SGPRs (s2..s4 on RDNA3 when the
+// kernel descriptor requests them). The selector materializes these ops
+// with their result RegType pinned to the right physical index; the asm
+// printer emits nothing because the value is already in the register on
+// kernel entry.
+def WaveMachine_SWorkgroupIdXOp
+    : WaveMachine_ZeroOperandResult<"s_workgroup_id_x", WaveMachine_SGPR1, []>;
+def WaveMachine_SWorkgroupIdYOp
+    : WaveMachine_ZeroOperandResult<"s_workgroup_id_y", WaveMachine_SGPR1, []>;
+def WaveMachine_SWorkgroupIdZOp
+    : WaveMachine_ZeroOperandResult<"s_workgroup_id_z", WaveMachine_SGPR1, []>;
+
+// Preloaded workitem id (packed) lives in `v0`. Only the X half is
+// exposed today; Y/Z would need additional descriptor flags.
+def WaveMachine_VWorkitemIdXOp
+    : WaveMachine_ZeroOperandResult<"v_workitem_id_x", WaveMachine_VGPR1, []>;
+
 def WaveMachine_VMovB32TupleOp
     : WaveMachine_UnaryResult<"v_mov_b32_tuple", WaveMachine_RegOrImm,
                               WaveMachine_VGPR, [WaveMachine_VALU]> {

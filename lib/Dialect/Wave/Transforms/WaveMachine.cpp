@@ -51,6 +51,16 @@ static wavemachine::RegType getRegType(MLIRContext *ctx,
   return wavemachine::RegType::get(ctx, regClass, width, -1);
 }
 
+// Pinned variant: the resulting register's physical index is fixed up
+// front (e.g. for HSA-loader-preloaded SGPRs s2..s4 or workitem_id VGPR
+// v0). The register allocator skips these defs and leaves the value in
+// place.
+static wavemachine::RegType getPinnedRegType(MLIRContext *ctx,
+                                             wavemachine::RegClass regClass,
+                                             unsigned width, int64_t index) {
+  return wavemachine::RegType::get(ctx, regClass, width, index);
+}
+
 static wavemachine::ImmType getImmType(MLIRContext *ctx) {
   return wavemachine::ImmType::get(ctx);
 }
@@ -62,6 +72,15 @@ static wavemachine::MemTokenType getMemTokenType(MLIRContext *ctx) {
 static bool isWaveMachineOp(Operation *op) {
   return op->getName().getDialectNamespace() ==
          wavemachine::WaveMachineDialect::getDialectNamespace();
+}
+
+static bool isVGPR(Value v) {
+  auto rt = dyn_cast<wavemachine::RegType>(v.getType());
+  return rt && rt.getRegClass() == wavemachine::RegClass::VGPR;
+}
+
+static bool isImm(Value v) {
+  return v.getDefiningOp<wavemachine::ImmOp>() != nullptr;
 }
 
 static Operation *createWMOp(OpBuilder &builder, Location loc, StringRef name,
@@ -199,6 +218,8 @@ private:
         .Case<arith::ConstantIndexOp>(
             [&](auto o) { return selectConstantIndex(o); })
         .Case<LaneIdOp>([&](auto o) { return selectLaneId(o); })
+        .Case<WorkgroupIdOp>([&](auto o) { return selectWorkgroupId(o); })
+        .Case<WorkitemIdOp>([&](auto o) { return selectWorkitemId(o); })
         .Case<SplatOp>([&](auto o) { return selectSplat(o); })
         .Case<BinaryOp>([&](auto o) { return selectBinary(o); })
         .Case<CmpIOp>([&](auto o) { return selectCmp(o); })
@@ -249,6 +270,45 @@ private:
     return success();
   }
 
+  LogicalResult selectWorkgroupId(WorkgroupIdOp op) {
+    StringRef opcode;
+    int64_t sgprIndex;
+    switch (op.getAxis()) {
+    case 0:
+      opcode = "s_workgroup_id_x";
+      sgprIndex = 2;
+      break;
+    case 1:
+      opcode = "s_workgroup_id_y";
+      sgprIndex = 3;
+      break;
+    case 2:
+      opcode = "s_workgroup_id_z";
+      sgprIndex = 4;
+      break;
+    default:
+      return op.emitError("workgroup_id axis must be 0, 1, or 2");
+    }
+    values[op.getResult()] = createInstr(
+        builder, op.getLoc(), opcode, {},
+        getPinnedRegType(op.getContext(), wavemachine::RegClass::SGPR,
+                         /*width=*/1, sgprIndex));
+    eraseIfTopLevel(op);
+    return success();
+  }
+
+  LogicalResult selectWorkitemId(WorkitemIdOp op) {
+    if (op.getAxis() != 0)
+      return op.emitError(
+          "WaveMachine backend supports only workitem_id along axis 0 (x)");
+    values[op.getResult()] = createInstr(
+        builder, op.getLoc(), "v_workitem_id_x", {},
+        getPinnedRegType(op.getContext(), wavemachine::RegClass::VGPR,
+                         /*width=*/1, /*index=*/0));
+    eraseIfTopLevel(op);
+    return success();
+  }
+
   LogicalResult selectSplat(SplatOp op) {
     values[op.getResult()] = expect(op.getSource(), op);
     eraseIfTopLevel(op);
@@ -265,12 +325,37 @@ private:
                                   .Default("");
     if (machineOpcode.empty())
       return op.emitError("unsupported wave.binary kind");
+    Value lhs = expect(op.getLhs(), op);
+    Value rhs = expect(op.getRhs(), op);
+    // v_lshlrev_b32_e32 expects `vdst, src0=shift, vsrc1=value`, and the
+    // commutative VALU ops (v_add/v_and/v_or/v_xor) likewise place the
+    // post-swap rhs into vsrc1 (VGPR-only). Materialize operands that
+    // would otherwise land in vsrc1 as an SGPR or literal.
+    if (machineOpcode == "v_lshlrev_b32") {
+      lhs = ensureVGPRForVSrc1(op.getLoc(), lhs);
+    } else {
+      if (isImm(rhs))
+        rhs = ensureVGPRForVSrc1(op.getLoc(), rhs);
+      if (!isVGPR(lhs) && !isVGPR(rhs))
+        lhs = ensureVGPRForVSrc1(op.getLoc(), lhs);
+    }
     values[op.getResult()] =
-        createInstr(builder, op.getLoc(), machineOpcode,
-                    {expect(op.getLhs(), op), expect(op.getRhs(), op)},
+        createInstr(builder, op.getLoc(), machineOpcode, {lhs, rhs},
                     getRegType(op.getContext(), wavemachine::RegClass::VGPR));
     eraseIfTopLevel(op);
     return success();
+  }
+
+  // Materialize an SGPR or immediate value into a fresh VGPR so it can be
+  // used in a position that the AMDGPU e32 encoding restricts to VGPR_32
+  // (typically `vsrc1` on commutative VALU ops or the value operand of
+  // `v_lshlrev_b32`). VGPR sources are returned as-is.
+  Value ensureVGPRForVSrc1(Location loc, Value v) {
+    if (isVGPR(v))
+      return v;
+    return createInstr(builder, loc, "v_mov_b32_tuple", {v},
+                       getRegType(builder.getContext(),
+                                  wavemachine::RegClass::VGPR, /*width=*/1));
   }
 
   LogicalResult selectCmp(CmpIOp op) {
