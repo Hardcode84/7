@@ -201,6 +201,12 @@ def WaveMachine_VXorB32Op
 def WaveMachine_VLshlrevB32Op
     : WaveMachine_BinaryResult<"v_lshlrev_b32", WaveMachine_RegOrImm,
                                WaveMachine_VGPR1, [WaveMachine_VALU]>;
+def WaveMachine_VLshrrevB32Op
+    : WaveMachine_BinaryResult<"v_lshrrev_b32", WaveMachine_RegOrImm,
+                               WaveMachine_VGPR1, [WaveMachine_VALU]>;
+def WaveMachine_VMulLoU32Op
+    : WaveMachine_BinaryResult<"v_mul_lo_u32", WaveMachine_RegOrImm,
+                               WaveMachine_VGPR1, [WaveMachine_VALU]>;
 def WaveMachine_VCmpEqU32Op
     : WaveMachine_BinaryResult<"v_cmp_eq_u32", WaveMachine_RegOrImm,
                                WaveMachine_SGPR1, [WaveMachine_VALU]>;

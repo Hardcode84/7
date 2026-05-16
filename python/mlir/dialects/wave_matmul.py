@@ -11,14 +11,23 @@ Python bindings (see :mod:`wave_dsl`). It returns a live
 
 The kernel reads A and B from global memory through ``wave.load`` +
 ``waveamd.fragment_pack`` (the ``fragment_load`` DSL helper) and stores
-the f32 accumulator with ``waveamd.fragment_store``. To keep the per-lane
-address arithmetic representable with the shift/and ops the current Wave
-backend exposes, the builder restricts itself to:
+the f32 accumulator with ``waveamd.fragment_store``.
 
-* ``M = 16`` (one M-tile, no m_tile decomposition needed)
-* ``N`` is a power-of-two multiple of 16 (``n_tile = workgroup_id``)
-* ``K`` is a power-of-two multiple of 16 (per-row stride is a shift)
-* ``BM = BN = 1`` (one wave per workgroup, one 16x16 tile per workgroup)
+Tile-to-wave mapping:
+  * The grid is launched 2-D as ``(M_blocks, N_blocks)`` and each
+    workgroup runs ``BM * BN`` waves (one wave per 16x16 output tile).
+  * The wave's local id within its workgroup is ``workitem_id_x >> 5``,
+    decomposed into ``(m_wave, n_wave)`` via ``BN`` being a power of 2.
+  * The wave's global tile is then
+    ``(m_tile, n_tile) = (workgroup_id_x * BM + m_wave,
+                          workgroup_id_y * BN + n_wave)``.
+
+Shape constraints:
+  * ``M``, ``N``, ``K`` are positive multiples of 16.
+  * ``BM`` is a positive integer dividing ``M / 16``.
+  * ``BN`` is a positive *power of 2* dividing ``N / 16`` (so the
+    wave-id decomposition uses ``andi`` + ``shri``).
+  * ``BM * BN <= 32`` (RDNA3 caps a workgroup at 32 waves of 32 lanes).
 """
 
 from __future__ import annotations
@@ -46,25 +55,25 @@ class _MatmulConfig:
         for dim, val in (("M", self.M), ("N", self.N), ("K", self.K)):
             if val <= 0 or val % 16 != 0:
                 raise ValueError(f"{dim} must be a positive multiple of 16; got {val}")
-        if self.M != 16:
+        if self.BM < 1 or self.BN < 1:
+            raise ValueError(f"BM and BN must be >= 1; got BM={self.BM}, BN={self.BN}")
+        if not _is_power_of_two(self.BN):
             raise ValueError(
-                "v1 of the real-load matmul only supports M=16 (single M-tile); "
-                f"got M={self.M}"
+                f"BN must be a positive power of two (for the wave-id "
+                f"decomposition); got BN={self.BN}"
             )
-        if not _is_power_of_two(self.N // 16):
+        if (self.M // 16) % self.BM != 0:
             raise ValueError(
-                "N/16 must be a power of two (so n_tile = workgroup_id with no "
-                f"divisions); got N={self.N}"
+                f"BM (={self.BM}) must divide M/16 (={self.M // 16})"
             )
-        if not _is_power_of_two(self.K // 16):
+        if (self.N // 16) % self.BN != 0:
             raise ValueError(
-                "K/16 must be a power of two (so per-row stride is a shift); "
-                f"got K={self.K}"
+                f"BN (={self.BN}) must divide N/16 (={self.N // 16})"
             )
-        if self.BM != 1 or self.BN != 1:
+        if self.waves_per_workgroup > 32:
             raise ValueError(
-                "v1 of the real-load matmul only supports BM=BN=1 (one wave per "
-                f"workgroup); got BM={self.BM}, BN={self.BN}"
+                f"BM * BN must be <= 32 (RDNA3 workgroup wave cap); "
+                f"got BM={self.BM}, BN={self.BN} (product={self.waves_per_workgroup})"
             )
 
     @property
@@ -90,21 +99,20 @@ class _MatmulConfig:
         return 32 * self.waves_per_workgroup
 
     @property
-    def num_workgroups(self) -> int:
-        return self.total_elements // (256 * self.waves_per_workgroup)
+    def M_blocks(self) -> int:
+        return self.M // (16 * self.BM)
+
+    @property
+    def N_blocks(self) -> int:
+        return self.N // (16 * self.BN)
 
     @property
     def k_steps(self) -> int:
         return self.K // 16
 
     @property
-    def log2_workgroup_i32_stride(self) -> int:
-        # i32 element stride per workgroup = 256 * BM*BN.
-        return (256 * self.waves_per_workgroup).bit_length() - 1
-
-    @property
-    def log2_K(self) -> int:
-        return self.K.bit_length() - 1
+    def log2_BN(self) -> int:
+        return self.BN.bit_length() - 1
 
 
 _KERNEL_NAME = "wmma_f16_matmul_tiled"
@@ -118,72 +126,116 @@ _MMA_KIND = "wmma.f32.16x16x16.f16"
 def _emit_kernel(bld: dsl.FunctionBuilder, cfg: _MatmulConfig) -> None:
     """Populate the tiled matmul kernel body.
 
-    Memory layout (all dims in f16 elements, addresses in element units):
+    Memory layout (in f16 elements, addresses in element units):
       * A is row-major ``M x K``; lane ``L`` of the A fragment owns row
-        ``L % 16`` so its per-tile base is ``A + (L % 16) * K + k * 16``.
+        ``m_tile * 16 + L % 16``.
       * B is column-major ``K x N`` (equivalent to row-major ``N x K``);
-        lane ``L`` owns column ``n_tile * 16 + L % 16`` so its per-tile
-        base is ``B + (n_tile * 16 + L % 16) * K + k * 16``.
-      * Output C is f32 in "tile block" layout: workgroup ``wg`` writes
-        256 contiguous f32 elements starting at ``wg * 256``.
+        lane ``L`` owns column ``n_tile * 16 + L % 16``.
+      * Output C is f32 in "tile block" layout: each wave writes 256
+        contiguous f32 elements starting at
+        ``((workgroup_id_x * N_blocks + workgroup_id_y) * waves_per_wg
+          + wave_id_in_wg) * 256``.
     """
     a_arg, b_arg, c_arg = bld.args
     i32 = dsl.i32()
 
-    # ---- C output address (1 wave per wg, 1 tile per wg) ---------------
-    wi = bld.workitem_id(axis=0)
-    neg32 = bld.constant(i32, -32)
-    wave_base = bld.binary("andi", wi, bld.splat(neg32))
-    c3 = bld.constant(i32, 3)
-    wave_off = bld.binary("shli", wave_base, bld.splat(c3))
+    def splat_const(value: int) -> dsl.Value:
+        return bld.splat(bld.constant(i32, value))
 
-    wg = bld.workgroup_id(axis=0)
-    wg_shift = bld.constant(i32, cfg.log2_workgroup_i32_stride)
-    wg_off = bld.binary("shli", bld.splat(wg), bld.splat(wg_shift))
-    c_off = bld.binary("addi", wg_off, wave_off)
+    # ---- decompose workitem_id and workgroup id into per-wave coords ----
+    wi = bld.workitem_id(axis=0)            # element[L] = wave_id_in_wg * 32 + L
+    lane = bld.lane_id()                     # element[L] = L
+    wg_m = bld.workgroup_id(axis=0)          # scalar i32: 0..M_blocks-1
+    wg_n = bld.workgroup_id(axis=1)          # scalar i32: 0..N_blocks-1
+
+    # wave_id_in_wg = wi >> 5 (uniform across the wave since L < 32).
+    wave_id = bld.binary("shri", wi, splat_const(5))
+
+    # (m_wave, n_wave) decomposition. BN is a power of 2 so:
+    #   n_wave = wave_id & (BN - 1)
+    #   m_wave = wave_id >> log2(BN)
+    n_wave = bld.binary("andi", wave_id, splat_const(cfg.BN - 1))
+    m_wave = bld.binary("shri", wave_id, splat_const(cfg.log2_BN))
+
+    # Global (m_tile, n_tile) for this wave:
+    #   m_tile = wg_m * BM + m_wave
+    #   n_tile = wg_n * BN + n_wave
+    m_tile = bld.binary(
+        "addi",
+        bld.binary("muli", bld.splat(wg_m), splat_const(cfg.BM)),
+        m_wave,
+    )
+    n_tile = bld.binary(
+        "addi",
+        bld.binary("muli", bld.splat(wg_n), splat_const(cfg.BN)),
+        n_wave,
+    )
+
+    # ---- per-lane row offset (L % 16) * K (in f16 elements) ----
+    lane_mod16 = bld.binary("andi", lane, splat_const(15))
+    lane_row_off = bld.binary("muli", lane_mod16, splat_const(cfg.K))
+
+    # ---- per-tile offset = tile * (16 * K) (in f16 elements) ----
+    tile_stride = splat_const(16 * cfg.K)
+    m_tile_off = bld.binary("muli", m_tile, tile_stride)
+    n_tile_off = bld.binary("muli", n_tile, tile_stride)
+
+    a_lane_base = bld.ptr_add(
+        a_arg, bld.binary("addi", m_tile_off, lane_row_off)
+    )
+    b_lane_base = bld.ptr_add(
+        b_arg, bld.binary("addi", n_tile_off, lane_row_off)
+    )
+
+    # ---- C output offset (in f32 elements) ----
+    # total_wave_id = (wg_m * N_blocks + wg_n) * waves_per_wg + wave_id_in_wg
+    # c_off = total_wave_id * 256  (256 = 1 << 8)
+    wg_linear = bld.binary(
+        "addi",
+        bld.binary("muli", bld.splat(wg_m), splat_const(cfg.N_blocks)),
+        bld.splat(wg_n),
+    )
+    wave_offset_within_grid = bld.binary(
+        "muli", wg_linear, splat_const(cfg.waves_per_workgroup)
+    )
+    total_wave_id = bld.binary("addi", wave_offset_within_grid, wave_id)
+    c_off = bld.binary("shli", total_wave_id, splat_const(8))
     c_ptr = bld.ptr_add(c_arg, c_off)
 
-    # ---- per-lane base addresses for A and B ---------------------------
-    # lane % 16 lets the second half of the wave (lanes 16..31) reuse the
-    # same row/column slice the first half computes, matching the RDNA3
-    # WMMA fragment layout (every value is held in two lanes).
-    lane = bld.lane_id()
-    c15 = bld.constant(i32, 15)
-    lane_mod16 = bld.binary("andi", lane, bld.splat(c15))
-
-    log2_K = bld.constant(i32, cfg.log2_K)
-    a_row_off = bld.binary("shli", lane_mod16, bld.splat(log2_K))
-    a_lane_base = bld.ptr_add(a_arg, a_row_off)
-
-    # n_tile == wg (since N/16 is a power of two). The per-workgroup B
-    # offset jumps 16*K elements between adjacent n_tiles.
-    log2_16K = bld.constant(i32, cfg.log2_K + 4)
-    b_wg_off = bld.binary("shli", bld.splat(wg), bld.splat(log2_16K))
-    b_lane_off = bld.binary("addi", b_wg_off, a_row_off)
-    b_lane_base = bld.ptr_add(b_arg, b_lane_off)
-
-    # ---- fragment types ------------------------------------------------
+    # ---- fragment types ----
     a_type = dsl.fragment_type(0, dsl.f16(), 16, 16, 32, 8)
     b_type = dsl.fragment_type(1, dsl.f16(), 16, 16, 32, 8)
     acc_type = dsl.fragment_type(2, dsl.f32(), 16, 16, 32, 8)
 
     # ---- K-loop: load A and B tiles, accumulate, advance pointers ------
     acc = bld.fragment_fill(bld.constant(i32, 0), acc_type)
-    c16 = bld.constant(i32, 16)
+    c16 = splat_const(16)
     a_ptr_iter = a_lane_base
     b_ptr_iter = b_lane_base
     for _ in range(cfg.k_steps):
         a_frag, _atok = bld.fragment_load(a_ptr_iter, a_type)
         b_frag, _btok = bld.fragment_load(b_ptr_iter, b_type)
         acc = bld.mma(_MMA_KIND, a_frag, b_frag, acc)
-        a_ptr_iter = bld.ptr_add(a_ptr_iter, bld.splat(c16))
-        b_ptr_iter = bld.ptr_add(b_ptr_iter, bld.splat(c16))
+        a_ptr_iter = bld.ptr_add(a_ptr_iter, c16)
+        b_ptr_iter = bld.ptr_add(b_ptr_iter, c16)
 
     bld.fragment_store(acc, c_ptr)
 
 
 def _emit_host(bld: dsl.FunctionBuilder, cfg: _MatmulConfig) -> None:
-    """Populate the host ``main`` that allocates, launches, and prints."""
+    """Populate the host ``main`` that allocates, launches, and prints.
+
+    The validation fill uses a per-axis split so each output element
+    depends on *both* A and B (so we can distinguish "matmul actually
+    ran" from "kernel happened to sum K ones"):
+
+      * A[i, k] = 1.0 for i in [0, M/2) and 2.0 for i in [M/2, M).
+      * B[k, j] = 1.0 for j in [0, N/2) and 2.0 for j in [N/2, N).
+
+    With that fill, C[i, j] = K * a(i) * b(j) takes values K, 2K, 4K
+    across the four output quadrants -- a pattern the lit CHECK lines
+    pin down directly.
+    """
     index = dsl.index_type()
     f16 = dsl.f16()
     f32 = dsl.f32()
@@ -192,23 +244,37 @@ def _emit_host(bld: dsl.FunctionBuilder, cfg: _MatmulConfig) -> None:
 
     c0 = bld.constant(index, 0)
     c1 = bld.constant(index, 1)
-    blocks = bld.constant(index, cfg.num_workgroups)
+    blocks_m = bld.constant(index, cfg.M_blocks)
+    blocks_n = bld.constant(index, cfg.N_blocks)
     threads = bld.constant(index, cfg.threads_per_workgroup)
-    a_total = bld.constant(index, cfg.a_elements)
-    b_total = bld.constant(index, cfg.b_elements)
     c_total = bld.constant(index, cfg.total_elements)
 
     one_f16 = bld.constant(f16, 1.0)
+    two_f16 = bld.constant(f16, 2.0)
     zero_f32 = bld.constant(f32, 0.0)
 
     a_buf = bld.alloc([cfg.a_elements], f16)
     b_buf = bld.alloc([cfg.b_elements], f16)
     c_buf = bld.alloc([cfg.total_elements], f32)
 
-    with bld.for_loop(c0, a_total, c1) as i:
+    # A is row-major MxK: rows [0, M/2) -> first M*K/2 elements (1.0);
+    # rows [M/2, M) -> the rest (2.0).
+    a_half = bld.constant(index, cfg.a_elements // 2)
+    a_total = bld.constant(index, cfg.a_elements)
+    with bld.for_loop(c0, a_half, c1) as i:
         bld.memref_store(one_f16, a_buf, [i])
-    with bld.for_loop(c0, b_total, c1) as i:
+    with bld.for_loop(a_half, a_total, c1) as i:
+        bld.memref_store(two_f16, a_buf, [i])
+
+    # B is column-major KxN (== row-major NxK): columns [0, N/2) -> first
+    # N*K/2 elements (1.0); columns [N/2, N) -> the rest (2.0).
+    b_half = bld.constant(index, cfg.b_elements // 2)
+    b_total = bld.constant(index, cfg.b_elements)
+    with bld.for_loop(c0, b_half, c1) as i:
         bld.memref_store(one_f16, b_buf, [i])
+    with bld.for_loop(b_half, b_total, c1) as i:
+        bld.memref_store(two_f16, b_buf, [i])
+
     with bld.for_loop(c0, c_total, c1) as i:
         bld.memref_store(zero_f32, c_buf, [i])
 
@@ -228,7 +294,7 @@ def _emit_host(bld: dsl.FunctionBuilder, cfg: _MatmulConfig) -> None:
     bld.launch(
         _GPU_MODULE_NAME,
         _KERNEL_NAME,
-        grid=(blocks, c1, c1),
+        grid=(blocks_m, blocks_n, c1),
         block=(threads, c1, c1),
         operands=[a_ptr, b_ptr, c_ptr],
     )
@@ -240,16 +306,12 @@ def build_wmma_f16_matmul_module(
 ) -> Module:
     """Return an MLIR :class:`Module` for the tiled WMMA f16 matmul.
 
-    The host allocates ``MxK`` (A) and ``NxK`` (B) f16 buffers filled
-    with 1.0, plus an ``MxN`` f32 output buffer, registers them with the
-    GPU runtime, and launches the kernel. Each output element is
-    therefore :math:`\\sum_{k=0}^{K-1} 1.0 \\cdot 1.0 = K`.
+    The host allocates ``MxK`` (A) and ``NxK`` (B) f16 buffers (filled
+    with a per-axis 1.0/2.0 split, see :func:`_emit_host`), plus an
+    ``MxN`` f32 output buffer, registers them with the GPU runtime, and
+    launches the kernel.
 
-    Constraints (see module docstring for the rationale):
-      * ``M = 16``.
-      * ``N`` is a power-of-two multiple of 16.
-      * ``K`` is a power-of-two multiple of 16.
-      * ``BM = BN = 1``.
+    See the module docstring for shape constraints.
 
     Note: the returned :class:`Module` is bound to a fresh MLIR
     :class:`Context` owned by the temporary :class:`ModuleBuilder`. The

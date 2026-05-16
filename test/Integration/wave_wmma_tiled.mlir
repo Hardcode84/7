@@ -1,21 +1,29 @@
 // REQUIRES: host-supports-amdgpu-wmma
 //
 // End-to-end check for the tiled WMMA f16xf16xf32 matmul with real
-// loads.
+// loads and non-uniform A/B fills.
 //
 // The Python helper in examples/wave emits a `gpu.module` + host `main`
 // for a 16x64 x 32x64 matmul (M=16, N=64, K=32, BM=BN=1). The host
-// allocates A (16*32 f16), B (64*32 f16) and C (16*64 f32), fills A
-// and B with 1.0 and zeros C, registers all three buffers with the
-// HIP runtime, and launches one workgroup per 16x16 output tile (4
-// workgroups, 32 lanes each). Each lane uses `wave.load` to read its
-// 8-dword A and B slices from global memory and `waveamd.fragment_pack`
-// to bind them as WMMA fragments, accumulates four 16x16x16 MMAs, and
-// stores the f32 result through `waveamd.fragment_store`.
+// allocates A (16*32 f16), B (64*32 f16) and C (16*64 f32) and fills
+// them with a per-axis split so each output element depends on *both*
+// matrices (catches "kernel happened to sum K ones" regressions):
 //
-// With the all-ones fill every output element equals K=32 (f32), so the
-// host-side `printMemrefF32` produces an uninterrupted run of
-// `32, 32, 32, ...` values.
+//   A[i, k] = 1.0 for i in [0, 8) and 2.0 for i in [8, 16).
+//   B[k, j] = 1.0 for j in [0, 32) and 2.0 for j in [32, 64).
+//
+// So C[i, j] = K * a(i) * b(j) takes values K, 2K, 4K -- here
+// 32, 64, 128 (since K=32).
+//
+// The RDNA3 WMMA f32 accumulator splits the 16 output rows across the
+// wave halves (lane L<16 holds rows {0,2,4,..,14} of column L%16; lane
+// L>=16 holds rows {1,3,..,15}). Within each lane's 8 contiguous
+// f32 dwords, rows 0..7 land in slots 0..3 and rows 8..15 land in
+// slots 4..7 -- so a single lane writes "<lo>, <lo>, <lo>, <lo>,
+// <hi>, <hi>, <hi>, <hi>" where <lo>/<hi> are the products picked up
+// from the low/high A halves. For n_tile in {0, 1} (b=1) that is
+// "32, 32, 32, 32, 64, 64, 64, 64"; for n_tile in {2, 3} (b=2) it is
+// "64, 64, 64, 64, 128, 128, 128, 128".
 //
 // RUN: %python %S/../../examples/wave/wmma_matmul_tiled.py --m=16 --n=64 --k=32 \
 // RUN:   | wave-opt --wave-compile-kernels='chip=%chip' \
@@ -30,7 +38,5 @@
 // RUN:       --entry-point-result=void \
 // RUN:   | FileCheck %s
 //
-// One 16-wide run of `32`s is enough evidence that the WMMA tiles
-// computed the right value at the (otherwise irregularly-wrapped)
-// `printMemrefF32` output.
-// CHECK: 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32
+// CHECK: 32, 32, 32, 32, 64, 64, 64, 64
+// CHECK: 64, 64, 64, 64, 128, 128, 128, 128

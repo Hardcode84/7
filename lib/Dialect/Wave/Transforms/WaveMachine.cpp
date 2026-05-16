@@ -325,18 +325,21 @@ private:
                                   .Case("ori", "v_or_b32")
                                   .Case("xori", "v_xor_b32")
                                   .Case("shli", "v_lshlrev_b32")
+                                  .Case("shri", "v_lshrrev_b32")
+                                  .Case("muli", "v_mul_lo_u32")
                                   .Default("");
     if (machineOpcode.empty())
       return op.emitError("unsupported wave.binary kind");
     Value lhs = expect(op.getLhs(), op);
     Value rhs = expect(op.getRhs(), op);
-    // v_lshlrev_b32_e32 expects `vdst, src0=shift, vsrc1=value`, and the
-    // commutative VALU ops (v_add/v_and/v_or/v_xor) likewise place the
-    // post-swap rhs into vsrc1 (VGPR-only). Materialize operands that
-    // would otherwise land in vsrc1 as an SGPR or literal.
-    if (machineOpcode == "v_lshlrev_b32") {
+    // The e32 (VOP2) shift/commutative ops place `vsrc1` in a slot that
+    // must be a VGPR -- materialize operands that would otherwise land
+    // in vsrc1 as an SGPR or literal. `v_mul_lo_u32` is VOP3-only so
+    // it has no such restriction.
+    if (machineOpcode == "v_lshlrev_b32" ||
+        machineOpcode == "v_lshrrev_b32") {
       lhs = ensureVGPRForVSrc1(op.getLoc(), lhs);
-    } else {
+    } else if (machineOpcode != "v_mul_lo_u32") {
       if (isImm(rhs))
         rhs = ensureVGPRForVSrc1(op.getLoc(), rhs);
       if (!isVGPR(lhs) && !isVGPR(rhs))

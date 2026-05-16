@@ -517,6 +517,18 @@ private:
       return emitMC(llvm::AMDGPU::V_LSHLREV_B32_e32_gfx11,
                     {toMCOperand(result()), toMCOperand(op.getOperand(1)),
                      toMCOperand(op.getOperand(0))});
+    if (isa<wavemachine::VLshrrevB32Op>(op))
+      return emitMC(llvm::AMDGPU::V_LSHRREV_B32_e32_gfx11,
+                    {toMCOperand(result()), toMCOperand(op.getOperand(1)),
+                     toMCOperand(op.getOperand(0))});
+    if (isa<wavemachine::VMulLoU32Op>(op))
+      // v_mul_lo_u32 is VOP3-only on RDNA3; operand placement is
+      // unconstrained so we emit (vdst, src0, src1) as-is without the
+      // VOP2 swap dance.
+      return emitMC(
+          llvm::AMDGPU::V_MUL_LO_U32_e64_gfx11,
+          {toMCOperand(result()), toMCOperand(op.getOperand(0)),
+           toMCOperand(op.getOperand(1))});
     if (isa<wavemachine::VCmpEqU32Op, wavemachine::VCmpNeU32Op,
             wavemachine::VCmpLtU32Op, wavemachine::VCmpLeU32Op,
             wavemachine::VCmpGtU32Op, wavemachine::VCmpGeU32Op>(op)) {
