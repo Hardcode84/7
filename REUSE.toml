@@ -4,44 +4,39 @@
 
 version = 1
 
+# Source files carry an inline SPDX-License-Identifier (LLVM style); we
+# aggregate a project-level copyright onto them.
 [[annotations]]
-path = ".gitignore"
-precedence = "override"
+path = ["**/*.cpp", "**/*.h"]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "2026 wave-mlir contributors"
+
+# File types where the upstream LLVM convention is to omit any SPDX header
+# (tests, examples, docs, CMakeLists, TableGen, some Python). We assert
+# project license and copyright via REUSE.toml.
+[[annotations]]
+path = [
+    "**/*.td",
+    "**/*.py",
+    "**/*.mlir",
+    "**/*.rst",
+    "**/CMakeLists.txt",
+]
+precedence = "aggregate"
 SPDX-FileCopyrightText = "2026 wave-mlir contributors"
 SPDX-License-Identifier = "Apache-2.0 WITH LLVM-exception"
 
+# Generic / metadata files.
 [[annotations]]
-path = ".pre-commit-config.yaml"
-precedence = "override"
-SPDX-FileCopyrightText = "2026 wave-mlir contributors"
-SPDX-License-Identifier = "Apache-2.0 WITH LLVM-exception"
-
-[[annotations]]
-path = "*.md"
-precedence = "override"
-SPDX-FileCopyrightText = "2026 wave-mlir contributors"
-SPDX-License-Identifier = "Apache-2.0 WITH LLVM-exception"
-
-[[annotations]]
-path = "*.toml"
-precedence = "override"
-SPDX-FileCopyrightText = "2026 wave-mlir contributors"
-SPDX-License-Identifier = "Apache-2.0 WITH LLVM-exception"
-
-[[annotations]]
-path = "*.json"
-precedence = "override"
-SPDX-FileCopyrightText = "2026 wave-mlir contributors"
-SPDX-License-Identifier = "Apache-2.0 WITH LLVM-exception"
-
-[[annotations]]
-path = "LICENSE.TXT"
-precedence = "override"
-SPDX-FileCopyrightText = "2026 wave-mlir contributors"
-SPDX-License-Identifier = "Apache-2.0 WITH LLVM-exception"
-
-[[annotations]]
-path = "llvm-commit.txt"
+path = [
+    ".gitignore",
+    ".pre-commit-config.yaml",
+    "**/*.md",
+    "**/*.toml",
+    "**/*.json",
+    "LICENSE.TXT",
+    "llvm-commit.txt",
+]
 precedence = "override"
 SPDX-FileCopyrightText = "2026 wave-mlir contributors"
 SPDX-License-Identifier = "Apache-2.0 WITH LLVM-exception"
