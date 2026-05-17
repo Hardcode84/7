@@ -4,10 +4,14 @@
 // loads and non-uniform A/B fills.
 //
 // The Python helper in examples/wave emits a `gpu.module` + host `main`
-// for a 16x64 x 32x64 matmul (M=16, N=64, K=32, BM=BN=1). The host
-// allocates A (16*32 f16), B (64*32 f16) and C (16*64 f32) and fills
-// them with a per-axis split so each output element depends on *both*
-// matrices (catches "kernel happened to sum K ones" regressions):
+// for a 16x64 x 32x64 matmul (M=16, N=64, K=32, BM=BN=1). The K
+// accumulation runs as a runtime-driven `scf.for` (tagged
+// `wave.nonzero_trip`) carrying (acc, a_ptr, b_ptr); the host passes
+// `K/16` as a fourth i32 kernel arg and the selector lowers it to a
+// post-tested `wavemachine.uniform_loop`. The host allocates A
+// (16*32 f16), B (64*32 f16) and C (16*64 f32) and fills them with a
+// per-axis split so each output element depends on *both* matrices
+// (catches "kernel happened to sum K ones" regressions):
 //
 //   A[i, k] = 1.0 for i in [0, 8) and 2.0 for i in [8, 16).
 //   B[k, j] = 1.0 for j in [0, 32) and 2.0 for j in [32, 64).

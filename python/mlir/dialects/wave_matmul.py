@@ -73,12 +73,6 @@ class _MatmulConfig:
     BN: int
     use_lds: bool = False
     use_buffer: bool = False
-    # When `dyn_k=True`, the kernel takes the per-tile K-step count as
-    # an extra i32 argument and lowers the K accumulation as a runtime
-    # `scf.for` loop (tagged `wave.nonzero_trip`) instead of a Python
-    # unroll. The host still allocates K = `cfg.K` so the launch shape
-    # matches; the dynamic count is just `K / 16`.
-    dyn_k: bool = False
 
     def __post_init__(self) -> None:
         for dim, val in (("M", self.M), ("N", self.N), ("K", self.K)):
@@ -358,30 +352,26 @@ def _emit_kernel(bld: dsl.FunctionBuilder, cfg: _MatmulConfig) -> None:
             bld.ptr_add(b_p, c16),
         )
 
-    if cfg.dyn_k:
-        # The fourth kernel arg is the per-tile K-step count (`K /
-        # 16`). We promise the host always launches with K > 0 so the
-        # selector can use the `wave.nonzero_trip` do/while shape.
-        # The wave-machine selector only accepts sized integer loop
-        # IVs (index types must be converted on the host side); i32 is
-        # the natural choice since the kernel arg arrives as i32.
-        k_steps_i32 = bld.args[3]
-        zero_i32 = bld.constant(dsl.i32(), 0)
-        one_i32 = bld.constant(dsl.i32(), 1)
-        with bld.for_loop(
-            zero_i32,
-            k_steps_i32,
-            one_i32,
-            init_args=(acc, a_ptr_iter, b_ptr_iter),
-            nonzero_trip=True,
-        ) as forop:
-            carry_acc, carry_a, carry_b = forop.inner_iter_args
-            new_acc, new_a, new_b = emit_step(carry_a, carry_b, carry_acc)
-            scf.YieldOp([new_acc, new_a, new_b])
-        acc = forop.results[0]
-    else:
-        for _ in range(cfg.k_steps):
-            acc, a_ptr_iter, b_ptr_iter = emit_step(a_ptr_iter, b_ptr_iter, acc)
+    # The fourth kernel arg is the per-tile K-step count (`K / 16`).
+    # We promise the host always launches with K > 0 so the selector
+    # can use the `wave.nonzero_trip` do/while shape. The wave-machine
+    # selector only accepts sized integer loop IVs (index types must
+    # be converted on the host side); i32 is the natural choice since
+    # the kernel arg arrives as i32.
+    k_steps_i32 = bld.args[3]
+    zero_i32 = bld.constant(dsl.i32(), 0)
+    one_i32 = bld.constant(dsl.i32(), 1)
+    with bld.for_loop(
+        zero_i32,
+        k_steps_i32,
+        one_i32,
+        init_args=(acc, a_ptr_iter, b_ptr_iter),
+        nonzero_trip=True,
+    ) as forop:
+        carry_acc, carry_a, carry_b = forop.inner_iter_args
+        new_acc, _new_a, _new_b = emit_step(carry_a, carry_b, carry_acc)
+        scf.YieldOp([new_acc, _new_a, _new_b])
+    acc = forop.results[0]
 
     bld.fragment_store(acc, coords.c_ptr)
 
@@ -455,12 +445,10 @@ def _emit_host(bld: dsl.FunctionBuilder, cfg: _MatmulConfig) -> None:
     [b_ptr] = bld.call(_F16_PTR_HELPER, [bld.memref_cast(b_buf, dyn_f16)], [f16_ptr])
     [c_ptr] = bld.call(_F32_PTR_HELPER, [c_buf], [f32_ptr])
 
-    launch_operands = [a_ptr, b_ptr, c_ptr]
-    if cfg.dyn_k:
-        # cfg.K is the buffer K used for allocation; per-tile K-step
-        # count is K / 16, passed in as an i32 to the kernel.
-        k_steps_value = bld.constant(dsl.i32(), cfg.k_steps)
-        launch_operands.append(k_steps_value)
+    # cfg.K is the buffer K used for allocation; per-tile K-step
+    # count is K / 16, passed in as an i32 to the kernel.
+    k_steps_value = bld.constant(dsl.i32(), cfg.k_steps)
+    launch_operands = [a_ptr, b_ptr, c_ptr, k_steps_value]
     bld.launch(
         _GPU_MODULE_NAME,
         _KERNEL_NAME,
@@ -480,7 +468,6 @@ def build_wmma_f16_matmul_module(
     BN: int = 1,
     use_lds: bool = False,
     use_buffer: bool = False,
-    dyn_k: bool = False,
 ) -> Module:
     """Return an MLIR :class:`Module` for the tiled WMMA f16 matmul.
 
@@ -520,7 +507,6 @@ def build_wmma_f16_matmul_module(
         BN=BN,
         use_lds=use_lds,
         use_buffer=use_buffer,
-        dyn_k=dyn_k,
     )
     bld = dsl.ModuleBuilder()
     with bld:
@@ -544,10 +530,9 @@ def build_wmma_f16_matmul_module(
             dsl.ptr_type(dsl.f16()),
             dsl.ptr_type(dsl.f16()),
             dsl.ptr_type(dsl.f32()),
-        ]
-        if cfg.dyn_k:
             # Per-tile K-step count (= K // 16). Passed by value as i32.
-            kernel_inputs.append(dsl.i32())
+            dsl.i32(),
+        ]
         lds_size = cfg.lds_bytes if cfg.use_lds else None
         with (
             bld.gpu_module(_GPU_MODULE_NAME) as gmod,
