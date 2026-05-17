@@ -32,8 +32,8 @@ module attributes {wavemachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 func.func @matrix_kernel(%out: !wave.ptr<i32, #wave.global>) attributes {wave.kernel} {
   %zero = arith.constant 0 : i32
   %seven = arith.constant 7 : i32
-  %base = arith.constant 0 : index
-  %ptr = wave.ptr_add %out, %base : !wave.ptr<i32, #wave.global>, index -> !wave.ptr<i32, #wave.global>
+  %base = arith.constant 0 : i32
+  %ptr = wave.ptr_add %out, %base : !wave.ptr<i32, #wave.global>, i32 -> !wave.ptr<i32, #wave.global>
   %a = waveamd.fragment_fill %zero : i32 -> !waveamd.fragment<0, i8, 16, 16, 32, 4>
   %b = waveamd.fragment_fill %zero : i32 -> !waveamd.fragment<1, i8, 16, 16, 32, 4>
   %acc = waveamd.fragment_fill %seven : i32 -> !waveamd.fragment<2, i32, 16, 16, 32, 8>
@@ -59,8 +59,8 @@ func.func @matrix_kernel(%out: !wave.ptr<i32, #wave.global>) attributes {wave.ke
 func.func @matrix_f16_kernel(%out: !wave.ptr<i32, #wave.global>) attributes {wave.kernel} {
   %zero = arith.constant 0 : i32
   %seven_as_f32_bits = arith.constant 1088421888 : i32
-  %base = arith.constant 0 : index
-  %ptr = wave.ptr_add %out, %base : !wave.ptr<i32, #wave.global>, index -> !wave.ptr<i32, #wave.global>
+  %base = arith.constant 0 : i32
+  %ptr = wave.ptr_add %out, %base : !wave.ptr<i32, #wave.global>, i32 -> !wave.ptr<i32, #wave.global>
   %a = waveamd.fragment_fill %zero : i32 -> !waveamd.fragment<0, f16, 16, 16, 32, 8>
   %b = waveamd.fragment_fill %zero : i32 -> !waveamd.fragment<1, f16, 16, 16, 32, 8>
   %acc = waveamd.fragment_fill %seven_as_f32_bits : i32 -> !waveamd.fragment<2, f32, 16, 16, 32, 8>

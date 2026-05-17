@@ -42,8 +42,8 @@ func.func @scalar_load_kernel(%in: !wave.ptr<i32, #wave.global>, %out: !wave.ptr
 func.func @tuple_load_kernel(%in: !wave.ptr<i32, #wave.global>, %out: !wave.ptr<i32, #wave.global>) attributes {wave.kernel} {
   %lane = wave.lane_id : !wave.simd<i32, 32>
   %ip = wave.ptr_add %in, %lane : !wave.ptr<i32, #wave.global>, !wave.simd<i32, 32> -> !wave.simd<!wave.ptr<i32, #wave.global>, 32>
-  %base = arith.constant 0 : index
-  %op = wave.ptr_add %out, %base : !wave.ptr<i32, #wave.global>, index -> !wave.ptr<i32, #wave.global>
+  %base = arith.constant 0 : i32
+  %op = wave.ptr_add %out, %base : !wave.ptr<i32, #wave.global>, i32 -> !wave.ptr<i32, #wave.global>
   %v, %tok = wave.load %ip : (!wave.simd<!wave.ptr<i32, #wave.global>, 32>) -> (!wave.simd<vector<8xi32>, 32>, !wave.mem.token)
   %frag = waveamd.fragment_pack %v : !wave.simd<vector<8xi32>, 32> -> !waveamd.fragment<2, f32, 16, 16, 32, 8>
   %st = waveamd.fragment_store %frag -> %op after %tok : (!waveamd.fragment<2, f32, 16, 16, 32, 8>, !wave.ptr<i32, #wave.global>, !wave.mem.token) -> !wave.mem.token
@@ -59,8 +59,8 @@ func.func @tuple_load_kernel(%in: !wave.ptr<i32, #wave.global>, %out: !wave.ptr<
 func.func @fragment_pack_is_noop(%in: !wave.ptr<i32, #wave.global>, %out: !wave.ptr<i32, #wave.global>) attributes {wave.kernel} {
   %lane = wave.lane_id : !wave.simd<i32, 32>
   %ip = wave.ptr_add %in, %lane : !wave.ptr<i32, #wave.global>, !wave.simd<i32, 32> -> !wave.simd<!wave.ptr<i32, #wave.global>, 32>
-  %base = arith.constant 0 : index
-  %op = wave.ptr_add %out, %base : !wave.ptr<i32, #wave.global>, index -> !wave.ptr<i32, #wave.global>
+  %base = arith.constant 0 : i32
+  %op = wave.ptr_add %out, %base : !wave.ptr<i32, #wave.global>, i32 -> !wave.ptr<i32, #wave.global>
   %v, %tok = wave.load %ip : (!wave.simd<!wave.ptr<i32, #wave.global>, 32>) -> (!wave.simd<vector<8xi32>, 32>, !wave.mem.token)
   %frag = waveamd.fragment_pack %v : !wave.simd<vector<8xi32>, 32> -> !waveamd.fragment<2, f32, 16, 16, 32, 8>
   %st = waveamd.fragment_store %frag -> %op after %tok : (!waveamd.fragment<2, f32, 16, 16, 32, 8>, !wave.ptr<i32, #wave.global>, !wave.mem.token) -> !wave.mem.token

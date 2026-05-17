@@ -362,14 +362,16 @@ def _emit_kernel(bld: dsl.FunctionBuilder, cfg: _MatmulConfig) -> None:
         # The fourth kernel arg is the per-tile K-step count (`K /
         # 16`). We promise the host always launches with K > 0 so the
         # selector can use the `wave.nonzero_trip` do/while shape.
+        # The wave-machine selector only accepts sized integer loop
+        # IVs (index types must be converted on the host side); i32 is
+        # the natural choice since the kernel arg arrives as i32.
         k_steps_i32 = bld.args[3]
-        zero_idx = bld.constant(dsl.index_type(), 0)
-        one_idx = bld.constant(dsl.index_type(), 1)
-        k_steps_idx = bld.index_cast(k_steps_i32, dsl.index_type())
+        zero_i32 = bld.constant(dsl.i32(), 0)
+        one_i32 = bld.constant(dsl.i32(), 1)
         with bld.for_loop(
-            zero_idx,
-            k_steps_idx,
-            one_idx,
+            zero_i32,
+            k_steps_i32,
+            one_i32,
             init_args=(acc, a_ptr_iter, b_ptr_iter),
             nonzero_trip=True,
         ) as forop:

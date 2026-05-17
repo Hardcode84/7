@@ -159,13 +159,13 @@ def test_uniform_for_loop_nonzero_trip():
     with w.module() as m:
         with m.function("loop_kernel", [w.ptr_type(w.i32())], kernel=True) as f:
             (_out,) = f.args
-            lo = f.constant(w.index_type(), 0)
-            hi = f.constant(w.index_type(), 8)
-            step = f.constant(w.index_type(), 1)
+            lo = f.constant(w.i32(), 0)
+            hi = f.constant(w.i32(), 8)
+            step = f.constant(w.i32(), 1)
             with f.for_loop(lo, hi, step, nonzero_trip=True):
                 pass
         # CHECK: func.func @loop_kernel
-        # CHECK: scf.for
+        # CHECK: scf.for {{.*}} : i32 {
         # CHECK: } {wave.nonzero_trip}
         print(m.module)
 
@@ -178,15 +178,15 @@ def test_uniform_for_loop_with_init_args():
     with w.module() as m:
         with m.function("loop_carry_kernel", [w.ptr_type(w.i32())], kernel=True) as f:
             (_out,) = f.args
-            lo = f.constant(w.index_type(), 0)
-            hi = f.constant(w.index_type(), 4)
-            step = f.constant(w.index_type(), 1)
+            lo = f.constant(w.i32(), 0)
+            hi = f.constant(w.i32(), 4)
+            step = f.constant(w.i32(), 1)
             init = f.constant(w.i32(), 7)
             with f.for_loop(lo, hi, step, init_args=(init,)) as forop:
                 (acc,) = forop.inner_iter_args
                 scf.YieldOp([acc])
             _ = forop.results[0]
         # CHECK: func.func @loop_carry_kernel
-        # CHECK: scf.for {{.*}} iter_args(%{{.+}} = %{{.+}}) -> (i32)
+        # CHECK: scf.for {{.*}} iter_args(%{{.+}} = %{{.+}}) -> (i32)  : i32 {
         # CHECK:   scf.yield {{.*}} : i32
         print(m.module)

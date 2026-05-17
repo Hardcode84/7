@@ -233,10 +233,6 @@ private:
       builder.setInsertionPoint(op);
     return llvm::TypeSwitch<Operation *, LogicalResult>(op)
         .Case<arith::ConstantIntOp>([&](auto o) { return selectConstant(o); })
-        .Case<arith::ConstantIndexOp>(
-            [&](auto o) { return selectConstantIndex(o); })
-        .Case<arith::IndexCastOp, arith::IndexCastUIOp>(
-            [&](auto o) { return selectIdentityCast(o); })
         .Case<LaneIdOp>([&](auto o) { return selectLaneId(o); })
         .Case<WorkgroupIdOp>([&](auto o) { return selectWorkgroupId(o); })
         .Case<WorkitemIdOp>([&](auto o) { return selectWorkitemId(o); })
@@ -278,23 +274,6 @@ private:
 
   LogicalResult selectConstant(arith::ConstantIntOp op) {
     values[op.getResult()] = createImm(builder, op.getLoc(), op.value());
-    eraseIfTopLevel(op);
-    return success();
-  }
-
-  LogicalResult selectConstantIndex(arith::ConstantIndexOp op) {
-    values[op.getResult()] = createImm(builder, op.getLoc(), op.value());
-    eraseIfTopLevel(op);
-    return success();
-  }
-
-  // arith.index_cast (and its UI variant) between scalar i32 and
-  // index types is an SSA-only no-op at the WaveMachine level: both
-  // sides land in the same 32-bit scalar register slot. We simply
-  // forward the wavemachine value through the value map.
-  template <typename CastOp> LogicalResult selectIdentityCast(CastOp op) {
-    Value mapped = expect(op.getOperand(), op);
-    values[op.getResult()] = mapped;
     eraseIfTopLevel(op);
     return success();
   }

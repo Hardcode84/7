@@ -31,9 +31,9 @@ gpu.module @kernels {
       attributes {gpu.kernel, wave.kernel} {
     %ones_i8x4 = arith.constant 0x01010101 : i32
     %acc_init  = arith.constant 0 : i32
-    %base      = arith.constant 0 : index
+    %base      = arith.constant 0 : i32
     %ptr = wave.ptr_add %out, %base
-        : !wave.ptr<i32, #wave.global>, index -> !wave.ptr<i32, #wave.global>
+        : !wave.ptr<i32, #wave.global>, i32 -> !wave.ptr<i32, #wave.global>
     %a   = waveamd.fragment_fill %ones_i8x4
         : i32 -> !waveamd.fragment<0, i8, 16, 16, 32, 4>
     %b   = waveamd.fragment_fill %ones_i8x4

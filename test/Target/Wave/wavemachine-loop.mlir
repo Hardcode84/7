@@ -38,10 +38,10 @@ module attributes {wavemachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // ASM: s_cbranch_scc1 .Lloop_pretested.loop_head_0
 // ASM: .Lloop_pretested.loop_exit_0:
 func.func @loop_pretested() attributes {wave.kernel} {
-  %lo = arith.constant 0 : index
-  %hi = arith.constant 4 : index
-  %step = arith.constant 1 : index
-  scf.for %i = %lo to %hi step %step {
+  %lo = arith.constant 0 : i32
+  %hi = arith.constant 4 : i32
+  %step = arith.constant 1 : i32
+  scf.for %i = %lo to %hi step %step : i32 {
     scf.yield
   }
   return
@@ -65,10 +65,10 @@ func.func @loop_pretested() attributes {wave.kernel} {
 // ASM: s_cbranch_scc1 .Lloop_post_tested.loop_head_0
 // ASM: .Lloop_post_tested.loop_exit_0:
 func.func @loop_post_tested() attributes {wave.kernel} {
-  %lo = arith.constant 0 : index
-  %hi = arith.constant 4 : index
-  %step = arith.constant 1 : index
-  scf.for %i = %lo to %hi step %step {
+  %lo = arith.constant 0 : i32
+  %hi = arith.constant 4 : i32
+  %step = arith.constant 1 : i32
+  scf.for %i = %lo to %hi step %step : i32 {
     scf.yield
   } {wave.nonzero_trip}
   return
