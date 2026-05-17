@@ -8,7 +8,11 @@
 // accumulation runs as a runtime-driven `scf.for` (tagged
 // `wave.nonzero_trip`) carrying (acc, a_ptr, b_ptr); the host passes
 // `K/16` as a fourth i32 kernel arg and the selector lowers it to a
-// post-tested `wavemachine.uniform_loop`. The host allocates A
+// post-tested `wavemachine.uniform_loop`. Each per-K-step A/B fragment
+// always rides through a per-wave LDS slot (the kernel exercises tuple
+// `ds_store_b32` / `ds_load_b32` and `s_barrier`), so this test also
+// pins down the `wave.lds_size` -> `group_segment_fixed_size`
+// propagation for the simple BM=BN=1 shape. The host allocates A
 // (16*32 f16), B (64*32 f16) and C (16*64 f32) and fills them with a
 // per-axis split so each output element depends on *both* matrices
 // (catches "kernel happened to sum K ones" regressions):

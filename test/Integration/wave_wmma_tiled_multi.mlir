@@ -9,7 +9,14 @@
 //     `andi` + `shri`, and `M_blocks = N_blocks = 2` no longer needs to
 //     be a power of two for the tile-coord math),
 //
-// so the pipeline exercises every new lowering path at once.
+// so the pipeline exercises every new lowering path at once. Each
+// per-K-step A/B fragment is staged through a per-wave LDS slot, so
+// this test also exercises tuple `ds_store_b32` / `ds_load_b32`,
+// `s_barrier`, and `wave.lds_size` -> `group_segment_fixed_size`
+// (4 waves * 2 fragments * 1024 B = 8192 B) across the multi-wave
+// shape and the `wavemachine.uniform_loop` back-edge -- the LGKM
+// drain across iterations is the regression we exposed when the K
+// loop became the only K accumulation shape.
 //
 // With the per-axis A/B fill (`A[i, :] = 1 if i<M/2 else 2`,
 // `B[:, j] = 1 if j<N/2 else 2`) every output element is

@@ -90,17 +90,12 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         help="waves per workgroup along N tiles (only 1 supported for now)",
     )
     parser.add_argument(
-        "--use-lds",
-        action="store_true",
-        help="round-trip each per-K-step A/B fragment through a per-wave "
-        "LDS slot (exercises ds_store_b32 / ds_load_b32 / s_barrier)",
-    )
-    parser.add_argument(
         "--use-buffer",
         action="store_true",
         help="wrap the A and B kernel inputs in waveamd.make_buffer so "
         "every per-K-step fragment load uses tuple buffer_load_b32 "
-        "(buffer_load_dword ..., 0 offen offset:i*4)",
+        "(buffer_load_dword ..., 0 offen offset:i*4) before the LDS "
+        "round-trip",
     )
     return parser.parse_args(argv)
 
@@ -116,7 +111,6 @@ def main(argv: list[str] | None = None) -> int:
         K=args.k,
         BM=args.bm,
         BN=args.bn,
-        use_lds=args.use_lds,
         use_buffer=args.use_buffer,
     )
     sys.stdout.write(str(module))

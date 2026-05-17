@@ -10,25 +10,23 @@ Python bindings (see :mod:`wave_dsl`). It returns a live
 ``mlir-runner``, ...) can consume.
 
 The kernel reads A and B from global memory through ``wave.load`` +
-``waveamd.fragment_pack`` (the ``fragment_load`` DSL helper) and stores
-the f32 accumulator with ``waveamd.fragment_store``. Optionally each
-per-K-step A/B fragment can be staged through LDS (``use_lds=True``):
-the global tuple load is followed by a tuple ``wave.store`` to a
-per-wave LDS slot, a workgroup ``wave.barrier``, and a tuple
-``wave.load`` from the same slot before the ``fragment_pack`` / ``mma``.
-This exercises every LDS code path -- tuple ``ds_store_b32`` /
-``ds_load_b32`` sequences, ``s_barrier``, and the kernel's
-``wave.lds_size`` -> ``group_segment_fixed_size`` propagation -- in
-the matmul kernel context while keeping the round-trip a pure
-identity over each fragment.
+``waveamd.fragment_pack`` (the ``fragment_load`` DSL helper), stages
+each per-K-step A/B fragment through a per-wave LDS slot, and stores
+the f32 accumulator with ``waveamd.fragment_store``. The LDS round-trip
+-- tuple ``wave.store`` to the slot, workgroup ``wave.barrier``, tuple
+``wave.load`` from the same slot, then ``fragment_pack`` / ``mma`` --
+keeps the transport a pure identity but exercises every LDS code path
+the AMDGPU backend supports (tuple ``ds_store_b32`` / ``ds_load_b32``
+sequences, ``s_barrier``, and the kernel's ``wave.lds_size`` ->
+``group_segment_fixed_size`` propagation) in the matmul context.
 
-Setting ``use_buffer=True`` instead wraps the A and B kernel inputs in
+Setting ``use_buffer=True`` also wraps the A and B kernel inputs in
 ``waveamd.make_buffer`` at the very top of the kernel, turning the
 subsequent per-K-step fragment loads into tuple ``buffer_load_b32``
-ops (lowered to ``buffer_load_dword ..., 0 offen offset:i*4``). The C
-fragment store stays on the global path, so the lit/integration tests
-can exercise the buffer load lowering end-to-end without disturbing
-the existing fragment_store codegen.
+ops (lowered to ``buffer_load_dword ..., 0 offen offset:i*4``) before
+they stage through LDS. The C fragment store stays on the global path,
+so the lit/integration tests can exercise the buffer load lowering
+end-to-end without disturbing the existing fragment_store codegen.
 
 Tile-to-wave mapping:
   * The grid is launched 2-D as ``(M_blocks, N_blocks)`` and each
@@ -71,7 +69,6 @@ class _MatmulConfig:
     K: int
     BM: int
     BN: int
-    use_lds: bool = False
     use_buffer: bool = False
 
     def __post_init__(self) -> None:
@@ -136,8 +133,6 @@ class _MatmulConfig:
     @property
     def lds_bytes(self) -> int:
         """Per-workgroup LDS arena (A and B fragment slots, one per wave)."""
-        if not self.use_lds:
-            return 0
         return 2 * self.waves_per_workgroup * _LDS_DWORDS_PER_FRAG * 4
 
 
@@ -329,7 +324,7 @@ def _emit_kernel(bld: dsl.FunctionBuilder, cfg: _MatmulConfig) -> None:
     b_type = dsl.fragment_type(1, dsl.f16(), 16, 16, 32, 8)
     acc_type = dsl.fragment_type(2, dsl.f32(), 16, 16, 32, 8)
 
-    staging = _emit_lds_staging(bld, cfg, coords) if cfg.use_lds else None
+    staging = _emit_lds_staging(bld, cfg, coords)
 
     acc = bld.fragment_fill(bld.constant(dsl.i32(), 0), acc_type)
     c16 = _splat_const(bld, 16)
@@ -339,13 +334,9 @@ def _emit_kernel(bld: dsl.FunctionBuilder, cfg: _MatmulConfig) -> None:
     def emit_step(
         a_p: dsl.Value, b_p: dsl.Value, acc_v: dsl.Value
     ) -> tuple[dsl.Value, dsl.Value, dsl.Value]:
-        if staging is not None:
-            a_frag, b_frag = _load_fragments_through_lds(
-                bld, a_p, b_p, a_type, b_type, staging
-            )
-        else:
-            a_frag, _atok = bld.fragment_load(a_p, a_type)
-            b_frag, _btok = bld.fragment_load(b_p, b_type)
+        a_frag, b_frag = _load_fragments_through_lds(
+            bld, a_p, b_p, a_type, b_type, staging
+        )
         return (
             bld.mma(_MMA_KIND, a_frag, b_frag, acc_v),
             bld.ptr_add(a_p, c16),
@@ -466,7 +457,6 @@ def build_wmma_f16_matmul_module(
     *,
     BM: int = 1,
     BN: int = 1,
-    use_lds: bool = False,
     use_buffer: bool = False,
 ) -> Module:
     """Return an MLIR :class:`Module` for the tiled WMMA f16 matmul.
@@ -476,20 +466,17 @@ def build_wmma_f16_matmul_module(
     ``MxN`` f32 output buffer, registers them with the GPU runtime, and
     launches the kernel.
 
-    When ``use_lds=True`` each per-K-step A/B fragment is round-tripped
-    through a per-wave LDS slot (identity transport) so the kernel
-    exercises tuple ``ds_store_b32`` / ``ds_load_b32`` and
-    ``s_barrier``; the kernel function is tagged with
-    ``wave.lds_size`` so the AMDGPU lowering programs the right
-    ``group_segment_fixed_size``.
+    Each per-K-step A/B fragment is round-tripped through a per-wave
+    LDS slot (identity transport), so the kernel always exercises tuple
+    ``ds_store_b32`` / ``ds_load_b32`` and ``s_barrier``; the kernel
+    function carries ``wave.lds_size`` so the AMDGPU lowering programs
+    the matching ``group_segment_fixed_size``.
 
-    When ``use_buffer=True`` the A and B inputs are wrapped in
-    ``waveamd.make_buffer`` so every per-K-step fragment load comes
-    out as a tuple ``buffer_load_b32`` (``buffer_load_dword ..., 0
-    offen offset:i*4``). The C output stays on the global pointer
-    path. ``use_lds`` and ``use_buffer`` are independent: enabling
-    both stages the buffer-loaded fragments through LDS just like the
-    global-loaded ones.
+    When ``use_buffer=True`` the A and B inputs are additionally
+    wrapped in ``waveamd.make_buffer`` so every per-K-step fragment
+    load comes out as a tuple ``buffer_load_b32`` (``buffer_load_dword
+    ..., 0 offen offset:i*4``) feeding the LDS round-trip. The C output
+    stays on the global pointer path.
 
     See the module docstring for shape constraints.
 
@@ -505,7 +492,6 @@ def build_wmma_f16_matmul_module(
         K=K,
         BM=BM,
         BN=BN,
-        use_lds=use_lds,
         use_buffer=use_buffer,
     )
     bld = dsl.ModuleBuilder()
@@ -533,7 +519,7 @@ def build_wmma_f16_matmul_module(
             # Per-tile K-step count (= K // 16). Passed by value as i32.
             dsl.i32(),
         ]
-        lds_size = cfg.lds_bytes if cfg.use_lds else None
+        lds_size = cfg.lds_bytes
         with (
             bld.gpu_module(_GPU_MODULE_NAME) as gmod,
             gmod.kernel(_KERNEL_NAME, kernel_inputs, lds_size=lds_size) as fb,
