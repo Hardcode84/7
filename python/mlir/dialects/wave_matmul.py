@@ -292,12 +292,21 @@ def _load_fragments_through_lds(
 ) -> tuple[dsl.Value, dsl.Value]:
     """Round-trip the A and B fragments through their LDS slots.
 
+    Issues *both* global loads back-to-back before either `ds_store`,
+    so the second tuple's vmem latency overlaps with the first
+    tuple's drain. The ticket-wait pass observes that `ds_store A`
+    only depends on the A load and emits `s_waitcnt vmcnt(N)` with
+    `N == width(B_load)` -- i.e. B's dwords are allowed to remain in
+    flight while A's drain, instead of the conservative `vmcnt(0)`
+    we would get if every load were immediately followed by its
+    store.
+
     Returns the packed `(a_frag, b_frag)` after the workgroup
     `wave.barrier` so the caller can feed them directly into `mma`.
     """
     a_regs, a_glob_tok = bld.load(a_ptr, staging.reg_simd_type)
-    a_store_tok = bld.store(a_regs, staging.a_lds_ptrs, after=a_glob_tok)
     b_regs, b_glob_tok = bld.load(b_ptr, staging.reg_simd_type)
+    a_store_tok = bld.store(a_regs, staging.a_lds_ptrs, after=a_glob_tok)
     b_store_tok = bld.store(b_regs, staging.b_lds_ptrs, after=b_glob_tok)
     barrier_tok = bld.barrier(a_store_tok, b_store_tok)
     a_regs2, _ = bld.load(staging.a_lds_ptrs, staging.reg_simd_type, after=barrier_tok)
@@ -317,6 +326,19 @@ def _emit_kernel(bld: dsl.FunctionBuilder, cfg: _MatmulConfig) -> None:
         contiguous f32 elements starting at
         ``((workgroup_id_x * N_blocks + workgroup_id_y) * waves_per_wg
           + wave_id_in_wg) * 256``.
+
+    Software pipelining (RDNA3 has no direct global-to-LDS DMA, so the
+    fragment staging is global_load -> VGPR -> ds_store -> barrier ->
+    ds_load, a long synchronous chain). Each loop iteration overlaps
+    the WMMA of the current K-step with the global+LDS prefetch of the
+    next K-step, so the global_load latency is hidden behind WMMA
+    issue. Schedule:
+
+      prologue: prefetch frag[0] through LDS.
+      loop body (k_steps - 1 iters):
+        WMMA(frag[k], acc)              # current iter's compute
+        prefetch frag[k+1] through LDS  # next iter's load (overlap)
+      epilogue: WMMA(frag[K-1], acc).
     """
     coords = _emit_tile_coords(bld, cfg)
 
@@ -326,45 +348,50 @@ def _emit_kernel(bld: dsl.FunctionBuilder, cfg: _MatmulConfig) -> None:
 
     staging = _emit_lds_staging(bld, cfg, coords)
 
-    acc = bld.fragment_fill(bld.constant(dsl.i32(), 0), acc_type)
+    init_acc = bld.fragment_fill(bld.constant(dsl.i32(), 0), acc_type)
     c16 = _splat_const(bld, 16)
-    a_ptr_iter = coords.a_lane_base
-    b_ptr_iter = coords.b_lane_base
 
-    def emit_step(
-        a_p: dsl.Value, b_p: dsl.Value, acc_v: dsl.Value
-    ) -> tuple[dsl.Value, dsl.Value, dsl.Value]:
-        a_frag, b_frag = _load_fragments_through_lds(
-            bld, a_p, b_p, a_type, b_type, staging
-        )
-        return (
-            bld.mma(_MMA_KIND, a_frag, b_frag, acc_v),
-            bld.ptr_add(a_p, c16),
-            bld.ptr_add(b_p, c16),
-        )
+    # Prologue: stage frag[0] through LDS so the loop's first WMMA has
+    # data ready to consume.
+    a_frag0, b_frag0 = _load_fragments_through_lds(
+        bld, coords.a_lane_base, coords.b_lane_base, a_type, b_type, staging
+    )
+    a_ptr1 = bld.ptr_add(coords.a_lane_base, c16)
+    b_ptr1 = bld.ptr_add(coords.b_lane_base, c16)
 
-    # The fourth kernel arg is the per-tile K-step count (`K / 16`).
-    # We promise the host always launches with K > 0 so the selector
-    # can use the `wave.nonzero_trip` do/while shape. The wave-machine
-    # selector only accepts sized integer loop IVs (index types must
-    # be converted on the host side); i32 is the natural choice since
-    # the kernel arg arrives as i32.
-    k_steps_i32 = bld.args[3]
+    # The fourth kernel arg is the pipelined-loop trip count
+    # (`K/16 - 1`, precomputed on the host). The loop body always pairs
+    # a WMMA on the carried fragment with a prefetch of the *next*
+    # fragment, so we run one fewer iteration than there are K-tiles
+    # and finish the last WMMA in the epilogue. The pre-tested
+    # `scf.for` shape (no `wave.nonzero_trip`) keeps the K=16
+    # (k_steps=1) edge case correct by collapsing the loop to zero
+    # iterations.
+    trip_count_i32 = bld.args[3]
     zero_i32 = bld.constant(dsl.i32(), 0)
     one_i32 = bld.constant(dsl.i32(), 1)
+
     with bld.for_loop(
         zero_i32,
-        k_steps_i32,
+        trip_count_i32,
         one_i32,
-        init_args=(acc, a_ptr_iter, b_ptr_iter),
-        nonzero_trip=True,
+        init_args=(init_acc, a_frag0, b_frag0, a_ptr1, b_ptr1),
     ) as forop:
-        carry_acc, carry_a, carry_b = forop.inner_iter_args
-        new_acc, _new_a, _new_b = emit_step(carry_a, carry_b, carry_acc)
-        scf.YieldOp([new_acc, _new_a, _new_b])
-    acc = forop.results[0]
+        carry_acc, carry_af, carry_bf, carry_ap, carry_bp = forop.inner_iter_args
+        new_acc = bld.mma(_MMA_KIND, carry_af, carry_bf, carry_acc)
+        new_af, new_bf = _load_fragments_through_lds(
+            bld, carry_ap, carry_bp, a_type, b_type, staging
+        )
+        new_ap = bld.ptr_add(carry_ap, c16)
+        new_bp = bld.ptr_add(carry_bp, c16)
+        scf.YieldOp([new_acc, new_af, new_bf, new_ap, new_bp])
 
-    bld.fragment_store(acc, coords.c_ptr)
+    final_acc_in = forop.results[0]
+    final_af = forop.results[1]
+    final_bf = forop.results[2]
+    final_acc = bld.mma(_MMA_KIND, final_af, final_bf, final_acc_in)
+
+    bld.fragment_store(final_acc, coords.c_ptr)
 
 
 def _emit_host(bld: dsl.FunctionBuilder, cfg: _MatmulConfig) -> None:
@@ -436,10 +463,13 @@ def _emit_host(bld: dsl.FunctionBuilder, cfg: _MatmulConfig) -> None:
     [b_ptr] = bld.call(_F16_PTR_HELPER, [bld.memref_cast(b_buf, dyn_f16)], [f16_ptr])
     [c_ptr] = bld.call(_F32_PTR_HELPER, [c_buf], [f32_ptr])
 
-    # cfg.K is the buffer K used for allocation; per-tile K-step
-    # count is K / 16, passed in as an i32 to the kernel.
-    k_steps_value = bld.constant(dsl.i32(), cfg.k_steps)
-    launch_operands = [a_ptr, b_ptr, c_ptr, k_steps_value]
+    # cfg.K is the buffer K used for allocation; the kernel runs a
+    # software-pipelined loop whose trip count is `K/16 - 1` (the
+    # prologue/epilogue absorb the first/last WMMA), so we pass that
+    # value (clamped at 0) as the fourth i32 kernel arg.
+    pipelined_trip_count = max(cfg.k_steps - 1, 0)
+    trip_count_value = bld.constant(dsl.i32(), pipelined_trip_count)
+    launch_operands = [a_ptr, b_ptr, c_ptr, trip_count_value]
     bld.launch(
         _GPU_MODULE_NAME,
         _KERNEL_NAME,

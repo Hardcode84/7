@@ -181,6 +181,39 @@ func.func @wave_buffer_tuple_load(%in: !wave.ptr<i32, #wave.global>,
   return
 }
 
+// Two back-to-back global tuple loads followed by two LDS stores must
+// emit `s_waitcnt vmcnt(8)` before the *first* `ds_store_b32`, leaving
+// the second load's 8 dwords in flight while the first drains. This
+// is the memory overlap that makes software-pipelined LDS staging
+// worthwhile on RDNA3 (no direct global->LDS DMA). A serialized
+// schedule (load A; store A; load B; store B) would only ever see
+// `vmcnt(0)` waits.
+// CHECK-LABEL: wave_two_tuple_loads_overlap:
+func.func @wave_two_tuple_loads_overlap(%a_in: !wave.ptr<i32, #wave.global>,
+                                        %b_in: !wave.ptr<i32, #wave.global>)
+    attributes {wave.kernel, wave.lds_size = 2048 : i64} {
+  %lane = wave.lane_id : !wave.simd<i32, 32>
+  %ap = wave.ptr_add %a_in, %lane : !wave.ptr<i32, #wave.global>, !wave.simd<i32, 32> -> !wave.simd<!wave.ptr<i32, #wave.global>, 32>
+  %bp = wave.ptr_add %b_in, %lane : !wave.ptr<i32, #wave.global>, !wave.simd<i32, 32> -> !wave.simd<!wave.ptr<i32, #wave.global>, 32>
+  %lds = wave.lds_base : !wave.ptr<i32, #wave.shared>
+  %slot_a = wave.ptr_add %lds, %lane : !wave.ptr<i32, #wave.shared>, !wave.simd<i32, 32> -> !wave.simd<!wave.ptr<i32, #wave.shared>, 32>
+  %c256 = arith.constant 256 : i32
+  %c256v = wave.splat %c256 : i32 -> !wave.simd<i32, 32>
+  %slot_b_off = wave.binary "addi" %lane, %c256v : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  %slot_b = wave.ptr_add %lds, %slot_b_off : !wave.ptr<i32, #wave.shared>, !wave.simd<i32, 32> -> !wave.simd<!wave.ptr<i32, #wave.shared>, 32>
+  // CHECK: global_load_b32
+  // CHECK: global_load_b32
+  %a_regs, %a_tok = wave.load %ap : (!wave.simd<!wave.ptr<i32, #wave.global>, 32>) -> (!wave.simd<vector<8xi32>, 32>, !wave.mem.token)
+  %b_regs, %b_tok = wave.load %bp : (!wave.simd<!wave.ptr<i32, #wave.global>, 32>) -> (!wave.simd<vector<8xi32>, 32>, !wave.mem.token)
+  // CHECK: s_waitcnt vmcnt(8)
+  // CHECK: ds_store_b32
+  %a_st = wave.store %a_regs -> %slot_a after %a_tok : (!wave.simd<vector<8xi32>, 32>, !wave.simd<!wave.ptr<i32, #wave.shared>, 32>, !wave.mem.token) -> !wave.mem.token
+  // CHECK: s_waitcnt vmcnt(0)
+  // CHECK: ds_store_b32
+  %b_st = wave.store %b_regs -> %slot_b after %b_tok : (!wave.simd<vector<8xi32>, 32>, !wave.simd<!wave.ptr<i32, #wave.shared>, 32>, !wave.mem.token) -> !wave.mem.token
+  return
+}
+
 // NOTE: NT_AMDGPU_METADATA
 // NOTE: amdhsa.kernels:
 // NOTE: .name:           wave_kernel
