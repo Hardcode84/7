@@ -1,9 +1,67 @@
-//===- WaveMachineWaitcnt.cpp - WaveMachine waitcnt insertion ----*- C++
-//-*-===//
+//===- WaveMachineWaitcnt.cpp - WaveMachine waitcnt insertion ---*- C++ -*-===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+//
+//===----------------------------------------------------------------------===//
+//
+// Token-based waitcnt insertion for WaveMachine IR.
+//
+// The pass tracks in-flight memory operations through SSA "memory tokens" as
+// described in `docs/AMDGPUExplicitWaveProgrammingModel.md` ("Memory Tokens").
+// Each token's identity is an SSA `Value`: a memory op's register result, its
+// explicit `!wavemachine.mem.token` result when it has one, or a block /
+// region argument that a branch propagates from one of those. Token-derivation
+// ops (`wavemachine.after`, `wavemachine.token_join`, `wavemachine.barrier`'s
+// deps) produce a fresh value-token whose drain position is the MIN of the
+// joined source positions.
+//
+// At each program point the lattice carries a sorted list of
+// `(value, counter, position)` entries, one per in-flight token. `position`
+// counts the *newer* same-counter issues queued behind that token:
+// `vmcnt(position)` is the exact wait that drains it. Per-counter "unknown"
+// sentinels (`value == nullptr`) cover tokens whose defining block does not
+// dominate the current program point.
+//
+// Transfer rules (per op):
+//   * memory-producing op: bump positions of *same-counter* tokens, then
+//     insert a fresh `(result-value, counter, 0)` entry for every
+//     memory-relevant result (register and explicit MemToken). The token's
+//     identity is the result `Value` itself, so a consumer reading that
+//     value finds its TokenState directly without any external map;
+//   * token-joining op (`wavemachine.after` / `wavemachine.token_join` /
+//     `wavemachine.barrier` with dependencies): the result value's
+//     TokenState is the per-counter MIN of the operand values' TokenStates.
+//     No new memory event is recorded;
+//   * consumer op: for each operand value, demand the wait its TokenState
+//     entry requires per counter. Aggregate per-counter requirements by
+//     MIN of positions (the tightest count that drains every required
+//     token), emit `s_waitcnt`/`s_waitcnt_vscnt` ahead of the op, and drop
+//     drained tokens from the lattice;
+//   * control-flow ops (`RegionBranchOpInterface`,
+//     `RegionBranchTerminatorOpInterface`, `BranchOpInterface`) pass
+//     operands to successors instead of reading them, so they do NOT
+//     consume tokens locally. The dataflow framework's block/region
+//     transfer hooks handle the operand-to-successor token remapping.
+//
+// CFG transfer rules (`visitBlockTransfer` /
+// `visitRegionBranchControlFlowTransfer`):
+//   * for every branch-operand -> successor-value pair, create a new
+//     TokenState keyed on the destination value, carrying the operand's
+//     position. This is the only way block args / region args get a
+//     position;
+//   * tokens whose defining block does not dominate the successor
+//     "escape" and collapse into a single per-counter unknown sentinel
+//     at the minimum escaping position;
+//   * merging two predecessor states takes the elementwise MIN over
+//     positions per `(counter, value)` pair. MIN is the tight bound:
+//     `vmcnt(N)` drains a token correctly on every path where the
+//     runtime position is at-or-above `N`, so the smallest position
+//     observed across paths is the safest static wait.
+//
+// `wavemachine.s_endpgm` implicitly waits `vscnt(0)` so the kernel does
+// not return with VMEM stores still in flight.
 //
 //===----------------------------------------------------------------------===//
 
@@ -16,8 +74,10 @@
 #include "mlir/Dialect/WaveMachine/IR/WaveMachine.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
+#include "mlir/IR/Dominance.h"
 #include "mlir/Interfaces/ControlFlowInterfaces.h"
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/TargetParser/TargetParser.h"
@@ -34,77 +94,36 @@ using namespace mlir::wave;
 
 namespace {
 
-// Waitcnt insertion is modeled as a ticket scoreboard over the WaveMachine IR:
-//
-// 1. Before analysis, assign each async memory operation a monotonic ticket in
-//    its hardware counter domain (vmcnt for VMEM loads, lgkmcnt for scalar/LDS
-//    style memory, and vscnt for VMEM stores).
-// 2. Run a dense forward dataflow analysis over CFG and RegionBranchOpInterface
-//    edges. The lattice carries the latest observed ticket per counter plus an
-//    SSA map from values/tokens to the ticket(s) that define their memory
-//    readiness.
-// 3. Region and block transfers propagate that SSA map through block arguments,
-//    structured operation results, and loop-carried iter_args. Backedges shift
-//    carried tickets by the number of same-counter memory events issued in the
-//    loop body, which is what makes double/triple buffering produce lgkmcnt(1)
-//    and lgkmcnt(2) instead of conservative lgkmcnt(0).
-// 4. Existing waitcnt operations update the lattice's "already waited" state.
-//    Explicit wavemachine.mem.token values can carry multiple tickets via
-//    token_join; wavemachine.wait and token-consuming memory operations require
-//    the corresponding tickets to be complete.
-// 5. After the solver reaches a fixpoint, a second pass over WaveMachine ops
-//    computes the minimum threshold for each required counter and inserts only
-//    the waitcnt operations. Pipeline hazards such as s_delay_alu are handled
-//    by the separate WaveMachine hazard pass.
+//===----------------------------------------------------------------------===//
+// Counter and token model
+//===----------------------------------------------------------------------===//
 
-enum class CounterKind { Vmem, Lgkm, Vscnt };
+enum class Counter : unsigned { Vmem = 0, Lgkm = 1, Vscnt = 2 };
+static constexpr unsigned kNumCounters = 3;
+static constexpr unsigned kSaturatePosition = 63;
 
-struct Ticket {
-  CounterKind counter;
-  int64_t value = -1;
+// One reaching token entry. Sorted by (counter, id) to keep merge O(n)
+// and lookup O(log n). `id` is the SSA `Value` whose runtime ready-ness
+// this token tracks; the null Value is a per-counter "unknown" sentinel.
+struct Token {
+  Value id;
+  Counter counter;
+  unsigned position;
+
+  bool isUnknown() const { return !id; }
 };
 
-struct CounterState {
-  int64_t lastTicket = -1;
-  std::optional<int64_t> lastWait;
+static bool sortKey(const Token &a, const Token &b) {
+  if (a.counter != b.counter)
+    return static_cast<unsigned>(a.counter) < static_cast<unsigned>(b.counter);
+  return a.id.getAsOpaquePointer() < b.id.getAsOpaquePointer();
+}
 
-  bool operator==(const CounterState &rhs) const {
-    return lastTicket == rhs.lastTicket && lastWait == rhs.lastWait;
-  }
+static bool sameKey(const Token &a, const Token &b) {
+  return a.counter == b.counter && a.id == b.id;
+}
 
-  bool operator!=(const CounterState &rhs) const { return !(*this == rhs); }
-
-  void observeIssue(int64_t ticket) {
-    if (ticket <= lastTicket)
-      return;
-    if (lastWait)
-      *lastWait += ticket - lastTicket;
-    lastTicket = ticket;
-  }
-
-  std::optional<unsigned> computeWait(int64_t requiredTicket) const {
-    if (lastTicket < 0)
-      return std::nullopt;
-    int64_t threshold = std::max<int64_t>(0, lastTicket - requiredTicket);
-    if (lastWait && *lastWait <= threshold)
-      return std::nullopt;
-    return static_cast<unsigned>(threshold);
-  }
-
-  void observeWait(unsigned threshold) {
-    if (!lastWait || threshold < *lastWait)
-      lastWait = threshold;
-  }
-
-  bool merge(const CounterState &other) {
-    CounterState old = *this;
-    lastTicket = std::max(lastTicket, other.lastTicket);
-    if (other.lastWait && (!lastWait || *other.lastWait < *lastWait))
-      lastWait = other.lastWait;
-    return *this != old;
-  }
-};
-
+// Required wait per counter computed at a consumer op.
 struct WaitRequirement {
   std::optional<unsigned> vmcnt;
   std::optional<unsigned> lgkmcnt;
@@ -112,113 +131,277 @@ struct WaitRequirement {
 
   bool hasWait() const { return vmcnt || lgkmcnt || vscnt; }
 
-  void add(CounterKind counter, unsigned threshold) {
-    std::optional<unsigned> *slot = nullptr;
-    switch (counter) {
-    case CounterKind::Vmem:
-      slot = &vmcnt;
-      break;
-    case CounterKind::Lgkm:
-      slot = &lgkmcnt;
-      break;
-    case CounterKind::Vscnt:
-      slot = &vscnt;
-      break;
+  std::optional<unsigned> &slotFor(Counter c) {
+    switch (c) {
+    case Counter::Vmem:
+      return vmcnt;
+    case Counter::Lgkm:
+      return lgkmcnt;
+    case Counter::Vscnt:
+      return vscnt;
     }
-    if (!*slot || threshold < **slot)
-      *slot = threshold;
+    llvm_unreachable("bad counter");
+  }
+
+  // The wait that satisfies all required tokens of `counter`. AMDGPU's
+  // `s_waitcnt cnt(N)` drains tokens whose position is >= N, so the
+  // tight bound is the MIN over required positions.
+  void requireDrain(Counter counter, unsigned position) {
+    auto &slot = slotFor(counter);
+    if (!slot || position < *slot)
+      slot = position;
   }
 };
 
-struct WaitcntScoreboard {
-  CounterState vmem;
-  CounterState lgkm;
-  CounterState vscnt;
-  DenseMap<Value, SmallVector<Ticket, 2>> valueTickets;
+//===----------------------------------------------------------------------===//
+// Lattice payload
+//===----------------------------------------------------------------------===//
 
-  bool merge(const WaitcntScoreboard &other) {
-    bool changed = false;
-    changed |= vmem.merge(other.vmem);
-    changed |= lgkm.merge(other.lgkm);
-    changed |= vscnt.merge(other.vscnt);
-    for (auto [value, tickets] : other.valueTickets) {
-      auto [it, inserted] = valueTickets.try_emplace(value, tickets);
-      if (inserted) {
-        changed = true;
-        continue;
-      }
-      for (Ticket ticket : tickets) {
-        bool found = false;
-        for (Ticket &existing : it->second) {
-          if (existing.counter != ticket.counter)
-            continue;
-          if (ticket.value < existing.value) {
-            existing.value = ticket.value;
-            changed = true;
-          }
-          found = true;
-        }
-        if (!found) {
-          it->second.push_back(ticket);
-          changed = true;
-        }
-      }
-    }
-    return changed;
+struct WaitState {
+  // Reaching tokens, sorted by (counter, id). Each (counter, id) pair
+  // appears at most once.
+  SmallVector<Token, 4> tokens;
+
+  bool operator==(const WaitState &rhs) const {
+    if (tokens.size() != rhs.tokens.size())
+      return false;
+    for (auto [a, b] : llvm::zip(tokens, rhs.tokens))
+      if (!sameKey(a, b) || a.position != b.position)
+        return false;
+    return true;
   }
+
+  bool operator!=(const WaitState &rhs) const { return !(*this == rhs); }
 };
 
-class WaitcntState : public AbstractDenseLattice {
+class WaitLattice : public AbstractDenseLattice {
 public:
-  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(WaitcntState)
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(WaitLattice)
 
   using AbstractDenseLattice::AbstractDenseLattice;
 
+  const WaitState &get() const { return state; }
+  WaitState &mutate() { return state; }
+
+  ChangeResult joinWith(const WaitState &incoming);
+
   ChangeResult join(const AbstractDenseLattice &rhs) override {
-    const auto &other = static_cast<const WaitcntState &>(rhs);
-    WaitcntScoreboard merged = scoreboard;
-    if (!merged.merge(other.scoreboard))
-      return ChangeResult::NoChange;
-    scoreboard = std::move(merged);
-    return ChangeResult::Change;
+    return joinWith(static_cast<const WaitLattice &>(rhs).state);
   }
 
-  ChangeResult joinScoreboard(const WaitcntScoreboard &rhs) {
-    WaitcntScoreboard merged = scoreboard;
-    if (!merged.merge(rhs))
+  ChangeResult reset() {
+    if (state.tokens.empty())
       return ChangeResult::NoChange;
-    scoreboard = std::move(merged);
+    state.tokens.clear();
     return ChangeResult::Change;
   }
 
   void print(raw_ostream &os) const override {
-    os << "vmem=" << scoreboard.vmem.lastTicket
-       << " lgkm=" << scoreboard.lgkm.lastTicket
-       << " vscnt=" << scoreboard.vscnt.lastTicket
-       << " values=" << scoreboard.valueTickets.size();
+    os << "tokens=" << state.tokens.size();
   }
-
-  ChangeResult reset() {
-    if (scoreboard.vmem.lastTicket == -1 && scoreboard.lgkm.lastTicket == -1 &&
-        scoreboard.vscnt.lastTicket == -1 && scoreboard.valueTickets.empty())
-      return ChangeResult::NoChange;
-    scoreboard = WaitcntScoreboard();
-    return ChangeResult::Change;
-  }
-
-  WaitcntScoreboard &mutate() { return scoreboard; }
-  const WaitcntScoreboard &get() const { return scoreboard; }
 
 private:
-  WaitcntScoreboard scoreboard;
+  WaitState state;
 };
+
+//===----------------------------------------------------------------------===//
+// Lattice helpers (mutators on WaitState)
+//===----------------------------------------------------------------------===//
+
+namespace lat {
+
+// Insert `tok` keeping `tokens` sorted; if a matching (counter, id) is
+// already present, take MIN of positions. Returns whether anything
+// changed.
+static bool insertOrMin(SmallVectorImpl<Token> &tokens, Token tok) {
+  auto it = llvm::lower_bound(tokens, tok, [](const Token &a, const Token &b) {
+    return sortKey(a, b);
+  });
+  if (it != tokens.end() && sameKey(*it, tok)) {
+    if (tok.position < it->position) {
+      it->position = tok.position;
+      return true;
+    }
+    return false;
+  }
+  tokens.insert(it, tok);
+  return true;
+}
+
+// Insert `tok` keeping `tokens` sorted; if a matching (counter, id) is
+// already present, replace the position with `tok.position` (used by
+// issuers, where the static op's re-issue across a back-edge resets
+// the position to zero rather than taking MIN). Returns whether
+// anything changed.
+static bool insertOrReplace(SmallVectorImpl<Token> &tokens, Token tok) {
+  auto it = llvm::lower_bound(tokens, tok, [](const Token &a, const Token &b) {
+    return sortKey(a, b);
+  });
+  if (it != tokens.end() && sameKey(*it, tok)) {
+    if (it->position != tok.position) {
+      it->position = tok.position;
+      return true;
+    }
+    return false;
+  }
+  tokens.insert(it, tok);
+  return true;
+}
+
+// Bump positions of every same-counter entry by `delta`, saturating
+// at `kSaturatePosition`.
+static void bumpCounter(SmallVectorImpl<Token> &tokens, Counter counter,
+                        unsigned delta) {
+  for (Token &t : tokens) {
+    if (t.counter != counter)
+      continue;
+    t.position = std::min<unsigned>(t.position + delta, kSaturatePosition);
+  }
+}
+
+// Drop entries that an `s_waitcnt cnt(threshold)` for `counter` would
+// drain. AMDGPU semantics: positions strictly above the threshold drain
+// (positions <= threshold remain pending).
+static void dropDrained(SmallVectorImpl<Token> &tokens, Counter counter,
+                        unsigned threshold) {
+  tokens.erase(std::remove_if(tokens.begin(), tokens.end(),
+                              [&](const Token &t) {
+                                return t.counter == counter &&
+                                       t.position >= threshold;
+                              }),
+               tokens.end());
+}
+
+// Drop entries with positions strictly greater than `threshold` for
+// any counter listed in `req`.
+static void applyWait(SmallVectorImpl<Token> &tokens,
+                      const WaitRequirement &req) {
+  if (req.vmcnt)
+    dropDrained(tokens, Counter::Vmem, *req.vmcnt);
+  if (req.lgkmcnt)
+    dropDrained(tokens, Counter::Lgkm, *req.lgkmcnt);
+  if (req.vscnt)
+    dropDrained(tokens, Counter::Vscnt, *req.vscnt);
+}
+
+// Find a Token entry by (counter, id). Returns nullptr if not present.
+static const Token *find(ArrayRef<Token> tokens, Counter counter, Value id) {
+  Token key{id, counter, 0};
+  auto it = llvm::lower_bound(tokens, key, [](const Token &a, const Token &b) {
+    return sortKey(a, b);
+  });
+  if (it == tokens.end() || !sameKey(*it, key))
+    return nullptr;
+  return &*it;
+}
+
+// The block that defines `id`'s value, or nullptr if `id` has no
+// owning block (e.g. anonymous tokens).
+static Block *definingBlock(Value id) {
+  if (Operation *defOp = id.getDefiningOp())
+    return defOp->getBlock();
+  if (auto arg = dyn_cast<BlockArgument>(id))
+    return arg.getOwner();
+  return nullptr;
+}
+
+// Concrete tokens whose defining block does not dominate `target`
+// "escape": they cannot be named at the target program point. Collapse
+// every escaping token into a per-counter unknown sentinel at the MIN
+// of the escaping positions (the tightest wait that would have drained
+// any of the originals). Idempotent: re-running collapses unknowns
+// already in place.
+static void collapseEscaping(WaitState &state, Block *target,
+                             DominanceInfo &dom) {
+  std::array<std::optional<unsigned>, kNumCounters> minPos = {};
+  SmallVector<Token, 4> kept;
+  kept.reserve(state.tokens.size());
+  for (const Token &t : state.tokens) {
+    Block *defBlock = t.isUnknown() ? nullptr : definingBlock(t.id);
+    if (t.isUnknown() || (defBlock && dom.dominates(defBlock, target))) {
+      kept.push_back(t);
+      continue;
+    }
+    unsigned slot = static_cast<unsigned>(t.counter);
+    if (!minPos[slot] || t.position < *minPos[slot])
+      minPos[slot] = t.position;
+  }
+  state.tokens = std::move(kept);
+  for (unsigned i = 0; i < kNumCounters; ++i) {
+    if (minPos[i])
+      insertOrMin(state.tokens,
+                  Token{Value(), static_cast<Counter>(i), *minPos[i]});
+  }
+}
+
+// Issue a memory op: bump same-counter positions by `count`, then
+// install / reset this op's own entry(ies) at position 0 for every
+// `tagged` result value (registers and explicit mem.tokens). All
+// tagged values share the same hardware queue position.
+//
+// If the op has no tagged result (e.g. a fire-and-forget store with no
+// SSA token), still record one anonymous entry (`id == nullptr`) so the
+// implicit `s_endpgm` vscnt drain can find it. Anonymous entries
+// collapse to a single per-counter slot at the newest issued position
+// (position 0), which is exactly what a "drain everything" wait needs
+// (`vscnt(0)` drains the FIFO in full regardless of how many anonymous
+// stores it contains).
+static bool issue(WaitState &state, Counter counter, unsigned count,
+                  ValueRange tagged) {
+  if (count == 0)
+    count = 1;
+  bumpCounter(state.tokens, counter, count);
+  bool changed = false;
+  if (tagged.empty()) {
+    changed |= insertOrReplace(state.tokens, Token{Value(), counter, 0});
+  } else {
+    for (Value v : tagged)
+      changed |= insertOrReplace(state.tokens, Token{v, counter, 0});
+  }
+  return changed;
+}
+
+// Compute the MIN position per counter over the source values' Token
+// entries. Returns one Token per counter that has any source entry.
+static SmallVector<Token, 3> mergeSources(ArrayRef<Token> tokens,
+                                          ValueRange sources, Value result) {
+  std::array<std::optional<unsigned>, kNumCounters> pos = {};
+  for (Value src : sources) {
+    for (const Token &t : tokens) {
+      if (t.id != src)
+        continue;
+      unsigned slot = static_cast<unsigned>(t.counter);
+      if (!pos[slot] || t.position < *pos[slot])
+        pos[slot] = t.position;
+    }
+  }
+  SmallVector<Token, 3> out;
+  for (unsigned i = 0; i < kNumCounters; ++i) {
+    if (pos[i])
+      out.push_back(Token{result, static_cast<Counter>(i), *pos[i]});
+  }
+  return out;
+}
+
+} // namespace lat
+
+ChangeResult WaitLattice::joinWith(const WaitState &incoming) {
+  bool changed = false;
+  for (const Token &tok : incoming.tokens)
+    changed |= lat::insertOrMin(state.tokens, tok);
+  return changed ? ChangeResult::Change : ChangeResult::NoChange;
+}
+
+//===----------------------------------------------------------------------===//
+// WaveMachine op classification
+//===----------------------------------------------------------------------===//
 
 static bool isWaveMachineOp(Operation *op) {
   return op->getName().getDialectNamespace() ==
          wavemachine::WaveMachineDialect::getDialectNamespace();
 }
 
-static bool isSMEMLoad(Operation *op) {
+static bool isSMEMLoadTrait(Operation *op) {
   return op->hasTrait<OpTrait::wavemachine::SMEMLoadOp>();
 }
 
@@ -230,14 +413,64 @@ static bool isVMEMStore(Operation *op) {
   return op->hasTrait<OpTrait::wavemachine::VMEMStoreOp>();
 }
 
-// How many hardware issues this op will expand to at MC emission. Tuple
-// loads and the LDS tuple-store fan out into one dword instruction per
-// tuple component; everything else is one issue. Getting this right
-// matters because the hardware vmcnt / lgkmcnt counters are incremented
-// per issue, not per IR op: if we encoded a tuple-load with one ticket
-// the consumer's `wait until ticket drained` would translate to
-// `vmcnt(N-1)`, which leaves the last dword of the tuple still in
-// flight and lets the next op observe a partially-written VGPR tuple.
+static bool isWaitcntOp(Operation *op) {
+  return op->hasTrait<OpTrait::wavemachine::WaitcntOp>();
+}
+
+static bool isTokenOnlyOp(Operation *op) {
+  return op->hasTrait<OpTrait::wavemachine::TokenOp>() ||
+         op->hasTrait<OpTrait::wavemachine::TokenJoinOp>();
+}
+
+static bool isMemoryIssuer(Operation *op) {
+  return isSMEMLoadTrait(op) || isVMEMLoad(op) || isVMEMStore(op);
+}
+
+// Ops that pass operands to a successor region/block instead of
+// consuming them locally. Their operand reads are not value uses, so
+// they must not trigger waitcnt emission: the token rides along the
+// branch/region operand and is consumed by the eventual reader in the
+// successor. The framework's `visitBlockTransfer` and
+// `visitRegionBranchControlFlowTransfer` perform the actual token
+// propagation; we just abstain from doing anything with the operands
+// here.
+static bool isControlFlowOp(Operation *op) {
+  return llvm::isa<RegionBranchOpInterface, RegionBranchTerminatorOpInterface,
+                   BranchOpInterface>(op);
+}
+
+// Coarse classification of how `transferOp` / `rewriteOp` should treat
+// each op. Lets the dispatch logic stay below the lizard CCN cap.
+enum class OpKind {
+  Skip,    // s_waitcnt, control-flow: handled by callers separately.
+  Wait,    // wavemachine.wait: drain operand tokens.
+  Issuer,  // VMEM/SMEM/LDS load or store: drain operand tokens, then issue.
+  Barrier, // s_barrier: drain operand tokens AND derive result tokens.
+  TokenOp, // wavemachine.after / token_join: derive result tokens only.
+  Endpgm,  // s_endpgm: implicit vscnt drain.
+  Generic, // any other op: drain its operand tokens.
+};
+
+static OpKind classifyOp(Operation *op) {
+  if (isWaitcntOp(op) || isControlFlowOp(op))
+    return OpKind::Skip;
+  if (llvm::isa<wavemachine::WaitOp>(op))
+    return OpKind::Wait;
+  if (isMemoryIssuer(op))
+    return OpKind::Issuer;
+  if (llvm::isa<wavemachine::SBarrierOp>(op))
+    return OpKind::Barrier;
+  if (isTokenOnlyOp(op))
+    return OpKind::TokenOp;
+  if (llvm::isa<wavemachine::SEndpgmOp>(op))
+    return OpKind::Endpgm;
+  return OpKind::Generic;
+}
+
+// AMDGPU tuple loads/stores expand into one hardware issue per dword.
+// The counter advances by N (not 1) for a width-N tuple, so a downstream
+// `vmcnt(N-1)` is wrong: the last dword is still pending. We bump per
+// expansion to match the hardware queue.
 static unsigned getIssueCount(Operation *op) {
   if (isa<wavemachine::DsLoadTupleB32Op, wavemachine::GlobalLoadTupleB32Op,
           wavemachine::BufferLoadTupleB32Op>(op))
@@ -247,21 +480,26 @@ static unsigned getIssueCount(Operation *op) {
   return 1;
 }
 
-static bool isWaitcnt(Operation *op) {
-  return op->hasTrait<OpTrait::wavemachine::WaitcntOp>();
+static Counter counterOf(Operation *op) {
+  if (isVMEMLoad(op))
+    return Counter::Vmem;
+  if (isVMEMStore(op))
+    return Counter::Vscnt;
+  return Counter::Lgkm;
 }
 
-static bool isTokenJoin(Operation *op) {
-  return op->hasTrait<OpTrait::wavemachine::TokenJoinOp>();
+// Result Values an issuer tags with its token id. For ops that produce
+// SSA `MemToken` we include those; we also include register results so
+// a consumer reading the loaded value picks up the dependency without
+// having to thread the token operand through explicitly.
+static void collectIssuerResults(Operation *op, SmallVectorImpl<Value> &out) {
+  for (Value r : op->getResults())
+    out.push_back(r);
 }
 
-static bool isTokenOnly(Operation *op) {
-  return op->hasTrait<OpTrait::wavemachine::TokenOp>() || isTokenJoin(op);
-}
-
-static bool hasMemoryTicket(Operation *op) {
-  return isSMEMLoad(op) || isVMEMLoad(op) || isVMEMStore(op);
-}
+//===----------------------------------------------------------------------===//
+// IsaVersion / waitcnt encoding helpers
+//===----------------------------------------------------------------------===//
 
 static FailureOr<llvm::AMDGPU::IsaVersion> getIsaVersion(Operation *op) {
   auto module = dyn_cast<ModuleOp>(op);
@@ -283,341 +521,183 @@ static FailureOr<llvm::AMDGPU::IsaVersion> getIsaVersion(Operation *op) {
   return version;
 }
 
-static unsigned encodeWaitcnt(std::optional<unsigned> vmcnt,
-                              std::optional<unsigned> lgkmcnt,
-                              const llvm::AMDGPU::IsaVersion &isaVersion) {
-  return llvm::AMDGPU::encodeWaitcnt(isaVersion, vmcnt.value_or(~0u),
-                                     /*expcnt=*/~0u, lgkmcnt.value_or(~0u));
-}
-
 static wavemachine::ImmType getImmType(MLIRContext *ctx) {
   return wavemachine::ImmType::get(ctx);
 }
 
-static Operation *createWMOp(OpBuilder &builder, Location loc, StringRef name,
-                             ValueRange operands, TypeRange resultTypes,
-                             ArrayRef<NamedAttribute> attrs = {}) {
-  std::string opName = ("wavemachine." + name).str();
-  OperationState state(loc, opName);
-  state.addOperands(operands);
-  state.addTypes(resultTypes);
-  state.addAttributes(attrs);
-  return builder.create(state);
-}
-
 static Value createImm(OpBuilder &builder, Location loc, int64_t value) {
-  Operation *op = createWMOp(
-      builder, loc, "imm", {}, getImmType(builder.getContext()),
-      {builder.getNamedAttr("value", builder.getI64IntegerAttr(value))});
-  return op->getResult(0);
-}
-
-static Operation *createInstrNoResult(OpBuilder &builder, Location loc,
-                                      StringRef name, ValueRange operands) {
-  return createWMOp(builder, loc, name, operands, TypeRange{});
+  return wavemachine::ImmOp::create(builder, loc,
+                                    getImmType(builder.getContext()),
+                                    builder.getI64IntegerAttr(value));
 }
 
 static std::optional<unsigned> getImmediate(Value value) {
-  Operation *def = value.getDefiningOp();
-  if (!def || !isa<wavemachine::ImmOp>(def))
-    return std::nullopt;
-  return static_cast<unsigned>(
-      def->getAttrOfType<IntegerAttr>("value").getInt());
+  if (auto op = value.getDefiningOp<wavemachine::ImmOp>())
+    return static_cast<unsigned>(op.getValue());
+  return std::nullopt;
 }
 
-static const CounterState &counterFor(const WaitcntScoreboard &scoreboard,
-                                      CounterKind kind) {
-  switch (kind) {
-  case CounterKind::Vmem:
-    return scoreboard.vmem;
-  case CounterKind::Lgkm:
-    return scoreboard.lgkm;
-  case CounterKind::Vscnt:
-    return scoreboard.vscnt;
-  }
-  llvm_unreachable("unknown CounterKind");
-}
+//===----------------------------------------------------------------------===//
+// Consumer-dep collection and wait computation
+//===----------------------------------------------------------------------===//
 
-static void collectOperandWaits(Value operand,
-                                const WaitcntScoreboard &scoreboard,
-                                WaitRequirement &requirement) {
-  auto it = scoreboard.valueTickets.find(operand);
-  if (it == scoreboard.valueTickets.end())
-    return;
-  for (Ticket ticket : it->second) {
-    if (auto wait =
-            counterFor(scoreboard, ticket.counter).computeWait(ticket.value))
-      requirement.add(ticket.counter, *wait);
-  }
-}
-
-static WaitRequirement computeRequirement(Operation *op,
-                                          const WaitcntScoreboard &scoreboard) {
-  WaitRequirement requirement;
-  if (isTokenOnly(op))
-    return requirement;
-  for (Value operand : op->getOperands())
-    collectOperandWaits(operand, scoreboard, requirement);
-  if (isa<wavemachine::SEndpgmOp>(op)) {
-    if (auto wait = scoreboard.vscnt.computeWait(scoreboard.vscnt.lastTicket))
-      requirement.add(CounterKind::Vscnt, *wait);
-  }
-  return requirement;
-}
-
-static void observeExistingWait(Operation *op, WaitcntScoreboard &scoreboard,
-                                const llvm::AMDGPU::IsaVersion &isaVersion) {
-  if (isa<wavemachine::SWaitcntOp>(op)) {
-    auto imm = getImmediate(op->getOperand(0));
-    if (!imm)
-      return;
-    unsigned vm = 0;
-    unsigned exp = 0;
-    unsigned lg = 0;
-    llvm::AMDGPU::decodeWaitcnt(isaVersion, *imm, vm, exp, lg);
-    scoreboard.vmem.observeWait(vm);
-    scoreboard.lgkm.observeWait(lg);
-    return;
-  }
-  if (isa<wavemachine::SWaitcntVscntOp>(op)) {
-    auto imm = getImmediate(op->getOperand(0));
-    if (imm)
-      scoreboard.vscnt.observeWait(*imm);
-  }
-}
-
-static void observeRequirement(WaitcntScoreboard &scoreboard,
-                               const WaitRequirement &requirement) {
-  if (requirement.vmcnt)
-    scoreboard.vmem.observeWait(*requirement.vmcnt);
-  if (requirement.lgkmcnt)
-    scoreboard.lgkm.observeWait(*requirement.lgkmcnt);
-  if (requirement.vscnt)
-    scoreboard.vscnt.observeWait(*requirement.vscnt);
-}
-
-static unsigned counterIndex(CounterKind counter) {
-  switch (counter) {
-  case CounterKind::Vmem:
-    return 0;
-  case CounterKind::Lgkm:
-    return 1;
-  case CounterKind::Vscnt:
-    return 2;
-  }
-  llvm_unreachable("unknown counter");
-}
-
-static void propagateTicket(WaitcntScoreboard &scoreboard, Value src, Value dst,
-                            ArrayRef<int64_t> ticketShift = {}) {
-  if (!src || !dst)
-    return;
-  auto it = scoreboard.valueTickets.find(src);
-  if (it == scoreboard.valueTickets.end())
-    return;
-  SmallVector<Ticket, 2> tickets = it->second;
-  if (!ticketShift.empty()) {
-    for (Ticket &ticket : tickets) {
-      ticket.value -= ticketShift[counterIndex(ticket.counter)];
-      ticket.value = std::max<int64_t>(ticket.value, -64);
-    }
-  }
-  scoreboard.valueTickets[dst] = tickets;
-}
-
-static void propagateTickets(WaitcntScoreboard &scoreboard, ValueRange sources,
-                             ValueRange destinations,
-                             ArrayRef<int64_t> ticketShift = {}) {
-  for (auto [src, dst] : llvm::zip_equal(sources, destinations))
-    propagateTicket(scoreboard, src, dst, ticketShift);
-}
-
-// Rewind the scoreboard counters across a back-edge: each iteration of
-// the loop body re-issues the same static set of tickets, so without
-// this rewind the destination block-entry state would observe
-// `lastTicket = max(static tickets in body)` and an in-body consumer
-// that runs *before* later in-body producers would over-count the
-// number of "newer" issues. Mirrors the value-ticket shift in
-// `propagateTicket`; only the counter "high-water mark" is rolled
-// back, `lastWait` stays at its propagated absolute threshold.
-static void applyBackedgeCounterShift(WaitcntScoreboard &scoreboard,
-                                      ArrayRef<int64_t> ticketShift) {
-  if (ticketShift.empty())
-    return;
-  auto shiftCounter = [&](CounterState &counter, CounterKind kind) {
-    int64_t s = ticketShift[counterIndex(kind)];
-    if (s <= 0)
-      return;
-    counter.lastTicket =
-        std::max<int64_t>(counter.lastTicket - s, /*floor=*/-64);
-  };
-  shiftCounter(scoreboard.vmem, CounterKind::Vmem);
-  shiftCounter(scoreboard.lgkm, CounterKind::Lgkm);
-  shiftCounter(scoreboard.vscnt, CounterKind::Vscnt);
-}
-
-static void assignOperationTickets(func::FuncOp func,
-                                   DenseMap<Operation *, Ticket> &tickets) {
-  // Each op gets the ticket of its *last* hardware issue: a tuple load
-  // of width N advances the counter by N and the op's results are
-  // tagged with the latest of those N tickets, so a downstream consumer
-  // asking `computeWait(thisOpsTicket)` translates straight into
-  // `vmcnt(0)` (or `lgkmcnt(0)`) once the whole tuple needs to drain.
-  int64_t vmem = -1;
-  int64_t lgkm = -1;
-  int64_t vscnt = -1;
-  func.walk([&](Operation *op) {
-    if (!hasMemoryTicket(op))
-      return;
-    unsigned issues = getIssueCount(op);
-    if (isSMEMLoad(op)) {
-      lgkm += issues;
-      tickets[op] = Ticket{CounterKind::Lgkm, lgkm};
-      return;
-    }
-    if (isVMEMLoad(op)) {
-      vmem += issues;
-      tickets[op] = Ticket{CounterKind::Vmem, vmem};
-      return;
-    }
-    if (isVMEMStore(op)) {
-      vscnt += issues;
-      tickets[op] = Ticket{CounterKind::Vscnt, vscnt};
-    }
-  });
-}
-
-static void emitWaits(OpBuilder &builder, Location loc,
-                      const WaitRequirement &requirement,
-                      const llvm::AMDGPU::IsaVersion &isaVersion) {
-  if (requirement.vmcnt || requirement.lgkmcnt) {
-    unsigned encoded =
-        encodeWaitcnt(requirement.vmcnt, requirement.lgkmcnt, isaVersion);
-    createInstrNoResult(builder, loc, "s_waitcnt",
-                        createImm(builder, loc, encoded));
-  }
-  if (requirement.vscnt) {
-    createInstrNoResult(builder, loc, "s_waitcnt_vscnt",
-                        createImm(builder, loc, *requirement.vscnt));
-  }
-}
-
-static void propagateBranchOperands(Operation *terminator, Block *successor,
-                                    WaitcntScoreboard &scoreboard,
-                                    ArrayRef<int64_t> ticketShift = {});
-
+// Validate WaveMachine-specific preconditions before analysis runs.
 static LogicalResult validateWaveMachineOp(Operation *op) {
   if (!isWaveMachineOp(op))
     return success();
   if (auto func = op->getParentOfType<func::FuncOp>();
-      func && func->hasAttr("wave.kernel") && isa<wavemachine::ArgOp>(op))
+      func && func->hasAttr("wave.kernel") && llvm::isa<wavemachine::ArgOp>(op))
     return op->emitError("waveamd-insert-ticket-waits expects "
                          "ABI-lowered kernel arguments");
-  if (isa<wavemachine::SLoadB32Op, wavemachine::SLoadB64Op,
-          wavemachine::SLoadB128Op>(op) &&
+  if (llvm::isa<wavemachine::SLoadB32Op, wavemachine::SLoadB64Op,
+                wavemachine::SLoadB128Op>(op) &&
       !op->getAttrOfType<StringAttr>("base"))
     return op->emitError("waveamd-insert-ticket-waits expects scalar "
                          "memory loads to carry a base register attribute");
   return success();
 }
 
-static void observeTicket(Operation *op,
-                          const DenseMap<Operation *, Ticket> &operationTickets,
-                          WaitcntScoreboard &scoreboard) {
-  if (isTokenJoin(op)) {
-    SmallVector<Ticket, 2> joined;
-    for (Value operand : op->getOperands()) {
-      auto it = scoreboard.valueTickets.find(operand);
-      if (it == scoreboard.valueTickets.end())
-        continue;
-      llvm::append_range(joined, it->second);
+// Compute the required wait at a consumer op by looking up each operand
+// in the lattice's Token set and demanding the tightest per-counter
+// drain.
+static WaitRequirement computeRequirement(Operation *op,
+                                          const WaitState &state) {
+  WaitRequirement req;
+  // s_endpgm is the unique "drain VMEM stores before kernel exit" hook:
+  // there is no SSA edge from a store's token to the return path, so
+  // we force a vscnt drain here when any VMEM store is in flight.
+  if (llvm::isa<wavemachine::SEndpgmOp>(op)) {
+    for (const Token &t : state.tokens) {
+      if (t.counter == Counter::Vscnt)
+        req.requireDrain(Counter::Vscnt, t.position);
     }
-    if (op->getNumResults() == 1)
-      scoreboard.valueTickets[op->getResult(0)] = std::move(joined);
+    return req;
+  }
+  for (Value operand : op->getOperands()) {
+    for (unsigned ci = 0; ci < kNumCounters; ++ci) {
+      Counter c = static_cast<Counter>(ci);
+      if (const Token *t = lat::find(state.tokens, c, operand))
+        req.requireDrain(c, t->position);
+    }
+  }
+  return req;
+}
+
+// Bump same-counter positions and add this op's freshly-produced token
+// entry(ies) at position 0 (or one anonymous nullptr entry for stores
+// with no SSA result).
+static void recordIssue(Operation *op, WaitState &state) {
+  SmallVector<Value, 2> results;
+  collectIssuerResults(op, results);
+  lat::issue(state, counterOf(op), getIssueCount(op), results);
+}
+
+// For each op result, install a fresh entry whose per-counter position
+// is the MIN over the operands' Token entries. Used by `s_barrier`,
+// `wavemachine.after`, and `wavemachine.token_join`.
+static void deriveResultTokens(Operation *op, WaitState &state) {
+  for (Value result : op->getResults()) {
+    SmallVector<Token, 3> derived =
+        lat::mergeSources(state.tokens, op->getOperands(), result);
+    for (Token t : derived)
+      lat::insertOrMin(state.tokens, t);
+  }
+}
+
+// Decode an existing `s_waitcnt`'s immediate and apply it to the state.
+static void observeExistingWaitcnt(Operation *op, WaitState &state,
+                                   const llvm::AMDGPU::IsaVersion &isaVer) {
+  if (llvm::isa<wavemachine::SWaitcntOp>(op)) {
+    auto imm = getImmediate(op->getOperand(0));
+    if (!imm)
+      return;
+    unsigned vm = 0, exp = 0, lg = 0;
+    llvm::AMDGPU::decodeWaitcnt(isaVer, *imm, vm, exp, lg);
+    unsigned vmMax = llvm::AMDGPU::getVmcntBitMask(isaVer);
+    unsigned lgMax = llvm::AMDGPU::getLgkmcntBitMask(isaVer);
+    if (vm < vmMax)
+      lat::dropDrained(state.tokens, Counter::Vmem, vm);
+    if (lg < lgMax)
+      lat::dropDrained(state.tokens, Counter::Lgkm, lg);
     return;
   }
+  if (llvm::isa<wavemachine::SWaitcntVscntOp>(op)) {
+    if (auto imm = getImmediate(op->getOperand(0)))
+      lat::dropDrained(state.tokens, Counter::Vscnt, *imm);
+  }
+}
 
-  auto it = operationTickets.find(op);
-  if (it == operationTickets.end())
+// Drain operand tokens at `op` and hand the computed requirement to
+// `emit` (a no-op during analysis, the real `s_waitcnt` emitter
+// during rewrite).
+template <typename EmitFn>
+static void applyDrain(Operation *op, WaitState &state, EmitFn emit) {
+  WaitRequirement req = computeRequirement(op, state);
+  emit(op, req);
+  lat::applyWait(state.tokens, req);
+}
+
+// Per-op state transfer. Both `TokenWaitAnalysis::transferOp` (analysis
+// pass) and `WaveAMDTicketWaitsPass::rewriteOp` (post-fixpoint rewriter)
+// dispatch through here so the lattice update and the conditional wait
+// emission share a single case table.
+template <typename EmitFn>
+static void runTransfer(Operation *op, WaitState &state,
+                        const llvm::AMDGPU::IsaVersion &isaVer, EmitFn emit) {
+  switch (classifyOp(op)) {
+  case OpKind::Skip:
+    if (isWaitcntOp(op))
+      observeExistingWaitcnt(op, state, isaVer);
+    // Control-flow ops are pass-throughs at this level; the framework
+    // hooks remap operands to successors.
     return;
-  const Ticket &ticket = it->second;
-  switch (ticket.counter) {
-  case CounterKind::Vmem:
-    scoreboard.vmem.observeIssue(ticket.value);
-    break;
-  case CounterKind::Lgkm:
-    scoreboard.lgkm.observeIssue(ticket.value);
-    break;
-  case CounterKind::Vscnt:
-    scoreboard.vscnt.observeIssue(ticket.value);
-    break;
-  }
-  for (Value result : op->getResults())
-    scoreboard.valueTickets[result] = SmallVector<Ticket, 2>{ticket};
-}
-
-static void collectBlocks(Region &region, SmallVectorImpl<Block *> &blocks) {
-  for (Block &block : region) {
-    blocks.push_back(&block);
-    for (Operation &op : block)
-      for (Region &nested : op.getRegions())
-        collectBlocks(nested, blocks);
-  }
-}
-
-static void countIssuesInBlock(Block *block, int64_t (&counts)[3]) {
-  for (Operation &op : *block) {
-    unsigned issues = getIssueCount(&op);
-    if (isVMEMLoad(&op))
-      counts[counterIndex(CounterKind::Vmem)] += issues;
-    if (isSMEMLoad(&op))
-      counts[counterIndex(CounterKind::Lgkm)] += issues;
-    if (isVMEMStore(&op))
-      counts[counterIndex(CounterKind::Vscnt)] += issues;
-  }
-}
-
-static bool isBackedge(Block *source, Block *dest,
-                       const DenseMap<Block *, unsigned> &blockOrder) {
-  auto sourceIt = blockOrder.find(source);
-  auto destIt = blockOrder.find(dest);
-  if (sourceIt == blockOrder.end() || destIt == blockOrder.end())
-    return false;
-  return destIt->second <= sourceIt->second;
-}
-
-static void computeTicketShift(Block *source, Block *dest,
-                               const DenseMap<Block *, unsigned> &blockOrder,
-                               int64_t (&shift)[3]) {
-  shift[0] = shift[1] = shift[2] = 0;
-  if (!isBackedge(source, dest, blockOrder))
+  case OpKind::Issuer:
+    applyDrain(op, state, emit);
+    recordIssue(op, state);
     return;
-  countIssuesInBlock(dest, shift);
+  case OpKind::Barrier:
+    // Drain operands ahead of the cross-wave fence AND seed result
+    // tokens so downstream loads of the same arena depend on it.
+    applyDrain(op, state, emit);
+    deriveResultTokens(op, state);
+    return;
+  case OpKind::TokenOp:
+    // after / token_join: result carries the per-counter MIN of
+    // operand positions. No memory event, nothing to drain.
+    deriveResultTokens(op, state);
+    return;
+  case OpKind::Wait:
+  case OpKind::Endpgm:
+  case OpKind::Generic:
+    applyDrain(op, state, emit);
+    return;
+  }
 }
 
-class WaitcntAnalysis : public DenseForwardDataFlowAnalysis<WaitcntState> {
+//===----------------------------------------------------------------------===//
+// Token analysis
+//===----------------------------------------------------------------------===//
+
+class TokenWaitAnalysis : public DenseForwardDataFlowAnalysis<WaitLattice> {
 public:
-  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(WaitcntAnalysis)
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(TokenWaitAnalysis)
 
-  WaitcntAnalysis(DataFlowSolver &solver,
-                  const DenseMap<Operation *, Ticket> &operationTickets,
-                  const DenseMap<Block *, unsigned> &blockOrder,
-                  const llvm::AMDGPU::IsaVersion &isaVersion)
-      : DenseForwardDataFlowAnalysis(solver),
-        operationTickets(operationTickets), blockOrder(blockOrder),
-        isaVersion(isaVersion) {}
+  TokenWaitAnalysis(DataFlowSolver &solver, DominanceInfo &dom,
+                    const llvm::AMDGPU::IsaVersion &isaVer)
+      : DenseForwardDataFlowAnalysis(solver), dom(dom), isaVer(isaVer) {}
 
   LogicalResult initialize(Operation *top) override {
-    auto markOperation = [&](Operation *op) {
+    // Mark every block and CFG edge live so the solver actually runs.
+    auto markRegions = [&](Operation *op) {
       for (Region &region : op->getRegions()) {
         for (Block &block : region) {
           auto *blockLive =
               getOrCreate<Executable>(getProgramPointBefore(&block));
           propagateIfChanged(blockLive, blockLive->setToLive());
-          Operation *terminator = block.getTerminator();
-          if (!terminator)
+          Operation *term = block.getTerminator();
+          if (!term)
             continue;
-          for (Block *successor : terminator->getSuccessors()) {
+          for (Block *successor : term->getSuccessors()) {
             auto *edgeLive = getOrCreate<Executable>(
                 getLatticeAnchor<CFGEdge>(&block, successor));
             propagateIfChanged(edgeLive, edgeLive->setToLive());
@@ -625,101 +705,82 @@ public:
         }
       }
     };
-    markOperation(top);
-    top->walk(markOperation);
-    return DenseForwardDataFlowAnalysis<WaitcntState>::initialize(top);
+    markRegions(top);
+    top->walk(markRegions);
+    return DenseForwardDataFlowAnalysis<WaitLattice>::initialize(top);
   }
 
-  void setToEntryState(WaitcntState *lattice) override {
+  void setToEntryState(WaitLattice *lattice) override {
     propagateIfChanged(lattice, lattice->reset());
   }
 
-  LogicalResult visitOperation(Operation *op, const WaitcntState &before,
-                               WaitcntState *after) override {
+  LogicalResult visitOperation(Operation *op, const WaitLattice &before,
+                               WaitLattice *after) override {
     if (failed(validateWaveMachineOp(op)))
       return failure();
 
-    WaitcntState next = before;
-    WaitcntScoreboard &scoreboard = next.mutate();
-    if (isWaitcnt(op)) {
-      observeExistingWait(op, scoreboard, isaVersion);
-    } else if (isa<wavemachine::WaitOp>(op)) {
-      WaitRequirement requirement = computeRequirement(op, before.get());
-      observeRequirement(scoreboard, requirement);
-    } else {
-      observeTicket(op, operationTickets, scoreboard);
-    }
-
-    propagateIfChanged(after, after->join(next));
-    markCFGSuccessorsLive(op, next.get());
+    WaitState next = before.get();
+    transferOp(op, next);
+    propagateIfChanged(after, after->joinWith(next));
+    markCFGSuccessorsLive(op, next);
     return success();
   }
 
   void visitBlockTransfer(Block *block, ProgramPoint *point, Block *predecessor,
-                          const WaitcntState &before,
-                          WaitcntState *after) override {
-    WaitcntState next = before;
-    int64_t shift[3];
-    computeTicketShift(predecessor, block, blockOrder, shift);
-    propagateBranchOperands(predecessor->getTerminator(), block, next.mutate(),
-                            shift);
-    applyBackedgeCounterShift(next.mutate(), shift);
-    propagateIfChanged(after, after->join(next));
+                          const WaitLattice &before,
+                          WaitLattice *after) override {
+    WaitState next = before.get();
+    propagateBranchOperands(predecessor->getTerminator(), block, next);
+    lat::collapseEscaping(next, block, dom);
+    propagateIfChanged(after, after->joinWith(next));
   }
 
   void visitRegionBranchControlFlowTransfer(RegionBranchOpInterface branch,
                                             std::optional<unsigned> regionFrom,
                                             std::optional<unsigned> regionTo,
-                                            const WaitcntState &before,
-                                            WaitcntState *after) override {
-    WaitcntState next = before;
-    WaitcntScoreboard &scoreboard = next.mutate();
+                                            const WaitLattice &before,
+                                            WaitLattice *after) override {
+    WaitState next = before.get();
     RegionSuccessor successor =
         regionTo ? RegionSuccessor(&branch->getRegion(*regionTo))
                  : RegionSuccessor::parent();
 
     SmallVector<Value> sources;
-    Block *sourceBlock = nullptr;
     if (regionFrom) {
-      Operation *terminator =
-          branch->getRegion(*regionFrom).front().getTerminator();
-      sourceBlock = terminator->getBlock();
-      if (auto regionTerm =
-              dyn_cast<RegionBranchTerminatorOpInterface>(terminator))
+      Operation *term = branch->getRegion(*regionFrom).front().getTerminator();
+      if (auto regionTerm = dyn_cast<RegionBranchTerminatorOpInterface>(term))
         llvm::append_range(sources, regionTerm.getSuccessorOperands(successor));
     } else {
       llvm::append_range(sources, branch.getEntrySuccessorOperands(successor));
     }
+    propagateOperandsThrough(sources, branch.getSuccessorInputs(successor),
+                             next);
 
-    int64_t shift[3] = {0, 0, 0};
-    if (regionFrom && regionTo && sourceBlock)
-      computeTicketShift(sourceBlock, &branch->getRegion(*regionTo).front(),
-                         blockOrder, shift);
-
-    propagateTickets(scoreboard, sources, branch.getSuccessorInputs(successor),
-                     shift);
-    applyBackedgeCounterShift(scoreboard, shift);
-
-    propagateIfChanged(after, after->join(next));
+    Block *targetBlock =
+        regionTo ? &branch->getRegion(*regionTo).front() : branch->getBlock();
+    if (targetBlock)
+      lat::collapseEscaping(next, targetBlock, dom);
+    propagateIfChanged(after, after->joinWith(next));
   }
 
 private:
-  void markCFGSuccessorsLive(Operation *op,
-                             const WaitcntScoreboard &scoreboard) {
+  void transferOp(Operation *op, WaitState &state) {
+    auto noop = [](Operation *, const WaitRequirement &) {};
+    runTransfer(op, state, isaVer, noop);
+  }
+
+  void markCFGSuccessorsLive(Operation *op, const WaitState &state) {
     if (op->getNumSuccessors() == 0)
       return;
     Block *source = op->getBlock();
     if (!source)
       return;
     for (Block *successor : op->getSuccessors()) {
-      WaitcntScoreboard successorState = scoreboard;
-      int64_t shift[3];
-      computeTicketShift(source, successor, blockOrder, shift);
-      propagateBranchOperands(op, successor, successorState, shift);
-      applyBackedgeCounterShift(successorState, shift);
+      WaitState next = state;
+      propagateBranchOperands(op, successor, next);
+      lat::collapseEscaping(next, successor, dom);
       auto *blockState = getLattice(getProgramPointBefore(successor));
-      propagateIfChanged(blockState,
-                         blockState->joinScoreboard(successorState));
+      propagateIfChanged(blockState, blockState->joinWith(next));
       auto *blockLive =
           getOrCreate<Executable>(getProgramPointBefore(successor));
       propagateIfChanged(blockLive, blockLive->setToLive());
@@ -729,258 +790,85 @@ private:
     }
   }
 
-  const DenseMap<Operation *, Ticket> &operationTickets;
-  const DenseMap<Block *, unsigned> &blockOrder;
-  const llvm::AMDGPU::IsaVersion &isaVersion;
-};
-
-// Map the successor block arguments through `BranchOpInterface`, if present.
-// Returns true iff the interface produced at least one edge into `successor`.
-static bool tryPropagateViaInterface(BranchOpInterface branch, Block *successor,
-                                     WaitcntScoreboard &scoreboard,
-                                     ArrayRef<int64_t> ticketShift) {
-  if (!branch)
-    return false;
-  bool mapped = false;
-  for (auto [index, target] : llvm::enumerate(branch->getSuccessors())) {
-    if (target != successor)
-      continue;
-    SuccessorOperands operands = branch.getSuccessorOperands(index);
-    unsigned limit =
-        std::min<unsigned>(operands.size(), successor->getNumArguments());
-    for (unsigned i = 0; i < limit; ++i)
-      propagateTicket(scoreboard, operands[i], successor->getArgument(i),
-                      ticketShift);
-    mapped = true;
-  }
-  return mapped;
-}
-
-// Fallback for plain terminators with one successor: assume operands map
-// positionally onto the block arguments.
-static void propagateImplicitSuccessorOperands(Operation *terminator,
-                                               Block *successor,
-                                               WaitcntScoreboard &scoreboard,
-                                               ArrayRef<int64_t> ticketShift) {
-  if (terminator->getNumSuccessors() != 1 ||
-      terminator->getSuccessor(0) != successor ||
-      terminator->getNumOperands() < successor->getNumArguments())
-    return;
-  for (auto [argIndex, arg] : llvm::enumerate(successor->getArguments()))
-    propagateTicket(scoreboard, terminator->getOperand(argIndex), arg,
-                    ticketShift);
-}
-
-static void propagateBranchOperands(Operation *terminator, Block *successor,
-                                    WaitcntScoreboard &scoreboard,
-                                    ArrayRef<int64_t> ticketShift) {
-  if (tryPropagateViaInterface(dyn_cast<BranchOpInterface>(terminator),
-                               successor, scoreboard, ticketShift))
-    return;
-  propagateImplicitSuccessorOperands(terminator, successor, scoreboard,
-                                     ticketShift);
-}
-
-static WaitcntScoreboard
-getEffectiveStateBefore(Operation *op, DataFlowSolver &solver,
-                        const DenseMap<Block *, unsigned> &blockOrder) {
-  WaitcntScoreboard effective;
-  if (auto *state =
-          solver.lookupState<WaitcntState>(solver.getProgramPointBefore(op)))
-    effective.merge(state->get());
-
-  Block *block = op->getBlock();
-  if (!block)
-    return effective;
-  if (auto *blockState =
-          solver.lookupState<WaitcntState>(solver.getProgramPointBefore(block)))
-    effective.merge(blockState->get());
-  if (block->isEntryBlock())
-    return effective;
-
-  for (Block *predecessor : block->getPredecessors()) {
-    Operation *terminator = predecessor->getTerminator();
-    auto *predState = solver.lookupState<WaitcntState>(
-        solver.getProgramPointAfter(terminator));
-    if (!predState)
-      continue;
-    WaitcntScoreboard predEffective = predState->get();
-    int64_t shift[3];
-    computeTicketShift(predecessor, block, blockOrder, shift);
-    propagateBranchOperands(terminator, block, predEffective, shift);
-    applyBackedgeCounterShift(predEffective, shift);
-    effective.merge(predEffective);
-  }
-  return effective;
-}
-
-// Intra-block redundant-waitcnt elimination. The dataflow analysis
-// only updates `lastWait` for `s_waitcnt`s already present in the IR
-// (and for the high-level `wavemachine::WaitOp`), so when this pass
-// emits a fresh `s_waitcnt lgkmcnt(0)` for op X and then computes the
-// requirement for the very next op Y, Y still sees the dataflow's
-// pre-emission state and re-emits its own (looser, redundant)
-// `s_waitcnt lgkmcnt(N)` even though the runtime counter is already
-// drained to ≤0. Doing the elision inside the dataflow itself turns
-// out to be unsound across loop back-edges (the `min`-merge of
-// `lastWait` then false-elides correctness-required waits inside the
-// loop body), so we instead run a strictly-local post-emission pass:
-// walk each block linearly, track per-counter `lastWait`, and drop
-// any `s_waitcnt` whose every specified counter is already
-// at-or-tighter than the running bound. Cross-block elimination is
-// not attempted (state resets at block boundaries) so every loop-
-// carried wait stays intact while runs of redundant counts back-to-
-// back within a block collapse away.
-//
-// Local tracker used by the post-emission cleanup. We only need
-// `lastWait` semantics (no value-ticket map), so this is a stripped-
-// down sibling of `WaitcntScoreboard`.
-struct BlockWaitTracker {
-  CounterState vmem;
-  CounterState lgkm;
-  CounterState vscnt;
-};
-
-static void bumpTrackerIssue(BlockWaitTracker &tracker, CounterKind counter,
-                             unsigned issues) {
-  auto bump = [issues](CounterState &c) {
-    c.lastTicket += issues;
-    if (c.lastWait)
-      *c.lastWait += issues;
-  };
-  switch (counter) {
-  case CounterKind::Vmem:
-    bump(tracker.vmem);
-    break;
-  case CounterKind::Lgkm:
-    bump(tracker.lgkm);
-    break;
-  case CounterKind::Vscnt:
-    bump(tracker.vscnt);
-    break;
-  }
-}
-
-// Decode an `s_waitcnt`'s immediate and return whether each counter
-// slot represents an actual wait (sub-max value).
-struct DecodedWaitcnt {
-  unsigned vm;
-  unsigned lg;
-  bool vmSpecified;
-  bool lgSpecified;
-};
-
-static std::optional<DecodedWaitcnt>
-decodeSWaitcnt(Operation *op, const llvm::AMDGPU::IsaVersion &isaVersion,
-               unsigned vmcntMax, unsigned lgkmcntMax) {
-  auto imm = getImmediate(op->getOperand(0));
-  if (!imm)
-    return std::nullopt;
-  DecodedWaitcnt out{};
-  unsigned exp = 0;
-  llvm::AMDGPU::decodeWaitcnt(isaVersion, *imm, out.vm, exp, out.lg);
-  out.vmSpecified = out.vm < vmcntMax;
-  out.lgSpecified = out.lg < lgkmcntMax;
-  return out;
-}
-
-// Returns true iff a `lastWait`-tracked counter already has a tighter
-// (or equal) drain than `value`, so a waitcnt asking for `value` is a
-// no-op. An unspecified slot (`!specified`) is treated as already
-// drained.
-static bool counterAlreadyDrained(const CounterState &state, unsigned value,
-                                  bool specified) {
-  if (!specified)
-    return true;
-  return state.lastWait && *state.lastWait <= value;
-}
-
-// Decide whether `op` (a `wavemachine.s_waitcnt`) is a runtime no-op
-// against `tracker`. Updates `tracker` with the kept thresholds on the
-// keep-path so subsequent ops see the new bound.
-static bool tryEliseSWaitcnt(Operation *op, BlockWaitTracker &tracker,
-                             const llvm::AMDGPU::IsaVersion &isaVersion,
-                             unsigned vmcntMax, unsigned lgkmcntMax) {
-  auto decoded = decodeSWaitcnt(op, isaVersion, vmcntMax, lgkmcntMax);
-  if (!decoded)
-    return false;
-  bool vmRedundant =
-      counterAlreadyDrained(tracker.vmem, decoded->vm, decoded->vmSpecified);
-  bool lgRedundant =
-      counterAlreadyDrained(tracker.lgkm, decoded->lg, decoded->lgSpecified);
-  if (vmRedundant && lgRedundant)
-    return true;
-  if (decoded->vmSpecified && !vmRedundant)
-    tracker.vmem.observeWait(decoded->vm);
-  if (decoded->lgSpecified && !lgRedundant)
-    tracker.lgkm.observeWait(decoded->lg);
-  return false;
-}
-
-static bool tryEliseSWaitcntVscnt(Operation *op, BlockWaitTracker &tracker) {
-  auto imm = getImmediate(op->getOperand(0));
-  if (!imm)
-    return false;
-  if (tracker.vscnt.lastWait && *tracker.vscnt.lastWait <= *imm)
-    return true;
-  tracker.vscnt.observeWait(*imm);
-  return false;
-}
-
-static void
-observeTrackerIssue(Operation *op, BlockWaitTracker &tracker,
-                    const DenseMap<Operation *, Ticket> &operationTickets) {
-  auto it = operationTickets.find(op);
-  if (it == operationTickets.end())
-    return;
-  bumpTrackerIssue(tracker, it->second.counter, getIssueCount(op));
-}
-
-static void eraseWaitOpAndDeadImm(Operation *op) {
-  Value immOperand = op->getOperand(0);
-  op->erase();
-  if (Operation *def = immOperand.getDefiningOp())
-    if (immOperand.use_empty())
-      def->erase();
-}
-
-static void
-collectRedundantWaitsInBlock(Block *block, BlockWaitTracker &tracker,
-                             const DenseMap<Operation *, Ticket> &tickets,
-                             const llvm::AMDGPU::IsaVersion &isaVersion,
-                             unsigned vmcntMax, unsigned lgkmcntMax,
-                             SmallVectorImpl<Operation *> &toErase) {
-  for (Operation &op : *block) {
-    if (isa<wavemachine::SWaitcntOp>(&op)) {
-      if (tryEliseSWaitcnt(&op, tracker, isaVersion, vmcntMax, lgkmcntMax))
-        toErase.push_back(&op);
-      continue;
+  // Take a predecessor's exit state and propagate it through a
+  // CFG-style branch into `successor`. Each branch operand seeds the
+  // successor's block arg with a fresh Token entry keyed on the block
+  // arg's `Value`, carrying the operand's per-counter position.
+  void propagateBranchOperands(Operation *term, Block *successor,
+                               WaitState &state) {
+    if (auto branch = dyn_cast<BranchOpInterface>(term)) {
+      bool mapped = false;
+      for (auto [idx, target] : llvm::enumerate(term->getSuccessors())) {
+        if (target != successor)
+          continue;
+        SuccessorOperands operands = branch.getSuccessorOperands(idx);
+        unsigned limit =
+            std::min<unsigned>(operands.size(), successor->getNumArguments());
+        SmallVector<Value, 4> srcs, dsts;
+        for (unsigned i = 0; i < limit; ++i) {
+          srcs.push_back(operands[i]);
+          dsts.push_back(successor->getArgument(i));
+        }
+        propagateOperandsThrough(srcs, dsts, state);
+        mapped = true;
+      }
+      if (mapped)
+        return;
     }
-    if (isa<wavemachine::SWaitcntVscntOp>(&op)) {
-      if (tryEliseSWaitcntVscnt(&op, tracker))
-        toErase.push_back(&op);
-      continue;
+    // Fallback: single-successor terminator with positional operands.
+    if (term->getNumSuccessors() == 1 && term->getSuccessor(0) == successor &&
+        term->getNumOperands() >= successor->getNumArguments()) {
+      SmallVector<Value, 4> srcs, dsts;
+      for (auto [i, arg] : llvm::enumerate(successor->getArguments())) {
+        srcs.push_back(term->getOperand(i));
+        dsts.push_back(arg);
+      }
+      propagateOperandsThrough(srcs, dsts, state);
     }
-    observeTrackerIssue(&op, tracker, tickets);
   }
-}
 
-static void
-cleanupRedundantWaits(func::FuncOp func,
-                      const DenseMap<Operation *, Ticket> &operationTickets,
-                      const llvm::AMDGPU::IsaVersion &isaVersion) {
-  SmallVector<Block *> blocks;
-  collectBlocks(func.getBody(), blocks);
-  unsigned vmcntMax = llvm::AMDGPU::getVmcntBitMask(isaVersion);
-  unsigned lgkmcntMax = llvm::AMDGPU::getLgkmcntBitMask(isaVersion);
-  SmallVector<Operation *> toErase;
-  for (Block *block : blocks) {
-    BlockWaitTracker tracker;
-    collectRedundantWaitsInBlock(block, tracker, operationTickets, isaVersion,
-                                 vmcntMax, lgkmcntMax, toErase);
+  // Map operand values to successor values: for each pair, every
+  // (counter, operand-position) entry is duplicated under the
+  // destination value's key. The merge at the successor (via
+  // `joinWith`) then takes MIN across predecessors.
+  void propagateOperandsThrough(ValueRange operands, ValueRange destinations,
+                                WaitState &state) {
+    SmallVector<Token, 4> added;
+    for (auto [op, dst] : llvm::zip_equal(operands, destinations)) {
+      for (unsigned ci = 0; ci < kNumCounters; ++ci) {
+        Counter c = static_cast<Counter>(ci);
+        if (const Token *t = lat::find(state.tokens, c, op))
+          added.push_back(Token{dst, c, t->position});
+      }
+    }
+    for (const Token &t : added)
+      lat::insertOrMin(state.tokens, t);
   }
-  for (Operation *op : toErase)
-    eraseWaitOpAndDeadImm(op);
+
+  DominanceInfo &dom;
+  const llvm::AMDGPU::IsaVersion &isaVer;
+};
+
+//===----------------------------------------------------------------------===//
+// Rewrite step
+//===----------------------------------------------------------------------===//
+
+// Emit the s_waitcnt op(s) implied by `req` immediately before `op`.
+static void emitWaits(OpBuilder &builder, Operation *op,
+                      const WaitRequirement &req,
+                      const llvm::AMDGPU::IsaVersion &isaVer) {
+  builder.setInsertionPoint(op);
+  if (req.vmcnt || req.lgkmcnt) {
+    unsigned encoded =
+        llvm::AMDGPU::encodeWaitcnt(isaVer, req.vmcnt.value_or(~0u),
+                                    /*expcnt=*/~0u, req.lgkmcnt.value_or(~0u));
+    wavemachine::SWaitcntOp::create(builder, op->getLoc(),
+                                    createImm(builder, op->getLoc(), encoded));
+  }
+  if (req.vscnt) {
+    wavemachine::SWaitcntVscntOp::create(
+        builder, op->getLoc(), createImm(builder, op->getLoc(), *req.vscnt));
+  }
 }
 
 struct WaveAMDTicketWaitsPass
@@ -988,41 +876,88 @@ struct WaveAMDTicketWaitsPass
   void runOnOperation() override {
     ModuleOp module = getOperation();
     for (func::FuncOp func : module.getOps<func::FuncOp>()) {
-      DenseMap<Operation *, Ticket> operationTickets;
-      DenseMap<Block *, unsigned> blockOrder;
-      FailureOr<llvm::AMDGPU::IsaVersion> isaVersion = getIsaVersion(func);
-      if (failed(isaVersion))
+      if (failed(runOnFunc(func)))
         return signalPassFailure();
-      assignOperationTickets(func, operationTickets);
-      SmallVector<Block *> blocks;
-      collectBlocks(func.getBody(), blocks);
-      for (auto [index, block] : llvm::enumerate(blocks))
-        blockOrder[block] = index;
+    }
+  }
 
-      DataFlowSolver solver;
-      loadBaselineAnalyses(solver);
-      solver.load<WaitcntAnalysis>(operationTickets, blockOrder, *isaVersion);
-      if (failed(solver.initializeAndRun(func)))
-        return signalPassFailure();
+  LogicalResult runOnFunc(func::FuncOp func) {
+    FailureOr<llvm::AMDGPU::IsaVersion> isaVersion = getIsaVersion(func);
+    if (failed(isaVersion))
+      return failure();
 
-      OpBuilder builder(func.getContext());
-      SmallVector<Operation *> ops;
-      func.walk([&](Operation *op) {
-        if (isWaveMachineOp(op) && !isWaitcnt(op) && !isTokenOnly(op))
-          ops.push_back(op);
-      });
+    DominanceInfo dom(func);
+    DataFlowSolver solver;
+    loadBaselineAnalyses(solver);
+    solver.load<TokenWaitAnalysis>(dom, *isaVersion);
+    if (failed(solver.initializeAndRun(func)))
+      return failure();
 
-      for (Operation *op : ops) {
-        WaitcntScoreboard effective =
-            getEffectiveStateBefore(op, solver, blockOrder);
-        WaitRequirement requirement = computeRequirement(op, effective);
-        if (!requirement.hasWait())
-          continue;
-        builder.setInsertionPoint(op);
-        emitWaits(builder, op->getLoc(), requirement, *isaVersion);
-      }
+    rewriteWithSolver(func, solver, *isaVersion);
+    return success();
+  }
 
-      cleanupRedundantWaits(func, operationTickets, *isaVersion);
+  // After the dataflow converges we walk every op in order, ask the
+  // solver for the state immediately before it, compute the wait it
+  // demands, and emit `s_waitcnt`(s) ahead of it. We keep a local copy
+  // of the state inside each block so consecutive consumers of the
+  // same token see the drain effect from the wait we just emitted (the
+  // solver's per-op state does not).
+  void rewriteWithSolver(func::FuncOp func, DataFlowSolver &solver,
+                         const llvm::AMDGPU::IsaVersion &isaVer) {
+    OpBuilder builder(func.getContext());
+    SmallVector<Block *> blocks;
+    collectBlocks(func.getBody(), blocks);
+    for (Block *block : blocks)
+      rewriteBlock(block, solver, isaVer, builder);
+  }
+
+  void rewriteBlock(Block *block, DataFlowSolver &solver,
+                    const llvm::AMDGPU::IsaVersion &isaVer,
+                    OpBuilder &builder) {
+    auto *blockLat =
+        solver.lookupState<WaitLattice>(solver.getProgramPointBefore(block));
+    WaitState local;
+    if (blockLat)
+      local = blockLat->get();
+
+    SmallVector<Operation *> ops;
+    for (Operation &op : *block)
+      ops.push_back(&op);
+
+    for (Operation *op : ops)
+      rewriteOp(op, local, solver, isaVer, builder);
+  }
+
+  void rewriteOp(Operation *op, WaitState &local, DataFlowSolver &solver,
+                 const llvm::AMDGPU::IsaVersion &isaVer, OpBuilder &builder) {
+    // Control-flow ops do not consume tokens locally; the framework's
+    // region- and block-transfer hooks compute the post-op state for
+    // us. Refresh `local` from the solver so a downstream consumer in
+    // this same block (e.g. `v_add %x, %r` reading a `scf.if` result)
+    // sees the joined region state. Inner regions are walked
+    // separately by `collectBlocks`, so we don't need to descend here.
+    if (isControlFlowOp(op)) {
+      if (auto *post =
+              solver.lookupState<WaitLattice>(solver.getProgramPointAfter(op)))
+        local = post->get();
+      return;
+    }
+    auto emit = [&](Operation *op, const WaitRequirement &req) {
+      if (req.hasWait())
+        emitWaits(builder, op, req, isaVer);
+    };
+    // Share the case table with the analysis pass: same state transfer,
+    // the only delta is the (conditional) `emit`.
+    runTransfer(op, local, isaVer, emit);
+  }
+
+  static void collectBlocks(Region &region, SmallVectorImpl<Block *> &blocks) {
+    for (Block &block : region) {
+      blocks.push_back(&block);
+      for (Operation &op : block)
+        for (Region &nested : op.getRegions())
+          collectBlocks(nested, blocks);
     }
   }
 };
