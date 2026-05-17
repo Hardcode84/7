@@ -39,27 +39,55 @@ struct WaveAMDResourceInfoPass
     unsigned sgpr;
     unsigned vgpr;
   };
+  // Update `out` with the high-water mark of a single result's
+  // register footprint. Returns true on a hard error (unallocated
+  // index) so the caller can short-circuit the walk.
+  bool scanResult(Operation &op, Value result, MaxRegs &out) {
+    auto regType = dyn_cast<wavemachine::RegType>(result.getType());
+    if (!regType)
+      return false;
+    // SCC is a single global bit; the allocator never assigns
+    // physical numbers for it.
+    if (regType.getRegClass() == wavemachine::RegClass::SCC)
+      return false;
+    int64_t index = regType.getIndex();
+    if (index < 0) {
+      op.emitError("waveamd-resource-info requires allocated register results");
+      return true;
+    }
+    unsigned end = index + regType.getWidth();
+    if (isSGPR(regType))
+      out.sgpr = std::max(out.sgpr, end);
+    if (isVGPR(regType))
+      out.vgpr = std::max(out.vgpr, end);
+    return false;
+  }
+
+  void scanOp(Operation &op, MaxRegs &out, bool &failed) {
+    for (Value result : op.getResults()) {
+      if (scanResult(op, result, out)) {
+        failed = true;
+        return;
+      }
+    }
+    for (Region &region : op.getRegions()) {
+      for (Block &block : region) {
+        for (Operation &nested : block) {
+          scanOp(nested, out, failed);
+          if (failed)
+            return;
+        }
+      }
+    }
+  }
+
   MaxRegs collectMaxRegs(func::FuncOp func, bool &failed) {
     bool isKernel = func->hasAttr("wave.kernel");
     MaxRegs out{isKernel ? 5u : 0u, isKernel ? 1u : 0u};
     for (Operation &op : func.getBody().front()) {
-      if (op.getNumResults() == 0)
-        continue;
-      auto regType = dyn_cast<wavemachine::RegType>(op.getResult(0).getType());
-      if (!regType)
-        continue;
-      int64_t index = regType.getIndex();
-      if (index < 0) {
-        op.emitError(
-            "waveamd-resource-info requires allocated register results");
-        failed = true;
+      scanOp(op, out, failed);
+      if (failed)
         return out;
-      }
-      unsigned end = index + regType.getWidth();
-      if (isSGPR(regType))
-        out.sgpr = std::max(out.sgpr, end);
-      if (isVGPR(regType))
-        out.vgpr = std::max(out.vgpr, end);
     }
     return out;
   }

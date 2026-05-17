@@ -102,6 +102,13 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         "every per-K-step fragment load uses tuple buffer_load_b32 "
         "(buffer_load_dword ..., 0 offen offset:i*4)",
     )
+    parser.add_argument(
+        "--dyn-k",
+        action="store_true",
+        help="take the per-tile K-step count as a runtime i32 kernel arg "
+        "and lower the K accumulation as a wave.nonzero_trip scf.for "
+        "loop (selector picks the do/while-shaped wavemachine.uniform_loop)",
+    )
     return parser.parse_args(argv)
 
 
@@ -118,6 +125,7 @@ def main(argv: list[str] | None = None) -> int:
         BN=args.bn,
         use_lds=args.use_lds,
         use_buffer=args.use_buffer,
+        dyn_k=args.dyn_k,
     )
     sys.stdout.write(str(module))
     return 0

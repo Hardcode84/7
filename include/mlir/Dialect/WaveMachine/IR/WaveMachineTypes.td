@@ -23,11 +23,12 @@ class WaveMachine_Type<string name, string typeMnemonic,
 def WaveMachine_RegClassSGPR : I32EnumAttrCase<"SGPR", 0, "sgpr">;
 def WaveMachine_RegClassVGPR : I32EnumAttrCase<"VGPR", 1, "vgpr">;
 def WaveMachine_RegClassAGPR : I32EnumAttrCase<"AGPR", 2, "agpr">;
+def WaveMachine_RegClassSCC : I32EnumAttrCase<"SCC", 3, "scc">;
 
 def WaveMachine_RegClassEnum : I32EnumAttr<"RegClass",
     "WaveMachine register class",
     [WaveMachine_RegClassSGPR, WaveMachine_RegClassVGPR,
-     WaveMachine_RegClassAGPR]> {
+     WaveMachine_RegClassAGPR, WaveMachine_RegClassSCC]> {
   let cppNamespace = "::mlir::wavemachine";
 }
 

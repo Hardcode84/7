@@ -51,6 +51,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from mlir.dialects import scf
 from mlir.dialects import wave_dsl as dsl
 from mlir.ir import Module
 
@@ -72,6 +73,12 @@ class _MatmulConfig:
     BN: int
     use_lds: bool = False
     use_buffer: bool = False
+    # When `dyn_k=True`, the kernel takes the per-tile K-step count as
+    # an extra i32 argument and lowers the K accumulation as a runtime
+    # `scf.for` loop (tagged `wave.nonzero_trip`) instead of a Python
+    # unroll. The host still allocates K = `cfg.K` so the launch shape
+    # matches; the dynamic count is just `K / 16`.
+    dyn_k: bool = False
 
     def __post_init__(self) -> None:
         for dim, val in (("M", self.M), ("N", self.N), ("K", self.K)):
@@ -178,7 +185,7 @@ def _wrap_in_buffer(
 
 def _emit_tile_coords(bld: dsl.FunctionBuilder, cfg: _MatmulConfig) -> _TileCoords:
     """Compute the per-wave (lane, A/B/C base ptrs) from workitem ids."""
-    a_arg, b_arg, c_arg = bld.args
+    a_arg, b_arg, c_arg = bld.args[0], bld.args[1], bld.args[2]
     if cfg.use_buffer:
         a_arg = _wrap_in_buffer(bld, a_arg, cfg.a_elements)
         b_arg = _wrap_in_buffer(bld, b_arg, cfg.b_elements)
@@ -334,17 +341,45 @@ def _emit_kernel(bld: dsl.FunctionBuilder, cfg: _MatmulConfig) -> None:
     c16 = _splat_const(bld, 16)
     a_ptr_iter = coords.a_lane_base
     b_ptr_iter = coords.b_lane_base
-    for _ in range(cfg.k_steps):
+
+    def emit_step(
+        a_p: dsl.Value, b_p: dsl.Value, acc_v: dsl.Value
+    ) -> tuple[dsl.Value, dsl.Value, dsl.Value]:
         if staging is not None:
             a_frag, b_frag = _load_fragments_through_lds(
-                bld, a_ptr_iter, b_ptr_iter, a_type, b_type, staging
+                bld, a_p, b_p, a_type, b_type, staging
             )
         else:
-            a_frag, _atok = bld.fragment_load(a_ptr_iter, a_type)
-            b_frag, _btok = bld.fragment_load(b_ptr_iter, b_type)
-        acc = bld.mma(_MMA_KIND, a_frag, b_frag, acc)
-        a_ptr_iter = bld.ptr_add(a_ptr_iter, c16)
-        b_ptr_iter = bld.ptr_add(b_ptr_iter, c16)
+            a_frag, _atok = bld.fragment_load(a_p, a_type)
+            b_frag, _btok = bld.fragment_load(b_p, b_type)
+        return (
+            bld.mma(_MMA_KIND, a_frag, b_frag, acc_v),
+            bld.ptr_add(a_p, c16),
+            bld.ptr_add(b_p, c16),
+        )
+
+    if cfg.dyn_k:
+        # The fourth kernel arg is the per-tile K-step count (`K /
+        # 16`). We promise the host always launches with K > 0 so the
+        # selector can use the `wave.nonzero_trip` do/while shape.
+        k_steps_i32 = bld.args[3]
+        zero_idx = bld.constant(dsl.index_type(), 0)
+        one_idx = bld.constant(dsl.index_type(), 1)
+        k_steps_idx = bld.index_cast(k_steps_i32, dsl.index_type())
+        with bld.for_loop(
+            zero_idx,
+            k_steps_idx,
+            one_idx,
+            init_args=(acc, a_ptr_iter, b_ptr_iter),
+            nonzero_trip=True,
+        ) as forop:
+            carry_acc, carry_a, carry_b = forop.inner_iter_args
+            new_acc, new_a, new_b = emit_step(carry_a, carry_b, carry_acc)
+            scf.YieldOp([new_acc, new_a, new_b])
+        acc = forop.results[0]
+    else:
+        for _ in range(cfg.k_steps):
+            acc, a_ptr_iter, b_ptr_iter = emit_step(a_ptr_iter, b_ptr_iter, acc)
 
     bld.fragment_store(acc, coords.c_ptr)
 
@@ -418,12 +453,18 @@ def _emit_host(bld: dsl.FunctionBuilder, cfg: _MatmulConfig) -> None:
     [b_ptr] = bld.call(_F16_PTR_HELPER, [bld.memref_cast(b_buf, dyn_f16)], [f16_ptr])
     [c_ptr] = bld.call(_F32_PTR_HELPER, [c_buf], [f32_ptr])
 
+    launch_operands = [a_ptr, b_ptr, c_ptr]
+    if cfg.dyn_k:
+        # cfg.K is the buffer K used for allocation; per-tile K-step
+        # count is K / 16, passed in as an i32 to the kernel.
+        k_steps_value = bld.constant(dsl.i32(), cfg.k_steps)
+        launch_operands.append(k_steps_value)
     bld.launch(
         _GPU_MODULE_NAME,
         _KERNEL_NAME,
         grid=(blocks_m, blocks_n, c1),
         block=(threads, c1, c1),
-        operands=[a_ptr, b_ptr, c_ptr],
+        operands=launch_operands,
     )
     bld.call(_PRINT_HELPER, [c_unranked])
 
@@ -437,6 +478,7 @@ def build_wmma_f16_matmul_module(
     BN: int = 1,
     use_lds: bool = False,
     use_buffer: bool = False,
+    dyn_k: bool = False,
 ) -> Module:
     """Return an MLIR :class:`Module` for the tiled WMMA f16 matmul.
 
@@ -469,7 +511,14 @@ def build_wmma_f16_matmul_module(
     without further setup.
     """
     cfg = _MatmulConfig(
-        M=M, N=N, K=K, BM=BM, BN=BN, use_lds=use_lds, use_buffer=use_buffer
+        M=M,
+        N=N,
+        K=K,
+        BM=BM,
+        BN=BN,
+        use_lds=use_lds,
+        use_buffer=use_buffer,
+        dyn_k=dyn_k,
     )
     bld = dsl.ModuleBuilder()
     with bld:
@@ -494,6 +543,9 @@ def build_wmma_f16_matmul_module(
             dsl.ptr_type(dsl.f16()),
             dsl.ptr_type(dsl.f32()),
         ]
+        if cfg.dyn_k:
+            # Per-tile K-step count (= K // 16). Passed by value as i32.
+            kernel_inputs.append(dsl.i32())
         lds_size = cfg.lds_bytes if cfg.use_lds else None
         with (
             bld.gpu_module(_GPU_MODULE_NAME) as gmod,

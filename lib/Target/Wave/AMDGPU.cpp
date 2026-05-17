@@ -100,6 +100,10 @@ private:
   std::unique_ptr<llvm::MCInstPrinter> instPrinter;
   SmallVector<KernelInfo> kernels;
   unsigned indent = 1;
+  // Per-function counter handing out unique label suffixes for
+  // structured uniform loops, reset at the start of each function.
+  unsigned loopCounter = 0;
+  std::string funcLabelPrefix;
 
   LogicalResult initializeMC(Operation *op) {
     static llvm::once_flag initializeBackendOnce;
@@ -170,6 +174,9 @@ private:
     os << "\t.type\t" << func.getSymName() << ",@function\n";
     os << func.getSymName() << ":\n";
     emitLine(StringRef("; wave backend: WaveMachine MLIR pipeline finalized"));
+
+    loopCounter = 0;
+    funcLabelPrefix = (".L" + Twine(func.getSymName())).str();
 
     for (Operation &op : func.getBody().front()) {
       if (isa<func::ReturnOp>(op))
@@ -342,9 +349,9 @@ private:
   }
 
   std::string operandToString(Value value) const {
-    Operation *def = value.getDefiningOp();
-    if (isa<wavemachine::ImmOp>(def))
-      return Twine(def->getAttrOfType<IntegerAttr>("value").getInt()).str();
+    if (Operation *def = value.getDefiningOp())
+      if (isa<wavemachine::ImmOp>(def))
+        return Twine(def->getAttrOfType<IntegerAttr>("value").getInt()).str();
     return physReg(value);
   }
 
@@ -406,10 +413,10 @@ private:
   }
 
   llvm::MCOperand toMCOperand(Value value) {
-    Operation *def = value.getDefiningOp();
-    if (isa<wavemachine::ImmOp>(def))
-      return llvm::MCOperand::createImm(
-          def->getAttrOfType<IntegerAttr>("value").getInt());
+    if (Operation *def = value.getDefiningOp())
+      if (isa<wavemachine::ImmOp>(def))
+        return llvm::MCOperand::createImm(
+            def->getAttrOfType<IntegerAttr>("value").getInt());
     return llvm::MCOperand::createReg(mcReg(value));
   }
 
@@ -441,6 +448,34 @@ private:
   bool isSGPR(Value value) const {
     auto regType = dyn_cast<wavemachine::RegType>(value.getType());
     return regType && regType.getRegClass() == wavemachine::RegClass::SGPR;
+  }
+
+  LogicalResult emitUniformLoop(wavemachine::UniformLoopOp loop) {
+    unsigned id = loopCounter++;
+    std::string headLabel = (funcLabelPrefix + ".loop_head_" + Twine(id)).str();
+    std::string exitLabel = (funcLabelPrefix + ".loop_exit_" + Twine(id)).str();
+    if (loop.getEntryCond()) {
+      // SCC was already set by an upstream s_cmp; skip body if false.
+      if (failed(emitMC(llvm::AMDGPU::S_CBRANCH_SCC0_gfx11,
+                        {labelOperand(exitLabel)})))
+        return failure();
+    }
+    os << headLabel << ":\n";
+    Block &body = loop.getBody().front();
+    auto term = cast<wavemachine::ContinueIfOp>(body.getTerminator());
+    for (Operation &child : body) {
+      if (&child == term.getOperation())
+        continue;
+      if (failed(emitOperation(child)))
+        return failure();
+    }
+    // continue_if: the SCC operand has been set by the upstream s_cmp;
+    // we branch back to the head if SCC==1, else fall through.
+    if (failed(emitMC(llvm::AMDGPU::S_CBRANCH_SCC1_gfx11,
+                      {labelOperand(headLabel)})))
+      return failure();
+    os << exitLabel << ":\n";
+    return success();
   }
 
   LogicalResult emitOperation(Operation &op) {
@@ -556,6 +591,44 @@ private:
         emitLine(Twine("s_mov_b32 ") + dst + ", " + src);
       return success();
     }
+    if (isa<wavemachine::SMovB32ValueOp>(op)) {
+      // Coalescing in the regalloc may have folded source==dest;
+      // skip in that case to avoid a `s_mov_b32 sX, sX`.
+      Value src = op.getOperand(0);
+      if (auto srcRt = dyn_cast<wavemachine::RegType>(src.getType())) {
+        if (srcRt.getRegClass() == wavemachine::RegClass::SGPR &&
+            srcRt.getIndex() == getPhys(op.getResult(0)))
+          return success();
+      }
+      return emitMC(llvm::AMDGPU::S_MOV_B32_gfx11,
+                    {toMCOperand(op.getResult(0)), toMCOperand(src)});
+    }
+    if (isa<wavemachine::SAddI32Op>(op))
+      return emitMC(llvm::AMDGPU::S_ADD_I32_gfx11,
+                    {toMCOperand(op.getResult(0)),
+                     toMCOperand(op.getOperand(0)),
+                     toMCOperand(op.getOperand(1))});
+    if (isa<wavemachine::SCmpLtI32Op>(op))
+      return emitMC(
+          llvm::AMDGPU::S_CMP_LT_I32_gfx11,
+          {toMCOperand(op.getOperand(0)), toMCOperand(op.getOperand(1))});
+    if (isa<wavemachine::SCmpLgU32Op>(op))
+      return emitMC(
+          llvm::AMDGPU::S_CMP_LG_U32_gfx11,
+          {toMCOperand(op.getOperand(0)), toMCOperand(op.getOperand(1))});
+    if (isa<wavemachine::SCBranchScc0Op>(op))
+      return emitMC(llvm::AMDGPU::S_CBRANCH_SCC0_gfx11,
+                    {labelOperand(op.getAttrOfType<StringAttr>("label"))});
+    if (isa<wavemachine::SCBranchScc1Op>(op))
+      return emitMC(llvm::AMDGPU::S_CBRANCH_SCC1_gfx11,
+                    {labelOperand(op.getAttrOfType<StringAttr>("label"))});
+    if (auto loop = dyn_cast<wavemachine::UniformLoopOp>(op))
+      return emitUniformLoop(loop);
+    if (isa<wavemachine::ContinueIfOp>(op))
+      // continue_if is consumed by emitUniformLoop; reaching it
+      // here would mean the loop op didn't recurse properly.
+      return op.emitError(
+          "wavemachine.continue_if escaped its parent uniform_loop");
     if (isa<wavemachine::SLoadB32Op>(op))
       return emitMC(
           llvm::AMDGPU::S_LOAD_B32_IMM_gfx11,

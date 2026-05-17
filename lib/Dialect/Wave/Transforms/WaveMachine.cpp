@@ -11,6 +11,7 @@
 #include "Utils/AMDGPUBaseInfo.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/Wave/IR/Wave.h"
 #include "mlir/Dialect/Wave/IR/WaveAMD.h"
 #include "mlir/Dialect/WaveMachine/IR/WaveMachine.h"
@@ -49,6 +50,11 @@ static wavemachine::RegType getRegType(MLIRContext *ctx,
                                        wavemachine::RegClass regClass,
                                        unsigned width = 1) {
   return wavemachine::RegType::get(ctx, regClass, width, -1);
+}
+
+static wavemachine::RegType getSCCType(MLIRContext *ctx) {
+  return wavemachine::RegType::get(ctx, wavemachine::RegClass::SCC, /*width=*/1,
+                                   /*index=*/-1);
 }
 
 // Pinned variant: the resulting register's physical index is fixed up
@@ -218,12 +224,19 @@ private:
   }
 
   LogicalResult selectOperation(Operation *op) {
-    if (op->getBlock()->getParentOp() == func)
+    // Reset the insertion point only when stepping into a fresh top-level
+    // op (either directly inside the function body, or inside a
+    // structured loop body whose pre/post layout we are rebuilding from
+    // scratch).
+    Operation *parentOp = op->getBlock()->getParentOp();
+    if (parentOp == func || isa<wavemachine::UniformLoopOp>(parentOp))
       builder.setInsertionPoint(op);
     return llvm::TypeSwitch<Operation *, LogicalResult>(op)
         .Case<arith::ConstantIntOp>([&](auto o) { return selectConstant(o); })
         .Case<arith::ConstantIndexOp>(
             [&](auto o) { return selectConstantIndex(o); })
+        .Case<arith::IndexCastOp, arith::IndexCastUIOp>(
+            [&](auto o) { return selectIdentityCast(o); })
         .Case<LaneIdOp>([&](auto o) { return selectLaneId(o); })
         .Case<WorkgroupIdOp>([&](auto o) { return selectWorkgroupId(o); })
         .Case<WorkitemIdOp>([&](auto o) { return selectWorkitemId(o); })
@@ -251,6 +264,11 @@ private:
         .Case<waveamd::FragmentStoreOp>(
             [&](auto o) { return selectFragmentStore(o); })
         .Case<func::ReturnOp>([&](auto o) { return selectReturn(o); })
+        .Case<scf::ForOp>([&](auto o) { return selectScfFor(o); })
+        .Case<scf::YieldOp>([&](auto) {
+          // scf.yield is consumed by selectScfFor; we drop it here.
+          return success();
+        })
         .Case<YieldOp>([&](auto) { return success(); })
         .Default([&](auto) {
           return op->emitError(
@@ -266,6 +284,17 @@ private:
 
   LogicalResult selectConstantIndex(arith::ConstantIndexOp op) {
     values[op.getResult()] = createImm(builder, op.getLoc(), op.value());
+    eraseIfTopLevel(op);
+    return success();
+  }
+
+  // arith.index_cast (and its UI variant) between scalar i32 and
+  // index types is an SSA-only no-op at the WaveMachine level: both
+  // sides land in the same 32-bit scalar register slot. We simply
+  // forward the wavemachine value through the value map.
+  template <typename CastOp> LogicalResult selectIdentityCast(CastOp op) {
+    Value mapped = expect(op.getOperand(), op);
+    values[op.getResult()] = mapped;
     eraseIfTopLevel(op);
     return success();
   }
@@ -744,6 +773,236 @@ private:
         createWMOp(builder, op.getLoc(), "token_join", storeTokens,
                    getMemTokenType(op.getContext()));
     values[op.getToken()] = token->getResult(0);
+    eraseIfTopLevel(op);
+    return success();
+  }
+
+  // Ensure `v` is an SGPR1 by inserting a v_readfirstlane_b32 if it is
+  // currently a VGPR. Imm values pass through as-is. Caller is
+  // responsible for handling the SIMD lifting (we don't expect SIMD
+  // here because scf.for operands are index/i32 scalars).
+  Value ensureSGPR1(Location loc, Value v) {
+    if (auto rt = dyn_cast<wavemachine::RegType>(v.getType())) {
+      if (rt.getRegClass() == wavemachine::RegClass::SGPR && rt.getWidth() == 1)
+        return v;
+      if (rt.getRegClass() == wavemachine::RegClass::VGPR && rt.getWidth() == 1)
+        return createInstr(
+            builder, loc, "v_readfirstlane_b32", v,
+            getRegType(builder.getContext(), wavemachine::RegClass::SGPR));
+    }
+    // Imm passes through; the WaveMachine_SGPR1OrImm constraint accepts it.
+    return v;
+  }
+
+  // Strict variant of `ensureSGPR1`: also lifts immediates into a
+  // freshly allocated SGPR via `s_mov_b32_value`. Required when the
+  // destination operand constraint is plain WaveMachine_Reg (e.g. a
+  // `uniform_loop` init carry).
+  Value materializeSGPR1(Location loc, Value v) {
+    v = ensureSGPR1(loc, v);
+    if (isa<wavemachine::ImmType>(v.getType()))
+      return createInstr(
+          builder, loc, "s_mov_b32_value", v,
+          getRegType(builder.getContext(), wavemachine::RegClass::SGPR));
+    return v;
+  }
+
+  // Snapshot of the wave-level information we need to (a) emit an init
+  // carry for an `scf.for` iter arg and (b) rebind the corresponding
+  // body block argument so downstream selectors see the same shape they
+  // would outside the loop. For SimdPtr iter args we carry the per-lane
+  // *offset* through the loop; the base / buffer flag is assumed
+  // loop-invariant and is captured from the surrounding scope.
+  struct CarrySnapshot {
+    enum class Kind { WMValue, Pointer };
+    Kind kind;
+    // `WMValue`: the already-selected wavemachine SSA value for the
+    // init arg (e.g. a VGPR tuple holding a fragment).
+    // `Pointer`: the selected per-lane offset VGPR for the pointer.
+    Value carry;
+    // `Pointer` only: the loop-invariant base register and buffer flag
+    // copied from the outer sidecars.
+    Value base;
+    bool isBuffer = false;
+  };
+
+  // Capture the wavemachine "shape" for every `scf.for` iter arg. Wave
+  // SimdPtr inits resolve through the pointer sidecars (base/offset),
+  // everything else goes through the standard `values` map.
+  LogicalResult snapshotScfCarries(scf::ForOp op,
+                                   SmallVectorImpl<CarrySnapshot> &out) {
+    out.reserve(op.getInitArgs().size());
+    for (Value initArg : op.getInitArgs()) {
+      if (auto simd = dyn_cast<SimdType>(initArg.getType());
+          simd && isa<PtrType>(simd.getElementType())) {
+        auto baseIt = pointerBases.find(initArg);
+        auto offsetIt = pointerOffsets.find(initArg);
+        if (baseIt == pointerBases.end() || offsetIt == pointerOffsets.end())
+          return op.emitError(
+              "scf.for pointer iter arg has no WaveMachine sidecar");
+        out.push_back({CarrySnapshot::Kind::Pointer,
+                       /*carry=*/offsetIt->second, baseIt->second,
+                       pointerBuffers.lookup(initArg)});
+        continue;
+      }
+      out.push_back({CarrySnapshot::Kind::WMValue, expect(initArg, op),
+                     /*base=*/Value{}, /*isBuffer=*/false});
+    }
+    return success();
+  }
+
+  // Materialise the `wavemachine.uniform_loop` op with the requested
+  // optional entry condition and init carries [IV, *iterArgCarries].
+  Operation *buildUniformLoopOp(Location loc, Value entryCond,
+                                ArrayRef<Value> inits) {
+    SmallVector<Type> resultTypes;
+    for (Value v : inits)
+      resultTypes.push_back(v.getType());
+    OperationState state(loc, "wavemachine.uniform_loop");
+    if (entryCond)
+      state.addOperands(entryCond);
+    state.addOperands(inits);
+    state.addTypes(resultTypes);
+    int32_t segs[2] = {entryCond ? 1 : 0, static_cast<int32_t>(inits.size())};
+    state.addAttribute("operandSegmentSizes",
+                       builder.getDenseI32ArrayAttr(segs));
+    Region *body = state.addRegion();
+    body->emplaceBlock();
+    for (Value init : inits)
+      body->front().addArgument(init.getType(), loc);
+    return builder.create(state);
+  }
+
+  // Register the loop body block args back into the selector maps so
+  // recursive selection inside the body resolves IV / iter args /
+  // carried pointers correctly.
+  void bindLoopBodyArgs(scf::ForOp op, Block &loopBody,
+                        ArrayRef<CarrySnapshot> snapshots) {
+    values[op.getInductionVar()] = loopBody.getArgument(0);
+    for (auto [idx, scfArg] : llvm::enumerate(op.getRegionIterArgs())) {
+      Value blockCarry = loopBody.getArgument(idx + 1);
+      const CarrySnapshot &snap = snapshots[idx];
+      if (snap.kind == CarrySnapshot::Kind::Pointer) {
+        pointerBases[scfArg] = snap.base;
+        pointerOffsets[scfArg] = blockCarry;
+        pointerBuffers[scfArg] = snap.isBuffer;
+        continue;
+      }
+      values[scfArg] = blockCarry;
+    }
+  }
+
+  // Recursively select every non-terminator op in the scf.for body.
+  // The original scf.yield is consumed by the caller.
+  LogicalResult selectScfBody(scf::ForOp op) {
+    auto savedIP = builder.saveInsertionPoint();
+    SmallVector<Operation *> bodyOps;
+    for (Operation &child :
+         llvm::make_early_inc_range(op.getBody()->without_terminator()))
+      bodyOps.push_back(&child);
+    for (Operation *child : bodyOps) {
+      builder.restoreInsertionPoint(savedIP);
+      if (failed(selectOperation(child)))
+        return failure();
+      savedIP = builder.saveInsertionPoint();
+    }
+    builder.restoreInsertionPoint(savedIP);
+    return success();
+  }
+
+  // Build the `continue_if` carry operand list out of the scf.yield
+  // results, looking up pointer offsets through the sidecar maps and
+  // enforcing that pointer carries preserve their loop-invariant base.
+  LogicalResult collectYieldCarries(scf::YieldOp yield,
+                                    ArrayRef<CarrySnapshot> snapshots,
+                                    SmallVectorImpl<Value> &out) {
+    for (auto [idx, y] : llvm::enumerate(yield.getResults())) {
+      const CarrySnapshot &snap = snapshots[idx];
+      if (snap.kind == CarrySnapshot::Kind::Pointer) {
+        auto baseIt = pointerBases.find(y);
+        auto offsetIt = pointerOffsets.find(y);
+        if (baseIt == pointerBases.end() || offsetIt == pointerOffsets.end())
+          return yield.emitError(
+              "scf.yield pointer carry has no WaveMachine sidecar");
+        if (baseIt->second != snap.base)
+          return yield.emitError(
+              "scf.yield pointer carry must keep loop-invariant base");
+        out.push_back(offsetIt->second);
+        continue;
+      }
+      out.push_back(expect(y, yield));
+    }
+    return success();
+  }
+
+  // Rebind the scf.for results to the wavemachine loop op results,
+  // skipping the synthetic IV carry at slot 0. Pointer carries get
+  // their sidecar entries reconstructed from the captured base.
+  void bindLoopResults(scf::ForOp op, Operation *loop,
+                       ArrayRef<CarrySnapshot> snapshots) {
+    for (auto [idx, scfResult] : llvm::enumerate(op.getResults())) {
+      Value wmResult = loop->getResult(idx + 1);
+      const CarrySnapshot &snap = snapshots[idx];
+      if (snap.kind == CarrySnapshot::Kind::Pointer) {
+        pointerBases[scfResult] = snap.base;
+        pointerOffsets[scfResult] = wmResult;
+        pointerBuffers[scfResult] = snap.isBuffer;
+        continue;
+      }
+      values[scfResult] = wmResult;
+    }
+  }
+
+  // Lower scf.for to wavemachine.uniform_loop with explicit IV
+  // bookkeeping. `wave.nonzero_trip` on the for op skips the entry
+  // SCC test (post-tested do/while), otherwise an `s_cmp_lt_i32
+  // lower, upper` is materialised immediately before the loop op.
+  LogicalResult selectScfFor(scf::ForOp op) {
+    Location loc = op.getLoc();
+    Value lower = ensureSGPR1(loc, expect(op.getLowerBound(), op));
+    Value upper = ensureSGPR1(loc, expect(op.getUpperBound(), op));
+    Value step = ensureSGPR1(loc, expect(op.getStep(), op));
+
+    Type scc = getSCCType(builder.getContext());
+    Value entryCond;
+    if (!op->hasAttr("wave.nonzero_trip"))
+      entryCond =
+          createInstr(builder, loc, "s_cmp_lt_i32", {lower, upper}, scc);
+
+    SmallVector<CarrySnapshot> snapshots;
+    if (failed(snapshotScfCarries(op, snapshots)))
+      return failure();
+
+    SmallVector<Value> inits;
+    inits.push_back(materializeSGPR1(loc, lower));
+    for (const CarrySnapshot &snap : snapshots)
+      inits.push_back(snap.carry);
+
+    Operation *loop = buildUniformLoopOp(loc, entryCond, inits);
+    Block &loopBody = loop->getRegion(0).front();
+    bindLoopBodyArgs(op, loopBody, snapshots);
+
+    builder.setInsertionPointToStart(&loopBody);
+    if (failed(selectScfBody(op)))
+      return failure();
+
+    Type sgpr1 =
+        getRegType(builder.getContext(), wavemachine::RegClass::SGPR, 1);
+    Operation *add =
+        createWMOp(builder, loc, "s_add_i32", {loopBody.getArgument(0), step},
+                   TypeRange{sgpr1, scc});
+    Value nextIv = add->getResult(0);
+    Value backCond =
+        createInstr(builder, loc, "s_cmp_lt_i32", {nextIv, upper}, scc);
+
+    SmallVector<Value> contOperands{backCond, nextIv};
+    auto yield = cast<scf::YieldOp>(op.getBody()->getTerminator());
+    if (failed(collectYieldCarries(yield, snapshots, contOperands)))
+      return failure();
+    createWMOp(builder, loc, "continue_if", contOperands, TypeRange{});
+
+    builder.setInsertionPointAfter(loop);
+    bindLoopResults(op, loop, snapshots);
     eraseIfTopLevel(op);
     return success();
   }

@@ -12,6 +12,7 @@
 include "mlir/Dialect/WaveMachine/IR/WaveMachineBase.td"
 include "mlir/Dialect/WaveMachine/IR/WaveMachineTypes.td"
 include "mlir/IR/OpBase.td"
+include "mlir/Interfaces/ControlFlowInterfaces.td"
 include "mlir/Interfaces/SideEffectInterfaces.td"
 
 class WaveMachine_Op<string mnemonic, list<Trait> traits = []> :
@@ -53,6 +54,23 @@ def WaveMachine_VGPR1
                  "::llvm::cast<::mlir::wavemachine::RegType>($_self).getRegClass() == ::mlir::wavemachine::RegClass::VGPR && "
                  "::llvm::cast<::mlir::wavemachine::RegType>($_self).getWidth() == 1">,
            "WaveMachine scalar VGPR register">;
+
+// SCC is the status condition code: a 1-bit hardware register implicitly
+// written by scalar ALU ops (s_cmp_*, s_add_i32 carry-out, ...) and read
+// by s_cbranch_scc0/1. There is exactly one physical SCC, so the
+// allocator skips SCC values entirely. Modelling it as a value makes the
+// def-use chain (s_cmp -> continue_if / cbranch) explicit in the IR.
+def WaveMachine_SCC
+    : Type<CPred<"::llvm::isa<::mlir::wavemachine::RegType>($_self) && "
+                 "::llvm::cast<::mlir::wavemachine::RegType>($_self).getRegClass() == ::mlir::wavemachine::RegClass::SCC">,
+           "WaveMachine SCC status bit">;
+
+def WaveMachine_SGPR1OrImm
+    : Type<CPred<"(::llvm::isa<::mlir::wavemachine::RegType>($_self) && "
+                 "::llvm::cast<::mlir::wavemachine::RegType>($_self).getRegClass() == ::mlir::wavemachine::RegClass::SGPR && "
+                 "::llvm::cast<::mlir::wavemachine::RegType>($_self).getWidth() == 1) || "
+                 "::llvm::isa<::mlir::wavemachine::ImmType>($_self)">,
+           "WaveMachine SGPR or immediate">;
 
 def WaveMachine_RegOrImm
     : Type<CPred<"::llvm::isa<::mlir::wavemachine::RegType>($_self) || "
@@ -244,6 +262,17 @@ def WaveMachine_SMovB32Op : WaveMachine_UnaryNoResult<"s_mov_b32",
                                                        WaveMachine_RegOrImm> {
   let arguments = (ins StrAttr:$dst, WaveMachine_RegOrImm:$source);
   let assemblyFormat = "$dst `,` $source attr-dict `:` functional-type(operands, results)";
+}
+
+// Value-producing scalar move: materialises an SGPR1 holding the
+// given Imm or copies an existing SGPR1/RegOrImm into a fresh
+// allocator-assigned SGPR. Used by the selector to lift loop-IV
+// initialisers out of `wavemachine.imm` into a real carry register.
+def WaveMachine_SMovB32ValueOp : WaveMachine_Op<"s_mov_b32_value", [Pure]> {
+  let summary = "scalar 32-bit move producing an SGPR value";
+  let arguments = (ins WaveMachine_RegOrImm:$source);
+  let results = (outs WaveMachine_SGPR1:$result);
+  let assemblyFormat = "$source attr-dict `:` functional-type(operands, results)";
 }
 def WaveMachine_SLoadB32Op : WaveMachine_UnaryResult<"s_load_b32",
                                                       WaveMachine_Imm,
@@ -457,6 +486,126 @@ def WaveMachine_SBarrierOp : WaveMachine_Op<"s_barrier"> {
   let arguments = (ins Variadic<WaveMachine_MemToken>:$dependencies);
   let results = (outs Variadic<WaveMachine_MemToken>:$tokens);
   let assemblyFormat = "$dependencies attr-dict `:` functional-type(operands, results)";
+}
+
+//===----------------------------------------------------------------------===//
+// Scalar ALU + branches (used by structured uniform loops)
+//===----------------------------------------------------------------------===//
+
+// Wave-uniform scalar add. Produces both an SGPR sum and an SCC
+// carry-out so that any IR consumer of SCC (e.g. an immediately
+// following s_cmp / continue_if) cannot accidentally be reordered
+// across this op without the dependence being visible.
+def WaveMachine_SAddI32Op : WaveMachine_Op<"s_add_i32", [Pure]> {
+  let summary = "scalar 32-bit add (sets SCC)";
+  let arguments = (ins WaveMachine_SGPR1:$lhs, WaveMachine_SGPR1OrImm:$rhs);
+  let results = (outs WaveMachine_SGPR1:$result, WaveMachine_SCC:$scc);
+  let assemblyFormat = "$lhs `,` $rhs attr-dict `:` functional-type(operands, results)";
+}
+
+def WaveMachine_SCmpLtI32Op : WaveMachine_Op<"s_cmp_lt_i32", [Pure]> {
+  let summary = "scalar signed less-than compare (sets SCC)";
+  let arguments = (ins
+    WaveMachine_SGPR1OrImm:$lhs,
+    WaveMachine_SGPR1OrImm:$rhs
+  );
+  let results = (outs WaveMachine_SCC:$result);
+  let assemblyFormat = "$lhs `,` $rhs attr-dict `:` functional-type(operands, results)";
+}
+
+def WaveMachine_SCmpLgU32Op : WaveMachine_Op<"s_cmp_lg_u32", [Pure]> {
+  let summary = "scalar unsigned not-equal compare (sets SCC)";
+  let arguments = (ins
+    WaveMachine_SGPR1OrImm:$lhs,
+    WaveMachine_SGPR1OrImm:$rhs
+  );
+  let results = (outs WaveMachine_SCC:$result);
+  let assemblyFormat = "$lhs `,` $rhs attr-dict `:` functional-type(operands, results)";
+}
+
+def WaveMachine_SCBranchScc0Op : WaveMachine_Op<"s_cbranch_scc0"> {
+  let summary = "branch if SCC is zero";
+  let arguments = (ins WaveMachine_SCC:$cond, StrAttr:$label);
+  let assemblyFormat = "$cond `:` type($cond) `,` $label attr-dict";
+}
+
+def WaveMachine_SCBranchScc1Op : WaveMachine_Op<"s_cbranch_scc1"> {
+  let summary = "branch if SCC is one";
+  let arguments = (ins WaveMachine_SCC:$cond, StrAttr:$label);
+  let assemblyFormat = "$cond `:` type($cond) `,` $label attr-dict";
+}
+
+//===----------------------------------------------------------------------===//
+// Structured uniform loop
+//===----------------------------------------------------------------------===//
+
+def WaveMachine_UniformLoopOp : WaveMachine_Op<"uniform_loop", [
+  AttrSizedOperandSegments,
+  SingleBlock,
+  DeclareOpInterfaceMethods<RegionBranchOpInterface,
+    ["getEntrySuccessorOperands", "getSuccessorInputs"]>,
+  RecursiveMemoryEffects
+]> {
+  let summary = "structured wave-uniform loop with explicit IV bookkeeping";
+  let description = [{
+    Wave-uniform structured loop with one body region whose block
+    arguments shadow `$inits`. The terminator `wavemachine.continue_if`
+    branches either back to the body (continue) or out of the op
+    (results = continue_if.carries).
+
+    When `$entry_cond` is present, the loop is pre-tested: if the SCC
+    becomes false on entry, the body is skipped entirely and the
+    results take the `$inits` values. When absent, the loop is
+    post-tested (do/while) and the body always runs at least once.
+
+    All IV arithmetic / comparisons are materialised as explicit
+    `wavemachine.s_add_i32` / `s_cmp_*` ops in the body; this op only
+    establishes the region boundary and the back-edge that the waitcnt
+    pass needs to see via `RegionBranchOpInterface`.
+  }];
+
+  let arguments = (ins Optional<WaveMachine_SCC>:$entry_cond,
+                       Variadic<WaveMachine_Reg>:$inits);
+  let results = (outs Variadic<WaveMachine_Reg>:$results);
+  let regions = (region SizedRegion<1>:$body);
+
+  let assemblyFormat = [{
+    (`if` $entry_cond^ `:` type($entry_cond))?
+    (`carries` `(` $inits^ `:` type($inits) `)`)?
+    $body
+    attr-dict (`->` type($results)^)?
+  }];
+
+  let hasVerifier = 1;
+}
+
+def WaveMachine_ContinueIfOp : WaveMachine_Op<"continue_if", [
+  Terminator,
+  HasParent<"UniformLoopOp">,
+  DeclareOpInterfaceMethods<RegionBranchTerminatorOpInterface,
+    ["getMutableSuccessorOperands"]>
+]> {
+  let summary = "uniform_loop back-edge terminator";
+  let description = [{
+    Conditional branch to the head of the parent `uniform_loop`'s body
+    if `$cond` (SCC) is one; otherwise the loop exits with `$carries`
+    as the op's results.
+
+    Only `$carries` are forwarded across the back-edge; `$cond` is the
+    SCC bit (already set by an upstream `s_cmp_*` op) consumed locally
+    by the `s_cbranch_scc1` the printer emits.
+  }];
+
+  let arguments = (ins WaveMachine_SCC:$cond,
+                       Variadic<WaveMachine_Reg>:$carries);
+
+  let assemblyFormat = [{
+    $cond `:` type($cond)
+    (`carries` `(` $carries^ `:` type($carries) `)`)?
+    attr-dict
+  }];
+
+  let hasVerifier = 1;
 }
 
 #endif // MLIR_DIALECT_WAVEMACHINE_IR_WAVEMACHINEOPS_TD

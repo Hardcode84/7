@@ -9,5 +9,6 @@ add_mlir_dialect_library(MLIRWaveMachineDialect
   MLIRWaveMachineOpsIncGen
 
   LINK_LIBS PUBLIC
+  MLIRControlFlowInterfaces
   MLIRIR
   )

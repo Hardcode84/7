@@ -347,6 +347,9 @@ class FunctionBuilder:
     def constant(self, result_type: Type, value: int | float) -> Value:
         return arith.ConstantOp(result_type, value).result
 
+    def index_cast(self, value: Value, result_type: Type) -> Value:
+        return arith.IndexCastOp(result_type, value).result
+
     # --- Wave ops ----------------------------------------------------------
 
     def lane_id(self, element_type: Type | None = None, width: int = 32) -> Value:
@@ -515,11 +518,42 @@ class FunctionBuilder:
         return memref.CastOp(result_type, buf).result
 
     @contextmanager
-    def for_loop(self, lower: Value, upper: Value, step: Value) -> Iterator[Value]:
-        forop = scf.ForOp(lower, upper, step)
+    def for_loop(
+        self,
+        lower: Value,
+        upper: Value,
+        step: Value,
+        init_args: Sequence[Value] = (),
+        nonzero_trip: bool = False,
+    ) -> Iterator[Value]:
+        """Yield an `scf.for`'s induction variable inside a context
+        manager (no carries) or the `scf.ForOp` itself when `init_args`
+        is non-empty.
+
+        When `init_args` is empty (the historical contract) the helper
+        yields a bare induction variable and emits an empty `scf.yield`
+        on context exit.
+
+        When `init_args` is non-empty the helper yields the underlying
+        `scf.ForOp` so the caller can access `forop.induction_variable`,
+        `forop.inner_iter_args`, and (after the `with` exits)
+        `forop.results`. The caller is responsible for emitting an
+        `scf.yield` with the next-iteration carry values.
+
+        `nonzero_trip=True` attaches a `wave.nonzero_trip` unit attr on
+        the `scf.for`, which the selector uses to skip the pre-test
+        compare and lower to a do/while-shaped `wavemachine.uniform_loop`
+        instead of the (potentially-zero-trip) pre-tested form.
+        """
+        forop = scf.ForOp(lower, upper, step, iter_args=list(init_args))
+        if nonzero_trip:
+            forop.operation.attributes["wave.nonzero_trip"] = UnitAttr.get()
         with InsertionPoint(forop.body):
-            yield forop.induction_variable
-            scf.YieldOp([])
+            if init_args:
+                yield forop
+            else:
+                yield forop.induction_variable
+                scf.YieldOp([])
 
     def call(
         self,

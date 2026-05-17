@@ -10,6 +10,7 @@
 
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/DialectImplementation.h"
+#include "mlir/Interfaces/ControlFlowInterfaces.h"
 #include "llvm/ADT/TypeSwitch.h"
 
 using namespace mlir;
@@ -163,6 +164,81 @@ LogicalResult DsStoreTupleB32Op::verify() {
   if (valueType.getWidth() < 1)
     return emitOpError("value tuple width must be at least 1");
   return success();
+}
+
+LogicalResult UniformLoopOp::verify() {
+  Block &body = getBody().front();
+  if (body.getNumArguments() != getInits().size())
+    return emitOpError("body block must have one argument per init carry");
+  for (auto [init, arg] : llvm::zip(getInits(), body.getArguments())) {
+    if (init.getType() != arg.getType())
+      return emitOpError(
+                 "init carry types must match body block argument types: ")
+             << init.getType() << " vs " << arg.getType();
+  }
+  if (getResults().size() != getInits().size())
+    return emitOpError("results count must match inits count");
+  for (auto [init, result] : llvm::zip(getInits(), getResults())) {
+    if (init.getType() != result.getType())
+      return emitOpError("init carry types must match result types: ")
+             << init.getType() << " vs " << result.getType();
+  }
+  if (body.empty() || !isa<ContinueIfOp>(body.back()))
+    return emitOpError("body must be terminated by a wavemachine.continue_if");
+  return success();
+}
+
+// Body region successors (from the WaveMachine perspective):
+//   - From parent: if entry_cond is missing, only the body is a
+//     successor (always entered); else both the body (cond=1) and the
+//     parent (cond=0; results = inits) are.
+//   - From body: both the body again (continue_if cond=1) and the
+//     parent (cond=0; results = continue_if.carries).
+void UniformLoopOp::getSuccessorRegions(
+    RegionBranchPoint point, SmallVectorImpl<RegionSuccessor> &regions) {
+  if (point.isParent()) {
+    regions.push_back(RegionSuccessor(&getBody()));
+    if (getEntryCond())
+      regions.push_back(RegionSuccessor::parent());
+    return;
+  }
+  regions.push_back(RegionSuccessor(&getBody()));
+  regions.push_back(RegionSuccessor::parent());
+}
+
+OperandRange
+UniformLoopOp::getEntrySuccessorOperands(RegionSuccessor successor) {
+  return getInits();
+}
+
+ValueRange UniformLoopOp::getSuccessorInputs(RegionSuccessor successor) {
+  if (successor.isParent())
+    return getResults();
+  return getBody().getArguments();
+}
+
+LogicalResult ContinueIfOp::verify() {
+  auto parent = (*this)->getParentOfType<UniformLoopOp>();
+  if (!parent)
+    return emitOpError("must be nested inside a wavemachine.uniform_loop");
+  if (getCarries().size() != parent.getInits().size())
+    return emitOpError("carries count must match parent uniform_loop inits");
+  for (auto [carry, init] : llvm::zip(getCarries(), parent.getInits())) {
+    if (carry.getType() != init.getType())
+      return emitOpError(
+                 "carry types must match parent uniform_loop init types: ")
+             << carry.getType() << " vs " << init.getType();
+  }
+  return success();
+}
+
+// continue_if forwards $carries to either the body block (back-edge,
+// cond=1) or the parent results (exit, cond=0). The SCC `$cond`
+// operand is local to the s_cbranch_scc1 the printer emits and is
+// *not* forwarded.
+MutableOperandRange
+ContinueIfOp::getMutableSuccessorOperands(RegionSuccessor successor) {
+  return getCarriesMutable();
 }
 
 #define GET_OP_CLASSES
