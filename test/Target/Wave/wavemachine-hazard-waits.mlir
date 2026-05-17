@@ -24,6 +24,25 @@ func.func @no_delay_after_vmcnt_wait(%x: !wavemachine.reg<vgpr, 1>, %y: !wavemac
   return
 }
 
+// A `wavemachine.uniform_loop` body must also be inspected: a partial
+// lgkmcnt wait inside the loop has to insert the same VALU mitigation
+// as it would at the top level.
+// CHECK-LABEL: func.func @delay_inside_uniform_loop
+// CHECK: wavemachine.uniform_loop
+// CHECK:   wavemachine.s_waitcnt
+// CHECK-NEXT: wavemachine.imm 1
+// CHECK-NEXT: wavemachine.s_delay_alu
+// CHECK-NEXT: wavemachine.v_add_u32
+func.func @delay_inside_uniform_loop(%x: !wavemachine.reg<vgpr, 1>, %y: !wavemachine.reg<sgpr, 1>, %ec: !wavemachine.reg<scc, 1>) {
+  wavemachine.uniform_loop if %ec : !wavemachine.reg<scc, 1> {
+    %wait = wavemachine.imm 64519 : !wavemachine.imm
+    wavemachine.s_waitcnt %wait : (!wavemachine.imm) -> ()
+    %sum = wavemachine.v_add_u32 %x, %y : (!wavemachine.reg<vgpr, 1>, !wavemachine.reg<sgpr, 1>) -> !wavemachine.reg<vgpr, 1>
+    wavemachine.continue_if %ec : !wavemachine.reg<scc, 1>
+  }
+  return
+}
+
 }
 
 // -----

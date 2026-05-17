@@ -128,3 +128,37 @@ func.func @structured_for_triple_buffer(%x: !wavemachine.reg<vgpr, 1>) {
 }
 
 }
+
+// -----
+
+// Regression for the back-edge inflation bug: two in-iter producers in
+// a `uniform_loop` body, where the FIRST consumer must see vmcnt(0)
+// rather than vmcnt(1). Without the back-edge counter rewind the
+// scoreboard's `lastTicket` would propagate the body-tail's vmem
+// ticket (=1) into the start of every iteration; the early consumer of
+// `%a` would then compute `threshold = 1 - 0 = 1` and emit vmcnt(1),
+// leaving the last dword of `%a` unread.
+module attributes {wavemachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
+
+// CHECK-LABEL: func.func @uniform_loop_two_vmem
+// CHECK: wavemachine.uniform_loop
+// CHECK:   wavemachine.global_load_b32
+// CHECK-NEXT: wavemachine.imm 1015
+// CHECK-NEXT: wavemachine.s_waitcnt
+// CHECK-NEXT: wavemachine.v_add_u32
+// CHECK: wavemachine.global_load_b32
+// CHECK-NEXT: wavemachine.imm 1015
+// CHECK-NEXT: wavemachine.s_waitcnt
+// CHECK-NEXT: wavemachine.v_add_u32
+func.func @uniform_loop_two_vmem(%off: !wavemachine.reg<vgpr, 1>, %base: !wavemachine.reg<sgpr, 2>, %ec: !wavemachine.reg<scc, 1>) {
+  wavemachine.uniform_loop if %ec : !wavemachine.reg<scc, 1> {
+    %a = wavemachine.global_load_b32 %off, %base : (!wavemachine.reg<vgpr, 1>, !wavemachine.reg<sgpr, 2>) -> (!wavemachine.reg<vgpr, 1>)
+    %sa = wavemachine.v_add_u32 %a, %a : (!wavemachine.reg<vgpr, 1>, !wavemachine.reg<vgpr, 1>) -> !wavemachine.reg<vgpr, 1>
+    %b = wavemachine.global_load_b32 %off, %base : (!wavemachine.reg<vgpr, 1>, !wavemachine.reg<sgpr, 2>) -> (!wavemachine.reg<vgpr, 1>)
+    %sb = wavemachine.v_add_u32 %b, %b : (!wavemachine.reg<vgpr, 1>, !wavemachine.reg<vgpr, 1>) -> !wavemachine.reg<vgpr, 1>
+    wavemachine.continue_if %ec : !wavemachine.reg<scc, 1>
+  }
+  return
+}
+
+}

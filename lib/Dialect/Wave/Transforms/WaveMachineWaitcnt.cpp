@@ -230,6 +230,23 @@ static bool isVMEMStore(Operation *op) {
   return op->hasTrait<OpTrait::wavemachine::VMEMStoreOp>();
 }
 
+// How many hardware issues this op will expand to at MC emission. Tuple
+// loads and the LDS tuple-store fan out into one dword instruction per
+// tuple component; everything else is one issue. Getting this right
+// matters because the hardware vmcnt / lgkmcnt counters are incremented
+// per issue, not per IR op: if we encoded a tuple-load with one ticket
+// the consumer's `wait until ticket drained` would translate to
+// `vmcnt(N-1)`, which leaves the last dword of the tuple still in
+// flight and lets the next op observe a partially-written VGPR tuple.
+static unsigned getIssueCount(Operation *op) {
+  if (isa<wavemachine::DsLoadTupleB32Op, wavemachine::GlobalLoadTupleB32Op,
+          wavemachine::BufferLoadTupleB32Op>(op))
+    return cast<wavemachine::RegType>(op->getResult(0).getType()).getWidth();
+  if (isa<wavemachine::DsStoreTupleB32Op>(op))
+    return cast<wavemachine::RegType>(op->getOperand(1).getType()).getWidth();
+  return 1;
+}
+
 static bool isWaitcnt(Operation *op) {
   return op->hasTrait<OpTrait::wavemachine::WaitcntOp>();
 }
@@ -415,24 +432,58 @@ static void propagateTickets(WaitcntScoreboard &scoreboard, ValueRange sources,
     propagateTicket(scoreboard, src, dst, ticketShift);
 }
 
+// Rewind the scoreboard counters across a back-edge: each iteration of
+// the loop body re-issues the same static set of tickets, so without
+// this rewind the destination block-entry state would observe
+// `lastTicket = max(static tickets in body)` and an in-body consumer
+// that runs *before* later in-body producers would over-count the
+// number of "newer" issues. Mirrors the value-ticket shift in
+// `propagateTicket`; only the counter "high-water mark" is rolled
+// back, `lastWait` stays at its propagated absolute threshold.
+static void applyBackedgeCounterShift(WaitcntScoreboard &scoreboard,
+                                      ArrayRef<int64_t> ticketShift) {
+  if (ticketShift.empty())
+    return;
+  auto shiftCounter = [&](CounterState &counter, CounterKind kind) {
+    int64_t s = ticketShift[counterIndex(kind)];
+    if (s <= 0)
+      return;
+    counter.lastTicket =
+        std::max<int64_t>(counter.lastTicket - s, /*floor=*/-64);
+  };
+  shiftCounter(scoreboard.vmem, CounterKind::Vmem);
+  shiftCounter(scoreboard.lgkm, CounterKind::Lgkm);
+  shiftCounter(scoreboard.vscnt, CounterKind::Vscnt);
+}
+
 static void assignOperationTickets(func::FuncOp func,
                                    DenseMap<Operation *, Ticket> &tickets) {
+  // Each op gets the ticket of its *last* hardware issue: a tuple load
+  // of width N advances the counter by N and the op's results are
+  // tagged with the latest of those N tickets, so a downstream consumer
+  // asking `computeWait(thisOpsTicket)` translates straight into
+  // `vmcnt(0)` (or `lgkmcnt(0)`) once the whole tuple needs to drain.
   int64_t vmem = -1;
   int64_t lgkm = -1;
   int64_t vscnt = -1;
   func.walk([&](Operation *op) {
     if (!hasMemoryTicket(op))
       return;
+    unsigned issues = getIssueCount(op);
     if (isSMEMLoad(op)) {
-      tickets[op] = Ticket{CounterKind::Lgkm, ++lgkm};
+      lgkm += issues;
+      tickets[op] = Ticket{CounterKind::Lgkm, lgkm};
       return;
     }
     if (isVMEMLoad(op)) {
-      tickets[op] = Ticket{CounterKind::Vmem, ++vmem};
+      vmem += issues;
+      tickets[op] = Ticket{CounterKind::Vmem, vmem};
       return;
     }
-    if (isVMEMStore(op))
-      tickets[op] = Ticket{CounterKind::Vscnt, ++vscnt};
+    if (isVMEMStore(op)) {
+      vscnt += issues;
+      tickets[op] = Ticket{CounterKind::Vscnt, vscnt};
+    }
   });
 }
 
@@ -516,12 +567,13 @@ static void collectBlocks(Region &region, SmallVectorImpl<Block *> &blocks) {
 
 static void countIssuesInBlock(Block *block, int64_t (&counts)[3]) {
   for (Operation &op : *block) {
+    unsigned issues = getIssueCount(&op);
     if (isVMEMLoad(&op))
-      ++counts[counterIndex(CounterKind::Vmem)];
+      counts[counterIndex(CounterKind::Vmem)] += issues;
     if (isSMEMLoad(&op))
-      ++counts[counterIndex(CounterKind::Lgkm)];
+      counts[counterIndex(CounterKind::Lgkm)] += issues;
     if (isVMEMStore(&op))
-      ++counts[counterIndex(CounterKind::Vscnt)];
+      counts[counterIndex(CounterKind::Vscnt)] += issues;
   }
 }
 
@@ -611,6 +663,7 @@ public:
     computeTicketShift(predecessor, block, blockOrder, shift);
     propagateBranchOperands(predecessor->getTerminator(), block, next.mutate(),
                             shift);
+    applyBackedgeCounterShift(next.mutate(), shift);
     propagateIfChanged(after, after->join(next));
   }
 
@@ -645,6 +698,7 @@ public:
 
     propagateTickets(scoreboard, sources, branch.getSuccessorInputs(successor),
                      shift);
+    applyBackedgeCounterShift(scoreboard, shift);
 
     propagateIfChanged(after, after->join(next));
   }
@@ -662,6 +716,7 @@ private:
       int64_t shift[3];
       computeTicketShift(source, successor, blockOrder, shift);
       propagateBranchOperands(op, successor, successorState, shift);
+      applyBackedgeCounterShift(successorState, shift);
       auto *blockState = getLattice(getProgramPointBefore(successor));
       propagateIfChanged(blockState,
                          blockState->joinScoreboard(successorState));
@@ -753,6 +808,7 @@ getEffectiveStateBefore(Operation *op, DataFlowSolver &solver,
     int64_t shift[3];
     computeTicketShift(predecessor, block, blockOrder, shift);
     propagateBranchOperands(terminator, block, predEffective, shift);
+    applyBackedgeCounterShift(predEffective, shift);
     effective.merge(predEffective);
   }
   return effective;

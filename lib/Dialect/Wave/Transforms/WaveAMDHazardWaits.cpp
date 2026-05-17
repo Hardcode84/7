@@ -245,32 +245,74 @@ private:
     return cfg.hasDelayAlu ? lg != cfg.defaultLgkmcnt : true;
   }
 
+  // Walk every wavemachine op in the function in program order, including
+  // ops nested inside structured regions such as `wavemachine.uniform_loop`.
+  // Returns failure (via diagnostic emission) if a malformed op is found.
+  LogicalResult collectOps(func::FuncOp func,
+                           SmallVectorImpl<Operation *> &ops) {
+    func.walk<WalkOrder::PreOrder>([&](Operation *op) {
+      if (op->getName().getDialectNamespace() ==
+          wavemachine::WaveMachineDialect::getDialectNamespace())
+        ops.push_back(op);
+    });
+    for (Operation *op : ops) {
+      if (isUnloweredKernelArg(*op, func))
+        return op->emitError(
+            "waveamd-insert-hazard-waits expects ABI-lowered kernel arguments");
+      if (isMalformedSMEMLoad(*op))
+        return op->emitError(
+            "waveamd-insert-hazard-waits expects scalar memory loads to "
+            "carry a base register attribute");
+    }
+    return success();
+  }
+
+  // Linear scan that inserts VALU-after-LGKM mitigations. Returns the
+  // value of `pendingLgkmWait` after the last op, which the caller may
+  // use to decide whether a back-edge replay is required.
+  bool processOnce(ArrayRef<Operation *> ops, bool startState,
+                   OpBuilder &builder, const HazardConfig &cfg,
+                   const llvm::MCSubtargetInfo &sti) {
+    bool pendingLgkmWait = startState;
+    for (Operation *op : ops) {
+      if (op->hasTrait<OpTrait::wavemachine::VALUOp>() && pendingLgkmWait) {
+        insertValuMitigation(*op, builder, cfg, sti);
+        pendingLgkmWait = false;
+      }
+      if (isa<wavemachine::SWaitcntOp>(op))
+        if (auto newState = recomputePendingLgkm(*op, cfg))
+          pendingLgkmWait = *newState;
+    }
+    return pendingLgkmWait;
+  }
+
   LogicalResult processFunction(func::FuncOp func, OpBuilder &builder,
                                 const HazardConfig &cfg,
                                 const llvm::MCSubtargetInfo &sti) {
-    bool pendingLgkmWait = false;
-    for (Operation &op : llvm::make_early_inc_range(func.getBody().front())) {
-      if (op.getName().getDialectNamespace() !=
-          wavemachine::WaveMachineDialect::getDialectNamespace())
-        continue;
-      if (isUnloweredKernelArg(op, func))
-        return op.emitError(
-            "waveamd-insert-hazard-waits expects ABI-lowered kernel arguments");
-      if (isMalformedSMEMLoad(op))
-        return op.emitError(
-            "waveamd-insert-hazard-waits expects scalar memory loads to "
-            "carry a base register attribute");
+    SmallVector<Operation *> ops;
+    if (failed(collectOps(func, ops)))
+      return failure();
 
-      if (op.hasTrait<OpTrait::wavemachine::VALUOp>() && pendingLgkmWait) {
-        insertValuMitigation(op, builder, cfg, sti);
-        pendingLgkmWait = false;
-      }
-
-      if (isa<wavemachine::SWaitcntOp>(op))
-        if (auto newState = recomputePendingLgkm(op, cfg))
-          pendingLgkmWait = *newState;
-    }
+    // Walk once with pendingLgkmWait=false (the linear fall-through
+    // state at function entry). If the walk leaves pendingLgkmWait=true
+    // and the function contains a uniform loop, re-walk with
+    // pendingLgkmWait=true so that a VALU at the *top* of a loop body
+    // picks up a leftover wait produced by the body's tail in the prior
+    // iteration. The replay is bounded to one extra pass because
+    // `insertValuMitigation` resets the flag inside the body.
+    bool finalState = processOnce(ops, /*startState=*/false, builder, cfg, sti);
+    if (finalState && containsLoop(func))
+      processOnce(ops, /*startState=*/true, builder, cfg, sti);
     return success();
+  }
+
+  static bool containsLoop(func::FuncOp func) {
+    bool found = false;
+    func.walk([&](wavemachine::UniformLoopOp) {
+      found = true;
+      return WalkResult::interrupt();
+    });
+    return found;
   }
 };
 
