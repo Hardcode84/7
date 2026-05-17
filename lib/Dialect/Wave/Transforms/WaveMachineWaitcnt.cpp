@@ -814,6 +814,175 @@ getEffectiveStateBefore(Operation *op, DataFlowSolver &solver,
   return effective;
 }
 
+// Intra-block redundant-waitcnt elimination. The dataflow analysis
+// only updates `lastWait` for `s_waitcnt`s already present in the IR
+// (and for the high-level `wavemachine::WaitOp`), so when this pass
+// emits a fresh `s_waitcnt lgkmcnt(0)` for op X and then computes the
+// requirement for the very next op Y, Y still sees the dataflow's
+// pre-emission state and re-emits its own (looser, redundant)
+// `s_waitcnt lgkmcnt(N)` even though the runtime counter is already
+// drained to ≤0. Doing the elision inside the dataflow itself turns
+// out to be unsound across loop back-edges (the `min`-merge of
+// `lastWait` then false-elides correctness-required waits inside the
+// loop body), so we instead run a strictly-local post-emission pass:
+// walk each block linearly, track per-counter `lastWait`, and drop
+// any `s_waitcnt` whose every specified counter is already
+// at-or-tighter than the running bound. Cross-block elimination is
+// not attempted (state resets at block boundaries) so every loop-
+// carried wait stays intact while runs of redundant counts back-to-
+// back within a block collapse away.
+//
+// Local tracker used by the post-emission cleanup. We only need
+// `lastWait` semantics (no value-ticket map), so this is a stripped-
+// down sibling of `WaitcntScoreboard`.
+struct BlockWaitTracker {
+  CounterState vmem;
+  CounterState lgkm;
+  CounterState vscnt;
+};
+
+static void bumpTrackerIssue(BlockWaitTracker &tracker, CounterKind counter,
+                             unsigned issues) {
+  auto bump = [issues](CounterState &c) {
+    c.lastTicket += issues;
+    if (c.lastWait)
+      *c.lastWait += issues;
+  };
+  switch (counter) {
+  case CounterKind::Vmem:
+    bump(tracker.vmem);
+    break;
+  case CounterKind::Lgkm:
+    bump(tracker.lgkm);
+    break;
+  case CounterKind::Vscnt:
+    bump(tracker.vscnt);
+    break;
+  }
+}
+
+// Decode an `s_waitcnt`'s immediate and return whether each counter
+// slot represents an actual wait (sub-max value).
+struct DecodedWaitcnt {
+  unsigned vm;
+  unsigned lg;
+  bool vmSpecified;
+  bool lgSpecified;
+};
+
+static std::optional<DecodedWaitcnt>
+decodeSWaitcnt(Operation *op, const llvm::AMDGPU::IsaVersion &isaVersion,
+               unsigned vmcntMax, unsigned lgkmcntMax) {
+  auto imm = getImmediate(op->getOperand(0));
+  if (!imm)
+    return std::nullopt;
+  DecodedWaitcnt out{};
+  unsigned exp = 0;
+  llvm::AMDGPU::decodeWaitcnt(isaVersion, *imm, out.vm, exp, out.lg);
+  out.vmSpecified = out.vm < vmcntMax;
+  out.lgSpecified = out.lg < lgkmcntMax;
+  return out;
+}
+
+// Returns true iff a `lastWait`-tracked counter already has a tighter
+// (or equal) drain than `value`, so a waitcnt asking for `value` is a
+// no-op. An unspecified slot (`!specified`) is treated as already
+// drained.
+static bool counterAlreadyDrained(const CounterState &state, unsigned value,
+                                  bool specified) {
+  if (!specified)
+    return true;
+  return state.lastWait && *state.lastWait <= value;
+}
+
+// Decide whether `op` (a `wavemachine.s_waitcnt`) is a runtime no-op
+// against `tracker`. Updates `tracker` with the kept thresholds on the
+// keep-path so subsequent ops see the new bound.
+static bool tryEliseSWaitcnt(Operation *op, BlockWaitTracker &tracker,
+                             const llvm::AMDGPU::IsaVersion &isaVersion,
+                             unsigned vmcntMax, unsigned lgkmcntMax) {
+  auto decoded = decodeSWaitcnt(op, isaVersion, vmcntMax, lgkmcntMax);
+  if (!decoded)
+    return false;
+  bool vmRedundant =
+      counterAlreadyDrained(tracker.vmem, decoded->vm, decoded->vmSpecified);
+  bool lgRedundant =
+      counterAlreadyDrained(tracker.lgkm, decoded->lg, decoded->lgSpecified);
+  if (vmRedundant && lgRedundant)
+    return true;
+  if (decoded->vmSpecified && !vmRedundant)
+    tracker.vmem.observeWait(decoded->vm);
+  if (decoded->lgSpecified && !lgRedundant)
+    tracker.lgkm.observeWait(decoded->lg);
+  return false;
+}
+
+static bool tryEliseSWaitcntVscnt(Operation *op, BlockWaitTracker &tracker) {
+  auto imm = getImmediate(op->getOperand(0));
+  if (!imm)
+    return false;
+  if (tracker.vscnt.lastWait && *tracker.vscnt.lastWait <= *imm)
+    return true;
+  tracker.vscnt.observeWait(*imm);
+  return false;
+}
+
+static void
+observeTrackerIssue(Operation *op, BlockWaitTracker &tracker,
+                    const DenseMap<Operation *, Ticket> &operationTickets) {
+  auto it = operationTickets.find(op);
+  if (it == operationTickets.end())
+    return;
+  bumpTrackerIssue(tracker, it->second.counter, getIssueCount(op));
+}
+
+static void eraseWaitOpAndDeadImm(Operation *op) {
+  Value immOperand = op->getOperand(0);
+  op->erase();
+  if (Operation *def = immOperand.getDefiningOp())
+    if (immOperand.use_empty())
+      def->erase();
+}
+
+static void
+collectRedundantWaitsInBlock(Block *block, BlockWaitTracker &tracker,
+                             const DenseMap<Operation *, Ticket> &tickets,
+                             const llvm::AMDGPU::IsaVersion &isaVersion,
+                             unsigned vmcntMax, unsigned lgkmcntMax,
+                             SmallVectorImpl<Operation *> &toErase) {
+  for (Operation &op : *block) {
+    if (isa<wavemachine::SWaitcntOp>(&op)) {
+      if (tryEliseSWaitcnt(&op, tracker, isaVersion, vmcntMax, lgkmcntMax))
+        toErase.push_back(&op);
+      continue;
+    }
+    if (isa<wavemachine::SWaitcntVscntOp>(&op)) {
+      if (tryEliseSWaitcntVscnt(&op, tracker))
+        toErase.push_back(&op);
+      continue;
+    }
+    observeTrackerIssue(&op, tracker, tickets);
+  }
+}
+
+static void
+cleanupRedundantWaits(func::FuncOp func,
+                      const DenseMap<Operation *, Ticket> &operationTickets,
+                      const llvm::AMDGPU::IsaVersion &isaVersion) {
+  SmallVector<Block *> blocks;
+  collectBlocks(func.getBody(), blocks);
+  unsigned vmcntMax = llvm::AMDGPU::getVmcntBitMask(isaVersion);
+  unsigned lgkmcntMax = llvm::AMDGPU::getLgkmcntBitMask(isaVersion);
+  SmallVector<Operation *> toErase;
+  for (Block *block : blocks) {
+    BlockWaitTracker tracker;
+    collectRedundantWaitsInBlock(block, tracker, operationTickets, isaVersion,
+                                 vmcntMax, lgkmcntMax, toErase);
+  }
+  for (Operation *op : toErase)
+    eraseWaitOpAndDeadImm(op);
+}
+
 struct WaveAMDTicketWaitsPass
     : public wave::impl::WaveAMDTicketWaitsBase<WaveAMDTicketWaitsPass> {
   void runOnOperation() override {
@@ -852,6 +1021,8 @@ struct WaveAMDTicketWaitsPass
         builder.setInsertionPoint(op);
         emitWaits(builder, op->getLoc(), requirement, *isaVersion);
       }
+
+      cleanupRedundantWaits(func, operationTickets, *isaVersion);
     }
   }
 };

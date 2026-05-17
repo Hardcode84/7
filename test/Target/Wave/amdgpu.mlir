@@ -188,6 +188,15 @@ func.func @wave_buffer_tuple_load(%in: !wave.ptr<i32, #wave.global>,
 // worthwhile on RDNA3 (no direct global->LDS DMA). A serialized
 // schedule (load A; store A; load B; store B) would only ever see
 // `vmcnt(0)` waits.
+//
+// The post-emission cleanup must also collapse the run of waitcnts
+// the per-op emission inserts: each block of 8 dword issues from a
+// tuple gets *one* `s_waitcnt` ahead of it, never one per dword. The
+// schedule below pins exactly five s_waitcnt lines in the kernel
+// body (lgkmcnt(1), lgkmcnt(0), vmcnt(8), vmcnt(0), and the trailing
+// vscnt flush), so any future regression that re-introduces a
+// per-dword `s_waitcnt lgkmcnt(N)` between the 8 `ds_store_b32`s
+// will surface here.
 // CHECK-LABEL: wave_two_tuple_loads_overlap:
 func.func @wave_two_tuple_loads_overlap(%a_in: !wave.ptr<i32, #wave.global>,
                                         %b_in: !wave.ptr<i32, #wave.global>)
@@ -201,15 +210,21 @@ func.func @wave_two_tuple_loads_overlap(%a_in: !wave.ptr<i32, #wave.global>,
   %c256v = wave.splat %c256 : i32 -> !wave.simd<i32, 32>
   %slot_b_off = wave.binary "addi" %lane, %c256v : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
   %slot_b = wave.ptr_add %lds, %slot_b_off : !wave.ptr<i32, #wave.shared>, !wave.simd<i32, 32> -> !wave.simd<!wave.ptr<i32, #wave.shared>, 32>
-  // CHECK: global_load_b32
-  // CHECK: global_load_b32
+  // CHECK: s_waitcnt lgkmcnt(1)
+  // CHECK-NEXT: global_load_b32 {{v[0-9]+, v[0-9]+, s\[6:7\]$}}
+  // CHECK-COUNT-7: global_load_b32 {{.*}} s[6:7] offset
+  // CHECK-NEXT: s_waitcnt lgkmcnt(0)
+  // CHECK-NEXT: global_load_b32 {{v[0-9]+, v[0-9]+, s\[8:9\]$}}
+  // CHECK-COUNT-7: global_load_b32 {{.*}} s[8:9] offset
+  // CHECK-NEXT: s_waitcnt vmcnt(8)
   %a_regs, %a_tok = wave.load %ap : (!wave.simd<!wave.ptr<i32, #wave.global>, 32>) -> (!wave.simd<vector<8xi32>, 32>, !wave.mem.token)
   %b_regs, %b_tok = wave.load %bp : (!wave.simd<!wave.ptr<i32, #wave.global>, 32>) -> (!wave.simd<vector<8xi32>, 32>, !wave.mem.token)
-  // CHECK: s_waitcnt vmcnt(8)
-  // CHECK: ds_store_b32
+  // CHECK-NEXT: ds_store_b32 {{v[0-9]+, v[0-9]+$}}
+  // CHECK-COUNT-7: ds_store_b32 {{v[0-9]+, v[0-9]+}} offset
+  // CHECK-NEXT: s_waitcnt vmcnt(0)
   %a_st = wave.store %a_regs -> %slot_a after %a_tok : (!wave.simd<vector<8xi32>, 32>, !wave.simd<!wave.ptr<i32, #wave.shared>, 32>, !wave.mem.token) -> !wave.mem.token
-  // CHECK: s_waitcnt vmcnt(0)
-  // CHECK: ds_store_b32
+  // CHECK-NEXT: ds_store_b32 {{v[0-9]+, v[0-9]+$}}
+  // CHECK-COUNT-7: ds_store_b32 {{v[0-9]+, v[0-9]+}} offset
   %b_st = wave.store %b_regs -> %slot_b after %b_tok : (!wave.simd<vector<8xi32>, 32>, !wave.simd<!wave.ptr<i32, #wave.shared>, 32>, !wave.mem.token) -> !wave.mem.token
   return
 }
