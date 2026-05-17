@@ -364,6 +364,8 @@ private:
       return llvm::AMDGPU::EXEC_LO;
     if (name == "null")
       return llvm::AMDGPU::SGPR_NULL;
+    if (name == "vcc_lo")
+      return llvm::AMDGPU::VCC_LO;
     llvm_unreachable("unknown physical register name");
   }
 
@@ -618,6 +620,125 @@ private:
                     {toMCOperand(op.getResult(0)),
                      toMCOperand(op.getOperand(0)),
                      toMCOperand(op.getOperand(1))});
+    if (isa<wavemachine::SAddU64Op>(op)) {
+      // Carry-chain: `s_add_u32 lo` sets SCC; `s_addc_u32 hi` consumes
+      // and re-sets it. Component splits go through the SGPR helper.
+      Value res = op.getResult(0);
+      Value lhs = op.getOperand(0);
+      Value rhs = op.getOperand(1);
+      if (failed(emitMC(llvm::AMDGPU::S_ADD_U32_gfx11,
+                        {toMCSGPRComponent(res, 0), toMCSGPRComponent(lhs, 0),
+                         toMCSGPRComponent(rhs, 0)})))
+        return failure();
+      return emitMC(llvm::AMDGPU::S_ADDC_U32_gfx11,
+                    {toMCSGPRComponent(res, 1), toMCSGPRComponent(lhs, 1),
+                     toMCSGPRComponent(rhs, 1)});
+    }
+    if (isa<wavemachine::VAddU64Op>(op)) {
+      // wave32 carry register: vcc_lo. Documented constraint that
+      // nothing else clobbers it across this pair.
+      Value res = op.getResult(0);
+      Value lhs = op.getOperand(0);
+      Value rhs = op.getOperand(1);
+      llvm::MCOperand vccLo =
+          llvm::MCOperand::createReg(namedPhysReg("vcc_lo"));
+      llvm::MCOperand clamp = llvm::MCOperand::createImm(0);
+      if (failed(emitMC(llvm::AMDGPU::V_ADD_CO_U32_e64_gfx11,
+                        {toMCVGPRComponent(res, 0), vccLo,
+                         toMCVGPRComponent(lhs, 0), toMCVGPRComponent(rhs, 0),
+                         clamp})))
+        return failure();
+      return emitMC(llvm::AMDGPU::V_ADD_CO_CI_U32_e64_gfx11,
+                    {toMCVGPRComponent(res, 1), vccLo,
+                     toMCVGPRComponent(lhs, 1), toMCVGPRComponent(rhs, 1),
+                     vccLo, clamp});
+    }
+    if (isa<wavemachine::SMulU64Op>(op)) {
+      // 64-bit mul-low expanded as the canonical four-mul, two-add
+      // sequence:
+      //   r_lo = a_lo * b_lo
+      //   r_hi = mul_hi(a_lo, b_lo)
+      //   r_hi += a_lo * b_hi    (scratch holds the cross product)
+      //   r_hi += a_hi * b_lo
+      // SCC from each s_add_i32 is dead.
+      Value res = op.getResult(0);
+      Value scratch = op.getResult(1);
+      Value lhs = op.getOperand(0);
+      Value rhs = op.getOperand(1);
+      if (failed(emitMC(llvm::AMDGPU::S_MUL_I32_gfx11,
+                        {toMCSGPRComponent(res, 0), toMCSGPRComponent(lhs, 0),
+                         toMCSGPRComponent(rhs, 0)})) ||
+          failed(emitMC(llvm::AMDGPU::S_MUL_HI_U32_gfx11,
+                        {toMCSGPRComponent(res, 1), toMCSGPRComponent(lhs, 0),
+                         toMCSGPRComponent(rhs, 0)})) ||
+          failed(emitMC(llvm::AMDGPU::S_MUL_I32_gfx11,
+                        {toMCOperand(scratch), toMCSGPRComponent(lhs, 0),
+                         toMCSGPRComponent(rhs, 1)})) ||
+          failed(emitMC(llvm::AMDGPU::S_ADD_I32_gfx11,
+                        {toMCSGPRComponent(res, 1), toMCSGPRComponent(res, 1),
+                         toMCOperand(scratch)})) ||
+          failed(emitMC(llvm::AMDGPU::S_MUL_I32_gfx11,
+                        {toMCOperand(scratch), toMCSGPRComponent(lhs, 1),
+                         toMCSGPRComponent(rhs, 0)})))
+        return failure();
+      return emitMC(llvm::AMDGPU::S_ADD_I32_gfx11,
+                    {toMCSGPRComponent(res, 1), toMCSGPRComponent(res, 1),
+                     toMCOperand(scratch)});
+    }
+    if (isa<wavemachine::VMulU64Op>(op)) {
+      // Vector mirror of s_mul_u64. v_add_u32 (no-carry) chains the
+      // cross-products into the high half.
+      Value res = op.getResult(0);
+      Value scratch = op.getResult(1);
+      Value lhs = op.getOperand(0);
+      Value rhs = op.getOperand(1);
+      if (failed(emitMC(llvm::AMDGPU::V_MUL_LO_U32_e64_gfx11,
+                        {toMCVGPRComponent(res, 0), toMCVGPRComponent(lhs, 0),
+                         toMCVGPRComponent(rhs, 0)})) ||
+          failed(emitMC(llvm::AMDGPU::V_MUL_HI_U32_e64_gfx11,
+                        {toMCVGPRComponent(res, 1), toMCVGPRComponent(lhs, 0),
+                         toMCVGPRComponent(rhs, 0)})) ||
+          failed(emitMC(llvm::AMDGPU::V_MUL_LO_U32_e64_gfx11,
+                        {toMCOperand(scratch), toMCVGPRComponent(lhs, 0),
+                         toMCVGPRComponent(rhs, 1)})) ||
+          failed(emitMC(llvm::AMDGPU::V_ADD_NC_U32_e32_gfx11,
+                        {toMCVGPRComponent(res, 1), toMCVGPRComponent(res, 1),
+                         toMCOperand(scratch)})) ||
+          failed(emitMC(llvm::AMDGPU::V_MUL_LO_U32_e64_gfx11,
+                        {toMCOperand(scratch), toMCVGPRComponent(lhs, 1),
+                         toMCVGPRComponent(rhs, 0)})))
+        return failure();
+      return emitMC(llvm::AMDGPU::V_ADD_NC_U32_e32_gfx11,
+                    {toMCVGPRComponent(res, 1), toMCVGPRComponent(res, 1),
+                     toMCOperand(scratch)});
+    }
+    if (isa<wavemachine::SLshlB64Op>(op))
+      // Hardware reads only the low 32 bits of the shift amount; pass
+      // the low component of the 2-wide shift operand.
+      return emitMC(llvm::AMDGPU::S_LSHL_B64_gfx11,
+                    {toMCOperand(op.getResult(0)),
+                     toMCOperand(op.getOperand(0)),
+                     toMCSGPRComponent(op.getOperand(1), 0)});
+    if (isa<wavemachine::VLshlrevB64Op>(op))
+      return emitMC(llvm::AMDGPU::V_LSHLREV_B64_e64_gfx11,
+                    {toMCOperand(op.getResult(0)),
+                     toMCVGPRComponent(op.getOperand(0), 0),
+                     toMCOperand(op.getOperand(1))});
+    if (isa<wavemachine::SMovB64ImmOp>(op)) {
+      // Lift a 64-bit immediate into an SGPR pair: low half then high.
+      int64_t value = op.getAttrOfType<IntegerAttr>("value").getInt();
+      Value res = op.getResult(0);
+      if (failed(emitMC(llvm::AMDGPU::S_MOV_B32_gfx11,
+                        {toMCSGPRComponent(res, 0),
+                         llvm::MCOperand::createImm(value & 0xffffffff)})))
+        return failure();
+      return emitMC(
+          llvm::AMDGPU::S_MOV_B32_gfx11,
+          {toMCSGPRComponent(res, 1),
+           llvm::MCOperand::createImm(
+               static_cast<int64_t>(static_cast<uint64_t>(value) >> 32) &
+               0xffffffff)});
+    }
     if (isa<wavemachine::SCmpLtI32Op>(op))
       return emitMC(
           llvm::AMDGPU::S_CMP_LT_I32_gfx11,

@@ -185,13 +185,24 @@ private:
 
   unsigned pointerBaseWidth(Type type) { return isBufferPointer(type) ? 4 : 2; }
 
+  // Register-tuple width for a non-pointer arg type: round the element
+  // bit-width up to whole 32-bit dwords. i32 -> 1, i64 -> 2.
+  unsigned nonPointerArgWidth(Type type) {
+    Type elt = type;
+    if (auto simd = dyn_cast<SimdType>(type))
+      elt = simd.getElementType();
+    if (elt.isIntOrFloat())
+      return (elt.getIntOrFloatBitWidth() + 31) / 32;
+    return 1;
+  }
+
   void materializeArgument(BlockArgument arg, size_t index) {
     Type type = arg.getType();
     bool isPtr = isa<PtrType>(type);
     wavemachine::RegClass regClass = isa<SimdType>(type)
                                          ? wavemachine::RegClass::VGPR
                                          : wavemachine::RegClass::SGPR;
-    unsigned width = isPtr ? pointerBaseWidth(type) : 1;
+    unsigned width = isPtr ? pointerBaseWidth(type) : nonPointerArgWidth(type);
     Operation *argOp = createWMOp(
         builder, func.getLoc(), "arg", {},
         getRegType(func.getContext(), regClass, width),
@@ -278,6 +289,19 @@ private:
   }
 
   LogicalResult selectConstant(arith::ConstantIntOp op) {
+    unsigned bits = op.getType().getIntOrFloatBitWidth();
+    if (bits == 64) {
+      // i64 constants land in an SGPR pair; the asm printer expands
+      // them into two `s_mov_b32` instructions for the halves.
+      Operation *mov = createWMOp(
+          builder, op.getLoc(), "s_mov_b64_imm", {},
+          getRegType(op.getContext(), wavemachine::RegClass::SGPR, /*w=*/2),
+          {builder.getNamedAttr("value",
+                                builder.getI64IntegerAttr(op.value()))});
+      values[op.getResult()] = mov->getResult(0);
+      eraseIfTopLevel(op);
+      return success();
+    }
     values[op.getResult()] = createImm(builder, op.getLoc(), op.value());
     eraseIfTopLevel(op);
     return success();
@@ -381,19 +405,7 @@ private:
     return cast<IntegerType>(type).getWidth();
   }
 
-  // Common shape check across the new width-independent arith ops:
-  // require i32 today, fail with a clear diagnostic for anything else.
-  LogicalResult requireI32(Operation *op, Type resultTy, StringRef mnemonic) {
-    unsigned bits = waveArithElementBits(resultTy);
-    if (bits == 32)
-      return success();
-    return op->emitError("WaveMachine backend only supports i32 wave.")
-           << mnemonic << " today (got i" << bits << ")";
-  }
-
-  LogicalResult selectAddi(AddiOp op) {
-    if (failed(requireI32(op, op.getResult().getType(), "addi")))
-      return failure();
+  LogicalResult selectAddiI32(AddiOp op) {
     Value lhs = expect(op.getLhs(), op);
     Value rhs = expect(op.getRhs(), op);
     if (!isa<SimdType>(op.getResult().getType())) {
@@ -412,9 +424,37 @@ private:
     return success();
   }
 
-  LogicalResult selectMuli(MuliOp op) {
-    if (failed(requireI32(op, op.getResult().getType(), "muli")))
-      return failure();
+  LogicalResult selectAddiI64(AddiOp op) {
+    bool lhsSimd = isa<SimdType>(op.getLhs().getType());
+    bool rhsSimd = isa<SimdType>(op.getRhs().getType());
+    if (lhsSimd != rhsSimd)
+      return op.emitOpError(
+          "i64 wave.addi with mixed uniform/SIMD operands is not yet "
+          "supported");
+    Value lhs = expect(op.getLhs(), op);
+    Value rhs = expect(op.getRhs(), op);
+    StringRef opcode = lhsSimd ? "v_add_u64" : "s_add_u64";
+    wavemachine::RegClass cls =
+        lhsSimd ? wavemachine::RegClass::VGPR : wavemachine::RegClass::SGPR;
+    values[op.getResult()] =
+        createInstr(builder, op.getLoc(), opcode, {lhs, rhs},
+                    getRegType(op.getContext(), cls, /*width=*/2));
+    eraseIfTopLevel(op);
+    return success();
+  }
+
+  LogicalResult selectAddi(AddiOp op) {
+    unsigned bits = waveArithElementBits(op.getResult().getType());
+    if (bits == 32)
+      return selectAddiI32(op);
+    if (bits == 64)
+      return selectAddiI64(op);
+    return op.emitError(
+               "WaveMachine backend only supports i32 / i64 wave.addi (got i")
+           << bits << ")";
+  }
+
+  LogicalResult selectMuliI32(MuliOp op) {
     Value lhs = expect(op.getLhs(), op);
     Value rhs = expect(op.getRhs(), op);
     if (!isa<SimdType>(op.getResult().getType())) {
@@ -432,9 +472,41 @@ private:
     return success();
   }
 
-  LogicalResult selectShli(ShliOp op) {
-    if (failed(requireI32(op, op.getResult().getType(), "shli")))
-      return failure();
+  LogicalResult selectMuliI64(MuliOp op) {
+    bool lhsSimd = isa<SimdType>(op.getLhs().getType());
+    bool rhsSimd = isa<SimdType>(op.getRhs().getType());
+    if (lhsSimd != rhsSimd)
+      return op.emitOpError(
+          "i64 wave.muli with mixed uniform/SIMD operands is not yet "
+          "supported");
+    Value lhs = expect(op.getLhs(), op);
+    Value rhs = expect(op.getRhs(), op);
+    StringRef opcode = lhsSimd ? "v_mul_u64" : "s_mul_u64";
+    wavemachine::RegClass cls =
+        lhsSimd ? wavemachine::RegClass::VGPR : wavemachine::RegClass::SGPR;
+    // Multi-result op: [0] is the i64 product, [1] is a scratch
+    // register the asm-printer uses for cross-product temporaries.
+    Operation *mul =
+        createWMOp(builder, op.getLoc(), opcode, {lhs, rhs},
+                   {getRegType(op.getContext(), cls, /*width=*/2),
+                    getRegType(op.getContext(), cls, /*width=*/1)});
+    values[op.getResult()] = mul->getResult(0);
+    eraseIfTopLevel(op);
+    return success();
+  }
+
+  LogicalResult selectMuli(MuliOp op) {
+    unsigned bits = waveArithElementBits(op.getResult().getType());
+    if (bits == 32)
+      return selectMuliI32(op);
+    if (bits == 64)
+      return selectMuliI64(op);
+    return op.emitError(
+               "WaveMachine backend only supports i32 / i64 wave.muli (got i")
+           << bits << ")";
+  }
+
+  LogicalResult selectShliI32(ShliOp op) {
     Value lhs = expect(op.getLhs(), op);
     Value rhs = expect(op.getRhs(), op);
     if (!isa<SimdType>(op.getResult().getType())) {
@@ -451,6 +523,41 @@ private:
                     getRegType(op.getContext(), wavemachine::RegClass::VGPR));
     eraseIfTopLevel(op);
     return success();
+  }
+
+  LogicalResult selectShliI64(ShliOp op) {
+    bool lhsSimd = isa<SimdType>(op.getLhs().getType());
+    bool rhsSimd = isa<SimdType>(op.getRhs().getType());
+    if (lhsSimd != rhsSimd)
+      return op.emitOpError(
+          "i64 wave.shli with mixed uniform/SIMD operands is not yet "
+          "supported");
+    Value lhs = expect(op.getLhs(), op);
+    Value rhs = expect(op.getRhs(), op);
+    StringRef opcode = lhsSimd ? "v_lshlrev_b64" : "s_lshl_b64";
+    wavemachine::RegClass cls =
+        lhsSimd ? wavemachine::RegClass::VGPR : wavemachine::RegClass::SGPR;
+    // s_lshl_b64 order is (value, shift); v_lshlrev_b64 (rev) flips it
+    // to (shift, value). Both extract the low 32 of the i64 shift
+    // amount inside the asm printer.
+    SmallVector<Value> operands =
+        lhsSimd ? SmallVector<Value>{rhs, lhs} : SmallVector<Value>{lhs, rhs};
+    values[op.getResult()] =
+        createInstr(builder, op.getLoc(), opcode, operands,
+                    getRegType(op.getContext(), cls, /*width=*/2));
+    eraseIfTopLevel(op);
+    return success();
+  }
+
+  LogicalResult selectShli(ShliOp op) {
+    unsigned bits = waveArithElementBits(op.getResult().getType());
+    if (bits == 32)
+      return selectShliI32(op);
+    if (bits == 64)
+      return selectShliI64(op);
+    return op.emitError(
+               "WaveMachine backend only supports i32 / i64 wave.shli (got i")
+           << bits << ")";
   }
 
   // Materialize an SGPR or immediate value into a fresh VGPR so it can be

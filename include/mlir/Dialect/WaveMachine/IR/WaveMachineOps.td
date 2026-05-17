@@ -55,6 +55,12 @@ def WaveMachine_VGPR1
                  "::llvm::cast<::mlir::wavemachine::RegType>($_self).getWidth() == 1">,
            "WaveMachine scalar VGPR register">;
 
+def WaveMachine_VGPR2
+    : Type<CPred<"::llvm::isa<::mlir::wavemachine::RegType>($_self) && "
+                 "::llvm::cast<::mlir::wavemachine::RegType>($_self).getRegClass() == ::mlir::wavemachine::RegClass::VGPR && "
+                 "::llvm::cast<::mlir::wavemachine::RegType>($_self).getWidth() == 2">,
+           "WaveMachine VGPR pair register">;
+
 // SCC is the status condition code: a 1-bit hardware register implicitly
 // written by scalar ALU ops (s_cmp_*, s_add_i32 carry-out, ...) and read
 // by s_cbranch_scc0/1. There is exactly one physical SCC, so the
@@ -524,6 +530,78 @@ def WaveMachine_SLshlB32Op : WaveMachine_Op<"s_lshl_b32", [Pure]> {
                        WaveMachine_SGPR1OrImm:$rhs);
   let results = (outs WaveMachine_SGPR1:$result);
   let assemblyFormat = "$lhs `,` $rhs attr-dict `:` functional-type(operands, results)";
+}
+
+// 64-bit scalar add. The asm printer expands this into the carry-chain
+// pair `s_add_u32` (low) + `s_addc_u32` (high). The intermediate SCC is
+// consumed by the second instruction and discarded after.
+def WaveMachine_SAddU64Op : WaveMachine_Op<"s_add_u64", [Pure]> {
+  let summary = "scalar 64-bit unsigned add";
+  let arguments = (ins WaveMachine_SGPR2:$lhs, WaveMachine_SGPR2:$rhs);
+  let results = (outs WaveMachine_SGPR2:$result);
+  let assemblyFormat = "$lhs `,` $rhs attr-dict `:` functional-type(operands, results)";
+}
+
+// 64-bit vector add. Expanded to `v_add_co_u32` (low) +
+// `v_addc_co_u32` (high) with the carry threaded through `vcc_lo` on
+// wave32. Documented constraint: vcc_lo must not be live across the
+// pair -- our offset-math path doesn't touch it, so we leave that to
+// the producer to enforce.
+def WaveMachine_VAddU64Op : WaveMachine_Op<"v_add_u64", [Pure]> {
+  let summary = "vector 64-bit unsigned add";
+  let arguments = (ins WaveMachine_VGPR2:$lhs, WaveMachine_VGPR2:$rhs);
+  let results = (outs WaveMachine_VGPR2:$result);
+  let assemblyFormat = "$lhs `,` $rhs attr-dict `:` functional-type(operands, results)";
+}
+
+// 64-bit unsigned multiply (low half). gfx11 has no native u64 mul, so
+// the asm printer expands this into the four-mul-plus-two-add canonical
+// sequence using the `$scratch` SGPR for the cross-product temporaries
+// (a_lo*b_hi and a_hi*b_lo). `$scratch` is a real allocated register
+// that's dead after the op; the regalloc just sees one extra short-
+// lived live range per op.
+def WaveMachine_SMulU64Op : WaveMachine_Op<"s_mul_u64", [Pure]> {
+  let summary = "scalar 64-bit unsigned multiply (low half)";
+  let arguments = (ins WaveMachine_SGPR2:$lhs, WaveMachine_SGPR2:$rhs);
+  let results = (outs WaveMachine_SGPR2:$result, WaveMachine_SGPR1:$scratch);
+  let assemblyFormat = "$lhs `,` $rhs attr-dict `:` functional-type(operands, results)";
+}
+
+def WaveMachine_VMulU64Op : WaveMachine_Op<"v_mul_u64", [Pure]> {
+  let summary = "vector 64-bit unsigned multiply (low half)";
+  let arguments = (ins WaveMachine_VGPR2:$lhs, WaveMachine_VGPR2:$rhs);
+  let results = (outs WaveMachine_VGPR2:$result, WaveMachine_VGPR1:$scratch);
+  let assemblyFormat = "$lhs `,` $rhs attr-dict `:` functional-type(operands, results)";
+}
+
+// 64-bit logical left shift. Single-instruction on gfx11 in both the
+// scalar and vector worlds. The shift operand is i64 to match
+// `wave.shli`'s "operands have the same type" rule -- the printer
+// extracts the low 32 bits since that's what the hardware reads.
+def WaveMachine_SLshlB64Op : WaveMachine_Op<"s_lshl_b64", [Pure]> {
+  let summary = "scalar 64-bit logical left shift";
+  let arguments = (ins WaveMachine_SGPR2:$lhs, WaveMachine_SGPR2:$shift);
+  let results = (outs WaveMachine_SGPR2:$result);
+  let assemblyFormat = "$lhs `,` $shift attr-dict `:` functional-type(operands, results)";
+}
+
+def WaveMachine_VLshlrevB64Op : WaveMachine_Op<"v_lshlrev_b64", [Pure]> {
+  let summary = "vector 64-bit logical left shift";
+  let arguments = (ins WaveMachine_VGPR2:$shift,
+                       WaveMachine_VGPR2:$value);
+  let results = (outs WaveMachine_VGPR2:$result);
+  let assemblyFormat = "$shift `,` $value attr-dict `:` functional-type(operands, results)";
+}
+
+// Materializes a 64-bit immediate as a 2-wide SGPR via two
+// `s_mov_b32` instructions for the low and high halves. Used by the
+// selector to lift `arith.constant : i64` into the 2-wide register
+// world the i64 ops consume.
+def WaveMachine_SMovB64ImmOp : WaveMachine_Op<"s_mov_b64_imm", [Pure]> {
+  let summary = "materialize a 64-bit immediate into an SGPR pair";
+  let arguments = (ins I64Attr:$value);
+  let results = (outs WaveMachine_SGPR2:$result);
+  let assemblyFormat = "$value attr-dict `:` type($result)";
 }
 
 def WaveMachine_SCmpLtI32Op : WaveMachine_Op<"s_cmp_lt_i32", [Pure]> {
