@@ -80,6 +80,7 @@ set(WAVE_LLVM_PROJECT_BUILD_DIR
 set(LLVM_MAIN_SRC_DIR "${WAVE_LLVM_PROJECT_SRC_DIR}/llvm")
 set(LLVM_BINARY_DIR "${WAVE_LLVM_PROJECT_BUILD_DIR}")
 
+add_subdirectory(third_party)
 add_subdirectory(include)
 add_subdirectory(lib)
 add_subdirectory(runtime)

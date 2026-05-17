@@ -1,6 +1,10 @@
 default_language_version:
   python: python3.12
 
+# Vendored upstream code is shipped verbatim; project-level formatting,
+# complexity, and ASCII-only rules don't apply to it.
+exclude: '^third_party/'
+
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v6.0.0
