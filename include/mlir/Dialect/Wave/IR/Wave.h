@@ -10,10 +10,13 @@
 #define MLIR_DIALECT_WAVE_IR_WAVE_H_
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/Wave/IR/WaveSymbols.h"
 #include "mlir/IR/Dialect.h"
 #include "mlir/IR/OpDefinition.h"
 #include "mlir/Interfaces/ControlFlowInterfaces.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
+
+#include <memory>
 
 #include "mlir/Dialect/Wave/IR/WaveOpsDialect.h.inc"
 

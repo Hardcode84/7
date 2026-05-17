@@ -110,6 +110,7 @@ tools = [
     ToolSubst("count", unresolved="fatal"),
     ToolSubst("not", unresolved="fatal"),
     ToolSubst("wave-opt", unresolved="fatal"),
+    ToolSubst("wave-symbols-test", unresolved="fatal"),
     ToolSubst("wave-translate", unresolved="fatal"),
     ToolSubst("llvm-mc", unresolved="ignore"),
     ToolSubst("ld.lld", unresolved="ignore"),

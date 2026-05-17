@@ -16,12 +16,16 @@
 #include "mlir/IR/DialectImplementation.h"
 #include "llvm/ADT/TypeSwitch.h"
 
+#include "ixsimpl.h"
+
 using namespace mlir;
 using namespace mlir::wave;
 
 #include "mlir/Dialect/Wave/IR/WaveOpsDialect.cpp.inc"
 
 void WaveDialect::initialize() {
+  if (!symbolStore)
+    symbolStore = std::make_unique<sym::Store>();
   registerAttributes();
   registerTypes();
   addOperations<
@@ -33,6 +37,30 @@ void WaveDialect::initialize() {
   // here keeps the dialect honest if anyone reaches for it before the
   // extension has run.
   declarePromisedInterface<ConvertToLLVMPatternInterface, WaveDialect>();
+}
+
+sym::Store &WaveDialect::getSymbolStore() {
+  assert(symbolStore && "wave symbolic store must be initialized");
+  return *symbolStore;
+}
+
+const sym::Store &WaveDialect::getSymbolStore() const {
+  assert(symbolStore && "wave symbolic store must be initialized");
+  return *symbolStore;
+}
+
+LogicalResult ExprAttr::verify(function_ref<InFlightDiagnostic()> emitError,
+                               sym::ExprHandle value) {
+  if (!value || !ixs_node_is_expr(value.raw()))
+    return emitError() << "expected expression handle";
+  return success();
+}
+
+LogicalResult PredAttr::verify(function_ref<InFlightDiagnostic()> emitError,
+                               sym::PredHandle value) {
+  if (!value || !ixs_node_is_pred(value.raw()))
+    return emitError() << "expected predicate handle";
+  return success();
 }
 
 void WaveDialect::registerAttributes() {

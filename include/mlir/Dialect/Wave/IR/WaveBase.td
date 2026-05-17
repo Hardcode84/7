@@ -34,6 +34,16 @@ def Wave_Dialect : Dialect {
   let extraClassDeclaration = [{
     void registerAttributes();
     void registerTypes();
+
+    /// Dialect-owned symbolic store: every #wave.expr / #wave.pred attribute
+    /// holds a hash-consed handle into this store. Lives for the dialect's
+    /// lifetime (i.e. the MLIRContext's), so handles round-trip across
+    /// passes by pointer.
+    sym::Store &getSymbolStore();
+    const sym::Store &getSymbolStore() const;
+
+  private:
+    std::unique_ptr<sym::Store> symbolStore;
   }];
 }
 
