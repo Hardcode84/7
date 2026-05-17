@@ -44,3 +44,28 @@ func.func @wave_ops(%pred: i1, %value: i32, %out: !wave.ptr<i32, #wave.global>) 
 
   func.return %first : i32
 }
+
+// CHECK-LABEL: func.func @wave_index_expr
+func.func @wave_index_expr(%lane: !wave.simd<i32, 32>,
+                           %k: index,
+                           %wgid: i32,
+                           %buffer: !wave.ptr<i32, #wave.global>) {
+  // Uniform-only bindings collapse to !wave.index (no width).
+  // CHECK: wave.index_expr <"K + wgid_y"> ["K", "wgid_y"](%{{.*}}, %{{.*}}) : (index, i32) -> !wave.index
+  %u = wave.index_expr #wave.expr<"K + wgid_y"> ["K", "wgid_y"] (%k, %wgid) : (index, i32) -> !wave.index
+
+  // Lane-varying binding pins the result to !wave.index<32>. The printer
+  // emits the ixsimpl canonical form of the expr text (terms reordered).
+  // CHECK: wave.index_expr <"K + 4*lid"> ["K", "lid"](%{{.*}}, %{{.*}}) : (index, !wave.simd<i32, 32>) -> !wave.index<32>
+  %v = wave.index_expr #wave.expr<"4*lid + K"> ["K", "lid"] (%k, %lane) : (index, !wave.simd<i32, 32>) -> !wave.index<32>
+
+  // Constant expression: zero bindings.
+  // CHECK: wave.index_expr <"42"> []() : () -> !wave.index
+  %c = wave.index_expr #wave.expr<"42"> [] () : () -> !wave.index
+
+  // The lane-varying index feeds straight into ptr_add as the offset.
+  // CHECK: wave.ptr_add {{.*}} : !wave.ptr<i32, #wave.global>, !wave.index<32> -> !wave.simd<!wave.ptr<i32, #wave.global>, 32>
+  %ptrs = wave.ptr_add %buffer, %v : !wave.ptr<i32, #wave.global>, !wave.index<32> -> !wave.simd<!wave.ptr<i32, #wave.global>, 32>
+
+  func.return
+}

@@ -9,6 +9,7 @@
 #ifndef MLIR_DIALECT_WAVE_IR_WAVEOPS_TD
 #define MLIR_DIALECT_WAVE_IR_WAVEOPS_TD
 
+include "mlir/Dialect/Wave/IR/WaveAttrs.td"
 include "mlir/Dialect/Wave/IR/WaveBase.td"
 include "mlir/Dialect/Wave/IR/WaveTypes.td"
 
@@ -232,6 +233,36 @@ def Wave_PtrAddOp : Wave_Op<"ptr_add", [Pure]> {
   let arguments = (ins AnyType:$base, AnyType:$offset);
   let results = (outs AnyType:$result);
   let assemblyFormat = "$base `,` $offset attr-dict `:` type($base) `,` type($offset) `->` type($result)";
+  let hasVerifier = 1;
+}
+
+def Wave_IndexExprOp : Wave_Op<"index_expr", [Pure]> {
+  let summary = "materialize a symbolic offset as a wave index value";
+  let description = [{
+    Produces a `!wave.index` value defined by a symbolic expression and a
+    list of bindings. Each binding pairs an SSA operand with the name of
+    a free symbol referenced by the expression. The free-symbol set of
+    `$expr` must equal the set of `$names` (bijective).
+
+    Binding operand types are restricted to either wave-uniform scalars
+    (`index`, signless integer, `!wave.index` with no width) or
+    lane-varying SIMD values (`!wave.simd<i32, W>`, `!wave.index<W>`).
+    The result width is the unique non-zero wave width across the
+    lane-varying bindings; with no lane-varying binding the result is
+    `!wave.index` (uniform).
+
+    The op is pure: equal `$expr` (pointer-equal hash-consed handle) and
+    equal `$bindings` / `$names` CSE.
+  }];
+
+  let arguments = (ins Wave_ExprAttr:$expr,
+                       StrArrayAttr:$names,
+                       Variadic<AnyType>:$bindings);
+  let results = (outs Wave_Index:$result);
+  let assemblyFormat = [{
+    $expr $names `(` $bindings `)` attr-dict
+    `:` functional-type($bindings, $result)
+  }];
   let hasVerifier = 1;
 }
 

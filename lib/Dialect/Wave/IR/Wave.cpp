@@ -14,6 +14,7 @@
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/DialectImplementation.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/TypeSwitch.h"
 
 #include "ixsimpl.h"
@@ -60,6 +61,14 @@ LogicalResult PredAttr::verify(function_ref<InFlightDiagnostic()> emitError,
                                sym::PredHandle value) {
   if (!value || !ixs_node_is_pred(value.raw()))
     return emitError() << "expected predicate handle";
+  return success();
+}
+
+LogicalResult
+WaveIndexType::verify(function_ref<InFlightDiagnostic()> emitError,
+                      int64_t width) {
+  if (width != 0 && width != 32 && width != 64)
+    return emitError() << "wave index width must be 0 (uniform), 32, or 64";
   return success();
 }
 
@@ -299,7 +308,9 @@ verifyPtrAddOffset(Type offsetType,
       return emitError("SIMD offset element type must be i32");
     return offsetSimd.getWidth();
   }
-  return emitError("offset must be index, integer, or i32 SIMD");
+  if (auto offsetIndex = dyn_cast<WaveIndexType>(offsetType))
+    return offsetIndex.getWidth();
+  return emitError("offset must be index, integer, i32 SIMD, or !wave.index");
 }
 
 // Check that `resultType` matches `pointerType` when both base and offset are
@@ -344,6 +355,105 @@ LogicalResult PtrAddOp::verify() {
   int64_t resultWidth = std::max<int64_t>(pointerWidth, *offsetWidth);
   return verifyPtrAddResult(getResult().getType(), base->pointerType,
                             resultWidth, emit);
+}
+
+// Classify an index_expr binding by its operand type. Returns 0 for
+// uniform scalars and a positive wave width for lane-varying bindings;
+// failure for any unsupported binding type.
+static FailureOr<int64_t> classifyIndexBinding(
+    Type type, function_ref<InFlightDiagnostic(const Twine &)> emitError) {
+  if (type.isIndex())
+    return int64_t{0};
+  if (auto intType = dyn_cast<IntegerType>(type)) {
+    if (!intType.isSignless())
+      return emitError("integer binding must be signless");
+    return int64_t{0};
+  }
+  if (auto indexType = dyn_cast<WaveIndexType>(type))
+    return indexType.getWidth();
+  if (auto simdType = dyn_cast<SimdType>(type)) {
+    if (!simdType.getElementType().isInteger(32))
+      return emitError("SIMD binding element type must be i32");
+    return simdType.getWidth();
+  }
+  return emitError("binding must be index, signless integer, !wave.index, or "
+                   "!wave.simd<i32, W>");
+}
+
+// Bijection check: every entry in `names` is a non-empty unique string
+// that names a free symbol of `freeSymbols`, and every member of
+// `freeSymbols` is covered. Successful return populates `bindingNames`.
+static LogicalResult verifyIndexExprNames(
+    ArrayAttr names, const llvm::DenseSet<StringRef> &freeSymbols,
+    llvm::DenseSet<StringRef> &bindingNames,
+    function_ref<InFlightDiagnostic(const Twine &)> emitError) {
+  for (Attribute attr : names) {
+    auto str = dyn_cast<StringAttr>(attr);
+    if (!str)
+      return emitError("names entries must be strings");
+    StringRef name = str.getValue();
+    if (name.empty())
+      return emitError("binding name must be non-empty");
+    if (!bindingNames.insert(name).second)
+      return emitError("duplicate binding name '" + name + "'");
+    if (!freeSymbols.count(name))
+      return emitError("binding name '" + name +
+                       "' is not a free symbol of the expression");
+  }
+  for (StringRef name : freeSymbols)
+    if (!bindingNames.count(name))
+      return emitError("free symbol '" + name + "' has no binding");
+  return success();
+}
+
+// Reduce binding types to the unique lane width (0 if all uniform).
+// Reports per-binding-type errors and lane-width conflicts.
+static FailureOr<int64_t> reduceIndexBindingWidth(
+    OperandRange bindings,
+    function_ref<InFlightDiagnostic(const Twine &)> emitError) {
+  int64_t laneWidth = 0;
+  for (Value binding : bindings) {
+    auto width = classifyIndexBinding(binding.getType(), emitError);
+    if (failed(width))
+      return failure();
+    if (*width == 0)
+      continue;
+    if (laneWidth != 0 && laneWidth != *width)
+      return emitError("conflicting lane-varying binding widths (" +
+                       Twine(laneWidth) + " vs " + Twine(*width) + ")");
+    laneWidth = *width;
+  }
+  return laneWidth;
+}
+
+LogicalResult IndexExprOp::verify() {
+  auto emit = [this](const Twine &msg) { return emitOpError(msg); };
+
+  ArrayAttr names = getNames();
+  OperandRange bindings = getBindings();
+  if (names.size() != bindings.size())
+    return emit("expected one name per binding (got ")
+           << names.size() << " names and " << bindings.size() << " bindings)";
+
+  // Hash-consed leaves may appear multiple times in the AST: dedupe.
+  llvm::DenseSet<StringRef> freeSymbols;
+  sym::walkSymbolNames(getExpr().getValue(),
+                       [&](StringRef name) { freeSymbols.insert(name); });
+
+  llvm::DenseSet<StringRef> bindingNames;
+  if (failed(verifyIndexExprNames(names, freeSymbols, bindingNames, emit)))
+    return failure();
+
+  auto laneWidth = reduceIndexBindingWidth(bindings, emit);
+  if (failed(laneWidth))
+    return failure();
+
+  auto resultType = cast<WaveIndexType>(getResult().getType());
+  if (resultType.getWidth() != *laneWidth)
+    return emit("result width ")
+           << resultType.getWidth() << " disagrees with binding lane width "
+           << *laneWidth;
+  return success();
 }
 
 #define GET_OP_CLASSES
