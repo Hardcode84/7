@@ -6,62 +6,14 @@
 //
 //===----------------------------------------------------------------------===//
 //
-// Token-based waitcnt insertion for WaveMachine IR.
-//
-// The pass tracks in-flight memory operations through SSA "memory tokens" as
-// described in `docs/AMDGPUExplicitWaveProgrammingModel.md` ("Memory Tokens").
-// Each token's identity is an SSA `Value`: a memory op's register result, its
-// explicit `!wavemachine.mem.token` result when it has one, or a block /
-// region argument that a branch propagates from one of those. Token-derivation
-// ops (`wavemachine.after`, `wavemachine.token_join`, `wavemachine.barrier`'s
-// deps) produce a fresh value-token whose drain position is the MIN of the
-// joined source positions.
-//
-// At each program point the lattice carries a sorted list of
-// `(value, counter, position)` entries, one per in-flight token. `position`
-// counts the *newer* same-counter issues queued behind that token:
-// `vmcnt(position)` is the exact wait that drains it. Per-counter "unknown"
-// sentinels (`value == nullptr`) cover tokens whose defining block does not
-// dominate the current program point.
-//
-// Transfer rules (per op):
-//   * memory-producing op: bump positions of *same-counter* tokens, then
-//     insert a fresh `(result-value, counter, 0)` entry for every
-//     memory-relevant result (register and explicit MemToken). The token's
-//     identity is the result `Value` itself, so a consumer reading that
-//     value finds its TokenState directly without any external map;
-//   * token-joining op (`wavemachine.after` / `wavemachine.token_join` /
-//     `wavemachine.barrier` with dependencies): the result value's
-//     TokenState is the per-counter MIN of the operand values' TokenStates.
-//     No new memory event is recorded;
-//   * consumer op: for each operand value, demand the wait its TokenState
-//     entry requires per counter. Aggregate per-counter requirements by
-//     MIN of positions (the tightest count that drains every required
-//     token), emit `s_waitcnt`/`s_waitcnt_vscnt` ahead of the op, and drop
-//     drained tokens from the lattice;
-//   * control-flow ops (`RegionBranchOpInterface`,
-//     `RegionBranchTerminatorOpInterface`, `BranchOpInterface`) pass
-//     operands to successors instead of reading them, so they do NOT
-//     consume tokens locally. The dataflow framework's block/region
-//     transfer hooks handle the operand-to-successor token remapping.
-//
-// CFG transfer rules (`visitBlockTransfer` /
-// `visitRegionBranchControlFlowTransfer`):
-//   * for every branch-operand -> successor-value pair, create a new
-//     TokenState keyed on the destination value, carrying the operand's
-//     position. This is the only way block args / region args get a
-//     position;
-//   * tokens whose defining block does not dominate the successor
-//     "escape" and collapse into a single per-counter unknown sentinel
-//     at the minimum escaping position;
-//   * merging two predecessor states takes the elementwise MIN over
-//     positions per `(counter, value)` pair. MIN is the tight bound:
-//     `vmcnt(N)` drains a token correctly on every path where the
-//     runtime position is at-or-above `N`, so the smallest position
-//     observed across paths is the safest static wait.
-//
-// `wavemachine.s_endpgm` implicitly waits `vscnt(0)` so the kernel does
-// not return with VMEM stores still in flight.
+// Token-based waitcnt insertion. Each in-flight memory op is named by its
+// SSA result Value (or nullptr for fire-and-forget stores). Lattice entry
+// is (value, counter, position): position counts newer same-counter issues
+// queued behind it, so `vmcnt(position)` is the exact drain. CFG joins
+// merge with MIN -- a wait larger than the path-minimum returns before
+// the token drains. Tokens whose def block doesn't dominate the successor
+// collapse to a per-counter nullptr sentinel at MIN of escaping positions.
+// `s_endpgm` forces `vscnt(0)` so VMEM stores don't leak past kernel exit.
 //
 //===----------------------------------------------------------------------===//
 
@@ -102,9 +54,7 @@ enum class Counter : unsigned { Vmem = 0, Lgkm = 1, Vscnt = 2 };
 static constexpr unsigned kNumCounters = 3;
 static constexpr unsigned kSaturatePosition = 63;
 
-// One reaching token entry. Sorted by (counter, id) to keep merge O(n)
-// and lookup O(log n). `id` is the SSA `Value` whose runtime ready-ness
-// this token tracks; the null Value is a per-counter "unknown" sentinel.
+// Null `id` is the per-counter unknown sentinel.
 struct Token {
   Value id;
   Counter counter;
@@ -123,7 +73,6 @@ static bool sameKey(const Token &a, const Token &b) {
   return a.counter == b.counter && a.id == b.id;
 }
 
-// Required wait per counter computed at a consumer op.
 struct WaitRequirement {
   std::optional<unsigned> vmcnt;
   std::optional<unsigned> lgkmcnt;
@@ -143,9 +92,7 @@ struct WaitRequirement {
     llvm_unreachable("bad counter");
   }
 
-  // The wait that satisfies all required tokens of `counter`. AMDGPU's
-  // `s_waitcnt cnt(N)` drains tokens whose position is >= N, so the
-  // tight bound is the MIN over required positions.
+  // MIN over required positions: `cnt(N)` drains everything at position >= N.
   void requireDrain(Counter counter, unsigned position) {
     auto &slot = slotFor(counter);
     if (!slot || position < *slot)
@@ -158,8 +105,7 @@ struct WaitRequirement {
 //===----------------------------------------------------------------------===//
 
 struct WaitState {
-  // Reaching tokens, sorted by (counter, id). Each (counter, id) pair
-  // appears at most once.
+  // Sorted by (counter, id); each (counter, id) appears at most once.
   SmallVector<Token, 4> tokens;
 
   bool operator==(const WaitState &rhs) const {
@@ -210,9 +156,7 @@ private:
 
 namespace lat {
 
-// Insert `tok` keeping `tokens` sorted; if a matching (counter, id) is
-// already present, take MIN of positions. Returns whether anything
-// changed.
+// On (counter, id) collision: take MIN of positions.
 static bool insertOrMin(SmallVectorImpl<Token> &tokens, Token tok) {
   auto it = llvm::lower_bound(tokens, tok, [](const Token &a, const Token &b) {
     return sortKey(a, b);
@@ -228,11 +172,8 @@ static bool insertOrMin(SmallVectorImpl<Token> &tokens, Token tok) {
   return true;
 }
 
-// Insert `tok` keeping `tokens` sorted; if a matching (counter, id) is
-// already present, replace the position with `tok.position` (used by
-// issuers, where the static op's re-issue across a back-edge resets
-// the position to zero rather than taking MIN). Returns whether
-// anything changed.
+// On collision: overwrite. Issuers reset to position 0 across back-edges
+// rather than taking MIN.
 static bool insertOrReplace(SmallVectorImpl<Token> &tokens, Token tok) {
   auto it = llvm::lower_bound(tokens, tok, [](const Token &a, const Token &b) {
     return sortKey(a, b);
@@ -248,8 +189,6 @@ static bool insertOrReplace(SmallVectorImpl<Token> &tokens, Token tok) {
   return true;
 }
 
-// Bump positions of every same-counter entry by `delta`, saturating
-// at `kSaturatePosition`.
 static void bumpCounter(SmallVectorImpl<Token> &tokens, Counter counter,
                         unsigned delta) {
   for (Token &t : tokens) {
@@ -259,9 +198,7 @@ static void bumpCounter(SmallVectorImpl<Token> &tokens, Counter counter,
   }
 }
 
-// Drop entries that an `s_waitcnt cnt(threshold)` for `counter` would
-// drain. AMDGPU semantics: positions strictly above the threshold drain
-// (positions <= threshold remain pending).
+// `cnt(threshold)` drains position >= threshold (positions < threshold stay).
 static void dropDrained(SmallVectorImpl<Token> &tokens, Counter counter,
                         unsigned threshold) {
   tokens.erase(std::remove_if(tokens.begin(), tokens.end(),
@@ -272,8 +209,6 @@ static void dropDrained(SmallVectorImpl<Token> &tokens, Counter counter,
                tokens.end());
 }
 
-// Drop entries with positions strictly greater than `threshold` for
-// any counter listed in `req`.
 static void applyWait(SmallVectorImpl<Token> &tokens,
                       const WaitRequirement &req) {
   if (req.vmcnt)
@@ -284,7 +219,6 @@ static void applyWait(SmallVectorImpl<Token> &tokens,
     dropDrained(tokens, Counter::Vscnt, *req.vscnt);
 }
 
-// Find a Token entry by (counter, id). Returns nullptr if not present.
 static const Token *find(ArrayRef<Token> tokens, Counter counter, Value id) {
   Token key{id, counter, 0};
   auto it = llvm::lower_bound(tokens, key, [](const Token &a, const Token &b) {
@@ -295,8 +229,6 @@ static const Token *find(ArrayRef<Token> tokens, Counter counter, Value id) {
   return &*it;
 }
 
-// The block that defines `id`'s value, or nullptr if `id` has no
-// owning block (e.g. anonymous tokens).
 static Block *definingBlock(Value id) {
   if (Operation *defOp = id.getDefiningOp())
     return defOp->getBlock();
@@ -305,12 +237,8 @@ static Block *definingBlock(Value id) {
   return nullptr;
 }
 
-// Concrete tokens whose defining block does not dominate `target`
-// "escape": they cannot be named at the target program point. Collapse
-// every escaping token into a per-counter unknown sentinel at the MIN
-// of the escaping positions (the tightest wait that would have drained
-// any of the originals). Idempotent: re-running collapses unknowns
-// already in place.
+// Token def-block not dominating `target` collapses to a per-counter
+// nullptr sentinel at MIN of escaping positions. Idempotent.
 static void collapseEscaping(WaitState &state, Block *target,
                              DominanceInfo &dom) {
   std::array<std::optional<unsigned>, kNumCounters> minPos = {};
@@ -334,18 +262,9 @@ static void collapseEscaping(WaitState &state, Block *target,
   }
 }
 
-// Issue a memory op: bump same-counter positions by `count`, then
-// install / reset this op's own entry(ies) at position 0 for every
-// `tagged` result value (registers and explicit mem.tokens). All
-// tagged values share the same hardware queue position.
-//
-// If the op has no tagged result (e.g. a fire-and-forget store with no
-// SSA token), still record one anonymous entry (`id == nullptr`) so the
-// implicit `s_endpgm` vscnt drain can find it. Anonymous entries
-// collapse to a single per-counter slot at the newest issued position
-// (position 0), which is exactly what a "drain everything" wait needs
-// (`vscnt(0)` drains the FIFO in full regardless of how many anonymous
-// stores it contains).
+// Bump same-counter positions, then seed position-0 entries for each
+// tagged result. No tagged result -> one anonymous (nullptr) entry so
+// `s_endpgm`'s vscnt drain can find untokenized stores.
 static bool issue(WaitState &state, Counter counter, unsigned count,
                   ValueRange tagged) {
   if (count == 0)
@@ -361,8 +280,7 @@ static bool issue(WaitState &state, Counter counter, unsigned count,
   return changed;
 }
 
-// Compute the MIN position per counter over the source values' Token
-// entries. Returns one Token per counter that has any source entry.
+// Per-counter MIN over `sources`' tokens, re-keyed under `result`.
 static SmallVector<Token, 3> mergeSources(ArrayRef<Token> tokens,
                                           ValueRange sources, Value result) {
   std::array<std::optional<unsigned>, kNumCounters> pos = {};
@@ -426,29 +344,21 @@ static bool isMemoryIssuer(Operation *op) {
   return isSMEMLoadTrait(op) || isVMEMLoad(op) || isVMEMStore(op);
 }
 
-// Ops that pass operands to a successor region/block instead of
-// consuming them locally. Their operand reads are not value uses, so
-// they must not trigger waitcnt emission: the token rides along the
-// branch/region operand and is consumed by the eventual reader in the
-// successor. The framework's `visitBlockTransfer` and
-// `visitRegionBranchControlFlowTransfer` perform the actual token
-// propagation; we just abstain from doing anything with the operands
-// here.
+// Operand reads here are branch arguments, not value uses; framework
+// hooks remap tokens to successors instead.
 static bool isControlFlowOp(Operation *op) {
   return llvm::isa<RegionBranchOpInterface, RegionBranchTerminatorOpInterface,
                    BranchOpInterface>(op);
 }
 
-// Coarse classification of how `transferOp` / `rewriteOp` should treat
-// each op. Lets the dispatch logic stay below the lizard CCN cap.
 enum class OpKind {
-  Skip,    // s_waitcnt, control-flow: handled by callers separately.
+  Skip,    // s_waitcnt, control-flow: handled separately.
   Wait,    // wavemachine.wait: drain operand tokens.
-  Issuer,  // VMEM/SMEM/LDS load or store: drain operand tokens, then issue.
-  Barrier, // s_barrier: drain operand tokens AND derive result tokens.
-  TokenOp, // wavemachine.after / token_join: derive result tokens only.
+  Issuer,  // VMEM/SMEM/LDS load or store: drain, then issue.
+  Barrier, // s_barrier: drain AND derive result tokens.
+  TokenOp, // wavemachine.after / token_join: derive only.
   Endpgm,  // s_endpgm: implicit vscnt drain.
-  Generic, // any other op: drain its operand tokens.
+  Generic, // any other op: drain its operands.
 };
 
 static OpKind classifyOp(Operation *op) {
@@ -467,10 +377,8 @@ static OpKind classifyOp(Operation *op) {
   return OpKind::Generic;
 }
 
-// AMDGPU tuple loads/stores expand into one hardware issue per dword.
-// The counter advances by N (not 1) for a width-N tuple, so a downstream
-// `vmcnt(N-1)` is wrong: the last dword is still pending. We bump per
-// expansion to match the hardware queue.
+// Tuple loads/stores expand to N hardware issues; bump by N or the
+// last dword is still pending.
 static unsigned getIssueCount(Operation *op) {
   if (isa<wavemachine::DsLoadTupleB32Op, wavemachine::GlobalLoadTupleB32Op,
           wavemachine::BufferLoadTupleB32Op>(op))
@@ -488,10 +396,8 @@ static Counter counterOf(Operation *op) {
   return Counter::Lgkm;
 }
 
-// Result Values an issuer tags with its token id. For ops that produce
-// SSA `MemToken` we include those; we also include register results so
-// a consumer reading the loaded value picks up the dependency without
-// having to thread the token operand through explicitly.
+// Both MemToken and register results tag the same issue so consumers
+// can depend via either edge.
 static void collectIssuerResults(Operation *op, SmallVectorImpl<Value> &out) {
   for (Value r : op->getResults())
     out.push_back(r);
@@ -541,7 +447,6 @@ static std::optional<unsigned> getImmediate(Value value) {
 // Consumer-dep collection and wait computation
 //===----------------------------------------------------------------------===//
 
-// Validate WaveMachine-specific preconditions before analysis runs.
 static LogicalResult validateWaveMachineOp(Operation *op) {
   if (!isWaveMachineOp(op))
     return success();
@@ -557,15 +462,11 @@ static LogicalResult validateWaveMachineOp(Operation *op) {
   return success();
 }
 
-// Compute the required wait at a consumer op by looking up each operand
-// in the lattice's Token set and demanding the tightest per-counter
-// drain.
 static WaitRequirement computeRequirement(Operation *op,
                                           const WaitState &state) {
   WaitRequirement req;
-  // s_endpgm is the unique "drain VMEM stores before kernel exit" hook:
-  // there is no SSA edge from a store's token to the return path, so
-  // we force a vscnt drain here when any VMEM store is in flight.
+  // No SSA edge from a store's token to the return path -- force vscnt
+  // drain when any VMEM store is still in flight.
   if (llvm::isa<wavemachine::SEndpgmOp>(op)) {
     for (const Token &t : state.tokens) {
       if (t.counter == Counter::Vscnt)
@@ -583,18 +484,14 @@ static WaitRequirement computeRequirement(Operation *op,
   return req;
 }
 
-// Bump same-counter positions and add this op's freshly-produced token
-// entry(ies) at position 0 (or one anonymous nullptr entry for stores
-// with no SSA result).
 static void recordIssue(Operation *op, WaitState &state) {
   SmallVector<Value, 2> results;
   collectIssuerResults(op, results);
   lat::issue(state, counterOf(op), getIssueCount(op), results);
 }
 
-// For each op result, install a fresh entry whose per-counter position
-// is the MIN over the operands' Token entries. Used by `s_barrier`,
-// `wavemachine.after`, and `wavemachine.token_join`.
+// Each result inherits per-counter MIN over operands. Used by s_barrier,
+// wavemachine.after, wavemachine.token_join.
 static void deriveResultTokens(Operation *op, WaitState &state) {
   for (Value result : op->getResults()) {
     SmallVector<Token, 3> derived =
@@ -604,7 +501,7 @@ static void deriveResultTokens(Operation *op, WaitState &state) {
   }
 }
 
-// Decode an existing `s_waitcnt`'s immediate and apply it to the state.
+// Decode existing s_waitcnt and apply its drain to the state.
 static void observeExistingWaitcnt(Operation *op, WaitState &state,
                                    const llvm::AMDGPU::IsaVersion &isaVer) {
   if (llvm::isa<wavemachine::SWaitcntOp>(op)) {
@@ -627,9 +524,7 @@ static void observeExistingWaitcnt(Operation *op, WaitState &state,
   }
 }
 
-// Drain operand tokens at `op` and hand the computed requirement to
-// `emit` (a no-op during analysis, the real `s_waitcnt` emitter
-// during rewrite).
+// `emit` is a no-op during analysis, the s_waitcnt emitter during rewrite.
 template <typename EmitFn>
 static void applyDrain(Operation *op, WaitState &state, EmitFn emit) {
   WaitRequirement req = computeRequirement(op, state);
@@ -637,10 +532,8 @@ static void applyDrain(Operation *op, WaitState &state, EmitFn emit) {
   lat::applyWait(state.tokens, req);
 }
 
-// Per-op state transfer. Both `TokenWaitAnalysis::transferOp` (analysis
-// pass) and `WaveAMDTicketWaitsPass::rewriteOp` (post-fixpoint rewriter)
-// dispatch through here so the lattice update and the conditional wait
-// emission share a single case table.
+// Shared dispatch for analysis and rewrite: same state transfer, the
+// only delta is the (conditional) `emit`.
 template <typename EmitFn>
 static void runTransfer(Operation *op, WaitState &state,
                         const llvm::AMDGPU::IsaVersion &isaVer, EmitFn emit) {
@@ -648,22 +541,18 @@ static void runTransfer(Operation *op, WaitState &state,
   case OpKind::Skip:
     if (isWaitcntOp(op))
       observeExistingWaitcnt(op, state, isaVer);
-    // Control-flow ops are pass-throughs at this level; the framework
-    // hooks remap operands to successors.
     return;
   case OpKind::Issuer:
     applyDrain(op, state, emit);
     recordIssue(op, state);
     return;
   case OpKind::Barrier:
-    // Drain operands ahead of the cross-wave fence AND seed result
-    // tokens so downstream loads of the same arena depend on it.
+    // Drain ahead of the fence AND seed result tokens so downstream
+    // loads of the same arena depend on it.
     applyDrain(op, state, emit);
     deriveResultTokens(op, state);
     return;
   case OpKind::TokenOp:
-    // after / token_join: result carries the per-counter MIN of
-    // operand positions. No memory event, nothing to drain.
     deriveResultTokens(op, state);
     return;
   case OpKind::Wait:
@@ -687,7 +576,7 @@ public:
       : DenseForwardDataFlowAnalysis(solver), dom(dom), isaVer(isaVer) {}
 
   LogicalResult initialize(Operation *top) override {
-    // Mark every block and CFG edge live so the solver actually runs.
+    // Solver needs every block + CFG edge marked live or it stalls.
     auto markRegions = [&](Operation *op) {
       for (Region &region : op->getRegions()) {
         for (Block &block : region) {
@@ -790,10 +679,7 @@ private:
     }
   }
 
-  // Take a predecessor's exit state and propagate it through a
-  // CFG-style branch into `successor`. Each branch operand seeds the
-  // successor's block arg with a fresh Token entry keyed on the block
-  // arg's `Value`, carrying the operand's per-counter position.
+  // Seed each successor block arg with the operand's per-counter position.
   void propagateBranchOperands(Operation *term, Block *successor,
                                WaitState &state) {
     if (auto branch = dyn_cast<BranchOpInterface>(term)) {
@@ -815,7 +701,7 @@ private:
       if (mapped)
         return;
     }
-    // Fallback: single-successor terminator with positional operands.
+    // Terminator without BranchOpInterface: assume positional operands.
     if (term->getNumSuccessors() == 1 && term->getSuccessor(0) == successor &&
         term->getNumOperands() >= successor->getNumArguments()) {
       SmallVector<Value, 4> srcs, dsts;
@@ -827,10 +713,8 @@ private:
     }
   }
 
-  // Map operand values to successor values: for each pair, every
-  // (counter, operand-position) entry is duplicated under the
-  // destination value's key. The merge at the successor (via
-  // `joinWith`) then takes MIN across predecessors.
+  // Re-key each operand's entries under the destination value;
+  // joinWith at the successor takes MIN across predecessors.
   void propagateOperandsThrough(ValueRange operands, ValueRange destinations,
                                 WaitState &state) {
     SmallVector<Token, 4> added;
@@ -853,7 +737,6 @@ private:
 // Rewrite step
 //===----------------------------------------------------------------------===//
 
-// Emit the s_waitcnt op(s) implied by `req` immediately before `op`.
 static void emitWaits(OpBuilder &builder, Operation *op,
                       const WaitRequirement &req,
                       const llvm::AMDGPU::IsaVersion &isaVer) {
@@ -897,12 +780,8 @@ struct WaveAMDTicketWaitsPass
     return success();
   }
 
-  // After the dataflow converges we walk every op in order, ask the
-  // solver for the state immediately before it, compute the wait it
-  // demands, and emit `s_waitcnt`(s) ahead of it. We keep a local copy
-  // of the state inside each block so consecutive consumers of the
-  // same token see the drain effect from the wait we just emitted (the
-  // solver's per-op state does not).
+  // Per-block local state so consecutive consumers see drains from the
+  // wait we just emitted (the solver's per-op state does not).
   void rewriteWithSolver(func::FuncOp func, DataFlowSolver &solver,
                          const llvm::AMDGPU::IsaVersion &isaVer) {
     OpBuilder builder(func.getContext());
@@ -931,12 +810,9 @@ struct WaveAMDTicketWaitsPass
 
   void rewriteOp(Operation *op, WaitState &local, DataFlowSolver &solver,
                  const llvm::AMDGPU::IsaVersion &isaVer, OpBuilder &builder) {
-    // Control-flow ops do not consume tokens locally; the framework's
-    // region- and block-transfer hooks compute the post-op state for
-    // us. Refresh `local` from the solver so a downstream consumer in
-    // this same block (e.g. `v_add %x, %r` reading a `scf.if` result)
-    // sees the joined region state. Inner regions are walked
-    // separately by `collectBlocks`, so we don't need to descend here.
+    // Control-flow ops: framework hooks computed the post-op state.
+    // Refresh `local` so a downstream consumer sees the joined region
+    // result. Inner regions are visited separately via collectBlocks.
     if (isControlFlowOp(op)) {
       if (auto *post =
               solver.lookupState<WaitLattice>(solver.getProgramPointAfter(op)))
@@ -947,8 +823,6 @@ struct WaveAMDTicketWaitsPass
       if (req.hasWait())
         emitWaits(builder, op, req, isaVer);
     };
-    // Share the case table with the analysis pass: same state transfer,
-    // the only delta is the (conditional) `emit`.
     runTransfer(op, local, isaVer, emit);
   }
 
