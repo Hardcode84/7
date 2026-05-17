@@ -245,11 +245,15 @@ def Wave_IndexExprOp : Wave_Op<"index_expr", [Pure]> {
     `$expr` must equal the set of `$names` (bijective).
 
     Binding operand types are restricted to either wave-uniform scalars
-    (`index`, signless integer, `!wave.index` with no width) or
-    lane-varying SIMD values (`!wave.simd<i32, W>`, `!wave.index<W>`).
-    The result width is the unique non-zero wave width across the
-    lane-varying bindings; with no lane-varying binding the result is
-    `!wave.index` (uniform).
+    (signless integer, `!wave.index` with no width) or lane-varying
+    SIMD values (`!wave.simd<i32, W>`, `!wave.index<W>`). The result
+    width is the unique non-zero wave width across the lane-varying
+    bindings; with no lane-varying binding the result is `!wave.index`
+    (uniform).
+
+    Built-in `index` is intentionally not accepted -- offset math here
+    stays in fixed-width integer land. Cast `index` SSA values to i32
+    at the producer before feeding them in.
 
     The op is pure: equal `$expr` (pointer-equal hash-consed handle) and
     equal `$bindings` / `$names` CSE.

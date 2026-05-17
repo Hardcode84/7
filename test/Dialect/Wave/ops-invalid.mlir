@@ -72,9 +72,9 @@ func.func @index_expr_unbound_symbol(%lane: !wave.simd<i32, 32>) {
 
 // -----
 
-func.func @index_expr_stray_binding(%lane: !wave.simd<i32, 32>, %k: index) {
+func.func @index_expr_stray_binding(%lane: !wave.simd<i32, 32>, %k: i32) {
   // expected-error @+1 {{binding name 'K' is not a free symbol of the expression}}
-  %v = wave.index_expr #wave.expr<"lid"> ["lid", "K"] (%lane, %k) : (!wave.simd<i32, 32>, index) -> !wave.index<32>
+  %v = wave.index_expr #wave.expr<"lid"> ["lid", "K"] (%lane, %k) : (!wave.simd<i32, 32>, i32) -> !wave.index<32>
   return
 }
 

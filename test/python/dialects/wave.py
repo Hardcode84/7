@@ -170,7 +170,7 @@ def test_index_expr():
             (buffer,) = f.args
             lane = f.lane_id()
             wgid_y = f.workgroup_id(1)
-            k = f.constant(w.index_type(), 16)
+            k = f.constant(w.i32(), 16)
 
             # Uniform-only bindings -> result is `!wave.index`.
             _u = f.index_expr("K + wgid_y", {"K": k, "wgid_y": wgid_y})

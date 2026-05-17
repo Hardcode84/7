@@ -21,6 +21,7 @@
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/StringMap.h"
 #include "llvm/ADT/StringSwitch.h"
 #include "llvm/ADT/TypeSwitch.h"
 #include "llvm/Support/Debug.h"
@@ -238,6 +239,7 @@ private:
         .Case<WorkitemIdOp>([&](auto o) { return selectWorkitemId(o); })
         .Case<SplatOp>([&](auto o) { return selectSplat(o); })
         .Case<BinaryOp>([&](auto o) { return selectBinary(o); })
+        .Case<IndexExprOp>([&](auto o) { return selectIndexExpr(o); })
         .Case<CmpIOp>([&](auto o) { return selectCmp(o); })
         .Case<BallotOp>([&](auto o) { return selectBallot(o); })
         .Case<ReadFirstOp>([&](auto o) { return selectReadFirst(o); })
@@ -507,6 +509,187 @@ private:
     return createInstr(
         builder, loc, "v_add_u32", {lhs, rhs},
         getRegType(builder.getContext(), wavemachine::RegClass::VGPR));
+  }
+
+  std::optional<Value> foldImmMul(Location loc, std::optional<int64_t> lhsImm,
+                                  std::optional<int64_t> rhsImm) {
+    if (lhsImm && rhsImm)
+      return createImm(builder, loc, *lhsImm * *rhsImm);
+    if ((lhsImm && *lhsImm == 0) || (rhsImm && *rhsImm == 0))
+      return createImm(builder, loc, 0);
+    return std::nullopt;
+  }
+
+  Value mulIndexValues(Location loc, Value lhs, Value rhs) {
+    std::optional<int64_t> lhsImm = getImmediateValue(lhs);
+    std::optional<int64_t> rhsImm = getImmediateValue(rhs);
+    if (auto folded = foldImmMul(loc, lhsImm, rhsImm))
+      return *folded;
+    if (lhsImm && *lhsImm == 1)
+      return rhs;
+    if (rhsImm && *rhsImm == 1)
+      return lhs;
+    // v_mul_lo_u32 is VOP3, so SGPR/literal in either slot is legal.
+    return createInstr(
+        builder, loc, "v_mul_lo_u32", {lhs, rhs},
+        getRegType(builder.getContext(), wavemachine::RegClass::VGPR));
+  }
+
+  // Structural integer literal of a node without materializing anything:
+  // IXS_INT or IXS_RAT with unit denominator.
+  static std::optional<int64_t> staticIntLiteral(::ixs_node *node) {
+    switch (ixs_node_tag(node)) {
+    case IXS_INT:
+      return ixs_node_int_val(node);
+    case IXS_RAT:
+      if (ixs_node_rat_den(node) == 1)
+        return ixs_node_rat_num(node);
+      return std::nullopt;
+    default:
+      return std::nullopt;
+    }
+  }
+
+  FailureOr<Value> materializeIxsRat(::ixs_node *node, Operation *user) {
+    if (ixs_node_rat_den(node) != 1)
+      return user->emitError(
+          "wave.index_expr selection rejects non-integer rational");
+    return createImm(builder, user->getLoc(), ixs_node_rat_num(node));
+  }
+
+  FailureOr<Value> materializeIxsSym(::ixs_node *node, Operation *user,
+                                     const llvm::StringMap<Value> &subs) {
+    StringRef name = ixs_node_sym_name(node);
+    auto it = subs.find(name);
+    if (it == subs.end())
+      return user->emitError("wave.index_expr leaf '")
+             << name << "' has no binding";
+    return it->second;
+  }
+
+  // ADD = coeff + sum(term_coeff[i] * term[i]). Skip materializing
+  // coeff when it's 0 and term_coeff[i] when it's 1.
+  FailureOr<Value> materializeIxsAdd(::ixs_node *node, Operation *user,
+                                     const llvm::StringMap<Value> &subs) {
+    Location loc = user->getLoc();
+    ::ixs_node *coeff = ixs_node_add_coeff(node);
+    std::optional<int64_t> coeffInt = staticIntLiteral(coeff);
+    std::optional<Value> acc;
+    if (!coeffInt || *coeffInt != 0) {
+      FailureOr<Value> seed = materializeIndexExprNode(coeff, user, subs);
+      if (failed(seed))
+        return failure();
+      acc = *seed;
+    }
+    uint32_t nterms = ixs_node_add_nterms(node);
+    for (uint32_t i = 0; i < nterms; ++i) {
+      FailureOr<Value> scaled = materializeIxsAddTerm(node, i, user, subs);
+      if (failed(scaled))
+        return failure();
+      acc = acc ? addByteOffsets(loc, *acc, *scaled) : *scaled;
+    }
+    return acc ? *acc : createImm(builder, loc, 0);
+  }
+
+  FailureOr<Value> materializeIxsAddTerm(::ixs_node *node, uint32_t i,
+                                         Operation *user,
+                                         const llvm::StringMap<Value> &subs) {
+    Location loc = user->getLoc();
+    ::ixs_node *termCoeff = ixs_node_add_term_coeff(node, i);
+    FailureOr<Value> term =
+        materializeIndexExprNode(ixs_node_add_term(node, i), user, subs);
+    if (failed(term))
+      return failure();
+    std::optional<int64_t> tcInt = staticIntLiteral(termCoeff);
+    if (tcInt && *tcInt == 1)
+      return *term;
+    FailureOr<Value> tcVal = materializeIndexExprNode(termCoeff, user, subs);
+    if (failed(tcVal))
+      return failure();
+    return mulIndexValues(loc, *tcVal, *term);
+  }
+
+  // MUL = coeff * prod(base[i] ^ exp[i]). Skip the coeff when it's 1.
+  FailureOr<Value> materializeIxsMul(::ixs_node *node, Operation *user,
+                                     const llvm::StringMap<Value> &subs) {
+    Location loc = user->getLoc();
+    ::ixs_node *coeff = ixs_node_mul_coeff(node);
+    std::optional<int64_t> coeffInt = staticIntLiteral(coeff);
+    std::optional<Value> acc;
+    if (!coeffInt || *coeffInt != 1) {
+      FailureOr<Value> seed = materializeIndexExprNode(coeff, user, subs);
+      if (failed(seed))
+        return failure();
+      acc = *seed;
+    }
+    uint32_t nfactors = ixs_node_mul_nfactors(node);
+    for (uint32_t i = 0; i < nfactors; ++i) {
+      FailureOr<Value> pow = materializeIxsMulFactor(node, i, user, subs);
+      if (failed(pow))
+        return failure();
+      acc = acc ? mulIndexValues(loc, *acc, *pow) : *pow;
+    }
+    return acc ? *acc : createImm(builder, loc, 1);
+  }
+
+  FailureOr<Value> materializeIxsMulFactor(::ixs_node *node, uint32_t i,
+                                           Operation *user,
+                                           const llvm::StringMap<Value> &subs) {
+    int32_t exp = ixs_node_mul_factor_exp(node, i);
+    if (exp <= 0)
+      return user->emitError(
+          "wave.index_expr selection rejects non-positive mul exponent");
+    FailureOr<Value> base =
+        materializeIndexExprNode(ixs_node_mul_factor_base(node, i), user, subs);
+    if (failed(base))
+      return failure();
+    Value pow = *base;
+    for (int32_t e = 1; e < exp; ++e)
+      pow = mulIndexValues(user->getLoc(), pow, *base);
+    return pow;
+  }
+
+  // Top-level dispatch over a #wave.expr AST. Substitutes bound SSA values
+  // at IXS_SYM leaves and folds ADD / MUL chains via the typed accessors
+  // (ixsimpl stores `coeff + sum(c_i * t_i)` and `coeff * prod(b_i^e_i)`).
+  // Floor / ceil / mod / rat with non-unit denominator are rejected.
+  FailureOr<Value>
+  materializeIndexExprNode(const ::ixs_node *cnode, Operation *user,
+                           const llvm::StringMap<Value> &substitution) {
+    // ixsimpl introspection accessors take non-const ixs_node *.
+    auto *node = const_cast<::ixs_node *>(cnode);
+    switch (ixs_node_tag(node)) {
+    case IXS_INT:
+      return createImm(builder, user->getLoc(), ixs_node_int_val(node));
+    case IXS_RAT:
+      return materializeIxsRat(node, user);
+    case IXS_SYM:
+      return materializeIxsSym(node, user, substitution);
+    case IXS_ADD:
+      return materializeIxsAdd(node, user, substitution);
+    case IXS_MUL:
+      return materializeIxsMul(node, user, substitution);
+    default:
+      return user->emitError(
+                 "wave.index_expr selection does not support node tag ")
+             << static_cast<int>(ixs_node_tag(node));
+    }
+  }
+
+  LogicalResult selectIndexExpr(IndexExprOp op) {
+    llvm::StringMap<Value> substitution;
+    for (auto [nameAttr, binding] :
+         llvm::zip(op.getNames(), op.getBindings())) {
+      StringRef key = cast<StringAttr>(nameAttr).getValue();
+      substitution[key] = expect(binding, op);
+    }
+    FailureOr<Value> result =
+        materializeIndexExprNode(op.getExpr().getNode(), op, substitution);
+    if (failed(result))
+      return failure();
+    values[op.getResult()] = *result;
+    eraseIfTopLevel(op);
+    return success();
   }
 
   LogicalResult selectPtrAdd(PtrAddOp op) {

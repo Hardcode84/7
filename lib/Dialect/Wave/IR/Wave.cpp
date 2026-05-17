@@ -359,11 +359,10 @@ LogicalResult PtrAddOp::verify() {
 
 // Classify an index_expr binding by its operand type. Returns 0 for
 // uniform scalars and a positive wave width for lane-varying bindings;
-// failure for any unsupported binding type.
+// failure for any unsupported binding type. Built-in `index` is
+// deliberately not accepted -- offset math stays in fixed-width territory.
 static FailureOr<int64_t> classifyIndexBinding(
     Type type, function_ref<InFlightDiagnostic(const Twine &)> emitError) {
-  if (type.isIndex())
-    return int64_t{0};
   if (auto intType = dyn_cast<IntegerType>(type)) {
     if (!intType.isSignless())
       return emitError("integer binding must be signless");
@@ -376,8 +375,8 @@ static FailureOr<int64_t> classifyIndexBinding(
       return emitError("SIMD binding element type must be i32");
     return simdType.getWidth();
   }
-  return emitError("binding must be index, signless integer, !wave.index, or "
-                   "!wave.simd<i32, W>");
+  return emitError(
+      "binding must be signless integer, !wave.index, or !wave.simd<i32, W>");
 }
 
 // Bijection check: every entry in `names` is a non-empty unique string
