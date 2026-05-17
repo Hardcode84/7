@@ -127,7 +127,7 @@ func.func @structured_if_nonzero(%cond: i1, %x: !wavemachine.reg<vgpr, 1>) {
 
 // Only the `then` arm of the `scf.if` issues an extra load. The
 // region-branch join sees `%a` at position 1 (through `then`) and 0
-// (through `else`); MIN = 0 → `lgkmcnt(0)` = `imm 64519`. `lgkmcnt(1)`
+// (through `else`); MIN = 0 -> `lgkmcnt(0)` = `imm 64519`. `lgkmcnt(1)`
 // would be unsafe on the `else` path (lgkmcnt is already 1 there).
 module attributes {wavemachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 

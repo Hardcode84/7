@@ -17,4 +17,4 @@
 # the thresholds and delete its line. Adding a new entry should be
 # accompanied by an explicit justification in the commit message.
 
-# (empty — keep it that way)
+# (empty -- keep it that way)
