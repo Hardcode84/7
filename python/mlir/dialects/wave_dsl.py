@@ -28,12 +28,13 @@ Usage::
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from types import TracebackType
 
 from mlir._mlir_libs._waveDialectsNanobind import (
     BufferAddressSpaceAttr,
+    ExprAttr,
     FragmentType,
     GlobalAddressSpaceAttr,
     MaskType,
@@ -42,10 +43,12 @@ from mlir._mlir_libs._waveDialectsNanobind import (
     PtrType,
     SharedAddressSpaceAttr,
     SimdType,
+    WaveIndexType,
     register_dialects,
 )
 from mlir.dialects import arith, func, gpu, memref, scf, wave, waveamd
 from mlir.ir import (
+    ArrayAttr,
     Attribute,
     Block,
     Context,
@@ -59,6 +62,7 @@ from mlir.ir import (
     MemRefType,
     Module,
     ShapedType,
+    StringAttr,
     Type,
     UnitAttr,
     UnrankedMemRefType,
@@ -118,6 +122,16 @@ def mask_type(width: int = 32) -> Type:
 
 def mem_token_type() -> Type:
     return MemTokenType.get(context=_current_context())
+
+
+def wave_index_type(width: int = 0) -> Type:
+    """Build a `!wave.index` value type.
+
+    `width=0` is the uniform (scalar) form. A non-zero `width` denotes the
+    lane-varying form: one per-lane element across a subgroup of that
+    width.
+    """
+    return WaveIndexType.get(width=width, context=_current_context())
 
 
 def global_address_space() -> Attribute:
@@ -183,6 +197,32 @@ def _current_context() -> Context:
     the type helpers so callers don't have to pass `ctx` everywhere.
     """
     return Context.current
+
+
+def _binding_lane_width(values: Iterable[Value]) -> int:
+    """Reduce binding operand types to a single non-zero lane width.
+
+    Uniform operands (`index`, signless int, uniform `!wave.index`)
+    contribute zero. Lane-varying operands (`!wave.simd<i32, W>`,
+    `!wave.index<W>`) must agree on `W`.
+    """
+    lane = 0
+    for v in values:
+        ty = v.type
+        if SimdType.isinstance(ty):
+            width = SimdType(ty).width
+        elif WaveIndexType.isinstance(ty):
+            width = WaveIndexType(ty).width
+        else:
+            width = 0
+        if width == 0:
+            continue
+        if lane and lane != width:
+            raise ValueError(
+                f"conflicting lane-varying binding widths: {lane} vs {width}"
+            )
+        lane = width
+    return lane
 
 
 def unranked_memref_type(element_type: Type) -> Type:
@@ -370,6 +410,32 @@ class FunctionBuilder:
 
     def binary(self, kind: str, lhs: Value, rhs: Value) -> Value:
         return wave.BinaryOp(lhs.type, kind, lhs, rhs).result
+
+    def index_expr(
+        self,
+        text: str,
+        bindings: Mapping[str, Value] | None = None,
+        result_type: Type | None = None,
+    ) -> Value:
+        """Build a `wave.index_expr` from a symbolic text and bindings.
+
+        `text` is parsed by ixsimpl into the dialect-owned store. Each
+        free symbol in the expression must appear as a key in
+        `bindings`; conversely every binding name must be a free symbol.
+
+        When `result_type` is omitted the lane width is inferred from
+        the binding operand types: a `!wave.simd<i32, W>` or
+        `!wave.index<W>` binding pins the result to `!wave.index<W>`;
+        otherwise the result is the uniform `!wave.index`.
+        """
+        bindings = dict(bindings or {})
+        if result_type is None:
+            result_type = wave_index_type(_binding_lane_width(bindings.values()))
+        expr_attr = ExprAttr.get(text, context=_current_context())
+        names_attr = ArrayAttr.get([StringAttr.get(n) for n in bindings])
+        return wave.IndexExprOp(
+            result_type, expr_attr, names_attr, list(bindings.values())
+        ).result
 
     def ptr_add(
         self, base: Value, offset: Value, result_type: Type | None = None
@@ -590,6 +656,7 @@ def module() -> ModuleBuilder:
 
 __all__ = [
     "BufferAddressSpaceAttr",
+    "ExprAttr",
     "F16Type",
     "F32Type",
     "FragmentType",
@@ -605,6 +672,7 @@ __all__ = [
     "PtrType",
     "SharedAddressSpaceAttr",
     "SimdType",
+    "WaveIndexType",
     "buffer_address_space",
     "buffer_ptr_type",
     "f16",
@@ -624,4 +692,5 @@ __all__ = [
     "simd_type",
     "unranked_memref_type",
     "vector_type",
+    "wave_index_type",
 ]

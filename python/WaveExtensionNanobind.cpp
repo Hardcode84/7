@@ -109,6 +109,37 @@ static void bindPtrType(nb::module_ &m) {
       });
 }
 
+static void bindWaveIndexType(nb::module_ &m) {
+  mlir_type_subclass(m, "WaveIndexType", mlirWaveTypeIsAWaveIndex)
+      .def_classmethod(
+          "get",
+          [](nb::object &cls, int64_t width, MlirContext ctx) {
+            return cls(mlirWaveWaveIndexTypeGet(ctx, width));
+          },
+          nb::arg("cls"), nb::arg("width") = 0, nb::arg("context"))
+      .def_property_readonly("width", [](MlirType self) {
+        return mlirWaveWaveIndexTypeGetWidth(self);
+      });
+}
+
+// Text constructor for #wave.expr. Python passes the canonical ixsimpl
+// source text; the dialect-owned store hash-conses it, so equal text
+// returns pointer-equal attribute handles.
+static void bindExprAttr(nb::module_ &m) {
+  mlir_attribute_subclass(m, "ExprAttr", mlirWaveAttributeIsAExpr)
+      .def_classmethod(
+          "get",
+          [](nb::object &cls, const std::string &text, MlirContext ctx) {
+            MlirStringRef ref{text.data(), text.size()};
+            MlirAttribute attr = mlirWaveExprAttrGetFromText(ctx, ref);
+            if (!attr.ptr)
+              throw nb::value_error(
+                  ("invalid wave.expr text: " + text).c_str());
+            return cls(attr);
+          },
+          nb::arg("cls"), nb::arg("text"), nb::arg("context"));
+}
+
 static void bindFragmentType(nb::module_ &m) {
   mlir_type_subclass(m, "FragmentType", mlirWaveAMDTypeIsAFragment)
       .def_classmethod(
@@ -154,6 +185,10 @@ NB_MODULE(_waveDialectsNanobind, m) {
   bindMaskType(m);
   bindMemTokenType(m);
   bindPtrType(m);
+  bindWaveIndexType(m);
+
+  // Wave symbolic attributes.
+  bindExprAttr(m);
 
   // Wave address-space attributes.
   bindAddressSpaceAttr(m, "GlobalAddressSpaceAttr",

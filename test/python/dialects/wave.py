@@ -131,6 +131,16 @@ def test_typed_bindings():
         assert casted_frag.columns == 16
         assert casted_frag.wave_size == 32
         assert casted_frag.registers == 8
+
+        uniform_idx = w.wave_index_type()
+        lane_idx = w.wave_index_type(32)
+        assert w.WaveIndexType.isinstance(uniform_idx)
+        assert w.WaveIndexType.isinstance(lane_idx)
+        assert w.WaveIndexType(uniform_idx).width == 0
+        assert w.WaveIndexType(lane_idx).width == 32
+
+        expr = w.ExprAttr.get("4*lid + K", context=w.Context.current)
+        assert w.ExprAttr.isinstance(expr)
         print("ok")
         # CHECK: ok
 
@@ -149,6 +159,42 @@ def test_waveamd_buffer_pointer_type():
         # CHECK: waveamd.make_buffer
         # CHECK: !wave.ptr<i32, #waveamd.buffer>
         # CHECK: !wave.simd<!wave.ptr<i32, #waveamd.buffer>, 32>
+        print(m.module)
+
+
+# CHECK-LABEL: TEST: test_index_expr
+@run
+def test_index_expr():
+    with w.module() as m:
+        with m.function("index_expr_kernel", [w.ptr_type(w.i32())], kernel=True) as f:
+            (buffer,) = f.args
+            lane = f.lane_id()
+            wgid_y = f.workgroup_id(1)
+            k = f.constant(w.index_type(), 16)
+
+            # Uniform-only bindings -> result is `!wave.index`.
+            _u = f.index_expr("K + wgid_y", {"K": k, "wgid_y": wgid_y})
+
+            # Lane-varying binding pins the result to `!wave.index<32>`.
+            off = f.index_expr("4*lid + K", {"K": k, "lid": lane})
+
+            # Zero bindings -> constant expression.
+            _c = f.index_expr("42", {})
+
+            ptrs = f.ptr_add(
+                buffer,
+                off,
+                w.simd_type(w.ptr_type(w.i32())),
+            )
+            f.store(f.splat(f.constant(w.i32(), 0)), ptrs)
+        # CHECK: func.func @index_expr_kernel
+        # CHECK: wave.index_expr <"K + wgid_y"> ["K", "wgid_y"]
+        # CHECK-SAME: -> !wave.index
+        # CHECK: wave.index_expr <"K + 4*lid"> ["K", "lid"]
+        # CHECK-SAME: -> !wave.index<32>
+        # CHECK: wave.index_expr <"42"> []()
+        # CHECK-SAME: -> !wave.index
+        # CHECK: wave.ptr_add {{.*}} !wave.index<32>
         print(m.module)
 
 

@@ -14,7 +14,9 @@
 #include "mlir/CAPI/Wrap.h"
 #include "mlir/Dialect/Wave/IR/Wave.h"
 #include "mlir/Dialect/Wave/IR/WaveAMD.h"
+#include "mlir/Dialect/Wave/IR/WaveSymbols.h"
 #include "mlir/Dialect/WaveMachine/IR/WaveMachine.h"
+#include "llvm/ADT/StringRef.h"
 
 using namespace mlir;
 
@@ -80,6 +82,45 @@ MlirType mlirWavePtrTypeGetElementType(MlirType type) {
 
 MlirAttribute mlirWavePtrTypeGetAddressSpace(MlirType type) {
   return wrap(llvm::cast<wave::PtrType>(unwrap(type)).getAddressSpace());
+}
+
+bool mlirWaveTypeIsAWaveIndex(MlirType type) {
+  return llvm::isa<wave::WaveIndexType>(unwrap(type));
+}
+
+MlirType mlirWaveWaveIndexTypeGet(MlirContext ctx, int64_t width) {
+  return wrap(wave::WaveIndexType::get(unwrap(ctx), width));
+}
+
+int64_t mlirWaveWaveIndexTypeGetWidth(MlirType type) {
+  return llvm::cast<wave::WaveIndexType>(unwrap(type)).getWidth();
+}
+
+//===----------------------------------------------------------------------===//
+// Wave symbolic-expression attribute
+//===----------------------------------------------------------------------===//
+
+bool mlirWaveAttributeIsAExpr(MlirAttribute attr) {
+  return llvm::isa<wave::ExprAttr>(unwrap(attr));
+}
+
+MlirAttribute mlirWaveExprAttrGetFromText(MlirContext ctx, MlirStringRef text) {
+  MLIRContext *context = unwrap(ctx);
+  // getOrLoad so the call is safe from Python before any other Wave op has
+  // forced the dialect to load.
+  auto *dialect = context->getOrLoadDialect<wave::WaveDialect>();
+  if (!dialect)
+    return MlirAttribute{nullptr};
+  std::string diagnostic;
+  auto handle = wave::sym::parseExpr(dialect->getSymbolStore(),
+                                     llvm::StringRef(text.data, text.length),
+                                     &diagnostic);
+  if (failed(handle)) {
+    emitError(UnknownLoc::get(context))
+        << "failed to parse wave.expr text: " << diagnostic;
+    return MlirAttribute{nullptr};
+  }
+  return wrap(wave::ExprAttr::get(context, *handle));
 }
 
 //===----------------------------------------------------------------------===//

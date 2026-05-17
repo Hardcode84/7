@@ -42,6 +42,23 @@ MLIR_CAPI_EXPORTED MlirType mlirWavePtrTypeGet(MlirType elementType,
 MLIR_CAPI_EXPORTED MlirType mlirWavePtrTypeGetElementType(MlirType type);
 MLIR_CAPI_EXPORTED MlirAttribute mlirWavePtrTypeGetAddressSpace(MlirType type);
 
+MLIR_CAPI_EXPORTED bool mlirWaveTypeIsAWaveIndex(MlirType type);
+MLIR_CAPI_EXPORTED MlirType mlirWaveWaveIndexTypeGet(MlirContext ctx,
+                                                     int64_t width);
+MLIR_CAPI_EXPORTED int64_t mlirWaveWaveIndexTypeGetWidth(MlirType type);
+
+//===----------------------------------------------------------------------===//
+// Wave symbolic-expression attribute (text constructor)
+//===----------------------------------------------------------------------===//
+
+// Returns a #wave.expr attribute parsed from `text`. On parse failure
+// emits a diagnostic on the context and returns a null MlirAttribute.
+// Note: the dialect-owned symbol store hash-conses the underlying node,
+// so equal texts return pointer-equal handles.
+MLIR_CAPI_EXPORTED bool mlirWaveAttributeIsAExpr(MlirAttribute attr);
+MLIR_CAPI_EXPORTED MlirAttribute
+mlirWaveExprAttrGetFromText(MlirContext ctx, MlirStringRef text);
+
 //===----------------------------------------------------------------------===//
 // Wave address-space attributes
 //===----------------------------------------------------------------------===//
