@@ -12,7 +12,7 @@ func.func @wave_add(%x: i32) -> i32 {
   %lane = wave.lane_id : !wave.simd<i32, 32>
   %vx = wave.splat %x : i32 -> !wave.simd<i32, 32>
   // CHECK: v_add_nc_u32_e32 [[SUM:v[0-9]+]], [[ARG:s[0-9]+]], [[LANE]]
-  %sum = wave.binary "addi" %lane, %vx : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  %sum = wave.addi %lane, %vx : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
   // CHECK: v_readfirstlane_b32 s0, [[SUM]]
   %first = wave.read_first %sum : !wave.simd<i32, 32> -> i32
   // CHECK: s_setpc_b64 s[30:31]
@@ -30,7 +30,7 @@ func.func @wave_where(%limit: i32) -> i32 {
   // CHECK: s_cbranch_execz [[END:.Lwave_wave_where_endif_[0-9]+]]
   wave.where %active {
     // CHECK: v_add_nc_u32_e32
-    %sum = wave.binary "addi" %lane, %vlimit : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+    %sum = wave.addi %lane, %vlimit : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
     wave.yield
   } : !wave.mask<32>
   // CHECK: [[END]]:
@@ -51,7 +51,7 @@ func.func @wave_where_else(%limit: i32) -> i32 {
   // CHECK: s_cbranch_execz [[ELSE:.Lwave_wave_where_else_else_[0-9]+]]
   wave.where %active {
     // CHECK: v_add_nc_u32_e32
-    %then = wave.binary "addi" %lane, %vlimit : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+    %then = wave.addi %lane, %vlimit : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
     wave.yield
   } otherwise {
     // CHECK: s_andn2_b32 exec_lo, [[SAVE]], [[MASK]]
@@ -75,7 +75,7 @@ func.func @wave_kernel(%out: !wave.ptr<i32, #wave.global>, %x: i32) attributes {
   // CHECK: s_waitcnt lgkmcnt(0)
   // CHECK: s_delay_alu instid0(VALU_DEP_1)
   // CHECK: v_add_nc_u32_e32 [[SUM:v[0-9]+]], [[X]], [[LANE]]
-  %sum = wave.binary "addi" %lane, %vx : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  %sum = wave.addi %lane, %vx : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
   // CHECK: v_lshlrev_b32_e32 [[OFFSET:v[0-9]+]], 2, [[LANE]]
   // CHECK: global_store_b32 [[OFFSET]], [[SUM]], [[OUT]]
   %ptrs = wave.ptr_add %out, %lane : !wave.ptr<i32, #wave.global>, !wave.simd<i32, 32> -> !wave.simd<!wave.ptr<i32, #wave.global>, 32>
@@ -87,7 +87,7 @@ func.func @wave_kernel(%out: !wave.ptr<i32, #wave.global>, %x: i32) attributes {
 // CHECK: .amdhsa_kernel wave_kernel
 
 // `wave.binary "shri"` lowers to v_lshrrev_b32 (VOP2; shift goes in
-// src0, value in vsrc1 -- mirroring shli). `wave.binary "muli"` lowers
+// src0, value in vsrc1 -- mirroring shli). `wave.muli` lowers
 // to v_mul_lo_u32 (VOP3, no operand-placement constraints).
 // CHECK-LABEL: wave_shri_muli:
 func.func @wave_shri_muli(%x: i32) -> i32 {
@@ -97,7 +97,7 @@ func.func @wave_shri_muli(%x: i32) -> i32 {
   // CHECK: v_lshrrev_b32_e32 [[SHIFTED:v[0-9]+]],
   %shifted = wave.binary "shri" %lane, %vx : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
   // CHECK: v_mul_lo_u32 [[MULLED:v[0-9]+]], [[SHIFTED]],
-  %mulled = wave.binary "muli" %shifted, %vx : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  %mulled = wave.muli %shifted, %vx : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
   %first = wave.read_first %mulled : !wave.simd<i32, 32> -> i32
   return %first : i32
 }
@@ -208,7 +208,7 @@ func.func @wave_two_tuple_loads_overlap(%a_in: !wave.ptr<i32, #wave.global>,
   %slot_a = wave.ptr_add %lds, %lane : !wave.ptr<i32, #wave.shared>, !wave.simd<i32, 32> -> !wave.simd<!wave.ptr<i32, #wave.shared>, 32>
   %c256 = arith.constant 256 : i32
   %c256v = wave.splat %c256 : i32 -> !wave.simd<i32, 32>
-  %slot_b_off = wave.binary "addi" %lane, %c256v : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  %slot_b_off = wave.addi %lane, %c256v : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
   %slot_b = wave.ptr_add %lds, %slot_b_off : !wave.ptr<i32, #wave.shared>, !wave.simd<i32, 32> -> !wave.simd<!wave.ptr<i32, #wave.shared>, 32>
   // CHECK: s_waitcnt lgkmcnt(1)
   // CHECK-NEXT: global_load_b32 {{v[0-9]+, v[0-9]+, s\[6:7\]$}}

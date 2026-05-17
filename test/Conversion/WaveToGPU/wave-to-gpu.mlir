@@ -6,7 +6,7 @@ func.func @lower_to_gpu(%pred: i1, %value: i32) -> i32 {
   %lane = wave.lane_id : !wave.simd<i32, 32>
   %vvalue = wave.splat %value : i32 -> !wave.simd<i32, 32>
   // CHECK: arith.addi
-  %sum = wave.binary "addi" %lane, %vvalue : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  %sum = wave.addi %lane, %vvalue : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
   // CHECK: arith.cmpi
   %laneMask = wave.cmpi ult %lane, %vvalue : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.mask<32>
   // CHECK: gpu.subgroup_id

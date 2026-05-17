@@ -196,40 +196,37 @@ def _emit_tile_coords(bld: dsl.FunctionBuilder, cfg: _MatmulConfig) -> _TileCoor
     # Global (m_tile, n_tile) for this wave:
     #   m_tile = wg_m * BM + m_wave
     #   n_tile = wg_n * BN + n_wave
-    m_tile = bld.binary(
-        "addi",
-        bld.binary("muli", bld.splat(wg_m), _splat_const(bld, cfg.BM)),
+    m_tile = bld.addi(
+        bld.muli(bld.splat(wg_m), _splat_const(bld, cfg.BM)),
         m_wave,
     )
-    n_tile = bld.binary(
-        "addi",
-        bld.binary("muli", bld.splat(wg_n), _splat_const(bld, cfg.BN)),
+    n_tile = bld.addi(
+        bld.muli(bld.splat(wg_n), _splat_const(bld, cfg.BN)),
         n_wave,
     )
 
     # Per-lane row offset (L % 16) * K, per-tile offset tile * (16 * K),
     # both in f16 elements (`ptr_add` scales by the pointer elt size).
     lane_mod16 = bld.binary("andi", lane, _splat_const(bld, 15))
-    lane_row_off = bld.binary("muli", lane_mod16, _splat_const(bld, cfg.K))
+    lane_row_off = bld.muli(lane_mod16, _splat_const(bld, cfg.K))
     tile_stride = _splat_const(bld, 16 * cfg.K)
-    m_tile_off = bld.binary("muli", m_tile, tile_stride)
-    n_tile_off = bld.binary("muli", n_tile, tile_stride)
-    a_lane_base = bld.ptr_add(a_arg, bld.binary("addi", m_tile_off, lane_row_off))
-    b_lane_base = bld.ptr_add(b_arg, bld.binary("addi", n_tile_off, lane_row_off))
+    m_tile_off = bld.muli(m_tile, tile_stride)
+    n_tile_off = bld.muli(n_tile, tile_stride)
+    a_lane_base = bld.ptr_add(a_arg, bld.addi(m_tile_off, lane_row_off))
+    b_lane_base = bld.ptr_add(b_arg, bld.addi(n_tile_off, lane_row_off))
 
     # C output offset (in f32 elements):
     # total_wave_id = (wg_m * N_blocks + wg_n) * waves_per_wg + wave_id_in_wg
     # c_off = total_wave_id * 256  (256 = 1 << 8)
-    wg_linear = bld.binary(
-        "addi",
-        bld.binary("muli", bld.splat(wg_m), _splat_const(bld, cfg.N_blocks)),
+    wg_linear = bld.addi(
+        bld.muli(bld.splat(wg_m), _splat_const(bld, cfg.N_blocks)),
         bld.splat(wg_n),
     )
-    wave_offset_within_grid = bld.binary(
-        "muli", wg_linear, _splat_const(bld, cfg.waves_per_workgroup)
+    wave_offset_within_grid = bld.muli(
+        wg_linear, _splat_const(bld, cfg.waves_per_workgroup)
     )
-    total_wave_id = bld.binary("addi", wave_offset_within_grid, wave_id)
-    c_off = bld.binary("shli", total_wave_id, _splat_const(bld, 8))
+    total_wave_id = bld.addi(wave_offset_within_grid, wave_id)
+    c_off = bld.shli(total_wave_id, _splat_const(bld, 8))
     c_ptr = bld.ptr_add(c_arg, c_off)
 
     return _TileCoords(
@@ -264,15 +261,12 @@ def _emit_lds_staging(
     """
     reg_simd_type = dsl.simd_type(dsl.vector_type(8, dsl.i32()), width=32)
     lds = bld.lds_base()
-    wave_slot_base = bld.binary(
-        "muli", coords.wave_id, _splat_const(bld, _LDS_DWORDS_PER_FRAG)
-    )
-    lane_in_slot = bld.binary("shli", coords.lane, _splat_const(bld, 3))
-    a_lds_off = bld.binary("addi", wave_slot_base, lane_in_slot)
+    wave_slot_base = bld.muli(coords.wave_id, _splat_const(bld, _LDS_DWORDS_PER_FRAG))
+    lane_in_slot = bld.shli(coords.lane, _splat_const(bld, 3))
+    a_lds_off = bld.addi(wave_slot_base, lane_in_slot)
     b_slot_offset = _splat_const(bld, cfg.waves_per_workgroup * _LDS_DWORDS_PER_FRAG)
-    b_lds_off = bld.binary(
-        "addi",
-        bld.binary("addi", b_slot_offset, wave_slot_base),
+    b_lds_off = bld.addi(
+        bld.addi(b_slot_offset, wave_slot_base),
         lane_in_slot,
     )
     return _LdsStaging(

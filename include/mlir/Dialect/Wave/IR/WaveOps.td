@@ -135,6 +135,60 @@ def Wave_BinaryOp : Wave_Op<"binary", [Pure]> {
   let hasVerifier = 1;
 }
 
+//===----------------------------------------------------------------------===//
+// Width-independent integer arithmetic over uniform-or-SIMD operands.
+//
+// Each op accepts a signless integer or `!wave.simd<iN, W>` per operand.
+// Element bit-widths must agree across operands; SIMD wave widths must
+// agree across SIMD operands. The result is `!wave.simd<iN, W>` if any
+// operand is SIMD, otherwise the bare `iN`.
+//
+// Lowering to WaveMachine picks the per-target instruction sequence
+// based on width and uniformity. Only i32 ships today; other widths
+// fail at selection with a clear diagnostic. Unsigned variants
+// (addui/mului/shlui) will follow when needed -- for these three
+// operations the two's-complement bits are identical to the signed
+// case, so the upstream MLIR convention (no sign suffix) applies.
+//===----------------------------------------------------------------------===//
+
+class Wave_IntBinaryArith<string mnemonic> : Wave_Op<mnemonic, [Pure]> {
+  let arguments = (ins AnyType:$lhs, AnyType:$rhs);
+  let results = (outs AnyType:$result);
+  let assemblyFormat = [{
+    $lhs `,` $rhs attr-dict
+    `:` type($lhs) `,` type($rhs) `->` type($result)
+  }];
+  let hasVerifier = 1;
+}
+
+def Wave_AddiOp : Wave_IntBinaryArith<"addi"> {
+  let summary = "integer add over uniform or SIMD operands";
+  let description = [{
+    Two's-complement addition. Mixed uniform / SIMD is legal: the result
+    follows the SIMD operand's wave width. Lowers per-target to
+    `s_add_i32`, `v_add_u32`, or their wider equivalents.
+  }];
+}
+
+def Wave_MuliOp : Wave_IntBinaryArith<"muli"> {
+  let summary = "integer multiply (low) over uniform or SIMD operands";
+  let description = [{
+    Two's-complement multiply, low half. Sign is bit-identical to
+    unsigned mul-low so no `s`/`u` suffix. Lowers per-target to
+    `s_mul_i32`, `v_mul_lo_u32`, or wider equivalents.
+  }];
+}
+
+def Wave_ShliOp : Wave_IntBinaryArith<"shli"> {
+  let summary = "logical left shift over uniform or SIMD operands";
+  let description = [{
+    Shift `$lhs` left by `$rhs` bits. The shift amount must have the
+    same element bit-width as `$lhs`. Behaviour for shift amounts equal
+    to or exceeding the element width is target-defined; producers
+    should mask before shifting if they care.
+  }];
+}
+
 def Wave_CmpIOp : Wave_Op<"cmpi", [Pure]> {
   let summary = "lane-wise integer comparison";
   let description = [{

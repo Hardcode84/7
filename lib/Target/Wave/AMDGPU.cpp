@@ -608,6 +608,16 @@ private:
                     {toMCOperand(op.getResult(0)),
                      toMCOperand(op.getOperand(0)),
                      toMCOperand(op.getOperand(1))});
+    if (isa<wavemachine::SMulI32Op>(op))
+      return emitMC(llvm::AMDGPU::S_MUL_I32_gfx11,
+                    {toMCOperand(op.getResult(0)),
+                     toMCOperand(op.getOperand(0)),
+                     toMCOperand(op.getOperand(1))});
+    if (isa<wavemachine::SLshlB32Op>(op))
+      return emitMC(llvm::AMDGPU::S_LSHL_B32_gfx11,
+                    {toMCOperand(op.getResult(0)),
+                     toMCOperand(op.getOperand(0)),
+                     toMCOperand(op.getOperand(1))});
     if (isa<wavemachine::SCmpLtI32Op>(op))
       return emitMC(
           llvm::AMDGPU::S_CMP_LT_I32_gfx11,

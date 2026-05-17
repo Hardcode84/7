@@ -115,6 +115,84 @@ LogicalResult BinaryOp::verify() {
   return success();
 }
 
+namespace {
+// Operand shape for the width-independent arith ops: element bit-width
+// plus an optional SIMD wave width (nullopt = uniform scalar).
+struct WaveArithOperandShape {
+  unsigned elementBits;
+  std::optional<int64_t> simdWidth;
+};
+} // namespace
+
+static FailureOr<WaveArithOperandShape> classifyWaveArithOperand(
+    Type type, function_ref<InFlightDiagnostic(const Twine &)> emitError) {
+  if (auto intTy = dyn_cast<IntegerType>(type)) {
+    if (!intTy.isSignless())
+      return emitError("integer operand must be signless");
+    return WaveArithOperandShape{intTy.getWidth(), std::nullopt};
+  }
+  if (auto simdTy = dyn_cast<SimdType>(type)) {
+    auto eltIntTy = dyn_cast<IntegerType>(simdTy.getElementType());
+    if (!eltIntTy || !eltIntTy.isSignless())
+      return emitError("SIMD operand element type must be a signless integer");
+    return WaveArithOperandShape{eltIntTy.getWidth(), simdTy.getWidth()};
+  }
+  return emitError("operand must be a signless integer or !wave.simd<iN, W>");
+}
+
+static LogicalResult verifyWaveArithResult(
+    Type resultType, unsigned elementBits, std::optional<int64_t> simdWidth,
+    function_ref<InFlightDiagnostic(const Twine &)> emitError) {
+  if (simdWidth) {
+    auto simdTy = dyn_cast<SimdType>(resultType);
+    if (!simdTy)
+      return emitError(
+          "result must be SIMD because at least one operand is SIMD");
+    if (simdTy.getWidth() != *simdWidth)
+      return emitError("result SIMD wave width must match operands");
+    auto eltIntTy = dyn_cast<IntegerType>(simdTy.getElementType());
+    if (!eltIntTy || eltIntTy.getWidth() != elementBits)
+      return emitError("result SIMD element width must match operands");
+    return success();
+  }
+  auto intTy = dyn_cast<IntegerType>(resultType);
+  if (!intTy || intTy.getWidth() != elementBits)
+    return emitError(
+        "result must be a signless integer with the operand element width");
+  return success();
+}
+
+static LogicalResult verifyWaveIntBinaryArith(Operation *op, Type lhsTy,
+                                              Type rhsTy, Type resultTy) {
+  auto emit = [op](const Twine &msg) { return op->emitOpError(msg); };
+  auto lhs = classifyWaveArithOperand(lhsTy, emit);
+  auto rhs = classifyWaveArithOperand(rhsTy, emit);
+  if (failed(lhs) || failed(rhs))
+    return failure();
+  if (lhs->elementBits != rhs->elementBits)
+    return emit("operand element bit-widths must match");
+  if (lhs->simdWidth && rhs->simdWidth && *lhs->simdWidth != *rhs->simdWidth)
+    return emit("SIMD wave widths must match across operands");
+  std::optional<int64_t> resultSimd =
+      lhs->simdWidth ? lhs->simdWidth : rhs->simdWidth;
+  return verifyWaveArithResult(resultTy, lhs->elementBits, resultSimd, emit);
+}
+
+LogicalResult AddiOp::verify() {
+  return verifyWaveIntBinaryArith(getOperation(), getLhs().getType(),
+                                  getRhs().getType(), getResult().getType());
+}
+
+LogicalResult MuliOp::verify() {
+  return verifyWaveIntBinaryArith(getOperation(), getLhs().getType(),
+                                  getRhs().getType(), getResult().getType());
+}
+
+LogicalResult ShliOp::verify() {
+  return verifyWaveIntBinaryArith(getOperation(), getLhs().getType(),
+                                  getRhs().getType(), getResult().getType());
+}
+
 LogicalResult CmpIOp::verify() {
   auto lhsType = cast<SimdType>(getLhs().getType());
   auto rhsType = cast<SimdType>(getRhs().getType());

@@ -7,8 +7,8 @@ func.func @wave_ops(%pred: i1, %value: i32, %out: !wave.ptr<i32, #wave.global>) 
   %lane = wave.lane_id : !wave.simd<i32, 32>
   // CHECK: wave.splat
   %vvalue = wave.splat %value : i32 -> !wave.simd<i32, 32>
-  // CHECK: wave.binary
-  %sum = wave.binary "addi" %lane, %vvalue : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  // CHECK: wave.addi
+  %sum = wave.addi %lane, %vvalue : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
   // CHECK: wave.cmpi
   %mask = wave.cmpi ult %lane, %vvalue : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.mask<32>
   // CHECK: wave.subgroup_id
@@ -43,6 +43,35 @@ func.func @wave_ops(%pred: i1, %value: i32, %out: !wave.ptr<i32, #wave.global>) 
   } : !wave.mask<32>
 
   func.return %first : i32
+}
+
+// CHECK-LABEL: func.func @wave_int_arith
+func.func @wave_int_arith(%uA: i32, %uB: i32, %vA: !wave.simd<i32, 32>, %vB: !wave.simd<i32, 32>) {
+  // Uniform-uniform: result is the bare iN.
+  // CHECK: wave.addi {{.*}} : i32, i32 -> i32
+  %0 = wave.addi %uA, %uB : i32, i32 -> i32
+  // CHECK: wave.muli {{.*}} : i32, i32 -> i32
+  %1 = wave.muli %uA, %uB : i32, i32 -> i32
+  // CHECK: wave.shli {{.*}} : i32, i32 -> i32
+  %2 = wave.shli %uA, %uB : i32, i32 -> i32
+
+  // SIMD-SIMD: result is SIMD<iN, W>.
+  // CHECK: wave.addi {{.*}} : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  %3 = wave.addi %vA, %vB : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+
+  // Mixed: SIMD operand pins the result width.
+  // CHECK: wave.addi {{.*}} : i32, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  %4 = wave.addi %uA, %vA : i32, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  // CHECK: wave.muli {{.*}} : !wave.simd<i32, 32>, i32 -> !wave.simd<i32, 32>
+  %5 = wave.muli %vA, %uA : !wave.simd<i32, 32>, i32 -> !wave.simd<i32, 32>
+
+  // i64 surface is type-system legal even though lowering rejects it.
+  %u64a = arith.constant 1 : i64
+  %u64b = arith.constant 2 : i64
+  // CHECK: wave.addi {{.*}} : i64, i64 -> i64
+  %6 = wave.addi %u64a, %u64b : i64, i64 -> i64
+
+  func.return
 }
 
 // CHECK-LABEL: func.func @wave_index_expr

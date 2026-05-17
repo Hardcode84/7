@@ -239,6 +239,9 @@ private:
         .Case<WorkitemIdOp>([&](auto o) { return selectWorkitemId(o); })
         .Case<SplatOp>([&](auto o) { return selectSplat(o); })
         .Case<BinaryOp>([&](auto o) { return selectBinary(o); })
+        .Case<AddiOp>([&](auto o) { return selectAddi(o); })
+        .Case<MuliOp>([&](auto o) { return selectMuli(o); })
+        .Case<ShliOp>([&](auto o) { return selectShli(o); })
         .Case<IndexExprOp>([&](auto o) { return selectIndexExpr(o); })
         .Case<CmpIOp>([&](auto o) { return selectCmp(o); })
         .Case<BallotOp>([&](auto o) { return selectBallot(o); })
@@ -338,26 +341,26 @@ private:
   }
 
   LogicalResult selectBinary(BinaryOp op) {
+    // addi / muli / shli have moved to dedicated wave.addi / muli / shli
+    // ops with full uniform-and-SIMD support; reject those kinds here so
+    // stragglers fail loudly instead of silently going through the old
+    // SIMD-only path.
     StringRef machineOpcode = llvm::StringSwitch<StringRef>(op.getKind())
-                                  .Case("addi", "v_add_u32")
                                   .Case("andi", "v_and_b32")
                                   .Case("ori", "v_or_b32")
                                   .Case("xori", "v_xor_b32")
-                                  .Case("shli", "v_lshlrev_b32")
                                   .Case("shri", "v_lshrrev_b32")
-                                  .Case("muli", "v_mul_lo_u32")
                                   .Default("");
     if (machineOpcode.empty())
-      return op.emitError("unsupported wave.binary kind");
+      return op.emitError("unsupported wave.binary kind '")
+             << op.getKind()
+             << "' (addi/muli/shli migrated to wave.addi/wave.muli/wave.shli)";
     Value lhs = expect(op.getLhs(), op);
     Value rhs = expect(op.getRhs(), op);
-    // The e32 (VOP2) shift/commutative ops place `vsrc1` in a slot that
-    // must be a VGPR -- materialize operands that would otherwise land
-    // in vsrc1 as an SGPR or literal. `v_mul_lo_u32` is VOP3-only so
-    // it has no such restriction.
-    if (machineOpcode == "v_lshlrev_b32" || machineOpcode == "v_lshrrev_b32") {
+    // VOP2 shift / commutative ops require `vsrc1` to be a VGPR.
+    if (machineOpcode == "v_lshrrev_b32") {
       lhs = ensureVGPRForVSrc1(op.getLoc(), lhs);
-    } else if (machineOpcode != "v_mul_lo_u32") {
+    } else {
       if (isImm(rhs))
         rhs = ensureVGPRForVSrc1(op.getLoc(), rhs);
       if (!isVGPR(lhs) && !isVGPR(rhs))
@@ -365,6 +368,86 @@ private:
     }
     values[op.getResult()] =
         createInstr(builder, op.getLoc(), machineOpcode, {lhs, rhs},
+                    getRegType(op.getContext(), wavemachine::RegClass::VGPR));
+    eraseIfTopLevel(op);
+    return success();
+  }
+
+  // Element bit-width of an iN or !wave.simd<iN, W> type. Caller has
+  // already verified the type is one of these via the op verifier.
+  unsigned waveArithElementBits(Type type) {
+    if (auto simd = dyn_cast<SimdType>(type))
+      return simd.getElementType().getIntOrFloatBitWidth();
+    return cast<IntegerType>(type).getWidth();
+  }
+
+  // Common shape check across the new width-independent arith ops:
+  // require i32 today, fail with a clear diagnostic for anything else.
+  LogicalResult requireI32(Operation *op, Type resultTy, StringRef mnemonic) {
+    unsigned bits = waveArithElementBits(resultTy);
+    if (bits == 32)
+      return success();
+    return op->emitError("WaveMachine backend only supports i32 wave.")
+           << mnemonic << " today (got i" << bits << ")";
+  }
+
+  LogicalResult selectAddi(AddiOp op) {
+    if (failed(requireI32(op, op.getResult().getType(), "addi")))
+      return failure();
+    Value lhs = expect(op.getLhs(), op);
+    Value rhs = expect(op.getRhs(), op);
+    if (!isa<SimdType>(op.getResult().getType())) {
+      // Uniform i32 add: s_add_i32 (with a dead SCC result).
+      Operation *added =
+          createWMOp(builder, op.getLoc(), "s_add_i32", {lhs, rhs},
+                     {getRegType(op.getContext(), wavemachine::RegClass::SGPR),
+                      getSCCType(op.getContext())});
+      values[op.getResult()] = added->getResult(0);
+      eraseIfTopLevel(op);
+      return success();
+    }
+    // SIMD or mixed: v_add_u32 with the existing SGPR-in-vsrc0 shuffle.
+    values[op.getResult()] = addByteOffsets(op.getLoc(), lhs, rhs);
+    eraseIfTopLevel(op);
+    return success();
+  }
+
+  LogicalResult selectMuli(MuliOp op) {
+    if (failed(requireI32(op, op.getResult().getType(), "muli")))
+      return failure();
+    Value lhs = expect(op.getLhs(), op);
+    Value rhs = expect(op.getRhs(), op);
+    if (!isa<SimdType>(op.getResult().getType())) {
+      values[op.getResult()] =
+          createInstr(builder, op.getLoc(), "s_mul_i32", {lhs, rhs},
+                      getRegType(op.getContext(), wavemachine::RegClass::SGPR));
+      eraseIfTopLevel(op);
+      return success();
+    }
+    // v_mul_lo_u32 is VOP3, operand placement is unconstrained.
+    values[op.getResult()] =
+        createInstr(builder, op.getLoc(), "v_mul_lo_u32", {lhs, rhs},
+                    getRegType(op.getContext(), wavemachine::RegClass::VGPR));
+    eraseIfTopLevel(op);
+    return success();
+  }
+
+  LogicalResult selectShli(ShliOp op) {
+    if (failed(requireI32(op, op.getResult().getType(), "shli")))
+      return failure();
+    Value lhs = expect(op.getLhs(), op);
+    Value rhs = expect(op.getRhs(), op);
+    if (!isa<SimdType>(op.getResult().getType())) {
+      values[op.getResult()] =
+          createInstr(builder, op.getLoc(), "s_lshl_b32", {lhs, rhs},
+                      getRegType(op.getContext(), wavemachine::RegClass::SGPR));
+      eraseIfTopLevel(op);
+      return success();
+    }
+    // VOP2 v_lshlrev_b32: shift amount in src0, value (vsrc1) must be VGPR.
+    lhs = ensureVGPRForVSrc1(op.getLoc(), lhs);
+    values[op.getResult()] =
+        createInstr(builder, op.getLoc(), "v_lshlrev_b32", {rhs, lhs},
                     getRegType(op.getContext(), wavemachine::RegClass::VGPR));
     eraseIfTopLevel(op);
     return success();

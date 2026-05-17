@@ -129,10 +129,7 @@ struct BinaryLowering : OpRewritePattern<BinaryOp> {
       return failure();
     StringRef kind = op.getKind();
     Value result;
-    if (kind == "addi")
-      result = arith::AddIOp::create(rewriter, op.getLoc(), op.getLhs(),
-                                     op.getRhs());
-    else if (kind == "andi")
+    if (kind == "andi")
       result = arith::AndIOp::create(rewriter, op.getLoc(), op.getLhs(),
                                      op.getRhs());
     else if (kind == "ori")
@@ -141,15 +138,35 @@ struct BinaryLowering : OpRewritePattern<BinaryOp> {
     else if (kind == "xori")
       result = arith::XOrIOp::create(rewriter, op.getLoc(), op.getLhs(),
                                      op.getRhs());
-    else if (kind == "shli")
-      result = arith::ShLIOp::create(rewriter, op.getLoc(), op.getLhs(),
-                                     op.getRhs());
     else
       return rewriter.notifyMatchFailure(op, "unsupported wave binary kind");
     rewriter.replaceOp(op, result);
     return success();
   }
 };
+
+// Uniform-scalar fast path for the new wave.addi / muli / shli ops:
+// rewrite to upstream arith. SIMD-operand cases fall through here and
+// pick up a different lowering layer that knows about lane scattering.
+template <typename WaveOp, typename ArithOp>
+struct IntBinaryArithLowering : OpRewritePattern<WaveOp> {
+  using OpRewritePattern<WaveOp>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(WaveOp op,
+                                PatternRewriter &rewriter) const override {
+    if (isa<SimdType>(op.getLhs().getType()) ||
+        isa<SimdType>(op.getRhs().getType()))
+      return failure();
+    Value result =
+        ArithOp::create(rewriter, op.getLoc(), op.getLhs(), op.getRhs());
+    rewriter.replaceOp(op, result);
+    return success();
+  }
+};
+
+using AddiLowering = IntBinaryArithLowering<AddiOp, arith::AddIOp>;
+using MuliLowering = IntBinaryArithLowering<MuliOp, arith::MulIOp>;
+using ShliLowering = IntBinaryArithLowering<ShliOp, arith::ShLIOp>;
 
 struct CmpILowering : OpRewritePattern<CmpIOp> {
   using OpRewritePattern<CmpIOp>::OpRewritePattern;
@@ -228,7 +245,8 @@ struct ConvertWaveToROCDLPass
       return signalPassFailure();
 
     RewritePatternSet computePatterns(&getContext());
-    computePatterns.add<BinaryLowering, CmpILowering>(&getContext());
+    computePatterns.add<BinaryLowering, CmpILowering, AddiLowering,
+                        MuliLowering, ShliLowering>(&getContext());
     if (failed(
             applyPatternsGreedily(getOperation(), std::move(computePatterns))))
       return signalPassFailure();

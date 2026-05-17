@@ -56,6 +56,46 @@ func.func @load_bad_ptr_kind(%p: i64) {
 
 // -----
 
+func.func @addi_width_mismatch(%a: i32, %b: i64) {
+  // expected-error @+1 {{operand element bit-widths must match}}
+  %0 = wave.addi %a, %b : i32, i64 -> i32
+  return
+}
+
+// -----
+
+func.func @addi_simd_width_mismatch(%a: !wave.simd<i32, 32>, %b: !wave.simd<i32, 64>) {
+  // expected-error @+1 {{SIMD wave widths must match}}
+  %0 = wave.addi %a, %b : !wave.simd<i32, 32>, !wave.simd<i32, 64> -> !wave.simd<i32, 32>
+  return
+}
+
+// -----
+
+func.func @addi_simd_result_required(%a: !wave.simd<i32, 32>, %b: i32) {
+  // expected-error @+1 {{result must be SIMD because at least one operand is SIMD}}
+  %0 = wave.addi %a, %b : !wave.simd<i32, 32>, i32 -> i32
+  return
+}
+
+// -----
+
+func.func @addi_uniform_result_int(%a: i32, %b: i32) {
+  // expected-error @+1 {{result must be a signless integer}}
+  %0 = "wave.addi"(%a, %b) : (i32, i32) -> !wave.simd<i32, 32>
+  return
+}
+
+// -----
+
+func.func @muli_simd_element_bits(%a: !wave.simd<i32, 32>, %b: !wave.simd<i32, 32>) {
+  // expected-error @+1 {{result SIMD element width must match operands}}
+  %0 = "wave.muli"(%a, %b) : (!wave.simd<i32, 32>, !wave.simd<i32, 32>) -> !wave.simd<i64, 32>
+  return
+}
+
+// -----
+
 func.func @index_expr_count_mismatch(%lane: !wave.simd<i32, 32>) {
   // expected-error @+1 {{expected one name per binding}}
   %v = wave.index_expr #wave.expr<"lid"> ["lid", "x"] (%lane) : (!wave.simd<i32, 32>) -> !wave.index<32>

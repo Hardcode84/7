@@ -503,6 +503,29 @@ def WaveMachine_SAddI32Op : WaveMachine_Op<"s_add_i32", [Pure]> {
   let assemblyFormat = "$lhs `,` $rhs attr-dict `:` functional-type(operands, results)";
 }
 
+// Signed scalar 32-bit multiply. AMDGPU `s_mul_i32` does not set SCC, so
+// there's no carry-out result to model; callers that need the high half
+// or unsigned behaviour will get separate ops later.
+def WaveMachine_SMulI32Op : WaveMachine_Op<"s_mul_i32", [Pure]> {
+  let summary = "scalar 32-bit signed multiply (low half)";
+  let arguments = (ins WaveMachine_SGPR1OrImm:$lhs,
+                       WaveMachine_SGPR1OrImm:$rhs);
+  let results = (outs WaveMachine_SGPR1:$result);
+  let assemblyFormat = "$lhs `,` $rhs attr-dict `:` functional-type(operands, results)";
+}
+
+// Scalar 32-bit logical left shift. `s_lshl_b32` does set SCC, but the
+// offset-math path that uses this op throws the SCC away; model it as
+// SCC-clobbering rather than SCC-producing so consumers can't reach for
+// it accidentally.
+def WaveMachine_SLshlB32Op : WaveMachine_Op<"s_lshl_b32", [Pure]> {
+  let summary = "scalar 32-bit logical left shift";
+  let arguments = (ins WaveMachine_SGPR1OrImm:$lhs,
+                       WaveMachine_SGPR1OrImm:$rhs);
+  let results = (outs WaveMachine_SGPR1:$result);
+  let assemblyFormat = "$lhs `,` $rhs attr-dict `:` functional-type(operands, results)";
+}
+
 def WaveMachine_SCmpLtI32Op : WaveMachine_Op<"s_cmp_lt_i32", [Pure]> {
   let summary = "scalar signed less-than compare (sets SCC)";
   let arguments = (ins

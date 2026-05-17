@@ -199,6 +199,21 @@ def _current_context() -> Context:
     return Context.current
 
 
+def _arith_result_type(lhs: Value, rhs: Value) -> Type:
+    """Infer the result type for `wave.addi`/`muli`/`shli`.
+
+    Result is SIMD if any operand is SIMD; element type follows the
+    operands' shared bit-width (we trust the verifier to reject
+    mismatches).
+    """
+    lhs_simd = SimdType.isinstance(lhs.type)
+    rhs_simd = SimdType.isinstance(rhs.type)
+    if not (lhs_simd or rhs_simd):
+        return lhs.type
+    simd = SimdType(lhs.type if lhs_simd else rhs.type)
+    return simd_type(simd.element_type, simd.width)
+
+
 def _binding_lane_width(values: Iterable[Value]) -> int:
     """Reduce binding operand types to a single non-zero lane width.
 
@@ -410,6 +425,15 @@ class FunctionBuilder:
 
     def binary(self, kind: str, lhs: Value, rhs: Value) -> Value:
         return wave.BinaryOp(lhs.type, kind, lhs, rhs).result
+
+    def addi(self, lhs: Value, rhs: Value) -> Value:
+        return wave.AddiOp(_arith_result_type(lhs, rhs), lhs, rhs).result
+
+    def muli(self, lhs: Value, rhs: Value) -> Value:
+        return wave.MuliOp(_arith_result_type(lhs, rhs), lhs, rhs).result
+
+    def shli(self, lhs: Value, rhs: Value) -> Value:
+        return wave.ShliOp(_arith_result_type(lhs, rhs), lhs, rhs).result
 
     def index_expr(
         self,
