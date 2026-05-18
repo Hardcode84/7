@@ -241,12 +241,9 @@ private:
     APInt smaxBound = APInt::getSignedMaxValue(w);
     if (range.smin() == sminBound && range.smax() == smaxBound)
       return std::nullopt;
-    sym::Store &store = func->getParentOfType<ModuleOp>()
-                            ->getContext()
-                            ->getOrLoadDialect<WaveDialect>()
-                            ->getSymbolStore();
-    auto handle = sym::rangeAssumption(store, name, range.smin().getSExtValue(),
-                                       range.smax().getSExtValue());
+    auto handle =
+        sym::rangeAssumption(symbolStore(), name, range.smin().getSExtValue(),
+                             range.smax().getSExtValue());
     if (failed(handle))
       return std::nullopt;
     return *handle;
@@ -346,10 +343,7 @@ private:
   }
 
   sym::Store &symbolStore() {
-    return func->getParentOfType<ModuleOp>()
-        ->getContext()
-        ->getOrLoadDialect<WaveDialect>()
-        ->getSymbolStore();
+    return func.getContext()->getLoadedDialect<WaveDialect>()->getSymbolStore();
   }
 
   // True iff `expr` provably stays in unsigned 32-bit (`[0, 2^32 - 1]`)
@@ -1446,10 +1440,9 @@ private:
       if (std::optional<sym::PredHandle> a = bindingAssumption(binding, key))
         assumptions.push_back(*a);
     }
-    sym::Store &store = symbolStore();
     sym::ExprHandle exprHandle{op.getExpr().getNode()};
     FailureOr<sym::ExprHandle> simplified =
-        sym::simplifyExpr(store, exprHandle, assumptions);
+        sym::simplifyExpr(symbolStore(), exprHandle, assumptions);
     ::ixs_node *root = const_cast<::ixs_node *>(
         succeeded(simplified) ? simplified->raw() : exprHandle.raw());
     OffsetTriple triple{};
