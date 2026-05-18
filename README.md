@@ -1,68 +1,67 @@
 # wave-mlir
 
-Standalone MLIR **Wave** dialect: an explicit wave-level programming model for
-AMDGPU, extracted from an in-tree LLVM/MLIR prototype.
+Standalone MLIR **Wave** dialect: an explicit wave-level programming model
+for AMDGPU. The dialect preserves uniformity, lane masks, wave size, and
+memory ordering as first-class IR facts, and lowers through an
+inspectable WaveMachine dialect to AMDGPU assembly.
 
-Status: code imported from `llvm/llvm-project` branch `wave-dsl`
-(tip `469ba96be262`). CMake glue is wired but **the build is not yet
-green out-of-tree** — see "Known build deps" below.
+The design rationale is in [`docs/AMDGPUExplicitWaveProgrammingModel.md`].
+
+## What's in here
+
+- `Wave` dialect — explicit wave-level ops (lane id, work-group id, masks,
+  ballots, lane permutations, structured `where`, symbolic offset
+  algebra via `wave.index_expr`, memory ops with explicit tokens, WMMA
+  fragments).
+- `WaveAMD` dialect — AMDGPU-specific extensions (`make_buffer`,
+  WMMA opcodes, register class hints).
+- `WaveMachine` dialect — inspectable machine-level IR after wave-to-amdgpu
+  selection: explicit SGPR / VGPR / mask / memory-token operands, every
+  pass-pipeline stage is a printable IR boundary.
+- Transform passes: selection (`waveamd-to-wavemachine`), ABI lowering,
+  register allocation, hazard / waitcnt insertion, resource info, HSA
+  metadata, GPU binary emission.
+- `wave-opt` and `wave-translate` tools wired with the full pipeline,
+  plus `wave-symbols-test` for the symbolic-offset smoke test.
+- Python bindings (`mlir.dialects.wave`, `mlir.dialects.waveamd`,
+  `mlir.dialects.wave_dsl`) and a tiled-WMMA matmul kernel in
+  `examples/wave/wmma_matmul_tiled.py` that runs end-to-end on
+  gfx1100.
 
 ## Layout
 
-Mirrors the in-tree MLIR layout so that `#include "mlir/Dialect/Wave/..."`
-references resolve without rewriting:
-
 ```
-include/mlir/Dialect/Wave/        # Wave dialect IR + transforms (.h / .td)
-include/mlir/Dialect/WaveMachine/ # WaveMachine machine-level dialect
-include/mlir/Target/Wave/         # AMDGPU translation entry points
-lib/Dialect/Wave/{IR,Transforms}/ # Dialect impl, WaveAMD* passes,
-                                  # WaveToGPU, WaveToROCDL, WaveMachine,
-                                  # waitcnt
-lib/Dialect/WaveMachine/IR/       # WaveMachine impl
-lib/Target/Wave/                  # AMDGPU assembly backend + translation
-python/mlir/dialects/             # Wave / WaveAMD bindings + wave_dsl tracer
+include/mlir/Dialect/Wave/        Wave dialect IR + transforms (.h / .td)
+include/mlir/Dialect/WaveMachine/ WaveMachine machine-level dialect
+include/Wave-c/                   CAPI (used by the Python bindings)
+lib/Dialect/Wave/{IR,Transforms}/ Dialect impl + waveamd-* passes
+lib/Dialect/WaveMachine/IR/       WaveMachine impl
+lib/Target/Wave/                  AMDGPU assembly backend + translation
+lib/CAPI/                         CAPI implementation
+python/                           Nanobind extension + wave_dsl builder
+runtime/                          libwave_runtime.so for mlir-runner tests
+tools/{wave-opt,wave-translate,wave-symbols-test}/
 test/{Dialect,Conversion,Target,Integration,python}/
-examples/wave/                    # small DSL examples
-docs/                             # Explicit Wave Programming Model proposal
+examples/wave/                    Small kernels + the tiled WMMA matmul
+third_party/ixsimpl/              Vendored symbolic-offset engine
+docs/                             Design proposal + scratch notes
 ```
-
-## Known build deps
-
-The imported transforms reach into AMDGPU internals that aren't part of
-the public MLIR/LLVM install surface — `lib/Target/AMDGPU/*` headers and
-their TableGen output. The top-level `CMakeLists.txt` points
-`LLVM_MAIN_SRC_DIR` and `LLVM_BINARY_DIR` at the bootstrap LLVM source
-and build trees (`build/_deps/llvm-project`, `build/llvm-build`) so the
-imported `target_include_directories(... lib/Target/AMDGPU)` lines
-resolve. Override `WAVE_LLVM_PROJECT_SRC_DIR` /
-`WAVE_LLVM_PROJECT_BUILD_DIR` if you bootstrapped LLVM elsewhere.
-
-`WaveAMDHazardWaits.cpp` originally referenced `llvm::AMDGPU::SNop` /
-`llvm::AMDGPU::SDelayAlu` helpers added by the (still-unmerged) upstream
-commit `6490bb708b51` "Share AMDGPU hazard delay encodings". Those
-helpers are vendored locally in that translation unit under
-`amdgpu_compat::`; once upstream lands, delete the vendored block and
-restore the `llvm::AMDGPU::` qualifications.
-
-Python bindings (`MLIR_ENABLE_BINDINGS_PYTHON`) and a `wave-opt` /
-`wave-translate` tool driver are TODO.
 
 ## Building
 
-LLVM/MLIR is pulled at the commit pinned in `llvm-commit.txt`. There is no
-submodule; the dep is fetched and built by a helper script.
+LLVM/MLIR is pulled at the commit pinned in `llvm-commit.txt` (no
+submodule; the dep is fetched and built by a helper script).
 
 ```bash
-# Fetch + build LLVM/MLIR into build/llvm-install (one-off, slow).
+# One-off: fetch + build LLVM/MLIR into build/llvm-install. Slow.
 python build_tools/build_llvm.py -j$(nproc)
 
-# Configure and build the dialect.
+# Configure and build wave-mlir.
 cmake -S . -B build -G Ninja
 cmake --build build
 ```
 
-Environment overrides (skip the bootstrap when you already have LLVM):
+Environment overrides for callers who already have a usable LLVM:
 
 | Variable | Meaning |
 |---|---|
@@ -70,9 +69,41 @@ Environment overrides (skip the bootstrap when you already have LLVM):
 | `LLVM_PROJECT_SOURCE_DIR` | existing `llvm-project` source checkout (will be built) |
 | `LLVM_COMMIT` | override the pinned commit |
 
+The transform layer reaches into AMDGPU backend internals
+(`lib/Target/AMDGPU/*` headers and their TableGen output), so the
+LLVM source and build trees stay reachable from the configure step.
+`WAVE_LLVM_PROJECT_SRC_DIR` / `WAVE_LLVM_PROJECT_BUILD_DIR` let you
+point at out-of-tree LLVM trees if the defaults under `build/_deps/`
+are not what you want.
+
+## Running
+
+`wave-opt` runs the Wave / WaveAMD / WaveMachine passes individually;
+`wave-translate --wave-to-amdgpu-asm` is the all-in-one frontend that
+emits AMDGPU assembly. The matmul example runs end-to-end through
+`mlir-runner` on an AMDGPU box with the ROCm runtime visible:
+
+```bash
+python examples/wave/wmma_matmul_tiled.py --m=64 --n=64 --k=48 --bm=2 --bn=2 --use-buffer \
+  | build/bin/wave-opt --wave-compile-kernels='chip=gfx1100' \
+                       --convert-scf-to-cf \
+                       --gpu-to-llvm=use-bare-pointers-for-kernels=true \
+                       --convert-to-llvm \
+                       --reconcile-unrealized-casts \
+  | build/llvm-install/bin/mlir-runner \
+      --shared-libs=build/llvm-install/lib/libmlir_rocm_runtime.so \
+      --shared-libs=build/llvm-install/lib/libmlir_runner_utils.so \
+      --shared-libs=build/lib/libwave_runtime.so \
+      --entry-point-result=void
+```
+
+The Python builder uses `ixsimpl` (vendored under `third_party/`) as
+the symbolic engine for `wave.index_expr`; see the
+"Symbolic Offset Algebra" section of the design doc.
+
 ## Development
 
-Pre-commit covers formatting and licensing checks:
+Pre-commit covers formatting, lint, licensing, and complexity checks:
 
 ```bash
 pip install pre-commit
@@ -80,6 +111,12 @@ pre-commit install
 pre-commit run --all-files
 ```
 
+Integration tests under `test/Integration/` need a real AMDGPU device
+and `mlir-runner` with the ROCm runtime; the rest of the lit suite is
+host-only.
+
 ## License
 
 Apache-2.0 with LLVM exception. See `LICENSE.TXT`.
+
+[`docs/AMDGPUExplicitWaveProgrammingModel.md`]: docs/AMDGPUExplicitWaveProgrammingModel.md
