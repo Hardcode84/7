@@ -809,30 +809,37 @@ private:
     if (isa<wavemachine::VReadfirstlaneB32Op>(op))
       return emitMC(llvm::AMDGPU::V_READFIRSTLANE_B32_gfx11,
                     {toMCOperand(result()), toMCOperand(op.getOperand(0))});
-    if (isa<wavemachine::GlobalStoreB32Op>(op))
-      return emitMC(
-          llvm::AMDGPU::GLOBAL_STORE_DWORD_SADDR_gfx11,
-          {toMCOperand(op.getOperand(0)), toMCOperand(op.getOperand(1)),
-           toMCOperand(op.getOperand(2)), llvm::MCOperand::createImm(0),
-           llvm::MCOperand::createImm(0)});
+    if (isa<wavemachine::GlobalStoreB32Op>(op)) {
+      int64_t instOffset = getIntAttr(&op, "inst_offset", 0);
+      return emitMC(llvm::AMDGPU::GLOBAL_STORE_DWORD_SADDR_gfx11,
+                    {toMCOperand(op.getOperand(0)),
+                     toMCOperand(op.getOperand(1)),
+                     toMCOperand(op.getOperand(2)),
+                     llvm::MCOperand::createImm(instOffset),
+                     llvm::MCOperand::createImm(0)});
+    }
     // GLOBAL_LOAD_DWORD_SADDR encodes its MC operands as
     //   vdst, saddr, vaddr, offset, cpol
     // -- the SADDR variants put the SGPR base first, unlike the *non*-SADDR
     // store variants we use elsewhere.
-    if (isa<wavemachine::GlobalLoadB32Op>(op))
-      return emitMC(
-          llvm::AMDGPU::GLOBAL_LOAD_DWORD_SADDR_gfx11,
-          {toMCOperand(op.getResult(0)), toMCOperand(op.getOperand(1)),
-           toMCOperand(op.getOperand(0)), llvm::MCOperand::createImm(0),
-           llvm::MCOperand::createImm(0)});
+    if (isa<wavemachine::GlobalLoadB32Op>(op)) {
+      int64_t instOffset = getIntAttr(&op, "inst_offset", 0);
+      return emitMC(llvm::AMDGPU::GLOBAL_LOAD_DWORD_SADDR_gfx11,
+                    {toMCOperand(op.getResult(0)),
+                     toMCOperand(op.getOperand(1)),
+                     toMCOperand(op.getOperand(0)),
+                     llvm::MCOperand::createImm(instOffset),
+                     llvm::MCOperand::createImm(0)});
+    }
     if (isa<wavemachine::GlobalLoadTupleB32Op>(op)) {
       auto regType = cast<wavemachine::RegType>(op.getResult(0).getType());
+      int64_t instOffset = getIntAttr(&op, "inst_offset", 0);
       for (unsigned i = 0, e = regType.getWidth(); i != e; ++i)
         if (failed(emitMC(llvm::AMDGPU::GLOBAL_LOAD_DWORD_SADDR_gfx11,
                           {toMCVGPRComponent(op.getResult(0), i),
                            toMCOperand(op.getOperand(1)),
                            toMCOperand(op.getOperand(0)),
-                           llvm::MCOperand::createImm(i * 4),
+                           llvm::MCOperand::createImm(instOffset + i * 4),
                            llvm::MCOperand::createImm(0)})))
           return failure();
       return success();
@@ -862,54 +869,72 @@ private:
     // `make_buffer_rsrc`, the per-lane VGPR offset is fed through
     // `vaddr` with the `offen` flag, and `soffset` is a hard-zero
     // immediate; `cpol` is the unset cache-policy.
-    if (isa<wavemachine::BufferStoreB32Op>(op))
+    // MUBUF OFFEN operand layout (MC):
+    //   STORE: vdata, vaddr, srsrc, soffset, offset, cpol
+    //   LOAD : vdst, vaddr, srsrc, soffset, offset, cpol
+    // Our IR layout (wavemachine):
+    //   STORE: offset(VGPR1), value(VGPR1), descriptor(SGPR4),
+    //          soffset(SGPR1OrImm), [dep], inst_offset attr
+    //   LOAD : offset(VGPR1), descriptor(SGPR4),
+    //          soffset(SGPR1OrImm), [dep], inst_offset attr
+    if (isa<wavemachine::BufferStoreB32Op>(op)) {
+      int64_t instOffset = getIntAttr(&op, "inst_offset", 0);
       return emitMC(
           llvm::AMDGPU::BUFFER_STORE_DWORD_OFFEN_gfx11,
           {toMCOperand(op.getOperand(1)), toMCOperand(op.getOperand(0)),
-           toMCOperand(op.getOperand(2)), llvm::MCOperand::createImm(0),
-           llvm::MCOperand::createImm(0), llvm::MCOperand::createImm(0)});
-    if (isa<wavemachine::BufferLoadB32Op>(op))
+           toMCOperand(op.getOperand(2)), toMCOperand(op.getOperand(3)),
+           llvm::MCOperand::createImm(instOffset),
+           llvm::MCOperand::createImm(0)});
+    }
+    if (isa<wavemachine::BufferLoadB32Op>(op)) {
+      int64_t instOffset = getIntAttr(&op, "inst_offset", 0);
       return emitMC(
           llvm::AMDGPU::BUFFER_LOAD_DWORD_OFFEN_gfx11,
           {toMCOperand(op.getResult(0)), toMCOperand(op.getOperand(0)),
-           toMCOperand(op.getOperand(1)), llvm::MCOperand::createImm(0),
-           llvm::MCOperand::createImm(0), llvm::MCOperand::createImm(0)});
+           toMCOperand(op.getOperand(1)), toMCOperand(op.getOperand(2)),
+           llvm::MCOperand::createImm(instOffset),
+           llvm::MCOperand::createImm(0)});
+    }
     // Tuple buffer loads expand into N consecutive `buffer_load_dword`
-    // instructions sharing the same vaddr / descriptor, with the
-    // per-component byte offset folded into the `offset:i*4` immediate.
+    // instructions sharing the same vaddr / descriptor / soffset, with
+    // the per-component byte offset folded into the
+    // `offset:(inst_offset + i*4)` immediate.
     if (isa<wavemachine::BufferLoadTupleB32Op>(op)) {
       auto regType = cast<wavemachine::RegType>(op.getResult(0).getType());
+      int64_t instOffset = getIntAttr(&op, "inst_offset", 0);
       for (unsigned i = 0, e = regType.getWidth(); i != e; ++i)
         if (failed(emitMC(llvm::AMDGPU::BUFFER_LOAD_DWORD_OFFEN_gfx11,
                           {toMCVGPRComponent(op.getResult(0), i),
                            toMCOperand(op.getOperand(0)),
                            toMCOperand(op.getOperand(1)),
-                           llvm::MCOperand::createImm(0),
-                           llvm::MCOperand::createImm(i * 4),
+                           toMCOperand(op.getOperand(2)),
+                           llvm::MCOperand::createImm(instOffset + i * 4),
                            llvm::MCOperand::createImm(0)})))
           return failure();
       return success();
     }
     if (isa<wavemachine::GlobalStoreTupleB32Op>(op)) {
       unsigned component = getIntAttr(&op, "component", 0);
+      int64_t instOffset = getIntAttr(&op, "inst_offset", 0);
       return emitMC(llvm::AMDGPU::GLOBAL_STORE_DWORD_SADDR_gfx11,
                     {toMCOperand(op.getOperand(0)),
                      toMCVGPRComponent(op.getOperand(1), component),
                      toMCOperand(op.getOperand(2)),
-                     llvm::MCOperand::createImm(component * 4),
+                     llvm::MCOperand::createImm(instOffset + component * 4),
                      llvm::MCOperand::createImm(0)});
     }
     if (isa<wavemachine::BufferStoreTupleB32Op>(op)) {
       // Mirror BufferStoreB32 in MUBUF OFFEN form: vdata, vaddr,
-      // srsrc, soffset (=0), offset:component*4, cpol (=0). vdata is
-      // the selected dword of the VGPR tuple.
+      // srsrc, soffset, offset:(inst_offset + component*4), cpol.
+      // vdata is the selected dword of the VGPR tuple.
       unsigned component = getIntAttr(&op, "component", 0);
+      int64_t instOffset = getIntAttr(&op, "inst_offset", 0);
       return emitMC(llvm::AMDGPU::BUFFER_STORE_DWORD_OFFEN_gfx11,
                     {toMCVGPRComponent(op.getOperand(1), component),
                      toMCOperand(op.getOperand(0)),
                      toMCOperand(op.getOperand(2)),
-                     llvm::MCOperand::createImm(0),
-                     llvm::MCOperand::createImm(component * 4),
+                     toMCOperand(op.getOperand(3)),
+                     llvm::MCOperand::createImm(instOffset + component * 4),
                      llvm::MCOperand::createImm(0)});
     }
     if (isa<wavemachine::DsLoadB32Op>(op))

@@ -49,15 +49,17 @@ func.func @missing_tuple_component(%offset: !wavemachine.reg<vgpr, 1>, %value: !
 // -----
 
 func.func @buffer_store_tuple_missing_component(%offset: !wavemachine.reg<vgpr, 1>, %value: !wavemachine.reg<vgpr, 4>, %desc: !wavemachine.reg<sgpr, 4>) {
+  %soff = wavemachine.imm 0 : !wavemachine.imm
   // expected-error @below {{requires a component attribute}}
-  %t = wavemachine.buffer_store_tuple_b32 %offset, %value, %desc : (!wavemachine.reg<vgpr, 1>, !wavemachine.reg<vgpr, 4>, !wavemachine.reg<sgpr, 4>) -> !wavemachine.mem.token
+  %t = wavemachine.buffer_store_tuple_b32 %offset, %value, %desc, %soff : (!wavemachine.reg<vgpr, 1>, !wavemachine.reg<vgpr, 4>, !wavemachine.reg<sgpr, 4>, !wavemachine.imm) -> !wavemachine.mem.token
   return
 }
 
 // -----
 
 func.func @buffer_store_tuple_oob_component(%offset: !wavemachine.reg<vgpr, 1>, %value: !wavemachine.reg<vgpr, 4>, %desc: !wavemachine.reg<sgpr, 4>) {
+  %soff = wavemachine.imm 0 : !wavemachine.imm
   // expected-error @below {{component must select a register in the value tuple}}
-  %t = wavemachine.buffer_store_tuple_b32 %offset, %value, %desc {component = 4 : i64} : (!wavemachine.reg<vgpr, 1>, !wavemachine.reg<vgpr, 4>, !wavemachine.reg<sgpr, 4>) -> !wavemachine.mem.token
+  %t = wavemachine.buffer_store_tuple_b32 %offset, %value, %desc, %soff {component = 4 : i64} : (!wavemachine.reg<vgpr, 1>, !wavemachine.reg<vgpr, 4>, !wavemachine.reg<sgpr, 4>, !wavemachine.imm) -> !wavemachine.mem.token
   return
 }

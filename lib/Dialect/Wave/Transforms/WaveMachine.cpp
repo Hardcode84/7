@@ -617,44 +617,57 @@ private:
     return success();
   }
 
+  LogicalResult selectSharedStore(StoreOp op, Value base, Value offset,
+                                  unsigned registers) {
+    Value addr = ensureVGPRForVSrc1(op.getLoc(),
+                                    addByteOffsets(op.getLoc(), base, offset));
+    SmallVector<Value> operands{addr, expect(op.getValue(), op)};
+    if (Value dependency = op.getDependency())
+      operands.push_back(expect(dependency, op));
+    StringRef opcode = registers == 1 ? "ds_store_b32" : "ds_store_tuple_b32";
+    Operation *store = createWMOp(builder, op.getLoc(), opcode, operands,
+                                  getMemTokenType(op.getContext()));
+    values[op.getToken()] = store->getResult(0);
+    eraseIfTopLevel(op);
+    return success();
+  }
+
+  LogicalResult selectGlobalOrBufferStore(StoreOp op, Value base, Value offset,
+                                          bool isBuffer, unsigned registers) {
+    if (registers != 1)
+      return op.emitError("global/buffer tuple stores are not supported by "
+                          "the WaveMachine backend yet");
+    SmallVector<Value> operands{offset, expect(op.getValue(), op), base};
+    if (isBuffer) {
+      // MUBUF buffer_store_b32 requires an explicit soffset slot.
+      // Pass a zero immediate when there's no S-bucket contribution;
+      // the bucketed lowering will populate this later.
+      operands.push_back(createImm(builder, op.getLoc(), 0));
+    }
+    if (Value dependency = op.getDependency())
+      operands.push_back(expect(dependency, op));
+    Operation *store =
+        createWMOp(builder, op.getLoc(),
+                   isBuffer ? "buffer_store_b32" : "global_store_b32", operands,
+                   getMemTokenType(op.getContext()));
+    values[op.getToken()] = store->getResult(0);
+    eraseIfTopLevel(op);
+    return success();
+  }
+
   LogicalResult selectStore(StoreOp op) {
     auto baseIt = pointerBases.find(op.getPtr());
     auto offsetIt = pointerOffsets.find(op.getPtr());
     auto bufferIt = pointerBuffers.find(op.getPtr());
     if (baseIt == pointerBases.end() || offsetIt == pointerOffsets.end())
       return op.emitError("WaveMachine backend expects selected wave pointer");
-    auto simdType = cast<SimdType>(op.getValue().getType());
-    unsigned registers = loadRegisterCount(simdType);
-    if (isSharedPointer(op.getPtr().getType())) {
-      Value addr = ensureVGPRForVSrc1(
-          op.getLoc(),
-          addByteOffsets(op.getLoc(), baseIt->second, offsetIt->second));
-      SmallVector<Value> operands{addr, expect(op.getValue(), op)};
-      if (Value dependency = op.getDependency())
-        operands.push_back(expect(dependency, op));
-      StringRef opcode = registers == 1 ? "ds_store_b32" : "ds_store_tuple_b32";
-      Operation *store = createWMOp(builder, op.getLoc(), opcode, operands,
-                                    getMemTokenType(op.getContext()));
-      values[op.getToken()] = store->getResult(0);
-      eraseIfTopLevel(op);
-      return success();
-    }
-    if (registers != 1)
-      return op.emitError("global/buffer tuple stores are not supported by "
-                          "the WaveMachine backend yet");
-    SmallVector<Value> operands{offsetIt->second, expect(op.getValue(), op),
-                                baseIt->second};
-    if (Value dependency = op.getDependency())
-      operands.push_back(expect(dependency, op));
-    Operation *store =
-        createWMOp(builder, op.getLoc(),
-                   bufferIt != pointerBuffers.end() && bufferIt->second
-                       ? "buffer_store_b32"
-                       : "global_store_b32",
-                   operands, getMemTokenType(op.getContext()));
-    values[op.getToken()] = store->getResult(0);
-    eraseIfTopLevel(op);
-    return success();
+    unsigned registers =
+        loadRegisterCount(cast<SimdType>(op.getValue().getType()));
+    if (isSharedPointer(op.getPtr().getType()))
+      return selectSharedStore(op, baseIt->second, offsetIt->second, registers);
+    bool isBuffer = bufferIt != pointerBuffers.end() && bufferIt->second;
+    return selectGlobalOrBufferStore(op, baseIt->second, offsetIt->second,
+                                     isBuffer, registers);
   }
 
   unsigned elementSizeBytes(Type type) {
@@ -1025,6 +1038,11 @@ private:
   LogicalResult selectGlobalOrBufferLoad(LoadOp op, Value base, Value offset,
                                          bool isBuffer, unsigned registers) {
     SmallVector<Value> operands{offset, base};
+    if (isBuffer) {
+      // MUBUF buffer_load_* requires an explicit soffset slot.
+      // Pass a zero immediate when there's no S-bucket contribution.
+      operands.push_back(createImm(builder, op.getLoc(), 0));
+    }
     if (Value dependency = op.getDependency())
       operands.push_back(expect(dependency, op));
     StringRef opcode;

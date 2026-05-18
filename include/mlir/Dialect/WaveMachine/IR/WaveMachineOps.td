@@ -327,11 +327,22 @@ def WaveMachine_SSetpcB64Op : WaveMachine_ZeroResult<"s_setpc_b64">;
 def WaveMachine_GlobalLoadB32Op
     : WaveMachine_Op<"global_load_b32", [WaveMachine_VMEMLoad]> {
   let summary = "global 32-bit load through an SGPR base";
+  let description = [{
+    Reads one 32-bit value from `base + offset + inst_offset` into the
+    result VGPR. `inst_offset` is folded into the instruction's
+    13-bit signed immediate slot; it defaults to 0. gfx11 GLOBAL has
+    no separate `soffset` slot -- any wave-uniform contribution must
+    be folded into `offset` by the producer.
+  }];
   let arguments = (ins WaveMachine_VGPR1:$offset, WaveMachine_SGPR2:$base,
-                       Optional<WaveMachine_MemToken>:$dependency);
+                       Optional<WaveMachine_MemToken>:$dependency,
+                       DefaultValuedAttr<I64Attr, "0">:$inst_offset);
   let results = (outs WaveMachine_VGPR1:$result,
                       Variadic<WaveMachine_MemToken>:$tokens);
-  let assemblyFormat = "$offset `,` $base (`after` $dependency^)? attr-dict `:` functional-type(operands, results)";
+  let assemblyFormat = [{
+    $offset `,` $base (`after` $dependency^)? (`offset` $inst_offset^)?
+    attr-dict `:` functional-type(operands, results)
+  }];
   let hasVerifier = 1;
 }
 
@@ -339,16 +350,21 @@ def WaveMachine_GlobalLoadTupleB32Op
     : WaveMachine_Op<"global_load_tuple_b32", [WaveMachine_VMEMLoad]> {
   let summary = "global load of N consecutive 32-bit values into a VGPR tuple";
   let description = [{
-    Loads `N` consecutive dwords from `base + offset + i*4` into the `N`
-    components of a single VGPR tuple result of width `N`. Expands to `N`
-    `global_load_dword` instructions in the AMDGPU printer; the tuple
-    width is therefore the result register width.
+    Loads `N` consecutive dwords from `base + offset + inst_offset +
+    i*4` into the `N` components of a single VGPR tuple result of
+    width `N`. Expands to `N` `global_load_dword` instructions in the
+    AMDGPU printer; the tuple width is therefore the result register
+    width.
   }];
   let arguments = (ins WaveMachine_VGPR1:$offset, WaveMachine_SGPR2:$base,
-                       Optional<WaveMachine_MemToken>:$dependency);
+                       Optional<WaveMachine_MemToken>:$dependency,
+                       DefaultValuedAttr<I64Attr, "0">:$inst_offset);
   let results = (outs WaveMachine_VGPR:$result,
                       Variadic<WaveMachine_MemToken>:$tokens);
-  let assemblyFormat = "$offset `,` $base (`after` $dependency^)? attr-dict `:` functional-type(operands, results)";
+  let assemblyFormat = [{
+    $offset `,` $base (`after` $dependency^)? (`offset` $inst_offset^)?
+    attr-dict `:` functional-type(operands, results)
+  }];
   let hasVerifier = 1;
 }
 
@@ -364,48 +380,89 @@ def WaveMachine_MakeBufferRsrcOp
 def WaveMachine_GlobalStoreB32Op
     : WaveMachine_Op<"global_store_b32", [WaveMachine_VMEMStore]> {
   let summary = "global 32-bit store through an SGPR base";
+  let description = [{
+    Stores `value` to `base + offset + inst_offset`. `inst_offset` is
+    folded into the instruction's 13-bit signed immediate slot;
+    defaults to 0.
+  }];
   let arguments = (ins WaveMachine_VGPR1:$offset, WaveMachine_RegOrImm:$value,
                        WaveMachine_SGPR2:$base,
-                       Optional<WaveMachine_MemToken>:$dependency);
+                       Optional<WaveMachine_MemToken>:$dependency,
+                       DefaultValuedAttr<I64Attr, "0">:$inst_offset);
   let results = (outs Variadic<WaveMachine_MemToken>:$tokens);
-  let assemblyFormat = "$offset `,` $value `,` $base (`after` $dependency^)? attr-dict `:` functional-type(operands, results)";
+  let assemblyFormat = [{
+    $offset `,` $value `,` $base (`after` $dependency^)?
+    (`offset` $inst_offset^)?
+    attr-dict `:` functional-type(operands, results)
+  }];
   let hasVerifier = 1;
 }
 def WaveMachine_BufferStoreB32Op
     : WaveMachine_Op<"buffer_store_b32", [WaveMachine_VMEMStore]> {
   let summary = "buffer 32-bit store through an SGPR descriptor and VGPR offset";
+  let description = [{
+    MUBUF OFFEN: stores `value` to `descriptor[offset + soffset +
+    inst_offset]`. `soffset` is the wave-uniform contribution (SGPR
+    or immediate); callers pass `wavemachine.imm 0` when there is no
+    S bucket. `inst_offset` folds into the instruction's 12-bit
+    signed immediate field and defaults to 0.
+  }];
   let arguments = (ins WaveMachine_VGPR1:$offset, WaveMachine_VGPR1:$value,
                        WaveMachine_SGPR4:$descriptor,
-                       Optional<WaveMachine_MemToken>:$dependency);
+                       WaveMachine_SGPR1OrImm:$soffset,
+                       Optional<WaveMachine_MemToken>:$dependency,
+                       DefaultValuedAttr<I64Attr, "0">:$inst_offset);
   let results = (outs Variadic<WaveMachine_MemToken>:$tokens);
-  let assemblyFormat = "$offset `,` $value `,` $descriptor (`after` $dependency^)? attr-dict `:` functional-type(operands, results)";
+  let assemblyFormat = [{
+    $offset `,` $value `,` $descriptor `,` $soffset
+    (`after` $dependency^)? (`offset` $inst_offset^)?
+    attr-dict `:` functional-type(operands, results)
+  }];
   let hasVerifier = 1;
 }
 def WaveMachine_BufferLoadB32Op
     : WaveMachine_Op<"buffer_load_b32", [WaveMachine_VMEMLoad]> {
   let summary = "buffer 32-bit load through an SGPR descriptor and VGPR offset";
+  let description = [{
+    MUBUF OFFEN: loads a 32-bit value from `descriptor[offset +
+    soffset + inst_offset]` into the result VGPR. Callers pass
+    `wavemachine.imm 0` for soffset when there is no S bucket.
+  }];
   let arguments = (ins WaveMachine_VGPR1:$offset, WaveMachine_SGPR4:$descriptor,
-                       Optional<WaveMachine_MemToken>:$dependency);
+                       WaveMachine_SGPR1OrImm:$soffset,
+                       Optional<WaveMachine_MemToken>:$dependency,
+                       DefaultValuedAttr<I64Attr, "0">:$inst_offset);
   let results = (outs WaveMachine_VGPR1:$result,
                       Variadic<WaveMachine_MemToken>:$tokens);
-  let assemblyFormat = "$offset `,` $descriptor (`after` $dependency^)? attr-dict `:` functional-type(operands, results)";
+  let assemblyFormat = [{
+    $offset `,` $descriptor `,` $soffset
+    (`after` $dependency^)? (`offset` $inst_offset^)?
+    attr-dict `:` functional-type(operands, results)
+  }];
   let hasVerifier = 1;
 }
 def WaveMachine_BufferLoadTupleB32Op
     : WaveMachine_Op<"buffer_load_tuple_b32", [WaveMachine_VMEMLoad]> {
   let summary = "buffer load of N consecutive 32-bit values into a VGPR tuple";
   let description = [{
-    Loads `N` consecutive dwords from `descriptor[offset + i*4]` into the
-    `N` components of a single VGPR tuple result of width `N`. Expands to
-    `N` `buffer_load_dword` instructions (each with a `offset:i*4`
+    Loads `N` consecutive dwords from `descriptor[offset + soffset +
+    inst_offset + i*4]` into the `N` components of a single VGPR
+    tuple result of width `N`. Expands to `N` `buffer_load_dword`
+    instructions (each with a `offset:(inst_offset + i*4)`
     immediate) in the AMDGPU printer; the tuple width is the result
     register width.
   }];
   let arguments = (ins WaveMachine_VGPR1:$offset, WaveMachine_SGPR4:$descriptor,
-                       Optional<WaveMachine_MemToken>:$dependency);
+                       WaveMachine_SGPR1OrImm:$soffset,
+                       Optional<WaveMachine_MemToken>:$dependency,
+                       DefaultValuedAttr<I64Attr, "0">:$inst_offset);
   let results = (outs WaveMachine_VGPR:$result,
                       Variadic<WaveMachine_MemToken>:$tokens);
-  let assemblyFormat = "$offset `,` $descriptor (`after` $dependency^)? attr-dict `:` functional-type(operands, results)";
+  let assemblyFormat = [{
+    $offset `,` $descriptor `,` $soffset
+    (`after` $dependency^)? (`offset` $inst_offset^)?
+    attr-dict `:` functional-type(operands, results)
+  }];
   let hasVerifier = 1;
 }
 
@@ -415,26 +472,44 @@ def WaveMachine_BufferStoreTupleB32Op
   let description = [{
     Stores the `component`-th 32-bit slice of the `value` VGPR tuple to
     the buffer described by `descriptor` at the lane VGPR offset plus
-    `component * 4`. Mirrors `global_store_tuple_b32`: each dword-store
-    is its own IR op so per-component memory tokens thread through the
-    selector loop in `selectFragmentStore` (and the upcoming bucketed
-    `wave.store` tuple path).
+    `soffset + inst_offset + component * 4`. Mirrors
+    `global_store_tuple_b32`: each dword-store is its own IR op so
+    per-component memory tokens thread through the selector loop in
+    `selectFragmentStore` (and the upcoming bucketed `wave.store`
+    tuple path).
   }];
   let arguments = (ins WaveMachine_VGPR1:$offset, WaveMachine_VGPR:$value,
                        WaveMachine_SGPR4:$descriptor,
-                       Optional<WaveMachine_MemToken>:$dependency);
+                       WaveMachine_SGPR1OrImm:$soffset,
+                       Optional<WaveMachine_MemToken>:$dependency,
+                       DefaultValuedAttr<I64Attr, "0">:$inst_offset);
   let results = (outs Variadic<WaveMachine_MemToken>:$tokens);
-  let assemblyFormat = "$offset `,` $value `,` $descriptor (`after` $dependency^)? attr-dict `:` functional-type(operands, results)";
+  let assemblyFormat = [{
+    $offset `,` $value `,` $descriptor `,` $soffset
+    (`after` $dependency^)? (`offset` $inst_offset^)?
+    attr-dict `:` functional-type(operands, results)
+  }];
   let hasVerifier = 1;
 }
 def WaveMachine_GlobalStoreTupleB32Op
     : WaveMachine_Op<"global_store_tuple_b32", [WaveMachine_VMEMStore]> {
   let summary = "global 32-bit store of a VGPR tuple component";
+  let description = [{
+    Per-component dword store: writes lane `component` of the `value`
+    VGPR tuple to `base + offset + inst_offset + component * 4`.
+    `inst_offset` lands in the instruction's 13-bit signed immediate
+    slot together with `component * 4`.
+  }];
   let arguments = (ins WaveMachine_VGPR1:$offset, WaveMachine_VGPR:$value,
                        WaveMachine_SGPR2:$base,
-                       Optional<WaveMachine_MemToken>:$dependency);
+                       Optional<WaveMachine_MemToken>:$dependency,
+                       DefaultValuedAttr<I64Attr, "0">:$inst_offset);
   let results = (outs Variadic<WaveMachine_MemToken>:$tokens);
-  let assemblyFormat = "$offset `,` $value `,` $base (`after` $dependency^)? attr-dict `:` functional-type(operands, results)";
+  let assemblyFormat = [{
+    $offset `,` $value `,` $base (`after` $dependency^)?
+    (`offset` $inst_offset^)?
+    attr-dict `:` functional-type(operands, results)
+  }];
   let hasVerifier = 1;
 }
 
@@ -452,7 +527,10 @@ def WaveMachine_DsLoadB32Op
                        DefaultValuedAttr<I64Attr, "0">:$offset);
   let results = (outs WaveMachine_VGPR1:$result,
                       Variadic<WaveMachine_MemToken>:$tokens);
-  let assemblyFormat = "$addr (`after` $dependency^)? attr-dict `:` functional-type(operands, results)";
+  let assemblyFormat = [{
+    $addr (`after` $dependency^)? (`offset` $offset^)?
+    attr-dict `:` functional-type(operands, results)
+  }];
 }
 
 def WaveMachine_DsLoadTupleB32Op
@@ -469,7 +547,10 @@ def WaveMachine_DsLoadTupleB32Op
                        DefaultValuedAttr<I64Attr, "0">:$offset);
   let results = (outs WaveMachine_VGPR:$result,
                       Variadic<WaveMachine_MemToken>:$tokens);
-  let assemblyFormat = "$addr (`after` $dependency^)? attr-dict `:` functional-type(operands, results)";
+  let assemblyFormat = [{
+    $addr (`after` $dependency^)? (`offset` $offset^)?
+    attr-dict `:` functional-type(operands, results)
+  }];
   let hasVerifier = 1;
 }
 
@@ -480,7 +561,10 @@ def WaveMachine_DsStoreB32Op
                        Optional<WaveMachine_MemToken>:$dependency,
                        DefaultValuedAttr<I64Attr, "0">:$offset);
   let results = (outs Variadic<WaveMachine_MemToken>:$tokens);
-  let assemblyFormat = "$addr `,` $value (`after` $dependency^)? attr-dict `:` functional-type(operands, results)";
+  let assemblyFormat = [{
+    $addr `,` $value (`after` $dependency^)? (`offset` $offset^)?
+    attr-dict `:` functional-type(operands, results)
+  }];
 }
 
 def WaveMachine_DsStoreTupleB32Op
@@ -496,7 +580,10 @@ def WaveMachine_DsStoreTupleB32Op
                        Optional<WaveMachine_MemToken>:$dependency,
                        DefaultValuedAttr<I64Attr, "0">:$offset);
   let results = (outs Variadic<WaveMachine_MemToken>:$tokens);
-  let assemblyFormat = "$addr `,` $value (`after` $dependency^)? attr-dict `:` functional-type(operands, results)";
+  let assemblyFormat = [{
+    $addr `,` $value (`after` $dependency^)? (`offset` $offset^)?
+    attr-dict `:` functional-type(operands, results)
+  }];
   let hasVerifier = 1;
 }
 
