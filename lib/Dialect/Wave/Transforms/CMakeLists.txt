@@ -6,6 +6,9 @@ add_mlir_dialect_library(MLIRWaveTransforms
   WaveAMDResourceInfo.cpp
   WaveAttachGPUBinary.cpp
   WaveMachine.cpp
+  WaveMachineIndexExpr.cpp
+  WaveMachineLoadStore.cpp
+  WaveMachineScfFor.cpp
   WaveMachineWaitcnt.cpp
   WaveToGPU.cpp
   WaveToROCDL.cpp
