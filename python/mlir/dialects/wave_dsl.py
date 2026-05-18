@@ -466,17 +466,24 @@ class FunctionBuilder:
     def index_expr(
         self,
         expr: ixsimpl.Expr,
-        bindings: Mapping[str, Value] | None = None,
+        bindings: Mapping[ixsimpl.Expr, Value] | None = None,
         result_type: Type | None = None,
     ) -> Value:
         """Build a `wave.index_expr` from a symbolic expression.
 
         `expr` is an :class:`ixsimpl.Expr` built via the module-level
-        :data:`sym_ctx`. We hand the dialect the canonical binary
-        serialization (`sym_ctx.serialize(expr)`) which it deserializes
-        into its own symbol store -- the structural bridge ixsimpl
-        documents for cross-context transfer, with no text on the FFI
-        path. Bindings are filtered to the expression's actual free
+        :data:`sym_ctx`; `bindings` maps the symbol leaves used in
+        `expr` (the :class:`ixsimpl.Expr` objects returned by
+        :func:`sym`) to their per-kernel :class:`mlir.ir.Value`
+        operand. Keying on the symbol object itself keeps the
+        Python-side data model fully structural -- no string names
+        crossing between the expression builder and the binding map.
+
+        We hand the dialect the canonical binary serialization
+        (`sym_ctx.serialize(expr)`) which it deserializes into its
+        own symbol store -- the structural bridge ixsimpl documents
+        for cross-context transfer, with no text on the FFI path.
+        Bindings are filtered to the expression's actual free
         symbols, so callers can pass a superset (e.g. a per-kernel
         binding dict) without tracking which symbols ixsimpl's
         simplifier might have dropped.
@@ -486,12 +493,14 @@ class FunctionBuilder:
         `!wave.index<W>` binding pins the result to `!wave.index<W>`;
         otherwise the result is the uniform `!wave.index`.
         """
-        all_bindings = dict(bindings or {})
+        binding_map: dict[str, Value] = {}
+        for key, value in (bindings or {}).items():
+            binding_map[key.sym_name] = value
         free_names = {s.sym_name for s in expr.free_symbols}
-        unknown = free_names - all_bindings.keys()
+        unknown = free_names - binding_map.keys()
         if unknown:
             raise ValueError(f"free symbols missing from bindings: {sorted(unknown)}")
-        filtered = {n: all_bindings[n] for n in all_bindings if n in free_names}
+        filtered = {n: binding_map[n] for n in binding_map if n in free_names}
         if result_type is None:
             result_type = wave_index_type(_binding_lane_width(filtered.values()))
         expr_attr = ExprAttr.get_from_bytes(

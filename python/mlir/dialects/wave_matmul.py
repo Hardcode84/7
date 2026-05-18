@@ -207,13 +207,14 @@ def _emit_tile_coords(bld: dsl.FunctionBuilder, cfg: _MatmulConfig) -> _TileCoor
     m_wave = ixsimpl.floor(wi / (32 * cfg.BN))
     n_wave = ixsimpl.mod(wave_id, cfg.BN)
     lane_mod16 = ixsimpl.mod(lane, 16)
+    sym_to_val = {wi: wi_val, lane: lane_val, wg_m: wg_m_val, wg_n: wg_n_val}
 
     stride_per_tile = 16 * cfg.K
     a_off = bld.index_expr(
         wg_m * (cfg.BM * stride_per_tile)
         + m_wave * stride_per_tile
         + lane_mod16 * cfg.K,
-        bindings={"wi": wi_val, "lane": lane_val, "wg_m": wg_m_val},
+        bindings=sym_to_val,
     )
     a_lane_base = bld.ptr_add(a_arg, a_off)
 
@@ -221,7 +222,7 @@ def _emit_tile_coords(bld: dsl.FunctionBuilder, cfg: _MatmulConfig) -> _TileCoor
         wg_n * (cfg.BN * stride_per_tile)
         + n_wave * stride_per_tile
         + lane_mod16 * cfg.K,
-        bindings={"wi": wi_val, "lane": lane_val, "wg_n": wg_n_val},
+        bindings=sym_to_val,
     )
     b_lane_base = bld.ptr_add(b_arg, b_off)
 
@@ -231,7 +232,7 @@ def _emit_tile_coords(bld: dsl.FunctionBuilder, cfg: _MatmulConfig) -> _TileCoor
         wg_m * (cfg.N_blocks * cfg.waves_per_workgroup * 256)
         + wg_n * (cfg.waves_per_workgroup * 256)
         + wave_id * 256,
-        bindings={"wi": wi_val, "wg_m": wg_m_val, "wg_n": wg_n_val},
+        bindings=sym_to_val,
     )
     c_ptr = bld.ptr_add(c_arg, c_off)
 
@@ -272,7 +273,7 @@ def _emit_lds_staging(
     wi = dsl.sym("wi")
     lane = dsl.sym("lane")
     wave_id = ixsimpl.floor(wi / 32)
-    bindings = {"wi": coords.wi, "lane": coords.lane}
+    bindings = {wi: coords.wi, lane: coords.lane}
     a_lds_off = bld.index_expr(
         wave_id * _LDS_DWORDS_PER_FRAG + lane * _LDS_DWORDS_PER_LANE,
         bindings=bindings,

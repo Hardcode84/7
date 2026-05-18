@@ -177,10 +177,10 @@ def test_index_expr():
             lid = w.sym("lid")
 
             # Uniform-only bindings -> result is `!wave.index`.
-            _u = f.index_expr(K + wgid, {"K": k, "wgid_y": wgid_y})
+            _u = f.index_expr(K + wgid, {K: k, wgid: wgid_y})
 
             # Lane-varying binding pins the result to `!wave.index<32>`.
-            off = f.index_expr(4 * lid + K, {"K": k, "lid": lane})
+            off = f.index_expr(4 * lid + K, {K: k, lid: lane})
 
             # Zero bindings -> constant expression.
             _c = f.index_expr(w.sym_ctx.int_(42), {})
