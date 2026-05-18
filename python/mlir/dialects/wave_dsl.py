@@ -48,6 +48,7 @@ from mlir._mlir_libs._waveDialectsNanobind import (
     register_dialects,
 )
 from mlir.dialects import arith, func, gpu, memref, scf, wave, waveamd
+from mlir.dialects.arith import CmpIPredicate
 from mlir.ir import (
     ArrayAttr,
     Attribute,
@@ -454,6 +455,42 @@ class FunctionBuilder:
     def binary(self, kind: str, lhs: Value, rhs: Value) -> Value:
         return wave.BinaryOp(lhs.type, kind, lhs, rhs).result
 
+    def cmpi(
+        self,
+        predicate: CmpIPredicate | str,
+        lhs: Value,
+        rhs: Value,
+    ) -> Value:
+        """Emit `wave.cmpi`; result mask width tracks the SIMD operand width."""
+        if isinstance(predicate, str):
+            predicate = CmpIPredicate[predicate]
+        width = SimdType(lhs.type).width
+        return wave.CmpIOp(mask_type(width), predicate, lhs, rhs).result
+
+    def ballot(self, mask: Value, result_type: Type | None = None) -> Value:
+        """Materialize `!wave.mask<W>` as integer bits via `wave.ballot`."""
+        result_type = result_type or IntegerType.get_signless(32)
+        return wave.BallotOp(result_type, mask).result
+
+    def read_first(self, value: Value, result_type: Type | None = None) -> Value:
+        """`wave.read_first` -- broadcast the first active lane to uniform."""
+        if result_type is None:
+            simd = SimdType(value.type)
+            result_type = simd.element_type
+        return wave.ReadFirstOp(result_type, value).result
+
+    @contextmanager
+    def where(self, condition: Value) -> Iterator[None]:
+        """Open a single-region `wave.where` and switch IR insertion into
+        the then-block. The terminating `wave.yield` is emitted on
+        context exit. No otherwise region.
+        """
+        op = wave.WhereOp(condition)
+        block = op.thenRegion.blocks.append()
+        with InsertionPoint(block):
+            yield
+            wave.YieldOp()
+
     def addi(self, lhs: Value, rhs: Value) -> Value:
         return wave.AddiOp(_arith_result_type(lhs, rhs), lhs, rhs).result
 
@@ -733,6 +770,7 @@ def module() -> ModuleBuilder:
 
 __all__ = [
     "BufferAddressSpaceAttr",
+    "CmpIPredicate",
     "ExprAttr",
     "F16Type",
     "F32Type",

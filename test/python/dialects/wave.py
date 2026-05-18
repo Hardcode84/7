@@ -202,6 +202,36 @@ def test_index_expr():
         print(m.module)
 
 
+# CHECK-LABEL: TEST: test_mask_where
+@run
+def test_mask_where():
+    with w.module() as m:
+        with m.function(
+            "where_kernel", [w.ptr_type(w.i32()), w.i32()], kernel=True
+        ) as f:
+            out, limit = f.args
+            lane = f.lane_id()
+            vlimit = f.splat(limit)
+            active = f.cmpi("ult", lane, vlimit)
+            ptrs = f.ptr_add(out, lane, w.simd_type(w.ptr_type(w.i32())))
+            with f.where(active):
+                f.store(lane, ptrs)
+            bits = f.ballot(active)
+            broadcast = f.read_first(lane)
+            del bits, broadcast
+        # CHECK: func.func @where_kernel
+        # CHECK: [[LANE:%.*]] = wave.lane_id
+        # CHECK: [[VLIM:%.*]] = wave.splat
+        # CHECK: [[MASK:%.*]] = wave.cmpi ult [[LANE]], [[VLIM]]
+        # CHECK-SAME: -> !wave.mask<32>
+        # CHECK: wave.where [[MASK]] {
+        # CHECK:   wave.store
+        # CHECK: } : !wave.mask<32>
+        # CHECK: wave.ballot [[MASK]] : !wave.mask<32> -> i32
+        # CHECK: wave.read_first [[LANE]] : !wave.simd<i32, 32> -> i32
+        print(m.module)
+
+
 # CHECK-LABEL: TEST: test_uniform_for_loop_nonzero_trip
 @run
 def test_uniform_for_loop_nonzero_trip():
