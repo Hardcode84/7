@@ -1166,9 +1166,13 @@ WaveMachineSelector::selectFragmentStore(waveamd::FragmentStoreOp op) {
   Value lane =
       createInstr(builder, op.getLoc(), "v_mbcnt_lo", {},
                   getRegType(op.getContext(), wavemachine::RegClass::VGPR));
+  assert(llvm::isPowerOf2_64(fragmentType.getRegisters()) &&
+         "fragment register count must be a power of two");
+  int64_t laneStrideBytes = fragmentType.getRegisters() * 4;
+  int64_t laneShift = llvm::Log2_64(laneStrideBytes);
   Value byteOffset =
       createInstr(builder, op.getLoc(), "v_lshlrev_b32",
-                  {lane, createImm(builder, op.getLoc(), 5)},
+                  {lane, createImm(builder, op.getLoc(), laneShift)},
                   getRegType(op.getContext(), wavemachine::RegClass::VGPR));
   Value baseOffsetValue = collapseTriple(op.getLoc(), offsetIt->second);
   byteOffset = addByteOffsets(op.getLoc(), baseOffsetValue, byteOffset);

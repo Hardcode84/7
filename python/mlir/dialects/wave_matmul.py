@@ -2,7 +2,7 @@
 #  See https://llvm.org/LICENSE.txt for license information.
 #  SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-"""Builder for the tiled WMMA f16xf16xf32 matmul kernel + host driver.
+"""Builder for tiled Wave f16xf16xf32 matmul kernels + host driver.
 
 This module assembles the module *programmatically* through the MLIR
 Python bindings (see :mod:`wave_dsl`). It returns a live
@@ -58,8 +58,32 @@ def _is_power_of_two(value: int) -> bool:
     return value > 0 and (value & (value - 1)) == 0
 
 
-_LDS_DWORDS_PER_FRAG = 8 * 32  # 8 registers/lane * 32 lanes (== 1024 bytes)
-_LDS_DWORDS_PER_LANE = 8  # 8 dwords/lane in the fragment tuple
+@dataclass(frozen=True)
+class _MmaVariant:
+    name: str
+    kind: str
+    ab_registers: int
+    acc_registers: int
+
+    @property
+    def lds_dwords_per_frag(self) -> int:
+        return self.ab_registers * 32
+
+
+_MMA_VARIANTS = {
+    "wmma": _MmaVariant("wmma", "wmma.f32.16x16x16.f16", 8, 8),
+    "mfma": _MmaVariant("mfma", "mfma.f32.16x16x16.f16", 2, 4),
+}
+
+
+def _select_mma_variant(name: str) -> _MmaVariant:
+    try:
+        return _MMA_VARIANTS[name]
+    except KeyError as exc:
+        choices = ", ".join(sorted(_MMA_VARIANTS))
+        raise ValueError(
+            f"unknown matrix intrinsic '{name}'; expected {choices}"
+        ) from exc
 
 
 @dataclass(frozen=True)
@@ -70,6 +94,7 @@ class _MatmulConfig:
     BM: int
     BN: int
     use_buffer: bool = False
+    matrix_intrinsic: str = "wmma"
 
     def __post_init__(self) -> None:
         for dim, val in (("M", self.M), ("N", self.N), ("K", self.K)):
@@ -133,7 +158,11 @@ class _MatmulConfig:
     @property
     def lds_bytes(self) -> int:
         """Per-workgroup LDS arena (A and B fragment slots, one per wave)."""
-        return 2 * self.waves_per_workgroup * _LDS_DWORDS_PER_FRAG * 4
+        return 2 * self.waves_per_workgroup * self.mma.lds_dwords_per_frag * 4
+
+    @property
+    def mma(self) -> _MmaVariant:
+        return _select_mma_variant(self.matrix_intrinsic)
 
 
 _KERNEL_NAME = "wmma_f16_matmul_tiled"
@@ -141,7 +170,6 @@ _GPU_MODULE_NAME = "kernels"
 _F16_PTR_HELPER = "wave_memref_to_ptr_global_f16"
 _F32_PTR_HELPER = "wave_memref_to_ptr_global_f32"
 _PRINT_HELPER = "printMemrefF32"
-_MMA_KIND = "wmma.f32.16x16x16.f16"
 
 
 def _splat_const(bld: dsl.FunctionBuilder, value: int) -> dsl.Value:
@@ -260,27 +288,27 @@ def _emit_lds_staging(
 
     Offsets are in i32 ELEMENTS (`lds_base()` is `!wave.ptr<i32,
     shared>` and `wave.ptr_add` scales by the pointer element size).
-    Each wave's A/B slot is 256 i32 elements (== 1024 bytes == one
-    8-register WMMA fragment), with lane L occupying 8 contiguous
-    dwords at `slot + L*8`. The B slabs live
-    `waves_per_wg * 256` elements after the A slabs. The address
-    arithmetic flows through `wave.index_expr` so the bucketizer
-    classifies wave_id / lane into the right slot at lowering time.
+    Each wave's A/B slot stores one fragment, with lane L occupying
+    `ab_registers` contiguous dwords. The B slabs live after all A slabs.
+    The address arithmetic flows through `wave.index_expr` so the
+    bucketizer classifies wave_id / lane into the right slot at lowering time.
     """
-    reg_simd_type = dsl.simd_type(dsl.vector_type(8, dsl.i32()), width=32)
+    reg_simd_type = dsl.simd_type(
+        dsl.vector_type(cfg.mma.ab_registers, dsl.i32()), width=32
+    )
     lds = bld.lds_base()
     wi = dsl.sym("wi")
     lane = dsl.sym("lane")
     wave_id = dsl.floor(wi / 32)
     bindings = {wi: coords.wi, lane: coords.lane}
     a_lds_off = bld.index_expr(
-        wave_id * _LDS_DWORDS_PER_FRAG + lane * _LDS_DWORDS_PER_LANE,
+        wave_id * cfg.mma.lds_dwords_per_frag + lane * cfg.mma.ab_registers,
         bindings=bindings,
     )
     b_lds_off = bld.index_expr(
-        (cfg.waves_per_workgroup * _LDS_DWORDS_PER_FRAG)
-        + wave_id * _LDS_DWORDS_PER_FRAG
-        + lane * _LDS_DWORDS_PER_LANE,
+        (cfg.waves_per_workgroup * cfg.mma.lds_dwords_per_frag)
+        + wave_id * cfg.mma.lds_dwords_per_frag
+        + lane * cfg.mma.ab_registers,
         bindings=bindings,
     )
     return _LdsStaging(
@@ -350,9 +378,9 @@ def _emit_kernel(bld: dsl.FunctionBuilder, cfg: _MatmulConfig) -> None:
     """
     coords = _emit_tile_coords(bld, cfg)
 
-    a_type = dsl.fragment_type(0, dsl.f16(), 16, 16, 32, 8)
-    b_type = dsl.fragment_type(1, dsl.f16(), 16, 16, 32, 8)
-    acc_type = dsl.fragment_type(2, dsl.f32(), 16, 16, 32, 8)
+    a_type = dsl.fragment_type(0, dsl.f16(), 16, 16, 32, cfg.mma.ab_registers)
+    b_type = dsl.fragment_type(1, dsl.f16(), 16, 16, 32, cfg.mma.ab_registers)
+    acc_type = dsl.fragment_type(2, dsl.f32(), 16, 16, 32, cfg.mma.acc_registers)
 
     staging = _emit_lds_staging(bld, cfg, coords)
 
@@ -386,7 +414,7 @@ def _emit_kernel(bld: dsl.FunctionBuilder, cfg: _MatmulConfig) -> None:
         init_args=(init_acc, a_frag0, b_frag0, a_ptr1, b_ptr1),
     ) as forop:
         carry_acc, carry_af, carry_bf, carry_ap, carry_bp = forop.inner_iter_args
-        new_acc = bld.mma(_MMA_KIND, carry_af, carry_bf, carry_acc)
+        new_acc = bld.mma(cfg.mma.kind, carry_af, carry_bf, carry_acc)
         new_af, new_bf = _load_fragments_through_lds(
             bld, carry_ap, carry_bp, a_type, b_type, staging
         )
@@ -397,7 +425,7 @@ def _emit_kernel(bld: dsl.FunctionBuilder, cfg: _MatmulConfig) -> None:
     final_acc_in = forop.results[0]
     final_af = forop.results[1]
     final_bf = forop.results[2]
-    final_acc = bld.mma(_MMA_KIND, final_af, final_bf, final_acc_in)
+    final_acc = bld.mma(cfg.mma.kind, final_af, final_bf, final_acc_in)
 
     bld.fragment_store(final_acc, coords.c_ptr)
 
@@ -496,6 +524,7 @@ def build_wmma_f16_matmul_module(
     BM: int = 1,
     BN: int = 1,
     use_buffer: bool = False,
+    matrix_intrinsic: str = "wmma",
 ) -> Module:
     """Return an MLIR :class:`Module` for the tiled WMMA f16 matmul.
 
@@ -531,6 +560,7 @@ def build_wmma_f16_matmul_module(
         BM=BM,
         BN=BN,
         use_buffer=use_buffer,
+        matrix_intrinsic=matrix_intrinsic,
     )
     bld = dsl.ModuleBuilder()
     with bld:

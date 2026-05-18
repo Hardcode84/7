@@ -67,6 +67,8 @@ if _chip:
     # WMMA (`v_wmma_*`) instructions exist on gfx11 and gfx12 only.
     if _chip.startswith(("gfx11", "gfx12")):
         config.available_features.add("host-supports-amdgpu-wmma")
+    if _chip == "gfx90a" or _chip.startswith(("gfx94", "gfx95")):
+        config.available_features.add("host-supports-amdgpu-mfma")
 
 # Runtime shared libs for the MLIR GPU integration tests.
 for name, env_key in [

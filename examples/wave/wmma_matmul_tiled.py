@@ -3,7 +3,7 @@
 #  See https://llvm.org/LICENSE.txt for license information.
 #  SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-"""Emit a tiled WMMA f16xf16xf32 matmul MLIR module for a given shape.
+"""Emit a tiled Wave f16xf16xf32 matmul MLIR module for a given shape.
 
 The kernel allocates host-side ``MxK`` (A) and ``NxK`` (B) f16 buffers
 filled with 1.0 and an ``MxN`` f32 output, then issues ``wave.load`` +
@@ -17,8 +17,8 @@ the standard host-lowering passes followed by ``mlir-runner``.
 
 Example:
 
-    wmma_matmul_tiled.py --m=16 --n=64 --k=32 \\
-        | wave-opt --wave-compile-kernels='chip=gfx1100' \\
+    wmma_matmul_tiled.py --chip=gfx950 --m=16 --n=64 --k=32 \\
+        | wave-opt --wave-compile-kernels='chip=gfx950' \\
             --convert-scf-to-cf \\
             --gpu-to-llvm=use-bare-pointers-for-kernels=true \\
             --convert-to-llvm \\
@@ -97,7 +97,24 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         "(buffer_load_dword ..., 0 offen offset:i*4) before the LDS "
         "round-trip",
     )
+    parser.add_argument(
+        "--chip",
+        default="",
+        help="AMDGPU chip used for auto intrinsic selection; gfx9/gfx950 use MFMA",
+    )
+    parser.add_argument(
+        "--matrix-intrinsic",
+        choices=("auto", "wmma", "mfma"),
+        default="auto",
+        help="matrix instruction family to emit; auto picks MFMA for gfx9/gfx950",
+    )
     return parser.parse_args(argv)
+
+
+def _select_matrix_intrinsic(chip: str, requested: str) -> str:
+    if requested != "auto":
+        return requested
+    return "mfma" if chip.startswith("gfx9") else "wmma"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -112,6 +129,7 @@ def main(argv: list[str] | None = None) -> int:
         BM=args.bm,
         BN=args.bn,
         use_buffer=args.use_buffer,
+        matrix_intrinsic=_select_matrix_intrinsic(args.chip, args.matrix_intrinsic),
     )
     sys.stdout.write(str(module))
     return 0

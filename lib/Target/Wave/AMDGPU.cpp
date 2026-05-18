@@ -290,6 +290,10 @@ private:
     return isGfx8Or9() ? llvm::AMDGPU::V_ADD_CO_U32_e32_gfx9
                        : llvm::AMDGPU::V_ADD_NC_U32_e32_gfx11;
   }
+  unsigned vMulLoU32() const {
+    return isGfx8Or9() ? llvm::AMDGPU::V_MUL_LO_U32_vi
+                       : llvm::AMDGPU::V_MUL_LO_U32_e64_gfx11;
+  }
   unsigned vCmpEqU32() const {
     return isGfx8Or9() ? llvm::AMDGPU::V_CMP_EQ_U32_e64_vi
                        : llvm::AMDGPU::V_CMP_EQ_U32_e64_gfx11;
@@ -709,6 +713,26 @@ private:
     return emitMC(vAddU32(), {dst, lhs, rhs});
   }
 
+  LogicalResult emitVMulLoU32(Operation &op, Value dst, Value lhs, Value rhs) {
+    if (isGfx8Or9()) {
+      std::optional<unsigned> lhsImm = getImmediate(lhs);
+      std::optional<unsigned> rhsImm = getImmediate(rhs);
+      if (lhsImm && rhsImm)
+        return op.emitError("v_mul_lo_u32 cannot materialize two immediates");
+      if (lhsImm || rhsImm) {
+        Value immValue = lhsImm ? lhs : rhs;
+        Value regValue = lhsImm ? rhs : lhs;
+        if (failed(
+                emitMC(vMovB32(), {toMCOperand(dst), toMCOperand(immValue)})))
+          return failure();
+        return emitMC(vMulLoU32(), {toMCOperand(dst), toMCOperand(dst),
+                                    toMCOperand(regValue)});
+      }
+    }
+    return emitMC(vMulLoU32(),
+                  {toMCOperand(dst), toMCOperand(lhs), toMCOperand(rhs)});
+  }
+
   bool isSGPR(Value value) const {
     auto regType = dyn_cast<wavemachine::RegType>(value.getType());
     return regType && regType.getRegClass() == wavemachine::RegClass::SGPR;
@@ -842,9 +866,7 @@ private:
       // v_mul_lo_u32 is VOP3-only on RDNA3; operand placement is
       // unconstrained so we emit (vdst, src0, src1) as-is without the
       // VOP2 swap dance.
-      return emitMC(llvm::AMDGPU::V_MUL_LO_U32_e64_gfx11,
-                    {toMCOperand(result()), toMCOperand(op.getOperand(0)),
-                     toMCOperand(op.getOperand(1))});
+      return emitVMulLoU32(op, result(), op.getOperand(0), op.getOperand(1));
     if (isa<wavemachine::VCmpEqU32Op, wavemachine::VCmpNeU32Op,
             wavemachine::VCmpLtU32Op, wavemachine::VCmpLeU32Op,
             wavemachine::VCmpGtU32Op, wavemachine::VCmpGeU32Op>(op)) {
