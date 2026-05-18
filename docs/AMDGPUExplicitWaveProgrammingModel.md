@@ -884,6 +884,116 @@ model. Target hazards that are not memory aliasing, such as SGPR-read hazards,
 EXEC/VCC hazards, VALU forwarding hazards, or generation-specific instruction
 restrictions, remain backend responsibilities.
 
+## Symbolic Offset Algebra
+
+GPU memory ops decompose their address into voffset, soffset, and a tiny
+`inst_offset` immediate -- per-lane VGPR, uniform SGPR / imm, compile-time
+immediate respectively. A wave kernel naturally produces address
+expressions of the form `wg_m * stride + m_wave * stride + lane * K + C`
+whose summands cleanly classify into one of those three slots, but the
+lane / uniform decomposition is only safe when the bucketizer knows
+each summand's reachable symbol kinds. Doing that classification by
+walking the post-selection MLIR is fragile; the source program already
+knows the structure.
+
+The Wave dialect carries the structure with `wave.index_expr`:
+
+```mlir
+%off = wave.index_expr
+  <"512*wg_m + 32*m_wave + 48*Mod(lane, 16) + 768*floor(1/64*wi)">
+  ["wi", "lane", "wg_m"] (%wi, %lane, %wg_m)
+  : (!wave.simd<i32, 32>, !wave.simd<i32, 32>, i32) -> !wave.index<32>
+%ptr = wave.ptr_add %base, %off : ...
+```
+
+The op carries a hash-consed symbolic AST (`#wave.expr`) plus a binding
+list pairing each free symbol with the SSA value that materialises it.
+The expression is built and canonicalised by `ixsimpl`, which is
+vendored under `third_party/ixsimpl`; the Wave dialect owns a single
+`ixs_ctx` per `MLIRContext` so equal expressions dedup to pointer-equal
+attribute handles. The expression itself is integer-valued; ixsimpl's
+rational MUL coefficient becomes a runtime divide only when wrapped in
+`floor` / `ceil`, and `mod` is a first-class node.
+
+### Surface
+
+The Python builder (`mlir.dialects.wave_dsl`) exposes a process-wide
+`ixsimpl.Context` so callers compose expressions structurally and feed
+the result to `dsl.index_expr`:
+
+```python
+wi = dsl.sym("wi")
+lane = dsl.sym("lane")
+wg_m = dsl.sym("wg_m")
+wave_id = ixsimpl.floor(wi / 32)
+m_wave = ixsimpl.floor(wi / (32 * BN))
+a_off = bld.index_expr(
+    wg_m * (BM * 16 * K) + m_wave * (16 * K) + ixsimpl.mod(lane, 16) * K,
+    bindings={wi: wi_val, lane: lane_val, wg_m: wg_m_val},
+)
+```
+
+The binding map keys are the `ixsimpl.Expr` symbol leaves themselves --
+no string round-trip between the expression and the per-kernel binding
+dict. The DSL serialises the `Expr` via `ixs_serialize_node` and the
+CAPI deserialises into the dialect's symbol store, so the FFI hop is
+structural binary, not text. Bindings are filtered down to each
+expression's actual free symbols, so a kernel-wide `sym_to_val` dict
+can feed several `index_expr` calls without per-call pruning.
+
+`wave.assume_range` is the source-level seed for the range-driven
+parts of the lowering. Wrapping a `wave.workgroup_id` (or any other
+SSA value) with `assume_range %v, [lo, hi]` lets upstream
+`IntegerRangeAnalysis` see the tight bound through ordinary
+`InferIntRangeInterface` propagation.
+
+### Bucketization
+
+The Wave-to-WaveMachine selector turns each `index_expr`-rooted address
+into a per-pointer `OffsetTriple { voffset, soffset, instOffset }`:
+
+1. **IntRangeAnalysis** runs once over the wave-level function. Each
+   binding's proven signed range becomes a `name in [lo, hi]` ixsimpl
+   assumption.
+2. **`ixs_simplify`** runs on the expression under those assumptions.
+   Anything provably constant collapses; symbols whose range is a
+   single point get folded out.
+3. **Per-summand classification**. Top-level summands of the resulting
+   ADD walk classify as `Const` / `Uniform` / `Lane` from the binding
+   types reached at the leaves (signless int → uniform, SIMD / wave
+   index with width → lane). FLOOR / CEIL / MOD recurse through their
+   children.
+4. **Routing**. Consts accumulate into `instOffset`. Uniforms
+   materialise SGPR-side via `s_mul_i32` / `s_lshl_b32` /
+   `s_add_i32` and join `soffset`. Lane summands materialise VGPR-side
+   via the existing `v_mul_lo_u32` / `v_add_u32` chain into
+   `voffset`. FLOOR / CEIL lower to `shr` of the LCM-scaled
+   numerator (power-of-two divisors); MOD lowers to bitwise `and`
+   with the divisor minus one.
+5. **Spec-driven emit**. Each WaveMachine memory op carries an
+   `AddressFieldsOpInterface` describing its slot widths (12-bit
+   unsigned `inst_offset` for buffer, 13-bit signed for global,
+   16-bit unsigned for LDS, plus the soffset presence bit). At emit
+   time the bucketizer demotes any slot whose proven range exceeds
+   the slot's width: inst_offset overflow demotes to soffset, soffset
+   overflow demotes to voffset.
+
+The end result is that:
+
+```python
+wg_m = dsl.assume_range(bld.workgroup_id(axis=0), 0, M_blocks - 1)
+```
+
+flips a workgroup-id-scaled summand from voffset (`v_mul_lo_u32 v5, 0x600, s2`)
+to soffset (`s_mul_i32 s6, 0x600, s2` -> `s_lshl_b32 s7, s6, 1` ->
+`buffer_load_b32 v16, v5, s[12:15], s7 offen offset:4`) without
+touching the surface code beyond the assume_range wrapper.
+
+`scf.for` pointer carries collapse the triple to a single voffset at
+the loop boundary; the bucketizer re-derives V / S / inst for each
+fresh `ptr_add` inside the body. This is a conservative compromise --
+carrying the full triple as iter args is left for later.
+
 ## Lowering Strategy
 
 The source model should lower through the MLIR communication layer before
