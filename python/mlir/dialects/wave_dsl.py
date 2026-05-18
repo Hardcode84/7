@@ -88,6 +88,14 @@ def sym(name: str) -> ixsimpl.Expr:
     return sym_ctx.sym(name)
 
 
+# Re-export the ixsimpl algebraic helpers callers reach for when
+# building `wave.index_expr` expressions. Keeps the DSL the single
+# import point for kernel builders -- no separate `import ixsimpl`.
+floor = ixsimpl.floor
+ceil = ixsimpl.ceil
+mod = ixsimpl.mod
+
+
 # ---------------------------------------------------------------------------
 # Type helpers
 # ---------------------------------------------------------------------------
@@ -790,8 +798,10 @@ __all__ = [
     "WaveIndexType",
     "buffer_address_space",
     "buffer_ptr_type",
+    "ceil",
     "f16",
     "f32",
+    "floor",
     "fragment_type",
     "global_address_space",
     "i8",
@@ -799,6 +809,7 @@ __all__ = [
     "index_type",
     "mask_type",
     "mem_token_type",
+    "mod",
     "module",
     "private_address_space",
     "ptr_type",

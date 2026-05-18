@@ -49,7 +49,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-import ixsimpl
 from mlir.dialects import scf
 from mlir.dialects import wave_dsl as dsl
 from mlir.ir import Module
@@ -203,10 +202,10 @@ def _emit_tile_coords(bld: dsl.FunctionBuilder, cfg: _MatmulConfig) -> _TileCoor
     lane = dsl.sym("lane")
     wg_m = dsl.sym("wg_m")
     wg_n = dsl.sym("wg_n")
-    wave_id = ixsimpl.floor(wi / 32)
-    m_wave = ixsimpl.floor(wi / (32 * cfg.BN))
-    n_wave = ixsimpl.mod(wave_id, cfg.BN)
-    lane_mod16 = ixsimpl.mod(lane, 16)
+    wave_id = dsl.floor(wi / 32)
+    m_wave = dsl.floor(wi / (32 * cfg.BN))
+    n_wave = dsl.mod(wave_id, cfg.BN)
+    lane_mod16 = dsl.mod(lane, 16)
     sym_to_val = {wi: wi_val, lane: lane_val, wg_m: wg_m_val, wg_n: wg_n_val}
 
     stride_per_tile = 16 * cfg.K
@@ -272,7 +271,7 @@ def _emit_lds_staging(
     lds = bld.lds_base()
     wi = dsl.sym("wi")
     lane = dsl.sym("lane")
-    wave_id = ixsimpl.floor(wi / 32)
+    wave_id = dsl.floor(wi / 32)
     bindings = {wi: coords.wi, lane: coords.lane}
     a_lds_off = bld.index_expr(
         wave_id * _LDS_DWORDS_PER_FRAG + lane * _LDS_DWORDS_PER_LANE,
