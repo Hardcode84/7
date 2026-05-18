@@ -9,6 +9,7 @@
 #include "mlir/Target/Wave/AMDGPU.h"
 
 #include "MCTargetDesc/AMDGPUMCTargetDesc.h"
+#include "Utils/AMDGPUBaseInfo.h"
 #include "lld/Common/Driver.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Wave/IR/Wave.h"
@@ -38,6 +39,7 @@
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/TargetSelect.h"
 #include "llvm/Support/raw_ostream.h"
+#include "llvm/TargetParser/TargetParser.h"
 #include "llvm/TargetParser/Triple.h"
 #include <algorithm>
 
@@ -102,6 +104,7 @@ private:
   std::unique_ptr<llvm::MCContext> mcContext;
   std::unique_ptr<llvm::MCInstPrinter> instPrinter;
   SmallVector<KernelInfo> kernels;
+  llvm::AMDGPU::IsaVersion isaVersion;
   std::string targetTriple = kDefaultTargetTriple.str();
   std::string targetChip = kDefaultTargetChip.str();
   unsigned indent = 1;
@@ -152,6 +155,10 @@ private:
     if (!sti)
       return module.emitError("unsupported AMDGPU target: ")
              << targetTriple << "--" << targetChip;
+    isaVersion = llvm::AMDGPU::getIsaVersion(targetChip);
+    if (isaVersion.Major == 0)
+      return module.emitError("unsupported AMDGPU target: ")
+             << targetTriple << "--" << targetChip;
     mcContext = std::make_unique<llvm::MCContext>(triple, *mai, *mri, *sti);
     unsigned asmVariant = mai->getOutputAssemblerDialect();
     instPrinter.reset(
@@ -159,6 +166,189 @@ private:
     if (!instPrinter)
       return op->emitError("failed to create AMDGPU MCInstPrinter");
     return success();
+  }
+
+  bool isGfx8Or9() const {
+    return isaVersion.Major == 8 || isaVersion.Major == 9;
+  }
+  bool isGfx11() const { return isaVersion.Major == 11; }
+  bool isGfx90APlus() const { return llvm::AMDGPU::isGFX90A(*sti); }
+
+  unsigned sMovB32() const {
+    return isGfx8Or9() ? llvm::AMDGPU::S_MOV_B32_vi
+                       : llvm::AMDGPU::S_MOV_B32_gfx11;
+  }
+  unsigned sAddI32() const {
+    return isGfx8Or9() ? llvm::AMDGPU::S_ADD_I32_vi
+                       : llvm::AMDGPU::S_ADD_I32_gfx11;
+  }
+  unsigned sMulI32() const {
+    return isGfx8Or9() ? llvm::AMDGPU::S_MUL_I32_vi
+                       : llvm::AMDGPU::S_MUL_I32_gfx11;
+  }
+  unsigned sLshlB32() const {
+    return isGfx8Or9() ? llvm::AMDGPU::S_LSHL_B32_vi
+                       : llvm::AMDGPU::S_LSHL_B32_gfx11;
+  }
+  unsigned sLshrB32() const {
+    return isGfx8Or9() ? llvm::AMDGPU::S_LSHR_B32_vi
+                       : llvm::AMDGPU::S_LSHR_B32_gfx11;
+  }
+  unsigned sAndB32() const {
+    return isGfx8Or9() ? llvm::AMDGPU::S_AND_B32_vi
+                       : llvm::AMDGPU::S_AND_B32_gfx11;
+  }
+  unsigned sAndn2B32() const {
+    return isGfx8Or9() ? llvm::AMDGPU::S_ANDN2_B32_vi
+                       : llvm::AMDGPU::S_ANDN2_B32_gfx11;
+  }
+  unsigned sAddU32() const {
+    return isGfx8Or9() ? llvm::AMDGPU::S_ADD_U32_vi
+                       : llvm::AMDGPU::S_ADD_U32_gfx11;
+  }
+  unsigned sAddcU32() const {
+    return isGfx8Or9() ? llvm::AMDGPU::S_ADDC_U32_vi
+                       : llvm::AMDGPU::S_ADDC_U32_gfx11;
+  }
+  unsigned sMulHiU32() const {
+    return isGfx8Or9() ? llvm::AMDGPU::S_MUL_HI_U32_vi
+                       : llvm::AMDGPU::S_MUL_HI_U32_gfx11;
+  }
+  unsigned sCmpLtI32() const {
+    return isGfx8Or9() ? llvm::AMDGPU::S_CMP_LT_I32_vi
+                       : llvm::AMDGPU::S_CMP_LT_I32_gfx11;
+  }
+  unsigned sCmpLgU32() const {
+    return isGfx8Or9() ? llvm::AMDGPU::S_CMP_LG_U32_vi
+                       : llvm::AMDGPU::S_CMP_LG_U32_gfx11;
+  }
+  unsigned sCbranchScc0() const {
+    return isGfx8Or9() ? llvm::AMDGPU::S_CBRANCH_SCC0_vi
+                       : llvm::AMDGPU::S_CBRANCH_SCC0_gfx11;
+  }
+  unsigned sCbranchScc1() const {
+    return isGfx8Or9() ? llvm::AMDGPU::S_CBRANCH_SCC1_vi
+                       : llvm::AMDGPU::S_CBRANCH_SCC1_gfx11;
+  }
+  unsigned sCbranchExecz() const {
+    return isGfx8Or9() ? llvm::AMDGPU::S_CBRANCH_EXECZ_vi
+                       : llvm::AMDGPU::S_CBRANCH_EXECZ_gfx11;
+  }
+  unsigned sLoadB32() const {
+    return isGfx8Or9() ? llvm::AMDGPU::S_LOAD_DWORD_IMM_vi
+                       : llvm::AMDGPU::S_LOAD_B32_IMM_gfx11;
+  }
+  unsigned sLoadB64() const {
+    return isGfx8Or9() ? llvm::AMDGPU::S_LOAD_DWORDX2_IMM_vi
+                       : llvm::AMDGPU::S_LOAD_B64_IMM_gfx11;
+  }
+  unsigned sLoadB128() const {
+    return isGfx8Or9() ? llvm::AMDGPU::S_LOAD_DWORDX4_IMM_vi
+                       : llvm::AMDGPU::S_LOAD_B128_IMM_gfx11;
+  }
+  unsigned sWaitcnt() const {
+    return isGfx8Or9() ? llvm::AMDGPU::S_WAITCNT_vi
+                       : llvm::AMDGPU::S_WAITCNT_gfx11;
+  }
+  unsigned sNop() const {
+    return isGfx8Or9() ? llvm::AMDGPU::S_NOP_vi : llvm::AMDGPU::S_NOP_gfx11;
+  }
+  unsigned sBarrier() const {
+    return isGfx8Or9() ? llvm::AMDGPU::S_BARRIER_vi
+                       : llvm::AMDGPU::S_BARRIER_gfx11;
+  }
+  unsigned sEndpgm() const {
+    return isGfx8Or9() ? llvm::AMDGPU::S_ENDPGM_vi
+                       : llvm::AMDGPU::S_ENDPGM_gfx11;
+  }
+  unsigned sSetpcB64() const {
+    return isGfx8Or9() ? llvm::AMDGPU::S_SETPC_B64_vi
+                       : llvm::AMDGPU::S_SETPC_B64_gfx11;
+  }
+
+  unsigned vMbcntLo() const {
+    return isGfx8Or9() ? llvm::AMDGPU::V_MBCNT_LO_U32_B32_e64_vi
+                       : llvm::AMDGPU::V_MBCNT_LO_U32_B32_e64_gfx11;
+  }
+  unsigned vMovB32() const {
+    return isGfx8Or9() ? llvm::AMDGPU::V_MOV_B32_e32_vi
+                       : llvm::AMDGPU::V_MOV_B32_e32_gfx11;
+  }
+  unsigned vLshlrevB32() const {
+    return isGfx8Or9() ? llvm::AMDGPU::V_LSHLREV_B32_e32_vi
+                       : llvm::AMDGPU::V_LSHLREV_B32_e32_gfx11;
+  }
+  unsigned vLshrrevB32() const {
+    return isGfx8Or9() ? llvm::AMDGPU::V_LSHRREV_B32_e32_vi
+                       : llvm::AMDGPU::V_LSHRREV_B32_e32_gfx11;
+  }
+  unsigned vReadfirstlaneB32() const {
+    return isGfx8Or9() ? llvm::AMDGPU::V_READFIRSTLANE_B32_vi
+                       : llvm::AMDGPU::V_READFIRSTLANE_B32_gfx11;
+  }
+  unsigned vCmpEqU32() const {
+    return isGfx8Or9() ? llvm::AMDGPU::V_CMP_EQ_U32_e64_vi
+                       : llvm::AMDGPU::V_CMP_EQ_U32_e64_gfx11;
+  }
+  unsigned vCmpNeU32() const {
+    return isGfx8Or9() ? llvm::AMDGPU::V_CMP_NE_U32_e64_vi
+                       : llvm::AMDGPU::V_CMP_NE_U32_e64_gfx11;
+  }
+  unsigned vCmpLtU32() const {
+    return isGfx8Or9() ? llvm::AMDGPU::V_CMP_LT_U32_e64_vi
+                       : llvm::AMDGPU::V_CMP_LT_U32_e64_gfx11;
+  }
+  unsigned vCmpLeU32() const {
+    return isGfx8Or9() ? llvm::AMDGPU::V_CMP_LE_U32_e64_vi
+                       : llvm::AMDGPU::V_CMP_LE_U32_e64_gfx11;
+  }
+  unsigned vCmpGtU32() const {
+    return isGfx8Or9() ? llvm::AMDGPU::V_CMP_GT_U32_e64_vi
+                       : llvm::AMDGPU::V_CMP_GT_U32_e64_gfx11;
+  }
+  unsigned vCmpGeU32() const {
+    return isGfx8Or9() ? llvm::AMDGPU::V_CMP_GE_U32_e64_vi
+                       : llvm::AMDGPU::V_CMP_GE_U32_e64_gfx11;
+  }
+
+  unsigned bufferStoreB32() const {
+    if (isGfx90APlus())
+      return llvm::AMDGPU::BUFFER_STORE_DWORD_OFFEN_gfx90a;
+    return isGfx8Or9() ? llvm::AMDGPU::BUFFER_STORE_DWORD_OFFEN_vi
+                       : llvm::AMDGPU::BUFFER_STORE_DWORD_OFFEN_gfx11;
+  }
+
+  unsigned bufferLoadB32() const {
+    if (isGfx90APlus())
+      return llvm::AMDGPU::BUFFER_LOAD_DWORD_OFFEN_gfx90a;
+    return isGfx8Or9() ? llvm::AMDGPU::BUFFER_LOAD_DWORD_OFFEN_vi
+                       : llvm::AMDGPU::BUFFER_LOAD_DWORD_OFFEN_gfx11;
+  }
+
+  unsigned globalStoreB32() const {
+    return isGfx8Or9() ? llvm::AMDGPU::GLOBAL_STORE_DWORD_SADDR_vi
+                       : llvm::AMDGPU::GLOBAL_STORE_DWORD_SADDR_gfx11;
+  }
+
+  unsigned globalLoadB32() const {
+    return isGfx8Or9() ? llvm::AMDGPU::GLOBAL_LOAD_DWORD_SADDR_vi
+                       : llvm::AMDGPU::GLOBAL_LOAD_DWORD_SADDR_gfx11;
+  }
+
+  unsigned dsReadB32() const {
+    return isGfx8Or9() ? llvm::AMDGPU::DS_READ_B32_vi_gfx9
+                       : llvm::AMDGPU::DS_READ_B32_gfx11;
+  }
+
+  unsigned dsWriteB32() const {
+    return isGfx8Or9() ? llvm::AMDGPU::DS_WRITE_B32_vi_gfx9
+                       : llvm::AMDGPU::DS_WRITE_B32_gfx11;
+  }
+
+  std::optional<unsigned> getImmediate(Value value) const {
+    if (auto imm = value.getDefiningOp<wavemachine::ImmOp>())
+      return static_cast<unsigned>(imm.getValue());
+    return std::nullopt;
   }
 
   void emitLine(StringRef line) {
@@ -268,9 +458,11 @@ private:
     os << "\t\t.amdhsa_kernarg_size " << kernargSize << "\n";
     os << "\t\t.amdhsa_user_sgpr_count 2\n";
     os << "\t\t.amdhsa_user_sgpr_kernarg_segment_ptr 1\n";
-    os << "\t\t.amdhsa_wavefront_size32 1\n";
-    os << "\t\t.amdhsa_uses_dynamic_stack 0\n";
-    os << "\t\t.amdhsa_enable_private_segment 0\n";
+    if (!isGfx8Or9()) {
+      os << "\t\t.amdhsa_wavefront_size32 1\n";
+      os << "\t\t.amdhsa_uses_dynamic_stack 0\n";
+      os << "\t\t.amdhsa_enable_private_segment 0\n";
+    }
     os << "\t\t.amdhsa_system_sgpr_workgroup_id_x 1\n";
     os << "\t\t.amdhsa_system_sgpr_workgroup_id_y " << (usesWgY ? 1 : 0)
        << "\n";
@@ -280,6 +472,10 @@ private:
     os << "\t\t.amdhsa_system_vgpr_workitem_id 0\n";
     os << "\t\t.amdhsa_next_free_vgpr " << vgprCount << "\n";
     os << "\t\t.amdhsa_next_free_sgpr " << sgprCount << "\n";
+    if (isGfx90APlus()) {
+      unsigned accumOffset = (std::max(vgprCount, 1u) + 3u) & ~3u;
+      os << "\t\t.amdhsa_accum_offset " << accumOffset << "\n";
+    }
     os << "\t\t.amdhsa_reserve_vcc 0\n";
     os << "\t\t.amdhsa_float_round_mode_32 0\n";
     os << "\t\t.amdhsa_float_round_mode_16_64 0\n";
@@ -288,11 +484,13 @@ private:
     os << "\t\t.amdhsa_dx10_clamp 1\n";
     os << "\t\t.amdhsa_ieee_mode 1\n";
     os << "\t\t.amdhsa_fp16_overflow 0\n";
-    os << "\t\t.amdhsa_workgroup_processor_mode 1\n";
-    os << "\t\t.amdhsa_memory_ordered 1\n";
-    os << "\t\t.amdhsa_forward_progress 1\n";
-    os << "\t\t.amdhsa_shared_vgpr_count 0\n";
-    os << "\t\t.amdhsa_inst_pref_size 1\n";
+    if (!isGfx8Or9()) {
+      os << "\t\t.amdhsa_workgroup_processor_mode 1\n";
+      os << "\t\t.amdhsa_memory_ordered 1\n";
+      os << "\t\t.amdhsa_forward_progress 1\n";
+      os << "\t\t.amdhsa_shared_vgpr_count 0\n";
+      os << "\t\t.amdhsa_inst_pref_size 1\n";
+    }
     os << "\t.end_amdhsa_kernel\n";
     os << "\t.text\n";
     os << "\t.set .L" << func.getSymName() << ".num_vgpr, " << vgprCount
@@ -382,10 +580,35 @@ private:
   }
 
   unsigned namedPhysReg(StringRef name) const {
+    if (name.consume_front("s[")) {
+      StringRef first;
+      StringRef last;
+      std::tie(first, last) = name.split(':');
+      if (!last.consume_back("]"))
+        llvm_unreachable("unknown physical register name");
+      unsigned start = 0;
+      unsigned end = 0;
+      if (first.getAsInteger(10, start) || last.getAsInteger(10, end))
+        llvm_unreachable("unknown physical register name");
+      unsigned width = end - start + 1;
+      if (width == 2)
+        return llvm::AMDGPU::SGPR0_SGPR1 + start / 2;
+      if (width == 4)
+        return llvm::AMDGPU::SGPR0_SGPR1_SGPR2_SGPR3 + start / 4;
+      llvm_unreachable("unknown physical register name");
+    }
+    if (name.consume_front("s")) {
+      unsigned phys = 0;
+      if (!name.getAsInteger(10, phys))
+        return llvm::AMDGPU::SGPR0 + phys;
+      llvm_unreachable("unknown physical register name");
+    }
     if (name == "s0")
       return llvm::AMDGPU::SGPR0;
     if (name == "s[0:1]")
       return llvm::AMDGPU::SGPR0_SGPR1;
+    if (name == "vcc")
+      return llvm::AMDGPU::VCC;
     if (name == "exec_lo")
       return llvm::AMDGPU::EXEC_LO;
     if (name == "null")
@@ -489,8 +712,7 @@ private:
     std::string exitLabel = (funcLabelPrefix + ".loop_exit_" + Twine(id)).str();
     if (loop.getEntryCond()) {
       // SCC was already set by an upstream s_cmp; skip body if false.
-      if (failed(emitMC(llvm::AMDGPU::S_CBRANCH_SCC0_gfx11,
-                        {labelOperand(exitLabel)})))
+      if (failed(emitMC(sCbranchScc0(), {labelOperand(exitLabel)})))
         return failure();
     }
     os << headLabel << ":\n";
@@ -504,8 +726,7 @@ private:
     }
     // continue_if: the SCC operand has been set by the upstream s_cmp;
     // we branch back to the head if SCC==1, else fall through.
-    if (failed(emitMC(llvm::AMDGPU::S_CBRANCH_SCC1_gfx11,
-                      {labelOperand(headLabel)})))
+    if (failed(emitMC(sCbranchScc1(), {labelOperand(headLabel)})))
       return failure();
     os << exitLabel << ":\n";
     return success();
@@ -534,15 +755,14 @@ private:
       return success();
     }
     if (isa<wavemachine::VMbcntLoOp>(op))
-      return emitMC(llvm::AMDGPU::V_MBCNT_LO_U32_B32_e64_gfx11,
+      return emitMC(vMbcntLo(),
                     {toMCOperand(result()), llvm::MCOperand::createImm(-1),
                      llvm::MCOperand::createImm(0)});
     if (isa<wavemachine::VMovB32TupleOp>(op)) {
       auto regType = cast<wavemachine::RegType>(result().getType());
       for (unsigned i = 0, e = regType.getWidth(); i != e; ++i)
-        if (failed(emitMC(llvm::AMDGPU::V_MOV_B32_e32_gfx11,
-                          {toMCVGPRComponent(result(), i),
-                           toMCOperand(op.getOperand(0))})))
+        if (failed(emitMC(vMovB32(), {toMCVGPRComponent(result(), i),
+                                      toMCOperand(op.getOperand(0))})))
           return failure();
       return success();
     }
@@ -589,11 +809,11 @@ private:
           opcode, {toMCOperand(result()), toMCOperand(lhs), toMCOperand(rhs)});
     }
     if (isa<wavemachine::VLshlrevB32Op>(op))
-      return emitMC(llvm::AMDGPU::V_LSHLREV_B32_e32_gfx11,
+      return emitMC(vLshlrevB32(),
                     {toMCOperand(result()), toMCOperand(op.getOperand(1)),
                      toMCOperand(op.getOperand(0))});
     if (isa<wavemachine::VLshrrevB32Op>(op))
-      return emitMC(llvm::AMDGPU::V_LSHRREV_B32_e32_gfx11,
+      return emitMC(vLshrrevB32(),
                     {toMCOperand(result()), toMCOperand(op.getOperand(1)),
                      toMCOperand(op.getOperand(0))});
     if (isa<wavemachine::VMulLoU32Op>(op))
@@ -606,26 +826,30 @@ private:
     if (isa<wavemachine::VCmpEqU32Op, wavemachine::VCmpNeU32Op,
             wavemachine::VCmpLtU32Op, wavemachine::VCmpLeU32Op,
             wavemachine::VCmpGtU32Op, wavemachine::VCmpGeU32Op>(op)) {
-      unsigned opcode = isa<wavemachine::VCmpEqU32Op>(op)
-                            ? llvm::AMDGPU::V_CMP_EQ_U32_e64_gfx11
-                        : isa<wavemachine::VCmpNeU32Op>(op)
-                            ? llvm::AMDGPU::V_CMP_NE_U32_e64_gfx11
-                        : isa<wavemachine::VCmpLtU32Op>(op)
-                            ? llvm::AMDGPU::V_CMP_LT_U32_e64_gfx11
-                        : isa<wavemachine::VCmpLeU32Op>(op)
-                            ? llvm::AMDGPU::V_CMP_LE_U32_e64_gfx11
-                        : isa<wavemachine::VCmpGtU32Op>(op)
-                            ? llvm::AMDGPU::V_CMP_GT_U32_e64_gfx11
-                            : llvm::AMDGPU::V_CMP_GE_U32_e64_gfx11;
-      return emitMC(opcode,
-                    {toMCOperand(result()), toMCOperand(op.getOperand(0)),
-                     toMCOperand(op.getOperand(1))});
+      unsigned opcode = isa<wavemachine::VCmpEqU32Op>(op)   ? vCmpEqU32()
+                        : isa<wavemachine::VCmpNeU32Op>(op) ? vCmpNeU32()
+                        : isa<wavemachine::VCmpLtU32Op>(op) ? vCmpLtU32()
+                        : isa<wavemachine::VCmpLeU32Op>(op) ? vCmpLeU32()
+                        : isa<wavemachine::VCmpGtU32Op>(op) ? vCmpGtU32()
+                                                            : vCmpGeU32();
+      llvm::MCOperand dst =
+          isGfx8Or9() ? llvm::MCOperand::createReg(namedPhysReg("vcc"))
+                      : toMCOperand(result());
+      if (failed(emitMC(opcode, {dst, toMCOperand(op.getOperand(0)),
+                                 toMCOperand(op.getOperand(1))})))
+        return failure();
+      if (!isGfx8Or9())
+        return success();
+      return emitMC(sMovB32(),
+                    {toMCOperand(result()),
+                     llvm::MCOperand::createReg(namedPhysReg("vcc_lo"))});
     }
     if (isa<wavemachine::SMovB32Op>(op)) {
       StringRef dst = op.getAttrOfType<StringAttr>("dst").getValue();
       std::string src = operandString(0);
       if (dst != src)
-        emitLine(Twine("s_mov_b32 ") + dst + ", " + src);
+        return emitMC(sMovB32(), {llvm::MCOperand::createReg(namedPhysReg(dst)),
+                                  toMCOperand(op.getOperand(0))});
       return success();
     }
     if (isa<wavemachine::SMovB32ValueOp>(op)) {
@@ -637,45 +861,40 @@ private:
             srcRt.getIndex() == getPhys(op.getResult(0)))
           return success();
       }
-      return emitMC(llvm::AMDGPU::S_MOV_B32_gfx11,
+      return emitMC(sMovB32(),
                     {toMCOperand(op.getResult(0)), toMCOperand(src)});
     }
     if (isa<wavemachine::SAddI32Op>(op))
-      return emitMC(llvm::AMDGPU::S_ADD_I32_gfx11,
-                    {toMCOperand(op.getResult(0)),
-                     toMCOperand(op.getOperand(0)),
-                     toMCOperand(op.getOperand(1))});
+      return emitMC(sAddI32(), {toMCOperand(op.getResult(0)),
+                                toMCOperand(op.getOperand(0)),
+                                toMCOperand(op.getOperand(1))});
     if (isa<wavemachine::SMulI32Op>(op))
-      return emitMC(llvm::AMDGPU::S_MUL_I32_gfx11,
-                    {toMCOperand(op.getResult(0)),
-                     toMCOperand(op.getOperand(0)),
-                     toMCOperand(op.getOperand(1))});
+      return emitMC(sMulI32(), {toMCOperand(op.getResult(0)),
+                                toMCOperand(op.getOperand(0)),
+                                toMCOperand(op.getOperand(1))});
     if (isa<wavemachine::SLshlB32Op>(op))
-      return emitMC(llvm::AMDGPU::S_LSHL_B32_gfx11,
-                    {toMCOperand(op.getResult(0)),
-                     toMCOperand(op.getOperand(0)),
-                     toMCOperand(op.getOperand(1))});
+      return emitMC(sLshlB32(), {toMCOperand(op.getResult(0)),
+                                 toMCOperand(op.getOperand(0)),
+                                 toMCOperand(op.getOperand(1))});
     if (isa<wavemachine::SLshrB32Op>(op))
-      return emitMC(llvm::AMDGPU::S_LSHR_B32_gfx11,
-                    {toMCOperand(op.getResult(0)),
-                     toMCOperand(op.getOperand(0)),
-                     toMCOperand(op.getOperand(1))});
+      return emitMC(sLshrB32(), {toMCOperand(op.getResult(0)),
+                                 toMCOperand(op.getOperand(0)),
+                                 toMCOperand(op.getOperand(1))});
     if (isa<wavemachine::SAndB32Op>(op))
-      return emitMC(llvm::AMDGPU::S_AND_B32_gfx11,
-                    {toMCOperand(op.getResult(0)),
-                     toMCOperand(op.getOperand(0)),
-                     toMCOperand(op.getOperand(1))});
+      return emitMC(sAndB32(), {toMCOperand(op.getResult(0)),
+                                toMCOperand(op.getOperand(0)),
+                                toMCOperand(op.getOperand(1))});
     if (isa<wavemachine::SAddU64Op>(op)) {
       // Carry-chain: `s_add_u32 lo` sets SCC; `s_addc_u32 hi` consumes
       // and re-sets it. Component splits go through the SGPR helper.
       Value res = op.getResult(0);
       Value lhs = op.getOperand(0);
       Value rhs = op.getOperand(1);
-      if (failed(emitMC(llvm::AMDGPU::S_ADD_U32_gfx11,
+      if (failed(emitMC(sAddU32(),
                         {toMCSGPRComponent(res, 0), toMCSGPRComponent(lhs, 0),
                          toMCSGPRComponent(rhs, 0)})))
         return failure();
-      return emitMC(llvm::AMDGPU::S_ADDC_U32_gfx11,
+      return emitMC(sAddcU32(),
                     {toMCSGPRComponent(res, 1), toMCSGPRComponent(lhs, 1),
                      toMCSGPRComponent(rhs, 1)});
     }
@@ -710,23 +929,23 @@ private:
       Value scratch = op.getResult(1);
       Value lhs = op.getOperand(0);
       Value rhs = op.getOperand(1);
-      if (failed(emitMC(llvm::AMDGPU::S_MUL_I32_gfx11,
+      if (failed(emitMC(sMulI32(),
                         {toMCSGPRComponent(res, 0), toMCSGPRComponent(lhs, 0),
                          toMCSGPRComponent(rhs, 0)})) ||
-          failed(emitMC(llvm::AMDGPU::S_MUL_HI_U32_gfx11,
+          failed(emitMC(sMulHiU32(),
                         {toMCSGPRComponent(res, 1), toMCSGPRComponent(lhs, 0),
                          toMCSGPRComponent(rhs, 0)})) ||
-          failed(emitMC(llvm::AMDGPU::S_MUL_I32_gfx11,
+          failed(emitMC(sMulI32(),
                         {toMCOperand(scratch), toMCSGPRComponent(lhs, 0),
                          toMCSGPRComponent(rhs, 1)})) ||
-          failed(emitMC(llvm::AMDGPU::S_ADD_I32_gfx11,
+          failed(emitMC(sAddI32(),
                         {toMCSGPRComponent(res, 1), toMCSGPRComponent(res, 1),
                          toMCOperand(scratch)})) ||
-          failed(emitMC(llvm::AMDGPU::S_MUL_I32_gfx11,
+          failed(emitMC(sMulI32(),
                         {toMCOperand(scratch), toMCSGPRComponent(lhs, 1),
                          toMCSGPRComponent(rhs, 0)})))
         return failure();
-      return emitMC(llvm::AMDGPU::S_ADD_I32_gfx11,
+      return emitMC(sAddI32(),
                     {toMCSGPRComponent(res, 1), toMCSGPRComponent(res, 1),
                      toMCOperand(scratch)});
     }
@@ -773,30 +992,28 @@ private:
       // Lift a 64-bit immediate into an SGPR pair: low half then high.
       int64_t value = op.getAttrOfType<IntegerAttr>("value").getInt();
       Value res = op.getResult(0);
-      if (failed(emitMC(llvm::AMDGPU::S_MOV_B32_gfx11,
+      if (failed(emitMC(sMovB32(),
                         {toMCSGPRComponent(res, 0),
                          llvm::MCOperand::createImm(value & 0xffffffff)})))
         return failure();
       return emitMC(
-          llvm::AMDGPU::S_MOV_B32_gfx11,
+          sMovB32(),
           {toMCSGPRComponent(res, 1),
            llvm::MCOperand::createImm(
                static_cast<int64_t>(static_cast<uint64_t>(value) >> 32) &
                0xffffffff)});
     }
     if (isa<wavemachine::SCmpLtI32Op>(op))
-      return emitMC(
-          llvm::AMDGPU::S_CMP_LT_I32_gfx11,
-          {toMCOperand(op.getOperand(0)), toMCOperand(op.getOperand(1))});
+      return emitMC(sCmpLtI32(), {toMCOperand(op.getOperand(0)),
+                                  toMCOperand(op.getOperand(1))});
     if (isa<wavemachine::SCmpLgU32Op>(op))
-      return emitMC(
-          llvm::AMDGPU::S_CMP_LG_U32_gfx11,
-          {toMCOperand(op.getOperand(0)), toMCOperand(op.getOperand(1))});
+      return emitMC(sCmpLgU32(), {toMCOperand(op.getOperand(0)),
+                                  toMCOperand(op.getOperand(1))});
     if (isa<wavemachine::SCBranchScc0Op>(op))
-      return emitMC(llvm::AMDGPU::S_CBRANCH_SCC0_gfx11,
+      return emitMC(sCbranchScc0(),
                     {labelOperand(op.getAttrOfType<StringAttr>("label"))});
     if (isa<wavemachine::SCBranchScc1Op>(op))
-      return emitMC(llvm::AMDGPU::S_CBRANCH_SCC1_gfx11,
+      return emitMC(sCbranchScc1(),
                     {labelOperand(op.getAttrOfType<StringAttr>("label"))});
     if (auto loop = dyn_cast<wavemachine::UniformLoopOp>(op))
       return emitUniformLoop(loop);
@@ -807,61 +1024,84 @@ private:
           "wavemachine.continue_if escaped its parent uniform_loop");
     if (isa<wavemachine::SLoadB32Op>(op))
       return emitMC(
-          llvm::AMDGPU::S_LOAD_B32_IMM_gfx11,
+          sLoadB32(),
           {toMCOperand(result()),
            llvm::MCOperand::createReg(
                namedPhysReg(op.getAttrOfType<StringAttr>("base").getValue())),
            toMCOperand(op.getOperand(0)), llvm::MCOperand::createImm(0)});
     if (isa<wavemachine::SLoadB64Op>(op))
       return emitMC(
-          llvm::AMDGPU::S_LOAD_B64_IMM_gfx11,
+          sLoadB64(),
           {toMCOperand(result()),
            llvm::MCOperand::createReg(
                namedPhysReg(op.getAttrOfType<StringAttr>("base").getValue())),
            toMCOperand(op.getOperand(0)), llvm::MCOperand::createImm(0)});
     if (isa<wavemachine::SLoadB128Op>(op))
       return emitMC(
-          llvm::AMDGPU::S_LOAD_B128_IMM_gfx11,
+          sLoadB128(),
           {toMCOperand(result()),
            llvm::MCOperand::createReg(
                namedPhysReg(op.getAttrOfType<StringAttr>("base").getValue())),
            toMCOperand(op.getOperand(0)), llvm::MCOperand::createImm(0)});
     if (isa<wavemachine::SWaitcntOp>(op))
-      return emitMCValues(llvm::AMDGPU::S_WAITCNT_gfx11, op.getOperands());
-    if (isa<wavemachine::SWaitcntVscntOp>(op))
+      return emitMCValues(sWaitcnt(), op.getOperands());
+    if (isa<wavemachine::SWaitcntVscntOp>(op)) {
+      if (isGfx8Or9()) {
+        unsigned vmcnt = getImmediate(op.getOperand(0)).value_or(0);
+        unsigned encoded =
+            llvm::AMDGPU::encodeWaitcnt(isaVersion, vmcnt, /*expcnt=*/~0u,
+                                        /*lgkmcnt=*/~0u);
+        return emitMC(sWaitcnt(), {llvm::MCOperand::createImm(encoded)});
+      }
       return emitMC(llvm::AMDGPU::S_WAITCNT_VSCNT_gfx11,
                     {llvm::MCOperand::createReg(namedPhysReg("null")),
                      toMCOperand(op.getOperand(0))});
+    }
     if (isa<wavemachine::SNopOp>(op))
-      return emitMCValues(llvm::AMDGPU::S_NOP_gfx11, op.getOperands());
-    if (isa<wavemachine::SDelayAluOp>(op))
+      return emitMCValues(sNop(), op.getOperands());
+    if (isa<wavemachine::SDelayAluOp>(op)) {
+      if (isGfx8Or9())
+        return success();
       return emitMCValues(llvm::AMDGPU::S_DELAY_ALU_gfx11, op.getOperands());
-    if (isa<wavemachine::SAndSaveexecB32Op>(op))
+    }
+    if (isa<wavemachine::SAndSaveexecB32Op>(op)) {
+      if (isGfx8Or9()) {
+        if (failed(emitMC(sMovB32(), {toMCOperand(result()),
+                                      llvm::MCOperand::createReg(
+                                          namedPhysReg("exec_lo"))})))
+          return failure();
+        return emitMC(sAndB32(),
+                      {llvm::MCOperand::createReg(namedPhysReg("exec_lo")),
+                       llvm::MCOperand::createReg(namedPhysReg("exec_lo")),
+                       toMCOperand(op.getOperand(0))});
+      }
       return emitMC(llvm::AMDGPU::S_AND_SAVEEXEC_B32_gfx11,
                     {toMCOperand(result()), toMCOperand(op.getOperand(0))});
+    }
     if (isa<wavemachine::SAndn2ExecB32Op>(op)) {
-      emitLine(Twine("s_andn2_b32 exec_lo, ") + operandString(0) + ", " +
-               operandString(1));
-      return success();
+      return emitMC(sAndn2B32(),
+                    {llvm::MCOperand::createReg(namedPhysReg("exec_lo")),
+                     toMCOperand(op.getOperand(0)),
+                     toMCOperand(op.getOperand(1))});
     }
     if (isa<wavemachine::SCBranchExeczOp>(op))
-      return emitMC(llvm::AMDGPU::S_CBRANCH_EXECZ_gfx11,
+      return emitMC(sCbranchExecz(),
                     {labelOperand(op.getAttrOfType<StringAttr>("label"))});
     if (isa<wavemachine::SMovExecLoOp>(op)) {
-      emitLine(Twine("s_mov_b32 exec_lo, ") + operandString(0));
-      return success();
+      return emitMC(sMovB32(),
+                    {llvm::MCOperand::createReg(namedPhysReg("exec_lo")),
+                     toMCOperand(op.getOperand(0))});
     }
     if (isa<wavemachine::VReadfirstlaneB32Op>(op))
-      return emitMC(llvm::AMDGPU::V_READFIRSTLANE_B32_gfx11,
+      return emitMC(vReadfirstlaneB32(),
                     {toMCOperand(result()), toMCOperand(op.getOperand(0))});
     if (isa<wavemachine::GlobalStoreB32Op>(op)) {
       int64_t instOffset = getIntAttr(&op, "inst_offset", 0);
-      return emitMC(llvm::AMDGPU::GLOBAL_STORE_DWORD_SADDR_gfx11,
-                    {toMCOperand(op.getOperand(0)),
-                     toMCOperand(op.getOperand(1)),
-                     toMCOperand(op.getOperand(2)),
-                     llvm::MCOperand::createImm(instOffset),
-                     llvm::MCOperand::createImm(0)});
+      return emitMC(globalStoreB32(), {toMCOperand(op.getOperand(0)),
+                                       toMCOperand(op.getOperand(1)),
+                                       toMCOperand(op.getOperand(2)),
+                                       llvm::MCOperand::createImm(instOffset),
+                                       llvm::MCOperand::createImm(0)});
     }
     // GLOBAL_LOAD_DWORD_SADDR encodes its MC operands as
     //   vdst, saddr, vaddr, offset, cpol
@@ -869,18 +1109,17 @@ private:
     // store variants we use elsewhere.
     if (isa<wavemachine::GlobalLoadB32Op>(op)) {
       int64_t instOffset = getIntAttr(&op, "inst_offset", 0);
-      return emitMC(llvm::AMDGPU::GLOBAL_LOAD_DWORD_SADDR_gfx11,
-                    {toMCOperand(op.getResult(0)),
-                     toMCOperand(op.getOperand(1)),
-                     toMCOperand(op.getOperand(0)),
-                     llvm::MCOperand::createImm(instOffset),
-                     llvm::MCOperand::createImm(0)});
+      return emitMC(globalLoadB32(), {toMCOperand(op.getResult(0)),
+                                      toMCOperand(op.getOperand(1)),
+                                      toMCOperand(op.getOperand(0)),
+                                      llvm::MCOperand::createImm(instOffset),
+                                      llvm::MCOperand::createImm(0)});
     }
     if (isa<wavemachine::GlobalLoadTupleB32Op>(op)) {
       auto regType = cast<wavemachine::RegType>(op.getResult(0).getType());
       int64_t instOffset = getIntAttr(&op, "inst_offset", 0);
       for (unsigned i = 0, e = regType.getWidth(); i != e; ++i)
-        if (failed(emitMC(llvm::AMDGPU::GLOBAL_LOAD_DWORD_SADDR_gfx11,
+        if (failed(emitMC(globalLoadB32(),
                           {toMCVGPRComponent(op.getResult(0), i),
                            toMCOperand(op.getOperand(1)),
                            toMCOperand(op.getOperand(0)),
@@ -893,16 +1132,13 @@ private:
       constexpr uint32_t gfx11Format32Float = 22;
       constexpr uint32_t defaultRsrcFlags =
           (gfx11Format32Float << 12) | (1u << 24) | (3u << 28);
-      if (failed(emitMC(llvm::AMDGPU::S_MOV_B32_gfx11,
-                        {toMCSGPRComponent(result(), 0),
-                         toMCSGPRComponent(op.getOperand(0), 0)})) ||
-          failed(emitMC(llvm::AMDGPU::S_MOV_B32_gfx11,
-                        {toMCSGPRComponent(result(), 1),
-                         toMCSGPRComponent(op.getOperand(0), 1)})) ||
-          failed(emitMC(llvm::AMDGPU::S_MOV_B32_gfx11,
-                        {toMCSGPRComponent(result(), 2),
-                         toMCOperand(op.getOperand(1))})) ||
-          failed(emitMC(llvm::AMDGPU::S_MOV_B32_gfx11,
+      if (failed(emitMC(sMovB32(), {toMCSGPRComponent(result(), 0),
+                                    toMCSGPRComponent(op.getOperand(0), 0)})) ||
+          failed(emitMC(sMovB32(), {toMCSGPRComponent(result(), 1),
+                                    toMCSGPRComponent(op.getOperand(0), 1)})) ||
+          failed(emitMC(sMovB32(), {toMCSGPRComponent(result(), 2),
+                                    toMCOperand(op.getOperand(1))})) ||
+          failed(emitMC(sMovB32(),
                         {toMCSGPRComponent(result(), 3),
                          llvm::MCOperand::createImm(defaultRsrcFlags)})))
         return failure();
@@ -924,21 +1160,21 @@ private:
     //          soffset(SGPR1OrImm), [dep], inst_offset attr
     if (isa<wavemachine::BufferStoreB32Op>(op)) {
       int64_t instOffset = getIntAttr(&op, "inst_offset", 0);
-      return emitMC(
-          llvm::AMDGPU::BUFFER_STORE_DWORD_OFFEN_gfx11,
-          {toMCOperand(op.getOperand(1)), toMCOperand(op.getOperand(0)),
-           toMCOperand(op.getOperand(2)), toMCOperand(op.getOperand(3)),
-           llvm::MCOperand::createImm(instOffset),
-           llvm::MCOperand::createImm(0)});
+      return emitMC(bufferStoreB32(), {toMCOperand(op.getOperand(1)),
+                                       toMCOperand(op.getOperand(0)),
+                                       toMCOperand(op.getOperand(2)),
+                                       toMCOperand(op.getOperand(3)),
+                                       llvm::MCOperand::createImm(instOffset),
+                                       llvm::MCOperand::createImm(0)});
     }
     if (isa<wavemachine::BufferLoadB32Op>(op)) {
       int64_t instOffset = getIntAttr(&op, "inst_offset", 0);
-      return emitMC(
-          llvm::AMDGPU::BUFFER_LOAD_DWORD_OFFEN_gfx11,
-          {toMCOperand(op.getResult(0)), toMCOperand(op.getOperand(0)),
-           toMCOperand(op.getOperand(1)), toMCOperand(op.getOperand(2)),
-           llvm::MCOperand::createImm(instOffset),
-           llvm::MCOperand::createImm(0)});
+      return emitMC(bufferLoadB32(), {toMCOperand(op.getResult(0)),
+                                      toMCOperand(op.getOperand(0)),
+                                      toMCOperand(op.getOperand(1)),
+                                      toMCOperand(op.getOperand(2)),
+                                      llvm::MCOperand::createImm(instOffset),
+                                      llvm::MCOperand::createImm(0)});
     }
     // Tuple buffer loads expand into N consecutive `buffer_load_dword`
     // instructions sharing the same vaddr / descriptor / soffset, with
@@ -948,7 +1184,7 @@ private:
       auto regType = cast<wavemachine::RegType>(op.getResult(0).getType());
       int64_t instOffset = getIntAttr(&op, "inst_offset", 0);
       for (unsigned i = 0, e = regType.getWidth(); i != e; ++i)
-        if (failed(emitMC(llvm::AMDGPU::BUFFER_LOAD_DWORD_OFFEN_gfx11,
+        if (failed(emitMC(bufferLoadB32(),
                           {toMCVGPRComponent(op.getResult(0), i),
                            toMCOperand(op.getOperand(0)),
                            toMCOperand(op.getOperand(1)),
@@ -961,7 +1197,7 @@ private:
     if (isa<wavemachine::GlobalStoreTupleB32Op>(op)) {
       unsigned component = getIntAttr(&op, "component", 0);
       int64_t instOffset = getIntAttr(&op, "inst_offset", 0);
-      return emitMC(llvm::AMDGPU::GLOBAL_STORE_DWORD_SADDR_gfx11,
+      return emitMC(globalStoreB32(),
                     {toMCOperand(op.getOperand(0)),
                      toMCVGPRComponent(op.getOperand(1), component),
                      toMCOperand(op.getOperand(2)),
@@ -974,7 +1210,7 @@ private:
       // vdata is the selected dword of the VGPR tuple.
       unsigned component = getIntAttr(&op, "component", 0);
       int64_t instOffset = getIntAttr(&op, "inst_offset", 0);
-      return emitMC(llvm::AMDGPU::BUFFER_STORE_DWORD_OFFEN_gfx11,
+      return emitMC(bufferStoreB32(),
                     {toMCVGPRComponent(op.getOperand(1), component),
                      toMCOperand(op.getOperand(0)),
                      toMCOperand(op.getOperand(2)),
@@ -983,7 +1219,7 @@ private:
                      llvm::MCOperand::createImm(0)});
     }
     if (isa<wavemachine::DsLoadB32Op>(op))
-      return emitMC(llvm::AMDGPU::DS_READ_B32_gfx11,
+      return emitMC(dsReadB32(),
                     {toMCOperand(op.getResult(0)),
                      toMCOperand(op.getOperand(0)),
                      llvm::MCOperand::createImm(getIntAttr(&op, "offset", 0)),
@@ -992,7 +1228,7 @@ private:
       auto regType = cast<wavemachine::RegType>(op.getResult(0).getType());
       int64_t baseOffset = getIntAttr(&op, "offset", 0);
       for (unsigned i = 0, e = regType.getWidth(); i != e; ++i)
-        if (failed(emitMC(llvm::AMDGPU::DS_READ_B32_gfx11,
+        if (failed(emitMC(dsReadB32(),
                           {toMCVGPRComponent(op.getResult(0), i),
                            toMCOperand(op.getOperand(0)),
                            llvm::MCOperand::createImm(baseOffset + i * 4),
@@ -1001,7 +1237,7 @@ private:
       return success();
     }
     if (isa<wavemachine::DsStoreB32Op>(op))
-      return emitMC(llvm::AMDGPU::DS_WRITE_B32_gfx11,
+      return emitMC(dsWriteB32(),
                     {toMCOperand(op.getOperand(0)),
                      toMCOperand(op.getOperand(1)),
                      llvm::MCOperand::createImm(getIntAttr(&op, "offset", 0)),
@@ -1010,7 +1246,7 @@ private:
       auto regType = cast<wavemachine::RegType>(op.getOperand(1).getType());
       int64_t baseOffset = getIntAttr(&op, "offset", 0);
       for (unsigned i = 0, e = regType.getWidth(); i != e; ++i)
-        if (failed(emitMC(llvm::AMDGPU::DS_WRITE_B32_gfx11,
+        if (failed(emitMC(dsWriteB32(),
                           {toMCOperand(op.getOperand(0)),
                            toMCVGPRComponent(op.getOperand(1), i),
                            llvm::MCOperand::createImm(baseOffset + i * 4),
@@ -1019,13 +1255,12 @@ private:
       return success();
     }
     if (isa<wavemachine::SBarrierOp>(op))
-      return emitMC(llvm::AMDGPU::S_BARRIER_gfx11, {});
+      return emitMC(sBarrier(), {});
     if (isa<wavemachine::SEndpgmOp>(op))
-      return emitMC(llvm::AMDGPU::S_ENDPGM_gfx11,
-                    {llvm::MCOperand::createImm(0)});
+      return emitMC(sEndpgm(), {llvm::MCOperand::createImm(0)});
     if (isa<wavemachine::SSetpcB64Op>(op)) {
-      emitLine(StringRef("s_setpc_b64 s[30:31]"));
-      return success();
+      return emitMC(sSetpcB64(),
+                    {llvm::MCOperand::createReg(namedPhysReg("s[30:31]"))});
     }
 
     return op.emitError("unsupported WaveMachine opcode: ") << name;
