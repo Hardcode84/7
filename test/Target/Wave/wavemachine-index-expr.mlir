@@ -59,7 +59,10 @@ func.func @passthrough(%out: !wave.ptr<i32, #wave.global>, %x: i32) attributes {
 
 // Buffer destination has the soffset slot, so wgid_x + wgid_y collapse
 // onto the S side via one `s_add_i32` and feed the buffer_store_b32
-// soffset operand. K=8 scaled x4 -> inst_offset = 32.
+// soffset operand. K=8 scaled x4 -> inst_offset = 32. The
+// `wave.assume_range` wrappers bound each workgroup_id so the
+// scaled sum provably fits the 32-bit S slot; without them the
+// emit-time spec check would demote the bucket to voffset.
 // CHECK-LABEL: func.func @buffer_buckets
 // CHECK: %[[LANE:.*]] = wavemachine.v_mbcnt_lo
 // CHECK: %[[WGX:.*]] = wavemachine.s_workgroup_id_x
@@ -70,14 +73,41 @@ func.func @passthrough(%out: !wave.ptr<i32, #wave.global>, %x: i32) attributes {
 // CHECK: wavemachine.buffer_store_b32 %[[VBYTE]],{{.*}}, %[[SBYTE]] offset 32
 func.func @buffer_buckets(%out: !wave.ptr<i32, #wave.global>, %x: i32) attributes {wave.kernel} {
   %lane = wave.lane_id : !wave.simd<i32, 32>
-  %wgid_x = wave.workgroup_id 0
-  %wgid_y = wave.workgroup_id 1
+  %wgid_x_raw = wave.workgroup_id 0
+  %wgid_y_raw = wave.workgroup_id 1
+  %wgid_x = wave.assume_range %wgid_x_raw, [0, 1023] : i32
+  %wgid_y = wave.assume_range %wgid_y_raw, [0, 1023] : i32
   %k = arith.constant 8 : i32
   %range = arith.constant 256 : i32
   %buf = waveamd.make_buffer %out, %range : !wave.ptr<i32, #wave.global>, i32 -> !wave.ptr<i32, #waveamd.buffer>
   %vx = wave.splat %x : i32 -> !wave.simd<i32, 32>
   %sum = wave.addi %lane, %vx : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
   %off = wave.index_expr <"lid + wgid_x + wgid_y + K"> ["K", "lid", "wgid_x", "wgid_y"] (%k, %lane, %wgid_x, %wgid_y) : (i32, !wave.simd<i32, 32>, i32, i32) -> !wave.index<32>
+  %ptrs = wave.ptr_add %buf, %off : !wave.ptr<i32, #waveamd.buffer>, !wave.index<32> -> !wave.simd<!wave.ptr<i32, #waveamd.buffer>, 32>
+  %tok = wave.store %sum -> %ptrs : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<i32, #waveamd.buffer>, 32>) -> !wave.mem.token
+  return
+}
+
+// Without `wave.assume_range`, workgroup_id reports the full
+// [0, INT32_MAX] lattice. Two of them, byte-scaled, push the soffset
+// bucket's proven range past 2^32-1, so the emit-time spec check
+// demotes the SGPR contribution into voffset via a final v_add_u32.
+// CHECK-LABEL: func.func @buffer_demote_on_overflow
+// CHECK: %[[LANE:.*]] = wavemachine.v_mbcnt_lo
+// CHECK: %[[SSUM:.*]], %{{.*}} = wavemachine.s_add_i32
+// CHECK: %[[VBYTE:.*]] = wavemachine.v_lshlrev_b32 %[[LANE]],
+// CHECK: %[[SBYTE:.*]] = wavemachine.s_lshl_b32 %[[SSUM]],
+// CHECK: %[[VMERGED:.*]] = wavemachine.v_add_u32 %[[VBYTE]], %[[SBYTE]]
+// CHECK: wavemachine.buffer_store_b32 %[[VMERGED]],
+func.func @buffer_demote_on_overflow(%out: !wave.ptr<i32, #wave.global>, %x: i32) attributes {wave.kernel} {
+  %lane = wave.lane_id : !wave.simd<i32, 32>
+  %wgid_x = wave.workgroup_id 0
+  %wgid_y = wave.workgroup_id 1
+  %range = arith.constant 256 : i32
+  %buf = waveamd.make_buffer %out, %range : !wave.ptr<i32, #wave.global>, i32 -> !wave.ptr<i32, #waveamd.buffer>
+  %vx = wave.splat %x : i32 -> !wave.simd<i32, 32>
+  %sum = wave.addi %lane, %vx : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  %off = wave.index_expr <"lid + wgid_x + wgid_y"> ["lid", "wgid_x", "wgid_y"] (%lane, %wgid_x, %wgid_y) : (!wave.simd<i32, 32>, i32, i32) -> !wave.index<32>
   %ptrs = wave.ptr_add %buf, %off : !wave.ptr<i32, #waveamd.buffer>, !wave.index<32> -> !wave.simd<!wave.ptr<i32, #waveamd.buffer>, 32>
   %tok = wave.store %sum -> %ptrs : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<i32, #waveamd.buffer>, 32>) -> !wave.mem.token
   return

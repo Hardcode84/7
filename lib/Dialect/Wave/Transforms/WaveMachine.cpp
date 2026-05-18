@@ -139,10 +139,19 @@ static Operation *createInstrNoResult(OpBuilder &builder, Location loc,
 // and `instOffset` an accumulated immediate that lands in the
 // memory op's `offset N` attr. A null `voffset` / `soffset` and a
 // zero `instOffset` each mean "no contribution".
+//
+// `voffsetExpr` / `soffsetExpr` are the symbolic forms of the V / S
+// buckets; `assumptions` are the per-binding range assumptions
+// inherited from the source `wave.index_expr`. The emit-time spec
+// check calls `sym::provablyInRange` over them and demotes the
+// bucket when its proven range overflows the slot's hardware width.
 struct OffsetTriple {
   Value voffset;
   Value soffset;
   int64_t instOffset = 0;
+  const ::ixs_node *voffsetExpr = nullptr;
+  const ::ixs_node *soffsetExpr = nullptr;
+  llvm::SmallVector<sym::PredHandle, 2> assumptions;
 };
 
 // Symbol kind for the bucketizer's per-summand classification. Bindings
@@ -290,6 +299,16 @@ private:
             getRegType(builder.getContext(), wavemachine::RegClass::SGPR));
       }
     }
+    // Scale the symbolic forms too so the emit-time width check sees
+    // the final byte-offset range, not the pre-scale element range.
+    if (t.voffsetExpr || t.soffsetExpr) {
+      auto sizeExpr = sym::composeExprInt(symbolStore(), size);
+      if (succeeded(sizeExpr)) {
+        out.voffsetExpr = scaleBucketExpr(t.voffsetExpr, sizeExpr->raw());
+        out.soffsetExpr = scaleBucketExpr(t.soffsetExpr, sizeExpr->raw());
+      }
+    }
+    out.assumptions = t.assumptions;
     return out;
   }
 
@@ -326,8 +345,34 @@ private:
     return t.instOffset < range.first || t.instOffset > range.second;
   }
 
-  // Push out-of-range / unsupported inst_offset and an unsupported
-  // soffset into the slots `spec` actually has.
+  sym::Store &symbolStore() {
+    return func->getParentOfType<ModuleOp>()
+        ->getContext()
+        ->getOrLoadDialect<WaveDialect>()
+        ->getSymbolStore();
+  }
+
+  // True iff `expr` provably stays in unsigned 32-bit (`[0, 2^32 - 1]`)
+  // under the triple's assumption set, or there is nothing symbolic to
+  // check. A null `expr` means the slot is empty / imm-only and is
+  // already safe.
+  bool slotFitsU32(const ::ixs_node *expr,
+                   ArrayRef<sym::PredHandle> assumptions) {
+    if (!expr)
+      return true;
+    return sym::provablyInRange(symbolStore(), sym::ExprHandle(expr),
+                                assumptions, int64_t{0},
+                                (int64_t{1} << 32) - 1);
+  }
+
+  // Push out-of-range / unsupported inst_offset and an unsupported or
+  // overwide soffset into the slots `spec` actually has. soffset is
+  // demoted to voffset when (a) the spec has no S slot, or (b) the
+  // soffset bucket's proven range overflows 32-bit. voffset is the
+  // catch-all; an overflow there is a real correctness issue that
+  // needs a 64-bit lowering, but the bucketizer can't synthesize one
+  // today and the practical kernels stay well below 2^32, so the
+  // overflow check stops at soffset.
   void demoteToFitSpec(Location loc, OffsetTriple &t,
                        const wavemachine::AddressFieldSpec &spec) {
     if (instOffsetOverflows(t, spec)) {
@@ -335,10 +380,13 @@ private:
                                spec.hasSoffset);
       t.instOffset = 0;
     }
-    if (!spec.hasSoffset && t.soffset) {
+    bool soffsetFits = slotFitsU32(t.soffsetExpr, t.assumptions);
+    if ((!spec.hasSoffset || !soffsetFits) && t.soffset) {
       t.voffset =
           t.voffset ? addByteOffsets(loc, t.voffset, t.soffset) : t.soffset;
+      t.voffsetExpr = appendBucketExpr(t.voffsetExpr, t.soffsetExpr);
       t.soffset = Value{};
+      t.soffsetExpr = nullptr;
     }
   }
 
@@ -366,9 +414,47 @@ private:
     return attrs;
   }
 
+  // ixsimpl ADD of two bucket sub-expressions; null slots pass the
+  // non-null counterpart through verbatim. Failure returns whichever
+  // side composed successfully (the bucket Value is still correct;
+  // we just lose the symbolic form for the width check).
+  const ::ixs_node *appendBucketExpr(const ::ixs_node *acc,
+                                     const ::ixs_node *add) {
+    if (!acc)
+      return add;
+    if (!add)
+      return acc;
+    FailureOr<sym::ExprHandle> handle =
+        sym::composeExprBinary(symbolStore(), sym::ExprHandle(acc),
+                               sym::ExprBinaryOp::Add, sym::ExprHandle(add));
+    if (failed(handle))
+      return acc;
+    return handle->raw();
+  }
+
+  // ixsimpl MUL of `coeff * value`, returning `value` when `coeff` is
+  // trivially the integer literal 1.
+  const ::ixs_node *scaleBucketExpr(const ::ixs_node *value,
+                                    const ::ixs_node *coeff) {
+    if (!coeff)
+      return value;
+    if (std::optional<int64_t> ci =
+            staticIntLiteral(const_cast<::ixs_node *>(coeff));
+        ci && *ci == 1)
+      return value;
+    FailureOr<sym::ExprHandle> handle =
+        sym::composeExprBinary(symbolStore(), sym::ExprHandle(coeff),
+                               sym::ExprBinaryOp::Mul, sym::ExprHandle(value));
+    if (failed(handle))
+      return value;
+    return handle->raw();
+  }
+
   // Field-wise sum of two triples. Null slots pass the non-null
   // operand through verbatim, so the result keeps each slot in its
   // natural class (V/S/imm) instead of forcing through a VGPR add.
+  // Symbolic forms and the assumption set merge alongside the Values
+  // so the emit-time width check sees the full picture.
   OffsetTriple mergeTriples(Location loc, OffsetTriple a, OffsetTriple b) {
     OffsetTriple out;
     out.voffset = !a.voffset   ? b.voffset
@@ -378,6 +464,10 @@ private:
                   : !b.soffset ? a.soffset
                                : addUniformBytes(loc, a.soffset, b.soffset);
     out.instOffset = a.instOffset + b.instOffset;
+    out.voffsetExpr = appendBucketExpr(a.voffsetExpr, b.voffsetExpr);
+    out.soffsetExpr = appendBucketExpr(a.soffsetExpr, b.soffsetExpr);
+    out.assumptions = a.assumptions;
+    llvm::append_range(out.assumptions, b.assumptions);
     return out;
   }
 
@@ -1258,7 +1348,9 @@ private:
   // Route one (optionally `term_coeff *`) summand into `triple`'s
   // matching slot. Const summands fold into `instOffset`; uniform
   // summands that materialize to an SGPR / imm join `soffset` via
-  // `s_add_i32`; everything else lands in `voffset`.
+  // `s_add_i32`; everything else lands in `voffset`. The summand's
+  // symbolic form joins the corresponding `*Expr` slot so the
+  // emit-time width check sees the full bucket.
   LogicalResult bucketizeSummand(::ixs_node *term, ::ixs_node *termCoeff,
                                  Operation *user,
                                  const llvm::StringMap<Value> &subs,
@@ -1272,21 +1364,21 @@ private:
     FailureOr<Value> summand = materializeSummand(term, termCoeff, user, subs);
     if (failed(summand))
       return failure();
-    // An imm-valued summand (e.g. uniform symbol bound to an imm)
-    // folds into the inst-offset slot rather than dragging an imm
-    // into the S adder.
     if (std::optional<int64_t> imm = getImmediateValue(*summand)) {
       triple.instOffset += *imm;
       return success();
     }
+    const ::ixs_node *summandExpr = scaleBucketExpr(term, termCoeff);
     Location loc = user->getLoc();
     if (kind == TermKind::Uniform && isUniformValue(*summand)) {
       triple.soffset = addUniformBytes(loc, triple.soffset, *summand);
+      triple.soffsetExpr = appendBucketExpr(triple.soffsetExpr, summandExpr);
       return success();
     }
     triple.voffset = triple.voffset
                          ? addByteOffsets(loc, triple.voffset, *summand)
                          : *summand;
+    triple.voffsetExpr = appendBucketExpr(triple.voffsetExpr, summandExpr);
     return success();
   }
 
@@ -1354,16 +1446,14 @@ private:
       if (std::optional<sym::PredHandle> a = bindingAssumption(binding, key))
         assumptions.push_back(*a);
     }
-    sym::Store &store = op->getParentOfType<ModuleOp>()
-                            ->getContext()
-                            ->getOrLoadDialect<WaveDialect>()
-                            ->getSymbolStore();
+    sym::Store &store = symbolStore();
     sym::ExprHandle exprHandle{op.getExpr().getNode()};
     FailureOr<sym::ExprHandle> simplified =
         sym::simplifyExpr(store, exprHandle, assumptions);
     ::ixs_node *root = const_cast<::ixs_node *>(
         succeeded(simplified) ? simplified->raw() : exprHandle.raw());
     OffsetTriple triple{};
+    triple.assumptions.assign(assumptions.begin(), assumptions.end());
     if (failed(bucketize(root, op, substitution, symKinds, triple)))
       return failure();
     indexTriples[op.getResult()] = triple;
