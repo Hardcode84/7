@@ -157,6 +157,12 @@ mlir::FailureOr<ExprHandle> simplifyExpr(Store &store, ExprHandle value,
 mlir::FailureOr<PredHandle> simplifyPred(Store &store, PredHandle value,
                                          std::string *diagnostic = nullptr);
 
+/// Simplify `value` under `assumptions`. AND-of-CMP assumption handles
+/// flatten to their CMP leaves before reaching the simplifier.
+mlir::FailureOr<ExprHandle> simplifyExpr(Store &store, ExprHandle value,
+                                         llvm::ArrayRef<PredHandle> assumptions,
+                                         std::string *diagnostic = nullptr);
+
 /// Three-valued result of a predicate entailment query.
 enum class CheckResult { True, False, Unknown };
 

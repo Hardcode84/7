@@ -403,7 +403,7 @@ FailureOr<PredHandle> mlir::wave::sym::simplifyPred(Store &store,
 
 // `ixs_bounds_add_assumption` only consumes CMP nodes -- an AND-tree
 // produced by `composePredAnd` is silently ignored. Flatten before
-// handing off to `ixs_check`.
+// handing off to `ixs_check` / `ixs_simplify`.
 static void flattenAssumption(ixs_node *node,
                               SmallVectorImpl<ixs_node *> &out) {
   if (!node)
@@ -414,6 +414,30 @@ static void flattenAssumption(ixs_node *node,
     return;
   }
   out.push_back(node);
+}
+
+FailureOr<ExprHandle>
+mlir::wave::sym::simplifyExpr(Store &store, ExprHandle value,
+                              ArrayRef<PredHandle> assumptions,
+                              std::string *diagnostic) {
+  Session session(store);
+  ixs_node *imported =
+      importNode(session, value.raw(), diagnostic, "wave.expr");
+  if (!imported)
+    return failure();
+  SmallVector<ixs_node *, 4> importedAssumptions;
+  for (PredHandle assumption : assumptions) {
+    ixs_node *imp =
+        importNode(session, assumption.raw(), diagnostic, "wave.pred");
+    if (!imp)
+      return failure();
+    flattenAssumption(imp, importedAssumptions);
+  }
+  ixs_node *simplified =
+      ixs_simplify(session.raw(), imported, importedAssumptions.data(),
+                   importedAssumptions.size());
+  return finishExpr(session.raw(), simplified, diagnostic,
+                    "failed to simplify wave.expr");
 }
 
 mlir::wave::sym::CheckResult

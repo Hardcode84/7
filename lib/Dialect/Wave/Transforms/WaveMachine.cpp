@@ -9,15 +9,21 @@
 #include "mlir/Dialect/Wave/Transforms/Passes.h"
 
 #include "Utils/AMDGPUBaseInfo.h"
+#include "mlir/Analysis/DataFlow/DeadCodeAnalysis.h"
+#include "mlir/Analysis/DataFlow/IntegerRangeAnalysis.h"
+#include "mlir/Analysis/DataFlow/Utils.h"
+#include "mlir/Analysis/DataFlowFramework.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/Wave/IR/Wave.h"
 #include "mlir/Dialect/Wave/IR/WaveAMD.h"
+#include "mlir/Dialect/Wave/IR/WaveSymbols.h"
 #include "mlir/Dialect/WaveMachine/IR/WaveMachine.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/PatternMatch.h"
+#include "mlir/Interfaces/InferIntRangeInterface.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
@@ -161,6 +167,15 @@ public:
     if (!func.getBody().hasOneBlock())
       return func.emitError("WaveMachine selection supports one-block funcs");
 
+    // Run IntegerRangeAnalysis once over the wave-level body so the
+    // bucketizer can convert proven ranges on `wave.index_expr`
+    // bindings into ixsimpl assumptions and simplify the AST before
+    // routing summands to V / S / inst-offset slots.
+    dataflow::loadBaselineAnalyses(rangeSolver);
+    rangeSolver.load<dataflow::IntegerRangeAnalysis>();
+    if (failed(rangeSolver.initializeAndRun(func)))
+      return func.emitError("IntegerRangeAnalysis failed on wave kernel");
+
     Block &block = func.getBody().front();
     builder.setInsertionPointToStart(&block);
     for (auto [index, arg] : llvm::enumerate(func.getArguments()))
@@ -193,7 +208,40 @@ private:
   DenseMap<Value, OffsetTriple> indexTriples;
   DenseMap<Value, bool> pointerBuffers;
   SmallVector<Operation *> opsToErase;
+  DataFlowSolver rangeSolver;
   unsigned nextLabel = 0;
+
+  // Look up the proven signed integer range of `binding` and convert
+  // it into an ixsimpl `name in [lo, hi]` assumption. Returns
+  // `nullopt` for SIMD bindings whose lattice is unset, or for
+  // bindings whose lattice is the trivial `maxRange` (no info).
+  std::optional<sym::PredHandle> bindingAssumption(Value binding,
+                                                   StringRef name) {
+    const dataflow::IntegerValueRangeLattice *lattice =
+        rangeSolver.lookupState<dataflow::IntegerValueRangeLattice>(binding);
+    if (!lattice)
+      return std::nullopt;
+    IntegerValueRange ivr = lattice->getValue();
+    if (ivr.isUninitialized())
+      return std::nullopt;
+    ConstantIntRanges range = ivr.getValue();
+    unsigned w = range.smin().getBitWidth();
+    if (w == 0)
+      return std::nullopt;
+    APInt sminBound = APInt::getSignedMinValue(w);
+    APInt smaxBound = APInt::getSignedMaxValue(w);
+    if (range.smin() == sminBound && range.smax() == smaxBound)
+      return std::nullopt;
+    sym::Store &store = func->getParentOfType<ModuleOp>()
+                            ->getContext()
+                            ->getOrLoadDialect<WaveDialect>()
+                            ->getSymbolStore();
+    auto handle = sym::rangeAssumption(store, name, range.smin().getSExtValue(),
+                                       range.smax().getSExtValue());
+    if (failed(handle))
+      return std::nullopt;
+    return *handle;
+  }
 
   // Sum the triple into a single VGPR voffset value.
   Value collapseTriple(Location loc, const OffsetTriple &t) {
@@ -413,6 +461,7 @@ private:
         .Case<WorkgroupIdOp>([&](auto o) { return selectWorkgroupId(o); })
         .Case<WorkitemIdOp>([&](auto o) { return selectWorkitemId(o); })
         .Case<SplatOp>([&](auto o) { return selectSplat(o); })
+        .Case<AssumeRangeOp>([&](auto o) { return selectAssumeRange(o); })
         .Case<BinaryOp>([&](auto o) { return selectBinary(o); })
         .Case<AddiOp>([&](auto o) { return selectAddi(o); })
         .Case<MuliOp>([&](auto o) { return selectMuli(o); })
@@ -524,6 +573,15 @@ private:
 
   LogicalResult selectSplat(SplatOp op) {
     values[op.getResult()] = expect(op.getSource(), op);
+    eraseIfTopLevel(op);
+    return success();
+  }
+
+  // `wave.assume_range` is identity at runtime: the asserted range is
+  // a producer-side hint for IntRangeAnalysis, not a runtime check.
+  // The selected value passes straight through.
+  LogicalResult selectAssumeRange(AssumeRangeOp op) {
+    values[op.getResult()] = expect(op.getValue(), op);
     eraseIfTopLevel(op);
     return success();
   }
@@ -1286,15 +1344,26 @@ private:
   LogicalResult selectIndexExpr(IndexExprOp op) {
     llvm::StringMap<Value> substitution;
     llvm::StringMap<TermKind> symKinds;
+    llvm::SmallVector<sym::PredHandle> assumptions;
     for (auto [nameAttr, binding] :
          llvm::zip(op.getNames(), op.getBindings())) {
       StringRef key = cast<StringAttr>(nameAttr).getValue();
       substitution[key] = expect(binding, op);
       symKinds[key] = isLaneVaryingType(binding.getType()) ? TermKind::Lane
                                                            : TermKind::Uniform;
+      if (std::optional<sym::PredHandle> a = bindingAssumption(binding, key))
+        assumptions.push_back(*a);
     }
+    sym::Store &store = op->getParentOfType<ModuleOp>()
+                            ->getContext()
+                            ->getOrLoadDialect<WaveDialect>()
+                            ->getSymbolStore();
+    sym::ExprHandle exprHandle{op.getExpr().getNode()};
+    FailureOr<sym::ExprHandle> simplified =
+        sym::simplifyExpr(store, exprHandle, assumptions);
+    ::ixs_node *root = const_cast<::ixs_node *>(
+        succeeded(simplified) ? simplified->raw() : exprHandle.raw());
     OffsetTriple triple{};
-    ::ixs_node *root = const_cast<::ixs_node *>(op.getExpr().getNode());
     if (failed(bucketize(root, op, substitution, symKinds, triple)))
       return failure();
     indexTriples[op.getResult()] = triple;

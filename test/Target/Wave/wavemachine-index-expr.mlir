@@ -83,4 +83,26 @@ func.func @buffer_buckets(%out: !wave.ptr<i32, #wave.global>, %x: i32) attribute
   return
 }
 
+// IntRangeAnalysis-driven fold: `wave.assume_range` pins `%a` to a
+// provable point range `[16, 16]`. Selection runs IntegerRangeAnalysis
+// over the body and builds ixsimpl assumptions per binding; `ixs_simplify`
+// then collapses `K + lid` to `lid + 16` even though `K` is bound to a
+// runtime SGPR. The bucketizer sees the const summand and routes it
+// to `offset` instead of an `s_add_i32` into the soffset slot.
+// CHECK-LABEL: func.func @range_drives_const_fold
+// CHECK: %[[LANE:.*]] = wavemachine.v_mbcnt_lo
+// CHECK-NOT: wavemachine.s_add_i32
+// CHECK: %[[VBYTE:.*]] = wavemachine.v_lshlrev_b32 %[[LANE]],
+// CHECK: wavemachine.global_store_b32 %[[VBYTE]], {{.*}} offset 64
+func.func @range_drives_const_fold(%out: !wave.ptr<i32, #wave.global>, %x: i32, %v: i32) attributes {wave.kernel} {
+  %lane = wave.lane_id : !wave.simd<i32, 32>
+  %a = wave.assume_range %x, [16, 16] : i32
+  %off = wave.index_expr <"K + lid"> ["K", "lid"] (%a, %lane) : (i32, !wave.simd<i32, 32>) -> !wave.index<32>
+  %ptrs = wave.ptr_add %out, %off : !wave.ptr<i32, #wave.global>, !wave.index<32> -> !wave.simd<!wave.ptr<i32, #wave.global>, 32>
+  %vv = wave.splat %v : i32 -> !wave.simd<i32, 32>
+  %val = wave.addi %lane, %vv : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  %tok = wave.store %val -> %ptrs : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<i32, #wave.global>, 32>) -> !wave.mem.token
+  return
+}
+
 }
