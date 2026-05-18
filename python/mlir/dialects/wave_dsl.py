@@ -437,15 +437,18 @@ class FunctionBuilder:
 
     def index_expr(
         self,
-        text: str,
+        expr: object,
         bindings: Mapping[str, Value] | None = None,
         result_type: Type | None = None,
     ) -> Value:
-        """Build a `wave.index_expr` from a symbolic text and bindings.
+        """Build a `wave.index_expr` from a symbolic expression.
 
-        `text` is parsed by ixsimpl into the dialect-owned store. Each
-        free symbol in the expression must appear as a key in
-        `bindings`; conversely every binding name must be a free symbol.
+        `expr` is either an :class:`ixsimpl.Expr` built via
+        :class:`ixsimpl.Context` + Python operators or a raw text form
+        (printed via ``str()`` either way before reparsing into the
+        dialect-owned store). Each free symbol in the expression must
+        appear as a key in `bindings`; conversely every binding name
+        must be a free symbol.
 
         When `result_type` is omitted the lane width is inferred from
         the binding operand types: a `!wave.simd<i32, W>` or
@@ -455,6 +458,7 @@ class FunctionBuilder:
         bindings = dict(bindings or {})
         if result_type is None:
             result_type = wave_index_type(_binding_lane_width(bindings.values()))
+        text = str(expr)
         expr_attr = ExprAttr.get(text, context=_current_context())
         names_attr = ArrayAttr.get([StringAttr.get(n) for n in bindings])
         return wave.IndexExprOp(
@@ -465,16 +469,19 @@ class FunctionBuilder:
         self, base: Value, offset: Value, result_type: Type | None = None
     ) -> Value:
         if result_type is None:
-            # Mirror the verifier: a SIMD-of-pointer result is required as
-            # soon as either operand is SIMD, otherwise the result is the
-            # plain pointer type. We peek at the type names to stay
-            # decoupled from the `wave` dialect Python type hierarchy.
+            # Mirror the verifier: a SIMD-of-pointer result is required
+            # whenever the base or offset is lane-varying. `!wave.simd<>`
+            # is the obvious carrier; `!wave.index<W>` (the offset that
+            # `wave.index_expr` produces) is the same lane-varying
+            # contract on the index side, so it forces a SIMD result
+            # too. We peek at the type names to stay decoupled from the
+            # `wave` dialect Python type hierarchy.
             base_ty = str(base.type)
             off_ty = str(offset.type)
-            if base_ty.startswith("!wave.simd<") or off_ty.startswith("!wave.simd<"):
-                # Inherit the pointer element type / address space from the
-                # base; default to a 32-wide pointer SIMD.
-                if base_ty.startswith("!wave.simd<"):
+            base_simd = base_ty.startswith("!wave.simd<")
+            off_lane_varying = off_ty.startswith(("!wave.simd<", "!wave.index<"))
+            if base_simd or off_lane_varying:
+                if base_simd:
                     result_type = base.type
                 else:
                     result_type = Type.parse(f"!wave.simd<{base_ty}, 32>")

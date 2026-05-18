@@ -47,3 +47,9 @@ exclude = '(^|/)mlir/dialects/(wave|waveamd)\.py$'
 [[tool.mypy.overrides]]
 module = ["mlir.*"]
 ignore_missing_imports = true
+
+# ixsimpl ships a typed Python package but its install-time stubs live
+# behind TYPE_CHECKING; the runtime API is fully usable without them.
+[[tool.mypy.overrides]]
+module = ["ixsimpl"]
+ignore_missing_imports = true
