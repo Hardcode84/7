@@ -99,8 +99,8 @@ class WaveMachine_GlobalMemoryOp<string mnemonic, list<Trait> traits = []>
           [DeclareOpInterfaceMethods<WaveMachine_AddressFieldsOpInterface>])> {
   let extraClassDefinition = [{
     ::mlir::wavemachine::AddressFieldSpec $cppClass::getAddressFieldSpec() {
-      return {/*hasInstOffset=*/true, /*instOffsetBits=*/13,
-              /*instOffsetSigned=*/true, /*hasSoffset=*/false};
+      return {/*instOffsetBits=*/13, /*instOffsetSigned=*/true,
+              /*hasSoffset=*/false};
     }
   }];
 }
@@ -111,8 +111,8 @@ class WaveMachine_BufferMemoryOp<string mnemonic, list<Trait> traits = []>
           [DeclareOpInterfaceMethods<WaveMachine_AddressFieldsOpInterface>])> {
   let extraClassDefinition = [{
     ::mlir::wavemachine::AddressFieldSpec $cppClass::getAddressFieldSpec() {
-      return {/*hasInstOffset=*/true, /*instOffsetBits=*/12,
-              /*instOffsetSigned=*/false, /*hasSoffset=*/true};
+      return {/*instOffsetBits=*/12, /*instOffsetSigned=*/false,
+              /*hasSoffset=*/true};
     }
   }];
 }
@@ -123,8 +123,8 @@ class WaveMachine_DsMemoryOp<string mnemonic, list<Trait> traits = []>
           [DeclareOpInterfaceMethods<WaveMachine_AddressFieldsOpInterface>])> {
   let extraClassDefinition = [{
     ::mlir::wavemachine::AddressFieldSpec $cppClass::getAddressFieldSpec() {
-      return {/*hasInstOffset=*/true, /*instOffsetBits=*/16,
-              /*instOffsetSigned=*/false, /*hasSoffset=*/false};
+      return {/*instOffsetBits=*/16, /*instOffsetSigned=*/false,
+              /*hasSoffset=*/false};
     }
   }];
 }

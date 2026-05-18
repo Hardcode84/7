@@ -15,20 +15,20 @@ namespace mlir::wavemachine {
 
 /// Per-op layout for the V / S / inst-offset address-field bucket.
 /// `voffset` is always present on a memory op, so it is not modeled
-/// here. The bucketizer consults this before emission to route each
+/// here. `instOffsetBits == 0` means the op has no inst-offset slot.
+/// The bucketizer consults this before emission to route each
 /// summand of a symbolic offset to the correct slot.
 struct AddressFieldSpec {
-  bool hasInstOffset = false;
   unsigned instOffsetBits = 0;
   bool instOffsetSigned = false;
   bool hasSoffset = false;
 };
 
-/// Closed signed interval `[lo, hi]` for the spec's inst-offset slot,
-/// or `{0, 0}` when `hasInstOffset` is false.
+/// Closed interval `[lo, hi]` for the spec's inst-offset slot, or
+/// `{0, 0}` when the op has no slot (`instOffsetBits == 0`).
 inline std::pair<int64_t, int64_t>
 instOffsetRange(const AddressFieldSpec &spec) {
-  if (!spec.hasInstOffset)
+  if (spec.instOffsetBits == 0)
     return {0, 0};
   if (spec.instOffsetSigned) {
     int64_t bound = int64_t{1} << (spec.instOffsetBits - 1);

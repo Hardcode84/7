@@ -268,10 +268,11 @@ private:
     t.voffset = t.voffset ? addByteOffsets(loc, t.voffset, imm) : imm;
   }
 
-  // True when `t.instOffset` won't fit `spec`'s inst-offset slot.
+  // True when `t.instOffset` won't fit `spec`'s inst-offset slot
+  // (covers both an absent slot and an out-of-range value).
   bool instOffsetOverflows(const OffsetTriple &t,
                            const wavemachine::AddressFieldSpec &spec) {
-    if (!spec.hasInstOffset)
+    if (spec.instOffsetBits == 0)
       return t.instOffset != 0;
     std::pair<int64_t, int64_t> range = wavemachine::instOffsetRange(spec);
     return t.instOffset < range.first || t.instOffset > range.second;
