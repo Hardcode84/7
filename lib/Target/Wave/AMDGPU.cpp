@@ -47,6 +47,9 @@ using namespace mlir;
 
 namespace {
 
+static constexpr llvm::StringLiteral kDefaultTargetTriple = "amdgcn-amd-amdhsa";
+static constexpr llvm::StringLiteral kDefaultTargetChip = "gfx1100";
+
 static bool isWM(Operation *op) {
   return op->getName().getDialectNamespace() ==
          wavemachine::WaveMachineDialect::getDialectNamespace();
@@ -80,7 +83,7 @@ public:
       return failure();
 
     os << "\t.text\n";
-    os << "\t.amdgcn_target \"amdgcn-amd-amdhsa--gfx1100\"\n";
+    os << "\t.amdgcn_target \"" << targetTriple << "--" << targetChip << "\"\n";
     os << "\t.amdhsa_code_object_version 6\n";
     for (func::FuncOp func : module.getOps<func::FuncOp>()) {
       if (failed(emitFunction(func)))
@@ -99,6 +102,8 @@ private:
   std::unique_ptr<llvm::MCContext> mcContext;
   std::unique_ptr<llvm::MCInstPrinter> instPrinter;
   SmallVector<KernelInfo> kernels;
+  std::string targetTriple = kDefaultTargetTriple.str();
+  std::string targetChip = kDefaultTargetChip.str();
   unsigned indent = 1;
   // Per-function counter handing out unique label suffixes for
   // structured uniform loops, reset at the start of each function.
@@ -115,7 +120,25 @@ private:
       // (`ROCDL::assembleIsa`), so the asm parser needs registering too.
       llvm::InitializeAllAsmParsers();
     });
-    llvm::Triple triple("amdgcn-amd-amdhsa");
+    auto module = dyn_cast<ModuleOp>(op);
+    if (!module)
+      module = op->getParentOfType<ModuleOp>();
+    if (!module)
+      return op->emitError("wave AMDGPU backend expects a module operation");
+
+    auto targetAttr = module->getAttrOfType<StringAttr>("wavemachine.target");
+    if (targetAttr) {
+      std::pair<StringRef, StringRef> split =
+          targetAttr.getValue().rsplit("--");
+      if (split.second.empty())
+        targetChip = targetAttr.getValue().str();
+      else {
+        targetTriple = split.first.str();
+        targetChip = split.second.str();
+      }
+    }
+
+    llvm::Triple triple(targetTriple);
     std::string error;
     const llvm::Target *target =
         llvm::TargetRegistry::lookupTarget(triple, error);
@@ -125,7 +148,10 @@ private:
     mri.reset(target->createMCRegInfo(triple));
     mai.reset(target->createMCAsmInfo(*mri, triple, mcOptions));
     mcii.reset(target->createMCInstrInfo());
-    sti.reset(target->createMCSubtargetInfo(triple, "gfx1100", ""));
+    sti.reset(target->createMCSubtargetInfo(triple, targetChip, ""));
+    if (!sti)
+      return module.emitError("unsupported AMDGPU target: ")
+             << targetTriple << "--" << targetChip;
     mcContext = std::make_unique<llvm::MCContext>(triple, *mai, *mri, *sti);
     unsigned asmVariant = mai->getOutputAssemblerDialect();
     instPrinter.reset(
@@ -321,7 +347,7 @@ private:
       os << "    .wavefront_size: 32\n";
       os << "    .workgroup_processor_mode: 1\n";
     }
-    os << "amdhsa.target:   amdgcn-amd-amdhsa--gfx1100\n";
+    os << "amdhsa.target:   " << targetTriple << "--" << targetChip << "\n";
     os << "amdhsa.version:\n";
     os << "  - 1\n";
     os << "  - 2\n";
@@ -1008,8 +1034,11 @@ private:
 
 static LogicalResult runWaveMachinePipeline(ModuleOp module) {
   Builder builder(module.getContext());
-  module->setAttr("wavemachine.target",
-                  builder.getStringAttr("amdgcn-amd-amdhsa--gfx1100"));
+  if (!module->hasAttr("wavemachine.target"))
+    module->setAttr(
+        "wavemachine.target",
+        builder.getStringAttr(
+            (Twine(kDefaultTargetTriple) + "--" + kDefaultTargetChip).str()));
   PassManager pm(module.getContext());
   pm.addPass(wave::createConvertWaveAMDToWaveMachine());
   pm.addPass(wave::createWaveAMDABILowering());

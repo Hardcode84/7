@@ -51,8 +51,7 @@ struct WaveAttachGPUBinaryPass
     auto binaryAttr = builder.getStringAttr(binary);
     auto chipAttr = builder.getStringAttr(chip);
 
-    // Construct `#rocdl.target<chip = "gfx1100", ...>` matching what the
-    // standard `gpu-module-to-binary` pipeline produces.
+    // Match the target attr standard GPU binary lowering would produce.
     auto rocdlTarget = ROCDL::ROCDLTargetAttr::get(
         &getContext(), /*O=*/3, builder.getStringAttr(triple), chipAttr,
         /*features=*/builder.getStringAttr(""),
