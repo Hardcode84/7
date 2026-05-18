@@ -54,7 +54,7 @@ func.func @wave_where_else(%limit: i32) -> i32 {
     %then = wave.addi %lane, %vlimit : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
     wave.yield
   } otherwise {
-    // CHECK: s_andn2_b32 exec_lo, [[SAVE]], [[MASK]]
+    // CHECK: s_and_not1_b32 exec_lo, [[SAVE]], [[MASK]]
     // CHECK: [[ELSE]]:
     // CHECK: v_xor_b32_e32
     %else = wave.binary "xori" %lane, %vlimit : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>

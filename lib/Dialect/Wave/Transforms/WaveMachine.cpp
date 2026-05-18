@@ -1139,12 +1139,14 @@ LogicalResult WaveMachineSelector::selectBarrier(BarrierOp op) {
 
 LogicalResult WaveMachineSelector::selectMma(waveamd::MmaOp op) {
   if (op.getKind() != "wmma.i32.16x16x16.iu8" &&
-      op.getKind() != "wmma.f32.16x16x16.f16")
+      op.getKind() != "wmma.f32.16x16x16.f16" &&
+      op.getKind() != "mfma.f32.16x16x16.f16")
     return op.emitError("unsupported WaveMachine matrix operation kind");
   auto resultType = cast<waveamd::FragmentType>(op.getResult().getType());
-  StringRef machineOpcode = op.getKind() == "wmma.i32.16x16x16.iu8"
-                                ? "wmma_i32_16x16x16_iu8"
-                                : "wmma_f32_16x16x16_f16";
+  StringRef machineOpcode =
+      op.getKind() == "wmma.i32.16x16x16.iu8"   ? "wmma_i32_16x16x16_iu8"
+      : op.getKind() == "wmma.f32.16x16x16.f16" ? "wmma_f32_16x16x16_f16"
+                                                : "mfma_f32_16x16x16_f16";
   values[op.getResult()] = createInstr(
       builder, op.getLoc(), machineOpcode,
       {expect(op.getA(), op), expect(op.getB(), op), expect(op.getAcc(), op)},

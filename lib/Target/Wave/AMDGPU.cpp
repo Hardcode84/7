@@ -286,6 +286,10 @@ private:
     return isGfx8Or9() ? llvm::AMDGPU::V_READFIRSTLANE_B32_vi
                        : llvm::AMDGPU::V_READFIRSTLANE_B32_gfx11;
   }
+  unsigned vAddU32() const {
+    return isGfx8Or9() ? llvm::AMDGPU::V_ADD_CO_U32_e32_gfx9
+                       : llvm::AMDGPU::V_ADD_NC_U32_e32_gfx11;
+  }
   unsigned vCmpEqU32() const {
     return isGfx8Or9() ? llvm::AMDGPU::V_CMP_EQ_U32_e64_vi
                        : llvm::AMDGPU::V_CMP_EQ_U32_e64_gfx11;
@@ -309,6 +313,10 @@ private:
   unsigned vCmpGeU32() const {
     return isGfx8Or9() ? llvm::AMDGPU::V_CMP_GE_U32_e64_vi
                        : llvm::AMDGPU::V_CMP_GE_U32_e64_gfx11;
+  }
+  unsigned mfmaF32_16x16x16F16() const {
+    return isGfx90APlus() ? llvm::AMDGPU::V_MFMA_F32_16X16X16F16_gfx940_vcd
+                          : llvm::AMDGPU::V_MFMA_F32_16X16X16F16_vi;
   }
 
   unsigned bufferStoreB32() const {
@@ -696,6 +704,11 @@ private:
     return emitMC(opcode, mcOperands);
   }
 
+  LogicalResult emitVAddU32(llvm::MCOperand dst, llvm::MCOperand lhs,
+                            llvm::MCOperand rhs) {
+    return emitMC(vAddU32(), {dst, lhs, rhs});
+  }
+
   bool isSGPR(Value value) const {
     auto regType = dyn_cast<wavemachine::RegType>(value.getType());
     return regType && regType.getRegClass() == wavemachine::RegClass::SGPR;
@@ -782,14 +795,23 @@ private:
            toMCOperand(op.getOperand(1)), llvm::MCOperand::createImm(0),
            toMCOperand(op.getOperand(2)), llvm::MCOperand::createImm(0),
            llvm::MCOperand::createImm(0)});
+    if (isa<wavemachine::MfmaF32_16x16x16_F16Op>(op)) {
+      if (!isGfx90APlus())
+        return op.emitError("mfma.f32.16x16x16.f16 requires gfx90a+");
+      return emitMC(
+          mfmaF32_16x16x16F16(),
+          {toMCOperand(result()), toMCOperand(op.getOperand(0)),
+           toMCOperand(op.getOperand(1)), toMCOperand(op.getOperand(2)),
+           llvm::MCOperand::createImm(0), llvm::MCOperand::createImm(0),
+           llvm::MCOperand::createImm(0)});
+    }
     if (isa<wavemachine::VAddU32Op>(op)) {
       Value lhs = op.getOperand(0);
       Value rhs = op.getOperand(1);
       if (isSGPR(rhs))
         std::swap(lhs, rhs);
-      return emitMC(
-          llvm::AMDGPU::V_ADD_NC_U32_e32_gfx11,
-          {toMCOperand(result()), toMCOperand(lhs), toMCOperand(rhs)});
+      return emitVAddU32(toMCOperand(result()), toMCOperand(lhs),
+                         toMCOperand(rhs));
     }
     if (isa<wavemachine::VAndB32Op, wavemachine::VOrB32Op,
             wavemachine::VXorB32Op>(op)) {
@@ -965,16 +987,15 @@ private:
           failed(emitMC(llvm::AMDGPU::V_MUL_LO_U32_e64_gfx11,
                         {toMCOperand(scratch), toMCVGPRComponent(lhs, 0),
                          toMCVGPRComponent(rhs, 1)})) ||
-          failed(emitMC(llvm::AMDGPU::V_ADD_NC_U32_e32_gfx11,
-                        {toMCVGPRComponent(res, 1), toMCVGPRComponent(res, 1),
-                         toMCOperand(scratch)})) ||
+          failed(emitVAddU32(toMCVGPRComponent(res, 1),
+                             toMCVGPRComponent(res, 1),
+                             toMCOperand(scratch))) ||
           failed(emitMC(llvm::AMDGPU::V_MUL_LO_U32_e64_gfx11,
                         {toMCOperand(scratch), toMCVGPRComponent(lhs, 1),
                          toMCVGPRComponent(rhs, 0)})))
         return failure();
-      return emitMC(llvm::AMDGPU::V_ADD_NC_U32_e32_gfx11,
-                    {toMCVGPRComponent(res, 1), toMCVGPRComponent(res, 1),
-                     toMCOperand(scratch)});
+      return emitVAddU32(toMCVGPRComponent(res, 1), toMCVGPRComponent(res, 1),
+                         toMCOperand(scratch));
     }
     if (isa<wavemachine::SLshlB64Op>(op))
       // Hardware reads only the low 32 bits of the shift amount; pass
