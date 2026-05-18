@@ -14,6 +14,7 @@
 
 #include "mlir/Dialect/Wave/IR/WaveSymbols.h"
 
+#include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/raw_ostream.h"
 
 #include <cstdlib>
@@ -76,6 +77,44 @@ sym::ExprHandle mustSimplify(sym::Store &store, sym::ExprHandle value) {
     std::exit(1);
   }
   return *handle;
+}
+
+void printRange(llvm::StringRef label, sym::Store &store, sym::ExprHandle expr,
+                llvm::ArrayRef<sym::PredHandle> assumptions, int64_t lo,
+                int64_t hi) {
+  llvm::outs() << label << ": "
+               << (sym::provablyInRange(store, expr, assumptions, lo, hi)
+                       ? "true"
+                       : "false")
+               << "\n";
+}
+
+// (4) Range queries: build `x in [0, 31]` as an ixsimpl assumption,
+// construct `4*x + 1` (range [1, 125]), and probe several candidate
+// ranges via `provablyInRange`. Exercises both bounds of the predicate
+// decomposition plus the AND-flattening path in `checkPredicate`.
+void runRangeQueries(sym::Store &store, sym::ExprHandle x,
+                     sym::ExprHandle fourX) {
+  auto rangeAssumption = sym::rangeAssumption(store, "x", 0, 31);
+  if (failed(rangeAssumption)) {
+    llvm::errs() << "failed to build range assumption\n";
+    std::exit(1);
+  }
+  llvm::SmallVector<sym::PredHandle, 1> assumptions{*rangeAssumption};
+
+  printRange("x-nonneg", store, x, assumptions, 0, 31);
+
+  // Reuse `fourX` from step (2). `4*x + 1` ranges over [1, 125] when
+  // x is in [0, 31].
+  sym::ExprHandle one = mustBuildInt(store, 1);
+  sym::ExprHandle linear =
+      mustCompose(store, fourX, sym::ExprBinaryOp::Add, one);
+
+  printRange("fits-tight", store, linear, assumptions, 1, 125);
+  printRange("fits-loose", store, linear, assumptions, -1000, 1000);
+  printRange("overflows-upper", store, linear, assumptions, 0, 100);
+  // No assumptions -> `x` unbounded, even the loose range fails to prove.
+  printRange("no-assumptions", store, linear, {}, -1000, 1000);
 }
 
 } // namespace
@@ -162,6 +201,8 @@ int main() {
   sym::ExprHandle xAgain = mustBuildSym(store, "x");
   llvm::outs() << "hash-consed-symbol: " << (x == xAgain ? "true" : "false")
                << "\n";
+
+  runRangeQueries(store, x, fourX);
 
   return 0;
 }

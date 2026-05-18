@@ -403,6 +403,85 @@ FailureOr<PredHandle> mlir::wave::sym::simplifyPred(Store &store,
                     "failed to simplify wave.pred");
 }
 
+// `ixs_bounds_add_assumption` only consumes CMP nodes -- an AND-tree
+// produced by `composePredAnd` is silently ignored. Flatten before
+// handing off to `ixs_check`.
+static void flattenAssumption(ixs_node *node,
+                              SmallVectorImpl<ixs_node *> &out) {
+  if (!node)
+    return;
+  if (ixs_node_tag(node) == IXS_AND) {
+    for (uint32_t i = 0, e = ixs_node_logic_nargs(node); i != e; ++i)
+      flattenAssumption(ixs_node_logic_arg(node, i), out);
+    return;
+  }
+  out.push_back(node);
+}
+
+mlir::wave::sym::CheckResult
+mlir::wave::sym::checkPredicate(Store &store, PredHandle predicate,
+                                ArrayRef<PredHandle> assumptions) {
+  if (!predicate)
+    return CheckResult::Unknown;
+  Session session(store);
+  ixs_node *importedPred =
+      importNode(session, predicate.raw(), /*diagnostic=*/nullptr, "wave.pred");
+  if (!importedPred)
+    return CheckResult::Unknown;
+  SmallVector<ixs_node *, 4> importedAssumptions;
+  for (PredHandle assumption : assumptions) {
+    ixs_node *imported = importNode(session, assumption.raw(),
+                                    /*diagnostic=*/nullptr, "wave.pred");
+    if (!imported)
+      return CheckResult::Unknown;
+    flattenAssumption(imported, importedAssumptions);
+  }
+  ixs_check_result result =
+      ixs_check(session.raw(), importedPred, importedAssumptions.data(),
+                importedAssumptions.size());
+  switch (result) {
+  case IXS_CHECK_TRUE:
+    return CheckResult::True;
+  case IXS_CHECK_FALSE:
+    return CheckResult::False;
+  case IXS_CHECK_UNKNOWN:
+    return CheckResult::Unknown;
+  }
+  return CheckResult::Unknown;
+}
+
+FailureOr<PredHandle>
+mlir::wave::sym::rangeAssumption(Store &store, StringRef name, int64_t lo,
+                                 int64_t hi, std::string *diagnostic) {
+  auto sym = composeExprSym(store, name, diagnostic);
+  auto loConst = composeExprInt(store, lo, diagnostic);
+  auto hiConst = composeExprInt(store, hi, diagnostic);
+  if (failed(sym) || failed(loConst) || failed(hiConst))
+    return failure();
+  auto geLo = composePredCmp(store, *sym, PredCmpOp::Ge, *loConst, diagnostic);
+  auto leHi = composePredCmp(store, *sym, PredCmpOp::Le, *hiConst, diagnostic);
+  if (failed(geLo) || failed(leHi))
+    return failure();
+  return composePredAnd(store, *geLo, *leHi, diagnostic);
+}
+
+bool mlir::wave::sym::provablyInRange(Store &store, ExprHandle expr,
+                                      ArrayRef<PredHandle> assumptions,
+                                      int64_t lo, int64_t hi) {
+  if (!expr)
+    return false;
+  auto loConst = composeExprInt(store, lo);
+  auto hiConst = composeExprInt(store, hi);
+  if (failed(loConst) || failed(hiConst))
+    return false;
+  auto geLo = composePredCmp(store, expr, PredCmpOp::Ge, *loConst);
+  auto leHi = composePredCmp(store, expr, PredCmpOp::Le, *hiConst);
+  if (failed(geLo) || failed(leHi))
+    return false;
+  return checkPredicate(store, *geLo, assumptions) == CheckResult::True &&
+         checkPredicate(store, *leHi, assumptions) == CheckResult::True;
+}
+
 std::optional<int64_t>
 mlir::wave::sym::getIntegerLiteralValue(ExprHandle value) {
   const ixs_node *node = value.raw();

@@ -18,6 +18,7 @@
 
 #include "ixsimpl.h"
 #include "mlir/Support/LogicalResult.h"
+#include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/Hashing.h"
 #include "llvm/ADT/STLFunctionalExtras.h"
 #include "llvm/ADT/StringRef.h"
@@ -158,6 +159,31 @@ mlir::FailureOr<ExprHandle> simplifyExpr(Store &store, ExprHandle value,
                                          std::string *diagnostic = nullptr);
 mlir::FailureOr<PredHandle> simplifyPred(Store &store, PredHandle value,
                                          std::string *diagnostic = nullptr);
+
+/// Result of an `ixs_check` entailment query.
+enum class CheckResult { True, False, Unknown };
+
+/// Decide whether `predicate` is provably true / false under the given
+/// assumption set, via interval propagation. Cheap relative to
+/// `simplifyPred` (no rewriting). Returns `Unknown` on OOM or
+/// inconclusive bounds.
+CheckResult checkPredicate(Store &store, PredHandle predicate,
+                           llvm::ArrayRef<PredHandle> assumptions);
+
+/// Build the conjunction `(name >= lo) && (name <= hi)` as a hash-
+/// consed predicate handle. Useful for translating an
+/// `IntegerValueRange` lattice element on a `wave.index_expr` binding
+/// into an ixsimpl assumption.
+mlir::FailureOr<PredHandle> rangeAssumption(Store &store, llvm::StringRef name,
+                                            int64_t lo, int64_t hi,
+                                            std::string *diagnostic = nullptr);
+
+/// True iff `expr` provably stays in the closed signed interval
+/// `[lo, hi]` under `assumptions`. Decomposes into `expr >= lo` and
+/// `expr <= hi` checks; either `Unknown` or `False` returns false.
+bool provablyInRange(Store &store, ExprHandle expr,
+                     llvm::ArrayRef<PredHandle> assumptions, int64_t lo,
+                     int64_t hi);
 
 /// Integer payload of a structurally-integral expression (ixs integer node
 /// or unit-denominator rational). Structural, no parse / render.
