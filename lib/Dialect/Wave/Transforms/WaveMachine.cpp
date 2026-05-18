@@ -34,6 +34,7 @@
 #include "llvm/Support/MathExtras.h"
 #include "llvm/TargetParser/TargetParser.h"
 #include <limits>
+#include <numeric>
 #include <optional>
 
 namespace mlir::wave {
@@ -1200,10 +1201,157 @@ private:
     return pow;
   }
 
+  // Recursive LCM of every rational denominator reachable from `node`.
+  // ADD coeffs and MUL coeffs are the only places ixsimpl parks
+  // non-unit denominators -- the algebra distributes everything
+  // else.
+  int64_t collectDenominator(::ixs_node *node) {
+    switch (ixs_node_tag(node)) {
+    case IXS_RAT: {
+      int64_t den = ixs_node_rat_den(node);
+      return den > 0 ? den : 1;
+    }
+    case IXS_ADD: {
+      int64_t d = collectDenominator(ixs_node_add_coeff(node));
+      uint32_t n = ixs_node_add_nterms(node);
+      for (uint32_t i = 0; i < n; ++i) {
+        d = std::lcm(d, collectDenominator(ixs_node_add_term_coeff(node, i)));
+        d = std::lcm(d, collectDenominator(ixs_node_add_term(node, i)));
+      }
+      return d;
+    }
+    case IXS_MUL: {
+      int64_t d = collectDenominator(ixs_node_mul_coeff(node));
+      uint32_t n = ixs_node_mul_nfactors(node);
+      for (uint32_t i = 0; i < n; ++i)
+        d = std::lcm(d, collectDenominator(ixs_node_mul_factor_base(node, i)));
+      return d;
+    }
+    default:
+      // INT / SYM are integer-valued leaves; FLOOR / CEIL / MOD are
+      // integer-valued by construction.
+      return 1;
+    }
+  }
+
+  // SGPR-or-VGPR power-of-two right shift (logical). Picks the
+  // register class that matches `v`'s domain so a uniform value stays
+  // uniform.
+  Value shrPow2(Location loc, Value v, unsigned log2Den) {
+    if (log2Den == 0)
+      return v;
+    Value shiftAmt = createImm(builder, loc, log2Den);
+    if (std::optional<int64_t> imm = getImmediateValue(v))
+      return createImm(builder, loc, *imm >> log2Den);
+    if (isUniformValue(v))
+      return createInstr(
+          builder, loc, "s_lshr_b32", {v, shiftAmt},
+          getRegType(builder.getContext(), wavemachine::RegClass::SGPR));
+    Value vgpr = ensureVGPRForVSrc1(loc, v);
+    return createInstr(
+        builder, loc, "v_lshrrev_b32", {vgpr, shiftAmt},
+        getRegType(builder.getContext(), wavemachine::RegClass::VGPR));
+  }
+
+  // SGPR-or-VGPR bitwise AND with a literal mask, for power-of-two
+  // modulo. `mask` is `divisor - 1`.
+  Value andMask(Location loc, Value v, int64_t mask) {
+    Value m = createImm(builder, loc, mask);
+    if (std::optional<int64_t> imm = getImmediateValue(v))
+      return createImm(builder, loc, *imm & mask);
+    if (isUniformValue(v))
+      return createInstr(
+          builder, loc, "s_and_b32", {v, m},
+          getRegType(builder.getContext(), wavemachine::RegClass::SGPR));
+    Value vgpr = ensureVGPRForVSrc1(loc, v);
+    return createInstr(
+        builder, loc, "v_and_b32", {vgpr, m},
+        getRegType(builder.getContext(), wavemachine::RegClass::VGPR));
+  }
+
+  // floor(expr): scale `expr` by its LCM denominator to get an integer-
+  // valued sub-expression, then divide by the denominator. We only
+  // support power-of-two denominators today (the AMD scalar/vector
+  // ISA has no native integer divide); the bucketizer's caller is
+  // welcome to keep non-pow2 floors as a separate wave.binary op.
+  FailureOr<Value> materializeIxsFloor(::ixs_node *node, Operation *user,
+                                       const llvm::StringMap<Value> &subs) {
+    ::ixs_node *child = ixs_node_unary_arg(node);
+    int64_t den = collectDenominator(child);
+    if (den == 1)
+      return materializeIndexExprNode(child, user, subs);
+    if (den <= 0 || (den & (den - 1)) != 0)
+      return user->emitError(
+                 "wave.index_expr floor needs a power-of-two denominator (got ")
+             << den << ")";
+    FailureOr<Value> scaled = materializeScaledInteger(child, den, user, subs);
+    if (failed(scaled))
+      return failure();
+    return shrPow2(user->getLoc(), *scaled, llvm::Log2_64(den));
+  }
+
+  // ceil(expr) on positive divisors via the (x + d - 1) // d identity.
+  FailureOr<Value> materializeIxsCeil(::ixs_node *node, Operation *user,
+                                      const llvm::StringMap<Value> &subs) {
+    ::ixs_node *child = ixs_node_unary_arg(node);
+    int64_t den = collectDenominator(child);
+    if (den == 1)
+      return materializeIndexExprNode(child, user, subs);
+    if (den <= 0 || (den & (den - 1)) != 0)
+      return user->emitError(
+                 "wave.index_expr ceil needs a power-of-two denominator (got ")
+             << den << ")";
+    FailureOr<Value> scaled = materializeScaledInteger(child, den, user, subs);
+    if (failed(scaled))
+      return failure();
+    Value bias = createImm(builder, user->getLoc(), den - 1);
+    Value biased = addByteOffsets(user->getLoc(), *scaled, bias);
+    return shrPow2(user->getLoc(), biased, llvm::Log2_64(den));
+  }
+
+  // mod(lhs, rhs). Only power-of-two `rhs` is supported: the modulus
+  // is a bitwise AND with `rhs - 1`. Non-pow2 right-hand sides need a
+  // real integer remainder which is multi-instruction emulation on
+  // AMDGPU; left as a follow-up.
+  FailureOr<Value> materializeIxsMod(::ixs_node *node, Operation *user,
+                                     const llvm::StringMap<Value> &subs) {
+    ::ixs_node *lhs = ixs_node_binary_lhs(node);
+    ::ixs_node *rhs = ixs_node_binary_rhs(node);
+    std::optional<int64_t> rhsInt = staticIntLiteral(rhs);
+    if (!rhsInt || *rhsInt <= 0 || (*rhsInt & (*rhsInt - 1)) != 0)
+      return user->emitError(
+          "wave.index_expr mod needs a power-of-two integer divisor");
+    FailureOr<Value> lhsValue = materializeIndexExprNode(lhs, user, subs);
+    if (failed(lhsValue))
+      return failure();
+    return andMask(user->getLoc(), *lhsValue, *rhsInt - 1);
+  }
+
+  // Materialize `node * factor` where `factor` is chosen so every
+  // rational coefficient in `node` becomes an integer. Used by the
+  // FLOOR / CEIL lowering to extract an integer-valued numerator
+  // before dividing. We delegate the algebra to ixsimpl: building
+  // `node * factor` in the dialect's store hits the canonicalizer
+  // and the resulting expression is rat-free.
+  FailureOr<Value>
+  materializeScaledInteger(::ixs_node *node, int64_t factor, Operation *user,
+                           const llvm::StringMap<Value> &subs) {
+    auto factorExpr = sym::composeExprInt(symbolStore(), factor);
+    if (failed(factorExpr))
+      return user->emitError("failed to compose integer factor");
+    auto scaled = sym::composeExprBinary(symbolStore(), sym::ExprHandle(node),
+                                         sym::ExprBinaryOp::Mul, *factorExpr);
+    if (failed(scaled))
+      return user->emitError("failed to scale floor/ceil child");
+    return materializeIndexExprNode(scaled->raw(), user, subs);
+  }
+
   // Top-level dispatch over a #wave.expr AST. Substitutes bound SSA values
-  // at IXS_SYM leaves and folds ADD / MUL chains via the typed accessors
-  // (ixsimpl stores `coeff + sum(c_i * t_i)` and `coeff * prod(b_i^e_i)`).
-  // Floor / ceil / mod / rat with non-unit denominator are rejected.
+  // at IXS_SYM leaves and folds ADD / MUL / FLOOR / CEIL / MOD chains
+  // via the typed accessors (ixsimpl stores `coeff + sum(c_i * t_i)` and
+  // `coeff * prod(b_i^e_i)`). Bare IXS_RAT with non-unit denominator
+  // outside a floor / ceil wrapper is rejected -- the wave layer is
+  // integer-valued.
   FailureOr<Value>
   materializeIndexExprNode(const ::ixs_node *cnode, Operation *user,
                            const llvm::StringMap<Value> &substitution) {
@@ -1220,6 +1368,12 @@ private:
       return materializeIxsAdd(node, user, substitution);
     case IXS_MUL:
       return materializeIxsMul(node, user, substitution);
+    case IXS_FLOOR:
+      return materializeIxsFloor(node, user, substitution);
+    case IXS_CEIL:
+      return materializeIxsCeil(node, user, substitution);
+    case IXS_MOD:
+      return materializeIxsMod(node, user, substitution);
     default:
       return user->emitError(
                  "wave.index_expr selection does not support node tag ")
@@ -1231,6 +1385,25 @@ private:
   // Constants stay `Const`; uniform-only symbol subtrees stay
   // `Uniform`; any reach into a lane-varying symbol promotes the
   // whole subtree to `Lane`.
+  TermKind classifyAdd(::ixs_node *node,
+                       const llvm::StringMap<TermKind> &symKinds) {
+    TermKind k = classifyTerm(ixs_node_add_coeff(node), symKinds);
+    uint32_t n = ixs_node_add_nterms(node);
+    for (uint32_t i = 0; i < n; ++i)
+      k = std::max(k, classifyTerm(ixs_node_add_term(node, i), symKinds));
+    return k;
+  }
+
+  TermKind classifyMul(::ixs_node *node,
+                       const llvm::StringMap<TermKind> &symKinds) {
+    TermKind k = classifyTerm(ixs_node_mul_coeff(node), symKinds);
+    uint32_t n = ixs_node_mul_nfactors(node);
+    for (uint32_t i = 0; i < n; ++i)
+      k = std::max(k,
+                   classifyTerm(ixs_node_mul_factor_base(node, i), symKinds));
+    return k;
+  }
+
   TermKind classifyTerm(::ixs_node *node,
                         const llvm::StringMap<TermKind> &symKinds) {
     switch (ixs_node_tag(node)) {
@@ -1242,21 +1415,16 @@ private:
       auto it = symKinds.find(name);
       return it == symKinds.end() ? TermKind::Lane : it->second;
     }
-    case IXS_ADD: {
-      TermKind k = classifyTerm(ixs_node_add_coeff(node), symKinds);
-      uint32_t n = ixs_node_add_nterms(node);
-      for (uint32_t i = 0; i < n; ++i)
-        k = std::max(k, classifyTerm(ixs_node_add_term(node, i), symKinds));
-      return k;
-    }
-    case IXS_MUL: {
-      TermKind k = classifyTerm(ixs_node_mul_coeff(node), symKinds);
-      uint32_t n = ixs_node_mul_nfactors(node);
-      for (uint32_t i = 0; i < n; ++i)
-        k = std::max(k,
-                     classifyTerm(ixs_node_mul_factor_base(node, i), symKinds));
-      return k;
-    }
+    case IXS_ADD:
+      return classifyAdd(node, symKinds);
+    case IXS_MUL:
+      return classifyMul(node, symKinds);
+    case IXS_FLOOR:
+    case IXS_CEIL:
+      return classifyTerm(ixs_node_unary_arg(node), symKinds);
+    case IXS_MOD:
+      return std::max(classifyTerm(ixs_node_binary_lhs(node), symKinds),
+                      classifyTerm(ixs_node_binary_rhs(node), symKinds));
     default:
       return TermKind::Lane;
     }
@@ -1455,18 +1623,70 @@ private:
     return acc;
   }
 
+  // floor(p/q) with truncation toward negative infinity.
+  static int64_t floorDiv(int64_t p, int64_t q) {
+    return p >= 0 ? p / q : -((-p + q - 1) / q);
+  }
+
+  // ceil(p/q) with truncation away from zero.
+  static int64_t ceilDiv(int64_t p, int64_t q) {
+    return p >= 0 ? (p + q - 1) / q : -(-p / q);
+  }
+
+  // Constant-fold IXS_FLOOR / IXS_CEIL by scaling the child to integer
+  // via ixsimpl, then dividing.
+  std::optional<int64_t> evalConstantFloorOrCeil(::ixs_node *node) {
+    ::ixs_node *child = ixs_node_unary_arg(node);
+    int64_t den = collectDenominator(child);
+    if (den <= 0)
+      return std::nullopt;
+    auto factor = sym::composeExprInt(symbolStore(), den);
+    if (failed(factor))
+      return std::nullopt;
+    auto scaled = sym::composeExprBinary(symbolStore(), sym::ExprHandle(child),
+                                         sym::ExprBinaryOp::Mul, *factor);
+    if (failed(scaled))
+      return std::nullopt;
+    std::optional<int64_t> num =
+        evalConstantNode(const_cast<::ixs_node *>(scaled->raw()));
+    if (!num)
+      return std::nullopt;
+    return ixs_node_tag(node) == IXS_FLOOR ? floorDiv(*num, den)
+                                           : ceilDiv(*num, den);
+  }
+
+  std::optional<int64_t> evalConstantMod(::ixs_node *node) {
+    std::optional<int64_t> lhs = evalConstantNode(ixs_node_binary_lhs(node));
+    std::optional<int64_t> rhs = evalConstantNode(ixs_node_binary_rhs(node));
+    if (!lhs || !rhs || *rhs == 0)
+      return std::nullopt;
+    int64_t r = *lhs % *rhs;
+    if (r != 0 && (r < 0) != (*rhs < 0))
+      r += *rhs;
+    return r;
+  }
+
   // Constant-fold a node that classifyTerm decided is Const, returning
   // its int value when expressible without materialization. ADD / MUL
   // chains of literals fold here so they stay on the fast path
-  // straight into `instOffset`.
+  // straight into `instOffset`. FLOOR / CEIL / MOD also fold when the
+  // child resolves to a literal.
   std::optional<int64_t> evalConstantNode(::ixs_node *node) {
     if (std::optional<int64_t> v = staticIntLiteral(node))
       return v;
-    if (ixs_node_tag(node) == IXS_ADD)
+    switch (ixs_node_tag(node)) {
+    case IXS_ADD:
       return evalConstantAdd(node);
-    if (ixs_node_tag(node) == IXS_MUL)
+    case IXS_MUL:
       return evalConstantMul(node);
-    return std::nullopt;
+    case IXS_FLOOR:
+    case IXS_CEIL:
+      return evalConstantFloorOrCeil(node);
+    case IXS_MOD:
+      return evalConstantMod(node);
+    default:
+      return std::nullopt;
+    }
   }
 
   LogicalResult selectIndexExpr(IndexExprOp op) {

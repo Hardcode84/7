@@ -49,6 +49,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+import ixsimpl
 from mlir.dialects import scf
 from mlir.dialects import wave_dsl as dsl
 from mlir.ir import Module
@@ -152,7 +153,7 @@ def _splat_const(bld: dsl.FunctionBuilder, value: int) -> dsl.Value:
 class _TileCoords:
     """Per-wave coordinates derived from `workitem_id` / `workgroup_id`."""
 
-    wave_id: dsl.Value  # wave id within the workgroup, broadcast to lanes
+    wi: dsl.Value  # raw workitem_id; wave_id = wi // 32 lives in index_expr
     lane: dsl.Value  # lane id within the wave
     a_lane_base: dsl.Value  # per-lane pointer into A for this wave's tile
     b_lane_base: dsl.Value  # per-lane pointer into B for this wave's tile
@@ -175,66 +176,52 @@ def _wrap_in_buffer(
 def _emit_tile_coords(bld: dsl.FunctionBuilder, cfg: _MatmulConfig) -> _TileCoords:
     """Compute the per-wave (lane, A/B/C base ptrs) from workitem ids.
 
-    Address arithmetic flows through `wave.index_expr` so the
-    WaveMachine bucketizer can route uniform symbols (workgroup ids)
-    into the soffset slot and lane-varying symbols (lane, m_wave,
-    n_wave) into voffset. Non-linear pieces (`>>`, `&`) stay on the
-    wave-arith side and feed into the index_expr as bindings.
+    All address arithmetic -- including the shri / andi pieces that
+    decompose `wi` into `wave_id`, `m_wave`, `n_wave`, and lane into
+    `lane_mod16` -- lives inside one `wave.index_expr` per pointer.
+    The bucketizer's floor / mod materializer lowers the non-linear
+    bits to shr / and at code-emit time, so the kernel surface stays
+    structurally symbolic.
     """
     a_arg, b_arg, c_arg = bld.args[0], bld.args[1], bld.args[2]
     if cfg.use_buffer:
         a_arg = _wrap_in_buffer(bld, a_arg, cfg.a_elements)
         b_arg = _wrap_in_buffer(bld, b_arg, cfg.b_elements)
 
-    wi = bld.workitem_id(axis=0)  # element[L] = wave_id_in_wg * 32 + L
-    lane = bld.lane_id()  # element[L] = L
+    # Lattice bounds for the bucketizer's range-fit check. workitem_id
+    # is `wave_id_in_wg * 32 + lane_id`, so it covers
+    # `[0, threads_per_workgroup - 1]`.
+    wi_val = bld.assume_range(bld.workitem_id(axis=0), 0, cfg.threads_per_workgroup - 1)
+    lane_val = bld.lane_id()
     wg_m_val = bld.assume_range(bld.workgroup_id(axis=0), 0, cfg.M_blocks - 1)
     wg_n_val = bld.assume_range(bld.workgroup_id(axis=1), 0, cfg.N_blocks - 1)
 
-    # wave_id_in_wg = wi >> 5 (uniform across the wave since L < 32);
-    # the BN power-of-two decomposition stays on the wave-arith side
-    # because `>>` / `&` aren't linear.
-    wave_id_raw = bld.binary("shri", wi, _splat_const(bld, 5))
-    wave_id_val = bld.assume_range(wave_id_raw, 0, cfg.waves_per_workgroup - 1)
-    n_wave_val = bld.binary("andi", wave_id_val, _splat_const(bld, cfg.BN - 1))
-    m_wave_val = bld.binary("shri", wave_id_val, _splat_const(bld, cfg.log2_BN))
-    lane_mod16_val = bld.binary("andi", lane, _splat_const(bld, 15))
-
-    # Symbolic offset side: ixsimpl-built expressions feed `wave.index_expr`
-    # via the shared `dsl.sym_ctx` so symbol identity stays stable.
+    # Symbolic offset side via the shared `dsl.sym_ctx`. wave_id /
+    # m_wave / n_wave / lane_mod16 ride floor / mod nodes that the
+    # bucketizer lowers to shr / and.
+    wi = dsl.sym("wi")
+    lane = dsl.sym("lane")
     wg_m = dsl.sym("wg_m")
     wg_n = dsl.sym("wg_n")
-    m_wave = dsl.sym("m_wave")
-    n_wave = dsl.sym("n_wave")
-    lane_mod16 = dsl.sym("lane_mod16")
-    wave_id = dsl.sym("wave_id")
+    wave_id = ixsimpl.floor(wi / 32)
+    m_wave = ixsimpl.floor(wi / (32 * cfg.BN))
+    n_wave = ixsimpl.mod(wave_id, cfg.BN)
+    lane_mod16 = ixsimpl.mod(lane, 16)
 
-    # A address (in f16 elements; ptr_add scales by the pointer elt size):
-    #   a_off = m_tile * 16*K + (lane & 15) * K
-    #         = wg_m * BM*16*K + m_wave * 16*K + lane_mod16 * K
     stride_per_tile = 16 * cfg.K
     a_off = bld.index_expr(
         wg_m * (cfg.BM * stride_per_tile)
         + m_wave * stride_per_tile
         + lane_mod16 * cfg.K,
-        bindings={
-            "wg_m": wg_m_val,
-            "m_wave": m_wave_val,
-            "lane_mod16": lane_mod16_val,
-        },
+        bindings={"wi": wi_val, "lane": lane_val, "wg_m": wg_m_val},
     )
     a_lane_base = bld.ptr_add(a_arg, a_off)
 
-    # B address mirrors A with (wg_n, n_wave).
     b_off = bld.index_expr(
         wg_n * (cfg.BN * stride_per_tile)
         + n_wave * stride_per_tile
         + lane_mod16 * cfg.K,
-        bindings={
-            "wg_n": wg_n_val,
-            "n_wave": n_wave_val,
-            "lane_mod16": lane_mod16_val,
-        },
+        bindings={"wi": wi_val, "lane": lane_val, "wg_n": wg_n_val},
     )
     b_lane_base = bld.ptr_add(b_arg, b_off)
 
@@ -244,13 +231,13 @@ def _emit_tile_coords(bld: dsl.FunctionBuilder, cfg: _MatmulConfig) -> _TileCoor
         wg_m * (cfg.N_blocks * cfg.waves_per_workgroup * 256)
         + wg_n * (cfg.waves_per_workgroup * 256)
         + wave_id * 256,
-        bindings={"wg_m": wg_m_val, "wg_n": wg_n_val, "wave_id": wave_id_val},
+        bindings={"wi": wi_val, "wg_m": wg_m_val, "wg_n": wg_n_val},
     )
     c_ptr = bld.ptr_add(c_arg, c_off)
 
     return _TileCoords(
-        wave_id=wave_id_val,
-        lane=lane,
+        wi=wi_val,
+        lane=lane_val,
         a_lane_base=a_lane_base,
         b_lane_base=b_lane_base,
         c_ptr=c_ptr,
@@ -282,9 +269,10 @@ def _emit_lds_staging(
     """
     reg_simd_type = dsl.simd_type(dsl.vector_type(8, dsl.i32()), width=32)
     lds = bld.lds_base()
-    wave_id = dsl.sym("wave_id")
+    wi = dsl.sym("wi")
     lane = dsl.sym("lane")
-    bindings = {"wave_id": coords.wave_id, "lane": coords.lane}
+    wave_id = ixsimpl.floor(wi / 32)
+    bindings = {"wi": coords.wi, "lane": coords.lane}
     a_lds_off = bld.index_expr(
         wave_id * _LDS_DWORDS_PER_FRAG + lane * _LDS_DWORDS_PER_LANE,
         bindings=bindings,

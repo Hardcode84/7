@@ -476,23 +476,30 @@ class FunctionBuilder:
         serialization (`sym_ctx.serialize(expr)`) which it deserializes
         into its own symbol store -- the structural bridge ixsimpl
         documents for cross-context transfer, with no text on the FFI
-        path. Each free symbol must appear as a key in `bindings`;
-        conversely every binding name must be a free symbol.
+        path. Bindings are filtered to the expression's actual free
+        symbols, so callers can pass a superset (e.g. a per-kernel
+        binding dict) without tracking which symbols ixsimpl's
+        simplifier might have dropped.
 
         When `result_type` is omitted the lane width is inferred from
         the binding operand types: a `!wave.simd<i32, W>` or
         `!wave.index<W>` binding pins the result to `!wave.index<W>`;
         otherwise the result is the uniform `!wave.index`.
         """
-        bindings = dict(bindings or {})
+        all_bindings = dict(bindings or {})
+        free_names = {s.sym_name for s in expr.free_symbols}
+        unknown = free_names - all_bindings.keys()
+        if unknown:
+            raise ValueError(f"free symbols missing from bindings: {sorted(unknown)}")
+        filtered = {n: all_bindings[n] for n in all_bindings if n in free_names}
         if result_type is None:
-            result_type = wave_index_type(_binding_lane_width(bindings.values()))
+            result_type = wave_index_type(_binding_lane_width(filtered.values()))
         expr_attr = ExprAttr.get_from_bytes(
             sym_ctx.serialize(expr), context=_current_context()
         )
-        names_attr = ArrayAttr.get([StringAttr.get(n) for n in bindings])
+        names_attr = ArrayAttr.get([StringAttr.get(n) for n in filtered])
         return wave.IndexExprOp(
-            result_type, expr_attr, names_attr, list(bindings.values())
+            result_type, expr_attr, names_attr, list(filtered.values())
         ).result
 
     def ptr_add(

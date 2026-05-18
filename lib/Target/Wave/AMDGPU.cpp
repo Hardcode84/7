@@ -452,6 +452,11 @@ private:
     return regType && regType.getRegClass() == wavemachine::RegClass::SGPR;
   }
 
+  bool isVGPR(Value value) const {
+    auto regType = dyn_cast<wavemachine::RegType>(value.getType());
+    return regType && regType.getRegClass() == wavemachine::RegClass::VGPR;
+  }
+
   LogicalResult emitUniformLoop(wavemachine::UniformLoopOp loop) {
     unsigned id = loopCounter++;
     std::string headLabel = (funcLabelPrefix + ".loop_head_" + Twine(id)).str();
@@ -544,7 +549,11 @@ private:
             wavemachine::VXorB32Op>(op)) {
       Value lhs = op.getOperand(0);
       Value rhs = op.getOperand(1);
-      if (isSGPR(rhs))
+      // VOP2 e32: src1 must be a VGPR. Both SGPR and imm RHS need to
+      // swap into src0; if both sides are non-VGPR we'd need a VOP3
+      // form, but the bucketizer only emits these with a VGPR on one
+      // side so the swap suffices.
+      if (!isVGPR(rhs))
         std::swap(lhs, rhs);
       unsigned opcode =
           isa<wavemachine::VAndB32Op>(op)  ? llvm::AMDGPU::V_AND_B32_e32_gfx11
@@ -617,6 +626,16 @@ private:
                      toMCOperand(op.getOperand(1))});
     if (isa<wavemachine::SLshlB32Op>(op))
       return emitMC(llvm::AMDGPU::S_LSHL_B32_gfx11,
+                    {toMCOperand(op.getResult(0)),
+                     toMCOperand(op.getOperand(0)),
+                     toMCOperand(op.getOperand(1))});
+    if (isa<wavemachine::SLshrB32Op>(op))
+      return emitMC(llvm::AMDGPU::S_LSHR_B32_gfx11,
+                    {toMCOperand(op.getResult(0)),
+                     toMCOperand(op.getOperand(0)),
+                     toMCOperand(op.getOperand(1))});
+    if (isa<wavemachine::SAndB32Op>(op))
+      return emitMC(llvm::AMDGPU::S_AND_B32_gfx11,
                     {toMCOperand(op.getResult(0)),
                      toMCOperand(op.getOperand(0)),
                      toMCOperand(op.getOperand(1))});

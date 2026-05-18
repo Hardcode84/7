@@ -679,6 +679,22 @@ def WaveMachine_SLshlB32Op : WaveMachine_Op<"s_lshl_b32", [Pure]> {
   let assemblyFormat = "$lhs `,` $rhs attr-dict `:` functional-type(operands, results)";
 }
 
+def WaveMachine_SLshrB32Op : WaveMachine_Op<"s_lshr_b32", [Pure]> {
+  let summary = "scalar 32-bit logical right shift";
+  let arguments = (ins WaveMachine_SGPR1OrImm:$lhs,
+                       WaveMachine_SGPR1OrImm:$rhs);
+  let results = (outs WaveMachine_SGPR1:$result);
+  let assemblyFormat = "$lhs `,` $rhs attr-dict `:` functional-type(operands, results)";
+}
+
+def WaveMachine_SAndB32Op : WaveMachine_Op<"s_and_b32", [Pure]> {
+  let summary = "scalar 32-bit bitwise AND";
+  let arguments = (ins WaveMachine_SGPR1OrImm:$lhs,
+                       WaveMachine_SGPR1OrImm:$rhs);
+  let results = (outs WaveMachine_SGPR1:$result);
+  let assemblyFormat = "$lhs `,` $rhs attr-dict `:` functional-type(operands, results)";
+}
+
 // 64-bit scalar add. The asm printer expands this into the carry-chain
 // pair `s_add_u32` (low) + `s_addc_u32` (high). The intermediate SCC is
 // consumed by the second instruction and discarded after.
