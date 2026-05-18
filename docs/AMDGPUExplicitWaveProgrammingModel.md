@@ -886,113 +886,122 @@ restrictions, remain backend responsibilities.
 
 ## Symbolic Offset Algebra
 
-GPU memory ops decompose their address into voffset, soffset, and a tiny
-`inst_offset` immediate -- per-lane VGPR, uniform SGPR / imm, compile-time
-immediate respectively. A wave kernel naturally produces address
-expressions of the form `wg_m * stride + m_wave * stride + lane * K + C`
-whose summands cleanly classify into one of those three slots, but the
-lane / uniform decomposition is only safe when the bucketizer knows
-each summand's reachable symbol kinds. Doing that classification by
-walking the post-selection MLIR is fragile; the source program already
-knows the structure.
+AMDGPU memory instructions decompose their address into voffset, soffset,
+and a small `inst_offset` immediate -- per-lane VGPR, uniform SGPR or
+imm, compile-time immediate. The split is not a peephole optimisation;
+it is the hardware encoding, and a kernel that produces a single flat
+voffset spends VGPR pressure on data the SGPR side could have carried
+for free.
 
-The Wave dialect carries the structure with `wave.index_expr`:
+A wave kernel writes addresses as polynomials in known building blocks:
+workgroup id times a tile stride, wave id times a fragment width, lane
+modulo a tile row, plus constants. Whether each summand is lane-varying
+or uniform, and whether a constant is small enough to ride the
+immediate slot, is structurally obvious in the source program. By the
+time that polynomial has been lowered to a chain of `wave.addi`,
+`wave.muli`, and `wave.binary` ops the structure has been shredded: the
+ADD chain is associative and reorderable, common subexpressions
+collapse, and the only way to recover "this `v_mul_lo_u32` is the
+`wg_m * BM*16*K` term in the A address" is to walk SSA backwards and
+pattern-match. That recovery path is what makes existing GPU backends
+allocate the SGPR-uniform contribution to a VGPR by default and rely
+on a downstream optimiser to fish it back out.
+
+The wave dialect should not lose the structure in the first place. The
+source representation of an offset is a symbolic expression with named
+free variables, paired with the SSA values that supply each variable:
 
 ```mlir
 %off = wave.index_expr
-  <"512*wg_m + 32*m_wave + 48*Mod(lane, 16) + 768*floor(1/64*wi)">
+  <"512*wg_m + 768*floor(1/64*wi) + 48*Mod(lane, 16)">
   ["wi", "lane", "wg_m"] (%wi, %lane, %wg_m)
   : (!wave.simd<i32, 32>, !wave.simd<i32, 32>, i32) -> !wave.index<32>
 %ptr = wave.ptr_add %base, %off : ...
 ```
 
-The op carries a hash-consed symbolic AST (`#wave.expr`) plus a binding
-list pairing each free symbol with the SSA value that materialises it.
-The expression is built and canonicalised by `ixsimpl`, which is
-vendored under `third_party/ixsimpl`; the Wave dialect owns a single
-`ixs_ctx` per `MLIRContext` so equal expressions dedup to pointer-equal
-attribute handles. The expression itself is integer-valued; ixsimpl's
-rational MUL coefficient becomes a runtime divide only when wrapped in
-`floor` / `ceil`, and `mod` is a first-class node.
+The symbolic side is a polynomial / floor / ceil / mod algebra over
+integer variables -- exactly the algebra the bucketizer needs and not
+a single instruction more. The bindings are the bridge between that
+algebra and the surrounding SSA. The carrier op is a translation
+target, not an optimisation pass output: the source-language lowering
+is expected to emit `wave.index_expr` directly for every address
+that has the polynomial shape, including the per-loop-iteration
+increments. Anything genuinely opaque (a runtime divisor, a pointer
+read, a `wave.ballot` result) stays an SSA operand and shows up only
+as a binding.
 
-### Surface
+The dialect treats two `wave.index_expr`s with the same symbolic
+expression as the same address. Equality is structural over the
+algebra, not pointer equality over the SSA chain that materialised it,
+so CSE and downstream passes see equivalent addresses as equivalent
+without needing to undo the lowering's intermediate state. This
+identity story is the reason the carrier op exists at the wave level
+rather than as an analysis attached to ordinary arith chains.
 
-The Python builder (`mlir.dialects.wave_dsl`) exposes a process-wide
-`ixsimpl.Context` so callers compose expressions structurally and feed
-the result to `dsl.index_expr`:
-
-```python
-wi = dsl.sym("wi")
-lane = dsl.sym("lane")
-wg_m = dsl.sym("wg_m")
-wave_id = ixsimpl.floor(wi / 32)
-m_wave = ixsimpl.floor(wi / (32 * BN))
-a_off = bld.index_expr(
-    wg_m * (BM * 16 * K) + m_wave * (16 * K) + ixsimpl.mod(lane, 16) * K,
-    bindings={wi: wi_val, lane: lane_val, wg_m: wg_m_val},
-)
-```
-
-The binding map keys are the `ixsimpl.Expr` symbol leaves themselves --
-no string round-trip between the expression and the per-kernel binding
-dict. The DSL serialises the `Expr` via `ixs_serialize_node` and the
-CAPI deserialises into the dialect's symbol store, so the FFI hop is
-structural binary, not text. Bindings are filtered down to each
-expression's actual free symbols, so a kernel-wide `sym_to_val` dict
-can feed several `index_expr` calls without per-call pruning.
-
-`wave.assume_range` is the source-level seed for the range-driven
-parts of the lowering. Wrapping a `wave.workgroup_id` (or any other
-SSA value) with `assume_range %v, [lo, hi]` lets upstream
-`IntegerRangeAnalysis` see the tight bound through ordinary
-`InferIntRangeInterface` propagation.
+Range information is a separate carrier op: `wave.assume_range %v,
+[lo, hi]` is identity at runtime and a producer-side assertion of a
+signed integer interval. The kernel author already knows the grid
+dimensions, the tile sizes, and which workgroup-id ranges are safely
+representable in 32 bits; the dialect refuses to rediscover those by
+inference and instead takes them from the source program. Wrapping a
+single SSA value with `assume_range` is enough; the bound flows
+through `InferIntRangeInterface` to every consumer that opts in,
+including the bucketizer's slot-fit checks.
 
 ### Bucketization
 
-The Wave-to-WaveMachine selector turns each `index_expr`-rooted address
-into a per-pointer `OffsetTriple { voffset, soffset, instOffset }`:
+Wave-to-WaveMachine selection translates each `wave.index_expr` into a
+per-pointer `(voffset, soffset, inst_offset)` triple. The translation
+is structurally simple because the input is structurally rich:
 
-1. **IntRangeAnalysis** runs once over the wave-level function. Each
-   binding's proven signed range becomes a `name in [lo, hi]` ixsimpl
-   assumption.
-2. **`ixs_simplify`** runs on the expression under those assumptions.
-   Anything provably constant collapses; symbols whose range is a
-   single point get folded out.
-3. **Per-summand classification**. Top-level summands of the resulting
-   ADD walk classify as `Const` / `Uniform` / `Lane` from the binding
-   types reached at the leaves (signless int → uniform, SIMD / wave
-   index with width → lane). FLOOR / CEIL / MOD recurse through their
-   children.
-4. **Routing**. Consts accumulate into `instOffset`. Uniforms
-   materialise SGPR-side via `s_mul_i32` / `s_lshl_b32` /
-   `s_add_i32` and join `soffset`. Lane summands materialise VGPR-side
-   via the existing `v_mul_lo_u32` / `v_add_u32` chain into
-   `voffset`. FLOOR / CEIL lower to `shr` of the LCM-scaled
-   numerator (power-of-two divisors); MOD lowers to bitwise `and`
-   with the divisor minus one.
-5. **Spec-driven emit**. Each WaveMachine memory op carries an
-   `AddressFieldsOpInterface` describing its slot widths (12-bit
-   unsigned `inst_offset` for buffer, 13-bit signed for global,
-   16-bit unsigned for LDS, plus the soffset presence bit). At emit
-   time the bucketizer demotes any slot whose proven range exceeds
-   the slot's width: inst_offset overflow demotes to soffset, soffset
-   overflow demotes to voffset.
+- Symbol kinds are read off the binding operand types. Signless integer
+  scalar bindings are uniform, SIMD-typed and `!wave.index<W>` bindings
+  are lane-varying. There is no need to walk the expression and infer.
+- The top-level ADD's summands classify as Const, Uniform, or Lane by
+  taking the maximum kind reachable through their factors. A summand
+  whose reachable symbols are all uniform contributes to the soffset
+  slot; one that touches a lane-varying symbol contributes to voffset;
+  a fully literal one accumulates into inst_offset.
+- Range assumptions composed from `wave.assume_range` plus
+  `IntegerRangeAnalysis` feed an `ixs_simplify` pass before
+  classification, so anything provably constant under the proven
+  bounds collapses out of the symbolic form rather than getting
+  rediscovered as an SSA chain inside the bucketizer.
+- Floor / ceil / mod nodes lower at emit time. The materialiser is
+  closed over the same algebra the source program used, so a
+  `wave_id = floor(wi / 32)` survives as a single shift in the
+  prologue instead of a separately-tracked SSA value the bucketizer
+  would have to re-associate with its eventual use.
 
-The end result is that:
+The destination memory op describes the slots it actually has through
+an op interface (`AddressFieldsOpInterface`): `inst_offset` bit width
+and signedness, presence of an `soffset` operand. The bucketizer
+treats those as a per-op contract rather than baking AMDGPU-specific
+constants into the selector. A summand whose proven range exceeds the
+slot it would have ridden demotes to the next-wider slot at emit time
+(`inst_offset` overflow demotes to `soffset`, `soffset` overflow
+demotes to `voffset`), so the routing decisions stay safe under
+arbitrary range information without splitting into target-specific
+fast paths.
 
-```python
-wg_m = dsl.assume_range(bld.workgroup_id(axis=0), 0, M_blocks - 1)
-```
+The visible payoff for the kernel author is small: wrapping each
+workgroup id with `assume_range` and writing the address as a single
+`index_expr` is enough. The bucketizer translates the resulting
+symbolic form into the V / S / inst-offset shape the hardware expects,
+including the SGPR-side multiplies and shifts that move the uniform
+contribution off the VGPR critical path. There is no second pass that
+walks the emitted machine code to undo a flat-voffset materialisation;
+the structure was preserved from the start, so the lowering only has
+to read it.
 
-flips a workgroup-id-scaled summand from voffset (`v_mul_lo_u32 v5, 0x600, s2`)
-to soffset (`s_mul_i32 s6, 0x600, s2` -> `s_lshl_b32 s7, s6, 1` ->
-`buffer_load_b32 v16, v5, s[12:15], s7 offen offset:4`) without
-touching the surface code beyond the assume_range wrapper.
-
-`scf.for` pointer carries collapse the triple to a single voffset at
-the loop boundary; the bucketizer re-derives V / S / inst for each
-fresh `ptr_add` inside the body. This is a conservative compromise --
-carrying the full triple as iter args is left for later.
+Pointer SSA values that thread through `scf.for` iter args currently
+collapse the triple to a single voffset at the loop boundary, and the
+bucketizer re-derives V / S / inst for each fresh `ptr_add` inside the
+body. This is a deliberate compromise: carrying the full triple as
+iter args would multiply the loop's carry width by three per pointer
+for an optimisation that matters mostly in pipelined inner loops, and
+the equivalent re-derivation costs nothing at the source level because
+the same `index_expr` shape can be emitted inside the body.
 
 ## Lowering Strategy
 
