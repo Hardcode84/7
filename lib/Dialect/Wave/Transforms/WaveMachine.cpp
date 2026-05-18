@@ -128,6 +128,31 @@ static Operation *createInstrNoResult(OpBuilder &builder, Location loc,
   return createWMOp(builder, loc, name, operands, TypeRange{}, attrs);
 }
 
+// Bucketed byte offset for a wave-level pointer. `voffset` carries the
+// per-lane VGPR contribution, `soffset` the uniform SGPR / imm part,
+// and `instOffset` an accumulated immediate that lands in the
+// memory op's `offset N` attr. A null `voffset` / `soffset` and a
+// zero `instOffset` each mean "no contribution".
+struct OffsetTriple {
+  Value voffset;
+  Value soffset;
+  int64_t instOffset = 0;
+};
+
+// Symbol kind for the bucketizer's per-summand classification. Bindings
+// reachable only through `Const` / `Uniform` paths can land in
+// `instOffset` / `soffset`; anything reaching a `Lane` symbol falls
+// through to `voffset`.
+enum class TermKind { Const = 0, Uniform = 1, Lane = 2 };
+
+static bool isLaneVaryingType(Type type) {
+  if (isa<SimdType>(type))
+    return true;
+  if (auto idx = dyn_cast<WaveIndexType>(type))
+    return idx.getWidth() != 0;
+  return false;
+}
+
 class WaveMachineSelector {
 public:
   explicit WaveMachineSelector(func::FuncOp func) : func(func), builder(func) {}
@@ -164,10 +189,148 @@ private:
   OpBuilder builder;
   DenseMap<Value, Value> values;
   DenseMap<Value, Value> pointerBases;
-  DenseMap<Value, Value> pointerOffsets;
+  DenseMap<Value, OffsetTriple> pointerOffsets;
+  DenseMap<Value, OffsetTriple> indexTriples;
   DenseMap<Value, bool> pointerBuffers;
   SmallVector<Operation *> opsToErase;
   unsigned nextLabel = 0;
+
+  // Sum the triple into a single VGPR voffset value.
+  Value collapseTriple(Location loc, const OffsetTriple &t) {
+    Value v = t.voffset;
+    if (t.soffset)
+      v = v ? addByteOffsets(loc, v, t.soffset) : t.soffset;
+    if (t.instOffset != 0) {
+      Value imm = createImm(builder, loc, t.instOffset);
+      v = v ? addByteOffsets(loc, v, imm) : imm;
+    }
+    return v ? v : createImm(builder, loc, 0);
+  }
+
+  // Multiply each slot of `t` by `size`. Used by selectPtrAdd to
+  // convert element offsets into byte offsets without losing the
+  // V / S / inst split. Power-of-two `size` lowers to shifts; the
+  // imm fast paths in the V / S adders fold size==1 / instOffset==0
+  // upstream.
+  OffsetTriple scaleTriple(Location loc, OffsetTriple t, unsigned size) {
+    if (size == 1)
+      return t;
+    OffsetTriple out;
+    out.instOffset = t.instOffset * static_cast<int64_t>(size);
+    if (t.voffset) {
+      if (std::optional<int64_t> imm = getImmediateValue(t.voffset)) {
+        out.voffset = createImm(builder, loc, *imm * size);
+      } else {
+        out.voffset = createInstr(
+            builder, loc, "v_lshlrev_b32",
+            {t.voffset, createImm(builder, loc, llvm::Log2_32(size))},
+            getRegType(builder.getContext(), wavemachine::RegClass::VGPR));
+      }
+    }
+    if (t.soffset) {
+      if (std::optional<int64_t> imm = getImmediateValue(t.soffset)) {
+        out.soffset = createImm(builder, loc, *imm * size);
+      } else if ((size & (size - 1)) == 0) {
+        out.soffset = createInstr(
+            builder, loc, "s_lshl_b32",
+            {t.soffset, createImm(builder, loc, llvm::Log2_32(size))},
+            getRegType(builder.getContext(), wavemachine::RegClass::SGPR));
+      } else {
+        out.soffset = createInstr(
+            builder, loc, "s_mul_i32",
+            {createImm(builder, loc, size), t.soffset},
+            getRegType(builder.getContext(), wavemachine::RegClass::SGPR));
+      }
+    }
+    return out;
+  }
+
+  // Demote overflow from `inst_offset` and any unsupported slot to the
+  // remaining slots (S if available, else V). Returns the operand
+  // triple ready for emission: voffset always materialized as VGPR1
+  // (zero VGPR for an empty slot), soffset as SGPR1OrImm when the
+  // spec has the slot, and the int that lands in the `offset N`
+  // attr.
+  struct BucketedOperands {
+    Value voffset;
+    Value soffset;
+    int64_t instOffset = 0;
+  };
+
+  // Push `imm` into soffset when the spec has the slot; otherwise
+  // into voffset. Used by the demote path.
+  void sinkImmIntoRemainingSlot(Location loc, OffsetTriple &t, Value imm,
+                                bool hasSoffset) {
+    if (hasSoffset) {
+      t.soffset = addUniformBytes(loc, t.soffset, imm);
+      return;
+    }
+    t.voffset = t.voffset ? addByteOffsets(loc, t.voffset, imm) : imm;
+  }
+
+  // True when `t.instOffset` won't fit `spec`'s inst-offset slot.
+  bool instOffsetOverflows(const OffsetTriple &t,
+                           const wavemachine::AddressFieldSpec &spec) {
+    if (!spec.hasInstOffset)
+      return t.instOffset != 0;
+    std::pair<int64_t, int64_t> range = wavemachine::instOffsetRange(spec);
+    return t.instOffset < range.first || t.instOffset > range.second;
+  }
+
+  // Push out-of-range / unsupported inst_offset and an unsupported
+  // soffset into the slots `spec` actually has.
+  void demoteToFitSpec(Location loc, OffsetTriple &t,
+                       const wavemachine::AddressFieldSpec &spec) {
+    if (instOffsetOverflows(t, spec)) {
+      sinkImmIntoRemainingSlot(loc, t, createImm(builder, loc, t.instOffset),
+                               spec.hasSoffset);
+      t.instOffset = 0;
+    }
+    if (!spec.hasSoffset && t.soffset) {
+      t.voffset =
+          t.voffset ? addByteOffsets(loc, t.voffset, t.soffset) : t.soffset;
+      t.soffset = Value{};
+    }
+  }
+
+  BucketedOperands bucketForSpec(Location loc, OffsetTriple t,
+                                 const wavemachine::AddressFieldSpec &spec) {
+    demoteToFitSpec(loc, t, spec);
+    BucketedOperands out;
+    Value vraw = t.voffset ? t.voffset : createImm(builder, loc, 0);
+    out.voffset = ensureVGPRForVSrc1(loc, vraw);
+    if (spec.hasSoffset)
+      out.soffset = t.soffset ? t.soffset : createImm(builder, loc, 0);
+    out.instOffset = t.instOffset;
+    return out;
+  }
+
+  // Build the `offset` attribute list for a bucketed emit. Empty
+  // when the inst_offset is zero so the printer continues to elide
+  // the `offset 0` clause.
+  SmallVector<NamedAttribute> instOffsetAttrs(int64_t value,
+                                              StringRef attrName) {
+    SmallVector<NamedAttribute> attrs;
+    if (value != 0)
+      attrs.push_back(
+          builder.getNamedAttr(attrName, builder.getI64IntegerAttr(value)));
+    return attrs;
+  }
+
+  // Field-wise sum of two triples. Null slots pass the non-null
+  // operand through verbatim, so the result keeps each slot in its
+  // natural class (V/S/imm) instead of forcing through a VGPR add.
+  OffsetTriple mergeTriples(Location loc, OffsetTriple a, OffsetTriple b) {
+    OffsetTriple out;
+    out.voffset = !a.voffset   ? b.voffset
+                  : !b.voffset ? a.voffset
+                               : addByteOffsets(loc, a.voffset, b.voffset);
+    out.soffset = !a.soffset   ? b.soffset
+                  : !b.soffset ? a.soffset
+                               : addUniformBytes(loc, a.soffset, b.soffset);
+    out.instOffset = a.instOffset + b.instOffset;
+    return out;
+  }
 
   bool isBufferPointer(Type type) {
     if (auto simd = dyn_cast<SimdType>(type))
@@ -212,7 +375,7 @@ private:
     if (!isPtr)
       return;
     pointerBases[arg] = argOp->getResult(0);
-    pointerOffsets[arg] = createImm(builder, func.getLoc(), 0);
+    pointerOffsets[arg] = OffsetTriple{};
     pointerBuffers[arg] = isBufferPointer(type);
   }
 
@@ -617,39 +780,46 @@ private:
     return success();
   }
 
-  LogicalResult selectSharedStore(StoreOp op, Value base, Value offset,
+  LogicalResult selectSharedStore(StoreOp op, Value base, OffsetTriple offset,
                                   unsigned registers) {
-    Value addr = ensureVGPRForVSrc1(op.getLoc(),
-                                    addByteOffsets(op.getLoc(), base, offset));
+    wavemachine::AddressFieldSpec spec =
+        registers == 1 ? wavemachine::DsStoreB32Op::getAddressFieldSpec()
+                       : wavemachine::DsStoreTupleB32Op::getAddressFieldSpec();
+    BucketedOperands b = bucketForSpec(op.getLoc(), offset, spec);
+    Value addr = ensureVGPRForVSrc1(
+        op.getLoc(), addByteOffsets(op.getLoc(), base, b.voffset));
     SmallVector<Value> operands{addr, expect(op.getValue(), op)};
     if (Value dependency = op.getDependency())
       operands.push_back(expect(dependency, op));
     StringRef opcode = registers == 1 ? "ds_store_b32" : "ds_store_tuple_b32";
     Operation *store = createWMOp(builder, op.getLoc(), opcode, operands,
-                                  getMemTokenType(op.getContext()));
+                                  getMemTokenType(op.getContext()),
+                                  instOffsetAttrs(b.instOffset, "offset"));
     values[op.getToken()] = store->getResult(0);
     eraseIfTopLevel(op);
     return success();
   }
 
-  LogicalResult selectGlobalOrBufferStore(StoreOp op, Value base, Value offset,
-                                          bool isBuffer, unsigned registers) {
+  LogicalResult selectGlobalOrBufferStore(StoreOp op, Value base,
+                                          OffsetTriple offset, bool isBuffer,
+                                          unsigned registers) {
     if (registers != 1)
       return op.emitError("global/buffer tuple stores are not supported by "
                           "the WaveMachine backend yet");
-    SmallVector<Value> operands{offset, expect(op.getValue(), op), base};
-    if (isBuffer) {
-      // MUBUF buffer_store_b32 requires an explicit soffset slot.
-      // Pass a zero immediate when there's no S-bucket contribution;
-      // the bucketed lowering will populate this later.
-      operands.push_back(createImm(builder, op.getLoc(), 0));
-    }
+    wavemachine::AddressFieldSpec spec =
+        isBuffer ? wavemachine::BufferStoreB32Op::getAddressFieldSpec()
+                 : wavemachine::GlobalStoreB32Op::getAddressFieldSpec();
+    BucketedOperands b = bucketForSpec(op.getLoc(), offset, spec);
+    SmallVector<Value> operands{b.voffset, expect(op.getValue(), op), base};
+    if (spec.hasSoffset)
+      operands.push_back(b.soffset);
     if (Value dependency = op.getDependency())
       operands.push_back(expect(dependency, op));
     Operation *store =
         createWMOp(builder, op.getLoc(),
                    isBuffer ? "buffer_store_b32" : "global_store_b32", operands,
-                   getMemTokenType(op.getContext()));
+                   getMemTokenType(op.getContext()),
+                   instOffsetAttrs(b.instOffset, "inst_offset"));
     values[op.getToken()] = store->getResult(0);
     eraseIfTopLevel(op);
     return success();
@@ -663,11 +833,12 @@ private:
       return op.emitError("WaveMachine backend expects selected wave pointer");
     unsigned registers =
         loadRegisterCount(cast<SimdType>(op.getValue().getType()));
+    OffsetTriple triple = offsetIt->second;
     if (isSharedPointer(op.getPtr().getType()))
-      return selectSharedStore(op, baseIt->second, offsetIt->second, registers);
+      return selectSharedStore(op, baseIt->second, triple, registers);
     bool isBuffer = bufferIt != pointerBuffers.end() && bufferIt->second;
-    return selectGlobalOrBufferStore(op, baseIt->second, offsetIt->second,
-                                     isBuffer, registers);
+    return selectGlobalOrBufferStore(op, baseIt->second, triple, isBuffer,
+                                     registers);
   }
 
   unsigned elementSizeBytes(Type type) {
@@ -879,18 +1050,263 @@ private:
     }
   }
 
+  // Walk an AST and return the highest TermKind reachable from it.
+  // Constants stay `Const`; uniform-only symbol subtrees stay
+  // `Uniform`; any reach into a lane-varying symbol promotes the
+  // whole subtree to `Lane`.
+  TermKind classifyTerm(::ixs_node *node,
+                        const llvm::StringMap<TermKind> &symKinds) {
+    switch (ixs_node_tag(node)) {
+    case IXS_INT:
+    case IXS_RAT:
+      return TermKind::Const;
+    case IXS_SYM: {
+      StringRef name = ixs_node_sym_name(node);
+      auto it = symKinds.find(name);
+      return it == symKinds.end() ? TermKind::Lane : it->second;
+    }
+    case IXS_ADD: {
+      TermKind k = classifyTerm(ixs_node_add_coeff(node), symKinds);
+      uint32_t n = ixs_node_add_nterms(node);
+      for (uint32_t i = 0; i < n; ++i)
+        k = std::max(k, classifyTerm(ixs_node_add_term(node, i), symKinds));
+      return k;
+    }
+    case IXS_MUL: {
+      TermKind k = classifyTerm(ixs_node_mul_coeff(node), symKinds);
+      uint32_t n = ixs_node_mul_nfactors(node);
+      for (uint32_t i = 0; i < n; ++i)
+        k = std::max(k,
+                     classifyTerm(ixs_node_mul_factor_base(node, i), symKinds));
+      return k;
+    }
+    default:
+      return TermKind::Lane;
+    }
+  }
+
+  // True iff `v` is a uniform-side value: an immediate, or an SGPR1
+  // register. Used by the bucketizer to recognize when a materialized
+  // summand can land in the `soffset` slot without an SGPR /
+  // VGPR demotion.
+  bool isUniformValue(Value v) {
+    if (!v)
+      return false;
+    if (isImm(v))
+      return true;
+    auto rt = dyn_cast<wavemachine::RegType>(v.getType());
+    return rt && rt.getRegClass() == wavemachine::RegClass::SGPR &&
+           rt.getWidth() == 1;
+  }
+
+  // Imm-fold path for SGPR-side adds: imm+imm collapses to one imm,
+  // imm-zero on either side returns the other operand. Returns null
+  // when the inputs need a real s_add_i32.
+  Value foldImmAdd(Location loc, Value lhs, Value rhs) {
+    std::optional<int64_t> lhsImm = getImmediateValue(lhs);
+    std::optional<int64_t> rhsImm = getImmediateValue(rhs);
+    if (lhsImm && rhsImm)
+      return createImm(builder, loc, *lhsImm + *rhsImm);
+    if (lhsImm && *lhsImm == 0)
+      return rhs;
+    if (rhsImm && *rhsImm == 0)
+      return lhs;
+    return Value{};
+  }
+
+  // Append `add` to the SGPR-side accumulator. Imm pairs collapse via
+  // `foldImmAdd`; otherwise emits `s_add_i32`, swapping operands when
+  // needed because the lhs must be an SGPR1, not an imm.
+  Value addUniformBytes(Location loc, Value acc, Value add) {
+    if (!acc)
+      return add;
+    if (!add)
+      return acc;
+    if (Value folded = foldImmAdd(loc, acc, add))
+      return folded;
+    if (isImm(acc) && !isImm(add))
+      std::swap(acc, add);
+    Operation *sum = createWMOp(
+        builder, loc, "s_add_i32", {acc, add},
+        {getRegType(builder.getContext(), wavemachine::RegClass::SGPR),
+         getSCCType(builder.getContext())});
+    return sum->getResult(0);
+  }
+
+  // Bucketize each top-level summand of `node` into `triple`. ADD
+  // structure: coeff + sum(term_coeff[i] * term[i]). For a non-ADD
+  // node the whole expression is treated as a single summand. Each
+  // summand materializes via the existing single-Value path; routing
+  // is decided by the summand's reachable symbol kinds.
+  LogicalResult bucketize(::ixs_node *node, Operation *user,
+                          const llvm::StringMap<Value> &subs,
+                          const llvm::StringMap<TermKind> &symKinds,
+                          OffsetTriple &triple) {
+    if (ixs_node_tag(node) != IXS_ADD)
+      return bucketizeSummand(node, /*explicitCoeff=*/nullptr, user, subs,
+                              symKinds, triple);
+    ::ixs_node *coeff = ixs_node_add_coeff(node);
+    std::optional<int64_t> coeffInt = staticIntLiteral(coeff);
+    if (!coeffInt)
+      return user->emitError(
+          "wave.index_expr bucketizer expects an integer ADD coefficient");
+    triple.instOffset += *coeffInt;
+    uint32_t nterms = ixs_node_add_nterms(node);
+    for (uint32_t i = 0; i < nterms; ++i) {
+      ::ixs_node *termCoeff = ixs_node_add_term_coeff(node, i);
+      ::ixs_node *term = ixs_node_add_term(node, i);
+      if (failed(
+              bucketizeSummand(term, termCoeff, user, subs, symKinds, triple)))
+        return failure();
+    }
+    return success();
+  }
+
+  // Materialize `term_coeff * term` as a single Value, skipping the
+  // multiply when the coefficient is trivially 1.
+  FailureOr<Value> materializeSummand(::ixs_node *term, ::ixs_node *termCoeff,
+                                      Operation *user,
+                                      const llvm::StringMap<Value> &subs) {
+    FailureOr<Value> termValue = materializeIndexExprNode(term, user, subs);
+    if (failed(termValue))
+      return failure();
+    std::optional<int64_t> coeffInt =
+        termCoeff ? staticIntLiteral(termCoeff) : std::optional<int64_t>{1};
+    if (!termCoeff || (coeffInt && *coeffInt == 1))
+      return *termValue;
+    FailureOr<Value> coeffValue =
+        materializeIndexExprNode(termCoeff, user, subs);
+    if (failed(coeffValue))
+      return failure();
+    return mulIndexValues(user->getLoc(), *coeffValue, *termValue);
+  }
+
+  // Try the literal-fold fast path for a Const-kind summand. Returns
+  // true if folded into `triple.instOffset`.
+  bool tryConstFoldSummand(::ixs_node *term, ::ixs_node *termCoeff,
+                           TermKind kind, OffsetTriple &triple) {
+    if (kind != TermKind::Const)
+      return false;
+    std::optional<int64_t> termInt = evalConstantNode(term);
+    std::optional<int64_t> coeffInt =
+        termCoeff ? staticIntLiteral(termCoeff) : std::optional<int64_t>{1};
+    if (!termInt || !coeffInt)
+      return false;
+    triple.instOffset += *coeffInt * *termInt;
+    return true;
+  }
+
+  // Route one (optionally `term_coeff *`) summand into `triple`'s
+  // matching slot. Const summands fold into `instOffset`; uniform
+  // summands that materialize to an SGPR / imm join `soffset` via
+  // `s_add_i32`; everything else lands in `voffset`.
+  LogicalResult bucketizeSummand(::ixs_node *term, ::ixs_node *termCoeff,
+                                 Operation *user,
+                                 const llvm::StringMap<Value> &subs,
+                                 const llvm::StringMap<TermKind> &symKinds,
+                                 OffsetTriple &triple) {
+    TermKind kind = classifyTerm(term, symKinds);
+    if (termCoeff)
+      kind = std::max(kind, classifyTerm(termCoeff, symKinds));
+    if (tryConstFoldSummand(term, termCoeff, kind, triple))
+      return success();
+    FailureOr<Value> summand = materializeSummand(term, termCoeff, user, subs);
+    if (failed(summand))
+      return failure();
+    // An imm-valued summand (e.g. uniform symbol bound to an imm)
+    // folds into the inst-offset slot rather than dragging an imm
+    // into the S adder.
+    if (std::optional<int64_t> imm = getImmediateValue(*summand)) {
+      triple.instOffset += *imm;
+      return success();
+    }
+    Location loc = user->getLoc();
+    if (kind == TermKind::Uniform && isUniformValue(*summand)) {
+      triple.soffset = addUniformBytes(loc, triple.soffset, *summand);
+      return success();
+    }
+    triple.voffset = triple.voffset
+                         ? addByteOffsets(loc, triple.voffset, *summand)
+                         : *summand;
+    return success();
+  }
+
+  std::optional<int64_t> evalConstantAdd(::ixs_node *node) {
+    std::optional<int64_t> acc = evalConstantNode(ixs_node_add_coeff(node));
+    if (!acc)
+      return std::nullopt;
+    uint32_t n = ixs_node_add_nterms(node);
+    for (uint32_t i = 0; i < n; ++i) {
+      std::optional<int64_t> tc =
+          evalConstantNode(ixs_node_add_term_coeff(node, i));
+      std::optional<int64_t> t = evalConstantNode(ixs_node_add_term(node, i));
+      if (!tc || !t)
+        return std::nullopt;
+      *acc += *tc * *t;
+    }
+    return acc;
+  }
+
+  std::optional<int64_t> evalConstantMul(::ixs_node *node) {
+    std::optional<int64_t> acc = evalConstantNode(ixs_node_mul_coeff(node));
+    if (!acc)
+      return std::nullopt;
+    uint32_t n = ixs_node_mul_nfactors(node);
+    for (uint32_t i = 0; i < n; ++i) {
+      int32_t exp = ixs_node_mul_factor_exp(node, i);
+      if (exp < 0)
+        return std::nullopt;
+      std::optional<int64_t> base =
+          evalConstantNode(ixs_node_mul_factor_base(node, i));
+      if (!base)
+        return std::nullopt;
+      int64_t pow = 1;
+      for (int32_t e = 0; e < exp; ++e)
+        pow *= *base;
+      *acc *= pow;
+    }
+    return acc;
+  }
+
+  // Constant-fold a node that classifyTerm decided is Const, returning
+  // its int value when expressible without materialization. ADD / MUL
+  // chains of literals fold here so they stay on the fast path
+  // straight into `instOffset`.
+  std::optional<int64_t> evalConstantNode(::ixs_node *node) {
+    if (std::optional<int64_t> v = staticIntLiteral(node))
+      return v;
+    if (ixs_node_tag(node) == IXS_ADD)
+      return evalConstantAdd(node);
+    if (ixs_node_tag(node) == IXS_MUL)
+      return evalConstantMul(node);
+    return std::nullopt;
+  }
+
   LogicalResult selectIndexExpr(IndexExprOp op) {
     llvm::StringMap<Value> substitution;
+    llvm::StringMap<TermKind> symKinds;
     for (auto [nameAttr, binding] :
          llvm::zip(op.getNames(), op.getBindings())) {
       StringRef key = cast<StringAttr>(nameAttr).getValue();
       substitution[key] = expect(binding, op);
+      symKinds[key] = isLaneVaryingType(binding.getType()) ? TermKind::Lane
+                                                           : TermKind::Uniform;
     }
-    FailureOr<Value> result =
-        materializeIndexExprNode(op.getExpr().getNode(), op, substitution);
-    if (failed(result))
+    OffsetTriple triple{};
+    ::ixs_node *root = const_cast<::ixs_node *>(op.getExpr().getNode());
+    if (failed(bucketize(root, op, substitution, symKinds, triple)))
       return failure();
-    values[op.getResult()] = *result;
+    indexTriples[op.getResult()] = triple;
+    // selectPtrAdd reads the bucketed triple directly; everyone else
+    // (wave.binary, debug printers) goes through the `values` map and
+    // needs a single collapsed VGPR. Skip the collapse when the only
+    // users are wave.ptr_add to keep the trivial bucketed lowering
+    // free of dead voffset / soffset adders.
+    bool needsCollapse =
+        llvm::any_of(op.getResult().getUsers(),
+                     [](Operation *user) { return !isa<PtrAddOp>(user); });
+    if (needsCollapse)
+      values[op.getResult()] = collapseTriple(op.getLoc(), triple);
     eraseIfTopLevel(op);
     return success();
   }
@@ -903,25 +1319,22 @@ private:
     // Snapshot mapped values before mutating any of the maps below; inserting
     // into a DenseMap can rehash and invalidate live iterators.
     Value baseValue = baseIt->second;
-    Value baseOffsetValue = offsetIt->second;
+    OffsetTriple baseTriple = offsetIt->second;
 
-    Value offset = expect(op.getOffset(), op);
-    unsigned size = elementSizeBytes(op.getBase().getType());
-    Value byteOffset = offset;
-    if (auto offsetDef = offset.getDefiningOp<wavemachine::ImmOp>()) {
-      int64_t scaled =
-          offsetDef->getAttrOfType<IntegerAttr>("value").getInt() * size;
-      byteOffset = createImm(builder, op.getLoc(), scaled);
-    } else if (size != 1) {
-      byteOffset = createInstr(
-          builder, op.getLoc(), "v_lshlrev_b32",
-          {offset, createImm(builder, op.getLoc(), llvm::Log2_32(size))},
-          getRegType(op.getContext(), wavemachine::RegClass::VGPR));
+    OffsetTriple offsetTriple;
+    auto tit = indexTriples.find(op.getOffset());
+    if (tit != indexTriples.end()) {
+      offsetTriple = tit->second;
+    } else {
+      Value offset = expect(op.getOffset(), op);
+      offsetTriple = OffsetTriple{offset, Value{}, 0};
     }
-    byteOffset = addByteOffsets(op.getLoc(), baseOffsetValue, byteOffset);
+    unsigned size = elementSizeBytes(op.getBase().getType());
+    OffsetTriple scaled = scaleTriple(op.getLoc(), offsetTriple, size);
+    OffsetTriple merged = mergeTriples(op.getLoc(), baseTriple, scaled);
 
     pointerBases[op.getResult()] = baseValue;
-    pointerOffsets[op.getResult()] = byteOffset;
+    pointerOffsets[op.getResult()] = merged;
     pointerBuffers[op.getResult()] = pointerBuffers.lookup(op.getBase());
     values[op.getResult()] = baseValue;
     eraseIfTopLevel(op);
@@ -935,13 +1348,13 @@ private:
       return op.emitError("WaveMachine backend expects selected base pointer");
     // See selectPtrAdd: snapshot before any DenseMap insertion.
     Value baseValue = baseIt->second;
-    Value baseOffsetValue = offsetIt->second;
+    OffsetTriple baseTriple = offsetIt->second;
     Operation *descriptor =
         createWMOp(builder, op.getLoc(), "make_buffer_rsrc",
                    {baseValue, expect(op.getRange(), op)},
                    getRegType(op.getContext(), wavemachine::RegClass::SGPR, 4));
     pointerBases[op.getResult()] = descriptor->getResult(0);
-    pointerOffsets[op.getResult()] = baseOffsetValue;
+    pointerOffsets[op.getResult()] = baseTriple;
     pointerBuffers[op.getResult()] = true;
     values[op.getResult()] = descriptor->getResult(0);
     eraseIfTopLevel(op);
@@ -1012,37 +1425,49 @@ private:
   // value/token to the produced VGPR tuple and memory token. Shared by
   // every variant of `selectLoad` (LDS / global / buffer).
   void finalizeLoad(LoadOp op, StringRef opcode, ArrayRef<Value> operands,
-                    unsigned registers) {
+                    unsigned registers, ArrayRef<NamedAttribute> attrs = {}) {
     SmallVector<Type, 2> resultTypes{
         getRegType(op.getContext(), wavemachine::RegClass::VGPR, registers),
         getMemTokenType(op.getContext())};
     Operation *load =
-        createWMOp(builder, op.getLoc(), opcode, operands, resultTypes);
+        createWMOp(builder, op.getLoc(), opcode, operands, resultTypes, attrs);
     values[op.getValue()] = load->getResult(0);
     values[op.getToken()] = load->getResult(1);
     eraseIfTopLevel(op);
   }
 
-  LogicalResult selectSharedLoad(LoadOp op, Value base, Value offset,
+  LogicalResult selectSharedLoad(LoadOp op, Value base, OffsetTriple offset,
                                  unsigned registers) {
-    Value addr = ensureVGPRForVSrc1(op.getLoc(),
-                                    addByteOffsets(op.getLoc(), base, offset));
+    wavemachine::AddressFieldSpec spec =
+        registers == 1 ? wavemachine::DsLoadB32Op::getAddressFieldSpec()
+                       : wavemachine::DsLoadTupleB32Op::getAddressFieldSpec();
+    BucketedOperands b = bucketForSpec(op.getLoc(), offset, spec);
+    Value addr = ensureVGPRForVSrc1(
+        op.getLoc(), addByteOffsets(op.getLoc(), base, b.voffset));
     SmallVector<Value> operands{addr};
     if (Value dependency = op.getDependency())
       operands.push_back(expect(dependency, op));
     finalizeLoad(op, registers == 1 ? "ds_load_b32" : "ds_load_tuple_b32",
-                 operands, registers);
+                 operands, registers, instOffsetAttrs(b.instOffset, "offset"));
     return success();
   }
 
-  LogicalResult selectGlobalOrBufferLoad(LoadOp op, Value base, Value offset,
-                                         bool isBuffer, unsigned registers) {
-    SmallVector<Value> operands{offset, base};
-    if (isBuffer) {
-      // MUBUF buffer_load_* requires an explicit soffset slot.
-      // Pass a zero immediate when there's no S-bucket contribution.
-      operands.push_back(createImm(builder, op.getLoc(), 0));
-    }
+  LogicalResult selectGlobalOrBufferLoad(LoadOp op, Value base,
+                                         OffsetTriple offset, bool isBuffer,
+                                         unsigned registers) {
+    wavemachine::AddressFieldSpec spec;
+    if (isBuffer)
+      spec = registers == 1
+                 ? wavemachine::BufferLoadB32Op::getAddressFieldSpec()
+                 : wavemachine::BufferLoadTupleB32Op::getAddressFieldSpec();
+    else
+      spec = registers == 1
+                 ? wavemachine::GlobalLoadB32Op::getAddressFieldSpec()
+                 : wavemachine::GlobalLoadTupleB32Op::getAddressFieldSpec();
+    BucketedOperands b = bucketForSpec(op.getLoc(), offset, spec);
+    SmallVector<Value> operands{b.voffset, base};
+    if (spec.hasSoffset)
+      operands.push_back(b.soffset);
     if (Value dependency = op.getDependency())
       operands.push_back(expect(dependency, op));
     StringRef opcode;
@@ -1050,7 +1475,8 @@ private:
       opcode = registers == 1 ? "buffer_load_b32" : "buffer_load_tuple_b32";
     else
       opcode = registers == 1 ? "global_load_b32" : "global_load_tuple_b32";
-    finalizeLoad(op, opcode, operands, registers);
+    finalizeLoad(op, opcode, operands, registers,
+                 instOffsetAttrs(b.instOffset, "inst_offset"));
     return success();
   }
 
@@ -1063,20 +1489,21 @@ private:
 
     auto simdType = cast<SimdType>(op.getValue().getType());
     unsigned registers = loadRegisterCount(simdType);
+    OffsetTriple triple = offsetIt->second;
 
     if (isSharedPointer(op.getPtr().getType()))
-      return selectSharedLoad(op, baseIt->second, offsetIt->second, registers);
+      return selectSharedLoad(op, baseIt->second, triple, registers);
 
     bool isBuffer = bufferIt != pointerBuffers.end() && bufferIt->second;
-    return selectGlobalOrBufferLoad(op, baseIt->second, offsetIt->second,
-                                    isBuffer, registers);
+    return selectGlobalOrBufferLoad(op, baseIt->second, triple, isBuffer,
+                                    registers);
   }
 
   LogicalResult selectLdsBase(LdsBaseOp op) {
     Value baseValue = createImm(builder, op.getLoc(), 0);
     pointerBases[op.getResult()] = baseValue;
     pointerOffsets[op.getResult()] =
-        createImm(builder, op.getLoc(), op.getOffset());
+        OffsetTriple{Value{}, Value{}, static_cast<int64_t>(op.getOffset())};
     values[op.getResult()] = baseValue;
     eraseIfTopLevel(op);
     return success();
@@ -1123,7 +1550,8 @@ private:
         createInstr(builder, op.getLoc(), "v_lshlrev_b32",
                     {lane, createImm(builder, op.getLoc(), 5)},
                     getRegType(op.getContext(), wavemachine::RegClass::VGPR));
-    byteOffset = addByteOffsets(op.getLoc(), offsetIt->second, byteOffset);
+    Value baseOffsetValue = collapseTriple(op.getLoc(), offsetIt->second);
+    byteOffset = addByteOffsets(op.getLoc(), baseOffsetValue, byteOffset);
 
     SmallVector<Value> storeTokens;
     for (int64_t component = 0, e = fragmentType.getRegisters(); component != e;
@@ -1198,7 +1626,11 @@ private:
 
   // Capture the wavemachine "shape" for every `scf.for` iter arg. Wave
   // SimdPtr inits resolve through the pointer sidecars (base/offset),
-  // everything else goes through the standard `values` map.
+  // everything else goes through the standard `values` map. Pointer
+  // carries collapse the triple to one VGPR at the loop boundary --
+  // S / inst contributions outside the loop bake in here, and the
+  // bucketizer re-derives them inside the body for each fresh
+  // PtrAdd.
   LogicalResult snapshotScfCarries(scf::ForOp op,
                                    SmallVectorImpl<CarrySnapshot> &out) {
     out.reserve(op.getInitArgs().size());
@@ -1210,8 +1642,8 @@ private:
         if (baseIt == pointerBases.end() || offsetIt == pointerOffsets.end())
           return op.emitError(
               "scf.for pointer iter arg has no WaveMachine sidecar");
-        out.push_back({CarrySnapshot::Kind::Pointer,
-                       /*carry=*/offsetIt->second, baseIt->second,
+        Value flat = collapseTriple(op.getLoc(), offsetIt->second);
+        out.push_back({CarrySnapshot::Kind::Pointer, flat, baseIt->second,
                        pointerBuffers.lookup(initArg)});
         continue;
       }
@@ -1254,7 +1686,7 @@ private:
       const CarrySnapshot &snap = snapshots[idx];
       if (snap.kind == CarrySnapshot::Kind::Pointer) {
         pointerBases[scfArg] = snap.base;
-        pointerOffsets[scfArg] = blockCarry;
+        pointerOffsets[scfArg] = OffsetTriple{blockCarry, Value{}, 0};
         pointerBuffers[scfArg] = snap.isBuffer;
         continue;
       }
@@ -1297,7 +1729,7 @@ private:
         if (baseIt->second != snap.base)
           return yield.emitError(
               "scf.yield pointer carry must keep loop-invariant base");
-        out.push_back(offsetIt->second);
+        out.push_back(collapseTriple(yield.getLoc(), offsetIt->second));
         continue;
       }
       out.push_back(expect(y, yield));
@@ -1315,7 +1747,7 @@ private:
       const CarrySnapshot &snap = snapshots[idx];
       if (snap.kind == CarrySnapshot::Kind::Pointer) {
         pointerBases[scfResult] = snap.base;
-        pointerOffsets[scfResult] = wmResult;
+        pointerOffsets[scfResult] = OffsetTriple{wmResult, Value{}, 0};
         pointerBuffers[scfResult] = snap.isBuffer;
         continue;
       }
