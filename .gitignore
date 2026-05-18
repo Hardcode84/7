@@ -20,3 +20,5 @@ __pycache__/
 
 # Compile-commands
 compile_commands.json
+
+.codex
