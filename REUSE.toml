@@ -30,6 +30,7 @@ SPDX-License-Identifier = "Apache-2.0 WITH LLVM-exception"
 [[annotations]]
 path = [
     ".gitignore",
+    ".gitmodules",
     ".pre-commit-config.yaml",
     "**/*.md",
     "**/*.toml",

@@ -43,16 +43,21 @@ runtime/                          libwave_runtime.so for mlir-runner tests
 tools/{wave-opt,wave-translate,wave-symbols-test}/
 test/{Dialect,Conversion,Target,Integration,python}/
 examples/wave/                    Small kernels + the tiled WMMA matmul
-third_party/ixsimpl/              Vendored symbolic-offset engine
+third_party/ixsimpl/              Symbolic-offset engine (git submodule)
 docs/                             Design proposal + scratch notes
 ```
 
 ## Building
 
 LLVM/MLIR is pulled at the commit pinned in `llvm-commit.txt` (no
-submodule; the dep is fetched and built by a helper script).
+submodule; the dep is fetched and built by a helper script). The
+ixsimpl symbolic engine ships as a git submodule under
+`third_party/ixsimpl`.
 
 ```bash
+# Fetch ixsimpl (clone with --recurse-submodules to skip this step).
+git submodule update --init --recursive
+
 # One-off: fetch + build LLVM/MLIR into build/llvm-install. Slow.
 python build_tools/build_llvm.py -j$(nproc)
 
@@ -97,8 +102,8 @@ python examples/wave/wmma_matmul_tiled.py --m=64 --n=64 --k=48 --bm=2 --bn=2 --u
       --entry-point-result=void
 ```
 
-The Python builder uses `ixsimpl` (vendored under `third_party/`) as
-the symbolic engine for `wave.index_expr`; see the
+The Python builder uses `ixsimpl` (submoduled under `third_party/`)
+as the symbolic engine for `wave.index_expr`; see the
 "Symbolic Offset Algebra" section of the design doc.
 
 ## Development
