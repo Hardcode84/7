@@ -35,7 +35,8 @@ def Wave_YieldOp : Wave_Op<"yield", [Pure, ReturnLike, Terminator,
   let assemblyFormat = "attr-dict";
 }
 
-def Wave_LaneIdOp : Wave_Op<"lane_id", [Pure]> {
+def Wave_LaneIdOp : Wave_Op<"lane_id", [Pure,
+    DeclareOpInterfaceMethods<InferIntRangeInterface, ["inferResultRanges"]>]> {
   let summary = "lane id within the current subgroup";
   let description = [{
     Returns the lane id as a lane-varying SIMD value. Each lane observes its own
@@ -56,7 +57,8 @@ def Wave_SubgroupIdOp : Wave_Op<"subgroup_id", [Pure]> {
   let assemblyFormat = "attr-dict";
 }
 
-def Wave_WorkgroupIdOp : Wave_Op<"workgroup_id", [Pure]> {
+def Wave_WorkgroupIdOp : Wave_Op<"workgroup_id", [Pure,
+    DeclareOpInterfaceMethods<InferIntRangeInterface, ["inferResultRanges"]>]> {
   let summary = "id of the current workgroup along the given grid axis";
   let description = [{
     Returns the wave-uniform workgroup id along axis 0 (`x`), 1 (`y`),
@@ -70,7 +72,8 @@ def Wave_WorkgroupIdOp : Wave_Op<"workgroup_id", [Pure]> {
   let hasVerifier = 1;
 }
 
-def Wave_WorkitemIdOp : Wave_Op<"workitem_id", [Pure]> {
+def Wave_WorkitemIdOp : Wave_Op<"workitem_id", [Pure,
+    DeclareOpInterfaceMethods<InferIntRangeInterface, ["inferResultRanges"]>]> {
   let summary = "id of the current workitem along the given workgroup axis";
   let description = [{
     Returns the per-lane workitem id along axis 0 (`x`), 1 (`y`), or 2

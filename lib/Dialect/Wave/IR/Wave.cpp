@@ -195,24 +195,56 @@ LogicalResult ShliOp::verify() {
 }
 
 // Range inference forwards to upstream `mlir::intrange` helpers. The
-// helpers operate on `ConstantIntRanges` whose APInt bit-width comes
-// from the operand ranges -- which match our element bit-width whether
-// the operands are scalar `iN` or `!wave.simd<iN, W>` -- so SIMD and
-// scalar shapes share one implementation.
+// wrinkle is that upstream's `ConstantIntRanges::getStorageBitwidth`
+// returns 0 for `!wave.simd<...>` (our SIMD type isn't a ShapedType
+// in upstream's eyes), so SIMD entry-state lattices arrive at width
+// 0 and would crash the helpers' APInt math. Normalize each operand
+// range to the result's element bit-width before forwarding -- a
+// width-0 (or otherwise-mismatched) incoming range becomes a max
+// range at the correct width. SIMD chains then propagate through
+// wave-arith uniformly with scalar chains.
+
+static unsigned waveArithElementWidth(Type type) {
+  if (auto simd = dyn_cast<SimdType>(type))
+    type = simd.getElementType();
+  return cast<IntegerType>(type).getWidth();
+}
+
+static ConstantIntRanges normalizeWaveArithRange(const ConstantIntRanges &range,
+                                                 unsigned bits) {
+  if (range.smin().getBitWidth() == bits)
+    return range;
+  return ConstantIntRanges::maxRange(bits);
+}
+
+static SmallVector<ConstantIntRanges, 2>
+normalizeWaveArithRanges(ArrayRef<ConstantIntRanges> argRanges, unsigned bits) {
+  SmallVector<ConstantIntRanges, 2> normalized;
+  normalized.reserve(argRanges.size());
+  for (const ConstantIntRanges &range : argRanges)
+    normalized.push_back(normalizeWaveArithRange(range, bits));
+  return normalized;
+}
 
 void AddiOp::inferResultRanges(ArrayRef<ConstantIntRanges> argRanges,
                                SetIntRangeFn setResultRange) {
-  setResultRange(getResult(), mlir::intrange::inferAdd(argRanges));
+  unsigned bits = waveArithElementWidth(getResult().getType());
+  setResultRange(getResult(), mlir::intrange::inferAdd(
+                                  normalizeWaveArithRanges(argRanges, bits)));
 }
 
 void MuliOp::inferResultRanges(ArrayRef<ConstantIntRanges> argRanges,
                                SetIntRangeFn setResultRange) {
-  setResultRange(getResult(), mlir::intrange::inferMul(argRanges));
+  unsigned bits = waveArithElementWidth(getResult().getType());
+  setResultRange(getResult(), mlir::intrange::inferMul(
+                                  normalizeWaveArithRanges(argRanges, bits)));
 }
 
 void ShliOp::inferResultRanges(ArrayRef<ConstantIntRanges> argRanges,
                                SetIntRangeFn setResultRange) {
-  setResultRange(getResult(), mlir::intrange::inferShl(argRanges));
+  unsigned bits = waveArithElementWidth(getResult().getType());
+  setResultRange(getResult(), mlir::intrange::inferShl(
+                                  normalizeWaveArithRanges(argRanges, bits)));
 }
 
 void AssumeRangeOp::inferResultRangesFromOptional(
@@ -280,6 +312,37 @@ LogicalResult WorkitemIdOp::verify() {
   if (simdType.getWidth() != 32)
     return emitOpError("only wave32 workitem_id is supported for now");
   return success();
+}
+
+// Seed `IntRangeAnalysis` from the wave-axis id ops. We don't know
+// grid / block dims at this layer, so all upper bounds default to
+// INT32_MAX; the producer wraps with `wave.assume_range` when a
+// tighter bound is needed. lane_id is the exception -- the SIMD wave
+// width gives us a tight `[0, W-1]` per lane.
+
+void LaneIdOp::inferResultRanges(ArrayRef<ConstantIntRanges>,
+                                 SetIntRangeFn setRange) {
+  auto simdTy = cast<SimdType>(getResult().getType());
+  unsigned bits = simdTy.getElementType().getIntOrFloatBitWidth();
+  APInt lo(bits, 0, /*isSigned=*/false);
+  APInt hi(bits, simdTy.getWidth() - 1, /*isSigned=*/false);
+  setRange(getResult(), ConstantIntRanges::fromSigned(lo, hi));
+}
+
+void WorkgroupIdOp::inferResultRanges(ArrayRef<ConstantIntRanges>,
+                                      SetIntRangeFn setRange) {
+  APInt lo(32, 0, /*isSigned=*/true);
+  APInt hi = APInt::getSignedMaxValue(32);
+  setRange(getResult(), ConstantIntRanges::fromSigned(lo, hi));
+}
+
+void WorkitemIdOp::inferResultRanges(ArrayRef<ConstantIntRanges>,
+                                     SetIntRangeFn setRange) {
+  auto simdTy = cast<SimdType>(getResult().getType());
+  unsigned bits = simdTy.getElementType().getIntOrFloatBitWidth();
+  APInt lo(bits, 0, /*isSigned=*/true);
+  APInt hi = APInt::getSignedMaxValue(bits);
+  setRange(getResult(), ConstantIntRanges::fromSigned(lo, hi));
 }
 
 namespace {

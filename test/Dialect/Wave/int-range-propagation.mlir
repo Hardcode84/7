@@ -54,3 +54,46 @@ func.func @chain_propagation(%v: i32, %w: i32) -> i1 {
   %cmp = arith.cmpi slt, %prod, %fifty : i32       // always true
   return %cmp : i1
 }
+
+// Id-op range seeds: workgroup_id contributes [0, INT32_MAX] without
+// any `wave.assume_range`. The lower bound alone is enough for the
+// non-negativity check to fold.
+// CHECK-LABEL: func.func @workgroup_id_nonneg
+// CHECK-NEXT: %[[T:.*]] = arith.constant true
+// CHECK-NEXT: return %[[T]] : i1
+func.func @workgroup_id_nonneg() -> i1 {
+  %wg = wave.workgroup_id 0
+  %zero = arith.constant 0 : i32
+  %cmp = arith.cmpi sge, %wg, %zero : i32          // always true
+  return %cmp : i1
+}
+
+// Upper bound also propagates: workgroup_id <= INT32_MAX.
+// CHECK-LABEL: func.func @workgroup_id_bounded
+// CHECK-NEXT: %[[T:.*]] = arith.constant true
+// CHECK-NEXT: return %[[T]] : i1
+func.func @workgroup_id_bounded() -> i1 {
+  %wg = wave.workgroup_id 1
+  %big = arith.constant 2147483647 : i32           // INT32_MAX
+  %cmp = arith.cmpi sle, %wg, %big : i32           // always true
+  return %cmp : i1
+}
+
+// SIMD chains: the wave-arith ops normalize incoming arg ranges to
+// the result's element bit-width before forwarding to the upstream
+// helpers, so a `wave.lane_id`-seeded `[0, W-1]` range happily flows
+// through `wave.addi` even when the other operand's lattice is at
+// upstream-side width 0 (SIMD entry state). int-range-optimizations
+// can't fold a SIMD-typed result to a constant -- nothing visible to
+// CHECK for -- but the pass must not crash.
+// CHECK-LABEL: func.func @simd_chain_no_crash
+// CHECK: wave.lane_id
+// CHECK: wave.addi
+// CHECK: return
+func.func @simd_chain_no_crash(%v: !wave.simd<i32, 32>)
+    -> !wave.simd<i32, 32> {
+  %lane = wave.lane_id : !wave.simd<i32, 32>
+  %sum = wave.addi %lane, %v
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  return %sum : !wave.simd<i32, 32>
+}
