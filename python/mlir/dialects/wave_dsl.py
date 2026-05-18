@@ -32,6 +32,7 @@ from collections.abc import Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from types import TracebackType
 
+import ixsimpl
 from mlir._mlir_libs._waveDialectsNanobind import (
     BufferAddressSpaceAttr,
     ExprAttr,
@@ -69,6 +70,22 @@ from mlir.ir import (
     Value,
     VectorType,
 )
+
+# Process-wide ixsimpl context for symbolic offset expressions. The DSL
+# hands callers symbols / literals out of this context and the
+# `index_expr` builder structurally imports the resulting `Expr` into the
+# Wave dialect's per-MLIRContext symbol store at the FFI boundary.
+# Sharing one Python-side context across the process keeps symbol
+# identity stable (e.g. `sym("lane")` is the same node for every kernel
+# in this interpreter), which the bucketizer's hash-consed equality
+# relies on.
+sym_ctx: ixsimpl.Context = ixsimpl.Context()
+
+
+def sym(name: str) -> ixsimpl.Expr:
+    """Return the `sym_ctx`-rooted symbol leaf with this name."""
+    return sym_ctx.sym(name)
+
 
 # ---------------------------------------------------------------------------
 # Type helpers
@@ -437,18 +454,19 @@ class FunctionBuilder:
 
     def index_expr(
         self,
-        expr: object,
+        expr: ixsimpl.Expr,
         bindings: Mapping[str, Value] | None = None,
         result_type: Type | None = None,
     ) -> Value:
         """Build a `wave.index_expr` from a symbolic expression.
 
-        `expr` is either an :class:`ixsimpl.Expr` built via
-        :class:`ixsimpl.Context` + Python operators or a raw text form
-        (printed via ``str()`` either way before reparsing into the
-        dialect-owned store). Each free symbol in the expression must
-        appear as a key in `bindings`; conversely every binding name
-        must be a free symbol.
+        `expr` is an :class:`ixsimpl.Expr` built via the module-level
+        :data:`sym_ctx`. We hand the dialect the canonical binary
+        serialization (`sym_ctx.serialize(expr)`) which it deserializes
+        into its own symbol store -- the structural bridge ixsimpl
+        documents for cross-context transfer, with no text on the FFI
+        path. Each free symbol must appear as a key in `bindings`;
+        conversely every binding name must be a free symbol.
 
         When `result_type` is omitted the lane width is inferred from
         the binding operand types: a `!wave.simd<i32, W>` or
@@ -458,8 +476,9 @@ class FunctionBuilder:
         bindings = dict(bindings or {})
         if result_type is None:
             result_type = wave_index_type(_binding_lane_width(bindings.values()))
-        text = str(expr)
-        expr_attr = ExprAttr.get(text, context=_current_context())
+        expr_attr = ExprAttr.get_from_bytes(
+            sym_ctx.serialize(expr), context=_current_context()
+        )
         names_attr = ArrayAttr.get([StringAttr.get(n) for n in bindings])
         return wave.IndexExprOp(
             result_type, expr_attr, names_attr, list(bindings.values())
@@ -721,6 +740,8 @@ __all__ = [
     "shared_address_space",
     "simd_ptr_type",
     "simd_type",
+    "sym",
+    "sym_ctx",
     "unranked_memref_type",
     "vector_type",
     "wave_index_type",

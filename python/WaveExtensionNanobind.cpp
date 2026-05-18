@@ -122,9 +122,11 @@ static void bindWaveIndexType(nb::module_ &m) {
       });
 }
 
-// Text constructor for #wave.expr. Python passes the canonical ixsimpl
-// source text; the dialect-owned store hash-conses it, so equal text
-// returns pointer-equal attribute handles.
+// #wave.expr constructors. `get_from_bytes` is the structural path:
+// callers pass the bytes produced by `ixsimpl.Context.serialize(expr)`
+// and the dialect deserializes into its own symbol store via
+// `ixs_deserialize_node`. `get` keeps the legacy text-parse entry
+// point for callers that genuinely start from text.
 static void bindExprAttr(nb::module_ &m) {
   mlir_attribute_subclass(m, "ExprAttr", mlirWaveAttributeIsAExpr)
       .def_classmethod(
@@ -137,7 +139,19 @@ static void bindExprAttr(nb::module_ &m) {
                   ("invalid wave.expr text: " + text).c_str());
             return cls(attr);
           },
-          nb::arg("cls"), nb::arg("text"), nb::arg("context"));
+          nb::arg("cls"), nb::arg("text"), nb::arg("context"))
+      .def_classmethod(
+          "get_from_bytes",
+          [](nb::object &cls, nb::bytes data, MlirContext ctx) {
+            const uint8_t *buf =
+                reinterpret_cast<const uint8_t *>(data.c_str());
+            MlirAttribute attr =
+                mlirWaveExprAttrGetFromBytes(ctx, buf, data.size());
+            if (!attr.ptr)
+              throw nb::value_error("failed to deserialize wave.expr bytes");
+            return cls(attr);
+          },
+          nb::arg("cls"), nb::arg("data"), nb::arg("context"));
 }
 
 static void bindFragmentType(nb::module_ &m) {

@@ -172,14 +172,18 @@ def test_index_expr():
             wgid_y = f.workgroup_id(1)
             k = f.constant(w.i32(), 16)
 
+            K = w.sym("K")
+            wgid = w.sym("wgid_y")
+            lid = w.sym("lid")
+
             # Uniform-only bindings -> result is `!wave.index`.
-            _u = f.index_expr("K + wgid_y", {"K": k, "wgid_y": wgid_y})
+            _u = f.index_expr(K + wgid, {"K": k, "wgid_y": wgid_y})
 
             # Lane-varying binding pins the result to `!wave.index<32>`.
-            off = f.index_expr("4*lid + K", {"K": k, "lid": lane})
+            off = f.index_expr(4 * lid + K, {"K": k, "lid": lane})
 
             # Zero bindings -> constant expression.
-            _c = f.index_expr("42", {})
+            _c = f.index_expr(w.sym_ctx.int_(42), {})
 
             ptrs = f.ptr_add(
                 buffer,

@@ -11,6 +11,9 @@
 
 #include "mlir-c/IR.h"
 
+#include <stddef.h>
+#include <stdint.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -58,6 +61,15 @@ MLIR_CAPI_EXPORTED int64_t mlirWaveWaveIndexTypeGetWidth(MlirType type);
 MLIR_CAPI_EXPORTED bool mlirWaveAttributeIsAExpr(MlirAttribute attr);
 MLIR_CAPI_EXPORTED MlirAttribute
 mlirWaveExprAttrGetFromText(MlirContext ctx, MlirStringRef text);
+
+// Build a #wave.expr from ixsimpl's stable binary serialization. Callers
+// produce `bytes` via `ixsimpl.Context.serialize(expr)` and pass them
+// here; the dialect deserializes into its own symbol store, so equal
+// foreign expressions dedup to the same `ExprAttr` handle without any
+// string round-trip on the FFI path. Returns a null attribute on
+// deserialization failure (malformed bytes or OOM).
+MLIR_CAPI_EXPORTED MlirAttribute mlirWaveExprAttrGetFromBytes(
+    MlirContext ctx, const uint8_t *bytes, size_t length);
 
 //===----------------------------------------------------------------------===//
 // Wave address-space attributes

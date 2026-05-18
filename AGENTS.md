@@ -63,6 +63,22 @@ Good:
 
 Same rule covers docstrings, commit bodies, and PR descriptions. Wit is welcome, fluff is not. Neither is acceptable.
 
+## FFI boundaries
+
+- **Never round-trip structural data through strings.** When a Python /
+  C / C++ value already has a structural representation (an
+  `ixsimpl.Expr`, an `MlirAttribute`, an op handle, an
+  `IntegerValueRange`, ...), pass it across language boundaries via the
+  structural API. The canonical bridges are: hash-consed handles
+  through their owning store; `serialize` / `deserialize` for stable
+  cross-context binary blobs; CAPI functions that take typed handles
+  or `uintptr_t` pointers. Reaching for `str(expr)` + parse on the
+  other side is wrong even when it happens to work -- the parser is
+  lossy, slow, and re-runs every time, and the resulting handle is
+  not pointer-equal to peers built structurally. `repr(...)` /
+  `str(...)` is for humans and printers; data that crosses a boundary
+  uses the structural path.
+
 ## Language and MLIR Guidelines
 
 ### Python

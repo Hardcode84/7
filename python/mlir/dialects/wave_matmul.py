@@ -49,7 +49,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-import ixsimpl
 from mlir.dialects import scf
 from mlir.dialects import wave_dsl as dsl
 from mlir.ir import Module
@@ -200,14 +199,14 @@ def _emit_tile_coords(bld: dsl.FunctionBuilder, cfg: _MatmulConfig) -> _TileCoor
     m_wave_val = bld.binary("shri", wave_id_val, _splat_const(bld, cfg.log2_BN))
     lane_mod16_val = bld.binary("andi", lane, _splat_const(bld, 15))
 
-    # Symbolic offset side: ixsimpl-built expressions feed `wave.index_expr`.
-    ctx = ixsimpl.Context()
-    wg_m = ctx.sym("wg_m")
-    wg_n = ctx.sym("wg_n")
-    m_wave = ctx.sym("m_wave")
-    n_wave = ctx.sym("n_wave")
-    lane_mod16 = ctx.sym("lane_mod16")
-    wave_id = ctx.sym("wave_id")
+    # Symbolic offset side: ixsimpl-built expressions feed `wave.index_expr`
+    # via the shared `dsl.sym_ctx` so symbol identity stays stable.
+    wg_m = dsl.sym("wg_m")
+    wg_n = dsl.sym("wg_n")
+    m_wave = dsl.sym("m_wave")
+    n_wave = dsl.sym("n_wave")
+    lane_mod16 = dsl.sym("lane_mod16")
+    wave_id = dsl.sym("wave_id")
 
     # A address (in f16 elements; ptr_add scales by the pointer elt size):
     #   a_off = m_tile * 16*K + (lane & 15) * K
@@ -282,9 +281,8 @@ def _emit_lds_staging(
     """
     reg_simd_type = dsl.simd_type(dsl.vector_type(8, dsl.i32()), width=32)
     lds = bld.lds_base()
-    ctx = ixsimpl.Context()
-    wave_id = ctx.sym("wave_id")
-    lane = ctx.sym("lane")
+    wave_id = dsl.sym("wave_id")
+    lane = dsl.sym("lane")
     bindings = {"wave_id": coords.wave_id, "lane": coords.lane}
     a_lds_off = bld.index_expr(
         wave_id * _LDS_DWORDS_PER_FRAG + lane * _LDS_DWORDS_PER_LANE,
