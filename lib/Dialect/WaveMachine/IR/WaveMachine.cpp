@@ -16,6 +16,7 @@
 using namespace mlir;
 using namespace mlir::wavemachine;
 
+#include "mlir/Dialect/WaveMachine/IR/WaveMachineInterfaces.cpp.inc"
 #include "mlir/Dialect/WaveMachine/IR/WaveMachineOpsDialect.cpp.inc"
 #include "mlir/Dialect/WaveMachine/IR/WaveMachineOpsEnums.cpp.inc"
 

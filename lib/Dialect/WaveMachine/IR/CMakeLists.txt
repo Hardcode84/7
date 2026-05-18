@@ -6,6 +6,7 @@ add_mlir_dialect_library(MLIRWaveMachineDialect
 
   DEPENDS
   MLIRWaveMachineEnumsIncGen
+  MLIRWaveMachineInterfacesIncGen
   MLIRWaveMachineOpsIncGen
 
   LINK_LIBS PUBLIC

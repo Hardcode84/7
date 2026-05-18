@@ -10,6 +10,7 @@
 #define MLIR_DIALECT_WAVEMACHINE_IR_WAVEMACHINEOPS_TD
 
 include "mlir/Dialect/WaveMachine/IR/WaveMachineBase.td"
+include "mlir/Dialect/WaveMachine/IR/WaveMachineInterfaces.td"
 include "mlir/Dialect/WaveMachine/IR/WaveMachineTypes.td"
 include "mlir/IR/OpBase.td"
 include "mlir/Interfaces/ControlFlowInterfaces.td"
@@ -86,6 +87,46 @@ def WaveMachine_RegOrImm
 class WaveMachine_ZeroResult<string mnemonic, list<Trait> traits = []>
     : WaveMachine_Op<mnemonic, traits> {
   let assemblyFormat = "attr-dict";
+}
+
+// Three memory-space bases that fold AddressFieldsOpInterface into the
+// parent op. Each owns the per-space inst_offset width / soffset
+// slot decision in one place. Concrete ops inherit these instead of
+// WaveMachine_Op directly.
+class WaveMachine_GlobalMemoryOp<string mnemonic, list<Trait> traits = []>
+    : WaveMachine_Op<mnemonic,
+        !listconcat(traits,
+          [DeclareOpInterfaceMethods<WaveMachine_AddressFieldsOpInterface>])> {
+  let extraClassDefinition = [{
+    ::mlir::wavemachine::AddressFieldSpec $cppClass::getAddressFieldSpec() {
+      return {/*hasInstOffset=*/true, /*instOffsetBits=*/13,
+              /*instOffsetSigned=*/true, /*hasSoffset=*/false};
+    }
+  }];
+}
+
+class WaveMachine_BufferMemoryOp<string mnemonic, list<Trait> traits = []>
+    : WaveMachine_Op<mnemonic,
+        !listconcat(traits,
+          [DeclareOpInterfaceMethods<WaveMachine_AddressFieldsOpInterface>])> {
+  let extraClassDefinition = [{
+    ::mlir::wavemachine::AddressFieldSpec $cppClass::getAddressFieldSpec() {
+      return {/*hasInstOffset=*/true, /*instOffsetBits=*/12,
+              /*instOffsetSigned=*/false, /*hasSoffset=*/true};
+    }
+  }];
+}
+
+class WaveMachine_DsMemoryOp<string mnemonic, list<Trait> traits = []>
+    : WaveMachine_Op<mnemonic,
+        !listconcat(traits,
+          [DeclareOpInterfaceMethods<WaveMachine_AddressFieldsOpInterface>])> {
+  let extraClassDefinition = [{
+    ::mlir::wavemachine::AddressFieldSpec $cppClass::getAddressFieldSpec() {
+      return {/*hasInstOffset=*/true, /*instOffsetBits=*/16,
+              /*instOffsetSigned=*/false, /*hasSoffset=*/false};
+    }
+  }];
 }
 
 class WaveMachine_ZeroOperandResult<string mnemonic, Type resultType,
@@ -325,7 +366,7 @@ def WaveMachine_SEndpgmOp : WaveMachine_ZeroResult<"s_endpgm">;
 def WaveMachine_SSetpcB64Op : WaveMachine_ZeroResult<"s_setpc_b64">;
 
 def WaveMachine_GlobalLoadB32Op
-    : WaveMachine_Op<"global_load_b32", [WaveMachine_VMEMLoad]> {
+    : WaveMachine_GlobalMemoryOp<"global_load_b32", [WaveMachine_VMEMLoad]> {
   let summary = "global 32-bit load through an SGPR base";
   let description = [{
     Reads one 32-bit value from `base + offset + inst_offset` into the
@@ -347,7 +388,7 @@ def WaveMachine_GlobalLoadB32Op
 }
 
 def WaveMachine_GlobalLoadTupleB32Op
-    : WaveMachine_Op<"global_load_tuple_b32", [WaveMachine_VMEMLoad]> {
+    : WaveMachine_GlobalMemoryOp<"global_load_tuple_b32", [WaveMachine_VMEMLoad]> {
   let summary = "global load of N consecutive 32-bit values into a VGPR tuple";
   let description = [{
     Loads `N` consecutive dwords from `base + offset + inst_offset +
@@ -378,7 +419,7 @@ def WaveMachine_MakeBufferRsrcOp
 }
 
 def WaveMachine_GlobalStoreB32Op
-    : WaveMachine_Op<"global_store_b32", [WaveMachine_VMEMStore]> {
+    : WaveMachine_GlobalMemoryOp<"global_store_b32", [WaveMachine_VMEMStore]> {
   let summary = "global 32-bit store through an SGPR base";
   let description = [{
     Stores `value` to `base + offset + inst_offset`. `inst_offset` is
@@ -398,7 +439,7 @@ def WaveMachine_GlobalStoreB32Op
   let hasVerifier = 1;
 }
 def WaveMachine_BufferStoreB32Op
-    : WaveMachine_Op<"buffer_store_b32", [WaveMachine_VMEMStore]> {
+    : WaveMachine_BufferMemoryOp<"buffer_store_b32", [WaveMachine_VMEMStore]> {
   let summary = "buffer 32-bit store through an SGPR descriptor and VGPR offset";
   let description = [{
     MUBUF OFFEN: stores `value` to `descriptor[offset + soffset +
@@ -421,7 +462,7 @@ def WaveMachine_BufferStoreB32Op
   let hasVerifier = 1;
 }
 def WaveMachine_BufferLoadB32Op
-    : WaveMachine_Op<"buffer_load_b32", [WaveMachine_VMEMLoad]> {
+    : WaveMachine_BufferMemoryOp<"buffer_load_b32", [WaveMachine_VMEMLoad]> {
   let summary = "buffer 32-bit load through an SGPR descriptor and VGPR offset";
   let description = [{
     MUBUF OFFEN: loads a 32-bit value from `descriptor[offset +
@@ -442,7 +483,7 @@ def WaveMachine_BufferLoadB32Op
   let hasVerifier = 1;
 }
 def WaveMachine_BufferLoadTupleB32Op
-    : WaveMachine_Op<"buffer_load_tuple_b32", [WaveMachine_VMEMLoad]> {
+    : WaveMachine_BufferMemoryOp<"buffer_load_tuple_b32", [WaveMachine_VMEMLoad]> {
   let summary = "buffer load of N consecutive 32-bit values into a VGPR tuple";
   let description = [{
     Loads `N` consecutive dwords from `descriptor[offset + soffset +
@@ -467,7 +508,7 @@ def WaveMachine_BufferLoadTupleB32Op
 }
 
 def WaveMachine_BufferStoreTupleB32Op
-    : WaveMachine_Op<"buffer_store_tuple_b32", [WaveMachine_VMEMStore]> {
+    : WaveMachine_BufferMemoryOp<"buffer_store_tuple_b32", [WaveMachine_VMEMStore]> {
   let summary = "buffer 32-bit store of a VGPR tuple component";
   let description = [{
     Stores the `component`-th 32-bit slice of the `value` VGPR tuple to
@@ -492,7 +533,7 @@ def WaveMachine_BufferStoreTupleB32Op
   let hasVerifier = 1;
 }
 def WaveMachine_GlobalStoreTupleB32Op
-    : WaveMachine_Op<"global_store_tuple_b32", [WaveMachine_VMEMStore]> {
+    : WaveMachine_GlobalMemoryOp<"global_store_tuple_b32", [WaveMachine_VMEMStore]> {
   let summary = "global 32-bit store of a VGPR tuple component";
   let description = [{
     Per-component dword store: writes lane `component` of the `value`
@@ -520,7 +561,7 @@ def WaveMachine_GlobalStoreTupleB32Op
 // that by tagging them with the SMEM-load trait, which the waitcnt pass
 // already routes to the LGKM counter.
 def WaveMachine_DsLoadB32Op
-    : WaveMachine_Op<"ds_load_b32", [WaveMachine_SMEMLoad]> {
+    : WaveMachine_DsMemoryOp<"ds_load_b32", [WaveMachine_SMEMLoad]> {
   let summary = "LDS 32-bit load";
   let arguments = (ins WaveMachine_VGPR1:$addr,
                        Optional<WaveMachine_MemToken>:$dependency,
@@ -534,7 +575,7 @@ def WaveMachine_DsLoadB32Op
 }
 
 def WaveMachine_DsLoadTupleB32Op
-    : WaveMachine_Op<"ds_load_tuple_b32", [WaveMachine_SMEMLoad]> {
+    : WaveMachine_DsMemoryOp<"ds_load_tuple_b32", [WaveMachine_SMEMLoad]> {
   let summary = "LDS load of N consecutive 32-bit values into a VGPR tuple";
   let description = [{
     Loads `N` consecutive dwords from LDS at `addr + offset + i*4` for
@@ -555,7 +596,7 @@ def WaveMachine_DsLoadTupleB32Op
 }
 
 def WaveMachine_DsStoreB32Op
-    : WaveMachine_Op<"ds_store_b32", [WaveMachine_SMEMLoad]> {
+    : WaveMachine_DsMemoryOp<"ds_store_b32", [WaveMachine_SMEMLoad]> {
   let summary = "LDS 32-bit store";
   let arguments = (ins WaveMachine_VGPR1:$addr, WaveMachine_VGPR1:$value,
                        Optional<WaveMachine_MemToken>:$dependency,
@@ -568,7 +609,7 @@ def WaveMachine_DsStoreB32Op
 }
 
 def WaveMachine_DsStoreTupleB32Op
-    : WaveMachine_Op<"ds_store_tuple_b32", [WaveMachine_SMEMLoad]> {
+    : WaveMachine_DsMemoryOp<"ds_store_tuple_b32", [WaveMachine_SMEMLoad]> {
   let summary = "LDS store of a VGPR tuple as N consecutive 32-bit values";
   let description = [{
     Stores the `N` components of the `value` VGPR tuple to LDS at

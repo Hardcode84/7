@@ -10,6 +10,7 @@
 #define MLIR_DIALECT_WAVEMACHINE_IR_WAVEMACHINE_H
 
 #include "mlir/Bytecode/BytecodeOpInterface.h"
+#include "mlir/Dialect/WaveMachine/IR/WaveMachineAddressFields.h"
 #include "mlir/Dialect/WaveMachine/IR/WaveMachineTraits.h"
 #include "mlir/IR/Dialect.h"
 #include "mlir/IR/OpDefinition.h"
@@ -19,6 +20,8 @@
 
 #include "mlir/Dialect/WaveMachine/IR/WaveMachineOpsDialect.h.inc"
 #include "mlir/Dialect/WaveMachine/IR/WaveMachineOpsEnums.h.inc"
+
+#include "mlir/Dialect/WaveMachine/IR/WaveMachineInterfaces.h.inc"
 
 #define GET_TYPEDEF_CLASSES
 #include "mlir/Dialect/WaveMachine/IR/WaveMachineOpsTypes.h.inc"
