@@ -358,8 +358,7 @@ def Wave_IndexExprOp : Wave_Op<"index_expr", [Pure]> {
     stays in fixed-width integer land. Cast `index` SSA values to i32
     at the producer before feeding them in.
 
-    The op is pure: equal `$expr` (pointer-equal hash-consed handle) and
-    equal `$bindings` / `$names` CSE.
+    The op is pure: equal `$expr`, `$bindings`, and `$names` CSE.
   }];
 
   let arguments = (ins Wave_ExprAttr:$expr,

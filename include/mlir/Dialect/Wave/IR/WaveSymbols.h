@@ -86,7 +86,7 @@ public:
   Store &operator=(const Store &) = delete;
 
   ixs_ctx *raw() const { return ctx; }
-  /// Render under the store mutex. For helpers already holding a `Store &`.
+  /// Render `node` as text.
   std::string render(const ixs_node *node) const;
 
 private:
@@ -112,8 +112,7 @@ private:
   ixs_session session;
 };
 
-/// Parses symbolic text into the destination store. Copies the input to
-/// satisfy the upstream NUL-terminated parser contract.
+/// Parse symbolic text into the destination store.
 mlir::FailureOr<ExprHandle> parseExpr(Store &store, llvm::StringRef text,
                                       std::string *diagnostic = nullptr);
 mlir::FailureOr<PredHandle> parsePred(Store &store, llvm::StringRef text,
@@ -129,15 +128,14 @@ composeExprBinary(Store &store, ExprHandle lhs, ExprBinaryOp op, ExprHandle rhs,
                   std::string *diagnostic = nullptr);
 mlir::FailureOr<ExprHandle> composeExprCeil(Store &store, ExprHandle value,
                                             std::string *diagnostic = nullptr);
-/// `composeExprBinary` with `Div` is *exact rational*. For Python `//`
-/// (floored integer division) wrap a Div in `composeExprFloor`.
+/// Floor of `value`. Use to turn an exact-rational `Div` into Python
+/// `//` (floored integer division).
 mlir::FailureOr<ExprHandle> composeExprFloor(Store &store, ExprHandle value,
                                              std::string *diagnostic = nullptr);
 mlir::FailureOr<ExprHandle> composeExprNeg(Store &store, ExprHandle value,
                                            std::string *diagnostic = nullptr);
 
-/// Symbol / integer leaves. Go through the dialect store so structurally
-/// built expressions share hash-consed nodes with parsed ones.
+/// Symbol / integer leaves.
 mlir::FailureOr<ExprHandle> composeExprSym(Store &store, llvm::StringRef name,
                                            std::string *diagnostic = nullptr);
 mlir::FailureOr<ExprHandle> composeExprInt(Store &store, int64_t value,
@@ -145,7 +143,7 @@ mlir::FailureOr<ExprHandle> composeExprInt(Store &store, int64_t value,
 mlir::FailureOr<PredHandle> composePredCmp(Store &store, ExprHandle lhs,
                                            PredCmpOp op, ExprHandle rhs,
                                            std::string *diagnostic = nullptr);
-/// Hash-consed AND / OR of two predicates.
+/// AND / OR of two predicates.
 mlir::FailureOr<PredHandle> composePredAnd(Store &store, PredHandle lhs,
                                            PredHandle rhs,
                                            std::string *diagnostic = nullptr);
@@ -153,43 +151,35 @@ mlir::FailureOr<PredHandle> composePredOr(Store &store, PredHandle lhs,
                                           PredHandle rhs,
                                           std::string *diagnostic = nullptr);
 
-/// Simplify under no assumptions. Returns a fresh handle that pointer-
-/// equals identically-shaped peers in the same store.
+/// Simplify under no assumptions.
 mlir::FailureOr<ExprHandle> simplifyExpr(Store &store, ExprHandle value,
                                          std::string *diagnostic = nullptr);
 mlir::FailureOr<PredHandle> simplifyPred(Store &store, PredHandle value,
                                          std::string *diagnostic = nullptr);
 
-/// Result of an `ixs_check` entailment query.
+/// Three-valued result of a predicate entailment query.
 enum class CheckResult { True, False, Unknown };
 
-/// Decide whether `predicate` is provably true / false under the given
-/// assumption set, via interval propagation. Cheap relative to
-/// `simplifyPred` (no rewriting). Returns `Unknown` on OOM or
-/// inconclusive bounds.
+/// Decide whether `predicate` is provably true / false under
+/// `assumptions`. Returns `Unknown` when inconclusive.
 CheckResult checkPredicate(Store &store, PredHandle predicate,
                            llvm::ArrayRef<PredHandle> assumptions);
 
-/// Build the conjunction `(name >= lo) && (name <= hi)` as a hash-
-/// consed predicate handle. Useful for translating an
-/// `IntegerValueRange` lattice element on a `wave.index_expr` binding
-/// into an ixsimpl assumption.
+/// Build the assumption `name in [lo, hi]`.
 mlir::FailureOr<PredHandle> rangeAssumption(Store &store, llvm::StringRef name,
                                             int64_t lo, int64_t hi,
                                             std::string *diagnostic = nullptr);
 
-/// True iff `expr` provably stays in the closed signed interval
-/// `[lo, hi]` under `assumptions`. Decomposes into `expr >= lo` and
-/// `expr <= hi` checks; either `Unknown` or `False` returns false.
+/// True iff `expr` provably stays in `[lo, hi]` under `assumptions`.
 bool provablyInRange(Store &store, ExprHandle expr,
                      llvm::ArrayRef<PredHandle> assumptions, int64_t lo,
                      int64_t hi);
 
-/// Integer payload of a structurally-integral expression (ixs integer node
-/// or unit-denominator rational). Structural, no parse / render.
+/// Integer payload of a structurally-integral expression. `nullopt`
+/// for non-integral nodes.
 std::optional<int64_t> getIntegerLiteralValue(ExprHandle value);
 
-/// Walk every symbolic leaf name. Structural, no parse / render.
+/// Walk every symbolic leaf name in `value`.
 void walkSymbolNames(ExprHandle value,
                      llvm::function_ref<void(llvm::StringRef)> callback);
 void walkSymbolNames(PredHandle value,
@@ -198,8 +188,7 @@ void walkSymbolNames(PredHandle value,
 mlir::FailureOr<ExprHandle> parseExprHandle(AsmParser &parser);
 mlir::FailureOr<PredHandle> parsePredHandle(AsmParser &parser);
 
-/// Render straight from the immutable hash-consed node -- these don't take
-/// `Store &` and won't reacquire the store mutex through the dialect.
+/// Print straight from the immutable node -- does not touch the store.
 void printExprHandle(AsmPrinter &printer, ExprHandle value);
 void printPredHandle(AsmPrinter &printer, PredHandle value);
 

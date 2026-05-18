@@ -34,8 +34,7 @@ void printLiteral(llvm::StringRef label, std::optional<int64_t> value) {
   llvm::outs() << "\n";
 }
 
-// `expect`-style helper: write `<label>: <text>` so FileCheck can match the
-// rendered form straight out of the hash-consed node.
+// Write `<label>: <rendered-expr>` for FileCheck.
 void printRendered(sym::Store &store, llvm::StringRef label,
                    sym::ExprHandle handle) {
   llvm::outs() << label << ": " << store.render(handle.raw()) << "\n";
@@ -89,10 +88,9 @@ void printRange(llvm::StringRef label, sym::Store &store, sym::ExprHandle expr,
                << "\n";
 }
 
-// (4) Range queries: build `x in [0, 31]` as an ixsimpl assumption,
-// construct `4*x + 1` (range [1, 125]), and probe several candidate
-// ranges via `provablyInRange`. Exercises both bounds of the predicate
-// decomposition plus the AND-flattening path in `checkPredicate`.
+// (4) Range queries: under `x in [0, 31]`, probe `4*x + 1` against
+// several candidate ranges. Hits both bounds plus the assumption-set
+// fast path.
 void runRangeQueries(sym::Store &store, sym::ExprHandle x,
                      sym::ExprHandle fourX) {
   auto rangeAssumption = sym::rangeAssumption(store, "x", 0, 31);
@@ -104,8 +102,7 @@ void runRangeQueries(sym::Store &store, sym::ExprHandle x,
 
   printRange("x-nonneg", store, x, assumptions, 0, 31);
 
-  // Reuse `fourX` from step (2). `4*x + 1` ranges over [1, 125] when
-  // x is in [0, 31].
+  // 4*x + 1 over x in [0, 31] -> [1, 125].
   sym::ExprHandle one = mustBuildInt(store, 1);
   sym::ExprHandle linear =
       mustCompose(store, fourX, sym::ExprBinaryOp::Add, one);

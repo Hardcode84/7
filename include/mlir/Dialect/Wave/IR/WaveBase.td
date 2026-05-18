@@ -35,10 +35,8 @@ def Wave_Dialect : Dialect {
     void registerAttributes();
     void registerTypes();
 
-    /// Dialect-owned symbolic store: every #wave.expr / #wave.pred attribute
-    /// holds a hash-consed handle into this store. Lives for the dialect's
-    /// lifetime (i.e. the MLIRContext's), so handles round-trip across
-    /// passes by pointer.
+    /// Dialect-owned symbolic store. Lives for the MLIRContext's
+    /// lifetime; handles minted against it stay valid across passes.
     sym::Store &getSymbolStore();
     const sym::Store &getSymbolStore() const;
 

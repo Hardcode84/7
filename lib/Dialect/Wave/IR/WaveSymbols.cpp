@@ -381,8 +381,6 @@ FailureOr<ExprHandle> mlir::wave::sym::simplifyExpr(Store &store,
       importNode(session, value.raw(), diagnostic, "wave.expr");
   if (!imported)
     return failure();
-  // `ixs_simplify` with no assumptions: pure rewriting, returns a hash-consed
-  // canonical form.
   ixs_node *simplified =
       ixs_simplify(session.raw(), imported, /*assumptions=*/nullptr, 0);
   return finishExpr(session.raw(), simplified, diagnostic,
