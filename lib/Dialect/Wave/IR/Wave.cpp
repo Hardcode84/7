@@ -14,6 +14,7 @@
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/DialectImplementation.h"
+#include "mlir/Interfaces/Utils/InferIntRangeCommon.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/TypeSwitch.h"
 
@@ -191,6 +192,50 @@ LogicalResult MuliOp::verify() {
 LogicalResult ShliOp::verify() {
   return verifyWaveIntBinaryArith(getOperation(), getLhs().getType(),
                                   getRhs().getType(), getResult().getType());
+}
+
+// Range inference forwards to upstream `mlir::intrange` helpers. The
+// helpers operate on `ConstantIntRanges` whose APInt bit-width comes
+// from the operand ranges -- which match our element bit-width whether
+// the operands are scalar `iN` or `!wave.simd<iN, W>` -- so SIMD and
+// scalar shapes share one implementation.
+
+void AddiOp::inferResultRanges(ArrayRef<ConstantIntRanges> argRanges,
+                               SetIntRangeFn setResultRange) {
+  setResultRange(getResult(), mlir::intrange::inferAdd(argRanges));
+}
+
+void MuliOp::inferResultRanges(ArrayRef<ConstantIntRanges> argRanges,
+                               SetIntRangeFn setResultRange) {
+  setResultRange(getResult(), mlir::intrange::inferMul(argRanges));
+}
+
+void ShliOp::inferResultRanges(ArrayRef<ConstantIntRanges> argRanges,
+                               SetIntRangeFn setResultRange) {
+  setResultRange(getResult(), mlir::intrange::inferShl(argRanges));
+}
+
+void AssumeRangeOp::inferResultRangesFromOptional(
+    ArrayRef<IntegerValueRange> argRanges, SetIntLatticeFn setResultRange) {
+  // Bit-width comes from the element type for SIMD payloads, the type
+  // itself for scalars. SetIntLatticeFn happily publishes on either.
+  Type ty = getResult().getType();
+  if (auto simd = dyn_cast<SimdType>(ty))
+    ty = simd.getElementType();
+  unsigned bits = cast<IntegerType>(ty).getWidth();
+  APInt lo(bits, static_cast<int64_t>(getLo()), /*isSigned=*/true);
+  APInt hi(bits, static_cast<int64_t>(getHi()), /*isSigned=*/true);
+  ConstantIntRanges asserted = ConstantIntRanges::fromSigned(lo, hi);
+  // Override `inferResultRangesFromOptional` so the assertion seeds the
+  // analysis even when the operand's lattice is still uninitialized
+  // (e.g. function args, no producer with the interface). When the
+  // operand range is known, narrow further by intersection.
+  IntegerValueRange incoming = argRanges[0];
+  IntegerValueRange out =
+      incoming.isUninitialized()
+          ? IntegerValueRange{asserted}
+          : IntegerValueRange{asserted.intersection(incoming.getValue())};
+  setResultRange(getResult(), out);
 }
 
 LogicalResult CmpIOp::verify() {

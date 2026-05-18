@@ -16,6 +16,7 @@ include "mlir/Dialect/Wave/IR/WaveTypes.td"
 include "mlir/Dialect/Arith/IR/ArithBase.td"
 include "mlir/IR/OpBase.td"
 include "mlir/Interfaces/ControlFlowInterfaces.td"
+include "mlir/Interfaces/InferIntRangeInterface.td"
 include "mlir/Interfaces/SideEffectInterfaces.td"
 
 class Wave_Op<string mnemonic, list<Trait> traits = []> :
@@ -151,7 +152,10 @@ def Wave_BinaryOp : Wave_Op<"binary", [Pure]> {
 // case, so the upstream MLIR convention (no sign suffix) applies.
 //===----------------------------------------------------------------------===//
 
-class Wave_IntBinaryArith<string mnemonic> : Wave_Op<mnemonic, [Pure]> {
+class Wave_IntBinaryArith<string mnemonic> : Wave_Op<mnemonic, [
+    Pure,
+    DeclareOpInterfaceMethods<InferIntRangeInterface, ["inferResultRanges"]>
+  ]> {
   let arguments = (ins AnyType:$lhs, AnyType:$rhs);
   let results = (outs AnyType:$result);
   let assemblyFormat = [{
@@ -186,6 +190,48 @@ def Wave_ShliOp : Wave_IntBinaryArith<"shli"> {
     same element bit-width as `$lhs`. Behaviour for shift amounts equal
     to or exceeding the element width is target-defined; producers
     should mask before shifting if they care.
+  }];
+}
+
+def Wave_AssumeRangeOp : Wave_Op<"assume_range", [
+    Pure, AllTypesMatch<["value", "result"]>,
+    DeclareOpInterfaceMethods<InferIntRangeInterface,
+                              ["inferResultRangesFromOptional"]>
+  ]> {
+  let summary = "assert a signed integer range on a value";
+  let description = [{
+    Identity at runtime. Producer-side assertion that `$value`, treated
+    as a signed integer, satisfies `lo <= value <= hi`. The op feeds
+    upstream `IntRangeAnalysis` through `InferIntRangeInterface` so
+    consuming ops that also implement the interface (the `arith.*`
+    family, plus any wave op that opts in later) can propagate the
+    bound.
+
+    The op overrides `inferResultRangesFromOptional` rather than
+    `inferResultRanges` so that it produces a range even when the
+    operand's incoming range is uninitialized -- which is the common
+    case for function args and other "first observation" points where
+    `assume_range` actually earns its keep.
+
+    The op is intentionally permissive:
+      * `lo > hi` is legal -- signals an empty range. Useful inside a
+        dead branch where the producer wants to assert unreachability.
+      * `lo` / `hi` need not fit the value's representable range. The
+        analysis clamps to the bit-width.
+
+    Accepts a signless integer or `!wave.simd<iN, W>` value; the latter
+    means "every lane is in `[lo, hi]`" and is published on the SIMD
+    value's lattice entry using the element bit-width.
+  }];
+
+  let arguments = (ins
+      AnyTypeOf<[AnySignlessInteger, Wave_SimdOfSignlessInteger]>:$value,
+      SI64Attr:$lo,
+      SI64Attr:$hi);
+  let results = (outs
+      AnyTypeOf<[AnySignlessInteger, Wave_SimdOfSignlessInteger]>:$result);
+  let assemblyFormat = [{
+    $value `,` `[` $lo `,` $hi `]` attr-dict `:` type($value)
   }];
 }
 

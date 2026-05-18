@@ -109,4 +109,11 @@ def Wave_Index
     : Type<CPred<"::llvm::isa<::mlir::wave::WaveIndexType>($_self)">,
            "wave index type">;
 
+// `!wave.simd<iN, W>` where iN is a signless integer.
+def Wave_SimdOfSignlessInteger
+    : Type<And<[CPred<"::llvm::isa<::mlir::wave::SimdType>($_self)">,
+                CPred<"::llvm::cast<::mlir::wave::SimdType>($_self)"
+                      ".getElementType().isSignlessInteger()">]>,
+           "wave SIMD of signless integer">;
+
 #endif // MLIR_DIALECT_WAVE_IR_WAVETYPES_TD

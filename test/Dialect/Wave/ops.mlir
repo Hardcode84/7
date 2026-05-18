@@ -74,6 +74,29 @@ func.func @wave_int_arith(%uA: i32, %uB: i32, %vA: !wave.simd<i32, 32>, %vB: !wa
   func.return
 }
 
+// CHECK-LABEL: func.func @wave_assume_range
+func.func @wave_assume_range(%u32: i32, %u64: i64,
+                             %v: !wave.simd<i32, 32>) {
+  // CHECK: wave.assume_range {{.*}}, [0, 31] : i32
+  %0 = wave.assume_range %u32, [0, 31] : i32
+
+  // CHECK: wave.assume_range {{.*}}, [-128, 127] : i64
+  %1 = wave.assume_range %u64, [-128, 127] : i64
+
+  // SIMD operand: per-lane assertion. Interface stays dormant on this
+  // path (upstream IntRangeAnalysis is scalar-only), but the op
+  // round-trips and the attribute is readable by symbolic-engine
+  // consumers.
+  // CHECK: wave.assume_range {{.*}}, [0, 31] : !wave.simd<i32, 32>
+  %2 = wave.assume_range %v, [0, 31] : !wave.simd<i32, 32>
+
+  // Empty range (lo > hi) is legal -- signals an unreachable branch.
+  // CHECK: wave.assume_range {{.*}}, [10, 5] : i32
+  %3 = wave.assume_range %u32, [10, 5] : i32
+
+  func.return
+}
+
 // CHECK-LABEL: func.func @wave_index_expr
 func.func @wave_index_expr(%lane: !wave.simd<i32, 32>,
                            %k: i32,

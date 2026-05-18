@@ -56,6 +56,22 @@ func.func @load_bad_ptr_kind(%p: i64) {
 
 // -----
 
+func.func @assume_range_on_ptr(%p: !wave.ptr<i32, #wave.global>) -> !wave.ptr<i32, #wave.global> {
+  // expected-error @+1 {{operand #0 must be signless integer or wave SIMD of signless integer}}
+  %r = wave.assume_range %p, [0, 100] : !wave.ptr<i32, #wave.global>
+  return %r : !wave.ptr<i32, #wave.global>
+}
+
+// -----
+
+func.func @assume_range_on_signed(%v: si32) -> si32 {
+  // expected-error @+1 {{operand #0 must be signless integer or wave SIMD of signless integer}}
+  %r = wave.assume_range %v, [0, 100] : si32
+  return %r : si32
+}
+
+// -----
+
 func.func @addi_width_mismatch(%a: i32, %b: i64) {
   // expected-error @+1 {{operand element bit-widths must match}}
   %0 = wave.addi %a, %b : i32, i64 -> i32
