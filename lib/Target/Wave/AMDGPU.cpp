@@ -899,6 +899,19 @@ private:
                      llvm::MCOperand::createImm(component * 4),
                      llvm::MCOperand::createImm(0)});
     }
+    if (isa<wavemachine::BufferStoreTupleB32Op>(op)) {
+      // Mirror BufferStoreB32 in MUBUF OFFEN form: vdata, vaddr,
+      // srsrc, soffset (=0), offset:component*4, cpol (=0). vdata is
+      // the selected dword of the VGPR tuple.
+      unsigned component = getIntAttr(&op, "component", 0);
+      return emitMC(llvm::AMDGPU::BUFFER_STORE_DWORD_OFFEN_gfx11,
+                    {toMCVGPRComponent(op.getOperand(1), component),
+                     toMCOperand(op.getOperand(0)),
+                     toMCOperand(op.getOperand(2)),
+                     llvm::MCOperand::createImm(0),
+                     llvm::MCOperand::createImm(component * 4),
+                     llvm::MCOperand::createImm(0)});
+    }
     if (isa<wavemachine::DsLoadB32Op>(op))
       return emitMC(llvm::AMDGPU::DS_READ_B32_gfx11,
                     {toMCOperand(op.getResult(0)),

@@ -408,6 +408,25 @@ def WaveMachine_BufferLoadTupleB32Op
   let assemblyFormat = "$offset `,` $descriptor (`after` $dependency^)? attr-dict `:` functional-type(operands, results)";
   let hasVerifier = 1;
 }
+
+def WaveMachine_BufferStoreTupleB32Op
+    : WaveMachine_Op<"buffer_store_tuple_b32", [WaveMachine_VMEMStore]> {
+  let summary = "buffer 32-bit store of a VGPR tuple component";
+  let description = [{
+    Stores the `component`-th 32-bit slice of the `value` VGPR tuple to
+    the buffer described by `descriptor` at the lane VGPR offset plus
+    `component * 4`. Mirrors `global_store_tuple_b32`: each dword-store
+    is its own IR op so per-component memory tokens thread through the
+    selector loop in `selectFragmentStore` (and the upcoming bucketed
+    `wave.store` tuple path).
+  }];
+  let arguments = (ins WaveMachine_VGPR1:$offset, WaveMachine_VGPR:$value,
+                       WaveMachine_SGPR4:$descriptor,
+                       Optional<WaveMachine_MemToken>:$dependency);
+  let results = (outs Variadic<WaveMachine_MemToken>:$tokens);
+  let assemblyFormat = "$offset `,` $value `,` $descriptor (`after` $dependency^)? attr-dict `:` functional-type(operands, results)";
+  let hasVerifier = 1;
+}
 def WaveMachine_GlobalStoreTupleB32Op
     : WaveMachine_Op<"global_store_tuple_b32", [WaveMachine_VMEMStore]> {
   let summary = "global 32-bit store of a VGPR tuple component";
