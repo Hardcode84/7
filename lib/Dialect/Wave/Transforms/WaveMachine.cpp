@@ -1052,6 +1052,40 @@ private:
         getRegType(builder.getContext(), wavemachine::RegClass::VGPR));
   }
 
+  // Power-of-two * SGPR1 lowers to `s_lshl_b32`. Returns the lowered
+  // Value or null when neither operand is a power-of-two literal.
+  Value tryLshlPow2(Location loc, std::optional<int64_t> lhsImm, Value lhs,
+                    std::optional<int64_t> rhsImm, Value rhs) {
+    std::optional<int64_t> immFactor = lhsImm ? lhsImm : rhsImm;
+    if (!immFactor || *immFactor <= 0 || (*immFactor & (*immFactor - 1)) != 0)
+      return Value{};
+    Value sgpr = lhsImm ? rhs : lhs;
+    return createInstr(
+        builder, loc, "s_lshl_b32",
+        {sgpr, createImm(builder, loc, llvm::Log2_32(*immFactor))},
+        getRegType(builder.getContext(), wavemachine::RegClass::SGPR));
+  }
+
+  // SGPR-domain multiply for the bucketizer's uniform path. Used when
+  // both operands are uniform-side values (SGPR1 / imm), so the
+  // product can land in the soffset slot instead of getting forced
+  // through `v_mul_lo_u32` into a VGPR.
+  Value mulUniformValues(Location loc, Value lhs, Value rhs) {
+    std::optional<int64_t> lhsImm = getImmediateValue(lhs);
+    std::optional<int64_t> rhsImm = getImmediateValue(rhs);
+    if (auto folded = foldImmMul(loc, lhsImm, rhsImm))
+      return *folded;
+    if (lhsImm && *lhsImm == 1)
+      return rhs;
+    if (rhsImm && *rhsImm == 1)
+      return lhs;
+    if (Value shifted = tryLshlPow2(loc, lhsImm, lhs, rhsImm, rhs))
+      return shifted;
+    return createInstr(
+        builder, loc, "s_mul_i32", {lhs, rhs},
+        getRegType(builder.getContext(), wavemachine::RegClass::SGPR));
+  }
+
   // Structural integer literal of a node without materializing anything:
   // IXS_INT or IXS_RAT with unit denominator.
   static std::optional<int64_t> staticIntLiteral(::ixs_node *node) {
@@ -1309,7 +1343,8 @@ private:
   // multiply when the coefficient is trivially 1.
   FailureOr<Value> materializeSummand(::ixs_node *term, ::ixs_node *termCoeff,
                                       Operation *user,
-                                      const llvm::StringMap<Value> &subs) {
+                                      const llvm::StringMap<Value> &subs,
+                                      bool uniform) {
     FailureOr<Value> termValue = materializeIndexExprNode(term, user, subs);
     if (failed(termValue))
       return failure();
@@ -1321,7 +1356,13 @@ private:
         materializeIndexExprNode(termCoeff, user, subs);
     if (failed(coeffValue))
       return failure();
-    return mulIndexValues(user->getLoc(), *coeffValue, *termValue);
+    // Uniform summands stay SGPR-side via `s_mul_i32` / `s_lshl_b32` so
+    // they can land in the soffset slot; the general path uses
+    // `v_mul_lo_u32` which forces a VGPR result.
+    Location loc = user->getLoc();
+    if (uniform && isUniformValue(*coeffValue) && isUniformValue(*termValue))
+      return mulUniformValues(loc, *coeffValue, *termValue);
+    return mulIndexValues(loc, *coeffValue, *termValue);
   }
 
   // Try the literal-fold fast path for a Const-kind summand. Returns
@@ -1355,7 +1396,8 @@ private:
       kind = std::max(kind, classifyTerm(termCoeff, symKinds));
     if (tryConstFoldSummand(term, termCoeff, kind, triple))
       return success();
-    FailureOr<Value> summand = materializeSummand(term, termCoeff, user, subs);
+    FailureOr<Value> summand = materializeSummand(
+        term, termCoeff, user, subs, /*uniform=*/kind == TermKind::Uniform);
     if (failed(summand))
       return failure();
     if (std::optional<int64_t> imm = getImmediateValue(*summand)) {

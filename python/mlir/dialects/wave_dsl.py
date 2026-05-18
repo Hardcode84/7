@@ -435,6 +435,17 @@ class FunctionBuilder:
     ) -> Value:
         return wave.WorkitemIdOp(simd_type(element_type, width), axis).result
 
+    def assume_range(self, value: Value, lo: int, hi: int) -> Value:
+        """Identity at runtime; seeds IRA with `lo <= value <= hi`.
+
+        The WaveMachine bucketizer's width-fit check turns a tighter
+        proven range into a soffset bucket survival: e.g. wrapping
+        `wave.workgroup_id` with `assume_range(_, 0, grid_dim - 1)`
+        lets `wg * stride` fit 32-bit and ride the SGPR soffset slot
+        instead of demoting to voffset.
+        """
+        return wave.AssumeRangeOp(value.type, value, lo, hi).result
+
     def splat(
         self, value: Value, element_type: Type | None = None, width: int = 32
     ) -> Value:

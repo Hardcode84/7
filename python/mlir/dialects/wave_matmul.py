@@ -188,13 +188,14 @@ def _emit_tile_coords(bld: dsl.FunctionBuilder, cfg: _MatmulConfig) -> _TileCoor
 
     wi = bld.workitem_id(axis=0)  # element[L] = wave_id_in_wg * 32 + L
     lane = bld.lane_id()  # element[L] = L
-    wg_m_val = bld.workgroup_id(axis=0)  # scalar i32: 0..M_blocks-1
-    wg_n_val = bld.workgroup_id(axis=1)  # scalar i32: 0..N_blocks-1
+    wg_m_val = bld.assume_range(bld.workgroup_id(axis=0), 0, cfg.M_blocks - 1)
+    wg_n_val = bld.assume_range(bld.workgroup_id(axis=1), 0, cfg.N_blocks - 1)
 
     # wave_id_in_wg = wi >> 5 (uniform across the wave since L < 32);
     # the BN power-of-two decomposition stays on the wave-arith side
     # because `>>` / `&` aren't linear.
-    wave_id_val = bld.binary("shri", wi, _splat_const(bld, 5))
+    wave_id_raw = bld.binary("shri", wi, _splat_const(bld, 5))
+    wave_id_val = bld.assume_range(wave_id_raw, 0, cfg.waves_per_workgroup - 1)
     n_wave_val = bld.binary("andi", wave_id_val, _splat_const(bld, cfg.BN - 1))
     m_wave_val = bld.binary("shri", wave_id_val, _splat_const(bld, cfg.log2_BN))
     lane_mod16_val = bld.binary("andi", lane, _splat_const(bld, 15))
