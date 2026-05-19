@@ -26,8 +26,9 @@ Example:
         | mlir-runner --shared-libs=...
 
 Shape constraints (see :mod:`mlir.dialects.wave_matmul` for the
-rationale): ``M = 16``, ``N`` and ``K`` are power-of-two multiples of
-16, ``BM = BN = 1``.
+rationale): ``M``, ``N`` and ``K`` are positive multiples of 16;
+``BM`` divides ``M/16``; ``BN`` is a power of two dividing ``N/16``;
+and ``BM * BN <= 32``.
 """
 
 from __future__ import annotations
@@ -63,31 +64,36 @@ def _ensure_package_on_path() -> None:
 def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n", 1)[0])
     parser.add_argument(
-        "--m", type=int, default=16, help="output rows (only 16 supported for now)"
+        "--m",
+        type=int,
+        default=16,
+        help="output rows; positive multiple of 16",
     )
     parser.add_argument(
         "--n",
         type=int,
         default=64,
-        help="output cols (power-of-two multiple of 16)",
+        help="output cols; positive multiple of 16",
     )
     parser.add_argument(
         "--k",
         type=int,
         default=32,
-        help="contraction dim (power-of-two multiple of 16)",
+        help="contraction dim; positive multiple of 16",
     )
     parser.add_argument(
         "--bm",
+        "--m-waves-per-block",
         type=int,
         default=1,
-        help="waves per workgroup along M tiles (only 1 supported for now)",
+        help="waves per workgroup along M tiles; must divide M/16",
     )
     parser.add_argument(
         "--bn",
+        "--n-waves-per-block",
         type=int,
         default=1,
-        help="waves per workgroup along N tiles (only 1 supported for now)",
+        help="waves per workgroup along N tiles; power of two dividing N/16",
     )
     parser.add_argument(
         "--use-buffer",
