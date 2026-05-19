@@ -440,8 +440,8 @@ LogicalResult WaveMachineSelector::selectOperation(Operation *op) {
           [&](auto o) { return selectFragmentPack(o); })
       .Case<waveamd::MmaOp>([&](auto o) { return selectMma(o); })
       .Case<waveamd::DmaLoadLdsOp>([&](auto o) { return selectDmaLoadLds(o); })
-      .Case<waveamd::FragmentStoreOp>(
-          [&](auto o) { return selectFragmentStore(o); })
+      .Case<waveamd::FragmentUnpackOp>(
+          [&](auto o) { return selectFragmentUnpack(o); })
       .Case<func::ReturnOp>([&](auto o) { return selectReturn(o); })
       .Case<scf::ForOp>([&](auto o) { return selectScfFor(*this, o); })
       .Case<scf::YieldOp>([&](auto) {
@@ -1117,6 +1117,17 @@ WaveMachineSelector::selectFragmentPack(waveamd::FragmentPackOp op) {
   return success();
 }
 
+// FragmentUnpack is the inverse rename: the fragment's VGPR tuple
+// gets routed through the value map as a SIMD-of-vector value so the
+// downstream `wave.store` (or LDS pipeline) treats it like any other
+// per-lane register tuple.
+LogicalResult
+WaveMachineSelector::selectFragmentUnpack(waveamd::FragmentUnpackOp op) {
+  values[op.getResult()] = expect(op.getFragment(), op);
+  eraseIfTopLevel(op);
+  return success();
+}
+
 LogicalResult WaveMachineSelector::selectLdsBase(LdsBaseOp op) {
   Value baseValue = createImm(builder, op.getLoc(), 0);
   pointerBases[op.getResult()] = baseValue;
@@ -1237,57 +1248,6 @@ LogicalResult WaveMachineSelector::selectDmaLoadLds(waveamd::DmaLoadLdsOp op) {
                      getMemTokenType(op.getContext()), attrs);
   }
   values[op.getToken()] = dma->getResult(0);
-  eraseIfTopLevel(op);
-  return success();
-}
-
-LogicalResult
-WaveMachineSelector::selectFragmentStore(waveamd::FragmentStoreOp op) {
-  auto fragmentType = cast<waveamd::FragmentType>(op.getFragment().getType());
-  auto baseIt = pointerBases.find(op.getPtr());
-  auto offsetIt = pointerOffsets.find(op.getPtr());
-  if (baseIt == pointerBases.end() || offsetIt == pointerOffsets.end())
-    return op.emitError("WaveMachine backend expects selected wave pointer");
-  Value lane;
-  if (fragmentType.getWaveSize() == 64) {
-    Value workitem = createInstr(builder, op.getLoc(), "v_workitem_id_x", {},
-                                 getPinnedRegType(op.getContext(),
-                                                  wavemachine::RegClass::VGPR,
-                                                  /*width=*/1, /*index=*/0));
-    lane = andMask(op.getLoc(), workitem, 63);
-  } else {
-    lane =
-        createInstr(builder, op.getLoc(), "v_mbcnt_lo", {},
-                    getRegType(op.getContext(), wavemachine::RegClass::VGPR));
-  }
-  assert(llvm::isPowerOf2_64(fragmentType.getRegisters()) &&
-         "fragment register count must be a power of two");
-  int64_t laneStrideBytes = fragmentType.getRegisters() * 4;
-  int64_t laneShift = llvm::Log2_64(laneStrideBytes);
-  Value byteOffset =
-      createInstr(builder, op.getLoc(), "v_lshlrev_b32",
-                  {lane, createImm(builder, op.getLoc(), laneShift)},
-                  getRegType(op.getContext(), wavemachine::RegClass::VGPR));
-  Value baseOffsetValue = collapseTriple(op.getLoc(), offsetIt->second);
-  byteOffset = addByteOffsets(op.getLoc(), baseOffsetValue, byteOffset);
-
-  SmallVector<Value> storeTokens;
-  for (int64_t component = 0, e = fragmentType.getRegisters(); component != e;
-       ++component) {
-    SmallVector<Value> operands{byteOffset, expect(op.getFragment(), op),
-                                baseIt->second};
-    if (Value dependency = op.getDependency())
-      operands.push_back(expect(dependency, op));
-    Operation *store =
-        createWMOp(builder, op.getLoc(), "global_store_tuple_b32", operands,
-                   getMemTokenType(op.getContext()),
-                   {builder.getNamedAttr(
-                       "component", builder.getI64IntegerAttr(component))});
-    storeTokens.push_back(store->getResult(0));
-  }
-  Operation *token = createWMOp(builder, op.getLoc(), "token_join", storeTokens,
-                                getMemTokenType(op.getContext()));
-  values[op.getToken()] = token->getResult(0);
   eraseIfTopLevel(op);
   return success();
 }

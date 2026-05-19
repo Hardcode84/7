@@ -51,7 +51,8 @@ def test_waveamd_matrix_kernel():
         # CHECK: func.func @matrix_kernel
         # CHECK: waveamd.fragment_fill
         # CHECK: waveamd.mma
-        # CHECK: waveamd.fragment_store
+        # CHECK: waveamd.fragment_unpack
+        # CHECK: wave.store
         # CHECK: wave.wait
         print(m.module)
 

@@ -235,29 +235,22 @@ LogicalResult DmaLoadLdsOp::verify() {
   return success();
 }
 
-LogicalResult FragmentStoreOp::verify() {
+LogicalResult FragmentUnpackOp::verify() {
   auto fragmentType = cast<FragmentType>(getFragment().getType());
-  if (fragmentType.getRole() != 2 ||
-      (!fragmentType.getElementType().isInteger(32) &&
-       !fragmentType.getElementType().isF32()))
-    return emitOpError(
-        "only 32-bit accumulator fragment stores are supported for now");
-  Type ptrType = getPtr().getType();
-  Type ptrElementType;
-  if (auto wavePtr = dyn_cast<wave::PtrType>(ptrType)) {
-    ptrElementType = wavePtr.getElementType();
-  } else if (auto ptrSimdType = dyn_cast<wave::SimdType>(ptrType)) {
-    auto wavePtr = dyn_cast<wave::PtrType>(ptrSimdType.getElementType());
-    if (!wavePtr)
-      return emitOpError("pointer SIMD element type must be a wave pointer");
-    if (ptrSimdType.getWidth() != fragmentType.getWaveSize())
-      return emitOpError("pointer SIMD width must match fragment wave size");
-    ptrElementType = wavePtr.getElementType();
-  } else {
-    return emitOpError("expected wave pointer operand");
-  }
-  if (!ptrElementType.isInteger(32) && !ptrElementType.isF32())
-    return emitOpError("fragment stores currently require a 32-bit pointer");
+  auto simdType = cast<wave::SimdType>(getRegisters().getType());
+  if (simdType.getWidth() != fragmentType.getWaveSize())
+    return emitOpError("result SIMD width must match fragment wave size");
+  auto vectorType = dyn_cast<VectorType>(simdType.getElementType());
+  if (!vectorType || vectorType.getRank() != 1)
+    return emitOpError("result SIMD element type must be a 1-D vector");
+  Type vectorElement = vectorType.getElementType();
+  if (!vectorElement.isIntOrFloat() ||
+      vectorElement.getIntOrFloatBitWidth() != 32)
+    return emitOpError("result vector element type must be 32 bits wide");
+  if (vectorType.getNumElements() != fragmentType.getRegisters())
+    return emitOpError("result vector element count (")
+           << vectorType.getNumElements() << ") must match fragment register "
+           << "count (" << fragmentType.getRegisters() << ")";
   return success();
 }
 

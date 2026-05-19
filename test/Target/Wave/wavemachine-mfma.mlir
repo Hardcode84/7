@@ -13,7 +13,8 @@ module attributes {wavemachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 
 // ASM-LABEL: mfma_f16xf32_kernel:
 // ASM: v_mfma_f32_16x16x16_f16 [[DST:v\[[0-9]+:[0-9]+\]]], [[A:v\[[0-9]+:[0-9]+\]]], [[B:v\[[0-9]+:[0-9]+\]]], [[C:v\[[0-9]+:[0-9]+\]]]
-// ASM: v_lshlrev_b32_e32 {{v[0-9]+}}, 4, {{v[0-9]+}}
+// ASM: v_mul_lo_u32 {{v[0-9]+}}, {{v[0-9]+}}, {{v[0-9]+}}
+// ASM: v_lshlrev_b32_e32 {{v[0-9]+}}, 2, {{v[0-9]+}}
 // ASM: global_store_dword {{v[0-9]+}}, {{v[0-9]+}}, {{s\[[0-9]+:[0-9]+\]$}}
 // ASM: global_store_dword {{v[0-9]+}}, {{v[0-9]+}}, {{s\[[0-9]+:[0-9]+\]}} offset:4
 // ASM: global_store_dword {{v[0-9]+}}, {{v[0-9]+}}, {{s\[[0-9]+:[0-9]+\]}} offset:8
@@ -33,9 +34,20 @@ func.func @mfma_f16xf32_kernel(%out: !wave.ptr<i32, #wave.global>)
         !waveamd.fragment<1, f16, 16, 16, 32, 2>,
         !waveamd.fragment<2, f32, 16, 16, 32, 4>
      -> !waveamd.fragment<2, f32, 16, 16, 32, 4>
-  %store_token = waveamd.fragment_store %result -> %out
-      : (!waveamd.fragment<2, f32, 16, 16, 32, 4>,
-         !wave.ptr<i32, #wave.global>) -> !wave.mem.token
+  %lane = wave.lane_id : !wave.simd<i32, 32>
+  %r = arith.constant 4 : i32
+  %r_simd = wave.splat %r : i32 -> !wave.simd<i32, 32>
+  %lane_off = wave.muli %lane, %r_simd
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  %tuple_ptr = wave.ptr_add %out, %lane_off
+      : !wave.ptr<i32, #wave.global>, !wave.simd<i32, 32>
+      -> !wave.simd<!wave.ptr<i32, #wave.global>, 32>
+  %regs = waveamd.fragment_unpack %result
+      : !waveamd.fragment<2, f32, 16, 16, 32, 4>
+      -> !wave.simd<vector<4xi32>, 32>
+  %store_token = wave.store %regs -> %tuple_ptr
+      : (!wave.simd<vector<4xi32>, 32>,
+         !wave.simd<!wave.ptr<i32, #wave.global>, 32>) -> !wave.mem.token
   return
 }
 
@@ -58,9 +70,24 @@ func.func @mfma_gfx950_f16xf32_kernel(%out: !wave.ptr<i32, #wave.global>)
         !waveamd.fragment<1, f16, 16, 16, 64, 4>,
         !waveamd.fragment<2, f32, 16, 16, 64, 4>
      -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
-  %store_token = waveamd.fragment_store %result -> %out
-      : (!waveamd.fragment<2, f32, 16, 16, 64, 4>,
-         !wave.ptr<i32, #wave.global>) -> !wave.mem.token
+  %wi = wave.workitem_id 0 : !wave.simd<i32, 64>
+  %mask = arith.constant 63 : i32
+  %mask_simd = wave.splat %mask : i32 -> !wave.simd<i32, 64>
+  %lane = wave.binary "andi" %wi, %mask_simd
+      : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+  %r = arith.constant 4 : i32
+  %r_simd = wave.splat %r : i32 -> !wave.simd<i32, 64>
+  %lane_off = wave.muli %lane, %r_simd
+      : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+  %tuple_ptr = wave.ptr_add %out, %lane_off
+      : !wave.ptr<i32, #wave.global>, !wave.simd<i32, 64>
+      -> !wave.simd<!wave.ptr<i32, #wave.global>, 64>
+  %regs = waveamd.fragment_unpack %result
+      : !waveamd.fragment<2, f32, 16, 16, 64, 4>
+      -> !wave.simd<vector<4xi32>, 64>
+  %store_token = wave.store %regs -> %tuple_ptr
+      : (!wave.simd<vector<4xi32>, 64>,
+         !wave.simd<!wave.ptr<i32, #wave.global>, 64>) -> !wave.mem.token
   return
 }
 

@@ -659,6 +659,22 @@ class FunctionBuilder:
         """
         return waveamd.FragmentPackOp(frag_type, registers).result
 
+    def fragment_unpack(self, fragment: Value) -> Value:
+        """Expose a WMMA fragment as a SIMD-of-vector register tuple.
+
+        Inverse rename for :meth:`fragment_pack`: surfaces a
+        ``!waveamd.fragment<role, T, M, N, W, R>`` as
+        ``!wave.simd<vector<R x i32>, W>`` so the per-lane VGPR tuple
+        can flow through generic wave plumbing (e.g. ``wave.store``)
+        without a dedicated fragment-store op. Zero-cost at the
+        WaveMachine level.
+        """
+        frag = FragmentType(fragment.type)
+        result_type = simd_type(
+            vector_type(frag.registers, i32()), width=frag.wave_size
+        )
+        return waveamd.FragmentUnpackOp(result_type, fragment).result
+
     def fragment_load(
         self,
         ptr: Value,
@@ -688,9 +704,30 @@ class FunctionBuilder:
     def fragment_store(
         self, fragment: Value, ptr: Value, *, after: Value | None = None
     ) -> Value:
-        return waveamd.FragmentStoreOp(
-            mem_token_type(), fragment, ptr, dependency=after
-        ).token
+        """Symmetric to :meth:`fragment_load`: unpack the fragment and
+        store the resulting per-lane R-dword tuple via ``wave.store``.
+
+        ``ptr`` must address lane 0's slot of the fragment row (the
+        lane-`L` slot lives at ``ptr + L * R`` in element units of the
+        pointer). The helper layers on the per-lane ``lane * R``
+        offset where ``lane = workitem_id_x mod wave_size`` (single
+        ``v_lshrrev`` / ``v_and`` pair on AMDGPU since both ``R`` and
+        ``wave_size`` are powers of two), passes the result through a
+        ``wave.index_expr`` so the bucketizer folds the per-element
+        scale into a single shift, and emits a tuple ``wave.store``.
+        The WaveMachine backend serializes that into ``R`` per-component
+        ``*_store_tuple_b32`` ops.
+        """
+        frag = FragmentType(fragment.type)
+        wi_sym = sym("__wave_dsl_frag_wi")
+        wi_val = self.workitem_id(axis=0, width=frag.wave_size)
+        lane_off = self.index_expr(
+            mod(wi_sym, frag.wave_size) * frag.registers,
+            {wi_sym: wi_val},
+        )
+        tuple_ptr = self.ptr_add(ptr, lane_off)
+        regs = self.fragment_unpack(fragment)
+        return self.store(regs, tuple_ptr, after=after)
 
     def make_buffer(
         self,

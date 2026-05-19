@@ -46,7 +46,12 @@ func.func @tuple_load_kernel(%in: !wave.ptr<i32, #wave.global>, %out: !wave.ptr<
   %op = wave.ptr_add %out, %base : !wave.ptr<i32, #wave.global>, i32 -> !wave.ptr<i32, #wave.global>
   %v, %tok = wave.load %ip : (!wave.simd<!wave.ptr<i32, #wave.global>, 32>) -> (!wave.simd<vector<8xi32>, 32>, !wave.mem.token)
   %frag = waveamd.fragment_pack %v : !wave.simd<vector<8xi32>, 32> -> !waveamd.fragment<2, f32, 16, 16, 32, 8>
-  %st = waveamd.fragment_store %frag -> %op after %tok : (!waveamd.fragment<2, f32, 16, 16, 32, 8>, !wave.ptr<i32, #wave.global>, !wave.mem.token) -> !wave.mem.token
+  %r = arith.constant 8 : i32
+  %r_simd = wave.splat %r : i32 -> !wave.simd<i32, 32>
+  %lane_off = wave.muli %lane, %r_simd : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  %tuple_ptr = wave.ptr_add %op, %lane_off : !wave.ptr<i32, #wave.global>, !wave.simd<i32, 32> -> !wave.simd<!wave.ptr<i32, #wave.global>, 32>
+  %regs = waveamd.fragment_unpack %frag : !waveamd.fragment<2, f32, 16, 16, 32, 8> -> !wave.simd<vector<8xi32>, 32>
+  %st = wave.store %regs -> %tuple_ptr after %tok : (!wave.simd<vector<8xi32>, 32>, !wave.simd<!wave.ptr<i32, #wave.global>, 32>, !wave.mem.token) -> !wave.mem.token
   return
 }
 
@@ -63,7 +68,12 @@ func.func @fragment_pack_is_noop(%in: !wave.ptr<i32, #wave.global>, %out: !wave.
   %op = wave.ptr_add %out, %base : !wave.ptr<i32, #wave.global>, i32 -> !wave.ptr<i32, #wave.global>
   %v, %tok = wave.load %ip : (!wave.simd<!wave.ptr<i32, #wave.global>, 32>) -> (!wave.simd<vector<8xi32>, 32>, !wave.mem.token)
   %frag = waveamd.fragment_pack %v : !wave.simd<vector<8xi32>, 32> -> !waveamd.fragment<2, f32, 16, 16, 32, 8>
-  %st = waveamd.fragment_store %frag -> %op after %tok : (!waveamd.fragment<2, f32, 16, 16, 32, 8>, !wave.ptr<i32, #wave.global>, !wave.mem.token) -> !wave.mem.token
+  %r = arith.constant 8 : i32
+  %r_simd = wave.splat %r : i32 -> !wave.simd<i32, 32>
+  %lane_off = wave.muli %lane, %r_simd : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  %tuple_ptr = wave.ptr_add %op, %lane_off : !wave.ptr<i32, #wave.global>, !wave.simd<i32, 32> -> !wave.simd<!wave.ptr<i32, #wave.global>, 32>
+  %regs = waveamd.fragment_unpack %frag : !waveamd.fragment<2, f32, 16, 16, 32, 8> -> !wave.simd<vector<8xi32>, 32>
+  %st = wave.store %regs -> %tuple_ptr after %tok : (!wave.simd<vector<8xi32>, 32>, !wave.simd<!wave.ptr<i32, #wave.global>, 32>, !wave.mem.token) -> !wave.mem.token
   return
 }
 

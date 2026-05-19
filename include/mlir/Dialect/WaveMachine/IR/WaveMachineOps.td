@@ -609,9 +609,8 @@ def WaveMachine_BufferStoreTupleB32Op
     the buffer described by `descriptor` at the lane VGPR offset plus
     `soffset + inst_offset + component * 4`. Mirrors
     `global_store_tuple_b32`: each dword-store is its own IR op so
-    per-component memory tokens thread through the selector loop in
-    `selectFragmentStore` (and the upcoming bucketed `wave.store`
-    tuple path).
+    per-component memory tokens thread through the bucketed
+    `wave.store` tuple selector in `selectGlobalOrBufferStore`.
   }];
   let arguments = (ins WaveMachine_VGPR1:$offset, WaveMachine_VGPR:$value,
                        WaveMachine_SGPR4:$descriptor,

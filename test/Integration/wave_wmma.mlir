@@ -6,10 +6,11 @@
 //
 // The kernel fills A and B with `i8` 1s (broadcast via the 0x01010101 i32
 // bit pattern) and seeds the accumulator with 0. Each result element is
-// therefore `sum_{k=0..15} 1*1 + 0 = 16`. `fragment_store` writes the 8
-// register components of the accumulator as 8 contiguous i32s per lane at
-// `lane_id * 32` bytes into `%out`, so a 32-lane wavefront fills the
-// entire 256-element output contiguously.
+// therefore `sum_{k=0..15} 1*1 + 0 = 16`. `fragment_unpack` exposes
+// the 8-register accumulator as a per-lane vector<8xi32>; the tuple
+// `wave.store` through `%out + lane_id * 8` (== `lane_id * 32`
+// bytes) writes 8 contiguous i32s per lane, so a 32-lane wavefront
+// fills the entire 256-element output contiguously.
 //
 // RUN: wave-opt %s \
 // RUN:   --wave-compile-kernels='chip=%chip' \
@@ -45,9 +46,20 @@ gpu.module @kernels {
           !waveamd.fragment<1, i8 , 16, 16, 32, 4>,
           !waveamd.fragment<2, i32, 16, 16, 32, 8>
        -> !waveamd.fragment<2, i32, 16, 16, 32, 8>
-    %tok = waveamd.fragment_store %d -> %ptr
-        : (!waveamd.fragment<2, i32, 16, 16, 32, 8>,
-           !wave.ptr<i32, #wave.global>) -> !wave.mem.token
+    %lane = wave.lane_id : !wave.simd<i32, 32>
+    %r = arith.constant 8 : i32
+    %r_simd = wave.splat %r : i32 -> !wave.simd<i32, 32>
+    %lane_off = wave.muli %lane, %r_simd
+        : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+    %tuple_ptr = wave.ptr_add %ptr, %lane_off
+        : !wave.ptr<i32, #wave.global>, !wave.simd<i32, 32>
+        -> !wave.simd<!wave.ptr<i32, #wave.global>, 32>
+    %regs = waveamd.fragment_unpack %d
+        : !waveamd.fragment<2, i32, 16, 16, 32, 8>
+        -> !wave.simd<vector<8xi32>, 32>
+    %tok = wave.store %regs -> %tuple_ptr
+        : (!wave.simd<vector<8xi32>, 32>,
+           !wave.simd<!wave.ptr<i32, #wave.global>, 32>) -> !wave.mem.token
     return
   }
 }

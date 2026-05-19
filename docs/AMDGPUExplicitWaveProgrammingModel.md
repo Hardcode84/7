@@ -691,13 +691,11 @@ distribution explicit.
 
 Fragment operations should include:
 
-`wave.fragment_load`
-  Load a matrix fragment from global memory or LDS using an explicit layout,
-  address pattern, and memory token dependencies.
-
-`wave.fragment_store`
-  Store an accumulator or result fragment back to memory using an explicit
-  layout and memory token dependencies.
+`wave.fragment_pack` and `wave.fragment_unpack`
+  Bind a per-lane register tuple (produced by `wave.load` or any tuple
+  source) into a wave-cooperative fragment and back. Zero-cost
+  renames at the WaveMachine level; the actual memory traffic goes
+  through `wave.load` and `wave.store` on either side.
 
 `wave.fragment_splat` and `wave.fragment_fill`
   Create accumulator fragments from scalar constants or uniform values.

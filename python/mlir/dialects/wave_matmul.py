@@ -12,7 +12,9 @@ Python bindings (see :mod:`wave_dsl`). It returns a live
 The kernel reads A and B from global memory through ``wave.load`` +
 ``waveamd.fragment_pack`` (the ``fragment_load`` DSL helper), stages
 each per-K-step A/B fragment through a per-wave LDS slot, and stores
-the f32 accumulator with ``waveamd.fragment_store``. The LDS round-trip
+the f32 accumulator via the ``fragment_unpack`` + tuple ``wave.store``
+chain (the :meth:`wave_dsl.FunctionBuilder.fragment_store` helper).
+The LDS round-trip
 -- tuple ``wave.store`` to the slot, workgroup ``wave.barrier``, tuple
 ``wave.load`` from the same slot, then ``fragment_pack`` / ``mma`` --
 keeps the transport a pure identity but exercises every LDS code path
@@ -26,7 +28,7 @@ subsequent per-K-step fragment loads into tuple ``buffer_load_b32``
 ops (lowered to ``buffer_load_dword ..., 0 offen offset:i*4``) before
 they stage through LDS. The C fragment store stays on the global path,
 so the lit/integration tests can exercise the buffer load lowering
-end-to-end without disturbing the existing fragment_store codegen.
+end-to-end without disturbing the existing fragment-store codegen.
 
 Tile-to-wave mapping:
   * The grid is launched 2-D as ``(M_blocks, N_blocks)`` and each

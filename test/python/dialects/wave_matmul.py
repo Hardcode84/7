@@ -41,4 +41,4 @@ print(module)
 # CHECK: scf.for
 # CHECK-COUNT-8: waveamd.mma "mfma.f32.16x16x16.f16"
 # CHECK: wave.load
-# CHECK-COUNT-4: waveamd.fragment_store
+# CHECK-COUNT-4: waveamd.fragment_unpack

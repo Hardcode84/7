@@ -75,24 +75,55 @@ LogicalResult selectSharedStore(WaveMachineSelector &S, StoreOp op, Value base,
 LogicalResult selectGlobalOrBufferStore(WaveMachineSelector &S, StoreOp op,
                                         Value base, OffsetTriple offset,
                                         bool isBuffer, unsigned registers) {
-  if (registers != 1)
-    return op.emitError("global/buffer tuple stores are not supported by "
-                        "the WaveMachine backend yet");
   wavemachine::AddressFieldSpec spec =
       isBuffer ? wavemachine::BufferStoreB32Op::getAddressFieldSpec()
                : wavemachine::GlobalStoreB32Op::getAddressFieldSpec();
   auto b = S.bucketForSpec(op.getLoc(), offset, spec);
-  SmallVector<Value> operands{b.voffset, S.expect(op.getValue(), op), base};
-  if (spec.hasSoffset)
-    operands.push_back(b.soffset);
-  if (Value dependency = op.getDependency())
-    operands.push_back(S.expect(dependency, op));
-  Operation *store =
-      createWMOp(S.builder, op.getLoc(),
-                 isBuffer ? "buffer_store_b32" : "global_store_b32", operands,
-                 getMemTokenType(op.getContext()),
-                 S.instOffsetAttrs(b.instOffset, "inst_offset"));
-  S.values[op.getToken()] = store->getResult(0);
+  StringRef scalarOpcode = isBuffer ? "buffer_store_b32" : "global_store_b32";
+  StringRef tupleOpcode =
+      isBuffer ? "buffer_store_tuple_b32" : "global_store_tuple_b32";
+  Value value = S.expect(op.getValue(), op);
+
+  // Scalar lane payload: a single dword-store.
+  if (registers == 1) {
+    SmallVector<Value> operands{b.voffset, value, base};
+    if (spec.hasSoffset)
+      operands.push_back(b.soffset);
+    if (Value dependency = op.getDependency())
+      operands.push_back(S.expect(dependency, op));
+    Operation *store =
+        createWMOp(S.builder, op.getLoc(), scalarOpcode, operands,
+                   getMemTokenType(op.getContext()),
+                   S.instOffsetAttrs(b.instOffset, "inst_offset"));
+    S.values[op.getToken()] = store->getResult(0);
+    S.eraseIfTopLevel(op);
+    return success();
+  }
+
+  // Tuple lane payload: one per-component `*_store_tuple_b32` per
+  // register, joined with `token_join`. The per-component dword lands
+  // at `voffset + soffset + inst_offset + component*4` per lane, which
+  // is exactly the layout `fragment_unpack` + this tuple wave.store
+  // contract expects.
+  SmallVector<Value> storeTokens;
+  storeTokens.reserve(registers);
+  for (unsigned component = 0; component != registers; ++component) {
+    SmallVector<Value> operands{b.voffset, value, base};
+    if (spec.hasSoffset)
+      operands.push_back(b.soffset);
+    if (Value dependency = op.getDependency())
+      operands.push_back(S.expect(dependency, op));
+    SmallVector<NamedAttribute> attrs =
+        S.instOffsetAttrs(b.instOffset, "inst_offset");
+    attrs.push_back(S.builder.getNamedAttr(
+        "component", S.builder.getI64IntegerAttr(component)));
+    Operation *store = createWMOp(S.builder, op.getLoc(), tupleOpcode, operands,
+                                  getMemTokenType(op.getContext()), attrs);
+    storeTokens.push_back(store->getResult(0));
+  }
+  Operation *join = createWMOp(S.builder, op.getLoc(), "token_join",
+                               storeTokens, getMemTokenType(op.getContext()));
+  S.values[op.getToken()] = join->getResult(0);
   S.eraseIfTopLevel(op);
   return success();
 }

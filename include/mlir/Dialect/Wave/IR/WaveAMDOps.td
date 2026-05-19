@@ -68,6 +68,30 @@ def WaveAMD_FragmentPackOp : WaveAMD_Op<"fragment_pack", [Pure]> {
   let hasVerifier = 1;
 }
 
+def WaveAMD_FragmentUnpackOp : WaveAMD_Op<"fragment_unpack", [Pure]> {
+  let summary = "expose a wave-cooperative fragment as per-lane register groups";
+  let description = [{
+    Inverse rename for `fragment_pack`: views a
+    `!waveamd.fragment<role, T, M, N, W, R>` as a
+    `!wave.simd<vector<R x i32>, W>` so callers can route the underlying
+    per-lane VGPR tuple through generic wave-dialect plumbing (e.g.
+    `wave.store`) without a dedicated fragment-store opcode.
+
+    Zero-cost at the WaveMachine level: input and output share the
+    physical `R`-wide VGPR tuple.
+
+    Verifier constraints mirror `fragment_pack`:
+
+    * SIMD width matches the fragment wave size.
+    * Per-lane vector holds exactly `R` 32-bit elements.
+  }];
+
+  let arguments = (ins WaveAMD_Fragment:$fragment);
+  let results = (outs Wave_Simd:$registers);
+  let assemblyFormat = "$fragment attr-dict `:` qualified(type($fragment)) `->` qualified(type($registers))";
+  let hasVerifier = 1;
+}
+
 def WaveAMD_MmaOp : WaveAMD_Op<"mma", [Pure]> {
   let summary = "AMD wave-cooperative matrix multiply-accumulate";
   let arguments = (ins StrAttr:$kind,
@@ -98,16 +122,6 @@ def WaveAMD_DmaLoadLdsOp : WaveAMD_Op<"dma_load_lds", [MemoryEffects<[MemRead, M
     $source `->` $dest `after` $dependency
     attr-dict `:` functional-type(operands, results)
   }];
-  let hasVerifier = 1;
-}
-
-def WaveAMD_FragmentStoreOp : WaveAMD_Op<"fragment_store", [MemoryEffects<[MemWrite]>]> {
-  let summary = "store an AMD matrix fragment to memory";
-  let arguments = (ins WaveAMD_Fragment:$fragment,
-                       AnyType:$ptr,
-                       Optional<Wave_MemToken>:$dependency);
-  let results = (outs Wave_MemToken:$token);
-  let assemblyFormat = "$fragment `->` $ptr (`after` $dependency^)? attr-dict `:` functional-type(operands, results)";
   let hasVerifier = 1;
 }
 

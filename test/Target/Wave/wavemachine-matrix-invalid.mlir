@@ -38,17 +38,6 @@ func.func @bad_mma_b_role(%x: i32) {
 
 // -----
 
-func.func @bad_fragment_store_pointer(%out: !wave.ptr<index, #wave.global>, %x: i32) {
-  %base = arith.constant 0 : index
-  %ptr = wave.ptr_add %out, %base : !wave.ptr<index, #wave.global>, index -> !wave.ptr<index, #wave.global>
-  %acc = waveamd.fragment_fill %x : i32 -> !waveamd.fragment<2, i32, 16, 16, 32, 8>
-  // expected-error @below {{fragment stores currently require a 32-bit pointer}}
-  %store_token = waveamd.fragment_store %acc -> %ptr : (!waveamd.fragment<2, i32, 16, 16, 32, 8>, !wave.ptr<index, #wave.global>) -> !wave.mem.token
-  return
-}
-
-// -----
-
 func.func @fragment_pack_bad_width(%v: !wave.simd<vector<8xi32>, 64>) {
   // expected-error @below {{operand SIMD width must match fragment wave size}}
   %frag = waveamd.fragment_pack %v : !wave.simd<vector<8xi32>, 64> -> !waveamd.fragment<2, f32, 16, 16, 32, 8>
@@ -76,5 +65,29 @@ func.func @fragment_pack_bad_vector_element(%v: !wave.simd<vector<16xf16>, 32>) 
 func.func @fragment_pack_register_mismatch(%v: !wave.simd<vector<4xi32>, 32>) {
   // expected-error @below {{operand vector element count (4) must match fragment register count (8)}}
   %frag = waveamd.fragment_pack %v : !wave.simd<vector<4xi32>, 32> -> !waveamd.fragment<2, f32, 16, 16, 32, 8>
+  return
+}
+
+// -----
+
+func.func @fragment_unpack_bad_width(%f: !waveamd.fragment<2, f32, 16, 16, 32, 8>) {
+  // expected-error @below {{result SIMD width must match fragment wave size}}
+  %v = waveamd.fragment_unpack %f : !waveamd.fragment<2, f32, 16, 16, 32, 8> -> !wave.simd<vector<8xi32>, 64>
+  return
+}
+
+// -----
+
+func.func @fragment_unpack_not_vector(%f: !waveamd.fragment<2, f32, 16, 16, 32, 8>) {
+  // expected-error @below {{result SIMD element type must be a 1-D vector}}
+  %v = waveamd.fragment_unpack %f : !waveamd.fragment<2, f32, 16, 16, 32, 8> -> !wave.simd<i32, 32>
+  return
+}
+
+// -----
+
+func.func @fragment_unpack_register_mismatch(%f: !waveamd.fragment<2, f32, 16, 16, 32, 8>) {
+  // expected-error @below {{result vector element count (4) must match fragment register count (8)}}
+  %v = waveamd.fragment_unpack %f : !waveamd.fragment<2, f32, 16, 16, 32, 8> -> !wave.simd<vector<4xi32>, 32>
   return
 }

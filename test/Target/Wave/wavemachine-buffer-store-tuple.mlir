@@ -5,10 +5,10 @@
 
 // `wavemachine.buffer_store_tuple_b32` completes the memory-op
 // matrix (global / buffer / lds x load / store x single / tuple) by
-// filling in the previously-missing buffer-tuple-store slot. Per-
-// component IR ops mirror `global_store_tuple_b32` so each dword
-// store can carry its own memory token through the selector loop
-// in `selectFragmentStore` once that path lands.
+// filling in the buffer-tuple-store slot. Per-component IR ops
+// mirror `global_store_tuple_b32` so each dword store can carry its
+// own memory token through `selectGlobalOrBufferStore`'s tuple
+// fan-out (the lowering for `fragment_unpack` + tuple `wave.store`).
 
 module attributes {wavemachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 

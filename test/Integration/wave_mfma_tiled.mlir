@@ -2,8 +2,8 @@
 //
 // Runs the Python tiled matmul example on gfx9 MFMA hardware. `--chip`
 // selects the MFMA fragment shape in auto mode; the kernel still stages
-// fragments through LDS and writes the f32 accumulator through the usual
-// fragment_store path.
+// fragments through LDS and writes the f32 accumulator via the
+// fragment_unpack + tuple wave.store chain.
 //
 // RUN: %python %S/../../examples/wave/wmma_matmul_tiled.py --chip=%chip --m=64 --n=64 --k=64 --bm=2 --bn=2 \
 // RUN:   | wave-opt --wave-compile-kernels='chip=%chip' \
