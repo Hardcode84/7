@@ -28,12 +28,16 @@ Example:
 Shape constraints (see :mod:`mlir.dialects.wave_matmul` for the
 rationale): ``M``, ``N`` and ``K`` are positive multiples of 16;
 ``BM * wave_m_tiles`` divides ``M/16``; ``BN * wave_n_tiles`` divides
-``N/16``; ``BN`` is a power of two; and ``BM * BN <= 32``.
+``N/16``; ``wave_k_tiles`` divides ``K/16``; ``BN`` is a power of two;
+and ``BM * BN <= 32``.
 """
 
 from __future__ import annotations
 
 import argparse
+import math
+import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -61,8 +65,7 @@ def _ensure_package_on_path() -> None:
             return
 
 
-def _parse_args(argv: list[str]) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description=__doc__.split("\n\n", 1)[0])
+def _add_shape_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--m",
         type=int,
@@ -81,6 +84,9 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         default=32,
         help="contraction dim; positive multiple of 16",
     )
+
+
+def _add_tile_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--bm",
         "--m-waves-per-block",
@@ -108,6 +114,17 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         help="16x16 N tiles computed by each wave",
     )
     parser.add_argument(
+        "--k-tiles",
+        "--wave-k-tiles",
+        dest="wave_k_tiles",
+        type=int,
+        default=1,
+        help="16-wide K slices folded by each virtual wave tile",
+    )
+
+
+def _add_codegen_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
         "--use-buffer",
         action="store_true",
         help="wrap the A and B kernel inputs in waveamd.make_buffer so "
@@ -126,6 +143,69 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         default="auto",
         help="matrix instruction family to emit; auto picks MFMA for gfx9/gfx950",
     )
+
+
+def _add_runner_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--random-data",
+        action="store_true",
+        help="fill A/B with deterministic pseudo-random f16 values",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=0,
+        help="seed for --random-data",
+    )
+    parser.add_argument(
+        "--run",
+        action="store_true",
+        help="run wave-opt and mlir-runner instead of only printing MLIR",
+    )
+    parser.add_argument(
+        "--compare-cpu",
+        action="store_true",
+        help="run deterministic random data and compare each output tile with CPU",
+    )
+    parser.add_argument(
+        "--wave-opt",
+        type=Path,
+        default=None,
+        help="path to wave-opt; defaults to build/bin/wave-opt",
+    )
+    parser.add_argument(
+        "--mlir-runner",
+        type=Path,
+        default=None,
+        help="path to mlir-runner; defaults to build/llvm-install/bin/mlir-runner",
+    )
+    parser.add_argument(
+        "--shared-lib",
+        action="append",
+        default=None,
+        type=Path,
+        help="shared library for mlir-runner; defaults to the usual Wave/MLIR libs",
+    )
+    parser.add_argument(
+        "--atol",
+        type=float,
+        default=1.0e-3,
+        help="absolute tolerance for --compare-cpu",
+    )
+    parser.add_argument(
+        "--rtol",
+        type=float,
+        default=1.0e-3,
+        help="relative tolerance for --compare-cpu",
+    )
+
+
+def _parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__.split("\n\n", 1)[0])
+    _add_shape_args(parser)
+    _add_tile_args(parser)
+    _add_codegen_args(parser)
+    _add_runner_args(parser)
     return parser.parse_args(argv)
 
 
@@ -135,11 +215,114 @@ def _select_matrix_intrinsic(chip: str, requested: str) -> str:
     return "mfma" if chip.startswith("gfx9") else "wmma"
 
 
+def _repo_root() -> Path:
+    return Path(__file__).resolve().parents[2]
+
+
+def _default_shared_libs(repo_root: Path) -> list[Path]:
+    return [
+        repo_root / "build" / "llvm-install" / "lib" / "libmlir_rocm_runtime.so",
+        repo_root / "build" / "llvm-install" / "lib" / "libmlir_runner_utils.so",
+        repo_root / "build" / "lib" / "libwave_runtime.so",
+    ]
+
+
+def _run_command(cmd: list[str], *, input_text: str) -> str:
+    proc = subprocess.run(
+        cmd,
+        input=input_text,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if proc.returncode != 0:
+        if proc.stdout:
+            sys.stdout.write(proc.stdout)
+        if proc.stderr:
+            sys.stderr.write(proc.stderr)
+        raise SystemExit(proc.returncode)
+    if proc.stderr:
+        sys.stderr.write(proc.stderr)
+    return proc.stdout
+
+
+def _run_module(module_text: str, args: argparse.Namespace) -> str:
+    if not args.chip:
+        raise SystemExit("--run needs --chip=<gfx>")
+    repo_root = _repo_root()
+    wave_opt = args.wave_opt or repo_root / "build" / "bin" / "wave-opt"
+    mlir_runner = (
+        args.mlir_runner or repo_root / "build" / "llvm-install" / "bin" / "mlir-runner"
+    )
+    lowered = _run_command(
+        [
+            str(wave_opt),
+            f"--wave-compile-kernels=chip={args.chip}",
+            "--convert-scf-to-cf",
+            "--gpu-to-llvm=use-bare-pointers-for-kernels=true",
+            "--convert-to-llvm",
+            "--reconcile-unrealized-casts",
+        ],
+        input_text=module_text,
+    )
+    runner_cmd = [str(mlir_runner)]
+    for lib in args.shared_lib or _default_shared_libs(repo_root):
+        runner_cmd.append(f"--shared-libs={lib}")
+    runner_cmd.append("--entry-point-result=void")
+    return _run_command(runner_cmd, input_text=lowered)
+
+
+def _parse_runner_values(output: str) -> tuple[float, ...]:
+    try:
+        data = output.split("data =", 1)[1]
+    except IndexError as exc:
+        raise ValueError("mlir-runner output has no memref data payload") from exc
+    pattern = r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?"
+    return tuple(float(x) for x in re.findall(pattern, data))
+
+
+def _compare_tile_multisets(
+    actual: tuple[float, ...],
+    expected: tuple[float, ...],
+    *,
+    atol: float,
+    rtol: float,
+) -> tuple[bool, str]:
+    if len(actual) != len(expected):
+        return False, f"length mismatch: gpu={len(actual)} cpu={len(expected)}"
+    tile_size = 256
+    worst = (0.0, 0, 0, 0.0, 0.0)
+    for tile in range(len(actual) // tile_size):
+        base = tile * tile_size
+        got_tile = sorted(actual[base : base + tile_size])
+        exp_tile = sorted(expected[base : base + tile_size])
+        for slot, (got, exp) in enumerate(zip(got_tile, exp_tile, strict=True)):
+            diff = abs(got - exp)
+            if diff > worst[0]:
+                worst = (diff, tile, slot, got, exp)
+            if not math.isclose(got, exp, rel_tol=rtol, abs_tol=atol):
+                return (
+                    False,
+                    f"tile {tile} slot {slot}: gpu={got} cpu={exp} " f"abs_diff={diff}",
+                )
+    diff, tile, slot, got, exp = worst
+    return (
+        True,
+        f"tiles={len(actual) // tile_size} max_abs_diff={diff} "
+        f"at tile {tile} slot {slot} (gpu={got}, cpu={exp})",
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(sys.argv[1:] if argv is None else argv)
     _ensure_package_on_path()
-    from mlir.dialects.wave_matmul import build_wmma_f16_matmul_module
+    from mlir.dialects.wave_matmul import (
+        build_wmma_f16_matmul_module,
+        compute_wmma_f16_matmul_reference_buffer,
+    )
 
+    matrix_intrinsic = _select_matrix_intrinsic(args.chip, args.matrix_intrinsic)
+    random_data = args.random_data or args.compare_cpu
     module = build_wmma_f16_matmul_module(
         M=args.m,
         N=args.n,
@@ -148,10 +331,45 @@ def main(argv: list[str] | None = None) -> int:
         BN=args.bn,
         wave_m_tiles=args.wave_m_tiles,
         wave_n_tiles=args.wave_n_tiles,
+        wave_k_tiles=args.wave_k_tiles,
         use_buffer=args.use_buffer,
-        matrix_intrinsic=_select_matrix_intrinsic(args.chip, args.matrix_intrinsic),
+        matrix_intrinsic=matrix_intrinsic,
+        random_data=random_data,
+        random_seed=args.seed,
     )
-    sys.stdout.write(str(module))
+    module_text = str(module)
+    if not args.run and not args.compare_cpu:
+        sys.stdout.write(module_text)
+        return 0
+
+    output = _run_module(module_text, args)
+    if not args.compare_cpu:
+        sys.stdout.write(output)
+        return 0
+
+    expected = compute_wmma_f16_matmul_reference_buffer(
+        M=args.m,
+        N=args.n,
+        K=args.k,
+        BM=args.bm,
+        BN=args.bn,
+        wave_m_tiles=args.wave_m_tiles,
+        wave_n_tiles=args.wave_n_tiles,
+        wave_k_tiles=args.wave_k_tiles,
+        random_data=True,
+        random_seed=args.seed,
+        matrix_intrinsic=matrix_intrinsic,
+    )
+    ok, message = _compare_tile_multisets(
+        _parse_runner_values(output),
+        expected,
+        atol=args.atol,
+        rtol=args.rtol,
+    )
+    if not ok:
+        sys.stderr.write(f"CPU comparison failed: {message}\n")
+        return 1
+    sys.stdout.write(f"CPU comparison passed: {message}\n")
     return 0
 
 

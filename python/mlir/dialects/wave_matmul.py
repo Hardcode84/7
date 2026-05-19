@@ -33,14 +33,16 @@ Tile-to-wave mapping:
     workgroup runs ``BM * BN`` waves.
   * The wave's local id within its workgroup is ``workitem_id_x >> 5``,
     decomposed into ``(m_wave, n_wave)`` via ``BN`` being a power of 2.
-  * Each wave computes a ``wave_m_tiles x wave_n_tiles`` rectangle of
-    16x16 output tiles.
+  * Each wave computes a virtual
+    ``wave_m_tiles x wave_n_tiles x wave_k_tiles`` tile. The K axis is
+    folded into the same accumulator rectangle.
 
 Shape constraints:
   * ``M``, ``N``, ``K`` are positive multiples of 16.
   * ``BM * wave_m_tiles`` divides ``M / 16``.
   * ``BN * wave_n_tiles`` divides ``N / 16``; ``BN`` is a power of 2 (so the
     wave-id decomposition uses ``andi`` + ``shri``).
+  * ``wave_k_tiles`` divides ``K / 16``.
   * ``BM * BN <= 32`` (RDNA3 caps a workgroup at 32 waves of 32 lanes).
 """
 
@@ -94,8 +96,11 @@ class _MatmulConfig:
     BN: int
     wave_m_tiles: int = 1
     wave_n_tiles: int = 1
+    wave_k_tiles: int = 1
     use_buffer: bool = False
     matrix_intrinsic: str = "wmma"
+    random_data: bool = False
+    random_seed: int = 0
 
     def __post_init__(self) -> None:
         _validate_positive_shape(self)
@@ -140,13 +145,18 @@ class _MatmulConfig:
         return self.K // 16
 
     @property
+    def virtual_k_steps(self) -> int:
+        return self.k_steps // self.wave_k_tiles
+
+    @property
     def log2_BN(self) -> int:
         return self.BN.bit_length() - 1
 
     @property
     def lds_bytes(self) -> int:
         return (
-            (self.wave_m_tiles + self.wave_n_tiles)
+            self.wave_k_tiles
+            * (self.wave_m_tiles + self.wave_n_tiles)
             * self.waves_per_workgroup
             * self.mma.lds_dwords_per_frag
             * 4
@@ -163,11 +173,12 @@ def _validate_positive_shape(cfg: _MatmulConfig) -> None:
             raise ValueError(f"{dim} must be a positive multiple of 16; got {val}")
     if cfg.BM < 1 or cfg.BN < 1:
         raise ValueError(f"BM and BN must be >= 1; got BM={cfg.BM}, BN={cfg.BN}")
-    if cfg.wave_m_tiles < 1 or cfg.wave_n_tiles < 1:
+    if cfg.wave_m_tiles < 1 or cfg.wave_n_tiles < 1 or cfg.wave_k_tiles < 1:
         raise ValueError(
-            f"wave_m_tiles and wave_n_tiles must be >= 1; "
+            f"wave_m_tiles, wave_n_tiles and wave_k_tiles must be >= 1; "
             f"got wave_m_tiles={cfg.wave_m_tiles}, "
-            f"wave_n_tiles={cfg.wave_n_tiles}"
+            f"wave_n_tiles={cfg.wave_n_tiles}, "
+            f"wave_k_tiles={cfg.wave_k_tiles}"
         )
 
 
@@ -189,6 +200,10 @@ def _validate_tile_shape(cfg: _MatmulConfig) -> None:
             f"BN * wave_n_tiles (={n_tiles_per_block}) must divide "
             f"N/16 (={cfg.N // 16})"
         )
+    if cfg.k_steps % cfg.wave_k_tiles != 0:
+        raise ValueError(
+            f"wave_k_tiles (={cfg.wave_k_tiles}) must divide K/16 (={cfg.k_steps})"
+        )
     if cfg.waves_per_workgroup > 32:
         raise ValueError(
             f"BM * BN must be <= 32 (RDNA3 workgroup wave cap); "
@@ -205,6 +220,106 @@ _PRINT_HELPER = "printMemrefF32"
 
 def _splat_const(bld: dsl.FunctionBuilder, value: int) -> dsl.Value:
     return bld.splat(bld.constant(dsl.i32(), value))
+
+
+def _deterministic_random_values(
+    count: int, *, seed: int, stream: int
+) -> tuple[float, ...]:
+    state = (seed ^ ((stream + 1) * 0x9E3779B9)) & 0xFFFFFFFF
+    values: list[float] = []
+    for _ in range(count):
+        state = (1664525 * state + 1013904223) & 0xFFFFFFFF
+        values.append((((state >> 24) % 17) - 8) * 0.25)
+    return tuple(values)
+
+
+def generate_wmma_f16_matmul_inputs(
+    M: int,
+    N: int,
+    K: int,
+    *,
+    random_data: bool = False,
+    random_seed: int = 0,
+) -> tuple[tuple[float, ...], tuple[float, ...]]:
+    if random_data:
+        return (
+            _deterministic_random_values(M * K, seed=random_seed, stream=0),
+            _deterministic_random_values(N * K, seed=random_seed, stream=1),
+        )
+
+    a_half = (M * K) // 2
+    b_half = (N * K) // 2
+    return (
+        tuple([1.0] * a_half + [2.0] * (M * K - a_half)),
+        tuple([1.0] * b_half + [2.0] * (N * K - b_half)),
+    )
+
+
+def _reference_tile(
+    cfg: _MatmulConfig,
+    a_values: tuple[float, ...],
+    b_values: tuple[float, ...],
+    m_tile: int,
+    n_tile: int,
+) -> tuple[float, ...]:
+    tile: list[float] = []
+    for mi in range(16):
+        m = m_tile * 16 + mi
+        for nj in range(16):
+            n = n_tile * 16 + nj
+            acc = 0.0
+            for k in range(cfg.K):
+                acc += a_values[m * cfg.K + k] * b_values[n * cfg.K + k]
+            tile.append(acc)
+    return tuple(tile)
+
+
+def compute_wmma_f16_matmul_reference_buffer(
+    M: int,
+    N: int,
+    K: int,
+    *,
+    BM: int = 1,
+    BN: int = 1,
+    wave_m_tiles: int = 1,
+    wave_n_tiles: int = 1,
+    wave_k_tiles: int = 1,
+    random_data: bool = False,
+    random_seed: int = 0,
+    matrix_intrinsic: str = "wmma",
+) -> tuple[float, ...]:
+    cfg = _MatmulConfig(
+        M=M,
+        N=N,
+        K=K,
+        BM=BM,
+        BN=BN,
+        wave_m_tiles=wave_m_tiles,
+        wave_n_tiles=wave_n_tiles,
+        wave_k_tiles=wave_k_tiles,
+        random_data=random_data,
+        random_seed=random_seed,
+        matrix_intrinsic=matrix_intrinsic,
+    )
+    a_values, b_values = generate_wmma_f16_matmul_inputs(
+        M, N, K, random_data=random_data, random_seed=random_seed
+    )
+    out: list[float] = []
+    for wg_m in range(cfg.M_blocks):
+        for wg_n in range(cfg.N_blocks):
+            for wave_id in range(cfg.waves_per_workgroup):
+                m_wave = wave_id // cfg.BN
+                n_wave = wave_id % cfg.BN
+                m_base = wg_m * cfg.BM * cfg.wave_m_tiles
+                n_base = wg_n * cfg.BN * cfg.wave_n_tiles
+                for i in range(cfg.wave_m_tiles):
+                    for j in range(cfg.wave_n_tiles):
+                        m_tile = m_base + m_wave * cfg.wave_m_tiles + i
+                        n_tile = n_base + n_wave * cfg.wave_n_tiles + j
+                        out.extend(
+                            _reference_tile(cfg, a_values, b_values, m_tile, n_tile)
+                        )
+    return tuple(out)
 
 
 @dataclass(frozen=True)
@@ -322,7 +437,7 @@ def _emit_lds_staging(
     lane = dsl.sym("lane")
     wave_id = dsl.floor(wi / 32)
     bindings = {wi: coords.wi, lane: coords.lane}
-    slots_per_wave = cfg.wave_m_tiles + cfg.wave_n_tiles
+    slots_per_wave = cfg.wave_k_tiles * (cfg.wave_m_tiles + cfg.wave_n_tiles)
 
     def slot_ptr(slot: int) -> dsl.Value:
         slot_off = bld.index_expr(
@@ -333,8 +448,16 @@ def _emit_lds_staging(
         )
         return bld.ptr_add(lds, slot_off)
 
-    a_lds_ptrs = tuple(slot_ptr(i) for i in range(cfg.wave_m_tiles))
-    b_lds_ptrs = tuple(slot_ptr(cfg.wave_m_tiles + i) for i in range(cfg.wave_n_tiles))
+    a_lds_ptrs = tuple(
+        slot_ptr(k * (cfg.wave_m_tiles + cfg.wave_n_tiles) + i)
+        for k in range(cfg.wave_k_tiles)
+        for i in range(cfg.wave_m_tiles)
+    )
+    b_lds_ptrs = tuple(
+        slot_ptr(k * (cfg.wave_m_tiles + cfg.wave_n_tiles) + cfg.wave_m_tiles + i)
+        for k in range(cfg.wave_k_tiles)
+        for i in range(cfg.wave_n_tiles)
+    )
     return _LdsStaging(
         reg_simd_type=reg_simd_type,
         a_lds_ptrs=a_lds_ptrs,
@@ -375,7 +498,7 @@ def _load_fragment_group_through_lds(
 def _ptr_add_const(bld: dsl.FunctionBuilder, ptr: dsl.Value, offset: int) -> dsl.Value:
     if offset == 0:
         return ptr
-    return bld.ptr_add(ptr, _splat_const(bld, offset))
+    return bld.ptr_add(ptr, bld.constant(dsl.i32(), offset))
 
 
 @dataclass(frozen=True)
@@ -413,11 +536,13 @@ def _initial_tile_ptrs(
     bld: dsl.FunctionBuilder, cfg: _MatmulConfig, coords: _TileCoords
 ) -> _TilePtrs:
     a0 = tuple(
-        _ptr_add_const(bld, coords.a_lane_base, i * 16 * cfg.K)
+        _ptr_add_const(bld, coords.a_lane_base, i * 16 * cfg.K + k * 16)
+        for k in range(cfg.wave_k_tiles)
         for i in range(cfg.wave_m_tiles)
     )
     b0 = tuple(
-        _ptr_add_const(bld, coords.b_lane_base, i * 16 * cfg.K)
+        _ptr_add_const(bld, coords.b_lane_base, i * 16 * cfg.K + k * 16)
+        for k in range(cfg.wave_k_tiles)
         for i in range(cfg.wave_n_tiles)
     )
     c = tuple(
@@ -438,7 +563,8 @@ def _initial_loop_args(
     types: _KernelTypes,
     staging: _LdsStaging,
     ptrs: _TilePtrs,
-    k_step_offset: dsl.Value,
+    a_step_offset: dsl.Value,
+    b_step_offset: dsl.Value,
 ) -> tuple[dsl.Value, ...]:
     init_acc = bld.fragment_fill(bld.constant(dsl.i32(), 0), types.acc)
     a_frags, b_frags = _load_fragment_group_through_lds(
@@ -449,16 +575,18 @@ def _initial_loop_args(
         *init_accs,
         *a_frags,
         *b_frags,
-        *_advance_ptrs(bld, ptrs.a0, k_step_offset),
-        *_advance_ptrs(bld, ptrs.b0, k_step_offset),
+        *_advance_ptrs(bld, ptrs.a0, a_step_offset),
+        *_advance_ptrs(bld, ptrs.b0, b_step_offset),
     )
 
 
 def _split_loop_state(values: tuple[dsl.Value, ...], cfg: _MatmulConfig) -> _LoopState:
     acc_end = cfg.tiles_per_wave
-    a_frag_end = acc_end + cfg.wave_m_tiles
-    b_frag_end = a_frag_end + cfg.wave_n_tiles
-    a_ptr_end = b_frag_end + cfg.wave_m_tiles
+    a_count = cfg.wave_k_tiles * cfg.wave_m_tiles
+    b_count = cfg.wave_k_tiles * cfg.wave_n_tiles
+    a_frag_end = acc_end + a_count
+    b_frag_end = a_frag_end + b_count
+    a_ptr_end = b_frag_end + a_count
     return _LoopState(
         accs=values[:acc_end],
         afs=values[acc_end:a_frag_end],
@@ -475,12 +603,20 @@ def _emit_mma_grid(
     bfs: tuple[dsl.Value, ...],
     accs: tuple[dsl.Value, ...],
 ) -> tuple[dsl.Value, ...]:
-    new_accs: list[dsl.Value] = []
-    for i, a_frag in enumerate(afs):
-        for j, b_frag in enumerate(bfs):
-            acc = accs[i * cfg.wave_n_tiles + j]
-            new_accs.append(bld.mma(cfg.mma.kind, a_frag, b_frag, acc))
-    return tuple(new_accs)
+    acc_grid = list(accs)
+    for k in range(cfg.wave_k_tiles):
+        a_base = k * cfg.wave_m_tiles
+        b_base = k * cfg.wave_n_tiles
+        for i in range(cfg.wave_m_tiles):
+            for j in range(cfg.wave_n_tiles):
+                acc_index = i * cfg.wave_n_tiles + j
+                acc_grid[acc_index] = bld.mma(
+                    cfg.mma.kind,
+                    afs[a_base + i],
+                    bfs[b_base + j],
+                    acc_grid[acc_index],
+                )
+    return tuple(acc_grid)
 
 
 def _emit_pipelined_step(
@@ -489,7 +625,8 @@ def _emit_pipelined_step(
     types: _KernelTypes,
     staging: _LdsStaging,
     state: _LoopState,
-    k_step_offset: dsl.Value,
+    a_step_offset: dsl.Value,
+    b_step_offset: dsl.Value,
 ) -> list[dsl.Value]:
     new_accs = _emit_mma_grid(bld, cfg, state.afs, state.bfs, state.accs)
     new_afs, new_bfs = _load_fragment_group_through_lds(
@@ -499,8 +636,8 @@ def _emit_pipelined_step(
         *new_accs,
         *new_afs,
         *new_bfs,
-        *_advance_ptrs(bld, state.aps, k_step_offset),
-        *_advance_ptrs(bld, state.bps, k_step_offset),
+        *_advance_ptrs(bld, state.aps, a_step_offset),
+        *_advance_ptrs(bld, state.bps, b_step_offset),
     ]
 
 
@@ -515,23 +652,34 @@ def _store_final_tiles(
         bld.fragment_store(acc, c_ptr)
 
 
+def _emit_constant_fill(
+    bld: dsl.FunctionBuilder,
+    buf: dsl.Value,
+    values: tuple[float, ...],
+    element_type: dsl.Type,
+    index_type: dsl.Type,
+) -> None:
+    for i, value in enumerate(values):
+        bld.memref_store(
+            bld.constant(element_type, value),
+            buf,
+            [bld.constant(index_type, i)],
+        )
+
+
 def _emit_kernel(bld: dsl.FunctionBuilder, cfg: _MatmulConfig) -> None:
     """Populate tiled matmul kernel body."""
     coords = _emit_tile_coords(bld, cfg)
     types = _kernel_types(cfg)
     staging = _emit_lds_staging(bld, cfg, coords)
-    c16 = _splat_const(bld, 16)
+    virtual_k_stride = bld.constant(dsl.i32(), 16 * cfg.wave_k_tiles)
     ptrs = _initial_tile_ptrs(bld, cfg, coords)
-    init_args = _initial_loop_args(bld, cfg, types, staging, ptrs, c16)
+    init_args = _initial_loop_args(
+        bld, cfg, types, staging, ptrs, virtual_k_stride, virtual_k_stride
+    )
 
     # The fourth kernel arg is the pipelined-loop trip count
-    # (`K/16 - 1`, precomputed on the host). The loop body always pairs
-    # a WMMA on the carried fragment with a prefetch of the *next*
-    # fragment, so we run one fewer iteration than there are K-tiles
-    # and finish the last WMMA in the epilogue. The pre-tested
-    # `scf.for` shape (no `wave.nonzero_trip`) keeps the K=16
-    # (k_steps=1) edge case correct by collapsing the loop to zero
-    # iterations.
+    # (`K / (16 * wave_k_tiles) - 1`, precomputed on host).
     trip_count_i32 = bld.args[3]
     zero_i32 = bld.constant(dsl.i32(), 0)
     one_i32 = bld.constant(dsl.i32(), 1)
@@ -543,7 +691,17 @@ def _emit_kernel(bld: dsl.FunctionBuilder, cfg: _MatmulConfig) -> None:
         init_args=init_args,
     ) as forop:
         state = _split_loop_state(tuple(forop.inner_iter_args), cfg)
-        scf.YieldOp(_emit_pipelined_step(bld, cfg, types, staging, state, c16))
+        scf.YieldOp(
+            _emit_pipelined_step(
+                bld,
+                cfg,
+                types,
+                staging,
+                state,
+                virtual_k_stride,
+                virtual_k_stride,
+            )
+        )
 
     final_state = _split_loop_state(tuple(forop.results), cfg)
     _store_final_tiles(bld, cfg, final_state, ptrs.c)
@@ -584,23 +742,34 @@ def _emit_host(bld: dsl.FunctionBuilder, cfg: _MatmulConfig) -> None:
     b_buf = bld.alloc([cfg.b_elements], f16)
     c_buf = bld.alloc([cfg.total_elements], f32)
 
-    # A is row-major MxK: rows [0, M/2) -> first M*K/2 elements (1.0);
-    # rows [M/2, M) -> the rest (2.0).
-    a_half = bld.constant(index, cfg.a_elements // 2)
-    a_total = bld.constant(index, cfg.a_elements)
-    with bld.for_loop(c0, a_half, c1) as i:
-        bld.memref_store(one_f16, a_buf, [i])
-    with bld.for_loop(a_half, a_total, c1) as i:
-        bld.memref_store(two_f16, a_buf, [i])
+    if cfg.random_data:
+        a_values, b_values = generate_wmma_f16_matmul_inputs(
+            cfg.M,
+            cfg.N,
+            cfg.K,
+            random_data=True,
+            random_seed=cfg.random_seed,
+        )
+        _emit_constant_fill(bld, a_buf, a_values, f16, index)
+        _emit_constant_fill(bld, b_buf, b_values, f16, index)
+    else:
+        # A is row-major MxK: rows [0, M/2) -> first M*K/2 elements (1.0);
+        # rows [M/2, M) -> the rest (2.0).
+        a_half = bld.constant(index, cfg.a_elements // 2)
+        a_total = bld.constant(index, cfg.a_elements)
+        with bld.for_loop(c0, a_half, c1) as i:
+            bld.memref_store(one_f16, a_buf, [i])
+        with bld.for_loop(a_half, a_total, c1) as i:
+            bld.memref_store(two_f16, a_buf, [i])
 
-    # B is column-major KxN (== row-major NxK): columns [0, N/2) -> first
-    # N*K/2 elements (1.0); columns [N/2, N) -> the rest (2.0).
-    b_half = bld.constant(index, cfg.b_elements // 2)
-    b_total = bld.constant(index, cfg.b_elements)
-    with bld.for_loop(c0, b_half, c1) as i:
-        bld.memref_store(one_f16, b_buf, [i])
-    with bld.for_loop(b_half, b_total, c1) as i:
-        bld.memref_store(two_f16, b_buf, [i])
+        # B is column-major KxN (== row-major NxK): columns [0, N/2) -> first
+        # N*K/2 elements (1.0); columns [N/2, N) -> the rest (2.0).
+        b_half = bld.constant(index, cfg.b_elements // 2)
+        b_total = bld.constant(index, cfg.b_elements)
+        with bld.for_loop(c0, b_half, c1) as i:
+            bld.memref_store(one_f16, b_buf, [i])
+        with bld.for_loop(b_half, b_total, c1) as i:
+            bld.memref_store(two_f16, b_buf, [i])
 
     with bld.for_loop(c0, c_total, c1) as i:
         bld.memref_store(zero_f32, c_buf, [i])
@@ -618,11 +787,8 @@ def _emit_host(bld: dsl.FunctionBuilder, cfg: _MatmulConfig) -> None:
     [b_ptr] = bld.call(_F16_PTR_HELPER, [bld.memref_cast(b_buf, dyn_f16)], [f16_ptr])
     [c_ptr] = bld.call(_F32_PTR_HELPER, [c_buf], [f32_ptr])
 
-    # cfg.K is the buffer K used for allocation; the kernel runs a
-    # software-pipelined loop whose trip count is `K/16 - 1` (the
-    # prologue/epilogue absorb the first/last WMMA), so we pass that
-    # value (clamped at 0) as the fourth i32 kernel arg.
-    pipelined_trip_count = max(cfg.k_steps - 1, 0)
+    # Virtual K tiles keep multiple adjacent MFMA K-slices in one loop body.
+    pipelined_trip_count = max(cfg.virtual_k_steps - 1, 0)
     trip_count_value = bld.constant(dsl.i32(), pipelined_trip_count)
     launch_operands = [a_ptr, b_ptr, c_ptr, trip_count_value]
     bld.launch(
@@ -644,8 +810,11 @@ def build_wmma_f16_matmul_module(
     BN: int = 1,
     wave_m_tiles: int = 1,
     wave_n_tiles: int = 1,
+    wave_k_tiles: int = 1,
     use_buffer: bool = False,
     matrix_intrinsic: str = "wmma",
+    random_data: bool = False,
+    random_seed: int = 0,
 ) -> Module:
     """Return an MLIR :class:`Module` for the tiled WMMA f16 matmul.
 
@@ -682,8 +851,11 @@ def build_wmma_f16_matmul_module(
         BN=BN,
         wave_m_tiles=wave_m_tiles,
         wave_n_tiles=wave_n_tiles,
+        wave_k_tiles=wave_k_tiles,
         use_buffer=use_buffer,
         matrix_intrinsic=matrix_intrinsic,
+        random_data=random_data,
+        random_seed=random_seed,
     )
     bld = dsl.ModuleBuilder()
     with bld:
@@ -723,4 +895,8 @@ def build_wmma_f16_matmul_module(
     return bld.module
 
 
-__all__ = ["build_wmma_f16_matmul_module"]
+__all__ = [
+    "build_wmma_f16_matmul_module",
+    "compute_wmma_f16_matmul_reference_buffer",
+    "generate_wmma_f16_matmul_inputs",
+]
