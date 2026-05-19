@@ -30,17 +30,16 @@ end-to-end without disturbing the existing fragment_store codegen.
 
 Tile-to-wave mapping:
   * The grid is launched 2-D as ``(M_blocks, N_blocks)`` and each
-    workgroup runs ``BM * BN`` waves (one wave per 16x16 output tile).
+    workgroup runs ``BM * BN`` waves.
   * The wave's local id within its workgroup is ``workitem_id_x >> 5``,
     decomposed into ``(m_wave, n_wave)`` via ``BN`` being a power of 2.
-  * The wave's global tile is then
-    ``(m_tile, n_tile) = (workgroup_id_x * BM + m_wave,
-                          workgroup_id_y * BN + n_wave)``.
+  * Each wave computes a ``wave_m_tiles x wave_n_tiles`` rectangle of
+    16x16 output tiles.
 
 Shape constraints:
   * ``M``, ``N``, ``K`` are positive multiples of 16.
-  * ``BM`` is a positive integer dividing ``M / 16``.
-  * ``BN`` is a positive *power of 2* dividing ``N / 16`` (so the
+  * ``BM * wave_m_tiles`` divides ``M / 16``.
+  * ``BN * wave_n_tiles`` divides ``N / 16``; ``BN`` is a power of 2 (so the
     wave-id decomposition uses ``andi`` + ``shri``).
   * ``BM * BN <= 32`` (RDNA3 caps a workgroup at 32 waves of 32 lanes).
 """
@@ -93,29 +92,14 @@ class _MatmulConfig:
     K: int
     BM: int
     BN: int
+    wave_m_tiles: int = 1
+    wave_n_tiles: int = 1
     use_buffer: bool = False
     matrix_intrinsic: str = "wmma"
 
     def __post_init__(self) -> None:
-        for dim, val in (("M", self.M), ("N", self.N), ("K", self.K)):
-            if val <= 0 or val % 16 != 0:
-                raise ValueError(f"{dim} must be a positive multiple of 16; got {val}")
-        if self.BM < 1 or self.BN < 1:
-            raise ValueError(f"BM and BN must be >= 1; got BM={self.BM}, BN={self.BN}")
-        if not _is_power_of_two(self.BN):
-            raise ValueError(
-                f"BN must be a positive power of two (for the wave-id "
-                f"decomposition); got BN={self.BN}"
-            )
-        if (self.M // 16) % self.BM != 0:
-            raise ValueError(f"BM (={self.BM}) must divide M/16 (={self.M // 16})")
-        if (self.N // 16) % self.BN != 0:
-            raise ValueError(f"BN (={self.BN}) must divide N/16 (={self.N // 16})")
-        if self.waves_per_workgroup > 32:
-            raise ValueError(
-                f"BM * BN must be <= 32 (RDNA3 workgroup wave cap); "
-                f"got BM={self.BM}, BN={self.BN} (product={self.waves_per_workgroup})"
-            )
+        _validate_positive_shape(self)
+        _validate_tile_shape(self)
 
     @property
     def total_elements(self) -> int:
@@ -136,16 +120,20 @@ class _MatmulConfig:
         return self.BM * self.BN
 
     @property
+    def tiles_per_wave(self) -> int:
+        return self.wave_m_tiles * self.wave_n_tiles
+
+    @property
     def threads_per_workgroup(self) -> int:
         return 32 * self.waves_per_workgroup
 
     @property
     def M_blocks(self) -> int:
-        return self.M // (16 * self.BM)
+        return self.M // (16 * self.BM * self.wave_m_tiles)
 
     @property
     def N_blocks(self) -> int:
-        return self.N // (16 * self.BN)
+        return self.N // (16 * self.BN * self.wave_n_tiles)
 
     @property
     def k_steps(self) -> int:
@@ -157,12 +145,55 @@ class _MatmulConfig:
 
     @property
     def lds_bytes(self) -> int:
-        """Per-workgroup LDS arena (A and B fragment slots, one per wave)."""
-        return 2 * self.waves_per_workgroup * self.mma.lds_dwords_per_frag * 4
+        return (
+            (self.wave_m_tiles + self.wave_n_tiles)
+            * self.waves_per_workgroup
+            * self.mma.lds_dwords_per_frag
+            * 4
+        )
 
     @property
     def mma(self) -> _MmaVariant:
         return _select_mma_variant(self.matrix_intrinsic)
+
+
+def _validate_positive_shape(cfg: _MatmulConfig) -> None:
+    for dim, val in (("M", cfg.M), ("N", cfg.N), ("K", cfg.K)):
+        if val <= 0 or val % 16 != 0:
+            raise ValueError(f"{dim} must be a positive multiple of 16; got {val}")
+    if cfg.BM < 1 or cfg.BN < 1:
+        raise ValueError(f"BM and BN must be >= 1; got BM={cfg.BM}, BN={cfg.BN}")
+    if cfg.wave_m_tiles < 1 or cfg.wave_n_tiles < 1:
+        raise ValueError(
+            f"wave_m_tiles and wave_n_tiles must be >= 1; "
+            f"got wave_m_tiles={cfg.wave_m_tiles}, "
+            f"wave_n_tiles={cfg.wave_n_tiles}"
+        )
+
+
+def _validate_tile_shape(cfg: _MatmulConfig) -> None:
+    if not _is_power_of_two(cfg.BN):
+        raise ValueError(
+            f"BN must be a positive power of two (for the wave-id "
+            f"decomposition); got BN={cfg.BN}"
+        )
+    m_tiles_per_block = cfg.BM * cfg.wave_m_tiles
+    n_tiles_per_block = cfg.BN * cfg.wave_n_tiles
+    if (cfg.M // 16) % m_tiles_per_block != 0:
+        raise ValueError(
+            f"BM * wave_m_tiles (={m_tiles_per_block}) must divide "
+            f"M/16 (={cfg.M // 16})"
+        )
+    if (cfg.N // 16) % n_tiles_per_block != 0:
+        raise ValueError(
+            f"BN * wave_n_tiles (={n_tiles_per_block}) must divide "
+            f"N/16 (={cfg.N // 16})"
+        )
+    if cfg.waves_per_workgroup > 32:
+        raise ValueError(
+            f"BM * BN must be <= 32 (RDNA3 workgroup wave cap); "
+            f"got BM={cfg.BM}, BN={cfg.BN} (product={cfg.waves_per_workgroup})"
+        )
 
 
 _KERNEL_NAME = "wmma_f16_matmul_tiled"
@@ -182,9 +213,9 @@ class _TileCoords:
 
     wi: dsl.Value  # raw workitem_id; wave_id = wi // 32 lives in index_expr
     lane: dsl.Value  # lane id within the wave
-    a_lane_base: dsl.Value  # per-lane pointer into A for this wave's tile
-    b_lane_base: dsl.Value  # per-lane pointer into B for this wave's tile
-    c_ptr: dsl.Value  # per-lane pointer into C for this wave's tile
+    a_lane_base: dsl.Value
+    b_lane_base: dsl.Value
+    c_ptr: dsl.Value
 
 
 def _wrap_in_buffer(
@@ -238,27 +269,25 @@ def _emit_tile_coords(bld: dsl.FunctionBuilder, cfg: _MatmulConfig) -> _TileCoor
 
     stride_per_tile = 16 * cfg.K
     a_off = bld.index_expr(
-        wg_m * (cfg.BM * stride_per_tile)
-        + m_wave * stride_per_tile
+        wg_m * (cfg.BM * cfg.wave_m_tiles * stride_per_tile)
+        + m_wave * (cfg.wave_m_tiles * stride_per_tile)
         + lane_mod16 * cfg.K,
         bindings=sym_to_val,
     )
     a_lane_base = bld.ptr_add(a_arg, a_off)
 
     b_off = bld.index_expr(
-        wg_n * (cfg.BN * stride_per_tile)
-        + n_wave * stride_per_tile
+        wg_n * (cfg.BN * cfg.wave_n_tiles * stride_per_tile)
+        + n_wave * (cfg.wave_n_tiles * stride_per_tile)
         + lane_mod16 * cfg.K,
         bindings=sym_to_val,
     )
     b_lane_base = bld.ptr_add(b_arg, b_off)
 
-    # C output offset (in f32 elements):
-    #   c_off = ((wg_m * N_blocks + wg_n) * waves_per_wg + wave_id) * 256
     c_off = bld.index_expr(
-        wg_m * (cfg.N_blocks * cfg.waves_per_workgroup * 256)
-        + wg_n * (cfg.waves_per_workgroup * 256)
-        + wave_id * 256,
+        wg_m * (cfg.N_blocks * cfg.waves_per_workgroup * cfg.tiles_per_wave * 256)
+        + wg_n * (cfg.waves_per_workgroup * cfg.tiles_per_wave * 256)
+        + wave_id * (cfg.tiles_per_wave * 256),
         bindings=sym_to_val,
     )
     c_ptr = bld.ptr_add(c_arg, c_off)
@@ -277,22 +306,14 @@ class _LdsStaging:
     """Per-wave LDS slots for the matmul fragment round-trip."""
 
     reg_simd_type: dsl.Type
-    a_lds_ptrs: dsl.Value
-    b_lds_ptrs: dsl.Value
+    a_lds_ptrs: tuple[dsl.Value, ...]
+    b_lds_ptrs: tuple[dsl.Value, ...]
 
 
 def _emit_lds_staging(
     bld: dsl.FunctionBuilder, cfg: _MatmulConfig, coords: _TileCoords
 ) -> _LdsStaging:
-    """Materialize per-wave A/B LDS slot pointers.
-
-    Offsets are in i32 ELEMENTS (`lds_base()` is `!wave.ptr<i32,
-    shared>` and `wave.ptr_add` scales by the pointer element size).
-    Each wave's A/B slot stores one fragment, with lane L occupying
-    `ab_registers` contiguous dwords. The B slabs live after all A slabs.
-    The address arithmetic flows through `wave.index_expr` so the
-    bucketizer classifies wave_id / lane into the right slot at lowering time.
-    """
+    """Materialize per-wave A/B LDS slot pointers."""
     reg_simd_type = dsl.simd_type(
         dsl.vector_type(cfg.mma.ab_registers, dsl.i32()), width=32
     )
@@ -301,99 +322,207 @@ def _emit_lds_staging(
     lane = dsl.sym("lane")
     wave_id = dsl.floor(wi / 32)
     bindings = {wi: coords.wi, lane: coords.lane}
-    a_lds_off = bld.index_expr(
-        wave_id * cfg.mma.lds_dwords_per_frag + lane * cfg.mma.ab_registers,
-        bindings=bindings,
-    )
-    b_lds_off = bld.index_expr(
-        (cfg.waves_per_workgroup * cfg.mma.lds_dwords_per_frag)
-        + wave_id * cfg.mma.lds_dwords_per_frag
-        + lane * cfg.mma.ab_registers,
-        bindings=bindings,
-    )
+    slots_per_wave = cfg.wave_m_tiles + cfg.wave_n_tiles
+
+    def slot_ptr(slot: int) -> dsl.Value:
+        slot_off = bld.index_expr(
+            wave_id * (slots_per_wave * cfg.mma.lds_dwords_per_frag)
+            + slot * cfg.mma.lds_dwords_per_frag
+            + lane * cfg.mma.ab_registers,
+            bindings=bindings,
+        )
+        return bld.ptr_add(lds, slot_off)
+
+    a_lds_ptrs = tuple(slot_ptr(i) for i in range(cfg.wave_m_tiles))
+    b_lds_ptrs = tuple(slot_ptr(cfg.wave_m_tiles + i) for i in range(cfg.wave_n_tiles))
     return _LdsStaging(
         reg_simd_type=reg_simd_type,
-        a_lds_ptrs=bld.ptr_add(lds, a_lds_off),
-        b_lds_ptrs=bld.ptr_add(lds, b_lds_off),
+        a_lds_ptrs=a_lds_ptrs,
+        b_lds_ptrs=b_lds_ptrs,
     )
 
 
-def _load_fragments_through_lds(
+def _load_fragment_group_through_lds(
     bld: dsl.FunctionBuilder,
-    a_ptr: dsl.Value,
-    b_ptr: dsl.Value,
+    a_ptrs: tuple[dsl.Value, ...],
+    b_ptrs: tuple[dsl.Value, ...],
     a_type: dsl.Type,
     b_type: dsl.Type,
     staging: _LdsStaging,
-) -> tuple[dsl.Value, dsl.Value]:
-    """Round-trip the A and B fragments through their LDS slots.
+) -> tuple[tuple[dsl.Value, ...], tuple[dsl.Value, ...]]:
+    """Round-trip one K-step's A/B fragment group through LDS."""
+    a_loads = tuple(bld.load(ptr, staging.reg_simd_type) for ptr in a_ptrs)
+    b_loads = tuple(bld.load(ptr, staging.reg_simd_type) for ptr in b_ptrs)
 
-    Issues *both* global loads back-to-back before either `ds_store`,
-    so the second tuple's vmem latency overlaps with the first
-    tuple's drain. The ticket-wait pass observes that `ds_store A`
-    only depends on the A load and emits `s_waitcnt vmcnt(N)` with
-    `N == width(B_load)` -- i.e. B's dwords are allowed to remain in
-    flight while A's drain, instead of the conservative `vmcnt(0)`
-    we would get if every load were immediately followed by its
-    store.
+    store_tokens: list[dsl.Value] = []
+    for (regs, glob_tok), lds_ptr in zip(a_loads, staging.a_lds_ptrs, strict=True):
+        store_tokens.append(bld.store(regs, lds_ptr, after=glob_tok))
+    for (regs, glob_tok), lds_ptr in zip(b_loads, staging.b_lds_ptrs, strict=True):
+        store_tokens.append(bld.store(regs, lds_ptr, after=glob_tok))
 
-    Returns the packed `(a_frag, b_frag)` after the workgroup
-    `wave.barrier` so the caller can feed them directly into `mma`.
-    """
-    a_regs, a_glob_tok = bld.load(a_ptr, staging.reg_simd_type)
-    b_regs, b_glob_tok = bld.load(b_ptr, staging.reg_simd_type)
-    a_store_tok = bld.store(a_regs, staging.a_lds_ptrs, after=a_glob_tok)
-    b_store_tok = bld.store(b_regs, staging.b_lds_ptrs, after=b_glob_tok)
-    barrier_tok = bld.barrier(a_store_tok, b_store_tok)
-    a_regs2, _ = bld.load(staging.a_lds_ptrs, staging.reg_simd_type, after=barrier_tok)
-    b_regs2, _ = bld.load(staging.b_lds_ptrs, staging.reg_simd_type, after=barrier_tok)
-    return bld.fragment_pack(a_regs2, a_type), bld.fragment_pack(b_regs2, b_type)
+    barrier_tok = bld.barrier(*store_tokens)
+    a_frags: list[dsl.Value] = []
+    b_frags: list[dsl.Value] = []
+    for lds_ptr in staging.a_lds_ptrs:
+        regs, _ = bld.load(lds_ptr, staging.reg_simd_type, after=barrier_tok)
+        a_frags.append(bld.fragment_pack(regs, a_type))
+    for lds_ptr in staging.b_lds_ptrs:
+        regs, _ = bld.load(lds_ptr, staging.reg_simd_type, after=barrier_tok)
+        b_frags.append(bld.fragment_pack(regs, b_type))
+    return tuple(a_frags), tuple(b_frags)
+
+
+def _ptr_add_const(bld: dsl.FunctionBuilder, ptr: dsl.Value, offset: int) -> dsl.Value:
+    if offset == 0:
+        return ptr
+    return bld.ptr_add(ptr, _splat_const(bld, offset))
+
+
+@dataclass(frozen=True)
+class _KernelTypes:
+    a: dsl.Type
+    b: dsl.Type
+    acc: dsl.Type
+
+
+@dataclass(frozen=True)
+class _TilePtrs:
+    a0: tuple[dsl.Value, ...]
+    b0: tuple[dsl.Value, ...]
+    c: tuple[dsl.Value, ...]
+
+
+@dataclass(frozen=True)
+class _LoopState:
+    accs: tuple[dsl.Value, ...]
+    afs: tuple[dsl.Value, ...]
+    bfs: tuple[dsl.Value, ...]
+    aps: tuple[dsl.Value, ...]
+    bps: tuple[dsl.Value, ...]
+
+
+def _kernel_types(cfg: _MatmulConfig) -> _KernelTypes:
+    return _KernelTypes(
+        a=dsl.fragment_type(0, dsl.f16(), 16, 16, 32, cfg.mma.ab_registers),
+        b=dsl.fragment_type(1, dsl.f16(), 16, 16, 32, cfg.mma.ab_registers),
+        acc=dsl.fragment_type(2, dsl.f32(), 16, 16, 32, cfg.mma.acc_registers),
+    )
+
+
+def _initial_tile_ptrs(
+    bld: dsl.FunctionBuilder, cfg: _MatmulConfig, coords: _TileCoords
+) -> _TilePtrs:
+    a0 = tuple(
+        _ptr_add_const(bld, coords.a_lane_base, i * 16 * cfg.K)
+        for i in range(cfg.wave_m_tiles)
+    )
+    b0 = tuple(
+        _ptr_add_const(bld, coords.b_lane_base, i * 16 * cfg.K)
+        for i in range(cfg.wave_n_tiles)
+    )
+    c = tuple(
+        _ptr_add_const(bld, coords.c_ptr, i * 256) for i in range(cfg.tiles_per_wave)
+    )
+    return _TilePtrs(a0=a0, b0=b0, c=c)
+
+
+def _advance_ptrs(
+    bld: dsl.FunctionBuilder, ptrs: tuple[dsl.Value, ...], offset: dsl.Value
+) -> tuple[dsl.Value, ...]:
+    return tuple(bld.ptr_add(ptr, offset) for ptr in ptrs)
+
+
+def _initial_loop_args(
+    bld: dsl.FunctionBuilder,
+    cfg: _MatmulConfig,
+    types: _KernelTypes,
+    staging: _LdsStaging,
+    ptrs: _TilePtrs,
+    k_step_offset: dsl.Value,
+) -> tuple[dsl.Value, ...]:
+    init_acc = bld.fragment_fill(bld.constant(dsl.i32(), 0), types.acc)
+    a_frags, b_frags = _load_fragment_group_through_lds(
+        bld, ptrs.a0, ptrs.b0, types.a, types.b, staging
+    )
+    init_accs = tuple(init_acc for _ in range(cfg.tiles_per_wave))
+    return (
+        *init_accs,
+        *a_frags,
+        *b_frags,
+        *_advance_ptrs(bld, ptrs.a0, k_step_offset),
+        *_advance_ptrs(bld, ptrs.b0, k_step_offset),
+    )
+
+
+def _split_loop_state(values: tuple[dsl.Value, ...], cfg: _MatmulConfig) -> _LoopState:
+    acc_end = cfg.tiles_per_wave
+    a_frag_end = acc_end + cfg.wave_m_tiles
+    b_frag_end = a_frag_end + cfg.wave_n_tiles
+    a_ptr_end = b_frag_end + cfg.wave_m_tiles
+    return _LoopState(
+        accs=values[:acc_end],
+        afs=values[acc_end:a_frag_end],
+        bfs=values[a_frag_end:b_frag_end],
+        aps=values[b_frag_end:a_ptr_end],
+        bps=values[a_ptr_end:],
+    )
+
+
+def _emit_mma_grid(
+    bld: dsl.FunctionBuilder,
+    cfg: _MatmulConfig,
+    afs: tuple[dsl.Value, ...],
+    bfs: tuple[dsl.Value, ...],
+    accs: tuple[dsl.Value, ...],
+) -> tuple[dsl.Value, ...]:
+    new_accs: list[dsl.Value] = []
+    for i, a_frag in enumerate(afs):
+        for j, b_frag in enumerate(bfs):
+            acc = accs[i * cfg.wave_n_tiles + j]
+            new_accs.append(bld.mma(cfg.mma.kind, a_frag, b_frag, acc))
+    return tuple(new_accs)
+
+
+def _emit_pipelined_step(
+    bld: dsl.FunctionBuilder,
+    cfg: _MatmulConfig,
+    types: _KernelTypes,
+    staging: _LdsStaging,
+    state: _LoopState,
+    k_step_offset: dsl.Value,
+) -> list[dsl.Value]:
+    new_accs = _emit_mma_grid(bld, cfg, state.afs, state.bfs, state.accs)
+    new_afs, new_bfs = _load_fragment_group_through_lds(
+        bld, state.aps, state.bps, types.a, types.b, staging
+    )
+    return [
+        *new_accs,
+        *new_afs,
+        *new_bfs,
+        *_advance_ptrs(bld, state.aps, k_step_offset),
+        *_advance_ptrs(bld, state.bps, k_step_offset),
+    ]
+
+
+def _store_final_tiles(
+    bld: dsl.FunctionBuilder,
+    cfg: _MatmulConfig,
+    state: _LoopState,
+    c_ptrs: tuple[dsl.Value, ...],
+) -> None:
+    final_accs = _emit_mma_grid(bld, cfg, state.afs, state.bfs, state.accs)
+    for acc, c_ptr in zip(final_accs, c_ptrs, strict=True):
+        bld.fragment_store(acc, c_ptr)
 
 
 def _emit_kernel(bld: dsl.FunctionBuilder, cfg: _MatmulConfig) -> None:
-    """Populate the tiled matmul kernel body.
-
-    Memory layout (in f16 elements, addresses in element units):
-      * A is row-major ``M x K``; lane ``L`` of the A fragment owns row
-        ``m_tile * 16 + L % 16``.
-      * B is column-major ``K x N`` (equivalent to row-major ``N x K``);
-        lane ``L`` owns column ``n_tile * 16 + L % 16``.
-      * Output C is f32 in "tile block" layout: each wave writes 256
-        contiguous f32 elements starting at
-        ``((workgroup_id_x * N_blocks + workgroup_id_y) * waves_per_wg
-          + wave_id_in_wg) * 256``.
-
-    Software pipelining (RDNA3 has no direct global-to-LDS DMA, so the
-    fragment staging is global_load -> VGPR -> ds_store -> barrier ->
-    ds_load, a long synchronous chain). Each loop iteration overlaps
-    the WMMA of the current K-step with the global+LDS prefetch of the
-    next K-step, so the global_load latency is hidden behind WMMA
-    issue. Schedule:
-
-      prologue: prefetch frag[0] through LDS.
-      loop body (k_steps - 1 iters):
-        WMMA(frag[k], acc)              # current iter's compute
-        prefetch frag[k+1] through LDS  # next iter's load (overlap)
-      epilogue: WMMA(frag[K-1], acc).
-    """
+    """Populate tiled matmul kernel body."""
     coords = _emit_tile_coords(bld, cfg)
-
-    a_type = dsl.fragment_type(0, dsl.f16(), 16, 16, 32, cfg.mma.ab_registers)
-    b_type = dsl.fragment_type(1, dsl.f16(), 16, 16, 32, cfg.mma.ab_registers)
-    acc_type = dsl.fragment_type(2, dsl.f32(), 16, 16, 32, cfg.mma.acc_registers)
-
+    types = _kernel_types(cfg)
     staging = _emit_lds_staging(bld, cfg, coords)
-
-    init_acc = bld.fragment_fill(bld.constant(dsl.i32(), 0), acc_type)
     c16 = _splat_const(bld, 16)
-
-    # Prologue: stage frag[0] through LDS so the loop's first WMMA has
-    # data ready to consume.
-    a_frag0, b_frag0 = _load_fragments_through_lds(
-        bld, coords.a_lane_base, coords.b_lane_base, a_type, b_type, staging
-    )
-    a_ptr1 = bld.ptr_add(coords.a_lane_base, c16)
-    b_ptr1 = bld.ptr_add(coords.b_lane_base, c16)
+    ptrs = _initial_tile_ptrs(bld, cfg, coords)
+    init_args = _initial_loop_args(bld, cfg, types, staging, ptrs, c16)
 
     # The fourth kernel arg is the pipelined-loop trip count
     # (`K/16 - 1`, precomputed on the host). The loop body always pairs
@@ -411,23 +540,13 @@ def _emit_kernel(bld: dsl.FunctionBuilder, cfg: _MatmulConfig) -> None:
         zero_i32,
         trip_count_i32,
         one_i32,
-        init_args=(init_acc, a_frag0, b_frag0, a_ptr1, b_ptr1),
+        init_args=init_args,
     ) as forop:
-        carry_acc, carry_af, carry_bf, carry_ap, carry_bp = forop.inner_iter_args
-        new_acc = bld.mma(cfg.mma.kind, carry_af, carry_bf, carry_acc)
-        new_af, new_bf = _load_fragments_through_lds(
-            bld, carry_ap, carry_bp, a_type, b_type, staging
-        )
-        new_ap = bld.ptr_add(carry_ap, c16)
-        new_bp = bld.ptr_add(carry_bp, c16)
-        scf.YieldOp([new_acc, new_af, new_bf, new_ap, new_bp])
+        state = _split_loop_state(tuple(forop.inner_iter_args), cfg)
+        scf.YieldOp(_emit_pipelined_step(bld, cfg, types, staging, state, c16))
 
-    final_acc_in = forop.results[0]
-    final_af = forop.results[1]
-    final_bf = forop.results[2]
-    final_acc = bld.mma(cfg.mma.kind, final_af, final_bf, final_acc_in)
-
-    bld.fragment_store(final_acc, coords.c_ptr)
+    final_state = _split_loop_state(tuple(forop.results), cfg)
+    _store_final_tiles(bld, cfg, final_state, ptrs.c)
 
 
 def _emit_host(bld: dsl.FunctionBuilder, cfg: _MatmulConfig) -> None:
@@ -523,6 +642,8 @@ def build_wmma_f16_matmul_module(
     *,
     BM: int = 1,
     BN: int = 1,
+    wave_m_tiles: int = 1,
+    wave_n_tiles: int = 1,
     use_buffer: bool = False,
     matrix_intrinsic: str = "wmma",
 ) -> Module:
@@ -559,6 +680,8 @@ def build_wmma_f16_matmul_module(
         K=K,
         BM=BM,
         BN=BN,
+        wave_m_tiles=wave_m_tiles,
+        wave_n_tiles=wave_n_tiles,
         use_buffer=use_buffer,
         matrix_intrinsic=matrix_intrinsic,
     )
@@ -584,7 +707,7 @@ def build_wmma_f16_matmul_module(
             dsl.ptr_type(dsl.f16()),
             dsl.ptr_type(dsl.f16()),
             dsl.ptr_type(dsl.f32()),
-            # Per-tile K-step count (= K // 16). Passed by value as i32.
+            # Software-pipeline loop trip count: K // 16 - 1.
             dsl.i32(),
         ]
         lds_size = cfg.lds_bytes

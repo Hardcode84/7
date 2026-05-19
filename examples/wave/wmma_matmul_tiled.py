@@ -27,8 +27,8 @@ Example:
 
 Shape constraints (see :mod:`mlir.dialects.wave_matmul` for the
 rationale): ``M``, ``N`` and ``K`` are positive multiples of 16;
-``BM`` divides ``M/16``; ``BN`` is a power of two dividing ``N/16``;
-and ``BM * BN <= 32``.
+``BM * wave_m_tiles`` divides ``M/16``; ``BN * wave_n_tiles`` divides
+``N/16``; ``BN`` is a power of two; and ``BM * BN <= 32``.
 """
 
 from __future__ import annotations
@@ -96,6 +96,18 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         help="waves per workgroup along N tiles; power of two dividing N/16",
     )
     parser.add_argument(
+        "--wave-m-tiles",
+        type=int,
+        default=1,
+        help="16x16 M tiles computed by each wave",
+    )
+    parser.add_argument(
+        "--wave-n-tiles",
+        type=int,
+        default=1,
+        help="16x16 N tiles computed by each wave",
+    )
+    parser.add_argument(
         "--use-buffer",
         action="store_true",
         help="wrap the A and B kernel inputs in waveamd.make_buffer so "
@@ -134,6 +146,8 @@ def main(argv: list[str] | None = None) -> int:
         K=args.k,
         BM=args.bm,
         BN=args.bn,
+        wave_m_tiles=args.wave_m_tiles,
+        wave_n_tiles=args.wave_n_tiles,
         use_buffer=args.use_buffer,
         matrix_intrinsic=_select_matrix_intrinsic(args.chip, args.matrix_intrinsic),
     )
