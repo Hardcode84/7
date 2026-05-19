@@ -63,3 +63,23 @@ func.func @buffer_store_tuple_oob_component(%offset: !wavemachine.reg<vgpr, 1>, 
   %t = wavemachine.buffer_store_tuple_b32 %offset, %value, %desc, %soff {component = 4 : i64} : (!wavemachine.reg<vgpr, 1>, !wavemachine.reg<vgpr, 4>, !wavemachine.reg<sgpr, 4>, !wavemachine.imm) -> !wavemachine.mem.token
   return
 }
+
+// -----
+
+func.func @tuple_to_elements_wrong_count(%t: !wavemachine.reg<vgpr, 8>) {
+  // expected-error @below {{element count (4) must match tuple register width (8)}}
+  %e:4 = wavemachine.tuple_to_elements %t
+      : (!wavemachine.reg<vgpr, 8>) -> (!wavemachine.reg<vgpr, 1>, !wavemachine.reg<vgpr, 1>, !wavemachine.reg<vgpr, 1>, !wavemachine.reg<vgpr, 1>)
+  return
+}
+
+// -----
+
+func.func @tuple_from_elements_wrong_count(%a: !wavemachine.reg<vgpr, 1>,
+                                           %b: !wavemachine.reg<vgpr, 1>,
+                                           %c: !wavemachine.reg<vgpr, 1>) {
+  // expected-error @below {{element count (3) must match tuple register width (8)}}
+  %t = wavemachine.tuple_from_elements %a, %b, %c
+      : (!wavemachine.reg<vgpr, 1>, !wavemachine.reg<vgpr, 1>, !wavemachine.reg<vgpr, 1>) -> !wavemachine.reg<vgpr, 8>
+  return
+}

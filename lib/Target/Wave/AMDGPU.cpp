@@ -824,6 +824,12 @@ private:
       return emitMC(vMbcntLo(),
                     {toMCOperand(result()), llvm::MCOperand::createImm(-1),
                      llvm::MCOperand::createImm(0)});
+    // Pure SSA renames: the regalloc has already aliased each element
+    // to its slot of the tuple's physical block (`tuple_phys + i`), so
+    // there is nothing to emit.
+    if (isa<wavemachine::TupleToElementsOp>(op) ||
+        isa<wavemachine::TupleFromElementsOp>(op))
+      return success();
     if (isa<wavemachine::VMovB32TupleOp>(op)) {
       auto regType = cast<wavemachine::RegType>(result().getType());
       Value src = op.getOperand(0);

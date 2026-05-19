@@ -67,6 +67,24 @@ LogicalResult VMovB32TupleOp::verify() {
   return success();
 }
 
+LogicalResult TupleToElementsOp::verify() {
+  auto tupleType = cast<RegType>(getTuple().getType());
+  if (tupleType.getWidth() != static_cast<int64_t>(getElements().size()))
+    return emitOpError("element count (")
+           << getElements().size() << ") must match tuple register width ("
+           << tupleType.getWidth() << ")";
+  return success();
+}
+
+LogicalResult TupleFromElementsOp::verify() {
+  auto tupleType = cast<RegType>(getTuple().getType());
+  if (tupleType.getWidth() != static_cast<int64_t>(getElements().size()))
+    return emitOpError("element count (")
+           << getElements().size() << ") must match tuple register width ("
+           << tupleType.getWidth() << ")";
+  return success();
+}
+
 LogicalResult WmmaI32_16x16x16_IU8Op::verify() {
   if (failed(verifyVGPRWidth(*this, getOperand(0), 4, "A operand")) ||
       failed(verifyVGPRWidth(*this, getOperand(1), 4, "B operand")) ||
