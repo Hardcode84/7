@@ -36,17 +36,9 @@ unsigned loadRegisterCount(SimdType simdType) {
   return 1;
 }
 
-// Build the WaveMachine load op with `opcode` and rebind the original
-// value / token to the produced VGPR tuple and memory token. Shared by
-// every selectLoad variant (LDS / global / buffer).
-void finalizeLoad(WaveMachineSelector &S, LoadOp op, StringRef opcode,
-                  ArrayRef<Value> operands, unsigned registers,
-                  ArrayRef<NamedAttribute> attrs = {}) {
-  SmallVector<Type, 2> resultTypes{
-      getRegType(op.getContext(), wavemachine::RegClass::VGPR, registers),
-      getMemTokenType(op.getContext())};
-  Operation *load =
-      createWMOp(S.builder, op.getLoc(), opcode, operands, resultTypes, attrs);
+// Bind the caller `wave.load` op's value + token to the freshly built
+// WaveMachine load and drop the source op.
+void bindLoadResults(WaveMachineSelector &S, LoadOp op, Operation *load) {
   S.values[op.getValue()] = load->getResult(0);
   S.values[op.getToken()] = load->getResult(1);
   S.eraseIfTopLevel(op);
@@ -60,16 +52,51 @@ LogicalResult selectSharedStore(WaveMachineSelector &S, StoreOp op, Value base,
   auto b = S.bucketForSpec(op.getLoc(), offset, spec);
   Value addr = S.ensureVGPRForVSrc1(
       op.getLoc(), S.addByteOffsets(op.getLoc(), base, b.voffset));
-  SmallVector<Value> operands{addr, S.expect(op.getValue(), op)};
-  if (Value dependency = op.getDependency())
-    operands.push_back(S.expect(dependency, op));
-  StringRef opcode = registers == 1 ? "ds_store_b32" : "ds_store_tuple_b32";
-  Operation *store = createWMOp(S.builder, op.getLoc(), opcode, operands,
-                                getMemTokenType(op.getContext()),
-                                S.instOffsetAttrs(b.instOffset, "offset"));
+  Value value = S.expect(op.getValue(), op);
+  Value dep = op.getDependency() ? S.expect(op.getDependency(), op) : Value{};
+  Type tokenType = getMemTokenType(op.getContext());
+  Operation *store;
+  if (registers == 1)
+    store = wavemachine::DsStoreB32Op::create(S.builder, op.getLoc(), tokenType,
+                                              addr, value, dep, b.instOffset);
+  else
+    store = wavemachine::DsStoreTupleB32Op::create(
+        S.builder, op.getLoc(), tokenType, addr, value, dep, b.instOffset);
   S.values[op.getToken()] = store->getResult(0);
   S.eraseIfTopLevel(op);
   return success();
+}
+
+// Build one per-component scalar / tuple store and return its token.
+// Tuple stores carry the `component` index as a discardable attr so the
+// asm printer can pick the right slice of the VGPR tuple; the bucketed
+// `inst_offset` is the slot's bucket value (the printer already adds
+// `component * 4` itself).
+Operation *buildOneGlobalOrBufferStore(WaveMachineSelector &S, StoreOp op,
+                                       Value voffset, Value value, Value base,
+                                       bool isBuffer, Value soffset, Value dep,
+                                       int64_t instOffset,
+                                       std::optional<unsigned> component) {
+  Type tokenType = getMemTokenType(op.getContext());
+  if (component) {
+    Operation *store;
+    if (isBuffer)
+      store = wavemachine::BufferStoreTupleB32Op::create(
+          S.builder, op.getLoc(), tokenType, voffset, value, base, soffset, dep,
+          instOffset);
+    else
+      store = wavemachine::GlobalStoreTupleB32Op::create(
+          S.builder, op.getLoc(), tokenType, voffset, value, base, dep,
+          instOffset);
+    store->setAttr("component", S.builder.getI64IntegerAttr(*component));
+    return store;
+  }
+  if (isBuffer)
+    return wavemachine::BufferStoreB32Op::create(
+        S.builder, op.getLoc(), tokenType, voffset, value, base, soffset, dep,
+        instOffset);
+  return wavemachine::GlobalStoreB32Op::create(
+      S.builder, op.getLoc(), tokenType, voffset, value, base, dep, instOffset);
 }
 
 LogicalResult selectGlobalOrBufferStore(WaveMachineSelector &S, StoreOp op,
@@ -79,22 +106,14 @@ LogicalResult selectGlobalOrBufferStore(WaveMachineSelector &S, StoreOp op,
       isBuffer ? wavemachine::BufferStoreB32Op::getAddressFieldSpec()
                : wavemachine::GlobalStoreB32Op::getAddressFieldSpec();
   auto b = S.bucketForSpec(op.getLoc(), offset, spec);
-  StringRef scalarOpcode = isBuffer ? "buffer_store_b32" : "global_store_b32";
-  StringRef tupleOpcode =
-      isBuffer ? "buffer_store_tuple_b32" : "global_store_tuple_b32";
   Value value = S.expect(op.getValue(), op);
+  Value dep = op.getDependency() ? S.expect(op.getDependency(), op) : Value{};
 
   // Scalar lane payload: a single dword-store.
   if (registers == 1) {
-    SmallVector<Value> operands{b.voffset, value, base};
-    if (spec.hasSoffset)
-      operands.push_back(b.soffset);
-    if (Value dependency = op.getDependency())
-      operands.push_back(S.expect(dependency, op));
     Operation *store =
-        createWMOp(S.builder, op.getLoc(), scalarOpcode, operands,
-                   getMemTokenType(op.getContext()),
-                   S.instOffsetAttrs(b.instOffset, "inst_offset"));
+        buildOneGlobalOrBufferStore(S, op, b.voffset, value, base, isBuffer,
+                                    b.soffset, dep, b.instOffset, std::nullopt);
     S.values[op.getToken()] = store->getResult(0);
     S.eraseIfTopLevel(op);
     return success();
@@ -108,22 +127,14 @@ LogicalResult selectGlobalOrBufferStore(WaveMachineSelector &S, StoreOp op,
   SmallVector<Value> storeTokens;
   storeTokens.reserve(registers);
   for (unsigned component = 0; component != registers; ++component) {
-    SmallVector<Value> operands{b.voffset, value, base};
-    if (spec.hasSoffset)
-      operands.push_back(b.soffset);
-    if (Value dependency = op.getDependency())
-      operands.push_back(S.expect(dependency, op));
-    SmallVector<NamedAttribute> attrs =
-        S.instOffsetAttrs(b.instOffset, "inst_offset");
-    attrs.push_back(S.builder.getNamedAttr(
-        "component", S.builder.getI64IntegerAttr(component)));
-    Operation *store = createWMOp(S.builder, op.getLoc(), tupleOpcode, operands,
-                                  getMemTokenType(op.getContext()), attrs);
+    Operation *store =
+        buildOneGlobalOrBufferStore(S, op, b.voffset, value, base, isBuffer,
+                                    b.soffset, dep, b.instOffset, component);
     storeTokens.push_back(store->getResult(0));
   }
-  Operation *join = createWMOp(S.builder, op.getLoc(), "token_join",
-                               storeTokens, getMemTokenType(op.getContext()));
-  S.values[op.getToken()] = join->getResult(0);
+  auto join = wavemachine::TokenJoinOp::create(
+      S.builder, op.getLoc(), getMemTokenType(op.getContext()), storeTokens);
+  S.values[op.getToken()] = join.getResult();
   S.eraseIfTopLevel(op);
   return success();
 }
@@ -136,11 +147,18 @@ LogicalResult selectSharedLoad(WaveMachineSelector &S, LoadOp op, Value base,
   auto b = S.bucketForSpec(op.getLoc(), offset, spec);
   Value addr = S.ensureVGPRForVSrc1(
       op.getLoc(), S.addByteOffsets(op.getLoc(), base, b.voffset));
-  SmallVector<Value> operands{addr};
-  if (Value dependency = op.getDependency())
-    operands.push_back(S.expect(dependency, op));
-  finalizeLoad(S, op, registers == 1 ? "ds_load_b32" : "ds_load_tuple_b32",
-               operands, registers, S.instOffsetAttrs(b.instOffset, "offset"));
+  Value dep = op.getDependency() ? S.expect(op.getDependency(), op) : Value{};
+  Type resultType =
+      getRegType(op.getContext(), wavemachine::RegClass::VGPR, registers);
+  Type tokenType = getMemTokenType(op.getContext());
+  Operation *load;
+  if (registers == 1)
+    load = wavemachine::DsLoadB32Op::create(S.builder, op.getLoc(), resultType,
+                                            tokenType, addr, dep, b.instOffset);
+  else
+    load = wavemachine::DsLoadTupleB32Op::create(
+        S.builder, op.getLoc(), resultType, tokenType, addr, dep, b.instOffset);
+  bindLoadResults(S, op, load);
   return success();
 }
 
@@ -157,18 +175,31 @@ LogicalResult selectGlobalOrBufferLoad(WaveMachineSelector &S, LoadOp op,
                ? wavemachine::GlobalLoadB32Op::getAddressFieldSpec()
                : wavemachine::GlobalLoadTupleB32Op::getAddressFieldSpec();
   auto b = S.bucketForSpec(op.getLoc(), offset, spec);
-  SmallVector<Value> operands{b.voffset, base};
-  if (spec.hasSoffset)
-    operands.push_back(b.soffset);
-  if (Value dependency = op.getDependency())
-    operands.push_back(S.expect(dependency, op));
-  StringRef opcode;
-  if (isBuffer)
-    opcode = registers == 1 ? "buffer_load_b32" : "buffer_load_tuple_b32";
-  else
-    opcode = registers == 1 ? "global_load_b32" : "global_load_tuple_b32";
-  finalizeLoad(S, op, opcode, operands, registers,
-               S.instOffsetAttrs(b.instOffset, "inst_offset"));
+  Value dep = op.getDependency() ? S.expect(op.getDependency(), op) : Value{};
+  Type resultType =
+      getRegType(op.getContext(), wavemachine::RegClass::VGPR, registers);
+  Type tokenType = getMemTokenType(op.getContext());
+  Operation *load;
+  if (isBuffer) {
+    if (registers == 1)
+      load = wavemachine::BufferLoadB32Op::create(
+          S.builder, op.getLoc(), resultType, tokenType, b.voffset, base,
+          b.soffset, dep, b.instOffset);
+    else
+      load = wavemachine::BufferLoadTupleB32Op::create(
+          S.builder, op.getLoc(), resultType, tokenType, b.voffset, base,
+          b.soffset, dep, b.instOffset);
+  } else {
+    if (registers == 1)
+      load = wavemachine::GlobalLoadB32Op::create(
+          S.builder, op.getLoc(), resultType, tokenType, b.voffset, base, dep,
+          b.instOffset);
+    else
+      load = wavemachine::GlobalLoadTupleB32Op::create(
+          S.builder, op.getLoc(), resultType, tokenType, b.voffset, base, dep,
+          b.instOffset);
+  }
+  bindLoadResults(S, op, load);
   return success();
 }
 

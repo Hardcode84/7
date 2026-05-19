@@ -23,36 +23,30 @@ using namespace mlir;
 
 namespace {
 
-static wavemachine::ImmType getImmType(MLIRContext *ctx) {
-  return wavemachine::ImmType::get(ctx);
-}
-
-static Operation *createWMOp(OpBuilder &builder, Location loc, StringRef name,
-                             ValueRange operands, TypeRange resultTypes,
-                             ArrayRef<NamedAttribute> attrs = {}) {
-  OperationState state(loc, ("wavemachine." + name).str());
-  state.addOperands(operands);
-  state.addTypes(resultTypes);
-  state.addAttributes(attrs);
-  return builder.create(state);
-}
-
 static Value createImm(OpBuilder &builder, Location loc, int64_t value) {
-  Operation *op = createWMOp(
-      builder, loc, "imm", {}, getImmType(builder.getContext()),
-      {builder.getNamedAttr("value", builder.getI64IntegerAttr(value))});
-  return op->getResult(0);
-}
-
-static Value createInstr(OpBuilder &builder, Location loc, StringRef name,
-                         ValueRange operands, Type resultType,
-                         ArrayRef<NamedAttribute> attrs = {}) {
-  Operation *op = createWMOp(builder, loc, name, operands, resultType, attrs);
-  return op->getResult(0);
+  return wavemachine::ImmOp::create(
+      builder, loc, wavemachine::ImmType::get(builder.getContext()),
+      static_cast<uint64_t>(value));
 }
 
 static bool isSGPR(wavemachine::RegType type) {
   return type.getRegClass() == wavemachine::RegClass::SGPR;
+}
+
+// Pick the typed scalar-load op for an `arg` slot. SLoad{32,64,128}
+// all share the same shape (offset operand + base string attr), so we
+// dispatch on width and build via the matching op's typed constructor.
+static Value createKernArgLoad(OpBuilder &builder, Location loc,
+                               Type resultType, Value offsetImm, unsigned width,
+                               bool isPointer, StringRef base) {
+  if (!isPointer)
+    return wavemachine::SLoadB32Op::create(builder, loc, resultType, offsetImm,
+                                           base);
+  if (width == 4)
+    return wavemachine::SLoadB128Op::create(builder, loc, resultType, offsetImm,
+                                            base);
+  return wavemachine::SLoadB64Op::create(builder, loc, resultType, offsetImm,
+                                         base);
 }
 
 struct WaveAMDABILoweringPass
@@ -93,16 +87,9 @@ private:
     return std::make_pair(regType, isPointer);
   }
 
-  // Pick the scalar load opcode for an argument of width `width`.
-  static StringRef pickLoadOpcode(unsigned width, bool isPointer) {
-    if (!isPointer)
-      return "s_load_b32";
-    return width == 4 ? "s_load_b128" : "s_load_b64";
-  }
-
-  // Validate and lower a single `wavemachine.arg` op into an `s_load_*`
-  // sequence at offset `offset`. On success returns the number of bytes
-  // consumed for this argument's kernarg slot.
+  // Validate and lower a single `wavemachine.arg` op into the matching
+  // `s_load_*` op at offset `offset`. On success returns the number of
+  // bytes consumed for this argument's kernarg slot.
   static FailureOr<unsigned> lowerArgOp(Operation &op, unsigned offset,
                                         OpBuilder &builder) {
     auto info = validateArgOp(op);
@@ -112,10 +99,9 @@ private:
 
     builder.setInsertionPoint(&op);
     Value offsetImm = createImm(builder, op.getLoc(), offset);
-    StringRef opcode = pickLoadOpcode(regType.getWidth(), isPointer);
-    Value loaded = createInstr(
-        builder, op.getLoc(), opcode, offsetImm, op.getResult(0).getType(),
-        {builder.getNamedAttr("base", builder.getStringAttr("s[0:1]"))});
+    Value loaded =
+        createKernArgLoad(builder, op.getLoc(), op.getResult(0).getType(),
+                          offsetImm, regType.getWidth(), isPointer, "s[0:1]");
     op.getResult(0).replaceAllUsesWith(loaded);
     op.erase();
     return isPointer ? regType.getWidth() * 4u : 4u;

@@ -147,28 +147,27 @@ OffsetTriple WaveMachineSelector::scaleTriple(Location loc, OffsetTriple t,
     return t;
   OffsetTriple out;
   out.instOffset = t.instOffset * static_cast<int64_t>(size);
+  Type vgprType = getRegType(builder.getContext(), wavemachine::RegClass::VGPR);
+  Type sgprType = getRegType(builder.getContext(), wavemachine::RegClass::SGPR);
   if (t.voffset) {
     if (std::optional<int64_t> imm = getImmediateValue(t.voffset)) {
       out.voffset = createImm(builder, loc, *imm * size);
     } else {
-      out.voffset = createInstr(
-          builder, loc, "v_lshlrev_b32",
-          {t.voffset, createImm(builder, loc, llvm::Log2_32(size))},
-          getRegType(builder.getContext(), wavemachine::RegClass::VGPR));
+      out.voffset = wavemachine::VLshlrevB32Op::create(
+          builder, loc, vgprType, t.voffset,
+          createImm(builder, loc, llvm::Log2_32(size)));
     }
   }
   if (t.soffset) {
     if (std::optional<int64_t> imm = getImmediateValue(t.soffset)) {
       out.soffset = createImm(builder, loc, *imm * size);
     } else if ((size & (size - 1)) == 0) {
-      out.soffset = createInstr(
-          builder, loc, "s_lshl_b32",
-          {t.soffset, createImm(builder, loc, llvm::Log2_32(size))},
-          getRegType(builder.getContext(), wavemachine::RegClass::SGPR));
+      out.soffset = wavemachine::SLshlB32Op::create(
+          builder, loc, sgprType, t.soffset,
+          createImm(builder, loc, llvm::Log2_32(size)));
     } else {
-      out.soffset = createInstr(
-          builder, loc, "s_mul_i32", {createImm(builder, loc, size), t.soffset},
-          getRegType(builder.getContext(), wavemachine::RegClass::SGPR));
+      out.soffset = wavemachine::SMulI32Op::create(
+          builder, loc, sgprType, createImm(builder, loc, size), t.soffset);
     }
   }
   // Scale the symbolic forms too so the emit-time width check sees
@@ -369,15 +368,13 @@ void WaveMachineSelector::materializeArgument(BlockArgument arg, size_t index) {
                                        ? wavemachine::RegClass::VGPR
                                        : wavemachine::RegClass::SGPR;
   unsigned width = isPtr ? pointerBaseWidth(type) : nonPointerArgWidth(type);
-  Operation *argOp = createWMOp(
-      builder, func.getLoc(), "arg", {},
-      getRegType(func.getContext(), regClass, width),
-      {builder.getNamedAttr("index", builder.getI64IntegerAttr(index)),
-       builder.getNamedAttr("pointer", builder.getBoolAttr(isPtr))});
-  values[arg] = argOp->getResult(0);
+  auto argOp = wavemachine::ArgOp::create(
+      builder, func.getLoc(), getRegType(func.getContext(), regClass, width),
+      builder.getI64IntegerAttr(index), builder.getBoolAttr(isPtr));
+  values[arg] = argOp;
   if (!isPtr)
     return;
-  pointerBases[arg] = argOp->getResult(0);
+  pointerBases[arg] = argOp;
   pointerOffsets[arg] = OffsetTriple{};
   pointerBuffers[arg] = isBufferPointer(type);
 }
@@ -459,11 +456,11 @@ LogicalResult WaveMachineSelector::selectConstant(arith::ConstantIntOp op) {
   if (bits == 64) {
     // i64 constants land in an SGPR pair; the asm printer expands
     // them into two `s_mov_b32` instructions for the halves.
-    Operation *mov = createWMOp(
-        builder, op.getLoc(), "s_mov_b64_imm", {},
+    auto mov = wavemachine::SMovB64ImmOp::create(
+        builder, op.getLoc(),
         getRegType(op.getContext(), wavemachine::RegClass::SGPR, /*w=*/2),
-        {builder.getNamedAttr("value", builder.getI64IntegerAttr(op.value()))});
-    values[op.getResult()] = mov->getResult(0);
+        builder.getI64IntegerAttr(op.value()));
+    values[op.getResult()] = mov;
     eraseIfTopLevel(op);
     return success();
   }
@@ -477,36 +474,43 @@ LogicalResult WaveMachineSelector::selectLaneId(LaneIdOp op) {
   if (!simdType.getElementType().isInteger(32) || simdType.getWidth() != 32)
     return op.emitError(
         "WaveMachine backend supports only !wave.simd<i32, 32> lane_id");
-  values[op.getResult()] =
-      createInstr(builder, op.getLoc(), "v_mbcnt_lo", {},
-                  getRegType(op.getContext(), wavemachine::RegClass::VGPR));
+  values[op.getResult()] = wavemachine::VMbcntLoOp::create(
+      builder, op.getLoc(),
+      getRegType(op.getContext(), wavemachine::RegClass::VGPR));
   eraseIfTopLevel(op);
   return success();
 }
 
 LogicalResult WaveMachineSelector::selectWorkgroupId(WorkgroupIdOp op) {
-  StringRef opcode;
   int64_t sgprIndex;
   switch (op.getAxis()) {
   case 0:
-    opcode = "s_workgroup_id_x";
     sgprIndex = 2;
     break;
   case 1:
-    opcode = "s_workgroup_id_y";
     sgprIndex = 3;
     break;
   case 2:
-    opcode = "s_workgroup_id_z";
     sgprIndex = 4;
     break;
   default:
     return op.emitError("workgroup_id axis must be 0, 1, or 2");
   }
-  values[op.getResult()] =
-      createInstr(builder, op.getLoc(), opcode, {},
-                  getPinnedRegType(op.getContext(), wavemachine::RegClass::SGPR,
-                                   /*width=*/1, sgprIndex));
+  Type pinned = getPinnedRegType(op.getContext(), wavemachine::RegClass::SGPR,
+                                 /*width=*/1, sgprIndex);
+  Value result;
+  switch (op.getAxis()) {
+  case 0:
+    result = wavemachine::SWorkgroupIdXOp::create(builder, op.getLoc(), pinned);
+    break;
+  case 1:
+    result = wavemachine::SWorkgroupIdYOp::create(builder, op.getLoc(), pinned);
+    break;
+  default:
+    result = wavemachine::SWorkgroupIdZOp::create(builder, op.getLoc(), pinned);
+    break;
+  }
+  values[op.getResult()] = result;
   eraseIfTopLevel(op);
   return success();
 }
@@ -515,10 +519,10 @@ LogicalResult WaveMachineSelector::selectWorkitemId(WorkitemIdOp op) {
   if (op.getAxis() != 0)
     return op.emitError(
         "WaveMachine backend supports only workitem_id along axis 0 (x)");
-  values[op.getResult()] =
-      createInstr(builder, op.getLoc(), "v_workitem_id_x", {},
-                  getPinnedRegType(op.getContext(), wavemachine::RegClass::VGPR,
-                                   /*width=*/1, /*index=*/0));
+  values[op.getResult()] = wavemachine::VWorkitemIdXOp::create(
+      builder, op.getLoc(),
+      getPinnedRegType(op.getContext(), wavemachine::RegClass::VGPR,
+                       /*width=*/1, /*index=*/0));
   eraseIfTopLevel(op);
   return success();
 }
@@ -538,25 +542,37 @@ LogicalResult WaveMachineSelector::selectAssumeRange(AssumeRangeOp op) {
   return success();
 }
 
+// Build the matching `v_*` op for a (legacy) `wave.binary` kind.
+// Returns nullptr if `kind` is no longer carried by the binary op
+// (addi / muli / shli migrated to their typed siblings).
+static Value buildWaveBinary(OpBuilder &builder, Location loc, Type resultType,
+                             StringRef kind, Value lhs, Value rhs) {
+  if (kind == "andi")
+    return wavemachine::VAndB32Op::create(builder, loc, resultType, lhs, rhs);
+  if (kind == "ori")
+    return wavemachine::VOrB32Op::create(builder, loc, resultType, lhs, rhs);
+  if (kind == "xori")
+    return wavemachine::VXorB32Op::create(builder, loc, resultType, lhs, rhs);
+  if (kind == "shri")
+    return wavemachine::VLshrrevB32Op::create(builder, loc, resultType, lhs,
+                                              rhs);
+  return Value{};
+}
+
 LogicalResult WaveMachineSelector::selectBinary(BinaryOp op) {
   // addi / muli / shli have moved to dedicated wave.addi / muli / shli
   // ops with full uniform-and-SIMD support; reject those kinds here so
   // stragglers fail loudly instead of silently going through the old
   // SIMD-only path.
-  StringRef machineOpcode = llvm::StringSwitch<StringRef>(op.getKind())
-                                .Case("andi", "v_and_b32")
-                                .Case("ori", "v_or_b32")
-                                .Case("xori", "v_xor_b32")
-                                .Case("shri", "v_lshrrev_b32")
-                                .Default("");
-  if (machineOpcode.empty())
+  StringRef kind = op.getKind();
+  if (kind != "shri" && kind != "andi" && kind != "ori" && kind != "xori")
     return op.emitError("unsupported wave.binary kind '")
-           << op.getKind()
+           << kind
            << "' (addi/muli/shli migrated to wave.addi/wave.muli/wave.shli)";
   Value lhs = expect(op.getLhs(), op);
   Value rhs = expect(op.getRhs(), op);
   // VOP2 shift / commutative ops require `vsrc1` to be a VGPR.
-  if (machineOpcode == "v_lshrrev_b32") {
+  if (kind == "shri") {
     lhs = ensureVGPRForVSrc1(op.getLoc(), lhs);
   } else {
     if (isImm(rhs))
@@ -564,9 +580,9 @@ LogicalResult WaveMachineSelector::selectBinary(BinaryOp op) {
     if (!isVGPR(lhs) && !isVGPR(rhs))
       lhs = ensureVGPRForVSrc1(op.getLoc(), lhs);
   }
+  Type vgprType = getRegType(op.getContext(), wavemachine::RegClass::VGPR);
   values[op.getResult()] =
-      createInstr(builder, op.getLoc(), machineOpcode, {lhs, rhs},
-                  getRegType(op.getContext(), wavemachine::RegClass::VGPR));
+      buildWaveBinary(builder, op.getLoc(), vgprType, kind, lhs, rhs);
   eraseIfTopLevel(op);
   return success();
 }
@@ -584,11 +600,11 @@ LogicalResult WaveMachineSelector::selectAddiI32(AddiOp op) {
   Value rhs = expect(op.getRhs(), op);
   if (!isa<SimdType>(op.getResult().getType())) {
     // Uniform i32 add: s_add_i32 (with a dead SCC result).
-    Operation *added =
-        createWMOp(builder, op.getLoc(), "s_add_i32", {lhs, rhs},
-                   {getRegType(op.getContext(), wavemachine::RegClass::SGPR),
-                    getSCCType(op.getContext())});
-    values[op.getResult()] = added->getResult(0);
+    auto added = wavemachine::SAddI32Op::create(
+        builder, op.getLoc(),
+        getRegType(op.getContext(), wavemachine::RegClass::SGPR),
+        getSCCType(op.getContext()), lhs, rhs);
+    values[op.getResult()] = added.getResult();
     eraseIfTopLevel(op);
     return success();
   }
@@ -607,12 +623,17 @@ LogicalResult WaveMachineSelector::selectAddiI64(AddiOp op) {
         "supported");
   Value lhs = expect(op.getLhs(), op);
   Value rhs = expect(op.getRhs(), op);
-  StringRef opcode = lhsSimd ? "v_add_u64" : "s_add_u64";
   wavemachine::RegClass cls =
       lhsSimd ? wavemachine::RegClass::VGPR : wavemachine::RegClass::SGPR;
-  values[op.getResult()] =
-      createInstr(builder, op.getLoc(), opcode, {lhs, rhs},
-                  getRegType(op.getContext(), cls, /*width=*/2));
+  Type resultType = getRegType(op.getContext(), cls, /*width=*/2);
+  Value result;
+  if (lhsSimd)
+    result = wavemachine::VAddU64Op::create(builder, op.getLoc(), resultType,
+                                            lhs, rhs);
+  else
+    result = wavemachine::SAddU64Op::create(builder, op.getLoc(), resultType,
+                                            lhs, rhs);
+  values[op.getResult()] = result;
   eraseIfTopLevel(op);
   return success();
 }
@@ -632,16 +653,16 @@ LogicalResult WaveMachineSelector::selectMuliI32(MuliOp op) {
   Value lhs = expect(op.getLhs(), op);
   Value rhs = expect(op.getRhs(), op);
   if (!isa<SimdType>(op.getResult().getType())) {
-    values[op.getResult()] =
-        createInstr(builder, op.getLoc(), "s_mul_i32", {lhs, rhs},
-                    getRegType(op.getContext(), wavemachine::RegClass::SGPR));
+    values[op.getResult()] = wavemachine::SMulI32Op::create(
+        builder, op.getLoc(),
+        getRegType(op.getContext(), wavemachine::RegClass::SGPR), lhs, rhs);
     eraseIfTopLevel(op);
     return success();
   }
   // v_mul_lo_u32 is VOP3, operand placement is unconstrained.
-  values[op.getResult()] =
-      createInstr(builder, op.getLoc(), "v_mul_lo_u32", {lhs, rhs},
-                  getRegType(op.getContext(), wavemachine::RegClass::VGPR));
+  values[op.getResult()] = wavemachine::VMulLoU32Op::create(
+      builder, op.getLoc(),
+      getRegType(op.getContext(), wavemachine::RegClass::VGPR), lhs, rhs);
   eraseIfTopLevel(op);
   return success();
 }
@@ -655,15 +676,22 @@ LogicalResult WaveMachineSelector::selectMuliI64(MuliOp op) {
         "supported");
   Value lhs = expect(op.getLhs(), op);
   Value rhs = expect(op.getRhs(), op);
-  StringRef opcode = lhsSimd ? "v_mul_u64" : "s_mul_u64";
   wavemachine::RegClass cls =
       lhsSimd ? wavemachine::RegClass::VGPR : wavemachine::RegClass::SGPR;
   // Multi-result op: [0] is the i64 product, [1] is a scratch
   // register the asm-printer uses for cross-product temporaries.
-  Operation *mul = createWMOp(builder, op.getLoc(), opcode, {lhs, rhs},
-                              {getRegType(op.getContext(), cls, /*width=*/2),
-                               getRegType(op.getContext(), cls, /*width=*/1)});
-  values[op.getResult()] = mul->getResult(0);
+  Type productType = getRegType(op.getContext(), cls, /*width=*/2);
+  Type scratchType = getRegType(op.getContext(), cls, /*width=*/1);
+  Value product;
+  if (lhsSimd)
+    product = wavemachine::VMulU64Op::create(builder, op.getLoc(), productType,
+                                             scratchType, lhs, rhs)
+                  .getResult();
+  else
+    product = wavemachine::SMulU64Op::create(builder, op.getLoc(), productType,
+                                             scratchType, lhs, rhs)
+                  .getResult();
+  values[op.getResult()] = product;
   eraseIfTopLevel(op);
   return success();
 }
@@ -683,17 +711,17 @@ LogicalResult WaveMachineSelector::selectShliI32(ShliOp op) {
   Value lhs = expect(op.getLhs(), op);
   Value rhs = expect(op.getRhs(), op);
   if (!isa<SimdType>(op.getResult().getType())) {
-    values[op.getResult()] =
-        createInstr(builder, op.getLoc(), "s_lshl_b32", {lhs, rhs},
-                    getRegType(op.getContext(), wavemachine::RegClass::SGPR));
+    values[op.getResult()] = wavemachine::SLshlB32Op::create(
+        builder, op.getLoc(),
+        getRegType(op.getContext(), wavemachine::RegClass::SGPR), lhs, rhs);
     eraseIfTopLevel(op);
     return success();
   }
   // VOP2 v_lshlrev_b32: shift amount in src0, value (vsrc1) must be VGPR.
   lhs = ensureVGPRForVSrc1(op.getLoc(), lhs);
-  values[op.getResult()] =
-      createInstr(builder, op.getLoc(), "v_lshlrev_b32", {rhs, lhs},
-                  getRegType(op.getContext(), wavemachine::RegClass::VGPR));
+  values[op.getResult()] = wavemachine::VLshlrevB32Op::create(
+      builder, op.getLoc(),
+      getRegType(op.getContext(), wavemachine::RegClass::VGPR), rhs, lhs);
   eraseIfTopLevel(op);
   return success();
 }
@@ -707,17 +735,20 @@ LogicalResult WaveMachineSelector::selectShliI64(ShliOp op) {
         "supported");
   Value lhs = expect(op.getLhs(), op);
   Value rhs = expect(op.getRhs(), op);
-  StringRef opcode = lhsSimd ? "v_lshlrev_b64" : "s_lshl_b64";
   wavemachine::RegClass cls =
       lhsSimd ? wavemachine::RegClass::VGPR : wavemachine::RegClass::SGPR;
+  Type resultType = getRegType(op.getContext(), cls, /*width=*/2);
   // s_lshl_b64 order is (value, shift); v_lshlrev_b64 (rev) flips it
   // to (shift, value). Both extract the low 32 of the i64 shift
   // amount inside the asm printer.
-  SmallVector<Value> operands =
-      lhsSimd ? SmallVector<Value>{rhs, lhs} : SmallVector<Value>{lhs, rhs};
-  values[op.getResult()] =
-      createInstr(builder, op.getLoc(), opcode, operands,
-                  getRegType(op.getContext(), cls, /*width=*/2));
+  Value result;
+  if (lhsSimd)
+    result = wavemachine::VLshlrevB64Op::create(builder, op.getLoc(),
+                                                resultType, rhs, lhs);
+  else
+    result = wavemachine::SLshlB64Op::create(builder, op.getLoc(), resultType,
+                                             lhs, rhs);
+  values[op.getResult()] = result;
   eraseIfTopLevel(op);
   return success();
 }
@@ -740,31 +771,43 @@ LogicalResult WaveMachineSelector::selectShli(ShliOp op) {
 Value WaveMachineSelector::ensureVGPRForVSrc1(Location loc, Value v) {
   if (isVGPR(v))
     return v;
-  return createInstr(builder, loc, "v_mov_b32_tuple", {v},
-                     getRegType(builder.getContext(),
-                                wavemachine::RegClass::VGPR, /*width=*/1));
+  return wavemachine::VMovB32TupleOp::create(
+      builder, loc,
+      getRegType(builder.getContext(), wavemachine::RegClass::VGPR,
+                 /*width=*/1),
+      v);
 }
 
 LogicalResult WaveMachineSelector::selectCmp(CmpIOp op) {
   auto maskType = cast<MaskType>(op.getType());
   if (maskType.getWidth() != 32)
     return op.emitError("WaveMachine backend supports only !wave.mask<32>");
-
-  StringRef machineOpcode =
-      llvm::StringSwitch<StringRef>(stringifyCmpIPredicate(op.getPredicate()))
-          .Case("eq", "v_cmp_eq_u32")
-          .Case("ne", "v_cmp_ne_u32")
-          .Case("ult", "v_cmp_lt_u32")
-          .Case("ule", "v_cmp_le_u32")
-          .Case("ugt", "v_cmp_gt_u32")
-          .Case("uge", "v_cmp_ge_u32")
-          .Default("");
-  if (machineOpcode.empty())
+  Type sgprType = getRegType(op.getContext(), wavemachine::RegClass::SGPR);
+  Value lhs = expect(op.getLhs(), op);
+  Value rhs = expect(op.getRhs(), op);
+  Value result;
+  StringRef predicate = stringifyCmpIPredicate(op.getPredicate());
+  if (predicate == "eq")
+    result = wavemachine::VCmpEqU32Op::create(builder, op.getLoc(), sgprType,
+                                              lhs, rhs);
+  else if (predicate == "ne")
+    result = wavemachine::VCmpNeU32Op::create(builder, op.getLoc(), sgprType,
+                                              lhs, rhs);
+  else if (predicate == "ult")
+    result = wavemachine::VCmpLtU32Op::create(builder, op.getLoc(), sgprType,
+                                              lhs, rhs);
+  else if (predicate == "ule")
+    result = wavemachine::VCmpLeU32Op::create(builder, op.getLoc(), sgprType,
+                                              lhs, rhs);
+  else if (predicate == "ugt")
+    result = wavemachine::VCmpGtU32Op::create(builder, op.getLoc(), sgprType,
+                                              lhs, rhs);
+  else if (predicate == "uge")
+    result = wavemachine::VCmpGeU32Op::create(builder, op.getLoc(), sgprType,
+                                              lhs, rhs);
+  else
     return op.emitError("unsupported wave.cmpi predicate");
-  values[op.getResult()] =
-      createInstr(builder, op.getLoc(), machineOpcode,
-                  {expect(op.getLhs(), op), expect(op.getRhs(), op)},
-                  getRegType(op.getContext(), wavemachine::RegClass::SGPR));
+  values[op.getResult()] = result;
   eraseIfTopLevel(op);
   return success();
 }
@@ -783,9 +826,9 @@ LogicalResult WaveMachineSelector::selectReadFirst(ReadFirstOp op) {
     eraseIfTopLevel(op);
     return success();
   }
-  values[op.getResult()] =
-      createInstr(builder, op.getLoc(), "v_readfirstlane_b32", src,
-                  getRegType(op.getContext(), wavemachine::RegClass::SGPR));
+  values[op.getResult()] = wavemachine::VReadfirstlaneB32Op::create(
+      builder, op.getLoc(),
+      getRegType(op.getContext(), wavemachine::RegClass::SGPR), src);
   eraseIfTopLevel(op);
   return success();
 }
@@ -829,9 +872,9 @@ Value WaveMachineSelector::addByteOffsets(Location loc, Value lhs, Value rhs) {
     rhs = ensureVGPRForVSrc1(loc, rhs);
   if (!isVGPR(lhs) && !isVGPR(rhs))
     lhs = ensureVGPRForVSrc1(loc, lhs);
-  return createInstr(
-      builder, loc, "v_add_u32", {lhs, rhs},
-      getRegType(builder.getContext(), wavemachine::RegClass::VGPR));
+  return wavemachine::VAddU32Op::create(
+      builder, loc,
+      getRegType(builder.getContext(), wavemachine::RegClass::VGPR), lhs, rhs);
 }
 
 std::optional<Value>
@@ -854,9 +897,9 @@ Value WaveMachineSelector::mulIndexValues(Location loc, Value lhs, Value rhs) {
   if (rhsImm && *rhsImm == 1)
     return lhs;
   // v_mul_lo_u32 is VOP3, so SGPR/literal in either slot is legal.
-  return createInstr(
-      builder, loc, "v_mul_lo_u32", {lhs, rhs},
-      getRegType(builder.getContext(), wavemachine::RegClass::VGPR));
+  return wavemachine::VMulLoU32Op::create(
+      builder, loc,
+      getRegType(builder.getContext(), wavemachine::RegClass::VGPR), lhs, rhs);
 }
 
 // Power-of-two * SGPR1 lowers to `s_lshl_b32`. Returns the lowered
@@ -869,10 +912,10 @@ Value WaveMachineSelector::tryLshlPow2(Location loc,
   if (!immFactor || *immFactor <= 0 || (*immFactor & (*immFactor - 1)) != 0)
     return Value{};
   Value sgpr = lhsImm ? rhs : lhs;
-  return createInstr(
-      builder, loc, "s_lshl_b32",
-      {sgpr, createImm(builder, loc, llvm::Log2_32(*immFactor))},
-      getRegType(builder.getContext(), wavemachine::RegClass::SGPR));
+  return wavemachine::SLshlB32Op::create(
+      builder, loc,
+      getRegType(builder.getContext(), wavemachine::RegClass::SGPR), sgpr,
+      createImm(builder, loc, llvm::Log2_32(*immFactor)));
 }
 
 // SGPR-domain multiply for the bucketizer's uniform path. Used when
@@ -891,9 +934,9 @@ Value WaveMachineSelector::mulUniformValues(Location loc, Value lhs,
     return lhs;
   if (Value shifted = tryLshlPow2(loc, lhsImm, lhs, rhsImm, rhs))
     return shifted;
-  return createInstr(
-      builder, loc, "s_mul_i32", {lhs, rhs},
-      getRegType(builder.getContext(), wavemachine::RegClass::SGPR));
+  return wavemachine::SMulI32Op::create(
+      builder, loc,
+      getRegType(builder.getContext(), wavemachine::RegClass::SGPR), lhs, rhs);
 }
 
 // SGPR-or-VGPR power-of-two right shift (logical). Picks the
@@ -906,13 +949,15 @@ Value WaveMachineSelector::shrPow2(Location loc, Value v, unsigned log2Den) {
   if (std::optional<int64_t> imm = getImmediateValue(v))
     return createImm(builder, loc, *imm >> log2Den);
   if (isUniformValue(v))
-    return createInstr(
-        builder, loc, "s_lshr_b32", {v, shiftAmt},
-        getRegType(builder.getContext(), wavemachine::RegClass::SGPR));
+    return wavemachine::SLshrB32Op::create(
+        builder, loc,
+        getRegType(builder.getContext(), wavemachine::RegClass::SGPR), v,
+        shiftAmt);
   Value vgpr = ensureVGPRForVSrc1(loc, v);
-  return createInstr(
-      builder, loc, "v_lshrrev_b32", {vgpr, shiftAmt},
-      getRegType(builder.getContext(), wavemachine::RegClass::VGPR));
+  return wavemachine::VLshrrevB32Op::create(
+      builder, loc,
+      getRegType(builder.getContext(), wavemachine::RegClass::VGPR), vgpr,
+      shiftAmt);
 }
 
 // SGPR-or-VGPR bitwise AND with a literal mask, for power-of-two
@@ -922,13 +967,13 @@ Value WaveMachineSelector::andMask(Location loc, Value v, int64_t mask) {
   if (std::optional<int64_t> imm = getImmediateValue(v))
     return createImm(builder, loc, *imm & mask);
   if (isUniformValue(v))
-    return createInstr(
-        builder, loc, "s_and_b32", {v, m},
-        getRegType(builder.getContext(), wavemachine::RegClass::SGPR));
+    return wavemachine::SAndB32Op::create(
+        builder, loc,
+        getRegType(builder.getContext(), wavemachine::RegClass::SGPR), v, m);
   Value vgpr = ensureVGPRForVSrc1(loc, v);
-  return createInstr(
-      builder, loc, "v_and_b32", {vgpr, m},
-      getRegType(builder.getContext(), wavemachine::RegClass::VGPR));
+  return wavemachine::VAndB32Op::create(
+      builder, loc,
+      getRegType(builder.getContext(), wavemachine::RegClass::VGPR), vgpr, m);
 }
 
 // True iff `v` is a uniform-side value: an immediate, or an SGPR1
@@ -972,11 +1017,11 @@ Value WaveMachineSelector::addUniformBytes(Location loc, Value acc, Value add) {
     return folded;
   if (isImm(acc) && !isImm(add))
     std::swap(acc, add);
-  Operation *sum =
-      createWMOp(builder, loc, "s_add_i32", {acc, add},
-                 {getRegType(builder.getContext(), wavemachine::RegClass::SGPR),
-                  getSCCType(builder.getContext())});
-  return sum->getResult(0);
+  auto sum = wavemachine::SAddI32Op::create(
+      builder, loc,
+      getRegType(builder.getContext(), wavemachine::RegClass::SGPR),
+      getSCCType(builder.getContext()), acc, add);
+  return sum.getResult();
 }
 
 LogicalResult WaveMachineSelector::selectIndexExpr(IndexExprOp op) {
@@ -1053,22 +1098,21 @@ LogicalResult WaveMachineSelector::selectMakeBuffer(waveamd::MakeBufferOp op) {
   // See selectPtrAdd: snapshot before any DenseMap insertion.
   Value baseValue = baseIt->second;
   OffsetTriple baseTriple = offsetIt->second;
-  Operation *descriptor =
-      createWMOp(builder, op.getLoc(), "make_buffer_rsrc",
-                 {baseValue, expect(op.getRange(), op)},
-                 getRegType(op.getContext(), wavemachine::RegClass::SGPR, 4));
-  pointerBases[op.getResult()] = descriptor->getResult(0);
+  Value descriptor = wavemachine::MakeBufferRsrcOp::create(
+      builder, op.getLoc(),
+      getRegType(op.getContext(), wavemachine::RegClass::SGPR, 4), baseValue,
+      expect(op.getRange(), op));
+  pointerBases[op.getResult()] = descriptor;
   pointerOffsets[op.getResult()] = baseTriple;
   pointerBuffers[op.getResult()] = true;
-  values[op.getResult()] = descriptor->getResult(0);
+  values[op.getResult()] = descriptor;
   eraseIfTopLevel(op);
   return success();
 }
 
 LogicalResult WaveMachineSelector::selectToken(TokenOp op) {
-  Operation *token = createWMOp(builder, op.getLoc(), "token", {},
-                                getMemTokenType(op.getContext()));
-  values[op.getResult()] = token->getResult(0);
+  values[op.getResult()] = wavemachine::TokenOp::create(
+      builder, op.getLoc(), getMemTokenType(op.getContext()));
   eraseIfTopLevel(op);
   return success();
 }
@@ -1077,9 +1121,8 @@ LogicalResult WaveMachineSelector::selectTokenJoin(Operation *op) {
   SmallVector<Value> operands;
   for (Value dependency : op->getOperands())
     operands.push_back(expect(dependency, op));
-  Operation *join = createWMOp(builder, op->getLoc(), "token_join", operands,
-                               getMemTokenType(op->getContext()));
-  values[op->getResult(0)] = join->getResult(0);
+  values[op->getResult(0)] = wavemachine::TokenJoinOp::create(
+      builder, op->getLoc(), getMemTokenType(op->getContext()), operands);
   eraseIfTopLevel(op);
   return success();
 }
@@ -1088,7 +1131,7 @@ LogicalResult WaveMachineSelector::selectWait(WaitOp op) {
   SmallVector<Value> operands;
   for (Value dependency : op.getDependencies())
     operands.push_back(expect(dependency, op));
-  createInstrNoResult(builder, op.getLoc(), "wait", operands);
+  wavemachine::WaitOp::create(builder, op.getLoc(), operands);
   eraseIfTopLevel(op);
   return success();
 }
@@ -1097,12 +1140,14 @@ LogicalResult
 WaveMachineSelector::selectFragmentFill(waveamd::FragmentFillOp op) {
   auto fragmentType = cast<waveamd::FragmentType>(op.getResult().getType());
   Value source = expect(op.getSource(), op);
-  values[op.getResult()] = createInstr(
-      builder, op.getLoc(), "v_mov_b32_tuple", source,
+  auto fill = wavemachine::VMovB32TupleOp::create(
+      builder, op.getLoc(),
       getRegType(op.getContext(), wavemachine::RegClass::VGPR,
                  fragmentType.getRegisters()),
-      {builder.getNamedAttr("registers", builder.getI64IntegerAttr(
-                                             fragmentType.getRegisters()))});
+      source);
+  fill->setAttr("registers",
+                builder.getI64IntegerAttr(fragmentType.getRegisters()));
+  values[op.getResult()] = fill;
   eraseIfTopLevel(op);
   return success();
 }
@@ -1142,30 +1187,37 @@ LogicalResult WaveMachineSelector::selectBarrier(BarrierOp op) {
   SmallVector<Value> operands;
   for (Value dependency : op.getDependencies())
     operands.push_back(expect(dependency, op));
-  Operation *barrier = createWMOp(builder, op.getLoc(), "s_barrier", operands,
-                                  getMemTokenType(op.getContext()));
+  auto barrier = wavemachine::SBarrierOp::create(
+      builder, op.getLoc(), getMemTokenType(op.getContext()), operands);
   values[op.getToken()] = barrier->getResult(0);
   eraseIfTopLevel(op);
   return success();
 }
 
 LogicalResult WaveMachineSelector::selectMma(waveamd::MmaOp op) {
-  if (op.getKind() != "wmma.i32.16x16x16.iu8" &&
-      op.getKind() != "wmma.f32.16x16x16.f16" &&
-      op.getKind() != "mfma.f32.16x16x16.f16" &&
-      op.getKind() != "mfma.f32.16x16x32.f16")
-    return op.emitError("unsupported WaveMachine matrix operation kind");
+  StringRef kind = op.getKind();
   auto resultType = cast<waveamd::FragmentType>(op.getResult().getType());
-  StringRef machineOpcode =
-      op.getKind() == "wmma.i32.16x16x16.iu8"   ? "wmma_i32_16x16x16_iu8"
-      : op.getKind() == "wmma.f32.16x16x16.f16" ? "wmma_f32_16x16x16_f16"
-      : op.getKind() == "mfma.f32.16x16x16.f16" ? "mfma_f32_16x16x16_f16"
-                                                : "mfma_f32_16x16x32_f16";
-  values[op.getResult()] = createInstr(
-      builder, op.getLoc(), machineOpcode,
-      {expect(op.getA(), op), expect(op.getB(), op), expect(op.getAcc(), op)},
-      getRegType(op.getContext(), wavemachine::RegClass::VGPR,
-                 resultType.getRegisters()));
+  Type vgprTuple = getRegType(op.getContext(), wavemachine::RegClass::VGPR,
+                              resultType.getRegisters());
+  Value a = expect(op.getA(), op);
+  Value b = expect(op.getB(), op);
+  Value acc = expect(op.getAcc(), op);
+  Value result;
+  if (kind == "wmma.i32.16x16x16.iu8")
+    result = wavemachine::WmmaI32_16x16x16_IU8Op::create(builder, op.getLoc(),
+                                                         vgprTuple, a, b, acc);
+  else if (kind == "wmma.f32.16x16x16.f16")
+    result = wavemachine::WmmaF32_16x16x16_F16Op::create(builder, op.getLoc(),
+                                                         vgprTuple, a, b, acc);
+  else if (kind == "mfma.f32.16x16x16.f16")
+    result = wavemachine::MfmaF32_16x16x16_F16Op::create(builder, op.getLoc(),
+                                                         vgprTuple, a, b, acc);
+  else if (kind == "mfma.f32.16x16x32.f16")
+    result = wavemachine::MfmaF32_16x16x32_F16Op::create(builder, op.getLoc(),
+                                                         vgprTuple, a, b, acc);
+  else
+    return op.emitError("unsupported WaveMachine matrix operation kind");
+  values[op.getResult()] = result;
   eraseIfTopLevel(op);
   return success();
 }
@@ -1194,9 +1246,9 @@ static FailureOr<Value> materializeDmaM0(WaveMachineSelector &S,
   Value dstAddr = S.addByteOffsets(op.getLoc(), dstBase,
                                    S.collapseTriple(op.getLoc(), dstTriple));
   Value m0Src = S.materializeSGPR1(op.getLoc(), dstAddr);
-  Operation *m0 = createWMOp(S.builder, op.getLoc(), "s_mov_m0", {m0Src},
-                             wavemachine::M0Type::get(op.getContext()));
-  return m0->getResult(0);
+  return Value{wavemachine::SMovM0Op::create(
+      S.builder, op.getLoc(), wavemachine::M0Type::get(op.getContext()),
+      m0Src)};
 }
 
 static wavemachine::AddressFieldSpec dmaAddressSpec(bool isBuffer,
@@ -1206,15 +1258,6 @@ static wavemachine::AddressFieldSpec dmaAddressSpec(bool isBuffer,
                        : wavemachine::BufferLoadLdsB32Op::getAddressFieldSpec();
   return bytes == 16 ? wavemachine::GlobalLoadLdsB128Op::getAddressFieldSpec()
                      : wavemachine::GlobalLoadLdsB32Op::getAddressFieldSpec();
-}
-
-static SmallVector<NamedAttribute>
-dmaAttrs(WaveMachineSelector &S, waveamd::DmaLoadLdsOp op, int64_t instOffset) {
-  SmallVector<NamedAttribute> attrs =
-      S.instOffsetAttrs(instOffset, "inst_offset");
-  if (op.getAux() != 0)
-    attrs.push_back(S.builder.getNamedAttr("aux", op.getAuxAttr()));
-  return attrs;
 }
 
 LogicalResult WaveMachineSelector::selectDmaLoadLds(waveamd::DmaLoadLdsOp op) {
@@ -1232,22 +1275,31 @@ LogicalResult WaveMachineSelector::selectDmaLoadLds(waveamd::DmaLoadLdsOp op) {
   bool isBuffer = pointerBuffers.lookup(op.getSource());
   auto b = bucketForSpec(op.getLoc(), srcTriple,
                          dmaAddressSpec(isBuffer, op.getBytes()));
-  SmallVector<NamedAttribute> attrs = dmaAttrs(*this, op, b.instOffset);
-  Operation *dma = nullptr;
+  IntegerAttr instOffsetAttr = builder.getI64IntegerAttr(b.instOffset);
+  IntegerAttr auxAttr = op.getAux() != 0 ? op.getAuxAttr() : IntegerAttr{};
+  Type tokenType = getMemTokenType(op.getContext());
+  Value dep = expect(op.getDependency(), op);
+  Value token;
   if (isBuffer) {
-    dma = createWMOp(
-        builder, op.getLoc(),
-        op.getBytes() == 16 ? "buffer_load_lds_b128" : "buffer_load_lds_b32",
-        {b.voffset, srcBase, b.soffset, *m0, expect(op.getDependency(), op)},
-        getMemTokenType(op.getContext()), attrs);
+    if (op.getBytes() == 16)
+      token = wavemachine::BufferLoadLdsB128Op::create(
+          builder, op.getLoc(), tokenType, b.voffset, srcBase, b.soffset, *m0,
+          dep, instOffsetAttr, auxAttr);
+    else
+      token = wavemachine::BufferLoadLdsB32Op::create(
+          builder, op.getLoc(), tokenType, b.voffset, srcBase, b.soffset, *m0,
+          dep, instOffsetAttr, auxAttr);
   } else {
-    dma = createWMOp(builder, op.getLoc(),
-                     op.getBytes() == 16 ? "global_load_lds_b128"
-                                         : "global_load_lds_b32",
-                     {b.voffset, srcBase, *m0, expect(op.getDependency(), op)},
-                     getMemTokenType(op.getContext()), attrs);
+    if (op.getBytes() == 16)
+      token = wavemachine::GlobalLoadLdsB128Op::create(
+          builder, op.getLoc(), tokenType, b.voffset, srcBase, *m0, dep,
+          instOffsetAttr, auxAttr);
+    else
+      token = wavemachine::GlobalLoadLdsB32Op::create(
+          builder, op.getLoc(), tokenType, b.voffset, srcBase, *m0, dep,
+          instOffsetAttr, auxAttr);
   }
-  values[op.getToken()] = dma->getResult(0);
+  values[op.getToken()] = token;
   eraseIfTopLevel(op);
   return success();
 }
@@ -1261,9 +1313,9 @@ Value WaveMachineSelector::ensureSGPR1(Location loc, Value v) {
     if (rt.getRegClass() == wavemachine::RegClass::SGPR && rt.getWidth() == 1)
       return v;
     if (rt.getRegClass() == wavemachine::RegClass::VGPR && rt.getWidth() == 1)
-      return createInstr(
-          builder, loc, "v_readfirstlane_b32", v,
-          getRegType(builder.getContext(), wavemachine::RegClass::SGPR));
+      return wavemachine::VReadfirstlaneB32Op::create(
+          builder, loc,
+          getRegType(builder.getContext(), wavemachine::RegClass::SGPR), v);
   }
   // Imm passes through; the WaveMachine_SGPR1OrImm constraint accepts it.
   return v;
@@ -1276,9 +1328,9 @@ Value WaveMachineSelector::ensureSGPR1(Location loc, Value v) {
 Value WaveMachineSelector::materializeSGPR1(Location loc, Value v) {
   v = ensureSGPR1(loc, v);
   if (isa<wavemachine::ImmType>(v.getType()))
-    return createInstr(
-        builder, loc, "s_mov_b32_value", v,
-        getRegType(builder.getContext(), wavemachine::RegClass::SGPR));
+    return wavemachine::SMovB32ValueOp::create(
+        builder, loc,
+        getRegType(builder.getContext(), wavemachine::RegClass::SGPR), v);
   return v;
 }
 
@@ -1287,30 +1339,22 @@ LogicalResult WaveMachineSelector::selectWhere(WhereOp op) {
   std::string elseLabel =
       op.getElseRegion().empty() ? endLabel : makeLabel("else");
   Value condition = expect(op.getCondition(), op);
-  Value savedExec =
-      createInstr(builder, op.getLoc(), "s_and_saveexec_b32", condition,
-                  getRegType(op.getContext(), wavemachine::RegClass::SGPR));
-  createInstrNoResult(
-      builder, op.getLoc(), "s_cbranch_execz", {},
-      {builder.getNamedAttr("label", builder.getStringAttr(elseLabel))});
+  Value savedExec = wavemachine::SAndSaveexecB32Op::create(
+      builder, op.getLoc(),
+      getRegType(op.getContext(), wavemachine::RegClass::SGPR), condition);
+  wavemachine::SCBranchExeczOp::create(builder, op.getLoc(), elseLabel);
   if (failed(selectRegion(op.getThenRegion())))
     return failure();
   if (!op.getElseRegion().empty()) {
-    createInstrNoResult(builder, op.getLoc(), "s_andn2_exec_b32",
-                        {savedExec, condition});
-    createInstrNoResult(
-        builder, op.getLoc(), "s_cbranch_execz", {},
-        {builder.getNamedAttr("label", builder.getStringAttr(endLabel))});
-    createInstrNoResult(
-        builder, op.getLoc(), "label", {},
-        {builder.getNamedAttr("name", builder.getStringAttr(elseLabel))});
+    wavemachine::SAndn2ExecB32Op::create(builder, op.getLoc(), savedExec,
+                                         condition);
+    wavemachine::SCBranchExeczOp::create(builder, op.getLoc(), endLabel);
+    wavemachine::LabelOp::create(builder, op.getLoc(), elseLabel);
     if (failed(selectRegion(op.getElseRegion())))
       return failure();
   }
-  createInstrNoResult(
-      builder, op.getLoc(), "label", {},
-      {builder.getNamedAttr("name", builder.getStringAttr(endLabel))});
-  createInstrNoResult(builder, op.getLoc(), "s_mov_exec_lo", savedExec);
+  wavemachine::LabelOp::create(builder, op.getLoc(), endLabel);
+  wavemachine::SMovExecLoOp::create(builder, op.getLoc(), savedExec);
   eraseIfTopLevel(op);
   return success();
 }
@@ -1332,7 +1376,7 @@ LogicalResult WaveMachineSelector::selectReturn(func::ReturnOp op) {
   if (func->hasAttr("wave.kernel")) {
     if (op.getNumOperands() != 0)
       return op.emitError("kernel functions must return void");
-    createInstrNoResult(builder, op.getLoc(), "s_endpgm", {});
+    wavemachine::SEndpgmOp::create(builder, op.getLoc());
     op.getOperandsMutable().clear();
     return success();
   }
@@ -1341,14 +1385,12 @@ LogicalResult WaveMachineSelector::selectReturn(func::ReturnOp op) {
     Value ret = expect(op.getOperand(0), op);
     auto regType = dyn_cast<wavemachine::RegType>(ret.getType());
     if (regType && regType.getRegClass() == wavemachine::RegClass::VGPR)
-      ret =
-          createInstr(builder, op.getLoc(), "v_readfirstlane_b32", ret,
-                      getRegType(op.getContext(), wavemachine::RegClass::SGPR));
-    createInstrNoResult(
-        builder, op.getLoc(), "s_mov_b32", ret,
-        {builder.getNamedAttr("dst", builder.getStringAttr("s0"))});
+      ret = wavemachine::VReadfirstlaneB32Op::create(
+          builder, op.getLoc(),
+          getRegType(op.getContext(), wavemachine::RegClass::SGPR), ret);
+    wavemachine::SMovB32Op::create(builder, op.getLoc(), "s0", ret);
   }
-  createInstrNoResult(builder, op.getLoc(), "s_setpc_b64", {});
+  wavemachine::SSetpcB64Op::create(builder, op.getLoc());
   op.getOperandsMutable().clear();
   return success();
 }

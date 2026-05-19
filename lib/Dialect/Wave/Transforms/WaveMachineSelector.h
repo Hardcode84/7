@@ -127,42 +127,10 @@ inline bool isImm(Value v) {
   return v.getDefiningOp<mlir::wavemachine::ImmOp>() != nullptr;
 }
 
-inline Operation *createWMOp(OpBuilder &builder, Location loc, StringRef name,
-                             ValueRange operands, TypeRange resultTypes,
-                             ArrayRef<NamedAttribute> attrs = {}) {
-  std::string opName = ("wavemachine." + name).str();
-  OperationState state(loc, opName);
-  state.addOperands(operands);
-  state.addTypes(resultTypes);
-  state.addAttributes(attrs);
-  return builder.create(state);
-}
-
-inline Operation *createWMOp(OpBuilder &builder, Location loc, StringRef name,
-                             ValueRange operands, Type resultType,
-                             ArrayRef<NamedAttribute> attrs = {}) {
-  SmallVector<Type, 1> resultTypes{resultType};
-  return createWMOp(builder, loc, name, operands, resultTypes, attrs);
-}
-
 inline Value createImm(OpBuilder &builder, Location loc, int64_t value) {
-  Operation *op = createWMOp(
-      builder, loc, "imm", {}, getImmType(builder.getContext()),
-      {builder.getNamedAttr("value", builder.getI64IntegerAttr(value))});
-  return op->getResult(0);
-}
-
-inline Value createInstr(OpBuilder &builder, Location loc, StringRef name,
-                         ValueRange operands, Type resultType,
-                         ArrayRef<NamedAttribute> attrs = {}) {
-  Operation *op = createWMOp(builder, loc, name, operands, resultType, attrs);
-  return op->getResult(0);
-}
-
-inline Operation *createInstrNoResult(OpBuilder &builder, Location loc,
-                                      StringRef name, ValueRange operands,
-                                      ArrayRef<NamedAttribute> attrs = {}) {
-  return createWMOp(builder, loc, name, operands, TypeRange{}, attrs);
+  return mlir::wavemachine::ImmOp::create(builder, loc,
+                                          getImmType(builder.getContext()),
+                                          static_cast<uint64_t>(value));
 }
 
 class WaveMachineSelector;

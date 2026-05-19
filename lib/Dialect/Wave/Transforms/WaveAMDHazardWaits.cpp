@@ -95,30 +95,10 @@ inline unsigned encodeCount(unsigned Count) {
 } // namespace SNop
 } // namespace amdgpu_compat
 
-static wavemachine::ImmType getImmType(MLIRContext *ctx) {
-  return wavemachine::ImmType::get(ctx);
-}
-
-static Operation *createWMOp(OpBuilder &builder, Location loc, StringRef name,
-                             ValueRange operands, TypeRange resultTypes,
-                             ArrayRef<NamedAttribute> attrs = {}) {
-  OperationState state(loc, ("wavemachine." + name).str());
-  state.addOperands(operands);
-  state.addTypes(resultTypes);
-  state.addAttributes(attrs);
-  return builder.create(state);
-}
-
 static Value createImm(OpBuilder &builder, Location loc, int64_t value) {
-  Operation *op = createWMOp(
-      builder, loc, "imm", {}, getImmType(builder.getContext()),
-      {builder.getNamedAttr("value", builder.getI64IntegerAttr(value))});
-  return op->getResult(0);
-}
-
-static Operation *createInstrNoResult(OpBuilder &builder, Location loc,
-                                      StringRef name, ValueRange operands) {
-  return createWMOp(builder, loc, name, operands, TypeRange{});
+  return wavemachine::ImmOp::create(
+      builder, loc, wavemachine::ImmType::get(builder.getContext()),
+      static_cast<uint64_t>(value));
 }
 
 static void insertNoops(OpBuilder &builder, Location loc, unsigned count,
@@ -127,8 +107,8 @@ static void insertNoops(OpBuilder &builder, Location loc, unsigned count,
   while (count > 0) {
     unsigned chunk = std::min(count, maxCount);
     count -= chunk;
-    createInstrNoResult(
-        builder, loc, "s_nop",
+    wavemachine::SNopOp::create(
+        builder, loc,
         createImm(builder, loc, amdgpu_compat::SNop::encodeCount(chunk)));
   }
 }
@@ -225,8 +205,8 @@ private:
                             const llvm::MCSubtargetInfo &sti) {
     builder.setInsertionPoint(&op);
     if (cfg.hasDelayAlu) {
-      createInstrNoResult(builder, op.getLoc(), "s_delay_alu",
-                          createImm(builder, op.getLoc(), cfg.valuDep1));
+      wavemachine::SDelayAluOp::create(
+          builder, op.getLoc(), createImm(builder, op.getLoc(), cfg.valuDep1));
     } else {
       insertNoops(builder, op.getLoc(), /*count=*/1, sti);
     }

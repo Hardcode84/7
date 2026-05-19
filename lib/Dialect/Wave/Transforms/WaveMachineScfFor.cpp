@@ -171,7 +171,7 @@ LogicalResult selectScfFor(WaveMachineSelector &S, scf::ForOp op) {
   Value entryCond;
   if (!op->hasAttr("wave.nonzero_trip"))
     entryCond =
-        createInstr(S.builder, loc, "s_cmp_lt_i32", {lower, upper}, scc);
+        wavemachine::SCmpLtI32Op::create(S.builder, loc, scc, lower, upper);
 
   SmallVector<CarrySnapshot> snapshots;
   if (failed(snapshotScfCarries(S, op, snapshots)))
@@ -192,18 +192,18 @@ LogicalResult selectScfFor(WaveMachineSelector &S, scf::ForOp op) {
 
   Type sgpr1 =
       getRegType(S.builder.getContext(), wavemachine::RegClass::SGPR, 1);
-  Operation *add =
-      createWMOp(S.builder, loc, "s_add_i32", {loopBody.getArgument(0), step},
-                 TypeRange{sgpr1, scc});
-  Value nextIv = add->getResult(0);
+  auto add = wavemachine::SAddI32Op::create(S.builder, loc, sgpr1, scc,
+                                            loopBody.getArgument(0), step);
+  Value nextIv = add.getResult();
   Value backCond =
-      createInstr(S.builder, loc, "s_cmp_lt_i32", {nextIv, upper}, scc);
+      wavemachine::SCmpLtI32Op::create(S.builder, loc, scc, nextIv, upper);
 
   SmallVector<Value> contOperands{backCond, nextIv};
   auto yield = cast<scf::YieldOp>(op.getBody()->getTerminator());
   if (failed(collectYieldCarries(S, yield, snapshots, contOperands)))
     return failure();
-  createWMOp(S.builder, loc, "continue_if", contOperands, TypeRange{});
+  wavemachine::ContinueIfOp::create(S.builder, loc, backCond,
+                                    ArrayRef<Value>(contOperands).drop_front());
 
   S.builder.setInsertionPointAfter(loop);
   bindLoopResults(S, op, loop, snapshots);
