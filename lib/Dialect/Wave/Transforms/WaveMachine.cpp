@@ -1157,47 +1157,81 @@ LogicalResult WaveMachineSelector::selectMma(waveamd::MmaOp op) {
   return success();
 }
 
-LogicalResult WaveMachineSelector::selectDmaLoadLds(waveamd::DmaLoadLdsOp op) {
-  if (op.getBytes() != 4)
-    return op.emitError("WaveMachine backend supports only bytes = 4");
-
-  auto srcBaseIt = pointerBases.find(op.getSource());
-  auto srcOffsetIt = pointerOffsets.find(op.getSource());
-  auto dstBaseIt = pointerBases.find(op.getDest());
-  auto dstOffsetIt = pointerOffsets.find(op.getDest());
-  if (srcBaseIt == pointerBases.end() || srcOffsetIt == pointerOffsets.end() ||
-      dstBaseIt == pointerBases.end() || dstOffsetIt == pointerOffsets.end())
+static FailureOr<std::tuple<Value, OffsetTriple, Value, OffsetTriple>>
+lookupDmaPointers(WaveMachineSelector &S, waveamd::DmaLoadLdsOp op) {
+  auto srcBaseIt = S.pointerBases.find(op.getSource());
+  auto srcOffsetIt = S.pointerOffsets.find(op.getSource());
+  auto dstBaseIt = S.pointerBases.find(op.getDest());
+  auto dstOffsetIt = S.pointerOffsets.find(op.getDest());
+  if (srcBaseIt == S.pointerBases.end() ||
+      srcOffsetIt == S.pointerOffsets.end() ||
+      dstBaseIt == S.pointerBases.end() ||
+      dstOffsetIt == S.pointerOffsets.end())
     return op.emitError("WaveMachine backend expects selected DMA pointers");
+  return std::make_tuple(srcBaseIt->second, srcOffsetIt->second,
+                         dstBaseIt->second, dstOffsetIt->second);
+}
 
-  OffsetTriple dstTriple = dstOffsetIt->second;
+static FailureOr<Value> materializeDmaM0(WaveMachineSelector &S,
+                                         waveamd::DmaLoadLdsOp op,
+                                         Value dstBase,
+                                         OffsetTriple dstTriple) {
   if (dstTriple.voffset)
     return op.emitError("DMA LDS destination must be uniform");
-  Value dstAddr = addByteOffsets(op.getLoc(), dstBaseIt->second,
-                                 collapseTriple(op.getLoc(), dstTriple));
-  Value m0Src = materializeSGPR1(op.getLoc(), dstAddr);
-  Operation *m0 = createWMOp(builder, op.getLoc(), "s_mov_m0", {m0Src},
+  Value dstAddr = S.addByteOffsets(op.getLoc(), dstBase,
+                                   S.collapseTriple(op.getLoc(), dstTriple));
+  Value m0Src = S.materializeSGPR1(op.getLoc(), dstAddr);
+  Operation *m0 = createWMOp(S.builder, op.getLoc(), "s_mov_m0", {m0Src},
                              wavemachine::M0Type::get(op.getContext()));
+  return m0->getResult(0);
+}
+
+static wavemachine::AddressFieldSpec dmaAddressSpec(bool isBuffer,
+                                                    int64_t bytes) {
+  if (isBuffer)
+    return bytes == 16 ? wavemachine::BufferLoadLdsB128Op::getAddressFieldSpec()
+                       : wavemachine::BufferLoadLdsB32Op::getAddressFieldSpec();
+  return bytes == 16 ? wavemachine::GlobalLoadLdsB128Op::getAddressFieldSpec()
+                     : wavemachine::GlobalLoadLdsB32Op::getAddressFieldSpec();
+}
+
+static SmallVector<NamedAttribute>
+dmaAttrs(WaveMachineSelector &S, waveamd::DmaLoadLdsOp op, int64_t instOffset) {
+  SmallVector<NamedAttribute> attrs =
+      S.instOffsetAttrs(instOffset, "inst_offset");
+  if (op.getAux() != 0)
+    attrs.push_back(S.builder.getNamedAttr("aux", op.getAuxAttr()));
+  return attrs;
+}
+
+LogicalResult WaveMachineSelector::selectDmaLoadLds(waveamd::DmaLoadLdsOp op) {
+  if (op.getBytes() != 4 && op.getBytes() != 16)
+    return op.emitError("WaveMachine backend supports only bytes = 4 or 16");
+  FailureOr<std::tuple<Value, OffsetTriple, Value, OffsetTriple>> ptrs =
+      lookupDmaPointers(*this, op);
+  if (failed(ptrs))
+    return failure();
+  auto [srcBase, srcTriple, dstBase, dstTriple] = *ptrs;
+  FailureOr<Value> m0 = materializeDmaM0(*this, op, dstBase, dstTriple);
+  if (failed(m0))
+    return failure();
 
   bool isBuffer = pointerBuffers.lookup(op.getSource());
-  wavemachine::AddressFieldSpec spec =
-      isBuffer ? wavemachine::BufferLoadLdsB32Op::getAddressFieldSpec()
-               : wavemachine::GlobalLoadLdsB32Op::getAddressFieldSpec();
-  auto b = bucketForSpec(op.getLoc(), srcOffsetIt->second, spec);
-  SmallVector<NamedAttribute> attrs =
-      instOffsetAttrs(b.instOffset, "inst_offset");
-  if (op.getAux() != 0)
-    attrs.push_back(builder.getNamedAttr("aux", op.getAuxAttr()));
-
+  auto b = bucketForSpec(op.getLoc(), srcTriple,
+                         dmaAddressSpec(isBuffer, op.getBytes()));
+  SmallVector<NamedAttribute> attrs = dmaAttrs(*this, op, b.instOffset);
   Operation *dma = nullptr;
   if (isBuffer) {
-    dma = createWMOp(builder, op.getLoc(), "buffer_load_lds_b32",
-                     {b.voffset, srcBaseIt->second, b.soffset, m0->getResult(0),
-                      expect(op.getDependency(), op)},
-                     getMemTokenType(op.getContext()), attrs);
+    dma = createWMOp(
+        builder, op.getLoc(),
+        op.getBytes() == 16 ? "buffer_load_lds_b128" : "buffer_load_lds_b32",
+        {b.voffset, srcBase, b.soffset, *m0, expect(op.getDependency(), op)},
+        getMemTokenType(op.getContext()), attrs);
   } else {
-    dma = createWMOp(builder, op.getLoc(), "global_load_lds_b32",
-                     {b.voffset, srcBaseIt->second, m0->getResult(0),
-                      expect(op.getDependency(), op)},
+    dma = createWMOp(builder, op.getLoc(),
+                     op.getBytes() == 16 ? "global_load_lds_b128"
+                                         : "global_load_lds_b32",
+                     {b.voffset, srcBase, *m0, expect(op.getDependency(), op)},
                      getMemTokenType(op.getContext()), attrs);
   }
   values[op.getToken()] = dma->getResult(0);

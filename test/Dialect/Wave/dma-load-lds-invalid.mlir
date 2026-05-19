@@ -9,7 +9,7 @@ func.func @bad_size(%in: !wave.ptr<i32, #wave.global>)
       -> !wave.simd<!wave.ptr<i32, #wave.global>, 32>
   %lds = wave.lds_base : !wave.ptr<i32, #wave.shared>
   %tok0 = wave.token : !wave.mem.token
-  // expected-error @below {{currently supports only bytes = 4}}
+  // expected-error @below {{currently supports only bytes = 4 or 16}}
   %tok = waveamd.dma_load_lds %src -> %lds after %tok0 {bytes = 8 : i64}
       : (!wave.simd<!wave.ptr<i32, #wave.global>, 32>,
          !wave.ptr<i32, #wave.shared>, !wave.mem.token) -> !wave.mem.token

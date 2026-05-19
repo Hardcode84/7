@@ -352,11 +352,22 @@ private:
                           : llvm::AMDGPU::GLOBAL_LOAD_LDS_DWORD_SADDR_vi;
   }
 
+  unsigned globalLoadLdsB128() const {
+    return isGfx90APlus() ? llvm::AMDGPU::GLOBAL_LOAD_LDS_DWORDX4_SADDR_gfx940
+                          : llvm::AMDGPU::GLOBAL_LOAD_LDS_DWORDX4_SADDR_vi;
+  }
+
   unsigned bufferLoadLdsB32() const {
     if (isGfx90APlus())
       return llvm::AMDGPU::BUFFER_LOAD_DWORD_LDS_OFFEN_gfx90a;
     return isGfx8Or9() ? llvm::AMDGPU::BUFFER_LOAD_DWORD_LDS_OFFEN_vi
                        : llvm::AMDGPU::BUFFER_LOAD_DWORD_LDS_OFFEN_gfx10;
+  }
+
+  unsigned bufferLoadLdsB128() const {
+    if (isGfx90APlus())
+      return llvm::AMDGPU::BUFFER_LOAD_DWORDX4_LDS_OFFEN_gfx90a;
+    return llvm::AMDGPU::BUFFER_LOAD_DWORDX4_LDS_OFFEN_vi;
   }
 
   unsigned dsReadB32() const {
@@ -1244,6 +1255,15 @@ private:
                                          llvm::MCOperand::createImm(instOffset),
                                          llvm::MCOperand::createImm(aux)});
     }
+    if (isa<wavemachine::GlobalLoadLdsB128Op>(op)) {
+      int64_t instOffset = getIntAttr(&op, "inst_offset", 0);
+      int64_t aux = getIntAttr(&op, "aux", 0);
+      return emitMC(globalLoadLdsB128(),
+                    {toMCOperand(op.getOperand(1)),
+                     toMCOperand(op.getOperand(0)),
+                     llvm::MCOperand::createImm(instOffset),
+                     llvm::MCOperand::createImm(aux)});
+    }
     if (isa<wavemachine::BufferLoadLdsB32Op>(op)) {
       int64_t instOffset = getIntAttr(&op, "inst_offset", 0);
       int64_t aux = getIntAttr(&op, "aux", 0);
@@ -1252,6 +1272,16 @@ private:
                                          toMCOperand(op.getOperand(2)),
                                          llvm::MCOperand::createImm(instOffset),
                                          llvm::MCOperand::createImm(aux)});
+    }
+    if (isa<wavemachine::BufferLoadLdsB128Op>(op)) {
+      int64_t instOffset = getIntAttr(&op, "inst_offset", 0);
+      int64_t aux = getIntAttr(&op, "aux", 0);
+      return emitMC(bufferLoadLdsB128(),
+                    {toMCOperand(op.getOperand(0)),
+                     toMCOperand(op.getOperand(1)),
+                     toMCOperand(op.getOperand(2)),
+                     llvm::MCOperand::createImm(instOffset),
+                     llvm::MCOperand::createImm(aux)});
     }
     // Tuple buffer loads expand into N consecutive `buffer_load_dword`
     // instructions sharing the same vaddr / descriptor / soffset, with

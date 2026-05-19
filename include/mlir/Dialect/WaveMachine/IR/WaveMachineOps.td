@@ -437,6 +437,25 @@ def WaveMachine_GlobalLoadLdsB32Op
   }];
 }
 
+def WaveMachine_GlobalLoadLdsB128Op
+    : WaveMachine_GlobalMemoryOp<"global_load_lds_b128", [WaveMachine_VMEMLoad]> {
+  let summary = "global-to-LDS 128-bit DMA load";
+  let description = [{
+    Reads 16 bytes from global memory and writes them to LDS. `m0` carries the
+    scalar LDS base; hardware adds 16*lane_id for this form.
+  }];
+  let arguments = (ins WaveMachine_VGPR1:$offset, WaveMachine_SGPR2:$base,
+                       WaveMachine_M0:$m0, WaveMachine_MemToken:$dependency,
+                       DefaultValuedAttr<I64Attr, "0">:$inst_offset,
+                       DefaultValuedAttr<I64Attr, "0">:$aux);
+  let results = (outs WaveMachine_MemToken:$token);
+  let assemblyFormat = [{
+    $offset `,` $base `,` $m0 `after` $dependency
+    (`offset` $inst_offset^)? (`aux` $aux^)?
+    attr-dict `:` functional-type(operands, results)
+  }];
+}
+
 def WaveMachine_MakeBufferRsrcOp
     : WaveMachine_Op<"make_buffer_rsrc", [Pure]> {
   let summary = "construct an AMD buffer descriptor";
@@ -543,6 +562,26 @@ def WaveMachine_BufferLoadLdsB32Op
     carries the scalar LDS base; hardware adds 4*lane_id for this dword form.
     The op consumes an input memory token for buffer/global ordering and
     returns a token representing the memory read plus LDS write.
+  }];
+  let arguments = (ins WaveMachine_VGPR1:$offset, WaveMachine_SGPR4:$descriptor,
+                       WaveMachine_SGPR1OrImm:$soffset, WaveMachine_M0:$m0,
+                       WaveMachine_MemToken:$dependency,
+                       DefaultValuedAttr<I64Attr, "0">:$inst_offset,
+                       DefaultValuedAttr<I64Attr, "0">:$aux);
+  let results = (outs WaveMachine_MemToken:$token);
+  let assemblyFormat = [{
+    $offset `,` $descriptor `,` $soffset `,` $m0 `after` $dependency
+    (`offset` $inst_offset^)? (`aux` $aux^)?
+    attr-dict `:` functional-type(operands, results)
+  }];
+}
+
+def WaveMachine_BufferLoadLdsB128Op
+    : WaveMachine_BufferMemoryOp<"buffer_load_lds_b128", [WaveMachine_VMEMLoad]> {
+  let summary = "buffer-to-LDS 128-bit DMA load";
+  let description = [{
+    Reads 16 bytes through a buffer descriptor and writes them to LDS. `m0`
+    carries the scalar LDS base; hardware adds 16*lane_id for this form.
   }];
   let arguments = (ins WaveMachine_VGPR1:$offset, WaveMachine_SGPR4:$descriptor,
                        WaveMachine_SGPR1OrImm:$soffset, WaveMachine_M0:$m0,

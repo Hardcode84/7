@@ -197,8 +197,8 @@ LogicalResult MmaOp::verify() {
 }
 
 LogicalResult DmaLoadLdsOp::verify() {
-  if (getBytes() != 4)
-    return emitOpError("currently supports only bytes = 4");
+  if (getBytes() != 4 && getBytes() != 16)
+    return emitOpError("currently supports only bytes = 4 or 16");
 
   Type sourceType = getSource().getType();
   auto sourceSimdType = dyn_cast<wave::SimdType>(sourceType);
