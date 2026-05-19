@@ -65,15 +65,19 @@ class _MmaVariant:
     kind: str
     ab_registers: int
     acc_registers: int
+    wave_size: int = 32
+    lane_k_elems: int = 0
+    k_tile: int = 16
 
     @property
     def lds_dwords_per_frag(self) -> int:
-        return self.ab_registers * 32
+        return self.ab_registers * self.wave_size
 
 
 _MMA_VARIANTS = {
     "wmma": _MmaVariant("wmma", "wmma.f32.16x16x16.f16", 8, 8),
     "mfma": _MmaVariant("mfma", "mfma.f32.16x16x16.f16", 2, 4),
+    "mfma_gfx950": _MmaVariant("mfma_gfx950", "mfma.f32.16x16x32.f16", 4, 4, 64, 8, 32),
 }
 
 
@@ -130,7 +134,7 @@ class _MatmulConfig:
 
     @property
     def threads_per_workgroup(self) -> int:
-        return 32 * self.waves_per_workgroup
+        return self.mma.wave_size * self.waves_per_workgroup
 
     @property
     def M_blocks(self) -> int:
@@ -142,7 +146,7 @@ class _MatmulConfig:
 
     @property
     def k_steps(self) -> int:
-        return self.K // 16
+        return self.K // self.mma.k_tile
 
     @property
     def virtual_k_steps(self) -> int:
@@ -200,9 +204,20 @@ def _validate_tile_shape(cfg: _MatmulConfig) -> None:
             f"BN * wave_n_tiles (={n_tiles_per_block}) must divide "
             f"N/16 (={cfg.N // 16})"
         )
+    if cfg.K % cfg.mma.k_tile != 0:
+        raise ValueError(
+            f"K must be a multiple of {cfg.mma.k_tile} for "
+            f"{cfg.matrix_intrinsic}; got {cfg.K}"
+        )
     if cfg.k_steps % cfg.wave_k_tiles != 0:
         raise ValueError(
-            f"wave_k_tiles (={cfg.wave_k_tiles}) must divide K/16 (={cfg.k_steps})"
+            f"wave_k_tiles (={cfg.wave_k_tiles}) must divide "
+            f"K/{cfg.mma.k_tile} (={cfg.k_steps})"
+        )
+    if cfg.mma.name == "mfma_gfx950" and cfg.tiles_per_wave != 1:
+        raise ValueError(
+            "gfx950 MFMA supports wave_k_tiles now, but per-wave M/N tiling "
+            "needs separate accumulator register allocation work"
         )
     if cfg.waves_per_workgroup > 32:
         raise ValueError(
@@ -327,7 +342,6 @@ class _TileCoords:
     """Per-wave coordinates derived from `workitem_id` / `workgroup_id`."""
 
     wi: dsl.Value  # raw workitem_id; wave_id = wi // 32 lives in index_expr
-    lane: dsl.Value  # lane id within the wave
     a_lane_base: dsl.Value
     b_lane_base: dsl.Value
     c_ptr: dsl.Value
@@ -361,11 +375,11 @@ def _emit_tile_coords(bld: dsl.FunctionBuilder, cfg: _MatmulConfig) -> _TileCoor
         a_arg = _wrap_in_buffer(bld, a_arg, cfg.a_elements)
         b_arg = _wrap_in_buffer(bld, b_arg, cfg.b_elements)
 
-    # Lattice bounds for the bucketizer's range-fit check. workitem_id
-    # is `wave_id_in_wg * 32 + lane_id`, so it covers
-    # `[0, threads_per_workgroup - 1]`.
-    wi_val = bld.assume_range(bld.workitem_id(axis=0), 0, cfg.threads_per_workgroup - 1)
-    lane_val = bld.lane_id()
+    wi_val = bld.assume_range(
+        bld.workitem_id(axis=0, width=cfg.mma.wave_size),
+        0,
+        cfg.threads_per_workgroup - 1,
+    )
     wg_m_val = bld.assume_range(bld.workgroup_id(axis=0), 0, cfg.M_blocks - 1)
     wg_n_val = bld.assume_range(bld.workgroup_id(axis=1), 0, cfg.N_blocks - 1)
 
@@ -373,20 +387,22 @@ def _emit_tile_coords(bld: dsl.FunctionBuilder, cfg: _MatmulConfig) -> _TileCoor
     # m_wave / n_wave / lane_mod16 ride floor / mod nodes that the
     # bucketizer lowers to shr / and.
     wi = dsl.sym("wi")
-    lane = dsl.sym("lane")
     wg_m = dsl.sym("wg_m")
     wg_n = dsl.sym("wg_n")
-    wave_id = dsl.floor(wi / 32)
-    m_wave = dsl.floor(wi / (32 * cfg.BN))
+    wave_id = dsl.floor(wi / cfg.mma.wave_size)
+    m_wave = dsl.floor(wi / (cfg.mma.wave_size * cfg.BN))
     n_wave = dsl.mod(wave_id, cfg.BN)
-    lane_mod16 = dsl.mod(lane, 16)
-    sym_to_val = {wi: wi_val, lane: lane_val, wg_m: wg_m_val, wg_n: wg_n_val}
+    lane = dsl.mod(wi, cfg.mma.wave_size)
+    lane_mod16 = dsl.mod(wi, 16)
+    lane_k_off = dsl.floor(lane / 16) * cfg.mma.lane_k_elems
+    sym_to_val = {wi: wi_val, wg_m: wg_m_val, wg_n: wg_n_val}
 
     stride_per_tile = 16 * cfg.K
     a_off = bld.index_expr(
         wg_m * (cfg.BM * cfg.wave_m_tiles * stride_per_tile)
         + m_wave * (cfg.wave_m_tiles * stride_per_tile)
-        + lane_mod16 * cfg.K,
+        + lane_mod16 * cfg.K
+        + lane_k_off,
         bindings=sym_to_val,
     )
     a_lane_base = bld.ptr_add(a_arg, a_off)
@@ -394,7 +410,8 @@ def _emit_tile_coords(bld: dsl.FunctionBuilder, cfg: _MatmulConfig) -> _TileCoor
     b_off = bld.index_expr(
         wg_n * (cfg.BN * cfg.wave_n_tiles * stride_per_tile)
         + n_wave * (cfg.wave_n_tiles * stride_per_tile)
-        + lane_mod16 * cfg.K,
+        + lane_mod16 * cfg.K
+        + lane_k_off,
         bindings=sym_to_val,
     )
     b_lane_base = bld.ptr_add(b_arg, b_off)
@@ -409,7 +426,6 @@ def _emit_tile_coords(bld: dsl.FunctionBuilder, cfg: _MatmulConfig) -> _TileCoor
 
     return _TileCoords(
         wi=wi_val,
-        lane=lane_val,
         a_lane_base=a_lane_base,
         b_lane_base=b_lane_base,
         c_ptr=c_ptr,
@@ -430,13 +446,13 @@ def _emit_lds_staging(
 ) -> _LdsStaging:
     """Materialize per-wave A/B LDS slot pointers."""
     reg_simd_type = dsl.simd_type(
-        dsl.vector_type(cfg.mma.ab_registers, dsl.i32()), width=32
+        dsl.vector_type(cfg.mma.ab_registers, dsl.i32()), width=cfg.mma.wave_size
     )
     lds = bld.lds_base()
     wi = dsl.sym("wi")
-    lane = dsl.sym("lane")
-    wave_id = dsl.floor(wi / 32)
-    bindings = {wi: coords.wi, lane: coords.lane}
+    lane = dsl.mod(wi, cfg.mma.wave_size)
+    wave_id = dsl.floor(wi / cfg.mma.wave_size)
+    bindings = {wi: coords.wi}
     slots_per_wave = cfg.wave_k_tiles * (cfg.wave_m_tiles + cfg.wave_n_tiles)
 
     def slot_ptr(slot: int) -> dsl.Value:
@@ -526,9 +542,15 @@ class _LoopState:
 
 def _kernel_types(cfg: _MatmulConfig) -> _KernelTypes:
     return _KernelTypes(
-        a=dsl.fragment_type(0, dsl.f16(), 16, 16, 32, cfg.mma.ab_registers),
-        b=dsl.fragment_type(1, dsl.f16(), 16, 16, 32, cfg.mma.ab_registers),
-        acc=dsl.fragment_type(2, dsl.f32(), 16, 16, 32, cfg.mma.acc_registers),
+        a=dsl.fragment_type(
+            0, dsl.f16(), 16, 16, cfg.mma.wave_size, cfg.mma.ab_registers
+        ),
+        b=dsl.fragment_type(
+            1, dsl.f16(), 16, 16, cfg.mma.wave_size, cfg.mma.ab_registers
+        ),
+        acc=dsl.fragment_type(
+            2, dsl.f32(), 16, 16, cfg.mma.wave_size, cfg.mma.acc_registers
+        ),
     )
 
 
@@ -536,12 +558,12 @@ def _initial_tile_ptrs(
     bld: dsl.FunctionBuilder, cfg: _MatmulConfig, coords: _TileCoords
 ) -> _TilePtrs:
     a0 = tuple(
-        _ptr_add_const(bld, coords.a_lane_base, i * 16 * cfg.K + k * 16)
+        _ptr_add_const(bld, coords.a_lane_base, i * 16 * cfg.K + k * cfg.mma.k_tile)
         for k in range(cfg.wave_k_tiles)
         for i in range(cfg.wave_m_tiles)
     )
     b0 = tuple(
-        _ptr_add_const(bld, coords.b_lane_base, i * 16 * cfg.K + k * 16)
+        _ptr_add_const(bld, coords.b_lane_base, i * 16 * cfg.K + k * cfg.mma.k_tile)
         for k in range(cfg.wave_k_tiles)
         for i in range(cfg.wave_n_tiles)
     )
@@ -652,6 +674,54 @@ def _store_final_tiles(
         bld.fragment_store(acc, c_ptr)
 
 
+def _store_acc_tiles(
+    bld: dsl.FunctionBuilder,
+    accs: tuple[dsl.Value, ...],
+    c_ptrs: tuple[dsl.Value, ...],
+) -> None:
+    for acc, c_ptr in zip(accs, c_ptrs, strict=True):
+        bld.fragment_store(acc, c_ptr)
+
+
+def _emit_gfx950_kernel(bld: dsl.FunctionBuilder, cfg: _MatmulConfig) -> None:
+    coords = _emit_tile_coords(bld, cfg)
+    types = _kernel_types(cfg)
+    staging = _emit_lds_staging(bld, cfg, coords)
+    virtual_k_stride = bld.constant(dsl.i32(), cfg.mma.k_tile * cfg.wave_k_tiles)
+    ptrs = _initial_tile_ptrs(bld, cfg, coords)
+    init_acc = bld.fragment_fill(bld.constant(dsl.i32(), 0), types.acc)
+    init_accs = tuple(init_acc for _ in range(cfg.tiles_per_wave))
+
+    trip_count_i32 = bld.args[3]
+    zero_i32 = bld.constant(dsl.i32(), 0)
+    one_i32 = bld.constant(dsl.i32(), 1)
+
+    with bld.for_loop(
+        zero_i32,
+        trip_count_i32,
+        one_i32,
+        init_args=(*init_accs, *ptrs.a0, *ptrs.b0),
+    ) as forop:
+        args = tuple(forop.inner_iter_args)
+        accs = args[: cfg.tiles_per_wave]
+        a_count = cfg.wave_k_tiles * cfg.wave_m_tiles
+        a_ptrs = args[cfg.tiles_per_wave : cfg.tiles_per_wave + a_count]
+        b_ptrs = args[cfg.tiles_per_wave + a_count :]
+        afs, bfs = _load_fragment_group_through_lds(
+            bld, a_ptrs, b_ptrs, types.a, types.b, staging
+        )
+        new_accs = _emit_mma_grid(bld, cfg, afs, bfs, accs)
+        scf.YieldOp(
+            [
+                *new_accs,
+                *_advance_ptrs(bld, a_ptrs, virtual_k_stride),
+                *_advance_ptrs(bld, b_ptrs, virtual_k_stride),
+            ]
+        )
+
+    _store_acc_tiles(bld, tuple(forop.results[: cfg.tiles_per_wave]), ptrs.c)
+
+
 def _emit_constant_fill(
     bld: dsl.FunctionBuilder,
     buf: dsl.Value,
@@ -669,10 +739,14 @@ def _emit_constant_fill(
 
 def _emit_kernel(bld: dsl.FunctionBuilder, cfg: _MatmulConfig) -> None:
     """Populate tiled matmul kernel body."""
+    if cfg.mma.name == "mfma_gfx950":
+        _emit_gfx950_kernel(bld, cfg)
+        return
+
     coords = _emit_tile_coords(bld, cfg)
     types = _kernel_types(cfg)
     staging = _emit_lds_staging(bld, cfg, coords)
-    virtual_k_stride = bld.constant(dsl.i32(), 16 * cfg.wave_k_tiles)
+    virtual_k_stride = bld.constant(dsl.i32(), cfg.mma.k_tile * cfg.wave_k_tiles)
     ptrs = _initial_tile_ptrs(bld, cfg, coords)
     init_args = _initial_loop_args(
         bld, cfg, types, staging, ptrs, virtual_k_stride, virtual_k_stride
@@ -787,9 +861,13 @@ def _emit_host(bld: dsl.FunctionBuilder, cfg: _MatmulConfig) -> None:
     [b_ptr] = bld.call(_F16_PTR_HELPER, [bld.memref_cast(b_buf, dyn_f16)], [f16_ptr])
     [c_ptr] = bld.call(_F32_PTR_HELPER, [c_buf], [f32_ptr])
 
-    # Virtual K tiles keep multiple adjacent MFMA K-slices in one loop body.
-    pipelined_trip_count = max(cfg.virtual_k_steps - 1, 0)
-    trip_count_value = bld.constant(dsl.i32(), pipelined_trip_count)
+    # Gfx950 uses a straight counted loop; older paths use prologue/body/epilogue.
+    kernel_trip_count = (
+        cfg.virtual_k_steps
+        if cfg.mma.name == "mfma_gfx950"
+        else max(cfg.virtual_k_steps - 1, 0)
+    )
+    trip_count_value = bld.constant(dsl.i32(), kernel_trip_count)
     launch_operands = [a_ptr, b_ptr, c_ptr, trip_count_value]
     bld.launch(
         _GPU_MODULE_NAME,

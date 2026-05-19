@@ -59,7 +59,8 @@ namespace {
 static bool isValidABFragment(FragmentType type) {
   bool isIU8 = type.getElementType().isInteger(8) && type.getRegisters() == 4;
   bool isF16 = type.getElementType().isF16() &&
-               (type.getRegisters() == 2 || type.getRegisters() == 8);
+               (type.getRegisters() == 2 || type.getRegisters() == 4 ||
+                type.getRegisters() == 8);
   return isIU8 || isF16;
 }
 // Layout constraints for an accumulator fragment.
@@ -99,8 +100,8 @@ LogicalResult FragmentFillOp::verify() {
   auto fragmentType = cast<FragmentType>(getResult().getType());
   if (!getSource().getType().isInteger(32))
     return emitOpError("source must be an i32 bit pattern");
-  if (fragmentType.getWaveSize() != 32)
-    return emitOpError("only wave32 fragments are supported for now");
+  if (fragmentType.getWaveSize() != 32 && fragmentType.getWaveSize() != 64)
+    return emitOpError("only wave32 and wave64 fragments are supported");
   int64_t role = fragmentType.getRole();
   if (!isValidFragmentRole(role))
     return emitOpError("fragment role must be 0 (A), 1 (B), or 2 (acc)");
@@ -132,6 +133,10 @@ static bool isWmma16x16x16(FragmentType type) {
   return type.getRows() == 16 && type.getColumns() == 16 &&
          type.getWaveSize() == 32;
 }
+static bool isMfmaGfx95016x16x32(FragmentType type) {
+  return type.getRows() == 16 && type.getColumns() == 16 &&
+         type.getWaveSize() == 64;
+}
 static bool matchIU8AB(FragmentType type, int64_t role) {
   return type.getRole() == role && type.getElementType().isInteger(8) &&
          type.getRegisters() == 4 && isWmma16x16x16(type);
@@ -156,6 +161,14 @@ static bool matchMfmaF32Acc(FragmentType type) {
   return type.getRole() == 2 && type.getElementType().isF32() &&
          type.getRegisters() == 4 && isWmma16x16x16(type);
 }
+static bool matchMfmaGfx950F16AB(FragmentType type, int64_t role) {
+  return type.getRole() == role && type.getElementType().isF16() &&
+         type.getRegisters() == 4 && isMfmaGfx95016x16x32(type);
+}
+static bool matchMfmaGfx950F32Acc(FragmentType type) {
+  return type.getRole() == 2 && type.getElementType().isF32() &&
+         type.getRegisters() == 4 && isMfmaGfx95016x16x32(type);
+}
 
 static constexpr WmmaShape kWmmaShapes[] = {
     {"wmma.i32.16x16x16.iu8", matchIU8AB, matchI32Acc,
@@ -167,6 +180,9 @@ static constexpr WmmaShape kWmmaShapes[] = {
     {"mfma.f32.16x16x16.f16", matchMfmaF16AB, matchMfmaF32Acc,
      "must be a 16x16 f16 wave32 fragment with 2 registers",
      "accumulator must be a 16x16 f32 wave32 fragment with 4 registers"},
+    {"mfma.f32.16x16x32.f16", matchMfmaGfx950F16AB, matchMfmaGfx950F32Acc,
+     "must be a 16x16 f16 wave64 fragment with 4 registers",
+     "accumulator must be a 16x16 f32 wave64 fragment with 4 registers"},
 };
 } // namespace
 

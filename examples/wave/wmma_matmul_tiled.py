@@ -139,7 +139,7 @@ def _add_codegen_args(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--matrix-intrinsic",
-        choices=("auto", "wmma", "mfma"),
+        choices=("auto", "wmma", "mfma", "mfma_gfx950"),
         default="auto",
         help="matrix instruction family to emit; auto picks MFMA for gfx9/gfx950",
     )
@@ -212,6 +212,8 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
 def _select_matrix_intrinsic(chip: str, requested: str) -> str:
     if requested != "auto":
         return requested
+    if chip.startswith("gfx95"):
+        return "mfma_gfx950"
     return "mfma" if chip.startswith("gfx9") else "wmma"
 
 

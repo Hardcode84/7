@@ -69,6 +69,8 @@ if _chip:
         config.available_features.add("host-supports-amdgpu-wmma")
     if _chip == "gfx90a" or _chip.startswith(("gfx94", "gfx95")):
         config.available_features.add("host-supports-amdgpu-mfma")
+    if _chip == "gfx950":
+        config.available_features.add("host-supports-amdgpu-gfx950")
 
 # Runtime shared libs for the MLIR GPU integration tests.
 for name, env_key in [

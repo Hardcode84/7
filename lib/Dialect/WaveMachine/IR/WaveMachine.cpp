@@ -94,6 +94,15 @@ LogicalResult MfmaF32_16x16x16_F16Op::verify() {
   return success();
 }
 
+LogicalResult MfmaF32_16x16x32_F16Op::verify() {
+  if (failed(verifyVGPRWidth(*this, getOperand(0), 4, "A operand")) ||
+      failed(verifyVGPRWidth(*this, getOperand(1), 4, "B operand")) ||
+      failed(verifyVGPRWidth(*this, getOperand(2), 4, "accumulator operand")) ||
+      failed(verifyVGPRWidth(*this, getResult(), 4, "result")))
+    return failure();
+  return success();
+}
+
 LogicalResult GlobalStoreB32Op::verify() {
   if (getNumResults() > 1)
     return emitOpError("produces at most one memory token");

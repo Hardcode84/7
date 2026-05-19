@@ -322,6 +322,9 @@ private:
     return isGfx90APlus() ? llvm::AMDGPU::V_MFMA_F32_16X16X16F16_gfx940_vcd
                           : llvm::AMDGPU::V_MFMA_F32_16X16X16F16_vi;
   }
+  unsigned mfmaF32_16x16x32F16() const {
+    return llvm::AMDGPU::V_MFMA_F32_16X16X32_F16_gfx940_vcd;
+  }
 
   unsigned bufferStoreB32() const {
     if (isGfx90APlus())
@@ -577,7 +580,8 @@ private:
       os << "    .uses_dynamic_stack: false\n";
       os << "    .vgpr_count:     " << kernel.vgprCount << "\n";
       os << "    .vgpr_spill_count: 0\n";
-      os << "    .wavefront_size: 32\n";
+      os << "    .wavefront_size: " << (targetChip == "gfx950" ? 64 : 32)
+         << "\n";
       os << "    .workgroup_processor_mode: 1\n";
     }
     os << "amdhsa.target:   " << targetTriple << "--" << targetChip << "\n";
@@ -849,6 +853,16 @@ private:
         return op.emitError("mfma.f32.16x16x16.f16 requires gfx90a+");
       return emitMC(
           mfmaF32_16x16x16F16(),
+          {toMCOperand(result()), toMCOperand(op.getOperand(0)),
+           toMCOperand(op.getOperand(1)), toMCOperand(op.getOperand(2)),
+           llvm::MCOperand::createImm(0), llvm::MCOperand::createImm(0),
+           llvm::MCOperand::createImm(0)});
+    }
+    if (isa<wavemachine::MfmaF32_16x16x32_F16Op>(op)) {
+      if (targetChip != "gfx950")
+        return op.emitError("mfma.f32.16x16x32.f16 requires gfx950");
+      return emitMC(
+          mfmaF32_16x16x32F16(),
           {toMCOperand(result()), toMCOperand(op.getOperand(0)),
            toMCOperand(op.getOperand(1)), toMCOperand(op.getOperand(2)),
            llvm::MCOperand::createImm(0), llvm::MCOperand::createImm(0),

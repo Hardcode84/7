@@ -309,6 +309,11 @@ def WaveMachine_MfmaF32_16x16x16_F16Op
                                 WaveMachine_VGPR, [WaveMachine_VALU]> {
   let hasVerifier = 1;
 }
+def WaveMachine_MfmaF32_16x16x32_F16Op
+    : WaveMachine_TernaryResult<"mfma_f32_16x16x32_f16", WaveMachine_VGPR,
+                                WaveMachine_VGPR, [WaveMachine_VALU]> {
+  let hasVerifier = 1;
+}
 
 def WaveMachine_SMovB32Op : WaveMachine_UnaryNoResult<"s_mov_b32",
                                                        WaveMachine_RegOrImm> {

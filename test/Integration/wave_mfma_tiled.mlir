@@ -5,7 +5,7 @@
 // fragments through LDS and writes the f32 accumulator through the usual
 // fragment_store path.
 //
-// RUN: %python %S/../../examples/wave/wmma_matmul_tiled.py --chip=%chip --m=64 --n=64 --k=48 --bm=2 --bn=2 \
+// RUN: %python %S/../../examples/wave/wmma_matmul_tiled.py --chip=%chip --m=64 --n=64 --k=64 --bm=2 --bn=2 \
 // RUN:   | wave-opt --wave-compile-kernels='chip=%chip' \
 // RUN:       --convert-scf-to-cf \
 // RUN:       --gpu-to-llvm=use-bare-pointers-for-kernels=true \
@@ -18,5 +18,5 @@
 // RUN:       --entry-point-result=void \
 // RUN:   | FileCheck %s
 //
-// CHECK-DAG: 48, 48, 48, 48
-// CHECK-DAG: 192, 192, 192, 192
+// CHECK-DAG: 64, 64, 64, 64
+// CHECK-DAG: 256, 256, 256, 256

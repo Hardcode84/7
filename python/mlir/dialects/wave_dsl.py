@@ -266,6 +266,14 @@ def _binding_lane_width(values: Iterable[Value]) -> int:
     return lane
 
 
+def _lane_width(type_: Type) -> int:
+    if SimdType.isinstance(type_):
+        return int(SimdType(type_).width)
+    if WaveIndexType.isinstance(type_):
+        return int(WaveIndexType(type_).width)
+    return 0
+
+
 def unranked_memref_type(element_type: Type) -> Type:
     return UnrankedMemRefType.get(element_type, Attribute.parse("0"))
 
@@ -560,22 +568,12 @@ class FunctionBuilder:
         self, base: Value, offset: Value, result_type: Type | None = None
     ) -> Value:
         if result_type is None:
-            # Mirror the verifier: a SIMD-of-pointer result is required
-            # whenever the base or offset is lane-varying. `!wave.simd<>`
-            # is the obvious carrier; `!wave.index<W>` (the offset that
-            # `wave.index_expr` produces) is the same lane-varying
-            # contract on the index side, so it forces a SIMD result
-            # too. We peek at the type names to stay decoupled from the
-            # `wave` dialect Python type hierarchy.
-            base_ty = str(base.type)
-            off_ty = str(offset.type)
-            base_simd = base_ty.startswith("!wave.simd<")
-            off_lane_varying = off_ty.startswith(("!wave.simd<", "!wave.index<"))
-            if base_simd or off_lane_varying:
-                if base_simd:
-                    result_type = base.type
-                else:
-                    result_type = Type.parse(f"!wave.simd<{base_ty}, 32>")
+            base_simd = SimdType.isinstance(base.type)
+            offset_width = _lane_width(offset.type)
+            if base_simd:
+                result_type = base.type
+            elif offset_width:
+                result_type = simd_type(base.type, offset_width)
             else:
                 result_type = base.type
         return wave.PtrAddOp(result_type, base, offset).result

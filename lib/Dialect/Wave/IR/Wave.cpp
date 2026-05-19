@@ -309,8 +309,8 @@ LogicalResult WorkitemIdOp::verify() {
   auto simdType = cast<SimdType>(getResult().getType());
   if (!simdType.getElementType().isInteger(32))
     return emitOpError("result SIMD element type must be i32");
-  if (simdType.getWidth() != 32)
-    return emitOpError("only wave32 workitem_id is supported for now");
+  if (simdType.getWidth() != 32 && simdType.getWidth() != 64)
+    return emitOpError("only wave32 and wave64 workitem_id are supported");
   return success();
 }
 

@@ -1141,13 +1141,15 @@ LogicalResult WaveMachineSelector::selectBarrier(BarrierOp op) {
 LogicalResult WaveMachineSelector::selectMma(waveamd::MmaOp op) {
   if (op.getKind() != "wmma.i32.16x16x16.iu8" &&
       op.getKind() != "wmma.f32.16x16x16.f16" &&
-      op.getKind() != "mfma.f32.16x16x16.f16")
+      op.getKind() != "mfma.f32.16x16x16.f16" &&
+      op.getKind() != "mfma.f32.16x16x32.f16")
     return op.emitError("unsupported WaveMachine matrix operation kind");
   auto resultType = cast<waveamd::FragmentType>(op.getResult().getType());
   StringRef machineOpcode =
       op.getKind() == "wmma.i32.16x16x16.iu8"   ? "wmma_i32_16x16x16_iu8"
       : op.getKind() == "wmma.f32.16x16x16.f16" ? "wmma_f32_16x16x16_f16"
-                                                : "mfma_f32_16x16x16_f16";
+      : op.getKind() == "mfma.f32.16x16x16.f16" ? "mfma_f32_16x16x16_f16"
+                                                : "mfma_f32_16x16x32_f16";
   values[op.getResult()] = createInstr(
       builder, op.getLoc(), machineOpcode,
       {expect(op.getA(), op), expect(op.getB(), op), expect(op.getAcc(), op)},
@@ -1246,9 +1248,18 @@ WaveMachineSelector::selectFragmentStore(waveamd::FragmentStoreOp op) {
   auto offsetIt = pointerOffsets.find(op.getPtr());
   if (baseIt == pointerBases.end() || offsetIt == pointerOffsets.end())
     return op.emitError("WaveMachine backend expects selected wave pointer");
-  Value lane =
-      createInstr(builder, op.getLoc(), "v_mbcnt_lo", {},
-                  getRegType(op.getContext(), wavemachine::RegClass::VGPR));
+  Value lane;
+  if (fragmentType.getWaveSize() == 64) {
+    Value workitem = createInstr(builder, op.getLoc(), "v_workitem_id_x", {},
+                                 getPinnedRegType(op.getContext(),
+                                                  wavemachine::RegClass::VGPR,
+                                                  /*width=*/1, /*index=*/0));
+    lane = andMask(op.getLoc(), workitem, 63);
+  } else {
+    lane =
+        createInstr(builder, op.getLoc(), "v_mbcnt_lo", {},
+                    getRegType(op.getContext(), wavemachine::RegClass::VGPR));
+  }
   assert(llvm::isPowerOf2_64(fragmentType.getRegisters()) &&
          "fragment register count must be a power of two");
   int64_t laneStrideBytes = fragmentType.getRegisters() * 4;
