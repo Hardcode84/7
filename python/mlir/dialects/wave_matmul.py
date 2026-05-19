@@ -214,11 +214,6 @@ def _validate_tile_shape(cfg: _MatmulConfig) -> None:
             f"wave_k_tiles (={cfg.wave_k_tiles}) must divide "
             f"K/{cfg.mma.k_tile} (={cfg.k_steps})"
         )
-    if cfg.mma.name == "mfma_gfx950" and cfg.tiles_per_wave != 1:
-        raise ValueError(
-            "gfx950 MFMA supports wave_k_tiles now, but per-wave M/N tiling "
-            "needs separate accumulator register allocation work"
-        )
     if cfg.waves_per_workgroup > 32:
         raise ValueError(
             f"BM * BN must be <= 32 (RDNA3 workgroup wave cap); "
@@ -674,54 +669,6 @@ def _store_final_tiles(
         bld.fragment_store(acc, c_ptr)
 
 
-def _store_acc_tiles(
-    bld: dsl.FunctionBuilder,
-    accs: tuple[dsl.Value, ...],
-    c_ptrs: tuple[dsl.Value, ...],
-) -> None:
-    for acc, c_ptr in zip(accs, c_ptrs, strict=True):
-        bld.fragment_store(acc, c_ptr)
-
-
-def _emit_gfx950_kernel(bld: dsl.FunctionBuilder, cfg: _MatmulConfig) -> None:
-    coords = _emit_tile_coords(bld, cfg)
-    types = _kernel_types(cfg)
-    staging = _emit_lds_staging(bld, cfg, coords)
-    virtual_k_stride = bld.constant(dsl.i32(), cfg.mma.k_tile * cfg.wave_k_tiles)
-    ptrs = _initial_tile_ptrs(bld, cfg, coords)
-    init_acc = bld.fragment_fill(bld.constant(dsl.i32(), 0), types.acc)
-    init_accs = tuple(init_acc for _ in range(cfg.tiles_per_wave))
-
-    trip_count_i32 = bld.args[3]
-    zero_i32 = bld.constant(dsl.i32(), 0)
-    one_i32 = bld.constant(dsl.i32(), 1)
-
-    with bld.for_loop(
-        zero_i32,
-        trip_count_i32,
-        one_i32,
-        init_args=(*init_accs, *ptrs.a0, *ptrs.b0),
-    ) as forop:
-        args = tuple(forop.inner_iter_args)
-        accs = args[: cfg.tiles_per_wave]
-        a_count = cfg.wave_k_tiles * cfg.wave_m_tiles
-        a_ptrs = args[cfg.tiles_per_wave : cfg.tiles_per_wave + a_count]
-        b_ptrs = args[cfg.tiles_per_wave + a_count :]
-        afs, bfs = _load_fragment_group_through_lds(
-            bld, a_ptrs, b_ptrs, types.a, types.b, staging
-        )
-        new_accs = _emit_mma_grid(bld, cfg, afs, bfs, accs)
-        scf.YieldOp(
-            [
-                *new_accs,
-                *_advance_ptrs(bld, a_ptrs, virtual_k_stride),
-                *_advance_ptrs(bld, b_ptrs, virtual_k_stride),
-            ]
-        )
-
-    _store_acc_tiles(bld, tuple(forop.results[: cfg.tiles_per_wave]), ptrs.c)
-
-
 def _emit_constant_fill(
     bld: dsl.FunctionBuilder,
     buf: dsl.Value,
@@ -739,10 +686,6 @@ def _emit_constant_fill(
 
 def _emit_kernel(bld: dsl.FunctionBuilder, cfg: _MatmulConfig) -> None:
     """Populate tiled matmul kernel body."""
-    if cfg.mma.name == "mfma_gfx950":
-        _emit_gfx950_kernel(bld, cfg)
-        return
-
     coords = _emit_tile_coords(bld, cfg)
     types = _kernel_types(cfg)
     staging = _emit_lds_staging(bld, cfg, coords)
@@ -861,13 +804,7 @@ def _emit_host(bld: dsl.FunctionBuilder, cfg: _MatmulConfig) -> None:
     [b_ptr] = bld.call(_F16_PTR_HELPER, [bld.memref_cast(b_buf, dyn_f16)], [f16_ptr])
     [c_ptr] = bld.call(_F32_PTR_HELPER, [c_buf], [f32_ptr])
 
-    # Gfx950 uses a straight counted loop; older paths use prologue/body/epilogue.
-    kernel_trip_count = (
-        cfg.virtual_k_steps
-        if cfg.mma.name == "mfma_gfx950"
-        else max(cfg.virtual_k_steps - 1, 0)
-    )
-    trip_count_value = bld.constant(dsl.i32(), kernel_trip_count)
+    trip_count_value = bld.constant(dsl.i32(), max(cfg.virtual_k_steps - 1, 0))
     launch_operands = [a_ptr, b_ptr, c_ptr, trip_count_value]
     bld.launch(
         _GPU_MODULE_NAME,

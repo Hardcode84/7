@@ -102,6 +102,18 @@ python examples/wave/wmma_matmul_tiled.py --m=64 --n=64 --k=48 --bm=2 --bn=2 --u
       --entry-point-result=void
 ```
 
+The example can also run the full pipeline itself and compare the GPU
+result against a deterministic CPU reference. This path fills A/B with
+pseudo-random f16 values derived from `--seed`, runs `wave-opt` and
+`mlir-runner`, then checks each output tile:
+
+```bash
+PYTHONPATH=build/python_packages/wave_mlir \
+python examples/wave/wmma_matmul_tiled.py \
+  --chip=gfx950 --m=32 --n=32 --k=64 --bm=2 --bn=2 \
+  --wave-k-tiles=2 --compare-cpu --seed=7
+```
+
 The Python builder uses `ixsimpl` (submoduled under `third_party/`)
 as the symbolic engine for `wave.index_expr`; see the
 "Symbolic Offset Algebra" section of the design doc.

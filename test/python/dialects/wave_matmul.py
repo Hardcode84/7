@@ -24,17 +24,6 @@ ref = compute_wmma_f16_matmul_reference_buffer(
 )
 print("random-ref", len(a0), len(b0), len(ref))
 
-try:
-    build_wmma_f16_matmul_module(
-        16,
-        32,
-        32,
-        wave_n_tiles=2,
-        matrix_intrinsic="mfma_gfx950",
-    )
-except ValueError as exc:
-    print("gfx950-guard", "per-wave M/N" in str(exc))
-
 module = build_wmma_f16_matmul_module(
     M=32,
     N=32,
@@ -47,7 +36,6 @@ module = build_wmma_f16_matmul_module(
 print(module)
 
 # CHECK: random-ref 1024 1024 1024
-# CHECK: gfx950-guard True
 # CHECK-LABEL: func.func @wmma_f16_matmul_tiled
 # CHECK-SAME: wave.lds_size = 2048
 # CHECK: scf.for
