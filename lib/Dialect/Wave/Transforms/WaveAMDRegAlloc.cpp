@@ -14,6 +14,7 @@
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/MC/MCSubtargetInfo.h"
@@ -358,7 +359,68 @@ struct WaveAMDRegAllocPass
     return success();
   }
 
+  // Two iter_arg slots that share one init SSA value are semantically
+  // independent carries that happen to start from the same value. The
+  // entry-carry coalescer can only fold init -> blockArg -> result
+  // into a single physical-register interval once per init; if it ran
+  // for both slots, both block args / both result slots would alias the
+  // same physical register and the body's per-slot writes would clobber
+  // each other. Materialize an explicit register-rename copy for each
+  // duplicate init so the coalescer sees fresh SSA values everywhere.
+  LogicalResult splitDuplicateLoopInits(func::FuncOp func) {
+    SmallVector<wavemachine::UniformLoopOp> loops;
+    func.walk([&](wavemachine::UniformLoopOp loop) { loops.push_back(loop); });
+    OpBuilder builder(func.getContext());
+    for (wavemachine::UniformLoopOp loop : loops) {
+      DenseSet<Value> seen;
+      builder.setInsertionPoint(loop);
+      for (auto [i, init] : llvm::enumerate(loop.getInits())) {
+        if (!trackedRegType(init)) {
+          seen.insert(init);
+          continue;
+        }
+        if (seen.insert(init).second)
+          continue;
+        FailureOr<Value> dup = duplicateRegValue(builder, loop.getLoc(), init);
+        if (failed(dup))
+          return failure();
+        loop.getInitsMutable()[i].assign(*dup);
+      }
+    }
+    return success();
+  }
+
+  // Emit a register-rename copy of `v` so the caller can use it as a
+  // fresh SSA value with the same register class / width. Drives off
+  // the source RegType: VGPR (any width) uses `v_mov_b32_tuple` with
+  // a `registers` attr; SGPR1 uses `s_mov_b32_value`. Wider SGPR tuple
+  // carries aren't covered by an existing dialect op yet; emit a
+  // diagnostic so the gap is visible.
+  static FailureOr<Value> duplicateRegValue(OpBuilder &builder, Location loc,
+                                            Value v) {
+    auto rt = cast<wavemachine::RegType>(v.getType());
+    if (isVGPR(rt)) {
+      wavemachine::RegType resultType = wavemachine::RegType::get(
+          rt.getContext(), rt.getRegClass(), rt.getWidth(), /*index=*/-1);
+      auto copy =
+          wavemachine::VMovB32TupleOp::create(builder, loc, resultType, v);
+      copy->setAttr("registers", builder.getI64IntegerAttr(rt.getWidth()));
+      return copy.getResult();
+    }
+    if (isSGPR(rt) && rt.getWidth() == 1) {
+      wavemachine::RegType resultType = wavemachine::RegType::get(
+          rt.getContext(), rt.getRegClass(), /*width=*/1, /*index=*/-1);
+      auto copy =
+          wavemachine::SMovB32ValueOp::create(builder, loc, resultType, v);
+      return copy.getResult();
+    }
+    return emitError(loc, "duplicateRegValue: unsupported register class / "
+                          "width for duplicate iter_arg init");
+  }
+
   LogicalResult allocateFunction(func::FuncOp func, RegisterLimits limits) {
+    if (failed(splitDuplicateLoopInits(func)))
+      return failure();
     SmallVector<Operation *> orderedOps;
     DenseMap<Operation *, unsigned> positions;
     LiveIntervalSet intervals;

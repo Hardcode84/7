@@ -826,10 +826,17 @@ private:
                      llvm::MCOperand::createImm(0)});
     if (isa<wavemachine::VMovB32TupleOp>(op)) {
       auto regType = cast<wavemachine::RegType>(result().getType());
-      for (unsigned i = 0, e = regType.getWidth(); i != e; ++i)
-        if (failed(emitMC(vMovB32(), {toMCVGPRComponent(result(), i),
-                                      toMCOperand(op.getOperand(0))})))
+      Value src = op.getOperand(0);
+      auto srcType = dyn_cast<wavemachine::RegType>(src.getType());
+      bool srcTuple = srcType &&
+                      srcType.getRegClass() == wavemachine::RegClass::VGPR &&
+                      srcType.getWidth() == regType.getWidth();
+      for (unsigned i = 0, e = regType.getWidth(); i != e; ++i) {
+        llvm::MCOperand srcOp =
+            srcTuple ? toMCVGPRComponent(src, i) : toMCOperand(src);
+        if (failed(emitMC(vMovB32(), {toMCVGPRComponent(result(), i), srcOp})))
           return failure();
+      }
       return success();
     }
     if (isa<wavemachine::WmmaI32_16x16x16_IU8Op>(op))
