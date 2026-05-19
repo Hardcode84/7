@@ -196,6 +196,29 @@ LogicalResult MmaOp::verify() {
   return success();
 }
 
+LogicalResult DmaLoadLdsOp::verify() {
+  if (getBytes() != 4)
+    return emitOpError("currently supports only bytes = 4");
+
+  Type sourceType = getSource().getType();
+  auto sourceSimdType = dyn_cast<wave::SimdType>(sourceType);
+  if (!sourceSimdType)
+    return emitOpError("source must be a SIMD wave pointer");
+  auto sourcePtr = dyn_cast<wave::PtrType>(sourceSimdType.getElementType());
+  if (!sourcePtr)
+    return emitOpError("source SIMD element type must be a wave pointer");
+  if (!isa<wave::GlobalAddressSpaceAttr, BufferAddressSpaceAttr>(
+          sourcePtr.getAddressSpace()))
+    return emitOpError("source pointer must be global or waveamd buffer");
+
+  auto destPtr = cast<wave::PtrType>(getDest().getType());
+  if (!isa<wave::SharedAddressSpaceAttr>(destPtr.getAddressSpace()))
+    return emitOpError("destination pointer must be shared");
+  if (!destPtr.getElementType().isInteger(32))
+    return emitOpError("destination pointer element type must be i32");
+  return success();
+}
+
 LogicalResult FragmentStoreOp::verify() {
   auto fragmentType = cast<FragmentType>(getFragment().getType());
   if (fragmentType.getRole() != 2 ||

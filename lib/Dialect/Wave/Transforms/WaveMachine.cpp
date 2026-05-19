@@ -439,6 +439,7 @@ LogicalResult WaveMachineSelector::selectOperation(Operation *op) {
       .Case<waveamd::FragmentPackOp>(
           [&](auto o) { return selectFragmentPack(o); })
       .Case<waveamd::MmaOp>([&](auto o) { return selectMma(o); })
+      .Case<waveamd::DmaLoadLdsOp>([&](auto o) { return selectDmaLoadLds(o); })
       .Case<waveamd::FragmentStoreOp>(
           [&](auto o) { return selectFragmentStore(o); })
       .Case<func::ReturnOp>([&](auto o) { return selectReturn(o); })
@@ -1152,6 +1153,54 @@ LogicalResult WaveMachineSelector::selectMma(waveamd::MmaOp op) {
       {expect(op.getA(), op), expect(op.getB(), op), expect(op.getAcc(), op)},
       getRegType(op.getContext(), wavemachine::RegClass::VGPR,
                  resultType.getRegisters()));
+  eraseIfTopLevel(op);
+  return success();
+}
+
+LogicalResult WaveMachineSelector::selectDmaLoadLds(waveamd::DmaLoadLdsOp op) {
+  if (op.getBytes() != 4)
+    return op.emitError("WaveMachine backend supports only bytes = 4");
+
+  auto srcBaseIt = pointerBases.find(op.getSource());
+  auto srcOffsetIt = pointerOffsets.find(op.getSource());
+  auto dstBaseIt = pointerBases.find(op.getDest());
+  auto dstOffsetIt = pointerOffsets.find(op.getDest());
+  if (srcBaseIt == pointerBases.end() || srcOffsetIt == pointerOffsets.end() ||
+      dstBaseIt == pointerBases.end() || dstOffsetIt == pointerOffsets.end())
+    return op.emitError("WaveMachine backend expects selected DMA pointers");
+
+  OffsetTriple dstTriple = dstOffsetIt->second;
+  if (dstTriple.voffset)
+    return op.emitError("DMA LDS destination must be uniform");
+  Value dstAddr = addByteOffsets(op.getLoc(), dstBaseIt->second,
+                                 collapseTriple(op.getLoc(), dstTriple));
+  Value m0Src = materializeSGPR1(op.getLoc(), dstAddr);
+  Operation *m0 = createWMOp(builder, op.getLoc(), "s_mov_m0", {m0Src},
+                             wavemachine::M0Type::get(op.getContext()));
+
+  bool isBuffer = pointerBuffers.lookup(op.getSource());
+  wavemachine::AddressFieldSpec spec =
+      isBuffer ? wavemachine::BufferLoadLdsB32Op::getAddressFieldSpec()
+               : wavemachine::GlobalLoadLdsB32Op::getAddressFieldSpec();
+  auto b = bucketForSpec(op.getLoc(), srcOffsetIt->second, spec);
+  SmallVector<NamedAttribute> attrs =
+      instOffsetAttrs(b.instOffset, "inst_offset");
+  if (op.getAux() != 0)
+    attrs.push_back(builder.getNamedAttr("aux", op.getAuxAttr()));
+
+  Operation *dma = nullptr;
+  if (isBuffer) {
+    dma = createWMOp(builder, op.getLoc(), "buffer_load_lds_b32",
+                     {b.voffset, srcBaseIt->second, b.soffset, m0->getResult(0),
+                      expect(op.getDependency(), op)},
+                     getMemTokenType(op.getContext()), attrs);
+  } else {
+    dma = createWMOp(builder, op.getLoc(), "global_load_lds_b32",
+                     {b.voffset, srcBaseIt->second, m0->getResult(0),
+                      expect(op.getDependency(), op)},
+                     getMemTokenType(op.getContext()), attrs);
+  }
+  values[op.getToken()] = dma->getResult(0);
   eraseIfTopLevel(op);
   return success();
 }

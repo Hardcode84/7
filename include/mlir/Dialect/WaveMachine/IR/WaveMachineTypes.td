@@ -64,6 +64,15 @@ def WaveMachine_MemTokenType : WaveMachine_Type<"MemToken", "mem.token"> {
   }];
 }
 
+def WaveMachine_M0Type : WaveMachine_Type<"M0", "m0"> {
+  let summary = "AMDGPU M0 state";
+  let description = [{
+    A `!wavemachine.m0` value makes writes to the AMDGPU M0 register visible
+    in WaveMachine IR. LDS DMA instructions consume it for their destination
+    base address.
+  }];
+}
+
 def WaveMachine_Reg
     : Type<CPred<"::llvm::isa<::mlir::wavemachine::RegType>($_self)">,
            "WaveMachine register type">;
@@ -75,5 +84,9 @@ def WaveMachine_Imm
 def WaveMachine_MemToken
     : Type<CPred<"::llvm::isa<::mlir::wavemachine::MemTokenType>($_self)">,
            "WaveMachine memory token type">;
+
+def WaveMachine_M0
+    : Type<CPred<"::llvm::isa<::mlir::wavemachine::M0Type>($_self)">,
+           "WaveMachine M0 state type">;
 
 #endif // MLIR_DIALECT_WAVEMACHINE_IR_WAVEMACHINETYPES_TD

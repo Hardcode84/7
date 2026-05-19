@@ -79,6 +79,28 @@ def WaveAMD_MmaOp : WaveAMD_Op<"mma", [Pure]> {
   let hasVerifier = 1;
 }
 
+def WaveAMD_DmaLoadLdsOp : WaveAMD_Op<"dma_load_lds", [MemoryEffects<[MemRead, MemWrite]>]> {
+  let summary = "DMA one dword from global or buffer memory into LDS";
+  let description = [{
+    Starts a global/buffer to LDS transfer. The source pointer may be lane
+    varying. The destination must be a scalar shared pointer: hardware takes
+    that address through M0 and writes a contiguous wave block at `base +
+    4*lane_id` for the dword form. The input token models source memory
+    ordering; the result token models both the read and the LDS write.
+  }];
+  let arguments = (ins AnyType:$source,
+                       Wave_Ptr:$dest,
+                       Wave_MemToken:$dependency,
+                       I64Attr:$bytes,
+                       DefaultValuedAttr<I64Attr, "0">:$aux);
+  let results = (outs Wave_MemToken:$token);
+  let assemblyFormat = [{
+    $source `->` $dest `after` $dependency
+    attr-dict `:` functional-type(operands, results)
+  }];
+  let hasVerifier = 1;
+}
+
 def WaveAMD_FragmentStoreOp : WaveAMD_Op<"fragment_store", [MemoryEffects<[MemWrite]>]> {
   let summary = "store an AMD matrix fragment to memory";
   let arguments = (ins WaveAMD_Fragment:$fragment,

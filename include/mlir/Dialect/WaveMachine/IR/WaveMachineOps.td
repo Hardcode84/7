@@ -367,6 +367,8 @@ def WaveMachine_SCBranchExeczOp : WaveMachine_ZeroResult<"s_cbranch_execz"> {
 }
 def WaveMachine_SMovExecLoOp : WaveMachine_UnaryNoResult<"s_mov_exec_lo",
                                                           WaveMachine_SGPR1>;
+def WaveMachine_SMovM0Op
+    : WaveMachine_UnaryResult<"s_mov_m0", WaveMachine_SGPR1, WaveMachine_M0>;
 def WaveMachine_SEndpgmOp : WaveMachine_ZeroResult<"s_endpgm">;
 def WaveMachine_SSetpcB64Op : WaveMachine_ZeroResult<"s_setpc_b64">;
 
@@ -412,6 +414,27 @@ def WaveMachine_GlobalLoadTupleB32Op
     attr-dict `:` functional-type(operands, results)
   }];
   let hasVerifier = 1;
+}
+
+def WaveMachine_GlobalLoadLdsB32Op
+    : WaveMachine_GlobalMemoryOp<"global_load_lds_b32", [WaveMachine_VMEMLoad]> {
+  let summary = "global-to-LDS 32-bit DMA load";
+  let description = [{
+    Reads one dword from global memory and writes it to LDS. `m0` carries the
+    scalar LDS base; hardware adds 4*lane_id for this dword form. The op
+    consumes an input memory token for global memory ordering and returns a
+    token representing the global read plus LDS write.
+  }];
+  let arguments = (ins WaveMachine_VGPR1:$offset, WaveMachine_SGPR2:$base,
+                       WaveMachine_M0:$m0, WaveMachine_MemToken:$dependency,
+                       DefaultValuedAttr<I64Attr, "0">:$inst_offset,
+                       DefaultValuedAttr<I64Attr, "0">:$aux);
+  let results = (outs WaveMachine_MemToken:$token);
+  let assemblyFormat = [{
+    $offset `,` $base `,` $m0 `after` $dependency
+    (`offset` $inst_offset^)? (`aux` $aux^)?
+    attr-dict `:` functional-type(operands, results)
+  }];
 }
 
 def WaveMachine_MakeBufferRsrcOp
@@ -510,6 +533,28 @@ def WaveMachine_BufferLoadTupleB32Op
     attr-dict `:` functional-type(operands, results)
   }];
   let hasVerifier = 1;
+}
+
+def WaveMachine_BufferLoadLdsB32Op
+    : WaveMachine_BufferMemoryOp<"buffer_load_lds_b32", [WaveMachine_VMEMLoad]> {
+  let summary = "buffer-to-LDS 32-bit DMA load";
+  let description = [{
+    Reads one dword through a buffer descriptor and writes it to LDS. `m0`
+    carries the scalar LDS base; hardware adds 4*lane_id for this dword form.
+    The op consumes an input memory token for buffer/global ordering and
+    returns a token representing the memory read plus LDS write.
+  }];
+  let arguments = (ins WaveMachine_VGPR1:$offset, WaveMachine_SGPR4:$descriptor,
+                       WaveMachine_SGPR1OrImm:$soffset, WaveMachine_M0:$m0,
+                       WaveMachine_MemToken:$dependency,
+                       DefaultValuedAttr<I64Attr, "0">:$inst_offset,
+                       DefaultValuedAttr<I64Attr, "0">:$aux);
+  let results = (outs WaveMachine_MemToken:$token);
+  let assemblyFormat = [{
+    $offset `,` $descriptor `,` $soffset `,` $m0 `after` $dependency
+    (`offset` $inst_offset^)? (`aux` $aux^)?
+    attr-dict `:` functional-type(operands, results)
+  }];
 }
 
 def WaveMachine_BufferStoreTupleB32Op

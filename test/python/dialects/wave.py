@@ -162,6 +162,22 @@ def test_waveamd_buffer_pointer_type():
         print(m.module)
 
 
+# CHECK-LABEL: TEST: test_waveamd_dma_load_lds
+@run
+def test_waveamd_dma_load_lds():
+    with w.module() as m:
+        with m.function("dma_load_lds_kernel", [w.ptr_type(w.i32())], kernel=True) as f:
+            (src_base,) = f.args
+            lane = f.lane_id()
+            src = f.ptr_add(src_base, lane, w.simd_ptr_type(w.i32()))
+            lds = f.lds_base()
+            dep = f.token()
+            f.dma_load_lds(src, lds, after=dep)
+        # CHECK: waveamd.dma_load_lds
+        # CHECK-SAME: {bytes = 4 : i64}
+        print(m.module)
+
+
 # CHECK-LABEL: TEST: test_index_expr
 @run
 def test_index_expr():

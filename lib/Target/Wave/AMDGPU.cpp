@@ -347,6 +347,18 @@ private:
                        : llvm::AMDGPU::GLOBAL_LOAD_DWORD_SADDR_gfx11;
   }
 
+  unsigned globalLoadLdsB32() const {
+    return isGfx90APlus() ? llvm::AMDGPU::GLOBAL_LOAD_LDS_DWORD_SADDR_gfx940
+                          : llvm::AMDGPU::GLOBAL_LOAD_LDS_DWORD_SADDR_vi;
+  }
+
+  unsigned bufferLoadLdsB32() const {
+    if (isGfx90APlus())
+      return llvm::AMDGPU::BUFFER_LOAD_DWORD_LDS_OFFEN_gfx90a;
+    return isGfx8Or9() ? llvm::AMDGPU::BUFFER_LOAD_DWORD_LDS_OFFEN_vi
+                       : llvm::AMDGPU::BUFFER_LOAD_DWORD_LDS_OFFEN_gfx10;
+  }
+
   unsigned dsReadB32() const {
     return isGfx8Or9() ? llvm::AMDGPU::DS_READ_B32_vi_gfx9
                        : llvm::AMDGPU::DS_READ_B32_gfx11;
@@ -621,6 +633,8 @@ private:
       return llvm::AMDGPU::SGPR0_SGPR1;
     if (name == "vcc")
       return llvm::AMDGPU::VCC;
+    if (name == "m0")
+      return llvm::AMDGPU::M0;
     if (name == "exec_lo")
       return llvm::AMDGPU::EXEC_LO;
     if (name == "null")
@@ -1135,6 +1149,9 @@ private:
                     {llvm::MCOperand::createReg(namedPhysReg("exec_lo")),
                      toMCOperand(op.getOperand(0))});
     }
+    if (isa<wavemachine::SMovM0Op>(op))
+      return emitMC(sMovB32(), {llvm::MCOperand::createReg(namedPhysReg("m0")),
+                                toMCOperand(op.getOperand(0))});
     if (isa<wavemachine::VReadfirstlaneB32Op>(op))
       return emitMC(vReadfirstlaneB32(),
                     {toMCOperand(result()), toMCOperand(op.getOperand(0))});
@@ -1218,6 +1235,23 @@ private:
                                       toMCOperand(op.getOperand(2)),
                                       llvm::MCOperand::createImm(instOffset),
                                       llvm::MCOperand::createImm(0)});
+    }
+    if (isa<wavemachine::GlobalLoadLdsB32Op>(op)) {
+      int64_t instOffset = getIntAttr(&op, "inst_offset", 0);
+      int64_t aux = getIntAttr(&op, "aux", 0);
+      return emitMC(globalLoadLdsB32(), {toMCOperand(op.getOperand(1)),
+                                         toMCOperand(op.getOperand(0)),
+                                         llvm::MCOperand::createImm(instOffset),
+                                         llvm::MCOperand::createImm(aux)});
+    }
+    if (isa<wavemachine::BufferLoadLdsB32Op>(op)) {
+      int64_t instOffset = getIntAttr(&op, "inst_offset", 0);
+      int64_t aux = getIntAttr(&op, "aux", 0);
+      return emitMC(bufferLoadLdsB32(), {toMCOperand(op.getOperand(0)),
+                                         toMCOperand(op.getOperand(1)),
+                                         toMCOperand(op.getOperand(2)),
+                                         llvm::MCOperand::createImm(instOffset),
+                                         llvm::MCOperand::createImm(aux)});
     }
     // Tuple buffer loads expand into N consecutive `buffer_load_dword`
     // instructions sharing the same vaddr / descriptor / soffset, with

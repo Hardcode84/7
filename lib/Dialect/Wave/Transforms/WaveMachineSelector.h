@@ -320,6 +320,7 @@ public:
   LogicalResult selectFragmentFill(waveamd::FragmentFillOp op);
   LogicalResult selectFragmentPack(waveamd::FragmentPackOp op);
   LogicalResult selectMma(waveamd::MmaOp op);
+  LogicalResult selectDmaLoadLds(waveamd::DmaLoadLdsOp op);
   LogicalResult selectFragmentStore(waveamd::FragmentStoreOp op);
   LogicalResult selectReturn(func::ReturnOp op);
 };

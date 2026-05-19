@@ -634,6 +634,19 @@ class FunctionBuilder:
 
     # --- WaveAMD ops -------------------------------------------------------
 
+    def dma_load_lds(
+        self,
+        source: Value,
+        dest: Value,
+        *,
+        after: Value,
+        bytes: int = 4,
+        aux: int = 0,
+    ) -> Value:
+        return waveamd.DmaLoadLdsOp(
+            mem_token_type(), source, dest, after, bytes=bytes, aux=aux
+        ).token
+
     def fragment_fill(self, value: Value, frag_type: Type) -> Value:
         return waveamd.FragmentFillOp(frag_type, value).result
 
