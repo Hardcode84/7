@@ -327,6 +327,68 @@ func.func @mfma_carry_consumed_in_body(
   return
 }
 
+// Pass-through carry: the value is set up by an MFMA OUTSIDE the
+// loop and `continue_if` forwards the block argument unchanged on
+// every iteration. The visited set in the SSA-edge walk has to bail
+// on the back-edge (else: infinite recursion); the entry path
+// resolves through the parent-op carry to the external MFMA, and
+// mitigation lands inside the body for the first-iteration hazard.
+// CHECK-LABEL: func.func @mfma_carry_passthrough_with_external_producer
+// CHECK: waveamdmachine.mfma_f32_16x16x32_f16
+// CHECK: waveamdmachine.uniform_loop
+// CHECK: ^bb0(%[[ACC:.+]]: !waveamdmachine.reg<vgpr, 4>):
+// CHECK-NEXT: waveamdmachine.imm 6
+// CHECK-NEXT: waveamdmachine.s_nop
+// CHECK-NEXT: waveamdmachine.global_store_b128 %{{.+}}, %[[ACC]],
+// CHECK: waveamdmachine.continue_if %{{.+}} : !waveamdmachine.reg<scc, 1> carries(%[[ACC]]
+func.func @mfma_carry_passthrough_with_external_producer(
+    %ec: !waveamdmachine.reg<scc, 1>,
+    %a: !waveamdmachine.reg<vgpr, 4>,
+    %b: !waveamdmachine.reg<vgpr, 4>,
+    %acc0: !waveamdmachine.reg<vgpr, 4>,
+    %off: !waveamdmachine.reg<vgpr, 1>,
+    %base: !waveamdmachine.reg<sgpr, 2>) {
+  %init = waveamdmachine.mfma_f32_16x16x32_f16 %a, %b, %acc0
+      : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
+         !waveamdmachine.reg<vgpr, 4>) -> !waveamdmachine.reg<vgpr, 4>
+  %unused2 = waveamdmachine.uniform_loop if %ec : !waveamdmachine.reg<scc, 1>
+      carries(%init : !waveamdmachine.reg<vgpr, 4>) {
+  ^bb0(%acc: !waveamdmachine.reg<vgpr, 4>):
+    %tok = waveamdmachine.global_store_b128 %off, %acc, %base
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 4>,
+           !waveamdmachine.reg<sgpr, 2>) -> !waveamdmachine.mem.token
+    waveamdmachine.continue_if %ec : !waveamdmachine.reg<scc, 1>
+        carries(%acc : !waveamdmachine.reg<vgpr, 4>)
+  } -> !waveamdmachine.reg<vgpr, 4>
+  return
+}
+
+// Pass-through carry with NO producer anywhere upstream. The visited
+// set still has to bail on the back-edge; the entry path finds no
+// matching MFMA. Both paths return null, no mitigation emitted.
+// CHECK-LABEL: func.func @passthrough_no_producer
+// CHECK: waveamdmachine.uniform_loop
+// CHECK: ^bb0(
+// CHECK-NEXT: waveamdmachine.global_store_b128
+// CHECK-NOT: waveamdmachine.s_nop
+// CHECK: waveamdmachine.continue_if
+func.func @passthrough_no_producer(
+    %ec: !waveamdmachine.reg<scc, 1>,
+    %acc0: !waveamdmachine.reg<vgpr, 4>,
+    %off: !waveamdmachine.reg<vgpr, 1>,
+    %base: !waveamdmachine.reg<sgpr, 2>) {
+  %unused3 = waveamdmachine.uniform_loop if %ec : !waveamdmachine.reg<scc, 1>
+      carries(%acc0 : !waveamdmachine.reg<vgpr, 4>) {
+  ^bb0(%acc: !waveamdmachine.reg<vgpr, 4>):
+    %tok = waveamdmachine.global_store_b128 %off, %acc, %base
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 4>,
+           !waveamdmachine.reg<sgpr, 2>) -> !waveamdmachine.mem.token
+    waveamdmachine.continue_if %ec : !waveamdmachine.reg<scc, 1>
+        carries(%acc : !waveamdmachine.reg<vgpr, 4>)
+  } -> !waveamdmachine.reg<vgpr, 4>
+  return
+}
+
 // MFMA result returned through the loop's exit-to-parent edge and
 // consumed by a VMEM store after the loop. The SSA-edge walk
 // follows the op result back through the `continue_if` exit
