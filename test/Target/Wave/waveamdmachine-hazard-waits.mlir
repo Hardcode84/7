@@ -166,4 +166,163 @@ func.func @mfma_result_store_delay_ignores_preloaded(
   return
 }
 
+// One real instruction between `s_mov_m0` and the DMA saturates the
+// 1-slot m0 pipeline gap; no `s_nop` needed.
+// CHECK-LABEL: func.func @m0_no_delay_when_gap_saturated
+// CHECK: waveamdmachine.s_mov_m0
+// CHECK-NEXT: waveamdmachine.s_add_i32
+// CHECK-NEXT: waveamdmachine.global_load_lds_b128
+// CHECK-NOT: waveamdmachine.s_nop
+func.func @m0_no_delay_when_gap_saturated(
+    %off: !waveamdmachine.reg<vgpr, 1>,
+    %base: !waveamdmachine.reg<sgpr, 2>,
+    %dst: !waveamdmachine.reg<sgpr, 1>,
+    %x: !waveamdmachine.reg<sgpr, 1>,
+    %dep: !waveamdmachine.mem.token) {
+  %m0 = waveamdmachine.s_mov_m0 %dst
+      : (!waveamdmachine.reg<sgpr, 1>) -> !waveamdmachine.m0
+  %sum, %scc = waveamdmachine.s_add_i32 %x, %x
+      : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<sgpr, 1>)
+      -> (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<scc, 1>)
+  %tok = waveamdmachine.global_load_lds_b128 %off, %base, %m0 after %dep
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 2>,
+         !waveamdmachine.m0, !waveamdmachine.mem.token)
+      -> !waveamdmachine.mem.token
+  return
+}
+
+// Pseudo-ops (`imm` etc., trait `NoMachineInst`) between the
+// producer and consumer do NOT count toward the gap; the mitigation
+// still fires.
+// CHECK-LABEL: func.func @m0_delay_with_imm_between
+// CHECK: waveamdmachine.s_mov_m0
+// CHECK: waveamdmachine.imm
+// CHECK-NEXT: waveamdmachine.imm 0
+// CHECK-NEXT: waveamdmachine.s_nop
+// CHECK-NEXT: waveamdmachine.global_load_lds_b128
+func.func @m0_delay_with_imm_between(
+    %off: !waveamdmachine.reg<vgpr, 1>,
+    %base: !waveamdmachine.reg<sgpr, 2>,
+    %dst: !waveamdmachine.reg<sgpr, 1>,
+    %dep: !waveamdmachine.mem.token) {
+  %m0 = waveamdmachine.s_mov_m0 %dst
+      : (!waveamdmachine.reg<sgpr, 1>) -> !waveamdmachine.m0
+  %unused = waveamdmachine.imm 42 : !waveamdmachine.imm
+  %tok = waveamdmachine.global_load_lds_b128 %off, %base, %m0 after %dep
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 2>,
+         !waveamdmachine.m0, !waveamdmachine.mem.token)
+      -> !waveamdmachine.mem.token
+  return
+}
+
+// Two consecutive `s_mov_m0`s. The DMA reads the second's result;
+// the first counts as a machine instruction between the second
+// producer and the consumer, but that machine instruction (the
+// first `s_mov_m0`) is the only thing between the *second*
+// producer's def and the consumer, contributing exactly 0 to that
+// gap. Mitigation still fires.
+// CHECK-LABEL: func.func @m0_delay_after_chained_mov
+// CHECK: waveamdmachine.s_mov_m0
+// CHECK: waveamdmachine.s_mov_m0
+// CHECK-NEXT: waveamdmachine.imm 0
+// CHECK-NEXT: waveamdmachine.s_nop
+// CHECK-NEXT: waveamdmachine.global_load_lds_b128
+func.func @m0_delay_after_chained_mov(
+    %off: !waveamdmachine.reg<vgpr, 1>,
+    %base: !waveamdmachine.reg<sgpr, 2>,
+    %dst1: !waveamdmachine.reg<sgpr, 1>,
+    %dst2: !waveamdmachine.reg<sgpr, 1>,
+    %dep: !waveamdmachine.mem.token) {
+  %m0_a = waveamdmachine.s_mov_m0 %dst1
+      : (!waveamdmachine.reg<sgpr, 1>) -> !waveamdmachine.m0
+  %m0_b = waveamdmachine.s_mov_m0 %dst2
+      : (!waveamdmachine.reg<sgpr, 1>) -> !waveamdmachine.m0
+  %tok = waveamdmachine.global_load_lds_b128 %off, %base, %m0_b after %dep
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 2>,
+         !waveamdmachine.m0, !waveamdmachine.mem.token)
+      -> !waveamdmachine.mem.token
+  return
+}
+
+// MFMA producer in one branch of a `cf.cond_br`, VMEM store in the
+// join. The backward query crosses the block boundary, finds the
+// MFMA in each predecessor, and the gap (0 in the pred + 1 for the
+// `cf.br` terminator + 0 in the join entry = 1) leaves 7 wait states
+// to be inserted as a single `s_nop` (encodes count - 1 = 6).
+// CHECK-LABEL: func.func @mfma_store_delay_across_cond_br
+// CHECK: cf.cond_br
+// CHECK: waveamdmachine.mfma_f32_16x16x32_f16
+// CHECK-NEXT: cf.br
+// CHECK: waveamdmachine.mfma_f32_16x16x32_f16
+// CHECK-NEXT: cf.br
+// CHECK: ^bb{{[0-9]+}}(%{{[0-9]+}}: !waveamdmachine.reg<vgpr, 4>)
+// CHECK-NEXT: waveamdmachine.imm 6
+// CHECK-NEXT: waveamdmachine.s_nop
+// CHECK-NEXT: waveamdmachine.global_store_b128
+func.func @mfma_store_delay_across_cond_br(
+    %cond: i1,
+    %a: !waveamdmachine.reg<vgpr, 4>,
+    %b: !waveamdmachine.reg<vgpr, 4>,
+    %acc: !waveamdmachine.reg<vgpr, 4>,
+    %off: !waveamdmachine.reg<vgpr, 1>,
+    %base: !waveamdmachine.reg<sgpr, 2>) {
+  cf.cond_br %cond, ^then, ^else
+^then:
+  %r_a = waveamdmachine.mfma_f32_16x16x32_f16 %a, %b, %acc
+      : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
+         !waveamdmachine.reg<vgpr, 4>) -> !waveamdmachine.reg<vgpr, 4>
+  cf.br ^join(%r_a : !waveamdmachine.reg<vgpr, 4>)
+^else:
+  %r_b = waveamdmachine.mfma_f32_16x16x32_f16 %a, %b, %acc
+      : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
+         !waveamdmachine.reg<vgpr, 4>) -> !waveamdmachine.reg<vgpr, 4>
+  cf.br ^join(%r_b : !waveamdmachine.reg<vgpr, 4>)
+^join(%r: !waveamdmachine.reg<vgpr, 4>):
+  %tok = waveamdmachine.global_store_b128 %off, %r, %base
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 4>,
+         !waveamdmachine.reg<sgpr, 2>) -> !waveamdmachine.mem.token
+  return
+}
+
+}
+
+// -----
+
+// Loop-replay must not double-emit the `s_nop` for an M0 hazard
+// inside a `uniform_loop` body. The trailing `s_waitcnt` forces the
+// loop-replay heuristic (VALU-after-LGKM persists across the
+// back-edge), but the `SsaEdge` M0 query is idempotent: on the
+// second walk it finds the `s_nop` from walk 1 already saturating
+// the gap, so only one `s_nop` survives in the body.
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
+
+// CHECK-LABEL: func.func @m0_delay_inside_uniform_loop_no_dup
+// CHECK: waveamdmachine.uniform_loop
+// CHECK:   waveamdmachine.s_mov_m0
+// CHECK-NEXT: waveamdmachine.imm 0
+// CHECK-NEXT: waveamdmachine.s_nop
+// CHECK-NEXT: waveamdmachine.global_load_lds_b128
+// CHECK-NOT: waveamdmachine.s_nop
+// CHECK: waveamdmachine.s_waitcnt
+// CHECK: waveamdmachine.continue_if
+func.func @m0_delay_inside_uniform_loop_no_dup(
+    %ec: !waveamdmachine.reg<scc, 1>,
+    %off: !waveamdmachine.reg<vgpr, 1>,
+    %base: !waveamdmachine.reg<sgpr, 2>,
+    %dst: !waveamdmachine.reg<sgpr, 1>,
+    %dep: !waveamdmachine.mem.token) {
+  waveamdmachine.uniform_loop if %ec : !waveamdmachine.reg<scc, 1> {
+    %m0 = waveamdmachine.s_mov_m0 %dst
+        : (!waveamdmachine.reg<sgpr, 1>) -> !waveamdmachine.m0
+    %tok = waveamdmachine.global_load_lds_b128 %off, %base, %m0 after %dep
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 2>,
+           !waveamdmachine.m0, !waveamdmachine.mem.token)
+        -> !waveamdmachine.mem.token
+    %wait = waveamdmachine.imm 0 : !waveamdmachine.imm
+    waveamdmachine.s_waitcnt %wait : (!waveamdmachine.imm) -> ()
+    waveamdmachine.continue_if %ec : !waveamdmachine.reg<scc, 1>
+  }
+  return
+}
+
 }

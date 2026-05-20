@@ -6,14 +6,27 @@
 //
 //===----------------------------------------------------------------------===//
 //
-// Linear walk over a flattened pre-order of every waveamdmachine op in
-// the function, including ops nested inside region-bearing ops such as
-// `uniform_loop`. Cross-block control flow (branches, joins) is NOT
-// analysed; the walk assumes each hazard producer and its consumer
-// sit in the same straight-line region. Today's selector upholds this
-// for every emitted op. The follow-up SSA-edge backward-query design
-// (see docs/HazardMitigationDesign.md) crosses blocks correctly and
-// supersedes this assumption.
+// Driver: flat pre-order walk over every waveamdmachine op in the
+// function (including ops nested in region-bearing ops like
+// `uniform_loop`). Two hazard categories run over the same walk:
+//
+//   - `LinearState`: a pending counter raised by a producer in the
+//     walk, decremented by each counted op, consumed by the matching
+//     consumer. VALU-after-LGKM uses this shape. The walk is
+//     straight-line: cross-block control flow (joins, back-edges) is
+//     NOT modelled, so a producer in one branch and consumer after the
+//     join can be miscounted. Today's selector keeps these in the
+//     same region, so it works in practice.
+//
+//   - `SsaEdge`: each consumer queries its operands backward via the
+//     SSA def-use chain (see `findProducer`). Same-block edges are
+//     precise; block-argument edges that resolve via a single
+//     `BranchOpInterface` hop are also handled. The query is
+//     idempotent under the loop replay because previously-inserted
+//     `s_nop`s count toward the gap. M0-after-`s_mov_m0` and
+//     VMEM-store-after-MFMA use this shape.
+//
+// Design notes: `docs/HazardMitigationDesign.md`.
 
 #include "mlir/Dialect/Wave/Transforms/Passes.h"
 
@@ -169,12 +182,6 @@ static std::optional<unsigned> getImmediate(Value value) {
       def->getAttrOfType<IntegerAttr>("value").getInt());
 }
 
-static bool consumesM0(Operation &op) {
-  return llvm::any_of(op.getOperandTypes(), [](Type type) {
-    return isa<waveamdmachine::M0Type>(type);
-  });
-}
-
 static bool isVMEMStore(Operation &op) {
   return op.hasTrait<OpTrait::waveamdmachine::VMEMStoreOp>();
 }
@@ -236,11 +243,130 @@ static std::optional<bool> recomputePendingLgkm(Operation &op,
   return cfg.hasDelayAlu ? lg != cfg.defaultLgkmcnt : true;
 }
 
-// Stage 1: every hazard runs through `LinearState` (pending-counter,
-// decrement on counted ops, mitigate on consumer). Stage 2 will add
-// `SsaEdge` (backward def-use query) -- the enum is here now so the
-// catalog factory can mark each entry's future intent.
+// Two execution shapes:
+//   - `LinearState`: pending counter raised by a producer, decremented
+//     by each counted op, consumed by the matching consumer. Right
+//     for hazards with no SSA edge (VALU-after-LGKM-wait: `s_waitcnt`
+//     mutates a global counter that every following VALU op sees).
+//   - `SsaEdge`: on each consumer, walk back to the producer via the
+//     SSA def-use chain and measure the distance in counted ops. Right
+//     for hazards where the producer's result feeds a specific
+//     consumer operand (M0-after-`s_mov_m0`, MFMA-result-as-VMEM-store).
 enum class HazardCategory { LinearState, SsaEdge };
+
+// Strictly between `from` and `to` in the same block: machine-inst
+// count, skipping ops tagged `NoMachineInst`. Caller must ensure
+// `from` precedes `to` in the same block.
+static unsigned countMachineInstsBetween(Operation *from, Operation *to) {
+  assert(from->getBlock() == to->getBlock() &&
+         "countMachineInstsBetween requires same-block operands");
+  unsigned count = 0;
+  for (Operation *cur = from->getNextNode(); cur && cur != to;
+       cur = cur->getNextNode()) {
+    if (!emitsNoMachineInst(*cur))
+      ++count;
+  }
+  return count;
+}
+
+// Machine-inst count from the start of `block` up to (but not
+// including) `op`. Used by cross-block edge resolution.
+static unsigned countFromBlockEntry(Block *block, Operation *op) {
+  unsigned count = 0;
+  for (Operation &cur : *block) {
+    if (&cur == op)
+      break;
+    if (!emitsNoMachineInst(cur))
+      ++count;
+  }
+  return count;
+}
+
+// Result of resolving a producer for an `SsaEdge` consumer operand.
+struct SsaEdgeResult {
+  Operation *producer;
+  unsigned gap;
+};
+
+// Successor index of `target` in `terminator`, or nullopt if
+// `target` is not a successor.
+static std::optional<unsigned> findSuccessorIndex(Operation *terminator,
+                                                  Block *target) {
+  for (unsigned i = 0, e = terminator->getNumSuccessors(); i < e; ++i) {
+    if (terminator->getSuccessor(i) == target)
+      return i;
+  }
+  return std::nullopt;
+}
+
+// Resolve a single block-arg predecessor edge to a producer. Returns
+// the producer + cumulative gap (producer-to-terminator + terminator +
+// `entryToAnchor`), or `nullopt` if the edge is unanalyzable (multi-hop)
+// or carries a non-producer value.
+static std::optional<SsaEdgeResult>
+resolvePredEdge(BranchOpInterface branchOp, unsigned succIdx, unsigned argIdx,
+                unsigned entryToAnchor,
+                function_ref<bool(Operation &)> isProducer) {
+  SuccessorOperands succOps = branchOp.getSuccessorOperands(succIdx);
+  if (argIdx >= succOps.size())
+    return std::nullopt;
+  Value forwarded = succOps[argIdx];
+  if (!forwarded)
+    return std::nullopt;
+  Operation *fwdDef = forwarded.getDefiningOp();
+  Operation *terminator = branchOp.getOperation();
+  if (!fwdDef || fwdDef->getBlock() != terminator->getBlock())
+    return std::nullopt;
+  if (!isProducer(*fwdDef))
+    return std::nullopt;
+  unsigned defToTerm = countMachineInstsBetween(fwdDef, terminator);
+  unsigned termGap = emitsNoMachineInst(*terminator) ? 0 : 1;
+  return SsaEdgeResult{fwdDef, defToTerm + termGap + entryToAnchor};
+}
+
+// Walk backward from `v` (read at `anchor`) looking for a producer of
+// `kind`. Handles:
+//   - Same-block producer: precise.
+//   - Block argument whose every predecessor edge forwards a value
+//     produced in the predecessor block (one-level cross-block).
+// Multi-hop CFG paths, structured region branches, and unknown
+// terminators return `nullopt` -- consumer gets no mitigation,
+// matching the pre-Stage-2 linear-walk behavior for those patterns.
+// Predecessors that don't carry the hazard (forwarded value is not
+// produced by `isProducer`) are skipped; the result is the min gap
+// across the predecessors that do.
+static std::optional<SsaEdgeResult>
+findProducer(Value v, Operation *anchor,
+             function_ref<bool(Operation &)> isProducer) {
+  if (Operation *def = v.getDefiningOp()) {
+    if (def->getBlock() != anchor->getBlock())
+      return std::nullopt;
+    if (!isProducer(*def))
+      return std::nullopt;
+    return SsaEdgeResult{def, countMachineInstsBetween(def, anchor)};
+  }
+  auto blockArg = cast<BlockArgument>(v);
+  Block *block = blockArg.getOwner();
+  unsigned argIdx = blockArg.getArgNumber();
+  unsigned entryToAnchor = countFromBlockEntry(block, anchor);
+  std::optional<SsaEdgeResult> best;
+  for (Block *pred : block->getPredecessors()) {
+    auto branchOp = dyn_cast<BranchOpInterface>(pred->getTerminator());
+    if (!branchOp)
+      return std::nullopt;
+    std::optional<unsigned> succIdx =
+        findSuccessorIndex(pred->getTerminator(), block);
+    if (!succIdx)
+      return std::nullopt;
+    std::optional<SsaEdgeResult> edge =
+        resolvePredEdge(branchOp, *succIdx, argIdx, entryToAnchor, isProducer);
+    if (!edge)
+      continue;
+    if (!best || edge->gap < best->gap)
+      best = edge;
+  }
+  return best;
+}
 
 using MitigateFn = std::function<unsigned(
     Operation &op, unsigned pending, OpBuilder &builder,
@@ -286,24 +412,47 @@ static HazardKind makeValuLgkmHazard() {
   };
 }
 
+// SsaEdge mitigate: for each hazard-bearing operand on `op`, walk
+// back to the producer and emit `requiredGap - currentGap` NOPs if
+// the gap isn't already saturated. Re-running this on the same op
+// (e.g. on the loop replay) is idempotent because previously
+// inserted `s_nop`s themselves count as machine instructions.
+//
+// Multi-operand consumers (none exist today but the contract is
+// here for clarity): the first operand whose edge needs mitigation
+// emits the NOPs; subsequent edges see the now-saturated gap and
+// skip. If two operands legitimately need different gap sizes, this
+// would under-mitigate -- handle that when the case arises.
+static unsigned mitigateSsaEdge(Operation &op, OpBuilder &b,
+                                const llvm::MCSubtargetInfo &sti,
+                                unsigned requiredGap,
+                                function_ref<bool(Type)> operandTypeFilter,
+                                function_ref<bool(Operation &)> isProducer) {
+  for (Value v : op.getOperands()) {
+    if (operandTypeFilter && !operandTypeFilter(v.getType()))
+      continue;
+    auto result = findProducer(v, &op, isProducer);
+    if (!result || result->gap >= requiredGap)
+      continue;
+    insertSNopMitigation(op, requiredGap - result->gap, b, sti);
+    return 0;
+  }
+  return 0;
+}
+
 static HazardKind makeM0Hazard() {
   return HazardKind{
       "m0-after-s-mov-m0",
-      HazardCategory::LinearState,
-      [](Operation &op, unsigned pending, OpBuilder &b, const HazardConfig &,
+      HazardCategory::SsaEdge,
+      [](Operation &op, unsigned, OpBuilder &b, const HazardConfig &cfg,
          const llvm::MCSubtargetInfo &sti) -> unsigned {
-        if (!pending || !consumesM0(op))
-          return pending;
-        insertSNopMitigation(op, pending, b, sti);
-        return 0;
+        return mitigateSsaEdge(
+            op, b, sti, cfg.m0PipelineDelay,
+            [](Type t) { return isa<waveamdmachine::M0Type>(t); },
+            [](Operation &p) { return isa<waveamdmachine::SMovM0Op>(p); });
       },
-      [](Operation &op, unsigned pending, const HazardConfig &cfg) -> unsigned {
-        if (isa<waveamdmachine::SMovM0Op>(op))
-          return cfg.m0PipelineDelay;
-        if (pending && !emitsNoMachineInst(op))
-          return pending - 1;
-        return pending;
-      },
+      // SsaEdge: no per-op state to advance.
+      [](Operation &, unsigned, const HazardConfig &) -> unsigned { return 0; },
       /*persistInReplay=*/false,
   };
 }
@@ -311,21 +460,21 @@ static HazardKind makeM0Hazard() {
 static HazardKind makeMfmaStoreHazard() {
   return HazardKind{
       "vmem-store-after-mfma",
-      HazardCategory::LinearState,
-      [](Operation &op, unsigned pending, OpBuilder &b, const HazardConfig &,
+      HazardCategory::SsaEdge,
+      [](Operation &op, unsigned, OpBuilder &b, const HazardConfig &cfg,
          const llvm::MCSubtargetInfo &sti) -> unsigned {
-        if (!pending || !isVMEMStore(op))
-          return pending;
-        insertSNopMitigation(op, pending, b, sti);
-        return 0;
+        if (!isVMEMStore(op))
+          return 0;
+        return mitigateSsaEdge(
+            op, b, sti, cfg.mfmaResultLatency,
+            // The MFMA result is the only VGPR-typed operand that
+            // carries this hazard, but the producer match alone is
+            // enough -- filter accepts every operand.
+            /*operandTypeFilter=*/nullptr, [](Operation &p) {
+              return p.hasTrait<OpTrait::waveamdmachine::MFMAOp>();
+            });
       },
-      [](Operation &op, unsigned pending, const HazardConfig &cfg) -> unsigned {
-        if (op.hasTrait<OpTrait::waveamdmachine::MFMAOp>())
-          return cfg.mfmaResultLatency;
-        if (pending && !emitsNoMachineInst(op))
-          return pending - 1;
-        return pending;
-      },
+      [](Operation &, unsigned, const HazardConfig &) -> unsigned { return 0; },
       /*persistInReplay=*/false,
   };
 }
