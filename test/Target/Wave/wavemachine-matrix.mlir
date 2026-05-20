@@ -10,15 +10,14 @@ module attributes {wavemachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // SELECT: wavemachine.v_mov_b32_tuple{{.*}} : (!wavemachine.imm) -> !wavemachine.reg<vgpr, 4>
 // SELECT: wavemachine.v_mov_b32_tuple{{.*}} : (!wavemachine.imm) -> !wavemachine.reg<vgpr, 8>
 // SELECT: wavemachine.wmma_i32_16x16x16_iu8{{.*}} : (!wavemachine.reg<vgpr, 4>, !wavemachine.reg<vgpr, 4>, !wavemachine.reg<vgpr, 8>) -> !wavemachine.reg<vgpr, 8>
-// SELECT: wavemachine.global_store_tuple_b32{{.*}} {component = 0 : i64}
-// SELECT: wavemachine.global_store_tuple_b32{{.*}} {component = 7 : i64}
+// SELECT: wavemachine.global_store_tuple_b32
 
 // PIPELINE: module attributes {wavemachine.target = "amdgcn-amd-amdhsa--gfx1100"}
 // PIPELINE-LABEL: func.func @matrix_kernel
 // PIPELINE-SAME: wavemachine.metadata
 // PIPELINE-SAME: wavemachine.vgpr_count
 // PIPELINE: wavemachine.wmma_i32_16x16x16_iu8{{.*}} -> !wavemachine.reg<vgpr, 8,
-// PIPELINE: wavemachine.global_store_tuple_b32{{.*}} {component = 7 : i64}
+// PIPELINE: wavemachine.global_store_tuple_b32
 
 // ASM-LABEL: matrix_kernel:
 // ASM: s_load_b64 [[OUT:s\[[0-9]+:[0-9]+\]]], s[0:1], 0x0
@@ -26,7 +25,9 @@ module attributes {wavemachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // ASM: v_mov_b32_e32 [[B0:v[0-9]+]], 0
 // ASM: v_mov_b32_e32 [[C0:v[0-9]+]], 7
 // ASM: v_wmma_i32_16x16x16_iu8 [[DST:v\[[0-9]+:[0-9]+\]]], [[A:v\[[0-9]+:[0-9]+\]]], [[B:v\[[0-9]+:[0-9]+\]]], [[C:v\[[0-9]+:[0-9]+\]]]
-// ASM: global_store_b32 {{v[0-9]+}}, {{v[0-9]+}}, [[OUT]]
+// ASM: global_store_b32 {{v[0-9]+}}, {{v[0-9]+}}, [[OUT]]{{$}}
+// ASM: global_store_b32 {{v[0-9]+}}, {{v[0-9]+}}, [[OUT]] offset:4
+// ASM: global_store_b32 {{v[0-9]+}}, {{v[0-9]+}}, [[OUT]] offset:28
 // ASM: s_waitcnt_vscnt null, 0x0
 // ASM: s_endpgm
 func.func @matrix_kernel(%out: !wave.ptr<i32, #wave.global>) attributes {wave.kernel} {

@@ -136,14 +136,11 @@ LogicalResult BufferStoreB32Op::verify() {
 LogicalResult GlobalStoreTupleB32Op::verify() {
   if (getNumResults() > 1)
     return emitOpError("produces at most one memory token");
-  auto component = (*this)->getAttrOfType<IntegerAttr>("component");
-  if (!component)
-    return emitOpError("requires a component attribute");
   auto valueType = cast<RegType>(getOperand(1).getType());
   if (!isVGPR(valueType))
     return emitOpError("value operand must be a VGPR tuple");
-  if (component.getInt() < 0 || component.getInt() >= valueType.getWidth())
-    return emitOpError("component must select a register in the value tuple");
+  if (valueType.getWidth() < 1)
+    return emitOpError("value tuple width must be at least 1");
   return success();
 }
 
@@ -184,14 +181,11 @@ LogicalResult BufferLoadTupleB32Op::verify() {
 LogicalResult BufferStoreTupleB32Op::verify() {
   if (getNumResults() > 1)
     return emitOpError("produces at most one memory token");
-  auto component = (*this)->getAttrOfType<IntegerAttr>("component");
-  if (!component)
-    return emitOpError("requires a component attribute");
   auto valueType = cast<RegType>(getOperand(1).getType());
   if (!isVGPR(valueType))
     return emitOpError("value operand must be a VGPR tuple");
-  if (component.getInt() < 0 || component.getInt() >= valueType.getWidth())
-    return emitOpError("component must select a register in the value tuple");
+  if (valueType.getWidth() < 1)
+    return emitOpError("value tuple width must be at least 1");
   return success();
 }
 

@@ -67,29 +67,20 @@ LogicalResult selectSharedStore(WaveMachineSelector &S, StoreOp op, Value base,
   return success();
 }
 
-// Build one per-component scalar / tuple store and return its token.
-// Tuple stores carry the `component` index as a discardable attr so the
-// asm printer can pick the right slice of the VGPR tuple; the bucketed
-// `inst_offset` is the slot's bucket value (the printer already adds
-// `component * 4` itself).
-Operation *buildOneGlobalOrBufferStore(WaveMachineSelector &S, StoreOp op,
-                                       Value voffset, Value value, Value base,
-                                       bool isBuffer, Value soffset, Value dep,
-                                       int64_t instOffset,
-                                       std::optional<unsigned> component) {
+// Build one scalar or tuple global-or-buffer store; the tuple form
+// covers all N dwords in a single op (asm emit expands it).
+static Operation *buildOneGlobalOrBufferStore(
+    WaveMachineSelector &S, StoreOp op, Value voffset, Value value, Value base,
+    bool isBuffer, Value soffset, Value dep, int64_t instOffset, bool isTuple) {
   Type tokenType = getMemTokenType(op.getContext());
-  if (component) {
-    Operation *store;
+  if (isTuple) {
     if (isBuffer)
-      store = wavemachine::BufferStoreTupleB32Op::create(
+      return wavemachine::BufferStoreTupleB32Op::create(
           S.builder, op.getLoc(), tokenType, voffset, value, base, soffset, dep,
           instOffset);
-    else
-      store = wavemachine::GlobalStoreTupleB32Op::create(
-          S.builder, op.getLoc(), tokenType, voffset, value, base, dep,
-          instOffset);
-    store->setAttr("component", S.builder.getI64IntegerAttr(*component));
-    return store;
+    return wavemachine::GlobalStoreTupleB32Op::create(S.builder, op.getLoc(),
+                                                      tokenType, voffset, value,
+                                                      base, dep, instOffset);
   }
   if (isBuffer)
     return wavemachine::BufferStoreB32Op::create(
@@ -108,33 +99,10 @@ LogicalResult selectGlobalOrBufferStore(WaveMachineSelector &S, StoreOp op,
   auto b = S.bucketForSpec(op.getLoc(), offset, spec);
   Value value = S.expect(op.getValue(), op);
   Value dep = op.getDependency() ? S.expect(op.getDependency(), op) : Value{};
-
-  // Scalar lane payload: a single dword-store.
-  if (registers == 1) {
-    Operation *store =
-        buildOneGlobalOrBufferStore(S, op, b.voffset, value, base, isBuffer,
-                                    b.soffset, dep, b.instOffset, std::nullopt);
-    S.values[op.getToken()] = store->getResult(0);
-    S.eraseIfTopLevel(op);
-    return success();
-  }
-
-  // Tuple lane payload: one per-component `*_store_tuple_b32` per
-  // register, joined with `token_join`. The per-component dword lands
-  // at `voffset + soffset + inst_offset + component*4` per lane, which
-  // is exactly the layout `fragment_unpack` + this tuple wave.store
-  // contract expects.
-  SmallVector<Value> storeTokens;
-  storeTokens.reserve(registers);
-  for (unsigned component = 0; component != registers; ++component) {
-    Operation *store =
-        buildOneGlobalOrBufferStore(S, op, b.voffset, value, base, isBuffer,
-                                    b.soffset, dep, b.instOffset, component);
-    storeTokens.push_back(store->getResult(0));
-  }
-  auto join = wavemachine::TokenJoinOp::create(
-      S.builder, op.getLoc(), getMemTokenType(op.getContext()), storeTokens);
-  S.values[op.getToken()] = join.getResult();
+  Operation *store = buildOneGlobalOrBufferStore(
+      S, op, b.voffset, value, base, isBuffer, b.soffset, dep, b.instOffset,
+      /*isTuple=*/registers != 1);
+  S.values[op.getToken()] = store->getResult(0);
   S.eraseIfTopLevel(op);
   return success();
 }

@@ -40,32 +40,6 @@ func.func @bad_wmma_width(%a: !wavemachine.reg<vgpr, 8>, %b: !wavemachine.reg<vg
 
 // -----
 
-func.func @missing_tuple_component(%offset: !wavemachine.reg<vgpr, 1>, %value: !wavemachine.reg<vgpr, 4>, %base: !wavemachine.reg<sgpr, 2>) {
-  // expected-error @below {{requires a component attribute}}
-  %t = wavemachine.global_store_tuple_b32 %offset, %value, %base : (!wavemachine.reg<vgpr, 1>, !wavemachine.reg<vgpr, 4>, !wavemachine.reg<sgpr, 2>) -> !wavemachine.mem.token
-  return
-}
-
-// -----
-
-func.func @buffer_store_tuple_missing_component(%offset: !wavemachine.reg<vgpr, 1>, %value: !wavemachine.reg<vgpr, 4>, %desc: !wavemachine.reg<sgpr, 4>) {
-  %soff = wavemachine.imm 0 : !wavemachine.imm
-  // expected-error @below {{requires a component attribute}}
-  %t = wavemachine.buffer_store_tuple_b32 %offset, %value, %desc, %soff : (!wavemachine.reg<vgpr, 1>, !wavemachine.reg<vgpr, 4>, !wavemachine.reg<sgpr, 4>, !wavemachine.imm) -> !wavemachine.mem.token
-  return
-}
-
-// -----
-
-func.func @buffer_store_tuple_oob_component(%offset: !wavemachine.reg<vgpr, 1>, %value: !wavemachine.reg<vgpr, 4>, %desc: !wavemachine.reg<sgpr, 4>) {
-  %soff = wavemachine.imm 0 : !wavemachine.imm
-  // expected-error @below {{component must select a register in the value tuple}}
-  %t = wavemachine.buffer_store_tuple_b32 %offset, %value, %desc, %soff {component = 4 : i64} : (!wavemachine.reg<vgpr, 1>, !wavemachine.reg<vgpr, 4>, !wavemachine.reg<sgpr, 4>, !wavemachine.imm) -> !wavemachine.mem.token
-  return
-}
-
-// -----
-
 func.func @tuple_to_elements_wrong_count(%t: !wavemachine.reg<vgpr, 8>) {
   // expected-error @below {{element count (4) must match tuple register width (8)}}
   %e:4 = wavemachine.tuple_to_elements %t

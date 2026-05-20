@@ -1329,28 +1329,32 @@ private:
       return success();
     }
     if (isa<wavemachine::GlobalStoreTupleB32Op>(op)) {
-      unsigned component = getIntAttr(&op, "component", 0);
+      auto regType = cast<wavemachine::RegType>(op.getOperand(1).getType());
       int64_t instOffset = getIntAttr(&op, "inst_offset", 0);
-      return emitMC(globalStoreB32(),
-                    {toMCOperand(op.getOperand(0)),
-                     toMCVGPRComponent(op.getOperand(1), component),
-                     toMCOperand(op.getOperand(2)),
-                     llvm::MCOperand::createImm(instOffset + component * 4),
-                     llvm::MCOperand::createImm(0)});
+      for (unsigned i = 0, e = regType.getWidth(); i != e; ++i)
+        if (failed(emitMC(globalStoreB32(),
+                          {toMCOperand(op.getOperand(0)),
+                           toMCVGPRComponent(op.getOperand(1), i),
+                           toMCOperand(op.getOperand(2)),
+                           llvm::MCOperand::createImm(instOffset + i * 4),
+                           llvm::MCOperand::createImm(0)})))
+          return failure();
+      return success();
     }
     if (isa<wavemachine::BufferStoreTupleB32Op>(op)) {
-      // Mirror BufferStoreB32 in MUBUF OFFEN form: vdata, vaddr,
-      // srsrc, soffset, offset:(inst_offset + component*4), cpol.
-      // vdata is the selected dword of the VGPR tuple.
-      unsigned component = getIntAttr(&op, "component", 0);
+      // MUBUF OFFEN: vdata, vaddr, srsrc, soffset, offset, cpol.
+      auto regType = cast<wavemachine::RegType>(op.getOperand(1).getType());
       int64_t instOffset = getIntAttr(&op, "inst_offset", 0);
-      return emitMC(bufferStoreB32(),
-                    {toMCVGPRComponent(op.getOperand(1), component),
-                     toMCOperand(op.getOperand(0)),
-                     toMCOperand(op.getOperand(2)),
-                     toMCOperand(op.getOperand(3)),
-                     llvm::MCOperand::createImm(instOffset + component * 4),
-                     llvm::MCOperand::createImm(0)});
+      for (unsigned i = 0, e = regType.getWidth(); i != e; ++i)
+        if (failed(emitMC(bufferStoreB32(),
+                          {toMCVGPRComponent(op.getOperand(1), i),
+                           toMCOperand(op.getOperand(0)),
+                           toMCOperand(op.getOperand(2)),
+                           toMCOperand(op.getOperand(3)),
+                           llvm::MCOperand::createImm(instOffset + i * 4),
+                           llvm::MCOperand::createImm(0)})))
+          return failure();
+      return success();
     }
     if (isa<wavemachine::DsLoadB32Op>(op))
       return emitMC(dsReadB32(),
