@@ -78,3 +78,100 @@ func.func @tuple_from_elements_mixed_class(%a: !waveamdmachine.reg<vgpr, 2>,
       : (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<sgpr, 2>) -> !waveamdmachine.reg<vgpr, 4>
   return
 }
+
+// -----
+
+// Covers the shared "produces at most one memory token" diagnostic emitted by
+// global/buffer/ds load and store ops -- substring match across all eight.
+func.func @memop_two_tokens(%off: !waveamdmachine.reg<vgpr, 1>,
+                            %base: !waveamdmachine.reg<sgpr, 2>) {
+  // expected-error @below {{produces at most one memory token}}
+  %r, %t0, %t1 = waveamdmachine.global_load_b32 %off, %base
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 2>)
+      -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token, !waveamdmachine.mem.token)
+  return
+}
+
+// -----
+
+// Covers "registers attribute must match result register width" emitted by
+// both v_mov_b32_tuple and s_mov_b32_tuple -- substring match.
+func.func @v_mov_b32_tuple_registers_mismatch(%src: !waveamdmachine.imm) {
+  // expected-error @below {{registers attribute must match result register width}}
+  %r = waveamdmachine.v_mov_b32_tuple %src {registers = 2 : i64}
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 4>
+  return
+}
+
+// -----
+
+// Substring "tuple width must be at least 1" covers all six tuple load/store
+// op variants (Buffer/Global/Ds Load/StoreTupleB32Op).
+func.func @global_load_tuple_b32_zero_width(%off: !waveamdmachine.reg<vgpr, 1>,
+                                            %base: !waveamdmachine.reg<sgpr, 2>) {
+  // expected-error @below {{tuple width must be at least 1}}
+  %r, %t = waveamdmachine.global_load_tuple_b32 %off, %base
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 2>)
+      -> (!waveamdmachine.reg<vgpr, 0>, !waveamdmachine.mem.token)
+  return
+}
+
+// -----
+
+func.func @uniform_loop_block_arg_count_mismatch(%init: !waveamdmachine.reg<sgpr, 1>,
+                                                  %sc: !waveamdmachine.reg<scc, 1>) {
+  // expected-error @below {{body block must have one argument per init carry}}
+  %r = waveamdmachine.uniform_loop carries(%init : !waveamdmachine.reg<sgpr, 1>) {
+  ^bb0(%iv: !waveamdmachine.reg<sgpr, 1>, %extra: !waveamdmachine.reg<sgpr, 1>):
+    waveamdmachine.continue_if %sc : !waveamdmachine.reg<scc, 1> carries(%iv : !waveamdmachine.reg<sgpr, 1>)
+  } -> !waveamdmachine.reg<sgpr, 1>
+  return
+}
+
+// -----
+
+func.func @uniform_loop_block_arg_type_mismatch(%init: !waveamdmachine.reg<sgpr, 1>,
+                                                 %sc: !waveamdmachine.reg<scc, 1>,
+                                                 %v: !waveamdmachine.reg<vgpr, 1>) {
+  // expected-error @below {{init carry types must match body block argument types}}
+  %r = waveamdmachine.uniform_loop carries(%init : !waveamdmachine.reg<sgpr, 1>) {
+  ^bb0(%iv: !waveamdmachine.reg<vgpr, 1>):
+    waveamdmachine.continue_if %sc : !waveamdmachine.reg<scc, 1> carries(%v : !waveamdmachine.reg<vgpr, 1>)
+  } -> !waveamdmachine.reg<sgpr, 1>
+  return
+}
+
+// -----
+
+func.func @uniform_loop_results_count_mismatch(%init: !waveamdmachine.reg<sgpr, 1>,
+                                                %sc: !waveamdmachine.reg<scc, 1>) {
+  // expected-error @below {{results count must match inits count}}
+  waveamdmachine.uniform_loop carries(%init : !waveamdmachine.reg<sgpr, 1>) {
+  ^bb0(%iv: !waveamdmachine.reg<sgpr, 1>):
+    waveamdmachine.continue_if %sc : !waveamdmachine.reg<scc, 1> carries(%iv : !waveamdmachine.reg<sgpr, 1>)
+  }
+  return
+}
+
+// -----
+
+func.func @uniform_loop_result_type_mismatch(%init: !waveamdmachine.reg<sgpr, 1>,
+                                              %sc: !waveamdmachine.reg<scc, 1>) {
+  // expected-error @below {{init carry types must match result types}}
+  %r = waveamdmachine.uniform_loop carries(%init : !waveamdmachine.reg<sgpr, 1>) {
+  ^bb0(%iv: !waveamdmachine.reg<sgpr, 1>):
+    waveamdmachine.continue_if %sc : !waveamdmachine.reg<scc, 1> carries(%iv : !waveamdmachine.reg<sgpr, 1>)
+  } -> !waveamdmachine.reg<vgpr, 1>
+  return
+}
+
+// -----
+
+func.func @uniform_loop_bad_terminator(%init: !waveamdmachine.reg<sgpr, 1>) {
+  // expected-error @below {{body must be terminated by a waveamdmachine.continue_if}}
+  %r = waveamdmachine.uniform_loop carries(%init : !waveamdmachine.reg<sgpr, 1>) {
+  ^bb0(%iv: !waveamdmachine.reg<sgpr, 1>):
+    waveamdmachine.label "foo"
+  } -> !waveamdmachine.reg<sgpr, 1>
+  return
+}

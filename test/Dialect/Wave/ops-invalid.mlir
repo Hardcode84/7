@@ -157,3 +157,83 @@ func.func @index_expr_conflicting_widths(%lane32: !wave.simd<i32, 32>, %lane64: 
   %v = wave.index_expr #wave.expr<"a + b"> ["a", "b"] (%lane32, %lane64) : (!wave.simd<i32, 32>, !wave.simd<i32, 64>) -> !wave.index<32>
   return
 }
+
+// -----
+
+func.func @index_expr_empty_name(%lane: !wave.simd<i32, 32>) {
+  // expected-error @+1 {{binding name must be non-empty}}
+  %v = wave.index_expr #wave.expr<"lid"> [""] (%lane) : (!wave.simd<i32, 32>) -> !wave.index<32>
+  return
+}
+
+// -----
+
+func.func @ballot_width_mismatch(%m: !wave.mask<32>) -> i64 {
+  // expected-error @+1 {{result integer width must match mask width}}
+  %r = wave.ballot %m : !wave.mask<32> -> i64
+  return %r : i64
+}
+
+// -----
+
+func.func @binary_result_type_mismatch(%a: !wave.simd<i32, 32>, %b: !wave.simd<i32, 32>) {
+  // expected-error @+1 {{operands and result must have the same SIMD type}}
+  %r = wave.binary "add" %a, %b : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 64>
+  return
+}
+
+// -----
+
+func.func @cmpi_operand_simd_mismatch(%a: !wave.simd<i32, 32>, %b: !wave.simd<i32, 64>) {
+  // expected-error @+1 {{operands must have the same SIMD type}}
+  %m = wave.cmpi ult %a, %b : !wave.simd<i32, 32>, !wave.simd<i32, 64> -> !wave.mask<32>
+  return
+}
+
+// -----
+
+func.func @cmpi_result_mask_width(%a: !wave.simd<i32, 32>, %b: !wave.simd<i32, 32>) {
+  // expected-error @+1 {{result mask width must match operand SIMD width}}
+  %m = wave.cmpi ult %a, %b : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.mask<64>
+  return
+}
+
+// -----
+
+func.func @lds_base_wrong_address_space() {
+  // expected-error @+1 {{result pointer must live in the shared address space}}
+  %p = wave.lds_base : !wave.ptr<i32, #wave.global>
+  return
+}
+
+// -----
+
+func.func @read_first_element_mismatch(%v: !wave.simd<i32, 32>) {
+  // expected-error @+1 {{result type must match SIMD element type}}
+  %r = wave.read_first %v : !wave.simd<i32, 32> -> i64
+  return
+}
+
+// -----
+
+func.func @splat_element_mismatch(%v: i32) {
+  // expected-error @+1 {{source type must match SIMD element type}}
+  %s = wave.splat %v : i32 -> !wave.simd<i64, 32>
+  return
+}
+
+// -----
+
+func.func @splat_unsupported_wave_width(%v: i32) {
+  // expected-error @+1 {{only wave32 and wave64 are supported for now}}
+  %s = wave.splat %v : i32 -> !wave.simd<i32, 16>
+  return
+}
+
+// -----
+
+func.func @workitem_id_unsupported_wave_width() {
+  // expected-error @+1 {{only wave32 and wave64 workitem_id are supported}}
+  %x = wave.workitem_id 0 : !wave.simd<i32, 16>
+  return
+}
