@@ -34,14 +34,22 @@ using namespace mlir;
 
 namespace {
 
-// A live interval tracks one "logical" register (single Value or a
-// coalesced group of Values sharing the same physical register, e.g. a
-// loop-carried value spanning init / block arg / continue_if carry /
-// loop op result). All `values` get their RegType's index updated when
-// the interval is assigned a physical register.
+// A live interval tracks one "logical" register: either a single Value
+// or a coalesced group sharing one physical block. The canonical
+// `type` carries the block's register class and width -- the latter is
+// the *tuple* width when the interval spans a tuple plus its
+// per-slot constituents. Each Value in `values` records its byte
+// (well, dword) offset within the block via the parallel
+// `slotOffsets`: a same-width loop-carry alias (init / block arg /
+// result) lives at `offset 0`, the i-th element of a tuple lives at
+// `offset i`. When the interval is allocated, every Value gets its
+// type's index field set to `base + slotOffsets[i]`.
 struct LiveInterval {
   SmallVector<Value> values;
-  wavemachine::RegType type; // canonical (class, width); index is filled in
+  SmallVector<unsigned> slotOffsets; // parallel to `values`; slot of each Value
+                                     // within the block
+  wavemachine::RegType type;         // block (class, width); index is filled
+                                     // in at allocation time
   unsigned start = std::numeric_limits<unsigned>::max();
   unsigned end = 0;
 };
@@ -177,6 +185,7 @@ struct WaveAMDRegAllocPass
     unsigned index = bucket.size();
     LiveInterval iv;
     iv.values.push_back(v);
+    iv.slotOffsets.push_back(0);
     iv.type = rt;
     iv.start = pos;
     iv.end = pos;
@@ -189,10 +198,15 @@ struct WaveAMDRegAllocPass
   // into the interval already created for `primary`. The absorbed
   // interval is emptied so it is skipped during allocation. Updates
   // the alias table so that subsequent lookups for `extra` resolve to
-  // the primary interval. Caller must have already ensured `primary`
-  // has an interval.
+  // the primary interval. `slotOffset` places `extra` at
+  // `primary.phys + slotOffset` once the block is assigned -- 0 for
+  // the same-width loop-carry aliasing path (the existing iter-arg
+  // coalesce); `i` for the i-th element of a wider tuple primary
+  // (used by the tuple_to/from_elements coalesce in T3). Caller must
+  // have already ensured `primary` has an interval.
   static LogicalResult coalesce(Value primary, Value extra, unsigned pos,
-                                LiveIntervalSet &intervals, Operation *errOp) {
+                                LiveIntervalSet &intervals, Operation *errOp,
+                                unsigned slotOffset = 0) {
     auto rt = dyn_cast<wavemachine::RegType>(primary.getType());
     if (!rt)
       return errOp->emitError("coalesce: primary value is not a register");
@@ -206,8 +220,9 @@ struct WaveAMDRegAllocPass
     auto extraIt = table.find(extra);
     if (extraIt == table.end()) {
       // No pre-existing interval for `extra`; simply alias it onto
-      // primary's interval.
+      // primary's interval at `slotOffset`.
       bucket[primIdx].values.push_back(extra);
+      bucket[primIdx].slotOffsets.push_back(slotOffset);
       bucket[primIdx].start = std::min(bucket[primIdx].start, pos);
       bucket[primIdx].end = bumpEnd(bucket[primIdx].end, pos);
       table[extra] = primIdx;
@@ -220,11 +235,16 @@ struct WaveAMDRegAllocPass
     LiveInterval &ex = bucket[extraIdx];
     prim.start = std::min(prim.start, ex.start);
     prim.end = bumpEnd(prim.end, std::max(ex.end, pos));
-    for (Value v : ex.values) {
+    // Merging two pre-existing intervals: every Value carried into
+    // primary picks up `slotOffset` on top of whatever offset it
+    // already had in `extra`.
+    for (auto [v, off] : llvm::zip(ex.values, ex.slotOffsets)) {
       prim.values.push_back(v);
+      prim.slotOffsets.push_back(slotOffset + off);
       table[v] = primIdx;
     }
     ex.values.clear();
+    ex.slotOffsets.clear();
     return success();
   }
 
@@ -298,11 +318,13 @@ struct WaveAMDRegAllocPass
       LiveInterval &carryIv = (*bucket)[carryIt->second];
       loopIv.start = std::min(loopIv.start, carryIv.start);
       loopIv.end = bumpEnd(loopIv.end, carryIv.end);
-      for (Value v : carryIv.values) {
+      for (auto [v, off] : llvm::zip(carryIv.values, carryIv.slotOffsets)) {
         loopIv.values.push_back(v);
+        loopIv.slotOffsets.push_back(off);
         (*table)[v] = initIt->second;
       }
       carryIv.values.clear();
+      carryIv.slotOffsets.clear();
     }
   }
 
@@ -484,8 +506,8 @@ struct WaveAMDRegAllocPass
       if (!phys)
         return func.emitError(
             "WaveMachine register allocator ran out of registers");
-      for (Value v : interval.values)
-        setRegPhys(v, *phys);
+      for (auto [v, off] : llvm::zip(interval.values, interval.slotOffsets))
+        setRegPhys(v, *phys + off);
       for (unsigned i = 0; i != width; ++i)
         used[*phys + i] = true;
       active.push_back(interval);
