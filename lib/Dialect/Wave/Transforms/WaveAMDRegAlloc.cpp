@@ -469,60 +469,118 @@ struct WaveAMDRegAllocPass
   }
 
   // Each VGPR value used as a tuple element carries at most one slot
-  // constraint: the cumulative dword offset it sits at within its
+  // constraint: a cumulative dword offset within its
   // anchor tuple's physical block. `tuple_to_elements` anchors each
   // result at `sum(width[0..i-1])`; the first `tuple_from_elements`
   // to consume a value anchors it at the operand's cumulative offset.
-  // Any subsequent use at a different offset, or any second
-  // from_elements consuming a value already consumed by another,
-  // must go through a fresh copy -- otherwise the coalescer would
-  // merge two unrelated tuples and the other slots would clobber
-  // each other.
+  //
+  // Copy whenever a coalesce-and-merge would either misplace this
+  // value or drag a sibling tuple's contents into a slot the new
+  // tuple already wants to fill with something else:
+  //   - slot mismatch: anchored at offset k, used here at j != k.
+  //   - reuse:         already absorbed by another from_elements.
+  //   - drag-in:       value is a to_elements result, and this
+  //                    from_elements is not a perfect identity
+  //                    round-trip of the same source tuple, so
+  //                    merging the source's interval would pull
+  //                    its other slots into positions this
+  //                    from_elements wants to fill with fresh ops.
+  using ToElementsSourceMap = DenseMap<Value, std::pair<Value, unsigned>>;
+
+  // Perfect identity round-trip: every operand is anchored at the
+  // same source tuple at its matching cumulative offset, and the
+  // from_elements tuple width equals the source tuple width. In
+  // that case the coalescer's merge lines each source slot up with
+  // exactly the operand slot the from_elements wants, so the two
+  // tuples can safely share the source's physical block.
+  static bool isPerfectRoundTrip(wavemachine::TupleFromElementsOp op,
+                                 const ToElementsSourceMap &source) {
+    Value sourceTuple;
+    unsigned cumOffset = 0;
+    for (Value element : op.getElements()) {
+      auto srcIt = source.find(element);
+      if (srcIt == source.end())
+        return false;
+      auto [srcTuple, srcSlot] = srcIt->second;
+      if (!sourceTuple)
+        sourceTuple = srcTuple;
+      else if (sourceTuple != srcTuple)
+        return false;
+      if (srcSlot != cumOffset)
+        return false;
+      cumOffset += cast<wavemachine::RegType>(element.getType()).getWidth();
+    }
+    if (!sourceTuple)
+      return false;
+    int64_t fromW =
+        cast<wavemachine::RegType>(op.getTuple().getType()).getWidth();
+    int64_t srcW = cast<wavemachine::RegType>(sourceTuple.getType()).getWidth();
+    return fromW == srcW;
+  }
+
+  // Process one tuple_from_elements: for each operand decide whether
+  // coalescing it directly is safe; if not, materialize a v_mov rename
+  // and rewire. Updates the running anchor / source / consumed maps.
+  LogicalResult
+  rewriteFromElementsForSharing(wavemachine::TupleFromElementsOp op,
+                                OpBuilder &builder,
+                                DenseMap<Value, unsigned> &anchorSlot,
+                                const ToElementsSourceMap &toElementsSource,
+                                DenseSet<Value> &consumedByFromElements) {
+    builder.setInsertionPoint(op);
+    bool perfectRT = isPerfectRoundTrip(op, toElementsSource);
+    SmallVector<Value> newElements;
+    newElements.reserve(op.getElements().size());
+    bool changed = false;
+    unsigned cumOffset = 0;
+    for (Value element : op.getElements()) {
+      unsigned slot = cumOffset;
+      unsigned width = cast<wavemachine::RegType>(element.getType()).getWidth();
+      Value use = element;
+      auto anchorIt = anchorSlot.find(element);
+      bool slotMismatch =
+          anchorIt != anchorSlot.end() && anchorIt->second != slot;
+      bool reuse = consumedByFromElements.contains(element);
+      bool dragInConflict = !perfectRT && toElementsSource.contains(element);
+      if (slotMismatch || reuse || dragInConflict) {
+        FailureOr<Value> dup = duplicateRegValue(builder, op.getLoc(), element);
+        if (failed(dup))
+          return failure();
+        use = *dup;
+        anchorSlot[use] = slot;
+        changed = true;
+      } else {
+        anchorSlot[element] = slot;
+      }
+      consumedByFromElements.insert(use);
+      newElements.push_back(use);
+      cumOffset += width;
+    }
+    if (changed)
+      op.getElementsMutable().assign(newElements);
+    return success();
+  }
+
   LogicalResult splitTupleElementSharing(func::FuncOp func) {
     OpBuilder builder(func.getContext());
     DenseMap<Value, unsigned> anchorSlot;
+    ToElementsSourceMap toElementsSource;
     DenseSet<Value> consumedByFromElements;
     func.walk([&](wavemachine::TupleToElementsOp op) {
       unsigned cumOffset = 0;
       for (Value element : op.getElements()) {
         anchorSlot[element] = cumOffset;
+        toElementsSource[element] = {op.getTuple(), cumOffset};
         cumOffset += cast<wavemachine::RegType>(element.getType()).getWidth();
       }
     });
     SmallVector<wavemachine::TupleFromElementsOp> ops;
     func.walk([&](wavemachine::TupleFromElementsOp op) { ops.push_back(op); });
     for (wavemachine::TupleFromElementsOp op : ops) {
-      builder.setInsertionPoint(op);
-      SmallVector<Value> newElements;
-      newElements.reserve(op.getElements().size());
-      bool changed = false;
-      unsigned cumOffset = 0;
-      for (Value element : op.getElements()) {
-        unsigned slot = cumOffset;
-        unsigned width =
-            cast<wavemachine::RegType>(element.getType()).getWidth();
-        Value use = element;
-        auto anchorIt = anchorSlot.find(element);
-        bool slotMismatch =
-            anchorIt != anchorSlot.end() && anchorIt->second != slot;
-        bool reuse = consumedByFromElements.contains(element);
-        if (slotMismatch || reuse) {
-          FailureOr<Value> dup =
-              duplicateRegValue(builder, op.getLoc(), element);
-          if (failed(dup))
-            return failure();
-          use = *dup;
-          anchorSlot[use] = slot;
-          changed = true;
-        } else {
-          anchorSlot[element] = slot;
-        }
-        consumedByFromElements.insert(use);
-        newElements.push_back(use);
-        cumOffset += width;
-      }
-      if (changed)
-        op.getElementsMutable().assign(newElements);
+      if (failed(rewriteFromElementsForSharing(op, builder, anchorSlot,
+                                               toElementsSource,
+                                               consumedByFromElements)))
+        return failure();
     }
     return success();
   }
