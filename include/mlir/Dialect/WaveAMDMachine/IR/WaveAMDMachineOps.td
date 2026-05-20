@@ -574,6 +574,12 @@ def WaveAMDMachine_GlobalLoadTupleB32Op
   let hasVerifier = 1;
 }
 
+// Global LDS DMA ops have no inst-offset slot in the hardware
+// encoding (the `global_load_lds_*` form addresses through V + base
+// only). The `inst_offset` attribute remains for IR shape uniformity
+// but always emits as 0; the spec below tells the bucketizer to sink
+// any constant component into `voffset` rather than parking it in
+// the attribute.
 def WaveAMDMachine_GlobalLoadLdsB32Op
     : WaveAMDMachine_GlobalMemoryOp<"global_load_lds_b32", [WaveAMDMachine_VMEMLoad]> {
   let summary = "global-to-LDS 32-bit DMA load";
@@ -593,6 +599,12 @@ def WaveAMDMachine_GlobalLoadLdsB32Op
     (`offset` $inst_offset^)? (`aux` $aux^)?
     attr-dict `:` functional-type(operands, results)
   }];
+  let extraClassDefinition = [{
+    ::mlir::waveamdmachine::AddressFieldSpec $cppClass::getAddressFieldSpec() {
+      return {/*instOffsetBits=*/0, /*instOffsetSigned=*/false,
+              /*hasSoffset=*/false};
+    }
+  }];
 }
 
 def WaveAMDMachine_GlobalLoadLdsB128Op
@@ -611,6 +623,12 @@ def WaveAMDMachine_GlobalLoadLdsB128Op
     $offset `,` $base `,` $m0 `after` $dependency
     (`offset` $inst_offset^)? (`aux` $aux^)?
     attr-dict `:` functional-type(operands, results)
+  }];
+  let extraClassDefinition = [{
+    ::mlir::waveamdmachine::AddressFieldSpec $cppClass::getAddressFieldSpec() {
+      return {/*instOffsetBits=*/0, /*instOffsetSigned=*/false,
+              /*hasSoffset=*/false};
+    }
   }];
 }
 
@@ -853,6 +871,11 @@ def WaveAMDMachine_BufferLoadTupleB32Op
   let hasVerifier = 1;
 }
 
+// Buffer LDS DMA ops have no inst-offset slot in the hardware
+// encoding -- the const component sinks into `soffset` (which the
+// op does carry). Spec mirrors the `Global` variant's policy with
+// `hasSoffset=true` so `demoteToFitSpec` routes the const there
+// instead of voffset.
 def WaveAMDMachine_BufferLoadLdsB32Op
     : WaveAMDMachine_BufferMemoryOp<"buffer_load_lds_b32", [WaveAMDMachine_VMEMLoad]> {
   let summary = "buffer-to-LDS 32-bit DMA load";
@@ -873,6 +896,12 @@ def WaveAMDMachine_BufferLoadLdsB32Op
     (`offset` $inst_offset^)? (`aux` $aux^)?
     attr-dict `:` functional-type(operands, results)
   }];
+  let extraClassDefinition = [{
+    ::mlir::waveamdmachine::AddressFieldSpec $cppClass::getAddressFieldSpec() {
+      return {/*instOffsetBits=*/0, /*instOffsetSigned=*/false,
+              /*hasSoffset=*/true};
+    }
+  }];
 }
 
 def WaveAMDMachine_BufferLoadLdsB128Op
@@ -892,6 +921,12 @@ def WaveAMDMachine_BufferLoadLdsB128Op
     $offset `,` $descriptor `,` $soffset `,` $m0 `after` $dependency
     (`offset` $inst_offset^)? (`aux` $aux^)?
     attr-dict `:` functional-type(operands, results)
+  }];
+  let extraClassDefinition = [{
+    ::mlir::waveamdmachine::AddressFieldSpec $cppClass::getAddressFieldSpec() {
+      return {/*instOffsetBits=*/0, /*instOffsetSigned=*/false,
+              /*hasSoffset=*/true};
+    }
   }];
 }
 

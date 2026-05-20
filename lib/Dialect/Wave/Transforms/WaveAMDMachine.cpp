@@ -188,16 +188,27 @@ OffsetTriple WaveAMDMachineSelector::scaleTriple(Location loc, OffsetTriple t,
 }
 
 // Push `imm` into soffset when the spec has the slot; otherwise
-// into voffset. Used by the demote path.
+// into voffset. The sink threads through the index engine: the
+// constant's IXS_INT term is appended to the destination slot's
+// symbolic expression so range proofs and emit-time peels see the
+// same content as the Value chain.
 void WaveAMDMachineSelector::sinkImmIntoRemainingSlot(Location loc,
                                                       OffsetTriple &t,
                                                       Value imm,
                                                       bool hasSoffset) {
+  std::optional<int64_t> immValue = getImmediateValue(imm);
+  FailureOr<sym::ExprHandle> immExpr =
+      immValue ? sym::composeExprInt(symbolStore(), *immValue)
+               : FailureOr<sym::ExprHandle>{failure()};
   if (hasSoffset) {
     t.soffset = addUniformBytes(loc, t.soffset, imm);
+    if (succeeded(immExpr))
+      t.soffsetExpr = appendBucketExpr(t.soffsetExpr, immExpr->raw());
     return;
   }
   t.voffset = t.voffset ? addByteOffsets(loc, t.voffset, imm) : imm;
+  if (succeeded(immExpr))
+    t.voffsetExpr = appendBucketExpr(t.voffsetExpr, immExpr->raw());
 }
 
 // True when `t.instOffset` won't fit `spec`'s inst-offset slot
@@ -1291,16 +1302,6 @@ static waveamdmachine::AddressFieldSpec dmaAddressSpec(bool isBuffer,
              : waveamdmachine::GlobalLoadLdsB32Op::getAddressFieldSpec();
 }
 
-static void sinkDmaInstOffset(WaveAMDMachineSelector &S, Location loc,
-                              OffsetTriple &srcTriple, bool isBuffer) {
-  if (srcTriple.instOffset == 0)
-    return;
-  S.sinkImmIntoRemainingSlot(loc, srcTriple,
-                             createImm(S.builder, loc, srcTriple.instOffset),
-                             isBuffer);
-  srcTriple.instOffset = 0;
-}
-
 LogicalResult
 WaveAMDMachineSelector::selectDmaLoadLds(waveamd::DmaLoadLdsOp op) {
   if (op.getBytes() != 4 && op.getBytes() != 16)
@@ -1315,7 +1316,6 @@ WaveAMDMachineSelector::selectDmaLoadLds(waveamd::DmaLoadLdsOp op) {
     return failure();
 
   bool isBuffer = pointerBuffers.lookup(op.getSource());
-  sinkDmaInstOffset(*this, op.getLoc(), srcTriple, isBuffer);
   auto b = bucketForSpec(op.getLoc(), srcTriple,
                          dmaAddressSpec(isBuffer, op.getBytes()));
   IntegerAttr instOffsetAttr = builder.getI64IntegerAttr(b.instOffset);
