@@ -90,7 +90,7 @@ func.func @wide_buffer_traffic(%arg0: !wave.ptr<i32, #wave.global>) attributes {
 // ASM11: ds_load_b96 {{v\[[0-9]+:[0-9]+\]}}, {{v[0-9]+}}
 // ASM11: ds_store_b96 {{v[0-9]+}}, {{v\[[0-9]+:[0-9]+\]}}
 // ASM11: s_endpgm
-func.func @wide_ds_traffic(%arg0: !wave.ptr<i32, #wave.global>) attributes {wave.kernel} {
+func.func @wide_ds_traffic() attributes {wave.kernel} {
   %addr = wavemachine.v_mbcnt_lo : !wavemachine.reg<vgpr, 1>
   %v, %tok = wavemachine.ds_load_b96 %addr
       : (!wavemachine.reg<vgpr, 1>) -> (!wavemachine.reg<vgpr, 3>, !wavemachine.mem.token)

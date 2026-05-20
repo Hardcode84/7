@@ -643,7 +643,15 @@ private:
     os << "---\n";
     os << "amdhsa.kernels:\n";
     for (const KernelInfo &kernel : kernels) {
-      os << "  - .args:\n";
+      // `.args:` followed by a newline-only block is parsed as `null`
+      // by the msgpack YAML reader, which then aborts in
+      // `MsgPackDocumentYAML`. Emit an explicit empty list when the
+      // kernel has no args so `llvm-mc` can round-trip the metadata.
+      if (kernel.args.empty()) {
+        os << "  - .args:           []\n";
+      } else {
+        os << "  - .args:\n";
+      }
       for (const KernelArgInfo &arg : kernel.args) {
         if (arg.isGlobalBuffer) {
           os << "      - .address_space:  global\n";
