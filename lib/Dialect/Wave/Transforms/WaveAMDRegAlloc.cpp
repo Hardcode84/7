@@ -25,6 +25,7 @@
 #include "llvm/TargetParser/Triple.h"
 #include <limits>
 #include <optional>
+#include <set>
 
 namespace mlir::wave {
 #define GEN_PASS_DEF_WAVEAMDREGALLOC
@@ -618,10 +619,25 @@ struct WaveAMDRegAllocPass
     return allocateClass(func, intervals.vgprs, limits.numVGPR, vgprReserved);
   }
 
+  // Physically-allocated half-open span `[begin, begin + size)` in a
+  // single register class. The class itself is implicit -- each
+  // allocator pass walks one class at a time and owns its own set.
+  // Sort by `begin` so a `std::set` lets us iterate gaps in order;
+  // intervals never overlap, so the begin-only comparison is also a
+  // sound equality key when we erase on expiration.
+  struct PhysAlloc {
+    unsigned begin;
+    unsigned size;
+    unsigned end() const { return begin + size; }
+    bool operator<(const PhysAlloc &o) const { return begin < o.begin; }
+  };
+
   // Release every active interval whose end position is before `pos`,
-  // freeing its physical register footprint in `used`.
+  // dropping its `PhysAlloc` from `live` so the freed slot rejoins the
+  // gap-walking pool. Mirrors the bitmap clear in the previous
+  // implementation, just keyed by interval.
   void expireOld(SmallVectorImpl<LiveInterval> &active,
-                 SmallVectorImpl<bool> &used, unsigned pos) {
+                 std::set<PhysAlloc> &live, unsigned pos) {
     SmallVector<LiveInterval> stillActive;
     for (LiveInterval interval : active) {
       if (interval.end >= pos) {
@@ -630,10 +646,8 @@ struct WaveAMDRegAllocPass
       }
       auto rt =
           cast<waveamdmachine::RegType>(interval.values.front().getType());
-      unsigned phys = rt.getIndex();
-      unsigned width = rt.getWidth();
-      for (unsigned i = 0; i != width; ++i)
-        used[phys + i] = false;
+      live.erase(PhysAlloc{static_cast<unsigned>(rt.getIndex()),
+                           static_cast<unsigned>(rt.getWidth())});
     }
     active = std::move(stillActive);
   }
@@ -647,14 +661,19 @@ struct WaveAMDRegAllocPass
                       });
 
     SmallVector<LiveInterval> active;
-    SmallVector<bool> used(numPhys, false);
-    for (unsigned i = 0; i != reserved && i != numPhys; ++i)
-      used[i] = true;
+    // Mirrors aster's `AllocConstraints` (RegisterColoring.cpp:82-258):
+    // one `std::set<Allocation>` sorted by `begin` so the allocator
+    // can walk gaps in order and pick the first one wide and aligned
+    // enough. Reserved registers (kernel preloaded SGPRs, v0 for the
+    // packed workitem id) pre-occupy `[0, reserved)`.
+    std::set<PhysAlloc> live;
+    if (reserved > 0 && reserved <= numPhys)
+      live.insert(PhysAlloc{0, reserved});
 
     for (LiveInterval interval : intervals) {
       if (interval.values.empty())
         continue;
-      expireOld(active, used, interval.start);
+      expireOld(active, live, interval.start);
       unsigned width = interval.type.getWidth();
       // AMDGPU register classes are sized to the next power of two of
       // the tuple width: VReg_96 (3 dwords) sits in a 4-aligned class,
@@ -663,14 +682,13 @@ struct WaveAMDRegAllocPass
       // for the consumer ops, and matches `width` exactly for the
       // power-of-two widths the pipeline currently produces.
       unsigned align = std::max<unsigned>(1, llvm::PowerOf2Ceil(width));
-      std::optional<unsigned> phys = findFreeContiguous(used, width, align);
+      std::optional<unsigned> phys = findFreeSlot(live, width, align, numPhys);
       if (!phys)
         return func.emitError(
             "WaveAMDMachine register allocator ran out of registers");
       for (auto [v, off] : llvm::zip(interval.values, interval.slotOffsets))
         setRegPhys(v, *phys + off);
-      for (unsigned i = 0; i != width; ++i)
-        used[*phys + i] = true;
+      live.insert(PhysAlloc{*phys, width});
       active.push_back(interval);
       llvm::sort(active, [](const LiveInterval &lhs, const LiveInterval &rhs) {
         return lhs.end < rhs.end;
@@ -679,21 +697,26 @@ struct WaveAMDRegAllocPass
     return success();
   }
 
-  static std::optional<unsigned>
-  findFreeContiguous(ArrayRef<bool> used, unsigned width, unsigned align) {
-    for (unsigned i = 0, e = used.size(); i + width <= e; ++i) {
-      if (i % align)
-        continue;
-      bool allFree = true;
-      for (unsigned j = 0; j != width; ++j) {
-        if (used[i + j]) {
-          allFree = false;
-          break;
-        }
-      }
-      if (allFree)
-        return i;
+  // Walk the gaps between live allocations in `begin` order. For each
+  // gap, check whether the requested width fits at `start`; if not,
+  // advance `start` to the next `align`-aligned position past the
+  // current allocation. After the last allocation, try the tail up to
+  // `maxRegs`. Lifted from aster's `AllocConstraints::alloc`
+  // (RegisterColoring.cpp:212-258).
+  static std::optional<unsigned> findFreeSlot(const std::set<PhysAlloc> &live,
+                                              unsigned width, unsigned align,
+                                              unsigned maxRegs) {
+    auto alignUp = [&](unsigned v) {
+      return ((v + align - 1) / align) * align;
+    };
+    unsigned start = 0;
+    for (const PhysAlloc &a : live) {
+      if (start + width <= a.begin)
+        return start;
+      start = alignUp(a.end());
     }
+    if (start + width <= maxRegs)
+      return start;
     return std::nullopt;
   }
 };
