@@ -445,8 +445,6 @@ def Wave_WhereOp : Wave_Op<"where", [
   let assemblyFormat = [{
     $condition $thenRegion (`otherwise` $elseRegion^)? attr-dict `:` qualified(type($condition))
   }];
-
-  let hasVerifier = 1;
 }
 
 #endif // MLIR_DIALECT_WAVE_IR_WAVEOPS_TD

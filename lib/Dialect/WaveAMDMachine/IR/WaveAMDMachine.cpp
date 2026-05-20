@@ -162,8 +162,6 @@ LogicalResult GlobalStoreTupleB32Op::verify() {
   if (getNumResults() > 1)
     return emitOpError("produces at most one memory token");
   auto valueType = cast<RegType>(getOperand(1).getType());
-  if (!isVGPR(valueType))
-    return emitOpError("value operand must be a VGPR tuple");
   if (valueType.getWidth() < 1)
     return emitOpError("value tuple width must be at least 1");
   return success();
@@ -179,8 +177,6 @@ LogicalResult GlobalLoadTupleB32Op::verify() {
   if (getTokens().size() > 1)
     return emitOpError("produces at most one memory token");
   auto resultType = cast<RegType>(getResult().getType());
-  if (!isVGPR(resultType))
-    return emitOpError("result must be a VGPR tuple");
   if (resultType.getWidth() < 1)
     return emitOpError("result tuple width must be at least 1");
   return success();
@@ -196,8 +192,6 @@ LogicalResult BufferLoadTupleB32Op::verify() {
   if (getTokens().size() > 1)
     return emitOpError("produces at most one memory token");
   auto resultType = cast<RegType>(getResult().getType());
-  if (!isVGPR(resultType))
-    return emitOpError("result must be a VGPR tuple");
   if (resultType.getWidth() < 1)
     return emitOpError("result tuple width must be at least 1");
   return success();
@@ -207,8 +201,6 @@ LogicalResult BufferStoreTupleB32Op::verify() {
   if (getNumResults() > 1)
     return emitOpError("produces at most one memory token");
   auto valueType = cast<RegType>(getOperand(1).getType());
-  if (!isVGPR(valueType))
-    return emitOpError("value operand must be a VGPR tuple");
   if (valueType.getWidth() < 1)
     return emitOpError("value tuple width must be at least 1");
   return success();
@@ -218,8 +210,6 @@ LogicalResult DsLoadTupleB32Op::verify() {
   if (getTokens().size() > 1)
     return emitOpError("produces at most one memory token");
   auto resultType = cast<RegType>(getResult().getType());
-  if (!isVGPR(resultType))
-    return emitOpError("result must be a VGPR tuple");
   if (resultType.getWidth() < 1)
     return emitOpError("result tuple width must be at least 1");
   return success();
@@ -229,8 +219,6 @@ LogicalResult DsStoreTupleB32Op::verify() {
   if (getNumResults() > 1)
     return emitOpError("produces at most one memory token");
   auto valueType = cast<RegType>(getValue().getType());
-  if (!isVGPR(valueType))
-    return emitOpError("value must be a VGPR tuple");
   if (valueType.getWidth() < 1)
     return emitOpError("value tuple width must be at least 1");
   return success();
@@ -289,9 +277,9 @@ ValueRange UniformLoopOp::getSuccessorInputs(RegionSuccessor successor) {
 }
 
 LogicalResult ContinueIfOp::verify() {
+  // The `HasParent<UniformLoopOp>` trait on the op definition
+  // guarantees this lookup succeeds before the verifier runs.
   auto parent = (*this)->getParentOfType<UniformLoopOp>();
-  if (!parent)
-    return emitOpError("must be nested inside a waveamdmachine.uniform_loop");
   if (getCarries().size() != parent.getInits().size())
     return emitOpError("carries count must match parent uniform_loop inits");
   for (auto [carry, init] : llvm::zip(getCarries(), parent.getInits())) {

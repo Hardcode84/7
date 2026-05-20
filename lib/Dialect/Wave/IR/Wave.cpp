@@ -87,17 +87,6 @@ void WaveDialect::registerTypes() {
       >();
 }
 
-LogicalResult WhereOp::verify() {
-  auto maskType = dyn_cast<MaskType>(getCondition().getType());
-  if (!maskType)
-    return emitOpError("condition must be a wave mask");
-  if (!getThenRegion().hasOneBlock())
-    return emitOpError("then region must have one block");
-  if (!getElseRegion().empty() && !getElseRegion().hasOneBlock())
-    return emitOpError("otherwise region must have at most one block");
-  return success();
-}
-
 LogicalResult SplatOp::verify() {
   auto simdType = cast<SimdType>(getResult().getType());
   if (simdType.getElementType() != getSource().getType())
@@ -517,9 +506,9 @@ verifyPtrAddResult(Type resultType, Type pointerType, int64_t simdWidth,
 }
 
 LogicalResult LdsBaseOp::verify() {
-  auto ptrType = dyn_cast<PtrType>(getResult().getType());
-  if (!ptrType)
-    return emitOpError("result must be a wave pointer");
+  // ODS pins the result to `Wave_Ptr`; only the address space needs a
+  // runtime check.
+  auto ptrType = cast<PtrType>(getResult().getType());
   if (!isa<SharedAddressSpaceAttr>(ptrType.getAddressSpace()))
     return emitOpError("result pointer must live in the shared address space");
   return success();
@@ -573,10 +562,9 @@ static LogicalResult verifyIndexExprNames(
     llvm::DenseSet<StringRef> &bindingNames,
     function_ref<InFlightDiagnostic(const Twine &)> emitError) {
   for (Attribute attr : names) {
-    auto str = dyn_cast<StringAttr>(attr);
-    if (!str)
-      return emitError("names entries must be strings");
-    StringRef name = str.getValue();
+    // ODS declares `$names` as `StrArrayAttr`, so non-string entries
+    // are rejected by the attribute parser before this runs.
+    StringRef name = cast<StringAttr>(attr).getValue();
     if (name.empty())
       return emitError("binding name must be non-empty");
     if (!bindingNames.insert(name).second)
