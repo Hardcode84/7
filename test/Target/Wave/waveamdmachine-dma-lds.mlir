@@ -75,6 +75,35 @@ func.func @global_dma_lds_uniform_mul_dest(%in: !wave.ptr<i32, #wave.global>)
   return
 }
 
+// SELECT-LABEL: func.func @global_dma_lds_uniform_dest_add
+// SELECT: [[M0SRC:%[A-Za-z0-9_]+]], %{{[A-Za-z0-9_]+}} = waveamdmachine.s_add_i32
+// SELECT-NEXT: [[M0:%[A-Za-z0-9_]+]] = waveamdmachine.s_mov_m0 [[M0SRC]]
+// SELECT: waveamdmachine.global_load_lds_b128
+// SELECT-SAME: !waveamdmachine.m0
+
+// ASM-LABEL: global_dma_lds_uniform_dest_add:
+// ASM: s_add_i32 [[M0SRC:s[0-9]+]],
+// ASM-NEXT: s_mov_b32 m0, [[M0SRC]]
+// ASM: global_load_lds_dwordx4
+func.func @global_dma_lds_uniform_dest_add(%in: !wave.ptr<i32, #wave.global>)
+    attributes {wave.kernel, wave.lds_size = 2048 : i64} {
+  %wi = wave.workitem_id 0 : !wave.simd<i32, 64>
+  %src = wave.ptr_add %in, %wi
+      : !wave.ptr<i32, #wave.global>, !wave.simd<i32, 64>
+      -> !wave.simd<!wave.ptr<i32, #wave.global>, 64>
+  %lds = wave.lds_base : !wave.ptr<i32, #wave.shared>
+  %first = wave.read_first %wi : !wave.simd<i32, 64> -> i32
+  %off = wave.index_expr <"256 + 512*floor(1/64*wi_first)"> ["wi_first"](%first)
+      : (i32) -> !wave.index
+  %dst = wave.ptr_add %lds, %off
+      : !wave.ptr<i32, #wave.shared>, !wave.index -> !wave.ptr<i32, #wave.shared>
+  %tok0 = wave.token : !wave.mem.token
+  %tok = waveamd.dma_load_lds %src -> %dst after %tok0 {bytes = 16 : i64}
+      : (!wave.simd<!wave.ptr<i32, #wave.global>, 64>,
+         !wave.ptr<i32, #wave.shared>, !wave.mem.token) -> !wave.mem.token
+  return
+}
+
 // SELECT-LABEL: func.func @global_dma_lds_source_const_offset
 // SELECT: waveamdmachine.global_load_lds_b128
 // SELECT-SAME: after %{{[A-Za-z0-9_]+}} :

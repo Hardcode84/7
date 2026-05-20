@@ -1267,8 +1267,13 @@ static FailureOr<Value> materializeDmaM0(WaveAMDMachineSelector &S,
                                          OffsetTriple dstTriple) {
   if (dstTriple.voffset)
     return op.emitError("DMA LDS destination must be uniform");
-  Value dstAddr = S.addByteOffsets(op.getLoc(), dstBase,
-                                   S.collapseTriple(op.getLoc(), dstTriple));
+  Value dstAddr = dstBase;
+  if (dstTriple.soffset)
+    dstAddr = S.addUniformBytes(op.getLoc(), dstAddr, dstTriple.soffset);
+  if (dstTriple.instOffset != 0)
+    dstAddr = S.addUniformBytes(
+        op.getLoc(), dstAddr,
+        createImm(S.builder, op.getLoc(), dstTriple.instOffset));
   Value m0Src = S.materializeSGPR1(op.getLoc(), dstAddr);
   return Value{waveamdmachine::SMovM0Op::create(
       S.builder, op.getLoc(), waveamdmachine::M0Type::get(op.getContext()),

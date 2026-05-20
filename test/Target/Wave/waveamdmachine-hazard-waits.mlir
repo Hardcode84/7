@@ -109,4 +109,60 @@ func.func @m0_delay_after_waitcnt(
   return
 }
 
+// CHECK-LABEL: func.func @mfma_result_store_delay
+// CHECK: waveamdmachine.mfma_f32_16x16x32_f16
+// CHECK-NEXT: waveamdmachine.imm 7
+// CHECK-NEXT: waveamdmachine.s_nop
+// CHECK-NEXT: waveamdmachine.global_store_b128
+func.func @mfma_result_store_delay(
+    %a: !waveamdmachine.reg<vgpr, 4>,
+    %b: !waveamdmachine.reg<vgpr, 4>,
+    %acc: !waveamdmachine.reg<vgpr, 4>,
+    %off: !waveamdmachine.reg<vgpr, 1>,
+    %base: !waveamdmachine.reg<sgpr, 2>) {
+  %r = waveamdmachine.mfma_f32_16x16x32_f16 %a, %b, %acc
+      : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
+         !waveamdmachine.reg<vgpr, 4>) -> !waveamdmachine.reg<vgpr, 4>
+  %tok = waveamdmachine.global_store_b128 %off, %r, %base
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 4>,
+         !waveamdmachine.reg<sgpr, 2>) -> !waveamdmachine.mem.token
+  return
+}
+
+// CHECK-LABEL: func.func @mfma_result_store_delay_ignores_preloaded
+// CHECK: waveamdmachine.mfma_f32_16x16x32_f16
+// CHECK: waveamdmachine.v_workitem_id_x
+// CHECK: waveamdmachine.v_and_b32
+// CHECK: waveamdmachine.v_mul_lo_u32
+// CHECK: waveamdmachine.v_lshlrev_b32
+// CHECK-NEXT: waveamdmachine.imm 4
+// CHECK-NEXT: waveamdmachine.s_nop
+// CHECK-NEXT: waveamdmachine.global_store_b128
+func.func @mfma_result_store_delay_ignores_preloaded(
+    %a: !waveamdmachine.reg<vgpr, 4>,
+    %b: !waveamdmachine.reg<vgpr, 4>,
+    %acc: !waveamdmachine.reg<vgpr, 4>,
+    %base: !waveamdmachine.reg<sgpr, 2>) {
+  %r = waveamdmachine.mfma_f32_16x16x32_f16 %a, %b, %acc
+      : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
+         !waveamdmachine.reg<vgpr, 4>) -> !waveamdmachine.reg<vgpr, 4>
+  %wi = waveamdmachine.v_workitem_id_x : !waveamdmachine.reg<vgpr, 1, 0>
+  %mask = waveamdmachine.imm 63 : !waveamdmachine.imm
+  %lane = waveamdmachine.v_and_b32 %wi, %mask
+      : (!waveamdmachine.reg<vgpr, 1, 0>, !waveamdmachine.imm)
+      -> !waveamdmachine.reg<vgpr, 1>
+  %four = waveamdmachine.imm 4 : !waveamdmachine.imm
+  %scaled = waveamdmachine.v_mul_lo_u32 %four, %lane
+      : (!waveamdmachine.imm, !waveamdmachine.reg<vgpr, 1>)
+      -> !waveamdmachine.reg<vgpr, 1>
+  %two = waveamdmachine.imm 2 : !waveamdmachine.imm
+  %off = waveamdmachine.v_lshlrev_b32 %scaled, %two
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.imm)
+      -> !waveamdmachine.reg<vgpr, 1>
+  %tok = waveamdmachine.global_store_b128 %off, %r, %base
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 4>,
+         !waveamdmachine.reg<sgpr, 2>) -> !waveamdmachine.mem.token
+  return
+}
+
 }

@@ -165,13 +165,23 @@ static bool consumesM0(Operation &op) {
   });
 }
 
+static bool isMFMA(Operation &op) {
+  return isa<waveamdmachine::MfmaF32_16x16x16_F16Op,
+             waveamdmachine::MfmaF32_16x16x32_F16Op>(op);
+}
+
+static bool isVMEMStore(Operation &op) {
+  return op.hasTrait<OpTrait::waveamdmachine::VMEMStoreOp>();
+}
+
 static bool countsAsInstruction(Operation &op) {
   return !isa<
       waveamdmachine::ArgOp, waveamdmachine::ImmOp, waveamdmachine::TokenOp,
       waveamdmachine::TokenJoinOp, waveamdmachine::WaitOp,
       waveamdmachine::SWaitcntOp, waveamdmachine::SWaitcntVscntOp,
-      waveamdmachine::TupleToElementsOp, waveamdmachine::TupleFromElementsOp>(
-      op);
+      waveamdmachine::TupleToElementsOp, waveamdmachine::TupleFromElementsOp,
+      waveamdmachine::SWorkgroupIdXOp, waveamdmachine::SWorkgroupIdYOp,
+      waveamdmachine::SWorkgroupIdZOp, waveamdmachine::VWorkitemIdXOp>(op);
 }
 
 struct HazardConfig {
@@ -270,11 +280,14 @@ private:
                    const llvm::MCSubtargetInfo &sti) {
     bool pendingLgkmWait = startState;
     unsigned pendingM0Wait = 0;
+    unsigned pendingMfmaStoreWait = 0;
     for (Operation *op : ops) {
       mitigateM0Hazard(*op, pendingM0Wait, builder, sti);
+      mitigateMfmaStoreHazard(*op, pendingMfmaStoreWait, builder, sti);
       mitigateValuHazard(*op, pendingLgkmWait, builder, cfg, sti);
       updateLgkmState(*op, pendingLgkmWait, cfg);
       updateM0State(*op, pendingM0Wait);
+      updateMfmaStoreState(*op, pendingMfmaStoreWait);
     }
     return pendingLgkmWait;
   }
@@ -286,6 +299,16 @@ private:
     builder.setInsertionPoint(&op);
     insertNoops(builder, op.getLoc(), pendingM0Wait, sti);
     pendingM0Wait = 0;
+  }
+
+  void mitigateMfmaStoreHazard(Operation &op, unsigned &pendingMfmaStoreWait,
+                               OpBuilder &builder,
+                               const llvm::MCSubtargetInfo &sti) {
+    if (!pendingMfmaStoreWait || !isVMEMStore(op))
+      return;
+    builder.setInsertionPoint(&op);
+    insertNoops(builder, op.getLoc(), pendingMfmaStoreWait, sti);
+    pendingMfmaStoreWait = 0;
   }
 
   void mitigateValuHazard(Operation &op, bool &pendingLgkmWait,
@@ -312,6 +335,15 @@ private:
     }
     if (pendingM0Wait && countsAsInstruction(op))
       --pendingM0Wait;
+  }
+
+  void updateMfmaStoreState(Operation &op, unsigned &pendingMfmaStoreWait) {
+    if (isMFMA(op)) {
+      pendingMfmaStoreWait = 8;
+      return;
+    }
+    if (pendingMfmaStoreWait && countsAsInstruction(op))
+      --pendingMfmaStoreWait;
   }
 
   LogicalResult processFunction(func::FuncOp func, OpBuilder &builder,

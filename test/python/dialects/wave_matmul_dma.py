@@ -17,6 +17,6 @@ print(module)
 # CHECK-LABEL: func.func @wmma_f16_matmul_tiled
 # CHECK-SAME: wave.lds_size = 16384
 # CHECK: wave.read_first
-# CHECK: waveamd.dma_load_lds
+# CHECK-COUNT-4: waveamd.dma_load_lds
 # CHECK: wave.wait
 # CHECK: waveamd.mma "mfma.f32.16x16x32.f16"
