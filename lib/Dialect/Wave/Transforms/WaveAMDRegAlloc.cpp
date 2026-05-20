@@ -19,6 +19,7 @@
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/MC/MCSubtargetInfo.h"
 #include "llvm/MC/TargetRegistry.h"
+#include "llvm/Support/MathExtras.h"
 #include "llvm/Support/TargetSelect.h"
 #include "llvm/TargetParser/TargetParser.h"
 #include "llvm/TargetParser/Triple.h"
@@ -647,8 +648,14 @@ struct WaveAMDRegAllocPass
         continue;
       expireOld(active, used, interval.start);
       unsigned width = interval.type.getWidth();
-      std::optional<unsigned> phys =
-          findFreeContiguous(used, width, /*align=*/width);
+      // AMDGPU register classes are sized to the next power of two of
+      // the tuple width: VReg_96 (3 dwords) sits in a 4-aligned class,
+      // VReg_160 (5 dwords) in an 8-aligned class, etc. Pinning the
+      // base to `next_power_of_two(width)` keeps the assembler happy
+      // for the consumer ops, and matches `width` exactly for the
+      // power-of-two widths the pipeline currently produces.
+      unsigned align = std::max<unsigned>(1, llvm::PowerOf2Ceil(width));
+      std::optional<unsigned> phys = findFreeContiguous(used, width, align);
       if (!phys)
         return func.emitError(
             "WaveMachine register allocator ran out of registers");
