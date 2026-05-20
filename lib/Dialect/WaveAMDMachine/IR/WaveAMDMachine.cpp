@@ -45,11 +45,6 @@ static bool isRegClassWidth(Type type, RegClass regClass, int64_t width) {
          regType.getWidth() == width;
 }
 
-static bool isVGPR(Type type) {
-  auto regType = dyn_cast<RegType>(type);
-  return regType && regType.getRegClass() == RegClass::VGPR;
-}
-
 static LogicalResult verifyVGPRWidth(Operation *op, Value value, int64_t width,
                                      StringRef name) {
   if (!isRegClassWidth(value.getType(), RegClass::VGPR, width))

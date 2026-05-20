@@ -22,3 +22,7 @@ set_target_properties(WaveIXSimpl PROPERTIES
   C_EXTENSIONS OFF
   POSITION_INDEPENDENT_CODE ON
 )
+
+# Vendored third-party code; opt out of `-Werror` so its existing
+# `-Wcast-qual` etc. warnings stay warnings, not build failures.
+target_compile_options(WaveIXSimpl PRIVATE -Wno-error)

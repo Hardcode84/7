@@ -54,6 +54,15 @@ list(APPEND CMAKE_MODULE_PATH "${LLVM_CMAKE_DIR}")
 include(TableGen)
 include(AddLLVM)
 include(AddMLIR)
+
+# Treat all warnings as errors. `HandleLLVMOptions` routes
+# `LLVM_ENABLE_WERROR` through `-Werror` on gcc/clang and `/WX` on
+# MSVC, so set it before the include and let the upstream machinery
+# pick the right spelling. `-Wall -Wextra` are already part of the
+# default warning set HandleLLVMOptions installs.
+set(LLVM_ENABLE_WERROR ON CACHE BOOL
+  "Treat compiler warnings as errors (delegates to HandleLLVMOptions)")
+
 include(HandleLLVMOptions)
 
 include_directories(${LLVM_INCLUDE_DIRS})

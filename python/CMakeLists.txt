@@ -2,6 +2,12 @@
 #
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
+# The python bindings build MLIR upstream sources (nanobind passes,
+# extension wrappers) that emit clang-only pragmas and benign macro
+# redefinitions which gcc flags. We don't own that source; opt this
+# subdirectory out of the top-level `-Werror`.
+add_compile_options(-Wno-error)
+
 include(AddMLIRPython)
 
 # Co-locate Wave dialect bindings under the upstream `mlir` package so the
