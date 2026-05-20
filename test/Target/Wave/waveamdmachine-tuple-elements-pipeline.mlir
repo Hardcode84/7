@@ -1,5 +1,7 @@
 // RUN: wave-opt --waveamd-insert-ticket-waits -split-input-file %s | FileCheck %s --check-prefix=WAIT
+// RUN: wave-opt --waveamd-insert-ticket-waits -split-input-file %s | wave-opt -split-input-file | FileCheck %s --check-prefix=WAIT
 // RUN: wave-opt --waveamd-reg-alloc -split-input-file %s | FileCheck %s --check-prefix=REGALLOC
+// RUN: wave-opt --waveamd-reg-alloc -split-input-file %s | wave-opt -split-input-file | FileCheck %s --check-prefix=REGALLOC
 
 // Lit coverage for the post-decompose IR shape: N scalar loads +
 // `tuple_from_elements` (data) + `token_join` (token); tuple

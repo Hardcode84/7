@@ -1,4 +1,5 @@
 // RUN: wave-opt --waveamd-insert-ticket-waits -split-input-file %s | FileCheck %s
+// RUN: wave-opt --waveamd-insert-ticket-waits -split-input-file %s | wave-opt -split-input-file | FileCheck %s
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 

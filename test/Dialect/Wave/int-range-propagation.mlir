@@ -1,4 +1,5 @@
 // RUN: wave-opt --int-range-optimizations %s | FileCheck %s
+// RUN: wave-opt --int-range-optimizations %s | wave-opt | FileCheck %s
 
 // `wave.assume_range` + the InferIntRangeInterface implementations on
 // `wave.addi` / `wave.muli` / `wave.shli` together let upstream

@@ -1,4 +1,5 @@
 // RUN: wave-opt --waveamd-reg-alloc %s | FileCheck %s
+// RUN: wave-opt --waveamd-reg-alloc %s | wave-opt | FileCheck %s
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 

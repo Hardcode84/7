@@ -1,4 +1,5 @@
 // RUN: wave-opt --waveamd-insert-ticket-waits -split-input-file %s | FileCheck %s
+// RUN: wave-opt --waveamd-insert-ticket-waits -split-input-file %s | wave-opt -split-input-file | FileCheck %s
 
 // Both arms of a `cf.cond_br` issue exactly one extra `s_load_b32`
 // before forwarding the original scalar to the merge block. The merge

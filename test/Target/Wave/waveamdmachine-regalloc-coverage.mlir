@@ -1,4 +1,5 @@
 // RUN: wave-opt --waveamd-reg-alloc -split-input-file %s | FileCheck %s
+// RUN: wave-opt --waveamd-reg-alloc -split-input-file %s | wave-opt -split-input-file | FileCheck %s
 
 // Black-box coverage of the gap-walking allocator's behaviour.
 // Each test exercises one or two specific algorithmic properties
