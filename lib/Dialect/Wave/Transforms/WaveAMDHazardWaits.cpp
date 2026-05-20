@@ -166,10 +166,12 @@ static bool consumesM0(Operation &op) {
 }
 
 static bool countsAsInstruction(Operation &op) {
-  return !isa<waveamdmachine::ArgOp, waveamdmachine::ImmOp,
-              waveamdmachine::TokenOp, waveamdmachine::TokenJoinOp,
-              waveamdmachine::WaitOp, waveamdmachine::TupleToElementsOp,
-              waveamdmachine::TupleFromElementsOp>(op);
+  return !isa<
+      waveamdmachine::ArgOp, waveamdmachine::ImmOp, waveamdmachine::TokenOp,
+      waveamdmachine::TokenJoinOp, waveamdmachine::WaitOp,
+      waveamdmachine::SWaitcntOp, waveamdmachine::SWaitcntVscntOp,
+      waveamdmachine::TupleToElementsOp, waveamdmachine::TupleFromElementsOp>(
+      op);
 }
 
 struct HazardConfig {

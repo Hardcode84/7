@@ -86,12 +86,14 @@ func.func @m0_delay_before_lds_dma(
   return
 }
 
-// CHECK-LABEL: func.func @no_m0_delay_after_waitcnt
+// CHECK-LABEL: func.func @m0_delay_after_waitcnt
 // CHECK: waveamdmachine.s_mov_m0
 // CHECK-NEXT: waveamdmachine.imm 0
 // CHECK-NEXT: waveamdmachine.s_waitcnt
+// CHECK-NEXT: waveamdmachine.imm 0
+// CHECK-NEXT: waveamdmachine.s_nop
 // CHECK-NEXT: waveamdmachine.global_load_lds_b128
-func.func @no_m0_delay_after_waitcnt(
+func.func @m0_delay_after_waitcnt(
     %off: !waveamdmachine.reg<vgpr, 1>,
     %base: !waveamdmachine.reg<sgpr, 2>,
     %dst: !waveamdmachine.reg<sgpr, 1>,
