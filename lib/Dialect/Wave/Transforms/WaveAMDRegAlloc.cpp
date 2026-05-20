@@ -372,12 +372,36 @@ struct WaveAMDRegAllocPass
       }
       for (Value operand : op.getOperands())
         extendInterval(operand, pos, intervals);
+      if (failed(coalesceTupleElementOps(op, pos, intervals)))
+        return failure();
       if (auto loop = dyn_cast<wavemachine::UniformLoopOp>(op)) {
         if (failed(processLoop(loop, pos, cursor, positions, orderedOps,
                                intervals)))
           return failure();
       }
     }
+    return success();
+  }
+
+  // Pin each element of a tuple_to/from_elements into the tuple's
+  // physical block at offset i. Tuple is always primary; the element
+  // absorbs at slotOffset=i so the allocator emits `phys + i` for it
+  // once the block is assigned.
+  LogicalResult coalesceTupleElementOps(Operation &op, unsigned pos,
+                                        LiveIntervalSet &intervals) {
+    auto coalesceTupleElements = [&](auto top) -> LogicalResult {
+      Value tuple = top.getTuple();
+      for (auto [i, element] : llvm::enumerate(top.getElements())) {
+        if (failed(coalesce(tuple, element, pos, intervals, top,
+                            static_cast<unsigned>(i))))
+          return failure();
+      }
+      return success();
+    };
+    if (auto toElems = dyn_cast<wavemachine::TupleToElementsOp>(op))
+      return coalesceTupleElements(toElems);
+    if (auto fromElems = dyn_cast<wavemachine::TupleFromElementsOp>(op))
+      return coalesceTupleElements(fromElems);
     return success();
   }
 
