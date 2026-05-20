@@ -1,280 +1,227 @@
-# Hazard mitigation: design proposal
+# Hazard mitigation: architecture
 
-Where the WaveAMD hazard pass is today, what reference implementations
-do, and where we should take it.
+How `lib/Dialect/Wave/Transforms/WaveAMDHazardWaits.cpp` models and
+inserts AMDGPU hazard-mitigation NOPs, why it's shaped the way it is,
+and what the comparable upstream and aster designs look like.
 
-## Current state
+## Where the pass sits
 
-`lib/Dialect/Wave/Transforms/WaveAMDHazardWaits.cpp` mitigates three
-hazards by flat-walking every waveamdmachine op in pre-order and
-maintaining one pending-counter per hazard:
+The pass runs late in the WaveAMD lowering pipeline, after register
+allocation, after ABI lowering, and after ticket-wait insertion. It
+walks every `waveamdmachine` op in a flattened pre-order, including
+ops nested inside structured regions (`uniform_loop` body), and emits
+mitigation instructions (`s_nop`, `s_delay_alu`) before the consumers
+of each modeled hazard.
+
+Three hazards are modeled today:
 
 | Hazard | Producer | Consumer | Gap |
 |---|---|---|---|
-| VALU after LGKM-clearing wait | `s_waitcnt` with non-default lgkm | any VALU op | 1 cycle (`s_delay_alu` or `s_nop 0`) |
-| M0 read after `s_mov_m0` | `s_mov_m0` | any op consuming `!m0` | 1 instruction |
-| VMEM store after MFMA | any MFMA variant | any VMEM store | 8 instructions |
+| VALU after LGKM-clearing wait | `s_waitcnt` with non-default lgkm | any `VALUOp`-trait op | 1 cycle (`s_delay_alu` on gfx11+, `s_nop 0` elsewhere) |
+| M0 read after `s_mov_m0` | `s_mov_m0` | any op with a `!m0`-typed operand | 1 instruction |
+| VMEM store after MFMA | any `MFMAOp`-trait op | any `VMEMStoreOp`-trait op consuming the MFMA result | 8 instructions |
 
-The walk is augmented by a one-shot loop replay: if the function
-contains a `uniform_loop` and the walk ended with `pendingLgkmWait`
-set, the entire walk runs a second time with `pendingLgkmWait` seeded
-to true.
+## Two hazard shapes
 
-Pain points (each filed as a bead):
+The catalog splits hazards into two execution categories because they
+behave differently at the SSA level.
 
-- `countsAsInstruction` is a denylist of "this op emits nothing" that
-  has grown in three consecutive commits. Next no-emit op silently
-  shortens every gap.
-- `isMFMA` hardcodes two MFMA variants; gfx950 has more.
-- The `1` and `8` are magic constants with no source citation.
-- Loop replay re-fires the M0 and MFMA-store mitigations on the
-  second walk, emitting duplicate NOPs when the relevant hazards
-  exist inside a loop body.
-- The flat-walk-with-counter has no concept of CFG. Cross-block
-  hazards (producer in one block, consumer after a join) get
-  miscounted. Works today only because the selector emits each
-  hazard producer immediately before its consumer.
+**`SsaEdge` (M0, MFMA-store)** -- the producer's *result* feeds a
+specific consumer's operand. The mitigation question is "for this
+operand, was it produced by this hazard, and how many counted
+instructions separate them?". Answered by `findProducer`: backward
+def-use walk from the consumer, looking for a producer match.
 
-## How upstream LLVM does it
+**`LinearState` (VALU-after-LGKM)** -- the producer is a side-effect
+op; every later consumer in program order is affected until the state
+clears. No SSA edge connects producer and consumer. Answered by a
+pending-counter loop: producer arms the counter, every counted op
+decrements (or in this case, the consumer just consumes the flag).
 
-`llvm/lib/Target/AMDGPU/GCNHazardRecognizer.{h,cpp}`:
+Trying to model linear-state hazards as SSA edges would require
+inventing synthetic dependency tokens that every VALU op takes as
+input, inflating the IR. Trying to model SSA-edge hazards through a
+forward dataflow gives "you need N waits here" but loses the
+(producer, consumer) edge that downstream scheduling needs. Keep them
+separate.
 
-- Each hazard family has its own `int check*(MachineInstr *)` method.
-  No central table; adding a hazard means adding a method.
-- Hazards are classified by trait-style predicates (`isVALU`,
-  `isVMEM`, `isMetaInstruction`), not by opcode denylists.
-- Cross-block visibility via `getWaitStatesSince(IsHazardFn,
-  IsExpiredFn)`: backward walk through predecessors with state
-  memoization on a `StateMap` to avoid exponential paths.
-- Latency constants live local to each `check*` method as named
-  `const int` locals (e.g. `const int VmemSgprWaitStates = 5`).
-  Arch variation is gated by `MCSubtargetInfo` feature checks, not
-  by per-constant tables. Duplication is accepted as the cost of
-  clarity.
-- A separate dataflow pass (`AMDGPUWaitSGPRHazards.{h,cpp}`) handles
-  gfx12 SGPR RAW hazards with per-block `In`/`Out` state and a
-  meet operator; that pass is post-schedule and orthogonal to the
-  scheduler-integrated recognizer.
+## The catalog
 
-Lesson: **trait-based classification + per-hazard methods + local
-constants**. Scales to dozens of hazard kinds without a centralized
-table that everyone has to edit.
+`HazardKind` is a plain struct with `mitigate` and `update` closures
+plus a `category` enum, a `persistInReplay` flag for the loop replay,
+and a name for diagnostics. `buildHazardCatalog(const HazardConfig &)`
+emits one entry per hazard kind. The driver iterates the catalog at
+each op:
 
-## How aster does it
-
-`aster/lib/Dialect/AMDGCN/...`:
-
-- Each hazard is a first-class tablegen attribute carrying a static
-  `kRequiredInstCounts` table. ~30 hazard kinds declared this way.
-- `HazardManager` builds an opcode -> applicable-hazards dense map
-  once at pass start, parameterized by ISA.
-- A `DenseForwardDataFlowAnalysis` (`HazardAnalysis`) carries the
-  set of active hazards with remaining wait counts as the lattice
-  element. Merges at CFG joins (`mergeActiveHazards` does an
-  elementwise min on counts). Loops handled by the solver's
-  fixpoint iteration.
-- The transform pass is a thin client: walk every op, query
-  solver state, insert `S_NOP` / `V_NOP` batches.
-
-Lesson: **hazards as first-class objects + dataflow analysis**.
-Cross-block correctness is free; loops handled by fixpoint; adding
-a hazard is one TableGen entry.
-
-## Proposed design for wave
-
-The shape: **hazard table (aster-style) + per-edge backward query
-(novel) + linear pending-counter fallback for state-like hazards
-(matching today's correct path)**. Dataflow analysis is *not* in the
-design; the backward walk subsumes it for SSA-edge hazards, and
-state-like hazards stay on a linear counter where they already work.
-
-### Two hazard shapes
-
-Wave's hazards split into two categories that want different
-machinery.
-
-**SSA-edge hazards.** Producer's *value* feeds a specific
-consumer's operand. The hazard fires on that producer-consumer pair
-specifically.
-
-- M0 read after `s_mov_m0`: producer's `!m0` result is consumed by
-  the DMA op's `m0` operand.
-- VMEM store after MFMA: producer's VGPR is consumed by the store's
-  data operand.
-
-**Linear-state hazards.** A side-effect at the producer affects
-*every* subsequent consumer until cleared. No SSA edge connects them.
-
-- VALU after LGKM-clearing wait: `s_waitcnt` mutates a global flag;
-  any later VALU op is affected. No data dependency.
-
-Trying to model linear-state hazards as SSA edges requires inventing
-synthetic dependency tokens that every VALU op takes as input, which
-inflates the IR for no real gain. Conversely, modeling SSA-edge
-hazards through a forward dataflow gives "you need N waits here" but
-loses the (producer, consumer) edge that downstream scheduling
-needs. Keep them separate.
-
-### Hazard table
-
-```cpp
-struct HazardKind {
-  StringRef name;
-  HazardCategory category;        // SsaEdge | LinearState
-  unsigned requiredGap;
-
-  // SsaEdge:
-  bool (*isProducer)(Operation &);
-  // Returns operand indices on the consumer that bind this hazard.
-  SmallVector<unsigned> (*consumerOperands)(Operation &);
-
-  // LinearState:
-  bool (*isStateProducer)(Operation &);
-  bool (*isStateConsumer)(Operation &);
-};
+```
+for (Operation *op : ops) {
+  for each kind: state[i] = kind.mitigate(*op, state[i], ...);
+  for each kind: state[i] = kind.update(*op, state[i], ...);
+}
 ```
 
-Built once per pass invocation, parameterized by `MCSubtargetInfo`.
-Subtarget feature gates decide which kinds populate the table.
-Constants in `requiredGap` carry an inline comment citing
-`GCNHazardRecognizer.cpp` where applicable.
+`LinearState` kinds use `state[i]` as a pending counter; `SsaEdge`
+kinds ignore it (they query backward on every op).
 
-The 13 currently-denylisted "no machine instruction" ops become
-tablegen-tagged with a `NoMachineInst` trait; the same trait drives
-distance counting in the backward walk.
+Constants for the gaps live in `HazardConfig` (`m0PipelineDelay = 1`,
+`mfmaResultLatency = 8`) with comments citing upstream
+`GCNHazardRecognizer.cpp`. `valuDep1` is the `s_delay_alu` encoding
+for "wait one VALU cycle", computed once at pass start.
 
-### Backward query for SSA-edge hazards
+## Trait-based classification
 
-For each op in program order, for each `HazardKind` with category
-`SsaEdge`:
+No denylists of opcodes. Tablegen-declared traits drive every
+classification decision:
 
-1. Get the operand indices the kind cares about via
-   `consumerOperands(op)`.
-2. For each such operand, walk backward from `value.getDefiningOp()`,
-   counting machine instructions seen (skipping `NoMachineInst`
-   ops). Visited set keyed on `(Value, HazardKind*)` to terminate
-   in loops.
-3. If the walk reaches an op for which `isProducer` is true, record
-   `(producer, currentGap)`.
-4. If `currentGap < requiredGap`, insert
-   `requiredGap - currentGap` NOPs before the consumer.
+- `NoMachineInst` -- op produces no hardware instruction (pseudo
+  ops: `arg`, `imm`, `token`, `s_waitcnt*`, `s_workgroup_id_*`,
+  `v_workitem_id_x`, `tuple_*`, `wait`, `token_join`). Used by gap
+  counting to skip ops that don't consume a wait state.
+- `VALUOp`, `VMEMLoadOp`, `VMEMStoreOp`, `SMEMLoadOp`,
+  `WaitcntOp`, `TokenOp`, `TokenJoinOp` -- pre-existing functional
+  classifiers used both here and in other passes.
+- `MFMAOp` -- the MFMA producer set for the VMEM-store hazard.
 
-Cache the per-edge result. Once computed, distance from a value to
-any downstream consumer can extend the prior cache entry
-incrementally.
+Adding a new MFMA variant requires only tagging it with `MFMAOp`; the
+hazard pass sees it automatically.
 
-When the backward walk hits a block argument, recurse into
-predecessors via `BranchOpInterface` / region branch interfaces.
-Combine results across predecessor paths by taking the minimum gap.
-That's a localized, on-demand dataflow only for edges that actually
-cross a block boundary; most edges don't.
+## Backward SSA walk
 
-### Linear-state hazards stay linear
+`findProducer(value, anchor, isProducer)` resolves an SSA-edge
+hazard query. Three paths:
 
-The current pending-counter loop in `processOnce` becomes a method
-on the `HazardKind` instances with `category == LinearState`. Same
-semantics as today: producer arms the counter, every counted op
-decrements it, consumer that arrives while the counter is non-zero
-gets a mitigation inserted.
+1. **Same-block def.** Walk forward from `value.getDefiningOp()` to
+   the consumer counting `NoMachineInst`-free ops. Precise.
 
-The double-emit loop-replay bug (`hazard-loop-replay-double-emit-8qj`)
-disappears: the linear state is now per-kind, and the replay path
-can save and restore the state of each linear kind around the
-second walk without re-firing the SSA-edge kinds (which aren't
-walked linearly any more).
+2. **`BranchOpInterface` predecessors.** For block arguments whose
+   block has cf-style predecessors, iterate each predecessor's
+   terminator, find the forwarded operand at the matching block-arg
+   index, and check if its defining op (in the predecessor's block)
+   is a producer. Gap = producer-to-terminator + terminator + entry
+   of consumer's block to anchor. Min across predecessors that raise
+   the hazard; predecessors that carry a non-producer contribute no
+   edge.
 
-### Why this enables a future scheduling pass
+3. **`RegionBranchOpInterface` carries.** For block arguments of a
+   region-entry block (`uniform_loop` body): the parent op's
+   `getEntrySuccessorOperands` gives the loop init; each
+   `RegionBranchTerminatorOpInterface` in the region (e.g.
+   `continue_if`) that branches back contributes a back-edge source.
+   For op results of a region-branch op: terminators whose successor
+   is `parent()` (the exit path) contribute the source.
 
-The backward-query cache contains, for every SSA-edge hazard
-binding, the exact `(producer, consumer, currentGap, requiredGap)`
-quadruple. A code-motion pass can consume the same cache to:
+The walk is mutually recursive between `findProducerThroughDef` (op
+result of a region-branch op recurses through exit terminators) and
+`findProducerThroughBlockArg` (block arg recurses through
+BranchOpInterface predecessors and region-branch sources). A
+`DenseSet<Value>` visited set keys recursion termination, so a
+pass-through carry (where `continue_if` forwards the block argument
+unchanged) does not loop.
 
-- Move the producer down or the consumer up within their block
-  (respecting other data dependencies and verifier shape) until
-  `currentGap >= requiredGap`.
-- Sink unrelated ops between the producer and consumer to fill the
-  gap with useful work instead of NOPs.
+Multi-hop CFG paths and unknown terminators return `nullopt`; the
+consumer gets no mitigation, matching the pre-refactor linear-walk
+behavior for those patterns. The flat-walk policy is honest about
+what it can't analyse rather than guessing.
 
-NOP insertion becomes the fallback for gaps the scheduler cannot
-close. The forward-dataflow shape can't do this because it doesn't
-preserve which producer caused which wait at which consumer.
+The query is **idempotent under the loop replay**: previously
+inserted `s_nop`s sit in the IR between producer and consumer and
+themselves count as machine instructions, so a second walk sees the
+gap saturated and emits nothing.
 
-## Staging
+## Loop replay
 
-**Stage 1 (one PR, maybe a long afternoon).** Pure refactor; no
-behavior change.
+`LinearState` kinds with `persistInReplay = true` (today: only
+VALU-after-LGKM) get a second walk seeded with their final state
+when the function contains a `uniform_loop`. This handles the case
+where the loop tail leaves the lgkm flag set and the body's head VALU
+needs a mitigation that the first walk (starting at `pending=0`)
+missed.
 
-- Add `NoMachineInst` and `MFMAOp` tablegen traits; tag the 13
-  no-emit ops and the 2 MFMA ops respectively.
-- Move `m0PipelineDelay` / `mfmaResultLatency` into `HazardConfig`
-  with cited constants.
-- Introduce the `HazardKind` table. Existing M0, MFMA-store, and
-  VALU-after-LGKM logic moves into table entries but keeps the
-  current linear-counter execution model for all three. This closes
-  beads `hazard-trait-noemit-by4`, `hazard-trait-mfma-bkj`,
-  `hazard-magic-constants-lq7`, `hazard-id-ops-denylist-7u6`. It
-  does NOT close the loop-replay double-emit or CFG-awareness beads.
+`SsaEdge` kinds set `persistInReplay = false`; their replay seed is
+0. The replay walk still re-runs their `mitigate` closure, but it
+fires no extra NOPs thanks to the idempotence above.
 
-**Stage 2 (one PR).** Behavior change: SSA-edge hazards move to
-backward query with caching.
+## Why not a dataflow analysis
 
-- Implement the backward-walk + cache for `SsaEdge`-category kinds.
-- M0 and MFMA-store kinds switch to `SsaEdge`.
-- VALU-after-LGKM stays on the linear-state path.
-- Loop replay is removed; linear-state hazards are managed inside
-  the loop replay differently if needed (per-kind saved state).
-- Closes `hazard-loop-replay-double-emit-8qj`.
-- Adds the cross-block test cases that motivate
-  `hazard-cfg-awareness-qc2`; closes that bead if the backward walk
-  through block arguments handles them. If it doesn't, the bead
-  stays open for follow-up.
+Aster uses MLIR's `DenseForwardDataFlowAnalysis` with a lattice
+element tracking active hazards. That's a clean way to handle CFG
+correctness for free.
 
-**Stage 3 (later, only if the cycles matter).** Scheduling.
+We chose the backward query because:
 
-- New pass consumes the backward-query cache.
-- Code motion to absorb gaps before falling back to NOP emission.
-- This is where the design pays back the refactor cost.
+- It produces a **per-edge** result -- the actual `(producer,
+  consumer, currentGap, requiredGap)` quadruple. Forward dataflow
+  produces a per-program-point result and loses the producer
+  attribution.
+- A future code-motion pass needs the per-edge data: "this consumer
+  reads the MFMA result with gap 3, required gap is 8 -- can we
+  move the consumer 5 ops later to absorb the hazard for free?"
+  Forward dataflow can't answer that.
+- For three hazards, the cost of re-querying per op is negligible
+  (no cache needed; revisit if a real hot kernel disagrees).
 
-**Skip.** Tablegen attributes for hazards (aster's level of
-formalism). Three hazards is too few to justify it; revisit at
-~10 hazard kinds.
+## Cross-references
 
-## Open questions
+- Upstream LLVM: `llvm/lib/Target/AMDGPU/GCNHazardRecognizer.{h,cpp}`
+  uses per-instruction-class `check*()` methods with hard-coded
+  latency locals and a `getWaitStatesSince()` template for backward
+  walks with state memoization. No central catalog.
+  `AMDGPUWaitSGPRHazards.{h,cpp}` is a separate post-schedule pass
+  for gfx12 SGPR RAW hazards using per-block dataflow.
+- Aster: `aster/lib/Dialect/AMDGCN/...` declares ~30 hazard kinds as
+  tablegen attributes, builds an opcode-indexed dense map at pass
+  start, and runs a forward dataflow over the lattice of active
+  hazards.
 
-- **Block-argument backward walk: how aggressive?** When the walk
-  crosses a block boundary, it has to enumerate predecessors. For
-  a loop back-edge, the predecessor includes the loop body itself.
-  Does the visited set cut this cleanly, or do we need a path-count
-  bound? Probably the visited set is enough; verify with a
-  loop+M0 test.
-- **Cache invalidation strategy.** Once Stage 3 starts moving ops
-  around, cached distances become stale. Invalidate per region
-  (per block?) on every IR mutation, or recompute lazily on the
-  next query. Both fine; pick on implementation.
-- **Where does the table live?** Probably a static factory function
-  per ISA in `WaveAMDHazardWaits.cpp`: `buildHazardCatalog(const
-  MCSubtargetInfo &)`. Could be lifted to a `.td`-described table
-  later; not needed now.
-- **What about `s_delay_alu` vs `s_nop`?** The VALU-after-LGKM kind
-  emits `s_delay_alu` on gfx11+, `s_nop 0` elsewhere. The hazard
-  table needs an emission policy per kind, not a fixed `s_nop`.
-  Easy to thread through.
-- **Will the SsaEdge model survive new hazards?** Need to check the
-  next ~3 hazards we expect to add (`hazard-id-ops-denylist-7u6`
-  hints at workgroup-id-related ones; gfx12 SGPR RAW hazards may
-  arrive eventually) and confirm they fit one of the two categories
-  cleanly. If gfx12 SGPR RAW needs a third shape, we add a third
-  category; the table is designed for that.
+Wave's approach borrows the **first-class catalog** idea from aster
+and the **trait-based classification** idea from upstream LLVM, but
+diverges by using a per-consumer backward query (LLVM-style) over an
+explicit catalog (aster-style) with separate handling for state-like
+hazards.
 
-## Beads this proposal addresses
+## Deferred work
 
-| Bead | Stage that closes it |
-|---|---|
-| `hazard-trait-noemit-by4` | 1 |
-| `hazard-trait-mfma-bkj` | 1 |
-| `hazard-magic-constants-lq7` | 1 |
-| `hazard-id-ops-denylist-7u6` | 1 |
-| `hazard-loop-replay-double-emit-8qj` | 2 |
-| `hazard-cfg-awareness-qc2` | 2 (backward walk crosses blocks via predecessors) |
-| `hazard-m0-test-gaps-fts` | 2 (add the tests as part of the SsaEdge migration) |
-| `dma-inst-offset-dedup-x0m` | unrelated; stays open |
+**Hazard-aware code motion.** The `SsaEdge` backward query already
+yields the `(producer, consumer, currentGap, requiredGap)`
+quadruple. A new pass would consume it to sink or hoist unrelated
+ops into the gap, falling back to `s_nop` only when no profitable
+motion exists. The current pass would become the fallback layer.
+Worth picking up once NOP density on real kernels becomes a
+measurable cost.
+
+**Tablegen-described catalog.** Aster's full formalism (hazards as
+parameterized attributes with subcase tables) only pays off once we
+ship ~10+ hazard kinds with multiple subcases each. Three single-case
+hazards in C++ closures is fine for now.
+
+**Multi-hop CFG and structured-region traversal.** `findProducer`
+handles one `BranchOpInterface` hop and one level of region-branch
+traversal. Deeper CFG paths or chains of region-branch ops return
+`nullopt` -- conservative, matching the pre-refactor flat-walk
+behavior. The shape of an extension is clear (recurse, increase the
+visited-set granularity, add cycle detection on Operation* rather
+than just Value) but no test case currently demands it.
+
+**State-like hazards across the loop back-edge.** The loop replay is
+a one-shot heuristic, not a true dataflow fixpoint. If a future
+LinearState hazard has more subtle back-edge semantics than the
+current VALU-after-LGKM, the replay will need to grow into a
+per-block IN/OUT dataflow. Until then, the heuristic + idempotent
+SSA-edge replay covers everything we ship.
+
+## File layout
+
+- `lib/Dialect/Wave/Transforms/WaveAMDHazardWaits.cpp` -- the pass.
+- `include/mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineOps.td` --
+  trait declarations (`WaveAMDMachine_NoMachineInst`,
+  `WaveAMDMachine_MFMA`) and per-op tagging.
+- `include/mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineTraits.h` --
+  C++ trait class templates.
+- `test/Target/Wave/waveamdmachine-hazard-waits.mlir` -- lit tests
+  covering: same-block VALU-LGKM (gfx11 + gfx10); same-block M0;
+  saturation; pseudo-op interleave; chained `s_mov_m0`; cross-block
+  via `cf.cond_br` / `cf.br`; loop-replay idempotence; MFMA carried
+  through a `uniform_loop` back-edge and consumed inside the body;
+  same MFMA consumed after the loop via the exit-to-parent carry;
+  pass-through carry with external producer; pass-through carry
+  with no producer.
