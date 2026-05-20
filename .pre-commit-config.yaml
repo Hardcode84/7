@@ -72,3 +72,13 @@ repos:
         entry: python build_tools/check_ascii_only.py
         language: python
         types_or: [python, c, c++]
+
+      - id: check-verifier-coverage
+        name: check verifier-coverage gaps
+        entry: python build_tools/check_verifier_coverage.py
+        language: python
+        # Scans the whole tree, no per-file dispatch.
+        pass_filenames: false
+        # Triggers on any change to verifier sources or tests that
+        # could open or close a gap.
+        files: '^(lib/.+\.cpp|test/.+\.mlir|build_tools/check_verifier_coverage\.py)$'
