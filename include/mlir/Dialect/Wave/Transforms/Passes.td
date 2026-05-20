@@ -42,10 +42,10 @@ def ConvertWaveToROCDL : Pass<"convert-wave-to-rocdl"> {
   ];
 }
 
-def ConvertWaveAMDToWaveMachine : Pass<"waveamd-to-wavemachine", "ModuleOp"> {
-  let summary = "Select Wave/WaveAMD operations into inspectable WaveMachine IR";
+def ConvertWaveAMDToWaveAMDMachine : Pass<"waveamd-to-waveamdmachine", "ModuleOp"> {
+  let summary = "Select Wave/WaveAMD operations into inspectable WaveAMDMachine IR";
   let description = [{
-    Lowers source-level Wave operations to generic WaveMachine dialect
+    Lowers source-level Wave operations to generic WaveAMDMachine dialect
     operations. This is the explicit backend boundary: the result is still MLIR,
     but the values are selected into SGPR/VGPR-like register classes and
     machine-like operations.
@@ -54,23 +54,23 @@ def ConvertWaveAMDToWaveMachine : Pass<"waveamd-to-wavemachine", "ModuleOp"> {
   let dependentDialects = [
     "func::FuncDialect",
     "waveamd::WaveAMDDialect",
-    "wavemachine::WaveMachineDialect"
+    "waveamdmachine::WaveAMDMachineDialect"
   ];
 }
 
 def WaveAMDABILowering
     : Pass<"waveamd-abi-lowering", "ModuleOp"> {
-  let summary = "Lower WaveMachine function arguments to the AMDGPU kernel ABI";
+  let summary = "Lower WaveAMDMachine function arguments to the AMDGPU kernel ABI";
   let dependentDialects = [
-    "wavemachine::WaveMachineDialect"
+    "waveamdmachine::WaveAMDMachineDialect"
   ];
 }
 
 def WaveAMDHazardWaits
     : Pass<"waveamd-insert-hazard-waits", "ModuleOp"> {
-  let summary = "Insert WaveMachine waitcnt and hazard instructions";
+  let summary = "Insert WaveAMDMachine waitcnt and hazard instructions";
   let dependentDialects = [
-    "wavemachine::WaveMachineDialect"
+    "waveamdmachine::WaveAMDMachineDialect"
   ];
 }
 
@@ -87,45 +87,45 @@ def WaveAMDDecomposeMemTuples
     are visible to the scoreboard.
   }];
   let dependentDialects = [
-    "wavemachine::WaveMachineDialect"
+    "waveamdmachine::WaveAMDMachineDialect"
   ];
 }
 
 def WaveAMDTicketWaits
     : Pass<"waveamd-insert-ticket-waits", "ModuleOp"> {
-  let summary = "Insert WaveMachine waitcnt instructions using ticket scoreboards";
+  let summary = "Insert WaveAMDMachine waitcnt instructions using ticket scoreboards";
   let description = [{
     Tracks async memory operations with per-counter tickets and inserts the
     minimum waitcnt threshold required by SSA uses. This is the waitcnt pass
-    intended for the staged WaveMachine backend; pipeline hazards remain a
+    intended for the staged WaveAMDMachine backend; pipeline hazards remain a
     separate concern.
   }];
   let dependentDialects = [
-    "wavemachine::WaveMachineDialect"
+    "waveamdmachine::WaveAMDMachineDialect"
   ];
 }
 
 def WaveAMDRegAlloc
     : Pass<"waveamd-reg-alloc", "ModuleOp"> {
-  let summary = "Allocate WaveMachine virtual registers to physical registers";
+  let summary = "Allocate WaveAMDMachine virtual registers to physical registers";
   let dependentDialects = [
-    "wavemachine::WaveMachineDialect"
+    "waveamdmachine::WaveAMDMachineDialect"
   ];
 }
 
 def WaveAMDResourceInfo
     : Pass<"waveamd-resource-info", "ModuleOp"> {
-  let summary = "Annotate WaveMachine functions with resource usage";
+  let summary = "Annotate WaveAMDMachine functions with resource usage";
   let dependentDialects = [
-    "wavemachine::WaveMachineDialect"
+    "waveamdmachine::WaveAMDMachineDialect"
   ];
 }
 
 def WaveAMDMetadata
     : Pass<"waveamd-metadata", "ModuleOp"> {
-  let summary = "Attach AMDGPU metadata information to WaveMachine IR";
+  let summary = "Attach AMDGPU metadata information to WaveAMDMachine IR";
   let dependentDialects = [
-    "wavemachine::WaveMachineDialect"
+    "waveamdmachine::WaveAMDMachineDialect"
   ];
 }
 
@@ -153,7 +153,7 @@ def WaveCompileKernels
     "ROCDL::ROCDLDialect",
     "wave::WaveDialect",
     "waveamd::WaveAMDDialect",
-    "wavemachine::WaveMachineDialect"
+    "waveamdmachine::WaveAMDMachineDialect"
   ];
 
   let options = [

@@ -8,7 +8,7 @@
 // accumulation runs as a runtime-driven `scf.for` (tagged
 // `wave.nonzero_trip`) carrying (acc, a_ptr, b_ptr); the host passes
 // `K/16` as a fourth i32 kernel arg and the selector lowers it to a
-// post-tested `wavemachine.uniform_loop`. Each per-K-step A/B fragment
+// post-tested `waveamdmachine.uniform_loop`. Each per-K-step A/B fragment
 // always rides through a per-wave LDS slot (the kernel exercises tuple
 // `ds_store_b32` / `ds_load_b32` and `s_barrier`), so this test also
 // pins down the `wave.lds_size` -> `group_segment_fixed_size`

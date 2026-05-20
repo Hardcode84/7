@@ -1,7 +1,7 @@
 // RUN: wave-translate --wave-to-amdgpu-asm %s | FileCheck %s
 // RUN: wave-translate --wave-to-amdgpu-asm %s | llvm-mc -triple=amdgcn-amd-amdhsa -mcpu=gfx950 -filetype=obj -o /dev/null
 
-module attributes {wavemachine.target = "amdgcn-amd-amdhsa--gfx950"} {
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 // CHECK: .amdgcn_target "amdgcn-amd-amdhsa--gfx950"
 
 // CHECK-LABEL: buffer_store_kernel:

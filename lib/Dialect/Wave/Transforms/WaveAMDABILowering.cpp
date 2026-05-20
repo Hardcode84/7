@@ -9,7 +9,7 @@
 #include "mlir/Dialect/Wave/Transforms/Passes.h"
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
-#include "mlir/Dialect/WaveMachine/IR/WaveMachine.h"
+#include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachine.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "llvm/ADT/STLExtras.h"
@@ -24,13 +24,13 @@ using namespace mlir;
 namespace {
 
 static Value createImm(OpBuilder &builder, Location loc, int64_t value) {
-  return wavemachine::ImmOp::create(
-      builder, loc, wavemachine::ImmType::get(builder.getContext()),
+  return waveamdmachine::ImmOp::create(
+      builder, loc, waveamdmachine::ImmType::get(builder.getContext()),
       static_cast<uint64_t>(value));
 }
 
-static bool isSGPR(wavemachine::RegType type) {
-  return type.getRegClass() == wavemachine::RegClass::SGPR;
+static bool isSGPR(waveamdmachine::RegType type) {
+  return type.getRegClass() == waveamdmachine::RegClass::SGPR;
 }
 
 // Pick the typed scalar-load op for an `arg` slot. SLoad{32,64,128}
@@ -40,13 +40,13 @@ static Value createKernArgLoad(OpBuilder &builder, Location loc,
                                Type resultType, Value offsetImm, unsigned width,
                                bool isPointer, StringRef base) {
   if (!isPointer)
-    return wavemachine::SLoadB32Op::create(builder, loc, resultType, offsetImm,
-                                           base);
+    return waveamdmachine::SLoadB32Op::create(builder, loc, resultType,
+                                              offsetImm, base);
   if (width == 4)
-    return wavemachine::SLoadB128Op::create(builder, loc, resultType, offsetImm,
+    return waveamdmachine::SLoadB128Op::create(builder, loc, resultType,
+                                               offsetImm, base);
+  return waveamdmachine::SLoadB64Op::create(builder, loc, resultType, offsetImm,
                                             base);
-  return wavemachine::SLoadB64Op::create(builder, loc, resultType, offsetImm,
-                                         base);
 }
 
 struct WaveAMDABILoweringPass
@@ -62,20 +62,20 @@ struct WaveAMDABILoweringPass
 private:
   // Verify operand shape constraints and extract the (regType, isPointer)
   // pair we need to emit the load.
-  static FailureOr<std::pair<wavemachine::RegType, bool>>
+  static FailureOr<std::pair<waveamdmachine::RegType, bool>>
   validateArgOp(Operation &op) {
     if (op.getNumResults() != 1)
       return op.emitError(
-          "waveamd-abi-lowering expects wavemachine.arg to have one result");
-    auto regType = dyn_cast<wavemachine::RegType>(op.getResult(0).getType());
+          "waveamd-abi-lowering expects waveamdmachine.arg to have one result");
+    auto regType = dyn_cast<waveamdmachine::RegType>(op.getResult(0).getType());
     if (!regType || !isSGPR(regType))
       return op.emitError(
           "waveamd-abi-lowering expects kernel arguments to be SGPR "
-          "WaveMachine registers");
+          "WaveAMDMachine registers");
     auto pointerAttr = op.getAttrOfType<BoolAttr>("pointer");
     if (!pointerAttr)
       return op.emitError(
-          "waveamd-abi-lowering expects wavemachine.arg to have a pointer "
+          "waveamd-abi-lowering expects waveamdmachine.arg to have a pointer "
           "attribute");
     bool isPointer = pointerAttr.getValue();
     unsigned width = regType.getWidth();
@@ -87,7 +87,7 @@ private:
     return std::make_pair(regType, isPointer);
   }
 
-  // Validate and lower a single `wavemachine.arg` op into the matching
+  // Validate and lower a single `waveamdmachine.arg` op into the matching
   // `s_load_*` op at offset `offset`. On success returns the number of
   // bytes consumed for this argument's kernarg slot.
   static FailureOr<unsigned> lowerArgOp(Operation &op, unsigned offset,
@@ -110,7 +110,7 @@ private:
   static LogicalResult lowerKernel(func::FuncOp func, OpBuilder &builder) {
     unsigned offset = 0;
     for (Operation &op : llvm::make_early_inc_range(func.getBody().front())) {
-      if (!isa<wavemachine::ArgOp>(op))
+      if (!isa<waveamdmachine::ArgOp>(op))
         continue;
       auto consumed = lowerArgOp(op, offset, builder);
       if (failed(consumed))
@@ -118,7 +118,7 @@ private:
       offset += *consumed;
     }
     unsigned kernargSize = (std::max(offset, 4u) + 7u) & ~7u;
-    func->setAttr("wavemachine.kernarg_size",
+    func->setAttr("waveamdmachine.kernarg_size",
                   builder.getI64IntegerAttr(kernargSize));
     return success();
   }

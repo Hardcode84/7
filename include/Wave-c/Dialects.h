@@ -20,7 +20,7 @@ extern "C" {
 
 MLIR_DECLARE_CAPI_DIALECT_REGISTRATION(Wave, wave);
 MLIR_DECLARE_CAPI_DIALECT_REGISTRATION(WaveAMD, waveamd);
-MLIR_DECLARE_CAPI_DIALECT_REGISTRATION(WaveMachine, wavemachine);
+MLIR_DECLARE_CAPI_DIALECT_REGISTRATION(WaveAMDMachine, waveamdmachine);
 
 //===----------------------------------------------------------------------===//
 // Wave types

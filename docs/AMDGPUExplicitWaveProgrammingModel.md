@@ -401,12 +401,12 @@ major code-generation stage should be a named pass with a textual IR boundary,
 so the compiler state can be inspected, tested, reduced, and debugged between
 stages.
 
-The central intermediate form for this pipeline should be a WaveMachine MLIR
-dialect. The WaveMachine dialect is lower level than the source `wave` dialect:
+The central intermediate form for this pipeline should be a WaveAMDMachine MLIR
+dialect. The WaveAMDMachine dialect is lower level than the source `wave` dialect:
 it represents selected AMDGPU-like machine operations, explicit register
 classes, memory events, masks, ABI values, and scheduling dependencies. It is
 still MLIR, not an opaque C++ side structure. The useful boundary is therefore
-between source semantics, inspectable WaveMachine dialect IR, and the existing
+between source semantics, inspectable WaveAMDMachine dialect IR, and the existing
 AMDGPU target machinery that already knows how to encode, schedule, and package
 code for the hardware.
 
@@ -415,18 +415,18 @@ The intended pipeline is:
 1. Preserve the MLIR wave dialect as the source-level contract.
 2. Canonicalize and verify explicit `wave<T, W>`, `mask<W>`,
    `!wave.mem.token`, `where`, and structured `scf` operations.
-3. Run a Wave-to-WaveMachine selection pass that converts wave operations into
-   inspectable WaveMachine dialect operations with explicit SGPR, VGPR, AGPR,
+3. Run a Wave-to-WaveAMDMachine selection pass that converts wave operations into
+   inspectable WaveAMDMachine dialect operations with explicit SGPR, VGPR, AGPR,
    mask, memory, and token operands.
 4. Run ABI lowering, register allocation, resource accounting, waitcnt
    insertion, hazard handling, and metadata construction as MLIR passes over
-   WaveMachine IR, using reusable LLVM AMDGPU infrastructure wherever possible.
+   WaveAMDMachine IR, using reusable LLVM AMDGPU infrastructure wherever possible.
 5. Emit MC instructions, ELF, code object metadata, and kernel descriptors from
    the existing AMDGPU MC and object emission layers.
 
 This suggests the following split for a prototype under `mlir/lib/Target/Wave`:
 
-`WaveMachine` dialect
+`WaveAMDMachine` dialect
   Define the inspectable machine-level MLIR operations and types used after
   wave selection:
   virtual registers, physical register assignments, register classes, operands,
@@ -438,7 +438,7 @@ This suggests the following split for a prototype under `mlir/lib/Target/Wave`:
 
 `AMDGPUISel.cpp`
   Lower `wave` operations, structured `where` regions, and supported
-  `scf` control flow into the WaveMachine dialect. This is where
+  `scf` control flow into the WaveAMDMachine dialect. This is where
   uniform values become SGPR candidates, `wave<T, W>` values become VGPR or
   AGPR candidates, and `mask<W>` values become scalar lane-mask registers.
   Generation-specific opcode selection belongs here only when it follows
@@ -447,13 +447,13 @@ This suggests the following split for a prototype under `mlir/lib/Target/Wave`:
 
 `AMDGPUMachineIR.cpp`
   Hold AMDGPU-specific helpers for instruction forms, operand constraints,
-  register widths, implicit operands, and conversion between WaveMachine dialect
+  register widths, implicit operands, and conversion between WaveAMDMachine dialect
   operations and LLVM AMDGPU machine constructs. This file is the natural place
   to build an adapter to LLVM `MachineInstr` and `MachineFunction` when a
   pass needs to call existing LLVM AMDGPU machinery.
 
 `AMDGPURegAlloc.cpp`
-  Provide an MLIR register-allocation pass for WaveMachine IR and the bridge to
+  Provide an MLIR register-allocation pass for WaveAMDMachine IR and the bridge to
   LLVM register classes, liveness, and resource accounting. A simple allocator
   is useful for early experiments, but the long-term design should reuse AMDGPU
   register classes, subtarget register limits, occupancy calculations, and spill
@@ -468,7 +468,7 @@ This suggests the following split for a prototype under `mlir/lib/Target/Wave`:
 
 `AMDGPUHazards.cpp`
   Provide an MLIR hazard and waitcnt pass. It should translate explicit
-  memory-token dependencies into WaveMachine memory events and invoke existing
+  memory-token dependencies into WaveAMDMachine memory events and invoke existing
   AMDGPU waitcnt and hazard machinery, such as waitcnt encoding utilities and
   `GCNHazardRecognizer`-style checks. This layer should not reintroduce
   hidden alias analysis. Missing token dependencies remain a program promise
@@ -482,12 +482,12 @@ This suggests the following split for a prototype under `mlir/lib/Target/Wave`:
 
 `AMDGPUMetadata.cpp`
   Provide an MLIR metadata pass that builds HSA code object metadata and kernel
-  descriptors from ABI and resource information attached to WaveMachine IR. The
+  descriptors from ABI and resource information attached to WaveAMDMachine IR. The
   metadata layer should eventually delegate to the same definitions used by the
   LLVM AMDGPU backend instead of carrying a separate schema by hand.
 
 `AMDGPUMCEmission.cpp`
-  Convert finalized WaveMachine operations to `MCInst` and use the AMDGPU MC
+  Convert finalized WaveAMDMachine operations to `MCInst` and use the AMDGPU MC
   layer for printing, encoding, relocations, and object emission. Raw string
   emission should be limited to temporary diagnostics and should not be the
   architecture of the backend.
@@ -694,7 +694,7 @@ Fragment operations should include:
 `wave.fragment_pack` and `wave.fragment_unpack`
   Bind a per-lane register tuple (produced by `wave.load` or any tuple
   source) into a wave-cooperative fragment and back. Zero-cost
-  renames at the WaveMachine level; the actual memory traffic goes
+  renames at the WaveAMDMachine level; the actual memory traffic goes
   through `wave.load` and `wave.store` on either side.
 
 `wave.fragment_splat` and `wave.fragment_fill`
@@ -731,21 +731,21 @@ verification:
 - reject fragment layouts that cannot be implemented efficiently or correctly on
   the selected subtarget.
 
-At the WaveMachine level, selected matrix operations should remain inspectable:
+At the WaveAMDMachine level, selected matrix operations should remain inspectable:
 
 ```mlir
-%acc1 = wavemachine.wmma %a, %b, %acc0
+%acc1 = waveamdmachine.wmma %a, %b, %acc0
     {opcode = "v_wmma_f32_16x16x16_f16",
      layout_a = #layout_a,
      layout_b = #layout_b,
      layout_c = #layout_c}
-    : (!wavemachine.reg_tuple<vgpr, ...>,
-       !wavemachine.reg_tuple<vgpr, ...>,
-       !wavemachine.reg_tuple<vgpr, ...>)
-   -> !wavemachine.reg_tuple<vgpr, ...>
+    : (!waveamdmachine.reg_tuple<vgpr, ...>,
+       !waveamdmachine.reg_tuple<vgpr, ...>,
+       !waveamdmachine.reg_tuple<vgpr, ...>)
+   -> !waveamdmachine.reg_tuple<vgpr, ...>
 ```
 
-The exact WaveMachine type spelling can evolve, but it must represent the
+The exact WaveAMDMachine type spelling can evolve, but it must represent the
 important machine facts explicitly: VGPR tuples, AGPR tuples where applicable,
 accumulator fragments, tied operands, implicit register constraints, and
 generation-specific hazards. The register allocator and resource pass must
@@ -948,7 +948,7 @@ including the bucketizer's slot-fit checks.
 
 ### Bucketization
 
-Wave-to-WaveMachine selection translates each `wave.index_expr` into a
+Wave-to-WaveAMDMachine selection translates each `wave.index_expr` into a
 per-pointer `(voffset, soffset, inst_offset)` triple. The translation
 is structurally simple because the input is structurally rich:
 
@@ -1047,8 +1047,8 @@ Register selection
   instruction selection.
 
 Matrix lowering
-  Lower `wave.fragment` and `wave.mma` operations through WaveMachine IR, not
-  directly to opaque intrinsics. The WaveMachine form should expose selected
+  Lower `wave.fragment` and `wave.mma` operations through WaveAMDMachine IR, not
+  directly to opaque intrinsics. The WaveAMDMachine form should expose selected
   MFMA/WMMA instruction families, operand layouts, VGPR or AGPR register tuples,
   tied accumulator constraints, and matrix-specific resource usage. This keeps
   fragment layout, register pressure, and selected opcodes inspectable before

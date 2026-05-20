@@ -7,7 +7,7 @@
 // CHECK: .amdgcn_target "amdgcn-amd-amdhsa--gfx1100"
 // CHECK-LABEL: wave_add:
 func.func @wave_add(%x: i32) -> i32 {
-  // CHECK: wave backend: WaveMachine MLIR pipeline finalized
+  // CHECK: wave backend: WaveAMDMachine MLIR pipeline finalized
   // CHECK: v_mbcnt_lo_u32_b32 [[LANE:v[0-9]+]], -1, 0
   %lane = wave.lane_id : !wave.simd<i32, 32>
   %vx = wave.splat %x : i32 -> !wave.simd<i32, 32>

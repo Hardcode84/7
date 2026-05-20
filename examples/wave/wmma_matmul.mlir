@@ -7,14 +7,14 @@
 //
 // To inspect the AMDGPU assembly instead, replace the surrounding
 // `gpu.module @kernels { ... }` with a plain `module attributes {
-// wavemachine.target = "amdgcn-amd-amdhsa--gfx1100" } { ... }` and run:
+// waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100" } { ... }` and run:
 //
-//   wave-opt <single-kernel.mlir> --waveamd-to-wavemachine \
+//   wave-opt <single-kernel.mlir> --waveamd-to-waveamdmachine \
 //       --waveamd-abi-lowering --waveamd-insert-hazard-waits \
 //       --waveamd-reg-alloc --waveamd-resource-info --waveamd-metadata \
 //     | wave-translate --wave-to-amdgpu-asm
 //
-// (See `test/Target/Wave/wavemachine-matrix.mlir` for a worked example
+// (See `test/Target/Wave/waveamdmachine-matrix.mlir` for a worked example
 // of the asm-inspection pipeline.)
 //
 // ---------------------------------------------------------------------------

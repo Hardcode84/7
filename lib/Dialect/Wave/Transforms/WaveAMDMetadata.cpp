@@ -9,7 +9,7 @@
 #include "mlir/Dialect/Wave/Transforms/Passes.h"
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
-#include "mlir/Dialect/WaveMachine/IR/WaveMachine.h"
+#include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachine.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
 
@@ -25,23 +25,24 @@ namespace {
 struct WaveAMDMetadataPass
     : public wave::impl::WaveAMDMetadataBase<WaveAMDMetadataPass> {
   void runOnOperation() override {
-    if (!getOperation()->hasAttr("wavemachine.target")) {
-      getOperation().emitError("waveamd-metadata requires a wavemachine.target "
-                               "module attribute");
+    if (!getOperation()->hasAttr("waveamdmachine.target")) {
+      getOperation().emitError(
+          "waveamd-metadata requires a waveamdmachine.target "
+          "module attribute");
       return signalPassFailure();
     }
     OpBuilder builder(getOperation().getContext());
     for (func::FuncOp func : getOperation().getOps<func::FuncOp>()) {
       if (!func->hasAttr("wave.kernel"))
         continue;
-      if (!func->hasAttr("wavemachine.kernarg_size") ||
-          !func->hasAttr("wavemachine.sgpr_count") ||
-          !func->hasAttr("wavemachine.vgpr_count")) {
+      if (!func->hasAttr("waveamdmachine.kernarg_size") ||
+          !func->hasAttr("waveamdmachine.sgpr_count") ||
+          !func->hasAttr("waveamdmachine.vgpr_count")) {
         func.emitError("waveamd-metadata requires ABI and resource attributes "
                        "on kernels");
         return signalPassFailure();
       }
-      func->setAttr("wavemachine.metadata", builder.getUnitAttr());
+      func->setAttr("waveamdmachine.metadata", builder.getUnitAttr());
     }
   }
 };

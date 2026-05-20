@@ -9,7 +9,7 @@
 #include "mlir/Dialect/Wave/Transforms/Passes.h"
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
-#include "mlir/Dialect/WaveMachine/IR/WaveMachine.h"
+#include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachine.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
 
@@ -22,17 +22,17 @@ using namespace mlir;
 
 namespace {
 
-static bool isSGPR(wavemachine::RegType type) {
-  return type.getRegClass() == wavemachine::RegClass::SGPR;
+static bool isSGPR(waveamdmachine::RegType type) {
+  return type.getRegClass() == waveamdmachine::RegClass::SGPR;
 }
 
-static bool isVGPR(wavemachine::RegType type) {
-  return type.getRegClass() == wavemachine::RegClass::VGPR;
+static bool isVGPR(waveamdmachine::RegType type) {
+  return type.getRegClass() == waveamdmachine::RegClass::VGPR;
 }
 
 struct WaveAMDResourceInfoPass
     : public wave::impl::WaveAMDResourceInfoBase<WaveAMDResourceInfoPass> {
-  // Walk a kernel func's allocated WaveMachine register results and
+  // Walk a kernel func's allocated WaveAMDMachine register results and
   // return the highest end-of-register for each class. Sets `failed` if
   // any result still has an unallocated `-1` index.
   struct MaxRegs {
@@ -43,12 +43,12 @@ struct WaveAMDResourceInfoPass
   // register footprint. Returns true on a hard error (unallocated
   // index) so the caller can short-circuit the walk.
   bool scanResult(Operation &op, Value result, MaxRegs &out) {
-    auto regType = dyn_cast<wavemachine::RegType>(result.getType());
+    auto regType = dyn_cast<waveamdmachine::RegType>(result.getType());
     if (!regType)
       return false;
     // SCC is a single global bit; the allocator never assigns
     // physical numbers for it.
-    if (regType.getRegClass() == wavemachine::RegClass::SCC)
+    if (regType.getRegClass() == waveamdmachine::RegClass::SCC)
       return false;
     int64_t index = regType.getIndex();
     if (index < 0) {
@@ -101,12 +101,12 @@ struct WaveAMDResourceInfoPass
         return signalPassFailure();
       unsigned sgprBaseline = func->hasAttr("wave.kernel") ? 6u : 1u;
       func->setAttr(
-          "wavemachine.sgpr_count",
+          "waveamdmachine.sgpr_count",
           builder.getI64IntegerAttr(std::max(regs.sgpr, sgprBaseline)));
-      func->setAttr("wavemachine.vgpr_count",
+      func->setAttr("waveamdmachine.vgpr_count",
                     builder.getI64IntegerAttr(std::max(regs.vgpr, 1u)));
       if (auto ldsAttr = func->getAttrOfType<IntegerAttr>("wave.lds_size"))
-        func->setAttr("wavemachine.lds_size",
+        func->setAttr("waveamdmachine.lds_size",
                       builder.getI64IntegerAttr(ldsAttr.getInt()));
     }
   }

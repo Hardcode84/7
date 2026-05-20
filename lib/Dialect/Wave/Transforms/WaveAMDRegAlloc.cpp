@@ -10,7 +10,7 @@
 
 #include "Utils/AMDGPUBaseInfo.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
-#include "mlir/Dialect/WaveMachine/IR/WaveMachine.h"
+#include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachine.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "llvm/ADT/DenseMap.h"
@@ -49,7 +49,7 @@ struct LiveInterval {
   SmallVector<Value> values;
   SmallVector<unsigned> slotOffsets; // parallel to `values`; slot of each Value
                                      // within the block
-  wavemachine::RegType type;         // block (class, width); index is filled
+  waveamdmachine::RegType type;      // block (class, width); index is filled
                                      // in at allocation time
   unsigned start = std::numeric_limits<unsigned>::max();
   unsigned end = 0;
@@ -61,36 +61,37 @@ struct RegisterLimits {
 };
 
 static bool isReg(Value value) {
-  return isa<wavemachine::RegType>(value.getType());
+  return isa<waveamdmachine::RegType>(value.getType());
 }
 
-static bool isSGPR(wavemachine::RegType type) {
-  return type.getRegClass() == wavemachine::RegClass::SGPR;
+static bool isSGPR(waveamdmachine::RegType type) {
+  return type.getRegClass() == waveamdmachine::RegClass::SGPR;
 }
 
-static bool isVGPR(wavemachine::RegType type) {
-  return type.getRegClass() == wavemachine::RegClass::VGPR;
+static bool isVGPR(waveamdmachine::RegType type) {
+  return type.getRegClass() == waveamdmachine::RegClass::VGPR;
 }
 
 // SCC is a single hardware bit; we don't allocate physical registers
 // for it.
-static bool isSCC(wavemachine::RegType type) {
-  return type.getRegClass() == wavemachine::RegClass::SCC;
+static bool isSCC(waveamdmachine::RegType type) {
+  return type.getRegClass() == waveamdmachine::RegClass::SCC;
 }
 
 static void setRegPhys(Value v, unsigned phys) {
-  auto rt = cast<wavemachine::RegType>(v.getType());
-  v.setType(wavemachine::RegType::get(rt.getContext(), rt.getRegClass(),
-                                      rt.getWidth(),
-                                      static_cast<int64_t>(phys)));
+  auto rt = cast<waveamdmachine::RegType>(v.getType());
+  v.setType(waveamdmachine::RegType::get(rt.getContext(), rt.getRegClass(),
+                                         rt.getWidth(),
+                                         static_cast<int64_t>(phys)));
 }
 
 static FailureOr<std::unique_ptr<llvm::MCSubtargetInfo>>
 createSubtargetInfo(ModuleOp module) {
-  auto targetAttr = module->getAttrOfType<StringAttr>("wavemachine.target");
+  auto targetAttr = module->getAttrOfType<StringAttr>("waveamdmachine.target");
   if (!targetAttr)
-    return module.emitError("waveamd-reg-alloc requires a wavemachine.target "
-                            "attribute");
+    return module.emitError(
+        "waveamd-reg-alloc requires a waveamdmachine.target "
+        "attribute");
 
   StringRef target = targetAttr.getValue();
   std::pair<StringRef, StringRef> split = target.rsplit("--");
@@ -167,7 +168,7 @@ struct WaveAMDRegAllocPass
                                             Operation *errOp) {
     if (!isReg(v))
       return failure();
-    auto rt = cast<wavemachine::RegType>(v.getType());
+    auto rt = cast<waveamdmachine::RegType>(v.getType());
     if (isSCC(rt))
       return failure();
     if (!isSGPR(rt) && !isVGPR(rt))
@@ -208,7 +209,7 @@ struct WaveAMDRegAllocPass
   static LogicalResult coalesce(Value primary, Value extra, unsigned pos,
                                 LiveIntervalSet &intervals, Operation *errOp,
                                 unsigned slotOffset = 0) {
-    auto rt = dyn_cast<wavemachine::RegType>(primary.getType());
+    auto rt = dyn_cast<waveamdmachine::RegType>(primary.getType());
     if (!rt)
       return errOp->emitError("coalesce: primary value is not a register");
     bool sgpr = isSGPR(rt);
@@ -252,10 +253,10 @@ struct WaveAMDRegAllocPass
   // Predicate: skip non-register operands and SCC carries during
   // interval bookkeeping. Returns the operand's RegType when it should
   // be tracked, or std::nullopt otherwise.
-  std::optional<wavemachine::RegType> trackedRegType(Value v) {
+  std::optional<waveamdmachine::RegType> trackedRegType(Value v) {
     if (!isReg(v))
       return std::nullopt;
-    auto rt = cast<wavemachine::RegType>(v.getType());
+    auto rt = cast<waveamdmachine::RegType>(v.getType());
     if (isSCC(rt))
       return std::nullopt;
     return rt;
@@ -264,7 +265,7 @@ struct WaveAMDRegAllocPass
   // Pick the interval bucket + lookup table matching the SGPR/VGPR
   // class of `rt`.
   std::pair<SmallVectorImpl<LiveInterval> *, DenseMap<Value, unsigned> *>
-  intervalsFor(wavemachine::RegType rt, LiveIntervalSet &intervals) {
+  intervalsFor(waveamdmachine::RegType rt, LiveIntervalSet &intervals) {
     if (isSGPR(rt))
       return {&intervals.sgprs, &intervals.sgprIntervals};
     return {&intervals.vgprs, &intervals.vgprIntervals};
@@ -282,7 +283,7 @@ struct WaveAMDRegAllocPass
 
   // Coalesce the loop block arg and result of each carry with the
   // init slot so the body can write back without an extra move.
-  LogicalResult coalesceLoopEntryCarries(wavemachine::UniformLoopOp loop,
+  LogicalResult coalesceLoopEntryCarries(waveamdmachine::UniformLoopOp loop,
                                          unsigned pos,
                                          LiveIntervalSet &intervals) {
     Block &body = loop.getBody().front();
@@ -299,10 +300,10 @@ struct WaveAMDRegAllocPass
 
   // Fold the continue_if carry-source intervals into the loop's
   // init interval so the back-edge becomes a no-op rename.
-  void coalesceLoopBackEdgeCarries(wavemachine::UniformLoopOp loop,
+  void coalesceLoopBackEdgeCarries(waveamdmachine::UniformLoopOp loop,
                                    LiveIntervalSet &intervals) {
     Block &body = loop.getBody().front();
-    auto term = cast<wavemachine::ContinueIfOp>(body.getTerminator());
+    auto term = cast<waveamdmachine::ContinueIfOp>(body.getTerminator());
     for (auto [i, init, carry] :
          llvm::enumerate(loop.getInits(), term.getCarries())) {
       auto rt = trackedRegType(init);
@@ -331,8 +332,8 @@ struct WaveAMDRegAllocPass
 
   // Extend each carry's interval out to `endPos` so it stays live
   // until the loop op itself completes.
-  void extendCarriesToLoopEnd(wavemachine::UniformLoopOp loop, unsigned endPos,
-                              LiveIntervalSet &intervals) {
+  void extendCarriesToLoopEnd(waveamdmachine::UniformLoopOp loop,
+                              unsigned endPos, LiveIntervalSet &intervals) {
     for (Value init : loop.getInits())
       extendInterval(init, endPos, intervals);
   }
@@ -340,7 +341,7 @@ struct WaveAMDRegAllocPass
   // Process a uniform_loop op: coalesce entry carries, recurse into
   // the body, then coalesce the back-edge carries and extend the
   // carry intervals over the whole loop range.
-  LogicalResult processLoop(wavemachine::UniformLoopOp loop, unsigned pos,
+  LogicalResult processLoop(waveamdmachine::UniformLoopOp loop, unsigned pos,
                             unsigned &cursor,
                             DenseMap<Operation *, unsigned> &positions,
                             SmallVectorImpl<Operation *> &orderedOps,
@@ -375,7 +376,7 @@ struct WaveAMDRegAllocPass
         extendInterval(operand, pos, intervals);
       if (failed(coalesceTupleElementOps(op, pos, intervals)))
         return failure();
-      if (auto loop = dyn_cast<wavemachine::UniformLoopOp>(op)) {
+      if (auto loop = dyn_cast<waveamdmachine::UniformLoopOp>(op)) {
         if (failed(processLoop(loop, pos, cursor, positions, orderedOps,
                                intervals)))
           return failure();
@@ -399,13 +400,14 @@ struct WaveAMDRegAllocPass
       for (Value element : top.getElements()) {
         if (failed(coalesce(tuple, element, pos, intervals, top, cumOffset)))
           return failure();
-        cumOffset += cast<wavemachine::RegType>(element.getType()).getWidth();
+        cumOffset +=
+            cast<waveamdmachine::RegType>(element.getType()).getWidth();
       }
       return success();
     };
-    if (auto toElems = dyn_cast<wavemachine::TupleToElementsOp>(op))
+    if (auto toElems = dyn_cast<waveamdmachine::TupleToElementsOp>(op))
       return coalesceTupleElements(toElems);
-    if (auto fromElems = dyn_cast<wavemachine::TupleFromElementsOp>(op))
+    if (auto fromElems = dyn_cast<waveamdmachine::TupleFromElementsOp>(op))
       return coalesceTupleElements(fromElems);
     return success();
   }
@@ -419,10 +421,11 @@ struct WaveAMDRegAllocPass
   // each other. Materialize an explicit register-rename copy for each
   // duplicate init so the coalescer sees fresh SSA values everywhere.
   LogicalResult splitDuplicateLoopInits(func::FuncOp func) {
-    SmallVector<wavemachine::UniformLoopOp> loops;
-    func.walk([&](wavemachine::UniformLoopOp loop) { loops.push_back(loop); });
+    SmallVector<waveamdmachine::UniformLoopOp> loops;
+    func.walk(
+        [&](waveamdmachine::UniformLoopOp loop) { loops.push_back(loop); });
     OpBuilder builder(func.getContext());
-    for (wavemachine::UniformLoopOp loop : loops) {
+    for (waveamdmachine::UniformLoopOp loop : loops) {
       DenseSet<Value> seen;
       builder.setInsertionPoint(loop);
       for (auto [i, init] : llvm::enumerate(loop.getInits())) {
@@ -449,18 +452,18 @@ struct WaveAMDRegAllocPass
   // diagnostic so the gap is visible.
   static FailureOr<Value> duplicateRegValue(OpBuilder &builder, Location loc,
                                             Value v) {
-    auto rt = cast<wavemachine::RegType>(v.getType());
-    wavemachine::RegType resultType = wavemachine::RegType::get(
+    auto rt = cast<waveamdmachine::RegType>(v.getType());
+    waveamdmachine::RegType resultType = waveamdmachine::RegType::get(
         rt.getContext(), rt.getRegClass(), rt.getWidth(), /*index=*/-1);
     if (isVGPR(rt)) {
       auto copy =
-          wavemachine::VMovB32TupleOp::create(builder, loc, resultType, v);
+          waveamdmachine::VMovB32TupleOp::create(builder, loc, resultType, v);
       copy->setAttr("registers", builder.getI64IntegerAttr(rt.getWidth()));
       return copy.getResult();
     }
     if (isSGPR(rt)) {
       auto copy =
-          wavemachine::SMovB32TupleOp::create(builder, loc, resultType, v);
+          waveamdmachine::SMovB32TupleOp::create(builder, loc, resultType, v);
       copy->setAttr("registers", builder.getI64IntegerAttr(rt.getWidth()));
       return copy.getResult();
     }
@@ -493,7 +496,7 @@ struct WaveAMDRegAllocPass
   // that case the coalescer's merge lines each source slot up with
   // exactly the operand slot the from_elements wants, so the two
   // tuples can safely share the source's physical block.
-  static bool isPerfectRoundTrip(wavemachine::TupleFromElementsOp op,
+  static bool isPerfectRoundTrip(waveamdmachine::TupleFromElementsOp op,
                                  const ToElementsSourceMap &source) {
     Value sourceTuple;
     unsigned cumOffset = 0;
@@ -508,13 +511,14 @@ struct WaveAMDRegAllocPass
         return false;
       if (srcSlot != cumOffset)
         return false;
-      cumOffset += cast<wavemachine::RegType>(element.getType()).getWidth();
+      cumOffset += cast<waveamdmachine::RegType>(element.getType()).getWidth();
     }
     if (!sourceTuple)
       return false;
     int64_t fromW =
-        cast<wavemachine::RegType>(op.getTuple().getType()).getWidth();
-    int64_t srcW = cast<wavemachine::RegType>(sourceTuple.getType()).getWidth();
+        cast<waveamdmachine::RegType>(op.getTuple().getType()).getWidth();
+    int64_t srcW =
+        cast<waveamdmachine::RegType>(sourceTuple.getType()).getWidth();
     return fromW == srcW;
   }
 
@@ -522,7 +526,7 @@ struct WaveAMDRegAllocPass
   // coalescing it directly is safe; if not, materialize a v_mov rename
   // and rewire. Updates the running anchor / source / consumed maps.
   LogicalResult
-  rewriteFromElementsForSharing(wavemachine::TupleFromElementsOp op,
+  rewriteFromElementsForSharing(waveamdmachine::TupleFromElementsOp op,
                                 OpBuilder &builder,
                                 DenseMap<Value, unsigned> &anchorSlot,
                                 const ToElementsSourceMap &toElementsSource,
@@ -535,7 +539,8 @@ struct WaveAMDRegAllocPass
     unsigned cumOffset = 0;
     for (Value element : op.getElements()) {
       unsigned slot = cumOffset;
-      unsigned width = cast<wavemachine::RegType>(element.getType()).getWidth();
+      unsigned width =
+          cast<waveamdmachine::RegType>(element.getType()).getWidth();
       Value use = element;
       auto anchorIt = anchorSlot.find(element);
       bool slotMismatch =
@@ -566,17 +571,19 @@ struct WaveAMDRegAllocPass
     DenseMap<Value, unsigned> anchorSlot;
     ToElementsSourceMap toElementsSource;
     DenseSet<Value> consumedByFromElements;
-    func.walk([&](wavemachine::TupleToElementsOp op) {
+    func.walk([&](waveamdmachine::TupleToElementsOp op) {
       unsigned cumOffset = 0;
       for (Value element : op.getElements()) {
         anchorSlot[element] = cumOffset;
         toElementsSource[element] = {op.getTuple(), cumOffset};
-        cumOffset += cast<wavemachine::RegType>(element.getType()).getWidth();
+        cumOffset +=
+            cast<waveamdmachine::RegType>(element.getType()).getWidth();
       }
     });
-    SmallVector<wavemachine::TupleFromElementsOp> ops;
-    func.walk([&](wavemachine::TupleFromElementsOp op) { ops.push_back(op); });
-    for (wavemachine::TupleFromElementsOp op : ops) {
+    SmallVector<waveamdmachine::TupleFromElementsOp> ops;
+    func.walk(
+        [&](waveamdmachine::TupleFromElementsOp op) { ops.push_back(op); });
+    for (waveamdmachine::TupleFromElementsOp op : ops) {
       if (failed(rewriteFromElementsForSharing(op, builder, anchorSlot,
                                                toElementsSource,
                                                consumedByFromElements)))
@@ -621,7 +628,8 @@ struct WaveAMDRegAllocPass
         stillActive.push_back(interval);
         continue;
       }
-      auto rt = cast<wavemachine::RegType>(interval.values.front().getType());
+      auto rt =
+          cast<waveamdmachine::RegType>(interval.values.front().getType());
       unsigned phys = rt.getIndex();
       unsigned width = rt.getWidth();
       for (unsigned i = 0; i != width; ++i)
@@ -658,7 +666,7 @@ struct WaveAMDRegAllocPass
       std::optional<unsigned> phys = findFreeContiguous(used, width, align);
       if (!phys)
         return func.emitError(
-            "WaveMachine register allocator ran out of registers");
+            "WaveAMDMachine register allocator ran out of registers");
       for (auto [v, off] : llvm::zip(interval.values, interval.slotOffsets))
         setRegPhys(v, *phys + off);
       for (unsigned i = 0; i != width; ++i)

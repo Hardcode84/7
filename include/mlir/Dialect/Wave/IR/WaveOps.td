@@ -147,7 +147,7 @@ def Wave_BinaryOp : Wave_Op<"binary", [Pure]> {
 // agree across SIMD operands. The result is `!wave.simd<iN, W>` if any
 // operand is SIMD, otherwise the bare `iN`.
 //
-// Lowering to WaveMachine picks the per-target instruction sequence
+// Lowering to WaveAMDMachine picks the per-target instruction sequence
 // based on width and uniformity. Only i32 ships today; other widths
 // fail at selection with a clear diagnostic. Unsigned variants
 // (addui/mului/shlui) will follow when needed -- for these three

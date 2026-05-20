@@ -58,13 +58,14 @@ private:
     MLIRContext *ctx = &getContext();
 
     // 1. Build a transient top-level module that the wave-to-AMDGPU pipeline
-    //    can consume: it expects a `builtin.module` with a `wavemachine.target`
-    //    attribute and `func.func` operations annotated with `wave.kernel`.
+    //    can consume: it expects a `builtin.module` with a
+    //    `waveamdmachine.target` attribute and `func.func` operations annotated
+    //    with `wave.kernel`.
     Builder b(ctx);
     std::string wmTarget = (StringRef(triple) + "--" + StringRef(chip)).str();
     OwningOpRef<ModuleOp> stagingRef(ModuleOp::create(loc));
     ModuleOp staging = *stagingRef;
-    staging->setAttr("wavemachine.target", b.getStringAttr(wmTarget));
+    staging->setAttr("waveamdmachine.target", b.getStringAttr(wmTarget));
 
     for (auto func : gpuMod.getOps<func::FuncOp>())
       staging.getBody()->push_back(func.clone().getOperation());

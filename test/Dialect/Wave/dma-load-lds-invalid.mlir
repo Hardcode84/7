@@ -1,6 +1,6 @@
 // RUN: wave-opt --split-input-file --verify-diagnostics %s
 
-module attributes {wavemachine.target = "amdgcn-amd-amdhsa--gfx950"} {
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 func.func @bad_size(%in: !wave.ptr<i32, #wave.global>)
     attributes {wave.kernel, wave.lds_size = 128 : i64} {
   %lane = wave.lane_id : !wave.simd<i32, 32>
@@ -19,7 +19,7 @@ func.func @bad_size(%in: !wave.ptr<i32, #wave.global>)
 
 // -----
 
-module attributes {wavemachine.target = "amdgcn-amd-amdhsa--gfx950"} {
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 func.func @bad_dest(%in: !wave.ptr<i32, #wave.global>)
     attributes {wave.kernel, wave.lds_size = 128 : i64} {
   %lane = wave.lane_id : !wave.simd<i32, 32>

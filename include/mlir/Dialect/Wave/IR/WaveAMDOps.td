@@ -50,7 +50,7 @@ def WaveAMD_FragmentPackOp : WaveAMD_Op<"fragment_pack", [Pure]> {
     the `R` 32-bit registers of the destination fragment in canonical
     WMMA order.
 
-    The op is a zero-cost rename at the WaveMachine level: the input and
+    The op is a zero-cost rename at the WaveAMDMachine level: the input and
     output share the same physical `R`-wide VGPR tuple. It exists so the
     DSL can build fragments out of the result of `wave.load` (or any
     other producer of per-lane register tuples) without forcing the
@@ -77,7 +77,7 @@ def WaveAMD_FragmentUnpackOp : WaveAMD_Op<"fragment_unpack", [Pure]> {
     per-lane VGPR tuple through generic wave-dialect plumbing (e.g.
     `wave.store`) without a dedicated fragment-store opcode.
 
-    Zero-cost at the WaveMachine level: input and output share the
+    Zero-cost at the WaveAMDMachine level: input and output share the
     physical `R`-wide VGPR tuple.
 
     Verifier constraints mirror `fragment_pack`:

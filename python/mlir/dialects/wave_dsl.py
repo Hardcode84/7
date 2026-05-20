@@ -455,7 +455,7 @@ class FunctionBuilder:
     def assume_range(self, value: Value, lo: int, hi: int) -> Value:
         """Identity at runtime; seeds IRA with `lo <= value <= hi`.
 
-        The WaveMachine bucketizer's width-fit check turns a tighter
+        The WaveAMDMachine bucketizer's width-fit check turns a tighter
         proven range into a soffset bucket survival: e.g. wrapping
         `wave.workgroup_id` with `assume_range(_, 0, grid_dim - 1)`
         lets `wg * stride` fit 32-bit and ride the SGPR soffset slot
@@ -667,7 +667,7 @@ class FunctionBuilder:
         ``!wave.simd<vector<R x i32>, W>`` so the per-lane VGPR tuple
         can flow through generic wave plumbing (e.g. ``wave.store``)
         without a dedicated fragment-store op. Zero-cost at the
-        WaveMachine level.
+        WaveAMDMachine level.
         """
         frag = FragmentType(fragment.type)
         result_type = simd_type(
@@ -715,7 +715,7 @@ class FunctionBuilder:
         ``wave_size`` are powers of two), passes the result through a
         ``wave.index_expr`` so the bucketizer folds the per-element
         scale into a single shift, and emits a tuple ``wave.store``.
-        The WaveMachine backend serializes that into ``R`` per-component
+        The WaveAMDMachine backend serializes that into ``R`` per-component
         ``*_store_tuple_b32`` ops.
         """
         frag = FragmentType(fragment.type)
@@ -778,7 +778,7 @@ class FunctionBuilder:
 
         `nonzero_trip=True` attaches a `wave.nonzero_trip` unit attr on
         the `scf.for`, which the selector uses to skip the pre-test
-        compare and lower to a do/while-shaped `wavemachine.uniform_loop`
+        compare and lower to a do/while-shaped `waveamdmachine.uniform_loop`
         instead of the (potentially-zero-trip) pre-tested form.
         """
         forop = scf.ForOp(lower, upper, step, iter_args=list(init_args))

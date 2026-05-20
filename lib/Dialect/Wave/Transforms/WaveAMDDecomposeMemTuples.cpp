@@ -9,7 +9,7 @@
 #include "mlir/Dialect/Wave/Transforms/Passes.h"
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
-#include "mlir/Dialect/WaveMachine/IR/WaveMachine.h"
+#include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachine.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "llvm/ADT/STLExtras.h"
@@ -28,20 +28,21 @@ using namespace mlir;
 
 namespace {
 
-static wavemachine::RegType vgprNType(MLIRContext *ctx, unsigned width) {
-  return wavemachine::RegType::get(ctx, wavemachine::RegClass::VGPR, width,
-                                   /*index=*/-1);
+static waveamdmachine::RegType vgprNType(MLIRContext *ctx, unsigned width) {
+  return waveamdmachine::RegType::get(ctx, waveamdmachine::RegClass::VGPR,
+                                      width,
+                                      /*index=*/-1);
 }
 
-static wavemachine::MemTokenType memTokenType(MLIRContext *ctx) {
-  return wavemachine::MemTokenType::get(ctx);
+static waveamdmachine::MemTokenType memTokenType(MLIRContext *ctx) {
+  return waveamdmachine::MemTokenType::get(ctx);
 }
 
 static FailureOr<llvm::AMDGPU::IsaVersion> getIsaVersion(ModuleOp module) {
-  auto target = module->getAttrOfType<StringAttr>("wavemachine.target");
+  auto target = module->getAttrOfType<StringAttr>("waveamdmachine.target");
   if (!target)
-    return module.emitError(
-        "waveamd-decompose-mem-tuples requires a wavemachine.target attribute");
+    return module.emitError("waveamd-decompose-mem-tuples requires a "
+                            "waveamdmachine.target attribute");
   StringRef cpu = target.getValue();
   std::pair<StringRef, StringRef> split = cpu.rsplit("--");
   if (!split.second.empty())
@@ -103,17 +104,17 @@ static Operation *createGlobalLoadChunk(OpBuilder &builder, Location loc,
   Type rt = vgprNType(builder.getContext(), width);
   switch (width) {
   case 1:
-    return wavemachine::GlobalLoadB32Op::create(builder, loc, rt, tokenType,
-                                                off, base, dep, instOffset);
+    return waveamdmachine::GlobalLoadB32Op::create(builder, loc, rt, tokenType,
+                                                   off, base, dep, instOffset);
   case 2:
-    return wavemachine::GlobalLoadB64Op::create(builder, loc, rt, tokenType,
-                                                off, base, dep, instOffset);
+    return waveamdmachine::GlobalLoadB64Op::create(builder, loc, rt, tokenType,
+                                                   off, base, dep, instOffset);
   case 3:
-    return wavemachine::GlobalLoadB96Op::create(builder, loc, rt, tokenType,
-                                                off, base, dep, instOffset);
+    return waveamdmachine::GlobalLoadB96Op::create(builder, loc, rt, tokenType,
+                                                   off, base, dep, instOffset);
   case 4:
-    return wavemachine::GlobalLoadB128Op::create(builder, loc, rt, tokenType,
-                                                 off, base, dep, instOffset);
+    return waveamdmachine::GlobalLoadB128Op::create(builder, loc, rt, tokenType,
+                                                    off, base, dep, instOffset);
   }
   llvm_unreachable("unsupported global load chunk width");
 }
@@ -124,17 +125,17 @@ static Operation *createGlobalStoreChunk(OpBuilder &builder, Location loc,
                                          Value dep, int64_t instOffset) {
   switch (width) {
   case 1:
-    return wavemachine::GlobalStoreB32Op::create(builder, loc, tokenType, off,
-                                                 value, base, dep, instOffset);
+    return waveamdmachine::GlobalStoreB32Op::create(
+        builder, loc, tokenType, off, value, base, dep, instOffset);
   case 2:
-    return wavemachine::GlobalStoreB64Op::create(builder, loc, tokenType, off,
-                                                 value, base, dep, instOffset);
+    return waveamdmachine::GlobalStoreB64Op::create(
+        builder, loc, tokenType, off, value, base, dep, instOffset);
   case 3:
-    return wavemachine::GlobalStoreB96Op::create(builder, loc, tokenType, off,
-                                                 value, base, dep, instOffset);
+    return waveamdmachine::GlobalStoreB96Op::create(
+        builder, loc, tokenType, off, value, base, dep, instOffset);
   case 4:
-    return wavemachine::GlobalStoreB128Op::create(builder, loc, tokenType, off,
-                                                  value, base, dep, instOffset);
+    return waveamdmachine::GlobalStoreB128Op::create(
+        builder, loc, tokenType, off, value, base, dep, instOffset);
   }
   llvm_unreachable("unsupported global store chunk width");
 }
@@ -146,16 +147,16 @@ static Operation *createBufferLoadChunk(OpBuilder &builder, Location loc,
   Type rt = vgprNType(builder.getContext(), width);
   switch (width) {
   case 1:
-    return wavemachine::BufferLoadB32Op::create(
+    return waveamdmachine::BufferLoadB32Op::create(
         builder, loc, rt, tokenType, off, desc, soffset, dep, instOffset);
   case 2:
-    return wavemachine::BufferLoadB64Op::create(
+    return waveamdmachine::BufferLoadB64Op::create(
         builder, loc, rt, tokenType, off, desc, soffset, dep, instOffset);
   case 3:
-    return wavemachine::BufferLoadB96Op::create(
+    return waveamdmachine::BufferLoadB96Op::create(
         builder, loc, rt, tokenType, off, desc, soffset, dep, instOffset);
   case 4:
-    return wavemachine::BufferLoadB128Op::create(
+    return waveamdmachine::BufferLoadB128Op::create(
         builder, loc, rt, tokenType, off, desc, soffset, dep, instOffset);
   }
   llvm_unreachable("unsupported buffer load chunk width");
@@ -168,16 +169,16 @@ static Operation *createBufferStoreChunk(OpBuilder &builder, Location loc,
                                          int64_t instOffset) {
   switch (width) {
   case 1:
-    return wavemachine::BufferStoreB32Op::create(
+    return waveamdmachine::BufferStoreB32Op::create(
         builder, loc, tokenType, off, value, desc, soffset, dep, instOffset);
   case 2:
-    return wavemachine::BufferStoreB64Op::create(
+    return waveamdmachine::BufferStoreB64Op::create(
         builder, loc, tokenType, off, value, desc, soffset, dep, instOffset);
   case 3:
-    return wavemachine::BufferStoreB96Op::create(
+    return waveamdmachine::BufferStoreB96Op::create(
         builder, loc, tokenType, off, value, desc, soffset, dep, instOffset);
   case 4:
-    return wavemachine::BufferStoreB128Op::create(
+    return waveamdmachine::BufferStoreB128Op::create(
         builder, loc, tokenType, off, value, desc, soffset, dep, instOffset);
   }
   llvm_unreachable("unsupported buffer store chunk width");
@@ -189,17 +190,17 @@ static Operation *createDsLoadChunk(OpBuilder &builder, Location loc,
   Type rt = vgprNType(builder.getContext(), width);
   switch (width) {
   case 1:
-    return wavemachine::DsLoadB32Op::create(builder, loc, rt, tokenType, addr,
-                                            dep, instOffset);
+    return waveamdmachine::DsLoadB32Op::create(builder, loc, rt, tokenType,
+                                               addr, dep, instOffset);
   case 2:
-    return wavemachine::DsLoadB64Op::create(builder, loc, rt, tokenType, addr,
-                                            dep, instOffset);
+    return waveamdmachine::DsLoadB64Op::create(builder, loc, rt, tokenType,
+                                               addr, dep, instOffset);
   case 3:
-    return wavemachine::DsLoadB96Op::create(builder, loc, rt, tokenType, addr,
-                                            dep, instOffset);
+    return waveamdmachine::DsLoadB96Op::create(builder, loc, rt, tokenType,
+                                               addr, dep, instOffset);
   case 4:
-    return wavemachine::DsLoadB128Op::create(builder, loc, rt, tokenType, addr,
-                                             dep, instOffset);
+    return waveamdmachine::DsLoadB128Op::create(builder, loc, rt, tokenType,
+                                                addr, dep, instOffset);
   }
   llvm_unreachable("unsupported ds load chunk width");
 }
@@ -210,17 +211,17 @@ static Operation *createDsStoreChunk(OpBuilder &builder, Location loc,
                                      int64_t instOffset) {
   switch (width) {
   case 1:
-    return wavemachine::DsStoreB32Op::create(builder, loc, tokenType, addr,
-                                             value, dep, instOffset);
+    return waveamdmachine::DsStoreB32Op::create(builder, loc, tokenType, addr,
+                                                value, dep, instOffset);
   case 2:
-    return wavemachine::DsStoreB64Op::create(builder, loc, tokenType, addr,
-                                             value, dep, instOffset);
+    return waveamdmachine::DsStoreB64Op::create(builder, loc, tokenType, addr,
+                                                value, dep, instOffset);
   case 3:
-    return wavemachine::DsStoreB96Op::create(builder, loc, tokenType, addr,
-                                             value, dep, instOffset);
+    return waveamdmachine::DsStoreB96Op::create(builder, loc, tokenType, addr,
+                                                value, dep, instOffset);
   case 4:
-    return wavemachine::DsStoreB128Op::create(builder, loc, tokenType, addr,
-                                              value, dep, instOffset);
+    return waveamdmachine::DsStoreB128Op::create(builder, loc, tokenType, addr,
+                                                 value, dep, instOffset);
   }
   llvm_unreachable("unsupported ds store chunk width");
 }
@@ -234,12 +235,12 @@ static void finalizeLoadDecomposition(Operation *op, Value tupleResult,
                                       ArrayRef<Value> tokens) {
   OpBuilder builder(op);
   Type tokenType = memTokenType(op->getContext());
-  auto tupleFromElements = wavemachine::TupleFromElementsOp::create(
+  auto tupleFromElements = waveamdmachine::TupleFromElementsOp::create(
       builder, op->getLoc(), tupleResult.getType(), elements);
   tupleResult.replaceAllUsesWith(tupleFromElements.getTuple());
   if (tokenResult) {
-    auto tokenJoin = wavemachine::TokenJoinOp::create(builder, op->getLoc(),
-                                                      tokenType, tokens);
+    auto tokenJoin = waveamdmachine::TokenJoinOp::create(builder, op->getLoc(),
+                                                         tokenType, tokens);
     tokenResult.replaceAllUsesWith(tokenJoin.getResult());
   }
   op->erase();
@@ -249,8 +250,8 @@ static void finalizeStoreDecomposition(Operation *op, Value tokenResult,
                                        ArrayRef<Value> tokens) {
   OpBuilder builder(op);
   Type tokenType = memTokenType(op->getContext());
-  auto tokenJoin = wavemachine::TokenJoinOp::create(builder, op->getLoc(),
-                                                    tokenType, tokens);
+  auto tokenJoin = waveamdmachine::TokenJoinOp::create(builder, op->getLoc(),
+                                                       tokenType, tokens);
   if (tokenResult)
     tokenResult.replaceAllUsesWith(tokenJoin.getResult());
   op->erase();
@@ -267,21 +268,23 @@ static SmallVector<Value> splitTupleByPlan(OpBuilder &builder, Operation *op,
   elementTypes.reserve(plan.size());
   for (unsigned w : plan)
     elementTypes.push_back(vgprNType(ctx, w));
-  auto split = wavemachine::TupleToElementsOp::create(builder, op->getLoc(),
-                                                      elementTypes, tuple);
+  auto split = waveamdmachine::TupleToElementsOp::create(builder, op->getLoc(),
+                                                         elementTypes, tuple);
   return SmallVector<Value>(split.getElements().begin(),
                             split.getElements().end());
 }
 
-static LogicalResult decomposeGlobalLoad(wavemachine::GlobalLoadTupleB32Op op,
-                                         const llvm::AMDGPU::IsaVersion &isa) {
+static LogicalResult
+decomposeGlobalLoad(waveamdmachine::GlobalLoadTupleB32Op op,
+                    const llvm::AMDGPU::IsaVersion &isa) {
   OpBuilder builder(op);
   unsigned width =
-      cast<wavemachine::RegType>(op.getResult().getType()).getWidth();
+      cast<waveamdmachine::RegType>(op.getResult().getType()).getWidth();
   SmallVector<unsigned> plan = planChunks(width, [&](unsigned w) {
     return widthSupported<
-        wavemachine::GlobalLoadB32Op, wavemachine::GlobalLoadB64Op,
-        wavemachine::GlobalLoadB96Op, wavemachine::GlobalLoadB128Op>(w, isa);
+        waveamdmachine::GlobalLoadB32Op, waveamdmachine::GlobalLoadB64Op,
+        waveamdmachine::GlobalLoadB96Op, waveamdmachine::GlobalLoadB128Op>(w,
+                                                                           isa);
   });
   Type tokenType = memTokenType(op.getContext());
   int64_t baseInstOffset = op.getInstOffset();
@@ -304,15 +307,17 @@ static LogicalResult decomposeGlobalLoad(wavemachine::GlobalLoadTupleB32Op op,
   return success();
 }
 
-static LogicalResult decomposeBufferLoad(wavemachine::BufferLoadTupleB32Op op,
-                                         const llvm::AMDGPU::IsaVersion &isa) {
+static LogicalResult
+decomposeBufferLoad(waveamdmachine::BufferLoadTupleB32Op op,
+                    const llvm::AMDGPU::IsaVersion &isa) {
   OpBuilder builder(op);
   unsigned width =
-      cast<wavemachine::RegType>(op.getResult().getType()).getWidth();
+      cast<waveamdmachine::RegType>(op.getResult().getType()).getWidth();
   SmallVector<unsigned> plan = planChunks(width, [&](unsigned w) {
     return widthSupported<
-        wavemachine::BufferLoadB32Op, wavemachine::BufferLoadB64Op,
-        wavemachine::BufferLoadB96Op, wavemachine::BufferLoadB128Op>(w, isa);
+        waveamdmachine::BufferLoadB32Op, waveamdmachine::BufferLoadB64Op,
+        waveamdmachine::BufferLoadB96Op, waveamdmachine::BufferLoadB128Op>(w,
+                                                                           isa);
   });
   Type tokenType = memTokenType(op.getContext());
   int64_t baseInstOffset = op.getInstOffset();
@@ -335,15 +340,15 @@ static LogicalResult decomposeBufferLoad(wavemachine::BufferLoadTupleB32Op op,
   return success();
 }
 
-static LogicalResult decomposeDsLoad(wavemachine::DsLoadTupleB32Op op,
+static LogicalResult decomposeDsLoad(waveamdmachine::DsLoadTupleB32Op op,
                                      const llvm::AMDGPU::IsaVersion &isa) {
   OpBuilder builder(op);
   unsigned width =
-      cast<wavemachine::RegType>(op.getResult().getType()).getWidth();
+      cast<waveamdmachine::RegType>(op.getResult().getType()).getWidth();
   SmallVector<unsigned> plan = planChunks(width, [&](unsigned w) {
-    return widthSupported<wavemachine::DsLoadB32Op, wavemachine::DsLoadB64Op,
-                          wavemachine::DsLoadB96Op, wavemachine::DsLoadB128Op>(
-        w, isa);
+    return widthSupported<
+        waveamdmachine::DsLoadB32Op, waveamdmachine::DsLoadB64Op,
+        waveamdmachine::DsLoadB96Op, waveamdmachine::DsLoadB128Op>(w, isa);
   });
   Type tokenType = memTokenType(op.getContext());
   int64_t baseOffset = op.getOffset();
@@ -366,15 +371,17 @@ static LogicalResult decomposeDsLoad(wavemachine::DsLoadTupleB32Op op,
   return success();
 }
 
-static LogicalResult decomposeGlobalStore(wavemachine::GlobalStoreTupleB32Op op,
-                                          const llvm::AMDGPU::IsaVersion &isa) {
+static LogicalResult
+decomposeGlobalStore(waveamdmachine::GlobalStoreTupleB32Op op,
+                     const llvm::AMDGPU::IsaVersion &isa) {
   OpBuilder builder(op);
   unsigned width =
-      cast<wavemachine::RegType>(op.getValue().getType()).getWidth();
+      cast<waveamdmachine::RegType>(op.getValue().getType()).getWidth();
   SmallVector<unsigned> plan = planChunks(width, [&](unsigned w) {
     return widthSupported<
-        wavemachine::GlobalStoreB32Op, wavemachine::GlobalStoreB64Op,
-        wavemachine::GlobalStoreB96Op, wavemachine::GlobalStoreB128Op>(w, isa);
+        waveamdmachine::GlobalStoreB32Op, waveamdmachine::GlobalStoreB64Op,
+        waveamdmachine::GlobalStoreB96Op, waveamdmachine::GlobalStoreB128Op>(
+        w, isa);
   });
   SmallVector<Value> elements =
       splitTupleByPlan(builder, op, op.getValue(), plan);
@@ -396,15 +403,17 @@ static LogicalResult decomposeGlobalStore(wavemachine::GlobalStoreTupleB32Op op,
   return success();
 }
 
-static LogicalResult decomposeBufferStore(wavemachine::BufferStoreTupleB32Op op,
-                                          const llvm::AMDGPU::IsaVersion &isa) {
+static LogicalResult
+decomposeBufferStore(waveamdmachine::BufferStoreTupleB32Op op,
+                     const llvm::AMDGPU::IsaVersion &isa) {
   OpBuilder builder(op);
   unsigned width =
-      cast<wavemachine::RegType>(op.getValue().getType()).getWidth();
+      cast<waveamdmachine::RegType>(op.getValue().getType()).getWidth();
   SmallVector<unsigned> plan = planChunks(width, [&](unsigned w) {
     return widthSupported<
-        wavemachine::BufferStoreB32Op, wavemachine::BufferStoreB64Op,
-        wavemachine::BufferStoreB96Op, wavemachine::BufferStoreB128Op>(w, isa);
+        waveamdmachine::BufferStoreB32Op, waveamdmachine::BufferStoreB64Op,
+        waveamdmachine::BufferStoreB96Op, waveamdmachine::BufferStoreB128Op>(
+        w, isa);
   });
   SmallVector<Value> elements =
       splitTupleByPlan(builder, op, op.getValue(), plan);
@@ -427,15 +436,15 @@ static LogicalResult decomposeBufferStore(wavemachine::BufferStoreTupleB32Op op,
   return success();
 }
 
-static LogicalResult decomposeDsStore(wavemachine::DsStoreTupleB32Op op,
+static LogicalResult decomposeDsStore(waveamdmachine::DsStoreTupleB32Op op,
                                       const llvm::AMDGPU::IsaVersion &isa) {
   OpBuilder builder(op);
   unsigned width =
-      cast<wavemachine::RegType>(op.getValue().getType()).getWidth();
+      cast<waveamdmachine::RegType>(op.getValue().getType()).getWidth();
   SmallVector<unsigned> plan = planChunks(width, [&](unsigned w) {
-    return widthSupported<wavemachine::DsStoreB32Op, wavemachine::DsStoreB64Op,
-                          wavemachine::DsStoreB96Op,
-                          wavemachine::DsStoreB128Op>(w, isa);
+    return widthSupported<
+        waveamdmachine::DsStoreB32Op, waveamdmachine::DsStoreB64Op,
+        waveamdmachine::DsStoreB96Op, waveamdmachine::DsStoreB128Op>(w, isa);
   });
   SmallVector<Value> elements =
       splitTupleByPlan(builder, op, op.getValue(), plan);
@@ -467,11 +476,12 @@ struct WaveAMDDecomposeMemTuplesPass
       return signalPassFailure();
     SmallVector<Operation *> worklist;
     module.walk([&](Operation *op) {
-      if (isa<wavemachine::GlobalLoadTupleB32Op,
-              wavemachine::BufferLoadTupleB32Op, wavemachine::DsLoadTupleB32Op,
-              wavemachine::GlobalStoreTupleB32Op,
-              wavemachine::BufferStoreTupleB32Op,
-              wavemachine::DsStoreTupleB32Op>(op))
+      if (isa<waveamdmachine::GlobalLoadTupleB32Op,
+              waveamdmachine::BufferLoadTupleB32Op,
+              waveamdmachine::DsLoadTupleB32Op,
+              waveamdmachine::GlobalStoreTupleB32Op,
+              waveamdmachine::BufferStoreTupleB32Op,
+              waveamdmachine::DsStoreTupleB32Op>(op))
         worklist.push_back(op);
     });
     for (Operation *op : worklist) {
@@ -482,17 +492,17 @@ struct WaveAMDDecomposeMemTuplesPass
 
   static LogicalResult decomposeOne(Operation *op,
                                     const llvm::AMDGPU::IsaVersion &isaVer) {
-    if (auto load = dyn_cast<wavemachine::GlobalLoadTupleB32Op>(op))
+    if (auto load = dyn_cast<waveamdmachine::GlobalLoadTupleB32Op>(op))
       return decomposeGlobalLoad(load, isaVer);
-    if (auto load = dyn_cast<wavemachine::BufferLoadTupleB32Op>(op))
+    if (auto load = dyn_cast<waveamdmachine::BufferLoadTupleB32Op>(op))
       return decomposeBufferLoad(load, isaVer);
-    if (auto load = dyn_cast<wavemachine::DsLoadTupleB32Op>(op))
+    if (auto load = dyn_cast<waveamdmachine::DsLoadTupleB32Op>(op))
       return decomposeDsLoad(load, isaVer);
-    if (auto store = dyn_cast<wavemachine::GlobalStoreTupleB32Op>(op))
+    if (auto store = dyn_cast<waveamdmachine::GlobalStoreTupleB32Op>(op))
       return decomposeGlobalStore(store, isaVer);
-    if (auto store = dyn_cast<wavemachine::BufferStoreTupleB32Op>(op))
+    if (auto store = dyn_cast<waveamdmachine::BufferStoreTupleB32Op>(op))
       return decomposeBufferStore(store, isaVer);
-    if (auto store = dyn_cast<wavemachine::DsStoreTupleB32Op>(op))
+    if (auto store = dyn_cast<waveamdmachine::DsStoreTupleB32Op>(op))
       return decomposeDsStore(store, isaVer);
     return success();
   }

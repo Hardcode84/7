@@ -2,15 +2,15 @@ add_mlir_dialect_library(MLIRWaveTransforms
   WaveAMDABILowering.cpp
   WaveAMDDecomposeMemTuples.cpp
   WaveAMDHazardWaits.cpp
+  WaveAMDMachine.cpp
+  WaveAMDMachineIndexExpr.cpp
+  WaveAMDMachineLoadStore.cpp
+  WaveAMDMachineScfFor.cpp
+  WaveAMDMachineWaitcnt.cpp
   WaveAMDMetadata.cpp
   WaveAMDRegAlloc.cpp
   WaveAMDResourceInfo.cpp
   WaveAttachGPUBinary.cpp
-  WaveMachine.cpp
-  WaveMachineIndexExpr.cpp
-  WaveMachineLoadStore.cpp
-  WaveMachineScfFor.cpp
-  WaveMachineWaitcnt.cpp
   WaveToGPU.cpp
   WaveToROCDL.cpp
 
@@ -35,8 +35,8 @@ add_mlir_dialect_library(MLIRWaveTransforms
   MLIRSCFDialect
   MLIRTransformUtils
   MLIRWaveAMDDialect
+  MLIRWaveAMDMachineDialect
   MLIRWaveDialect
-  MLIRWaveMachineDialect
   )
 
 target_include_directories(obj.MLIRWaveTransforms

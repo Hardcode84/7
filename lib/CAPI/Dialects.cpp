@@ -16,7 +16,7 @@
 #include "mlir/Dialect/Wave/IR/Wave.h"
 #include "mlir/Dialect/Wave/IR/WaveAMD.h"
 #include "mlir/Dialect/Wave/IR/WaveSymbols.h"
-#include "mlir/Dialect/WaveMachine/IR/WaveMachine.h"
+#include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachine.h"
 #include "llvm/ADT/StringRef.h"
 
 #include <cstring>
@@ -26,8 +26,8 @@ using namespace mlir;
 MLIR_DEFINE_CAPI_DIALECT_REGISTRATION(Wave, wave, mlir::wave::WaveDialect)
 MLIR_DEFINE_CAPI_DIALECT_REGISTRATION(WaveAMD, waveamd,
                                       mlir::waveamd::WaveAMDDialect)
-MLIR_DEFINE_CAPI_DIALECT_REGISTRATION(WaveMachine, wavemachine,
-                                      mlir::wavemachine::WaveMachineDialect)
+MLIR_DEFINE_CAPI_DIALECT_REGISTRATION(
+    WaveAMDMachine, waveamdmachine, mlir::waveamdmachine::WaveAMDMachineDialect)
 
 //===----------------------------------------------------------------------===//
 // Wave types

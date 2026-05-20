@@ -29,7 +29,7 @@ add_mlir_translation_library(MLIRTargetWave
   MLIRSupport
   MLIRTranslateLib
   MLIRWaveDialect
-  MLIRWaveMachineDialect
+  MLIRWaveAMDMachineDialect
   MLIRWaveTransforms
   lldCommon
   lldELF

@@ -14,7 +14,7 @@
 // this test also exercises tuple `ds_store_b32` / `ds_load_b32`,
 // `s_barrier`, and `wave.lds_size` -> `group_segment_fixed_size`
 // (4 waves * 2 fragments * 1024 B = 8192 B) across the multi-wave
-// shape and the `wavemachine.uniform_loop` back-edge -- the LGKM
+// shape and the `waveamdmachine.uniform_loop` back-edge -- the LGKM
 // drain across iterations is the regression we exposed when the K
 // loop became the only K accumulation shape.
 //

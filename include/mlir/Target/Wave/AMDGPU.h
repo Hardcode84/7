@@ -18,14 +18,14 @@ namespace wave {
 
 /// Emit AMDGPU assembly for the Wave dialect MVP.
 ///
-/// This backend runs the staged WaveMachine MLIR pipeline before emission. The
-/// final emitter consumes inspectable WaveMachine IR rather than selecting
-/// source Wave operations directly.
+/// This backend runs the staged WaveAMDMachine MLIR pipeline before emission.
+/// The final emitter consumes inspectable WaveAMDMachine IR rather than
+/// selecting source Wave operations directly.
 LogicalResult translateWaveToAMDGPU(Operation *op, raw_ostream &os);
 
 /// Run the wave-to-AMDGPU pipeline plus in-process assembly and linking,
 /// producing a HSACO blob in memory. `op` must be a `ModuleOp` carrying a
-/// `wavemachine.target` string attribute compatible with the WaveMachine
+/// `waveamdmachine.target` string attribute compatible with the WaveAMDMachine
 /// backend; `op` is mutated in place by the pipeline. `triple`, `chip`, and
 /// `features` describe the assembler/linker target.
 LogicalResult compileWaveToHSACO(Operation *op, StringRef triple,

@@ -31,23 +31,24 @@ static void bindAddressSpaceAttr(nb::module_ &m, const char *name,
 
 // Single `register_dialects(context, load=True)` entry point that exposes
 // both the user-facing `wave` / `waveamd` dialects and the lower-level
-// `wavemachine` dialect. Callers normally only need the first two, but we
+// `waveamdmachine` dialect. Callers normally only need the first two, but we
 // wire the third one too so a Python-built module can be round-tripped
-// through the WaveMachine pipeline without re-registering out-of-band.
+// through the WaveAMDMachine pipeline without re-registering out-of-band.
 static void bindRegisterDialects(nb::module_ &m) {
   m.def(
       "register_dialects",
       [](MlirContext ctx, bool load) {
         MlirDialectHandle wave = mlirGetDialectHandle__wave__();
         MlirDialectHandle waveamd = mlirGetDialectHandle__waveamd__();
-        MlirDialectHandle wavemachine = mlirGetDialectHandle__wavemachine__();
+        MlirDialectHandle waveamdmachine =
+            mlirGetDialectHandle__waveamdmachine__();
         mlirDialectHandleRegisterDialect(wave, ctx);
         mlirDialectHandleRegisterDialect(waveamd, ctx);
-        mlirDialectHandleRegisterDialect(wavemachine, ctx);
+        mlirDialectHandleRegisterDialect(waveamdmachine, ctx);
         if (load) {
           mlirDialectHandleLoadDialect(wave, ctx);
           mlirDialectHandleLoadDialect(waveamd, ctx);
-          mlirDialectHandleLoadDialect(wavemachine, ctx);
+          mlirDialectHandleLoadDialect(waveamdmachine, ctx);
         }
       },
       nb::arg("context"), nb::arg("load") = true);

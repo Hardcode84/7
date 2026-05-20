@@ -10,7 +10,7 @@
 
 #include "Utils/AMDGPUBaseInfo.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
-#include "mlir/Dialect/WaveMachine/IR/WaveMachine.h"
+#include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachine.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "llvm/MC/MCSubtargetInfo.h"
@@ -96,8 +96,8 @@ inline unsigned encodeCount(unsigned Count) {
 } // namespace amdgpu_compat
 
 static Value createImm(OpBuilder &builder, Location loc, int64_t value) {
-  return wavemachine::ImmOp::create(
-      builder, loc, wavemachine::ImmType::get(builder.getContext()),
+  return waveamdmachine::ImmOp::create(
+      builder, loc, waveamdmachine::ImmType::get(builder.getContext()),
       static_cast<uint64_t>(value));
 }
 
@@ -107,7 +107,7 @@ static void insertNoops(OpBuilder &builder, Location loc, unsigned count,
   while (count > 0) {
     unsigned chunk = std::min(count, maxCount);
     count -= chunk;
-    wavemachine::SNopOp::create(
+    waveamdmachine::SNopOp::create(
         builder, loc,
         createImm(builder, loc, amdgpu_compat::SNop::encodeCount(chunk)));
   }
@@ -120,10 +120,10 @@ createSubtargetInfo(Operation *op) {
     module = op->getParentOfType<ModuleOp>();
   if (!module)
     return op->emitError("waveamd-insert-hazard-waits requires a module");
-  auto target = module->getAttrOfType<StringAttr>("wavemachine.target");
+  auto target = module->getAttrOfType<StringAttr>("waveamdmachine.target");
   if (!target)
     return module.emitError("waveamd-insert-hazard-waits requires a "
-                            "wavemachine.target attribute");
+                            "waveamdmachine.target attribute");
   StringRef cpu = target.getValue();
   std::pair<StringRef, StringRef> split = cpu.rsplit("--");
   if (!split.second.empty())
@@ -153,7 +153,7 @@ createSubtargetInfo(Operation *op) {
 
 static std::optional<unsigned> getImmediate(Value value) {
   Operation *def = value.getDefiningOp();
-  if (!def || !isa<wavemachine::ImmOp>(def))
+  if (!def || !isa<waveamdmachine::ImmOp>(def))
     return std::nullopt;
   return static_cast<unsigned>(
       def->getAttrOfType<IntegerAttr>("value").getInt());
@@ -190,12 +190,12 @@ private:
   // True for ops that must not appear in `wave.kernel` funcs at this stage
   // (ABI lowering should have replaced them).
   static bool isUnloweredKernelArg(Operation &op, func::FuncOp func) {
-    return func->hasAttr("wave.kernel") && isa<wavemachine::ArgOp>(op);
+    return func->hasAttr("wave.kernel") && isa<waveamdmachine::ArgOp>(op);
   }
   // True for scalar memory loads missing the required `base` attribute.
   static bool isMalformedSMEMLoad(Operation &op) {
-    return isa<wavemachine::SLoadB32Op, wavemachine::SLoadB64Op,
-               wavemachine::SLoadB128Op>(op) &&
+    return isa<waveamdmachine::SLoadB32Op, waveamdmachine::SLoadB64Op,
+               waveamdmachine::SLoadB128Op>(op) &&
            !op.getAttrOfType<StringAttr>("base");
   }
 
@@ -205,7 +205,7 @@ private:
                             const llvm::MCSubtargetInfo &sti) {
     builder.setInsertionPoint(&op);
     if (cfg.hasDelayAlu) {
-      wavemachine::SDelayAluOp::create(
+      waveamdmachine::SDelayAluOp::create(
           builder, op.getLoc(), createImm(builder, op.getLoc(), cfg.valuDep1));
     } else {
       insertNoops(builder, op.getLoc(), /*count=*/1, sti);
@@ -225,14 +225,14 @@ private:
     return cfg.hasDelayAlu ? lg != cfg.defaultLgkmcnt : true;
   }
 
-  // Walk every wavemachine op in the function in program order, including
-  // ops nested inside structured regions such as `wavemachine.uniform_loop`.
+  // Walk every waveamdmachine op in the function in program order, including
+  // ops nested inside structured regions such as `waveamdmachine.uniform_loop`.
   // Returns failure (via diagnostic emission) if a malformed op is found.
   LogicalResult collectOps(func::FuncOp func,
                            SmallVectorImpl<Operation *> &ops) {
     func.walk<WalkOrder::PreOrder>([&](Operation *op) {
       if (op->getName().getDialectNamespace() ==
-          wavemachine::WaveMachineDialect::getDialectNamespace())
+          waveamdmachine::WaveAMDMachineDialect::getDialectNamespace())
         ops.push_back(op);
     });
     for (Operation *op : ops) {
@@ -255,11 +255,11 @@ private:
                    const llvm::MCSubtargetInfo &sti) {
     bool pendingLgkmWait = startState;
     for (Operation *op : ops) {
-      if (op->hasTrait<OpTrait::wavemachine::VALUOp>() && pendingLgkmWait) {
+      if (op->hasTrait<OpTrait::waveamdmachine::VALUOp>() && pendingLgkmWait) {
         insertValuMitigation(*op, builder, cfg, sti);
         pendingLgkmWait = false;
       }
-      if (isa<wavemachine::SWaitcntOp>(op))
+      if (isa<waveamdmachine::SWaitcntOp>(op))
         if (auto newState = recomputePendingLgkm(*op, cfg))
           pendingLgkmWait = *newState;
     }
@@ -288,7 +288,7 @@ private:
 
   static bool containsLoop(func::FuncOp func) {
     bool found = false;
-    func.walk([&](wavemachine::UniformLoopOp) {
+    func.walk([&](waveamdmachine::UniformLoopOp) {
       found = true;
       return WalkResult::interrupt();
     });

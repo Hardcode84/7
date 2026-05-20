@@ -3,7 +3,7 @@
 Standalone MLIR **Wave** dialect: an explicit wave-level programming model
 for AMDGPU. The dialect preserves uniformity, lane masks, wave size, and
 memory ordering as first-class IR facts, and lowers through an
-inspectable WaveMachine dialect to AMDGPU assembly.
+inspectable WaveAMDMachine dialect to AMDGPU assembly.
 
 The design rationale is in [`docs/AMDGPUExplicitWaveProgrammingModel.md`].
 
@@ -15,10 +15,10 @@ The design rationale is in [`docs/AMDGPUExplicitWaveProgrammingModel.md`].
   fragments).
 - `WaveAMD` dialect — AMDGPU-specific extensions (`make_buffer`,
   WMMA opcodes, register class hints).
-- `WaveMachine` dialect — inspectable machine-level IR after wave-to-amdgpu
+- `WaveAMDMachine` dialect — inspectable machine-level IR after wave-to-amdgpu
   selection: explicit SGPR / VGPR / mask / memory-token operands, every
   pass-pipeline stage is a printable IR boundary.
-- Transform passes: selection (`waveamd-to-wavemachine`), ABI lowering,
+- Transform passes: selection (`waveamd-to-waveamdmachine`), ABI lowering,
   register allocation, hazard / waitcnt insertion, resource info, HSA
   metadata, GPU binary emission.
 - `wave-opt` and `wave-translate` tools wired with the full pipeline,
@@ -32,10 +32,10 @@ The design rationale is in [`docs/AMDGPUExplicitWaveProgrammingModel.md`].
 
 ```
 include/mlir/Dialect/Wave/        Wave dialect IR + transforms (.h / .td)
-include/mlir/Dialect/WaveMachine/ WaveMachine machine-level dialect
+include/mlir/Dialect/WaveAMDMachine/ WaveAMDMachine machine-level dialect
 include/Wave-c/                   CAPI (used by the Python bindings)
 lib/Dialect/Wave/{IR,Transforms}/ Dialect impl + waveamd-* passes
-lib/Dialect/WaveMachine/IR/       WaveMachine impl
+lib/Dialect/WaveAMDMachine/IR/       WaveAMDMachine impl
 lib/Target/Wave/                  AMDGPU assembly backend + translation
 lib/CAPI/                         CAPI implementation
 python/                           Nanobind extension + wave_dsl builder
@@ -83,7 +83,7 @@ are not what you want.
 
 ## Running
 
-`wave-opt` runs the Wave / WaveAMD / WaveMachine passes individually;
+`wave-opt` runs the Wave / WaveAMD / WaveAMDMachine passes individually;
 `wave-translate --wave-to-amdgpu-asm` is the all-in-one frontend that
 emits AMDGPU assembly. The matmul example runs end-to-end through
 `mlir-runner` on an AMDGPU box with the ROCm runtime visible:

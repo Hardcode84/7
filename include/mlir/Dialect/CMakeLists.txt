@@ -1,2 +1,2 @@
 add_subdirectory(Wave)
-add_subdirectory(WaveMachine)
+add_subdirectory(WaveAMDMachine)
