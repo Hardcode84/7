@@ -11,8 +11,6 @@ add_mlir_dialect_library(MLIRWaveTransforms
   WaveAMDRegAlloc.cpp
   WaveAMDResourceInfo.cpp
   WaveAttachGPUBinary.cpp
-  WaveToGPU.cpp
-  WaveToROCDL.cpp
 
   ADDITIONAL_HEADER_DIRS
   ${MLIR_MAIN_INCLUDE_DIR}/mlir/Dialect/Wave
