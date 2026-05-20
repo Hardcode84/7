@@ -14,10 +14,7 @@ module attributes {wavemachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // CHECK: wavemachine.buffer_store_tuple_b32 %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}
 
 // ASM-LABEL: buffer_store_tuple_kernel:
-// ASM: buffer_store_b32 {{v[0-9]+}}, {{v[0-9]+}}, s[{{[0-9]+}}:{{[0-9]+}}], 0 offen{{$}}
-// ASM: buffer_store_b32 {{v[0-9]+}}, {{v[0-9]+}}, s[{{[0-9]+}}:{{[0-9]+}}], 0 offen offset:4
-// ASM: buffer_store_b32 {{v[0-9]+}}, {{v[0-9]+}}, s[{{[0-9]+}}:{{[0-9]+}}], 0 offen offset:8
-// ASM: buffer_store_b32 {{v[0-9]+}}, {{v[0-9]+}}, s[{{[0-9]+}}:{{[0-9]+}}], 0 offen offset:12
+// ASM: buffer_store_b128 v{{\[[0-9]+:[0-9]+\]}}, {{v[0-9]+}}, s[{{[0-9]+}}:{{[0-9]+}}], 0 offen{{$}}
 // ASM: s_endpgm
 func.func @buffer_store_tuple_kernel(%arg0: !wave.ptr<i32, #wave.global>) attributes {wave.kernel} {
   %base = wavemachine.arg {index = 0 : i64, pointer = true} : !wavemachine.reg<sgpr, 2>

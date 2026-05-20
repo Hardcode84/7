@@ -137,20 +137,19 @@ func.func @wave_lds_tuple_echo(%in: !wave.ptr<i32, #wave.global>,
     attributes {wave.kernel, wave.lds_size = 1024 : i64} {
   %lane = wave.lane_id : !wave.simd<i32, 32>
   %ip = wave.ptr_add %in, %lane : !wave.ptr<i32, #wave.global>, !wave.simd<i32, 32> -> !wave.simd<!wave.ptr<i32, #wave.global>, 32>
-  // CHECK: global_load_b32
+  // CHECK: global_load_b128
+  // CHECK: global_load_b128
   %v, %tok = wave.load %ip : (!wave.simd<!wave.ptr<i32, #wave.global>, 32>) -> (!wave.simd<vector<8xi32>, 32>, !wave.mem.token)
   %lds = wave.lds_base : !wave.ptr<i32, #wave.shared>
   %lds_ptrs = wave.ptr_add %lds, %lane : !wave.ptr<i32, #wave.shared>, !wave.simd<i32, 32> -> !wave.simd<!wave.ptr<i32, #wave.shared>, 32>
-  // CHECK: ds_store_b32 {{v[0-9]+}}, {{v[0-9]+}}
-  // CHECK: ds_store_b32 {{v[0-9]+}}, {{v[0-9]+}} offset:4
-  // CHECK: ds_store_b32 {{v[0-9]+}}, {{v[0-9]+}} offset:28
+  // CHECK: ds_store_b128 {{v[0-9]+}}, {{v\[[0-9]+:[0-9]+\]}}
+  // CHECK: ds_store_b128 {{v[0-9]+}}, {{v\[[0-9]+:[0-9]+\]}} offset:16
   %store_token = wave.store %v -> %lds_ptrs after %tok : (!wave.simd<vector<8xi32>, 32>, !wave.simd<!wave.ptr<i32, #wave.shared>, 32>, !wave.mem.token) -> !wave.mem.token
   // CHECK: s_waitcnt lgkmcnt(0)
   // CHECK: s_barrier
   %barrier_token = wave.barrier %store_token : (!wave.mem.token) -> !wave.mem.token
-  // CHECK: ds_load_b32 {{v[0-9]+}}, {{v[0-9]+}}
-  // CHECK: ds_load_b32 {{v[0-9]+}}, {{v[0-9]+}} offset:4
-  // CHECK: ds_load_b32 {{v[0-9]+}}, {{v[0-9]+}} offset:28
+  // CHECK: ds_load_b128 {{v\[[0-9]+:[0-9]+\]}}, {{v[0-9]+}}
+  // CHECK: ds_load_b128 {{v\[[0-9]+:[0-9]+\]}}, {{v[0-9]+}} offset:16
   %loaded:2 = wave.load %lds_ptrs after %barrier_token : (!wave.simd<!wave.ptr<i32, #wave.shared>, 32>, !wave.mem.token) -> (!wave.simd<vector<8xi32>, 32>, !wave.mem.token)
   %op = wave.ptr_add %out, %lane : !wave.ptr<i32, #wave.global>, !wave.simd<i32, 32> -> !wave.simd<!wave.ptr<i32, #wave.global>, 32>
   %frag = waveamd.fragment_pack %loaded#0 : !wave.simd<vector<8xi32>, 32> -> !waveamd.fragment<2, f32, 16, 16, 32, 8>
@@ -176,9 +175,8 @@ func.func @wave_buffer_tuple_load(%in: !wave.ptr<i32, #wave.global>,
   %buffer = waveamd.make_buffer %in, %range : !wave.ptr<i32, #wave.global>, i32 -> !wave.ptr<i32, #waveamd.buffer>
   %lane = wave.lane_id : !wave.simd<i32, 32>
   %iptrs = wave.ptr_add %buffer, %lane : !wave.ptr<i32, #waveamd.buffer>, !wave.simd<i32, 32> -> !wave.simd<!wave.ptr<i32, #waveamd.buffer>, 32>
-  // CHECK: buffer_load_b32 v{{[0-9]+}}, {{v[0-9]+}}, {{s\[[0-9]+:[0-9]+\]}}, 0 offen{{$}}
-  // CHECK: buffer_load_b32 v{{[0-9]+}}, {{v[0-9]+}}, {{s\[[0-9]+:[0-9]+\]}}, 0 offen offset:4
-  // CHECK: buffer_load_b32 v{{[0-9]+}}, {{v[0-9]+}}, {{s\[[0-9]+:[0-9]+\]}}, 0 offen offset:28
+  // CHECK: buffer_load_b128 v{{\[[0-9]+:[0-9]+\]}}, {{v[0-9]+}}, {{s\[[0-9]+:[0-9]+\]}}, 0 offen{{$}}
+  // CHECK: buffer_load_b128 v{{\[[0-9]+:[0-9]+\]}}, {{v[0-9]+}}, {{s\[[0-9]+:[0-9]+\]}}, 0 offen offset:16
   %v, %tok = wave.load %iptrs : (!wave.simd<!wave.ptr<i32, #waveamd.buffer>, 32>) -> (!wave.simd<vector<8xi32>, 32>, !wave.mem.token)
   %optrs = wave.ptr_add %out, %lane : !wave.ptr<i32, #wave.global>, !wave.simd<i32, 32> -> !wave.simd<!wave.ptr<i32, #wave.global>, 32>
   %frag = waveamd.fragment_pack %v : !wave.simd<vector<8xi32>, 32> -> !waveamd.fragment<2, f32, 16, 16, 32, 8>
@@ -221,20 +219,20 @@ func.func @wave_two_tuple_loads_overlap(%a_in: !wave.ptr<i32, #wave.global>,
   %slot_b_off = wave.addi %lane, %c256v : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
   %slot_b = wave.ptr_add %lds, %slot_b_off : !wave.ptr<i32, #wave.shared>, !wave.simd<i32, 32> -> !wave.simd<!wave.ptr<i32, #wave.shared>, 32>
   // CHECK: s_waitcnt lgkmcnt(1)
-  // CHECK-NEXT: global_load_b32 {{v[0-9]+, v[0-9]+, s\[6:7\]$}}
-  // CHECK-COUNT-7: global_load_b32 {{.*}} s[6:7] offset
+  // CHECK-NEXT: global_load_b128 {{v\[[0-9]+:[0-9]+\], v[0-9]+, s\[6:7\]$}}
+  // CHECK-NEXT: global_load_b128 {{.*}} s[6:7] offset
   // CHECK-NEXT: s_waitcnt lgkmcnt(0)
-  // CHECK-NEXT: global_load_b32 {{v[0-9]+, v[0-9]+, s\[8:9\]$}}
-  // CHECK-COUNT-7: global_load_b32 {{.*}} s[8:9] offset
-  // CHECK-NEXT: s_waitcnt vmcnt(8)
+  // CHECK-NEXT: global_load_b128 {{v\[[0-9]+:[0-9]+\], v[0-9]+, s\[8:9\]$}}
+  // CHECK-NEXT: global_load_b128 {{.*}} s[8:9] offset
+  // CHECK-NEXT: s_waitcnt vmcnt(2)
   %a_regs, %a_tok = wave.load %ap : (!wave.simd<!wave.ptr<i32, #wave.global>, 32>) -> (!wave.simd<vector<8xi32>, 32>, !wave.mem.token)
   %b_regs, %b_tok = wave.load %bp : (!wave.simd<!wave.ptr<i32, #wave.global>, 32>) -> (!wave.simd<vector<8xi32>, 32>, !wave.mem.token)
-  // CHECK-NEXT: ds_store_b32 {{v[0-9]+, v[0-9]+$}}
-  // CHECK-COUNT-7: ds_store_b32 {{v[0-9]+, v[0-9]+}} offset
+  // CHECK-NEXT: ds_store_b128 {{v[0-9]+, v\[[0-9]+:[0-9]+\]$}}
+  // CHECK-NEXT: ds_store_b128 {{v[0-9]+, v\[[0-9]+:[0-9]+\]}} offset
   // CHECK-NEXT: s_waitcnt vmcnt(0)
   %a_st = wave.store %a_regs -> %slot_a after %a_tok : (!wave.simd<vector<8xi32>, 32>, !wave.simd<!wave.ptr<i32, #wave.shared>, 32>, !wave.mem.token) -> !wave.mem.token
-  // CHECK-NEXT: ds_store_b32 {{v[0-9]+, v[0-9]+$}}
-  // CHECK-COUNT-7: ds_store_b32 {{v[0-9]+, v[0-9]+}} offset
+  // CHECK-NEXT: ds_store_b128 {{v[0-9]+, v\[[0-9]+:[0-9]+\]$}}
+  // CHECK-NEXT: ds_store_b128 {{v[0-9]+, v\[[0-9]+:[0-9]+\]}} offset
   %b_st = wave.store %b_regs -> %slot_b after %b_tok : (!wave.simd<vector<8xi32>, 32>, !wave.simd<!wave.ptr<i32, #wave.shared>, 32>, !wave.mem.token) -> !wave.mem.token
   return
 }

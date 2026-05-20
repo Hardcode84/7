@@ -25,9 +25,8 @@ module attributes {wavemachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // ASM: v_mov_b32_e32 [[B0:v[0-9]+]], 0
 // ASM: v_mov_b32_e32 [[C0:v[0-9]+]], 7
 // ASM: v_wmma_i32_16x16x16_iu8 [[DST:v\[[0-9]+:[0-9]+\]]], [[A:v\[[0-9]+:[0-9]+\]]], [[B:v\[[0-9]+:[0-9]+\]]], [[C:v\[[0-9]+:[0-9]+\]]]
-// ASM: global_store_b32 {{v[0-9]+}}, {{v[0-9]+}}, [[OUT]]{{$}}
-// ASM: global_store_b32 {{v[0-9]+}}, {{v[0-9]+}}, [[OUT]] offset:4
-// ASM: global_store_b32 {{v[0-9]+}}, {{v[0-9]+}}, [[OUT]] offset:28
+// ASM: global_store_b128 {{v[0-9]+}}, {{v\[[0-9]+:[0-9]+\]}}, [[OUT]]{{$}}
+// ASM: global_store_b128 {{v[0-9]+}}, {{v\[[0-9]+:[0-9]+\]}}, [[OUT]] offset:16
 // ASM: s_waitcnt_vscnt null, 0x0
 // ASM: s_endpgm
 func.func @matrix_kernel(%out: !wave.ptr<i32, #wave.global>) attributes {wave.kernel} {
@@ -61,7 +60,8 @@ func.func @matrix_kernel(%out: !wave.ptr<i32, #wave.global>) attributes {wave.ke
 
 // ASM-LABEL: matrix_f16_kernel:
 // ASM: v_wmma_f32_16x16x16_f16 [[DST:v\[[0-9]+:[0-9]+\]]], [[A:v\[[0-9]+:[0-9]+\]]], [[B:v\[[0-9]+:[0-9]+\]]], [[C:v\[[0-9]+:[0-9]+\]]]
-// ASM: global_store_b32 {{v[0-9]+}}, {{v[0-9]+}}, {{s\[[0-9]+:[0-9]+\]}} offset:28
+// ASM: global_store_b128 {{v[0-9]+}}, {{v\[[0-9]+:[0-9]+\]}}, {{s\[[0-9]+:[0-9]+\]}}{{$}}
+// ASM: global_store_b128 {{v[0-9]+}}, {{v\[[0-9]+:[0-9]+\]}}, {{s\[[0-9]+:[0-9]+\]}} offset:16
 // ASM: s_endpgm
 func.func @matrix_f16_kernel(%out: !wave.ptr<i32, #wave.global>) attributes {wave.kernel} {
   %zero = arith.constant 0 : i32

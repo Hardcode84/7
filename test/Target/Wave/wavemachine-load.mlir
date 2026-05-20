@@ -35,9 +35,8 @@ func.func @scalar_load_kernel(%in: !wave.ptr<i32, #wave.global>, %out: !wave.ptr
 // PIPELINE: wavemachine.global_load_tuple_b32{{.*}} -> (!wavemachine.reg<vgpr, 8,
 
 // ASM-LABEL: tuple_load_kernel:
-// ASM: global_load_b32 {{v[0-9]+}}, {{v[0-9]+}}, {{s\[[0-9]+:[0-9]+\]}}
-// ASM: global_load_b32 {{v[0-9]+}}, {{v[0-9]+}}, {{s\[[0-9]+:[0-9]+\]}} offset:4
-// ASM: global_load_b32 {{v[0-9]+}}, {{v[0-9]+}}, {{s\[[0-9]+:[0-9]+\]}} offset:28
+// ASM: global_load_b128 {{v\[[0-9]+:[0-9]+\]}}, {{v[0-9]+}}, {{s\[[0-9]+:[0-9]+\]}}{{$}}
+// ASM: global_load_b128 {{v\[[0-9]+:[0-9]+\]}}, {{v[0-9]+}}, {{s\[[0-9]+:[0-9]+\]}} offset:16
 // ASM: s_endpgm
 func.func @tuple_load_kernel(%in: !wave.ptr<i32, #wave.global>, %out: !wave.ptr<i32, #wave.global>) attributes {wave.kernel} {
   %lane = wave.lane_id : !wave.simd<i32, 32>

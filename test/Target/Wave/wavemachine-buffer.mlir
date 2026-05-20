@@ -68,10 +68,8 @@ func.func @buffer_load_kernel(%in: !wave.ptr<i32, #wave.global>, %out: !wave.ptr
 // SELECT: wavemachine.buffer_load_tuple_b32
 
 // ASM-LABEL: buffer_load_tuple_kernel:
-// ASM: buffer_load_b32 v{{[0-9]+}}, {{v[0-9]+}}, {{s\[[0-9]+:[0-9]+\]}}, 0 offen{{$}}
-// ASM: buffer_load_b32 v{{[0-9]+}}, {{v[0-9]+}}, {{s\[[0-9]+:[0-9]+\]}}, 0 offen offset:4
-// ASM: buffer_load_b32 v{{[0-9]+}}, {{v[0-9]+}}, {{s\[[0-9]+:[0-9]+\]}}, 0 offen offset:8
-// ASM: buffer_load_b32 v{{[0-9]+}}, {{v[0-9]+}}, {{s\[[0-9]+:[0-9]+\]}}, 0 offen offset:28
+// ASM: buffer_load_b128 v{{\[[0-9]+:[0-9]+\]}}, {{v[0-9]+}}, {{s\[[0-9]+:[0-9]+\]}}, 0 offen{{$}}
+// ASM: buffer_load_b128 v{{\[[0-9]+:[0-9]+\]}}, {{v[0-9]+}}, {{s\[[0-9]+:[0-9]+\]}}, 0 offen offset:16
 // ASM: s_waitcnt {{.*}}vmcnt
 func.func @buffer_load_tuple_kernel(%in: !wave.ptr<i32, #wave.global>, %out: !wave.ptr<i32, #wave.global>) attributes {wave.kernel} {
   %range = arith.constant 1024 : i32

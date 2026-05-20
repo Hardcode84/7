@@ -15,10 +15,7 @@ module attributes {wavemachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 // ASM: v_mfma_f32_16x16x16_f16 [[DST:v\[[0-9]+:[0-9]+\]]], [[A:v\[[0-9]+:[0-9]+\]]], [[B:v\[[0-9]+:[0-9]+\]]], [[C:v\[[0-9]+:[0-9]+\]]]
 // ASM: v_mul_lo_u32 {{v[0-9]+}}, {{v[0-9]+}}, {{v[0-9]+}}
 // ASM: v_lshlrev_b32_e32 {{v[0-9]+}}, 2, {{v[0-9]+}}
-// ASM: global_store_dword {{v[0-9]+}}, {{v[0-9]+}}, {{s\[[0-9]+:[0-9]+\]$}}
-// ASM: global_store_dword {{v[0-9]+}}, {{v[0-9]+}}, {{s\[[0-9]+:[0-9]+\]}} offset:4
-// ASM: global_store_dword {{v[0-9]+}}, {{v[0-9]+}}, {{s\[[0-9]+:[0-9]+\]}} offset:8
-// ASM: global_store_dword {{v[0-9]+}}, {{v[0-9]+}}, {{s\[[0-9]+:[0-9]+\]}} offset:12
+// ASM: global_store_dwordx4 {{v[0-9]+}}, {{v\[[0-9]+:[0-9]+\]}}, {{s\[[0-9]+:[0-9]+\]$}}
 // ASM-NOT: offset:16
 func.func @mfma_f16xf32_kernel(%out: !wave.ptr<i32, #wave.global>)
     attributes {wave.kernel} {
