@@ -27,6 +27,11 @@ def WaveMachine_Waitcnt : NativeOpTrait<"wavemachine::WaitcntOp">;
 def WaveMachine_TokenTrait : NativeOpTrait<"wavemachine::TokenOp">;
 def WaveMachine_TokenJoinTrait : NativeOpTrait<"wavemachine::TokenJoinOp">;
 
+def WaveMachine_SGPR
+    : Type<CPred<"::llvm::isa<::mlir::wavemachine::RegType>($_self) && "
+                 "::llvm::cast<::mlir::wavemachine::RegType>($_self).getRegClass() == ::mlir::wavemachine::RegClass::SGPR">,
+           "WaveMachine SGPR register">;
+
 def WaveMachine_SGPR1
     : Type<CPred<"::llvm::isa<::mlir::wavemachine::RegType>($_self) && "
                  "::llvm::cast<::mlir::wavemachine::RegType>($_self).getRegClass() == ::mlir::wavemachine::RegClass::SGPR && "
@@ -83,6 +88,15 @@ def WaveMachine_RegOrImm
     : Type<CPred<"::llvm::isa<::mlir::wavemachine::RegType>($_self) || "
                  "::llvm::isa<::mlir::wavemachine::ImmType>($_self)">,
            "WaveMachine register or immediate">;
+
+// Any allocatable register class (SGPR, VGPR, AGPR). Excludes SCC,
+// which is a 1-bit hardware flag that cannot participate in tuples.
+def WaveMachine_GPR
+    : Type<CPred<"::llvm::isa<::mlir::wavemachine::RegType>($_self) && "
+                 "(::llvm::cast<::mlir::wavemachine::RegType>($_self).getRegClass() == ::mlir::wavemachine::RegClass::SGPR || "
+                 "::llvm::cast<::mlir::wavemachine::RegType>($_self).getRegClass() == ::mlir::wavemachine::RegClass::VGPR || "
+                 "::llvm::cast<::mlir::wavemachine::RegType>($_self).getRegClass() == ::mlir::wavemachine::RegClass::AGPR)">,
+           "WaveMachine GPR (SGPR/VGPR/AGPR)">;
 
 class WaveMachine_ZeroResult<string mnemonic, list<Trait> traits = []>
     : WaveMachine_Op<mnemonic, traits> {
@@ -252,9 +266,10 @@ def WaveMachine_VMovB32TupleOp
   let hasVerifier = 1;
 }
 
-// Pure SSA renames between a VGPR tuple and its constituent VGPR
-// pieces. Elements may be any width as long as their widths sum to
-// the tuple width; the regalloc places each element at
+// Pure SSA renames between a GPR tuple (SGPR/VGPR/AGPR) and its
+// constituent GPR pieces. Elements may be any width as long as
+// their widths sum to the tuple width, and all pieces must share
+// the tuple's register class. The regalloc places each element at
 // `tuple_phys + cumulative_offset`, where the offset is the sum of
 // the preceding elements' widths. Both ops are zero-cost at asm
 // emit time. `tuple_to_elements` is the natural before-store
@@ -263,9 +278,9 @@ def WaveMachine_VMovB32TupleOp
 // gather (assembles per-instruction load results into one tuple).
 def WaveMachine_TupleToElementsOp
     : WaveMachine_Op<"tuple_to_elements", [Pure, WaveMachine_TokenJoinTrait]> {
-  let summary = "split a VGPR tuple into mixed-width VGPR pieces";
-  let arguments = (ins WaveMachine_VGPR:$tuple);
-  let results = (outs Variadic<WaveMachine_VGPR>:$elements);
+  let summary = "split a GPR tuple into mixed-width GPR pieces";
+  let arguments = (ins WaveMachine_GPR:$tuple);
+  let results = (outs Variadic<WaveMachine_GPR>:$elements);
   let assemblyFormat =
       "$tuple attr-dict `:` functional-type(operands, results)";
   let hasVerifier = 1;
@@ -274,9 +289,9 @@ def WaveMachine_TupleToElementsOp
 def WaveMachine_TupleFromElementsOp
     : WaveMachine_Op<"tuple_from_elements",
                      [Pure, WaveMachine_TokenJoinTrait]> {
-  let summary = "concatenate mixed-width VGPR pieces into a VGPR tuple";
-  let arguments = (ins Variadic<WaveMachine_VGPR>:$elements);
-  let results = (outs WaveMachine_VGPR:$tuple);
+  let summary = "concatenate mixed-width GPR pieces into a GPR tuple";
+  let arguments = (ins Variadic<WaveMachine_GPR>:$elements);
+  let results = (outs WaveMachine_GPR:$tuple);
   let assemblyFormat =
       "$elements attr-dict `:` functional-type(operands, results)";
   let hasVerifier = 1;
@@ -360,6 +375,15 @@ def WaveMachine_SMovB32ValueOp : WaveMachine_Op<"s_mov_b32_value", [Pure]> {
   let arguments = (ins WaveMachine_RegOrImm:$source);
   let results = (outs WaveMachine_SGPR1:$result);
   let assemblyFormat = "$source attr-dict `:` functional-type(operands, results)";
+}
+
+// Wide-SGPR rename / broadcast, mirroring `v_mov_b32_tuple`. Emits
+// N `s_mov_b32` instructions; source may be another same-width
+// SGPR tuple (per-component copy) or a scalar value (broadcast).
+def WaveMachine_SMovB32TupleOp
+    : WaveMachine_UnaryResult<"s_mov_b32_tuple", WaveMachine_RegOrImm,
+                              WaveMachine_SGPR, []> {
+  let hasVerifier = 1;
 }
 def WaveMachine_SLoadB32Op : WaveMachine_UnaryResult<"s_load_b32",
                                                       WaveMachine_Imm,

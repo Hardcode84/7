@@ -91,11 +91,14 @@ func.func @no_duplicate_inits() attributes {wave.kernel} {
   return
 }
 
-// SGPR1 duplicate inits also get split (via s_mov_b32_value).
+// SGPR1 duplicate inits also get split. The selector materialises
+// the init via `s_mov_b32_value`; the regalloc's split inserts an
+// `s_mov_b32_tuple` (registers = 1) rename so the two carry slots
+// see distinct SSA values.
 //
 // CHECK-LABEL: func.func @duplicate_sgpr1_init
 // CHECK: %[[SINIT:.+]] = wavemachine.s_mov_b32_value {{.*}} : (!wavemachine.imm) -> !wavemachine.reg<sgpr, 1, {{[0-9]+}}>
-// CHECK: %[[SDUP:.+]] = wavemachine.s_mov_b32_value %[[SINIT]] : (!wavemachine.reg<sgpr, 1, {{[0-9]+}}>) -> !wavemachine.reg<sgpr, 1, {{[0-9]+}}>
+// CHECK: %[[SDUP:.+]] = wavemachine.s_mov_b32_tuple %[[SINIT]] {registers = 1 : i64} : (!wavemachine.reg<sgpr, 1, {{[0-9]+}}>) -> !wavemachine.reg<sgpr, 1, {{[0-9]+}}>
 // CHECK: wavemachine.uniform_loop {{.*}} carries({{[^,]+}}, %[[SINIT]], %[[SDUP]] : {{[^)]*}})
 func.func @duplicate_sgpr1_init() attributes {wave.kernel} {
   %zero = wavemachine.imm 0 : !wavemachine.imm

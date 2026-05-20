@@ -449,19 +449,18 @@ struct WaveAMDRegAllocPass
   static FailureOr<Value> duplicateRegValue(OpBuilder &builder, Location loc,
                                             Value v) {
     auto rt = cast<wavemachine::RegType>(v.getType());
+    wavemachine::RegType resultType = wavemachine::RegType::get(
+        rt.getContext(), rt.getRegClass(), rt.getWidth(), /*index=*/-1);
     if (isVGPR(rt)) {
-      wavemachine::RegType resultType = wavemachine::RegType::get(
-          rt.getContext(), rt.getRegClass(), rt.getWidth(), /*index=*/-1);
       auto copy =
           wavemachine::VMovB32TupleOp::create(builder, loc, resultType, v);
       copy->setAttr("registers", builder.getI64IntegerAttr(rt.getWidth()));
       return copy.getResult();
     }
-    if (isSGPR(rt) && rt.getWidth() == 1) {
-      wavemachine::RegType resultType = wavemachine::RegType::get(
-          rt.getContext(), rt.getRegClass(), /*width=*/1, /*index=*/-1);
+    if (isSGPR(rt)) {
       auto copy =
-          wavemachine::SMovB32ValueOp::create(builder, loc, resultType, v);
+          wavemachine::SMovB32TupleOp::create(builder, loc, resultType, v);
+      copy->setAttr("registers", builder.getI64IntegerAttr(rt.getWidth()));
       return copy.getResult();
     }
     return emitError(loc, "duplicateRegValue: unsupported register class / "

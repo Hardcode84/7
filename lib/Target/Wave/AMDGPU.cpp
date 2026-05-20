@@ -845,6 +845,21 @@ private:
       }
       return success();
     }
+    if (isa<wavemachine::SMovB32TupleOp>(op)) {
+      auto regType = cast<wavemachine::RegType>(result().getType());
+      Value src = op.getOperand(0);
+      auto srcType = dyn_cast<wavemachine::RegType>(src.getType());
+      bool srcTuple = srcType &&
+                      srcType.getRegClass() == wavemachine::RegClass::SGPR &&
+                      srcType.getWidth() == regType.getWidth();
+      for (unsigned i = 0, e = regType.getWidth(); i != e; ++i) {
+        llvm::MCOperand srcOp =
+            srcTuple ? toMCSGPRComponent(src, i) : toMCOperand(src);
+        if (failed(emitMC(sMovB32(), {toMCSGPRComponent(result(), i), srcOp})))
+          return failure();
+      }
+      return success();
+    }
     if (isa<wavemachine::WmmaI32_16x16x16_IU8Op>(op))
       return emitMC(
           llvm::AMDGPU::V_WMMA_I32_16X16X16_IU8_twoaddr_w32_gfx11,

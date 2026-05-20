@@ -68,3 +68,13 @@ func.func @tuple_from_elements_subtuple_width_mismatch(%a: !wavemachine.reg<vgpr
       : (!wavemachine.reg<vgpr, 4>, !wavemachine.reg<vgpr, 2>, !wavemachine.reg<vgpr, 1>) -> !wavemachine.reg<vgpr, 8>
   return
 }
+
+// -----
+
+func.func @tuple_from_elements_mixed_class(%a: !wavemachine.reg<vgpr, 2>,
+                                           %b: !wavemachine.reg<sgpr, 2>) {
+  // expected-error @below {{element register class must match tuple's}}
+  %t = wavemachine.tuple_from_elements %a, %b
+      : (!wavemachine.reg<vgpr, 2>, !wavemachine.reg<sgpr, 2>) -> !wavemachine.reg<vgpr, 4>
+  return
+}

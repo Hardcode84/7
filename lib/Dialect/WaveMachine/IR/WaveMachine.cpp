@@ -67,6 +67,16 @@ LogicalResult VMovB32TupleOp::verify() {
   return success();
 }
 
+LogicalResult SMovB32TupleOp::verify() {
+  auto resultType = cast<RegType>(getResult().getType());
+  if (auto registers = (*this)->getAttrOfType<IntegerAttr>("registers")) {
+    if (registers.getInt() != resultType.getWidth())
+      return emitOpError(
+          "registers attribute must match result register width");
+  }
+  return success();
+}
+
 static int64_t sumElementWidths(ValueRange elements) {
   int64_t total = 0;
   for (Value e : elements)
@@ -74,24 +84,29 @@ static int64_t sumElementWidths(ValueRange elements) {
   return total;
 }
 
-LogicalResult TupleToElementsOp::verify() {
-  auto tupleType = cast<RegType>(getTuple().getType());
-  int64_t total = sumElementWidths(getElements());
+static LogicalResult verifyTupleElements(Operation *op, RegType tupleType,
+                                         ValueRange elements) {
+  int64_t total = sumElementWidths(elements);
   if (tupleType.getWidth() != total)
-    return emitOpError("element widths sum (")
+    return op->emitOpError("element widths sum (")
            << total << ") must match tuple register width ("
            << tupleType.getWidth() << ")";
+  for (Value e : elements) {
+    auto eType = cast<RegType>(e.getType());
+    if (eType.getRegClass() != tupleType.getRegClass())
+      return op->emitOpError("element register class must match tuple's");
+  }
   return success();
 }
 
+LogicalResult TupleToElementsOp::verify() {
+  return verifyTupleElements(*this, cast<RegType>(getTuple().getType()),
+                             getElements());
+}
+
 LogicalResult TupleFromElementsOp::verify() {
-  auto tupleType = cast<RegType>(getTuple().getType());
-  int64_t total = sumElementWidths(getElements());
-  if (tupleType.getWidth() != total)
-    return emitOpError("element widths sum (")
-           << total << ") must match tuple register width ("
-           << tupleType.getWidth() << ")";
-  return success();
+  return verifyTupleElements(*this, cast<RegType>(getTuple().getType()),
+                             getElements());
 }
 
 LogicalResult WmmaI32_16x16x16_IU8Op::verify() {
