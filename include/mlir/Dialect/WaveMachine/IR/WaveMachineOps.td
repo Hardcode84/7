@@ -16,8 +16,28 @@ include "mlir/IR/OpBase.td"
 include "mlir/Interfaces/ControlFlowInterfaces.td"
 include "mlir/Interfaces/SideEffectInterfaces.td"
 
+// Every WaveMachine op gets a static `isSupportedOnIsa(IsaVersion)`
+// classifier. The default is "supported everywhere"; gated ops
+// override `archPredicate` with a C++ expression. The expression
+// runs with `isa` in scope as `const llvm::AMDGPU::IsaVersion &`,
+// so predicates can read `isa.Major`, `isa.Minor`, `isa.Stepping`
+// freely.
+//
+// Callers query at op construction time -- before any instance
+// exists -- via `XxxOp::isSupportedOnIsa(isa)`. This is the
+// statically-typed gate the selector / decompose passes use to
+// pick between alternative ops for the same operation.
 class WaveMachine_Op<string mnemonic, list<Trait> traits = []> :
-    Op<WaveMachine_Dialect, mnemonic, traits>;
+    Op<WaveMachine_Dialect, mnemonic, traits> {
+  string archPredicate = "true";
+
+  let extraClassDeclaration = [{
+    static bool isSupportedOnIsa(const ::llvm::AMDGPU::IsaVersion &isa) {
+      (void)isa;
+      return }] # archPredicate # [{;
+    }
+  }];
+}
 
 def WaveMachine_VALU : NativeOpTrait<"wavemachine::VALUOp">;
 def WaveMachine_SMEMLoad : NativeOpTrait<"wavemachine::SMEMLoadOp">;
@@ -343,21 +363,25 @@ def WaveMachine_WmmaI32_16x16x16_IU8Op
     : WaveMachine_TernaryResult<"wmma_i32_16x16x16_iu8", WaveMachine_VGPR,
                                 WaveMachine_VGPR, [WaveMachine_VALU]> {
   let hasVerifier = 1;
+  let archPredicate = "isa.Major == 11 || isa.Major == 12";
 }
 def WaveMachine_WmmaF32_16x16x16_F16Op
     : WaveMachine_TernaryResult<"wmma_f32_16x16x16_f16", WaveMachine_VGPR,
                                 WaveMachine_VGPR, [WaveMachine_VALU]> {
   let hasVerifier = 1;
+  let archPredicate = "isa.Major == 11 || isa.Major == 12";
 }
 def WaveMachine_MfmaF32_16x16x16_F16Op
     : WaveMachine_TernaryResult<"mfma_f32_16x16x16_f16", WaveMachine_VGPR,
                                 WaveMachine_VGPR, [WaveMachine_VALU]> {
   let hasVerifier = 1;
+  let archPredicate = "isa.Major == 9";
 }
 def WaveMachine_MfmaF32_16x16x32_F16Op
     : WaveMachine_TernaryResult<"mfma_f32_16x16x32_f16", WaveMachine_VGPR,
                                 WaveMachine_VGPR, [WaveMachine_VALU]> {
   let hasVerifier = 1;
+  let archPredicate = "isa.Major == 9";
 }
 
 def WaveMachine_SMovB32Op : WaveMachine_UnaryNoResult<"s_mov_b32",

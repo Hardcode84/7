@@ -17,6 +17,10 @@
 #include "mlir/IR/Types.h"
 #include "mlir/Interfaces/ControlFlowInterfaces.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
+// The generated op classes carry `static bool isSupportedOnIsa(...)`,
+// which takes `llvm::AMDGPU::IsaVersion` by reference. The struct
+// must be visible wherever the op headers are included.
+#include "llvm/TargetParser/TargetParser.h"
 
 #include "mlir/Dialect/WaveMachine/IR/WaveMachineOpsDialect.h.inc"
 #include "mlir/Dialect/WaveMachine/IR/WaveMachineOpsEnums.h.inc"
