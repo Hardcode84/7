@@ -62,3 +62,49 @@ func.func @nop_delay_on_gfx10(%x: !waveamdmachine.reg<vgpr, 1>, %y: !waveamdmach
 }
 
 }
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
+
+// CHECK-LABEL: func.func @m0_delay_before_lds_dma
+// CHECK: waveamdmachine.s_mov_m0
+// CHECK-NEXT: waveamdmachine.imm 0
+// CHECK-NEXT: waveamdmachine.s_nop
+// CHECK-NEXT: waveamdmachine.global_load_lds_b128
+func.func @m0_delay_before_lds_dma(
+    %off: !waveamdmachine.reg<vgpr, 1>,
+    %base: !waveamdmachine.reg<sgpr, 2>,
+    %dst: !waveamdmachine.reg<sgpr, 1>,
+    %dep: !waveamdmachine.mem.token) {
+  %m0 = waveamdmachine.s_mov_m0 %dst
+      : (!waveamdmachine.reg<sgpr, 1>) -> !waveamdmachine.m0
+  %tok = waveamdmachine.global_load_lds_b128 %off, %base, %m0 after %dep
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 2>,
+         !waveamdmachine.m0, !waveamdmachine.mem.token)
+      -> !waveamdmachine.mem.token
+  return
+}
+
+// CHECK-LABEL: func.func @no_m0_delay_after_waitcnt
+// CHECK: waveamdmachine.s_mov_m0
+// CHECK-NEXT: waveamdmachine.imm 0
+// CHECK-NEXT: waveamdmachine.s_waitcnt
+// CHECK-NEXT: waveamdmachine.global_load_lds_b128
+func.func @no_m0_delay_after_waitcnt(
+    %off: !waveamdmachine.reg<vgpr, 1>,
+    %base: !waveamdmachine.reg<sgpr, 2>,
+    %dst: !waveamdmachine.reg<sgpr, 1>,
+    %dep: !waveamdmachine.mem.token) {
+  %m0 = waveamdmachine.s_mov_m0 %dst
+      : (!waveamdmachine.reg<sgpr, 1>) -> !waveamdmachine.m0
+  %wait = waveamdmachine.imm 0 : !waveamdmachine.imm
+  waveamdmachine.s_waitcnt %wait : (!waveamdmachine.imm) -> ()
+  %tok = waveamdmachine.global_load_lds_b128 %off, %base, %m0 after %dep
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 2>,
+         !waveamdmachine.m0, !waveamdmachine.mem.token)
+      -> !waveamdmachine.mem.token
+  return
+}
+
+}

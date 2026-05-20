@@ -1286,6 +1286,16 @@ static waveamdmachine::AddressFieldSpec dmaAddressSpec(bool isBuffer,
              : waveamdmachine::GlobalLoadLdsB32Op::getAddressFieldSpec();
 }
 
+static void sinkDmaInstOffset(WaveAMDMachineSelector &S, Location loc,
+                              OffsetTriple &srcTriple, bool isBuffer) {
+  if (srcTriple.instOffset == 0)
+    return;
+  S.sinkImmIntoRemainingSlot(loc, srcTriple,
+                             createImm(S.builder, loc, srcTriple.instOffset),
+                             isBuffer);
+  srcTriple.instOffset = 0;
+}
+
 LogicalResult
 WaveAMDMachineSelector::selectDmaLoadLds(waveamd::DmaLoadLdsOp op) {
   if (op.getBytes() != 4 && op.getBytes() != 16)
@@ -1300,6 +1310,7 @@ WaveAMDMachineSelector::selectDmaLoadLds(waveamd::DmaLoadLdsOp op) {
     return failure();
 
   bool isBuffer = pointerBuffers.lookup(op.getSource());
+  sinkDmaInstOffset(*this, op.getLoc(), srcTriple, isBuffer);
   auto b = bucketForSpec(op.getLoc(), srcTriple,
                          dmaAddressSpec(isBuffer, op.getBytes()));
   IntegerAttr instOffsetAttr = builder.getI64IntegerAttr(b.instOffset);

@@ -75,6 +75,30 @@ func.func @global_dma_lds_uniform_mul_dest(%in: !wave.ptr<i32, #wave.global>)
   return
 }
 
+// SELECT-LABEL: func.func @global_dma_lds_source_const_offset
+// SELECT: waveamdmachine.global_load_lds_b128
+// SELECT-SAME: after %{{[A-Za-z0-9_]+}} :
+
+// ASM-LABEL: global_dma_lds_source_const_offset:
+// ASM: s_mov_b32 m0,
+// ASM: global_load_lds_dwordx4
+// ASM-NOT: offset:
+func.func @global_dma_lds_source_const_offset(%in: !wave.ptr<i32, #wave.global>)
+    attributes {wave.kernel, wave.lds_size = 512 : i64} {
+  %wi = wave.workitem_id 0 : !wave.simd<i32, 64>
+  %src_off = wave.index_expr <"64 + wi"> ["wi"](%wi)
+      : (!wave.simd<i32, 64>) -> !wave.index<64>
+  %src = wave.ptr_add %in, %src_off
+      : !wave.ptr<i32, #wave.global>, !wave.index<64>
+      -> !wave.simd<!wave.ptr<i32, #wave.global>, 64>
+  %lds = wave.lds_base : !wave.ptr<i32, #wave.shared>
+  %tok0 = wave.token : !wave.mem.token
+  %tok = waveamd.dma_load_lds %src -> %lds after %tok0 {bytes = 16 : i64}
+      : (!wave.simd<!wave.ptr<i32, #wave.global>, 64>,
+         !wave.ptr<i32, #wave.shared>, !wave.mem.token) -> !wave.mem.token
+  return
+}
+
 // SELECT-LABEL: func.func @buffer_dma_lds
 // SELECT: waveamdmachine.s_mov_m0
 // SELECT: waveamdmachine.buffer_load_lds_b32

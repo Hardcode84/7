@@ -159,6 +159,19 @@ static std::optional<unsigned> getImmediate(Value value) {
       def->getAttrOfType<IntegerAttr>("value").getInt());
 }
 
+static bool consumesM0(Operation &op) {
+  return llvm::any_of(op.getOperandTypes(), [](Type type) {
+    return isa<waveamdmachine::M0Type>(type);
+  });
+}
+
+static bool countsAsInstruction(Operation &op) {
+  return !isa<waveamdmachine::ArgOp, waveamdmachine::ImmOp,
+              waveamdmachine::TokenOp, waveamdmachine::TokenJoinOp,
+              waveamdmachine::WaitOp, waveamdmachine::TupleToElementsOp,
+              waveamdmachine::TupleFromElementsOp>(op);
+}
+
 struct HazardConfig {
   bool hasDelayAlu;
   llvm::AMDGPU::IsaVersion isaVersion;
@@ -254,16 +267,49 @@ private:
                    OpBuilder &builder, const HazardConfig &cfg,
                    const llvm::MCSubtargetInfo &sti) {
     bool pendingLgkmWait = startState;
+    unsigned pendingM0Wait = 0;
     for (Operation *op : ops) {
-      if (op->hasTrait<OpTrait::waveamdmachine::VALUOp>() && pendingLgkmWait) {
-        insertValuMitigation(*op, builder, cfg, sti);
-        pendingLgkmWait = false;
-      }
-      if (isa<waveamdmachine::SWaitcntOp>(op))
-        if (auto newState = recomputePendingLgkm(*op, cfg))
-          pendingLgkmWait = *newState;
+      mitigateM0Hazard(*op, pendingM0Wait, builder, sti);
+      mitigateValuHazard(*op, pendingLgkmWait, builder, cfg, sti);
+      updateLgkmState(*op, pendingLgkmWait, cfg);
+      updateM0State(*op, pendingM0Wait);
     }
     return pendingLgkmWait;
+  }
+
+  void mitigateM0Hazard(Operation &op, unsigned &pendingM0Wait,
+                        OpBuilder &builder, const llvm::MCSubtargetInfo &sti) {
+    if (!pendingM0Wait || !consumesM0(op))
+      return;
+    builder.setInsertionPoint(&op);
+    insertNoops(builder, op.getLoc(), pendingM0Wait, sti);
+    pendingM0Wait = 0;
+  }
+
+  void mitigateValuHazard(Operation &op, bool &pendingLgkmWait,
+                          OpBuilder &builder, const HazardConfig &cfg,
+                          const llvm::MCSubtargetInfo &sti) {
+    if (!op.hasTrait<OpTrait::waveamdmachine::VALUOp>() || !pendingLgkmWait)
+      return;
+    insertValuMitigation(op, builder, cfg, sti);
+    pendingLgkmWait = false;
+  }
+
+  void updateLgkmState(Operation &op, bool &pendingLgkmWait,
+                       const HazardConfig &cfg) {
+    if (!isa<waveamdmachine::SWaitcntOp>(op))
+      return;
+    if (auto newState = recomputePendingLgkm(op, cfg))
+      pendingLgkmWait = *newState;
+  }
+
+  void updateM0State(Operation &op, unsigned &pendingM0Wait) {
+    if (isa<waveamdmachine::SMovM0Op>(op)) {
+      pendingM0Wait = 1;
+      return;
+    }
+    if (pendingM0Wait && countsAsInstruction(op))
+      --pendingM0Wait;
   }
 
   LogicalResult processFunction(func::FuncOp func, OpBuilder &builder,
