@@ -9,7 +9,7 @@
 // `gpu.module @kernels { ... }` with a plain `module attributes {
 // waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100" } { ... }` and run:
 //
-//   wave-opt <single-kernel.mlir> --waveamd-to-waveamdmachine \
+//   wave-opt <single-kernel.mlir> --waveamd-to-machine \
 //       --waveamd-abi-lowering --waveamd-insert-hazard-waits \
 //       --waveamd-reg-alloc --waveamd-resource-info --waveamd-metadata \
 //     | wave-translate --wave-to-amdgpu-asm

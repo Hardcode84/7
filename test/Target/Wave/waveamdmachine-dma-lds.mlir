@@ -1,4 +1,4 @@
-// RUN: wave-opt --split-input-file --waveamd-to-waveamdmachine --verify-diagnostics %s | FileCheck %s --check-prefix=SELECT
+// RUN: wave-opt --split-input-file --waveamd-to-machine --verify-diagnostics %s | FileCheck %s --check-prefix=SELECT
 // RUN: wave-translate --split-input-file --wave-to-amdgpu-asm %s | FileCheck %s --check-prefix=ASM
 // RUN: wave-translate --split-input-file --wave-to-amdgpu-asm %s | llvm-mc -triple=amdgcn-amd-amdhsa -mcpu=gfx950 -filetype=obj -o /dev/null
 

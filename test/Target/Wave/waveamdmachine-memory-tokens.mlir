@@ -1,5 +1,5 @@
-// RUN: wave-opt --waveamd-to-waveamdmachine %s | FileCheck %s --check-prefix=SELECT
-// RUN: wave-opt --waveamd-to-waveamdmachine --waveamd-abi-lowering --waveamd-insert-ticket-waits %s | FileCheck %s --check-prefix=TICKET
+// RUN: wave-opt --waveamd-to-machine %s | FileCheck %s --check-prefix=SELECT
+// RUN: wave-opt --waveamd-to-machine --waveamd-abi-lowering --waveamd-insert-ticket-waits %s | FileCheck %s --check-prefix=TICKET
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 

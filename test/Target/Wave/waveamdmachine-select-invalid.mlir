@@ -1,4 +1,4 @@
-// RUN: wave-opt --waveamd-to-waveamdmachine -split-input-file -verify-diagnostics %s
+// RUN: wave-opt --waveamd-to-machine -split-input-file -verify-diagnostics %s
 
 func.func @unsupported_op(%x: i32, %y: i32) -> i32 {
   // expected-error @below {{unsupported operation in WaveAMDMachine selection}}

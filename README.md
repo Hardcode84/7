@@ -18,7 +18,7 @@ The design rationale is in [`docs/AMDGPUExplicitWaveProgrammingModel.md`].
 - `WaveAMDMachine` dialect — inspectable machine-level IR after wave-to-amdgpu
   selection: explicit SGPR / VGPR / mask / memory-token operands, every
   pass-pipeline stage is a printable IR boundary.
-- Transform passes: selection (`waveamd-to-waveamdmachine`), ABI lowering,
+- Transform passes: selection (`waveamd-to-machine`), ABI lowering,
   register allocation, hazard / waitcnt insertion, resource info, HSA
   metadata, GPU binary emission.
 - `wave-opt` and `wave-translate` tools wired with the full pipeline,

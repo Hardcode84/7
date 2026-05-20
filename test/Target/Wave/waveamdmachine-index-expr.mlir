@@ -1,4 +1,4 @@
-// RUN: wave-opt --waveamd-to-waveamdmachine %s | FileCheck %s
+// RUN: wave-opt --waveamd-to-machine %s | FileCheck %s
 
 // `wave.index_expr` bucketizes the top-level ixsimpl ADD summands
 // into a V / S / inst-offset triple before lowering. Lane-varying

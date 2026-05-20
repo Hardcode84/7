@@ -1,4 +1,4 @@
-// RUN: wave-opt --split-input-file --waveamd-to-waveamdmachine --verify-diagnostics %s | FileCheck %s --check-prefix=SELECT
+// RUN: wave-opt --split-input-file --waveamd-to-machine --verify-diagnostics %s | FileCheck %s --check-prefix=SELECT
 
 // Width-independent integer arith ops lower per-target based on
 // operand uniformity. Uniform-uniform i32 goes to the scalar

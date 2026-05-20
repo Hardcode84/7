@@ -42,7 +42,7 @@ def ConvertWaveToROCDL : Pass<"convert-wave-to-rocdl"> {
   ];
 }
 
-def ConvertWaveAMDToWaveAMDMachine : Pass<"waveamd-to-waveamdmachine", "ModuleOp"> {
+def ConvertWaveAMDToWaveAMDMachine : Pass<"waveamd-to-machine", "ModuleOp"> {
   let summary = "Select Wave/WaveAMD operations into inspectable WaveAMDMachine IR";
   let description = [{
     Lowers source-level Wave operations to generic WaveAMDMachine dialect

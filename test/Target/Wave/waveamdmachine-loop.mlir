@@ -1,5 +1,5 @@
-// RUN: wave-opt --waveamd-to-waveamdmachine %s | FileCheck %s --check-prefix=SELECT
-// RUN: wave-opt --waveamd-to-waveamdmachine --waveamd-abi-lowering --waveamd-insert-ticket-waits --waveamd-insert-hazard-waits --waveamd-reg-alloc %s | FileCheck %s --check-prefix=REGALLOC
+// RUN: wave-opt --waveamd-to-machine %s | FileCheck %s --check-prefix=SELECT
+// RUN: wave-opt --waveamd-to-machine --waveamd-abi-lowering --waveamd-insert-ticket-waits --waveamd-insert-hazard-waits --waveamd-reg-alloc %s | FileCheck %s --check-prefix=REGALLOC
 // RUN: wave-translate --wave-to-amdgpu-asm %s | FileCheck %s --check-prefix=ASM
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
