@@ -1,5 +1,6 @@
 add_mlir_dialect_library(MLIRWaveTransforms
   WaveAMDABILowering.cpp
+  WaveAMDDecomposeMemTuples.cpp
   WaveAMDHazardWaits.cpp
   WaveAMDMetadata.cpp
   WaveAMDRegAlloc.cpp

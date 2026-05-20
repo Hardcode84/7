@@ -74,6 +74,23 @@ def WaveAMDHazardWaits
   ];
 }
 
+def WaveAMDDecomposeMemTuples
+    : Pass<"waveamd-decompose-mem-tuples", "ModuleOp"> {
+  let summary = "Decompose tuple memory ops into per-element scalar memory ops";
+  let description = [{
+    Each `*_load_tuple_b32` becomes N scalar `*_load_b32` ops at
+    `inst_offset + i*4`, gathered via `tuple_from_elements` (data) and
+    `token_join` (token). Each `*_store_tuple_b32` becomes a
+    `tuple_to_elements` split followed by N scalar `*_store_b32` ops,
+    joined via `token_join`. After this pass no `*_tuple_b32` mem ops
+    remain. Runs before waitcnt insertion so the per-element tokens
+    are visible to the scoreboard.
+  }];
+  let dependentDialects = [
+    "wavemachine::WaveMachineDialect"
+  ];
+}
+
 def WaveAMDTicketWaits
     : Pass<"waveamd-insert-ticket-waits", "ModuleOp"> {
   let summary = "Insert WaveMachine waitcnt instructions using ticket scoreboards";

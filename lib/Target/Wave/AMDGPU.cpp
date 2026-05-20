@@ -1415,6 +1415,7 @@ static LogicalResult runWaveMachinePipeline(ModuleOp module) {
   PassManager pm(module.getContext());
   pm.addPass(wave::createConvertWaveAMDToWaveMachine());
   pm.addPass(wave::createWaveAMDABILowering());
+  pm.addPass(wave::createWaveAMDDecomposeMemTuples());
   pm.addPass(wave::createWaveAMDTicketWaits());
   pm.addPass(wave::createWaveAMDHazardWaits());
   pm.addPass(wave::createWaveAMDRegAlloc());

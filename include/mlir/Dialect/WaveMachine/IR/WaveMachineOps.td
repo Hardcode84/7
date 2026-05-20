@@ -261,7 +261,7 @@ def WaveMachine_VMovB32TupleOp
 // (assembles N scalar load results into one tuple value the rest of
 // the pipeline expects).
 def WaveMachine_TupleToElementsOp
-    : WaveMachine_Op<"tuple_to_elements", [Pure]> {
+    : WaveMachine_Op<"tuple_to_elements", [Pure, WaveMachine_TokenJoinTrait]> {
   let summary = "split a VGPR tuple into per-slot scalar VGPRs";
   let arguments = (ins WaveMachine_VGPR:$tuple);
   let results = (outs Variadic<WaveMachine_VGPR1>:$elements);
@@ -271,7 +271,8 @@ def WaveMachine_TupleToElementsOp
 }
 
 def WaveMachine_TupleFromElementsOp
-    : WaveMachine_Op<"tuple_from_elements", [Pure]> {
+    : WaveMachine_Op<"tuple_from_elements",
+                     [Pure, WaveMachine_TokenJoinTrait]> {
   let summary = "concatenate per-slot scalar VGPRs into a VGPR tuple";
   let arguments = (ins Variadic<WaveMachine_VGPR1>:$elements);
   let results = (outs WaveMachine_VGPR:$tuple);
