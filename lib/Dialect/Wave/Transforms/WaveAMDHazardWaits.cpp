@@ -20,8 +20,10 @@
 //
 //   - `SsaEdge`: each consumer queries its operands backward via the
 //     SSA def-use chain (see `findProducer`). Same-block edges are
-//     precise; block-argument edges that resolve via a single
-//     `BranchOpInterface` hop are also handled. The query is
+//     precise; block-argument edges resolved via a single
+//     `BranchOpInterface` hop and `RegionBranchOpInterface`
+//     entry/back-edge/exit carries are also handled (so loop-carried
+//     producers are traced through `uniform_loop`). The query is
 //     idempotent under the loop replay because previously-inserted
 //     `s_nop`s count toward the gap. M0-after-`s_mov_m0` and
 //     VMEM-store-after-MFMA use this shape.
@@ -324,28 +326,168 @@ resolvePredEdge(BranchOpInterface branchOp, unsigned succIdx, unsigned argIdx,
   return SsaEdgeResult{fwdDef, defToTerm + termGap + entryToAnchor};
 }
 
-// Walk backward from `v` (read at `anchor`) looking for a producer of
-// `kind`. Handles:
-//   - Same-block producer: precise.
-//   - Block argument whose every predecessor edge forwards a value
-//     produced in the predecessor block (one-level cross-block).
-// Multi-hop CFG paths, structured region branches, and unknown
-// terminators return `nullopt` -- consumer gets no mitigation,
-// matching the pre-Stage-2 linear-walk behavior for those patterns.
-// Predecessors that don't carry the hazard (forwarded value is not
-// produced by `isProducer`) are skipped; the result is the min gap
-// across the predecessors that do.
-static std::optional<SsaEdgeResult>
-findProducer(Value v, Operation *anchor,
-             function_ref<bool(Operation &)> isProducer) {
-  if (Operation *def = v.getDefiningOp()) {
-    if (def->getBlock() != anchor->getBlock())
-      return std::nullopt;
-    if (!isProducer(*def))
-      return std::nullopt;
-    return SsaEdgeResult{def, countMachineInstsBetween(def, anchor)};
+// Forwarded value + the op that performs the forwarding. The op is
+// either the parent `RegionBranchOpInterface` op (entry from parent)
+// or a `RegionBranchTerminatorOpInterface` (back-edge or exit). Used
+// as the anchor for the recursive walk on the source side; the gap on
+// the destination side is added by the caller.
+struct RegionBranchSource {
+  Value value;
+  Operation *sourceOp;
+};
+
+// Append every (operand, terminator) pair from terminators inside
+// `parentOp`'s regions whose successor list contains `wantedSucc`.
+// `extract(succ, ops)` maps a matched successor to the operand chosen
+// at the appropriate index.
+template <typename ExtractFn>
+static void collectFromTerminators(Operation *parentOp,
+                                   function_ref<bool(RegionSuccessor)> matches,
+                                   ExtractFn extract,
+                                   SmallVectorImpl<RegionBranchSource> &out) {
+  for (Region &region : parentOp->getRegions()) {
+    for (Block &b : region) {
+      auto term =
+          dyn_cast<RegionBranchTerminatorOpInterface>(b.getTerminator());
+      if (!term)
+        continue;
+      SmallVector<RegionSuccessor> succs;
+      SmallVector<Attribute> constOperands(term->getNumOperands(), Attribute());
+      term.getSuccessorRegions(constOperands, succs);
+      for (RegionSuccessor &succ : succs) {
+        if (!matches(succ))
+          continue;
+        MutableOperandRange ops = term.getMutableSuccessorOperands(succ);
+        extract(ops, term.getOperation(), out);
+      }
+    }
   }
-  auto blockArg = cast<BlockArgument>(v);
+}
+
+// All values that flow into block argument `arg` via region-branch
+// interfaces: entry operands from the parent op (loop init) and
+// back-edge operands from terminators that branch to `arg`'s region
+// (continue_if carry). Empty for blocks that are not the entry block
+// of a region.
+static SmallVector<RegionBranchSource>
+collectRegionBranchSources(BlockArgument arg) {
+  SmallVector<RegionBranchSource> sources;
+  Block *block = arg.getOwner();
+  Region *region = block->getParent();
+  if (!region || block != &region->front())
+    return sources;
+  Operation *parentOp = region->getParentOp();
+  if (!parentOp)
+    return sources;
+  auto regionBranch = dyn_cast<RegionBranchOpInterface>(parentOp);
+  if (!regionBranch)
+    return sources;
+  unsigned argIdx = arg.getArgNumber();
+  RegionSuccessor regionSucc(region);
+  OperandRange entryOps = regionBranch.getEntrySuccessorOperands(regionSucc);
+  if (argIdx < entryOps.size())
+    sources.push_back({entryOps[argIdx], parentOp});
+  collectFromTerminators(
+      parentOp,
+      [&](RegionSuccessor succ) {
+        return !succ.isParent() && succ.getSuccessor() == region;
+      },
+      [&](MutableOperandRange ops, Operation *term,
+          SmallVectorImpl<RegionBranchSource> &out) {
+        if (argIdx < ops.size())
+          out.push_back({Value(ops[argIdx].get()), term});
+      },
+      sources);
+  return sources;
+}
+
+// All values that flow into op result `v` via the
+// `RegionBranchOpInterface`'s exit-to-parent terminators (the carry
+// values on the iteration that branches out, mapped positionally to
+// the op's results).
+static SmallVector<RegionBranchSource> collectRegionResultSources(OpResult v) {
+  SmallVector<RegionBranchSource> sources;
+  Operation *op = v.getOwner();
+  if (!isa<RegionBranchOpInterface>(op))
+    return sources;
+  unsigned resultIdx = v.getResultNumber();
+  collectFromTerminators(
+      op, [](RegionSuccessor succ) { return succ.isParent(); },
+      [&](MutableOperandRange ops, Operation *term,
+          SmallVectorImpl<RegionBranchSource> &out) {
+        if (resultIdx < ops.size())
+          out.push_back({Value(ops[resultIdx].get()), term});
+      },
+      sources);
+  return sources;
+}
+
+// Walk backward from `v` (read at `anchor`) looking for a producer of
+// `isProducer`. Handles:
+//   - Same-block producer: precise.
+//   - Block argument resolved via `BranchOpInterface` predecessor
+//     edges (one CFG hop).
+//   - Block argument of a region-entry block resolved via
+//     `RegionBranchOpInterface` entry operands and any
+//     `RegionBranchTerminatorOpInterface` back-edges. The recursion
+//     uses a visited set so that pass-through carries (where the
+//     terminator forwards the block argument unchanged) do not loop.
+// Multi-hop CFG paths and unknown terminators return `nullopt`;
+// predecessors that carry a non-producer value contribute no edge but
+// don't fail the whole search. The result is the min gap across the
+// raising predecessors / region-branch sources.
+// Combine a recursive result `sub` with `destSideGap` (count from the
+// source op back up to the original consumer's anchor). Keeps the
+// smaller of `best` and the new combined edge.
+static void mergeEdge(std::optional<SsaEdgeResult> &best,
+                      std::optional<SsaEdgeResult> sub, Operation *sourceOp,
+                      unsigned destSideGap) {
+  if (!sub)
+    return;
+  unsigned termGap = emitsNoMachineInst(*sourceOp) ? 0 : 1;
+  unsigned totalGap = sub->gap + termGap + destSideGap;
+  if (!best || totalGap < best->gap)
+    best = SsaEdgeResult{sub->producer, totalGap};
+}
+
+// Forward declarations for the mutually recursive helpers below.
+static std::optional<SsaEdgeResult>
+findProducerImpl(Value v, Operation *anchor,
+                 function_ref<bool(Operation &)> isProducer,
+                 DenseSet<Value> &visited);
+
+// `v` is defined by `def`. If `def` itself is a producer, return the
+// edge. Otherwise, if `def` is a `RegionBranchOpInterface` op,
+// recurse through its exit-to-parent terminators (the consumer reads
+// a value carried out of the loop). Same-block constraint applies.
+static std::optional<SsaEdgeResult>
+findProducerThroughDef(Operation *def, Value v, Operation *anchor,
+                       function_ref<bool(Operation &)> isProducer,
+                       DenseSet<Value> &visited) {
+  if (def->getBlock() != anchor->getBlock())
+    return std::nullopt;
+  if (isProducer(*def))
+    return SsaEdgeResult{def, countMachineInstsBetween(def, anchor)};
+  OpResult res = dyn_cast<OpResult>(v);
+  if (!res || !isa<RegionBranchOpInterface>(def))
+    return std::nullopt;
+  unsigned defToAnchor = countMachineInstsBetween(def, anchor);
+  std::optional<SsaEdgeResult> best;
+  for (const RegionBranchSource &src : collectRegionResultSources(res))
+    mergeEdge(best,
+              findProducerImpl(src.value, src.sourceOp, isProducer, visited),
+              src.sourceOp, defToAnchor);
+  return best;
+}
+
+// `blockArg` is a region-entry block argument. Try each
+// `BranchOpInterface` predecessor (one CFG hop) and each
+// region-branch source (loop init from parent + back-edge from
+// `continue_if`-style terminators).
+static std::optional<SsaEdgeResult>
+findProducerThroughBlockArg(BlockArgument blockArg, Operation *anchor,
+                            function_ref<bool(Operation &)> isProducer,
+                            DenseSet<Value> &visited) {
   Block *block = blockArg.getOwner();
   unsigned argIdx = blockArg.getArgNumber();
   unsigned entryToAnchor = countFromBlockEntry(block, anchor);
@@ -365,7 +507,30 @@ findProducer(Value v, Operation *anchor,
     if (!best || edge->gap < best->gap)
       best = edge;
   }
+  for (const RegionBranchSource &src : collectRegionBranchSources(blockArg))
+    mergeEdge(best,
+              findProducerImpl(src.value, src.sourceOp, isProducer, visited),
+              src.sourceOp, entryToAnchor);
   return best;
+}
+
+static std::optional<SsaEdgeResult>
+findProducerImpl(Value v, Operation *anchor,
+                 function_ref<bool(Operation &)> isProducer,
+                 DenseSet<Value> &visited) {
+  if (!visited.insert(v).second)
+    return std::nullopt;
+  if (Operation *def = v.getDefiningOp())
+    return findProducerThroughDef(def, v, anchor, isProducer, visited);
+  return findProducerThroughBlockArg(cast<BlockArgument>(v), anchor, isProducer,
+                                     visited);
+}
+
+static std::optional<SsaEdgeResult>
+findProducer(Value v, Operation *anchor,
+             function_ref<bool(Operation &)> isProducer) {
+  DenseSet<Value> visited;
+  return findProducerImpl(v, anchor, isProducer, visited);
 }
 
 using MitigateFn = std::function<unsigned(

@@ -288,6 +288,80 @@ func.func @mfma_store_delay_across_cond_br(
 
 // -----
 
+// MFMA result carried across a `uniform_loop` back-edge and read by
+// a VMEM store inside the body on the next iteration. The SSA-edge
+// walk follows the block argument back through
+// `RegionBranchOpInterface`: entry source (loop init) doesn't carry
+// the producer, but the `continue_if` back-edge does, resolving to
+// the MFMA in the previous iteration. Gap = 0 (mfma->continue_if) +
+// 1 (continue_if) + 0 (entry-to-store) = 1; mitigation = 7 NOPs.
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
+
+// CHECK-LABEL: func.func @mfma_carry_consumed_in_body
+// CHECK: waveamdmachine.uniform_loop
+// CHECK: ^bb0(%[[ACC:.+]]: !waveamdmachine.reg<vgpr, 4>):
+// CHECK-NEXT: waveamdmachine.imm 6
+// CHECK-NEXT: waveamdmachine.s_nop
+// CHECK-NEXT: waveamdmachine.global_store_b128 %{{.+}}, %[[ACC]],
+// CHECK: waveamdmachine.mfma_f32_16x16x32_f16
+// CHECK: waveamdmachine.continue_if
+func.func @mfma_carry_consumed_in_body(
+    %ec: !waveamdmachine.reg<scc, 1>,
+    %a: !waveamdmachine.reg<vgpr, 4>,
+    %b: !waveamdmachine.reg<vgpr, 4>,
+    %acc_init: !waveamdmachine.reg<vgpr, 4>,
+    %off: !waveamdmachine.reg<vgpr, 1>,
+    %base: !waveamdmachine.reg<sgpr, 2>) {
+  %unused = waveamdmachine.uniform_loop if %ec : !waveamdmachine.reg<scc, 1>
+      carries(%acc_init : !waveamdmachine.reg<vgpr, 4>) {
+  ^bb0(%acc: !waveamdmachine.reg<vgpr, 4>):
+    %tok = waveamdmachine.global_store_b128 %off, %acc, %base
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 4>,
+           !waveamdmachine.reg<sgpr, 2>) -> !waveamdmachine.mem.token
+    %new = waveamdmachine.mfma_f32_16x16x32_f16 %a, %b, %acc
+        : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
+           !waveamdmachine.reg<vgpr, 4>) -> !waveamdmachine.reg<vgpr, 4>
+    waveamdmachine.continue_if %ec : !waveamdmachine.reg<scc, 1>
+        carries(%new : !waveamdmachine.reg<vgpr, 4>)
+  } -> !waveamdmachine.reg<vgpr, 4>
+  return
+}
+
+// MFMA result returned through the loop's exit-to-parent edge and
+// consumed by a VMEM store after the loop. The SSA-edge walk
+// follows the op result back through the `continue_if` exit
+// successor, resolving to the MFMA inside the body.
+// CHECK-LABEL: func.func @mfma_carry_consumed_after_loop
+// CHECK: %[[RES:.+]] = waveamdmachine.uniform_loop
+// CHECK: waveamdmachine.imm 6
+// CHECK-NEXT: waveamdmachine.s_nop
+// CHECK-NEXT: waveamdmachine.global_store_b128 %{{.+}}, %[[RES]],
+func.func @mfma_carry_consumed_after_loop(
+    %ec: !waveamdmachine.reg<scc, 1>,
+    %a: !waveamdmachine.reg<vgpr, 4>,
+    %b: !waveamdmachine.reg<vgpr, 4>,
+    %acc_init: !waveamdmachine.reg<vgpr, 4>,
+    %off: !waveamdmachine.reg<vgpr, 1>,
+    %base: !waveamdmachine.reg<sgpr, 2>) {
+  %result = waveamdmachine.uniform_loop if %ec : !waveamdmachine.reg<scc, 1>
+      carries(%acc_init : !waveamdmachine.reg<vgpr, 4>) {
+  ^bb0(%acc: !waveamdmachine.reg<vgpr, 4>):
+    %new = waveamdmachine.mfma_f32_16x16x32_f16 %a, %b, %acc
+        : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
+           !waveamdmachine.reg<vgpr, 4>) -> !waveamdmachine.reg<vgpr, 4>
+    waveamdmachine.continue_if %ec : !waveamdmachine.reg<scc, 1>
+        carries(%new : !waveamdmachine.reg<vgpr, 4>)
+  } -> !waveamdmachine.reg<vgpr, 4>
+  %tok = waveamdmachine.global_store_b128 %off, %result, %base
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 4>,
+         !waveamdmachine.reg<sgpr, 2>) -> !waveamdmachine.mem.token
+  return
+}
+
+}
+
+// -----
+
 // Loop-replay must not double-emit the `s_nop` for an M0 hazard
 // inside a `uniform_loop` body. The trailing `s_waitcnt` forces the
 // loop-replay heuristic (VALU-after-LGKM persists across the
