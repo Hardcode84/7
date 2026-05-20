@@ -88,6 +88,41 @@ func.func @buffer_buckets(%out: !wave.ptr<i32, #wave.global>, %x: i32) attribute
   return
 }
 
+// Nested uniform add/mul must stay SGPR-side; otherwise the buffer
+// soffset path collapses into voffset.
+// CHECK-LABEL: func.func @nested_uniform_summand_stays_sgpr
+// CHECK: %[[LANE:.*]] = waveamdmachine.v_mbcnt_lo
+// CHECK: %[[WGX:.*]] = waveamdmachine.s_workgroup_id_x
+// CHECK: %[[WGY:.*]] = waveamdmachine.s_workgroup_id_y
+// CHECK: %[[ONE:.*]] = waveamdmachine.imm 1
+// CHECK: %[[XADD:.*]], %{{.*}} = waveamdmachine.s_add_i32 %[[WGX]], %[[ONE]]
+// CHECK: %[[TWO:.*]] = waveamdmachine.imm 2
+// CHECK: %[[YADD:.*]], %{{.*}} = waveamdmachine.s_add_i32 %[[WGY]], %[[TWO]]
+// CHECK: %[[PROD:.*]] = waveamdmachine.s_mul_i32 %[[XADD]], %[[YADD]]
+// CHECK: %[[VBYTE:.*]] = waveamdmachine.v_lshlrev_b32 %[[LANE]],
+// CHECK: %[[SBYTE:.*]] = waveamdmachine.s_lshl_b32 %[[PROD]],
+// CHECK: waveamdmachine.buffer_store_b32 %[[VBYTE]], %[[LANE]], {{.*}}, %[[SBYTE]]
+func.func @nested_uniform_summand_stays_sgpr(%out: !wave.ptr<i32, #wave.global>) attributes {wave.kernel} {
+  %lane = wave.lane_id : !wave.simd<i32, 32>
+  %wgid_x_raw = wave.workgroup_id 0
+  %wgid_y_raw = wave.workgroup_id 1
+  %wgid_x = wave.assume_range %wgid_x_raw, [0, 15] : i32
+  %wgid_y = wave.assume_range %wgid_y_raw, [0, 15] : i32
+  %range = arith.constant 4096 : i32
+  %buf = waveamd.make_buffer %out, %range
+      : !wave.ptr<i32, #wave.global>, i32 -> !wave.ptr<i32, #waveamd.buffer>
+  %off = wave.index_expr <"lid + (wgid_x + 1)*(wgid_y + 2)">
+      ["lid", "wgid_x", "wgid_y"] (%lane, %wgid_x, %wgid_y)
+      : (!wave.simd<i32, 32>, i32, i32) -> !wave.index<32>
+  %ptrs = wave.ptr_add %buf, %off
+      : !wave.ptr<i32, #waveamd.buffer>, !wave.index<32>
+      -> !wave.simd<!wave.ptr<i32, #waveamd.buffer>, 32>
+  %tok = wave.store %lane -> %ptrs
+      : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<i32, #waveamd.buffer>, 32>)
+      -> !wave.mem.token
+  return
+}
+
 // Without `wave.assume_range`, workgroup_id reports the full
 // [0, INT32_MAX] lattice. Two of them, byte-scaled, push the soffset
 // bucket's proven range past 2^32-1, so the emit-time spec check

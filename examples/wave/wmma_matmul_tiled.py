@@ -133,6 +133,11 @@ def _add_codegen_args(parser: argparse.ArgumentParser) -> None:
         "round-trip",
     )
     parser.add_argument(
+        "--use-dma-lds",
+        action="store_true",
+        help="stage gfx950 MFMA A fragments through waveamd.dma_load_lds",
+    )
+    parser.add_argument(
         "--chip",
         default="",
         help="AMDGPU chip used for auto intrinsic selection; gfx9/gfx950 use MFMA",
@@ -335,6 +340,7 @@ def main(argv: list[str] | None = None) -> int:
         wave_n_tiles=args.wave_n_tiles,
         wave_k_tiles=args.wave_k_tiles,
         use_buffer=args.use_buffer,
+        use_dma_lds=args.use_dma_lds,
         matrix_intrinsic=matrix_intrinsic,
         random_data=random_data,
         random_seed=args.seed,

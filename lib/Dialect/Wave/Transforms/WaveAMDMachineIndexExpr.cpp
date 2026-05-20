@@ -116,7 +116,13 @@ FailureOr<Value> materializeIxsAdd(WaveAMDMachineSelector &S, ::ixs_node *node,
     FailureOr<Value> scaled = materializeIxsAddTerm(S, node, i, user, subs);
     if (failed(scaled))
       return failure();
-    acc = acc ? S.addByteOffsets(loc, *acc, *scaled) : *scaled;
+    if (!acc) {
+      acc = *scaled;
+    } else if (S.isUniformValue(*acc) && S.isUniformValue(*scaled)) {
+      acc = S.addUniformBytes(loc, *acc, *scaled);
+    } else {
+      acc = S.addByteOffsets(loc, *acc, *scaled);
+    }
   }
   return acc ? *acc : createImm(S.builder, loc, 0);
 }
@@ -158,7 +164,13 @@ FailureOr<Value> materializeIxsMul(WaveAMDMachineSelector &S, ::ixs_node *node,
     FailureOr<Value> pow = materializeIxsMulFactor(S, node, i, user, subs);
     if (failed(pow))
       return failure();
-    acc = acc ? S.mulIndexValues(loc, *acc, *pow) : *pow;
+    if (!acc) {
+      acc = *pow;
+    } else if (S.isUniformValue(*acc) && S.isUniformValue(*pow)) {
+      acc = S.mulUniformValues(loc, *acc, *pow);
+    } else {
+      acc = S.mulIndexValues(loc, *acc, *pow);
+    }
   }
   return acc ? *acc : createImm(S.builder, loc, 1);
 }
