@@ -350,6 +350,96 @@ private:
                        : llvm::AMDGPU::GLOBAL_LOAD_DWORD_SADDR_gfx11;
   }
 
+  unsigned globalLoadB64() const {
+    return isGfx8Or9() ? llvm::AMDGPU::GLOBAL_LOAD_DWORDX2_SADDR_vi
+                       : llvm::AMDGPU::GLOBAL_LOAD_DWORDX2_SADDR_gfx11;
+  }
+
+  unsigned globalLoadB96() const {
+    return isGfx8Or9() ? llvm::AMDGPU::GLOBAL_LOAD_DWORDX3_SADDR_vi
+                       : llvm::AMDGPU::GLOBAL_LOAD_DWORDX3_SADDR_gfx11;
+  }
+
+  unsigned globalLoadB128() const {
+    return isGfx8Or9() ? llvm::AMDGPU::GLOBAL_LOAD_DWORDX4_SADDR_vi
+                       : llvm::AMDGPU::GLOBAL_LOAD_DWORDX4_SADDR_gfx11;
+  }
+
+  unsigned globalStoreB64() const {
+    return isGfx8Or9() ? llvm::AMDGPU::GLOBAL_STORE_DWORDX2_SADDR_vi
+                       : llvm::AMDGPU::GLOBAL_STORE_DWORDX2_SADDR_gfx11;
+  }
+
+  unsigned globalStoreB96() const {
+    return isGfx8Or9() ? llvm::AMDGPU::GLOBAL_STORE_DWORDX3_SADDR_vi
+                       : llvm::AMDGPU::GLOBAL_STORE_DWORDX3_SADDR_gfx11;
+  }
+
+  unsigned globalStoreB128() const {
+    return isGfx8Or9() ? llvm::AMDGPU::GLOBAL_STORE_DWORDX4_SADDR_vi
+                       : llvm::AMDGPU::GLOBAL_STORE_DWORDX4_SADDR_gfx11;
+  }
+
+  unsigned bufferLoadB64() const {
+    return isGfx8Or9() ? llvm::AMDGPU::BUFFER_LOAD_DWORDX2_OFFEN_vi
+                       : llvm::AMDGPU::BUFFER_LOAD_DWORDX2_OFFEN_gfx11;
+  }
+
+  unsigned bufferLoadB96() const {
+    return isGfx8Or9() ? llvm::AMDGPU::BUFFER_LOAD_DWORDX3_OFFEN_vi
+                       : llvm::AMDGPU::BUFFER_LOAD_DWORDX3_OFFEN_gfx11;
+  }
+
+  unsigned bufferLoadB128() const {
+    return isGfx8Or9() ? llvm::AMDGPU::BUFFER_LOAD_DWORDX4_OFFEN_vi
+                       : llvm::AMDGPU::BUFFER_LOAD_DWORDX4_OFFEN_gfx11;
+  }
+
+  unsigned bufferStoreB64() const {
+    return isGfx8Or9() ? llvm::AMDGPU::BUFFER_STORE_DWORDX2_OFFEN_vi
+                       : llvm::AMDGPU::BUFFER_STORE_DWORDX2_OFFEN_gfx11;
+  }
+
+  unsigned bufferStoreB96() const {
+    return isGfx8Or9() ? llvm::AMDGPU::BUFFER_STORE_DWORDX3_OFFEN_vi
+                       : llvm::AMDGPU::BUFFER_STORE_DWORDX3_OFFEN_gfx11;
+  }
+
+  unsigned bufferStoreB128() const {
+    return isGfx8Or9() ? llvm::AMDGPU::BUFFER_STORE_DWORDX4_OFFEN_vi
+                       : llvm::AMDGPU::BUFFER_STORE_DWORDX4_OFFEN_gfx11;
+  }
+
+  unsigned dsReadB64() const {
+    return isGfx8Or9() ? llvm::AMDGPU::DS_READ_B64_vi_gfx9
+                       : llvm::AMDGPU::DS_READ_B64_gfx11;
+  }
+
+  unsigned dsReadB96() const {
+    return isGfx8Or9() ? llvm::AMDGPU::DS_READ_B96_vi_gfx9
+                       : llvm::AMDGPU::DS_READ_B96_gfx11;
+  }
+
+  unsigned dsReadB128() const {
+    return isGfx8Or9() ? llvm::AMDGPU::DS_READ_B128_vi_gfx9
+                       : llvm::AMDGPU::DS_READ_B128_gfx11;
+  }
+
+  unsigned dsWriteB64() const {
+    return isGfx8Or9() ? llvm::AMDGPU::DS_WRITE_B64_vi_gfx9
+                       : llvm::AMDGPU::DS_WRITE_B64_gfx11;
+  }
+
+  unsigned dsWriteB96() const {
+    return isGfx8Or9() ? llvm::AMDGPU::DS_WRITE_B96_vi_gfx9
+                       : llvm::AMDGPU::DS_WRITE_B96_gfx11;
+  }
+
+  unsigned dsWriteB128() const {
+    return isGfx8Or9() ? llvm::AMDGPU::DS_WRITE_B128_vi_gfx9
+                       : llvm::AMDGPU::DS_WRITE_B128_gfx11;
+  }
+
   unsigned globalLoadLdsB32() const {
     return isGfx90APlus() ? llvm::AMDGPU::GLOBAL_LOAD_LDS_DWORD_SADDR_gfx940
                           : llvm::AMDGPU::GLOBAL_LOAD_LDS_DWORD_SADDR_vi;
@@ -677,6 +767,8 @@ private:
       return llvm::AMDGPU::VGPR0 + phys;
     case 2:
       return llvm::AMDGPU::VGPR0_VGPR1 + phys;
+    case 3:
+      return llvm::AMDGPU::VGPR0_VGPR1_VGPR2 + phys;
     case 4:
       return llvm::AMDGPU::VGPR0_VGPR1_VGPR2_VGPR3 + phys;
     case 8:
@@ -735,6 +827,62 @@ private:
     for (Value operand : operands)
       mcOperands.push_back(toMCOperand(operand));
     return emitMC(opcode, mcOperands);
+  }
+
+  // Shared emit shapes for the width-parameterised mem ops. The MC
+  // operand order is what the LLVM AMDGPU printer expects per family:
+  //   GLOBAL_*_SADDR: vdst/vdata, saddr, vaddr, offset, cpol
+  //   BUFFER_*_OFFEN: vdst/vdata, vaddr, srsrc, soffset, offset, cpol
+  //   DS_READ_*:      vdst, vaddr, offset, gds
+  //   DS_WRITE_*:     vaddr, vdata, offset, gds
+  LogicalResult emitGlobalLoad(Operation &op, unsigned opcode) {
+    int64_t instOffset = getIntAttr(&op, "inst_offset", 0);
+    return emitMC(opcode,
+                  {toMCOperand(op.getResult(0)), toMCOperand(op.getOperand(1)),
+                   toMCOperand(op.getOperand(0)),
+                   llvm::MCOperand::createImm(instOffset),
+                   llvm::MCOperand::createImm(0)});
+  }
+
+  LogicalResult emitGlobalStore(Operation &op, unsigned opcode) {
+    int64_t instOffset = getIntAttr(&op, "inst_offset", 0);
+    return emitMC(opcode,
+                  {toMCOperand(op.getOperand(0)), toMCOperand(op.getOperand(1)),
+                   toMCOperand(op.getOperand(2)),
+                   llvm::MCOperand::createImm(instOffset),
+                   llvm::MCOperand::createImm(0)});
+  }
+
+  LogicalResult emitBufferLoad(Operation &op, unsigned opcode) {
+    int64_t instOffset = getIntAttr(&op, "inst_offset", 0);
+    return emitMC(opcode,
+                  {toMCOperand(op.getResult(0)), toMCOperand(op.getOperand(0)),
+                   toMCOperand(op.getOperand(1)), toMCOperand(op.getOperand(2)),
+                   llvm::MCOperand::createImm(instOffset),
+                   llvm::MCOperand::createImm(0)});
+  }
+
+  LogicalResult emitBufferStore(Operation &op, unsigned opcode) {
+    int64_t instOffset = getIntAttr(&op, "inst_offset", 0);
+    return emitMC(opcode,
+                  {toMCOperand(op.getOperand(1)), toMCOperand(op.getOperand(0)),
+                   toMCOperand(op.getOperand(2)), toMCOperand(op.getOperand(3)),
+                   llvm::MCOperand::createImm(instOffset),
+                   llvm::MCOperand::createImm(0)});
+  }
+
+  LogicalResult emitDsLoad(Operation &op, unsigned opcode) {
+    return emitMC(opcode,
+                  {toMCOperand(op.getResult(0)), toMCOperand(op.getOperand(0)),
+                   llvm::MCOperand::createImm(getIntAttr(&op, "offset", 0)),
+                   llvm::MCOperand::createImm(0)});
+  }
+
+  LogicalResult emitDsStore(Operation &op, unsigned opcode) {
+    return emitMC(opcode,
+                  {toMCOperand(op.getOperand(0)), toMCOperand(op.getOperand(1)),
+                   llvm::MCOperand::createImm(getIntAttr(&op, "offset", 0)),
+                   llvm::MCOperand::createImm(0)});
   }
 
   LogicalResult emitVAddU32(llvm::MCOperand dst, llvm::MCOperand lhs,
@@ -1208,26 +1356,26 @@ private:
     if (isa<wavemachine::VReadfirstlaneB32Op>(op))
       return emitMC(vReadfirstlaneB32(),
                     {toMCOperand(result()), toMCOperand(op.getOperand(0))});
-    if (isa<wavemachine::GlobalStoreB32Op>(op)) {
-      int64_t instOffset = getIntAttr(&op, "inst_offset", 0);
-      return emitMC(globalStoreB32(), {toMCOperand(op.getOperand(0)),
-                                       toMCOperand(op.getOperand(1)),
-                                       toMCOperand(op.getOperand(2)),
-                                       llvm::MCOperand::createImm(instOffset),
-                                       llvm::MCOperand::createImm(0)});
-    }
+    if (isa<wavemachine::GlobalStoreB32Op>(op))
+      return emitGlobalStore(op, globalStoreB32());
+    if (isa<wavemachine::GlobalStoreB64Op>(op))
+      return emitGlobalStore(op, globalStoreB64());
+    if (isa<wavemachine::GlobalStoreB96Op>(op))
+      return emitGlobalStore(op, globalStoreB96());
+    if (isa<wavemachine::GlobalStoreB128Op>(op))
+      return emitGlobalStore(op, globalStoreB128());
     // GLOBAL_LOAD_DWORD_SADDR encodes its MC operands as
     //   vdst, saddr, vaddr, offset, cpol
     // -- the SADDR variants put the SGPR base first, unlike the *non*-SADDR
     // store variants we use elsewhere.
-    if (isa<wavemachine::GlobalLoadB32Op>(op)) {
-      int64_t instOffset = getIntAttr(&op, "inst_offset", 0);
-      return emitMC(globalLoadB32(), {toMCOperand(op.getResult(0)),
-                                      toMCOperand(op.getOperand(1)),
-                                      toMCOperand(op.getOperand(0)),
-                                      llvm::MCOperand::createImm(instOffset),
-                                      llvm::MCOperand::createImm(0)});
-    }
+    if (isa<wavemachine::GlobalLoadB32Op>(op))
+      return emitGlobalLoad(op, globalLoadB32());
+    if (isa<wavemachine::GlobalLoadB64Op>(op))
+      return emitGlobalLoad(op, globalLoadB64());
+    if (isa<wavemachine::GlobalLoadB96Op>(op))
+      return emitGlobalLoad(op, globalLoadB96());
+    if (isa<wavemachine::GlobalLoadB128Op>(op))
+      return emitGlobalLoad(op, globalLoadB128());
     if (isa<wavemachine::GlobalLoadTupleB32Op,
             wavemachine::BufferLoadTupleB32Op, wavemachine::DsLoadTupleB32Op,
             wavemachine::GlobalStoreTupleB32Op,
@@ -1266,24 +1414,22 @@ private:
     //          soffset(SGPR1OrImm), [dep], inst_offset attr
     //   LOAD : offset(VGPR1), descriptor(SGPR4),
     //          soffset(SGPR1OrImm), [dep], inst_offset attr
-    if (isa<wavemachine::BufferStoreB32Op>(op)) {
-      int64_t instOffset = getIntAttr(&op, "inst_offset", 0);
-      return emitMC(bufferStoreB32(), {toMCOperand(op.getOperand(1)),
-                                       toMCOperand(op.getOperand(0)),
-                                       toMCOperand(op.getOperand(2)),
-                                       toMCOperand(op.getOperand(3)),
-                                       llvm::MCOperand::createImm(instOffset),
-                                       llvm::MCOperand::createImm(0)});
-    }
-    if (isa<wavemachine::BufferLoadB32Op>(op)) {
-      int64_t instOffset = getIntAttr(&op, "inst_offset", 0);
-      return emitMC(bufferLoadB32(), {toMCOperand(op.getResult(0)),
-                                      toMCOperand(op.getOperand(0)),
-                                      toMCOperand(op.getOperand(1)),
-                                      toMCOperand(op.getOperand(2)),
-                                      llvm::MCOperand::createImm(instOffset),
-                                      llvm::MCOperand::createImm(0)});
-    }
+    if (isa<wavemachine::BufferStoreB32Op>(op))
+      return emitBufferStore(op, bufferStoreB32());
+    if (isa<wavemachine::BufferStoreB64Op>(op))
+      return emitBufferStore(op, bufferStoreB64());
+    if (isa<wavemachine::BufferStoreB96Op>(op))
+      return emitBufferStore(op, bufferStoreB96());
+    if (isa<wavemachine::BufferStoreB128Op>(op))
+      return emitBufferStore(op, bufferStoreB128());
+    if (isa<wavemachine::BufferLoadB32Op>(op))
+      return emitBufferLoad(op, bufferLoadB32());
+    if (isa<wavemachine::BufferLoadB64Op>(op))
+      return emitBufferLoad(op, bufferLoadB64());
+    if (isa<wavemachine::BufferLoadB96Op>(op))
+      return emitBufferLoad(op, bufferLoadB96());
+    if (isa<wavemachine::BufferLoadB128Op>(op))
+      return emitBufferLoad(op, bufferLoadB128());
     if (isa<wavemachine::GlobalLoadLdsB32Op>(op)) {
       int64_t instOffset = getIntAttr(&op, "inst_offset", 0);
       int64_t aux = getIntAttr(&op, "aux", 0);
@@ -1321,17 +1467,21 @@ private:
                      llvm::MCOperand::createImm(aux)});
     }
     if (isa<wavemachine::DsLoadB32Op>(op))
-      return emitMC(dsReadB32(),
-                    {toMCOperand(op.getResult(0)),
-                     toMCOperand(op.getOperand(0)),
-                     llvm::MCOperand::createImm(getIntAttr(&op, "offset", 0)),
-                     llvm::MCOperand::createImm(0)});
+      return emitDsLoad(op, dsReadB32());
+    if (isa<wavemachine::DsLoadB64Op>(op))
+      return emitDsLoad(op, dsReadB64());
+    if (isa<wavemachine::DsLoadB96Op>(op))
+      return emitDsLoad(op, dsReadB96());
+    if (isa<wavemachine::DsLoadB128Op>(op))
+      return emitDsLoad(op, dsReadB128());
     if (isa<wavemachine::DsStoreB32Op>(op))
-      return emitMC(dsWriteB32(),
-                    {toMCOperand(op.getOperand(0)),
-                     toMCOperand(op.getOperand(1)),
-                     llvm::MCOperand::createImm(getIntAttr(&op, "offset", 0)),
-                     llvm::MCOperand::createImm(0)});
+      return emitDsStore(op, dsWriteB32());
+    if (isa<wavemachine::DsStoreB64Op>(op))
+      return emitDsStore(op, dsWriteB64());
+    if (isa<wavemachine::DsStoreB96Op>(op))
+      return emitDsStore(op, dsWriteB96());
+    if (isa<wavemachine::DsStoreB128Op>(op))
+      return emitDsStore(op, dsWriteB128());
     if (isa<wavemachine::SBarrierOp>(op))
       return emitMC(sBarrier(), {});
     if (isa<wavemachine::SEndpgmOp>(op))

@@ -87,6 +87,18 @@ def WaveMachine_VGPR2
                  "::llvm::cast<::mlir::wavemachine::RegType>($_self).getWidth() == 2">,
            "WaveMachine VGPR pair register">;
 
+def WaveMachine_VGPR3
+    : Type<CPred<"::llvm::isa<::mlir::wavemachine::RegType>($_self) && "
+                 "::llvm::cast<::mlir::wavemachine::RegType>($_self).getRegClass() == ::mlir::wavemachine::RegClass::VGPR && "
+                 "::llvm::cast<::mlir::wavemachine::RegType>($_self).getWidth() == 3">,
+           "WaveMachine VGPR triple register">;
+
+def WaveMachine_VGPR4
+    : Type<CPred<"::llvm::isa<::mlir::wavemachine::RegType>($_self) && "
+                 "::llvm::cast<::mlir::wavemachine::RegType>($_self).getRegClass() == ::mlir::wavemachine::RegClass::VGPR && "
+                 "::llvm::cast<::mlir::wavemachine::RegType>($_self).getWidth() == 4">,
+           "WaveMachine VGPR quad register">;
+
 // SCC is the status condition code: a 1-bit hardware register implicitly
 // written by scalar ALU ops (s_cmp_*, s_add_i32 carry-out, ...) and read
 // by s_cbranch_scc0/1. There is exactly one physical SCC, so the
@@ -477,6 +489,52 @@ def WaveMachine_GlobalLoadB32Op
   let hasVerifier = 1;
 }
 
+// HW-fused multi-dword global loads. The single op corresponds 1:1 to
+// one `global_load_dwordx{2,3,4}` instruction on gfx9 (and the
+// `_b{64,96,128}` syntax on gfx11/12). Operand shape mirrors
+// `global_load_b32`; result width is fixed by the op's mnemonic.
+def WaveMachine_GlobalLoadB64Op
+    : WaveMachine_GlobalMemoryOp<"global_load_b64", [WaveMachine_VMEMLoad]> {
+  let summary = "global 64-bit load through an SGPR base";
+  let arguments = (ins WaveMachine_VGPR1:$offset, WaveMachine_SGPR2:$base,
+                       Optional<WaveMachine_MemToken>:$dependency,
+                       DefaultValuedAttr<I64Attr, "0">:$inst_offset);
+  let results = (outs WaveMachine_VGPR2:$result,
+                      Variadic<WaveMachine_MemToken>:$tokens);
+  let assemblyFormat = [{
+    $offset `,` $base (`after` $dependency^)? (`offset` $inst_offset^)?
+    attr-dict `:` functional-type(operands, results)
+  }];
+}
+
+def WaveMachine_GlobalLoadB96Op
+    : WaveMachine_GlobalMemoryOp<"global_load_b96", [WaveMachine_VMEMLoad]> {
+  let summary = "global 96-bit load through an SGPR base";
+  let arguments = (ins WaveMachine_VGPR1:$offset, WaveMachine_SGPR2:$base,
+                       Optional<WaveMachine_MemToken>:$dependency,
+                       DefaultValuedAttr<I64Attr, "0">:$inst_offset);
+  let results = (outs WaveMachine_VGPR3:$result,
+                      Variadic<WaveMachine_MemToken>:$tokens);
+  let assemblyFormat = [{
+    $offset `,` $base (`after` $dependency^)? (`offset` $inst_offset^)?
+    attr-dict `:` functional-type(operands, results)
+  }];
+}
+
+def WaveMachine_GlobalLoadB128Op
+    : WaveMachine_GlobalMemoryOp<"global_load_b128", [WaveMachine_VMEMLoad]> {
+  let summary = "global 128-bit load through an SGPR base";
+  let arguments = (ins WaveMachine_VGPR1:$offset, WaveMachine_SGPR2:$base,
+                       Optional<WaveMachine_MemToken>:$dependency,
+                       DefaultValuedAttr<I64Attr, "0">:$inst_offset);
+  let results = (outs WaveMachine_VGPR4:$result,
+                      Variadic<WaveMachine_MemToken>:$tokens);
+  let assemblyFormat = [{
+    $offset `,` $base (`after` $dependency^)? (`offset` $inst_offset^)?
+    attr-dict `:` functional-type(operands, results)
+  }];
+}
+
 def WaveMachine_GlobalLoadTupleB32Op
     : WaveMachine_GlobalMemoryOp<"global_load_tuple_b32", [WaveMachine_VMEMLoad]> {
   let summary = "global load of N consecutive 32-bit values into a VGPR tuple";
@@ -568,6 +626,51 @@ def WaveMachine_GlobalStoreB32Op
   }];
   let hasVerifier = 1;
 }
+
+def WaveMachine_GlobalStoreB64Op
+    : WaveMachine_GlobalMemoryOp<"global_store_b64", [WaveMachine_VMEMStore]> {
+  let summary = "global 64-bit store through an SGPR base";
+  let arguments = (ins WaveMachine_VGPR1:$offset, WaveMachine_VGPR2:$value,
+                       WaveMachine_SGPR2:$base,
+                       Optional<WaveMachine_MemToken>:$dependency,
+                       DefaultValuedAttr<I64Attr, "0">:$inst_offset);
+  let results = (outs Variadic<WaveMachine_MemToken>:$tokens);
+  let assemblyFormat = [{
+    $offset `,` $value `,` $base (`after` $dependency^)?
+    (`offset` $inst_offset^)?
+    attr-dict `:` functional-type(operands, results)
+  }];
+}
+
+def WaveMachine_GlobalStoreB96Op
+    : WaveMachine_GlobalMemoryOp<"global_store_b96", [WaveMachine_VMEMStore]> {
+  let summary = "global 96-bit store through an SGPR base";
+  let arguments = (ins WaveMachine_VGPR1:$offset, WaveMachine_VGPR3:$value,
+                       WaveMachine_SGPR2:$base,
+                       Optional<WaveMachine_MemToken>:$dependency,
+                       DefaultValuedAttr<I64Attr, "0">:$inst_offset);
+  let results = (outs Variadic<WaveMachine_MemToken>:$tokens);
+  let assemblyFormat = [{
+    $offset `,` $value `,` $base (`after` $dependency^)?
+    (`offset` $inst_offset^)?
+    attr-dict `:` functional-type(operands, results)
+  }];
+}
+
+def WaveMachine_GlobalStoreB128Op
+    : WaveMachine_GlobalMemoryOp<"global_store_b128", [WaveMachine_VMEMStore]> {
+  let summary = "global 128-bit store through an SGPR base";
+  let arguments = (ins WaveMachine_VGPR1:$offset, WaveMachine_VGPR4:$value,
+                       WaveMachine_SGPR2:$base,
+                       Optional<WaveMachine_MemToken>:$dependency,
+                       DefaultValuedAttr<I64Attr, "0">:$inst_offset);
+  let results = (outs Variadic<WaveMachine_MemToken>:$tokens);
+  let assemblyFormat = [{
+    $offset `,` $value `,` $base (`after` $dependency^)?
+    (`offset` $inst_offset^)?
+    attr-dict `:` functional-type(operands, results)
+  }];
+}
 def WaveMachine_BufferStoreB32Op
     : WaveMachine_BufferMemoryOp<"buffer_store_b32", [WaveMachine_VMEMStore]> {
   let summary = "buffer 32-bit store through an SGPR descriptor and VGPR offset";
@@ -612,6 +715,102 @@ def WaveMachine_BufferLoadB32Op
   }];
   let hasVerifier = 1;
 }
+def WaveMachine_BufferLoadB64Op
+    : WaveMachine_BufferMemoryOp<"buffer_load_b64", [WaveMachine_VMEMLoad]> {
+  let summary = "buffer 64-bit load through an SGPR descriptor and VGPR offset";
+  let arguments = (ins WaveMachine_VGPR1:$offset, WaveMachine_SGPR4:$descriptor,
+                       WaveMachine_SGPR1OrImm:$soffset,
+                       Optional<WaveMachine_MemToken>:$dependency,
+                       DefaultValuedAttr<I64Attr, "0">:$inst_offset);
+  let results = (outs WaveMachine_VGPR2:$result,
+                      Variadic<WaveMachine_MemToken>:$tokens);
+  let assemblyFormat = [{
+    $offset `,` $descriptor `,` $soffset
+    (`after` $dependency^)? (`offset` $inst_offset^)?
+    attr-dict `:` functional-type(operands, results)
+  }];
+}
+
+def WaveMachine_BufferLoadB96Op
+    : WaveMachine_BufferMemoryOp<"buffer_load_b96", [WaveMachine_VMEMLoad]> {
+  let summary = "buffer 96-bit load through an SGPR descriptor and VGPR offset";
+  let arguments = (ins WaveMachine_VGPR1:$offset, WaveMachine_SGPR4:$descriptor,
+                       WaveMachine_SGPR1OrImm:$soffset,
+                       Optional<WaveMachine_MemToken>:$dependency,
+                       DefaultValuedAttr<I64Attr, "0">:$inst_offset);
+  let results = (outs WaveMachine_VGPR3:$result,
+                      Variadic<WaveMachine_MemToken>:$tokens);
+  let assemblyFormat = [{
+    $offset `,` $descriptor `,` $soffset
+    (`after` $dependency^)? (`offset` $inst_offset^)?
+    attr-dict `:` functional-type(operands, results)
+  }];
+}
+
+def WaveMachine_BufferLoadB128Op
+    : WaveMachine_BufferMemoryOp<"buffer_load_b128", [WaveMachine_VMEMLoad]> {
+  let summary = "buffer 128-bit load through an SGPR descriptor and VGPR offset";
+  let arguments = (ins WaveMachine_VGPR1:$offset, WaveMachine_SGPR4:$descriptor,
+                       WaveMachine_SGPR1OrImm:$soffset,
+                       Optional<WaveMachine_MemToken>:$dependency,
+                       DefaultValuedAttr<I64Attr, "0">:$inst_offset);
+  let results = (outs WaveMachine_VGPR4:$result,
+                      Variadic<WaveMachine_MemToken>:$tokens);
+  let assemblyFormat = [{
+    $offset `,` $descriptor `,` $soffset
+    (`after` $dependency^)? (`offset` $inst_offset^)?
+    attr-dict `:` functional-type(operands, results)
+  }];
+}
+
+def WaveMachine_BufferStoreB64Op
+    : WaveMachine_BufferMemoryOp<"buffer_store_b64", [WaveMachine_VMEMStore]> {
+  let summary = "buffer 64-bit store through an SGPR descriptor and VGPR offset";
+  let arguments = (ins WaveMachine_VGPR1:$offset, WaveMachine_VGPR2:$value,
+                       WaveMachine_SGPR4:$descriptor,
+                       WaveMachine_SGPR1OrImm:$soffset,
+                       Optional<WaveMachine_MemToken>:$dependency,
+                       DefaultValuedAttr<I64Attr, "0">:$inst_offset);
+  let results = (outs Variadic<WaveMachine_MemToken>:$tokens);
+  let assemblyFormat = [{
+    $offset `,` $value `,` $descriptor `,` $soffset
+    (`after` $dependency^)? (`offset` $inst_offset^)?
+    attr-dict `:` functional-type(operands, results)
+  }];
+}
+
+def WaveMachine_BufferStoreB96Op
+    : WaveMachine_BufferMemoryOp<"buffer_store_b96", [WaveMachine_VMEMStore]> {
+  let summary = "buffer 96-bit store through an SGPR descriptor and VGPR offset";
+  let arguments = (ins WaveMachine_VGPR1:$offset, WaveMachine_VGPR3:$value,
+                       WaveMachine_SGPR4:$descriptor,
+                       WaveMachine_SGPR1OrImm:$soffset,
+                       Optional<WaveMachine_MemToken>:$dependency,
+                       DefaultValuedAttr<I64Attr, "0">:$inst_offset);
+  let results = (outs Variadic<WaveMachine_MemToken>:$tokens);
+  let assemblyFormat = [{
+    $offset `,` $value `,` $descriptor `,` $soffset
+    (`after` $dependency^)? (`offset` $inst_offset^)?
+    attr-dict `:` functional-type(operands, results)
+  }];
+}
+
+def WaveMachine_BufferStoreB128Op
+    : WaveMachine_BufferMemoryOp<"buffer_store_b128", [WaveMachine_VMEMStore]> {
+  let summary = "buffer 128-bit store through an SGPR descriptor and VGPR offset";
+  let arguments = (ins WaveMachine_VGPR1:$offset, WaveMachine_VGPR4:$value,
+                       WaveMachine_SGPR4:$descriptor,
+                       WaveMachine_SGPR1OrImm:$soffset,
+                       Optional<WaveMachine_MemToken>:$dependency,
+                       DefaultValuedAttr<I64Attr, "0">:$inst_offset);
+  let results = (outs Variadic<WaveMachine_MemToken>:$tokens);
+  let assemblyFormat = [{
+    $offset `,` $value `,` $descriptor `,` $soffset
+    (`after` $dependency^)? (`offset` $inst_offset^)?
+    attr-dict `:` functional-type(operands, results)
+  }];
+}
+
 def WaveMachine_BufferLoadTupleB32Op
     : WaveMachine_BufferMemoryOp<"buffer_load_tuple_b32", [WaveMachine_VMEMLoad]> {
   let summary = "buffer load of N consecutive 32-bit values into a VGPR tuple";
@@ -770,6 +969,87 @@ def WaveMachine_DsStoreB32Op
     : WaveMachine_DsMemoryOp<"ds_store_b32", [WaveMachine_SMEMLoad]> {
   let summary = "LDS 32-bit store";
   let arguments = (ins WaveMachine_VGPR1:$addr, WaveMachine_VGPR1:$value,
+                       Optional<WaveMachine_MemToken>:$dependency,
+                       DefaultValuedAttr<I64Attr, "0">:$offset);
+  let results = (outs Variadic<WaveMachine_MemToken>:$tokens);
+  let assemblyFormat = [{
+    $addr `,` $value (`after` $dependency^)? (`offset` $offset^)?
+    attr-dict `:` functional-type(operands, results)
+  }];
+}
+
+def WaveMachine_DsLoadB64Op
+    : WaveMachine_DsMemoryOp<"ds_load_b64", [WaveMachine_SMEMLoad]> {
+  let summary = "LDS 64-bit load";
+  let arguments = (ins WaveMachine_VGPR1:$addr,
+                       Optional<WaveMachine_MemToken>:$dependency,
+                       DefaultValuedAttr<I64Attr, "0">:$offset);
+  let results = (outs WaveMachine_VGPR2:$result,
+                      Variadic<WaveMachine_MemToken>:$tokens);
+  let assemblyFormat = [{
+    $addr (`after` $dependency^)? (`offset` $offset^)?
+    attr-dict `:` functional-type(operands, results)
+  }];
+}
+
+def WaveMachine_DsLoadB96Op
+    : WaveMachine_DsMemoryOp<"ds_load_b96", [WaveMachine_SMEMLoad]> {
+  let summary = "LDS 96-bit load";
+  let arguments = (ins WaveMachine_VGPR1:$addr,
+                       Optional<WaveMachine_MemToken>:$dependency,
+                       DefaultValuedAttr<I64Attr, "0">:$offset);
+  let results = (outs WaveMachine_VGPR3:$result,
+                      Variadic<WaveMachine_MemToken>:$tokens);
+  let assemblyFormat = [{
+    $addr (`after` $dependency^)? (`offset` $offset^)?
+    attr-dict `:` functional-type(operands, results)
+  }];
+}
+
+def WaveMachine_DsLoadB128Op
+    : WaveMachine_DsMemoryOp<"ds_load_b128", [WaveMachine_SMEMLoad]> {
+  let summary = "LDS 128-bit load";
+  let arguments = (ins WaveMachine_VGPR1:$addr,
+                       Optional<WaveMachine_MemToken>:$dependency,
+                       DefaultValuedAttr<I64Attr, "0">:$offset);
+  let results = (outs WaveMachine_VGPR4:$result,
+                      Variadic<WaveMachine_MemToken>:$tokens);
+  let assemblyFormat = [{
+    $addr (`after` $dependency^)? (`offset` $offset^)?
+    attr-dict `:` functional-type(operands, results)
+  }];
+}
+
+def WaveMachine_DsStoreB64Op
+    : WaveMachine_DsMemoryOp<"ds_store_b64", [WaveMachine_SMEMLoad]> {
+  let summary = "LDS 64-bit store";
+  let arguments = (ins WaveMachine_VGPR1:$addr, WaveMachine_VGPR2:$value,
+                       Optional<WaveMachine_MemToken>:$dependency,
+                       DefaultValuedAttr<I64Attr, "0">:$offset);
+  let results = (outs Variadic<WaveMachine_MemToken>:$tokens);
+  let assemblyFormat = [{
+    $addr `,` $value (`after` $dependency^)? (`offset` $offset^)?
+    attr-dict `:` functional-type(operands, results)
+  }];
+}
+
+def WaveMachine_DsStoreB96Op
+    : WaveMachine_DsMemoryOp<"ds_store_b96", [WaveMachine_SMEMLoad]> {
+  let summary = "LDS 96-bit store";
+  let arguments = (ins WaveMachine_VGPR1:$addr, WaveMachine_VGPR3:$value,
+                       Optional<WaveMachine_MemToken>:$dependency,
+                       DefaultValuedAttr<I64Attr, "0">:$offset);
+  let results = (outs Variadic<WaveMachine_MemToken>:$tokens);
+  let assemblyFormat = [{
+    $addr `,` $value (`after` $dependency^)? (`offset` $offset^)?
+    attr-dict `:` functional-type(operands, results)
+  }];
+}
+
+def WaveMachine_DsStoreB128Op
+    : WaveMachine_DsMemoryOp<"ds_store_b128", [WaveMachine_SMEMLoad]> {
+  let summary = "LDS 128-bit store";
+  let arguments = (ins WaveMachine_VGPR1:$addr, WaveMachine_VGPR4:$value,
                        Optional<WaveMachine_MemToken>:$dependency,
                        DefaultValuedAttr<I64Attr, "0">:$offset);
   let results = (outs Variadic<WaveMachine_MemToken>:$tokens);
