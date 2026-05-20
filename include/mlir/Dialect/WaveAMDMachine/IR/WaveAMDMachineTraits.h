@@ -35,6 +35,19 @@ class TokenOp : public TraitBase<ConcreteType, TokenOp> {};
 template <typename ConcreteType>
 class TokenJoinOp : public TraitBase<ConcreteType, TokenJoinOp> {};
 
+// Tags ops that produce no hardware instruction at asm emit time
+// (pseudo-ops, preloaded register projections, waitcnt-class ops
+// that emit MC pseudos). Hazard passes use this to count
+// instruction gaps without manually maintaining a denylist.
+template <typename ConcreteType>
+class NoMachineInst : public TraitBase<ConcreteType, NoMachineInst> {};
+
+// Tags ops that emit a real MFMA instruction. Used by the hazard
+// pass to detect the producer side of the MFMA-result-as-VMEM-store
+// pipeline hazard.
+template <typename ConcreteType>
+class MFMAOp : public TraitBase<ConcreteType, MFMAOp> {};
+
 } // namespace mlir::OpTrait::waveamdmachine
 
 #endif // MLIR_DIALECT_WAVEAMDMACHINE_IR_WAVEAMDMACHINETRAITS_H

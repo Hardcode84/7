@@ -5,6 +5,15 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
+//
+// Linear walk over a flattened pre-order of every waveamdmachine op in
+// the function, including ops nested inside region-bearing ops such as
+// `uniform_loop`. Cross-block control flow (branches, joins) is NOT
+// analysed; the walk assumes each hazard producer and its consumer
+// sit in the same straight-line region. Today's selector upholds this
+// for every emitted op. The follow-up SSA-edge backward-query design
+// (see docs/HazardMitigationDesign.md) crosses blocks correctly and
+// supersedes this assumption.
 
 #include "mlir/Dialect/Wave/Transforms/Passes.h"
 
@@ -18,6 +27,7 @@
 #include "llvm/Support/TargetSelect.h"
 #include "llvm/TargetParser/TargetParser.h"
 #include "llvm/TargetParser/Triple.h"
+#include <functional>
 #include <optional>
 
 namespace mlir::wave {
@@ -165,23 +175,12 @@ static bool consumesM0(Operation &op) {
   });
 }
 
-static bool isMFMA(Operation &op) {
-  return isa<waveamdmachine::MfmaF32_16x16x16_F16Op,
-             waveamdmachine::MfmaF32_16x16x32_F16Op>(op);
-}
-
 static bool isVMEMStore(Operation &op) {
   return op.hasTrait<OpTrait::waveamdmachine::VMEMStoreOp>();
 }
 
-static bool countsAsInstruction(Operation &op) {
-  return !isa<
-      waveamdmachine::ArgOp, waveamdmachine::ImmOp, waveamdmachine::TokenOp,
-      waveamdmachine::TokenJoinOp, waveamdmachine::WaitOp,
-      waveamdmachine::SWaitcntOp, waveamdmachine::SWaitcntVscntOp,
-      waveamdmachine::TupleToElementsOp, waveamdmachine::TupleFromElementsOp,
-      waveamdmachine::SWorkgroupIdXOp, waveamdmachine::SWorkgroupIdYOp,
-      waveamdmachine::SWorkgroupIdZOp, waveamdmachine::VWorkitemIdXOp>(op);
+static bool emitsNoMachineInst(Operation &op) {
+  return op.hasTrait<OpTrait::waveamdmachine::NoMachineInst>();
 }
 
 struct HazardConfig {
@@ -189,7 +188,160 @@ struct HazardConfig {
   llvm::AMDGPU::IsaVersion isaVersion;
   unsigned defaultLgkmcnt;
   unsigned valuDep1;
+
+  // Wait states between `s_mov_m0` and the next op reading `m0`.
+  // One pipeline slot on every AMDGPU ISA that exposes M0; see
+  // GCNHazardRecognizer.cpp's setreg / m0-write hazard checks.
+  unsigned m0PipelineDelay;
+
+  // Wait states between an MFMA result becoming readable and a
+  // VMEM store consuming it. Conservative worst-case from
+  // GCNHazardRecognizer.cpp's MFMA latency tables; per-variant
+  // tightening (gfx950 has more granular cases) is left to a
+  // future pass that knows the MFMA shape.
+  unsigned mfmaResultLatency;
 };
+
+// Insert `count` `s_nop`s right before `op`.
+static void insertSNopMitigation(Operation &op, unsigned count, OpBuilder &b,
+                                 const llvm::MCSubtargetInfo &sti) {
+  b.setInsertionPoint(&op);
+  insertNoops(b, op.getLoc(), count, sti);
+}
+
+// Emit the VALU-after-LGKM mitigation right before `op`: `s_delay_alu`
+// on gfx11+, plain `s_nop 0` otherwise.
+static void insertValuMitigation(Operation &op, OpBuilder &b,
+                                 const HazardConfig &cfg,
+                                 const llvm::MCSubtargetInfo &sti) {
+  b.setInsertionPoint(&op);
+  if (cfg.hasDelayAlu) {
+    waveamdmachine::SDelayAluOp::create(
+        b, op.getLoc(), createImm(b, op.getLoc(), cfg.valuDep1));
+    return;
+  }
+  insertNoops(b, op.getLoc(), /*count=*/1, sti);
+}
+
+// Decode `op` (an `s_waitcnt`) and return the new value of the LGKM
+// pending flag, or `nullopt` if the immediate isn't statically known
+// (the existing pending value should be kept).
+static std::optional<bool> recomputePendingLgkm(Operation &op,
+                                                const HazardConfig &cfg) {
+  auto imm = getImmediate(op.getOperand(0));
+  if (!imm)
+    return std::nullopt;
+  unsigned vm = 0, exp = 0, lg = 0;
+  llvm::AMDGPU::decodeWaitcnt(cfg.isaVersion, *imm, vm, exp, lg);
+  return cfg.hasDelayAlu ? lg != cfg.defaultLgkmcnt : true;
+}
+
+// Stage 1: every hazard runs through `LinearState` (pending-counter,
+// decrement on counted ops, mitigate on consumer). Stage 2 will add
+// `SsaEdge` (backward def-use query) -- the enum is here now so the
+// catalog factory can mark each entry's future intent.
+enum class HazardCategory { LinearState, SsaEdge };
+
+using MitigateFn = std::function<unsigned(
+    Operation &op, unsigned pending, OpBuilder &builder,
+    const HazardConfig &cfg, const llvm::MCSubtargetInfo &sti)>;
+
+using UpdateFn = std::function<unsigned(Operation &op, unsigned pending,
+                                        const HazardConfig &cfg)>;
+
+struct HazardKind {
+  StringRef name;
+  HazardCategory category;
+  // Run at every op. Inserts mitigation if pending is non-zero and the
+  // op consumes the hazard; returns updated pending.
+  MitigateFn mitigate;
+  // Run at every op, after mitigation. Producers raise pending;
+  // counted ops decrement (counter kinds) or pass through (flag kinds).
+  UpdateFn update;
+  // True iff the loop-replay walk should be seeded with this kind's
+  // final state. Today only VALU-after-LGKM persists; counter kinds
+  // reset to 0 in the replay (matching pre-refactor semantics; see
+  // bead hazard-loop-replay-double-emit-8qj for the Stage 2 fix).
+  bool persistInReplay;
+};
+
+static HazardKind makeValuLgkmHazard() {
+  return HazardKind{
+      "valu-after-lgkm-wait",
+      HazardCategory::LinearState,
+      [](Operation &op, unsigned pending, OpBuilder &b, const HazardConfig &cfg,
+         const llvm::MCSubtargetInfo &sti) -> unsigned {
+        if (!pending || !op.hasTrait<OpTrait::waveamdmachine::VALUOp>())
+          return pending;
+        insertValuMitigation(op, b, cfg, sti);
+        return 0;
+      },
+      [](Operation &op, unsigned pending, const HazardConfig &cfg) -> unsigned {
+        if (!isa<waveamdmachine::SWaitcntOp>(op))
+          return pending;
+        std::optional<bool> next = recomputePendingLgkm(op, cfg);
+        return next ? (*next ? 1u : 0u) : pending;
+      },
+      /*persistInReplay=*/true,
+  };
+}
+
+static HazardKind makeM0Hazard() {
+  return HazardKind{
+      "m0-after-s-mov-m0",
+      HazardCategory::LinearState,
+      [](Operation &op, unsigned pending, OpBuilder &b, const HazardConfig &,
+         const llvm::MCSubtargetInfo &sti) -> unsigned {
+        if (!pending || !consumesM0(op))
+          return pending;
+        insertSNopMitigation(op, pending, b, sti);
+        return 0;
+      },
+      [](Operation &op, unsigned pending, const HazardConfig &cfg) -> unsigned {
+        if (isa<waveamdmachine::SMovM0Op>(op))
+          return cfg.m0PipelineDelay;
+        if (pending && !emitsNoMachineInst(op))
+          return pending - 1;
+        return pending;
+      },
+      /*persistInReplay=*/false,
+  };
+}
+
+static HazardKind makeMfmaStoreHazard() {
+  return HazardKind{
+      "vmem-store-after-mfma",
+      HazardCategory::LinearState,
+      [](Operation &op, unsigned pending, OpBuilder &b, const HazardConfig &,
+         const llvm::MCSubtargetInfo &sti) -> unsigned {
+        if (!pending || !isVMEMStore(op))
+          return pending;
+        insertSNopMitigation(op, pending, b, sti);
+        return 0;
+      },
+      [](Operation &op, unsigned pending, const HazardConfig &cfg) -> unsigned {
+        if (op.hasTrait<OpTrait::waveamdmachine::MFMAOp>())
+          return cfg.mfmaResultLatency;
+        if (pending && !emitsNoMachineInst(op))
+          return pending - 1;
+        return pending;
+      },
+      /*persistInReplay=*/false,
+  };
+}
+
+// Order matters only for mitigation insertion at a single op site
+// (the inserted NOPs appear in catalog order between the cursor and
+// `op`). Match the legacy order (M0, MFMA-store, VALU-LGKM) so any
+// future CHECK that depends on instruction-pile ordering keeps
+// matching.
+static SmallVector<HazardKind> buildHazardCatalog(const HazardConfig &) {
+  SmallVector<HazardKind> catalog;
+  catalog.push_back(makeM0Hazard());
+  catalog.push_back(makeMfmaStoreHazard());
+  catalog.push_back(makeValuLgkmHazard());
+  return catalog;
+}
 
 struct WaveAMDHazardWaitsPass
     : public wave::impl::WaveAMDHazardWaitsBase<WaveAMDHazardWaitsPass> {
@@ -200,10 +352,15 @@ struct WaveAMDHazardWaitsPass
         createSubtargetInfo(module);
     if (failed(sti))
       return signalPassFailure();
-    HazardConfig cfg{llvm::AMDGPU::isGFX11Plus(**sti),
-                     llvm::AMDGPU::getIsaVersion((*sti)->getCPU()), 0,
-                     amdgpu_compat::SDelayAlu::encode(
-                         amdgpu_compat::SDelayAlu::DelayType::VALU, 1)};
+    HazardConfig cfg{
+        llvm::AMDGPU::isGFX11Plus(**sti),
+        llvm::AMDGPU::getIsaVersion((*sti)->getCPU()),
+        /*defaultLgkmcnt=*/0,
+        amdgpu_compat::SDelayAlu::encode(
+            amdgpu_compat::SDelayAlu::DelayType::VALU, 1),
+        /*m0PipelineDelay=*/1,
+        /*mfmaResultLatency=*/8,
+    };
     cfg.defaultLgkmcnt = llvm::AMDGPU::decodeLgkmcnt(
         cfg.isaVersion, llvm::AMDGPU::getWaitcntBitMask(cfg.isaVersion));
     for (func::FuncOp func : module.getOps<func::FuncOp>())
@@ -224,35 +381,8 @@ private:
            !op.getAttrOfType<StringAttr>("base");
   }
 
-  // Emit the VALU-after-SMEM mitigation right before `op`.
-  void insertValuMitigation(Operation &op, OpBuilder &builder,
-                            const HazardConfig &cfg,
-                            const llvm::MCSubtargetInfo &sti) {
-    builder.setInsertionPoint(&op);
-    if (cfg.hasDelayAlu) {
-      waveamdmachine::SDelayAluOp::create(
-          builder, op.getLoc(), createImm(builder, op.getLoc(), cfg.valuDep1));
-    } else {
-      insertNoops(builder, op.getLoc(), /*count=*/1, sti);
-    }
-  }
-
-  // Decide whether `op` (a `s_waitcnt`) cleared the LGKM counter; returns
-  // the new `pendingLgkmWait` state, or `std::nullopt` to leave it
-  // unchanged (immediate not statically known).
-  std::optional<bool> recomputePendingLgkm(Operation &op,
-                                           const HazardConfig &cfg) {
-    auto imm = getImmediate(op.getOperand(0));
-    if (!imm)
-      return std::nullopt;
-    unsigned vm = 0, exp = 0, lg = 0;
-    llvm::AMDGPU::decodeWaitcnt(cfg.isaVersion, *imm, vm, exp, lg);
-    return cfg.hasDelayAlu ? lg != cfg.defaultLgkmcnt : true;
-  }
-
-  // Walk every waveamdmachine op in the function in program order, including
-  // ops nested inside structured regions such as `waveamdmachine.uniform_loop`.
-  // Returns failure (via diagnostic emission) if a malformed op is found.
+  // Pre-order walk over every waveamdmachine op in `func`, including
+  // ops nested inside structured regions. Diagnoses malformed input.
   LogicalResult collectOps(func::FuncOp func,
                            SmallVectorImpl<Operation *> &ops) {
     func.walk<WalkOrder::PreOrder>([&](Operation *op) {
@@ -272,78 +402,21 @@ private:
     return success();
   }
 
-  // Linear scan that inserts VALU-after-LGKM mitigations. Returns the
-  // value of `pendingLgkmWait` after the last op, which the caller may
-  // use to decide whether a back-edge replay is required.
-  bool processOnce(ArrayRef<Operation *> ops, bool startState,
-                   OpBuilder &builder, const HazardConfig &cfg,
-                   const llvm::MCSubtargetInfo &sti) {
-    bool pendingLgkmWait = startState;
-    unsigned pendingM0Wait = 0;
-    unsigned pendingMfmaStoreWait = 0;
+  // Drive each catalog entry over `ops`. Returns the per-kind pending
+  // state after the last op; the caller uses it to decide whether a
+  // loop-replay walk is required.
+  static SmallVector<unsigned>
+  processOnce(ArrayRef<HazardKind> catalog, ArrayRef<Operation *> ops,
+              ArrayRef<unsigned> initial, OpBuilder &builder,
+              const HazardConfig &cfg, const llvm::MCSubtargetInfo &sti) {
+    SmallVector<unsigned> state(initial.begin(), initial.end());
     for (Operation *op : ops) {
-      mitigateM0Hazard(*op, pendingM0Wait, builder, sti);
-      mitigateMfmaStoreHazard(*op, pendingMfmaStoreWait, builder, sti);
-      mitigateValuHazard(*op, pendingLgkmWait, builder, cfg, sti);
-      updateLgkmState(*op, pendingLgkmWait, cfg);
-      updateM0State(*op, pendingM0Wait);
-      updateMfmaStoreState(*op, pendingMfmaStoreWait);
+      for (size_t i = 0, e = catalog.size(); i < e; ++i)
+        state[i] = catalog[i].mitigate(*op, state[i], builder, cfg, sti);
+      for (size_t i = 0, e = catalog.size(); i < e; ++i)
+        state[i] = catalog[i].update(*op, state[i], cfg);
     }
-    return pendingLgkmWait;
-  }
-
-  void mitigateM0Hazard(Operation &op, unsigned &pendingM0Wait,
-                        OpBuilder &builder, const llvm::MCSubtargetInfo &sti) {
-    if (!pendingM0Wait || !consumesM0(op))
-      return;
-    builder.setInsertionPoint(&op);
-    insertNoops(builder, op.getLoc(), pendingM0Wait, sti);
-    pendingM0Wait = 0;
-  }
-
-  void mitigateMfmaStoreHazard(Operation &op, unsigned &pendingMfmaStoreWait,
-                               OpBuilder &builder,
-                               const llvm::MCSubtargetInfo &sti) {
-    if (!pendingMfmaStoreWait || !isVMEMStore(op))
-      return;
-    builder.setInsertionPoint(&op);
-    insertNoops(builder, op.getLoc(), pendingMfmaStoreWait, sti);
-    pendingMfmaStoreWait = 0;
-  }
-
-  void mitigateValuHazard(Operation &op, bool &pendingLgkmWait,
-                          OpBuilder &builder, const HazardConfig &cfg,
-                          const llvm::MCSubtargetInfo &sti) {
-    if (!op.hasTrait<OpTrait::waveamdmachine::VALUOp>() || !pendingLgkmWait)
-      return;
-    insertValuMitigation(op, builder, cfg, sti);
-    pendingLgkmWait = false;
-  }
-
-  void updateLgkmState(Operation &op, bool &pendingLgkmWait,
-                       const HazardConfig &cfg) {
-    if (!isa<waveamdmachine::SWaitcntOp>(op))
-      return;
-    if (auto newState = recomputePendingLgkm(op, cfg))
-      pendingLgkmWait = *newState;
-  }
-
-  void updateM0State(Operation &op, unsigned &pendingM0Wait) {
-    if (isa<waveamdmachine::SMovM0Op>(op)) {
-      pendingM0Wait = 1;
-      return;
-    }
-    if (pendingM0Wait && countsAsInstruction(op))
-      --pendingM0Wait;
-  }
-
-  void updateMfmaStoreState(Operation &op, unsigned &pendingMfmaStoreWait) {
-    if (isMFMA(op)) {
-      pendingMfmaStoreWait = 8;
-      return;
-    }
-    if (pendingMfmaStoreWait && countsAsInstruction(op))
-      --pendingMfmaStoreWait;
+    return state;
   }
 
   LogicalResult processFunction(func::FuncOp func, OpBuilder &builder,
@@ -353,16 +426,30 @@ private:
     if (failed(collectOps(func, ops)))
       return failure();
 
-    // Walk once with pendingLgkmWait=false (the linear fall-through
-    // state at function entry). If the walk leaves pendingLgkmWait=true
-    // and the function contains a uniform loop, re-walk with
-    // pendingLgkmWait=true so that a VALU at the *top* of a loop body
-    // picks up a leftover wait produced by the body's tail in the prior
-    // iteration. The replay is bounded to one extra pass because
-    // `insertValuMitigation` resets the flag inside the body.
-    bool finalState = processOnce(ops, /*startState=*/false, builder, cfg, sti);
-    if (finalState && containsLoop(func))
-      processOnce(ops, /*startState=*/true, builder, cfg, sti);
+    SmallVector<HazardKind> catalog = buildHazardCatalog(cfg);
+    SmallVector<unsigned> zero(catalog.size(), 0);
+
+    SmallVector<unsigned> finalState =
+        processOnce(catalog, ops, zero, builder, cfg, sti);
+
+    // Loop replay: a back-edge can carry a kind's pending state from
+    // the body's tail back to the top, so kinds flagged
+    // `persistInReplay` get a second walk seeded with their final
+    // state. Non-persistent kinds reset to 0 in the replay, matching
+    // pre-refactor semantics (bead hazard-loop-replay-double-emit-8qj
+    // tracks the resulting M0 / MFMA-store double-emit on Stage 2).
+    if (!containsLoop(func))
+      return success();
+    SmallVector<unsigned> replaySeed(catalog.size(), 0);
+    bool anyPersisted = false;
+    for (size_t i = 0, e = catalog.size(); i < e; ++i) {
+      if (catalog[i].persistInReplay && finalState[i]) {
+        replaySeed[i] = finalState[i];
+        anyPersisted = true;
+      }
+    }
+    if (anyPersisted)
+      processOnce(catalog, ops, replaySeed, builder, cfg, sti);
     return success();
   }
 

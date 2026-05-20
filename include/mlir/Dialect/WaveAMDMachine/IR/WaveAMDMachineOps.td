@@ -46,6 +46,8 @@ def WaveAMDMachine_VMEMStore : NativeOpTrait<"waveamdmachine::VMEMStoreOp">;
 def WaveAMDMachine_Waitcnt : NativeOpTrait<"waveamdmachine::WaitcntOp">;
 def WaveAMDMachine_TokenTrait : NativeOpTrait<"waveamdmachine::TokenOp">;
 def WaveAMDMachine_TokenJoinTrait : NativeOpTrait<"waveamdmachine::TokenJoinOp">;
+def WaveAMDMachine_NoMachineInst : NativeOpTrait<"waveamdmachine::NoMachineInst">;
+def WaveAMDMachine_MFMA : NativeOpTrait<"waveamdmachine::MFMAOp">;
 
 def WaveAMDMachine_SGPR
     : Type<CPred<"::llvm::isa<::mlir::waveamdmachine::RegType>($_self) && "
@@ -220,14 +222,17 @@ class WaveAMDMachine_BinaryNoResult<string mnemonic, Type operandType,
   let assemblyFormat = "$lhs `,` $rhs attr-dict `:` functional-type(operands, results)";
 }
 
-def WaveAMDMachine_ArgOp : WaveAMDMachine_Op<"arg"> {
+def WaveAMDMachine_ArgOp : WaveAMDMachine_Op<"arg", [WaveAMDMachine_NoMachineInst]> {
   let summary = "selected function argument";
   let arguments = (ins I64Attr:$index, BoolAttr:$pointer);
   let results = (outs WaveAMDMachine_Reg:$result);
   let assemblyFormat = "attr-dict `:` type($result)";
 }
 
-def WaveAMDMachine_ImmOp : WaveAMDMachine_Op<"imm", [Pure]> {
+def WaveAMDMachine_ImmOp : WaveAMDMachine_Op<"imm", [
+  Pure,
+  WaveAMDMachine_NoMachineInst
+]> {
   let summary = "machine immediate";
   let arguments = (ins I64Attr:$value);
   let results = (outs WaveAMDMachine_Imm:$result);
@@ -236,7 +241,8 @@ def WaveAMDMachine_ImmOp : WaveAMDMachine_Op<"imm", [Pure]> {
 
 def WaveAMDMachine_TokenOp : WaveAMDMachine_Op<"token", [
   Pure,
-  WaveAMDMachine_TokenTrait
+  WaveAMDMachine_TokenTrait,
+  WaveAMDMachine_NoMachineInst
 ]> {
   let summary = "empty machine memory token";
   let results = (outs WaveAMDMachine_MemToken:$result);
@@ -244,7 +250,7 @@ def WaveAMDMachine_TokenOp : WaveAMDMachine_Op<"token", [
 }
 
 def WaveAMDMachine_TokenJoinOp : WaveAMDMachine_Op<"token_join",
-    [Pure, WaveAMDMachine_TokenJoinTrait]> {
+    [Pure, WaveAMDMachine_TokenJoinTrait, WaveAMDMachine_NoMachineInst]> {
   let summary = "join machine memory tokens";
   let arguments = (ins Variadic<WaveAMDMachine_MemToken>:$dependencies);
   let results = (outs WaveAMDMachine_MemToken:$result);
@@ -259,7 +265,7 @@ def WaveAMDMachine_AfterOp : WaveAMDMachine_Op<"after",
   let assemblyFormat = "$dependencies attr-dict `:` functional-type(operands, results)";
 }
 
-def WaveAMDMachine_WaitOp : WaveAMDMachine_Op<"wait"> {
+def WaveAMDMachine_WaitOp : WaveAMDMachine_Op<"wait", [WaveAMDMachine_NoMachineInst]> {
   let summary = "wait for machine memory token dependencies";
   let arguments = (ins Variadic<WaveAMDMachine_MemToken>:$dependencies);
   let assemblyFormat = "$dependencies attr-dict `:` functional-type(operands, results)";
@@ -281,16 +287,20 @@ def WaveAMDMachine_VMbcntLoOp
 // printer emits nothing because the value is already in the register on
 // kernel entry.
 def WaveAMDMachine_SWorkgroupIdXOp
-    : WaveAMDMachine_ZeroOperandResult<"s_workgroup_id_x", WaveAMDMachine_SGPR1, []>;
+    : WaveAMDMachine_ZeroOperandResult<"s_workgroup_id_x", WaveAMDMachine_SGPR1,
+                                       [WaveAMDMachine_NoMachineInst]>;
 def WaveAMDMachine_SWorkgroupIdYOp
-    : WaveAMDMachine_ZeroOperandResult<"s_workgroup_id_y", WaveAMDMachine_SGPR1, []>;
+    : WaveAMDMachine_ZeroOperandResult<"s_workgroup_id_y", WaveAMDMachine_SGPR1,
+                                       [WaveAMDMachine_NoMachineInst]>;
 def WaveAMDMachine_SWorkgroupIdZOp
-    : WaveAMDMachine_ZeroOperandResult<"s_workgroup_id_z", WaveAMDMachine_SGPR1, []>;
+    : WaveAMDMachine_ZeroOperandResult<"s_workgroup_id_z", WaveAMDMachine_SGPR1,
+                                       [WaveAMDMachine_NoMachineInst]>;
 
 // Preloaded workitem id (packed) lives in `v0`. Only the X half is
 // exposed today; Y/Z would need additional descriptor flags.
 def WaveAMDMachine_VWorkitemIdXOp
-    : WaveAMDMachine_ZeroOperandResult<"v_workitem_id_x", WaveAMDMachine_VGPR1, []>;
+    : WaveAMDMachine_ZeroOperandResult<"v_workitem_id_x", WaveAMDMachine_VGPR1,
+                                       [WaveAMDMachine_NoMachineInst]>;
 
 def WaveAMDMachine_VMovB32TupleOp
     : WaveAMDMachine_UnaryResult<"v_mov_b32_tuple", WaveAMDMachine_RegOrImm,
@@ -309,7 +319,9 @@ def WaveAMDMachine_VMovB32TupleOp
 // stores can consume); `tuple_from_elements` is the after-load
 // gather (assembles per-instruction load results into one tuple).
 def WaveAMDMachine_TupleToElementsOp
-    : WaveAMDMachine_Op<"tuple_to_elements", [Pure, WaveAMDMachine_TokenJoinTrait]> {
+    : WaveAMDMachine_Op<"tuple_to_elements",
+                       [Pure, WaveAMDMachine_TokenJoinTrait,
+                        WaveAMDMachine_NoMachineInst]> {
   let summary = "split a GPR tuple into mixed-width GPR pieces";
   let arguments = (ins WaveAMDMachine_GPR:$tuple);
   let results = (outs Variadic<WaveAMDMachine_GPR>:$elements);
@@ -320,7 +332,8 @@ def WaveAMDMachine_TupleToElementsOp
 
 def WaveAMDMachine_TupleFromElementsOp
     : WaveAMDMachine_Op<"tuple_from_elements",
-                     [Pure, WaveAMDMachine_TokenJoinTrait]> {
+                     [Pure, WaveAMDMachine_TokenJoinTrait,
+                      WaveAMDMachine_NoMachineInst]> {
   let summary = "concatenate mixed-width GPR pieces into a GPR tuple";
   let arguments = (ins Variadic<WaveAMDMachine_GPR>:$elements);
   let results = (outs WaveAMDMachine_GPR:$tuple);
@@ -385,13 +398,15 @@ def WaveAMDMachine_WmmaF32_16x16x16_F16Op
 }
 def WaveAMDMachine_MfmaF32_16x16x16_F16Op
     : WaveAMDMachine_TernaryResult<"mfma_f32_16x16x16_f16", WaveAMDMachine_VGPR,
-                                WaveAMDMachine_VGPR, [WaveAMDMachine_VALU]> {
+                                WaveAMDMachine_VGPR,
+                                [WaveAMDMachine_VALU, WaveAMDMachine_MFMA]> {
   let hasVerifier = 1;
   let archPredicate = "isa.Major == 9";
 }
 def WaveAMDMachine_MfmaF32_16x16x32_F16Op
     : WaveAMDMachine_TernaryResult<"mfma_f32_16x16x32_f16", WaveAMDMachine_VGPR,
-                                WaveAMDMachine_VGPR, [WaveAMDMachine_VALU]> {
+                                WaveAMDMachine_VGPR,
+                                [WaveAMDMachine_VALU, WaveAMDMachine_MFMA]> {
   let hasVerifier = 1;
   let archPredicate = "isa.Major == 9";
 }
@@ -444,10 +459,12 @@ def WaveAMDMachine_SLoadB128Op : WaveAMDMachine_UnaryResult<"s_load_b128",
 }
 def WaveAMDMachine_SWaitcntOp : WaveAMDMachine_UnaryNoResult<"s_waitcnt",
                                                         WaveAMDMachine_Imm,
-                                                        [WaveAMDMachine_Waitcnt]>;
+                                                        [WaveAMDMachine_Waitcnt,
+                                                         WaveAMDMachine_NoMachineInst]>;
 def WaveAMDMachine_SWaitcntVscntOp : WaveAMDMachine_UnaryNoResult<"s_waitcnt_vscnt",
                                                              WaveAMDMachine_Imm,
-                                                             [WaveAMDMachine_Waitcnt]>;
+                                                             [WaveAMDMachine_Waitcnt,
+                                                              WaveAMDMachine_NoMachineInst]>;
 def WaveAMDMachine_SNopOp : WaveAMDMachine_UnaryNoResult<"s_nop", WaveAMDMachine_Imm>;
 def WaveAMDMachine_SDelayAluOp : WaveAMDMachine_UnaryNoResult<"s_delay_alu",
                                                          WaveAMDMachine_Imm>;
