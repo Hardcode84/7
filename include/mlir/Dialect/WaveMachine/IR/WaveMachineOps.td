@@ -252,19 +252,20 @@ def WaveMachine_VMovB32TupleOp
   let hasVerifier = 1;
 }
 
-// Pure SSA renames between a VGPR tuple and its per-slot constituent
-// VGPRs. The regalloc coalesces each element with `tuple_phys +
-// slot_index`, so both ops are zero-cost in asm (no instructions
-// emitted). `tuple_to_elements` is the natural before-store hand-off
-// (splits a tuple value into N scalar VGPRs the scalar stores can
-// consume each); `tuple_from_elements` is the after-load gather
-// (assembles N scalar load results into one tuple value the rest of
-// the pipeline expects).
+// Pure SSA renames between a VGPR tuple and its constituent VGPR
+// pieces. Elements may be any width as long as their widths sum to
+// the tuple width; the regalloc places each element at
+// `tuple_phys + cumulative_offset`, where the offset is the sum of
+// the preceding elements' widths. Both ops are zero-cost at asm
+// emit time. `tuple_to_elements` is the natural before-store
+// hand-off (splits a tuple value into pieces the per-instruction
+// stores can consume); `tuple_from_elements` is the after-load
+// gather (assembles per-instruction load results into one tuple).
 def WaveMachine_TupleToElementsOp
     : WaveMachine_Op<"tuple_to_elements", [Pure, WaveMachine_TokenJoinTrait]> {
-  let summary = "split a VGPR tuple into per-slot scalar VGPRs";
+  let summary = "split a VGPR tuple into mixed-width VGPR pieces";
   let arguments = (ins WaveMachine_VGPR:$tuple);
-  let results = (outs Variadic<WaveMachine_VGPR1>:$elements);
+  let results = (outs Variadic<WaveMachine_VGPR>:$elements);
   let assemblyFormat =
       "$tuple attr-dict `:` functional-type(operands, results)";
   let hasVerifier = 1;
@@ -273,8 +274,8 @@ def WaveMachine_TupleToElementsOp
 def WaveMachine_TupleFromElementsOp
     : WaveMachine_Op<"tuple_from_elements",
                      [Pure, WaveMachine_TokenJoinTrait]> {
-  let summary = "concatenate per-slot scalar VGPRs into a VGPR tuple";
-  let arguments = (ins Variadic<WaveMachine_VGPR1>:$elements);
+  let summary = "concatenate mixed-width VGPR pieces into a VGPR tuple";
+  let arguments = (ins Variadic<WaveMachine_VGPR>:$elements);
   let results = (outs WaveMachine_VGPR:$tuple);
   let assemblyFormat =
       "$elements attr-dict `:` functional-type(operands, results)";

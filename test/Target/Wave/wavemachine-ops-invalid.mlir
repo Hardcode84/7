@@ -41,7 +41,7 @@ func.func @bad_wmma_width(%a: !wavemachine.reg<vgpr, 8>, %b: !wavemachine.reg<vg
 // -----
 
 func.func @tuple_to_elements_wrong_count(%t: !wavemachine.reg<vgpr, 8>) {
-  // expected-error @below {{element count (4) must match tuple register width (8)}}
+  // expected-error @below {{element widths sum (4) must match tuple register width (8)}}
   %e:4 = wavemachine.tuple_to_elements %t
       : (!wavemachine.reg<vgpr, 8>) -> (!wavemachine.reg<vgpr, 1>, !wavemachine.reg<vgpr, 1>, !wavemachine.reg<vgpr, 1>, !wavemachine.reg<vgpr, 1>)
   return
@@ -52,8 +52,19 @@ func.func @tuple_to_elements_wrong_count(%t: !wavemachine.reg<vgpr, 8>) {
 func.func @tuple_from_elements_wrong_count(%a: !wavemachine.reg<vgpr, 1>,
                                            %b: !wavemachine.reg<vgpr, 1>,
                                            %c: !wavemachine.reg<vgpr, 1>) {
-  // expected-error @below {{element count (3) must match tuple register width (8)}}
+  // expected-error @below {{element widths sum (3) must match tuple register width (8)}}
   %t = wavemachine.tuple_from_elements %a, %b, %c
       : (!wavemachine.reg<vgpr, 1>, !wavemachine.reg<vgpr, 1>, !wavemachine.reg<vgpr, 1>) -> !wavemachine.reg<vgpr, 8>
+  return
+}
+
+// -----
+
+func.func @tuple_from_elements_subtuple_width_mismatch(%a: !wavemachine.reg<vgpr, 4>,
+                                                       %b: !wavemachine.reg<vgpr, 2>,
+                                                       %c: !wavemachine.reg<vgpr, 1>) {
+  // expected-error @below {{element widths sum (7) must match tuple register width (8)}}
+  %t = wavemachine.tuple_from_elements %a, %b, %c
+      : (!wavemachine.reg<vgpr, 4>, !wavemachine.reg<vgpr, 2>, !wavemachine.reg<vgpr, 1>) -> !wavemachine.reg<vgpr, 8>
   return
 }

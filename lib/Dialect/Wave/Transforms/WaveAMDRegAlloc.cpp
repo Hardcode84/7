@@ -384,17 +384,21 @@ struct WaveAMDRegAllocPass
   }
 
   // Pin each element of a tuple_to/from_elements into the tuple's
-  // physical block at offset i. Tuple is always primary; the element
-  // absorbs at slotOffset=i so the allocator emits `phys + i` for it
-  // once the block is assigned.
+  // physical block at its cumulative byte (dword) offset within the
+  // tuple. Tuple is always primary; element i absorbs at
+  // `sum(width[0..i-1])` so the allocator emits `phys + offset` for it
+  // once the block is assigned. Width-1 elements collapse to operand
+  // index, matching the original semantics; wider sub-tuple pieces get
+  // their proper offset.
   LogicalResult coalesceTupleElementOps(Operation &op, unsigned pos,
                                         LiveIntervalSet &intervals) {
     auto coalesceTupleElements = [&](auto top) -> LogicalResult {
       Value tuple = top.getTuple();
-      for (auto [i, element] : llvm::enumerate(top.getElements())) {
-        if (failed(coalesce(tuple, element, pos, intervals, top,
-                            static_cast<unsigned>(i))))
+      unsigned cumOffset = 0;
+      for (Value element : top.getElements()) {
+        if (failed(coalesce(tuple, element, pos, intervals, top, cumOffset)))
           return failure();
+        cumOffset += cast<wavemachine::RegType>(element.getType()).getWidth();
       }
       return success();
     };
@@ -464,21 +468,26 @@ struct WaveAMDRegAllocPass
                           "width for duplicate iter_arg init");
   }
 
-  // Each VGPR1 value carries at most one slot constraint: the slot it
-  // sits at within its anchor tuple's physical block. `tuple_to_elements`
-  // anchors its result at slot i; the first `tuple_from_elements` to
-  // consume a value anchors it at the operand index. Any subsequent use
-  // at a different slot, or any second from_elements consuming a value
-  // already consumed by another, must go through a fresh copy --
-  // otherwise the coalescer would merge two unrelated tuples and the
-  // other slots would clobber each other.
+  // Each VGPR value used as a tuple element carries at most one slot
+  // constraint: the cumulative dword offset it sits at within its
+  // anchor tuple's physical block. `tuple_to_elements` anchors each
+  // result at `sum(width[0..i-1])`; the first `tuple_from_elements`
+  // to consume a value anchors it at the operand's cumulative offset.
+  // Any subsequent use at a different offset, or any second
+  // from_elements consuming a value already consumed by another,
+  // must go through a fresh copy -- otherwise the coalescer would
+  // merge two unrelated tuples and the other slots would clobber
+  // each other.
   LogicalResult splitTupleElementSharing(func::FuncOp func) {
     OpBuilder builder(func.getContext());
     DenseMap<Value, unsigned> anchorSlot;
     DenseSet<Value> consumedByFromElements;
     func.walk([&](wavemachine::TupleToElementsOp op) {
-      for (auto [i, element] : llvm::enumerate(op.getElements()))
-        anchorSlot[element] = static_cast<unsigned>(i);
+      unsigned cumOffset = 0;
+      for (Value element : op.getElements()) {
+        anchorSlot[element] = cumOffset;
+        cumOffset += cast<wavemachine::RegType>(element.getType()).getWidth();
+      }
     });
     SmallVector<wavemachine::TupleFromElementsOp> ops;
     func.walk([&](wavemachine::TupleFromElementsOp op) { ops.push_back(op); });
@@ -487,8 +496,11 @@ struct WaveAMDRegAllocPass
       SmallVector<Value> newElements;
       newElements.reserve(op.getElements().size());
       bool changed = false;
-      for (auto [i, element] : llvm::enumerate(op.getElements())) {
-        unsigned slot = static_cast<unsigned>(i);
+      unsigned cumOffset = 0;
+      for (Value element : op.getElements()) {
+        unsigned slot = cumOffset;
+        unsigned width =
+            cast<wavemachine::RegType>(element.getType()).getWidth();
         Value use = element;
         auto anchorIt = anchorSlot.find(element);
         bool slotMismatch =
@@ -507,6 +519,7 @@ struct WaveAMDRegAllocPass
         }
         consumedByFromElements.insert(use);
         newElements.push_back(use);
+        cumOffset += width;
       }
       if (changed)
         op.getElementsMutable().assign(newElements);

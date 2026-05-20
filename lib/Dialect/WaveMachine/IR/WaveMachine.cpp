@@ -67,20 +67,29 @@ LogicalResult VMovB32TupleOp::verify() {
   return success();
 }
 
+static int64_t sumElementWidths(ValueRange elements) {
+  int64_t total = 0;
+  for (Value e : elements)
+    total += cast<RegType>(e.getType()).getWidth();
+  return total;
+}
+
 LogicalResult TupleToElementsOp::verify() {
   auto tupleType = cast<RegType>(getTuple().getType());
-  if (tupleType.getWidth() != static_cast<int64_t>(getElements().size()))
-    return emitOpError("element count (")
-           << getElements().size() << ") must match tuple register width ("
+  int64_t total = sumElementWidths(getElements());
+  if (tupleType.getWidth() != total)
+    return emitOpError("element widths sum (")
+           << total << ") must match tuple register width ("
            << tupleType.getWidth() << ")";
   return success();
 }
 
 LogicalResult TupleFromElementsOp::verify() {
   auto tupleType = cast<RegType>(getTuple().getType());
-  if (tupleType.getWidth() != static_cast<int64_t>(getElements().size()))
-    return emitOpError("element count (")
-           << getElements().size() << ") must match tuple register width ("
+  int64_t total = sumElementWidths(getElements());
+  if (tupleType.getWidth() != total)
+    return emitOpError("element widths sum (")
+           << total << ") must match tuple register width ("
            << tupleType.getWidth() << ")";
   return success();
 }
