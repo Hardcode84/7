@@ -464,8 +464,60 @@ struct WaveAMDRegAllocPass
                           "width for duplicate iter_arg init");
   }
 
+  // Each VGPR1 value carries at most one slot constraint: the slot it
+  // sits at within its anchor tuple's physical block. `tuple_to_elements`
+  // anchors its result at slot i; the first `tuple_from_elements` to
+  // consume a value anchors it at the operand index. Any subsequent use
+  // at a different slot, or any second from_elements consuming a value
+  // already consumed by another, must go through a fresh copy --
+  // otherwise the coalescer would merge two unrelated tuples and the
+  // other slots would clobber each other.
+  LogicalResult splitTupleElementSharing(func::FuncOp func) {
+    OpBuilder builder(func.getContext());
+    DenseMap<Value, unsigned> anchorSlot;
+    DenseSet<Value> consumedByFromElements;
+    func.walk([&](wavemachine::TupleToElementsOp op) {
+      for (auto [i, element] : llvm::enumerate(op.getElements()))
+        anchorSlot[element] = static_cast<unsigned>(i);
+    });
+    SmallVector<wavemachine::TupleFromElementsOp> ops;
+    func.walk([&](wavemachine::TupleFromElementsOp op) { ops.push_back(op); });
+    for (wavemachine::TupleFromElementsOp op : ops) {
+      builder.setInsertionPoint(op);
+      SmallVector<Value> newElements;
+      newElements.reserve(op.getElements().size());
+      bool changed = false;
+      for (auto [i, element] : llvm::enumerate(op.getElements())) {
+        unsigned slot = static_cast<unsigned>(i);
+        Value use = element;
+        auto anchorIt = anchorSlot.find(element);
+        bool slotMismatch =
+            anchorIt != anchorSlot.end() && anchorIt->second != slot;
+        bool reuse = consumedByFromElements.contains(element);
+        if (slotMismatch || reuse) {
+          FailureOr<Value> dup =
+              duplicateRegValue(builder, op.getLoc(), element);
+          if (failed(dup))
+            return failure();
+          use = *dup;
+          anchorSlot[use] = slot;
+          changed = true;
+        } else {
+          anchorSlot[element] = slot;
+        }
+        consumedByFromElements.insert(use);
+        newElements.push_back(use);
+      }
+      if (changed)
+        op.getElementsMutable().assign(newElements);
+    }
+    return success();
+  }
+
   LogicalResult allocateFunction(func::FuncOp func, RegisterLimits limits) {
     if (failed(splitDuplicateLoopInits(func)))
+      return failure();
+    if (failed(splitTupleElementSharing(func)))
       return failure();
     SmallVector<Operation *> orderedOps;
     DenseMap<Operation *, unsigned> positions;
