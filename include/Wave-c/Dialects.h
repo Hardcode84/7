@@ -23,6 +23,10 @@ MLIR_DECLARE_CAPI_DIALECT_REGISTRATION(WaveAMD, waveamd);
 MLIR_DECLARE_CAPI_DIALECT_REGISTRATION(WaveAMDMachine, waveamdmachine);
 MLIR_DECLARE_CAPI_DIALECT_REGISTRATION(WaveMeta, wavemeta);
 
+// Register all wave-owned MLIR passes with the global pass registry so
+// `PassManager.parse(...)` from Python can name them. Idempotent.
+MLIR_CAPI_EXPORTED void mlirRegisterWavePasses(void);
+
 //===----------------------------------------------------------------------===//
 // Wave types
 //===----------------------------------------------------------------------===//

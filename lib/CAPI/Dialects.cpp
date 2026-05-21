@@ -18,6 +18,15 @@
 #include "mlir/Dialect/Wave/IR/WaveMeta.h"
 #include "mlir/Dialect/Wave/IR/WaveSymbols.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachine.h"
+#include "mlir/Pass/Pass.h"
+
+namespace mlir::wave {
+// Forward declaration to keep the heavyweight `WaveCompileKernels`
+// machinery out of WaveCAPI's link closure. Python-side callers only
+// need `wavemeta-specialize`; the other wave passes ride in via
+// `wave-opt` which links its own pass registry.
+std::unique_ptr<::mlir::Pass> createWaveMetaSpecialize();
+} // namespace mlir::wave
 #include "llvm/ADT/StringRef.h"
 
 #include <cstring>
@@ -31,6 +40,12 @@ MLIR_DEFINE_CAPI_DIALECT_REGISTRATION(
     WaveAMDMachine, waveamdmachine, mlir::waveamdmachine::WaveAMDMachineDialect)
 MLIR_DEFINE_CAPI_DIALECT_REGISTRATION(WaveMeta, wavemeta,
                                       mlir::wavemeta::WaveMetaDialect)
+
+void mlirRegisterWavePasses(void) {
+  ::mlir::registerPass([]() -> std::unique_ptr<::mlir::Pass> {
+    return mlir::wave::createWaveMetaSpecialize();
+  });
+}
 
 //===----------------------------------------------------------------------===//
 // Wave types

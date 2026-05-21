@@ -52,9 +52,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from mlir.dialects import scf
+from mlir._mlir_libs._waveDialectsNanobind import PTupleType
+from mlir.dialects import arith, scf, wavemeta
 from mlir.dialects import wave_dsl as dsl
-from mlir.ir import Module
+from mlir.ir import (
+    DictAttr,
+    IndexType,
+    IntegerAttr,
+    IntegerType,
+    Module,
+)
 
 
 def _is_power_of_two(value: int) -> bool:
@@ -763,6 +770,28 @@ def _split_loop_state(values: tuple[dsl.Value, ...], cfg: _MatmulConfig) -> _Loo
     )
 
 
+def _ptuple_type(element_type: dsl.Type, count: int) -> dsl.Type:
+    i64 = IntegerType.get_signless(64)
+    return PTupleType.get(element_type, IntegerAttr.get(i64, count))
+
+
+def _flat_extract(
+    bld: dsl.FunctionBuilder,
+    ptuple_value: dsl.Value,
+    element_type: dsl.Type,
+    count: int,
+) -> tuple[dsl.Value, ...]:
+    """Constant-index tuple_get for every slot. The specialiser folds
+    these to the producing tuple_make's operands.
+    """
+    index = IndexType.get()
+    out = []
+    for i in range(count):
+        idx = bld.constant(index, i)
+        out.append(wavemeta.TupleGetOp(element_type, ptuple_value, idx).result)
+    return tuple(out)
+
+
 def _emit_mma_grid(
     bld: dsl.FunctionBuilder,
     cfg: _MatmulConfig,
@@ -770,20 +799,63 @@ def _emit_mma_grid(
     bfs: tuple[dsl.Value, ...],
     accs: tuple[dsl.Value, ...],
 ) -> tuple[dsl.Value, ...]:
-    acc_grid = list(accs)
-    for k in range(cfg.wave_k_tiles):
-        a_base = k * cfg.wave_m_tiles
-        b_base = k * cfg.wave_n_tiles
-        for i in range(cfg.wave_m_tiles):
-            for j in range(cfg.wave_n_tiles):
-                acc_index = i * cfg.wave_n_tiles + j
-                acc_grid[acc_index] = bld.mma(
-                    cfg.mma.kind,
-                    afs[a_base + i],
-                    bfs[b_base + j],
-                    acc_grid[acc_index],
-                )
-    return tuple(acc_grid)
+    """Triply-nested `wavemeta.static_for` over (k, i, j); the
+    specialiser unrolls all three once the tile-factor params bind.
+    Accumulator state rides through as a `!wavemeta.ptuple` so the
+    inner body can address it by `i * wave_n + j`.
+    """
+    if not accs:
+        return ()
+
+    acc_type = accs[0].type
+    af_type = afs[0].type if afs else acc_type
+    bf_type = bfs[0].type if bfs else acc_type
+
+    acc_count = cfg.tiles_per_wave
+    af_count = cfg.wave_k_tiles * cfg.wave_m_tiles
+    bf_count = cfg.wave_k_tiles * cfg.wave_n_tiles
+
+    acc_pt_type = _ptuple_type(acc_type, acc_count)
+    af_pt_type = _ptuple_type(af_type, af_count)
+    bf_pt_type = _ptuple_type(bf_type, bf_count)
+
+    afs_t = wavemeta.TupleMakeOp(af_pt_type, list(afs)).result
+    bfs_t = wavemeta.TupleMakeOp(bf_pt_type, list(bfs)).result
+    accs_t = wavemeta.TupleMakeOp(acc_pt_type, list(accs)).result
+
+    index = IndexType.get()
+    c0 = bld.constant(index, 0)
+    c1 = bld.constant(index, 1)
+    wave_k = bld.static_param("wave_k_tiles", index)
+    wave_m = bld.static_param("wave_m_tiles", index)
+    wave_n = bld.static_param("wave_n_tiles", index)
+
+    with bld.static_for(c0, wave_k, c1, init_args=[accs_t]) as outer:
+        k_iv = outer.induction_variable
+        (accs_k,) = outer.inner_iter_args
+        with bld.static_for(c0, wave_m, c1, init_args=[accs_k]) as mid:
+            i_iv = mid.induction_variable
+            (accs_ki,) = mid.inner_iter_args
+            with bld.static_for(c0, wave_n, c1, init_args=[accs_ki]) as inner:
+                j_iv = inner.induction_variable
+                (accs_kij,) = inner.inner_iter_args
+
+                a_idx = arith.AddIOp(arith.MulIOp(k_iv, wave_m).result, i_iv).result
+                b_idx = arith.AddIOp(arith.MulIOp(k_iv, wave_n).result, j_iv).result
+                acc_idx = arith.AddIOp(arith.MulIOp(i_iv, wave_n).result, j_iv).result
+
+                af = wavemeta.TupleGetOp(af_type, afs_t, a_idx).result
+                bf = wavemeta.TupleGetOp(bf_type, bfs_t, b_idx).result
+                acc_old = wavemeta.TupleGetOp(acc_type, accs_kij, acc_idx).result
+                acc_new = bld.mma(cfg.mma.kind, af, bf, acc_old)
+                accs_kij_new = wavemeta.TupleSetOp(
+                    acc_pt_type, accs_kij, acc_idx, acc_new
+                ).result
+                wavemeta.YieldOp([accs_kij_new])
+            wavemeta.YieldOp([inner.results[0]])
+        wavemeta.YieldOp([mid.results[0]])
+
+    return _flat_extract(bld, outer.results[0], acc_type, acc_count)
 
 
 def _emit_pipelined_step(
@@ -1059,7 +1131,21 @@ def build_wmma_f16_matmul_module(
         with bld.host_main() as fb:
             _emit_host(fb, cfg)
 
+        _attach_wavemeta_params(bld.module, cfg)
+        dsl.specialize_wavemeta(bld.module)
+
     return bld.module
+
+
+def _attach_wavemeta_params(module: Module, cfg: _MatmulConfig) -> None:
+    """Install the `wavemeta.params` dict the specialiser reads."""
+    index = IndexType.get()
+    bindings = {
+        "wave_k_tiles": IntegerAttr.get(index, cfg.wave_k_tiles),
+        "wave_m_tiles": IntegerAttr.get(index, cfg.wave_m_tiles),
+        "wave_n_tiles": IntegerAttr.get(index, cfg.wave_n_tiles),
+    }
+    module.operation.attributes["wavemeta.params"] = DictAttr.get(bindings)
 
 
 __all__ = [

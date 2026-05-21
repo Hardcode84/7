@@ -58,6 +58,14 @@ static void bindRegisterDialects(nb::module_ &m) {
       nb::arg("context"), nb::arg("load") = true);
 }
 
+// Wire wave passes to a single Python entry point so
+// `PassManager.parse("wavemeta-specialize")` (and the other wave passes)
+// resolve. Idempotent on the MLIR side -- the underlying TableGen
+// registration de-dups.
+static void bindRegisterPasses(nb::module_ &m) {
+  m.def("register_passes", []() { mlirRegisterWavePasses(); });
+}
+
 static void bindSimdType(nb::module_ &m) {
   mlir_type_subclass(m, "SimdType", mlirWaveTypeIsASimd)
       .def_classmethod(
@@ -219,6 +227,7 @@ static void bindPTupleType(nb::module_ &m) {
 
 NB_MODULE(_waveDialectsNanobind, m) {
   bindRegisterDialects(m);
+  bindRegisterPasses(m);
 
   // Wave types.
   bindSimdType(m);

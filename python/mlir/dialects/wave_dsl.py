@@ -46,8 +46,9 @@ from mlir._mlir_libs._waveDialectsNanobind import (
     SimdType,
     WaveIndexType,
     register_dialects,
+    register_passes,
 )
-from mlir.dialects import arith, func, gpu, memref, scf, wave, waveamd
+from mlir.dialects import arith, func, gpu, memref, scf, wave, waveamd, wavemeta
 from mlir.dialects.arith import CmpIPredicate
 from mlir.ir import (
     ArrayAttr,
@@ -71,6 +72,12 @@ from mlir.ir import (
     Value,
     VectorType,
 )
+from mlir.passmanager import PassManager
+
+# Make wave passes discoverable to PassManager.parse(...) on first
+# import. The underlying TableGen registration de-dups, so re-imports
+# are free.
+register_passes()
 
 # Process-wide ixsimpl context for symbolic offset expressions. The DSL
 # hands callers symbols / literals out of this context and the
@@ -272,6 +279,15 @@ def _lane_width(type_: Type) -> int:
     if WaveIndexType.isinstance(type_):
         return int(WaveIndexType(type_).width)
     return 0
+
+
+def specialize_wavemeta(module: Module) -> None:
+    """Bind module-level `wavemeta.params` and run `wavemeta-specialize`
+    in place. After the call no `wavemeta.*` op survives in `module`.
+    """
+    with module.context:
+        pm = PassManager.parse("builtin.module(wavemeta-specialize)")
+        pm.run(module.operation)
 
 
 def unranked_memref_type(element_type: Type) -> Type:
@@ -752,6 +768,30 @@ class FunctionBuilder:
 
     def memref_cast(self, buf: Value, result_type: Type) -> Value:
         return memref.CastOp(result_type, buf).result
+
+    def static_param(self, name: str, ty: Type) -> Value:
+        """`wavemeta.param "name" : T` -- a typed SSA value bound by the
+        specialiser via the module's `wavemeta.params` dict.
+        """
+        return wavemeta.ParamOp(ty, name).result
+
+    @contextmanager
+    def static_for(
+        self,
+        lower: Value,
+        upper: Value,
+        step: Value,
+        init_args: Sequence[Value] = (),
+    ) -> Iterator[wavemeta.StaticForOp]:
+        """`wavemeta.static_for` shaped like `scf.for`. Bounds must be
+        `index`; the specialiser unrolls the loop once they fold to
+        constants. The caller emits the body and a `wavemeta.YieldOp`.
+        Yields the op so callers can reach for `induction_variable`,
+        `inner_iter_args`, and (post-`with`) `results`.
+        """
+        op = wavemeta.StaticForOp(lower, upper, step, init_args)
+        with InsertionPoint(op.body_block):
+            yield op
 
     @contextmanager
     def for_loop(

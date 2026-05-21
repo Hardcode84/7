@@ -12,7 +12,6 @@ from mlir._mlir_libs._waveDialectsNanobind import (
 )
 from mlir.dialects import arith, func, wavemeta
 from mlir.ir import (
-    Block,
     Context,
     IndexType,
     InsertionPoint,
@@ -89,16 +88,10 @@ def test_static_for_with_iter_args():
                 c0 = arith.ConstantOp(idx, IntegerAttr.get(idx, 0)).result
                 c4 = arith.ConstantOp(idx, IntegerAttr.get(idx, 4)).result
                 c1 = arith.ConstantOp(idx, IntegerAttr.get(idx, 1)).result
-                loop = wavemeta.StaticForOp(
-                    [i32],
-                    c0,
-                    c4,
-                    c1,
-                    [init],
-                )
-                body = Block.create_at_start(loop.body, [idx, i32])
-                with InsertionPoint(body):
-                    iv, acc = body.arguments
+                loop = wavemeta.StaticForOp(c0, c4, c1, [init])
+                with InsertionPoint(loop.body_block):
+                    iv = loop.induction_variable
+                    (acc,) = loop.inner_iter_args
                     nxt = arith.AddIOp(
                         acc,
                         arith.IndexCastOp(i32, iv).result,

@@ -38,6 +38,7 @@ print(module)
 # CHECK: random-ref 1024 1024 1024
 # CHECK-LABEL: func.func @wmma_f16_matmul_tiled
 # CHECK-SAME: wave.lds_size = 2048
+# CHECK-NOT: wavemeta.
 # CHECK: scf.for
 # CHECK-COUNT-8: waveamd.mma "mfma.f32.16x16x16.f16"
 # CHECK: wave.load
