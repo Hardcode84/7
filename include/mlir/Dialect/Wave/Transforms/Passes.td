@@ -136,6 +136,31 @@ def WaveCompileKernels
   ];
 }
 
+def WaveMetaSpecialize
+    : Pass<"wavemeta-specialize", "ModuleOp"> {
+  let summary = "Resolve wavemeta parameters and statically known control flow.";
+  let description = [{
+    Reads a module-scope `wavemeta.params = {name = value, ...}` dict
+    attribute, binds matching `wavemeta.param` ops, then folds away
+    `wavemeta.static_if` / `wavemeta.static_for` / `wavemeta.tuple_*`
+    using a greedy rewriter. Surviving `!wavemeta.ptuple` types are
+    expanded to scalar SSA values via dialect-conversion populators
+    over `scf`, `func`, and `wavemeta` itself. Anything that still
+    refers to a `wavemeta.*` op or `!wavemeta.ptuple` type after all
+    that gets a diagnostic.
+  }];
+  let dependentDialects = [
+    "arith::ArithDialect",
+    "scf::SCFDialect"
+  ];
+  let options = [
+    Option<"errorOnResidual", "error-on-residual", "bool",
+           /*default=*/"true",
+           "Fail the pass when any wavemeta.* op or !wavemeta.ptuple "
+           "type remains after specialisation.">
+  ];
+}
+
 def WaveAttachGPUBinary
     : Pass<"wave-attach-gpu-binary", "ModuleOp"> {
   let summary = "Embed a pre-compiled GPU binary as a `gpu.binary` op";

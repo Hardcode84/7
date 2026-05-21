@@ -11,6 +11,7 @@ add_mlir_dialect_library(MLIRWaveTransforms
   WaveAMDRegAlloc.cpp
   WaveAMDResourceInfo.cpp
   WaveAttachGPUBinary.cpp
+  WaveMetaSpecialize.cpp
 
   ADDITIONAL_HEADER_DIRS
   ${MLIR_MAIN_INCLUDE_DIR}/mlir/Dialect/Wave
@@ -26,15 +27,19 @@ add_mlir_dialect_library(MLIRWaveTransforms
   LINK_LIBS PUBLIC
   MLIRAnalysis
   MLIRArithDialect
+  MLIRFuncDialect
+  MLIRFuncTransforms
   MLIRGPUDialect
   MLIRIR
   MLIRPass
   MLIRROCDLDialect
   MLIRSCFDialect
+  MLIRSCFTransforms
   MLIRTransformUtils
   MLIRWaveAMDDialect
   MLIRWaveAMDMachineDialect
   MLIRWaveDialect
+  MLIRWaveMetaDialect
   )
 
 target_include_directories(obj.MLIRWaveTransforms

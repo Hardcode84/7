@@ -23,6 +23,7 @@
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/Wave/IR/Wave.h"
 #include "mlir/Dialect/Wave/IR/WaveAMD.h"
+#include "mlir/Dialect/Wave/IR/WaveMeta.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachine.h"
 
 namespace mlir {
