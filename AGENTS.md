@@ -115,6 +115,7 @@ Same rule covers docstrings, commit bodies, and PR descriptions. Wit is welcome,
 - Prefer named accessors to `getResult(0)` when possible.
 - In LIT tests, never use raw SSA names like `%0` or `%1` in `CHECK` lines. Capture them with placeholders such as `[[VAL:%.*]]` and reuse the placeholder.
 - For type-rewriting passes, drive the dialect-conversion infrastructure (`TypeConverter` + `applyPartialConversion`) instead of poking `Value::setType` from a walk; the conversion driver tracks materializations across boundaries that bare in-place mutation does not. Reuse upstream populators (`populateAnyFunctionOpInterfaceTypeConversionPattern`, `populateReturnOpTypeConversionPattern`, `populateCallOpTypeConversionPattern`, `scf::populateSCFStructuralTypeConversionsAndLegality`) rather than hand-rolling per-op clone-and-replace.
+- **Verifiers must be local.** `verify()` checks the op's own attributes, operand/result types, and region structure -- nothing else. Walking def-use chains, peeking at producers, or reading other ops' state belongs in passes that `signalPassFailure()`. If you reach for `op.getOperand(i).getDefiningOp<X>()` inside a verifier, stop.
 
 ## Commits
 
