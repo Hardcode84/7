@@ -9,4 +9,5 @@ add_mlir_public_c_api_library(WaveCAPI
   MLIRWaveAMDDialect
   MLIRWaveAMDMachineDialect
   MLIRWaveDialect
+  MLIRWaveMetaDialect
 )

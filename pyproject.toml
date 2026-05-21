@@ -40,7 +40,7 @@ files = ["python", "examples"]
 # Re-export stubs for the auto-generated dialect ops live in the build
 # tree; mypy can't resolve their `_*_ops_gen` siblings from the source
 # tree, so skip them.
-exclude = '(^|/)mlir/dialects/(wave|waveamd)\.py$'
+exclude = '(^|/)mlir/dialects/(wave|waveamd|wavemeta)\.py$'
 
 # The MLIR core Python bindings ship without typed `.pyi` stubs; we still
 # pick up the dialect classes we explicitly import.

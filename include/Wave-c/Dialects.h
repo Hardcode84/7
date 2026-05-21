@@ -21,6 +21,7 @@ extern "C" {
 MLIR_DECLARE_CAPI_DIALECT_REGISTRATION(Wave, wave);
 MLIR_DECLARE_CAPI_DIALECT_REGISTRATION(WaveAMD, waveamd);
 MLIR_DECLARE_CAPI_DIALECT_REGISTRATION(WaveAMDMachine, waveamdmachine);
+MLIR_DECLARE_CAPI_DIALECT_REGISTRATION(WaveMeta, wavemeta);
 
 //===----------------------------------------------------------------------===//
 // Wave types
@@ -110,6 +111,18 @@ MLIR_CAPI_EXPORTED bool
 mlirWaveAMDAttributeIsABufferAddressSpace(MlirAttribute attr);
 MLIR_CAPI_EXPORTED MlirAttribute
 mlirWaveAMDBufferAddressSpaceAttrGet(MlirContext ctx);
+
+//===----------------------------------------------------------------------===//
+// WaveMeta types
+//===----------------------------------------------------------------------===//
+
+// `!wavemeta.ptuple<T, W>` carries N elements of type T. `W` is either an
+// `IntegerAttr` (concrete N) or a `StringAttr` (parameter-named width).
+MLIR_CAPI_EXPORTED bool mlirWaveMetaTypeIsAPTuple(MlirType type);
+MLIR_CAPI_EXPORTED MlirType mlirWaveMetaPTupleTypeGet(MlirType elementType,
+                                                      MlirAttribute width);
+MLIR_CAPI_EXPORTED MlirType mlirWaveMetaPTupleTypeGetElementType(MlirType type);
+MLIR_CAPI_EXPORTED MlirAttribute mlirWaveMetaPTupleTypeGetWidth(MlirType type);
 
 #ifdef __cplusplus
 }

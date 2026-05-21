@@ -30,10 +30,11 @@ static void bindAddressSpaceAttr(nb::module_ &m, const char *name,
 }
 
 // Single `register_dialects(context, load=True)` entry point that exposes
-// both the user-facing `wave` / `waveamd` dialects and the lower-level
-// `waveamdmachine` dialect. Callers normally only need the first two, but we
-// wire the third one too so a Python-built module can be round-tripped
-// through the WaveAMDMachine pipeline without re-registering out-of-band.
+// the user-facing `wave` / `waveamd` / `wavemeta` dialects and the
+// lower-level `waveamdmachine` dialect. Callers normally only need the
+// first three, but we wire the fourth one too so a Python-built module
+// can be round-tripped through the WaveAMDMachine pipeline without
+// re-registering out-of-band.
 static void bindRegisterDialects(nb::module_ &m) {
   m.def(
       "register_dialects",
@@ -42,13 +43,16 @@ static void bindRegisterDialects(nb::module_ &m) {
         MlirDialectHandle waveamd = mlirGetDialectHandle__waveamd__();
         MlirDialectHandle waveamdmachine =
             mlirGetDialectHandle__waveamdmachine__();
+        MlirDialectHandle wavemeta = mlirGetDialectHandle__wavemeta__();
         mlirDialectHandleRegisterDialect(wave, ctx);
         mlirDialectHandleRegisterDialect(waveamd, ctx);
         mlirDialectHandleRegisterDialect(waveamdmachine, ctx);
+        mlirDialectHandleRegisterDialect(wavemeta, ctx);
         if (load) {
           mlirDialectHandleLoadDialect(wave, ctx);
           mlirDialectHandleLoadDialect(waveamd, ctx);
           mlirDialectHandleLoadDialect(waveamdmachine, ctx);
+          mlirDialectHandleLoadDialect(wavemeta, ctx);
         }
       },
       nb::arg("context"), nb::arg("load") = true);
@@ -192,6 +196,27 @@ static void bindFragmentType(nb::module_ &m) {
       });
 }
 
+// `!wavemeta.ptuple<T, W>` constructor + accessors. The width attribute
+// is passed through verbatim: callers hand in an `IntegerAttr` for a
+// concrete count or a `StringAttr` for a parameter-named width.
+static void bindPTupleType(nb::module_ &m) {
+  mlir_type_subclass(m, "PTupleType", mlirWaveMetaTypeIsAPTuple)
+      .def_classmethod(
+          "get",
+          [](nb::object &cls, MlirType elementType, MlirAttribute width) {
+            return cls(mlirWaveMetaPTupleTypeGet(elementType, width));
+          },
+          nb::arg("cls"), nb::arg("element_type"), nb::arg("width"))
+      .def_property_readonly("element_type",
+                             [](MlirType self) {
+                               return mlirWaveMetaPTupleTypeGetElementType(
+                                   self);
+                             })
+      .def_property_readonly("width", [](MlirType self) {
+        return mlirWaveMetaPTupleTypeGetWidth(self);
+      });
+}
+
 NB_MODULE(_waveDialectsNanobind, m) {
   bindRegisterDialects(m);
 
@@ -221,4 +246,7 @@ NB_MODULE(_waveDialectsNanobind, m) {
   bindAddressSpaceAttr(m, "BufferAddressSpaceAttr",
                        mlirWaveAMDAttributeIsABufferAddressSpace,
                        mlirWaveAMDBufferAddressSpaceAttrGet);
+
+  // WaveMeta types.
+  bindPTupleType(m);
 }

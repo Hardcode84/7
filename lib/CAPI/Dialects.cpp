@@ -15,6 +15,7 @@
 #include "mlir/CAPI/Wrap.h"
 #include "mlir/Dialect/Wave/IR/Wave.h"
 #include "mlir/Dialect/Wave/IR/WaveAMD.h"
+#include "mlir/Dialect/Wave/IR/WaveMeta.h"
 #include "mlir/Dialect/Wave/IR/WaveSymbols.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachine.h"
 #include "llvm/ADT/StringRef.h"
@@ -28,6 +29,8 @@ MLIR_DEFINE_CAPI_DIALECT_REGISTRATION(WaveAMD, waveamd,
                                       mlir::waveamd::WaveAMDDialect)
 MLIR_DEFINE_CAPI_DIALECT_REGISTRATION(
     WaveAMDMachine, waveamdmachine, mlir::waveamdmachine::WaveAMDMachineDialect)
+MLIR_DEFINE_CAPI_DIALECT_REGISTRATION(WaveMeta, wavemeta,
+                                      mlir::wavemeta::WaveMetaDialect)
 
 //===----------------------------------------------------------------------===//
 // Wave types
@@ -249,4 +252,25 @@ bool mlirWaveAMDAttributeIsABufferAddressSpace(MlirAttribute attr) {
 
 MlirAttribute mlirWaveAMDBufferAddressSpaceAttrGet(MlirContext ctx) {
   return wrap(waveamd::BufferAddressSpaceAttr::get(unwrap(ctx)));
+}
+
+//===----------------------------------------------------------------------===//
+// WaveMeta types
+//===----------------------------------------------------------------------===//
+
+bool mlirWaveMetaTypeIsAPTuple(MlirType type) {
+  return llvm::isa<wavemeta::PTupleType>(unwrap(type));
+}
+
+MlirType mlirWaveMetaPTupleTypeGet(MlirType elementType, MlirAttribute width) {
+  Type elt = unwrap(elementType);
+  return wrap(wavemeta::PTupleType::get(elt.getContext(), elt, unwrap(width)));
+}
+
+MlirType mlirWaveMetaPTupleTypeGetElementType(MlirType type) {
+  return wrap(llvm::cast<wavemeta::PTupleType>(unwrap(type)).getElementType());
+}
+
+MlirAttribute mlirWaveMetaPTupleTypeGetWidth(MlirType type) {
+  return wrap(llvm::cast<wavemeta::PTupleType>(unwrap(type)).getWidth());
 }

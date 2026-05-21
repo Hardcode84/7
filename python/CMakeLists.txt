@@ -24,6 +24,7 @@ declare_mlir_python_sources(WavePythonSources.dsl
   SOURCES
     dialects/wave.py
     dialects/waveamd.py
+    dialects/wavemeta.py
     dialects/wave_dsl.py
     dialects/wave_matmul.py
 )
@@ -43,6 +44,14 @@ declare_mlir_dialect_python_bindings(
   GEN_ENUM_BINDINGS
   SOURCES_GLOB dialects/_waveamd_*_gen.py
   DIALECT_NAME waveamd)
+
+declare_mlir_dialect_python_bindings(
+  ADD_TO_PARENT WavePythonSources
+  ROOT_DIR "${CMAKE_CURRENT_SOURCE_DIR}/mlir"
+  TD_FILE dialects/WaveMetaOps.td
+  GEN_ENUM_BINDINGS
+  SOURCES_GLOB dialects/_wavemeta_*_gen.py
+  DIALECT_NAME wavemeta)
 
 declare_mlir_python_extension(WavePythonSources.NanobindExtension
   MODULE_NAME _waveDialectsNanobind
