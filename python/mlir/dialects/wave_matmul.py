@@ -53,7 +53,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from mlir._mlir_libs._waveDialectsNanobind import PTupleType
-from mlir.dialects import arith, scf, wavemeta
+from mlir.dialects import scf, wavemeta
 from mlir.dialects import wave_dsl as dsl
 from mlir.ir import (
     DictAttr,
@@ -831,18 +831,19 @@ def _emit_mma_grid(
     wave_n = bld.static_param("wave_n_tiles", index)
 
     with bld.static_for(c0, wave_k, c1, init_args=[accs_t]) as outer:
-        k_iv = outer.induction_variable
+        k = dsl.idx(outer.induction_variable)
         (accs_k,) = outer.inner_iter_args
         with bld.static_for(c0, wave_m, c1, init_args=[accs_k]) as mid:
-            i_iv = mid.induction_variable
+            i = dsl.idx(mid.induction_variable)
             (accs_ki,) = mid.inner_iter_args
             with bld.static_for(c0, wave_n, c1, init_args=[accs_ki]) as inner:
-                j_iv = inner.induction_variable
+                j = dsl.idx(inner.induction_variable)
                 (accs_kij,) = inner.inner_iter_args
 
-                a_idx = arith.AddIOp(arith.MulIOp(k_iv, wave_m).result, i_iv).result
-                b_idx = arith.AddIOp(arith.MulIOp(k_iv, wave_n).result, j_iv).result
-                acc_idx = arith.AddIOp(arith.MulIOp(i_iv, wave_n).result, j_iv).result
+                wm, wn = dsl.idx(wave_m), dsl.idx(wave_n)
+                a_idx = (k * wm + i).v
+                b_idx = (k * wn + j).v
+                acc_idx = (i * wn + j).v
 
                 af = wavemeta.TupleGetOp(af_type, afs_t, a_idx).result
                 bf = wavemeta.TupleGetOp(bf_type, bfs_t, b_idx).result
