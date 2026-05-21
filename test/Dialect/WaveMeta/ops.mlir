@@ -115,3 +115,41 @@ func.func @if_no_results(%c: i1) {
   }
   return
 }
+
+// tuple_make_broadcast: parameter-named width is fine; init's type
+// must match the result's element type.
+// CHECK-LABEL: func.func @tuple_make_broadcast
+// CHECK: %[[T:.+]] = wavemeta.tuple_make_broadcast %{{.+}} : i32 -> <i32, "unroll">
+// CHECK: return %[[T]]
+func.func @tuple_make_broadcast(%init: i32) -> !wavemeta.ptuple<i32, "unroll"> {
+  %t = wavemeta.tuple_make_broadcast %init : i32 -> !wavemeta.ptuple<i32, "unroll">
+  return %t : !wavemeta.ptuple<i32, "unroll">
+}
+
+// tuple_make: concrete width N, exactly N operands of the element type.
+// CHECK-LABEL: func.func @tuple_make
+// CHECK: %[[T:.+]] = wavemeta.tuple_make {{.+}} : (i32, i32, i32, i32) -> !wavemeta.ptuple<i32, 4 : i64>
+func.func @tuple_make(%a: i32, %b: i32, %c: i32, %d: i32) -> !wavemeta.ptuple<i32, 4> {
+  %t = wavemeta.tuple_make %a, %b, %c, %d : (i32, i32, i32, i32) -> !wavemeta.ptuple<i32, 4>
+  return %t : !wavemeta.ptuple<i32, 4>
+}
+
+// tuple_make with zero elements + concrete width 0.
+// CHECK-LABEL: func.func @tuple_make_empty
+// CHECK: %[[T:.+]] = wavemeta.tuple_make : () -> !wavemeta.ptuple<i32, 0 : i64>
+func.func @tuple_make_empty() -> !wavemeta.ptuple<i32, 0> {
+  %t = wavemeta.tuple_make : () -> !wavemeta.ptuple<i32, 0>
+  return %t : !wavemeta.ptuple<i32, 0>
+}
+
+// tuple_get / tuple_set: static index access; result of set has same
+// tuple type as input.
+// CHECK-LABEL: func.func @tuple_get_set
+// CHECK: %[[G:.+]] = wavemeta.tuple_get %{{.+}}[%{{.+}}] : <i32, "n"> -> i32
+// CHECK: %[[S:.+]] = wavemeta.tuple_set %{{.+}}[%{{.+}}], %{{.+}} : <i32, "n">, i32
+// CHECK: return %[[S]]
+func.func @tuple_get_set(%t: !wavemeta.ptuple<i32, "n">, %i: index, %v: i32) -> !wavemeta.ptuple<i32, "n"> {
+  %g = wavemeta.tuple_get %t[%i] : !wavemeta.ptuple<i32, "n"> -> i32
+  %s = wavemeta.tuple_set %t[%i], %v : !wavemeta.ptuple<i32, "n">, i32
+  return %s : !wavemeta.ptuple<i32, "n">
+}

@@ -10,6 +10,7 @@
 #define MLIR_DIALECT_WAVE_IR_WAVEMETAOPS_TD
 
 include "mlir/Dialect/Wave/IR/WaveMetaBase.td"
+include "mlir/IR/AttrTypeBase.td"
 include "mlir/IR/BuiltinAttributeInterfaces.td"
 include "mlir/IR/OpBase.td"
 include "mlir/IR/RegionKindInterface.td"
@@ -18,6 +19,21 @@ include "mlir/Interfaces/SideEffectInterfaces.td"
 
 class WaveMeta_Op<string mnemonic, list<Trait> traits = []> :
     Op<WaveMeta_Dialect, mnemonic, traits>;
+
+// `!wavemeta.ptuple<T, W>` carries N elements of type T. The width
+// W is either a `StringAttr` naming a parameter (resolved by the
+// specialiser) or an `IntegerAttr` of concrete N. Once the
+// specialiser binds the parameter, the width becomes concrete and
+// the tuple's `tuple_get` / `tuple_set` chain typically collapses
+// via the folder.
+def WaveMeta_PTupleType : TypeDef<WaveMeta_Dialect, "PTuple"> {
+  let mnemonic = "ptuple";
+  let summary = "Tuple with parameter-driven width";
+  let parameters = (ins "::mlir::Type":$elementType,
+                        "::mlir::Attribute":$width);
+  let assemblyFormat = "`<` $elementType `,` $width `>`";
+  let genVerifyDecl = 1;
+}
 
 // A typed value backed by a pipeline parameter. While `$value` is
 // absent the op behaves as an opaque SSA value of its declared
@@ -130,6 +146,70 @@ def WaveMeta_StaticIfOp : WaveMeta_Op<"static_if", [
   let assemblyFormat = [{
     $condition (`->` `(` type($results)^ `)`)?
     $thenRegion (`else` $elseRegion^)? attr-dict
+  }];
+  let hasVerifier = 1;
+}
+
+//===----------------------------------------------------------------------===//
+// Parametric tuple ops
+//===----------------------------------------------------------------------===//
+
+// Construct a parametric tuple by broadcasting one value to every
+// slot. The result type's width (either parameter-named or concrete)
+// is supplied by the user; the verifier just enforces that the
+// init's type matches the result's element type.
+def WaveMeta_TupleMakeBroadcastOp
+    : WaveMeta_Op<"tuple_make_broadcast", [Pure]> {
+  let summary = "Construct a parametric tuple by broadcasting one value";
+  let arguments = (ins AnyType:$init);
+  let results = (outs WaveMeta_PTupleType:$result);
+  let assemblyFormat = "$init attr-dict `:` type($init) `->` type($result)";
+  let hasVerifier = 1;
+}
+
+// Construct a parametric tuple from N explicit elements. The
+// result's width MUST be concrete (`IntegerAttr`); a parameter-named
+// width here would be a malformed op (no way to know how many
+// operands to expect).
+def WaveMeta_TupleMakeOp
+    : WaveMeta_Op<"tuple_make", [Pure, SameTypeOperands]> {
+  let summary = "Construct a parametric tuple from explicit elements";
+  let arguments = (ins Variadic<AnyType>:$elements);
+  let results = (outs WaveMeta_PTupleType:$result);
+  let assemblyFormat = "$elements attr-dict `:` functional-type(operands, results)";
+  let hasVerifier = 1;
+}
+
+// Read the element at `$index` from a parametric tuple. `$index`
+// is an `index`-typed SSA value that must resolve to a constant
+// after specialisation. The result type equals the tuple's
+// element type.
+def WaveMeta_TupleGetOp : WaveMeta_Op<"tuple_get", [Pure]> {
+  let summary = "Read the element at a static index";
+  let arguments = (ins WaveMeta_PTupleType:$tuple, Index:$index);
+  let results = (outs AnyType:$result);
+  let assemblyFormat = [{
+    $tuple `[` $index `]` attr-dict `:` type($tuple) `->` type($result)
+  }];
+  let hasVerifier = 1;
+  let hasFolder = 1;
+}
+
+// Functional update: produce a new tuple with `$value` substituted
+// at `$index`. Same restrictions on `$index` as `tuple_get`.
+def WaveMeta_TupleSetOp
+    : WaveMeta_Op<"tuple_set",
+                  [Pure, AllTypesMatch<["tuple", "result"]>]> {
+  let summary = "Functional update of a parametric tuple at a static index";
+  let arguments = (ins
+    WaveMeta_PTupleType:$tuple,
+    Index:$index,
+    AnyType:$value
+  );
+  let results = (outs WaveMeta_PTupleType:$result);
+  let assemblyFormat = [{
+    $tuple `[` $index `]` `,` $value attr-dict
+    `:` type($tuple) `,` type($value)
   }];
   let hasVerifier = 1;
 }

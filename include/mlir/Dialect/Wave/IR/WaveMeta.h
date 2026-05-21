@@ -18,6 +18,9 @@
 
 #include "mlir/Dialect/Wave/IR/WaveMetaOpsDialect.h.inc"
 
+#define GET_TYPEDEF_CLASSES
+#include "mlir/Dialect/Wave/IR/WaveMetaOpsTypes.h.inc"
+
 #define GET_OP_CLASSES
 #include "mlir/Dialect/Wave/IR/WaveMetaOps.h.inc"
 

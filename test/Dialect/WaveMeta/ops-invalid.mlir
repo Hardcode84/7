@@ -145,3 +145,69 @@ func.func @if_then_arity_mismatch(%c: i1) -> i32 {
   }) : (i1) -> i32
   return %r : i32
 }
+
+// -----
+
+// ptuple width attribute must be a StringAttr or IntegerAttr.
+// expected-error @below {{width must be a StringAttr (parameter name) or IntegerAttr (concrete width)}}
+func.func private @bad_ptuple_width(!wavemeta.ptuple<i32, [0, 1]>) -> ()
+
+// -----
+
+// Concrete ptuple width cannot be negative.
+// expected-error @below {{concrete width must be non-negative, got -1}}
+func.func private @negative_ptuple_width(!wavemeta.ptuple<i32, -1>) -> ()
+
+// -----
+
+// tuple_make_broadcast: init's type must match the result's element type.
+func.func @broadcast_type_mismatch(%init: i32) -> !wavemeta.ptuple<i64, "n"> {
+  // expected-error @below {{init type 'i32' must match result tuple element type 'i64'}}
+  %t = wavemeta.tuple_make_broadcast %init : i32 -> !wavemeta.ptuple<i64, "n">
+  return %t : !wavemeta.ptuple<i64, "n">
+}
+
+// -----
+
+// tuple_make: parameter-named width is rejected (need concrete N).
+func.func @make_parametric_width(%a: i32) -> !wavemeta.ptuple<i32, "n"> {
+  // expected-error @below {{result tuple width must be concrete; parameter-named widths are only valid for tuple_make_broadcast}}
+  %t = wavemeta.tuple_make %a : (i32) -> !wavemeta.ptuple<i32, "n">
+  return %t : !wavemeta.ptuple<i32, "n">
+}
+
+// -----
+
+// tuple_make: operand count must match the concrete width.
+func.func @make_arity_mismatch(%a: i32, %b: i32) -> !wavemeta.ptuple<i32, 4> {
+  // expected-error @below {{operand count (2) must match concrete tuple width (4)}}
+  %t = wavemeta.tuple_make %a, %b : (i32, i32) -> !wavemeta.ptuple<i32, 4>
+  return %t : !wavemeta.ptuple<i32, 4>
+}
+
+// -----
+
+// tuple_make: operand type must match the element type.
+func.func @make_elt_type_mismatch(%a: i64) -> !wavemeta.ptuple<i32, 1> {
+  // expected-error @below {{operand type 'i64' must match result tuple element type 'i32'}}
+  %t = wavemeta.tuple_make %a : (i64) -> !wavemeta.ptuple<i32, 1>
+  return %t : !wavemeta.ptuple<i32, 1>
+}
+
+// -----
+
+// tuple_get: result type must match the tuple's element type.
+func.func @get_type_mismatch(%t: !wavemeta.ptuple<i32, "n">, %i: index) -> i64 {
+  // expected-error @below {{result type 'i64' must match tuple element type 'i32'}}
+  %v = wavemeta.tuple_get %t[%i] : !wavemeta.ptuple<i32, "n"> -> i64
+  return %v : i64
+}
+
+// -----
+
+// tuple_set: value type must match the tuple's element type.
+func.func @set_value_type_mismatch(%t: !wavemeta.ptuple<i32, "n">, %i: index, %v: i64) -> !wavemeta.ptuple<i32, "n"> {
+  // expected-error @below {{value type 'i64' must match tuple element type 'i32'}}
+  %r = wavemeta.tuple_set %t[%i], %v : !wavemeta.ptuple<i32, "n">, i64
+  return %r : !wavemeta.ptuple<i32, "n">
+}

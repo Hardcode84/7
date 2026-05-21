@@ -35,3 +35,40 @@ func.func @bound_param_i1() -> i1 {
   %v = wavemeta.param "use_lds" {value = true} : i1
   return %v : i1
 }
+
+// `tuple_get` of a `tuple_make_broadcast` collapses to the
+// broadcasted init regardless of the index.
+// CHECK-LABEL: func.func @get_of_broadcast
+// CHECK-NOT: wavemeta.tuple_make_broadcast
+// CHECK-NOT: wavemeta.tuple_get
+// CHECK: return %arg0 : i32
+func.func @get_of_broadcast(%init: i32, %i: index) -> i32 {
+  %t = wavemeta.tuple_make_broadcast %init : i32 -> !wavemeta.ptuple<i32, "n">
+  %v = wavemeta.tuple_get %t[%i] : !wavemeta.ptuple<i32, "n"> -> i32
+  return %v : i32
+}
+
+// `tuple_get` of a concrete `tuple_make` with a constant index folds
+// to the matching element.
+// CHECK-LABEL: func.func @get_of_make_const_index
+// CHECK-NOT: wavemeta.tuple_make
+// CHECK-NOT: wavemeta.tuple_get
+// CHECK: return %arg2 : i32
+func.func @get_of_make_const_index(%a: i32, %b: i32, %c: i32, %d: i32) -> i32 {
+  %t = wavemeta.tuple_make %a, %b, %c, %d : (i32, i32, i32, i32) -> !wavemeta.ptuple<i32, 4>
+  %i = arith.constant 2 : index
+  %v = wavemeta.tuple_get %t[%i] : !wavemeta.ptuple<i32, 4> -> i32
+  return %v : i32
+}
+
+// `tuple_get` with a non-constant index does NOT fold; the op
+// survives until the index becomes a constant via specialisation.
+// CHECK-LABEL: func.func @get_dynamic_index_stays
+// CHECK: %[[T:.+]] = wavemeta.tuple_make
+// CHECK: %[[V:.+]] = wavemeta.tuple_get %[[T]][%arg4]
+// CHECK: return %[[V]]
+func.func @get_dynamic_index_stays(%a: i32, %b: i32, %c: i32, %d: i32, %i: index) -> i32 {
+  %t = wavemeta.tuple_make %a, %b, %c, %d : (i32, i32, i32, i32) -> !wavemeta.ptuple<i32, 4>
+  %v = wavemeta.tuple_get %t[%i] : !wavemeta.ptuple<i32, 4> -> i32
+  return %v : i32
+}

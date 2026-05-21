@@ -20,12 +20,18 @@ def WaveMeta_Dialect : Dialect {
     specialiser pass needs them. `wavemeta.param` reads a
     module-scoped parameter binding; `wavemeta.static_for` and
     `wavemeta.static_if` get fully unrolled / branch-selected
-    once their bounds / conditions become constant. The
-    specialiser then leaves no `wavemeta.*` ops behind.
+    once their bounds / conditions become constant; the
+    parametric-tuple type `!wavemeta.ptuple` lets iter-arg
+    width track an unroll factor and collapses to flat SSA
+    values after specialisation.
 
     Design notes: `docs/StaticControlFlowOpsDesign.md`.
   }];
   let hasConstantMaterializer = 1;
+  let useDefaultTypePrinterParser = 1;
+  let extraClassDeclaration = [{
+    void registerTypes();
+  }];
 }
 
 #endif // MLIR_DIALECT_WAVE_IR_WAVEMETABASE_TD

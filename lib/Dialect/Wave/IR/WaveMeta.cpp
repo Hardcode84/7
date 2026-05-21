@@ -12,6 +12,7 @@
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/DialectImplementation.h"
 #include "mlir/Interfaces/ControlFlowInterfaces.h"
+#include "llvm/ADT/TypeSwitch.h"
 
 using namespace mlir;
 using namespace mlir::wavemeta;
@@ -19,9 +20,20 @@ using namespace mlir::wavemeta;
 #include "mlir/Dialect/Wave/IR/WaveMetaOpsDialect.cpp.inc"
 
 void WaveMetaDialect::initialize() {
+  registerTypes();
   addOperations<
 #define GET_OP_LIST
 #include "mlir/Dialect/Wave/IR/WaveMetaOps.cpp.inc"
+      >();
+}
+
+#define GET_TYPEDEF_CLASSES
+#include "mlir/Dialect/Wave/IR/WaveMetaOpsTypes.cpp.inc"
+
+void WaveMetaDialect::registerTypes() {
+  addTypes<
+#define GET_TYPEDEF_LIST
+#include "mlir/Dialect/Wave/IR/WaveMetaOpsTypes.cpp.inc"
       >();
 }
 
@@ -179,6 +191,109 @@ void StaticIfOp::getRegionInvocationBounds(
     return;
   }
   invocationBounds.assign(/*NumElts=*/2, InvocationBounds(0, 1));
+}
+
+//===----------------------------------------------------------------------===//
+// PTupleType
+//===----------------------------------------------------------------------===//
+
+LogicalResult PTupleType::verify(function_ref<InFlightDiagnostic()> emitError,
+                                 Type elementType, Attribute width) {
+  if (!elementType)
+    return emitError() << "element type must be non-null";
+  if (auto intAttr = dyn_cast<IntegerAttr>(width)) {
+    if (intAttr.getInt() < 0)
+      return emitError() << "concrete width must be non-negative, got "
+                         << intAttr.getInt();
+    return success();
+  }
+  if (isa<StringAttr>(width))
+    return success();
+  return emitError()
+         << "width must be a StringAttr (parameter name) or IntegerAttr "
+            "(concrete width)";
+}
+
+//===----------------------------------------------------------------------===//
+// TupleMakeBroadcastOp
+//===----------------------------------------------------------------------===//
+
+LogicalResult TupleMakeBroadcastOp::verify() {
+  auto resultType = cast<PTupleType>(getResult().getType());
+  if (resultType.getElementType() != getInit().getType())
+    return emitOpError("init type ")
+           << getInit().getType() << " must match result tuple element type "
+           << resultType.getElementType();
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// TupleMakeOp
+//===----------------------------------------------------------------------===//
+
+LogicalResult TupleMakeOp::verify() {
+  auto resultType = cast<PTupleType>(getResult().getType());
+  auto widthAttr = dyn_cast<IntegerAttr>(resultType.getWidth());
+  if (!widthAttr)
+    return emitOpError(
+        "result tuple width must be concrete; parameter-named widths are "
+        "only valid for tuple_make_broadcast");
+  if (widthAttr.getInt() != static_cast<int64_t>(getElements().size()))
+    return emitOpError("operand count (")
+           << getElements().size() << ") must match concrete tuple width ("
+           << widthAttr.getInt() << ")";
+  if (!getElements().empty() &&
+      resultType.getElementType() != getElements().front().getType())
+    return emitOpError("operand type ")
+           << getElements().front().getType()
+           << " must match result tuple element type "
+           << resultType.getElementType();
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// TupleGetOp
+//===----------------------------------------------------------------------===//
+
+LogicalResult TupleGetOp::verify() {
+  auto tupleType = cast<PTupleType>(getTuple().getType());
+  if (tupleType.getElementType() != getResult().getType())
+    return emitOpError("result type ")
+           << getResult().getType() << " must match tuple element type "
+           << tupleType.getElementType();
+  return success();
+}
+
+OpFoldResult TupleGetOp::fold(FoldAdaptor adaptor) {
+  // tuple_get from a broadcast collapses to the broadcasted init,
+  // regardless of the index.
+  if (auto bcast = getTuple().getDefiningOp<TupleMakeBroadcastOp>())
+    return bcast.getInit();
+  // tuple_get %t[const] from a concrete tuple_make returns the matching
+  // operand.
+  auto makeOp = getTuple().getDefiningOp<TupleMakeOp>();
+  if (!makeOp)
+    return {};
+  auto idxAttr = dyn_cast_or_null<IntegerAttr>(adaptor.getIndex());
+  if (!idxAttr)
+    return {};
+  int64_t idx = idxAttr.getInt();
+  if (idx < 0 || idx >= static_cast<int64_t>(makeOp.getElements().size()))
+    return {};
+  return makeOp.getElements()[idx];
+}
+
+//===----------------------------------------------------------------------===//
+// TupleSetOp
+//===----------------------------------------------------------------------===//
+
+LogicalResult TupleSetOp::verify() {
+  auto tupleType = cast<PTupleType>(getTuple().getType());
+  if (tupleType.getElementType() != getValue().getType())
+    return emitOpError("value type ")
+           << getValue().getType() << " must match tuple element type "
+           << tupleType.getElementType();
+  return success();
 }
 
 #define GET_OP_CLASSES
