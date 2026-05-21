@@ -15,6 +15,7 @@
 #include "mlir/Conversion/WaveToLLVM/WaveToLLVM.h"
 #include "mlir/Dialect/Wave/IR/Wave.h"
 #include "mlir/Dialect/Wave/IR/WaveAMD.h"
+#include "mlir/Dialect/Wave/IR/WaveMeta.h"
 #include "mlir/Dialect/Wave/Transforms/Passes.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachine.h"
 
@@ -25,6 +26,7 @@ int main(int argc, char **argv) {
   mlir::registerAllPasses();
 
   registry.insert<mlir::wave::WaveDialect, mlir::waveamd::WaveAMDDialect,
+                  mlir::wavemeta::WaveMetaDialect,
                   mlir::waveamdmachine::WaveAMDMachineDialect>();
   mlir::wave::registerWavePasses();
   mlir::wave::registerConvertWaveToLLVMInterface(registry);

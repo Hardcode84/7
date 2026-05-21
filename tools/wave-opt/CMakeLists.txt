@@ -21,6 +21,7 @@ target_link_libraries(wave-opt PRIVATE
   MLIRWaveAMDDialect
   MLIRWaveAMDMachineDialect
   MLIRWaveDialect
+  MLIRWaveMetaDialect
   MLIRWaveToLLVM
   MLIRWaveTransforms
 )

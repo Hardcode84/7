@@ -37,3 +37,19 @@ add_mlir_dialect_library(MLIRWaveAMDDialect
   MLIRSideEffectInterfaces
   MLIRWaveDialect
   )
+
+add_mlir_dialect_library(MLIRWaveMetaDialect
+  PARTIAL_SOURCES_INTENDED
+  WaveMeta.cpp
+
+  ADDITIONAL_HEADER_DIRS
+  ${MLIR_MAIN_INCLUDE_DIR}/mlir/Dialect/Wave
+
+  DEPENDS
+  MLIRWaveMetaOpsIncGen
+
+  LINK_LIBS PUBLIC
+  MLIRArithDialect
+  MLIRIR
+  MLIRSideEffectInterfaces
+  )
