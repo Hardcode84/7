@@ -50,6 +50,7 @@ add_mlir_dialect_library(MLIRWaveMetaDialect
 
   LINK_LIBS PUBLIC
   MLIRArithDialect
+  MLIRControlFlowInterfaces
   MLIRIR
   MLIRSideEffectInterfaces
   )

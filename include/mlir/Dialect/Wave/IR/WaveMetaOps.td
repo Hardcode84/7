@@ -12,6 +12,8 @@
 include "mlir/Dialect/Wave/IR/WaveMetaBase.td"
 include "mlir/IR/BuiltinAttributeInterfaces.td"
 include "mlir/IR/OpBase.td"
+include "mlir/IR/RegionKindInterface.td"
+include "mlir/Interfaces/ControlFlowInterfaces.td"
 include "mlir/Interfaces/SideEffectInterfaces.td"
 
 class WaveMeta_Op<string mnemonic, list<Trait> traits = []> :
@@ -42,6 +44,93 @@ def WaveMeta_ParamOp : WaveMeta_Op<"param", [Pure]> {
   let results = (outs AnyTypeOf<[Index, AnySignlessInteger]>:$result);
   let assemblyFormat = "$name attr-dict `:` type($result)";
   let hasFolder = 1;
+  let hasVerifier = 1;
+}
+
+// Terminator for `wavemeta.static_for` and `wavemeta.static_if`.
+// `Pure` because it just forwards SSA values along a region edge;
+// the RegionBranchTerminatorOpInterface lets dataflow track those
+// forwarded values into the body block args (loop back-edge) or
+// the parent op's results (loop exit / if-merge).
+def WaveMeta_YieldOp : WaveMeta_Op<"yield", [
+    Pure,
+    ReturnLike,
+    Terminator,
+    ParentOneOf<["::mlir::wavemeta::StaticForOp",
+                 "::mlir::wavemeta::StaticIfOp"]>,
+    DeclareOpInterfaceMethods<RegionBranchTerminatorOpInterface,
+        ["getMutableSuccessorOperands"]>
+]> {
+  let summary = "yield values from a wavemeta region";
+  let arguments = (ins Variadic<AnyType>:$values);
+  let assemblyFormat = "($values^ `:` type($values))? attr-dict";
+}
+
+// Loop with statically-known bounds. Same body shape as `scf.for`:
+// region has one block whose first argument is the induction var
+// and the remainder mirror `$iter_args`. The intent is for the
+// WaveMeta specialiser to fully unroll the loop once the bounds
+// (and any param-driven iter_args) become concrete; the op is
+// `RegionBranchOpInterface` so generic dataflow passes still see
+// the loop while it exists.
+def WaveMeta_StaticForOp : WaveMeta_Op<"static_for", [
+    DeclareOpInterfaceMethods<RegionBranchOpInterface,
+        ["getEntrySuccessorOperands", "getSuccessorInputs"]>,
+    RecursiveMemoryEffects,
+    AllTypesMatch<["iter_args", "results"]>
+]> {
+  let summary = "structured for-loop with statically-known bounds";
+  let description = [{
+    Iterates the body region from `$lower_bound` to `$upper_bound`
+    (exclusive) in increments of `$step`. The body's entry block
+    has `1 + N` arguments: the induction value (`index`) followed
+    by the carries that mirror `$iter_args`. The terminator
+    `wavemeta.yield` forwards new carry values either back to the
+    body (next iteration) or to the op results (loop exit).
+
+    Bounds and step are SSA `index` values. The static-for is
+    fully unrolled by the WaveMeta specialiser once the bounds are
+    concrete; until then the op survives as ordinary CFG.
+  }];
+  let arguments = (ins Index:$lower_bound, Index:$upper_bound, Index:$step,
+                       Variadic<AnyType>:$iter_args);
+  let results = (outs Variadic<AnyType>:$results);
+  let regions = (region SizedRegion<1>:$body);
+  let assemblyFormat = [{
+    $lower_bound `to` $upper_bound `step` $step
+    (`iter_args` `(` $iter_args^ `:` type($iter_args) `)`)?
+    $body attr-dict (`->` type($results)^)?
+  }];
+  let hasVerifier = 1;
+}
+
+// Compile-time branch on an `i1` condition. After specialisation
+// the chosen region's contents are inlined in place of the op.
+def WaveMeta_StaticIfOp : WaveMeta_Op<"static_if", [
+    DeclareOpInterfaceMethods<RegionBranchOpInterface,
+        ["getSuccessorInputs", "getRegionInvocationBounds"]>,
+    RecursiveMemoryEffects,
+    NoRegionArguments
+]> {
+  let summary = "structured if/else with no run-time branch";
+  let description = [{
+    Selects between the `then` and `else` regions based on
+    `$condition`. Both regions yield values via `wavemeta.yield`;
+    the operand types of the yield must equal `$results`. The
+    `else` region is required iff `$results` is non-empty.
+
+    The WaveMeta specialiser replaces the op with the chosen
+    region's contents once `$condition` is a constant; until then
+    the op survives as ordinary CFG.
+  }];
+  let arguments = (ins I1:$condition);
+  let results = (outs Variadic<AnyType>:$results);
+  let regions = (region SizedRegion<1>:$thenRegion,
+                        AnyRegion:$elseRegion);
+  let assemblyFormat = [{
+    $condition (`->` `(` type($results)^ `)`)?
+    $thenRegion (`else` $elseRegion^)? attr-dict
+  }];
   let hasVerifier = 1;
 }
 
