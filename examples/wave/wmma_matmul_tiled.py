@@ -261,15 +261,21 @@ def _run_module(module_text: str, args: argparse.Namespace) -> str:
     mlir_runner = (
         args.mlir_runner or repo_root / "build" / "llvm-install" / "bin" / "mlir-runner"
     )
+    pipeline_lib = (
+        repo_root / "build" / "share" / "wave-mlir" / "pipelines" / "pipelines.mlir"
+    )
+    pass_pipeline = (
+        "builtin.module("
+        f"wave-set-target-attr{{chip={args.chip}}},"
+        f"transform-preload-library{{transform-library-paths={pipeline_lib}}},"
+        "transform-interpreter{entry-point=compile_kernels},"
+        "convert-scf-to-cf,"
+        "gpu-to-llvm{use-bare-pointers-for-kernels=true},"
+        "convert-to-llvm,"
+        "reconcile-unrealized-casts)"
+    )
     lowered = _run_command(
-        [
-            str(wave_opt),
-            f"--wave-compile-kernels=chip={args.chip}",
-            "--convert-scf-to-cf",
-            "--gpu-to-llvm=use-bare-pointers-for-kernels=true",
-            "--convert-to-llvm",
-            "--reconcile-unrealized-casts",
-        ],
+        [str(wave_opt), f"--pass-pipeline={pass_pipeline}"],
         input_text=module_text,
     )
     runner_cmd = [str(mlir_runner)]

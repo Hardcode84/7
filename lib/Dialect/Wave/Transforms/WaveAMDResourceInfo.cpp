@@ -82,7 +82,7 @@ struct WaveAMDResourceInfoPass
   }
 
   MaxRegs collectMaxRegs(func::FuncOp func, bool &failed) {
-    bool isKernel = func->hasAttr("wave.kernel");
+    bool isKernel = func->hasAttr(wave::WaveDialect::getKernelAttrName());
     MaxRegs out{isKernel ? 5u : 0u, isKernel ? 1u : 0u};
     for (Operation &op : func.getBody().front()) {
       scanOp(op, out, failed);
@@ -94,12 +94,18 @@ struct WaveAMDResourceInfoPass
 
   void runOnOperation() override {
     OpBuilder builder(getOperation().getContext());
-    for (func::FuncOp func : getOperation().getOps<func::FuncOp>()) {
+    SmallVector<func::FuncOp> kernels;
+    getOperation().walk([&](func::FuncOp f) {
+      if (!f.isExternal())
+        kernels.push_back(f);
+    });
+    for (func::FuncOp func : kernels) {
       bool failed = false;
       MaxRegs regs = collectMaxRegs(func, failed);
       if (failed)
         return signalPassFailure();
-      unsigned sgprBaseline = func->hasAttr("wave.kernel") ? 6u : 1u;
+      unsigned sgprBaseline =
+          func->hasAttr(wave::WaveDialect::getKernelAttrName()) ? 6u : 1u;
       func->setAttr(
           "waveamdmachine.sgpr_count",
           builder.getI64IntegerAttr(std::max(regs.sgpr, sgprBaseline)));

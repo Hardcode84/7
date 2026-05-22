@@ -677,7 +677,12 @@ struct WaveAMDHazardWaitsPass
     };
     cfg.defaultLgkmcnt = llvm::AMDGPU::decodeLgkmcnt(
         cfg.isaVersion, llvm::AMDGPU::getWaitcntBitMask(cfg.isaVersion));
-    for (func::FuncOp func : module.getOps<func::FuncOp>())
+    SmallVector<func::FuncOp> kernels;
+    module.walk([&](func::FuncOp f) {
+      if (!f.isExternal())
+        kernels.push_back(f);
+    });
+    for (func::FuncOp func : kernels)
       if (failed(processFunction(func, builder, cfg, **sti)))
         return signalPassFailure();
   }
@@ -686,7 +691,8 @@ private:
   // True for ops that must not appear in `wave.kernel` funcs at this stage
   // (ABI lowering should have replaced them).
   static bool isUnloweredKernelArg(Operation &op, func::FuncOp func) {
-    return func->hasAttr("wave.kernel") && isa<waveamdmachine::ArgOp>(op);
+    return func->hasAttr(wave::WaveDialect::getKernelAttrName()) &&
+           isa<waveamdmachine::ArgOp>(op);
   }
   // True for scalar memory loads missing the required `base` attribute.
   static bool isMalformedSMEMLoad(Operation &op) {

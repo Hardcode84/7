@@ -1,9 +1,9 @@
 // RUN: wave-opt --waveamd-to-machine -split-input-file -verify-diagnostics %s
 
-func.func @unsupported_op(%x: i32, %y: i32) -> i32 {
+func.func @unsupported_op(%x: i32, %y: i32) attributes {wave.kernel} {
   // expected-error @below {{unsupported operation in WaveAMDMachine selection}}
   %sum = arith.addi %x, %y : i32
-  return %sum : i32
+  return
 }
 
 // -----

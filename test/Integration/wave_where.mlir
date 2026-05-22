@@ -5,12 +5,7 @@
 // id is strictly below the runtime `limit` write their lane id, the
 // rest must keep the sentinel.
 //
-// RUN: wave-opt %s \
-// RUN:   --wave-compile-kernels='chip=%chip' \
-// RUN:   --convert-scf-to-cf \
-// RUN:   --gpu-to-llvm=use-bare-pointers-for-kernels=true \
-// RUN:   --convert-to-llvm \
-// RUN:   --reconcile-unrealized-casts \
+// RUN: wave-opt %s --pass-pipeline='builtin.module(wave-set-target-attr{chip=%chip},transform-preload-library{transform-library-paths=%wave_pipelines},transform-interpreter{entry-point=compile_kernels},convert-scf-to-cf,gpu-to-llvm{use-bare-pointers-for-kernels=true},convert-to-llvm,reconcile-unrealized-casts)' \
 // RUN:   | mlir-runner \
 // RUN:       --shared-libs=%mlir_rocm_runtime \
 // RUN:       --shared-libs=%mlir_runner_utils \

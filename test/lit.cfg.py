@@ -95,6 +95,18 @@ _wave_runtime = Path(config.wave_mlir_obj_root) / "lib" / "libwave_runtime.so"
 if _wave_runtime.exists():
     config.substitutions.append(("%wave_runtime", str(_wave_runtime)))
 
+# Compilation pipeline library (transform.named_sequence file) staged
+# next to the binary at build time; tests reach it via %wave_pipelines.
+_wave_pipelines = (
+    Path(config.wave_mlir_obj_root)
+    / "share"
+    / "wave-mlir"
+    / "pipelines"
+    / "pipelines.mlir"
+)
+if _wave_pipelines.exists():
+    config.substitutions.append(("%wave_pipelines", str(_wave_pipelines)))
+
 # Tool search order: our build's bin first (wave-opt, wave-translate),
 # then the LLVM install (llvm-mc, ld.lld, llvm-readelf, FileCheck if
 # LLVM_INSTALL_UTILS was on), then the LLVM build dir as a fallback for

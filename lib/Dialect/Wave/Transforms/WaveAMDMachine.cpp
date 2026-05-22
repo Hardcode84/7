@@ -1418,7 +1418,7 @@ LogicalResult WaveAMDMachineSelector::selectReturn(func::ReturnOp op) {
   if (op.getNumOperands() > 1)
     return op.emitError(
         "WaveAMDMachine backend supports at most one return value");
-  if (func->hasAttr("wave.kernel")) {
+  if (func->hasAttr(wave::WaveDialect::getKernelAttrName())) {
     if (op.getNumOperands() != 0)
       return op.emitError("kernel functions must return void");
     waveamdmachine::SEndpgmOp::create(builder, op.getLoc());
@@ -1449,7 +1449,31 @@ struct ConvertWaveAMDToWaveAMDMachinePass
           ConvertWaveAMDToWaveAMDMachinePass> {
   void runOnOperation() override {
     ModuleOp m = getOperation();
-    for (func::FuncOp func : m.getOps<func::FuncOp>()) {
+    SmallVector<func::FuncOp> targets;
+    m.walk([&](func::FuncOp f) {
+      if (f.isExternal())
+        return;
+      // Pull in funcs that either carry the kernel attribute (the
+      // production path -- they live inside `gpu.module`) or contain
+      // wave / waveamd ops at any nesting (the test path -- synthetic
+      // top-level funcs used to pin selector behaviour). Host glue
+      // and runtime helpers fall through untouched.
+      if (f->hasAttr(wave::WaveDialect::getKernelAttrName())) {
+        targets.push_back(f);
+        return;
+      }
+      bool reachesWave = false;
+      f.walk([&](Operation *op) {
+        if (isa<wave::WaveDialect, waveamd::WaveAMDDialect>(op->getDialect())) {
+          reachesWave = true;
+          return WalkResult::interrupt();
+        }
+        return WalkResult::advance();
+      });
+      if (reachesWave)
+        targets.push_back(f);
+    });
+    for (func::FuncOp func : targets) {
       if (failed(wave::wmsel::WaveAMDMachineSelector(func).run()))
         return signalPassFailure();
     }

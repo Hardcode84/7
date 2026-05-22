@@ -27,16 +27,14 @@ namespace wave {
 LogicalResult translateWaveToAMDGPU(Operation *op, raw_ostream &os,
                                     StringRef pipelineFile = {});
 
-/// Run the wave-to-AMDGPU pipeline plus in-process assembly and linking,
-/// producing a HSACO blob in memory. `op` must be a `ModuleOp` carrying a
-/// `waveamdmachine.target` string attribute compatible with the WaveAMDMachine
-/// backend; `op` is mutated in place by the pipeline. `triple`, `chip`, and
-/// `features` describe the assembler/linker target. `pipelineFile` overrides
-/// the default `transform.named_sequence` path; empty selects the default.
-LogicalResult compileWaveToHSACO(Operation *op, StringRef triple,
-                                 StringRef chip, StringRef features,
-                                 StringRef pipelineFile,
-                                 SmallVectorImpl<char> &out);
+/// Emit AMDGPU assembly + assemble + lld-link an already-lowered module
+/// of WaveAMDMachine IR into a HSACO blob. `op` must be a `ModuleOp`
+/// carrying a `waveamdmachine.target` attribute. No wave-to-AMDGPU pass
+/// pipeline runs here; the caller is responsible for lowering the input
+/// via the transform interpreter beforehand.
+LogicalResult assembleWaveAMDGPUKernels(Operation *op, StringRef triple,
+                                        StringRef chip, StringRef features,
+                                        SmallVectorImpl<char> &out);
 
 /// Register the `wave-to-amdgpu-asm` mlir-translate entry point.
 void registerWaveToAMDGPUTranslation();

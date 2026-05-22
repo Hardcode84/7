@@ -32,9 +32,12 @@ struct WaveAMDMetadataPass
       return signalPassFailure();
     }
     OpBuilder builder(getOperation().getContext());
-    for (func::FuncOp func : getOperation().getOps<func::FuncOp>()) {
-      if (!func->hasAttr("wave.kernel"))
-        continue;
+    SmallVector<func::FuncOp> kernels;
+    getOperation().walk([&](func::FuncOp f) {
+      if (f->hasAttr(wave::WaveDialect::getKernelAttrName()))
+        kernels.push_back(f);
+    });
+    for (func::FuncOp func : kernels) {
       if (!func->hasAttr("waveamdmachine.kernarg_size") ||
           !func->hasAttr("waveamdmachine.sgpr_count") ||
           !func->hasAttr("waveamdmachine.vgpr_count")) {

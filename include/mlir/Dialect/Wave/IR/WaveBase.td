@@ -40,6 +40,12 @@ def Wave_Dialect : Dialect {
     sym::Store &getSymbolStore();
     const sym::Store &getSymbolStore() const;
 
+    /// Unit attribute that marks `func.func` ops the wave-to-AMDGPU
+    /// backend treats as kernels (per-pass walks pin selection on it).
+    static constexpr ::llvm::StringLiteral getKernelAttrName() {
+      return "wave.kernel";
+    }
+
   private:
     std::unique_ptr<sym::Store> symbolStore;
   }];

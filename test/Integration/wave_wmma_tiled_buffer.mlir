@@ -13,11 +13,7 @@
 // (`K * a(i) * b(j)`, K=48 -> 48 and 192 in the two checked quadrants).
 //
 // RUN: %python %S/../../examples/wave/wmma_matmul_tiled.py --m=64 --n=64 --k=48 --bm=2 --bn=2 --use-buffer \
-// RUN:   | wave-opt --wave-compile-kernels='chip=%chip' \
-// RUN:       --convert-scf-to-cf \
-// RUN:       --gpu-to-llvm=use-bare-pointers-for-kernels=true \
-// RUN:       --convert-to-llvm \
-// RUN:       --reconcile-unrealized-casts \
+// RUN:   | wave-opt --pass-pipeline='builtin.module(wave-set-target-attr{chip=%chip},transform-preload-library{transform-library-paths=%wave_pipelines},transform-interpreter{entry-point=compile_kernels},convert-scf-to-cf,gpu-to-llvm{use-bare-pointers-for-kernels=true},convert-to-llvm,reconcile-unrealized-casts)' \
 // RUN:   | mlir-runner \
 // RUN:       --shared-libs=%mlir_rocm_runtime \
 // RUN:       --shared-libs=%mlir_runner_utils \

@@ -54,8 +54,15 @@ struct WaveAMDABILoweringPass
   void runOnOperation() override {
     ModuleOp module = getOperation();
     OpBuilder builder(module.getContext());
-    for (func::FuncOp func : module.getOps<func::FuncOp>())
-      if (func->hasAttr("wave.kernel") && failed(lowerKernel(func, builder)))
+    SmallVector<func::FuncOp> kernels;
+    module.walk([&](func::FuncOp f) {
+      if (f->hasAttr(wave::WaveDialect::getKernelAttrName()))
+        kernels.push_back(f);
+    });
+    // ABI lowering only touches wave kernels; host funcs (memref-shaped
+    // entry points, runtime helpers) keep their original signatures.
+    for (func::FuncOp func : kernels)
+      if (failed(lowerKernel(func, builder)))
         return signalPassFailure();
   }
 

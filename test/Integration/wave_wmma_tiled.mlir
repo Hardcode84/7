@@ -34,11 +34,7 @@
 // "64, 64, 64, 64, 128, 128, 128, 128".
 //
 // RUN: %python %S/../../examples/wave/wmma_matmul_tiled.py --m=16 --n=64 --k=32 \
-// RUN:   | wave-opt --wave-compile-kernels='chip=%chip' \
-// RUN:       --convert-scf-to-cf \
-// RUN:       --gpu-to-llvm=use-bare-pointers-for-kernels=true \
-// RUN:       --convert-to-llvm \
-// RUN:       --reconcile-unrealized-casts \
+// RUN:   | wave-opt --pass-pipeline='builtin.module(wave-set-target-attr{chip=%chip},transform-preload-library{transform-library-paths=%wave_pipelines},transform-interpreter{entry-point=compile_kernels},convert-scf-to-cf,gpu-to-llvm{use-bare-pointers-for-kernels=true},convert-to-llvm,reconcile-unrealized-casts)' \
 // RUN:   | mlir-runner \
 // RUN:       --shared-libs=%mlir_rocm_runtime \
 // RUN:       --shared-libs=%mlir_runner_utils \

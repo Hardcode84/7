@@ -1,5 +1,4 @@
-//===- WaveCompileKernels.cpp - In-process Wave -> HSACO splice
-//------------===//
+//===- WaveCompileKernels.cpp - GPU-module ISA assembly + lld --*- C++ -*-===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
 // See https://llvm.org/LICENSE.txt for license information.
@@ -36,51 +35,59 @@ struct WaveCompileKernelsPass
 
   void runOnOperation() override {
     ModuleOp parent = getOperation();
+    auto target = parent->getAttrOfType<StringAttr>("waveamdmachine.target");
+    if (!target) {
+      parent.emitError("wave-compile-kernels requires a "
+                       "`waveamdmachine.target` module attribute");
+      return signalPassFailure();
+    }
+    auto [tripleRef, chipRef] = target.getValue().split("--");
+    if (tripleRef.empty() || chipRef.empty()) {
+      parent.emitError(
+          "malformed `waveamdmachine.target`; expected `<triple>--<chip>`");
+      return signalPassFailure();
+    }
+
     SmallVector<gpu::GPUModuleOp> targets;
     parent.walk([&](gpu::GPUModuleOp mod) {
       for (auto func : mod.getOps<func::FuncOp>()) {
-        if (func->hasAttr("wave.kernel")) {
+        if (func->hasAttr(wave::WaveDialect::getKernelAttrName())) {
           targets.push_back(mod);
           break;
         }
       }
     });
 
-    for (gpu::GPUModuleOp target : targets) {
-      if (failed(compileOne(target)))
+    for (gpu::GPUModuleOp gpuMod : targets) {
+      if (failed(compileOne(gpuMod, target.getValue(), tripleRef, chipRef)))
         return signalPassFailure();
     }
   }
 
 private:
-  LogicalResult compileOne(gpu::GPUModuleOp gpuMod) {
+  LogicalResult compileOne(gpu::GPUModuleOp gpuMod, StringRef targetAttrValue,
+                           StringRef triple, StringRef chip) {
     Location loc = gpuMod.getLoc();
     MLIRContext *ctx = &getContext();
-
-    // 1. Build a transient top-level module that the wave-to-AMDGPU pipeline
-    //    can consume: it expects a `builtin.module` with a
-    //    `waveamdmachine.target` attribute and `func.func` operations annotated
-    //    with `wave.kernel`.
     Builder b(ctx);
-    std::string wmTarget = (StringRef(triple) + "--" + StringRef(chip)).str();
+
+    // Already-lowered WaveAMDMachine IR lives inside `gpuMod`. Pull the
+    // funcs into a fresh top-level module so the ISA emitter sees the
+    // shape it expects (`builtin.module` + `func.func`s with the target
+    // attribute on the parent).
     OwningOpRef<ModuleOp> stagingRef(ModuleOp::create(loc));
     ModuleOp staging = *stagingRef;
-    staging->setAttr("waveamdmachine.target", b.getStringAttr(wmTarget));
-
+    staging->setAttr("waveamdmachine.target", b.getStringAttr(targetAttrValue));
     for (auto func : gpuMod.getOps<func::FuncOp>())
       staging.getBody()->push_back(func.clone().getOperation());
 
-    // 2. Drive the wave-to-AMDGPU translate pipeline + assemble + link
-    //    entirely in-process.
     SmallVector<char, 0> hsaco;
-    if (failed(wave::compileWaveToHSACO(staging.getOperation(), triple, chip,
-                                        features, pipelineFile, hsaco)))
+    if (failed(wave::assembleWaveAMDGPUKernels(staging.getOperation(), triple,
+                                               chip, features, hsaco)))
       return gpuMod.emitError("in-process wave-to-HSACO compilation failed for "
                               "`gpu.module @")
              << gpuMod.getSymName() << "`";
 
-    // 3. Replace `gpu.module @X` with a `gpu.binary @X [#gpu.object<...>]`
-    //    that carries the freshly produced HSACO.
     OpBuilder builder(gpuMod);
     auto binaryAttr =
         builder.getStringAttr(StringRef(hsaco.data(), hsaco.size()));

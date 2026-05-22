@@ -454,7 +454,7 @@ static LogicalResult validateWaveAMDMachineOp(Operation *op) {
   if (!isWaveAMDMachineOp(op))
     return success();
   if (auto func = op->getParentOfType<func::FuncOp>();
-      func && func->hasAttr("wave.kernel") &&
+      func && func->hasAttr(wave::WaveDialect::getKernelAttrName()) &&
       llvm::isa<waveamdmachine::ArgOp>(op))
     return op->emitError("waveamd-insert-ticket-waits expects "
                          "ABI-lowered kernel arguments");
@@ -762,7 +762,12 @@ struct WaveAMDTicketWaitsPass
     : public wave::impl::WaveAMDTicketWaitsBase<WaveAMDTicketWaitsPass> {
   void runOnOperation() override {
     ModuleOp module = getOperation();
-    for (func::FuncOp func : module.getOps<func::FuncOp>()) {
+    SmallVector<func::FuncOp> kernels;
+    module.walk([&](func::FuncOp f) {
+      if (!f.isExternal())
+        kernels.push_back(f);
+    });
+    for (func::FuncOp func : kernels) {
       if (failed(runOnFunc(func)))
         return signalPassFailure();
     }

@@ -98,6 +98,44 @@ def WaveAMDMetadata
   ];
 }
 
+def WaveSetTargetAttr
+    : Pass<"wave-set-target-attr", "ModuleOp"> {
+  let summary = "Stamp the AMDGPU target onto the module attribute the wave passes read";
+  let description = [{
+    Sets `waveamdmachine.target = "<triple>--<chip>"` on the operated-on
+    module unless it already carries one. The wave-to-AMDGPU pipeline
+    passes (decompose-mem-tuples, hazard-waits, ...) read this attribute
+    to pick subtarget features. Tests / drivers invoke this once at the
+    start of the pipeline so the downstream sequence stays target-agnostic.
+  }];
+  // Eagerly load every dialect a downstream pass in the compilation
+  // library may pull in. `transform.apply_registered_pass` later
+  // invokes those passes inside the multi-threaded execution context
+  // the outer PassManager creates, where the MLIR registry refuses to
+  // accept new dialect entries; pre-loading via this front pass turns
+  // the inner registry merges into no-ops.
+  let dependentDialects = [
+    "LLVM::LLVMDialect",
+    "ROCDL::ROCDLDialect",
+    "arith::ArithDialect",
+    "cf::ControlFlowDialect",
+    "func::FuncDialect",
+    "gpu::GPUDialect",
+    "memref::MemRefDialect",
+    "scf::SCFDialect",
+    "wave::WaveDialect",
+    "waveamd::WaveAMDDialect",
+    "waveamdmachine::WaveAMDMachineDialect"
+  ];
+  let options = [
+    Option<"chip", "chip", "std::string", /*default=*/"\"gfx1100\"",
+           "AMDGPU chip identifier (e.g. gfx1100).">,
+    Option<"triple", "triple", "std::string",
+           /*default=*/"\"amdgcn-amd-amdhsa\"",
+           "Target triple.">
+  ];
+}
+
 def WaveCompileKernels
     : Pass<"wave-compile-kernels", "ModuleOp"> {
   let summary = "Compile wave kernels in `gpu.module` ops to in-place `gpu.binary`";
@@ -116,27 +154,15 @@ def WaveCompileKernels
   }];
 
   let dependentDialects = [
-    "arith::ArithDialect",
     "func::FuncDialect",
     "gpu::GPUDialect",
     "ROCDL::ROCDLDialect",
-    "transform::TransformDialect",
-    "wave::WaveDialect",
-    "waveamd::WaveAMDDialect",
     "waveamdmachine::WaveAMDMachineDialect"
   ];
 
   let options = [
-    Option<"chip", "chip", "std::string", /*default=*/"\"gfx1100\"",
-           "AMDGPU chip identifier (e.g. gfx1100) for the `#rocdl.target`.">,
-    Option<"triple", "triple", "std::string",
-           /*default=*/"\"amdgcn-amd-amdhsa\"",
-           "Target triple for the `#rocdl.target` attribute.">,
     Option<"features", "features", "std::string", /*default=*/"\"\"",
-           "Target features string forwarded to the AMDGPU MC assembler.">,
-    Option<"pipelineFile", "pipeline-file", "std::string", /*default=*/"\"\"",
-           "Path to a `transform.named_sequence` MLIR file describing the "
-           "wave-to-AMDGPU pipeline. Empty selects the build-time default.">
+           "Target features forwarded to the AMDGPU MC assembler.">
   ];
 }
 

@@ -140,7 +140,12 @@ struct WaveAMDRegAllocPass
     FailureOr<RegisterLimits> limits = getRegisterLimits(getOperation());
     if (failed(limits))
       return signalPassFailure();
-    for (func::FuncOp func : getOperation().getOps<func::FuncOp>()) {
+    SmallVector<func::FuncOp> kernels;
+    getOperation().walk([&](func::FuncOp f) {
+      if (!f.isExternal())
+        kernels.push_back(f);
+    });
+    for (func::FuncOp func : kernels) {
       if (failed(allocateFunction(func, *limits)))
         return signalPassFailure();
     }
@@ -611,8 +616,10 @@ struct WaveAMDRegAllocPass
     // the kernel descriptor flags; we reserve unconditionally to keep
     // the allocator simple). v0 always holds the packed workitem_id, so
     // reserve it too.
-    unsigned sgprReserved = func->hasAttr("wave.kernel") ? 5 : 0;
-    unsigned vgprReserved = func->hasAttr("wave.kernel") ? 1 : 0;
+    unsigned sgprReserved =
+        func->hasAttr(wave::WaveDialect::getKernelAttrName()) ? 5 : 0;
+    unsigned vgprReserved =
+        func->hasAttr(wave::WaveDialect::getKernelAttrName()) ? 1 : 0;
     if (failed(
             allocateClass(func, intervals.sgprs, limits.numSGPR, sgprReserved)))
       return failure();

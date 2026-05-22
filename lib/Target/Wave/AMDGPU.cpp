@@ -540,7 +540,7 @@ private:
 
     os << "\t.size\t" << func.getSymName() << ", .-" << func.getSymName()
        << "\n";
-    if (func->hasAttr("wave.kernel")) {
+    if (func->hasAttr(wave::WaveDialect::getKernelAttrName())) {
       KernelInfo info;
       info.name = func.getSymName().str();
       info.kernargSize = getKernelArgSize(func);
@@ -1523,14 +1523,14 @@ private:
 // unavailable.
 static void wavePipelineAnchor() {}
 
-// Resolve the default compilation-pipeline path. `WAVE_PIPELINES_DIR`
-// in the environment wins; otherwise compose the build-time relative
-// path against the running executable's directory so a moved
-// `bin/` + `share/` pair stays consistent.
+// Resolve the wave compilation pipeline library path.
+// `WAVE_PIPELINES_DIR` in the environment wins; otherwise compose the
+// build-time relative path against the running executable's directory
+// so a moved `bin/` + `share/` pair stays consistent.
 static std::string findDefaultPipelineFile() {
   if (const char *env = std::getenv("WAVE_PIPELINES_DIR")) {
     SmallString<256> p(env);
-    llvm::sys::path::append(p, "default.mlir");
+    llvm::sys::path::append(p, "pipelines.mlir");
     return std::string(p);
   }
   std::string exe = llvm::sys::fs::getMainExecutable(
@@ -1639,17 +1639,18 @@ static LogicalResult linkElfToHsacoInProcess(Operation *opForDiag,
   return success();
 }
 
-LogicalResult mlir::wave::compileWaveToHSACO(Operation *op, StringRef triple,
-                                             StringRef chip, StringRef features,
-                                             StringRef pipelineFile,
-                                             SmallVectorImpl<char> &out) {
+LogicalResult
+mlir::wave::assembleWaveAMDGPUKernels(Operation *op, StringRef triple,
+                                      StringRef chip, StringRef features,
+                                      SmallVectorImpl<char> &out) {
   auto module = dyn_cast<ModuleOp>(op);
   if (!module)
-    return op->emitError("compileWaveToHSACO expects a module operation");
+    return op->emitError(
+        "assembleWaveAMDGPUKernels expects a module operation");
 
   SmallString<8192> isaStorage;
   llvm::raw_svector_ostream isaOS(isaStorage);
-  if (failed(translateWaveToAMDGPU(module, isaOS, pipelineFile)))
+  if (failed(WaveAMDGPUEmitter(isaOS).emit(module)))
     return failure();
 
   auto errCallback = [&] { return op->emitError(); };
