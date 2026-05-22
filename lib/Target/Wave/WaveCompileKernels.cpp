@@ -74,7 +74,7 @@ private:
     //    entirely in-process.
     SmallVector<char, 0> hsaco;
     if (failed(wave::compileWaveToHSACO(staging.getOperation(), triple, chip,
-                                        features, hsaco)))
+                                        features, pipelineFile, hsaco)))
       return gpuMod.emitError("in-process wave-to-HSACO compilation failed for "
                               "`gpu.module @")
              << gpuMod.getSymName() << "`";

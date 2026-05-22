@@ -13,6 +13,8 @@
 #include "Utils/AMDGPUBaseInfo.h"
 #include "lld/Common/Driver.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/Transform/IR/TransformDialect.h"
+#include "mlir/Dialect/Transform/Transforms/TransformInterpreterUtils.h"
 #include "mlir/Dialect/Wave/IR/Wave.h"
 #include "mlir/Dialect/Wave/IR/WaveAMD.h"
 #include "mlir/Dialect/Wave/Transforms/Passes.h"
@@ -20,7 +22,7 @@
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/Diagnostics.h"
-#include "mlir/Pass/PassManager.h"
+#include "mlir/IR/OwningOpRef.h"
 #include "mlir/Target/LLVM/ROCDL/Utils.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
@@ -38,6 +40,7 @@
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/FileUtilities.h"
 #include "llvm/Support/MemoryBuffer.h"
+#include "llvm/Support/Path.h"
 #include "llvm/Support/TargetSelect.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/TargetParser/TargetParser.h"
@@ -1511,33 +1514,85 @@ private:
   }
 };
 
-static LogicalResult runWaveAMDMachinePipeline(ModuleOp module) {
-  Builder builder(module.getContext());
+#ifndef WAVE_DEFAULT_PIPELINE_REL
+#error "WAVE_DEFAULT_PIPELINE_REL must be defined by the build system"
+#endif
+
+// Anchor symbol whose containing image getMainExecutable can hash back
+// to on platforms that need a fallback when `/proc/self/exe` is
+// unavailable.
+static void wavePipelineAnchor() {}
+
+// Resolve the default compilation-pipeline path. `WAVE_PIPELINES_DIR`
+// in the environment wins; otherwise compose the build-time relative
+// path against the running executable's directory so a moved
+// `bin/` + `share/` pair stays consistent.
+static std::string findDefaultPipelineFile() {
+  if (const char *env = std::getenv("WAVE_PIPELINES_DIR")) {
+    SmallString<256> p(env);
+    llvm::sys::path::append(p, "default.mlir");
+    return std::string(p);
+  }
+  std::string exe = llvm::sys::fs::getMainExecutable(
+      /*Argv0=*/nullptr, reinterpret_cast<void *>(&wavePipelineAnchor));
+  if (exe.empty())
+    return {};
+  SmallString<256> p(llvm::sys::path::parent_path(exe));
+  llvm::sys::path::append(p, WAVE_DEFAULT_PIPELINE_REL);
+  return std::string(p);
+}
+
+static LogicalResult runWaveAMDMachinePipeline(ModuleOp module,
+                                               StringRef pipelineFile) {
+  MLIRContext *ctx = module.getContext();
+  Builder builder(ctx);
   if (!module->hasAttr("waveamdmachine.target"))
     module->setAttr(
         "waveamdmachine.target",
         builder.getStringAttr(
             (Twine(kDefaultTargetTriple) + "--" + kDefaultTargetChip).str()));
-  PassManager pm(module.getContext());
-  pm.addPass(wave::createConvertWaveAMDToWaveAMDMachine());
-  pm.addPass(wave::createWaveAMDABILowering());
-  pm.addPass(wave::createWaveAMDDecomposeMemTuples());
-  pm.addPass(wave::createWaveAMDTicketWaits());
-  pm.addPass(wave::createWaveAMDHazardWaits());
-  pm.addPass(wave::createWaveAMDRegAlloc());
-  pm.addPass(wave::createWaveAMDResourceInfo());
-  pm.addPass(wave::createWaveAMDMetadata());
-  return pm.run(module);
+
+  // The transform interpreter resolves `transform.apply_registered_pass`
+  // names through the global pass registry; ensure wave-owned passes are
+  // discoverable even when this code path runs outside `wave-opt`
+  // (e.g. via `wave-translate`).
+  wave::registerWavePasses();
+  ctx->getOrLoadDialect<transform::TransformDialect>();
+
+  std::string resolved;
+  StringRef path = pipelineFile;
+  if (path.empty()) {
+    resolved = findDefaultPipelineFile();
+    if (resolved.empty())
+      return module.emitError(
+          "cannot locate default Wave compilation pipeline; set "
+          "WAVE_PIPELINES_DIR or pass `pipeline-file`");
+    path = resolved;
+  }
+  OwningOpRef<ModuleOp> transformModule;
+  if (failed(transform::detail::parseTransformModuleFromFile(ctx, path,
+                                                             transformModule)))
+    return module.emitError("failed to parse Wave compilation pipeline `")
+           << path << "`";
+
+  Operation *entry =
+      transform::detail::findTransformEntryPoint(module, *transformModule);
+  if (!entry)
+    return module.emitError("Wave compilation pipeline `")
+           << path << "` missing entry point";
+
+  return transform::applyTransformNamedSequence(module, entry, *transformModule,
+                                                transform::TransformOptions());
 }
 
 } // namespace
 
-LogicalResult mlir::wave::translateWaveToAMDGPU(Operation *op,
-                                                raw_ostream &os) {
+LogicalResult mlir::wave::translateWaveToAMDGPU(Operation *op, raw_ostream &os,
+                                                StringRef pipelineFile) {
   auto module = dyn_cast<ModuleOp>(op);
   if (!module)
     return op->emitError("wave AMDGPU backend expects a module operation");
-  if (failed(runWaveAMDMachinePipeline(module)))
+  if (failed(runWaveAMDMachinePipeline(module, pipelineFile)))
     return failure();
   return WaveAMDGPUEmitter(os).emit(module);
 }
@@ -1586,6 +1641,7 @@ static LogicalResult linkElfToHsacoInProcess(Operation *opForDiag,
 
 LogicalResult mlir::wave::compileWaveToHSACO(Operation *op, StringRef triple,
                                              StringRef chip, StringRef features,
+                                             StringRef pipelineFile,
                                              SmallVectorImpl<char> &out) {
   auto module = dyn_cast<ModuleOp>(op);
   if (!module)
@@ -1593,7 +1649,7 @@ LogicalResult mlir::wave::compileWaveToHSACO(Operation *op, StringRef triple,
 
   SmallString<8192> isaStorage;
   llvm::raw_svector_ostream isaOS(isaStorage);
-  if (failed(translateWaveToAMDGPU(module, isaOS)))
+  if (failed(translateWaveToAMDGPU(module, isaOS, pipelineFile)))
     return failure();
 
   auto errCallback = [&] { return op->emitError(); };

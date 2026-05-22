@@ -120,6 +120,7 @@ def WaveCompileKernels
     "func::FuncDialect",
     "gpu::GPUDialect",
     "ROCDL::ROCDLDialect",
+    "transform::TransformDialect",
     "wave::WaveDialect",
     "waveamd::WaveAMDDialect",
     "waveamdmachine::WaveAMDMachineDialect"
@@ -132,7 +133,10 @@ def WaveCompileKernels
            /*default=*/"\"amdgcn-amd-amdhsa\"",
            "Target triple for the `#rocdl.target` attribute.">,
     Option<"features", "features", "std::string", /*default=*/"\"\"",
-           "Target features string forwarded to the AMDGPU MC assembler.">
+           "Target features string forwarded to the AMDGPU MC assembler.">,
+    Option<"pipelineFile", "pipeline-file", "std::string", /*default=*/"\"\"",
+           "Path to a `transform.named_sequence` MLIR file describing the "
+           "wave-to-AMDGPU pipeline. Empty selects the build-time default.">
   ];
 }
 
