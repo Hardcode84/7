@@ -68,18 +68,25 @@ static void substituteParametricWidths(ModuleOp moduleOp) {
 }
 
 // Walk every ParamOp once and attach `$value` from the module's
-// `wavemeta.params` dict where the name matches. Name-match with
-// type-mismatch is an error -- bare "no binding" silenceably hides
-// the real cause (autotuners feeding `i64` into an `index` param,
-// etc.).
+// `wavemeta.params` dict where the name matches; immediately
+// materialise the resolved param as `arith.constant` and rewrite uses
+// so subsequent fold-based patterns (`StaticForUnroll`'s
+// `getConstantIntValue` etc.) see the concrete value without relying
+// on the greedy rewriter to re-fire on every visited op. Name-match
+// with type-mismatch is an error -- bare "no binding" silenceably
+// hides the real cause (autotuners feeding `i64` into an `index`
+// param, etc.).
 static LogicalResult bindParams(ModuleOp moduleOp) {
   auto dict = moduleOp->getAttrOfType<DictionaryAttr>(
       WaveMetaDialect::getParamsAttrName());
   if (!dict)
     return success();
+  SmallVector<ParamOp> resolved;
   WalkResult result = moduleOp.walk([&](ParamOp op) -> WalkResult {
-    if (op.getValueAttr())
+    if (op.getValueAttr()) {
+      resolved.push_back(op);
       return WalkResult::advance();
+    }
     Attribute bound = dict.get(op.getName());
     if (!bound)
       return WalkResult::advance();
@@ -93,9 +100,23 @@ static LogicalResult bindParams(ModuleOp moduleOp) {
              << "wavemeta.params['" << op.getName() << "'] has type "
              << typed.getType() << ", expected " << op.getResult().getType();
     op.setValueAttr(typed);
+    resolved.push_back(op);
     return WalkResult::advance();
   });
-  return failure(result.wasInterrupted());
+  if (result.wasInterrupted())
+    return failure();
+  for (ParamOp op : resolved) {
+    auto typed = op.getValueAttr();
+    if (!typed)
+      continue;
+    OpBuilder builder(op);
+    Value constant = arith::ConstantOp::create(builder, op.getLoc(),
+                                               op.getResult().getType(), typed)
+                         .getResult();
+    op.getResult().replaceAllUsesWith(constant);
+    op.erase();
+  }
+  return success();
 }
 
 //===----------------------------------------------------------------------===//
@@ -173,7 +194,7 @@ struct StaticForUnroll : OpRewritePattern<StaticForOp> {
     }
 
     SmallVector<Value> carries(op.getIterArgs());
-    for (int64_t i = 0; i < tripCount; ++i)
+    for (int64_t i : llvm::seq(tripCount))
       carries = emitForIteration(rewriter, op, *lb + i * *step, carries);
     rewriter.replaceOp(op, carries);
     return success();
@@ -232,49 +253,133 @@ static void populatePhase2Patterns(RewritePatternSet &patterns) {
 //===----------------------------------------------------------------------===//
 
 // Converter rule for `!wavemeta.ptuple<T, W>`:
-// - Concrete non-negative W: expand to W copies of T.
+// - Concrete non-negative W: recursively convert T, then emit
+//   `W` copies of that decomposed list. Nested
+//   `ptuple<ptuple<af, M>, K>` collapses to `K * M` flat scalars in
+//   one shot.
 // - Parameter-named W: keep as-is so structural ops stay legal; the
 //   residual phase will then point at whatever still holds it.
 class PTupleTypeConverter : public TypeConverter {
 public:
   PTupleTypeConverter() {
     addConversion([](Type t) { return t; });
-    addConversion(
-        [](PTupleType t, SmallVectorImpl<Type> &out) -> LogicalResult {
-          auto width = dyn_cast<IntegerAttr>(t.getWidth());
-          if (!width || width.getInt() < 0) {
-            out.push_back(t);
-            return success();
-          }
-          out.append(width.getInt(), t.getElementType());
-          return success();
-        });
-    // Source materialisation: rebuild ptuple from scalars on the fly
-    // (used when a converted value flows into an unconverted use).
-    addSourceMaterialization([](OpBuilder &builder, PTupleType resTy,
-                                ValueRange inputs, Location loc) -> Value {
+    addConversion([this](PTupleType t, SmallVectorImpl<Type> &out) {
+      return convertPTuple(t, out);
+    });
+    addSourceMaterialization([this](OpBuilder &builder, PTupleType resTy,
+                                    ValueRange inputs, Location loc) {
+      return rebuildPTuple(builder, loc, resTy, inputs);
+    });
+    addTargetMaterialization([this](OpBuilder &builder, TypeRange resTys,
+                                    ValueRange inputs, Location loc, Type) {
+      return projectPTuple(builder, loc, resTys, inputs);
+    });
+  }
+
+private:
+  LogicalResult convertPTuple(PTupleType t, SmallVectorImpl<Type> &out) const {
+    auto width = dyn_cast<IntegerAttr>(t.getWidth());
+    if (!width || width.getInt() < 0) {
+      out.push_back(t);
+      return success();
+    }
+    SmallVector<Type> elementTypes;
+    if (failed(convertType(t.getElementType(), elementTypes)))
+      return failure();
+    for ([[maybe_unused]] int64_t i : llvm::seq(width.getInt()))
+      out.append(elementTypes);
+    return success();
+  }
+
+  // Rebuild a (possibly nested) ptuple from already-flat scalars by
+  // chunking by the inner-converted size and recursing.
+  Value rebuildPTuple(OpBuilder &builder, Location loc, PTupleType resTy,
+                      ValueRange inputs) const {
+    auto width = dyn_cast<IntegerAttr>(resTy.getWidth());
+    if (!width || width.getInt() < 0)
+      return Value();
+    int64_t n = width.getInt();
+    Type elementType = resTy.getElementType();
+    auto innerPt = dyn_cast<PTupleType>(elementType);
+    if (!innerPt) {
+      if (static_cast<int64_t>(inputs.size()) != n)
+        return Value();
       return TupleMakeOp::create(builder, loc, resTy, inputs).getResult();
-    });
-    // Target materialisation: project a still-ptuple value to its
-    // scalar slots via constant-index `tuple_get`s.
-    addTargetMaterialization([](OpBuilder &builder, TypeRange resTys,
-                                ValueRange inputs,
-                                Location loc) -> SmallVector<Value> {
-      assert(inputs.size() == 1 &&
-             "ptuple target materialisation expects one input");
-      Value tuple = inputs.front();
-      auto tupleTy = cast<PTupleType>(tuple.getType());
-      SmallVector<Value> out;
-      out.reserve(resTys.size());
-      for (size_t i = 0, e = resTys.size(); i < e; ++i) {
-        Value idx = arith::ConstantIndexOp::create(builder, loc,
-                                                   static_cast<int64_t>(i));
-        out.push_back(TupleGetOp::create(builder, loc, tupleTy.getElementType(),
-                                         tuple, idx)
-                          .getResult());
-      }
-      return out;
-    });
+    }
+    SmallVector<Type> innerDecomp;
+    if (failed(convertType(elementType, innerDecomp)))
+      return Value();
+    int64_t innerSize = static_cast<int64_t>(innerDecomp.size());
+    if (innerSize == 0 || static_cast<int64_t>(inputs.size()) != n * innerSize)
+      return Value();
+    SmallVector<Value> innerPtuples;
+    innerPtuples.reserve(n);
+    for (int64_t i : llvm::seq(n)) {
+      Value inner = materializeSourceConversion(
+          builder, loc, innerPt, inputs.slice(i * innerSize, innerSize));
+      if (!inner)
+        return Value();
+      innerPtuples.push_back(inner);
+    }
+    return TupleMakeOp::create(builder, loc, resTy, innerPtuples).getResult();
+  }
+
+  // Project a still-ptuple value to its converted slots: one level
+  // of `tuple_get`s, then recurse on any still-ptuple inner type.
+  // Emit one level of `tuple_get`s extracting all `n` slots.
+  SmallVector<Value> projectOneLevel(OpBuilder &builder, Location loc,
+                                     Value tuple, Type elementType,
+                                     int64_t n) const {
+    SmallVector<Value> out;
+    out.reserve(n);
+    for (int64_t i : llvm::seq(n)) {
+      Value idx = arith::ConstantIndexOp::create(builder, loc, i);
+      out.push_back(TupleGetOp::create(builder, loc, elementType, tuple, idx)
+                        .getResult());
+    }
+    return out;
+  }
+
+  // Project each still-ptuple value to its further decomposed scalars
+  // via recursive target materialisation; flatten the result.
+  SmallVector<Value> projectNested(OpBuilder &builder, Location loc,
+                                   ValueRange firstLevel,
+                                   TypeRange innerDecomp) const {
+    SmallVector<Value> out;
+    out.reserve(firstLevel.size() * innerDecomp.size());
+    for (Value v : firstLevel) {
+      SmallVector<Value> sub =
+          materializeTargetConversion(builder, loc, innerDecomp, ValueRange{v});
+      if (sub.empty())
+        return {};
+      out.append(sub);
+    }
+    return out;
+  }
+
+  SmallVector<Value> projectPTuple(OpBuilder &builder, Location loc,
+                                   TypeRange resTys, ValueRange inputs) const {
+    if (inputs.size() != 1)
+      return {};
+    Value tuple = inputs.front();
+    auto tupleTy = dyn_cast<PTupleType>(tuple.getType());
+    auto width =
+        tupleTy ? dyn_cast<IntegerAttr>(tupleTy.getWidth()) : IntegerAttr();
+    if (!width || width.getInt() < 0)
+      return {};
+    int64_t n = width.getInt();
+    Type elementType = tupleTy.getElementType();
+    SmallVector<Value> firstLevel =
+        projectOneLevel(builder, loc, tuple, elementType, n);
+    if (!isa<PTupleType>(elementType))
+      return static_cast<int64_t>(resTys.size()) == n ? firstLevel
+                                                      : SmallVector<Value>{};
+    SmallVector<Type> innerDecomp;
+    if (failed(convertType(elementType, innerDecomp)) ||
+        static_cast<int64_t>(resTys.size()) !=
+            n * static_cast<int64_t>(innerDecomp.size()))
+      return {};
+    return projectNested(builder, loc, firstLevel, innerDecomp);
   }
 };
 
@@ -318,8 +423,11 @@ struct BroadcastDecompose : OpConversionPattern<TupleMakeBroadcastOp> {
   }
 };
 
-// `tuple_get` whose tuple crossed a boundary: pick the scalar at the
-// constant index from the adaptor's flattened operand list.
+// `tuple_get` whose tuple crossed a boundary: pick the slice at the
+// constant index from the adaptor's flattened operand list. For
+// nested ptuples the source decomposes to `width * inner_count`
+// scalars and the result decomposes to `inner_count` scalars; slice
+// `[idx * inner_count, (idx + 1) * inner_count)` and replace 1-to-N.
 struct TupleGetDecompose : OpConversionPattern<TupleGetOp> {
   using OpConversionPattern::OpConversionPattern;
   LogicalResult
@@ -328,16 +436,28 @@ struct TupleGetDecompose : OpConversionPattern<TupleGetOp> {
     std::optional<int64_t> idx = getConstantIntValue(op.getIndex());
     if (!idx)
       return failure();
-    ValueRange tupleScalars = adaptor.getTuple();
-    int64_t n = static_cast<int64_t>(tupleScalars.size());
+    auto tupleTy = cast<PTupleType>(op.getTuple().getType());
+    auto width = dyn_cast<IntegerAttr>(tupleTy.getWidth());
+    if (!width || width.getInt() < 0)
+      return failure();
+    int64_t n = width.getInt();
     if (*idx < 0 || *idx >= n)
       return failure();
-    rewriter.replaceOp(op, tupleScalars[*idx]);
+    ValueRange tupleScalars = adaptor.getTuple();
+    int64_t totalScalars = static_cast<int64_t>(tupleScalars.size());
+    if (totalScalars == 0 || totalScalars % n != 0)
+      return failure();
+    int64_t inner = totalScalars / n;
+    ValueRange slice = tupleScalars.slice(*idx * inner, inner);
+    rewriter.replaceOpWithMultiple(op, {slice});
     return success();
   }
 };
 
-// `tuple_set`: replicate the scalar list with one slot updated.
+// `tuple_set`: replicate the scalar list with one slot updated. For
+// nested ptuples the slot itself decomposes to `inner` scalars, so
+// splice the converted value's scalar range into the matching window
+// of the carried tuple.
 struct TupleSetDecompose : OpConversionPattern<TupleSetOp> {
   using OpConversionPattern::OpConversionPattern;
   LogicalResult
@@ -346,15 +466,24 @@ struct TupleSetDecompose : OpConversionPattern<TupleSetOp> {
     std::optional<int64_t> idx = getConstantIntValue(op.getIndex());
     if (!idx)
       return failure();
-    ValueRange tupleScalars = adaptor.getTuple();
-    ValueRange valueScalars = adaptor.getValue();
-    if (valueScalars.size() != 1)
+    auto tupleTy = cast<PTupleType>(op.getTuple().getType());
+    auto width = dyn_cast<IntegerAttr>(tupleTy.getWidth());
+    if (!width || width.getInt() < 0)
       return failure();
-    int64_t n = static_cast<int64_t>(tupleScalars.size());
+    int64_t n = width.getInt();
     if (*idx < 0 || *idx >= n)
       return failure();
+    ValueRange tupleScalars = adaptor.getTuple();
+    ValueRange valueScalars = adaptor.getValue();
+    int64_t total = static_cast<int64_t>(tupleScalars.size());
+    if (total == 0 || total % n != 0)
+      return failure();
+    int64_t inner = total / n;
+    if (static_cast<int64_t>(valueScalars.size()) != inner)
+      return failure();
     SmallVector<Value> replacements(tupleScalars.begin(), tupleScalars.end());
-    replacements[*idx] = valueScalars.front();
+    for (int64_t k = 0; k < inner; ++k)
+      replacements[*idx * inner + k] = valueScalars[k];
     rewriter.replaceOpWithMultiple(op, {replacements});
     return success();
   }
