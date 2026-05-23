@@ -19,28 +19,45 @@ wave.amd.machine.func
 +---------------------+    +-----------------------------+
 | Per-op classifier   |--->| Per-arch data spine         |
 | (op -> SchedClass)  |    | - latency table             |
-+---------------------+    | - issue-resource map        |
++---------------------+    | - class -> FU resource map  |
         |                  | - hazard rules              |
         v                  | - structural params         |
 +---------------------+    | (SchedModel + HW overrides) |
-| Multi-wave issue    |<---+-----------------------------+
-| simulator           |
+| Dense dataflow      |<---+-----------------------------+
+| analysis            |
+| (MachineState       |
+|  lattice per        |
+|  program point)     |
 +---------------------+
         |
-        +--> cycles            (cost fn for autotune)
-        +--> per-wave timeline (cost fn for scheduler)
+        +--> per-op pressure     (cost fn for scheduler)
+        +--> total cycles        (autotune score)
+        |
+        v
++---------------------+
+| Multi-wave issue    | (Stage 5: layered on top of the
+| simulator           |  per-program-point lattice)
++---------------------+
+        |
+        +--> per-wave timeline   (ATT calibration target)
 
 +---------------------+
 | List scheduler pass |--+
-| (uses sim as cost)  |  |--> wave.amd.machine.func (reordered)
+| (cost = re-run      |  |--> wave.amd.machine.func (reordered)
+|  dataflow on        |  |
+|  candidate order)   |  |
 +---------------------+--+
 ```
 
-Three artifacts, built in order: **data spine** (static + HW
-overrides), **simulator** (the estimator), **scheduler** (uses
-simulator as cost function). The simulator stands on its own as
-the `wave.transform.estimate_cycles` op surfaced to the autotune
-machinery; the scheduler is `wave.transform.schedule`.
+Three artifacts, built in order: **data spine** (static per-arch
+parameters + per-FU resource map + HW-calibrated overrides),
+**dataflow analysis** (per-program-point MachineState lattice),
+**scheduler** (cost = pressure delta from re-running the analysis
+on a candidate ordering). The dataflow output also feeds the
+multi-wave simulator in Stage 5. Surfaced into the
+transform-dialect pipeline as `wave.transform.estimate_cycles`
+(total) and `wave.transform.pressure_report` (per-region detail);
+the scheduler is `wave.transform.schedule`.
 
 ## Scope and non-goals
 
@@ -126,34 +143,117 @@ Four branches resolved up front:
 unmapped opcodes during estimator runs in debug builds; collect
 gaps from real kernels.
 
-## Stage 2: single-wave linear estimator
+## Stage 2: dense-dataflow pressure analysis
 
-**Goal.** Given a `wave.amd.machine.func` + arch, return predicted
-cycles assuming one wave on one SIMD.
+**Goal.** Per-program-point machine-state lattice over the
+wave.amd.machine func body. Replaces a scalar single-wave cycle
+count with a richer artifact: each lattice point carries per-FU
+ready-cycles, per-counter in-flight depth, and per-Value
+ready-cycles. The Stage 8 scheduler reads pressure from this
+lattice; the Stage 5 multi-wave simulator consumes it as input;
+the autotune machinery still gets a scalar total when it asks for
+one.
 
-**Deliverable.** `CycleEstimator.cpp` with
-`estimateSingleWave(FuncOp, ArchData) -> int64_t`.
+Single-wave scalar estimators have a fundamental problem on real
+kernels: loops are visited once, branches sum instead of max, and
+the output gives no actionable signal for what to reorder. Dense
+dataflow with structural loop handling avoids all three.
 
-**Algorithm.** Walk the func linearly; maintain a next-issue-cycle
-cursor and a per-VGPR ready-cycle map. For each op:
-- Latency = `LatencyTable[arch][classifier(op)]`.
-- Issue cycle = max(cursor, max ready-cycle of operand producers
-  + their latency, hazard-rule-required wait).
-- Bump cursor to issue cycle + 1 (single-issue SIMD).
-- Record `op -> issueCycle`; downstream needs it.
+**Lattice.**
+```cpp
+struct MachineState {
+  // Per-functional-unit "next free" cycle, relative to fn entry.
+  // FU set: VALU pipe, SALU pipe, VMEM pipe, lgkmcnt-side
+  // (SMEM/LDS), MFMA/XDL pipe, TRANS pipe, branch pipe.
+  std::array<int64_t, NumFU> fuReadyAt;
 
-Total cycles = max(issue cycle + own latency) over all ops.
+  // Per-waitcnt-counter in-flight depth (loadcnt, dscnt, expcnt,
+  // storecnt + GFX12 split variants).
+  std::array<int, NumWaitCounters> inflight;
 
-**Validation gate.** Five synthetic kernels: dependent VALU chain,
-independent VALU chain, VMEM burst, MFMA chain, mixed. Compare
-against `llvm-mca` on the same kernels lowered to ISA. Pass: within
-5% across all five. Anything wider signals a misclassified op or
-wrong latency entry.
+  // Per-Value ready-cycle map (live values only).
+  DenseMap<Value, int64_t> readyAt;
+};
+```
 
-**Risk.** `llvm-mca` rejects handcrafted kernels (needs full func
-wrapping + correct waitcnt). Mitigation: generate via the existing
-`wave-translate` -> `.s` path; pipe to mca; accept its output as
-single-wave ground truth.
+Join at CFG merges: element-wise `max` on `fuReadyAt` and
+`inflight` (upper-bound semantics); set-union on `readyAt`.
+Monotone, ascending -- classical forward dataflow.
+
+**Transfer function** for op `o`:
+```
+fu = funit(class(o))
+issueAt = max(fuReadyAt[fu], max-over-operand-ready,
+              hazard-required-wait)
+fuReadyAt[fu] = issueAt + 1
+readyAt[results(o)] = issueAt + latency(o)
+inflight[counter(o)]++ for memory ops
+s_waitcnt N decrements counter + rebases fuReadyAt[branch]
+```
+
+**Implementation.** `mlir::dataflow::AbstractDenseDataFlowAnalysis`
+as the within-straight-line driver. Loops are handled
+structurally rather than via fixed-point (absolute cycles grow
+unboundedly per iter; no fixed point exists on the raw lattice):
+walk `uniform_loop` body once with a fresh zero lattice, extract
+per-iter delta (final-minus-initial per FU; sum per counter),
+multiply by trip count, apply to incoming lattice. Trip count
+extraction:
+- **Static:** `MLIRInferIntRangeInterface` on the `continue_if`
+  predicate; project already pulls in the deps.
+- **Annotation:** `waveamdmachine.trip_count` attribute on the
+  `uniform_loop` op when upstream knows (e.g.,
+  `wavemeta-specialize` after K is concretised).
+- **Fallback:** unknown -> use a heuristic (initial: 4) and tag
+  the result with `wave.estimated_unknown_trip_count = true` so
+  autotune scoring can downweight kernels with unbounded loops.
+
+Branches (`scf.if`-equivalent regions if they appear post-
+lowering) get standard `max`-on-join semantics. Scalar
+`s_cbranch_*` ops in straight-line code are treated as their own
+issue-slot cost only; their control-flow targets are not modeled.
+
+**Per-FU resource map.** New entry in the data spine:
+`SchedClass -> FunctionalUnit`. Lifted from `SISchedule.td`'s
+`HWWriteRes<class, [resources], cycles>`; the LLVM resource enum
+(`HWVALU`, `HWSALU`, `HWVMEM`, `HWLGKM`, `HWXDL`, `HWTransVALU`,
+`HWBranch`, `HWExport`) collapses to our compact FU set.
+`check-sched-tables.py` (Stage 1's pre-commit hook) is extended
+to diff the resource binding per class.
+
+**Sub-beads.** Stage 2 splits into four:
+- 2A: extended data spine -- per-FU map, `funit(class)` accessor,
+  hazard-required-wait helper. Updates check-sched-tables.py.
+- 2B: `MachineState` lattice type + dataflow driver over
+  straight-line code (no loops yet). Passes 5 synthetic kernels
+  vs `llvm-mca`.
+- 2C: structural loop handling + trip-count extraction. Passes
+  a 6th synthetic kernel with a fixed-trip-count loop.
+- 2D: `wave.transform.estimate_cycles` (returns total cycles) +
+  `wave.transform.pressure_report` (writes per-region per-FU
+  utilisation as a module attribute for the scheduler /
+  diagnostics).
+
+**Validation gate.** Six synthetic kernels: dependent VALU chain,
+independent VALU chain (probes per-FU parallelism), VMEM burst
+(probes inflight saturation), MFMA chain, simple loop with N=4
+trips (probes structural loop handling), mixed. Compared against
+`llvm-mca` on the same assembled ISA. Pass:
+- Total cycles within 5% on all six.
+- Per-FU ready-cycle vector within 10% of mca's
+  `Resource pressure per iteration` block.
+
+**Risk: trip-count failure.** Unknown trip counts force the
+fallback path. Mitigation: emit a remark + module attribute so
+downstream consumers know the estimate is degraded; surface the
+warning in `wave.transform.estimate_cycles` output (high bit of
+the returned i64 reserved as "estimate-is-approximate" flag, or
+a sidecar param).
+
+**Risk: per-FU map drift vs LLVM.** Same SISchedule.td hand-copy
+problem as latencies, same mitigation (extend
+`check-sched-tables.py`). The TableGen emitter follow-up
+(sy5.1.4) folds both diff paths into one generator.
 
 ## Stage 3: HW microbenchmark harness
 
@@ -208,7 +308,11 @@ subtract.
 ## Stage 5: multi-wave issue simulator
 
 **Goal.** Cycle-by-cycle simulator with per-SIMD round-robin and
-per-wave ready queues.
+per-wave ready queues. Builds on Stage 2's per-program-point
+`MachineState` lattice -- the simulator runs N copies of the
+single-wave state (one per coresident wave), arbitrates between
+them per SIMD cycle, and shares the data spine + per-FU resource
+map.
 
 **Deliverable.** `IssueSimulator.cpp`:
 ```cpp
@@ -316,17 +420,20 @@ check sample density.
 ## Stage 8: list scheduler pass
 
 **Goal.** Reorder ops in `wave.amd.machine.func` to minimize
-simulated cycles.
+predicted cycles + smooth per-FU pressure.
 
 **Algorithm.** Standard DAG list scheduler:
 - Build dependence DAG from operand SSA use-def plus
   waitcnt-implied ordering.
 - Critical-path heuristic for initial node priority.
-- Cost function = `IssueSimulator::simulate()` on the candidate
-  ordering.
-- For each scheduling region (delimited by `sched_barrier(0)` ops
-  in the input): explore reorderings; accept lower cycle count.
-  Across regions: never reorder.
+- Cost function = re-run Stage 2's dense dataflow on the
+  candidate ordering and read the per-region pressure +
+  total-cycle delta. The lattice tells the scheduler which FU
+  is the bottleneck across a region, so it can prefer
+  reorderings that pull non-bottleneck ops into the busy zone.
+- For each scheduling region (delimited by `sched_barrier(0)`
+  ops in the input): explore reorderings; accept lower cycle
+  count. Across regions: never reorder.
 
 The CK / HipKittens / AITER convention of bookending intent with
 `sched_barrier(0)` is exactly the region delimiter we need. Where
@@ -385,16 +492,16 @@ heavy MFMA stalls).
 
 ## Recommended kickoff sequence
 
-Three concrete starting beads:
+Stage 1 (per-arch data spine) has landed: `ArchData`,
+`SchedClass`, `OpClassifier`, `LatencyTable`, plus the
+pre-commit drift check. Stage 2's sub-beads (2A-2D) are the
+next chunk; 2A (per-FU map) extends the data spine and unblocks
+2B (dataflow driver) which unblocks 2C (loops) which unblocks
+2D (transform-dialect ops).
 
-1. **Commit this design doc.**
-2. **`lib/Dialect/WaveAMD/CostModel/ArchData.{h,cpp}`** -- per-arch
-   struct + entries for the four target archs.
-3. **`lib/Dialect/WaveAMD/CostModel/OpClassifier.{h,cpp}`** --
-   first 20 `wave.amd.machine` ops mapped to `SchedClass`.
-
-After those land, Stage 2 (linear estimator) and Stage 3 (microbench
-harness) are independent and can proceed in parallel.
+Stage 3 (HW microbench harness) is independent of Stage 2 and
+can run in parallel; it feeds Stage 4 (calibration overrides on
+the data spine).
 
 ## Open questions
 
