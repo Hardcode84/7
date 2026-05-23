@@ -1054,6 +1054,7 @@ def build_wmma_f16_matmul_module(
     matrix_intrinsic: str = "wmma",
     random_data: bool = False,
     random_seed: int = 0,
+    skip_specialize: bool = False,
 ) -> Module:
     """Return an MLIR :class:`Module` for the tiled WMMA f16 matmul.
 
@@ -1133,7 +1134,8 @@ def build_wmma_f16_matmul_module(
             _emit_host(fb, cfg)
 
         _attach_wavemeta_params(bld.module, cfg)
-        dsl.specialize_wavemeta(bld.module)
+        if not skip_specialize:
+            dsl.specialize_wavemeta(bld.module)
 
     return bld.module
 
