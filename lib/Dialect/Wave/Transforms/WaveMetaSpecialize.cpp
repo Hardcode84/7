@@ -15,6 +15,7 @@
 #include "mlir/Dialect/SCF/Transforms/Patterns.h"
 #include "mlir/Dialect/Utils/StaticValueUtils.h"
 #include "mlir/Dialect/Wave/IR/WaveMeta.h"
+#include "mlir/IR/AttrTypeSubElements.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/IRMapping.h"
 #include "mlir/IR/Matchers.h"
@@ -38,6 +39,33 @@ namespace {
 //===----------------------------------------------------------------------===//
 // Phase 1: bind module-scope params.
 //===----------------------------------------------------------------------===//
+
+// Resolve `!wavemeta.ptuple<T, "name">` to `!wavemeta.ptuple<T, N>` by
+// reading `wavemeta.params[name]` and substituting the concrete int.
+// Lets the matmul-style "K-tile worth of frags rides through scf.for
+// iter_args" pattern shrink under `bind_param` instead of staying
+// stuck at the build-time max. After this phase, every surviving
+// parametric width is an unresolved one (no dict entry / non-int
+// entry) and the residual phase will flag it.
+static void substituteParametricWidths(ModuleOp moduleOp) {
+  auto params = moduleOp->getAttrOfType<DictionaryAttr>(
+      WaveMetaDialect::getParamsAttrName());
+  if (!params)
+    return;
+  AttrTypeReplacer replacer;
+  replacer.addReplacement([&](PTupleType t) -> std::optional<Type> {
+    auto sw = dyn_cast<StringAttr>(t.getWidth());
+    if (!sw)
+      return std::nullopt;
+    auto bound = dyn_cast_or_null<IntegerAttr>(params.get(sw.getValue()));
+    if (!bound)
+      return std::nullopt;
+    return PTupleType::get(t.getContext(), t.getElementType(), bound);
+  });
+  replacer.recursivelyReplaceElementsIn(moduleOp, /*replaceAttrs=*/true,
+                                        /*replaceLocs=*/false,
+                                        /*replaceTypes=*/true);
+}
 
 // Walk every ParamOp once and attach `$value` from the module's
 // `wavemeta.params` dict where the name matches. Name-match with
@@ -430,6 +458,7 @@ struct WaveMetaSpecializePass
 
     if (failed(bindParams(moduleOp)))
       return signalPassFailure();
+    substituteParametricWidths(moduleOp);
 
     {
       RewritePatternSet patterns(ctx);
