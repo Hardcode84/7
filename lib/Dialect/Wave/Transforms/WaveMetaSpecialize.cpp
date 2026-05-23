@@ -45,7 +45,8 @@ namespace {
 // the real cause (autotuners feeding `i64` into an `index` param,
 // etc.).
 static LogicalResult bindParams(ModuleOp moduleOp) {
-  auto dict = moduleOp->getAttrOfType<DictionaryAttr>("wavemeta.params");
+  auto dict = moduleOp->getAttrOfType<DictionaryAttr>(
+      WaveMetaDialect::getParamsAttrName());
   if (!dict)
     return success();
   WalkResult result = moduleOp.walk([&](ParamOp op) -> WalkResult {

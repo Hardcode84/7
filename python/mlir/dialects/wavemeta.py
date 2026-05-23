@@ -7,6 +7,11 @@ from collections.abc import Sequence
 from ._wavemeta_ops_gen import *  # noqa: F403
 from ._wavemeta_ops_gen import _Dialect
 
+# Module-level dictionary attribute the specialiser reads to bind
+# `wavemeta.param` ops and to resolve parameter-named ptuple widths.
+# Mirrors `WaveMetaDialect::getParamsAttrName()` on the C++ side.
+PARAMS_ATTR_NAME = "wavemeta.params"
+
 try:
     from ..ir import (
         Block,

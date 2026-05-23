@@ -8,6 +8,8 @@
 
 #include "mlir/Dialect/Wave/IR/Wave.h"
 
+#include "mlir/Dialect/Wave/IR/WaveMeta.h"
+
 #include "mlir/Dialect/Transform/IR/TransformDialect.h"
 #include "mlir/Dialect/Transform/IR/TransformOps.h"
 #include "mlir/Dialect/Transform/Interfaces/TransformInterfaces.h"
@@ -83,7 +85,8 @@ wave::TransformBindParamOp::apply(transform::TransformRewriter &rewriter,
              << valueAttr;
     valueAttr = IntegerAttr::get(resultType, intAttr.getValue().getSExtValue());
   }
-  StringAttr paramsName = builder.getStringAttr("wavemeta.params");
+  StringAttr paramsName =
+      builder.getStringAttr(wavemeta::WaveMetaDialect::getParamsAttrName());
   StringAttr keyAttr = builder.getStringAttr(getAttrName());
   SmallVector<NamedAttribute> entries;
   if (auto existing = mod->getAttrOfType<DictionaryAttr>(paramsName)) {

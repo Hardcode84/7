@@ -31,6 +31,14 @@ def WaveMeta_Dialect : Dialect {
   let useDefaultTypePrinterParser = 1;
   let extraClassDeclaration = [{
     void registerTypes();
+
+    /// Module-level dictionary attribute the specialiser reads to
+    /// bind `wavemeta.param` ops and to resolve parameter-named
+    /// `!wavemeta.ptuple` widths. Keyed by `wavemeta.param` name;
+    /// values are typed attributes matching the param's result type.
+    static constexpr ::llvm::StringLiteral getParamsAttrName() {
+      return "wavemeta.params";
+    }
   }];
 }
 

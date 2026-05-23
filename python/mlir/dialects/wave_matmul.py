@@ -1148,7 +1148,7 @@ def _attach_wavemeta_params(module: Module, cfg: _MatmulConfig) -> None:
         "wave_m_tiles": IntegerAttr.get(index, cfg.wave_m_tiles),
         "wave_n_tiles": IntegerAttr.get(index, cfg.wave_n_tiles),
     }
-    module.operation.attributes["wavemeta.params"] = DictAttr.get(bindings)
+    module.operation.attributes[wavemeta.PARAMS_ATTR_NAME] = DictAttr.get(bindings)
 
 
 __all__ = [
