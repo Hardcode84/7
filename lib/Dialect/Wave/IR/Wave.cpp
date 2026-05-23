@@ -68,6 +68,43 @@ LogicalResult PredAttr::verify(function_ref<InFlightDiagnostic()> emitError,
   return success();
 }
 
+LogicalResult TuneEnumAttr::verify(function_ref<InFlightDiagnostic()> emitError,
+                                   ArrayRef<int64_t> values) {
+  if (values.empty())
+    return emitError() << "tune_enum domain must be non-empty";
+  return success();
+}
+
+LogicalResult
+TuneRangeAttr::verify(function_ref<InFlightDiagnostic()> emitError,
+                      int64_t lower, int64_t upper, int64_t step) {
+  if (step <= 0)
+    return emitError() << "tune_range step must be positive, got " << step;
+  if (upper <= lower)
+    return emitError() << "tune_range upper (" << upper
+                       << ") must be greater than lower (" << lower << ")";
+  return success();
+}
+
+LogicalResult
+TunePow2InAttr::verify(function_ref<InFlightDiagnostic()> emitError,
+                       int64_t lower, int64_t upper) {
+  if (lower <= 0)
+    return emitError() << "tune_pow2_in lower must be positive, got " << lower;
+  if (upper < lower)
+    return emitError() << "tune_pow2_in upper (" << upper
+                       << ") must be >= lower (" << lower << ")";
+  // At least one power of two must fit. The smallest pow2 >= lower is
+  // 2^ceil(log2(lower)); reject if that overshoots `upper`.
+  uint64_t p = 1;
+  while (p < static_cast<uint64_t>(lower))
+    p <<= 1;
+  if (p > static_cast<uint64_t>(upper))
+    return emitError() << "tune_pow2_in domain is empty: no power of two in ["
+                       << lower << ", " << upper << "]";
+  return success();
+}
+
 LogicalResult
 WaveIndexType::verify(function_ref<InFlightDiagnostic()> emitError,
                       int64_t width) {

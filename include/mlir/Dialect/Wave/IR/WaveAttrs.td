@@ -82,4 +82,45 @@ def Wave_PrivateAddressSpaceAttr : Wave_Attr<"PrivateAddressSpace", "private"> {
   let assemblyFormat = "";
 }
 
+//===----------------------------------------------------------------------===//
+// Tune-op variable domains. Each variant describes one variable's
+// enumeration set for `wave.transform.tune`'s Cartesian product.
+//===----------------------------------------------------------------------===//
+
+def Wave_TuneEnumAttr : Wave_Attr<"TuneEnum", "tune_enum"> {
+  let summary = "Explicit enumeration of i64 values";
+  let description = [{
+    Domain expressed as a literal list of integers, e.g.
+    `#wave.tune_enum<[1, 2, 4, 8]>`. Order of the list is the order the
+    tune op explores the variable.
+  }];
+  let parameters = (ins ArrayRefParameter<"int64_t">:$values);
+  let assemblyFormat = "`<` `[` $values `]` `>`";
+  let genVerifyDecl = 1;
+}
+
+def Wave_TuneRangeAttr : Wave_Attr<"TuneRange", "tune_range"> {
+  let summary = "Half-open integer range with positive stride";
+  let description = [{
+    Domain `{lo, lo + step, lo + 2*step, ...}` up to but excluding
+    `hi`. `step` must be positive; `hi > lo` (so the domain is
+    non-empty).
+  }];
+  let parameters = (ins "int64_t":$lower, "int64_t":$upper, "int64_t":$step);
+  let assemblyFormat = "`<` $lower `,` $upper `,` $step `>`";
+  let genVerifyDecl = 1;
+}
+
+def Wave_TunePow2InAttr : Wave_Attr<"TunePow2In", "tune_pow2_in"> {
+  let summary = "Powers of two within a closed range";
+  let description = [{
+    Domain is the set of `2^k` values that fall within `[lower, upper]`
+    inclusive. `lower` and `upper` must be positive and at least one
+    power of two has to fit in the range.
+  }];
+  let parameters = (ins "int64_t":$lower, "int64_t":$upper);
+  let assemblyFormat = "`<` `[` $lower `,` $upper `]` `>`";
+  let genVerifyDecl = 1;
+}
+
 #endif // MLIR_DIALECT_WAVE_IR_WAVEATTRS_TD

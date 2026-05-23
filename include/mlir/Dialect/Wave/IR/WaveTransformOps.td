@@ -13,6 +13,7 @@ include "mlir/Dialect/Transform/IR/TransformDialect.td"
 include "mlir/Dialect/Transform/Interfaces/TransformInterfaces.td"
 include "mlir/Dialect/Wave/IR/WaveBase.td"
 include "mlir/IR/OpBase.td"
+include "mlir/IR/SymbolInterfaces.td"
 include "mlir/Interfaces/SideEffectInterfaces.td"
 
 // Query op: pull a named `IntegerAttr` off each payload op and yield it
@@ -38,6 +39,51 @@ def Wave_TransformGetIntAttrOp
   let assemblyFormat = [{
     $attr_name `from` $target attr-dict
         `:` functional-type($target, $result)
+  }];
+}
+
+// Autotune op. Enumerates the Cartesian product of named tune-var
+// domains, invokes an optional feasibility filter, runs the body
+// sequence on a cloned payload module per surviving trial, scores
+// the result, and replaces the original payload with the winning
+// clone (max score, lower enumeration index breaks ties).
+def Wave_TransformTuneOp : Op<Wave_Dialect, "transform.tune", [
+    DeclareOpInterfaceMethods<MemoryEffectsOpInterface>,
+    DeclareOpInterfaceMethods<TransformOpInterface>,
+    DeclareOpInterfaceMethods<SymbolUserOpInterface>]> {
+  let summary = "Run a compilation sequence over a bounded search space";
+  let description = [{
+    Enumerates `$variables` in deterministic lex order (variable order
+    is the dictionary's key order; per-variable values are explored in
+    domain order). For each config:
+
+      * If `$assumes` is set, invokes that named sequence with the
+        config's i64 values bound to the trailing `!transform.param<i64>`
+        arguments. Silenceable failure -> skip this config without
+        running the body. Definite failure -> propagate.
+      * Otherwise: clones the payload, invokes `$body` on the clone
+        with the config values, then `$score` on the same clone.
+        Records the score.
+
+    Picks the trial with the highest score; on tie, the lower
+    enumeration index wins. Replaces the original payload with the
+    winning clone via the standard transform-state machinery.
+
+    Definite failures: no config is feasible (all skipped by
+    `$assumes`); every trial silenceably failed; `$body` or `$score`
+    returned definite failure.
+  }];
+  let arguments = (ins TransformHandleTypeInterface:$target,
+                       SymbolRefAttr:$body,
+                       SymbolRefAttr:$score,
+                       OptionalAttr<SymbolRefAttr>:$assumes,
+                       DictionaryAttr:$variables);
+  let results = (outs TransformHandleTypeInterface:$winner,
+                      TransformParamTypeInterface:$best_score);
+  let assemblyFormat = [{
+    $target `body` `=` $body `score` `=` $score
+        (`assumes` `=` $assumes^)? attr-dict
+        `:` functional-type(operands, results)
   }];
 }
 
