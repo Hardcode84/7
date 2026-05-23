@@ -85,3 +85,66 @@ module attributes {transform.with_named_sequence} {
     transform.yield
   }
 }
+
+// -----
+
+// `as` clause re-types the IntegerAttr value. The transform param is
+// always `i64`; kernels with `wavemeta.param "tile" : index` want
+// `index` in the dict.
+
+// CHECK-LABEL: module
+// CHECK-SAME: wavemeta.params = {tile = 32 : index}
+module attributes {transform.with_named_sequence} {
+  func.func @sink() {
+    return
+  }
+
+  transform.named_sequence @__transform_main(
+      %root: !transform.any_op {transform.readonly}) {
+    %v = transform.param.constant 32 : i64 -> !transform.param<i64>
+    wave.transform.bind_param %root "tile" = %v as index
+        : (!transform.any_op, !transform.param<i64>) -> ()
+    transform.yield
+  }
+}
+
+// -----
+
+// `as i32` truncates to a narrower integer type. Same write path,
+// different stored type.
+
+// CHECK-LABEL: module
+// CHECK-SAME: wavemeta.params = {n = 7 : i32}
+module attributes {transform.with_named_sequence} {
+  func.func @sink() {
+    return
+  }
+
+  transform.named_sequence @__transform_main(
+      %root: !transform.any_op {transform.readonly}) {
+    %v = transform.param.constant 7 : i64 -> !transform.param<i64>
+    wave.transform.bind_param %root "n" = %v as i32
+        : (!transform.any_op, !transform.param<i64>) -> ()
+    transform.yield
+  }
+}
+
+// -----
+
+// Negative: `as` clause with a non-integer/index type is a definite
+// failure.
+
+module attributes {transform.with_named_sequence} {
+  func.func @sink() {
+    return
+  }
+
+  transform.named_sequence @__transform_main(
+      %root: !transform.any_op {transform.readonly}) {
+    %v = transform.param.constant 1 : i64 -> !transform.param<i64>
+    // expected-error @below {{`as` clause requires an integer or index type}}
+    wave.transform.bind_param %root "x" = %v as f32
+        : (!transform.any_op, !transform.param<i64>) -> ()
+    transform.yield
+  }
+}

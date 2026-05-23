@@ -99,17 +99,29 @@ def Wave_TransformBindParamOp
   let description = [{
     Sets `wavemeta.params[$attr_name] = $value` on the target builtin
     module, creating the dict if absent and replacing any pre-existing
-    same-name entry. Definite failure if the target is not a
-    `builtin.module` op, the handle resolves to anything other than
-    one op, or the value param holds anything other than one
-    attribute.
+    same-name entry.
+
+    `$value` is a `!transform.param` whose payload must be exactly one
+    attribute. By default the attribute is stored as-is. When the
+    optional `as` clause is set, the value must be an `IntegerAttr`
+    and is re-typed to `$result_type` (which must be an integer or
+    index type); this is the standard escape hatch for autotuning
+    loops feeding `!transform.param<i64>` values into kernels whose
+    `wavemeta.param` ops carry `index` or narrower integer types.
+
+    Definite failure if the target is not a `builtin.module` op, the
+    handle resolves to anything other than one op, the value param
+    holds anything other than one attribute, the `as` clause was
+    requested but the value is not an `IntegerAttr`, or `$result_type`
+    is neither an integer nor an index type.
   }];
   let arguments = (ins TransformHandleTypeInterface:$target,
                        StrAttr:$attr_name,
-                       TransformParamTypeInterface:$value);
+                       TransformParamTypeInterface:$value,
+                       OptionalAttr<TypeAttr>:$result_type);
   let results = (outs);
   let assemblyFormat = [{
-    $target $attr_name `=` $value attr-dict
+    $target $attr_name `=` $value (`as` $result_type^)? attr-dict
         `:` functional-type(operands, results)
   }];
 }

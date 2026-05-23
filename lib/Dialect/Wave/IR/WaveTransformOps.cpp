@@ -69,6 +69,20 @@ wave::TransformBindParamOp::apply(transform::TransformRewriter &rewriter,
            << values.size();
 
   Builder builder(mod.getContext());
+  Attribute valueAttr = values.front();
+  if (TypeAttr resultTypeAttr = getResultTypeAttr()) {
+    Type resultType = resultTypeAttr.getValue();
+    if (!resultType.isIntOrIndex())
+      return emitDefiniteFailure()
+             << "`as` clause requires an integer or index type, got "
+             << resultType;
+    auto intAttr = dyn_cast<IntegerAttr>(valueAttr);
+    if (!intAttr)
+      return emitDefiniteFailure()
+             << "`as` clause requires the value to be an IntegerAttr, got "
+             << valueAttr;
+    valueAttr = IntegerAttr::get(resultType, intAttr.getValue().getSExtValue());
+  }
   StringAttr paramsName = builder.getStringAttr("wavemeta.params");
   StringAttr keyAttr = builder.getStringAttr(getAttrName());
   SmallVector<NamedAttribute> entries;
@@ -78,7 +92,7 @@ wave::TransformBindParamOp::apply(transform::TransformRewriter &rewriter,
         entries.push_back(na);
     }
   }
-  entries.emplace_back(keyAttr, values.front());
+  entries.emplace_back(keyAttr, valueAttr);
   mod->setAttr(paramsName, builder.getDictionaryAttr(entries));
   return DiagnosedSilenceableFailure::success();
 }
