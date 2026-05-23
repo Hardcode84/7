@@ -14,15 +14,15 @@
 from mlir.dialects.wave_matmul import build_wmma_f16_matmul_module
 from mlir.ir import Module, UnitAttr
 
-MAX_K_TILES = 2
+MAX_K_TILES = 8
 
 module = build_wmma_f16_matmul_module(
-    M=32,
-    N=32,
-    K=32,
+    M=16,
+    N=16,
+    K=128,
     wave_k_tiles=MAX_K_TILES,
-    BM=2,
-    BN=2,
+    BM=1,
+    BN=1,
     matrix_intrinsic="wmma",
     skip_specialize=True,
 )
@@ -47,7 +47,7 @@ module attributes {transform.with_named_sequence} {
     %m6 = transform.apply_registered_pass "waveamd-insert-hazard-waits" to %m5
         : (!transform.any_op) -> !transform.any_op
     %m7 = transform.apply_registered_pass "waveamd-reg-alloc" with
-        options = { "mark-overflow" = true, "vgpr-limit" = 96 }
+        options = { "mark-overflow" = true }
         to %m6 : (!transform.any_op) -> !transform.any_op
     %overflowed = wave.transform.get_int_attr
         "waveamdmachine.regalloc_overflowed_count" from %m7
@@ -73,7 +73,7 @@ module attributes {transform.with_named_sequence} {
   transform.named_sequence @__transform_main(
       %root: !transform.any_op {transform.consumed}) {
     %w, %s = wave.transform.tune %root body = @body score = @score {
-      variables = {wave_k_tiles = #wave.tune_enum<[1, 2]>}
+      variables = {wave_k_tiles = #wave.tune_enum<[1, 2, 4, 8]>}
     } : (!transform.any_op) -> (!transform.any_op, !transform.param<i64>)
     transform.yield
   }
@@ -93,10 +93,11 @@ with module.context:
 
 print(module)
 
-# Both `wave_k_tiles = 1` and `wave_k_tiles = 2` compile to the same
-# `vgpr_count_max = 88` on this fixture (the software-pipeline body
-# dominates VGPR pressure; the K-unroll's MMA count rides on the
-# same accumulator), so tune picks the lower-index trial.
+# With the builder packing A/B frags into nested parametric ptuple
+# iter-args (`ptuple<ptuple<af, M>, "wave_k_tiles">`), the K-loop
+# iter-arg width scales with the bound `wave_k_tiles`. On gfx1100
+# (256 VGPRs / wave): K = 1, 2, 4 fit at 192, 208, 240 VGPRs; K = 8
+# overflows. Tune silenceably skips the overflow, picks K = 4.
 # CHECK-LABEL: module
-# CHECK-SAME: waveamdmachine.vgpr_count_max = 88 : i64
-# CHECK-SAME: wavemeta.params = {wave_k_tiles = 1 : index
+# CHECK-SAME: waveamdmachine.vgpr_count_max = 240 : i64
+# CHECK-SAME: wavemeta.params = {wave_k_tiles = 4 : index

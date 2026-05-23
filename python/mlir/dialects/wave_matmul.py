@@ -61,6 +61,7 @@ from mlir.ir import (
     IntegerAttr,
     IntegerType,
     Module,
+    StringAttr,
 )
 
 
@@ -745,27 +746,34 @@ def _initial_loop_args(
     b0 = ptrs.b_dma0 if cfg.use_dma_lds else ptrs.b0
     a_frags, b_frags = _load_fragment_group(bld, cfg, a0, b0, types, staging)
     init_accs = tuple(init_acc for _ in range(cfg.tiles_per_wave))
+    wave_k = bld.static_param("wave_k_tiles", IndexType.get())
+    a_pt = _pack_frags_into_nested_parametric_ptuple(
+        bld, a_frags, cfg.wave_m_tiles, cfg.wave_k_tiles, wave_k
+    )
+    b_pt = _pack_frags_into_nested_parametric_ptuple(
+        bld, b_frags, cfg.wave_n_tiles, cfg.wave_k_tiles, wave_k
+    )
     return (
         *init_accs,
-        *a_frags,
-        *b_frags,
+        a_pt,
+        b_pt,
         *_advance_ptrs(bld, a0, a_step_offset),
         *_advance_ptrs(bld, b0, b_step_offset),
     )
 
 
 def _split_loop_state(values: tuple[dsl.Value, ...], cfg: _MatmulConfig) -> _LoopState:
+    """Iter-args layout: `tiles_per_wave` acc scalars, then ONE nested
+    parametric ptuple slot per side (A then B), then variadic ptrs.
+    """
     acc_end = cfg.tiles_per_wave
-    a_count = cfg.wave_k_tiles * cfg.wave_m_tiles
-    b_count = cfg.wave_k_tiles * cfg.wave_n_tiles
-    a_frag_end = acc_end + a_count
-    b_frag_end = a_frag_end + b_count
-    a_ptr_end = b_frag_end + a_count
+    a_ptr_start = acc_end + 2
+    a_ptr_end = a_ptr_start + cfg.wave_k_tiles * cfg.wave_m_tiles
     return _LoopState(
         accs=values[:acc_end],
-        afs=values[acc_end:a_frag_end],
-        bfs=values[a_frag_end:b_frag_end],
-        aps=values[b_frag_end:a_ptr_end],
+        afs=(values[acc_end],),
+        bfs=(values[acc_end + 1],),
+        aps=values[a_ptr_start:a_ptr_end],
         bps=values[a_ptr_end:],
     )
 
@@ -773,6 +781,49 @@ def _split_loop_state(values: tuple[dsl.Value, ...], cfg: _MatmulConfig) -> _Loo
 def _ptuple_type(element_type: dsl.Type, count: int) -> dsl.Type:
     i64 = IntegerType.get_signless(64)
     return PTupleType.get(element_type, IntegerAttr.get(i64, count))
+
+
+def _param_ptuple_type(element_type: dsl.Type, name: str) -> dsl.Type:
+    return PTupleType.get(element_type, StringAttr.get(name))
+
+
+def _pack_frags_into_nested_parametric_ptuple(
+    bld: dsl.FunctionBuilder,
+    frags: tuple[dsl.Value, ...],
+    rows: int,
+    cols: int,
+    k_param: dsl.Value,
+    width_name: str = "wave_k_tiles",
+) -> dsl.Value:
+    """Wrap a `rows * cols` flat frag list (laid out as `k * rows + i`)
+    into a single nested parametric ptuple
+    `ptuple<ptuple<af, rows>, $width_name>`. Outer width is parametric
+    in `wave_k_tiles`, inner stays concrete -- so `bind_param
+    wave_k_tiles` shrinks the K dimension while M stays at its
+    build-time count.
+    """
+    if cols == 0:
+        raise ValueError("need at least one K-tile worth of frags")
+    element_type = frags[0].type
+    index = IndexType.get()
+    inner_pt_type = _ptuple_type(element_type, rows)
+    inners: list[dsl.Value] = []
+    for k in range(cols):
+        row = list(frags[k * rows : (k + 1) * rows])
+        inners.append(wavemeta.TupleMakeOp(inner_pt_type, row).result)
+    max_outer_pt_type = _ptuple_type(inner_pt_type, cols)
+    max_outer = wavemeta.TupleMakeOp(max_outer_pt_type, inners).result
+    param_pt_type = _param_ptuple_type(inner_pt_type, width_name)
+    init = wavemeta.TupleMakeBroadcastOp(param_pt_type, inners[0]).result
+    c0 = bld.constant(index, 0)
+    c1 = bld.constant(index, 1)
+    with bld.static_for(c0, k_param, c1, init_args=[init]) as loop:
+        k_iv = loop.induction_variable
+        (acc,) = loop.inner_iter_args
+        inner = wavemeta.TupleGetOp(inner_pt_type, max_outer, k_iv).result
+        new = wavemeta.TupleSetOp(param_pt_type, acc, k_iv, inner).result
+        wavemeta.YieldOp([new])
+    return loop.results[0]
 
 
 def _flat_extract(
@@ -808,19 +859,15 @@ def _emit_mma_grid(
         return ()
 
     acc_type = accs[0].type
-    af_type = afs[0].type if afs else acc_type
-    bf_type = bfs[0].type if bfs else acc_type
+    a_outer_type = PTupleType(afs[0].type)
+    b_outer_type = PTupleType(bfs[0].type)
+    a_row_type = a_outer_type.element_type
+    b_row_type = b_outer_type.element_type
+    af_type = PTupleType(a_row_type).element_type
+    bf_type = PTupleType(b_row_type).element_type
 
     acc_count = cfg.tiles_per_wave
-    af_count = cfg.wave_k_tiles * cfg.wave_m_tiles
-    bf_count = cfg.wave_k_tiles * cfg.wave_n_tiles
-
     acc_pt_type = _ptuple_type(acc_type, acc_count)
-    af_pt_type = _ptuple_type(af_type, af_count)
-    bf_pt_type = _ptuple_type(bf_type, bf_count)
-
-    afs_t = wavemeta.TupleMakeOp(af_pt_type, list(afs)).result
-    bfs_t = wavemeta.TupleMakeOp(bf_pt_type, list(bfs)).result
     accs_t = wavemeta.TupleMakeOp(acc_pt_type, list(accs)).result
 
     index = IndexType.get()
@@ -831,22 +878,22 @@ def _emit_mma_grid(
     wave_n = bld.static_param("wave_n_tiles", index)
 
     with bld.static_for(c0, wave_k, c1, init_args=[accs_t]) as outer:
-        k = dsl.idx(outer.induction_variable)
+        k_iv = outer.induction_variable
         (accs_k,) = outer.inner_iter_args
+        a_row = wavemeta.TupleGetOp(a_row_type, afs[0], k_iv).result
+        b_row = wavemeta.TupleGetOp(b_row_type, bfs[0], k_iv).result
         with bld.static_for(c0, wave_m, c1, init_args=[accs_k]) as mid:
-            i = dsl.idx(mid.induction_variable)
+            i_iv = mid.induction_variable
             (accs_ki,) = mid.inner_iter_args
+            af = wavemeta.TupleGetOp(af_type, a_row, i_iv).result
             with bld.static_for(c0, wave_n, c1, init_args=[accs_ki]) as inner:
-                j = dsl.idx(inner.induction_variable)
+                j_iv = inner.induction_variable
                 (accs_kij,) = inner.inner_iter_args
-
-                wm, wn = dsl.idx(wave_m), dsl.idx(wave_n)
-                a_idx = (k * wm + i).v
-                b_idx = (k * wn + j).v
+                wn = dsl.idx(wave_n)
+                i = dsl.idx(i_iv)
+                j = dsl.idx(j_iv)
                 acc_idx = (i * wn + j).v
-
-                af = wavemeta.TupleGetOp(af_type, afs_t, a_idx).result
-                bf = wavemeta.TupleGetOp(bf_type, bfs_t, b_idx).result
+                bf = wavemeta.TupleGetOp(bf_type, b_row, j_iv).result
                 acc_old = wavemeta.TupleGetOp(acc_type, accs_kij, acc_idx).result
                 acc_new = bld.mma(cfg.mma.kind, af, bf, acc_old)
                 accs_kij_new = wavemeta.TupleSetOp(
@@ -872,10 +919,17 @@ def _emit_pipelined_step(
     new_afs, new_bfs = _load_fragment_group(
         bld, cfg, state.aps, state.bps, types, staging
     )
+    wave_k = bld.static_param("wave_k_tiles", IndexType.get())
+    a_pt = _pack_frags_into_nested_parametric_ptuple(
+        bld, new_afs, cfg.wave_m_tiles, cfg.wave_k_tiles, wave_k
+    )
+    b_pt = _pack_frags_into_nested_parametric_ptuple(
+        bld, new_bfs, cfg.wave_n_tiles, cfg.wave_k_tiles, wave_k
+    )
     return [
         *new_accs,
-        *new_afs,
-        *new_bfs,
+        a_pt,
+        b_pt,
         *_advance_ptrs(bld, state.aps, a_step_offset),
         *_advance_ptrs(bld, state.bps, b_step_offset),
     ]
