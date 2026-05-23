@@ -41,4 +41,31 @@ def Wave_TransformGetIntAttrOp
   }];
 }
 
+// Write op: patch one entry of the target module's `wavemeta.params`
+// dictionary attribute. Tune sequences use this to push per-trial
+// variable bindings into a cloned module before invoking the
+// specialiser.
+def Wave_TransformBindParamOp
+    : Op<Wave_Dialect, "transform.bind_param", [
+        DeclareOpInterfaceMethods<MemoryEffectsOpInterface>,
+        DeclareOpInterfaceMethods<TransformOpInterface>]> {
+  let summary = "Patch one entry of the target module's wavemeta.params dict";
+  let description = [{
+    Sets `wavemeta.params[$attr_name] = $value` on the target builtin
+    module, creating the dict if absent and replacing any pre-existing
+    same-name entry. Definite failure if the target is not a
+    `builtin.module` op, the handle resolves to anything other than
+    one op, or the value param holds anything other than one
+    attribute.
+  }];
+  let arguments = (ins TransformHandleTypeInterface:$target,
+                       StrAttr:$attr_name,
+                       TransformParamTypeInterface:$value);
+  let results = (outs);
+  let assemblyFormat = [{
+    $target $attr_name `=` $value attr-dict
+        `:` functional-type(operands, results)
+  }];
+}
+
 #endif // MLIR_DIALECT_WAVE_IR_WAVETRANSFORMOPS_TD
