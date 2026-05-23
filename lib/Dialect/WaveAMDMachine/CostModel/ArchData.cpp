@@ -1,0 +1,121 @@
+//===- ArchData.cpp - Per-arch structural parameters ----------------------===//
+//
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+//
+//===----------------------------------------------------------------------===//
+
+#include "mlir/Dialect/WaveAMDMachine/CostModel/ArchData.h"
+
+#include "llvm/ADT/Twine.h"
+#include "llvm/Support/ErrorHandling.h"
+
+namespace mlir::waveamdmachine {
+
+// CDNA3 / MI300. FeatureGFX90AInsts ->
+// LLVM AMDGPUBaseInfo.cpp:1265 getMaxWavesPerEU=8,
+// :1394 getVGPRAllocGranule=8, :1431 getTotalNumVGPRs=512.
+// Wave64 native unit; 4-cycle SIMD16 issue period.
+static constexpr ArchData kGfx942{
+    /*name=*/"gfx942",
+    /*wavesPerSIMD=*/8,
+    /*simdsPerCU=*/4,
+    /*vgprFileSize=*/512,
+    /*vgprAllocGranule=*/8,
+    /*valuPipelineDepth=*/4,
+    /*wave64IssueMultiplier=*/1,
+    /*issuesPerCUPerCycle=*/5,
+    /*simdIssuePeriod=*/4,
+};
+
+// CDNA4 / MI350. Shares the gfx9_4 feature shape with gfx942 on
+// every dimension this table tracks.
+static constexpr ArchData kGfx950{
+    /*name=*/"gfx950",
+    /*wavesPerSIMD=*/8,
+    /*simdsPerCU=*/4,
+    /*vgprFileSize=*/512,
+    /*vgprAllocGranule=*/8,
+    /*valuPipelineDepth=*/4,
+    /*wave64IssueMultiplier=*/1,
+    /*issuesPerCUPerCycle=*/5,
+    /*simdIssuePeriod=*/4,
+};
+
+// RDNA3 Navi31 (RX 7900 series). FeatureGFX10_3Insts +
+// Feature1536VGPRs -> getMaxWavesPerEU=16, wave32 granule=24,
+// wave32 file=1536. SIMD32 single-cycle issue, wave64 = 2x wave32.
+static constexpr ArchData kGfx1100{
+    /*name=*/"gfx1100",
+    /*wavesPerSIMD=*/16,
+    /*simdsPerCU=*/2,
+    /*vgprFileSize=*/1536,
+    /*vgprAllocGranule=*/24,
+    /*valuPipelineDepth=*/5,
+    /*wave64IssueMultiplier=*/2,
+    /*issuesPerCUPerCycle=*/5,
+    /*simdIssuePeriod=*/1,
+};
+
+// RDNA4. FeatureISAVersion12 carries Feature1536VGPRs by default
+// (AMDGPU.td:2048). Matches gfx1100 on the structural dimensions.
+static constexpr ArchData kGfx1200{
+    /*name=*/"gfx1200",
+    /*wavesPerSIMD=*/16,
+    /*simdsPerCU=*/2,
+    /*vgprFileSize=*/1536,
+    /*vgprAllocGranule=*/24,
+    /*valuPipelineDepth=*/5,
+    /*wave64IssueMultiplier=*/2,
+    /*issuesPerCUPerCycle=*/5,
+    /*simdIssuePeriod=*/1,
+};
+
+// Compile-time invariants. Anything failing here means a typo in
+// the table above slipped past review.
+template <const ArchData &A> static constexpr bool sane() {
+  static_assert(A.wavesPerSIMD > 0 && A.wavesPerSIMD <= 32,
+                "wavesPerSIMD out of range");
+  static_assert(A.simdsPerCU == 2 || A.simdsPerCU == 4,
+                "simdsPerCU is 2 (RDNA) or 4 (CDNA)");
+  static_assert(A.vgprFileSize >= 256 && A.vgprFileSize <= 2048,
+                "vgprFileSize out of range");
+  static_assert(A.vgprAllocGranule > 0 &&
+                    A.vgprFileSize % A.vgprAllocGranule == 0,
+                "granule must divide file size");
+  static_assert(A.valuPipelineDepth >= 1 && A.valuPipelineDepth <= 8,
+                "valuPipelineDepth out of range");
+  static_assert(A.wave64IssueMultiplier == 1 || A.wave64IssueMultiplier == 2,
+                "wave64IssueMultiplier is 1 (CDNA) or 2 (RDNA)");
+  static_assert(A.issuesPerCUPerCycle >= 1 && A.issuesPerCUPerCycle <= 8,
+                "issuesPerCUPerCycle out of range");
+  static_assert(A.simdIssuePeriod == 1 || A.simdIssuePeriod == 4,
+                "simdIssuePeriod is 1 (RDNA) or 4 (CDNA wave64)");
+  return true;
+}
+
+static_assert(sane<kGfx942>());
+static_assert(sane<kGfx950>());
+static_assert(sane<kGfx1100>());
+static_assert(sane<kGfx1200>());
+
+bool isArchSupported(llvm::StringRef gfxName) {
+  return gfxName == "gfx942" || gfxName == "gfx950" || gfxName == "gfx1100" ||
+         gfxName == "gfx1200";
+}
+
+const ArchData &getArchData(llvm::StringRef gfxName) {
+  if (gfxName == "gfx942")
+    return kGfx942;
+  if (gfxName == "gfx950")
+    return kGfx950;
+  if (gfxName == "gfx1100")
+    return kGfx1100;
+  if (gfxName == "gfx1200")
+    return kGfx1200;
+  llvm::report_fatal_error(llvm::Twine("ArchData: unsupported arch '") +
+                           gfxName + "'");
+}
+
+} // namespace mlir::waveamdmachine
