@@ -40,26 +40,33 @@ namespace {
 //===----------------------------------------------------------------------===//
 
 // Walk every ParamOp once and attach `$value` from the module's
-// `wavemeta.params` dict where the name matches and the typed attr's
-// type agrees with the result. Mismatches are silently skipped so the
-// residual phase can speak with one voice.
-static void bindParams(ModuleOp moduleOp) {
+// `wavemeta.params` dict where the name matches. Name-match with
+// type-mismatch is an error -- bare "no binding" silenceably hides
+// the real cause (autotuners feeding `i64` into an `index` param,
+// etc.).
+static LogicalResult bindParams(ModuleOp moduleOp) {
   auto dict = moduleOp->getAttrOfType<DictionaryAttr>("wavemeta.params");
   if (!dict)
-    return;
-  moduleOp.walk([&](ParamOp op) {
+    return success();
+  WalkResult result = moduleOp.walk([&](ParamOp op) -> WalkResult {
     if (op.getValueAttr())
-      return;
+      return WalkResult::advance();
     Attribute bound = dict.get(op.getName());
     if (!bound)
-      return;
+      return WalkResult::advance();
     auto typed = dyn_cast<TypedAttr>(bound);
     if (!typed)
-      return;
+      return op.emitOpError()
+             << "wavemeta.params['" << op.getName()
+             << "'] is not a typed attribute (got " << bound << ")";
     if (typed.getType() != op.getResult().getType())
-      return;
+      return op.emitOpError()
+             << "wavemeta.params['" << op.getName() << "'] has type "
+             << typed.getType() << ", expected " << op.getResult().getType();
     op.setValueAttr(typed);
+    return WalkResult::advance();
   });
+  return failure(result.wasInterrupted());
 }
 
 //===----------------------------------------------------------------------===//
@@ -420,7 +427,8 @@ struct WaveMetaSpecializePass
     ModuleOp moduleOp = getOperation();
     MLIRContext *ctx = &getContext();
 
-    bindParams(moduleOp);
+    if (failed(bindParams(moduleOp)))
+      return signalPassFailure();
 
     {
       RewritePatternSet patterns(ctx);

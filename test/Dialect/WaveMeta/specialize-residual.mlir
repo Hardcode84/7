@@ -60,3 +60,18 @@ func.func @parametric_broadcast(%init: i32) -> !wavemeta.ptuple<i32, "n"> {
   %t = wavemeta.tuple_make_broadcast %init : i32 -> !wavemeta.ptuple<i32, "n">
   return %t : !wavemeta.ptuple<i32, "n">
 }
+
+// -----
+
+// Name matches but the bound attribute's type doesn't match the
+// ParamOp's result type. Used to be silently dropped, leading to a
+// confusing "no binding" downstream. Now flagged with the actual
+// type mismatch so autotuners feeding `i64` into an `index` param
+// see the real cause.
+module attributes {wavemeta.params = {tile = 4 : i64}} {
+  func.func @type_mismatch() -> index {
+    // expected-error@+1 {{wavemeta.params['tile'] has type 'i64', expected 'index'}}
+    %v = wavemeta.param "tile" : index
+    return %v : index
+  }
+}
