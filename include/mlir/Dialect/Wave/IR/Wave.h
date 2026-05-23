@@ -10,6 +10,8 @@
 #define MLIR_DIALECT_WAVE_IR_WAVE_H_
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/Transform/IR/TransformDialect.h"
+#include "mlir/Dialect/Transform/Interfaces/TransformInterfaces.h"
 #include "mlir/Dialect/Wave/IR/WaveSymbols.h"
 #include "mlir/IR/Dialect.h"
 #include "mlir/IR/OpDefinition.h"
@@ -29,5 +31,8 @@
 
 #define GET_OP_CLASSES
 #include "mlir/Dialect/Wave/IR/WaveOps.h.inc"
+
+#define GET_OP_CLASSES
+#include "mlir/Dialect/Wave/IR/WaveTransformOps.h.inc"
 
 #endif // MLIR_DIALECT_WAVE_IR_WAVE_H_

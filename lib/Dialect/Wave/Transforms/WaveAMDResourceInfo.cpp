@@ -93,27 +93,50 @@ struct WaveAMDResourceInfoPass
   }
 
   void runOnOperation() override {
-    OpBuilder builder(getOperation().getContext());
+    ModuleOp mod = getOperation();
+    OpBuilder builder(mod.getContext());
     SmallVector<func::FuncOp> kernels;
-    getOperation().walk([&](func::FuncOp f) {
+    mod.walk([&](func::FuncOp f) {
       if (!f.isExternal())
         kernels.push_back(f);
     });
+    int64_t maxSgpr = 0;
+    int64_t maxVgpr = 0;
+    int64_t maxLds = 0;
+    bool sawKernel = false;
     for (func::FuncOp func : kernels) {
       bool failed = false;
       MaxRegs regs = collectMaxRegs(func, failed);
       if (failed)
         return signalPassFailure();
-      unsigned sgprBaseline =
-          func->hasAttr(wave::WaveDialect::getKernelAttrName()) ? 6u : 1u;
-      func->setAttr(
-          "waveamdmachine.sgpr_count",
-          builder.getI64IntegerAttr(std::max(regs.sgpr, sgprBaseline)));
+      bool isKernel = func->hasAttr(wave::WaveDialect::getKernelAttrName());
+      unsigned sgprBaseline = isKernel ? 6u : 1u;
+      unsigned sgprCount = std::max(regs.sgpr, sgprBaseline);
+      unsigned vgprCount = std::max(regs.vgpr, 1u);
+      func->setAttr("waveamdmachine.sgpr_count",
+                    builder.getI64IntegerAttr(sgprCount));
       func->setAttr("waveamdmachine.vgpr_count",
-                    builder.getI64IntegerAttr(std::max(regs.vgpr, 1u)));
-      if (auto ldsAttr = func->getAttrOfType<IntegerAttr>("wave.lds_size"))
+                    builder.getI64IntegerAttr(vgprCount));
+      int64_t lds = 0;
+      if (auto ldsAttr = func->getAttrOfType<IntegerAttr>("wave.lds_size")) {
+        lds = ldsAttr.getInt();
         func->setAttr("waveamdmachine.lds_size",
-                      builder.getI64IntegerAttr(ldsAttr.getInt()));
+                      builder.getI64IntegerAttr(lds));
+      }
+      if (!isKernel)
+        continue;
+      sawKernel = true;
+      maxSgpr = std::max<int64_t>(maxSgpr, sgprCount);
+      maxVgpr = std::max<int64_t>(maxVgpr, vgprCount);
+      maxLds = std::max<int64_t>(maxLds, lds);
+    }
+    if (sawKernel) {
+      mod->setAttr("waveamdmachine.sgpr_count_max",
+                   builder.getI64IntegerAttr(maxSgpr));
+      mod->setAttr("waveamdmachine.vgpr_count_max",
+                   builder.getI64IntegerAttr(maxVgpr));
+      mod->setAttr("waveamdmachine.lds_size_max",
+                   builder.getI64IntegerAttr(maxLds));
     }
   }
 };

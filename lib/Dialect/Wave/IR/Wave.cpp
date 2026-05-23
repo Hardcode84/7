@@ -33,6 +33,9 @@ void WaveDialect::initialize() {
   addOperations<
 #define GET_OP_LIST
 #include "mlir/Dialect/Wave/IR/WaveOps.cpp.inc"
+      ,
+#define GET_OP_LIST
+#include "mlir/Dialect/Wave/IR/WaveTransformOps.cpp.inc"
       >();
   // The actual interface implementation lives in MLIRWaveToLLVM and is
   // attached lazily via `registerConvertWaveToLLVMInterface`. Promising it

@@ -2,6 +2,7 @@ add_mlir_dialect_library(MLIRWaveDialect
   PARTIAL_SOURCES_INTENDED
   Wave.cpp
   WaveSymbols.cpp
+  WaveTransformOps.cpp
 
   ADDITIONAL_HEADER_DIRS
   ${MLIR_MAIN_INCLUDE_DIR}/mlir/Dialect/Wave
@@ -9,6 +10,7 @@ add_mlir_dialect_library(MLIRWaveDialect
   DEPENDS
   MLIRWaveAttributesIncGen
   MLIRWaveOpsIncGen
+  MLIRWaveTransformOpsIncGen
 
   LINK_LIBS PUBLIC
   MLIRArithDialect
@@ -18,6 +20,8 @@ add_mlir_dialect_library(MLIRWaveDialect
   MLIRIR
   MLIRSCFDialect
   MLIRSideEffectInterfaces
+  MLIRTransformDialect
+  MLIRTransformDialectInterfaces
   WaveIXSimpl
   )
 

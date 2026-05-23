@@ -13,7 +13,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // SELECT: waveamdmachine.wmma_i32_16x16x16_iu8{{.*}} : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 8>) -> !waveamdmachine.reg<vgpr, 8>
 // SELECT: waveamdmachine.global_store_tuple_b32
 
-// PIPELINE: module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"}
+// PIPELINE: module attributes {{{.*}}waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"{{.*}}}
 // PIPELINE-LABEL: func.func @matrix_kernel
 // PIPELINE-SAME: waveamdmachine.metadata
 // PIPELINE-SAME: waveamdmachine.vgpr_count

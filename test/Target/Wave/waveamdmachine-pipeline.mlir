@@ -57,7 +57,7 @@ func.func @where_test(%limit: i32) -> i32 {
 // RESOURCE-LABEL: func.func @kernel_test
 // RESOURCE-SAME: waveamdmachine.sgpr_count = 8 : i64
 // RESOURCE-SAME: waveamdmachine.vgpr_count = 4 : i64
-// METADATA: module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"}
+// METADATA: module attributes {{{.*}}waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"{{.*}}}
 // METADATA-LABEL: func.func @kernel_test
 // METADATA-SAME: waveamdmachine.metadata
 func.func @kernel_test(%out: !wave.ptr<i32, #wave.global>, %x: i32) attributes {wave.kernel} {
