@@ -77,8 +77,33 @@ def WaveAMDTicketWaits
 def WaveAMDRegAlloc
     : Pass<"waveamd-reg-alloc", "ModuleOp"> {
   let summary = "Allocate WaveAMDMachine virtual registers to physical registers";
+  let description = [{
+    Linear-scan VGPR/SGPR allocator over WaveAMDMachine IR. In the
+    default mode (`mark-overflow=false`), running out of physical
+    registers fails the pass. In `mark-overflow=true` (used by the
+    autotuning loop) the pass instead annotates the offending func
+    with `waveamdmachine.regalloc_overflowed = i64 1`, leaves the
+    remaining intervals unallocated (so downstream passes will
+    misbehave if they don't skip overflowed funcs), and -- once the
+    module has been walked -- stamps a module-level
+    `waveamdmachine.regalloc_overflowed_count = i64 N` summarising
+    how many kernels overflowed.
+
+    `vgpr-limit` / `sgpr-limit` override the per-class budget below
+    the subtarget default; -1 keeps the target's number. Test-only
+    knob (and a foot-gun in production: shrinking below what the
+    pipeline needs guarantees overflow).
+  }];
   let dependentDialects = [
     "waveamdmachine::WaveAMDMachineDialect"
+  ];
+  let options = [
+    Option<"markOverflow", "mark-overflow", "bool", /*default=*/"false",
+           "Annotate overflowed funcs instead of failing the pass.">,
+    Option<"vgprLimitOverride", "vgpr-limit", "int", /*default=*/"-1",
+           "Cap VGPRs below the subtarget default; -1 means no cap.">,
+    Option<"sgprLimitOverride", "sgpr-limit", "int", /*default=*/"-1",
+           "Cap SGPRs below the subtarget default; -1 means no cap.">,
   ];
 }
 

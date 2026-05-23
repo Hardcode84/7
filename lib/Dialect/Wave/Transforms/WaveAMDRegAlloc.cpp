@@ -136,19 +136,38 @@ static FailureOr<RegisterLimits> getRegisterLimits(ModuleOp module) {
 
 struct WaveAMDRegAllocPass
     : public wave::impl::WaveAMDRegAllocBase<WaveAMDRegAllocPass> {
+  using WaveAMDRegAllocBase::WaveAMDRegAllocBase;
+
   void runOnOperation() override {
     FailureOr<RegisterLimits> limits = getRegisterLimits(getOperation());
     if (failed(limits))
       return signalPassFailure();
+    if (vgprLimitOverride >= 0)
+      limits->numVGPR =
+          std::min(limits->numVGPR, static_cast<unsigned>(vgprLimitOverride));
+    if (sgprLimitOverride >= 0)
+      limits->numSGPR =
+          std::min(limits->numSGPR, static_cast<unsigned>(sgprLimitOverride));
     SmallVector<func::FuncOp> kernels;
     getOperation().walk([&](func::FuncOp f) {
       if (!f.isExternal())
         kernels.push_back(f);
     });
+    Builder builder(&getContext());
+    int64_t overflowedCount = 0;
     for (func::FuncOp func : kernels) {
-      if (failed(allocateFunction(func, *limits)))
+      bool overflow = false;
+      if (failed(allocateFunction(func, *limits, markOverflow, overflow)))
         return signalPassFailure();
+      if (overflow) {
+        func->setAttr("waveamdmachine.regalloc_overflowed",
+                      builder.getI64IntegerAttr(1));
+        ++overflowedCount;
+      }
     }
+    if (markOverflow && overflowedCount > 0)
+      getOperation()->setAttr("waveamdmachine.regalloc_overflowed_count",
+                              builder.getI64IntegerAttr(overflowedCount));
   }
 
   struct LiveIntervalSet {
@@ -598,7 +617,8 @@ struct WaveAMDRegAllocPass
     return success();
   }
 
-  LogicalResult allocateFunction(func::FuncOp func, RegisterLimits limits) {
+  LogicalResult allocateFunction(func::FuncOp func, RegisterLimits limits,
+                                 bool softFail, bool &overflow) {
     if (failed(splitDuplicateLoopInits(func)))
       return failure();
     if (failed(splitTupleElementSharing(func)))
@@ -620,10 +640,11 @@ struct WaveAMDRegAllocPass
         func->hasAttr(wave::WaveDialect::getKernelAttrName()) ? 5 : 0;
     unsigned vgprReserved =
         func->hasAttr(wave::WaveDialect::getKernelAttrName()) ? 1 : 0;
-    if (failed(
-            allocateClass(func, intervals.sgprs, limits.numSGPR, sgprReserved)))
+    if (failed(allocateClass(func, intervals.sgprs, limits.numSGPR,
+                             sgprReserved, softFail, overflow)))
       return failure();
-    return allocateClass(func, intervals.vgprs, limits.numVGPR, vgprReserved);
+    return allocateClass(func, intervals.vgprs, limits.numVGPR, vgprReserved,
+                         softFail, overflow);
   }
 
   // Physically-allocated half-open span `[begin, begin + size)` in a
@@ -661,7 +682,8 @@ struct WaveAMDRegAllocPass
 
   LogicalResult allocateClass(func::FuncOp func,
                               MutableArrayRef<LiveInterval> intervals,
-                              unsigned numPhys, unsigned reserved) {
+                              unsigned numPhys, unsigned reserved,
+                              bool softFail, bool &overflow) {
     llvm::stable_sort(intervals,
                       [](const LiveInterval &lhs, const LiveInterval &rhs) {
                         return lhs.start < rhs.start;
@@ -690,9 +712,14 @@ struct WaveAMDRegAllocPass
       // power-of-two widths the pipeline currently produces.
       unsigned align = std::max<unsigned>(1, llvm::PowerOf2Ceil(width));
       std::optional<unsigned> phys = findFreeSlot(live, width, align, numPhys);
-      if (!phys)
+      if (!phys) {
+        if (softFail) {
+          overflow = true;
+          return success();
+        }
         return func.emitError(
             "WaveAMDMachine register allocator ran out of registers");
+      }
       for (auto [v, off] : llvm::zip(interval.values, interval.slotOffsets))
         setRegPhys(v, *phys + off);
       live.insert(PhysAlloc{*phys, width});
