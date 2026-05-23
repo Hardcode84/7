@@ -18,6 +18,7 @@ namespace mlir::waveamdmachine {
 // :1394 getVGPRAllocGranule=8, :1431 getTotalNumVGPRs=512.
 // Wave64 native unit; 4-cycle SIMD16 issue period.
 static constexpr ArchData kGfx942{
+    /*isa=*/{9, 4, 2},
     /*name=*/"gfx942",
     /*wavesPerSIMD=*/8,
     /*simdsPerCU=*/4,
@@ -32,6 +33,7 @@ static constexpr ArchData kGfx942{
 // CDNA4 / MI350. Shares the gfx9_4 feature shape with gfx942 on
 // every dimension this table tracks.
 static constexpr ArchData kGfx950{
+    /*isa=*/{9, 5, 0},
     /*name=*/"gfx950",
     /*wavesPerSIMD=*/8,
     /*simdsPerCU=*/4,
@@ -47,6 +49,7 @@ static constexpr ArchData kGfx950{
 // Feature1536VGPRs -> getMaxWavesPerEU=16, wave32 granule=24,
 // wave32 file=1536. SIMD32 single-cycle issue, wave64 = 2x wave32.
 static constexpr ArchData kGfx1100{
+    /*isa=*/{11, 0, 0},
     /*name=*/"gfx1100",
     /*wavesPerSIMD=*/16,
     /*simdsPerCU=*/2,
@@ -61,6 +64,7 @@ static constexpr ArchData kGfx1100{
 // RDNA4. FeatureISAVersion12 carries Feature1536VGPRs by default
 // (AMDGPU.td:2048). Matches gfx1100 on the structural dimensions.
 static constexpr ArchData kGfx1200{
+    /*isa=*/{12, 0, 0},
     /*name=*/"gfx1200",
     /*wavesPerSIMD=*/16,
     /*simdsPerCU=*/2,
@@ -100,22 +104,29 @@ static_assert(sane<kGfx950>());
 static_assert(sane<kGfx1100>());
 static_assert(sane<kGfx1200>());
 
-bool isArchSupported(llvm::StringRef gfxName) {
-  return gfxName == "gfx942" || gfxName == "gfx950" || gfxName == "gfx1100" ||
-         gfxName == "gfx1200";
+static bool isaEq(const llvm::AMDGPU::IsaVersion &a,
+                  const llvm::AMDGPU::IsaVersion &b) {
+  return a.Major == b.Major && a.Minor == b.Minor && a.Stepping == b.Stepping;
 }
 
-const ArchData &getArchData(llvm::StringRef gfxName) {
-  if (gfxName == "gfx942")
+bool isArchSupported(const llvm::AMDGPU::IsaVersion &isa) {
+  return isaEq(isa, kGfx942.isa) || isaEq(isa, kGfx950.isa) ||
+         isaEq(isa, kGfx1100.isa) || isaEq(isa, kGfx1200.isa);
+}
+
+const ArchData &getArchData(const llvm::AMDGPU::IsaVersion &isa) {
+  if (isaEq(isa, kGfx942.isa))
     return kGfx942;
-  if (gfxName == "gfx950")
+  if (isaEq(isa, kGfx950.isa))
     return kGfx950;
-  if (gfxName == "gfx1100")
+  if (isaEq(isa, kGfx1100.isa))
     return kGfx1100;
-  if (gfxName == "gfx1200")
+  if (isaEq(isa, kGfx1200.isa))
     return kGfx1200;
-  llvm::report_fatal_error(llvm::Twine("ArchData: unsupported arch '") +
-                           gfxName + "'");
+  llvm::report_fatal_error(llvm::Twine("ArchData: unsupported IsaVersion ") +
+                           llvm::Twine(isa.Major) + "." +
+                           llvm::Twine(isa.Minor) + "." +
+                           llvm::Twine(isa.Stepping));
 }
 
 } // namespace mlir::waveamdmachine

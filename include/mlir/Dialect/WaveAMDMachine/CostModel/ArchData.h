@@ -16,6 +16,7 @@
 #define MLIR_DIALECT_WAVEAMDMACHINE_COSTMODEL_ARCHDATA_H
 
 #include "llvm/ADT/StringRef.h"
+#include "llvm/TargetParser/TargetParser.h"
 
 namespace mlir::waveamdmachine {
 
@@ -24,7 +25,10 @@ namespace mlir::waveamdmachine {
 // fields use the same wave size as the arch's native mode (wave32
 // on RDNA, wave64 on CDNA) unless noted.
 struct ArchData {
-  // Canonical gfx target name (e.g. "gfx1100").
+  // Canonical IsaVersion. Drives lookup and equality.
+  llvm::AMDGPU::IsaVersion isa;
+
+  // Canonical gfx name (e.g. "gfx1100"). Diagnostics-only.
   llvm::StringRef name;
 
   // Max coresident waves per SIMD unit, ignoring register pressure.
@@ -58,13 +62,13 @@ struct ArchData {
   int simdIssuePeriod;
 };
 
-// Lookup by canonical gfx name. Aborts (report_fatal_error) on
-// unsupported arch -- callers are expected to validate first.
-const ArchData &getArchData(llvm::StringRef gfxName);
+// Lookup by IsaVersion. Aborts (report_fatal_error) on unsupported
+// arch -- callers are expected to validate first via isArchSupported.
+const ArchData &getArchData(const llvm::AMDGPU::IsaVersion &isa);
 
 // Returns true if the arch is in the supported set without
 // asserting. Useful for early validation paths.
-bool isArchSupported(llvm::StringRef gfxName);
+bool isArchSupported(const llvm::AMDGPU::IsaVersion &isa);
 
 } // namespace mlir::waveamdmachine
 
