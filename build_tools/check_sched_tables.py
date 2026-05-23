@@ -6,12 +6,17 @@
 
 Parses LLVM's ``SISchedule.td`` (from
 ``build/_deps/llvm-project`` or ``$LLVM_PROJECT_SOURCE_DIR``)
-and ``lib/Dialect/WaveAMDMachine/CostModel/LatencyTable.cpp``;
-verifies that every (arch, SchedClass) cycle count in our
-hand-copy matches what LLVM's HWWriteRes lines actually say.
+and our two hand-copied tables:
+
+* ``lib/Dialect/WaveAMDMachine/CostModel/LatencyTable.cpp``
+* ``lib/Dialect/WaveAMDMachine/CostModel/FunctionalUnit.cpp``
+
+Verifies that every (arch, SchedClass) cycle count + primary
+functional-unit binding matches what LLVM's HWWriteRes /
+HWVALUWriteRes lines actually say.
 
 Skips classes LLVM does not bind for a given model (e.g. WMMA on
-CDNA, MAI on RDNA) and pseudo SchedClasses that have no LLVM
+CDNA, MAI on RDNA) and pseudo SchedClasses with no LLVM
 equivalent (``NoInst``, ``WaitcntPseudo``).
 
 Exit codes:
@@ -20,8 +25,7 @@ Exit codes:
 
 If no LLVM source tree is reachable the script returns 0 with a
 note on stderr; contributors without an LLVM checkout still get
-clean pre-commit runs, but CI catches drift by virtue of always
-having one.
+clean pre-commit runs.
 """
 
 from __future__ import annotations
@@ -33,6 +37,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 LATENCY_CPP = REPO_ROOT / "lib/Dialect/WaveAMDMachine/CostModel/LatencyTable.cpp"
+FU_CPP = REPO_ROOT / "lib/Dialect/WaveAMDMachine/CostModel/FunctionalUnit.cpp"
 
 # Map our internal SchedClass enum name to upstream LLVM SchedWrite
 # name. None = pseudo / no LLVM equivalent / not bound on any arch
@@ -64,9 +69,21 @@ CLASS_TO_LLVM: dict[str, str | None] = {
     "WaitcntPseudo": None,
 }
 
-# Map our arch suffix (kLatencyGfxNNN) to (LLVM SchedModel name,
-# inherits SICommonWriteRes?). The CDNA models start from the
-# common defaults; the GFX10+ models are self-contained.
+# LLVM resource enum -> our FunctionalUnit enum.
+LLVM_RES_TO_OURS: dict[str, str] = {
+    "HWVALU": "VALU",
+    "HWSALU": "SALU",
+    "HWVMEM": "VMEM",
+    "HWLGKM": "LGKM",
+    "HWXDL": "MFMA_XDL",
+    "HWTransVALU": "TRANS",
+    "HWBranch": "BRANCH",
+    "HWExport": "EXPORT",
+}
+
+# Map our arch suffix (kLatency/kFUsGfxNNN) to (LLVM SchedModel
+# name, inherits SICommonWriteRes?). CDNA models start from the
+# common defaults; GFX10+ models are self-contained.
 ARCH_MODEL: dict[str, tuple[str, bool]] = {
     "Gfx942": ("SIDPGFX942FullSpeedModel", True),
     "Gfx950": ("SIDPGFX950FullSpeedModel", True),
@@ -74,9 +91,10 @@ ARCH_MODEL: dict[str, tuple[str, bool]] = {
     "Gfx1200": ("GFX12SpeedModel", False),
 }
 
-# HWWriteRes<Class, [resources], cycles> -- cycles is the last int.
-# HWVALUWriteRes<Class, cycles>.
-WRITE_RES_RE = re.compile(r"HW(?:VALU)?WriteRes<(\w+),\s*(?:\[[^\]]*\],\s*)?(\d+)>")
+# HWWriteRes<Class, [resources], cycles>.
+HWWRITERES_RE = re.compile(r"HWWriteRes<(\w+),\s*\[([^\]]*)\],\s*(\d+)>")
+# HWVALUWriteRes<Class, cycles> -- implicit HWVALU resource.
+HWVALUWRITERES_RE = re.compile(r"HWVALUWriteRes<(\w+),\s*(\d+)>")
 
 
 def find_sischedule_td() -> Path | None:
@@ -110,26 +128,46 @@ def extract_braced_block(text: str, start: int) -> str:
     return text[start : i - 1]
 
 
-def parse_block(td_text: str, header_re: str) -> dict[str, int]:
+def primary_fu_from_resources(res_list_text: str) -> str | None:
+    """Pick the primary FU from a comma-separated resource list.
+    HWRC is the register-cache port and is always secondary."""
+    for r in res_list_text.split(","):
+        name = r.strip()
+        if name and name != "HWRC":
+            return LLVM_RES_TO_OURS.get(name)
+    return None
+
+
+def parse_block(td_text: str, header_re: str) -> dict[str, dict]:
     """Parse one ``multiclass`` or ``let SchedModel = X in`` block
-    and return {SchedWrite -> cycles}. Later writes win on
-    duplicates (matches LLVM's let-override semantics)."""
+    and return {SchedWrite: {"cycles": int, "fu": str | None}}.
+    Later writes win on duplicates (LLVM's let-override semantics)."""
     m = re.search(header_re, td_text)
     if not m:
         return {}
     body = extract_braced_block(td_text, m.end())
-    result: dict[str, int] = {}
+    result: dict[str, dict] = {}
     for raw in body.splitlines():
         line = raw.split("//", 1)[0].strip()
-        mm = WRITE_RES_RE.search(line)
+        mm = HWWRITERES_RE.search(line)
         if mm:
-            result[mm.group(1)] = int(mm.group(2))
+            result[mm.group(1)] = {
+                "cycles": int(mm.group(3)),
+                "fu": primary_fu_from_resources(mm.group(2)),
+            }
+            continue
+        mm = HWVALUWRITERES_RE.search(line)
+        if mm:
+            result[mm.group(1)] = {
+                "cycles": int(mm.group(2)),
+                "fu": "VALU",
+            }
     return result
 
 
-def parse_td(path: Path) -> dict[str, dict[str, int]]:
+def parse_td(path: Path) -> dict[str, dict[str, dict]]:
     text = path.read_text()
-    out: dict[str, dict[str, int]] = {
+    out: dict[str, dict[str, dict]] = {
         "SICommonWriteRes": parse_block(text, r"multiclass\s+SICommonWriteRes\s*\{")
     }
     seen_models: set[str] = set()
@@ -143,39 +181,99 @@ def parse_td(path: Path) -> dict[str, dict[str, int]]:
     return out
 
 
-def parse_cpp(path: Path) -> dict[str, dict[str, int]]:
+def parse_cpp_table(
+    path: Path, struct_name: str, entry_pattern: str
+) -> dict[str, dict[str, str]]:
+    """Parse per-arch tables from a CostModel cpp file. Returns
+    {arch: {SchedClass: raw_value_text}}. Handles aliases like
+    ``kLatencyGfx950 = kLatencyGfx942``."""
     text = path.read_text()
-    out: dict[str, dict[str, int]] = {}
+    out: dict[str, dict[str, str]] = {}
     table_re = re.compile(
-        r"static\s+constexpr\s+ClassLatencies\s+kLatency(\w+)\s*=\s*\{" r"([^}]*)\};",
+        rf"static\s+constexpr\s+{struct_name}\s+k\w+Gfx(\w+)\s*=\s*\{{" r"([^}]*)\};",
         re.DOTALL,
     )
     for m in table_re.finditer(text):
-        arch = m.group(1)
+        arch = "Gfx" + m.group(1)
         body = m.group(2)
-        entries: dict[str, int] = {}
-        for em in re.finditer(r"/\*(\w+)=\*/\s*(\d+)", body):
-            entries[em.group(1)] = int(em.group(2))
+        entries: dict[str, str] = {}
+        for em in re.finditer(rf"/\*(\w+)=\*/\s*({entry_pattern})", body):
+            entries[em.group(1)] = em.group(2)
         out[arch] = entries
     alias_re = re.compile(
-        r"static\s+constexpr\s+ClassLatencies\s+kLatency(\w+)\s*=\s*" r"kLatency(\w+);"
+        rf"static\s+constexpr\s+{struct_name}\s+k\w+Gfx(\w+)\s*=\s*" r"k\w+Gfx(\w+);"
     )
     for m in alias_re.finditer(text):
-        out[m.group(1)] = out[m.group(2)]
+        out["Gfx" + m.group(1)] = out["Gfx" + m.group(2)]
     return out
+
+
+def parse_cpp_latencies(path: Path) -> dict[str, dict[str, int]]:
+    raw = parse_cpp_table(path, "ClassLatencies", r"\d+")
+    return {
+        arch: {k: int(v) for k, v in entries.items()} for arch, entries in raw.items()
+    }
+
+
+def parse_cpp_fus(path: Path) -> dict[str, dict[str, str]]:
+    raw = parse_cpp_table(path, "ClassFUs", r"FunctionalUnit::\w+")
+    out: dict[str, dict[str, str]] = {}
+    for arch, entries in raw.items():
+        out[arch] = {k: v.removeprefix("FunctionalUnit::") for k, v in entries.items()}
+    return out
+
+
+def check_latency_entry(
+    arch_key: str,
+    model_name: str,
+    our_class: str,
+    expected: int,
+    cpp_lat: dict[str, int],
+) -> list[str]:
+    actual = cpp_lat.get(our_class)
+    if actual is None:
+        return [f"{arch_key}: missing latency entry for {our_class}"]
+    if actual != expected:
+        return [
+            f"{arch_key}.{our_class}: latency cpp={actual}, "
+            f"SISchedule.td/{model_name}={expected}"
+        ]
+    return []
+
+
+def check_fu_entry(
+    arch_key: str,
+    model_name: str,
+    our_class: str,
+    expected: str,
+    cpp_fu: dict[str, str],
+) -> list[str]:
+    actual = cpp_fu.get(our_class)
+    if actual is None:
+        return [f"{arch_key}: missing FU entry for {our_class}"]
+    if actual != expected:
+        return [
+            f"{arch_key}.{our_class}: FU cpp={actual}, "
+            f"SISchedule.td/{model_name}={expected}"
+        ]
+    return []
 
 
 def check_arch(
     arch_key: str,
     model_name: str,
     inherits: bool,
-    cpp_tables: dict[str, dict[str, int]],
-    td_tables: dict[str, dict[str, int]],
+    cpp_lat: dict[str, dict[str, int]],
+    cpp_fu: dict[str, dict[str, str]],
+    td_tables: dict[str, dict[str, dict]],
 ) -> list[str]:
-    if arch_key not in cpp_tables:
-        return [f"{arch_key}: missing table in {LATENCY_CPP.name}"]
-    cpp_entries = cpp_tables[arch_key]
-    td_entries: dict[str, int] = {}
+    if arch_key not in cpp_lat:
+        return [f"{arch_key}: missing latency table in {LATENCY_CPP.name}"]
+    if arch_key not in cpp_fu:
+        return [f"{arch_key}: missing FU table in {FU_CPP.name}"]
+    arch_lat = cpp_lat[arch_key]
+    arch_fu = cpp_fu[arch_key]
+    td_entries: dict[str, dict] = {}
     if inherits:
         td_entries.update(td_tables["SICommonWriteRes"])
     td_entries.update(td_tables.get(model_name, {}))
@@ -183,15 +281,15 @@ def check_arch(
     for our_class, llvm_class in CLASS_TO_LLVM.items():
         if llvm_class is None or llvm_class not in td_entries:
             continue
-        expected = td_entries[llvm_class]
-        actual = cpp_entries.get(our_class)
-        if actual is None:
-            errors.append(f"{arch_key}: missing entry for {our_class}")
-        elif actual != expected:
-            errors.append(
-                f"{arch_key}.{our_class}: cpp says {actual}, "
-                f"SISchedule.td/{model_name}/{llvm_class} "
-                f"says {expected}"
+        td_entry = td_entries[llvm_class]
+        errors.extend(
+            check_latency_entry(
+                arch_key, model_name, our_class, td_entry["cycles"], arch_lat
+            )
+        )
+        if td_entry["fu"] is not None:
+            errors.extend(
+                check_fu_entry(arch_key, model_name, our_class, td_entry["fu"], arch_fu)
             )
     return errors
 
@@ -207,11 +305,14 @@ def main() -> int:
         )
         return 0
     td_tables = parse_td(td_path)
-    cpp_tables = parse_cpp(LATENCY_CPP)
+    cpp_lat = parse_cpp_latencies(LATENCY_CPP)
+    cpp_fu = parse_cpp_fus(FU_CPP)
 
     errors: list[str] = []
     for arch_key, (model_name, inherits) in ARCH_MODEL.items():
-        errors.extend(check_arch(arch_key, model_name, inherits, cpp_tables, td_tables))
+        errors.extend(
+            check_arch(arch_key, model_name, inherits, cpp_lat, cpp_fu, td_tables)
+        )
 
     if errors:
         print(
