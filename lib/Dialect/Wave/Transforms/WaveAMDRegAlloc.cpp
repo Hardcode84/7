@@ -165,7 +165,7 @@ struct WaveAMDRegAllocPass
         ++overflowedCount;
       }
     }
-    if (markOverflow && overflowedCount > 0)
+    if (markOverflow)
       getOperation()->setAttr("waveamdmachine.regalloc_overflowed_count",
                               builder.getI64IntegerAttr(overflowedCount));
   }
