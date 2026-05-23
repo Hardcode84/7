@@ -21,6 +21,7 @@
 #include "mlir/IR/SymbolTable.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/Support/Parallel.h"
 #include <limits>
 
 #define GET_OP_CLASSES
@@ -287,21 +288,30 @@ invokeOrClassify(transform::TransformOpInterface caller,
   return TrialStatus::Ok;
 }
 
-// Evaluate one trial: assumes-check, clone, body, score. On `Ok`, the
-// outcome carries the clone and its score. `Skip` means a silenceable
-// failure pruned this trial. `Definite` carries a propagating failure.
+// Evaluate one trial: assumes-check, clone, body, score. Constructs
+// per-trial `TransformState` instances so the runtime stack and
+// payload mappings are isolated from the outer interpreter -- this is
+// what lets trials run on a thread pool. `Ok` carries the clone and
+// its score; `Skip` is a silenceable prune; `Definite` is a
+// propagating failure.
 static TrialOutcome
 runTrial(transform::TransformOpInterface caller, ModuleOp origModule,
          transform::NamedSequenceOp bodyCallee,
          transform::NamedSequenceOp scoreCallee,
          transform::NamedSequenceOp assumesCallee,
-         MutableArrayRef<SmallVector<transform::MappedValue>> paramBindings,
-         transform::TransformState &state) {
+         MutableArrayRef<SmallVector<transform::MappedValue>> paramBindings) {
   TrialOutcome out;
+  // Each sub-sequence runs against its own `TransformState`. The
+  // public ctor is private; `makeTransformStateForTesting` is the only
+  // public factory and the cross-thread isolation it gives is the
+  // whole point of using it here, not just testing.
   if (assumesCallee) {
+    transform::TransformState assumesState =
+        transform::detail::makeTransformStateForTesting(
+            /*region=*/nullptr, /*payloadRoot=*/origModule);
     SmallVector<SmallVector<transform::MappedValue>> dummy;
     TrialStatus st = invokeOrClassify(caller, assumesCallee, paramBindings,
-                                      state, dummy, out);
+                                      assumesState, dummy, out);
     if (st != TrialStatus::Ok)
       return out;
   }
@@ -316,15 +326,23 @@ runTrial(transform::TransformOpInterface caller, ModuleOp origModule,
   for (const SmallVector<transform::MappedValue> &m : paramBindings)
     bodyBindings.push_back(m);
 
+  transform::TransformState bodyState =
+      transform::detail::makeTransformStateForTesting(
+          /*region=*/nullptr,
+          /*payloadRoot=*/out.clone->getOperation());
   SmallVector<SmallVector<transform::MappedValue>> bodyOut;
-  TrialStatus bst =
-      invokeOrClassify(caller, bodyCallee, bodyBindings, state, bodyOut, out);
+  TrialStatus bst = invokeOrClassify(caller, bodyCallee, bodyBindings,
+                                     bodyState, bodyOut, out);
   if (bst != TrialStatus::Ok)
     return out;
 
+  transform::TransformState scoreState =
+      transform::detail::makeTransformStateForTesting(
+          /*region=*/nullptr,
+          /*payloadRoot=*/out.clone->getOperation());
   SmallVector<SmallVector<transform::MappedValue>> scoreOut;
-  TrialStatus sst =
-      invokeOrClassify(caller, scoreCallee, bodyBindings, state, scoreOut, out);
+  TrialStatus sst = invokeOrClassify(caller, scoreCallee, bodyBindings,
+                                     scoreState, scoreOut, out);
   if (sst != TrialStatus::Ok)
     return out;
 
@@ -343,19 +361,29 @@ struct TuneCallees {
   transform::NamedSequenceOp assumes; // May be null.
 };
 
-// Drive the enumeration loop: for each config, run one trial, track
-// the winner. Definite failures propagate. `bestClone`/`bestScore`
-// are valid only if `anyFeasible` flips to true.
-static DiagnosedSilenceableFailure tuneRunAllTrials(
-    transform::TransformOpInterface caller, ModuleOp orig,
-    const TuneCallees &callees, ArrayRef<SmallVector<int64_t>> configs,
-    Builder &builder, transform::TransformState &state,
-    OwningOpRef<ModuleOp> &bestClone, int64_t &bestScore, bool &anyFeasible) {
-  for (const SmallVector<int64_t> &config : configs) {
-    SmallVector<SmallVector<transform::MappedValue>> paramBindings =
-        buildParamBindings(builder, config);
-    TrialOutcome o = runTrial(caller, orig, callees.body, callees.score,
-                              callees.assumes, paramBindings, state);
+// Drive the enumeration: dispatch every trial in parallel via the
+// context thread pool, then reduce sequentially in enumeration order
+// for deterministic tie-breaking. Each trial runs on its own clone
+// with its own `TransformState`, so the only shared state during the
+// parallel phase is the unifying StorageUniquer and the source
+// module's read-only IR. `bestClone`/`bestScore` are valid only when
+// `anyFeasible` flips to true.
+static DiagnosedSilenceableFailure
+tuneRunAllTrials(transform::TransformOpInterface caller, ModuleOp orig,
+                 const TuneCallees &callees,
+                 ArrayRef<SmallVector<int64_t>> configs, Builder &builder,
+                 OwningOpRef<ModuleOp> &bestClone, int64_t &bestScore,
+                 bool &anyFeasible) {
+  SmallVector<SmallVector<SmallVector<transform::MappedValue>>> allBindings;
+  allBindings.reserve(configs.size());
+  for (const SmallVector<int64_t> &config : configs)
+    allBindings.push_back(buildParamBindings(builder, config));
+  SmallVector<TrialOutcome> outcomes(configs.size());
+  llvm::parallelFor(0, configs.size(), [&](size_t i) {
+    outcomes[i] = runTrial(caller, orig, callees.body, callees.score,
+                           callees.assumes, allBindings[i]);
+  });
+  for (TrialOutcome &o : outcomes) {
     if (o.status == TrialStatus::Definite)
       return std::move(o.diag);
     if (o.status == TrialStatus::Skip)
@@ -457,7 +485,7 @@ wave::TransformTuneOp::apply(transform::TransformRewriter &rewriter,
   int64_t bestScore = std::numeric_limits<int64_t>::min();
   bool anyFeasible = false;
   if (DiagnosedSilenceableFailure r =
-          tuneRunAllTrials(*this, origModule, callees, configs, builder, state,
+          tuneRunAllTrials(*this, origModule, callees, configs, builder,
                            bestClone, bestScore, anyFeasible);
       !r.succeeded())
     return r;
