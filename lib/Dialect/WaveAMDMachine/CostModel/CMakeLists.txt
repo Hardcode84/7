@@ -1,5 +1,6 @@
 add_mlir_library(MLIRWaveAMDMachineCostModel
   ArchData.cpp
+  LatencyTable.cpp
   OpClassifier.cpp
   SchedClass.cpp
 

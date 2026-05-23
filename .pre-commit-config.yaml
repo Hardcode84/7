@@ -82,3 +82,12 @@ repos:
         # Triggers on any change to verifier sources or tests that
         # could open or close a gap.
         files: '^(lib/.+\.cpp|test/.+\.mlir|build_tools/check_verifier_coverage\.py)$'
+
+      - id: check-sched-tables
+        name: check sched-table divergence vs SISchedule.td
+        entry: python build_tools/check_sched_tables.py
+        language: python
+        # Reads LatencyTable.cpp + LLVM checkout; no per-file
+        # dispatch needed.
+        pass_filenames: false
+        files: '^(lib/Dialect/WaveAMDMachine/CostModel/LatencyTable\.cpp|build_tools/check_sched_tables\.py)$'
