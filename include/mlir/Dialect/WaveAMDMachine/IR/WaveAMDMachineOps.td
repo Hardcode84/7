@@ -479,6 +479,13 @@ def WaveAMDMachine_SWaitcntVscntOp : WaveAMDMachine_UnaryNoResult<"s_waitcnt_vsc
                                                              [WaveAMDMachine_Waitcnt,
                                                               WaveAMDMachine_NoMachineInst]>;
 def WaveAMDMachine_SNopOp : WaveAMDMachine_UnaryNoResult<"s_nop", WaveAMDMachine_Imm>;
+// Set wave issue priority (0..3). Free, dynamic nudge for the HW
+// issue arbiter -- prefer this over cycle counting when biasing
+// multi-wave co-execution (e.g. ping-pong phase entry: the wave
+// group that should issue MFMAs bumps prio while the other group
+// is loading). Available on every arch the project supports.
+def WaveAMDMachine_SSetprioOp : WaveAMDMachine_UnaryNoResult<"s_setprio",
+                                                             WaveAMDMachine_Imm>;
 def WaveAMDMachine_SDelayAluOp : WaveAMDMachine_UnaryNoResult<"s_delay_alu",
                                                          WaveAMDMachine_Imm>;
 def WaveAMDMachine_SAndSaveexecB32Op

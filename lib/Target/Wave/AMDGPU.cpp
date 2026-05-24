@@ -258,6 +258,10 @@ private:
   unsigned sNop() const {
     return isGfx8Or9() ? llvm::AMDGPU::S_NOP_vi : llvm::AMDGPU::S_NOP_gfx11;
   }
+  unsigned sSetprio() const {
+    return isGfx8Or9() ? llvm::AMDGPU::S_SETPRIO_vi
+                       : llvm::AMDGPU::S_SETPRIO_gfx11;
+  }
   unsigned sBarrier() const {
     return isGfx8Or9() ? llvm::AMDGPU::S_BARRIER_vi
                        : llvm::AMDGPU::S_BARRIER_gfx11;
@@ -1343,6 +1347,8 @@ private:
     }
     if (isa<waveamdmachine::SNopOp>(op))
       return emitMCValues(sNop(), op.getOperands());
+    if (isa<waveamdmachine::SSetprioOp>(op))
+      return emitMCValues(sSetprio(), op.getOperands());
     if (isa<waveamdmachine::SDelayAluOp>(op)) {
       if (isGfx8Or9())
         return success();
