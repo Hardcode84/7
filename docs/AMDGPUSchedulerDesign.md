@@ -251,6 +251,50 @@ headers, they stay separate: cold captures the warm-up state from
 pre-loop, hot captures the steady-state from backedge accumulation
 after enough fixed-point iterations.
 
+### Loop exit: collapse cold/hot
+
+At a `uniform_loop`'s exit edge, the lattice transitions from
+"inside the loop" to "outside it". Inside, cold = iter-1 flavour
+and hot = steady-state flavour. Outside, that flavour distinction
+no longer applies to *this* loop's iterations -- we just have
+"the actual machine state when control exited". The transition
+rule:
+
+```
+collapsed   = max(loop_body_exit.cold, loop_body_exit.hot)
+post_loop.cold = collapsed  (joined with any other forward incoming)
+post_loop.hot  = enclosing_loop.hot  (or BOT if no enclosing loop)
+```
+
+Two things to notice:
+
+1. `max` covers both trip-count regimes. For T = 1 the back-edge
+   is never taken, so `hot` at exit is still BOT from
+   initialisation and `collapsed` = `cold`. For T > 1 the
+   fix-pointed `hot` dominates `cold` and `collapsed` = `hot`. No
+   trip-count branching needed in the lattice plumbing.
+
+2. The downstream `hot` is **not** the just-exited loop's hot --
+   it's the enclosing loop's hot (looked up from the lattice at
+   the `uniform_loop` op's own program point, not from the
+   body-exit state). For top-level loops there is no enclosing
+   loop and downstream hot is BOT. For nested loops the inner's
+   hot vanishes into the downstream cold while the outer's hot
+   keeps flowing through the post-inner-loop code unchanged.
+
+This is implemented via the `visitRegionBranchControlFlowTransfer`
+hook on `uniform_loop`: when `regionFrom = body, regionTo =
+nullopt` (control exiting the op back to its parent), the
+after-state's cold is set to the collapse of before's cold and
+hot, and after-state's hot is read from the enclosing-scope
+lattice rather than from before.
+
+Total-cycle accounting is decoupled from this collapse: per-iter
+cost still uses `cold` for iter 1 and `hot` for steady state via
+the structural `C1 + (T-1) * Ss` formula (see "Total cycles
+accumulation" below). The collapse only affects per-program-point
+pressure queries downstream.
+
 ### Why cold/hot is worth the 2x lattice cost
 
 Naive single-component max-join at a loop header conflates pre-
