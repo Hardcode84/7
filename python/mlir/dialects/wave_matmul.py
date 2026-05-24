@@ -572,9 +572,31 @@ def _load_fragment_group_through_lds(
     staging: _LdsStaging,
 ) -> tuple[tuple[dsl.Value, ...], tuple[dsl.Value, ...]]:
     """Round-trip one K-step's A/B fragment group through LDS."""
+    a_loads, b_loads = _lds_global_loads(bld, a_ptrs, b_ptrs, staging)
+    return _lds_store_reload(bld, a_loads, b_loads, a_type, b_type, staging)
+
+
+def _lds_global_loads(
+    bld: dsl.FunctionBuilder,
+    a_ptrs: tuple[dsl.Value, ...],
+    b_ptrs: tuple[dsl.Value, ...],
+    staging: _LdsStaging,
+) -> tuple[
+    tuple[tuple[dsl.Value, dsl.Value], ...], tuple[tuple[dsl.Value, dsl.Value], ...]
+]:
     a_loads = tuple(bld.load(ptr, staging.reg_simd_type) for ptr in a_ptrs)
     b_loads = tuple(bld.load(ptr, staging.reg_simd_type) for ptr in b_ptrs)
+    return a_loads, b_loads
 
+
+def _lds_store_reload(
+    bld: dsl.FunctionBuilder,
+    a_loads: tuple[tuple[dsl.Value, dsl.Value], ...],
+    b_loads: tuple[tuple[dsl.Value, dsl.Value], ...],
+    a_type: dsl.Type,
+    b_type: dsl.Type,
+    staging: _LdsStaging,
+) -> tuple[tuple[dsl.Value, ...], tuple[dsl.Value, ...]]:
     store_tokens: list[dsl.Value] = []
     for (regs, glob_tok), lds_ptr in zip(a_loads, staging.a_lds_ptrs, strict=True):
         store_tokens.append(bld.store(regs, lds_ptr, after=glob_tok))
@@ -602,6 +624,16 @@ def _load_fragment_group_through_dma_lds(
     b_type: dsl.Type,
     staging: _LdsStaging,
 ) -> tuple[tuple[dsl.Value, ...], tuple[dsl.Value, ...]]:
+    dma_tokens = _dma_issue(bld, a_ptrs, b_ptrs, staging)
+    return _dma_drain(bld, dma_tokens, a_type, b_type, staging)
+
+
+def _dma_issue(
+    bld: dsl.FunctionBuilder,
+    a_ptrs: tuple[dsl.Value, ...],
+    b_ptrs: tuple[dsl.Value, ...],
+    staging: _LdsStaging,
+) -> list[dsl.Value]:
     dep = bld.token()
     dma_tokens: list[dsl.Value] = []
     for ptr, lds_ptr in zip(a_ptrs, staging.a_dma_lds_ptrs, strict=True):
@@ -612,7 +644,16 @@ def _load_fragment_group_through_dma_lds(
         tok = bld.dma_load_lds(ptr, lds_ptr, after=dep, bytes=16)
         bld.wait(tok)
         dma_tokens.append(tok)
+    return dma_tokens
 
+
+def _dma_drain(
+    bld: dsl.FunctionBuilder,
+    dma_tokens: list[dsl.Value],
+    a_type: dsl.Type,
+    b_type: dsl.Type,
+    staging: _LdsStaging,
+) -> tuple[tuple[dsl.Value, ...], tuple[dsl.Value, ...]]:
     barrier_tok = bld.barrier(*dma_tokens)
     a_frags: list[dsl.Value] = []
     b_frags: list[dsl.Value] = []
@@ -915,10 +956,28 @@ def _emit_pipelined_step(
     a_step_offset: dsl.Value,
     b_step_offset: dsl.Value,
 ) -> list[dsl.Value]:
-    new_accs = _emit_mma_grid(bld, cfg, state.afs, state.bfs, state.accs)
-    new_afs, new_bfs = _load_fragment_group(
-        bld, cfg, state.aps, state.bps, types, staging
-    )
+    # Issue this step's global loads, run the wmma grid on last step's
+    # frags while they are in flight, then drain them through LDS. The
+    # wmma sits between global_load and ds_store, overlapping VMEM
+    # latency with compute. The dma path overlaps via its own waits.
+    # Issue this step's global loads, run the wmma grid on last step's
+    # frags while they are in flight, then drain them through LDS: wmma
+    # sits between global_load and ds_store, overlapping VMEM latency.
+    # dma path overlaps via its own waits.
+    # Issue this step's loads, run the wmma grid on last step's frags
+    # while they are in flight, then drain through LDS: wmma sits between
+    # global_load/dma and ds_store, overlapping VMEM latency. Loads ride
+    # across the grid, so K unroll trades down for the overlap.
+    if cfg.use_dma_lds:
+        dma_tokens = _dma_issue(bld, state.aps, state.bps, staging)
+        new_accs = _emit_mma_grid(bld, cfg, state.afs, state.bfs, state.accs)
+        new_afs, new_bfs = _dma_drain(bld, dma_tokens, types.a, types.b, staging)
+    else:
+        a_loads, b_loads = _lds_global_loads(bld, state.aps, state.bps, staging)
+        new_accs = _emit_mma_grid(bld, cfg, state.afs, state.bfs, state.accs)
+        new_afs, new_bfs = _lds_store_reload(
+            bld, a_loads, b_loads, types.a, types.b, staging
+        )
     wave_k = bld.static_param("wave_k_tiles", IndexType.get())
     a_pt = _pack_frags_into_nested_parametric_ptuple(
         bld, new_afs, cfg.wave_m_tiles, cfg.wave_k_tiles, wave_k

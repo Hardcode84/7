@@ -96,8 +96,8 @@ print(module)
 # With the builder packing A/B frags into nested parametric ptuple
 # iter-args (`ptuple<ptuple<af, M>, "wave_k_tiles">`), the K-loop
 # iter-arg width scales with the bound `wave_k_tiles`. On gfx1100
-# (256 VGPRs / wave): K = 1, 2, 4 fit at 192, 208, 240 VGPRs; K = 8
-# overflows. Tune silenceably skips the overflow, picks K = 4.
+# (256 VGPRs / wave): with global loads riding across the wmma grid for
+# overlap, K = 4 lands at 256 VGPRs; K = 8 overflows. Tune picks K = 4.
 # CHECK-LABEL: module
-# CHECK-SAME: waveamdmachine.vgpr_count_max = 240 : i64
+# CHECK-SAME: waveamdmachine.vgpr_count_max = 256 : i64
 # CHECK-SAME: wavemeta.params = {wave_k_tiles = 4 : index
