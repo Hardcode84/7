@@ -77,12 +77,18 @@ enum class TermKind { Const = 0, Uniform = 1, Lane = 2 };
 // carry so the body re-derives V / S / inst contributions from a fresh
 // PtrAdd. `base` and `isBuffer` ride untouched across the loop body
 // for `Pointer` carries.
+//
+// `strideBytes != 0` marks a global pointer whose per-iter advance is a
+// wave-uniform constant: the body recomputes its base as `base + iv *
+// strideBytes` in the scalar domain and the voffset carry stays
+// loop-invariant, so the per-lane `v_add` advance disappears.
 struct CarrySnapshot {
   enum class Kind { WMValue, Pointer };
   Kind kind;
   Value carry;
   Value base;
   bool isBuffer = false;
+  int64_t strideBytes = 0;
 };
 
 // Small free helpers used by every selection TU.
