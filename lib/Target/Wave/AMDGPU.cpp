@@ -989,6 +989,14 @@ private:
       return emitMC(vMbcntLo(),
                     {toMCOperand(result()), llvm::MCOperand::createImm(-1),
                      llvm::MCOperand::createImm(0)});
+    // hwreg(HW_REG_SHADER_CYCLES=29, offset=0, size=32) packed as
+    // id | (offset << 6) | ((size - 1) << 11) = 0xF81D. Gated on
+    // gfx11 by archPredicate; emitter assumes the dispatcher already
+    // honoured isSupportedOnIsa.
+    if (isa<waveamdmachine::SGetregShaderCyclesOp>(op))
+      return emitMC(
+          llvm::AMDGPU::S_GETREG_B32_gfx11,
+          {toMCOperand(result()), llvm::MCOperand::createImm(0xF81D)});
     // Pure SSA renames: the regalloc has already aliased each element
     // to its slot of the tuple's physical block (`tuple_phys + i`), so
     // there is nothing to emit.

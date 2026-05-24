@@ -457,6 +457,19 @@ def WaveAMDMachine_SLoadB128Op : WaveAMDMachine_UnaryResult<"s_load_b128",
   let arguments = (ins WaveAMDMachine_Imm:$offset, StrAttr:$base);
   let assemblyFormat = "$offset `,` $base attr-dict `:` functional-type(operands, results)";
 }
+// Read the per-SIMD shader-cycles HW register via
+// `s_getreg_b32 sN, hwreg(HW_REG_SHADER_CYCLES)`. RDNA3-only.
+// gfx11 returns a 32-bit value with only the low 20 bits valid
+// (counter wraps at ~600us @ 1.76GHz, which is more than enough
+// for microbench bodies but lethal for whole-kernel timing of
+// realistic workloads). gfx12 exposes LO/HI pairs and gfx1250
+// has `s_get_shader_cycles_u64`; those need their own ops.
+def WaveAMDMachine_SGetregShaderCyclesOp
+    : WaveAMDMachine_ZeroOperandResult<"s_getreg_shader_cycles",
+                                       WaveAMDMachine_SGPR1> {
+  let archPredicate = "isa.Major == 11";
+  let summary = "read HW_REG_SHADER_CYCLES via s_getreg_b32 (RDNA3)";
+}
 def WaveAMDMachine_SWaitcntOp : WaveAMDMachine_UnaryNoResult<"s_waitcnt",
                                                         WaveAMDMachine_Imm,
                                                         [WaveAMDMachine_Waitcnt,
