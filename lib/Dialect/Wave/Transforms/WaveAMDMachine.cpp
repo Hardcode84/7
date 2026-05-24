@@ -428,6 +428,7 @@ LogicalResult WaveAMDMachineSelector::selectOperation(Operation *op) {
   return llvm::TypeSwitch<Operation *, LogicalResult>(op)
       .Case<arith::ConstantIntOp>([&](auto o) { return selectConstant(o); })
       .Case<LaneIdOp>([&](auto o) { return selectLaneId(o); })
+      .Case<ReadCyclesOp>([&](auto o) { return selectReadCycles(o); })
       .Case<WorkgroupIdOp>([&](auto o) { return selectWorkgroupId(o); })
       .Case<WorkitemIdOp>([&](auto o) { return selectWorkitemId(o); })
       .Case<SplatOp>([&](auto o) { return selectSplat(o); })
@@ -497,6 +498,22 @@ LogicalResult WaveAMDMachineSelector::selectLaneId(LaneIdOp op) {
   values[op.getResult()] = waveamdmachine::VMbcntLoOp::create(
       builder, op.getLoc(),
       getRegType(op.getContext(), waveamdmachine::RegClass::VGPR));
+  eraseIfTopLevel(op);
+  return success();
+}
+
+// Lowers to s_getreg_shader_cycles on gfx11. The op's archPredicate
+// rejects construction on other archs; if it returns a null Value we
+// surface that with a clean error rather than letting downstream
+// emission blow up.
+LogicalResult WaveAMDMachineSelector::selectReadCycles(ReadCyclesOp op) {
+  Value v = waveamdmachine::SGetregShaderCyclesOp::create(
+      builder, op.getLoc(),
+      getRegType(op.getContext(), waveamdmachine::RegClass::SGPR));
+  if (!v)
+    return op.emitError(
+        "wave.read_cycles is only wired for gfx11 (HW_REG_SHADER_CYCLES)");
+  values[op.getResult()] = v;
   eraseIfTopLevel(op);
   return success();
 }

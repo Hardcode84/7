@@ -47,6 +47,19 @@ def Wave_LaneIdOp : Wave_Op<"lane_id", [Pure,
   let assemblyFormat = "attr-dict `:` qualified(type($result))";
 }
 
+// Read the per-SIMD shader cycle counter. Not pure: two consecutive
+// reads observe different values. Returned as a uniform i32, so it
+// reaches the rest of the wave dialect (splat, store) through the
+// same path as kernel scalar args. AMDGPU lowering picks the per-arch
+// counter inst -- gfx11 uses `s_getreg_b32 hwreg(HW_REG_SHADER_CYCLES)`
+// (20-bit, wraps at ~600us @ 1.76GHz); other archs need their own
+// machine ops and are not yet wired.
+def Wave_ReadCyclesOp : Wave_Op<"read_cycles"> {
+  let summary = "read the per-SIMD shader cycle counter";
+  let results = (outs I32:$result);
+  let assemblyFormat = "attr-dict `:` type($result)";
+}
+
 def Wave_SubgroupIdOp : Wave_Op<"subgroup_id", [Pure]> {
   let summary = "subgroup id within the current workgroup";
   let description = [{

@@ -102,7 +102,10 @@ LogicalResult selectGlobalOrBufferStore(WaveAMDMachineSelector &S, StoreOp op,
       isBuffer ? waveamdmachine::BufferStoreB32Op::getAddressFieldSpec()
                : waveamdmachine::GlobalStoreB32Op::getAddressFieldSpec();
   auto b = S.bucketForSpec(op.getLoc(), offset, spec);
-  Value value = S.expect(op.getValue(), op);
+  // wave.splat'd SGPRs (e.g. wave.read_cycles) reach the store as
+  // SGPR1; the VMEM store needs the value in a VGPR. Materialize on
+  // demand; no-op for already-VGPR values.
+  Value value = S.ensureVGPRForVSrc1(op.getLoc(), S.expect(op.getValue(), op));
   Value dep = op.getDependency() ? S.expect(op.getDependency(), op) : Value{};
   Operation *store = buildOneGlobalOrBufferStore(
       S, op, b.voffset, value, base, isBuffer, b.soffset, dep, b.instOffset,

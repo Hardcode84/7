@@ -19,4 +19,31 @@ func.func @shader_cycles_pair() attributes {wave.kernel} {
   return
 }
 
+// wave.read_cycles + wave.splat + wave.store must lower end-to-end:
+//   - read_cycles -> s_getreg_b32 hwreg(HW_REG_SHADER_CYCLES) into SGPR
+//   - splat is a no-op identity (SGPR stays scalar)
+//   - store materializes the SGPR into a VGPR via v_mov_b32 before
+//     the buffer_store_b32 (the load-store selector inserts the
+//     ensureVGPRForVSrc1 bridge for SGPR-typed store values).
+// ASM-LABEL: store_one_cycle:
+// ASM: s_getreg_b32 s{{[0-9]+}}, hwreg(HW_REG_SHADER_CYCLES)
+// ASM: v_mov_b32_e32 v{{[0-9]+}}, s{{[0-9]+}}
+// ASM: buffer_store_b32
+func.func @store_one_cycle(%out: !wave.ptr<i32, #wave.global>)
+    attributes {wave.kernel} {
+  %range = arith.constant 128 : i32
+  %buffer = waveamd.make_buffer %out, %range
+      : !wave.ptr<i32, #wave.global>, i32 -> !wave.ptr<i32, #waveamd.buffer>
+  %lane = wave.lane_id : !wave.simd<i32, 32>
+  %ptrs = wave.ptr_add %buffer, %lane
+      : !wave.ptr<i32, #waveamd.buffer>, !wave.simd<i32, 32>
+        -> !wave.simd<!wave.ptr<i32, #waveamd.buffer>, 32>
+  %t = wave.read_cycles : i32
+  %t_simd = wave.splat %t : i32 -> !wave.simd<i32, 32>
+  %tok = wave.store %t_simd -> %ptrs
+      : (!wave.simd<i32, 32>,
+         !wave.simd<!wave.ptr<i32, #waveamd.buffer>, 32>) -> !wave.mem.token
+  return
+}
+
 }

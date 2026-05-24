@@ -261,6 +261,7 @@ public:
   // ---- per-op selectors --------------------------------------------------
   LogicalResult selectConstant(arith::ConstantIntOp op);
   LogicalResult selectLaneId(LaneIdOp op);
+  LogicalResult selectReadCycles(ReadCyclesOp op);
   LogicalResult selectWorkgroupId(WorkgroupIdOp op);
   LogicalResult selectWorkitemId(WorkitemIdOp op);
   LogicalResult selectSplat(SplatOp op);
