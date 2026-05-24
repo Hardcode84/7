@@ -27,8 +27,8 @@ namespace mlir::waveamdmachine {
 
 namespace {
 
-// Lattice cell: wraps a MachineState. Element-wise max meet via
-// MachineState::join.
+// Lattice cell: wraps a MachineState in relative-cycles form.
+// Element-wise max meet via MachineState::join.
 class MachineStateLattice : public mlir::dataflow::AbstractDenseLattice {
 public:
   using AbstractDenseLattice::AbstractDenseLattice;
@@ -42,15 +42,15 @@ public:
   }
 
   void print(llvm::raw_ostream &os) const override {
-    os << "MachineState{maxFu=" << state.maxFuCycle()
-       << ", liveVals=" << state.readyAt.size() << "}";
+    os << "MachineState{maxFu=" << state.maxFuPending()
+       << ", liveVals=" << state.valPending.size() << "}";
   }
 };
 
-// Forward dataflow that propagates MachineState. Transfer for
-// each wave.amd.machine op charges its FU's ready cycle + updates
-// the per-Value ready map. Non-wave-amd-machine ops are
-// pass-through.
+// Forward dataflow that propagates relative-pendings MachineState.
+// Transfer for each wave.amd.machine op: compute wait W,
+// saturating-decrement all pendings by W, then schedule the op
+// (FU pending = 1, results pending = latency).
 class PressureAnalysis
     : public mlir::dataflow::DenseForwardDataFlowAnalysis<MachineStateLattice> {
 public:
@@ -67,9 +67,9 @@ public:
   }
 
   void setToEntryState(MachineStateLattice *lattice) override {
-    // Entry state is zero (all FUs idle at cycle 0, no live values).
-    lattice->state.fuReadyAt = {};
-    lattice->state.readyAt.clear();
+    // Entry state: nothing pending. fuPending all zeros, valPending empty.
+    lattice->state.fuPending = {};
+    lattice->state.valPending.clear();
     propagateIfChanged(lattice, ChangeResult::Change);
   }
 
@@ -79,40 +79,68 @@ private:
   const ArchData &arch;
 };
 
+// Per-op transfer in relative-cycles form. Side-effect: returns
+// Change always (we always mutate state for waveamdmachine ops).
 ChangeResult PressureAnalysis::applyTransfer(Operation *op,
                                              MachineStateLattice *lattice) {
   SchedClass cls = classifyOp(op);
   MachineState &state = lattice->state;
 
-  int64_t operandReady = 0;
+  // Compute max operand-pending across the op's operands.
+  int operandWait = 0;
   for (Value v : op->getOperands()) {
-    auto it = state.readyAt.find(v);
-    if (it != state.readyAt.end())
-      operandReady = std::max(operandReady, it->second);
+    auto it = state.valPending.find(v);
+    if (it != state.valPending.end())
+      operandWait = std::max(operandWait, it->second);
   }
 
   if (cls == SchedClass::NoInst) {
-    // Pseudo: results ready at max-operand-ready; no FU charged.
+    // Pseudo: results inherit the operand wait (data-dep propagation),
+    // no time advance, no FU charged.
     for (Value r : op->getResults())
-      state.readyAt[r] = operandReady;
+      state.valPending[r] = operandWait;
     return ChangeResult::Change;
   }
 
   FunctionalUnit fu = funit(arch, cls);
-  int64_t latency = getLatency(arch, cls);
+  int latency = getLatency(arch, cls);
 
-  int64_t fuReady = (fu == FunctionalUnit::None)
-                        ? 0
-                        : state.fuReadyAt[static_cast<size_t>(fu)];
-  int64_t issueAt = std::max(fuReady, operandReady);
+  int fuWait = (fu == FunctionalUnit::None)
+                   ? 0
+                   : state.fuPending[static_cast<size_t>(fu)];
+  int wait = std::max(fuWait, operandWait);
 
+  // Advance time by `wait` (saturating-decrement all pendings).
+  state.advance(wait);
+
+  // Issue: FU is occupied for 1 cycle; results pending = latency.
   if (fu != FunctionalUnit::None)
-    state.fuReadyAt[static_cast<size_t>(fu)] = issueAt + 1;
-
+    state.fuPending[static_cast<size_t>(fu)] = 1;
   for (Value r : op->getResults())
-    state.readyAt[r] = issueAt + latency;
+    state.valPending[r] = latency;
 
   return ChangeResult::Change;
+}
+
+// Compute the wait time `op` would incur given the relative state
+// just before it. Mirrors the wait computation in applyTransfer
+// but does not mutate. Used by the total-cycles accumulator.
+static int waitForOp(Operation *op, const MachineState &state,
+                     const ArchData &arch) {
+  SchedClass cls = classifyOp(op);
+  if (cls == SchedClass::NoInst)
+    return 0;
+  FunctionalUnit fu = funit(arch, cls);
+  int fuWait = (fu == FunctionalUnit::None)
+                   ? 0
+                   : state.fuPending[static_cast<size_t>(fu)];
+  int operandWait = 0;
+  for (Value v : op->getOperands()) {
+    auto it = state.valPending.find(v);
+    if (it != state.valPending.end())
+      operandWait = std::max(operandWait, it->second);
+  }
+  return std::max(fuWait, operandWait);
 }
 
 } // namespace
@@ -127,20 +155,35 @@ LogicalResult runPressureAnalysis(func::FuncOp func, const ArchData &arch,
   if (failed(solver.initializeAndRun(func)))
     return failure();
 
-  int64_t maxCycles = 0;
+  // Walk ops in program order and accumulate absolute cycles from
+  // the relative-pending state at each program-point-before. Loops
+  // are walked once at this stage (Stage 2 trip-count handling is
+  // a separate commit); the resulting cycle count is correct for
+  // straight-line code only.
+  int64_t absoluteCycle = 0;
+  int64_t maxCompletion = 0;
   func.walk([&](Operation *op) {
     if (op == func.getOperation())
       return;
     if (!isa<WaveAMDMachineDialect>(op->getDialect()))
       return;
-    ProgramPoint *pt = solver.getProgramPointAfter(op);
-    const auto *lat = solver.lookupState<MachineStateLattice>(pt);
-    if (!lat)
+    ProgramPoint *beforePt = solver.getProgramPointBefore(op);
+    ProgramPoint *afterPt = solver.getProgramPointAfter(op);
+    const auto *beforeLat = solver.lookupState<MachineStateLattice>(beforePt);
+    const auto *afterLat = solver.lookupState<MachineStateLattice>(afterPt);
+    if (!beforeLat || !afterLat)
       return;
-    out.perOpAfter[op] = lat->state;
-    maxCycles = std::max(maxCycles, lat->state.maxFuCycle());
+    int wait = waitForOp(op, beforeLat->state, arch);
+    absoluteCycle += wait;
+    int64_t issueAt = absoluteCycle;
+    SchedClass cls = classifyOp(op);
+    if (cls != SchedClass::NoInst) {
+      absoluteCycle += 1; // FU held for 1 issue cycle
+      maxCompletion = std::max(maxCompletion, issueAt + getLatency(arch, cls));
+    }
+    out.perOpAfter[op] = afterLat->state;
   });
-  out.totalCycles = maxCycles;
+  out.totalCycles = maxCompletion;
   return success();
 }
 

@@ -7,9 +7,15 @@
 //===----------------------------------------------------------------------===//
 //
 // MachineState is the lattice value carried at every program point
-// by the Stage 2 dense dataflow analysis. Fields are scoped to what
-// the scheduler actually consumes; counter modeling beyond
-// fuReadyAt comes with Stage 2C (loops + waitcnt-aware transfer).
+// by the Stage 2 dense dataflow analysis. Represented in
+// relative-cycles form -- fuPending[fu] = cycles until that
+// functional unit is next free from this point in time;
+// valPending[v] = cycles until value v is ready. Bounded above by
+// max-latency, so the lattice domain is finite and dataflow
+// reaches a fixed point naturally.
+//
+// Total cycles are accumulated separately during the walk, not
+// stored in the state. See PressureAnalysis.
 //
 //===----------------------------------------------------------------------===//
 
@@ -21,32 +27,30 @@
 #include "llvm/ADT/DenseMap.h"
 
 #include <array>
-#include <cstdint>
 
 namespace mlir::waveamdmachine {
 
-// Per-FU "next free" cycle vector + per-Value ready map. All
-// counts are absolute cycles since function entry (relative
-// origin = 0).
-//
-// Element-wise max is the lattice ordering; join = max. NoInst
-// and waitcnt-pseudo ops do not advance fuReadyAt but propagate
-// operand ready-cycles to their results so downstream data
-// dependencies stay correct.
+// Relative-cycles pressure: per-FU and per-Value "cycles until
+// free / ready" from this program point. All zero = nothing
+// pending. Element-wise max is the lattice ordering; join = max.
 struct MachineState {
-  std::array<int64_t, static_cast<size_t>(FunctionalUnit::NumFunctionalUnits)>
-      fuReadyAt = {};
-  llvm::DenseMap<mlir::Value, int64_t> readyAt;
+  std::array<int, static_cast<size_t>(FunctionalUnit::NumFunctionalUnits)>
+      fuPending = {};
+  llvm::DenseMap<mlir::Value, int> valPending;
 
   // Element-wise max join. Returns true iff any field changed.
   bool join(const MachineState &rhs);
 
-  // Equality on the full state (fuReadyAt + readyAt map).
   bool operator==(const MachineState &rhs) const;
   bool operator!=(const MachineState &rhs) const { return !(*this == rhs); }
 
-  // Max fuReadyAt over all FUs -- the "current cycle" upper bound.
-  int64_t maxFuCycle() const;
+  // Saturating-decrement all pendings by `w`. Drops valPending
+  // entries that reach <= 0. Models "time advances by w cycles".
+  void advance(int w);
+
+  // Max over fuPending. The "bottleneck FU is busy for at most
+  // this many more cycles" upper bound.
+  int maxFuPending() const;
 };
 
 } // namespace mlir::waveamdmachine
