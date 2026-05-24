@@ -125,6 +125,7 @@ tools = [
     ToolSubst("FileCheck", unresolved="fatal"),
     ToolSubst("count", unresolved="fatal"),
     ToolSubst("not", unresolved="fatal"),
+    ToolSubst("wave-calibrate-report", unresolved="fatal"),
     ToolSubst("wave-opt", unresolved="fatal"),
     ToolSubst("wave-symbols-test", unresolved="fatal"),
     ToolSubst("wave-translate", unresolved="fatal"),

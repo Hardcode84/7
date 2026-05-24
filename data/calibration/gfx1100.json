@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "arch": "gfx1100",
+  "device_name": "AMD Radeon Pro W7900 Dual Slot",
+  "rocm_version": "6.3.3-74",
+  "measured_at": "2026-05-24",
+  "harness": "tools/wave-microbench/wave-microbench.py --in-kernel-cycles",
+  "notes": "Initial scaffold from Stage 4. The infrastructure is wired (CalibrationData reads this file; wave-calibrate-report tool diffs it against the LLVM SISchedule.td defaults) but the per-class isolation campaign is still pending. The single composite measurement we have today (vmem_store_loop_timed.mlir: ~59 cycles per scf.for body iter, comprising 1x buffer_store_b32 + 1x v_add_nc_u32 + s_add_i32 + s_cmp_lt_i32 + s_cbranch_scc1) is NOT a per-class number and is intentionally left out of overrides until a dedicated per-class kernel suite lands (tracked separately).",
+  "overrides": {}
+}

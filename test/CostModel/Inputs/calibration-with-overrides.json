@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "arch": "gfx1100",
+  "device_name": "test-device",
+  "rocm_version": "test",
+  "measured_at": "2026-01-01",
+  "harness": "test",
+  "notes": "fixture for wave-calibrate-report LIT test",
+  "overrides": {
+    "WriteVMEM": {
+      "cycles": 80,
+      "kernel": "fixture.mlir",
+      "notes": "fictitious; for tool output formatting check"
+    },
+    "WriteSALU": {
+      "cycles": 4,
+      "kernel": "fixture.mlir",
+      "notes": "fictitious"
+    }
+  }
+}

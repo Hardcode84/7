@@ -1,5 +1,6 @@
 add_mlir_library(MLIRWaveAMDMachineCostModel
   ArchData.cpp
+  CalibrationData.cpp
   FunctionalUnit.cpp
   LatencyTable.cpp
   MachineState.cpp
