@@ -11,7 +11,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 //
 // CHECK-LABEL: func.func @duplicate_vgpr_init
 // CHECK: %[[INIT:.+]] = waveamdmachine.v_mov_b32_tuple {{.*}} {registers = 8 : i64} : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 8, {{[0-9]+}}>
-// CHECK: %[[DUP:.+]] = waveamdmachine.v_mov_b32_tuple %[[INIT]] {registers = 8 : i64} : (!waveamdmachine.reg<vgpr, 8, {{[0-9]+}}>) -> !waveamdmachine.reg<vgpr, 8, {{[0-9]+}}>
+// CHECK: %[[DUP:.+]] = waveamdmachine.v_mov_b32_tuple {{.*}} {registers = 8 : i64} : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 8, {{[0-9]+}}>
 // CHECK: waveamdmachine.uniform_loop {{.*}} carries(%{{[^,]+}}, %[[INIT]], %[[DUP]] : {{[^)]*}})
 func.func @duplicate_vgpr_init() attributes {wave.kernel} {
   %zero = waveamdmachine.imm 0 : !waveamdmachine.imm

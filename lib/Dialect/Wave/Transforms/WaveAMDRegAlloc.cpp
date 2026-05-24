@@ -494,6 +494,15 @@ struct WaveAMDRegAllocPass
     auto rt = cast<waveamdmachine::RegType>(v.getType());
     waveamdmachine::RegType resultType = waveamdmachine::RegType::get(
         rt.getContext(), rt.getRegClass(), rt.getWidth(), /*index=*/-1);
+    // Const fill (v_mov from imm): re-materialize the imm per tile, not
+    // copy the seed tile -- each acc zeroes independently instead of
+    // chaining off tile 0. cse merged them; reg-alloc must not collapse.
+    if (auto mov = v.getDefiningOp<waveamdmachine::VMovB32TupleOp>())
+      if (mov.getSource().getDefiningOp<waveamdmachine::ImmOp>()) {
+        Operation *clone = builder.clone(*mov);
+        clone->getResult(0).setType(resultType);
+        return clone->getResult(0);
+      }
     if (isVGPR(rt)) {
       auto copy =
           waveamdmachine::VMovB32TupleOp::create(builder, loc, resultType, v);
