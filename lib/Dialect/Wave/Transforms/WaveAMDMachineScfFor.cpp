@@ -87,8 +87,9 @@ LogicalResult snapshotScfCarries(WaveAMDMachineSelector &S, scf::ForOp op,
             "scf.for pointer iter arg has no WaveAMDMachine sidecar");
       Value flat = S.collapseTriple(op.getLoc(), offsetIt->second);
       bool isBuffer = S.pointerBuffers.lookup(initArg);
-      // global only: buffer base is an SRD, shared base is a const 0.
-      int64_t stride = !isBuffer && !S.isSharedPointer(initArg.getType())
+      // shared base is a const 0; global marches the SGPR base, buffer
+      // marches soffset. LDS skipped.
+      int64_t stride = !S.isSharedPointer(initArg.getType())
                            ? stridedCarryBytes(S, op, idx)
                            : 0;
       out.push_back({CarrySnapshot::Kind::Pointer, flat, baseIt->second,
@@ -248,8 +249,16 @@ LogicalResult selectScfFor(WaveAMDMachineSelector &S, scf::ForOp op) {
   for (auto [idx, snap] : llvm::enumerate(snapshots)) {
     if (snap.kind != CarrySnapshot::Kind::Pointer || snap.strideBytes == 0)
       continue;
-    S.pointerBases[op.getRegionIterArgs()[idx]] = recomputeStridedBase(
-        S, loc, snap.base, loopBody.getArgument(0), snap.strideBytes);
+    Value scfArg = op.getRegionIterArgs()[idx];
+    Value iv = loopBody.getArgument(0);
+    if (snap.isBuffer) {
+      // soffset bucket exists on buffer ops: march there, base SRD fixed.
+      S.pointerOffsets[scfArg].soffset = S.mulUniformValues(
+          loc, iv, createImm(S.builder, loc, snap.strideBytes));
+      continue;
+    }
+    S.pointerBases[scfArg] =
+        recomputeStridedBase(S, loc, snap.base, iv, snap.strideBytes);
   }
   if (failed(selectScfBody(S, op)))
     return failure();
