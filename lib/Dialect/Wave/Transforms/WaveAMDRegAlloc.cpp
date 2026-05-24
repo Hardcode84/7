@@ -536,6 +536,21 @@ struct WaveAMDRegAllocPass
   //                    merging the source's interval would pull
   //                    its other slots into positions this
   //                    from_elements wants to fill with fresh ops.
+  // True when `v` is a uniform_loop carry value: the coalescer aliases
+  // init / block arg / result / continue carry onto one offset-0
+  // interval, so any other pin (a tuple slot) would split that interval.
+  static bool feedsLoopCarry(Value v) {
+    if (auto arg = dyn_cast<BlockArgument>(v))
+      if (isa<waveamdmachine::UniformLoopOp>(arg.getOwner()->getParentOp()))
+        return true;
+    if (v.getDefiningOp<waveamdmachine::UniformLoopOp>())
+      return true;
+    return llvm::any_of(v.getUsers(), [](Operation *u) {
+      return isa<waveamdmachine::UniformLoopOp, waveamdmachine::ContinueIfOp>(
+          u);
+    });
+  }
+
   using ToElementsSourceMap = DenseMap<Value, std::pair<Value, unsigned>>;
 
   // Perfect identity round-trip: every operand is anchored at the
@@ -595,7 +610,10 @@ struct WaveAMDRegAllocPass
           anchorIt != anchorSlot.end() && anchorIt->second != slot;
       bool reuse = consumedByFromElements.contains(element);
       bool dragInConflict = !perfectRT && toElementsSource.contains(element);
-      if (slotMismatch || reuse || dragInConflict) {
+      // A loop-carry value (init/arg/result/continue) is already pinned
+      // to its carry's interval at offset 0; pinning it here at slot
+      // would fight the carry coalescer and split the carry. Copy.
+      if (slotMismatch || reuse || dragInConflict || feedsLoopCarry(element)) {
         FailureOr<Value> dup = duplicateRegValue(builder, op.getLoc(), element);
         if (failed(dup))
           return failure();
