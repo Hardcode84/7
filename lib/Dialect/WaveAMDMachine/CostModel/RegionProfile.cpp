@@ -183,17 +183,9 @@ static SmallVector<int> regionBoundaries(ArrayRef<RegionProfile> regions) {
   return b;
 }
 
-} // namespace
-
-PingpongPick scorePingpongDelay(ArrayRef<RegionProfile> regions,
-                                const ArchData &arch, int delay) {
-  PingpongPick pick;
-  pick.delay = delay;
-  if (regions.empty())
-    return pick;
-  FuTimeline tl = buildTimeline(regions);
-  // Event cycles to evaluate: every segment boundary from wave 0
-  // and the same boundaries shifted by `delay` for wave 1.
+// Gather all segment-boundary event times from wave 0 and wave 1
+// shifted by `delay`. Sorted and uniqued.
+static SmallVector<int> gatherEvents(const FuTimeline &tl, int delay) {
   SmallVector<int> events;
   for (size_t fu = 0; fu < kNumFUs; ++fu) {
     for (const Segment &s : tl[fu]) {
@@ -205,6 +197,47 @@ PingpongPick scorePingpongDelay(ArrayRef<RegionProfile> regions,
   }
   llvm::sort(events);
   events.erase(std::unique(events.begin(), events.end()), events.end());
+  return events;
+}
+
+// Time-averaged utilisation of `target` over the combined run.
+// Each piecewise-constant segment between consecutive events
+// contributes (busy density capped at bandwidth) * span; divide
+// by total span * bandwidth.
+static double avgTargetUtil(const FuTimeline &tl, ArrayRef<int> events,
+                            int delay, FunctionalUnit target,
+                            const ArchData &arch) {
+  if (events.size() < 2)
+    return 0.0;
+  double bw = fuBandwidth(target, arch);
+  if (bw <= 0.0)
+    return 0.0;
+  int runStart = events.front();
+  int runEnd = events.back();
+  if (runEnd <= runStart)
+    return 0.0;
+  double busyArea = 0.0;
+  for (size_t i = 1; i < events.size(); ++i) {
+    int span = events[i] - events[i - 1];
+    int tMid = events[i - 1] + span / 2;
+    double combined =
+        densityAt(tl, target, tMid) + densityAt(tl, target, tMid - delay);
+    busyArea += std::min(combined, bw) * span;
+  }
+  return busyArea / (static_cast<double>(runEnd - runStart) * bw);
+}
+
+} // namespace
+
+PingpongPick scorePingpongDelay(ArrayRef<RegionProfile> regions,
+                                const ArchData &arch, int delay,
+                                std::optional<FunctionalUnit> targetFU) {
+  PingpongPick pick;
+  pick.delay = delay;
+  if (regions.empty())
+    return pick;
+  FuTimeline tl = buildTimeline(regions);
+  SmallVector<int> events = gatherEvents(tl, delay);
 
   for (int t : events) {
     for (size_t fu = 0; fu < kNumFUs; ++fu) {
@@ -221,20 +254,17 @@ PingpongPick scorePingpongDelay(ArrayRef<RegionProfile> regions,
       }
     }
   }
+
+  if (targetFU)
+    pick.targetFuAvgUtil = avgTargetUtil(tl, events, delay, *targetFU, arch);
   return pick;
 }
 
-PingpongPick findOptimalPingpongDelay(ArrayRef<RegionProfile> regions,
-                                      const ArchData &arch) {
-  PingpongPick best;
-  best.predictedPeakUtil = std::numeric_limits<double>::infinity();
-  if (regions.empty()) {
-    best.predictedPeakUtil = 0.0;
-    return best;
-  }
-  // Candidate D values = pairwise differences of region-boundary
-  // cycles. O(N^2) candidates; for typical N=10..20 that's
-  // hundreds, sub-millisecond per scoring call.
+namespace {
+
+// Candidate D values = pairwise differences of region-boundary
+// cycles. O(N^2) candidates; for typical N=10..20 that's hundreds.
+static SmallVector<int> gatherDelayCandidates(ArrayRef<RegionProfile> regions) {
   SmallVector<int> boundaries = regionBoundaries(regions);
   SmallVector<int> candidates;
   for (int b0 : boundaries)
@@ -244,13 +274,55 @@ PingpongPick findOptimalPingpongDelay(ArrayRef<RegionProfile> regions,
   llvm::sort(candidates);
   candidates.erase(std::unique(candidates.begin(), candidates.end()),
                    candidates.end());
+  return candidates;
+}
 
+static PingpongPick searchMinPeak(ArrayRef<RegionProfile> regions,
+                                  const ArchData &arch,
+                                  ArrayRef<int> candidates) {
+  PingpongPick best;
+  best.predictedPeakUtil = std::numeric_limits<double>::infinity();
   for (int d : candidates) {
     PingpongPick pick = scorePingpongDelay(regions, arch, d);
     if (pick.predictedPeakUtil < best.predictedPeakUtil)
       best = pick;
   }
   return best;
+}
+
+static PingpongPick searchMaxTarget(ArrayRef<RegionProfile> regions,
+                                    const ArchData &arch,
+                                    ArrayRef<int> candidates,
+                                    const PingpongObjective &obj) {
+  PingpongPick best;
+  best.predictedPeakUtil = std::numeric_limits<double>::infinity();
+  PingpongPick bestUnderCap;
+  bestUnderCap.targetFuAvgUtil = -1.0;
+  for (int d : candidates) {
+    PingpongPick pick = scorePingpongDelay(regions, arch, d, obj.maximizeFU);
+    if (pick.predictedPeakUtil < best.predictedPeakUtil)
+      best = pick;
+    if (pick.predictedPeakUtil <= obj.peakCap &&
+        pick.targetFuAvgUtil > bestUnderCap.targetFuAvgUtil)
+      bestUnderCap = pick;
+  }
+  // Fall back to min-peak if no D satisfies the cap.
+  return bestUnderCap.targetFuAvgUtil >= 0.0 ? bestUnderCap : best;
+}
+
+} // namespace
+
+PingpongPick findOptimalPingpongDelay(ArrayRef<RegionProfile> regions,
+                                      const ArchData &arch,
+                                      PingpongObjective obj) {
+  if (regions.empty()) {
+    PingpongPick pick;
+    return pick;
+  }
+  SmallVector<int> candidates = gatherDelayCandidates(regions);
+  if (obj.maximizeFU)
+    return searchMaxTarget(regions, arch, candidates, obj);
+  return searchMinPeak(regions, arch, candidates);
 }
 
 SmallVector<RegionProfile>

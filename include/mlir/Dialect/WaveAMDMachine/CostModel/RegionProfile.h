@@ -23,6 +23,7 @@
 #include "llvm/ADT/SmallVector.h"
 
 #include <array>
+#include <optional>
 
 namespace mlir {
 class Operation;
@@ -72,27 +73,48 @@ partitionRegions(func::FuncOp func, const PressureAnalysisResult &dataflow,
                  const ArchData &arch, int windowSize = 16,
                  double fuzzyMargin = 0.2);
 
-// Result of the ping-pong delay search: the best D to stagger wave 1
-// against wave 0, the predicted peak FU utilisation under that D
-// (1.0 = saturated, >1 = bottleneck), and which FU is the
-// bottleneck.
+// Result of the ping-pong delay search.
 struct PingpongPick {
   int delay = 0;
+
+  // Worst FU load across the combined timeline at this D.
+  // 1.0 = saturated, >1 = bottleneck (oversubscribed contention).
   double predictedPeakUtil = 0.0;
+
+  // FU that hits predictedPeakUtil.
   FunctionalUnit bottleneckFU = FunctionalUnit::None;
+
+  // If the search had a target FU (PingpongObjective::maximizeFU
+  // set), this is its time-averaged utilisation under this D.
+  // [0, 1] where 1.0 means the target pipe is fully busy
+  // throughout the combined run. 0.0 if no target was set.
+  double targetFuAvgUtil = 0.0;
 };
 
-// Score a specific delay D for two waves running the same kernel.
-// Returns the peak FU utilisation across the combined timeline.
-PingpongPick scorePingpongDelay(ArrayRef<RegionProfile> regions,
-                                const ArchData &arch, int delay);
+// What the search is optimising for. Default = minimise overall
+// peak; with maximizeFU set, instead maximise that FU's avg
+// utilisation among Ds whose overall peak doesn't exceed peakCap.
+struct PingpongObjective {
+  std::optional<FunctionalUnit> maximizeFU;
+  double peakCap = 1.0;
+};
 
-// Search over candidate D values (region-boundary alignments) and
-// return the one that minimises peak FU utilisation. 2-wave
-// specialisation; the same convolution generalises to N waves
-// when that becomes needed.
+// Score a specific delay D. If targetFU is set, also computes the
+// target's avg utilisation; otherwise targetFuAvgUtil stays 0.
+PingpongPick
+scorePingpongDelay(ArrayRef<RegionProfile> regions, const ArchData &arch,
+                   int delay,
+                   std::optional<FunctionalUnit> targetFU = std::nullopt);
+
+// Search over candidate D values (region-boundary alignments).
+// Without maximizeFU: returns the D with the lowest overall peak.
+// With maximizeFU: returns the D that maximises target FU's avg
+// utilisation among Ds whose overall peak <= obj.peakCap; falls
+// back to min-peak if no D satisfies the constraint.
+// 2-wave specialisation; same convolution generalises to N waves.
 PingpongPick findOptimalPingpongDelay(ArrayRef<RegionProfile> regions,
-                                      const ArchData &arch);
+                                      const ArchData &arch,
+                                      PingpongObjective obj = {});
 
 } // namespace mlir::waveamdmachine
 
