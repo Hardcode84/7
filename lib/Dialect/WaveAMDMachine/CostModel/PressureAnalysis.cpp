@@ -241,8 +241,12 @@ LogicalResult runPressureAnalysis(func::FuncOp func, const ArchData &arch,
   if (failed(solver.initializeAndRun(func)))
     return failure();
 
-  // Walk ops in program order and accumulate absolute cycles
-  // from the relative-pending cold state at each program point.
+  // Walk ops in program order; track absoluteCycle from the
+  // relative-pending cold state at each program-point-before.
+  // The "1 cycle of issue slot" doesn't need an explicit advance
+  // here -- the after-lattice's fuPending=1 already captures it,
+  // and the next op's waitForOp reads that. For the trailing op
+  // the latency contribution is captured via issueAt + latency.
   // Loops walked once at this stage; trip-count multiplication
   // is a follow-up commit.
   int64_t absoluteCycle = 0;
@@ -262,10 +266,8 @@ LogicalResult runPressureAnalysis(func::FuncOp func, const ArchData &arch,
     absoluteCycle += wait;
     int64_t issueAt = absoluteCycle;
     SchedClass cls = classifyOp(op);
-    if (cls != SchedClass::NoInst) {
-      absoluteCycle += 1;
+    if (cls != SchedClass::NoInst)
       maxCompletion = std::max(maxCompletion, issueAt + getLatency(arch, cls));
-    }
     out.perOpCold[op] = afterLat->cold;
     out.perOpHot[op] = afterLat->hot;
   });

@@ -9,7 +9,14 @@
 #include "mlir/Dialect/Wave/IR/Wave.h"
 
 #include "mlir/Dialect/Wave/IR/WaveMeta.h"
+#include "mlir/Dialect/WaveAMDMachine/CostModel/ArchData.h"
+#include "mlir/Dialect/WaveAMDMachine/CostModel/FunctionalUnit.h"
+#include "mlir/Dialect/WaveAMDMachine/CostModel/OpClassifier.h"
+#include "mlir/Dialect/WaveAMDMachine/CostModel/PressureAnalysis.h"
+#include "mlir/Dialect/WaveAMDMachine/CostModel/SchedClass.h"
+#include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachine.h"
 
+#include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Transform/IR/TransformDialect.h"
 #include "mlir/Dialect/Transform/IR/TransformOps.h"
 #include "mlir/Dialect/Transform/Interfaces/TransformInterfaces.h"
@@ -22,6 +29,7 @@
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/Parallel.h"
+#include "llvm/TargetParser/TargetParser.h"
 #include <limits>
 
 #define GET_OP_CLASSES
@@ -50,6 +58,162 @@ void wave::TransformGetIntAttrOp::getEffects(
     SmallVectorImpl<MemoryEffects::EffectInstance> &effects) {
   transform::onlyReadsHandle(getTargetMutable(), effects);
   transform::producesHandle(getOperation()->getOpResults(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// wave.transform.estimate_cycles + wave.transform.pressure_report
+//===----------------------------------------------------------------------===//
+
+namespace {
+
+// Find the nearest enclosing module's `waveamdmachine.target`
+// string and extract the chip (after the last "--"). Returns
+// empty if no enclosing module carries the attribute.
+static llvm::StringRef readChipFromEnclosingModule(Operation *op) {
+  ModuleOp mod = op->getParentOfType<ModuleOp>();
+  if (!mod)
+    mod = dyn_cast<ModuleOp>(op);
+  while (mod) {
+    if (auto attr = mod->getAttrOfType<StringAttr>("waveamdmachine.target")) {
+      llvm::StringRef target = attr.getValue();
+      size_t pos = target.rfind("--");
+      if (pos != llvm::StringRef::npos)
+        return target.drop_front(pos + 2);
+      return target;
+    }
+    mod = mod->getParentOfType<ModuleOp>();
+  }
+  return {};
+}
+
+// Resolve `target` payload op to an ArchData. Failure if no
+// enclosing module has `waveamdmachine.target` or if the chip
+// names an unsupported arch.
+static FailureOr<const waveamdmachine::ArchData *>
+resolveArch(Operation *target) {
+  llvm::StringRef chip = readChipFromEnclosingModule(target);
+  if (chip.empty())
+    return failure();
+  llvm::AMDGPU::IsaVersion isa = llvm::AMDGPU::getIsaVersion(chip);
+  if (!waveamdmachine::isArchSupported(isa))
+    return failure();
+  return &waveamdmachine::getArchData(isa);
+}
+
+// Sum totalCycles across all func.func in a target. For a single
+// func target this is just that func's cycles.
+static FailureOr<int64_t> sumFuncCycles(Operation *target,
+                                        const waveamdmachine::ArchData &arch) {
+  int64_t total = 0;
+  auto runOne = [&](func::FuncOp f) -> LogicalResult {
+    waveamdmachine::PressureAnalysisResult res;
+    if (failed(waveamdmachine::runPressureAnalysis(f, arch, res)))
+      return failure();
+    total += res.totalCycles;
+    return success();
+  };
+  if (auto f = dyn_cast<func::FuncOp>(target))
+    return failed(runOne(f)) ? FailureOr<int64_t>(failure())
+                             : FailureOr<int64_t>(total);
+  WalkResult walk = target->walk([&](func::FuncOp f) {
+    return failed(runOne(f)) ? WalkResult::interrupt() : WalkResult::advance();
+  });
+  if (walk.wasInterrupted())
+    return failure();
+  return total;
+}
+
+} // namespace
+
+DiagnosedSilenceableFailure
+wave::TransformEstimateCyclesOp::apply(transform::TransformRewriter &rewriter,
+                                       transform::TransformResults &results,
+                                       transform::TransformState &state) {
+  Builder b(getContext());
+  SmallVector<Attribute> values;
+  for (Operation *target : state.getPayloadOps(getTarget())) {
+    auto arch = resolveArch(target);
+    if (failed(arch))
+      return emitDefiniteFailure()
+             << "target has no enclosing module with `waveamdmachine.target` "
+                "or arch is unsupported";
+    auto cycles = sumFuncCycles(target, **arch);
+    if (failed(cycles))
+      return emitDefiniteFailure() << "PressureAnalysis failed on target";
+    values.push_back(b.getI64IntegerAttr(*cycles));
+  }
+  results.setParams(cast<OpResult>(getResult()), values);
+  return DiagnosedSilenceableFailure::success();
+}
+
+void wave::TransformEstimateCyclesOp::getEffects(
+    SmallVectorImpl<MemoryEffects::EffectInstance> &effects) {
+  transform::onlyReadsHandle(getTargetMutable(), effects);
+  transform::producesHandle(getOperation()->getOpResults(), effects);
+}
+
+namespace {
+
+// Walk wave.amd.machine ops in `target` (a func or module);
+// accumulate issue cycles per FU from classifier + funit. Pure
+// static walk -- no dataflow needed.
+static llvm::DenseMap<waveamdmachine::FunctionalUnit, int64_t>
+computePerFuCycles(Operation *target, const waveamdmachine::ArchData &arch) {
+  llvm::DenseMap<waveamdmachine::FunctionalUnit, int64_t> counts;
+  target->walk([&](Operation *op) {
+    if (op == target)
+      return;
+    if (!isa<waveamdmachine::WaveAMDMachineDialect>(op->getDialect()))
+      return;
+    waveamdmachine::SchedClass cls = waveamdmachine::classifyOp(op);
+    if (cls == waveamdmachine::SchedClass::NoInst)
+      return;
+    waveamdmachine::FunctionalUnit fu = waveamdmachine::funit(arch, cls);
+    if (fu == waveamdmachine::FunctionalUnit::None)
+      return;
+    counts[fu] += 1;
+  });
+  return counts;
+}
+
+} // namespace
+
+DiagnosedSilenceableFailure
+wave::TransformPressureReportOp::apply(transform::TransformRewriter &rewriter,
+                                       transform::TransformResults &results,
+                                       transform::TransformState &state) {
+  Builder b(getContext());
+  StringAttr attrName = b.getStringAttr(getAttrName());
+  for (Operation *target : state.getPayloadOps(getTarget())) {
+    auto arch = resolveArch(target);
+    if (failed(arch))
+      return emitDefiniteFailure()
+             << "target has no enclosing module with `waveamdmachine.target` "
+                "or arch is unsupported";
+    auto counts = computePerFuCycles(target, **arch);
+    SmallVector<NamedAttribute> entries;
+    for (int i = 0; i < static_cast<int>(
+                            waveamdmachine::FunctionalUnit::NumFunctionalUnits);
+         ++i) {
+      auto fu = static_cast<waveamdmachine::FunctionalUnit>(i);
+      if (fu == waveamdmachine::FunctionalUnit::None)
+        continue;
+      auto it = counts.find(fu);
+      if (it == counts.end())
+        continue;
+      entries.emplace_back(
+          b.getStringAttr(waveamdmachine::getFunctionalUnitName(fu)),
+          b.getI64IntegerAttr(it->second));
+    }
+    target->setAttr(attrName, b.getDictionaryAttr(entries));
+  }
+  return DiagnosedSilenceableFailure::success();
+}
+
+void wave::TransformPressureReportOp::getEffects(
+    SmallVectorImpl<MemoryEffects::EffectInstance> &effects) {
+  transform::onlyReadsHandle(getTargetMutable(), effects);
+  transform::modifiesPayload(effects);
 }
 
 DiagnosedSilenceableFailure

@@ -126,4 +126,67 @@ def Wave_TransformBindParamOp
   }];
 }
 
+// Runs Stage 2's dense-dataflow PressureAnalysis on each payload
+// op (func.func or builtin.module) and yields totalCycles as a
+// `!transform.param<i64>`. The arch is read from the enclosing
+// module's `waveamdmachine.target` attribute (set by
+// `wave-set-target-attr`). For module targets, the result is the
+// sum over contained funcs.
+//
+// totalCycles is currently a straight-line accumulator -- loop
+// bodies walked once. Trip-count multiplication lands separately;
+// callers should treat the number as ranking-grade until then.
+def Wave_TransformEstimateCyclesOp
+    : Op<Wave_Dialect, "transform.estimate_cycles", [
+        DeclareOpInterfaceMethods<MemoryEffectsOpInterface>,
+        DeclareOpInterfaceMethods<TransformOpInterface>]> {
+  let summary = "Single-wave cycle estimate as a transform param";
+  let description = [{
+    For each payload op associated with `$target`, run the
+    PressureAnalysis dataflow and append the resulting totalCycles
+    to the output parameter. Target ops must be `func.func` or
+    `builtin.module` (for modules, the result is the sum over
+    contained funcs). Reads the arch from the enclosing module's
+    `waveamdmachine.target` attribute.
+
+    Definite failure if the attribute is missing or names an
+    unsupported arch.
+  }];
+  let arguments = (ins TransformHandleTypeInterface:$target);
+  let results = (outs TransformParamTypeInterface:$result);
+  let assemblyFormat = [{
+    `from` $target attr-dict `:` functional-type($target, $result)
+  }];
+}
+
+// Attaches a per-FU issue-cycle dictionary to each payload op. Useful
+// for the scheduler (Stage 8) and for diagnostics. Static walk over
+// the op tape -- counts each op as `1` cycle on its FU (per the
+// classifier + funit map). Total cycles separately accumulated; see
+// `wave.transform.estimate_cycles`.
+def Wave_TransformPressureReportOp
+    : Op<Wave_Dialect, "transform.pressure_report", [
+        DeclareOpInterfaceMethods<MemoryEffectsOpInterface>,
+        DeclareOpInterfaceMethods<TransformOpInterface>]> {
+  let summary = "Stamp a per-FU issue-cycle dict onto each payload op";
+  let description = [{
+    For each payload op associated with `$target` (func.func or
+    builtin.module), walks contained wave.amd.machine ops and
+    counts issue cycles per FunctionalUnit. Stamps the result as
+    a DictionaryAttr at `$attr_name` (default
+    `wave.pressure_report`). For modules, the dict aggregates over
+    all contained funcs.
+
+    Definite failure if the enclosing module's `waveamdmachine.target`
+    attribute is missing or names an unsupported arch.
+  }];
+  let arguments = (ins TransformHandleTypeInterface:$target,
+                       DefaultValuedStrAttr<StrAttr, "wave.pressure_report">:$attr_name);
+  let results = (outs);
+  let assemblyFormat = [{
+    `from` $target (`as` $attr_name^)? attr-dict
+        `:` functional-type(operands, results)
+  }];
+}
+
 #endif // MLIR_DIALECT_WAVE_IR_WAVETRANSFORMOPS_TD

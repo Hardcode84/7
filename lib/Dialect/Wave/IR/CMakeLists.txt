@@ -14,6 +14,7 @@ add_mlir_dialect_library(MLIRWaveDialect
 
   LINK_LIBS PUBLIC
   MLIRArithDialect
+  MLIRFuncDialect
   MLIRGPUDialect
   MLIRInferIntRangeCommon
   MLIRInferIntRangeInterface
@@ -22,6 +23,7 @@ add_mlir_dialect_library(MLIRWaveDialect
   MLIRSideEffectInterfaces
   MLIRTransformDialect
   MLIRTransformDialectInterfaces
+  MLIRWaveAMDMachineCostModel
   WaveIXSimpl
   )
 
