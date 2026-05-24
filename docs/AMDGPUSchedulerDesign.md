@@ -25,8 +25,8 @@ wave.amd.machine.func
 +---------------------+    | (SchedModel + HW overrides) |
 | Dense dataflow      |<---+-----------------------------+
 | analysis            |
-| (MachineState       |
-|  lattice per        |
+| (MachineState cold/ |
+|  hot lattice per    |
 |  program point)     |
 +---------------------+
         |
@@ -35,11 +35,20 @@ wave.amd.machine.func
         |
         v
 +---------------------+
-| Multi-wave issue    | (Stage 5: layered on top of the
-| simulator           |  per-program-point lattice)
+| RegionProfile +     | (Stage 5: auto-partition into
+| ping-pong delay     |  per-FU regions; convolution to
+| search              |  find optimal stagger D)
 +---------------------+
         |
-        +--> per-wave timeline   (ATT calibration target)
+        +--> peak-util score     (autotune score for
+        |                         ping-pong configs)
+        +--> stagger insertion   (wave_id-conditional
+                                  barrier or s_sleep)
+
++---------------------+
+| Event simulator     |  (Stage 6: cycle-accurate, ATT
+| + wave-sim-vs-att   |   calibration target, NOT in
++---------------------+   autotune hot path)
 
 +---------------------+
 | List scheduler pass |--+
@@ -49,15 +58,21 @@ wave.amd.machine.func
 +---------------------+--+
 ```
 
-Three artifacts, built in order: **data spine** (static per-arch
+Four artifacts, built in order: **data spine** (static per-arch
 parameters + per-FU resource map + HW-calibrated overrides),
-**dataflow analysis** (per-program-point MachineState lattice),
+**dataflow analysis** (per-program-point cold/hot lattice),
+**region profile + multi-wave queries** (auto-partition into
+per-FU regions; analytic ping-pong delay; stagger insertion),
 **scheduler** (cost = pressure delta from re-running the analysis
-on a candidate ordering). The dataflow output also feeds the
-multi-wave simulator in Stage 5. Surfaced into the
-transform-dialect pipeline as `wave.transform.estimate_cycles`
-(total) and `wave.transform.pressure_report` (per-region detail);
-the scheduler is `wave.transform.schedule`.
+on a candidate ordering). The cycle-accurate event simulator is
+a Stage 6 calibration tool, not the primary multi-wave model.
+
+Surfaced into the transform-dialect pipeline as
+`wave.transform.estimate_cycles` (total),
+`wave.transform.pressure_report` (per-region detail),
+`wave.transform.pingpong_score` (optimal `D` + predicted peak),
+`wave.transform.insert_pingpong_stagger` (writes the staggering
+primitive); the scheduler is `wave.transform.schedule`.
 
 ## Scope and non-goals
 
@@ -448,114 +463,253 @@ populated from microbench measurements.
 loop-relative measurement -- run the same body N and 2N times,
 subtract.
 
-## Stage 5: multi-wave issue simulator
+## Stage 5: region profile + multi-wave queries
 
-**Goal.** Cycle-by-cycle simulator with per-SIMD round-robin and
-per-wave ready queues. Builds on Stage 2's per-program-point
-`MachineState` lattice -- the simulator runs N copies of the
-single-wave state (one per coresident wave), arbitrates between
-them per SIMD cycle, and shares the data spine + per-FU resource
-map.
+**Goal.** A per-region per-FU "FU-cycle matrix" over the kernel,
+plus the small set of analytic queries the autotune loop and
+scheduler actually consume. Replaces a cycle-by-cycle multi-wave
+simulator -- the autotune use cases (ping-pong delay selection,
+block partitioning for overlap, peak-utilisation scoring) don't
+need cycle-accurate simulation; they need an integrated per-FU
+profile they can convolve.
 
-**Deliverable.** `IssueSimulator.cpp`:
+The cycle-accurate / event-driven simulator still has a role,
+but as a Stage 6 calibration target against ATT, not as the
+primary cost function. Demoted from "the multi-wave model" to
+"the ground-truth oracle for tuning the analytical model".
+
+### RegionProfile
+
 ```cpp
-struct SimConfig {
-  ArchData arch;
-  int wavesPerSIMD;       // from regalloc / occupancy.
-  int activeSIMDs;        // usually arch.simdsPerCU.
-  WavePriority initialPrio;
+struct RegionProfile {
+  Operation *begin;   // first op of the region
+  Operation *end;     // one-past-last op
+  std::array<int, NumFunctionalUnits> fuCycles;  // issue cycles per FU
+  int totalIssueCycles;       // sum of fuCycles
+  int totalWallCycles;        // including waits, from Stage 2 dataflow
+  FunctionalUnit dominantFU;
 };
-int64_t simulate(ArrayRef<WaveTrace> waves, SimConfig);
 ```
 
-`WaveTrace` is the linear op list with SchedClass + operand deps
-pre-computed by Stage 1's classifier.
+`fuCycles[fu]` = sum over ops in the region of `1` if
+`funit(op) == fu`. (Multi-cycle ops contribute their latency,
+not their issue slot count; the issue slot is `1` per op.) The
+fact that `RegionProfile` mixes a static-walk artifact
+(`fuCycles`) with a dataflow-derived field (`totalWallCycles`)
+is fine -- they're queried at the same boundary.
 
-**Simulator state.**
-- Per-SIMD: round-robin pointer over its coresident waves.
-- Per-wave: PC, ready-cycle-per-VGPR map, waitcnt counters
-  (`loadcnt`, `dscnt`, `expcnt`, `storecnt` plus GFX12-split
-  variants), current priority.
-- Per-CU: issued-this-cycle counter capped at
-  `arch.issuesPerCUPerCycle`.
+### Auto-partitioning
 
-**Main loop.**
+Region boundaries are mostly automatic. The detector walks ops
+in program order with a sliding window of `W` ops, computes the
+window-dominant FU at each step, and emits a boundary when the
+dominant FU changes across two consecutive windows with
+sufficient margin:
+
 ```
-for cycle in 0..:
-  for simd in round_robin(simds):
-    if cycle % arch.simdIssuePeriod != 0: continue
-    wave = pick_wave(simd, priority_biased_round_robin)
-    op = wave's next op if (waitcnt + operand deps satisfied)
-    if op: issue(op); update waitcnts; schedule completion event;
-           charge per-class latency; advance wave.PC
-  process_completion_events(cycle)
-  if all_waves_done: break
-return cycle
+W = 16            (tunable; bigger = smoother, fewer regions)
+fuzzy_margin = 0.2 (dominant must beat second-best by 20% of cycles)
+
+for op in func.walk:
+  window.push(op); window.pop_if_full()
+  curr_dom = argmax(window.fuCycles)
+  if curr_dom != last_dom and margin(window) > fuzzy_margin:
+    emit_boundary_at(op)
+    last_dom = curr_dom
 ```
 
-**Memory latency model.** When a VMEM op issues, schedule a
-load-complete event at `cycle + WriteVMEM_latency`. The event
-decrements `loadcnt` for that wave. Latency from the data spine;
-calibrated by Stage 3's VMEM kernel.
+Explicit `sched_barrier(0)` ops in the input still emit forced
+boundaries -- kernel-author intent overrides auto-detection.
+Calibration: re-run the partitioner on the CK / HipKittens
+production kernels and check that auto-detected boundaries
+match the hand-placed `sched_barrier(0)` boundaries. The
+defaults for `W` and `fuzzy_margin` are chosen to reproduce
+human placement on the matmul and FA-CK templates.
 
-**Wave-priority handling.** Higher prio biases the per-SIMD wave
-pick weights; does not exclude lower-prio waves. Initial weight
-ratio: 2x per priority level. Refined against ATT data in Stage 6.
+### Optimal-delay search (ping-pong)
 
-**Validation gate.** Run multi-wave kernels at occupancy 1, 2, 4
-waves/SIMD on gfx11; compare measured vs predicted. Pass:
-**ranking is monotone correct** across occupancy levels
-(predicted cycles(occ=1) > cycles(occ=2) > cycles(occ=4) matches
-measurement even if absolute numbers drift). Tighter is better;
-ranking is the bar.
+Per-region `fuCycles` casts to a per-cycle FU-activity timeline
+by distributing the issues uniformly over the region's wall
+cycles (square-wave approximation; sufficient for autotune
+scoring, refined to op-exact for ATT calibration). Then for a
+candidate delay `D`:
 
-## Stage 6: ATT integration
+```
+combined[t][fu] = wave0_profile[t][fu] + wave1_profile[t - D][fu]
+peak[D]         = max over t and fu of
+                   combined[t][fu] / fu_bandwidth[fu]
+```
+
+`fu_bandwidth[fu]` = per-cycle issue capacity (1 for VALU on
+RDNA, 1/`simdIssuePeriod` for CDNA wave64 on the same pipe,
+etc., from ArchData).
+
+Candidate `D` values aren't every integer cycle -- only the
+alignments where the convolution overlap structure changes,
+which means region boundaries of wave 0 vs wave 1. For an N-
+region kernel that's O(N) candidates per pair, dozens to
+hundreds total. Sub-millisecond per scoring call.
+
+Public API:
+
+```cpp
+struct PingpongPick {
+  int delay;                // cycles to stagger wave 1 vs wave 0
+  double predictedPeakUtil; // peak / bandwidth -- 1.0 = saturated, >1 = bottleneck
+  FunctionalUnit bottleneckFU;
+};
+
+PingpongPick findOptimalPingpongDelay(ArrayRef<RegionProfile> regions,
+                                      const ArchData &arch);
+```
+
+Generalises to N waves at arbitrary offsets via the same
+convolution shape; the 2-wave specialisation is the
+common-case entry point.
+
+### Stagger insertion
+
+Once `D` is picked, a transform-dialect op writes the staggering
+primitive into the IR:
+
+```mlir
+wave.transform.insert_pingpong_stagger %target [delay = %d]
+    : (!transform.any_op, !transform.param<i64>) -> ()
+```
+
+Mechanism choice:
+- **Barrier-conditional** (preferred when `D` snaps to a region
+  boundary). Emits a `wave_id`-predicated `s_barrier` so
+  one wave-group passes through while the other stalls. Matches
+  the production CK / HipKittens 8-wave pattern.
+- **`s_sleep N`** (when `D` falls between barrier boundaries).
+  Hard cycle delay, exact `D`; can loop for `D > 32K` cycles.
+
+For exact-`D` requests the op picks barrier-conditional if a
+region boundary is within `simdIssuePeriod` cycles of `D`, else
+falls back to `s_sleep`.
+
+### Autotune wiring
+
+Two new transform-dialect ops feed the autotune body sequence:
+
+```mlir
+%d, %peak = wave.transform.pingpong_score from %mod waves = 2
+    : (!transform.any_op) -> (!transform.param<i64>, !transform.param<i64>)
+
+wave.transform.insert_pingpong_stagger %mod delay = %d
+    : (!transform.any_op, !transform.param<i64>) -> ()
+
+%cycles = wave.transform.estimate_cycles from %mod
+    : (!transform.any_op) -> !transform.param<i64>
+```
+
+`pingpong_score` runs `partitionRegions` + `findOptimalPingpongDelay`
+on the target and returns `(optimal_delay, predicted_peak * 1000)`.
+The autotune body inserts the stagger and then sanity-verifies
+total cycles via the existing `estimate_cycles` op.
+
+### Validation gate
+
+Apply the pipeline to a CK-style matmul on gfx1100 (the
+patient-zero box). Expected: `pingpong_score` returns a delay
+that brackets one MFMA-dominated region with one VMEM-dominated
+region; after stagger insertion + lowering, ATT (from Stage 6)
+shows the predicted ping-pong overlap pattern on real HW. Pass:
+within 20% of optimal on the predicted-peak-util metric across
+3 representative kernels.
+
+### What's left for the cycle-accurate simulator
+
+The event-driven simulator from earlier drafts of this doc
+becomes a Stage 6 tool: takes the same input IR, runs an actual
+event simulation, produces per-wave per-cycle timelines. Two
+uses:
+- **Calibrate** `RegionProfile`'s approximations (square-wave
+  vs op-exact, multiplier accuracy for symmetric kernels).
+- **Validate** that `insert_pingpong_stagger`'s choice actually
+  produces the predicted overlap when arbitration / `s_setprio`
+  interactions are in play.
+
+It does not run inside the autotune loop -- too slow, and the
+analytical approach is sufficient for scoring.
+
+## Stage 6: ATT integration + cycle-accurate simulator
 
 **Goal.** Ground-truth per-wave timeline from `rocprofv3 --att`;
-use it to tune the simulator.
+use it to tune both Stage 5's analytical model and the
+cycle-accurate event-driven simulator (this stage's other
+deliverable).
 
 **Background.** Advanced Thread Tracer records per-wave
-instruction-level issue cycles. It's the only public AMD tool with
+instruction-level issue cycles -- the only public AMD tool with
 per-wave timing granularity.
 
-**Deliverable.**
-- `tools/wave-att-import.py` -- ingests `rocprofv3 --att` output,
-  produces per-wave issue traces aligned to our `WaveTrace`
-  op order.
-- `wave-sim-vs-att` -- runs the simulator on the same kernel and
-  prints a per-cycle diff: who-issued-what, sim vs att,
-  color-coded delta.
+**Two deliverables, one stage:**
+
+1. **`tools/wave-att-import.py`** -- ingests `rocprofv3 --att`
+   output, produces per-wave issue traces aligned to op order.
+2. **Event-driven simulator** -- takes the post-Stage-2 IR plus
+   `wavesPerSIMD`, runs a priority-queue event sim with
+   per-SIMD round-robin + per-wave waitcnt counters +
+   `s_setprio`-biased arbitration. Output: per-wave per-cycle
+   issue timeline. Used to:
+   - Cross-check Stage 5's analytical `RegionProfile` /
+     ping-pong predictions.
+   - Calibrate the analytical model's approximations
+     (square-wave timeline distribution, priority bias weights,
+     memory latency mean/jitter).
+   - Spot multi-wave effects the analytical model misses
+     (asymmetric contention windows, `s_setprio` re-ordering).
+
+   The simulator is NOT in the autotune hot path. It runs
+   offline, in `wave-sim-vs-att`, to validate and tune.
+
+**`wave-sim-vs-att`** runs the simulator and the ATT capture on
+the same kernel; prints a per-cycle diff (who-issued-what, sim
+vs att, color-coded delta). Where the diff is large, ATT wins;
+the analytical model's parameters get adjusted to close the gap.
 
 **Tune against ATT.**
 - Round-robin policy details: which SIMD wins ties, exact
   priority bias weights.
-- Memory latency distribution: replace constant WriteVMEM with
-  mean + jitter sampled from ATT.
-- Wave-priority effect magnitude.
+- Memory latency distribution: replace constant `WriteVMEM`
+  with mean + jitter sampled from ATT.
+- `s_setprio` effect magnitude.
 - Hazard rule coverage: ATT will show inserted NOPs we missed.
+- `fuzzy_margin` / window size `W` for Stage 5's auto-
+  partitioner (calibrate so detected regions match human-placed
+  `sched_barrier(0)` boundaries on CK / HipKittens templates).
 
 **Risk.** ATT captures cycle counts, not wall time -- overhead
 doesn't distort the recorded cycles meaningfully (sampling-mode
-caveat aside). Mitigation: larger kernels, longer captures, sanity
-check sample density.
+caveat aside). Mitigation: larger kernels, longer captures,
+sanity check sample density.
 
 ## Stage 7: priority and sched_group_barrier semantics
 
 **Goal.** Simulator respects scheduling intent embedded in the IR.
 
-**Deliverables.** Simulator handles, in order of importance:
-- `s_setprio` / `__builtin_amdgcn_s_setprio` -- per-wave priority
-  change at the issuing PC. Bias the SIMD's wave-pick weights.
+**Deliverables.** Both Stage 5's region analysis and Stage 6's
+event simulator respect the scheduling-intent ops embedded in
+the IR, in order of importance:
+- `s_setprio` / `__builtin_amdgcn_s_setprio` -- per-wave
+  priority change at the issuing PC. Stage 5: tag the enclosing
+  region as high-priority for bandwidth accounting. Stage 6:
+  bias the SIMD's wave-pick weights.
 - `sched_group_barrier(mask, size, sync_id)` -- next `size` ops
-  of class `mask` form a non-interleavable scheduling unit; pair
-  with same-`sync_id` siblings.
-- `sched_barrier(mask)` -- reordering boundary; flush the ready
-  queue across it.
+  of class `mask` form a non-interleavable scheduling unit;
+  pair with same-`sync_id` siblings.
+- `sched_barrier(mask)` -- reordering boundary; forces a region
+  split in the auto-partitioner; in the simulator, flushes the
+  ready queue across it.
 - Conditional `s_barrier` after a `warp_id`-based predicate --
-  wave-group split detection. Model the two groups with a
-  one-barrier-segment phase offset (this is the 8-wave ping-pong
-  pattern; see `docs/AMDGPUStaticCycleEstimation.md`).
+  wave-group split detection. Already the primitive
+  `insert_pingpong_stagger` emits when `D` snaps to a region
+  boundary.
 - `s_sleep N` -- wave PC advances but no issue for N cycles.
+  Emitted by `insert_pingpong_stagger` when `D` doesn't align
+  to a region boundary.
 - `iglp_opt(N)` -- pattern-match the four LLVM strategies;
   optional, since modern code uses hand-rolled
   `sched_group_barrier`.
