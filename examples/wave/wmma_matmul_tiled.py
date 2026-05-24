@@ -148,6 +148,18 @@ def _add_codegen_args(parser: argparse.ArgumentParser) -> None:
         default="auto",
         help="matrix instruction family to emit; auto picks MFMA for gfx9/gfx950",
     )
+    parser.add_argument(
+        "--dump-asm",
+        action="store_true",
+        help="lower the kernel through the backend pipeline and print AMDGPU "
+        "asm instead of MLIR (needs --chip; pinned via wave-translate)",
+    )
+    parser.add_argument(
+        "--wave-translate",
+        type=Path,
+        default=None,
+        help="path to wave-translate; defaults to build/bin/wave-translate",
+    )
 
 
 def _add_runner_args(parser: argparse.ArgumentParser) -> None:
@@ -253,6 +265,26 @@ def _run_command(cmd: list[str], *, input_text: str) -> str:
     return proc.stdout
 
 
+def _dump_asm(module_text: str, args: argparse.Namespace) -> str:
+    if not args.chip:
+        raise SystemExit("--dump-asm needs --chip=<gfx>")
+    repo_root = _repo_root()
+    wave_translate = args.wave_translate or repo_root / "build/bin/wave-translate"
+    # Hoist the kernel func into a standalone target module: wave-translate
+    # lowers a target-attr module, not the gpu.container_module wrapper.
+    m = re.search(r"(func\.func @wmma\w+.*?\n    \})", module_text, re.S)
+    if not m:
+        raise SystemExit("could not isolate kernel func from generated module")
+    kernel = m.group(1).replace("\n    ", "\n  ")
+    target = f"amdgcn-amd-amdhsa--{args.chip}"
+    wrapped = (
+        f'module attributes {{waveamdmachine.target = "{target}"}} {{\n{kernel}\n}}\n'
+    )
+    return _run_command(
+        [str(wave_translate), "--wave-to-amdgpu-asm", "-"], input_text=wrapped
+    )
+
+
 def _run_module(module_text: str, args: argparse.Namespace) -> str:
     if not args.chip:
         raise SystemExit("--run needs --chip=<gfx>")
@@ -352,6 +384,9 @@ def main(argv: list[str] | None = None) -> int:
         random_seed=args.seed,
     )
     module_text = str(module)
+    if args.dump_asm:
+        sys.stdout.write(_dump_asm(module_text, args))
+        return 0
     if not args.run and not args.compare_cpu:
         sys.stdout.write(module_text)
         return 0
