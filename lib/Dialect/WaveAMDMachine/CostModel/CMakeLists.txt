@@ -5,6 +5,7 @@ add_mlir_library(MLIRWaveAMDMachineCostModel
   MachineState.cpp
   OpClassifier.cpp
   PressureAnalysis.cpp
+  RegionProfile.cpp
   SchedClass.cpp
 
   ADDITIONAL_HEADER_DIRS
