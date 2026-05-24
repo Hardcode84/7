@@ -313,7 +313,13 @@ struct WaveAMDRegAllocPass
                                          LiveIntervalSet &intervals) {
     Block &body = loop.getBody().front();
     for (auto [i, init] : llvm::enumerate(loop.getInits())) {
-      if (!trackedRegType(init))
+      auto rt = trackedRegType(init);
+      if (!rt)
+        continue;
+      // Pre-pinned inits (fragment regs at fixed indices) get no
+      // interval; carry/arg already share the index, nothing to merge.
+      auto [bucket, table] = intervalsFor(*rt, intervals);
+      if (!table->contains(init))
         continue;
       if (failed(coalesce(init, body.getArgument(i), pos, intervals, loop)))
         return failure();
@@ -421,6 +427,14 @@ struct WaveAMDRegAllocPass
                                         LiveIntervalSet &intervals) {
     auto coalesceTupleElements = [&](auto top) -> LogicalResult {
       Value tuple = top.getTuple();
+      // Pinned tuple (fragment reg at fixed index) has no interval; its
+      // elements derive phys from tuple index + offset, nothing to merge.
+      auto rt = trackedRegType(tuple);
+      if (rt) {
+        auto [bucket, table] = intervalsFor(*rt, intervals);
+        if (!table->contains(tuple))
+          return success();
+      }
       unsigned cumOffset = 0;
       for (Value element : top.getElements()) {
         if (failed(coalesce(tuple, element, pos, intervals, top, cumOffset)))
