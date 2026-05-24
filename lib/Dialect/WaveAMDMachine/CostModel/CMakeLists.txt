@@ -2,7 +2,9 @@ add_mlir_library(MLIRWaveAMDMachineCostModel
   ArchData.cpp
   FunctionalUnit.cpp
   LatencyTable.cpp
+  MachineState.cpp
   OpClassifier.cpp
+  PressureAnalysis.cpp
   SchedClass.cpp
 
   ADDITIONAL_HEADER_DIRS
@@ -10,6 +12,8 @@ add_mlir_library(MLIRWaveAMDMachineCostModel
 
   LINK_LIBS PUBLIC
   LLVMSupport
+  MLIRAnalysis
+  MLIRFuncDialect
   MLIRIR
   MLIRWaveAMDMachineDialect
   )
