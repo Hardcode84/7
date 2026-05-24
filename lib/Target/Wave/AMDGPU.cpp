@@ -24,6 +24,7 @@
 #include "mlir/IR/Diagnostics.h"
 #include "mlir/IR/OwningOpRef.h"
 #include "mlir/Target/LLVM/ROCDL/Utils.h"
+#include "mlir/Transforms/Passes.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Config/Targets.h"
@@ -1571,6 +1572,11 @@ static LogicalResult runWaveAMDMachinePipeline(ModuleOp module,
   // discoverable even when this code path runs outside `wave-opt`
   // (e.g. via `wave-translate`).
   wave::registerWavePasses();
+  // The backend pipeline runs canonicalize + cse after selection to
+  // fold duplicate const materializations; register them for this
+  // path too (outside wave-opt's registerAllPasses).
+  registerCanonicalizerPass();
+  registerCSEPass();
   ctx->getOrLoadDialect<transform::TransformDialect>();
 
   std::string resolved;

@@ -16,7 +16,13 @@ module attributes {transform.with_named_sequence} {
       %root: !transform.any_op {transform.consumed}) -> !transform.any_op {
     %r0 = transform.apply_registered_pass "waveamd-to-machine" to %root
         : (!transform.any_op) -> !transform.any_op
-    %r1 = transform.apply_registered_pass "waveamd-abi-lowering" to %r0
+    // Fold duplicate imm / v_mov constant materializations selection
+    // emits per address add, before reg-alloc.
+    %rk = transform.apply_registered_pass "canonicalize" to %r0
+        : (!transform.any_op) -> !transform.any_op
+    %rc = transform.apply_registered_pass "cse" to %rk
+        : (!transform.any_op) -> !transform.any_op
+    %r1 = transform.apply_registered_pass "waveamd-abi-lowering" to %rc
         : (!transform.any_op) -> !transform.any_op
     %r2 = transform.apply_registered_pass "waveamd-decompose-mem-tuples" to %r1
         : (!transform.any_op) -> !transform.any_op

@@ -20,10 +20,11 @@ func.func @wave_add(%x: i32) -> i32 {
 }
 
 // CHECK-LABEL: wave_where:
-func.func @wave_where(%limit: i32) -> i32 {
+func.func @wave_where(%limit: i32, %out: !wave.ptr<i32, #wave.global>) -> i32 {
   // CHECK: v_mbcnt_lo_u32_b32 [[LANE:v[0-9]+]], -1, 0
   %lane = wave.lane_id : !wave.simd<i32, 32>
   %vlimit = wave.splat %limit : i32 -> !wave.simd<i32, 32>
+  %ptrs = wave.ptr_add %out, %lane : !wave.ptr<i32, #wave.global>, !wave.simd<i32, 32> -> !wave.simd<!wave.ptr<i32, #wave.global>, 32>
   // CHECK: v_cmp_lt_u32_e64 [[MASK:s[0-9]+]], [[LANE]], [[ARG:s[0-9]+]]
   %active = wave.cmpi ult %lane, %vlimit : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.mask<32>
   // CHECK: s_and_saveexec_b32 [[SAVE:s[0-9]+]], [[MASK]]
@@ -31,6 +32,7 @@ func.func @wave_where(%limit: i32) -> i32 {
   wave.where %active {
     // CHECK: v_add_nc_u32_e32
     %sum = wave.addi %lane, %vlimit : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+    %t = wave.store %sum -> %ptrs : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<i32, #wave.global>, 32>) -> !wave.mem.token
     wave.yield
   } : !wave.mask<32>
   // CHECK: [[END]]:
@@ -41,10 +43,11 @@ func.func @wave_where(%limit: i32) -> i32 {
 }
 
 // CHECK-LABEL: wave_where_else:
-func.func @wave_where_else(%limit: i32) -> i32 {
+func.func @wave_where_else(%limit: i32, %out: !wave.ptr<i32, #wave.global>) -> i32 {
   // CHECK: v_mbcnt_lo_u32_b32 [[LANE:v[0-9]+]], -1, 0
   %lane = wave.lane_id : !wave.simd<i32, 32>
   %vlimit = wave.splat %limit : i32 -> !wave.simd<i32, 32>
+  %ptrs = wave.ptr_add %out, %lane : !wave.ptr<i32, #wave.global>, !wave.simd<i32, 32> -> !wave.simd<!wave.ptr<i32, #wave.global>, 32>
   // CHECK: v_cmp_lt_u32_e64 [[MASK:s[0-9]+]], [[LANE]], [[ARG:s[0-9]+]]
   %active = wave.cmpi ult %lane, %vlimit : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.mask<32>
   // CHECK: s_and_saveexec_b32 [[SAVE:s[0-9]+]], [[MASK]]
@@ -52,12 +55,14 @@ func.func @wave_where_else(%limit: i32) -> i32 {
   wave.where %active {
     // CHECK: v_add_nc_u32_e32
     %then = wave.addi %lane, %vlimit : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+    %t0 = wave.store %then -> %ptrs : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<i32, #wave.global>, 32>) -> !wave.mem.token
     wave.yield
   } otherwise {
     // CHECK: s_and_not1_b32 exec_lo, [[SAVE]], [[MASK]]
     // CHECK: [[ELSE]]:
     // CHECK: v_xor_b32_e32
     %else = wave.binary "xori" %lane, %vlimit : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+    %t1 = wave.store %else -> %ptrs : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<i32, #wave.global>, 32>) -> !wave.mem.token
     wave.yield
   } : !wave.mask<32>
   // CHECK: s_mov_b32 exec_lo, [[SAVE]]
