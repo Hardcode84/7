@@ -66,15 +66,21 @@ SchedClass classifyOp(Operation *op) {
       // Scalar memory (s_load_*).
       .Case<SLoadB32Op, SLoadB64Op, SLoadB128Op>(
           [](auto) { return SchedClass::WriteSMEM; })
-      // Structural pseudos: emit no real instruction.
-      .Case<LabelOp, MakeBufferRsrcOp, AfterOp>(
+      // Structural pseudos: emit no real instruction. ContinueIfOp
+      // is a region terminator -- the actual branch comes from
+      // codegen lowering, not from this op directly.
+      .Case<LabelOp, MakeBufferRsrcOp, AfterOp, ContinueIfOp>(
           [](auto) { return SchedClass::NoInst; })
       // Barrier.
       .Case<SBarrierOp>(
           [](auto) { return SchedClass::WriteBarrier; })
-      // Branches / control flow / endpgm.
+      // Branches / control flow / endpgm. UniformLoopOp + ContinueIfOp
+      // are NOT here -- they're region-structural ops; the actual
+      // branches come from codegen lowering. UniformLoopOp gets
+      // handled by the dataflow framework via RegionBranchOpInterface;
+      // ContinueIfOp is the body terminator and is NoInst above.
       .Case<SCBranchScc0Op, SCBranchScc1Op, SCBranchExeczOp,
-            SSetpcB64Op, SEndpgmOp, UniformLoopOp, ContinueIfOp>(
+            SSetpcB64Op, SEndpgmOp>(
           [](auto) { return SchedClass::WriteBranch; })
       // 64-bit VALU expansions (charged differently from 32-bit).
       .Case<VAddU64Op, VMulU64Op, VLshlrevB64Op>(

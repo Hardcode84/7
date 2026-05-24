@@ -82,6 +82,72 @@ module attributes {transform.with_named_sequence,
 
 // -----
 
+// uniform_loop with explicit trip_count attribute. Per-iter body
+// cost gets multiplied by T = 3: C1 (cold-trajectory body walk)
+// + (T-1) * Ss (hot-trajectory body walk). Single SALU op per
+// iter on gfx1100 (latency=2): C1=2 (single op completes at 2),
+// Ss=3 (hot fuPending=1 from prior iter's issue forces wait 1
+// before issue; complete at 1+2=3). Total = 2 + 2*3 = 8.
+
+module attributes {transform.with_named_sequence,
+                   waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
+  func.func @trip_count_loop(%init: !waveamdmachine.reg<sgpr, 1>) {
+    %step = waveamdmachine.imm 1 : !waveamdmachine.imm
+    %r = waveamdmachine.uniform_loop carries(%init : !waveamdmachine.reg<sgpr, 1>) {
+    ^bb0(%iv: !waveamdmachine.reg<sgpr, 1>):
+      %next:2 = waveamdmachine.s_add_i32 %iv, %step :
+          (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.imm) ->
+          (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<scc, 1>)
+      waveamdmachine.continue_if %next#1 :
+          !waveamdmachine.reg<scc, 1>
+          carries(%next#0 : !waveamdmachine.reg<sgpr, 1>)
+    } { waveamdmachine.trip_count = 3 : i64 } -> !waveamdmachine.reg<sgpr, 1>
+    return
+  }
+
+  transform.named_sequence @__transform_main(
+      %root: !transform.any_op {transform.readonly}) {
+    %c = wave.transform.estimate_cycles from %root
+        : (!transform.any_op) -> !transform.param<i64>
+    %k = transform.param.constant 8 : i64 -> !transform.param<i64>
+    transform.match.param.cmpi eq %c, %k : !transform.param<i64>
+    transform.yield
+  }
+}
+
+// -----
+
+// Same body, trip_count = 1: should give exactly C1 = 2 (no
+// steady-state iter).
+
+module attributes {transform.with_named_sequence,
+                   waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
+  func.func @trip_count_one(%init: !waveamdmachine.reg<sgpr, 1>) {
+    %step = waveamdmachine.imm 1 : !waveamdmachine.imm
+    %r = waveamdmachine.uniform_loop carries(%init : !waveamdmachine.reg<sgpr, 1>) {
+    ^bb0(%iv: !waveamdmachine.reg<sgpr, 1>):
+      %next:2 = waveamdmachine.s_add_i32 %iv, %step :
+          (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.imm) ->
+          (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<scc, 1>)
+      waveamdmachine.continue_if %next#1 :
+          !waveamdmachine.reg<scc, 1>
+          carries(%next#0 : !waveamdmachine.reg<sgpr, 1>)
+    } { waveamdmachine.trip_count = 1 : i64 } -> !waveamdmachine.reg<sgpr, 1>
+    return
+  }
+
+  transform.named_sequence @__transform_main(
+      %root: !transform.any_op {transform.readonly}) {
+    %c = wave.transform.estimate_cycles from %root
+        : (!transform.any_op) -> !transform.param<i64>
+    %k = transform.param.constant 2 : i64 -> !transform.param<i64>
+    transform.match.param.cmpi eq %c, %k : !transform.param<i64>
+    transform.yield
+  }
+}
+
+// -----
+
 // pressure_report attaches the per-FU dict to the module.
 // Two s_add_i32 -> SALU=2 issue cycles (one cycle per op).
 

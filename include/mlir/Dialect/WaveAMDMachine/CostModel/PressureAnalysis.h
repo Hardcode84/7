@@ -51,10 +51,19 @@ struct PressureAnalysisResult {
   // back-edge.
   llvm::DenseMap<Operation *, MachineState> perOpHot;
 
-  // Total cycle count. Currently a straight-line accumulator
-  // (loops walked once); structural trip-count multiplication
-  // lands in a follow-up commit.
+  // Total cycle count. Loops counted with structural
+  // C1 + (T-1)*Ss: C1 from walking the body with cold entry,
+  // Ss from walking with hot entry, T from a
+  // waveamdmachine.trip_count attribute or a heuristic
+  // fallback (with `unknownTripCount` set).
   int64_t totalCycles = 0;
+
+  // True iff any uniform_loop in the analysed func had no
+  // recoverable trip count (no attribute, range analysis didn't
+  // produce a concrete value) and the heuristic fallback fired.
+  // Downstream consumers (autotune scoring) can downweight or
+  // refuse-to-score in that case.
+  bool unknownTripCount = false;
 };
 
 // Run the dense forward analysis on `func`. Returns failure only

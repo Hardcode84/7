@@ -8,6 +8,7 @@
 
 #include "mlir/Dialect/WaveAMDMachine/CostModel/PressureAnalysis.h"
 
+#include "mlir/Analysis/DataFlow/ConstantPropagationAnalysis.h"
 #include "mlir/Analysis/DataFlow/DeadCodeAnalysis.h"
 #include "mlir/Analysis/DataFlow/DenseAnalysis.h"
 #include "mlir/Analysis/DataFlowFramework.h"
@@ -233,45 +234,133 @@ static int waitForOp(Operation *op, const MachineState &state,
 
 } // namespace
 
+// Walk one body block (cold or hot trajectory) and return the
+// per-iter cycle cost = max(issueAt + latency) measured from
+// block entry at cycle 0. Used to compute C1 (cold trajectory)
+// and Ss (hot trajectory) for uniform_loop bodies.
+static int64_t computeIterCost(Block &body, bool useCold,
+                               DataFlowSolver &solver, const ArchData &arch) {
+  int64_t cycle = 0;
+  int64_t maxComp = 0;
+  for (Operation &op : body) {
+    if (op.hasTrait<OpTrait::IsTerminator>())
+      continue;
+    if (!isa<WaveAMDMachineDialect>(op.getDialect()))
+      continue;
+    ProgramPoint *beforePt = solver.getProgramPointBefore(&op);
+    const auto *lat = solver.lookupState<PressureLattice>(beforePt);
+    if (!lat)
+      continue;
+    const MachineState &state = useCold ? lat->cold : lat->hot;
+    int wait = waitForOp(&op, state, arch);
+    cycle += wait;
+    SchedClass cls = classifyOp(&op);
+    if (cls != SchedClass::NoInst)
+      maxComp = std::max(maxComp, cycle + getLatency(arch, cls));
+  }
+  return maxComp;
+}
+
+// Trip-count extraction. Looks for a `waveamdmachine.trip_count`
+// IntegerAttr on the loop op; falls back to a heuristic and sets
+// the "unknown" flag so downstream can downweight.
+static int64_t extractTripCount(UniformLoopOp loop, bool &unknownFlag) {
+  if (auto attr = loop->getAttrOfType<IntegerAttr>("waveamdmachine.trip_count"))
+    return attr.getInt();
+  unknownFlag = true;
+  return 4; // heuristic fallback.
+}
+
+// Populate per-op cold/hot maps from the solver. Walks recursively
+// (including loop bodies) -- the maps are diagnostic; the
+// trip-count multiplication only affects totalCycles.
+static void populatePerOpStates(Operation *root, DataFlowSolver &solver,
+                                PressureAnalysisResult &out) {
+  root->walk([&](Operation *op) {
+    if (op == root)
+      return;
+    if (!isa<WaveAMDMachineDialect>(op->getDialect()))
+      return;
+    ProgramPoint *afterPt = solver.getProgramPointAfter(op);
+    const auto *lat = solver.lookupState<PressureLattice>(afterPt);
+    if (!lat)
+      return;
+    out.perOpCold[op] = lat->cold;
+    out.perOpHot[op] = lat->hot;
+  });
+}
+
+// Forward decl.
+static int64_t accumulateBlock(Block &block, int64_t entryCycle,
+                               DataFlowSolver &solver, const ArchData &arch,
+                               PressureAnalysisResult &out);
+
+// Handle a uniform_loop: C1 + (T-1)*Ss per design doc. Returns
+// the post-loop cycle (entry + total loop cycles).
+static int64_t accumulateLoop(UniformLoopOp loop, int64_t entryCycle,
+                              DataFlowSolver &solver, const ArchData &arch,
+                              PressureAnalysisResult &out) {
+  Block &body = loop.getBody().front();
+  int64_t c1 = computeIterCost(body, /*useCold=*/true, solver, arch);
+  int64_t ss = computeIterCost(body, /*useCold=*/false, solver, arch);
+  int64_t t = extractTripCount(loop, out.unknownTripCount);
+  if (t < 1)
+    t = 1;
+  int64_t loopCycles = c1 + (t - 1) * ss;
+  return entryCycle + loopCycles;
+}
+
+static int64_t accumulateBlock(Block &block, int64_t entryCycle,
+                               DataFlowSolver &solver, const ArchData &arch,
+                               PressureAnalysisResult &out) {
+  int64_t cycle = entryCycle;
+  int64_t maxComp = entryCycle;
+  for (Operation &op : block) {
+    if (op.hasTrait<OpTrait::IsTerminator>())
+      continue;
+    if (auto loop = dyn_cast<UniformLoopOp>(&op)) {
+      int64_t postLoop = accumulateLoop(loop, cycle, solver, arch, out);
+      cycle = postLoop;
+      maxComp = std::max(maxComp, postLoop);
+      continue;
+    }
+    if (!isa<WaveAMDMachineDialect>(op.getDialect()))
+      continue;
+    ProgramPoint *beforePt = solver.getProgramPointBefore(&op);
+    const auto *beforeLat = solver.lookupState<PressureLattice>(beforePt);
+    if (!beforeLat)
+      continue;
+    int wait = waitForOp(&op, beforeLat->cold, arch);
+    cycle += wait;
+    int64_t issueAt = cycle;
+    SchedClass cls = classifyOp(&op);
+    if (cls != SchedClass::NoInst)
+      maxComp = std::max(maxComp, issueAt + getLatency(arch, cls));
+  }
+  return maxComp;
+}
+
 LogicalResult runPressureAnalysis(func::FuncOp func, const ArchData &arch,
                                   PressureAnalysisResult &out) {
   DataFlowSolver solver;
+  // DeadCodeAnalysis needs SparseConstantPropagation to reason
+  // about region-branch operand values; without the latter,
+  // uniform_loop body blocks aren't marked Executable and the
+  // dense analysis never visits body ops.
+  solver.load<mlir::dataflow::SparseConstantPropagation>();
   solver.load<mlir::dataflow::DeadCodeAnalysis>();
   solver.load<PressureAnalysis>(arch);
   if (failed(solver.initializeAndRun(func)))
     return failure();
 
-  // Walk ops in program order; track absoluteCycle from the
-  // relative-pending cold state at each program-point-before.
-  // The "1 cycle of issue slot" doesn't need an explicit advance
-  // here -- the after-lattice's fuPending=1 already captures it,
-  // and the next op's waitForOp reads that. For the trailing op
-  // the latency contribution is captured via issueAt + latency.
-  // Loops walked once at this stage; trip-count multiplication
-  // is a follow-up commit.
-  int64_t absoluteCycle = 0;
-  int64_t maxCompletion = 0;
-  func.walk([&](Operation *op) {
-    if (op == func.getOperation())
-      return;
-    if (!isa<WaveAMDMachineDialect>(op->getDialect()))
-      return;
-    ProgramPoint *beforePt = solver.getProgramPointBefore(op);
-    ProgramPoint *afterPt = solver.getProgramPointAfter(op);
-    const auto *beforeLat = solver.lookupState<PressureLattice>(beforePt);
-    const auto *afterLat = solver.lookupState<PressureLattice>(afterPt);
-    if (!beforeLat || !afterLat)
-      return;
-    int wait = waitForOp(op, beforeLat->cold, arch);
-    absoluteCycle += wait;
-    int64_t issueAt = absoluteCycle;
-    SchedClass cls = classifyOp(op);
-    if (cls != SchedClass::NoInst)
-      maxCompletion = std::max(maxCompletion, issueAt + getLatency(arch, cls));
-    out.perOpCold[op] = afterLat->cold;
-    out.perOpHot[op] = afterLat->hot;
-  });
-  out.totalCycles = maxCompletion;
+  // Per-op state map: diagnostic, populated for every reachable
+  // waveamdmachine op (top-level and inside loop bodies).
+  populatePerOpStates(func.getOperation(), solver, out);
+
+  // Total-cycles accumulator: recursive over blocks, loop-aware
+  // via C1 + (T-1)*Ss.
+  out.totalCycles = accumulateBlock(func.getBody().front(), /*entryCycle=*/0,
+                                    solver, arch, out);
   return success();
 }
 
