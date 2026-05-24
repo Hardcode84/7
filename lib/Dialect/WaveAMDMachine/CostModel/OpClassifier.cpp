@@ -69,16 +69,15 @@ SchedClass classifyOp(Operation *op) {
       // Structural pseudos: emit no real instruction. ContinueIfOp
       // is a region terminator -- the actual branch comes from
       // codegen lowering, not from this op directly.
-      .Case<LabelOp, MakeBufferRsrcOp, AfterOp, ContinueIfOp>(
+      .Case<LabelOp, MakeBufferRsrcOp, AfterOp, ContinueIfOp, UniformLoopOp>(
           [](auto) { return SchedClass::NoInst; })
       // Barrier.
       .Case<SBarrierOp>(
           [](auto) { return SchedClass::WriteBarrier; })
       // Branches / control flow / endpgm. UniformLoopOp + ContinueIfOp
-      // are NOT here -- they're region-structural ops; the actual
-      // branches come from codegen lowering. UniformLoopOp gets
-      // handled by the dataflow framework via RegionBranchOpInterface;
-      // ContinueIfOp is the body terminator and is NoInst above.
+      // are NoInst above -- region-structural, real branches come from
+      // codegen lowering. Loop body cost is dataflow-handled via
+      // RegionBranchOpInterface; a static walk charges the loop op 0.
       .Case<SCBranchScc0Op, SCBranchScc1Op, SCBranchExeczOp,
             SSetpcB64Op, SEndpgmOp>(
           [](auto) { return SchedClass::WriteBranch; })
@@ -92,7 +91,8 @@ SchedClass classifyOp(Operation *op) {
             SAndSaveexecB32Op, SCmpLgU32Op, SCmpLtI32Op, SDelayAluOp,
             SLshlB32Op, SLshlB64Op, SLshrB32Op, SMovB32Op,
             SMovB32TupleOp, SMovB32ValueOp, SMovB64ImmOp,
-            SMovExecLoOp, SMovM0Op, SMulI32Op, SMulU64Op, SNopOp>(
+            SMovExecLoOp, SMovM0Op, SMulI32Op, SMulU64Op, SNopOp,
+            SSetprioOp, SGetregShaderCyclesOp>(
           [](auto) { return SchedClass::WriteSALU; })
       .Default(fallbackClassify);
   // clang-format on
