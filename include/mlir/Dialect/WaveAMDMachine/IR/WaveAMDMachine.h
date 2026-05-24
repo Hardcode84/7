@@ -17,6 +17,7 @@
 #include "mlir/IR/OpDefinition.h"
 #include "mlir/IR/Types.h"
 #include "mlir/Interfaces/ControlFlowInterfaces.h"
+#include "mlir/Interfaces/LoopLikeInterface.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
 // The generated op classes carry `static bool isSupportedOnIsa(...)`,
 // which takes `llvm::AMDGPU::IsaVersion` by reference. The struct

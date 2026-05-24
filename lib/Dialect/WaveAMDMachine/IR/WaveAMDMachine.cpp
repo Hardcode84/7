@@ -271,6 +271,24 @@ ValueRange UniformLoopOp::getSuccessorInputs(RegionSuccessor successor) {
   return getBody().getArguments();
 }
 
+llvm::SmallVector<Region *> UniformLoopOp::getLoopRegions() {
+  return {&getBody()};
+}
+
+Block::BlockArgListType UniformLoopOp::getRegionIterArgs() {
+  return getBody().front().getArguments();
+}
+
+std::optional<MutableArrayRef<OpOperand>>
+UniformLoopOp::getYieldedValuesMutable() {
+  return cast<ContinueIfOp>(getBody().front().getTerminator())
+      .getCarriesMutable();
+}
+
+std::optional<ResultRange> UniformLoopOp::getLoopResults() {
+  return getResults();
+}
+
 LogicalResult ContinueIfOp::verify() {
   // The `HasParent<UniformLoopOp>` trait on the op definition
   // guarantees this lookup succeeds before the verifier runs.

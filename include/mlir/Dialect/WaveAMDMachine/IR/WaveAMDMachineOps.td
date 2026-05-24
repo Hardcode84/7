@@ -14,6 +14,7 @@ include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineInterfaces.td"
 include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineTypes.td"
 include "mlir/IR/OpBase.td"
 include "mlir/Interfaces/ControlFlowInterfaces.td"
+include "mlir/Interfaces/LoopLikeInterface.td"
 include "mlir/Interfaces/SideEffectInterfaces.td"
 
 // Every WaveAMDMachine op gets a static `isSupportedOnIsa(IsaVersion)`
@@ -1358,6 +1359,9 @@ def WaveAMDMachine_UniformLoopOp : WaveAMDMachine_Op<"uniform_loop", [
   SingleBlock,
   DeclareOpInterfaceMethods<RegionBranchOpInterface,
     ["getEntrySuccessorOperands", "getSuccessorInputs"]>,
+  DeclareOpInterfaceMethods<LoopLikeOpInterface,
+    ["getLoopRegions", "getRegionIterArgs", "getYieldedValuesMutable",
+     "getLoopResults"]>,
   RecursiveMemoryEffects
 ]> {
   let summary = "structured wave-uniform loop with explicit IV bookkeeping";
