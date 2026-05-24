@@ -189,4 +189,30 @@ def Wave_TransformPressureReportOp
   }];
 }
 
+// Insert ping-pong sync primitives at auto-detected region
+// boundaries. Barrier-insertion-only: partitions each kernel func
+// (RegionProfile sliding-window detector) and drops an s_barrier
+// between adjacent FU-regions, plus an s_setprio at func entry.
+// Phase/role partitioning (body cloning, wave_id predication) is a
+// later transform. gfx<=11 path -- s_barrier only.
+def Wave_TransformInsertPingpongBarriersOp
+    : Op<Wave_Dialect, "transform.insert_pingpong_barriers", [
+        DeclareOpInterfaceMethods<MemoryEffectsOpInterface>,
+        DeclareOpInterfaceMethods<TransformOpInterface>]> {
+  let summary = "Insert s_barrier / s_setprio at region boundaries";
+  let description = [{
+    For each func.func payload op, partition the body into per-FU
+    regions and emit a waveamdmachine.s_barrier before every region
+    after the first. `prio` (default 3) sets an s_setprio at func
+    entry. Reads arch from the enclosing module `waveamdmachine.target`.
+    Definite failure if arch missing/unsupported. gfx<=11 only.
+  }];
+  let arguments = (ins TransformHandleTypeInterface:$target,
+                       DefaultValuedAttr<I64Attr, "3">:$prio);
+  let results = (outs);
+  let assemblyFormat = [{
+    `from` $target attr-dict `:` functional-type(operands, results)
+  }];
+}
+
 #endif // MLIR_DIALECT_WAVE_IR_WAVETRANSFORMOPS_TD

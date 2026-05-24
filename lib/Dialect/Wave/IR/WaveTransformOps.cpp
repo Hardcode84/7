@@ -13,6 +13,7 @@
 #include "mlir/Dialect/WaveAMDMachine/CostModel/FunctionalUnit.h"
 #include "mlir/Dialect/WaveAMDMachine/CostModel/OpClassifier.h"
 #include "mlir/Dialect/WaveAMDMachine/CostModel/PressureAnalysis.h"
+#include "mlir/Dialect/WaveAMDMachine/CostModel/RegionProfile.h"
 #include "mlir/Dialect/WaveAMDMachine/CostModel/SchedClass.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachine.h"
 
@@ -211,6 +212,77 @@ wave::TransformPressureReportOp::apply(transform::TransformRewriter &rewriter,
 }
 
 void wave::TransformPressureReportOp::getEffects(
+    SmallVectorImpl<MemoryEffects::EffectInstance> &effects) {
+  transform::onlyReadsHandle(getTargetMutable(), effects);
+  transform::modifiesPayload(effects);
+}
+
+//===----------------------------------------------------------------------===//
+// wave.transform.insert_pingpong_barriers
+//===----------------------------------------------------------------------===//
+
+namespace {
+
+// Insert a wave-id-prio nudge at func entry and an s_barrier before
+// every region boundary after the first. Empty-token barriers --
+// ticket-wait insertion runs later and threads dependencies.
+static LogicalResult insertBarriersInFunc(func::FuncOp f,
+                                          const waveamdmachine::ArchData &arch,
+                                          int64_t prio) {
+  waveamdmachine::PressureAnalysisResult res;
+  if (failed(waveamdmachine::runPressureAnalysis(f, arch, res)))
+    return failure();
+  SmallVector<waveamdmachine::RegionProfile> regions =
+      waveamdmachine::partitionRegions(f, res, arch);
+  OpBuilder b(f.getContext());
+  Block &entry = f.getBody().front();
+  b.setInsertionPointToStart(&entry);
+  Value imm = waveamdmachine::ImmOp::create(
+      b, f.getLoc(), waveamdmachine::ImmType::get(f.getContext()),
+      static_cast<uint64_t>(prio));
+  waveamdmachine::SSetprioOp::create(b, f.getLoc(), imm);
+  for (size_t i = 1; i < regions.size(); ++i) {
+    Operation *begin = regions[i].begin;
+    if (!begin)
+      continue;
+    b.setInsertionPoint(begin);
+    waveamdmachine::SBarrierOp::create(b, begin->getLoc(), TypeRange{},
+                                       ValueRange{});
+  }
+  return success();
+}
+
+} // namespace
+
+DiagnosedSilenceableFailure wave::TransformInsertPingpongBarriersOp::apply(
+    transform::TransformRewriter &rewriter,
+    transform::TransformResults &results, transform::TransformState &state) {
+  int64_t prio = getPrio();
+  for (Operation *target : state.getPayloadOps(getTarget())) {
+    auto arch = resolveArch(target);
+    if (failed(arch))
+      return emitDefiniteFailure()
+             << "target has no enclosing module with `waveamdmachine.target` "
+                "or arch is unsupported";
+    auto runOne = [&](func::FuncOp f) {
+      return insertBarriersInFunc(f, **arch, prio);
+    };
+    if (auto f = dyn_cast<func::FuncOp>(target)) {
+      if (failed(runOne(f)))
+        return emitDefiniteFailure() << "region partition failed";
+    } else {
+      WalkResult w = target->walk([&](func::FuncOp f) {
+        return failed(runOne(f)) ? WalkResult::interrupt()
+                                 : WalkResult::advance();
+      });
+      if (w.wasInterrupted())
+        return emitDefiniteFailure() << "region partition failed";
+    }
+  }
+  return DiagnosedSilenceableFailure::success();
+}
+
+void wave::TransformInsertPingpongBarriersOp::getEffects(
     SmallVectorImpl<MemoryEffects::EffectInstance> &effects) {
   transform::onlyReadsHandle(getTargetMutable(), effects);
   transform::modifiesPayload(effects);
