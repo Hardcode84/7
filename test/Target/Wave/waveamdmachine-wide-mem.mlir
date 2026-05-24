@@ -29,6 +29,9 @@ func.func @wide_global_loads(%arg0: !wave.ptr<i32, #wave.global>) attributes {wa
       : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 2>) -> (!waveamdmachine.reg<vgpr, 3>, !waveamdmachine.mem.token)
   %lo128, %tok128 = waveamdmachine.global_load_b128 %off, %base offset 16
       : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 2>) -> (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.mem.token)
+  waveamdmachine.global_store_b64 %off, %lo64, %base : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<sgpr, 2>) -> ()
+  waveamdmachine.global_store_b96 %off, %lo96, %base offset 8 : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 3>, !waveamdmachine.reg<sgpr, 2>) -> ()
+  waveamdmachine.global_store_b128 %off, %lo128, %base offset 16 : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<sgpr, 2>) -> ()
   waveamdmachine.s_endpgm
   return
 }

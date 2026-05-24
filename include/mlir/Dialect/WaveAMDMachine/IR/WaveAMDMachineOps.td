@@ -222,7 +222,10 @@ class WaveAMDMachine_BinaryNoResult<string mnemonic, Type operandType,
   let assemblyFormat = "$lhs `,` $rhs attr-dict `:` functional-type(operands, results)";
 }
 
-def WaveAMDMachine_ArgOp : WaveAMDMachine_Op<"arg", [WaveAMDMachine_NoMachineInst]> {
+def WaveAMDMachine_ArgOp : WaveAMDMachine_Op<"arg", [
+  WaveAMDMachine_NoMachineInst,
+  Pure
+]> {
   let summary = "selected function argument";
   let arguments = (ins I64Attr:$index, BoolAttr:$pointer);
   let results = (outs WaveAMDMachine_Reg:$result);
@@ -279,7 +282,7 @@ def WaveAMDMachine_LabelOp : WaveAMDMachine_Op<"label"> {
 
 def WaveAMDMachine_VMbcntLoOp
     : WaveAMDMachine_ZeroOperandResult<"v_mbcnt_lo", WaveAMDMachine_VGPR1,
-                                    [WaveAMDMachine_VALU]>;
+                                    [WaveAMDMachine_VALU, Pure]>;
 
 // Preloaded workgroup ids live in fixed SGPRs (s2..s4 on RDNA3 when the
 // kernel descriptor requests them). The selector materializes these ops
@@ -288,19 +291,19 @@ def WaveAMDMachine_VMbcntLoOp
 // kernel entry.
 def WaveAMDMachine_SWorkgroupIdXOp
     : WaveAMDMachine_ZeroOperandResult<"s_workgroup_id_x", WaveAMDMachine_SGPR1,
-                                       [WaveAMDMachine_NoMachineInst]>;
+                                       [WaveAMDMachine_NoMachineInst, Pure]>;
 def WaveAMDMachine_SWorkgroupIdYOp
     : WaveAMDMachine_ZeroOperandResult<"s_workgroup_id_y", WaveAMDMachine_SGPR1,
-                                       [WaveAMDMachine_NoMachineInst]>;
+                                       [WaveAMDMachine_NoMachineInst, Pure]>;
 def WaveAMDMachine_SWorkgroupIdZOp
     : WaveAMDMachine_ZeroOperandResult<"s_workgroup_id_z", WaveAMDMachine_SGPR1,
-                                       [WaveAMDMachine_NoMachineInst]>;
+                                       [WaveAMDMachine_NoMachineInst, Pure]>;
 
 // Preloaded workitem id (packed) lives in `v0`. Only the X half is
 // exposed today; Y/Z would need additional descriptor flags.
 def WaveAMDMachine_VWorkitemIdXOp
     : WaveAMDMachine_ZeroOperandResult<"v_workitem_id_x", WaveAMDMachine_VGPR1,
-                                       [WaveAMDMachine_NoMachineInst]>;
+                                       [WaveAMDMachine_NoMachineInst, Pure]>;
 
 def WaveAMDMachine_VMovB32TupleOp
     : WaveAMDMachine_UnaryResult<"v_mov_b32_tuple", WaveAMDMachine_RegOrImm,
@@ -382,7 +385,7 @@ def WaveAMDMachine_VCmpGeU32Op
                                WaveAMDMachine_SGPR1, [WaveAMDMachine_VALU]>;
 def WaveAMDMachine_VReadfirstlaneB32Op
     : WaveAMDMachine_UnaryResult<"v_readfirstlane_b32", WaveAMDMachine_VGPR1,
-                              WaveAMDMachine_SGPR1, [WaveAMDMachine_VALU]>;
+                              WaveAMDMachine_SGPR1, [WaveAMDMachine_VALU, Pure]>;
 
 def WaveAMDMachine_WmmaI32_16x16x16_IU8Op
     : WaveAMDMachine_TernaryResult<"wmma_i32_16x16x16_iu8", WaveAMDMachine_VGPR,
@@ -433,7 +436,7 @@ def WaveAMDMachine_SMovB32ValueOp : WaveAMDMachine_Op<"s_mov_b32_value", [Pure]>
 // SGPR tuple (per-component copy) or a scalar value (broadcast).
 def WaveAMDMachine_SMovB32TupleOp
     : WaveAMDMachine_UnaryResult<"s_mov_b32_tuple", WaveAMDMachine_RegOrImm,
-                              WaveAMDMachine_SGPR, []> {
+                              WaveAMDMachine_SGPR, [Pure]> {
   let hasVerifier = 1;
 }
 def WaveAMDMachine_SLoadB32Op : WaveAMDMachine_UnaryResult<"s_load_b32",
@@ -505,7 +508,7 @@ def WaveAMDMachine_SEndpgmOp : WaveAMDMachine_ZeroResult<"s_endpgm">;
 def WaveAMDMachine_SSetpcB64Op : WaveAMDMachine_ZeroResult<"s_setpc_b64">;
 
 def WaveAMDMachine_GlobalLoadB32Op
-    : WaveAMDMachine_GlobalMemoryOp<"global_load_b32", [WaveAMDMachine_VMEMLoad]> {
+    : WaveAMDMachine_GlobalMemoryOp<"global_load_b32", [WaveAMDMachine_VMEMLoad, MemoryEffects<[MemRead]>]> {
   let summary = "global 32-bit load through an SGPR base";
   let description = [{
     Reads one 32-bit value from `base + offset + inst_offset` into the
@@ -531,7 +534,7 @@ def WaveAMDMachine_GlobalLoadB32Op
 // `_b{64,96,128}` syntax on gfx11/12). Operand shape mirrors
 // `global_load_b32`; result width is fixed by the op's mnemonic.
 def WaveAMDMachine_GlobalLoadB64Op
-    : WaveAMDMachine_GlobalMemoryOp<"global_load_b64", [WaveAMDMachine_VMEMLoad]> {
+    : WaveAMDMachine_GlobalMemoryOp<"global_load_b64", [WaveAMDMachine_VMEMLoad, MemoryEffects<[MemRead]>]> {
   let summary = "global 64-bit load through an SGPR base";
   let arguments = (ins WaveAMDMachine_VGPR1:$offset, WaveAMDMachine_SGPR2:$base,
                        Optional<WaveAMDMachine_MemToken>:$dependency,
@@ -545,7 +548,7 @@ def WaveAMDMachine_GlobalLoadB64Op
 }
 
 def WaveAMDMachine_GlobalLoadB96Op
-    : WaveAMDMachine_GlobalMemoryOp<"global_load_b96", [WaveAMDMachine_VMEMLoad]> {
+    : WaveAMDMachine_GlobalMemoryOp<"global_load_b96", [WaveAMDMachine_VMEMLoad, MemoryEffects<[MemRead]>]> {
   let summary = "global 96-bit load through an SGPR base";
   let arguments = (ins WaveAMDMachine_VGPR1:$offset, WaveAMDMachine_SGPR2:$base,
                        Optional<WaveAMDMachine_MemToken>:$dependency,
@@ -559,7 +562,7 @@ def WaveAMDMachine_GlobalLoadB96Op
 }
 
 def WaveAMDMachine_GlobalLoadB128Op
-    : WaveAMDMachine_GlobalMemoryOp<"global_load_b128", [WaveAMDMachine_VMEMLoad]> {
+    : WaveAMDMachine_GlobalMemoryOp<"global_load_b128", [WaveAMDMachine_VMEMLoad, MemoryEffects<[MemRead]>]> {
   let summary = "global 128-bit load through an SGPR base";
   let arguments = (ins WaveAMDMachine_VGPR1:$offset, WaveAMDMachine_SGPR2:$base,
                        Optional<WaveAMDMachine_MemToken>:$dependency,
@@ -573,7 +576,7 @@ def WaveAMDMachine_GlobalLoadB128Op
 }
 
 def WaveAMDMachine_GlobalLoadTupleB32Op
-    : WaveAMDMachine_GlobalMemoryOp<"global_load_tuple_b32", [WaveAMDMachine_VMEMLoad]> {
+    : WaveAMDMachine_GlobalMemoryOp<"global_load_tuple_b32", [WaveAMDMachine_VMEMLoad, MemoryEffects<[MemRead]>]> {
   let summary = "global load of N consecutive 32-bit values into a VGPR tuple";
   let description = [{
     Loads `N` consecutive dwords from `base + offset + inst_offset +
@@ -601,7 +604,7 @@ def WaveAMDMachine_GlobalLoadTupleB32Op
 // any constant component into `voffset` rather than parking it in
 // the attribute.
 def WaveAMDMachine_GlobalLoadLdsB32Op
-    : WaveAMDMachine_GlobalMemoryOp<"global_load_lds_b32", [WaveAMDMachine_VMEMLoad]> {
+    : WaveAMDMachine_GlobalMemoryOp<"global_load_lds_b32", [WaveAMDMachine_VMEMLoad, MemoryEffects<[MemRead, MemWrite]>]> {
   let summary = "global-to-LDS 32-bit DMA load";
   let description = [{
     Reads one dword from global memory and writes it to LDS. `m0` carries the
@@ -628,7 +631,7 @@ def WaveAMDMachine_GlobalLoadLdsB32Op
 }
 
 def WaveAMDMachine_GlobalLoadLdsB128Op
-    : WaveAMDMachine_GlobalMemoryOp<"global_load_lds_b128", [WaveAMDMachine_VMEMLoad]> {
+    : WaveAMDMachine_GlobalMemoryOp<"global_load_lds_b128", [WaveAMDMachine_VMEMLoad, MemoryEffects<[MemRead, MemWrite]>]> {
   let summary = "global-to-LDS 128-bit DMA load";
   let description = [{
     Reads 16 bytes from global memory and writes them to LDS. `m0` carries the
@@ -662,7 +665,7 @@ def WaveAMDMachine_MakeBufferRsrcOp
 }
 
 def WaveAMDMachine_GlobalStoreB32Op
-    : WaveAMDMachine_GlobalMemoryOp<"global_store_b32", [WaveAMDMachine_VMEMStore]> {
+    : WaveAMDMachine_GlobalMemoryOp<"global_store_b32", [WaveAMDMachine_VMEMStore, MemoryEffects<[MemWrite]>]> {
   let summary = "global 32-bit store through an SGPR base";
   let description = [{
     Stores `value` to `base + offset + inst_offset`. `inst_offset` is
@@ -683,7 +686,7 @@ def WaveAMDMachine_GlobalStoreB32Op
 }
 
 def WaveAMDMachine_GlobalStoreB64Op
-    : WaveAMDMachine_GlobalMemoryOp<"global_store_b64", [WaveAMDMachine_VMEMStore]> {
+    : WaveAMDMachine_GlobalMemoryOp<"global_store_b64", [WaveAMDMachine_VMEMStore, MemoryEffects<[MemWrite]>]> {
   let summary = "global 64-bit store through an SGPR base";
   let arguments = (ins WaveAMDMachine_VGPR1:$offset, WaveAMDMachine_VGPR2:$value,
                        WaveAMDMachine_SGPR2:$base,
@@ -698,7 +701,7 @@ def WaveAMDMachine_GlobalStoreB64Op
 }
 
 def WaveAMDMachine_GlobalStoreB96Op
-    : WaveAMDMachine_GlobalMemoryOp<"global_store_b96", [WaveAMDMachine_VMEMStore]> {
+    : WaveAMDMachine_GlobalMemoryOp<"global_store_b96", [WaveAMDMachine_VMEMStore, MemoryEffects<[MemWrite]>]> {
   let summary = "global 96-bit store through an SGPR base";
   let arguments = (ins WaveAMDMachine_VGPR1:$offset, WaveAMDMachine_VGPR3:$value,
                        WaveAMDMachine_SGPR2:$base,
@@ -713,7 +716,7 @@ def WaveAMDMachine_GlobalStoreB96Op
 }
 
 def WaveAMDMachine_GlobalStoreB128Op
-    : WaveAMDMachine_GlobalMemoryOp<"global_store_b128", [WaveAMDMachine_VMEMStore]> {
+    : WaveAMDMachine_GlobalMemoryOp<"global_store_b128", [WaveAMDMachine_VMEMStore, MemoryEffects<[MemWrite]>]> {
   let summary = "global 128-bit store through an SGPR base";
   let arguments = (ins WaveAMDMachine_VGPR1:$offset, WaveAMDMachine_VGPR4:$value,
                        WaveAMDMachine_SGPR2:$base,
@@ -727,7 +730,7 @@ def WaveAMDMachine_GlobalStoreB128Op
   }];
 }
 def WaveAMDMachine_BufferStoreB32Op
-    : WaveAMDMachine_BufferMemoryOp<"buffer_store_b32", [WaveAMDMachine_VMEMStore]> {
+    : WaveAMDMachine_BufferMemoryOp<"buffer_store_b32", [WaveAMDMachine_VMEMStore, MemoryEffects<[MemWrite]>]> {
   let summary = "buffer 32-bit store through an SGPR descriptor and VGPR offset";
   let description = [{
     MUBUF OFFEN: stores `value` to `descriptor[offset + soffset +
@@ -750,7 +753,7 @@ def WaveAMDMachine_BufferStoreB32Op
   let hasVerifier = 1;
 }
 def WaveAMDMachine_BufferLoadB32Op
-    : WaveAMDMachine_BufferMemoryOp<"buffer_load_b32", [WaveAMDMachine_VMEMLoad]> {
+    : WaveAMDMachine_BufferMemoryOp<"buffer_load_b32", [WaveAMDMachine_VMEMLoad, MemoryEffects<[MemRead]>]> {
   let summary = "buffer 32-bit load through an SGPR descriptor and VGPR offset";
   let description = [{
     MUBUF OFFEN: loads a 32-bit value from `descriptor[offset +
@@ -771,7 +774,7 @@ def WaveAMDMachine_BufferLoadB32Op
   let hasVerifier = 1;
 }
 def WaveAMDMachine_BufferLoadB64Op
-    : WaveAMDMachine_BufferMemoryOp<"buffer_load_b64", [WaveAMDMachine_VMEMLoad]> {
+    : WaveAMDMachine_BufferMemoryOp<"buffer_load_b64", [WaveAMDMachine_VMEMLoad, MemoryEffects<[MemRead]>]> {
   let summary = "buffer 64-bit load through an SGPR descriptor and VGPR offset";
   let arguments = (ins WaveAMDMachine_VGPR1:$offset, WaveAMDMachine_SGPR4:$descriptor,
                        WaveAMDMachine_SGPR1OrImm:$soffset,
@@ -787,7 +790,7 @@ def WaveAMDMachine_BufferLoadB64Op
 }
 
 def WaveAMDMachine_BufferLoadB96Op
-    : WaveAMDMachine_BufferMemoryOp<"buffer_load_b96", [WaveAMDMachine_VMEMLoad]> {
+    : WaveAMDMachine_BufferMemoryOp<"buffer_load_b96", [WaveAMDMachine_VMEMLoad, MemoryEffects<[MemRead]>]> {
   let summary = "buffer 96-bit load through an SGPR descriptor and VGPR offset";
   let arguments = (ins WaveAMDMachine_VGPR1:$offset, WaveAMDMachine_SGPR4:$descriptor,
                        WaveAMDMachine_SGPR1OrImm:$soffset,
@@ -803,7 +806,7 @@ def WaveAMDMachine_BufferLoadB96Op
 }
 
 def WaveAMDMachine_BufferLoadB128Op
-    : WaveAMDMachine_BufferMemoryOp<"buffer_load_b128", [WaveAMDMachine_VMEMLoad]> {
+    : WaveAMDMachine_BufferMemoryOp<"buffer_load_b128", [WaveAMDMachine_VMEMLoad, MemoryEffects<[MemRead]>]> {
   let summary = "buffer 128-bit load through an SGPR descriptor and VGPR offset";
   let arguments = (ins WaveAMDMachine_VGPR1:$offset, WaveAMDMachine_SGPR4:$descriptor,
                        WaveAMDMachine_SGPR1OrImm:$soffset,
@@ -819,7 +822,7 @@ def WaveAMDMachine_BufferLoadB128Op
 }
 
 def WaveAMDMachine_BufferStoreB64Op
-    : WaveAMDMachine_BufferMemoryOp<"buffer_store_b64", [WaveAMDMachine_VMEMStore]> {
+    : WaveAMDMachine_BufferMemoryOp<"buffer_store_b64", [WaveAMDMachine_VMEMStore, MemoryEffects<[MemWrite]>]> {
   let summary = "buffer 64-bit store through an SGPR descriptor and VGPR offset";
   let arguments = (ins WaveAMDMachine_VGPR1:$offset, WaveAMDMachine_VGPR2:$value,
                        WaveAMDMachine_SGPR4:$descriptor,
@@ -835,7 +838,7 @@ def WaveAMDMachine_BufferStoreB64Op
 }
 
 def WaveAMDMachine_BufferStoreB96Op
-    : WaveAMDMachine_BufferMemoryOp<"buffer_store_b96", [WaveAMDMachine_VMEMStore]> {
+    : WaveAMDMachine_BufferMemoryOp<"buffer_store_b96", [WaveAMDMachine_VMEMStore, MemoryEffects<[MemWrite]>]> {
   let summary = "buffer 96-bit store through an SGPR descriptor and VGPR offset";
   let arguments = (ins WaveAMDMachine_VGPR1:$offset, WaveAMDMachine_VGPR3:$value,
                        WaveAMDMachine_SGPR4:$descriptor,
@@ -851,7 +854,7 @@ def WaveAMDMachine_BufferStoreB96Op
 }
 
 def WaveAMDMachine_BufferStoreB128Op
-    : WaveAMDMachine_BufferMemoryOp<"buffer_store_b128", [WaveAMDMachine_VMEMStore]> {
+    : WaveAMDMachine_BufferMemoryOp<"buffer_store_b128", [WaveAMDMachine_VMEMStore, MemoryEffects<[MemWrite]>]> {
   let summary = "buffer 128-bit store through an SGPR descriptor and VGPR offset";
   let arguments = (ins WaveAMDMachine_VGPR1:$offset, WaveAMDMachine_VGPR4:$value,
                        WaveAMDMachine_SGPR4:$descriptor,
@@ -867,7 +870,7 @@ def WaveAMDMachine_BufferStoreB128Op
 }
 
 def WaveAMDMachine_BufferLoadTupleB32Op
-    : WaveAMDMachine_BufferMemoryOp<"buffer_load_tuple_b32", [WaveAMDMachine_VMEMLoad]> {
+    : WaveAMDMachine_BufferMemoryOp<"buffer_load_tuple_b32", [WaveAMDMachine_VMEMLoad, MemoryEffects<[MemRead]>]> {
   let summary = "buffer load of N consecutive 32-bit values into a VGPR tuple";
   let description = [{
     Loads `N` consecutive dwords from `descriptor[offset + soffset +
@@ -897,7 +900,7 @@ def WaveAMDMachine_BufferLoadTupleB32Op
 // `hasSoffset=true` so `demoteToFitSpec` routes the const there
 // instead of voffset.
 def WaveAMDMachine_BufferLoadLdsB32Op
-    : WaveAMDMachine_BufferMemoryOp<"buffer_load_lds_b32", [WaveAMDMachine_VMEMLoad]> {
+    : WaveAMDMachine_BufferMemoryOp<"buffer_load_lds_b32", [WaveAMDMachine_VMEMLoad, MemoryEffects<[MemRead, MemWrite]>]> {
   let summary = "buffer-to-LDS 32-bit DMA load";
   let description = [{
     Reads one dword through a buffer descriptor and writes it to LDS. `m0`
@@ -925,7 +928,7 @@ def WaveAMDMachine_BufferLoadLdsB32Op
 }
 
 def WaveAMDMachine_BufferLoadLdsB128Op
-    : WaveAMDMachine_BufferMemoryOp<"buffer_load_lds_b128", [WaveAMDMachine_VMEMLoad]> {
+    : WaveAMDMachine_BufferMemoryOp<"buffer_load_lds_b128", [WaveAMDMachine_VMEMLoad, MemoryEffects<[MemRead, MemWrite]>]> {
   let summary = "buffer-to-LDS 128-bit DMA load";
   let description = [{
     Reads 16 bytes through a buffer descriptor and writes them to LDS. `m0`
@@ -951,7 +954,7 @@ def WaveAMDMachine_BufferLoadLdsB128Op
 }
 
 def WaveAMDMachine_BufferStoreTupleB32Op
-    : WaveAMDMachine_BufferMemoryOp<"buffer_store_tuple_b32", [WaveAMDMachine_VMEMStore]> {
+    : WaveAMDMachine_BufferMemoryOp<"buffer_store_tuple_b32", [WaveAMDMachine_VMEMStore, MemoryEffects<[MemWrite]>]> {
   let summary = "buffer 32-bit store of a VGPR tuple component";
   let description = [{
     Stores the `component`-th 32-bit slice of the `value` VGPR tuple to
@@ -975,7 +978,7 @@ def WaveAMDMachine_BufferStoreTupleB32Op
   let hasVerifier = 1;
 }
 def WaveAMDMachine_GlobalStoreTupleB32Op
-    : WaveAMDMachine_GlobalMemoryOp<"global_store_tuple_b32", [WaveAMDMachine_VMEMStore]> {
+    : WaveAMDMachine_GlobalMemoryOp<"global_store_tuple_b32", [WaveAMDMachine_VMEMStore, MemoryEffects<[MemWrite]>]> {
   let summary = "global 32-bit store of a VGPR tuple component";
   let description = [{
     Per-component dword store: writes lane `component` of the `value`

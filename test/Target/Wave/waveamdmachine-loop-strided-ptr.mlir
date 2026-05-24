@@ -25,6 +25,8 @@ func.func @strided_kloop(%a: !wave.ptr<f16, #wave.global>, %n: i32)
         -> (!wave.simd<vector<8xi32>, 32>, !wave.mem.token)
     %v1, %t1 = wave.load %q1 : (!wave.simd<!wave.ptr<f16, #wave.global>, 32>)
         -> (!wave.simd<vector<8xi32>, 32>, !wave.mem.token)
+    wave.store %v0 -> %q1 : (!wave.simd<vector<8xi32>, 32>, !wave.simd<!wave.ptr<f16, #wave.global>, 32>) -> !wave.mem.token
+    wave.store %v1 -> %q0 : (!wave.simd<vector<8xi32>, 32>, !wave.simd<!wave.ptr<f16, #wave.global>, 32>) -> !wave.mem.token
     %n0 = wave.ptr_add %q0, %c16 : !wave.simd<!wave.ptr<f16, #wave.global>, 32>, i32
         -> !wave.simd<!wave.ptr<f16, #wave.global>, 32>
     %n1 = wave.ptr_add %q1, %c16 : !wave.simd<!wave.ptr<f16, #wave.global>, 32>, i32
