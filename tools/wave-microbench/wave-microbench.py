@@ -177,6 +177,13 @@ def build_argparser() -> argparse.ArgumentParser:
         action="store_true",
         help="run wave.transform.estimate_cycles and print predicted vs measured",
     )
+    ap.add_argument(
+        "--inner",
+        type=int,
+        default=None,
+        help="inner-loop trip count for repeat-body kernels"
+        " (passed as the 2nd i32 arg; runner sees --args=2 --x N)",
+    )
     return ap
 
 
@@ -196,25 +203,21 @@ def run_kernel(
     env = os.environ.copy()
     existing_ld = env.get("LD_LIBRARY_PATH", "")
     env["LD_LIBRARY_PATH"] = args.rocm_lib + (":" + existing_ld if existing_ld else "")
-    result = subprocess.run(
-        [
-            str(runner_bin),
-            "--iters",
-            str(args.iters),
-            "--warmup",
-            str(args.warmup),
-            "--grid",
-            args.grid,
-            "--block",
-            args.block,
-            str(hsaco),
-            kernel,
-        ],
-        check=True,
-        capture_output=True,
-        text=True,
-        env=env,
-    )
+    cmd = [
+        str(runner_bin),
+        "--iters",
+        str(args.iters),
+        "--warmup",
+        str(args.warmup),
+        "--grid",
+        args.grid,
+        "--block",
+        args.block,
+    ]
+    if args.inner is not None:
+        cmd += ["--args", "2", "--x", str(args.inner)]
+    cmd += [str(hsaco), kernel]
+    result = subprocess.run(cmd, check=True, capture_output=True, text=True, env=env)
     return result.stdout
 
 
