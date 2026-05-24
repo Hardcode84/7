@@ -13,15 +13,15 @@
 
 // RUN: wave-opt %s --pass-pipeline='builtin.module(transform-interpreter)' --verify-diagnostics | FileCheck %s
 
-// With `vgpr-limit = 6` (5 allocatable VGPRs after the reserved v0)
-// the trials with `k_unroll` in {1, 2} fit; `k_unroll >= 4` overflows
-// because the extract loop's dead per-slot v_movs also consume a
-// fresh phys slot at each def. Winner: `k_unroll = 2`, scoring
-// `waveamdmachine.vgpr_count_max = 5`.
+// All prefetch slots fill the same imm0 seed: v_mov_b32_tuple is
+// Pure, so CSE collapses every unroll to one shared VGPR. Trials
+// all fit; tune picks the largest unroll, scoring
+// `waveamdmachine.vgpr_count_max = 1`. (Distinct loads -- which is
+// the real case -- would not fold; that needs a non-const seed.)
 
 // CHECK-LABEL: module
-// CHECK-SAME: waveamdmachine.vgpr_count_max = 5 : i64
-// CHECK-SAME: wavemeta.params = {k_unroll = 2 : index}
+// CHECK-SAME: waveamdmachine.vgpr_count_max = 1 : i64
+// CHECK-SAME: wavemeta.params = {k_unroll = 1 : index}
 // CHECK-LABEL: func.func @vary_vgprs
 // CHECK-NOT: wavemeta.
 module attributes {transform.with_named_sequence,

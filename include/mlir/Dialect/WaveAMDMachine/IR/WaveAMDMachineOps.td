@@ -194,7 +194,7 @@ class WaveAMDMachine_UnaryResult<string mnemonic, Type operandType, Type resultT
 
 class WaveAMDMachine_BinaryResult<string mnemonic, Type operandType, Type resultType,
                                list<Trait> traits = []>
-    : WaveAMDMachine_Op<mnemonic, traits> {
+    : WaveAMDMachine_Op<mnemonic, !listconcat(traits, [Pure])> {
   let arguments = (ins operandType:$lhs, operandType:$rhs);
   let results = (outs resultType:$result);
   let assemblyFormat = "$lhs `,` $rhs attr-dict `:` functional-type(operands, results)";
@@ -202,7 +202,7 @@ class WaveAMDMachine_BinaryResult<string mnemonic, Type operandType, Type result
 
 class WaveAMDMachine_TernaryResult<string mnemonic, Type operandType, Type resultType,
                                 list<Trait> traits = []>
-    : WaveAMDMachine_Op<mnemonic, traits> {
+    : WaveAMDMachine_Op<mnemonic, !listconcat(traits, [Pure])> {
   let arguments = (ins operandType:$a, operandType:$b, operandType:$c);
   let results = (outs resultType:$result);
   let assemblyFormat = "$a `,` $b `,` $c attr-dict `:` functional-type(operands, results)";
@@ -304,7 +304,7 @@ def WaveAMDMachine_VWorkitemIdXOp
 
 def WaveAMDMachine_VMovB32TupleOp
     : WaveAMDMachine_UnaryResult<"v_mov_b32_tuple", WaveAMDMachine_RegOrImm,
-                              WaveAMDMachine_VGPR, [WaveAMDMachine_VALU]> {
+                              WaveAMDMachine_VGPR, [WaveAMDMachine_VALU, Pure]> {
   let hasVerifier = 1;
 }
 
