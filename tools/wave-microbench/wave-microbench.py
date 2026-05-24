@@ -158,6 +158,12 @@ def build_argparser() -> argparse.ArgumentParser:
     ap.add_argument("--grid", default="1,1,1")
     ap.add_argument("--block", default="32,1,1")
     ap.add_argument(
+        "--buf-elems",
+        type=int,
+        default=None,
+        help="i32 output buffer size; defaults to grid*block on the runner",
+    )
+    ap.add_argument(
         "--build-dir",
         type=Path,
         default=Path(os.environ.get("WAVE_BUILD_DIR", str(DEFAULT_BUILD))),
@@ -183,6 +189,13 @@ def build_argparser() -> argparse.ArgumentParser:
         default=None,
         help="inner-loop trip count for repeat-body kernels"
         " (passed as the 2nd i32 arg; runner sees --args=2 --x N)",
+    )
+    ap.add_argument(
+        "--in-kernel-cycles",
+        action="store_true",
+        help="for kernels that store t0/t1 in out[0]/out[1] via"
+        " wave.read_cycles, dump those slots and report dt"
+        " (gfx11 20-bit shader-cycles wrap is unwrapped)",
     )
     return ap
 
@@ -214,11 +227,35 @@ def run_kernel(
         "--block",
         args.block,
     ]
+    if args.buf_elems is not None:
+        cmd += ["--buf-elems", str(args.buf_elems)]
     if args.inner is not None:
         cmd += ["--args", "2", "--x", str(args.inner)]
+    if args.in_kernel_cycles:
+        cmd += ["--dump-out", "2"]
     cmd += [str(hsaco), kernel]
     result = subprocess.run(cmd, check=True, capture_output=True, text=True, env=env)
     return result.stdout
+
+
+def report_in_kernel_cycles(runner_stdout: str) -> None:
+    """Parse out[0]=t0 and out[1]=t1 from runner stdout and report dt.
+    gfx11 HW_REG_SHADER_CYCLES is 20 bits; we unwrap with mod 2^20."""
+    slots: dict[int, int] = {}
+    for line in runner_stdout.splitlines():
+        m = re.match(r"out\[(\d+)\]: (-?\d+)", line)
+        if m:
+            slots[int(m.group(1))] = int(m.group(2))
+    if 0 not in slots or 1 not in slots:
+        return
+    t0, t1 = slots[0], slots[1]
+    mask = (1 << 20) - 1
+    dt = (t1 - t0) & mask
+    print(
+        f"in_kernel_cycles_t0: {t0 & mask}\n"
+        f"in_kernel_cycles_t1: {t1 & mask}\n"
+        f"in_kernel_cycles_dt: {dt}"
+    )
 
 
 def report_predicted_vs_measured(runner_stdout: str, predicted: int) -> None:
@@ -261,6 +298,8 @@ def main() -> int:
         print(out, end="")
         if predicted is not None:
             report_predicted_vs_measured(out, predicted)
+        if args.in_kernel_cycles:
+            report_in_kernel_cycles(out)
     return 0
 
 

@@ -39,6 +39,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <vector>
 
 namespace {
 
@@ -55,6 +56,10 @@ struct Args {
   // 1 = (i32 *out), 2 = (i32 *out, i32 x). Default 1.
   int numArgs = 1;
   int extraI32 = 0;
+  // After the last launch, copy this many i32s back from `out` and
+  // print one `out[N]: VALUE` line per slot. Used by in-kernel timer
+  // microbenches to surface t0 / t1 to the orchestrator. <= 0 = off.
+  int dumpOut = 0;
 };
 
 [[noreturn]] static void die(const char *msg) {
@@ -73,7 +78,8 @@ static void usage() {
       "  --block X,Y,Z   block dim (default 32,1,1)\n"
       "  --buf-elems N   i32 output buffer size (default grid*block)\n"
       "  --args N        kernel arg count (1 or 2; default 1)\n"
-      "  --x VAL         second i32 arg value when --args=2 (default 0)\n");
+      "  --x VAL         second i32 arg value when --args=2 (default 0)\n"
+      "  --dump-out N    dump first N i32s from `out` post-run (default 0)\n");
 }
 
 static int parseInt(const char *s) {
@@ -100,6 +106,7 @@ static void setWarmup(Args &a, const char *v) { a.warmupIters = parseInt(v); }
 static void setBufElems(Args &a, const char *v) { a.bufElems = parseInt(v); }
 static void setNumArgs(Args &a, const char *v) { a.numArgs = parseInt(v); }
 static void setExtraI32(Args &a, const char *v) { a.extraI32 = parseInt(v); }
+static void setDumpOut(Args &a, const char *v) { a.dumpOut = parseInt(v); }
 static void setGrid(Args &a, const char *v) {
   parseTriple(v, a.gridX, a.gridY, a.gridZ);
 }
@@ -110,7 +117,7 @@ static void setBlock(Args &a, const char *v) {
 static constexpr FlagHandler kFlags[] = {
     {"--iters", setIters}, {"--warmup", setWarmup},      {"--grid", setGrid},
     {"--block", setBlock}, {"--buf-elems", setBufElems}, {"--args", setNumArgs},
-    {"--x", setExtraI32},
+    {"--x", setExtraI32},  {"--dump-out", setDumpOut},
 };
 
 static bool tryFlag(const char *arg, const char *val, Args &a) {
@@ -242,6 +249,16 @@ int main(int argc, char **argv) {
   std::printf("total_ms: %.3f\n", elapsedMs);
   std::printf("per_launch_us: %.3f\n", perLaunchUs);
   std::printf("per_launch_cycles_wallclock: %.0f\n", perLaunchCycles);
+
+  if (a.dumpOut > 0) {
+    int n = a.dumpOut < a.bufElems ? a.dumpOut : a.bufElems;
+    std::vector<int32_t> host(n, 0);
+    check(hipMemcpy(host.data(), deviceOut, n * sizeof(int32_t),
+                    hipMemcpyDeviceToHost),
+          "hipMemcpy out -> host");
+    for (int i = 0; i < n; ++i)
+      std::printf("out[%d]: %d\n", i, host[i]);
+  }
 
   check(hipEventDestroy(start), "event destroy start");
   check(hipEventDestroy(stop), "event destroy stop");
