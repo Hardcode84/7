@@ -133,4 +133,36 @@ func.func @duplicate_sgpr1_init() attributes {wave.kernel} {
   return
 }
 
+// Pre-pinned fragment carry (vgpr,8 at fixed index) + a pinned
+// tuple_to_elements inside the body. Pinned regs get no live
+// interval, so loop-entry-carry and tuple coalesce must skip them
+// instead of failing "coalesce: primary has no interval". This was
+// the WMMA matmul accumulator carry. Just need it to not crash.
+// CHECK-LABEL: func.func @pinned_fragment_carry
+// CHECK: waveamdmachine.uniform_loop carries
+// CHECK: waveamdmachine.tuple_to_elements
+func.func @pinned_fragment_carry(%init: !waveamdmachine.reg<vgpr, 8, 16>)
+    attributes {wave.kernel} {
+  %z = waveamdmachine.imm 0 : !waveamdmachine.imm
+  %iv = waveamdmachine.s_mov_b32_value %z
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<sgpr, 1>
+  %r:2 = waveamdmachine.uniform_loop carries(%iv, %init :
+      !waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<vgpr, 8, 16>) {
+  ^bb0(%a: !waveamdmachine.reg<sgpr, 1>, %f: !waveamdmachine.reg<vgpr, 8, 16>):
+    %e:8 = waveamdmachine.tuple_to_elements %f
+        : (!waveamdmachine.reg<vgpr, 8, 16>)
+        -> (!waveamdmachine.reg<vgpr, 1, 16>, !waveamdmachine.reg<vgpr, 1, 17>,
+            !waveamdmachine.reg<vgpr, 1, 18>, !waveamdmachine.reg<vgpr, 1, 19>,
+            !waveamdmachine.reg<vgpr, 1, 20>, !waveamdmachine.reg<vgpr, 1, 21>,
+            !waveamdmachine.reg<vgpr, 1, 22>, !waveamdmachine.reg<vgpr, 1, 23>)
+    %n:2 = waveamdmachine.s_add_i32 %a, %z
+        : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.imm)
+        -> (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<scc, 1>)
+    waveamdmachine.continue_if %n#1 : !waveamdmachine.reg<scc, 1>
+        carries(%n#0, %f : !waveamdmachine.reg<sgpr, 1>,
+                !waveamdmachine.reg<vgpr, 8, 16>)
+  } -> !waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<vgpr, 8, 16>
+  return
+}
+
 }
