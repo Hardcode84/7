@@ -72,6 +72,28 @@ partitionRegions(func::FuncOp func, const PressureAnalysisResult &dataflow,
                  const ArchData &arch, int windowSize = 16,
                  double fuzzyMargin = 0.2);
 
+// Result of the ping-pong delay search: the best D to stagger wave 1
+// against wave 0, the predicted peak FU utilisation under that D
+// (1.0 = saturated, >1 = bottleneck), and which FU is the
+// bottleneck.
+struct PingpongPick {
+  int delay = 0;
+  double predictedPeakUtil = 0.0;
+  FunctionalUnit bottleneckFU = FunctionalUnit::None;
+};
+
+// Score a specific delay D for two waves running the same kernel.
+// Returns the peak FU utilisation across the combined timeline.
+PingpongPick scorePingpongDelay(ArrayRef<RegionProfile> regions,
+                                const ArchData &arch, int delay);
+
+// Search over candidate D values (region-boundary alignments) and
+// return the one that minimises peak FU utilisation. 2-wave
+// specialisation; the same convolution generalises to N waves
+// when that becomes needed.
+PingpongPick findOptimalPingpongDelay(ArrayRef<RegionProfile> regions,
+                                      const ArchData &arch);
+
 } // namespace mlir::waveamdmachine
 
 #endif // MLIR_DIALECT_WAVEAMDMACHINE_COSTMODEL_REGIONPROFILE_H
