@@ -91,9 +91,9 @@ Four branches resolved up front:
 
 2. **Hand-copy LLVM SchedModel data per arch initially; TableGen
    emitter later.** Four archs is ~200 lines of data; a TG-emitter
-   pass is real work. File a bead to mechanize before adding the
-   fifth arch. A pre-commit diff script keeps the hand-copy honest
-   against upstream.
+   pass is real work. Mechanise before adding the fifth arch. A
+   pre-commit diff script keeps the hand-copy honest against
+   upstream.
 
 3. **ATT integration via `rocprofv3 --att`, not raw SQTT decode.**
    rocprofv3 is the ROCm-supported path with a stable output
@@ -146,114 +146,213 @@ gaps from real kernels.
 ## Stage 2: dense-dataflow pressure analysis
 
 **Goal.** Per-program-point machine-state lattice over the
-wave.amd.machine func body. Replaces a scalar single-wave cycle
-count with a richer artifact: each lattice point carries per-FU
-ready-cycles, per-counter in-flight depth, and per-Value
-ready-cycles. The Stage 8 scheduler reads pressure from this
-lattice; the Stage 5 multi-wave simulator consumes it as input;
-the autotune machinery still gets a scalar total when it asks for
-one.
+wave.amd.machine func body. The Stage 8 scheduler reads pressure
+from this lattice; the Stage 5 multi-wave simulator consumes it
+as input; the autotune machinery still gets a scalar total when
+it asks for one.
 
 Single-wave scalar estimators have a fundamental problem on real
 kernels: loops are visited once, branches sum instead of max, and
 the output gives no actionable signal for what to reorder. Dense
-dataflow with structural loop handling avoids all three.
+dataflow over relative-cycles state, with cold/hot separation at
+loop headers, avoids all three.
 
-**Lattice.**
+### Lattice: cold/hot tuple of relative-cycles state
+
+Each lattice cell carries **two** `MachineState` components -- a
+**cold** state (reflects pre-loop / non-backedge incoming control
+flow) and a **hot** state (reflects backedge incoming, i.e. the
+steady-state shape after the loop has settled). At non-loop
+program points the two are equal after convergence. At loop
+headers they split: cold = max over pre-loop predecessors, hot =
+max over backedge predecessors.
+
+Each `MachineState` is itself in **relative-cycles form**:
+
 ```cpp
 struct MachineState {
-  // Per-functional-unit "next free" cycle, relative to fn entry.
-  // FU set: VALU pipe, SALU pipe, VMEM pipe, lgkmcnt-side
-  // (SMEM/LDS), MFMA/XDL pipe, TRANS pipe, branch pipe.
-  std::array<int64_t, NumFU> fuReadyAt;
+  // Per-functional-unit "cycles until free" from this program
+  // point. Bounded by max-latency over FU classes (a small
+  // constant), so the lattice domain is finite and fixed-point
+  // iteration terminates without ad-hoc widening.
+  // FU set: VALU pipe, SALU pipe, VMEM, LGKM (SMEM+LDS),
+  // MFMA/XDL pipe, TRANS pipe, branch pipe, export pipe.
+  std::array<int, NumFU> fuPending;
 
   // Per-waitcnt-counter in-flight depth (loadcnt, dscnt, expcnt,
-  // storecnt + GFX12 split variants).
+  // storecnt + GFX12 split variants). Also bounded.
   std::array<int, NumWaitCounters> inflight;
 
-  // Per-Value ready-cycle map (live values only).
-  DenseMap<Value, int64_t> readyAt;
+  // Per-Value "cycles until ready" map (live values only).
+  DenseMap<Value, int> valPending;
+};
+
+struct PressureLattice {
+  MachineState cold;
+  MachineState hot;
 };
 ```
 
-Join at CFG merges: element-wise `max` on `fuReadyAt` and
-`inflight` (upper-bound semantics); set-union on `readyAt`.
-Monotone, ascending -- classical forward dataflow.
+Why relative cycles rather than absolute "cycle since function
+entry": absolute counts grow unboundedly per loop iteration, so
+no fixed point exists on the raw lattice -- you can't use a
+classical dataflow solver without bolting on structural
+loop-walking. Relative pendings are bounded above by max-latency,
+so the lattice is finite and the MLIR dataflow solver iterates to
+fixed point naturally. Total cycles (the autotune scalar) gets
+accumulated separately during the walk, not inside the lattice.
 
-**Transfer function** for op `o`:
+### Transfer function
+
+For each wave.amd.machine op `o`, apply identically to **both**
+cold and hot components of the lattice:
+
 ```
-fu = funit(class(o))
-issueAt = max(fuReadyAt[fu], max-over-operand-ready,
-              hazard-required-wait)
-fuReadyAt[fu] = issueAt + 1
-readyAt[results(o)] = issueAt + latency(o)
-inflight[counter(o)]++ for memory ops
-s_waitcnt N decrements counter + rebases fuReadyAt[branch]
+fu = funit(arch, class(o))
+W  = max(fuPending[fu],
+         max-over-operand-pending,
+         hazard-required-wait)
+// time advances by W; decrement all pendings by W (clamp at 0).
+fuPending  -= W   (saturating)
+valPending -= W   (saturating; drop entries at 0)
+inflight  unchanged (counter waits handled by s_waitcnt below)
+// op issues:
+fuPending[fu]            = 1            // FU occupied for 1 issue cycle
+valPending[results(o)]   = latency(o)   // results ready after `latency`
+inflight[counter(o)]    += 1 for memory ops
 ```
 
-**Implementation.** `mlir::dataflow::AbstractDenseDataFlowAnalysis`
-as the within-straight-line driver. Loops are handled
-structurally rather than via fixed-point (absolute cycles grow
-unboundedly per iter; no fixed point exists on the raw lattice):
-walk `uniform_loop` body once with a fresh zero lattice, extract
-per-iter delta (final-minus-initial per FU; sum per counter),
-multiply by trip count, apply to incoming lattice. Trip count
-extraction:
-- **Static:** `MLIRInferIntRangeInterface` on the `continue_if`
-  predicate; project already pulls in the deps.
-- **Annotation:** `waveamdmachine.trip_count` attribute on the
-  `uniform_loop` op when upstream knows (e.g.,
-  `wavemeta-specialize` after K is concretised).
-- **Fallback:** unknown -> use a heuristic (initial: 4) and tag
-  the result with `wave.estimated_unknown_trip_count = true` so
-  autotune scoring can downweight kernels with unbounded loops.
+Per-op total-cycle contribution = `W + 1` (issue wait plus the
+one cycle the FU is held). Accumulated in a side-channel
+(per-block running sum + a per-fn total), not stored in the
+lattice itself.
 
-Branches (`scf.if`-equivalent regions if they appear post-
-lowering) get standard `max`-on-join semantics. Scalar
-`s_cbranch_*` ops in straight-line code are treated as their own
-issue-slot cost only; their control-flow targets are not modeled.
+`s_waitcnt N` (the explicit wait pseudo) decrements the matching
+counter to at most `N`, and advances time by however many cycles
+are needed for the actual wait to drain.
 
-**Per-FU resource map.** New entry in the data spine:
-`SchedClass -> FunctionalUnit`. Lifted from `SISchedule.td`'s
-`HWWriteRes<class, [resources], cycles>`; the LLVM resource enum
-(`HWVALU`, `HWSALU`, `HWVMEM`, `HWLGKM`, `HWXDL`, `HWTransVALU`,
-`HWBranch`, `HWExport`) collapses to our compact FU set.
-`check-sched-tables.py` (Stage 1's pre-commit hook) is extended
-to diff the resource binding per class.
+### Joins at CFG edges
 
-**Sub-beads.** Stage 2 splits into four:
-- 2A: extended data spine -- per-FU map, `funit(class)` accessor,
-  hazard-required-wait helper. Updates check-sched-tables.py.
-- 2B: `MachineState` lattice type + dataflow driver over
-  straight-line code (no loops yet). Passes 5 synthetic kernels
-  vs `llvm-mca`.
-- 2C: structural loop handling + trip-count extraction. Passes
-  a 6th synthetic kernel with a fixed-trip-count loop.
-- 2D: `wave.transform.estimate_cycles` (returns total cycles) +
-  `wave.transform.pressure_report` (writes per-region per-FU
-  utilisation as a module attribute for the scheduler /
-  diagnostics).
+Joins are **edge-typed**:
 
-**Validation gate.** Six synthetic kernels: dependent VALU chain,
-independent VALU chain (probes per-FU parallelism), VMEM burst
-(probes inflight saturation), MFMA chain, simple loop with N=4
-trips (probes structural loop handling), mixed. Compared against
+- **Forward / non-backedge** (`pred` not in backedge set):
+  `after.cold.meet(before.cold)` and `after.hot.meet(before.hot)`.
+  Both components flow through normally; element-wise max on
+  each.
+- **Backedge** (`pred` is the source of an identified backedge to
+  `block`): only `after.hot.meet(before.hot)`. Cold does **not**
+  propagate around backedges -- the cold component represents
+  "what arrives the first time we reach this point", which by
+  definition excludes loop-carried contributions.
+
+At non-loop program points, cold and hot converge to the same
+value (both join from the same set of incoming edges). At loop
+headers, they stay separate: cold captures the warm-up state from
+pre-loop, hot captures the steady-state from backedge accumulation
+after enough fixed-point iterations.
+
+### Why cold/hot is worth the 2x lattice cost
+
+Naive single-component max-join at a loop header conflates pre-
+loop influence with steady-state. If a scalar burst right before
+the loop leaves VALU pending = 10 but per-iter steady-state VALU
+pending is 2, the max says "10 forever" -- which is correct as an
+upper bound but useless for the scheduler (it'll think the loop
+body is VALU-bound when it isn't).
+
+Cold/hot separation gives both views at every program point. The
+scheduler reads `state.hot` for "in-loop steady-state pressure"
+queries; the autotune total uses `state.cold` for first-iter cost
+and `state.hot` for subsequent iters.
+
+The construction also generalises beyond structured `uniform_loop`
+-- if any future pass introduces unstructured CFG with raw
+`s_cbranch_*` loops, we just need a dominator-tree pass to
+identify backedges and the same lattice plumbing keeps working.
+
+### Backedge identification
+
+For the current IR shape (structured `uniform_loop` +
+`continue_if`), backedges are syntactic: the `continue_if`
+inside a `uniform_loop` body is the back-edge to the loop's entry
+block. No DT pass required at this stage; the lattice asks "is
+the predecessor block the parent `uniform_loop`'s body terminator?"
+
+When unstructured loops appear (not yet, but the design
+accommodates), drop in a `DominanceInfo`-based backedge set
+computed once per function.
+
+### Total cycles accumulation
+
+The lattice gives per-program-point pressure, not per-fn total
+cycles. Total is computed during the analysis run as a side
+effect of the transfer:
+
+- **Straight-line block**: total += sum of `(W + 1)` per op.
+- **Loop with trip count T**:
+  - Iter-1 cost C1 = walk body using `cold` as entry state.
+  - Steady cost Ss = walk body using `hot` as entry state
+    (after fixed-point convergence).
+  - Total = C1 + (T - 1) * Ss.
+- **Loop with unknown T**: heuristic T = 4; tag result with
+  `wave.estimated_unknown_trip_count = true` so autotune scoring
+  downweights kernels with unbounded loops.
+- **CFG branch (`scf.if`-style nested regions)**: total advances
+  by max of the branches' contributions (worst-case path).
+
+Trip-count extraction: `MLIRInferIntRangeInterface` on the
+`continue_if` predicate (the project already pulls in the deps);
+fallback to `waveamdmachine.trip_count` attribute on the
+`uniform_loop` op when upstream sets one (e.g.,
+`wavemeta-specialize` after K is concretised).
+
+### Per-FU resource map
+
+New entry in the data spine: `SchedClass -> FunctionalUnit`.
+Lifted from `SISchedule.td`'s `HWWriteRes<class, [resources],
+cycles>`; the LLVM resource enum (`HWVALU`, `HWSALU`, `HWVMEM`,
+`HWLGKM`, `HWXDL`, `HWTransVALU`, `HWBranch`, `HWExport`)
+collapses to our compact FU set. `check-sched-tables.py` (Stage
+1's pre-commit hook) extended to diff the resource binding per
+class alongside the existing latency diff.
+
+### Implementation notes
+
+- `mlir::dataflow::AbstractDenseDataFlowAnalysis` as the driver.
+  `MachineState::meet` does the element-wise max; the framework
+  iterates to fixed point.
+- `visitBlockTransfer` is overridden to inspect the predecessor
+  and dispatch cold vs. hot per edge.
+- Loop-aware total-cycle accumulation is a small post-pass over
+  `uniform_loop` ops: query the lattice at the loop body's
+  entry / exit, compute C1 / Ss, multiply, sum.
+
+### Validation gate
+
+Six synthetic kernels: dependent VALU chain, independent VALU
+chain (probes per-FU parallelism), VMEM burst (probes inflight
+saturation), MFMA chain, fixed-trip-count loop (probes cold/hot
+separation + trip-count multiplication), mixed. Compared against
 `llvm-mca` on the same assembled ISA. Pass:
 - Total cycles within 5% on all six.
-- Per-FU ready-cycle vector within 10% of mca's
+- Per-FU pending vector within 10% of mca's
   `Resource pressure per iteration` block.
 
-**Risk: trip-count failure.** Unknown trip counts force the
-fallback path. Mitigation: emit a remark + module attribute so
-downstream consumers know the estimate is degraded; surface the
-warning in `wave.transform.estimate_cycles` output (high bit of
-the returned i64 reserved as "estimate-is-approximate" flag, or
-a sidecar param).
+### Risks
 
-**Risk: per-FU map drift vs LLVM.** Same SISchedule.td hand-copy
-problem as latencies, same mitigation (extend
-`check-sched-tables.py`). The TableGen emitter follow-up
-(sy5.1.4) folds both diff paths into one generator.
+- **Trip-count failure.** Unknown trip counts force the heuristic
+  path. Mitigation: tag the result with
+  `wave.estimated_unknown_trip_count = true`; downstream
+  consumers (autotune scoring, scheduler) can downweight or
+  refuse to score.
+- **Per-FU map drift vs LLVM.** Same SISchedule.td hand-copy
+  problem as latencies, same mitigation (extend
+  `check-sched-tables.py`). A future TableGen emitter folds both
+  diff paths into one generator.
+- **Irreducible CFG.** Not currently produced by any wave-to-
+  machine path; the cold/hot model still works in principle but
+  needs DT-based backedge detection rather than the trivial
+  `uniform_loop`-structural lookup. Filed as a future concern.
 
 ## Stage 3: HW microbenchmark harness
 
@@ -490,14 +589,15 @@ we lose on simple cases that's acceptable; the win has to come on
 cases where multi-wave behavior is the bottleneck (memory-bound or
 heavy MFMA stalls).
 
-## Recommended kickoff sequence
+## Build order
 
-Stage 1 (per-arch data spine) has landed: `ArchData`,
-`SchedClass`, `OpClassifier`, `LatencyTable`, plus the
-pre-commit drift check. Stage 2's sub-beads (2A-2D) are the
-next chunk; 2A (per-FU map) extends the data spine and unblocks
-2B (dataflow driver) which unblocks 2C (loops) which unblocks
-2D (transform-dialect ops).
+Stage 1 lands first (`ArchData`, `SchedClass`, `OpClassifier`,
+`LatencyTable`, the pre-commit `check-sched-tables` hook). Stage
+2 is built incrementally: per-FU map first (data-spine
+extension), then the cold/hot dataflow driver on straight-line
+code, then loop-aware total-cycle accumulation + trip-count
+extraction, then the transform-dialect ops that surface the
+result to autotune.
 
 Stage 3 (HW microbench harness) is independent of Stage 2 and
 can run in parallel; it feeds Stage 4 (calibration overrides on
