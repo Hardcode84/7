@@ -1,5 +1,5 @@
 //===- PressureAnalysis.h - Dense forward dataflow over MachineState
-//-*-C++-*-===//
+//---*-C++-*-===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
 // See https://llvm.org/LICENSE.txt for license information.
@@ -7,17 +7,16 @@
 //
 //===----------------------------------------------------------------------===//
 //
-// Dense forward dataflow that propagates `MachineState` through a
-// wave.amd.machine func body. Per-op transfer function charges
-// the right FU pipe + updates per-Value ready cycles; join at CFG
-// merges is element-wise max. Single-block kernels run as a flat
-// forward pass; multi-block (s_cbranch_*) gets the standard join
-// at block heads.
+// Dense forward dataflow that propagates a (cold, hot) tuple of
+// `MachineState` through a wave.amd.machine func body. Cold
+// reflects state arriving via non-backedge incoming control flow
+// (first-visit / pre-loop); hot reflects backedge-only incoming
+// (loop-carried steady state). At non-loop points the two
+// converge; at loop headers they stay separate, giving the
+// scheduler a distinguishable steady-state view.
 //
-// Loop bodies are walked once at this stage; structural loop
-// handling with trip-count multiplication is Stage 2C's job
-// (sy5.13). Counter modeling (waitcnt inflight depth) is also
-// deferred; this stage tracks FU pressure + value readiness only.
+// See docs/AMDGPUSchedulerDesign.md "Stage 2" for the full
+// design. This header exposes the public API only.
 //
 //===----------------------------------------------------------------------===//
 
@@ -41,20 +40,27 @@ namespace mlir::waveamdmachine {
 struct ArchData;
 
 struct PressureAnalysisResult {
-  // Per-op "after" MachineState for every wave.amd.machine op in
-  // the analysed func.
-  llvm::DenseMap<Operation *, MachineState> perOpAfter;
+  // Per-op "after" cold state. For non-loop ops, equals the hot
+  // state after convergence. For ops inside a loop body, this is
+  // the iter-1 / warm-up flavor.
+  llvm::DenseMap<Operation *, MachineState> perOpCold;
 
-  // max fuReadyAt over every per-op state -- single-wave cycle
-  // estimate ignoring loop trip counts (Stage 2C fixes that).
+  // Per-op "after" hot state. For ops inside a loop body, this
+  // is the steady-state flavor; the scheduler reads this for
+  // in-loop pressure queries. BOT at points unreachable via any
+  // back-edge.
+  llvm::DenseMap<Operation *, MachineState> perOpHot;
+
+  // Total cycle count. Currently a straight-line accumulator
+  // (loops walked once); structural trip-count multiplication
+  // lands in a follow-up commit.
   int64_t totalCycles = 0;
 };
 
 // Run the dense forward analysis on `func`. Returns failure only
-// if the dataflow solver itself fails (rare; usually means a
-// pathological op pattern the framework can't handle). On
-// success, `out` is populated with the per-op states and the
-// scalar total.
+// if the dataflow solver itself fails (rare; usually a pathological
+// op pattern the framework can't handle). On success, `out` is
+// populated with per-op cold/hot states and the scalar total.
 LogicalResult runPressureAnalysis(func::FuncOp func, const ArchData &arch,
                                   PressureAnalysisResult &out);
 
