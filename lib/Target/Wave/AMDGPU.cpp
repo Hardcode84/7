@@ -1590,6 +1590,7 @@ static LogicalResult runWaveAMDMachinePipeline(ModuleOp module,
   // path too (outside wave-opt's registerAllPasses).
   registerCanonicalizerPass();
   registerCSEPass();
+  registerLoopInvariantCodeMotionPass();
   ctx->getOrLoadDialect<transform::TransformDialect>();
 
   std::string resolved;
