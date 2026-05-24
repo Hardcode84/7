@@ -114,31 +114,101 @@ public:
     propagateIfChanged(lattice, ChangeResult::Change);
   }
 
-  // Override region-branch transfer so that the back-edge of a
-  // `uniform_loop` (body region looping back to itself) only
-  // propagates the hot component, not cold. Loop-entry and
-  // loop-exit transitions use the default symmetric meet for now;
-  // a follow-up commit refines them.
+  // Override region-branch transfer for `uniform_loop`. Three
+  // edge kinds matter:
+  //   - parent -> body  (loop entry): after.cold = collapse of
+  //     before.cold and before.hot (max -- either outer flavor
+  //     could be reaching iter 1 of this loop). after.hot stays
+  //     untouched; only the back-edge populates it.
+  //   - body -> body    (back-edge): only after.hot.join(before.hot).
+  //     cold does not loop back by construction.
+  //   - body -> parent  (loop exit): after.cold = collapse of
+  //     body-exit cold and hot (covers both T=1 and T>1).
+  //     after.hot = before.hot for now (pessimistic upper bound;
+  //     proper enclosing-hot lookup is a follow-up).
   void visitRegionBranchControlFlowTransfer(RegionBranchOpInterface branch,
                                             std::optional<unsigned> regionFrom,
                                             std::optional<unsigned> regionTo,
                                             const PressureLattice &before,
                                             PressureLattice *after) override {
-    if (isa<UniformLoopOp>(branch.getOperation()) && regionFrom.has_value() &&
-        regionTo.has_value() && *regionFrom == 0 && *regionTo == 0) {
-      // Back-edge: only hot loops back.
-      bool changed = after->hot.join(before.hot);
-      propagateIfChanged(after, changed ? ChangeResult::Change
-                                        : ChangeResult::NoChange);
-      return;
+    if (auto loop = dyn_cast<UniformLoopOp>(branch.getOperation())) {
+      if (handleUniformLoopEdge(loop, regionFrom, regionTo, before, after))
+        return;
     }
     DenseForwardDataFlowAnalysis::visitRegionBranchControlFlowTransfer(
         branch, regionFrom, regionTo, before, after);
   }
 
 private:
+  bool handleUniformLoopEdge(UniformLoopOp loop,
+                             std::optional<unsigned> regionFrom,
+                             std::optional<unsigned> regionTo,
+                             const PressureLattice &before,
+                             PressureLattice *after);
+
+  // Per-edge-kind helpers; each returns true to indicate the
+  // edge was handled (caller skips the default symmetric meet).
+  void propagateLoopEntry(const PressureLattice &before,
+                          PressureLattice *after);
+  void propagateBackEdge(const PressureLattice &before, PressureLattice *after);
+  void propagateLoopExit(const PressureLattice &before, PressureLattice *after);
+
   const ArchData &arch;
 };
+
+bool PressureAnalysis::handleUniformLoopEdge(UniformLoopOp loop,
+                                             std::optional<unsigned> regionFrom,
+                                             std::optional<unsigned> regionTo,
+                                             const PressureLattice &before,
+                                             PressureLattice *after) {
+  (void)loop;
+  if (!regionFrom && regionTo == 0u) {
+    propagateLoopEntry(before, after);
+    return true;
+  }
+  if (regionFrom == 0u && regionTo == 0u) {
+    propagateBackEdge(before, after);
+    return true;
+  }
+  if (regionFrom == 0u && !regionTo) {
+    propagateLoopExit(before, after);
+    return true;
+  }
+  // parent->parent (entry_cond=false skip): default symmetric meet.
+  return false;
+}
+
+void PressureAnalysis::propagateLoopEntry(const PressureLattice &before,
+                                          PressureLattice *after) {
+  // Collapse pre-loop cold and hot into iter-1 cold. `after->hot`
+  // stays untouched -- only the back-edge populates it.
+  MachineState collapse = before.cold;
+  collapse.join(before.hot);
+  bool changed = after->cold.join(collapse);
+  propagateIfChanged(after,
+                     changed ? ChangeResult::Change : ChangeResult::NoChange);
+}
+
+void PressureAnalysis::propagateBackEdge(const PressureLattice &before,
+                                         PressureLattice *after) {
+  bool changed = after->hot.join(before.hot);
+  propagateIfChanged(after,
+                     changed ? ChangeResult::Change : ChangeResult::NoChange);
+}
+
+void PressureAnalysis::propagateLoopExit(const PressureLattice &before,
+                                         PressureLattice *after) {
+  // Collapse body-exit cold and hot into downstream cold (handles
+  // both T=1 and T>1 without branching). after.hot pessimistically
+  // inherits before.hot -- proper enclosing-hot lookup via
+  // getOrCreateFor is a follow-up.
+  MachineState collapse = before.cold;
+  collapse.join(before.hot);
+  bool c1 = after->cold.join(collapse);
+  bool c2 = after->hot.join(before.hot);
+  propagateIfChanged(after, (c1 || c2) ? ChangeResult::Change
+                                       : ChangeResult::NoChange);
+}
 
 // Compute the wait time `op` would incur given the relative state
 // just before it. Mirrors the wait computation in applyTransferTo
