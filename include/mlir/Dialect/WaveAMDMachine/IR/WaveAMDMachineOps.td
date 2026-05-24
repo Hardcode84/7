@@ -1231,6 +1231,21 @@ def WaveAMDMachine_SAddU64Op : WaveAMDMachine_Op<"s_add_u64", [Pure]> {
   let assemblyFormat = "$lhs `,` $rhs attr-dict `:` functional-type(operands, results)";
 }
 
+// 64-bit base + zero-extended 32-bit offset. Expands to `s_add_u32`
+// (low) + `s_addc_u32 hi, hi, 0` (high) -- the high addend is an
+// immediate, so unlike a full `s_add_u64` it needs no second register
+// pair and no `tuple_from_elements` to widen the offset. Lets the IV
+// recompute fold a scalar byte offset into a pointer base.
+def WaveAMDMachine_SAddU64U32Op : WaveAMDMachine_Op<"s_add_u64_u32", [Pure]> {
+  let summary = "scalar 64-bit base + zero-extended 32-bit offset";
+  let arguments = (ins
+    WaveAMDMachine_SGPR2:$base,
+    WaveAMDMachine_SGPR1:$offset
+  );
+  let results = (outs WaveAMDMachine_SGPR2:$result);
+  let assemblyFormat = "$base `,` $offset attr-dict `:` functional-type(operands, results)";
+}
+
 // 64-bit vector add. Expanded to `v_add_co_u32` (low) +
 // `v_addc_co_u32` (high) with the carry threaded through `vcc_lo` on
 // wave32. Documented constraint: vcc_lo must not be live across the

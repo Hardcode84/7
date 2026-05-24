@@ -1188,6 +1188,19 @@ private:
                     {toMCSGPRComponent(res, 1), toMCSGPRComponent(lhs, 1),
                      toMCSGPRComponent(rhs, 1)});
     }
+    if (isa<waveamdmachine::SAddU64U32Op>(op)) {
+      // Zero-extended offset: high addend is an immediate 0, so the
+      // carry-chain widens the 32-bit offset without a second register.
+      Value res = op.getResult(0);
+      Value base = op.getOperand(0);
+      if (failed(emitMC(sAddU32(),
+                        {toMCSGPRComponent(res, 0), toMCSGPRComponent(base, 0),
+                         toMCOperand(op.getOperand(1))})))
+        return failure();
+      return emitMC(sAddcU32(),
+                    {toMCSGPRComponent(res, 1), toMCSGPRComponent(base, 1),
+                     llvm::MCOperand::createImm(0)});
+    }
     if (isa<waveamdmachine::VAddU64Op>(op)) {
       // wave32 carry register: vcc_lo. Documented constraint that
       // nothing else clobbers it across this pair.
