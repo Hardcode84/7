@@ -8,9 +8,8 @@
 
 #include "mlir/Dialect/WaveAMDMachine/CostModel/PressureAnalysis.h"
 
-#include "mlir/Analysis/DataFlow/ConstantPropagationAnalysis.h"
-#include "mlir/Analysis/DataFlow/DeadCodeAnalysis.h"
 #include "mlir/Analysis/DataFlow/DenseAnalysis.h"
+#include "mlir/Analysis/DataFlow/Utils.h"
 #include "mlir/Analysis/DataFlowFramework.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/WaveAMDMachine/CostModel/ArchData.h"
@@ -343,12 +342,12 @@ static int64_t accumulateBlock(Block &block, int64_t entryCycle,
 LogicalResult runPressureAnalysis(func::FuncOp func, const ArchData &arch,
                                   PressureAnalysisResult &out) {
   DataFlowSolver solver;
-  // DeadCodeAnalysis needs SparseConstantPropagation to reason
-  // about region-branch operand values; without the latter,
-  // uniform_loop body blocks aren't marked Executable and the
-  // dense analysis never visits body ops.
-  solver.load<mlir::dataflow::SparseConstantPropagation>();
-  solver.load<mlir::dataflow::DeadCodeAnalysis>();
+  // DeadCodeAnalysis + SparseConstantPropagation pair via the
+  // upstream helper. Required prerequisites: without the const-
+  // prop analysis, DeadCodeAnalysis can't extract operand values
+  // for region-branch ops, uniform_loop body blocks aren't marked
+  // Executable, and the dense analysis never visits body ops.
+  mlir::dataflow::loadBaselineAnalyses(solver);
   solver.load<PressureAnalysis>(arch);
   if (failed(solver.initializeAndRun(func)))
     return failure();
