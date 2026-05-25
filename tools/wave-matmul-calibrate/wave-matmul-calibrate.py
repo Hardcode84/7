@@ -383,8 +383,8 @@ def main() -> int:
         Variant("pingpong", insert_pingpong=True),
     ]
 
-    tmp_ctx = tempfile.TemporaryDirectory()
-    tmp = Path(tmp_ctx.name)
+    tmp_ctx = None if args.keep_tmp else tempfile.TemporaryDirectory()
+    tmp = Path(tempfile.mkdtemp() if args.keep_tmp else tmp_ctx.name)
     try:
         source = tmp / "matmul_kernel.mlir"
         source.write_text(generate_kernel_module(args, chip))
@@ -411,7 +411,6 @@ def main() -> int:
         print_delta(results)
         if args.keep_tmp:
             print(f"tmp: {tmp}")
-            tmp_ctx = None
     finally:
         if tmp_ctx is not None:
             tmp_ctx.cleanup()

@@ -645,6 +645,9 @@ deliverable).
 instruction-level issue cycles -- the only public AMD tool with
 per-wave timing granularity.
 
+Run commands and current The Rock setup notes live in
+`docs/Gfx1100CalibrationMethodology.md`.
+
 **Two deliverables, one stage:**
 
 1. **`tools/wave-att-import.py`** -- ingests `rocprofv3 --att`
