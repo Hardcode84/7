@@ -1,0 +1,5 @@
+"CodeObj","Vaddr","Instruction","Hitcount","Latency","Stall","Idle","Source"
+1,5632,"; sample_kernel",0,0,0,0,""
+1,5632,"s_load_b64 s[6:7], s[0:1], null",2,20,0,7,""
+1,5640,"s_waitcnt lgkmcnt(0)",2,60,58,0,""
+1,5888,"s_nop 0",1,1,0,0,""

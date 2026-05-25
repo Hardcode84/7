@@ -1,0 +1,9 @@
+{
+  "code": [
+    ["s_load_b64 s[6:7], s[0:1], null", 0, 10, "", 1, 5632, 2, 20, 0, 7],
+    ["s_waitcnt lgkmcnt(0)", 0, 11, "", 1, 5640, 2, 60, 58, 0],
+    ["; sample_kernel", 0, 11, "", 1, 5632, 0, 0, 0, 0]
+  ],
+  "header": "ISA, _, LineNumber, Source, Codeobj, Vaddr, Hit, Latency, Stall, Idle",
+  "version": "3.0.0"
+}

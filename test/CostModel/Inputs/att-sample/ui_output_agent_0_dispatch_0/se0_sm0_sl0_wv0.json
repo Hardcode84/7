@@ -1,0 +1,21 @@
+{
+  "duration": 34,
+  "name": "SE0",
+  "num_insts": 4,
+  "num_stitched": 2,
+  "wave": {
+    "begin": 100,
+    "cu": 0,
+    "end": 134,
+    "id": 0,
+    "instructions": [
+      [100, 1, 0, 1, 10],
+      [101, 9, 30, 31, 11],
+      [132, 6, 0, 1, 0],
+      [133, 6, 0, 1, 99]
+    ],
+    "simd": 0,
+    "slot": 0,
+    "timeline": []
+  }
+}
