@@ -31,6 +31,7 @@
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/Parallel.h"
 #include "llvm/TargetParser/TargetParser.h"
+#include <cmath>
 #include <limits>
 
 #define GET_OP_CLASSES
@@ -215,6 +216,81 @@ void wave::TransformPressureReportOp::getEffects(
     SmallVectorImpl<MemoryEffects::EffectInstance> &effects) {
   transform::onlyReadsHandle(getTargetMutable(), effects);
   transform::modifiesPayload(effects);
+}
+
+//===----------------------------------------------------------------------===//
+// wave.transform.pingpong_score
+//===----------------------------------------------------------------------===//
+
+namespace {
+
+static FailureOr<waveamdmachine::PingpongPick>
+scorePingpongFunc(func::FuncOp f, const waveamdmachine::ArchData &arch) {
+  waveamdmachine::PressureAnalysisResult res;
+  if (failed(waveamdmachine::runPressureAnalysis(f, arch, res)))
+    return failure();
+  SmallVector<waveamdmachine::RegionProfile> regions =
+      waveamdmachine::partitionRegions(f, res, arch);
+  return waveamdmachine::findOptimalPingpongDelay(regions, arch);
+}
+
+static FailureOr<waveamdmachine::PingpongPick>
+scorePingpongTarget(Operation *target, const waveamdmachine::ArchData &arch) {
+  if (auto f = dyn_cast<func::FuncOp>(target))
+    return scorePingpongFunc(f, arch);
+
+  bool sawFunc = false;
+  waveamdmachine::PingpongPick best;
+  WalkResult walk = target->walk([&](func::FuncOp f) {
+    FailureOr<waveamdmachine::PingpongPick> pick = scorePingpongFunc(f, arch);
+    if (failed(pick))
+      return WalkResult::interrupt();
+    if (!sawFunc || pick->predictedPeakUtil > best.predictedPeakUtil)
+      best = *pick;
+    sawFunc = true;
+    return WalkResult::advance();
+  });
+  if (walk.wasInterrupted())
+    return failure();
+  return best;
+}
+
+} // namespace
+
+DiagnosedSilenceableFailure
+wave::TransformPingpongScoreOp::apply(transform::TransformRewriter &rewriter,
+                                      transform::TransformResults &results,
+                                      transform::TransformState &state) {
+  if (getWaves() != 2)
+    return emitDefiniteFailure()
+           << "pingpong_score currently supports waves = 2 only";
+
+  Builder b(getContext());
+  SmallVector<Attribute> delays;
+  SmallVector<Attribute> peaks;
+  for (Operation *target : state.getPayloadOps(getTarget())) {
+    auto arch = resolveArch(target);
+    if (failed(arch))
+      return emitDefiniteFailure()
+             << "target has no enclosing module with `waveamdmachine.target` "
+                "or arch is unsupported";
+    FailureOr<waveamdmachine::PingpongPick> pick =
+        scorePingpongTarget(target, **arch);
+    if (failed(pick))
+      return emitDefiniteFailure() << "region partition failed";
+    int64_t peak = std::llround(pick->predictedPeakUtil * 1000.0);
+    delays.push_back(b.getI64IntegerAttr(pick->delay));
+    peaks.push_back(b.getI64IntegerAttr(peak));
+  }
+  results.setParams(cast<OpResult>(getDelay()), delays);
+  results.setParams(cast<OpResult>(getPeak()), peaks);
+  return DiagnosedSilenceableFailure::success();
+}
+
+void wave::TransformPingpongScoreOp::getEffects(
+    SmallVectorImpl<MemoryEffects::EffectInstance> &effects) {
+  transform::onlyReadsHandle(getTargetMutable(), effects);
+  transform::producesHandle(getOperation()->getOpResults(), effects);
 }
 
 //===----------------------------------------------------------------------===//

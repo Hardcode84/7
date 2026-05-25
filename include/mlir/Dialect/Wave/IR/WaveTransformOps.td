@@ -189,6 +189,32 @@ def Wave_TransformPressureReportOp
   }];
 }
 
+// Run the ping-pong delay search and return delay plus peak*1000.
+def Wave_TransformPingpongScoreOp
+    : Op<Wave_Dialect, "transform.pingpong_score", [
+        DeclareOpInterfaceMethods<MemoryEffectsOpInterface>,
+        DeclareOpInterfaceMethods<TransformOpInterface>]> {
+  let summary = "Score the best two-wave ping-pong delay";
+  let description = [{
+    For each payload op associated with `$target`, runs
+    PressureAnalysis, partitions each kernel into FU regions, searches
+    candidate two-wave offsets, and returns the selected delay plus the
+    predicted peak utilization scaled by 1000.
+
+    Definite failure if the enclosing module's
+    `waveamdmachine.target` attribute is missing or names an unsupported
+    arch. Currently supports `waves = 2` only.
+  }];
+  let arguments = (ins TransformHandleTypeInterface:$target,
+                       DefaultValuedAttr<I64Attr, "2">:$waves);
+  let results = (outs TransformParamTypeInterface:$delay,
+                      TransformParamTypeInterface:$peak);
+  let assemblyFormat = [{
+    `from` $target (`waves` `=` $waves^)? attr-dict
+        `:` functional-type($target, results)
+  }];
+}
+
 // Insert ping-pong sync primitives at auto-detected region
 // boundaries. Barrier-insertion-only: partitions each kernel func
 // (RegionProfile sliding-window detector) and drops an s_barrier
