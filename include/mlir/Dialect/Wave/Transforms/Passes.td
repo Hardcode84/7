@@ -74,6 +74,30 @@ def WaveAMDTicketWaits
   ];
 }
 
+def WaveAMDMachineSchedule
+    : Pass<"waveamd-machine-schedule", "ModuleOp"> {
+  let summary = "Collect local WaveAMDMachine regions for model-based scheduling";
+  let description = [{
+    First Stage 8 scheduler pass. The default mode is a no-op over
+    `waveamdmachine` IR: it only discovers local scheduling regions so later
+    beads can add dependence DAG construction and model-scored reordering.
+
+    Intended placement is before ticket-wait and hazard-wait insertion. Hard
+    boundaries include terminators, labels, branches, waitcnts, workgroup
+    barriers, priority changes, region-bearing ops, and unsupported
+    side-effecting ops. `uniform_loop` bodies are scanned as nested local
+    regions, but the loop op itself is never part of an outer region.
+  }];
+  let dependentDialects = [
+    "func::FuncDialect",
+    "waveamdmachine::WaveAMDMachineDialect"
+  ];
+  let options = [
+    Option<"printRegions", "print-regions", "bool", /*default=*/"false",
+           "Print discovered local scheduling regions to stderr.">
+  ];
+}
+
 def WaveAMDRegAlloc
     : Pass<"waveamd-reg-alloc", "ModuleOp"> {
   let summary = "Allocate WaveAMDMachine virtual registers to physical registers";
