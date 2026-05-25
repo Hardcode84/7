@@ -68,6 +68,11 @@ LogicalResult simulateEventTimeline(func::FuncOp func, const ArchData &arch,
                                     const EventSimConfig &config,
                                     EventSimResult &out);
 
+LogicalResult simulateEventTimeline(ArrayRef<Operation *> ops,
+                                    const ArchData &arch,
+                                    const EventSimConfig &config,
+                                    EventSimResult &out);
+
 } // namespace mlir::waveamdmachine
 
 #endif // MLIR_DIALECT_WAVEAMDMACHINE_COSTMODEL_EVENTSIMULATOR_H

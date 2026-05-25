@@ -39,6 +39,7 @@ add_mlir_dialect_library(MLIRWaveTransforms
   MLIRSCFTransforms
   MLIRTransformUtils
   MLIRWaveAMDDialect
+  MLIRWaveAMDMachineCostModel
   MLIRWaveAMDMachineDialect
   MLIRWaveDialect
   MLIRWaveMetaDialect

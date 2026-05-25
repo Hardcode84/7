@@ -552,8 +552,15 @@ LogicalResult EventSimulator::run() {
 LogicalResult simulateEventTimeline(func::FuncOp func, const ArchData &arch,
                                     const EventSimConfig &config,
                                     EventSimResult &out) {
-  out = EventSimResult();
   SmallVector<Operation *> ops = flattenOps(func, config);
+  return simulateEventTimeline(ops, arch, config, out);
+}
+
+LogicalResult simulateEventTimeline(ArrayRef<Operation *> ops,
+                                    const ArchData &arch,
+                                    const EventSimConfig &config,
+                                    EventSimResult &out) {
+  out = EventSimResult();
   EventSimulator simulator(ops, arch, config, out);
   return simulator.run();
 }

@@ -80,7 +80,7 @@ def WaveAMDMachineSchedule
   let description = [{
     Scheduler entry pass. The default mode is a no-op over
     `waveamdmachine` IR: it only discovers local scheduling regions so future
-    implementations can add dependence DAG construction and model-scored
+    implementations can add dependence tracking and model-scored
     reordering.
 
     Intended placement is before ticket-wait and hazard-wait insertion. Hard
@@ -96,8 +96,16 @@ def WaveAMDMachineSchedule
   let options = [
     Option<"printRegions", "print-regions", "bool", /*default=*/"false",
            "Print discovered local scheduling regions to stderr.">,
-    Option<"printDag", "print-dag", "bool", /*default=*/"false",
-           "Print local scheduling DAG edges to stderr.">
+    Option<"printDeps", "print-deps", "bool", /*default=*/"false",
+           "Print local scheduling dependences to stderr.">,
+    Option<"printScore", "print-score", "bool", /*default=*/"false",
+           "Print event-simulator scores for local scheduling regions.">,
+    Option<"scoreFunc", "score-func", "std::string", /*default=*/"\"\"",
+           "Function name whose local region should score a candidate order.">,
+    Option<"scoreRegion", "score-region", "int", /*default=*/"-1",
+           "Local region ordinal for score-order; -1 disables candidate scoring.">,
+    Option<"scoreOrder", "score-order", "std::string", /*default=*/"\"\"",
+           "Comma-separated op indices for a candidate local-region order.">
   ];
 }
 
