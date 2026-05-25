@@ -83,8 +83,8 @@ transform.named_sequence @__transform_main(%root: !transform.any_op {transform.c
 // DAG: waveamd-machine-schedule dag func=regions region=2 nodes=3
 // DAG: waveamd-machine-schedule edge region=2 kind=ssa 1->2 src=waveamdmachine.s_add_i32 dst=waveamdmachine.s_cmp_lt_i32
 // DAG: waveamd-machine-schedule edge region=2 kind=loop_carry recurrence 1->0 src=waveamdmachine.s_add_i32 dst=waveamdmachine.s_add_i32
-// DAG: waveamd-machine-schedule dag func=memory_edges region=0 nodes=5
+// DAG: waveamd-machine-schedule dag func=memory_edges region=0 nodes=5 edges=4
 // DAG: waveamd-machine-schedule edge region=0 kind=mem_token 0->1 src=waveamdmachine.token dst=waveamdmachine.global_load_b32
 // DAG: waveamd-machine-schedule edge region=0 kind=ssa 1->2 src=waveamdmachine.global_load_b32 dst=waveamdmachine.v_add_u32
 // DAG: waveamd-machine-schedule edge region=0 kind=mem_token 1->3 src=waveamdmachine.global_load_b32 dst=waveamdmachine.global_store_b32
-// DAG: waveamd-machine-schedule edge region=0 kind=memory_order 3->4 src=waveamdmachine.global_store_b32 dst=waveamdmachine.global_store_b32
+// DAG-NOT: kind=memory_order

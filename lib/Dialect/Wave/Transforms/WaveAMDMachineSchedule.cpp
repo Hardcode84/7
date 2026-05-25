@@ -41,7 +41,6 @@ struct ScheduleRegion {
 enum class EdgeKind {
   Ssa,
   MemToken,
-  MemoryOrder,
   LoopCarry,
 };
 
@@ -65,25 +64,6 @@ static bool isKnownMemoryOp(Operation *op) {
   return op->hasTrait<traits::SMEMLoadOp>() ||
          op->hasTrait<traits::VMEMLoadOp>() ||
          op->hasTrait<traits::VMEMStoreOp>();
-}
-
-static bool isKnownMemoryWrite(Operation *op) {
-  if (op->hasTrait<traits::VMEMStoreOp>())
-    return true;
-  return isa<waveamdmachine::BufferLoadLdsB32Op,
-             waveamdmachine::BufferLoadLdsB128Op,
-             waveamdmachine::GlobalLoadLdsB32Op,
-             waveamdmachine::GlobalLoadLdsB128Op, waveamdmachine::DsStoreB32Op,
-             waveamdmachine::DsStoreB64Op, waveamdmachine::DsStoreB96Op,
-             waveamdmachine::DsStoreB128Op, waveamdmachine::DsStoreTupleB32Op>(
-      op);
-}
-
-static bool isMemoryEffecting(Operation *op) {
-  return isKnownMemoryOp(op) || isa<waveamdmachine::BufferLoadLdsB32Op,
-                                    waveamdmachine::BufferLoadLdsB128Op,
-                                    waveamdmachine::GlobalLoadLdsB32Op,
-                                    waveamdmachine::GlobalLoadLdsB128Op>(op);
 }
 
 static bool hasUnknownMemoryEffects(Operation *op) {
@@ -124,8 +104,6 @@ static StringRef getEdgeKindName(EdgeKind kind) {
     return "ssa";
   case EdgeKind::MemToken:
     return "mem_token";
-  case EdgeKind::MemoryOrder:
-    return "memory_order";
   case EdgeKind::LoopCarry:
     return "loop_carry";
   }
@@ -220,23 +198,6 @@ static void addValueEdges(const ScheduleRegion &region, ScheduleDag &dag,
   }
 }
 
-static void addMemoryOrderEdges(const ScheduleRegion &region, ScheduleDag &dag,
-                                DenseMap<Operation *, unsigned> &nodeForOp) {
-  Operation *lastMemory = nullptr;
-  bool lastMemoryWasWrite = false;
-  for (Operation *op : region.ops) {
-    bool memoryEffecting = isMemoryEffecting(op);
-    if (!memoryEffecting)
-      continue;
-    bool memoryWrite = isKnownMemoryWrite(op);
-    if (lastMemory && (lastMemoryWasWrite || memoryWrite))
-      addEdge(dag, nodeForOp.lookup(lastMemory), nodeForOp.lookup(op),
-              EdgeKind::MemoryOrder);
-    lastMemory = op;
-    lastMemoryWasWrite = memoryWrite;
-  }
-}
-
 static void addLoopCarryEdges(const ScheduleRegion &region, ScheduleDag &dag,
                               DenseMap<Operation *, unsigned> &nodeForOp) {
   Block *block = region.first->getBlock();
@@ -273,7 +234,6 @@ static ScheduleDag buildDag(const ScheduleRegion &region) {
     nodeForOp[op] = index;
 
   addValueEdges(region, dag, nodeForOp);
-  addMemoryOrderEdges(region, dag, nodeForOp);
   addLoopCarryEdges(region, dag, nodeForOp);
   return dag;
 }
