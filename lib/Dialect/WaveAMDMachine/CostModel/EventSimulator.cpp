@@ -74,6 +74,23 @@ static unsigned counterIndex(EventSimCounter counter) {
   llvm_unreachable("counter has no queue");
 }
 
+struct WaitcntLimits {
+  unsigned vmem = 0;
+  unsigned lgkm = 0;
+};
+
+static WaitcntLimits decodeWaitcntImm(const ArchData &arch, unsigned imm) {
+  WaitcntLimits limits;
+  if (arch.isa.Major >= 11) {
+    limits.vmem = (imm >> 10) & 0x3f;
+    limits.lgkm = (imm >> 4) & 0x3f;
+    return limits;
+  }
+  limits.vmem = (imm & 0xf) | (((imm >> 14) & 0x3) << 4);
+  limits.lgkm = (imm >> 8) & 0xf;
+  return limits;
+}
+
 static std::optional<unsigned> getImmediate(Value value) {
   if (ImmOp imm = value.getDefiningOp<ImmOp>())
     return static_cast<unsigned>(imm.getValue());
@@ -281,12 +298,11 @@ int64_t EventSimulator::waitcntReadyCycle(WaveState &wave, Operation *op,
     std::optional<unsigned> imm = getImmediate(op->getOperand(0));
     if (!imm)
       return cycle;
-    if (*imm != 0)
-      return cycle;
+    WaitcntLimits limits = decodeWaitcntImm(arch, *imm);
     int64_t vmem = counterReadyAt(
-        wave.counters[counterIndex(EventSimCounter::Vmem)], 0, cycle);
+        wave.counters[counterIndex(EventSimCounter::Vmem)], limits.vmem, cycle);
     int64_t lgkm = counterReadyAt(
-        wave.counters[counterIndex(EventSimCounter::Lgkm)], 0, cycle);
+        wave.counters[counterIndex(EventSimCounter::Lgkm)], limits.lgkm, cycle);
     return std::max(vmem, lgkm);
   }
   return cycle;
@@ -351,8 +367,6 @@ LogicalResult EventSimulator::executeWaitcnt(WaveState &wave, Operation *op,
     std::optional<unsigned> imm = getImmediate(op->getOperand(0));
     if (!imm)
       return op->emitError("event simulator requires constant s_waitcnt imm");
-    if (*imm != 0)
-      return op->emitError("event simulator only decodes s_waitcnt 0");
   } else if (!getImmediate(op->getOperand(0))) {
     return op->emitError("event simulator requires constant s_waitcnt_vscnt "
                          "imm");

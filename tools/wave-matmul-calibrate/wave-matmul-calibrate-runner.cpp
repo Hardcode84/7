@@ -1,0 +1,304 @@
+//===- wave-matmul-calibrate-runner.cpp - Timed matmul launcher -*- C++ -*-===//
+//
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+//
+//===----------------------------------------------------------------------===//
+
+#include <hip/hip_runtime.h>
+#include <hip/hip_runtime_api.h>
+
+#include <algorithm>
+#include <cmath>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <vector>
+
+namespace {
+
+struct Args {
+  const char *hsaco = nullptr;
+  const char *kernel = nullptr;
+  int m = 32;
+  int n = 32;
+  int k = 32;
+  int bm = 1;
+  int bn = 2;
+  int waveMTiles = 1;
+  int waveNTiles = 1;
+  int waveKTiles = 1;
+  int iters = 1000;
+  int warmupIters = 10;
+  bool checkOutput = true;
+};
+
+[[noreturn]] static void die(const char *msg) {
+  std::fprintf(stderr, "%s\n", msg);
+  std::exit(2);
+}
+
+static void usage() {
+  std::fprintf(
+      stderr, "usage: wave-matmul-calibrate-runner [options] <hsaco> <kernel>\n"
+              "options:\n"
+              "  --m N                  output rows (default 32)\n"
+              "  --n N                  output cols (default 32)\n"
+              "  --k N                  contraction dim (default 32)\n"
+              "  --bm N                 M waves per block (default 1)\n"
+              "  --bn N                 N waves per block (default 2)\n"
+              "  --wave-m-tiles N       per-wave M tiles (default 1)\n"
+              "  --wave-n-tiles N       per-wave N tiles (default 1)\n"
+              "  --wave-k-tiles N       per-wave K tiles (default 1)\n"
+              "  --iters N              launch iterations (default 1000)\n"
+              "  --warmup N             warmup launches (default 10)\n"
+              "  --no-check             skip all-ones output check\n");
+}
+
+static int parseInt(const char *s) {
+  char *end = nullptr;
+  long v = std::strtol(s, &end, 10);
+  if (!end || *end != '\0')
+    die("bad integer arg");
+  return static_cast<int>(v);
+}
+
+struct FlagHandler {
+  const char *name;
+  void (*set)(Args &, const char *);
+};
+
+static void setM(Args &a, const char *v) { a.m = parseInt(v); }
+static void setN(Args &a, const char *v) { a.n = parseInt(v); }
+static void setK(Args &a, const char *v) { a.k = parseInt(v); }
+static void setBM(Args &a, const char *v) { a.bm = parseInt(v); }
+static void setBN(Args &a, const char *v) { a.bn = parseInt(v); }
+static void setWaveMTiles(Args &a, const char *v) {
+  a.waveMTiles = parseInt(v);
+}
+static void setWaveNTiles(Args &a, const char *v) {
+  a.waveNTiles = parseInt(v);
+}
+static void setWaveKTiles(Args &a, const char *v) {
+  a.waveKTiles = parseInt(v);
+}
+static void setIters(Args &a, const char *v) { a.iters = parseInt(v); }
+static void setWarmup(Args &a, const char *v) { a.warmupIters = parseInt(v); }
+
+static constexpr FlagHandler kFlags[] = {
+    {"--m", setM},
+    {"--n", setN},
+    {"--k", setK},
+    {"--bm", setBM},
+    {"--bn", setBN},
+    {"--wave-m-tiles", setWaveMTiles},
+    {"--wave-n-tiles", setWaveNTiles},
+    {"--wave-k-tiles", setWaveKTiles},
+    {"--iters", setIters},
+    {"--warmup", setWarmup},
+};
+
+static bool tryFlag(const char *arg, const char *val, Args &a) {
+  for (const FlagHandler &h : kFlags) {
+    if (std::strcmp(arg, h.name) == 0) {
+      h.set(a, val);
+      return true;
+    }
+  }
+  return false;
+}
+
+static void setPositional(Args &a, const char *arg, int &positional) {
+  if (positional == 0)
+    a.hsaco = arg;
+  else if (positional == 1)
+    a.kernel = arg;
+  else
+    die("unexpected positional argument");
+  ++positional;
+}
+
+static bool isHelp(const char *arg) {
+  return std::strcmp(arg, "--help") == 0 || std::strcmp(arg, "-h") == 0;
+}
+
+static bool isFlag(const char *arg) { return arg[0] == '-' && arg[1] == '-'; }
+
+static int handleOneArg(int argc, char **argv, int i, Args &a,
+                        int &positional) {
+  const char *arg = argv[i];
+  if (isHelp(arg)) {
+    usage();
+    std::exit(0);
+  }
+  if (std::strcmp(arg, "--no-check") == 0) {
+    a.checkOutput = false;
+    return i + 1;
+  }
+  if (isFlag(arg)) {
+    if (i + 1 >= argc)
+      die("missing value for flag");
+    if (!tryFlag(arg, argv[i + 1], a))
+      die("unknown flag");
+    return i + 2;
+  }
+  setPositional(a, arg, positional);
+  return i + 1;
+}
+
+static void requirePositive(int v, const char *what) {
+  if (v <= 0)
+    die(what);
+}
+
+static void validateArgs(const Args &a) {
+  requirePositive(a.m, "m must be positive");
+  requirePositive(a.n, "n must be positive");
+  requirePositive(a.k, "k must be positive");
+  requirePositive(a.bm, "bm must be positive");
+  requirePositive(a.bn, "bn must be positive");
+  requirePositive(a.waveMTiles, "wave-m-tiles must be positive");
+  requirePositive(a.waveNTiles, "wave-n-tiles must be positive");
+  requirePositive(a.waveKTiles, "wave-k-tiles must be positive");
+}
+
+static Args parseArgs(int argc, char **argv) {
+  Args a;
+  int positional = 0;
+  for (int i = 1; i < argc;)
+    i = handleOneArg(argc, argv, i, a, positional);
+  if (!a.hsaco || !a.kernel) {
+    usage();
+    die("missing required positional args");
+  }
+  validateArgs(a);
+  return a;
+}
+
+static void checkHip(hipError_t e, const char *what) {
+  if (e != hipSuccess) {
+    std::fprintf(stderr, "%s: %s\n", what, hipGetErrorString(e));
+    std::exit(1);
+  }
+}
+
+static int divExact(int num, int den, const char *what) {
+  if (den <= 0 || num % den != 0)
+    die(what);
+  return num / den;
+}
+
+static void validateOutput(const std::vector<float> &hostC, int k) {
+  double worst = 0.0;
+  int worstIdx = -1;
+  double expected = static_cast<double>(k);
+  for (int i = 0, e = static_cast<int>(hostC.size()); i < e; ++i) {
+    double diff = std::fabs(static_cast<double>(hostC[i]) - expected);
+    if (diff > worst) {
+      worst = diff;
+      worstIdx = i;
+    }
+  }
+  if (worst > 1.0e-3) {
+    std::fprintf(stderr,
+                 "output_check: failed index=%d expected=%.6f got=%.6f "
+                 "abs_diff=%.6f\n",
+                 worstIdx, expected, static_cast<double>(hostC[worstIdx]),
+                 worst);
+    std::exit(1);
+  }
+  std::printf("output_check: passed max_abs_diff=%.6f index=%d\n", worst,
+              worstIdx);
+}
+
+} // namespace
+
+int main(int argc, char **argv) {
+  Args a = parseArgs(argc, argv);
+
+  int blocksX = divExact(a.m, 16 * a.bm * a.waveMTiles, "bad M blocking");
+  int blocksY = divExact(a.n, 16 * a.bn * a.waveNTiles, "bad N blocking");
+  int blockThreads = a.bm * a.bn * 32;
+  int virtualKSteps = divExact(a.k, 16 * a.waveKTiles, "bad K blocking");
+  int tripCount = std::max(virtualKSteps - 1, 0);
+
+  hipDeviceProp_t props;
+  checkHip(hipGetDeviceProperties(&props, 0), "hipGetDeviceProperties");
+  double clockMHz = props.clockRate / 1000.0;
+  double clockHz = props.clockRate * 1000.0;
+
+  hipModule_t mod = nullptr;
+  hipFunction_t kfn = nullptr;
+  checkHip(hipModuleLoad(&mod, a.hsaco), "hipModuleLoad");
+  checkHip(hipModuleGetFunction(&kfn, mod, a.kernel), "hipModuleGetFunction");
+
+  std::vector<uint16_t> hostA(static_cast<size_t>(a.m) * a.k, 0x3c00);
+  std::vector<uint16_t> hostB(static_cast<size_t>(a.n) * a.k, 0x3c00);
+  std::vector<float> hostC(static_cast<size_t>(a.m) * a.n, 0.0f);
+
+  uint16_t *deviceA = nullptr;
+  uint16_t *deviceB = nullptr;
+  float *deviceC = nullptr;
+  checkHip(hipMalloc(&deviceA, hostA.size() * sizeof(uint16_t)), "hipMalloc A");
+  checkHip(hipMalloc(&deviceB, hostB.size() * sizeof(uint16_t)), "hipMalloc B");
+  checkHip(hipMalloc(&deviceC, hostC.size() * sizeof(float)), "hipMalloc C");
+  checkHip(hipMemcpy(deviceA, hostA.data(), hostA.size() * sizeof(uint16_t),
+                     hipMemcpyHostToDevice),
+           "hipMemcpy A");
+  checkHip(hipMemcpy(deviceB, hostB.data(), hostB.size() * sizeof(uint16_t),
+                     hipMemcpyHostToDevice),
+           "hipMemcpy B");
+  checkHip(hipMemset(deviceC, 0, hostC.size() * sizeof(float)), "hipMemset C");
+
+  void *kernelArgs[] = {&deviceA, &deviceB, &deviceC, &tripCount};
+
+  for (int i = 0; i < a.warmupIters; ++i)
+    checkHip(hipModuleLaunchKernel(kfn, blocksX, blocksY, 1, blockThreads, 1, 1,
+                                   0, nullptr, kernelArgs, nullptr),
+             "warmup launch");
+  checkHip(hipDeviceSynchronize(), "warmup sync");
+
+  hipEvent_t start, stop;
+  checkHip(hipEventCreate(&start), "event create start");
+  checkHip(hipEventCreate(&stop), "event create stop");
+  checkHip(hipEventRecord(start, nullptr), "event record start");
+  for (int i = 0; i < a.iters; ++i)
+    checkHip(hipModuleLaunchKernel(kfn, blocksX, blocksY, 1, blockThreads, 1, 1,
+                                   0, nullptr, kernelArgs, nullptr),
+             "timed launch");
+  checkHip(hipEventRecord(stop, nullptr), "event record stop");
+  checkHip(hipEventSynchronize(stop), "event sync stop");
+
+  float elapsedMs = 0.0f;
+  checkHip(hipEventElapsedTime(&elapsedMs, start, stop), "event elapsed");
+  double perLaunchUs = (elapsedMs * 1000.0) / a.iters;
+  double perLaunchCycles = perLaunchUs * (clockHz / 1e6);
+
+  checkHip(hipMemcpy(hostC.data(), deviceC, hostC.size() * sizeof(float),
+                     hipMemcpyDeviceToHost),
+           "hipMemcpy C");
+
+  std::printf("device: %s (%s) shader_clock_mhz=%.0f\n", props.name,
+              props.gcnArchName, clockMHz);
+  std::printf("kernel: %s\n", a.kernel);
+  std::printf("shape: m=%d n=%d k=%d bm=%d bn=%d wave_m_tiles=%d "
+              "wave_n_tiles=%d wave_k_tiles=%d\n",
+              a.m, a.n, a.k, a.bm, a.bn, a.waveMTiles, a.waveNTiles,
+              a.waveKTiles);
+  std::printf("grid: %d,%d,1 block: %d,1,1 waves_per_workgroup=%d\n", blocksX,
+              blocksY, blockThreads, a.bm * a.bn);
+  std::printf("loop_trip_count: %d\n", tripCount);
+  std::printf("iters: %d\n", a.iters);
+  std::printf("total_ms: %.3f\n", elapsedMs);
+  std::printf("per_launch_us: %.3f\n", perLaunchUs);
+  std::printf("per_launch_cycles_wallclock: %.0f\n", perLaunchCycles);
+  if (a.checkOutput)
+    validateOutput(hostC, a.k);
+
+  checkHip(hipFree(deviceA), "hipFree A");
+  checkHip(hipFree(deviceB), "hipFree B");
+  checkHip(hipFree(deviceC), "hipFree C");
+  return 0;
+}
