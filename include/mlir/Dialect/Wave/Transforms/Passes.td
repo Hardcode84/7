@@ -95,7 +95,9 @@ def WaveAMDMachineSchedule
   ];
   let options = [
     Option<"printRegions", "print-regions", "bool", /*default=*/"false",
-           "Print discovered local scheduling regions to stderr.">
+           "Print discovered local scheduling regions to stderr.">,
+    Option<"printDag", "print-dag", "bool", /*default=*/"false",
+           "Print local scheduling DAG edges to stderr.">
   ];
 }
 

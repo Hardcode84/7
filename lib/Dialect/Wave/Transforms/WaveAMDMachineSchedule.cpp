@@ -14,6 +14,7 @@
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/Operation.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
+#include "llvm/ADT/DenseMap.h"
 #include "llvm/Support/raw_ostream.h"
 
 namespace mlir::wave {
@@ -34,6 +35,25 @@ struct ScheduleRegion {
   Operation *first = nullptr;
   Operation *last = nullptr;
   unsigned opCount = 0;
+  SmallVector<Operation *, 16> ops;
+};
+
+enum class EdgeKind {
+  Ssa,
+  MemToken,
+  MemoryOrder,
+  LoopCarry,
+};
+
+struct ScheduleEdge {
+  unsigned src = 0;
+  unsigned dst = 0;
+  EdgeKind kind = EdgeKind::Ssa;
+  bool recurrence = false;
+};
+
+struct ScheduleDag {
+  SmallVector<ScheduleEdge, 32> edges;
 };
 
 static bool isWaveAMDMachineOp(Operation *op) {
@@ -45,6 +65,25 @@ static bool isKnownMemoryOp(Operation *op) {
   return op->hasTrait<traits::SMEMLoadOp>() ||
          op->hasTrait<traits::VMEMLoadOp>() ||
          op->hasTrait<traits::VMEMStoreOp>();
+}
+
+static bool isKnownMemoryWrite(Operation *op) {
+  if (op->hasTrait<traits::VMEMStoreOp>())
+    return true;
+  return isa<waveamdmachine::BufferLoadLdsB32Op,
+             waveamdmachine::BufferLoadLdsB128Op,
+             waveamdmachine::GlobalLoadLdsB32Op,
+             waveamdmachine::GlobalLoadLdsB128Op, waveamdmachine::DsStoreB32Op,
+             waveamdmachine::DsStoreB64Op, waveamdmachine::DsStoreB96Op,
+             waveamdmachine::DsStoreB128Op, waveamdmachine::DsStoreTupleB32Op>(
+      op);
+}
+
+static bool isMemoryEffecting(Operation *op) {
+  return isKnownMemoryOp(op) || isa<waveamdmachine::BufferLoadLdsB32Op,
+                                    waveamdmachine::BufferLoadLdsB128Op,
+                                    waveamdmachine::GlobalLoadLdsB32Op,
+                                    waveamdmachine::GlobalLoadLdsB128Op>(op);
 }
 
 static bool hasUnknownMemoryEffects(Operation *op) {
@@ -71,11 +110,41 @@ static bool isHardBoundary(Operation *op) {
           waveamdmachine::SSetprioOp, waveamdmachine::SCBranchExeczOp,
           waveamdmachine::SCBranchScc0Op, waveamdmachine::SCBranchScc1Op,
           waveamdmachine::SGetregShaderCyclesOp, waveamdmachine::SNopOp,
-          waveamdmachine::SDelayAluOp, waveamdmachine::SAndSaveexecB32Op,
-          waveamdmachine::SAndn2ExecB32Op, waveamdmachine::SMovExecLoOp,
-          waveamdmachine::SEndpgmOp, waveamdmachine::SSetpcB64Op>(op))
+          waveamdmachine::WaitOp, waveamdmachine::SDelayAluOp,
+          waveamdmachine::SAndSaveexecB32Op, waveamdmachine::SAndn2ExecB32Op,
+          waveamdmachine::SMovExecLoOp, waveamdmachine::SEndpgmOp,
+          waveamdmachine::SSetpcB64Op>(op))
     return true;
   return hasUnknownMemoryEffects(op);
+}
+
+static StringRef getEdgeKindName(EdgeKind kind) {
+  switch (kind) {
+  case EdgeKind::Ssa:
+    return "ssa";
+  case EdgeKind::MemToken:
+    return "mem_token";
+  case EdgeKind::MemoryOrder:
+    return "memory_order";
+  case EdgeKind::LoopCarry:
+    return "loop_carry";
+  }
+  llvm_unreachable("unknown edge kind");
+}
+
+static bool isMemToken(Value value) {
+  return isa<waveamdmachine::MemTokenType>(value.getType());
+}
+
+static void addEdge(ScheduleDag &dag, unsigned src, unsigned dst, EdgeKind kind,
+                    bool recurrence = false) {
+  if (src == dst)
+    return;
+  for (const ScheduleEdge &edge : dag.edges)
+    if (edge.src == src && edge.dst == dst && edge.kind == kind &&
+        edge.recurrence == recurrence)
+      return;
+  dag.edges.push_back({src, dst, kind, recurrence});
 }
 
 class RegionCollector {
@@ -89,35 +158,35 @@ public:
   }
 
 private:
-  void flush(Operation *first, Operation *last, unsigned opCount,
-             unsigned blockOrdinal) {
-    if (!opCount)
+  void flush(SmallVectorImpl<Operation *> &ops, unsigned blockOrdinal) {
+    if (ops.empty())
       return;
-    regions.push_back({func, blockOrdinal, nextRegion++, first, last, opCount});
+    ScheduleRegion region;
+    region.func = func;
+    region.blockOrdinal = blockOrdinal;
+    region.regionOrdinal = nextRegion++;
+    region.first = ops.front();
+    region.last = ops.back();
+    region.opCount = static_cast<unsigned>(ops.size());
+    region.ops.append(ops.begin(), ops.end());
+    regions.push_back(std::move(region));
+    ops.clear();
   }
 
   void collectBlock(Block &block) {
     unsigned blockOrdinal = nextBlock++;
-    Operation *first = nullptr;
-    Operation *last = nullptr;
-    unsigned opCount = 0;
+    SmallVector<Operation *, 16> ops;
     for (Operation &op : block) {
       if (isHardBoundary(&op)) {
-        flush(first, last, opCount, blockOrdinal);
-        first = nullptr;
-        last = nullptr;
-        opCount = 0;
+        flush(ops, blockOrdinal);
         if (auto loop = dyn_cast<waveamdmachine::UniformLoopOp>(op))
           for (Block &nested : loop.getBody())
             collectBlock(nested);
         continue;
       }
-      if (!first)
-        first = &op;
-      last = &op;
-      ++opCount;
+      ops.push_back(&op);
     }
-    flush(first, last, opCount, blockOrdinal);
+    flush(ops, blockOrdinal);
   }
 
   func::FuncOp func;
@@ -135,6 +204,99 @@ static void printRegion(ScheduleRegion region) {
                << " last=" << region.last->getName().getStringRef() << "\n";
 }
 
+static void addValueEdges(const ScheduleRegion &region, ScheduleDag &dag,
+                          DenseMap<Operation *, unsigned> &nodeForOp) {
+  for (auto [dstIndex, op] : llvm::enumerate(region.ops)) {
+    for (Value operand : op->getOperands()) {
+      Operation *def = operand.getDefiningOp();
+      if (!def)
+        continue;
+      auto it = nodeForOp.find(def);
+      if (it == nodeForOp.end())
+        continue;
+      addEdge(dag, it->second, dstIndex,
+              isMemToken(operand) ? EdgeKind::MemToken : EdgeKind::Ssa);
+    }
+  }
+}
+
+static void addMemoryOrderEdges(const ScheduleRegion &region, ScheduleDag &dag,
+                                DenseMap<Operation *, unsigned> &nodeForOp) {
+  Operation *lastMemory = nullptr;
+  bool lastMemoryWasWrite = false;
+  for (Operation *op : region.ops) {
+    bool memoryEffecting = isMemoryEffecting(op);
+    if (!memoryEffecting)
+      continue;
+    bool memoryWrite = isKnownMemoryWrite(op);
+    if (lastMemory && (lastMemoryWasWrite || memoryWrite))
+      addEdge(dag, nodeForOp.lookup(lastMemory), nodeForOp.lookup(op),
+              EdgeKind::MemoryOrder);
+    lastMemory = op;
+    lastMemoryWasWrite = memoryWrite;
+  }
+}
+
+static void addLoopCarryEdges(const ScheduleRegion &region, ScheduleDag &dag,
+                              DenseMap<Operation *, unsigned> &nodeForOp) {
+  Block *block = region.first->getBlock();
+  auto loop = dyn_cast<waveamdmachine::UniformLoopOp>(block->getParentOp());
+  if (!loop)
+    return;
+  auto term = dyn_cast<waveamdmachine::ContinueIfOp>(
+      loop.getBody().front().getTerminator());
+  if (!term)
+    return;
+  for (Operation *user : region.ops) {
+    unsigned userIndex = nodeForOp.lookup(user);
+    for (Value operand : user->getOperands()) {
+      auto arg = dyn_cast<BlockArgument>(operand);
+      if (!arg || arg.getOwner() != block)
+        continue;
+      unsigned argIndex = arg.getArgNumber();
+      if (argIndex >= term.getCarries().size())
+        continue;
+      Operation *carryDef = term.getCarries()[argIndex].getDefiningOp();
+      auto it = nodeForOp.find(carryDef);
+      if (it == nodeForOp.end())
+        continue;
+      addEdge(dag, it->second, userIndex, EdgeKind::LoopCarry,
+              /*recurrence=*/true);
+    }
+  }
+}
+
+static ScheduleDag buildDag(const ScheduleRegion &region) {
+  ScheduleDag dag;
+  DenseMap<Operation *, unsigned> nodeForOp;
+  for (auto [index, op] : llvm::enumerate(region.ops))
+    nodeForOp[op] = index;
+
+  addValueEdges(region, dag, nodeForOp);
+  addMemoryOrderEdges(region, dag, nodeForOp);
+  addLoopCarryEdges(region, dag, nodeForOp);
+  return dag;
+}
+
+static void printScheduleDag(ScheduleRegion region, const ScheduleDag &dag) {
+  llvm::errs() << "waveamd-machine-schedule dag func="
+               << region.func.getSymName() << " region=" << region.regionOrdinal
+               << " nodes=" << region.ops.size()
+               << " edges=" << dag.edges.size() << "\n";
+  for (const ScheduleEdge &edge : dag.edges) {
+    Operation *src = region.ops[edge.src];
+    Operation *dst = region.ops[edge.dst];
+    llvm::errs() << "waveamd-machine-schedule edge region="
+                 << region.regionOrdinal
+                 << " kind=" << getEdgeKindName(edge.kind);
+    if (edge.recurrence)
+      llvm::errs() << " recurrence";
+    llvm::errs() << " " << edge.src << "->" << edge.dst
+                 << " src=" << src->getName().getStringRef()
+                 << " dst=" << dst->getName().getStringRef() << "\n";
+  }
+}
+
 struct WaveAMDMachineSchedulePass
     : public wave::impl::WaveAMDMachineScheduleBase<
           WaveAMDMachineSchedulePass> {
@@ -146,10 +308,12 @@ struct WaveAMDMachineSchedulePass
       if (func.isExternal())
         return;
       SmallVector<ScheduleRegion> regions = RegionCollector(func).collect();
-      if (!printRegions)
-        return;
-      for (const ScheduleRegion &region : regions)
-        printRegion(region);
+      for (const ScheduleRegion &region : regions) {
+        if (printRegions)
+          printRegion(region);
+        if (printDag)
+          printScheduleDag(region, buildDag(region));
+      }
     });
   }
 };
