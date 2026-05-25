@@ -11,6 +11,9 @@
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/WaveAMDMachine/CostModel/ArchData.h"
 #include "mlir/Dialect/WaveAMDMachine/CostModel/EventSimulator.h"
+#include "mlir/Dialect/WaveAMDMachine/CostModel/FunctionalUnit.h"
+#include "mlir/Dialect/WaveAMDMachine/CostModel/LatencyTable.h"
+#include "mlir/Dialect/WaveAMDMachine/CostModel/OpClassifier.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachine.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineTraits.h"
 #include "mlir/IR/BuiltinOps.h"
@@ -21,6 +24,7 @@
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/TargetParser/TargetParser.h"
 
+#include <algorithm>
 #include <limits>
 
 namespace mlir::wave {
@@ -445,6 +449,393 @@ static void printRegionScores(const ScheduleRegion &region,
                  scoreCandidateOps(region, graph, candidate, archResolution));
 }
 
+struct GraphTables {
+  SmallVector<SmallVector<unsigned, 4>, 16> successors;
+  SmallVector<unsigned, 16> pendingPreds;
+};
+
+static GraphTables buildGraphTables(const ScheduleRegion &region,
+                                    const DependenceGraph &graph) {
+  GraphTables tables;
+  tables.successors.resize(region.ops.size());
+  tables.pendingPreds.assign(region.ops.size(), 0);
+  for (const ScheduleEdge &edge : graph.edges) {
+    if (edge.recurrence)
+      continue;
+    tables.successors[edge.src].push_back(edge.dst);
+    ++tables.pendingPreds[edge.dst];
+  }
+  for (SmallVector<unsigned, 4> &succs : tables.successors) {
+    llvm::sort(succs);
+    succs.erase(std::unique(succs.begin(), succs.end()), succs.end());
+  }
+  return tables;
+}
+
+static bool isMemoryIssuer(Operation *op) {
+  return op->hasTrait<traits::SMEMLoadOp>() ||
+         op->hasTrait<traits::VMEMLoadOp>() ||
+         op->hasTrait<traits::VMEMStoreOp>();
+}
+
+static bool isMatrixOp(Operation *op) {
+  return isa<waveamdmachine::MfmaF32_16x16x16_F16Op,
+             waveamdmachine::MfmaF32_16x16x32_F16Op,
+             waveamdmachine::WmmaF32_16x16x16_F16Op,
+             waveamdmachine::WmmaI32_16x16x16_IU8Op>(op);
+}
+
+struct NodeMetrics {
+  int latency = 0;
+  int64_t criticalPath = 0;
+  bool memory = false;
+  bool reachesMemory = false;
+  bool matrix = false;
+  bool reachesMatrix = false;
+};
+
+static int64_t computeCriticalPath(
+    unsigned node, ArrayRef<SmallVector<unsigned, 4>> successors,
+    ArrayRef<NodeMetrics> metrics, SmallVectorImpl<int64_t> &memo,
+    SmallVectorImpl<uint8_t> &state) {
+  if (state[node] == 2)
+    return memo[node];
+  if (state[node] == 1)
+    return metrics[node].latency;
+  state[node] = 1;
+  int64_t best = metrics[node].latency;
+  for (unsigned succ : successors[node]) {
+    int64_t through =
+        metrics[node].latency +
+        computeCriticalPath(succ, successors, metrics, memo, state);
+    best = std::max(best, through);
+  }
+  state[node] = 2;
+  memo[node] = best;
+  return best;
+}
+
+static bool computeReachMemory(unsigned node,
+                               ArrayRef<SmallVector<unsigned, 4>> successors,
+                               SmallVectorImpl<NodeMetrics> &metrics,
+                               SmallVectorImpl<uint8_t> &state) {
+  if (state[node] == 2)
+    return metrics[node].reachesMemory;
+  if (state[node] == 1)
+    return metrics[node].memory;
+  state[node] = 1;
+  bool reaches = metrics[node].memory;
+  for (unsigned succ : successors[node])
+    reaches |= computeReachMemory(succ, successors, metrics, state);
+  state[node] = 2;
+  metrics[node].reachesMemory = reaches;
+  return reaches;
+}
+
+static bool computeReachMatrix(unsigned node,
+                               ArrayRef<SmallVector<unsigned, 4>> successors,
+                               SmallVectorImpl<NodeMetrics> &metrics,
+                               SmallVectorImpl<uint8_t> &state) {
+  if (state[node] == 2)
+    return metrics[node].reachesMatrix;
+  if (state[node] == 1)
+    return metrics[node].matrix;
+  state[node] = 1;
+  bool reaches = metrics[node].matrix;
+  for (unsigned succ : successors[node])
+    reaches |= computeReachMatrix(succ, successors, metrics, state);
+  state[node] = 2;
+  metrics[node].reachesMatrix = reaches;
+  return reaches;
+}
+
+static SmallVector<NodeMetrics, 16>
+computeNodeMetrics(const ScheduleRegion &region, const GraphTables &tables,
+                   const waveamdmachine::ArchData &arch) {
+  SmallVector<NodeMetrics, 16> metrics(region.ops.size());
+  for (auto [index, op] : llvm::enumerate(region.ops)) {
+    waveamdmachine::SchedClass cls = waveamdmachine::classifyOp(op);
+    metrics[index].latency = waveamdmachine::getLatency(arch, cls);
+    metrics[index].memory = isMemoryIssuer(op);
+    metrics[index].matrix = isMatrixOp(op);
+  }
+
+  SmallVector<int64_t, 16> memo(region.ops.size(), 0);
+  SmallVector<uint8_t, 16> state(region.ops.size(), 0);
+  for (unsigned index = 0; index < region.ops.size(); ++index)
+    metrics[index].criticalPath =
+        computeCriticalPath(index, tables.successors, metrics, memo, state);
+
+  state.assign(region.ops.size(), 0);
+  for (unsigned index = 0; index < region.ops.size(); ++index)
+    computeReachMemory(index, tables.successors, metrics, state);
+
+  state.assign(region.ops.size(), 0);
+  for (unsigned index = 0; index < region.ops.size(); ++index)
+    computeReachMatrix(index, tables.successors, metrics, state);
+
+  return metrics;
+}
+
+enum class SchedulePolicy {
+  CriticalPath,
+  MemoryEarly,
+  MatrixFeed,
+};
+
+static int memoryPriority(const NodeMetrics &metrics) {
+  if (metrics.memory)
+    return 3;
+  if (metrics.reachesMemory)
+    return 2;
+  if (metrics.latency >= 20)
+    return 1;
+  return 0;
+}
+
+static int matrixPriority(const NodeMetrics &metrics) {
+  if (metrics.reachesMatrix && !metrics.matrix)
+    return 3;
+  if (metrics.matrix)
+    return 2;
+  return 0;
+}
+
+static bool isBetterReadyNode(SchedulePolicy policy, unsigned lhs, unsigned rhs,
+                              ArrayRef<NodeMetrics> metrics) {
+  const NodeMetrics &l = metrics[lhs];
+  const NodeMetrics &r = metrics[rhs];
+  auto betterByCommon = [&]() {
+    if (l.criticalPath != r.criticalPath)
+      return l.criticalPath > r.criticalPath;
+    if (l.latency != r.latency)
+      return l.latency > r.latency;
+    return lhs < rhs;
+  };
+
+  switch (policy) {
+  case SchedulePolicy::CriticalPath:
+    return betterByCommon();
+  case SchedulePolicy::MemoryEarly:
+    if (memoryPriority(l) != memoryPriority(r))
+      return memoryPriority(l) > memoryPriority(r);
+    return betterByCommon();
+  case SchedulePolicy::MatrixFeed:
+    if (matrixPriority(l) != matrixPriority(r))
+      return matrixPriority(l) > matrixPriority(r);
+    return betterByCommon();
+  }
+  llvm_unreachable("unknown schedule policy");
+}
+
+static bool buildListOrder(const GraphTables &tables,
+                           ArrayRef<NodeMetrics> metrics, SchedulePolicy policy,
+                           SmallVectorImpl<unsigned> &order) {
+  SmallVector<unsigned, 16> pending = tables.pendingPreds;
+  SmallVector<unsigned, 16> ready;
+  for (auto [index, count] : llvm::enumerate(pending))
+    if (count == 0)
+      ready.push_back(index);
+
+  while (!ready.empty()) {
+    unsigned bestReady = 0;
+    for (unsigned i = 1; i < ready.size(); ++i)
+      if (isBetterReadyNode(policy, ready[i], ready[bestReady], metrics))
+        bestReady = i;
+
+    unsigned node = ready[bestReady];
+    ready.erase(ready.begin() + bestReady);
+    order.push_back(node);
+    for (unsigned succ : tables.successors[node]) {
+      assert(pending[succ] > 0 && "successor predecessor count underflow");
+      --pending[succ];
+      if (pending[succ] == 0)
+        ready.push_back(succ);
+    }
+  }
+
+  return order.size() == pending.size();
+}
+
+struct OrderCandidate {
+  StringRef name;
+  SmallVector<unsigned, 16> order;
+};
+
+static SmallVector<unsigned, 16>
+getOriginalOrder(const ScheduleRegion &region) {
+  SmallVector<unsigned, 16> order;
+  for (unsigned i = 0; i < region.ops.size(); ++i)
+    order.push_back(i);
+  return order;
+}
+
+static void addPolicyCandidate(SmallVectorImpl<OrderCandidate> &candidates,
+                               StringRef name, const GraphTables &tables,
+                               ArrayRef<NodeMetrics> metrics,
+                               SchedulePolicy policy) {
+  OrderCandidate candidate;
+  candidate.name = name;
+  if (!buildListOrder(tables, metrics, policy, candidate.order))
+    return;
+  candidates.push_back(std::move(candidate));
+}
+
+static SmallVector<OrderCandidate, 4>
+buildScheduleCandidates(const ScheduleRegion &region,
+                        const DependenceGraph &graph,
+                        const waveamdmachine::ArchData &arch) {
+  SmallVector<OrderCandidate, 4> candidates;
+  candidates.push_back({"original", getOriginalOrder(region)});
+
+  GraphTables tables = buildGraphTables(region, graph);
+  SmallVector<NodeMetrics, 16> metrics =
+      computeNodeMetrics(region, tables, arch);
+  addPolicyCandidate(candidates, "critical_path", tables, metrics,
+                     SchedulePolicy::CriticalPath);
+  addPolicyCandidate(candidates, "memory_early", tables, metrics,
+                     SchedulePolicy::MemoryEarly);
+  addPolicyCandidate(candidates, "wmma_feed", tables, metrics,
+                     SchedulePolicy::MatrixFeed);
+  return candidates;
+}
+
+struct EvaluatedCandidate {
+  StringRef name;
+  SmallVector<unsigned, 16> order;
+  ScoreResult score;
+};
+
+struct ScheduleDecision {
+  SmallVector<EvaluatedCandidate, 4> candidates;
+  unsigned selected = 0;
+};
+
+static bool isOriginalOrder(ArrayRef<unsigned> order) {
+  for (auto [index, opIndex] : llvm::enumerate(order))
+    if (index != opIndex)
+      return false;
+  return true;
+}
+
+static ScoreResult scoreOrderCandidate(const ScheduleRegion &region,
+                                       const DependenceGraph &graph,
+                                       const OrderCandidate &candidate,
+                                       ArchResolution archResolution) {
+  SmallVector<Operation *, 16> ops;
+  StringRef fallbackReason;
+  if (!buildCandidateOps(region, graph, candidate.order, ops, fallbackReason))
+    return {false, 0, 0, fallbackReason};
+  return scoreOps(ops, archResolution);
+}
+
+static ScheduleDecision
+evaluateScheduleCandidates(const ScheduleRegion &region,
+                           const DependenceGraph &graph,
+                           ArchResolution archResolution) {
+  ScheduleDecision decision;
+  if (!archResolution.arch) {
+    decision.candidates.push_back(
+        {"original",
+         getOriginalOrder(region),
+         {false, 0, 0, archResolution.fallbackReason}});
+    return decision;
+  }
+
+  SmallVector<OrderCandidate, 4> candidates =
+      buildScheduleCandidates(region, graph, *archResolution.arch);
+  for (const OrderCandidate &candidate : candidates)
+    decision.candidates.push_back(
+        {candidate.name, candidate.order,
+         scoreOrderCandidate(region, graph, candidate, archResolution)});
+
+  for (unsigned i = 1; i < decision.candidates.size(); ++i) {
+    const ScoreResult &best = decision.candidates[decision.selected].score;
+    const ScoreResult &score = decision.candidates[i].score;
+    if (!score.supported)
+      continue;
+    if (!best.supported || score.cycles < best.cycles)
+      decision.selected = i;
+  }
+  return decision;
+}
+
+static void printOrder(raw_ostream &os, ArrayRef<unsigned> order) {
+  for (auto [index, opIndex] : llvm::enumerate(order)) {
+    if (index != 0)
+      os << ",";
+    os << opIndex;
+  }
+}
+
+static void printCandidateDiagnostics(ScheduleRegion region,
+                                      const ScheduleDecision &decision) {
+  ScoreResult original = decision.candidates.front().score;
+  for (const EvaluatedCandidate &candidate : decision.candidates) {
+    llvm::errs() << "waveamd-machine-schedule candidate func="
+                 << region.func.getSymName()
+                 << " region=" << region.regionOrdinal
+                 << " name=" << candidate.name;
+    if (candidate.score.supported) {
+      llvm::errs() << " cycles=" << candidate.score.cycles;
+      if (original.supported)
+        llvm::errs() << " delta=" << candidate.score.cycles - original.cycles;
+      llvm::errs() << " issued_ops=" << candidate.score.issuedOps;
+    } else {
+      llvm::errs() << " fallback=original reason="
+                   << candidate.score.fallbackReason;
+    }
+    llvm::errs() << " order=";
+    printOrder(llvm::errs(), candidate.order);
+    llvm::errs() << "\n";
+  }
+}
+
+static void printScheduleDecision(ScheduleRegion region,
+                                  const ScheduleDecision &decision,
+                                  bool willApply) {
+  const EvaluatedCandidate &selected = decision.candidates[decision.selected];
+  ScoreResult original = decision.candidates.front().score;
+  llvm::errs() << "waveamd-machine-schedule selected func="
+               << region.func.getSymName() << " region=" << region.regionOrdinal
+               << " name=" << selected.name;
+  if (selected.score.supported) {
+    llvm::errs() << " original_cycles=" << original.cycles
+                 << " selected_cycles=" << selected.score.cycles
+                 << " delta=" << selected.score.cycles - original.cycles;
+  } else {
+    llvm::errs() << " fallback=original reason="
+                 << selected.score.fallbackReason;
+  }
+  llvm::errs() << " action=" << (willApply ? "apply" : "keep") << " order=";
+  printOrder(llvm::errs(), selected.order);
+  llvm::errs() << "\n";
+}
+
+static bool shouldApplyDecision(const ScheduleDecision &decision) {
+  if (decision.candidates.empty() || decision.selected == 0)
+    return false;
+  const EvaluatedCandidate &original = decision.candidates.front();
+  const EvaluatedCandidate &selected = decision.candidates[decision.selected];
+  return original.score.supported && selected.score.supported &&
+         selected.score.cycles < original.score.cycles &&
+         !isOriginalOrder(selected.order);
+}
+
+static void applyScheduleOrder(const ScheduleRegion &region,
+                               ArrayRef<unsigned> order) {
+  Operation *insertBefore = region.last->getNextNode();
+  Block *block = region.last->getBlock();
+  for (unsigned index : llvm::reverse(order)) {
+    Operation *op = region.ops[index];
+    if (insertBefore)
+      op->moveBefore(insertBefore);
+    else
+      op->moveBefore(block, block->end());
+    insertBefore = op;
+  }
+}
+
 struct WaveAMDMachineSchedulePass
     : public wave::impl::WaveAMDMachineScheduleBase<
           WaveAMDMachineSchedulePass> {
@@ -456,6 +847,7 @@ struct WaveAMDMachineSchedulePass
     CandidateRequest candidate =
         getCandidateRequest(StringRef(scoreOrder), scoreRegion);
     bool emitScores = printScore || candidate.requested;
+    bool runScheduler = printCandidates || applySchedule;
     StringRef scoreFuncName(scoreFunc);
     mod.walk([&](func::FuncOp func) {
       if (func.isExternal())
@@ -463,19 +855,19 @@ struct WaveAMDMachineSchedulePass
       SmallVector<ScheduleRegion> regions = RegionCollector(func).collect();
       for (const ScheduleRegion &region : regions)
         processRegion(region, archResolution, candidate, scoreFuncName,
-                      emitScores);
+                      emitScores, runScheduler);
     });
   }
 
   void processRegion(const ScheduleRegion &region,
                      ArchResolution archResolution,
                      const CandidateRequest &candidate, StringRef scoreFuncName,
-                     bool emitScores) {
+                     bool emitScores, bool runScheduler) {
     bool scoreCandidate =
         candidate.requested &&
         shouldScoreCandidate(region, scoreFuncName, scoreRegion);
     DependenceGraph graph;
-    if (printDeps || scoreCandidate)
+    if (printDeps || scoreCandidate || runScheduler)
       graph = buildDependenceGraph(region);
     if (printRegions)
       printRegion(region);
@@ -484,6 +876,22 @@ struct WaveAMDMachineSchedulePass
     if (emitScores)
       printRegionScores(region, graph, archResolution, candidate,
                         scoreCandidate);
+    if (runScheduler)
+      processScheduler(region, graph, archResolution);
+  }
+
+  void processScheduler(const ScheduleRegion &region,
+                        const DependenceGraph &graph,
+                        ArchResolution archResolution) {
+    ScheduleDecision decision =
+        evaluateScheduleCandidates(region, graph, archResolution);
+    bool willApply = applySchedule && shouldApplyDecision(decision);
+    if (printCandidates) {
+      printCandidateDiagnostics(region, decision);
+      printScheduleDecision(region, decision, willApply);
+    }
+    if (willApply)
+      applyScheduleOrder(region, decision.candidates[decision.selected].order);
   }
 };
 
