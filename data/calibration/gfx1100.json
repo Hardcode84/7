@@ -3,8 +3,34 @@
   "arch": "gfx1100",
   "device_name": "AMD Radeon Pro W7900 Dual Slot",
   "rocm_version": "6.3.3-74",
-  "measured_at": "2026-05-24",
-  "harness": "tools/wave-microbench/wave-microbench.py --in-kernel-cycles",
-  "notes": "Initial scaffold from Stage 4. The infrastructure is wired (CalibrationData reads this file; wave-calibrate-report tool diffs it against the LLVM SISchedule.td defaults) but the per-class isolation campaign is still pending. The single composite measurement we have today (vmem_store_loop_timed.mlir: ~59 cycles per scf.for body iter, comprising 1x buffer_store_b32 + 1x v_add_nc_u32 + s_add_i32 + s_cmp_lt_i32 + s_cbranch_scc1) is NOT a per-class number and is intentionally left out of overrides until a dedicated per-class kernel suite lands (tracked separately).",
-  "overrides": {}
+  "measured_at": "2026-05-25",
+  "harness": "tools/wave-microbench/wave-microbench.py --in-kernel-cycles; gfx1100_schedclass_timed sweep N=32,64,128,256",
+  "notes": "Per-class gfx1100 seed calibration from in-kernel HW_REG_SHADER_CYCLES slopes. See docs/Gfx1100CalibrationMethodology.md for raw slopes and subtraction rules.",
+  "overrides": {
+    "WriteSALU": {
+      "cycles": 3,
+      "kernel": "tools/wave-microbench/kernels/gfx1100_schedclass_timed.mlir@sched_salu_chain_timed",
+      "notes": "16 dependent s_add_i32 ops per loop iter. Slope 67.995 cyc/iter; branch-loop baseline 22.000; solved with Write32Bit=3.87 -> 3.12 cyc/op, rounded to 3."
+    },
+    "Write32Bit": {
+      "cycles": 4,
+      "kernel": "tools/wave-microbench/kernels/gfx1100_schedclass_timed.mlir@sched_valu_chain_timed",
+      "notes": "16 dependent v_add_nc_u32 ops per loop iter. Slope 80.117 cyc/iter minus 22.000 branch-loop baseline leaves 15 extra VALU ops -> 3.87 cyc/op, rounded to 4."
+    },
+    "WriteVMEM": {
+      "cycles": 177,
+      "kernel": "tools/wave-microbench/kernels/gfx1100_schedclass_timed.mlir@sched_vmem_store_timed",
+      "notes": "4 ordered buffer_store_b32 ops per loop iter. Slope 741.796 cyc/iter; subtract branch-loop baseline and 3 extra VALU ops -> 177.0 cyc/store."
+    },
+    "WriteLDS": {
+      "cycles": 47,
+      "kernel": "tools/wave-microbench/kernels/gfx1100_schedclass_timed.mlir@sched_lds_load_timed",
+      "notes": "4 ds_load_b32 + dependent VALU consumers per loop iter. Slope 222.000 cyc/iter; subtract branch-loop baseline and 3 extra VALU ops -> 47.1 cyc/load."
+    },
+    "WriteBranch": {
+      "cycles": 12,
+      "kernel": "tools/wave-microbench/kernels/gfx1100_schedclass_timed.mlir@sched_branch_loop_timed",
+      "notes": "Loop body contains one v_add_nc_u32 plus loop s_add_i32/s_cmp_lt_i32/s_cbranch_scc1. Slope 22.000; subtract Write32Bit and two WriteSALU ops -> 12 cyc/branch."
+    }
+  }
 }
