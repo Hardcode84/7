@@ -369,6 +369,32 @@ struct WaveAMDRegAllocPass
       extendInterval(init, endPos, intervals);
   }
 
+  static bool operationIsInside(Operation *root, Operation *op) {
+    for (Operation *cur = op; cur; cur = cur->getParentOp())
+      if (cur == root)
+        return true;
+    return false;
+  }
+
+  static bool valueIsDefinedInside(Operation *root, Value value) {
+    if (Operation *def = value.getDefiningOp())
+      return operationIsInside(root, def);
+    if (auto arg = dyn_cast<BlockArgument>(value))
+      return operationIsInside(root, arg.getOwner()->getParentOp());
+    return false;
+  }
+
+  void extendExternalLoopUses(waveamdmachine::UniformLoopOp loop,
+                              unsigned endPos, LiveIntervalSet &intervals) {
+    loop.getBody().walk([&](Operation *op) {
+      for (Value operand : op->getOperands()) {
+        if (valueIsDefinedInside(loop, operand))
+          continue;
+        extendInterval(operand, endPos, intervals);
+      }
+    });
+  }
+
   // Process a uniform_loop op: coalesce entry carries, recurse into
   // the body, then coalesce the back-edge carries and extend the
   // carry intervals over the whole loop range.
@@ -384,6 +410,7 @@ struct WaveAMDRegAllocPass
       return failure();
     coalesceLoopBackEdgeCarries(loop, intervals);
     extendCarriesToLoopEnd(loop, cursor, intervals);
+    extendExternalLoopUses(loop, cursor, intervals);
     return success();
   }
 
