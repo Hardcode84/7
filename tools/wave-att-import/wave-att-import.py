@@ -133,6 +133,15 @@ class ImportSummary:
     wave_unresolved: int = 0
 
 
+@dataclass(frozen=True)
+class WaitWindow:
+    wait: StaticInst
+    counter: str
+    limit: int
+    pending: tuple[StaticInst, ...]
+    drained: tuple[StaticInst, ...]
+
+
 def parse_int(text: str) -> int:
     value = text.strip()
     if value.lower().startswith("0x"):
@@ -185,6 +194,60 @@ def classify_mnemonic(mnemonic: str) -> str:
         if mnemonic.startswith(prefix):
             return cls
     return "Unknown"
+
+
+def producer_counter(inst: StaticInst) -> str | None:
+    mnemonic = inst.mnemonic
+    if mnemonic.startswith(("s_load", "ds_load", "ds_store")):
+        return "lgkm"
+    if mnemonic.startswith(("buffer_load", "global_load", "flat_load")):
+        return "vmem"
+    if mnemonic.startswith(("buffer_store", "global_store", "flat_store")):
+        return "vscnt"
+    return None
+
+
+def parse_wait_counters(inst: StaticInst) -> list[tuple[str, int]]:
+    counter_names = {"lgkmcnt": "lgkm", "vmcnt": "vmem"}
+    waits = []
+    for counter, limit in re.findall(
+        r"\b(vmcnt|lgkmcnt)\((0x[0-9a-fA-F]+|\d+)\)", inst.instruction
+    ):
+        waits.append((counter_names[counter], parse_int(limit)))
+    if inst.mnemonic == "s_waitcnt_vscnt":
+        match = re.search(r",\s*(0x[0-9a-fA-F]+|\d+)\s*$", inst.instruction)
+        if match:
+            waits.append(("vscnt", parse_int(match.group(1))))
+    return waits
+
+
+def build_wait_windows(static: dict[int, StaticInst]) -> list[WaitWindow]:
+    pending: dict[str, list[StaticInst]] = {"lgkm": [], "vmem": [], "vscnt": []}
+    windows: list[WaitWindow] = []
+    for pc in sorted(static):
+        inst = static[pc]
+        waits = parse_wait_counters(inst)
+        if waits:
+            for counter, limit in waits:
+                current = pending[counter]
+                drain_count = max(0, len(current) - limit)
+                drained = tuple(current[:drain_count])
+                windows.append(
+                    WaitWindow(
+                        wait=inst,
+                        counter=counter,
+                        limit=limit,
+                        pending=tuple(current),
+                        drained=drained,
+                    )
+                )
+                del current[:drain_count]
+            continue
+
+        counter = producer_counter(inst)
+        if counter:
+            pending[counter].append(inst)
+    return windows
 
 
 def parse_stats(
@@ -344,6 +407,115 @@ def build_report(
     return out.getvalue()
 
 
+def model_latency(inst: StaticInst) -> int | None:
+    latency = MODEL_LATENCIES[classify_mnemonic(inst.mnemonic)]
+    if isinstance(latency, int):
+        return latency
+    return None
+
+
+def join_pcs(insts: tuple[StaticInst, ...]) -> str:
+    return ";".join(f"0x{inst.pc:x}" for inst in insts)
+
+
+def join_classes(insts: tuple[StaticInst, ...]) -> str:
+    return ";".join(classify_mnemonic(inst.mnemonic) for inst in insts)
+
+
+def max_model_latency(insts: tuple[StaticInst, ...]) -> int | None:
+    latencies = [model_latency(inst) for inst in insts]
+    known = [latency for latency in latencies if latency is not None]
+    if not known:
+        return None
+    return max(known)
+
+
+def static_order_model_stall(window: WaitWindow) -> int:
+    ready_cycles = []
+    for inst in window.drained:
+        latency = model_latency(inst)
+        if latency is not None:
+            ready_cycles.append(inst.index + latency)
+    if not ready_cycles:
+        return 0
+    return max(0, max(ready_cycles) - window.wait.index)
+
+
+def build_window_report(
+    static: dict[int, StaticInst],
+    att_stats: dict[int, AttStats],
+    wave_stats: dict[int, WaveStats],
+    summary: ImportSummary,
+    *,
+    include_summary: bool,
+) -> str:
+    windows = build_wait_windows(static)
+    out = io.StringIO()
+    if include_summary:
+        out.write("summary:\n")
+        out.write(f"  static_instructions: {len(static)}\n")
+        out.write(f"  stats_rows: {summary.stats_rows}\n")
+        out.write(f"  stats_resolved: {summary.stats_resolved}\n")
+        out.write(f"  stats_unresolved: {summary.stats_unresolved}\n")
+        out.write(f"  code_json_files: {summary.code_json_files}\n")
+        out.write(f"  code_lines: {summary.code_lines}\n")
+        out.write(f"  wave_files: {summary.wave_files}\n")
+        out.write(f"  wave_rows: {summary.wave_rows}\n")
+        out.write(f"  wave_resolved: {summary.wave_resolved}\n")
+        out.write(f"  wave_unresolved: {summary.wave_unresolved}\n")
+        out.write(f"  wait_windows: {len(windows)}\n\n")
+
+    writer = csv.writer(out, lineterminator="\n")
+    writer.writerow(
+        [
+            "wait_pc_hex",
+            "wait_pc_dec",
+            "wait_instruction",
+            "counter",
+            "limit",
+            "pending_count",
+            "drained_count",
+            "pending_pcs",
+            "drained_pcs",
+            "pending_classes",
+            "model_max_latency",
+            "model_static_wait",
+            "att_stats_hitcount",
+            "att_stats_avg_latency",
+            "att_stats_avg_stall",
+            "wave_hitcount",
+            "wave_avg_duration",
+            "wave_avg_stall",
+        ]
+    )
+    for window in windows:
+        att = att_stats.get(window.wait.pc, AttStats())
+        wave = wave_stats.get(window.wait.pc, WaveStats())
+        writer.writerow(
+            [
+                f"0x{window.wait.pc:x}",
+                window.wait.pc,
+                window.wait.instruction,
+                window.counter,
+                window.limit,
+                len(window.pending),
+                len(window.drained),
+                join_pcs(window.pending),
+                join_pcs(window.drained),
+                join_classes(window.pending),
+                format_number(max_model_latency(window.pending)),
+                static_order_model_stall(window),
+                att.hitcount or "",
+                format_number(att.avg_latency),
+                format_number(att.avg_stall),
+                wave.hitcount or "",
+                format_number(wave.avg_duration),
+                format_number(wave.avg_stall),
+            ]
+        )
+    return out.getvalue()
+
+
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -362,6 +534,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         "--summary",
         action="store_true",
         help="print import coverage summary before CSV",
+    )
+    parser.add_argument(
+        "--windows",
+        action="store_true",
+        help="print wait-window calibration rows instead of per-PC rows",
     )
     parser.add_argument("--output", type=Path, help="write report to file")
     source = parser.add_mutually_exclusive_group(required=True)
@@ -384,9 +561,14 @@ def main(argv: list[str]) -> int:
     att_stats = parse_stats(args.att_dir, static_pcs, summary)
     code_maps = parse_code_maps(args.att_dir, summary)
     wave_stats = parse_wave_json(args.att_dir, static_pcs, code_maps, summary)
-    report = build_report(
-        static, att_stats, wave_stats, summary, include_summary=args.summary
-    )
+    if args.windows:
+        report = build_window_report(
+            static, att_stats, wave_stats, summary, include_summary=args.summary
+        )
+    else:
+        report = build_report(
+            static, att_stats, wave_stats, summary, include_summary=args.summary
+        )
     if args.output:
         args.output.write_text(report)
     else:

@@ -1,5 +1,6 @@
 # ruff: noqa: E501
 # RUN: %PYTHON %S/../../tools/wave-att-import/wave-att-import.py --att-dir %S/Inputs/att-sample --objdump %S/Inputs/att-objdump.txt --summary | FileCheck %s
+# RUN: %PYTHON %S/../../tools/wave-att-import/wave-att-import.py --att-dir %S/Inputs/att-sample --objdump %S/Inputs/att-objdump.txt --windows | FileCheck %s --check-prefix=WIN
 
 # CHECK: summary:
 # CHECK:   static_instructions: 4
@@ -18,3 +19,6 @@
 # CHECK: 0x1608,5640,s_waitcnt lgkmcnt(0),s_waitcnt,WaitcntPseudo,0,1,2,30.0,29.0,0.0,1,31.0,30.0,101.0
 # CHECK: 0x160c,5644,"v_and_b32_e32 v1, 15, v0",v_and_b32_e32,Write32Bit,5,2,,,,,,,,
 # CHECK: 0x1610,5648,s_endpgm,s_endpgm,WriteBranch,32,3,,,,,,,,
+
+# WIN: wait_pc_hex,wait_pc_dec,wait_instruction,counter,limit,pending_count,drained_count,pending_pcs,drained_pcs,pending_classes,model_max_latency,model_static_wait,att_stats_hitcount,att_stats_avg_latency,att_stats_avg_stall,wave_hitcount,wave_avg_duration,wave_avg_stall
+# WIN: 0x1608,5640,s_waitcnt lgkmcnt(0),lgkm,0,1,1,0x1600,0x1600,WriteSMEM,20,19,2,30.0,29.0,1,31.0,30.0
