@@ -2,6 +2,7 @@
 // RUN: wave-sim-report --waves=2 %s | FileCheck %s --check-prefix=TWO
 // RUN: wave-sim-report --waves=2 --timeline %s | FileCheck %s --check-prefix=TRACE
 // RUN: wave-sim-report --func=smem_wait --timeline %s | FileCheck %s --check-prefix=WAIT
+// RUN: wave-sim-report --func=smem_wait --op-latencies %s | FileCheck %s --check-prefix=LAT
 // RUN: wave-sim-report --func=smem_partial_wait --timeline %s | FileCheck %s --check-prefix=WAITPART
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
@@ -75,6 +76,12 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // WAIT: issue cycle=20 wave=0 simd=0 fu=SALU op=waveamdmachine.s_add_i32
 // WAIT: counter_drained cycle=20 wave=0 simd=0 fu=LGKM counter=lgkm op=waveamdmachine.s_load_b32
 // WAIT: counter_drained cycle=20 wave=0 simd=0 op=waveamdmachine.s_waitcnt
+
+// LAT: op_latencies:
+// LAT: op_index=0 op=waveamdmachine.imm class=NoInst fu=None latency=0 issues=1
+// LAT: op_index=2 op=waveamdmachine.s_load_b32 class=WriteSMEM fu=LGKM latency=20 issues=1
+// LAT: op_index=3 op=waveamdmachine.s_waitcnt class=NoInst fu=None latency=0 issues=1 waitcnt=1
+// LAT: op_index=4 op=waveamdmachine.s_add_i32 class=WriteSALU fu=SALU latency=2 issues=1
 
 // WAITPART: issue cycle=0 wave=0 simd=0 fu=LGKM op=waveamdmachine.s_load_b32
 // WAITPART: issue cycle=1 wave=0 simd=0 fu=LGKM op=waveamdmachine.s_load_b32

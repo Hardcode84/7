@@ -13,7 +13,10 @@
 #include "mlir/Dialect/WaveAMDMachine/CostModel/ArchData.h"
 #include "mlir/Dialect/WaveAMDMachine/CostModel/EventSimulator.h"
 #include "mlir/Dialect/WaveAMDMachine/CostModel/FunctionalUnit.h"
+#include "mlir/Dialect/WaveAMDMachine/CostModel/LatencyTable.h"
+#include "mlir/Dialect/WaveAMDMachine/CostModel/OpClassifier.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachine.h"
+#include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineTraits.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/DialectRegistry.h"
 #include "mlir/IR/MLIRContext.h"
@@ -58,6 +61,11 @@ static llvm::cl::opt<int>
 static llvm::cl::opt<bool> timeline("timeline",
                                     llvm::cl::desc("print event timeline"),
                                     llvm::cl::init(false));
+
+static llvm::cl::opt<bool>
+    opLatencies("op-latencies",
+                llvm::cl::desc("print flattened op class/latency table"),
+                llvm::cl::init(false));
 
 static const ArchData *resolveArch(llvm::StringRef name) {
   llvm::StringRef cpu = name;
@@ -119,6 +127,52 @@ static llvm::StringRef counterName(EventSimCounter counter) {
   llvm_unreachable("bad counter");
 }
 
+static bool isWaveAMDMachineOp(Operation *op) {
+  return op->getName().getDialectNamespace() ==
+         WaveAMDMachineDialect::getDialectNamespace();
+}
+
+static unsigned getIssueCount(Operation *op) {
+  if (isa<DsLoadTupleB32Op, GlobalLoadTupleB32Op, BufferLoadTupleB32Op>(op))
+    return cast<RegType>(op->getResult(0).getType()).getWidth();
+  if (isa<DsStoreTupleB32Op>(op))
+    return cast<RegType>(op->getOperand(1).getType()).getWidth();
+  return 1;
+}
+
+static int64_t getTripCount(UniformLoopOp loop) {
+  IntegerAttr trip =
+      loop->getAttrOfType<IntegerAttr>("waveamdmachine.trip_count");
+  if (!trip)
+    return 1;
+  return std::max<int64_t>(0, trip.getInt());
+}
+
+static void appendBlockOps(Block &block, SmallVectorImpl<Operation *> &ops);
+
+static void appendOp(Operation *op, SmallVectorImpl<Operation *> &ops) {
+  if (UniformLoopOp loop = dyn_cast<UniformLoopOp>(op)) {
+    Block &body = loop.getBody().front();
+    for (int64_t i = 0, e = getTripCount(loop); i < e; ++i)
+      appendBlockOps(body, ops);
+    return;
+  }
+  if (isWaveAMDMachineOp(op))
+    ops.push_back(op);
+}
+
+static void appendBlockOps(Block &block, SmallVectorImpl<Operation *> &ops) {
+  for (Operation &op : block)
+    appendOp(&op, ops);
+}
+
+static SmallVector<Operation *> flattenOps(func::FuncOp func) {
+  SmallVector<Operation *> ops;
+  for (Block &block : func.getBody())
+    appendBlockOps(block, ops);
+  return ops;
+}
+
 static void printEvent(const EventSimEvent &event) {
   llvm::outs() << eventKindName(event.kind) << " cycle=" << event.cycle
                << " wave=" << event.wave << " simd=" << event.simd;
@@ -129,6 +183,25 @@ static void printEvent(const EventSimEvent &event) {
   if (event.op)
     llvm::outs() << " op=" << event.op->getName().getStringRef();
   llvm::outs() << "\n";
+}
+
+static void printOpLatencies(func::FuncOp func, const ArchData &arch) {
+  SmallVector<Operation *> ops = flattenOps(func);
+  llvm::outs() << "op_latencies:\n";
+  for (auto [idx, op] : llvm::enumerate(ops)) {
+    SchedClass cls = classifyOp(op);
+    FunctionalUnit fu =
+        cls == SchedClass::NoInst ? FunctionalUnit::None : funit(arch, cls);
+    llvm::outs() << "  op_index=" << idx
+                 << " op=" << op->getName().getStringRef()
+                 << " class=" << getSchedClassName(cls)
+                 << " fu=" << getFunctionalUnitName(fu)
+                 << " latency=" << getLatency(arch, cls)
+                 << " issues=" << getIssueCount(op);
+    if (op->hasTrait<::mlir::OpTrait::waveamdmachine::WaitcntOp>())
+      llvm::outs() << " waitcnt=1";
+    llvm::outs() << "\n";
+  }
 }
 
 static int report(ModuleOp mod) {
@@ -163,6 +236,8 @@ static int report(ModuleOp mod) {
   for (size_t i = 0; i < result.waveCompletedCycles.size(); ++i)
     llvm::outs() << "wave_" << i
                  << "_completed: " << result.waveCompletedCycles[i] << "\n";
+  if (opLatencies)
+    printOpLatencies(func, *arch);
   if (timeline)
     for (const EventSimEvent &event : result.events)
       printEvent(event);
