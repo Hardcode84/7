@@ -9,8 +9,7 @@
 // Per-region per-FU cycle matrix used by the multi-wave queries
 // (Stage 5B optimal-D search, Stage 5C stagger insertion, Stage 5D
 // pingpong_score op). Region boundaries are auto-detected via a
-// sliding-window dominant-FU detector; explicit sched_barrier(0)
-// ops would force boundaries once the dialect has them.
+// sliding-window dominant-FU detector.
 //
 //===----------------------------------------------------------------------===//
 
@@ -67,7 +66,7 @@ struct RegionProfile {
 // second-best, divided by window total).
 //
 // Defaults tuned to be re-calibrated against CK / HipKittens
-// hand-placed sched_barrier(0) boundaries in Stage 6.
+// scheduling traces in Stage 6.
 SmallVector<RegionProfile>
 partitionRegions(func::FuncOp func, const PressureAnalysisResult &dataflow,
                  const ArchData &arch, int windowSize = 16,
