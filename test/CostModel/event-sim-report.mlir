@@ -4,6 +4,7 @@
 // RUN: wave-sim-report --func=smem_wait --timeline %s | FileCheck %s --check-prefix=WAIT
 // RUN: wave-sim-report --func=smem_wait --op-latencies %s | FileCheck %s --check-prefix=LAT
 // RUN: wave-sim-report --func=smem_partial_wait --timeline %s | FileCheck %s --check-prefix=WAITPART
+// RUN: wave-sim-report --func=trip_loop --trip-count=3 %s | FileCheck %s --check-prefix=TRIP
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
   func.func @two_dep_salu(%init: !waveamdmachine.reg<sgpr, 1>) {
@@ -49,6 +50,20 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
         (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<scc, 1>)
     return
   }
+
+  func.func @trip_loop(%init: !waveamdmachine.reg<sgpr, 1>) {
+    %step = waveamdmachine.imm 1 : !waveamdmachine.imm
+    %r = waveamdmachine.uniform_loop carries(%init : !waveamdmachine.reg<sgpr, 1>) {
+    ^bb0(%iv: !waveamdmachine.reg<sgpr, 1>):
+      %next:2 = waveamdmachine.s_add_i32 %iv, %step :
+          (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.imm) ->
+          (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<scc, 1>)
+      waveamdmachine.continue_if %next#1 :
+          !waveamdmachine.reg<scc, 1>
+          carries(%next#0 : !waveamdmachine.reg<sgpr, 1>)
+    } -> !waveamdmachine.reg<sgpr, 1>
+    return
+  }
 }
 
 // ONE: func: two_dep_salu
@@ -87,3 +102,8 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // WAITPART: issue cycle=1 wave=0 simd=0 fu=LGKM op=waveamdmachine.s_load_b32
 // WAITPART: issue cycle=20 wave=0 simd=0 fu=SALU op=waveamdmachine.s_add_i32
 // WAITPART: issue cycle=21 wave=0 simd=0 fu=SALU op=waveamdmachine.s_add_i32
+
+// TRIP: func: trip_loop
+// TRIP: trip_count_override: 3
+// TRIP: total_cycles: 6
+// TRIP: issued_ops: 3

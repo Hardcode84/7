@@ -105,7 +105,9 @@ static unsigned getIssueCount(Operation *op) {
   return 1;
 }
 
-static int64_t getTripCount(UniformLoopOp loop) {
+static int64_t getTripCount(UniformLoopOp loop, const EventSimConfig &config) {
+  if (config.tripCountOverride >= 0)
+    return config.tripCountOverride;
   IntegerAttr trip =
       loop->getAttrOfType<IntegerAttr>("waveamdmachine.trip_count");
   if (!trip)
@@ -113,29 +115,33 @@ static int64_t getTripCount(UniformLoopOp loop) {
   return std::max<int64_t>(0, trip.getInt());
 }
 
-static void appendBlockOps(Block &block, SmallVectorImpl<Operation *> &ops);
+static void appendBlockOps(Block &block, const EventSimConfig &config,
+                           SmallVectorImpl<Operation *> &ops);
 
-static void appendOp(Operation *op, SmallVectorImpl<Operation *> &ops) {
+static void appendOp(Operation *op, const EventSimConfig &config,
+                     SmallVectorImpl<Operation *> &ops) {
   if (UniformLoopOp loop = dyn_cast<UniformLoopOp>(op)) {
-    int64_t trips = getTripCount(loop);
+    int64_t trips = getTripCount(loop, config);
     Block &body = loop.getBody().front();
     for (int64_t i = 0; i < trips; ++i)
-      appendBlockOps(body, ops);
+      appendBlockOps(body, config, ops);
     return;
   }
   if (isWaveAMDMachineOp(op))
     ops.push_back(op);
 }
 
-static void appendBlockOps(Block &block, SmallVectorImpl<Operation *> &ops) {
+static void appendBlockOps(Block &block, const EventSimConfig &config,
+                           SmallVectorImpl<Operation *> &ops) {
   for (Operation &op : block)
-    appendOp(&op, ops);
+    appendOp(&op, config, ops);
 }
 
-static SmallVector<Operation *> flattenOps(func::FuncOp func) {
+static SmallVector<Operation *> flattenOps(func::FuncOp func,
+                                           const EventSimConfig &config) {
   SmallVector<Operation *> ops;
   for (Block &block : func.getBody())
-    appendBlockOps(block, ops);
+    appendBlockOps(block, config, ops);
   return ops;
 }
 
@@ -547,7 +553,7 @@ LogicalResult simulateEventTimeline(func::FuncOp func, const ArchData &arch,
                                     const EventSimConfig &config,
                                     EventSimResult &out) {
   out = EventSimResult();
-  SmallVector<Operation *> ops = flattenOps(func);
+  SmallVector<Operation *> ops = flattenOps(func, config);
   EventSimulator simulator(ops, arch, config, out);
   return simulator.run();
 }

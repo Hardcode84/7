@@ -29,6 +29,7 @@ struct EventSimConfig {
   int waves = 1;
   int simds = 1;
   int startDelay = 0;
+  int64_t tripCountOverride = -1;
   bool recordTimeline = false;
 };
 

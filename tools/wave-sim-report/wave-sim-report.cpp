@@ -58,6 +58,11 @@ static llvm::cl::opt<int>
                llvm::cl::desc("cycle delay between consecutive waves"),
                llvm::cl::init(0));
 
+static llvm::cl::opt<int64_t>
+    tripCount("trip-count",
+              llvm::cl::desc("override all uniform_loop trip counts"),
+              llvm::cl::init(-1));
+
 static llvm::cl::opt<bool> timeline("timeline",
                                     llvm::cl::desc("print event timeline"),
                                     llvm::cl::init(false));
@@ -141,6 +146,8 @@ static unsigned getIssueCount(Operation *op) {
 }
 
 static int64_t getTripCount(UniformLoopOp loop) {
+  if (tripCount >= 0)
+    return tripCount;
   IntegerAttr trip =
       loop->getAttrOfType<IntegerAttr>("waveamdmachine.trip_count");
   if (!trip)
@@ -220,6 +227,7 @@ static int report(ModuleOp mod) {
   config.waves = std::max(1, waves.getValue());
   config.simds = std::max(1, simds.getValue());
   config.startDelay = std::max(0, startDelay.getValue());
+  config.tripCountOverride = std::max<int64_t>(-1, tripCount.getValue());
   config.recordTimeline = timeline.getValue();
 
   EventSimResult result;
@@ -231,6 +239,8 @@ static int report(ModuleOp mod) {
   llvm::outs() << "waves: " << config.waves << "\n";
   llvm::outs() << "simds: " << config.simds << "\n";
   llvm::outs() << "start_delay: " << config.startDelay << "\n";
+  if (config.tripCountOverride >= 0)
+    llvm::outs() << "trip_count_override: " << config.tripCountOverride << "\n";
   llvm::outs() << "total_cycles: " << result.totalCycles << "\n";
   llvm::outs() << "issued_ops: " << result.issuedOps << "\n";
   for (size_t i = 0; i < result.waveCompletedCycles.size(); ++i)

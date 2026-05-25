@@ -229,11 +229,23 @@ def parse_total_cycles(text: str) -> int:
     return int(match.group(1))
 
 
+def compute_loop_trip_count(args: argparse.Namespace) -> int:
+    virtual_k_steps = div_exact(args.k, 16 * args.wave_k_tiles, "bad K blocking")
+    return max(virtual_k_steps - 1, 0)
+
+
+def div_exact(num: int, den: int, what: str) -> int:
+    if den <= 0 or num % den != 0:
+        sys.exit(what)
+    return num // den
+
+
 def run_sim_reports(
     build_dir: Path, machine_mlir: Path, args: argparse.Namespace
 ) -> dict[tuple[int, int, int], int]:
     wave_sim = build_dir / "bin/wave-sim-report"
     waves_per_workgroup = args.bm * args.bn
+    trip_count = compute_loop_trip_count(args)
     specs = [(1, 1, 0), (waves_per_workgroup, 1, 0)]
     spread_simds = min(max(waves_per_workgroup, 1), 4)
     if spread_simds != 1:
@@ -247,6 +259,7 @@ def run_sim_reports(
                 f"--waves={waves}",
                 f"--simds={simds}",
                 f"--start-delay={delay}",
+                f"--trip-count={trip_count}",
                 str(machine_mlir),
             ]
         )
@@ -393,7 +406,8 @@ def main() -> int:
             f"chip: {chip}\n"
             f"shape: m={args.m} n={args.n} k={args.k} bm={args.bm} bn={args.bn} "
             f"wave_m_tiles={args.wave_m_tiles} wave_n_tiles={args.wave_n_tiles} "
-            f"wave_k_tiles={args.wave_k_tiles}"
+            f"wave_k_tiles={args.wave_k_tiles}\n"
+            f"sim_loop_trip_count: {compute_loop_trip_count(args)}"
         )
         results: list[VariantResult] = []
         for variant in variants:
