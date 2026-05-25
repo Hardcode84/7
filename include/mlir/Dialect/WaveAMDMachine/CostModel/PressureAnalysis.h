@@ -15,8 +15,8 @@
 // converge; at loop headers they stay separate, giving the
 // scheduler a distinguishable steady-state view.
 //
-// See docs/AMDGPUSchedulerDesign.md "Stage 2" for the full
-// design. This header exposes the public API only.
+// See docs/AMDGPUSchedulerDesign.md for the full design. This header
+// exposes the public API only.
 //
 //===----------------------------------------------------------------------===//
 

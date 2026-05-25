@@ -550,9 +550,8 @@ struct HazardKind {
   // counted ops decrement (counter kinds) or pass through (flag kinds).
   UpdateFn update;
   // True iff the loop-replay walk should be seeded with this kind's
-  // final state. Today only VALU-after-LGKM persists; counter kinds
-  // reset to 0 in the replay (matching pre-refactor semantics; see
-  // bead hazard-loop-replay-double-emit-8qj for the Stage 2 fix).
+  // final state. Only linear wait-state hazards persist across the
+  // replay; edge-count hazards reset to 0.
   bool persistInReplay;
 };
 
@@ -755,9 +754,7 @@ private:
     // Loop replay: a back-edge can carry a kind's pending state from
     // the body's tail back to the top, so kinds flagged
     // `persistInReplay` get a second walk seeded with their final
-    // state. Non-persistent kinds reset to 0 in the replay, matching
-    // pre-refactor semantics (bead hazard-loop-replay-double-emit-8qj
-    // tracks the resulting M0 / MFMA-store double-emit on Stage 2).
+    // state. Edge-count hazards reset to 0 in the replay.
     if (!containsLoop(func))
       return success();
     SmallVector<unsigned> replaySeed(catalog.size(), 0);

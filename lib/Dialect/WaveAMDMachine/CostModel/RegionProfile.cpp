@@ -104,10 +104,8 @@ static RegionProfile makeRegion(ArrayRef<Operation *> ops, size_t startIdx,
     wallEstimate += 1; // one issue slot per op
   }
   p.totalIssueCycles = static_cast<int>(endIdx - startIdx);
-  // Crude wall estimate: issue slots + tail latency of the last
-  // op. Refined later when Stage 5B's convolution needs better
-  // numbers (will plumb per-op cold absolute cycles from the
-  // dataflow).
+  // Crude wall estimate: issue slots + tail latency of the last op.
+  // Per-op dataflow cycles will replace this.
   p.totalWallCycles = wallEstimate + std::max(0, lastLatency - 1);
   p.dominantFU = argmaxFu(p.fuCycles);
   return p;
@@ -328,7 +326,7 @@ PingpongPick findOptimalPingpongDelay(ArrayRef<RegionProfile> regions,
 SmallVector<RegionProfile>
 partitionRegions(func::FuncOp func, const PressureAnalysisResult &dataflow,
                  const ArchData &arch, int windowSize, double fuzzyMargin) {
-  (void)dataflow; // wall-cycle plumbing comes when Stage 5B needs it.
+  (void)dataflow;
   SmallVector<Operation *> ops = flattenKernelOps(func, arch);
   SmallVector<RegionProfile> regions;
   if (ops.empty())

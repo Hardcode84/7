@@ -7,7 +7,7 @@
 //===----------------------------------------------------------------------===//
 //
 // Optional overlay on top of the LLVM-derived LatencyTable. Loaded
-// from a JSON file produced by the Stage 3 microbench harness. Absent
+// from a JSON file produced by the microbench harness. Absent
 // entries fall back to the LLVM default; the static table is
 // untouched, so calibration-free callers see identical behavior.
 //

@@ -126,8 +126,8 @@ def Wave_TransformBindParamOp
   }];
 }
 
-// Runs Stage 2's dense-dataflow PressureAnalysis on each payload
-// op (func.func or builtin.module) and yields totalCycles as a
+// Runs dense-dataflow PressureAnalysis on each payload op
+// (func.func or builtin.module) and yields totalCycles as a
 // `!transform.param<i64>`. The arch is read from the enclosing
 // module's `waveamdmachine.target` attribute (set by
 // `wave-set-target-attr`). For module targets, the result is the
@@ -160,7 +160,7 @@ def Wave_TransformEstimateCyclesOp
 }
 
 // Attaches a per-FU issue-cycle dictionary to each payload op. Useful
-// for the scheduler (Stage 8) and for diagnostics. Static walk over
+// for scheduler diagnostics. Static walk over
 // the op tape -- counts each op as `1` cycle on its FU (per the
 // classifier + funit map). Total cycles separately accumulated; see
 // `wave.transform.estimate_cycles`.

@@ -78,9 +78,10 @@ def WaveAMDMachineSchedule
     : Pass<"waveamd-machine-schedule", "ModuleOp"> {
   let summary = "Collect local WaveAMDMachine regions for model-based scheduling";
   let description = [{
-    First Stage 8 scheduler pass. The default mode is a no-op over
-    `waveamdmachine` IR: it only discovers local scheduling regions so later
-    beads can add dependence DAG construction and model-scored reordering.
+    Scheduler entry pass. The default mode is a no-op over
+    `waveamdmachine` IR: it only discovers local scheduling regions so future
+    implementations can add dependence DAG construction and model-scored
+    reordering.
 
     Intended placement is before ticket-wait and hazard-wait insertion. Hard
     boundaries include terminators, labels, branches, waitcnts, workgroup

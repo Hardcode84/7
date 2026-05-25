@@ -7,7 +7,7 @@
 //===----------------------------------------------------------------------===//
 //
 // Per-(arch, SchedClass) primary functional unit. Drives the
-// MachineState lattice's per-FU readyAt accounting in the Stage 2
+// MachineState lattice's per-FU readyAt accounting in dense
 // dataflow analysis. Numbers come from LLVM's SISchedule.td
 // HWWriteRes/HWVALUWriteRes resource lists; hand-copied, kept
 // honest by build_tools/check_sched_tables.py.

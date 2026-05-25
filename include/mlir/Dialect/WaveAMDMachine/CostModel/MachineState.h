@@ -7,7 +7,7 @@
 //===----------------------------------------------------------------------===//
 //
 // MachineState is the lattice value carried at every program point
-// by the Stage 2 dense dataflow analysis. Represented in
+// by dense dataflow analysis. Represented in
 // relative-cycles form -- fuPending[fu] = cycles until that
 // functional unit is next free from this point in time;
 // valPending[v] = cycles until value v is ready. Bounded above by
