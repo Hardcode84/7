@@ -130,16 +130,23 @@ class ImportSummary:
     wave_files: int = 0
     wave_rows: int = 0
     wave_resolved: int = 0
+    wave_code_resolved: int = 0
+    wave_position_resolved: int = 0
     wave_unresolved: int = 0
+    wave_position_mismatched: int = 0
 
 
 @dataclass(frozen=True)
 class WaitWindow:
     wait: StaticInst
+    phase: str
     counter: str
     limit: int
     pending: tuple[StaticInst, ...]
     drained: tuple[StaticInst, ...]
+
+
+NON_ATT_MNEMONICS = {"s_delay_alu"}
 
 
 def parse_int(text: str) -> int:
@@ -221,9 +228,52 @@ def parse_wait_counters(inst: StaticInst) -> list[tuple[str, int]]:
     return waits
 
 
+def parse_branch_imm(inst: StaticInst) -> int | None:
+    match = re.match(r"s_cbranch_\w+\s+(0x[0-9a-fA-F]+|\d+)\b", inst.instruction)
+    if not match:
+        return None
+    return parse_int(match.group(1))
+
+
+def is_backedge_branch(inst: StaticInst) -> bool:
+    imm = parse_branch_imm(inst)
+    return imm is not None and imm >= 0x8000
+
+
+def is_forward_branch(inst: StaticInst) -> bool:
+    imm = parse_branch_imm(inst)
+    return imm is not None and imm < 0x8000
+
+
+def infer_loop_indices(static: dict[int, StaticInst]) -> tuple[int, int] | None:
+    ordered = [static[pc] for pc in sorted(static)]
+    backedges = [inst.index for inst in ordered if is_backedge_branch(inst)]
+    if not backedges:
+        return None
+    loop_end = backedges[0]
+    exit_branches = [
+        inst.index for inst in ordered[:loop_end] if is_forward_branch(inst)
+    ]
+    if not exit_branches:
+        return None
+    return exit_branches[-1] + 1, loop_end
+
+
+def classify_phase(inst: StaticInst, loop_indices: tuple[int, int] | None) -> str:
+    if loop_indices is None:
+        return "unknown"
+    loop_start, loop_end = loop_indices
+    if inst.index < loop_start:
+        return "prologue"
+    if inst.index <= loop_end:
+        return "loop"
+    return "epilogue"
+
+
 def build_wait_windows(static: dict[int, StaticInst]) -> list[WaitWindow]:
     pending: dict[str, list[StaticInst]] = {"lgkm": [], "vmem": [], "vscnt": []}
     windows: list[WaitWindow] = []
+    loop_indices = infer_loop_indices(static)
     for pc in sorted(static):
         inst = static[pc]
         waits = parse_wait_counters(inst)
@@ -235,6 +285,7 @@ def build_wait_windows(static: dict[int, StaticInst]) -> list[WaitWindow]:
                 windows.append(
                     WaitWindow(
                         wait=inst,
+                        phase=classify_phase(inst, loop_indices),
                         counter=counter,
                         limit=limit,
                         pending=tuple(current),
@@ -248,6 +299,29 @@ def build_wait_windows(static: dict[int, StaticInst]) -> list[WaitWindow]:
         if counter:
             pending[counter].append(inst)
     return windows
+
+
+def att_emits(inst: StaticInst) -> bool:
+    return inst.mnemonic not in NON_ATT_MNEMONICS
+
+
+def build_dynamic_trace(
+    static: dict[int, StaticInst], trip_count: int | None
+) -> list[StaticInst] | None:
+    if trip_count is None:
+        return None
+    ordered = [static[pc] for pc in sorted(static)]
+    loop_indices = infer_loop_indices(static)
+    if loop_indices is None:
+        expanded = ordered
+    else:
+        loop_start, loop_end = loop_indices
+        expanded = [
+            *ordered[:loop_start],
+            *(ordered[loop_start : loop_end + 1] * trip_count),
+            *ordered[loop_end + 1 :],
+        ]
+    return [inst for inst in expanded if att_emits(inst)]
 
 
 def parse_stats(
@@ -296,10 +370,42 @@ def parse_code_maps(
     return maps
 
 
+def resolve_wave_pc(
+    row: list[object],
+    idx: int,
+    line_to_pc: dict[int, int],
+    dynamic_trace: list[StaticInst] | None,
+    use_position: bool,
+) -> tuple[int | None, bool]:
+    asmline = int(row[4])
+    pc = line_to_pc.get(asmline) if asmline else None
+    if pc is not None or not use_position:
+        return pc, False
+    assert dynamic_trace is not None
+    return dynamic_trace[idx].pc, True
+
+
+def add_wave_row(
+    stats: dict[int, WaveStats],
+    pc: int,
+    row: list[object],
+    resolved_by_position: bool,
+    summary: ImportSummary,
+) -> None:
+    time, _, stall, duration, _ = row[:5]
+    summary.wave_resolved += 1
+    if resolved_by_position:
+        summary.wave_position_resolved += 1
+    else:
+        summary.wave_code_resolved += 1
+    stats.setdefault(pc, WaveStats()).add(float(time), float(duration), float(stall))
+
+
 def parse_wave_json(
     att_dir: Path,
     static_pcs: set[int],
     code_maps: dict[Path, dict[int, int]],
+    dynamic_trace: list[StaticInst] | None,
     summary: ImportSummary,
 ) -> dict[int, WaveStats]:
     stats: dict[int, WaveStats] = {}
@@ -309,19 +415,22 @@ def parse_wave_json(
         data = json.loads(path.read_text())
         instructions = data.get("wave", {}).get("instructions", [])
         summary.wave_rows += len(instructions)
-        for row in instructions:
+        use_position = dynamic_trace is not None and len(instructions) == len(
+            dynamic_trace
+        )
+        if dynamic_trace is not None and not use_position:
+            summary.wave_position_mismatched += 1
+        for idx, row in enumerate(instructions):
             if len(row) < 5:
                 summary.wave_unresolved += 1
                 continue
-            time, _, stall, duration, asmline = row[:5]
-            pc = line_to_pc.get(int(asmline)) if asmline else None
+            pc, resolved_by_position = resolve_wave_pc(
+                row, idx, line_to_pc, dynamic_trace, use_position
+            )
             if pc is None or pc not in static_pcs:
                 summary.wave_unresolved += 1
                 continue
-            summary.wave_resolved += 1
-            stats.setdefault(pc, WaveStats()).add(
-                float(time), float(duration), float(stall)
-            )
+            add_wave_row(stats, pc, row, resolved_by_position, summary)
     return stats
 
 
@@ -358,6 +467,8 @@ def build_report(
         out.write(f"  wave_files: {summary.wave_files}\n")
         out.write(f"  wave_rows: {summary.wave_rows}\n")
         out.write(f"  wave_resolved: {summary.wave_resolved}\n")
+        out.write(f"  wave_code_resolved: {summary.wave_code_resolved}\n")
+        out.write(f"  wave_position_resolved: {summary.wave_position_resolved}\n")
         out.write(f"  wave_unresolved: {summary.wave_unresolved}\n\n")
 
     writer = csv.writer(out, lineterminator="\n")
@@ -462,7 +573,10 @@ def build_window_report(
         out.write(f"  wave_files: {summary.wave_files}\n")
         out.write(f"  wave_rows: {summary.wave_rows}\n")
         out.write(f"  wave_resolved: {summary.wave_resolved}\n")
+        out.write(f"  wave_code_resolved: {summary.wave_code_resolved}\n")
+        out.write(f"  wave_position_resolved: {summary.wave_position_resolved}\n")
         out.write(f"  wave_unresolved: {summary.wave_unresolved}\n")
+        out.write(f"  wave_position_mismatched: {summary.wave_position_mismatched}\n")
         out.write(f"  wait_windows: {len(windows)}\n\n")
 
     writer = csv.writer(out, lineterminator="\n")
@@ -471,6 +585,7 @@ def build_window_report(
             "wait_pc_hex",
             "wait_pc_dec",
             "wait_instruction",
+            "phase",
             "counter",
             "limit",
             "pending_count",
@@ -496,6 +611,7 @@ def build_window_report(
                 f"0x{window.wait.pc:x}",
                 window.wait.pc,
                 window.wait.instruction,
+                window.phase,
                 window.counter,
                 window.limit,
                 len(window.pending),
@@ -540,6 +656,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         action="store_true",
         help="print wait-window calibration rows instead of per-PC rows",
     )
+    parser.add_argument(
+        "--trip-count",
+        type=int,
+        help="recover unresolved per-wave rows by expanded static order",
+    )
     parser.add_argument("--output", type=Path, help="write report to file")
     source = parser.add_mutually_exclusive_group(required=True)
     source.add_argument("--objdump", type=Path, help="precomputed llvm-objdump -d text")
@@ -560,7 +681,10 @@ def main(argv: list[str]) -> int:
     static_pcs = set(static)
     att_stats = parse_stats(args.att_dir, static_pcs, summary)
     code_maps = parse_code_maps(args.att_dir, summary)
-    wave_stats = parse_wave_json(args.att_dir, static_pcs, code_maps, summary)
+    dynamic_trace = build_dynamic_trace(static, args.trip_count)
+    wave_stats = parse_wave_json(
+        args.att_dir, static_pcs, code_maps, dynamic_trace, summary
+    )
     if args.windows:
         report = build_window_report(
             static, att_stats, wave_stats, summary, include_summary=args.summary
