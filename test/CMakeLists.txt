@@ -16,6 +16,7 @@ configure_lit_site_cfg(
 set(WAVE_MLIR_TEST_DEPENDS
   wave-calibrate-report
   wave-opt
+  wave-sim-report
   wave-symbols-test
   wave-translate
 )

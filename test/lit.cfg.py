@@ -127,6 +127,7 @@ tools = [
     ToolSubst("not", unresolved="fatal"),
     ToolSubst("wave-calibrate-report", unresolved="fatal"),
     ToolSubst("wave-opt", unresolved="fatal"),
+    ToolSubst("wave-sim-report", unresolved="fatal"),
     ToolSubst("wave-symbols-test", unresolved="fatal"),
     ToolSubst("wave-translate", unresolved="fatal"),
     ToolSubst("llvm-mc", unresolved="ignore"),
