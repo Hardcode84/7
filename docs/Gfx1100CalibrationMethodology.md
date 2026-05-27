@@ -68,6 +68,7 @@ Generate matmul artifacts and keep the temp directory:
 tools/wave-matmul-calibrate/wave-matmul-calibrate.py \
   --m=256 --n=256 --k=16 --bm=1 --bn=1 --use-buffer \
   --iters=1 --warmup=0 --no-check --keep-tmp \
+  --variants baseline,scheduled,pingpong \
   --hipcc "$CONDA_PREFIX/bin/hipcc" \
   --rocm-lib "$CORE/lib"
 ```
@@ -108,7 +109,8 @@ find "$OUT" -maxdepth 3 -type f | sort
 On gfx11, `--att-simd-select 0x3` selects SIMD 3. It is not a SIMD mask.
 `--att-shader-engine-mask 0x3f` traces all six shader engines on W7900.
 
-For ping-pong, replace the final HSACO path with
+For scheduler output, replace the final HSACO path with
+`"$TMP/scheduled/scheduled.hsaco"`. For ping-pong, use
 `"$TMP/pingpong/pingpong.hsaco"`.
 
 Useful output files:

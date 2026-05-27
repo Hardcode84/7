@@ -27,6 +27,7 @@ KERNEL_NAME = "wmma_f16_matmul_tiled"
 class Variant:
     name: str
     insert_pingpong: bool
+    apply_schedule: bool
 
 
 @dataclass
@@ -35,6 +36,14 @@ class VariantResult:
     sim_cycles: dict[tuple[int, int, int], int]
     hw_cycles: int | None
     hw_us: float | None
+    hw_check: str | None
+
+
+VARIANTS = {
+    "baseline": Variant("baseline", insert_pingpong=False, apply_schedule=False),
+    "scheduled": Variant("scheduled", insert_pingpong=False, apply_schedule=True),
+    "pingpong": Variant("pingpong", insert_pingpong=True, apply_schedule=False),
+}
 
 
 def run(
@@ -117,13 +126,27 @@ def generate_kernel_module(args: argparse.Namespace, chip: str) -> str:
     )
 
 
-def pipeline_text(*, insert_pingpong: bool) -> str:
+def pipeline_text(*, insert_pingpong: bool, apply_schedule: bool) -> str:
     insert = ""
     if insert_pingpong:
         insert = (
             "    wave.transform.insert_pingpong_barriers from %rl\n"
             "        : (!transform.any_op) -> ()\n"
         )
+    schedule = ""
+    wait_input = "%r2"
+    if apply_schedule:
+        schedule = (
+            '    %rs = transform.apply_registered_pass "waveamd-machine-schedule" '
+            "with\n"
+            '        options = { "apply-schedule" = true }\n'
+            "        to %r2 : (!transform.any_op) -> !transform.any_op\n"
+        )
+        wait_input = "%rs"
+    ticket_wait = (
+        '    %r3 = transform.apply_registered_pass "waveamd-insert-ticket-waits" '
+        f"to {wait_input}"
+    )
     return f"""module attributes {{transform.with_named_sequence}} {{
   transform.named_sequence @__transform_main(
       %root: !transform.any_op {{transform.consumed}}) -> !transform.any_op {{
@@ -139,7 +162,7 @@ def pipeline_text(*, insert_pingpong: bool) -> str:
         : (!transform.any_op) -> !transform.any_op
     %r2 = transform.apply_registered_pass "waveamd-decompose-mem-tuples" to %r1
         : (!transform.any_op) -> !transform.any_op
-    %r3 = transform.apply_registered_pass "waveamd-insert-ticket-waits" to %r2
+{schedule}{ticket_wait}
         : (!transform.any_op) -> !transform.any_op
     %r4 = transform.apply_registered_pass "waveamd-insert-hazard-waits" to %r3
         : (!transform.any_op) -> !transform.any_op
@@ -158,7 +181,12 @@ def pipeline_text(*, insert_pingpong: bool) -> str:
 def write_pipeline(tmp: Path, variant: Variant) -> Path:
     path = tmp / variant.name / "pipelines.mlir"
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(pipeline_text(insert_pingpong=variant.insert_pingpong))
+    path.write_text(
+        pipeline_text(
+            insert_pingpong=variant.insert_pingpong,
+            apply_schedule=variant.apply_schedule,
+        )
+    )
     return path
 
 
@@ -276,17 +304,21 @@ def compile_runner(args: argparse.Namespace, tmp: Path) -> Path:
     return runner
 
 
-def parse_hw(stdout: str) -> tuple[int, float]:
+def parse_hw(stdout: str, *, check_output: bool) -> tuple[int, float, str]:
     cycles = re.search(r"^per_launch_cycles_wallclock:\s+(\d+)$", stdout, re.M)
     micros = re.search(r"^per_launch_us:\s+([0-9.]+)$", stdout, re.M)
     if not cycles or not micros:
         sys.exit("runner output missing timing fields")
-    return int(cycles.group(1)), float(micros.group(1))
+    if not check_output:
+        return int(cycles.group(1)), float(micros.group(1)), "skipped"
+    if not re.search(r"^output_check:\s+passed\b", stdout, re.M):
+        sys.exit("runner output missing successful output check")
+    return int(cycles.group(1)), float(micros.group(1)), "passed"
 
 
 def run_hw(
     runner: Path, hsaco: Path, args: argparse.Namespace, rocm_lib: str
-) -> tuple[int, float]:
+) -> tuple[int, float, str]:
     env = os.environ.copy()
     existing_ld = env.get("LD_LIBRARY_PATH", "")
     env["LD_LIBRARY_PATH"] = rocm_lib + (":" + existing_ld if existing_ld else "")
@@ -318,7 +350,7 @@ def run_hw(
     cmd += [str(hsaco), KERNEL_NAME]
     stdout = run(cmd, env=env)
     sys.stdout.write(stdout)
-    return parse_hw(stdout)
+    return parse_hw(stdout, check_output=not args.no_check)
 
 
 def print_result(result: VariantResult) -> None:
@@ -331,22 +363,47 @@ def print_result(result: VariantResult) -> None:
     if result.hw_cycles is not None and result.hw_us is not None:
         print(f"  hw_per_launch_us: {result.hw_us:.3f}")
         print(f"  hw_cycles_wallclock: {result.hw_cycles}")
+    if result.hw_check is not None:
+        print(f"  hw_output_check: {result.hw_check}")
 
 
 def print_delta(results: list[VariantResult]) -> None:
     by_name = {r.name: r for r in results}
     base = by_name.get("baseline")
-    pp = by_name.get("pingpong")
-    if not base or not pp:
+    if not base:
         return
-    print("delta: pingpong - baseline")
-    for spec, pp_cycles in sorted(pp.sim_cycles.items()):
-        if spec in base.sim_cycles:
-            print(f"  sim_cycles {spec}: {pp_cycles - base.sim_cycles[spec]:+d}")
-    if base.hw_cycles is not None and pp.hw_cycles is not None:
-        delta = pp.hw_cycles - base.hw_cycles
-        pct = 100.0 * delta / max(base.hw_cycles, 1)
-        print(f"  hw_cycles_wallclock: {delta:+d} ({pct:+.1f}%)")
+    for result in results:
+        if result.name == "baseline":
+            continue
+        print(f"delta: {result.name} - baseline")
+        for spec, cycles in sorted(result.sim_cycles.items()):
+            if spec in base.sim_cycles:
+                print(f"  sim_cycles {spec}: {cycles - base.sim_cycles[spec]:+d}")
+        if base.hw_cycles is not None and result.hw_cycles is not None:
+            delta = result.hw_cycles - base.hw_cycles
+            pct = 100.0 * delta / max(base.hw_cycles, 1)
+            print(f"  hw_cycles_wallclock: {delta:+d} ({pct:+.1f}%)")
+
+
+def parse_variants(text: str) -> list[Variant]:
+    variants: list[Variant] = []
+    seen: set[str] = set()
+    for raw in text.split(","):
+        name = raw.strip()
+        if not name:
+            raise argparse.ArgumentTypeError("empty variant name")
+        if name not in VARIANTS:
+            choices = ", ".join(sorted(VARIANTS))
+            raise argparse.ArgumentTypeError(
+                f"unknown variant '{name}' (choices: {choices})"
+            )
+        if name in seen:
+            raise argparse.ArgumentTypeError(f"duplicate variant '{name}'")
+        variants.append(VARIANTS[name])
+        seen.add(name)
+    if not variants:
+        raise argparse.ArgumentTypeError("no variants selected")
+    return variants
 
 
 def build_argparser() -> argparse.ArgumentParser:
@@ -369,6 +426,12 @@ def build_argparser() -> argparse.ArgumentParser:
     )
     ap.add_argument("--iters", type=int, default=1000)
     ap.add_argument("--warmup", type=int, default=10)
+    ap.add_argument(
+        "--variants",
+        type=parse_variants,
+        default=parse_variants("baseline,scheduled"),
+        help="comma-separated variants: baseline, scheduled, pingpong",
+    )
     ap.add_argument("--skip-hw", action="store_true")
     ap.add_argument("--no-check", action="store_true")
     ap.add_argument("--keep-tmp", action="store_true")
@@ -391,10 +454,7 @@ def build_argparser() -> argparse.ArgumentParser:
 def main() -> int:
     args = build_argparser().parse_args()
     chip = args.chip or detect_chip()
-    variants = [
-        Variant("baseline", insert_pingpong=False),
-        Variant("pingpong", insert_pingpong=True),
-    ]
+    variants = args.variants
 
     tmp_ctx = None if args.keep_tmp else tempfile.TemporaryDirectory()
     tmp = Path(tempfile.mkdtemp() if args.keep_tmp else tmp_ctx.name)
@@ -416,10 +476,11 @@ def main() -> int:
             sim_cycles = run_sim_reports(args.build_dir, machine, args)
             hw_cycles = None
             hw_us = None
+            hw_check = None
             if runner is not None:
                 hsaco = lower_hsaco(args.build_dir, source, pipeline, tmp, variant.name)
-                hw_cycles, hw_us = run_hw(runner, hsaco, args, args.rocm_lib)
-            result = VariantResult(variant.name, sim_cycles, hw_cycles, hw_us)
+                hw_cycles, hw_us, hw_check = run_hw(runner, hsaco, args, args.rocm_lib)
+            result = VariantResult(variant.name, sim_cycles, hw_cycles, hw_us, hw_check)
             print_result(result)
             results.append(result)
         print_delta(results)
