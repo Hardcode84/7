@@ -6,6 +6,16 @@
 //
 //===----------------------------------------------------------------------===//
 
+// Scheduler design:
+// - Split funcs into straight-line local regions. Control flow, waitcnt,
+//   barriers, priority changes, nested regions, and unknown effects bound them.
+// - Legal motion follows SSA and explicit mem-token edges. Memory ops without
+//   a token edge are independent for this pass.
+// - Candidate orders are deterministic permutations of one region. Loop-carried
+//   recurrence edges are diagnostics, not intra-iteration ordering constraints.
+// - Cost code ranks legal candidates only. Rewriting requires a strict win over
+//   original order and never repairs an illegal candidate.
+
 #include "mlir/Dialect/Wave/Transforms/Passes.h"
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
