@@ -16,6 +16,7 @@
 #include "mlir/Dialect/WaveAMDMachine/CostModel/RegionProfile.h"
 #include "mlir/Dialect/WaveAMDMachine/CostModel/SchedClass.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachine.h"
+#include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineTarget.h"
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Transform/IR/TransformDialect.h"
@@ -33,6 +34,7 @@
 #include "llvm/TargetParser/TargetParser.h"
 #include <cmath>
 #include <limits>
+#include <optional>
 
 #define GET_OP_CLASSES
 #include "mlir/Dialect/Wave/IR/WaveTransformOps.cpp.inc"
@@ -68,35 +70,23 @@ void wave::TransformGetIntAttrOp::getEffects(
 
 namespace {
 
-// Find the nearest enclosing module's `waveamdmachine.target`
-// string and extract the chip (after the last "--"). Returns
-// empty if no enclosing module carries the attribute.
-static llvm::StringRef readChipFromEnclosingModule(Operation *op) {
-  ModuleOp mod = op->getParentOfType<ModuleOp>();
+static std::optional<waveamdmachine::AMDGPUTarget>
+readTargetFromEnclosingModule(Operation *op) {
+  ModuleOp mod = waveamdmachine::findAMDGPUTargetModule(op);
   if (!mod)
-    mod = dyn_cast<ModuleOp>(op);
-  while (mod) {
-    if (auto attr = mod->getAttrOfType<StringAttr>("waveamdmachine.target")) {
-      llvm::StringRef target = attr.getValue();
-      size_t pos = target.rfind("--");
-      if (pos != llvm::StringRef::npos)
-        return target.drop_front(pos + 2);
-      return target;
-    }
-    mod = mod->getParentOfType<ModuleOp>();
-  }
-  return {};
+    return std::nullopt;
+  StringAttr attr = mod->getAttrOfType<StringAttr>("waveamdmachine.target");
+  return waveamdmachine::parseAMDGPUTargetAttr(attr.getValue());
 }
 
-// Resolve `target` payload op to an ArchData. Failure if no
-// enclosing module has `waveamdmachine.target` or if the chip
-// names an unsupported arch.
+// Failure if enclosing target attr is missing, malformed, or unsupported.
 static FailureOr<const waveamdmachine::ArchData *>
 resolveArch(Operation *target) {
-  llvm::StringRef chip = readChipFromEnclosingModule(target);
-  if (chip.empty())
+  std::optional<waveamdmachine::AMDGPUTarget> parsed =
+      readTargetFromEnclosingModule(target);
+  if (!parsed)
     return failure();
-  llvm::AMDGPU::IsaVersion isa = llvm::AMDGPU::getIsaVersion(chip);
+  llvm::AMDGPU::IsaVersion isa = llvm::AMDGPU::getIsaVersion(parsed->chip);
   if (!waveamdmachine::isArchSupported(isa))
     return failure();
   return &waveamdmachine::getArchData(isa);

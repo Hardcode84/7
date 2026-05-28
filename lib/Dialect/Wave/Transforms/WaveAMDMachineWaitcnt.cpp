@@ -25,6 +25,7 @@
 #include "mlir/Analysis/DataFlow/Utils.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachine.h"
+#include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineTarget.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/Dominance.h"
@@ -411,23 +412,8 @@ static void collectIssuerResults(Operation *op, SmallVectorImpl<Value> &out) {
 //===----------------------------------------------------------------------===//
 
 static FailureOr<llvm::AMDGPU::IsaVersion> getIsaVersion(Operation *op) {
-  auto module = dyn_cast<ModuleOp>(op);
-  if (!module)
-    module = op->getParentOfType<ModuleOp>();
-  if (!module)
-    return op->emitError("waveamd-insert-ticket-waits requires a module");
-  auto target = module->getAttrOfType<StringAttr>("waveamdmachine.target");
-  if (!target)
-    return module.emitError("waveamd-insert-ticket-waits requires a "
-                            "waveamdmachine.target attribute");
-  StringRef cpu = target.getValue();
-  std::pair<StringRef, StringRef> split = cpu.rsplit("--");
-  if (!split.second.empty())
-    cpu = split.second;
-  llvm::AMDGPU::IsaVersion version = llvm::AMDGPU::getIsaVersion(cpu);
-  if (version.Major == 0)
-    return module.emitError("unsupported AMDGPU target: ") << target.getValue();
-  return version;
+  return waveamdmachine::getAMDGPUTargetIsaVersion(
+      op, "waveamd-insert-ticket-waits");
 }
 
 static waveamdmachine::ImmType getImmType(MLIRContext *ctx) {

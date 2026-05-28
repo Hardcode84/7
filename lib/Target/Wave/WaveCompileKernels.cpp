@@ -12,6 +12,7 @@
 #include "mlir/Dialect/GPU/IR/CompilationInterfaces.h"
 #include "mlir/Dialect/GPU/IR/GPUDialect.h"
 #include "mlir/Dialect/LLVMIR/ROCDLDialect.h"
+#include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineTarget.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/OwningOpRef.h"
@@ -41,12 +42,11 @@ struct WaveCompileKernelsPass
                        "`waveamdmachine.target` module attribute");
       return signalPassFailure();
     }
-    auto [tripleRef, chipRef] = target.getValue().split("--");
-    if (tripleRef.empty() || chipRef.empty()) {
-      parent.emitError(
-          "malformed `waveamdmachine.target`; expected `<triple>--<chip>`");
+    FailureOr<waveamdmachine::AMDGPUTarget> parsed =
+        waveamdmachine::parseAMDGPUTargetAttr(
+            target.getValue(), [&]() { return parent.emitError(); });
+    if (failed(parsed))
       return signalPassFailure();
-    }
 
     SmallVector<gpu::GPUModuleOp> targets;
     parent.walk([&](gpu::GPUModuleOp mod) {
@@ -59,7 +59,8 @@ struct WaveCompileKernelsPass
     });
 
     for (gpu::GPUModuleOp gpuMod : targets) {
-      if (failed(compileOne(gpuMod, target.getValue(), tripleRef, chipRef)))
+      if (failed(compileOne(gpuMod, target.getValue(), parsed->triple,
+                            parsed->chip)))
         return signalPassFailure();
     }
   }

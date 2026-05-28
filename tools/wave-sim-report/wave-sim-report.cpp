@@ -17,6 +17,7 @@
 #include "mlir/Dialect/WaveAMDMachine/CostModel/MemoryCounterTiming.h"
 #include "mlir/Dialect/WaveAMDMachine/CostModel/OpClassifier.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachine.h"
+#include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineTarget.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineTraits.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/DialectRegistry.h"
@@ -31,6 +32,7 @@
 #include "llvm/TargetParser/TargetParser.h"
 
 #include <algorithm>
+#include <optional>
 
 using namespace mlir;
 using namespace mlir::waveamdmachine;
@@ -110,9 +112,12 @@ static llvm::cl::opt<int>
 
 static const ArchData *resolveArch(llvm::StringRef name) {
   llvm::StringRef cpu = name;
-  std::pair<llvm::StringRef, llvm::StringRef> split = cpu.rsplit("--");
-  if (!split.second.empty())
-    cpu = split.second;
+  if (name.contains("--")) {
+    std::optional<AMDGPUTarget> target = parseAMDGPUTargetAttr(name);
+    if (!target)
+      return nullptr;
+    cpu = target->chip;
+  }
   llvm::AMDGPU::IsaVersion isa = llvm::AMDGPU::getIsaVersion(cpu);
   if (isa.Major == 0 || !isArchSupported(isa))
     return nullptr;

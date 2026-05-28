@@ -35,6 +35,7 @@
 #include "Utils/AMDGPUBaseInfo.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachine.h"
+#include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineTarget.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "llvm/MC/MCSubtargetInfo.h"
@@ -140,19 +141,10 @@ static void insertNoops(OpBuilder &builder, Location loc, unsigned count,
 
 static FailureOr<std::unique_ptr<llvm::MCSubtargetInfo>>
 createSubtargetInfo(Operation *op) {
-  auto module = dyn_cast<ModuleOp>(op);
-  if (!module)
-    module = op->getParentOfType<ModuleOp>();
-  if (!module)
-    return op->emitError("waveamd-insert-hazard-waits requires a module");
-  auto target = module->getAttrOfType<StringAttr>("waveamdmachine.target");
-  if (!target)
-    return module.emitError("waveamd-insert-hazard-waits requires a "
-                            "waveamdmachine.target attribute");
-  StringRef cpu = target.getValue();
-  std::pair<StringRef, StringRef> split = cpu.rsplit("--");
-  if (!split.second.empty())
-    cpu = split.second;
+  FailureOr<waveamdmachine::AMDGPUTarget> target =
+      waveamdmachine::getAMDGPUTarget(op, "waveamd-insert-hazard-waits");
+  if (failed(target))
+    return failure();
 
   static llvm::once_flag initializeBackendOnce;
   llvm::call_once(initializeBackendOnce, []() {
@@ -160,7 +152,7 @@ createSubtargetInfo(Operation *op) {
     llvm::InitializeAllTargetMCs();
   });
 
-  llvm::Triple triple("amdgcn-amd-amdhsa");
+  llvm::Triple triple(target->triple);
   std::string error;
   const llvm::Target *llvmTarget =
       llvm::TargetRegistry::lookupTarget(triple, error);
@@ -168,11 +160,13 @@ createSubtargetInfo(Operation *op) {
     return op->emitError("failed to lookup AMDGPU target: ") << error;
 
   std::unique_ptr<llvm::MCSubtargetInfo> sti(
-      llvmTarget->createMCSubtargetInfo(triple, cpu, /*Features=*/""));
+      llvmTarget->createMCSubtargetInfo(triple, target->chip, /*Features=*/""));
   if (!sti)
-    return module.emitError("unsupported AMDGPU target: ") << target.getValue();
-  if (llvm::AMDGPU::getIsaVersion(cpu).Major == 0)
-    return module.emitError("unsupported AMDGPU target: ") << target.getValue();
+    return op->emitError("unsupported AMDGPU target: ")
+           << target->triple << "--" << target->chip;
+  if (llvm::AMDGPU::getIsaVersion(target->chip).Major == 0)
+    return op->emitError("unsupported AMDGPU target: ")
+           << target->triple << "--" << target->chip;
   return sti;
 }
 

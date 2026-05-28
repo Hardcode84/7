@@ -15,6 +15,7 @@
 #include "mlir/Dialect/WaveAMDMachine/CostModel/MemoryCounterTiming.h"
 #include "mlir/Dialect/WaveAMDMachine/CostModel/OpClassifier.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachine.h"
+#include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineTarget.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineTraits.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
 #include "llvm/ADT/DenseMap.h"
@@ -23,6 +24,7 @@
 
 #include <algorithm>
 #include <limits>
+#include <optional>
 
 using namespace mlir;
 
@@ -265,25 +267,20 @@ void printDependences(ScheduleRegion region, const DependenceGraph &graph) {
 }
 
 ArchResolution resolveArch(Operation *op) {
-  ModuleOp mod = op->getParentOfType<ModuleOp>();
+  ModuleOp mod = waveamdmachine::findAMDGPUTargetModule(op);
   if (!mod)
-    mod = dyn_cast<ModuleOp>(op);
-  while (mod) {
-    StringAttr target = mod->getAttrOfType<StringAttr>("waveamdmachine.target");
-    if (target) {
-      StringRef tripleAndChip = target.getValue();
-      size_t pos = tripleAndChip.rfind("--");
-      StringRef chip = pos == StringRef::npos
-                           ? tripleAndChip
-                           : tripleAndChip.drop_front(pos + 2);
-      llvm::AMDGPU::IsaVersion isa = llvm::AMDGPU::getIsaVersion(chip);
-      if (!waveamdmachine::isArchSupported(isa))
-        return {nullptr, "unsupported_arch"};
-      return {&waveamdmachine::getArchData(isa), {}};
-    }
-    mod = mod->getParentOfType<ModuleOp>();
-  }
-  return {nullptr, "missing_target"};
+    return {nullptr, "missing_target"};
+
+  StringAttr target = mod->getAttrOfType<StringAttr>("waveamdmachine.target");
+  std::optional<waveamdmachine::AMDGPUTarget> parsed =
+      waveamdmachine::parseAMDGPUTargetAttr(target.getValue());
+  if (!parsed)
+    return {nullptr, "malformed_target"};
+
+  llvm::AMDGPU::IsaVersion isa = llvm::AMDGPU::getIsaVersion(parsed->chip);
+  if (!waveamdmachine::isArchSupported(isa))
+    return {nullptr, "unsupported_arch"};
+  return {&waveamdmachine::getArchData(isa), {}};
 }
 
 static ScoreResult scoreOps(ArrayRef<Operation *> ops,

@@ -22,6 +22,7 @@
 #include "mlir/Dialect/Wave/IR/WaveAMD.h"
 #include "mlir/Dialect/Wave/IR/WaveSymbols.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachine.h"
+#include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineTarget.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/PatternMatch.h"
@@ -100,30 +101,9 @@ static bool isSimdPackedF32(Type type) {
   return simdType && isVector2F32(simdType.getElementType());
 }
 
-static ModuleOp findTargetModule(Operation *op) {
-  ModuleOp mod = dyn_cast<ModuleOp>(op);
-  if (!mod)
-    mod = op->getParentOfType<ModuleOp>();
-  while (mod && !mod->hasAttr("waveamdmachine.target"))
-    mod = mod->getParentOfType<ModuleOp>();
-  return mod;
-}
-
 static FailureOr<llvm::AMDGPU::IsaVersion>
 getTargetIsaVersion(Operation *op, StringRef feature) {
-  ModuleOp mod = findTargetModule(op);
-  if (!mod)
-    return op->emitError(feature)
-           << " requires a waveamdmachine.target module attribute";
-  auto target = mod->getAttrOfType<StringAttr>("waveamdmachine.target");
-  StringRef cpu = target.getValue();
-  std::pair<StringRef, StringRef> split = cpu.rsplit("--");
-  if (!split.second.empty())
-    cpu = split.second;
-  llvm::AMDGPU::IsaVersion version = llvm::AMDGPU::getIsaVersion(cpu);
-  if (version.Major == 0)
-    return mod.emitError("unsupported AMDGPU target: ") << target.getValue();
-  return version;
+  return waveamdmachine::getAMDGPUTargetIsaVersion(op, feature);
 }
 
 static LogicalResult requirePackedF16Target(Operation *op, StringRef kind) {

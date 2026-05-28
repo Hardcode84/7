@@ -19,6 +19,7 @@
 #include "mlir/Dialect/Wave/IR/WaveAMD.h"
 #include "mlir/Dialect/Wave/Transforms/Passes.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachine.h"
+#include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineTarget.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/Diagnostics.h"
@@ -137,14 +138,13 @@ private:
     auto targetAttr =
         module->getAttrOfType<StringAttr>("waveamdmachine.target");
     if (targetAttr) {
-      std::pair<StringRef, StringRef> split =
-          targetAttr.getValue().rsplit("--");
-      if (split.second.empty())
-        targetChip = targetAttr.getValue().str();
-      else {
-        targetTriple = split.first.str();
-        targetChip = split.second.str();
-      }
+      FailureOr<waveamdmachine::AMDGPUTarget> target =
+          waveamdmachine::parseAMDGPUTargetAttr(
+              targetAttr.getValue(), [&]() { return module.emitError(); });
+      if (failed(target))
+        return failure();
+      targetTriple = target->triple.str();
+      targetChip = target->chip.str();
     }
 
     llvm::Triple triple(targetTriple);

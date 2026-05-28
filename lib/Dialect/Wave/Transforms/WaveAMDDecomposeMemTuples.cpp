@@ -10,6 +10,7 @@
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachine.h"
+#include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineTarget.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "llvm/ADT/STLExtras.h"
@@ -38,29 +39,9 @@ static waveamdmachine::MemTokenType memTokenType(MLIRContext *ctx) {
   return waveamdmachine::MemTokenType::get(ctx);
 }
 
-static ModuleOp findTargetModule(Operation *op) {
-  ModuleOp module = op->getParentOfType<ModuleOp>();
-  if (!module)
-    module = dyn_cast<ModuleOp>(op);
-  while (module && !module->hasAttr("waveamdmachine.target"))
-    module = module->getParentOfType<ModuleOp>();
-  return module;
-}
-
 static FailureOr<llvm::AMDGPU::IsaVersion> getIsaVersion(Operation *root) {
-  ModuleOp module = findTargetModule(root);
-  if (!module)
-    return root->emitError("waveamd-decompose-mem-tuples requires a "
-                           "waveamdmachine.target module attribute");
-  auto target = module->getAttrOfType<StringAttr>("waveamdmachine.target");
-  StringRef cpu = target.getValue();
-  std::pair<StringRef, StringRef> split = cpu.rsplit("--");
-  if (!split.second.empty())
-    cpu = split.second;
-  llvm::AMDGPU::IsaVersion version = llvm::AMDGPU::getIsaVersion(cpu);
-  if (version.Major == 0)
-    return module.emitError("unsupported AMDGPU target: ") << target.getValue();
-  return version;
+  return waveamdmachine::getAMDGPUTargetIsaVersion(
+      root, "waveamd-decompose-mem-tuples");
 }
 
 // Greedy widest-first plan: at each step pick the largest HW-supported
