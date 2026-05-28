@@ -42,10 +42,27 @@ func.func @pressure_missing_default(%a: !waveamdmachine.reg<vgpr, 1>) {
 }
 }
 
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx942",
+                   waveamdmachine.target_waves = 8 : i64} {
+func.func @cdna_budget(%a: !waveamdmachine.reg<vgpr, 1>) {
+  %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+  %wide = waveamdmachine.v_mov_b32_tuple %zero {registers = 80 : i64} : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 80>
+  %v = waveamdmachine.v_add_u32 %a, %a : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
+  return
+}
+}
+
 // CHECK: module attributes {{{.*}}waveamdmachine.target_waves = 4 : i64{{.*}}}
 // CHECK-LABEL: func.func @explicit
 // CHECK-SAME: attributes {{{.*}}waveamdmachine.target_waves = 2 : i64{{.*}}}
 // CHECK-LABEL: func.func @missing_default
 
-// TARGET: candidate func=pressure_explicit_one region=0 name=original cycles=6 delta=0 issued_ops=2 max_vgpr=128 max_sgpr=0 vgpr_critical_excess=0
-// TARGET: candidate func=pressure_missing_default region=0 name=original cycles=6 delta=0 issued_ops=2 max_vgpr=128 max_sgpr=0 vgpr_critical_excess=32
+// TARGET: budgets func=module_default hard_vgpr=256 derived_hard_vgpr=256 hard_sgpr=106 derived_hard_sgpr=106 critical_vgpr=256 derived_critical_vgpr=256 critical_sgpr=106 derived_critical_sgpr=106
+// TARGET: budgets func=pressure_explicit_one hard_vgpr=256 derived_hard_vgpr=256 hard_sgpr=106 derived_hard_sgpr=106 critical_vgpr=256 derived_critical_vgpr=256 critical_sgpr=106 derived_critical_sgpr=106
+// TARGET: candidate func=pressure_explicit_one region=0 name=original cycles=6 delta=0 issued_ops=2 max_vgpr=128 max_sgpr=0 vgpr_hard_excess=0 sgpr_hard_excess=0 vgpr_critical_excess=0 sgpr_critical_excess=0
+// TARGET: budgets func=pressure_missing_default hard_vgpr=256 derived_hard_vgpr=256 hard_sgpr=106 derived_hard_sgpr=106 critical_vgpr=96 derived_critical_vgpr=96 critical_sgpr=106 derived_critical_sgpr=106
+// TARGET: candidate func=pressure_missing_default region=0 name=original cycles=6 delta=0 issued_ops=2 max_vgpr=128 max_sgpr=0 vgpr_hard_excess=0 sgpr_hard_excess=0 vgpr_critical_excess=32 sgpr_critical_excess=0
+// TARGET: budgets func=cdna_budget hard_vgpr=512 derived_hard_vgpr=512 hard_sgpr=102 derived_hard_sgpr=102 critical_vgpr=64 derived_critical_vgpr=64 critical_sgpr=96 derived_critical_sgpr=96
+// TARGET: candidate func=cdna_budget region=0 name=original cycles=5 delta=0 issued_ops=2 max_vgpr=80 max_sgpr=0 vgpr_hard_excess=0 sgpr_hard_excess=0 vgpr_critical_excess=16 sgpr_critical_excess=0

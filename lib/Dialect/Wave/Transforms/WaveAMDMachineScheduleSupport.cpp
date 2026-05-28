@@ -9,6 +9,7 @@
 #include "WaveAMDMachineScheduleSupport.h"
 
 #include "WaveAMDRegLiveIntervals.h"
+#include "WaveAMDRegisterLimits.h"
 #include "mlir/Dialect/WaveAMDMachine/CostModel/FunctionalUnit.h"
 #include "mlir/Dialect/WaveAMDMachine/CostModel/LatencyTable.h"
 #include "mlir/Dialect/WaveAMDMachine/CostModel/MemoryCounterTiming.h"
@@ -299,16 +300,6 @@ bool hasHardBudget(RegisterPressureBudgets budgets) {
   return budgets.hardVGPR >= 0 || budgets.hardSGPR >= 0;
 }
 
-FailureOr<int> deriveCriticalVGPRBudget(const waveamdmachine::ArchData &arch,
-                                        int targetWaves) {
-  if (targetWaves == 0)
-    targetWaves = arch.wavesPerSIMD;
-  if (targetWaves < 0)
-    return failure();
-  int raw = arch.vgprFileSize / targetWaves;
-  return (raw / arch.vgprAllocGranule) * arch.vgprAllocGranule;
-}
-
 static bool isValidLatencyOverride(int value) { return value >= -1; }
 
 LogicalResult
@@ -408,19 +399,72 @@ resolveScheduleTargetWaves(Operation *op, ArchResolution archResolution,
                              kTargetWavesAttr, /*allowZero=*/false);
 }
 
-static LogicalResult
-applyDerivedCriticalBudget(ArchResolution archResolution,
-                           bool pressureAwareSelection, int pressureTargetWaves,
-                           RegisterPressureBudgets &budgets) {
-  if (!(pressureAwareSelection && budgets.criticalVGPR < 0 &&
-        pressureTargetWaves >= 0 && archResolution.arch))
-    return success();
-  FailureOr<int> derived =
-      deriveCriticalVGPRBudget(*archResolution.arch, pressureTargetWaves);
-  if (failed(derived))
-    return failure();
-  budgets.criticalVGPR = *derived;
-  return success();
+static bool hasPressureOverride(int pressureVgprBudget, int pressureSgprBudget,
+                                int pressureCriticalVgprBudget,
+                                int pressureCriticalSgprBudget,
+                                int pressureTargetWavesOverride) {
+  return pressureVgprBudget >= 0 || pressureSgprBudget >= 0 ||
+         pressureCriticalVgprBudget >= 0 || pressureCriticalSgprBudget >= 0 ||
+         pressureTargetWavesOverride != -2;
+}
+
+static int toBudget(unsigned value) {
+  return static_cast<int>(
+      std::min<unsigned>(value, std::numeric_limits<int>::max()));
+}
+
+static unsigned getTargetWavesForBudget(const WaveAMDRegisterLimits &limits,
+                                        int targetWaves) {
+  if (targetWaves == 0)
+    return limits.maxWavesPerEU;
+  return static_cast<unsigned>(targetWaves);
+}
+
+static void deriveHardBudgets(Operation *op,
+                              const WaveAMDRegisterLimits &limits,
+                              RegisterPressureBudgets &budgets) {
+  func::FuncOp func = dyn_cast<func::FuncOp>(op);
+  unsigned reservedVGPR = func ? getWaveAMDReservedVGPRs(func) : 0;
+  unsigned reservedSGPR = func ? getWaveAMDReservedSGPRs(func) : 0;
+  budgets.derivedHardVGPR = toBudget(
+      getEffectiveWaveAMDRegisterBudget(limits.addressableVGPRs, reservedVGPR));
+  budgets.derivedHardSGPR = toBudget(
+      getEffectiveWaveAMDRegisterBudget(limits.addressableSGPRs, reservedSGPR));
+}
+
+static void deriveCriticalBudgets(Operation *op,
+                                  const WaveAMDRegisterLimits &limits,
+                                  int targetWaves,
+                                  RegisterPressureBudgets &budgets) {
+  if (targetWaves < 0)
+    return;
+  func::FuncOp func = dyn_cast<func::FuncOp>(op);
+  unsigned reservedVGPR = func ? getWaveAMDReservedVGPRs(func) : 0;
+  unsigned reservedSGPR = func ? getWaveAMDReservedSGPRs(func) : 0;
+  unsigned waves = getTargetWavesForBudget(limits, targetWaves);
+  budgets.derivedCriticalVGPR = toBudget(getEffectiveWaveAMDRegisterBudget(
+      getMaxWaveAMDRegisterBudgetForWaves(limits.maxVGPRsForWaves, waves),
+      reservedVGPR));
+  budgets.derivedCriticalSGPR = toBudget(getEffectiveWaveAMDRegisterBudget(
+      getMaxWaveAMDRegisterBudgetForWaves(limits.maxSGPRsForWaves, waves),
+      reservedSGPR));
+}
+
+static void applyPressureOverrides(int pressureVgprBudget,
+                                   int pressureSgprBudget,
+                                   int pressureCriticalVgprBudget,
+                                   int pressureCriticalSgprBudget,
+                                   RegisterPressureBudgets &budgets) {
+  budgets.hardVGPR =
+      pressureVgprBudget >= 0 ? pressureVgprBudget : budgets.derivedHardVGPR;
+  budgets.hardSGPR =
+      pressureSgprBudget >= 0 ? pressureSgprBudget : budgets.derivedHardSGPR;
+  budgets.criticalVGPR = pressureCriticalVgprBudget >= 0
+                             ? pressureCriticalVgprBudget
+                             : budgets.derivedCriticalVGPR;
+  budgets.criticalSGPR = pressureCriticalSgprBudget >= 0
+                             ? pressureCriticalSgprBudget
+                             : budgets.derivedCriticalSGPR;
 }
 
 LogicalResult configureSchedulePressureBudgets(
@@ -437,13 +481,22 @@ LogicalResult configureSchedulePressureBudgets(
       op, archResolution, pressureTargetWavesOverride);
   if (failed(targetWaves))
     return failure();
-  budgets.hardVGPR = pressureVgprBudget;
-  budgets.hardSGPR = pressureSgprBudget;
-  budgets.criticalVGPR = pressureCriticalVgprBudget;
-  budgets.criticalSGPR = pressureCriticalSgprBudget;
-  if (failed(applyDerivedCriticalBudget(archResolution, pressureAwareSelection,
-                                        *targetWaves, budgets)))
-    return failure();
+
+  if (archResolution.arch) {
+    FailureOr<WaveAMDRegisterLimits> limits = getWaveAMDRegisterLimits(op);
+    if (failed(limits))
+      return failure();
+    deriveHardBudgets(op, *limits, budgets);
+    deriveCriticalBudgets(op, *limits, *targetWaves, budgets);
+  }
+  applyPressureOverrides(pressureVgprBudget, pressureSgprBudget,
+                         pressureCriticalVgprBudget, pressureCriticalSgprBudget,
+                         budgets);
+  budgets.reportBudgets =
+      pressureAwareSelection ||
+      hasPressureOverride(
+          pressureVgprBudget, pressureSgprBudget, pressureCriticalVgprBudget,
+          pressureCriticalSgprBudget, pressureTargetWavesOverride);
   budgets.selectionEnabled =
       pressureAwareSelection &&
       (hasHardBudget(budgets) || hasCriticalBudget(budgets));
@@ -530,6 +583,8 @@ void printPressure(raw_ostream &os, const RegisterPressureResult &pressure,
     return;
   }
   os << " max_vgpr=" << pressure.maxVGPR << " max_sgpr=" << pressure.maxSGPR;
+  if (!budgets.reportBudgets)
+    return;
   if (budgets.hardVGPR >= 0)
     os << " vgpr_hard_excess=" << pressure.hardVGPRExcess;
   if (budgets.hardSGPR >= 0)
@@ -538,6 +593,41 @@ void printPressure(raw_ostream &os, const RegisterPressureResult &pressure,
     os << " vgpr_critical_excess=" << pressure.criticalVGPRExcess;
   if (budgets.criticalSGPR >= 0)
     os << " sgpr_critical_excess=" << pressure.criticalSGPRExcess;
+}
+
+bool shouldReportPressureBudgets(RegisterPressureBudgets budgets) {
+  return budgets.reportBudgets &&
+         (budgets.hardVGPR >= 0 || budgets.hardSGPR >= 0 ||
+          budgets.criticalVGPR >= 0 || budgets.criticalSGPR >= 0 ||
+          budgets.derivedHardVGPR >= 0 || budgets.derivedHardSGPR >= 0 ||
+          budgets.derivedCriticalVGPR >= 0 || budgets.derivedCriticalSGPR >= 0);
+}
+
+static void printBudgetField(raw_ostream &os, StringRef name, int budget,
+                             int derived) {
+  os << " " << name << "=";
+  if (budget >= 0)
+    os << budget;
+  else
+    os << "disabled";
+  if (derived >= 0)
+    os << " derived_" << name << "=" << derived;
+}
+
+void printPressureBudgets(func::FuncOp func,
+                          const RegisterPressureBudgets &budgets) {
+  if (!shouldReportPressureBudgets(budgets))
+    return;
+  llvm::errs() << kDiagPrefix << " budgets func=" << func.getSymName();
+  printBudgetField(llvm::errs(), "hard_vgpr", budgets.hardVGPR,
+                   budgets.derivedHardVGPR);
+  printBudgetField(llvm::errs(), "hard_sgpr", budgets.hardSGPR,
+                   budgets.derivedHardSGPR);
+  printBudgetField(llvm::errs(), "critical_vgpr", budgets.criticalVGPR,
+                   budgets.derivedCriticalVGPR);
+  printBudgetField(llvm::errs(), "critical_sgpr", budgets.criticalSGPR,
+                   budgets.derivedCriticalSGPR);
+  llvm::errs() << "\n";
 }
 
 static void printScoreLine(ScheduleRegion region, StringRef orderName,

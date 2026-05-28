@@ -8,21 +8,16 @@
 
 #include "mlir/Dialect/Wave/Transforms/Passes.h"
 
-#include "Utils/AMDGPUBaseInfo.h"
 #include "WaveAMDRegAllocPrep.h"
 #include "WaveAMDRegLiveIntervals.h"
+#include "WaveAMDRegisterLimits.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachine.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
-#include "llvm/MC/MCSubtargetInfo.h"
-#include "llvm/MC/TargetRegistry.h"
 #include "llvm/Support/MathExtras.h"
-#include "llvm/Support/TargetSelect.h"
-#include "llvm/TargetParser/TargetParser.h"
-#include "llvm/TargetParser/Triple.h"
 #include <optional>
 #include <set>
 
@@ -47,51 +42,18 @@ static void setRegPhys(Value v, unsigned phys) {
                                          static_cast<int64_t>(phys)));
 }
 
-static FailureOr<std::unique_ptr<llvm::MCSubtargetInfo>>
-createSubtargetInfo(ModuleOp module) {
-  auto targetAttr = module->getAttrOfType<StringAttr>("waveamdmachine.target");
-  if (!targetAttr)
-    return module.emitError(
-        "waveamd-reg-alloc requires a waveamdmachine.target "
-        "attribute");
-
-  StringRef target = targetAttr.getValue();
-  std::pair<StringRef, StringRef> split = target.rsplit("--");
-  StringRef cpu = split.second.empty() ? target : split.second;
-
-  static llvm::once_flag initializeBackendOnce;
-  llvm::call_once(initializeBackendOnce, []() {
-    llvm::InitializeAllTargetInfos();
-    llvm::InitializeAllTargetMCs();
-  });
-
-  llvm::Triple triple("amdgcn-amd-amdhsa");
-  std::string error;
-  const llvm::Target *llvmTarget =
-      llvm::TargetRegistry::lookupTarget(triple, error);
-  if (!llvmTarget)
-    return module.emitError("failed to lookup AMDGPU target: ") << error;
-
-  std::unique_ptr<llvm::MCSubtargetInfo> sti(
-      llvmTarget->createMCSubtargetInfo(triple, cpu, /*Features=*/""));
-  if (!sti)
-    return module.emitError("unsupported AMDGPU target: ") << target;
-  if (llvm::AMDGPU::getIsaVersion(cpu).Major == 0)
-    return module.emitError("unsupported AMDGPU target: ") << target;
-  return sti;
-}
-
 static FailureOr<RegisterLimits> getRegisterLimits(ModuleOp module) {
-  FailureOr<std::unique_ptr<llvm::MCSubtargetInfo>> sti =
-      createSubtargetInfo(module);
-  if (failed(sti))
+  if (!module->hasAttr("waveamdmachine.target"))
+    return module.emitError(
+        "waveamd-reg-alloc requires a waveamdmachine.target attribute");
+  FailureOr<wave::WaveAMDRegisterLimits> targetLimits =
+      wave::getWaveAMDRegisterLimits(module);
+  if (failed(targetLimits))
     return failure();
 
   RegisterLimits limits;
-  limits.numSGPR = llvm::AMDGPU::IsaInfo::getAddressableNumSGPRs(sti->get());
-  limits.numVGPR =
-      llvm::AMDGPU::IsaInfo::getAddressableNumVGPRs(sti->get(),
-                                                    /*DynamicVGPRBlockSize=*/0);
+  limits.numSGPR = targetLimits->addressableSGPRs;
+  limits.numVGPR = targetLimits->addressableVGPRs;
   return limits;
 }
 
@@ -141,15 +103,8 @@ struct WaveAMDRegAllocPass
       return failure();
     wave::WaveAMDLiveIntervalSet &intervals = builtIntervals->intervals;
 
-    // For `wave.kernel` funcs, the HSA loader preloads s[0:1] = kernarg
-    // pointer (always) and s2/s3/s4 = workgroup_id.x/y/z (conditional on
-    // the kernel descriptor flags; we reserve unconditionally to keep
-    // the allocator simple). v0 always holds the packed workitem_id, so
-    // reserve it too.
-    unsigned sgprReserved =
-        func->hasAttr(wave::WaveDialect::getKernelAttrName()) ? 5 : 0;
-    unsigned vgprReserved =
-        func->hasAttr(wave::WaveDialect::getKernelAttrName()) ? 1 : 0;
+    unsigned sgprReserved = wave::getWaveAMDReservedSGPRs(func);
+    unsigned vgprReserved = wave::getWaveAMDReservedVGPRs(func);
     if (failed(allocateClass(func, intervals.sgprs, limits.numSGPR,
                              sgprReserved, softFail, overflow)))
       return failure();

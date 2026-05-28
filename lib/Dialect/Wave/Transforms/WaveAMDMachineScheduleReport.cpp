@@ -100,6 +100,8 @@ struct WaveAMDMachineScheduleReportPass
                   bool prepareForPressure) {
     if (func.isExternal())
       return success();
+    if (prepareForPressure)
+      printPressureBudgets(func, pressureBudgets);
     if (!prepareForPressure)
       return reportFunction(func, archResolution, modelConfig, pressureBudgets,
                             candidate, scoreFuncName, emitScores,

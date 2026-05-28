@@ -66,6 +66,11 @@ struct RegisterPressureBudgets {
   int hardSGPR = -1;
   int criticalVGPR = -1;
   int criticalSGPR = -1;
+  int derivedHardVGPR = -1;
+  int derivedHardSGPR = -1;
+  int derivedCriticalVGPR = -1;
+  int derivedCriticalSGPR = -1;
+  bool reportBudgets = false;
   bool selectionEnabled = false;
 };
 
@@ -114,8 +119,6 @@ int64_t getHardExcess(RegisterPressureResult pressure);
 int64_t getCriticalExcess(RegisterPressureResult pressure);
 bool hasCriticalBudget(RegisterPressureBudgets budgets);
 bool hasHardBudget(RegisterPressureBudgets budgets);
-FailureOr<int> deriveCriticalVGPRBudget(const waveamdmachine::ArchData &arch,
-                                        int targetWaves);
 LogicalResult
 configureScheduleModel(ModuleOp mod, int modelWaves, int modelSimds,
                        int modelStartDelay, int modelVmemValueLatency,
@@ -134,6 +137,9 @@ CandidateMetrics evaluateOps(const ScheduleRegion &region,
                              const RegisterPressureBudgets &budgets);
 void printPressure(raw_ostream &os, const RegisterPressureResult &pressure,
                    const RegisterPressureBudgets &budgets);
+bool shouldReportPressureBudgets(RegisterPressureBudgets budgets);
+void printPressureBudgets(func::FuncOp func,
+                          const RegisterPressureBudgets &budgets);
 CandidateRequest getCandidateRequest(StringRef orderText, int scoreRegion);
 bool shouldScoreCandidate(const ScheduleRegion &region, StringRef scoreFunc,
                           int scoreRegion);
