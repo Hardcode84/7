@@ -274,6 +274,8 @@ public:
   LogicalResult selectSplat(SplatOp op);
   LogicalResult selectAssumeRange(AssumeRangeOp op);
   LogicalResult selectBinary(BinaryOp op);
+  LogicalResult selectPack(PackOp op);
+  LogicalResult selectExtract(ExtractOp op);
   LogicalResult selectCast(CastOp op);
   LogicalResult selectAddi(AddiOp op);
   LogicalResult selectAddiI32(AddiOp op);

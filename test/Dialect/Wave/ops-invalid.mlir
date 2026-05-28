@@ -305,7 +305,7 @@ func.func @cast_wrong_policy_type(%x: f32) {
 // -----
 
 func.func @fadd_packed_bad_element(%a: !wave.simd<vector<2xi16>, 32>, %b: !wave.simd<vector<2xi16>, 32>) {
-  // expected-error @+1 {{SIMD element type must be f32 or vector<2xf16>}}
+  // expected-error @+1 {{SIMD element type must be f32, f16, or vector<2xf16>}}
   %r = wave.fadd %a, %b : !wave.simd<vector<2xi16>, 32>, !wave.simd<vector<2xi16>, 32> -> !wave.simd<vector<2xi16>, 32>
   return
 }

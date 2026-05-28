@@ -519,6 +519,8 @@ LogicalResult WaveAMDMachineSelector::selectOperation(Operation *op) {
       .Case<SplatOp>([&](auto o) { return selectSplat(o); })
       .Case<AssumeRangeOp>([&](auto o) { return selectAssumeRange(o); })
       .Case<BinaryOp>([&](auto o) { return selectBinary(o); })
+      .Case<PackOp>([&](auto o) { return selectPack(o); })
+      .Case<ExtractOp>([&](auto o) { return selectExtract(o); })
       .Case<CastOp>([&](auto o) { return selectCast(o); })
       .Case<AddiOp>([&](auto o) { return selectAddi(o); })
       .Case<MuliOp>([&](auto o) { return selectMuli(o); })
@@ -1017,6 +1019,68 @@ LogicalResult WaveAMDMachineSelector::selectFExp2(FExp2Op op) {
 
 LogicalResult WaveAMDMachineSelector::selectFRcp(FRcpOp op) {
   return selectF32<waveamdmachine::VRcpF32Op>(*this, op, op.getSource());
+}
+
+LogicalResult WaveAMDMachineSelector::selectPack(PackOp op) {
+  Type resultType = op.getResult().getType();
+  Type vgprType = getRegType(op.getContext(), waveamdmachine::RegClass::VGPR);
+  if (isSimdPackedF32(resultType)) {
+    SmallVector<Value, 2> elements;
+    for (Value input : op.getInputs())
+      elements.push_back(ensureVGPRForVSrc1(op.getLoc(), expect(input, op)));
+    values[op.getResult()] = waveamdmachine::TupleFromElementsOp::create(
+        builder, op.getLoc(),
+        getRegType(op.getContext(), waveamdmachine::RegClass::VGPR,
+                   /*width=*/2),
+        elements);
+    eraseIfTopLevel(op);
+    return success();
+  }
+  if (isSimdPackedF16(resultType)) {
+    Value lo = ensureVGPRForVSrc1(op.getLoc(), expect(op.getInputs()[0], op));
+    Value hi = ensureVGPRForVSrc1(op.getLoc(), expect(op.getInputs()[1], op));
+    Value mask = createImm(builder, op.getLoc(), 0xffff);
+    Value shift = createImm(builder, op.getLoc(), 16);
+    Value loMasked = waveamdmachine::VAndB32Op::create(builder, op.getLoc(),
+                                                       vgprType, lo, mask);
+    Value hiShifted = waveamdmachine::VLshlrevB32Op::create(
+        builder, op.getLoc(), vgprType, hi, shift);
+    values[op.getResult()] = waveamdmachine::VOrB32Op::create(
+        builder, op.getLoc(), vgprType, loMasked, hiShifted);
+    eraseIfTopLevel(op);
+    return success();
+  }
+  return op.emitError(
+      "WaveAMDMachine pack lowering supports only SIMD vector<2xf32/f16>");
+}
+
+LogicalResult WaveAMDMachineSelector::selectExtract(ExtractOp op) {
+  Type sourceType = op.getSource().getType();
+  Value source = expect(op.getSource(), op);
+  Type vgprType = getRegType(op.getContext(), waveamdmachine::RegClass::VGPR);
+  if (isSimdPackedF32(sourceType)) {
+    SmallVector<Type, 2> elementTypes = {vgprType, vgprType};
+    auto split = waveamdmachine::TupleToElementsOp::create(
+        builder, op.getLoc(), elementTypes, source);
+    values[op.getResult()] = split.getElements()[op.getIndex()];
+    eraseIfTopLevel(op);
+    return success();
+  }
+  if (isSimdPackedF16(sourceType)) {
+    Value shiftOrMask =
+        createImm(builder, op.getLoc(), op.getIndex() == 0 ? 0xffff : 16);
+    if (op.getIndex() == 0) {
+      values[op.getResult()] = waveamdmachine::VAndB32Op::create(
+          builder, op.getLoc(), vgprType, source, shiftOrMask);
+    } else {
+      values[op.getResult()] = waveamdmachine::VLshrrevB32Op::create(
+          builder, op.getLoc(), vgprType, source, shiftOrMask);
+    }
+    eraseIfTopLevel(op);
+    return success();
+  }
+  return op.emitError(
+      "WaveAMDMachine extract lowering supports only SIMD vector<2xf32/f16>");
 }
 
 static CastRounding getFpConvertRounding(CastOp op) {

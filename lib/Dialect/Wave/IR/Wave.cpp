@@ -516,20 +516,33 @@ static bool isWavePackedF16Type(Type type) {
          vectorType.getElementType().isF16();
 }
 
+static bool isAllowedWaveFloatElement(Type elementType, bool allowScalarF16,
+                                      bool allowPackedF16) {
+  if (elementType.isF32())
+    return true;
+  if (allowScalarF16 && elementType.isF16())
+    return true;
+  return allowPackedF16 && isWavePackedF16Type(elementType);
+}
+
+static const char *getWaveFloatElementError(bool allowScalarF16,
+                                            bool allowPackedF16) {
+  if (allowScalarF16 && allowPackedF16)
+    return "SIMD element type must be f32, f16, or vector<2xf16>";
+  if (allowPackedF16)
+    return "SIMD element type must be f32 or vector<2xf16>";
+  return "SIMD element type must be f32";
+}
+
 static LogicalResult
-verifyWaveFloatSimd(Type type, bool allowPackedF16,
+verifyWaveFloatSimd(Type type, bool allowScalarF16, bool allowPackedF16,
                     function_ref<InFlightDiagnostic(const Twine &)> emitError) {
   SimdType simdType = dyn_cast<SimdType>(type);
   if (!simdType)
-    return emitError(allowPackedF16 ? "operand must be !wave.simd<f32, W> or "
-                                      "!wave.simd<vector<2xf16>, W>"
-                                    : "operand must be !wave.simd<f32, W>");
+    return emitError("operand must be !wave.simd<..., W>");
   Type elementType = simdType.getElementType();
-  if (!elementType.isF32() &&
-      (!allowPackedF16 || !isWavePackedF16Type(elementType)))
-    return emitError(allowPackedF16
-                         ? "SIMD element type must be f32 or vector<2xf16>"
-                         : "SIMD element type must be f32");
+  if (!isAllowedWaveFloatElement(elementType, allowScalarF16, allowPackedF16))
+    return emitError(getWaveFloatElementError(allowScalarF16, allowPackedF16));
   if (simdType.getWidth() != 32 && simdType.getWidth() != 64)
     return emitError("only wave32 and wave64 are supported");
   return success();
@@ -537,11 +550,12 @@ verifyWaveFloatSimd(Type type, bool allowPackedF16,
 
 static LogicalResult verifyWaveFloatSimdBinary(Operation *op, Type lhsTy,
                                                Type rhsTy, Type resultTy,
+                                               bool allowScalarF16,
                                                bool allowPackedF16) {
   auto emit = [op](const Twine &msg) { return op->emitOpError(msg); };
   if (lhsTy != rhsTy || lhsTy != resultTy)
     return emit("operands and result must have the same SIMD type");
-  return verifyWaveFloatSimd(lhsTy, allowPackedF16, emit);
+  return verifyWaveFloatSimd(lhsTy, allowScalarF16, allowPackedF16, emit);
 }
 
 static LogicalResult verifyWaveFloatSimdTernary(Operation *op, Type lhsTy,
@@ -550,7 +564,8 @@ static LogicalResult verifyWaveFloatSimdTernary(Operation *op, Type lhsTy,
   auto emit = [op](const Twine &msg) { return op->emitOpError(msg); };
   if (lhsTy != rhsTy || lhsTy != accTy || lhsTy != resultTy)
     return emit("operands and result must have the same SIMD type");
-  return verifyWaveFloatSimd(lhsTy, /*allowPackedF16=*/true, emit);
+  return verifyWaveFloatSimd(lhsTy, /*allowScalarF16=*/true,
+                             /*allowPackedF16=*/true, emit);
 }
 
 static LogicalResult verifyWaveFloatSimdUnary(Operation *op, Type sourceTy,
@@ -558,30 +573,35 @@ static LogicalResult verifyWaveFloatSimdUnary(Operation *op, Type sourceTy,
   auto emit = [op](const Twine &msg) { return op->emitOpError(msg); };
   if (sourceTy != resultTy)
     return emit("operand and result must have the same SIMD type");
-  return verifyWaveFloatSimd(sourceTy, /*allowPackedF16=*/false, emit);
+  return verifyWaveFloatSimd(sourceTy, /*allowScalarF16=*/false,
+                             /*allowPackedF16=*/false, emit);
 }
 
 LogicalResult FAddOp::verify() {
   return verifyWaveFloatSimdBinary(getOperation(), getLhs().getType(),
                                    getRhs().getType(), getResult().getType(),
+                                   /*allowScalarF16=*/true,
                                    /*allowPackedF16=*/true);
 }
 
 LogicalResult FSubOp::verify() {
   return verifyWaveFloatSimdBinary(getOperation(), getLhs().getType(),
                                    getRhs().getType(), getResult().getType(),
+                                   /*allowScalarF16=*/false,
                                    /*allowPackedF16=*/false);
 }
 
 LogicalResult FMulOp::verify() {
   return verifyWaveFloatSimdBinary(getOperation(), getLhs().getType(),
                                    getRhs().getType(), getResult().getType(),
+                                   /*allowScalarF16=*/true,
                                    /*allowPackedF16=*/true);
 }
 
 LogicalResult FMaxOp::verify() {
   return verifyWaveFloatSimdBinary(getOperation(), getLhs().getType(),
                                    getRhs().getType(), getResult().getType(),
+                                   /*allowScalarF16=*/false,
                                    /*allowPackedF16=*/true);
 }
 
