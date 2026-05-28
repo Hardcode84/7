@@ -266,7 +266,9 @@ def pipeline_text(
     return f"""module attributes {{transform.with_named_sequence}} {{
   transform.named_sequence @__transform_main(
       %root: !transform.any_op {{transform.consumed}}) -> !transform.any_op {{
-    %r0 = transform.apply_registered_pass "waveamd-to-machine" to %root
+    %rpack = transform.apply_registered_pass "wave-form-packed-math" to %root
+        : (!transform.any_op) -> !transform.any_op
+    %r0 = transform.apply_registered_pass "waveamd-to-machine" to %rpack
         : (!transform.any_op) -> !transform.any_op
     %rk = transform.apply_registered_pass "canonicalize" to %r0
         : (!transform.any_op) -> !transform.any_op
