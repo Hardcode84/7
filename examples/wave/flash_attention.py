@@ -25,6 +25,12 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--block-m", type=int, default=4)
     parser.add_argument("--block-n", type=int, default=8)
     parser.add_argument("--head-dim", type=int, default=8)
+    parser.add_argument(
+        "--seq-n",
+        type=int,
+        default=None,
+        help="total K/V sequence length; defaults to --block-n",
+    )
     add_execution_args(parser, default_atol=3.0e-3, default_rtol=3.0e-3)
     return parser.parse_args(argv)
 
@@ -52,6 +58,7 @@ def main(argv: list[str] | None = None) -> int:
         block_n=args.block_n,
         head_dim=args.head_dim,
         random_seed=args.seed,
+        seq_n=args.seq_n,
     )
     module_text = str(module)
     if args.dump_asm:
@@ -77,6 +84,7 @@ def main(argv: list[str] | None = None) -> int:
         args.block_n,
         args.head_dim,
         random_seed=args.seed,
+        seq_n=args.seq_n,
     )
     ok, message = compare_values(
         parse_runner_values(output),

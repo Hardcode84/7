@@ -2,13 +2,14 @@
 #  See https://llvm.org/LICENSE.txt for license information.
 #  SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-"""Builder for a one-wave f32 FlashAttention forward kernel."""
+"""Builder for a tiled one-wave f32 FlashAttention forward kernel."""
 
 from __future__ import annotations
 
 import math
 from dataclasses import dataclass
 
+import ixsimpl
 from mlir.dialects import wave_dsl as dsl
 from mlir.ir import Module
 
@@ -24,6 +25,7 @@ class _FlashAttentionConfig:
     block_n: int
     head_dim: int
     random_seed: int = 0
+    seq_n: int | None = None
 
     def __post_init__(self) -> None:
         for name, value in (
@@ -33,6 +35,8 @@ class _FlashAttentionConfig:
         ):
             if value <= 0:
                 raise ValueError(f"{name} must be positive; got {value}")
+        if self.seq_n is not None and self.seq_n <= 0:
+            raise ValueError(f"seq_n must be positive; got {self.seq_n}")
         if self.block_m * self.head_dim != 32:
             raise ValueError(
                 "current one-wave FA kernel requires block_m * head_dim == 32; "
@@ -47,11 +51,15 @@ class _FlashAttentionConfig:
 
     @property
     def kv_elements(self) -> int:
-        return self.block_n * self.head_dim
+        return self.seq_len * self.head_dim
 
     @property
     def out_elements(self) -> int:
         return self.q_elements
+
+    @property
+    def seq_len(self) -> int:
+        return self.block_n if self.seq_n is None else self.seq_n
 
 
 def _rand_values(
@@ -71,8 +79,11 @@ def generate_flash_attention_f32_inputs(
     head_dim: int,
     *,
     random_seed: int = 0,
+    seq_n: int | None = None,
 ) -> tuple[tuple[float, ...], tuple[float, ...], tuple[float, ...]]:
-    cfg = _FlashAttentionConfig(block_m, block_n, head_dim, random_seed)
+    cfg = _FlashAttentionConfig(
+        block_m, block_n, head_dim, random_seed=random_seed, seq_n=seq_n
+    )
     q_base = _rand_values(cfg.q_elements, seed=random_seed, stream=0, scale=0.0625)
     k_values = _rand_values(cfg.kv_elements, seed=random_seed, stream=1, scale=0.0625)
     v_values = _rand_values(cfg.kv_elements, seed=random_seed, stream=2, scale=0.125)
@@ -87,15 +98,18 @@ def compute_flash_attention_f32_reference(
     head_dim: int,
     *,
     random_seed: int = 0,
+    seq_n: int | None = None,
 ) -> tuple[float, ...]:
-    cfg = _FlashAttentionConfig(block_m, block_n, head_dim, random_seed)
+    cfg = _FlashAttentionConfig(
+        block_m, block_n, head_dim, random_seed=random_seed, seq_n=seq_n
+    )
     q_values, k_values, v_values = generate_flash_attention_f32_inputs(
-        block_m, block_n, head_dim, random_seed=random_seed
+        block_m, block_n, head_dim, random_seed=random_seed, seq_n=seq_n
     )
     out: list[float] = []
     for m in range(cfg.block_m):
         scores: list[float] = []
-        for n in range(cfg.block_n):
+        for n in range(cfg.seq_len):
             score = 0.0
             for d in range(cfg.head_dim):
                 score += q_values[m * cfg.head_dim + d] * k_values[n * cfg.head_dim + d]
@@ -137,22 +151,103 @@ def _load_q(
     return _load_f32(bld, bld.ptr_add(q_ptr, q_off))
 
 
+def _load_q_regs(
+    bld: dsl.FunctionBuilder,
+    q_ptr: dsl.Value,
+    lane: dsl.Value,
+    head_dim: int,
+) -> tuple[dsl.Value, ...]:
+    return tuple(_load_q(bld, q_ptr, lane, head_dim, k) for k in range(head_dim))
+
+
 def _score_for_n(
     bld: dsl.FunctionBuilder,
     cfg: _FlashAttentionConfig,
-    q_ptr: dsl.Value,
+    q_regs: tuple[dsl.Value, ...],
     k_ptr: dsl.Value,
-    lane: dsl.Value,
     n: int,
 ) -> dsl.Value:
     score: dsl.Value | None = None
-    for k in range(cfg.head_dim):
-        q = _load_q(bld, q_ptr, lane, cfg.head_dim, k)
+    for k, q in enumerate(q_regs):
         kval = _load_f32(bld, _ptr_add_const(bld, k_ptr, n * cfg.head_dim + k))
         term = bld.fmul(q, kval)
         score = term if score is None else bld.fadd(score, term)
     assert score is not None
     return score
+
+
+def _max_all(bld: dsl.FunctionBuilder, values: tuple[dsl.Value, ...]) -> dsl.Value:
+    result = values[0]
+    for value in values[1:]:
+        result = bld.fmax(result, value)
+    return result
+
+
+def _tile_scores(
+    bld: dsl.FunctionBuilder,
+    cfg: _FlashAttentionConfig,
+    q_regs: tuple[dsl.Value, ...],
+    k_ptr: dsl.Value,
+    start_n: int,
+) -> tuple[tuple[int, ...], tuple[dsl.Value, ...]]:
+    end_n = min(start_n + cfg.block_n, cfg.seq_len)
+    ns = tuple(range(start_n, end_n))
+    return ns, tuple(_score_for_n(bld, cfg, q_regs, k_ptr, n) for n in ns)
+
+
+def _emit_first_tile(
+    bld: dsl.FunctionBuilder,
+    cfg: _FlashAttentionConfig,
+    q_regs: tuple[dsl.Value, ...],
+    k_ptr: dsl.Value,
+    v_ptr: dsl.Value,
+    d_expr: ixsimpl.Expr,
+    bindings: dict[ixsimpl.Expr, dsl.Value],
+) -> tuple[dsl.Value, dsl.Value, dsl.Value]:
+    ns, scores = _tile_scores(bld, cfg, q_regs, k_ptr, 0)
+    row_max = _max_all(bld, scores)
+    denom: dsl.Value | None = None
+    numer: dsl.Value | None = None
+
+    for n, score in zip(ns, scores, strict=True):
+        prob = bld.fexp2(bld.fsub(score, row_max))
+        denom = prob if denom is None else bld.fadd(denom, prob)
+        v_off = bld.index_expr(n * cfg.head_dim + d_expr, bindings=bindings)
+        v_val = _load_f32(bld, bld.ptr_add(v_ptr, v_off))
+        weighted = bld.fmul(prob, v_val)
+        numer = weighted if numer is None else bld.fadd(numer, weighted)
+
+    assert denom is not None and numer is not None
+    return row_max, denom, numer
+
+
+def _emit_online_tile(
+    bld: dsl.FunctionBuilder,
+    cfg: _FlashAttentionConfig,
+    q_regs: tuple[dsl.Value, ...],
+    k_ptr: dsl.Value,
+    v_ptr: dsl.Value,
+    d_expr: ixsimpl.Expr,
+    bindings: dict[ixsimpl.Expr, dsl.Value],
+    start_n: int,
+    row_max: dsl.Value,
+    denom: dsl.Value,
+    numer: dsl.Value,
+) -> tuple[dsl.Value, dsl.Value, dsl.Value]:
+    ns, scores = _tile_scores(bld, cfg, q_regs, k_ptr, start_n)
+    next_max = bld.fmax(row_max, _max_all(bld, scores))
+    alpha = bld.fexp2(bld.fsub(row_max, next_max))
+    next_denom = bld.fmul(denom, alpha)
+    next_numer = bld.fmul(numer, alpha)
+
+    for n, score in zip(ns, scores, strict=True):
+        prob = bld.fexp2(bld.fsub(score, next_max))
+        next_denom = bld.fadd(next_denom, prob)
+        v_off = bld.index_expr(n * cfg.head_dim + d_expr, bindings=bindings)
+        v_val = _load_f32(bld, bld.ptr_add(v_ptr, v_off))
+        next_numer = bld.fadd(next_numer, bld.fmul(prob, v_val))
+
+    return next_max, next_denom, next_numer
 
 
 def _emit_kernel(bld: dsl.FunctionBuilder, cfg: _FlashAttentionConfig) -> None:
@@ -162,26 +257,32 @@ def _emit_kernel(bld: dsl.FunctionBuilder, cfg: _FlashAttentionConfig) -> None:
     d_expr = dsl.mod(lane_sym, cfg.head_dim)
     bindings = {lane_sym: lane}
 
-    scores = tuple(
-        _score_for_n(bld, cfg, q_arg, k_arg, lane, n) for n in range(cfg.block_n)
+    q_regs = _load_q_regs(bld, q_arg, lane, cfg.head_dim)
+    row_max, denom, numer = _emit_first_tile(
+        bld,
+        cfg,
+        q_regs,
+        k_arg,
+        v_arg,
+        d_expr,
+        bindings,
     )
-    row_max = scores[0]
-    for score in scores[1:]:
-        row_max = bld.fmax(row_max, score)
 
-    probs: list[dsl.Value] = []
-    denom: dsl.Value | None = None
-    numer: dsl.Value | None = None
-    for n, score in enumerate(scores):
-        prob = bld.fexp2(bld.fsub(score, row_max))
-        probs.append(prob)
-        denom = prob if denom is None else bld.fadd(denom, prob)
-        v_off = bld.index_expr(n * cfg.head_dim + d_expr, bindings=bindings)
-        v_val = _load_f32(bld, bld.ptr_add(v_arg, v_off))
-        term = bld.fmul(prob, v_val)
-        numer = term if numer is None else bld.fadd(numer, term)
+    for start_n in range(cfg.block_n, cfg.seq_len, cfg.block_n):
+        row_max, denom, numer = _emit_online_tile(
+            bld,
+            cfg,
+            q_regs,
+            k_arg,
+            v_arg,
+            d_expr,
+            bindings,
+            start_n,
+            row_max,
+            denom,
+            numer,
+        )
 
-    assert denom is not None and numer is not None
     out_val = bld.fmul(numer, bld.frcp(denom))
     out_off = bld.index_expr(lane_sym, bindings=bindings)
     bld.store(out_val, bld.ptr_add(out_arg, out_off))
@@ -220,7 +321,11 @@ def _emit_host(bld: dsl.FunctionBuilder, cfg: _FlashAttentionConfig) -> None:
     threads = bld.constant(index, 32)
 
     q_values, k_values, v_values = generate_flash_attention_f32_inputs(
-        cfg.block_m, cfg.block_n, cfg.head_dim, random_seed=cfg.random_seed
+        cfg.block_m,
+        cfg.block_n,
+        cfg.head_dim,
+        random_seed=cfg.random_seed,
+        seq_n=cfg.seq_n,
     )
     q_buf = bld.alloc([cfg.q_elements], f32)
     k_buf = bld.alloc([cfg.kv_elements], f32)
@@ -265,8 +370,11 @@ def build_flash_attention_f32_module(
     block_n: int = 8,
     head_dim: int = 8,
     random_seed: int = 0,
+    seq_n: int | None = None,
 ) -> Module:
-    cfg = _FlashAttentionConfig(block_m, block_n, head_dim, random_seed)
+    cfg = _FlashAttentionConfig(
+        block_m, block_n, head_dim, random_seed=random_seed, seq_n=seq_n
+    )
     bld = dsl.ModuleBuilder()
     with bld:
         dyn_f32 = dsl.dynamic_1d_memref_type(dsl.f32())
