@@ -288,6 +288,142 @@ func.func @cast_wrong_policy_type(%x: f32) {
 
 // -----
 
+func.func @pack_empty() {
+  // expected-error @+1 {{requires at least one input}}
+  %r = "wave.pack"() : () -> vector<1xf16>
+  return
+}
+
+// -----
+
+func.func @pack_scalar_type_mismatch(%a: f16, %b: i16) {
+  // expected-error @+1 {{requires all operands to have the same type}}
+  %r = wave.pack %a, %b : f16, i16 -> vector<2xf16>
+  return
+}
+
+// -----
+
+func.func @pack_scalar_result_not_vector(%a: f16, %b: f16) {
+  // expected-error @+1 {{result #0 must be 1-D vector or wave SIMD of 1-D vector}}
+  %r = "wave.pack"(%a, %b) : (f16, f16) -> f16
+  return
+}
+
+// -----
+
+func.func @pack_result_length_mismatch(%a: f16, %b: f16) {
+  // expected-error @+1 {{input count must match result vector length}}
+  %r = wave.pack %a, %b : f16, f16 -> vector<3xf16>
+  return
+}
+
+// -----
+
+func.func @pack_scalar_result_simd(%a: f16, %b: f16) {
+  // expected-error @+1 {{result must not be SIMD when inputs are scalar}}
+  %r = "wave.pack"(%a, %b) : (f16, f16) -> !wave.simd<vector<2xf16>, 32>
+  return
+}
+
+// -----
+
+func.func @pack_scalar_result_element_mismatch(%a: f16, %b: f16) {
+  // expected-error @+1 {{result vector element type must match inputs}}
+  %r = wave.pack %a, %b : f16, f16 -> vector<2xi16>
+  return
+}
+
+// -----
+
+func.func @pack_simd_width_mismatch(%a: !wave.simd<f16, 32>, %b: !wave.simd<f16, 64>) {
+  // expected-error @+1 {{requires all operands to have the same type}}
+  %r = wave.pack %a, %b : !wave.simd<f16, 32>, !wave.simd<f16, 64> -> !wave.simd<vector<2xf16>, 32>
+  return
+}
+
+// -----
+
+func.func @pack_simd_result_not_simd(%a: !wave.simd<f16, 32>, %b: !wave.simd<f16, 32>) {
+  // expected-error @+1 {{result must be SIMD when inputs are SIMD}}
+  %r = "wave.pack"(%a, %b) : (!wave.simd<f16, 32>, !wave.simd<f16, 32>) -> vector<2xf16>
+  return
+}
+
+// -----
+
+func.func @pack_simd_result_width_mismatch(%a: !wave.simd<f16, 32>, %b: !wave.simd<f16, 32>) {
+  // expected-error @+1 {{result SIMD width must match inputs}}
+  %r = wave.pack %a, %b : !wave.simd<f16, 32>, !wave.simd<f16, 32> -> !wave.simd<vector<2xf16>, 64>
+  return
+}
+
+// -----
+
+func.func @pack_mixed_scalar_simd(%a: f16, %b: !wave.simd<f16, 32>) {
+  // expected-error @+1 {{requires all operands to have the same type}}
+  %r = "wave.pack"(%a, %b) : (f16, !wave.simd<f16, 32>) -> vector<2xf16>
+  return
+}
+
+// -----
+
+func.func @extract_scalar_source_not_vector(%a: f16) {
+  // expected-error @+1 {{operand #0 must be 1-D vector or wave SIMD of 1-D vector}}
+  %r = wave.extract %a[0] : f16 -> f16
+  return
+}
+
+// -----
+
+func.func @extract_out_of_bounds(%a: vector<2xf16>) {
+  // expected-error @+1 {{index must be in source vector bounds}}
+  %r = wave.extract %a[2] : vector<2xf16> -> f16
+  return
+}
+
+// -----
+
+func.func @extract_negative_index(%a: vector<2xf16>) {
+  // expected-error @+1 {{attribute 'index' failed to satisfy constraint}}
+  %r = wave.extract %a[-1] : vector<2xf16> -> f16
+  return
+}
+
+// -----
+
+func.func @extract_result_type_mismatch(%a: vector<2xf16>) {
+  // expected-error @+1 {{result type must match source vector element}}
+  %r = wave.extract %a[1] : vector<2xf16> -> i16
+  return
+}
+
+// -----
+
+func.func @extract_simd_result_width_mismatch(%a: !wave.simd<vector<2xf16>, 32>) {
+  // expected-error @+1 {{result SIMD width must match source}}
+  %r = wave.extract %a[1] : !wave.simd<vector<2xf16>, 32> -> !wave.simd<f16, 64>
+  return
+}
+
+// -----
+
+func.func @extract_simd_result_required(%a: !wave.simd<vector<2xf16>, 32>) {
+  // expected-error @+1 {{result must be SIMD when source is SIMD}}
+  %r = wave.extract %a[1] : !wave.simd<vector<2xf16>, 32> -> f16
+  return
+}
+
+// -----
+
+func.func @extract_simd_result_element_mismatch(%a: !wave.simd<vector<2xf16>, 32>) {
+  // expected-error @+1 {{result element type must match source vector element}}
+  %r = wave.extract %a[1] : !wave.simd<vector<2xf16>, 32> -> !wave.simd<i16, 32>
+  return
+}
+
+// -----
+
 func.func @cmpi_operand_simd_mismatch(%a: !wave.simd<i32, 32>, %b: !wave.simd<i32, 64>) {
   // expected-error @+1 {{operands must have the same SIMD type}}
   %m = wave.cmpi ult %a, %b : !wave.simd<i32, 32>, !wave.simd<i32, 64> -> !wave.mask<32>

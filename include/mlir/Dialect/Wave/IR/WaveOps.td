@@ -163,6 +163,28 @@ def Wave_CastOp : Wave_Op<"cast", [Pure]> {
   let hasVerifier = 1;
 }
 
+def Wave_PackOp : Wave_Op<"pack", [Pure, SameTypeOperands]> {
+  let summary = "pack values into a vector";
+  let arguments = (ins Variadic<AnyType>:$inputs);
+  let results = (outs Wave_1DVectorOrSimdOf1DVector:$result);
+  let assemblyFormat = [{
+    $inputs attr-dict `:` type($inputs) `->` type($result)
+  }];
+  let hasVerifier = 1;
+}
+
+def Wave_ExtractOp : Wave_Op<"extract", [Pure]> {
+  let summary = "extract one element from a vector";
+  let arguments = (ins Wave_1DVectorOrSimdOf1DVector:$source,
+                       ConfinedAttr<I64Attr, [IntNonNegative]>:$index);
+  let results = (outs AnyType:$result);
+  let assemblyFormat = [{
+    $source `[` $index `]` attr-dict
+    `:` type($source) `->` type($result)
+  }];
+  let hasVerifier = 1;
+}
+
 //===----------------------------------------------------------------------===//
 // Width-independent integer arithmetic over uniform-or-SIMD operands.
 //

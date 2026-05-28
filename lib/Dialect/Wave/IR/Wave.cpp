@@ -327,6 +327,72 @@ LogicalResult CastOp::verify() {
   return verifyWaveCastPolicy(*this, *source, *result, *policy);
 }
 
+static VectorType getWaveVectorPayloadType(Type type) {
+  if (SimdType simdType = dyn_cast<SimdType>(type))
+    return cast<VectorType>(simdType.getElementType());
+  return cast<VectorType>(type);
+}
+
+LogicalResult PackOp::verify() {
+  OperandRange inputs = getInputs();
+  if (inputs.empty())
+    return emitOpError("requires at least one input");
+
+  Type inputType = inputs.front().getType();
+  Type inputElementType = inputType;
+  std::optional<int64_t> inputSimdWidth;
+  if (SimdType inputSimd = dyn_cast<SimdType>(inputType)) {
+    inputElementType = inputSimd.getElementType();
+    inputSimdWidth = inputSimd.getWidth();
+  }
+
+  Type resultType = getResult().getType();
+  if (SimdType resultSimd = dyn_cast<SimdType>(resultType)) {
+    if (!inputSimdWidth)
+      return emitOpError("result must not be SIMD when inputs are scalar");
+    if (resultSimd.getWidth() != *inputSimdWidth)
+      return emitOpError("result SIMD width must match inputs");
+  } else if (inputSimdWidth) {
+    return emitOpError("result must be SIMD when inputs are SIMD");
+  }
+
+  VectorType vectorType = getWaveVectorPayloadType(resultType);
+  if (vectorType.getElementType() != inputElementType)
+    return emitOpError("result vector element type must match inputs");
+  if (static_cast<size_t>(vectorType.getNumElements()) != inputs.size())
+    return emitOpError("input count must match result vector length");
+  return success();
+}
+
+LogicalResult ExtractOp::verify() {
+  Type sourceType = getSource().getType();
+  std::optional<int64_t> simdWidth;
+  if (SimdType sourceSimd = dyn_cast<SimdType>(sourceType)) {
+    simdWidth = sourceSimd.getWidth();
+  }
+
+  VectorType vectorType = getWaveVectorPayloadType(sourceType);
+  int64_t index = getIndex();
+  if (index >= vectorType.getNumElements())
+    return emitOpError("index must be in source vector bounds");
+
+  Type resultType = getResult().getType();
+  if (simdWidth) {
+    SimdType resultSimd = dyn_cast<SimdType>(resultType);
+    if (!resultSimd)
+      return emitOpError("result must be SIMD when source is SIMD");
+    if (resultSimd.getWidth() != *simdWidth)
+      return emitOpError("result SIMD width must match source");
+    if (resultSimd.getElementType() != vectorType.getElementType())
+      return emitOpError(
+          "result element type must match source vector element");
+    return success();
+  }
+  if (resultType != vectorType.getElementType())
+    return emitOpError("result type must match source vector element");
+  return success();
+}
+
 namespace {
 // Operand shape for the width-independent arith ops: element bit-width
 // plus an optional SIMD wave width (nullopt = uniform scalar).

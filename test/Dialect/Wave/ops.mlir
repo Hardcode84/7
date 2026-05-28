@@ -115,6 +115,26 @@ func.func @wave_cast_ops(%vf32: !wave.simd<f32, 32>, %vf16: !wave.simd<f16, 32>,
   func.return
 }
 
+// CHECK-LABEL: func.func @wave_pack_extract_ops
+// CHECK-SAME: ([[A:%.*]]: f16, [[B:%.*]]: f16, [[C:%.*]]: f16, [[VA:%.*]]: !wave.simd<f16, 32>, [[VB:%.*]]: !wave.simd<f16, 32>)
+func.func @wave_pack_extract_ops(%a: f16, %b: f16, %c: f16,
+                                 %va: !wave.simd<f16, 32>,
+                                 %vb: !wave.simd<f16, 32>)
+    -> (vector<3xf16>, f16, !wave.simd<vector<2xf16>, 32>,
+        !wave.simd<f16, 32>) {
+  // CHECK: [[PACK:%.*]] = wave.pack [[A]], [[B]], [[C]] : f16, f16, f16 -> vector<3xf16>
+  %pack = wave.pack %a, %b, %c : f16, f16, f16 -> vector<3xf16>
+  // CHECK: [[EXTRACT:%.*]] = wave.extract [[PACK]][2] : vector<3xf16> -> f16
+  %extract = wave.extract %pack[2] : vector<3xf16> -> f16
+  // CHECK: [[VPACK:%.*]] = wave.pack [[VA]], [[VB]] : !wave.simd<f16, 32>, !wave.simd<f16, 32> -> !wave.simd<vector<2xf16>, 32>
+  %vpack = wave.pack %va, %vb : !wave.simd<f16, 32>, !wave.simd<f16, 32> -> !wave.simd<vector<2xf16>, 32>
+  // CHECK: [[VEXTRACT:%.*]] = wave.extract [[VPACK]][1] : !wave.simd<vector<2xf16>, 32> -> !wave.simd<f16, 32>
+  %vextract = wave.extract %vpack[1] : !wave.simd<vector<2xf16>, 32> -> !wave.simd<f16, 32>
+  func.return %pack, %extract, %vpack, %vextract
+      : vector<3xf16>, f16, !wave.simd<vector<2xf16>, 32>,
+        !wave.simd<f16, 32>
+}
+
 // CHECK-LABEL: func.func @wave_assume_range
 func.func @wave_assume_range(%u32: i32, %u64: i64,
                              %v: !wave.simd<i32, 32>) {

@@ -109,6 +109,26 @@ def Wave_Index
     : Type<CPred<"::llvm::isa<::mlir::wave::WaveIndexType>($_self)">,
            "wave index type">;
 
+def Wave_1DVector
+    : Type<And<[CPred<"::llvm::isa<::mlir::VectorType>($_self)">,
+                CPred<"::llvm::cast<::mlir::VectorType>($_self).getRank() == "
+                      "1">]>,
+           "1-D vector">;
+
+def Wave_SimdOf1DVector
+    : Type<And<[CPred<"::llvm::isa<::mlir::wave::SimdType>($_self)">,
+                CPred<"::llvm::isa<::mlir::VectorType>("
+                      "::llvm::cast<::mlir::wave::SimdType>($_self)"
+                      ".getElementType())">,
+                CPred<"::llvm::cast<::mlir::VectorType>("
+                      "::llvm::cast<::mlir::wave::SimdType>($_self)"
+                      ".getElementType()).getRank() == 1">]>,
+           "wave SIMD of 1-D vector">;
+
+def Wave_1DVectorOrSimdOf1DVector
+    : Type<Or<[Wave_1DVector.predicate, Wave_SimdOf1DVector.predicate]>,
+           "1-D vector or wave SIMD of 1-D vector">;
+
 // `!wave.simd<iN, W>` where iN is a signless integer.
 def Wave_SimdOfSignlessInteger
     : Type<And<[CPred<"::llvm::isa<::mlir::wave::SimdType>($_self)">,
