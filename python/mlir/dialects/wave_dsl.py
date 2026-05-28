@@ -108,6 +108,9 @@ mod = ixsimpl.mod
 # ---------------------------------------------------------------------------
 
 
+CastKind = wave.CastKind
+
+
 def i8() -> IntegerType:
     return IntegerType.get_signless(8)
 
@@ -546,6 +549,19 @@ class FunctionBuilder:
     def binary(self, kind: str, lhs: Value, rhs: Value) -> Value:
         return wave.BinaryOp(lhs.type, kind, lhs, rhs).result
 
+    def cast(
+        self,
+        source: Value,
+        result_type: Type,
+        kind: object = CastKind.FpConvert,
+        *,
+        policy: Attribute | None = None,
+    ) -> Value:
+        return wave.CastOp(result_type, kind, source, policy=policy).result
+
+    def fpconvert(self, source: Value, result_type: Type) -> Value:
+        return self.cast(source, result_type, CastKind.FpConvert)
+
     def cmpi(
         self,
         predicate: CmpIPredicate | str,
@@ -943,6 +959,7 @@ def module() -> ModuleBuilder:
 
 __all__ = [
     "BufferAddressSpaceAttr",
+    "CastKind",
     "CmpIPredicate",
     "ExprAttr",
     "F16Type",

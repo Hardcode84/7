@@ -434,6 +434,7 @@ LogicalResult WaveAMDMachineSelector::selectOperation(Operation *op) {
       .Case<SplatOp>([&](auto o) { return selectSplat(o); })
       .Case<AssumeRangeOp>([&](auto o) { return selectAssumeRange(o); })
       .Case<BinaryOp>([&](auto o) { return selectBinary(o); })
+      .Case<CastOp>([&](auto o) { return selectCast(o); })
       .Case<AddiOp>([&](auto o) { return selectAddi(o); })
       .Case<MuliOp>([&](auto o) { return selectMuli(o); })
       .Case<ShliOp>([&](auto o) { return selectShli(o); })
@@ -853,6 +854,48 @@ LogicalResult WaveAMDMachineSelector::selectFExp2(FExp2Op op) {
 
 LogicalResult WaveAMDMachineSelector::selectFRcp(FRcpOp op) {
   return selectF32<waveamdmachine::VRcpF32Op>(*this, op, op.getSource());
+}
+
+static CastRounding getFpConvertRounding(CastOp op) {
+  std::optional<DictionaryAttr> policy = op.getPolicy();
+  if (!policy)
+    return CastRounding::RNE;
+  Attribute attr = policy->get("rounding");
+  if (!attr)
+    return CastRounding::RNE;
+  return cast<CastRoundingPolicyAttr>(attr).getValue();
+}
+
+LogicalResult WaveAMDMachineSelector::selectCast(CastOp op) {
+  if (op.getKind() != CastKind::FpConvert)
+    return op.emitError(
+        "WaveAMDMachine backend only supports fpconvert wave.cast");
+  SimdType sourceType = dyn_cast<SimdType>(op.getSource().getType());
+  SimdType resultType = dyn_cast<SimdType>(op.getResult().getType());
+  if (!sourceType || !resultType)
+    return op.emitError("WaveAMDMachine backend only supports SIMD wave.cast");
+  Type sourceElement = sourceType.getElementType();
+  Type resultElement = resultType.getElementType();
+  if (getFpConvertRounding(op) != CastRounding::RNE)
+    return op.emitError(
+        "WaveAMDMachine fpconvert lowering supports only rne rounding");
+
+  Value source = ensureVGPRForVSrc1(op.getLoc(), expect(op.getSource(), op));
+  Type vgprType = getRegType(op.getContext(), waveamdmachine::RegClass::VGPR);
+  if (sourceElement.isF32() && resultElement.isF16()) {
+    values[op.getResult()] = waveamdmachine::VCvtF16F32Op::create(
+        builder, op.getLoc(), vgprType, source);
+    eraseIfTopLevel(op);
+    return success();
+  }
+  if (sourceElement.isF16() && resultElement.isF32()) {
+    values[op.getResult()] = waveamdmachine::VCvtF32F16Op::create(
+        builder, op.getLoc(), vgprType, source);
+    eraseIfTopLevel(op);
+    return success();
+  }
+  return op.emitError(
+      "WaveAMDMachine fpconvert lowering supports only f32/f16 SIMD");
 }
 
 // Materialize an SGPR or immediate value into a fresh VGPR so it can be

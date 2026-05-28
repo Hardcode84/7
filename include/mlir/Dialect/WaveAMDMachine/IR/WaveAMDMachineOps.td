@@ -386,6 +386,14 @@ def WaveAMDMachine_VRcpF32Op
     : WaveAMDMachine_UnaryResult<"v_rcp_f32", WaveAMDMachine_VGPR1,
                               WaveAMDMachine_VGPR1,
                               [WaveAMDMachine_VALU, Pure]>;
+def WaveAMDMachine_VCvtF16F32Op
+    : WaveAMDMachine_UnaryResult<"v_cvt_f16_f32", WaveAMDMachine_VGPR1,
+                              WaveAMDMachine_VGPR1,
+                              [WaveAMDMachine_VALU, Pure]>;
+def WaveAMDMachine_VCvtF32F16Op
+    : WaveAMDMachine_UnaryResult<"v_cvt_f32_f16", WaveAMDMachine_VGPR1,
+                              WaveAMDMachine_VGPR1,
+                              [WaveAMDMachine_VALU, Pure]>;
 def WaveAMDMachine_VCmpEqU32Op
     : WaveAMDMachine_BinaryResult<"v_cmp_eq_u32", WaveAMDMachine_RegOrImm,
                                WaveAMDMachine_SGPR1, [WaveAMDMachine_VALU]>;

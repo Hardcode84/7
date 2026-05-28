@@ -179,6 +179,19 @@ def test_waveamd_dma_load_lds():
         print(m.module)
 
 
+# CHECK-LABEL: TEST: test_wave_cast_helper
+@run
+def test_wave_cast_helper():
+    with w.module() as m:
+        with m.function("cast_kernel", [], kernel=True) as f:
+            one = f.constant(w.f32(), 1.0)
+            vx = f.splat(one, w.f32())
+            f.fpconvert(vx, w.simd_type(w.f16()))
+        # CHECK: wave.cast fpconvert
+        # CHECK-SAME: !wave.simd<f32, 32> -> !wave.simd<f16, 32>
+        print(m.module)
+
+
 # CHECK-LABEL: TEST: test_index_expr
 @run
 def test_index_expr():

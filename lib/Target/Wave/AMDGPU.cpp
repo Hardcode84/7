@@ -328,6 +328,29 @@ private:
     return isGfx8Or9() ? llvm::AMDGPU::V_RCP_F32_e32_vi
                        : llvm::AMDGPU::V_RCP_F32_e32_gfx11;
   }
+  unsigned vCvtF16F32() const {
+    if (isGfx8Or9())
+      return llvm::AMDGPU::V_CVT_F16_F32_e64_vi;
+    if (isaVersion.Major == 10)
+      return llvm::AMDGPU::V_CVT_F16_F32_e64_gfx10;
+    if (isaVersion.Major == 11)
+      return llvm::AMDGPU::V_CVT_F16_F32V_CVT_F16_F32_t16_e64_gfx11;
+    if (isaVersion.Major == 12)
+      return llvm::AMDGPU::V_CVT_F16_F32V_CVT_F16_F32_t16_e64_gfx12;
+    return llvm::AMDGPU::V_CVT_F16_F32V_CVT_F16_F32_t16_e64_gfx13;
+  }
+  unsigned vCvtF32F16() const {
+    if (isGfx8Or9())
+      return llvm::AMDGPU::V_CVT_F32_F16_e64_vi;
+    if (isaVersion.Major == 10)
+      return llvm::AMDGPU::V_CVT_F32_F16_e64_gfx10;
+    if (isaVersion.Major == 11)
+      return llvm::AMDGPU::V_CVT_F32_F16V_CVT_F32_F16_t16_e64_gfx11;
+    if (isaVersion.Major == 12)
+      return llvm::AMDGPU::V_CVT_F32_F16V_CVT_F32_F16_t16_e64_gfx12;
+    return llvm::AMDGPU::V_CVT_F32_F16V_CVT_F32_F16_t16_e64_gfx13;
+  }
+  bool usesTrue16Cvt() const { return isaVersion.Major >= 11; }
   unsigned vCmpEqU32() const {
     return isGfx8Or9() ? llvm::AMDGPU::V_CMP_EQ_U32_e64_vi
                        : llvm::AMDGPU::V_CMP_EQ_U32_e64_gfx11;
@@ -831,6 +854,16 @@ private:
     return llvm::MCOperand::createReg(mcVGPRReg(getPhys(value) + component, 1));
   }
 
+  llvm::MCOperand toMCVGPRLo16(Value value) const {
+    waveamdmachine::RegType regType =
+        cast<waveamdmachine::RegType>(value.getType());
+    if (regType.getRegClass() != waveamdmachine::RegClass::VGPR ||
+        regType.getWidth() != 1)
+      llvm_unreachable("expected scalar VGPR");
+    return llvm::MCOperand::createReg(llvm::AMDGPU::VGPR0_LO16 +
+                                      getPhys(value));
+  }
+
   llvm::MCOperand toMCSGPRComponent(Value value, unsigned component) const {
     auto regType = cast<waveamdmachine::RegType>(value.getType());
     if (regType.getRegClass() != waveamdmachine::RegClass::SGPR ||
@@ -1152,6 +1185,24 @@ private:
           isa<waveamdmachine::VExpF32Op>(op) ? vExpF32() : vRcpF32();
       return emitMC(opcode,
                     {toMCOperand(result()), toMCOperand(op.getOperand(0))});
+    }
+    if (isa<waveamdmachine::VCvtF16F32Op, waveamdmachine::VCvtF32F16Op>(op)) {
+      bool f16FromF32 = isa<waveamdmachine::VCvtF16F32Op>(op);
+      unsigned opcode = f16FromF32 ? vCvtF16F32() : vCvtF32F16();
+      if (usesTrue16Cvt()) {
+        llvm::MCOperand dst =
+            f16FromF32 ? toMCVGPRLo16(result()) : toMCOperand(result());
+        llvm::MCOperand src = f16FromF32 ? toMCOperand(op.getOperand(0))
+                                         : toMCVGPRLo16(op.getOperand(0));
+        return emitMC(opcode, {dst, llvm::MCOperand::createImm(0), src,
+                               llvm::MCOperand::createImm(0),
+                               llvm::MCOperand::createImm(0),
+                               llvm::MCOperand::createImm(0)});
+      }
+      return emitMC(
+          opcode, {toMCOperand(result()), llvm::MCOperand::createImm(0),
+                   toMCOperand(op.getOperand(0)), llvm::MCOperand::createImm(0),
+                   llvm::MCOperand::createImm(0)});
     }
     if (isa<waveamdmachine::VCmpEqU32Op, waveamdmachine::VCmpNeU32Op,
             waveamdmachine::VCmpLtU32Op, waveamdmachine::VCmpLeU32Op,
