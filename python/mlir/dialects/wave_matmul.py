@@ -53,8 +53,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from mlir._mlir_libs._waveDialectsNanobind import PTupleType
-from mlir.dialects import scf, wavemeta
 from mlir.dialects import wave_dsl as dsl
+from mlir.dialects import wavemeta
 from mlir.ir import (
     DictAttr,
     IndexType,
@@ -1053,7 +1053,7 @@ def _emit_kernel(bld: dsl.FunctionBuilder, cfg: _MatmulConfig) -> None:
         init_args=init_args,
     ) as forop:
         state = _split_loop_state(tuple(forop.inner_iter_args), cfg)
-        scf.YieldOp(
+        bld.yield_(
             _emit_pipelined_step(
                 bld,
                 cfg,

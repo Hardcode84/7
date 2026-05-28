@@ -906,8 +906,8 @@ class FunctionBuilder:
         When `init_args` is non-empty the helper yields the underlying
         `scf.ForOp` so the caller can access `forop.induction_variable`,
         `forop.inner_iter_args`, and (after the `with` exits)
-        `forop.results`. The caller is responsible for emitting an
-        `scf.yield` with the next-iteration carry values.
+        `forop.results`. The caller is responsible for emitting
+        `bld.yield_(...)` with next-iteration carry values.
 
         `nonzero_trip=True` attaches a `wave.nonzero_trip` unit attr on
         the `scf.for`, which the selector uses to skip the pre-test
@@ -922,7 +922,10 @@ class FunctionBuilder:
                 yield forop
             else:
                 yield forop.induction_variable
-                scf.YieldOp([])
+                self.yield_()
+
+    def yield_(self, values: Sequence[Value] = ()) -> None:
+        scf.YieldOp(list(values))
 
     def call(
         self,

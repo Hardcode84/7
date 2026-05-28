@@ -283,8 +283,6 @@ def test_uniform_for_loop_nonzero_trip():
 # CHECK-LABEL: TEST: test_uniform_for_loop_with_init_args
 @run
 def test_uniform_for_loop_with_init_args():
-    from mlir.dialects import scf
-
     with w.module() as m:
         with m.function("loop_carry_kernel", [w.ptr_type(w.i32())], kernel=True) as f:
             (_out,) = f.args
@@ -294,7 +292,7 @@ def test_uniform_for_loop_with_init_args():
             init = f.constant(w.i32(), 7)
             with f.for_loop(lo, hi, step, init_args=(init,)) as forop:
                 (acc,) = forop.inner_iter_args
-                scf.YieldOp([acc])
+                f.yield_([acc])
             _ = forop.results[0]
         # CHECK: func.func @loop_carry_kernel
         # CHECK: scf.for {{.*}} iter_args(%{{.+}} = %{{.+}}) -> (i32)  : i32 {

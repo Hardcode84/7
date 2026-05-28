@@ -11,7 +11,6 @@ import struct
 from dataclasses import dataclass
 
 import ixsimpl
-from mlir.dialects import scf
 from mlir.dialects import wave_dsl as dsl
 from mlir.ir import Module
 
@@ -730,7 +729,7 @@ def _emit_kernel(bld: dsl.FunctionBuilder, cfg: _FlashAttentionConfig) -> None:
                 )
 
             bld.barrier(*score_tokens)
-            scf.YieldOp(list(_flatten_loop_state(next_states)))
+            bld.yield_(_flatten_loop_state(next_states))
         states = _split_loop_state(tuple(loop.results), cfg.output_chunks)
 
     for chunk, state in enumerate(states):
