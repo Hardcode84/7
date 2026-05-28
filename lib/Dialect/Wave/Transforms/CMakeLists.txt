@@ -11,6 +11,7 @@ add_mlir_dialect_library(MLIRWaveTransforms
   WaveAMDMetadata.cpp
   WaveAMDRegAlloc.cpp
   WaveAMDRegAllocPrep.cpp
+  WaveAMDRegLiveIntervals.cpp
   WaveAMDResourceInfo.cpp
   WaveAttachGPUBinary.cpp
   WaveMetaSpecialize.cpp
