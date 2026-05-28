@@ -15,6 +15,22 @@ func.func @delay_after_lgkm_wait(%x: !waveamdmachine.reg<vgpr, 1>, %y: !waveamdm
   return
 }
 
+// CHECK-LABEL: func.func @delay_before_fpconvert_after_lgkm_wait
+// CHECK: waveamdmachine.s_waitcnt
+// CHECK-NEXT: waveamdmachine.imm 1
+// CHECK-NEXT: waveamdmachine.s_delay_alu
+// CHECK-NEXT: waveamdmachine.v_cvt_f16_f32
+// CHECK-NEXT: waveamdmachine.v_cvt_f32_f16
+func.func @delay_before_fpconvert_after_lgkm_wait(%x: !waveamdmachine.reg<vgpr, 1>) {
+  %wait = waveamdmachine.imm 64519 : !waveamdmachine.imm
+  waveamdmachine.s_waitcnt %wait : (!waveamdmachine.imm) -> ()
+  %h = waveamdmachine.v_cvt_f16_f32 %x
+      : (!waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
+  %f = waveamdmachine.v_cvt_f32_f16 %h
+      : (!waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
+  return
+}
+
 // CHECK-LABEL: func.func @no_delay_after_vmcnt_wait
 // CHECK: waveamdmachine.s_waitcnt
 // CHECK-NEXT: waveamdmachine.v_add_u32
