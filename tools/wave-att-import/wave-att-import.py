@@ -44,7 +44,7 @@ PREFIX_CLASSES = (
     (("buffer_load", "global_load", "flat_load"), "WriteVMEM"),
     (("buffer_store", "global_store", "flat_store"), "WriteVMEM"),
     (("ds_load", "ds_store"), "WriteLDS"),
-    ("v_wmma", "Write16PassWMMA"),
+    ("v_wmma", "Write32Bit"),
     ("s_cbranch", "WriteBranch"),
     ("s_", "WriteSALU"),
     ("v_", "Write32Bit"),

@@ -1,0 +1,10 @@
+# SPDX-FileCopyrightText: 2026 wave-mlir contributors
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+
+sample.hsaco:	file format elf64-amdgpu
+
+Disassembly of section .text:
+
+0000000000002000 <wmma_kernel>:
+	v_wmma_f32_16x16x16_f16 v[0:7], v[8:15], v[16:23], v[0:7]  // 000000002000: DEADBEEF
+	v_wmma_i32_16x16x16_iu8 v[0:7], v[8:11], v[12:15], v[0:7]  // 000000002008: DEADBEEF

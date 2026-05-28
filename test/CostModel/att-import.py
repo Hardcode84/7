@@ -1,5 +1,6 @@
 # ruff: noqa: E501
 # RUN: %PYTHON %S/../../tools/wave-att-import/wave-att-import.py --att-dir %S/Inputs/att-sample --objdump %S/Inputs/att-objdump.txt --summary | FileCheck %s
+# RUN: %PYTHON %S/../../tools/wave-att-import/wave-att-import.py --att-dir %S/Inputs/att-sample --objdump %S/Inputs/att-wmma-objdump.txt --summary | FileCheck %s --check-prefix=WMMA
 # RUN: %PYTHON %S/../../tools/wave-att-import/wave-att-import.py --att-dir %S/Inputs/att-sample --objdump %S/Inputs/att-objdump.txt --windows | FileCheck %s --check-prefix=WIN
 # RUN: %PYTHON %S/../../tools/wave-att-import/wave-att-import.py --att-dir %S/Inputs/att-sample --objdump %S/Inputs/att-objdump.txt --summary --trip-count 0 | FileCheck %s --check-prefix=POS
 # RUN: %PYTHON %S/../../tools/wave-att-import/wave-att-import.py --att-dir %S/Inputs/att-sample --objdump %S/Inputs/att-objdump.txt --summary --trip-count 0 --window-summary | FileCheck %s --check-prefix=SUM
@@ -38,3 +39,6 @@
 # SUM: class,SMEM,1,19.0,31.0,30.0
 # SUM: phase,unknown,1,19.0,31.0,30.0
 # SUM: phase:unknown,SMEM,1,19.0,31.0,30.0
+
+# WMMA: 0x2000,8192,"v_wmma_f32_16x16x16_f16 {{.*}}",v_wmma_f32_16x16x16_f16,Write32Bit,5,0
+# WMMA: 0x2008,8200,"v_wmma_i32_16x16x16_iu8 {{.*}}",v_wmma_i32_16x16x16_iu8,Write32Bit,5,1

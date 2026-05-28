@@ -3,6 +3,7 @@
 // RUN: wave-opt %s --waveamd-machine-schedule='score-func=candidate_greater score-region=0 score-order=0,2,1,3' 2>&1 | FileCheck %s --check-prefix=GREATER
 // RUN: wave-opt %s --waveamd-machine-schedule='score-func=candidate_equal score-region=0 score-order=1,0' 2>&1 | FileCheck %s --check-prefix=EQUAL
 // RUN: wave-opt %s --waveamd-machine-schedule='score-func=candidate_invalid score-region=0 score-order=1,0' 2>&1 | FileCheck %s --check-prefix=INVALID
+// RUN: wave-opt %s --waveamd-machine-schedule='score-func=wmma_latency score-region=0 score-order=0,1' 2>&1 | FileCheck %s --check-prefix=WMMA
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 func.func @candidate_lower(%off: !waveamdmachine.reg<vgpr, 1>,
@@ -46,6 +47,18 @@ func.func @candidate_invalid(%a: !waveamdmachine.reg<vgpr, 1>,
   %rhs = waveamdmachine.v_add_u32 %lhs, %b : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
   return
 }
+
+func.func @wmma_latency(%a: !waveamdmachine.reg<vgpr, 8>,
+                        %b: !waveamdmachine.reg<vgpr, 8>,
+                        %acc: !waveamdmachine.reg<vgpr, 8>) {
+  %first = waveamdmachine.wmma_f32_16x16x16_f16 %a, %b, %acc
+      : (!waveamdmachine.reg<vgpr, 8>, !waveamdmachine.reg<vgpr, 8>,
+         !waveamdmachine.reg<vgpr, 8>) -> !waveamdmachine.reg<vgpr, 8>
+  %second = waveamdmachine.wmma_f32_16x16x16_f16 %a, %b, %first
+      : (!waveamdmachine.reg<vgpr, 8>, !waveamdmachine.reg<vgpr, 8>,
+         !waveamdmachine.reg<vgpr, 8>) -> !waveamdmachine.reg<vgpr, 8>
+  return
+}
 }
 
 // LOWER: waveamd-machine-schedule score func=candidate_lower region=0 order=original cycles=326 issued_ops=3
@@ -62,3 +75,6 @@ func.func @candidate_invalid(%a: !waveamdmachine.reg<vgpr, 1>,
 
 // INVALID: waveamd-machine-schedule score func=candidate_invalid region=0 order=original cycles=10 issued_ops=2
 // INVALID: waveamd-machine-schedule score func=candidate_invalid region=0 order=candidate fallback=original reason=candidate_order_breaks_dependency
+
+// WMMA: waveamd-machine-schedule score func=wmma_latency region=0 order=original cycles=10 issued_ops=2
+// WMMA: waveamd-machine-schedule score func=wmma_latency region=0 order=candidate cycles=10 issued_ops=2

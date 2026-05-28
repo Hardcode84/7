@@ -67,7 +67,8 @@ enum class SchedClass : uint8_t {
   WriteXDL2PassWMMA,
   WriteXDL4PassWMMA,
 
-  // WMMA via the VALU pipeline (gfx11/12 v_wmma_*).
+  // VALU-pipe WMMA classes from LLVM's gfx125x model. Current
+  // gfx11 v_wmma_* lowering uses Write32Bit.
   Write4PassWMMA,
   Write8PassWMMA,
   Write16PassWMMA,
