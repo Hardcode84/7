@@ -60,6 +60,92 @@ static bool isLaneVaryingType(Type type) {
   return false;
 }
 
+static unsigned bitWidth(Type type) {
+  if (auto vecTy = dyn_cast<VectorType>(type)) {
+    Type elementType = vecTy.getElementType();
+    if (elementType.isIntOrFloat())
+      return elementType.getIntOrFloatBitWidth() * vecTy.getNumElements();
+  }
+  if (type.isIntOrFloat())
+    return type.getIntOrFloatBitWidth();
+  return 32;
+}
+
+static unsigned dwordCount(Type type) { return (bitWidth(type) + 31) / 32; }
+
+static bool isVector2F16(Type type) {
+  auto vecTy = dyn_cast<VectorType>(type);
+  return vecTy && vecTy.getRank() == 1 && vecTy.getNumElements() == 2 &&
+         vecTy.getElementType().isF16();
+}
+
+static bool isVector2F32(Type type) {
+  auto vecTy = dyn_cast<VectorType>(type);
+  return vecTy && vecTy.getRank() == 1 && vecTy.getNumElements() == 2 &&
+         vecTy.getElementType().isF32();
+}
+
+static bool isSimdF32(Type type) {
+  auto simdType = dyn_cast<SimdType>(type);
+  return simdType && simdType.getElementType().isF32();
+}
+
+static bool isSimdPackedF16(Type type) {
+  auto simdType = dyn_cast<SimdType>(type);
+  return simdType && isVector2F16(simdType.getElementType());
+}
+
+static bool isSimdPackedF32(Type type) {
+  auto simdType = dyn_cast<SimdType>(type);
+  return simdType && isVector2F32(simdType.getElementType());
+}
+
+static ModuleOp findTargetModule(Operation *op) {
+  ModuleOp mod = dyn_cast<ModuleOp>(op);
+  if (!mod)
+    mod = op->getParentOfType<ModuleOp>();
+  while (mod && !mod->hasAttr("waveamdmachine.target"))
+    mod = mod->getParentOfType<ModuleOp>();
+  return mod;
+}
+
+static FailureOr<llvm::AMDGPU::IsaVersion>
+getTargetIsaVersion(Operation *op, StringRef feature) {
+  ModuleOp mod = findTargetModule(op);
+  if (!mod)
+    return op->emitError(feature)
+           << " requires a waveamdmachine.target module attribute";
+  auto target = mod->getAttrOfType<StringAttr>("waveamdmachine.target");
+  StringRef cpu = target.getValue();
+  std::pair<StringRef, StringRef> split = cpu.rsplit("--");
+  if (!split.second.empty())
+    cpu = split.second;
+  llvm::AMDGPU::IsaVersion version = llvm::AMDGPU::getIsaVersion(cpu);
+  if (version.Major == 0)
+    return mod.emitError("unsupported AMDGPU target: ") << target.getValue();
+  return version;
+}
+
+static LogicalResult requirePackedF16Target(Operation *op, StringRef kind) {
+  FailureOr<llvm::AMDGPU::IsaVersion> isa =
+      getTargetIsaVersion(op, "packed f16 lowering");
+  if (failed(isa))
+    return failure();
+  if (!waveamdmachine::VPkAddF16Op::isSupportedOnIsa(*isa))
+    return op->emitError("packed f16 ") << kind << " lowering requires gfx9+";
+  return success();
+}
+
+static LogicalResult requirePackedCvtTarget(CastOp op) {
+  FailureOr<llvm::AMDGPU::IsaVersion> isa =
+      getTargetIsaVersion(op, "packed f32 to f16 lowering");
+  if (failed(isa))
+    return failure();
+  if (!waveamdmachine::VCvtPkRtzF16F32Op::isSupportedOnIsa(*isa))
+    return op.emitError("packed f32 to f16 lowering requires gfx10+");
+  return success();
+}
+
 LogicalResult WaveAMDMachineSelector::run() {
   if (!func.getBody().hasOneBlock())
     return func.emitError("WaveAMDMachine selection supports one-block funcs");
@@ -374,9 +460,7 @@ unsigned WaveAMDMachineSelector::nonPointerArgWidth(Type type) {
   Type elt = type;
   if (auto simd = dyn_cast<SimdType>(type))
     elt = simd.getElementType();
-  if (elt.isIntOrFloat())
-    return (elt.getIntOrFloatBitWidth() + 31) / 32;
-  return 1;
+  return dwordCount(elt);
 }
 
 void WaveAMDMachineSelector::materializeArgument(BlockArgument arg,
@@ -443,6 +527,7 @@ LogicalResult WaveAMDMachineSelector::selectOperation(Operation *op) {
       .Case<FSubOp>([&](auto o) { return selectFSub(o); })
       .Case<FMulOp>([&](auto o) { return selectFMul(o); })
       .Case<FMaxOp>([&](auto o) { return selectFMax(o); })
+      .Case<FmaOp>([&](auto o) { return selectFma(o); })
       .Case<FExp2Op>([&](auto o) { return selectFExp2(o); })
       .Case<FRcpOp>([&](auto o) { return selectFRcp(o); })
       .Case<IndexExprOp>([&](auto o) { return selectIndexExpr(o); })
@@ -831,24 +916,74 @@ LogicalResult WaveAMDMachineSelector::selectShli(ShliOp op) {
 template <typename MachineOp, typename WaveOp, typename... OperandValues>
 static LogicalResult selectF32(WaveAMDMachineSelector &S, WaveOp op,
                                OperandValues... operands) {
-  SimdType resultType = cast<SimdType>(op.getResult().getType());
-  if (!resultType.getElementType().isF32())
+  if (!isSimdF32(op.getResult().getType()))
     return op.emitError(
         "WaveAMDMachine f32 lowering supports only !wave.simd<f32, W>");
   auto toVGPR = [&](Value operand) {
     return S.ensureVGPRForVSrc1(op.getLoc(), S.expect(operand, op));
   };
-  S.values[op.getResult()] = MachineOp::create(
+  auto selected = MachineOp::create(
       S.builder, op.getLoc(),
       getRegType(S.builder.getContext(), waveamdmachine::RegClass::VGPR),
       toVGPR(operands)...);
+  S.values[op.getResult()] = selected.getResult();
   S.eraseIfTopLevel(op);
   return success();
 }
 
+template <typename MachineOp, typename WaveOp>
+static LogicalResult selectPackedF16Binary(WaveAMDMachineSelector &S, WaveOp op,
+                                           StringRef kind, Value lhs,
+                                           Value rhs) {
+  if (failed(requirePackedF16Target(op.getOperation(), kind)))
+    return failure();
+  auto toVGPR = [&](Value operand) {
+    return S.ensureVGPRForVSrc1(op.getLoc(), S.expect(operand, op));
+  };
+  auto selected = MachineOp::create(
+      S.builder, op.getLoc(),
+      getRegType(S.builder.getContext(), waveamdmachine::RegClass::VGPR),
+      toVGPR(lhs), toVGPR(rhs), false, 0, 3);
+  S.values[op.getResult()] = selected.getResult();
+  S.eraseIfTopLevel(op);
+  return success();
+}
+
+template <typename MachineOp, typename WaveOp>
+static LogicalResult selectPackedF16Ternary(WaveAMDMachineSelector &S,
+                                            WaveOp op, StringRef kind, Value a,
+                                            Value b, Value c) {
+  if (failed(requirePackedF16Target(op.getOperation(), kind)))
+    return failure();
+  auto toVGPR = [&](Value operand) {
+    return S.ensureVGPRForVSrc1(op.getLoc(), S.expect(operand, op));
+  };
+  auto selected = MachineOp::create(
+      S.builder, op.getLoc(),
+      getRegType(S.builder.getContext(), waveamdmachine::RegClass::VGPR),
+      toVGPR(a), toVGPR(b), toVGPR(c), false, 0, 7);
+  S.values[op.getResult()] = selected.getResult();
+  S.eraseIfTopLevel(op);
+  return success();
+}
+
+template <typename F32MachineOp, typename PackedMachineOp, typename WaveOp>
+static LogicalResult selectFloatBinary(WaveAMDMachineSelector &S, WaveOp op,
+                                       StringRef kind) {
+  Type resultType = op.getResult().getType();
+  if (isSimdF32(resultType))
+    return selectF32<F32MachineOp>(S, op, op.getLhs(), op.getRhs());
+  if (isSimdPackedF16(resultType))
+    return selectPackedF16Binary<PackedMachineOp>(S, op, kind, op.getLhs(),
+                                                  op.getRhs());
+  return op.emitError("WaveAMDMachine ")
+         << kind << " lowering supports only !wave.simd<f32, W> or "
+         << "!wave.simd<vector<2xf16>, W>";
+}
+
 LogicalResult WaveAMDMachineSelector::selectFAdd(FAddOp op) {
-  return selectF32<waveamdmachine::VAddF32Op>(*this, op, op.getLhs(),
-                                              op.getRhs());
+  return selectFloatBinary<waveamdmachine::VAddF32Op,
+                           waveamdmachine::VPkAddF16Op>(*this, op, "fadd");
 }
 
 LogicalResult WaveAMDMachineSelector::selectFSub(FSubOp op) {
@@ -857,13 +992,23 @@ LogicalResult WaveAMDMachineSelector::selectFSub(FSubOp op) {
 }
 
 LogicalResult WaveAMDMachineSelector::selectFMul(FMulOp op) {
-  return selectF32<waveamdmachine::VMulF32Op>(*this, op, op.getLhs(),
-                                              op.getRhs());
+  return selectFloatBinary<waveamdmachine::VMulF32Op,
+                           waveamdmachine::VPkMulF16Op>(*this, op, "fmul");
 }
 
 LogicalResult WaveAMDMachineSelector::selectFMax(FMaxOp op) {
+  if (isSimdPackedF16(op.getResult().getType()))
+    return op.emitError("packed f16 fmax lowering is not implemented");
   return selectF32<waveamdmachine::VMaxF32Op>(*this, op, op.getLhs(),
                                               op.getRhs());
+}
+
+LogicalResult WaveAMDMachineSelector::selectFma(FmaOp op) {
+  if (!isSimdPackedF16(op.getResult().getType()))
+    return op.emitError("WaveAMDMachine fma lowering supports only "
+                        "!wave.simd<vector<2xf16>, W>");
+  return selectPackedF16Ternary<waveamdmachine::VPkFmaF16Op>(
+      *this, op, "fma", op.getLhs(), op.getRhs(), op.getAcc());
 }
 
 LogicalResult WaveAMDMachineSelector::selectFExp2(FExp2Op op) {
@@ -884,6 +1029,60 @@ static CastRounding getFpConvertRounding(CastOp op) {
   return cast<CastRoundingPolicyAttr>(attr).getValue();
 }
 
+static LogicalResult selectPackedF32ToF16Cast(WaveAMDMachineSelector &S,
+                                              CastOp op,
+                                              CastRounding rounding) {
+  if (rounding != CastRounding::RTZ)
+    return op.emitError(
+        "packed f32 to f16 lowering supports only rtz rounding");
+  if (failed(requirePackedCvtTarget(op)))
+    return failure();
+  Value source = S.expect(op.getSource(), op);
+  auto sourceReg = dyn_cast<waveamdmachine::RegType>(source.getType());
+  if (!sourceReg || sourceReg.getRegClass() != waveamdmachine::RegClass::VGPR ||
+      sourceReg.getWidth() != 2)
+    return op.emitError("packed f32 source must lower to a VGPR pair");
+  Type vgprType = getRegType(op.getContext(), waveamdmachine::RegClass::VGPR);
+  SmallVector<Type, 2> elementTypes = {vgprType, vgprType};
+  auto split = waveamdmachine::TupleToElementsOp::create(S.builder, op.getLoc(),
+                                                         elementTypes, source);
+  SmallVector<Value, 2> elements(split.getElements().begin(),
+                                 split.getElements().end());
+  auto cvt = waveamdmachine::VCvtPkRtzF16F32Op::create(
+      S.builder, op.getLoc(), vgprType, elements[0], elements[1]);
+  S.values[op.getResult()] = cvt.getResult();
+  S.eraseIfTopLevel(op);
+  return success();
+}
+
+static LogicalResult selectScalarFpConvert(WaveAMDMachineSelector &S, CastOp op,
+                                           Type sourceElement,
+                                           Type resultElement,
+                                           CastRounding rounding) {
+  if (rounding != CastRounding::RNE)
+    return op.emitError(
+        "WaveAMDMachine fpconvert lowering supports only rne rounding");
+
+  Value source =
+      S.ensureVGPRForVSrc1(op.getLoc(), S.expect(op.getSource(), op));
+  Type vgprType = getRegType(op.getContext(), waveamdmachine::RegClass::VGPR);
+  if (sourceElement.isF32() && resultElement.isF16()) {
+    S.values[op.getResult()] = waveamdmachine::VCvtF16F32Op::create(
+        S.builder, op.getLoc(), vgprType, source);
+    S.eraseIfTopLevel(op);
+    return success();
+  }
+  if (sourceElement.isF16() && resultElement.isF32()) {
+    S.values[op.getResult()] = waveamdmachine::VCvtF32F16Op::create(
+        S.builder, op.getLoc(), vgprType, source);
+    S.eraseIfTopLevel(op);
+    return success();
+  }
+  return op.emitError(
+      "WaveAMDMachine fpconvert lowering supports only f32/f16 SIMD or "
+      "vector<2xf32> to vector<2xf16> SIMD");
+}
+
 LogicalResult WaveAMDMachineSelector::selectCast(CastOp op) {
   if (op.getKind() != CastKind::FpConvert)
     return op.emitError(
@@ -894,26 +1093,13 @@ LogicalResult WaveAMDMachineSelector::selectCast(CastOp op) {
     return op.emitError("WaveAMDMachine backend only supports SIMD wave.cast");
   Type sourceElement = sourceType.getElementType();
   Type resultElement = resultType.getElementType();
-  if (getFpConvertRounding(op) != CastRounding::RNE)
-    return op.emitError(
-        "WaveAMDMachine fpconvert lowering supports only rne rounding");
+  CastRounding rounding = getFpConvertRounding(op);
 
-  Value source = ensureVGPRForVSrc1(op.getLoc(), expect(op.getSource(), op));
-  Type vgprType = getRegType(op.getContext(), waveamdmachine::RegClass::VGPR);
-  if (sourceElement.isF32() && resultElement.isF16()) {
-    values[op.getResult()] = waveamdmachine::VCvtF16F32Op::create(
-        builder, op.getLoc(), vgprType, source);
-    eraseIfTopLevel(op);
-    return success();
-  }
-  if (sourceElement.isF16() && resultElement.isF32()) {
-    values[op.getResult()] = waveamdmachine::VCvtF32F16Op::create(
-        builder, op.getLoc(), vgprType, source);
-    eraseIfTopLevel(op);
-    return success();
-  }
-  return op.emitError(
-      "WaveAMDMachine fpconvert lowering supports only f32/f16 SIMD");
+  if (isSimdPackedF32(op.getSource().getType()) &&
+      isSimdPackedF16(op.getResult().getType()))
+    return selectPackedF32ToF16Cast(*this, op, rounding);
+  return selectScalarFpConvert(*this, op, sourceElement, resultElement,
+                               rounding);
 }
 
 // Materialize an SGPR or immediate value into a fresh VGPR so it can be
@@ -990,13 +1176,7 @@ unsigned WaveAMDMachineSelector::elementSizeBytes(Type type) {
     type = ptr.getElementType();
   if (auto simd = dyn_cast<SimdType>(type))
     type = cast<PtrType>(simd.getElementType()).getElementType();
-  if (type.isInteger(8))
-    return 1;
-  if (type.isInteger(16) || type.isF16())
-    return 2;
-  if (type.isIntOrFloat() && type.getIntOrFloatBitWidth() == 32)
-    return 4;
-  return 4;
+  return (bitWidth(type) + 7) / 8;
 }
 
 std::optional<int64_t> WaveAMDMachineSelector::getImmediateValue(Value value) {

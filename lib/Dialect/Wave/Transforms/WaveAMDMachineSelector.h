@@ -288,6 +288,7 @@ public:
   LogicalResult selectFSub(FSubOp op);
   LogicalResult selectFMul(FMulOp op);
   LogicalResult selectFMax(FMaxOp op);
+  LogicalResult selectFma(FmaOp op);
   LogicalResult selectFExp2(FExp2Op op);
   LogicalResult selectFRcp(FRcpOp op);
   LogicalResult selectIndexExpr(IndexExprOp op);

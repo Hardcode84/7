@@ -352,6 +352,7 @@ private:
   }
   bool usesTrue16Cvt() const { return isaVersion.Major >= 11; }
   bool supportsCvtPkRtzF16F32() const { return isaVersion.Major >= 10; }
+  bool supportsPackedF16() const { return isaVersion.Major >= 9; }
   unsigned vCvtPkRtzF16F32() const {
     if (isaVersion.Major == 10)
       return llvm::AMDGPU::V_CVT_PKRTZ_F16_F32_e32_gfx10;
@@ -1367,12 +1368,17 @@ private:
                      toMCOperand(op.getOperand(1))});
     }
     if (isa<waveamdmachine::VPkAddF16Op, waveamdmachine::VPkMulF16Op>(op)) {
+      if (!supportsPackedF16())
+        return op.emitError("v_pk_*_f16 requires gfx9+");
       unsigned opcode =
           isa<waveamdmachine::VPkAddF16Op>(op) ? vPkAddF16() : vPkMulF16();
       return emitPackedBinary(opcode, op);
     }
-    if (isa<waveamdmachine::VPkFmaF16Op>(op))
+    if (isa<waveamdmachine::VPkFmaF16Op>(op)) {
+      if (!supportsPackedF16())
+        return op.emitError("v_pk_fma_f16 requires gfx9+");
       return emitPackedTernary(vPkFmaF16(), op);
+    }
     if (isa<waveamdmachine::VCmpEqU32Op, waveamdmachine::VCmpNeU32Op,
             waveamdmachine::VCmpLtU32Op, waveamdmachine::VCmpLeU32Op,
             waveamdmachine::VCmpGtU32Op, waveamdmachine::VCmpGeU32Op>(op)) {

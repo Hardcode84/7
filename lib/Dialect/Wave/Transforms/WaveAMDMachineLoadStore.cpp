@@ -27,14 +27,19 @@ namespace mlir::wave::wmsel {
 
 namespace {
 
-// Per-lane register count for a wave.load result: 1 for scalar
-// results, vector element count for tuple results. The verifier
-// guarantees a 32-bit element width, so this maps directly to VGPR
-// tuple width.
+static unsigned dwordCount(Type type) {
+  uint64_t bits = 32;
+  if (auto vecTy = dyn_cast<VectorType>(type)) {
+    Type elementType = vecTy.getElementType();
+    if (elementType.isIntOrFloat())
+      bits = elementType.getIntOrFloatBitWidth() * vecTy.getNumElements();
+  } else if (type.isIntOrFloat())
+    bits = type.getIntOrFloatBitWidth();
+  return (bits + 31) / 32;
+}
+
 unsigned loadRegisterCount(SimdType simdType) {
-  if (auto vecTy = dyn_cast<VectorType>(simdType.getElementType()))
-    return vecTy.getNumElements();
-  return 1;
+  return dwordCount(simdType.getElementType());
 }
 
 bool isScalar16Bit(SimdType simdType) {

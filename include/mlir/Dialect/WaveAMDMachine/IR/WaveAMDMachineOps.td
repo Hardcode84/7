@@ -216,6 +216,7 @@ class WaveAMDMachine_TernaryResult<string mnemonic, Type operandType, Type resul
 
 class WaveAMDMachine_PackedBinaryResult<string mnemonic>
     : WaveAMDMachine_Op<mnemonic, [WaveAMDMachine_VALU, Pure]> {
+  let archPredicate = "isa.Major >= 9";
   let arguments = (ins WaveAMDMachine_VGPR1:$lhs,
                        WaveAMDMachine_VGPR1:$rhs,
                        DefaultValuedAttr<BoolAttr, "false">:$clamp,
@@ -229,6 +230,7 @@ class WaveAMDMachine_PackedBinaryResult<string mnemonic>
 
 class WaveAMDMachine_PackedTernaryResult<string mnemonic>
     : WaveAMDMachine_Op<mnemonic, [WaveAMDMachine_VALU, Pure]> {
+  let archPredicate = "isa.Major >= 9";
   let arguments = (ins WaveAMDMachine_VGPR1:$a,
                        WaveAMDMachine_VGPR1:$b,
                        WaveAMDMachine_VGPR1:$c,
@@ -431,7 +433,9 @@ def WaveAMDMachine_VCvtPkRtzF16F32Op
     : WaveAMDMachine_BinaryResult<"v_cvt_pk_rtz_f16_f32",
                                WaveAMDMachine_VGPR1,
                                WaveAMDMachine_VGPR1,
-                               [WaveAMDMachine_VALU]>;
+                               [WaveAMDMachine_VALU]> {
+  let archPredicate = "isa.Major >= 10";
+}
 def WaveAMDMachine_VPkAddF16Op
     : WaveAMDMachine_PackedBinaryResult<"v_pk_add_f16">;
 def WaveAMDMachine_VPkMulF16Op
