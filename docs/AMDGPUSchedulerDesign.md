@@ -756,6 +756,12 @@ Command split:
 - apply: `wave-opt --waveamd-machine-schedule='apply-schedule=1'`
 - inspect: `wave-opt --waveamd-machine-schedule-report='print-candidates=1'`
 
+Target occupancy is IR metadata. `waveamdmachine.target_waves = N : i64`
+on a scheduled function sets the waves-per-SIMD target used for derived
+critical VGPR pressure; a module attr is the fallback for generated
+single-kernel wrappers. Missing attr means target max for the arch.
+`pressure-target-waves-override` exists only for diagnostics.
+
 **Risk.** Correctness around `s_setprio` / waitcnt pairs --
 reordering across them is unsafe. Mitigation: mark these as
 explicit DAG scheduling barriers; emit `sched_barrier(0)` around

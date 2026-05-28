@@ -118,8 +118,8 @@ def WaveAMDMachineSchedule
            "Critical VGPR budget for scheduler pressure policy; -1 disables critical-pressure ranking.">,
     Option<"pressureCriticalSgprBudget", "pressure-critical-sgpr-budget", "int", /*default=*/"-1",
            "Critical SGPR budget for scheduler pressure policy; -1 disables critical-pressure ranking.">,
-    Option<"pressureTargetWaves", "pressure-target-waves", "int", /*default=*/"0",
-           "Target waves per SIMD for derived VGPR critical budget; 0 uses the target maximum, -1 disables derivation.">
+    Option<"pressureTargetWavesOverride", "pressure-target-waves-override", "int", /*default=*/"-2",
+           "Diagnostic override for waveamdmachine.target_waves; -2 uses IR/default, -1 disables derived VGPR budget, 0 uses the target maximum.">
   ];
 }
 
@@ -169,8 +169,8 @@ def WaveAMDMachineScheduleReport
            "Critical VGPR budget for scheduler pressure diagnostics; -1 disables excess reporting.">,
     Option<"pressureCriticalSgprBudget", "pressure-critical-sgpr-budget", "int", /*default=*/"-1",
            "Critical SGPR budget for scheduler pressure diagnostics; -1 disables excess reporting.">,
-    Option<"pressureTargetWaves", "pressure-target-waves", "int", /*default=*/"0",
-           "Target waves per SIMD for derived VGPR critical budget; 0 uses the target maximum, -1 disables derivation.">,
+    Option<"pressureTargetWavesOverride", "pressure-target-waves-override", "int", /*default=*/"-2",
+           "Diagnostic override for waveamdmachine.target_waves; -2 uses IR/default, -1 disables derived VGPR budget, 0 uses the target maximum.">,
     Option<"scoreFunc", "score-func", "std::string", /*default=*/"\"\"",
            "Function name whose local region should score a candidate order.">,
     Option<"scoreRegion", "score-region", "int", /*default=*/"-1",

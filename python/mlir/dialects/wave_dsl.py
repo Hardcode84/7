@@ -480,12 +480,16 @@ class _GpuModuleBuilder:
         results: Sequence[Type] = (),
         *,
         lds_size: int | None = None,
+        attrs: Mapping[str, Attribute] | None = None,
     ) -> Iterator[FunctionBuilder]:
         op = func.FuncOp(name, (list(inputs), list(results)))
         op.attributes["gpu.kernel"] = UnitAttr.get()
         op.attributes["wave.kernel"] = UnitAttr.get()
         if lds_size is not None:
             op.attributes["wave.lds_size"] = i64_attr(lds_size)
+        if attrs is not None:
+            for attr_name, attr in attrs.items():
+                op.attributes[attr_name] = attr
         block = op.add_entry_block()
         with InsertionPoint(block):
             yield FunctionBuilder(block)

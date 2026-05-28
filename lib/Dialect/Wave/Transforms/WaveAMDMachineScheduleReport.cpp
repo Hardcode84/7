@@ -45,15 +45,21 @@ struct WaveAMDMachineScheduleReportPass
       return;
 
     ModuleOp mod = getOperation();
-    ArchResolution archResolution = resolveArch(mod);
     waveamdmachine::EventSimConfig modelConfig;
-    RegisterPressureBudgets pressureBudgets;
-    if (failed(
-            configureReport(mod, archResolution, modelConfig, pressureBudgets)))
+    if (failed(configureReport(mod, modelConfig)))
       return signalPassFailure();
 
     StringRef scoreFuncName(scoreFunc);
     WalkResult walkResult = mod.walk([&](func::FuncOp func) {
+      ArchResolution archResolution = resolveArch(func);
+      RegisterPressureBudgets pressureBudgets;
+      if (controls.prepareForPressure &&
+          failed(configureSchedulePressureBudgets(
+              func, archResolution, pressureAwareSelection, pressureVgprBudget,
+              pressureSgprBudget, pressureCriticalVgprBudget,
+              pressureCriticalSgprBudget, pressureTargetWavesOverride,
+              pressureBudgets)))
+        return WalkResult::interrupt();
       if (failed(processFunction(
               func, archResolution, modelConfig, pressureBudgets,
               controls.candidate, scoreFuncName, controls.emitScores,
@@ -78,17 +84,11 @@ struct WaveAMDMachineScheduleReportPass
     return controls;
   }
 
-  LogicalResult configureReport(ModuleOp mod, ArchResolution archResolution,
-                                waveamdmachine::EventSimConfig &modelConfig,
-                                RegisterPressureBudgets &pressureBudgets) {
-    if (failed(configureScheduleModel(
-            mod, modelWaves, modelSimds, modelStartDelay, modelVmemValueLatency,
-            modelSmemValueLatency, modelLdsValueLatency, modelConfig)))
-      return failure();
-    return configureSchedulePressureBudgets(
-        mod, archResolution, pressureAwareSelection, pressureVgprBudget,
-        pressureSgprBudget, pressureCriticalVgprBudget,
-        pressureCriticalSgprBudget, pressureTargetWaves, pressureBudgets);
+  LogicalResult configureReport(ModuleOp mod,
+                                waveamdmachine::EventSimConfig &modelConfig) {
+    return configureScheduleModel(mod, modelWaves, modelSimds, modelStartDelay,
+                                  modelVmemValueLatency, modelSmemValueLatency,
+                                  modelLdsValueLatency, modelConfig);
   }
 
   LogicalResult

@@ -29,6 +29,7 @@ namespace mlir::wave {
 
 namespace traits = ::mlir::OpTrait::waveamdmachine;
 static constexpr StringLiteral kDiagPrefix = "waveamd-machine-schedule-report";
+static constexpr StringLiteral kTargetWavesAttr = "waveamdmachine.target_waves";
 
 static bool isWaveAMDMachineOp(Operation *op) {
   return op->getName().getDialectNamespace() ==
@@ -342,22 +343,69 @@ configureScheduleModel(ModuleOp mod, int modelWaves, int modelSimds,
   return success();
 }
 
-static LogicalResult validatePressureOptions(
-    ModuleOp mod, ArchResolution archResolution, int pressureVgprBudget,
-    int pressureSgprBudget, int pressureCriticalVgprBudget,
-    int pressureCriticalSgprBudget, int pressureTargetWaves) {
+static LogicalResult validatePressureOptions(Operation *op,
+                                             int pressureVgprBudget,
+                                             int pressureSgprBudget,
+                                             int pressureCriticalVgprBudget,
+                                             int pressureCriticalSgprBudget,
+                                             int pressureTargetWavesOverride) {
   if (pressureVgprBudget < -1 || pressureSgprBudget < -1 ||
-      pressureCriticalVgprBudget < -1 || pressureCriticalSgprBudget < -1 ||
-      pressureTargetWaves < -1) {
-    mod.emitError() << "pressure budgets must be -1 or non-negative";
+      pressureCriticalVgprBudget < -1 || pressureCriticalSgprBudget < -1) {
+    op->emitError() << "pressure budgets must be -1 or non-negative";
     return failure();
   }
-  if (pressureTargetWaves > 0 && archResolution.arch &&
-      pressureTargetWaves > archResolution.arch->wavesPerSIMD) {
-    mod.emitError() << "pressure-target-waves exceeds target wave capacity";
+  if (pressureTargetWavesOverride < -2) {
+    op->emitError()
+        << "pressure-target-waves-override must be -2, -1, or non-negative";
     return failure();
   }
   return success();
+}
+
+static FailureOr<int>
+validateTargetWaves(Operation *op, ArchResolution archResolution,
+                    int64_t targetWaves, StringRef sourceName, bool allowZero) {
+  if (targetWaves == 0 && allowZero)
+    return 0;
+  if (targetWaves <= 0 ||
+      targetWaves > static_cast<int64_t>(std::numeric_limits<int>::max())) {
+    op->emitError() << sourceName << " must be positive";
+    return failure();
+  }
+  if (archResolution.arch && targetWaves > archResolution.arch->wavesPerSIMD) {
+    op->emitError() << sourceName << " exceeds target wave capacity";
+    return failure();
+  }
+  return static_cast<int>(targetWaves);
+}
+
+static Attribute findTargetWavesAttr(Operation *op) {
+  for (Operation *cur = op; cur; cur = cur->getParentOp())
+    if (Attribute attr = cur->getAttr(kTargetWavesAttr))
+      return attr;
+  return {};
+}
+
+static FailureOr<int>
+resolveScheduleTargetWaves(Operation *op, ArchResolution archResolution,
+                           int pressureTargetWavesOverride) {
+  if (pressureTargetWavesOverride == -1)
+    return -1;
+  if (pressureTargetWavesOverride >= 0)
+    return validateTargetWaves(op, archResolution, pressureTargetWavesOverride,
+                               "pressure-target-waves-override",
+                               /*allowZero=*/true);
+
+  Attribute attr = findTargetWavesAttr(op);
+  if (!attr)
+    return 0;
+  auto intAttr = dyn_cast<IntegerAttr>(attr);
+  if (!intAttr) {
+    op->emitError() << kTargetWavesAttr << " must be an integer attribute";
+    return failure();
+  }
+  return validateTargetWaves(op, archResolution, intAttr.getInt(),
+                             kTargetWavesAttr, /*allowZero=*/false);
 }
 
 static LogicalResult
@@ -376,21 +424,25 @@ applyDerivedCriticalBudget(ArchResolution archResolution,
 }
 
 LogicalResult configureSchedulePressureBudgets(
-    ModuleOp mod, ArchResolution archResolution, bool pressureAwareSelection,
+    Operation *op, ArchResolution archResolution, bool pressureAwareSelection,
     int pressureVgprBudget, int pressureSgprBudget,
     int pressureCriticalVgprBudget, int pressureCriticalSgprBudget,
-    int pressureTargetWaves, RegisterPressureBudgets &budgets) {
-  if (failed(validatePressureOptions(
-          mod, archResolution, pressureVgprBudget, pressureSgprBudget,
-          pressureCriticalVgprBudget, pressureCriticalSgprBudget,
-          pressureTargetWaves)))
+    int pressureTargetWavesOverride, RegisterPressureBudgets &budgets) {
+  if (failed(validatePressureOptions(op, pressureVgprBudget, pressureSgprBudget,
+                                     pressureCriticalVgprBudget,
+                                     pressureCriticalSgprBudget,
+                                     pressureTargetWavesOverride)))
+    return failure();
+  FailureOr<int> targetWaves = resolveScheduleTargetWaves(
+      op, archResolution, pressureTargetWavesOverride);
+  if (failed(targetWaves))
     return failure();
   budgets.hardVGPR = pressureVgprBudget;
   budgets.hardSGPR = pressureSgprBudget;
   budgets.criticalVGPR = pressureCriticalVgprBudget;
   budgets.criticalSGPR = pressureCriticalSgprBudget;
   if (failed(applyDerivedCriticalBudget(archResolution, pressureAwareSelection,
-                                        pressureTargetWaves, budgets)))
+                                        *targetWaves, budgets)))
     return failure();
   budgets.selectionEnabled =
       pressureAwareSelection &&

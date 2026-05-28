@@ -41,21 +41,22 @@ struct WaveAMDMachineSchedulePass
 
   void runOnOperation() override {
     ModuleOp mod = getOperation();
-    ArchResolution archResolution = resolveArch(mod);
     waveamdmachine::EventSimConfig modelConfig;
     if (failed(configureScheduleModel(
             mod, modelWaves, modelSimds, modelStartDelay, modelVmemValueLatency,
             modelSmemValueLatency, modelLdsValueLatency, modelConfig)))
       return signalPassFailure();
-    RegisterPressureBudgets pressureBudgets;
-    if (failed(configureSchedulePressureBudgets(
-            mod, archResolution, pressureAwareSelection, pressureVgprBudget,
-            pressureSgprBudget, pressureCriticalVgprBudget,
-            pressureCriticalSgprBudget, pressureTargetWaves, pressureBudgets)))
-      return signalPassFailure();
     if (!applySchedule)
       return;
     WalkResult walkResult = mod.walk([&](func::FuncOp func) {
+      ArchResolution archResolution = resolveArch(func);
+      RegisterPressureBudgets pressureBudgets;
+      if (failed(configureSchedulePressureBudgets(
+              func, archResolution, pressureAwareSelection, pressureVgprBudget,
+              pressureSgprBudget, pressureCriticalVgprBudget,
+              pressureCriticalSgprBudget, pressureTargetWavesOverride,
+              pressureBudgets)))
+        return WalkResult::interrupt();
       if (failed(processFunction(func, archResolution, modelConfig,
                                  pressureBudgets)))
         return WalkResult::interrupt();

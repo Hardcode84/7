@@ -125,6 +125,12 @@ def _add_codegen_args(parser: argparse.ArgumentParser) -> None:
         default="auto",
         help="matrix instruction family to emit; auto picks MFMA for gfx9/gfx950",
     )
+    parser.add_argument(
+        "--target-waves",
+        type=int,
+        default=0,
+        help="stamp waveamdmachine.target_waves on the kernel; 0 omits it",
+    )
 
 
 def _add_runner_args(parser: argparse.ArgumentParser) -> None:
@@ -142,7 +148,10 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     _add_tile_args(parser)
     _add_codegen_args(parser)
     _add_runner_args(parser)
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if args.target_waves < 0:
+        parser.error("--target-waves must be non-negative")
+    return args
 
 
 def _select_matrix_intrinsic(chip: str, requested: str) -> str:
@@ -219,6 +228,7 @@ def main(argv: list[str] | None = None) -> int:
         matrix_intrinsic=matrix_intrinsic,
         random_data=random_data,
         random_seed=args.seed,
+        target_waves=args.target_waves or None,
     )
     module_text = str(module)
     if args.dump_asm:

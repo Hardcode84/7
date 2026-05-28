@@ -123,6 +123,8 @@ def build_example_args(args: argparse.Namespace, chip: str) -> list[str]:
         cmd.append("--use-dma-lds")
     if args.matrix_intrinsic != "auto":
         cmd.append(f"--matrix-intrinsic={args.matrix_intrinsic}")
+    if args.target_waves:
+        cmd.append(f"--target-waves={args.target_waves}")
     return cmd
 
 
@@ -518,6 +520,7 @@ def build_argparser() -> argparse.ArgumentParser:
     ap.add_argument("--wave-m-tiles", type=int, default=1)
     ap.add_argument("--wave-n-tiles", type=int, default=1)
     ap.add_argument("--wave-k-tiles", type=int, default=1)
+    ap.add_argument("--target-waves", type=int, default=0)
     ap.add_argument("--use-buffer", action="store_true")
     ap.add_argument("--use-dma-lds", action="store_true")
     ap.add_argument(
@@ -561,10 +564,16 @@ def build_argparser() -> argparse.ArgumentParser:
     return ap
 
 
-def main() -> int:
-    args = build_argparser().parse_args()
+def validate_args(args: argparse.Namespace) -> None:
     if args.repeats <= 0:
         sys.exit("--repeats must be positive")
+    if args.target_waves < 0:
+        sys.exit("--target-waves must be non-negative")
+
+
+def main() -> int:
+    args = build_argparser().parse_args()
+    validate_args(args)
     chip = args.chip or detect_chip()
     variants = args.variants
 
@@ -578,7 +587,7 @@ def main() -> int:
             f"chip: {chip}\n"
             f"shape: m={args.m} n={args.n} k={args.k} bm={args.bm} bn={args.bn} "
             f"wave_m_tiles={args.wave_m_tiles} wave_n_tiles={args.wave_n_tiles} "
-            f"wave_k_tiles={args.wave_k_tiles}\n"
+            f"wave_k_tiles={args.wave_k_tiles} target_waves={args.target_waves}\n"
             f"sim_loop_trip_count: {compute_loop_trip_count(args)}"
         )
         results: list[VariantResult] = []

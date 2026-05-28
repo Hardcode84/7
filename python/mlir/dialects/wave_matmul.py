@@ -239,10 +239,19 @@ _GPU_MODULE_NAME = "kernels"
 _F16_PTR_HELPER = "wave_memref_to_ptr_global_f16"
 _F32_PTR_HELPER = "wave_memref_to_ptr_global_f32"
 _PRINT_HELPER = "printMemrefF32"
+_TARGET_WAVES_ATTR = "waveamdmachine.target_waves"
 
 
 def _splat_const(bld: dsl.FunctionBuilder, value: int) -> dsl.Value:
     return bld.splat(bld.constant(dsl.i32(), value))
+
+
+def _target_waves_attrs(target_waves: int | None) -> dict[str, dsl.Attribute]:
+    if target_waves is None:
+        return {}
+    if target_waves <= 0:
+        raise ValueError(f"target_waves must be positive; got {target_waves}")
+    return {_TARGET_WAVES_ATTR: dsl.i64_attr(target_waves)}
 
 
 def _deterministic_random_values(
@@ -1168,34 +1177,9 @@ def build_wmma_f16_matmul_module(
     random_data: bool = False,
     random_seed: int = 0,
     skip_specialize: bool = False,
+    target_waves: int | None = None,
 ) -> Module:
-    """Return an MLIR :class:`Module` for the tiled WMMA f16 matmul.
-
-    The host allocates ``MxK`` (A) and ``NxK`` (B) f16 buffers (filled
-    with a per-axis 1.0/2.0 split, see :func:`_emit_host`), plus an
-    ``MxN`` f32 output buffer, registers them with the GPU runtime, and
-    launches the kernel.
-
-    Each per-K-step A/B fragment is round-tripped through a per-wave
-    LDS slot (identity transport), so the kernel always exercises tuple
-    ``ds_store_b32`` / ``ds_load_b32`` and ``s_barrier``; the kernel
-    function carries ``wave.lds_size`` so the AMDGPU lowering programs
-    the matching ``group_segment_fixed_size``.
-
-    When ``use_buffer=True`` the A and B inputs are additionally
-    wrapped in ``waveamd.make_buffer`` so every per-K-step fragment
-    load comes out as a tuple ``buffer_load_b32`` (``buffer_load_dword
-    ..., 0 offen offset:i*4``) feeding the LDS round-trip. The C output
-    stays on the global pointer path.
-
-    See the module docstring for shape constraints.
-
-    Note: the returned :class:`Module` is bound to a fresh MLIR
-    :class:`Context` owned by the temporary :class:`ModuleBuilder`. The
-    ``__exit__`` releases all thread-local handles before returning, so
-    callers can keep using the module (e.g. printing, pass-managing)
-    without further setup.
-    """
+    """Return an MLIR module for the tiled f16 matmul host + kernel."""
     cfg = _MatmulConfig(
         M=M,
         N=N,
@@ -1239,7 +1223,12 @@ def build_wmma_f16_matmul_module(
         lds_size = cfg.lds_bytes
         with (
             bld.gpu_module(_GPU_MODULE_NAME) as gmod,
-            gmod.kernel(_KERNEL_NAME, kernel_inputs, lds_size=lds_size) as fb,
+            gmod.kernel(
+                _KERNEL_NAME,
+                kernel_inputs,
+                lds_size=lds_size,
+                attrs=_target_waves_attrs(target_waves),
+            ) as fb,
         ):
             _emit_kernel(fb, cfg)
 

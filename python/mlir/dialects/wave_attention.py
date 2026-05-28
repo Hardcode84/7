@@ -17,6 +17,7 @@ _KERNEL_NAME = "flash_attention_f32"
 _GPU_MODULE_NAME = "kernels"
 _F32_PTR_HELPER = "wave_memref_to_ptr_global_f32"
 _PRINT_HELPER = "printMemrefF32"
+_TARGET_WAVES_ATTR = "waveamdmachine.target_waves"
 
 
 @dataclass(frozen=True)
@@ -129,6 +130,14 @@ def _ptr_add_const(bld: dsl.FunctionBuilder, ptr: dsl.Value, offset: int) -> dsl
     if offset == 0:
         return ptr
     return bld.ptr_add(ptr, bld.constant(dsl.i32(), offset))
+
+
+def _target_waves_attrs(target_waves: int | None) -> dict[str, dsl.Attribute]:
+    if target_waves is None:
+        return {}
+    if target_waves <= 0:
+        raise ValueError(f"target_waves must be positive; got {target_waves}")
+    return {_TARGET_WAVES_ATTR: dsl.i64_attr(target_waves)}
 
 
 def _load_f32(bld: dsl.FunctionBuilder, ptr: dsl.Value) -> dsl.Value:
@@ -371,6 +380,7 @@ def build_flash_attention_f32_module(
     head_dim: int = 8,
     random_seed: int = 0,
     seq_n: int | None = None,
+    target_waves: int | None = None,
 ) -> Module:
     cfg = _FlashAttentionConfig(
         block_m, block_n, head_dim, random_seed=random_seed, seq_n=seq_n
@@ -388,7 +398,11 @@ def build_flash_attention_f32_module(
         ]
         with (
             bld.gpu_module(_GPU_MODULE_NAME) as gmod,
-            gmod.kernel(_KERNEL_NAME, kernel_inputs) as fb,
+            gmod.kernel(
+                _KERNEL_NAME,
+                kernel_inputs,
+                attrs=_target_waves_attrs(target_waves),
+            ) as fb,
         ):
             _emit_kernel(fb, cfg)
         with bld.host_main() as fb:

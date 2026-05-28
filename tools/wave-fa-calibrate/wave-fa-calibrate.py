@@ -99,7 +99,7 @@ def detect_chip() -> str:
 
 
 def build_example_args(args: argparse.Namespace, chip: str) -> list[str]:
-    return [
+    cmd = [
         sys.executable,
         str(EXAMPLE),
         f"--chip={chip}",
@@ -109,6 +109,9 @@ def build_example_args(args: argparse.Namespace, chip: str) -> list[str]:
         f"--seq-n={args.seq_n}",
         f"--seed={args.seed}",
     ]
+    if args.target_waves:
+        cmd.append(f"--target-waves={args.target_waves}")
+    return cmd
 
 
 def generate_kernel_module(args: argparse.Namespace, chip: str) -> str:
@@ -141,7 +144,6 @@ def scheduler_policy_options(
     options: dict[str, bool | int] = {}
     if not args.no_pressure_aware_schedule:
         options["pressure-aware-selection"] = True
-        options["pressure-target-waves"] = args.pressure_target_waves
     if variant.schedule_model == "multi":
         options["model-waves"] = args.model_waves
         options["model-simds"] = args.model_simds
@@ -519,7 +521,7 @@ def build_argparser() -> argparse.ArgumentParser:
     ap.add_argument("--print-score", action="store_true")
     ap.add_argument("--print-regions", action="store_true")
     ap.add_argument("--no-pressure-aware-schedule", action="store_true")
-    ap.add_argument("--pressure-target-waves", type=int, default=0)
+    ap.add_argument("--target-waves", type=int, default=0)
     ap.add_argument("--skip-hw", action="store_true")
     ap.add_argument("--no-check", action="store_true")
     ap.add_argument("--keep-tmp", action="store_true")
@@ -557,8 +559,8 @@ def validate_args(args: argparse.Namespace) -> None:
             sys.exit(f"--{name.replace('_', '-')} must be positive")
     if args.warmup < 0:
         sys.exit("--warmup must be non-negative")
-    if args.pressure_target_waves < -1:
-        sys.exit("--pressure-target-waves must be -1 or non-negative")
+    if args.target_waves < 0:
+        sys.exit("--target-waves must be non-negative")
     if args.block_m * args.head_dim != 32:
         sys.exit("current FA kernel requires --block-m * --head-dim == 32")
 
@@ -577,7 +579,8 @@ def main() -> int:
         print(
             f"chip: {chip}\n"
             f"shape: block_m={args.block_m} block_n={args.block_n} "
-            f"seq_n={args.seq_n} head_dim={args.head_dim}"
+            f"seq_n={args.seq_n} head_dim={args.head_dim} "
+            f"target_waves={args.target_waves}"
         )
         results: list[VariantResult] = []
         for variant in args.variants:

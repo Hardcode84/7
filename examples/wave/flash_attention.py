@@ -31,8 +31,17 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         default=None,
         help="total K/V sequence length; defaults to --block-n",
     )
+    parser.add_argument(
+        "--target-waves",
+        type=int,
+        default=0,
+        help="stamp waveamdmachine.target_waves on the kernel; 0 omits it",
+    )
     add_execution_args(parser, default_atol=3.0e-3, default_rtol=3.0e-3)
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if args.target_waves < 0:
+        parser.error("--target-waves must be non-negative")
+    return args
 
 
 def _dump_asm(module_text: str, args: argparse.Namespace) -> str:
@@ -59,6 +68,7 @@ def main(argv: list[str] | None = None) -> int:
         head_dim=args.head_dim,
         random_seed=args.seed,
         seq_n=args.seq_n,
+        target_waves=args.target_waves or None,
     )
     module_text = str(module)
     if args.dump_asm:

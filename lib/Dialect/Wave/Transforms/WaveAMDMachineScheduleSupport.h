@@ -122,10 +122,10 @@ configureScheduleModel(ModuleOp mod, int modelWaves, int modelSimds,
                        int modelSmemValueLatency, int modelLdsValueLatency,
                        waveamdmachine::EventSimConfig &modelConfig);
 LogicalResult configureSchedulePressureBudgets(
-    ModuleOp mod, ArchResolution archResolution, bool pressureAwareSelection,
+    Operation *op, ArchResolution archResolution, bool pressureAwareSelection,
     int pressureVgprBudget, int pressureSgprBudget,
     int pressureCriticalVgprBudget, int pressureCriticalSgprBudget,
-    int pressureTargetWaves, RegisterPressureBudgets &budgets);
+    int pressureTargetWavesOverride, RegisterPressureBudgets &budgets);
 
 CandidateMetrics evaluateOps(const ScheduleRegion &region,
                              ArrayRef<Operation *> ops,
