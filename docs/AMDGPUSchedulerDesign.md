@@ -104,11 +104,10 @@ Four branches resolved up front:
    ranking but loses the per-wave timeline needed to compete with
    ATT ground truth. "Best estimator" means simulator.
 
-2. **Hand-copy LLVM SchedModel data per arch initially; TableGen
-   emitter later.** Four archs is ~200 lines of data; a TG-emitter
-   pass is real work. Mechanise before adding the fifth arch. A
-   pre-commit diff script keeps the hand-copy honest against
-   upstream.
+2. **Generate LLVM SchedModel latency data from `SISchedule.td`.**
+   The checked-in latency include lets normal builds work without
+   an LLVM source checkout. Pre-commit regenerates and diffs it when
+   LLVM sources are present.
 
 3. **ATT integration via `rocprofv3 --att`, not raw SQTT decode.**
    rocprofv3 is the ROCm-supported path with a stable output
@@ -139,8 +138,8 @@ Four branches resolved up front:
 - `OpClassifier.{h,cpp}` -- map every `wave.amd.machine.*` op to a
   SchedClass via op interfaces (`isVMEM()`, `isMFMA()`, ...) plus
   opcode-mnemonic switch fallback.
-- `LatencyTable.cpp` -- per-arch `(SchedClass -> latencyCycles)`
-  table. Numbers hand-copied from `SISchedule.td`'s
+- `LatencyTable.inc` -- generated per-arch
+  `(SchedClass -> latencyCycles)` table from `SISchedule.td`'s
   `GFX11SpeedModel`, `GFX12SpeedModel`, `SIDPGFX942FullSpeedModel`,
   `SIDPGFX950FullSpeedModel`.
 - `HazardRules.cpp` -- ported subset of `GCNHazardRecognizer`:
@@ -150,9 +149,9 @@ Four branches resolved up front:
   `TRANS32_DEP_{1..3}`, `SALU_CYCLE_{1..3}`, `FMA_ACCUM_CYCLE_1`
   numbers for GFX11/12.
 
-**Hygiene.** `scripts/check-sched-tables.py` parses
-`SISchedule.td` and diffs the numbers against our table. Wire to
-`pre-commit`. Prevents silent drift.
+**Hygiene.** `build_tools/gen_sched_table.py --check`
+regenerates the checked-in latency include from `SISchedule.td`
+and checks the functional-unit map against upstream bindings.
 
 **Risk.** Op classifier coverage. Mitigation: assert-fail on
 unmapped opcodes during estimator runs in debug builds; collect
@@ -371,9 +370,9 @@ New entry in the data spine: `SchedClass -> FunctionalUnit`.
 Lifted from `SISchedule.td`'s `HWWriteRes<class, [resources],
 cycles>`; the LLVM resource enum (`HWVALU`, `HWSALU`, `HWVMEM`,
 `HWLGKM`, `HWXDL`, `HWTransVALU`, `HWBranch`, `HWExport`)
-collapses to our compact FU set. `check-sched-tables.py` (Stage
-1's pre-commit hook) extended to diff the resource binding per
-class alongside the existing latency diff.
+collapses to our compact FU set. `gen_sched_table.py --check`
+diffs the resource binding per class alongside the generated
+latency include.
 
 ### Implementation notes
 
@@ -404,10 +403,9 @@ separation + trip-count multiplication), mixed. Compared against
   `wave.estimated_unknown_trip_count = true`; downstream
   consumers (autotune scoring, scheduler) can downweight or
   refuse to score.
-- **Per-FU map drift vs LLVM.** Same SISchedule.td hand-copy
-  problem as latencies, same mitigation (extend
-  `check-sched-tables.py`). A future TableGen emitter folds both
-  diff paths into one generator.
+- **Per-FU map drift vs LLVM.** Mitigation: `gen_sched_table.py
+  --check` compares the handwritten FU map against upstream
+  bindings when LLVM sources are present.
 - **Irreducible CFG.** Not currently produced by any wave-to-
   machine path; the cold/hot model still works in principle but
   needs DT-based backedge detection rather than the trivial
@@ -793,7 +791,7 @@ heavy MFMA stalls).
 ## Build order
 
 Stage 1 lands first (`ArchData`, `SchedClass`, `OpClassifier`,
-`LatencyTable`, the pre-commit `check-sched-tables` hook). Stage
+`LatencyTable`, the `gen_sched_table.py --check` hook). Stage
 2 is built incrementally: per-FU map first (data-spine
 extension), then the cold/hot dataflow driver on straight-line
 code, then loop-aware total-cycle accumulation + trip-count

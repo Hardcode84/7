@@ -23,8 +23,8 @@
 namespace mlir::waveamdmachine {
 
 // Coarse scheduling buckets. Names mirror LLVM's SISchedule.td
-// SchedWrite classes so the per-arch latency hand-copy in
-// LatencyTable stays grep-correlatable with upstream.
+// SchedWrite classes so generated latency tables stay
+// grep-correlatable with upstream.
 enum class SchedClass : uint8_t {
   // Pseudo-ops that emit no machine instruction. Charge 0 cycles.
   NoInst,

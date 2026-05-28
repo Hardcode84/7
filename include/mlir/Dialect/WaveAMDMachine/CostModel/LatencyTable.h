@@ -6,10 +6,8 @@
 //
 //===----------------------------------------------------------------------===//
 //
-// Per-(arch, SchedClass) latency in SIMD cycles. Numbers come from
-// LLVM's SISchedule.td (gfx942 / gfx950 / gfx1100 / gfx1200 models).
-// Hand-copied; scripts/check-sched-tables.py keeps the copy honest
-// against upstream LLVM.
+// Per-(arch, SchedClass) latency in SIMD cycles. Generated from
+// LLVM's SISchedule.td for gfx942 / gfx950 / gfx1100 / gfx1200.
 //
 //===----------------------------------------------------------------------===//
 

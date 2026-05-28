@@ -23,7 +23,7 @@ using ClassFUs = std::array<FunctionalUnit,
 // For class/arch combinations that LLVM does not bind explicitly,
 // the entry uses a canonical FU (the one the class would use on
 // the arch that does bind it) rather than None. Misuse is a
-// user error and gracefully degrades; check_sched_tables.py only
+// user error and gracefully degrades; gen_sched_table.py only
 // compares against bindings that LLVM actually publishes.
 
 // CDNA3 / gfx942. SICommonWriteRes (SISchedule.td:171-221) +
