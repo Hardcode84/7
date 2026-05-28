@@ -36,33 +36,15 @@ from __future__ import annotations
 
 import argparse
 import math
-import re
-import subprocess
 import sys
-from pathlib import Path
 
-
-def _ensure_package_on_path() -> None:
-    """Allow running the script directly from a source checkout.
-
-    When invoked as ``python examples/wave/wmma_matmul_tiled.py`` the
-    built ``python_packages/wave_mlir`` tree must be importable so that
-    ``mlir.dialects.wave_matmul`` resolves alongside the upstream
-    bindings and our nanobind extension. We only prepend it if the
-    module is not already importable, so installed setups remain
-    untouched.
-    """
-    try:
-        import mlir.dialects.wave_matmul  # noqa: F401
-
-        return
-    except ImportError:
-        pass
-    repo_root = Path(__file__).resolve().parents[2]
-    for path in [repo_root / "build" / "python_packages" / "wave_mlir"]:
-        if (path / "mlir" / "dialects").is_dir():
-            sys.path.insert(0, str(path))
-            return
+from common import (
+    add_execution_args,
+    dump_kernel_asm,
+    ensure_package_on_path,
+    parse_runner_values,
+    run_module,
+)
 
 
 def _add_shape_args(parser: argparse.ArgumentParser) -> None:
@@ -138,27 +120,10 @@ def _add_codegen_args(parser: argparse.ArgumentParser) -> None:
         help="stage gfx950 MFMA A fragments through waveamd.dma_load_lds",
     )
     parser.add_argument(
-        "--chip",
-        default="",
-        help="AMDGPU chip used for auto intrinsic selection; gfx9/gfx950 use MFMA",
-    )
-    parser.add_argument(
         "--matrix-intrinsic",
         choices=("auto", "wmma", "mfma", "mfma_gfx950"),
         default="auto",
         help="matrix instruction family to emit; auto picks MFMA for gfx9/gfx950",
-    )
-    parser.add_argument(
-        "--dump-asm",
-        action="store_true",
-        help="lower the kernel through the backend pipeline and print AMDGPU "
-        "asm instead of MLIR (needs --chip; pinned via wave-translate)",
-    )
-    parser.add_argument(
-        "--wave-translate",
-        type=Path,
-        default=None,
-        help="path to wave-translate; defaults to build/bin/wave-translate",
     )
 
 
@@ -168,53 +133,7 @@ def _add_runner_args(parser: argparse.ArgumentParser) -> None:
         action="store_true",
         help="fill A/B with deterministic pseudo-random f16 values",
     )
-    parser.add_argument(
-        "--seed",
-        type=int,
-        default=0,
-        help="seed for --random-data",
-    )
-    parser.add_argument(
-        "--run",
-        action="store_true",
-        help="run wave-opt and mlir-runner instead of only printing MLIR",
-    )
-    parser.add_argument(
-        "--compare-cpu",
-        action="store_true",
-        help="run deterministic random data and compare each output tile with CPU",
-    )
-    parser.add_argument(
-        "--wave-opt",
-        type=Path,
-        default=None,
-        help="path to wave-opt; defaults to build/bin/wave-opt",
-    )
-    parser.add_argument(
-        "--mlir-runner",
-        type=Path,
-        default=None,
-        help="path to mlir-runner; defaults to build/llvm-install/bin/mlir-runner",
-    )
-    parser.add_argument(
-        "--shared-lib",
-        action="append",
-        default=None,
-        type=Path,
-        help="shared library for mlir-runner; defaults to the usual Wave/MLIR libs",
-    )
-    parser.add_argument(
-        "--atol",
-        type=float,
-        default=1.0e-3,
-        help="absolute tolerance for --compare-cpu",
-    )
-    parser.add_argument(
-        "--rtol",
-        type=float,
-        default=1.0e-3,
-        help="relative tolerance for --compare-cpu",
-    )
+    add_execution_args(parser, default_atol=1.0e-3, default_rtol=1.0e-3)
 
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:
@@ -234,96 +153,14 @@ def _select_matrix_intrinsic(chip: str, requested: str) -> str:
     return "mfma" if chip.startswith("gfx9") else "wmma"
 
 
-def _repo_root() -> Path:
-    return Path(__file__).resolve().parents[2]
-
-
-def _default_shared_libs(repo_root: Path) -> list[Path]:
-    return [
-        repo_root / "build" / "llvm-install" / "lib" / "libmlir_rocm_runtime.so",
-        repo_root / "build" / "llvm-install" / "lib" / "libmlir_runner_utils.so",
-        repo_root / "build" / "lib" / "libwave_runtime.so",
-    ]
-
-
-def _run_command(cmd: list[str], *, input_text: str) -> str:
-    proc = subprocess.run(
-        cmd,
-        input=input_text,
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    if proc.returncode != 0:
-        if proc.stdout:
-            sys.stdout.write(proc.stdout)
-        if proc.stderr:
-            sys.stderr.write(proc.stderr)
-        raise SystemExit(proc.returncode)
-    if proc.stderr:
-        sys.stderr.write(proc.stderr)
-    return proc.stdout
-
-
 def _dump_asm(module_text: str, args: argparse.Namespace) -> str:
-    if not args.chip:
-        raise SystemExit("--dump-asm needs --chip=<gfx>")
-    repo_root = _repo_root()
-    wave_translate = args.wave_translate or repo_root / "build/bin/wave-translate"
-    # Hoist the kernel func into a standalone target module: wave-translate
-    # lowers a target-attr module, not the gpu.container_module wrapper.
-    m = re.search(r"(func\.func @wmma\w+.*?\n    \})", module_text, re.S)
-    if not m:
-        raise SystemExit("could not isolate kernel func from generated module")
-    kernel = m.group(1).replace("\n    ", "\n  ")
-    target = f"amdgcn-amd-amdhsa--{args.chip}"
-    wrapped = (
-        f'module attributes {{waveamdmachine.target = "{target}"}} {{\n{kernel}\n}}\n'
+    return dump_kernel_asm(
+        module_text,
+        chip=args.chip,
+        wave_translate=args.wave_translate,
+        kernel_regex=r"(func\.func @wmma\w+.*?\n    \})",
+        missing_message="could not isolate kernel func from generated module",
     )
-    return _run_command(
-        [str(wave_translate), "--wave-to-amdgpu-asm", "-"], input_text=wrapped
-    )
-
-
-def _run_module(module_text: str, args: argparse.Namespace) -> str:
-    if not args.chip:
-        raise SystemExit("--run needs --chip=<gfx>")
-    repo_root = _repo_root()
-    wave_opt = args.wave_opt or repo_root / "build" / "bin" / "wave-opt"
-    mlir_runner = (
-        args.mlir_runner or repo_root / "build" / "llvm-install" / "bin" / "mlir-runner"
-    )
-    pipeline_lib = (
-        repo_root / "build" / "share" / "wave-mlir" / "pipelines" / "pipelines.mlir"
-    )
-    pass_pipeline = (
-        "builtin.module("
-        f"wave-set-target-attr{{chip={args.chip}}},"
-        f"transform-preload-library{{transform-library-paths={pipeline_lib}}},"
-        "transform-interpreter{entry-point=compile_kernels},"
-        "convert-scf-to-cf,"
-        "gpu-to-llvm{use-bare-pointers-for-kernels=true},"
-        "convert-to-llvm,"
-        "reconcile-unrealized-casts)"
-    )
-    lowered = _run_command(
-        [str(wave_opt), f"--pass-pipeline={pass_pipeline}"],
-        input_text=module_text,
-    )
-    runner_cmd = [str(mlir_runner)]
-    for lib in args.shared_lib or _default_shared_libs(repo_root):
-        runner_cmd.append(f"--shared-libs={lib}")
-    runner_cmd.append("--entry-point-result=void")
-    return _run_command(runner_cmd, input_text=lowered)
-
-
-def _parse_runner_values(output: str) -> tuple[float, ...]:
-    try:
-        data = output.split("data =", 1)[1]
-    except IndexError as exc:
-        raise ValueError("mlir-runner output has no memref data payload") from exc
-    pattern = r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?"
-    return tuple(float(x) for x in re.findall(pattern, data))
 
 
 def _compare_tile_multisets(
@@ -360,7 +197,7 @@ def _compare_tile_multisets(
 
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(sys.argv[1:] if argv is None else argv)
-    _ensure_package_on_path()
+    ensure_package_on_path("mlir.dialects.wave_matmul")
     from mlir.dialects.wave_matmul import (
         build_wmma_f16_matmul_module,
         compute_wmma_f16_matmul_reference_buffer,
@@ -391,7 +228,13 @@ def main(argv: list[str] | None = None) -> int:
         sys.stdout.write(module_text)
         return 0
 
-    output = _run_module(module_text, args)
+    output = run_module(
+        module_text,
+        chip=args.chip,
+        wave_opt=args.wave_opt,
+        mlir_runner=args.mlir_runner,
+        shared_libs=args.shared_lib,
+    )
     if not args.compare_cpu:
         sys.stdout.write(output)
         return 0
@@ -410,7 +253,7 @@ def main(argv: list[str] | None = None) -> int:
         matrix_intrinsic=matrix_intrinsic,
     )
     ok, message = _compare_tile_multisets(
-        _parse_runner_values(output),
+        parse_runner_values(output),
         expected,
         atol=args.atol,
         rtol=args.rtol,
