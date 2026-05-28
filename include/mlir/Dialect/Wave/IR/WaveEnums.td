@@ -23,4 +23,33 @@ def Wave_CastKindEnum : I32EnumAttr<"CastKind", "Wave cast kind", [
   let cppNamespace = "::mlir::wave";
 }
 
+def Wave_CastRoundingRNE : I32EnumAttrCase<"RNE", 0, "rne">;
+def Wave_CastRoundingRTZ : I32EnumAttrCase<"RTZ", 1, "rtz">;
+def Wave_CastRoundingRTP : I32EnumAttrCase<"RTP", 2, "rtp">;
+def Wave_CastRoundingRTN : I32EnumAttrCase<"RTN", 3, "rtn">;
+
+def Wave_CastRoundingEnum : I32EnumAttr<"CastRounding", "Wave cast rounding mode", [
+    Wave_CastRoundingRNE, Wave_CastRoundingRTZ, Wave_CastRoundingRTP,
+    Wave_CastRoundingRTN]> {
+  let cppNamespace = "::mlir::wave";
+}
+
+def Wave_CastSignednessSigned : I32EnumAttrCase<"Signed", 0, "signed">;
+def Wave_CastSignednessUnsigned : I32EnumAttrCase<"Unsigned", 1, "unsigned">;
+
+def Wave_CastSignednessEnum : I32EnumAttr<"CastSignedness",
+    "Wave cast integer signedness",
+    [Wave_CastSignednessSigned, Wave_CastSignednessUnsigned]> {
+  let cppNamespace = "::mlir::wave";
+}
+
+def Wave_CastExtensionSign : I32EnumAttrCase<"Sign", 0, "sign">;
+def Wave_CastExtensionZero : I32EnumAttrCase<"Zero", 1, "zero">;
+
+def Wave_CastExtensionEnum : I32EnumAttr<"CastExtension",
+    "Wave cast integer extension mode",
+    [Wave_CastExtensionSign, Wave_CastExtensionZero]> {
+  let cppNamespace = "::mlir::wave";
+}
+
 #endif // MLIR_DIALECT_WAVE_IR_WAVEENUMS_TD

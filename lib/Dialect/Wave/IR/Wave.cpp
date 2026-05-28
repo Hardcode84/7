@@ -151,7 +151,14 @@ enum class WaveCastElementKind { Int, Float };
 
 struct WaveCastShape {
   WaveCastElementKind elementKind;
+  unsigned elementBits;
   std::optional<int64_t> simdWidth;
+};
+
+struct WaveCastPolicy {
+  CastRoundingPolicyAttr rounding;
+  CastSignednessPolicyAttr signedness;
+  CastExtensionPolicyAttr extension;
 };
 } // namespace
 
@@ -167,10 +174,12 @@ static FailureOr<WaveCastShape> classifyWaveCastType(
   if (IntegerType integerType = dyn_cast<IntegerType>(elementType)) {
     if (!integerType.isSignless())
       return emitError("integer cast type must be signless");
-    return WaveCastShape{WaveCastElementKind::Int, simdWidth};
+    return WaveCastShape{WaveCastElementKind::Int, integerType.getWidth(),
+                         simdWidth};
   }
   if (isa<FloatType>(elementType))
-    return WaveCastShape{WaveCastElementKind::Float, simdWidth};
+    return WaveCastShape{WaveCastElementKind::Float,
+                         elementType.getIntOrFloatBitWidth(), simdWidth};
   return emitError(
       "cast type must be a signless integer or float, optionally wrapped in "
       "!wave.simd<..., W>");
@@ -184,6 +193,46 @@ static LogicalResult requireWaveCastKind(CastOp op, WaveCastShape source,
   if (source.elementKind != sourceKind || result.elementKind != resultKind)
     return op.emitOpError(message);
   return success();
+}
+
+static bool isWaveCastPolicyKey(StringRef name) {
+  return name == "rounding" || name == "signedness" || name == "extension";
+}
+
+static FailureOr<WaveCastPolicy> getWaveCastPolicy(CastOp op) {
+  WaveCastPolicy result;
+  std::optional<DictionaryAttr> policy = op.getPolicy();
+  if (!policy)
+    return result;
+
+  for (NamedAttribute attr : *policy)
+    if (!isWaveCastPolicyKey(attr.getName().getValue()))
+      return op.emitOpError("unknown policy field '")
+             << attr.getName().getValue() << "'";
+
+  Attribute rounding = policy->get("rounding");
+  if (rounding) {
+    result.rounding = dyn_cast<CastRoundingPolicyAttr>(rounding);
+    if (!result.rounding)
+      return op.emitOpError("policy 'rounding' must be #wave.cast_rounding");
+  }
+
+  Attribute signedness = policy->get("signedness");
+  if (signedness) {
+    result.signedness = dyn_cast<CastSignednessPolicyAttr>(signedness);
+    if (!result.signedness)
+      return op.emitOpError(
+          "policy 'signedness' must be #wave.cast_signedness");
+  }
+
+  Attribute extension = policy->get("extension");
+  if (extension) {
+    result.extension = dyn_cast<CastExtensionPolicyAttr>(extension);
+    if (!result.extension)
+      return op.emitOpError("policy 'extension' must be #wave.cast_extension");
+  }
+
+  return result;
 }
 
 static LogicalResult verifyWaveCastKind(CastOp op, WaveCastShape source,
@@ -211,6 +260,51 @@ static LogicalResult verifyWaveCastKind(CastOp op, WaveCastShape source,
   return success();
 }
 
+static LogicalResult verifyWaveCastRoundingPolicy(CastOp op,
+                                                  WaveCastPolicy policy) {
+  if (!policy.rounding)
+    return success();
+  if (op.getKind() != CastKind::FpConvert && op.getKind() != CastKind::IntToFp)
+    return op.emitOpError("rounding policy requires fpconvert or int_to_fp");
+  return success();
+}
+
+static LogicalResult verifyWaveCastSignednessPolicy(CastOp op,
+                                                    WaveCastPolicy policy) {
+  bool needsSignedness =
+      op.getKind() == CastKind::IntToFp || op.getKind() == CastKind::FpToInt;
+  if (needsSignedness && !policy.signedness)
+    return op.emitOpError("signedness policy required for ")
+           << stringifyCastKind(op.getKind());
+  if (!needsSignedness && policy.signedness)
+    return op.emitOpError("signedness policy requires int_to_fp or fp_to_int");
+  return success();
+}
+
+static LogicalResult verifyWaveCastExtensionPolicy(CastOp op,
+                                                   WaveCastShape source,
+                                                   WaveCastShape result,
+                                                   WaveCastPolicy policy) {
+  bool wideningIntConvert = op.getKind() == CastKind::IntConvert &&
+                            result.elementBits > source.elementBits;
+  if (wideningIntConvert && !policy.extension)
+    return op.emitOpError("extension policy required for widening intconvert");
+  if (!wideningIntConvert && policy.extension)
+    return op.emitOpError(
+        "extension policy only valid for widening intconvert");
+  return success();
+}
+
+static LogicalResult verifyWaveCastPolicy(CastOp op, WaveCastShape source,
+                                          WaveCastShape result,
+                                          WaveCastPolicy policy) {
+  if (failed(verifyWaveCastRoundingPolicy(op, policy)))
+    return failure();
+  if (failed(verifyWaveCastSignednessPolicy(op, policy)))
+    return failure();
+  return verifyWaveCastExtensionPolicy(op, source, result, policy);
+}
+
 LogicalResult CastOp::verify() {
   auto emit = [this](const Twine &msg) { return emitOpError(msg); };
   FailureOr<WaveCastShape> source =
@@ -225,11 +319,12 @@ LogicalResult CastOp::verify() {
   if (source->simdWidth && *source->simdWidth != *result->simdWidth)
     return emitOpError("source and result SIMD widths must match");
 
-  if (std::optional<DictionaryAttr> policy = getPolicy())
-    if (!policy->empty())
-      return emitOpError("non-empty policy requires wave.cast policy attrs");
-
-  return verifyWaveCastKind(*this, *source, *result);
+  FailureOr<WaveCastPolicy> policy = getWaveCastPolicy(*this);
+  if (failed(policy))
+    return failure();
+  if (failed(verifyWaveCastKind(*this, *source, *result)))
+    return failure();
+  return verifyWaveCastPolicy(*this, *source, *result, *policy);
 }
 
 namespace {

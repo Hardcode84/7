@@ -216,6 +216,54 @@ func.func @cast_bad_fp_to_int_kind(%x: !wave.simd<i32, 32>) {
 
 // -----
 
+func.func @cast_widening_intconvert_missing_extension(%x: !wave.simd<i16, 32>) {
+  // expected-error @+1 {{extension policy required for widening intconvert}}
+  %r = wave.cast intconvert %x : !wave.simd<i16, 32> -> !wave.simd<i32, 32>
+  return
+}
+
+// -----
+
+func.func @cast_intconvert_trunc_with_extension(%x: !wave.simd<i32, 32>) {
+  // expected-error @+1 {{extension policy only valid for widening intconvert}}
+  %r = wave.cast intconvert %x policy {extension = #wave.cast_extension<sign>} : !wave.simd<i32, 32> -> !wave.simd<i16, 32>
+  return
+}
+
+// -----
+
+func.func @cast_int_to_fp_missing_signedness(%x: !wave.simd<i32, 32>) {
+  // expected-error @+1 {{signedness policy required for int_to_fp}}
+  %r = wave.cast int_to_fp %x : !wave.simd<i32, 32> -> !wave.simd<f32, 32>
+  return
+}
+
+// -----
+
+func.func @cast_fp_to_int_missing_signedness(%x: !wave.simd<f32, 32>) {
+  // expected-error @+1 {{signedness policy required for fp_to_int}}
+  %r = wave.cast fp_to_int %x : !wave.simd<f32, 32> -> !wave.simd<i32, 32>
+  return
+}
+
+// -----
+
+func.func @cast_rounding_on_fp_to_int(%x: !wave.simd<f32, 32>) {
+  // expected-error @+1 {{rounding policy requires fpconvert or int_to_fp}}
+  %r = wave.cast fp_to_int %x policy {rounding = #wave.cast_rounding<rne>, signedness = #wave.cast_signedness<signed>} : !wave.simd<f32, 32> -> !wave.simd<i32, 32>
+  return
+}
+
+// -----
+
+func.func @cast_signedness_on_fpconvert(%x: !wave.simd<f32, 32>) {
+  // expected-error @+1 {{signedness policy requires int_to_fp or fp_to_int}}
+  %r = wave.cast fpconvert %x policy {signedness = #wave.cast_signedness<signed>} : !wave.simd<f32, 32> -> !wave.simd<f16, 32>
+  return
+}
+
+// -----
+
 func.func @cast_non_numeric(%p: !wave.ptr<i32, #wave.global>) {
   // expected-error @+1 {{cast type must be a signless integer or float}}
   %r = wave.cast intconvert %p : !wave.ptr<i32, #wave.global> -> i32
@@ -224,9 +272,17 @@ func.func @cast_non_numeric(%p: !wave.ptr<i32, #wave.global>) {
 
 // -----
 
-func.func @cast_non_empty_policy(%x: f32) {
-  // expected-error @+1 {{non-empty policy requires wave.cast policy attrs}}
-  %r = wave.cast fpconvert %x policy {round = "rn"} : f32 -> f16
+func.func @cast_unknown_policy(%x: f32) {
+  // expected-error @+1 {{unknown policy field 'round'}}
+  %r = wave.cast fpconvert %x policy {round = #wave.cast_rounding<rne>} : f32 -> f16
+  return
+}
+
+// -----
+
+func.func @cast_wrong_policy_type(%x: f32) {
+  // expected-error @+1 {{policy 'rounding' must be #wave.cast_rounding}}
+  %r = wave.cast fpconvert %x policy {rounding = "rne"} : f32 -> f16
   return
 }
 

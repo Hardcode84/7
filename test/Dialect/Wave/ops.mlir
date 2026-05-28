@@ -98,16 +98,20 @@ func.func @wave_f32_ops(%a: !wave.simd<f32, 32>, %b: !wave.simd<f32, 32>) -> !wa
 func.func @wave_cast_ops(%vf32: !wave.simd<f32, 32>, %vf16: !wave.simd<f16, 32>,
                          %vi32: !wave.simd<i32, 32>, %vi16: !wave.simd<i16, 32>,
                          %sf32: f32) {
-  // CHECK: [[FPCVT:%.*]] = wave.cast fpconvert [[VF32]] : !wave.simd<f32, 32> -> !wave.simd<f16, 32>
-  %fp = wave.cast fpconvert %vf32 : !wave.simd<f32, 32> -> !wave.simd<f16, 32>
-  // CHECK: [[ICVT:%.*]] = wave.cast intconvert [[VI16]] : !wave.simd<i16, 32> -> !wave.simd<i32, 32>
-  %int = wave.cast intconvert %vi16 : !wave.simd<i16, 32> -> !wave.simd<i32, 32>
-  // CHECK: [[ITOF:%.*]] = wave.cast int_to_fp [[VI32]] : !wave.simd<i32, 32> -> !wave.simd<f32, 32>
-  %itof = wave.cast int_to_fp %vi32 : !wave.simd<i32, 32> -> !wave.simd<f32, 32>
-  // CHECK: [[FTOI:%.*]] = wave.cast fp_to_int [[VF16]] : !wave.simd<f16, 32> -> !wave.simd<i32, 32>
-  %ftoi = wave.cast fp_to_int %vf16 : !wave.simd<f16, 32> -> !wave.simd<i32, 32>
-  // CHECK: [[SFP:%.*]] = wave.cast fpconvert [[SF32]] : f32 -> f16
-  %scalar_fp = wave.cast fpconvert %sf32 : f32 -> f16
+  // CHECK: [[FPCVT:%.*]] = wave.cast fpconvert [[VF32]] policy {rounding = #wave.cast_rounding<rne>} : !wave.simd<f32, 32> -> !wave.simd<f16, 32>
+  %fp = wave.cast fpconvert %vf32 policy {rounding = #wave.cast_rounding<rne>} : !wave.simd<f32, 32> -> !wave.simd<f16, 32>
+  // CHECK: [[ICVT:%.*]] = wave.cast intconvert [[VI16]] policy {extension = #wave.cast_extension<sign>} : !wave.simd<i16, 32> -> !wave.simd<i32, 32>
+  %int = wave.cast intconvert %vi16 policy {extension = #wave.cast_extension<sign>} : !wave.simd<i16, 32> -> !wave.simd<i32, 32>
+  // CHECK: [[ICVTZ:%.*]] = wave.cast intconvert [[VI16]] policy {extension = #wave.cast_extension<zero>} : !wave.simd<i16, 32> -> !wave.simd<i32, 32>
+  %int_zero = wave.cast intconvert %vi16 policy {extension = #wave.cast_extension<zero>} : !wave.simd<i16, 32> -> !wave.simd<i32, 32>
+  // CHECK: [[ITOF:%.*]] = wave.cast int_to_fp [[VI32]] policy {rounding = #wave.cast_rounding<rtz>, signedness = #wave.cast_signedness<unsigned>} : !wave.simd<i32, 32> -> !wave.simd<f32, 32>
+  %itof = wave.cast int_to_fp %vi32 policy {rounding = #wave.cast_rounding<rtz>, signedness = #wave.cast_signedness<unsigned>} : !wave.simd<i32, 32> -> !wave.simd<f32, 32>
+  // CHECK: [[FTOI:%.*]] = wave.cast fp_to_int [[VF16]] policy {signedness = #wave.cast_signedness<signed>} : !wave.simd<f16, 32> -> !wave.simd<i32, 32>
+  %ftoi = wave.cast fp_to_int %vf16 policy {signedness = #wave.cast_signedness<signed>} : !wave.simd<f16, 32> -> !wave.simd<i32, 32>
+  // CHECK: [[SFP:%.*]] = wave.cast fpconvert [[SF32]] policy {rounding = #wave.cast_rounding<rtp>} : f32 -> f16
+  %scalar_fp = wave.cast fpconvert %sf32 policy {rounding = #wave.cast_rounding<rtp>} : f32 -> f16
+  // CHECK: [[SFPD:%.*]] = wave.cast fpconvert [[SF32]] policy {rounding = #wave.cast_rounding<rtn>} : f32 -> f16
+  %scalar_fp_down = wave.cast fpconvert %sf32 policy {rounding = #wave.cast_rounding<rtn>} : f32 -> f16
   func.return
 }
 

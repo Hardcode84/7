@@ -10,11 +10,33 @@
 #define MLIR_DIALECT_WAVE_IR_WAVEATTRS_TD
 
 include "mlir/Dialect/Wave/IR/WaveBase.td"
+include "mlir/Dialect/Wave/IR/WaveEnums.td"
 include "mlir/IR/AttrTypeBase.td"
 
 class Wave_Attr<string name, string attrMnemonic, list<Trait> traits = []>
     : AttrDef<Wave_Dialect, name, traits> {
   let mnemonic = attrMnemonic;
+}
+
+def Wave_CastRoundingPolicyAttr
+    : Wave_Attr<"CastRoundingPolicy", "cast_rounding"> {
+  let summary = "wave.cast floating-point rounding policy";
+  let parameters = (ins EnumParameter<Wave_CastRoundingEnum>:$value);
+  let assemblyFormat = "`<` $value `>`";
+}
+
+def Wave_CastSignednessPolicyAttr
+    : Wave_Attr<"CastSignednessPolicy", "cast_signedness"> {
+  let summary = "wave.cast integer signedness policy";
+  let parameters = (ins EnumParameter<Wave_CastSignednessEnum>:$value);
+  let assemblyFormat = "`<` $value `>`";
+}
+
+def Wave_CastExtensionPolicyAttr
+    : Wave_Attr<"CastExtensionPolicy", "cast_extension"> {
+  let summary = "wave.cast integer extension policy";
+  let parameters = (ins EnumParameter<Wave_CastExtensionEnum>:$value);
+  let assemblyFormat = "`<` $value `>`";
 }
 
 //===----------------------------------------------------------------------===//
