@@ -312,7 +312,7 @@ decomposeGlobalLoad(waveamdmachine::GlobalLoadTupleB32Op op,
     tokens.push_back(chunk->getResult(1));
     cumByteOffset += static_cast<int64_t>(w) * 4;
   }
-  Value tokenResult = op.getTokens().empty() ? Value{} : op.getTokens().front();
+  Value tokenResult = op.getToken();
   finalizeLoadDecomposition(op, op.getResult(), tokenResult, elements, tokens);
   return success();
 }
@@ -345,7 +345,7 @@ decomposeBufferLoad(waveamdmachine::BufferLoadTupleB32Op op,
     tokens.push_back(chunk->getResult(1));
     cumByteOffset += static_cast<int64_t>(w) * 4;
   }
-  Value tokenResult = op.getTokens().empty() ? Value{} : op.getTokens().front();
+  Value tokenResult = op.getToken();
   finalizeLoadDecomposition(op, op.getResult(), tokenResult, elements, tokens);
   return success();
 }
@@ -376,7 +376,7 @@ static LogicalResult decomposeDsLoad(waveamdmachine::DsLoadTupleB32Op op,
     tokens.push_back(chunk->getResult(1));
     cumByteOffset += static_cast<int64_t>(w) * 4;
   }
-  Value tokenResult = op.getTokens().empty() ? Value{} : op.getTokens().front();
+  Value tokenResult = op.getToken();
   finalizeLoadDecomposition(op, op.getResult(), tokenResult, elements, tokens);
   return success();
 }
@@ -408,7 +408,7 @@ decomposeGlobalStore(waveamdmachine::GlobalStoreTupleB32Op op,
     tokens.push_back(chunk->getResult(0));
     cumByteOffset += static_cast<int64_t>(w) * 4;
   }
-  Value tokenResult = op.getTokens().empty() ? Value{} : op.getTokens().front();
+  Value tokenResult = op.getToken();
   finalizeStoreDecomposition(op, tokenResult, tokens);
   return success();
 }
@@ -441,7 +441,7 @@ decomposeBufferStore(waveamdmachine::BufferStoreTupleB32Op op,
     tokens.push_back(chunk->getResult(0));
     cumByteOffset += static_cast<int64_t>(w) * 4;
   }
-  Value tokenResult = op.getTokens().empty() ? Value{} : op.getTokens().front();
+  Value tokenResult = op.getToken();
   finalizeStoreDecomposition(op, tokenResult, tokens);
   return success();
 }
@@ -471,7 +471,7 @@ static LogicalResult decomposeDsStore(waveamdmachine::DsStoreTupleB32Op op,
     tokens.push_back(chunk->getResult(0));
     cumByteOffset += static_cast<int64_t>(w) * 4;
   }
-  Value tokenResult = op.getTokens().empty() ? Value{} : op.getTokens().front();
+  Value tokenResult = op.getToken();
   finalizeStoreDecomposition(op, tokenResult, tokens);
   return success();
 }

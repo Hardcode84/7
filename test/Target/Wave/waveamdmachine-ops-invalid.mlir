@@ -81,11 +81,10 @@ func.func @tuple_from_elements_mixed_class(%a: !waveamdmachine.reg<vgpr, 2>,
 
 // -----
 
-// Covers the shared "produces at most one memory token" diagnostic emitted by
-// global/buffer/ds load and store ops -- substring match across all eight.
+// Memory-token result group is optional, not variadic.
 func.func @memop_two_tokens(%off: !waveamdmachine.reg<vgpr, 1>,
                             %base: !waveamdmachine.reg<sgpr, 2>) {
-  // expected-error @below {{produces at most one memory token}}
+  // expected-error @below {{requires 0 or 1 element, but found 2}}
   %r, %t0, %t1 = waveamdmachine.global_load_b32 %off, %base
       : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 2>)
       -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token, !waveamdmachine.mem.token)

@@ -39,26 +39,26 @@ single = build_flash_attention_f32_module(
     seq_n=16,
 )
 single_text = str(single)
-assert single_text.count('"waveamd.mma"') == 4
-assert single_text.count('"wave.cast"') > 0
+assert single_text.count("waveamd.mma") == 4
+assert single_text.count("wave.cast") > 0
 print("fa-mfma ok")
 print(
     "fa-single mma",
-    single_text.count('"waveamd.mma"'),
+    single_text.count("waveamd.mma"),
     "casts",
-    single_text.count('"wave.cast"'),
+    single_text.count("wave.cast"),
 )
 print(module)
 
 # CHECK: fa-ref 256 512 512 256
 # CHECK: fa-mfma ok
 # CHECK: fa-single mma 4 casts {{[1-9][0-9]*}}
-# CHECK: sym_name = "flash_attention_f32"
-# CHECK: "waveamd.mma"
-# CHECK: "waveamd.fragment_unpack"
-# CHECK: "wave.fmul"
-# CHECK: "wave.fadd"
-# CHECK: "wave.fmax"
-# CHECK: "wave.fsub"
-# CHECK: "wave.fexp2"
-# CHECK: "wave.frcp"
+# CHECK: func.func @flash_attention_f32
+# CHECK: waveamd.mma
+# CHECK: waveamd.fragment_unpack
+# CHECK: wave.fmul
+# CHECK: wave.fadd
+# CHECK: wave.fmax
+# CHECK: wave.fsub
+# CHECK: wave.fexp2
+# CHECK: wave.frcp

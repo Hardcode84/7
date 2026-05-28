@@ -141,75 +141,21 @@ LogicalResult MfmaF32_16x16x32_F16Op::verify() {
   return success();
 }
 
-LogicalResult GlobalStoreB16Op::verify() {
-  if (getNumResults() > 1)
-    return emitOpError("produces at most one memory token");
-  return success();
-}
-
-LogicalResult GlobalStoreB32Op::verify() {
-  if (getNumResults() > 1)
-    return emitOpError("produces at most one memory token");
-  return success();
-}
-
-LogicalResult BufferStoreB16Op::verify() {
-  if (getNumResults() > 1)
-    return emitOpError("produces at most one memory token");
-  return success();
-}
-
-LogicalResult BufferStoreB32Op::verify() {
-  if (getNumResults() > 1)
-    return emitOpError("produces at most one memory token");
-  return success();
-}
-
 LogicalResult GlobalStoreTupleB32Op::verify() {
-  if (getNumResults() > 1)
-    return emitOpError("produces at most one memory token");
   auto valueType = cast<RegType>(getOperand(1).getType());
   if (valueType.getWidth() < 1)
     return emitOpError("value tuple width must be at least 1");
   return success();
 }
 
-LogicalResult GlobalLoadB16Op::verify() {
-  if (getTokens().size() > 1)
-    return emitOpError("produces at most one memory token");
-  return success();
-}
-
-LogicalResult GlobalLoadB32Op::verify() {
-  if (getTokens().size() > 1)
-    return emitOpError("produces at most one memory token");
-  return success();
-}
-
 LogicalResult GlobalLoadTupleB32Op::verify() {
-  if (getTokens().size() > 1)
-    return emitOpError("produces at most one memory token");
   auto resultType = cast<RegType>(getResult().getType());
   if (resultType.getWidth() < 1)
     return emitOpError("result tuple width must be at least 1");
   return success();
 }
 
-LogicalResult BufferLoadB16Op::verify() {
-  if (getTokens().size() > 1)
-    return emitOpError("produces at most one memory token");
-  return success();
-}
-
-LogicalResult BufferLoadB32Op::verify() {
-  if (getTokens().size() > 1)
-    return emitOpError("produces at most one memory token");
-  return success();
-}
-
 LogicalResult BufferLoadTupleB32Op::verify() {
-  if (getTokens().size() > 1)
-    return emitOpError("produces at most one memory token");
   auto resultType = cast<RegType>(getResult().getType());
   if (resultType.getWidth() < 1)
     return emitOpError("result tuple width must be at least 1");
@@ -217,8 +163,6 @@ LogicalResult BufferLoadTupleB32Op::verify() {
 }
 
 LogicalResult BufferStoreTupleB32Op::verify() {
-  if (getNumResults() > 1)
-    return emitOpError("produces at most one memory token");
   auto valueType = cast<RegType>(getOperand(1).getType());
   if (valueType.getWidth() < 1)
     return emitOpError("value tuple width must be at least 1");
@@ -226,8 +170,6 @@ LogicalResult BufferStoreTupleB32Op::verify() {
 }
 
 LogicalResult DsLoadTupleB32Op::verify() {
-  if (getTokens().size() > 1)
-    return emitOpError("produces at most one memory token");
   auto resultType = cast<RegType>(getResult().getType());
   if (resultType.getWidth() < 1)
     return emitOpError("result tuple width must be at least 1");
@@ -235,8 +177,6 @@ LogicalResult DsLoadTupleB32Op::verify() {
 }
 
 LogicalResult DsStoreTupleB32Op::verify() {
-  if (getNumResults() > 1)
-    return emitOpError("produces at most one memory token");
   auto valueType = cast<RegType>(getValue().getType());
   if (valueType.getWidth() < 1)
     return emitOpError("value tuple width must be at least 1");

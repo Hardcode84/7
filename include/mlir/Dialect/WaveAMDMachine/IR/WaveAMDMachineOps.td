@@ -543,12 +543,11 @@ def WaveAMDMachine_GlobalLoadB16Op
                        Optional<WaveAMDMachine_MemToken>:$dependency,
                        DefaultValuedAttr<I64Attr, "0">:$inst_offset);
   let results = (outs WaveAMDMachine_VGPR1:$result,
-                      Variadic<WaveAMDMachine_MemToken>:$tokens);
+                      Optional<WaveAMDMachine_MemToken>:$token);
   let assemblyFormat = [{
     $offset `,` $base (`after` $dependency^)? (`offset` $inst_offset^)?
     attr-dict `:` functional-type(operands, results)
   }];
-  let hasVerifier = 1;
 }
 
 def WaveAMDMachine_GlobalLoadB32Op
@@ -565,12 +564,11 @@ def WaveAMDMachine_GlobalLoadB32Op
                        Optional<WaveAMDMachine_MemToken>:$dependency,
                        DefaultValuedAttr<I64Attr, "0">:$inst_offset);
   let results = (outs WaveAMDMachine_VGPR1:$result,
-                      Variadic<WaveAMDMachine_MemToken>:$tokens);
+                      Optional<WaveAMDMachine_MemToken>:$token);
   let assemblyFormat = [{
     $offset `,` $base (`after` $dependency^)? (`offset` $inst_offset^)?
     attr-dict `:` functional-type(operands, results)
   }];
-  let hasVerifier = 1;
 }
 
 // HW-fused multi-dword global loads. The single op corresponds 1:1 to
@@ -584,7 +582,7 @@ def WaveAMDMachine_GlobalLoadB64Op
                        Optional<WaveAMDMachine_MemToken>:$dependency,
                        DefaultValuedAttr<I64Attr, "0">:$inst_offset);
   let results = (outs WaveAMDMachine_VGPR2:$result,
-                      Variadic<WaveAMDMachine_MemToken>:$tokens);
+                      Optional<WaveAMDMachine_MemToken>:$token);
   let assemblyFormat = [{
     $offset `,` $base (`after` $dependency^)? (`offset` $inst_offset^)?
     attr-dict `:` functional-type(operands, results)
@@ -598,7 +596,7 @@ def WaveAMDMachine_GlobalLoadB96Op
                        Optional<WaveAMDMachine_MemToken>:$dependency,
                        DefaultValuedAttr<I64Attr, "0">:$inst_offset);
   let results = (outs WaveAMDMachine_VGPR3:$result,
-                      Variadic<WaveAMDMachine_MemToken>:$tokens);
+                      Optional<WaveAMDMachine_MemToken>:$token);
   let assemblyFormat = [{
     $offset `,` $base (`after` $dependency^)? (`offset` $inst_offset^)?
     attr-dict `:` functional-type(operands, results)
@@ -612,7 +610,7 @@ def WaveAMDMachine_GlobalLoadB128Op
                        Optional<WaveAMDMachine_MemToken>:$dependency,
                        DefaultValuedAttr<I64Attr, "0">:$inst_offset);
   let results = (outs WaveAMDMachine_VGPR4:$result,
-                      Variadic<WaveAMDMachine_MemToken>:$tokens);
+                      Optional<WaveAMDMachine_MemToken>:$token);
   let assemblyFormat = [{
     $offset `,` $base (`after` $dependency^)? (`offset` $inst_offset^)?
     attr-dict `:` functional-type(operands, results)
@@ -633,7 +631,7 @@ def WaveAMDMachine_GlobalLoadTupleB32Op
                        Optional<WaveAMDMachine_MemToken>:$dependency,
                        DefaultValuedAttr<I64Attr, "0">:$inst_offset);
   let results = (outs WaveAMDMachine_VGPR:$result,
-                      Variadic<WaveAMDMachine_MemToken>:$tokens);
+                      Optional<WaveAMDMachine_MemToken>:$token);
   let assemblyFormat = [{
     $offset `,` $base (`after` $dependency^)? (`offset` $inst_offset^)?
     attr-dict `:` functional-type(operands, results)
@@ -715,13 +713,12 @@ def WaveAMDMachine_GlobalStoreB16Op
                        WaveAMDMachine_SGPR2:$base,
                        Optional<WaveAMDMachine_MemToken>:$dependency,
                        DefaultValuedAttr<I64Attr, "0">:$inst_offset);
-  let results = (outs Variadic<WaveAMDMachine_MemToken>:$tokens);
+  let results = (outs Optional<WaveAMDMachine_MemToken>:$token);
   let assemblyFormat = [{
     $offset `,` $value `,` $base (`after` $dependency^)?
     (`offset` $inst_offset^)?
     attr-dict `:` functional-type(operands, results)
   }];
-  let hasVerifier = 1;
 }
 
 def WaveAMDMachine_GlobalStoreB32Op
@@ -736,13 +733,12 @@ def WaveAMDMachine_GlobalStoreB32Op
                        WaveAMDMachine_SGPR2:$base,
                        Optional<WaveAMDMachine_MemToken>:$dependency,
                        DefaultValuedAttr<I64Attr, "0">:$inst_offset);
-  let results = (outs Variadic<WaveAMDMachine_MemToken>:$tokens);
+  let results = (outs Optional<WaveAMDMachine_MemToken>:$token);
   let assemblyFormat = [{
     $offset `,` $value `,` $base (`after` $dependency^)?
     (`offset` $inst_offset^)?
     attr-dict `:` functional-type(operands, results)
   }];
-  let hasVerifier = 1;
 }
 
 def WaveAMDMachine_GlobalStoreB64Op
@@ -752,7 +748,7 @@ def WaveAMDMachine_GlobalStoreB64Op
                        WaveAMDMachine_SGPR2:$base,
                        Optional<WaveAMDMachine_MemToken>:$dependency,
                        DefaultValuedAttr<I64Attr, "0">:$inst_offset);
-  let results = (outs Variadic<WaveAMDMachine_MemToken>:$tokens);
+  let results = (outs Optional<WaveAMDMachine_MemToken>:$token);
   let assemblyFormat = [{
     $offset `,` $value `,` $base (`after` $dependency^)?
     (`offset` $inst_offset^)?
@@ -767,7 +763,7 @@ def WaveAMDMachine_GlobalStoreB96Op
                        WaveAMDMachine_SGPR2:$base,
                        Optional<WaveAMDMachine_MemToken>:$dependency,
                        DefaultValuedAttr<I64Attr, "0">:$inst_offset);
-  let results = (outs Variadic<WaveAMDMachine_MemToken>:$tokens);
+  let results = (outs Optional<WaveAMDMachine_MemToken>:$token);
   let assemblyFormat = [{
     $offset `,` $value `,` $base (`after` $dependency^)?
     (`offset` $inst_offset^)?
@@ -782,7 +778,7 @@ def WaveAMDMachine_GlobalStoreB128Op
                        WaveAMDMachine_SGPR2:$base,
                        Optional<WaveAMDMachine_MemToken>:$dependency,
                        DefaultValuedAttr<I64Attr, "0">:$inst_offset);
-  let results = (outs Variadic<WaveAMDMachine_MemToken>:$tokens);
+  let results = (outs Optional<WaveAMDMachine_MemToken>:$token);
   let assemblyFormat = [{
     $offset `,` $value `,` $base (`after` $dependency^)?
     (`offset` $inst_offset^)?
@@ -797,13 +793,12 @@ def WaveAMDMachine_BufferStoreB16Op
                        WaveAMDMachine_SGPR1OrImm:$soffset,
                        Optional<WaveAMDMachine_MemToken>:$dependency,
                        DefaultValuedAttr<I64Attr, "0">:$inst_offset);
-  let results = (outs Variadic<WaveAMDMachine_MemToken>:$tokens);
+  let results = (outs Optional<WaveAMDMachine_MemToken>:$token);
   let assemblyFormat = [{
     $offset `,` $value `,` $descriptor `,` $soffset
     (`after` $dependency^)? (`offset` $inst_offset^)?
     attr-dict `:` functional-type(operands, results)
   }];
-  let hasVerifier = 1;
 }
 
 def WaveAMDMachine_BufferStoreB32Op
@@ -821,13 +816,12 @@ def WaveAMDMachine_BufferStoreB32Op
                        WaveAMDMachine_SGPR1OrImm:$soffset,
                        Optional<WaveAMDMachine_MemToken>:$dependency,
                        DefaultValuedAttr<I64Attr, "0">:$inst_offset);
-  let results = (outs Variadic<WaveAMDMachine_MemToken>:$tokens);
+  let results = (outs Optional<WaveAMDMachine_MemToken>:$token);
   let assemblyFormat = [{
     $offset `,` $value `,` $descriptor `,` $soffset
     (`after` $dependency^)? (`offset` $inst_offset^)?
     attr-dict `:` functional-type(operands, results)
   }];
-  let hasVerifier = 1;
 }
 def WaveAMDMachine_BufferLoadB16Op
     : WaveAMDMachine_BufferMemoryOp<"buffer_load_b16", [WaveAMDMachine_VMEMLoad, MemoryEffects<[MemRead]>]> {
@@ -837,13 +831,12 @@ def WaveAMDMachine_BufferLoadB16Op
                        Optional<WaveAMDMachine_MemToken>:$dependency,
                        DefaultValuedAttr<I64Attr, "0">:$inst_offset);
   let results = (outs WaveAMDMachine_VGPR1:$result,
-                      Variadic<WaveAMDMachine_MemToken>:$tokens);
+                      Optional<WaveAMDMachine_MemToken>:$token);
   let assemblyFormat = [{
     $offset `,` $descriptor `,` $soffset
     (`after` $dependency^)? (`offset` $inst_offset^)?
     attr-dict `:` functional-type(operands, results)
   }];
-  let hasVerifier = 1;
 }
 
 def WaveAMDMachine_BufferLoadB32Op
@@ -859,13 +852,12 @@ def WaveAMDMachine_BufferLoadB32Op
                        Optional<WaveAMDMachine_MemToken>:$dependency,
                        DefaultValuedAttr<I64Attr, "0">:$inst_offset);
   let results = (outs WaveAMDMachine_VGPR1:$result,
-                      Variadic<WaveAMDMachine_MemToken>:$tokens);
+                      Optional<WaveAMDMachine_MemToken>:$token);
   let assemblyFormat = [{
     $offset `,` $descriptor `,` $soffset
     (`after` $dependency^)? (`offset` $inst_offset^)?
     attr-dict `:` functional-type(operands, results)
   }];
-  let hasVerifier = 1;
 }
 def WaveAMDMachine_BufferLoadB64Op
     : WaveAMDMachine_BufferMemoryOp<"buffer_load_b64", [WaveAMDMachine_VMEMLoad, MemoryEffects<[MemRead]>]> {
@@ -875,7 +867,7 @@ def WaveAMDMachine_BufferLoadB64Op
                        Optional<WaveAMDMachine_MemToken>:$dependency,
                        DefaultValuedAttr<I64Attr, "0">:$inst_offset);
   let results = (outs WaveAMDMachine_VGPR2:$result,
-                      Variadic<WaveAMDMachine_MemToken>:$tokens);
+                      Optional<WaveAMDMachine_MemToken>:$token);
   let assemblyFormat = [{
     $offset `,` $descriptor `,` $soffset
     (`after` $dependency^)? (`offset` $inst_offset^)?
@@ -891,7 +883,7 @@ def WaveAMDMachine_BufferLoadB96Op
                        Optional<WaveAMDMachine_MemToken>:$dependency,
                        DefaultValuedAttr<I64Attr, "0">:$inst_offset);
   let results = (outs WaveAMDMachine_VGPR3:$result,
-                      Variadic<WaveAMDMachine_MemToken>:$tokens);
+                      Optional<WaveAMDMachine_MemToken>:$token);
   let assemblyFormat = [{
     $offset `,` $descriptor `,` $soffset
     (`after` $dependency^)? (`offset` $inst_offset^)?
@@ -907,7 +899,7 @@ def WaveAMDMachine_BufferLoadB128Op
                        Optional<WaveAMDMachine_MemToken>:$dependency,
                        DefaultValuedAttr<I64Attr, "0">:$inst_offset);
   let results = (outs WaveAMDMachine_VGPR4:$result,
-                      Variadic<WaveAMDMachine_MemToken>:$tokens);
+                      Optional<WaveAMDMachine_MemToken>:$token);
   let assemblyFormat = [{
     $offset `,` $descriptor `,` $soffset
     (`after` $dependency^)? (`offset` $inst_offset^)?
@@ -923,7 +915,7 @@ def WaveAMDMachine_BufferStoreB64Op
                        WaveAMDMachine_SGPR1OrImm:$soffset,
                        Optional<WaveAMDMachine_MemToken>:$dependency,
                        DefaultValuedAttr<I64Attr, "0">:$inst_offset);
-  let results = (outs Variadic<WaveAMDMachine_MemToken>:$tokens);
+  let results = (outs Optional<WaveAMDMachine_MemToken>:$token);
   let assemblyFormat = [{
     $offset `,` $value `,` $descriptor `,` $soffset
     (`after` $dependency^)? (`offset` $inst_offset^)?
@@ -939,7 +931,7 @@ def WaveAMDMachine_BufferStoreB96Op
                        WaveAMDMachine_SGPR1OrImm:$soffset,
                        Optional<WaveAMDMachine_MemToken>:$dependency,
                        DefaultValuedAttr<I64Attr, "0">:$inst_offset);
-  let results = (outs Variadic<WaveAMDMachine_MemToken>:$tokens);
+  let results = (outs Optional<WaveAMDMachine_MemToken>:$token);
   let assemblyFormat = [{
     $offset `,` $value `,` $descriptor `,` $soffset
     (`after` $dependency^)? (`offset` $inst_offset^)?
@@ -955,7 +947,7 @@ def WaveAMDMachine_BufferStoreB128Op
                        WaveAMDMachine_SGPR1OrImm:$soffset,
                        Optional<WaveAMDMachine_MemToken>:$dependency,
                        DefaultValuedAttr<I64Attr, "0">:$inst_offset);
-  let results = (outs Variadic<WaveAMDMachine_MemToken>:$tokens);
+  let results = (outs Optional<WaveAMDMachine_MemToken>:$token);
   let assemblyFormat = [{
     $offset `,` $value `,` $descriptor `,` $soffset
     (`after` $dependency^)? (`offset` $inst_offset^)?
@@ -979,7 +971,7 @@ def WaveAMDMachine_BufferLoadTupleB32Op
                        Optional<WaveAMDMachine_MemToken>:$dependency,
                        DefaultValuedAttr<I64Attr, "0">:$inst_offset);
   let results = (outs WaveAMDMachine_VGPR:$result,
-                      Variadic<WaveAMDMachine_MemToken>:$tokens);
+                      Optional<WaveAMDMachine_MemToken>:$token);
   let assemblyFormat = [{
     $offset `,` $descriptor `,` $soffset
     (`after` $dependency^)? (`offset` $inst_offset^)?
@@ -1063,7 +1055,7 @@ def WaveAMDMachine_BufferStoreTupleB32Op
                        WaveAMDMachine_SGPR1OrImm:$soffset,
                        Optional<WaveAMDMachine_MemToken>:$dependency,
                        DefaultValuedAttr<I64Attr, "0">:$inst_offset);
-  let results = (outs Variadic<WaveAMDMachine_MemToken>:$tokens);
+  let results = (outs Optional<WaveAMDMachine_MemToken>:$token);
   let assemblyFormat = [{
     $offset `,` $value `,` $descriptor `,` $soffset
     (`after` $dependency^)? (`offset` $inst_offset^)?
@@ -1084,7 +1076,7 @@ def WaveAMDMachine_GlobalStoreTupleB32Op
                        WaveAMDMachine_SGPR2:$base,
                        Optional<WaveAMDMachine_MemToken>:$dependency,
                        DefaultValuedAttr<I64Attr, "0">:$inst_offset);
-  let results = (outs Variadic<WaveAMDMachine_MemToken>:$tokens);
+  let results = (outs Optional<WaveAMDMachine_MemToken>:$token);
   let assemblyFormat = [{
     $offset `,` $value `,` $base (`after` $dependency^)?
     (`offset` $inst_offset^)?
@@ -1106,7 +1098,7 @@ def WaveAMDMachine_DsLoadB16Op
                        Optional<WaveAMDMachine_MemToken>:$dependency,
                        DefaultValuedAttr<I64Attr, "0">:$offset);
   let results = (outs WaveAMDMachine_VGPR1:$result,
-                      Variadic<WaveAMDMachine_MemToken>:$tokens);
+                      Optional<WaveAMDMachine_MemToken>:$token);
   let assemblyFormat = [{
     $addr (`after` $dependency^)? (`offset` $offset^)?
     attr-dict `:` functional-type(operands, results)
@@ -1120,7 +1112,7 @@ def WaveAMDMachine_DsLoadB32Op
                        Optional<WaveAMDMachine_MemToken>:$dependency,
                        DefaultValuedAttr<I64Attr, "0">:$offset);
   let results = (outs WaveAMDMachine_VGPR1:$result,
-                      Variadic<WaveAMDMachine_MemToken>:$tokens);
+                      Optional<WaveAMDMachine_MemToken>:$token);
   let assemblyFormat = [{
     $addr (`after` $dependency^)? (`offset` $offset^)?
     attr-dict `:` functional-type(operands, results)
@@ -1140,7 +1132,7 @@ def WaveAMDMachine_DsLoadTupleB32Op
                        Optional<WaveAMDMachine_MemToken>:$dependency,
                        DefaultValuedAttr<I64Attr, "0">:$offset);
   let results = (outs WaveAMDMachine_VGPR:$result,
-                      Variadic<WaveAMDMachine_MemToken>:$tokens);
+                      Optional<WaveAMDMachine_MemToken>:$token);
   let assemblyFormat = [{
     $addr (`after` $dependency^)? (`offset` $offset^)?
     attr-dict `:` functional-type(operands, results)
@@ -1154,7 +1146,7 @@ def WaveAMDMachine_DsStoreB16Op
   let arguments = (ins WaveAMDMachine_VGPR1:$addr, WaveAMDMachine_VGPR1:$value,
                        Optional<WaveAMDMachine_MemToken>:$dependency,
                        DefaultValuedAttr<I64Attr, "0">:$offset);
-  let results = (outs Variadic<WaveAMDMachine_MemToken>:$tokens);
+  let results = (outs Optional<WaveAMDMachine_MemToken>:$token);
   let assemblyFormat = [{
     $addr `,` $value (`after` $dependency^)? (`offset` $offset^)?
     attr-dict `:` functional-type(operands, results)
@@ -1167,7 +1159,7 @@ def WaveAMDMachine_DsStoreB32Op
   let arguments = (ins WaveAMDMachine_VGPR1:$addr, WaveAMDMachine_VGPR1:$value,
                        Optional<WaveAMDMachine_MemToken>:$dependency,
                        DefaultValuedAttr<I64Attr, "0">:$offset);
-  let results = (outs Variadic<WaveAMDMachine_MemToken>:$tokens);
+  let results = (outs Optional<WaveAMDMachine_MemToken>:$token);
   let assemblyFormat = [{
     $addr `,` $value (`after` $dependency^)? (`offset` $offset^)?
     attr-dict `:` functional-type(operands, results)
@@ -1181,7 +1173,7 @@ def WaveAMDMachine_DsLoadB64Op
                        Optional<WaveAMDMachine_MemToken>:$dependency,
                        DefaultValuedAttr<I64Attr, "0">:$offset);
   let results = (outs WaveAMDMachine_VGPR2:$result,
-                      Variadic<WaveAMDMachine_MemToken>:$tokens);
+                      Optional<WaveAMDMachine_MemToken>:$token);
   let assemblyFormat = [{
     $addr (`after` $dependency^)? (`offset` $offset^)?
     attr-dict `:` functional-type(operands, results)
@@ -1195,7 +1187,7 @@ def WaveAMDMachine_DsLoadB96Op
                        Optional<WaveAMDMachine_MemToken>:$dependency,
                        DefaultValuedAttr<I64Attr, "0">:$offset);
   let results = (outs WaveAMDMachine_VGPR3:$result,
-                      Variadic<WaveAMDMachine_MemToken>:$tokens);
+                      Optional<WaveAMDMachine_MemToken>:$token);
   let assemblyFormat = [{
     $addr (`after` $dependency^)? (`offset` $offset^)?
     attr-dict `:` functional-type(operands, results)
@@ -1209,7 +1201,7 @@ def WaveAMDMachine_DsLoadB128Op
                        Optional<WaveAMDMachine_MemToken>:$dependency,
                        DefaultValuedAttr<I64Attr, "0">:$offset);
   let results = (outs WaveAMDMachine_VGPR4:$result,
-                      Variadic<WaveAMDMachine_MemToken>:$tokens);
+                      Optional<WaveAMDMachine_MemToken>:$token);
   let assemblyFormat = [{
     $addr (`after` $dependency^)? (`offset` $offset^)?
     attr-dict `:` functional-type(operands, results)
@@ -1222,7 +1214,7 @@ def WaveAMDMachine_DsStoreB64Op
   let arguments = (ins WaveAMDMachine_VGPR1:$addr, WaveAMDMachine_VGPR2:$value,
                        Optional<WaveAMDMachine_MemToken>:$dependency,
                        DefaultValuedAttr<I64Attr, "0">:$offset);
-  let results = (outs Variadic<WaveAMDMachine_MemToken>:$tokens);
+  let results = (outs Optional<WaveAMDMachine_MemToken>:$token);
   let assemblyFormat = [{
     $addr `,` $value (`after` $dependency^)? (`offset` $offset^)?
     attr-dict `:` functional-type(operands, results)
@@ -1235,7 +1227,7 @@ def WaveAMDMachine_DsStoreB96Op
   let arguments = (ins WaveAMDMachine_VGPR1:$addr, WaveAMDMachine_VGPR3:$value,
                        Optional<WaveAMDMachine_MemToken>:$dependency,
                        DefaultValuedAttr<I64Attr, "0">:$offset);
-  let results = (outs Variadic<WaveAMDMachine_MemToken>:$tokens);
+  let results = (outs Optional<WaveAMDMachine_MemToken>:$token);
   let assemblyFormat = [{
     $addr `,` $value (`after` $dependency^)? (`offset` $offset^)?
     attr-dict `:` functional-type(operands, results)
@@ -1248,7 +1240,7 @@ def WaveAMDMachine_DsStoreB128Op
   let arguments = (ins WaveAMDMachine_VGPR1:$addr, WaveAMDMachine_VGPR4:$value,
                        Optional<WaveAMDMachine_MemToken>:$dependency,
                        DefaultValuedAttr<I64Attr, "0">:$offset);
-  let results = (outs Variadic<WaveAMDMachine_MemToken>:$tokens);
+  let results = (outs Optional<WaveAMDMachine_MemToken>:$token);
   let assemblyFormat = [{
     $addr `,` $value (`after` $dependency^)? (`offset` $offset^)?
     attr-dict `:` functional-type(operands, results)
@@ -1267,7 +1259,7 @@ def WaveAMDMachine_DsStoreTupleB32Op
   let arguments = (ins WaveAMDMachine_VGPR1:$addr, WaveAMDMachine_VGPR:$value,
                        Optional<WaveAMDMachine_MemToken>:$dependency,
                        DefaultValuedAttr<I64Attr, "0">:$offset);
-  let results = (outs Variadic<WaveAMDMachine_MemToken>:$tokens);
+  let results = (outs Optional<WaveAMDMachine_MemToken>:$token);
   let assemblyFormat = [{
     $addr `,` $value (`after` $dependency^)? (`offset` $offset^)?
     attr-dict `:` functional-type(operands, results)
