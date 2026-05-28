@@ -5,6 +5,7 @@ add_mlir_library(MLIRWaveAMDMachineCostModel
   FunctionalUnit.cpp
   LatencyTable.cpp
   MachineState.cpp
+  MemoryCounterTiming.cpp
   OpClassifier.cpp
   PressureAnalysis.cpp
   RegionProfile.cpp

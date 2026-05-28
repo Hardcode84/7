@@ -14,6 +14,7 @@
 #include "mlir/Dialect/WaveAMDMachine/CostModel/EventSimulator.h"
 #include "mlir/Dialect/WaveAMDMachine/CostModel/FunctionalUnit.h"
 #include "mlir/Dialect/WaveAMDMachine/CostModel/LatencyTable.h"
+#include "mlir/Dialect/WaveAMDMachine/CostModel/MemoryCounterTiming.h"
 #include "mlir/Dialect/WaveAMDMachine/CostModel/OpClassifier.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachine.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineTraits.h"
@@ -71,6 +72,26 @@ static llvm::cl::opt<bool>
     opLatencies("op-latencies",
                 llvm::cl::desc("print flattened op class/latency table"),
                 llvm::cl::init(false));
+
+static llvm::cl::opt<int> vmemCounterLatency(
+    "vmem-counter-latency",
+    llvm::cl::desc("override VMEM-load waitcnt counter latency"),
+    llvm::cl::init(-1));
+
+static llvm::cl::opt<int> vscntCounterLatency(
+    "vscnt-counter-latency",
+    llvm::cl::desc("override VMEM-store waitcnt counter latency"),
+    llvm::cl::init(-1));
+
+static llvm::cl::opt<int> smemCounterLatency(
+    "smem-counter-latency",
+    llvm::cl::desc("override SMEM-load waitcnt counter latency"),
+    llvm::cl::init(-1));
+
+static llvm::cl::opt<int>
+    ldsCounterLatency("lds-counter-latency",
+                      llvm::cl::desc("override LDS waitcnt counter latency"),
+                      llvm::cl::init(-1));
 
 static const ArchData *resolveArch(llvm::StringRef name) {
   llvm::StringRef cpu = name;
@@ -192,7 +213,17 @@ static void printEvent(const EventSimEvent &event) {
   llvm::outs() << "\n";
 }
 
-static void printOpLatencies(func::FuncOp func, const ArchData &arch) {
+static bool isValidLatencyOverride(int value) { return value >= -1; }
+
+static bool validateCounterLatencies() {
+  return isValidLatencyOverride(vmemCounterLatency) &&
+         isValidLatencyOverride(vscntCounterLatency) &&
+         isValidLatencyOverride(smemCounterLatency) &&
+         isValidLatencyOverride(ldsCounterLatency);
+}
+
+static void printOpLatencies(func::FuncOp func, const ArchData &arch,
+                             const MemoryCounterLatencies &counterLatencies) {
   SmallVector<Operation *> ops = flattenOps(func);
   llvm::outs() << "op_latencies:\n";
   for (auto [idx, op] : llvm::enumerate(ops)) {
@@ -203,8 +234,12 @@ static void printOpLatencies(func::FuncOp func, const ArchData &arch) {
                  << " op=" << op->getName().getStringRef()
                  << " class=" << getSchedClassName(cls)
                  << " fu=" << getFunctionalUnitName(fu)
-                 << " latency=" << getLatency(arch, cls)
-                 << " issues=" << getIssueCount(op);
+                 << " latency=" << getLatency(arch, cls);
+    if (getMemoryCounterKind(op) != MemoryCounterKind::None) {
+      llvm::outs() << " counter_latency="
+                   << getMemoryCounterLatency(arch, op, counterLatencies);
+    }
+    llvm::outs() << " issues=" << getIssueCount(op);
     if (op->hasTrait<::mlir::OpTrait::waveamdmachine::WaitcntOp>())
       llvm::outs() << " waitcnt=1";
     llvm::outs() << "\n";
@@ -222,6 +257,10 @@ static int report(ModuleOp mod) {
     llvm::errs() << "function not found\n";
     return 1;
   }
+  if (!validateCounterLatencies()) {
+    llvm::errs() << "counter latency overrides must be -1 or non-negative\n";
+    return 1;
+  }
 
   EventSimConfig config;
   config.waves = std::max(1, waves.getValue());
@@ -229,6 +268,10 @@ static int report(ModuleOp mod) {
   config.startDelay = std::max(0, startDelay.getValue());
   config.tripCountOverride = std::max<int64_t>(-1, tripCount.getValue());
   config.recordTimeline = timeline.getValue();
+  config.counterLatencies.vmemLoad = vmemCounterLatency;
+  config.counterLatencies.vmemStore = vscntCounterLatency;
+  config.counterLatencies.smemLoad = smemCounterLatency;
+  config.counterLatencies.lds = ldsCounterLatency;
 
   EventSimResult result;
   if (failed(simulateEventTimeline(func, *arch, config, result)))
@@ -247,7 +290,7 @@ static int report(ModuleOp mod) {
     llvm::outs() << "wave_" << i
                  << "_completed: " << result.waveCompletedCycles[i] << "\n";
   if (opLatencies)
-    printOpLatencies(func, *arch);
+    printOpLatencies(func, *arch, config.counterLatencies);
   if (timeline)
     for (const EventSimEvent &event : result.events)
       printEvent(event);

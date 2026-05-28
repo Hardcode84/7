@@ -2,6 +2,7 @@
 # RUN: %PYTHON %S/../../tools/wave-att-import/wave-att-import.py --att-dir %S/Inputs/att-sample --objdump %S/Inputs/att-objdump.txt --summary | FileCheck %s
 # RUN: %PYTHON %S/../../tools/wave-att-import/wave-att-import.py --att-dir %S/Inputs/att-sample --objdump %S/Inputs/att-wmma-objdump.txt --summary | FileCheck %s --check-prefix=WMMA
 # RUN: %PYTHON %S/../../tools/wave-att-import/wave-att-import.py --att-dir %S/Inputs/att-sample --objdump %S/Inputs/att-objdump.txt --windows | FileCheck %s --check-prefix=WIN
+# RUN: %PYTHON %S/../../tools/wave-att-import/wave-att-import.py --att-dir %S/Inputs/att-sample --objdump %S/Inputs/att-objdump.txt --windows --counter-latency WriteSMEM=10 | FileCheck %s --check-prefix=WIN-CNT
 # RUN: %PYTHON %S/../../tools/wave-att-import/wave-att-import.py --att-dir %S/Inputs/att-sample --objdump %S/Inputs/att-objdump.txt --summary --trip-count 0 | FileCheck %s --check-prefix=POS
 # RUN: %PYTHON %S/../../tools/wave-att-import/wave-att-import.py --att-dir %S/Inputs/att-sample --objdump %S/Inputs/att-objdump.txt --summary --trip-count 0 --window-summary | FileCheck %s --check-prefix=SUM
 
@@ -23,8 +24,10 @@
 # CHECK: 0x160c,5644,"v_and_b32_e32 v1, 15, v0",v_and_b32_e32,Write32Bit,5,2,,,,,,,,
 # CHECK: 0x1610,5648,s_endpgm,s_endpgm,WriteBranch,32,3,,,,,,,,
 
-# WIN: wait_pc_hex,wait_pc_dec,wait_instruction,phase,counter,limit,pending_count,drained_count,pending_pcs,drained_pcs,pending_classes,model_max_latency,model_static_wait,att_stats_hitcount,att_stats_avg_latency,att_stats_avg_stall,wave_hitcount,wave_avg_duration,wave_avg_stall
-# WIN: 0x1608,5640,s_waitcnt lgkmcnt(0),unknown,lgkm,0,1,1,0x1600,0x1600,WriteSMEM,20,19,2,30.0,29.0,1,31.0,30.0
+# WIN: wait_pc_hex,wait_pc_dec,wait_instruction,phase,counter,limit,pending_count,drained_count,pending_pcs,drained_pcs,pending_classes,model_max_latency,model_static_wait,counter_max_latency,counter_static_wait,att_stats_hitcount,att_stats_avg_latency,att_stats_avg_stall,wave_hitcount,wave_avg_duration,wave_avg_stall
+# WIN: 0x1608,5640,s_waitcnt lgkmcnt(0),unknown,lgkm,0,1,1,0x1600,0x1600,WriteSMEM,20,19,20,19,2,30.0,29.0,1,31.0,30.0
+
+# WIN-CNT: 0x1608,5640,s_waitcnt lgkmcnt(0),unknown,lgkm,0,1,1,0x1600,0x1600,WriteSMEM,20,19,10,9,2,30.0,29.0,1,31.0,30.0
 
 # POS: wave_resolved: 4
 # POS: wave_code_resolved: 2
@@ -34,11 +37,11 @@
 # POS: 0x1610,5648,s_endpgm,s_endpgm,WriteBranch,32,3,,,,,1,1.0,0.0,133.0
 
 # SUM: wait_windows: 1
-# SUM: scope,name,windows,model_static_wait_per_wave,att_wave_duration_per_wave,att_wave_stall_per_wave
-# SUM: all,all,1,19.0,31.0,30.0
-# SUM: class,SMEM,1,19.0,31.0,30.0
-# SUM: phase,unknown,1,19.0,31.0,30.0
-# SUM: phase:unknown,SMEM,1,19.0,31.0,30.0
+# SUM: scope,name,windows,model_static_wait_per_wave,counter_static_wait_per_wave,att_wave_duration_per_wave,att_wave_stall_per_wave
+# SUM: all,all,1,19.0,19.0,31.0,30.0
+# SUM: class,SMEM,1,19.0,19.0,31.0,30.0
+# SUM: phase,unknown,1,19.0,19.0,31.0,30.0
+# SUM: phase:unknown,SMEM,1,19.0,19.0,31.0,30.0
 
 # WMMA: 0x2000,8192,"v_wmma_f32_16x16x16_f16 {{.*}}",v_wmma_f32_16x16x16_f16,Write32Bit,5,0
 # WMMA: 0x2008,8200,"v_wmma_i32_16x16x16_iu8 {{.*}}",v_wmma_i32_16x16x16_iu8,Write32Bit,5,1

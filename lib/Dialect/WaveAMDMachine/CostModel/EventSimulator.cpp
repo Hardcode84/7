@@ -11,6 +11,7 @@
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/WaveAMDMachine/CostModel/ArchData.h"
 #include "mlir/Dialect/WaveAMDMachine/CostModel/LatencyTable.h"
+#include "mlir/Dialect/WaveAMDMachine/CostModel/MemoryCounterTiming.h"
 #include "mlir/Dialect/WaveAMDMachine/CostModel/OpClassifier.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachine.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineTraits.h"
@@ -47,17 +48,21 @@ static bool isWaitcntOp(Operation *op) {
 }
 
 static bool isMemoryIssuer(Operation *op) {
-  return op->hasTrait<traits::SMEMLoadOp>() ||
-         op->hasTrait<traits::VMEMLoadOp>() ||
-         op->hasTrait<traits::VMEMStoreOp>();
+  return getMemoryCounterKind(op) != MemoryCounterKind::None;
 }
 
 static EventSimCounter counterOf(Operation *op) {
-  if (op->hasTrait<traits::VMEMLoadOp>())
+  switch (getMemoryCounterKind(op)) {
+  case MemoryCounterKind::Vmem:
     return EventSimCounter::Vmem;
-  if (op->hasTrait<traits::VMEMStoreOp>())
+  case MemoryCounterKind::Vscnt:
     return EventSimCounter::Vscnt;
-  return EventSimCounter::Lgkm;
+  case MemoryCounterKind::Lgkm:
+    return EventSimCounter::Lgkm;
+  case MemoryCounterKind::None:
+    break;
+  }
+  llvm_unreachable("op has no waitcnt counter");
 }
 
 static unsigned counterIndex(EventSimCounter counter) {
@@ -392,9 +397,9 @@ LogicalResult EventSimulator::executeIssued(WaveState &wave, Operation *op,
   FunctionalUnit fu = funit(arch, cls);
   unsigned issues = std::max(1u, getIssueCount(op));
   int period = std::max(1, arch.simdIssuePeriod);
-  int latency = getLatency(arch, cls);
+  int dependencyLatency = getLatency(arch, cls);
   int64_t lastIssue = cycle + static_cast<int64_t>(issues - 1) * period;
-  int64_t ready = lastIssue + latency;
+  int64_t ready = lastIssue + dependencyLatency;
   int64_t nextIssue = cycle + static_cast<int64_t>(issues) * period;
 
   SimdState &simd = simds[wave.simd];
@@ -415,9 +420,11 @@ LogicalResult EventSimulator::executeIssued(WaveState &wave, Operation *op,
 
   if (isMemoryIssuer(op)) {
     EventSimCounter counter = counterOf(op);
+    int counterLatency =
+        getMemoryCounterLatency(arch, op, config.counterLatencies);
     SmallVector<int64_t, 4> &queue = wave.counters[counterIndex(counter)];
     for (unsigned i = 0; i < issues; ++i) {
-      int64_t done = cycle + static_cast<int64_t>(i) * period + latency;
+      int64_t done = cycle + static_cast<int64_t>(i) * period + counterLatency;
       queue.push_back(done);
       schedule({done, EventSimEventKind::CounterDrained, wave.id, wave.simd, op,
                 fu, counter});

@@ -676,6 +676,9 @@ the analytical model's parameters get adjusted to close the gap.
   priority bias weights.
 - Memory latency distribution: replace constant `WriteVMEM`
   with mean + jitter sampled from ATT.
+- Wait-counter timing is separate from `SchedWrite` latency:
+  tune `wave-sim-report --*-counter-latency` and ATT import
+  `--counter-latency CLASS=N` before touching LLVM-derived tables.
 - `s_setprio` effect magnitude.
 - Hazard rule coverage: ATT will show inserted NOPs we missed.
 - `fuzzy_margin` / window size `W` for Stage 5's auto-

@@ -33,6 +33,8 @@ MODEL_LATENCIES = {
     "Unknown": "",
 }
 
+COUNTER_LATENCIES = dict(MODEL_LATENCIES)
+
 EXACT_CLASSES = {
     "s_barrier": "WriteBarrier",
     "s_endpgm": "WriteBranch",
@@ -518,11 +520,21 @@ def build_report(
     return out.getvalue()
 
 
-def model_latency(inst: StaticInst) -> int | None:
-    latency = MODEL_LATENCIES[classify_mnemonic(inst.mnemonic)]
+def table_latency(table: dict[str, int | str], inst: StaticInst) -> int | None:
+    latency = table[classify_mnemonic(inst.mnemonic)]
     if isinstance(latency, int):
         return latency
     return None
+
+
+def model_latency(inst: StaticInst) -> int | None:
+    return table_latency(MODEL_LATENCIES, inst)
+
+
+def counter_latency(
+    inst: StaticInst, counter_latencies: dict[str, int | str]
+) -> int | None:
+    return table_latency(counter_latencies, inst)
 
 
 def join_pcs(insts: tuple[StaticInst, ...]) -> str:
@@ -541,10 +553,33 @@ def max_model_latency(insts: tuple[StaticInst, ...]) -> int | None:
     return max(known)
 
 
+def max_counter_latency(
+    insts: tuple[StaticInst, ...], counter_latencies: dict[str, int | str]
+) -> int | None:
+    latencies = [counter_latency(inst, counter_latencies) for inst in insts]
+    known = [latency for latency in latencies if latency is not None]
+    if not known:
+        return None
+    return max(known)
+
+
 def static_order_model_stall(window: WaitWindow) -> int:
     ready_cycles = []
     for inst in window.drained:
         latency = model_latency(inst)
+        if latency is not None:
+            ready_cycles.append(inst.index + latency)
+    if not ready_cycles:
+        return 0
+    return max(0, max(ready_cycles) - window.wait.index)
+
+
+def static_order_counter_stall(
+    window: WaitWindow, counter_latencies: dict[str, int | str]
+) -> int:
+    ready_cycles = []
+    for inst in window.drained:
+        latency = counter_latency(inst, counter_latencies)
         if latency is not None:
             ready_cycles.append(inst.index + latency)
     if not ready_cycles:
@@ -572,6 +607,7 @@ def build_window_report(
     att_stats: dict[int, AttStats],
     wave_stats: dict[int, WaveStats],
     summary: ImportSummary,
+    counter_latencies: dict[str, int | str],
     *,
     include_summary: bool,
 ) -> str:
@@ -610,6 +646,8 @@ def build_window_report(
             "pending_classes",
             "model_max_latency",
             "model_static_wait",
+            "counter_max_latency",
+            "counter_static_wait",
             "att_stats_hitcount",
             "att_stats_avg_latency",
             "att_stats_avg_stall",
@@ -636,6 +674,8 @@ def build_window_report(
                 join_classes(window.pending),
                 format_number(max_model_latency(window.pending)),
                 static_order_model_stall(window),
+                format_number(max_counter_latency(window.pending, counter_latencies)),
+                static_order_counter_stall(window, counter_latencies),
                 att.hitcount or "",
                 format_number(att.avg_latency),
                 format_number(att.avg_stall),
@@ -651,6 +691,7 @@ def build_window_report(
 class WindowSummary:
     windows: int = 0
     model_static_wait: float = 0.0
+    counter_static_wait: float = 0.0
     att_wave_duration: float = 0.0
     att_wave_stall: float = 0.0
 
@@ -661,6 +702,7 @@ def add_window_summary(
     window: WaitWindow,
     wave: WaveStats,
     wave_files: int,
+    counter_latencies: dict[str, int | str],
 ) -> None:
     summary = summaries.setdefault(key, WindowSummary())
     summary.windows += 1
@@ -668,6 +710,9 @@ def add_window_summary(
         return
     scale = wave.hitcount / wave_files
     summary.model_static_wait += static_order_model_stall(window) * scale
+    summary.counter_static_wait += (
+        static_order_counter_stall(window, counter_latencies) * scale
+    )
     summary.att_wave_duration += (wave.avg_duration or 0.0) * scale
     summary.att_wave_stall += (wave.avg_stall or 0.0) * scale
 
@@ -676,6 +721,7 @@ def build_window_summary_report(
     static: dict[int, StaticInst],
     wave_stats: dict[int, WaveStats],
     summary: ImportSummary,
+    counter_latencies: dict[str, int | str],
     *,
     include_summary: bool,
 ) -> str:
@@ -684,12 +730,29 @@ def build_window_summary_report(
     for window in windows:
         wave = wave_stats.get(window.wait.pc, WaveStats())
         window_class = classify_window_class(window)
-        add_window_summary(summaries, ("all", "all"), window, wave, summary.wave_files)
         add_window_summary(
-            summaries, ("phase", window.phase), window, wave, summary.wave_files
+            summaries,
+            ("all", "all"),
+            window,
+            wave,
+            summary.wave_files,
+            counter_latencies,
         )
         add_window_summary(
-            summaries, ("class", window_class), window, wave, summary.wave_files
+            summaries,
+            ("phase", window.phase),
+            window,
+            wave,
+            summary.wave_files,
+            counter_latencies,
+        )
+        add_window_summary(
+            summaries,
+            ("class", window_class),
+            window,
+            wave,
+            summary.wave_files,
+            counter_latencies,
         )
         add_window_summary(
             summaries,
@@ -697,6 +760,7 @@ def build_window_summary_report(
             window,
             wave,
             summary.wave_files,
+            counter_latencies,
         )
 
     out = io.StringIO()
@@ -717,6 +781,7 @@ def build_window_summary_report(
             "name",
             "windows",
             "model_static_wait_per_wave",
+            "counter_static_wait_per_wave",
             "att_wave_duration_per_wave",
             "att_wave_stall_per_wave",
         ]
@@ -729,11 +794,28 @@ def build_window_summary_report(
                 key[1],
                 row.windows,
                 format_number(row.model_static_wait),
+                format_number(row.counter_static_wait),
                 format_number(row.att_wave_duration),
                 format_number(row.att_wave_stall),
             ]
         )
     return out.getvalue()
+
+
+def parse_counter_latency_override(text: str) -> tuple[str, int]:
+    if "=" not in text:
+        raise argparse.ArgumentTypeError("expected CLASS=LATENCY")
+    name, value_text = text.split("=", 1)
+    name = name.strip()
+    if name not in COUNTER_LATENCIES or not isinstance(COUNTER_LATENCIES[name], int):
+        raise argparse.ArgumentTypeError(f"unknown latency class: {name}")
+    try:
+        value = int(value_text, 10)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("latency must be an integer") from exc
+    if value < 0:
+        raise argparse.ArgumentTypeError("latency must be non-negative")
+    return name, value
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
@@ -770,6 +852,14 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         type=int,
         help="recover unresolved per-wave rows by expanded static order",
     )
+    parser.add_argument(
+        "--counter-latency",
+        action="append",
+        default=[],
+        metavar="CLASS=LATENCY",
+        type=parse_counter_latency_override,
+        help="override wait-counter timing for a model class",
+    )
     parser.add_argument("--output", type=Path, help="write report to file")
     source = parser.add_mutually_exclusive_group(required=True)
     source.add_argument("--objdump", type=Path, help="precomputed llvm-objdump -d text")
@@ -794,13 +884,25 @@ def main(argv: list[str]) -> int:
     wave_stats = parse_wave_json(
         args.att_dir, static_pcs, code_maps, dynamic_trace, summary
     )
+    counter_latencies = dict(COUNTER_LATENCIES)
+    for cls, latency in args.counter_latency:
+        counter_latencies[cls] = latency
     if args.window_summary:
         report = build_window_summary_report(
-            static, wave_stats, summary, include_summary=args.summary
+            static,
+            wave_stats,
+            summary,
+            counter_latencies,
+            include_summary=args.summary,
         )
     elif args.windows:
         report = build_window_report(
-            static, att_stats, wave_stats, summary, include_summary=args.summary
+            static,
+            att_stats,
+            wave_stats,
+            summary,
+            counter_latencies,
+            include_summary=args.summary,
         )
     else:
         report = build_report(

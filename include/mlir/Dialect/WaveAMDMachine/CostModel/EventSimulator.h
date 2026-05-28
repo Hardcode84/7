@@ -10,6 +10,7 @@
 #define MLIR_DIALECT_WAVEAMDMACHINE_COSTMODEL_EVENTSIMULATOR_H
 
 #include "mlir/Dialect/WaveAMDMachine/CostModel/FunctionalUnit.h"
+#include "mlir/Dialect/WaveAMDMachine/CostModel/MemoryCounterTiming.h"
 #include "mlir/Support/LLVM.h"
 
 #include <cstdint>
@@ -31,6 +32,7 @@ struct EventSimConfig {
   int startDelay = 0;
   int64_t tripCountOverride = -1;
   bool recordTimeline = false;
+  MemoryCounterLatencies counterLatencies;
 };
 
 enum class EventSimCounter : uint8_t {
