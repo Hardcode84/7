@@ -321,6 +321,7 @@ struct RegisterPressureBudgets {
   int hardSGPR = -1;
   int criticalVGPR = -1;
   int criticalSGPR = -1;
+  bool selectionEnabled = false;
 };
 
 struct RegisterPressureResult {
@@ -357,6 +358,33 @@ static int64_t computeExcess(unsigned pressure, int budget) {
   if (budget < 0)
     return 0;
   return std::max<int64_t>(0, static_cast<int64_t>(pressure) - budget);
+}
+
+static int64_t getHardExcess(RegisterPressureResult pressure) {
+  return pressure.hardVGPRExcess + pressure.hardSGPRExcess;
+}
+
+static int64_t getCriticalExcess(RegisterPressureResult pressure) {
+  return pressure.criticalVGPRExcess + pressure.criticalSGPRExcess;
+}
+
+static bool hasCriticalBudget(RegisterPressureBudgets budgets) {
+  return budgets.criticalVGPR >= 0 || budgets.criticalSGPR >= 0;
+}
+
+static bool hasHardBudget(RegisterPressureBudgets budgets) {
+  return budgets.hardVGPR >= 0 || budgets.hardSGPR >= 0;
+}
+
+static FailureOr<int>
+deriveCriticalVGPRBudget(const waveamdmachine::ArchData &arch,
+                         int targetWaves) {
+  if (targetWaves == 0)
+    targetWaves = arch.wavesPerSIMD;
+  if (targetWaves < 0)
+    return failure();
+  int raw = arch.vgprFileSize / targetWaves;
+  return (raw / arch.vgprAllocGranule) * arch.vgprAllocGranule;
 }
 
 static unsigned
@@ -866,6 +894,35 @@ static bool isOriginalOrder(ArrayRef<unsigned> order) {
   return true;
 }
 
+static bool isPressureViable(const EvaluatedCandidate &candidate,
+                             RegisterPressureBudgets budgets) {
+  if (!candidate.metrics.score.supported)
+    return false;
+  if (!budgets.selectionEnabled)
+    return true;
+  if (!candidate.metrics.pressure.supported)
+    return false;
+  return getHardExcess(candidate.metrics.pressure) == 0;
+}
+
+static bool isBetterScheduleCandidate(const EvaluatedCandidate &candidate,
+                                      const EvaluatedCandidate &best,
+                                      RegisterPressureBudgets budgets) {
+  bool candidateViable = isPressureViable(candidate, budgets);
+  bool bestViable = isPressureViable(best, budgets);
+  if (candidateViable != bestViable)
+    return candidateViable;
+  if (!candidateViable)
+    return false;
+  if (budgets.selectionEnabled && hasCriticalBudget(budgets)) {
+    int64_t candidateExcess = getCriticalExcess(candidate.metrics.pressure);
+    int64_t bestExcess = getCriticalExcess(best.metrics.pressure);
+    if (candidateExcess != bestExcess)
+      return candidateExcess < bestExcess;
+  }
+  return candidate.metrics.score.cycles < best.metrics.score.cycles;
+}
+
 static CandidateMetrics evaluateOrderCandidate(
     const ScheduleRegion &region, const DependenceGraph &graph,
     const OrderCandidate &candidate, ArchResolution archResolution,
@@ -901,15 +958,11 @@ evaluateScheduleCandidates(const ScheduleRegion &region,
          evaluateOrderCandidate(region, graph, candidate, archResolution,
                                 modelConfig, budgets)});
 
-  for (unsigned i = 1; i < decision.candidates.size(); ++i) {
-    const ScoreResult &best =
-        decision.candidates[decision.selected].metrics.score;
-    const ScoreResult &score = decision.candidates[i].metrics.score;
-    if (!score.supported)
-      continue;
-    if (!best.supported || score.cycles < best.cycles)
+  for (unsigned i = 1; i < decision.candidates.size(); ++i)
+    if (isBetterScheduleCandidate(decision.candidates[i],
+                                  decision.candidates[decision.selected],
+                                  budgets))
       decision.selected = i;
-  }
   return decision;
 }
 
@@ -969,13 +1022,13 @@ static void printScheduleDecision(ScheduleRegion region,
   llvm::errs() << "\n";
 }
 
-static bool shouldApplyDecision(const ScheduleDecision &decision) {
+static bool shouldApplyDecision(const ScheduleDecision &decision,
+                                RegisterPressureBudgets budgets) {
   if (decision.candidates.empty() || decision.selected == 0)
     return false;
   const EvaluatedCandidate &original = decision.candidates.front();
   const EvaluatedCandidate &selected = decision.candidates[decision.selected];
-  return original.metrics.score.supported && selected.metrics.score.supported &&
-         selected.metrics.score.cycles < original.metrics.score.cycles &&
+  return isBetterScheduleCandidate(selected, original, budgets) &&
          !isOriginalOrder(selected.order);
 }
 
@@ -1030,16 +1083,52 @@ struct WaveAMDMachineSchedulePass
   }
 
   LogicalResult configurePressureBudgets(ModuleOp mod,
+                                         ArchResolution archResolution,
                                          RegisterPressureBudgets &budgets) {
+    if (failed(validatePressureOptions(mod, archResolution)))
+      return failure();
+    copyPressureBudgets(budgets);
+    if (failed(applyDerivedCriticalBudget(archResolution, budgets)))
+      return failure();
+    budgets.selectionEnabled =
+        pressureAwareSelection &&
+        (hasHardBudget(budgets) || hasCriticalBudget(budgets));
+    return success();
+  }
+
+  LogicalResult validatePressureOptions(ModuleOp mod,
+                                        ArchResolution archResolution) {
     if (pressureVgprBudget < -1 || pressureSgprBudget < -1 ||
-        pressureCriticalVgprBudget < -1 || pressureCriticalSgprBudget < -1) {
+        pressureCriticalVgprBudget < -1 || pressureCriticalSgprBudget < -1 ||
+        pressureTargetWaves < -1) {
       mod.emitError() << "pressure budgets must be -1 or non-negative";
       return failure();
     }
+    if (pressureTargetWaves > 0 && archResolution.arch &&
+        pressureTargetWaves > archResolution.arch->wavesPerSIMD) {
+      mod.emitError() << "pressure-target-waves exceeds target wave capacity";
+      return failure();
+    }
+    return success();
+  }
+
+  void copyPressureBudgets(RegisterPressureBudgets &budgets) {
     budgets.hardVGPR = pressureVgprBudget;
     budgets.hardSGPR = pressureSgprBudget;
     budgets.criticalVGPR = pressureCriticalVgprBudget;
     budgets.criticalSGPR = pressureCriticalSgprBudget;
+  }
+
+  LogicalResult applyDerivedCriticalBudget(ArchResolution archResolution,
+                                           RegisterPressureBudgets &budgets) {
+    if (!(pressureAwareSelection && budgets.criticalVGPR < 0 &&
+          pressureTargetWaves >= 0 && archResolution.arch))
+      return success();
+    FailureOr<int> derived =
+        deriveCriticalVGPRBudget(*archResolution.arch, pressureTargetWaves);
+    if (failed(derived))
+      return failure();
+    budgets.criticalVGPR = *derived;
     return success();
   }
 
@@ -1050,7 +1139,7 @@ struct WaveAMDMachineSchedulePass
     if (failed(configureModel(mod, modelConfig)))
       return signalPassFailure();
     RegisterPressureBudgets pressureBudgets;
-    if (failed(configurePressureBudgets(mod, pressureBudgets)))
+    if (failed(configurePressureBudgets(mod, archResolution, pressureBudgets)))
       return signalPassFailure();
     CandidateRequest candidate =
         getCandidateRequest(StringRef(scoreOrder), scoreRegion);
@@ -1117,7 +1206,8 @@ struct WaveAMDMachineSchedulePass
                         const RegisterPressureBudgets &pressureBudgets) {
     ScheduleDecision decision = evaluateScheduleCandidates(
         region, graph, archResolution, modelConfig, pressureBudgets);
-    bool willApply = applySchedule && shouldApplyDecision(decision);
+    bool willApply =
+        applySchedule && shouldApplyDecision(decision, pressureBudgets);
     if (printCandidates) {
       printCandidateDiagnostics(region, decision, pressureBudgets);
       printScheduleDecision(region, decision, willApply);
