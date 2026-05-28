@@ -304,6 +304,30 @@ private:
     return isGfx8Or9() ? llvm::AMDGPU::V_MUL_LO_U32_vi
                        : llvm::AMDGPU::V_MUL_LO_U32_e64_gfx11;
   }
+  unsigned vAddF32() const {
+    return isGfx8Or9() ? llvm::AMDGPU::V_ADD_F32_e32_vi
+                       : llvm::AMDGPU::V_ADD_F32_e32_gfx11;
+  }
+  unsigned vSubF32() const {
+    return isGfx8Or9() ? llvm::AMDGPU::V_SUB_F32_e32_vi
+                       : llvm::AMDGPU::V_SUB_F32_e32_gfx11;
+  }
+  unsigned vMulF32() const {
+    return isGfx8Or9() ? llvm::AMDGPU::V_MUL_F32_e32_vi
+                       : llvm::AMDGPU::V_MUL_F32_e32_gfx11;
+  }
+  unsigned vMaxF32() const {
+    return isGfx8Or9() ? llvm::AMDGPU::V_MAX_F32_e32_vi
+                       : llvm::AMDGPU::V_MAX_F32_e32_gfx11;
+  }
+  unsigned vExpF32() const {
+    return isGfx8Or9() ? llvm::AMDGPU::V_EXP_F32_e32_vi
+                       : llvm::AMDGPU::V_EXP_F32_e32_gfx11;
+  }
+  unsigned vRcpF32() const {
+    return isGfx8Or9() ? llvm::AMDGPU::V_RCP_F32_e32_vi
+                       : llvm::AMDGPU::V_RCP_F32_e32_gfx11;
+  }
   unsigned vCmpEqU32() const {
     return isGfx8Or9() ? llvm::AMDGPU::V_CMP_EQ_U32_e64_vi
                        : llvm::AMDGPU::V_CMP_EQ_U32_e64_gfx11;
@@ -1113,6 +1137,22 @@ private:
       // unconstrained so we emit (vdst, src0, src1) as-is without the
       // VOP2 swap dance.
       return emitVMulLoU32(op, result(), op.getOperand(0), op.getOperand(1));
+    if (isa<waveamdmachine::VAddF32Op, waveamdmachine::VSubF32Op,
+            waveamdmachine::VMulF32Op, waveamdmachine::VMaxF32Op>(op)) {
+      unsigned opcode = isa<waveamdmachine::VAddF32Op>(op)   ? vAddF32()
+                        : isa<waveamdmachine::VSubF32Op>(op) ? vSubF32()
+                        : isa<waveamdmachine::VMulF32Op>(op) ? vMulF32()
+                                                             : vMaxF32();
+      return emitMC(opcode,
+                    {toMCOperand(result()), toMCOperand(op.getOperand(0)),
+                     toMCOperand(op.getOperand(1))});
+    }
+    if (isa<waveamdmachine::VExpF32Op, waveamdmachine::VRcpF32Op>(op)) {
+      unsigned opcode =
+          isa<waveamdmachine::VExpF32Op>(op) ? vExpF32() : vRcpF32();
+      return emitMC(opcode,
+                    {toMCOperand(result()), toMCOperand(op.getOperand(0))});
+    }
     if (isa<waveamdmachine::VCmpEqU32Op, waveamdmachine::VCmpNeU32Op,
             waveamdmachine::VCmpLtU32Op, waveamdmachine::VCmpLeU32Op,
             waveamdmachine::VCmpGtU32Op, waveamdmachine::VCmpGeU32Op>(op)) {

@@ -223,6 +223,65 @@ LogicalResult ShliOp::verify() {
                                   getRhs().getType(), getResult().getType());
 }
 
+static LogicalResult
+verifyWaveF32Simd(Type type,
+                  function_ref<InFlightDiagnostic(const Twine &)> emitError) {
+  auto simdType = dyn_cast<SimdType>(type);
+  if (!simdType)
+    return emitError("operand must be !wave.simd<f32, W>");
+  if (!simdType.getElementType().isF32())
+    return emitError("SIMD element type must be f32");
+  if (simdType.getWidth() != 32 && simdType.getWidth() != 64)
+    return emitError("only wave32 and wave64 are supported");
+  return success();
+}
+
+static LogicalResult verifyWaveF32SimdBinary(Operation *op, Type lhsTy,
+                                             Type rhsTy, Type resultTy) {
+  auto emit = [op](const Twine &msg) { return op->emitOpError(msg); };
+  if (lhsTy != rhsTy || lhsTy != resultTy)
+    return emit("operands and result must have the same SIMD type");
+  return verifyWaveF32Simd(lhsTy, emit);
+}
+
+static LogicalResult verifyWaveF32SimdUnary(Operation *op, Type sourceTy,
+                                            Type resultTy) {
+  auto emit = [op](const Twine &msg) { return op->emitOpError(msg); };
+  if (sourceTy != resultTy)
+    return emit("operand and result must have the same SIMD type");
+  return verifyWaveF32Simd(sourceTy, emit);
+}
+
+LogicalResult FAddOp::verify() {
+  return verifyWaveF32SimdBinary(getOperation(), getLhs().getType(),
+                                 getRhs().getType(), getResult().getType());
+}
+
+LogicalResult FSubOp::verify() {
+  return verifyWaveF32SimdBinary(getOperation(), getLhs().getType(),
+                                 getRhs().getType(), getResult().getType());
+}
+
+LogicalResult FMulOp::verify() {
+  return verifyWaveF32SimdBinary(getOperation(), getLhs().getType(),
+                                 getRhs().getType(), getResult().getType());
+}
+
+LogicalResult FMaxOp::verify() {
+  return verifyWaveF32SimdBinary(getOperation(), getLhs().getType(),
+                                 getRhs().getType(), getResult().getType());
+}
+
+LogicalResult FExp2Op::verify() {
+  return verifyWaveF32SimdUnary(getOperation(), getSource().getType(),
+                                getResult().getType());
+}
+
+LogicalResult FRcpOp::verify() {
+  return verifyWaveF32SimdUnary(getOperation(), getSource().getType(),
+                                getResult().getType());
+}
+
 // Range inference forwards to upstream `mlir::intrange` helpers. The
 // wrinkle is that upstream's `ConstantIntRanges::getStorageBitwidth`
 // returns 0 for `!wave.simd<...>` (our SIMD type isn't a ShapedType

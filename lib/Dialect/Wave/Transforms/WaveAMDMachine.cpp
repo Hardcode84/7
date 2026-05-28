@@ -437,6 +437,12 @@ LogicalResult WaveAMDMachineSelector::selectOperation(Operation *op) {
       .Case<AddiOp>([&](auto o) { return selectAddi(o); })
       .Case<MuliOp>([&](auto o) { return selectMuli(o); })
       .Case<ShliOp>([&](auto o) { return selectShli(o); })
+      .Case<FAddOp>([&](auto o) { return selectFAdd(o); })
+      .Case<FSubOp>([&](auto o) { return selectFSub(o); })
+      .Case<FMulOp>([&](auto o) { return selectFMul(o); })
+      .Case<FMaxOp>([&](auto o) { return selectFMax(o); })
+      .Case<FExp2Op>([&](auto o) { return selectFExp2(o); })
+      .Case<FRcpOp>([&](auto o) { return selectFRcp(o); })
       .Case<IndexExprOp>([&](auto o) { return selectIndexExpr(o); })
       .Case<CmpIOp>([&](auto o) { return selectCmp(o); })
       .Case<BallotOp>([&](auto o) { return selectBallot(o); })
@@ -805,6 +811,64 @@ LogicalResult WaveAMDMachineSelector::selectShli(ShliOp op) {
   return op.emitError(
              "WaveAMDMachine backend only supports i32 / i64 wave.shli (got i")
          << bits << ")";
+}
+
+LogicalResult WaveAMDMachineSelector::selectFAdd(FAddOp op) {
+  Value lhs = ensureVGPRForVSrc1(op.getLoc(), expect(op.getLhs(), op));
+  Value rhs = ensureVGPRForVSrc1(op.getLoc(), expect(op.getRhs(), op));
+  values[op.getResult()] = waveamdmachine::VAddF32Op::create(
+      builder, op.getLoc(),
+      getRegType(op.getContext(), waveamdmachine::RegClass::VGPR), lhs, rhs);
+  eraseIfTopLevel(op);
+  return success();
+}
+
+LogicalResult WaveAMDMachineSelector::selectFSub(FSubOp op) {
+  Value lhs = ensureVGPRForVSrc1(op.getLoc(), expect(op.getLhs(), op));
+  Value rhs = ensureVGPRForVSrc1(op.getLoc(), expect(op.getRhs(), op));
+  values[op.getResult()] = waveamdmachine::VSubF32Op::create(
+      builder, op.getLoc(),
+      getRegType(op.getContext(), waveamdmachine::RegClass::VGPR), lhs, rhs);
+  eraseIfTopLevel(op);
+  return success();
+}
+
+LogicalResult WaveAMDMachineSelector::selectFMul(FMulOp op) {
+  Value lhs = ensureVGPRForVSrc1(op.getLoc(), expect(op.getLhs(), op));
+  Value rhs = ensureVGPRForVSrc1(op.getLoc(), expect(op.getRhs(), op));
+  values[op.getResult()] = waveamdmachine::VMulF32Op::create(
+      builder, op.getLoc(),
+      getRegType(op.getContext(), waveamdmachine::RegClass::VGPR), lhs, rhs);
+  eraseIfTopLevel(op);
+  return success();
+}
+
+LogicalResult WaveAMDMachineSelector::selectFMax(FMaxOp op) {
+  Value lhs = ensureVGPRForVSrc1(op.getLoc(), expect(op.getLhs(), op));
+  Value rhs = ensureVGPRForVSrc1(op.getLoc(), expect(op.getRhs(), op));
+  values[op.getResult()] = waveamdmachine::VMaxF32Op::create(
+      builder, op.getLoc(),
+      getRegType(op.getContext(), waveamdmachine::RegClass::VGPR), lhs, rhs);
+  eraseIfTopLevel(op);
+  return success();
+}
+
+LogicalResult WaveAMDMachineSelector::selectFExp2(FExp2Op op) {
+  Value source = ensureVGPRForVSrc1(op.getLoc(), expect(op.getSource(), op));
+  values[op.getResult()] = waveamdmachine::VExpF32Op::create(
+      builder, op.getLoc(),
+      getRegType(op.getContext(), waveamdmachine::RegClass::VGPR), source);
+  eraseIfTopLevel(op);
+  return success();
+}
+
+LogicalResult WaveAMDMachineSelector::selectFRcp(FRcpOp op) {
+  Value source = ensureVGPRForVSrc1(op.getLoc(), expect(op.getSource(), op));
+  values[op.getResult()] = waveamdmachine::VRcpF32Op::create(
+      builder, op.getLoc(),
+      getRegType(op.getContext(), waveamdmachine::RegClass::VGPR), source);
+  eraseIfTopLevel(op);
+  return success();
 }
 
 // Materialize an SGPR or immediate value into a fresh VGPR so it can be

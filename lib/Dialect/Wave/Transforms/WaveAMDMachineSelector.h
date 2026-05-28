@@ -282,6 +282,12 @@ public:
   LogicalResult selectShli(ShliOp op);
   LogicalResult selectShliI32(ShliOp op);
   LogicalResult selectShliI64(ShliOp op);
+  LogicalResult selectFAdd(FAddOp op);
+  LogicalResult selectFSub(FSubOp op);
+  LogicalResult selectFMul(FMulOp op);
+  LogicalResult selectFMax(FMaxOp op);
+  LogicalResult selectFExp2(FExp2Op op);
+  LogicalResult selectFRcp(FRcpOp op);
   LogicalResult selectIndexExpr(IndexExprOp op);
   LogicalResult selectCmp(CmpIOp op);
   LogicalResult selectBallot(BallotOp op);

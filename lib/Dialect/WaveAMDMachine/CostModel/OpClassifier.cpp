@@ -84,6 +84,8 @@ SchedClass classifyOp(Operation *op) {
       // 64-bit VALU expansions (charged differently from 32-bit).
       .Case<VAddU64Op, VMulU64Op, VLshlrevB64Op>(
           [](auto) { return SchedClass::Write64Bit; })
+      .Case<VExpF32Op, VRcpF32Op>(
+          [](auto) { return SchedClass::WriteTrans32; })
       // Scalar ALU pipe: arithmetic, shifts, compares, moves, exec
       // manipulation, nop, delay_alu. Scalar 64-bit add/mul/shl
       // still run on the SALU pipe.

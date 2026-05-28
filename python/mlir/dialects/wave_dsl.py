@@ -587,6 +587,24 @@ class FunctionBuilder:
     def shli(self, lhs: Value, rhs: Value) -> Value:
         return wave.ShliOp(_arith_result_type(lhs, rhs), lhs, rhs).result
 
+    def fadd(self, lhs: Value, rhs: Value) -> Value:
+        return wave.FAddOp(lhs.type, lhs, rhs).result
+
+    def fsub(self, lhs: Value, rhs: Value) -> Value:
+        return wave.FSubOp(lhs.type, lhs, rhs).result
+
+    def fmul(self, lhs: Value, rhs: Value) -> Value:
+        return wave.FMulOp(lhs.type, lhs, rhs).result
+
+    def fmax(self, lhs: Value, rhs: Value) -> Value:
+        return wave.FMaxOp(lhs.type, lhs, rhs).result
+
+    def fexp2(self, value: Value) -> Value:
+        return wave.FExp2Op(value.type, value).result
+
+    def frcp(self, value: Value) -> Value:
+        return wave.FRcpOp(value.type, value).result
+
     def index_expr(
         self,
         expr: ixsimpl.Expr,

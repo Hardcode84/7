@@ -25,6 +25,7 @@ declare_mlir_python_sources(WavePythonSources.dsl
     dialects/wave.py
     dialects/waveamd.py
     dialects/wavemeta.py
+    dialects/wave_attention.py
     dialects/wave_dsl.py
     dialects/wave_matmul.py
 )

@@ -209,6 +209,51 @@ def Wave_ShliOp : Wave_IntBinaryArith<"shli"> {
   }];
 }
 
+class Wave_F32SimdBinary<string mnemonic> : Wave_Op<mnemonic, [Pure]> {
+  let arguments = (ins Wave_Simd:$lhs, Wave_Simd:$rhs);
+  let results = (outs Wave_Simd:$result);
+  let assemblyFormat = [{
+    $lhs `,` $rhs attr-dict
+    `:` qualified(type($lhs)) `,` qualified(type($rhs)) `->`
+    qualified(type($result))
+  }];
+  let hasVerifier = 1;
+}
+
+class Wave_F32SimdUnary<string mnemonic> : Wave_Op<mnemonic, [Pure]> {
+  let arguments = (ins Wave_Simd:$source);
+  let results = (outs Wave_Simd:$result);
+  let assemblyFormat = [{
+    $source attr-dict `:` qualified(type($source)) `->`
+    qualified(type($result))
+  }];
+  let hasVerifier = 1;
+}
+
+def Wave_FAddOp : Wave_F32SimdBinary<"fadd"> {
+  let summary = "lane-wise f32 add";
+}
+
+def Wave_FSubOp : Wave_F32SimdBinary<"fsub"> {
+  let summary = "lane-wise f32 subtract";
+}
+
+def Wave_FMulOp : Wave_F32SimdBinary<"fmul"> {
+  let summary = "lane-wise f32 multiply";
+}
+
+def Wave_FMaxOp : Wave_F32SimdBinary<"fmax"> {
+  let summary = "lane-wise f32 maximum";
+}
+
+def Wave_FExp2Op : Wave_F32SimdUnary<"fexp2"> {
+  let summary = "lane-wise base-2 f32 exponential";
+}
+
+def Wave_FRcpOp : Wave_F32SimdUnary<"frcp"> {
+  let summary = "lane-wise f32 reciprocal";
+}
+
 def Wave_AssumeRangeOp : Wave_Op<"assume_range", [
     Pure, AllTypesMatch<["value", "result"]>,
     DeclareOpInterfaceMethods<InferIntRangeInterface,
