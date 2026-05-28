@@ -26,6 +26,14 @@ func.func @unsupported_binary_kind(%x: i32) {
 
 // -----
 
+func.func @unsupported_packed_f16_fadd(%a: !wave.simd<vector<2xf16>, 32>, %b: !wave.simd<vector<2xf16>, 32>) {
+  // expected-error @below {{WaveAMDMachine f32 lowering supports only !wave.simd<f32, W>}}
+  %sum = wave.fadd %a, %b : !wave.simd<vector<2xf16>, 32>, !wave.simd<vector<2xf16>, 32> -> !wave.simd<vector<2xf16>, 32>
+  return
+}
+
+// -----
+
 func.func @kernel_return_value(%x: i32) -> i32 attributes {wave.kernel} {
   // expected-error @below {{kernel functions must return void}}
   return %x : i32

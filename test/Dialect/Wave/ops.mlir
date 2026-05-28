@@ -85,11 +85,30 @@ func.func @wave_f32_ops(%a: !wave.simd<f32, 32>, %b: !wave.simd<f32, 32>) -> !wa
   %mul = wave.fmul %sub, %a : !wave.simd<f32, 32>, !wave.simd<f32, 32> -> !wave.simd<f32, 32>
   // CHECK: [[MAX:%.*]] = wave.fmax [[MUL]], [[ADD]] : !wave.simd<f32, 32>, !wave.simd<f32, 32> -> !wave.simd<f32, 32>
   %max = wave.fmax %mul, %add : !wave.simd<f32, 32>, !wave.simd<f32, 32> -> !wave.simd<f32, 32>
-  // CHECK: [[EXP:%.*]] = wave.fexp2 [[MAX]] : !wave.simd<f32, 32> -> !wave.simd<f32, 32>
-  %exp = wave.fexp2 %max : !wave.simd<f32, 32> -> !wave.simd<f32, 32>
+  // CHECK: [[FMA:%.*]] = wave.fma [[MUL]], [[ADD]], [[MAX]] : !wave.simd<f32, 32>, !wave.simd<f32, 32>, !wave.simd<f32, 32> -> !wave.simd<f32, 32>
+  %fma = wave.fma %mul, %add, %max : !wave.simd<f32, 32>, !wave.simd<f32, 32>, !wave.simd<f32, 32> -> !wave.simd<f32, 32>
+  // CHECK: [[EXP:%.*]] = wave.fexp2 [[FMA]] : !wave.simd<f32, 32> -> !wave.simd<f32, 32>
+  %exp = wave.fexp2 %fma : !wave.simd<f32, 32> -> !wave.simd<f32, 32>
   // CHECK: [[RCP:%.*]] = wave.frcp [[EXP]] : !wave.simd<f32, 32> -> !wave.simd<f32, 32>
   %rcp = wave.frcp %exp : !wave.simd<f32, 32> -> !wave.simd<f32, 32>
   func.return %rcp : !wave.simd<f32, 32>
+}
+
+// CHECK-LABEL: func.func @wave_packed_f16_ops
+// CHECK-SAME: ([[A:%.*]]: !wave.simd<vector<2xf16>, 32>, [[B:%.*]]: !wave.simd<vector<2xf16>, 32>, [[C:%.*]]: !wave.simd<vector<2xf16>, 32>)
+func.func @wave_packed_f16_ops(%a: !wave.simd<vector<2xf16>, 32>,
+                               %b: !wave.simd<vector<2xf16>, 32>,
+                               %c: !wave.simd<vector<2xf16>, 32>)
+    -> !wave.simd<vector<2xf16>, 32> {
+  // CHECK: [[ADD:%.*]] = wave.fadd [[A]], [[B]] : !wave.simd<vector<2xf16>, 32>, !wave.simd<vector<2xf16>, 32> -> !wave.simd<vector<2xf16>, 32>
+  %add = wave.fadd %a, %b : !wave.simd<vector<2xf16>, 32>, !wave.simd<vector<2xf16>, 32> -> !wave.simd<vector<2xf16>, 32>
+  // CHECK: [[MUL:%.*]] = wave.fmul [[ADD]], [[C]] : !wave.simd<vector<2xf16>, 32>, !wave.simd<vector<2xf16>, 32> -> !wave.simd<vector<2xf16>, 32>
+  %mul = wave.fmul %add, %c : !wave.simd<vector<2xf16>, 32>, !wave.simd<vector<2xf16>, 32> -> !wave.simd<vector<2xf16>, 32>
+  // CHECK: [[MAX:%.*]] = wave.fmax [[MUL]], [[ADD]] : !wave.simd<vector<2xf16>, 32>, !wave.simd<vector<2xf16>, 32> -> !wave.simd<vector<2xf16>, 32>
+  %max = wave.fmax %mul, %add : !wave.simd<vector<2xf16>, 32>, !wave.simd<vector<2xf16>, 32> -> !wave.simd<vector<2xf16>, 32>
+  // CHECK: [[FMA:%.*]] = wave.fma [[ADD]], [[MUL]], [[MAX]] : !wave.simd<vector<2xf16>, 32>, !wave.simd<vector<2xf16>, 32>, !wave.simd<vector<2xf16>, 32> -> !wave.simd<vector<2xf16>, 32>
+  %fma = wave.fma %add, %mul, %max : !wave.simd<vector<2xf16>, 32>, !wave.simd<vector<2xf16>, 32>, !wave.simd<vector<2xf16>, 32> -> !wave.simd<vector<2xf16>, 32>
+  func.return %fma : !wave.simd<vector<2xf16>, 32>
 }
 
 // CHECK-LABEL: func.func @wave_cast_ops
@@ -112,6 +131,17 @@ func.func @wave_cast_ops(%vf32: !wave.simd<f32, 32>, %vf16: !wave.simd<f16, 32>,
   %scalar_fp = wave.cast fpconvert %sf32 policy {rounding = #wave.cast_rounding<rtp>} : f32 -> f16
   // CHECK: [[SFPD:%.*]] = wave.cast fpconvert [[SF32]] policy {rounding = #wave.cast_rounding<rtn>} : f32 -> f16
   %scalar_fp_down = wave.cast fpconvert %sf32 policy {rounding = #wave.cast_rounding<rtn>} : f32 -> f16
+  func.return
+}
+
+// CHECK-LABEL: func.func @wave_packed_cast_ops
+// CHECK-SAME: ([[VF32:%.*]]: !wave.simd<vector<2xf32>, 32>, [[VF16:%.*]]: !wave.simd<vector<2xf16>, 32>)
+func.func @wave_packed_cast_ops(%vf32: !wave.simd<vector<2xf32>, 32>,
+                                %vf16: !wave.simd<vector<2xf16>, 32>) {
+  // CHECK: [[DOWN:%.*]] = wave.cast fpconvert [[VF32]] policy {rounding = #wave.cast_rounding<rne>} : !wave.simd<vector<2xf32>, 32> -> !wave.simd<vector<2xf16>, 32>
+  %down = wave.cast fpconvert %vf32 policy {rounding = #wave.cast_rounding<rne>} : !wave.simd<vector<2xf32>, 32> -> !wave.simd<vector<2xf16>, 32>
+  // CHECK: [[UP:%.*]] = wave.cast fpconvert [[VF16]] : !wave.simd<vector<2xf16>, 32> -> !wave.simd<vector<2xf32>, 32>
+  %up = wave.cast fpconvert %vf16 : !wave.simd<vector<2xf16>, 32> -> !wave.simd<vector<2xf32>, 32>
   func.return
 }
 

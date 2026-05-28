@@ -244,7 +244,7 @@ def Wave_ShliOp : Wave_IntBinaryArith<"shli"> {
   }];
 }
 
-class Wave_F32SimdBinary<string mnemonic> : Wave_Op<mnemonic, [Pure]> {
+class Wave_FloatSimdBinary<string mnemonic> : Wave_Op<mnemonic, [Pure]> {
   let arguments = (ins Wave_Simd:$lhs, Wave_Simd:$rhs);
   let results = (outs Wave_Simd:$result);
   let assemblyFormat = [{
@@ -255,7 +255,18 @@ class Wave_F32SimdBinary<string mnemonic> : Wave_Op<mnemonic, [Pure]> {
   let hasVerifier = 1;
 }
 
-class Wave_F32SimdUnary<string mnemonic> : Wave_Op<mnemonic, [Pure]> {
+class Wave_FloatSimdTernary<string mnemonic> : Wave_Op<mnemonic, [Pure]> {
+  let arguments = (ins Wave_Simd:$lhs, Wave_Simd:$rhs, Wave_Simd:$acc);
+  let results = (outs Wave_Simd:$result);
+  let assemblyFormat = [{
+    $lhs `,` $rhs `,` $acc attr-dict
+    `:` qualified(type($lhs)) `,` qualified(type($rhs)) `,`
+    qualified(type($acc)) `->` qualified(type($result))
+  }];
+  let hasVerifier = 1;
+}
+
+class Wave_FloatSimdUnary<string mnemonic> : Wave_Op<mnemonic, [Pure]> {
   let arguments = (ins Wave_Simd:$source);
   let results = (outs Wave_Simd:$result);
   let assemblyFormat = [{
@@ -265,27 +276,31 @@ class Wave_F32SimdUnary<string mnemonic> : Wave_Op<mnemonic, [Pure]> {
   let hasVerifier = 1;
 }
 
-def Wave_FAddOp : Wave_F32SimdBinary<"fadd"> {
-  let summary = "lane-wise f32 add";
+def Wave_FAddOp : Wave_FloatSimdBinary<"fadd"> {
+  let summary = "lane-wise floating-point add";
 }
 
-def Wave_FSubOp : Wave_F32SimdBinary<"fsub"> {
+def Wave_FSubOp : Wave_FloatSimdBinary<"fsub"> {
   let summary = "lane-wise f32 subtract";
 }
 
-def Wave_FMulOp : Wave_F32SimdBinary<"fmul"> {
-  let summary = "lane-wise f32 multiply";
+def Wave_FMulOp : Wave_FloatSimdBinary<"fmul"> {
+  let summary = "lane-wise floating-point multiply";
 }
 
-def Wave_FMaxOp : Wave_F32SimdBinary<"fmax"> {
-  let summary = "lane-wise f32 maximum";
+def Wave_FMaxOp : Wave_FloatSimdBinary<"fmax"> {
+  let summary = "lane-wise floating-point maximum";
 }
 
-def Wave_FExp2Op : Wave_F32SimdUnary<"fexp2"> {
+def Wave_FmaOp : Wave_FloatSimdTernary<"fma"> {
+  let summary = "lane-wise fused multiply-add";
+}
+
+def Wave_FExp2Op : Wave_FloatSimdUnary<"fexp2"> {
   let summary = "lane-wise base-2 f32 exponential";
 }
 
-def Wave_FRcpOp : Wave_F32SimdUnary<"frcp"> {
+def Wave_FRcpOp : Wave_FloatSimdUnary<"frcp"> {
   let summary = "lane-wise f32 reciprocal";
 }
 

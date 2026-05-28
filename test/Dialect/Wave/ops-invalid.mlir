@@ -200,6 +200,22 @@ func.func @cast_simd_width_mismatch(%x: !wave.simd<f32, 32>) {
 
 // -----
 
+func.func @cast_vector_rank_mismatch(%x: !wave.simd<vector<2x2xf32>, 32>) {
+  // expected-error @+1 {{numeric vector payload must be 1-D}}
+  %r = wave.cast fpconvert %x : !wave.simd<vector<2x2xf32>, 32> -> !wave.simd<vector<4xf16>, 32>
+  return
+}
+
+// -----
+
+func.func @cast_vector_length_mismatch(%x: !wave.simd<vector<2xf32>, 32>) {
+  // expected-error @+1 {{source and result vector lengths must match}}
+  %r = wave.cast fpconvert %x : !wave.simd<vector<2xf32>, 32> -> !wave.simd<vector<3xf16>, 32>
+  return
+}
+
+// -----
+
 func.func @cast_bad_fpconvert_kind(%x: !wave.simd<i32, 32>) {
   // expected-error @+1 {{fpconvert requires float source and result}}
   %r = wave.cast fpconvert %x : !wave.simd<i32, 32> -> !wave.simd<i16, 32>
@@ -283,6 +299,30 @@ func.func @cast_unknown_policy(%x: f32) {
 func.func @cast_wrong_policy_type(%x: f32) {
   // expected-error @+1 {{policy 'rounding' must be #wave.cast_rounding}}
   %r = wave.cast fpconvert %x policy {rounding = "rne"} : f32 -> f16
+  return
+}
+
+// -----
+
+func.func @fadd_packed_bad_element(%a: !wave.simd<vector<2xi16>, 32>, %b: !wave.simd<vector<2xi16>, 32>) {
+  // expected-error @+1 {{SIMD element type must be f32 or vector<2xf16>}}
+  %r = wave.fadd %a, %b : !wave.simd<vector<2xi16>, 32>, !wave.simd<vector<2xi16>, 32> -> !wave.simd<vector<2xi16>, 32>
+  return
+}
+
+// -----
+
+func.func @fsub_packed_f16_rejected(%a: !wave.simd<vector<2xf16>, 32>, %b: !wave.simd<vector<2xf16>, 32>) {
+  // expected-error @+1 {{SIMD element type must be f32}}
+  %r = wave.fsub %a, %b : !wave.simd<vector<2xf16>, 32>, !wave.simd<vector<2xf16>, 32> -> !wave.simd<vector<2xf16>, 32>
+  return
+}
+
+// -----
+
+func.func @fma_result_type_mismatch(%a: !wave.simd<vector<2xf16>, 32>, %b: !wave.simd<vector<2xf16>, 32>) {
+  // expected-error @+1 {{operands and result must have the same SIMD type}}
+  %r = wave.fma %a, %b, %a : !wave.simd<vector<2xf16>, 32>, !wave.simd<vector<2xf16>, 32>, !wave.simd<vector<2xf16>, 32> -> !wave.simd<vector<2xf16>, 64>
   return
 }
 

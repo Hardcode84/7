@@ -831,6 +831,10 @@ LogicalResult WaveAMDMachineSelector::selectShli(ShliOp op) {
 template <typename MachineOp, typename WaveOp, typename... OperandValues>
 static LogicalResult selectF32(WaveAMDMachineSelector &S, WaveOp op,
                                OperandValues... operands) {
+  SimdType resultType = cast<SimdType>(op.getResult().getType());
+  if (!resultType.getElementType().isF32())
+    return op.emitError(
+        "WaveAMDMachine f32 lowering supports only !wave.simd<f32, W>");
   auto toVGPR = [&](Value operand) {
     return S.ensureVGPRForVSrc1(op.getLoc(), S.expect(operand, op));
   };
