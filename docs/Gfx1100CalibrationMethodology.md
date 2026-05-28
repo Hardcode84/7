@@ -136,6 +136,126 @@ LD_LIBRARY_PATH="$CORE/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
   "$TMP/baseline/baseline.hsaco" wmma_f16_matmul_tiled
 ```
 
+## Same-region matmul ATT calibration
+
+Scheduler calibration uses the loop wait windows, not whole-dispatch wallclock.
+For BM=BN=1, generate one-wave artifacts and keep the temp dir:
+
+```bash
+CORE=$(python - <<'PY'
+from pathlib import Path
+import rocm_sdk_core
+
+print(Path(rocm_sdk_core.__file__).resolve().parents[1] / "_rocm_sdk_core")
+PY
+)
+
+ROCM_LIB="$CORE/lib" HIPCC="$CONDA_PREFIX/bin/hipcc" \
+tools/wave-matmul-calibrate/wave-matmul-calibrate.py \
+  --chip=gfx1100 --use-buffer --iters=1 --warmup=0 --no-check --keep-tmp \
+  --variants=baseline,scheduled \
+  --m=256 --n=256 --k=<K> --bm=1 --bn=1
+```
+
+Run ATT once per variant/capture:
+
+```bash
+OUT=$(mktemp -d /tmp/wave-att.XXXXXX)
+
+LD_LIBRARY_PATH="$CORE/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
+"$CORE/bin/rocprofv3" \
+  --rocm-root "$CORE" \
+  --att \
+  --att-library-path "$CORE/lib" \
+  --output-format json \
+  -d "$OUT" -o out \
+  --kernel-include-regex wmma_f16_matmul_tiled \
+  --att-target-cu 1 \
+  --att-shader-engine-mask 0x3f \
+  --att-simd-select 0x3 \
+  --att-buffer-size 0x6000000 \
+  -- "$TMP/wave-matmul-calibrate-runner" \
+  --m 256 --n 256 --k <K> --bm 1 --bn 1 \
+  --wave-m-tiles 1 --wave-n-tiles 1 --wave-k-tiles 1 \
+  --iters 1 --warmup 0 --no-check \
+  "$TMP/<variant>/<variant>.hsaco" wmma_f16_matmul_tiled
+```
+
+Import wait windows by PC and summarize per traced wave:
+
+```bash
+tools/wave-att-import/wave-att-import.py \
+  --att-dir "$OUT" \
+  --code-object "$TMP/<variant>/<variant>.hsaco" \
+  --llvm-objdump build/llvm-install/bin/llvm-objdump \
+  --arch gfx1100 \
+  --trip-count <K/16-1> \
+  --window-summary
+```
+
+The captured ATT files reported incomplete stitch, but `--trip-count` expanded
+static order resolved all per-wave rows:
+
+| K | Variant | Captures | Wave rows/capture | Unresolved |
+| ---: | --- | ---: | ---: | ---: |
+| 64 | baseline | 2 | 804 | 0 |
+| 64 | scheduled | 2 | 804 | 0 |
+| 128 | baseline | 2 | 1332 | 0 |
+| 128 | scheduled | 3 | 1332 | 0 |
+
+`wave-sim-report` was run on the final machine MLIR with matching trip count.
+ATT columns below are medians of the `phase,loop` `--window-summary` row,
+cycles per traced wave. Samples show per-capture loop wait totals.
+
+| K | Model base | Model sched | Model delta | ATT loop base | ATT loop sched | ATT delta | ATT samples |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| 64 | 11412 | 9920 | -1492 | 465.9 | 406.8 | -59.2 | base 466.7,465.2; sched 424.5,389.0 |
+| 128 | 22348 | 19404 | -2944 | 1973.8 | 1592.5 | -381.3 | base 2005.5,1942.2; sched 4153.2,1592.5,1544.8 |
+
+Loop wait split by dominant pending class:
+
+| K | LDS delta | VMEM-load delta | Read |
+| ---: | ---: | ---: | --- |
+| 64 | -106.3 | +47.2 | LDS improves; VMEM wait worsens slightly. |
+| 128 | -186.2 | -195.2 | Improvement splits across LDS and VMEM. |
+
+Observed gap:
+
+- Model predicts the right direction, but is 4-8x larger than ATT loop wait
+  improvement on these rows.
+- Loop wait model overpredicts VMEM waits most: K64 loop VMEM model is
+  1881 cycles vs ATT 69-117; K128 model is 4389 cycles vs ATT 589-785.
+- WMMA rows issue as 1-cycle ATT rows with zero local stall, so this data does
+  not justify changing `Write16PassWMMA`.
+- Do not retune raw latency constants from this capture. Next useful model work
+  is waitcnt/VMEM overlap and arbitration, not WMMA latency.
+
+PMC sanity check:
+
+```bash
+LD_LIBRARY_PATH="$CORE/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
+"$CORE/bin/rocprofv3" \
+  --rocm-root "$CORE" \
+  --pmc GRBM_GUI_ACTIVE GRBM_COUNT SQ_WAVES_sum \
+  --kernel-include-regex wmma_f16_matmul_tiled \
+  --output-format json \
+  -d "$OUT" -o out \
+  -- "$TMP/wave-matmul-calibrate-runner" ... \
+  "$TMP/<variant>/<variant>.hsaco" wmma_f16_matmul_tiled
+```
+
+`SQ_WAVES_sum` returned 256 for each dispatch, matching the 16x16 one-wave
+grid. `GRBM_GUI_ACTIVE` and `GRBM_COUNT` were zero in this The Rock profiler
+build, so they were not usable as cycle counters. Rocprof dispatch timestamps
+were stable enough to reject one-launch runner wallclock outliers:
+
+| K | Variant | Dispatch timestamp median ns | SQ_WAVES_sum |
+| ---: | --- | ---: | ---: |
+| 64 | baseline | 2120 | 256 |
+| 64 | scheduled | 2440 | 256 |
+| 128 | baseline | 3200 | 256 |
+| 128 | scheduled | 3120 | 256 |
+
 Failure modes:
 
 - `libamdhip64.so.7 => not found`: missing `LD_LIBRARY_PATH="$CORE/lib"`.

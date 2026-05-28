@@ -2,6 +2,7 @@
 # RUN: %PYTHON %S/../../tools/wave-att-import/wave-att-import.py --att-dir %S/Inputs/att-sample --objdump %S/Inputs/att-objdump.txt --summary | FileCheck %s
 # RUN: %PYTHON %S/../../tools/wave-att-import/wave-att-import.py --att-dir %S/Inputs/att-sample --objdump %S/Inputs/att-objdump.txt --windows | FileCheck %s --check-prefix=WIN
 # RUN: %PYTHON %S/../../tools/wave-att-import/wave-att-import.py --att-dir %S/Inputs/att-sample --objdump %S/Inputs/att-objdump.txt --summary --trip-count 0 | FileCheck %s --check-prefix=POS
+# RUN: %PYTHON %S/../../tools/wave-att-import/wave-att-import.py --att-dir %S/Inputs/att-sample --objdump %S/Inputs/att-objdump.txt --summary --trip-count 0 --window-summary | FileCheck %s --check-prefix=SUM
 
 # CHECK: summary:
 # CHECK:   static_instructions: 4
@@ -30,3 +31,10 @@
 # POS: wave_unresolved: 0
 # POS: 0x160c,5644,"v_and_b32_e32 v1, 15, v0",v_and_b32_e32,Write32Bit,5,2,,,,,1,1.0,0.0,132.0
 # POS: 0x1610,5648,s_endpgm,s_endpgm,WriteBranch,32,3,,,,,1,1.0,0.0,133.0
+
+# SUM: wait_windows: 1
+# SUM: scope,name,windows,model_static_wait_per_wave,att_wave_duration_per_wave,att_wave_stall_per_wave
+# SUM: all,all,1,19.0,31.0,30.0
+# SUM: class,SMEM,1,19.0,31.0,30.0
+# SUM: phase,unknown,1,19.0,31.0,30.0
+# SUM: phase:unknown,SMEM,1,19.0,31.0,30.0

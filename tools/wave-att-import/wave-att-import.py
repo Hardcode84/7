@@ -552,6 +552,21 @@ def static_order_model_stall(window: WaitWindow) -> int:
     return max(0, max(ready_cycles) - window.wait.index)
 
 
+def classify_window_class(window: WaitWindow) -> str:
+    classes = set(join_classes(window.pending).split(";"))
+    if window.counter == "vscnt":
+        return "VMEM store"
+    if "WriteVMEM" in classes:
+        return "VMEM load"
+    if "WriteLDS" in classes and "WriteSMEM" in classes:
+        return "LGKM mixed"
+    if "WriteLDS" in classes:
+        return "LDS"
+    if "WriteSMEM" in classes:
+        return "SMEM"
+    return window.counter
+
+
 def build_window_report(
     static: dict[int, StaticInst],
     att_stats: dict[int, AttStats],
@@ -632,6 +647,95 @@ def build_window_report(
     return out.getvalue()
 
 
+@dataclass
+class WindowSummary:
+    windows: int = 0
+    model_static_wait: float = 0.0
+    att_wave_duration: float = 0.0
+    att_wave_stall: float = 0.0
+
+
+def add_window_summary(
+    summaries: dict[tuple[str, str], WindowSummary],
+    key: tuple[str, str],
+    window: WaitWindow,
+    wave: WaveStats,
+    wave_files: int,
+) -> None:
+    summary = summaries.setdefault(key, WindowSummary())
+    summary.windows += 1
+    if wave_files == 0 or wave.hitcount == 0:
+        return
+    scale = wave.hitcount / wave_files
+    summary.model_static_wait += static_order_model_stall(window) * scale
+    summary.att_wave_duration += (wave.avg_duration or 0.0) * scale
+    summary.att_wave_stall += (wave.avg_stall or 0.0) * scale
+
+
+def build_window_summary_report(
+    static: dict[int, StaticInst],
+    wave_stats: dict[int, WaveStats],
+    summary: ImportSummary,
+    *,
+    include_summary: bool,
+) -> str:
+    windows = build_wait_windows(static)
+    summaries: dict[tuple[str, str], WindowSummary] = {}
+    for window in windows:
+        wave = wave_stats.get(window.wait.pc, WaveStats())
+        window_class = classify_window_class(window)
+        add_window_summary(summaries, ("all", "all"), window, wave, summary.wave_files)
+        add_window_summary(
+            summaries, ("phase", window.phase), window, wave, summary.wave_files
+        )
+        add_window_summary(
+            summaries, ("class", window_class), window, wave, summary.wave_files
+        )
+        add_window_summary(
+            summaries,
+            (f"phase:{window.phase}", window_class),
+            window,
+            wave,
+            summary.wave_files,
+        )
+
+    out = io.StringIO()
+    if include_summary:
+        out.write("summary:\n")
+        out.write(f"  static_instructions: {len(static)}\n")
+        out.write(f"  wave_files: {summary.wave_files}\n")
+        out.write(f"  wave_rows: {summary.wave_rows}\n")
+        out.write(f"  wave_resolved: {summary.wave_resolved}\n")
+        out.write(f"  wave_unresolved: {summary.wave_unresolved}\n")
+        out.write(f"  wave_position_mismatched: {summary.wave_position_mismatched}\n")
+        out.write(f"  wait_windows: {len(windows)}\n\n")
+
+    writer = csv.writer(out, lineterminator="\n")
+    writer.writerow(
+        [
+            "scope",
+            "name",
+            "windows",
+            "model_static_wait_per_wave",
+            "att_wave_duration_per_wave",
+            "att_wave_stall_per_wave",
+        ]
+    )
+    for key in sorted(summaries):
+        row = summaries[key]
+        writer.writerow(
+            [
+                key[0],
+                key[1],
+                row.windows,
+                format_number(row.model_static_wait),
+                format_number(row.att_wave_duration),
+                format_number(row.att_wave_stall),
+            ]
+        )
+    return out.getvalue()
+
+
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -655,6 +759,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         "--windows",
         action="store_true",
         help="print wait-window calibration rows instead of per-PC rows",
+    )
+    parser.add_argument(
+        "--window-summary",
+        action="store_true",
+        help="print per-wave wait totals by phase and producer class",
     )
     parser.add_argument(
         "--trip-count",
@@ -685,7 +794,11 @@ def main(argv: list[str]) -> int:
     wave_stats = parse_wave_json(
         args.att_dir, static_pcs, code_maps, dynamic_trace, summary
     )
-    if args.windows:
+    if args.window_summary:
+        report = build_window_summary_report(
+            static, wave_stats, summary, include_summary=args.summary
+        )
+    elif args.windows:
         report = build_window_report(
             static, att_stats, wave_stats, summary, include_summary=args.summary
         )
