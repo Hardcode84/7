@@ -18,6 +18,8 @@
 
 #include "mlir/Dialect/Wave/Transforms/Passes.h"
 
+#include "WaveAMDRegAllocPrep.h"
+#include "WaveAMDRegLiveIntervals.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/WaveAMDMachine/CostModel/ArchData.h"
 #include "mlir/Dialect/WaveAMDMachine/CostModel/EventSimulator.h"
@@ -314,6 +316,29 @@ struct ScoreResult {
   StringRef fallbackReason;
 };
 
+struct RegisterPressureBudgets {
+  int hardVGPR = -1;
+  int hardSGPR = -1;
+  int criticalVGPR = -1;
+  int criticalSGPR = -1;
+};
+
+struct RegisterPressureResult {
+  bool supported = false;
+  unsigned maxVGPR = 0;
+  unsigned maxSGPR = 0;
+  int64_t hardVGPRExcess = 0;
+  int64_t hardSGPRExcess = 0;
+  int64_t criticalVGPRExcess = 0;
+  int64_t criticalSGPRExcess = 0;
+  StringRef fallbackReason;
+};
+
+struct CandidateMetrics {
+  ScoreResult score;
+  RegisterPressureResult pressure;
+};
+
 static ScoreResult scoreOps(ArrayRef<Operation *> ops,
                             ArchResolution archResolution,
                             const waveamdmachine::EventSimConfig &config) {
@@ -328,16 +353,117 @@ static ScoreResult scoreOps(ArrayRef<Operation *> ops,
   return {true, result.totalCycles, result.issuedOps, {}};
 }
 
+static int64_t computeExcess(unsigned pressure, int budget) {
+  if (budget < 0)
+    return 0;
+  return std::max<int64_t>(0, static_cast<int64_t>(pressure) - budget);
+}
+
+static unsigned
+computeMaxPressure(ArrayRef<wave::WaveAMDLiveInterval> intervals,
+                   unsigned firstPos, unsigned lastPos) {
+  unsigned maxPressure = 0;
+  for (unsigned pos = firstPos; pos <= lastPos; ++pos) {
+    unsigned pressure = 0;
+    for (const wave::WaveAMDLiveInterval &interval : intervals) {
+      if (interval.values.empty())
+        continue;
+      if (interval.start <= pos && pos <= interval.end)
+        pressure += interval.type.getWidth();
+    }
+    maxPressure = std::max(maxPressure, pressure);
+  }
+  return maxPressure;
+}
+
+static FailureOr<std::pair<unsigned, unsigned>>
+getPositionSpan(ArrayRef<Operation *> ops,
+                const DenseMap<Operation *, unsigned> &positions) {
+  unsigned firstPos = std::numeric_limits<unsigned>::max();
+  unsigned lastPos = 0;
+  for (Operation *op : ops) {
+    auto it = positions.find(op);
+    if (it == positions.end())
+      return failure();
+    firstPos = std::min(firstPos, it->second);
+    lastPos = std::max(lastPos, it->second);
+  }
+  return std::make_pair(firstPos, lastPos);
+}
+
+static RegisterPressureResult
+computeRegisterPressure(const ScheduleRegion &region,
+                        ArrayRef<Operation *> orderedOps,
+                        const RegisterPressureBudgets &budgets) {
+  wave::WaveAMDLiveIntervalOrderOverride orderOverride;
+  orderOverride.block = region.first->getBlock();
+  orderOverride.ops = orderedOps;
+  FailureOr<wave::WaveAMDLiveIntervalBuildResult> builtIntervals =
+      wave::buildWaveAMDLiveIntervals(region.func, orderOverride);
+  if (failed(builtIntervals))
+    return {false, 0, 0, 0, 0, 0, 0, "pressure_analysis_failed"};
+
+  FailureOr<std::pair<unsigned, unsigned>> span =
+      getPositionSpan(orderedOps, builtIntervals->positions);
+  if (failed(span))
+    return {false, 0, 0, 0, 0, 0, 0, "pressure_position_missing"};
+
+  RegisterPressureResult result;
+  result.supported = true;
+  result.maxSGPR = computeMaxPressure(builtIntervals->intervals.sgprs,
+                                      span->first, span->second);
+  result.maxVGPR = computeMaxPressure(builtIntervals->intervals.vgprs,
+                                      span->first, span->second);
+  result.hardVGPRExcess = computeExcess(result.maxVGPR, budgets.hardVGPR);
+  result.hardSGPRExcess = computeExcess(result.maxSGPR, budgets.hardSGPR);
+  result.criticalVGPRExcess =
+      computeExcess(result.maxVGPR, budgets.criticalVGPR);
+  result.criticalSGPRExcess =
+      computeExcess(result.maxSGPR, budgets.criticalSGPR);
+  return result;
+}
+
+static CandidateMetrics
+evaluateOps(const ScheduleRegion &region, ArrayRef<Operation *> ops,
+            ArchResolution archResolution,
+            const waveamdmachine::EventSimConfig &modelConfig,
+            const RegisterPressureBudgets &budgets) {
+  return {scoreOps(ops, archResolution, modelConfig),
+          computeRegisterPressure(region, ops, budgets)};
+}
+
+static void printPressure(raw_ostream &os,
+                          const RegisterPressureResult &pressure,
+                          const RegisterPressureBudgets &budgets) {
+  if (!pressure.supported) {
+    os << " pressure_fallback=original pressure_reason="
+       << pressure.fallbackReason;
+    return;
+  }
+  os << " max_vgpr=" << pressure.maxVGPR << " max_sgpr=" << pressure.maxSGPR;
+  if (budgets.hardVGPR >= 0)
+    os << " vgpr_hard_excess=" << pressure.hardVGPRExcess;
+  if (budgets.hardSGPR >= 0)
+    os << " sgpr_hard_excess=" << pressure.hardSGPRExcess;
+  if (budgets.criticalVGPR >= 0)
+    os << " vgpr_critical_excess=" << pressure.criticalVGPRExcess;
+  if (budgets.criticalSGPR >= 0)
+    os << " sgpr_critical_excess=" << pressure.criticalSGPRExcess;
+}
+
 static void printScoreLine(ScheduleRegion region, StringRef orderName,
-                           ScoreResult score) {
+                           CandidateMetrics metrics,
+                           const RegisterPressureBudgets &budgets) {
   llvm::errs() << "waveamd-machine-schedule score func="
                << region.func.getSymName() << " region=" << region.regionOrdinal
                << " order=" << orderName;
-  if (score.supported) {
-    llvm::errs() << " cycles=" << score.cycles
-                 << " issued_ops=" << score.issuedOps;
+  if (metrics.score.supported) {
+    llvm::errs() << " cycles=" << metrics.score.cycles
+                 << " issued_ops=" << metrics.score.issuedOps;
+    printPressure(llvm::errs(), metrics.pressure, budgets);
   } else {
-    llvm::errs() << " fallback=original reason=" << score.fallbackReason;
+    llvm::errs() << " fallback=original reason="
+                 << metrics.score.fallbackReason;
   }
   llvm::errs() << "\n";
 }
@@ -429,36 +555,41 @@ static bool buildCandidateOps(const ScheduleRegion &region,
   return true;
 }
 
-static ScoreResult
-scoreCandidateOps(const ScheduleRegion &region, const DependenceGraph &graph,
-                  const CandidateRequest &candidate,
-                  ArchResolution archResolution,
-                  const waveamdmachine::EventSimConfig &modelConfig) {
+static CandidateMetrics evaluateCandidateRequest(
+    const ScheduleRegion &region, const DependenceGraph &graph,
+    const CandidateRequest &candidate, ArchResolution archResolution,
+    const waveamdmachine::EventSimConfig &modelConfig,
+    const RegisterPressureBudgets &budgets) {
   if (!candidate.parsed)
-    return {false, 0, 0, candidate.fallbackReason};
+    return {{false, 0, 0, candidate.fallbackReason}, {}};
 
   SmallVector<Operation *, 16> candidateOps;
   StringRef fallbackReason;
   if (!buildCandidateOps(region, graph, candidate.order, candidateOps,
                          fallbackReason))
-    return {false, 0, 0, fallbackReason};
+    return {{false, 0, 0, fallbackReason}, {}};
 
-  return scoreOps(candidateOps, archResolution, modelConfig);
+  return evaluateOps(region, candidateOps, archResolution, modelConfig,
+                     budgets);
 }
 
 static void printRegionScores(const ScheduleRegion &region,
                               const DependenceGraph &graph,
                               ArchResolution archResolution,
                               const waveamdmachine::EventSimConfig &modelConfig,
+                              const RegisterPressureBudgets &budgets,
                               const CandidateRequest &candidate,
                               bool scoreCandidate) {
-  printScoreLine(region, "original",
-                 scoreOps(region.ops, archResolution, modelConfig));
+  printScoreLine(
+      region, "original",
+      evaluateOps(region, region.ops, archResolution, modelConfig, budgets),
+      budgets);
   if (!scoreCandidate)
     return;
-  printScoreLine(
-      region, "candidate",
-      scoreCandidateOps(region, graph, candidate, archResolution, modelConfig));
+  printScoreLine(region, "candidate",
+                 evaluateCandidateRequest(region, graph, candidate,
+                                          archResolution, modelConfig, budgets),
+                 budgets);
 }
 
 struct GraphTables {
@@ -720,7 +851,7 @@ buildScheduleCandidates(const ScheduleRegion &region,
 struct EvaluatedCandidate {
   StringRef name;
   SmallVector<unsigned, 16> order;
-  ScoreResult score;
+  CandidateMetrics metrics;
 };
 
 struct ScheduleDecision {
@@ -735,29 +866,30 @@ static bool isOriginalOrder(ArrayRef<unsigned> order) {
   return true;
 }
 
-static ScoreResult
-scoreOrderCandidate(const ScheduleRegion &region, const DependenceGraph &graph,
-                    const OrderCandidate &candidate,
-                    ArchResolution archResolution,
-                    const waveamdmachine::EventSimConfig &modelConfig) {
+static CandidateMetrics evaluateOrderCandidate(
+    const ScheduleRegion &region, const DependenceGraph &graph,
+    const OrderCandidate &candidate, ArchResolution archResolution,
+    const waveamdmachine::EventSimConfig &modelConfig,
+    const RegisterPressureBudgets &budgets) {
   SmallVector<Operation *, 16> ops;
   StringRef fallbackReason;
   if (!buildCandidateOps(region, graph, candidate.order, ops, fallbackReason))
-    return {false, 0, 0, fallbackReason};
-  return scoreOps(ops, archResolution, modelConfig);
+    return {{false, 0, 0, fallbackReason}, {}};
+  return evaluateOps(region, ops, archResolution, modelConfig, budgets);
 }
 
 static ScheduleDecision
 evaluateScheduleCandidates(const ScheduleRegion &region,
                            const DependenceGraph &graph,
                            ArchResolution archResolution,
-                           const waveamdmachine::EventSimConfig &modelConfig) {
+                           const waveamdmachine::EventSimConfig &modelConfig,
+                           const RegisterPressureBudgets &budgets) {
   ScheduleDecision decision;
   if (!archResolution.arch) {
     decision.candidates.push_back(
         {"original",
          getOriginalOrder(region),
-         {false, 0, 0, archResolution.fallbackReason}});
+         {{false, 0, 0, archResolution.fallbackReason}, {}}});
     return decision;
   }
 
@@ -766,12 +898,13 @@ evaluateScheduleCandidates(const ScheduleRegion &region,
   for (const OrderCandidate &candidate : candidates)
     decision.candidates.push_back(
         {candidate.name, candidate.order,
-         scoreOrderCandidate(region, graph, candidate, archResolution,
-                             modelConfig)});
+         evaluateOrderCandidate(region, graph, candidate, archResolution,
+                                modelConfig, budgets)});
 
   for (unsigned i = 1; i < decision.candidates.size(); ++i) {
-    const ScoreResult &best = decision.candidates[decision.selected].score;
-    const ScoreResult &score = decision.candidates[i].score;
+    const ScoreResult &best =
+        decision.candidates[decision.selected].metrics.score;
+    const ScoreResult &score = decision.candidates[i].metrics.score;
     if (!score.supported)
       continue;
     if (!best.supported || score.cycles < best.cycles)
@@ -789,21 +922,24 @@ static void printOrder(raw_ostream &os, ArrayRef<unsigned> order) {
 }
 
 static void printCandidateDiagnostics(ScheduleRegion region,
-                                      const ScheduleDecision &decision) {
-  ScoreResult original = decision.candidates.front().score;
+                                      const ScheduleDecision &decision,
+                                      const RegisterPressureBudgets &budgets) {
+  ScoreResult original = decision.candidates.front().metrics.score;
   for (const EvaluatedCandidate &candidate : decision.candidates) {
     llvm::errs() << "waveamd-machine-schedule candidate func="
                  << region.func.getSymName()
                  << " region=" << region.regionOrdinal
                  << " name=" << candidate.name;
-    if (candidate.score.supported) {
-      llvm::errs() << " cycles=" << candidate.score.cycles;
+    if (candidate.metrics.score.supported) {
+      llvm::errs() << " cycles=" << candidate.metrics.score.cycles;
       if (original.supported)
-        llvm::errs() << " delta=" << candidate.score.cycles - original.cycles;
-      llvm::errs() << " issued_ops=" << candidate.score.issuedOps;
+        llvm::errs() << " delta="
+                     << candidate.metrics.score.cycles - original.cycles;
+      llvm::errs() << " issued_ops=" << candidate.metrics.score.issuedOps;
+      printPressure(llvm::errs(), candidate.metrics.pressure, budgets);
     } else {
       llvm::errs() << " fallback=original reason="
-                   << candidate.score.fallbackReason;
+                   << candidate.metrics.score.fallbackReason;
     }
     llvm::errs() << " order=";
     printOrder(llvm::errs(), candidate.order);
@@ -815,17 +951,18 @@ static void printScheduleDecision(ScheduleRegion region,
                                   const ScheduleDecision &decision,
                                   bool willApply) {
   const EvaluatedCandidate &selected = decision.candidates[decision.selected];
-  ScoreResult original = decision.candidates.front().score;
+  ScoreResult original = decision.candidates.front().metrics.score;
   llvm::errs() << "waveamd-machine-schedule selected func="
                << region.func.getSymName() << " region=" << region.regionOrdinal
                << " name=" << selected.name;
-  if (selected.score.supported) {
+  if (selected.metrics.score.supported) {
     llvm::errs() << " original_cycles=" << original.cycles
-                 << " selected_cycles=" << selected.score.cycles
-                 << " delta=" << selected.score.cycles - original.cycles;
+                 << " selected_cycles=" << selected.metrics.score.cycles
+                 << " delta="
+                 << selected.metrics.score.cycles - original.cycles;
   } else {
     llvm::errs() << " fallback=original reason="
-                 << selected.score.fallbackReason;
+                 << selected.metrics.score.fallbackReason;
   }
   llvm::errs() << " action=" << (willApply ? "apply" : "keep") << " order=";
   printOrder(llvm::errs(), selected.order);
@@ -837,8 +974,8 @@ static bool shouldApplyDecision(const ScheduleDecision &decision) {
     return false;
   const EvaluatedCandidate &original = decision.candidates.front();
   const EvaluatedCandidate &selected = decision.candidates[decision.selected];
-  return original.score.supported && selected.score.supported &&
-         selected.score.cycles < original.score.cycles &&
+  return original.metrics.score.supported && selected.metrics.score.supported &&
+         selected.metrics.score.cycles < original.metrics.score.cycles &&
          !isOriginalOrder(selected.order);
 }
 
@@ -892,30 +1029,67 @@ struct WaveAMDMachineSchedulePass
     return success();
   }
 
+  LogicalResult configurePressureBudgets(ModuleOp mod,
+                                         RegisterPressureBudgets &budgets) {
+    if (pressureVgprBudget < -1 || pressureSgprBudget < -1 ||
+        pressureCriticalVgprBudget < -1 || pressureCriticalSgprBudget < -1) {
+      mod.emitError() << "pressure budgets must be -1 or non-negative";
+      return failure();
+    }
+    budgets.hardVGPR = pressureVgprBudget;
+    budgets.hardSGPR = pressureSgprBudget;
+    budgets.criticalVGPR = pressureCriticalVgprBudget;
+    budgets.criticalSGPR = pressureCriticalSgprBudget;
+    return success();
+  }
+
   void runOnOperation() override {
     ModuleOp mod = getOperation();
     ArchResolution archResolution = resolveArch(mod);
     waveamdmachine::EventSimConfig modelConfig;
     if (failed(configureModel(mod, modelConfig)))
       return signalPassFailure();
+    RegisterPressureBudgets pressureBudgets;
+    if (failed(configurePressureBudgets(mod, pressureBudgets)))
+      return signalPassFailure();
     CandidateRequest candidate =
         getCandidateRequest(StringRef(scoreOrder), scoreRegion);
     bool emitScores = printScore || candidate.requested;
     bool runScheduler = printCandidates || applySchedule;
+    bool measurePressure = emitScores || runScheduler;
     StringRef scoreFuncName(scoreFunc);
-    mod.walk([&](func::FuncOp func) {
-      if (func.isExternal())
-        return;
-      SmallVector<ScheduleRegion> regions = RegionCollector(func).collect();
-      for (const ScheduleRegion &region : regions)
-        processRegion(region, archResolution, modelConfig, candidate,
-                      scoreFuncName, emitScores, runScheduler);
+    WalkResult walkResult = mod.walk([&](func::FuncOp func) {
+      if (failed(processFunction(func, archResolution, modelConfig,
+                                 pressureBudgets, candidate, scoreFuncName,
+                                 emitScores, runScheduler, measurePressure)))
+        return WalkResult::interrupt();
+      return WalkResult::advance();
     });
+    if (walkResult.wasInterrupted())
+      return signalPassFailure();
+  }
+
+  LogicalResult
+  processFunction(func::FuncOp func, ArchResolution archResolution,
+                  const waveamdmachine::EventSimConfig &modelConfig,
+                  const RegisterPressureBudgets &pressureBudgets,
+                  const CandidateRequest &candidate, StringRef scoreFuncName,
+                  bool emitScores, bool runScheduler, bool measurePressure) {
+    if (func.isExternal())
+      return success();
+    if (measurePressure && failed(wave::prepareWaveAMDRegAllocIR(func)))
+      return failure();
+    SmallVector<ScheduleRegion> regions = RegionCollector(func).collect();
+    for (const ScheduleRegion &region : regions)
+      processRegion(region, archResolution, modelConfig, pressureBudgets,
+                    candidate, scoreFuncName, emitScores, runScheduler);
+    return success();
   }
 
   void processRegion(const ScheduleRegion &region,
                      ArchResolution archResolution,
                      const waveamdmachine::EventSimConfig &modelConfig,
+                     const RegisterPressureBudgets &pressureBudgets,
                      const CandidateRequest &candidate, StringRef scoreFuncName,
                      bool emitScores, bool runScheduler) {
     bool scoreCandidate =
@@ -929,21 +1103,23 @@ struct WaveAMDMachineSchedulePass
     if (printDeps)
       printDependences(region, graph);
     if (emitScores)
-      printRegionScores(region, graph, archResolution, modelConfig, candidate,
-                        scoreCandidate);
+      printRegionScores(region, graph, archResolution, modelConfig,
+                        pressureBudgets, candidate, scoreCandidate);
     if (runScheduler)
-      processScheduler(region, graph, archResolution, modelConfig);
+      processScheduler(region, graph, archResolution, modelConfig,
+                       pressureBudgets);
   }
 
   void processScheduler(const ScheduleRegion &region,
                         const DependenceGraph &graph,
                         ArchResolution archResolution,
-                        const waveamdmachine::EventSimConfig &modelConfig) {
-    ScheduleDecision decision =
-        evaluateScheduleCandidates(region, graph, archResolution, modelConfig);
+                        const waveamdmachine::EventSimConfig &modelConfig,
+                        const RegisterPressureBudgets &pressureBudgets) {
+    ScheduleDecision decision = evaluateScheduleCandidates(
+        region, graph, archResolution, modelConfig, pressureBudgets);
     bool willApply = applySchedule && shouldApplyDecision(decision);
     if (printCandidates) {
-      printCandidateDiagnostics(region, decision);
+      printCandidateDiagnostics(region, decision, pressureBudgets);
       printScheduleDecision(region, decision, willApply);
     }
     if (willApply)

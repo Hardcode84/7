@@ -16,8 +16,8 @@ func.func @candidate_lower(%off: !waveamdmachine.reg<vgpr, 1>,
 }
 }
 
-// DIAG: waveamd-machine-schedule candidate func=candidate_lower region=0 name=original cycles=326 delta=0 issued_ops=3 order=0,1,2,3
-// DIAG: waveamd-machine-schedule candidate func=candidate_lower region=0 name=critical_path cycles=325 delta=-1 issued_ops=3 order=0,2,1,3
+// DIAG: waveamd-machine-schedule candidate func=candidate_lower region=0 name=original cycles=326 delta=0 issued_ops=3 max_vgpr=3 max_sgpr=0 order=0,1,2,3
+// DIAG: waveamd-machine-schedule candidate func=candidate_lower region=0 name=critical_path cycles=325 delta=-1 issued_ops=3 max_vgpr=3 max_sgpr=0 order=0,2,1,3
 // DIAG: waveamd-machine-schedule selected func=candidate_lower region=0 name=critical_path original_cycles=326 selected_cycles=325 delta=-1 action=apply order=0,2,1,3
 
 // APPLY-LABEL: func.func @candidate_lower
