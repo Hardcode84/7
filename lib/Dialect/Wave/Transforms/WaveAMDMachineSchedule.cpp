@@ -314,13 +314,10 @@ struct ScoreResult {
 };
 
 static ScoreResult scoreOps(ArrayRef<Operation *> ops,
-                            ArchResolution archResolution) {
+                            ArchResolution archResolution,
+                            const waveamdmachine::EventSimConfig &config) {
   if (!archResolution.arch)
     return {false, 0, 0, archResolution.fallbackReason};
-
-  waveamdmachine::EventSimConfig config;
-  config.waves = 1;
-  config.simds = 1;
 
   waveamdmachine::EventSimResult result;
   if (failed(waveamdmachine::simulateEventTimeline(ops, *archResolution.arch,
@@ -431,10 +428,11 @@ static bool buildCandidateOps(const ScheduleRegion &region,
   return true;
 }
 
-static ScoreResult scoreCandidateOps(const ScheduleRegion &region,
-                                     const DependenceGraph &graph,
-                                     const CandidateRequest &candidate,
-                                     ArchResolution archResolution) {
+static ScoreResult
+scoreCandidateOps(const ScheduleRegion &region, const DependenceGraph &graph,
+                  const CandidateRequest &candidate,
+                  ArchResolution archResolution,
+                  const waveamdmachine::EventSimConfig &modelConfig) {
   if (!candidate.parsed)
     return {false, 0, 0, candidate.fallbackReason};
 
@@ -444,19 +442,22 @@ static ScoreResult scoreCandidateOps(const ScheduleRegion &region,
                          fallbackReason))
     return {false, 0, 0, fallbackReason};
 
-  return scoreOps(candidateOps, archResolution);
+  return scoreOps(candidateOps, archResolution, modelConfig);
 }
 
 static void printRegionScores(const ScheduleRegion &region,
                               const DependenceGraph &graph,
                               ArchResolution archResolution,
+                              const waveamdmachine::EventSimConfig &modelConfig,
                               const CandidateRequest &candidate,
                               bool scoreCandidate) {
-  printScoreLine(region, "original", scoreOps(region.ops, archResolution));
+  printScoreLine(region, "original",
+                 scoreOps(region.ops, archResolution, modelConfig));
   if (!scoreCandidate)
     return;
-  printScoreLine(region, "candidate",
-                 scoreCandidateOps(region, graph, candidate, archResolution));
+  printScoreLine(
+      region, "candidate",
+      scoreCandidateOps(region, graph, candidate, archResolution, modelConfig));
 }
 
 struct GraphTables {
@@ -728,21 +729,23 @@ static bool isOriginalOrder(ArrayRef<unsigned> order) {
   return true;
 }
 
-static ScoreResult scoreOrderCandidate(const ScheduleRegion &region,
-                                       const DependenceGraph &graph,
-                                       const OrderCandidate &candidate,
-                                       ArchResolution archResolution) {
+static ScoreResult
+scoreOrderCandidate(const ScheduleRegion &region, const DependenceGraph &graph,
+                    const OrderCandidate &candidate,
+                    ArchResolution archResolution,
+                    const waveamdmachine::EventSimConfig &modelConfig) {
   SmallVector<Operation *, 16> ops;
   StringRef fallbackReason;
   if (!buildCandidateOps(region, graph, candidate.order, ops, fallbackReason))
     return {false, 0, 0, fallbackReason};
-  return scoreOps(ops, archResolution);
+  return scoreOps(ops, archResolution, modelConfig);
 }
 
 static ScheduleDecision
 evaluateScheduleCandidates(const ScheduleRegion &region,
                            const DependenceGraph &graph,
-                           ArchResolution archResolution) {
+                           ArchResolution archResolution,
+                           const waveamdmachine::EventSimConfig &modelConfig) {
   ScheduleDecision decision;
   if (!archResolution.arch) {
     decision.candidates.push_back(
@@ -757,7 +760,8 @@ evaluateScheduleCandidates(const ScheduleRegion &region,
   for (const OrderCandidate &candidate : candidates)
     decision.candidates.push_back(
         {candidate.name, candidate.order,
-         scoreOrderCandidate(region, graph, candidate, archResolution)});
+         scoreOrderCandidate(region, graph, candidate, archResolution,
+                             modelConfig)});
 
   for (unsigned i = 1; i < decision.candidates.size(); ++i) {
     const ScoreResult &best = decision.candidates[decision.selected].score;
@@ -854,6 +858,22 @@ struct WaveAMDMachineSchedulePass
   void runOnOperation() override {
     ModuleOp mod = getOperation();
     ArchResolution archResolution = resolveArch(mod);
+    waveamdmachine::EventSimConfig modelConfig;
+    if (modelWaves <= 0) {
+      mod.emitError() << "model-waves must be positive";
+      return signalPassFailure();
+    }
+    if (modelSimds <= 0) {
+      mod.emitError() << "model-simds must be positive";
+      return signalPassFailure();
+    }
+    if (modelStartDelay < 0) {
+      mod.emitError() << "model-start-delay must be non-negative";
+      return signalPassFailure();
+    }
+    modelConfig.waves = modelWaves;
+    modelConfig.simds = modelSimds;
+    modelConfig.startDelay = modelStartDelay;
     CandidateRequest candidate =
         getCandidateRequest(StringRef(scoreOrder), scoreRegion);
     bool emitScores = printScore || candidate.requested;
@@ -864,13 +884,14 @@ struct WaveAMDMachineSchedulePass
         return;
       SmallVector<ScheduleRegion> regions = RegionCollector(func).collect();
       for (const ScheduleRegion &region : regions)
-        processRegion(region, archResolution, candidate, scoreFuncName,
-                      emitScores, runScheduler);
+        processRegion(region, archResolution, modelConfig, candidate,
+                      scoreFuncName, emitScores, runScheduler);
     });
   }
 
   void processRegion(const ScheduleRegion &region,
                      ArchResolution archResolution,
+                     const waveamdmachine::EventSimConfig &modelConfig,
                      const CandidateRequest &candidate, StringRef scoreFuncName,
                      bool emitScores, bool runScheduler) {
     bool scoreCandidate =
@@ -884,17 +905,18 @@ struct WaveAMDMachineSchedulePass
     if (printDeps)
       printDependences(region, graph);
     if (emitScores)
-      printRegionScores(region, graph, archResolution, candidate,
+      printRegionScores(region, graph, archResolution, modelConfig, candidate,
                         scoreCandidate);
     if (runScheduler)
-      processScheduler(region, graph, archResolution);
+      processScheduler(region, graph, archResolution, modelConfig);
   }
 
   void processScheduler(const ScheduleRegion &region,
                         const DependenceGraph &graph,
-                        ArchResolution archResolution) {
+                        ArchResolution archResolution,
+                        const waveamdmachine::EventSimConfig &modelConfig) {
     ScheduleDecision decision =
-        evaluateScheduleCandidates(region, graph, archResolution);
+        evaluateScheduleCandidates(region, graph, archResolution, modelConfig);
     bool willApply = applySchedule && shouldApplyDecision(decision);
     if (printCandidates) {
       printCandidateDiagnostics(region, decision);

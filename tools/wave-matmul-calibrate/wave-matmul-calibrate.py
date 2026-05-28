@@ -29,6 +29,7 @@ class Variant:
     name: str
     insert_pingpong: bool
     apply_schedule: bool
+    schedule_model: str = "single"
 
 
 @dataclass
@@ -55,6 +56,12 @@ class VariantResult:
 VARIANTS = {
     "baseline": Variant("baseline", insert_pingpong=False, apply_schedule=False),
     "scheduled": Variant("scheduled", insert_pingpong=False, apply_schedule=True),
+    "scheduled_multiwave": Variant(
+        "scheduled_multiwave",
+        insert_pingpong=False,
+        apply_schedule=True,
+        schedule_model="multi",
+    ),
     "pingpong": Variant("pingpong", insert_pingpong=True, apply_schedule=False),
 }
 
@@ -139,7 +146,56 @@ def generate_kernel_module(args: argparse.Namespace, chip: str) -> str:
     )
 
 
-def pipeline_text(*, insert_pingpong: bool, apply_schedule: bool) -> str:
+def waves_per_workgroup(args: argparse.Namespace) -> int:
+    return args.bm * args.bn
+
+
+def spread_simds(args: argparse.Namespace) -> int:
+    return min(max(waves_per_workgroup(args), 1), 4)
+
+
+def sim_report_specs(args: argparse.Namespace) -> list[tuple[int, int, int]]:
+    waves = waves_per_workgroup(args)
+    specs = [(1, 1, 0), (waves, 1, 0), (waves, spread_simds(args), 0)]
+    out: list[tuple[int, int, int]] = []
+    seen: set[tuple[int, int, int]] = set()
+    for spec in specs:
+        if spec in seen:
+            continue
+        out.append(spec)
+        seen.add(spec)
+    return out
+
+
+def schedule_pass_options(
+    variant: Variant, args: argparse.Namespace
+) -> dict[str, bool | int]:
+    if not variant.apply_schedule:
+        return {}
+    options: dict[str, bool | int] = {"apply-schedule": True}
+    if variant.schedule_model == "multi":
+        options["model-waves"] = waves_per_workgroup(args)
+        options["model-simds"] = spread_simds(args)
+        options["model-start-delay"] = 0
+    elif variant.schedule_model != "single":
+        sys.exit(f"unknown schedule model: {variant.schedule_model}")
+    return options
+
+
+def format_pass_options(options: dict[str, bool | int]) -> str:
+    pieces: list[str] = []
+    for name, value in options.items():
+        if isinstance(value, bool):
+            value_text = "true" if value else "false"
+        else:
+            value_text = str(value)
+        pieces.append(f'"{name}" = {value_text}')
+    return ", ".join(pieces)
+
+
+def pipeline_text(
+    *, insert_pingpong: bool, schedule_options: dict[str, bool | int]
+) -> str:
     insert = ""
     if insert_pingpong:
         insert = (
@@ -148,11 +204,12 @@ def pipeline_text(*, insert_pingpong: bool, apply_schedule: bool) -> str:
         )
     schedule = ""
     wait_input = "%r2"
-    if apply_schedule:
+    if schedule_options:
+        option_text = format_pass_options(schedule_options)
         schedule = (
             '    %rs = transform.apply_registered_pass "waveamd-machine-schedule" '
             "with\n"
-            '        options = { "apply-schedule" = true }\n'
+            f"        options = {{ {option_text} }}\n"
             "        to %r2 : (!transform.any_op) -> !transform.any_op\n"
         )
         wait_input = "%rs"
@@ -191,13 +248,13 @@ def pipeline_text(*, insert_pingpong: bool, apply_schedule: bool) -> str:
 """
 
 
-def write_pipeline(tmp: Path, variant: Variant) -> Path:
+def write_pipeline(tmp: Path, variant: Variant, args: argparse.Namespace) -> Path:
     path = tmp / variant.name / "pipelines.mlir"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         pipeline_text(
             insert_pingpong=variant.insert_pingpong,
-            apply_schedule=variant.apply_schedule,
+            schedule_options=schedule_pass_options(variant, args),
         )
     )
     return path
@@ -285,14 +342,9 @@ def run_sim_reports(
     build_dir: Path, machine_mlir: Path, args: argparse.Namespace
 ) -> dict[tuple[int, int, int], int]:
     wave_sim = build_dir / "bin/wave-sim-report"
-    waves_per_workgroup = args.bm * args.bn
     trip_count = compute_loop_trip_count(args)
-    specs = [(1, 1, 0), (waves_per_workgroup, 1, 0)]
-    spread_simds = min(max(waves_per_workgroup, 1), 4)
-    if spread_simds != 1:
-        specs.append((waves_per_workgroup, spread_simds, 0))
     out: dict[tuple[int, int, int], int] = {}
-    for waves, simds, delay in specs:
+    for waves, simds, delay in sim_report_specs(args):
         text = run(
             [
                 str(wave_sim),
@@ -387,7 +439,7 @@ def run_variant(
     runner: Path | None,
     tmp: Path,
 ) -> VariantResult:
-    pipeline = write_pipeline(tmp, variant)
+    pipeline = write_pipeline(tmp, variant, args)
     machine = lower_machine(args.build_dir, source, pipeline, tmp, variant.name)
     sim_cycles = run_sim_reports(args.build_dir, machine, args)
     if runner is None:
@@ -485,7 +537,10 @@ def build_argparser() -> argparse.ArgumentParser:
         "--variants",
         type=parse_variants,
         default=parse_variants("baseline,scheduled"),
-        help="comma-separated variants: baseline, scheduled, pingpong",
+        help=(
+            "comma-separated variants: baseline, scheduled, "
+            "scheduled_multiwave, pingpong"
+        ),
     )
     ap.add_argument("--skip-hw", action="store_true")
     ap.add_argument("--no-check", action="store_true")
