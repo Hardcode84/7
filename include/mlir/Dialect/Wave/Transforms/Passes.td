@@ -76,18 +76,63 @@ def WaveAMDTicketWaits
 
 def WaveAMDMachineSchedule
     : Pass<"waveamd-machine-schedule", "ModuleOp"> {
-  let summary = "Collect local WaveAMDMachine regions for model-based scheduling";
+  let summary = "Apply model-based local WaveAMDMachine scheduling";
   let description = [{
-    Scheduler entry pass. The default mode is a no-op over
-    `waveamdmachine` IR: it only discovers local scheduling regions so future
-    implementations can add dependence tracking and model-scored
-    reordering.
+    Scheduler pass over `waveamdmachine` IR. The default mode is a no-op; with
+    `apply-schedule`, it discovers local scheduling regions, ranks legal
+    candidate orders with the event simulator and pressure policy, and rewrites
+    the region when the selected order is non-original.
 
     Intended placement is before ticket-wait and hazard-wait insertion. Hard
     boundaries include terminators, labels, branches, waitcnts, workgroup
     barriers, priority changes, region-bearing ops, and unsupported
     side-effecting ops. `uniform_loop` bodies are scanned as nested local
     regions, but the loop op itself is never part of an outer region.
+  }];
+  let dependentDialects = [
+    "func::FuncDialect",
+    "waveamdmachine::WaveAMDMachineDialect"
+  ];
+  let options = [
+    Option<"applySchedule", "apply-schedule", "bool", /*default=*/"false",
+           "Apply the best non-worse model-scored local schedule.">,
+    Option<"pressureAwareSelection", "pressure-aware-selection", "bool", /*default=*/"false",
+           "Use register-pressure budgets to select scheduler candidates.">,
+    Option<"modelWaves", "model-waves", "int", /*default=*/"1",
+           "Wave count used by model-scored local scheduling.">,
+    Option<"modelSimds", "model-simds", "int", /*default=*/"1",
+           "SIMD count used by model-scored local scheduling.">,
+    Option<"modelStartDelay", "model-start-delay", "int", /*default=*/"0",
+           "Cycle delay between modeled waves.">,
+    Option<"modelVmemValueLatency", "model-vmem-value-latency", "int", /*default=*/"-1",
+           "VMEM-load value-ready latency used by model-scored local scheduling.">,
+    Option<"modelSmemValueLatency", "model-smem-value-latency", "int", /*default=*/"-1",
+           "SMEM-load value-ready latency used by model-scored local scheduling.">,
+    Option<"modelLdsValueLatency", "model-lds-value-latency", "int", /*default=*/"-1",
+           "LDS-load value-ready latency used by model-scored local scheduling.">,
+    Option<"pressureVgprBudget", "pressure-vgpr-budget", "int", /*default=*/"-1",
+           "Hard VGPR budget for scheduler pressure policy; -1 disables hard-budget rejection.">,
+    Option<"pressureSgprBudget", "pressure-sgpr-budget", "int", /*default=*/"-1",
+           "Hard SGPR budget for scheduler pressure policy; -1 disables hard-budget rejection.">,
+    Option<"pressureCriticalVgprBudget", "pressure-critical-vgpr-budget", "int", /*default=*/"-1",
+           "Critical VGPR budget for scheduler pressure policy; -1 disables critical-pressure ranking.">,
+    Option<"pressureCriticalSgprBudget", "pressure-critical-sgpr-budget", "int", /*default=*/"-1",
+           "Critical SGPR budget for scheduler pressure policy; -1 disables critical-pressure ranking.">,
+    Option<"pressureTargetWaves", "pressure-target-waves", "int", /*default=*/"0",
+           "Target waves per SIMD for derived VGPR critical budget; 0 uses the target maximum, -1 disables derivation.">
+  ];
+}
+
+def WaveAMDMachineScheduleReport
+    : Pass<"waveamd-machine-schedule-report", "ModuleOp"> {
+  let summary = "Print WaveAMDMachine scheduler diagnostics";
+  let description = [{
+    Non-mutating diagnostics pass for the machine scheduler. It shares region
+    discovery, dependence construction, scoring, candidate generation, and
+    pressure measurement with `waveamd-machine-schedule`.
+
+    Reports that need pressure clone the function before regalloc preparation,
+    so the input IR is not rewritten.
   }];
   let dependentDialects = [
     "func::FuncDialect",
@@ -102,8 +147,6 @@ def WaveAMDMachineSchedule
            "Print event-simulator scores for local scheduling regions.">,
     Option<"printCandidates", "print-candidates", "bool", /*default=*/"false",
            "Print model-scored scheduler candidate orders to stderr.">,
-    Option<"applySchedule", "apply-schedule", "bool", /*default=*/"false",
-           "Apply the best non-worse model-scored local schedule.">,
     Option<"pressureAwareSelection", "pressure-aware-selection", "bool", /*default=*/"false",
            "Use register-pressure budgets to select scheduler candidates.">,
     Option<"modelWaves", "model-waves", "int", /*default=*/"1",

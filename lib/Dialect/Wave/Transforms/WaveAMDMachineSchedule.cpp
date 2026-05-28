@@ -34,111 +34,30 @@ using namespace mlir::wave;
 
 namespace {
 
-static bool isValidLatencyOverride(int value) { return value >= -1; }
-
 struct WaveAMDMachineSchedulePass
     : public wave::impl::WaveAMDMachineScheduleBase<
           WaveAMDMachineSchedulePass> {
   using WaveAMDMachineScheduleBase::WaveAMDMachineScheduleBase;
 
-  LogicalResult configureModel(ModuleOp mod,
-                               waveamdmachine::EventSimConfig &modelConfig) {
-    if (modelWaves <= 0) {
-      mod.emitError() << "model-waves must be positive";
-      return failure();
-    }
-    if (modelSimds <= 0) {
-      mod.emitError() << "model-simds must be positive";
-      return failure();
-    }
-    if (modelStartDelay < 0) {
-      mod.emitError() << "model-start-delay must be non-negative";
-      return failure();
-    }
-    if (!isValidLatencyOverride(modelVmemValueLatency) ||
-        !isValidLatencyOverride(modelSmemValueLatency) ||
-        !isValidLatencyOverride(modelLdsValueLatency)) {
-      mod.emitError() << "model value latencies must be -1 or non-negative";
-      return failure();
-    }
-    modelConfig.waves = modelWaves;
-    modelConfig.simds = modelSimds;
-    modelConfig.startDelay = modelStartDelay;
-    modelConfig.valueLatencies.vmemLoad = modelVmemValueLatency;
-    modelConfig.valueLatencies.smemLoad = modelSmemValueLatency;
-    modelConfig.valueLatencies.lds = modelLdsValueLatency;
-    return success();
-  }
-
-  LogicalResult configurePressureBudgets(ModuleOp mod,
-                                         ArchResolution archResolution,
-                                         RegisterPressureBudgets &budgets) {
-    if (failed(validatePressureOptions(mod, archResolution)))
-      return failure();
-    copyPressureBudgets(budgets);
-    if (failed(applyDerivedCriticalBudget(archResolution, budgets)))
-      return failure();
-    budgets.selectionEnabled =
-        pressureAwareSelection &&
-        (hasHardBudget(budgets) || hasCriticalBudget(budgets));
-    return success();
-  }
-
-  LogicalResult validatePressureOptions(ModuleOp mod,
-                                        ArchResolution archResolution) {
-    if (pressureVgprBudget < -1 || pressureSgprBudget < -1 ||
-        pressureCriticalVgprBudget < -1 || pressureCriticalSgprBudget < -1 ||
-        pressureTargetWaves < -1) {
-      mod.emitError() << "pressure budgets must be -1 or non-negative";
-      return failure();
-    }
-    if (pressureTargetWaves > 0 && archResolution.arch &&
-        pressureTargetWaves > archResolution.arch->wavesPerSIMD) {
-      mod.emitError() << "pressure-target-waves exceeds target wave capacity";
-      return failure();
-    }
-    return success();
-  }
-
-  void copyPressureBudgets(RegisterPressureBudgets &budgets) {
-    budgets.hardVGPR = pressureVgprBudget;
-    budgets.hardSGPR = pressureSgprBudget;
-    budgets.criticalVGPR = pressureCriticalVgprBudget;
-    budgets.criticalSGPR = pressureCriticalSgprBudget;
-  }
-
-  LogicalResult applyDerivedCriticalBudget(ArchResolution archResolution,
-                                           RegisterPressureBudgets &budgets) {
-    if (!(pressureAwareSelection && budgets.criticalVGPR < 0 &&
-          pressureTargetWaves >= 0 && archResolution.arch))
-      return success();
-    FailureOr<int> derived =
-        deriveCriticalVGPRBudget(*archResolution.arch, pressureTargetWaves);
-    if (failed(derived))
-      return failure();
-    budgets.criticalVGPR = *derived;
-    return success();
-  }
-
   void runOnOperation() override {
     ModuleOp mod = getOperation();
     ArchResolution archResolution = resolveArch(mod);
     waveamdmachine::EventSimConfig modelConfig;
-    if (failed(configureModel(mod, modelConfig)))
+    if (failed(configureScheduleModel(
+            mod, modelWaves, modelSimds, modelStartDelay, modelVmemValueLatency,
+            modelSmemValueLatency, modelLdsValueLatency, modelConfig)))
       return signalPassFailure();
     RegisterPressureBudgets pressureBudgets;
-    if (failed(configurePressureBudgets(mod, archResolution, pressureBudgets)))
+    if (failed(configureSchedulePressureBudgets(
+            mod, archResolution, pressureAwareSelection, pressureVgprBudget,
+            pressureSgprBudget, pressureCriticalVgprBudget,
+            pressureCriticalSgprBudget, pressureTargetWaves, pressureBudgets)))
       return signalPassFailure();
-    CandidateRequest candidate =
-        getCandidateRequest(StringRef(scoreOrder), scoreRegion);
-    bool emitScores = printScore || candidate.requested;
-    bool runScheduler = printCandidates || applySchedule;
-    bool measurePressure = emitScores || runScheduler;
-    StringRef scoreFuncName(scoreFunc);
+    if (!applySchedule)
+      return;
     WalkResult walkResult = mod.walk([&](func::FuncOp func) {
       if (failed(processFunction(func, archResolution, modelConfig,
-                                 pressureBudgets, candidate, scoreFuncName,
-                                 emitScores, runScheduler, measurePressure)))
+                                 pressureBudgets)))
         return WalkResult::interrupt();
       return WalkResult::advance();
     });
@@ -149,42 +68,24 @@ struct WaveAMDMachineSchedulePass
   LogicalResult
   processFunction(func::FuncOp func, ArchResolution archResolution,
                   const waveamdmachine::EventSimConfig &modelConfig,
-                  const RegisterPressureBudgets &pressureBudgets,
-                  const CandidateRequest &candidate, StringRef scoreFuncName,
-                  bool emitScores, bool runScheduler, bool measurePressure) {
+                  const RegisterPressureBudgets &pressureBudgets) {
     if (func.isExternal())
       return success();
-    if (measurePressure && failed(wave::prepareWaveAMDRegAllocIR(func)))
+    if (failed(wave::prepareWaveAMDRegAllocIR(func)))
       return failure();
     SmallVector<ScheduleRegion> regions = collectScheduleRegions(func);
     for (const ScheduleRegion &region : regions)
-      processRegion(region, archResolution, modelConfig, pressureBudgets,
-                    candidate, scoreFuncName, emitScores, runScheduler);
+      processRegion(region, archResolution, modelConfig, pressureBudgets);
     return success();
   }
 
   void processRegion(const ScheduleRegion &region,
                      ArchResolution archResolution,
                      const waveamdmachine::EventSimConfig &modelConfig,
-                     const RegisterPressureBudgets &pressureBudgets,
-                     const CandidateRequest &candidate, StringRef scoreFuncName,
-                     bool emitScores, bool runScheduler) {
-    bool scoreCandidate =
-        candidate.requested &&
-        shouldScoreCandidate(region, scoreFuncName, scoreRegion);
-    DependenceGraph graph;
-    if (printDeps || scoreCandidate || runScheduler)
-      graph = buildDependenceGraph(region);
-    if (printRegions)
-      printRegion(region);
-    if (printDeps)
-      printDependences(region, graph);
-    if (emitScores)
-      printRegionScores(region, graph, archResolution, modelConfig,
-                        pressureBudgets, candidate, scoreCandidate);
-    if (runScheduler)
-      processScheduler(region, graph, archResolution, modelConfig,
-                       pressureBudgets);
+                     const RegisterPressureBudgets &pressureBudgets) {
+    DependenceGraph graph = buildDependenceGraph(region);
+    processScheduler(region, graph, archResolution, modelConfig,
+                     pressureBudgets);
   }
 
   void processScheduler(const ScheduleRegion &region,
@@ -196,10 +97,6 @@ struct WaveAMDMachineSchedulePass
         region, graph, archResolution, modelConfig, pressureBudgets);
     bool willApply =
         applySchedule && shouldApplyDecision(decision, pressureBudgets);
-    if (printCandidates) {
-      printCandidateDiagnostics(region, decision, pressureBudgets);
-      printScheduleDecision(region, decision, willApply);
-    }
     if (willApply)
       applyScheduleOrder(region, decision.candidates[decision.selected].order);
   }

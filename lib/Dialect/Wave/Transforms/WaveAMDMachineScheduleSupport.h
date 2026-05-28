@@ -15,6 +15,7 @@
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/Operation.h"
 #include "mlir/Support/LLVM.h"
+#include "mlir/Support/LogicalResult.h"
 #include "llvm/Support/raw_ostream.h"
 
 #include <cstdint>
@@ -115,6 +116,16 @@ bool hasCriticalBudget(RegisterPressureBudgets budgets);
 bool hasHardBudget(RegisterPressureBudgets budgets);
 FailureOr<int> deriveCriticalVGPRBudget(const waveamdmachine::ArchData &arch,
                                         int targetWaves);
+LogicalResult
+configureScheduleModel(ModuleOp mod, int modelWaves, int modelSimds,
+                       int modelStartDelay, int modelVmemValueLatency,
+                       int modelSmemValueLatency, int modelLdsValueLatency,
+                       waveamdmachine::EventSimConfig &modelConfig);
+LogicalResult configureSchedulePressureBudgets(
+    ModuleOp mod, ArchResolution archResolution, bool pressureAwareSelection,
+    int pressureVgprBudget, int pressureSgprBudget,
+    int pressureCriticalVgprBudget, int pressureCriticalSgprBudget,
+    int pressureTargetWaves, RegisterPressureBudgets &budgets);
 
 CandidateMetrics evaluateOps(const ScheduleRegion &region,
                              ArrayRef<Operation *> ops,

@@ -1,4 +1,4 @@
-// RUN: wave-opt %s --waveamd-machine-schedule='print-score=1' 2>&1 | FileCheck %s
+// RUN: wave-opt %s --waveamd-machine-schedule-report='print-score=1' 2>&1 | FileCheck %s
 
 module {
 func.func @missing_target(%a: !waveamdmachine.reg<vgpr, 1>,
@@ -8,4 +8,4 @@ func.func @missing_target(%a: !waveamdmachine.reg<vgpr, 1>,
 }
 }
 
-// CHECK: waveamd-machine-schedule score func=missing_target region=0 order=original fallback=original reason=missing_target
+// CHECK: waveamd-machine-schedule-report score func=missing_target region=0 order=original fallback=original reason=missing_target

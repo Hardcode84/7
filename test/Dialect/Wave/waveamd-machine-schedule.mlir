@@ -1,7 +1,7 @@
 // RUN: wave-opt %s --waveamd-machine-schedule | FileCheck %s --check-prefix=NOOP
-// RUN: wave-opt %s --waveamd-machine-schedule='print-regions=1' 2>&1 | FileCheck %s --check-prefix=REGION
-// RUN: wave-opt %s --waveamd-machine-schedule='print-deps=1' 2>&1 | FileCheck %s --check-prefix=DEPS
-// RUN: wave-opt %s --waveamd-machine-schedule='print-score=1' 2>&1 | FileCheck %s --check-prefix=SCORE
+// RUN: wave-opt %s --waveamd-machine-schedule-report='print-regions=1' 2>&1 | FileCheck %s --check-prefix=REGION
+// RUN: wave-opt %s --waveamd-machine-schedule-report='print-deps=1' 2>&1 | FileCheck %s --check-prefix=DEPS
+// RUN: wave-opt %s --waveamd-machine-schedule-report='print-score=1' 2>&1 | FileCheck %s --check-prefix=SCORE
 // RUN: wave-opt %s --pass-pipeline='builtin.module(transform-interpreter)' | FileCheck %s --check-prefix=APPLY
 
 module attributes {transform.with_named_sequence,
@@ -86,26 +86,26 @@ transform.named_sequence @__transform_main(%root: !transform.any_op {transform.c
 }
 }
 
-// REGION: waveamd-machine-schedule region func=regions block=0 region=0 ops=4 first=waveamdmachine.imm last=waveamdmachine.v_add_u32
-// REGION: waveamd-machine-schedule region func=regions block=0 region=1 ops=1 first=waveamdmachine.v_add_u32 last=waveamdmachine.v_add_u32
-// REGION: waveamd-machine-schedule region func=regions block=1 region=2 ops=3 first=waveamdmachine.s_add_i32 last=waveamdmachine.s_cmp_lt_i32
-// REGION: waveamd-machine-schedule region func=regions block=0 region=3 ops=1 first=waveamdmachine.v_add_u32 last=waveamdmachine.v_add_u32
-// REGION: waveamd-machine-schedule region func=hard_boundaries block=0 region=0 ops=1 first=waveamdmachine.v_add_u32 last=waveamdmachine.v_add_u32
-// REGION: waveamd-machine-schedule region func=hard_boundaries block=0 region=1 ops=1 first=waveamdmachine.v_add_u32 last=waveamdmachine.v_add_u32
-// REGION: waveamd-machine-schedule region func=hard_boundaries block=0 region=2 ops=1 first=waveamdmachine.v_add_u32 last=waveamdmachine.v_add_u32
+// REGION: waveamd-machine-schedule-report region func=regions block=0 region=0 ops=4 first=waveamdmachine.imm last=waveamdmachine.v_add_u32
+// REGION: waveamd-machine-schedule-report region func=regions block=0 region=1 ops=1 first=waveamdmachine.v_add_u32 last=waveamdmachine.v_add_u32
+// REGION: waveamd-machine-schedule-report region func=regions block=1 region=2 ops=3 first=waveamdmachine.s_add_i32 last=waveamdmachine.s_cmp_lt_i32
+// REGION: waveamd-machine-schedule-report region func=regions block=0 region=3 ops=1 first=waveamdmachine.v_add_u32 last=waveamdmachine.v_add_u32
+// REGION: waveamd-machine-schedule-report region func=hard_boundaries block=0 region=0 ops=1 first=waveamdmachine.v_add_u32 last=waveamdmachine.v_add_u32
+// REGION: waveamd-machine-schedule-report region func=hard_boundaries block=0 region=1 ops=1 first=waveamdmachine.v_add_u32 last=waveamdmachine.v_add_u32
+// REGION: waveamd-machine-schedule-report region func=hard_boundaries block=0 region=2 ops=1 first=waveamdmachine.v_add_u32 last=waveamdmachine.v_add_u32
 
-// DEPS: waveamd-machine-schedule deps func=regions region=0 nodes=4
-// DEPS: waveamd-machine-schedule edge region=0 kind=ssa 2->3 src=waveamdmachine.v_add_u32 dst=waveamdmachine.v_add_u32
-// DEPS: waveamd-machine-schedule deps func=regions region=2 nodes=3
-// DEPS: waveamd-machine-schedule edge region=2 kind=ssa 1->2 src=waveamdmachine.s_add_i32 dst=waveamdmachine.s_cmp_lt_i32
-// DEPS: waveamd-machine-schedule edge region=2 kind=loop_carry recurrence 1->0 src=waveamdmachine.s_add_i32 dst=waveamdmachine.s_add_i32
-// DEPS: waveamd-machine-schedule deps func=memory_edges region=0 nodes=5 edges=4
-// DEPS: waveamd-machine-schedule edge region=0 kind=mem_token 0->1 src=waveamdmachine.token dst=waveamdmachine.global_load_b32
-// DEPS: waveamd-machine-schedule edge region=0 kind=ssa 1->2 src=waveamdmachine.global_load_b32 dst=waveamdmachine.v_add_u32
-// DEPS: waveamd-machine-schedule edge region=0 kind=mem_token 1->3 src=waveamdmachine.global_load_b32 dst=waveamdmachine.global_store_b32
+// DEPS: waveamd-machine-schedule-report deps func=regions region=0 nodes=4
+// DEPS: waveamd-machine-schedule-report edge region=0 kind=ssa 2->3 src=waveamdmachine.v_add_u32 dst=waveamdmachine.v_add_u32
+// DEPS: waveamd-machine-schedule-report deps func=regions region=2 nodes=3
+// DEPS: waveamd-machine-schedule-report edge region=2 kind=ssa 1->2 src=waveamdmachine.s_add_i32 dst=waveamdmachine.s_cmp_lt_i32
+// DEPS: waveamd-machine-schedule-report edge region=2 kind=loop_carry recurrence 1->0 src=waveamdmachine.s_add_i32 dst=waveamdmachine.s_add_i32
+// DEPS: waveamd-machine-schedule-report deps func=memory_edges region=0 nodes=5 edges=4
+// DEPS: waveamd-machine-schedule-report edge region=0 kind=mem_token 0->1 src=waveamdmachine.token dst=waveamdmachine.global_load_b32
+// DEPS: waveamd-machine-schedule-report edge region=0 kind=ssa 1->2 src=waveamdmachine.global_load_b32 dst=waveamdmachine.v_add_u32
+// DEPS: waveamd-machine-schedule-report edge region=0 kind=mem_token 1->3 src=waveamdmachine.global_load_b32 dst=waveamdmachine.global_store_b32
 // DEPS-NOT: kind=memory_order
 
-// SCORE: waveamd-machine-schedule score func=regions region=0 order=original cycles=
+// SCORE: waveamd-machine-schedule-report score func=regions region=0 order=original cycles=
 // SCORE-SAME: issued_ops=2
-// SCORE: waveamd-machine-schedule score func=memory_edges region=0 order=original cycles=
+// SCORE: waveamd-machine-schedule-report score func=memory_edges region=0 order=original cycles=
 // SCORE-SAME: issued_ops=4

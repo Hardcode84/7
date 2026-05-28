@@ -28,6 +28,7 @@ using namespace mlir;
 namespace mlir::wave {
 
 namespace traits = ::mlir::OpTrait::waveamdmachine;
+static constexpr StringLiteral kDiagPrefix = "waveamd-machine-schedule-report";
 
 static bool isWaveAMDMachineOp(Operation *op) {
   return op->getName().getDialectNamespace() ==
@@ -156,8 +157,8 @@ SmallVector<ScheduleRegion> collectScheduleRegions(func::FuncOp func) {
 }
 
 void printRegion(ScheduleRegion region) {
-  llvm::errs() << "waveamd-machine-schedule region func="
-               << region.func.getSymName() << " block=" << region.blockOrdinal
+  llvm::errs() << kDiagPrefix << " region func=" << region.func.getSymName()
+               << " block=" << region.blockOrdinal
                << " region=" << region.regionOrdinal
                << " ops=" << region.opCount
                << " first=" << region.first->getName().getStringRef()
@@ -222,15 +223,14 @@ DependenceGraph buildDependenceGraph(const ScheduleRegion &region) {
 }
 
 void printDependences(ScheduleRegion region, const DependenceGraph &graph) {
-  llvm::errs() << "waveamd-machine-schedule deps func="
-               << region.func.getSymName() << " region=" << region.regionOrdinal
+  llvm::errs() << kDiagPrefix << " deps func=" << region.func.getSymName()
+               << " region=" << region.regionOrdinal
                << " nodes=" << region.ops.size()
                << " edges=" << graph.edges.size() << "\n";
   for (const ScheduleEdge &edge : graph.edges) {
     Operation *src = region.ops[edge.src];
     Operation *dst = region.ops[edge.dst];
-    llvm::errs() << "waveamd-machine-schedule edge region="
-                 << region.regionOrdinal
+    llvm::errs() << kDiagPrefix << " edge region=" << region.regionOrdinal
                  << " kind=" << getEdgeKindName(edge.kind);
     if (edge.recurrence)
       llvm::errs() << " recurrence";
@@ -306,6 +306,96 @@ FailureOr<int> deriveCriticalVGPRBudget(const waveamdmachine::ArchData &arch,
     return failure();
   int raw = arch.vgprFileSize / targetWaves;
   return (raw / arch.vgprAllocGranule) * arch.vgprAllocGranule;
+}
+
+static bool isValidLatencyOverride(int value) { return value >= -1; }
+
+LogicalResult
+configureScheduleModel(ModuleOp mod, int modelWaves, int modelSimds,
+                       int modelStartDelay, int modelVmemValueLatency,
+                       int modelSmemValueLatency, int modelLdsValueLatency,
+                       waveamdmachine::EventSimConfig &modelConfig) {
+  if (modelWaves <= 0) {
+    mod.emitError() << "model-waves must be positive";
+    return failure();
+  }
+  if (modelSimds <= 0) {
+    mod.emitError() << "model-simds must be positive";
+    return failure();
+  }
+  if (modelStartDelay < 0) {
+    mod.emitError() << "model-start-delay must be non-negative";
+    return failure();
+  }
+  if (!isValidLatencyOverride(modelVmemValueLatency) ||
+      !isValidLatencyOverride(modelSmemValueLatency) ||
+      !isValidLatencyOverride(modelLdsValueLatency)) {
+    mod.emitError() << "model value latencies must be -1 or non-negative";
+    return failure();
+  }
+  modelConfig.waves = modelWaves;
+  modelConfig.simds = modelSimds;
+  modelConfig.startDelay = modelStartDelay;
+  modelConfig.valueLatencies.vmemLoad = modelVmemValueLatency;
+  modelConfig.valueLatencies.smemLoad = modelSmemValueLatency;
+  modelConfig.valueLatencies.lds = modelLdsValueLatency;
+  return success();
+}
+
+static LogicalResult validatePressureOptions(
+    ModuleOp mod, ArchResolution archResolution, int pressureVgprBudget,
+    int pressureSgprBudget, int pressureCriticalVgprBudget,
+    int pressureCriticalSgprBudget, int pressureTargetWaves) {
+  if (pressureVgprBudget < -1 || pressureSgprBudget < -1 ||
+      pressureCriticalVgprBudget < -1 || pressureCriticalSgprBudget < -1 ||
+      pressureTargetWaves < -1) {
+    mod.emitError() << "pressure budgets must be -1 or non-negative";
+    return failure();
+  }
+  if (pressureTargetWaves > 0 && archResolution.arch &&
+      pressureTargetWaves > archResolution.arch->wavesPerSIMD) {
+    mod.emitError() << "pressure-target-waves exceeds target wave capacity";
+    return failure();
+  }
+  return success();
+}
+
+static LogicalResult
+applyDerivedCriticalBudget(ArchResolution archResolution,
+                           bool pressureAwareSelection, int pressureTargetWaves,
+                           RegisterPressureBudgets &budgets) {
+  if (!(pressureAwareSelection && budgets.criticalVGPR < 0 &&
+        pressureTargetWaves >= 0 && archResolution.arch))
+    return success();
+  FailureOr<int> derived =
+      deriveCriticalVGPRBudget(*archResolution.arch, pressureTargetWaves);
+  if (failed(derived))
+    return failure();
+  budgets.criticalVGPR = *derived;
+  return success();
+}
+
+LogicalResult configureSchedulePressureBudgets(
+    ModuleOp mod, ArchResolution archResolution, bool pressureAwareSelection,
+    int pressureVgprBudget, int pressureSgprBudget,
+    int pressureCriticalVgprBudget, int pressureCriticalSgprBudget,
+    int pressureTargetWaves, RegisterPressureBudgets &budgets) {
+  if (failed(validatePressureOptions(
+          mod, archResolution, pressureVgprBudget, pressureSgprBudget,
+          pressureCriticalVgprBudget, pressureCriticalSgprBudget,
+          pressureTargetWaves)))
+    return failure();
+  budgets.hardVGPR = pressureVgprBudget;
+  budgets.hardSGPR = pressureSgprBudget;
+  budgets.criticalVGPR = pressureCriticalVgprBudget;
+  budgets.criticalSGPR = pressureCriticalSgprBudget;
+  if (failed(applyDerivedCriticalBudget(archResolution, pressureAwareSelection,
+                                        pressureTargetWaves, budgets)))
+    return failure();
+  budgets.selectionEnabled =
+      pressureAwareSelection &&
+      (hasHardBudget(budgets) || hasCriticalBudget(budgets));
+  return success();
 }
 
 static unsigned computeMaxPressure(ArrayRef<WaveAMDLiveInterval> intervals,
@@ -401,9 +491,8 @@ void printPressure(raw_ostream &os, const RegisterPressureResult &pressure,
 static void printScoreLine(ScheduleRegion region, StringRef orderName,
                            CandidateMetrics metrics,
                            const RegisterPressureBudgets &budgets) {
-  llvm::errs() << "waveamd-machine-schedule score func="
-               << region.func.getSymName() << " region=" << region.regionOrdinal
-               << " order=" << orderName;
+  llvm::errs() << kDiagPrefix << " score func=" << region.func.getSymName()
+               << " region=" << region.regionOrdinal << " order=" << orderName;
   if (metrics.score.supported) {
     llvm::errs() << " cycles=" << metrics.score.cycles
                  << " issued_ops=" << metrics.score.issuedOps;
@@ -882,8 +971,8 @@ void printCandidateDiagnostics(ScheduleRegion region,
                                const RegisterPressureBudgets &budgets) {
   ScoreResult original = decision.candidates.front().metrics.score;
   for (const EvaluatedCandidate &candidate : decision.candidates) {
-    llvm::errs() << "waveamd-machine-schedule candidate func="
-                 << region.func.getSymName()
+    llvm::errs() << kDiagPrefix
+                 << " candidate func=" << region.func.getSymName()
                  << " region=" << region.regionOrdinal
                  << " name=" << candidate.name;
     if (candidate.metrics.score.supported) {
@@ -907,8 +996,8 @@ void printScheduleDecision(ScheduleRegion region,
                            const ScheduleDecision &decision, bool willApply) {
   const EvaluatedCandidate &selected = decision.candidates[decision.selected];
   ScoreResult original = decision.candidates.front().metrics.score;
-  llvm::errs() << "waveamd-machine-schedule selected func="
-               << region.func.getSymName() << " region=" << region.regionOrdinal
+  llvm::errs() << kDiagPrefix << " selected func=" << region.func.getSymName()
+               << " region=" << region.regionOrdinal
                << " name=" << selected.name;
   if (selected.metrics.score.supported) {
     llvm::errs() << " original_cycles=" << original.cycles

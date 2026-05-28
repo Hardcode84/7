@@ -133,17 +133,12 @@ def generate_kernel_module(args: argparse.Namespace, chip: str) -> str:
     )
 
 
-def schedule_pass_options(
+def scheduler_policy_options(
     variant: Variant, args: argparse.Namespace
 ) -> dict[str, bool | int]:
     if not variant.apply_schedule:
         return {}
-    options: dict[str, bool | int] = {
-        "apply-schedule": True,
-        "print-candidates": args.print_candidates,
-        "print-score": args.print_score,
-        "print-regions": args.print_regions,
-    }
+    options: dict[str, bool | int] = {}
     if not args.no_pressure_aware_schedule:
         options["pressure-aware-selection"] = True
         options["pressure-target-waves"] = args.pressure_target_waves
@@ -154,6 +149,32 @@ def schedule_pass_options(
     elif variant.schedule_model != "single":
         sys.exit(f"unknown schedule model: {variant.schedule_model}")
     return {name: value for name, value in options.items() if value is not False}
+
+
+def schedule_pass_options(
+    variant: Variant, args: argparse.Namespace
+) -> dict[str, bool | int]:
+    if not variant.apply_schedule:
+        return {}
+    return {"apply-schedule": True, **scheduler_policy_options(variant, args)}
+
+
+def schedule_report_options(
+    variant: Variant, args: argparse.Namespace
+) -> dict[str, bool | int]:
+    if not variant.apply_schedule:
+        return {}
+    report_options: dict[str, bool | int] = {
+        "print-candidates": args.print_candidates,
+        "print-score": args.print_score,
+        "print-regions": args.print_regions,
+    }
+    report_options = {
+        name: value for name, value in report_options.items() if value is not False
+    }
+    if not report_options:
+        return {}
+    return {**report_options, **scheduler_policy_options(variant, args)}
 
 
 def format_pass_options(options: dict[str, bool | int]) -> str:
@@ -167,16 +188,32 @@ def format_pass_options(options: dict[str, bool | int]) -> str:
     return ", ".join(pieces)
 
 
-def pipeline_text(schedule_options: dict[str, bool | int]) -> str:
+def pipeline_text(
+    schedule_options: dict[str, bool | int],
+    report_options: dict[str, bool | int],
+) -> str:
+    report = ""
     schedule = ""
-    wait_input = "%r2"
+    schedule_input = "%r2"
+    wait_input = schedule_input
+    if report_options:
+        option_text = format_pass_options(report_options)
+        report = (
+            "    %rr = transform.apply_registered_pass "
+            '"waveamd-machine-schedule-report" '
+            "with\n"
+            f"        options = {{ {option_text} }}\n"
+            f"        to {schedule_input} : (!transform.any_op) -> !transform.any_op\n"
+        )
+        schedule_input = "%rr"
+        wait_input = schedule_input
     if schedule_options:
         option_text = format_pass_options(schedule_options)
         schedule = (
             '    %rs = transform.apply_registered_pass "waveamd-machine-schedule" '
             "with\n"
             f"        options = {{ {option_text} }}\n"
-            "        to %r2 : (!transform.any_op) -> !transform.any_op\n"
+            f"        to {schedule_input} : (!transform.any_op) -> !transform.any_op\n"
         )
         wait_input = "%rs"
     ticket_wait = (
@@ -198,7 +235,7 @@ def pipeline_text(schedule_options: dict[str, bool | int]) -> str:
         : (!transform.any_op) -> !transform.any_op
     %r2 = transform.apply_registered_pass "waveamd-decompose-mem-tuples" to %r1
         : (!transform.any_op) -> !transform.any_op
-{schedule}{ticket_wait}
+{report}{schedule}{ticket_wait}
         : (!transform.any_op) -> !transform.any_op
     %r4 = transform.apply_registered_pass "waveamd-insert-hazard-waits" to %r3
         : (!transform.any_op) -> !transform.any_op
@@ -217,7 +254,12 @@ def pipeline_text(schedule_options: dict[str, bool | int]) -> str:
 def write_pipeline(tmp: Path, variant: Variant, args: argparse.Namespace) -> Path:
     path = tmp / variant.name / "pipelines.mlir"
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(pipeline_text(schedule_pass_options(variant, args)))
+    path.write_text(
+        pipeline_text(
+            schedule_pass_options(variant, args),
+            schedule_report_options(variant, args),
+        )
+    )
     return path
 
 

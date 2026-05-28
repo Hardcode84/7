@@ -748,8 +748,13 @@ single region.
 - Genetic / beam search for small kernels (autotune via
   `wave.transform.tune`).
 
-**Deliverable.** `wave-amd-machine-schedule` pass; output is the
-reordered func. Plug into the transform-dialect pipeline.
+**Deliverable.** `waveamd-machine-schedule` applies the selected
+order. `waveamd-machine-schedule-report` prints regions, deps,
+scores, candidate orders, and pressure without mutating IR.
+
+Command split:
+- apply: `wave-opt --waveamd-machine-schedule='apply-schedule=1'`
+- inspect: `wave-opt --waveamd-machine-schedule-report='print-candidates=1'`
 
 **Risk.** Correctness around `s_setprio` / waitcnt pairs --
 reordering across them is unsafe. Mitigation: mark these as
