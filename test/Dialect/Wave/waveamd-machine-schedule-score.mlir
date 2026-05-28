@@ -1,4 +1,5 @@
 // RUN: wave-opt %s --waveamd-machine-schedule='score-func=candidate_lower score-region=0 score-order=0,2,1,3' 2>&1 | FileCheck %s --check-prefix=LOWER
+// RUN: wave-opt %s --waveamd-machine-schedule='score-func=candidate_lower score-region=0 score-order=0,2,1,3 model-vmem-value-latency=20' 2>&1 | FileCheck %s --check-prefix=LOWER-VALUE
 // RUN: wave-opt %s --waveamd-machine-schedule='score-func=candidate_lower score-region=0 score-order=0,2,1,3 model-waves=4 model-simds=4 model-start-delay=0' 2>&1 | FileCheck %s --check-prefix=LOWER-MW
 // RUN: wave-opt %s --waveamd-machine-schedule='score-func=candidate_greater score-region=0 score-order=0,2,1,3' 2>&1 | FileCheck %s --check-prefix=GREATER
 // RUN: wave-opt %s --waveamd-machine-schedule='score-func=candidate_equal score-region=0 score-order=1,0' 2>&1 | FileCheck %s --check-prefix=EQUAL
@@ -63,6 +64,9 @@ func.func @wmma_latency(%a: !waveamdmachine.reg<vgpr, 8>,
 
 // LOWER: waveamd-machine-schedule score func=candidate_lower region=0 order=original cycles=326 issued_ops=3
 // LOWER: waveamd-machine-schedule score func=candidate_lower region=0 order=candidate cycles=325 issued_ops=3
+
+// LOWER-VALUE: waveamd-machine-schedule score func=candidate_lower region=0 order=original cycles=26 issued_ops=3
+// LOWER-VALUE: waveamd-machine-schedule score func=candidate_lower region=0 order=candidate cycles=25 issued_ops=3
 
 // LOWER-MW: waveamd-machine-schedule score func=candidate_lower region=0 order=original cycles={{[0-9]+}} issued_ops=12
 // LOWER-MW: waveamd-machine-schedule score func=candidate_lower region=0 order=candidate cycles={{[0-9]+}} issued_ops=12

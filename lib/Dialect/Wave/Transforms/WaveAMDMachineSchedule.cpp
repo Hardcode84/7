@@ -23,6 +23,7 @@
 #include "mlir/Dialect/WaveAMDMachine/CostModel/EventSimulator.h"
 #include "mlir/Dialect/WaveAMDMachine/CostModel/FunctionalUnit.h"
 #include "mlir/Dialect/WaveAMDMachine/CostModel/LatencyTable.h"
+#include "mlir/Dialect/WaveAMDMachine/CostModel/MemoryCounterTiming.h"
 #include "mlir/Dialect/WaveAMDMachine/CostModel/OpClassifier.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachine.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineTraits.h"
@@ -562,11 +563,15 @@ static bool computeReachMatrix(unsigned node,
 
 static SmallVector<NodeMetrics, 16>
 computeNodeMetrics(const ScheduleRegion &region, const GraphTables &tables,
-                   const waveamdmachine::ArchData &arch) {
+                   const waveamdmachine::ArchData &arch,
+                   const waveamdmachine::EventSimConfig &modelConfig) {
   SmallVector<NodeMetrics, 16> metrics(region.ops.size());
   for (auto [index, op] : llvm::enumerate(region.ops)) {
     waveamdmachine::SchedClass cls = waveamdmachine::classifyOp(op);
     metrics[index].latency = waveamdmachine::getLatency(arch, cls);
+    if (waveamdmachine::hasMemoryValueLatency(op))
+      metrics[index].latency = waveamdmachine::getMemoryValueLatency(
+          arch, op, modelConfig.valueLatencies);
     metrics[index].memory = isMemoryIssuer(op);
     metrics[index].matrix = isMatrixOp(op);
   }
@@ -695,13 +700,14 @@ static void addPolicyCandidate(SmallVectorImpl<OrderCandidate> &candidates,
 static SmallVector<OrderCandidate, 4>
 buildScheduleCandidates(const ScheduleRegion &region,
                         const DependenceGraph &graph,
-                        const waveamdmachine::ArchData &arch) {
+                        const waveamdmachine::ArchData &arch,
+                        const waveamdmachine::EventSimConfig &modelConfig) {
   SmallVector<OrderCandidate, 4> candidates;
   candidates.push_back({"original", getOriginalOrder(region)});
 
   GraphTables tables = buildGraphTables(region, graph);
   SmallVector<NodeMetrics, 16> metrics =
-      computeNodeMetrics(region, tables, arch);
+      computeNodeMetrics(region, tables, arch, modelConfig);
   addPolicyCandidate(candidates, "critical_path", tables, metrics,
                      SchedulePolicy::CriticalPath);
   addPolicyCandidate(candidates, "memory_early", tables, metrics,
@@ -756,7 +762,7 @@ evaluateScheduleCandidates(const ScheduleRegion &region,
   }
 
   SmallVector<OrderCandidate, 4> candidates =
-      buildScheduleCandidates(region, graph, *archResolution.arch);
+      buildScheduleCandidates(region, graph, *archResolution.arch, modelConfig);
   for (const OrderCandidate &candidate : candidates)
     decision.candidates.push_back(
         {candidate.name, candidate.order,
@@ -850,30 +856,48 @@ static void applyScheduleOrder(const ScheduleRegion &region,
   }
 }
 
+static bool isValidLatencyOverride(int value) { return value >= -1; }
+
 struct WaveAMDMachineSchedulePass
     : public wave::impl::WaveAMDMachineScheduleBase<
           WaveAMDMachineSchedulePass> {
   using WaveAMDMachineScheduleBase::WaveAMDMachineScheduleBase;
 
-  void runOnOperation() override {
-    ModuleOp mod = getOperation();
-    ArchResolution archResolution = resolveArch(mod);
-    waveamdmachine::EventSimConfig modelConfig;
+  LogicalResult configureModel(ModuleOp mod,
+                               waveamdmachine::EventSimConfig &modelConfig) {
     if (modelWaves <= 0) {
       mod.emitError() << "model-waves must be positive";
-      return signalPassFailure();
+      return failure();
     }
     if (modelSimds <= 0) {
       mod.emitError() << "model-simds must be positive";
-      return signalPassFailure();
+      return failure();
     }
     if (modelStartDelay < 0) {
       mod.emitError() << "model-start-delay must be non-negative";
-      return signalPassFailure();
+      return failure();
+    }
+    if (!isValidLatencyOverride(modelVmemValueLatency) ||
+        !isValidLatencyOverride(modelSmemValueLatency) ||
+        !isValidLatencyOverride(modelLdsValueLatency)) {
+      mod.emitError() << "model value latencies must be -1 or non-negative";
+      return failure();
     }
     modelConfig.waves = modelWaves;
     modelConfig.simds = modelSimds;
     modelConfig.startDelay = modelStartDelay;
+    modelConfig.valueLatencies.vmemLoad = modelVmemValueLatency;
+    modelConfig.valueLatencies.smemLoad = modelSmemValueLatency;
+    modelConfig.valueLatencies.lds = modelLdsValueLatency;
+    return success();
+  }
+
+  void runOnOperation() override {
+    ModuleOp mod = getOperation();
+    ArchResolution archResolution = resolveArch(mod);
+    waveamdmachine::EventSimConfig modelConfig;
+    if (failed(configureModel(mod, modelConfig)))
+      return signalPassFailure();
     CandidateRequest candidate =
         getCandidateRequest(StringRef(scoreOrder), scoreRegion);
     bool emitScores = printScore || candidate.requested;

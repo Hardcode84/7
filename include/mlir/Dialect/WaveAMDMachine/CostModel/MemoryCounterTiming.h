@@ -33,10 +33,21 @@ struct MemoryCounterLatencies {
   int lds = -1;
 };
 
+struct MemoryValueLatencies {
+  int vmemLoad = -1;
+  int smemLoad = -1;
+  int lds = -1;
+};
+
 MemoryCounterKind getMemoryCounterKind(Operation *op);
 
 int getMemoryCounterLatency(const ArchData &arch, Operation *op,
                             const MemoryCounterLatencies &overrides = {});
+
+bool hasMemoryValueLatency(Operation *op);
+
+int getMemoryValueLatency(const ArchData &arch, Operation *op,
+                          const MemoryValueLatencies &overrides = {});
 
 } // namespace mlir::waveamdmachine
 

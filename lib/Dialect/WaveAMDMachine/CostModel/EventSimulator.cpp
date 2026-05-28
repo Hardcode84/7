@@ -51,6 +51,10 @@ static bool isMemoryIssuer(Operation *op) {
   return getMemoryCounterKind(op) != MemoryCounterKind::None;
 }
 
+static bool isMemToken(Value value) {
+  return isa<MemTokenType>(value.getType());
+}
+
 static EventSimCounter counterOf(Operation *op) {
   switch (getMemoryCounterKind(op)) {
   case MemoryCounterKind::Vmem:
@@ -224,6 +228,13 @@ private:
   LogicalResult executeNoInst(WaveState &wave, Operation *op, int64_t cycle);
   LogicalResult executeWaitcnt(WaveState &wave, Operation *op, int64_t cycle);
   LogicalResult executeIssued(WaveState &wave, Operation *op, int64_t cycle);
+  void markIssuedResults(WaveState &wave, Operation *op, FunctionalUnit fu,
+                         int64_t ready, int64_t nextIssue,
+                         int64_t memoryValueReady, bool memoryIssuer,
+                         bool hasMemoryValue);
+  void queueMemoryCounterEvents(WaveState &wave, Operation *op,
+                                FunctionalUnit fu, int64_t cycle,
+                                unsigned issues, int period);
   void queueCompletion(WaveState &wave, int64_t cycle);
   bool queueReadyCompletions(int64_t cycle);
   LogicalResult stepReadyWaves(int64_t cycle, bool &progressed);
@@ -391,6 +402,41 @@ LogicalResult EventSimulator::executeWaitcnt(WaveState &wave, Operation *op,
   return success();
 }
 
+void EventSimulator::markIssuedResults(WaveState &wave, Operation *op,
+                                       FunctionalUnit fu, int64_t ready,
+                                       int64_t nextIssue,
+                                       int64_t memoryValueReady,
+                                       bool memoryIssuer, bool hasMemoryValue) {
+  for (Value result : op->getResults()) {
+    int64_t resultReady = ready;
+    if (memoryIssuer && isMemToken(result))
+      resultReady = nextIssue;
+    else if (hasMemoryValue)
+      resultReady = memoryValueReady;
+    wave.readyAt[result] = resultReady;
+    schedule({resultReady, EventSimEventKind::ValueReady, wave.id, wave.simd,
+              op, fu, EventSimCounter::None});
+    wave.lastReady = std::max(wave.lastReady, resultReady);
+  }
+  if (op->getNumResults() == 0)
+    wave.lastReady = std::max(wave.lastReady, ready);
+}
+
+void EventSimulator::queueMemoryCounterEvents(WaveState &wave, Operation *op,
+                                              FunctionalUnit fu, int64_t cycle,
+                                              unsigned issues, int period) {
+  EventSimCounter counter = counterOf(op);
+  int counterLatency =
+      getMemoryCounterLatency(arch, op, config.counterLatencies);
+  SmallVector<int64_t, 4> &queue = wave.counters[counterIndex(counter)];
+  for (unsigned i = 0; i < issues; ++i) {
+    int64_t done = cycle + static_cast<int64_t>(i) * period + counterLatency;
+    queue.push_back(done);
+    schedule({done, EventSimEventKind::CounterDrained, wave.id, wave.simd, op,
+              fu, counter});
+  }
+}
+
 LogicalResult EventSimulator::executeIssued(WaveState &wave, Operation *op,
                                             int64_t cycle) {
   SchedClass cls = classifyOp(op);
@@ -401,6 +447,12 @@ LogicalResult EventSimulator::executeIssued(WaveState &wave, Operation *op,
   int64_t lastIssue = cycle + static_cast<int64_t>(issues - 1) * period;
   int64_t ready = lastIssue + dependencyLatency;
   int64_t nextIssue = cycle + static_cast<int64_t>(issues) * period;
+  bool memoryIssuer = isMemoryIssuer(op);
+  bool hasMemoryValue = hasMemoryValueLatency(op);
+  int64_t memoryValueReady =
+      hasMemoryValue
+          ? lastIssue + getMemoryValueLatency(arch, op, config.valueLatencies)
+          : ready;
 
   SimdState &simd = simds[wave.simd];
   simd.issueReady = nextIssue;
@@ -411,25 +463,11 @@ LogicalResult EventSimulator::executeIssued(WaveState &wave, Operation *op,
   recordNow({cycle, EventSimEventKind::OpIssued, wave.id, wave.simd, op, fu,
              EventSimCounter::None});
 
-  for (Value result : op->getResults()) {
-    wave.readyAt[result] = ready;
-    schedule({ready, EventSimEventKind::ValueReady, wave.id, wave.simd, op, fu,
-              EventSimCounter::None});
-  }
-  wave.lastReady = std::max(wave.lastReady, ready);
+  markIssuedResults(wave, op, fu, ready, nextIssue, memoryValueReady,
+                    memoryIssuer, hasMemoryValue);
 
-  if (isMemoryIssuer(op)) {
-    EventSimCounter counter = counterOf(op);
-    int counterLatency =
-        getMemoryCounterLatency(arch, op, config.counterLatencies);
-    SmallVector<int64_t, 4> &queue = wave.counters[counterIndex(counter)];
-    for (unsigned i = 0; i < issues; ++i) {
-      int64_t done = cycle + static_cast<int64_t>(i) * period + counterLatency;
-      queue.push_back(done);
-      schedule({done, EventSimEventKind::CounterDrained, wave.id, wave.simd, op,
-                fu, counter});
-    }
-  }
+  if (memoryIssuer)
+    queueMemoryCounterEvents(wave, op, fu, cycle, issues, period);
 
   if (SSetprioOp setprio = dyn_cast<SSetprioOp>(op)) {
     if (std::optional<unsigned> imm = getImmediate(setprio.getOperand()))

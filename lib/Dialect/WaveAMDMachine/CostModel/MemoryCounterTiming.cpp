@@ -28,6 +28,22 @@ static bool isLDSIssuer(Operation *op) {
              DsStoreB128Op, DsStoreTupleB32Op>(op);
 }
 
+static bool isLDSLoad(Operation *op) {
+  return isa<DsLoadB32Op, DsLoadB64Op, DsLoadB96Op, DsLoadB128Op,
+             DsLoadTupleB32Op>(op);
+}
+
+static bool isSMEMLoad(Operation *op) {
+  return isa<SLoadB32Op, SLoadB64Op, SLoadB128Op>(op);
+}
+
+static bool hasRegisterResult(Operation *op) {
+  for (Value result : op->getResults())
+    if (!isa<MemTokenType>(result.getType()))
+      return true;
+  return false;
+}
+
 static int overrideOrDefault(int overrideLatency, int defaultLatency) {
   return overrideLatency >= 0 ? overrideLatency : defaultLatency;
 }
@@ -52,11 +68,30 @@ int getMemoryCounterLatency(const ArchData &arch, Operation *op,
     return overrideOrDefault(overrides.vmemLoad, defaultLatency);
   if (op->hasTrait<traits::VMEMStoreOp>())
     return overrideOrDefault(overrides.vmemStore, defaultLatency);
-  if (op->hasTrait<traits::SMEMLoadOp>())
-    return overrideOrDefault(overrides.smemLoad, defaultLatency);
   if (isLDSIssuer(op))
     return overrideOrDefault(overrides.lds, defaultLatency);
+  if (op->hasTrait<traits::SMEMLoadOp>())
+    return overrideOrDefault(overrides.smemLoad, defaultLatency);
   llvm_unreachable("op has no memory counter timing");
+}
+
+bool hasMemoryValueLatency(Operation *op) {
+  if (!hasRegisterResult(op))
+    return false;
+  return op->hasTrait<traits::VMEMLoadOp>() || isLDSLoad(op) || isSMEMLoad(op);
+}
+
+int getMemoryValueLatency(const ArchData &arch, Operation *op,
+                          const MemoryValueLatencies &overrides) {
+  SchedClass cls = classifyOp(op);
+  int defaultLatency = getLatency(arch, cls);
+  if (op->hasTrait<traits::VMEMLoadOp>())
+    return overrideOrDefault(overrides.vmemLoad, defaultLatency);
+  if (isLDSLoad(op))
+    return overrideOrDefault(overrides.lds, defaultLatency);
+  if (isSMEMLoad(op))
+    return overrideOrDefault(overrides.smemLoad, defaultLatency);
+  llvm_unreachable("op has no memory value timing");
 }
 
 } // namespace mlir::waveamdmachine

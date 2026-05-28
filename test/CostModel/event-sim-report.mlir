@@ -4,6 +4,9 @@
 // RUN: wave-sim-report --func=smem_wait --timeline %s | FileCheck %s --check-prefix=WAIT
 // RUN: wave-sim-report --func=smem_wait --timeline --smem-counter-latency=7 %s | FileCheck %s --check-prefix=COUNTER
 // RUN: wave-sim-report --func=smem_wait --op-latencies %s | FileCheck %s --check-prefix=LAT
+// RUN: wave-sim-report --func=smem_value_ready --timeline --smem-value-latency=7 %s | FileCheck %s --check-prefix=VALUE
+// RUN: wave-sim-report --func=mem_token_issue_ready --timeline %s | FileCheck %s --check-prefix=TOKEN
+// RUN: wave-sim-report --func=lds_wait --timeline --lds-counter-latency=7 %s | FileCheck %s --check-prefix=LDSCOUNTER
 // RUN: wave-sim-report --func=smem_partial_wait --timeline %s | FileCheck %s --check-prefix=WAITPART
 // RUN: wave-sim-report --func=trip_loop --trip-count=3 %s | FileCheck %s --check-prefix=TRIP
 
@@ -28,6 +31,41 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
     %sum:2 = waveamdmachine.s_add_i32 %load, %step :
         (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.imm) ->
         (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<scc, 1>)
+    return
+  }
+
+  func.func @smem_value_ready() {
+    %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+    %step = waveamdmachine.imm 1 : !waveamdmachine.imm
+    %load = waveamdmachine.s_load_b32 %zero, "s[0:1]" :
+        (!waveamdmachine.imm) -> !waveamdmachine.reg<sgpr, 1>
+    %sum:2 = waveamdmachine.s_add_i32 %load, %step :
+        (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.imm) ->
+        (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<scc, 1>)
+    return
+  }
+
+  func.func @mem_token_issue_ready(%off: !waveamdmachine.reg<vgpr, 1>,
+                                   %base: !waveamdmachine.reg<sgpr, 2>,
+                                   %value: !waveamdmachine.reg<vgpr, 1>) {
+    %tok0 = waveamdmachine.token : !waveamdmachine.mem.token
+    %load, %tok1 = waveamdmachine.global_load_b32 %off, %base after %tok0
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 2>, !waveamdmachine.mem.token)
+          -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+    %store = waveamdmachine.global_store_b32 %off, %value, %base after %tok1
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+           !waveamdmachine.reg<sgpr, 2>, !waveamdmachine.mem.token)
+          -> !waveamdmachine.mem.token
+    return
+  }
+
+  func.func @lds_wait(%addr: !waveamdmachine.reg<vgpr, 1>,
+                      %value: !waveamdmachine.reg<vgpr, 1>) {
+    %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+    %store = waveamdmachine.ds_store_b32 %addr, %value
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.mem.token
+    waveamdmachine.s_waitcnt %zero : (!waveamdmachine.imm) -> ()
     return
   }
 
@@ -100,9 +138,24 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
 // LAT: op_latencies:
 // LAT: op_index=0 op=waveamdmachine.imm class=NoInst fu=None latency=0 issues=1
-// LAT: op_index=2 op=waveamdmachine.s_load_b32 class=WriteSMEM fu=LGKM latency=20 counter_latency=20 issues=1
+// LAT: op_index=2 op=waveamdmachine.s_load_b32 class=WriteSMEM fu=LGKM latency=20 counter_latency=20 value_latency=20 issues=1
 // LAT: op_index=3 op=waveamdmachine.s_waitcnt class=NoInst fu=None latency=0 issues=1 waitcnt=1
 // LAT: op_index=4 op=waveamdmachine.s_add_i32 class=WriteSALU fu=SALU latency=2 issues=1
+
+// VALUE: func: smem_value_ready
+// VALUE: total_cycles: 9
+// VALUE: issue cycle=0 wave=0 simd=0 fu=LGKM op=waveamdmachine.s_load_b32
+// VALUE: issue cycle=7 wave=0 simd=0 fu=SALU op=waveamdmachine.s_add_i32
+// VALUE: value_ready cycle=7 wave=0 simd=0 fu=LGKM op=waveamdmachine.s_load_b32
+
+// TOKEN: func: mem_token_issue_ready
+// TOKEN: issue cycle=0 wave=0 simd=0 fu=VMEM op=waveamdmachine.global_load_b32
+// TOKEN: issue cycle=1 wave=0 simd=0 fu=VMEM op=waveamdmachine.global_store_b32
+
+// LDSCOUNTER: func: lds_wait
+// LDSCOUNTER: issue cycle=0 wave=0 simd=0 fu=LGKM op=waveamdmachine.ds_store_b32
+// LDSCOUNTER-DAG: counter_drained cycle=7 wave=0 simd=0 fu=LGKM counter=lgkm op=waveamdmachine.ds_store_b32
+// LDSCOUNTER-DAG: counter_drained cycle=7 wave=0 simd=0 op=waveamdmachine.s_waitcnt
 
 // WAITPART: issue cycle=0 wave=0 simd=0 fu=LGKM op=waveamdmachine.s_load_b32
 // WAITPART: issue cycle=1 wave=0 simd=0 fu=LGKM op=waveamdmachine.s_load_b32

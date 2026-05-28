@@ -93,6 +93,21 @@ static llvm::cl::opt<int>
                       llvm::cl::desc("override LDS waitcnt counter latency"),
                       llvm::cl::init(-1));
 
+static llvm::cl::opt<int>
+    vmemValueLatency("vmem-value-latency",
+                     llvm::cl::desc("override VMEM-load value-ready latency"),
+                     llvm::cl::init(-1));
+
+static llvm::cl::opt<int>
+    smemValueLatency("smem-value-latency",
+                     llvm::cl::desc("override SMEM-load value-ready latency"),
+                     llvm::cl::init(-1));
+
+static llvm::cl::opt<int>
+    ldsValueLatency("lds-value-latency",
+                    llvm::cl::desc("override LDS-load value-ready latency"),
+                    llvm::cl::init(-1));
+
 static const ArchData *resolveArch(llvm::StringRef name) {
   llvm::StringRef cpu = name;
   std::pair<llvm::StringRef, llvm::StringRef> split = cpu.rsplit("--");
@@ -215,15 +230,19 @@ static void printEvent(const EventSimEvent &event) {
 
 static bool isValidLatencyOverride(int value) { return value >= -1; }
 
-static bool validateCounterLatencies() {
+static bool validateLatencyOverrides() {
   return isValidLatencyOverride(vmemCounterLatency) &&
          isValidLatencyOverride(vscntCounterLatency) &&
          isValidLatencyOverride(smemCounterLatency) &&
-         isValidLatencyOverride(ldsCounterLatency);
+         isValidLatencyOverride(ldsCounterLatency) &&
+         isValidLatencyOverride(vmemValueLatency) &&
+         isValidLatencyOverride(smemValueLatency) &&
+         isValidLatencyOverride(ldsValueLatency);
 }
 
 static void printOpLatencies(func::FuncOp func, const ArchData &arch,
-                             const MemoryCounterLatencies &counterLatencies) {
+                             const MemoryCounterLatencies &counterLatencies,
+                             const MemoryValueLatencies &valueLatencies) {
   SmallVector<Operation *> ops = flattenOps(func);
   llvm::outs() << "op_latencies:\n";
   for (auto [idx, op] : llvm::enumerate(ops)) {
@@ -239,6 +258,9 @@ static void printOpLatencies(func::FuncOp func, const ArchData &arch,
       llvm::outs() << " counter_latency="
                    << getMemoryCounterLatency(arch, op, counterLatencies);
     }
+    if (hasMemoryValueLatency(op))
+      llvm::outs() << " value_latency="
+                   << getMemoryValueLatency(arch, op, valueLatencies);
     llvm::outs() << " issues=" << getIssueCount(op);
     if (op->hasTrait<::mlir::OpTrait::waveamdmachine::WaitcntOp>())
       llvm::outs() << " waitcnt=1";
@@ -257,8 +279,8 @@ static int report(ModuleOp mod) {
     llvm::errs() << "function not found\n";
     return 1;
   }
-  if (!validateCounterLatencies()) {
-    llvm::errs() << "counter latency overrides must be -1 or non-negative\n";
+  if (!validateLatencyOverrides()) {
+    llvm::errs() << "latency overrides must be -1 or non-negative\n";
     return 1;
   }
 
@@ -272,6 +294,9 @@ static int report(ModuleOp mod) {
   config.counterLatencies.vmemStore = vscntCounterLatency;
   config.counterLatencies.smemLoad = smemCounterLatency;
   config.counterLatencies.lds = ldsCounterLatency;
+  config.valueLatencies.vmemLoad = vmemValueLatency;
+  config.valueLatencies.smemLoad = smemValueLatency;
+  config.valueLatencies.lds = ldsValueLatency;
 
   EventSimResult result;
   if (failed(simulateEventTimeline(func, *arch, config, result)))
@@ -290,7 +315,8 @@ static int report(ModuleOp mod) {
     llvm::outs() << "wave_" << i
                  << "_completed: " << result.waveCompletedCycles[i] << "\n";
   if (opLatencies)
-    printOpLatencies(func, *arch, config.counterLatencies);
+    printOpLatencies(func, *arch, config.counterLatencies,
+                     config.valueLatencies);
   if (timeline)
     for (const EventSimEvent &event : result.events)
       printEvent(event);

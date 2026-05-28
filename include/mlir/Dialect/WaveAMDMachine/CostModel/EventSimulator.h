@@ -33,6 +33,7 @@ struct EventSimConfig {
   int64_t tripCountOverride = -1;
   bool recordTimeline = false;
   MemoryCounterLatencies counterLatencies;
+  MemoryValueLatencies valueLatencies;
 };
 
 enum class EventSimCounter : uint8_t {

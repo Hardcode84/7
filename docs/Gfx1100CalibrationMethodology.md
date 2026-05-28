@@ -243,25 +243,40 @@ Static ATT window replay:
 | Loop LDS windows only | `WriteLDS ~= 85` | Closer for LDS rows, but unrelated to VMEM overprediction. |
 | Total loop wait windows | `WriteVMEM ~= 155`, `WriteLDS ~= 0` | Reduces absolute error, but cannot explain baseline/scheduled deltas. |
 
-`wave-sim-report` on the K64/K128 machine MLIR was unchanged for all tested
-counter overrides:
+`wave-sim-report` on the K64/K128 machine MLIR is unchanged for VMEM counter
+overrides:
 
-| K | Variant | Default total | With VMEM/LDS counter overrides |
+| K | Variant | Current default | `--vmem-counter-latency=80` |
 | ---: | --- | ---: | ---: |
-| 64 | baseline | 11369 | 11369 |
+| 64 | baseline | 11293 | 11293 |
 | 64 | scheduled | 9877 | 9877 |
-| 128 | baseline | 22305 | 22305 |
+| 128 | baseline | 22153 | 22153 |
 | 128 | scheduled | 19361 | 19361 |
 
-Reason: these scores are gated by memory SSA result readiness
-(`WriteVMEM`/`WriteLDS` dependency latency), not by explicit waitcnt counter
-drain timing. Counter-latency knobs are useful for wait-window reports, but
-they are not the matmul scheduling calibration knob.
+LDS counter overrides affect explicit LGKM waits once DS ops route through the
+LDS override. That is still counter drain timing, not load consumer readiness.
+VMEM score deltas remain gated by memory SSA value readiness, not by explicit
+VMEM waitcnt counter drain timing.
 
-Conclusion: do not set gfx1100 counter-latency defaults from this data. Next
-model work needs a separate memory value-ready / overlap model for load
-consumers, plus clause/coalescing effects, instead of retuning waitcnt counter
-completion.
+## Value-readiness split check
+
+`wave-sim-report` now models load register result readiness separately from
+waitcnt counter drain. Memory tokens are issue-order dependencies; load data
+results use `--*-value-latency`.
+
+Retained K64/K128 matmul replay:
+
+| K | Variant | Default total | `--vmem-value-latency=80 --lds-value-latency=40` |
+| ---: | --- | ---: | ---: |
+| 64 | baseline | 11293 | 10479 |
+| 64 | scheduled | 9877 | 9949 |
+| 128 | baseline | 22153 | 20523 |
+| 128 | scheduled | 19361 | 19505 |
+
+This moves the scheduling delta from `-1416/-2792` cycles to `-530/-1018`
+cycles for K64/K128. Direction is closer to ATT, but one constant pair still
+does not explain both K values. Next calibration target is value-readiness
+overlap: VMEM/LDS clauses, coalescing, and consumer spacing.
 
 PMC sanity check:
 
