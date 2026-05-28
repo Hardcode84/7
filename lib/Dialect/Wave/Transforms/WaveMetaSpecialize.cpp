@@ -173,6 +173,25 @@ static SmallVector<Value> emitForIteration(PatternRewriter &rewriter,
   return next;
 }
 
+static SmallVector<Value> cloneLoopBody(PatternRewriter &rewriter,
+                                        Region &region, Value iv,
+                                        ValueRange carriesIn) {
+  Block &body = region.front();
+  IRMapping map;
+  map.map(body.getArgument(0), iv);
+  for (auto [bbArg, carry] :
+       llvm::zip(body.getArguments().drop_front(), carriesIn))
+    map.map(bbArg, carry);
+  for (Operation &bodyOp : body.without_terminator())
+    rewriter.clone(bodyOp, map);
+  auto yield = cast<YieldOp>(body.getTerminator());
+  SmallVector<Value> next;
+  next.reserve(yield.getValues().size());
+  for (Value v : yield.getValues())
+    next.push_back(map.lookupOrDefault(v));
+  return next;
+}
+
 // `wavemeta.static_for` with constant bounds: unroll by cloning the
 // body trip-count times, threading the iter-arg carries through.
 // Step <= 0 is rejected here and surfaces in phase 4 as a residual.
@@ -197,6 +216,131 @@ struct StaticForUnroll : OpRewritePattern<StaticForOp> {
     for (int64_t i : llvm::seq(tripCount))
       carries = emitForIteration(rewriter, op, *lb + i * *step, carries);
     rewriter.replaceOp(op, carries);
+    return success();
+  }
+};
+
+static Value constantIndex(OpBuilder &builder, Location loc, int64_t value) {
+  return arith::ConstantIndexOp::create(builder, loc, value).getResult();
+}
+
+static Value addI(OpBuilder &builder, Location loc, Value lhs, Value rhs) {
+  return arith::AddIOp::create(builder, loc, lhs, rhs).getResult();
+}
+
+static Value subI(OpBuilder &builder, Location loc, Value lhs, Value rhs) {
+  return arith::SubIOp::create(builder, loc, lhs, rhs).getResult();
+}
+
+static Value mulI(OpBuilder &builder, Location loc, Value lhs, Value rhs) {
+  return arith::MulIOp::create(builder, loc, lhs, rhs).getResult();
+}
+
+static Value divUI(OpBuilder &builder, Location loc, Value lhs, Value rhs) {
+  return arith::DivUIOp::create(builder, loc, lhs, rhs).getResult();
+}
+
+static Value buildDynamicMainEnd(OpBuilder &builder, Location loc, Value lower,
+                                 Value upper, Value step, Value unroll) {
+  Value c0 = constantIndex(builder, loc, 0);
+  Value c1 = constantIndex(builder, loc, 1);
+  Value span = subI(builder, loc, upper, lower);
+  Value stepMinusOne = subI(builder, loc, step, c1);
+  Value tripCeil =
+      divUI(builder, loc, addI(builder, loc, span, stepMinusOne), step);
+  Value hasTrip = arith::CmpIOp::create(builder, loc, arith::CmpIPredicate::slt,
+                                        lower, upper)
+                      .getResult();
+  Value trip =
+      arith::SelectOp::create(builder, loc, hasTrip, tripCeil, c0).getResult();
+  Value chunks = divUI(builder, loc, trip, unroll);
+  Value mainTrip = mulI(builder, loc, chunks, unroll);
+  return addI(builder, loc, lower, mulI(builder, loc, mainTrip, step));
+}
+
+static Value buildMainEnd(OpBuilder &builder, Location loc, Value lower,
+                          Value upper, Value step, Value unroll) {
+  std::optional<int64_t> lb = getConstantIntValue(lower);
+  std::optional<int64_t> ub = getConstantIntValue(upper);
+  std::optional<int64_t> st = getConstantIntValue(step);
+  std::optional<int64_t> ur = getConstantIntValue(unroll);
+  if (!lb || !ub || !st || !ur || *st <= 0 || *ur <= 0)
+    return buildDynamicMainEnd(builder, loc, lower, upper, step, unroll);
+  int64_t span = *ub - *lb;
+  int64_t trip = span <= 0 ? 0 : (span + *st - 1) / *st;
+  int64_t mainTrip = (trip / *ur) * *ur;
+  return constantIndex(builder, loc, *lb + mainTrip * *st);
+}
+
+static Value buildMainStep(OpBuilder &builder, Location loc, Value step,
+                           Value unroll) {
+  std::optional<int64_t> st = getConstantIntValue(step);
+  std::optional<int64_t> ur = getConstantIntValue(unroll);
+  if (!st || !ur)
+    return mulI(builder, loc, step, unroll);
+  return constantIndex(builder, loc, *st * *ur);
+}
+
+static void createStaticForBody(PatternRewriter &rewriter, StaticForOp loop,
+                                Region &srcBody, Value baseIv, Value step) {
+  Location loc = loop.getLoc();
+  SmallVector<Type> argTypes;
+  argTypes.push_back(rewriter.getIndexType());
+  llvm::append_range(argTypes, loop.getResultTypes());
+  SmallVector<Location> argLocs(argTypes.size(), loc);
+  Block *body = rewriter.createBlock(&loop.getBody(), loop.getBody().end(),
+                                     argTypes, argLocs);
+
+  rewriter.setInsertionPointToStart(body);
+  Value offset = mulI(rewriter, loc, body->getArgument(0), step);
+  Value logicalIv = addI(rewriter, loc, baseIv, offset);
+  SmallVector<Value> yielded = cloneLoopBody(rewriter, srcBody, logicalIv,
+                                             body->getArguments().drop_front());
+  YieldOp::create(rewriter, loc, yielded);
+}
+
+struct UnrolledForLower : OpRewritePattern<UnrolledForOp> {
+  using OpRewritePattern::OpRewritePattern;
+  LogicalResult matchAndRewrite(UnrolledForOp op,
+                                PatternRewriter &rewriter) const override {
+    std::optional<int64_t> unroll = getConstantIntValue(op.getUnroll());
+    std::optional<int64_t> step = getConstantIntValue(op.getStep());
+    if (!unroll || *unroll <= 0 || (step && *step <= 0))
+      return failure();
+
+    Location loc = op.getLoc();
+    Value c0 = constantIndex(rewriter, loc, 0);
+    Value c1 = constantIndex(rewriter, loc, 1);
+    Value mainEnd =
+        buildMainEnd(rewriter, loc, op.getLowerBound(), op.getUpperBound(),
+                     op.getStep(), op.getUnroll());
+    Value mainStep = buildMainStep(rewriter, loc, op.getStep(), op.getUnroll());
+
+    scf::ForOp mainFor = scf::ForOp::create(
+        rewriter, loc, op.getLowerBound(), mainEnd, mainStep, op.getIterArgs());
+    rewriter.setInsertionPointToStart(mainFor.getBody());
+    StaticForOp staticFor =
+        StaticForOp::create(rewriter, loc, op.getResultTypes(), c0,
+                            op.getUnroll(), c1, mainFor.getRegionIterArgs());
+    createStaticForBody(rewriter, staticFor, op.getBody(),
+                        mainFor.getInductionVar(), op.getStep());
+    if (!op.getResultTypes().empty()) {
+      rewriter.setInsertionPointAfter(staticFor);
+      scf::YieldOp::create(rewriter, loc, staticFor.getResults());
+    }
+
+    rewriter.setInsertionPointAfter(mainFor);
+    scf::ForOp tailFor =
+        scf::ForOp::create(rewriter, loc, mainEnd, op.getUpperBound(),
+                           op.getStep(), mainFor.getResults());
+    rewriter.setInsertionPointToStart(tailFor.getBody());
+    SmallVector<Value> yielded =
+        cloneLoopBody(rewriter, op.getBody(), tailFor.getInductionVar(),
+                      tailFor.getRegionIterArgs());
+    if (!yielded.empty())
+      scf::YieldOp::create(rewriter, loc, yielded);
+
+    rewriter.replaceOp(op, tailFor.getResults());
     return success();
   }
 };
@@ -244,8 +388,8 @@ struct TupleSetFold : OpRewritePattern<TupleSetOp> {
 };
 
 static void populatePhase2Patterns(RewritePatternSet &patterns) {
-  patterns.add<StaticIfFold, StaticForUnroll, BroadcastExpand, TupleSetFold>(
-      patterns.getContext());
+  patterns.add<StaticIfFold, StaticForUnroll, UnrolledForLower, BroadcastExpand,
+               TupleSetFold>(patterns.getContext());
 }
 
 //===----------------------------------------------------------------------===//
@@ -519,6 +663,10 @@ static bool diagnoseWavemetaResidual(Operation *op) {
   }
   if (isa<StaticForOp>(op)) {
     op->emitOpError("static_for bounds do not fold to constants");
+    return true;
+  }
+  if (isa<UnrolledForOp>(op)) {
+    op->emitOpError("unrolled_for needs a positive constant unroll factor");
     return true;
   }
   if (isa<TupleGetOp, TupleSetOp>(op)) {

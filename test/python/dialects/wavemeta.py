@@ -103,6 +103,34 @@ def test_static_for_with_iter_args():
         print(m)
 
 
+# CHECK-LABEL: TEST: test_unrolled_for_with_iter_args
+@run
+def test_unrolled_for_with_iter_args():
+    with Context() as ctx, Location.unknown():
+        register_dialects(ctx)
+        m = Module.create()
+        idx = IndexType.get()
+        with InsertionPoint(m.body):
+            f = func.FuncOp("sum_unrolled", ([idx], [idx]))
+            block = f.add_entry_block()
+            with InsertionPoint(block):
+                (init,) = block.arguments
+                c0 = arith.ConstantOp(idx, IntegerAttr.get(idx, 0)).result
+                c8 = arith.ConstantOp(idx, IntegerAttr.get(idx, 8)).result
+                c1 = arith.ConstantOp(idx, IntegerAttr.get(idx, 1)).result
+                c4 = arith.ConstantOp(idx, IntegerAttr.get(idx, 4)).result
+                loop = wavemeta.UnrolledForOp(c0, c8, c1, c4, [init])
+                with InsertionPoint(loop.body_block):
+                    iv = loop.induction_variable
+                    (acc,) = loop.inner_iter_args
+                    nxt = arith.AddIOp(acc, iv).result
+                    wavemeta.YieldOp([nxt])
+                func.ReturnOp([loop.results[0]])
+        # CHECK: wavemeta.unrolled_for %{{.+}} to %{{.+}} step %{{.+}} unroll %{{.+}} iter_args(%{{.+}} : index)
+        # CHECK: wavemeta.yield %{{.+}} : index
+        print(m)
+
+
 # CHECK-LABEL: TEST: test_tuple_make_and_get
 @run
 def test_tuple_make_and_get():

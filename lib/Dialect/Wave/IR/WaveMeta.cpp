@@ -79,35 +79,40 @@ YieldOp::getMutableSuccessorOperands(RegionSuccessor successor) {
 // StaticForOp
 //===----------------------------------------------------------------------===//
 
-LogicalResult StaticForOp::verify() {
-  Block &block = getBody().front();
-  unsigned expectedArgs = 1 + getIterArgs().size();
+static LogicalResult verifyLoopRegion(Operation *op, Region &body,
+                                      ValueRange iterArgs) {
+  Block &block = body.front();
+  unsigned expectedArgs = 1 + iterArgs.size();
   if (block.getNumArguments() != expectedArgs)
-    return emitOpError("body block expects ")
+    return op->emitOpError("body block expects ")
            << expectedArgs << " arguments (induction var + iter args), got "
            << block.getNumArguments();
   if (!block.getArgument(0).getType().isIndex())
-    return emitOpError("body block first argument must be index, got ")
+    return op->emitOpError("body block first argument must be index, got ")
            << block.getArgument(0).getType();
-  for (auto [idx, init] : llvm::enumerate(getIterArgs())) {
+  for (auto [idx, init] : llvm::enumerate(iterArgs)) {
     Type argType = block.getArgument(idx + 1).getType();
     if (argType != init.getType())
-      return emitOpError("body block arg #")
+      return op->emitOpError("body block arg #")
              << (idx + 1) << " type " << argType
              << " must match iter_args type " << init.getType();
   }
   auto yield = dyn_cast<YieldOp>(block.getTerminator());
   if (!yield)
-    return emitOpError("body must be terminated by wavemeta.yield");
-  if (yield.getValues().size() != getIterArgs().size())
-    return emitOpError("yield operand count must equal iter_args count");
+    return op->emitOpError("body must be terminated by wavemeta.yield");
+  if (yield.getValues().size() != iterArgs.size())
+    return op->emitOpError("yield operand count must equal iter_args count");
   for (auto [idx, val] : llvm::enumerate(yield.getValues())) {
-    if (val.getType() != getIterArgs()[idx].getType())
-      return emitOpError("yield operand #")
+    if (val.getType() != iterArgs[idx].getType())
+      return op->emitOpError("yield operand #")
              << idx << " type " << val.getType()
-             << " must match iter_args type " << getIterArgs()[idx].getType();
+             << " must match iter_args type " << iterArgs[idx].getType();
   }
   return success();
+}
+
+LogicalResult StaticForOp::verify() {
+  return verifyLoopRegion(getOperation(), getBody(), getIterArgs());
 }
 
 // The body region is both the entry (from parent) and a back-edge
@@ -129,6 +134,31 @@ ValueRange StaticForOp::getSuccessorInputs(RegionSuccessor successor) {
   if (successor.isParent())
     return getResults();
   // Body block args excluding the induction var.
+  return getBody().front().getArguments().drop_front();
+}
+
+//===----------------------------------------------------------------------===//
+// UnrolledForOp
+//===----------------------------------------------------------------------===//
+
+LogicalResult UnrolledForOp::verify() {
+  return verifyLoopRegion(getOperation(), getBody(), getIterArgs());
+}
+
+void UnrolledForOp::getSuccessorRegions(
+    RegionBranchPoint point, SmallVectorImpl<RegionSuccessor> &regions) {
+  regions.push_back(RegionSuccessor(&getBody()));
+  regions.push_back(RegionSuccessor::parent());
+}
+
+OperandRange
+UnrolledForOp::getEntrySuccessorOperands(RegionSuccessor successor) {
+  return getIterArgs();
+}
+
+ValueRange UnrolledForOp::getSuccessorInputs(RegionSuccessor successor) {
+  if (successor.isParent())
+    return getResults();
   return getBody().front().getArguments().drop_front();
 }
 

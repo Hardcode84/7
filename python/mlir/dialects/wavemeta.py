@@ -79,6 +79,50 @@ class StaticForOp(StaticForOp):  # noqa: F405
 
 
 @_ods_cext.register_operation(_Dialect, replace=True)
+class UnrolledForOp(UnrolledForOp):  # noqa: F405
+    """Builder helper around `wavemeta.unrolled_for`."""
+
+    def __init__(
+        self,
+        lower_bound: Value,
+        upper_bound: Value,
+        step: Value,
+        unroll: Value,
+        iter_args: Operation | OpView | Sequence[Value] | None = None,
+        *,
+        loc: Location | None = None,
+        ip: InsertionPoint | None = None,
+    ):
+        if iter_args is None:
+            iter_args = []
+        iter_args = _get_op_results_or_values(iter_args)
+        result_types = [arg.type for arg in iter_args]
+        super().__init__(
+            result_types,
+            lower_bound,
+            upper_bound,
+            step,
+            unroll,
+            iter_args,
+            loc=loc,
+            ip=ip,
+        )
+        Block.create_at_start(self.body, [IndexType.get(), *result_types])
+
+    @property
+    def body_block(self) -> Block:
+        return self.body.blocks[0]
+
+    @property
+    def induction_variable(self) -> Value:
+        return self.body_block.arguments[0]
+
+    @property
+    def inner_iter_args(self):
+        return self.body_block.arguments[1:]
+
+
+@_ods_cext.register_operation(_Dialect, replace=True)
 class StaticIfOp(StaticIfOp):  # noqa: F405
     """Builder helpers around `wavemeta.static_if`: auto-creates the
     `then` (and optional `else`) entry blocks and exposes them as

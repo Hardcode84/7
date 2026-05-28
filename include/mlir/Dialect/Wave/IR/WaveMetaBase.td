@@ -18,9 +18,10 @@ def WaveMeta_Dialect : Dialect {
     The WaveMeta dialect carries pipeline-parameter and static
     control-flow ops that survive only as long as the
     specialiser pass needs them. `wavemeta.param` reads a
-    module-scoped parameter binding; `wavemeta.static_for` and
-    `wavemeta.static_if` get fully unrolled / branch-selected
-    once their bounds / conditions become constant; the
+    module-scoped parameter binding; `wavemeta.static_for`,
+    `wavemeta.unrolled_for`, and `wavemeta.static_if` get
+    expanded / branch-selected once their controlling params
+    become constant; the
     parametric-tuple type `!wavemeta.ptuple` lets iter-arg
     width track an unroll factor and collapses to flat SSA
     values after specialisation.

@@ -30,6 +30,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
+from enum import Enum, auto
 from types import TracebackType
 
 import ixsimpl
@@ -109,6 +110,11 @@ mod = ixsimpl.mod
 
 
 CastKind = wave.CastKind
+
+
+class _YieldKind(Enum):
+    SCF = auto()
+    WAVEMETA = auto()
 
 
 def i8() -> IntegerType:
@@ -504,6 +510,7 @@ class FunctionBuilder:
 
     def __init__(self, block: Block) -> None:
         self.block = block
+        self._yield_stack: list[_YieldKind] = []
 
     @property
     def args(self) -> Sequence[Value]:
@@ -884,7 +891,11 @@ class FunctionBuilder:
         """
         op = wavemeta.StaticForOp(lower, upper, step, init_args)
         with InsertionPoint(op.body_block):
-            yield op
+            self._yield_stack.append(_YieldKind.WAVEMETA)
+            try:
+                yield op
+            finally:
+                self._yield_stack.pop()
 
     @contextmanager
     def for_loop(
@@ -894,6 +905,7 @@ class FunctionBuilder:
         step: Value,
         init_args: Sequence[Value] = (),
         nonzero_trip: bool = False,
+        unroll: int | Value | None = None,
     ) -> Iterator[Value]:
         """Yield an `scf.for`'s induction variable inside a context
         manager (no carries) or the `scf.ForOp` itself when `init_args`
@@ -913,18 +925,48 @@ class FunctionBuilder:
         the `scf.for`, which the selector uses to skip the pre-test
         compare and lower to a do/while-shaped `waveamdmachine.uniform_loop`
         instead of the (potentially-zero-trip) pre-tested form.
+
+        `unroll=N` emits `wavemeta.unrolled_for`; specialization expands it
+        into an unrolled main loop plus scalar tail.
         """
+        if unroll is not None:
+            if nonzero_trip:
+                raise ValueError("nonzero_trip is not supported with unroll")
+            if isinstance(unroll, int):
+                unroll = self.constant(index_type(), unroll)
+            forop = wavemeta.UnrolledForOp(
+                lower, upper, step, unroll, iter_args=list(init_args)
+            )
+            with InsertionPoint(forop.body_block):
+                self._yield_stack.append(_YieldKind.WAVEMETA)
+                try:
+                    if init_args:
+                        yield forop
+                    else:
+                        yield forop.induction_variable
+                        self.yield_()
+                finally:
+                    self._yield_stack.pop()
+            return
+
         forop = scf.ForOp(lower, upper, step, iter_args=list(init_args))
         if nonzero_trip:
             forop.operation.attributes["wave.nonzero_trip"] = UnitAttr.get()
         with InsertionPoint(forop.body):
-            if init_args:
-                yield forop
-            else:
-                yield forop.induction_variable
-                self.yield_()
+            self._yield_stack.append(_YieldKind.SCF)
+            try:
+                if init_args:
+                    yield forop
+                else:
+                    yield forop.induction_variable
+                    self.yield_()
+            finally:
+                self._yield_stack.pop()
 
     def yield_(self, values: Sequence[Value] = ()) -> None:
+        if self._yield_stack and self._yield_stack[-1] is _YieldKind.WAVEMETA:
+            wavemeta.YieldOp(list(values))
+            return
         scf.YieldOp(list(values))
 
     def call(

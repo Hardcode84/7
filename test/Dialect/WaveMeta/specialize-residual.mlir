@@ -40,6 +40,23 @@ func.func @dynamic_if(%c: i1, %a: i32, %b: i32) -> i32 {
 
 // -----
 
+func.func @unresolved_unrolled_for(%init: index) -> index {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %c8 = arith.constant 8 : index
+  // expected-error@+1 {{parameter 'u' has no binding}}
+  %u = wavemeta.param "u" : index
+  // expected-error@+1 {{unrolled_for needs a positive constant unroll factor}}
+  %r = wavemeta.unrolled_for %c0 to %c8 step %c1 unroll %u iter_args(%init : index) {
+  ^bb0(%iv: index, %acc: index):
+    %next = arith.addi %acc, %iv : index
+    wavemeta.yield %next : index
+  } -> index
+  return %r : index
+}
+
+// -----
+
 // tuple_get with a non-constant index against a tuple_make: the
 // folder cannot fire; phase 3 can't pick a slot either.
 func.func @nonconst_index(%a: i32, %b: i32, %i: index) -> i32 {

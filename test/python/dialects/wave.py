@@ -298,3 +298,25 @@ def test_uniform_for_loop_with_init_args():
         # CHECK: scf.for {{.*}} iter_args(%{{.+}} = %{{.+}}) -> (i32)  : i32 {
         # CHECK:   scf.yield {{.*}} : i32
         print(m.module)
+
+
+# CHECK-LABEL: TEST: test_unrolled_for_loop_with_init_args
+@run
+def test_unrolled_for_loop_with_init_args():
+    with w.module() as m:
+        with m.function(
+            "unrolled_loop_kernel", [w.ptr_type(w.i32())], kernel=True
+        ) as f:
+            (_out,) = f.args
+            lo = f.constant(w.index_type(), 0)
+            hi = f.constant(w.index_type(), 8)
+            step = f.constant(w.index_type(), 1)
+            init = f.constant(w.index_type(), 7)
+            with f.for_loop(lo, hi, step, init_args=(init,), unroll=4) as loop:
+                (acc,) = loop.inner_iter_args
+                f.yield_([acc])
+            _ = loop.results[0]
+        # CHECK: func.func @unrolled_loop_kernel
+        # CHECK: wavemeta.unrolled_for {{.*}} unroll {{.*}} iter_args(%{{.+}} : index)
+        # CHECK:   wavemeta.yield {{.*}} : index
+        print(m.module)

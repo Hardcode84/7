@@ -87,6 +87,23 @@ func.func @for_multi_iter(%lb: index, %ub: index, %step: index, %i32: i32, %i64:
   return %r#0, %r#1 : i32, i64
 }
 
+// CHECK-LABEL: func.func @unrolled_for_with_iter_args
+// CHECK: %[[R:.+]] = wavemeta.unrolled_for %{{.+}} to %{{.+}} step %{{.+}} unroll %{{.+}} iter_args(%{{.+}} : index) {
+// CHECK-NEXT: ^bb0(%[[IV:.+]]: index, %[[ACC:.+]]: index):
+// CHECK-NEXT:   %[[NEXT:.+]] = arith.addi %[[ACC]], %[[IV]] : index
+// CHECK-NEXT:   wavemeta.yield %[[NEXT]] : index
+// CHECK-NEXT: } -> index
+// CHECK: return %[[R]] : index
+func.func @unrolled_for_with_iter_args(%lb: index, %ub: index, %step: index,
+                                       %unroll: index, %init: index) -> index {
+  %r = wavemeta.unrolled_for %lb to %ub step %step unroll %unroll iter_args(%init : index) {
+  ^bb0(%iv: index, %acc: index):
+    %next = arith.addi %acc, %iv : index
+    wavemeta.yield %next : index
+  } -> index
+  return %r : index
+}
+
 // static_if with results: both regions yield matching types.
 // CHECK-LABEL: func.func @if_with_results
 // CHECK: %[[R:.+]] = wavemeta.static_if %{{.+}} -> (i32) {

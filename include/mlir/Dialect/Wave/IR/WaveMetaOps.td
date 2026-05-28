@@ -63,7 +63,7 @@ def WaveMeta_ParamOp : WaveMeta_Op<"param", [Pure]> {
   let hasVerifier = 1;
 }
 
-// Terminator for `wavemeta.static_for` and `wavemeta.static_if`.
+// Terminator for wavemeta structured regions.
 // `Pure` because it just forwards SSA values along a region edge;
 // the RegionBranchTerminatorOpInterface lets dataflow track those
 // forwarded values into the body block args (loop back-edge) or
@@ -73,6 +73,7 @@ def WaveMeta_YieldOp : WaveMeta_Op<"yield", [
     ReturnLike,
     Terminator,
     ParentOneOf<["::mlir::wavemeta::StaticForOp",
+                 "::mlir::wavemeta::UnrolledForOp",
                  "::mlir::wavemeta::StaticIfOp"]>,
     DeclareOpInterfaceMethods<RegionBranchTerminatorOpInterface,
         ["getMutableSuccessorOperands"]>
@@ -114,6 +115,33 @@ def WaveMeta_StaticForOp : WaveMeta_Op<"static_for", [
   let regions = (region SizedRegion<1>:$body);
   let assemblyFormat = [{
     $lower_bound `to` $upper_bound `step` $step
+    (`iter_args` `(` $iter_args^ `:` type($iter_args) `)`)?
+    $body attr-dict (`->` type($results)^)?
+  }];
+  let hasVerifier = 1;
+}
+
+// Runtime loop whose body is expanded into unrolled full chunks plus a
+// scalar tail during WaveMeta specialisation.
+def WaveMeta_UnrolledForOp : WaveMeta_Op<"unrolled_for", [
+    DeclareOpInterfaceMethods<RegionBranchOpInterface,
+        ["getEntrySuccessorOperands", "getSuccessorInputs"]>,
+    RecursiveMemoryEffects,
+    AllTypesMatch<["iter_args", "results"]>
+]> {
+  let summary = "structured for-loop with a parameterized unroll factor";
+  let description = [{
+    Carries the same body contract as `scf.for`: body block argument 0 is
+    the induction value and the remaining arguments mirror `$iter_args`.
+    The WaveMeta specialiser lowers this op to a full-chunk `scf.for`
+    containing `wavemeta.static_for`, followed by a scalar tail `scf.for`.
+  }];
+  let arguments = (ins Index:$lower_bound, Index:$upper_bound, Index:$step,
+                       Index:$unroll, Variadic<AnyType>:$iter_args);
+  let results = (outs Variadic<AnyType>:$results);
+  let regions = (region SizedRegion<1>:$body);
+  let assemblyFormat = [{
+    $lower_bound `to` $upper_bound `step` $step `unroll` $unroll
     (`iter_args` `(` $iter_args^ `:` type($iter_args) `)`)?
     $body attr-dict (`->` type($results)^)?
   }];
