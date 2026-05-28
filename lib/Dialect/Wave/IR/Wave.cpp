@@ -16,6 +16,7 @@
 #include "mlir/IR/DialectImplementation.h"
 #include "mlir/Interfaces/Utils/InferIntRangeCommon.h"
 #include "llvm/ADT/DenseSet.h"
+#include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/TypeSwitch.h"
 
 #include "ixsimpl.h"
@@ -364,6 +365,22 @@ LogicalResult PackOp::verify() {
   return success();
 }
 
+OpFoldResult PackOp::fold(FoldAdaptor) {
+  Value source;
+  for (auto [index, input] : llvm::enumerate(getInputs())) {
+    ExtractOp extract = input.getDefiningOp<ExtractOp>();
+    if (!extract || extract.getIndex() != index)
+      return {};
+    if (!source)
+      source = extract.getSource();
+    if (extract.getSource() != source)
+      return {};
+  }
+  if (source && source.getType() == getResult().getType())
+    return source;
+  return {};
+}
+
 LogicalResult ExtractOp::verify() {
   Type sourceType = getSource().getType();
   std::optional<int64_t> simdWidth;
@@ -391,6 +408,16 @@ LogicalResult ExtractOp::verify() {
   if (resultType != vectorType.getElementType())
     return emitOpError("result type must match source vector element");
   return success();
+}
+
+OpFoldResult ExtractOp::fold(FoldAdaptor) {
+  PackOp pack = getSource().getDefiningOp<PackOp>();
+  if (!pack)
+    return {};
+  uint64_t index = getIndex();
+  if (index >= pack.getInputs().size())
+    return {};
+  return pack.getInputs()[index];
 }
 
 namespace {

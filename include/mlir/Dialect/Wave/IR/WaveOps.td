@@ -170,6 +170,7 @@ def Wave_PackOp : Wave_Op<"pack", [Pure, SameTypeOperands]> {
   let assemblyFormat = [{
     $inputs attr-dict `:` type($inputs) `->` type($result)
   }];
+  let hasFolder = 1;
   let hasVerifier = 1;
 }
 
@@ -182,6 +183,7 @@ def Wave_ExtractOp : Wave_Op<"extract", [Pure]> {
     $source `[` $index `]` attr-dict
     `:` type($source) `->` type($result)
   }];
+  let hasFolder = 1;
   let hasVerifier = 1;
 }
 
