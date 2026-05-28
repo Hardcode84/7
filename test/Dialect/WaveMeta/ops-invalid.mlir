@@ -97,7 +97,7 @@ func.func @if_then_type_mismatch(%c: i1) -> i32 {
 
 // Induction-var slot in the body block has the wrong type.
 func.func @for_iv_not_index(%lb: index, %ub: index, %step: index) {
-  // expected-error @below {{body block first argument must be index, got 'i32'}}
+  // expected-error @below {{body block first argument type 'i32' must match IV type 'index'}}
   "wavemeta.static_for"(%lb, %ub, %step) ({
   ^bb0(%iv: i32):
     "wavemeta.yield"() : () -> ()

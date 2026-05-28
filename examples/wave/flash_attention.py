@@ -37,6 +37,11 @@ def _validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) ->
     _parser_error_if(
         parser, args.target_waves < 0, "--target-waves must be non-negative"
     )
+    _parser_error_if(
+        parser,
+        args.tile_loop_unroll < 0,
+        "--tile-loop-unroll must be non-negative",
+    )
     for name in ("block_m", "block_n", "head_dim"):
         _parser_error_if(
             parser,
@@ -93,6 +98,12 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         default=0,
         help="stamp waveamdmachine.target_waves on the kernel; 0 omits it",
     )
+    parser.add_argument(
+        "--tile-loop-unroll",
+        type=int,
+        default=0,
+        help="unroll K/V tile loop by this factor; 0 keeps the plain scf.for",
+    )
     add_execution_args(parser, default_atol=3.0e-3, default_rtol=3.0e-3)
     args = parser.parse_args(argv)
     _validate_args(parser, args)
@@ -127,6 +138,7 @@ def main(argv: list[str] | None = None) -> int:
         seq_n=args.seq_n,
         matrix_intrinsic=matrix_intrinsic,
         target_waves=args.target_waves or None,
+        tile_loop_unroll=args.tile_loop_unroll or None,
     )
     module_text = str(module)
     if args.dump_asm:

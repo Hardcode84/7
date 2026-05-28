@@ -21,7 +21,7 @@ func.func @unrolled_main_and_tail(%init: index) -> index {
   ^bb0(%iv: index, %acc: index):
     %next = arith.addi %acc, %iv : index
     wavemeta.yield %next : index
-  } -> index
+  } -> index : index, index, index, index
   return %r : index
 }
 
@@ -45,7 +45,7 @@ module attributes {wavemeta.params = {u = 2 : index}} {
     ^bb0(%iv: index, %acc: index):
       %next = arith.addi %acc, %iv : index
       wavemeta.yield %next : index
-    } -> index
+    } -> index : index, index, index, index
     return %r : index
   }
 }
@@ -67,6 +67,6 @@ func.func @unrolled_bare(%out: memref<?xindex>) {
   ^bb0(%iv: index):
     memref.store %iv, %out[%iv] : memref<?xindex>
     wavemeta.yield
-  }
+  } : index, index, index, index
   return
 }

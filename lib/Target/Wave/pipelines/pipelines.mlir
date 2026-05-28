@@ -14,7 +14,11 @@ module attributes {transform.with_named_sequence} {
   // it for subtarget feature selection.
   transform.named_sequence @waveamd_backend(
       %root: !transform.any_op {transform.consumed}) -> !transform.any_op {
-    %r0 = transform.apply_registered_pass "waveamd-to-machine" to %root
+    %rm = transform.apply_registered_pass "wavemeta-specialize" to %root
+        : (!transform.any_op) -> !transform.any_op
+    %rmeta = transform.apply_registered_pass "canonicalize" to %rm
+        : (!transform.any_op) -> !transform.any_op
+    %r0 = transform.apply_registered_pass "waveamd-to-machine" to %rmeta
         : (!transform.any_op) -> !transform.any_op
     // Fold duplicate imm / v_mov constant materializations selection
     // emits per address add, before reg-alloc.

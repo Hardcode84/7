@@ -100,7 +100,7 @@ func.func @unrolled_for_with_iter_args(%lb: index, %ub: index, %step: index,
   ^bb0(%iv: index, %acc: index):
     %next = arith.addi %acc, %iv : index
     wavemeta.yield %next : index
-  } -> index
+  } -> index : index, index, index, index
   return %r : index
 }
 

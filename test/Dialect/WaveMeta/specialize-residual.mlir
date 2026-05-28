@@ -51,7 +51,7 @@ func.func @unresolved_unrolled_for(%init: index) -> index {
   ^bb0(%iv: index, %acc: index):
     %next = arith.addi %acc, %iv : index
     wavemeta.yield %next : index
-  } -> index
+  } -> index : index, index, index, index
   return %r : index
 }
 

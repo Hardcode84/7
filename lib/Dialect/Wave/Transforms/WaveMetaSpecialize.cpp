@@ -224,6 +224,20 @@ static Value constantIndex(OpBuilder &builder, Location loc, int64_t value) {
   return arith::ConstantIndexOp::create(builder, loc, value).getResult();
 }
 
+static Value constantLike(OpBuilder &builder, Location loc, Type type,
+                          int64_t value) {
+  if (type.isIndex())
+    return constantIndex(builder, loc, value);
+  return arith::ConstantIntOp::create(builder, loc, type, value).getResult();
+}
+
+static Value indexCast(OpBuilder &builder, Location loc, Value value,
+                       Type type) {
+  if (value.getType() == type)
+    return value;
+  return arith::IndexCastOp::create(builder, loc, type, value).getResult();
+}
+
 static Value addI(OpBuilder &builder, Location loc, Value lhs, Value rhs) {
   return arith::AddIOp::create(builder, loc, lhs, rhs).getResult();
 }
@@ -242,8 +256,9 @@ static Value divUI(OpBuilder &builder, Location loc, Value lhs, Value rhs) {
 
 static Value buildDynamicMainEnd(OpBuilder &builder, Location loc, Value lower,
                                  Value upper, Value step, Value unroll) {
-  Value c0 = constantIndex(builder, loc, 0);
-  Value c1 = constantIndex(builder, loc, 1);
+  Type type = lower.getType();
+  Value c0 = constantLike(builder, loc, type, 0);
+  Value c1 = constantLike(builder, loc, type, 1);
   Value span = subI(builder, loc, upper, lower);
   Value stepMinusOne = subI(builder, loc, step, c1);
   Value tripCeil =
@@ -269,7 +284,7 @@ static Value buildMainEnd(OpBuilder &builder, Location loc, Value lower,
   int64_t span = *ub - *lb;
   int64_t trip = span <= 0 ? 0 : (span + *st - 1) / *st;
   int64_t mainTrip = (trip / *ur) * *ur;
-  return constantIndex(builder, loc, *lb + mainTrip * *st);
+  return constantLike(builder, loc, lower.getType(), *lb + mainTrip * *st);
 }
 
 static Value buildMainStep(OpBuilder &builder, Location loc, Value step,
@@ -278,7 +293,7 @@ static Value buildMainStep(OpBuilder &builder, Location loc, Value step,
   std::optional<int64_t> ur = getConstantIntValue(unroll);
   if (!st || !ur)
     return mulI(builder, loc, step, unroll);
-  return constantIndex(builder, loc, *st * *ur);
+  return constantLike(builder, loc, step.getType(), *st * *ur);
 }
 
 static void createStaticForBody(PatternRewriter &rewriter, StaticForOp loop,
@@ -292,7 +307,9 @@ static void createStaticForBody(PatternRewriter &rewriter, StaticForOp loop,
                                      argTypes, argLocs);
 
   rewriter.setInsertionPointToStart(body);
-  Value offset = mulI(rewriter, loc, body->getArgument(0), step);
+  Value staticIv =
+      indexCast(rewriter, loc, body->getArgument(0), step.getType());
+  Value offset = mulI(rewriter, loc, staticIv, step);
   Value logicalIv = addI(rewriter, loc, baseIv, offset);
   SmallVector<Value> yielded = cloneLoopBody(rewriter, srcBody, logicalIv,
                                              body->getArguments().drop_front());
@@ -311,6 +328,7 @@ struct UnrolledForLower : OpRewritePattern<UnrolledForOp> {
     Location loc = op.getLoc();
     Value c0 = constantIndex(rewriter, loc, 0);
     Value c1 = constantIndex(rewriter, loc, 1);
+    Value staticUnroll = constantIndex(rewriter, loc, *unroll);
     Value mainEnd =
         buildMainEnd(rewriter, loc, op.getLowerBound(), op.getUpperBound(),
                      op.getStep(), op.getUnroll());
@@ -321,7 +339,7 @@ struct UnrolledForLower : OpRewritePattern<UnrolledForOp> {
     rewriter.setInsertionPointToStart(mainFor.getBody());
     StaticForOp staticFor =
         StaticForOp::create(rewriter, loc, op.getResultTypes(), c0,
-                            op.getUnroll(), c1, mainFor.getRegionIterArgs());
+                            staticUnroll, c1, mainFor.getRegionIterArgs());
     createStaticForBody(rewriter, staticFor, op.getBody(),
                         mainFor.getInductionVar(), op.getStep());
     if (!op.getResultTypes().empty()) {

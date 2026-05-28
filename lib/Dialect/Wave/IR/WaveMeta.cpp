@@ -79,7 +79,7 @@ YieldOp::getMutableSuccessorOperands(RegionSuccessor successor) {
 // StaticForOp
 //===----------------------------------------------------------------------===//
 
-static LogicalResult verifyLoopRegion(Operation *op, Region &body,
+static LogicalResult verifyLoopRegion(Operation *op, Region &body, Type ivType,
                                       ValueRange iterArgs) {
   Block &block = body.front();
   unsigned expectedArgs = 1 + iterArgs.size();
@@ -87,9 +87,10 @@ static LogicalResult verifyLoopRegion(Operation *op, Region &body,
     return op->emitOpError("body block expects ")
            << expectedArgs << " arguments (induction var + iter args), got "
            << block.getNumArguments();
-  if (!block.getArgument(0).getType().isIndex())
-    return op->emitOpError("body block first argument must be index, got ")
-           << block.getArgument(0).getType();
+  if (block.getArgument(0).getType() != ivType)
+    return op->emitOpError("body block first argument type ")
+           << block.getArgument(0).getType() << " must match IV type "
+           << ivType;
   for (auto [idx, init] : llvm::enumerate(iterArgs)) {
     Type argType = block.getArgument(idx + 1).getType();
     if (argType != init.getType())
@@ -112,7 +113,8 @@ static LogicalResult verifyLoopRegion(Operation *op, Region &body,
 }
 
 LogicalResult StaticForOp::verify() {
-  return verifyLoopRegion(getOperation(), getBody(), getIterArgs());
+  return verifyLoopRegion(getOperation(), getBody(), getLowerBound().getType(),
+                          getIterArgs());
 }
 
 // The body region is both the entry (from parent) and a back-edge
@@ -142,7 +144,8 @@ ValueRange StaticForOp::getSuccessorInputs(RegionSuccessor successor) {
 //===----------------------------------------------------------------------===//
 
 LogicalResult UnrolledForOp::verify() {
-  return verifyLoopRegion(getOperation(), getBody(), getIterArgs());
+  return verifyLoopRegion(getOperation(), getBody(), getLowerBound().getType(),
+                          getIterArgs());
 }
 
 void UnrolledForOp::getSuccessorRegions(

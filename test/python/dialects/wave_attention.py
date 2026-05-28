@@ -23,6 +23,15 @@ module = build_flash_attention_f32_module(
     random_seed=11,
     seq_n=32,
 )
+unrolled = build_flash_attention_f32_module(
+    block_m=16,
+    block_n=16,
+    head_dim=16,
+    random_seed=11,
+    seq_n=32,
+    tile_loop_unroll=2,
+)
+assert "wavemeta.unrolled_for" in str(unrolled)
 mfma = build_flash_attention_f32_module(
     block_m=16,
     block_n=16,
@@ -42,6 +51,7 @@ single_text = str(single)
 assert single_text.count("waveamd.mma") == 4
 assert single_text.count("wave.cast") > 0
 print("fa-mfma ok")
+print("fa-unrolled ok")
 print(
     "fa-single mma",
     single_text.count("waveamd.mma"),
@@ -52,6 +62,7 @@ print(module)
 
 # CHECK: fa-ref 256 512 512 256
 # CHECK: fa-mfma ok
+# CHECK: fa-unrolled ok
 # CHECK: fa-single mma 4 casts {{[1-9][0-9]*}}
 # CHECK: func.func @flash_attention_f32
 # CHECK: waveamd.mma

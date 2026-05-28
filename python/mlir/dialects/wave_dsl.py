@@ -933,7 +933,7 @@ class FunctionBuilder:
             if nonzero_trip:
                 raise ValueError("nonzero_trip is not supported with unroll")
             if isinstance(unroll, int):
-                unroll = self.constant(index_type(), unroll)
+                unroll = self.constant(lower.type, unroll)
             forop = wavemeta.UnrolledForOp(
                 lower, upper, step, unroll, iter_args=list(init_args)
             )

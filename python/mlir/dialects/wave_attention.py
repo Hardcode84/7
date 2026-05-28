@@ -66,6 +66,7 @@ class _FlashAttentionConfig:
     random_seed: int = 0
     seq_n: int | None = None
     matrix_intrinsic: str = "wmma"
+    tile_loop_unroll: int | None = None
 
     def __post_init__(self) -> None:
         _validate_positive_config(self)
@@ -125,6 +126,8 @@ def _validate_positive_config(cfg: _FlashAttentionConfig) -> None:
         _require_positive(name, value)
     if cfg.seq_n is not None:
         _require_positive("seq_n", cfg.seq_n)
+    if cfg.tile_loop_unroll is not None:
+        _require_positive("tile_loop_unroll", cfg.tile_loop_unroll)
 
 
 def _validate_mma_config(cfg: _FlashAttentionConfig) -> None:
@@ -691,7 +694,9 @@ def _emit_kernel(bld: dsl.FunctionBuilder, cfg: _FlashAttentionConfig) -> None:
         c1 = bld.constant(dsl.i32(), 1)
         upper = bld.constant(dsl.i32(), num_tiles)
         init_args = _flatten_loop_state(states)
-        with bld.for_loop(c1, upper, c1, init_args=init_args) as loop:
+        with bld.for_loop(
+            c1, upper, c1, init_args=init_args, unroll=cfg.tile_loop_unroll
+        ) as loop:
             tile_sym = dsl.sym("fa_tile")
             loop_states = _split_loop_state(
                 tuple(loop.inner_iter_args), cfg.output_chunks
@@ -830,6 +835,7 @@ def build_flash_attention_f32_module(
     seq_n: int | None = None,
     matrix_intrinsic: str = "wmma",
     target_waves: int | None = None,
+    tile_loop_unroll: int | None = None,
 ) -> Module:
     cfg = _FlashAttentionConfig(
         block_m,
@@ -838,6 +844,7 @@ def build_flash_attention_f32_module(
         random_seed=random_seed,
         seq_n=seq_n,
         matrix_intrinsic=matrix_intrinsic,
+        tile_loop_unroll=tile_loop_unroll,
     )
     bld = dsl.ModuleBuilder()
     with bld:

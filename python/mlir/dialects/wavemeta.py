@@ -15,7 +15,6 @@ PARAMS_ATTR_NAME = "wavemeta.params"
 try:
     from ..ir import (
         Block,
-        IndexType,
         InsertionPoint,
         Location,
         Operation,
@@ -63,7 +62,7 @@ class StaticForOp(StaticForOp):  # noqa: F405
             loc=loc,
             ip=ip,
         )
-        Block.create_at_start(self.body, [IndexType.get(), *result_types])
+        Block.create_at_start(self.body, [lower_bound.type, *result_types])
 
     @property
     def body_block(self) -> Block:
@@ -107,7 +106,7 @@ class UnrolledForOp(UnrolledForOp):  # noqa: F405
             loc=loc,
             ip=ip,
         )
-        Block.create_at_start(self.body, [IndexType.get(), *result_types])
+        Block.create_at_start(self.body, [lower_bound.type, *result_types])
 
     @property
     def body_block(self) -> Block:

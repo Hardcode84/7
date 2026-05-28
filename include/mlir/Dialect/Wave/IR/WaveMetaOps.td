@@ -127,6 +127,7 @@ def WaveMeta_UnrolledForOp : WaveMeta_Op<"unrolled_for", [
     DeclareOpInterfaceMethods<RegionBranchOpInterface,
         ["getEntrySuccessorOperands", "getSuccessorInputs"]>,
     RecursiveMemoryEffects,
+    AllTypesMatch<["lower_bound", "upper_bound", "step", "unroll"]>,
     AllTypesMatch<["iter_args", "results"]>
 ]> {
   let summary = "structured for-loop with a parameterized unroll factor";
@@ -136,14 +137,18 @@ def WaveMeta_UnrolledForOp : WaveMeta_Op<"unrolled_for", [
     The WaveMeta specialiser lowers this op to a full-chunk `scf.for`
     containing `wavemeta.static_for`, followed by a scalar tail `scf.for`.
   }];
-  let arguments = (ins Index:$lower_bound, Index:$upper_bound, Index:$step,
-                       Index:$unroll, Variadic<AnyType>:$iter_args);
+  let arguments = (ins AnySignlessIntegerOrIndex:$lower_bound,
+                       AnySignlessIntegerOrIndex:$upper_bound,
+                       AnySignlessIntegerOrIndex:$step,
+                       AnySignlessIntegerOrIndex:$unroll,
+                       Variadic<AnyType>:$iter_args);
   let results = (outs Variadic<AnyType>:$results);
   let regions = (region SizedRegion<1>:$body);
   let assemblyFormat = [{
     $lower_bound `to` $upper_bound `step` $step `unroll` $unroll
     (`iter_args` `(` $iter_args^ `:` type($iter_args) `)`)?
     $body attr-dict (`->` type($results)^)?
+    `:` type($lower_bound) `,` type($upper_bound) `,` type($step) `,` type($unroll)
   }];
   let hasVerifier = 1;
 }

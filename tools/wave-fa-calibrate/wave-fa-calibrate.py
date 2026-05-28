@@ -114,6 +114,8 @@ def build_example_args(args: argparse.Namespace, chip: str) -> list[str]:
     ]
     if args.target_waves:
         cmd.append(f"--target-waves={args.target_waves}")
+    if args.tile_loop_unroll:
+        cmd.append(f"--tile-loop-unroll={args.tile_loop_unroll}")
     return cmd
 
 
@@ -229,7 +231,11 @@ def pipeline_text(
     return f"""module attributes {{transform.with_named_sequence}} {{
   transform.named_sequence @__transform_main(
       %root: !transform.any_op {{transform.consumed}}) -> !transform.any_op {{
-    %r0 = transform.apply_registered_pass "waveamd-to-machine" to %root
+    %rm = transform.apply_registered_pass "wavemeta-specialize" to %root
+        : (!transform.any_op) -> !transform.any_op
+    %rmeta = transform.apply_registered_pass "canonicalize" to %rm
+        : (!transform.any_op) -> !transform.any_op
+    %r0 = transform.apply_registered_pass "waveamd-to-machine" to %rmeta
         : (!transform.any_op) -> !transform.any_op
     %rk = transform.apply_registered_pass "canonicalize" to %r0
         : (!transform.any_op) -> !transform.any_op
@@ -537,6 +543,7 @@ def build_argparser() -> argparse.ArgumentParser:
     ap.add_argument("--print-regions", action="store_true")
     ap.add_argument("--no-pressure-aware-schedule", action="store_true")
     ap.add_argument("--target-waves", type=int, default=0)
+    ap.add_argument("--tile-loop-unroll", type=int, default=0)
     ap.add_argument("--skip-hw", action="store_true")
     ap.add_argument("--no-check", action="store_true")
     ap.add_argument("--keep-tmp", action="store_true")
@@ -576,6 +583,7 @@ def validate_args(args: argparse.Namespace, chip: str) -> None:
         )
     exit_if(args.warmup < 0, "--warmup must be non-negative")
     exit_if(args.target_waves < 0, "--target-waves must be non-negative")
+    exit_if(args.tile_loop_unroll < 0, "--tile-loop-unroll must be non-negative")
     exit_if(
         bool(args.head_dim & (args.head_dim - 1)), "--head-dim must be a power of two"
     )
