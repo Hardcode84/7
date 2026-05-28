@@ -206,6 +206,8 @@ static void makeInputs(const Args &a, std::vector<float> &q,
         static_cast<_Float16>(static_cast<double>(value) * qScale));
   for (float &value : k)
     value = static_cast<float>(static_cast<_Float16>(value));
+  for (float &value : v)
+    value = static_cast<float>(static_cast<_Float16>(value));
 }
 
 static std::vector<_Float16> packHalf(const std::vector<float> &values) {
@@ -312,16 +314,18 @@ int main(int argc, char **argv) {
   makeInputs(a, hostQ, hostK, hostV);
   std::vector<_Float16> hostQHalf = packHalf(hostQ);
   std::vector<_Float16> hostKHalf = packHalf(hostK);
+  std::vector<_Float16> hostVHalf = packHalf(hostV);
 
   _Float16 *deviceQ = nullptr;
   _Float16 *deviceK = nullptr;
-  float *deviceV = nullptr;
+  _Float16 *deviceV = nullptr;
   float *deviceOut = nullptr;
   checkHip(hipMalloc(&deviceQ, hostQHalf.size() * sizeof(_Float16)),
            "hipMalloc Q");
   checkHip(hipMalloc(&deviceK, hostKHalf.size() * sizeof(_Float16)),
            "hipMalloc K");
-  checkHip(hipMalloc(&deviceV, hostV.size() * sizeof(float)), "hipMalloc V");
+  checkHip(hipMalloc(&deviceV, hostVHalf.size() * sizeof(_Float16)),
+           "hipMalloc V");
   checkHip(hipMalloc(&deviceOut, hostOut.size() * sizeof(float)),
            "hipMalloc out");
   checkHip(hipMemcpy(deviceQ, hostQHalf.data(),
@@ -332,7 +336,8 @@ int main(int argc, char **argv) {
                      hostKHalf.size() * sizeof(_Float16),
                      hipMemcpyHostToDevice),
            "hipMemcpy K");
-  checkHip(hipMemcpy(deviceV, hostV.data(), hostV.size() * sizeof(float),
+  checkHip(hipMemcpy(deviceV, hostVHalf.data(),
+                     hostVHalf.size() * sizeof(_Float16),
                      hipMemcpyHostToDevice),
            "hipMemcpy V");
   checkHip(hipMemset(deviceOut, 0, hostOut.size() * sizeof(float)),

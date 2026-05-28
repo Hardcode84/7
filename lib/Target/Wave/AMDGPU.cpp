@@ -390,6 +390,16 @@ private:
                        : llvm::AMDGPU::BUFFER_STORE_DWORD_OFFEN_gfx11;
   }
 
+  unsigned bufferStoreB16() const {
+    if (isGfx90APlus())
+      return llvm::AMDGPU::BUFFER_STORE_SHORT_OFFEN_gfx90a;
+    if (isGfx8Or9())
+      return llvm::AMDGPU::BUFFER_STORE_SHORT_OFFEN_vi;
+    if (isaVersion.Major == 10)
+      return llvm::AMDGPU::BUFFER_STORE_SHORT_OFFEN_gfx10;
+    return llvm::AMDGPU::BUFFER_STORE_SHORT_OFFEN_gfx11;
+  }
+
   unsigned bufferLoadB32() const {
     if (isGfx90APlus())
       return llvm::AMDGPU::BUFFER_LOAD_DWORD_OFFEN_gfx90a;
@@ -397,14 +407,48 @@ private:
                        : llvm::AMDGPU::BUFFER_LOAD_DWORD_OFFEN_gfx11;
   }
 
+  unsigned bufferLoadB16() const {
+    if (isGfx90APlus())
+      return llvm::AMDGPU::BUFFER_LOAD_USHORT_OFFEN_gfx90a;
+    if (isGfx8Or9())
+      return llvm::AMDGPU::BUFFER_LOAD_USHORT_OFFEN_vi;
+    if (isaVersion.Major == 10)
+      return llvm::AMDGPU::BUFFER_LOAD_USHORT_OFFEN_gfx10;
+    return llvm::AMDGPU::BUFFER_LOAD_USHORT_OFFEN_gfx11;
+  }
+
   unsigned globalStoreB32() const {
     return isGfx8Or9() ? llvm::AMDGPU::GLOBAL_STORE_DWORD_SADDR_vi
                        : llvm::AMDGPU::GLOBAL_STORE_DWORD_SADDR_gfx11;
   }
 
+  unsigned globalStoreB16() const {
+    if (isGfx8Or9())
+      return llvm::AMDGPU::GLOBAL_STORE_SHORT_SADDR_vi;
+    if (isaVersion.Major == 10)
+      return llvm::AMDGPU::GLOBAL_STORE_SHORT_SADDR_gfx10;
+    if (isaVersion.Major == 11)
+      return llvm::AMDGPU::GLOBAL_STORE_SHORT_SADDR_gfx11;
+    if (isaVersion.Major == 12)
+      return llvm::AMDGPU::GLOBAL_STORE_SHORT_SADDR_gfx12;
+    return llvm::AMDGPU::GLOBAL_STORE_SHORT_SADDR_gfx13;
+  }
+
   unsigned globalLoadB32() const {
     return isGfx8Or9() ? llvm::AMDGPU::GLOBAL_LOAD_DWORD_SADDR_vi
                        : llvm::AMDGPU::GLOBAL_LOAD_DWORD_SADDR_gfx11;
+  }
+
+  unsigned globalLoadB16() const {
+    if (isGfx8Or9())
+      return llvm::AMDGPU::GLOBAL_LOAD_USHORT_SADDR_vi;
+    if (isaVersion.Major == 10)
+      return llvm::AMDGPU::GLOBAL_LOAD_USHORT_SADDR_gfx10;
+    if (isaVersion.Major == 11)
+      return llvm::AMDGPU::GLOBAL_LOAD_USHORT_SADDR_gfx11;
+    if (isaVersion.Major == 12)
+      return llvm::AMDGPU::GLOBAL_LOAD_USHORT_SADDR_gfx12;
+    return llvm::AMDGPU::GLOBAL_LOAD_USHORT_SADDR_gfx13;
   }
 
   unsigned globalLoadB64() const {
@@ -525,9 +569,33 @@ private:
                        : llvm::AMDGPU::DS_READ_B32_gfx11;
   }
 
+  unsigned dsReadB16() const {
+    if (isGfx8Or9())
+      return llvm::AMDGPU::DS_READ_U16_vi_gfx9;
+    if (isaVersion.Major == 10)
+      return llvm::AMDGPU::DS_READ_U16_gfx10;
+    if (isaVersion.Major == 11)
+      return llvm::AMDGPU::DS_READ_U16_gfx11;
+    if (isaVersion.Major == 12)
+      return llvm::AMDGPU::DS_READ_U16_gfx12;
+    return llvm::AMDGPU::DS_READ_U16_gfx13;
+  }
+
   unsigned dsWriteB32() const {
     return isGfx8Or9() ? llvm::AMDGPU::DS_WRITE_B32_vi_gfx9
                        : llvm::AMDGPU::DS_WRITE_B32_gfx11;
+  }
+
+  unsigned dsWriteB16() const {
+    if (isGfx8Or9())
+      return llvm::AMDGPU::DS_WRITE_B16_vi_gfx9;
+    if (isaVersion.Major == 10)
+      return llvm::AMDGPU::DS_WRITE_B16_gfx10;
+    if (isaVersion.Major == 11)
+      return llvm::AMDGPU::DS_WRITE_B16_gfx11;
+    if (isaVersion.Major == 12)
+      return llvm::AMDGPU::DS_WRITE_B16_gfx12;
+    return llvm::AMDGPU::DS_WRITE_B16_gfx13;
   }
 
   std::optional<unsigned> getImmediate(Value value) const {
@@ -1493,6 +1561,8 @@ private:
     if (isa<waveamdmachine::VReadfirstlaneB32Op>(op))
       return emitMC(vReadfirstlaneB32(),
                     {toMCOperand(result()), toMCOperand(op.getOperand(0))});
+    if (isa<waveamdmachine::GlobalStoreB16Op>(op))
+      return emitGlobalStore(op, globalStoreB16());
     if (isa<waveamdmachine::GlobalStoreB32Op>(op))
       return emitGlobalStore(op, globalStoreB32());
     if (isa<waveamdmachine::GlobalStoreB64Op>(op))
@@ -1505,6 +1575,8 @@ private:
     //   vdst, saddr, vaddr, offset, cpol
     // -- the SADDR variants put the SGPR base first, unlike the *non*-SADDR
     // store variants we use elsewhere.
+    if (isa<waveamdmachine::GlobalLoadB16Op>(op))
+      return emitGlobalLoad(op, globalLoadB16());
     if (isa<waveamdmachine::GlobalLoadB32Op>(op))
       return emitGlobalLoad(op, globalLoadB32());
     if (isa<waveamdmachine::GlobalLoadB64Op>(op))
@@ -1552,6 +1624,8 @@ private:
     //          soffset(SGPR1OrImm), [dep], inst_offset attr
     //   LOAD : offset(VGPR1), descriptor(SGPR4),
     //          soffset(SGPR1OrImm), [dep], inst_offset attr
+    if (isa<waveamdmachine::BufferStoreB16Op>(op))
+      return emitBufferStore(op, bufferStoreB16());
     if (isa<waveamdmachine::BufferStoreB32Op>(op))
       return emitBufferStore(op, bufferStoreB32());
     if (isa<waveamdmachine::BufferStoreB64Op>(op))
@@ -1560,6 +1634,8 @@ private:
       return emitBufferStore(op, bufferStoreB96());
     if (isa<waveamdmachine::BufferStoreB128Op>(op))
       return emitBufferStore(op, bufferStoreB128());
+    if (isa<waveamdmachine::BufferLoadB16Op>(op))
+      return emitBufferLoad(op, bufferLoadB16());
     if (isa<waveamdmachine::BufferLoadB32Op>(op))
       return emitBufferLoad(op, bufferLoadB32());
     if (isa<waveamdmachine::BufferLoadB64Op>(op))
@@ -1604,6 +1680,8 @@ private:
                      llvm::MCOperand::createImm(instOffset),
                      llvm::MCOperand::createImm(aux)});
     }
+    if (isa<waveamdmachine::DsLoadB16Op>(op))
+      return emitDsLoad(op, dsReadB16());
     if (isa<waveamdmachine::DsLoadB32Op>(op))
       return emitDsLoad(op, dsReadB32());
     if (isa<waveamdmachine::DsLoadB64Op>(op))
@@ -1612,6 +1690,8 @@ private:
       return emitDsLoad(op, dsReadB96());
     if (isa<waveamdmachine::DsLoadB128Op>(op))
       return emitDsLoad(op, dsReadB128());
+    if (isa<waveamdmachine::DsStoreB16Op>(op))
+      return emitDsStore(op, dsWriteB16());
     if (isa<waveamdmachine::DsStoreB32Op>(op))
       return emitDsStore(op, dsWriteB32());
     if (isa<waveamdmachine::DsStoreB64Op>(op))

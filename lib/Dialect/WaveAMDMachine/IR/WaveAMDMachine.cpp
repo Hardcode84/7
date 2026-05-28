@@ -141,7 +141,19 @@ LogicalResult MfmaF32_16x16x32_F16Op::verify() {
   return success();
 }
 
+LogicalResult GlobalStoreB16Op::verify() {
+  if (getNumResults() > 1)
+    return emitOpError("produces at most one memory token");
+  return success();
+}
+
 LogicalResult GlobalStoreB32Op::verify() {
+  if (getNumResults() > 1)
+    return emitOpError("produces at most one memory token");
+  return success();
+}
+
+LogicalResult BufferStoreB16Op::verify() {
   if (getNumResults() > 1)
     return emitOpError("produces at most one memory token");
   return success();
@@ -162,6 +174,12 @@ LogicalResult GlobalStoreTupleB32Op::verify() {
   return success();
 }
 
+LogicalResult GlobalLoadB16Op::verify() {
+  if (getTokens().size() > 1)
+    return emitOpError("produces at most one memory token");
+  return success();
+}
+
 LogicalResult GlobalLoadB32Op::verify() {
   if (getTokens().size() > 1)
     return emitOpError("produces at most one memory token");
@@ -174,6 +192,12 @@ LogicalResult GlobalLoadTupleB32Op::verify() {
   auto resultType = cast<RegType>(getResult().getType());
   if (resultType.getWidth() < 1)
     return emitOpError("result tuple width must be at least 1");
+  return success();
+}
+
+LogicalResult BufferLoadB16Op::verify() {
+  if (getTokens().size() > 1)
+    return emitOpError("produces at most one memory token");
   return success();
 }
 

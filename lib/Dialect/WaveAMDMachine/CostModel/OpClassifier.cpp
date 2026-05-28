@@ -59,8 +59,8 @@ SchedClass classifyOp(Operation *op) {
       .Case<WmmaF32_16x16x16_F16Op, WmmaI32_16x16x16_IU8Op>(
           [](auto) { return SchedClass::Write32Bit; })
       // LDS (ds_* family).
-      .Case<DsLoadB32Op, DsLoadB64Op, DsLoadB96Op, DsLoadB128Op,
-            DsLoadTupleB32Op, DsStoreB32Op, DsStoreB64Op,
+      .Case<DsLoadB16Op, DsLoadB32Op, DsLoadB64Op, DsLoadB96Op, DsLoadB128Op,
+            DsLoadTupleB32Op, DsStoreB16Op, DsStoreB32Op, DsStoreB64Op,
             DsStoreB96Op, DsStoreB128Op, DsStoreTupleB32Op>(
           [](auto) { return SchedClass::WriteLDS; })
       // Scalar memory (s_load_*).

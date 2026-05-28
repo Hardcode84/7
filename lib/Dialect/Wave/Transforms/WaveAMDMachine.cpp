@@ -427,6 +427,7 @@ LogicalResult WaveAMDMachineSelector::selectOperation(Operation *op) {
     builder.setInsertionPoint(op);
   return llvm::TypeSwitch<Operation *, LogicalResult>(op)
       .Case<arith::ConstantIntOp>([&](auto o) { return selectConstant(o); })
+      .Case<arith::ConstantOp>([&](auto o) { return selectConstant(o); })
       .Case<LaneIdOp>([&](auto o) { return selectLaneId(o); })
       .Case<ReadCyclesOp>([&](auto o) { return selectReadCycles(o); })
       .Case<WorkgroupIdOp>([&](auto o) { return selectWorkgroupId(o); })
@@ -493,6 +494,19 @@ LogicalResult WaveAMDMachineSelector::selectConstant(arith::ConstantIntOp op) {
     return success();
   }
   values[op.getResult()] = createImm(builder, op.getLoc(), op.value());
+  eraseIfTopLevel(op);
+  return success();
+}
+
+LogicalResult WaveAMDMachineSelector::selectConstant(arith::ConstantOp op) {
+  FloatAttr attr = dyn_cast<FloatAttr>(op.getValue());
+  if (!attr)
+    return op.emitError("unsupported arith.constant attribute");
+  unsigned bits = op.getType().getIntOrFloatBitWidth();
+  if (bits != 16 && bits != 32)
+    return op.emitError("floating constant must be 16 or 32 bits wide");
+  values[op.getResult()] = createImm(
+      builder, op.getLoc(), attr.getValue().bitcastToAPInt().getZExtValue());
   eraseIfTopLevel(op);
   return success();
 }

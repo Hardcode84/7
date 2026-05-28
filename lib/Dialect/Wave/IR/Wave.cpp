@@ -644,8 +644,8 @@ decodeLoadShape(Type resultElementType,
   if (!resultElementType.isIntOrFloat())
     return emitError("result element type must be integer or float");
   unsigned bits = resultElementType.getIntOrFloatBitWidth();
-  if (bits != 32)
-    return emitError("scalar result element type must be 32 bits wide for now");
+  if (bits != 16 && bits != 32)
+    return emitError("scalar result element type must be 16 or 32 bits wide");
   return LoadShape{bits, bits};
 }
 

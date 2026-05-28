@@ -102,6 +102,18 @@ class _FlashAttentionConfig:
     def score_lds_bytes(self) -> int:
         return self.block_m * self.block_n * 4
 
+    @property
+    def prob_lds_bytes(self) -> int:
+        return self.block_m * self.mma.k_tile * 2
+
+    @property
+    def value_lds_bytes(self) -> int:
+        return 16 * self.mma.k_tile * 2
+
+    @property
+    def lds_bytes(self) -> int:
+        return self.score_lds_bytes + self.prob_lds_bytes + self.value_lds_bytes
+
 
 def _validate_positive_config(cfg: _FlashAttentionConfig) -> None:
     for name, value in (
@@ -169,7 +181,11 @@ def generate_flash_attention_f32_inputs(
     v_values = _rand_values(cfg.kv_elements, seed=random_seed, stream=2, scale=0.125)
     scale = math.log2(math.e) / math.sqrt(cfg.head_dim)
     q_values = tuple(_round_f16(x * scale) for x in q_base)
-    return q_values, tuple(_round_f16(x) for x in k_values), v_values
+    return (
+        q_values,
+        tuple(_round_f16(x) for x in k_values),
+        tuple(_round_f16(x) for x in v_values),
+    )
 
 
 def compute_flash_attention_f32_reference(
@@ -213,9 +229,16 @@ def _target_waves_attrs(target_waves: int | None) -> dict[str, dsl.Attribute]:
     return {_TARGET_WAVES_ATTR: dsl.i64_attr(target_waves)}
 
 
-def _load_f32(bld: dsl.FunctionBuilder, ptr: dsl.Value, wave_size: int) -> dsl.Value:
-    value, _ = bld.load(ptr, dsl.simd_type(dsl.f32(), width=wave_size))
-    return value
+def _load_f16_as_f32(
+    bld: dsl.FunctionBuilder, ptr: dsl.Value, wave_size: int
+) -> dsl.Value:
+    value, _ = bld.load(ptr, dsl.simd_type(dsl.f16(), width=wave_size))
+    return bld.fpconvert(value, dsl.simd_type(dsl.f32(), width=wave_size))
+
+
+def _zero_f16_simd(bld: dsl.FunctionBuilder, wave_size: int) -> dsl.Value:
+    zero = bld.splat(bld.constant(dsl.f32(), 0.0), dsl.f32(), wave_size)
+    return bld.fpconvert(zero, dsl.simd_type(dsl.f16(), width=wave_size))
 
 
 @dataclass(frozen=True)
@@ -280,6 +303,27 @@ def _load_k_fragment(
     return frag
 
 
+def _load_row_major_fragment(
+    bld: dsl.FunctionBuilder,
+    cfg: _FlashAttentionConfig,
+    ptr: dsl.Value,
+    frag_type: dsl.Type,
+    row_stride: int,
+    lane_value: dsl.Value,
+    after: dsl.Value,
+) -> dsl.Value:
+    lane_sym = dsl.sym("fa_lane")
+    lane_expr = dsl.mod(lane_sym, cfg.mma.wave_size)
+    lane_mod16 = dsl.mod(lane_expr, 16)
+    lane_k_off = dsl.floor(lane_expr / 16) * cfg.mma.lane_k_elems
+    off = bld.index_expr(
+        lane_mod16 * row_stride + lane_k_off,
+        bindings={lane_sym: lane_value},
+    )
+    frag, _ = bld.fragment_load(bld.ptr_add(ptr, off), frag_type, after=after)
+    return frag
+
+
 def _max_all(bld: dsl.FunctionBuilder, values: tuple[dsl.Value, ...]) -> dsl.Value:
     result = values[0]
     for value in values[1:]:
@@ -304,13 +348,31 @@ def _emit_qk_tile(
     return acc
 
 
+def _mod_expr(value: int | ixsimpl.Expr, divisor: int) -> int | ixsimpl.Expr:
+    if isinstance(value, int):
+        return value % divisor
+    return dsl.mod(value, divisor)
+
+
+def _floor_div_expr(value: int | ixsimpl.Expr, divisor: int) -> int | ixsimpl.Expr:
+    if isinstance(value, int):
+        return value // divisor
+    return dsl.floor(value / divisor)
+
+
 def _score_slot_expr(
-    cfg: _FlashAttentionConfig, row: ixsimpl.Expr, col: int
-) -> ixsimpl.Expr:
+    cfg: _FlashAttentionConfig,
+    row: int | ixsimpl.Expr,
+    col: int | ixsimpl.Expr,
+) -> int | ixsimpl.Expr:
     if cfg.mma.score_layout == "wmma":
-        return (dsl.mod(row, 2) * 16 + col) * cfg.mma.acc_registers + dsl.floor(row / 2)
+        return (_mod_expr(row, 2) * 16 + col) * cfg.mma.acc_registers + _floor_div_expr(
+            row, 2
+        )
     if cfg.mma.score_layout == "mfma":
-        return (row * 4 + (col % 4)) * cfg.mma.acc_registers + (col // 4)
+        return (row * 4 + _mod_expr(col, 4)) * cfg.mma.acc_registers + (
+            _floor_div_expr(col, 4)
+        )
     raise AssertionError(f"unknown score layout {cfg.mma.score_layout}")
 
 
@@ -359,7 +421,7 @@ def _emit_first_tile(
         prob = bld.fexp2(bld.fsub(score, row_max))
         denom = prob if denom is None else bld.fadd(denom, prob)
         v_off = bld.index_expr((start_n + n) * cfg.head_dim + d_expr, bindings=bindings)
-        v_val = _load_f32(bld, bld.ptr_add(v_ptr, v_off), cfg.mma.wave_size)
+        v_val = _load_f16_as_f32(bld, bld.ptr_add(v_ptr, v_off), cfg.mma.wave_size)
         weighted = bld.fmul(prob, v_val)
         numer = weighted if numer is None else bld.fadd(numer, weighted)
 
@@ -389,10 +451,181 @@ def _emit_online_tile(
         prob = bld.fexp2(bld.fsub(score, next_max))
         next_denom = bld.fadd(next_denom, prob)
         v_off = bld.index_expr((start_n + n) * cfg.head_dim + d_expr, bindings=bindings)
-        v_val = _load_f32(bld, bld.ptr_add(v_ptr, v_off), cfg.mma.wave_size)
+        v_val = _load_f16_as_f32(bld, bld.ptr_add(v_ptr, v_off), cfg.mma.wave_size)
         next_numer = bld.fadd(next_numer, bld.fmul(prob, v_val))
 
     return next_max, next_denom, next_numer
+
+
+def _stage_probability_tile(
+    bld: dsl.FunctionBuilder,
+    cfg: _FlashAttentionConfig,
+    score_ptr: dsl.Value,
+    prob_ptr: dsl.Value,
+    lane: dsl.Value,
+    after: dsl.Value,
+) -> dsl.Value:
+    lane_sym = dsl.sym("fa_lane")
+    lane_expr = dsl.mod(lane_sym, cfg.mma.wave_size)
+    bindings = {lane_sym: lane}
+    f16_simd = dsl.simd_type(dsl.f16(), width=cfg.mma.wave_size)
+    tokens: list[dsl.Value] = []
+
+    for step in range((cfg.block_m * cfg.block_n) // cfg.mma.wave_size):
+        elem = lane_expr + step * cfg.mma.wave_size
+        row = dsl.floor(elem / cfg.block_n)
+        col = dsl.mod(elem, cfg.block_n)
+        scores: list[dsl.Value] = []
+        for n in range(cfg.block_n):
+            score_idx = bld.index_expr(_score_slot_expr(cfg, row, n), bindings=bindings)
+            score, _ = bld.load(
+                bld.ptr_add(score_ptr, score_idx),
+                dsl.simd_type(dsl.f32(), width=cfg.mma.wave_size),
+                after=after,
+            )
+            scores.append(score)
+        row_max = _max_all(bld, tuple(scores))
+        denom: dsl.Value | None = None
+        for score in scores:
+            prob = bld.fexp2(bld.fsub(score, row_max))
+            denom = prob if denom is None else bld.fadd(denom, prob)
+        assert denom is not None
+        prob_idx = bld.index_expr(_score_slot_expr(cfg, row, col), bindings=bindings)
+        score, _ = bld.load(
+            bld.ptr_add(score_ptr, prob_idx),
+            dsl.simd_type(dsl.f32(), width=cfg.mma.wave_size),
+            after=after,
+        )
+        prob = bld.fmul(bld.fexp2(bld.fsub(score, row_max)), bld.frcp(denom))
+        prob_h = bld.fpconvert(prob, f16_simd)
+        p_off = bld.index_expr(row * cfg.mma.k_tile + col, bindings=bindings)
+        tokens.append(bld.store(prob_h, bld.ptr_add(prob_ptr, p_off), after=after))
+
+    pad_cols = cfg.mma.k_tile - cfg.block_n
+    if pad_cols:
+        zero = _zero_f16_simd(bld, cfg.mma.wave_size)
+        for step in range((cfg.block_m * pad_cols) // cfg.mma.wave_size):
+            elem = lane_expr + step * cfg.mma.wave_size
+            row = dsl.floor(elem / pad_cols)
+            col = cfg.block_n + dsl.mod(elem, pad_cols)
+            p_off = bld.index_expr(row * cfg.mma.k_tile + col, bindings=bindings)
+            tokens.append(bld.store(zero, bld.ptr_add(prob_ptr, p_off), after=after))
+
+    return bld.barrier(*tokens)
+
+
+def _stage_value_tile(
+    bld: dsl.FunctionBuilder,
+    cfg: _FlashAttentionConfig,
+    v_ptr: dsl.Value,
+    value_ptr: dsl.Value,
+    lane: dsl.Value,
+    start_n: int,
+    d_tile: int,
+    after: dsl.Value,
+) -> dsl.Value:
+    lane_sym = dsl.sym("fa_lane")
+    lane_expr = dsl.mod(lane_sym, cfg.mma.wave_size)
+    bindings = {lane_sym: lane}
+    f16_simd = dsl.simd_type(dsl.f16(), width=cfg.mma.wave_size)
+    tokens: list[dsl.Value] = []
+
+    for step in range((16 * cfg.block_n) // cfg.mma.wave_size):
+        elem = lane_expr + step * cfg.mma.wave_size
+        d_col = dsl.floor(elem / cfg.block_n)
+        n = dsl.mod(elem, cfg.block_n)
+        v_off = bld.index_expr(
+            (start_n + n) * cfg.head_dim + d_tile * 16 + d_col,
+            bindings=bindings,
+        )
+        value, token = bld.load(bld.ptr_add(v_ptr, v_off), f16_simd, after=after)
+        lds_off = bld.index_expr(d_col * cfg.mma.k_tile + n, bindings=bindings)
+        tokens.append(bld.store(value, bld.ptr_add(value_ptr, lds_off), after=token))
+
+    pad_cols = cfg.mma.k_tile - cfg.block_n
+    if pad_cols:
+        zero = _zero_f16_simd(bld, cfg.mma.wave_size)
+        for step in range((16 * pad_cols) // cfg.mma.wave_size):
+            elem = lane_expr + step * cfg.mma.wave_size
+            d_col = dsl.floor(elem / pad_cols)
+            n = cfg.block_n + dsl.mod(elem, pad_cols)
+            lds_off = bld.index_expr(d_col * cfg.mma.k_tile + n, bindings=bindings)
+            tokens.append(bld.store(zero, bld.ptr_add(value_ptr, lds_off), after=after))
+
+    return bld.barrier(*tokens)
+
+
+def _store_fragment_as_row_major(
+    bld: dsl.FunctionBuilder,
+    cfg: _FlashAttentionConfig,
+    scratch_ptr: dsl.Value,
+    out_ptr: dsl.Value,
+    lane: dsl.Value,
+    d_tile: int,
+    after: dsl.Value,
+) -> dsl.Value:
+    lane_sym = dsl.sym("fa_lane")
+    lane_expr = dsl.mod(lane_sym, cfg.mma.wave_size)
+    bindings = {lane_sym: lane}
+    tokens: list[dsl.Value] = []
+    for step in range((16 * 16) // cfg.mma.wave_size):
+        elem = lane_expr + step * cfg.mma.wave_size
+        row = dsl.floor(elem / 16)
+        col = dsl.mod(elem, 16)
+        scratch_off = bld.index_expr(_score_slot_expr(cfg, row, col), bindings=bindings)
+        value, token = bld.load(
+            bld.ptr_add(scratch_ptr, scratch_off),
+            dsl.simd_type(dsl.f32(), width=cfg.mma.wave_size),
+            after=after,
+        )
+        out_off = bld.index_expr(
+            row * cfg.head_dim + d_tile * 16 + col,
+            bindings=bindings,
+        )
+        tokens.append(bld.store(value, bld.ptr_add(out_ptr, out_off), after=token))
+    return bld.barrier(*tokens)
+
+
+def _emit_single_tile_mma_kernel(
+    bld: dsl.FunctionBuilder,
+    cfg: _FlashAttentionConfig,
+    types: _KernelTypes,
+    q_arg: dsl.Value,
+    k_arg: dsl.Value,
+    v_arg: dsl.Value,
+    out_arg: dsl.Value,
+    lane: dsl.Value,
+) -> None:
+    score_ptr = bld.lds_base(dsl.f32())
+    prob_ptr = bld.lds_base(dsl.f16(), offset=cfg.score_lds_bytes)
+    value_ptr = bld.lds_base(dsl.f16(), offset=cfg.score_lds_bytes + cfg.prob_lds_bytes)
+    scratch_dep = bld.token()
+
+    qk = _emit_qk_tile(bld, cfg, types, q_arg, k_arg, lane, 0)
+    score_store = bld.fragment_store(qk, score_ptr, after=scratch_dep)
+    score_ready = bld.barrier(score_store)
+    prob_ready = _stage_probability_tile(
+        bld, cfg, score_ptr, prob_ptr, lane, score_ready
+    )
+
+    for d_tile in range(cfg.head_dim // 16):
+        value_ready = _stage_value_tile(
+            bld, cfg, v_arg, value_ptr, lane, 0, d_tile, score_ready
+        )
+        operands_ready = bld.barrier(prob_ready, value_ready)
+        p_frag = _load_row_major_fragment(
+            bld, cfg, prob_ptr, types.a, cfg.mma.k_tile, lane, operands_ready
+        )
+        v_frag = _load_row_major_fragment(
+            bld, cfg, value_ptr, types.b, cfg.mma.k_tile, lane, operands_ready
+        )
+        acc = bld.fragment_fill(bld.constant(dsl.i32(), 0), types.acc)
+        acc = bld.mma(cfg.mma.kind, p_frag, v_frag, acc)
+        acc_store = bld.fragment_store(acc, score_ptr, after=operands_ready)
+        acc_ready = bld.barrier(acc_store)
+        scratch_dep = _store_fragment_as_row_major(
+            bld, cfg, score_ptr, out_arg, lane, d_tile, acc_ready
+        )
 
 
 def _emit_kernel(bld: dsl.FunctionBuilder, cfg: _FlashAttentionConfig) -> None:
@@ -404,6 +637,12 @@ def _emit_kernel(bld: dsl.FunctionBuilder, cfg: _FlashAttentionConfig) -> None:
     )
     lane_sym = dsl.sym("fa_lane")
     types = _kernel_types(cfg)
+    if cfg.seq_len == cfg.block_n:
+        _emit_single_tile_mma_kernel(
+            bld, cfg, types, q_arg, k_arg, v_arg, out_arg, lane
+        )
+        return
+
     score_ptr = bld.lds_base(dsl.f32())
     states: list[tuple[dsl.Value, dsl.Value, dsl.Value] | None] = [
         None for _ in range(cfg.output_chunks)
@@ -501,12 +740,12 @@ def _emit_host(bld: dsl.FunctionBuilder, cfg: _FlashAttentionConfig) -> None:
     )
     q_buf = bld.alloc([cfg.q_elements], f16)
     k_buf = bld.alloc([cfg.kv_elements], f16)
-    v_buf = bld.alloc([cfg.kv_elements], f32)
+    v_buf = bld.alloc([cfg.kv_elements], f16)
     out_buf = bld.alloc([cfg.out_elements], f32)
 
     _emit_constant_fill(bld, q_buf, q_values, f16, index)
     _emit_constant_fill(bld, k_buf, k_values, f16, index)
-    _emit_constant_fill(bld, v_buf, v_values, f32, index)
+    _emit_constant_fill(bld, v_buf, v_values, f16, index)
     _emit_zero_fill(bld, out_buf, cfg.out_elements, index)
 
     q_unranked = bld.cast_unranked(q_buf)
@@ -522,7 +761,7 @@ def _emit_host(bld: dsl.FunctionBuilder, cfg: _FlashAttentionConfig) -> None:
     dyn_f32 = dsl.dynamic_1d_memref_type(f32)
     [q_ptr] = bld.call(_F16_PTR_HELPER, [bld.memref_cast(q_buf, dyn_f16)], [f16_ptr])
     [k_ptr] = bld.call(_F16_PTR_HELPER, [bld.memref_cast(k_buf, dyn_f16)], [f16_ptr])
-    [v_ptr] = bld.call(_F32_PTR_HELPER, [bld.memref_cast(v_buf, dyn_f32)], [f32_ptr])
+    [v_ptr] = bld.call(_F16_PTR_HELPER, [bld.memref_cast(v_buf, dyn_f16)], [f16_ptr])
     [out_ptr] = bld.call(
         _F32_PTR_HELPER, [bld.memref_cast(out_buf, dyn_f32)], [f32_ptr]
     )
@@ -568,7 +807,7 @@ def build_flash_attention_f32_module(
         kernel_inputs = [
             dsl.ptr_type(dsl.f16()),
             dsl.ptr_type(dsl.f16()),
-            dsl.ptr_type(dsl.f32()),
+            dsl.ptr_type(dsl.f16()),
             dsl.ptr_type(dsl.f32()),
         ]
         with (
@@ -576,7 +815,7 @@ def build_flash_attention_f32_module(
             gmod.kernel(
                 _KERNEL_NAME,
                 kernel_inputs,
-                lds_size=cfg.score_lds_bytes,
+                lds_size=cfg.lds_bytes,
                 attrs=_target_waves_attrs(target_waves),
             ) as fb,
         ):

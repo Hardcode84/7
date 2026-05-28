@@ -33,7 +33,7 @@ func.func @load_bad_ptr_simd_width(%p: !wave.simd<!wave.ptr<i32, #wave.global>, 
 // -----
 
 func.func @load_bad_scalar_width(%p: !wave.ptr<i32, #wave.global>) {
-  // expected-error @+1 {{scalar result element type must be 32 bits wide for now}}
+  // expected-error @+1 {{per-lane payload must be a multiple of the pointer element bit width}}
   %v, %t = wave.load %p : (!wave.ptr<i32, #wave.global>) -> (!wave.simd<i16, 32>, !wave.mem.token)
   return
 }

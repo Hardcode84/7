@@ -23,6 +23,16 @@ func.func @cast_f16_to_f32_wave32(%x: !wave.simd<f16, 32>) attributes {wave.kern
   return
 }
 
+// SELECT-LABEL: func.func @cast_f32_zero_to_f16_wave32
+// SELECT: waveamdmachine.v_mov_b32_tuple
+// SELECT: waveamdmachine.v_cvt_f16_f32
+func.func @cast_f32_zero_to_f16_wave32() attributes {wave.kernel} {
+  %zero = arith.constant 0.000000e+00 : f32
+  %v = wave.splat %zero : f32 -> !wave.simd<f32, 32>
+  %h = wave.cast fpconvert %v : !wave.simd<f32, 32> -> !wave.simd<f16, 32>
+  return
+}
+
 }
 
 // -----

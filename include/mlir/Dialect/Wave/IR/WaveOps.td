@@ -468,9 +468,8 @@ def Wave_LoadOp : Wave_Op<"load", [MemoryEffects<[MemRead]>]> {
 
     The result shape is driven entirely by the result SIMD type:
 
-    * `!wave.simd<T, W>` -- each lane loads exactly one `T` element. The
-      pointer element type must be 32 bits wide (the only width the
-      lowering currently supports).
+    * `!wave.simd<T, W>` -- each lane loads exactly one 16- or 32-bit
+      `T` element.
     * `!wave.simd<vector<N x T'>, W>` -- each lane loads `N` consecutive
       32-bit transport elements `T'` starting at its pointer. The total
       per-lane payload is `N * 32` bits; the pointer element type may be

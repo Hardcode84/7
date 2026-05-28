@@ -129,22 +129,51 @@ def run_command(cmd: Sequence[str], *, input_text: str) -> str:
     return proc.stdout
 
 
+def _extract_generic_func(module_text: str, kernel_name: str) -> str | None:
+    marker = f'sym_name = "{kernel_name}"'
+    lines = module_text.splitlines()
+    for start, line in enumerate(lines):
+        if '"func.func"' not in line or marker not in line:
+            continue
+        indent = len(line) - len(line.lstrip())
+        end_prefix = " " * indent + "}) "
+        for end in range(start + 1, len(lines)):
+            if lines[end].startswith(end_prefix) and lines[end].rstrip().endswith(
+                " : () -> ()"
+            ):
+                return "\n".join(lines[start : end + 1])
+    return None
+
+
+def extract_kernel_op(
+    module_text: str, *, kernel_regex: str, kernel_name: str | None = None
+) -> str | None:
+    match = re.search(kernel_regex, module_text, re.S)
+    if match:
+        return match.group(1).replace("\n    ", "\n  ")
+    if kernel_name is None:
+        return None
+    return _extract_generic_func(module_text, kernel_name)
+
+
 def dump_kernel_asm(
     module_text: str,
     *,
     chip: str,
     wave_translate: Path | None,
     kernel_regex: str,
+    kernel_name: str | None = None,
     missing_message: str,
 ) -> str:
     if not chip:
         raise SystemExit("--dump-asm needs --chip=<gfx>")
     root = repo_root()
     wave_translate = wave_translate or root / "build/bin/wave-translate"
-    match = re.search(kernel_regex, module_text, re.S)
-    if not match:
+    kernel = extract_kernel_op(
+        module_text, kernel_regex=kernel_regex, kernel_name=kernel_name
+    )
+    if kernel is None:
         raise SystemExit(missing_message)
-    kernel = match.group(1).replace("\n    ", "\n  ")
     target = f"amdgcn-amd-amdhsa--{chip}"
     wrapped = (
         f'module attributes {{waveamdmachine.target = "{target}"}} {{\n{kernel}\n}}\n'

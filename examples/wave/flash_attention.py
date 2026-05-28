@@ -105,6 +105,7 @@ def _dump_asm(module_text: str, args: argparse.Namespace) -> str:
         chip=args.chip,
         wave_translate=args.wave_translate,
         kernel_regex=r"(func\.func @flash_attention_f32.*?\n    \})",
+        kernel_name="flash_attention_f32",
         missing_message="could not isolate flash_attention_f32 kernel",
     )
 

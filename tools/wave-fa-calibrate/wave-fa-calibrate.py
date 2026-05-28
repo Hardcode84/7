@@ -22,6 +22,9 @@ DEFAULT_BUILD = REPO_ROOT / "build"
 EXAMPLE = REPO_ROOT / "examples/wave/flash_attention.py"
 RUNNER_SRC = REPO_ROOT / "tools/wave-fa-calibrate/wave-fa-calibrate-runner.cpp"
 KERNEL_NAME = "flash_attention_f32"
+sys.path.insert(0, str(REPO_ROOT / "examples/wave"))
+
+from common import extract_kernel_op  # noqa: E402
 
 
 @dataclass(frozen=True)
@@ -123,12 +126,13 @@ def generate_kernel_module(args: argparse.Namespace, chip: str) -> str:
         else str(package_path) + os.pathsep + env["PYTHONPATH"]
     )
     module_text = run(build_example_args(args, chip), env=env)
-    match = re.search(
-        r"(func\.func @flash_attention_f32.*?\n    \})", module_text, re.S
+    kernel = extract_kernel_op(
+        module_text,
+        kernel_regex=r"(func\.func @flash_attention_f32.*?\n    \})",
+        kernel_name=KERNEL_NAME,
     )
-    if not match:
+    if kernel is None:
         sys.exit("could not isolate flash_attention_f32 kernel from generated module")
-    kernel = match.group(1).replace("\n    ", "\n  ")
     target = f"amdgcn-amd-amdhsa--{chip}"
     return (
         f'module attributes {{waveamdmachine.target = "{target}"}} '
