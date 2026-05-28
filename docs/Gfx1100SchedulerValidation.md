@@ -88,3 +88,67 @@ Limits:
   is useful here; absolute savings are not calibrated.
 - CK GEMM / FA-CK attention still need a kernel import or wrapper path
   before they can join this sweep.
+
+## Pressure-aware scheduler check
+
+Machine: same W7900 / gfx1100. Commands used `--iters=100 --warmup=10
+--repeats=3`. Scheduler budget defaults came from the target: kernel hard
+VGPR/SGPR `255/101`, critical `95/101` when no `target_waves` attr was set.
+
+Matmul command shape:
+
+```bash
+tools/wave-matmul-calibrate/wave-matmul-calibrate.py \
+  --chip=gfx1100 --variants=scheduled \
+  --m=32 --n=32 --k=32 --bm=1 --bn=2 \
+  --iters=100 --warmup=10 --repeats=3
+```
+
+Compared with `--no-pressure-aware-schedule`, pressure-aware selection picked
+the same candidate in every region: `critical_path, critical_path, wmma_feed,
+critical_path, critical_path`. Max VGPR was `22, 31, 45, 29, 33`, below the
+critical budget. Final sim cycles matched: `5137` for `(waves=1, simds=1)` and
+`5137` for `(waves=2, simds=2)`.
+
+| Matmul policy | HW cycles samples | Median cycles | Median us | Check |
+| --- | --- | ---: | ---: | --- |
+| no pressure | 6937,10464,10362 | 10362 | 5.888 | passed |
+| pressure-aware | 10467,10344,10451 | 10451 | 5.938 | passed |
+
+Result: pressure policy is neutral on this matmul shape. The +89-cycle median
+delta is timing noise; selected orders and model output are unchanged.
+
+FlashAttention command shape:
+
+```bash
+tools/wave-fa-calibrate/wave-fa-calibrate.py \
+  --chip=gfx1100 --variants=scheduled \
+  --seq-n=<16-or-32> --iters=100 --warmup=10 --repeats=3
+```
+
+For `seq_n=16`, no-pressure scheduling selected the aggressive
+`critical_path` order: post-lowering sim `1292`, candidate max VGPR `153`.
+Pressure-aware scheduling rejected that order because `153 > 95`
+(`vgpr_critical_excess=58`) and kept original order: post-lowering sim `48244`,
+candidate max VGPR `21`.
+
+| FA seq_n=16 policy | HW cycles samples | Median cycles | Median us | Check |
+| --- | --- | ---: | ---: | --- |
+| no pressure | 7075,10873,10886 | 10873 | 6.178 | passed |
+| pressure-aware | 19012,19047,18987 | 19012 | 10.802 | passed |
+
+Result: occupancy-safe scheduling regresses this small FA kernel by `+8139`
+cycles (`+74.9%`) versus the high-pressure order. Reason is deliberate: current
+policy protects target-wave occupancy and regalloc headroom before cycle score.
+
+For `seq_n=32`, old no-pressure scheduled lowering failed in
+`waveamd-reg-alloc` with "ran out of registers". Pressure-aware baseline and
+scheduled variants both lowered and passed.
+
+| FA seq_n=32 variant | Sim cycles | HW cycles samples | Median cycles | Median us | Check |
+| --- | ---: | --- | ---: | ---: | --- |
+| baseline | 96118 | 28487,28375,28497 | 28487 | 16.186 | passed |
+| scheduled | 96118 | 28508,28492,28512 | 28508 | 16.198 | passed |
+
+Result: pressure-aware scheduling fixes the seq_n=32 regalloc failure. It also
+keeps the schedule at baseline, so the measured `+21` cycles (`+0.1%`) is noise.

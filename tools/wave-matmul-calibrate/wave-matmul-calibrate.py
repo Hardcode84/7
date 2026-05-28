@@ -169,19 +169,47 @@ def sim_report_specs(args: argparse.Namespace) -> list[tuple[int, int, int]]:
     return out
 
 
-def schedule_pass_options(
+def scheduler_policy_options(
     variant: Variant, args: argparse.Namespace
 ) -> dict[str, bool | int]:
     if not variant.apply_schedule:
         return {}
-    options: dict[str, bool | int] = {"apply-schedule": True}
+    options: dict[str, bool | int] = {}
+    if not args.no_pressure_aware_schedule:
+        options["pressure-aware-selection"] = True
     if variant.schedule_model == "multi":
         options["model-waves"] = waves_per_workgroup(args)
         options["model-simds"] = spread_simds(args)
         options["model-start-delay"] = 0
     elif variant.schedule_model != "single":
         sys.exit(f"unknown schedule model: {variant.schedule_model}")
-    return options
+    return {name: value for name, value in options.items() if value is not False}
+
+
+def schedule_pass_options(
+    variant: Variant, args: argparse.Namespace
+) -> dict[str, bool | int]:
+    if not variant.apply_schedule:
+        return {}
+    return {"apply-schedule": True, **scheduler_policy_options(variant, args)}
+
+
+def schedule_report_options(
+    variant: Variant, args: argparse.Namespace
+) -> dict[str, bool | int]:
+    if not variant.apply_schedule:
+        return {}
+    report_options: dict[str, bool | int] = {
+        "print-candidates": args.print_candidates,
+        "print-score": args.print_score,
+        "print-regions": args.print_regions,
+    }
+    report_options = {
+        name: value for name, value in report_options.items() if value is not False
+    }
+    if not report_options:
+        return {}
+    return {**report_options, **scheduler_policy_options(variant, args)}
 
 
 def format_pass_options(options: dict[str, bool | int]) -> str:
@@ -196,7 +224,10 @@ def format_pass_options(options: dict[str, bool | int]) -> str:
 
 
 def pipeline_text(
-    *, insert_pingpong: bool, schedule_options: dict[str, bool | int]
+    *,
+    insert_pingpong: bool,
+    schedule_options: dict[str, bool | int],
+    report_options: dict[str, bool | int],
 ) -> str:
     insert = ""
     if insert_pingpong:
@@ -204,15 +235,28 @@ def pipeline_text(
             "    wave.transform.insert_pingpong_barriers from %rl\n"
             "        : (!transform.any_op) -> ()\n"
         )
+    report = ""
     schedule = ""
-    wait_input = "%r2"
+    schedule_input = "%r2"
+    wait_input = schedule_input
+    if report_options:
+        option_text = format_pass_options(report_options)
+        report = (
+            "    %rr = transform.apply_registered_pass "
+            '"waveamd-machine-schedule-report" '
+            "with\n"
+            f"        options = {{ {option_text} }}\n"
+            f"        to {schedule_input} : (!transform.any_op) -> !transform.any_op\n"
+        )
+        schedule_input = "%rr"
+        wait_input = schedule_input
     if schedule_options:
         option_text = format_pass_options(schedule_options)
         schedule = (
             '    %rs = transform.apply_registered_pass "waveamd-machine-schedule" '
             "with\n"
             f"        options = {{ {option_text} }}\n"
-            "        to %r2 : (!transform.any_op) -> !transform.any_op\n"
+            f"        to {schedule_input} : (!transform.any_op) -> !transform.any_op\n"
         )
         wait_input = "%rs"
     ticket_wait = (
@@ -234,7 +278,7 @@ def pipeline_text(
         : (!transform.any_op) -> !transform.any_op
     %r2 = transform.apply_registered_pass "waveamd-decompose-mem-tuples" to %r1
         : (!transform.any_op) -> !transform.any_op
-{schedule}{ticket_wait}
+{report}{schedule}{ticket_wait}
         : (!transform.any_op) -> !transform.any_op
     %r4 = transform.apply_registered_pass "waveamd-insert-hazard-waits" to %r3
         : (!transform.any_op) -> !transform.any_op
@@ -257,6 +301,7 @@ def write_pipeline(tmp: Path, variant: Variant, args: argparse.Namespace) -> Pat
         pipeline_text(
             insert_pingpong=variant.insert_pingpong,
             schedule_options=schedule_pass_options(variant, args),
+            report_options=schedule_report_options(variant, args),
         )
     )
     return path
@@ -545,6 +590,10 @@ def build_argparser() -> argparse.ArgumentParser:
             "scheduled_multiwave, pingpong"
         ),
     )
+    ap.add_argument("--print-candidates", action="store_true")
+    ap.add_argument("--print-score", action="store_true")
+    ap.add_argument("--print-regions", action="store_true")
+    ap.add_argument("--no-pressure-aware-schedule", action="store_true")
     ap.add_argument("--skip-hw", action="store_true")
     ap.add_argument("--no-check", action="store_true")
     ap.add_argument("--keep-tmp", action="store_true")
