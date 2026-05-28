@@ -22,18 +22,27 @@ using namespace mlir;
 
 namespace {
 
+static ModuleOp findTargetModule(Operation *op) {
+  ModuleOp module = op->getParentOfType<ModuleOp>();
+  if (!module)
+    module = dyn_cast<ModuleOp>(op);
+  while (module && !module->hasAttr("waveamdmachine.target"))
+    module = module->getParentOfType<ModuleOp>();
+  return module;
+}
+
 struct WaveAMDMetadataPass
     : public wave::impl::WaveAMDMetadataBase<WaveAMDMetadataPass> {
   void runOnOperation() override {
-    if (!getOperation()->hasAttr("waveamdmachine.target")) {
-      getOperation().emitError(
-          "waveamd-metadata requires a waveamdmachine.target "
-          "module attribute");
+    Operation *root = getOperation();
+    if (!findTargetModule(root)) {
+      root->emitError("waveamd-metadata requires a waveamdmachine.target "
+                      "module attribute");
       return signalPassFailure();
     }
-    OpBuilder builder(getOperation().getContext());
+    OpBuilder builder(root->getContext());
     SmallVector<func::FuncOp> kernels;
-    getOperation().walk([&](func::FuncOp f) {
+    root->walk([&](func::FuncOp f) {
       if (f->hasAttr(wave::WaveDialect::getKernelAttrName()))
         kernels.push_back(f);
     });

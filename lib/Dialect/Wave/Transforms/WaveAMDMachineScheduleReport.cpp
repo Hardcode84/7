@@ -44,13 +44,13 @@ struct WaveAMDMachineScheduleReportPass
     if (!controls.anyOutput)
       return;
 
-    ModuleOp mod = getOperation();
+    Operation *root = getOperation();
     waveamdmachine::EventSimConfig modelConfig;
-    if (failed(configureReport(mod, modelConfig)))
+    if (failed(configureReport(root, modelConfig)))
       return signalPassFailure();
 
     StringRef scoreFuncName(scoreFunc);
-    WalkResult walkResult = mod.walk([&](func::FuncOp func) {
+    WalkResult walkResult = root->walk([&](func::FuncOp func) {
       ArchResolution archResolution = resolveArch(func);
       RegisterPressureBudgets pressureBudgets;
       if (controls.prepareForPressure &&
@@ -84,9 +84,9 @@ struct WaveAMDMachineScheduleReportPass
     return controls;
   }
 
-  LogicalResult configureReport(ModuleOp mod,
+  LogicalResult configureReport(Operation *root,
                                 waveamdmachine::EventSimConfig &modelConfig) {
-    return configureScheduleModel(mod, modelWaves, modelSimds, modelStartDelay,
+    return configureScheduleModel(root, modelWaves, modelSimds, modelStartDelay,
                                   modelVmemValueLatency, modelSmemValueLatency,
                                   modelLdsValueLatency, modelConfig);
   }

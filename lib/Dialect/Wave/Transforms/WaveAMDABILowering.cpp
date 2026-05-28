@@ -52,10 +52,10 @@ static Value createKernArgLoad(OpBuilder &builder, Location loc,
 struct WaveAMDABILoweringPass
     : public wave::impl::WaveAMDABILoweringBase<WaveAMDABILoweringPass> {
   void runOnOperation() override {
-    ModuleOp module = getOperation();
-    OpBuilder builder(module.getContext());
+    Operation *root = getOperation();
+    OpBuilder builder(root->getContext());
     SmallVector<func::FuncOp> kernels;
-    module.walk([&](func::FuncOp f) {
+    root->walk([&](func::FuncOp f) {
       if (f->hasAttr(wave::WaveDialect::getKernelAttrName()))
         kernels.push_back(f);
     });

@@ -659,10 +659,10 @@ static SmallVector<HazardKind> buildHazardCatalog(const HazardConfig &) {
 struct WaveAMDHazardWaitsPass
     : public wave::impl::WaveAMDHazardWaitsBase<WaveAMDHazardWaitsPass> {
   void runOnOperation() override {
-    ModuleOp module = getOperation();
-    OpBuilder builder(module.getContext());
+    Operation *root = getOperation();
+    OpBuilder builder(root->getContext());
     FailureOr<std::unique_ptr<llvm::MCSubtargetInfo>> sti =
-        createSubtargetInfo(module);
+        createSubtargetInfo(root);
     if (failed(sti))
       return signalPassFailure();
     HazardConfig cfg{
@@ -677,7 +677,7 @@ struct WaveAMDHazardWaitsPass
     cfg.defaultLgkmcnt = llvm::AMDGPU::decodeLgkmcnt(
         cfg.isaVersion, llvm::AMDGPU::getWaitcntBitMask(cfg.isaVersion));
     SmallVector<func::FuncOp> kernels;
-    module.walk([&](func::FuncOp f) {
+    root->walk([&](func::FuncOp f) {
       if (!f.isExternal())
         kernels.push_back(f);
     });

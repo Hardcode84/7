@@ -38,11 +38,21 @@ static waveamdmachine::MemTokenType memTokenType(MLIRContext *ctx) {
   return waveamdmachine::MemTokenType::get(ctx);
 }
 
-static FailureOr<llvm::AMDGPU::IsaVersion> getIsaVersion(ModuleOp module) {
+static ModuleOp findTargetModule(Operation *op) {
+  ModuleOp module = op->getParentOfType<ModuleOp>();
+  if (!module)
+    module = dyn_cast<ModuleOp>(op);
+  while (module && !module->hasAttr("waveamdmachine.target"))
+    module = module->getParentOfType<ModuleOp>();
+  return module;
+}
+
+static FailureOr<llvm::AMDGPU::IsaVersion> getIsaVersion(Operation *root) {
+  ModuleOp module = findTargetModule(root);
+  if (!module)
+    return root->emitError("waveamd-decompose-mem-tuples requires a "
+                           "waveamdmachine.target module attribute");
   auto target = module->getAttrOfType<StringAttr>("waveamdmachine.target");
-  if (!target)
-    return module.emitError("waveamd-decompose-mem-tuples requires a "
-                            "waveamdmachine.target attribute");
   StringRef cpu = target.getValue();
   std::pair<StringRef, StringRef> split = cpu.rsplit("--");
   if (!split.second.empty())
@@ -470,12 +480,12 @@ struct WaveAMDDecomposeMemTuplesPass
     : public wave::impl::WaveAMDDecomposeMemTuplesBase<
           WaveAMDDecomposeMemTuplesPass> {
   void runOnOperation() override {
-    ModuleOp module = getOperation();
-    FailureOr<llvm::AMDGPU::IsaVersion> isaVer = getIsaVersion(module);
+    Operation *root = getOperation();
+    FailureOr<llvm::AMDGPU::IsaVersion> isaVer = getIsaVersion(root);
     if (failed(isaVer))
       return signalPassFailure();
     SmallVector<Operation *> worklist;
-    module.walk([&](Operation *op) {
+    root->walk([&](Operation *op) {
       if (isa<waveamdmachine::GlobalLoadTupleB32Op,
               waveamdmachine::BufferLoadTupleB32Op,
               waveamdmachine::DsLoadTupleB32Op,

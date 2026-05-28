@@ -40,15 +40,16 @@ struct WaveAMDMachineSchedulePass
   using WaveAMDMachineScheduleBase::WaveAMDMachineScheduleBase;
 
   void runOnOperation() override {
-    ModuleOp mod = getOperation();
+    Operation *root = getOperation();
     waveamdmachine::EventSimConfig modelConfig;
-    if (failed(configureScheduleModel(
-            mod, modelWaves, modelSimds, modelStartDelay, modelVmemValueLatency,
-            modelSmemValueLatency, modelLdsValueLatency, modelConfig)))
+    if (failed(configureScheduleModel(root, modelWaves, modelSimds,
+                                      modelStartDelay, modelVmemValueLatency,
+                                      modelSmemValueLatency,
+                                      modelLdsValueLatency, modelConfig)))
       return signalPassFailure();
     if (!applySchedule)
       return;
-    WalkResult walkResult = mod.walk([&](func::FuncOp func) {
+    WalkResult walkResult = root->walk([&](func::FuncOp func) {
       ArchResolution archResolution = resolveArch(func);
       RegisterPressureBudgets pressureBudgets;
       if (failed(configureSchedulePressureBudgets(

@@ -303,26 +303,26 @@ bool hasHardBudget(RegisterPressureBudgets budgets) {
 static bool isValidLatencyOverride(int value) { return value >= -1; }
 
 LogicalResult
-configureScheduleModel(ModuleOp mod, int modelWaves, int modelSimds,
+configureScheduleModel(Operation *op, int modelWaves, int modelSimds,
                        int modelStartDelay, int modelVmemValueLatency,
                        int modelSmemValueLatency, int modelLdsValueLatency,
                        waveamdmachine::EventSimConfig &modelConfig) {
   if (modelWaves <= 0) {
-    mod.emitError() << "model-waves must be positive";
+    op->emitError() << "model-waves must be positive";
     return failure();
   }
   if (modelSimds <= 0) {
-    mod.emitError() << "model-simds must be positive";
+    op->emitError() << "model-simds must be positive";
     return failure();
   }
   if (modelStartDelay < 0) {
-    mod.emitError() << "model-start-delay must be non-negative";
+    op->emitError() << "model-start-delay must be non-negative";
     return failure();
   }
   if (!isValidLatencyOverride(modelVmemValueLatency) ||
       !isValidLatencyOverride(modelSmemValueLatency) ||
       !isValidLatencyOverride(modelLdsValueLatency)) {
-    mod.emitError() << "model value latencies must be -1 or non-negative";
+    op->emitError() << "model value latencies must be -1 or non-negative";
     return failure();
   }
   modelConfig.waves = modelWaves;

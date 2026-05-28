@@ -120,7 +120,7 @@ int64_t getCriticalExcess(RegisterPressureResult pressure);
 bool hasCriticalBudget(RegisterPressureBudgets budgets);
 bool hasHardBudget(RegisterPressureBudgets budgets);
 LogicalResult
-configureScheduleModel(ModuleOp mod, int modelWaves, int modelSimds,
+configureScheduleModel(Operation *op, int modelWaves, int modelSimds,
                        int modelStartDelay, int modelVmemValueLatency,
                        int modelSmemValueLatency, int modelLdsValueLatency,
                        waveamdmachine::EventSimConfig &modelConfig);

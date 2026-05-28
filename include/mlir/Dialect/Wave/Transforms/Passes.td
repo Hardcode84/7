@@ -11,7 +11,7 @@
 
 include "mlir/Pass/PassBase.td"
 
-def ConvertWaveAMDToWaveAMDMachine : Pass<"waveamd-to-machine", "ModuleOp"> {
+def ConvertWaveAMDToWaveAMDMachine : Pass<"waveamd-to-machine"> {
   let summary = "Select Wave/WaveAMD operations into inspectable WaveAMDMachine IR";
   let description = [{
     Lowers source-level Wave operations to generic WaveAMDMachine dialect
@@ -28,7 +28,7 @@ def ConvertWaveAMDToWaveAMDMachine : Pass<"waveamd-to-machine", "ModuleOp"> {
 }
 
 def WaveAMDABILowering
-    : Pass<"waveamd-abi-lowering", "ModuleOp"> {
+    : Pass<"waveamd-abi-lowering"> {
   let summary = "Lower WaveAMDMachine function arguments to the AMDGPU kernel ABI";
   let dependentDialects = [
     "waveamdmachine::WaveAMDMachineDialect"
@@ -36,7 +36,7 @@ def WaveAMDABILowering
 }
 
 def WaveAMDHazardWaits
-    : Pass<"waveamd-insert-hazard-waits", "ModuleOp"> {
+    : Pass<"waveamd-insert-hazard-waits"> {
   let summary = "Insert WaveAMDMachine waitcnt and hazard instructions";
   let dependentDialects = [
     "waveamdmachine::WaveAMDMachineDialect"
@@ -44,7 +44,7 @@ def WaveAMDHazardWaits
 }
 
 def WaveAMDDecomposeMemTuples
-    : Pass<"waveamd-decompose-mem-tuples", "ModuleOp"> {
+    : Pass<"waveamd-decompose-mem-tuples"> {
   let summary = "Decompose tuple memory ops into per-element scalar memory ops";
   let description = [{
     Each `*_load_tuple_b32` becomes N scalar `*_load_b32` ops at
@@ -61,7 +61,7 @@ def WaveAMDDecomposeMemTuples
 }
 
 def WaveAMDTicketWaits
-    : Pass<"waveamd-insert-ticket-waits", "ModuleOp"> {
+    : Pass<"waveamd-insert-ticket-waits"> {
   let summary = "Insert WaveAMDMachine waitcnt instructions using ticket scoreboards";
   let description = [{
     Tracks async memory operations with per-counter tickets and inserts the
@@ -75,7 +75,7 @@ def WaveAMDTicketWaits
 }
 
 def WaveAMDMachineSchedule
-    : Pass<"waveamd-machine-schedule", "ModuleOp"> {
+    : Pass<"waveamd-machine-schedule"> {
   let summary = "Apply model-based local WaveAMDMachine scheduling";
   let description = [{
     Scheduler pass over `waveamdmachine` IR. The default mode is a no-op; with
@@ -124,7 +124,7 @@ def WaveAMDMachineSchedule
 }
 
 def WaveAMDMachineScheduleReport
-    : Pass<"waveamd-machine-schedule-report", "ModuleOp"> {
+    : Pass<"waveamd-machine-schedule-report"> {
   let summary = "Print WaveAMDMachine scheduler diagnostics";
   let description = [{
     Non-mutating diagnostics pass for the machine scheduler. It shares region
@@ -222,7 +222,7 @@ def WaveAMDResourceInfo
 }
 
 def WaveAMDMetadata
-    : Pass<"waveamd-metadata", "ModuleOp"> {
+    : Pass<"waveamd-metadata"> {
   let summary = "Attach AMDGPU metadata information to WaveAMDMachine IR";
   let dependentDialects = [
     "waveamdmachine::WaveAMDMachineDialect"

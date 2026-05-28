@@ -1513,9 +1513,9 @@ struct ConvertWaveAMDToWaveAMDMachinePass
     : public wave::impl::ConvertWaveAMDToWaveAMDMachineBase<
           ConvertWaveAMDToWaveAMDMachinePass> {
   void runOnOperation() override {
-    ModuleOp m = getOperation();
+    Operation *root = getOperation();
     SmallVector<func::FuncOp> targets;
-    m.walk([&](func::FuncOp f) {
+    root->walk([&](func::FuncOp f) {
       if (f.isExternal())
         return;
       // Pull in funcs that either carry the kernel attribute (the

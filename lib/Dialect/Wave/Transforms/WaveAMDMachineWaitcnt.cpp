@@ -761,9 +761,9 @@ static void emitWaits(OpBuilder &builder, Operation *op,
 struct WaveAMDTicketWaitsPass
     : public wave::impl::WaveAMDTicketWaitsBase<WaveAMDTicketWaitsPass> {
   void runOnOperation() override {
-    ModuleOp module = getOperation();
+    Operation *root = getOperation();
     SmallVector<func::FuncOp> kernels;
-    module.walk([&](func::FuncOp f) {
+    root->walk([&](func::FuncOp f) {
       if (!f.isExternal())
         kernels.push_back(f);
     });
