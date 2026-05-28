@@ -30,6 +30,7 @@ struct ReportControls {
   CandidateRequest candidate;
   bool emitScores = false;
   bool emitCandidates = false;
+  bool emitClasses = false;
   bool prepareForPressure = false;
   bool anyOutput = false;
 };
@@ -60,10 +61,11 @@ struct WaveAMDMachineScheduleReportPass
               pressureCriticalSgprBudget, pressureTargetWavesOverride,
               pressureBudgets)))
         return WalkResult::interrupt();
-      if (failed(processFunction(
-              func, archResolution, modelConfig, pressureBudgets,
-              controls.candidate, scoreFuncName, controls.emitScores,
-              controls.emitCandidates, controls.prepareForPressure)))
+      if (failed(processFunction(func, archResolution, modelConfig,
+                                 pressureBudgets, controls.candidate,
+                                 scoreFuncName, controls.emitScores,
+                                 controls.emitCandidates, controls.emitClasses,
+                                 controls.prepareForPressure)))
         return WalkResult::interrupt();
       return WalkResult::advance();
     });
@@ -77,10 +79,11 @@ struct WaveAMDMachineScheduleReportPass
         getCandidateRequest(StringRef(scoreOrder), scoreRegion);
     controls.emitScores = printScore || controls.candidate.requested;
     controls.emitCandidates = printCandidates;
+    controls.emitClasses = printClasses;
     controls.prepareForPressure =
         controls.emitScores || controls.emitCandidates;
     controls.anyOutput = printRegions || printDeps || controls.emitScores ||
-                         controls.emitCandidates;
+                         controls.emitCandidates || controls.emitClasses;
     return controls;
   }
 
@@ -96,7 +99,7 @@ struct WaveAMDMachineScheduleReportPass
                   const waveamdmachine::EventSimConfig &modelConfig,
                   const RegisterPressureBudgets &pressureBudgets,
                   const CandidateRequest &candidate, StringRef scoreFuncName,
-                  bool emitScores, bool emitCandidates,
+                  bool emitScores, bool emitCandidates, bool emitClasses,
                   bool prepareForPressure) {
     if (func.isExternal())
       return success();
@@ -105,7 +108,7 @@ struct WaveAMDMachineScheduleReportPass
     if (!prepareForPressure)
       return reportFunction(func, archResolution, modelConfig, pressureBudgets,
                             candidate, scoreFuncName, emitScores,
-                            emitCandidates);
+                            emitCandidates, emitClasses);
 
     IRMapping mapper;
     Operation *clonedOp = func->clone(mapper);
@@ -115,7 +118,7 @@ struct WaveAMDMachineScheduleReportPass
       return failure();
     return reportFunction(clonedFunc, archResolution, modelConfig,
                           pressureBudgets, candidate, scoreFuncName, emitScores,
-                          emitCandidates);
+                          emitCandidates, emitClasses);
   }
 
   LogicalResult
@@ -123,11 +126,12 @@ struct WaveAMDMachineScheduleReportPass
                  const waveamdmachine::EventSimConfig &modelConfig,
                  const RegisterPressureBudgets &pressureBudgets,
                  const CandidateRequest &candidate, StringRef scoreFuncName,
-                 bool emitScores, bool emitCandidates) {
+                 bool emitScores, bool emitCandidates, bool emitClasses) {
     SmallVector<ScheduleRegion> regions = collectScheduleRegions(func);
     for (const ScheduleRegion &region : regions)
       reportRegion(region, archResolution, modelConfig, pressureBudgets,
-                   candidate, scoreFuncName, emitScores, emitCandidates);
+                   candidate, scoreFuncName, emitScores, emitCandidates,
+                   emitClasses);
     return success();
   }
 
@@ -135,7 +139,7 @@ struct WaveAMDMachineScheduleReportPass
                     const waveamdmachine::EventSimConfig &modelConfig,
                     const RegisterPressureBudgets &pressureBudgets,
                     const CandidateRequest &candidate, StringRef scoreFuncName,
-                    bool emitScores, bool emitCandidates) {
+                    bool emitScores, bool emitCandidates, bool emitClasses) {
     bool scoreCandidate =
         candidate.requested &&
         shouldScoreCandidate(region, scoreFuncName, scoreRegion);
@@ -144,6 +148,8 @@ struct WaveAMDMachineScheduleReportPass
       graph = buildDependenceGraph(region);
     if (printRegions)
       printRegion(region);
+    if (emitClasses)
+      printOpClasses(region, archResolution);
     if (printDeps)
       printDependences(region, graph);
     if (emitScores)

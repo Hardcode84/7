@@ -167,6 +167,28 @@ void printRegion(ScheduleRegion region) {
                << " last=" << region.last->getName().getStringRef() << "\n";
 }
 
+void printOpClasses(ScheduleRegion region, ArchResolution archResolution) {
+  for (auto [index, op] : llvm::enumerate(region.ops)) {
+    waveamdmachine::SchedClass cls = waveamdmachine::classifyOp(op);
+    llvm::errs() << kDiagPrefix << " op func=" << region.func.getSymName()
+                 << " region=" << region.regionOrdinal << " index=" << index
+                 << " name=" << op->getName().getStringRef()
+                 << " class=" << waveamdmachine::getSchedClassName(cls);
+    if (archResolution.arch) {
+      waveamdmachine::FunctionalUnit fu =
+          cls == waveamdmachine::SchedClass::NoInst
+              ? waveamdmachine::FunctionalUnit::None
+              : waveamdmachine::funit(*archResolution.arch, cls);
+      llvm::errs() << " fu=" << waveamdmachine::getFunctionalUnitName(fu)
+                   << " latency="
+                   << waveamdmachine::getLatency(*archResolution.arch, cls);
+    } else {
+      llvm::errs() << " arch_fallback=" << archResolution.fallbackReason;
+    }
+    llvm::errs() << "\n";
+  }
+}
+
 static void addValueEdges(const ScheduleRegion &region, DependenceGraph &graph,
                           DenseMap<Operation *, unsigned> &nodeForOp) {
   for (auto [dstIndex, op] : llvm::enumerate(region.ops)) {

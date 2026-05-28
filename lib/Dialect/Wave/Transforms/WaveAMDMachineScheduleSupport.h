@@ -112,6 +112,7 @@ SmallVector<ScheduleRegion> collectScheduleRegions(func::FuncOp func);
 StringRef getEdgeKindName(EdgeKind kind);
 DependenceGraph buildDependenceGraph(const ScheduleRegion &region);
 void printRegion(ScheduleRegion region);
+void printOpClasses(ScheduleRegion region, ArchResolution archResolution);
 void printDependences(ScheduleRegion region, const DependenceGraph &graph);
 
 ArchResolution resolveArch(Operation *op);

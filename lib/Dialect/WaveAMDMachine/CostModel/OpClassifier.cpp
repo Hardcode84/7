@@ -84,7 +84,8 @@ SchedClass classifyOp(Operation *op) {
       // 64-bit VALU expansions (charged differently from 32-bit).
       .Case<VAddU64Op, VMulU64Op, VLshlrevB64Op>(
           [](auto) { return SchedClass::Write64Bit; })
-      .Case<VCvtF16F32Op, VCvtF32F16Op>(
+      .Case<VCvtF16F32Op, VCvtF32F16Op, VCvtPkRtzF16F32Op, VPkAddF16Op,
+            VPkMulF16Op, VPkFmaF16Op>(
           [](auto) { return SchedClass::Write32Bit; })
       .Case<VExpF32Op, VRcpF32Op>(
           [](auto) { return SchedClass::WriteTrans32; })

@@ -147,6 +147,8 @@ def WaveAMDMachineScheduleReport
            "Print event-simulator scores for local scheduling regions.">,
     Option<"printCandidates", "print-candidates", "bool", /*default=*/"false",
            "Print model-scored scheduler candidate orders to stderr.">,
+    Option<"printClasses", "print-classes", "bool", /*default=*/"false",
+           "Print scheduler class, functional unit, and latency for each local-region op.">,
     Option<"pressureAwareSelection", "pressure-aware-selection", "bool", /*default=*/"false",
            "Use register-pressure budgets to select scheduler candidates.">,
     Option<"modelWaves", "model-waves", "int", /*default=*/"1",
