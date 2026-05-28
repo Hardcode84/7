@@ -115,11 +115,11 @@ def WaveAMDMachineSchedule
     Option<"pressureSgprBudget", "pressure-sgpr-budget", "int", /*default=*/"-1",
            "Hard SGPR budget override for scheduler pressure policy; -1 uses the target default.">,
     Option<"pressureCriticalVgprBudget", "pressure-critical-vgpr-budget", "int", /*default=*/"-1",
-           "Critical VGPR budget override for scheduler pressure policy; -1 uses the target-waves default.">,
+           "Critical VGPR budget override for scheduler pressure policy; -1 uses an explicit multi-wave target.">,
     Option<"pressureCriticalSgprBudget", "pressure-critical-sgpr-budget", "int", /*default=*/"-1",
-           "Critical SGPR budget override for scheduler pressure policy; -1 uses the target-waves default.">,
+           "Critical SGPR budget override for scheduler pressure policy; -1 uses an explicit multi-wave target.">,
     Option<"pressureTargetWavesOverride", "pressure-target-waves-override", "int", /*default=*/"-2",
-           "Override waveamdmachine.target_waves; -2 uses IR/default, -1 disables derived critical budgets, 0 uses the target maximum.">
+           "Override waveamdmachine.target_waves; -2 uses explicit IR attrs, -1 disables derived critical budgets, 0 uses the target maximum.">
   ];
 }
 
@@ -166,11 +166,11 @@ def WaveAMDMachineScheduleReport
     Option<"pressureSgprBudget", "pressure-sgpr-budget", "int", /*default=*/"-1",
            "Hard SGPR budget override for scheduler pressure diagnostics; -1 uses the target default.">,
     Option<"pressureCriticalVgprBudget", "pressure-critical-vgpr-budget", "int", /*default=*/"-1",
-           "Critical VGPR budget override for scheduler pressure diagnostics; -1 uses the target-waves default.">,
+           "Critical VGPR budget override for scheduler pressure diagnostics; -1 uses an explicit multi-wave target.">,
     Option<"pressureCriticalSgprBudget", "pressure-critical-sgpr-budget", "int", /*default=*/"-1",
-           "Critical SGPR budget override for scheduler pressure diagnostics; -1 uses the target-waves default.">,
+           "Critical SGPR budget override for scheduler pressure diagnostics; -1 uses an explicit multi-wave target.">,
     Option<"pressureTargetWavesOverride", "pressure-target-waves-override", "int", /*default=*/"-2",
-           "Override waveamdmachine.target_waves; -2 uses IR/default, -1 disables derived critical budgets, 0 uses the target maximum.">,
+           "Override waveamdmachine.target_waves; -2 uses explicit IR attrs, -1 disables derived critical budgets, 0 uses the target maximum.">,
     Option<"scoreFunc", "score-func", "std::string", /*default=*/"\"\"",
            "Function name whose local region should score a candidate order.">,
     Option<"scoreRegion", "score-region", "int", /*default=*/"-1",

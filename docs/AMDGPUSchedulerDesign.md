@@ -759,8 +759,9 @@ Command split:
 Target occupancy is IR metadata. `waveamdmachine.target_waves = N : i64`
 on a scheduled function sets the waves-per-SIMD target used for derived
 critical VGPR pressure; a module attr is the fallback for generated
-single-kernel wrappers. Missing attr means target max for the arch.
-`pressure-target-waves-override` exists only for diagnostics.
+single-kernel wrappers. Missing attr means no derived occupancy pressure;
+hard arch register caps still apply. `pressure-target-waves-override`
+exists only for diagnostics.
 
 **Risk.** Correctness around `s_setprio` / waitcnt pairs --
 reordering across them is unsafe. Mitigation: mark these as

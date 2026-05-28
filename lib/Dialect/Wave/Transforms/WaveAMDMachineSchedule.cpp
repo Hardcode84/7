@@ -13,8 +13,8 @@
 //   a token edge are independent for this pass.
 // - Candidate orders are deterministic permutations of one region. Loop-carried
 //   recurrence edges are diagnostics, not intra-iteration ordering constraints.
-// - Cost policy ranks legal candidates. Rewrite only applies a selected
-//   non-original order; selection may prefer pressure over cycles.
+// - Cost policy ranks legal candidates. Hard register caps gate candidates;
+//   explicit multi-wave targets add occupancy pressure ranking.
 
 #include "mlir/Dialect/Wave/Transforms/Passes.h"
 

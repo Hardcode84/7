@@ -420,6 +420,21 @@ static unsigned getTargetWavesForBudget(const WaveAMDRegisterLimits &limits,
   return static_cast<unsigned>(targetWaves);
 }
 
+static bool shouldDeriveCriticalBudgets(Operation *op,
+                                        const WaveAMDRegisterLimits &limits,
+                                        int targetWaves,
+                                        int pressureTargetWavesOverride) {
+  if (pressureTargetWavesOverride == -1)
+    return false;
+  if (pressureTargetWavesOverride >= 0)
+    return getTargetWavesForBudget(limits, targetWaves) > 1;
+
+  Attribute attr = findTargetWavesAttr(op);
+  if (!attr)
+    return false;
+  return cast<IntegerAttr>(attr).getInt() > 1;
+}
+
 static void deriveHardBudgets(Operation *op,
                               const WaveAMDRegisterLimits &limits,
                               RegisterPressureBudgets &budgets) {
@@ -487,7 +502,9 @@ LogicalResult configureSchedulePressureBudgets(
     if (failed(limits))
       return failure();
     deriveHardBudgets(op, *limits, budgets);
-    deriveCriticalBudgets(op, *limits, *targetWaves, budgets);
+    if (shouldDeriveCriticalBudgets(op, *limits, *targetWaves,
+                                    pressureTargetWavesOverride))
+      deriveCriticalBudgets(op, *limits, *targetWaves, budgets);
   }
   applyPressureOverrides(pressureVgprBudget, pressureSgprBudget,
                          pressureCriticalVgprBudget, pressureCriticalSgprBudget,

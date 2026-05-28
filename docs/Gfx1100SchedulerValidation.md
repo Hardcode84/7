@@ -91,9 +91,11 @@ Limits:
 
 ## Pressure-aware scheduler check
 
-Machine: same W7900 / gfx1100. Commands used `--iters=100 --warmup=10
---repeats=3`. Scheduler budget defaults came from the target: kernel hard
-VGPR/SGPR `255/101`, critical `95/101` when no `target_waves` attr was set.
+Machine: same W7900 / gfx1100. Matmul rows used `--iters=100 --warmup=10
+--repeats=3`. FA rows were refreshed with `--iters=1000 --warmup=20`.
+Scheduler budget defaults derive hard VGPR/SGPR caps from the target:
+`255/101` here. Missing `target_waves` leaves critical occupancy budgets
+disabled; explicit multi-wave targets derive them.
 
 Matmul command shape:
 
@@ -107,8 +109,8 @@ tools/wave-matmul-calibrate/wave-matmul-calibrate.py \
 Compared with `--no-pressure-aware-schedule`, pressure-aware selection picked
 the same candidate in every region: `critical_path, critical_path, wmma_feed,
 critical_path, critical_path`. Max VGPR was `22, 31, 45, 29, 33`, below the
-critical budget. Final sim cycles matched: `5137` for `(waves=1, simds=1)` and
-`5137` for `(waves=2, simds=2)`.
+hard cap. Final sim cycles matched: `5137` for `(waves=1, simds=1)` and `5137`
+for `(waves=2, simds=2)`.
 
 | Matmul policy | HW cycles samples | Median cycles | Median us | Check |
 | --- | --- | ---: | ---: | --- |
@@ -123,35 +125,31 @@ FlashAttention command shape:
 ```bash
 tools/wave-fa-calibrate/wave-fa-calibrate.py \
   --chip=gfx1100 --variants=scheduled \
-  --seq-n=<16-or-32> --iters=100 --warmup=10 --repeats=3
+  --seq-n=<16-or-32> --iters=1000 --warmup=20 --repeats=<3-or-5>
 ```
 
-For `seq_n=16`, no-pressure scheduling selected the aggressive
-`critical_path` order: post-lowering sim `1292`, candidate max VGPR `153`.
-Pressure-aware scheduling rejected that order because `153 > 95`
-(`vgpr_critical_excess=58`) and kept original order: post-lowering sim `48244`,
-candidate max VGPR `21`.
+For `seq_n=16`, no `target_waves` is set, so pressure-aware selection enforces
+only the hard cap. The aggressive schedule stays under the cap and is selected.
 
-| FA seq_n=16 policy | HW cycles samples | Median cycles | Median us | Check |
-| --- | --- | ---: | ---: | --- |
-| no pressure | 7075,10873,10886 | 10873 | 6.178 | passed |
-| pressure-aware | 19012,19047,18987 | 19012 | 10.802 | passed |
+| FA seq_n=16 variant | Sim cycles | HW cycles samples | Median cycles | Median us | Check |
+| --- | ---: | --- | ---: | ---: | --- |
+| baseline | 26799 | 12846,13581,13526,13576,13498 | 13526 | 7.685 | passed |
+| scheduled | 23468 | 12355,12358,12287,12290,12352 | 12352 | 7.018 | passed |
 
-Result: occupancy-safe scheduling regresses this small FA kernel by `+8139`
-cycles (`+74.9%`) versus the high-pressure order. Reason is deliberate: current
-policy protects target-wave occupancy and regalloc headroom before cycle score.
+Result: hard-cap-only pressure selection keeps the useful schedule: `-1174`
+cycles (`-8.7%`) versus baseline.
 
-For `seq_n=32`, old no-pressure scheduled lowering failed in
-`waveamd-reg-alloc` with "ran out of registers". Pressure-aware baseline and
-scheduled variants both lowered and passed.
+For `seq_n=32`, hard-cap selection rejects region 1 and 3 candidates with
+`541` and `577` max VGPR (`255` cap), so the old no-pressure regalloc failure
+path stays blocked. Safe regions can still be scheduled.
 
 | FA seq_n=32 variant | Sim cycles | HW cycles samples | Median cycles | Median us | Check |
 | --- | ---: | --- | ---: | ---: | --- |
-| baseline | 96118 | 28487,28375,28497 | 28487 | 16.186 | passed |
-| scheduled | 96118 | 28508,28492,28512 | 28508 | 16.198 | passed |
+| baseline | 190840 | 54842,50581,51628 | 51628 | 29.334 | passed |
+| scheduled | 189648 | 50172,51209,51195 | 51195 | 29.088 | passed |
 
-Result: pressure-aware scheduling fixes the seq_n=32 regalloc failure. It also
-keeps the schedule at baseline, so the measured `+21` cycles (`+0.1%`) is noise.
+Result: hard-cap pressure still protects regalloc and allows a small measured
+win: `-433` cycles (`-0.8%`).
 
 ## FlashAttention multi-wave D sweep
 
