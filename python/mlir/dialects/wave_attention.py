@@ -11,6 +11,7 @@ import struct
 from dataclasses import dataclass
 
 import ixsimpl
+from mlir.dialects import scf
 from mlir.dialects import wave_dsl as dsl
 from mlir.ir import Module
 
@@ -20,6 +21,7 @@ _F16_PTR_HELPER = "wave_memref_to_ptr_global_f16"
 _F32_PTR_HELPER = "wave_memref_to_ptr_global_f32"
 _PRINT_HELPER = "printMemrefF32"
 _TARGET_WAVES_ATTR = "waveamdmachine.target_waves"
+type _ExprLike = int | ixsimpl.Expr
 
 
 @dataclass(frozen=True)
@@ -288,16 +290,19 @@ def _load_k_fragment(
     types: _KernelTypes,
     k_ptr: dsl.Value,
     lane_value: dsl.Value,
-    start_n: int,
+    start_n: _ExprLike,
     k_step: int,
+    bindings: dict[ixsimpl.Expr, dsl.Value] | None = None,
 ) -> dsl.Value:
     lane_sym = dsl.sym("fa_lane")
     lane_expr = dsl.mod(lane_sym, cfg.mma.wave_size)
     lane_mod16 = dsl.mod(lane_expr, 16)
     lane_k_off = dsl.floor(lane_expr / 16) * cfg.mma.lane_k_elems
+    expr_bindings = dict(bindings or {})
+    expr_bindings[lane_sym] = lane_value
     k_off = bld.index_expr(
         (start_n + lane_mod16) * cfg.head_dim + lane_k_off + k_step * cfg.mma.k_tile,
-        bindings={lane_sym: lane_value},
+        bindings=expr_bindings,
     )
     frag, _ = bld.fragment_load(bld.ptr_add(k_ptr, k_off), types.b)
     return frag
@@ -338,12 +343,15 @@ def _emit_qk_tile(
     q_ptr: dsl.Value,
     k_ptr: dsl.Value,
     lane: dsl.Value,
-    start_n: int,
+    start_n: _ExprLike,
+    bindings: dict[ixsimpl.Expr, dsl.Value] | None = None,
 ) -> dsl.Value:
     acc = bld.fragment_fill(bld.constant(dsl.i32(), 0), types.acc)
     for k_step in range(cfg.head_dim // cfg.mma.k_tile):
         q_frag = _load_q_fragment(bld, cfg, types, q_ptr, lane, k_step)
-        k_frag = _load_k_fragment(bld, cfg, types, k_ptr, lane, start_n, k_step)
+        k_frag = _load_k_fragment(
+            bld, cfg, types, k_ptr, lane, start_n, k_step, bindings
+        )
         acc = bld.mma(cfg.mma.kind, q_frag, k_frag, acc)
     return acc
 
@@ -409,7 +417,7 @@ def _emit_first_tile(
     v_ptr: dsl.Value,
     d_expr: ixsimpl.Expr,
     bindings: dict[ixsimpl.Expr, dsl.Value],
-    start_n: int,
+    start_n: _ExprLike,
     ns: tuple[int, ...],
     scores: tuple[dsl.Value, ...],
 ) -> tuple[dsl.Value, dsl.Value, dsl.Value]:
@@ -435,7 +443,7 @@ def _emit_online_tile(
     v_ptr: dsl.Value,
     d_expr: ixsimpl.Expr,
     bindings: dict[ixsimpl.Expr, dsl.Value],
-    start_n: int,
+    start_n: _ExprLike,
     row_max: dsl.Value,
     denom: dsl.Value,
     numer: dsl.Value,
@@ -455,6 +463,21 @@ def _emit_online_tile(
         next_numer = bld.fadd(next_numer, bld.fmul(prob, v_val))
 
     return next_max, next_denom, next_numer
+
+
+def _flatten_loop_state(
+    states: list[tuple[dsl.Value, dsl.Value, dsl.Value]],
+) -> tuple[dsl.Value, ...]:
+    values: list[dsl.Value] = []
+    for state in states:
+        values.extend(state)
+    return tuple(values)
+
+
+def _split_loop_state(
+    values: tuple[dsl.Value, ...], chunks: int
+) -> list[tuple[dsl.Value, dsl.Value, dsl.Value]]:
+    return [(values[i], values[i + 1], values[i + 2]) for i in range(0, chunks * 3, 3)]
 
 
 def _stage_probability_tile(
@@ -644,50 +667,73 @@ def _emit_kernel(bld: dsl.FunctionBuilder, cfg: _FlashAttentionConfig) -> None:
         return
 
     score_ptr = bld.lds_base(dsl.f32())
-    states: list[tuple[dsl.Value, dsl.Value, dsl.Value] | None] = [
-        None for _ in range(cfg.output_chunks)
-    ]
     scratch_dep = bld.token()
+    qk = _emit_qk_tile(bld, cfg, types, q_arg, k_arg, lane, 0)
+    score_store = bld.fragment_store(qk, score_ptr, after=scratch_dep)
+    score_ready = bld.barrier(score_store)
+    score_tokens: list[dsl.Value] = []
+    states: list[tuple[dsl.Value, dsl.Value, dsl.Value]] = []
 
-    for start_n in range(0, cfg.seq_len, cfg.block_n):
-        qk = _emit_qk_tile(bld, cfg, types, q_arg, k_arg, lane, start_n)
-        score_store = bld.fragment_store(qk, score_ptr, after=scratch_dep)
-        score_ready = bld.barrier(score_store)
-        score_tokens: list[dsl.Value] = []
+    for chunk in range(cfg.output_chunks):
+        out_idx = lane_sym + chunk * cfg.mma.wave_size
+        d_expr = dsl.mod(out_idx, cfg.head_dim)
+        bindings = {lane_sym: lane}
+        ns, scores, tokens = _load_score_values(
+            bld, cfg, score_ptr, lane, chunk, score_ready
+        )
+        score_tokens.extend(tokens)
+        states.append(
+            _emit_first_tile(bld, cfg, v_arg, d_expr, bindings, 0, ns, scores)
+        )
 
-        for chunk in range(cfg.output_chunks):
-            out_idx = lane_sym + chunk * cfg.mma.wave_size
-            d_expr = dsl.mod(out_idx, cfg.head_dim)
-            bindings = {lane_sym: lane}
-            ns, scores, tokens = _load_score_values(
-                bld, cfg, score_ptr, lane, chunk, score_ready
+    scratch_dep = bld.barrier(*score_tokens)
+    num_tiles = cfg.seq_len // cfg.block_n
+    if num_tiles > 1:
+        c1 = bld.constant(dsl.i32(), 1)
+        upper = bld.constant(dsl.i32(), num_tiles)
+        init_args = _flatten_loop_state(states)
+        with bld.for_loop(c1, upper, c1, init_args=init_args) as loop:
+            tile_sym = dsl.sym("fa_tile")
+            loop_states = _split_loop_state(
+                tuple(loop.inner_iter_args), cfg.output_chunks
             )
-            score_tokens.extend(tokens)
-            state = states[chunk]
-            if state is None:
-                states[chunk] = _emit_first_tile(
-                    bld, cfg, v_arg, d_expr, bindings, start_n, ns, scores
+            start_n = tile_sym * cfg.block_n
+            bindings = {lane_sym: lane, tile_sym: loop.induction_variable}
+            qk = _emit_qk_tile(bld, cfg, types, q_arg, k_arg, lane, start_n, bindings)
+            score_store = bld.fragment_store(qk, score_ptr, after=bld.token())
+            score_ready = bld.barrier(score_store)
+            score_tokens = []
+            next_states: list[tuple[dsl.Value, dsl.Value, dsl.Value]] = []
+
+            for chunk, state in enumerate(loop_states):
+                out_idx = lane_sym + chunk * cfg.mma.wave_size
+                d_expr = dsl.mod(out_idx, cfg.head_dim)
+                ns, scores, tokens = _load_score_values(
+                    bld, cfg, score_ptr, lane, chunk, score_ready
                 )
-            else:
+                score_tokens.extend(tokens)
                 row_max, denom, numer = state
-                states[chunk] = _emit_online_tile(
-                    bld,
-                    cfg,
-                    v_arg,
-                    d_expr,
-                    bindings,
-                    start_n,
-                    row_max,
-                    denom,
-                    numer,
-                    ns,
-                    scores,
+                next_states.append(
+                    _emit_online_tile(
+                        bld,
+                        cfg,
+                        v_arg,
+                        d_expr,
+                        bindings,
+                        start_n,
+                        row_max,
+                        denom,
+                        numer,
+                        ns,
+                        scores,
+                    )
                 )
 
-        scratch_dep = bld.barrier(*score_tokens)
+            bld.barrier(*score_tokens)
+            scf.YieldOp(list(_flatten_loop_state(next_states)))
+        states = _split_loop_state(tuple(loop.results), cfg.output_chunks)
 
     for chunk, state in enumerate(states):
-        assert state is not None
         _, denom, numer = state
         out_idx = lane_sym + chunk * cfg.mma.wave_size
         out_val = bld.fmul(numer, bld.frcp(denom))

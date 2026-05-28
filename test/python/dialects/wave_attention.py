@@ -61,4 +61,6 @@ print(module)
 # CHECK: wave.fmax
 # CHECK: wave.fsub
 # CHECK: wave.fexp2
+# CHECK: scf.for
+# CHECK-SAME: iter_args
 # CHECK: wave.frcp

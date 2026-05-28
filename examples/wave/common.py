@@ -145,12 +145,42 @@ def _extract_generic_func(module_text: str, kernel_name: str) -> str | None:
     return None
 
 
+def _dedent_op(text: str) -> str:
+    lines = text.splitlines()
+    nonempty = [line for line in lines if line.strip()]
+    if not nonempty:
+        return text
+    indent = min(len(line) - len(line.lstrip()) for line in nonempty)
+    if indent == 0:
+        return text
+    prefix = " " * indent
+    return "\n".join(line.removeprefix(prefix) for line in lines)
+
+
+def _extract_pretty_func(module_text: str, kernel_name: str) -> str | None:
+    lines = module_text.splitlines()
+    pattern = re.compile(rf"^\s*func\.func @{re.escape(kernel_name)}(?:\W|$)")
+    for start, line in enumerate(lines):
+        if not pattern.search(line):
+            continue
+        depth = 0
+        for end in range(start, len(lines)):
+            depth += lines[end].count("{") - lines[end].count("}")
+            if end > start and depth == 0:
+                return _dedent_op("\n".join(lines[start : end + 1]))
+    return None
+
+
 def extract_kernel_op(
     module_text: str, *, kernel_regex: str, kernel_name: str | None = None
 ) -> str | None:
+    if kernel_name is not None:
+        pretty = _extract_pretty_func(module_text, kernel_name)
+        if pretty is not None:
+            return pretty
     match = re.search(kernel_regex, module_text, re.S)
     if match:
-        return match.group(1).replace("\n    ", "\n  ")
+        return _dedent_op(match.group(1))
     if kernel_name is None:
         return None
     return _extract_generic_func(module_text, kernel_name)

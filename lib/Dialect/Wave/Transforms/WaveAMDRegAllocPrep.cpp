@@ -96,6 +96,74 @@ static LogicalResult splitDuplicateLoopInits(func::FuncOp func) {
   return success();
 }
 
+static Operation *topLevelBodyOp(Block &body, Operation *op) {
+  while (op && op->getBlock() != &body)
+    op = op->getParentOp();
+  return op;
+}
+
+static bool hasUseAfter(BlockArgument arg, Operation *op,
+                        const DenseMap<Operation *, unsigned> &order) {
+  auto posIt = order.find(op);
+  if (posIt == order.end())
+    return true;
+  unsigned pos = posIt->second;
+  Block &body = *arg.getOwner();
+  for (OpOperand &use : arg.getUses()) {
+    Operation *user = topLevelBodyOp(body, use.getOwner());
+    if (!user || isa<waveamdmachine::ContinueIfOp>(user))
+      continue;
+    auto it = order.find(user);
+    if (it != order.end() && it->second > pos)
+      return true;
+  }
+  return false;
+}
+
+static bool needsBackedgeCopy(waveamdmachine::UniformLoopOp loop, unsigned i,
+                              Value carry,
+                              const DenseMap<Operation *, unsigned> &order) {
+  Block &body = loop.getBody().front();
+  Value init = loop.getInits()[i];
+  BlockArgument arg = body.getArgument(i);
+  if (carry == arg || carry == init)
+    return false;
+  Operation *def = carry.getDefiningOp();
+  if (!def)
+    return true;
+  Operation *top = topLevelBodyOp(body, def);
+  if (!top)
+    return true;
+  return hasUseAfter(arg, top, order);
+}
+
+static LogicalResult materializeLoopBackedgeCopies(func::FuncOp func) {
+  SmallVector<waveamdmachine::UniformLoopOp> loops;
+  func.walk([&](waveamdmachine::UniformLoopOp loop) { loops.push_back(loop); });
+  OpBuilder builder(func.getContext());
+  for (waveamdmachine::UniformLoopOp loop : loops) {
+    Block &body = loop.getBody().front();
+    auto term = cast<waveamdmachine::ContinueIfOp>(body.getTerminator());
+    DenseMap<Operation *, unsigned> order;
+    unsigned index = 0;
+    for (Operation &op : body.without_terminator())
+      order[&op] = index++;
+    builder.setInsertionPoint(term);
+    for (auto [i, carry] : llvm::enumerate(term.getCarries())) {
+      if (!trackedRegType(carry))
+        continue;
+      // Late defs can stay coalesced; early defs need tail copy.
+      if (!needsBackedgeCopy(loop, i, carry, order))
+        continue;
+      FailureOr<Value> dup = duplicateRegValue(builder, term.getLoc(), carry);
+      if (failed(dup))
+        return failure();
+      term.getCarriesMutable()[i].assign(*dup);
+    }
+  }
+  return success();
+}
+
 static bool feedsLoopCarry(Value v) {
   if (auto arg = dyn_cast<BlockArgument>(v))
     if (isa<waveamdmachine::UniformLoopOp>(arg.getOwner()->getParentOp()))
@@ -202,6 +270,8 @@ static LogicalResult splitTupleElementSharing(func::FuncOp func) {
 } // namespace
 
 LogicalResult mlir::wave::prepareWaveAMDRegAllocIR(func::FuncOp func) {
+  if (failed(materializeLoopBackedgeCopies(func)))
+    return failure();
   if (failed(splitDuplicateLoopInits(func)))
     return failure();
   return splitTupleElementSharing(func);

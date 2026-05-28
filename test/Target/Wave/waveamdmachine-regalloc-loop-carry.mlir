@@ -219,4 +219,50 @@ func.func @external_loop_base_live_across_backedge() attributes {wave.kernel} {
   return
 }
 
+// Back-edge copy must happen after old carry's last use.
+// CHECK-LABEL: func.func @backedge_copy_after_old_use
+// CHECK: waveamdmachine.uniform_loop
+// CHECK: %[[NEXT:.+]] = waveamdmachine.v_add_f32
+// CHECK: waveamdmachine.v_sub_f32 {{.*}}, %[[NEXT]]
+// CHECK: %[[COPY:.+]] = waveamdmachine.v_mov_b32_tuple %[[NEXT]]
+// CHECK: waveamdmachine.continue_if {{.*}}carries({{[^,]+}}, %[[COPY]]
+func.func @backedge_copy_after_old_use() attributes {wave.kernel} {
+  %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+  %one = waveamdmachine.imm 1 : !waveamdmachine.imm
+  %four = waveamdmachine.imm 4 : !waveamdmachine.imm
+  %init = waveamdmachine.v_mov_b32_tuple %zero {registers = 1 : i64}
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
+  %stepv = waveamdmachine.v_mov_b32_tuple %one {registers = 1 : i64}
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
+  %iv = waveamdmachine.s_mov_b32_value %zero
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<sgpr, 1>
+  %ec = waveamdmachine.s_cmp_lt_i32 %zero, %four
+      : (!waveamdmachine.imm, !waveamdmachine.imm) -> !waveamdmachine.reg<scc, 1>
+  %results:2 = waveamdmachine.uniform_loop if %ec : !waveamdmachine.reg<scc, 1>
+      carries(%iv, %init :
+              !waveamdmachine.reg<sgpr, 1>,
+              !waveamdmachine.reg<vgpr, 1>) {
+  ^bb0(%cur_iv: !waveamdmachine.reg<sgpr, 1>,
+       %cur: !waveamdmachine.reg<vgpr, 1>):
+    %next = waveamdmachine.v_add_f32 %cur, %stepv
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+    %old_use = waveamdmachine.v_sub_f32 %cur, %next
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+    %niv, %scc = waveamdmachine.s_add_i32 %cur_iv, %one
+        : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.imm)
+          -> (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<scc, 1>)
+    %bc = waveamdmachine.s_cmp_lt_i32 %niv, %four
+        : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.imm)
+          -> !waveamdmachine.reg<scc, 1>
+    waveamdmachine.continue_if %bc : !waveamdmachine.reg<scc, 1>
+        carries(%niv, %next :
+                !waveamdmachine.reg<sgpr, 1>,
+                !waveamdmachine.reg<vgpr, 1>)
+  } -> !waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<vgpr, 1>
+  waveamdmachine.s_endpgm
+  return
+}
+
 }
