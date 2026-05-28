@@ -394,6 +394,8 @@ def run_hw(
         str(args.iters),
         "--warmup",
         str(args.warmup),
+        "--threads",
+        str(threads_per_workgroup(args.chip)),
     ]
     if args.no_check:
         cmd.append("--no-check")
@@ -489,16 +491,21 @@ def parse_variants(text: str) -> list[Variant]:
     return variants
 
 
-def threads_per_workgroup(args: argparse.Namespace) -> int:
-    return args.block_m * args.head_dim
+def threads_per_workgroup(chip: str) -> int:
+    return 64 if chip.startswith("gfx950") else 32
+
+
+def exit_if(condition: bool, message: str) -> None:
+    if condition:
+        sys.exit(message)
 
 
 def build_argparser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--chip", default="", help="gfx target; default from rocminfo")
-    ap.add_argument("--block-m", type=int, default=4)
-    ap.add_argument("--block-n", type=int, default=8)
-    ap.add_argument("--head-dim", type=int, default=8)
+    ap.add_argument("--block-m", type=int, default=16)
+    ap.add_argument("--block-n", type=int, default=16)
+    ap.add_argument("--head-dim", type=int, default=32)
     ap.add_argument("--seq-n", type=int, default=16)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--iters", type=int, default=1000)
@@ -545,7 +552,7 @@ def build_argparser() -> argparse.ArgumentParser:
     return ap
 
 
-def validate_args(args: argparse.Namespace) -> None:
+def validate_args(args: argparse.Namespace, chip: str) -> None:
     positive = (
         "block_m",
         "block_n",
@@ -559,25 +566,29 @@ def validate_args(args: argparse.Namespace) -> None:
         "model_simds",
     )
     for name in positive:
-        if getattr(args, name) <= 0:
-            sys.exit(f"--{name.replace('_', '-')} must be positive")
-    if args.warmup < 0:
-        sys.exit("--warmup must be non-negative")
-    if args.target_waves < 0:
-        sys.exit("--target-waves must be non-negative")
-    if args.head_dim & (args.head_dim - 1):
-        sys.exit("--head-dim must be a power of two")
-    threads = threads_per_workgroup(args)
-    if threads % 32:
-        sys.exit("FA kernel requires --block-m * --head-dim to be a multiple of 32")
-    if threads > 1024:
-        sys.exit("FA kernel requires --block-m * --head-dim <= 1024")
+        exit_if(
+            getattr(args, name) <= 0,
+            f"--{name.replace('_', '-')} must be positive",
+        )
+    exit_if(args.warmup < 0, "--warmup must be non-negative")
+    exit_if(args.target_waves < 0, "--target-waves must be non-negative")
+    exit_if(
+        bool(args.head_dim & (args.head_dim - 1)), "--head-dim must be a power of two"
+    )
+    exit_if(
+        args.block_m != 16 or args.block_n != 16,
+        "MMA FA kernel requires --block-m=16 and --block-n=16",
+    )
+    exit_if(args.seq_n % args.block_n != 0, "--seq-n must be a multiple of --block-n")
+    k_tile = 32 if chip.startswith("gfx950") else 16
+    exit_if(args.head_dim % k_tile != 0, f"--head-dim must be a multiple of {k_tile}")
 
 
 def main() -> int:
     args = build_argparser().parse_args()
-    validate_args(args)
     chip = args.chip or detect_chip()
+    args.chip = chip
+    validate_args(args, chip)
 
     tmp_ctx = None if args.keep_tmp else tempfile.TemporaryDirectory()
     tmp = Path(tempfile.mkdtemp() if args.keep_tmp else tmp_ctx.name)
@@ -589,7 +600,7 @@ def main() -> int:
             f"chip: {chip}\n"
             f"shape: block_m={args.block_m} block_n={args.block_n} "
             f"seq_n={args.seq_n} head_dim={args.head_dim} "
-            f"waves_per_workgroup={threads_per_workgroup(args) // 32} "
+            f"waves_per_workgroup={threads_per_workgroup(chip) // 32} "
             f"target_waves={args.target_waves}"
         )
         results: list[VariantResult] = []

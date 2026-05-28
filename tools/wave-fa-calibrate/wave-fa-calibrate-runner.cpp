@@ -22,10 +22,11 @@ namespace {
 struct Args {
   const char *hsaco = nullptr;
   const char *kernel = nullptr;
-  int blockM = 4;
-  int blockN = 8;
+  int blockM = 16;
+  int blockN = 16;
   int seqN = 16;
-  int headDim = 8;
+  int headDim = 32;
+  int threads = 32;
   int seed = 0;
   int iters = 1000;
   int warmupIters = 10;
@@ -39,16 +40,18 @@ struct Args {
 
 static void usage() {
   std::fprintf(
-      stderr, "usage: wave-fa-calibrate-runner [options] <hsaco> <kernel>\n"
-              "options:\n"
-              "  --block-m N     Q rows (default 4)\n"
-              "  --block-n N     K/V tile width baked into kernel (default 8)\n"
-              "  --seq-n N       total K/V rows (default 16)\n"
-              "  --head-dim N    head dimension (default 8)\n"
-              "  --seed N        deterministic input seed (default 0)\n"
-              "  --iters N       timed launch iterations (default 1000)\n"
-              "  --warmup N      warmup launches (default 10)\n"
-              "  --no-check      skip CPU reference comparison\n");
+      stderr,
+      "usage: wave-fa-calibrate-runner [options] <hsaco> <kernel>\n"
+      "options:\n"
+      "  --block-m N     Q rows (default 16)\n"
+      "  --block-n N     K/V tile width baked into kernel (default 16)\n"
+      "  --seq-n N       total K/V rows (default 16)\n"
+      "  --head-dim N    head dimension (default 32)\n"
+      "  --threads N     workgroup threads (default 32)\n"
+      "  --seed N        deterministic input seed (default 0)\n"
+      "  --iters N       timed launch iterations (default 1000)\n"
+      "  --warmup N      warmup launches (default 10)\n"
+      "  --no-check      skip CPU reference comparison\n");
 }
 
 static int parseInt(const char *s) {
@@ -68,14 +71,15 @@ static void setBlockM(Args &a, const char *v) { a.blockM = parseInt(v); }
 static void setBlockN(Args &a, const char *v) { a.blockN = parseInt(v); }
 static void setSeqN(Args &a, const char *v) { a.seqN = parseInt(v); }
 static void setHeadDim(Args &a, const char *v) { a.headDim = parseInt(v); }
+static void setThreads(Args &a, const char *v) { a.threads = parseInt(v); }
 static void setSeed(Args &a, const char *v) { a.seed = parseInt(v); }
 static void setIters(Args &a, const char *v) { a.iters = parseInt(v); }
 static void setWarmup(Args &a, const char *v) { a.warmupIters = parseInt(v); }
 
 static constexpr FlagHandler kFlags[] = {
-    {"--block-m", setBlockM},   {"--block-n", setBlockN}, {"--seq-n", setSeqN},
-    {"--head-dim", setHeadDim}, {"--seed", setSeed},      {"--iters", setIters},
-    {"--warmup", setWarmup},
+    {"--block-m", setBlockM},   {"--block-n", setBlockN},  {"--seq-n", setSeqN},
+    {"--head-dim", setHeadDim}, {"--threads", setThreads}, {"--seed", setSeed},
+    {"--iters", setIters},      {"--warmup", setWarmup},
 };
 
 static bool tryFlag(const char *arg, const char *val, Args &a) {
@@ -133,23 +137,27 @@ static void requirePositive(int v, const char *what) {
 
 static bool isPowerOfTwo(int v) { return (v & (v - 1)) == 0; }
 
-static int threadsPerWorkgroup(const Args &a) { return a.blockM * a.headDim; }
+static int threadsPerWorkgroup(const Args &a) { return a.threads; }
 
 static void validateArgs(const Args &a) {
   requirePositive(a.blockM, "block-m must be positive");
   requirePositive(a.blockN, "block-n must be positive");
   requirePositive(a.seqN, "seq-n must be positive");
   requirePositive(a.headDim, "head-dim must be positive");
+  requirePositive(a.threads, "threads must be positive");
   requirePositive(a.iters, "iters must be positive");
   if (a.warmupIters < 0)
     die("warmup must be non-negative");
   if (!isPowerOfTwo(a.headDim))
     die("head-dim must be a power of two");
-  int64_t threads = static_cast<int64_t>(a.blockM) * a.headDim;
-  if (threads % 32 != 0)
-    die("FA kernel requires block-m * head-dim to be a multiple of 32");
-  if (threads > 1024)
-    die("FA kernel requires block-m * head-dim <= 1024");
+  if (a.blockM != 16 || a.blockN != 16)
+    die("MMA FA kernel requires block-m=16 and block-n=16");
+  if (a.seqN % a.blockN != 0)
+    die("seq-n must be a multiple of block-n");
+  if (a.headDim % 16 != 0)
+    die("head-dim must be a multiple of 16");
+  if (a.threads != 32 && a.threads != 64)
+    die("threads must be 32 or 64");
 }
 
 static Args parseArgs(int argc, char **argv) {
@@ -194,7 +202,17 @@ static void makeInputs(const Args &a, std::vector<float> &q,
   double qScale =
       1.4426950408889634 / std::sqrt(static_cast<double>(a.headDim));
   for (float &value : q)
-    value = static_cast<float>(static_cast<double>(value) * qScale);
+    value = static_cast<float>(
+        static_cast<_Float16>(static_cast<double>(value) * qScale));
+  for (float &value : k)
+    value = static_cast<float>(static_cast<_Float16>(value));
+}
+
+static std::vector<_Float16> packHalf(const std::vector<float> &values) {
+  std::vector<_Float16> packed(values.size());
+  for (int i = 0, e = static_cast<int>(values.size()); i < e; ++i)
+    packed[i] = static_cast<_Float16>(values[i]);
+  return packed;
 }
 
 static std::vector<float> computeReference(const Args &a,
@@ -252,6 +270,23 @@ static void validateOutput(const std::vector<float> &out,
               worstIdx);
 }
 
+static void printTiming(const Args &a, const hipDeviceProp_t &props,
+                        int threads, double clockMHz, float elapsedMs,
+                        double perLaunchUs, double perLaunchCycles) {
+  std::printf("device: %s (%s) shader_clock_mhz=%.0f\n", props.name,
+              props.gcnArchName, clockMHz);
+  std::printf("kernel: %s\n", a.kernel);
+  std::printf(
+      "shape: block_m=%d block_n=%d seq_n=%d head_dim=%d seed=%d threads=%d\n",
+      a.blockM, a.blockN, a.seqN, a.headDim, a.seed, threads);
+  std::printf("grid: 1,1,1 block: %d,1,1 waves_per_workgroup=%d\n", threads,
+              threads / 32);
+  std::printf("iters: %d\n", a.iters);
+  std::printf("total_ms: %.3f\n", elapsedMs);
+  std::printf("per_launch_us: %.3f\n", perLaunchUs);
+  std::printf("per_launch_cycles_wallclock: %.0f\n", perLaunchCycles);
+}
+
 } // namespace
 
 int main(int argc, char **argv) {
@@ -275,20 +310,26 @@ int main(int argc, char **argv) {
   std::vector<float> hostV(kvElems, 0.0f);
   std::vector<float> hostOut(qElems, 0.0f);
   makeInputs(a, hostQ, hostK, hostV);
+  std::vector<_Float16> hostQHalf = packHalf(hostQ);
+  std::vector<_Float16> hostKHalf = packHalf(hostK);
 
-  float *deviceQ = nullptr;
-  float *deviceK = nullptr;
+  _Float16 *deviceQ = nullptr;
+  _Float16 *deviceK = nullptr;
   float *deviceV = nullptr;
   float *deviceOut = nullptr;
-  checkHip(hipMalloc(&deviceQ, hostQ.size() * sizeof(float)), "hipMalloc Q");
-  checkHip(hipMalloc(&deviceK, hostK.size() * sizeof(float)), "hipMalloc K");
+  checkHip(hipMalloc(&deviceQ, hostQHalf.size() * sizeof(_Float16)),
+           "hipMalloc Q");
+  checkHip(hipMalloc(&deviceK, hostKHalf.size() * sizeof(_Float16)),
+           "hipMalloc K");
   checkHip(hipMalloc(&deviceV, hostV.size() * sizeof(float)), "hipMalloc V");
   checkHip(hipMalloc(&deviceOut, hostOut.size() * sizeof(float)),
            "hipMalloc out");
-  checkHip(hipMemcpy(deviceQ, hostQ.data(), hostQ.size() * sizeof(float),
+  checkHip(hipMemcpy(deviceQ, hostQHalf.data(),
+                     hostQHalf.size() * sizeof(_Float16),
                      hipMemcpyHostToDevice),
            "hipMemcpy Q");
-  checkHip(hipMemcpy(deviceK, hostK.data(), hostK.size() * sizeof(float),
+  checkHip(hipMemcpy(deviceK, hostKHalf.data(),
+                     hostKHalf.size() * sizeof(_Float16),
                      hipMemcpyHostToDevice),
            "hipMemcpy K");
   checkHip(hipMemcpy(deviceV, hostV.data(), hostV.size() * sizeof(float),
@@ -325,17 +366,8 @@ int main(int argc, char **argv) {
                      hipMemcpyDeviceToHost),
            "hipMemcpy out");
 
-  std::printf("device: %s (%s) shader_clock_mhz=%.0f\n", props.name,
-              props.gcnArchName, clockMHz);
-  std::printf("kernel: %s\n", a.kernel);
-  std::printf("shape: block_m=%d block_n=%d seq_n=%d head_dim=%d seed=%d\n",
-              a.blockM, a.blockN, a.seqN, a.headDim, a.seed);
-  std::printf("grid: 1,1,1 block: %d,1,1 waves_per_workgroup=%d\n", threads,
-              threads / 32);
-  std::printf("iters: %d\n", a.iters);
-  std::printf("total_ms: %.3f\n", elapsedMs);
-  std::printf("per_launch_us: %.3f\n", perLaunchUs);
-  std::printf("per_launch_cycles_wallclock: %.0f\n", perLaunchCycles);
+  printTiming(a, props, threads, clockMHz, elapsedMs, perLaunchUs,
+              perLaunchCycles);
   if (a.checkOutput)
     validateOutput(hostOut, computeReference(a, hostQ, hostK, hostV));
 

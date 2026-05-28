@@ -20,11 +20,67 @@ from common import (
 )
 
 
+def _select_matrix_intrinsic(chip: str, requested: str) -> str:
+    if requested != "auto":
+        return requested
+    return "mfma_gfx950" if chip.startswith("gfx950") else "wmma"
+
+
+def _parser_error_if(
+    parser: argparse.ArgumentParser, condition: bool, message: str
+) -> None:
+    if condition:
+        parser.error(message)
+
+
+def _validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
+    _parser_error_if(
+        parser, args.target_waves < 0, "--target-waves must be non-negative"
+    )
+    for name in ("block_m", "block_n", "head_dim"):
+        _parser_error_if(
+            parser,
+            getattr(args, name) <= 0,
+            f"--{name.replace('_', '-')} must be positive",
+        )
+    _parser_error_if(
+        parser, args.seq_n is not None and args.seq_n <= 0, "--seq-n must be positive"
+    )
+    _parser_error_if(
+        parser,
+        bool(args.head_dim & (args.head_dim - 1)),
+        "--head-dim must be a power of two",
+    )
+    matrix_intrinsic = _select_matrix_intrinsic(args.chip, args.matrix_intrinsic)
+    _parser_error_if(
+        parser,
+        args.block_m != 16 or args.block_n != 16,
+        "--block-m and --block-n must both be 16 for MMA attention",
+    )
+    _parser_error_if(
+        parser,
+        args.seq_n is not None and args.seq_n % args.block_n != 0,
+        "--seq-n must be a multiple of --block-n",
+    )
+    k_tile = 32 if matrix_intrinsic == "mfma_gfx950" else 16
+    _parser_error_if(
+        parser,
+        args.head_dim % k_tile != 0,
+        f"--head-dim must be a multiple of {k_tile}",
+    )
+
+
 def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--block-m", type=int, default=4)
-    parser.add_argument("--block-n", type=int, default=8)
-    parser.add_argument("--head-dim", type=int, default=8)
+    parser.add_argument("--block-m", type=int, default=16)
+    parser.add_argument("--block-n", type=int, default=16)
+    parser.add_argument("--head-dim", type=int, default=32)
+    parser.add_argument(
+        "--matrix-intrinsic",
+        choices=("auto", "wmma", "mfma_gfx950"),
+        default="auto",
+        help="matrix instruction family to emit; auto picks gfx950 MFMA only",
+    )
     parser.add_argument(
         "--seq-n",
         type=int,
@@ -39,20 +95,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     )
     add_execution_args(parser, default_atol=3.0e-3, default_rtol=3.0e-3)
     args = parser.parse_args(argv)
-    if args.target_waves < 0:
-        parser.error("--target-waves must be non-negative")
-    for name in ("block_m", "block_n", "head_dim"):
-        if getattr(args, name) <= 0:
-            parser.error(f"--{name.replace('_', '-')} must be positive")
-    if args.seq_n is not None and args.seq_n <= 0:
-        parser.error("--seq-n must be positive")
-    if args.head_dim & (args.head_dim - 1):
-        parser.error("--head-dim must be a power of two")
-    threads = args.block_m * args.head_dim
-    if threads % 32:
-        parser.error("--block-m * --head-dim must be a multiple of 32")
-    if threads > 1024:
-        parser.error("--block-m * --head-dim must be <= 1024")
+    _validate_args(parser, args)
     return args
 
 
@@ -74,12 +117,14 @@ def main(argv: list[str] | None = None) -> int:
         compute_flash_attention_f32_reference,
     )
 
+    matrix_intrinsic = _select_matrix_intrinsic(args.chip, args.matrix_intrinsic)
     module = build_flash_attention_f32_module(
         block_m=args.block_m,
         block_n=args.block_n,
         head_dim=args.head_dim,
         random_seed=args.seed,
         seq_n=args.seq_n,
+        matrix_intrinsic=matrix_intrinsic,
         target_waves=args.target_waves or None,
     )
     module_text = str(module)
