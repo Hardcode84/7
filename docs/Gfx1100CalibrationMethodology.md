@@ -230,6 +230,39 @@ Observed gap:
 - Do not retune raw latency constants from this capture. Next useful model work
   is waitcnt/VMEM overlap and arbitration, not WMMA latency.
 
+## Counter-latency split check
+
+After splitting wait-counter timing from `SchedWrite` dependency latency, the
+same retained ATT captures were replayed with counter-latency overrides.
+
+Static ATT window replay:
+
+| Fit target | Best knob | Result |
+| --- | --- | --- |
+| Loop VMEM-load windows only | `WriteVMEM ~= 80` | Still high RMSE; K64 wants near-zero, K128 wants much larger. |
+| Loop LDS windows only | `WriteLDS ~= 85` | Closer for LDS rows, but unrelated to VMEM overprediction. |
+| Total loop wait windows | `WriteVMEM ~= 155`, `WriteLDS ~= 0` | Reduces absolute error, but cannot explain baseline/scheduled deltas. |
+
+`wave-sim-report` on the K64/K128 machine MLIR was unchanged for all tested
+counter overrides:
+
+| K | Variant | Default total | With VMEM/LDS counter overrides |
+| ---: | --- | ---: | ---: |
+| 64 | baseline | 11369 | 11369 |
+| 64 | scheduled | 9877 | 9877 |
+| 128 | baseline | 22305 | 22305 |
+| 128 | scheduled | 19361 | 19361 |
+
+Reason: these scores are gated by memory SSA result readiness
+(`WriteVMEM`/`WriteLDS` dependency latency), not by explicit waitcnt counter
+drain timing. Counter-latency knobs are useful for wait-window reports, but
+they are not the matmul scheduling calibration knob.
+
+Conclusion: do not set gfx1100 counter-latency defaults from this data. Next
+model work needs a separate memory value-ready / overlap model for load
+consumers, plus clause/coalescing effects, instead of retuning waitcnt counter
+completion.
+
 PMC sanity check:
 
 ```bash
