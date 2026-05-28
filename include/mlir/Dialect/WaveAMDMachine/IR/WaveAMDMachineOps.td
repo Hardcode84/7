@@ -124,6 +124,11 @@ def WaveAMDMachine_RegOrImm
                  "::llvm::isa<::mlir::waveamdmachine::ImmType>($_self)">,
            "WaveAMDMachine register or immediate">;
 
+def WaveAMDMachine_PackedOpSel2Attr
+    : ConfinedAttr<I64Attr, [IntMinValue<0>, IntMaxValue<3>]>;
+def WaveAMDMachine_PackedOpSel3Attr
+    : ConfinedAttr<I64Attr, [IntMinValue<0>, IntMaxValue<7>]>;
+
 // Any allocatable register class (SGPR, VGPR, AGPR). Excludes SCC,
 // which is a 1-bit hardware flag that cannot participate in tuples.
 def WaveAMDMachine_GPR
@@ -207,6 +212,34 @@ class WaveAMDMachine_TernaryResult<string mnemonic, Type operandType, Type resul
   let arguments = (ins operandType:$a, operandType:$b, operandType:$c);
   let results = (outs resultType:$result);
   let assemblyFormat = "$a `,` $b `,` $c attr-dict `:` functional-type(operands, results)";
+}
+
+class WaveAMDMachine_PackedBinaryResult<string mnemonic>
+    : WaveAMDMachine_Op<mnemonic, [WaveAMDMachine_VALU, Pure]> {
+  let arguments = (ins WaveAMDMachine_VGPR1:$lhs,
+                       WaveAMDMachine_VGPR1:$rhs,
+                       DefaultValuedAttr<BoolAttr, "false">:$clamp,
+                       DefaultValuedAttr<WaveAMDMachine_PackedOpSel2Attr,
+                                         "0">:$op_sel,
+                       DefaultValuedAttr<WaveAMDMachine_PackedOpSel2Attr,
+                                         "3">:$op_sel_hi);
+  let results = (outs WaveAMDMachine_VGPR1:$result);
+  let assemblyFormat = "$lhs `,` $rhs attr-dict `:` functional-type(operands, results)";
+}
+
+class WaveAMDMachine_PackedTernaryResult<string mnemonic>
+    : WaveAMDMachine_Op<mnemonic, [WaveAMDMachine_VALU, Pure]> {
+  let arguments = (ins WaveAMDMachine_VGPR1:$a,
+                       WaveAMDMachine_VGPR1:$b,
+                       WaveAMDMachine_VGPR1:$c,
+                       DefaultValuedAttr<BoolAttr, "false">:$clamp,
+                       DefaultValuedAttr<WaveAMDMachine_PackedOpSel3Attr,
+                                         "0">:$op_sel,
+                       DefaultValuedAttr<WaveAMDMachine_PackedOpSel3Attr,
+                                         "7">:$op_sel_hi);
+  let results = (outs WaveAMDMachine_VGPR1:$result);
+  let assemblyFormat =
+      "$a `,` $b `,` $c attr-dict `:` functional-type(operands, results)";
 }
 
 class WaveAMDMachine_UnaryNoResult<string mnemonic, Type operandType,
@@ -394,6 +427,17 @@ def WaveAMDMachine_VCvtF32F16Op
     : WaveAMDMachine_UnaryResult<"v_cvt_f32_f16", WaveAMDMachine_VGPR1,
                               WaveAMDMachine_VGPR1,
                               [WaveAMDMachine_VALU, Pure]>;
+def WaveAMDMachine_VCvtPkRtzF16F32Op
+    : WaveAMDMachine_BinaryResult<"v_cvt_pk_rtz_f16_f32",
+                               WaveAMDMachine_VGPR1,
+                               WaveAMDMachine_VGPR1,
+                               [WaveAMDMachine_VALU]>;
+def WaveAMDMachine_VPkAddF16Op
+    : WaveAMDMachine_PackedBinaryResult<"v_pk_add_f16">;
+def WaveAMDMachine_VPkMulF16Op
+    : WaveAMDMachine_PackedBinaryResult<"v_pk_mul_f16">;
+def WaveAMDMachine_VPkFmaF16Op
+    : WaveAMDMachine_PackedTernaryResult<"v_pk_fma_f16">;
 def WaveAMDMachine_VCmpEqU32Op
     : WaveAMDMachine_BinaryResult<"v_cmp_eq_u32", WaveAMDMachine_RegOrImm,
                                WaveAMDMachine_SGPR1, [WaveAMDMachine_VALU]>;

@@ -351,6 +351,49 @@ private:
     return llvm::AMDGPU::V_CVT_F32_F16V_CVT_F32_F16_t16_e64_gfx13;
   }
   bool usesTrue16Cvt() const { return isaVersion.Major >= 11; }
+  bool supportsCvtPkRtzF16F32() const { return isaVersion.Major >= 10; }
+  unsigned vCvtPkRtzF16F32() const {
+    if (isaVersion.Major == 10)
+      return llvm::AMDGPU::V_CVT_PKRTZ_F16_F32_e32_gfx10;
+    if (isaVersion.Major == 11)
+      return llvm::AMDGPU::V_CVT_PK_RTZ_F16_F32_e32_gfx11;
+    if (isaVersion.Major == 12)
+      return llvm::AMDGPU::V_CVT_PK_RTZ_F16_F32_e32_gfx12;
+    return llvm::AMDGPU::V_CVT_PK_RTZ_F16_F32_e32_gfx13;
+  }
+  unsigned vPkAddF16() const {
+    if (isGfx8Or9())
+      return llvm::AMDGPU::V_PK_ADD_F16_vi;
+    if (isaVersion.Major == 10)
+      return llvm::AMDGPU::V_PK_ADD_F16_gfx10;
+    if (isaVersion.Major == 11)
+      return llvm::AMDGPU::V_PK_ADD_F16_gfx11;
+    if (isaVersion.Major == 12)
+      return llvm::AMDGPU::V_PK_ADD_F16_gfx12;
+    return llvm::AMDGPU::V_PK_ADD_F16_gfx13;
+  }
+  unsigned vPkMulF16() const {
+    if (isGfx8Or9())
+      return llvm::AMDGPU::V_PK_MUL_F16_vi;
+    if (isaVersion.Major == 10)
+      return llvm::AMDGPU::V_PK_MUL_F16_gfx10;
+    if (isaVersion.Major == 11)
+      return llvm::AMDGPU::V_PK_MUL_F16_gfx11;
+    if (isaVersion.Major == 12)
+      return llvm::AMDGPU::V_PK_MUL_F16_gfx12;
+    return llvm::AMDGPU::V_PK_MUL_F16_gfx13;
+  }
+  unsigned vPkFmaF16() const {
+    if (isGfx8Or9())
+      return llvm::AMDGPU::V_PK_FMA_F16_vi;
+    if (isaVersion.Major == 10)
+      return llvm::AMDGPU::V_PK_FMA_F16_gfx10;
+    if (isaVersion.Major == 11)
+      return llvm::AMDGPU::V_PK_FMA_F16_gfx11;
+    if (isaVersion.Major == 12)
+      return llvm::AMDGPU::V_PK_FMA_F16_gfx12;
+    return llvm::AMDGPU::V_PK_FMA_F16_gfx13;
+  }
   unsigned vCmpEqU32() const {
     return isGfx8Or9() ? llvm::AMDGPU::V_CMP_EQ_U32_e64_vi
                        : llvm::AMDGPU::V_CMP_EQ_U32_e64_gfx11;
@@ -618,6 +661,12 @@ private:
   unsigned getIntAttr(Operation *op, StringRef name, unsigned fallback) const {
     if (auto attr = op->getAttrOfType<IntegerAttr>(name))
       return attr.getInt();
+    return fallback;
+  }
+
+  bool getBoolAttr(Operation *op, StringRef name, bool fallback) const {
+    if (auto attr = op->getAttrOfType<BoolAttr>(name))
+      return attr.getValue();
     return fallback;
   }
 
@@ -974,6 +1023,44 @@ private:
     return emitMC(opcode, mcOperands);
   }
 
+  unsigned packedSrcMods(unsigned opSel, unsigned opSelHi,
+                         unsigned operandIndex) const {
+    return (((opSel >> operandIndex) & 1) << 2) |
+           (((opSelHi >> operandIndex) & 1) << 3);
+  }
+
+  LogicalResult emitPackedBinary(unsigned opcode, Operation &op) {
+    unsigned opSel = getIntAttr(&op, "op_sel", 0);
+    unsigned opSelHi = getIntAttr(&op, "op_sel_hi", 3);
+    return emitMC(
+        opcode,
+        {toMCOperand(op.getResult(0)),
+         llvm::MCOperand::createImm(packedSrcMods(opSel, opSelHi, 0)),
+         toMCOperand(op.getOperand(0)),
+         llvm::MCOperand::createImm(packedSrcMods(opSel, opSelHi, 1)),
+         toMCOperand(op.getOperand(1)),
+         llvm::MCOperand::createImm(getBoolAttr(&op, "clamp", false)),
+         llvm::MCOperand::createImm(opSel), llvm::MCOperand::createImm(opSelHi),
+         llvm::MCOperand::createImm(0), llvm::MCOperand::createImm(0)});
+  }
+
+  LogicalResult emitPackedTernary(unsigned opcode, Operation &op) {
+    unsigned opSel = getIntAttr(&op, "op_sel", 0);
+    unsigned opSelHi = getIntAttr(&op, "op_sel_hi", 7);
+    return emitMC(
+        opcode,
+        {toMCOperand(op.getResult(0)),
+         llvm::MCOperand::createImm(packedSrcMods(opSel, opSelHi, 0)),
+         toMCOperand(op.getOperand(0)),
+         llvm::MCOperand::createImm(packedSrcMods(opSel, opSelHi, 1)),
+         toMCOperand(op.getOperand(1)),
+         llvm::MCOperand::createImm(packedSrcMods(opSel, opSelHi, 2)),
+         toMCOperand(op.getOperand(2)),
+         llvm::MCOperand::createImm(getBoolAttr(&op, "clamp", false)),
+         llvm::MCOperand::createImm(opSel), llvm::MCOperand::createImm(opSelHi),
+         llvm::MCOperand::createImm(0), llvm::MCOperand::createImm(0)});
+  }
+
   // Shared emit shapes for the width-parameterised mem ops. The MC
   // operand order is what the LLVM AMDGPU printer expects per family:
   //   GLOBAL_*_SADDR: vdst/vdata, saddr, vaddr, offset, cpol
@@ -1272,6 +1359,20 @@ private:
                    toMCOperand(op.getOperand(0)), llvm::MCOperand::createImm(0),
                    llvm::MCOperand::createImm(0)});
     }
+    if (isa<waveamdmachine::VCvtPkRtzF16F32Op>(op)) {
+      if (!supportsCvtPkRtzF16F32())
+        return op.emitError("v_cvt_pk_rtz_f16_f32 requires gfx10+");
+      return emitMC(vCvtPkRtzF16F32(),
+                    {toMCOperand(result()), toMCOperand(op.getOperand(0)),
+                     toMCOperand(op.getOperand(1))});
+    }
+    if (isa<waveamdmachine::VPkAddF16Op, waveamdmachine::VPkMulF16Op>(op)) {
+      unsigned opcode =
+          isa<waveamdmachine::VPkAddF16Op>(op) ? vPkAddF16() : vPkMulF16();
+      return emitPackedBinary(opcode, op);
+    }
+    if (isa<waveamdmachine::VPkFmaF16Op>(op))
+      return emitPackedTernary(vPkFmaF16(), op);
     if (isa<waveamdmachine::VCmpEqU32Op, waveamdmachine::VCmpNeU32Op,
             waveamdmachine::VCmpLtU32Op, waveamdmachine::VCmpLeU32Op,
             waveamdmachine::VCmpGtU32Op, waveamdmachine::VCmpGeU32Op>(op)) {
