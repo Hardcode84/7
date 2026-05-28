@@ -1016,6 +1016,47 @@ struct OrderCandidate {
   SmallVector<unsigned, 16> order;
 };
 
+struct BeamSearchConfig {
+  // Prefix pruning only. Event-sim + pressure rank completed orders.
+  unsigned width = 12;                // states kept per depth
+  unsigned branchLimit = 4;           // ready choices expanded per state
+  unsigned candidateLimit = 8;        // completed beam orders emitted
+  int64_t guideBonus = 200000;        // prefer fixed-policy prefix
+  int64_t discrepancyPenalty = 50000; // cost per guide deviation
+  int64_t criticalPathWeight = 1000;  // favor long remaining chains
+  int64_t latencyWeight = 100;        // favor latency hiding
+  int64_t unlockWeight = 500;         // favor newly-ready successors
+  int64_t memoryWeight = 80;          // tie-break toward memory paths
+  int64_t matrixWeight = 80;          // tie-break toward matrix feeders
+  int64_t guideDistancePenalty = 10;  // prefer earlier guide nodes
+};
+
+static constexpr BeamSearchConfig kDefaultBeamSearchConfig;
+
+struct BeamState {
+  SmallVector<unsigned, 16> order;
+  SmallVector<unsigned, 16> pending;
+  SmallVector<unsigned, 16> ready;
+  SmallVector<uint8_t, 16> scheduled;
+  int64_t rank = 0;
+  unsigned discrepancies = 0;
+  unsigned guideOrdinal = 0;
+};
+
+struct ReadyChoice {
+  unsigned node = 0;
+  int64_t score = 0;
+  unsigned discrepancy = 0;
+  unsigned guidePosition = 0;
+};
+
+struct BeamResult {
+  SmallVector<unsigned, 16> order;
+  int64_t rank = 0;
+  unsigned discrepancies = 0;
+  unsigned guideOrdinal = 0;
+};
+
 } // namespace
 
 static SmallVector<unsigned, 16>
@@ -1037,6 +1078,277 @@ static void addPolicyCandidate(SmallVectorImpl<OrderCandidate> &candidates,
   candidates.push_back(std::move(candidate));
 }
 
+static BeamState makeInitialBeamState(const GraphTables &tables) {
+  BeamState state;
+  state.pending = tables.pendingPreds;
+  state.scheduled.assign(tables.pendingPreds.size(), 0);
+  for (auto [index, count] : llvm::enumerate(tables.pendingPreds))
+    if (count == 0)
+      state.ready.push_back(index);
+  return state;
+}
+
+static unsigned getUnsetNode() { return std::numeric_limits<unsigned>::max(); }
+
+static unsigned findNextGuideNode(ArrayRef<unsigned> guide,
+                                  ArrayRef<uint8_t> scheduled) {
+  for (unsigned node : guide)
+    if (!scheduled[node])
+      return node;
+  return getUnsetNode();
+}
+
+static SmallVector<unsigned, 16> buildGuidePositions(ArrayRef<unsigned> guide) {
+  SmallVector<unsigned, 16> positions(guide.size(), getUnsetNode());
+  for (auto [index, node] : llvm::enumerate(guide))
+    positions[node] = index;
+  return positions;
+}
+
+static unsigned countUnlockedSuccessors(unsigned node,
+                                        const GraphTables &tables,
+                                        ArrayRef<unsigned> pending) {
+  unsigned unlocked = 0;
+  for (unsigned succ : tables.successors[node])
+    if (pending[succ] == 1)
+      ++unlocked;
+  return unlocked;
+}
+
+static ReadyChoice scoreReadyChoice(unsigned node, const BeamState &state,
+                                    const GraphTables &tables,
+                                    ArrayRef<NodeMetrics> metrics,
+                                    ArrayRef<unsigned> guide,
+                                    ArrayRef<unsigned> guidePositions,
+                                    const BeamSearchConfig &config) {
+  unsigned nextGuide = findNextGuideNode(guide, state.scheduled);
+  ReadyChoice choice;
+  choice.node = node;
+  choice.discrepancy = node == nextGuide ? 0 : 1;
+  choice.guidePosition = guidePositions[node];
+
+  int64_t guideScore = node == nextGuide ? config.guideBonus : 0;
+  int64_t pathScore = metrics[node].criticalPath * config.criticalPathWeight;
+  int64_t latencyScore =
+      static_cast<int64_t>(metrics[node].latency) * config.latencyWeight;
+  int64_t unlockScore = static_cast<int64_t>(countUnlockedSuccessors(
+                            node, tables, state.pending)) *
+                        config.unlockWeight;
+  int64_t memoryScore =
+      static_cast<int64_t>(memoryPriority(metrics[node])) * config.memoryWeight;
+  int64_t matrixScore =
+      static_cast<int64_t>(matrixPriority(metrics[node])) * config.matrixWeight;
+  int64_t guideDistancePenalty =
+      choice.guidePosition == getUnsetNode()
+          ? 0
+          : static_cast<int64_t>(choice.guidePosition) *
+                config.guideDistancePenalty;
+  choice.score = guideScore + pathScore + latencyScore + unlockScore +
+                 memoryScore + matrixScore - guideDistancePenalty;
+  return choice;
+}
+
+static bool isBetterReadyChoice(const ReadyChoice &lhs,
+                                const ReadyChoice &rhs) {
+  if (lhs.score != rhs.score)
+    return lhs.score > rhs.score;
+  if (lhs.discrepancy != rhs.discrepancy)
+    return lhs.discrepancy < rhs.discrepancy;
+  if (lhs.guidePosition != rhs.guidePosition)
+    return lhs.guidePosition < rhs.guidePosition;
+  return lhs.node < rhs.node;
+}
+
+static SmallVector<ReadyChoice, 8>
+getReadyChoices(const BeamState &state, const GraphTables &tables,
+                ArrayRef<NodeMetrics> metrics, ArrayRef<unsigned> guide,
+                ArrayRef<unsigned> guidePositions,
+                const BeamSearchConfig &config) {
+  SmallVector<ReadyChoice, 8> choices;
+  for (unsigned node : state.ready)
+    choices.push_back(scoreReadyChoice(node, state, tables, metrics, guide,
+                                       guidePositions, config));
+  llvm::sort(choices, isBetterReadyChoice);
+  if (choices.size() > config.branchLimit)
+    choices.resize(config.branchLimit);
+  return choices;
+}
+
+static void removeReadyNode(SmallVectorImpl<unsigned> &ready, unsigned node) {
+  auto it = llvm::find(ready, node);
+  assert(it != ready.end() && "selected node must be ready");
+  ready.erase(it);
+}
+
+static BeamState appendBeamNode(const BeamState &state,
+                                const ReadyChoice &choice,
+                                const GraphTables &tables) {
+  BeamState next = state;
+  unsigned node = choice.node;
+  removeReadyNode(next.ready, node);
+  next.scheduled[node] = 1;
+  next.order.push_back(node);
+  next.rank += choice.score;
+  next.discrepancies += choice.discrepancy;
+
+  for (unsigned succ : tables.successors[node]) {
+    assert(next.pending[succ] > 0 && "successor predecessor count underflow");
+    --next.pending[succ];
+    if (next.pending[succ] == 0)
+      next.ready.push_back(succ);
+  }
+  llvm::sort(next.ready);
+  return next;
+}
+
+static bool isLexicographicallyEarlier(ArrayRef<unsigned> lhs,
+                                       ArrayRef<unsigned> rhs) {
+  return std::lexicographical_compare(lhs.begin(), lhs.end(), rhs.begin(),
+                                      rhs.end());
+}
+
+static int64_t getBeamRank(const BeamState &state,
+                           const BeamSearchConfig &config) {
+  return state.rank -
+         static_cast<int64_t>(state.discrepancies) * config.discrepancyPenalty;
+}
+
+static bool isBetterBeamState(const BeamState &lhs, const BeamState &rhs,
+                              const BeamSearchConfig &config) {
+  int64_t lhsRank = getBeamRank(lhs, config);
+  int64_t rhsRank = getBeamRank(rhs, config);
+  if (lhsRank != rhsRank)
+    return lhsRank > rhsRank;
+  if (lhs.discrepancies != rhs.discrepancies)
+    return lhs.discrepancies < rhs.discrepancies;
+  if (lhs.guideOrdinal != rhs.guideOrdinal)
+    return lhs.guideOrdinal < rhs.guideOrdinal;
+  return isLexicographicallyEarlier(lhs.order, rhs.order);
+}
+
+static int64_t getBeamResultRank(const BeamResult &result,
+                                 const BeamSearchConfig &config) {
+  return result.rank -
+         static_cast<int64_t>(result.discrepancies) * config.discrepancyPenalty;
+}
+
+static bool isBetterBeamResult(const BeamResult &lhs, const BeamResult &rhs,
+                               const BeamSearchConfig &config) {
+  int64_t lhsRank = getBeamResultRank(lhs, config);
+  int64_t rhsRank = getBeamResultRank(rhs, config);
+  if (lhsRank != rhsRank)
+    return lhsRank > rhsRank;
+  if (lhs.discrepancies != rhs.discrepancies)
+    return lhs.discrepancies < rhs.discrepancies;
+  if (lhs.guideOrdinal != rhs.guideOrdinal)
+    return lhs.guideOrdinal < rhs.guideOrdinal;
+  return isLexicographicallyEarlier(lhs.order, rhs.order);
+}
+
+static void pruneBeam(SmallVectorImpl<BeamState> &beam,
+                      const BeamSearchConfig &config) {
+  llvm::sort(beam, [&](const BeamState &lhs, const BeamState &rhs) {
+    return isBetterBeamState(lhs, rhs, config);
+  });
+  if (beam.size() > config.width)
+    beam.resize(config.width);
+}
+
+static SmallVector<BeamResult, 8>
+runGuidedBeamSearch(const GraphTables &tables, ArrayRef<NodeMetrics> metrics,
+                    ArrayRef<unsigned> guide, unsigned guideOrdinal,
+                    const BeamSearchConfig &config) {
+  SmallVector<unsigned, 16> guidePositions = buildGuidePositions(guide);
+  SmallVector<BeamState, 16> beam;
+  BeamState initial = makeInitialBeamState(tables);
+  initial.guideOrdinal = guideOrdinal;
+  beam.push_back(std::move(initial));
+
+  for (unsigned depth : llvm::seq<unsigned>(0, guide.size())) {
+    (void)depth;
+    SmallVector<BeamState, 32> nextBeam;
+    for (const BeamState &state : beam) {
+      SmallVector<ReadyChoice, 8> choices = getReadyChoices(
+          state, tables, metrics, guide, guidePositions, config);
+      for (const ReadyChoice &choice : choices)
+        nextBeam.push_back(appendBeamNode(state, choice, tables));
+    }
+    if (nextBeam.empty())
+      break;
+    pruneBeam(nextBeam, config);
+    beam = std::move(nextBeam);
+  }
+
+  SmallVector<BeamResult, 8> results;
+  for (const BeamState &state : beam) {
+    if (state.order.size() != guide.size())
+      continue;
+    results.push_back(
+        {state.order, state.rank, state.discrepancies, state.guideOrdinal});
+  }
+  llvm::sort(results, [&](const BeamResult &lhs, const BeamResult &rhs) {
+    return isBetterBeamResult(lhs, rhs, config);
+  });
+  return results;
+}
+
+static bool sameOrder(ArrayRef<unsigned> lhs, ArrayRef<unsigned> rhs) {
+  return lhs.size() == rhs.size() &&
+         std::equal(lhs.begin(), lhs.end(), rhs.begin());
+}
+
+static bool hasCandidateOrder(ArrayRef<OrderCandidate> candidates,
+                              ArrayRef<unsigned> order) {
+  for (const OrderCandidate &candidate : candidates)
+    if (sameOrder(candidate.order, order))
+      return true;
+  return false;
+}
+
+static bool hasBeamResultOrder(ArrayRef<BeamResult> results,
+                               ArrayRef<unsigned> order) {
+  for (const BeamResult &result : results)
+    if (sameOrder(result.order, order))
+      return true;
+  return false;
+}
+
+static void addGuidedBeamCandidates(SmallVectorImpl<OrderCandidate> &candidates,
+                                    const GraphTables &tables,
+                                    ArrayRef<NodeMetrics> metrics,
+                                    const BeamSearchConfig &config) {
+  static constexpr StringLiteral kBeamNames[] = {
+      "beam_0", "beam_1", "beam_2", "beam_3",
+      "beam_4", "beam_5", "beam_6", "beam_7",
+  };
+
+  if (tables.pendingPreds.size() < 3)
+    return;
+
+  SmallVector<BeamResult, 16> results;
+  for (auto [index, candidate] : llvm::enumerate(candidates)) {
+    SmallVector<BeamResult, 8> guideResults =
+        runGuidedBeamSearch(tables, metrics, candidate.order, index, config);
+    for (BeamResult &result : guideResults) {
+      if (hasCandidateOrder(candidates, result.order) ||
+          hasBeamResultOrder(results, result.order))
+        continue;
+      results.push_back(std::move(result));
+    }
+  }
+  llvm::sort(results, [&](const BeamResult &lhs, const BeamResult &rhs) {
+    return isBetterBeamResult(lhs, rhs, config);
+  });
+
+  unsigned emitted = 0;
+  for (const BeamResult &result : results) {
+    if (emitted >= config.candidateLimit || emitted >= std::size(kBeamNames))
+      break;
+    candidates.push_back({kBeamNames[emitted], result.order});
+    ++emitted;
+  }
+}
+
 static SmallVector<OrderCandidate, 4>
 buildScheduleCandidates(const ScheduleRegion &region,
                         const DependenceGraph &graph,
@@ -1054,6 +1366,8 @@ buildScheduleCandidates(const ScheduleRegion &region,
                      SchedulePolicy::MemoryEarly);
   addPolicyCandidate(candidates, "wmma_feed", tables, metrics,
                      SchedulePolicy::MatrixFeed);
+  addGuidedBeamCandidates(candidates, tables, metrics,
+                          kDefaultBeamSearchConfig);
   return candidates;
 }
 
