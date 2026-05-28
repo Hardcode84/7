@@ -15,6 +15,7 @@ import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+from statistics import median
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_BUILD = REPO_ROOT / "build"
@@ -34,9 +35,21 @@ class Variant:
 class VariantResult:
     name: str
     sim_cycles: dict[tuple[int, int, int], int]
-    hw_cycles: int | None
-    hw_us: float | None
+    hw_cycles_samples: list[int]
+    hw_us_samples: list[float]
     hw_check: str | None
+
+    @property
+    def hw_cycles(self) -> int | None:
+        if not self.hw_cycles_samples:
+            return None
+        return round(median(self.hw_cycles_samples))
+
+    @property
+    def hw_us(self) -> float | None:
+        if not self.hw_us_samples:
+            return None
+        return median(self.hw_us_samples)
 
 
 VARIANTS = {
@@ -353,6 +366,37 @@ def run_hw(
     return parse_hw(stdout, check_output=not args.no_check)
 
 
+def run_hw_repeats(
+    runner: Path, hsaco: Path, args: argparse.Namespace
+) -> tuple[list[int], list[float], str]:
+    cycles_samples: list[int] = []
+    us_samples: list[float] = []
+    checks: set[str] = set()
+    for _ in range(args.repeats):
+        cycles, micros, check = run_hw(runner, hsaco, args, args.rocm_lib)
+        cycles_samples.append(cycles)
+        us_samples.append(micros)
+        checks.add(check)
+    return cycles_samples, us_samples, checks.pop() if len(checks) == 1 else "mixed"
+
+
+def run_variant(
+    variant: Variant,
+    args: argparse.Namespace,
+    source: Path,
+    runner: Path | None,
+    tmp: Path,
+) -> VariantResult:
+    pipeline = write_pipeline(tmp, variant)
+    machine = lower_machine(args.build_dir, source, pipeline, tmp, variant.name)
+    sim_cycles = run_sim_reports(args.build_dir, machine, args)
+    if runner is None:
+        return VariantResult(variant.name, sim_cycles, [], [], None)
+    hsaco = lower_hsaco(args.build_dir, source, pipeline, tmp, variant.name)
+    hw_cycles, hw_us, hw_check = run_hw_repeats(runner, hsaco, args)
+    return VariantResult(variant.name, sim_cycles, hw_cycles, hw_us, hw_check)
+
+
 def print_result(result: VariantResult) -> None:
     print(f"variant: {result.name}")
     for (waves, simds, delay), cycles in sorted(result.sim_cycles.items()):
@@ -360,7 +404,12 @@ def print_result(result: VariantResult) -> None:
             f"  sim_cycles waves={waves} simds={simds} "
             f"start_delay={delay}: {cycles}"
         )
-    if result.hw_cycles is not None and result.hw_us is not None:
+    if result.hw_cycles_samples and result.hw_us_samples:
+        if len(result.hw_cycles_samples) > 1:
+            cycles = ",".join(str(x) for x in result.hw_cycles_samples)
+            micros = ",".join(f"{x:.3f}" for x in result.hw_us_samples)
+            print(f"  hw_cycles_wallclock_samples: {cycles}")
+            print(f"  hw_per_launch_us_samples: {micros}")
         print(f"  hw_per_launch_us: {result.hw_us:.3f}")
         print(f"  hw_cycles_wallclock: {result.hw_cycles}")
     if result.hw_check is not None:
@@ -427,6 +476,12 @@ def build_argparser() -> argparse.ArgumentParser:
     ap.add_argument("--iters", type=int, default=1000)
     ap.add_argument("--warmup", type=int, default=10)
     ap.add_argument(
+        "--repeats",
+        type=int,
+        default=1,
+        help="hardware timing repeats per variant; reports median",
+    )
+    ap.add_argument(
         "--variants",
         type=parse_variants,
         default=parse_variants("baseline,scheduled"),
@@ -453,6 +508,8 @@ def build_argparser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = build_argparser().parse_args()
+    if args.repeats <= 0:
+        sys.exit("--repeats must be positive")
     chip = args.chip or detect_chip()
     variants = args.variants
 
@@ -471,16 +528,7 @@ def main() -> int:
         )
         results: list[VariantResult] = []
         for variant in variants:
-            pipeline = write_pipeline(tmp, variant)
-            machine = lower_machine(args.build_dir, source, pipeline, tmp, variant.name)
-            sim_cycles = run_sim_reports(args.build_dir, machine, args)
-            hw_cycles = None
-            hw_us = None
-            hw_check = None
-            if runner is not None:
-                hsaco = lower_hsaco(args.build_dir, source, pipeline, tmp, variant.name)
-                hw_cycles, hw_us, hw_check = run_hw(runner, hsaco, args, args.rocm_lib)
-            result = VariantResult(variant.name, sim_cycles, hw_cycles, hw_us, hw_check)
+            result = run_variant(variant, args, source, runner, tmp)
             print_result(result)
             results.append(result)
         print_delta(results)
