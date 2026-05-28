@@ -152,3 +152,36 @@ scheduled variants both lowered and passed.
 
 Result: pressure-aware scheduling fixes the seq_n=32 regalloc failure. It also
 keeps the schedule at baseline, so the measured `+21` cycles (`+0.1%`) is noise.
+
+## FlashAttention multi-wave D sweep
+
+Command shape:
+
+```bash
+CORE=$(python - <<'PY'
+from pathlib import Path
+import rocm_sdk_core
+print(Path(rocm_sdk_core.__file__).resolve().parents[1] / "_rocm_sdk_core")
+PY
+)
+
+ROCM_LIB="$CORE/lib" HIPCC="$CONDA_PREFIX/bin/hipcc" \
+tools/wave-fa-calibrate/wave-fa-calibrate.py \
+  --chip=gfx1100 --variants=baseline,scheduled \
+  --block-m=1 --block-n=<BN> --seq-n=<SN> --head-dim=<D> \
+  --sim-waves=<waves/WG> --sim-simds=<waves/WG> \
+  --iters=100 --warmup=10 --repeats=3
+```
+
+All rows passed the CPU output check. Scheduled selected the original order for
+both rows; pressure-aware critical-path candidates were too register-heavy.
+
+| Shape | Waves/WG | Sim waves/SIMDs | Base sim | Sched sim | Base hw samples | Sched hw samples | Base hw | Sched hw | HW delta |
+| --- | ---: | --- | ---: | ---: | --- | --- | ---: | ---: | ---: |
+| block_m=1 block_n=4 seq_n=8 D=64 | 2 | 2/2 | 172912 | 172912 | 57263,42821,43001 | 42742,42777,42721 | 43001 | 42742 | -259 (-0.6%) |
+| block_m=1 block_n=2 seq_n=4 D=128 | 4 | 4/4 | 171616 | 171616 | 38098,42236,42357 | 42395,42438,42348 | 42236 | 42395 | +159 (+0.4%) |
+
+Result: the Wave FA builder now covers D64/D128 multi-wave workgroups and
+lowers/runs through the same baseline/scheduled path. Scheduling is neutral on
+these shapes until the pressure model can find a legal lower-pressure
+interleave.

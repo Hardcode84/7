@@ -131,6 +131,10 @@ static void requirePositive(int v, const char *what) {
     die(what);
 }
 
+static bool isPowerOfTwo(int v) { return (v & (v - 1)) == 0; }
+
+static int threadsPerWorkgroup(const Args &a) { return a.blockM * a.headDim; }
+
 static void validateArgs(const Args &a) {
   requirePositive(a.blockM, "block-m must be positive");
   requirePositive(a.blockN, "block-n must be positive");
@@ -139,8 +143,13 @@ static void validateArgs(const Args &a) {
   requirePositive(a.iters, "iters must be positive");
   if (a.warmupIters < 0)
     die("warmup must be non-negative");
-  if (a.blockM * a.headDim != 32)
-    die("current FA kernel requires block-m * head-dim == 32");
+  if (!isPowerOfTwo(a.headDim))
+    die("head-dim must be a power of two");
+  int64_t threads = static_cast<int64_t>(a.blockM) * a.headDim;
+  if (threads % 32 != 0)
+    die("FA kernel requires block-m * head-dim to be a multiple of 32");
+  if (threads > 1024)
+    die("FA kernel requires block-m * head-dim <= 1024");
 }
 
 static Args parseArgs(int argc, char **argv) {
@@ -247,6 +256,7 @@ static void validateOutput(const std::vector<float> &out,
 
 int main(int argc, char **argv) {
   Args a = parseArgs(argc, argv);
+  int threads = threadsPerWorkgroup(a);
 
   hipDeviceProp_t props;
   checkHip(hipGetDeviceProperties(&props, 0), "hipGetDeviceProperties");
@@ -290,7 +300,7 @@ int main(int argc, char **argv) {
   void *kernelArgs[] = {&deviceQ, &deviceK, &deviceV, &deviceOut};
 
   for (int i = 0; i < a.warmupIters; ++i)
-    checkHip(hipModuleLaunchKernel(kfn, 1, 1, 1, 32, 1, 1, 0, nullptr,
+    checkHip(hipModuleLaunchKernel(kfn, 1, 1, 1, threads, 1, 1, 0, nullptr,
                                    kernelArgs, nullptr),
              "warmup launch");
   checkHip(hipDeviceSynchronize(), "warmup sync");
@@ -300,7 +310,7 @@ int main(int argc, char **argv) {
   checkHip(hipEventCreate(&stop), "event create stop");
   checkHip(hipEventRecord(start, nullptr), "event record start");
   for (int i = 0; i < a.iters; ++i)
-    checkHip(hipModuleLaunchKernel(kfn, 1, 1, 1, 32, 1, 1, 0, nullptr,
+    checkHip(hipModuleLaunchKernel(kfn, 1, 1, 1, threads, 1, 1, 0, nullptr,
                                    kernelArgs, nullptr),
              "timed launch");
   checkHip(hipEventRecord(stop, nullptr), "event record stop");
@@ -320,7 +330,8 @@ int main(int argc, char **argv) {
   std::printf("kernel: %s\n", a.kernel);
   std::printf("shape: block_m=%d block_n=%d seq_n=%d head_dim=%d seed=%d\n",
               a.blockM, a.blockN, a.seqN, a.headDim, a.seed);
-  std::printf("grid: 1,1,1 block: 32,1,1 waves_per_workgroup=1\n");
+  std::printf("grid: 1,1,1 block: %d,1,1 waves_per_workgroup=%d\n", threads,
+              threads / 32);
   std::printf("iters: %d\n", a.iters);
   std::printf("total_ms: %.3f\n", elapsedMs);
   std::printf("per_launch_us: %.3f\n", perLaunchUs);

@@ -2,7 +2,7 @@
 #  See https://llvm.org/LICENSE.txt for license information.
 #  SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-"""Builder for a tiled one-wave f32 FlashAttention forward kernel."""
+"""Builder for a tiled wave f32 FlashAttention forward kernel."""
 
 from __future__ import annotations
 
@@ -38,17 +38,30 @@ class _FlashAttentionConfig:
                 raise ValueError(f"{name} must be positive; got {value}")
         if self.seq_n is not None and self.seq_n <= 0:
             raise ValueError(f"seq_n must be positive; got {self.seq_n}")
-        if self.block_m * self.head_dim != 32:
+        if self.threads_per_workgroup % 32:
             raise ValueError(
-                "current one-wave FA kernel requires block_m * head_dim == 32; "
+                "FA kernel requires block_m * head_dim to be a multiple of 32; "
                 f"got {self.block_m} * {self.head_dim}"
+            )
+        if self.threads_per_workgroup > 1024:
+            raise ValueError(
+                "FA kernel requires block_m * head_dim <= 1024; "
+                f"got {self.threads_per_workgroup}"
             )
         if self.head_dim & (self.head_dim - 1):
             raise ValueError(f"head_dim must be a power of two; got {self.head_dim}")
 
     @property
-    def q_elements(self) -> int:
+    def threads_per_workgroup(self) -> int:
         return self.block_m * self.head_dim
+
+    @property
+    def waves_per_workgroup(self) -> int:
+        return self.threads_per_workgroup // 32
+
+    @property
+    def q_elements(self) -> int:
+        return self.threads_per_workgroup
 
     @property
     def kv_elements(self) -> int:
@@ -261,7 +274,7 @@ def _emit_online_tile(
 
 def _emit_kernel(bld: dsl.FunctionBuilder, cfg: _FlashAttentionConfig) -> None:
     q_arg, k_arg, v_arg, out_arg = bld.args
-    lane = bld.assume_range(bld.workitem_id(axis=0), 0, 31)
+    lane = bld.assume_range(bld.workitem_id(axis=0), 0, cfg.threads_per_workgroup - 1)
     lane_sym = dsl.sym("fa_lane")
     d_expr = dsl.mod(lane_sym, cfg.head_dim)
     bindings = {lane_sym: lane}
@@ -327,7 +340,7 @@ def _emit_host(bld: dsl.FunctionBuilder, cfg: _FlashAttentionConfig) -> None:
     f32 = dsl.f32()
     f32_ptr = dsl.ptr_type(f32)
     c1 = bld.constant(index, 1)
-    threads = bld.constant(index, 32)
+    threads = bld.constant(index, cfg.threads_per_workgroup)
 
     q_values, k_values, v_values = generate_flash_attention_f32_inputs(
         cfg.block_m,

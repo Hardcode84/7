@@ -489,6 +489,10 @@ def parse_variants(text: str) -> list[Variant]:
     return variants
 
 
+def threads_per_workgroup(args: argparse.Namespace) -> int:
+    return args.block_m * args.head_dim
+
+
 def build_argparser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--chip", default="", help="gfx target; default from rocminfo")
@@ -561,8 +565,13 @@ def validate_args(args: argparse.Namespace) -> None:
         sys.exit("--warmup must be non-negative")
     if args.target_waves < 0:
         sys.exit("--target-waves must be non-negative")
-    if args.block_m * args.head_dim != 32:
-        sys.exit("current FA kernel requires --block-m * --head-dim == 32")
+    if args.head_dim & (args.head_dim - 1):
+        sys.exit("--head-dim must be a power of two")
+    threads = threads_per_workgroup(args)
+    if threads % 32:
+        sys.exit("FA kernel requires --block-m * --head-dim to be a multiple of 32")
+    if threads > 1024:
+        sys.exit("FA kernel requires --block-m * --head-dim <= 1024")
 
 
 def main() -> int:
@@ -580,6 +589,7 @@ def main() -> int:
             f"chip: {chip}\n"
             f"shape: block_m={args.block_m} block_n={args.block_n} "
             f"seq_n={args.seq_n} head_dim={args.head_dim} "
+            f"waves_per_workgroup={threads_per_workgroup(args) // 32} "
             f"target_waves={args.target_waves}"
         )
         results: list[VariantResult] = []

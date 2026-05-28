@@ -3,7 +3,7 @@
 #  See https://llvm.org/LICENSE.txt for license information.
 #  SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-"""Emit and run the one-wave f32 FlashAttention kernel."""
+"""Emit and run the wave f32 FlashAttention kernel."""
 
 from __future__ import annotations
 
@@ -41,6 +41,18 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     args = parser.parse_args(argv)
     if args.target_waves < 0:
         parser.error("--target-waves must be non-negative")
+    for name in ("block_m", "block_n", "head_dim"):
+        if getattr(args, name) <= 0:
+            parser.error(f"--{name.replace('_', '-')} must be positive")
+    if args.seq_n is not None and args.seq_n <= 0:
+        parser.error("--seq-n must be positive")
+    if args.head_dim & (args.head_dim - 1):
+        parser.error("--head-dim must be a power of two")
+    threads = args.block_m * args.head_dim
+    if threads % 32:
+        parser.error("--block-m * --head-dim must be a multiple of 32")
+    if threads > 1024:
+        parser.error("--block-m * --head-dim must be <= 1024")
     return args
 
 
