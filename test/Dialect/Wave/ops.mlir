@@ -74,6 +74,24 @@ func.func @wave_int_arith(%uA: i32, %uB: i32, %vA: !wave.simd<i32, 32>, %vB: !wa
   func.return
 }
 
+// CHECK-LABEL: func.func @wave_f32_ops
+// CHECK-SAME: ([[A:%.*]]: !wave.simd<f32, 32>, [[B:%.*]]: !wave.simd<f32, 32>)
+func.func @wave_f32_ops(%a: !wave.simd<f32, 32>, %b: !wave.simd<f32, 32>) -> !wave.simd<f32, 32> {
+  // CHECK: [[ADD:%.*]] = wave.fadd [[A]], [[B]] : !wave.simd<f32, 32>, !wave.simd<f32, 32> -> !wave.simd<f32, 32>
+  %add = wave.fadd %a, %b : !wave.simd<f32, 32>, !wave.simd<f32, 32> -> !wave.simd<f32, 32>
+  // CHECK: [[SUB:%.*]] = wave.fsub [[ADD]], [[B]] : !wave.simd<f32, 32>, !wave.simd<f32, 32> -> !wave.simd<f32, 32>
+  %sub = wave.fsub %add, %b : !wave.simd<f32, 32>, !wave.simd<f32, 32> -> !wave.simd<f32, 32>
+  // CHECK: [[MUL:%.*]] = wave.fmul [[SUB]], [[A]] : !wave.simd<f32, 32>, !wave.simd<f32, 32> -> !wave.simd<f32, 32>
+  %mul = wave.fmul %sub, %a : !wave.simd<f32, 32>, !wave.simd<f32, 32> -> !wave.simd<f32, 32>
+  // CHECK: [[MAX:%.*]] = wave.fmax [[MUL]], [[ADD]] : !wave.simd<f32, 32>, !wave.simd<f32, 32> -> !wave.simd<f32, 32>
+  %max = wave.fmax %mul, %add : !wave.simd<f32, 32>, !wave.simd<f32, 32> -> !wave.simd<f32, 32>
+  // CHECK: [[EXP:%.*]] = wave.fexp2 [[MAX]] : !wave.simd<f32, 32> -> !wave.simd<f32, 32>
+  %exp = wave.fexp2 %max : !wave.simd<f32, 32> -> !wave.simd<f32, 32>
+  // CHECK: [[RCP:%.*]] = wave.frcp [[EXP]] : !wave.simd<f32, 32> -> !wave.simd<f32, 32>
+  %rcp = wave.frcp %exp : !wave.simd<f32, 32> -> !wave.simd<f32, 32>
+  func.return %rcp : !wave.simd<f32, 32>
+}
+
 // CHECK-LABEL: func.func @wave_assume_range
 func.func @wave_assume_range(%u32: i32, %u64: i64,
                              %v: !wave.simd<i32, 32>) {
