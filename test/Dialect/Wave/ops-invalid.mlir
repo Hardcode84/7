@@ -184,6 +184,54 @@ func.func @binary_result_type_mismatch(%a: !wave.simd<i32, 32>, %b: !wave.simd<i
 
 // -----
 
+func.func @cast_scalar_simd_mismatch(%x: f32) {
+  // expected-error @+1 {{source and result must both be scalar or both be SIMD}}
+  %r = wave.cast fpconvert %x : f32 -> !wave.simd<f16, 32>
+  return
+}
+
+// -----
+
+func.func @cast_simd_width_mismatch(%x: !wave.simd<f32, 32>) {
+  // expected-error @+1 {{source and result SIMD widths must match}}
+  %r = wave.cast fpconvert %x : !wave.simd<f32, 32> -> !wave.simd<f16, 64>
+  return
+}
+
+// -----
+
+func.func @cast_bad_fpconvert_kind(%x: !wave.simd<i32, 32>) {
+  // expected-error @+1 {{fpconvert requires float source and result}}
+  %r = wave.cast fpconvert %x : !wave.simd<i32, 32> -> !wave.simd<i16, 32>
+  return
+}
+
+// -----
+
+func.func @cast_bad_fp_to_int_kind(%x: !wave.simd<i32, 32>) {
+  // expected-error @+1 {{fp_to_int requires float source and integer result}}
+  %r = wave.cast fp_to_int %x : !wave.simd<i32, 32> -> !wave.simd<i16, 32>
+  return
+}
+
+// -----
+
+func.func @cast_non_numeric(%p: !wave.ptr<i32, #wave.global>) {
+  // expected-error @+1 {{cast type must be a signless integer or float}}
+  %r = wave.cast intconvert %p : !wave.ptr<i32, #wave.global> -> i32
+  return
+}
+
+// -----
+
+func.func @cast_non_empty_policy(%x: f32) {
+  // expected-error @+1 {{non-empty policy requires wave.cast policy attrs}}
+  %r = wave.cast fpconvert %x policy {round = "rn"} : f32 -> f16
+  return
+}
+
+// -----
+
 func.func @cmpi_operand_simd_mismatch(%a: !wave.simd<i32, 32>, %b: !wave.simd<i32, 64>) {
   // expected-error @+1 {{operands must have the same SIMD type}}
   %m = wave.cmpi ult %a, %b : !wave.simd<i32, 32>, !wave.simd<i32, 64> -> !wave.mask<32>

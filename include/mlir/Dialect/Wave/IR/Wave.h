@@ -22,6 +22,7 @@
 #include <memory>
 
 #include "mlir/Dialect/Wave/IR/WaveOpsDialect.h.inc"
+#include "mlir/Dialect/Wave/IR/WaveOpsEnums.h.inc"
 
 #define GET_ATTRDEF_CLASSES
 #include "mlir/Dialect/Wave/IR/WaveOpsAttributes.h.inc"

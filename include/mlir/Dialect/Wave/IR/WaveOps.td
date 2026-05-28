@@ -11,6 +11,7 @@
 
 include "mlir/Dialect/Wave/IR/WaveAttrs.td"
 include "mlir/Dialect/Wave/IR/WaveBase.td"
+include "mlir/Dialect/Wave/IR/WaveEnums.td"
 include "mlir/Dialect/Wave/IR/WaveTypes.td"
 
 include "mlir/Dialect/Arith/IR/ArithBase.td"
@@ -149,6 +150,16 @@ def Wave_BinaryOp : Wave_Op<"binary", [Pure]> {
   let arguments = (ins StrAttr:$kind, Wave_Simd:$lhs, Wave_Simd:$rhs);
   let results = (outs Wave_Simd:$result);
   let assemblyFormat = "$kind $lhs `,` $rhs attr-dict `:` qualified(type($lhs)) `,` qualified(type($rhs)) `->` qualified(type($result))";
+  let hasVerifier = 1;
+}
+
+def Wave_CastOp : Wave_Op<"cast", [Pure]> {
+  let summary = "numeric conversion over scalar or SIMD values";
+  let arguments = (ins Wave_CastKindEnum:$kind,
+                       AnyType:$source,
+                       OptionalAttr<DictionaryAttr>:$policy);
+  let results = (outs AnyType:$result);
+  let assemblyFormat = "$kind $source (`policy` $policy^)? attr-dict `:` type($source) `->` type($result)";
   let hasVerifier = 1;
 }
 

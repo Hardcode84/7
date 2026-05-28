@@ -1,6 +1,11 @@
 add_mlir_dialect(WaveOps wave)
 add_mlir_doc(WaveOps WaveOps Dialects/ -gen-dialect-doc)
 
+set(LLVM_TARGET_DEFINITIONS WaveEnums.td)
+mlir_tablegen(WaveOpsEnums.h.inc -gen-enum-decls)
+mlir_tablegen(WaveOpsEnums.cpp.inc -gen-enum-defs)
+add_public_tablegen_target(MLIRWaveEnumsIncGen)
+
 set(LLVM_TARGET_DEFINITIONS WaveAttrs.td)
 mlir_tablegen(WaveOpsAttributes.h.inc -gen-attrdef-decls -attrdefs-dialect=wave)
 mlir_tablegen(WaveOpsAttributes.cpp.inc -gen-attrdef-defs -attrdefs-dialect=wave)

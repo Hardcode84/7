@@ -24,6 +24,7 @@ using namespace mlir;
 using namespace mlir::wave;
 
 #include "mlir/Dialect/Wave/IR/WaveOpsDialect.cpp.inc"
+#include "mlir/Dialect/Wave/IR/WaveOpsEnums.cpp.inc"
 
 void WaveDialect::initialize() {
   if (!symbolStore)
@@ -143,6 +144,92 @@ LogicalResult BinaryOp::verify() {
   if (lhsType != rhsType || lhsType != resultType)
     return emitOpError("operands and result must have the same SIMD type");
   return success();
+}
+
+namespace {
+enum class WaveCastElementKind { Int, Float };
+
+struct WaveCastShape {
+  WaveCastElementKind elementKind;
+  std::optional<int64_t> simdWidth;
+};
+} // namespace
+
+static FailureOr<WaveCastShape> classifyWaveCastType(
+    Type type, function_ref<InFlightDiagnostic(const Twine &)> emitError) {
+  Type elementType = type;
+  std::optional<int64_t> simdWidth;
+  if (SimdType simdType = dyn_cast<SimdType>(type)) {
+    elementType = simdType.getElementType();
+    simdWidth = simdType.getWidth();
+  }
+
+  if (IntegerType integerType = dyn_cast<IntegerType>(elementType)) {
+    if (!integerType.isSignless())
+      return emitError("integer cast type must be signless");
+    return WaveCastShape{WaveCastElementKind::Int, simdWidth};
+  }
+  if (isa<FloatType>(elementType))
+    return WaveCastShape{WaveCastElementKind::Float, simdWidth};
+  return emitError(
+      "cast type must be a signless integer or float, optionally wrapped in "
+      "!wave.simd<..., W>");
+}
+
+static LogicalResult requireWaveCastKind(CastOp op, WaveCastShape source,
+                                         WaveCastShape result,
+                                         WaveCastElementKind sourceKind,
+                                         WaveCastElementKind resultKind,
+                                         StringRef message) {
+  if (source.elementKind != sourceKind || result.elementKind != resultKind)
+    return op.emitOpError(message);
+  return success();
+}
+
+static LogicalResult verifyWaveCastKind(CastOp op, WaveCastShape source,
+                                        WaveCastShape result) {
+  switch (op.getKind()) {
+  case CastKind::FpConvert:
+    return requireWaveCastKind(op, source, result, WaveCastElementKind::Float,
+                               WaveCastElementKind::Float,
+                               "fpconvert requires float source and result");
+  case CastKind::IntConvert:
+    return requireWaveCastKind(op, source, result, WaveCastElementKind::Int,
+                               WaveCastElementKind::Int,
+                               "intconvert requires integer source and result");
+  case CastKind::IntToFp:
+    return requireWaveCastKind(op, source, result, WaveCastElementKind::Int,
+                               WaveCastElementKind::Float,
+                               "int_to_fp requires integer source and float "
+                               "result");
+  case CastKind::FpToInt:
+    return requireWaveCastKind(op, source, result, WaveCastElementKind::Float,
+                               WaveCastElementKind::Int,
+                               "fp_to_int requires float source and integer "
+                               "result");
+  }
+  return success();
+}
+
+LogicalResult CastOp::verify() {
+  auto emit = [this](const Twine &msg) { return emitOpError(msg); };
+  FailureOr<WaveCastShape> source =
+      classifyWaveCastType(getSource().getType(), emit);
+  FailureOr<WaveCastShape> result =
+      classifyWaveCastType(getResult().getType(), emit);
+  if (failed(source) || failed(result))
+    return failure();
+
+  if (source->simdWidth.has_value() != result->simdWidth.has_value())
+    return emitOpError("source and result must both be scalar or both be SIMD");
+  if (source->simdWidth && *source->simdWidth != *result->simdWidth)
+    return emitOpError("source and result SIMD widths must match");
+
+  if (std::optional<DictionaryAttr> policy = getPolicy())
+    if (!policy->empty())
+      return emitOpError("non-empty policy requires wave.cast policy attrs");
+
+  return verifyWaveCastKind(*this, *source, *result);
 }
 
 namespace {
