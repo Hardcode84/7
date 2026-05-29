@@ -56,13 +56,17 @@ namespace mlir::wave::wmsel {
 // inherited from the source `wave.index_expr`. The emit-time spec
 // check calls `sym::provablyInRange` over them and demotes the
 // bucket when its proven range overflows the slot's hardware width.
+// `fullExpr` rematerializes addr64 fallback without reusing truncated
+// 32-bit bucket values.
 struct OffsetTriple {
+  llvm::SmallVector<sym::PredHandle, 2> assumptions;
+  llvm::SmallVector<std::pair<std::string, Value>, 4> bindings;
   Value voffset;
   Value soffset;
-  int64_t instOffset = 0;
   const ::ixs_node *voffsetExpr = nullptr;
   const ::ixs_node *soffsetExpr = nullptr;
-  llvm::SmallVector<sym::PredHandle, 2> assumptions;
+  const ::ixs_node *fullExpr = nullptr;
+  int64_t instOffset = 0;
 };
 
 // Symbol kind for the bucketizer's per-summand classification. Bindings
@@ -87,6 +91,7 @@ struct CarrySnapshot {
   Kind kind;
   Value carry;
   Value base;
+  Value globalBase;
   bool isBuffer = false;
   int64_t strideBytes = 0;
 };
@@ -207,6 +212,7 @@ public:
   OpBuilder builder;
   DenseMap<Value, Value> values;
   DenseMap<Value, Value> pointerBases;
+  DenseMap<Value, Value> pointerGlobalBases;
   DenseMap<Value, OffsetTriple> pointerOffsets;
   DenseMap<Value, OffsetTriple> indexTriples;
   DenseMap<Value, bool> pointerBuffers;
@@ -233,11 +239,17 @@ public:
                                 bool hasSoffset);
   bool instOffsetOverflows(const OffsetTriple &t,
                            const mlir::waveamdmachine::AddressFieldSpec &spec);
+  bool
+  needsFullAddressForSpec(const OffsetTriple &t,
+                          const mlir::waveamdmachine::AddressFieldSpec &spec);
   void demoteToFitSpec(Location loc, OffsetTriple &t,
                        const mlir::waveamdmachine::AddressFieldSpec &spec);
   BucketedOperands
   bucketForSpec(Location loc, OffsetTriple t,
                 const mlir::waveamdmachine::AddressFieldSpec &spec);
+  FailureOr<Value> materializeGlobalAddress(Location loc, Value base,
+                                            const OffsetTriple &t,
+                                            Operation *user);
 
   // ---- codegen helpers ---------------------------------------------------
   bool isBufferPointer(Type type);

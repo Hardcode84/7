@@ -978,9 +978,10 @@ treats those as a per-op contract rather than baking AMDGPU-specific
 constants into the selector. A summand whose proven range exceeds the
 slot it would have ridden demotes to the next-wider slot at emit time
 (`inst_offset` overflow demotes to `soffset`, `soffset` overflow
-demotes to `voffset`), so the routing decisions stay safe under
-arbitrary range information without splitting into target-specific
-fast paths.
+demotes to `voffset`). If the final voffset is not provably unsigned
+32-bit, the selector materializes a VGPR64 address and uses the
+non-SADDR global form. Buffer pointers retain the original global base
+for that fallback; the normal OFFEN path remains the common case.
 
 The visible payoff for the kernel author is small: wrapping each
 workgroup id with `assume_range` and writing the address as a single

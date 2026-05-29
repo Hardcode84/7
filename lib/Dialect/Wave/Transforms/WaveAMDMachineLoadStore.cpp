@@ -113,10 +113,54 @@ static Operation *buildOneGlobalOrBufferStore(WaveAMDMachineSelector &S,
       S.builder, op.getLoc(), tokenType, voffset, value, base, dep, instOffset);
 }
 
+static LogicalResult selectFullAddressStore(WaveAMDMachineSelector &S,
+                                            StoreOp op, Value globalBase,
+                                            OffsetTriple offset,
+                                            unsigned registers, bool scalar16) {
+  if (!globalBase)
+    return op.emitError("full-address fallback requires original global base");
+  FailureOr<Value> addr =
+      S.materializeGlobalAddress(op.getLoc(), globalBase, offset, op);
+  if (failed(addr))
+    return failure();
+  Value value = S.ensureVGPRForVSrc1(op.getLoc(), S.expect(op.getValue(), op));
+  Value dep = op.getDependency() ? S.expect(op.getDependency(), op) : Value{};
+  Type tokenType = getMemTokenType(op.getContext());
+  SmallVector<Value> tokens;
+  if (scalar16) {
+    Operation *store = waveamdmachine::GlobalStoreB16Addr64Op::create(
+        S.builder, op.getLoc(), tokenType, *addr, value, dep, 0);
+    tokens.push_back(store->getResult(0));
+  } else if (registers == 1) {
+    Operation *store = waveamdmachine::GlobalStoreB32Addr64Op::create(
+        S.builder, op.getLoc(), tokenType, *addr, value, dep, 0);
+    tokens.push_back(store->getResult(0));
+  } else {
+    Type vgpr1 = getRegType(op.getContext(), waveamdmachine::RegClass::VGPR, 1);
+    SmallVector<Type> elementTypes(registers, vgpr1);
+    auto split = waveamdmachine::TupleToElementsOp::create(
+        S.builder, op.getLoc(), elementTypes, value);
+    for (auto [idx, element] : llvm::enumerate(split.getElements())) {
+      Operation *store = waveamdmachine::GlobalStoreB32Addr64Op::create(
+          S.builder, op.getLoc(), tokenType, *addr, element, dep,
+          static_cast<int64_t>(idx) * 4);
+      tokens.push_back(store->getResult(0));
+    }
+  }
+  Value token = tokens.size() == 1
+                    ? tokens.front()
+                    : waveamdmachine::TokenJoinOp::create(
+                          S.builder, op.getLoc(), tokenType, tokens)
+                          .getResult();
+  S.values[op.getToken()] = token;
+  S.eraseIfTopLevel(op);
+  return success();
+}
+
 LogicalResult selectGlobalOrBufferStore(WaveAMDMachineSelector &S, StoreOp op,
-                                        Value base, OffsetTriple offset,
-                                        bool isBuffer, unsigned registers,
-                                        bool scalar16) {
+                                        Value base, Value globalBase,
+                                        OffsetTriple offset, bool isBuffer,
+                                        unsigned registers, bool scalar16) {
   waveamdmachine::AddressFieldSpec spec =
       scalar16
           ? (isBuffer ? waveamdmachine::BufferStoreB16Op::getAddressFieldSpec()
@@ -124,6 +168,9 @@ LogicalResult selectGlobalOrBufferStore(WaveAMDMachineSelector &S, StoreOp op,
           : (isBuffer
                  ? waveamdmachine::BufferStoreB32Op::getAddressFieldSpec()
                  : waveamdmachine::GlobalStoreB32Op::getAddressFieldSpec());
+  if (S.needsFullAddressForSpec(offset, spec))
+    return selectFullAddressStore(S, op, globalBase, offset, registers,
+                                  scalar16);
   auto b = S.bucketForSpec(op.getLoc(), offset, spec);
   // wave.splat'd SGPRs (e.g. wave.read_cycles) reach the store as
   // SGPR1; the VMEM store needs the value in a VGPR. Materialize on
@@ -234,13 +281,68 @@ static Operation *buildGlobalLoad(WaveAMDMachineSelector &S, LoadOp op,
       b.instOffset);
 }
 
+LogicalResult selectFullAddressLoad(WaveAMDMachineSelector &S, LoadOp op,
+                                    Value globalBase, OffsetTriple offset,
+                                    unsigned registers, bool scalar16) {
+  if (!globalBase)
+    return op.emitError("full-address fallback requires original global base");
+  FailureOr<Value> addr =
+      S.materializeGlobalAddress(op.getLoc(), globalBase, offset, op);
+  if (failed(addr))
+    return failure();
+  Value dep = op.getDependency() ? S.expect(op.getDependency(), op) : Value{};
+  Type tokenType = getMemTokenType(op.getContext());
+  Type vgpr1 = getRegType(op.getContext(), waveamdmachine::RegClass::VGPR, 1);
+  SmallVector<Value> elements;
+  SmallVector<Value> tokens;
+  if (scalar16) {
+    Operation *load = waveamdmachine::GlobalLoadB16Addr64Op::create(
+        S.builder, op.getLoc(), vgpr1, tokenType, *addr, dep, 0);
+    elements.push_back(load->getResult(0));
+    tokens.push_back(load->getResult(1));
+  } else if (registers == 1) {
+    Operation *load = waveamdmachine::GlobalLoadB32Addr64Op::create(
+        S.builder, op.getLoc(), vgpr1, tokenType, *addr, dep, 0);
+    elements.push_back(load->getResult(0));
+    tokens.push_back(load->getResult(1));
+  } else {
+    for (unsigned idx : llvm::seq<unsigned>(0, registers)) {
+      Operation *load = waveamdmachine::GlobalLoadB32Addr64Op::create(
+          S.builder, op.getLoc(), vgpr1, tokenType, *addr, dep,
+          static_cast<int64_t>(idx) * 4);
+      elements.push_back(load->getResult(0));
+      tokens.push_back(load->getResult(1));
+    }
+  }
+  Value result = elements.front();
+  if (registers != 1) {
+    Type resultType =
+        getRegType(op.getContext(), waveamdmachine::RegClass::VGPR, registers);
+    result = waveamdmachine::TupleFromElementsOp::create(S.builder, op.getLoc(),
+                                                         resultType, elements)
+                 .getTuple();
+  }
+  Value token = tokens.size() == 1
+                    ? tokens.front()
+                    : waveamdmachine::TokenJoinOp::create(
+                          S.builder, op.getLoc(), tokenType, tokens)
+                          .getResult();
+  S.values[op.getValue()] = result;
+  S.values[op.getToken()] = token;
+  S.eraseIfTopLevel(op);
+  return success();
+}
+
 LogicalResult selectGlobalOrBufferLoad(WaveAMDMachineSelector &S, LoadOp op,
-                                       Value base, OffsetTriple offset,
-                                       bool isBuffer, unsigned registers,
-                                       bool scalar16) {
+                                       Value base, Value globalBase,
+                                       OffsetTriple offset, bool isBuffer,
+                                       unsigned registers, bool scalar16) {
   waveamdmachine::AddressFieldSpec spec =
       isBuffer ? bufferLoadSpec(scalar16, registers)
                : globalLoadSpec(scalar16, registers);
+  if (S.needsFullAddressForSpec(offset, spec))
+    return selectFullAddressLoad(S, op, globalBase, offset, registers,
+                                 scalar16);
   auto b = S.bucketForSpec(op.getLoc(), offset, spec);
   Value dep = op.getDependency() ? S.expect(op.getDependency(), op) : Value{};
   Type resultType =
@@ -270,8 +372,11 @@ LogicalResult selectStore(WaveAMDMachineSelector &S, StoreOp op) {
     return selectSharedStore(S, op, baseIt->second, triple, registers,
                              scalar16);
   bool isBuffer = bufferIt != S.pointerBuffers.end() && bufferIt->second;
-  return selectGlobalOrBufferStore(S, op, baseIt->second, triple, isBuffer,
-                                   registers, scalar16);
+  Value globalBase = S.pointerGlobalBases.lookup(op.getPtr());
+  if (!globalBase && !isBuffer)
+    globalBase = baseIt->second;
+  return selectGlobalOrBufferStore(S, op, baseIt->second, globalBase, triple,
+                                   isBuffer, registers, scalar16);
 }
 
 LogicalResult selectLoad(WaveAMDMachineSelector &S, LoadOp op) {
@@ -290,8 +395,11 @@ LogicalResult selectLoad(WaveAMDMachineSelector &S, LoadOp op) {
     return selectSharedLoad(S, op, baseIt->second, triple, registers, scalar16);
 
   bool isBuffer = bufferIt != S.pointerBuffers.end() && bufferIt->second;
-  return selectGlobalOrBufferLoad(S, op, baseIt->second, triple, isBuffer,
-                                  registers, scalar16);
+  Value globalBase = S.pointerGlobalBases.lookup(op.getPtr());
+  if (!globalBase && !isBuffer)
+    globalBase = baseIt->second;
+  return selectGlobalOrBufferLoad(S, op, baseIt->second, globalBase, triple,
+                                  isBuffer, registers, scalar16);
 }
 
 } // namespace mlir::wave::wmsel

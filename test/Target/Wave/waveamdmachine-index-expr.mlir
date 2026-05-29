@@ -11,7 +11,7 @@
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
-// 4*lid + K + wgid_y on a global ptr (no S slot).
+// 4*lid + K + bounded wgid_y on a global ptr (no S slot).
 //   V bucket: 4*lid -> v_mul_lo_u32, scaled x4 -> v_lshlrev_b32(.,2).
 //   S bucket: wgid_y, scaled x4 -> s_lshl_b32(.,2).
 //   inst:    K=16, scaled x4 -> offset 64.
@@ -28,7 +28,8 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // CHECK: waveamdmachine.global_store_b32 %[[ADDR]], {{.*}} offset 64
 func.func @mixed_offset(%out: !wave.ptr<i32, #wave.global>, %x: i32) attributes {wave.kernel} {
   %lane = wave.lane_id : !wave.simd<i32, 32>
-  %wgid_y = wave.workgroup_id 1
+  %wgid_y_raw = wave.workgroup_id 1
+  %wgid_y = wave.assume_range %wgid_y_raw, [0, 1023] : i32
   %k = arith.constant 16 : i32
   %off = wave.index_expr <"4*lid + K + wgid_y"> ["K", "lid", "wgid_y"] (%k, %lane, %wgid_y) : (i32, !wave.simd<i32, 32>, i32) -> !wave.index<32>
   %ptrs = wave.ptr_add %out, %off : !wave.ptr<i32, #wave.global>, !wave.index<32> -> !wave.simd<!wave.ptr<i32, #wave.global>, 32>
@@ -125,17 +126,14 @@ func.func @nested_uniform_summand_stays_sgpr(%out: !wave.ptr<i32, #wave.global>)
 }
 
 // Without `wave.assume_range`, workgroup_id reports the full
-// [0, INT32_MAX] lattice. Two of them, byte-scaled, push the soffset
-// bucket's proven range past 2^32-1, so the emit-time spec check
-// demotes the SGPR contribution into voffset via a final v_add_u32.
-// CHECK-LABEL: func.func @buffer_demote_on_overflow
+// [0, INT32_MAX] lattice. Two of them, byte-scaled, overflow the
+// final offset slots, so selection falls back to addr64 global VMEM.
+// CHECK-LABEL: func.func @buffer_addr64_on_overflow
 // CHECK: %[[LANE:.*]] = waveamdmachine.v_mbcnt_lo
 // CHECK: %[[SSUM:.*]], %{{.*}} = waveamdmachine.s_add_i32
-// CHECK: %[[VBYTE:.*]] = waveamdmachine.v_lshlrev_b32 %[[LANE]],
-// CHECK: %[[SBYTE:[^,]+]], %{{.*}} = waveamdmachine.s_lshl_b32 %[[SSUM]],
-// CHECK: %[[VMERGED:.*]] = waveamdmachine.v_add_u32 %[[VBYTE]], %[[SBYTE]]
-// CHECK: waveamdmachine.buffer_store_b32 %[[VMERGED]],
-func.func @buffer_demote_on_overflow(%out: !wave.ptr<i32, #wave.global>, %x: i32) attributes {wave.kernel} {
+// CHECK-NOT: waveamdmachine.buffer_store_b32
+// CHECK: waveamdmachine.global_store_b32_addr64
+func.func @buffer_addr64_on_overflow(%out: !wave.ptr<i32, #wave.global>, %x: i32) attributes {wave.kernel} {
   %lane = wave.lane_id : !wave.simd<i32, 32>
   %wgid_x = wave.workgroup_id 0
   %wgid_y = wave.workgroup_id 1

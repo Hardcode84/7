@@ -315,6 +315,19 @@ Value WaveAMDMachineSelector::collapseTriple(Location loc,
   return v ? v : createImm(builder, loc, 0);
 }
 
+static void scaleTripleExprs(WaveAMDMachineSelector &S, OffsetTriple &out,
+                             const OffsetTriple &t, unsigned size) {
+  if (!t.voffsetExpr && !t.soffsetExpr && !t.fullExpr)
+    return;
+  FailureOr<sym::ExprHandle> sizeExpr =
+      sym::composeExprInt(S.symbolStore(), size);
+  if (failed(sizeExpr))
+    return;
+  out.voffsetExpr = S.scaleBucketExpr(t.voffsetExpr, sizeExpr->raw());
+  out.soffsetExpr = S.scaleBucketExpr(t.soffsetExpr, sizeExpr->raw());
+  out.fullExpr = S.scaleBucketExpr(t.fullExpr, sizeExpr->raw());
+}
+
 // Multiply each slot of `t` by `size`. Used by selectPtrAdd to
 // convert element offsets into byte offsets without losing the
 // V / S / inst split. Power-of-two `size` lowers to shifts; the
@@ -355,14 +368,9 @@ OffsetTriple WaveAMDMachineSelector::scaleTriple(Location loc, OffsetTriple t,
   }
   // Scale the symbolic forms too so the emit-time width check sees
   // the final byte-offset range, not the pre-scale element range.
-  if (t.voffsetExpr || t.soffsetExpr) {
-    auto sizeExpr = sym::composeExprInt(symbolStore(), size);
-    if (succeeded(sizeExpr)) {
-      out.voffsetExpr = scaleBucketExpr(t.voffsetExpr, sizeExpr->raw());
-      out.soffsetExpr = scaleBucketExpr(t.soffsetExpr, sizeExpr->raw());
-    }
-  }
+  scaleTripleExprs(*this, out, t, size);
   out.assumptions = t.assumptions;
+  out.bindings = t.bindings;
   return out;
 }
 
@@ -400,6 +408,25 @@ bool WaveAMDMachineSelector::instOffsetOverflows(
   return t.instOffset < range.first || t.instOffset > range.second;
 }
 
+bool WaveAMDMachineSelector::needsFullAddressForSpec(
+    const OffsetTriple &t, const waveamdmachine::AddressFieldSpec &spec) {
+  const ::ixs_node *vExpr = t.voffsetExpr;
+  const ::ixs_node *sExpr = t.soffsetExpr;
+  if (instOffsetOverflows(t, spec)) {
+    FailureOr<sym::ExprHandle> immExpr =
+        sym::composeExprInt(symbolStore(), t.instOffset);
+    if (succeeded(immExpr)) {
+      if (spec.hasSoffset)
+        sExpr = appendBucketExpr(sExpr, immExpr->raw());
+      else
+        vExpr = appendBucketExpr(vExpr, immExpr->raw());
+    }
+  }
+  if (!spec.hasSoffset || !slotFitsU32(sExpr, t.assumptions))
+    vExpr = appendBucketExpr(vExpr, sExpr);
+  return !slotFitsU32(vExpr, t.assumptions);
+}
+
 sym::Store &WaveAMDMachineSelector::symbolStore() {
   return func.getContext()->getLoadedDialect<WaveDialect>()->getSymbolStore();
 }
@@ -416,14 +443,9 @@ bool WaveAMDMachineSelector::slotFitsU32(
                               int64_t{0}, (int64_t{1} << 32) - 1);
 }
 
-// Push out-of-range / unsupported inst_offset and an unsupported or
-// overwide soffset into the slots `spec` actually has. soffset is
-// demoted to voffset when (a) the spec has no S slot, or (b) the
-// soffset bucket's proven range overflows 32-bit. voffset is the
-// catch-all; an overflow there is a real correctness issue that
-// needs a 64-bit lowering, but the bucketizer can't synthesize one
-// today and the practical kernels stay well below 2^32, so the
-// overflow check stops at soffset.
+// Push out-of-range / unsupported inst_offset and unsupported or
+// overwide soffset into the slots `spec` has. Callers route overwide
+// final voffset through addr64 before reaching this helper.
 void WaveAMDMachineSelector::demoteToFitSpec(
     Location loc, OffsetTriple &t,
     const waveamdmachine::AddressFieldSpec &spec) {
@@ -453,6 +475,325 @@ WaveAMDMachineSelector::BucketedOperands WaveAMDMachineSelector::bucketForSpec(
     out.soffset = t.soffset ? t.soffset : createImm(builder, loc, 0);
   out.instOffset = t.instOffset;
   return out;
+}
+
+static std::optional<int64_t> staticIntLiteral(::ixs_node *node) {
+  switch (ixs_node_tag(node)) {
+  case IXS_INT:
+    return ixs_node_int_val(node);
+  case IXS_RAT:
+    if (ixs_node_rat_den(node) == 1)
+      return ixs_node_rat_num(node);
+    return std::nullopt;
+  default:
+    return std::nullopt;
+  }
+}
+
+static bool isReg(Value v, waveamdmachine::RegClass cls, unsigned width) {
+  auto rt = dyn_cast<waveamdmachine::RegType>(v.getType());
+  return rt && rt.getRegClass() == cls && rt.getWidth() == width;
+}
+
+static bool isVGPR2(Value v) {
+  return isReg(v, waveamdmachine::RegClass::VGPR, 2);
+}
+
+static bool isSGPR2(Value v) {
+  return isReg(v, waveamdmachine::RegClass::SGPR, 2);
+}
+
+static bool isWideVGPR(Value v) {
+  auto rt = dyn_cast<waveamdmachine::RegType>(v.getType());
+  return rt && rt.getRegClass() == waveamdmachine::RegClass::VGPR &&
+         rt.getWidth() == 2;
+}
+
+static Value tuple2(WaveAMDMachineSelector &S, Location loc,
+                    waveamdmachine::RegClass cls, Value lo, Value hi) {
+  Type resultType = getRegType(S.builder.getContext(), cls, 2);
+  return waveamdmachine::TupleFromElementsOp::create(S.builder, loc, resultType,
+                                                     ValueRange{lo, hi})
+      .getTuple();
+}
+
+static Value ensureSGPR2(WaveAMDMachineSelector &S, Location loc, Value v) {
+  if (isSGPR2(v))
+    return v;
+  if (std::optional<int64_t> imm = S.getImmediateValue(v))
+    return waveamdmachine::SMovB64ImmOp::create(
+               S.builder, loc,
+               getRegType(S.builder.getContext(),
+                          waveamdmachine::RegClass::SGPR, 2),
+               S.builder.getI64IntegerAttr(*imm))
+        .getResult();
+  Value lo = S.materializeSGPR1(loc, v);
+  Value hi = S.materializeSGPR1(loc, createImm(S.builder, loc, 0));
+  return tuple2(S, loc, waveamdmachine::RegClass::SGPR, lo, hi);
+}
+
+static Value ensureVGPR2(WaveAMDMachineSelector &S, Location loc, Value v) {
+  if (isVGPR2(v))
+    return v;
+  if (isSGPR2(v)) {
+    Type sgpr1 =
+        getRegType(S.builder.getContext(), waveamdmachine::RegClass::SGPR, 1);
+    auto split = waveamdmachine::TupleToElementsOp::create(
+        S.builder, loc, TypeRange{sgpr1, sgpr1}, v);
+    Value lo = S.ensureVGPRForVSrc1(loc, split.getElements()[0]);
+    Value hi = S.ensureVGPRForVSrc1(loc, split.getElements()[1]);
+    return tuple2(S, loc, waveamdmachine::RegClass::VGPR, lo, hi);
+  }
+  Value lo = S.ensureVGPRForVSrc1(loc, v);
+  Value hi = S.ensureVGPRForVSrc1(loc, createImm(S.builder, loc, 0));
+  return tuple2(S, loc, waveamdmachine::RegClass::VGPR, lo, hi);
+}
+
+static Value addWide(WaveAMDMachineSelector &S, Location loc, Value lhs,
+                     Value rhs) {
+  if (isWideVGPR(lhs) || isWideVGPR(rhs)) {
+    Type resultType =
+        getRegType(S.builder.getContext(), waveamdmachine::RegClass::VGPR, 2);
+    return waveamdmachine::VAddU64Op::create(
+               S.builder, loc, resultType, getVCCType(S.builder.getContext()),
+               ensureVGPR2(S, loc, lhs), ensureVGPR2(S, loc, rhs))
+        .getResult();
+  }
+  Type resultType =
+      getRegType(S.builder.getContext(), waveamdmachine::RegClass::SGPR, 2);
+  return waveamdmachine::SAddU64Op::create(
+             S.builder, loc, resultType, getSCCType(S.builder.getContext()),
+             ensureSGPR2(S, loc, lhs), ensureSGPR2(S, loc, rhs))
+      .getResult();
+}
+
+static Value mulWide(WaveAMDMachineSelector &S, Location loc, Value lhs,
+                     Value rhs) {
+  if (isWideVGPR(lhs) || isWideVGPR(rhs)) {
+    Type pairType =
+        getRegType(S.builder.getContext(), waveamdmachine::RegClass::VGPR, 2);
+    Type scratchType =
+        getRegType(S.builder.getContext(), waveamdmachine::RegClass::VGPR, 1);
+    return waveamdmachine::VMulU64Op::create(
+               S.builder, loc, pairType, scratchType, ensureVGPR2(S, loc, lhs),
+               ensureVGPR2(S, loc, rhs))
+        .getResult();
+  }
+  Type pairType =
+      getRegType(S.builder.getContext(), waveamdmachine::RegClass::SGPR, 2);
+  Type scratchType =
+      getRegType(S.builder.getContext(), waveamdmachine::RegClass::SGPR, 1);
+  return waveamdmachine::SMulU64Op::create(
+             S.builder, loc, pairType, scratchType,
+             getSCCType(S.builder.getContext()), ensureSGPR2(S, loc, lhs),
+             ensureSGPR2(S, loc, rhs))
+      .getResult();
+}
+
+static FailureOr<Value>
+materializeWideIndexExprNode(WaveAMDMachineSelector &S, const ::ixs_node *cnode,
+                             Operation *user,
+                             ArrayRef<std::pair<std::string, Value>> bindings);
+
+static FailureOr<Value>
+materializeWideAddTerm(WaveAMDMachineSelector &S, ::ixs_node *node, uint32_t i,
+                       Operation *user,
+                       ArrayRef<std::pair<std::string, Value>> bindings) {
+  FailureOr<Value> term = materializeWideIndexExprNode(
+      S, ixs_node_add_term(node, i), user, bindings);
+  if (failed(term))
+    return failure();
+  ::ixs_node *coeff = ixs_node_add_term_coeff(node, i);
+  std::optional<int64_t> coeffInt = staticIntLiteral(coeff);
+  if (coeffInt && *coeffInt == 1)
+    return *term;
+  FailureOr<Value> coeffValue =
+      materializeWideIndexExprNode(S, coeff, user, bindings);
+  if (failed(coeffValue))
+    return failure();
+  return mulWide(S, user->getLoc(), *coeffValue, *term);
+}
+
+static FailureOr<Value>
+materializeWideAdd(WaveAMDMachineSelector &S, ::ixs_node *node, Operation *user,
+                   ArrayRef<std::pair<std::string, Value>> bindings) {
+  Location loc = user->getLoc();
+  std::optional<Value> acc;
+  ::ixs_node *coeff = ixs_node_add_coeff(node);
+  std::optional<int64_t> coeffInt = staticIntLiteral(coeff);
+  if (!coeffInt || *coeffInt != 0) {
+    FailureOr<Value> seed =
+        materializeWideIndexExprNode(S, coeff, user, bindings);
+    if (failed(seed))
+      return failure();
+    acc = *seed;
+  }
+  uint32_t n = ixs_node_add_nterms(node);
+  for (uint32_t i = 0; i < n; ++i) {
+    FailureOr<Value> term = materializeWideAddTerm(S, node, i, user, bindings);
+    if (failed(term))
+      return failure();
+    acc = acc ? addWide(S, loc, *acc, *term) : std::optional<Value>{*term};
+  }
+  if (acc)
+    return *acc;
+  return waveamdmachine::SMovB64ImmOp::create(
+             S.builder, loc,
+             getRegType(S.builder.getContext(), waveamdmachine::RegClass::SGPR,
+                        2),
+             S.builder.getI64IntegerAttr(0))
+      .getResult();
+}
+
+static FailureOr<Value>
+materializeWideMulFactor(WaveAMDMachineSelector &S, ::ixs_node *node,
+                         uint32_t i, Operation *user,
+                         ArrayRef<std::pair<std::string, Value>> bindings) {
+  int32_t exp = ixs_node_mul_factor_exp(node, i);
+  if (exp <= 0)
+    return user->emitError(
+        "full-address index_expr rejects non-positive mul exponent");
+  FailureOr<Value> base = materializeWideIndexExprNode(
+      S, ixs_node_mul_factor_base(node, i), user, bindings);
+  if (failed(base))
+    return failure();
+  Value pow = *base;
+  for (int32_t e = 1; e < exp; ++e)
+    pow = mulWide(S, user->getLoc(), pow, *base);
+  return pow;
+}
+
+static FailureOr<Value>
+materializeWideMul(WaveAMDMachineSelector &S, ::ixs_node *node, Operation *user,
+                   ArrayRef<std::pair<std::string, Value>> bindings) {
+  Location loc = user->getLoc();
+  std::optional<Value> acc;
+  ::ixs_node *coeff = ixs_node_mul_coeff(node);
+  std::optional<int64_t> coeffInt = staticIntLiteral(coeff);
+  if (!coeffInt || *coeffInt != 1) {
+    FailureOr<Value> seed =
+        materializeWideIndexExprNode(S, coeff, user, bindings);
+    if (failed(seed))
+      return failure();
+    acc = *seed;
+  }
+  uint32_t n = ixs_node_mul_nfactors(node);
+  for (uint32_t i = 0; i < n; ++i) {
+    FailureOr<Value> factor =
+        materializeWideMulFactor(S, node, i, user, bindings);
+    if (failed(factor))
+      return failure();
+    acc = acc ? mulWide(S, loc, *acc, *factor) : std::optional<Value>{*factor};
+  }
+  if (acc)
+    return *acc;
+  return waveamdmachine::SMovB64ImmOp::create(
+             S.builder, loc,
+             getRegType(S.builder.getContext(), waveamdmachine::RegClass::SGPR,
+                        2),
+             S.builder.getI64IntegerAttr(1))
+      .getResult();
+}
+
+static FailureOr<Value>
+materializeWideSymbol(WaveAMDMachineSelector &S, ::ixs_node *node,
+                      Operation *user,
+                      ArrayRef<std::pair<std::string, Value>> bindings) {
+  StringRef name = ixs_node_sym_name(node);
+  for (const auto &binding : bindings)
+    if (binding.first == name)
+      return isReg(binding.second, waveamdmachine::RegClass::VGPR, 1) ||
+                     isVGPR2(binding.second)
+                 ? ensureVGPR2(S, user->getLoc(), binding.second)
+                 : ensureSGPR2(S, user->getLoc(), binding.second);
+  return user->emitError("full-address index_expr leaf '")
+         << name << "' has no binding";
+}
+
+static FailureOr<Value>
+materializeWideIndexExprNode(WaveAMDMachineSelector &S, const ::ixs_node *cnode,
+                             Operation *user,
+                             ArrayRef<std::pair<std::string, Value>> bindings) {
+  auto *node = const_cast<::ixs_node *>(cnode);
+  Location loc = user->getLoc();
+  switch (ixs_node_tag(node)) {
+  case IXS_INT:
+    return waveamdmachine::SMovB64ImmOp::create(
+               S.builder, loc,
+               getRegType(S.builder.getContext(),
+                          waveamdmachine::RegClass::SGPR, 2),
+               S.builder.getI64IntegerAttr(ixs_node_int_val(node)))
+        .getResult();
+  case IXS_RAT: {
+    if (ixs_node_rat_den(node) != 1)
+      return user->emitError(
+          "full-address index_expr rejects non-integer rational");
+    return waveamdmachine::SMovB64ImmOp::create(
+               S.builder, loc,
+               getRegType(S.builder.getContext(),
+                          waveamdmachine::RegClass::SGPR, 2),
+               S.builder.getI64IntegerAttr(ixs_node_rat_num(node)))
+        .getResult();
+  }
+  case IXS_SYM:
+    return materializeWideSymbol(S, node, user, bindings);
+  case IXS_ADD:
+    return materializeWideAdd(S, node, user, bindings);
+  case IXS_MUL:
+    return materializeWideMul(S, node, user, bindings);
+  case IXS_FLOOR:
+  case IXS_CEIL:
+  case IXS_MOD:
+    return user->emitError(
+        "full-address index_expr supports only add/mul expressions");
+  default:
+    return user->emitError("full-address index_expr unsupported node tag ")
+           << static_cast<int>(ixs_node_tag(node));
+  }
+}
+
+static Value sgprPairToVGPRPair(WaveAMDMachineSelector &S, Location loc,
+                                Value pair) {
+  return ensureVGPR2(S, loc, pair);
+}
+
+FailureOr<Value> WaveAMDMachineSelector::materializeGlobalAddress(
+    Location loc, Value base, const OffsetTriple &t, Operation *user) {
+  Value addr = base;
+  if (t.fullExpr) {
+    FailureOr<Value> offset =
+        materializeWideIndexExprNode(*this, t.fullExpr, user, t.bindings);
+    if (failed(offset))
+      return failure();
+    if (isWideVGPR(*offset))
+      return addWide(*this, loc, sgprPairToVGPRPair(*this, loc, addr), *offset);
+    addr = addWide(*this, loc, addr, *offset);
+    return sgprPairToVGPRPair(*this, loc, addr);
+  }
+  if (t.instOffset != 0) {
+    Value imm =
+        waveamdmachine::SMovB64ImmOp::create(
+            builder, loc,
+            getRegType(builder.getContext(), waveamdmachine::RegClass::SGPR, 2),
+            builder.getI64IntegerAttr(t.instOffset))
+            .getResult();
+    addr = addWide(*this, loc, addr, imm);
+  }
+  if (t.soffset)
+    addr =
+        waveamdmachine::SAddU64U32Op::create(
+            builder, loc,
+            getRegType(builder.getContext(), waveamdmachine::RegClass::SGPR, 2),
+            getSCCType(builder.getContext()), addr,
+            materializeSGPR1(loc, t.soffset))
+            .getResult();
+  Value vaddr = sgprPairToVGPRPair(*this, loc, addr);
+  if (!t.voffset)
+    return vaddr;
+  Value lo = ensureVGPRForVSrc1(loc, t.voffset);
+  Value hi = ensureVGPRForVSrc1(loc, createImm(builder, loc, 0));
+  Value voffset = tuple2(*this, loc, waveamdmachine::RegClass::VGPR, lo, hi);
+  return addWide(*this, loc, vaddr, voffset);
 }
 
 // Build the `offset` attribute list for a bucketed emit. Empty
@@ -524,8 +865,11 @@ OffsetTriple WaveAMDMachineSelector::mergeTriples(Location loc, OffsetTriple a,
   out.instOffset = a.instOffset + b.instOffset;
   out.voffsetExpr = appendBucketExpr(a.voffsetExpr, b.voffsetExpr);
   out.soffsetExpr = appendBucketExpr(a.soffsetExpr, b.soffsetExpr);
+  out.fullExpr = appendBucketExpr(a.fullExpr, b.fullExpr);
   out.assumptions = a.assumptions;
   llvm::append_range(out.assumptions, b.assumptions);
+  out.bindings = a.bindings;
+  llvm::append_range(out.bindings, b.bindings);
   return out;
 }
 
@@ -571,6 +915,8 @@ void WaveAMDMachineSelector::materializeArgument(BlockArgument arg,
   if (!isPtr)
     return;
   pointerBases[arg] = argOp;
+  if (!isBufferPointer(type) && !isSharedPointer(type))
+    pointerGlobalBases[arg] = argOp;
   pointerOffsets[arg] = OffsetTriple{};
   pointerBuffers[arg] = isBufferPointer(type);
 }
@@ -1555,6 +1901,9 @@ LogicalResult WaveAMDMachineSelector::selectIndexExpr(IndexExprOp op) {
   triple.assumptions.assign(assumptions.begin(), assumptions.end());
   if (failed(bucketize(*this, root, op, substitution, symKinds, triple)))
     return failure();
+  triple.fullExpr = root;
+  for (const auto &binding : substitution)
+    triple.bindings.push_back({binding.getKey().str(), binding.getValue()});
   indexTriples[op.getResult()] = triple;
   // selectPtrAdd reads the bucketed triple directly; everyone else
   // (wave.binary, debug printers) goes through the `values` map and
@@ -1578,6 +1927,7 @@ LogicalResult WaveAMDMachineSelector::selectPtrAdd(PtrAddOp op) {
   // Snapshot mapped values before mutating any of the maps below; inserting
   // into a DenseMap can rehash and invalidate live iterators.
   Value baseValue = baseIt->second;
+  Value globalBase = pointerGlobalBases.lookup(op.getBase());
   OffsetTriple baseTriple = offsetIt->second;
 
   OffsetTriple offsetTriple;
@@ -1586,13 +1936,15 @@ LogicalResult WaveAMDMachineSelector::selectPtrAdd(PtrAddOp op) {
     offsetTriple = tit->second;
   } else {
     Value offset = expect(op.getOffset(), op);
-    offsetTriple = OffsetTriple{offset, Value{}, 0};
+    offsetTriple.voffset = offset;
   }
   unsigned size = elementSizeBytes(op.getBase().getType());
   OffsetTriple scaled = scaleTriple(op.getLoc(), offsetTriple, size);
   OffsetTriple merged = mergeTriples(op.getLoc(), baseTriple, scaled);
 
   pointerBases[op.getResult()] = baseValue;
+  if (globalBase)
+    pointerGlobalBases[op.getResult()] = globalBase;
   pointerOffsets[op.getResult()] = merged;
   pointerBuffers[op.getResult()] = pointerBuffers.lookup(op.getBase());
   values[op.getResult()] = baseValue;
@@ -1608,12 +1960,14 @@ WaveAMDMachineSelector::selectMakeBuffer(waveamd::MakeBufferOp op) {
     return op.emitError("WaveAMDMachine backend expects selected base pointer");
   // See selectPtrAdd: snapshot before any DenseMap insertion.
   Value baseValue = baseIt->second;
+  Value globalBase = pointerGlobalBases.lookup(op.getBase());
   OffsetTriple baseTriple = offsetIt->second;
   Value descriptor = waveamdmachine::MakeBufferRsrcOp::create(
       builder, op.getLoc(),
       getRegType(op.getContext(), waveamdmachine::RegClass::SGPR, 4), baseValue,
       expect(op.getRange(), op));
   pointerBases[op.getResult()] = descriptor;
+  pointerGlobalBases[op.getResult()] = globalBase ? globalBase : baseValue;
   pointerOffsets[op.getResult()] = baseTriple;
   pointerBuffers[op.getResult()] = true;
   values[op.getResult()] = descriptor;
@@ -1687,8 +2041,9 @@ WaveAMDMachineSelector::selectFragmentUnpack(waveamd::FragmentUnpackOp op) {
 LogicalResult WaveAMDMachineSelector::selectLdsBase(LdsBaseOp op) {
   Value baseValue = createImm(builder, op.getLoc(), 0);
   pointerBases[op.getResult()] = baseValue;
-  pointerOffsets[op.getResult()] =
-      OffsetTriple{Value{}, Value{}, static_cast<int64_t>(op.getOffset())};
+  pointerOffsets[op.getResult()] = OffsetTriple{};
+  pointerOffsets[op.getResult()].instOffset =
+      static_cast<int64_t>(op.getOffset());
   values[op.getResult()] = baseValue;
   eraseIfTopLevel(op);
   return success();

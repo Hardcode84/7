@@ -473,6 +473,18 @@ private:
                        : llvm::AMDGPU::GLOBAL_STORE_DWORD_SADDR_gfx11;
   }
 
+  unsigned globalStoreB32Addr64() const {
+    if (isGfx8Or9())
+      return llvm::AMDGPU::GLOBAL_STORE_DWORD_vi;
+    if (isaVersion.Major == 10)
+      return llvm::AMDGPU::GLOBAL_STORE_DWORD_gfx10;
+    if (isaVersion.Major == 11)
+      return llvm::AMDGPU::GLOBAL_STORE_DWORD_gfx11;
+    if (isaVersion.Major == 12)
+      return llvm::AMDGPU::GLOBAL_STORE_DWORD_gfx12;
+    return llvm::AMDGPU::GLOBAL_STORE_DWORD_gfx13;
+  }
+
   unsigned globalStoreB16() const {
     if (isGfx8Or9())
       return llvm::AMDGPU::GLOBAL_STORE_SHORT_SADDR_vi;
@@ -485,9 +497,33 @@ private:
     return llvm::AMDGPU::GLOBAL_STORE_SHORT_SADDR_gfx13;
   }
 
+  unsigned globalStoreB16Addr64() const {
+    if (isGfx8Or9())
+      return llvm::AMDGPU::GLOBAL_STORE_SHORT_vi;
+    if (isaVersion.Major == 10)
+      return llvm::AMDGPU::GLOBAL_STORE_SHORT_gfx10;
+    if (isaVersion.Major == 11)
+      return llvm::AMDGPU::GLOBAL_STORE_SHORT_gfx11;
+    if (isaVersion.Major == 12)
+      return llvm::AMDGPU::GLOBAL_STORE_SHORT_gfx12;
+    return llvm::AMDGPU::GLOBAL_STORE_SHORT_gfx13;
+  }
+
   unsigned globalLoadB32() const {
     return isGfx8Or9() ? llvm::AMDGPU::GLOBAL_LOAD_DWORD_SADDR_vi
                        : llvm::AMDGPU::GLOBAL_LOAD_DWORD_SADDR_gfx11;
+  }
+
+  unsigned globalLoadB32Addr64() const {
+    if (isGfx8Or9())
+      return llvm::AMDGPU::GLOBAL_LOAD_DWORD_vi;
+    if (isaVersion.Major == 10)
+      return llvm::AMDGPU::GLOBAL_LOAD_DWORD_gfx10;
+    if (isaVersion.Major == 11)
+      return llvm::AMDGPU::GLOBAL_LOAD_DWORD_gfx11;
+    if (isaVersion.Major == 12)
+      return llvm::AMDGPU::GLOBAL_LOAD_DWORD_gfx12;
+    return llvm::AMDGPU::GLOBAL_LOAD_DWORD_gfx13;
   }
 
   unsigned globalLoadB16() const {
@@ -500,6 +536,18 @@ private:
     if (isaVersion.Major == 12)
       return llvm::AMDGPU::GLOBAL_LOAD_USHORT_SADDR_gfx12;
     return llvm::AMDGPU::GLOBAL_LOAD_USHORT_SADDR_gfx13;
+  }
+
+  unsigned globalLoadB16Addr64() const {
+    if (isGfx8Or9())
+      return llvm::AMDGPU::GLOBAL_LOAD_USHORT_vi;
+    if (isaVersion.Major == 10)
+      return llvm::AMDGPU::GLOBAL_LOAD_USHORT_gfx10;
+    if (isaVersion.Major == 11)
+      return llvm::AMDGPU::GLOBAL_LOAD_USHORT_gfx11;
+    if (isaVersion.Major == 12)
+      return llvm::AMDGPU::GLOBAL_LOAD_USHORT_gfx12;
+    return llvm::AMDGPU::GLOBAL_LOAD_USHORT_gfx13;
   }
 
   unsigned globalLoadB64() const {
@@ -1092,6 +1140,22 @@ private:
                    llvm::MCOperand::createImm(0)});
   }
 
+  LogicalResult emitGlobalAddrLoad(Operation &op, unsigned opcode) {
+    int64_t instOffset = getIntAttr(&op, "inst_offset", 0);
+    return emitMC(opcode,
+                  {toMCOperand(op.getResult(0)), toMCOperand(op.getOperand(0)),
+                   llvm::MCOperand::createImm(instOffset),
+                   llvm::MCOperand::createImm(0)});
+  }
+
+  LogicalResult emitGlobalAddrStore(Operation &op, unsigned opcode) {
+    int64_t instOffset = getIntAttr(&op, "inst_offset", 0);
+    return emitMC(opcode,
+                  {toMCOperand(op.getOperand(0)), toMCOperand(op.getOperand(1)),
+                   llvm::MCOperand::createImm(instOffset),
+                   llvm::MCOperand::createImm(0)});
+  }
+
   LogicalResult emitBufferLoad(Operation &op, unsigned opcode) {
     int64_t instOffset = getIntAttr(&op, "inst_offset", 0);
     return emitMC(opcode,
@@ -1674,6 +1738,10 @@ private:
     if (isa<waveamdmachine::VReadfirstlaneB32Op>(op))
       return emitMC(vReadfirstlaneB32(),
                     {toMCOperand(result()), toMCOperand(op.getOperand(0))});
+    if (isa<waveamdmachine::GlobalStoreB16Addr64Op>(op))
+      return emitGlobalAddrStore(op, globalStoreB16Addr64());
+    if (isa<waveamdmachine::GlobalStoreB32Addr64Op>(op))
+      return emitGlobalAddrStore(op, globalStoreB32Addr64());
     if (isa<waveamdmachine::GlobalStoreB16Op>(op))
       return emitGlobalStore(op, globalStoreB16());
     if (isa<waveamdmachine::GlobalStoreB32Op>(op))
@@ -1688,6 +1756,10 @@ private:
     //   vdst, saddr, vaddr, offset, cpol
     // -- the SADDR variants put the SGPR base first, unlike the *non*-SADDR
     // store variants we use elsewhere.
+    if (isa<waveamdmachine::GlobalLoadB16Addr64Op>(op))
+      return emitGlobalAddrLoad(op, globalLoadB16Addr64());
+    if (isa<waveamdmachine::GlobalLoadB32Addr64Op>(op))
+      return emitGlobalAddrLoad(op, globalLoadB32Addr64());
     if (isa<waveamdmachine::GlobalLoadB16Op>(op))
       return emitGlobalLoad(op, globalLoadB16());
     if (isa<waveamdmachine::GlobalLoadB32Op>(op))

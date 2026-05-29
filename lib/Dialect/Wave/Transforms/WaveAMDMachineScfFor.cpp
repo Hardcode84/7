@@ -89,17 +89,19 @@ LogicalResult snapshotScfCarries(WaveAMDMachineSelector &S, scf::ForOp op,
             "scf.for pointer iter arg has no WaveAMDMachine sidecar");
       Value flat = S.collapseTriple(op.getLoc(), offsetIt->second);
       bool isBuffer = S.pointerBuffers.lookup(initArg);
+      Value globalBase = S.pointerGlobalBases.lookup(initArg);
       // shared base is a const 0; global marches the SGPR base, buffer
       // marches soffset. LDS skipped.
       int64_t stride = !S.isSharedPointer(initArg.getType())
                            ? stridedCarryBytes(S, op, idx)
                            : 0;
       out.push_back({CarrySnapshot::Kind::Pointer, flat, baseIt->second,
-                     isBuffer, stride});
+                     globalBase, isBuffer, stride});
       continue;
     }
     out.push_back({CarrySnapshot::Kind::WMValue, S.expect(initArg, op),
-                   /*base=*/Value{}, /*isBuffer=*/false, /*strideBytes=*/0});
+                   /*base=*/Value{}, /*globalBase=*/Value{},
+                   /*isBuffer=*/false, /*strideBytes=*/0});
   }
   return success();
 }
@@ -137,7 +139,11 @@ void bindLoopBodyArgs(WaveAMDMachineSelector &S, scf::ForOp op, Block &loopBody,
     const CarrySnapshot &snap = snapshots[idx];
     if (snap.kind == CarrySnapshot::Kind::Pointer) {
       S.pointerBases[scfArg] = snap.base;
-      S.pointerOffsets[scfArg] = OffsetTriple{blockCarry, Value{}, 0};
+      if (snap.globalBase)
+        S.pointerGlobalBases[scfArg] = snap.globalBase;
+      OffsetTriple triple;
+      triple.voffset = blockCarry;
+      S.pointerOffsets[scfArg] = triple;
       S.pointerBuffers[scfArg] = snap.isBuffer;
       continue;
     }
@@ -187,6 +193,8 @@ LogicalResult collectYieldCarries(WaveAMDMachineSelector &S, scf::YieldOp yield,
       if (baseIt->second != snap.base)
         return yield.emitError(
             "scf.yield pointer carry must keep loop-invariant base");
+      if (snap.globalBase && S.pointerGlobalBases.lookup(y) != snap.globalBase)
+        return yield.emitError("scf.yield pointer carry must keep global base");
       out.push_back(S.collapseTriple(yield.getLoc(), offsetIt->second));
       continue;
     }
@@ -205,11 +213,38 @@ void bindLoopResults(WaveAMDMachineSelector &S, scf::ForOp op, Operation *loop,
     const CarrySnapshot &snap = snapshots[idx];
     if (snap.kind == CarrySnapshot::Kind::Pointer) {
       S.pointerBases[scfResult] = snap.base;
-      S.pointerOffsets[scfResult] = OffsetTriple{wmResult, Value{}, 0};
+      if (snap.globalBase)
+        S.pointerGlobalBases[scfResult] = snap.globalBase;
+      OffsetTriple triple;
+      triple.voffset = wmResult;
+      S.pointerOffsets[scfResult] = triple;
       S.pointerBuffers[scfResult] = snap.isBuffer;
       continue;
     }
     S.values[scfResult] = wmResult;
+  }
+}
+
+static void rebindStridedPointerCarries(WaveAMDMachineSelector &S,
+                                        scf::ForOp op, Block &loopBody,
+                                        ArrayRef<CarrySnapshot> snapshots) {
+  Location loc = op.getLoc();
+  for (auto [idx, snap] : llvm::enumerate(snapshots)) {
+    if (snap.kind != CarrySnapshot::Kind::Pointer || snap.strideBytes == 0)
+      continue;
+    Value scfArg = op.getRegionIterArgs()[idx];
+    Value iv = loopBody.getArgument(0);
+    if (snap.isBuffer) {
+      // soffset bucket exists on buffer ops: march there, base SRD fixed.
+      S.pointerOffsets[scfArg].soffset = S.mulUniformValues(
+          loc, iv, createImm(S.builder, loc, snap.strideBytes));
+      continue;
+    }
+    Value stridedBase =
+        recomputeStridedBase(S, loc, snap.base, iv, snap.strideBytes);
+    S.pointerBases[scfArg] = stridedBase;
+    if (snap.globalBase)
+      S.pointerGlobalBases[scfArg] = stridedBase;
   }
 }
 
@@ -248,20 +283,7 @@ LogicalResult selectScfFor(WaveAMDMachineSelector &S, scf::ForOp op) {
   // loads address through the advancing scalar base instead of a
   // per-lane voffset add. bindLoopBodyArgs already pinned the
   // loop-invariant voffset carry.
-  for (auto [idx, snap] : llvm::enumerate(snapshots)) {
-    if (snap.kind != CarrySnapshot::Kind::Pointer || snap.strideBytes == 0)
-      continue;
-    Value scfArg = op.getRegionIterArgs()[idx];
-    Value iv = loopBody.getArgument(0);
-    if (snap.isBuffer) {
-      // soffset bucket exists on buffer ops: march there, base SRD fixed.
-      S.pointerOffsets[scfArg].soffset = S.mulUniformValues(
-          loc, iv, createImm(S.builder, loc, snap.strideBytes));
-      continue;
-    }
-    S.pointerBases[scfArg] =
-        recomputeStridedBase(S, loc, snap.base, iv, snap.strideBytes);
-  }
+  rebindStridedPointerCarries(S, op, loopBody, snapshots);
   if (failed(selectScfBody(S, op)))
     return failure();
 

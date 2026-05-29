@@ -625,6 +625,34 @@ def WaveAMDMachine_GlobalLoadB32Op
   }];
 }
 
+def WaveAMDMachine_GlobalLoadB16Addr64Op
+    : WaveAMDMachine_GlobalMemoryOp<"global_load_b16_addr64", [WaveAMDMachine_VMEMLoad, MemoryEffects<[MemRead]>]> {
+  let summary = "global 16-bit load through a VGPR64 address";
+  let arguments = (ins WaveAMDMachine_VGPR2:$address,
+                       Optional<WaveAMDMachine_MemToken>:$dependency,
+                       DefaultValuedAttr<I64Attr, "0">:$inst_offset);
+  let results = (outs WaveAMDMachine_VGPR1:$result,
+                      Optional<WaveAMDMachine_MemToken>:$token);
+  let assemblyFormat = [{
+    $address (`after` $dependency^)? (`offset` $inst_offset^)?
+    attr-dict `:` functional-type(operands, results)
+  }];
+}
+
+def WaveAMDMachine_GlobalLoadB32Addr64Op
+    : WaveAMDMachine_GlobalMemoryOp<"global_load_b32_addr64", [WaveAMDMachine_VMEMLoad, MemoryEffects<[MemRead]>]> {
+  let summary = "global 32-bit load through a VGPR64 address";
+  let arguments = (ins WaveAMDMachine_VGPR2:$address,
+                       Optional<WaveAMDMachine_MemToken>:$dependency,
+                       DefaultValuedAttr<I64Attr, "0">:$inst_offset);
+  let results = (outs WaveAMDMachine_VGPR1:$result,
+                      Optional<WaveAMDMachine_MemToken>:$token);
+  let assemblyFormat = [{
+    $address (`after` $dependency^)? (`offset` $inst_offset^)?
+    attr-dict `:` functional-type(operands, results)
+  }];
+}
+
 // HW-fused multi-dword global loads. The single op corresponds 1:1 to
 // one `global_load_dwordx{2,3,4}` instruction on gfx9 (and the
 // `_b{64,96,128}` syntax on gfx11/12). Operand shape mirrors
@@ -790,6 +818,34 @@ def WaveAMDMachine_GlobalStoreB32Op
   let results = (outs Optional<WaveAMDMachine_MemToken>:$token);
   let assemblyFormat = [{
     $offset `,` $value `,` $base (`after` $dependency^)?
+    (`offset` $inst_offset^)?
+    attr-dict `:` functional-type(operands, results)
+  }];
+}
+
+def WaveAMDMachine_GlobalStoreB16Addr64Op
+    : WaveAMDMachine_GlobalMemoryOp<"global_store_b16_addr64", [WaveAMDMachine_VMEMStore, MemoryEffects<[MemWrite]>]> {
+  let summary = "global 16-bit store through a VGPR64 address";
+  let arguments = (ins WaveAMDMachine_VGPR2:$address, WaveAMDMachine_VGPR1:$value,
+                       Optional<WaveAMDMachine_MemToken>:$dependency,
+                       DefaultValuedAttr<I64Attr, "0">:$inst_offset);
+  let results = (outs Optional<WaveAMDMachine_MemToken>:$token);
+  let assemblyFormat = [{
+    $address `,` $value (`after` $dependency^)?
+    (`offset` $inst_offset^)?
+    attr-dict `:` functional-type(operands, results)
+  }];
+}
+
+def WaveAMDMachine_GlobalStoreB32Addr64Op
+    : WaveAMDMachine_GlobalMemoryOp<"global_store_b32_addr64", [WaveAMDMachine_VMEMStore, MemoryEffects<[MemWrite]>]> {
+  let summary = "global 32-bit store through a VGPR64 address";
+  let arguments = (ins WaveAMDMachine_VGPR2:$address, WaveAMDMachine_VGPR1:$value,
+                       Optional<WaveAMDMachine_MemToken>:$dependency,
+                       DefaultValuedAttr<I64Attr, "0">:$inst_offset);
+  let results = (outs Optional<WaveAMDMachine_MemToken>:$token);
+  let assemblyFormat = [{
+    $address `,` $value (`after` $dependency^)?
     (`offset` $inst_offset^)?
     attr-dict `:` functional-type(operands, results)
   }];
