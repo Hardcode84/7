@@ -113,6 +113,7 @@ private:
   llvm::AMDGPU::IsaVersion isaVersion;
   std::string targetTriple = kDefaultTargetTriple.str();
   std::string targetChip = kDefaultTargetChip.str();
+  unsigned wavefrontSize = 32;
   unsigned indent = 1;
   // Per-function counter handing out unique label suffixes for
   // structured uniform loops, reset at the start of each function.
@@ -165,6 +166,12 @@ private:
     if (isaVersion.Major == 0)
       return module.emitError("unsupported AMDGPU target: ")
              << targetTriple << "--" << targetChip;
+    std::optional<unsigned> defaultWavefrontSize =
+        waveamdmachine::getAMDGPUDefaultWavefrontSize(targetChip);
+    if (!defaultWavefrontSize)
+      return module.emitError("unsupported AMDGPU target: ")
+             << targetTriple << "--" << targetChip;
+    wavefrontSize = *defaultWavefrontSize;
     mcContext = std::make_unique<llvm::MCContext>(triple, *mai, *mri, *sti);
     unsigned asmVariant = mai->getOutputAssemblerDialect();
     instPrinter.reset(
@@ -763,7 +770,7 @@ private:
     os << "\t\t.amdhsa_kernarg_size " << kernargSize << "\n";
     os << "\t\t.amdhsa_user_sgpr_count 2\n";
     os << "\t\t.amdhsa_user_sgpr_kernarg_segment_ptr 1\n";
-    if (!isGfx8Or9()) {
+    if (!isGfx8Or9() && wavefrontSize == 32) {
       os << "\t\t.amdhsa_wavefront_size32 1\n";
       os << "\t\t.amdhsa_uses_dynamic_stack 0\n";
       os << "\t\t.amdhsa_enable_private_segment 0\n";
@@ -855,8 +862,7 @@ private:
       os << "    .uses_dynamic_stack: false\n";
       os << "    .vgpr_count:     " << kernel.vgprCount << "\n";
       os << "    .vgpr_spill_count: 0\n";
-      os << "    .wavefront_size: " << (targetChip == "gfx950" ? 64 : 32)
-         << "\n";
+      os << "    .wavefront_size: " << wavefrontSize << "\n";
       os << "    .workgroup_processor_mode: 1\n";
     }
     os << "amdhsa.target:   " << targetTriple << "--" << targetChip << "\n";

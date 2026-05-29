@@ -40,6 +40,11 @@ FailureOr<AMDGPUTarget> getAMDGPUTarget(Operation *op,
 FailureOr<llvm::AMDGPU::IsaVersion>
 getAMDGPUTargetIsaVersion(Operation *op, llvm::StringRef consumer);
 
+std::optional<unsigned> getAMDGPUDefaultWavefrontSize(llvm::StringRef chip);
+
+FailureOr<unsigned> getAMDGPUDefaultWavefrontSize(Operation *op,
+                                                  llvm::StringRef consumer);
+
 } // namespace mlir::waveamdmachine
 
 #endif // MLIR_DIALECT_WAVEAMDMACHINE_IR_WAVEAMDMACHINETARGET_H

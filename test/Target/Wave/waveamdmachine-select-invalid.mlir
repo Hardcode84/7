@@ -47,9 +47,9 @@ func.func @unsupported_packed_f32_to_f16_rounding(%x: !wave.simd<vector<2xf32>, 
 // -----
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx803"} {
-func.func @unsupported_packed_f16_target(%a: !wave.simd<vector<2xf16>, 32>, %b: !wave.simd<vector<2xf16>, 32>) {
+func.func @unsupported_packed_f16_target(%a: !wave.simd<vector<2xf16>, 64>, %b: !wave.simd<vector<2xf16>, 64>) {
   // expected-error @below {{packed f16 fadd lowering requires gfx9+}}
-  %sum = wave.fadd %a, %b : !wave.simd<vector<2xf16>, 32>, !wave.simd<vector<2xf16>, 32> -> !wave.simd<vector<2xf16>, 32>
+  %sum = wave.fadd %a, %b : !wave.simd<vector<2xf16>, 64>, !wave.simd<vector<2xf16>, 64> -> !wave.simd<vector<2xf16>, 64>
   return
 }
 }
@@ -57,9 +57,29 @@ func.func @unsupported_packed_f16_target(%a: !wave.simd<vector<2xf16>, 32>, %b: 
 // -----
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
-func.func @unsupported_packed_f32_to_f16_target(%x: !wave.simd<vector<2xf32>, 32>) {
+func.func @unsupported_packed_f32_to_f16_target(%x: !wave.simd<vector<2xf32>, 64>) {
   // expected-error @below {{packed f32 to f16 lowering requires gfx10+}}
-  %h = wave.cast fpconvert %x policy {rounding = #wave.cast_rounding<rtz>} : !wave.simd<vector<2xf32>, 32> -> !wave.simd<vector<2xf16>, 32>
+  %h = wave.cast fpconvert %x policy {rounding = #wave.cast_rounding<rtz>} : !wave.simd<vector<2xf32>, 64> -> !wave.simd<vector<2xf16>, 64>
+  return
+}
+}
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
+// expected-error @below {{WaveAMDMachine backend target gfx1100 uses wave32 but function requires wave64}}
+func.func @gfx1100_rejects_wave64(%x: i32) {
+  %v = wave.splat %x : i32 -> !wave.simd<i32, 64>
+  return
+}
+}
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx942"} {
+// expected-error @below {{WaveAMDMachine backend target gfx942 uses wave64 but function requires wave32}}
+func.func @gfx942_rejects_wave32(%x: i32) {
+  %v = wave.splat %x : i32 -> !wave.simd<i32, 32>
   return
 }
 }

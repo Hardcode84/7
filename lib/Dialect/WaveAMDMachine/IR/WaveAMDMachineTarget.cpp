@@ -73,3 +73,26 @@ mlir::waveamdmachine::getAMDGPUTargetIsaVersion(Operation *op,
            << target->triple << "--" << target->chip;
   return isa;
 }
+
+std::optional<unsigned>
+mlir::waveamdmachine::getAMDGPUDefaultWavefrontSize(StringRef chip) {
+  llvm::AMDGPU::IsaVersion isa = llvm::AMDGPU::getIsaVersion(chip);
+  if (isa.Major == 0)
+    return std::nullopt;
+  return isa.Major == 8 || isa.Major == 9 ? 64 : 32;
+}
+
+FailureOr<unsigned>
+mlir::waveamdmachine::getAMDGPUDefaultWavefrontSize(Operation *op,
+                                                    StringRef consumer) {
+  FailureOr<AMDGPUTarget> target = getAMDGPUTarget(op, consumer);
+  if (failed(target))
+    return failure();
+
+  std::optional<unsigned> wavefrontSize =
+      getAMDGPUDefaultWavefrontSize(target->chip);
+  if (!wavefrontSize)
+    return findAMDGPUTargetModule(op).emitError("unsupported AMDGPU target: ")
+           << target->triple << "--" << target->chip;
+  return *wavefrontSize;
+}

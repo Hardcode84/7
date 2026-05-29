@@ -126,9 +126,120 @@ static LogicalResult requirePackedCvtTarget(CastOp op) {
   return success();
 }
 
+static LogicalResult noteWaveWidth(Operation *diagOp,
+                                   std::optional<unsigned> &required,
+                                   unsigned width) {
+  if (width == 0)
+    return success();
+  if (!required) {
+    required = width;
+    return success();
+  }
+  if (*required == width)
+    return success();
+  return diagOp->emitError("WaveAMDMachine backend requires one wave width per "
+                           "function; saw wave")
+         << *required << " and wave" << width;
+}
+
+static LogicalResult noteTypeWaveWidth(Operation *diagOp, Type type,
+                                       std::optional<unsigned> &required) {
+  if (auto simd = dyn_cast<SimdType>(type))
+    return noteWaveWidth(diagOp, required, simd.getWidth());
+  if (auto mask = dyn_cast<MaskType>(type))
+    return noteWaveWidth(diagOp, required, mask.getWidth());
+  if (auto index = dyn_cast<WaveIndexType>(type))
+    return noteWaveWidth(diagOp, required, index.getWidth());
+  if (auto fragment = dyn_cast<waveamd::FragmentType>(type))
+    return noteWaveWidth(diagOp, required, fragment.getWaveSize());
+  if (auto tuple = dyn_cast<TupleType>(type)) {
+    for (Type element : tuple.getTypes())
+      if (failed(noteTypeWaveWidth(diagOp, element, required)))
+        return failure();
+  }
+  if (auto vector = dyn_cast<VectorType>(type))
+    return noteTypeWaveWidth(diagOp, vector.getElementType(), required);
+  return success();
+}
+
+static LogicalResult noteTypesWaveWidth(Operation *diagOp, TypeRange types,
+                                        std::optional<unsigned> &required) {
+  for (Type type : types)
+    if (failed(noteTypeWaveWidth(diagOp, type, required)))
+      return failure();
+  return success();
+}
+
+static LogicalResult
+noteRegionArgsWaveWidth(Operation *diagOp, MutableArrayRef<Region> regions,
+                        std::optional<unsigned> &required) {
+  for (Region &region : regions) {
+    for (Block &block : region) {
+      for (BlockArgument arg : block.getArguments()) {
+        if (failed(noteTypeWaveWidth(diagOp, arg.getType(), required)))
+          return failure();
+      }
+    }
+  }
+  return success();
+}
+
+static LogicalResult noteOpWaveWidth(Operation *op,
+                                     std::optional<unsigned> &required) {
+  if (failed(noteTypesWaveWidth(op, op->getOperandTypes(), required)))
+    return failure();
+  if (failed(noteTypesWaveWidth(op, op->getResultTypes(), required)))
+    return failure();
+  return noteRegionArgsWaveWidth(op, op->getRegions(), required);
+}
+
+static FailureOr<std::optional<unsigned>>
+getFunctionWaveWidth(func::FuncOp func) {
+  std::optional<unsigned> required;
+  FunctionType type = func.getFunctionType();
+  if (failed(noteTypesWaveWidth(func, type.getInputs(), required)))
+    return failure();
+  if (failed(noteTypesWaveWidth(func, type.getResults(), required)))
+    return failure();
+
+  WalkResult walk = func.walk([&](Operation *op) {
+    return failed(noteOpWaveWidth(op, required)) ? WalkResult::interrupt()
+                                                 : WalkResult::advance();
+  });
+  if (walk.wasInterrupted())
+    return failure();
+  return required;
+}
+
+static LogicalResult validateTargetWaveWidth(func::FuncOp func) {
+  if (!waveamdmachine::findAMDGPUTargetModule(func))
+    return success();
+
+  FailureOr<unsigned> targetWidth =
+      waveamdmachine::getAMDGPUDefaultWavefrontSize(func,
+                                                    "WaveAMDMachine selection");
+  if (failed(targetWidth))
+    return failure();
+
+  FailureOr<std::optional<unsigned>> required = getFunctionWaveWidth(func);
+  if (failed(required))
+    return failure();
+  if (!*required || **required == *targetWidth)
+    return success();
+  FailureOr<waveamdmachine::AMDGPUTarget> target =
+      waveamdmachine::getAMDGPUTarget(func, "WaveAMDMachine selection");
+  if (failed(target))
+    return failure();
+  return func.emitError("WaveAMDMachine backend target ")
+         << target->chip << " uses wave" << *targetWidth
+         << " but function requires wave" << **required;
+}
+
 LogicalResult WaveAMDMachineSelector::run() {
   if (!func.getBody().hasOneBlock())
     return func.emitError("WaveAMDMachine selection supports one-block funcs");
+  if (failed(validateTargetWaveWidth(func)))
+    return failure();
 
   // Run IntegerRangeAnalysis once over the wave-level body so the
   // bucketizer can convert proven ranges on `wave.index_expr`
