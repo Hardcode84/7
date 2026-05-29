@@ -1,10 +1,7 @@
 // REQUIRES: host-supports-amdgpu
 //
 // Single-file e2e: the GPU kernel lives in a `gpu.module @kernels` carrying
-// wave dialect ops; `--wave-compile-kernels` drives the wave-to-AMDGPU
-// pipeline, assembles, and links to a HSACO entirely in-process, then
-// replaces the source `gpu.module` with the corresponding `gpu.binary`. No
-// user-visible filesystem intermediates.
+// wave dialect ops; `compile_kernels` emits a HSACO-bearing `gpu.binary`.
 //
 // RUN: wave-opt %s --pass-pipeline='builtin.module(wave-set-target-attr{chip=%chip},transform-preload-library{transform-library-paths=%wave_pipelines},transform-interpreter{entry-point=compile_kernels},convert-scf-to-cf,gpu-to-llvm{use-bare-pointers-for-kernels=true},convert-to-llvm,reconcile-unrealized-casts)' \
 // RUN:   | mlir-runner \
@@ -18,8 +15,7 @@ module attributes {gpu.container_module} {
 
 gpu.module @kernels {
   // `gpu.kernel` is required by `gpu.launch_func`'s symbol verifier;
-  // `wave.kernel` is the marker `--wave-compile-kernels` watches for to
-  // pick up the func as a Wave kernel.
+  // `wave.kernel` marks funcs consumed by `compile_kernels`.
   func.func @write_lane_ids(%dst: !wave.ptr<i32, #wave.global>)
       attributes {gpu.kernel, wave.kernel} {
     %range = arith.constant 128 : i32

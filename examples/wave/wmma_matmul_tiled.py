@@ -12,17 +12,22 @@ and stores the f32 accumulator. With the all-ones fill the host can
 check the result element-wise against ``K`` (each output element is
 :math:`\\sum_{k=0}^{K-1} 1.0 \\cdot 1.0 = K`).
 
-Pipe the output through ``wave-opt --wave-compile-kernels='chip=<gfx>'`` and
-the standard host-lowering passes followed by ``mlir-runner``.
+Pipe the output through the Wave transform pipeline and the standard
+host-lowering passes followed by ``mlir-runner``.
 
 Example:
 
+    PIPELINES=build/share/wave-mlir/pipelines/pipelines.mlir
+    PASS_PIPELINE="builtin.module(\\
+    wave-set-target-attr{chip=gfx950},\\
+    transform-preload-library{transform-library-paths=${PIPELINES}},\\
+    transform-interpreter{entry-point=compile_kernels},\\
+    convert-scf-to-cf,\\
+    gpu-to-llvm{use-bare-pointers-for-kernels=true},\\
+    convert-to-llvm,\\
+    reconcile-unrealized-casts)"
     wmma_matmul_tiled.py --chip=gfx950 --m=16 --n=64 --k=32 \\
-        | wave-opt --wave-compile-kernels='chip=gfx950' \\
-            --convert-scf-to-cf \\
-            --gpu-to-llvm=use-bare-pointers-for-kernels=true \\
-            --convert-to-llvm \\
-            --reconcile-unrealized-casts \\
+        | wave-opt --pass-pipeline="${PASS_PIPELINE}" \\
         | mlir-runner --shared-libs=...
 
 Shape constraints (see :mod:`mlir.dialects.wave_matmul` for the

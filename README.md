@@ -89,12 +89,9 @@ emits AMDGPU assembly. The matmul example runs end-to-end through
 `mlir-runner` on an AMDGPU box with the ROCm runtime visible:
 
 ```bash
+PIPELINES=build/share/wave-mlir/pipelines/pipelines.mlir
 python examples/wave/wmma_matmul_tiled.py --m=64 --n=64 --k=48 --bm=2 --bn=2 --use-buffer \
-  | build/bin/wave-opt --wave-compile-kernels='chip=gfx1100' \
-                       --convert-scf-to-cf \
-                       --gpu-to-llvm=use-bare-pointers-for-kernels=true \
-                       --convert-to-llvm \
-                       --reconcile-unrealized-casts \
+  | build/bin/wave-opt --pass-pipeline="builtin.module(wave-set-target-attr{chip=gfx1100},transform-preload-library{transform-library-paths=${PIPELINES}},transform-interpreter{entry-point=compile_kernels},convert-scf-to-cf,gpu-to-llvm{use-bare-pointers-for-kernels=true},convert-to-llvm,reconcile-unrealized-casts)" \
   | build/llvm-install/bin/mlir-runner \
       --shared-libs=build/llvm-install/lib/libmlir_rocm_runtime.so \
       --shared-libs=build/llvm-install/lib/libmlir_runner_utils.so \

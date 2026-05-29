@@ -1,7 +1,7 @@
 // REQUIRES: host-supports-amdgpu-wmma
 //
 // End-to-end check for the `waveamd.mma` lowering path: compile the
-// `wmma.i32.16x16x16.iu8` kernel below to a HSACO via `--wave-compile-kernels`,
+// `wmma.i32.16x16x16.iu8` kernel below to a HSACO via `compile_kernels`,
 // launch it on the local AMDGPU, and verify the 16x16 output tile.
 //
 // The kernel fills A and B with `i8` 1s (broadcast via the 0x01010101 i32

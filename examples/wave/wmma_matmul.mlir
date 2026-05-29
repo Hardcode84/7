@@ -3,7 +3,8 @@
 // Compile the `gpu.module` below into a HSACO-carrying `gpu.binary`
 // entirely in-process:
 //
-//   wave-opt wmma_matmul.mlir --wave-compile-kernels='chip=gfx1100'
+//   wave-opt wmma_matmul.mlir \
+//       --pass-pipeline='builtin.module(wave-set-target-attr{chip=gfx1100},transform-preload-library{transform-library-paths=build/share/wave-mlir/pipelines/pipelines.mlir},transform-interpreter{entry-point=compile_kernels})'
 //
 // To inspect the AMDGPU assembly instead, replace the surrounding
 // `gpu.module @kernels { ... }` with a plain `module attributes {
