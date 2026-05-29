@@ -954,6 +954,199 @@ FailureOr<Value> WaveAMDMachineSelector::materializeGlobalAddress(
   return addWide(*this, loc, vaddr, vwide);
 }
 
+FailureOr<Value> materializePointerOffsetValue(WaveAMDMachineSelector &S,
+                                               Operation *user,
+                                               const PointerOffset &offset) {
+  if (!offset.expr)
+    return createImm(S.builder, user->getLoc(), 0);
+  llvm::StringMap<Value> subs;
+  for (const PointerOffsetBinding &binding : offset.bindings)
+    subs[binding.name] = S.expect(binding.value, user);
+  return materializeIndexExprNode(S, offset.expr.raw(), user, subs);
+}
+
+FailureOr<Value> materializePointerOffsetVGPR(WaveAMDMachineSelector &S,
+                                              Operation *user,
+                                              const PointerOffset &offset) {
+  FailureOr<Value> value = materializePointerOffsetValue(S, user, offset);
+  if (failed(value))
+    return failure();
+  return S.ensureVGPRForVSrc1(user->getLoc(), *value);
+}
+
+namespace {
+
+struct AddressPlanBindings {
+  llvm::StringMap<Value> narrow;
+  SmallVector<std::pair<std::string, Value>, 4> wide;
+};
+
+static AddressPlanBindings
+materializeAddressPlanBindings(WaveAMDMachineSelector &S, Operation *user,
+                               const AddressPlan &plan) {
+  AddressPlanBindings out;
+  for (const PointerOffsetBinding &binding : plan.bindings) {
+    Value mapped = S.expect(binding.value, user);
+    out.narrow[binding.name] = mapped;
+    out.wide.push_back({binding.name, mapped});
+  }
+  return out;
+}
+
+static FailureOr<sym::ExprHandle>
+appendAddressExpr(WaveAMDMachineSelector &S, sym::ExprHandle lhs,
+                  sym::ExprHandle rhs, ArrayRef<sym::PredHandle> assumptions) {
+  if (!lhs)
+    return rhs;
+  if (!rhs)
+    return lhs;
+  FailureOr<sym::ExprHandle> expr =
+      sym::composeExprBinary(S.symbolStore(), lhs, sym::ExprBinaryOp::Add, rhs);
+  if (failed(expr))
+    return failure();
+  FailureOr<sym::ExprHandle> simplified =
+      sym::simplifyExpr(S.symbolStore(), *expr, assumptions);
+  return succeeded(simplified) ? *simplified : *expr;
+}
+
+static TermKind classifyPlanExpr(WaveAMDMachineSelector &S,
+                                 const AddressPlan &plan,
+                                 sym::ExprHandle expr) {
+  llvm::StringMap<TermKind> symKinds;
+  for (const PointerOffsetBinding &binding : plan.bindings)
+    symKinds[binding.name] = binding.kind;
+  return classifyTerm(S, const_cast<::ixs_node *>(expr.raw()), symKinds);
+}
+
+static FailureOr<bool> tryAppendRemainderToSlot(WaveAMDMachineSelector &S,
+                                                AddressPlan &plan,
+                                                sym::ExprHandle &slot) {
+  FailureOr<sym::ExprHandle> joined = appendAddressExpr(
+      S, slot, plan.fullAddressRemainderExpr, plan.assumptions);
+  if (failed(joined))
+    return failure();
+  if (!S.slotFitsU32(joined->raw(), plan.assumptions))
+    return false;
+  slot = *joined;
+  plan.fullAddressRemainderExpr = {};
+  return true;
+}
+
+static LogicalResult
+demotePlanRemainderToFields(WaveAMDMachineSelector &S, AddressPlan &plan,
+                            const waveamdmachine::AddressFieldSpec &spec) {
+  if (!plan.fullAddressRemainderExpr)
+    return success();
+  TermKind remainderKind =
+      classifyPlanExpr(S, plan, plan.fullAddressRemainderExpr);
+  if (spec.hasSoffset && remainderKind != TermKind::Lane) {
+    FailureOr<bool> tookSoffset =
+        tryAppendRemainderToSlot(S, plan, plan.soffsetExpr);
+    if (failed(tookSoffset))
+      return failure();
+    if (*tookSoffset)
+      return success();
+  }
+  FailureOr<bool> tookVoffset =
+      tryAppendRemainderToSlot(S, plan, plan.voffsetExpr);
+  return failed(tookVoffset) ? failure() : success();
+}
+
+static FailureOr<Value>
+materializePlanExpr(WaveAMDMachineSelector &S, Operation *user,
+                    sym::ExprHandle expr, const AddressPlanBindings &bindings) {
+  return materializeIndexExprNode(S, expr.raw(), user, bindings.narrow);
+}
+
+static FailureOr<sym::ExprHandle>
+planCompleteAddressExpr(WaveAMDMachineSelector &S, const AddressPlan &plan) {
+  sym::ExprHandle expr = plan.fullAddressRemainderExpr;
+  if (plan.instOffset != 0) {
+    FailureOr<sym::ExprHandle> inst =
+        sym::composeExprInt(S.symbolStore(), plan.instOffset);
+    if (failed(inst))
+      return failure();
+    FailureOr<sym::ExprHandle> withInst =
+        appendAddressExpr(S, expr, *inst, plan.assumptions);
+    if (failed(withInst))
+      return failure();
+    expr = *withInst;
+  }
+  FailureOr<sym::ExprHandle> withVoffset =
+      appendAddressExpr(S, expr, plan.voffsetExpr, plan.assumptions);
+  if (failed(withVoffset))
+    return failure();
+  return appendAddressExpr(S, *withVoffset, plan.soffsetExpr, plan.assumptions);
+}
+
+} // namespace
+
+FailureOr<AddressPlan>
+planMemoryAddress(WaveAMDMachineSelector &S, Operation *user,
+                  const PointerOffset &offset,
+                  const waveamdmachine::AddressFieldSpec &spec) {
+  FailureOr<AddressPlan> plan = planAddressFields(S, offset, spec);
+  if (failed(plan))
+    return user->emitError("failed to plan memory address fields");
+  if (failed(demotePlanRemainderToFields(S, *plan, spec)))
+    return user->emitError("failed to demote memory address remainder");
+  return *plan;
+}
+
+FailureOr<WaveAMDMachineSelector::BucketedOperands>
+materializePlanBuckets(WaveAMDMachineSelector &S, Operation *user,
+                       const AddressPlan &plan,
+                       const waveamdmachine::AddressFieldSpec &spec) {
+  AddressPlanBindings bindings = materializeAddressPlanBindings(S, user, plan);
+  WaveAMDMachineSelector::BucketedOperands out;
+  Value vraw;
+  if (plan.voffsetExpr) {
+    FailureOr<Value> voffset =
+        materializePlanExpr(S, user, plan.voffsetExpr, bindings);
+    if (failed(voffset))
+      return failure();
+    vraw = *voffset;
+  } else {
+    vraw = createImm(S.builder, user->getLoc(), 0);
+  }
+  out.voffset = S.ensureVGPRForVSrc1(user->getLoc(), vraw);
+  if (spec.hasSoffset) {
+    if (plan.soffsetExpr) {
+      FailureOr<Value> soffset =
+          materializePlanExpr(S, user, plan.soffsetExpr, bindings);
+      if (failed(soffset))
+        return failure();
+      out.soffset = S.ensureSGPR1(user->getLoc(), *soffset);
+    } else {
+      out.soffset = createImm(S.builder, user->getLoc(), 0);
+    }
+  }
+  out.instOffset = plan.instOffset;
+  return out;
+}
+
+FailureOr<Value> materializeFullPlanAddress(WaveAMDMachineSelector &S,
+                                            Operation *user, Value base,
+                                            const AddressPlan &plan) {
+  AddressPlanBindings bindings = materializeAddressPlanBindings(S, user, plan);
+  FailureOr<sym::ExprHandle> expr = planCompleteAddressExpr(S, plan);
+  if (failed(expr))
+    return failure();
+  Value addr = base;
+  if (*expr) {
+    FailureOr<Value> offset =
+        materializeWideIndexExprNode(S, expr->raw(), user, bindings.wide);
+    if (failed(offset))
+      return failure();
+    if (isWideVGPR(*offset))
+      addr = addWide(S, user->getLoc(),
+                     sgprPairToVGPRPair(S, user->getLoc(), addr), *offset);
+    else
+      addr = addWide(S, user->getLoc(), addr, *offset);
+  }
+  return isWideVGPR(addr) ? addr : sgprPairToVGPRPair(S, user->getLoc(), addr);
+}
+
 // Build the `offset` attribute list for a bucketed emit. Empty
 // when the inst_offset is zero so the printer continues to elide
 // the `offset 0` clause.

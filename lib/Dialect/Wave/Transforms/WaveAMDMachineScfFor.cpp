@@ -52,21 +52,6 @@ static FailureOr<PointerOffset> makeSymbolicCarry(WaveAMDMachineSelector &S,
   return offset;
 }
 
-static FailureOr<Value> materializePointerCarry(WaveAMDMachineSelector &S,
-                                                Operation *user,
-                                                const PointerOffset &offset) {
-  if (!offset.expr)
-    return createImm(S.builder, user->getLoc(), 0);
-  llvm::StringMap<Value> subs;
-  for (const PointerOffsetBinding &binding : offset.bindings)
-    subs[binding.name] = S.expect(binding.value, user);
-  FailureOr<Value> value =
-      materializeIndexExprNode(S, offset.expr.raw(), user, subs);
-  if (failed(value))
-    return failure();
-  return S.ensureVGPRForVSrc1(user->getLoc(), *value);
-}
-
 static LogicalResult addSymbolicStride(WaveAMDMachineSelector &S,
                                        PointerOffset &offset, Value strideValue,
                                        StringRef name) {
@@ -149,7 +134,8 @@ LogicalResult snapshotScfCarries(WaveAMDMachineSelector &S, scf::ForOp op,
       Value flat;
       if (auto symIt = S.pointerIndexOffsets.find(initArg);
           symIt != S.pointerIndexOffsets.end()) {
-        FailureOr<Value> carry = materializePointerCarry(S, op, symIt->second);
+        FailureOr<Value> carry =
+            materializePointerOffsetVGPR(S, op, symIt->second);
         if (failed(carry))
           return failure();
         flat = *carry;
@@ -274,7 +260,8 @@ static LogicalResult collectPointerYieldCarry(WaveAMDMachineSelector &S,
     return yield.emitError("scf.yield pointer carry must keep global base");
   if (auto symIt = S.pointerIndexOffsets.find(y);
       symIt != S.pointerIndexOffsets.end()) {
-    FailureOr<Value> carry = materializePointerCarry(S, yield, symIt->second);
+    FailureOr<Value> carry =
+        materializePointerOffsetVGPR(S, yield, symIt->second);
     if (failed(carry))
       return failure();
     out.push_back(*carry);

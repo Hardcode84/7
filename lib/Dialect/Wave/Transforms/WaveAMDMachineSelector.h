@@ -201,6 +201,23 @@ FailureOr<AddressPlan>
 planAddressFields(WaveAMDMachineSelector &S, const PointerOffset &offset,
                   const mlir::waveamdmachine::AddressFieldSpec &spec);
 
+FailureOr<Value> materializePointerOffsetValue(WaveAMDMachineSelector &S,
+                                               Operation *user,
+                                               const PointerOffset &offset);
+
+FailureOr<Value> materializePointerOffsetVGPR(WaveAMDMachineSelector &S,
+                                              Operation *user,
+                                              const PointerOffset &offset);
+
+FailureOr<AddressPlan>
+planMemoryAddress(WaveAMDMachineSelector &S, Operation *user,
+                  const PointerOffset &offset,
+                  const mlir::waveamdmachine::AddressFieldSpec &spec);
+
+FailureOr<Value> materializeFullPlanAddress(WaveAMDMachineSelector &S,
+                                            Operation *user, Value base,
+                                            const AddressPlan &plan);
+
 LogicalResult bucketize(WaveAMDMachineSelector &S, ::ixs_node *node,
                         Operation *user, const llvm::StringMap<Value> &subs,
                         const llvm::StringMap<TermKind> &symKinds,
@@ -363,6 +380,11 @@ public:
   LogicalResult selectDmaLoadLds(waveamd::DmaLoadLdsOp op);
   LogicalResult selectReturn(func::ReturnOp op);
 };
+
+FailureOr<WaveAMDMachineSelector::BucketedOperands>
+materializePlanBuckets(WaveAMDMachineSelector &S, Operation *user,
+                       const AddressPlan &plan,
+                       const mlir::waveamdmachine::AddressFieldSpec &spec);
 
 } // namespace mlir::wave::wmsel
 
