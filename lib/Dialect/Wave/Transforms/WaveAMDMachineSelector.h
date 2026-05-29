@@ -218,6 +218,7 @@ public:
   DenseMap<Value, bool> pointerBuffers;
   SmallVector<Operation *> opsToErase;
   DataFlowSolver rangeSolver;
+  std::optional<unsigned> targetIsaMajor;
   unsigned nextLabel = 0;
 
   // ---- bucketizer helpers (kept here so out-of-TU callers can use them) --

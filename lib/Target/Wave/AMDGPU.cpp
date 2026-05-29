@@ -336,10 +336,6 @@ private:
     return isGfx8Or9() ? llvm::AMDGPU::V_READFIRSTLANE_B32_vi
                        : llvm::AMDGPU::V_READFIRSTLANE_B32_gfx11;
   }
-  unsigned vAddU32() const {
-    return isGfx8Or9() ? llvm::AMDGPU::V_ADD_CO_U32_e32_gfx9
-                       : llvm::AMDGPU::V_ADD_NC_U32_e32_gfx11;
-  }
   unsigned vMulLoU32() const {
     return isGfx8Or9() ? llvm::AMDGPU::V_MUL_LO_U32_vi
                        : llvm::AMDGPU::V_MUL_LO_U32_e64_gfx11;
@@ -1205,8 +1201,24 @@ private:
   }
 
   LogicalResult emitVAddU32(llvm::MCOperand dst, llvm::MCOperand lhs,
-                            llvm::MCOperand rhs) {
-    return emitMC(vAddU32(), {dst, lhs, rhs});
+                            llvm::MCOperand rhs, Operation &op) {
+    if (isaVersion.Major == 8)
+      return op.emitError("v_add_u32 without VCC result unsupported on gfx8");
+    if (isaVersion.Major == 9)
+      return emitMC(llvm::AMDGPU::V_ADD_U32_e32_gfx9, {dst, lhs, rhs});
+    return emitMC(llvm::AMDGPU::V_ADD_NC_U32_e32_gfx11, {dst, lhs, rhs});
+  }
+
+  LogicalResult emitVAddU32Vcc(llvm::MCOperand dst, llvm::MCOperand lhs,
+                               llvm::MCOperand rhs) {
+    if (isaVersion.Major == 8)
+      return emitMC(llvm::AMDGPU::V_ADD_U32_e32_vi, {dst, lhs, rhs});
+    if (isaVersion.Major == 9)
+      return emitMC(llvm::AMDGPU::V_ADD_CO_U32_e32_gfx9, {dst, lhs, rhs});
+    llvm::MCOperand vccLo = llvm::MCOperand::createReg(namedPhysReg("vcc_lo"));
+    llvm::MCOperand clamp = llvm::MCOperand::createImm(0);
+    return emitMC(llvm::AMDGPU::V_ADD_CO_U32_e64_gfx11,
+                  {dst, vccLo, lhs, rhs, clamp});
   }
 
   LogicalResult emitVMulLoU32(Operation &op, Value dst, Value lhs, Value rhs) {
@@ -1379,7 +1391,15 @@ private:
       if (isSGPR(rhs))
         std::swap(lhs, rhs);
       return emitVAddU32(toMCOperand(result()), toMCOperand(lhs),
-                         toMCOperand(rhs));
+                         toMCOperand(rhs), op);
+    }
+    if (isa<waveamdmachine::VAddU32VccOp>(op)) {
+      Value lhs = op.getOperand(0);
+      Value rhs = op.getOperand(1);
+      if (isSGPR(rhs))
+        std::swap(lhs, rhs);
+      return emitVAddU32Vcc(toMCOperand(result()), toMCOperand(lhs),
+                            toMCOperand(rhs));
     }
     if (isa<waveamdmachine::VAndB32Op, waveamdmachine::VOrB32Op,
             waveamdmachine::VXorB32Op>(op)) {
@@ -1465,22 +1485,40 @@ private:
         return op.emitError("v_pk_fma_f16 requires gfx9+");
       return emitPackedTernary(vPkFmaF16(), op);
     }
-    if (isa<waveamdmachine::VCmpEqU32Op, waveamdmachine::VCmpNeU32Op,
-            waveamdmachine::VCmpLtU32Op, waveamdmachine::VCmpLeU32Op,
-            waveamdmachine::VCmpGtU32Op, waveamdmachine::VCmpGeU32Op>(op)) {
-      unsigned opcode = isa<waveamdmachine::VCmpEqU32Op>(op)   ? vCmpEqU32()
-                        : isa<waveamdmachine::VCmpNeU32Op>(op) ? vCmpNeU32()
-                        : isa<waveamdmachine::VCmpLtU32Op>(op) ? vCmpLtU32()
-                        : isa<waveamdmachine::VCmpLeU32Op>(op) ? vCmpLeU32()
-                        : isa<waveamdmachine::VCmpGtU32Op>(op) ? vCmpGtU32()
-                                                               : vCmpGeU32();
+    if (isa<waveamdmachine::VCmpEqU32Op, waveamdmachine::VCmpEqU32VccOp,
+            waveamdmachine::VCmpNeU32Op, waveamdmachine::VCmpNeU32VccOp,
+            waveamdmachine::VCmpLtU32Op, waveamdmachine::VCmpLtU32VccOp,
+            waveamdmachine::VCmpLeU32Op, waveamdmachine::VCmpLeU32VccOp,
+            waveamdmachine::VCmpGtU32Op, waveamdmachine::VCmpGtU32VccOp,
+            waveamdmachine::VCmpGeU32Op, waveamdmachine::VCmpGeU32VccOp>(op)) {
+      unsigned opcode =
+          isa<waveamdmachine::VCmpEqU32Op, waveamdmachine::VCmpEqU32VccOp>(op)
+              ? vCmpEqU32()
+          : isa<waveamdmachine::VCmpNeU32Op, waveamdmachine::VCmpNeU32VccOp>(op)
+              ? vCmpNeU32()
+          : isa<waveamdmachine::VCmpLtU32Op, waveamdmachine::VCmpLtU32VccOp>(op)
+              ? vCmpLtU32()
+          : isa<waveamdmachine::VCmpLeU32Op, waveamdmachine::VCmpLeU32VccOp>(op)
+              ? vCmpLeU32()
+          : isa<waveamdmachine::VCmpGtU32Op, waveamdmachine::VCmpGtU32VccOp>(op)
+              ? vCmpGtU32()
+              : vCmpGeU32();
+      bool writesVcc =
+          isa<waveamdmachine::VCmpEqU32VccOp, waveamdmachine::VCmpNeU32VccOp,
+              waveamdmachine::VCmpLtU32VccOp, waveamdmachine::VCmpLeU32VccOp,
+              waveamdmachine::VCmpGtU32VccOp, waveamdmachine::VCmpGeU32VccOp>(
+              op);
+      if (isGfx8Or9() && !writesVcc)
+        return op.emitError(
+            "v_cmp_*_u32 without VCC result unsupported on gfx8/9");
       llvm::MCOperand dst =
-          isGfx8Or9() ? llvm::MCOperand::createReg(namedPhysReg("vcc"))
-                      : toMCOperand(result());
+          writesVcc ? llvm::MCOperand::createReg(
+                          namedPhysReg(wavefrontSize == 32 ? "vcc_lo" : "vcc"))
+                    : toMCOperand(result());
       if (failed(emitMC(opcode, {dst, toMCOperand(op.getOperand(0)),
                                  toMCOperand(op.getOperand(1))})))
         return failure();
-      if (!isGfx8Or9())
+      if (!writesVcc)
         return success();
       return emitMC(sMovB32(),
                     {toMCOperand(result()),
@@ -1621,14 +1659,14 @@ private:
                         {toMCOperand(scratch), toMCVGPRComponent(lhs, 0),
                          toMCVGPRComponent(rhs, 1)})) ||
           failed(emitVAddU32(toMCVGPRComponent(res, 1),
-                             toMCVGPRComponent(res, 1),
-                             toMCOperand(scratch))) ||
+                             toMCVGPRComponent(res, 1), toMCOperand(scratch),
+                             op)) ||
           failed(emitMC(llvm::AMDGPU::V_MUL_LO_U32_e64_gfx11,
                         {toMCOperand(scratch), toMCVGPRComponent(lhs, 1),
                          toMCVGPRComponent(rhs, 0)})))
         return failure();
       return emitVAddU32(toMCVGPRComponent(res, 1), toMCVGPRComponent(res, 1),
-                         toMCOperand(scratch));
+                         toMCOperand(scratch), op);
     }
     if (isa<waveamdmachine::SLshlB64Op>(op))
       // Hardware reads only the low 32 bits of the shift amount; pass

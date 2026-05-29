@@ -396,6 +396,14 @@ def WaveAMDMachine_TupleFromElementsOp
 def WaveAMDMachine_VAddU32Op
     : WaveAMDMachine_BinaryResult<"v_add_u32", WaveAMDMachine_RegOrImm,
                                WaveAMDMachine_VGPR1, [WaveAMDMachine_VALU]>;
+def WaveAMDMachine_VAddU32VccOp
+    : WaveAMDMachine_Op<"v_add_u32_vcc", [WaveAMDMachine_VALU, Pure]> {
+  let summary = "vector 32-bit add (sets VCC)";
+  let arguments = (ins WaveAMDMachine_RegOrImm:$lhs,
+                       WaveAMDMachine_RegOrImm:$rhs);
+  let results = (outs WaveAMDMachine_VGPR1:$result, WaveAMDMachine_VCC:$vcc);
+  let assemblyFormat = "$lhs `,` $rhs attr-dict `:` functional-type(operands, results)";
+}
 def WaveAMDMachine_VAndB32Op
     : WaveAMDMachine_BinaryResult<"v_and_b32", WaveAMDMachine_RegOrImm,
                                WaveAMDMachine_VGPR1, [WaveAMDMachine_VALU]>;
@@ -455,24 +463,43 @@ def WaveAMDMachine_VPkMulF16Op
     : WaveAMDMachine_PackedBinaryResult<"v_pk_mul_f16">;
 def WaveAMDMachine_VPkFmaF16Op
     : WaveAMDMachine_PackedTernaryResult<"v_pk_fma_f16">;
+class WaveAMDMachine_VCmpU32Vcc<string mnemonic>
+    : WaveAMDMachine_Op<mnemonic, [WaveAMDMachine_VALU, Pure]> {
+  let arguments = (ins WaveAMDMachine_RegOrImm:$lhs,
+                       WaveAMDMachine_RegOrImm:$rhs);
+  let results = (outs WaveAMDMachine_SGPR1:$result, WaveAMDMachine_VCC:$vcc);
+  let assemblyFormat = "$lhs `,` $rhs attr-dict `:` functional-type(operands, results)";
+}
 def WaveAMDMachine_VCmpEqU32Op
     : WaveAMDMachine_BinaryResult<"v_cmp_eq_u32", WaveAMDMachine_RegOrImm,
                                WaveAMDMachine_SGPR1, [WaveAMDMachine_VALU]>;
+def WaveAMDMachine_VCmpEqU32VccOp
+    : WaveAMDMachine_VCmpU32Vcc<"v_cmp_eq_u32_vcc">;
 def WaveAMDMachine_VCmpNeU32Op
     : WaveAMDMachine_BinaryResult<"v_cmp_ne_u32", WaveAMDMachine_RegOrImm,
                                WaveAMDMachine_SGPR1, [WaveAMDMachine_VALU]>;
+def WaveAMDMachine_VCmpNeU32VccOp
+    : WaveAMDMachine_VCmpU32Vcc<"v_cmp_ne_u32_vcc">;
 def WaveAMDMachine_VCmpLtU32Op
     : WaveAMDMachine_BinaryResult<"v_cmp_lt_u32", WaveAMDMachine_RegOrImm,
                                WaveAMDMachine_SGPR1, [WaveAMDMachine_VALU]>;
+def WaveAMDMachine_VCmpLtU32VccOp
+    : WaveAMDMachine_VCmpU32Vcc<"v_cmp_lt_u32_vcc">;
 def WaveAMDMachine_VCmpLeU32Op
     : WaveAMDMachine_BinaryResult<"v_cmp_le_u32", WaveAMDMachine_RegOrImm,
                                WaveAMDMachine_SGPR1, [WaveAMDMachine_VALU]>;
+def WaveAMDMachine_VCmpLeU32VccOp
+    : WaveAMDMachine_VCmpU32Vcc<"v_cmp_le_u32_vcc">;
 def WaveAMDMachine_VCmpGtU32Op
     : WaveAMDMachine_BinaryResult<"v_cmp_gt_u32", WaveAMDMachine_RegOrImm,
                                WaveAMDMachine_SGPR1, [WaveAMDMachine_VALU]>;
+def WaveAMDMachine_VCmpGtU32VccOp
+    : WaveAMDMachine_VCmpU32Vcc<"v_cmp_gt_u32_vcc">;
 def WaveAMDMachine_VCmpGeU32Op
     : WaveAMDMachine_BinaryResult<"v_cmp_ge_u32", WaveAMDMachine_RegOrImm,
                                WaveAMDMachine_SGPR1, [WaveAMDMachine_VALU]>;
+def WaveAMDMachine_VCmpGeU32VccOp
+    : WaveAMDMachine_VCmpU32Vcc<"v_cmp_ge_u32_vcc">;
 def WaveAMDMachine_VReadfirstlaneB32Op
     : WaveAMDMachine_UnaryResult<"v_readfirstlane_b32", WaveAMDMachine_VGPR1,
                               WaveAMDMachine_SGPR1, [WaveAMDMachine_VALU, Pure]>;
@@ -581,11 +608,21 @@ def WaveAMDMachine_SSetprioOp : WaveAMDMachine_UnaryNoResult<"s_setprio",
                                                              WaveAMDMachine_Imm>;
 def WaveAMDMachine_SDelayAluOp : WaveAMDMachine_UnaryNoResult<"s_delay_alu",
                                                          WaveAMDMachine_Imm>;
-def WaveAMDMachine_SAndSaveexecB32Op
-    : WaveAMDMachine_UnaryResult<"s_and_saveexec_b32", WaveAMDMachine_SGPR1,
-                              WaveAMDMachine_SGPR1>;
-def WaveAMDMachine_SAndn2ExecB32Op
-    : WaveAMDMachine_BinaryNoResult<"s_andn2_exec_b32", WaveAMDMachine_SGPR1>;
+def WaveAMDMachine_SAndSaveexecB32Op : WaveAMDMachine_Op<"s_and_saveexec_b32"> {
+  let summary = "save EXEC, mask EXEC, and set SCC";
+  let arguments = (ins WaveAMDMachine_SGPR1:$mask);
+  let results = (outs
+    WaveAMDMachine_SGPR1:$saved_exec,
+    WaveAMDMachine_SCC:$scc
+  );
+  let assemblyFormat = "$mask attr-dict `:` functional-type(operands, results)";
+}
+def WaveAMDMachine_SAndn2ExecB32Op : WaveAMDMachine_Op<"s_andn2_exec_b32"> {
+  let summary = "set EXEC to lhs & ~rhs and set SCC";
+  let arguments = (ins WaveAMDMachine_SGPR1:$lhs, WaveAMDMachine_SGPR1:$rhs);
+  let results = (outs WaveAMDMachine_SCC:$scc);
+  let assemblyFormat = "$lhs `,` $rhs attr-dict `:` functional-type(operands, results)";
+}
 def WaveAMDMachine_SCBranchExeczOp : WaveAMDMachine_ZeroResult<"s_cbranch_execz"> {
   let arguments = (ins StrAttr:$label);
   let assemblyFormat = "$label attr-dict";
@@ -1523,9 +1560,9 @@ def WaveAMDMachine_VMulU64Op : WaveAMDMachine_Op<"v_mul_u64", [Pure]> {
 // `wave.shli`'s "operands have the same type" rule -- the printer
 // extracts the low 32 bits since that's what the hardware reads.
 def WaveAMDMachine_SLshlB64Op : WaveAMDMachine_Op<"s_lshl_b64", [Pure]> {
-  let summary = "scalar 64-bit logical left shift";
+  let summary = "scalar 64-bit logical left shift (sets SCC)";
   let arguments = (ins WaveAMDMachine_SGPR2:$lhs, WaveAMDMachine_SGPR2:$shift);
-  let results = (outs WaveAMDMachine_SGPR2:$result);
+  let results = (outs WaveAMDMachine_SGPR2:$result, WaveAMDMachine_SCC:$scc);
   let assemblyFormat = "$lhs `,` $shift attr-dict `:` functional-type(operands, results)";
 }
 

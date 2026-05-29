@@ -48,6 +48,68 @@ func.func @overlapping_scc_live_range(%a: !waveamdmachine.reg<sgpr, 1>,
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
+func.func @overlapping_scc_live_range_s_lshl_b64(%a: !waveamdmachine.reg<sgpr, 2>,
+                                                 %shift: !waveamdmachine.reg<sgpr, 2>,
+                                                 %x: !waveamdmachine.reg<sgpr, 1>,
+                                                 %y: !waveamdmachine.reg<sgpr, 1>) {
+  %scc = waveamdmachine.s_cmp_lt_i32 %x, %y
+      : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<sgpr, 1>)
+        -> !waveamdmachine.reg<scc, 1>
+  // expected-error @below {{overlapping SCC live range needs flag spill support}}
+  %shifted, %shift_scc = waveamdmachine.s_lshl_b64 %a, %shift
+      : (!waveamdmachine.reg<sgpr, 2>, !waveamdmachine.reg<sgpr, 2>)
+        -> (!waveamdmachine.reg<sgpr, 2>, !waveamdmachine.reg<scc, 1>)
+  waveamdmachine.s_cbranch_scc1 %scc : !waveamdmachine.reg<scc, 1>, "taken"
+  return
+}
+
+}
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
+
+func.func @overlapping_scc_live_range_saveexec(%mask: !waveamdmachine.reg<sgpr, 1>,
+                                               %x: !waveamdmachine.reg<sgpr, 1>,
+                                               %y: !waveamdmachine.reg<sgpr, 1>) {
+  %scc = waveamdmachine.s_cmp_lt_i32 %x, %y
+      : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<sgpr, 1>)
+        -> !waveamdmachine.reg<scc, 1>
+  // expected-error @below {{overlapping SCC live range needs flag spill support}}
+  %saved, %save_scc = waveamdmachine.s_and_saveexec_b32 %mask
+      : (!waveamdmachine.reg<sgpr, 1>)
+        -> (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<scc, 1>)
+  waveamdmachine.s_cbranch_scc1 %scc : !waveamdmachine.reg<scc, 1>, "taken"
+  return
+}
+
+}
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
+
+func.func @overlapping_scc_live_range_andn2_exec(%saved: !waveamdmachine.reg<sgpr, 1>,
+                                                 %mask: !waveamdmachine.reg<sgpr, 1>,
+                                                 %x: !waveamdmachine.reg<sgpr, 1>,
+                                                 %y: !waveamdmachine.reg<sgpr, 1>) {
+  %scc = waveamdmachine.s_cmp_lt_i32 %x, %y
+      : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<sgpr, 1>)
+        -> !waveamdmachine.reg<scc, 1>
+  // expected-error @below {{overlapping SCC live range needs flag spill support}}
+  %exec_scc = waveamdmachine.s_andn2_exec_b32 %saved, %mask
+      : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<sgpr, 1>)
+        -> !waveamdmachine.reg<scc, 1>
+  waveamdmachine.s_cbranch_scc1 %scc : !waveamdmachine.reg<scc, 1>, "taken"
+  return
+}
+
+}
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
+
 func.func @overlapping_vcc_live_range(%a: !waveamdmachine.reg<vgpr, 2>,
                                       %b: !waveamdmachine.reg<vgpr, 2>,
                                       %c: !waveamdmachine.reg<vgpr, 2>,
@@ -60,6 +122,48 @@ func.func @overlapping_vcc_live_range(%a: !waveamdmachine.reg<vgpr, 2>,
   %sum1, %vcc1 = waveamdmachine.v_add_u64 %c, %d
       : (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vgpr, 2>)
         -> (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vcc, 1>)
+  return %vcc0 : !waveamdmachine.reg<vcc, 1>
+}
+
+}
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
+
+func.func @overlapping_vcc_live_range_v_add_u32_vcc(%a: !waveamdmachine.reg<vgpr, 2>,
+                                                    %b: !waveamdmachine.reg<vgpr, 2>,
+                                                    %c: !waveamdmachine.reg<vgpr, 1>,
+                                                    %d: !waveamdmachine.reg<vgpr, 1>)
+    -> !waveamdmachine.reg<vcc, 1> {
+  %sum0, %vcc0 = waveamdmachine.v_add_u64 %a, %b
+      : (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vgpr, 2>)
+        -> (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vcc, 1>)
+  // expected-error @below {{overlapping VCC live range needs flag spill support}}
+  %sum1, %vcc1 = waveamdmachine.v_add_u32_vcc %c, %d
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vcc, 1>)
+  return %vcc0 : !waveamdmachine.reg<vcc, 1>
+}
+
+}
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
+
+func.func @overlapping_vcc_live_range_v_cmp_u32_vcc(%a: !waveamdmachine.reg<vgpr, 2>,
+                                                    %b: !waveamdmachine.reg<vgpr, 2>,
+                                                    %c: !waveamdmachine.reg<vgpr, 1>,
+                                                    %d: !waveamdmachine.reg<vgpr, 1>)
+    -> !waveamdmachine.reg<vcc, 1> {
+  %sum0, %vcc0 = waveamdmachine.v_add_u64 %a, %b
+      : (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vgpr, 2>)
+        -> (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vcc, 1>)
+  // expected-error @below {{overlapping VCC live range needs flag spill support}}
+  %mask, %vcc1 = waveamdmachine.v_cmp_lt_u32_vcc %c, %d
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<vcc, 1>)
   return %vcc0 : !waveamdmachine.reg<vcc, 1>
 }
 

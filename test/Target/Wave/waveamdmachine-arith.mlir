@@ -98,7 +98,7 @@ func.func @simd_i64_mul(%a: !wave.simd<i64, 32>, %b: !wave.simd<i64, 32>) attrib
 // operand is allocated as a 2-wide SGPR even though the hardware only
 // reads the low 32 bits; the asm printer extracts the low component.
 // SELECT-LABEL: func.func @uniform_i64_shl
-// SELECT: waveamdmachine.s_lshl_b64 {{.*}} : (!waveamdmachine.reg<sgpr, 2>, !waveamdmachine.reg<sgpr, 2>) -> !waveamdmachine.reg<sgpr, 2>
+// SELECT: waveamdmachine.s_lshl_b64 {{.*}} : (!waveamdmachine.reg<sgpr, 2>, !waveamdmachine.reg<sgpr, 2>) -> (!waveamdmachine.reg<sgpr, 2>, !waveamdmachine.reg<scc, 1>)
 func.func @uniform_i64_shl() attributes {wave.kernel} {
   %a = arith.constant 5 : i64
   %b = arith.constant 3 : i64
@@ -112,6 +112,21 @@ func.func @uniform_i64_shl() attributes {wave.kernel} {
 // SELECT: waveamdmachine.v_lshlrev_b64 {{.*}} : (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vgpr, 2>) -> !waveamdmachine.reg<vgpr, 2>
 func.func @simd_i64_shl(%a: !wave.simd<i64, 32>, %b: !wave.simd<i64, 32>) attributes {wave.kernel} {
   %s = wave.shli %a, %b : !wave.simd<i64, 32>, !wave.simd<i64, 32> -> !wave.simd<i64, 32>
+  return
+}
+
+}
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx803"} {
+
+// gfx8 v_add_u32 writes VCC; keep that clobber explicit in machine IR.
+// SELECT-LABEL: func.func @gfx8_simd_i32_addi
+// SELECT: waveamdmachine.v_add_u32_vcc {{.*}} : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>) -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vcc, 1>)
+func.func @gfx8_simd_i32_addi(%a: !wave.simd<i32, 64>,
+                              %b: !wave.simd<i32, 64>) attributes {wave.kernel} {
+  %sum = wave.addi %a, %b : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
   return
 }
 

@@ -285,10 +285,25 @@ static LogicalResult validateTargetWaveWidth(func::FuncOp func) {
          << " but function requires wave" << **required;
 }
 
-LogicalResult WaveAMDMachineSelector::run() {
+static LogicalResult
+validateMachineSelectionTarget(WaveAMDMachineSelector &selector) {
+  func::FuncOp func = selector.func;
   if (!func.getBody().hasOneBlock())
     return func.emitError("WaveAMDMachine selection supports one-block funcs");
   if (failed(validateTargetWaveWidth(func)))
+    return failure();
+  if (!waveamdmachine::findAMDGPUTargetModule(func))
+    return success();
+  FailureOr<llvm::AMDGPU::IsaVersion> isa =
+      getTargetIsaVersion(func, "WaveAMDMachine selection");
+  if (failed(isa))
+    return failure();
+  selector.targetIsaMajor = isa->Major;
+  return success();
+}
+
+LogicalResult WaveAMDMachineSelector::run() {
+  if (failed(validateMachineSelectionTarget(*this)))
     return failure();
 
   // Run IntegerRangeAnalysis once over the wave-level body so the
@@ -1440,8 +1455,10 @@ LogicalResult WaveAMDMachineSelector::selectShliI64(ShliOp op) {
     result = waveamdmachine::VLshlrevB64Op::create(builder, op.getLoc(),
                                                    resultType, rhs, lhs);
   else
-    result = waveamdmachine::SLshlB64Op::create(builder, op.getLoc(),
-                                                resultType, lhs, rhs);
+    result = waveamdmachine::SLshlB64Op::create(
+                 builder, op.getLoc(), resultType, getSCCType(op.getContext()),
+                 lhs, rhs)
+                 .getResult();
   values[op.getResult()] = result;
   eraseIfTopLevel(op);
   return success();
@@ -1723,35 +1740,103 @@ Value WaveAMDMachineSelector::ensureVGPRForVSrc1(Location loc, Value v) {
       v);
 }
 
+enum class U32CmpKind { Eq, Ne, Lt, Le, Gt, Ge };
+
+static std::optional<U32CmpKind> getU32CmpKind(arith::CmpIPredicate predicate) {
+  switch (predicate) {
+  case arith::CmpIPredicate::eq:
+    return U32CmpKind::Eq;
+  case arith::CmpIPredicate::ne:
+    return U32CmpKind::Ne;
+  case arith::CmpIPredicate::ult:
+    return U32CmpKind::Lt;
+  case arith::CmpIPredicate::ule:
+    return U32CmpKind::Le;
+  case arith::CmpIPredicate::ugt:
+    return U32CmpKind::Gt;
+  case arith::CmpIPredicate::uge:
+    return U32CmpKind::Ge;
+  default:
+    return std::nullopt;
+  }
+}
+
+static Value createVCmpU32(OpBuilder &builder, Location loc, U32CmpKind kind,
+                           Type resultType, Value lhs, Value rhs) {
+  switch (kind) {
+  case U32CmpKind::Eq:
+    return waveamdmachine::VCmpEqU32Op::create(builder, loc, resultType, lhs,
+                                               rhs);
+  case U32CmpKind::Ne:
+    return waveamdmachine::VCmpNeU32Op::create(builder, loc, resultType, lhs,
+                                               rhs);
+  case U32CmpKind::Lt:
+    return waveamdmachine::VCmpLtU32Op::create(builder, loc, resultType, lhs,
+                                               rhs);
+  case U32CmpKind::Le:
+    return waveamdmachine::VCmpLeU32Op::create(builder, loc, resultType, lhs,
+                                               rhs);
+  case U32CmpKind::Gt:
+    return waveamdmachine::VCmpGtU32Op::create(builder, loc, resultType, lhs,
+                                               rhs);
+  case U32CmpKind::Ge:
+    return waveamdmachine::VCmpGeU32Op::create(builder, loc, resultType, lhs,
+                                               rhs);
+  }
+  llvm_unreachable("handled U32 compare kind");
+}
+
+static Value createVCmpU32Vcc(OpBuilder &builder, Location loc, U32CmpKind kind,
+                              Type resultType, Type vccType, Value lhs,
+                              Value rhs) {
+  switch (kind) {
+  case U32CmpKind::Eq:
+    return waveamdmachine::VCmpEqU32VccOp::create(builder, loc, resultType,
+                                                  vccType, lhs, rhs)
+        .getResult();
+  case U32CmpKind::Ne:
+    return waveamdmachine::VCmpNeU32VccOp::create(builder, loc, resultType,
+                                                  vccType, lhs, rhs)
+        .getResult();
+  case U32CmpKind::Lt:
+    return waveamdmachine::VCmpLtU32VccOp::create(builder, loc, resultType,
+                                                  vccType, lhs, rhs)
+        .getResult();
+  case U32CmpKind::Le:
+    return waveamdmachine::VCmpLeU32VccOp::create(builder, loc, resultType,
+                                                  vccType, lhs, rhs)
+        .getResult();
+  case U32CmpKind::Gt:
+    return waveamdmachine::VCmpGtU32VccOp::create(builder, loc, resultType,
+                                                  vccType, lhs, rhs)
+        .getResult();
+  case U32CmpKind::Ge:
+    return waveamdmachine::VCmpGeU32VccOp::create(builder, loc, resultType,
+                                                  vccType, lhs, rhs)
+        .getResult();
+  }
+  llvm_unreachable("handled U32 compare kind");
+}
+
+static bool usesLegacyVCmpVcc(const WaveAMDMachineSelector &selector) {
+  return selector.targetIsaMajor && *selector.targetIsaMajor < 10;
+}
+
 LogicalResult WaveAMDMachineSelector::selectCmp(CmpIOp op) {
   auto maskType = cast<MaskType>(op.getType());
   if (maskType.getWidth() != 32)
     return op.emitError("WaveAMDMachine backend supports only !wave.mask<32>");
+  std::optional<U32CmpKind> kind = getU32CmpKind(op.getPredicate());
+  if (!kind)
+    return op.emitError("unsupported wave.cmpi predicate");
   Type sgprType = getRegType(op.getContext(), waveamdmachine::RegClass::SGPR);
   Value lhs = expect(op.getLhs(), op);
   Value rhs = expect(op.getRhs(), op);
-  Value result;
-  StringRef predicate = stringifyCmpIPredicate(op.getPredicate());
-  if (predicate == "eq")
-    result = waveamdmachine::VCmpEqU32Op::create(builder, op.getLoc(), sgprType,
-                                                 lhs, rhs);
-  else if (predicate == "ne")
-    result = waveamdmachine::VCmpNeU32Op::create(builder, op.getLoc(), sgprType,
-                                                 lhs, rhs);
-  else if (predicate == "ult")
-    result = waveamdmachine::VCmpLtU32Op::create(builder, op.getLoc(), sgprType,
-                                                 lhs, rhs);
-  else if (predicate == "ule")
-    result = waveamdmachine::VCmpLeU32Op::create(builder, op.getLoc(), sgprType,
-                                                 lhs, rhs);
-  else if (predicate == "ugt")
-    result = waveamdmachine::VCmpGtU32Op::create(builder, op.getLoc(), sgprType,
-                                                 lhs, rhs);
-  else if (predicate == "uge")
-    result = waveamdmachine::VCmpGeU32Op::create(builder, op.getLoc(), sgprType,
-                                                 lhs, rhs);
-  else
-    return op.emitError("unsupported wave.cmpi predicate");
+  Value result =
+      usesLegacyVCmpVcc(*this)
+          ? createVCmpU32Vcc(builder, op.getLoc(), *kind, sgprType,
+                             getVCCType(op.getContext()), lhs, rhs)
+          : createVCmpU32(builder, op.getLoc(), *kind, sgprType, lhs, rhs);
   values[op.getResult()] = result;
   eraseIfTopLevel(op);
   return success();
@@ -1793,6 +1878,19 @@ std::optional<int64_t> WaveAMDMachineSelector::getImmediateValue(Value value) {
   return imm->getAttrOfType<IntegerAttr>("value").getInt();
 }
 
+static Value createVAddU32(WaveAMDMachineSelector &selector, Location loc,
+                           Value lhs, Value rhs) {
+  Type vgprType =
+      getRegType(selector.builder.getContext(), waveamdmachine::RegClass::VGPR);
+  if (selector.targetIsaMajor && *selector.targetIsaMajor == 8)
+    return waveamdmachine::VAddU32VccOp::create(
+               selector.builder, loc, vgprType,
+               getVCCType(selector.builder.getContext()), lhs, rhs)
+        .getResult();
+  return waveamdmachine::VAddU32Op::create(selector.builder, loc, vgprType, lhs,
+                                           rhs);
+}
+
 Value WaveAMDMachineSelector::addByteOffsets(Location loc, Value lhs,
                                              Value rhs) {
   std::optional<int64_t> lhsImm = getImmediateValue(lhs);
@@ -1812,10 +1910,7 @@ Value WaveAMDMachineSelector::addByteOffsets(Location loc, Value lhs,
     rhs = ensureVGPRForVSrc1(loc, rhs);
   if (!isVGPR(lhs) && !isVGPR(rhs))
     lhs = ensureVGPRForVSrc1(loc, lhs);
-  return waveamdmachine::VAddU32Op::create(
-      builder, loc,
-      getRegType(builder.getContext(), waveamdmachine::RegClass::VGPR), lhs,
-      rhs);
+  return createVAddU32(*this, loc, lhs, rhs);
 }
 
 std::optional<Value>
@@ -2335,15 +2430,19 @@ LogicalResult WaveAMDMachineSelector::selectWhere(WhereOp op) {
   std::string elseLabel =
       op.getElseRegion().empty() ? endLabel : makeLabel("else");
   Value condition = expect(op.getCondition(), op);
-  Value savedExec = waveamdmachine::SAndSaveexecB32Op::create(
-      builder, op.getLoc(),
-      getRegType(op.getContext(), waveamdmachine::RegClass::SGPR), condition);
+  waveamdmachine::SAndSaveexecB32Op saveExec =
+      waveamdmachine::SAndSaveexecB32Op::create(
+          builder, op.getLoc(),
+          getRegType(op.getContext(), waveamdmachine::RegClass::SGPR),
+          getSCCType(op.getContext()), condition);
+  Value savedExec = saveExec.getSavedExec();
   waveamdmachine::SCBranchExeczOp::create(builder, op.getLoc(), elseLabel);
   if (failed(selectRegion(op.getThenRegion())))
     return failure();
   if (!op.getElseRegion().empty()) {
-    waveamdmachine::SAndn2ExecB32Op::create(builder, op.getLoc(), savedExec,
-                                            condition);
+    waveamdmachine::SAndn2ExecB32Op::create(builder, op.getLoc(),
+                                            getSCCType(op.getContext()),
+                                            savedExec, condition);
     waveamdmachine::SCBranchExeczOp::create(builder, op.getLoc(), endLabel);
     waveamdmachine::LabelOp::create(builder, op.getLoc(), elseLabel);
     if (failed(selectRegion(op.getElseRegion())))
