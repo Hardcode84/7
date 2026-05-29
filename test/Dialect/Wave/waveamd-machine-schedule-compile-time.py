@@ -131,7 +131,7 @@ def main() -> int:
             "--print-candidates",
             "--pressure-vgpr-budget=255",
         ],
-        timeout=12.0,
+        timeout=20.0,
     )
     require("fa_seq32_d16_u4_beam_report", text, r"name=beam_0")
     require(

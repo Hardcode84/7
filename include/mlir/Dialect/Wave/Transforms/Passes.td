@@ -43,6 +43,19 @@ def WaveFormPackedMath : Pass<"wave-form-packed-math"> {
   ];
 }
 
+def WaveCombinePointerOffsets : Pass<"wave-combine-pointer-offsets"> {
+  let summary = "Combine chained Wave pointer offsets into one symbolic offset";
+  let description = [{
+    Folds chained `wave.ptr_add` offsets into one `wave.index_expr` feeding a
+    single `wave.ptr_add`. This preserves current `wave.ptr_add` element-offset
+    semantics; byte address planning is derived later by machine selection.
+  }];
+  let dependentDialects = [
+    "func::FuncDialect",
+    "wave::WaveDialect"
+  ];
+}
+
 def WaveAMDABILowering
     : Pass<"waveamd-abi-lowering"> {
   let summary = "Lower WaveAMDMachine function arguments to the AMDGPU kernel ABI";
