@@ -9,7 +9,7 @@
 //
 // Private header for the Wave-to-WaveAMDMachine selector. Holds the
 // `WaveAMDMachineSelector` class plus the small free helpers (register
-// builders, `waveamdmachine.*` op factories, OffsetTriple, TermKind) that
+// builders, `waveamdmachine.*` op factories, pointer offsets) that
 // every selection-time TU needs. The IXS-AST materializer / classifier /
 // constant evaluator / bucketizer cluster lives next to the class as
 // free functions defined in `WaveAMDMachineIndexExpr.cpp` -- this header
@@ -45,6 +45,35 @@
 
 namespace mlir::wave::wmsel {
 
+// Symbol kind for address-expression classification. Bindings reachable only
+// through `Const` / `Uniform` paths can land in `instOffset` / `soffset`;
+// anything reaching a `Lane` symbol falls through to `voffset`.
+enum class TermKind { Const = 0, Uniform = 1, Lane = 2 };
+
+struct PointerOffsetBinding {
+  std::string name;
+  Value value;
+  TermKind kind = TermKind::Lane;
+};
+
+// Canonical symbolic pointer offset. Slot materialization happens in
+// AddressPlan.
+struct PointerOffset {
+  llvm::SmallVector<PointerOffsetBinding, 4> bindings;
+  llvm::SmallVector<sym::PredHandle, 2> assumptions;
+  sym::ExprHandle expr;
+};
+
+// Planned machine byte-address fields. Null expr handle means absent slot.
+struct AddressPlan {
+  llvm::SmallVector<PointerOffsetBinding, 4> bindings;
+  llvm::SmallVector<sym::PredHandle, 2> assumptions;
+  sym::ExprHandle voffsetExpr;
+  sym::ExprHandle soffsetExpr;
+  sym::ExprHandle fullAddressRemainderExpr;
+  int64_t instOffset = 0;
+};
+
 // Bucketed byte offset for a wave-level pointer. `voffset` carries the
 // per-lane VGPR contribution, `soffset` the uniform SGPR / imm part,
 // and `instOffset` an accumulated immediate that lands in the
@@ -71,12 +100,6 @@ struct OffsetTriple {
   int64_t instOffset = 0;
   int64_t addr64InstOffset = 0;
 };
-
-// Symbol kind for the bucketizer's per-summand classification. Bindings
-// reachable only through `Const` / `Uniform` paths can land in
-// `instOffset` / `soffset`; anything reaching a `Lane` symbol falls
-// through to `voffset`.
-enum class TermKind { Const = 0, Uniform = 1, Lane = 2 };
 
 // Per-iter-arg snapshot captured at the scf.for boundary. `WMValue`
 // carries an already-selected waveamdmachine SSA value straight through;
@@ -217,6 +240,7 @@ public:
   DenseMap<Value, Value> pointerBases;
   DenseMap<Value, Value> pointerGlobalBases;
   DenseMap<Value, OffsetTriple> pointerOffsets;
+  DenseMap<Value, PointerOffset> indexOffsets;
   DenseMap<Value, OffsetTriple> indexTriples;
   DenseMap<Value, bool> pointerBuffers;
   SmallVector<Operation *> opsToErase;

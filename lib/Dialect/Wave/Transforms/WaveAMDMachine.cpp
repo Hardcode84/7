@@ -2194,19 +2194,25 @@ LogicalResult WaveAMDMachineSelector::selectIndexExpr(IndexExprOp op) {
   llvm::StringMap<Value> substitution;
   llvm::StringMap<TermKind> symKinds;
   llvm::SmallVector<sym::PredHandle> assumptions;
+  PointerOffset pointerOffset;
   for (auto [nameAttr, binding] : llvm::zip(op.getNames(), op.getBindings())) {
     StringRef key = cast<StringAttr>(nameAttr).getValue();
-    substitution[key] = expect(binding, op);
-    symKinds[key] = isLaneVaryingType(binding.getType()) ? TermKind::Lane
+    Value mapped = expect(binding, op);
+    TermKind kind = isLaneVaryingType(binding.getType()) ? TermKind::Lane
                                                          : TermKind::Uniform;
-    if (std::optional<sym::PredHandle> a = bindingAssumption(binding, key))
+    substitution[key] = mapped;
+    symKinds[key] = kind;
+    pointerOffset.bindings.push_back({key.str(), binding, kind});
+    if (std::optional<sym::PredHandle> a = bindingAssumption(binding, key)) {
       assumptions.push_back(*a);
+      pointerOffset.assumptions.push_back(*a);
+    }
   }
   sym::ExprHandle exprHandle{op.getExpr().getNode()};
   FailureOr<sym::ExprHandle> simplified =
       sym::simplifyExpr(symbolStore(), exprHandle, assumptions);
-  ::ixs_node *root = const_cast<::ixs_node *>(
-      succeeded(simplified) ? simplified->raw() : exprHandle.raw());
+  pointerOffset.expr = succeeded(simplified) ? *simplified : exprHandle;
+  ::ixs_node *root = const_cast<::ixs_node *>(pointerOffset.expr.raw());
   OffsetTriple triple{};
   triple.assumptions.assign(assumptions.begin(), assumptions.end());
   if (failed(bucketize(*this, root, op, substitution, symKinds, triple)))
@@ -2214,6 +2220,7 @@ LogicalResult WaveAMDMachineSelector::selectIndexExpr(IndexExprOp op) {
   triple.fullExpr = root;
   for (const auto &binding : substitution)
     triple.bindings.push_back({binding.getKey().str(), binding.getValue()});
+  indexOffsets[op.getResult()] = std::move(pointerOffset);
   indexTriples[op.getResult()] = triple;
   // selectPtrAdd reads the bucketed triple directly; everyone else
   // (wave.binary, debug printers) goes through the `values` map and
