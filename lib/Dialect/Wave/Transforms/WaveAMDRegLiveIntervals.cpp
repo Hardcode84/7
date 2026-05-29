@@ -389,8 +389,8 @@ private:
   }
 
   wave::WaveAMDLiveIntervalBuildResult result;
-  unsigned cursor = 0;
   wave::WaveAMDLiveIntervalOrderOverride orderOverride;
+  unsigned cursor = 0;
   bool hasOrderOverride = false;
   bool usedOrderOverride = false;
 };

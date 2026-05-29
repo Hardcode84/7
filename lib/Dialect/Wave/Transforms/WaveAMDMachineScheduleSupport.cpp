@@ -149,8 +149,8 @@ private:
     flush(ops, blockOrdinal);
   }
 
-  func::FuncOp func;
   SmallVector<ScheduleRegion> regions;
+  func::FuncOp func;
   unsigned nextBlock = 0;
   unsigned nextRegion = 0;
 };
@@ -270,32 +270,48 @@ void printDependences(ScheduleRegion region, const DependenceGraph &graph) {
 ArchResolution resolveArch(Operation *op) {
   ModuleOp mod = waveamdmachine::findAMDGPUTargetModule(op);
   if (!mod)
-    return {nullptr, "missing_target"};
+    return {"missing_target", nullptr};
 
   StringAttr target = mod->getAttrOfType<StringAttr>("waveamdmachine.target");
   std::optional<waveamdmachine::AMDGPUTarget> parsed =
       waveamdmachine::parseAMDGPUTargetAttr(target.getValue());
   if (!parsed)
-    return {nullptr, "malformed_target"};
+    return {"malformed_target", nullptr};
 
   llvm::AMDGPU::IsaVersion isa = llvm::AMDGPU::getIsaVersion(parsed->chip);
   if (!waveamdmachine::isArchSupported(isa))
-    return {nullptr, "unsupported_arch"};
-  return {&waveamdmachine::getArchData(isa), {}};
+    return {"unsupported_arch", nullptr};
+  return {{}, &waveamdmachine::getArchData(isa)};
+}
+
+static ScoreResult makeUnsupportedScore(StringRef fallbackReason) {
+  ScoreResult result;
+  result.fallbackReason = fallbackReason;
+  return result;
+}
+
+static CandidateMetrics makeUnsupportedCandidateMetrics(StringRef reason) {
+  CandidateMetrics metrics;
+  metrics.score = makeUnsupportedScore(reason);
+  return metrics;
 }
 
 static ScoreResult scoreOps(ArrayRef<Operation *> ops,
                             ArchResolution archResolution,
                             const waveamdmachine::EventSimConfig &config) {
   if (!archResolution.arch)
-    return {false, 0, 0, archResolution.fallbackReason};
+    return makeUnsupportedScore(archResolution.fallbackReason);
 
   waveamdmachine::EventSimResult result;
   if (failed(waveamdmachine::simulateEventTimeline(ops, *archResolution.arch,
                                                    config, result)))
-    return {false, 0, 0, "simulation_failed"};
+    return makeUnsupportedScore("simulation_failed");
 
-  return {true, result.totalCycles, result.issuedOps, {}};
+  ScoreResult score;
+  score.cycles = result.totalCycles;
+  score.issuedOps = result.issuedOps;
+  score.supported = true;
+  return score;
 }
 
 static int64_t computeExcess(unsigned pressure, int budget) {
@@ -557,13 +573,13 @@ static unsigned computeMaxPressure(ArrayRef<WaveAMDLiveInterval> intervals,
 }
 
 struct SchedulePressureRegionContext {
+  SmallVector<unsigned, 32> sgprGroups;
+  SmallVector<unsigned, 32> vgprGroups;
+  StringRef fallbackReason;
   const SchedulePressureContext *funcContext = nullptr;
   unsigned firstPos = 0;
   unsigned lastPos = 0;
-  SmallVector<unsigned, 32> sgprGroups;
-  SmallVector<unsigned, 32> vgprGroups;
   bool supported = false;
-  StringRef fallbackReason;
 };
 
 static FailureOr<std::pair<unsigned, unsigned>>
@@ -668,6 +684,13 @@ makeRegisterPressureResult(unsigned maxVGPR, unsigned maxSGPR,
   return result;
 }
 
+static RegisterPressureResult
+makeUnsupportedRegisterPressureResult(StringRef fallbackReason) {
+  RegisterPressureResult result;
+  result.fallbackReason = fallbackReason;
+  return result;
+}
+
 static std::optional<RegisterPressureResult>
 getSafePressureUpperBound(const SchedulePressureRegionContext &context,
                           const RegisterPressureBudgets &budgets) {
@@ -694,12 +717,12 @@ computeRegisterPressureFull(const ScheduleRegion &region,
   FailureOr<WaveAMDLiveIntervalBuildResult> builtIntervals =
       buildWaveAMDLiveIntervals(region.func, orderOverride);
   if (failed(builtIntervals))
-    return {false, 0, 0, 0, 0, 0, 0, "pressure_analysis_failed"};
+    return makeUnsupportedRegisterPressureResult("pressure_analysis_failed");
 
   FailureOr<std::pair<unsigned, unsigned>> span =
       getPositionSpan(orderedOps, builtIntervals->positions);
   if (failed(span))
-    return {false, 0, 0, 0, 0, 0, 0, "pressure_position_missing"};
+    return makeUnsupportedRegisterPressureResult("pressure_position_missing");
 
   return makeRegisterPressureResult(
       computeMaxPressure(builtIntervals->intervals.vgprs, span->first,
@@ -710,8 +733,8 @@ computeRegisterPressureFull(const ScheduleRegion &region,
 }
 
 struct PressureGroupRef {
-  bool sgpr = false;
   unsigned index = 0;
+  bool sgpr = false;
 };
 
 struct LocalPressureBounds {
@@ -728,12 +751,12 @@ findPressureGroup(const SchedulePressureContext &context, Value value) {
     auto it = context.intervals.intervals.sgprIntervals.find(value);
     if (it == context.intervals.intervals.sgprIntervals.end())
       return std::nullopt;
-    return PressureGroupRef{true, it->second};
+    return PressureGroupRef{it->second, true};
   }
   auto it = context.intervals.intervals.vgprIntervals.find(value);
   if (it == context.intervals.intervals.vgprIntervals.end())
     return std::nullopt;
-  return PressureGroupRef{false, it->second};
+  return PressureGroupRef{it->second, false};
 }
 
 static void markPressureStart(LocalPressureBounds &bounds, unsigned pos) {
@@ -789,9 +812,9 @@ computeRegisterPressureLocal(const ScheduleRegion &region,
                              const RegisterPressureBudgets &budgets,
                              const SchedulePressureRegionContext &context) {
   if (!context.supported)
-    return {false, 0, 0, 0, 0, 0, 0, context.fallbackReason};
+    return makeUnsupportedRegisterPressureResult(context.fallbackReason);
   if (orderedOps.size() != region.ops.size())
-    return {false, 0, 0, 0, 0, 0, 0, "pressure_position_missing"};
+    return makeUnsupportedRegisterPressureResult("pressure_position_missing");
   const WaveAMDLiveIntervalBuildResult &intervals =
       context.funcContext->intervals;
 
@@ -811,7 +834,7 @@ computeRegisterPressureLocal(const ScheduleRegion &region,
   for (Operation *op : orderedOps) {
     auto posIt = candidatePos.find(op);
     if (posIt == candidatePos.end())
-      return {false, 0, 0, 0, 0, 0, 0, "pressure_position_missing"};
+      return makeUnsupportedRegisterPressureResult("pressure_position_missing");
     unsigned pos = posIt->second;
     for (Value value : op->getResults()) {
       std::optional<PressureGroupRef> group =
@@ -1023,13 +1046,13 @@ CandidateMetrics evaluateCandidateRequest(
     const waveamdmachine::EventSimConfig &modelConfig,
     const RegisterPressureBudgets &budgets) {
   if (!candidate.parsed)
-    return {{false, 0, 0, candidate.fallbackReason}, {}};
+    return makeUnsupportedCandidateMetrics(candidate.fallbackReason);
 
   SmallVector<Operation *, 16> candidateOps;
   StringRef fallbackReason;
   if (!buildCandidateOps(region, graph, candidate.order, candidateOps,
                          fallbackReason))
-    return {{false, 0, 0, fallbackReason}, {}};
+    return makeUnsupportedCandidateMetrics(fallbackReason);
 
   return evaluateOps(region, candidateOps, archResolution, modelConfig, budgets,
                      PressureEvaluation::Eager);
@@ -1282,7 +1305,10 @@ static SmallVector<OrderCandidate, 4> buildScheduleCandidates(
     const waveamdmachine::EventSimConfig &modelConfig,
     const RegisterPressureBudgets &budgets, bool enableBeamSearch) {
   SmallVector<OrderCandidate, 4> candidates;
-  candidates.push_back({"original", getOriginalOrder(region)});
+  OrderCandidate original;
+  original.name = "original";
+  original.order = getOriginalOrder(region);
+  candidates.push_back(std::move(original));
 
   GraphTables tables = buildGraphTables(region, graph);
   SmallVector<NodeMetrics, 16> metrics =
@@ -1328,7 +1354,8 @@ static bool computeCandidatePressure(
   SmallVector<Operation *, 16> ops;
   StringRef fallbackReason;
   if (!buildCandidateOps(region, graph, candidate.order, ops, fallbackReason)) {
-    candidate.metrics.pressure = {false, 0, 0, 0, 0, 0, 0, fallbackReason};
+    candidate.metrics.pressure =
+        makeUnsupportedRegisterPressureResult(fallbackReason);
     return false;
   }
 
@@ -1366,7 +1393,7 @@ static CandidateMetrics evaluateOrderCandidate(
   SmallVector<Operation *, 16> ops;
   StringRef fallbackReason;
   if (!buildCandidateOps(region, graph, candidate.order, ops, fallbackReason))
-    return {{false, 0, 0, fallbackReason}, {}};
+    return makeUnsupportedCandidateMetrics(fallbackReason);
   bool skipExactPressure =
       safePressureUpperBound ||
       pressureEvaluation == PressureEvaluation::LazyHardCap;
@@ -1478,11 +1505,11 @@ static void appendEvaluatedCandidates(
     const SchedulePressureRegionContext *pressureRegionContext) {
   for (const OrderCandidate &candidate : candidates)
     decision.candidates.push_back(
-        {candidate.name, candidate.order,
+        {candidate.order,
          evaluateOrderCandidate(region, graph, candidate, archResolution,
                                 modelConfig, budgets, pressureEvaluation,
-                                safePressureUpperBound,
-                                pressureRegionContext)});
+                                safePressureUpperBound, pressureRegionContext),
+         candidate.name});
 }
 
 ScheduleDecision evaluateScheduleCandidates(
@@ -1495,9 +1522,9 @@ ScheduleDecision evaluateScheduleCandidates(
   ScheduleDecision decision;
   if (!archResolution.arch) {
     decision.candidates.push_back(
-        {"original",
-         getOriginalOrder(region),
-         {{false, 0, 0, archResolution.fallbackReason}, {}}});
+        {getOriginalOrder(region),
+         makeUnsupportedCandidateMetrics(archResolution.fallbackReason),
+         "original"});
     return decision;
   }
 

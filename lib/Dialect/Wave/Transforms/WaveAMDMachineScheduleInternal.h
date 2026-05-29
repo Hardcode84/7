@@ -23,8 +23,8 @@ struct GraphTables {
 };
 
 struct NodeMetrics {
-  int latency = 0;
   int64_t criticalPath = 0;
+  int latency = 0;
   bool memory = false;
   bool reachesMemory = false;
   bool matrix = false;
@@ -38,8 +38,8 @@ enum class SchedulePolicy {
 };
 
 struct OrderCandidate {
-  StringRef name;
   SmallVector<unsigned, 16> order;
+  StringRef name;
 };
 
 GraphTables buildGraphTables(const ScheduleRegion &region,

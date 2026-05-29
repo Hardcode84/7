@@ -27,11 +27,6 @@ namespace {
 
 struct BeamSearchConfig {
   // Prefix pruning only. Event-sim + pressure rank completed orders.
-  unsigned width = 12;                      // states kept per depth
-  unsigned branchLimit = 4;                 // ready choices expanded per state
-  unsigned candidateLimit = 8;              // completed beam orders emitted
-  unsigned parallelChoiceParentMin = 32;    // parents scored in parallel
-  unsigned parallelStateChildMin = 32;      // next states built in parallel
   int64_t guideBonus = 200000;              // prefer fixed-policy prefix
   int64_t discrepancyPenalty = 50000;       // cost per guide deviation
   int64_t criticalPathWeight = 1000;        // favor long remaining chains
@@ -43,6 +38,11 @@ struct BeamSearchConfig {
   int64_t hardPressurePenalty = 1000000;    // repair hard-cap excess
   int64_t criticalPressurePenalty = 100000; // repair occupancy excess
   int64_t pressurePeakPenalty = 10;         // tie-break on peak pressure
+  unsigned width = 12;                      // states kept per depth
+  unsigned branchLimit = 4;                 // ready choices expanded per state
+  unsigned candidateLimit = 8;              // completed beam orders emitted
+  unsigned parallelChoiceParentMin = 32;    // parents scored in parallel
+  unsigned parallelStateChildMin = 32;      // next states built in parallel
 };
 
 static constexpr BeamSearchConfig kDefaultBeamSearchConfig;
@@ -78,9 +78,9 @@ struct PressurePreview {
 
 struct BeamState {
   SmallVector<unsigned, 16> pending;
+  BeamPressureState pressure;
   BitVector ready;
   BitVector scheduled;
-  BeamPressureState pressure;
   int64_t rank = 0;
   unsigned discrepancies = 0;
   unsigned guideOrdinal = 0;
@@ -90,11 +90,11 @@ struct BeamState {
 };
 
 struct ReadyChoice {
-  unsigned node = 0;
   int64_t score = 0;
   int64_t hardExcess = 0;
   int64_t criticalExcess = 0;
   int64_t peakPressure = 0;
+  unsigned node = 0;
   unsigned discrepancy = 0;
   unsigned guidePosition = 0;
 };
@@ -109,8 +109,8 @@ struct BeamResult {
 };
 
 struct BeamChild {
-  unsigned parent = 0;
   ReadyChoice choice;
+  unsigned parent = 0;
 };
 
 struct BeamTrace {
@@ -645,7 +645,7 @@ static SmallVector<BeamChild, 32> buildBeamChildren(
   SmallVector<BeamChild, 32> children;
   for (auto [parentIndex, choices] : llvm::enumerate(choicesByParent))
     for (const ReadyChoice &choice : choices)
-      children.push_back({static_cast<unsigned>(parentIndex), choice});
+      children.push_back({choice, static_cast<unsigned>(parentIndex)});
   return children;
 }
 
@@ -777,7 +777,7 @@ void addGuidedBeamCandidates(SmallVectorImpl<OrderCandidate> &candidates,
     if (emitted >= kDefaultBeamSearchConfig.candidateLimit ||
         emitted >= std::size(kBeamNames))
       break;
-    candidates.push_back({kBeamNames[emitted], result.order});
+    candidates.push_back({result.order, kBeamNames[emitted]});
     ++emitted;
   }
 }

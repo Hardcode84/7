@@ -52,8 +52,8 @@ struct WaveAMDLiveIntervalBuildResult {
 };
 
 struct WaveAMDLiveIntervalOrderOverride {
-  Block *block = nullptr;
   ArrayRef<Operation *> ops;
+  Block *block = nullptr;
 };
 
 bool isWaveAMDReg(Value value);

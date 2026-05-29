@@ -24,13 +24,13 @@
 namespace mlir::wave {
 
 struct ScheduleRegion {
+  SmallVector<Operation *, 16> ops;
   func::FuncOp func;
-  unsigned blockOrdinal = 0;
-  unsigned regionOrdinal = 0;
   Operation *first = nullptr;
   Operation *last = nullptr;
+  unsigned blockOrdinal = 0;
+  unsigned regionOrdinal = 0;
   unsigned opCount = 0;
-  SmallVector<Operation *, 16> ops;
 };
 
 enum class EdgeKind {
@@ -51,15 +51,15 @@ struct DependenceGraph {
 };
 
 struct ArchResolution {
-  const waveamdmachine::ArchData *arch = nullptr;
   StringRef fallbackReason;
+  const waveamdmachine::ArchData *arch = nullptr;
 };
 
 struct ScoreResult {
-  bool supported = false;
+  StringRef fallbackReason;
   int64_t cycles = 0;
   int64_t issuedOps = 0;
-  StringRef fallbackReason;
+  bool supported = false;
 };
 
 struct RegisterPressureBudgets {
@@ -76,14 +76,14 @@ struct RegisterPressureBudgets {
 };
 
 struct RegisterPressureResult {
-  bool supported = false;
-  unsigned maxVGPR = 0;
-  unsigned maxSGPR = 0;
+  StringRef fallbackReason;
   int64_t hardVGPRExcess = 0;
   int64_t hardSGPRExcess = 0;
   int64_t criticalVGPRExcess = 0;
   int64_t criticalSGPRExcess = 0;
-  StringRef fallbackReason;
+  unsigned maxVGPR = 0;
+  unsigned maxSGPR = 0;
+  bool supported = false;
   bool conservative = false;
 };
 
@@ -99,16 +99,16 @@ enum class PressureEvaluation {
 };
 
 struct CandidateRequest {
-  bool requested = false;
-  bool parsed = false;
   SmallVector<unsigned, 16> order;
   StringRef fallbackReason;
+  bool requested = false;
+  bool parsed = false;
 };
 
 struct EvaluatedCandidate {
-  StringRef name;
   SmallVector<unsigned, 16> order;
   CandidateMetrics metrics;
+  StringRef name;
 };
 
 struct ScheduleDecision {
@@ -118,8 +118,8 @@ struct ScheduleDecision {
 
 struct SchedulePressureContext {
   WaveAMDLiveIntervalBuildResult intervals;
-  bool supported = false;
   StringRef fallbackReason;
+  bool supported = false;
 };
 
 SmallVector<ScheduleRegion> collectScheduleRegions(func::FuncOp func);
