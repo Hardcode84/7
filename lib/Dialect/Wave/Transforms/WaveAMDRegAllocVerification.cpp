@@ -9,6 +9,7 @@
 #include "mlir/Dialect/Wave/Transforms/WaveAMDRegAllocVerification.h"
 
 #include "WaveAMDRegLiveIntervals.h"
+#include "WaveAMDRegisterLimits.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachine.h"
 #include "llvm/ADT/STLExtras.h"
@@ -147,16 +148,52 @@ static bool physicalRangesOverlap(const PhysicalLiveRange &lhs,
   return lhs.physStart < rhs.physEnd && rhs.physStart < lhs.physEnd;
 }
 
+static bool isAllowedReservedValue(Value value) {
+  Operation *def = value.getDefiningOp();
+  if (!def)
+    return false;
+  auto type = cast<waveamdmachine::RegType>(value.getType());
+  int64_t index = type.getIndex();
+  if (type.getWidth() != 1)
+    return false;
+  if (isa<waveamdmachine::VWorkitemIdXOp>(def))
+    return index == 0;
+  if (isa<waveamdmachine::SWorkgroupIdXOp>(def))
+    return index == 2;
+  if (isa<waveamdmachine::SWorkgroupIdYOp>(def))
+    return index == 3;
+  if (isa<waveamdmachine::SWorkgroupIdZOp>(def))
+    return index == 4;
+  return false;
+}
+
 static LogicalResult
-verifyNoInterference(func::FuncOp func,
-                     ArrayRef<wave::WaveAMDLiveInterval> intervals,
-                     StringRef consumer, StringRef regClass) {
+verifyNotInReservedRange(func::FuncOp func,
+                         const wave::WaveAMDLiveInterval &interval,
+                         const PhysicalLiveRange &range, StringRef consumer,
+                         StringRef regClass, unsigned reserved) {
+  if (reserved == 0 || range.physStart >= reserved)
+    return success();
+  for (Value value : interval.values)
+    if (!isAllowedReservedValue(value))
+      return diagOpForValue(value, func)->emitError()
+             << consumer << " found " << regClass
+             << " value allocated in reserved kernel ABI registers";
+  return success();
+}
+
+static LogicalResult verifyNoInterference(
+    func::FuncOp func, ArrayRef<wave::WaveAMDLiveInterval> intervals,
+    StringRef consumer, StringRef regClass, unsigned reserved) {
   SmallVector<PhysicalLiveRange> ranges;
   for (const wave::WaveAMDLiveInterval &interval : intervals) {
     if (interval.values.empty())
       continue;
     PhysicalLiveRange range;
     if (failed(buildPhysicalLiveRange(func, interval, range, consumer)))
+      return failure();
+    if (failed(verifyNotInReservedRange(func, interval, range, consumer,
+                                        regClass, reserved)))
       return failure();
     ranges.push_back(range);
   }
@@ -208,10 +245,11 @@ mlir::wave::verifyWaveAMDRegAllocation(func::FuncOp func, StringRef consumer,
   if (failed(builtIntervals))
     return failure();
   if (failed(verifyNoInterference(func, builtIntervals->intervals.sgprs,
-                                  consumer, "SGPR")))
+                                  consumer, "SGPR",
+                                  getWaveAMDReservedSGPRs(func))))
     return failure();
   return verifyNoInterference(func, builtIntervals->intervals.vgprs, consumer,
-                              "VGPR");
+                              "VGPR", getWaveAMDReservedVGPRs(func));
 }
 
 LogicalResult mlir::wave::verifyWaveAMDRegAllocations(

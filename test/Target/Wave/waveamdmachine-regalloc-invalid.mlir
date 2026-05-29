@@ -173,6 +173,34 @@ func.func @overlapping_vcc_live_range_v_cmp_u32_vcc(%a: !waveamdmachine.reg<vgpr
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
+func.func @reserved_vgpr_pin_rejected() attributes {wave.kernel} {
+  %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+  // expected-error @below {{waveamd-reg-alloc found VGPR value allocated in reserved kernel ABI registers}}
+  %reg = waveamdmachine.v_mov_b32_tuple %zero
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1, 0>
+  return
+}
+
+}
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
+
+func.func @reserved_sgpr_pin_rejected() attributes {wave.kernel} {
+  %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+  // expected-error @below {{waveamd-reg-alloc found SGPR value allocated in reserved kernel ABI registers}}
+  %reg = waveamdmachine.s_mov_b32_value %zero
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<sgpr, 1, 0>
+  return
+}
+
+}
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
+
 func.func @unsupported_register_class() {
   // expected-error @below {{waveamd-reg-alloc supports only SGPR and VGPR register classes}}
   %reg = waveamdmachine.arg {index = 0 : i64, pointer = false} : !waveamdmachine.reg<agpr, 1>

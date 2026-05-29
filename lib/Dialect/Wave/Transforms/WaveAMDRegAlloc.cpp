@@ -58,6 +58,17 @@ static FailureOr<RegisterLimits> getRegisterLimits(ModuleOp module) {
   return limits;
 }
 
+static LogicalResult validateReservedLimit(func::FuncOp func, StringRef cls,
+                                           unsigned numPhys,
+                                           unsigned reserved) {
+  if (numPhys >= reserved)
+    return success();
+  return func.emitError()
+         << "waveamd-reg-alloc " << cls
+         << " limit leaves fewer registers than reserved kernel ABI prefix "
+         << "(available=" << numPhys << ", reserved=" << reserved << ")";
+}
+
 struct WaveAMDRegAllocPass
     : public wave::impl::WaveAMDRegAllocBase<WaveAMDRegAllocPass> {
   using WaveAMDRegAllocBase::WaveAMDRegAllocBase;
@@ -114,6 +125,11 @@ struct WaveAMDRegAllocPass
 
     unsigned sgprReserved = wave::getWaveAMDReservedSGPRs(func);
     unsigned vgprReserved = wave::getWaveAMDReservedVGPRs(func);
+    if (failed(validateReservedLimit(func, "SGPR", limits.numSGPR,
+                                     sgprReserved)) ||
+        failed(
+            validateReservedLimit(func, "VGPR", limits.numVGPR, vgprReserved)))
+      return failure();
     if (failed(allocateClass(func, intervals.sgprs, limits.numSGPR,
                              sgprReserved, softFail, overflow)))
       return failure();

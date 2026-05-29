@@ -8,6 +8,7 @@
 
 #include "mlir/Dialect/Wave/Transforms/Passes.h"
 
+#include "WaveAMDRegisterLimits.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Wave/Transforms/WaveAMDRegAllocVerification.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachine.h"
@@ -41,6 +42,14 @@ static void clearModuleResourceAttrs(ModuleOp mod) {
   mod->removeAttr("waveamdmachine.sgpr_count_max");
   mod->removeAttr("waveamdmachine.vgpr_count_max");
   mod->removeAttr("waveamdmachine.lds_size_max");
+}
+
+static unsigned getMinReportedSGPRs(func::FuncOp func) {
+  return std::max(1u, wave::getWaveAMDReservedSGPRs(func) + 1);
+}
+
+static unsigned getMinReportedVGPRs(func::FuncOp func) {
+  return std::max(1u, wave::getWaveAMDReservedVGPRs(func));
 }
 
 struct WaveAMDResourceInfoPass
@@ -95,8 +104,8 @@ struct WaveAMDResourceInfoPass
   }
 
   MaxRegs collectMaxRegs(func::FuncOp func, bool &failed) {
-    bool isKernel = func->hasAttr(wave::WaveDialect::getKernelAttrName());
-    MaxRegs out{isKernel ? 5u : 0u, isKernel ? 1u : 0u};
+    MaxRegs out{wave::getWaveAMDReservedSGPRs(func),
+                wave::getWaveAMDReservedVGPRs(func)};
     for (Operation &op : func.getBody().front()) {
       scanOp(op, out, failed);
       if (failed)
@@ -131,9 +140,8 @@ struct WaveAMDResourceInfoPass
       if (failed)
         return signalPassFailure();
       bool isKernel = func->hasAttr(wave::WaveDialect::getKernelAttrName());
-      unsigned sgprBaseline = isKernel ? 6u : 1u;
-      unsigned sgprCount = std::max(regs.sgpr, sgprBaseline);
-      unsigned vgprCount = std::max(regs.vgpr, 1u);
+      unsigned sgprCount = std::max(regs.sgpr, getMinReportedSGPRs(func));
+      unsigned vgprCount = std::max(regs.vgpr, getMinReportedVGPRs(func));
       func->setAttr("waveamdmachine.sgpr_count",
                     builder.getI64IntegerAttr(sgprCount));
       func->setAttr("waveamdmachine.vgpr_count",
