@@ -10,6 +10,7 @@
 
 #include "WaveAMDRegLiveIntervals.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachine.h"
+#include "mlir/IR/Threading.h"
 #include "llvm/ADT/BitVector.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
@@ -708,16 +709,23 @@ void addGuidedBeamCandidates(SmallVectorImpl<OrderCandidate> &candidates,
   if (isPressureSearchEnabled(budgets))
     pressureModel = buildPressureModel(region);
 
+  SmallVector<SmallVector<BeamResult, 8>, 8> perGuideResults;
+  perGuideResults.resize(candidates.size());
+  MLIRContext *context = region.ops.front()->getContext();
+  parallelFor(context, 0, candidates.size(), [&](size_t index) {
+    perGuideResults[index] = runGuidedBeamSearch(
+        tables, metrics, candidates[index].order, static_cast<unsigned>(index),
+        pressureModel, budgets, kDefaultBeamSearchConfig);
+  });
+
   SmallVector<BeamResult, 16> results;
-  for (auto [index, candidate] : llvm::enumerate(candidates)) {
-    SmallVector<BeamResult, 8> guideResults =
-        runGuidedBeamSearch(tables, metrics, candidate.order, index,
-                            pressureModel, budgets, kDefaultBeamSearchConfig);
-    for (BeamResult &result : guideResults) {
+  for (size_t index : llvm::seq<size_t>(0, candidates.size())) {
+    ArrayRef<BeamResult> guideResults = perGuideResults[index];
+    for (const BeamResult &result : guideResults) {
       if (hasCandidateOrder(candidates, result.order) ||
           hasBeamResultOrder(results, result.order))
         continue;
-      results.push_back(std::move(result));
+      results.push_back(result);
     }
   }
   llvm::sort(results, [&](const BeamResult &lhs, const BeamResult &rhs) {
