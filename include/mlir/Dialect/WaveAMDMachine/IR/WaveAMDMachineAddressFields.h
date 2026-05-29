@@ -14,11 +14,10 @@
 
 namespace mlir::waveamdmachine {
 
-/// Per-op layout for the V / S / inst-offset address-field bucket.
+/// Per-op layout for the V / S / inst-offset address fields.
 /// `voffset` is always present on a memory op, so it is not modeled
 /// here. `instOffsetBits == 0` means the op has no inst-offset slot.
-/// The bucketizer consults this before emission to route each
-/// summand of a symbolic offset to the correct slot.
+/// Address planning consults this before emission.
 struct AddressFieldSpec {
   unsigned instOffsetBits = 0;
   bool instOffsetSigned = false;

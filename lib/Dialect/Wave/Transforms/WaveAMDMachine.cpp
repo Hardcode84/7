@@ -306,10 +306,7 @@ LogicalResult WaveAMDMachineSelector::run() {
   if (failed(validateMachineSelectionTarget(*this)))
     return failure();
 
-  // Run IntegerRangeAnalysis once over the wave-level body so the
-  // bucketizer can convert proven ranges on `wave.index_expr`
-  // bindings into ixsimpl assumptions and simplify the AST before
-  // routing summands to V / S / inst-offset slots.
+  // Range facts become ixsimpl assumptions for address planning.
   dataflow::loadBaselineAnalyses(rangeSolver);
   rangeSolver.load<dataflow::IntegerRangeAnalysis>();
   if (failed(rangeSolver.initializeAndRun(func)))
@@ -365,32 +362,6 @@ WaveAMDMachineSelector::bindingAssumption(Value binding, StringRef name) {
   if (failed(handle))
     return std::nullopt;
   return *handle;
-}
-
-// Sum the triple into a single VGPR voffset value.
-Value WaveAMDMachineSelector::collapseTriple(Location loc,
-                                             const OffsetTriple &t) {
-  Value v = t.voffset;
-  if (t.soffset)
-    v = v ? addByteOffsets(loc, v, t.soffset) : t.soffset;
-  if (t.instOffset != 0) {
-    Value imm = createImm(builder, loc, t.instOffset);
-    v = v ? addByteOffsets(loc, v, imm) : imm;
-  }
-  return v ? v : createImm(builder, loc, 0);
-}
-
-static void scaleTripleExprs(WaveAMDMachineSelector &S, OffsetTriple &out,
-                             const OffsetTriple &t, unsigned size) {
-  if (!t.voffsetExpr && !t.soffsetExpr && !t.fullExpr)
-    return;
-  FailureOr<sym::ExprHandle> sizeExpr =
-      sym::composeExprInt(S.symbolStore(), size);
-  if (failed(sizeExpr))
-    return;
-  out.voffsetExpr = S.scaleBucketExpr(t.voffsetExpr, sizeExpr->raw());
-  out.soffsetExpr = S.scaleBucketExpr(t.soffsetExpr, sizeExpr->raw());
-  out.fullExpr = S.scaleBucketExpr(t.fullExpr, sizeExpr->raw());
 }
 
 static std::optional<int64_t> checkedAddImm(std::optional<int64_t> lhs,
@@ -455,42 +426,10 @@ static FailureOr<Value> scaleSOffset(WaveAMDMachineSelector &S, Location loc,
       .getResult();
 }
 
-// Multiply each slot of `t` by `size`. Used by selectPtrAdd to
-// convert element offsets into byte offsets without losing the
-// V / S / inst split. Power-of-two `size` lowers to shifts; the
-// imm fast paths in the V / S adders fold size==1 / instOffset==0
-// upstream.
-FailureOr<OffsetTriple> WaveAMDMachineSelector::scaleTriple(Location loc,
-                                                            OffsetTriple t,
-                                                            unsigned size) {
-  if (size == 1)
-    return t;
-  OffsetTriple out;
-  std::optional<int64_t> instOffset =
-      llvm::checkedMul(t.instOffset, static_cast<int64_t>(size));
-  if (!instOffset)
-    return failure();
-  out.instOffset = *instOffset;
-  FailureOr<Value> voffset = scaleVOffset(*this, loc, t.voffset, size);
-  FailureOr<Value> soffset = scaleSOffset(*this, loc, t.soffset, size);
-  if (failed(voffset) || failed(soffset))
-    return failure();
-  out.voffset = *voffset;
-  out.soffset = *soffset;
-  // Scale the symbolic forms too so the emit-time width check sees
-  // the final byte-offset range, not the pre-scale element range.
-  scaleTripleExprs(*this, out, t, size);
-  out.assumptions = t.assumptions;
-  out.bindings = t.bindings;
-  return out;
-}
-
 sym::Store &WaveAMDMachineSelector::symbolStore() {
   return func.getContext()->getLoadedDialect<WaveDialect>()->getSymbolStore();
 }
 
-// True iff `expr` provably stays in unsigned 32-bit (`[0, 2^32 - 1]`)
-// under the triple's assumption set. Null means caller lost proof.
 bool WaveAMDMachineSelector::slotFitsU32(
     const ::ixs_node *expr, ArrayRef<sym::PredHandle> assumptions) {
   if (!expr)
@@ -1017,9 +956,7 @@ FailureOr<Value> materializeFullPlanAddress(WaveAMDMachineSelector &S,
   return isWideVGPR(addr) ? addr : sgprPairToVGPRPair(S, user->getLoc(), addr);
 }
 
-// Build the `offset` attribute list for a bucketed emit. Empty
-// when the inst_offset is zero so the printer continues to elide
-// the `offset 0` clause.
+// Empty attr list keeps the printer from spelling `offset 0`.
 SmallVector<NamedAttribute>
 WaveAMDMachineSelector::instOffsetAttrs(int64_t value, StringRef attrName) {
   SmallVector<NamedAttribute> attrs;
@@ -1027,106 +964,6 @@ WaveAMDMachineSelector::instOffsetAttrs(int64_t value, StringRef attrName) {
     attrs.push_back(
         builder.getNamedAttr(attrName, builder.getI64IntegerAttr(value)));
   return attrs;
-}
-
-// ixsimpl ADD of two bucket sub-expressions; null slots pass the
-// non-null counterpart through verbatim. Failure returns whichever
-// side composed successfully (the bucket Value is still correct;
-// we just lose the symbolic form for the width check).
-const ::ixs_node *
-WaveAMDMachineSelector::appendBucketExpr(const ::ixs_node *acc,
-                                         const ::ixs_node *add) {
-  if (!acc)
-    return add;
-  if (!add)
-    return acc;
-  FailureOr<sym::ExprHandle> handle =
-      sym::composeExprBinary(symbolStore(), sym::ExprHandle(acc),
-                             sym::ExprBinaryOp::Add, sym::ExprHandle(add));
-  if (failed(handle))
-    return acc;
-  return handle->raw();
-}
-
-// ixsimpl MUL of `coeff * value`, returning `value` when `coeff` is
-// trivially the integer literal 1.
-const ::ixs_node *
-WaveAMDMachineSelector::scaleBucketExpr(const ::ixs_node *value,
-                                        const ::ixs_node *coeff) {
-  if (!coeff)
-    return value;
-  ::ixs_node *c = const_cast<::ixs_node *>(coeff);
-  if (ixs_node_tag(c) == IXS_INT && ixs_node_int_val(c) == 1)
-    return value;
-  if (ixs_node_tag(c) == IXS_RAT && ixs_node_rat_den(c) == 1 &&
-      ixs_node_rat_num(c) == 1)
-    return value;
-  FailureOr<sym::ExprHandle> handle =
-      sym::composeExprBinary(symbolStore(), sym::ExprHandle(coeff),
-                             sym::ExprBinaryOp::Mul, sym::ExprHandle(value));
-  if (failed(handle))
-    return value;
-  return handle->raw();
-}
-
-static Value mergeVOffset(WaveAMDMachineSelector &S, Location loc, Value lhs,
-                          Value rhs) {
-  if (!lhs)
-    return rhs;
-  if (!rhs)
-    return lhs;
-  return S.addByteOffsets(loc, lhs, rhs);
-}
-
-static Value mergeSOffset(WaveAMDMachineSelector &S, Location loc, Value lhs,
-                          Value rhs) {
-  if (!lhs)
-    return rhs;
-  if (!rhs)
-    return lhs;
-  return S.addUniformBytes(loc, lhs, rhs);
-}
-
-static FailureOr<int64_t> checkedAddOffset(int64_t lhs, int64_t rhs) {
-  std::optional<int64_t> sum = llvm::checkedAdd(lhs, rhs);
-  if (!sum)
-    return failure();
-  return *sum;
-}
-
-static bool hasOffsetPayload(const OffsetTriple &t) {
-  return t.voffset || t.soffset || t.instOffset != 0 || t.voffsetExpr ||
-         t.soffsetExpr;
-}
-
-static bool fullExprCoversPayload(const OffsetTriple &t) {
-  return t.fullExpr || !hasOffsetPayload(t);
-}
-
-// Field-wise sum of two triples. Null slots pass the non-null
-// operand through verbatim, so the result keeps each slot in its
-// natural class (V/S/imm) instead of forcing through a VGPR add.
-// Symbolic forms and the assumption set merge alongside the Values
-// so the emit-time width check sees the full picture.
-FailureOr<OffsetTriple> WaveAMDMachineSelector::mergeTriples(Location loc,
-                                                             OffsetTriple a,
-                                                             OffsetTriple b) {
-  OffsetTriple out;
-  out.voffset = mergeVOffset(*this, loc, a.voffset, b.voffset);
-  out.soffset = mergeSOffset(*this, loc, a.soffset, b.soffset);
-  FailureOr<int64_t> instOffset = checkedAddOffset(a.instOffset, b.instOffset);
-  if (failed(instOffset))
-    return failure();
-  out.instOffset = *instOffset;
-  out.voffsetExpr = appendBucketExpr(a.voffsetExpr, b.voffsetExpr);
-  out.soffsetExpr = appendBucketExpr(a.soffsetExpr, b.soffsetExpr);
-  if (fullExprCoversPayload(a) && fullExprCoversPayload(b))
-    out.fullExpr = appendBucketExpr(a.fullExpr, b.fullExpr);
-  out.assumptions = a.assumptions;
-  llvm::append_range(out.assumptions, b.assumptions);
-  out.bindings = a.bindings;
-  llvm::append_range(out.bindings, b.bindings);
-  return out;
 }
 
 bool WaveAMDMachineSelector::isBufferPointer(Type type) {
@@ -2120,10 +1957,7 @@ Value WaveAMDMachineSelector::tryLshlPow2(Location loc,
       .getResult();
 }
 
-// SGPR-domain multiply for the bucketizer's uniform path. Used when
-// both operands are uniform-side values (SGPR1 / imm), so the
-// product can land in the soffset slot instead of getting forced
-// through `v_mul_lo_u32` into a VGPR.
+// SGPR-domain multiply for uniform address/index expressions.
 Value WaveAMDMachineSelector::mulUniformValues(Location loc, Value lhs,
                                                Value rhs) {
   std::optional<int64_t> lhsImm = getImmediateValue(lhs);
@@ -2185,10 +2019,7 @@ Value WaveAMDMachineSelector::andMask(Location loc, Value v, int64_t mask) {
       m);
 }
 
-// True iff `v` is a uniform-side value: an immediate, or an SGPR1
-// register. Used by the bucketizer to recognize when a materialized
-// summand can land in the `soffset` slot without an SGPR /
-// VGPR demotion.
+// Uniform-side value: immediate or SGPR1.
 bool WaveAMDMachineSelector::isUniformValue(Value v) {
   if (!v)
     return false;

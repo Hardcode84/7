@@ -3,11 +3,10 @@
 // RUN: wave-translate --wave-to-amdgpu-asm %s | FileCheck %s --check-prefix=ASM
 // RUN: wave-translate --wave-to-amdgpu-asm %s | llvm-mc -triple=amdgcn-amd-amdhsa -mcpu=gfx1100 -filetype=obj -o /dev/null
 
-// The MUBUF / GLOBAL memory ops now expose explicit slots that the
-// bucketed offset lowering can populate:
+// The MUBUF / GLOBAL memory ops expose explicit address fields:
 //   * Global ops: a `inst_offset` I64 attr (folds into the MUBUF
 //     12/13-bit signed immediate field). No native `soffset` on gfx11
-//     global; the bucketizer folds any S contribution into V.
+//     global; address planning folds any S contribution into V.
 //   * Buffer ops: an `soffset` SGPR1OrImm operand (use
 //     `waveamdmachine.imm 0` for "no S") plus the same `inst_offset`
 //     attr.

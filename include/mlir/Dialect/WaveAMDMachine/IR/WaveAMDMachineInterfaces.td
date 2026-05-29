@@ -15,9 +15,9 @@ def WaveAMDMachine_AddressFieldsOpInterface
     : OpInterface<"AddressFieldsOpInterface"> {
   let cppNamespace = "::mlir::waveamdmachine";
   let description = [{
-    Per-op layout of the V / S / inst-offset address-field bucket on
-    a memory op. The bucketizer queries the spec before emission to
-    decide where each summand of a symbolic offset goes.
+    Per-op layout of the V / S / inst-offset address fields on
+    a memory op. Address planning queries the spec before emission to
+    route symbolic offset pieces.
   }];
   let methods = [
     StaticInterfaceMethod<

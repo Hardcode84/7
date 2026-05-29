@@ -34,7 +34,7 @@ func.func @mixed_offset(%out: !wave.ptr<i32, #wave.global>, %x: i32) attributes 
   return
 }
 
-// Single-symbol passthrough: the bucketizer routes lid straight to
+// Single-symbol passthrough: address planning routes lid straight to
 // the voffset slot; the only arith is the byte-scale shift on lid
 // and the value-side adder. No spurious `imm 0` / `imm 1` ops, no
 // inst_offset on the store.
@@ -125,8 +125,7 @@ func.func @nested_uniform_summand_stays_sgpr(%out: !wave.ptr<i32, #wave.global>)
 // provable point range `[16, 16]`. Selection runs IntegerRangeAnalysis
 // over the body and builds ixsimpl assumptions per binding; `ixs_simplify`
 // then collapses `K + lid` to `lid + 16` even though `K` is bound to a
-// runtime SGPR. The bucketizer sees the const summand and routes it
-// to `offset` instead of an `s_add_i32` into the soffset slot.
+// runtime SGPR. Address planning routes the const summand to `offset`.
 // CHECK-LABEL: func.func @range_drives_const_fold
 // CHECK: %[[LANE:.*]] = waveamdmachine.v_mbcnt_lo
 // CHECK-NOT: waveamdmachine.s_add_i32

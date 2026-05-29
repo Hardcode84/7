@@ -1,4 +1,4 @@
-//===- WaveAMDMachineIndexExpr.cpp - bucketizer for `wave.index_expr`
+//===- WaveAMDMachineIndexExpr.cpp - `wave.index_expr` lowering
 //--------===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
@@ -7,14 +7,8 @@
 //
 //===----------------------------------------------------------------------===//
 //
-// IXS-AST materializer / classifier / constant evaluator / bucketizer
-// cluster, factored out of `WaveAMDMachine.cpp`. The selector's
-// per-op `select*` methods (and the rest of WaveAMDMachine selection)
-// stay in `WaveAMDMachine.cpp`; this file owns the `wave.index_expr`
-// translation surface: walk the symbolic AST, decide whether each
-// summand rides voffset / soffset / inst_offset, and emit the right
-// SGPR / VGPR / imm ops via `WaveAMDMachineSelector`'s public codegen
-// helpers.
+// IXS-AST materializer, classifier, constant evaluator, and address planner.
+// Per-op selection stays in `WaveAMDMachine.cpp`.
 //
 //===----------------------------------------------------------------------===//
 
@@ -383,97 +377,6 @@ std::optional<int64_t> evalConstantMod(WaveAMDMachineSelector &S,
   return r;
 }
 
-// Materialize `term_coeff * term` as a single Value, skipping the
-// multiply when the coefficient is trivially 1. Uniform-only summands
-// route through SGPR-domain mul so the result can ride the soffset
-// slot.
-FailureOr<Value> materializeSummand(WaveAMDMachineSelector &S, ::ixs_node *term,
-                                    ::ixs_node *termCoeff, Operation *user,
-                                    const llvm::StringMap<Value> &subs,
-                                    bool uniform) {
-  FailureOr<Value> termValue = materializeIndexExprNode(S, term, user, subs);
-  if (failed(termValue))
-    return failure();
-  std::optional<int64_t> coeffInt =
-      termCoeff ? staticIntLiteral(termCoeff) : std::optional<int64_t>{1};
-  if (!termCoeff || (coeffInt && *coeffInt == 1))
-    return *termValue;
-  FailureOr<Value> coeffValue =
-      materializeIndexExprNode(S, termCoeff, user, subs);
-  if (failed(coeffValue))
-    return failure();
-  Location loc = user->getLoc();
-  if (uniform && S.isUniformValue(*coeffValue) && S.isUniformValue(*termValue))
-    return S.mulUniformValues(loc, *coeffValue, *termValue);
-  return S.mulIndexValues(loc, *coeffValue, *termValue);
-}
-
-// Literal-fold fast path for a Const-kind summand.
-FailureOr<bool> tryConstFoldSummand(WaveAMDMachineSelector &S, ::ixs_node *term,
-                                    ::ixs_node *termCoeff, TermKind kind,
-                                    Operation *user, OffsetTriple &triple) {
-  if (kind != TermKind::Const)
-    return false;
-  std::optional<int64_t> termInt = evalConstantNode(S, term);
-  std::optional<int64_t> coeffInt =
-      termCoeff ? staticIntLiteral(termCoeff) : std::optional<int64_t>{1};
-  if (!termInt || !coeffInt)
-    return user->emitError(
-        "wave.index_expr constant summand is not representable as i64");
-  std::optional<int64_t> folded =
-      llvm::checkedMulAdd(*coeffInt, *termInt, triple.instOffset);
-  if (!folded)
-    return user->emitError(
-        "wave.index_expr constant summand is not representable as i64");
-  triple.instOffset = *folded;
-  return true;
-}
-
-// Route one (optionally `term_coeff *`) summand into `triple`'s
-// matching slot. Const summands fold into `instOffset`; uniform
-// summands that materialize to an SGPR / imm join `soffset`;
-// everything else lands in `voffset`. The symbolic form joins the
-// matching `*Expr` slot so the emit-time width check sees the full
-// bucket.
-LogicalResult bucketizeSummand(WaveAMDMachineSelector &S, ::ixs_node *term,
-                               ::ixs_node *termCoeff, Operation *user,
-                               const llvm::StringMap<Value> &subs,
-                               const llvm::StringMap<TermKind> &symKinds,
-                               OffsetTriple &triple) {
-  TermKind kind = classifyTerm(S, term, symKinds);
-  if (termCoeff)
-    kind = std::max(kind, classifyTerm(S, termCoeff, symKinds));
-  FailureOr<bool> constFolded =
-      tryConstFoldSummand(S, term, termCoeff, kind, user, triple);
-  if (failed(constFolded))
-    return failure();
-  if (*constFolded)
-    return success();
-  FailureOr<Value> summand = materializeSummand(
-      S, term, termCoeff, user, subs, /*uniform=*/kind == TermKind::Uniform);
-  if (failed(summand))
-    return failure();
-  if (std::optional<int64_t> imm = S.getImmediateValue(*summand)) {
-    std::optional<int64_t> sum = llvm::checkedAdd(triple.instOffset, *imm);
-    if (!sum)
-      return user->emitError("wave.index_expr constant offset overflows i64");
-    triple.instOffset = *sum;
-    return success();
-  }
-  const ::ixs_node *summandExpr = S.scaleBucketExpr(term, termCoeff);
-  Location loc = user->getLoc();
-  if (kind == TermKind::Uniform && S.isUniformValue(*summand)) {
-    triple.soffset = S.addUniformBytes(loc, triple.soffset, *summand);
-    triple.soffsetExpr = S.appendBucketExpr(triple.soffsetExpr, summandExpr);
-    return success();
-  }
-  triple.voffset = triple.voffset
-                       ? S.addByteOffsets(loc, triple.voffset, *summand)
-                       : *summand;
-  triple.voffsetExpr = S.appendBucketExpr(triple.voffsetExpr, summandExpr);
-  return success();
-}
-
 struct AddressPlanAddend {
   sym::ExprHandle expr;
   TermKind kind = TermKind::Lane;
@@ -805,37 +708,6 @@ planAddressFields(WaveAMDMachineSelector &S, const PointerOffset &offset,
   if (failed(appendRemainingAddends(S, addends, plan)))
     return failure();
   return plan;
-}
-
-// Bucketize each top-level summand of `node` into `triple`. ADD
-// structure: coeff + sum(term_coeff[i] * term[i]). For a non-ADD
-// node the whole expression is treated as a single summand.
-LogicalResult bucketize(WaveAMDMachineSelector &S, ::ixs_node *node,
-                        Operation *user, const llvm::StringMap<Value> &subs,
-                        const llvm::StringMap<TermKind> &symKinds,
-                        OffsetTriple &triple) {
-  if (ixs_node_tag(node) != IXS_ADD)
-    return bucketizeSummand(S, node, /*explicitCoeff=*/nullptr, user, subs,
-                            symKinds, triple);
-  ::ixs_node *coeff = ixs_node_add_coeff(node);
-  std::optional<int64_t> coeffInt = staticIntLiteral(coeff);
-  if (!coeffInt)
-    return user->emitError(
-        "wave.index_expr bucketizer expects an integer ADD coefficient");
-  std::optional<int64_t> instOffset =
-      llvm::checkedAdd(triple.instOffset, *coeffInt);
-  if (!instOffset)
-    return user->emitError("wave.index_expr constant offset overflows i64");
-  triple.instOffset = *instOffset;
-  uint32_t nterms = ixs_node_add_nterms(node);
-  for (uint32_t i = 0; i < nterms; ++i) {
-    ::ixs_node *termCoeff = ixs_node_add_term_coeff(node, i);
-    ::ixs_node *term = ixs_node_add_term(node, i);
-    if (failed(
-            bucketizeSummand(S, term, termCoeff, user, subs, symKinds, triple)))
-      return failure();
-  }
-  return success();
 }
 
 } // namespace mlir::wave::wmsel

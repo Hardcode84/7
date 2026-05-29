@@ -11,10 +11,8 @@
 // `WaveAMDMachineSelector` class plus the small free helpers (register
 // builders, `waveamdmachine.*` op factories, pointer offsets) that
 // every selection-time TU needs. The IXS-AST materializer / classifier /
-// constant evaluator / bucketizer cluster lives next to the class as
-// free functions defined in `WaveAMDMachineIndexExpr.cpp` -- this header
-// declares them so `WaveAMDMachine.cpp` can call them and so the
-// bucketizer TU sees the selector's public state.
+// constant evaluator / address planner cluster lives next to the class
+// as free functions defined in `WaveAMDMachineIndexExpr.cpp`.
 //
 //===----------------------------------------------------------------------===//
 
@@ -71,27 +69,6 @@ struct AddressPlan {
   sym::ExprHandle voffsetExpr;
   sym::ExprHandle soffsetExpr;
   sym::ExprHandle fullAddressRemainderExpr;
-  int64_t instOffset = 0;
-};
-
-// Bucketed byte offset for a wave-level pointer. `voffset` carries the
-// per-lane VGPR contribution, `soffset` the uniform SGPR / imm part,
-// and `instOffset` an accumulated immediate that lands in the
-// memory op's `offset N` attr. A null `voffset` / `soffset` and a
-// zero `instOffset` each mean "no contribution".
-//
-// `voffsetExpr` / `soffsetExpr` are the symbolic forms of the V / S
-// buckets; `assumptions` are the per-binding range assumptions. Emit-time
-// spec checks use them to demote overwide slots. `fullExpr` materializes the
-// complete byte offset for addr64 fallback.
-struct OffsetTriple {
-  llvm::SmallVector<sym::PredHandle, 2> assumptions;
-  llvm::SmallVector<std::pair<std::string, Value>, 4> bindings;
-  Value voffset;
-  Value soffset;
-  const ::ixs_node *voffsetExpr = nullptr;
-  const ::ixs_node *soffsetExpr = nullptr;
-  const ::ixs_node *fullExpr = nullptr;
   int64_t instOffset = 0;
 };
 
@@ -170,7 +147,7 @@ inline Value createImm(OpBuilder &builder, Location loc, int64_t value) {
 
 class WaveAMDMachineSelector;
 
-// IXS-AST materializer / classifier / constant evaluator / bucketizer
+// IXS-AST materializer / classifier / constant evaluator / address planner
 // cluster. Defined in `WaveAMDMachineIndexExpr.cpp` as free helpers
 // taking the selector by reference. The selector publishes the
 // `waveamdmachine` op factories, the codegen helpers (addByteOffsets,
@@ -215,11 +192,6 @@ FailureOr<Value> materializeFullPlanAddress(WaveAMDMachineSelector &S,
                                             Operation *user, Value base,
                                             const AddressPlan &plan);
 
-LogicalResult bucketize(WaveAMDMachineSelector &S, ::ixs_node *node,
-                        Operation *user, const llvm::StringMap<Value> &subs,
-                        const llvm::StringMap<TermKind> &symKinds,
-                        OffsetTriple &triple);
-
 // scf.for lowering cluster. Defined in `WaveAMDMachineScfFor.cpp` as free
 // helpers taking the selector by reference, mirroring the IXS-cluster
 // pattern. `selectScfFor` is the entry point dispatched from
@@ -246,7 +218,7 @@ public:
   };
 
   // ---- selector state ----------------------------------------------------
-  // Public because the index-expr / bucketizer cluster lives next door
+  // Public because the index-expr / address-planner cluster lives next door
   // as free helpers (see `WaveAMDMachineIndexExpr.cpp`) and reaches in
   // for `builder`, the substitution maps, the range solver, etc.
   func::FuncOp func;
@@ -262,23 +234,14 @@ public:
   std::optional<unsigned> targetIsaMajor;
   unsigned nextLabel = 0;
 
-  // ---- bucketizer helpers (kept here so out-of-TU callers can use them) --
+  // ---- address-planning helpers -----------------------------------------
   std::optional<sym::PredHandle> bindingAssumption(Value binding,
                                                    StringRef name);
-  Value collapseTriple(Location loc, const OffsetTriple &t);
-  FailureOr<OffsetTriple> scaleTriple(Location loc, OffsetTriple t,
-                                      unsigned size);
-  FailureOr<OffsetTriple> mergeTriples(Location loc, OffsetTriple a,
-                                       OffsetTriple b);
   sym::Store &symbolStore();
   bool slotFitsU32(const ::ixs_node *expr,
                    ArrayRef<sym::PredHandle> assumptions);
   SmallVector<NamedAttribute> instOffsetAttrs(int64_t value,
                                               StringRef attrName);
-  const ::ixs_node *appendBucketExpr(const ::ixs_node *acc,
-                                     const ::ixs_node *add);
-  const ::ixs_node *scaleBucketExpr(const ::ixs_node *value,
-                                    const ::ixs_node *coeff);
 
   // ---- codegen helpers ---------------------------------------------------
   bool isBufferPointer(Type type);

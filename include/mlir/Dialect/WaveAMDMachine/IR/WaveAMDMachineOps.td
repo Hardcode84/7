@@ -768,9 +768,7 @@ def WaveAMDMachine_GlobalLoadTupleB32Op
 // Global LDS DMA ops have no inst-offset slot in the hardware
 // encoding (the `global_load_lds_*` form addresses through V + base
 // only). The `inst_offset` attribute remains for IR shape uniformity
-// but always emits as 0; the spec below tells the bucketizer to sink
-// any constant component into `voffset` rather than parking it in
-// the attribute.
+// but always emits as 0; address planning sinks constants into `voffset`.
 def WaveAMDMachine_GlobalLoadLdsB32Op
     : WaveAMDMachine_GlobalMemoryOp<"global_load_lds_b32", [WaveAMDMachine_VMEMLoad, MemoryEffects<[MemRead, MemWrite]>]> {
   let summary = "global-to-LDS 32-bit DMA load";
