@@ -7,7 +7,7 @@
 //
 //===----------------------------------------------------------------------===//
 //
-// IXS-AST materializer, classifier, constant evaluator, and address planner.
+// IXS-AST materializer, classifier, and address planner.
 // Per-op selection stays in `WaveAMDMachine.cpp`.
 //
 //===----------------------------------------------------------------------===//
@@ -17,8 +17,6 @@
 #include "llvm/Support/CheckedArithmetic.h"
 #include "llvm/Support/MathExtras.h"
 
-#include <limits>
-#include <numeric>
 #include <optional>
 
 using namespace mlir;
@@ -32,49 +30,7 @@ namespace {
 
 // IXS_INT or IXS_RAT with unit denominator; nullopt otherwise.
 std::optional<int64_t> staticIntLiteral(::ixs_node *node) {
-  switch (ixs_node_tag(node)) {
-  case IXS_INT:
-    return ixs_node_int_val(node);
-  case IXS_RAT:
-    if (ixs_node_rat_den(node) == 1)
-      return ixs_node_rat_num(node);
-    return std::nullopt;
-  default:
-    return std::nullopt;
-  }
-}
-
-static std::optional<int64_t> checkedLCM(std::optional<int64_t> lhs,
-                                         std::optional<int64_t> rhs) {
-  if (!lhs || !rhs)
-    return std::nullopt;
-  int64_t gcd = std::gcd(*lhs, *rhs);
-  return llvm::checkedMul(*lhs / gcd, *rhs);
-}
-
-static bool divOverflows(int64_t p, int64_t q) {
-  return q == 0 ||
-         (p == std::numeric_limits<int64_t>::min() && q == int64_t{-1});
-}
-
-static std::optional<int64_t> floorDiv(int64_t p, int64_t q) {
-  if (divOverflows(p, q))
-    return std::nullopt;
-  int64_t div = p / q;
-  int64_t rem = p % q;
-  if (rem == 0 || (rem < 0) == (q < 0))
-    return div;
-  return llvm::checkedSub(div, int64_t{1});
-}
-
-static std::optional<int64_t> ceilDiv(int64_t p, int64_t q) {
-  if (divOverflows(p, q))
-    return std::nullopt;
-  int64_t div = p / q;
-  int64_t rem = p % q;
-  if (rem == 0 || (rem < 0) != (q < 0))
-    return div;
-  return llvm::checkedAdd(div, int64_t{1});
+  return sym::getIntegerLiteralValue(sym::ExprHandle(node));
 }
 
 FailureOr<Value> materializeIxsRat(WaveAMDMachineSelector &S, ::ixs_node *node,
@@ -220,7 +176,7 @@ FailureOr<Value> materializeIxsFloor(WaveAMDMachineSelector &S,
                                      ::ixs_node *node, Operation *user,
                                      const llvm::StringMap<Value> &subs) {
   ::ixs_node *child = ixs_node_unary_arg(node);
-  std::optional<int64_t> den = collectDenominator(child);
+  std::optional<int64_t> den = sym::collectDenominator(sym::ExprHandle(child));
   if (!den)
     return user->emitError("wave.index_expr denominator overflows i64");
   if (*den == 1)
@@ -241,7 +197,7 @@ FailureOr<Value> materializeIxsCeil(WaveAMDMachineSelector &S, ::ixs_node *node,
                                     Operation *user,
                                     const llvm::StringMap<Value> &subs) {
   ::ixs_node *child = ixs_node_unary_arg(node);
-  std::optional<int64_t> den = collectDenominator(child);
+  std::optional<int64_t> den = sym::collectDenominator(sym::ExprHandle(child));
   if (!den)
     return user->emitError("wave.index_expr denominator overflows i64");
   if (*den == 1)
@@ -293,88 +249,6 @@ TermKind classifyMul(WaveAMDMachineSelector &S, ::ixs_node *node,
     k = std::max(k,
                  classifyTerm(S, ixs_node_mul_factor_base(node, i), symKinds));
   return k;
-}
-
-std::optional<int64_t> evalConstantAdd(WaveAMDMachineSelector &S,
-                                       ::ixs_node *node) {
-  std::optional<int64_t> acc = evalConstantNode(S, ixs_node_add_coeff(node));
-  if (!acc)
-    return std::nullopt;
-  uint32_t n = ixs_node_add_nterms(node);
-  for (uint32_t i = 0; i < n; ++i) {
-    std::optional<int64_t> tc =
-        evalConstantNode(S, ixs_node_add_term_coeff(node, i));
-    std::optional<int64_t> t = evalConstantNode(S, ixs_node_add_term(node, i));
-    if (!tc || !t)
-      return std::nullopt;
-    acc = llvm::checkedMulAdd(*tc, *t, *acc);
-    if (!acc)
-      return std::nullopt;
-  }
-  return acc;
-}
-
-std::optional<int64_t> evalConstantMul(WaveAMDMachineSelector &S,
-                                       ::ixs_node *node) {
-  std::optional<int64_t> acc = evalConstantNode(S, ixs_node_mul_coeff(node));
-  if (!acc)
-    return std::nullopt;
-  uint32_t n = ixs_node_mul_nfactors(node);
-  for (uint32_t i = 0; i < n; ++i) {
-    int32_t exp = ixs_node_mul_factor_exp(node, i);
-    if (exp < 0)
-      return std::nullopt;
-    std::optional<int64_t> base =
-        evalConstantNode(S, ixs_node_mul_factor_base(node, i));
-    if (!base)
-      return std::nullopt;
-    int64_t pow = 1;
-    for (int32_t e = 0; e < exp; ++e) {
-      std::optional<int64_t> next = llvm::checkedMul(pow, *base);
-      if (!next)
-        return std::nullopt;
-      pow = *next;
-    }
-    acc = llvm::checkedMul(*acc, pow);
-    if (!acc)
-      return std::nullopt;
-  }
-  return acc;
-}
-
-// Constant-fold IXS_FLOOR / IXS_CEIL by scaling the child to integer
-// via ixsimpl, then dividing.
-std::optional<int64_t> evalConstantFloorOrCeil(WaveAMDMachineSelector &S,
-                                               ::ixs_node *node) {
-  ::ixs_node *child = ixs_node_unary_arg(node);
-  std::optional<int64_t> den = collectDenominator(child);
-  if (!den || *den <= 0)
-    return std::nullopt;
-  auto factor = sym::composeExprInt(S.symbolStore(), *den);
-  if (failed(factor))
-    return std::nullopt;
-  auto scaled = sym::composeExprBinary(S.symbolStore(), sym::ExprHandle(child),
-                                       sym::ExprBinaryOp::Mul, *factor);
-  if (failed(scaled))
-    return std::nullopt;
-  std::optional<int64_t> num =
-      evalConstantNode(S, const_cast<::ixs_node *>(scaled->raw()));
-  if (!num)
-    return std::nullopt;
-  return ixs_node_tag(node) == IXS_FLOOR ? floorDiv(*num, *den)
-                                         : ceilDiv(*num, *den);
-}
-
-std::optional<int64_t> evalConstantMod(WaveAMDMachineSelector &S,
-                                       ::ixs_node *node) {
-  std::optional<int64_t> lhs = evalConstantNode(S, ixs_node_binary_lhs(node));
-  std::optional<int64_t> rhs = evalConstantNode(S, ixs_node_binary_rhs(node));
-  if (!lhs || !rhs || divOverflows(*lhs, *rhs))
-    return std::nullopt;
-  int64_t r = *lhs % *rhs;
-  if (r != 0 && (r < 0) != (*rhs < 0))
-    r += *rhs;
-  return r;
 }
 
 struct AddressPlanAddend {
@@ -501,12 +375,7 @@ collectPlanAddends(WaveAMDMachineSelector &S, ::ixs_node *node,
 
 static FailureOr<sym::ExprHandle> expandPlanExpr(WaveAMDMachineSelector &S,
                                                  sym::ExprHandle expr) {
-  sym::Session session(S.symbolStore());
-  ::ixs_node *expanded =
-      ixs_expand(session.raw(), const_cast<::ixs_node *>(expr.raw()));
-  if (!expanded)
-    return failure();
-  return sym::ExprHandle(expanded);
+  return sym::expandExpr(S.symbolStore(), expr);
 }
 
 static LogicalResult takeInstOffsetAddends(
@@ -515,8 +384,7 @@ static LogicalResult takeInstOffsetAddends(
   for (AddressPlanAddend &addend : addends) {
     if (addend.taken || addend.kind != TermKind::Const)
       continue;
-    ::ixs_node *node = const_cast<::ixs_node *>(addend.expr.raw());
-    std::optional<int64_t> value = evalConstantNode(S, node);
+    std::optional<int64_t> value = sym::getIntegerLiteralValue(addend.expr);
     std::optional<int64_t> next =
         value ? llvm::checkedAdd(plan.instOffset, *value) : std::nullopt;
     if (next && instOffsetFits(*next, spec)) {
@@ -540,7 +408,7 @@ static void takeFirstPlanSlot(WaveAMDMachineSelector &S, TermKind kind,
   for (AddressPlanAddend &addend : addends) {
     if (addend.taken || addend.kind != kind)
       continue;
-    if (!S.slotFitsU32(addend.expr.raw(), plan.assumptions))
+    if (!S.slotFitsU32(addend.expr, plan.assumptions))
       continue;
     slotExpr = addend.expr;
     addend.taken = true;
@@ -566,35 +434,6 @@ appendRemainingAddends(WaveAMDMachineSelector &S,
 } // namespace
 
 // ---- public surface (declared in WaveAMDMachineSelector.h) ----------------
-
-std::optional<int64_t> collectDenominator(::ixs_node *node) {
-  switch (ixs_node_tag(node)) {
-  case IXS_RAT: {
-    int64_t den = ixs_node_rat_den(node);
-    return den > 0 ? den : 1;
-  }
-  case IXS_ADD: {
-    std::optional<int64_t> d = collectDenominator(ixs_node_add_coeff(node));
-    uint32_t n = ixs_node_add_nterms(node);
-    for (uint32_t i = 0; i < n; ++i) {
-      d = checkedLCM(d, collectDenominator(ixs_node_add_term_coeff(node, i)));
-      d = checkedLCM(d, collectDenominator(ixs_node_add_term(node, i)));
-    }
-    return d;
-  }
-  case IXS_MUL: {
-    std::optional<int64_t> d = collectDenominator(ixs_node_mul_coeff(node));
-    uint32_t n = ixs_node_mul_nfactors(node);
-    for (uint32_t i = 0; i < n; ++i)
-      d = checkedLCM(d, collectDenominator(ixs_node_mul_factor_base(node, i)));
-    return d;
-  }
-  default:
-    // INT / SYM are integer-valued leaves; FLOOR / CEIL / MOD are
-    // integer-valued by construction.
-    return 1;
-  }
-}
 
 FailureOr<Value> materializeIndexExprNode(WaveAMDMachineSelector &S,
                                           const ::ixs_node *cnode,
@@ -649,28 +488,6 @@ TermKind classifyTerm(WaveAMDMachineSelector &S, ::ixs_node *node,
                     classifyTerm(S, ixs_node_binary_rhs(node), symKinds));
   default:
     return TermKind::Lane;
-  }
-}
-
-// Constant-fold a node that classifyTerm decided is Const, returning
-// its int value when expressible without materialization. ADD / MUL /
-// FLOOR / CEIL / MOD recurse here; non-literal leaves break the fold.
-std::optional<int64_t> evalConstantNode(WaveAMDMachineSelector &S,
-                                        ::ixs_node *node) {
-  if (std::optional<int64_t> v = staticIntLiteral(node))
-    return v;
-  switch (ixs_node_tag(node)) {
-  case IXS_ADD:
-    return evalConstantAdd(S, node);
-  case IXS_MUL:
-    return evalConstantMul(S, node);
-  case IXS_FLOOR:
-  case IXS_CEIL:
-    return evalConstantFloorOrCeil(S, node);
-  case IXS_MOD:
-    return evalConstantMod(S, node);
-  default:
-    return std::nullopt;
   }
 }
 

@@ -110,6 +110,16 @@ sym::ExprHandle mustSimplify(sym::Store &store, sym::ExprHandle value) {
   return *handle;
 }
 
+sym::ExprHandle mustExpand(sym::Store &store, sym::ExprHandle value) {
+  std::string diagnostic;
+  auto handle = sym::expandExpr(store, value, &diagnostic);
+  if (failed(handle)) {
+    llvm::errs() << "failed to expand: " << diagnostic << "\n";
+    std::exit(1);
+  }
+  return *handle;
+}
+
 void printRange(llvm::StringRef label, sym::Store &store, sym::ExprHandle expr,
                 llvm::ArrayRef<sym::PredHandle> assumptions, int64_t lo,
                 int64_t hi) {
@@ -118,6 +128,37 @@ void printRange(llvm::StringRef label, sym::Store &store, sym::ExprHandle expr,
                        ? "true"
                        : "false")
                << "\n";
+}
+
+void printUtilitySmoke(sym::Store &store, sym::ExprHandle x) {
+  sym::ExprHandle one = mustBuildInt(store, 1);
+  sym::ExprHandle two = mustBuildInt(store, 2);
+  sym::ExprHandle four = mustBuildInt(store, 4);
+  sym::ExprHandle seven = mustBuildInt(store, 7);
+  sym::ExprHandle xPlusOne = mustCompose(store, x, sym::ExprBinaryOp::Add, one);
+  sym::ExprHandle xPlusTwo = mustCompose(store, x, sym::ExprBinaryOp::Add, two);
+  sym::ExprHandle product =
+      mustCompose(store, xPlusOne, sym::ExprBinaryOp::Mul, xPlusTwo);
+  printRendered(store, "expanded-product", mustExpand(store, product));
+
+  sym::ExprHandle sevenHalf =
+      mustCompose(store, seven, sym::ExprBinaryOp::Div, two);
+  sym::ExprHandle xQuarter =
+      mustCompose(store, x, sym::ExprBinaryOp::Div, four);
+  sym::ExprHandle denomExpr =
+      mustCompose(store, sevenHalf, sym::ExprBinaryOp::Add, xQuarter);
+  printLiteral("denominator-lcm", sym::collectDenominator(denomExpr));
+
+  auto rangeAssumption = sym::rangeAssumption(store, "x", 0, 31);
+  if (failed(rangeAssumption)) {
+    llvm::errs() << "failed to build range assumption\n";
+    std::exit(1);
+  }
+  llvm::SmallVector<sym::PredHandle, 1> assumptions{*rangeAssumption};
+  llvm::outs() << "fits-u32: "
+               << boolName(sym::provablyFitsU32(store, x, assumptions)) << "\n";
+  llvm::outs() << "fits-u32-unbounded: "
+               << boolName(sym::provablyFitsU32(store, x, {})) << "\n";
 }
 
 void printFacadeSmoke(sym::Store &store, sym::ExprHandle x,
@@ -252,6 +293,7 @@ int main() {
   sym::ExprHandle five = mustBuildInt(store, 5);
   sym::ExprHandle six = mustBuildInt(store, 6);
 
+  printUtilitySmoke(store, x);
   sym::ExprHandle threeX = mustCompose(store, three, sym::ExprBinaryOp::Mul, x);
   printFacadeSmoke(store, x, five, threeX);
 

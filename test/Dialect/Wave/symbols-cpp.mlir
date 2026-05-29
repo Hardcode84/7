@@ -9,6 +9,12 @@
 // CHECK: non-unit-rat: none
 // CHECK: symbol: none
 
+// Expansion, denominator-LCM, and u32 range wrappers stay behind WaveSymbols.
+// CHECK: expanded-product: 2 + 3*x + x**2
+// CHECK: denominator-lcm: 4
+// CHECK: fits-u32: true
+// CHECK: fits-u32-unbounded: false
+
 // Const-correct facade over ixsimpl ADD/MUL/unary/binary/predicate nodes.
 // CHECK: view-add-valid: true
 // CHECK: view-add-kind: add

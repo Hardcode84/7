@@ -431,11 +431,8 @@ sym::Store &WaveAMDMachineSelector::symbolStore() {
 }
 
 bool WaveAMDMachineSelector::slotFitsU32(
-    const ::ixs_node *expr, ArrayRef<sym::PredHandle> assumptions) {
-  if (!expr)
-    return false;
-  return sym::provablyInRange(symbolStore(), sym::ExprHandle(expr), assumptions,
-                              int64_t{0}, (int64_t{1} << 32) - 1);
+    sym::ExprHandle expr, ArrayRef<sym::PredHandle> assumptions) {
+  return sym::provablyFitsU32(symbolStore(), expr, assumptions);
 }
 
 static std::optional<int64_t> staticIntLiteral(::ixs_node *node) {
@@ -799,7 +796,7 @@ static FailureOr<bool> tryAppendRemainderToSlot(WaveAMDMachineSelector &S,
       S, slot, plan.fullAddressRemainderExpr, plan.assumptions);
   if (failed(joined))
     return failure();
-  if (!S.slotFitsU32(joined->raw(), plan.assumptions))
+  if (!S.slotFitsU32(*joined, plan.assumptions))
     return false;
   slot = *joined;
   plan.fullAddressRemainderExpr = {};
@@ -2178,13 +2175,12 @@ static FailureOr<PointerOffset> scalePointerOffset(WaveAMDMachineSelector &S,
       S.symbolStore(), out.expr, sym::ExprBinaryOp::Mul, *scale);
   if (failed(scaled))
     return failure();
-  sym::Session session(S.symbolStore());
-  ::ixs_node *expanded =
-      ixs_expand(session.raw(), const_cast<::ixs_node *>(scaled->raw()));
-  if (!expanded || ixs_is_error(expanded) || !ixs_node_is_expr(expanded))
+  FailureOr<sym::ExprHandle> expanded =
+      sym::expandExpr(S.symbolStore(), *scaled);
+  if (failed(expanded))
     return failure();
   FailureOr<sym::ExprHandle> simplified =
-      simplifyPointerOffset(S, sym::ExprHandle(expanded), out.assumptions);
+      simplifyPointerOffset(S, *expanded, out.assumptions);
   if (failed(simplified))
     return failure();
   out.expr = *simplified;

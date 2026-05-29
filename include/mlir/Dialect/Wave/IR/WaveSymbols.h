@@ -255,6 +255,8 @@ mlir::FailureOr<PredHandle> simplifyPred(Store &store, PredHandle value,
 mlir::FailureOr<ExprHandle> simplifyExpr(Store &store, ExprHandle value,
                                          llvm::ArrayRef<PredHandle> assumptions,
                                          std::string *diagnostic = nullptr);
+mlir::FailureOr<ExprHandle> expandExpr(Store &store, ExprHandle value,
+                                       std::string *diagnostic = nullptr);
 
 /// Three-valued result of a predicate entailment query.
 enum class CheckResult { True, False, Unknown };
@@ -273,10 +275,13 @@ mlir::FailureOr<PredHandle> rangeAssumption(Store &store, llvm::StringRef name,
 bool provablyInRange(Store &store, ExprHandle expr,
                      llvm::ArrayRef<PredHandle> assumptions, int64_t lo,
                      int64_t hi);
+bool provablyFitsU32(Store &store, ExprHandle expr,
+                     llvm::ArrayRef<PredHandle> assumptions);
 
 /// Integer payload of a structurally-integral expression. `nullopt`
 /// for non-integral nodes.
 std::optional<int64_t> getIntegerLiteralValue(ExprHandle value);
+std::optional<int64_t> collectDenominator(ExprHandle value);
 
 /// Walk every symbolic leaf name in `value`.
 void walkSymbolNames(ExprHandle value,

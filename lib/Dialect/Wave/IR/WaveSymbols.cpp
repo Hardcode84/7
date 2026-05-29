@@ -11,12 +11,14 @@
 #include "mlir/Dialect/Wave/IR/Wave.h"
 #include "mlir/IR/OpImplementation.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/Support/CheckedArithmetic.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/raw_ostream.h"
 
 #include <array>
 #include <cassert>
 #include <limits>
+#include <numeric>
 #include <utility>
 
 using namespace mlir;
@@ -73,6 +75,14 @@ static std::optional<PredCmpOp> getPredCmpOp(ixs_cmp_op op) {
     return PredCmpOp::Ne;
   }
   return std::nullopt;
+}
+
+static std::optional<int64_t> checkedLCM(std::optional<int64_t> lhs,
+                                         std::optional<int64_t> rhs) {
+  if (!lhs || !rhs)
+    return std::nullopt;
+  int64_t gcd = std::gcd(*lhs, *rhs);
+  return llvm::checkedMul(*lhs / gcd, *rhs);
 }
 
 static std::string joinSessionErrors(ixs_session *session) {
@@ -649,6 +659,18 @@ mlir::wave::sym::simplifyExpr(Store &store, ExprHandle value,
                     "failed to simplify wave.expr");
 }
 
+FailureOr<ExprHandle> mlir::wave::sym::expandExpr(Store &store,
+                                                  ExprHandle value,
+                                                  std::string *diagnostic) {
+  Session session(store);
+  ixs_node *imported =
+      importNode(session, value.raw(), diagnostic, "wave.expr");
+  if (!imported)
+    return failure();
+  return finishExpr(session.raw(), ixs_expand(session.raw(), imported),
+                    diagnostic, "failed to expand wave.expr");
+}
+
 mlir::wave::sym::CheckResult
 mlir::wave::sym::checkPredicate(Store &store, PredHandle predicate,
                                 ArrayRef<PredHandle> assumptions) {
@@ -713,6 +735,12 @@ bool mlir::wave::sym::provablyInRange(Store &store, ExprHandle expr,
          checkPredicate(store, *leHi, assumptions) == CheckResult::True;
 }
 
+bool mlir::wave::sym::provablyFitsU32(Store &store, ExprHandle expr,
+                                      ArrayRef<PredHandle> assumptions) {
+  return provablyInRange(store, expr, assumptions, int64_t{0},
+                         (int64_t{1} << 32) - 1);
+}
+
 std::optional<int64_t>
 mlir::wave::sym::getIntegerLiteralValue(ExprHandle value) {
   ExprView view(value);
@@ -722,6 +750,35 @@ mlir::wave::sym::getIntegerLiteralValue(ExprHandle value) {
   if (rational && rational->denominator == 1)
     return rational->numerator;
   return std::nullopt;
+}
+
+std::optional<int64_t> mlir::wave::sym::collectDenominator(ExprHandle value) {
+  ExprView view(value);
+  ExprKind kind = view.getKind();
+  if (kind == ExprKind::Invalid)
+    return std::nullopt;
+  if (kind == ExprKind::Rational) {
+    std::optional<RationalLiteral> rational = view.getRational();
+    if (!rational)
+      return std::nullopt;
+    return rational->denominator > 0 ? rational->denominator : 1;
+  }
+  if (kind == ExprKind::Add) {
+    std::optional<int64_t> d = collectDenominator(view.getAddConstant());
+    for (uint32_t i = 0, e = view.getAddTermCount(); i != e; ++i) {
+      AddTerm term = view.getAddTerm(i);
+      d = checkedLCM(d, collectDenominator(term.coefficient));
+      d = checkedLCM(d, collectDenominator(term.term));
+    }
+    return d;
+  }
+  if (kind == ExprKind::Mul) {
+    std::optional<int64_t> d = collectDenominator(view.getMulCoefficient());
+    for (uint32_t i = 0, e = view.getMulFactorCount(); i != e; ++i)
+      d = checkedLCM(d, collectDenominator(view.getMulFactor(i).base));
+    return d;
+  }
+  return 1;
 }
 
 void mlir::wave::sym::walkSymbolNames(

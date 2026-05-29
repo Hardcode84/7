@@ -7,12 +7,8 @@
 //
 //===----------------------------------------------------------------------===//
 //
-// Private header for the Wave-to-WaveAMDMachine selector. Holds the
-// `WaveAMDMachineSelector` class plus the small free helpers (register
-// builders, `waveamdmachine.*` op factories, pointer offsets) that
-// every selection-time TU needs. The IXS-AST materializer / classifier /
-// constant evaluator / address planner cluster lives next to the class
-// as free functions defined in `WaveAMDMachineIndexExpr.cpp`.
+// Private selector header: shared factories, register builders, pointer
+// offsets, and index-expression helpers.
 //
 //===----------------------------------------------------------------------===//
 
@@ -148,12 +144,8 @@ inline Value createImm(OpBuilder &builder, Location loc, int64_t value) {
 
 class WaveAMDMachineSelector;
 
-// IXS-AST materializer / classifier / constant evaluator / address planner
-// cluster. Defined in `WaveAMDMachineIndexExpr.cpp` as free helpers
-// taking the selector by reference. The selector publishes the
-// `waveamdmachine` op factories, the codegen helpers (addByteOffsets,
-// addUniformBytes, mul*, shr/and), the binding maps, and the symbol
-// store via public methods that these helpers call.
+// Index-expression helpers share selector factories, bindings, and symbol
+// store.
 
 FailureOr<Value> materializeIndexExprNode(WaveAMDMachineSelector &S,
                                           const ::ixs_node *node,
@@ -162,11 +154,6 @@ FailureOr<Value> materializeIndexExprNode(WaveAMDMachineSelector &S,
 
 TermKind classifyTerm(WaveAMDMachineSelector &S, ::ixs_node *node,
                       const llvm::StringMap<TermKind> &symKinds);
-
-std::optional<int64_t> evalConstantNode(WaveAMDMachineSelector &S,
-                                        ::ixs_node *node);
-
-std::optional<int64_t> collectDenominator(::ixs_node *node);
 
 FailureOr<AddressPlan>
 planAddressFields(WaveAMDMachineSelector &S, const PointerOffset &offset,
@@ -243,8 +230,7 @@ public:
   std::optional<sym::PredHandle> bindingAssumption(Value binding,
                                                    StringRef name);
   sym::Store &symbolStore();
-  bool slotFitsU32(const ::ixs_node *expr,
-                   ArrayRef<sym::PredHandle> assumptions);
+  bool slotFitsU32(sym::ExprHandle expr, ArrayRef<sym::PredHandle> assumptions);
   SmallVector<NamedAttribute> instOffsetAttrs(int64_t value,
                                               StringRef attrName);
 
