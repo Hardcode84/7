@@ -1406,9 +1406,8 @@ private:
       Value lhs = op.getOperand(0);
       Value rhs = op.getOperand(1);
       // VOP2 e32: src1 must be a VGPR. Both SGPR and imm RHS need to
-      // swap into src0; if both sides are non-VGPR we'd need a VOP3
-      // form, but the bucketizer only emits these with a VGPR on one
-      // side so the swap suffices.
+      // swap into src0; if both sides are non-VGPR we'd need a VOP3 form.
+      // Wave selection emits these with a VGPR on one side.
       if (!isVGPR(rhs))
         std::swap(lhs, rhs);
       unsigned opcode = isa<waveamdmachine::VAndB32Op>(op)

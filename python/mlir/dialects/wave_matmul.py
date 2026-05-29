@@ -385,7 +385,7 @@ def _emit_tile_coords(bld: dsl.FunctionBuilder, cfg: _MatmulConfig) -> _TileCoor
     All address arithmetic -- including the shri / andi pieces that
     decompose `wi` into `wave_id`, `m_wave`, `n_wave`, and lane into
     `lane_mod16` -- lives inside one `wave.index_expr` per pointer.
-    The bucketizer's floor / mod materializer lowers the non-linear
+    Address expression materialization lowers the non-linear
     bits to shr / and at code-emit time, so the kernel surface stays
     structurally symbolic.
     """
@@ -403,8 +403,7 @@ def _emit_tile_coords(bld: dsl.FunctionBuilder, cfg: _MatmulConfig) -> _TileCoor
     wg_n_val = bld.assume_range(bld.workgroup_id(axis=1), 0, cfg.N_blocks - 1)
 
     # Symbolic offset side via the shared `dsl.sym_ctx`. wave_id /
-    # m_wave / n_wave / lane_mod16 ride floor / mod nodes that the
-    # bucketizer lowers to shr / and.
+    # m_wave / n_wave / lane_mod16 ride floor / mod nodes lowered to shr / and.
     wi = dsl.sym("wi")
     wg_m = dsl.sym("wg_m")
     wg_n = dsl.sym("wg_n")

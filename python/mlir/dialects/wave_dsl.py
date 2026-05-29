@@ -86,8 +86,7 @@ register_passes()
 # Wave dialect's per-MLIRContext symbol store at the FFI boundary.
 # Sharing one Python-side context across the process keeps symbol
 # identity stable (e.g. `sym("lane")` is the same node for every kernel
-# in this interpreter), which the bucketizer's hash-consed equality
-# relies on.
+# in this interpreter), keeping structural imports deterministic.
 sym_ctx: ixsimpl.Context = ixsimpl.Context()
 
 
@@ -540,7 +539,7 @@ class FunctionBuilder:
     def assume_range(self, value: Value, lo: int, hi: int) -> Value:
         """Identity at runtime; seeds IRA with `lo <= value <= hi`.
 
-        The WaveAMDMachine bucketizer's width-fit check turns a tighter
+        The WaveAMDMachine address planner's width-fit check turns a tighter
         proven range into a soffset bucket survival: e.g. wrapping
         `wave.workgroup_id` with `assume_range(_, 0, grid_dim - 1)`
         lets `wg * stride` fit 32-bit and ride the SGPR soffset slot
@@ -829,7 +828,7 @@ class FunctionBuilder:
         offset where ``lane = workitem_id_x mod wave_size`` (single
         ``v_lshrrev`` / ``v_and`` pair on AMDGPU since both ``R`` and
         ``wave_size`` are powers of two), passes the result through a
-        ``wave.index_expr`` so the bucketizer folds the per-element
+        ``wave.index_expr`` so address planning folds the per-element
         scale into a single shift, and emits a tuple ``wave.store``.
         The WaveAMDMachine backend serializes that into ``R`` per-component
         ``*_store_tuple_b32`` ops.
