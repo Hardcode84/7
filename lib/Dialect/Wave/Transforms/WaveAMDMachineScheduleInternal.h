@@ -1,0 +1,65 @@
+//===- WaveAMDMachineScheduleInternal.h - Scheduler internals ---*- C++ -*-===//
+//
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+//
+//===----------------------------------------------------------------------===//
+
+#ifndef DIALECT_WAVE_TRANSFORMS_WAVEAMDMACHINESCHEDULEINTERNAL_H
+#define DIALECT_WAVE_TRANSFORMS_WAVEAMDMACHINESCHEDULEINTERNAL_H
+
+#include "WaveAMDMachineScheduleSupport.h"
+
+#include "mlir/Dialect/WaveAMDMachine/CostModel/ArchData.h"
+#include "mlir/Dialect/WaveAMDMachine/CostModel/EventSimulator.h"
+#include "mlir/Support/LLVM.h"
+
+namespace mlir::wave {
+
+struct GraphTables {
+  SmallVector<SmallVector<unsigned, 4>, 16> successors;
+  SmallVector<unsigned, 16> pendingPreds;
+};
+
+struct NodeMetrics {
+  int latency = 0;
+  int64_t criticalPath = 0;
+  bool memory = false;
+  bool reachesMemory = false;
+  bool matrix = false;
+  bool reachesMatrix = false;
+};
+
+enum class SchedulePolicy {
+  CriticalPath,
+  MemoryEarly,
+  MatrixFeed,
+};
+
+struct OrderCandidate {
+  StringRef name;
+  SmallVector<unsigned, 16> order;
+};
+
+GraphTables buildGraphTables(const ScheduleRegion &region,
+                             const DependenceGraph &graph);
+SmallVector<NodeMetrics, 16>
+computeNodeMetrics(const ScheduleRegion &region, const GraphTables &tables,
+                   const waveamdmachine::ArchData &arch,
+                   const waveamdmachine::EventSimConfig &modelConfig);
+int memoryPriority(const NodeMetrics &metrics);
+int matrixPriority(const NodeMetrics &metrics);
+bool buildListOrder(const GraphTables &tables, ArrayRef<NodeMetrics> metrics,
+                    SchedulePolicy policy, SmallVectorImpl<unsigned> &order);
+bool sameOrder(ArrayRef<unsigned> lhs, ArrayRef<unsigned> rhs);
+bool isPressureSearchEnabled(const RegisterPressureBudgets &budgets);
+void addGuidedBeamCandidates(SmallVectorImpl<OrderCandidate> &candidates,
+                             const GraphTables &tables,
+                             ArrayRef<NodeMetrics> metrics,
+                             const ScheduleRegion &region,
+                             const RegisterPressureBudgets &budgets);
+
+} // namespace mlir::wave
+
+#endif // DIALECT_WAVE_TRANSFORMS_WAVEAMDMACHINESCHEDULEINTERNAL_H

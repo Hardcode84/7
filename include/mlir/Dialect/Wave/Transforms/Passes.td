@@ -110,6 +110,8 @@ def WaveAMDMachineSchedule
   let options = [
     Option<"applySchedule", "apply-schedule", "bool", /*default=*/"false",
            "Apply the best non-worse model-scored local schedule.">,
+    Option<"beamSearch", "beam-search", "bool", /*default=*/"false",
+           "Enable guided beam-search scheduler candidates.">,
     Option<"pressureAwareSelection", "pressure-aware-selection", "bool", /*default=*/"false",
            "Use register-pressure budgets to select scheduler candidates.">,
     Option<"modelWaves", "model-waves", "int", /*default=*/"1",
@@ -163,6 +165,8 @@ def WaveAMDMachineScheduleReport
            "Print model-scored scheduler candidate orders to stderr.">,
     Option<"printClasses", "print-classes", "bool", /*default=*/"false",
            "Print scheduler class, functional unit, and latency for each local-region op.">,
+    Option<"beamSearch", "beam-search", "bool", /*default=*/"false",
+           "Enable guided beam-search scheduler candidates.">,
     Option<"pressureAwareSelection", "pressure-aware-selection", "bool", /*default=*/"false",
            "Use register-pressure budgets to select scheduler candidates.">,
     Option<"modelWaves", "model-waves", "int", /*default=*/"1",

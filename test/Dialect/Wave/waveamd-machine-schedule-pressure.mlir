@@ -1,6 +1,6 @@
-// RUN: wave-opt %s --waveamd-machine-schedule-report='print-candidates=1 pressure-vgpr-budget=3 pressure-target-waves-override=-1' 2>&1 | FileCheck %s --check-prefix=DISABLED
-// RUN: wave-opt %s --waveamd-machine-schedule-report='print-candidates=1 pressure-aware-selection=1 pressure-vgpr-budget=3 pressure-target-waves-override=-1' 2>&1 | FileCheck %s --check-prefix=HARD
-// RUN: wave-opt %s --waveamd-machine-schedule-report='print-candidates=1 pressure-aware-selection=1 pressure-critical-vgpr-budget=3 pressure-target-waves-override=-1' 2>&1 | FileCheck %s --check-prefix=CRIT
+// RUN: wave-opt %s --waveamd-machine-schedule-report='print-candidates=1 beam-search=1 pressure-vgpr-budget=3 pressure-target-waves-override=-1' 2>&1 | FileCheck %s --check-prefix=DISABLED
+// RUN: wave-opt %s --waveamd-machine-schedule-report='print-candidates=1 beam-search=1 pressure-aware-selection=1 pressure-vgpr-budget=3 pressure-target-waves-override=-1' 2>&1 | FileCheck %s --check-prefix=HARD
+// RUN: wave-opt %s --waveamd-machine-schedule-report='print-candidates=1 beam-search=1 pressure-aware-selection=1 pressure-critical-vgpr-budget=3 pressure-target-waves-override=-1' 2>&1 | FileCheck %s --check-prefix=CRIT
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 func.func @pressure_guard(%off: !waveamdmachine.reg<vgpr, 1>,

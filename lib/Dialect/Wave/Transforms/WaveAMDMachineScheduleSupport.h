@@ -156,12 +156,11 @@ void printRegionScores(const ScheduleRegion &region,
                        const RegisterPressureBudgets &budgets,
                        const CandidateRequest &candidate, bool scoreCandidate);
 
-ScheduleDecision
-evaluateScheduleCandidates(const ScheduleRegion &region,
-                           const DependenceGraph &graph,
-                           ArchResolution archResolution,
-                           const waveamdmachine::EventSimConfig &modelConfig,
-                           const RegisterPressureBudgets &budgets);
+ScheduleDecision evaluateScheduleCandidates(
+    const ScheduleRegion &region, const DependenceGraph &graph,
+    ArchResolution archResolution,
+    const waveamdmachine::EventSimConfig &modelConfig,
+    const RegisterPressureBudgets &budgets, bool enableBeamSearch);
 void printOrder(raw_ostream &os, ArrayRef<unsigned> order);
 void printCandidateDiagnostics(ScheduleRegion region,
                                const ScheduleDecision &decision,

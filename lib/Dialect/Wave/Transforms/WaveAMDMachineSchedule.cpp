@@ -95,8 +95,9 @@ struct WaveAMDMachineSchedulePass
                         ArchResolution archResolution,
                         const waveamdmachine::EventSimConfig &modelConfig,
                         const RegisterPressureBudgets &pressureBudgets) {
-    ScheduleDecision decision = evaluateScheduleCandidates(
-        region, graph, archResolution, modelConfig, pressureBudgets);
+    ScheduleDecision decision =
+        evaluateScheduleCandidates(region, graph, archResolution, modelConfig,
+                                   pressureBudgets, beamSearch);
     bool willApply =
         applySchedule && shouldApplyDecision(decision, pressureBudgets);
     if (willApply)
