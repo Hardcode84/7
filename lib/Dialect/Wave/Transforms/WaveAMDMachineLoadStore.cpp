@@ -574,19 +574,15 @@ LogicalResult selectGlobalOrBufferLoad(WaveAMDMachineSelector &S, LoadOp op,
 
 LogicalResult selectStore(WaveAMDMachineSelector &S, StoreOp op) {
   auto baseIt = S.pointerBases.find(op.getPtr());
-  auto offsetIt = S.pointerOffsets.find(op.getPtr());
   auto symIt = S.pointerIndexOffsets.find(op.getPtr());
   auto bufferIt = S.pointerBuffers.find(op.getPtr());
-  if (baseIt == S.pointerBases.end() || (offsetIt == S.pointerOffsets.end() &&
-                                         symIt == S.pointerIndexOffsets.end()))
+  if (baseIt == S.pointerBases.end() || symIt == S.pointerIndexOffsets.end())
     return op.emitError("WaveAMDMachine backend expects selected wave pointer");
   unsigned registers =
       loadRegisterCount(cast<SimdType>(op.getValue().getType()));
   bool scalar16 = isScalar16Bit(cast<SimdType>(op.getValue().getType()));
-  OffsetTriple triple =
-      offsetIt == S.pointerOffsets.end() ? OffsetTriple{} : offsetIt->second;
-  const PointerOffset *symbolic =
-      symIt == S.pointerIndexOffsets.end() ? nullptr : &symIt->second;
+  OffsetTriple triple;
+  const PointerOffset *symbolic = &symIt->second;
   if (S.isSharedPointer(op.getPtr().getType()))
     return selectSharedStore(S, op, baseIt->second, triple, symbolic, registers,
                              scalar16);
@@ -600,20 +596,16 @@ LogicalResult selectStore(WaveAMDMachineSelector &S, StoreOp op) {
 
 LogicalResult selectLoad(WaveAMDMachineSelector &S, LoadOp op) {
   auto baseIt = S.pointerBases.find(op.getPtr());
-  auto offsetIt = S.pointerOffsets.find(op.getPtr());
   auto symIt = S.pointerIndexOffsets.find(op.getPtr());
   auto bufferIt = S.pointerBuffers.find(op.getPtr());
-  if (baseIt == S.pointerBases.end() || (offsetIt == S.pointerOffsets.end() &&
-                                         symIt == S.pointerIndexOffsets.end()))
+  if (baseIt == S.pointerBases.end() || symIt == S.pointerIndexOffsets.end())
     return op.emitError("WaveAMDMachine backend expects selected wave pointer");
 
   auto simdType = cast<SimdType>(op.getValue().getType());
   unsigned registers = loadRegisterCount(simdType);
   bool scalar16 = isScalar16Bit(simdType);
-  OffsetTriple triple =
-      offsetIt == S.pointerOffsets.end() ? OffsetTriple{} : offsetIt->second;
-  const PointerOffset *symbolic =
-      symIt == S.pointerIndexOffsets.end() ? nullptr : &symIt->second;
+  OffsetTriple triple;
+  const PointerOffset *symbolic = &symIt->second;
 
   if (S.isSharedPointer(op.getPtr().getType()))
     return selectSharedLoad(S, op, baseIt->second, triple, symbolic, registers,

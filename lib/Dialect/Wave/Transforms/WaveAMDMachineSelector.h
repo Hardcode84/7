@@ -95,17 +95,10 @@ struct OffsetTriple {
   int64_t instOffset = 0;
 };
 
-// Per-iter-arg snapshot captured at the scf.for boundary. `WMValue`
-// carries an already-selected waveamdmachine SSA value straight through;
-// `Pointer` collapses a SimdPtr iter arg's triple to a single VGPR
-// carry so the body re-derives V / S / inst contributions from a fresh
-// PtrAdd. `base` and `isBuffer` ride untouched across the loop body
-// for `Pointer` carries.
+// Per-iter-arg snapshot captured at the scf.for boundary. Pointer carries
+// thread base metadata plus one VGPR offset value through the loop.
 //
-// `strideBytes != 0` marks a global pointer whose per-iter advance is a
-// wave-uniform constant: the body recomputes its base as `base + iv *
-// strideBytes` in the scalar domain and the voffset carry stays
-// loop-invariant, so the per-lane `v_add` advance disappears.
+// `strideBytes != 0`: body rematerializes `base + iv * strideBytes`.
 struct CarrySnapshot {
   std::string bodyOffsetName;
   std::string resultOffsetName;
@@ -223,6 +216,10 @@ LogicalResult bucketize(WaveAMDMachineSelector &S, ::ixs_node *node,
                         const llvm::StringMap<TermKind> &symKinds,
                         OffsetTriple &triple);
 
+FailureOr<OffsetTriple> bucketizePointerOffset(WaveAMDMachineSelector &S,
+                                               Operation *user,
+                                               const PointerOffset &offset);
+
 // scf.for lowering cluster. Defined in `WaveAMDMachineScfFor.cpp` as free
 // helpers taking the selector by reference, mirroring the IXS-cluster
 // pattern. `selectScfFor` is the entry point dispatched from
@@ -257,7 +254,6 @@ public:
   DenseMap<Value, Value> values;
   DenseMap<Value, Value> pointerBases;
   DenseMap<Value, Value> pointerGlobalBases;
-  DenseMap<Value, OffsetTriple> pointerOffsets;
   DenseMap<Value, PointerOffset> pointerIndexOffsets;
   DenseMap<Value, PointerOffset> indexOffsets;
   DenseMap<Value, bool> pointerBuffers;

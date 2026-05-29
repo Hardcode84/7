@@ -114,12 +114,7 @@ static Value recomputeStridedBase(WaveAMDMachineSelector &S, Location loc,
       .getResult();
 }
 
-// Capture the waveamdmachine "shape" for every `scf.for` iter arg. Wave
-// SimdPtr inits resolve through the pointer sidecars (base/offset),
-// everything else through the standard `values` map. Pointer carries
-// collapse the triple to one VGPR at the loop boundary -- S / inst
-// contributions outside the loop bake in here, and the bucketizer
-// re-derives them inside the body for each fresh PtrAdd.
+// Capture waveamdmachine shape for every `scf.for` iter arg.
 LogicalResult snapshotScfCarries(WaveAMDMachineSelector &S, scf::ForOp op,
                                  SmallVectorImpl<CarrySnapshot> &out) {
   out.reserve(op.getInitArgs().size());
@@ -127,21 +122,15 @@ LogicalResult snapshotScfCarries(WaveAMDMachineSelector &S, scf::ForOp op,
     if (auto simd = dyn_cast<SimdType>(initArg.getType());
         simd && isa<PtrType>(simd.getElementType())) {
       auto baseIt = S.pointerBases.find(initArg);
-      auto offsetIt = S.pointerOffsets.find(initArg);
-      if (baseIt == S.pointerBases.end() || offsetIt == S.pointerOffsets.end())
+      auto offsetIt = S.pointerIndexOffsets.find(initArg);
+      if (baseIt == S.pointerBases.end() ||
+          offsetIt == S.pointerIndexOffsets.end())
         return op.emitError(
             "scf.for pointer iter arg has no WaveAMDMachine sidecar");
-      Value flat;
-      if (auto symIt = S.pointerIndexOffsets.find(initArg);
-          symIt != S.pointerIndexOffsets.end()) {
-        FailureOr<Value> carry =
-            materializePointerOffsetVGPR(S, op, symIt->second);
-        if (failed(carry))
-          return failure();
-        flat = *carry;
-      } else {
-        flat = S.collapseTriple(op.getLoc(), offsetIt->second);
-      }
+      FailureOr<OffsetTriple> offset =
+          bucketizePointerOffset(S, op, offsetIt->second);
+      if (failed(offset))
+        return failure();
       bool isBuffer = S.pointerBuffers.lookup(initArg);
       Value globalBase = S.pointerGlobalBases.lookup(initArg);
       // shared base is a const 0; global marches the SGPR base, buffer
@@ -151,7 +140,8 @@ LogicalResult snapshotScfCarries(WaveAMDMachineSelector &S, scf::ForOp op,
                            : 0;
       CarrySnapshot snap;
       snap.kind = CarrySnapshot::Kind::Pointer;
-      snap.carry = flat;
+      snap.carry = S.ensureVGPRForVSrc1(op.getLoc(),
+                                        S.collapseTriple(op.getLoc(), *offset));
       snap.base = baseIt->second;
       snap.globalBase = globalBase;
       snap.strideBytes = stride;
@@ -205,9 +195,6 @@ void bindLoopBodyArgs(WaveAMDMachineSelector &S, scf::ForOp op, Block &loopBody,
       S.pointerBases[scfArg] = snap.base;
       if (snap.globalBase)
         S.pointerGlobalBases[scfArg] = snap.globalBase;
-      OffsetTriple triple;
-      triple.voffset = blockCarry;
-      S.pointerOffsets[scfArg] = triple;
       S.values[blockCarry] = blockCarry;
       FailureOr<PointerOffset> symbolic =
           makeSymbolicCarry(S, snap.bodyOffsetName, blockCarry, TermKind::Lane);
@@ -249,8 +236,8 @@ static LogicalResult collectPointerYieldCarry(WaveAMDMachineSelector &S,
     return success();
   }
   auto baseIt = S.pointerBases.find(y);
-  auto offsetIt = S.pointerOffsets.find(y);
-  if (baseIt == S.pointerBases.end() || offsetIt == S.pointerOffsets.end())
+  auto offsetIt = S.pointerIndexOffsets.find(y);
+  if (baseIt == S.pointerBases.end() || offsetIt == S.pointerIndexOffsets.end())
     return yield.emitError(
         "scf.yield pointer carry has no WaveAMDMachine sidecar");
   if (baseIt->second != snap.base)
@@ -258,16 +245,11 @@ static LogicalResult collectPointerYieldCarry(WaveAMDMachineSelector &S,
         "scf.yield pointer carry must keep loop-invariant base");
   if (snap.globalBase && S.pointerGlobalBases.lookup(y) != snap.globalBase)
     return yield.emitError("scf.yield pointer carry must keep global base");
-  if (auto symIt = S.pointerIndexOffsets.find(y);
-      symIt != S.pointerIndexOffsets.end()) {
-    FailureOr<Value> carry =
-        materializePointerOffsetVGPR(S, yield, symIt->second);
-    if (failed(carry))
-      return failure();
-    out.push_back(*carry);
-    return success();
-  }
-  out.push_back(S.collapseTriple(yield.getLoc(), offsetIt->second));
+  FailureOr<Value> carry =
+      materializePointerOffsetVGPR(S, yield, offsetIt->second);
+  if (failed(carry))
+    return failure();
+  out.push_back(*carry);
   return success();
 }
 
@@ -298,9 +280,6 @@ void bindLoopResults(WaveAMDMachineSelector &S, scf::ForOp op, Operation *loop,
       S.pointerBases[scfResult] = snap.base;
       if (snap.globalBase)
         S.pointerGlobalBases[scfResult] = snap.globalBase;
-      OffsetTriple triple;
-      triple.voffset = wmResult;
-      S.pointerOffsets[scfResult] = triple;
       S.values[wmResult] = wmResult;
       FailureOr<PointerOffset> symbolic =
           makeSymbolicCarry(S, snap.resultOffsetName, wmResult, TermKind::Lane);
@@ -325,13 +304,11 @@ static void rebindStridedPointerCarries(WaveAMDMachineSelector &S,
     Value scfArg = op.getRegionIterArgs()[idx];
     Value iv = loopBody.getArgument(0);
     if (snap.isBuffer) {
-      // soffset bucket exists on buffer ops: march there, base SRD fixed.
-      S.pointerOffsets[scfArg].soffset = S.mulUniformValues(
+      Value strideValue = S.mulUniformValues(
           loc, iv, createImm(S.builder, loc, snap.strideBytes));
       if (auto symIt = S.pointerIndexOffsets.find(scfArg);
           symIt != S.pointerIndexOffsets.end())
-        if (failed(addSymbolicStride(S, symIt->second,
-                                     S.pointerOffsets[scfArg].soffset,
+        if (failed(addSymbolicStride(S, symIt->second, strideValue,
                                      snap.strideName)))
           S.pointerIndexOffsets.erase(scfArg);
       continue;
