@@ -1022,6 +1022,7 @@ struct BeamSearchConfig {
   unsigned width = 12;                      // states kept per depth
   unsigned branchLimit = 4;                 // ready choices expanded per state
   unsigned candidateLimit = 8;              // completed beam orders emitted
+  unsigned maxRegionOps = 1024;             // cap quadratic beam state copies
   int64_t guideBonus = 200000;              // prefer fixed-policy prefix
   int64_t discrepancyPenalty = 50000;       // cost per guide deviation
   int64_t criticalPathWeight = 1000;        // favor long remaining chains
@@ -1593,7 +1594,8 @@ static void addGuidedBeamCandidates(SmallVectorImpl<OrderCandidate> &candidates,
       "beam_4", "beam_5", "beam_6", "beam_7",
   };
 
-  if (tables.pendingPreds.size() < 3)
+  if (tables.pendingPreds.size() < 3 ||
+      tables.pendingPreds.size() > config.maxRegionOps)
     return;
 
   SmallVector<BeamResult, 16> results;
