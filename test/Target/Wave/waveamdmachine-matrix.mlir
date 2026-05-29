@@ -10,8 +10,13 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // SELECT: waveamdmachine.v_mov_b32_tuple{{.*}} : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 4>
 // SELECT: waveamdmachine.v_mov_b32_tuple{{.*}} : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 4>
 // SELECT: waveamdmachine.v_mov_b32_tuple{{.*}} : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 8>
-// SELECT: waveamdmachine.wmma_i32_16x16x16_iu8{{.*}} : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 8>) -> !waveamdmachine.reg<vgpr, 8>
-// SELECT: waveamdmachine.global_store_tuple_b32
+// SELECT: %[[MMA:.+]] = waveamdmachine.wmma_i32_16x16x16_iu8{{.*}} : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 8>) -> !waveamdmachine.reg<vgpr, 8>
+// SELECT: %[[LANE:.+]] = waveamdmachine.v_mbcnt_lo
+// SELECT: %[[ELEM_STRIDE:.+]] = waveamdmachine.imm 8
+// SELECT: %[[ELEM_OFF:.+]] = waveamdmachine.v_mul_lo_u32 %[[LANE]], %[[ELEM_STRIDE]]
+// SELECT: %[[DWORD_SHIFT:.+]] = waveamdmachine.imm 2
+// SELECT: %[[BYTE_OFF:.+]] = waveamdmachine.v_lshlrev_b32 %[[ELEM_OFF]], %[[DWORD_SHIFT]]
+// SELECT: waveamdmachine.global_store_tuple_b32 %[[BYTE_OFF]], %[[MMA]]
 
 // PIPELINE: module attributes {{{.*}}waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"{{.*}}}
 // PIPELINE-LABEL: func.func @matrix_kernel

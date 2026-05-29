@@ -48,6 +48,27 @@ func.func @overlapping_scc_live_range(%a: !waveamdmachine.reg<sgpr, 1>,
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
+func.func @overlapping_vcc_live_range(%a: !waveamdmachine.reg<vgpr, 2>,
+                                      %b: !waveamdmachine.reg<vgpr, 2>,
+                                      %c: !waveamdmachine.reg<vgpr, 2>,
+                                      %d: !waveamdmachine.reg<vgpr, 2>)
+    -> !waveamdmachine.reg<vcc, 1> {
+  %sum0, %vcc0 = waveamdmachine.v_add_u64 %a, %b
+      : (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vgpr, 2>)
+        -> (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vcc, 1>)
+  // expected-error @below {{overlapping VCC live range needs flag spill support}}
+  %sum1, %vcc1 = waveamdmachine.v_add_u64 %c, %d
+      : (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vgpr, 2>)
+        -> (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vcc, 1>)
+  return %vcc0 : !waveamdmachine.reg<vcc, 1>
+}
+
+}
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
+
 func.func @unsupported_register_class() {
   // expected-error @below {{waveamd-reg-alloc supports only SGPR and VGPR register classes}}
   %reg = waveamdmachine.arg {index = 0 : i64, pointer = false} : !waveamdmachine.reg<agpr, 1>

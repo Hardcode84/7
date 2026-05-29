@@ -21,3 +21,19 @@ func.func @interfering_vgprs() {
       : (!waveamdmachine.reg<vgpr, 1, 0>) -> !waveamdmachine.reg<vgpr, 1, 2>
   return
 }
+
+// -----
+
+// expected-error @below {{waveamd-resource-info found interfering SGPR register live ranges}}
+func.func @interfering_sgprs() {
+  %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+  %a = waveamdmachine.s_mov_b32_value %zero
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<sgpr, 1, 0>
+  %b = waveamdmachine.s_mov_b32_value %zero
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<sgpr, 1, 0>
+  %use_a = waveamdmachine.s_mov_b32_value %a
+      : (!waveamdmachine.reg<sgpr, 1, 0>) -> !waveamdmachine.reg<sgpr, 1, 1>
+  %use_b = waveamdmachine.s_mov_b32_value %b
+      : (!waveamdmachine.reg<sgpr, 1, 0>) -> !waveamdmachine.reg<sgpr, 1, 2>
+  return
+}

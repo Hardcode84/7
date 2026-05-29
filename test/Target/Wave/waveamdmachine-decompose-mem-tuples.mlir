@@ -173,4 +173,22 @@ func.func @global_store_width8_decompose(%off: !waveamdmachine.reg<vgpr, 1>,
   return %tok : !waveamdmachine.mem.token
 }
 
+// Width-5 store mirrors load chunking: b128 + b32 at offset 16.
+//
+// CHECK-LABEL: func.func @global_store_width5_decompose
+// CHECK: %[[E:.+]]:2 = waveamdmachine.tuple_to_elements
+// CHECK-SAME: -> (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 1>)
+// CHECK: %[[T0:.+]] = waveamdmachine.global_store_b128 %{{.*}}, %[[E]]#0, %{{.*}}{{ *:}}
+// CHECK: %[[T1:.+]] = waveamdmachine.global_store_b32 %{{.*}}, %[[E]]#1, %{{.*}} offset 16
+// CHECK: waveamdmachine.token_join %[[T0]], %[[T1]]
+func.func @global_store_width5_decompose(%off: !waveamdmachine.reg<vgpr, 1>,
+                                          %val: !waveamdmachine.reg<vgpr, 5>,
+                                          %base: !waveamdmachine.reg<sgpr, 2>)
+    -> !waveamdmachine.mem.token {
+  %tok = waveamdmachine.global_store_tuple_b32 %off, %val, %base
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 5>, !waveamdmachine.reg<sgpr, 2>)
+        -> !waveamdmachine.mem.token
+  return %tok : !waveamdmachine.mem.token
+}
+
 }
