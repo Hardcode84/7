@@ -17,6 +17,7 @@
 #include "mlir/Dialect/Transform/Transforms/TransformInterpreterUtils.h"
 #include "mlir/Dialect/Wave/IR/Wave.h"
 #include "mlir/Dialect/Wave/IR/WaveAMD.h"
+#include "mlir/Dialect/Wave/IR/WaveAMDABI.h"
 #include "mlir/Dialect/Wave/Transforms/Passes.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachine.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineTarget.h"
@@ -726,18 +727,6 @@ private:
     return fallback;
   }
 
-  bool isBufferPointer(Type type) const {
-    auto ptr = dyn_cast<wave::PtrType>(type);
-    return ptr && isa<waveamd::BufferAddressSpaceAttr>(ptr.getAddressSpace());
-  }
-
-  unsigned kernelArgSize(Type type) const {
-    auto ptr = dyn_cast<wave::PtrType>(type);
-    if (!ptr)
-      return 4;
-    return isBufferPointer(type) ? 16 : 8;
-  }
-
   LogicalResult emitFunction(func::FuncOp func) {
     if (!func.getBody().hasOneBlock())
       return func.emitError(
@@ -772,14 +761,12 @@ private:
       info.sgprCount = getIntAttr(func, "waveamdmachine.sgpr_count", 6);
       info.vgprCount = getIntAttr(func, "waveamdmachine.vgpr_count", 1);
       info.ldsSize = getIntAttr(func, "waveamdmachine.lds_size", 0);
-      unsigned offset = 0;
-      for (auto [index, arg] : llvm::enumerate(func.getArguments())) {
-        bool isBuffer = isa<wave::PtrType>(arg.getType());
-        unsigned size = kernelArgSize(arg.getType());
-        info.args.push_back(
-            KernelArgInfo{("arg" + Twine(index)).str(), offset, size,
-                          isBuffer && !isBufferPointer(arg.getType())});
-        offset += size;
+      SmallVector<waveamd::KernargSlot> layout =
+          waveamd::getKernargLayout(func.getFunctionType().getInputs());
+      for (auto [index, slot] : llvm::enumerate(layout)) {
+        info.args.push_back(KernelArgInfo{("arg" + Twine(index)).str(),
+                                          slot.offset, slot.size,
+                                          slot.isGlobalBuffer});
       }
       kernels.push_back(info);
       emitKernelDescriptor(func);
@@ -791,10 +778,7 @@ private:
     if (auto attr =
             func->getAttrOfType<IntegerAttr>("waveamdmachine.kernarg_size"))
       return attr.getInt();
-    unsigned size = 0;
-    for (BlockArgument arg : func.getArguments())
-      size += kernelArgSize(arg.getType());
-    return (std::max(size, 4u) + 7u) & ~7u;
+    return waveamd::getKernargSegmentSize(func.getFunctionType().getInputs());
   }
 
   void emitKernelDescriptor(func::FuncOp func) {

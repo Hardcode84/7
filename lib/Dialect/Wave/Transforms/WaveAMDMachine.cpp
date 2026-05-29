@@ -20,6 +20,7 @@
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/Wave/IR/Wave.h"
 #include "mlir/Dialect/Wave/IR/WaveAMD.h"
+#include "mlir/Dialect/Wave/IR/WaveAMDABI.h"
 #include "mlir/Dialect/Wave/IR/WaveSymbols.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachine.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineTarget.h"
@@ -72,8 +73,6 @@ static unsigned bitWidth(Type type) {
     return type.getIntOrFloatBitWidth();
   return 32;
 }
-
-static unsigned dwordCount(Type type) { return (bitWidth(type) + 31) / 32; }
 
 static bool isVector2F16(Type type) {
   auto vecTy = dyn_cast<VectorType>(type);
@@ -940,16 +939,11 @@ bool WaveAMDMachineSelector::isSharedPointer(Type type) {
 }
 
 unsigned WaveAMDMachineSelector::pointerBaseWidth(Type type) {
-  return isBufferPointer(type) ? 4 : 2;
+  return waveamd::getKernargRegisterWidth(type);
 }
 
-// Register-tuple width for a non-pointer arg type: round the element
-// bit-width up to whole 32-bit dwords. i32 -> 1, i64 -> 2.
 unsigned WaveAMDMachineSelector::nonPointerArgWidth(Type type) {
-  Type elt = type;
-  if (auto simd = dyn_cast<SimdType>(type))
-    elt = simd.getElementType();
-  return dwordCount(elt);
+  return waveamd::getKernargRegisterWidth(type);
 }
 
 void WaveAMDMachineSelector::materializeArgument(BlockArgument arg,

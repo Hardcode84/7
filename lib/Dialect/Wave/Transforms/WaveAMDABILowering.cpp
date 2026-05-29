@@ -9,10 +9,13 @@
 #include "mlir/Dialect/Wave/Transforms/Passes.h"
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/Wave/IR/WaveAMDABI.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachine.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "llvm/ADT/STLExtras.h"
+
+#include <limits>
 
 namespace mlir::wave {
 #define GEN_PASS_DEF_WAVEAMDABILOWERING
@@ -33,20 +36,18 @@ static bool isSGPR(waveamdmachine::RegType type) {
   return type.getRegClass() == waveamdmachine::RegClass::SGPR;
 }
 
-// Pick the typed scalar-load op for an `arg` slot. SLoad{32,64,128}
-// all share the same shape (offset operand + base string attr), so we
-// dispatch on width and build via the matching op's typed constructor.
+// Width is SGPR dwords: 1/2/4 map to scalar load width.
 static Value createKernArgLoad(OpBuilder &builder, Location loc,
                                Type resultType, Value offsetImm, unsigned width,
-                               bool isPointer, StringRef base) {
-  if (!isPointer)
+                               StringRef base) {
+  if (width == 1)
     return waveamdmachine::SLoadB32Op::create(builder, loc, resultType,
                                               offsetImm, base);
-  if (width == 4)
-    return waveamdmachine::SLoadB128Op::create(builder, loc, resultType,
-                                               offsetImm, base);
-  return waveamdmachine::SLoadB64Op::create(builder, loc, resultType, offsetImm,
-                                            base);
+  if (width == 2)
+    return waveamdmachine::SLoadB64Op::create(builder, loc, resultType,
+                                              offsetImm, base);
+  return waveamdmachine::SLoadB128Op::create(builder, loc, resultType,
+                                             offsetImm, base);
 }
 
 struct WaveAMDABILoweringPass
@@ -67,8 +68,6 @@ struct WaveAMDABILoweringPass
   }
 
 private:
-  // Verify operand shape constraints and extract the (regType, isPointer)
-  // pair we need to emit the load.
   static FailureOr<std::pair<waveamdmachine::RegType, bool>>
   validateArgOp(Operation &op) {
     if (op.getNumResults() != 1)
@@ -86,45 +85,72 @@ private:
           "attribute");
     bool isPointer = pointerAttr.getValue();
     unsigned width = regType.getWidth();
-    bool widthOk = isPointer ? (width == 2 || width == 4) : (width == 1);
-    if (!widthOk)
+    if (!waveamd::isValidKernargRegisterWidth(isPointer, width))
       return op.emitError(
           "waveamd-abi-lowering found argument register width inconsistent "
           "with pointer attribute");
     return std::make_pair(regType, isPointer);
   }
 
-  // Validate and lower a single `waveamdmachine.arg` op into the matching
-  // `s_load_*` op at offset `offset`. On success returns the number of
-  // bytes consumed for this argument's kernarg slot.
-  static FailureOr<unsigned> lowerArgOp(Operation &op, unsigned offset,
-                                        OpBuilder &builder) {
+  static FailureOr<unsigned> getArgIndex(Operation &op) {
+    auto argOp = cast<waveamdmachine::ArgOp>(&op);
+    int64_t index = argOp.getIndex();
+    if (index < 0)
+      return op.emitError("waveamd-abi-lowering found negative arg index");
+    if (index > std::numeric_limits<unsigned>::max())
+      return op.emitError("waveamd-abi-lowering found arg index too large");
+    return static_cast<unsigned>(index);
+  }
+
+  static LogicalResult lowerArgOp(Operation &op,
+                                  ArrayRef<waveamd::KernargSlot> layout,
+                                  TypeRange argTypes, OpBuilder &builder) {
     auto info = validateArgOp(op);
     if (failed(info))
       return failure();
     auto [regType, isPointer] = *info;
 
+    FailureOr<unsigned> index = getArgIndex(op);
+    if (failed(index))
+      return failure();
+    if (*index >= layout.size())
+      return op.emitError("waveamd-abi-lowering found arg index outside "
+                          "function argument list");
+
+    Type sourceType = argTypes[*index];
+    if (isPointer != waveamd::isKernargPointer(sourceType))
+      return op.emitError(
+          "waveamd-abi-lowering found pointer attribute inconsistent "
+          "with source argument type");
+    unsigned byteSize =
+        waveamd::getKernargByteSizeForRegisterWidth(regType.getWidth());
+    waveamd::KernargSlot slot = layout[*index];
+    if (byteSize != slot.size)
+      return op.emitError(
+          "waveamd-abi-lowering found register width inconsistent with source "
+          "argument type");
+
     builder.setInsertionPoint(&op);
-    Value offsetImm = createImm(builder, op.getLoc(), offset);
+    Value offsetImm = createImm(builder, op.getLoc(), slot.offset);
     Value loaded =
         createKernArgLoad(builder, op.getLoc(), op.getResult(0).getType(),
-                          offsetImm, regType.getWidth(), isPointer, "s[0:1]");
+                          offsetImm, regType.getWidth(), "s[0:1]");
     op.getResult(0).replaceAllUsesWith(loaded);
     op.erase();
-    return isPointer ? regType.getWidth() * 4u : 4u;
+    return success();
   }
 
   static LogicalResult lowerKernel(func::FuncOp func, OpBuilder &builder) {
-    unsigned offset = 0;
+    TypeRange argTypes = func.getFunctionType().getInputs();
+    SmallVector<waveamd::KernargSlot> layout =
+        waveamd::getKernargLayout(argTypes);
     for (Operation &op : llvm::make_early_inc_range(func.getBody().front())) {
       if (!isa<waveamdmachine::ArgOp>(op))
         continue;
-      auto consumed = lowerArgOp(op, offset, builder);
-      if (failed(consumed))
+      if (failed(lowerArgOp(op, layout, argTypes, builder)))
         return failure();
-      offset += *consumed;
     }
-    unsigned kernargSize = (std::max(offset, 4u) + 7u) & ~7u;
+    unsigned kernargSize = waveamd::getKernargSegmentSize(argTypes);
     func->setAttr("waveamdmachine.kernarg_size",
                   builder.getI64IntegerAttr(kernargSize));
     return success();
