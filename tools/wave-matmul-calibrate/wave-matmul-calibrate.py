@@ -65,6 +65,13 @@ VARIANTS = {
     "pingpong": Variant("pingpong", insert_pingpong=True, apply_schedule=False),
 }
 
+PRESSURE_BUDGET_OPTIONS = (
+    ("pressure-vgpr-budget", "pressure_vgpr_budget"),
+    ("pressure-sgpr-budget", "pressure_sgpr_budget"),
+    ("pressure-critical-vgpr-budget", "pressure_critical_vgpr_budget"),
+    ("pressure-critical-sgpr-budget", "pressure_critical_sgpr_budget"),
+)
+
 
 def run(
     cmd: list[str],
@@ -175,8 +182,14 @@ def scheduler_policy_options(
     if not variant.apply_schedule:
         return {}
     options: dict[str, bool | int] = {}
+    if args.beam_search:
+        options["beam-search"] = True
     if not args.no_pressure_aware_schedule:
         options["pressure-aware-selection"] = True
+    for option, attr in PRESSURE_BUDGET_OPTIONS:
+        value = getattr(args, attr)
+        if value >= 0:
+            options[option] = value
     if variant.schedule_model == "multi":
         options["model-waves"] = waves_per_workgroup(args)
         options["model-simds"] = spread_simds(args)
@@ -595,7 +608,12 @@ def build_argparser() -> argparse.ArgumentParser:
     ap.add_argument("--print-candidates", action="store_true")
     ap.add_argument("--print-score", action="store_true")
     ap.add_argument("--print-regions", action="store_true")
+    ap.add_argument("--beam-search", action="store_true")
     ap.add_argument("--no-pressure-aware-schedule", action="store_true")
+    ap.add_argument("--pressure-vgpr-budget", type=int, default=-1)
+    ap.add_argument("--pressure-sgpr-budget", type=int, default=-1)
+    ap.add_argument("--pressure-critical-vgpr-budget", type=int, default=-1)
+    ap.add_argument("--pressure-critical-sgpr-budget", type=int, default=-1)
     ap.add_argument("--skip-hw", action="store_true")
     ap.add_argument("--no-check", action="store_true")
     ap.add_argument("--keep-tmp", action="store_true")
@@ -620,6 +638,9 @@ def validate_args(args: argparse.Namespace) -> None:
         sys.exit("--repeats must be positive")
     if args.target_waves < 0:
         sys.exit("--target-waves must be non-negative")
+    for _, name in PRESSURE_BUDGET_OPTIONS:
+        if getattr(args, name) < -1:
+            sys.exit(f"--{name.replace('_', '-')} must be >= -1")
 
 
 def main() -> int:
