@@ -72,16 +72,17 @@ func.func @wave_where_else(%limit: i32, %out: !wave.ptr<i32, #wave.global>) -> i
 
 // CHECK-LABEL: wave_kernel:
 func.func @wave_kernel(%out: !wave.ptr<i32, #wave.global>, %x: i32) attributes {wave.kernel} {
-  // CHECK: s_load_b64 [[OUT:s\[[0-9]+:[0-9]+\]]], s[0:1], 0x0
   // CHECK: s_load_b32 [[X:s[0-9]+]], s[0:1], 0x8
+  // CHECK: s_load_b64 [[OUT:s\[[0-9]+:[0-9]+\]]], s[0:1], 0x0
   // CHECK: v_mbcnt_lo_u32_b32 [[LANE:v[0-9]+]], -1, 0
   %lane = wave.lane_id : !wave.simd<i32, 32>
   %vx = wave.splat %x : i32 -> !wave.simd<i32, 32>
-  // CHECK: s_waitcnt lgkmcnt(0)
+  // CHECK: s_waitcnt lgkmcnt(1)
   // CHECK: s_delay_alu instid0(VALU_DEP_1)
   // CHECK: v_add_nc_u32_e32 [[SUM:v[0-9]+]], [[X]], [[LANE]]
   %sum = wave.addi %lane, %vx : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
   // CHECK: v_lshlrev_b32_e32 [[OFFSET:v[0-9]+]], 2, [[LANE]]
+  // CHECK: s_waitcnt lgkmcnt(0)
   // CHECK: global_store_b32 [[OFFSET]], [[SUM]], [[OUT]]
   %ptrs = wave.ptr_add %out, %lane : !wave.ptr<i32, #wave.global>, !wave.simd<i32, 32> -> !wave.simd<!wave.ptr<i32, #wave.global>, 32>
   %store_token = wave.store %sum -> %ptrs : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<i32, #wave.global>, 32>) -> !wave.mem.token
@@ -229,7 +230,8 @@ func.func @wave_two_tuple_loads_overlap(%a_in: !wave.ptr<i32, #wave.global>,
   // CHECK-NEXT: s_waitcnt lgkmcnt(0)
   // CHECK-NEXT: global_load_b128 {{v\[[0-9]+:[0-9]+\], v[0-9]+, s\[8:9\]$}}
   // CHECK-NEXT: global_load_b128 {{.*}} s[8:9] offset
-  // CHECK-NEXT: s_waitcnt vmcnt(2)
+  // CHECK-NOT: ds_store_b128
+  // CHECK: s_waitcnt vmcnt(2)
   %a_regs, %a_tok = wave.load %ap : (!wave.simd<!wave.ptr<i32, #wave.global>, 32>) -> (!wave.simd<vector<8xi32>, 32>, !wave.mem.token)
   %b_regs, %b_tok = wave.load %bp : (!wave.simd<!wave.ptr<i32, #wave.global>, 32>) -> (!wave.simd<vector<8xi32>, 32>, !wave.mem.token)
   // CHECK-NEXT: ds_store_b128 {{v[0-9]+, v\[[0-9]+:[0-9]+\]$}}

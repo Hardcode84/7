@@ -12,7 +12,7 @@ module attributes {transform.with_named_sequence} {
   // emission. Caller must have stamped `waveamdmachine.target` on the
   // module (e.g. via `wave-set-target-attr`) -- the passes below read
   // it for subtarget feature selection.
-  transform.named_sequence @waveamd_backend(
+  transform.named_sequence @waveamd_backend_lower(
       %root: !transform.any_op {transform.consumed}) -> !transform.any_op {
     %rm = transform.apply_registered_pass "wavemeta-specialize" to %root
         : (!transform.any_op) -> !transform.any_op
@@ -35,7 +35,12 @@ module attributes {transform.with_named_sequence} {
         : (!transform.any_op) -> !transform.any_op
     %r2 = transform.apply_registered_pass "waveamd-decompose-mem-tuples" to %r1
         : (!transform.any_op) -> !transform.any_op
-    %r3 = transform.apply_registered_pass "waveamd-insert-ticket-waits" to %r2
+    transform.yield %r2 : !transform.any_op
+  }
+
+  transform.named_sequence @waveamd_backend_finish(
+      %root: !transform.any_op {transform.consumed}) -> !transform.any_op {
+    %r3 = transform.apply_registered_pass "waveamd-insert-ticket-waits" to %root
         : (!transform.any_op) -> !transform.any_op
     %r4 = transform.apply_registered_pass "waveamd-reg-alloc" to %r3
         : (!transform.any_op) -> !transform.any_op
@@ -46,6 +51,29 @@ module attributes {transform.with_named_sequence} {
     %r7 = transform.apply_registered_pass "waveamd-metadata" to %r6
         : (!transform.any_op) -> !transform.any_op
     transform.yield %r7 : !transform.any_op
+  }
+
+  transform.named_sequence @waveamd_backend_unscheduled(
+      %root: !transform.any_op {transform.consumed}) -> !transform.any_op {
+    %r0 = transform.include @waveamd_backend_lower failures(propagate) (%root)
+        : (!transform.any_op) -> !transform.any_op
+    %r1 = transform.include @waveamd_backend_finish failures(propagate) (%r0)
+        : (!transform.any_op) -> !transform.any_op
+    transform.yield %r1 : !transform.any_op
+  }
+
+  transform.named_sequence @waveamd_backend(
+      %root: !transform.any_op {transform.consumed}) -> !transform.any_op {
+    %r0 = transform.include @waveamd_backend_lower failures(propagate) (%root)
+        : (!transform.any_op) -> !transform.any_op
+    %rs = transform.apply_registered_pass "waveamd-machine-schedule" with
+        options = { "apply-schedule" = true,
+                    "pressure-aware-selection" = true,
+                    "max-region-ops" = 512 }
+        to %r0 : (!transform.any_op) -> !transform.any_op
+    %r1 = transform.include @waveamd_backend_finish failures(propagate) (%rs)
+        : (!transform.any_op) -> !transform.any_op
+    transform.yield %r1 : !transform.any_op
   }
 
   // Wave backend + final assembly + lld into a `gpu.binary` per
