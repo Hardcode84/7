@@ -18,6 +18,7 @@ class Operation;
 namespace mlir::waveamdmachine {
 
 struct ArchData;
+class CalibrationData;
 
 enum class MemoryCounterKind : uint8_t {
   None,
@@ -42,12 +43,14 @@ struct MemoryValueLatencies {
 MemoryCounterKind getMemoryCounterKind(Operation *op);
 
 int getMemoryCounterLatency(const ArchData &arch, Operation *op,
-                            const MemoryCounterLatencies &overrides = {});
+                            const MemoryCounterLatencies &overrides = {},
+                            const CalibrationData *calibration = nullptr);
 
 bool hasMemoryValueLatency(Operation *op);
 
 int getMemoryValueLatency(const ArchData &arch, Operation *op,
-                          const MemoryValueLatencies &overrides = {});
+                          const MemoryValueLatencies &overrides = {},
+                          const CalibrationData *calibration = nullptr);
 
 } // namespace mlir::waveamdmachine
 

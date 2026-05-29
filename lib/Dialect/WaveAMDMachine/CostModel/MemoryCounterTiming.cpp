@@ -9,6 +9,7 @@
 #include "mlir/Dialect/WaveAMDMachine/CostModel/MemoryCounterTiming.h"
 
 #include "mlir/Dialect/WaveAMDMachine/CostModel/ArchData.h"
+#include "mlir/Dialect/WaveAMDMachine/CostModel/CalibrationData.h"
 #include "mlir/Dialect/WaveAMDMachine/CostModel/LatencyTable.h"
 #include "mlir/Dialect/WaveAMDMachine/CostModel/OpClassifier.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachine.h"
@@ -48,6 +49,13 @@ static int overrideOrDefault(int overrideLatency, int defaultLatency) {
   return overrideLatency >= 0 ? overrideLatency : defaultLatency;
 }
 
+static int getConfiguredLatency(const ArchData &arch, SchedClass cls,
+                                const CalibrationData *calibration) {
+  if (!calibration)
+    return getLatency(arch, cls);
+  return getCalibratedLatency(arch, cls, *calibration);
+}
+
 } // namespace
 
 MemoryCounterKind getMemoryCounterKind(Operation *op) {
@@ -61,9 +69,10 @@ MemoryCounterKind getMemoryCounterKind(Operation *op) {
 }
 
 int getMemoryCounterLatency(const ArchData &arch, Operation *op,
-                            const MemoryCounterLatencies &overrides) {
+                            const MemoryCounterLatencies &overrides,
+                            const CalibrationData *calibration) {
   SchedClass cls = classifyOp(op);
-  int defaultLatency = getLatency(arch, cls);
+  int defaultLatency = getConfiguredLatency(arch, cls, calibration);
   if (op->hasTrait<traits::VMEMLoadOp>())
     return overrideOrDefault(overrides.vmemLoad, defaultLatency);
   if (op->hasTrait<traits::VMEMStoreOp>())
@@ -82,9 +91,10 @@ bool hasMemoryValueLatency(Operation *op) {
 }
 
 int getMemoryValueLatency(const ArchData &arch, Operation *op,
-                          const MemoryValueLatencies &overrides) {
+                          const MemoryValueLatencies &overrides,
+                          const CalibrationData *calibration) {
   SchedClass cls = classifyOp(op);
-  int defaultLatency = getLatency(arch, cls);
+  int defaultLatency = getConfiguredLatency(arch, cls, calibration);
   if (op->hasTrait<traits::VMEMLoadOp>())
     return overrideOrDefault(overrides.vmemLoad, defaultLatency);
   if (isLDSLoad(op))

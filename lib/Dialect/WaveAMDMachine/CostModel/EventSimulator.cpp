@@ -10,6 +10,7 @@
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/WaveAMDMachine/CostModel/ArchData.h"
+#include "mlir/Dialect/WaveAMDMachine/CostModel/CalibrationData.h"
 #include "mlir/Dialect/WaveAMDMachine/CostModel/LatencyTable.h"
 #include "mlir/Dialect/WaveAMDMachine/CostModel/MemoryCounterTiming.h"
 #include "mlir/Dialect/WaveAMDMachine/CostModel/OpClassifier.h"
@@ -53,6 +54,13 @@ static bool isMemoryIssuer(Operation *op) {
 
 static bool isMemToken(Value value) {
   return isa<MemTokenType>(value.getType());
+}
+
+static int getConfiguredLatency(const ArchData &arch, SchedClass cls,
+                                const EventSimConfig &config) {
+  if (!config.calibration)
+    return getLatency(arch, cls);
+  return getCalibratedLatency(arch, cls, *config.calibration);
 }
 
 static EventSimCounter counterOf(Operation *op) {
@@ -426,8 +434,8 @@ void EventSimulator::queueMemoryCounterEvents(WaveState &wave, Operation *op,
                                               FunctionalUnit fu, int64_t cycle,
                                               unsigned issues, int period) {
   EventSimCounter counter = counterOf(op);
-  int counterLatency =
-      getMemoryCounterLatency(arch, op, config.counterLatencies);
+  int counterLatency = getMemoryCounterLatency(
+      arch, op, config.counterLatencies, config.calibration);
   SmallVector<int64_t, 4> &queue = wave.counters[counterIndex(counter)];
   for (unsigned i = 0; i < issues; ++i) {
     int64_t done = cycle + static_cast<int64_t>(i) * period + counterLatency;
@@ -443,7 +451,7 @@ LogicalResult EventSimulator::executeIssued(WaveState &wave, Operation *op,
   FunctionalUnit fu = funit(arch, cls);
   unsigned issues = std::max(1u, getIssueCount(op));
   int period = std::max(1, arch.simdIssuePeriod);
-  int dependencyLatency = getLatency(arch, cls);
+  int dependencyLatency = getConfiguredLatency(arch, cls, config);
   int64_t lastIssue = cycle + static_cast<int64_t>(issues - 1) * period;
   int64_t ready = lastIssue + dependencyLatency;
   int64_t nextIssue = cycle + static_cast<int64_t>(issues) * period;
@@ -451,7 +459,8 @@ LogicalResult EventSimulator::executeIssued(WaveState &wave, Operation *op,
   bool hasMemoryValue = hasMemoryValueLatency(op);
   int64_t memoryValueReady =
       hasMemoryValue
-          ? lastIssue + getMemoryValueLatency(arch, op, config.valueLatencies)
+          ? lastIssue + getMemoryValueLatency(arch, op, config.valueLatencies,
+                                              config.calibration)
           : ready;
 
   SimdState &simd = simds[wave.simd];

@@ -58,6 +58,11 @@ struct WaveAMDMachineSchedulePass
                                       modelSmemValueLatency,
                                       modelLdsValueLatency, modelConfig)))
       return signalPassFailure();
+    std::optional<waveamdmachine::CalibrationData> calibration;
+    if (failed(loadScheduleCalibration(root, calibrationFile, calibration)))
+      return signalPassFailure();
+    if (calibration)
+      modelConfig.calibration = &*calibration;
     if (!applySchedule)
       return;
     ScheduleSearchLimits searchLimits{static_cast<int64_t>(maxBeamWork),
@@ -65,6 +70,9 @@ struct WaveAMDMachineSchedulePass
                                       /*emitDiagnostics=*/false};
     WalkResult walkResult = root->walk([&](func::FuncOp func) {
       ArchResolution archResolution = resolveArch(func);
+      if (failed(
+              validateScheduleCalibration(func, archResolution, modelConfig)))
+        return WalkResult::interrupt();
       RegisterPressureBudgets pressureBudgets;
       if (failed(configureSchedulePressureBudgets(
               func, archResolution, pressureAwareSelection, pressureVgprBudget,

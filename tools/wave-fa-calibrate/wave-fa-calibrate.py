@@ -71,6 +71,39 @@ PRESSURE_BUDGET_OPTIONS = (
 )
 
 
+def add_pressure_budget_options(
+    options: dict[str, bool | int | str], args: argparse.Namespace
+) -> None:
+    for option, attr in PRESSURE_BUDGET_OPTIONS:
+        value = getattr(args, attr)
+        if value >= 0:
+            options[option] = value
+
+
+def add_common_scheduler_options(
+    options: dict[str, bool | int | str], args: argparse.Namespace
+) -> None:
+    if args.beam_search:
+        options["beam-search"] = True
+    if not args.no_pressure_aware_schedule:
+        options["pressure-aware-selection"] = True
+    if args.calibration_file:
+        options["calibration-file"] = str(args.calibration_file)
+    add_pressure_budget_options(options, args)
+
+
+def add_schedule_model_options(
+    options: dict[str, bool | int | str], variant: Variant, args: argparse.Namespace
+) -> None:
+    if variant.schedule_model == "single":
+        return
+    if variant.schedule_model != "multi":
+        sys.exit(f"unknown schedule model: {variant.schedule_model}")
+    options["model-waves"] = args.model_waves
+    options["model-simds"] = args.model_simds
+    options["model-start-delay"] = args.model_start_delay
+
+
 def run(
     cmd: list[str],
     *,
@@ -151,30 +184,18 @@ def generate_kernel_module(args: argparse.Namespace, chip: str) -> str:
 
 def scheduler_policy_options(
     variant: Variant, args: argparse.Namespace
-) -> dict[str, bool | int]:
+) -> dict[str, bool | int | str]:
     if not variant.apply_schedule:
         return {}
-    options: dict[str, bool | int] = {}
-    if args.beam_search:
-        options["beam-search"] = True
-    if not args.no_pressure_aware_schedule:
-        options["pressure-aware-selection"] = True
-    for option, attr in PRESSURE_BUDGET_OPTIONS:
-        value = getattr(args, attr)
-        if value >= 0:
-            options[option] = value
-    if variant.schedule_model == "multi":
-        options["model-waves"] = args.model_waves
-        options["model-simds"] = args.model_simds
-        options["model-start-delay"] = args.model_start_delay
-    elif variant.schedule_model != "single":
-        sys.exit(f"unknown schedule model: {variant.schedule_model}")
+    options: dict[str, bool | int | str] = {}
+    add_common_scheduler_options(options, args)
+    add_schedule_model_options(options, variant, args)
     return {name: value for name, value in options.items() if value is not False}
 
 
 def schedule_pass_options(
     variant: Variant, args: argparse.Namespace
-) -> dict[str, bool | int]:
+) -> dict[str, bool | int | str]:
     if not variant.apply_schedule:
         return {}
     return {"apply-schedule": True, **scheduler_policy_options(variant, args)}
@@ -182,7 +203,7 @@ def schedule_pass_options(
 
 def schedule_report_options(
     variant: Variant, args: argparse.Namespace
-) -> dict[str, bool | int]:
+) -> dict[str, bool | int | str]:
     if not variant.apply_schedule:
         return {}
     report_options: dict[str, bool | int] = {
@@ -198,11 +219,13 @@ def schedule_report_options(
     return {**report_options, **scheduler_policy_options(variant, args)}
 
 
-def format_pass_options(options: dict[str, bool | int]) -> str:
+def format_pass_options(options: dict[str, bool | int | str]) -> str:
     pieces: list[str] = []
     for name, value in options.items():
         if isinstance(value, bool):
             value_text = "true" if value else "false"
+        elif isinstance(value, str):
+            value_text = '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
         else:
             value_text = str(value)
         pieces.append(f'"{name}" = {value_text}')
@@ -210,8 +233,8 @@ def format_pass_options(options: dict[str, bool | int]) -> str:
 
 
 def pipeline_text(
-    schedule_options: dict[str, bool | int],
-    report_options: dict[str, bool | int],
+    schedule_options: dict[str, bool | int | str],
+    report_options: dict[str, bool | int | str],
 ) -> str:
     report = ""
     schedule = ""
@@ -370,6 +393,11 @@ def run_sim_report(
             f"--waves={args.sim_waves}",
             f"--simds={args.sim_simds}",
             f"--start-delay={args.sim_start_delay}",
+            *(
+                [f"--calibration-file={args.calibration_file}"]
+                if args.calibration_file
+                else []
+            ),
             str(machine_mlir),
         ]
     )
@@ -562,6 +590,7 @@ def build_argparser() -> argparse.ArgumentParser:
     ap.add_argument("--pressure-sgpr-budget", type=int, default=-1)
     ap.add_argument("--pressure-critical-vgpr-budget", type=int, default=-1)
     ap.add_argument("--pressure-critical-sgpr-budget", type=int, default=-1)
+    ap.add_argument("--calibration-file", type=Path, default=None)
     ap.add_argument("--target-waves", type=int, default=0)
     ap.add_argument("--tile-loop-unroll", type=int, default=0)
     ap.add_argument("--skip-hw", action="store_true")
@@ -604,6 +633,10 @@ def validate_args(args: argparse.Namespace, chip: str) -> None:
     exit_if(args.warmup < 0, "--warmup must be non-negative")
     exit_if(args.target_waves < 0, "--target-waves must be non-negative")
     exit_if(args.tile_loop_unroll < 0, "--tile-loop-unroll must be non-negative")
+    exit_if(
+        args.calibration_file is not None and not args.calibration_file.exists(),
+        f"--calibration-file does not exist: {args.calibration_file}",
+    )
     for _, name in PRESSURE_BUDGET_OPTIONS:
         exit_if(getattr(args, name) < -1, f"--{name.replace('_', '-')} must be >= -1")
     exit_if(

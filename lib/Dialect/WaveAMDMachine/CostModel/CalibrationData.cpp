@@ -13,6 +13,7 @@
 #include "llvm/Support/Error.h"
 #include "llvm/Support/JSON.h"
 #include "llvm/Support/MemoryBuffer.h"
+#include "llvm/TargetParser/TargetParser.h"
 
 namespace mlir::waveamdmachine {
 
@@ -24,6 +25,11 @@ SchedClass parseSchedClassName(llvm::StringRef name) {
       return cls;
   }
   return SchedClass::NumSchedClasses;
+}
+
+static bool isaEq(const llvm::AMDGPU::IsaVersion &a,
+                  const llvm::AMDGPU::IsaVersion &b) {
+  return a.Major == b.Major && a.Minor == b.Minor && a.Stepping == b.Stepping;
 }
 
 namespace {
@@ -124,6 +130,13 @@ const CalibrationOverride *CalibrationData::getOverride(SchedClass cls) const {
   if (it == overrides.end())
     return nullptr;
   return &it->second;
+}
+
+bool CalibrationData::matchesArch(const ArchData &archData) const {
+  if (arch.empty())
+    return true;
+  llvm::AMDGPU::IsaVersion isa = llvm::AMDGPU::getIsaVersion(arch);
+  return isaEq(isa, archData.isa);
 }
 
 int getCalibratedLatency(const ArchData &arch, SchedClass cls,

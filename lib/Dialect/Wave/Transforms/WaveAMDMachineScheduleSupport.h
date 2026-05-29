@@ -12,6 +12,7 @@
 #include "WaveAMDRegLiveIntervals.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/WaveAMDMachine/CostModel/ArchData.h"
+#include "mlir/Dialect/WaveAMDMachine/CostModel/CalibrationData.h"
 #include "mlir/Dialect/WaveAMDMachine/CostModel/EventSimulator.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/Operation.h"
@@ -20,6 +21,7 @@
 #include "llvm/Support/raw_ostream.h"
 
 #include <cstdint>
+#include <optional>
 
 namespace mlir::wave {
 
@@ -133,7 +135,8 @@ SmallVector<ScheduleRegion> collectScheduleRegions(func::FuncOp func);
 StringRef getEdgeKindName(EdgeKind kind);
 DependenceGraph buildDependenceGraph(const ScheduleRegion &region);
 void printRegion(ScheduleRegion region);
-void printOpClasses(ScheduleRegion region, ArchResolution archResolution);
+void printOpClasses(ScheduleRegion region, ArchResolution archResolution,
+                    const waveamdmachine::EventSimConfig &modelConfig);
 void printDependences(ScheduleRegion region, const DependenceGraph &graph);
 bool exceedsScheduleRegionLimit(ScheduleRegion region,
                                 ScheduleSearchLimits limits);
@@ -151,6 +154,12 @@ configureScheduleModel(Operation *op, int modelWaves, int modelSimds,
                        int modelStartDelay, int modelVmemValueLatency,
                        int modelSmemValueLatency, int modelLdsValueLatency,
                        waveamdmachine::EventSimConfig &modelConfig);
+LogicalResult loadScheduleCalibration(
+    Operation *op, StringRef calibrationFile,
+    std::optional<waveamdmachine::CalibrationData> &calibration);
+LogicalResult
+validateScheduleCalibration(Operation *op, ArchResolution archResolution,
+                            const waveamdmachine::EventSimConfig &modelConfig);
 LogicalResult configureSchedulePressureBudgets(
     Operation *op, ArchResolution archResolution, bool pressureAwareSelection,
     int pressureVgprBudget, int pressureSgprBudget,

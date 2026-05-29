@@ -4,6 +4,8 @@
 // RUN: wave-sim-report --func=smem_wait --timeline %s | FileCheck %s --check-prefix=WAIT
 // RUN: wave-sim-report --func=smem_wait --timeline --smem-counter-latency=7 %s | FileCheck %s --check-prefix=COUNTER
 // RUN: wave-sim-report --func=smem_wait --op-latencies %s | FileCheck %s --check-prefix=LAT
+// RUN: wave-sim-report --func=two_dep_salu --calibration-file=%S/Inputs/calibration-with-overrides.json %s | FileCheck %s --check-prefix=CALIB
+// RUN: wave-sim-report --func=two_dep_salu --op-latencies --calibration-file=%S/Inputs/calibration-with-overrides.json %s | FileCheck %s --check-prefix=CALLAT
 // RUN: wave-sim-report --func=smem_value_ready --timeline --smem-value-latency=7 %s | FileCheck %s --check-prefix=VALUE
 // RUN: wave-sim-report --func=mem_token_issue_ready --timeline %s | FileCheck %s --check-prefix=TOKEN
 // RUN: wave-sim-report --func=lds_wait --timeline --lds-counter-latency=7 %s | FileCheck %s --check-prefix=LDSCOUNTER
@@ -141,6 +143,11 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // LAT: op_index=2 op=waveamdmachine.s_load_b32 class=WriteSMEM fu=LGKM latency=20 counter_latency=20 value_latency=20 issues=1
 // LAT: op_index=3 op=waveamdmachine.s_waitcnt class=NoInst fu=None latency=0 issues=1 waitcnt=1
 // LAT: op_index=4 op=waveamdmachine.s_add_i32 class=WriteSALU fu=SALU latency=2 issues=1
+
+// CALIB: func: two_dep_salu
+// CALIB: total_cycles: 8
+
+// CALLAT: op=waveamdmachine.s_add_i32 class=WriteSALU fu=SALU latency=4
 
 // VALUE: func: smem_value_ready
 // VALUE: total_cycles: 9

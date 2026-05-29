@@ -73,6 +73,11 @@ struct WaveAMDMachineScheduleReportPass
     waveamdmachine::EventSimConfig modelConfig;
     if (failed(configureReport(root, modelConfig)))
       return signalPassFailure();
+    std::optional<waveamdmachine::CalibrationData> calibration;
+    if (failed(loadScheduleCalibration(root, calibrationFile, calibration)))
+      return signalPassFailure();
+    if (calibration)
+      modelConfig.calibration = &*calibration;
 
     StringRef scoreFuncName(scoreFunc);
     ScheduleSearchLimits searchLimits{static_cast<int64_t>(maxBeamWork),
@@ -80,6 +85,9 @@ struct WaveAMDMachineScheduleReportPass
                                       /*emitDiagnostics=*/true};
     WalkResult walkResult = root->walk([&](func::FuncOp func) {
       ArchResolution archResolution = resolveArch(func);
+      if (failed(
+              validateScheduleCalibration(func, archResolution, modelConfig)))
+        return WalkResult::interrupt();
       RegisterPressureBudgets pressureBudgets;
       if (controls.prepareForPressure &&
           failed(configureSchedulePressureBudgets(
@@ -183,7 +191,7 @@ struct WaveAMDMachineScheduleReportPass
     if (printRegions)
       printRegion(region);
     if (emitClasses)
-      printOpClasses(region, archResolution);
+      printOpClasses(region, archResolution, modelConfig);
     if (skipRegionWorkForLimit(region, needsGraph || emitScores, searchLimits))
       return;
     if (needsGraph)

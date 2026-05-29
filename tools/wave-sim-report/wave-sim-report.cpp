@@ -11,6 +11,7 @@
 #include "mlir/Dialect/Wave/IR/WaveAMD.h"
 #include "mlir/Dialect/Wave/IR/WaveMeta.h"
 #include "mlir/Dialect/WaveAMDMachine/CostModel/ArchData.h"
+#include "mlir/Dialect/WaveAMDMachine/CostModel/CalibrationData.h"
 #include "mlir/Dialect/WaveAMDMachine/CostModel/EventSimulator.h"
 #include "mlir/Dialect/WaveAMDMachine/CostModel/FunctionalUnit.h"
 #include "mlir/Dialect/WaveAMDMachine/CostModel/LatencyTable.h"
@@ -25,6 +26,7 @@
 #include "mlir/InitAllDialects.h"
 #include "mlir/Parser/Parser.h"
 #include "llvm/Support/CommandLine.h"
+#include "llvm/Support/Error.h"
 #include "llvm/Support/InitLLVM.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/SourceMgr.h"
@@ -74,6 +76,11 @@ static llvm::cl::opt<bool>
     opLatencies("op-latencies",
                 llvm::cl::desc("print flattened op class/latency table"),
                 llvm::cl::init(false));
+
+static llvm::cl::opt<std::string>
+    calibrationFile("calibration-file",
+                    llvm::cl::desc("JSON latency calibration overlay"),
+                    llvm::cl::init(""));
 
 static llvm::cl::opt<int> vmemCounterLatency(
     "vmem-counter-latency",
@@ -245,9 +252,59 @@ static bool validateLatencyOverrides() {
          isValidLatencyOverride(ldsValueLatency);
 }
 
+static bool loadCalibration(std::optional<CalibrationData> &calibration) {
+  if (calibrationFile.empty())
+    return true;
+  llvm::Expected<CalibrationData> loaded =
+      CalibrationData::loadFromFile(calibrationFile);
+  if (!loaded) {
+    llvm::errs() << "failed to load calibration: "
+                 << llvm::toString(loaded.takeError()) << "\n";
+    return false;
+  }
+  calibration = std::move(*loaded);
+  return true;
+}
+
+static bool
+validateCalibrationArch(const ArchData &arch,
+                        const std::optional<CalibrationData> &calibration) {
+  if (!calibration || calibration->matchesArch(arch))
+    return true;
+  llvm::errs() << "calibration arch " << calibration->arch
+               << " does not match target " << arch.name << "\n";
+  return false;
+}
+
+static int getConfiguredLatency(const ArchData &arch, SchedClass cls,
+                                const CalibrationData *calibration) {
+  if (!calibration)
+    return getLatency(arch, cls);
+  return getCalibratedLatency(arch, cls, *calibration);
+}
+
+static EventSimConfig buildConfig(const CalibrationData *calibration) {
+  EventSimConfig config;
+  config.waves = std::max(1, waves.getValue());
+  config.simds = std::max(1, simds.getValue());
+  config.startDelay = std::max(0, startDelay.getValue());
+  config.tripCountOverride = std::max<int64_t>(-1, tripCount.getValue());
+  config.calibration = calibration;
+  config.recordTimeline = timeline.getValue();
+  config.counterLatencies.vmemLoad = vmemCounterLatency;
+  config.counterLatencies.vmemStore = vscntCounterLatency;
+  config.counterLatencies.smemLoad = smemCounterLatency;
+  config.counterLatencies.lds = ldsCounterLatency;
+  config.valueLatencies.vmemLoad = vmemValueLatency;
+  config.valueLatencies.smemLoad = smemValueLatency;
+  config.valueLatencies.lds = ldsValueLatency;
+  return config;
+}
+
 static void printOpLatencies(func::FuncOp func, const ArchData &arch,
                              const MemoryCounterLatencies &counterLatencies,
-                             const MemoryValueLatencies &valueLatencies) {
+                             const MemoryValueLatencies &valueLatencies,
+                             const CalibrationData *calibration) {
   SmallVector<Operation *> ops = flattenOps(func);
   llvm::outs() << "op_latencies:\n";
   for (auto [idx, op] : llvm::enumerate(ops)) {
@@ -258,19 +315,49 @@ static void printOpLatencies(func::FuncOp func, const ArchData &arch,
                  << " op=" << op->getName().getStringRef()
                  << " class=" << getSchedClassName(cls)
                  << " fu=" << getFunctionalUnitName(fu)
-                 << " latency=" << getLatency(arch, cls);
+                 << " latency=" << getConfiguredLatency(arch, cls, calibration);
     if (getMemoryCounterKind(op) != MemoryCounterKind::None) {
       llvm::outs() << " counter_latency="
-                   << getMemoryCounterLatency(arch, op, counterLatencies);
+                   << getMemoryCounterLatency(arch, op, counterLatencies,
+                                              calibration);
     }
     if (hasMemoryValueLatency(op))
       llvm::outs() << " value_latency="
-                   << getMemoryValueLatency(arch, op, valueLatencies);
+                   << getMemoryValueLatency(arch, op, valueLatencies,
+                                            calibration);
     llvm::outs() << " issues=" << getIssueCount(op);
     if (op->hasTrait<::mlir::OpTrait::waveamdmachine::WaitcntOp>())
       llvm::outs() << " waitcnt=1";
     llvm::outs() << "\n";
   }
+}
+
+static void printSimulationReport(func::FuncOp func, const ArchData &arch,
+                                  const EventSimConfig &config,
+                                  const EventSimResult &result) {
+  llvm::outs() << "func: " << func.getName() << "\n";
+  llvm::outs() << "arch: " << arch.name << "\n";
+  llvm::outs() << "waves: " << config.waves << "\n";
+  llvm::outs() << "simds: " << config.simds << "\n";
+  llvm::outs() << "start_delay: " << config.startDelay << "\n";
+  if (config.tripCountOverride >= 0)
+    llvm::outs() << "trip_count_override: " << config.tripCountOverride << "\n";
+  llvm::outs() << "total_cycles: " << result.totalCycles << "\n";
+  llvm::outs() << "issued_ops: " << result.issuedOps << "\n";
+  for (size_t i = 0; i < result.waveCompletedCycles.size(); ++i)
+    llvm::outs() << "wave_" << i
+                 << "_completed: " << result.waveCompletedCycles[i] << "\n";
+}
+
+static void printOptionalReports(func::FuncOp func, const ArchData &arch,
+                                 const EventSimConfig &config,
+                                 const EventSimResult &result) {
+  if (opLatencies)
+    printOpLatencies(func, arch, config.counterLatencies, config.valueLatencies,
+                     config.calibration);
+  if (timeline)
+    for (const EventSimEvent &event : result.events)
+      printEvent(event);
 }
 
 static int report(ModuleOp mod) {
@@ -288,43 +375,20 @@ static int report(ModuleOp mod) {
     llvm::errs() << "latency overrides must be -1 or non-negative\n";
     return 1;
   }
+  std::optional<CalibrationData> calibration;
+  if (!loadCalibration(calibration))
+    return 1;
+  if (!validateCalibrationArch(*arch, calibration))
+    return 1;
 
-  EventSimConfig config;
-  config.waves = std::max(1, waves.getValue());
-  config.simds = std::max(1, simds.getValue());
-  config.startDelay = std::max(0, startDelay.getValue());
-  config.tripCountOverride = std::max<int64_t>(-1, tripCount.getValue());
-  config.recordTimeline = timeline.getValue();
-  config.counterLatencies.vmemLoad = vmemCounterLatency;
-  config.counterLatencies.vmemStore = vscntCounterLatency;
-  config.counterLatencies.smemLoad = smemCounterLatency;
-  config.counterLatencies.lds = ldsCounterLatency;
-  config.valueLatencies.vmemLoad = vmemValueLatency;
-  config.valueLatencies.smemLoad = smemValueLatency;
-  config.valueLatencies.lds = ldsValueLatency;
+  EventSimConfig config = buildConfig(calibration ? &*calibration : nullptr);
 
   EventSimResult result;
   if (failed(simulateEventTimeline(func, *arch, config, result)))
     return 1;
 
-  llvm::outs() << "func: " << func.getName() << "\n";
-  llvm::outs() << "arch: " << arch->name << "\n";
-  llvm::outs() << "waves: " << config.waves << "\n";
-  llvm::outs() << "simds: " << config.simds << "\n";
-  llvm::outs() << "start_delay: " << config.startDelay << "\n";
-  if (config.tripCountOverride >= 0)
-    llvm::outs() << "trip_count_override: " << config.tripCountOverride << "\n";
-  llvm::outs() << "total_cycles: " << result.totalCycles << "\n";
-  llvm::outs() << "issued_ops: " << result.issuedOps << "\n";
-  for (size_t i = 0; i < result.waveCompletedCycles.size(); ++i)
-    llvm::outs() << "wave_" << i
-                 << "_completed: " << result.waveCompletedCycles[i] << "\n";
-  if (opLatencies)
-    printOpLatencies(func, *arch, config.counterLatencies,
-                     config.valueLatencies);
-  if (timeline)
-    for (const EventSimEvent &event : result.events)
-      printEvent(event);
+  printSimulationReport(func, *arch, config, result);
+  printOptionalReports(func, *arch, config, result);
   return 0;
 }
 

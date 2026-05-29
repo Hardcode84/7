@@ -61,6 +61,7 @@ public:
 
   std::optional<int> getOverrideCycles(SchedClass cls) const;
   const CalibrationOverride *getOverride(SchedClass cls) const;
+  bool matchesArch(const ArchData &arch) const;
 
   // Public fields with no invariants -- the JSON loader fills them.
   // Kept public so the loader (free helper in the .cpp) and the

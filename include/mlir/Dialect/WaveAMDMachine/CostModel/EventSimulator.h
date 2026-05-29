@@ -25,12 +25,14 @@ class FuncOp;
 namespace mlir::waveamdmachine {
 
 struct ArchData;
+class CalibrationData;
 
 struct EventSimConfig {
   int waves = 1;
   int simds = 1;
   int startDelay = 0;
   int64_t tripCountOverride = -1;
+  const CalibrationData *calibration = nullptr;
   bool recordTimeline = false;
   MemoryCounterLatencies counterLatencies;
   MemoryValueLatencies valueLatencies;

@@ -21,6 +21,7 @@
 #include "mlir/Interfaces/SideEffectInterfaces.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/Support/Error.h"
 #include "llvm/TargetParser/TargetParser.h"
 
 #include <algorithm>
@@ -38,6 +39,15 @@ static constexpr StringLiteral kTargetWavesAttr = "waveamdmachine.target_waves";
 static bool isWaveAMDMachineOp(Operation *op) {
   return op->getName().getDialectNamespace() ==
          waveamdmachine::WaveAMDMachineDialect::getDialectNamespace();
+}
+
+static int getModelLatency(const waveamdmachine::ArchData &arch,
+                           waveamdmachine::SchedClass cls,
+                           const waveamdmachine::EventSimConfig &modelConfig) {
+  if (!modelConfig.calibration)
+    return waveamdmachine::getLatency(arch, cls);
+  return waveamdmachine::getCalibratedLatency(arch, cls,
+                                              *modelConfig.calibration);
 }
 
 static bool isKnownMemoryOp(Operation *op) {
@@ -197,7 +207,8 @@ void printScheduleRegionLimitSkip(ScheduleRegion region,
                << "\n";
 }
 
-void printOpClasses(ScheduleRegion region, ArchResolution archResolution) {
+void printOpClasses(ScheduleRegion region, ArchResolution archResolution,
+                    const waveamdmachine::EventSimConfig &modelConfig) {
   for (auto [index, op] : llvm::enumerate(region.ops)) {
     waveamdmachine::SchedClass cls = waveamdmachine::classifyOp(op);
     llvm::errs() << kDiagPrefix << " op func=" << region.func.getSymName()
@@ -211,7 +222,7 @@ void printOpClasses(ScheduleRegion region, ArchResolution archResolution) {
               : waveamdmachine::funit(*archResolution.arch, cls);
       llvm::errs() << " fu=" << waveamdmachine::getFunctionalUnitName(fu)
                    << " latency="
-                   << waveamdmachine::getLatency(*archResolution.arch, cls);
+                   << getModelLatency(*archResolution.arch, cls, modelConfig);
     } else {
       llvm::errs() << " arch_fallback=" << archResolution.fallbackReason;
     }
@@ -421,6 +432,32 @@ configureScheduleModel(Operation *op, int modelWaves, int modelSimds,
   modelConfig.valueLatencies.smemLoad = modelSmemValueLatency;
   modelConfig.valueLatencies.lds = modelLdsValueLatency;
   return success();
+}
+
+LogicalResult loadScheduleCalibration(
+    Operation *op, StringRef calibrationFile,
+    std::optional<waveamdmachine::CalibrationData> &calibration) {
+  if (calibrationFile.empty())
+    return success();
+  llvm::Expected<waveamdmachine::CalibrationData> loaded =
+      waveamdmachine::CalibrationData::loadFromFile(calibrationFile);
+  if (!loaded)
+    return op->emitError("failed to load calibration: ")
+           << llvm::toString(loaded.takeError());
+  calibration = std::move(*loaded);
+  return success();
+}
+
+LogicalResult
+validateScheduleCalibration(Operation *op, ArchResolution archResolution,
+                            const waveamdmachine::EventSimConfig &modelConfig) {
+  if (!modelConfig.calibration || !archResolution.arch)
+    return success();
+  if (modelConfig.calibration->matchesArch(*archResolution.arch))
+    return success();
+  return op->emitError("calibration arch ")
+         << modelConfig.calibration->arch << " does not match target "
+         << archResolution.arch->name;
 }
 
 static LogicalResult validatePressureOptions(Operation *op,
@@ -1222,10 +1259,10 @@ computeNodeMetrics(const ScheduleRegion &region, const GraphTables &tables,
   SmallVector<NodeMetrics, 16> metrics(region.ops.size());
   for (auto [index, op] : llvm::enumerate(region.ops)) {
     waveamdmachine::SchedClass cls = waveamdmachine::classifyOp(op);
-    metrics[index].latency = waveamdmachine::getLatency(arch, cls);
+    metrics[index].latency = getModelLatency(arch, cls, modelConfig);
     if (waveamdmachine::hasMemoryValueLatency(op))
       metrics[index].latency = waveamdmachine::getMemoryValueLatency(
-          arch, op, modelConfig.valueLatencies);
+          arch, op, modelConfig.valueLatencies, modelConfig.calibration);
     metrics[index].memory = isMemoryIssuer(op);
     metrics[index].matrix = isMatrixOp(op);
   }
