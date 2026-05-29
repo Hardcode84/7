@@ -81,24 +81,18 @@ struct AddressPlan {
 // zero `instOffset` each mean "no contribution".
 //
 // `voffsetExpr` / `soffsetExpr` are the symbolic forms of the V / S
-// buckets; `assumptions` are the per-binding range assumptions
-// inherited from the source `wave.index_expr`. The emit-time spec
-// check calls `sym::provablyInRange` over them and demotes the
-// bucket when its proven range overflows the slot's hardware width.
-// `fullExpr` rematerializes addr64 fallback. `addr64*` slots carry
-// raw pointer terms not represented by `fullExpr`.
+// buckets; `assumptions` are the per-binding range assumptions. Emit-time
+// spec checks use them to demote overwide slots. `fullExpr` materializes the
+// complete byte offset for addr64 fallback.
 struct OffsetTriple {
   llvm::SmallVector<sym::PredHandle, 2> assumptions;
   llvm::SmallVector<std::pair<std::string, Value>, 4> bindings;
   Value voffset;
   Value soffset;
-  Value addr64Voffset;
-  Value addr64Soffset;
   const ::ixs_node *voffsetExpr = nullptr;
   const ::ixs_node *soffsetExpr = nullptr;
   const ::ixs_node *fullExpr = nullptr;
   int64_t instOffset = 0;
-  int64_t addr64InstOffset = 0;
 };
 
 // Per-iter-arg snapshot captured at the scf.for boundary. `WMValue`

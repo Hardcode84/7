@@ -221,7 +221,6 @@ void bindLoopBodyArgs(WaveAMDMachineSelector &S, scf::ForOp op, Block &loopBody,
         S.pointerGlobalBases[scfArg] = snap.globalBase;
       OffsetTriple triple;
       triple.voffset = blockCarry;
-      triple.addr64Voffset = blockCarry;
       S.pointerOffsets[scfArg] = triple;
       S.values[blockCarry] = blockCarry;
       FailureOr<PointerOffset> symbolic =
@@ -314,7 +313,6 @@ void bindLoopResults(WaveAMDMachineSelector &S, scf::ForOp op, Operation *loop,
         S.pointerGlobalBases[scfResult] = snap.globalBase;
       OffsetTriple triple;
       triple.voffset = wmResult;
-      triple.addr64Voffset = wmResult;
       S.pointerOffsets[scfResult] = triple;
       S.values[wmResult] = wmResult;
       FailureOr<PointerOffset> symbolic =
@@ -343,7 +341,6 @@ static void rebindStridedPointerCarries(WaveAMDMachineSelector &S,
       // soffset bucket exists on buffer ops: march there, base SRD fixed.
       S.pointerOffsets[scfArg].soffset = S.mulUniformValues(
           loc, iv, createImm(S.builder, loc, snap.strideBytes));
-      S.pointerOffsets[scfArg].addr64Soffset = S.pointerOffsets[scfArg].soffset;
       if (auto symIt = S.pointerIndexOffsets.find(scfArg);
           symIt != S.pointerIndexOffsets.end())
         if (failed(addSymbolicStride(S, symIt->second,

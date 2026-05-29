@@ -205,7 +205,6 @@ static FailureOr<Value> materializeFullPlanAddress(WaveAMDMachineSelector &S,
   OffsetTriple triple;
   triple.bindings = std::move(bindings.wide);
   triple.fullExpr = expr->raw();
-  triple.addr64InstOffset = plan.instOffset;
   return S.materializeGlobalAddress(user->getLoc(), base, triple, user);
 }
 
