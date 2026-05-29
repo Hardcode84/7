@@ -183,3 +183,40 @@ Result: the Wave FA builder now covers D64/D128 multi-wave workgroups and
 lowers/runs through the same baseline/scheduled path. Scheduling is neutral on
 these shapes until the pressure model can find a legal lower-pressure
 interleave.
+
+## Beam-search compile-time scaling
+
+Inputs were scheduler-only pre-schedule MLIR generated from the matmul and FA
+calibrators. Command shape:
+
+```bash
+build/bin/wave-opt <presched.mlir> \
+  --waveamd-machine-schedule='apply-schedule=1 pressure-aware-selection=1 beam-search=1'
+```
+
+`no threading` adds `--mlir-disable-threading`. Times are wall seconds. Small
+cases use median of 3 runs; `fa seq32 D16` uses 1 run because it is already the
+scaling cliff.
+
+| Revision | Search shape | Case | Threaded | No threading | Output |
+| --- | --- | --- | ---: | ---: | --- |
+| `48b7639` | serial beam | matmul 32x32x64 | 0.06 | 0.06 | stable |
+| `48b7639` | serial beam | FA seq16 D32 u4 | 1.46 | 1.46 | stable |
+| `48b7639` | serial beam | FA seq16 D64 u4 | 2.20 | 2.20 | stable |
+| `48b7639` | serial beam | FA seq32 D16 u4 | 15.71 | 15.64 | stable |
+| `2395026` | outer-guide parallel | matmul 32x32x64 | 0.06 | 0.06 | stable |
+| `2395026` | outer-guide parallel | FA seq16 D32 u4 | 1.40 | 1.44 | stable |
+| `2395026` | outer-guide parallel | FA seq16 D64 u4 | 2.13 | 2.17 | stable |
+| `2395026` | outer-guide parallel | FA seq32 D16 u4 | 15.49 | 15.50 | stable |
+| `679b304` | gated inner expansion | matmul 32x32x64 | 0.06 | 0.06 | stable |
+| `679b304` | gated inner expansion | FA seq16 D32 u4 | 1.40 | 1.45 | stable |
+| `679b304` | gated inner expansion | FA seq16 D64 u4 | 2.12 | 2.17 | stable |
+| `679b304` | gated inner expansion | FA seq32 D16 u4 | 15.52 | 15.46 | stable |
+
+`stable` means threaded and `--mlir-disable-threading` output were byte-identical
+for that revision and case.
+
+Result: outer-guide parallelism gives a small win on the two FA seq16 cases and
+does not perturb output. Current inner expansion threshold is above the default
+beam width, so it preserves the outer-guide result. A threshold-8 trial
+regressed FA seq16 timing; keep it gated until a wider-beam user exists.
