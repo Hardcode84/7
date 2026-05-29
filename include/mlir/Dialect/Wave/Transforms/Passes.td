@@ -17,7 +17,9 @@ def ConvertWaveAMDToWaveAMDMachine : Pass<"waveamd-to-machine"> {
     Lowers source-level Wave operations to generic WaveAMDMachine dialect
     operations. This is the explicit backend boundary: the result is still MLIR,
     but the values are selected into SGPR/VGPR-like register classes and
-    machine-like operations.
+    machine-like operations. Module-level `wavemeta.params` may remain as
+    metadata, but selected functions must contain only supported boundary
+    types and no residual `wavemeta.*` ops.
   }];
 
   let dependentDialects = [

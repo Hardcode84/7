@@ -8,6 +8,28 @@ func.func @unsupported_op(%x: i32, %y: i32) attributes {wave.kernel} {
 
 // -----
 
+func.func @residual_wavemeta_op() attributes {wave.kernel} {
+  // expected-error @below {{WaveAMDMachine lowering requires wavemeta-specialize; residual wavemeta operation remains}}
+  %n = wavemeta.param "n" : index
+  return
+}
+
+// -----
+
+// expected-error @below {{unsupported type for WaveAMDMachine lowering: '!wavemeta.ptuple<i32, "n">'}}
+func.func @residual_wavemeta_type(%t: !wavemeta.ptuple<i32, "n">) attributes {wave.kernel} {
+  return
+}
+
+// -----
+
+// expected-error @below {{unsupported type for WaveAMDMachine lowering: 'memref<4xi32>'}}
+func.func @unsupported_source_type(%m: memref<4xi32>) attributes {wave.kernel} {
+  return
+}
+
+// -----
+
 func.func @unsupported_lane_id_width() {
   // expected-error @below {{WaveAMDMachine backend supports only !wave.simd<i32, 32> lane_id}}
   %lane = wave.lane_id : !wave.simd<i32, 64>

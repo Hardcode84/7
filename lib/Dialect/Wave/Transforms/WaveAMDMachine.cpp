@@ -21,6 +21,7 @@
 #include "mlir/Dialect/Wave/IR/Wave.h"
 #include "mlir/Dialect/Wave/IR/WaveAMD.h"
 #include "mlir/Dialect/Wave/IR/WaveAMDABI.h"
+#include "mlir/Dialect/Wave/IR/WaveMeta.h"
 #include "mlir/Dialect/Wave/IR/WaveSymbols.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachine.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineTarget.h"
@@ -2394,6 +2395,111 @@ LogicalResult WaveAMDMachineSelector::selectReturn(func::ReturnOp op) {
 
 namespace {
 
+static bool isSupportedBoundaryType(Type type);
+
+static bool isSupportedScalarPayloadType(Type type) {
+  if (type.isIndex())
+    return true;
+  if (auto intType = dyn_cast<IntegerType>(type))
+    return intType.isSignless() && intType.getWidth() <= 64;
+  if (auto floatType = dyn_cast<FloatType>(type))
+    return floatType.getWidth() == 16 || floatType.getWidth() == 32;
+  return false;
+}
+
+static bool isSupportedVectorPayloadType(VectorType type) {
+  return type.getRank() == 1 &&
+         isSupportedScalarPayloadType(type.getElementType());
+}
+
+static bool isSupportedTuplePayloadType(TupleType type) {
+  return llvm::all_of(type.getTypes(), isSupportedBoundaryType);
+}
+
+static bool isSupportedSimdPayloadType(SimdType type) {
+  int64_t width = type.getWidth();
+  return (width == 32 || width == 64) &&
+         isSupportedBoundaryType(type.getElementType());
+}
+
+static bool isSupportedWaveIndexType(WaveIndexType type) {
+  int64_t width = type.getWidth();
+  return width == 0 || width == 32 || width == 64;
+}
+
+static bool isSupportedWaveType(Type type) {
+  if (auto ptrType = dyn_cast<PtrType>(type))
+    return isSupportedBoundaryType(ptrType.getElementType());
+  if (auto simdType = dyn_cast<SimdType>(type))
+    return isSupportedSimdPayloadType(simdType);
+  if (auto maskType = dyn_cast<MaskType>(type))
+    return maskType.getWidth() == 32 || maskType.getWidth() == 64;
+  if (auto indexType = dyn_cast<WaveIndexType>(type))
+    return isSupportedWaveIndexType(indexType);
+  return isa<MemTokenType, waveamd::FragmentType>(type);
+}
+
+static bool isSupportedMachineType(Type type) {
+  return isa<waveamdmachine::RegType, waveamdmachine::ImmType,
+             waveamdmachine::MemTokenType, waveamdmachine::M0Type>(type);
+}
+
+static bool isSupportedBoundaryType(Type type) {
+  if (isSupportedScalarPayloadType(type))
+    return true;
+  if (auto vectorType = dyn_cast<VectorType>(type))
+    return isSupportedVectorPayloadType(vectorType);
+  if (auto tupleType = dyn_cast<TupleType>(type))
+    return isSupportedTuplePayloadType(tupleType);
+  return isSupportedWaveType(type) || isSupportedMachineType(type);
+}
+
+static LogicalResult diagnoseUnsupportedBoundaryType(Operation *op, Type type) {
+  if (isSupportedBoundaryType(type))
+    return success();
+  return op->emitError("unsupported type for WaveAMDMachine lowering: ")
+         << type;
+}
+
+static LogicalResult diagnoseUnsupportedBoundaryTypes(Operation *op) {
+  for (Type type : op->getOperandTypes())
+    if (failed(diagnoseUnsupportedBoundaryType(op, type)))
+      return failure();
+  for (Type type : op->getResultTypes())
+    if (failed(diagnoseUnsupportedBoundaryType(op, type)))
+      return failure();
+  for (Region &region : op->getRegions()) {
+    for (Block &block : region) {
+      for (BlockArgument arg : block.getArguments())
+        if (failed(diagnoseUnsupportedBoundaryType(op, arg.getType())))
+          return failure();
+    }
+  }
+  return success();
+}
+
+static LogicalResult diagnoseFunctionResultTypes(func::FuncOp func) {
+  for (Type type : func.getFunctionType().getResults())
+    if (failed(diagnoseUnsupportedBoundaryType(func, type)))
+      return failure();
+  return success();
+}
+
+static LogicalResult diagnoseWaveAMDMachineBoundary(func::FuncOp func) {
+  bool foundUnsupported = failed(diagnoseFunctionResultTypes(func));
+  func.walk([&](Operation *op) {
+    if (op->getDialect() && isa<wavemeta::WaveMetaDialect>(op->getDialect())) {
+      op->emitOpError("WaveAMDMachine lowering requires wavemeta-specialize; "
+                      "residual wavemeta operation remains");
+      foundUnsupported = true;
+      return;
+    }
+    if (failed(diagnoseUnsupportedBoundaryTypes(op)))
+      foundUnsupported = true;
+  });
+  return success(!foundUnsupported);
+}
+
 struct ConvertWaveAMDToWaveAMDMachinePass
     : public wave::impl::ConvertWaveAMDToWaveAMDMachineBase<
           ConvertWaveAMDToWaveAMDMachinePass> {
@@ -2423,6 +2529,12 @@ struct ConvertWaveAMDToWaveAMDMachinePass
       if (reachesWave)
         targets.push_back(f);
     });
+    bool foundUnsupported = false;
+    for (func::FuncOp func : targets)
+      if (failed(diagnoseWaveAMDMachineBoundary(func)))
+        foundUnsupported = true;
+    if (foundUnsupported)
+      return signalPassFailure();
     for (func::FuncOp func : targets) {
       if (failed(wave::wmsel::WaveAMDMachineSelector(func).run()))
         return signalPassFailure();
