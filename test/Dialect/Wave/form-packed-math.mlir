@@ -130,6 +130,22 @@ func.func @policy_mismatch(%a: !wave.simd<f32, 32>, %b: !wave.simd<f32, 32>)
   return %x, %y : !wave.simd<f16, 32>, !wave.simd<f16, 32>
 }
 
+// CHECK-LABEL: func.func @rne_cast_pair
+// CHECK-NOT: vector<2xf
+// CHECK: wave.cast fpconvert
+// CHECK-SAME: policy {rounding = #wave.cast_rounding<rne>}
+// CHECK: wave.cast fpconvert
+// CHECK-SAME: policy {rounding = #wave.cast_rounding<rne>}
+// CHECK: return
+func.func @rne_cast_pair(%a: !wave.simd<f32, 32>, %b: !wave.simd<f32, 32>)
+    -> (!wave.simd<f16, 32>, !wave.simd<f16, 32>) {
+  %x = wave.cast fpconvert %a policy {rounding = #wave.cast_rounding<rne>}
+      : !wave.simd<f32, 32> -> !wave.simd<f16, 32>
+  %y = wave.cast fpconvert %b policy {rounding = #wave.cast_rounding<rne>}
+      : !wave.simd<f32, 32> -> !wave.simd<f16, 32>
+  return %x, %y : !wave.simd<f16, 32>, !wave.simd<f16, 32>
+}
+
 // CHECK-LABEL: func.func @pack_extract_only_stays
 // CHECK-NOT: wave.pack
 // CHECK: wave.extract
@@ -142,6 +158,29 @@ func.func @pack_extract_only_stays(%v: !wave.simd<vector<2xf16>, 32>)
   %y = wave.extract %v[1]
       : !wave.simd<vector<2xf16>, 32> -> !wave.simd<f16, 32>
   return %x, %y : !wave.simd<f16, 32>, !wave.simd<f16, 32>
+}
+
+}
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx803"} {
+
+// CHECK-LABEL: func.func @gfx8_f16_math_stays_scalar
+// CHECK-NOT: vector<2xf16>
+// CHECK: wave.fadd
+// CHECK: wave.fadd
+// CHECK: return
+func.func @gfx8_f16_math_stays_scalar(%a0: !wave.simd<f16, 64>,
+                                      %a1: !wave.simd<f16, 64>,
+                                      %b0: !wave.simd<f16, 64>,
+                                      %b1: !wave.simd<f16, 64>)
+    -> (!wave.simd<f16, 64>, !wave.simd<f16, 64>) {
+  %s0 = wave.fadd %a0, %b0
+      : !wave.simd<f16, 64>, !wave.simd<f16, 64> -> !wave.simd<f16, 64>
+  %s1 = wave.fadd %a1, %b1
+      : !wave.simd<f16, 64>, !wave.simd<f16, 64> -> !wave.simd<f16, 64>
+  return %s0, %s1 : !wave.simd<f16, 64>, !wave.simd<f16, 64>
 }
 
 }

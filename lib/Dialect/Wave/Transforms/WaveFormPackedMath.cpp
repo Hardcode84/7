@@ -10,6 +10,8 @@
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Wave/IR/Wave.h"
+#include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachine.h"
+#include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineTarget.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "llvm/ADT/DenseMap.h"
@@ -42,6 +44,11 @@ struct PackedPair {
   Value packed;
 };
 
+struct PackedMathCapabilities {
+  bool packedF16Math = true;
+  bool packedF32ToF16 = true;
+};
+
 static bool isScalarSimdF16(Type type) {
   SimdType simd = dyn_cast<SimdType>(type);
   return simd && simd.getElementType().isF16();
@@ -65,6 +72,16 @@ static bool isF32ToF16Cast(CastOp op) {
          isScalarSimdF16(op.getResult().getType());
 }
 
+static bool hasRtzRounding(CastOp op) {
+  std::optional<DictionaryAttr> policy = op.getPolicy();
+  if (!policy)
+    return false;
+  Attribute attr = policy->get("rounding");
+  if (!attr)
+    return false;
+  return cast<CastRoundingPolicyAttr>(attr).getValue() == CastRounding::RTZ;
+}
+
 static std::optional<PairKind> getFloatMathKind(Operation *op) {
   if (op->getNumResults() == 0 || !isScalarSimdF16(op->getResult(0).getType()))
     return std::nullopt;
@@ -84,6 +101,16 @@ static std::optional<PairKind> getCandidateKind(Operation *op) {
     return std::nullopt;
   }
   return getFloatMathKind(op);
+}
+
+static bool isCandidateSupported(Operation *op,
+                                 const PackedMathCapabilities &capabilities) {
+  std::optional<PairKind> kind = getCandidateKind(op);
+  if (!kind)
+    return false;
+  if (*kind == PairKind::Cast)
+    return capabilities.packedF32ToF16 && hasRtzRounding(cast<CastOp>(op));
+  return capabilities.packedF16Math;
 }
 
 static bool isCommutative(PairKind kind) {
@@ -144,14 +171,35 @@ static bool independentPair(Operation *lo, Operation *hi) {
   return !dependsOn(lo, hi) && !dependsOn(hi, lo);
 }
 
+static FailureOr<PackedMathCapabilities>
+getPackedMathCapabilities(Operation *op) {
+  if (!waveamdmachine::findAMDGPUTargetModule(op))
+    return PackedMathCapabilities{};
+
+  FailureOr<llvm::AMDGPU::IsaVersion> isa =
+      waveamdmachine::getAMDGPUTargetIsaVersion(op, "wave-form-packed-math");
+  if (failed(isa))
+    return failure();
+
+  PackedMathCapabilities capabilities;
+  capabilities.packedF16Math =
+      waveamdmachine::VPkAddF16Op::isSupportedOnIsa(*isa) &&
+      waveamdmachine::VPkMulF16Op::isSupportedOnIsa(*isa) &&
+      waveamdmachine::VPkFmaF16Op::isSupportedOnIsa(*isa);
+  capabilities.packedF32ToF16 =
+      waveamdmachine::VCvtPkRtzF16F32Op::isSupportedOnIsa(*isa);
+  return capabilities;
+}
+
 class PackedMathBuilder {
 public:
-  PackedMathBuilder(func::FuncOp func) : builder(func.getContext()) {}
+  PackedMathBuilder(func::FuncOp func, PackedMathCapabilities capabilities)
+      : builder(func.getContext()), capabilities(capabilities) {}
 
   bool runOnBlock(Block &block) {
     SmallVector<Operation *, 16> candidates;
     for (Operation &op : block)
-      if (getCandidateKind(&op))
+      if (isCandidateSupported(&op, capabilities))
         candidates.push_back(&op);
 
     for (auto [index, op] : llvm::enumerate(candidates)) {
@@ -173,8 +221,14 @@ public:
   }
 
 private:
+  bool canFormPackedPair(Operation *lo, Operation *hi) {
+    return compatiblePair(lo, hi) && independentPair(lo, hi) &&
+           isCandidateSupported(lo, capabilities) &&
+           isCandidateSupported(hi, capabilities);
+  }
+
   bool canVectorizeRootPair(Operation *lo, Operation *hi) {
-    if (!compatiblePair(lo, hi) || !independentPair(lo, hi))
+    if (!canFormPackedPair(lo, hi))
       return false;
     if (lo->getResult(0).use_empty() && hi->getResult(0).use_empty())
       return false;
@@ -204,8 +258,7 @@ private:
     Operation *hiDef = hi.getDefiningOp();
     if (!loDef || !hiDef)
       return 0;
-    return compatiblePair(loDef, hiDef) && independentPair(loDef, hiDef) ? 1
-                                                                         : 0;
+    return canFormPackedPair(loDef, hiDef) ? 1 : 0;
   }
 
   SmallVector<std::pair<Value, Value>, 3> chooseOperandPairs(Operation *lo,
@@ -238,8 +291,7 @@ private:
     Operation *loDef = lo.getDefiningOp();
     Operation *hiDef = hi.getDefiningOp();
     if (loDef && hiDef && !vectorizedOps.contains(loDef) &&
-        !vectorizedOps.contains(hiDef) && compatiblePair(loDef, hiDef) &&
-        independentPair(loDef, hiDef)) {
+        !vectorizedOps.contains(hiDef) && canFormPackedPair(loDef, hiDef)) {
       Value packed = getOrCreatePackedOp(loDef, hiDef);
       packedValueForPair[key] = packed;
       return packed;
@@ -341,6 +393,7 @@ private:
   SmallVector<PackedPair, 16> packedPairs;
   DenseSet<Operation *> vectorizedOps;
   SmallVector<Operation *, 16> eraseOps;
+  PackedMathCapabilities capabilities;
   bool changed = false;
 };
 
@@ -350,9 +403,14 @@ struct WaveFormPackedMathPass
 
   void runOnOperation() override {
     Operation *root = getOperation();
-    root->walk([&](func::FuncOp func) {
+    WalkResult result = root->walk([&](func::FuncOp func) -> WalkResult {
       if (func.isExternal())
-        return;
+        return WalkResult::advance();
+      FailureOr<PackedMathCapabilities> capabilities =
+          getPackedMathCapabilities(func);
+      if (failed(capabilities))
+        return WalkResult::interrupt();
+
       SmallVector<Block *, 16> blocks;
       func.walk([&](Operation *op) {
         for (Region &region : op->getRegions())
@@ -360,10 +418,13 @@ struct WaveFormPackedMathPass
             blocks.push_back(&block);
       });
       for (Block *block : blocks) {
-        PackedMathBuilder packedMath(func);
+        PackedMathBuilder packedMath(func, *capabilities);
         (void)packedMath.runOnBlock(*block);
       }
+      return WalkResult::advance();
     });
+    if (result.wasInterrupted())
+      return signalPassFailure();
   }
 };
 
