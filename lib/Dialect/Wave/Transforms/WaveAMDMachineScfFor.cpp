@@ -127,9 +127,9 @@ LogicalResult snapshotScfCarries(WaveAMDMachineSelector &S, scf::ForOp op,
           offsetIt == S.pointerIndexOffsets.end())
         return op.emitError(
             "scf.for pointer iter arg has no WaveAMDMachine sidecar");
-      FailureOr<OffsetTriple> offset =
-          bucketizePointerOffset(S, op, offsetIt->second);
-      if (failed(offset))
+      FailureOr<Value> carry =
+          materializePointerOffsetCarryVGPR(S, op, offsetIt->second);
+      if (failed(carry))
         return failure();
       bool isBuffer = S.pointerBuffers.lookup(initArg);
       Value globalBase = S.pointerGlobalBases.lookup(initArg);
@@ -140,8 +140,7 @@ LogicalResult snapshotScfCarries(WaveAMDMachineSelector &S, scf::ForOp op,
                            : 0;
       CarrySnapshot snap;
       snap.kind = CarrySnapshot::Kind::Pointer;
-      snap.carry = S.ensureVGPRForVSrc1(op.getLoc(),
-                                        S.collapseTriple(op.getLoc(), *offset));
+      snap.carry = *carry;
       snap.base = baseIt->second;
       snap.globalBase = globalBase;
       snap.strideBytes = stride;
@@ -246,7 +245,7 @@ static LogicalResult collectPointerYieldCarry(WaveAMDMachineSelector &S,
   if (snap.globalBase && S.pointerGlobalBases.lookup(y) != snap.globalBase)
     return yield.emitError("scf.yield pointer carry must keep global base");
   FailureOr<Value> carry =
-      materializePointerOffsetVGPR(S, yield, offsetIt->second);
+      materializePointerOffsetCarryVGPR(S, yield, offsetIt->second);
   if (failed(carry))
     return failure();
   out.push_back(*carry);

@@ -202,6 +202,10 @@ FailureOr<Value> materializePointerOffsetVGPR(WaveAMDMachineSelector &S,
                                               Operation *user,
                                               const PointerOffset &offset);
 
+FailureOr<Value> materializePointerOffsetCarryVGPR(WaveAMDMachineSelector &S,
+                                                   Operation *user,
+                                                   const PointerOffset &offset);
+
 FailureOr<AddressPlan>
 planMemoryAddress(WaveAMDMachineSelector &S, Operation *user,
                   const PointerOffset &offset,
@@ -215,10 +219,6 @@ LogicalResult bucketize(WaveAMDMachineSelector &S, ::ixs_node *node,
                         Operation *user, const llvm::StringMap<Value> &subs,
                         const llvm::StringMap<TermKind> &symKinds,
                         OffsetTriple &triple);
-
-FailureOr<OffsetTriple> bucketizePointerOffset(WaveAMDMachineSelector &S,
-                                               Operation *user,
-                                               const PointerOffset &offset);
 
 // scf.for lowering cluster. Defined in `WaveAMDMachineScfFor.cpp` as free
 // helpers taking the selector by reference, mirroring the IXS-cluster

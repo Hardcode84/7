@@ -1125,6 +1125,51 @@ materializePlanBuckets(WaveAMDMachineSelector &S, Operation *user,
   return out;
 }
 
+FailureOr<Value>
+materializePointerOffsetCarryVGPR(WaveAMDMachineSelector &S, Operation *user,
+                                  const PointerOffset &offset) {
+  waveamdmachine::AddressFieldSpec spec{/*instOffsetBits=*/32,
+                                        /*instOffsetSigned=*/true,
+                                        /*hasSoffset=*/true};
+  FailureOr<AddressPlan> plan = planAddressFields(S, offset, spec);
+  if (failed(plan))
+    return user->emitError("failed to plan pointer carry offset");
+  AddressPlanBindings bindings = materializeAddressPlanBindings(S, user, *plan);
+  Location loc = user->getLoc();
+  Value carry;
+  if (plan->voffsetExpr) {
+    FailureOr<Value> voffset =
+        materializePlanExpr(S, user, plan->voffsetExpr, bindings);
+    if (failed(voffset))
+      return failure();
+    carry = *voffset;
+  } else {
+    carry = createImm(S.builder, loc, 0);
+  }
+  carry = S.ensureVGPRForVSrc1(loc, carry);
+  auto append = [&](Value value) {
+    if (value)
+      carry = S.addByteOffsets(loc, carry, value);
+  };
+  if (plan->soffsetExpr) {
+    FailureOr<Value> soffset =
+        materializePlanExpr(S, user, plan->soffsetExpr, bindings);
+    if (failed(soffset))
+      return failure();
+    append(S.ensureSGPR1(loc, *soffset));
+  }
+  if (plan->instOffset != 0)
+    append(createImm(S.builder, loc, plan->instOffset));
+  if (plan->fullAddressRemainderExpr) {
+    FailureOr<Value> remainder =
+        materializePlanExpr(S, user, plan->fullAddressRemainderExpr, bindings);
+    if (failed(remainder))
+      return failure();
+    append(*remainder);
+  }
+  return carry;
+}
+
 FailureOr<Value> materializeFullPlanAddress(WaveAMDMachineSelector &S,
                                             Operation *user, Value base,
                                             const AddressPlan &plan) {
@@ -2395,9 +2440,9 @@ LogicalResult WaveAMDMachineSelector::selectIndexExpr(IndexExprOp op) {
   return success();
 }
 
-FailureOr<OffsetTriple> bucketizePointerOffset(WaveAMDMachineSelector &S,
-                                               Operation *user,
-                                               const PointerOffset &offset) {
+static FailureOr<OffsetTriple>
+bucketizePointerOffset(WaveAMDMachineSelector &S, Operation *user,
+                       const PointerOffset &offset) {
   llvm::StringMap<Value> substitution;
   llvm::StringMap<TermKind> symKinds;
   OffsetTriple triple;
