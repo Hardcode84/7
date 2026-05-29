@@ -73,7 +73,7 @@ struct AddressPlan {
 };
 
 // Per-iter-arg snapshot captured at the scf.for boundary. Pointer carries
-// thread base metadata plus one VGPR offset value through the loop.
+// thread base metadata plus one offset value through the loop.
 //
 // `strideBytes != 0`: body rematerializes `base + iv * strideBytes`.
 struct CarrySnapshot {
@@ -86,6 +86,7 @@ struct CarrySnapshot {
   Value globalBase;
   int64_t strideBytes = 0;
   Kind kind;
+  TermKind offsetKind = TermKind::Lane;
   bool isBuffer = false;
 };
 
@@ -179,9 +180,13 @@ FailureOr<Value> materializePointerOffsetVGPR(WaveAMDMachineSelector &S,
                                               Operation *user,
                                               const PointerOffset &offset);
 
-FailureOr<Value> materializePointerOffsetCarryVGPR(WaveAMDMachineSelector &S,
-                                                   Operation *user,
-                                                   const PointerOffset &offset);
+TermKind classifyPointerOffset(WaveAMDMachineSelector &S,
+                               const PointerOffset &offset);
+
+FailureOr<Value> materializePointerOffsetCarry(WaveAMDMachineSelector &S,
+                                               Operation *user,
+                                               const PointerOffset &offset,
+                                               TermKind carryKind);
 
 FailureOr<AddressPlan>
 planMemoryAddress(WaveAMDMachineSelector &S, Operation *user,

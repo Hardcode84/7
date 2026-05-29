@@ -73,6 +73,56 @@ static LogicalResult addSymbolicStride(WaveAMDMachineSelector &S,
   return success();
 }
 
+static bool isLaneVaryingValue(Type type) {
+  if (isa<SimdType>(type))
+    return true;
+  if (auto idx = dyn_cast<WaveIndexType>(type))
+    return idx.getWidth() != 0;
+  return false;
+}
+
+static TermKind loopCarryKind(TermKind kind) {
+  return kind == TermKind::Lane ? TermKind::Lane : TermKind::Uniform;
+}
+
+static TermKind classifyIndexExprResult(WaveAMDMachineSelector &S,
+                                        IndexExprOp op) {
+  PointerOffset offset;
+  for (auto [nameAttr, binding] : llvm::zip(op.getNames(), op.getBindings())) {
+    StringRef key = cast<StringAttr>(nameAttr).getValue();
+    TermKind kind = isLaneVaryingValue(binding.getType()) ? TermKind::Lane
+                                                          : TermKind::Uniform;
+    offset.bindings.push_back({key.str(), binding, kind});
+    if (std::optional<sym::PredHandle> a = S.bindingAssumption(binding, key))
+      offset.assumptions.push_back(*a);
+  }
+  sym::ExprHandle expr{op.getExpr().getNode()};
+  FailureOr<sym::ExprHandle> simplified =
+      sym::simplifyExpr(S.symbolStore(), expr, offset.assumptions);
+  offset.expr = succeeded(simplified) ? *simplified : expr;
+  return classifyPointerOffset(S, offset);
+}
+
+static TermKind classifyPointerYield(WaveAMDMachineSelector &S, Value value,
+                                     Value iterArg, TermKind iterKind) {
+  if (value == iterArg)
+    return iterKind;
+  if (auto add = value.getDefiningOp<PtrAddOp>()) {
+    TermKind baseKind =
+        classifyPointerYield(S, add.getBase(), iterArg, iterKind);
+    TermKind offsetKind = isLaneVaryingValue(add.getOffset().getType())
+                              ? TermKind::Lane
+                              : TermKind::Uniform;
+    if (auto index = add.getOffset().getDefiningOp<IndexExprOp>())
+      offsetKind = classifyIndexExprResult(S, index);
+    return std::max(baseKind, offsetKind);
+  }
+  auto it = S.pointerIndexOffsets.find(value);
+  if (it != S.pointerIndexOffsets.end())
+    return classifyPointerOffset(S, it->second);
+  return TermKind::Lane;
+}
+
 // Wave-uniform per-iter advance (bytes) for global carry `i` the body
 // may march on the scalar base, else 0. Eligible: normalized loop, dead
 // post-loop result, constant-offset ptr_add chain back to the iter arg.
@@ -118,6 +168,7 @@ static Value recomputeStridedBase(WaveAMDMachineSelector &S, Location loc,
 LogicalResult snapshotScfCarries(WaveAMDMachineSelector &S, scf::ForOp op,
                                  SmallVectorImpl<CarrySnapshot> &out) {
   out.reserve(op.getInitArgs().size());
+  auto yield = cast<scf::YieldOp>(op.getBody()->getTerminator());
   for (auto [idx, initArg] : llvm::enumerate(op.getInitArgs())) {
     if (auto simd = dyn_cast<SimdType>(initArg.getType());
         simd && isa<PtrType>(simd.getElementType())) {
@@ -127,23 +178,31 @@ LogicalResult snapshotScfCarries(WaveAMDMachineSelector &S, scf::ForOp op,
           offsetIt == S.pointerIndexOffsets.end())
         return op.emitError(
             "scf.for pointer iter arg has no WaveAMDMachine sidecar");
+      TermKind initKind = classifyPointerOffset(S, offsetIt->second);
+      int64_t stride = !S.isSharedPointer(initArg.getType())
+                           ? stridedCarryBytes(S, op, idx)
+                           : 0;
+      TermKind yieldKind =
+          stride != 0 ? initKind
+                      : classifyPointerYield(S, yield.getOperand(idx),
+                                             op.getRegionIterArgs()[idx],
+                                             loopCarryKind(initKind));
+      TermKind carryKind = loopCarryKind(std::max(initKind, yieldKind));
       FailureOr<Value> carry =
-          materializePointerOffsetCarryVGPR(S, op, offsetIt->second);
+          materializePointerOffsetCarry(S, op, offsetIt->second, carryKind);
       if (failed(carry))
         return failure();
       bool isBuffer = S.pointerBuffers.lookup(initArg);
       Value globalBase = S.pointerGlobalBases.lookup(initArg);
       // shared base is a const 0; global marches the SGPR base, buffer
       // marches soffset. LDS skipped.
-      int64_t stride = !S.isSharedPointer(initArg.getType())
-                           ? stridedCarryBytes(S, op, idx)
-                           : 0;
       CarrySnapshot snap;
       snap.kind = CarrySnapshot::Kind::Pointer;
       snap.carry = *carry;
       snap.base = baseIt->second;
       snap.globalBase = globalBase;
       snap.strideBytes = stride;
+      snap.offsetKind = carryKind;
       snap.isBuffer = isBuffer;
       snap.bodyOffsetName = makeLoopSymbol(S, "ptr_body");
       snap.resultOffsetName = makeLoopSymbol(S, "ptr_result");
@@ -196,7 +255,8 @@ void bindLoopBodyArgs(WaveAMDMachineSelector &S, scf::ForOp op, Block &loopBody,
         S.pointerGlobalBases[scfArg] = snap.globalBase;
       S.values[blockCarry] = blockCarry;
       FailureOr<PointerOffset> symbolic =
-          makeSymbolicCarry(S, snap.bodyOffsetName, blockCarry, TermKind::Lane);
+          makeSymbolicCarry(S, snap.bodyOffsetName, blockCarry, snap.offsetKind,
+                            /*assumeU32=*/true);
       if (succeeded(symbolic))
         S.pointerIndexOffsets[scfArg] = *symbolic;
       else
@@ -244,8 +304,8 @@ static LogicalResult collectPointerYieldCarry(WaveAMDMachineSelector &S,
         "scf.yield pointer carry must keep loop-invariant base");
   if (snap.globalBase && S.pointerGlobalBases.lookup(y) != snap.globalBase)
     return yield.emitError("scf.yield pointer carry must keep global base");
-  FailureOr<Value> carry =
-      materializePointerOffsetCarryVGPR(S, yield, offsetIt->second);
+  FailureOr<Value> carry = materializePointerOffsetCarry(
+      S, yield, offsetIt->second, snap.offsetKind);
   if (failed(carry))
     return failure();
   out.push_back(*carry);
@@ -281,7 +341,8 @@ void bindLoopResults(WaveAMDMachineSelector &S, scf::ForOp op, Operation *loop,
         S.pointerGlobalBases[scfResult] = snap.globalBase;
       S.values[wmResult] = wmResult;
       FailureOr<PointerOffset> symbolic =
-          makeSymbolicCarry(S, snap.resultOffsetName, wmResult, TermKind::Lane);
+          makeSymbolicCarry(S, snap.resultOffsetName, wmResult, snap.offsetKind,
+                            /*assumeU32=*/true);
       if (succeeded(symbolic))
         S.pointerIndexOffsets[scfResult] = *symbolic;
       else
@@ -331,15 +392,15 @@ LogicalResult selectScfFor(WaveAMDMachineSelector &S, scf::ForOp op) {
   Value upper = S.ensureSGPR1(loc, S.expect(op.getUpperBound(), op));
   Value step = S.ensureSGPR1(loc, S.expect(op.getStep(), op));
 
+  SmallVector<CarrySnapshot> snapshots;
+  if (failed(snapshotScfCarries(S, op, snapshots)))
+    return failure();
+
   Type scc = getSCCType(S.builder.getContext());
   Value entryCond;
   if (!op->hasAttr("wave.nonzero_trip"))
     entryCond =
         waveamdmachine::SCmpLtI32Op::create(S.builder, loc, scc, lower, upper);
-
-  SmallVector<CarrySnapshot> snapshots;
-  if (failed(snapshotScfCarries(S, op, snapshots)))
-    return failure();
 
   SmallVector<Value> inits;
   inits.push_back(S.materializeSGPR1(loc, lower));
@@ -364,15 +425,15 @@ LogicalResult selectScfFor(WaveAMDMachineSelector &S, scf::ForOp op) {
   auto add = waveamdmachine::SAddI32Op::create(S.builder, loc, sgpr1, scc,
                                                loopBody.getArgument(0), step);
   Value nextIv = add.getResult();
+
+  SmallVector<Value> carryOperands{nextIv};
+  auto yield = cast<scf::YieldOp>(op.getBody()->getTerminator());
+  if (failed(collectYieldCarries(S, yield, snapshots, carryOperands)))
+    return failure();
+
   Value backCond =
       waveamdmachine::SCmpLtI32Op::create(S.builder, loc, scc, nextIv, upper);
-
-  SmallVector<Value> contOperands{backCond, nextIv};
-  auto yield = cast<scf::YieldOp>(op.getBody()->getTerminator());
-  if (failed(collectYieldCarries(S, yield, snapshots, contOperands)))
-    return failure();
-  waveamdmachine::ContinueIfOp::create(
-      S.builder, loc, backCond, ArrayRef<Value>(contOperands).drop_front());
+  waveamdmachine::ContinueIfOp::create(S.builder, loc, backCond, carryOperands);
 
   S.builder.setInsertionPointAfter(loop);
   bindLoopResults(S, op, loop, snapshots);

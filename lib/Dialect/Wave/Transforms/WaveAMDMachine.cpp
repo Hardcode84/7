@@ -738,6 +738,16 @@ FailureOr<Value> materializePointerOffsetVGPR(WaveAMDMachineSelector &S,
   return S.ensureVGPRForVSrc1(user->getLoc(), *value);
 }
 
+TermKind classifyPointerOffset(WaveAMDMachineSelector &S,
+                               const PointerOffset &offset) {
+  if (!offset.expr)
+    return TermKind::Const;
+  llvm::StringMap<TermKind> symKinds;
+  for (const PointerOffsetBinding &binding : offset.bindings)
+    symKinds[binding.name] = binding.kind;
+  return classifyTerm(S, const_cast<::ixs_node *>(offset.expr.raw()), symKinds);
+}
+
 namespace {
 
 struct AddressPlanBindings {
@@ -889,15 +899,35 @@ materializePlanBuckets(WaveAMDMachineSelector &S, Operation *user,
   return out;
 }
 
-FailureOr<Value>
-materializePointerOffsetCarryVGPR(WaveAMDMachineSelector &S, Operation *user,
-                                  const PointerOffset &offset) {
+static FailureOr<Value>
+materializeUniformPointerOffsetCarry(WaveAMDMachineSelector &S, Operation *user,
+                                     const PointerOffset &offset) {
+  if (classifyPointerOffset(S, offset) == TermKind::Lane)
+    return user->emitError("uniform pointer carry became lane-varying");
+  FailureOr<Value> value = materializePointerOffsetValue(S, user, offset);
+  if (failed(value))
+    return failure();
+  return S.materializeSGPR1(user->getLoc(), *value);
+}
+
+static FailureOr<AddressPlan>
+planLanePointerOffsetCarry(WaveAMDMachineSelector &S, Operation *user,
+                           const PointerOffset &offset) {
   waveamdmachine::AddressFieldSpec spec{/*instOffsetBits=*/32,
                                         /*instOffsetSigned=*/true,
                                         /*hasSoffset=*/true};
   FailureOr<AddressPlan> plan = planAddressFields(S, offset, spec);
   if (failed(plan))
     return user->emitError("failed to plan pointer carry offset");
+  return *plan;
+}
+
+static FailureOr<Value>
+materializeLanePointerOffsetCarry(WaveAMDMachineSelector &S, Operation *user,
+                                  const PointerOffset &offset) {
+  FailureOr<AddressPlan> plan = planLanePointerOffsetCarry(S, user, offset);
+  if (failed(plan))
+    return failure();
   AddressPlanBindings bindings = materializeAddressPlanBindings(S, user, *plan);
   Location loc = user->getLoc();
   Value carry;
@@ -932,6 +962,15 @@ materializePointerOffsetCarryVGPR(WaveAMDMachineSelector &S, Operation *user,
     append(*remainder);
   }
   return carry;
+}
+
+FailureOr<Value> materializePointerOffsetCarry(WaveAMDMachineSelector &S,
+                                               Operation *user,
+                                               const PointerOffset &offset,
+                                               TermKind carryKind) {
+  if (carryKind != TermKind::Lane)
+    return materializeUniformPointerOffsetCarry(S, user, offset);
+  return materializeLanePointerOffsetCarry(S, user, offset);
 }
 
 FailureOr<Value> materializeFullPlanAddress(WaveAMDMachineSelector &S,
