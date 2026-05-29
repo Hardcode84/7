@@ -260,7 +260,6 @@ public:
   DenseMap<Value, OffsetTriple> pointerOffsets;
   DenseMap<Value, PointerOffset> pointerIndexOffsets;
   DenseMap<Value, PointerOffset> indexOffsets;
-  DenseMap<Value, OffsetTriple> indexTriples;
   DenseMap<Value, bool> pointerBuffers;
   SmallVector<Operation *> opsToErase;
   DataFlowSolver rangeSolver;

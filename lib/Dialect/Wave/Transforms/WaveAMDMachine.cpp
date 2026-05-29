@@ -2368,45 +2368,30 @@ Value WaveAMDMachineSelector::addUniformBytes(Location loc, Value acc,
 }
 
 LogicalResult WaveAMDMachineSelector::selectIndexExpr(IndexExprOp op) {
-  llvm::StringMap<Value> substitution;
-  llvm::StringMap<TermKind> symKinds;
-  llvm::SmallVector<sym::PredHandle> assumptions;
   PointerOffset pointerOffset;
   for (auto [nameAttr, binding] : llvm::zip(op.getNames(), op.getBindings())) {
     StringRef key = cast<StringAttr>(nameAttr).getValue();
-    Value mapped = expect(binding, op);
     TermKind kind = isLaneVaryingType(binding.getType()) ? TermKind::Lane
                                                          : TermKind::Uniform;
-    substitution[key] = mapped;
-    symKinds[key] = kind;
     pointerOffset.bindings.push_back({key.str(), binding, kind});
-    if (std::optional<sym::PredHandle> a = bindingAssumption(binding, key)) {
-      assumptions.push_back(*a);
+    if (std::optional<sym::PredHandle> a = bindingAssumption(binding, key))
       pointerOffset.assumptions.push_back(*a);
-    }
   }
   sym::ExprHandle exprHandle{op.getExpr().getNode()};
   FailureOr<sym::ExprHandle> simplified =
-      sym::simplifyExpr(symbolStore(), exprHandle, assumptions);
+      sym::simplifyExpr(symbolStore(), exprHandle, pointerOffset.assumptions);
   pointerOffset.expr = succeeded(simplified) ? *simplified : exprHandle;
-  bool needsCollapse =
+  bool needsValue =
       llvm::any_of(op.getResult().getUsers(),
                    [](Operation *user) { return !isa<PtrAddOp>(user); });
   indexOffsets[op.getResult()] = pointerOffset;
-  if (!needsCollapse) {
-    eraseIfTopLevel(op);
-    return success();
+  if (needsValue) {
+    FailureOr<Value> value =
+        materializePointerOffsetValue(*this, op, pointerOffset);
+    if (failed(value))
+      return failure();
+    values[op.getResult()] = *value;
   }
-  ::ixs_node *root = const_cast<::ixs_node *>(pointerOffset.expr.raw());
-  OffsetTriple triple{};
-  triple.assumptions.assign(assumptions.begin(), assumptions.end());
-  if (failed(bucketize(*this, root, op, substitution, symKinds, triple)))
-    return failure();
-  triple.fullExpr = root;
-  for (const auto &binding : substitution)
-    triple.bindings.push_back({binding.getKey().str(), binding.getValue()});
-  indexTriples[op.getResult()] = triple;
-  values[op.getResult()] = collapseTriple(op.getLoc(), triple);
   eraseIfTopLevel(op);
   return success();
 }
@@ -2629,9 +2614,6 @@ materializeSymbolicBaseForFallback(WaveAMDMachineSelector &S, PtrAddOp op,
 static FailureOr<OffsetTriple> getPtrAddOffsetTriple(WaveAMDMachineSelector &S,
                                                      PtrAddOp op, unsigned size,
                                                      bool hasSymbolic) {
-  auto tripleIt = S.indexTriples.find(op.getOffset());
-  if (tripleIt != S.indexTriples.end())
-    return tripleIt->second;
   if (hasSymbolic)
     return OffsetTriple{};
   if (auto offsetIt = S.indexOffsets.find(op.getOffset());
