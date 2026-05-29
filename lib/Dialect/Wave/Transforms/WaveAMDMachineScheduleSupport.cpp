@@ -607,9 +607,13 @@ CandidateMetrics evaluateOps(const ScheduleRegion &region,
                              ArrayRef<Operation *> ops,
                              ArchResolution archResolution,
                              const waveamdmachine::EventSimConfig &modelConfig,
-                             const RegisterPressureBudgets &budgets) {
-  return {scoreOps(ops, archResolution, modelConfig),
-          computeRegisterPressure(region, ops, budgets)};
+                             const RegisterPressureBudgets &budgets,
+                             PressureEvaluation pressureEvaluation) {
+  CandidateMetrics metrics;
+  metrics.score = scoreOps(ops, archResolution, modelConfig);
+  if (pressureEvaluation == PressureEvaluation::Eager)
+    metrics.pressure = computeRegisterPressure(region, ops, budgets);
+  return metrics;
 }
 
 void printPressure(raw_ostream &os, const RegisterPressureResult &pressure,
@@ -776,8 +780,8 @@ CandidateMetrics evaluateCandidateRequest(
                          fallbackReason))
     return {{false, 0, 0, fallbackReason}, {}};
 
-  return evaluateOps(region, candidateOps, archResolution, modelConfig,
-                     budgets);
+  return evaluateOps(region, candidateOps, archResolution, modelConfig, budgets,
+                     PressureEvaluation::Eager);
 }
 
 void printRegionScores(const ScheduleRegion &region,
@@ -786,10 +790,10 @@ void printRegionScores(const ScheduleRegion &region,
                        const waveamdmachine::EventSimConfig &modelConfig,
                        const RegisterPressureBudgets &budgets,
                        const CandidateRequest &candidate, bool scoreCandidate) {
-  printScoreLine(
-      region, "original",
-      evaluateOps(region, region.ops, archResolution, modelConfig, budgets),
-      budgets);
+  printScoreLine(region, "original",
+                 evaluateOps(region, region.ops, archResolution, modelConfig,
+                             budgets, PressureEvaluation::Eager),
+                 budgets);
   if (!scoreCandidate)
     return;
   printScoreLine(region, "candidate",
@@ -1061,6 +1065,26 @@ static bool isPressureViable(const EvaluatedCandidate &candidate,
   return getHardExcess(candidate.metrics.pressure) == 0;
 }
 
+static bool computeCandidatePressure(EvaluatedCandidate &candidate,
+                                     const ScheduleRegion &region,
+                                     const DependenceGraph &graph,
+                                     const RegisterPressureBudgets &budgets) {
+  if (!candidate.metrics.score.supported)
+    return false;
+  if (candidate.metrics.pressure.supported)
+    return true;
+
+  SmallVector<Operation *, 16> ops;
+  StringRef fallbackReason;
+  if (!buildCandidateOps(region, graph, candidate.order, ops, fallbackReason)) {
+    candidate.metrics.pressure = {false, 0, 0, 0, 0, 0, 0, fallbackReason};
+    return false;
+  }
+
+  candidate.metrics.pressure = computeRegisterPressure(region, ops, budgets);
+  return candidate.metrics.pressure.supported;
+}
+
 static bool isBetterScheduleCandidate(const EvaluatedCandidate &candidate,
                                       const EvaluatedCandidate &best,
                                       RegisterPressureBudgets budgets) {
@@ -1083,19 +1107,79 @@ static CandidateMetrics evaluateOrderCandidate(
     const ScheduleRegion &region, const DependenceGraph &graph,
     const OrderCandidate &candidate, ArchResolution archResolution,
     const waveamdmachine::EventSimConfig &modelConfig,
-    const RegisterPressureBudgets &budgets) {
+    const RegisterPressureBudgets &budgets,
+    PressureEvaluation pressureEvaluation) {
   SmallVector<Operation *, 16> ops;
   StringRef fallbackReason;
   if (!buildCandidateOps(region, graph, candidate.order, ops, fallbackReason))
     return {{false, 0, 0, fallbackReason}, {}};
-  return evaluateOps(region, ops, archResolution, modelConfig, budgets);
+  PressureEvaluation initialPressure =
+      pressureEvaluation == PressureEvaluation::LazyHardCap
+          ? PressureEvaluation::None
+          : pressureEvaluation;
+  return evaluateOps(region, ops, archResolution, modelConfig, budgets,
+                     initialPressure);
+}
+
+static void selectEagerPressureCandidate(ScheduleDecision &decision,
+                                         RegisterPressureBudgets budgets) {
+  for (unsigned i = 1; i < decision.candidates.size(); ++i)
+    if (isBetterScheduleCandidate(decision.candidates[i],
+                                  decision.candidates[decision.selected],
+                                  budgets))
+      decision.selected = i;
+}
+
+static void selectLazyHardCapCandidate(ScheduleDecision &decision,
+                                       const ScheduleRegion &region,
+                                       const DependenceGraph &graph,
+                                       RegisterPressureBudgets budgets) {
+  SmallVector<unsigned, 16> indices;
+  for (auto [index, candidate] : llvm::enumerate(decision.candidates))
+    if (candidate.metrics.score.supported)
+      indices.push_back(index);
+  llvm::stable_sort(indices, [&](unsigned lhs, unsigned rhs) {
+    int64_t lhsCycles = decision.candidates[lhs].metrics.score.cycles;
+    int64_t rhsCycles = decision.candidates[rhs].metrics.score.cycles;
+    if (lhsCycles != rhsCycles)
+      return lhsCycles < rhsCycles;
+    return lhs < rhs;
+  });
+
+  decision.selected = 0;
+  for (unsigned index : indices) {
+    EvaluatedCandidate &candidate = decision.candidates[index];
+    computeCandidatePressure(candidate, region, graph, budgets);
+    if (isPressureViable(candidate, budgets)) {
+      decision.selected = index;
+      return;
+    }
+  }
+}
+
+static void selectScheduleCandidate(ScheduleDecision &decision,
+                                    const ScheduleRegion &region,
+                                    const DependenceGraph &graph,
+                                    RegisterPressureBudgets budgets,
+                                    PressureEvaluation pressureEvaluation) {
+  switch (pressureEvaluation) {
+  case PressureEvaluation::None:
+  case PressureEvaluation::Eager:
+    selectEagerPressureCandidate(decision, budgets);
+    return;
+  case PressureEvaluation::LazyHardCap:
+    selectLazyHardCapCandidate(decision, region, graph, budgets);
+    return;
+  }
+  llvm_unreachable("unknown pressure evaluation mode");
 }
 
 ScheduleDecision evaluateScheduleCandidates(
     const ScheduleRegion &region, const DependenceGraph &graph,
     ArchResolution archResolution,
     const waveamdmachine::EventSimConfig &modelConfig,
-    const RegisterPressureBudgets &budgets, bool enableBeamSearch) {
+    const RegisterPressureBudgets &budgets, bool enableBeamSearch,
+    PressureEvaluation pressureEvaluation) {
   ScheduleDecision decision;
   if (!archResolution.arch) {
     decision.candidates.push_back(
@@ -1112,13 +1196,9 @@ ScheduleDecision evaluateScheduleCandidates(
     decision.candidates.push_back(
         {candidate.name, candidate.order,
          evaluateOrderCandidate(region, graph, candidate, archResolution,
-                                modelConfig, budgets)});
+                                modelConfig, budgets, pressureEvaluation)});
 
-  for (unsigned i = 1; i < decision.candidates.size(); ++i)
-    if (isBetterScheduleCandidate(decision.candidates[i],
-                                  decision.candidates[decision.selected],
-                                  budgets))
-      decision.selected = i;
+  selectScheduleCandidate(decision, region, graph, budgets, pressureEvaluation);
   return decision;
 }
 

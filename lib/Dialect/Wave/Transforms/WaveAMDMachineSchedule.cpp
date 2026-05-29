@@ -34,6 +34,15 @@ using namespace mlir::wave;
 
 namespace {
 
+static PressureEvaluation
+getSchedulePressureEvaluation(RegisterPressureBudgets budgets) {
+  if (!budgets.selectionEnabled)
+    return PressureEvaluation::None;
+  if (hasCriticalBudget(budgets))
+    return PressureEvaluation::Eager;
+  return PressureEvaluation::LazyHardCap;
+}
+
 struct WaveAMDMachineSchedulePass
     : public wave::impl::WaveAMDMachineScheduleBase<
           WaveAMDMachineSchedulePass> {
@@ -95,9 +104,9 @@ struct WaveAMDMachineSchedulePass
                         ArchResolution archResolution,
                         const waveamdmachine::EventSimConfig &modelConfig,
                         const RegisterPressureBudgets &pressureBudgets) {
-    ScheduleDecision decision =
-        evaluateScheduleCandidates(region, graph, archResolution, modelConfig,
-                                   pressureBudgets, beamSearch);
+    ScheduleDecision decision = evaluateScheduleCandidates(
+        region, graph, archResolution, modelConfig, pressureBudgets, beamSearch,
+        getSchedulePressureEvaluation(pressureBudgets));
     bool willApply =
         applySchedule && shouldApplyDecision(decision, pressureBudgets);
     if (willApply)

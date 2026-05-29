@@ -90,6 +90,12 @@ struct CandidateMetrics {
   RegisterPressureResult pressure;
 };
 
+enum class PressureEvaluation {
+  None,
+  Eager,
+  LazyHardCap,
+};
+
 struct CandidateRequest {
   bool requested = false;
   bool parsed = false;
@@ -135,7 +141,8 @@ CandidateMetrics evaluateOps(const ScheduleRegion &region,
                              ArrayRef<Operation *> ops,
                              ArchResolution archResolution,
                              const waveamdmachine::EventSimConfig &modelConfig,
-                             const RegisterPressureBudgets &budgets);
+                             const RegisterPressureBudgets &budgets,
+                             PressureEvaluation pressureEvaluation);
 void printPressure(raw_ostream &os, const RegisterPressureResult &pressure,
                    const RegisterPressureBudgets &budgets);
 bool shouldReportPressureBudgets(RegisterPressureBudgets budgets);
@@ -160,7 +167,8 @@ ScheduleDecision evaluateScheduleCandidates(
     const ScheduleRegion &region, const DependenceGraph &graph,
     ArchResolution archResolution,
     const waveamdmachine::EventSimConfig &modelConfig,
-    const RegisterPressureBudgets &budgets, bool enableBeamSearch);
+    const RegisterPressureBudgets &budgets, bool enableBeamSearch,
+    PressureEvaluation pressureEvaluation);
 void printOrder(raw_ostream &os, ArrayRef<unsigned> order);
 void printCandidateDiagnostics(ScheduleRegion region,
                                const ScheduleDecision &decision,

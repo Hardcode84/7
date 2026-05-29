@@ -1,6 +1,7 @@
 // RUN: wave-opt %s --waveamd-machine-schedule-report='print-candidates=1 beam-search=1 pressure-vgpr-budget=3 pressure-target-waves-override=-1' 2>&1 | FileCheck %s --check-prefix=DISABLED
 // RUN: wave-opt %s --waveamd-machine-schedule-report='print-candidates=1 beam-search=1 pressure-aware-selection=1 pressure-vgpr-budget=3 pressure-target-waves-override=-1' 2>&1 | FileCheck %s --check-prefix=HARD
 // RUN: wave-opt %s --waveamd-machine-schedule-report='print-candidates=1 beam-search=1 pressure-aware-selection=1 pressure-critical-vgpr-budget=3 pressure-target-waves-override=-1' 2>&1 | FileCheck %s --check-prefix=CRIT
+// RUN: wave-opt %s --waveamd-machine-schedule='apply-schedule=1 beam-search=1 pressure-aware-selection=1 pressure-vgpr-budget=3 pressure-target-waves-override=-1' | FileCheck %s --check-prefix=APPLY-HARD
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 func.func @pressure_guard(%off: !waveamdmachine.reg<vgpr, 1>,
@@ -38,3 +39,11 @@ func.func @pressure_guard(%off: !waveamdmachine.reg<vgpr, 1>,
 // CRIT: waveamd-machine-schedule-report candidate func=pressure_guard region=0 name=critical_path cycles=325 delta=-7 issued_ops=5 max_vgpr=4 max_sgpr=0 vgpr_hard_excess=0 sgpr_hard_excess=0 vgpr_critical_excess=1 order=0,4,1,2,3,5
 // CRIT: waveamd-machine-schedule-report candidate func=pressure_guard region=0 name=beam_0 cycles=332 delta=0 issued_ops=5 max_vgpr=3 max_sgpr=0 vgpr_hard_excess=0 sgpr_hard_excess=0 vgpr_critical_excess=0 order=0,2,1,3,4,5
 // CRIT: waveamd-machine-schedule-report selected func=pressure_guard region=0 name=original original_cycles=332 selected_cycles=332 delta=0 action=keep order=0,1,2,3,4,5
+
+// APPLY-HARD-LABEL: func.func @pressure_guard
+// APPLY-HARD: waveamdmachine.token
+// APPLY-HARD-NEXT: waveamdmachine.v_add_u32
+// APPLY-HARD-NEXT: waveamdmachine.v_add_u32
+// APPLY-HARD-NEXT: waveamdmachine.v_add_u32
+// APPLY-HARD-NEXT: waveamdmachine.global_load_b32
+// APPLY-HARD-NEXT: waveamdmachine.v_add_u32
