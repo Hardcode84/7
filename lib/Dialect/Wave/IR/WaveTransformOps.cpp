@@ -28,9 +28,9 @@
 #include "mlir/IR/Dialect.h"
 #include "mlir/IR/OwningOpRef.h"
 #include "mlir/IR/SymbolTable.h"
+#include "mlir/IR/Threading.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
-#include "llvm/Support/Parallel.h"
 #include "llvm/TargetParser/TargetParser.h"
 #include <cmath>
 #include <limits>
@@ -681,7 +681,8 @@ tuneRunAllTrials(transform::TransformOpInterface caller, ModuleOp orig,
   for (const SmallVector<int64_t> &config : configs)
     allBindings.push_back(buildParamBindings(builder, config));
   SmallVector<TrialOutcome> outcomes(configs.size());
-  llvm::parallelFor(0, configs.size(), [&](size_t i) {
+  // MLIR wrapper buffers diagnostics per config and flushes in order.
+  mlir::parallelFor(caller->getContext(), 0, configs.size(), [&](size_t i) {
     outcomes[i] = runTrial(caller, orig, callees.body, callees.score,
                            callees.assumes, allBindings[i]);
   });

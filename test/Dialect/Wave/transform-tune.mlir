@@ -37,6 +37,48 @@ module attributes {transform.with_named_sequence} {
 
 // -----
 
+// Definite failure emitted inside a worker trial still reports at the nested op.
+
+module attributes {transform.with_named_sequence} {
+  func.func @sink() {
+    return
+  }
+
+  transform.named_sequence @assumes(
+      %v: !transform.param<i64> {transform.readonly}) {
+    %one = transform.param.constant 1 : i64 -> !transform.param<i64>
+    transform.match.param.cmpi eq %v, %one : !transform.param<i64>
+    transform.yield
+  }
+
+  transform.named_sequence @body(
+      %mod: !transform.any_op {transform.readonly},
+      %v: !transform.param<i64> {transform.readonly}) {
+    // expected-error @below {{target op missing IntegerAttr `missing`}}
+    %missing = wave.transform.get_int_attr "missing" from %mod
+        : (!transform.any_op) -> !transform.param<i64>
+    transform.yield
+  }
+
+  transform.named_sequence @score(
+      %mod: !transform.any_op {transform.readonly},
+      %v: !transform.param<i64> {transform.readonly})
+      -> !transform.param<i64> {
+    transform.yield %v : !transform.param<i64>
+  }
+
+  transform.named_sequence @__transform_main(
+      %root: !transform.any_op {transform.consumed}) {
+    %w, %s = wave.transform.tune %root
+        body = @body score = @score assumes = @assumes {
+      variables = {v = #wave.tune_enum<[1, 2, 3]>}
+    } : (!transform.any_op) -> (!transform.any_op, !transform.param<i64>)
+    transform.yield
+  }
+}
+
+// -----
+
 // Pow2 + range cross-product. Score yields just `%a`, so winner has
 // max(a) = 8. Ties on `a` break by lower enumeration index. With `a`
 // as the inner (fastest) axis, the first config with `a = 8` lands at
