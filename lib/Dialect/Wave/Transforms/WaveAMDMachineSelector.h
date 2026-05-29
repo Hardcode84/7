@@ -148,11 +148,10 @@ class WaveAMDMachineSelector;
 // store.
 
 FailureOr<Value> materializeIndexExprNode(WaveAMDMachineSelector &S,
-                                          const ::ixs_node *node,
-                                          Operation *user,
+                                          sym::ExprHandle expr, Operation *user,
                                           const llvm::StringMap<Value> &subs);
 
-TermKind classifyTerm(WaveAMDMachineSelector &S, ::ixs_node *node,
+TermKind classifyTerm(WaveAMDMachineSelector &S, sym::ExprHandle expr,
                       const llvm::StringMap<TermKind> &symKinds);
 
 FailureOr<AddressPlan>

@@ -28,23 +28,25 @@ namespace mlir::wave::wmsel {
 
 namespace {
 
-// IXS_INT or IXS_RAT with unit denominator; nullopt otherwise.
-std::optional<int64_t> staticIntLiteral(::ixs_node *node) {
-  return sym::getIntegerLiteralValue(sym::ExprHandle(node));
+// Integer or unit-denominator rational; nullopt otherwise.
+std::optional<int64_t> staticIntLiteral(sym::ExprHandle expr) {
+  return sym::getIntegerLiteralValue(expr);
 }
 
-FailureOr<Value> materializeIxsRat(WaveAMDMachineSelector &S, ::ixs_node *node,
-                                   Operation *user) {
-  if (ixs_node_rat_den(node) != 1)
+FailureOr<Value> materializeRational(WaveAMDMachineSelector &S,
+                                     sym::ExprHandle expr, Operation *user) {
+  std::optional<sym::RationalLiteral> rational =
+      sym::ExprView(expr).getRational();
+  if (!rational || rational->denominator != 1)
     return user->emitError(
         "wave.index_expr selection rejects non-integer rational");
-  return createImm(S.builder, user->getLoc(), ixs_node_rat_num(node));
+  return createImm(S.builder, user->getLoc(), rational->numerator);
 }
 
-FailureOr<Value> materializeIxsSym(WaveAMDMachineSelector &, ::ixs_node *node,
-                                   Operation *user,
+FailureOr<Value> materializeSymbol(WaveAMDMachineSelector &,
+                                   sym::ExprHandle expr, Operation *user,
                                    const llvm::StringMap<Value> &subs) {
-  StringRef name = ixs_node_sym_name(node);
+  StringRef name = sym::ExprView(expr).getSymbolName();
   auto it = subs.find(name);
   if (it == subs.end())
     return user->emitError("wave.index_expr leaf '")
@@ -52,20 +54,18 @@ FailureOr<Value> materializeIxsSym(WaveAMDMachineSelector &, ::ixs_node *node,
   return it->second;
 }
 
-FailureOr<Value> materializeIxsAddTerm(WaveAMDMachineSelector &S,
-                                       ::ixs_node *node, uint32_t i,
-                                       Operation *user,
-                                       const llvm::StringMap<Value> &subs) {
+FailureOr<Value> materializeAddTerm(WaveAMDMachineSelector &S,
+                                    sym::AddTerm addTerm, Operation *user,
+                                    const llvm::StringMap<Value> &subs) {
   Location loc = user->getLoc();
-  ::ixs_node *termCoeff = ixs_node_add_term_coeff(node, i);
-  FailureOr<Value> term =
-      materializeIndexExprNode(S, ixs_node_add_term(node, i), user, subs);
+  FailureOr<Value> term = materializeIndexExprNode(S, addTerm.term, user, subs);
   if (failed(term))
     return failure();
-  std::optional<int64_t> tcInt = staticIntLiteral(termCoeff);
+  std::optional<int64_t> tcInt = staticIntLiteral(addTerm.coefficient);
   if (tcInt && *tcInt == 1)
     return *term;
-  FailureOr<Value> tcVal = materializeIndexExprNode(S, termCoeff, user, subs);
+  FailureOr<Value> tcVal =
+      materializeIndexExprNode(S, addTerm.coefficient, user, subs);
   if (failed(tcVal))
     return failure();
   if (S.isUniformValue(*tcVal) && S.isUniformValue(*term))
@@ -75,11 +75,12 @@ FailureOr<Value> materializeIxsAddTerm(WaveAMDMachineSelector &S,
 
 // ADD = coeff + sum(term_coeff[i] * term[i]). Skip materializing coeff
 // when it's 0 and term_coeff[i] when it's 1.
-FailureOr<Value> materializeIxsAdd(WaveAMDMachineSelector &S, ::ixs_node *node,
-                                   Operation *user,
-                                   const llvm::StringMap<Value> &subs) {
+FailureOr<Value> materializeAdd(WaveAMDMachineSelector &S, sym::ExprHandle expr,
+                                Operation *user,
+                                const llvm::StringMap<Value> &subs) {
   Location loc = user->getLoc();
-  ::ixs_node *coeff = ixs_node_add_coeff(node);
+  sym::ExprView view(expr);
+  sym::ExprHandle coeff = view.getAddConstant();
   std::optional<int64_t> coeffInt = staticIntLiteral(coeff);
   std::optional<Value> acc;
   if (!coeffInt || *coeffInt != 0) {
@@ -88,9 +89,10 @@ FailureOr<Value> materializeIxsAdd(WaveAMDMachineSelector &S, ::ixs_node *node,
       return failure();
     acc = *seed;
   }
-  uint32_t nterms = ixs_node_add_nterms(node);
+  uint32_t nterms = view.getAddTermCount();
   for (uint32_t i = 0; i < nterms; ++i) {
-    FailureOr<Value> scaled = materializeIxsAddTerm(S, node, i, user, subs);
+    FailureOr<Value> scaled =
+        materializeAddTerm(S, view.getAddTerm(i), user, subs);
     if (failed(scaled))
       return failure();
     if (!acc) {
@@ -104,16 +106,14 @@ FailureOr<Value> materializeIxsAdd(WaveAMDMachineSelector &S, ::ixs_node *node,
   return acc ? *acc : createImm(S.builder, loc, 0);
 }
 
-FailureOr<Value> materializeIxsMulFactor(WaveAMDMachineSelector &S,
-                                         ::ixs_node *node, uint32_t i,
-                                         Operation *user,
-                                         const llvm::StringMap<Value> &subs) {
-  int32_t exp = ixs_node_mul_factor_exp(node, i);
+FailureOr<Value> materializeMulFactor(WaveAMDMachineSelector &S,
+                                      sym::MulFactor factor, Operation *user,
+                                      const llvm::StringMap<Value> &subs) {
+  int32_t exp = factor.exponent;
   if (exp <= 0)
     return user->emitError(
         "wave.index_expr selection rejects non-positive mul exponent");
-  FailureOr<Value> base = materializeIndexExprNode(
-      S, ixs_node_mul_factor_base(node, i), user, subs);
+  FailureOr<Value> base = materializeIndexExprNode(S, factor.base, user, subs);
   if (failed(base))
     return failure();
   Value pow = *base;
@@ -123,11 +123,12 @@ FailureOr<Value> materializeIxsMulFactor(WaveAMDMachineSelector &S,
 }
 
 // MUL = coeff * prod(base[i] ^ exp[i]). Skip the coeff when it's 1.
-FailureOr<Value> materializeIxsMul(WaveAMDMachineSelector &S, ::ixs_node *node,
-                                   Operation *user,
-                                   const llvm::StringMap<Value> &subs) {
+FailureOr<Value> materializeMul(WaveAMDMachineSelector &S, sym::ExprHandle expr,
+                                Operation *user,
+                                const llvm::StringMap<Value> &subs) {
   Location loc = user->getLoc();
-  ::ixs_node *coeff = ixs_node_mul_coeff(node);
+  sym::ExprView view(expr);
+  sym::ExprHandle coeff = view.getMulCoefficient();
   std::optional<int64_t> coeffInt = staticIntLiteral(coeff);
   std::optional<Value> acc;
   if (!coeffInt || *coeffInt != 1) {
@@ -136,9 +137,10 @@ FailureOr<Value> materializeIxsMul(WaveAMDMachineSelector &S, ::ixs_node *node,
       return failure();
     acc = *seed;
   }
-  uint32_t nfactors = ixs_node_mul_nfactors(node);
+  uint32_t nfactors = view.getMulFactorCount();
   for (uint32_t i = 0; i < nfactors; ++i) {
-    FailureOr<Value> pow = materializeIxsMulFactor(S, node, i, user, subs);
+    FailureOr<Value> pow =
+        materializeMulFactor(S, view.getMulFactor(i), user, subs);
     if (failed(pow))
       return failure();
     if (!acc) {
@@ -156,27 +158,27 @@ FailureOr<Value> materializeIxsMul(WaveAMDMachineSelector &S, ::ixs_node *node,
 // becomes an integer. ixsimpl does the algebra; we just compose and
 // re-materialize.
 FailureOr<Value> materializeScaledInteger(WaveAMDMachineSelector &S,
-                                          ::ixs_node *node, int64_t factor,
+                                          sym::ExprHandle expr, int64_t factor,
                                           Operation *user,
                                           const llvm::StringMap<Value> &subs) {
   auto factorExpr = sym::composeExprInt(S.symbolStore(), factor);
   if (failed(factorExpr))
     return user->emitError("failed to compose integer factor");
-  auto scaled = sym::composeExprBinary(S.symbolStore(), sym::ExprHandle(node),
+  auto scaled = sym::composeExprBinary(S.symbolStore(), expr,
                                        sym::ExprBinaryOp::Mul, *factorExpr);
   if (failed(scaled))
     return user->emitError("failed to scale floor/ceil child");
-  return materializeIndexExprNode(S, scaled->raw(), user, subs);
+  return materializeIndexExprNode(S, *scaled, user, subs);
 }
 
 // floor(expr): scale `expr` by its LCM denominator to get an integer-
 // valued sub-expression, then divide by the denominator. Power-of-two
 // denominators only.
-FailureOr<Value> materializeIxsFloor(WaveAMDMachineSelector &S,
-                                     ::ixs_node *node, Operation *user,
-                                     const llvm::StringMap<Value> &subs) {
-  ::ixs_node *child = ixs_node_unary_arg(node);
-  std::optional<int64_t> den = sym::collectDenominator(sym::ExprHandle(child));
+FailureOr<Value> materializeFloor(WaveAMDMachineSelector &S,
+                                  sym::ExprHandle expr, Operation *user,
+                                  const llvm::StringMap<Value> &subs) {
+  sym::ExprHandle child = sym::ExprView(expr).getUnaryArg();
+  std::optional<int64_t> den = sym::collectDenominator(child);
   if (!den)
     return user->emitError("wave.index_expr denominator overflows i64");
   if (*den == 1)
@@ -193,11 +195,11 @@ FailureOr<Value> materializeIxsFloor(WaveAMDMachineSelector &S,
 }
 
 // ceil(expr) on positive divisors via the (x + d - 1) // d identity.
-FailureOr<Value> materializeIxsCeil(WaveAMDMachineSelector &S, ::ixs_node *node,
-                                    Operation *user,
-                                    const llvm::StringMap<Value> &subs) {
-  ::ixs_node *child = ixs_node_unary_arg(node);
-  std::optional<int64_t> den = sym::collectDenominator(sym::ExprHandle(child));
+FailureOr<Value> materializeCeil(WaveAMDMachineSelector &S,
+                                 sym::ExprHandle expr, Operation *user,
+                                 const llvm::StringMap<Value> &subs) {
+  sym::ExprHandle child = sym::ExprView(expr).getUnaryArg();
+  std::optional<int64_t> den = sym::collectDenominator(child);
   if (!den)
     return user->emitError("wave.index_expr denominator overflows i64");
   if (*den == 1)
@@ -217,11 +219,12 @@ FailureOr<Value> materializeIxsCeil(WaveAMDMachineSelector &S, ::ixs_node *node,
 
 // mod(lhs, rhs). Only power-of-two `rhs` is supported: the modulus is
 // a bitwise AND with `rhs - 1`.
-FailureOr<Value> materializeIxsMod(WaveAMDMachineSelector &S, ::ixs_node *node,
-                                   Operation *user,
-                                   const llvm::StringMap<Value> &subs) {
-  ::ixs_node *lhs = ixs_node_binary_lhs(node);
-  ::ixs_node *rhs = ixs_node_binary_rhs(node);
+FailureOr<Value> materializeMod(WaveAMDMachineSelector &S, sym::ExprHandle expr,
+                                Operation *user,
+                                const llvm::StringMap<Value> &subs) {
+  sym::ExprView view(expr);
+  sym::ExprHandle lhs = view.getBinaryLhs();
+  sym::ExprHandle rhs = view.getBinaryRhs();
   std::optional<int64_t> rhsInt = staticIntLiteral(rhs);
   if (!rhsInt || *rhsInt <= 0 || (*rhsInt & (*rhsInt - 1)) != 0)
     return user->emitError(
@@ -232,22 +235,23 @@ FailureOr<Value> materializeIxsMod(WaveAMDMachineSelector &S, ::ixs_node *node,
   return S.andMask(user->getLoc(), *lhsValue, *rhsInt - 1);
 }
 
-TermKind classifyAdd(WaveAMDMachineSelector &S, ::ixs_node *node,
+TermKind classifyAdd(WaveAMDMachineSelector &S, sym::ExprHandle expr,
                      const llvm::StringMap<TermKind> &symKinds) {
-  TermKind k = classifyTerm(S, ixs_node_add_coeff(node), symKinds);
-  uint32_t n = ixs_node_add_nterms(node);
+  sym::ExprView view(expr);
+  TermKind k = classifyTerm(S, view.getAddConstant(), symKinds);
+  uint32_t n = view.getAddTermCount();
   for (uint32_t i = 0; i < n; ++i)
-    k = std::max(k, classifyTerm(S, ixs_node_add_term(node, i), symKinds));
+    k = std::max(k, classifyTerm(S, view.getAddTerm(i).term, symKinds));
   return k;
 }
 
-TermKind classifyMul(WaveAMDMachineSelector &S, ::ixs_node *node,
+TermKind classifyMul(WaveAMDMachineSelector &S, sym::ExprHandle expr,
                      const llvm::StringMap<TermKind> &symKinds) {
-  TermKind k = classifyTerm(S, ixs_node_mul_coeff(node), symKinds);
-  uint32_t n = ixs_node_mul_nfactors(node);
+  sym::ExprView view(expr);
+  TermKind k = classifyTerm(S, view.getMulCoefficient(), symKinds);
+  uint32_t n = view.getMulFactorCount();
   for (uint32_t i = 0; i < n; ++i)
-    k = std::max(k,
-                 classifyTerm(S, ixs_node_mul_factor_base(node, i), symKinds));
+    k = std::max(k, classifyTerm(S, view.getMulFactor(i).base, symKinds));
   return k;
 }
 
@@ -260,16 +264,14 @@ struct AddressPlanAddend {
 static bool isOneExpr(sym::ExprHandle expr) {
   if (!expr)
     return false;
-  ::ixs_node *node = const_cast<::ixs_node *>(expr.raw());
-  std::optional<int64_t> value = staticIntLiteral(node);
+  std::optional<int64_t> value = staticIntLiteral(expr);
   return value && *value == 1;
 }
 
 static bool isZeroExpr(sym::ExprHandle expr) {
   if (!expr)
     return true;
-  ::ixs_node *node = const_cast<::ixs_node *>(expr.raw());
-  std::optional<int64_t> value = staticIntLiteral(node);
+  std::optional<int64_t> value = staticIntLiteral(expr);
   return value && *value == 0;
 }
 
@@ -290,14 +292,13 @@ simplifyPlanExpr(WaveAMDMachineSelector &S, sym::ExprHandle expr,
 }
 
 static FailureOr<sym::ExprHandle>
-scalePlanAddend(WaveAMDMachineSelector &S, ::ixs_node *term,
-                ::ixs_node *termCoeff, ArrayRef<sym::PredHandle> assumptions) {
-  sym::ExprHandle termExpr(term);
-  if (!termCoeff || isOneExpr(sym::ExprHandle(termCoeff)))
-    return simplifyPlanExpr(S, termExpr, assumptions);
-  FailureOr<sym::ExprHandle> scaled =
-      sym::composeExprBinary(S.symbolStore(), sym::ExprHandle(termCoeff),
-                             sym::ExprBinaryOp::Mul, termExpr);
+scalePlanAddend(WaveAMDMachineSelector &S, sym::ExprHandle term,
+                sym::ExprHandle termCoeff,
+                ArrayRef<sym::PredHandle> assumptions) {
+  if (!termCoeff || isOneExpr(termCoeff))
+    return simplifyPlanExpr(S, term, assumptions);
+  FailureOr<sym::ExprHandle> scaled = sym::composeExprBinary(
+      S.symbolStore(), termCoeff, sym::ExprBinaryOp::Mul, term);
   if (failed(scaled))
     return failure();
   return simplifyPlanExpr(S, *scaled, assumptions);
@@ -326,8 +327,8 @@ static LogicalResult appendPlanExpr(WaveAMDMachineSelector &S,
 }
 
 static TermKind
-classifyScaledAddend(WaveAMDMachineSelector &S, ::ixs_node *term,
-                     ::ixs_node *termCoeff,
+classifyScaledAddend(WaveAMDMachineSelector &S, sym::ExprHandle term,
+                     sym::ExprHandle termCoeff,
                      const llvm::StringMap<TermKind> &symKinds) {
   TermKind kind = classifyTerm(S, term, symKinds);
   if (termCoeff)
@@ -336,8 +337,8 @@ classifyScaledAddend(WaveAMDMachineSelector &S, ::ixs_node *term,
 }
 
 static LogicalResult
-collectPlanAddend(WaveAMDMachineSelector &S, ::ixs_node *term,
-                  ::ixs_node *termCoeff,
+collectPlanAddend(WaveAMDMachineSelector &S, sym::ExprHandle term,
+                  sym::ExprHandle termCoeff,
                   const llvm::StringMap<TermKind> &symKinds,
                   ArrayRef<sym::PredHandle> assumptions,
                   SmallVectorImpl<AddressPlanAddend> &addends) {
@@ -353,20 +354,21 @@ collectPlanAddend(WaveAMDMachineSelector &S, ::ixs_node *term,
 }
 
 static LogicalResult
-collectPlanAddends(WaveAMDMachineSelector &S, ::ixs_node *node,
+collectPlanAddends(WaveAMDMachineSelector &S, sym::ExprHandle expr,
                    const llvm::StringMap<TermKind> &symKinds,
                    ArrayRef<sym::PredHandle> assumptions,
                    SmallVectorImpl<AddressPlanAddend> &addends) {
-  if (ixs_node_tag(node) != IXS_ADD)
-    return collectPlanAddend(S, node, /*termCoeff=*/nullptr, symKinds,
-                             assumptions, addends);
-  sym::ExprHandle coeff(ixs_node_add_coeff(node));
+  sym::ExprView view(expr);
+  if (view.getKind() != sym::ExprKind::Add)
+    return collectPlanAddend(S, expr, /*termCoeff=*/{}, symKinds, assumptions,
+                             addends);
+  sym::ExprHandle coeff = view.getAddConstant();
   if (!isZeroExpr(coeff))
     addends.push_back({coeff, TermKind::Const, false});
-  uint32_t nterms = ixs_node_add_nterms(node);
+  uint32_t nterms = view.getAddTermCount();
   for (uint32_t i = 0; i < nterms; ++i) {
-    if (failed(collectPlanAddend(S, ixs_node_add_term(node, i),
-                                 ixs_node_add_term_coeff(node, i), symKinds,
+    sym::AddTerm term = view.getAddTerm(i);
+    if (failed(collectPlanAddend(S, term.term, term.coefficient, symKinds,
                                  assumptions, addends)))
       return failure();
   }
@@ -436,56 +438,58 @@ appendRemainingAddends(WaveAMDMachineSelector &S,
 // ---- public surface (declared in WaveAMDMachineSelector.h) ----------------
 
 FailureOr<Value> materializeIndexExprNode(WaveAMDMachineSelector &S,
-                                          const ::ixs_node *cnode,
-                                          Operation *user,
+                                          sym::ExprHandle expr, Operation *user,
                                           const llvm::StringMap<Value> &subs) {
-  // ixsimpl introspection accessors take non-const ixs_node *.
-  auto *node = const_cast<::ixs_node *>(cnode);
-  switch (ixs_node_tag(node)) {
-  case IXS_INT:
-    return createImm(S.builder, user->getLoc(), ixs_node_int_val(node));
-  case IXS_RAT:
-    return materializeIxsRat(S, node, user);
-  case IXS_SYM:
-    return materializeIxsSym(S, node, user, subs);
-  case IXS_ADD:
-    return materializeIxsAdd(S, node, user, subs);
-  case IXS_MUL:
-    return materializeIxsMul(S, node, user, subs);
-  case IXS_FLOOR:
-    return materializeIxsFloor(S, node, user, subs);
-  case IXS_CEIL:
-    return materializeIxsCeil(S, node, user, subs);
-  case IXS_MOD:
-    return materializeIxsMod(S, node, user, subs);
+  sym::ExprView view(expr);
+  switch (view.getKind()) {
+  case sym::ExprKind::Integer:
+    if (std::optional<int64_t> value = view.getInt())
+      return createImm(S.builder, user->getLoc(), *value);
+    break;
+  case sym::ExprKind::Rational:
+    return materializeRational(S, expr, user);
+  case sym::ExprKind::Symbol:
+    return materializeSymbol(S, expr, user, subs);
+  case sym::ExprKind::Add:
+    return materializeAdd(S, expr, user, subs);
+  case sym::ExprKind::Mul:
+    return materializeMul(S, expr, user, subs);
+  case sym::ExprKind::Floor:
+    return materializeFloor(S, expr, user, subs);
+  case sym::ExprKind::Ceil:
+    return materializeCeil(S, expr, user, subs);
+  case sym::ExprKind::Mod:
+    return materializeMod(S, expr, user, subs);
   default:
-    return user->emitError(
-               "wave.index_expr selection does not support node tag ")
-           << static_cast<int>(ixs_node_tag(node));
+    break;
   }
+  return user->emitError(
+             "wave.index_expr selection does not support expression kind ")
+         << static_cast<int>(view.getKind());
 }
 
-TermKind classifyTerm(WaveAMDMachineSelector &S, ::ixs_node *node,
+TermKind classifyTerm(WaveAMDMachineSelector &S, sym::ExprHandle expr,
                       const llvm::StringMap<TermKind> &symKinds) {
-  switch (ixs_node_tag(node)) {
-  case IXS_INT:
-  case IXS_RAT:
+  sym::ExprView view(expr);
+  switch (view.getKind()) {
+  case sym::ExprKind::Integer:
+  case sym::ExprKind::Rational:
     return TermKind::Const;
-  case IXS_SYM: {
-    StringRef name = ixs_node_sym_name(node);
+  case sym::ExprKind::Symbol: {
+    StringRef name = view.getSymbolName();
     auto it = symKinds.find(name);
     return it == symKinds.end() ? TermKind::Lane : it->second;
   }
-  case IXS_ADD:
-    return classifyAdd(S, node, symKinds);
-  case IXS_MUL:
-    return classifyMul(S, node, symKinds);
-  case IXS_FLOOR:
-  case IXS_CEIL:
-    return classifyTerm(S, ixs_node_unary_arg(node), symKinds);
-  case IXS_MOD:
-    return std::max(classifyTerm(S, ixs_node_binary_lhs(node), symKinds),
-                    classifyTerm(S, ixs_node_binary_rhs(node), symKinds));
+  case sym::ExprKind::Add:
+    return classifyAdd(S, expr, symKinds);
+  case sym::ExprKind::Mul:
+    return classifyMul(S, expr, symKinds);
+  case sym::ExprKind::Floor:
+  case sym::ExprKind::Ceil:
+    return classifyTerm(S, view.getUnaryArg(), symKinds);
+  case sym::ExprKind::Mod:
+    return std::max(classifyTerm(S, view.getBinaryLhs(), symKinds),
+                    classifyTerm(S, view.getBinaryRhs(), symKinds));
   default:
     return TermKind::Lane;
   }
@@ -514,8 +518,7 @@ planAddressFields(WaveAMDMachineSelector &S, const PointerOffset &offset,
     expr = *simplified;
 
   SmallVector<AddressPlanAddend, 8> addends;
-  ::ixs_node *node = const_cast<::ixs_node *>(expr.raw());
-  if (failed(collectPlanAddends(S, node, symKinds, plan.assumptions, addends)))
+  if (failed(collectPlanAddends(S, expr, symKinds, plan.assumptions, addends)))
     return failure();
   if (failed(takeInstOffsetAddends(S, spec, addends, plan)))
     return failure();

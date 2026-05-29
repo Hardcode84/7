@@ -723,7 +723,7 @@ FailureOr<Value> materializePointerOffsetValue(WaveAMDMachineSelector &S,
   llvm::StringMap<Value> subs;
   for (const PointerOffsetBinding &binding : offset.bindings)
     subs[binding.name] = S.expect(binding.value, user);
-  return materializeIndexExprNode(S, offset.expr.raw(), user, subs);
+  return materializeIndexExprNode(S, offset.expr, user, subs);
 }
 
 FailureOr<Value> materializePointerOffsetVGPR(WaveAMDMachineSelector &S,
@@ -742,7 +742,7 @@ TermKind classifyPointerOffset(WaveAMDMachineSelector &S,
   llvm::StringMap<TermKind> symKinds;
   for (const PointerOffsetBinding &binding : offset.bindings)
     symKinds[binding.name] = binding.kind;
-  return classifyTerm(S, const_cast<::ixs_node *>(offset.expr.raw()), symKinds);
+  return classifyTerm(S, offset.expr, symKinds);
 }
 
 namespace {
@@ -786,7 +786,7 @@ static TermKind classifyPlanExpr(WaveAMDMachineSelector &S,
   llvm::StringMap<TermKind> symKinds;
   for (const PointerOffsetBinding &binding : plan.bindings)
     symKinds[binding.name] = binding.kind;
-  return classifyTerm(S, const_cast<::ixs_node *>(expr.raw()), symKinds);
+  return classifyTerm(S, expr, symKinds);
 }
 
 static FailureOr<bool> tryAppendRemainderToSlot(WaveAMDMachineSelector &S,
@@ -826,7 +826,7 @@ demotePlanRemainderToFields(WaveAMDMachineSelector &S, AddressPlan &plan,
 static FailureOr<Value>
 materializePlanExpr(WaveAMDMachineSelector &S, Operation *user,
                     sym::ExprHandle expr, const AddressPlanBindings &bindings) {
-  return materializeIndexExprNode(S, expr.raw(), user, bindings.narrow);
+  return materializeIndexExprNode(S, expr, user, bindings.narrow);
 }
 
 static FailureOr<sym::ExprHandle>
@@ -2498,8 +2498,7 @@ static LogicalResult requireUniformDmaDest(WaveAMDMachineSelector &S,
   llvm::StringMap<TermKind> symKinds;
   for (const PointerOffsetBinding &binding : offset.bindings)
     symKinds[binding.name] = binding.kind;
-  TermKind kind =
-      classifyTerm(S, const_cast<::ixs_node *>(offset.expr.raw()), symKinds);
+  TermKind kind = classifyTerm(S, offset.expr, symKinds);
   if (kind == TermKind::Lane)
     return op.emitError("DMA LDS destination must be uniform");
   return success();
