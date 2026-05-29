@@ -59,6 +59,33 @@ namespace {
 static constexpr llvm::StringLiteral kDefaultTargetTriple = "amdgcn-amd-amdhsa";
 static constexpr llvm::StringLiteral kDefaultTargetChip = "gfx1100";
 
+static bool isSupportedBackendIsa(const llvm::AMDGPU::IsaVersion &isa) {
+  return isa.Major == 8 || isa.Major == 9 || isa.Major == 11;
+}
+
+static bool isGfx950(const llvm::AMDGPU::IsaVersion &isa) {
+  return isa.Major == 9 && isa.Minor == 5 && isa.Stepping == 0;
+}
+
+static LogicalResult
+checkSupportedBackendTarget(ModuleOp module, StringRef triple, StringRef chip,
+                            const llvm::AMDGPU::IsaVersion &isa) {
+  if (isa.Major == 0)
+    return module.emitError("unsupported AMDGPU target: ")
+           << triple << "--" << chip;
+  if (!isSupportedBackendIsa(isa))
+    return module.emitError("wave AMDGPU backend does not support target: ")
+           << triple << "--" << chip
+           << " (supported gfx generations: gfx8, gfx9, gfx11)";
+  return success();
+}
+
+static LogicalResult
+checkSupportedBackendTarget(ModuleOp module, StringRef triple, StringRef chip) {
+  return checkSupportedBackendTarget(module, triple, chip,
+                                     llvm::AMDGPU::getIsaVersion(chip));
+}
+
 static bool isWM(Operation *op) {
   return op->getName().getDialectNamespace() ==
          waveamdmachine::WaveAMDMachineDialect::getDialectNamespace();
@@ -164,9 +191,9 @@ private:
       return module.emitError("unsupported AMDGPU target: ")
              << targetTriple << "--" << targetChip;
     isaVersion = llvm::AMDGPU::getIsaVersion(targetChip);
-    if (isaVersion.Major == 0)
-      return module.emitError("unsupported AMDGPU target: ")
-             << targetTriple << "--" << targetChip;
+    if (failed(checkSupportedBackendTarget(module, targetTriple, targetChip,
+                                           isaVersion)))
+      return failure();
     std::optional<unsigned> defaultWavefrontSize =
         waveamdmachine::getAMDGPUDefaultWavefrontSize(targetChip);
     if (!defaultWavefrontSize)
@@ -1332,7 +1359,7 @@ private:
            llvm::MCOperand::createImm(0)});
     }
     if (isa<waveamdmachine::MfmaF32_16x16x32_F16Op>(op)) {
-      if (targetChip != "gfx950")
+      if (!isGfx950(isaVersion))
         return op.emitError("mfma.f32.16x16x32.f16 requires gfx950");
       return emitMC(
           mfmaF32_16x16x32F16(),
@@ -1919,6 +1946,14 @@ static LogicalResult runWaveAMDMachinePipeline(ModuleOp module,
         "waveamdmachine.target",
         builder.getStringAttr(
             (Twine(kDefaultTargetTriple) + "--" + kDefaultTargetChip).str()));
+  auto targetAttr = module->getAttrOfType<StringAttr>("waveamdmachine.target");
+  FailureOr<waveamdmachine::AMDGPUTarget> target =
+      waveamdmachine::parseAMDGPUTargetAttr(
+          targetAttr.getValue(), [&]() { return module.emitError(); });
+  if (failed(target))
+    return failure();
+  if (failed(checkSupportedBackendTarget(module, target->triple, target->chip)))
+    return failure();
 
   // The transform interpreter resolves `transform.apply_registered_pass`
   // names through the global pass registry; ensure wave-owned passes are

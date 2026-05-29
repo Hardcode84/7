@@ -103,6 +103,7 @@ Same rule covers docstrings, commit bodies, and PR descriptions. Wit is welcome,
 - For MLIR/C++ debug logging, include `llvm/Support/DebugLog.h` and use `LDBG()` / `LDBG_OS()` instead of raw `LLVM_DEBUG(llvm::dbgs() << ...)`.
 - Mark TU-local free functions `static` even inside an `namespace { ... }`. Anonymous namespaces house struct/class definitions; free functions get an explicit `static` so the storage class is visible at the signature and not implied from a brace fifty lines up. Templates keep `template <...>` first then `static`; `[[noreturn]]` stays leftmost.
 - AMDGPU backend instruction emission goes through MCInst/MCInstPrinter. Do not print ISA text directly except labels, directives, and comments.
+- Do not branch on AMDGPU chip names as strings. Parse targets once and use `llvm::AMDGPU::IsaVersion` or MC subtarget predicates for arch checks.
 - Keep structs/classes compact: non-trivial/container fields first (`SmallVector`, `DenseMap`, `BitVector`, `std::optional`, etc.), then pointer/view/scalar fields in descending size, then small enums/bools. When reordering fields, fix or replace positional aggregate initializers.
 
 ### MLIR

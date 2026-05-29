@@ -17,6 +17,13 @@ include "mlir/Interfaces/ControlFlowInterfaces.td"
 include "mlir/Interfaces/LoopLikeInterface.td"
 include "mlir/Interfaces/SideEffectInterfaces.td"
 
+defvar WaveAMDMachine_Gfx90APlus =
+    "isa.Major == 9 && ((isa.Minor == 0 && isa.Stepping == 10) || " #
+    "(isa.Minor == 4 && isa.Stepping == 2) || " #
+    "(isa.Minor == 5 && isa.Stepping == 0))";
+defvar WaveAMDMachine_Gfx950 =
+    "isa.Major == 9 && isa.Minor == 5 && isa.Stepping == 0";
+
 // Every WaveAMDMachine op gets a static `isSupportedOnIsa(IsaVersion)`
 // classifier. The default is "supported everywhere"; gated ops
 // override `archPredicate` with a C++ expression. The expression
@@ -487,14 +494,14 @@ def WaveAMDMachine_MfmaF32_16x16x16_F16Op
                                 WaveAMDMachine_VGPR,
                                 [WaveAMDMachine_VALU, WaveAMDMachine_MFMA]> {
   let hasVerifier = 1;
-  let archPredicate = "isa.Major == 9";
+  let archPredicate = WaveAMDMachine_Gfx90APlus;
 }
 def WaveAMDMachine_MfmaF32_16x16x32_F16Op
     : WaveAMDMachine_TernaryResult<"mfma_f32_16x16x32_f16", WaveAMDMachine_VGPR,
                                 WaveAMDMachine_VGPR,
                                 [WaveAMDMachine_VALU, WaveAMDMachine_MFMA]> {
   let hasVerifier = 1;
-  let archPredicate = "isa.Major == 9";
+  let archPredicate = WaveAMDMachine_Gfx950;
 }
 
 def WaveAMDMachine_SMovB32Op : WaveAMDMachine_UnaryNoResult<"s_mov_b32",

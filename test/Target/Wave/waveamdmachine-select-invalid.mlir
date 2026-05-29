@@ -66,6 +66,45 @@ func.func @unsupported_packed_f32_to_f16_target(%x: !wave.simd<vector<2xf32>, 64
 
 // -----
 
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1030"} {
+func.func @unsupported_wmma_target(%x: i32) {
+  %a = waveamd.fragment_fill %x : i32 -> !waveamd.fragment<0, i8, 16, 16, 32, 4>
+  %b = waveamd.fragment_fill %x : i32 -> !waveamd.fragment<1, i8, 16, 16, 32, 4>
+  %acc = waveamd.fragment_fill %x : i32 -> !waveamd.fragment<2, i32, 16, 16, 32, 8>
+  // expected-error @below {{wmma.i32.16x16x16.iu8 lowering requires gfx11/gfx12}}
+  %result = waveamd.mma "wmma.i32.16x16x16.iu8" %a, %b, %acc : !waveamd.fragment<0, i8, 16, 16, 32, 4>, !waveamd.fragment<1, i8, 16, 16, 32, 4>, !waveamd.fragment<2, i32, 16, 16, 32, 8> -> !waveamd.fragment<2, i32, 16, 16, 32, 8>
+  return
+}
+}
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx942"} {
+func.func @unsupported_mfma_gfx950_target(%x: i32) {
+  %a = waveamd.fragment_fill %x : i32 -> !waveamd.fragment<0, f16, 16, 16, 64, 4>
+  %b = waveamd.fragment_fill %x : i32 -> !waveamd.fragment<1, f16, 16, 16, 64, 4>
+  %acc = waveamd.fragment_fill %x : i32 -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
+  // expected-error @below {{mfma.f32.16x16x32.f16 lowering requires gfx950}}
+  %result = waveamd.mma "mfma.f32.16x16x32.f16" %a, %b, %acc : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
+  return
+}
+}
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
+func.func @unsupported_mfma_family(%x: i32) {
+  %a = waveamd.fragment_fill %x : i32 -> !waveamd.fragment<0, f16, 16, 16, 32, 2>
+  %b = waveamd.fragment_fill %x : i32 -> !waveamd.fragment<1, f16, 16, 16, 32, 2>
+  %acc = waveamd.fragment_fill %x : i32 -> !waveamd.fragment<2, f32, 16, 16, 32, 4>
+  // expected-error @below {{mfma.f32.16x16x16.f16 lowering requires gfx90a+}}
+  %result = waveamd.mma "mfma.f32.16x16x16.f16" %a, %b, %acc : !waveamd.fragment<0, f16, 16, 16, 32, 2>, !waveamd.fragment<1, f16, 16, 16, 32, 2>, !waveamd.fragment<2, f32, 16, 16, 32, 4> -> !waveamd.fragment<2, f32, 16, 16, 32, 4>
+  return
+}
+}
+
+// -----
+
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // expected-error @below {{WaveAMDMachine backend target gfx1100 uses wave32 but function requires wave64}}
 func.func @gfx1100_rejects_wave64(%x: i32) {

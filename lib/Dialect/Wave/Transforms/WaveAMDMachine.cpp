@@ -36,6 +36,7 @@
 #include "llvm/ADT/TypeSwitch.h"
 #include "llvm/Support/CheckedArithmetic.h"
 #include "llvm/Support/Debug.h"
+#include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/MathExtras.h"
 #include "llvm/TargetParser/TargetParser.h"
 #include <limits>
@@ -124,6 +125,54 @@ static LogicalResult requirePackedCvtTarget(CastOp op) {
   if (!waveamdmachine::VCvtPkRtzF16F32Op::isSupportedOnIsa(*isa))
     return op.emitError("packed f32 to f16 lowering requires gfx10+");
   return success();
+}
+
+enum class MmaKind {
+  WmmaI32_16x16x16_IU8,
+  WmmaF32_16x16x16_F16,
+  MfmaF32_16x16x16_F16,
+  MfmaF32_16x16x32_F16,
+  Unsupported,
+};
+
+static MmaKind parseMmaKind(StringRef kind) {
+  return llvm::StringSwitch<MmaKind>(kind)
+      .Case("wmma.i32.16x16x16.iu8", MmaKind::WmmaI32_16x16x16_IU8)
+      .Case("wmma.f32.16x16x16.f16", MmaKind::WmmaF32_16x16x16_F16)
+      .Case("mfma.f32.16x16x16.f16", MmaKind::MfmaF32_16x16x16_F16)
+      .Case("mfma.f32.16x16x32.f16", MmaKind::MfmaF32_16x16x32_F16)
+      .Default(MmaKind::Unsupported);
+}
+
+static LogicalResult requireMmaTarget(waveamd::MmaOp op, MmaKind kind,
+                                      const llvm::AMDGPU::IsaVersion &isa) {
+  auto require = [&](bool supported, StringRef requirement) -> LogicalResult {
+    if (supported)
+      return success();
+    return op.emitError() << op.getKind() << " lowering requires "
+                          << requirement;
+  };
+  switch (kind) {
+  case MmaKind::WmmaI32_16x16x16_IU8:
+    return require(
+        waveamdmachine::WmmaI32_16x16x16_IU8Op::isSupportedOnIsa(isa),
+        "gfx11/gfx12");
+  case MmaKind::WmmaF32_16x16x16_F16:
+    return require(
+        waveamdmachine::WmmaF32_16x16x16_F16Op::isSupportedOnIsa(isa),
+        "gfx11/gfx12");
+  case MmaKind::MfmaF32_16x16x16_F16:
+    return require(
+        waveamdmachine::MfmaF32_16x16x16_F16Op::isSupportedOnIsa(isa),
+        "gfx90a+");
+  case MmaKind::MfmaF32_16x16x32_F16:
+    return require(
+        waveamdmachine::MfmaF32_16x16x32_F16Op::isSupportedOnIsa(isa),
+        "gfx950");
+  case MmaKind::Unsupported:
+    return success();
+  }
+  llvm_unreachable("unknown MMA kind");
 }
 
 static LogicalResult noteWaveWidth(Operation *diagOp,
@@ -2119,6 +2168,13 @@ LogicalResult WaveAMDMachineSelector::selectBarrier(BarrierOp op) {
 
 LogicalResult WaveAMDMachineSelector::selectMma(waveamd::MmaOp op) {
   StringRef kind = op.getKind();
+  MmaKind mmaKind = parseMmaKind(kind);
+  FailureOr<llvm::AMDGPU::IsaVersion> isa =
+      getTargetIsaVersion(op, "matrix lowering");
+  if (failed(isa))
+    return failure();
+  if (failed(requireMmaTarget(op, mmaKind, *isa)))
+    return failure();
   auto resultType = cast<waveamd::FragmentType>(op.getResult().getType());
   Type vgprTuple = getRegType(op.getContext(), waveamdmachine::RegClass::VGPR,
                               resultType.getRegisters());
@@ -2126,20 +2182,26 @@ LogicalResult WaveAMDMachineSelector::selectMma(waveamd::MmaOp op) {
   Value b = expect(op.getB(), op);
   Value acc = expect(op.getAcc(), op);
   Value result;
-  if (kind == "wmma.i32.16x16x16.iu8")
+  switch (mmaKind) {
+  case MmaKind::WmmaI32_16x16x16_IU8:
     result = waveamdmachine::WmmaI32_16x16x16_IU8Op::create(
         builder, op.getLoc(), vgprTuple, a, b, acc);
-  else if (kind == "wmma.f32.16x16x16.f16")
+    break;
+  case MmaKind::WmmaF32_16x16x16_F16:
     result = waveamdmachine::WmmaF32_16x16x16_F16Op::create(
         builder, op.getLoc(), vgprTuple, a, b, acc);
-  else if (kind == "mfma.f32.16x16x16.f16")
+    break;
+  case MmaKind::MfmaF32_16x16x16_F16:
     result = waveamdmachine::MfmaF32_16x16x16_F16Op::create(
         builder, op.getLoc(), vgprTuple, a, b, acc);
-  else if (kind == "mfma.f32.16x16x32.f16")
+    break;
+  case MmaKind::MfmaF32_16x16x32_F16:
     result = waveamdmachine::MfmaF32_16x16x32_F16Op::create(
         builder, op.getLoc(), vgprTuple, a, b, acc);
-  else
+    break;
+  case MmaKind::Unsupported:
     return op.emitError("unsupported WaveAMDMachine matrix operation kind");
+  }
   values[op.getResult()] = result;
   eraseIfTopLevel(op);
   return success();
