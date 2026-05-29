@@ -18,6 +18,7 @@
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineTarget.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineTraits.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
+#include "llvm/ADT/BitVector.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
@@ -1022,7 +1023,6 @@ struct BeamSearchConfig {
   unsigned width = 12;                      // states kept per depth
   unsigned branchLimit = 4;                 // ready choices expanded per state
   unsigned candidateLimit = 8;              // completed beam orders emitted
-  unsigned maxRegionOps = 1024;             // cap quadratic beam state copies
   int64_t guideBonus = 200000;              // prefer fixed-policy prefix
   int64_t discrepancyPenalty = 50000;       // cost per guide deviation
   int64_t criticalPathWeight = 1000;        // favor long remaining chains
@@ -1046,6 +1046,7 @@ struct PressureValueInfo {
 struct PressureModel {
   SmallVector<PressureValueInfo, 32> values;
   SmallVector<SmallVector<unsigned, 4>, 16> uses;
+  SmallVector<SmallVector<std::pair<unsigned, unsigned>, 4>, 16> uniqueUses;
   SmallVector<SmallVector<unsigned, 2>, 16> defs;
   SmallVector<unsigned, 32> initialRemainingUses;
 };
@@ -1059,15 +1060,24 @@ struct BeamPressureState {
   unsigned maxSGPR = 0;
 };
 
+struct PressurePreview {
+  unsigned currentVGPR = 0;
+  unsigned currentSGPR = 0;
+  unsigned maxVGPR = 0;
+  unsigned maxSGPR = 0;
+};
+
 struct BeamState {
-  SmallVector<unsigned, 16> order;
   SmallVector<unsigned, 16> pending;
-  SmallVector<unsigned, 16> ready;
-  SmallVector<uint8_t, 16> scheduled;
+  BitVector ready;
+  BitVector scheduled;
   BeamPressureState pressure;
   int64_t rank = 0;
   unsigned discrepancies = 0;
   unsigned guideOrdinal = 0;
+  unsigned guideCursor = 0;
+  unsigned trace = std::numeric_limits<unsigned>::max();
+  unsigned depth = 0;
 };
 
 struct ReadyChoice {
@@ -1089,6 +1099,16 @@ struct BeamResult {
   unsigned maxSGPR = 0;
 };
 
+struct BeamChild {
+  unsigned parent = 0;
+  ReadyChoice choice;
+};
+
+struct BeamTrace {
+  unsigned parent = std::numeric_limits<unsigned>::max();
+  unsigned node = 0;
+};
+
 } // namespace
 
 static SmallVector<unsigned, 16>
@@ -1099,6 +1119,11 @@ getOriginalOrder(const ScheduleRegion &region) {
   return order;
 }
 
+static bool sameOrder(ArrayRef<unsigned> lhs, ArrayRef<unsigned> rhs) {
+  return lhs.size() == rhs.size() &&
+         std::equal(lhs.begin(), lhs.end(), rhs.begin());
+}
+
 static void addPolicyCandidate(SmallVectorImpl<OrderCandidate> &candidates,
                                StringRef name, const GraphTables &tables,
                                ArrayRef<NodeMetrics> metrics,
@@ -1107,6 +1132,9 @@ static void addPolicyCandidate(SmallVectorImpl<OrderCandidate> &candidates,
   candidate.name = name;
   if (!buildListOrder(tables, metrics, policy, candidate.order))
     return;
+  for (const OrderCandidate &existing : candidates)
+    if (sameOrder(existing.order, candidate.order))
+      return;
   candidates.push_back(std::move(candidate));
 }
 
@@ -1155,21 +1183,60 @@ static void dropPressure(BeamPressureState &state, const PressureModel &model,
   state.currentSGPR -= width;
 }
 
-static int64_t getBeamHardExcess(const BeamPressureState &pressure,
-                                 const RegisterPressureBudgets &budgets) {
-  return computeExcess(pressure.maxVGPR, budgets.hardVGPR) +
-         computeExcess(pressure.maxSGPR, budgets.hardSGPR);
+static bool isPreviewActive(const BeamPressureState &state,
+                            ArrayRef<unsigned> added, unsigned value) {
+  return state.active[value] || llvm::is_contained(added, value);
 }
 
-static int64_t getBeamCriticalExcess(const BeamPressureState &pressure,
-                                     const RegisterPressureBudgets &budgets) {
-  return computeExcess(pressure.maxVGPR, budgets.criticalVGPR) +
-         computeExcess(pressure.maxSGPR, budgets.criticalSGPR);
+static void addPreviewPressure(PressurePreview &preview,
+                               const BeamPressureState &state,
+                               const PressureModel &model, unsigned value,
+                               SmallVectorImpl<unsigned> &added) {
+  if (isPreviewActive(state, added, value))
+    return;
+  added.push_back(value);
+  unsigned width = getPressureWidth(model.values[value].type);
+  if (isVGPRPressureValue(model, value)) {
+    preview.currentVGPR += width;
+    preview.maxVGPR = std::max(preview.maxVGPR, preview.currentVGPR);
+    return;
+  }
+  preview.currentSGPR += width;
+  preview.maxSGPR = std::max(preview.maxSGPR, preview.currentSGPR);
 }
 
-static int64_t getBeamPeakPressure(const BeamPressureState &pressure) {
-  return static_cast<int64_t>(pressure.maxVGPR) +
-         static_cast<int64_t>(pressure.maxSGPR);
+static void dropPreviewPressure(PressurePreview &preview,
+                                const PressureModel &model, unsigned value,
+                                SmallVectorImpl<unsigned> &dropped) {
+  if (llvm::is_contained(dropped, value))
+    return;
+  dropped.push_back(value);
+  unsigned width = getPressureWidth(model.values[value].type);
+  if (isVGPRPressureValue(model, value)) {
+    assert(preview.currentVGPR >= width && "VGPR pressure underflow");
+    preview.currentVGPR -= width;
+    return;
+  }
+  assert(preview.currentSGPR >= width && "SGPR pressure underflow");
+  preview.currentSGPR -= width;
+}
+
+static int64_t getPreviewHardExcess(const PressurePreview &preview,
+                                    const RegisterPressureBudgets &budgets) {
+  return computeExcess(preview.maxVGPR, budgets.hardVGPR) +
+         computeExcess(preview.maxSGPR, budgets.hardSGPR);
+}
+
+static int64_t
+getPreviewCriticalExcess(const PressurePreview &preview,
+                         const RegisterPressureBudgets &budgets) {
+  return computeExcess(preview.maxVGPR, budgets.criticalVGPR) +
+         computeExcess(preview.maxSGPR, budgets.criticalSGPR);
+}
+
+static int64_t getPreviewPeakPressure(const PressurePreview &preview) {
+  return static_cast<int64_t>(preview.maxVGPR) +
+         static_cast<int64_t>(preview.maxSGPR);
 }
 
 static BeamPressureState makeInitialPressureState(const PressureModel &model) {
@@ -1179,24 +1246,42 @@ static BeamPressureState makeInitialPressureState(const PressureModel &model) {
   return state;
 }
 
-static BeamPressureState applyPressureNode(const BeamPressureState &state,
-                                           const PressureModel &model,
-                                           unsigned node) {
-  BeamPressureState next = state;
+static void applyPressureNode(BeamPressureState &state,
+                              const PressureModel &model, unsigned node) {
   for (unsigned value : model.uses[node])
-    addPressure(next, model, value);
+    addPressure(state, model, value);
   for (unsigned value : model.defs[node])
-    addPressure(next, model, value);
+    addPressure(state, model, value);
   for (unsigned value : model.uses[node]) {
-    assert(next.remainingUses[value] > 0 && "remaining use underflow");
-    --next.remainingUses[value];
-    if (next.remainingUses[value] == 0 && !model.values[value].liveOut)
-      dropPressure(next, model, value);
+    assert(state.remainingUses[value] > 0 && "remaining use underflow");
+    --state.remainingUses[value];
+    if (state.remainingUses[value] == 0 && !model.values[value].liveOut)
+      dropPressure(state, model, value);
   }
   for (unsigned value : model.defs[node])
-    if (next.remainingUses[value] == 0 && !model.values[value].liveOut)
-      dropPressure(next, model, value);
-  return next;
+    if (state.remainingUses[value] == 0 && !model.values[value].liveOut)
+      dropPressure(state, model, value);
+}
+
+static PressurePreview previewPressureNode(const BeamPressureState &state,
+                                           const PressureModel &model,
+                                           unsigned node) {
+  PressurePreview preview{state.currentVGPR, state.currentSGPR, state.maxVGPR,
+                          state.maxSGPR};
+  SmallVector<unsigned, 4> added;
+  for (unsigned value : model.uses[node])
+    addPreviewPressure(preview, state, model, value, added);
+  for (unsigned value : model.defs[node])
+    addPreviewPressure(preview, state, model, value, added);
+
+  SmallVector<unsigned, 4> dropped;
+  for (auto [value, count] : model.uniqueUses[node])
+    if (state.remainingUses[value] == count && !model.values[value].liveOut)
+      dropPreviewPressure(preview, model, value, dropped);
+  for (unsigned value : model.defs[node])
+    if (state.remainingUses[value] == 0 && !model.values[value].liveOut)
+      dropPreviewPressure(preview, model, value, dropped);
+  return preview;
 }
 
 static bool hasUseOutsideRegion(Value value,
@@ -1230,6 +1315,7 @@ getPressureValue(Value value, PressureModel &model,
 static PressureModel buildPressureModel(const ScheduleRegion &region) {
   PressureModel model;
   model.uses.resize(region.ops.size());
+  model.uniqueUses.resize(region.ops.size());
   model.defs.resize(region.ops.size());
 
   DenseSet<Operation *> regionOps;
@@ -1246,6 +1332,18 @@ static PressureModel buildPressureModel(const ScheduleRegion &region) {
       model.uses[node].push_back(*value);
       ++model.initialRemainingUses[*value];
     }
+    for (unsigned value : model.uses[node]) {
+      auto it =
+          llvm::find_if(model.uniqueUses[node],
+                        [value](const std::pair<unsigned, unsigned> &entry) {
+                          return entry.first == value;
+                        });
+      if (it == model.uniqueUses[node].end()) {
+        model.uniqueUses[node].push_back({value, 1});
+        continue;
+      }
+      ++it->second;
+    }
     for (Value result : op->getResults()) {
       std::optional<unsigned> value =
           getPressureValue(result, model, valueNumbers, regionOps);
@@ -1260,20 +1358,26 @@ static BeamState makeInitialBeamState(const GraphTables &tables,
                                       const PressureModel &pressureModel) {
   BeamState state;
   state.pending = tables.pendingPreds;
-  state.scheduled.assign(tables.pendingPreds.size(), 0);
+  state.ready.resize(tables.pendingPreds.size());
+  state.scheduled.resize(tables.pendingPreds.size());
   state.pressure = makeInitialPressureState(pressureModel);
   for (auto [index, count] : llvm::enumerate(tables.pendingPreds))
     if (count == 0)
-      state.ready.push_back(index);
+      state.ready.set(index);
   return state;
 }
 
-static unsigned findNextGuideNode(ArrayRef<unsigned> guide,
-                                  ArrayRef<uint8_t> scheduled) {
-  for (unsigned node : guide)
-    if (!scheduled[node])
-      return node;
-  return getUnsetNode();
+static void advanceGuideCursor(BeamState &state, ArrayRef<unsigned> guide) {
+  while (state.guideCursor < guide.size() &&
+         state.scheduled.test(guide[state.guideCursor]))
+    ++state.guideCursor;
+}
+
+static unsigned getNextGuideNode(const BeamState &state,
+                                 ArrayRef<unsigned> guide) {
+  if (state.guideCursor >= guide.size())
+    return getUnsetNode();
+  return guide[state.guideCursor];
 }
 
 static SmallVector<unsigned, 16> buildGuidePositions(ArrayRef<unsigned> guide) {
@@ -1295,20 +1399,19 @@ static unsigned countUnlockedSuccessors(unsigned node,
 
 static ReadyChoice scoreReadyChoice(
     unsigned node, const BeamState &state, const GraphTables &tables,
-    ArrayRef<NodeMetrics> metrics, ArrayRef<unsigned> guide,
+    ArrayRef<NodeMetrics> metrics, unsigned nextGuide,
     ArrayRef<unsigned> guidePositions, const PressureModel &pressureModel,
     const RegisterPressureBudgets &budgets, const BeamSearchConfig &config) {
-  unsigned nextGuide = findNextGuideNode(guide, state.scheduled);
   ReadyChoice choice;
   choice.node = node;
   choice.discrepancy = node == nextGuide ? 0 : 1;
   choice.guidePosition = guidePositions[node];
   if (isPressureSearchEnabled(budgets)) {
-    BeamPressureState pressure =
-        applyPressureNode(state.pressure, pressureModel, node);
-    choice.hardExcess = getBeamHardExcess(pressure, budgets);
-    choice.criticalExcess = getBeamCriticalExcess(pressure, budgets);
-    choice.peakPressure = getBeamPeakPressure(pressure);
+    PressurePreview pressure =
+        previewPressureNode(state.pressure, pressureModel, node);
+    choice.hardExcess = getPreviewHardExcess(pressure, budgets);
+    choice.criticalExcess = getPreviewCriticalExcess(pressure, budgets);
+    choice.peakPressure = getPreviewPeakPressure(pressure);
   }
 
   int64_t guideScore = node == nextGuide ? config.guideBonus : 0;
@@ -1360,8 +1463,9 @@ static SmallVector<ReadyChoice, 8> getReadyChoices(
     ArrayRef<unsigned> guidePositions, const PressureModel &pressureModel,
     const RegisterPressureBudgets &budgets, const BeamSearchConfig &config) {
   SmallVector<ReadyChoice, 8> choices;
-  for (unsigned node : state.ready)
-    choices.push_back(scoreReadyChoice(node, state, tables, metrics, guide,
+  unsigned nextGuide = getNextGuideNode(state, guide);
+  for (unsigned node : state.ready.set_bits())
+    choices.push_back(scoreReadyChoice(node, state, tables, metrics, nextGuide,
                                        guidePositions, pressureModel, budgets,
                                        config));
   llvm::sort(choices, isBetterReadyChoice);
@@ -1370,34 +1474,33 @@ static SmallVector<ReadyChoice, 8> getReadyChoices(
   return choices;
 }
 
-static void removeReadyNode(SmallVectorImpl<unsigned> &ready, unsigned node) {
-  auto it = llvm::find(ready, node);
-  assert(it != ready.end() && "selected node must be ready");
-  ready.erase(it);
-}
-
 static BeamState appendBeamNode(const BeamState &state,
                                 const ReadyChoice &choice,
                                 const GraphTables &tables,
+                                ArrayRef<unsigned> guide,
                                 const PressureModel &pressureModel,
-                                const RegisterPressureBudgets &budgets) {
+                                const RegisterPressureBudgets &budgets,
+                                SmallVectorImpl<BeamTrace> &traces) {
   BeamState next = state;
   unsigned node = choice.node;
-  removeReadyNode(next.ready, node);
-  next.scheduled[node] = 1;
-  next.order.push_back(node);
+  assert(next.ready.test(node) && "selected node must be ready");
+  next.ready.reset(node);
+  next.scheduled.set(node);
+  advanceGuideCursor(next, guide);
+  next.trace = traces.size();
+  next.depth = state.depth + 1;
+  traces.push_back({state.trace, node});
   next.rank += choice.score;
   next.discrepancies += choice.discrepancy;
   if (isPressureSearchEnabled(budgets))
-    next.pressure = applyPressureNode(state.pressure, pressureModel, node);
+    applyPressureNode(next.pressure, pressureModel, node);
 
   for (unsigned succ : tables.successors[node]) {
     assert(next.pending[succ] > 0 && "successor predecessor count underflow");
     --next.pending[succ];
     if (next.pending[succ] == 0)
-      next.ready.push_back(succ);
+      next.ready.set(succ);
   }
-  llvm::sort(next.ready);
   return next;
 }
 
@@ -1407,50 +1510,70 @@ static bool isLexicographicallyEarlier(ArrayRef<unsigned> lhs,
                                       rhs.end());
 }
 
-static int64_t getBeamRank(const BeamState &state,
-                           const RegisterPressureBudgets &budgets,
-                           const BeamSearchConfig &config) {
-  int64_t pressurePenalty = 0;
-  if (isPressureSearchEnabled(budgets))
-    pressurePenalty =
-        getBeamHardExcess(state.pressure, budgets) *
-            config.hardPressurePenalty +
-        getBeamCriticalExcess(state.pressure, budgets) *
-            config.criticalPressurePenalty +
-        getBeamPeakPressure(state.pressure) * config.pressurePeakPenalty;
-  return state.rank -
-         static_cast<int64_t>(state.discrepancies) * config.discrepancyPenalty -
+static SmallVector<unsigned, 16> buildBeamOrder(const BeamState &state,
+                                                ArrayRef<BeamTrace> traces) {
+  SmallVector<unsigned, 16> order;
+  for (unsigned trace = state.trace; trace != getUnsetNode();
+       trace = traces[trace].parent)
+    order.push_back(traces[trace].node);
+  std::reverse(order.begin(), order.end());
+  return order;
+}
+
+static int64_t getChildPressurePenalty(const ReadyChoice &choice,
+                                       const BeamSearchConfig &config) {
+  return choice.hardExcess * config.hardPressurePenalty +
+         choice.criticalExcess * config.criticalPressurePenalty +
+         choice.peakPressure * config.pressurePeakPenalty;
+}
+
+static int64_t getBeamChildRank(const BeamChild &child,
+                                ArrayRef<BeamState> parents,
+                                const RegisterPressureBudgets &budgets,
+                                const BeamSearchConfig &config) {
+  const BeamState &parent = parents[child.parent];
+  int64_t pressurePenalty = isPressureSearchEnabled(budgets)
+                                ? getChildPressurePenalty(child.choice, config)
+                                : 0;
+  return parent.rank + child.choice.score -
+         static_cast<int64_t>(parent.discrepancies + child.choice.discrepancy) *
+             config.discrepancyPenalty -
          pressurePenalty;
 }
 
-static bool isBetterBeamState(const BeamState &lhs, const BeamState &rhs,
+static bool isLexicographicallyEarlierChild(const BeamChild &lhs,
+                                            const BeamChild &rhs) {
+  if (lhs.parent != rhs.parent)
+    return lhs.parent < rhs.parent;
+  return lhs.choice.node < rhs.choice.node;
+}
+
+static bool isBetterBeamChild(const BeamChild &lhs, const BeamChild &rhs,
+                              ArrayRef<BeamState> parents,
                               const RegisterPressureBudgets &budgets,
                               const BeamSearchConfig &config) {
   if (isPressureSearchEnabled(budgets)) {
-    int64_t lhsHard = getBeamHardExcess(lhs.pressure, budgets);
-    int64_t rhsHard = getBeamHardExcess(rhs.pressure, budgets);
-    if (lhsHard != rhsHard)
-      return lhsHard < rhsHard;
-    int64_t lhsCritical = getBeamCriticalExcess(lhs.pressure, budgets);
-    int64_t rhsCritical = getBeamCriticalExcess(rhs.pressure, budgets);
-    if (lhsCritical != rhsCritical)
-      return lhsCritical < rhsCritical;
+    if (lhs.choice.hardExcess != rhs.choice.hardExcess)
+      return lhs.choice.hardExcess < rhs.choice.hardExcess;
+    if (lhs.choice.criticalExcess != rhs.choice.criticalExcess)
+      return lhs.choice.criticalExcess < rhs.choice.criticalExcess;
   }
-  int64_t lhsRank = getBeamRank(lhs, budgets, config);
-  int64_t rhsRank = getBeamRank(rhs, budgets, config);
+  int64_t lhsRank = getBeamChildRank(lhs, parents, budgets, config);
+  int64_t rhsRank = getBeamChildRank(rhs, parents, budgets, config);
   if (lhsRank != rhsRank)
     return lhsRank > rhsRank;
-  if (isPressureSearchEnabled(budgets)) {
-    int64_t lhsPeak = getBeamPeakPressure(lhs.pressure);
-    int64_t rhsPeak = getBeamPeakPressure(rhs.pressure);
-    if (lhsPeak != rhsPeak)
-      return lhsPeak < rhsPeak;
-  }
-  if (lhs.discrepancies != rhs.discrepancies)
-    return lhs.discrepancies < rhs.discrepancies;
-  if (lhs.guideOrdinal != rhs.guideOrdinal)
-    return lhs.guideOrdinal < rhs.guideOrdinal;
-  return isLexicographicallyEarlier(lhs.order, rhs.order);
+  if (isPressureSearchEnabled(budgets) &&
+      lhs.choice.peakPressure != rhs.choice.peakPressure)
+    return lhs.choice.peakPressure < rhs.choice.peakPressure;
+  unsigned lhsDiscrepancies =
+      parents[lhs.parent].discrepancies + lhs.choice.discrepancy;
+  unsigned rhsDiscrepancies =
+      parents[rhs.parent].discrepancies + rhs.choice.discrepancy;
+  if (lhsDiscrepancies != rhsDiscrepancies)
+    return lhsDiscrepancies < rhsDiscrepancies;
+  if (parents[lhs.parent].guideOrdinal != parents[rhs.parent].guideOrdinal)
+    return parents[lhs.parent].guideOrdinal < parents[rhs.parent].guideOrdinal;
+  return isLexicographicallyEarlierChild(lhs, rhs);
 }
 
 static int64_t getBeamResultRank(const BeamResult &result,
@@ -1509,14 +1632,15 @@ static bool isBetterBeamResult(const BeamResult &lhs, const BeamResult &rhs,
   return isLexicographicallyEarlier(lhs.order, rhs.order);
 }
 
-static void pruneBeam(SmallVectorImpl<BeamState> &beam,
-                      const RegisterPressureBudgets &budgets,
-                      const BeamSearchConfig &config) {
-  llvm::sort(beam, [&](const BeamState &lhs, const BeamState &rhs) {
-    return isBetterBeamState(lhs, rhs, budgets, config);
+static void pruneBeamChildren(SmallVectorImpl<BeamChild> &children,
+                              ArrayRef<BeamState> parents,
+                              const RegisterPressureBudgets &budgets,
+                              const BeamSearchConfig &config) {
+  llvm::sort(children, [&](const BeamChild &lhs, const BeamChild &rhs) {
+    return isBetterBeamChild(lhs, rhs, parents, budgets, config);
   });
-  if (beam.size() > config.width)
-    beam.resize(config.width);
+  if (children.size() > config.width)
+    children.resize(config.width);
 }
 
 static SmallVector<BeamResult, 8>
@@ -1527,44 +1651,46 @@ runGuidedBeamSearch(const GraphTables &tables, ArrayRef<NodeMetrics> metrics,
                     const BeamSearchConfig &config) {
   SmallVector<unsigned, 16> guidePositions = buildGuidePositions(guide);
   SmallVector<BeamState, 16> beam;
+  SmallVector<BeamTrace, 64> traces;
   BeamState initial = makeInitialBeamState(tables, pressureModel);
   initial.guideOrdinal = guideOrdinal;
   beam.push_back(std::move(initial));
 
   for (unsigned depth : llvm::seq<unsigned>(0, guide.size())) {
     (void)depth;
-    SmallVector<BeamState, 32> nextBeam;
-    for (const BeamState &state : beam) {
+    SmallVector<BeamChild, 32> children;
+    for (auto [parentIndex, state] : llvm::enumerate(beam)) {
       SmallVector<ReadyChoice, 8> choices =
           getReadyChoices(state, tables, metrics, guide, guidePositions,
                           pressureModel, budgets, config);
       for (const ReadyChoice &choice : choices)
-        nextBeam.push_back(
-            appendBeamNode(state, choice, tables, pressureModel, budgets));
+        children.push_back({static_cast<unsigned>(parentIndex), choice});
     }
-    if (nextBeam.empty())
+    if (children.empty())
       break;
-    pruneBeam(nextBeam, budgets, config);
+    pruneBeamChildren(children, beam, budgets, config);
+
+    SmallVector<BeamState, 16> nextBeam;
+    nextBeam.reserve(children.size());
+    for (const BeamChild &child : children)
+      nextBeam.push_back(appendBeamNode(beam[child.parent], child.choice,
+                                        tables, guide, pressureModel, budgets,
+                                        traces));
     beam = std::move(nextBeam);
   }
 
   SmallVector<BeamResult, 8> results;
   for (const BeamState &state : beam) {
-    if (state.order.size() != guide.size())
+    if (state.depth != guide.size())
       continue;
-    results.push_back({state.order, state.rank, state.discrepancies,
-                       state.guideOrdinal, state.pressure.maxVGPR,
-                       state.pressure.maxSGPR});
+    results.push_back({buildBeamOrder(state, traces), state.rank,
+                       state.discrepancies, state.guideOrdinal,
+                       state.pressure.maxVGPR, state.pressure.maxSGPR});
   }
   llvm::sort(results, [&](const BeamResult &lhs, const BeamResult &rhs) {
     return isBetterBeamResult(lhs, rhs, budgets, config);
   });
   return results;
-}
-
-static bool sameOrder(ArrayRef<unsigned> lhs, ArrayRef<unsigned> rhs) {
-  return lhs.size() == rhs.size() &&
-         std::equal(lhs.begin(), lhs.end(), rhs.begin());
 }
 
 static bool hasCandidateOrder(ArrayRef<OrderCandidate> candidates,
@@ -1594,8 +1720,7 @@ static void addGuidedBeamCandidates(SmallVectorImpl<OrderCandidate> &candidates,
       "beam_4", "beam_5", "beam_6", "beam_7",
   };
 
-  if (tables.pendingPreds.size() < 3 ||
-      tables.pendingPreds.size() > config.maxRegionOps)
+  if (tables.pendingPreds.size() < 3)
     return;
 
   SmallVector<BeamResult, 16> results;
