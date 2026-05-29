@@ -106,7 +106,8 @@ struct WaveAMDMachineSchedulePass
                         const RegisterPressureBudgets &pressureBudgets) {
     ScheduleDecision decision = evaluateScheduleCandidates(
         region, graph, archResolution, modelConfig, pressureBudgets, beamSearch,
-        getSchedulePressureEvaluation(pressureBudgets));
+        getSchedulePressureEvaluation(pressureBudgets),
+        /*allowPressureUpperBound=*/true);
     bool willApply =
         applySchedule && shouldApplyDecision(decision, pressureBudgets);
     if (willApply)

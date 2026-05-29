@@ -167,7 +167,7 @@ struct WaveAMDMachineScheduleReportPass
                         const RegisterPressureBudgets &pressureBudgets) {
     ScheduleDecision decision = evaluateScheduleCandidates(
         region, graph, archResolution, modelConfig, pressureBudgets, beamSearch,
-        PressureEvaluation::Eager);
+        PressureEvaluation::Eager, /*allowPressureUpperBound=*/false);
     printCandidateDiagnostics(region, decision, pressureBudgets);
     printScheduleDecision(region, decision, /*willApply=*/false);
   }

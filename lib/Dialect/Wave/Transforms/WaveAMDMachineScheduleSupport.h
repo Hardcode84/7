@@ -83,6 +83,7 @@ struct RegisterPressureResult {
   int64_t criticalVGPRExcess = 0;
   int64_t criticalSGPRExcess = 0;
   StringRef fallbackReason;
+  bool conservative = false;
 };
 
 struct CandidateMetrics {
@@ -168,7 +169,7 @@ ScheduleDecision evaluateScheduleCandidates(
     ArchResolution archResolution,
     const waveamdmachine::EventSimConfig &modelConfig,
     const RegisterPressureBudgets &budgets, bool enableBeamSearch,
-    PressureEvaluation pressureEvaluation);
+    PressureEvaluation pressureEvaluation, bool allowPressureUpperBound);
 void printOrder(raw_ostream &os, ArrayRef<unsigned> order);
 void printCandidateDiagnostics(ScheduleRegion region,
                                const ScheduleDecision &decision,

@@ -556,6 +556,26 @@ static unsigned computeMaxPressure(ArrayRef<WaveAMDLiveInterval> intervals,
   return maxPressure;
 }
 
+struct SchedulePressureContext {
+  WaveAMDLiveIntervalBuildResult intervals;
+  bool supported = false;
+  StringRef fallbackReason;
+};
+
+static SchedulePressureContext
+buildSchedulePressureContext(const ScheduleRegion &region) {
+  SchedulePressureContext context;
+  FailureOr<WaveAMDLiveIntervalBuildResult> builtIntervals =
+      buildWaveAMDLiveIntervals(region.func);
+  if (failed(builtIntervals)) {
+    context.fallbackReason = "pressure_analysis_failed";
+    return context;
+  }
+  context.intervals = std::move(*builtIntervals);
+  context.supported = true;
+  return context;
+}
+
 static FailureOr<std::pair<unsigned, unsigned>>
 getPositionSpan(ArrayRef<Operation *> ops,
                 const DenseMap<Operation *, unsigned> &positions) {
@@ -569,6 +589,63 @@ getPositionSpan(ArrayRef<Operation *> ops,
     lastPos = std::max(lastPos, it->second);
   }
   return std::make_pair(firstPos, lastPos);
+}
+
+static bool overlaps(unsigned start, unsigned end, unsigned firstPos,
+                     unsigned lastPos) {
+  return start <= lastPos && firstPos <= end;
+}
+
+static unsigned
+computePressureUpperBound(ArrayRef<WaveAMDLiveInterval> intervals,
+                          unsigned firstPos, unsigned lastPos) {
+  unsigned pressure = 0;
+  for (const WaveAMDLiveInterval &interval : intervals) {
+    if (interval.values.empty())
+      continue;
+    if (overlaps(interval.start, interval.end, firstPos, lastPos))
+      pressure += interval.type.getWidth();
+  }
+  return pressure;
+}
+
+static RegisterPressureResult
+makeRegisterPressureResult(unsigned maxVGPR, unsigned maxSGPR,
+                           const RegisterPressureBudgets &budgets,
+                           bool conservative) {
+  RegisterPressureResult result;
+  result.supported = true;
+  result.maxSGPR = maxSGPR;
+  result.maxVGPR = maxVGPR;
+  result.hardVGPRExcess = computeExcess(result.maxVGPR, budgets.hardVGPR);
+  result.hardSGPRExcess = computeExcess(result.maxSGPR, budgets.hardSGPR);
+  result.criticalVGPRExcess =
+      computeExcess(result.maxVGPR, budgets.criticalVGPR);
+  result.criticalSGPRExcess =
+      computeExcess(result.maxSGPR, budgets.criticalSGPR);
+  result.conservative = conservative;
+  return result;
+}
+
+static std::optional<RegisterPressureResult>
+getSafePressureUpperBound(const ScheduleRegion &region,
+                          const SchedulePressureContext &context,
+                          const RegisterPressureBudgets &budgets) {
+  if (!context.supported)
+    return std::nullopt;
+  FailureOr<std::pair<unsigned, unsigned>> span =
+      getPositionSpan(region.ops, context.intervals.positions);
+  if (failed(span))
+    return std::nullopt;
+  RegisterPressureResult result = makeRegisterPressureResult(
+      computePressureUpperBound(context.intervals.intervals.vgprs, span->first,
+                                span->second),
+      computePressureUpperBound(context.intervals.intervals.sgprs, span->first,
+                                span->second),
+      budgets, /*conservative=*/true);
+  if (getHardExcess(result) != 0 || getCriticalExcess(result) != 0)
+    return std::nullopt;
+  return result;
 }
 
 static RegisterPressureResult
@@ -588,19 +665,12 @@ computeRegisterPressure(const ScheduleRegion &region,
   if (failed(span))
     return {false, 0, 0, 0, 0, 0, 0, "pressure_position_missing"};
 
-  RegisterPressureResult result;
-  result.supported = true;
-  result.maxSGPR = computeMaxPressure(builtIntervals->intervals.sgprs,
-                                      span->first, span->second);
-  result.maxVGPR = computeMaxPressure(builtIntervals->intervals.vgprs,
-                                      span->first, span->second);
-  result.hardVGPRExcess = computeExcess(result.maxVGPR, budgets.hardVGPR);
-  result.hardSGPRExcess = computeExcess(result.maxSGPR, budgets.hardSGPR);
-  result.criticalVGPRExcess =
-      computeExcess(result.maxVGPR, budgets.criticalVGPR);
-  result.criticalSGPRExcess =
-      computeExcess(result.maxSGPR, budgets.criticalSGPR);
-  return result;
+  return makeRegisterPressureResult(
+      computeMaxPressure(builtIntervals->intervals.vgprs, span->first,
+                         span->second),
+      computeMaxPressure(builtIntervals->intervals.sgprs, span->first,
+                         span->second),
+      budgets, /*conservative=*/false);
 }
 
 CandidateMetrics evaluateOps(const ScheduleRegion &region,
@@ -624,6 +694,8 @@ void printPressure(raw_ostream &os, const RegisterPressureResult &pressure,
     return;
   }
   os << " max_vgpr=" << pressure.maxVGPR << " max_sgpr=" << pressure.maxSGPR;
+  if (pressure.conservative)
+    os << " pressure_bound=conservative";
   if (!budgets.reportBudgets)
     return;
   if (budgets.hardVGPR >= 0)
@@ -1108,17 +1180,22 @@ static CandidateMetrics evaluateOrderCandidate(
     const OrderCandidate &candidate, ArchResolution archResolution,
     const waveamdmachine::EventSimConfig &modelConfig,
     const RegisterPressureBudgets &budgets,
-    PressureEvaluation pressureEvaluation) {
+    PressureEvaluation pressureEvaluation,
+    std::optional<RegisterPressureResult> safePressureUpperBound) {
   SmallVector<Operation *, 16> ops;
   StringRef fallbackReason;
   if (!buildCandidateOps(region, graph, candidate.order, ops, fallbackReason))
     return {{false, 0, 0, fallbackReason}, {}};
+  bool skipExactPressure =
+      safePressureUpperBound ||
+      pressureEvaluation == PressureEvaluation::LazyHardCap;
   PressureEvaluation initialPressure =
-      pressureEvaluation == PressureEvaluation::LazyHardCap
-          ? PressureEvaluation::None
-          : pressureEvaluation;
-  return evaluateOps(region, ops, archResolution, modelConfig, budgets,
-                     initialPressure);
+      skipExactPressure ? PressureEvaluation::None : pressureEvaluation;
+  CandidateMetrics metrics = evaluateOps(region, ops, archResolution,
+                                         modelConfig, budgets, initialPressure);
+  if (safePressureUpperBound && metrics.score.supported)
+    metrics.pressure = *safePressureUpperBound;
+  return metrics;
 }
 
 static void selectEagerPressureCandidate(ScheduleDecision &decision,
@@ -1179,7 +1256,7 @@ ScheduleDecision evaluateScheduleCandidates(
     ArchResolution archResolution,
     const waveamdmachine::EventSimConfig &modelConfig,
     const RegisterPressureBudgets &budgets, bool enableBeamSearch,
-    PressureEvaluation pressureEvaluation) {
+    PressureEvaluation pressureEvaluation, bool allowPressureUpperBound) {
   ScheduleDecision decision;
   if (!archResolution.arch) {
     decision.candidates.push_back(
@@ -1189,14 +1266,28 @@ ScheduleDecision evaluateScheduleCandidates(
     return decision;
   }
 
+  std::optional<RegisterPressureResult> safePressureUpperBound;
+  if (allowPressureUpperBound && budgets.selectionEnabled &&
+      pressureEvaluation != PressureEvaluation::None) {
+    SchedulePressureContext pressureContext =
+        buildSchedulePressureContext(region);
+    safePressureUpperBound =
+        getSafePressureUpperBound(region, pressureContext, budgets);
+  }
+
+  RegisterPressureBudgets candidateBudgets = budgets;
+  if (safePressureUpperBound)
+    candidateBudgets.selectionEnabled = false;
+
   SmallVector<OrderCandidate, 4> candidates =
       buildScheduleCandidates(region, graph, *archResolution.arch, modelConfig,
-                              budgets, enableBeamSearch);
+                              candidateBudgets, enableBeamSearch);
   for (const OrderCandidate &candidate : candidates)
     decision.candidates.push_back(
         {candidate.name, candidate.order,
          evaluateOrderCandidate(region, graph, candidate, archResolution,
-                                modelConfig, budgets, pressureEvaluation)});
+                                modelConfig, budgets, pressureEvaluation,
+                                safePressureUpperBound)});
 
   selectScheduleCandidate(decision, region, graph, budgets, pressureEvaluation);
   return decision;
