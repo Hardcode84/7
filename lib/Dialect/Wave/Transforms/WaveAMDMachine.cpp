@@ -435,17 +435,8 @@ bool WaveAMDMachineSelector::slotFitsU32(
   return sym::provablyFitsU32(symbolStore(), expr, assumptions);
 }
 
-static std::optional<int64_t> staticIntLiteral(::ixs_node *node) {
-  switch (ixs_node_tag(node)) {
-  case IXS_INT:
-    return ixs_node_int_val(node);
-  case IXS_RAT:
-    if (ixs_node_rat_den(node) == 1)
-      return ixs_node_rat_num(node);
-    return std::nullopt;
-  default:
-    return std::nullopt;
-  }
+static std::optional<int64_t> staticIntLiteral(sym::ExprHandle expr) {
+  return sym::getIntegerLiteralValue(expr);
 }
 
 static bool isReg(Value v, waveamdmachine::RegClass cls, unsigned width) {
@@ -549,35 +540,36 @@ static Value mulWide(WaveAMDMachineSelector &S, Location loc, Value lhs,
 }
 
 static FailureOr<Value>
-materializeWideIndexExprNode(WaveAMDMachineSelector &S, const ::ixs_node *cnode,
+materializeWideIndexExprNode(WaveAMDMachineSelector &S, sym::ExprHandle expr,
                              Operation *user,
                              ArrayRef<std::pair<std::string, Value>> bindings);
 
 static FailureOr<Value>
-materializeWideAddTerm(WaveAMDMachineSelector &S, ::ixs_node *node, uint32_t i,
+materializeWideAddTerm(WaveAMDMachineSelector &S, sym::AddTerm addTerm,
                        Operation *user,
                        ArrayRef<std::pair<std::string, Value>> bindings) {
-  FailureOr<Value> term = materializeWideIndexExprNode(
-      S, ixs_node_add_term(node, i), user, bindings);
+  FailureOr<Value> term =
+      materializeWideIndexExprNode(S, addTerm.term, user, bindings);
   if (failed(term))
     return failure();
-  ::ixs_node *coeff = ixs_node_add_term_coeff(node, i);
-  std::optional<int64_t> coeffInt = staticIntLiteral(coeff);
+  std::optional<int64_t> coeffInt = staticIntLiteral(addTerm.coefficient);
   if (coeffInt && *coeffInt == 1)
     return *term;
   FailureOr<Value> coeffValue =
-      materializeWideIndexExprNode(S, coeff, user, bindings);
+      materializeWideIndexExprNode(S, addTerm.coefficient, user, bindings);
   if (failed(coeffValue))
     return failure();
   return mulWide(S, user->getLoc(), *coeffValue, *term);
 }
 
 static FailureOr<Value>
-materializeWideAdd(WaveAMDMachineSelector &S, ::ixs_node *node, Operation *user,
+materializeWideAdd(WaveAMDMachineSelector &S, sym::ExprHandle expr,
+                   Operation *user,
                    ArrayRef<std::pair<std::string, Value>> bindings) {
   Location loc = user->getLoc();
+  sym::ExprView view(expr);
   std::optional<Value> acc;
-  ::ixs_node *coeff = ixs_node_add_coeff(node);
+  sym::ExprHandle coeff = view.getAddConstant();
   std::optional<int64_t> coeffInt = staticIntLiteral(coeff);
   if (!coeffInt || *coeffInt != 0) {
     FailureOr<Value> seed =
@@ -586,9 +578,10 @@ materializeWideAdd(WaveAMDMachineSelector &S, ::ixs_node *node, Operation *user,
       return failure();
     acc = *seed;
   }
-  uint32_t n = ixs_node_add_nterms(node);
+  uint32_t n = view.getAddTermCount();
   for (uint32_t i = 0; i < n; ++i) {
-    FailureOr<Value> term = materializeWideAddTerm(S, node, i, user, bindings);
+    FailureOr<Value> term =
+        materializeWideAddTerm(S, view.getAddTerm(i), user, bindings);
     if (failed(term))
       return failure();
     acc = acc ? addWide(S, loc, *acc, *term) : std::optional<Value>{*term};
@@ -604,15 +597,15 @@ materializeWideAdd(WaveAMDMachineSelector &S, ::ixs_node *node, Operation *user,
 }
 
 static FailureOr<Value>
-materializeWideMulFactor(WaveAMDMachineSelector &S, ::ixs_node *node,
-                         uint32_t i, Operation *user,
+materializeWideMulFactor(WaveAMDMachineSelector &S, sym::MulFactor factor,
+                         Operation *user,
                          ArrayRef<std::pair<std::string, Value>> bindings) {
-  int32_t exp = ixs_node_mul_factor_exp(node, i);
+  int32_t exp = factor.exponent;
   if (exp <= 0)
     return user->emitError(
         "full-address index_expr rejects non-positive mul exponent");
-  FailureOr<Value> base = materializeWideIndexExprNode(
-      S, ixs_node_mul_factor_base(node, i), user, bindings);
+  FailureOr<Value> base =
+      materializeWideIndexExprNode(S, factor.base, user, bindings);
   if (failed(base))
     return failure();
   Value pow = *base;
@@ -622,11 +615,13 @@ materializeWideMulFactor(WaveAMDMachineSelector &S, ::ixs_node *node,
 }
 
 static FailureOr<Value>
-materializeWideMul(WaveAMDMachineSelector &S, ::ixs_node *node, Operation *user,
+materializeWideMul(WaveAMDMachineSelector &S, sym::ExprHandle expr,
+                   Operation *user,
                    ArrayRef<std::pair<std::string, Value>> bindings) {
   Location loc = user->getLoc();
+  sym::ExprView view(expr);
   std::optional<Value> acc;
-  ::ixs_node *coeff = ixs_node_mul_coeff(node);
+  sym::ExprHandle coeff = view.getMulCoefficient();
   std::optional<int64_t> coeffInt = staticIntLiteral(coeff);
   if (!coeffInt || *coeffInt != 1) {
     FailureOr<Value> seed =
@@ -635,10 +630,10 @@ materializeWideMul(WaveAMDMachineSelector &S, ::ixs_node *node, Operation *user,
       return failure();
     acc = *seed;
   }
-  uint32_t n = ixs_node_mul_nfactors(node);
+  uint32_t n = view.getMulFactorCount();
   for (uint32_t i = 0; i < n; ++i) {
     FailureOr<Value> factor =
-        materializeWideMulFactor(S, node, i, user, bindings);
+        materializeWideMulFactor(S, view.getMulFactor(i), user, bindings);
     if (failed(factor))
       return failure();
     acc = acc ? mulWide(S, loc, *acc, *factor) : std::optional<Value>{*factor};
@@ -654,10 +649,10 @@ materializeWideMul(WaveAMDMachineSelector &S, ::ixs_node *node, Operation *user,
 }
 
 static FailureOr<Value>
-materializeWideSymbol(WaveAMDMachineSelector &S, ::ixs_node *node,
+materializeWideSymbol(WaveAMDMachineSelector &S, sym::ExprHandle expr,
                       Operation *user,
                       ArrayRef<std::pair<std::string, Value>> bindings) {
-  StringRef name = ixs_node_sym_name(node);
+  StringRef name = sym::ExprView(expr).getSymbolName();
   for (const auto &binding : bindings)
     if (binding.first == name)
       return isReg(binding.second, waveamdmachine::RegClass::VGPR, 1) ||
@@ -668,46 +663,54 @@ materializeWideSymbol(WaveAMDMachineSelector &S, ::ixs_node *node,
          << name << "' has no binding";
 }
 
+static Value createWideImm(WaveAMDMachineSelector &S, Location loc,
+                           int64_t value) {
+  Type sgpr2 =
+      getRegType(S.builder.getContext(), waveamdmachine::RegClass::SGPR, 2);
+  return waveamdmachine::SMovB64ImmOp::create(
+             S.builder, loc, sgpr2, S.builder.getI64IntegerAttr(value))
+      .getResult();
+}
+
+static FailureOr<Value> materializeWideRational(WaveAMDMachineSelector &S,
+                                                sym::ExprHandle expr,
+                                                Operation *user) {
+  std::optional<sym::RationalLiteral> rational =
+      sym::ExprView(expr).getRational();
+  if (!rational || rational->denominator != 1)
+    return user->emitError(
+        "full-address index_expr rejects non-integer rational");
+  return createWideImm(S, user->getLoc(), rational->numerator);
+}
+
 static FailureOr<Value>
-materializeWideIndexExprNode(WaveAMDMachineSelector &S, const ::ixs_node *cnode,
+materializeWideIndexExprNode(WaveAMDMachineSelector &S, sym::ExprHandle expr,
                              Operation *user,
                              ArrayRef<std::pair<std::string, Value>> bindings) {
-  auto *node = const_cast<::ixs_node *>(cnode);
-  Location loc = user->getLoc();
-  switch (ixs_node_tag(node)) {
-  case IXS_INT:
-    return waveamdmachine::SMovB64ImmOp::create(
-               S.builder, loc,
-               getRegType(S.builder.getContext(),
-                          waveamdmachine::RegClass::SGPR, 2),
-               S.builder.getI64IntegerAttr(ixs_node_int_val(node)))
-        .getResult();
-  case IXS_RAT: {
-    if (ixs_node_rat_den(node) != 1)
-      return user->emitError(
-          "full-address index_expr rejects non-integer rational");
-    return waveamdmachine::SMovB64ImmOp::create(
-               S.builder, loc,
-               getRegType(S.builder.getContext(),
-                          waveamdmachine::RegClass::SGPR, 2),
-               S.builder.getI64IntegerAttr(ixs_node_rat_num(node)))
-        .getResult();
-  }
-  case IXS_SYM:
-    return materializeWideSymbol(S, node, user, bindings);
-  case IXS_ADD:
-    return materializeWideAdd(S, node, user, bindings);
-  case IXS_MUL:
-    return materializeWideMul(S, node, user, bindings);
-  case IXS_FLOOR:
-  case IXS_CEIL:
-  case IXS_MOD:
+  sym::ExprView view(expr);
+  switch (view.getKind()) {
+  case sym::ExprKind::Integer:
+    if (std::optional<int64_t> value = view.getInt())
+      return createWideImm(S, user->getLoc(), *value);
+    break;
+  case sym::ExprKind::Rational:
+    return materializeWideRational(S, expr, user);
+  case sym::ExprKind::Symbol:
+    return materializeWideSymbol(S, expr, user, bindings);
+  case sym::ExprKind::Add:
+    return materializeWideAdd(S, expr, user, bindings);
+  case sym::ExprKind::Mul:
+    return materializeWideMul(S, expr, user, bindings);
+  case sym::ExprKind::Floor:
+  case sym::ExprKind::Ceil:
+  case sym::ExprKind::Mod:
     return user->emitError(
         "full-address index_expr supports only add/mul expressions");
   default:
-    return user->emitError("full-address index_expr unsupported node tag ")
-           << static_cast<int>(ixs_node_tag(node));
+    break;
   }
+  return user->emitError("full-address index_expr unsupported expression kind ")
+         << static_cast<int>(view.getKind());
 }
 
 static Value sgprPairToVGPRPair(WaveAMDMachineSelector &S, Location loc,
@@ -980,7 +983,7 @@ FailureOr<Value> materializeFullPlanAddress(WaveAMDMachineSelector &S,
   Value addr = base;
   if (*expr) {
     FailureOr<Value> offset =
-        materializeWideIndexExprNode(S, expr->raw(), user, bindings.wide);
+        materializeWideIndexExprNode(S, *expr, user, bindings.wide);
     if (failed(offset))
       return failure();
     if (isWideVGPR(*offset))
