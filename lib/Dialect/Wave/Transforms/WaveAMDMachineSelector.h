@@ -279,21 +279,6 @@ public:
                                      const ::ixs_node *add);
   const ::ixs_node *scaleBucketExpr(const ::ixs_node *value,
                                     const ::ixs_node *coeff);
-  void sinkImmIntoRemainingSlot(Location loc, OffsetTriple &t, Value imm,
-                                bool hasSoffset);
-  bool instOffsetOverflows(const OffsetTriple &t,
-                           const mlir::waveamdmachine::AddressFieldSpec &spec);
-  bool
-  needsFullAddressForSpec(const OffsetTriple &t,
-                          const mlir::waveamdmachine::AddressFieldSpec &spec);
-  void demoteToFitSpec(Location loc, OffsetTriple &t,
-                       const mlir::waveamdmachine::AddressFieldSpec &spec);
-  BucketedOperands
-  bucketForSpec(Location loc, OffsetTriple t,
-                const mlir::waveamdmachine::AddressFieldSpec &spec);
-  FailureOr<Value> materializeGlobalAddress(Location loc, Value base,
-                                            const OffsetTriple &t,
-                                            Operation *user);
 
   // ---- codegen helpers ---------------------------------------------------
   bool isBufferPointer(Type type);

@@ -8,7 +8,7 @@
 //===----------------------------------------------------------------------===//
 //
 // Lower `wave.load` / `wave.store` to LDS / global / buffer ops.
-// Symbolic offsets use AddressPlan; OffsetTriple paths use bucketForSpec.
+// Pointer offsets are planned at the emission site.
 //
 //===----------------------------------------------------------------------===//
 
@@ -55,29 +55,23 @@ void bindLoadResults(WaveAMDMachineSelector &S, LoadOp op, Operation *load) {
 }
 
 LogicalResult selectSharedStore(WaveAMDMachineSelector &S, StoreOp op,
-                                Value base, OffsetTriple offset,
-                                const PointerOffset *symbolic,
+                                Value base, const PointerOffset &offset,
                                 unsigned registers, bool scalar16) {
   waveamdmachine::AddressFieldSpec spec =
       scalar16 ? waveamdmachine::DsStoreB16Op::getAddressFieldSpec()
       : registers == 1
           ? waveamdmachine::DsStoreB32Op::getAddressFieldSpec()
           : waveamdmachine::DsStoreTupleB32Op::getAddressFieldSpec();
-  WaveAMDMachineSelector::BucketedOperands b;
-  if (symbolic) {
-    FailureOr<AddressPlan> plan = planMemoryAddress(S, op, *symbolic, spec);
-    if (failed(plan))
-      return failure();
-    if (plan->fullAddressRemainderExpr)
-      return op.emitError("LDS memory op offset exceeds address fields");
-    FailureOr<WaveAMDMachineSelector::BucketedOperands> buckets =
-        materializePlanBuckets(S, op, *plan, spec);
-    if (failed(buckets))
-      return failure();
-    b = *buckets;
-  } else {
-    b = S.bucketForSpec(op.getLoc(), offset, spec);
-  }
+  FailureOr<AddressPlan> plan = planMemoryAddress(S, op, offset, spec);
+  if (failed(plan))
+    return failure();
+  if (plan->fullAddressRemainderExpr)
+    return op.emitError("LDS memory op offset exceeds address fields");
+  FailureOr<WaveAMDMachineSelector::BucketedOperands> buckets =
+      materializePlanBuckets(S, op, *plan, spec);
+  if (failed(buckets))
+    return failure();
+  WaveAMDMachineSelector::BucketedOperands b = *buckets;
   Value addr = S.ensureVGPRForVSrc1(
       op.getLoc(), S.addByteOffsets(op.getLoc(), base, b.voffset));
   Value value = S.expect(op.getValue(), op);
@@ -122,50 +116,6 @@ static Operation *buildOneGlobalOrBufferStore(WaveAMDMachineSelector &S,
         instOffset);
   return waveamdmachine::GlobalStoreB32Op::create(
       S.builder, op.getLoc(), tokenType, voffset, value, base, dep, instOffset);
-}
-
-static LogicalResult selectFullAddressStore(WaveAMDMachineSelector &S,
-                                            StoreOp op, Value globalBase,
-                                            OffsetTriple offset,
-                                            unsigned registers, bool scalar16) {
-  if (!globalBase)
-    return op.emitError("full-address fallback requires original global base");
-  FailureOr<Value> addr =
-      S.materializeGlobalAddress(op.getLoc(), globalBase, offset, op);
-  if (failed(addr))
-    return failure();
-  Value value = S.ensureVGPRForVSrc1(op.getLoc(), S.expect(op.getValue(), op));
-  Value dep = op.getDependency() ? S.expect(op.getDependency(), op) : Value{};
-  Type tokenType = getMemTokenType(op.getContext());
-  SmallVector<Value> tokens;
-  if (scalar16) {
-    Operation *store = waveamdmachine::GlobalStoreB16Addr64Op::create(
-        S.builder, op.getLoc(), tokenType, *addr, value, dep, 0);
-    tokens.push_back(store->getResult(0));
-  } else if (registers == 1) {
-    Operation *store = waveamdmachine::GlobalStoreB32Addr64Op::create(
-        S.builder, op.getLoc(), tokenType, *addr, value, dep, 0);
-    tokens.push_back(store->getResult(0));
-  } else {
-    Type vgpr1 = getRegType(op.getContext(), waveamdmachine::RegClass::VGPR, 1);
-    SmallVector<Type> elementTypes(registers, vgpr1);
-    auto split = waveamdmachine::TupleToElementsOp::create(
-        S.builder, op.getLoc(), elementTypes, value);
-    for (auto [idx, element] : llvm::enumerate(split.getElements())) {
-      Operation *store = waveamdmachine::GlobalStoreB32Addr64Op::create(
-          S.builder, op.getLoc(), tokenType, *addr, element, dep,
-          static_cast<int64_t>(idx) * 4);
-      tokens.push_back(store->getResult(0));
-    }
-  }
-  Value token = tokens.size() == 1
-                    ? tokens.front()
-                    : waveamdmachine::TokenJoinOp::create(
-                          S.builder, op.getLoc(), tokenType, tokens)
-                          .getResult();
-  S.values[op.getToken()] = token;
-  S.eraseIfTopLevel(op);
-  return success();
 }
 
 static LogicalResult selectFullAddressStore(WaveAMDMachineSelector &S,
@@ -241,11 +191,12 @@ emitGlobalOrBufferStore(WaveAMDMachineSelector &S, StoreOp op, Value base,
   return success();
 }
 
-static LogicalResult selectGlobalOrBufferStoreSymbolic(
-    WaveAMDMachineSelector &S, StoreOp op, Value base, Value globalBase,
-    const PointerOffset &symbolic, bool isBuffer, unsigned registers,
-    bool scalar16, const waveamdmachine::AddressFieldSpec &spec) {
-  FailureOr<AddressPlan> plan = planMemoryAddress(S, op, symbolic, spec);
+static LogicalResult
+selectGlobalOrBufferStore(WaveAMDMachineSelector &S, StoreOp op, Value base,
+                          Value globalBase, const PointerOffset &offset,
+                          bool isBuffer, unsigned registers, bool scalar16,
+                          const waveamdmachine::AddressFieldSpec &spec) {
+  FailureOr<AddressPlan> plan = planMemoryAddress(S, op, offset, spec);
   if (failed(plan))
     return failure();
   if (plan->fullAddressRemainderExpr && isBuffer)
@@ -262,26 +213,9 @@ static LogicalResult selectGlobalOrBufferStoreSymbolic(
                                  scalar16);
 }
 
-static LogicalResult selectGlobalOrBufferStoreTriple(
-    WaveAMDMachineSelector &S, StoreOp op, Value base, Value globalBase,
-    OffsetTriple offset, bool isBuffer, unsigned registers, bool scalar16,
-    const waveamdmachine::AddressFieldSpec &spec) {
-  bool needsFullAddress = S.needsFullAddressForSpec(offset, spec);
-  if (needsFullAddress && isBuffer)
-    return op.emitError(
-        "buffer memory op offset exceeds buffer address fields");
-  if (needsFullAddress)
-    return selectFullAddressStore(S, op, globalBase, offset, registers,
-                                  scalar16);
-  auto buckets = S.bucketForSpec(op.getLoc(), offset, spec);
-  return emitGlobalOrBufferStore(S, op, base, buckets, isBuffer, registers,
-                                 scalar16);
-}
-
 LogicalResult selectGlobalOrBufferStore(WaveAMDMachineSelector &S, StoreOp op,
                                         Value base, Value globalBase,
-                                        OffsetTriple offset,
-                                        const PointerOffset *symbolic,
+                                        const PointerOffset &offset,
                                         bool isBuffer, unsigned registers,
                                         bool scalar16) {
   waveamdmachine::AddressFieldSpec spec =
@@ -291,38 +225,28 @@ LogicalResult selectGlobalOrBufferStore(WaveAMDMachineSelector &S, StoreOp op,
           : (isBuffer
                  ? waveamdmachine::BufferStoreB32Op::getAddressFieldSpec()
                  : waveamdmachine::GlobalStoreB32Op::getAddressFieldSpec());
-  if (symbolic)
-    return selectGlobalOrBufferStoreSymbolic(S, op, base, globalBase, *symbolic,
-                                             isBuffer, registers, scalar16,
-                                             spec);
-  return selectGlobalOrBufferStoreTriple(S, op, base, globalBase, offset,
-                                         isBuffer, registers, scalar16, spec);
+  return selectGlobalOrBufferStore(S, op, base, globalBase, offset, isBuffer,
+                                   registers, scalar16, spec);
 }
 
 LogicalResult selectSharedLoad(WaveAMDMachineSelector &S, LoadOp op, Value base,
-                               OffsetTriple offset,
-                               const PointerOffset *symbolic,
-                               unsigned registers, bool scalar16) {
+                               const PointerOffset &offset, unsigned registers,
+                               bool scalar16) {
   waveamdmachine::AddressFieldSpec spec =
       scalar16 ? waveamdmachine::DsLoadB16Op::getAddressFieldSpec()
       : registers == 1
           ? waveamdmachine::DsLoadB32Op::getAddressFieldSpec()
           : waveamdmachine::DsLoadTupleB32Op::getAddressFieldSpec();
-  WaveAMDMachineSelector::BucketedOperands b;
-  if (symbolic) {
-    FailureOr<AddressPlan> plan = planMemoryAddress(S, op, *symbolic, spec);
-    if (failed(plan))
-      return failure();
-    if (plan->fullAddressRemainderExpr)
-      return op.emitError("LDS memory op offset exceeds address fields");
-    FailureOr<WaveAMDMachineSelector::BucketedOperands> buckets =
-        materializePlanBuckets(S, op, *plan, spec);
-    if (failed(buckets))
-      return failure();
-    b = *buckets;
-  } else {
-    b = S.bucketForSpec(op.getLoc(), offset, spec);
-  }
+  FailureOr<AddressPlan> plan = planMemoryAddress(S, op, offset, spec);
+  if (failed(plan))
+    return failure();
+  if (plan->fullAddressRemainderExpr)
+    return op.emitError("LDS memory op offset exceeds address fields");
+  FailureOr<WaveAMDMachineSelector::BucketedOperands> buckets =
+      materializePlanBuckets(S, op, *plan, spec);
+  if (failed(buckets))
+    return failure();
+  WaveAMDMachineSelector::BucketedOperands b = *buckets;
   Value addr = S.ensureVGPRForVSrc1(
       op.getLoc(), S.addByteOffsets(op.getLoc(), base, b.voffset));
   Value dep = op.getDependency() ? S.expect(op.getDependency(), op) : Value{};
@@ -398,58 +322,6 @@ static Operation *buildGlobalLoad(WaveAMDMachineSelector &S, LoadOp op,
 }
 
 LogicalResult selectFullAddressLoad(WaveAMDMachineSelector &S, LoadOp op,
-                                    Value globalBase, OffsetTriple offset,
-                                    unsigned registers, bool scalar16) {
-  if (!globalBase)
-    return op.emitError("full-address fallback requires original global base");
-  FailureOr<Value> addr =
-      S.materializeGlobalAddress(op.getLoc(), globalBase, offset, op);
-  if (failed(addr))
-    return failure();
-  Value dep = op.getDependency() ? S.expect(op.getDependency(), op) : Value{};
-  Type tokenType = getMemTokenType(op.getContext());
-  Type vgpr1 = getRegType(op.getContext(), waveamdmachine::RegClass::VGPR, 1);
-  SmallVector<Value> elements;
-  SmallVector<Value> tokens;
-  if (scalar16) {
-    Operation *load = waveamdmachine::GlobalLoadB16Addr64Op::create(
-        S.builder, op.getLoc(), vgpr1, tokenType, *addr, dep, 0);
-    elements.push_back(load->getResult(0));
-    tokens.push_back(load->getResult(1));
-  } else if (registers == 1) {
-    Operation *load = waveamdmachine::GlobalLoadB32Addr64Op::create(
-        S.builder, op.getLoc(), vgpr1, tokenType, *addr, dep, 0);
-    elements.push_back(load->getResult(0));
-    tokens.push_back(load->getResult(1));
-  } else {
-    for (unsigned idx : llvm::seq<unsigned>(0, registers)) {
-      Operation *load = waveamdmachine::GlobalLoadB32Addr64Op::create(
-          S.builder, op.getLoc(), vgpr1, tokenType, *addr, dep,
-          static_cast<int64_t>(idx) * 4);
-      elements.push_back(load->getResult(0));
-      tokens.push_back(load->getResult(1));
-    }
-  }
-  Value result = elements.front();
-  if (registers != 1) {
-    Type resultType =
-        getRegType(op.getContext(), waveamdmachine::RegClass::VGPR, registers);
-    result = waveamdmachine::TupleFromElementsOp::create(S.builder, op.getLoc(),
-                                                         resultType, elements)
-                 .getTuple();
-  }
-  Value token = tokens.size() == 1
-                    ? tokens.front()
-                    : waveamdmachine::TokenJoinOp::create(
-                          S.builder, op.getLoc(), tokenType, tokens)
-                          .getResult();
-  S.values[op.getValue()] = result;
-  S.values[op.getToken()] = token;
-  S.eraseIfTopLevel(op);
-  return success();
-}
-
-LogicalResult selectFullAddressLoad(WaveAMDMachineSelector &S, LoadOp op,
                                     Value globalBase, const AddressPlan &plan,
                                     unsigned registers, bool scalar16) {
   if (!globalBase)
@@ -516,11 +388,12 @@ emitGlobalOrBufferLoad(WaveAMDMachineSelector &S, LoadOp op, Value base,
   return success();
 }
 
-static LogicalResult selectGlobalOrBufferLoadSymbolic(
-    WaveAMDMachineSelector &S, LoadOp op, Value base, Value globalBase,
-    const PointerOffset &symbolic, bool isBuffer, unsigned registers,
-    bool scalar16, const waveamdmachine::AddressFieldSpec &spec) {
-  FailureOr<AddressPlan> plan = planMemoryAddress(S, op, symbolic, spec);
+static LogicalResult
+selectGlobalOrBufferLoad(WaveAMDMachineSelector &S, LoadOp op, Value base,
+                         Value globalBase, const PointerOffset &offset,
+                         bool isBuffer, unsigned registers, bool scalar16,
+                         const waveamdmachine::AddressFieldSpec &spec) {
+  FailureOr<AddressPlan> plan = planMemoryAddress(S, op, offset, spec);
   if (failed(plan))
     return failure();
   if (plan->fullAddressRemainderExpr && isBuffer)
@@ -536,38 +409,16 @@ static LogicalResult selectGlobalOrBufferLoadSymbolic(
                                 scalar16);
 }
 
-static LogicalResult
-selectGlobalOrBufferLoadTriple(WaveAMDMachineSelector &S, LoadOp op, Value base,
-                               Value globalBase, OffsetTriple offset,
-                               bool isBuffer, unsigned registers, bool scalar16,
-                               const waveamdmachine::AddressFieldSpec &spec) {
-  bool needsFullAddress = S.needsFullAddressForSpec(offset, spec);
-  if (needsFullAddress && isBuffer)
-    return op.emitError(
-        "buffer memory op offset exceeds buffer address fields");
-  if (needsFullAddress)
-    return selectFullAddressLoad(S, op, globalBase, offset, registers,
-                                 scalar16);
-  auto buckets = S.bucketForSpec(op.getLoc(), offset, spec);
-  return emitGlobalOrBufferLoad(S, op, base, buckets, isBuffer, registers,
-                                scalar16);
-}
-
 LogicalResult selectGlobalOrBufferLoad(WaveAMDMachineSelector &S, LoadOp op,
                                        Value base, Value globalBase,
-                                       OffsetTriple offset,
-                                       const PointerOffset *symbolic,
+                                       const PointerOffset &offset,
                                        bool isBuffer, unsigned registers,
                                        bool scalar16) {
   waveamdmachine::AddressFieldSpec spec =
       isBuffer ? bufferLoadSpec(scalar16, registers)
                : globalLoadSpec(scalar16, registers);
-  if (symbolic)
-    return selectGlobalOrBufferLoadSymbolic(S, op, base, globalBase, *symbolic,
-                                            isBuffer, registers, scalar16,
-                                            spec);
-  return selectGlobalOrBufferLoadTriple(S, op, base, globalBase, offset,
-                                        isBuffer, registers, scalar16, spec);
+  return selectGlobalOrBufferLoad(S, op, base, globalBase, offset, isBuffer,
+                                  registers, scalar16, spec);
 }
 
 } // namespace
@@ -581,17 +432,16 @@ LogicalResult selectStore(WaveAMDMachineSelector &S, StoreOp op) {
   unsigned registers =
       loadRegisterCount(cast<SimdType>(op.getValue().getType()));
   bool scalar16 = isScalar16Bit(cast<SimdType>(op.getValue().getType()));
-  OffsetTriple triple;
-  const PointerOffset *symbolic = &symIt->second;
   if (S.isSharedPointer(op.getPtr().getType()))
-    return selectSharedStore(S, op, baseIt->second, triple, symbolic, registers,
+    return selectSharedStore(S, op, baseIt->second, symIt->second, registers,
                              scalar16);
   bool isBuffer = bufferIt != S.pointerBuffers.end() && bufferIt->second;
   Value globalBase = S.pointerGlobalBases.lookup(op.getPtr());
   if (!globalBase && !isBuffer)
     globalBase = baseIt->second;
-  return selectGlobalOrBufferStore(S, op, baseIt->second, globalBase, triple,
-                                   symbolic, isBuffer, registers, scalar16);
+  return selectGlobalOrBufferStore(S, op, baseIt->second, globalBase,
+                                   symIt->second, isBuffer, registers,
+                                   scalar16);
 }
 
 LogicalResult selectLoad(WaveAMDMachineSelector &S, LoadOp op) {
@@ -604,19 +454,16 @@ LogicalResult selectLoad(WaveAMDMachineSelector &S, LoadOp op) {
   auto simdType = cast<SimdType>(op.getValue().getType());
   unsigned registers = loadRegisterCount(simdType);
   bool scalar16 = isScalar16Bit(simdType);
-  OffsetTriple triple;
-  const PointerOffset *symbolic = &symIt->second;
-
   if (S.isSharedPointer(op.getPtr().getType()))
-    return selectSharedLoad(S, op, baseIt->second, triple, symbolic, registers,
+    return selectSharedLoad(S, op, baseIt->second, symIt->second, registers,
                             scalar16);
 
   bool isBuffer = bufferIt != S.pointerBuffers.end() && bufferIt->second;
   Value globalBase = S.pointerGlobalBases.lookup(op.getPtr());
   if (!globalBase && !isBuffer)
     globalBase = baseIt->second;
-  return selectGlobalOrBufferLoad(S, op, baseIt->second, globalBase, triple,
-                                  symbolic, isBuffer, registers, scalar16);
+  return selectGlobalOrBufferLoad(S, op, baseIt->second, globalBase,
+                                  symIt->second, isBuffer, registers, scalar16);
 }
 
 } // namespace mlir::wave::wmsel

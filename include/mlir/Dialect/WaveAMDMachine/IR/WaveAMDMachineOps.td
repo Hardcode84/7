@@ -1137,8 +1137,7 @@ def WaveAMDMachine_BufferLoadTupleB32Op
 // Buffer LDS DMA ops have no inst-offset slot in the hardware
 // encoding -- the const component sinks into `soffset` (which the
 // op does carry). Spec mirrors the `Global` variant's policy with
-// `hasSoffset=true` so `demoteToFitSpec` routes the const there
-// instead of voffset.
+// `hasSoffset=true`: AddressPlan routes constants to soffset.
 def WaveAMDMachine_BufferLoadLdsB32Op
     : WaveAMDMachine_BufferMemoryOp<"buffer_load_lds_b32", [WaveAMDMachine_VMEMLoad, MemoryEffects<[MemRead, MemWrite]>]> {
   let summary = "buffer-to-LDS 32-bit DMA load";
