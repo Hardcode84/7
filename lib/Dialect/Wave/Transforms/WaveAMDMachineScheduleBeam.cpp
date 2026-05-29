@@ -452,22 +452,22 @@ static SmallVector<ReadyChoice, 8> getReadyChoices(
   return choices;
 }
 
-static BeamState appendBeamNode(const BeamState &state,
-                                const ReadyChoice &choice,
-                                const GraphTables &tables,
-                                ArrayRef<unsigned> guide,
-                                const PressureModel &pressureModel,
-                                const RegisterPressureBudgets &budgets,
-                                SmallVectorImpl<BeamTrace> &traces) {
+static BeamState
+buildNextBeamState(const BeamState &state, const ReadyChoice &choice,
+                   const GraphTables &tables, ArrayRef<unsigned> guide,
+                   const PressureModel &pressureModel,
+                   const RegisterPressureBudgets &budgets,
+                   MutableArrayRef<BeamTrace> traces, unsigned traceIndex) {
   BeamState next = state;
   unsigned node = choice.node;
+  assert(traceIndex < traces.size() && "trace slot must be preallocated");
   assert(next.ready.test(node) && "selected node must be ready");
   next.ready.reset(node);
   next.scheduled.set(node);
   advanceGuideCursor(next, guide);
-  next.trace = traces.size();
+  next.trace = traceIndex;
   next.depth = state.depth + 1;
-  traces.push_back({state.trace, node});
+  traces[traceIndex] = {state.trace, node};
   next.rank += choice.score;
   next.discrepancies += choice.discrepancy;
   if (isPressureSearchEnabled(budgets))
@@ -650,10 +650,12 @@ runGuidedBeamSearch(const GraphTables &tables, ArrayRef<NodeMetrics> metrics,
 
     SmallVector<BeamState, 16> nextBeam;
     nextBeam.reserve(children.size());
-    for (const BeamChild &child : children)
-      nextBeam.push_back(appendBeamNode(beam[child.parent], child.choice,
-                                        tables, guide, pressureModel, budgets,
-                                        traces));
+    unsigned traceBase = traces.size();
+    traces.resize(traceBase + children.size());
+    for (auto [childIndex, child] : llvm::enumerate(children))
+      nextBeam.push_back(buildNextBeamState(
+          beam[child.parent], child.choice, tables, guide, pressureModel,
+          budgets, traces, traceBase + childIndex));
     beam = std::move(nextBeam);
   }
 
