@@ -1,28 +1,23 @@
 // RUN: wave-opt --waveamd-to-machine %s | FileCheck %s
 // RUN: wave-opt --waveamd-to-machine %s | wave-opt | FileCheck %s
 
-// `wave.index_expr` bucketizes the top-level ixsimpl ADD summands
-// into a V / S / inst-offset triple before lowering. Lane-varying
-// terms stay on the VGPR side; uniform SGPR symbols accumulate in
-// the S slot; constants collapse into the `inst_offset` attr.
-// `wave.ptr_add` scales each slot by element size, and the destination
-// memory op routes the triple through its AddressFieldsOpInterface
-// spec (folding S into V when the target lacks an soffset slot).
+// `wave.index_expr` stays symbolic through `wave.ptr_add`; memory
+// lowering expands the byte expression, picks V / S / inst-offset
+// fields from the target memory-op spec, then materializes the chosen
+// fields.
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
 // 4*lid + K + bounded wgid_y on a global ptr (no S slot).
-//   V bucket: 4*lid -> v_mul_lo_u32, scaled x4 -> v_lshlrev_b32(.,2).
-//   S bucket: wgid_y, scaled x4 -> s_lshl_b32(.,2).
+//   V field: 4*lid scaled by element size -> v_lshlrev_b32(.,4).
+//   S term:  wgid_y scaled by element size -> s_lshl_b32(.,2).
 //   inst:    K=16, scaled x4 -> offset 64.
 //   Global has no soffset slot, so the scaled S contribution folds
 //   into V via one final v_add_u32.
 // CHECK-LABEL: func.func @mixed_offset
 // CHECK: %[[LANE:.*]] = waveamdmachine.v_mbcnt_lo
 // CHECK: %[[WGID:.*]] = waveamdmachine.s_workgroup_id_y
-// CHECK: %[[FOUR:.*]] = waveamdmachine.imm 4
-// CHECK: %[[MUL:.*]] = waveamdmachine.v_mul_lo_u32 %[[FOUR]], %[[LANE]]
-// CHECK: %[[VSCALE:.*]] = waveamdmachine.v_lshlrev_b32 %[[MUL]],
+// CHECK: %[[VSCALE:.*]] = waveamdmachine.v_lshlrev_b32 %[[LANE]],
 // CHECK: %[[SSCALE:[^,]+]], %{{.*}} = waveamdmachine.s_lshl_b32 %[[WGID]],
 // CHECK: %[[ADDR:.*]] = waveamdmachine.v_add_u32 %[[VSCALE]], %[[SSCALE]]
 // CHECK: waveamdmachine.global_store_b32 %[[ADDR]], {{.*}} offset 64
@@ -59,9 +54,9 @@ func.func @passthrough(%out: !wave.ptr<i32, #wave.global>, %x: i32) attributes {
   return
 }
 
-// Buffer destination has the soffset slot, so wgid_x + wgid_y collapse
-// onto the S side via one `s_add_i32` and feed the buffer_store_b32
-// soffset operand. K=8 scaled x4 -> inst_offset = 32. The
+// Buffer destination has the soffset slot, so the scaled wgid_x /
+// wgid_y terms stay SGPR-side and feed the buffer_store_b32 soffset
+// operand. K=8 scaled x4 -> inst_offset = 32. The
 // `wave.assume_range` wrappers bound each workgroup_id so the
 // scaled sum provably fits the 32-bit S slot; without them the
 // emit-time spec check would demote the bucket to voffset.
@@ -69,9 +64,10 @@ func.func @passthrough(%out: !wave.ptr<i32, #wave.global>, %x: i32) attributes {
 // CHECK: %[[LANE:.*]] = waveamdmachine.v_mbcnt_lo
 // CHECK: %[[WGX:.*]] = waveamdmachine.s_workgroup_id_x
 // CHECK: %[[WGY:.*]] = waveamdmachine.s_workgroup_id_y
-// CHECK: %[[SSUM:.*]], %{{.*}} = waveamdmachine.s_add_i32 %[[WGX]], %[[WGY]]
 // CHECK: %[[VBYTE:.*]] = waveamdmachine.v_lshlrev_b32 %[[LANE]],
-// CHECK: %[[SBYTE:[^,]+]], %{{.*}} = waveamdmachine.s_lshl_b32 %[[SSUM]],
+// CHECK: %[[SX:[^,]+]], %{{.*}} = waveamdmachine.s_lshl_b32 %[[WGX]],
+// CHECK: %[[SY:[^,]+]], %{{.*}} = waveamdmachine.s_lshl_b32 %[[WGY]],
+// CHECK: %[[SBYTE:[^,]+]], %{{.*}} = waveamdmachine.s_add_i32 %[[SX]], %[[SY]]
 // CHECK: waveamdmachine.buffer_store_b32 %[[VBYTE]],{{.*}}, %[[SBYTE]] offset 32
 func.func @buffer_buckets(%out: !wave.ptr<i32, #wave.global>, %x: i32) attributes {wave.kernel} {
   %lane = wave.lane_id : !wave.simd<i32, 32>
@@ -90,20 +86,20 @@ func.func @buffer_buckets(%out: !wave.ptr<i32, #wave.global>, %x: i32) attribute
   return
 }
 
-// Nested uniform add/mul must stay SGPR-side; otherwise the buffer
-// soffset path collapses into voffset.
+// Expanded uniform polynomial must stay SGPR-side; otherwise the
+// buffer soffset path collapses into voffset.
 // CHECK-LABEL: func.func @nested_uniform_summand_stays_sgpr
 // CHECK: %[[LANE:.*]] = waveamdmachine.v_mbcnt_lo
 // CHECK: %[[WGX:.*]] = waveamdmachine.s_workgroup_id_x
 // CHECK: %[[WGY:.*]] = waveamdmachine.s_workgroup_id_y
-// CHECK: %[[ONE:.*]] = waveamdmachine.imm 1
-// CHECK: %[[XADD:.*]], %{{.*}} = waveamdmachine.s_add_i32 %[[WGX]], %[[ONE]]
-// CHECK: %[[TWO:.*]] = waveamdmachine.imm 2
-// CHECK: %[[YADD:.*]], %{{.*}} = waveamdmachine.s_add_i32 %[[WGY]], %[[TWO]]
-// CHECK: %[[PROD:.*]] = waveamdmachine.s_mul_i32 %[[XADD]], %[[YADD]]
 // CHECK: %[[VBYTE:.*]] = waveamdmachine.v_lshlrev_b32 %[[LANE]],
-// CHECK: %[[SBYTE:[^,]+]], %{{.*}} = waveamdmachine.s_lshl_b32 %[[PROD]],
-// CHECK: waveamdmachine.buffer_store_b32 %[[VBYTE]], %[[LANE]], {{.*}}, %[[SBYTE]]
+// CHECK: %[[SX:[^,]+]], %{{.*}} = waveamdmachine.s_lshl_b32 %[[WGX]],
+// CHECK: %[[SY:[^,]+]], %{{.*}} = waveamdmachine.s_lshl_b32 %[[WGY]],
+// CHECK: %[[S0:[^,]+]], %{{.*}} = waveamdmachine.s_add_i32 %[[SX]], %[[SY]]
+// CHECK: %[[SXY:.*]] = waveamdmachine.s_mul_i32 %[[WGX]], %[[WGY]]
+// CHECK: %[[SXY4:[^,]+]], %{{.*}} = waveamdmachine.s_lshl_b32 %[[SXY]],
+// CHECK: %[[SBYTE:[^,]+]], %{{.*}} = waveamdmachine.s_add_i32 %[[S0]], %[[SXY4]]
+// CHECK: waveamdmachine.buffer_store_b32 %[[VBYTE]], %[[LANE]], {{.*}}, %[[SBYTE]] offset 8
 func.func @nested_uniform_summand_stays_sgpr(%out: !wave.ptr<i32, #wave.global>) attributes {wave.kernel} {
   %lane = wave.lane_id : !wave.simd<i32, 32>
   %wgid_x_raw = wave.workgroup_id 0

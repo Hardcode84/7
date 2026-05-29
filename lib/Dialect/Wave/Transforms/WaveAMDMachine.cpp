@@ -1142,6 +1142,7 @@ void WaveAMDMachineSelector::materializeArgument(BlockArgument arg,
   if (!isBufferPointer(type) && !isSharedPointer(type))
     pointerGlobalBases[arg] = argOp;
   pointerOffsets[arg] = OffsetTriple{};
+  pointerIndexOffsets[arg] = PointerOffset{};
   pointerBuffers[arg] = isBufferPointer(type);
 }
 
@@ -2036,6 +2037,23 @@ WaveAMDMachineSelector::foldImmMul(Location loc, std::optional<int64_t> lhsImm,
   return std::nullopt;
 }
 
+static Value tryMulIndexPow2(WaveAMDMachineSelector &S, Location loc, Value lhs,
+                             Value rhs, std::optional<int64_t> lhsImm,
+                             std::optional<int64_t> rhsImm) {
+  std::optional<int64_t> pow2 = lhsImm ? lhsImm : rhsImm;
+  if (!pow2 || *pow2 <= 0 || (*pow2 & (*pow2 - 1)) != 0)
+    return Value{};
+  Value value = lhsImm ? rhs : lhs;
+  if (S.isUniformValue(value))
+    return S.mulUniformValues(loc, lhs, rhs);
+  return waveamdmachine::VLshlrevB32Op::create(
+             S.builder, loc,
+             getRegType(S.builder.getContext(), waveamdmachine::RegClass::VGPR),
+             S.ensureVGPRForVSrc1(loc, value),
+             createImm(S.builder, loc, llvm::Log2_64(*pow2)))
+      .getResult();
+}
+
 Value WaveAMDMachineSelector::mulIndexValues(Location loc, Value lhs,
                                              Value rhs) {
   std::optional<int64_t> lhsImm = getImmediateValue(lhs);
@@ -2046,6 +2064,8 @@ Value WaveAMDMachineSelector::mulIndexValues(Location loc, Value lhs,
     return rhs;
   if (rhsImm && *rhsImm == 1)
     return lhs;
+  if (Value shifted = tryMulIndexPow2(*this, loc, lhs, rhs, lhsImm, rhsImm))
+    return shifted;
   if (isImm(lhs) && isImm(rhs))
     rhs = ensureVGPRForVSrc1(loc, rhs);
   // v_mul_lo_u32 is VOP3, so SGPR/literal in either slot is legal.
@@ -2212,6 +2232,14 @@ LogicalResult WaveAMDMachineSelector::selectIndexExpr(IndexExprOp op) {
   FailureOr<sym::ExprHandle> simplified =
       sym::simplifyExpr(symbolStore(), exprHandle, assumptions);
   pointerOffset.expr = succeeded(simplified) ? *simplified : exprHandle;
+  bool needsCollapse =
+      llvm::any_of(op.getResult().getUsers(),
+                   [](Operation *user) { return !isa<PtrAddOp>(user); });
+  indexOffsets[op.getResult()] = pointerOffset;
+  if (!needsCollapse) {
+    eraseIfTopLevel(op);
+    return success();
+  }
   ::ixs_node *root = const_cast<::ixs_node *>(pointerOffset.expr.raw());
   OffsetTriple triple{};
   triple.assumptions.assign(assumptions.begin(), assumptions.end());
@@ -2220,18 +2248,8 @@ LogicalResult WaveAMDMachineSelector::selectIndexExpr(IndexExprOp op) {
   triple.fullExpr = root;
   for (const auto &binding : substitution)
     triple.bindings.push_back({binding.getKey().str(), binding.getValue()});
-  indexOffsets[op.getResult()] = std::move(pointerOffset);
   indexTriples[op.getResult()] = triple;
-  // selectPtrAdd reads the bucketed triple directly; everyone else
-  // (wave.binary, debug printers) goes through the `values` map and
-  // needs a single collapsed VGPR. Skip the collapse when the only
-  // users are wave.ptr_add to keep the trivial bucketed lowering
-  // free of dead voffset / soffset adders.
-  bool needsCollapse =
-      llvm::any_of(op.getResult().getUsers(),
-                   [](Operation *user) { return !isa<PtrAddOp>(user); });
-  if (needsCollapse)
-    values[op.getResult()] = collapseTriple(op.getLoc(), triple);
+  values[op.getResult()] = collapseTriple(op.getLoc(), triple);
   eraseIfTopLevel(op);
   return success();
 }
@@ -2261,41 +2279,214 @@ static LogicalResult setRawPtrOffset(WaveAMDMachineSelector &S, PtrAddOp op,
   return success();
 }
 
-LogicalResult WaveAMDMachineSelector::selectPtrAdd(PtrAddOp op) {
-  auto baseIt = pointerBases.find(op.getBase());
-  auto offsetIt = pointerOffsets.find(op.getBase());
-  if (baseIt == pointerBases.end() || offsetIt == pointerOffsets.end())
-    return op.emitError("WaveAMDMachine backend expects selected base pointer");
-  // Snapshot mapped values before mutating any of the maps below; inserting
-  // into a DenseMap can rehash and invalidate live iterators.
-  Value baseValue = baseIt->second;
-  Value globalBase = pointerGlobalBases.lookup(op.getBase());
-  OffsetTriple baseTriple = offsetIt->second;
-  unsigned size = elementSizeBytes(op.getBase().getType());
-
-  OffsetTriple offsetTriple;
-  auto tit = indexTriples.find(op.getOffset());
-  if (tit != indexTriples.end()) {
-    offsetTriple = tit->second;
-  } else {
-    Value offset = expect(op.getOffset(), op);
-    if (failed(setRawPtrOffset(*this, op, offset, size, offsetTriple)))
-      return failure();
+static FailureOr<OffsetTriple>
+bucketizePointerOffset(WaveAMDMachineSelector &S, Operation *user,
+                       const PointerOffset &offset) {
+  llvm::StringMap<Value> substitution;
+  llvm::StringMap<TermKind> symKinds;
+  OffsetTriple triple;
+  triple.assumptions = offset.assumptions;
+  for (const PointerOffsetBinding &binding : offset.bindings) {
+    Value mapped = S.expect(binding.value, user);
+    substitution[binding.name] = mapped;
+    symKinds[binding.name] = binding.kind;
+    triple.bindings.push_back({binding.name, mapped});
   }
-  FailureOr<OffsetTriple> scaled = scaleTriple(op.getLoc(), offsetTriple, size);
+  ::ixs_node *root = const_cast<::ixs_node *>(offset.expr.raw());
+  if (failed(bucketize(S, root, user, substitution, symKinds, triple)))
+    return failure();
+  triple.fullExpr = root;
+  return triple;
+}
+
+static bool samePointerBinding(const PointerOffsetBinding &lhs,
+                               const PointerOffsetBinding &rhs) {
+  return lhs.name == rhs.name && lhs.value == rhs.value && lhs.kind == rhs.kind;
+}
+
+static LogicalResult appendPointerBindings(PointerOffset &dst,
+                                           const PointerOffset &src) {
+  for (const PointerOffsetBinding &binding : src.bindings) {
+    auto it = llvm::find_if(dst.bindings, [&](const PointerOffsetBinding &old) {
+      return old.name == binding.name;
+    });
+    if (it != dst.bindings.end()) {
+      if (!samePointerBinding(*it, binding))
+        return failure();
+      continue;
+    }
+    dst.bindings.push_back(binding);
+  }
+  llvm::append_range(dst.assumptions, src.assumptions);
+  return success();
+}
+
+static FailureOr<sym::ExprHandle>
+simplifyPointerOffset(WaveAMDMachineSelector &S, sym::ExprHandle expr,
+                      ArrayRef<sym::PredHandle> assumptions) {
+  FailureOr<sym::ExprHandle> simplified =
+      sym::simplifyExpr(S.symbolStore(), expr, assumptions);
+  return succeeded(simplified) ? *simplified : expr;
+}
+
+static FailureOr<PointerOffset> scalePointerOffset(WaveAMDMachineSelector &S,
+                                                   const PointerOffset &offset,
+                                                   unsigned size) {
+  PointerOffset out = offset;
+  if (!out.expr || size == 1)
+    return out;
+  FailureOr<sym::ExprHandle> scale = sym::composeExprInt(S.symbolStore(), size);
+  if (failed(scale))
+    return failure();
+  FailureOr<sym::ExprHandle> scaled = sym::composeExprBinary(
+      S.symbolStore(), out.expr, sym::ExprBinaryOp::Mul, *scale);
+  if (failed(scaled))
+    return failure();
+  sym::Session session(S.symbolStore());
+  ::ixs_node *expanded =
+      ixs_expand(session.raw(), const_cast<::ixs_node *>(scaled->raw()));
+  if (!expanded || ixs_is_error(expanded) || !ixs_node_is_expr(expanded))
+    return failure();
+  FailureOr<sym::ExprHandle> simplified =
+      simplifyPointerOffset(S, sym::ExprHandle(expanded), out.assumptions);
+  if (failed(simplified))
+    return failure();
+  out.expr = *simplified;
+  return out;
+}
+
+static FailureOr<PointerOffset> mergePointerOffsets(WaveAMDMachineSelector &S,
+                                                    const PointerOffset &base,
+                                                    const PointerOffset &add) {
+  PointerOffset out = base;
+  if (failed(appendPointerBindings(out, add)))
+    return failure();
+  if (!out.expr) {
+    out.expr = add.expr;
+    return out;
+  }
+  if (!add.expr)
+    return out;
+  FailureOr<sym::ExprHandle> expr = sym::composeExprBinary(
+      S.symbolStore(), out.expr, sym::ExprBinaryOp::Add, add.expr);
+  if (failed(expr))
+    return failure();
+  FailureOr<sym::ExprHandle> simplified =
+      simplifyPointerOffset(S, *expr, out.assumptions);
+  if (failed(simplified))
+    return failure();
+  out.expr = *simplified;
+  return out;
+}
+
+static FailureOr<PointerOffset> planPtrAddOffset(WaveAMDMachineSelector &S,
+                                                 PtrAddOp op, unsigned size) {
+  auto baseIt = S.pointerIndexOffsets.find(op.getBase());
+  auto offsetIt = S.indexOffsets.find(op.getOffset());
+  if (baseIt == S.pointerIndexOffsets.end() || offsetIt == S.indexOffsets.end())
+    return failure();
+  FailureOr<PointerOffset> scaled =
+      scalePointerOffset(S, offsetIt->second, size);
+  if (failed(scaled))
+    return failure();
+  return mergePointerOffsets(S, baseIt->second, *scaled);
+}
+
+struct PtrAddBase {
+  Value baseValue;
+  Value globalBase;
+  OffsetTriple triple;
+  unsigned size = 0;
+};
+
+static FailureOr<PtrAddBase> lookupPtrAddBase(WaveAMDMachineSelector &S,
+                                              PtrAddOp op) {
+  auto baseIt = S.pointerBases.find(op.getBase());
+  auto offsetIt = S.pointerOffsets.find(op.getBase());
+  if (baseIt == S.pointerBases.end() || offsetIt == S.pointerOffsets.end())
+    return op.emitError("WaveAMDMachine backend expects selected base pointer");
+  return PtrAddBase{baseIt->second, S.pointerGlobalBases.lookup(op.getBase()),
+                    offsetIt->second,
+                    S.elementSizeBytes(op.getBase().getType())};
+}
+
+static bool pointerResultNeedsLegacyOffset(Value ptr) {
+  return llvm::any_of(ptr.getUsers(), [](Operation *user) {
+    return !isa<LoadOp, StoreOp, PtrAddOp, waveamd::MakeBufferOp>(user);
+  });
+}
+
+static LogicalResult
+materializeSymbolicBaseForFallback(WaveAMDMachineSelector &S, PtrAddOp op,
+                                   OffsetTriple &base) {
+  auto baseSymIt = S.pointerIndexOffsets.find(op.getBase());
+  if (baseSymIt == S.pointerIndexOffsets.end() || !baseSymIt->second.expr)
+    return success();
+  FailureOr<OffsetTriple> lazyBase =
+      bucketizePointerOffset(S, op, baseSymIt->second);
+  if (failed(lazyBase))
+    return failure();
+  base = *lazyBase;
+  return success();
+}
+
+static FailureOr<OffsetTriple> getPtrAddOffsetTriple(WaveAMDMachineSelector &S,
+                                                     PtrAddOp op, unsigned size,
+                                                     bool hasSymbolic) {
+  auto tripleIt = S.indexTriples.find(op.getOffset());
+  if (tripleIt != S.indexTriples.end())
+    return tripleIt->second;
+  if (hasSymbolic)
+    return OffsetTriple{};
+  if (auto offsetIt = S.indexOffsets.find(op.getOffset());
+      offsetIt != S.indexOffsets.end()) {
+    FailureOr<OffsetTriple> lazy =
+        bucketizePointerOffset(S, op, offsetIt->second);
+    if (failed(lazy))
+      return failure();
+    return *lazy;
+  }
+  OffsetTriple triple;
+  Value offset = S.expect(op.getOffset(), op);
+  if (failed(setRawPtrOffset(S, op, offset, size, triple)))
+    return failure();
+  return triple;
+}
+
+LogicalResult WaveAMDMachineSelector::selectPtrAdd(PtrAddOp op) {
+  FailureOr<PtrAddBase> base = lookupPtrAddBase(*this, op);
+  if (failed(base))
+    return failure();
+  FailureOr<PointerOffset> symbolic = planPtrAddOffset(*this, op, base->size);
+  bool keepSymbolic =
+      succeeded(symbolic) && !pointerResultNeedsLegacyOffset(op.getResult());
+  if (!keepSymbolic &&
+      failed(materializeSymbolicBaseForFallback(*this, op, base->triple)))
+    return failure();
+
+  FailureOr<OffsetTriple> offsetTriple =
+      getPtrAddOffsetTriple(*this, op, base->size, keepSymbolic);
+  if (failed(offsetTriple))
+    return failure();
+  FailureOr<OffsetTriple> scaled =
+      scaleTriple(op.getLoc(), *offsetTriple, base->size);
   if (failed(scaled))
     return op.emitError("pointer offset byte scale overflows i64");
   FailureOr<OffsetTriple> merged =
-      mergeTriples(op.getLoc(), baseTriple, *scaled);
+      mergeTriples(op.getLoc(), base->triple, *scaled);
   if (failed(merged))
     return op.emitError("pointer offset accumulation overflows i64");
 
-  pointerBases[op.getResult()] = baseValue;
-  if (globalBase)
-    pointerGlobalBases[op.getResult()] = globalBase;
+  pointerBases[op.getResult()] = base->baseValue;
+  if (base->globalBase)
+    pointerGlobalBases[op.getResult()] = base->globalBase;
   pointerOffsets[op.getResult()] = *merged;
+  if (keepSymbolic)
+    pointerIndexOffsets[op.getResult()] = std::move(*symbolic);
+  else
+    pointerIndexOffsets.erase(op.getResult());
   pointerBuffers[op.getResult()] = pointerBuffers.lookup(op.getBase());
-  values[op.getResult()] = baseValue;
+  values[op.getResult()] = base->baseValue;
   eraseIfTopLevel(op);
   return success();
 }
@@ -2306,10 +2497,20 @@ WaveAMDMachineSelector::selectMakeBuffer(waveamd::MakeBufferOp op) {
   auto offsetIt = pointerOffsets.find(op.getBase());
   if (baseIt == pointerBases.end() || offsetIt == pointerOffsets.end())
     return op.emitError("WaveAMDMachine backend expects selected base pointer");
-  // See selectPtrAdd: snapshot before any DenseMap insertion.
+  // DenseMap insert can rehash.
   Value baseValue = baseIt->second;
   Value globalBase = pointerGlobalBases.lookup(op.getBase());
   OffsetTriple baseTriple = offsetIt->second;
+  auto symIt = pointerIndexOffsets.find(op.getBase());
+  bool keepSymbolic = symIt != pointerIndexOffsets.end() &&
+                      !pointerResultNeedsLegacyOffset(op.getResult());
+  if (symIt != pointerIndexOffsets.end() && !keepSymbolic) {
+    FailureOr<OffsetTriple> lazyBase =
+        bucketizePointerOffset(*this, op, symIt->second);
+    if (failed(lazyBase))
+      return failure();
+    baseTriple = *lazyBase;
+  }
   Value descriptor = waveamdmachine::MakeBufferRsrcOp::create(
       builder, op.getLoc(),
       getRegType(op.getContext(), waveamdmachine::RegClass::SGPR, 4), baseValue,
@@ -2317,6 +2518,10 @@ WaveAMDMachineSelector::selectMakeBuffer(waveamd::MakeBufferOp op) {
   pointerBases[op.getResult()] = descriptor;
   pointerGlobalBases[op.getResult()] = globalBase ? globalBase : baseValue;
   pointerOffsets[op.getResult()] = baseTriple;
+  if (keepSymbolic)
+    pointerIndexOffsets[op.getResult()] = symIt->second;
+  else
+    pointerIndexOffsets.erase(op.getResult());
   pointerBuffers[op.getResult()] = true;
   values[op.getResult()] = descriptor;
   eraseIfTopLevel(op);
@@ -2394,6 +2599,12 @@ LogicalResult WaveAMDMachineSelector::selectLdsBase(LdsBaseOp op) {
       static_cast<int64_t>(op.getOffset());
   pointerOffsets[op.getResult()].addr64InstOffset =
       static_cast<int64_t>(op.getOffset());
+  PointerOffset offset;
+  FailureOr<sym::ExprHandle> expr =
+      sym::composeExprInt(symbolStore(), static_cast<int64_t>(op.getOffset()));
+  if (succeeded(expr))
+    offset.expr = *expr;
+  pointerIndexOffsets[op.getResult()] = offset;
   values[op.getResult()] = baseValue;
   eraseIfTopLevel(op);
   return success();

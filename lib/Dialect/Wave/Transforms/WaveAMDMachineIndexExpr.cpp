@@ -118,6 +118,8 @@ FailureOr<Value> materializeIxsAddTerm(WaveAMDMachineSelector &S,
   FailureOr<Value> tcVal = materializeIndexExprNode(S, termCoeff, user, subs);
   if (failed(tcVal))
     return failure();
+  if (S.isUniformValue(*tcVal) && S.isUniformValue(*term))
+    return S.mulUniformValues(loc, *tcVal, *term);
   return S.mulIndexValues(loc, *tcVal, *term);
 }
 
@@ -594,6 +596,16 @@ collectPlanAddends(WaveAMDMachineSelector &S, ::ixs_node *node,
   return success();
 }
 
+static FailureOr<sym::ExprHandle> expandPlanExpr(WaveAMDMachineSelector &S,
+                                                 sym::ExprHandle expr) {
+  sym::Session session(S.symbolStore());
+  ::ixs_node *expanded =
+      ixs_expand(session.raw(), const_cast<::ixs_node *>(expr.raw()));
+  if (!expanded)
+    return failure();
+  return sym::ExprHandle(expanded);
+}
+
 static LogicalResult takeInstOffsetAddends(
     WaveAMDMachineSelector &S, const waveamdmachine::AddressFieldSpec &spec,
     SmallVectorImpl<AddressPlanAddend> &addends, AddressPlan &plan) {
@@ -772,8 +784,17 @@ planAddressFields(WaveAMDMachineSelector &S, const PointerOffset &offset,
   for (const PointerOffsetBinding &binding : offset.bindings)
     symKinds[binding.name] = binding.kind;
 
+  sym::ExprHandle expr = offset.expr;
+  if (FailureOr<sym::ExprHandle> expanded = expandPlanExpr(S, expr);
+      succeeded(expanded))
+    expr = *expanded;
+  if (FailureOr<sym::ExprHandle> simplified =
+          simplifyPlanExpr(S, expr, plan.assumptions);
+      succeeded(simplified))
+    expr = *simplified;
+
   SmallVector<AddressPlanAddend, 8> addends;
-  ::ixs_node *node = const_cast<::ixs_node *>(offset.expr.raw());
+  ::ixs_node *node = const_cast<::ixs_node *>(expr.raw());
   if (failed(collectPlanAddends(S, node, symKinds, plan.assumptions, addends)))
     return failure();
   if (failed(takeInstOffsetAddends(S, spec, addends, plan)))

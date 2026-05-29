@@ -145,6 +145,7 @@ void bindLoopBodyArgs(WaveAMDMachineSelector &S, scf::ForOp op, Block &loopBody,
       triple.voffset = blockCarry;
       triple.addr64Voffset = blockCarry;
       S.pointerOffsets[scfArg] = triple;
+      S.pointerIndexOffsets.erase(scfArg);
       S.pointerBuffers[scfArg] = snap.isBuffer;
       continue;
     }
@@ -220,6 +221,7 @@ void bindLoopResults(WaveAMDMachineSelector &S, scf::ForOp op, Operation *loop,
       triple.voffset = wmResult;
       triple.addr64Voffset = wmResult;
       S.pointerOffsets[scfResult] = triple;
+      S.pointerIndexOffsets.erase(scfResult);
       S.pointerBuffers[scfResult] = snap.isBuffer;
       continue;
     }
@@ -241,6 +243,7 @@ static void rebindStridedPointerCarries(WaveAMDMachineSelector &S,
       S.pointerOffsets[scfArg].soffset = S.mulUniformValues(
           loc, iv, createImm(S.builder, loc, snap.strideBytes));
       S.pointerOffsets[scfArg].addr64Soffset = S.pointerOffsets[scfArg].soffset;
+      S.pointerIndexOffsets.erase(scfArg);
       continue;
     }
     Value stridedBase =
@@ -248,6 +251,7 @@ static void rebindStridedPointerCarries(WaveAMDMachineSelector &S,
     S.pointerBases[scfArg] = stridedBase;
     if (snap.globalBase)
       S.pointerGlobalBases[scfArg] = stridedBase;
+    S.pointerIndexOffsets.erase(scfArg);
   }
 }
 

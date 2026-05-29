@@ -244,6 +244,7 @@ public:
   DenseMap<Value, Value> pointerBases;
   DenseMap<Value, Value> pointerGlobalBases;
   DenseMap<Value, OffsetTriple> pointerOffsets;
+  DenseMap<Value, PointerOffset> pointerIndexOffsets;
   DenseMap<Value, PointerOffset> indexOffsets;
   DenseMap<Value, OffsetTriple> indexTriples;
   DenseMap<Value, bool> pointerBuffers;
