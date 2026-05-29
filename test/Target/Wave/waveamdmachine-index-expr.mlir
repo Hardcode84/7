@@ -125,28 +125,6 @@ func.func @nested_uniform_summand_stays_sgpr(%out: !wave.ptr<i32, #wave.global>)
   return
 }
 
-// Without `wave.assume_range`, workgroup_id reports the full
-// [0, INT32_MAX] lattice. Two of them, byte-scaled, overflow the
-// final offset slots, so selection falls back to addr64 global VMEM.
-// CHECK-LABEL: func.func @buffer_addr64_on_overflow
-// CHECK: %[[LANE:.*]] = waveamdmachine.v_mbcnt_lo
-// CHECK: %[[SSUM:.*]], %{{.*}} = waveamdmachine.s_add_i32
-// CHECK-NOT: waveamdmachine.buffer_store_b32
-// CHECK: waveamdmachine.global_store_b32_addr64
-func.func @buffer_addr64_on_overflow(%out: !wave.ptr<i32, #wave.global>, %x: i32) attributes {wave.kernel} {
-  %lane = wave.lane_id : !wave.simd<i32, 32>
-  %wgid_x = wave.workgroup_id 0
-  %wgid_y = wave.workgroup_id 1
-  %range = arith.constant 256 : i32
-  %buf = waveamd.make_buffer %out, %range : !wave.ptr<i32, #wave.global>, i32 -> !wave.ptr<i32, #waveamd.buffer>
-  %vx = wave.splat %x : i32 -> !wave.simd<i32, 32>
-  %sum = wave.addi %lane, %vx : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
-  %off = wave.index_expr <"lid + wgid_x + wgid_y"> ["lid", "wgid_x", "wgid_y"] (%lane, %wgid_x, %wgid_y) : (!wave.simd<i32, 32>, i32, i32) -> !wave.index<32>
-  %ptrs = wave.ptr_add %buf, %off : !wave.ptr<i32, #waveamd.buffer>, !wave.index<32> -> !wave.simd<!wave.ptr<i32, #waveamd.buffer>, 32>
-  %tok = wave.store %sum -> %ptrs : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<i32, #waveamd.buffer>, 32>) -> !wave.mem.token
-  return
-}
-
 // IntRangeAnalysis-driven fold: `wave.assume_range` pins `%a` to a
 // provable point range `[16, 16]`. Selection runs IntegerRangeAnalysis
 // over the body and builds ixsimpl assumptions per binding; `ixs_simplify`

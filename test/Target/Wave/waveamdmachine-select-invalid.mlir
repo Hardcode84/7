@@ -163,3 +163,45 @@ func.func @index_expr_byte_scale_overflow(%out: !wave.ptr<i32, #wave.global>) at
   return
 }
 }
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
+func.func @buffer_store_offset_overflow(%out: !wave.ptr<i32, #wave.global>) attributes {wave.kernel} {
+  %range = arith.constant 64 : i32
+  %buf = waveamd.make_buffer %out, %range
+      : !wave.ptr<i32, #wave.global>, i32 -> !wave.ptr<i32, #waveamd.buffer>
+  %lane = wave.lane_id : !wave.simd<i32, 32>
+  %off = wave.index_expr <"1073741824 + lid"> ["lid"] (%lane)
+      : (!wave.simd<i32, 32>) -> !wave.index<32>
+  %ptrs = wave.ptr_add %buf, %off
+      : !wave.ptr<i32, #waveamd.buffer>, !wave.index<32>
+      -> !wave.simd<!wave.ptr<i32, #waveamd.buffer>, 32>
+  // expected-error @below {{buffer memory op offset exceeds buffer address fields}}
+  %tok = wave.store %lane -> %ptrs
+      : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<i32, #waveamd.buffer>, 32>)
+      -> !wave.mem.token
+  return
+}
+}
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
+func.func @buffer_load_offset_overflow(%out: !wave.ptr<i32, #wave.global>) attributes {wave.kernel} {
+  %range = arith.constant 64 : i32
+  %buf = waveamd.make_buffer %out, %range
+      : !wave.ptr<i32, #wave.global>, i32 -> !wave.ptr<i32, #waveamd.buffer>
+  %lane = wave.lane_id : !wave.simd<i32, 32>
+  %off = wave.index_expr <"1073741824 + lid"> ["lid"] (%lane)
+      : (!wave.simd<i32, 32>) -> !wave.index<32>
+  %ptrs = wave.ptr_add %buf, %off
+      : !wave.ptr<i32, #waveamd.buffer>, !wave.index<32>
+      -> !wave.simd<!wave.ptr<i32, #waveamd.buffer>, 32>
+  // expected-error @below {{buffer memory op offset exceeds buffer address fields}}
+  %value, %tok = wave.load %ptrs
+      : (!wave.simd<!wave.ptr<i32, #waveamd.buffer>, 32>)
+      -> (!wave.simd<i32, 32>, !wave.mem.token)
+  return
+}
+}

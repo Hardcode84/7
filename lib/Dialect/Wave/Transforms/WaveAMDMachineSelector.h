@@ -56,17 +56,20 @@ namespace mlir::wave::wmsel {
 // inherited from the source `wave.index_expr`. The emit-time spec
 // check calls `sym::provablyInRange` over them and demotes the
 // bucket when its proven range overflows the slot's hardware width.
-// `fullExpr` rematerializes addr64 fallback without reusing truncated
-// 32-bit bucket values.
+// `fullExpr` rematerializes addr64 fallback. `addr64*` slots carry
+// raw pointer terms not represented by `fullExpr`.
 struct OffsetTriple {
   llvm::SmallVector<sym::PredHandle, 2> assumptions;
   llvm::SmallVector<std::pair<std::string, Value>, 4> bindings;
   Value voffset;
   Value soffset;
+  Value addr64Voffset;
+  Value addr64Soffset;
   const ::ixs_node *voffsetExpr = nullptr;
   const ::ixs_node *soffsetExpr = nullptr;
   const ::ixs_node *fullExpr = nullptr;
   int64_t instOffset = 0;
+  int64_t addr64InstOffset = 0;
 };
 
 // Symbol kind for the bucketizer's per-summand classification. Bindings

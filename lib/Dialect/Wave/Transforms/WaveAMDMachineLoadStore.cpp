@@ -168,7 +168,11 @@ LogicalResult selectGlobalOrBufferStore(WaveAMDMachineSelector &S, StoreOp op,
           : (isBuffer
                  ? waveamdmachine::BufferStoreB32Op::getAddressFieldSpec()
                  : waveamdmachine::GlobalStoreB32Op::getAddressFieldSpec());
-  if (S.needsFullAddressForSpec(offset, spec))
+  bool needsFullAddress = S.needsFullAddressForSpec(offset, spec);
+  if (needsFullAddress && isBuffer)
+    return op.emitError(
+        "buffer memory op offset exceeds buffer address fields");
+  if (needsFullAddress)
     return selectFullAddressStore(S, op, globalBase, offset, registers,
                                   scalar16);
   auto b = S.bucketForSpec(op.getLoc(), offset, spec);
@@ -340,7 +344,11 @@ LogicalResult selectGlobalOrBufferLoad(WaveAMDMachineSelector &S, LoadOp op,
   waveamdmachine::AddressFieldSpec spec =
       isBuffer ? bufferLoadSpec(scalar16, registers)
                : globalLoadSpec(scalar16, registers);
-  if (S.needsFullAddressForSpec(offset, spec))
+  bool needsFullAddress = S.needsFullAddressForSpec(offset, spec);
+  if (needsFullAddress && isBuffer)
+    return op.emitError(
+        "buffer memory op offset exceeds buffer address fields");
+  if (needsFullAddress)
     return selectFullAddressLoad(S, op, globalBase, offset, registers,
                                  scalar16);
   auto b = S.bucketForSpec(op.getLoc(), offset, spec);

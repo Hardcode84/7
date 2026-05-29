@@ -471,12 +471,35 @@ FailureOr<OffsetTriple> WaveAMDMachineSelector::scaleTriple(Location loc,
   if (!instOffset)
     return failure();
   out.instOffset = *instOffset;
+  std::optional<int64_t> addr64InstOffset =
+      llvm::checkedMul(t.addr64InstOffset, static_cast<int64_t>(size));
+  if (!addr64InstOffset)
+    return failure();
+  out.addr64InstOffset = *addr64InstOffset;
   FailureOr<Value> voffset = scaleVOffset(*this, loc, t.voffset, size);
   FailureOr<Value> soffset = scaleSOffset(*this, loc, t.soffset, size);
   if (failed(voffset) || failed(soffset))
     return failure();
   out.voffset = *voffset;
   out.soffset = *soffset;
+  if (t.addr64Voffset == t.voffset) {
+    out.addr64Voffset = out.voffset;
+  } else {
+    FailureOr<Value> addr64Voffset =
+        scaleVOffset(*this, loc, t.addr64Voffset, size);
+    if (failed(addr64Voffset))
+      return failure();
+    out.addr64Voffset = *addr64Voffset;
+  }
+  if (t.addr64Soffset == t.soffset) {
+    out.addr64Soffset = out.soffset;
+  } else {
+    FailureOr<Value> addr64Soffset =
+        scaleSOffset(*this, loc, t.addr64Soffset, size);
+    if (failed(addr64Soffset))
+      return failure();
+    out.addr64Soffset = *addr64Soffset;
+  }
   // Scale the symbolic forms too so the emit-time width check sees
   // the final byte-offset range, not the pre-scale element range.
   scaleTripleExprs(*this, out, t, size);
@@ -519,8 +542,43 @@ bool WaveAMDMachineSelector::instOffsetOverflows(
   return t.instOffset < range.first || t.instOffset > range.second;
 }
 
+static bool fitsU32(int64_t value) {
+  return value >= 0 && value <= (int64_t{1} << 32) - 1;
+}
+
+static bool rawSlotFitsU32(WaveAMDMachineSelector &S, Value value) {
+  if (!value)
+    return true;
+  if (std::optional<int64_t> imm = S.getImmediateValue(value))
+    return fitsU32(*imm);
+  waveamdmachine::RegType rt =
+      dyn_cast<waveamdmachine::RegType>(value.getType());
+  return rt && rt.getWidth() == 1;
+}
+
+static bool offsetSlotFitsU32(WaveAMDMachineSelector &S, Value value,
+                              const ::ixs_node *expr,
+                              ArrayRef<sym::PredHandle> assumptions) {
+  if (expr)
+    return S.slotFitsU32(expr, assumptions);
+  return rawSlotFitsU32(S, value);
+}
+
+static bool hasAddr64Residual(const OffsetTriple &t) {
+  return t.addr64Voffset || t.addr64Soffset || t.addr64InstOffset != 0;
+}
+
+static bool fullExprNeedsWide(WaveAMDMachineSelector &S,
+                              const OffsetTriple &t) {
+  if (!t.fullExpr || !hasAddr64Residual(t))
+    return false;
+  return !S.slotFitsU32(t.fullExpr, t.assumptions);
+}
+
 bool WaveAMDMachineSelector::needsFullAddressForSpec(
     const OffsetTriple &t, const waveamdmachine::AddressFieldSpec &spec) {
+  if (fullExprNeedsWide(*this, t))
+    return true;
   const ::ixs_node *vExpr = t.voffsetExpr;
   const ::ixs_node *sExpr = t.soffsetExpr;
   if (instOffsetOverflows(t, spec)) {
@@ -533,9 +591,10 @@ bool WaveAMDMachineSelector::needsFullAddressForSpec(
         vExpr = appendBucketExpr(vExpr, immExpr->raw());
     }
   }
-  if (!spec.hasSoffset || !slotFitsU32(sExpr, t.assumptions))
+  if (!spec.hasSoffset ||
+      !offsetSlotFitsU32(*this, t.soffset, sExpr, t.assumptions))
     vExpr = appendBucketExpr(vExpr, sExpr);
-  return !slotFitsU32(vExpr, t.assumptions);
+  return !offsetSlotFitsU32(*this, t.voffset, vExpr, t.assumptions);
 }
 
 sym::Store &WaveAMDMachineSelector::symbolStore() {
@@ -543,13 +602,11 @@ sym::Store &WaveAMDMachineSelector::symbolStore() {
 }
 
 // True iff `expr` provably stays in unsigned 32-bit (`[0, 2^32 - 1]`)
-// under the triple's assumption set, or there is nothing symbolic to
-// check. A null `expr` means the slot is empty / imm-only and is
-// already safe.
+// under the triple's assumption set. Null means caller lost proof.
 bool WaveAMDMachineSelector::slotFitsU32(
     const ::ixs_node *expr, ArrayRef<sym::PredHandle> assumptions) {
   if (!expr)
-    return true;
+    return false;
   return sym::provablyInRange(symbolStore(), sym::ExprHandle(expr), assumptions,
                               int64_t{0}, (int64_t{1} << 32) - 1);
 }
@@ -565,7 +622,8 @@ void WaveAMDMachineSelector::demoteToFitSpec(
                              spec.hasSoffset);
     t.instOffset = 0;
   }
-  bool soffsetFits = slotFitsU32(t.soffsetExpr, t.assumptions);
+  bool soffsetFits =
+      offsetSlotFitsU32(*this, t.soffset, t.soffsetExpr, t.assumptions);
   if ((!spec.hasSoffset || !soffsetFits) && t.soffset) {
     t.voffset =
         t.voffset ? addByteOffsets(loc, t.voffset, t.soffset) : t.soffset;
@@ -868,43 +926,69 @@ static Value sgprPairToVGPRPair(WaveAMDMachineSelector &S, Location loc,
   return ensureVGPR2(S, loc, pair);
 }
 
+static Value addAddressSOffset(WaveAMDMachineSelector &S, Location loc,
+                               Value addr, Value offset) {
+  if (isWideVGPR(addr))
+    return addWide(S, loc, addr, offset);
+  return waveamdmachine::SAddU64U32Op::create(
+             S.builder, loc,
+             getRegType(S.builder.getContext(), waveamdmachine::RegClass::SGPR,
+                        2),
+             getSCCType(S.builder.getContext()), addr,
+             S.materializeSGPR1(loc, offset))
+      .getResult();
+}
+
+static void foldWideRawImm(WaveAMDMachineSelector &S, Location loc, Value &addr,
+                           Value &slot) {
+  if (!slot)
+    return;
+  std::optional<int64_t> imm = S.getImmediateValue(slot);
+  if (!imm || fitsU32(*imm))
+    return;
+  addr = addWide(S, loc, addr, ensureSGPR2(S, loc, slot));
+  slot = Value{};
+}
+
 FailureOr<Value> WaveAMDMachineSelector::materializeGlobalAddress(
     Location loc, Value base, const OffsetTriple &t, Operation *user) {
   Value addr = base;
+  Value voffset = t.voffset;
+  Value soffset = t.soffset;
+  int64_t instOffset = t.instOffset;
   if (t.fullExpr) {
     FailureOr<Value> offset =
         materializeWideIndexExprNode(*this, t.fullExpr, user, t.bindings);
     if (failed(offset))
       return failure();
     if (isWideVGPR(*offset))
-      return addWide(*this, loc, sgprPairToVGPRPair(*this, loc, addr), *offset);
-    addr = addWide(*this, loc, addr, *offset);
-    return sgprPairToVGPRPair(*this, loc, addr);
+      addr = addWide(*this, loc, sgprPairToVGPRPair(*this, loc, addr), *offset);
+    else
+      addr = addWide(*this, loc, addr, *offset);
+    voffset = t.addr64Voffset;
+    soffset = t.addr64Soffset;
+    instOffset = t.addr64InstOffset;
   }
-  if (t.instOffset != 0) {
+  foldWideRawImm(*this, loc, addr, voffset);
+  foldWideRawImm(*this, loc, addr, soffset);
+  if (instOffset != 0) {
     Value imm =
         waveamdmachine::SMovB64ImmOp::create(
             builder, loc,
             getRegType(builder.getContext(), waveamdmachine::RegClass::SGPR, 2),
-            builder.getI64IntegerAttr(t.instOffset))
+            builder.getI64IntegerAttr(instOffset))
             .getResult();
     addr = addWide(*this, loc, addr, imm);
   }
-  if (t.soffset)
-    addr =
-        waveamdmachine::SAddU64U32Op::create(
-            builder, loc,
-            getRegType(builder.getContext(), waveamdmachine::RegClass::SGPR, 2),
-            getSCCType(builder.getContext()), addr,
-            materializeSGPR1(loc, t.soffset))
-            .getResult();
-  Value vaddr = sgprPairToVGPRPair(*this, loc, addr);
-  if (!t.voffset)
+  if (soffset)
+    addr = addAddressSOffset(*this, loc, addr, soffset);
+  Value vaddr = isWideVGPR(addr) ? addr : sgprPairToVGPRPair(*this, loc, addr);
+  if (!voffset)
     return vaddr;
-  Value lo = ensureVGPRForVSrc1(loc, t.voffset);
+  Value lo = ensureVGPRForVSrc1(loc, voffset);
   Value hi = ensureVGPRForVSrc1(loc, createImm(builder, loc, 0));
-  Value voffset = tuple2(*this, loc, waveamdmachine::RegClass::VGPR, lo, hi);
-  return addWide(*this, loc, vaddr, voffset);
+  Value vwide = tuple2(*this, loc, waveamdmachine::RegClass::VGPR, lo, hi);
+  return addWide(*this, loc, vaddr, vwide);
 }
 
 // Build the `offset` attribute list for a bucketed emit. Empty
@@ -959,6 +1043,31 @@ WaveAMDMachineSelector::scaleBucketExpr(const ::ixs_node *value,
   return handle->raw();
 }
 
+static Value mergeVOffset(WaveAMDMachineSelector &S, Location loc, Value lhs,
+                          Value rhs) {
+  if (!lhs)
+    return rhs;
+  if (!rhs)
+    return lhs;
+  return S.addByteOffsets(loc, lhs, rhs);
+}
+
+static Value mergeSOffset(WaveAMDMachineSelector &S, Location loc, Value lhs,
+                          Value rhs) {
+  if (!lhs)
+    return rhs;
+  if (!rhs)
+    return lhs;
+  return S.addUniformBytes(loc, lhs, rhs);
+}
+
+static FailureOr<int64_t> checkedAddOffset(int64_t lhs, int64_t rhs) {
+  std::optional<int64_t> sum = llvm::checkedAdd(lhs, rhs);
+  if (!sum)
+    return failure();
+  return *sum;
+}
+
 // Field-wise sum of two triples. Null slots pass the non-null
 // operand through verbatim, so the result keeps each slot in its
 // natural class (V/S/imm) instead of forcing through a VGPR add.
@@ -968,17 +1077,21 @@ FailureOr<OffsetTriple> WaveAMDMachineSelector::mergeTriples(Location loc,
                                                              OffsetTriple a,
                                                              OffsetTriple b) {
   OffsetTriple out;
-  out.voffset = !a.voffset   ? b.voffset
-                : !b.voffset ? a.voffset
-                             : addByteOffsets(loc, a.voffset, b.voffset);
-  out.soffset = !a.soffset   ? b.soffset
-                : !b.soffset ? a.soffset
-                             : addUniformBytes(loc, a.soffset, b.soffset);
-  std::optional<int64_t> instOffset =
-      llvm::checkedAdd(a.instOffset, b.instOffset);
-  if (!instOffset)
+  out.voffset = mergeVOffset(*this, loc, a.voffset, b.voffset);
+  out.soffset = mergeSOffset(*this, loc, a.soffset, b.soffset);
+  out.addr64Voffset =
+      mergeVOffset(*this, loc, a.addr64Voffset, b.addr64Voffset);
+  out.addr64Soffset =
+      mergeSOffset(*this, loc, a.addr64Soffset, b.addr64Soffset);
+  FailureOr<int64_t> instOffset = checkedAddOffset(a.instOffset, b.instOffset);
+  if (failed(instOffset))
     return failure();
   out.instOffset = *instOffset;
+  FailureOr<int64_t> addr64InstOffset =
+      checkedAddOffset(a.addr64InstOffset, b.addr64InstOffset);
+  if (failed(addr64InstOffset))
+    return failure();
+  out.addr64InstOffset = *addr64InstOffset;
   out.voffsetExpr = appendBucketExpr(a.voffsetExpr, b.voffsetExpr);
   out.soffsetExpr = appendBucketExpr(a.soffsetExpr, b.soffsetExpr);
   out.fullExpr = appendBucketExpr(a.fullExpr, b.fullExpr);
@@ -2116,6 +2229,31 @@ LogicalResult WaveAMDMachineSelector::selectIndexExpr(IndexExprOp op) {
   return success();
 }
 
+static LogicalResult setRawPtrOffset(WaveAMDMachineSelector &S, PtrAddOp op,
+                                     Value offset, unsigned size,
+                                     OffsetTriple &triple) {
+  triple.voffset = offset;
+  std::optional<int64_t> imm = S.getImmediateValue(offset);
+  if (!imm) {
+    triple.addr64Voffset = offset;
+    return success();
+  }
+  std::optional<int64_t> byteImm =
+      llvm::checkedMul(*imm, static_cast<int64_t>(size));
+  if (!byteImm)
+    return op.emitError("pointer offset byte scale overflows i64");
+  if (fitsU32(*byteImm)) {
+    triple.addr64Voffset = offset;
+    return success();
+  }
+  FailureOr<sym::ExprHandle> expr = sym::composeExprInt(S.symbolStore(), *imm);
+  if (failed(expr))
+    return op.emitError("failed to compose raw pointer offset");
+  triple.voffsetExpr = expr->raw();
+  triple.fullExpr = expr->raw();
+  return success();
+}
+
 LogicalResult WaveAMDMachineSelector::selectPtrAdd(PtrAddOp op) {
   auto baseIt = pointerBases.find(op.getBase());
   auto offsetIt = pointerOffsets.find(op.getBase());
@@ -2126,6 +2264,7 @@ LogicalResult WaveAMDMachineSelector::selectPtrAdd(PtrAddOp op) {
   Value baseValue = baseIt->second;
   Value globalBase = pointerGlobalBases.lookup(op.getBase());
   OffsetTriple baseTriple = offsetIt->second;
+  unsigned size = elementSizeBytes(op.getBase().getType());
 
   OffsetTriple offsetTriple;
   auto tit = indexTriples.find(op.getOffset());
@@ -2133,9 +2272,9 @@ LogicalResult WaveAMDMachineSelector::selectPtrAdd(PtrAddOp op) {
     offsetTriple = tit->second;
   } else {
     Value offset = expect(op.getOffset(), op);
-    offsetTriple.voffset = offset;
+    if (failed(setRawPtrOffset(*this, op, offset, size, offsetTriple)))
+      return failure();
   }
-  unsigned size = elementSizeBytes(op.getBase().getType());
   FailureOr<OffsetTriple> scaled = scaleTriple(op.getLoc(), offsetTriple, size);
   if (failed(scaled))
     return op.emitError("pointer offset byte scale overflows i64");
@@ -2245,6 +2384,8 @@ LogicalResult WaveAMDMachineSelector::selectLdsBase(LdsBaseOp op) {
   pointerBases[op.getResult()] = baseValue;
   pointerOffsets[op.getResult()] = OffsetTriple{};
   pointerOffsets[op.getResult()].instOffset =
+      static_cast<int64_t>(op.getOffset());
+  pointerOffsets[op.getResult()].addr64InstOffset =
       static_cast<int64_t>(op.getOffset());
   values[op.getResult()] = baseValue;
   eraseIfTopLevel(op);
