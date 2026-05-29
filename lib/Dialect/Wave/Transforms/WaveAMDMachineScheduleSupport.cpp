@@ -183,6 +183,20 @@ void printRegion(ScheduleRegion region) {
                << " last=" << region.last->getName().getStringRef() << "\n";
 }
 
+bool exceedsScheduleRegionLimit(ScheduleRegion region,
+                                ScheduleSearchLimits limits) {
+  return limits.maxRegionOps >= 0 &&
+         region.opCount > static_cast<unsigned>(limits.maxRegionOps);
+}
+
+void printScheduleRegionLimitSkip(ScheduleRegion region,
+                                  ScheduleSearchLimits limits) {
+  llvm::errs() << kDiagPrefix << " skipped func=" << region.func.getSymName()
+               << " region=" << region.regionOrdinal << " reason=max_region_ops"
+               << " ops=" << region.opCount << " limit=" << limits.maxRegionOps
+               << "\n";
+}
+
 void printOpClasses(ScheduleRegion region, ArchResolution archResolution) {
   for (auto [index, op] : llvm::enumerate(region.ops)) {
     waveamdmachine::SchedClass cls = waveamdmachine::classifyOp(op);
@@ -1338,11 +1352,13 @@ bool isPressureSearchEnabled(const RegisterPressureBudgets &budgets) {
          (hasHardBudget(budgets) || hasCriticalBudget(budgets));
 }
 
-static SmallVector<OrderCandidate, 4> buildScheduleCandidates(
-    const ScheduleRegion &region, const DependenceGraph &graph,
-    const waveamdmachine::ArchData &arch,
-    const waveamdmachine::EventSimConfig &modelConfig,
-    const RegisterPressureBudgets &budgets, bool enableBeamSearch) {
+static SmallVector<OrderCandidate, 4>
+buildScheduleCandidates(const ScheduleRegion &region,
+                        const DependenceGraph &graph,
+                        const waveamdmachine::ArchData &arch,
+                        const waveamdmachine::EventSimConfig &modelConfig,
+                        const RegisterPressureBudgets &budgets,
+                        bool enableBeamSearch, ScheduleSearchLimits limits) {
   SmallVector<OrderCandidate, 4> candidates;
   OrderCandidate original;
   original.name = "original";
@@ -1358,8 +1374,22 @@ static SmallVector<OrderCandidate, 4> buildScheduleCandidates(
                      SchedulePolicy::MemoryEarly);
   addPolicyCandidate(candidates, "wmma_feed", tables, metrics,
                      SchedulePolicy::MatrixFeed);
-  if (enableBeamSearch)
-    addGuidedBeamCandidates(candidates, tables, metrics, region, budgets);
+  if (enableBeamSearch) {
+    int64_t estimatedBeamWork =
+        estimateGuidedBeamSearchWork(candidates.size(), region.opCount);
+    if (limits.maxBeamWork >= 0 && estimatedBeamWork > limits.maxBeamWork) {
+      if (limits.emitDiagnostics) {
+        func::FuncOp func = region.func;
+        llvm::errs() << kDiagPrefix << " skipped func=" << func.getSymName()
+                     << " region=" << region.regionOrdinal
+                     << " reason=max_beam_work"
+                     << " estimated_work=" << estimatedBeamWork
+                     << " limit=" << limits.maxBeamWork << "\n";
+      }
+    } else {
+      addGuidedBeamCandidates(candidates, tables, metrics, region, budgets);
+    }
+  }
   return candidates;
 }
 
@@ -1556,7 +1586,8 @@ ScheduleDecision evaluateScheduleCandidates(
     ArchResolution archResolution,
     const waveamdmachine::EventSimConfig &modelConfig,
     const RegisterPressureBudgets &budgets, bool enableBeamSearch,
-    PressureEvaluation pressureEvaluation, bool allowPressureUpperBound,
+    ScheduleSearchLimits limits, PressureEvaluation pressureEvaluation,
+    bool allowPressureUpperBound,
     const SchedulePressureContext *pressureContext) {
   ScheduleDecision decision;
   if (!archResolution.arch) {
@@ -1580,7 +1611,7 @@ ScheduleDecision evaluateScheduleCandidates(
       getCandidateBudgets(budgets, safePressureUpperBound);
   SmallVector<OrderCandidate, 4> candidates =
       buildScheduleCandidates(region, graph, *archResolution.arch, modelConfig,
-                              candidateBudgets, enableBeamSearch);
+                              candidateBudgets, enableBeamSearch, limits);
   appendEvaluatedCandidates(decision, candidates, region, graph, archResolution,
                             modelConfig, budgets, pressureEvaluation,
                             safePressureUpperBound, pressureContextForRegion);

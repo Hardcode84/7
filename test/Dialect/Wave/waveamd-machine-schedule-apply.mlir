@@ -1,6 +1,9 @@
 // RUN: wave-opt %s --waveamd-machine-schedule-report='print-candidates=1' --waveamd-machine-schedule='apply-schedule=1' 2>&1 | FileCheck %s --check-prefixes=DIAG,NOBEAM,APPLY
 // RUN: wave-opt %s --waveamd-machine-schedule-report='print-candidates=1 beam-search=1' 2>&1 | FileCheck %s --check-prefix=BEAM
+// RUN: wave-opt %s --waveamd-machine-schedule-report='print-candidates=1 max-region-ops=3' 2>&1 | FileCheck %s --check-prefix=REGIONCAP
+// RUN: wave-opt %s --waveamd-machine-schedule-report='print-candidates=1 beam-search=1 max-beam-work=1' 2>&1 | FileCheck %s --check-prefix=BEAMCAP
 // RUN: wave-opt %s --waveamd-machine-schedule-report='print-candidates=1' | FileCheck %s --check-prefix=NOAPPLY
+// RUN: wave-opt %s --waveamd-machine-schedule='apply-schedule=1 max-region-ops=3' | FileCheck %s --check-prefix=NOAPPLY
 // RUN: wave-opt %s --waveamd-machine-schedule='apply-schedule=1' --waveamd-insert-ticket-waits --waveamd-reg-alloc --waveamd-insert-hazard-waits | FileCheck %s --check-prefix=PIPE
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
@@ -23,6 +26,10 @@ func.func @candidate_lower(%off: !waveamdmachine.reg<vgpr, 1>,
 // NOBEAM-NOT: name=beam_0
 // DIAG: waveamd-machine-schedule-report selected func=candidate_lower region=0 name=critical_path original_cycles=326 selected_cycles=325 delta=-1 action=keep order=0,2,1,3
 // BEAM: waveamd-machine-schedule-report candidate func=candidate_lower region=0 name=beam_0 cycles=326 delta=0 issued_ops=3 max_vgpr=3 max_sgpr=0 order=1,0,2,3
+// REGIONCAP: waveamd-machine-schedule-report skipped func=candidate_lower region=0 reason=max_region_ops ops=4 limit=3
+// BEAMCAP: waveamd-machine-schedule-report skipped func=candidate_lower region=0 reason=max_beam_work estimated_work={{[0-9]+}} limit=1
+// BEAMCAP-NOT: name=beam_0
+// BEAMCAP: waveamd-machine-schedule-report selected func=candidate_lower region=0 name=critical_path
 
 // APPLY-LABEL: func.func @candidate_lower
 // APPLY: [[TOK:%.*]] = waveamdmachine.token

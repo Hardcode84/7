@@ -117,6 +117,12 @@ struct ScheduleDecision {
   unsigned selected = 0;
 };
 
+struct ScheduleSearchLimits {
+  int64_t maxBeamWork = -1;
+  int maxRegionOps = -1;
+  bool emitDiagnostics = false;
+};
+
 struct SchedulePressureContext {
   WaveAMDLiveIntervalBuildResult intervals;
   StringRef fallbackReason;
@@ -129,6 +135,10 @@ DependenceGraph buildDependenceGraph(const ScheduleRegion &region);
 void printRegion(ScheduleRegion region);
 void printOpClasses(ScheduleRegion region, ArchResolution archResolution);
 void printDependences(ScheduleRegion region, const DependenceGraph &graph);
+bool exceedsScheduleRegionLimit(ScheduleRegion region,
+                                ScheduleSearchLimits limits);
+void printScheduleRegionLimitSkip(ScheduleRegion region,
+                                  ScheduleSearchLimits limits);
 
 ArchResolution resolveArch(Operation *op);
 int64_t getHardExcess(RegisterPressureResult pressure);
@@ -178,7 +188,8 @@ ScheduleDecision evaluateScheduleCandidates(
     ArchResolution archResolution,
     const waveamdmachine::EventSimConfig &modelConfig,
     const RegisterPressureBudgets &budgets, bool enableBeamSearch,
-    PressureEvaluation pressureEvaluation, bool allowPressureUpperBound,
+    ScheduleSearchLimits limits, PressureEvaluation pressureEvaluation,
+    bool allowPressureUpperBound,
     const SchedulePressureContext *pressureContext);
 void printOrder(raw_ostream &os, ArrayRef<unsigned> order);
 void printCandidateDiagnostics(ScheduleRegion region,

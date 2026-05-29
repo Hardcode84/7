@@ -35,6 +35,30 @@ struct ReportControls {
   bool anyOutput = false;
 };
 
+static bool isScoreCandidateRequested(const ScheduleRegion &region,
+                                      const CandidateRequest &candidate,
+                                      StringRef scoreFuncName,
+                                      int scoreRegion) {
+  return candidate.requested &&
+         shouldScoreCandidate(region, scoreFuncName, scoreRegion);
+}
+
+static bool needsReportGraph(bool printDeps, bool scoreCandidate,
+                             bool emitCandidates) {
+  return printDeps || scoreCandidate || emitCandidates;
+}
+
+static bool skipRegionWorkForLimit(const ScheduleRegion &region,
+                                   bool needsRegionWork,
+                                   ScheduleSearchLimits searchLimits) {
+  if (!needsRegionWork)
+    return false;
+  if (!exceedsScheduleRegionLimit(region, searchLimits))
+    return false;
+  printScheduleRegionLimitSkip(region, searchLimits);
+  return true;
+}
+
 struct WaveAMDMachineScheduleReportPass
     : public wave::impl::WaveAMDMachineScheduleReportBase<
           WaveAMDMachineScheduleReportPass> {
@@ -51,6 +75,9 @@ struct WaveAMDMachineScheduleReportPass
       return signalPassFailure();
 
     StringRef scoreFuncName(scoreFunc);
+    ScheduleSearchLimits searchLimits{static_cast<int64_t>(maxBeamWork),
+                                      maxRegionOps,
+                                      /*emitDiagnostics=*/true};
     WalkResult walkResult = root->walk([&](func::FuncOp func) {
       ArchResolution archResolution = resolveArch(func);
       RegisterPressureBudgets pressureBudgets;
@@ -65,7 +92,7 @@ struct WaveAMDMachineScheduleReportPass
                                  pressureBudgets, controls.candidate,
                                  scoreFuncName, controls.emitScores,
                                  controls.emitCandidates, controls.emitClasses,
-                                 controls.prepareForPressure)))
+                                 controls.prepareForPressure, searchLimits)))
         return WalkResult::interrupt();
       return WalkResult::advance();
     });
@@ -100,7 +127,7 @@ struct WaveAMDMachineScheduleReportPass
                   const RegisterPressureBudgets &pressureBudgets,
                   const CandidateRequest &candidate, StringRef scoreFuncName,
                   bool emitScores, bool emitCandidates, bool emitClasses,
-                  bool prepareForPressure) {
+                  bool prepareForPressure, ScheduleSearchLimits searchLimits) {
     if (func.isExternal())
       return success();
     if (prepareForPressure)
@@ -109,7 +136,7 @@ struct WaveAMDMachineScheduleReportPass
       return reportFunction(func, archResolution, modelConfig, pressureBudgets,
                             candidate, scoreFuncName, emitScores,
                             emitCandidates, emitClasses,
-                            /*pressureContext=*/nullptr);
+                            /*pressureContext=*/nullptr, searchLimits);
 
     IRMapping mapper;
     Operation *clonedOp = func->clone(mapper);
@@ -121,7 +148,8 @@ struct WaveAMDMachineScheduleReportPass
         buildSchedulePressureContext(clonedFunc);
     return reportFunction(clonedFunc, archResolution, modelConfig,
                           pressureBudgets, candidate, scoreFuncName, emitScores,
-                          emitCandidates, emitClasses, &pressureContext);
+                          emitCandidates, emitClasses, &pressureContext,
+                          searchLimits);
   }
 
   LogicalResult
@@ -130,12 +158,13 @@ struct WaveAMDMachineScheduleReportPass
                  const RegisterPressureBudgets &pressureBudgets,
                  const CandidateRequest &candidate, StringRef scoreFuncName,
                  bool emitScores, bool emitCandidates, bool emitClasses,
-                 const SchedulePressureContext *pressureContext) {
+                 const SchedulePressureContext *pressureContext,
+                 ScheduleSearchLimits searchLimits) {
     SmallVector<ScheduleRegion> regions = collectScheduleRegions(func);
     for (const ScheduleRegion &region : regions)
       reportRegion(region, archResolution, modelConfig, pressureBudgets,
                    candidate, scoreFuncName, emitScores, emitCandidates,
-                   emitClasses, pressureContext);
+                   emitClasses, pressureContext, searchLimits);
     return success();
   }
 
@@ -144,17 +173,21 @@ struct WaveAMDMachineScheduleReportPass
                     const RegisterPressureBudgets &pressureBudgets,
                     const CandidateRequest &candidate, StringRef scoreFuncName,
                     bool emitScores, bool emitCandidates, bool emitClasses,
-                    const SchedulePressureContext *pressureContext) {
-    bool scoreCandidate =
-        candidate.requested &&
-        shouldScoreCandidate(region, scoreFuncName, scoreRegion);
+                    const SchedulePressureContext *pressureContext,
+                    ScheduleSearchLimits searchLimits) {
+    bool scoreCandidate = isScoreCandidateRequested(region, candidate,
+                                                    scoreFuncName, scoreRegion);
+    bool needsGraph =
+        needsReportGraph(printDeps, scoreCandidate, emitCandidates);
     DependenceGraph graph;
-    if (printDeps || scoreCandidate || emitCandidates)
-      graph = buildDependenceGraph(region);
     if (printRegions)
       printRegion(region);
     if (emitClasses)
       printOpClasses(region, archResolution);
+    if (skipRegionWorkForLimit(region, needsGraph || emitScores, searchLimits))
+      return;
+    if (needsGraph)
+      graph = buildDependenceGraph(region);
     if (printDeps)
       printDependences(region, graph);
     if (emitScores)
@@ -162,7 +195,7 @@ struct WaveAMDMachineScheduleReportPass
                         pressureBudgets, candidate, scoreCandidate);
     if (emitCandidates)
       reportCandidates(region, graph, archResolution, modelConfig,
-                       pressureBudgets, pressureContext);
+                       pressureBudgets, pressureContext, searchLimits);
   }
 
   void reportCandidates(const ScheduleRegion &region,
@@ -170,11 +203,12 @@ struct WaveAMDMachineScheduleReportPass
                         ArchResolution archResolution,
                         const waveamdmachine::EventSimConfig &modelConfig,
                         const RegisterPressureBudgets &pressureBudgets,
-                        const SchedulePressureContext *pressureContext) {
+                        const SchedulePressureContext *pressureContext,
+                        ScheduleSearchLimits searchLimits) {
     ScheduleDecision decision = evaluateScheduleCandidates(
         region, graph, archResolution, modelConfig, pressureBudgets, beamSearch,
-        PressureEvaluation::Eager, /*allowPressureUpperBound=*/false,
-        pressureContext);
+        searchLimits, PressureEvaluation::Eager,
+        /*allowPressureUpperBound=*/false, pressureContext);
     printCandidateDiagnostics(region, decision, pressureBudgets);
     printScheduleDecision(region, decision, /*willApply=*/false);
   }

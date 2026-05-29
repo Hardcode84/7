@@ -60,6 +60,9 @@ struct WaveAMDMachineSchedulePass
       return signalPassFailure();
     if (!applySchedule)
       return;
+    ScheduleSearchLimits searchLimits{static_cast<int64_t>(maxBeamWork),
+                                      maxRegionOps,
+                                      /*emitDiagnostics=*/false};
     WalkResult walkResult = root->walk([&](func::FuncOp func) {
       ArchResolution archResolution = resolveArch(func);
       RegisterPressureBudgets pressureBudgets;
@@ -70,7 +73,7 @@ struct WaveAMDMachineSchedulePass
               pressureBudgets)))
         return WalkResult::interrupt();
       if (failed(processFunction(func, archResolution, modelConfig,
-                                 pressureBudgets)))
+                                 pressureBudgets, searchLimits)))
         return WalkResult::interrupt();
       return WalkResult::advance();
     });
@@ -81,7 +84,8 @@ struct WaveAMDMachineSchedulePass
   LogicalResult
   processFunction(func::FuncOp func, ArchResolution archResolution,
                   const waveamdmachine::EventSimConfig &modelConfig,
-                  const RegisterPressureBudgets &pressureBudgets) {
+                  const RegisterPressureBudgets &pressureBudgets,
+                  ScheduleSearchLimits searchLimits) {
     if (func.isExternal())
       return success();
     if (failed(wave::prepareWaveAMDRegAllocIR(func)))
@@ -95,7 +99,8 @@ struct WaveAMDMachineSchedulePass
     for (const ScheduleRegion &region : regions)
       processRegion(region, archResolution, modelConfig, pressureBudgets,
                     pressureEvaluation,
-                    pressureContext ? &*pressureContext : nullptr);
+                    pressureContext ? &*pressureContext : nullptr,
+                    searchLimits);
     return success();
   }
 
@@ -104,10 +109,14 @@ struct WaveAMDMachineSchedulePass
                      const waveamdmachine::EventSimConfig &modelConfig,
                      const RegisterPressureBudgets &pressureBudgets,
                      PressureEvaluation pressureEvaluation,
-                     const SchedulePressureContext *pressureContext) {
+                     const SchedulePressureContext *pressureContext,
+                     ScheduleSearchLimits searchLimits) {
+    if (exceedsScheduleRegionLimit(region, searchLimits))
+      return;
     DependenceGraph graph = buildDependenceGraph(region);
     processScheduler(region, graph, archResolution, modelConfig,
-                     pressureBudgets, pressureEvaluation, pressureContext);
+                     pressureBudgets, pressureEvaluation, pressureContext,
+                     searchLimits);
   }
 
   void processScheduler(const ScheduleRegion &region,
@@ -116,10 +125,12 @@ struct WaveAMDMachineSchedulePass
                         const waveamdmachine::EventSimConfig &modelConfig,
                         const RegisterPressureBudgets &pressureBudgets,
                         PressureEvaluation pressureEvaluation,
-                        const SchedulePressureContext *pressureContext) {
+                        const SchedulePressureContext *pressureContext,
+                        ScheduleSearchLimits searchLimits) {
     ScheduleDecision decision = evaluateScheduleCandidates(
         region, graph, archResolution, modelConfig, pressureBudgets, beamSearch,
-        pressureEvaluation, /*allowPressureUpperBound=*/true, pressureContext);
+        searchLimits, pressureEvaluation, /*allowPressureUpperBound=*/true,
+        pressureContext);
     bool willApply =
         applySchedule && shouldApplyDecision(decision, pressureBudgets);
     if (willApply)

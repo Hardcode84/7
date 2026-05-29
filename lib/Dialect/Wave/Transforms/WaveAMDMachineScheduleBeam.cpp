@@ -47,6 +47,14 @@ struct BeamSearchConfig {
 
 static constexpr BeamSearchConfig kDefaultBeamSearchConfig;
 
+static int64_t saturatingMul(int64_t lhs, int64_t rhs) {
+  if (lhs == 0 || rhs == 0)
+    return 0;
+  if (lhs > std::numeric_limits<int64_t>::max() / rhs)
+    return std::numeric_limits<int64_t>::max();
+  return lhs * rhs;
+}
+
 struct PressureValueInfo {
   waveamdmachine::RegType type;
   bool liveOut = false;
@@ -730,6 +738,14 @@ static bool hasBeamResultOrder(ArrayRef<BeamResult> results,
 }
 
 } // namespace
+
+int64_t estimateGuidedBeamSearchWork(unsigned guideCount, unsigned nodeCount) {
+  if (nodeCount < 3 || guideCount == 0)
+    return 0;
+  int64_t work = saturatingMul(guideCount, kDefaultBeamSearchConfig.width);
+  work = saturatingMul(work, nodeCount);
+  return saturatingMul(work, nodeCount);
+}
 
 void addGuidedBeamCandidates(SmallVectorImpl<OrderCandidate> &candidates,
                              const GraphTables &tables,

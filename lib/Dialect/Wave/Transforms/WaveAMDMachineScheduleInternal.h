@@ -54,6 +54,7 @@ bool buildListOrder(const GraphTables &tables, ArrayRef<NodeMetrics> metrics,
                     SchedulePolicy policy, SmallVectorImpl<unsigned> &order);
 bool sameOrder(ArrayRef<unsigned> lhs, ArrayRef<unsigned> rhs);
 bool isPressureSearchEnabled(const RegisterPressureBudgets &budgets);
+int64_t estimateGuidedBeamSearchWork(unsigned guideCount, unsigned nodeCount);
 void addGuidedBeamCandidates(SmallVectorImpl<OrderCandidate> &candidates,
                              const GraphTables &tables,
                              ArrayRef<NodeMetrics> metrics,
