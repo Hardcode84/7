@@ -113,13 +113,16 @@ struct OffsetTriple {
 // strideBytes` in the scalar domain and the voffset carry stays
 // loop-invariant, so the per-lane `v_add` advance disappears.
 struct CarrySnapshot {
+  std::string bodyOffsetName;
+  std::string resultOffsetName;
+  std::string strideName;
   enum class Kind { WMValue, Pointer };
-  Kind kind;
   Value carry;
   Value base;
   Value globalBase;
-  bool isBuffer = false;
   int64_t strideBytes = 0;
+  Kind kind;
+  bool isBuffer = false;
 };
 
 // Small free helpers used by every selection TU.

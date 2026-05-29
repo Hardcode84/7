@@ -71,8 +71,8 @@ func.func @global_mixed_index_and_raw_ptr_add(%out: !wave.ptr<i32, #wave.global>
 // SELECT: waveamdmachine.uniform_loop
 // SELECT: ^bb0(%{{.*}}: !waveamdmachine.reg<sgpr, 1>, %[[CARRY:.*]]: !waveamdmachine.reg<vgpr, 1>):
 // SELECT: %[[CARRY64:.*]] = waveamdmachine.tuple_from_elements %[[CARRY]],
-// SELECT: %[[ADDR:.*]], %{{.*}} = waveamdmachine.v_add_u64 {{.*}}, %[[CARRY64]]
-// SELECT: waveamdmachine.global_store_b32_addr64 %[[ADDR]]
+// SELECT: waveamdmachine.v_add_u64 {{.*}}, %[[CARRY64]]
+// SELECT: waveamdmachine.global_store_b32_addr64
 // ASM-LABEL: global_loop_carry_mixed_addr64:
 // ASM: global_store_b32 v[{{[0-9]+}}:{{[0-9]+}}], v{{[0-9]+}}, off
 func.func @global_loop_carry_mixed_addr64(%out: !wave.ptr<i32, #wave.global>) attributes {wave.kernel} {

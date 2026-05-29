@@ -29,6 +29,65 @@ namespace mlir::wave::wmsel {
 
 namespace {
 
+static std::string makeLoopSymbol(WaveAMDMachineSelector &S, StringRef stem) {
+  return (Twine("__wave_loop_") + stem + "_" + Twine(S.nextLabel++)).str();
+}
+
+static FailureOr<PointerOffset> makeSymbolicCarry(WaveAMDMachineSelector &S,
+                                                  StringRef name, Value value,
+                                                  TermKind kind,
+                                                  bool assumeU32 = false) {
+  FailureOr<sym::ExprHandle> expr = sym::composeExprSym(S.symbolStore(), name);
+  if (failed(expr))
+    return failure();
+  PointerOffset offset;
+  offset.expr = *expr;
+  offset.bindings.push_back({name.str(), value, kind});
+  if (kind == TermKind::Lane || assumeU32) {
+    FailureOr<sym::PredHandle> range = sym::rangeAssumption(
+        S.symbolStore(), name, int64_t{0}, (int64_t{1} << 32) - 1);
+    if (succeeded(range))
+      offset.assumptions.push_back(*range);
+  }
+  return offset;
+}
+
+static FailureOr<Value> materializePointerCarry(WaveAMDMachineSelector &S,
+                                                Operation *user,
+                                                const PointerOffset &offset) {
+  if (!offset.expr)
+    return createImm(S.builder, user->getLoc(), 0);
+  llvm::StringMap<Value> subs;
+  for (const PointerOffsetBinding &binding : offset.bindings)
+    subs[binding.name] = S.expect(binding.value, user);
+  FailureOr<Value> value =
+      materializeIndexExprNode(S, offset.expr.raw(), user, subs);
+  if (failed(value))
+    return failure();
+  return S.ensureVGPRForVSrc1(user->getLoc(), *value);
+}
+
+static LogicalResult addSymbolicStride(WaveAMDMachineSelector &S,
+                                       PointerOffset &offset, Value strideValue,
+                                       StringRef name) {
+  S.values[strideValue] = strideValue;
+  FailureOr<PointerOffset> stride =
+      makeSymbolicCarry(S, name, strideValue, TermKind::Uniform,
+                        /*assumeU32=*/true);
+  if (failed(stride))
+    return failure();
+  FailureOr<sym::ExprHandle> expr =
+      offset.expr ? sym::composeExprBinary(S.symbolStore(), offset.expr,
+                                           sym::ExprBinaryOp::Add, stride->expr)
+                  : FailureOr<sym::ExprHandle>(stride->expr);
+  if (failed(expr))
+    return failure();
+  offset.expr = *expr;
+  llvm::append_range(offset.bindings, stride->bindings);
+  llvm::append_range(offset.assumptions, stride->assumptions);
+  return success();
+}
+
 // Wave-uniform per-iter advance (bytes) for global carry `i` the body
 // may march on the scalar base, else 0. Eligible: normalized loop, dead
 // post-loop result, constant-offset ptr_add chain back to the iter arg.
@@ -87,7 +146,16 @@ LogicalResult snapshotScfCarries(WaveAMDMachineSelector &S, scf::ForOp op,
       if (baseIt == S.pointerBases.end() || offsetIt == S.pointerOffsets.end())
         return op.emitError(
             "scf.for pointer iter arg has no WaveAMDMachine sidecar");
-      Value flat = S.collapseTriple(op.getLoc(), offsetIt->second);
+      Value flat;
+      if (auto symIt = S.pointerIndexOffsets.find(initArg);
+          symIt != S.pointerIndexOffsets.end()) {
+        FailureOr<Value> carry = materializePointerCarry(S, op, symIt->second);
+        if (failed(carry))
+          return failure();
+        flat = *carry;
+      } else {
+        flat = S.collapseTriple(op.getLoc(), offsetIt->second);
+      }
       bool isBuffer = S.pointerBuffers.lookup(initArg);
       Value globalBase = S.pointerGlobalBases.lookup(initArg);
       // shared base is a const 0; global marches the SGPR base, buffer
@@ -95,13 +163,23 @@ LogicalResult snapshotScfCarries(WaveAMDMachineSelector &S, scf::ForOp op,
       int64_t stride = !S.isSharedPointer(initArg.getType())
                            ? stridedCarryBytes(S, op, idx)
                            : 0;
-      out.push_back({CarrySnapshot::Kind::Pointer, flat, baseIt->second,
-                     globalBase, isBuffer, stride});
+      CarrySnapshot snap;
+      snap.kind = CarrySnapshot::Kind::Pointer;
+      snap.carry = flat;
+      snap.base = baseIt->second;
+      snap.globalBase = globalBase;
+      snap.strideBytes = stride;
+      snap.isBuffer = isBuffer;
+      snap.bodyOffsetName = makeLoopSymbol(S, "ptr_body");
+      snap.resultOffsetName = makeLoopSymbol(S, "ptr_result");
+      snap.strideName = makeLoopSymbol(S, "ptr_stride");
+      out.push_back(std::move(snap));
       continue;
     }
-    out.push_back({CarrySnapshot::Kind::WMValue, S.expect(initArg, op),
-                   /*base=*/Value{}, /*globalBase=*/Value{},
-                   /*isBuffer=*/false, /*strideBytes=*/0});
+    CarrySnapshot snap;
+    snap.kind = CarrySnapshot::Kind::WMValue;
+    snap.carry = S.expect(initArg, op);
+    out.push_back(std::move(snap));
   }
   return success();
 }
@@ -145,7 +223,13 @@ void bindLoopBodyArgs(WaveAMDMachineSelector &S, scf::ForOp op, Block &loopBody,
       triple.voffset = blockCarry;
       triple.addr64Voffset = blockCarry;
       S.pointerOffsets[scfArg] = triple;
-      S.pointerIndexOffsets.erase(scfArg);
+      S.values[blockCarry] = blockCarry;
+      FailureOr<PointerOffset> symbolic =
+          makeSymbolicCarry(S, snap.bodyOffsetName, blockCarry, TermKind::Lane);
+      if (succeeded(symbolic))
+        S.pointerIndexOffsets[scfArg] = *symbolic;
+      else
+        S.pointerIndexOffsets.erase(scfArg);
       S.pointerBuffers[scfArg] = snap.isBuffer;
       continue;
     }
@@ -171,33 +255,44 @@ LogicalResult selectScfBody(WaveAMDMachineSelector &S, scf::ForOp op) {
   return success();
 }
 
-// Build the `continue_if` carry operand list from the scf.yield
-// results, looking up pointer offsets through the sidecars and
-// enforcing that pointer carries preserve their loop-invariant base.
+static LogicalResult collectPointerYieldCarry(WaveAMDMachineSelector &S,
+                                              scf::YieldOp yield, Value y,
+                                              const CarrySnapshot &snap,
+                                              SmallVectorImpl<Value> &out) {
+  if (snap.strideBytes != 0) {
+    out.push_back(snap.carry);
+    return success();
+  }
+  auto baseIt = S.pointerBases.find(y);
+  auto offsetIt = S.pointerOffsets.find(y);
+  if (baseIt == S.pointerBases.end() || offsetIt == S.pointerOffsets.end())
+    return yield.emitError(
+        "scf.yield pointer carry has no WaveAMDMachine sidecar");
+  if (baseIt->second != snap.base)
+    return yield.emitError(
+        "scf.yield pointer carry must keep loop-invariant base");
+  if (snap.globalBase && S.pointerGlobalBases.lookup(y) != snap.globalBase)
+    return yield.emitError("scf.yield pointer carry must keep global base");
+  if (auto symIt = S.pointerIndexOffsets.find(y);
+      symIt != S.pointerIndexOffsets.end()) {
+    FailureOr<Value> carry = materializePointerCarry(S, yield, symIt->second);
+    if (failed(carry))
+      return failure();
+    out.push_back(*carry);
+    return success();
+  }
+  out.push_back(S.collapseTriple(yield.getLoc(), offsetIt->second));
+  return success();
+}
+
 LogicalResult collectYieldCarries(WaveAMDMachineSelector &S, scf::YieldOp yield,
                                   ArrayRef<CarrySnapshot> snapshots,
                                   SmallVectorImpl<Value> &out) {
   for (auto [idx, y] : llvm::enumerate(yield.getResults())) {
     const CarrySnapshot &snap = snapshots[idx];
     if (snap.kind == CarrySnapshot::Kind::Pointer) {
-      // Strided base lives in the IV recompute; the voffset carry is
-      // loop-invariant, so feed the init straight back and let the
-      // body's now-dead advance ptr_add fold away.
-      if (snap.strideBytes != 0) {
-        out.push_back(snap.carry);
-        continue;
-      }
-      auto baseIt = S.pointerBases.find(y);
-      auto offsetIt = S.pointerOffsets.find(y);
-      if (baseIt == S.pointerBases.end() || offsetIt == S.pointerOffsets.end())
-        return yield.emitError(
-            "scf.yield pointer carry has no WaveAMDMachine sidecar");
-      if (baseIt->second != snap.base)
-        return yield.emitError(
-            "scf.yield pointer carry must keep loop-invariant base");
-      if (snap.globalBase && S.pointerGlobalBases.lookup(y) != snap.globalBase)
-        return yield.emitError("scf.yield pointer carry must keep global base");
-      out.push_back(S.collapseTriple(yield.getLoc(), offsetIt->second));
+      if (failed(collectPointerYieldCarry(S, yield, y, snap, out)))
+        return failure();
       continue;
     }
     out.push_back(S.expect(y, yield));
@@ -221,7 +316,13 @@ void bindLoopResults(WaveAMDMachineSelector &S, scf::ForOp op, Operation *loop,
       triple.voffset = wmResult;
       triple.addr64Voffset = wmResult;
       S.pointerOffsets[scfResult] = triple;
-      S.pointerIndexOffsets.erase(scfResult);
+      S.values[wmResult] = wmResult;
+      FailureOr<PointerOffset> symbolic =
+          makeSymbolicCarry(S, snap.resultOffsetName, wmResult, TermKind::Lane);
+      if (succeeded(symbolic))
+        S.pointerIndexOffsets[scfResult] = *symbolic;
+      else
+        S.pointerIndexOffsets.erase(scfResult);
       S.pointerBuffers[scfResult] = snap.isBuffer;
       continue;
     }
@@ -243,7 +344,12 @@ static void rebindStridedPointerCarries(WaveAMDMachineSelector &S,
       S.pointerOffsets[scfArg].soffset = S.mulUniformValues(
           loc, iv, createImm(S.builder, loc, snap.strideBytes));
       S.pointerOffsets[scfArg].addr64Soffset = S.pointerOffsets[scfArg].soffset;
-      S.pointerIndexOffsets.erase(scfArg);
+      if (auto symIt = S.pointerIndexOffsets.find(scfArg);
+          symIt != S.pointerIndexOffsets.end())
+        if (failed(addSymbolicStride(S, symIt->second,
+                                     S.pointerOffsets[scfArg].soffset,
+                                     snap.strideName)))
+          S.pointerIndexOffsets.erase(scfArg);
       continue;
     }
     Value stridedBase =
@@ -251,7 +357,6 @@ static void rebindStridedPointerCarries(WaveAMDMachineSelector &S,
     S.pointerBases[scfArg] = stridedBase;
     if (snap.globalBase)
       S.pointerGlobalBases[scfArg] = stridedBase;
-    S.pointerIndexOffsets.erase(scfArg);
   }
 }
 

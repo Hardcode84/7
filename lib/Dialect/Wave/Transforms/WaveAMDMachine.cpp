@@ -2382,11 +2382,22 @@ static FailureOr<PointerOffset> mergePointerOffsets(WaveAMDMachineSelector &S,
 static FailureOr<PointerOffset> planPtrAddOffset(WaveAMDMachineSelector &S,
                                                  PtrAddOp op, unsigned size) {
   auto baseIt = S.pointerIndexOffsets.find(op.getBase());
-  auto offsetIt = S.indexOffsets.find(op.getOffset());
-  if (baseIt == S.pointerIndexOffsets.end() || offsetIt == S.indexOffsets.end())
+  if (baseIt == S.pointerIndexOffsets.end())
     return failure();
-  FailureOr<PointerOffset> scaled =
-      scalePointerOffset(S, offsetIt->second, size);
+  PointerOffset offset;
+  if (auto offsetIt = S.indexOffsets.find(op.getOffset());
+      offsetIt != S.indexOffsets.end()) {
+    offset = offsetIt->second;
+  } else if (std::optional<int64_t> raw = getConstantIntValue(op.getOffset())) {
+    FailureOr<sym::ExprHandle> expr =
+        sym::composeExprInt(S.symbolStore(), *raw);
+    if (failed(expr))
+      return failure();
+    offset.expr = *expr;
+  } else {
+    return failure();
+  }
+  FailureOr<PointerOffset> scaled = scalePointerOffset(S, offset, size);
   if (failed(scaled))
     return failure();
   return mergePointerOffsets(S, baseIt->second, *scaled);
@@ -2412,7 +2423,8 @@ static FailureOr<PtrAddBase> lookupPtrAddBase(WaveAMDMachineSelector &S,
 
 static bool pointerResultNeedsLegacyOffset(Value ptr) {
   return llvm::any_of(ptr.getUsers(), [](Operation *user) {
-    return !isa<LoadOp, StoreOp, PtrAddOp, waveamd::MakeBufferOp>(user);
+    return !isa<LoadOp, StoreOp, PtrAddOp, waveamd::MakeBufferOp, scf::YieldOp>(
+        user);
   });
 }
 
@@ -2426,6 +2438,8 @@ materializeSymbolicBaseForFallback(WaveAMDMachineSelector &S, PtrAddOp op,
       bucketizePointerOffset(S, op, baseSymIt->second);
   if (failed(lazyBase))
     return failure();
+  if (baseSymIt->second.bindings.empty())
+    lazyBase->fullExpr = nullptr;
   base = *lazyBase;
   return success();
 }
