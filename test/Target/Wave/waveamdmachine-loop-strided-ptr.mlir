@@ -42,8 +42,8 @@ func.func @strided_kloop(%a: !wave.ptr<f16, #wave.global>, %n: i32)
 // recompute to one s_add_u64_u32 feeding both loads, no v_add in body.
 // CHECK-LABEL: func.func @strided_kloop
 // CHECK: uniform_loop
-// CHECK: %[[SH:.+]] = waveamdmachine.s_lshl_b32 %arg{{.+}}, %{{.+}}
-// CHECK: %[[B:.+]] = waveamdmachine.s_add_u64_u32 %{{.+}}, %[[SH]]
+// CHECK: %[[SH:[^,]+]], %{{.*}} = waveamdmachine.s_lshl_b32 %arg{{.+}}, %{{.+}}
+// CHECK: %[[B:[^,]+]], %{{.*}} = waveamdmachine.s_add_u64_u32 %{{.+}}, %[[SH]]
 // CHECK: global_load_tuple_b32 %{{.+}}, %[[B]]
 // CHECK: global_load_tuple_b32 %{{.+}}, %[[B]]
 // CHECK-NOT: waveamdmachine.v_add_u32

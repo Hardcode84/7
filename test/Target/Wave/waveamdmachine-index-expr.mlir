@@ -23,7 +23,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // CHECK: %[[FOUR:.*]] = waveamdmachine.imm 4
 // CHECK: %[[MUL:.*]] = waveamdmachine.v_mul_lo_u32 %[[FOUR]], %[[LANE]]
 // CHECK: %[[VSCALE:.*]] = waveamdmachine.v_lshlrev_b32 %[[MUL]],
-// CHECK: %[[SSCALE:.*]] = waveamdmachine.s_lshl_b32 %[[WGID]],
+// CHECK: %[[SSCALE:[^,]+]], %{{.*}} = waveamdmachine.s_lshl_b32 %[[WGID]],
 // CHECK: %[[ADDR:.*]] = waveamdmachine.v_add_u32 %[[VSCALE]], %[[SSCALE]]
 // CHECK: waveamdmachine.global_store_b32 %[[ADDR]], {{.*}} offset 64
 func.func @mixed_offset(%out: !wave.ptr<i32, #wave.global>, %x: i32) attributes {wave.kernel} {
@@ -70,7 +70,7 @@ func.func @passthrough(%out: !wave.ptr<i32, #wave.global>, %x: i32) attributes {
 // CHECK: %[[WGY:.*]] = waveamdmachine.s_workgroup_id_y
 // CHECK: %[[SSUM:.*]], %{{.*}} = waveamdmachine.s_add_i32 %[[WGX]], %[[WGY]]
 // CHECK: %[[VBYTE:.*]] = waveamdmachine.v_lshlrev_b32 %[[LANE]],
-// CHECK: %[[SBYTE:.*]] = waveamdmachine.s_lshl_b32 %[[SSUM]],
+// CHECK: %[[SBYTE:[^,]+]], %{{.*}} = waveamdmachine.s_lshl_b32 %[[SSUM]],
 // CHECK: waveamdmachine.buffer_store_b32 %[[VBYTE]],{{.*}}, %[[SBYTE]] offset 32
 func.func @buffer_buckets(%out: !wave.ptr<i32, #wave.global>, %x: i32) attributes {wave.kernel} {
   %lane = wave.lane_id : !wave.simd<i32, 32>
@@ -101,7 +101,7 @@ func.func @buffer_buckets(%out: !wave.ptr<i32, #wave.global>, %x: i32) attribute
 // CHECK: %[[YADD:.*]], %{{.*}} = waveamdmachine.s_add_i32 %[[WGY]], %[[TWO]]
 // CHECK: %[[PROD:.*]] = waveamdmachine.s_mul_i32 %[[XADD]], %[[YADD]]
 // CHECK: %[[VBYTE:.*]] = waveamdmachine.v_lshlrev_b32 %[[LANE]],
-// CHECK: %[[SBYTE:.*]] = waveamdmachine.s_lshl_b32 %[[PROD]],
+// CHECK: %[[SBYTE:[^,]+]], %{{.*}} = waveamdmachine.s_lshl_b32 %[[PROD]],
 // CHECK: waveamdmachine.buffer_store_b32 %[[VBYTE]], %[[LANE]], {{.*}}, %[[SBYTE]]
 func.func @nested_uniform_summand_stays_sgpr(%out: !wave.ptr<i32, #wave.global>) attributes {wave.kernel} {
   %lane = wave.lane_id : !wave.simd<i32, 32>
@@ -132,7 +132,7 @@ func.func @nested_uniform_summand_stays_sgpr(%out: !wave.ptr<i32, #wave.global>)
 // CHECK: %[[LANE:.*]] = waveamdmachine.v_mbcnt_lo
 // CHECK: %[[SSUM:.*]], %{{.*}} = waveamdmachine.s_add_i32
 // CHECK: %[[VBYTE:.*]] = waveamdmachine.v_lshlrev_b32 %[[LANE]],
-// CHECK: %[[SBYTE:.*]] = waveamdmachine.s_lshl_b32 %[[SSUM]],
+// CHECK: %[[SBYTE:[^,]+]], %{{.*}} = waveamdmachine.s_lshl_b32 %[[SSUM]],
 // CHECK: %[[VMERGED:.*]] = waveamdmachine.v_add_u32 %[[VBYTE]], %[[SBYTE]]
 // CHECK: waveamdmachine.buffer_store_b32 %[[VMERGED]],
 func.func @buffer_demote_on_overflow(%out: !wave.ptr<i32, #wave.global>, %x: i32) attributes {wave.kernel} {

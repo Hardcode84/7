@@ -14,7 +14,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // SELECT: waveamdmachine.s_workgroup_id_x
 // SELECT: waveamdmachine.s_add_i32 {{.*}} -> (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<scc, 1>)
 // SELECT: waveamdmachine.s_mul_i32 {{.*}} -> !waveamdmachine.reg<sgpr, 1>
-// SELECT: waveamdmachine.s_lshl_b32 {{.*}} -> !waveamdmachine.reg<sgpr, 1>
+// SELECT: waveamdmachine.s_lshl_b32 {{.*}} -> (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<scc, 1>)
 // SELECT-NOT: waveamdmachine.v_add_u32
 // SELECT-NOT: waveamdmachine.v_mul_lo_u32
 func.func @uniform_i32_arith(%out: !wave.ptr<i32, #wave.global>) attributes {wave.kernel} {
@@ -53,7 +53,7 @@ func.func @mixed_i32_addi(%out: !wave.ptr<i32, #wave.global>) attributes {wave.k
 // SELECT-LABEL: func.func @uniform_i64_add
 // SELECT: waveamdmachine.s_mov_b64_imm 100
 // SELECT: waveamdmachine.s_mov_b64_imm 200
-// SELECT: waveamdmachine.s_add_u64 {{.*}} : (!waveamdmachine.reg<sgpr, 2>, !waveamdmachine.reg<sgpr, 2>) -> !waveamdmachine.reg<sgpr, 2>
+// SELECT: waveamdmachine.s_add_u64 {{.*}} : (!waveamdmachine.reg<sgpr, 2>, !waveamdmachine.reg<sgpr, 2>) -> (!waveamdmachine.reg<sgpr, 2>, !waveamdmachine.reg<scc, 1>)
 func.func @uniform_i64_add() attributes {wave.kernel} {
   %a = arith.constant 100 : i64
   %b = arith.constant 200 : i64
@@ -66,7 +66,7 @@ func.func @uniform_i64_add() attributes {wave.kernel} {
 // through the ABI pass today (it rejects width-2 non-pointer args), so
 // we exercise only the selection pass here.
 // SELECT-LABEL: func.func @simd_i64_add
-// SELECT: waveamdmachine.v_add_u64 {{.*}} : (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vgpr, 2>) -> !waveamdmachine.reg<vgpr, 2>
+// SELECT: waveamdmachine.v_add_u64 {{.*}} : (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vgpr, 2>) -> (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vcc, 1>)
 func.func @simd_i64_add(%a: !wave.simd<i64, 32>, %b: !wave.simd<i64, 32>) attributes {wave.kernel} {
   %sum = wave.addi %a, %b : !wave.simd<i64, 32>, !wave.simd<i64, 32> -> !wave.simd<i64, 32>
   return
@@ -77,7 +77,7 @@ func.func @simd_i64_add(%a: !wave.simd<i64, 32>, %b: !wave.simd<i64, 32>) attrib
 // The asm printer later expands that single op into the 4-mul + 2-add
 // sequence (s_mul_i32, s_mul_hi_u32, ...).
 // SELECT-LABEL: func.func @uniform_i64_mul
-// SELECT: waveamdmachine.s_mul_u64 {{.*}} : (!waveamdmachine.reg<sgpr, 2>, !waveamdmachine.reg<sgpr, 2>) -> (!waveamdmachine.reg<sgpr, 2>, !waveamdmachine.reg<sgpr, 1>)
+// SELECT: waveamdmachine.s_mul_u64 {{.*}} : (!waveamdmachine.reg<sgpr, 2>, !waveamdmachine.reg<sgpr, 2>) -> (!waveamdmachine.reg<sgpr, 2>, !waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<scc, 1>)
 func.func @uniform_i64_mul() attributes {wave.kernel} {
   %a = arith.constant 5 : i64
   %b = arith.constant 7 : i64

@@ -30,7 +30,7 @@ func.func @strided_buf(%a: !wave.ptr<f16, #wave.global>, %n: i32, %r: i32)
 
 // CHECK-LABEL: func.func @strided_buf
 // CHECK: uniform_loop
-// CHECK: %[[SO:.+]] = waveamdmachine.s_lshl_b32 %arg{{.+}}, %{{.+}}
+// CHECK: %[[SO:[^,]+]], %{{.*}} = waveamdmachine.s_lshl_b32 %arg{{.+}}, %{{.+}}
 // CHECK: buffer_load_tuple_b32 %{{.+}}, %{{.+}}, %[[SO]]
 // CHECK-NOT: waveamdmachine.v_add_u32
 // CHECK: continue_if

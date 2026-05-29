@@ -51,6 +51,18 @@ func.func @memory_edges(%off: !waveamdmachine.reg<vgpr, 1>,
   return
 }
 
+func.func @vcc_edges(%a: !waveamdmachine.reg<vgpr, 2>,
+                     %b: !waveamdmachine.reg<vgpr, 2>,
+                     %c: !waveamdmachine.reg<vgpr, 2>) {
+  %x, %vcc0 = waveamdmachine.v_add_u64 %a, %b
+      : (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vgpr, 2>)
+        -> (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vcc, 1>)
+  %y, %vcc1 = waveamdmachine.v_add_u64 %a, %c
+      : (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vgpr, 2>)
+        -> (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vcc, 1>)
+  return
+}
+
 func.func private @opaque()
 
 func.func @hard_boundaries(%a: !waveamdmachine.reg<vgpr, 1>,
@@ -99,11 +111,15 @@ transform.named_sequence @__transform_main(%root: !transform.any_op {transform.c
 // DEPS: waveamd-machine-schedule-report deps func=regions region=2 nodes=3
 // DEPS: waveamd-machine-schedule-report edge region=2 kind=ssa 1->2 src=waveamdmachine.s_add_i32 dst=waveamdmachine.s_cmp_lt_i32
 // DEPS: waveamd-machine-schedule-report edge region=2 kind=loop_carry recurrence 1->0 src=waveamdmachine.s_add_i32 dst=waveamdmachine.s_add_i32
+// DEPS: waveamd-machine-schedule-report edge region=2 kind=flag 0->1 src=waveamdmachine.s_add_i32 dst=waveamdmachine.s_add_i32
+// DEPS: waveamd-machine-schedule-report edge region=2 kind=flag 1->2 src=waveamdmachine.s_add_i32 dst=waveamdmachine.s_cmp_lt_i32
 // DEPS: waveamd-machine-schedule-report deps func=memory_edges region=0 nodes=5 edges=4
 // DEPS: waveamd-machine-schedule-report edge region=0 kind=mem_token 0->1 src=waveamdmachine.token dst=waveamdmachine.global_load_b32
 // DEPS: waveamd-machine-schedule-report edge region=0 kind=ssa 1->2 src=waveamdmachine.global_load_b32 dst=waveamdmachine.v_add_u32
 // DEPS: waveamd-machine-schedule-report edge region=0 kind=mem_token 1->3 src=waveamdmachine.global_load_b32 dst=waveamdmachine.global_store_b32
 // DEPS-NOT: kind=memory_order
+// DEPS: waveamd-machine-schedule-report deps func=vcc_edges region=0 nodes=2 edges=1
+// DEPS: waveamd-machine-schedule-report edge region=0 kind=flag 0->1 src=waveamdmachine.v_add_u64 dst=waveamdmachine.v_add_u64
 
 // SCORE: waveamd-machine-schedule-report score func=regions region=0 order=original cycles=
 // SCORE-SAME: issued_ops=2

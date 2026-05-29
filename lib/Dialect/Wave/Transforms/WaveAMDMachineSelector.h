@@ -105,6 +105,12 @@ inline mlir::waveamdmachine::RegType getSCCType(MLIRContext *ctx) {
                                             /*width=*/1, /*index=*/-1);
 }
 
+inline mlir::waveamdmachine::RegType getVCCType(MLIRContext *ctx) {
+  return mlir::waveamdmachine::RegType::get(ctx,
+                                            mlir::waveamdmachine::RegClass::VCC,
+                                            /*width=*/1, /*index=*/-1);
+}
+
 // Pinned variant: the resulting register's physical index is fixed up
 // front (HSA-loader-preloaded SGPRs s2..s4, workitem_id VGPR v0, ...).
 inline mlir::waveamdmachine::RegType

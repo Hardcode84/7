@@ -100,7 +100,7 @@ def main() -> int:
     require(
         "matmul_pressure_disabled",
         text,
-        r"sim_cycles waves=2 simds=2 start_delay=0: 9887",
+        r"sim_cycles waves=2 simds=2 start_delay=0: 11273",
     )
     reject("matmul_pressure_disabled", text, r"waveamd-machine-schedule-report")
 
@@ -118,7 +118,7 @@ def main() -> int:
     require(
         "matmul_hard_cap_beam_report",
         text,
-        r"selected func=wmma_f16_matmul_tiled region=2 name=wmma_feed",
+        r"selected func=wmma_f16_matmul_tiled region=1 name=critical_path",
     )
     require("matmul_hard_cap_beam_report", text, r"vgpr_hard_excess=0")
     reject("matmul_hard_cap_beam_report", text, r"pressure_fallback")

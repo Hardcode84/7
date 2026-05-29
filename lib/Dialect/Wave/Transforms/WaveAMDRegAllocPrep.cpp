@@ -37,11 +37,185 @@ static bool isSCC(waveamdmachine::RegType type) {
   return type.getRegClass() == waveamdmachine::RegClass::SCC;
 }
 
+static bool isVCC(waveamdmachine::RegType type) {
+  return type.getRegClass() == waveamdmachine::RegClass::VCC;
+}
+
+static bool isFlagReg(waveamdmachine::RegType type) {
+  return isSCC(type) || isVCC(type);
+}
+
+static std::optional<waveamdmachine::RegClass> flagClass(Value v) {
+  auto rt = dyn_cast<waveamdmachine::RegType>(v.getType());
+  if (!rt || !isFlagReg(rt))
+    return std::nullopt;
+  return rt.getRegClass();
+}
+
+static StringRef flagName(waveamdmachine::RegClass cls) {
+  if (cls == waveamdmachine::RegClass::SCC)
+    return "SCC";
+  if (cls == waveamdmachine::RegClass::VCC)
+    return "VCC";
+  return "flag";
+}
+
+static SmallVectorImpl<Value> &flagLiveSet(waveamdmachine::RegClass cls,
+                                           SmallVectorImpl<Value> &scc,
+                                           SmallVectorImpl<Value> &vcc) {
+  return cls == waveamdmachine::RegClass::SCC ? scc : vcc;
+}
+
+static void eraseLiveValue(SmallVectorImpl<Value> &values, Value v) {
+  auto it = llvm::find(values, v);
+  if (it != values.end())
+    values.erase(it);
+}
+
+struct FlagBlockInfo {
+  SmallVector<Operation *> ops;
+  DenseMap<Operation *, unsigned> positions;
+  DenseMap<Value, unsigned> lastUse;
+  DenseSet<Value> definedInBlock;
+};
+
+static void noteFlagUse(Value value, Operation *owner, FlagBlockInfo &info) {
+  if (!flagClass(value))
+    return;
+  auto it = info.positions.find(owner);
+  if (it == info.positions.end())
+    return;
+  unsigned &last = info.lastUse[value];
+  last = std::max(last, it->second);
+}
+
+static void noteFlagResultUses(Operation *op, FlagBlockInfo &info) {
+  for (Value result : op->getResults()) {
+    if (!flagClass(result))
+      continue;
+    info.definedInBlock.insert(result);
+    for (OpOperand &use : result.getUses()) {
+      auto it = info.positions.find(use.getOwner());
+      unsigned index =
+          it == info.positions.end() ? info.ops.size() : it->second;
+      unsigned &last = info.lastUse[result];
+      last = std::max(last, index);
+    }
+  }
+}
+
+static FlagBlockInfo collectFlagBlockInfo(Block &block) {
+  FlagBlockInfo info;
+  for (auto [index, op] : llvm::enumerate(block)) {
+    info.ops.push_back(&op);
+    info.positions[&op] = index;
+  }
+  for (Operation *op : info.ops)
+    for (Value operand : op->getOperands())
+      noteFlagUse(operand, op, info);
+  for (Operation *op : info.ops)
+    noteFlagResultUses(op, info);
+  return info;
+}
+
+static void initializeLiveFlags(const FlagBlockInfo &info,
+                                SmallVectorImpl<Value> &liveSCC,
+                                SmallVectorImpl<Value> &liveVCC) {
+  for (const auto &entry : info.lastUse) {
+    Value value = entry.first;
+    if (info.definedInBlock.contains(value))
+      continue;
+    std::optional<waveamdmachine::RegClass> cls = flagClass(value);
+    if (cls)
+      flagLiveSet(*cls, liveSCC, liveVCC).push_back(value);
+  }
+}
+
+static void retireFlagOperands(Operation *op, unsigned index,
+                               const FlagBlockInfo &info,
+                               SmallVectorImpl<Value> &liveSCC,
+                               SmallVectorImpl<Value> &liveVCC) {
+  for (Value operand : op->getOperands()) {
+    std::optional<waveamdmachine::RegClass> cls = flagClass(operand);
+    if (!cls || info.lastUse.lookup(operand) != index)
+      continue;
+    eraseLiveValue(flagLiveSet(*cls, liveSCC, liveVCC), operand);
+  }
+}
+
+static SmallVector<waveamdmachine::RegClass, 2>
+getWrittenFlagClasses(Operation *op) {
+  SmallVector<waveamdmachine::RegClass, 2> written;
+  for (Value result : op->getResults()) {
+    std::optional<waveamdmachine::RegClass> cls = flagClass(result);
+    if (cls && !llvm::is_contained(written, *cls))
+      written.push_back(*cls);
+  }
+  return written;
+}
+
+static LogicalResult verifyFlagWritesAvailable(
+    Operation *op, ArrayRef<waveamdmachine::RegClass> written,
+    SmallVectorImpl<Value> &liveSCC, SmallVectorImpl<Value> &liveVCC) {
+  for (waveamdmachine::RegClass cls : written) {
+    SmallVectorImpl<Value> &live = flagLiveSet(cls, liveSCC, liveVCC);
+    if (!live.empty())
+      return op->emitError("overlapping ")
+             << flagName(cls) << " live range needs flag spill support";
+  }
+  return success();
+}
+
+static void trackLiveFlagResults(Operation *op, unsigned index,
+                                 const FlagBlockInfo &info,
+                                 SmallVectorImpl<Value> &liveSCC,
+                                 SmallVectorImpl<Value> &liveVCC) {
+  for (Value result : op->getResults()) {
+    std::optional<waveamdmachine::RegClass> cls = flagClass(result);
+    auto it = info.lastUse.find(result);
+    if (!cls || it == info.lastUse.end() || it->second <= index)
+      continue;
+    flagLiveSet(*cls, liveSCC, liveVCC).push_back(result);
+  }
+}
+
+static LogicalResult verifyNoFlagLiveRangeOverlap(Block &block) {
+  FlagBlockInfo info = collectFlagBlockInfo(block);
+  SmallVector<Value, 4> liveSCC;
+  SmallVector<Value, 4> liveVCC;
+  initializeLiveFlags(info, liveSCC, liveVCC);
+  for (auto [index, op] : llvm::enumerate(info.ops)) {
+    retireFlagOperands(op, index, info, liveSCC, liveVCC);
+    SmallVector<waveamdmachine::RegClass, 2> written =
+        getWrittenFlagClasses(op);
+    if (failed(verifyFlagWritesAvailable(op, written, liveSCC, liveVCC)))
+      return failure();
+    trackLiveFlagResults(op, index, info, liveSCC, liveVCC);
+  }
+  return success();
+}
+
+static LogicalResult verifyNoFlagLiveRangeOverlap(Region &region) {
+  for (Block &block : region) {
+    if (failed(verifyNoFlagLiveRangeOverlap(block)))
+      return failure();
+    for (Operation &op : block)
+      for (Region &nested : op.getRegions())
+        if (failed(verifyNoFlagLiveRangeOverlap(nested)))
+          return failure();
+  }
+  return success();
+}
+
+static LogicalResult verifyNoFlagLiveRangeOverlap(func::FuncOp func) {
+  return verifyNoFlagLiveRangeOverlap(func.getBody());
+}
+
 static std::optional<waveamdmachine::RegType> trackedRegType(Value v) {
   if (!isReg(v))
     return std::nullopt;
   auto rt = cast<waveamdmachine::RegType>(v.getType());
-  if (isSCC(rt))
+  if (isFlagReg(rt))
     return std::nullopt;
   return rt;
 }
@@ -270,6 +444,8 @@ static LogicalResult splitTupleElementSharing(func::FuncOp func) {
 } // namespace
 
 LogicalResult mlir::wave::prepareWaveAMDRegAllocIR(func::FuncOp func) {
+  if (failed(verifyNoFlagLiveRangeOverlap(func)))
+    return failure();
   if (failed(materializeLoopBackedgeCopies(func)))
     return failure();
   if (failed(splitDuplicateLoopInits(func)))

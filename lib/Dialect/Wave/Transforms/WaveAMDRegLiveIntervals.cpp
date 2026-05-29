@@ -33,11 +33,19 @@ bool isWaveAMDSCC(waveamdmachine::RegType type) {
   return type.getRegClass() == waveamdmachine::RegClass::SCC;
 }
 
+bool isWaveAMDVCC(waveamdmachine::RegType type) {
+  return type.getRegClass() == waveamdmachine::RegClass::VCC;
+}
+
+bool isWaveAMDFlagReg(waveamdmachine::RegType type) {
+  return isWaveAMDSCC(type) || isWaveAMDVCC(type);
+}
+
 std::optional<waveamdmachine::RegType> getTrackedWaveAMDRegType(Value value) {
   if (!isWaveAMDReg(value))
     return std::nullopt;
   auto rt = cast<waveamdmachine::RegType>(value.getType());
-  if (isWaveAMDSCC(rt))
+  if (isWaveAMDFlagReg(rt))
     return std::nullopt;
   return rt;
 }
@@ -66,7 +74,7 @@ ensureInterval(Value value, unsigned pos,
   if (!wave::isWaveAMDReg(value))
     return failure();
   auto rt = cast<waveamdmachine::RegType>(value.getType());
-  if (wave::isWaveAMDSCC(rt))
+  if (wave::isWaveAMDFlagReg(rt))
     return failure();
   if (!wave::isWaveAMDSGPR(rt) && !wave::isWaveAMDVGPR(rt))
     return errOp->emitError("waveamd-reg-alloc supports only SGPR and "

@@ -232,9 +232,11 @@ OffsetTriple WaveAMDMachineSelector::scaleTriple(Location loc, OffsetTriple t,
     if (std::optional<int64_t> imm = getImmediateValue(t.soffset)) {
       out.soffset = createImm(builder, loc, *imm * size);
     } else if ((size & (size - 1)) == 0) {
-      out.soffset = waveamdmachine::SLshlB32Op::create(
-          builder, loc, sgprType, t.soffset,
-          createImm(builder, loc, llvm::Log2_32(size)));
+      out.soffset =
+          waveamdmachine::SLshlB32Op::create(
+              builder, loc, sgprType, getSCCType(builder.getContext()),
+              t.soffset, createImm(builder, loc, llvm::Log2_32(size)))
+              .getResult();
     } else {
       out.soffset = waveamdmachine::SMulI32Op::create(
           builder, loc, sgprType, createImm(builder, loc, size), t.soffset);
@@ -759,11 +761,15 @@ LogicalResult WaveAMDMachineSelector::selectAddiI64(AddiOp op) {
   Type resultType = getRegType(op.getContext(), cls, /*width=*/2);
   Value result;
   if (lhsSimd)
-    result = waveamdmachine::VAddU64Op::create(builder, op.getLoc(), resultType,
-                                               lhs, rhs);
+    result =
+        waveamdmachine::VAddU64Op::create(builder, op.getLoc(), resultType,
+                                          getVCCType(op.getContext()), lhs, rhs)
+            .getResult();
   else
-    result = waveamdmachine::SAddU64Op::create(builder, op.getLoc(), resultType,
-                                               lhs, rhs);
+    result =
+        waveamdmachine::SAddU64Op::create(builder, op.getLoc(), resultType,
+                                          getSCCType(op.getContext()), lhs, rhs)
+            .getResult();
   values[op.getResult()] = result;
   eraseIfTopLevel(op);
   return success();
@@ -820,7 +826,8 @@ LogicalResult WaveAMDMachineSelector::selectMuliI64(MuliOp op) {
                   .getResult();
   else
     product = waveamdmachine::SMulU64Op::create(
-                  builder, op.getLoc(), productType, scratchType, lhs, rhs)
+                  builder, op.getLoc(), productType, scratchType,
+                  getSCCType(op.getContext()), lhs, rhs)
                   .getResult();
   values[op.getResult()] = product;
   eraseIfTopLevel(op);
@@ -842,9 +849,12 @@ LogicalResult WaveAMDMachineSelector::selectShliI32(ShliOp op) {
   Value lhs = expect(op.getLhs(), op);
   Value rhs = expect(op.getRhs(), op);
   if (!isa<SimdType>(op.getResult().getType())) {
-    values[op.getResult()] = waveamdmachine::SLshlB32Op::create(
-        builder, op.getLoc(),
-        getRegType(op.getContext(), waveamdmachine::RegClass::SGPR), lhs, rhs);
+    values[op.getResult()] =
+        waveamdmachine::SLshlB32Op::create(
+            builder, op.getLoc(),
+            getRegType(op.getContext(), waveamdmachine::RegClass::SGPR),
+            getSCCType(op.getContext()), lhs, rhs)
+            .getResult();
     eraseIfTopLevel(op);
     return success();
   }
@@ -1294,9 +1304,11 @@ Value WaveAMDMachineSelector::tryLshlPow2(Location loc,
     return Value{};
   Value sgpr = lhsImm ? rhs : lhs;
   return waveamdmachine::SLshlB32Op::create(
-      builder, loc,
-      getRegType(builder.getContext(), waveamdmachine::RegClass::SGPR), sgpr,
-      createImm(builder, loc, llvm::Log2_32(*immFactor)));
+             builder, loc,
+             getRegType(builder.getContext(), waveamdmachine::RegClass::SGPR),
+             getSCCType(builder.getContext()), sgpr,
+             createImm(builder, loc, llvm::Log2_32(*immFactor)))
+      .getResult();
 }
 
 // SGPR-domain multiply for the bucketizer's uniform path. Used when
@@ -1332,9 +1344,10 @@ Value WaveAMDMachineSelector::shrPow2(Location loc, Value v, unsigned log2Den) {
     return createImm(builder, loc, *imm >> log2Den);
   if (isUniformValue(v))
     return waveamdmachine::SLshrB32Op::create(
-        builder, loc,
-        getRegType(builder.getContext(), waveamdmachine::RegClass::SGPR), v,
-        shiftAmt);
+               builder, loc,
+               getRegType(builder.getContext(), waveamdmachine::RegClass::SGPR),
+               getSCCType(builder.getContext()), v, shiftAmt)
+        .getResult();
   Value vgpr = ensureVGPRForVSrc1(loc, v);
   return waveamdmachine::VLshrrevB32Op::create(
       builder, loc,
@@ -1350,8 +1363,10 @@ Value WaveAMDMachineSelector::andMask(Location loc, Value v, int64_t mask) {
     return createImm(builder, loc, *imm & mask);
   if (isUniformValue(v))
     return waveamdmachine::SAndB32Op::create(
-        builder, loc,
-        getRegType(builder.getContext(), waveamdmachine::RegClass::SGPR), v, m);
+               builder, loc,
+               getRegType(builder.getContext(), waveamdmachine::RegClass::SGPR),
+               getSCCType(builder.getContext()), v, m)
+        .getResult();
   Value vgpr = ensureVGPRForVSrc1(loc, v);
   return waveamdmachine::VAndB32Op::create(
       builder, loc,

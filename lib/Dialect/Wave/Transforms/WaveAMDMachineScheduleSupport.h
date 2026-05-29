@@ -37,6 +37,7 @@ enum class EdgeKind {
   Ssa,
   MemToken,
   LoopCarry,
+  Flag,
 };
 
 struct ScheduleEdge {

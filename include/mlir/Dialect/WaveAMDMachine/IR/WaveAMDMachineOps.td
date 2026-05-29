@@ -112,6 +112,13 @@ def WaveAMDMachine_SCC
                  "::llvm::cast<::mlir::waveamdmachine::RegType>($_self).getRegClass() == ::mlir::waveamdmachine::RegClass::SCC">,
            "WaveAMDMachine SCC status bit">;
 
+// VCC is the vector carry / compare state. Like SCC, it is a single
+// physical flag resource outside normal register allocation.
+def WaveAMDMachine_VCC
+    : Type<CPred<"::llvm::isa<::mlir::waveamdmachine::RegType>($_self) && "
+                 "::llvm::cast<::mlir::waveamdmachine::RegType>($_self).getRegClass() == ::mlir::waveamdmachine::RegClass::VCC">,
+           "WaveAMDMachine VCC state">;
+
 def WaveAMDMachine_SGPR1OrImm
     : Type<CPred<"(::llvm::isa<::mlir::waveamdmachine::RegType>($_self) && "
                  "::llvm::cast<::mlir::waveamdmachine::RegType>($_self).getRegClass() == ::mlir::waveamdmachine::RegClass::SGPR && "
@@ -129,8 +136,7 @@ def WaveAMDMachine_PackedOpSel2Attr
 def WaveAMDMachine_PackedOpSel3Attr
     : ConfinedAttr<I64Attr, [IntMinValue<0>, IntMaxValue<7>]>;
 
-// Any allocatable register class (SGPR, VGPR, AGPR). Excludes SCC,
-// which is a 1-bit hardware flag that cannot participate in tuples.
+// Any allocatable register class (SGPR, VGPR, AGPR). Excludes hardware flags.
 def WaveAMDMachine_GPR
     : Type<CPred<"::llvm::isa<::mlir::waveamdmachine::RegType>($_self) && "
                  "(::llvm::cast<::mlir::waveamdmachine::RegType>($_self).getRegClass() == ::mlir::waveamdmachine::RegClass::SGPR || "
@@ -1365,7 +1371,7 @@ def WaveAMDMachine_SLshlB32Op : WaveAMDMachine_Op<"s_lshl_b32", [Pure]> {
   let summary = "scalar 32-bit logical left shift";
   let arguments = (ins WaveAMDMachine_SGPR1OrImm:$lhs,
                        WaveAMDMachine_SGPR1OrImm:$rhs);
-  let results = (outs WaveAMDMachine_SGPR1:$result);
+  let results = (outs WaveAMDMachine_SGPR1:$result, WaveAMDMachine_SCC:$scc);
   let assemblyFormat = "$lhs `,` $rhs attr-dict `:` functional-type(operands, results)";
 }
 
@@ -1373,7 +1379,7 @@ def WaveAMDMachine_SLshrB32Op : WaveAMDMachine_Op<"s_lshr_b32", [Pure]> {
   let summary = "scalar 32-bit logical right shift";
   let arguments = (ins WaveAMDMachine_SGPR1OrImm:$lhs,
                        WaveAMDMachine_SGPR1OrImm:$rhs);
-  let results = (outs WaveAMDMachine_SGPR1:$result);
+  let results = (outs WaveAMDMachine_SGPR1:$result, WaveAMDMachine_SCC:$scc);
   let assemblyFormat = "$lhs `,` $rhs attr-dict `:` functional-type(operands, results)";
 }
 
@@ -1381,7 +1387,7 @@ def WaveAMDMachine_SAndB32Op : WaveAMDMachine_Op<"s_and_b32", [Pure]> {
   let summary = "scalar 32-bit bitwise AND";
   let arguments = (ins WaveAMDMachine_SGPR1OrImm:$lhs,
                        WaveAMDMachine_SGPR1OrImm:$rhs);
-  let results = (outs WaveAMDMachine_SGPR1:$result);
+  let results = (outs WaveAMDMachine_SGPR1:$result, WaveAMDMachine_SCC:$scc);
   let assemblyFormat = "$lhs `,` $rhs attr-dict `:` functional-type(operands, results)";
 }
 
@@ -1391,7 +1397,7 @@ def WaveAMDMachine_SAndB32Op : WaveAMDMachine_Op<"s_and_b32", [Pure]> {
 def WaveAMDMachine_SAddU64Op : WaveAMDMachine_Op<"s_add_u64", [Pure]> {
   let summary = "scalar 64-bit unsigned add";
   let arguments = (ins WaveAMDMachine_SGPR2:$lhs, WaveAMDMachine_SGPR2:$rhs);
-  let results = (outs WaveAMDMachine_SGPR2:$result);
+  let results = (outs WaveAMDMachine_SGPR2:$result, WaveAMDMachine_SCC:$scc);
   let assemblyFormat = "$lhs `,` $rhs attr-dict `:` functional-type(operands, results)";
 }
 
@@ -1406,7 +1412,7 @@ def WaveAMDMachine_SAddU64U32Op : WaveAMDMachine_Op<"s_add_u64_u32", [Pure]> {
     WaveAMDMachine_SGPR2:$base,
     WaveAMDMachine_SGPR1:$offset
   );
-  let results = (outs WaveAMDMachine_SGPR2:$result);
+  let results = (outs WaveAMDMachine_SGPR2:$result, WaveAMDMachine_SCC:$scc);
   let assemblyFormat = "$base `,` $offset attr-dict `:` functional-type(operands, results)";
 }
 
@@ -1418,7 +1424,7 @@ def WaveAMDMachine_SAddU64U32Op : WaveAMDMachine_Op<"s_add_u64_u32", [Pure]> {
 def WaveAMDMachine_VAddU64Op : WaveAMDMachine_Op<"v_add_u64", [Pure]> {
   let summary = "vector 64-bit unsigned add";
   let arguments = (ins WaveAMDMachine_VGPR2:$lhs, WaveAMDMachine_VGPR2:$rhs);
-  let results = (outs WaveAMDMachine_VGPR2:$result);
+  let results = (outs WaveAMDMachine_VGPR2:$result, WaveAMDMachine_VCC:$vcc);
   let assemblyFormat = "$lhs `,` $rhs attr-dict `:` functional-type(operands, results)";
 }
 
@@ -1433,7 +1439,8 @@ def WaveAMDMachine_SMulU64Op : WaveAMDMachine_Op<"s_mul_u64", [Pure]> {
   let arguments = (ins WaveAMDMachine_SGPR2:$lhs, WaveAMDMachine_SGPR2:$rhs);
   let results = (outs
     WaveAMDMachine_SGPR2:$result,
-    WaveAMDMachine_SGPR1:$scratch
+    WaveAMDMachine_SGPR1:$scratch,
+    WaveAMDMachine_SCC:$scc
   );
   let assemblyFormat = "$lhs `,` $rhs attr-dict `:` functional-type(operands, results)";
 }

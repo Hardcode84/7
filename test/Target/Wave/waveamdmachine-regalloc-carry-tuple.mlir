@@ -20,7 +20,7 @@ func.func @carry_tuple(%a: !waveamdmachine.reg<sgpr, 2>, %n: !waveamdmachine.reg
   %r = waveamdmachine.uniform_loop if %ec : !waveamdmachine.reg<scc, 1> carries(%lo : !waveamdmachine.reg<sgpr, 1>) {
   ^bb0(%iv: !waveamdmachine.reg<sgpr, 1>):
     %t = waveamdmachine.tuple_from_elements %iv, %lo : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<sgpr, 1>) -> !waveamdmachine.reg<sgpr, 2>
-    %b = waveamdmachine.s_add_u64 %a, %t : (!waveamdmachine.reg<sgpr, 2>, !waveamdmachine.reg<sgpr, 2>) -> !waveamdmachine.reg<sgpr, 2>
+    %b, %add_scc = waveamdmachine.s_add_u64 %a, %t : (!waveamdmachine.reg<sgpr, 2>, !waveamdmachine.reg<sgpr, 2>) -> (!waveamdmachine.reg<sgpr, 2>, !waveamdmachine.reg<scc, 1>)
     %v, %tok = waveamdmachine.global_load_b32 %off, %b : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 2>) -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
     %niv, %scc = waveamdmachine.s_add_i32 %iv, %z1 : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.imm) -> (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<scc, 1>)
     %bc = waveamdmachine.s_cmp_lt_i32 %niv, %n : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<sgpr, 1>) -> !waveamdmachine.reg<scc, 1>

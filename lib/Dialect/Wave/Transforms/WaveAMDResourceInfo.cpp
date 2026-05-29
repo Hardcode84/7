@@ -46,9 +46,9 @@ struct WaveAMDResourceInfoPass
     auto regType = dyn_cast<waveamdmachine::RegType>(result.getType());
     if (!regType)
       return false;
-    // SCC is a single global bit; the allocator never assigns
-    // physical numbers for it.
-    if (regType.getRegClass() == waveamdmachine::RegClass::SCC)
+    // Hardware flags are single global resources; no physical numbering.
+    if (regType.getRegClass() == waveamdmachine::RegClass::SCC ||
+        regType.getRegClass() == waveamdmachine::RegClass::VCC)
       return false;
     int64_t index = regType.getIndex();
     if (index < 0) {

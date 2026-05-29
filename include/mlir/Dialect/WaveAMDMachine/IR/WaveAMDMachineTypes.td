@@ -24,11 +24,13 @@ def WaveAMDMachine_RegClassSGPR : I32EnumAttrCase<"SGPR", 0, "sgpr">;
 def WaveAMDMachine_RegClassVGPR : I32EnumAttrCase<"VGPR", 1, "vgpr">;
 def WaveAMDMachine_RegClassAGPR : I32EnumAttrCase<"AGPR", 2, "agpr">;
 def WaveAMDMachine_RegClassSCC : I32EnumAttrCase<"SCC", 3, "scc">;
+def WaveAMDMachine_RegClassVCC : I32EnumAttrCase<"VCC", 4, "vcc">;
 
 def WaveAMDMachine_RegClassEnum : I32EnumAttr<"RegClass",
     "WaveAMDMachine register class",
     [WaveAMDMachine_RegClassSGPR, WaveAMDMachine_RegClassVGPR,
-     WaveAMDMachine_RegClassAGPR, WaveAMDMachine_RegClassSCC]> {
+     WaveAMDMachine_RegClassAGPR, WaveAMDMachine_RegClassSCC,
+     WaveAMDMachine_RegClassVCC]> {
   let cppNamespace = "::mlir::waveamdmachine";
 }
 
@@ -37,8 +39,9 @@ def WaveAMDMachine_RegType : WaveAMDMachine_Type<"Reg", "reg"> {
   let description = [{
     A `!waveamdmachine.reg<class, width[, index]>` value represents a selected
     virtual or physical AMDGPU register. The `class` parameter is an enum
-    (`sgpr`, `vgpr`, or `agpr`), `width` is the number of consecutive 32-bit
-    registers, and optional `index` is the assigned physical register base.
+    (`sgpr`, `vgpr`, `agpr`, `scc`, or `vcc`), `width` is the number of
+    consecutive 32-bit registers, and optional `index` is the assigned
+    physical register base.
   }];
 
   let parameters = (ins EnumParameter<WaveAMDMachine_RegClassEnum>:$regClass,

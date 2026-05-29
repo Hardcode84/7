@@ -60,7 +60,9 @@ bool isWaveAMDReg(Value value);
 bool isWaveAMDSGPR(waveamdmachine::RegType type);
 bool isWaveAMDVGPR(waveamdmachine::RegType type);
 bool isWaveAMDSCC(waveamdmachine::RegType type);
-// Skips non-register operands and SCC.
+bool isWaveAMDVCC(waveamdmachine::RegType type);
+bool isWaveAMDFlagReg(waveamdmachine::RegType type);
+// Skips non-register operands and hardware flags.
 std::optional<waveamdmachine::RegType> getTrackedWaveAMDRegType(Value value);
 
 FailureOr<WaveAMDLiveIntervalBuildResult>

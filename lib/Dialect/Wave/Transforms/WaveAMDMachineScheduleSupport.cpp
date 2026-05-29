@@ -86,12 +86,25 @@ StringRef getEdgeKindName(EdgeKind kind) {
     return "mem_token";
   case EdgeKind::LoopCarry:
     return "loop_carry";
+  case EdgeKind::Flag:
+    return "flag";
   }
   llvm_unreachable("unknown edge kind");
 }
 
 static bool isMemToken(Value value) {
   return isa<waveamdmachine::MemTokenType>(value.getType());
+}
+
+static std::optional<waveamdmachine::RegClass> getFlagClass(Value value) {
+  auto type = dyn_cast<waveamdmachine::RegType>(value.getType());
+  if (!type)
+    return std::nullopt;
+  waveamdmachine::RegClass cls = type.getRegClass();
+  if (cls == waveamdmachine::RegClass::SCC ||
+      cls == waveamdmachine::RegClass::VCC)
+    return cls;
+  return std::nullopt;
 }
 
 static void addEdge(DependenceGraph &graph, unsigned src, unsigned dst,
@@ -208,6 +221,31 @@ static void addValueEdges(const ScheduleRegion &region, DependenceGraph &graph,
   }
 }
 
+static void addFlagEdges(const ScheduleRegion &region, DependenceGraph &graph) {
+  DenseMap<waveamdmachine::RegClass, unsigned> lastWriter;
+  DenseMap<waveamdmachine::RegClass, SmallVector<unsigned, 4>> readers;
+  for (auto [index, op] : llvm::enumerate(region.ops)) {
+    for (Value operand : op->getOperands())
+      if (std::optional<waveamdmachine::RegClass> cls = getFlagClass(operand))
+        readers[*cls].push_back(index);
+
+    SmallVector<waveamdmachine::RegClass, 2> written;
+    for (Value result : op->getResults()) {
+      std::optional<waveamdmachine::RegClass> cls = getFlagClass(result);
+      if (cls && !llvm::is_contained(written, *cls))
+        written.push_back(*cls);
+    }
+    for (waveamdmachine::RegClass cls : written) {
+      if (auto it = lastWriter.find(cls); it != lastWriter.end())
+        addEdge(graph, it->second, index, EdgeKind::Flag);
+      for (unsigned reader : readers[cls])
+        addEdge(graph, reader, index, EdgeKind::Flag);
+      readers[cls].clear();
+      lastWriter[cls] = index;
+    }
+  }
+}
+
 static void addLoopCarryEdges(const ScheduleRegion &region,
                               DependenceGraph &graph,
                               DenseMap<Operation *, unsigned> &nodeForOp) {
@@ -246,6 +284,7 @@ DependenceGraph buildDependenceGraph(const ScheduleRegion &region) {
 
   addValueEdges(region, graph, nodeForOp);
   addLoopCarryEdges(region, graph, nodeForOp);
+  addFlagEdges(region, graph);
   return graph;
 }
 

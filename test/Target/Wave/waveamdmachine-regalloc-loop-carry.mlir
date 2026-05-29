@@ -170,9 +170,9 @@ func.func @pinned_fragment_carry(%init: !waveamdmachine.reg<vgpr, 8, 16>)
 // CHECK: %[[ABASE:.+]] = waveamdmachine.s_load_b64 {{.*}} -> !waveamdmachine.reg<sgpr, 2, [[ABASE_REG:[0-9]+]]>
 // CHECK: %[[BBASE:.+]] = waveamdmachine.s_load_b64 {{.*}} -> !waveamdmachine.reg<sgpr, 2, {{[0-9]+}}>
 // CHECK: waveamdmachine.uniform_loop
-// CHECK: %{{.+}} = waveamdmachine.s_add_u64_u32 %[[ABASE]],
-// CHECK-NOT: waveamdmachine.s_add_u64_u32 {{.*}} -> !waveamdmachine.reg<sgpr, 2, [[ABASE_REG]]>
-// CHECK: %{{.+}} = waveamdmachine.s_add_u64_u32 %[[BBASE]],
+// CHECK: %{{.+}}, %{{.*}} = waveamdmachine.s_add_u64_u32 %[[ABASE]],
+// CHECK-NOT: waveamdmachine.s_add_u64_u32 {{.*}} -> (!waveamdmachine.reg<sgpr, 2, [[ABASE_REG]]>
+// CHECK: %{{.+}}, %{{.*}} = waveamdmachine.s_add_u64_u32 %[[BBASE]],
 func.func @external_loop_base_live_across_backedge() attributes {wave.kernel} {
   %z = waveamdmachine.imm 0 : !waveamdmachine.imm
   %one = waveamdmachine.imm 1 : !waveamdmachine.imm
@@ -191,15 +191,15 @@ func.func @external_loop_base_live_across_backedge() attributes {wave.kernel} {
   %r = waveamdmachine.uniform_loop if %ec : !waveamdmachine.reg<scc, 1>
       carries(%iv : !waveamdmachine.reg<sgpr, 1>) {
   ^bb0(%cur: !waveamdmachine.reg<sgpr, 1>):
-    %step = waveamdmachine.s_lshl_b32 %cur, %five
+    %step, %shift_scc = waveamdmachine.s_lshl_b32 %cur, %five
         : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.imm)
-          -> !waveamdmachine.reg<sgpr, 1>
-    %ap = waveamdmachine.s_add_u64_u32 %abase, %step
+          -> (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<scc, 1>)
+    %ap, %ap_scc = waveamdmachine.s_add_u64_u32 %abase, %step
         : (!waveamdmachine.reg<sgpr, 2>, !waveamdmachine.reg<sgpr, 1>)
-          -> !waveamdmachine.reg<sgpr, 2>
-    %bp = waveamdmachine.s_add_u64_u32 %bbase, %step
+          -> (!waveamdmachine.reg<sgpr, 2>, !waveamdmachine.reg<scc, 1>)
+    %bp, %bp_scc = waveamdmachine.s_add_u64_u32 %bbase, %step
         : (!waveamdmachine.reg<sgpr, 2>, !waveamdmachine.reg<sgpr, 1>)
-          -> !waveamdmachine.reg<sgpr, 2>
+          -> (!waveamdmachine.reg<sgpr, 2>, !waveamdmachine.reg<scc, 1>)
     %av, %atok = waveamdmachine.global_load_b32 %off, %ap
         : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 2>)
           -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)

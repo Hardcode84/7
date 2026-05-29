@@ -64,8 +64,10 @@ static Value recomputeStridedBase(WaveAMDMachineSelector &S, Location loc,
   Value offset = S.materializeSGPR1(loc, scaled);
   Type sgpr2 =
       getRegType(S.builder.getContext(), waveamdmachine::RegClass::SGPR, 2);
-  return waveamdmachine::SAddU64U32Op::create(S.builder, loc, sgpr2, base,
-                                              offset);
+  return waveamdmachine::SAddU64U32Op::create(
+             S.builder, loc, sgpr2, getSCCType(S.builder.getContext()), base,
+             offset)
+      .getResult();
 }
 
 // Capture the waveamdmachine "shape" for every `scf.for` iter arg. Wave
