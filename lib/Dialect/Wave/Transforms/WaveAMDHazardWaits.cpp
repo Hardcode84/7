@@ -19,6 +19,7 @@
 
 #include "Utils/AMDGPUBaseInfo.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/Wave/Transforms/WaveAMDRegAllocVerification.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachine.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineTarget.h"
 #include "mlir/IR/Builders.h"
@@ -720,6 +721,9 @@ private:
   LogicalResult processFunction(func::FuncOp func, OpBuilder &builder,
                                 const HazardConfig &cfg,
                                 const llvm::MCSubtargetInfo &sti) {
+    if (failed(wave::failIfWaveAMDRegAllocOverflowed(
+            func, "waveamd-insert-hazard-waits")))
+      return failure();
     SmallVector<Operation *> ops;
     if (failed(collectOps(func, ops)))
       return failure();

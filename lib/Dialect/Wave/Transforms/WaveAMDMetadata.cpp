@@ -9,6 +9,7 @@
 #include "mlir/Dialect/Wave/Transforms/Passes.h"
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/Wave/Transforms/WaveAMDRegAllocVerification.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachine.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
@@ -47,6 +48,9 @@ struct WaveAMDMetadataPass
         kernels.push_back(f);
     });
     for (func::FuncOp func : kernels) {
+      if (failed(
+              wave::failIfWaveAMDRegAllocOverflowed(func, "waveamd-metadata")))
+        return signalPassFailure();
       if (!func->hasAttr("waveamdmachine.kernarg_size") ||
           !func->hasAttr("waveamdmachine.sgpr_count") ||
           !func->hasAttr("waveamdmachine.vgpr_count")) {

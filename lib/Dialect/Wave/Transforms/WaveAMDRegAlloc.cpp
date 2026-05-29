@@ -12,6 +12,7 @@
 #include "WaveAMDRegLiveIntervals.h"
 #include "WaveAMDRegisterLimits.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/Wave/Transforms/WaveAMDRegAllocVerification.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachine.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
@@ -78,18 +79,26 @@ struct WaveAMDRegAllocPass
     });
     Builder builder(&getContext());
     int64_t overflowedCount = 0;
+    getOperation()->removeAttr(
+        wave::getWaveAMDRegAllocOverflowedCountAttrName());
     for (func::FuncOp func : kernels) {
       bool overflow = false;
+      func->removeAttr(wave::getWaveAMDRegAllocOverflowedAttrName());
       if (failed(allocateFunction(func, *limits, markOverflow, overflow)))
         return signalPassFailure();
       if (overflow) {
-        func->setAttr("waveamdmachine.regalloc_overflowed",
+        func->setAttr(wave::getWaveAMDRegAllocOverflowedAttrName(),
                       builder.getI64IntegerAttr(1));
         ++overflowedCount;
+        continue;
       }
+      if (failed(wave::verifyWaveAMDRegAllocation(
+              func, "waveamd-reg-alloc",
+              wave::WaveAMDRegAllocVerificationScope::Results)))
+        return signalPassFailure();
     }
     if (markOverflow)
-      getOperation()->setAttr("waveamdmachine.regalloc_overflowed_count",
+      getOperation()->setAttr(wave::getWaveAMDRegAllocOverflowedCountAttrName(),
                               builder.getI64IntegerAttr(overflowedCount));
   }
 

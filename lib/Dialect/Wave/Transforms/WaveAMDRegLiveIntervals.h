@@ -68,6 +68,9 @@ std::optional<waveamdmachine::RegType> getTrackedWaveAMDRegType(Value value);
 FailureOr<WaveAMDLiveIntervalBuildResult>
 buildWaveAMDLiveIntervals(func::FuncOp func);
 
+FailureOr<WaveAMDLiveIntervalBuildResult>
+buildAllocatedWaveAMDLiveIntervals(func::FuncOp func);
+
 // Candidate order replaces one contiguous slice in one block.
 FailureOr<WaveAMDLiveIntervalBuildResult>
 buildWaveAMDLiveIntervals(func::FuncOp func,

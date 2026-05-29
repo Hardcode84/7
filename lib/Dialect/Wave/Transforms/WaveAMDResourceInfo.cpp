@@ -9,6 +9,7 @@
 #include "mlir/Dialect/Wave/Transforms/Passes.h"
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/Wave/Transforms/WaveAMDRegAllocVerification.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachine.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
@@ -28,6 +29,18 @@ static bool isSGPR(waveamdmachine::RegType type) {
 
 static bool isVGPR(waveamdmachine::RegType type) {
   return type.getRegClass() == waveamdmachine::RegClass::VGPR;
+}
+
+static void clearResourceAttrs(func::FuncOp func) {
+  func->removeAttr("waveamdmachine.sgpr_count");
+  func->removeAttr("waveamdmachine.vgpr_count");
+  func->removeAttr("waveamdmachine.lds_size");
+}
+
+static void clearModuleResourceAttrs(ModuleOp mod) {
+  mod->removeAttr("waveamdmachine.sgpr_count_max");
+  mod->removeAttr("waveamdmachine.vgpr_count_max");
+  mod->removeAttr("waveamdmachine.lds_size_max");
 }
 
 struct WaveAMDResourceInfoPass
@@ -94,6 +107,7 @@ struct WaveAMDResourceInfoPass
 
   void runOnOperation() override {
     ModuleOp mod = getOperation();
+    clearModuleResourceAttrs(mod);
     OpBuilder builder(mod.getContext());
     SmallVector<func::FuncOp> kernels;
     mod.walk([&](func::FuncOp f) {
@@ -105,6 +119,13 @@ struct WaveAMDResourceInfoPass
     int64_t maxLds = 0;
     bool sawKernel = false;
     for (func::FuncOp func : kernels) {
+      clearResourceAttrs(func);
+      if (wave::isWaveAMDRegAllocOverflowed(func))
+        continue;
+      if (failed(wave::verifyWaveAMDRegAllocation(
+              func, "waveamd-resource-info",
+              wave::WaveAMDRegAllocVerificationScope::Results)))
+        return signalPassFailure();
       bool failed = false;
       MaxRegs regs = collectMaxRegs(func, failed);
       if (failed)

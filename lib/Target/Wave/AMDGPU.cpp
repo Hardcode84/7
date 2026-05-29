@@ -19,6 +19,7 @@
 #include "mlir/Dialect/Wave/IR/WaveAMD.h"
 #include "mlir/Dialect/Wave/IR/WaveAMDABI.h"
 #include "mlir/Dialect/Wave/Transforms/Passes.h"
+#include "mlir/Dialect/Wave/Transforms/WaveAMDRegAllocVerification.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachine.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineTarget.h"
 #include "mlir/IR/Builders.h"
@@ -116,6 +117,10 @@ public:
     if (!module)
       return op->emitError("wave AMDGPU backend expects a module operation");
     if (failed(initializeMC(op)))
+      return failure();
+    if (failed(wave::verifyWaveAMDRegAllocations(
+            module, "wave-to-amdgpu-asm",
+            wave::WaveAMDRegAllocVerificationScope::AllValues)))
       return failure();
 
     os << "\t.text\n";

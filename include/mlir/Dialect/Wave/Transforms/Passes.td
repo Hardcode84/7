@@ -218,10 +218,9 @@ def WaveAMDRegAlloc
     default mode (`mark-overflow=false`), running out of physical
     registers fails the pass. In `mark-overflow=true` (used by the
     autotuning loop) the pass instead annotates the offending func
-    with `waveamdmachine.regalloc_overflowed = i64 1`, leaves the
-    remaining intervals unallocated (so downstream passes will
-    misbehave if they don't skip overflowed funcs), and -- once the
-    module has been walked -- stamps a module-level
+    with `waveamdmachine.regalloc_overflowed = i64 1`, leaves later
+    production consumers to fail or skip that func explicitly, and
+    -- once the module has been walked -- stamps a module-level
     `waveamdmachine.regalloc_overflowed_count = i64 N` summarising
     how many kernels overflowed.
 

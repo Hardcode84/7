@@ -1,4 +1,6 @@
 // RUN: wave-opt --waveamd-reg-alloc='mark-overflow=true vgpr-limit=2' %s | FileCheck %s
+// RUN: wave-opt --waveamd-reg-alloc='mark-overflow=true vgpr-limit=2' --waveamd-resource-info %s | FileCheck %s --check-prefix=SKIP
+// RUN: not wave-opt --waveamd-reg-alloc='mark-overflow=true vgpr-limit=2' --waveamd-insert-hazard-waits %s 2>&1 | FileCheck %s --check-prefix=HAZARD
 // RUN: not wave-opt --waveamd-reg-alloc='vgpr-limit=2' %s 2>&1 | FileCheck %s --check-prefix=HARD
 
 // Soft-fail: instead of dying, the regalloc pass annotates the func
@@ -10,6 +12,12 @@
 // CHECK-SAME: waveamdmachine.regalloc_overflowed_count = 1 : i64
 // CHECK-LABEL: func.func @too_many_vgprs
 // CHECK-SAME: waveamdmachine.regalloc_overflowed = 1 : i64
+
+// SKIP-LABEL: func.func @too_many_vgprs
+// SKIP-SAME: waveamdmachine.regalloc_overflowed = 1 : i64
+// SKIP-NOT: waveamdmachine.vgpr_count
+
+// HAZARD: waveamd-insert-hazard-waits cannot consume overflowed register allocation
 
 // HARD: WaveAMDMachine register allocator ran out of registers
 

@@ -70,7 +70,8 @@ intervalsFor(waveamdmachine::RegType rt,
 // Find or create `value`'s interval in the matching SGPR/VGPR bucket.
 static FailureOr<unsigned>
 ensureInterval(Value value, unsigned pos,
-               wave::WaveAMDLiveIntervalSet &intervals, Operation *errOp) {
+               wave::WaveAMDLiveIntervalSet &intervals, Operation *errOp,
+               bool includeAllocated) {
   if (!wave::isWaveAMDReg(value))
     return failure();
   auto rt = cast<waveamdmachine::RegType>(value.getType());
@@ -79,7 +80,7 @@ ensureInterval(Value value, unsigned pos,
   if (!wave::isWaveAMDSGPR(rt) && !wave::isWaveAMDVGPR(rt))
     return errOp->emitError("waveamd-reg-alloc supports only SGPR and "
                             "VGPR register classes");
-  if (rt.getIndex() >= 0)
+  if (rt.getIndex() >= 0 && !includeAllocated)
     return failure();
   auto [bucket, table] = intervalsFor(rt, intervals);
   if (auto it = table->find(value); it != table->end()) {
@@ -159,6 +160,8 @@ public:
   LiveIntervalBuilder() = default;
   LiveIntervalBuilder(wave::WaveAMDLiveIntervalOrderOverride orderOverride)
       : orderOverride(orderOverride), hasOrderOverride(true) {}
+  explicit LiveIntervalBuilder(bool includeAllocated)
+      : includeAllocated(includeAllocated) {}
 
   FailureOr<wave::WaveAMDLiveIntervalBuildResult> build(func::FuncOp func) {
     if (func.isExternal())
@@ -383,7 +386,8 @@ private:
       result.orderedOps.push_back(op);
       for (Value value : op->getResults()) {
         // failure() here means "not a tracked register", not error.
-        (void)ensureInterval(value, pos, result.intervals, op);
+        (void)ensureInterval(value, pos, result.intervals, op,
+                             includeAllocated);
       }
       for (Value operand : op->getOperands())
         extendInterval(operand, pos);
@@ -399,6 +403,7 @@ private:
   wave::WaveAMDLiveIntervalBuildResult result;
   wave::WaveAMDLiveIntervalOrderOverride orderOverride;
   unsigned cursor = 0;
+  bool includeAllocated = false;
   bool hasOrderOverride = false;
   bool usedOrderOverride = false;
 };
@@ -408,6 +413,12 @@ private:
 FailureOr<wave::WaveAMDLiveIntervalBuildResult>
 mlir::wave::buildWaveAMDLiveIntervals(func::FuncOp func) {
   LiveIntervalBuilder builder;
+  return builder.build(func);
+}
+
+FailureOr<wave::WaveAMDLiveIntervalBuildResult>
+mlir::wave::buildAllocatedWaveAMDLiveIntervals(func::FuncOp func) {
+  LiveIntervalBuilder builder(/*includeAllocated=*/true);
   return builder.build(func);
 }
 
