@@ -37,9 +37,9 @@ module attributes {transform.with_named_sequence} {
         : (!transform.any_op) -> !transform.any_op
     %r3 = transform.apply_registered_pass "waveamd-insert-ticket-waits" to %r2
         : (!transform.any_op) -> !transform.any_op
-    %r4 = transform.apply_registered_pass "waveamd-insert-hazard-waits" to %r3
+    %r4 = transform.apply_registered_pass "waveamd-reg-alloc" to %r3
         : (!transform.any_op) -> !transform.any_op
-    %r5 = transform.apply_registered_pass "waveamd-reg-alloc" to %r4
+    %r5 = transform.apply_registered_pass "waveamd-insert-hazard-waits" to %r4
         : (!transform.any_op) -> !transform.any_op
     %r6 = transform.apply_registered_pass "waveamd-resource-info" to %r5
         : (!transform.any_op) -> !transform.any_op

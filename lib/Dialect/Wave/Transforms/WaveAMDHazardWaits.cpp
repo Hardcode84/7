@@ -6,27 +6,12 @@
 //
 //===----------------------------------------------------------------------===//
 //
-// Driver: flat pre-order walk over every waveamdmachine op in the
-// function (including ops nested in region-bearing ops like
-// `uniform_loop`). Two hazard categories run over the same walk:
-//
-//   - `LinearState`: a pending counter raised by a producer in the
-//     walk, decremented by each counted op, consumed by the matching
-//     consumer. VALU-after-LGKM uses this shape. The walk is
-//     straight-line: cross-block control flow (joins, back-edges) is
-//     NOT modelled, so a producer in one branch and consumer after the
-//     join can be miscounted. Today's selector keeps these in the
-//     same region, so it works in practice.
-//
-//   - `SsaEdge`: each consumer queries its operands backward via the
-//     SSA def-use chain (see `findProducer`). Same-block edges are
-//     precise; block-argument edges resolved via a single
-//     `BranchOpInterface` hop and `RegionBranchOpInterface`
-//     entry/back-edge/exit carries are also handled (so loop-carried
-//     producers are traced through `uniform_loop`). The query is
-//     idempotent under the loop replay because previously-inserted
-//     `s_nop`s count toward the gap. M0-after-`s_mov_m0` and
-//     VMEM-store-after-MFMA use this shape.
+// Driver: flat pre-order walk over every waveamdmachine op in a
+// function, after regalloc. LinearState hazards use walk-local
+// pending state plus one loop replay; SSA-edge hazards query backward
+// through same-block defs, one-hop CFG block args, and region-branch
+// entry/back-edge/exit carries. Regalloc can insert VALU copies, so
+// production pipelines run this pass after allocation.
 //
 // Design notes: `docs/HazardMitigationDesign.md`.
 

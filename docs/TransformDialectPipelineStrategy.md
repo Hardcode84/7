@@ -29,8 +29,8 @@ thread pool.
 `lib/Target/Wave/pipelines/pipelines.mlir` holds
 `@waveamd_backend` (the full backend: `waveamd-to-machine`,
 `waveamd-abi-lowering`, `waveamd-decompose-mem-tuples`,
-`waveamd-insert-ticket-waits`, `waveamd-insert-hazard-waits`,
-`waveamd-reg-alloc`, `waveamd-resource-info`,
+`waveamd-insert-ticket-waits`, `waveamd-reg-alloc`,
+`waveamd-insert-hazard-waits`, `waveamd-resource-info`,
 `waveamd-metadata`) and `@compile_kernels` (the backend +
 `wave-compile-kernels`). The default entry is
 `@__transform_main`, which `wave-translate` picks up implicitly.
@@ -170,7 +170,8 @@ read-only source module.
   pass in `body` -- including the expensive backend lowering that
   precedes the tunable axis. For a tune over `wave_k_tiles`, the
   K-independent prefix (wave-to-machine, ABI lowering, ticket
-  waits, hazard waits, ...) gets paid N times. A
+  waits, ...) gets paid N times; post-regalloc hazard insertion runs
+  after the overflow check. A
   `transform.checkpoint %m` / `transform.restore_from %ckpt` pair
   would let the body fork only the K-dependent suffix. Not built.
 - **Pre-regalloc pressure estimation.** Trials measure VGPR

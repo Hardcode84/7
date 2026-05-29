@@ -10,8 +10,9 @@
 // waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100" } { ... }` and run:
 //
 //   wave-opt <single-kernel.mlir> --waveamd-to-machine \
-//       --waveamd-abi-lowering --waveamd-insert-hazard-waits \
-//       --waveamd-reg-alloc --waveamd-resource-info --waveamd-metadata \
+//       --waveamd-abi-lowering --waveamd-reg-alloc \
+//       --waveamd-insert-hazard-waits --waveamd-resource-info \
+//       --waveamd-metadata \
 //     | wave-translate --wave-to-amdgpu-asm
 //
 // (See `test/Target/Wave/waveamdmachine-matrix.mlir` for a worked example

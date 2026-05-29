@@ -8,8 +8,8 @@
 #
 # The Python builder is asked for pre-specialise MLIR
 # (skip_specialize=True). The tune body then binds the tile factor,
-# specialises, lowers, regalloc-mark-overflow, resource-info; the
-# score reads vgpr_count_max off the module.
+# specialises, lowers, regalloc-mark-overflow, hazard-waits,
+# resource-info; the score reads vgpr_count_max off the module.
 
 from mlir.dialects.wave_matmul import build_wmma_f16_matmul_module
 from mlir.ir import Module, UnitAttr
@@ -44,18 +44,18 @@ module attributes {transform.with_named_sequence} {
         : (!transform.any_op) -> !transform.any_op
     %m5 = transform.apply_registered_pass "waveamd-insert-ticket-waits" to %m4
         : (!transform.any_op) -> !transform.any_op
-    %m6 = transform.apply_registered_pass "waveamd-insert-hazard-waits" to %m5
-        : (!transform.any_op) -> !transform.any_op
     %m7 = transform.apply_registered_pass "waveamd-reg-alloc" with
         options = { "mark-overflow" = true }
-        to %m6 : (!transform.any_op) -> !transform.any_op
+        to %m5 : (!transform.any_op) -> !transform.any_op
     %overflowed = wave.transform.get_int_attr
         "waveamdmachine.regalloc_overflowed_count" from %m7
         : (!transform.any_op) -> !transform.param<i64>
     %zero = transform.param.constant 0 : i64 -> !transform.param<i64>
     transform.match.param.cmpi eq %overflowed, %zero
         : !transform.param<i64>
-    %m8 = transform.apply_registered_pass "waveamd-resource-info" to %m7
+    %m8 = transform.apply_registered_pass "waveamd-insert-hazard-waits" to %m7
+        : (!transform.any_op) -> !transform.any_op
+    %m9 = transform.apply_registered_pass "waveamd-resource-info" to %m8
         : (!transform.any_op) -> !transform.any_op
     transform.yield
   }

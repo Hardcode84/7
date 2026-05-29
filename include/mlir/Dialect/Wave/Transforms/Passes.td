@@ -51,7 +51,15 @@ def WaveAMDABILowering
 
 def WaveAMDHazardWaits
     : Pass<"waveamd-insert-hazard-waits"> {
-  let summary = "Insert WaveAMDMachine waitcnt and hazard instructions";
+  let summary = "Insert WaveAMDMachine hazard mitigation instructions";
+  let description = [{
+    Inserts target hazard mitigation (`s_nop` / `s_delay_alu`) over
+    WaveAMDMachine IR. Intended placement is after ABI lowering,
+    ticket-wait insertion, and register allocation: ticket waits
+    materialize the `s_waitcnt` producers this pass reacts to, and
+    regalloc preparation may introduce VALU copies that must also be
+    checked.
+  }];
   let dependentDialects = [
     "waveamdmachine::WaveAMDMachineDialect"
   ];

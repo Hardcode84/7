@@ -1,6 +1,6 @@
 // RUN: wave-opt --waveamd-to-machine %s | FileCheck %s --check-prefix=SELECT
 // RUN: wave-opt --waveamd-to-machine %s | wave-opt | FileCheck %s --check-prefix=SELECT
-// RUN: wave-opt --waveamd-to-machine --waveamd-abi-lowering --waveamd-insert-hazard-waits --waveamd-reg-alloc --waveamd-resource-info --waveamd-metadata %s | FileCheck %s --check-prefix=PIPELINE
+// RUN: wave-opt --waveamd-to-machine --waveamd-abi-lowering --waveamd-reg-alloc --waveamd-insert-hazard-waits --waveamd-resource-info --waveamd-metadata %s | FileCheck %s --check-prefix=PIPELINE
 // RUN: wave-translate --wave-to-amdgpu-asm %s | FileCheck %s --check-prefix=ASM
 // RUN: wave-translate --wave-to-amdgpu-asm %s | llvm-mc -triple=amdgcn-amd-amdhsa -mcpu=gfx1100 -filetype=obj -o /dev/null
 

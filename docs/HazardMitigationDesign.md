@@ -6,12 +6,18 @@ and what the comparable upstream and aster designs look like.
 
 ## Where the pass sits
 
-The pass runs late in the WaveAMD lowering pipeline, after register
-allocation, after ABI lowering, and after ticket-wait insertion. It
-walks every `waveamdmachine` op in a flattened pre-order, including
-ops nested inside structured regions (`uniform_loop` body), and emits
-mitigation instructions (`s_nop`, `s_delay_alu`) before the consumers
-of each modeled hazard.
+The pass runs late in the WaveAMD lowering pipeline, after ABI
+lowering, ticket-wait insertion, and register allocation. Ticket
+waits must run first because this pass reacts to emitted
+`s_waitcnt`s. Register allocation must also run first because its
+preparation step can insert `v_mov_b32_tuple`, a VALU op that itself
+needs the LGKM-wait mitigation if it becomes the first VALU after an
+`s_waitcnt`.
+
+The pass walks every `waveamdmachine` op in a flattened pre-order,
+including ops nested inside structured regions (`uniform_loop` body),
+and emits mitigation instructions (`s_nop`, `s_delay_alu`) before the
+consumers of each modeled hazard.
 
 Three hazards are modeled today:
 

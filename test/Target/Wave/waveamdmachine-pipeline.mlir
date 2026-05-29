@@ -3,9 +3,9 @@
 // RUN: wave-opt --waveamd-to-machine --waveamd-abi-lowering %s | FileCheck %s --check-prefix=ABI
 // RUN: wave-opt --waveamd-to-machine --waveamd-abi-lowering --waveamd-insert-ticket-waits %s | FileCheck %s --check-prefix=TICKET
 // RUN: wave-opt --waveamd-to-machine --waveamd-abi-lowering --waveamd-insert-ticket-waits --waveamd-insert-hazard-waits %s | FileCheck %s --check-prefix=HAZARD
-// RUN: wave-opt --waveamd-to-machine --waveamd-abi-lowering --waveamd-insert-ticket-waits --waveamd-insert-hazard-waits --waveamd-reg-alloc %s | FileCheck %s --check-prefix=REGALLOC
-// RUN: wave-opt --waveamd-to-machine --waveamd-abi-lowering --waveamd-insert-ticket-waits --waveamd-insert-hazard-waits --waveamd-reg-alloc --waveamd-resource-info %s | FileCheck %s --check-prefix=RESOURCE
-// RUN: wave-opt --waveamd-to-machine --waveamd-abi-lowering --waveamd-insert-ticket-waits --waveamd-insert-hazard-waits --waveamd-reg-alloc --waveamd-resource-info --waveamd-metadata %s | FileCheck %s --check-prefix=METADATA
+// RUN: wave-opt --waveamd-to-machine --waveamd-abi-lowering --waveamd-insert-ticket-waits --waveamd-reg-alloc --waveamd-insert-hazard-waits %s | FileCheck %s --check-prefix=REGALLOC
+// RUN: wave-opt --waveamd-to-machine --waveamd-abi-lowering --waveamd-insert-ticket-waits --waveamd-reg-alloc --waveamd-insert-hazard-waits --waveamd-resource-info %s | FileCheck %s --check-prefix=RESOURCE
+// RUN: wave-opt --waveamd-to-machine --waveamd-abi-lowering --waveamd-insert-ticket-waits --waveamd-reg-alloc --waveamd-insert-hazard-waits --waveamd-resource-info --waveamd-metadata %s | FileCheck %s --check-prefix=METADATA
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 

@@ -1,7 +1,7 @@
 // RUN: wave-opt %s --waveamd-machine-schedule-report='print-candidates=1' --waveamd-machine-schedule='apply-schedule=1' 2>&1 | FileCheck %s --check-prefixes=DIAG,NOBEAM,APPLY
 // RUN: wave-opt %s --waveamd-machine-schedule-report='print-candidates=1 beam-search=1' 2>&1 | FileCheck %s --check-prefix=BEAM
 // RUN: wave-opt %s --waveamd-machine-schedule-report='print-candidates=1' | FileCheck %s --check-prefix=NOAPPLY
-// RUN: wave-opt %s --waveamd-machine-schedule='apply-schedule=1' --waveamd-insert-ticket-waits --waveamd-insert-hazard-waits --waveamd-reg-alloc | FileCheck %s --check-prefix=PIPE
+// RUN: wave-opt %s --waveamd-machine-schedule='apply-schedule=1' --waveamd-insert-ticket-waits --waveamd-reg-alloc --waveamd-insert-hazard-waits | FileCheck %s --check-prefix=PIPE
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 func.func @candidate_lower(%off: !waveamdmachine.reg<vgpr, 1>,
