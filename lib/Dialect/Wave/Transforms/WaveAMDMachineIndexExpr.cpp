@@ -472,6 +472,182 @@ LogicalResult bucketizeSummand(WaveAMDMachineSelector &S, ::ixs_node *term,
   return success();
 }
 
+struct AddressPlanAddend {
+  sym::ExprHandle expr;
+  TermKind kind = TermKind::Lane;
+  bool taken = false;
+};
+
+static bool isOneExpr(sym::ExprHandle expr) {
+  if (!expr)
+    return false;
+  ::ixs_node *node = const_cast<::ixs_node *>(expr.raw());
+  std::optional<int64_t> value = staticIntLiteral(node);
+  return value && *value == 1;
+}
+
+static bool isZeroExpr(sym::ExprHandle expr) {
+  if (!expr)
+    return true;
+  ::ixs_node *node = const_cast<::ixs_node *>(expr.raw());
+  std::optional<int64_t> value = staticIntLiteral(node);
+  return value && *value == 0;
+}
+
+static bool instOffsetFits(int64_t value,
+                           const waveamdmachine::AddressFieldSpec &spec) {
+  std::pair<int64_t, int64_t> range = waveamdmachine::instOffsetRange(spec);
+  return value >= range.first && value <= range.second;
+}
+
+static FailureOr<sym::ExprHandle>
+simplifyPlanExpr(WaveAMDMachineSelector &S, sym::ExprHandle expr,
+                 ArrayRef<sym::PredHandle> assumptions) {
+  FailureOr<sym::ExprHandle> simplified =
+      sym::simplifyExpr(S.symbolStore(), expr, assumptions);
+  if (succeeded(simplified))
+    return *simplified;
+  return expr;
+}
+
+static FailureOr<sym::ExprHandle>
+scalePlanAddend(WaveAMDMachineSelector &S, ::ixs_node *term,
+                ::ixs_node *termCoeff, ArrayRef<sym::PredHandle> assumptions) {
+  sym::ExprHandle termExpr(term);
+  if (!termCoeff || isOneExpr(sym::ExprHandle(termCoeff)))
+    return simplifyPlanExpr(S, termExpr, assumptions);
+  FailureOr<sym::ExprHandle> scaled =
+      sym::composeExprBinary(S.symbolStore(), sym::ExprHandle(termCoeff),
+                             sym::ExprBinaryOp::Mul, termExpr);
+  if (failed(scaled))
+    return failure();
+  return simplifyPlanExpr(S, *scaled, assumptions);
+}
+
+static LogicalResult appendPlanExpr(WaveAMDMachineSelector &S,
+                                    sym::ExprHandle add,
+                                    ArrayRef<sym::PredHandle> assumptions,
+                                    sym::ExprHandle &acc) {
+  if (isZeroExpr(add))
+    return success();
+  if (!acc) {
+    acc = add;
+    return success();
+  }
+  FailureOr<sym::ExprHandle> joined =
+      sym::composeExprBinary(S.symbolStore(), acc, sym::ExprBinaryOp::Add, add);
+  if (failed(joined))
+    return failure();
+  FailureOr<sym::ExprHandle> simplified =
+      simplifyPlanExpr(S, *joined, assumptions);
+  if (failed(simplified))
+    return failure();
+  acc = *simplified;
+  return success();
+}
+
+static TermKind
+classifyScaledAddend(WaveAMDMachineSelector &S, ::ixs_node *term,
+                     ::ixs_node *termCoeff,
+                     const llvm::StringMap<TermKind> &symKinds) {
+  TermKind kind = classifyTerm(S, term, symKinds);
+  if (termCoeff)
+    kind = std::max(kind, classifyTerm(S, termCoeff, symKinds));
+  return kind;
+}
+
+static LogicalResult
+collectPlanAddend(WaveAMDMachineSelector &S, ::ixs_node *term,
+                  ::ixs_node *termCoeff,
+                  const llvm::StringMap<TermKind> &symKinds,
+                  ArrayRef<sym::PredHandle> assumptions,
+                  SmallVectorImpl<AddressPlanAddend> &addends) {
+  FailureOr<sym::ExprHandle> scaled =
+      scalePlanAddend(S, term, termCoeff, assumptions);
+  if (failed(scaled))
+    return failure();
+  if (isZeroExpr(*scaled))
+    return success();
+  addends.push_back(
+      {*scaled, classifyScaledAddend(S, term, termCoeff, symKinds), false});
+  return success();
+}
+
+static LogicalResult
+collectPlanAddends(WaveAMDMachineSelector &S, ::ixs_node *node,
+                   const llvm::StringMap<TermKind> &symKinds,
+                   ArrayRef<sym::PredHandle> assumptions,
+                   SmallVectorImpl<AddressPlanAddend> &addends) {
+  if (ixs_node_tag(node) != IXS_ADD)
+    return collectPlanAddend(S, node, /*termCoeff=*/nullptr, symKinds,
+                             assumptions, addends);
+  sym::ExprHandle coeff(ixs_node_add_coeff(node));
+  if (!isZeroExpr(coeff))
+    addends.push_back({coeff, TermKind::Const, false});
+  uint32_t nterms = ixs_node_add_nterms(node);
+  for (uint32_t i = 0; i < nterms; ++i) {
+    if (failed(collectPlanAddend(S, ixs_node_add_term(node, i),
+                                 ixs_node_add_term_coeff(node, i), symKinds,
+                                 assumptions, addends)))
+      return failure();
+  }
+  return success();
+}
+
+static LogicalResult takeInstOffsetAddends(
+    WaveAMDMachineSelector &S, const waveamdmachine::AddressFieldSpec &spec,
+    SmallVectorImpl<AddressPlanAddend> &addends, AddressPlan &plan) {
+  for (AddressPlanAddend &addend : addends) {
+    if (addend.taken || addend.kind != TermKind::Const)
+      continue;
+    ::ixs_node *node = const_cast<::ixs_node *>(addend.expr.raw());
+    std::optional<int64_t> value = evalConstantNode(S, node);
+    std::optional<int64_t> next =
+        value ? llvm::checkedAdd(plan.instOffset, *value) : std::nullopt;
+    if (next && instOffsetFits(*next, spec)) {
+      plan.instOffset = *next;
+      addend.taken = true;
+      continue;
+    }
+    if (failed(appendPlanExpr(S, addend.expr, plan.assumptions,
+                              plan.fullAddressRemainderExpr)))
+      return failure();
+    addend.taken = true;
+  }
+  return success();
+}
+
+static void takeFirstPlanSlot(WaveAMDMachineSelector &S, TermKind kind,
+                              SmallVectorImpl<AddressPlanAddend> &addends,
+                              AddressPlan &plan, sym::ExprHandle &slotExpr) {
+  if (slotExpr)
+    return;
+  for (AddressPlanAddend &addend : addends) {
+    if (addend.taken || addend.kind != kind)
+      continue;
+    if (!S.slotFitsU32(addend.expr.raw(), plan.assumptions))
+      continue;
+    slotExpr = addend.expr;
+    addend.taken = true;
+    return;
+  }
+}
+
+static LogicalResult
+appendRemainingAddends(WaveAMDMachineSelector &S,
+                       SmallVectorImpl<AddressPlanAddend> &addends,
+                       AddressPlan &plan) {
+  for (AddressPlanAddend &addend : addends) {
+    if (addend.taken)
+      continue;
+    if (failed(appendPlanExpr(S, addend.expr, plan.assumptions,
+                              plan.fullAddressRemainderExpr)))
+      return failure();
+    addend.taken = true;
+  }
+  return success();
+}
+
 } // namespace
 
 // ---- public surface (declared in WaveAMDMachineSelector.h) ----------------
@@ -581,6 +757,33 @@ std::optional<int64_t> evalConstantNode(WaveAMDMachineSelector &S,
   default:
     return std::nullopt;
   }
+}
+
+FailureOr<AddressPlan>
+planAddressFields(WaveAMDMachineSelector &S, const PointerOffset &offset,
+                  const waveamdmachine::AddressFieldSpec &spec) {
+  AddressPlan plan;
+  plan.bindings = offset.bindings;
+  plan.assumptions = offset.assumptions;
+  if (!offset.expr)
+    return plan;
+
+  llvm::StringMap<TermKind> symKinds;
+  for (const PointerOffsetBinding &binding : offset.bindings)
+    symKinds[binding.name] = binding.kind;
+
+  SmallVector<AddressPlanAddend, 8> addends;
+  ::ixs_node *node = const_cast<::ixs_node *>(offset.expr.raw());
+  if (failed(collectPlanAddends(S, node, symKinds, plan.assumptions, addends)))
+    return failure();
+  if (failed(takeInstOffsetAddends(S, spec, addends, plan)))
+    return failure();
+  if (spec.hasSoffset)
+    takeFirstPlanSlot(S, TermKind::Uniform, addends, plan, plan.soffsetExpr);
+  takeFirstPlanSlot(S, TermKind::Lane, addends, plan, plan.voffsetExpr);
+  if (failed(appendRemainingAddends(S, addends, plan)))
+    return failure();
+  return plan;
 }
 
 // Bucketize each top-level summand of `node` into `triple`. ADD

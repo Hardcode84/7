@@ -200,6 +200,10 @@ std::optional<int64_t> evalConstantNode(WaveAMDMachineSelector &S,
 
 std::optional<int64_t> collectDenominator(::ixs_node *node);
 
+FailureOr<AddressPlan>
+planAddressFields(WaveAMDMachineSelector &S, const PointerOffset &offset,
+                  const mlir::waveamdmachine::AddressFieldSpec &spec);
+
 LogicalResult bucketize(WaveAMDMachineSelector &S, ::ixs_node *node,
                         Operation *user, const llvm::StringMap<Value> &subs,
                         const llvm::StringMap<TermKind> &symKinds,
