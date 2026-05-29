@@ -33,6 +33,7 @@
 #include "llvm/ADT/StringMap.h"
 #include "llvm/ADT/StringSwitch.h"
 #include "llvm/ADT/TypeSwitch.h"
+#include "llvm/Support/CheckedArithmetic.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/MathExtras.h"
 #include "llvm/TargetParser/TargetParser.h"
@@ -328,44 +329,90 @@ static void scaleTripleExprs(WaveAMDMachineSelector &S, OffsetTriple &out,
   out.fullExpr = S.scaleBucketExpr(t.fullExpr, sizeExpr->raw());
 }
 
+static std::optional<int64_t> checkedAddImm(std::optional<int64_t> lhs,
+                                            std::optional<int64_t> rhs) {
+  if (!lhs || !rhs)
+    return std::nullopt;
+  return llvm::checkedAdd(*lhs, *rhs);
+}
+
+static std::optional<int64_t> checkedMulImm(std::optional<int64_t> lhs,
+                                            std::optional<int64_t> rhs) {
+  if (!lhs || !rhs)
+    return std::nullopt;
+  return llvm::checkedMul(*lhs, *rhs);
+}
+
+static FailureOr<Value> scaleVOffset(WaveAMDMachineSelector &S, Location loc,
+                                     Value value, unsigned size) {
+  if (!value)
+    return Value{};
+  std::optional<int64_t> imm = S.getImmediateValue(value);
+  if (imm) {
+    std::optional<int64_t> scaled =
+        llvm::checkedMul(*imm, static_cast<int64_t>(size));
+    if (!scaled)
+      return failure();
+    return createImm(S.builder, loc, *scaled);
+  }
+  Type vgprType =
+      getRegType(S.builder.getContext(), waveamdmachine::RegClass::VGPR);
+  if ((size & (size - 1)) == 0)
+    return waveamdmachine::VLshlrevB32Op::create(
+               S.builder, loc, vgprType, value,
+               createImm(S.builder, loc, llvm::Log2_32(size)))
+        .getResult();
+  return waveamdmachine::VMulLoU32Op::create(S.builder, loc, vgprType, value,
+                                             createImm(S.builder, loc, size))
+      .getResult();
+}
+
+static FailureOr<Value> scaleSOffset(WaveAMDMachineSelector &S, Location loc,
+                                     Value value, unsigned size) {
+  if (!value)
+    return Value{};
+  std::optional<int64_t> imm = S.getImmediateValue(value);
+  if (imm) {
+    std::optional<int64_t> scaled =
+        llvm::checkedMul(*imm, static_cast<int64_t>(size));
+    if (!scaled)
+      return failure();
+    return createImm(S.builder, loc, *scaled);
+  }
+  Type sgprType =
+      getRegType(S.builder.getContext(), waveamdmachine::RegClass::SGPR);
+  if ((size & (size - 1)) == 0)
+    return waveamdmachine::SLshlB32Op::create(
+               S.builder, loc, sgprType, getSCCType(S.builder.getContext()),
+               value, createImm(S.builder, loc, llvm::Log2_32(size)))
+        .getResult();
+  return waveamdmachine::SMulI32Op::create(
+             S.builder, loc, sgprType, createImm(S.builder, loc, size), value)
+      .getResult();
+}
+
 // Multiply each slot of `t` by `size`. Used by selectPtrAdd to
 // convert element offsets into byte offsets without losing the
 // V / S / inst split. Power-of-two `size` lowers to shifts; the
 // imm fast paths in the V / S adders fold size==1 / instOffset==0
 // upstream.
-OffsetTriple WaveAMDMachineSelector::scaleTriple(Location loc, OffsetTriple t,
-                                                 unsigned size) {
+FailureOr<OffsetTriple> WaveAMDMachineSelector::scaleTriple(Location loc,
+                                                            OffsetTriple t,
+                                                            unsigned size) {
   if (size == 1)
     return t;
   OffsetTriple out;
-  out.instOffset = t.instOffset * static_cast<int64_t>(size);
-  Type vgprType =
-      getRegType(builder.getContext(), waveamdmachine::RegClass::VGPR);
-  Type sgprType =
-      getRegType(builder.getContext(), waveamdmachine::RegClass::SGPR);
-  if (t.voffset) {
-    if (std::optional<int64_t> imm = getImmediateValue(t.voffset)) {
-      out.voffset = createImm(builder, loc, *imm * size);
-    } else {
-      out.voffset = waveamdmachine::VLshlrevB32Op::create(
-          builder, loc, vgprType, t.voffset,
-          createImm(builder, loc, llvm::Log2_32(size)));
-    }
-  }
-  if (t.soffset) {
-    if (std::optional<int64_t> imm = getImmediateValue(t.soffset)) {
-      out.soffset = createImm(builder, loc, *imm * size);
-    } else if ((size & (size - 1)) == 0) {
-      out.soffset =
-          waveamdmachine::SLshlB32Op::create(
-              builder, loc, sgprType, getSCCType(builder.getContext()),
-              t.soffset, createImm(builder, loc, llvm::Log2_32(size)))
-              .getResult();
-    } else {
-      out.soffset = waveamdmachine::SMulI32Op::create(
-          builder, loc, sgprType, createImm(builder, loc, size), t.soffset);
-    }
-  }
+  std::optional<int64_t> instOffset =
+      llvm::checkedMul(t.instOffset, static_cast<int64_t>(size));
+  if (!instOffset)
+    return failure();
+  out.instOffset = *instOffset;
+  FailureOr<Value> voffset = scaleVOffset(*this, loc, t.voffset, size);
+  FailureOr<Value> soffset = scaleSOffset(*this, loc, t.soffset, size);
+  if (failed(voffset) || failed(soffset))
+    return failure();
+  out.voffset = *voffset;
+  out.soffset = *soffset;
   // Scale the symbolic forms too so the emit-time width check sees
   // the final byte-offset range, not the pre-scale element range.
   scaleTripleExprs(*this, out, t, size);
@@ -853,8 +900,9 @@ WaveAMDMachineSelector::scaleBucketExpr(const ::ixs_node *value,
 // natural class (V/S/imm) instead of forcing through a VGPR add.
 // Symbolic forms and the assumption set merge alongside the Values
 // so the emit-time width check sees the full picture.
-OffsetTriple WaveAMDMachineSelector::mergeTriples(Location loc, OffsetTriple a,
-                                                  OffsetTriple b) {
+FailureOr<OffsetTriple> WaveAMDMachineSelector::mergeTriples(Location loc,
+                                                             OffsetTriple a,
+                                                             OffsetTriple b) {
   OffsetTriple out;
   out.voffset = !a.voffset   ? b.voffset
                 : !b.voffset ? a.voffset
@@ -862,7 +910,11 @@ OffsetTriple WaveAMDMachineSelector::mergeTriples(Location loc, OffsetTriple a,
   out.soffset = !a.soffset   ? b.soffset
                 : !b.soffset ? a.soffset
                              : addUniformBytes(loc, a.soffset, b.soffset);
-  out.instOffset = a.instOffset + b.instOffset;
+  std::optional<int64_t> instOffset =
+      llvm::checkedAdd(a.instOffset, b.instOffset);
+  if (!instOffset)
+    return failure();
+  out.instOffset = *instOffset;
   out.voffsetExpr = appendBucketExpr(a.voffsetExpr, b.voffsetExpr);
   out.soffsetExpr = appendBucketExpr(a.soffsetExpr, b.soffsetExpr);
   out.fullExpr = appendBucketExpr(a.fullExpr, b.fullExpr);
@@ -1701,8 +1753,8 @@ Value WaveAMDMachineSelector::addByteOffsets(Location loc, Value lhs,
                                              Value rhs) {
   std::optional<int64_t> lhsImm = getImmediateValue(lhs);
   std::optional<int64_t> rhsImm = getImmediateValue(rhs);
-  if (lhsImm && rhsImm)
-    return createImm(builder, loc, *lhsImm + *rhsImm);
+  if (std::optional<int64_t> sum = checkedAddImm(lhsImm, rhsImm))
+    return createImm(builder, loc, *sum);
   if (lhsImm && *lhsImm == 0)
     return rhs;
   if (rhsImm && *rhsImm == 0)
@@ -1725,8 +1777,8 @@ Value WaveAMDMachineSelector::addByteOffsets(Location loc, Value lhs,
 std::optional<Value>
 WaveAMDMachineSelector::foldImmMul(Location loc, std::optional<int64_t> lhsImm,
                                    std::optional<int64_t> rhsImm) {
-  if (lhsImm && rhsImm)
-    return createImm(builder, loc, *lhsImm * *rhsImm);
+  if (std::optional<int64_t> product = checkedMulImm(lhsImm, rhsImm))
+    return createImm(builder, loc, *product);
   if ((lhsImm && *lhsImm == 0) || (rhsImm && *rhsImm == 0))
     return createImm(builder, loc, 0);
   return std::nullopt;
@@ -1742,6 +1794,8 @@ Value WaveAMDMachineSelector::mulIndexValues(Location loc, Value lhs,
     return rhs;
   if (rhsImm && *rhsImm == 1)
     return lhs;
+  if (isImm(lhs) && isImm(rhs))
+    rhs = ensureVGPRForVSrc1(loc, rhs);
   // v_mul_lo_u32 is VOP3, so SGPR/literal in either slot is legal.
   return waveamdmachine::VMulLoU32Op::create(
       builder, loc,
@@ -1784,6 +1838,8 @@ Value WaveAMDMachineSelector::mulUniformValues(Location loc, Value lhs,
     return lhs;
   if (Value shifted = tryLshlPow2(loc, lhsImm, lhs, rhsImm, rhs))
     return shifted;
+  if (isImm(lhs) && isImm(rhs))
+    lhs = materializeSGPR1(loc, lhs);
   return waveamdmachine::SMulI32Op::create(
       builder, loc,
       getRegType(builder.getContext(), waveamdmachine::RegClass::SGPR), lhs,
@@ -1851,8 +1907,8 @@ bool WaveAMDMachineSelector::isUniformValue(Value v) {
 Value WaveAMDMachineSelector::foldImmAdd(Location loc, Value lhs, Value rhs) {
   std::optional<int64_t> lhsImm = getImmediateValue(lhs);
   std::optional<int64_t> rhsImm = getImmediateValue(rhs);
-  if (lhsImm && rhsImm)
-    return createImm(builder, loc, *lhsImm + *rhsImm);
+  if (std::optional<int64_t> sum = checkedAddImm(lhsImm, rhsImm))
+    return createImm(builder, loc, *sum);
   if (lhsImm && *lhsImm == 0)
     return rhs;
   if (rhsImm && *rhsImm == 0)
@@ -1871,7 +1927,9 @@ Value WaveAMDMachineSelector::addUniformBytes(Location loc, Value acc,
     return acc;
   if (Value folded = foldImmAdd(loc, acc, add))
     return folded;
-  if (isImm(acc) && !isImm(add))
+  if (isImm(acc) && isImm(add))
+    acc = materializeSGPR1(loc, acc);
+  else if (isImm(acc))
     std::swap(acc, add);
   auto sum = waveamdmachine::SAddI32Op::create(
       builder, loc,
@@ -1939,13 +1997,18 @@ LogicalResult WaveAMDMachineSelector::selectPtrAdd(PtrAddOp op) {
     offsetTriple.voffset = offset;
   }
   unsigned size = elementSizeBytes(op.getBase().getType());
-  OffsetTriple scaled = scaleTriple(op.getLoc(), offsetTriple, size);
-  OffsetTriple merged = mergeTriples(op.getLoc(), baseTriple, scaled);
+  FailureOr<OffsetTriple> scaled = scaleTriple(op.getLoc(), offsetTriple, size);
+  if (failed(scaled))
+    return op.emitError("pointer offset byte scale overflows i64");
+  FailureOr<OffsetTriple> merged =
+      mergeTriples(op.getLoc(), baseTriple, *scaled);
+  if (failed(merged))
+    return op.emitError("pointer offset accumulation overflows i64");
 
   pointerBases[op.getResult()] = baseValue;
   if (globalBase)
     pointerGlobalBases[op.getResult()] = globalBase;
-  pointerOffsets[op.getResult()] = merged;
+  pointerOffsets[op.getResult()] = *merged;
   pointerBuffers[op.getResult()] = pointerBuffers.lookup(op.getBase());
   values[op.getResult()] = baseValue;
   eraseIfTopLevel(op);

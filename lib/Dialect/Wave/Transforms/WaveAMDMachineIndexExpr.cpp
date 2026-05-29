@@ -20,8 +20,10 @@
 
 #include "WaveAMDMachineSelector.h"
 
+#include "llvm/Support/CheckedArithmetic.h"
 #include "llvm/Support/MathExtras.h"
 
+#include <limits>
 #include <numeric>
 #include <optional>
 
@@ -48,14 +50,37 @@ std::optional<int64_t> staticIntLiteral(::ixs_node *node) {
   }
 }
 
-// floor(p/q) with truncation toward negative infinity.
-int64_t floorDiv(int64_t p, int64_t q) {
-  return p >= 0 ? p / q : -((-p + q - 1) / q);
+static std::optional<int64_t> checkedLCM(std::optional<int64_t> lhs,
+                                         std::optional<int64_t> rhs) {
+  if (!lhs || !rhs)
+    return std::nullopt;
+  int64_t gcd = std::gcd(*lhs, *rhs);
+  return llvm::checkedMul(*lhs / gcd, *rhs);
 }
 
-// ceil(p/q) with truncation away from zero.
-int64_t ceilDiv(int64_t p, int64_t q) {
-  return p >= 0 ? (p + q - 1) / q : -(-p / q);
+static bool divOverflows(int64_t p, int64_t q) {
+  return q == 0 ||
+         (p == std::numeric_limits<int64_t>::min() && q == int64_t{-1});
+}
+
+static std::optional<int64_t> floorDiv(int64_t p, int64_t q) {
+  if (divOverflows(p, q))
+    return std::nullopt;
+  int64_t div = p / q;
+  int64_t rem = p % q;
+  if (rem == 0 || (rem < 0) == (q < 0))
+    return div;
+  return llvm::checkedSub(div, int64_t{1});
+}
+
+static std::optional<int64_t> ceilDiv(int64_t p, int64_t q) {
+  if (divOverflows(p, q))
+    return std::nullopt;
+  int64_t div = p / q;
+  int64_t rem = p % q;
+  if (rem == 0 || (rem < 0) != (q < 0))
+    return div;
+  return llvm::checkedAdd(div, int64_t{1});
 }
 
 FailureOr<Value> materializeIxsRat(WaveAMDMachineSelector &S, ::ixs_node *node,
@@ -199,17 +224,20 @@ FailureOr<Value> materializeIxsFloor(WaveAMDMachineSelector &S,
                                      ::ixs_node *node, Operation *user,
                                      const llvm::StringMap<Value> &subs) {
   ::ixs_node *child = ixs_node_unary_arg(node);
-  int64_t den = collectDenominator(child);
-  if (den == 1)
+  std::optional<int64_t> den = collectDenominator(child);
+  if (!den)
+    return user->emitError("wave.index_expr denominator overflows i64");
+  if (*den == 1)
     return materializeIndexExprNode(S, child, user, subs);
-  if (den <= 0 || (den & (den - 1)) != 0)
+  if (*den <= 0 || (*den & (*den - 1)) != 0)
     return user->emitError(
                "wave.index_expr floor needs a power-of-two denominator (got ")
-           << den << ")";
-  FailureOr<Value> scaled = materializeScaledInteger(S, child, den, user, subs);
+           << *den << ")";
+  FailureOr<Value> scaled =
+      materializeScaledInteger(S, child, *den, user, subs);
   if (failed(scaled))
     return failure();
-  return S.shrPow2(user->getLoc(), *scaled, llvm::Log2_64(den));
+  return S.shrPow2(user->getLoc(), *scaled, llvm::Log2_64(*den));
 }
 
 // ceil(expr) on positive divisors via the (x + d - 1) // d identity.
@@ -217,19 +245,22 @@ FailureOr<Value> materializeIxsCeil(WaveAMDMachineSelector &S, ::ixs_node *node,
                                     Operation *user,
                                     const llvm::StringMap<Value> &subs) {
   ::ixs_node *child = ixs_node_unary_arg(node);
-  int64_t den = collectDenominator(child);
-  if (den == 1)
+  std::optional<int64_t> den = collectDenominator(child);
+  if (!den)
+    return user->emitError("wave.index_expr denominator overflows i64");
+  if (*den == 1)
     return materializeIndexExprNode(S, child, user, subs);
-  if (den <= 0 || (den & (den - 1)) != 0)
+  if (*den <= 0 || (*den & (*den - 1)) != 0)
     return user->emitError(
                "wave.index_expr ceil needs a power-of-two denominator (got ")
-           << den << ")";
-  FailureOr<Value> scaled = materializeScaledInteger(S, child, den, user, subs);
+           << *den << ")";
+  FailureOr<Value> scaled =
+      materializeScaledInteger(S, child, *den, user, subs);
   if (failed(scaled))
     return failure();
-  Value bias = createImm(S.builder, user->getLoc(), den - 1);
+  Value bias = createImm(S.builder, user->getLoc(), *den - 1);
   Value biased = S.addByteOffsets(user->getLoc(), *scaled, bias);
-  return S.shrPow2(user->getLoc(), biased, llvm::Log2_64(den));
+  return S.shrPow2(user->getLoc(), biased, llvm::Log2_64(*den));
 }
 
 // mod(lhs, rhs). Only power-of-two `rhs` is supported: the modulus is
@@ -280,7 +311,9 @@ std::optional<int64_t> evalConstantAdd(WaveAMDMachineSelector &S,
     std::optional<int64_t> t = evalConstantNode(S, ixs_node_add_term(node, i));
     if (!tc || !t)
       return std::nullopt;
-    *acc += *tc * *t;
+    acc = llvm::checkedMulAdd(*tc, *t, *acc);
+    if (!acc)
+      return std::nullopt;
   }
   return acc;
 }
@@ -300,9 +333,15 @@ std::optional<int64_t> evalConstantMul(WaveAMDMachineSelector &S,
     if (!base)
       return std::nullopt;
     int64_t pow = 1;
-    for (int32_t e = 0; e < exp; ++e)
-      pow *= *base;
-    *acc *= pow;
+    for (int32_t e = 0; e < exp; ++e) {
+      std::optional<int64_t> next = llvm::checkedMul(pow, *base);
+      if (!next)
+        return std::nullopt;
+      pow = *next;
+    }
+    acc = llvm::checkedMul(*acc, pow);
+    if (!acc)
+      return std::nullopt;
   }
   return acc;
 }
@@ -312,10 +351,10 @@ std::optional<int64_t> evalConstantMul(WaveAMDMachineSelector &S,
 std::optional<int64_t> evalConstantFloorOrCeil(WaveAMDMachineSelector &S,
                                                ::ixs_node *node) {
   ::ixs_node *child = ixs_node_unary_arg(node);
-  int64_t den = collectDenominator(child);
-  if (den <= 0)
+  std::optional<int64_t> den = collectDenominator(child);
+  if (!den || *den <= 0)
     return std::nullopt;
-  auto factor = sym::composeExprInt(S.symbolStore(), den);
+  auto factor = sym::composeExprInt(S.symbolStore(), *den);
   if (failed(factor))
     return std::nullopt;
   auto scaled = sym::composeExprBinary(S.symbolStore(), sym::ExprHandle(child),
@@ -326,15 +365,15 @@ std::optional<int64_t> evalConstantFloorOrCeil(WaveAMDMachineSelector &S,
       evalConstantNode(S, const_cast<::ixs_node *>(scaled->raw()));
   if (!num)
     return std::nullopt;
-  return ixs_node_tag(node) == IXS_FLOOR ? floorDiv(*num, den)
-                                         : ceilDiv(*num, den);
+  return ixs_node_tag(node) == IXS_FLOOR ? floorDiv(*num, *den)
+                                         : ceilDiv(*num, *den);
 }
 
 std::optional<int64_t> evalConstantMod(WaveAMDMachineSelector &S,
                                        ::ixs_node *node) {
   std::optional<int64_t> lhs = evalConstantNode(S, ixs_node_binary_lhs(node));
   std::optional<int64_t> rhs = evalConstantNode(S, ixs_node_binary_rhs(node));
-  if (!lhs || !rhs || *rhs == 0)
+  if (!lhs || !rhs || divOverflows(*lhs, *rhs))
     return std::nullopt;
   int64_t r = *lhs % *rhs;
   if (r != 0 && (r < 0) != (*rhs < 0))
@@ -368,17 +407,23 @@ FailureOr<Value> materializeSummand(WaveAMDMachineSelector &S, ::ixs_node *term,
 }
 
 // Literal-fold fast path for a Const-kind summand.
-bool tryConstFoldSummand(WaveAMDMachineSelector &S, ::ixs_node *term,
-                         ::ixs_node *termCoeff, TermKind kind,
-                         OffsetTriple &triple) {
+FailureOr<bool> tryConstFoldSummand(WaveAMDMachineSelector &S, ::ixs_node *term,
+                                    ::ixs_node *termCoeff, TermKind kind,
+                                    Operation *user, OffsetTriple &triple) {
   if (kind != TermKind::Const)
     return false;
   std::optional<int64_t> termInt = evalConstantNode(S, term);
   std::optional<int64_t> coeffInt =
       termCoeff ? staticIntLiteral(termCoeff) : std::optional<int64_t>{1};
   if (!termInt || !coeffInt)
-    return false;
-  triple.instOffset += *coeffInt * *termInt;
+    return user->emitError(
+        "wave.index_expr constant summand is not representable as i64");
+  std::optional<int64_t> folded =
+      llvm::checkedMulAdd(*coeffInt, *termInt, triple.instOffset);
+  if (!folded)
+    return user->emitError(
+        "wave.index_expr constant summand is not representable as i64");
+  triple.instOffset = *folded;
   return true;
 }
 
@@ -396,14 +441,21 @@ LogicalResult bucketizeSummand(WaveAMDMachineSelector &S, ::ixs_node *term,
   TermKind kind = classifyTerm(S, term, symKinds);
   if (termCoeff)
     kind = std::max(kind, classifyTerm(S, termCoeff, symKinds));
-  if (tryConstFoldSummand(S, term, termCoeff, kind, triple))
+  FailureOr<bool> constFolded =
+      tryConstFoldSummand(S, term, termCoeff, kind, user, triple);
+  if (failed(constFolded))
+    return failure();
+  if (*constFolded)
     return success();
   FailureOr<Value> summand = materializeSummand(
       S, term, termCoeff, user, subs, /*uniform=*/kind == TermKind::Uniform);
   if (failed(summand))
     return failure();
   if (std::optional<int64_t> imm = S.getImmediateValue(*summand)) {
-    triple.instOffset += *imm;
+    std::optional<int64_t> sum = llvm::checkedAdd(triple.instOffset, *imm);
+    if (!sum)
+      return user->emitError("wave.index_expr constant offset overflows i64");
+    triple.instOffset = *sum;
     return success();
   }
   const ::ixs_node *summandExpr = S.scaleBucketExpr(term, termCoeff);
@@ -424,26 +476,26 @@ LogicalResult bucketizeSummand(WaveAMDMachineSelector &S, ::ixs_node *term,
 
 // ---- public surface (declared in WaveAMDMachineSelector.h) ----------------
 
-int64_t collectDenominator(::ixs_node *node) {
+std::optional<int64_t> collectDenominator(::ixs_node *node) {
   switch (ixs_node_tag(node)) {
   case IXS_RAT: {
     int64_t den = ixs_node_rat_den(node);
     return den > 0 ? den : 1;
   }
   case IXS_ADD: {
-    int64_t d = collectDenominator(ixs_node_add_coeff(node));
+    std::optional<int64_t> d = collectDenominator(ixs_node_add_coeff(node));
     uint32_t n = ixs_node_add_nterms(node);
     for (uint32_t i = 0; i < n; ++i) {
-      d = std::lcm(d, collectDenominator(ixs_node_add_term_coeff(node, i)));
-      d = std::lcm(d, collectDenominator(ixs_node_add_term(node, i)));
+      d = checkedLCM(d, collectDenominator(ixs_node_add_term_coeff(node, i)));
+      d = checkedLCM(d, collectDenominator(ixs_node_add_term(node, i)));
     }
     return d;
   }
   case IXS_MUL: {
-    int64_t d = collectDenominator(ixs_node_mul_coeff(node));
+    std::optional<int64_t> d = collectDenominator(ixs_node_mul_coeff(node));
     uint32_t n = ixs_node_mul_nfactors(node);
     for (uint32_t i = 0; i < n; ++i)
-      d = std::lcm(d, collectDenominator(ixs_node_mul_factor_base(node, i)));
+      d = checkedLCM(d, collectDenominator(ixs_node_mul_factor_base(node, i)));
     return d;
   }
   default:
@@ -546,7 +598,11 @@ LogicalResult bucketize(WaveAMDMachineSelector &S, ::ixs_node *node,
   if (!coeffInt)
     return user->emitError(
         "wave.index_expr bucketizer expects an integer ADD coefficient");
-  triple.instOffset += *coeffInt;
+  std::optional<int64_t> instOffset =
+      llvm::checkedAdd(triple.instOffset, *coeffInt);
+  if (!instOffset)
+    return user->emitError("wave.index_expr constant offset overflows i64");
+  triple.instOffset = *instOffset;
   uint32_t nterms = ixs_node_add_nterms(node);
   for (uint32_t i = 0; i < nterms; ++i) {
     ::ixs_node *termCoeff = ixs_node_add_term_coeff(node, i);

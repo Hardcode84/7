@@ -90,3 +90,15 @@ func.func @kernel_return_value(%x: i32) -> i32 attributes {wave.kernel} {
   // expected-error @below {{kernel functions must return void}}
   return %x : i32
 }
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
+func.func @index_expr_byte_scale_overflow(%out: !wave.ptr<i32, #wave.global>) attributes {wave.kernel} {
+  %lane = wave.lane_id : !wave.simd<i32, 32>
+  %off = wave.index_expr <"4611686018427387904 + lid"> ["lid"] (%lane) : (!wave.simd<i32, 32>) -> !wave.index<32>
+  // expected-error @below {{pointer offset byte scale overflows i64}}
+  %ptrs = wave.ptr_add %out, %off : !wave.ptr<i32, #wave.global>, !wave.index<32> -> !wave.simd<!wave.ptr<i32, #wave.global>, 32>
+  return
+}
+}

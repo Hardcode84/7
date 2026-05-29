@@ -172,7 +172,7 @@ TermKind classifyTerm(WaveAMDMachineSelector &S, ::ixs_node *node,
 std::optional<int64_t> evalConstantNode(WaveAMDMachineSelector &S,
                                         ::ixs_node *node);
 
-int64_t collectDenominator(::ixs_node *node);
+std::optional<int64_t> collectDenominator(::ixs_node *node);
 
 LogicalResult bucketize(WaveAMDMachineSelector &S, ::ixs_node *node,
                         Operation *user, const llvm::StringMap<Value> &subs,
@@ -224,8 +224,10 @@ public:
   std::optional<sym::PredHandle> bindingAssumption(Value binding,
                                                    StringRef name);
   Value collapseTriple(Location loc, const OffsetTriple &t);
-  OffsetTriple scaleTriple(Location loc, OffsetTriple t, unsigned size);
-  OffsetTriple mergeTriples(Location loc, OffsetTriple a, OffsetTriple b);
+  FailureOr<OffsetTriple> scaleTriple(Location loc, OffsetTriple t,
+                                      unsigned size);
+  FailureOr<OffsetTriple> mergeTriples(Location loc, OffsetTriple a,
+                                       OffsetTriple b);
   sym::Store &symbolStore();
   bool slotFitsU32(const ::ixs_node *expr,
                    ArrayRef<sym::PredHandle> assumptions);
