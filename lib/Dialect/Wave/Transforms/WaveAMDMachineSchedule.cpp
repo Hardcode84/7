@@ -24,6 +24,8 @@
 #include "mlir/Dialect/WaveAMDMachine/CostModel/EventSimulator.h"
 #include "mlir/IR/BuiltinOps.h"
 
+#include <optional>
+
 namespace mlir::wave {
 #define GEN_PASS_DEF_WAVEAMDMACHINESCHEDULE
 #include "mlir/Dialect/Wave/Transforms/Passes.h.inc"
@@ -85,29 +87,39 @@ struct WaveAMDMachineSchedulePass
     if (failed(wave::prepareWaveAMDRegAllocIR(func)))
       return failure();
     SmallVector<ScheduleRegion> regions = collectScheduleRegions(func);
+    PressureEvaluation pressureEvaluation =
+        getSchedulePressureEvaluation(pressureBudgets);
+    std::optional<SchedulePressureContext> pressureContext;
+    if (pressureEvaluation != PressureEvaluation::None)
+      pressureContext = buildSchedulePressureContext(func);
     for (const ScheduleRegion &region : regions)
-      processRegion(region, archResolution, modelConfig, pressureBudgets);
+      processRegion(region, archResolution, modelConfig, pressureBudgets,
+                    pressureEvaluation,
+                    pressureContext ? &*pressureContext : nullptr);
     return success();
   }
 
   void processRegion(const ScheduleRegion &region,
                      ArchResolution archResolution,
                      const waveamdmachine::EventSimConfig &modelConfig,
-                     const RegisterPressureBudgets &pressureBudgets) {
+                     const RegisterPressureBudgets &pressureBudgets,
+                     PressureEvaluation pressureEvaluation,
+                     const SchedulePressureContext *pressureContext) {
     DependenceGraph graph = buildDependenceGraph(region);
     processScheduler(region, graph, archResolution, modelConfig,
-                     pressureBudgets);
+                     pressureBudgets, pressureEvaluation, pressureContext);
   }
 
   void processScheduler(const ScheduleRegion &region,
                         const DependenceGraph &graph,
                         ArchResolution archResolution,
                         const waveamdmachine::EventSimConfig &modelConfig,
-                        const RegisterPressureBudgets &pressureBudgets) {
+                        const RegisterPressureBudgets &pressureBudgets,
+                        PressureEvaluation pressureEvaluation,
+                        const SchedulePressureContext *pressureContext) {
     ScheduleDecision decision = evaluateScheduleCandidates(
         region, graph, archResolution, modelConfig, pressureBudgets, beamSearch,
-        getSchedulePressureEvaluation(pressureBudgets),
-        /*allowPressureUpperBound=*/true);
+        pressureEvaluation, /*allowPressureUpperBound=*/true, pressureContext);
     bool willApply =
         applySchedule && shouldApplyDecision(decision, pressureBudgets);
     if (willApply)

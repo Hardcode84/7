@@ -9,6 +9,7 @@
 #ifndef DIALECT_WAVE_TRANSFORMS_WAVEAMDMACHINESCHEDULESUPPORT_H
 #define DIALECT_WAVE_TRANSFORMS_WAVEAMDMACHINESCHEDULESUPPORT_H
 
+#include "WaveAMDRegLiveIntervals.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/WaveAMDMachine/CostModel/ArchData.h"
 #include "mlir/Dialect/WaveAMDMachine/CostModel/EventSimulator.h"
@@ -115,6 +116,12 @@ struct ScheduleDecision {
   unsigned selected = 0;
 };
 
+struct SchedulePressureContext {
+  WaveAMDLiveIntervalBuildResult intervals;
+  bool supported = false;
+  StringRef fallbackReason;
+};
+
 SmallVector<ScheduleRegion> collectScheduleRegions(func::FuncOp func);
 StringRef getEdgeKindName(EdgeKind kind);
 DependenceGraph buildDependenceGraph(const ScheduleRegion &region);
@@ -127,6 +134,7 @@ int64_t getHardExcess(RegisterPressureResult pressure);
 int64_t getCriticalExcess(RegisterPressureResult pressure);
 bool hasCriticalBudget(RegisterPressureBudgets budgets);
 bool hasHardBudget(RegisterPressureBudgets budgets);
+SchedulePressureContext buildSchedulePressureContext(func::FuncOp func);
 LogicalResult
 configureScheduleModel(Operation *op, int modelWaves, int modelSimds,
                        int modelStartDelay, int modelVmemValueLatency,
@@ -169,7 +177,8 @@ ScheduleDecision evaluateScheduleCandidates(
     ArchResolution archResolution,
     const waveamdmachine::EventSimConfig &modelConfig,
     const RegisterPressureBudgets &budgets, bool enableBeamSearch,
-    PressureEvaluation pressureEvaluation, bool allowPressureUpperBound);
+    PressureEvaluation pressureEvaluation, bool allowPressureUpperBound,
+    const SchedulePressureContext *pressureContext);
 void printOrder(raw_ostream &os, ArrayRef<unsigned> order);
 void printCandidateDiagnostics(ScheduleRegion region,
                                const ScheduleDecision &decision,

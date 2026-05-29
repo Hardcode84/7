@@ -108,7 +108,8 @@ struct WaveAMDMachineScheduleReportPass
     if (!prepareForPressure)
       return reportFunction(func, archResolution, modelConfig, pressureBudgets,
                             candidate, scoreFuncName, emitScores,
-                            emitCandidates, emitClasses);
+                            emitCandidates, emitClasses,
+                            /*pressureContext=*/nullptr);
 
     IRMapping mapper;
     Operation *clonedOp = func->clone(mapper);
@@ -116,9 +117,11 @@ struct WaveAMDMachineScheduleReportPass
     func::FuncOp clonedFunc = cast<func::FuncOp>(clonedOp);
     if (failed(wave::prepareWaveAMDRegAllocIR(clonedFunc)))
       return failure();
+    SchedulePressureContext pressureContext =
+        buildSchedulePressureContext(clonedFunc);
     return reportFunction(clonedFunc, archResolution, modelConfig,
                           pressureBudgets, candidate, scoreFuncName, emitScores,
-                          emitCandidates, emitClasses);
+                          emitCandidates, emitClasses, &pressureContext);
   }
 
   LogicalResult
@@ -126,12 +129,13 @@ struct WaveAMDMachineScheduleReportPass
                  const waveamdmachine::EventSimConfig &modelConfig,
                  const RegisterPressureBudgets &pressureBudgets,
                  const CandidateRequest &candidate, StringRef scoreFuncName,
-                 bool emitScores, bool emitCandidates, bool emitClasses) {
+                 bool emitScores, bool emitCandidates, bool emitClasses,
+                 const SchedulePressureContext *pressureContext) {
     SmallVector<ScheduleRegion> regions = collectScheduleRegions(func);
     for (const ScheduleRegion &region : regions)
       reportRegion(region, archResolution, modelConfig, pressureBudgets,
                    candidate, scoreFuncName, emitScores, emitCandidates,
-                   emitClasses);
+                   emitClasses, pressureContext);
     return success();
   }
 
@@ -139,7 +143,8 @@ struct WaveAMDMachineScheduleReportPass
                     const waveamdmachine::EventSimConfig &modelConfig,
                     const RegisterPressureBudgets &pressureBudgets,
                     const CandidateRequest &candidate, StringRef scoreFuncName,
-                    bool emitScores, bool emitCandidates, bool emitClasses) {
+                    bool emitScores, bool emitCandidates, bool emitClasses,
+                    const SchedulePressureContext *pressureContext) {
     bool scoreCandidate =
         candidate.requested &&
         shouldScoreCandidate(region, scoreFuncName, scoreRegion);
@@ -157,17 +162,19 @@ struct WaveAMDMachineScheduleReportPass
                         pressureBudgets, candidate, scoreCandidate);
     if (emitCandidates)
       reportCandidates(region, graph, archResolution, modelConfig,
-                       pressureBudgets);
+                       pressureBudgets, pressureContext);
   }
 
   void reportCandidates(const ScheduleRegion &region,
                         const DependenceGraph &graph,
                         ArchResolution archResolution,
                         const waveamdmachine::EventSimConfig &modelConfig,
-                        const RegisterPressureBudgets &pressureBudgets) {
+                        const RegisterPressureBudgets &pressureBudgets,
+                        const SchedulePressureContext *pressureContext) {
     ScheduleDecision decision = evaluateScheduleCandidates(
         region, graph, archResolution, modelConfig, pressureBudgets, beamSearch,
-        PressureEvaluation::Eager, /*allowPressureUpperBound=*/false);
+        PressureEvaluation::Eager, /*allowPressureUpperBound=*/false,
+        pressureContext);
     printCandidateDiagnostics(region, decision, pressureBudgets);
     printScheduleDecision(region, decision, /*willApply=*/false);
   }
