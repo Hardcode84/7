@@ -19,8 +19,6 @@
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/TypeSwitch.h"
 
-#include "ixsimpl.h"
-
 using namespace mlir;
 using namespace mlir::wave;
 
@@ -58,14 +56,14 @@ const sym::Store &WaveDialect::getSymbolStore() const {
 
 LogicalResult ExprAttr::verify(function_ref<InFlightDiagnostic()> emitError,
                                sym::ExprHandle value) {
-  if (!value || !ixs_node_is_expr(value.raw()))
+  if (!sym::isExpr(value))
     return emitError() << "expected expression handle";
   return success();
 }
 
 LogicalResult PredAttr::verify(function_ref<InFlightDiagnostic()> emitError,
                                sym::PredHandle value) {
-  if (!value || !ixs_node_is_pred(value.raw()))
+  if (!sym::isPred(value))
     return emitError() << "expected predicate handle";
   return success();
 }

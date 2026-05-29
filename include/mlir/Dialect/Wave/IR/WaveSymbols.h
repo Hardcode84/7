@@ -76,6 +76,97 @@ private:
 enum class ExprBinaryOp { Add, Sub, Mul, Div, Mod };
 enum class PredCmpOp { Lt, Le, Gt, Ge, Eq, Ne };
 
+enum class ExprKind {
+  Invalid,
+  Integer,
+  Rational,
+  Symbol,
+  Add,
+  Mul,
+  Floor,
+  Ceil,
+  Mod,
+  Piecewise,
+  Max,
+  Min,
+  Xor,
+  Error,
+  ParseError,
+};
+
+enum class PredKind {
+  Invalid,
+  Cmp,
+  And,
+  Or,
+  Not,
+  True,
+  False,
+  Error,
+  ParseError,
+};
+
+struct RationalLiteral {
+  int64_t numerator = 0;
+  int64_t denominator = 1;
+};
+
+struct AddTerm {
+  ExprHandle coefficient;
+  ExprHandle term;
+};
+
+struct MulFactor {
+  ExprHandle base;
+  int32_t exponent = 0;
+};
+
+bool isExpr(ExprHandle value);
+bool isPred(PredHandle value);
+
+// Wrong-kind accessors return empty handles / zero counts.
+class ExprView {
+public:
+  explicit ExprView(ExprHandle value) : value(value) {}
+
+  ExprHandle getHandle() const { return value; }
+  bool isValid() const;
+  ExprKind getKind() const;
+  std::optional<int64_t> getInt() const;
+  std::optional<RationalLiteral> getRational() const;
+  llvm::StringRef getSymbolName() const;
+  ExprHandle getAddConstant() const;
+  uint32_t getAddTermCount() const;
+  AddTerm getAddTerm(uint32_t index) const;
+  ExprHandle getMulCoefficient() const;
+  uint32_t getMulFactorCount() const;
+  MulFactor getMulFactor(uint32_t index) const;
+  ExprHandle getUnaryArg() const;
+  ExprHandle getBinaryLhs() const;
+  ExprHandle getBinaryRhs() const;
+
+private:
+  ExprHandle value;
+};
+
+class PredView {
+public:
+  explicit PredView(PredHandle value) : value(value) {}
+
+  PredHandle getHandle() const { return value; }
+  bool isValid() const;
+  PredKind getKind() const;
+  std::optional<PredCmpOp> getCmpOp() const;
+  ExprHandle getCmpLhs() const;
+  ExprHandle getCmpRhs() const;
+  PredHandle getUnaryArg() const;
+  uint32_t getLogicArgCount() const;
+  PredHandle getLogicArg(uint32_t index) const;
+
+private:
+  PredHandle value;
+};
+
 /// Long-lived symbolic store owned by one `WaveDialect` / `MLIRContext`.
 class Store {
 public:
@@ -88,6 +179,8 @@ public:
   ixs_ctx *raw() const { return ctx; }
   /// Render `node` as text.
   std::string render(const ixs_node *node) const;
+  std::string render(ExprHandle value) const;
+  std::string render(PredHandle value) const;
 
 private:
   ixs_ctx *ctx = nullptr;

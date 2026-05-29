@@ -17,6 +17,7 @@
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/raw_ostream.h"
 
+#include <array>
 #include <cstdlib>
 #include <optional>
 
@@ -34,10 +35,31 @@ void printLiteral(llvm::StringRef label, std::optional<int64_t> value) {
   llvm::outs() << "\n";
 }
 
+const char *boolName(bool value) { return value ? "true" : "false"; }
+
+const char *exprKindName(sym::ExprKind kind) {
+  static constexpr std::array<const char *, 15> names = {
+      "invalid", "integer", "rational", "symbol", "add",
+      "mul",     "floor",   "ceil",     "mod",    "piecewise",
+      "max",     "min",     "xor",      "error",  "parse-error",
+  };
+  size_t index = static_cast<size_t>(kind);
+  return index < names.size() ? names[index] : "invalid";
+}
+
+const char *predKindName(sym::PredKind kind) {
+  static constexpr std::array<const char *, 9> names = {
+      "invalid", "cmp",   "and",   "or",          "not",
+      "true",    "false", "error", "parse-error",
+  };
+  size_t index = static_cast<size_t>(kind);
+  return index < names.size() ? names[index] : "invalid";
+}
+
 // Write `<label>: <rendered-expr>` for FileCheck.
 void printRendered(sym::Store &store, llvm::StringRef label,
                    sym::ExprHandle handle) {
-  llvm::outs() << label << ": " << store.render(handle.raw()) << "\n";
+  llvm::outs() << label << ": " << store.render(handle) << "\n";
 }
 
 sym::ExprHandle mustBuildInt(sym::Store &store, int64_t value) {
@@ -53,6 +75,16 @@ sym::ExprHandle mustBuildSym(sym::Store &store, llvm::StringRef name) {
   auto handle = sym::composeExprSym(store, name);
   if (failed(handle)) {
     llvm::errs() << "failed to build symbol '" << name << "'\n";
+    std::exit(1);
+  }
+  return *handle;
+}
+
+sym::ExprHandle mustParseExpr(sym::Store &store, llvm::StringRef text) {
+  std::string diagnostic;
+  auto handle = sym::parseExpr(store, text, &diagnostic);
+  if (failed(handle)) {
+    llvm::errs() << "failed to parse '" << text << "': " << diagnostic << "\n";
     std::exit(1);
   }
   return *handle;
@@ -85,6 +117,76 @@ void printRange(llvm::StringRef label, sym::Store &store, sym::ExprHandle expr,
                << (sym::provablyInRange(store, expr, assumptions, lo, hi)
                        ? "true"
                        : "false")
+               << "\n";
+}
+
+void printFacadeSmoke(sym::Store &store, sym::ExprHandle x,
+                      sym::ExprHandle five, sym::ExprHandle threeX) {
+  sym::ExprHandle affine =
+      mustCompose(store, threeX, sym::ExprBinaryOp::Add, five);
+  sym::ExprView addView(affine);
+  llvm::outs() << "view-add-valid: " << boolName(addView.isValid()) << "\n";
+  llvm::outs() << "view-add-kind: " << exprKindName(addView.getKind()) << "\n";
+  printLiteral("view-add-constant",
+               sym::getIntegerLiteralValue(addView.getAddConstant()));
+  llvm::outs() << "view-add-terms: " << addView.getAddTermCount() << "\n";
+  sym::AddTerm addTerm = addView.getAddTerm(0);
+  printLiteral("view-add-term-coeff",
+               sym::getIntegerLiteralValue(addTerm.coefficient));
+  llvm::outs() << "view-add-term-symbol: "
+               << sym::ExprView(addTerm.term).getSymbolName() << "\n";
+
+  sym::ExprView mulView(threeX);
+  llvm::outs() << "view-mul-kind: " << exprKindName(mulView.getKind()) << "\n";
+  printLiteral("view-mul-coeff",
+               sym::getIntegerLiteralValue(mulView.getMulCoefficient()));
+  llvm::outs() << "view-mul-factors: " << mulView.getMulFactorCount() << "\n";
+  sym::MulFactor factor = mulView.getMulFactor(0);
+  llvm::outs() << "view-mul-factor-symbol: "
+               << sym::ExprView(factor.base).getSymbolName() << "\n";
+  llvm::outs() << "view-mul-factor-exp: " << factor.exponent << "\n";
+
+  sym::ExprHandle ratio =
+      mustCompose(store, threeX, sym::ExprBinaryOp::Div, five);
+  auto floorHandle = sym::composeExprFloor(store, ratio);
+  if (failed(floorHandle)) {
+    llvm::errs() << "failed to build floor facade smoke\n";
+    std::exit(1);
+  }
+  sym::ExprView floorView(*floorHandle);
+  llvm::outs() << "view-floor-arg-kind: "
+               << exprKindName(sym::ExprView(floorView.getUnaryArg()).getKind())
+               << "\n";
+
+  sym::ExprHandle mod =
+      mustCompose(store, threeX, sym::ExprBinaryOp::Mod, five);
+  sym::ExprView modView(mod);
+  llvm::outs() << "view-mod-lhs-kind: "
+               << exprKindName(sym::ExprView(modView.getBinaryLhs()).getKind())
+               << "\n";
+  printLiteral("view-mod-rhs",
+               sym::getIntegerLiteralValue(modView.getBinaryRhs()));
+
+  auto geZero =
+      sym::composePredCmp(store, x, sym::PredCmpOp::Ge, mustBuildInt(store, 0));
+  auto leMax = sym::composePredCmp(store, x, sym::PredCmpOp::Le,
+                                   mustBuildInt(store, 31));
+  if (failed(geZero) || failed(leMax)) {
+    llvm::errs() << "failed to build predicate facade smoke\n";
+    std::exit(1);
+  }
+  auto range = sym::composePredAnd(store, *geZero, *leMax);
+  if (failed(range)) {
+    llvm::errs() << "failed to build predicate AND facade smoke\n";
+    std::exit(1);
+  }
+  sym::PredView predView(*range);
+  llvm::outs() << "view-pred-valid: " << boolName(predView.isValid()) << "\n";
+  llvm::outs() << "view-pred-kind: " << predKindName(predView.getKind())
+               << "\n";
+  llvm::outs() << "view-pred-args: " << predView.getLogicArgCount() << "\n";
+  llvm::outs() << "view-pred-first-kind: "
+               << predKindName(sym::PredView(predView.getLogicArg(0)).getKind())
                << "\n";
 }
 
@@ -121,19 +223,16 @@ int main() {
 
   //===--------------------------------------------------------------------===//
   // (1) Integer-literal introspection round-trip (mirrors the 5/5 sanity
-  // check on `getIntegerLiteralValue`). Lock the session only for the leaf
-  // builds.
+  // check on `getIntegerLiteralValue`).
   //===--------------------------------------------------------------------===//
   {
-    sym::Session session(store);
-    printLiteral("int", sym::getIntegerLiteralValue(
-                            sym::ExprHandle(ixs_int(session.raw(), -42))));
-    printLiteral("unit-rat", sym::getIntegerLiteralValue(sym::ExprHandle(
-                                 ixs_rat(session.raw(), 7, 1))));
-    printLiteral("non-unit-rat", sym::getIntegerLiteralValue(sym::ExprHandle(
-                                     ixs_rat(session.raw(), 7, 2))));
-    printLiteral("symbol", sym::getIntegerLiteralValue(
-                               sym::ExprHandle(ixs_sym(session.raw(), "N"))));
+    printLiteral("int", sym::getIntegerLiteralValue(mustBuildInt(store, -42)));
+    printLiteral("unit-rat",
+                 sym::getIntegerLiteralValue(mustParseExpr(store, "7/1")));
+    printLiteral("non-unit-rat",
+                 sym::getIntegerLiteralValue(mustParseExpr(store, "7/2")));
+    printLiteral("symbol",
+                 sym::getIntegerLiteralValue(mustBuildSym(store, "N")));
   }
 
   //===--------------------------------------------------------------------===//
@@ -150,7 +249,11 @@ int main() {
   sym::ExprHandle two = mustBuildInt(store, 2);
   sym::ExprHandle three = mustBuildInt(store, 3);
   sym::ExprHandle four = mustBuildInt(store, 4);
+  sym::ExprHandle five = mustBuildInt(store, 5);
   sym::ExprHandle six = mustBuildInt(store, 6);
+
+  sym::ExprHandle threeX = mustCompose(store, three, sym::ExprBinaryOp::Mul, x);
+  printFacadeSmoke(store, x, five, threeX);
 
   sym::ExprHandle fourX = mustCompose(store, four, sym::ExprBinaryOp::Mul, x);
   sym::ExprHandle twoX = mustCompose(store, two, sym::ExprBinaryOp::Mul, x);

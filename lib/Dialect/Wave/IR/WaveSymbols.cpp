@@ -14,6 +14,7 @@
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/raw_ostream.h"
 
+#include <array>
 #include <cassert>
 #include <limits>
 #include <utility>
@@ -23,6 +24,56 @@ using namespace mlir::wave;
 using namespace mlir::wave::sym;
 
 namespace {
+
+static ixs_node *mutableNode(const ixs_node *node) {
+  return const_cast<ixs_node *>(node);
+}
+
+static ExprKind getExprKind(ixs_tag tag) {
+  static constexpr std::array<ExprKind, IXS_PARSE_ERROR + 1> kindByTag = {
+      ExprKind::Integer, ExprKind::Rational,   ExprKind::Symbol,
+      ExprKind::Add,     ExprKind::Mul,        ExprKind::Floor,
+      ExprKind::Ceil,    ExprKind::Mod,        ExprKind::Piecewise,
+      ExprKind::Max,     ExprKind::Min,        ExprKind::Xor,
+      ExprKind::Invalid, ExprKind::Invalid,    ExprKind::Invalid,
+      ExprKind::Invalid, ExprKind::Invalid,    ExprKind::Invalid,
+      ExprKind::Error,   ExprKind::ParseError,
+  };
+  size_t index = static_cast<size_t>(tag);
+  return index < kindByTag.size() ? kindByTag[index] : ExprKind::Invalid;
+}
+
+static PredKind getPredKind(ixs_tag tag) {
+  static constexpr std::array<PredKind, IXS_PARSE_ERROR + 1> kindByTag = {
+      PredKind::Invalid, PredKind::Invalid,    PredKind::Invalid,
+      PredKind::Invalid, PredKind::Invalid,    PredKind::Invalid,
+      PredKind::Invalid, PredKind::Invalid,    PredKind::Invalid,
+      PredKind::Invalid, PredKind::Invalid,    PredKind::Invalid,
+      PredKind::Cmp,     PredKind::And,        PredKind::Or,
+      PredKind::Not,     PredKind::True,       PredKind::False,
+      PredKind::Error,   PredKind::ParseError,
+  };
+  size_t index = static_cast<size_t>(tag);
+  return index < kindByTag.size() ? kindByTag[index] : PredKind::Invalid;
+}
+
+static std::optional<PredCmpOp> getPredCmpOp(ixs_cmp_op op) {
+  switch (op) {
+  case IXS_CMP_LT:
+    return PredCmpOp::Lt;
+  case IXS_CMP_LE:
+    return PredCmpOp::Le;
+  case IXS_CMP_GT:
+    return PredCmpOp::Gt;
+  case IXS_CMP_GE:
+    return PredCmpOp::Ge;
+  case IXS_CMP_EQ:
+    return PredCmpOp::Eq;
+  case IXS_CMP_NE:
+    return PredCmpOp::Ne;
+  }
+  return std::nullopt;
+}
 
 static std::string joinSessionErrors(ixs_session *session) {
   std::string message;
@@ -38,14 +89,13 @@ static std::string joinSessionErrors(ixs_session *session) {
 
 static std::string renderNode(const ixs_node *node) {
   assert(node && "expected non-null ixsimpl node");
-  auto *rawNode = const_cast<ixs_node *>(node);
   // ixsimpl printer walks immutable graph: no session needed.
-  size_t n = ixs_print(rawNode, nullptr, 0);
+  size_t n = ixs_print(mutableNode(node), nullptr, 0);
   if (n == std::numeric_limits<size_t>::max())
     llvm::report_fatal_error(
         "wave symbolic printer reported an invalid length");
   std::string text(n + 1, '\0');
-  ixs_print(rawNode, text.data(), text.size());
+  ixs_print(mutableNode(node), text.data(), text.size());
   text.resize(n);
   return text;
 }
@@ -81,7 +131,7 @@ static void walkSymbolNamesImpl(const ixs_node *node,
   while (!stack.empty()) {
     const ixs_node *current = stack.pop_back_val();
     // ixsimpl introspection accessors are read-only but C API lacks const.
-    auto *rawNode = const_cast<ixs_node *>(current);
+    ixs_node *rawNode = mutableNode(current);
     if (ixs_node_tag(rawNode) == IXS_SYM)
       callback(ixs_node_sym_name(rawNode));
 
@@ -135,11 +185,170 @@ std::string Store::render(const ixs_node *node) const {
   return renderNode(node);
 }
 
+std::string Store::render(ExprHandle value) const {
+  return render(value.raw());
+}
+
+std::string Store::render(PredHandle value) const {
+  return render(value.raw());
+}
+
 Session::Session(Store &store) : store(store), lock(store.mutex) {
   ixs_session_init(&session, store.ctx);
 }
 
 Session::~Session() { ixs_session_destroy(&session); }
+
+bool mlir::wave::sym::isExpr(ExprHandle value) {
+  return value && ixs_node_is_expr(value.raw());
+}
+
+bool mlir::wave::sym::isPred(PredHandle value) {
+  return value && ixs_node_is_pred(value.raw());
+}
+
+bool ExprView::isValid() const { return isExpr(value); }
+
+ExprKind ExprView::getKind() const {
+  if (!value)
+    return ExprKind::Invalid;
+  return getExprKind(ixs_node_tag(mutableNode(value.raw())));
+}
+
+std::optional<int64_t> ExprView::getInt() const {
+  if (getKind() != ExprKind::Integer)
+    return std::nullopt;
+  return ixs_node_int_val(mutableNode(value.raw()));
+}
+
+std::optional<RationalLiteral> ExprView::getRational() const {
+  if (getKind() != ExprKind::Rational)
+    return std::nullopt;
+  ixs_node *node = mutableNode(value.raw());
+  return RationalLiteral{ixs_node_rat_num(node), ixs_node_rat_den(node)};
+}
+
+StringRef ExprView::getSymbolName() const {
+  if (getKind() != ExprKind::Symbol)
+    return {};
+  return ixs_node_sym_name(mutableNode(value.raw()));
+}
+
+ExprHandle ExprView::getAddConstant() const {
+  if (getKind() != ExprKind::Add)
+    return {};
+  return ExprHandle(ixs_node_add_coeff(mutableNode(value.raw())));
+}
+
+uint32_t ExprView::getAddTermCount() const {
+  if (getKind() != ExprKind::Add)
+    return 0;
+  return ixs_node_add_nterms(mutableNode(value.raw()));
+}
+
+AddTerm ExprView::getAddTerm(uint32_t index) const {
+  if (getKind() != ExprKind::Add)
+    return {};
+  ixs_node *node = mutableNode(value.raw());
+  if (index >= ixs_node_add_nterms(node))
+    return {};
+  return AddTerm{ExprHandle(ixs_node_add_term_coeff(node, index)),
+                 ExprHandle(ixs_node_add_term(node, index))};
+}
+
+ExprHandle ExprView::getMulCoefficient() const {
+  if (getKind() != ExprKind::Mul)
+    return {};
+  return ExprHandle(ixs_node_mul_coeff(mutableNode(value.raw())));
+}
+
+uint32_t ExprView::getMulFactorCount() const {
+  if (getKind() != ExprKind::Mul)
+    return 0;
+  return ixs_node_mul_nfactors(mutableNode(value.raw()));
+}
+
+MulFactor ExprView::getMulFactor(uint32_t index) const {
+  if (getKind() != ExprKind::Mul)
+    return {};
+  ixs_node *node = mutableNode(value.raw());
+  if (index >= ixs_node_mul_nfactors(node))
+    return {};
+  return MulFactor{ExprHandle(ixs_node_mul_factor_base(node, index)),
+                   ixs_node_mul_factor_exp(node, index)};
+}
+
+ExprHandle ExprView::getUnaryArg() const {
+  ExprKind kind = getKind();
+  if (kind != ExprKind::Floor && kind != ExprKind::Ceil)
+    return {};
+  return ExprHandle(ixs_node_unary_arg(mutableNode(value.raw())));
+}
+
+ExprHandle ExprView::getBinaryLhs() const {
+  ExprKind kind = getKind();
+  if (kind != ExprKind::Mod && kind != ExprKind::Max && kind != ExprKind::Min &&
+      kind != ExprKind::Xor)
+    return {};
+  return ExprHandle(ixs_node_binary_lhs(mutableNode(value.raw())));
+}
+
+ExprHandle ExprView::getBinaryRhs() const {
+  ExprKind kind = getKind();
+  if (kind != ExprKind::Mod && kind != ExprKind::Max && kind != ExprKind::Min &&
+      kind != ExprKind::Xor)
+    return {};
+  return ExprHandle(ixs_node_binary_rhs(mutableNode(value.raw())));
+}
+
+bool PredView::isValid() const { return isPred(value); }
+
+PredKind PredView::getKind() const {
+  if (!value)
+    return PredKind::Invalid;
+  return getPredKind(ixs_node_tag(mutableNode(value.raw())));
+}
+
+std::optional<PredCmpOp> PredView::getCmpOp() const {
+  if (getKind() != PredKind::Cmp)
+    return std::nullopt;
+  return getPredCmpOp(ixs_node_cmp_op(mutableNode(value.raw())));
+}
+
+ExprHandle PredView::getCmpLhs() const {
+  if (getKind() != PredKind::Cmp)
+    return {};
+  return ExprHandle(ixs_node_binary_lhs(mutableNode(value.raw())));
+}
+
+ExprHandle PredView::getCmpRhs() const {
+  if (getKind() != PredKind::Cmp)
+    return {};
+  return ExprHandle(ixs_node_binary_rhs(mutableNode(value.raw())));
+}
+
+PredHandle PredView::getUnaryArg() const {
+  if (getKind() != PredKind::Not)
+    return {};
+  return PredHandle(ixs_node_unary_arg(mutableNode(value.raw())));
+}
+
+uint32_t PredView::getLogicArgCount() const {
+  PredKind kind = getKind();
+  if (kind != PredKind::And && kind != PredKind::Or)
+    return 0;
+  return ixs_node_logic_nargs(mutableNode(value.raw()));
+}
+
+PredHandle PredView::getLogicArg(uint32_t index) const {
+  PredKind kind = getKind();
+  if (kind != PredKind::And && kind != PredKind::Or)
+    return {};
+  ixs_node *node = mutableNode(value.raw());
+  if (index >= ixs_node_logic_nargs(node))
+    return {};
+  return PredHandle(ixs_node_logic_arg(node, index));
+}
 
 FailureOr<ExprHandle> mlir::wave::sym::parseExpr(Store &store,
                                                  llvm::StringRef text,
@@ -506,17 +715,12 @@ bool mlir::wave::sym::provablyInRange(Store &store, ExprHandle expr,
 
 std::optional<int64_t>
 mlir::wave::sym::getIntegerLiteralValue(ExprHandle value) {
-  const ixs_node *node = value.raw();
-  if (!node)
-    return std::nullopt;
-  // ixsimpl introspection accessors are read-only but C API lacks const.
-  auto *rawNode = const_cast<ixs_node *>(node);
-  if (!ixs_node_is_expr(rawNode))
-    return std::nullopt;
-  if (ixs_node_tag(rawNode) == IXS_INT)
-    return ixs_node_int_val(rawNode);
-  if (ixs_node_tag(rawNode) == IXS_RAT && ixs_node_rat_den(rawNode) == 1)
-    return ixs_node_rat_num(rawNode);
+  ExprView view(value);
+  if (std::optional<int64_t> integer = view.getInt())
+    return integer;
+  std::optional<RationalLiteral> rational = view.getRational();
+  if (rational && rational->denominator == 1)
+    return rational->numerator;
   return std::nullopt;
 }
 
