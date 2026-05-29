@@ -119,5 +119,8 @@ Same rule covers docstrings, commit bodies, and PR descriptions. Wit is welcome,
 
 ## Commits
 
+- Before every commit, run full lit and integration tests:
+  `cmake --build build --target check-wave-mlir -j $(nproc)` and
+  `build/bin/llvm-lit -sv build/test --filter='Integration'`.
 - Small, focused commits. One logical change per commit. If you're wondering whether to split — split.
 - Commit messages should be descriptive, or at least funny. Not both is acceptable. Neither is not.
