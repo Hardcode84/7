@@ -12,6 +12,7 @@
 // RUN: wave-sim-report --func=lds_b16_latency --op-latencies --lds-counter-latency=7 --lds-value-latency=11 --smem-counter-latency=97 --smem-value-latency=101 %s | FileCheck %s --check-prefix=LDSB16LAT
 // RUN: wave-sim-report --func=smem_partial_wait --timeline %s | FileCheck %s --check-prefix=WAITPART
 // RUN: wave-sim-report --func=trip_loop --trip-count=3 %s | FileCheck %s --check-prefix=TRIP
+// RUN: wave-sim-report --func=trip_loop --trip-count=10000 %s | FileCheck %s --check-prefix=TRIPBIG
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
   func.func @two_dep_salu(%init: !waveamdmachine.reg<sgpr, 1>) {
@@ -188,3 +189,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // TRIP: trip_count_override: 3
 // TRIP: total_cycles: 6
 // TRIP: issued_ops: 3
+
+// TRIPBIG: trip_count_override: 10000
+// TRIPBIG: total_cycles: 20000
+// TRIPBIG: issued_ops: 10000

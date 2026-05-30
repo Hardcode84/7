@@ -23,6 +23,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdint>
 #include <limits>
 #include <optional>
 #include <queue>
@@ -132,37 +133,83 @@ static int64_t getTripCount(UniformLoopOp loop, const EventSimConfig &config) {
   return std::max<int64_t>(0, trip.getInt());
 }
 
-static void appendBlockOps(Block &block, const EventSimConfig &config,
-                           SmallVectorImpl<Operation *> &ops);
+enum class ProgramItemKind : uint8_t {
+  Op,
+  LoopBegin,
+  LoopEnd,
+};
 
-static void appendOp(Operation *op, const EventSimConfig &config,
-                     SmallVectorImpl<Operation *> &ops) {
+struct ProgramItem {
+  Operation *op = nullptr;
+  int64_t tripCount = 0;
+  unsigned bodyStart = 0;
+  unsigned loop = 0;
+  ProgramItemKind kind = ProgramItemKind::Op;
+};
+
+static ProgramItem makeOpItem(Operation *op) {
+  ProgramItem item;
+  item.op = op;
+  return item;
+}
+
+static ProgramItem makeLoopBeginItem(int64_t tripCount, unsigned bodyStart) {
+  ProgramItem item;
+  item.tripCount = tripCount;
+  item.bodyStart = bodyStart;
+  item.kind = ProgramItemKind::LoopBegin;
+  return item;
+}
+
+static ProgramItem makeLoopEndItem(unsigned loop) {
+  ProgramItem item;
+  item.loop = loop;
+  item.kind = ProgramItemKind::LoopEnd;
+  return item;
+}
+
+static void appendProgramBlock(Block &block, const EventSimConfig &config,
+                               SmallVectorImpl<ProgramItem> &program);
+
+static void appendProgramOp(Operation *op, const EventSimConfig &config,
+                            SmallVectorImpl<ProgramItem> &program) {
   if (UniformLoopOp loop = dyn_cast<UniformLoopOp>(op)) {
     int64_t trips = getTripCount(loop, config);
-    Block &body = loop.getBody().front();
-    for (int64_t i = 0; i < trips; ++i)
-      appendBlockOps(body, config, ops);
+    if (trips <= 0)
+      return;
+    unsigned loopIndex = program.size();
+    program.push_back(makeLoopBeginItem(trips, loopIndex + 1));
+    appendProgramBlock(loop.getBody().front(), config, program);
+    program.push_back(makeLoopEndItem(loopIndex));
     return;
   }
   if (isWaveAMDMachineOp(op))
-    ops.push_back(op);
+    program.push_back(makeOpItem(op));
 }
 
-static void appendBlockOps(Block &block, const EventSimConfig &config,
-                           SmallVectorImpl<Operation *> &ops) {
+static void appendProgramBlock(Block &block, const EventSimConfig &config,
+                               SmallVectorImpl<ProgramItem> &program) {
   for (Operation &op : block)
-    appendOp(&op, config, ops);
+    appendProgramOp(&op, config, program);
 }
 
-static SmallVector<Operation *> flattenOps(func::FuncOp func,
-                                           const EventSimConfig &config) {
-  SmallVector<Operation *> ops;
+static SmallVector<ProgramItem> buildProgram(func::FuncOp func,
+                                             const EventSimConfig &config) {
+  SmallVector<ProgramItem> program;
   for (Block &block : func.getBody())
-    appendBlockOps(block, config, ops);
-  return ops;
+    appendProgramBlock(block, config, program);
+  return program;
 }
+
+struct LoopFrame {
+  int64_t remaining = 0;
+  unsigned loop = 0;
+};
 
 struct WaveState {
+  SmallVector<LoopFrame, 4> loops;
+  DenseMap<Value, int64_t> readyAt;
+  std::array<SmallVector<int64_t, 4>, kNumCounters> counters;
   int id = 0;
   int simd = 0;
   size_t pc = 0;
@@ -171,8 +218,6 @@ struct WaveState {
   int64_t lastReady = 0;
   bool done = false;
   bool completionQueued = false;
-  DenseMap<Value, int64_t> readyAt;
-  std::array<SmallVector<int64_t, 4>, kNumCounters> counters;
 };
 
 struct SimdState {
@@ -210,23 +255,31 @@ public:
   EventSimulator(ArrayRef<Operation *> ops, const ArchData &arch,
                  const EventSimConfig &config, EventSimResult &out)
       : ops(ops), arch(arch), config(config), out(out) {}
+  EventSimulator(ArrayRef<ProgramItem> program, const ArchData &arch,
+                 const EventSimConfig &config, EventSimResult &out)
+      : program(program), arch(arch), config(config), out(out),
+        structuredProgram(true) {}
 
   LogicalResult run();
 
 private:
   ArrayRef<Operation *> ops;
+  ArrayRef<ProgramItem> program;
   const ArchData &arch;
   const EventSimConfig &config;
   EventSimResult &out;
-  SmallVector<WaveState> waves;
+  SmallVector<WaveState, 8> waves;
   SmallVector<SimdState> simds;
   std::priority_queue<EventSimEvent, std::vector<EventSimEvent>, EventLater>
       events;
+  bool structuredProgram = false;
 
   void initialize();
   void processEventsUpTo(int64_t cycle);
   void schedule(EventSimEvent event);
   void recordNow(EventSimEvent event);
+  void advanceControl(WaveState &wave) const;
+  Operation *currentOp(WaveState &wave) const;
   void pruneCounters(WaveState &wave, int64_t cycle);
   int64_t operandReadyCycle(const WaveState &wave, Operation *op) const;
   int64_t waitcntReadyCycle(WaveState &wave, Operation *op, int64_t cycle);
@@ -271,6 +324,47 @@ void EventSimulator::schedule(EventSimEvent event) { events.push(event); }
 void EventSimulator::recordNow(EventSimEvent event) {
   if (config.recordTimeline)
     out.events.push_back(event);
+}
+
+void EventSimulator::advanceControl(WaveState &wave) const {
+  while (wave.pc < program.size()) {
+    const ProgramItem &item = program[wave.pc];
+    switch (item.kind) {
+    case ProgramItemKind::Op:
+      return;
+    case ProgramItemKind::LoopBegin:
+      wave.loops.push_back({item.tripCount, static_cast<unsigned>(wave.pc)});
+      wave.pc = item.bodyStart;
+      break;
+    case ProgramItemKind::LoopEnd: {
+      assert(!wave.loops.empty() && "loop end without active loop");
+      LoopFrame &frame = wave.loops.back();
+      assert(frame.loop == item.loop && "loop end mismatch");
+      --frame.remaining;
+      if (frame.remaining > 0) {
+        wave.pc = program[frame.loop].bodyStart;
+        break;
+      }
+      wave.loops.pop_back();
+      ++wave.pc;
+      break;
+    }
+    }
+  }
+}
+
+Operation *EventSimulator::currentOp(WaveState &wave) const {
+  if (!structuredProgram) {
+    if (wave.pc >= ops.size())
+      return nullptr;
+    return ops[wave.pc];
+  }
+  advanceControl(wave);
+  if (wave.pc >= program.size())
+    return nullptr;
+  const ProgramItem &item = program[wave.pc];
+  assert(item.kind == ProgramItemKind::Op && "control item escaped");
+  return item.op;
 }
 
 void EventSimulator::processEventsUpTo(int64_t cycle) {
@@ -339,9 +433,11 @@ int64_t EventSimulator::waitcntReadyCycle(WaveState &wave, Operation *op,
 }
 
 int64_t EventSimulator::opReadyCycle(WaveState &wave, int64_t cycle) {
-  if (wave.done || wave.pc >= ops.size())
+  if (wave.done)
     return cycle;
-  Operation *op = ops[wave.pc];
+  Operation *op = currentOp(wave);
+  if (!op)
+    return cycle;
   if (isWaitcntOp(op))
     return waitcntReadyCycle(wave, op, cycle);
   int64_t ready = operandReadyCycle(wave, op);
@@ -365,7 +461,7 @@ int EventSimulator::selectReadyWave(int simd, int64_t cycle) {
     WaveState &wave = waves[idx];
     if (wave.simd != simd || wave.done)
       continue;
-    if (wave.pc >= ops.size())
+    if (!currentOp(wave))
       continue;
     if (opReadyCycle(wave, cycle) > cycle)
       continue;
@@ -490,9 +586,9 @@ LogicalResult EventSimulator::executeIssued(WaveState &wave, Operation *op,
 LogicalResult EventSimulator::stepWave(WaveState &wave, int64_t cycle,
                                        bool &issued) {
   issued = false;
-  if (wave.pc >= ops.size())
+  Operation *op = currentOp(wave);
+  if (!op)
     return success();
-  Operation *op = ops[wave.pc];
   if (isWaitcntOp(op))
     return executeWaitcnt(wave, op, cycle);
   SchedClass cls = classifyOp(op);
@@ -517,7 +613,7 @@ void EventSimulator::queueCompletion(WaveState &wave, int64_t cycle) {
 bool EventSimulator::queueReadyCompletions(int64_t cycle) {
   bool changed = false;
   for (WaveState &wave : waves) {
-    if (!wave.done && wave.pc >= ops.size()) {
+    if (!wave.done && !currentOp(wave)) {
       queueCompletion(wave, cycle);
       changed = true;
     }
@@ -557,7 +653,7 @@ int64_t EventSimulator::nextCycleAfter(int64_t cycle) {
   for (WaveState &wave : waves) {
     if (wave.done)
       continue;
-    if (wave.pc >= ops.size()) {
+    if (!currentOp(wave)) {
       next = std::min(next, std::max(cycle, wave.lastReady));
       continue;
     }
@@ -606,8 +702,10 @@ LogicalResult EventSimulator::run() {
 LogicalResult simulateEventTimeline(func::FuncOp func, const ArchData &arch,
                                     const EventSimConfig &config,
                                     EventSimResult &out) {
-  SmallVector<Operation *> ops = flattenOps(func, config);
-  return simulateEventTimeline(ops, arch, config, out);
+  SmallVector<ProgramItem> program = buildProgram(func, config);
+  out = EventSimResult();
+  EventSimulator simulator(program, arch, config, out);
+  return simulator.run();
 }
 
 LogicalResult simulateEventTimeline(ArrayRef<Operation *> ops,
