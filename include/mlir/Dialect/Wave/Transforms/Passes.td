@@ -381,12 +381,6 @@ def WaveMetaSpecialize
     "arith::ArithDialect",
     "scf::SCFDialect"
   ];
-  let options = [
-    Option<"errorOnResidual", "error-on-residual", "bool",
-           /*default=*/"true",
-           "Emit residual-specific diagnostics when any wavemeta.* op or "
-           "!wavemeta.ptuple type remains after specialisation.">
-  ];
 }
 
 def WaveAttachGPUBinary

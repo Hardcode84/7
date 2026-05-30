@@ -730,6 +730,41 @@ static bool hasUnresolvedPTupleResult(Operation *op) {
   return hasPTupleType(op->getResultTypes());
 }
 
+static bool hasPTupleAttr(Operation *op) {
+  return llvm::any_of(op->getAttrs(), [](NamedAttribute attr) {
+    return containsPTupleType(attr.getValue());
+  });
+}
+
+static bool hasPTupleBlockArg(Operation *op) {
+  for (Region &region : op->getRegions())
+    for (Block &block : region)
+      if (hasPTupleType(block.getArgumentTypes()))
+        return true;
+  return false;
+}
+
+static bool diagnosePTupleResidual(Operation *op) {
+  bool anyResidual = false;
+  if (!isa<func::ReturnOp>(op) && hasPTupleType(op->getOperandTypes())) {
+    op->emitOpError("operand has unresolved parametric tuple type");
+    anyResidual = true;
+  }
+  if (hasUnresolvedPTupleResult(op)) {
+    op->emitOpError("result has unresolved parametric tuple type");
+    anyResidual = true;
+  }
+  if (!isa<FunctionOpInterface>(op) && hasPTupleAttr(op)) {
+    op->emitOpError("attribute contains unresolved parametric tuple type");
+    anyResidual = true;
+  }
+  if (!isa<FunctionOpInterface>(op) && hasPTupleBlockArg(op)) {
+    op->emitOpError("region argument has unresolved parametric tuple type");
+    anyResidual = true;
+  }
+  return anyResidual;
+}
+
 static bool diagnoseFunctionSignature(FunctionOpInterface fn) {
   if (!hasPTupleType(fn.getArgumentTypes()) &&
       !hasPTupleType(fn.getResultTypes()))
@@ -747,62 +782,14 @@ static LogicalResult diagnoseResiduals(ModuleOp moduleOp) {
     }
     if (isSilentResidualKind(op))
       return;
-    if (hasUnresolvedPTupleResult(op)) {
-      op->emitOpError("result has unresolved parametric tuple type");
+    if (diagnosePTupleResidual(op))
       anyResidual = true;
-    }
   });
   moduleOp.walk([&](FunctionOpInterface fn) {
     if (diagnoseFunctionSignature(fn))
       anyResidual = true;
   });
   return success(!anyResidual);
-}
-
-static bool hasPTupleAttr(Operation *op) {
-  return llvm::any_of(op->getAttrs(), [](NamedAttribute attr) {
-    return containsPTupleType(attr.getValue());
-  });
-}
-
-static bool hasPTupleBlockArg(Operation *op) {
-  for (Region &region : op->getRegions())
-    for (Block &block : region)
-      if (hasPTupleType(block.getArgumentTypes()))
-        return true;
-  return false;
-}
-
-static LogicalResult verifyNoResiduals(ModuleOp moduleOp,
-                                       bool emitDiagnostics) {
-  bool anyResidual = false;
-  moduleOp.walk<WalkOrder::PreOrder>([&](Operation *op) {
-    if (op->getDialect() && isa<WaveMetaDialect>(op->getDialect())) {
-      if (emitDiagnostics)
-        op->emitOpError("wavemeta-specialize left residual wavemeta operation");
-      anyResidual = true;
-      return WalkResult::skip();
-    }
-    if (hasPTupleType(op->getOperandTypes()) ||
-        hasPTupleType(op->getResultTypes()) || hasPTupleAttr(op) ||
-        hasPTupleBlockArg(op)) {
-      if (emitDiagnostics)
-        op->emitOpError(
-            "wavemeta-specialize left residual !wavemeta.ptuple type");
-      anyResidual = true;
-      return WalkResult::skip();
-    }
-    return WalkResult::advance();
-  });
-  return success(!anyResidual);
-}
-
-static LogicalResult checkResiduals(ModuleOp moduleOp, bool errorOnResidual) {
-  bool diagnosedResidual =
-      errorOnResidual && failed(diagnoseResiduals(moduleOp));
-  bool shouldEmitBackstop = !errorOnResidual || !diagnosedResidual;
-  bool failedBackstop = failed(verifyNoResiduals(moduleOp, shouldEmitBackstop));
-  return success(!diagnosedResidual && !failedBackstop);
 }
 
 //===----------------------------------------------------------------------===//
@@ -877,7 +864,7 @@ struct WaveMetaSpecializePass
         return signalPassFailure();
     }
 
-    if (failed(checkResiduals(moduleOp, errorOnResidual)))
+    if (failed(diagnoseResiduals(moduleOp)))
       return signalPassFailure();
   }
 };
