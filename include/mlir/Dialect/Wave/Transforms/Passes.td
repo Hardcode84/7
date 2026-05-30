@@ -124,6 +124,20 @@ def WaveAMDTicketWaits
   ];
 }
 
+def WaveAMDPreserveHardwareRegs
+    : Pass<"waveamd-preserve-hw-regs"> {
+  let summary = "Preserve singleton WaveAMDMachine hardware registers";
+  let description = [{
+    Inserts save/reload code when SCC, VCC, or M0 values are live across a
+    clobber of the same singleton hardware resource. Unsupported cases are
+    left for `waveamd-reg-alloc` to reject as the final correctness gate.
+  }];
+  let dependentDialects = [
+    "func::FuncDialect",
+    "waveamdmachine::WaveAMDMachineDialect"
+  ];
+}
+
 def WaveAMDMachineSchedule
     : Pass<"waveamd-machine-schedule"> {
   let summary = "Apply model-based local WaveAMDMachine scheduling";

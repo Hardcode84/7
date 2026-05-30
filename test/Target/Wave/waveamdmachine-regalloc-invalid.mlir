@@ -13,7 +13,7 @@ func.func @overlapping_scc_live_range_in_loop(%iv0: !waveamdmachine.reg<sgpr, 1>
     %scc = waveamdmachine.s_cmp_lt_i32 %iv, %n
         : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<sgpr, 1>)
           -> !waveamdmachine.reg<scc, 1>
-    // expected-error @below {{overlapping SCC live range needs flag spill support}}
+    // expected-error @below {{waveamd-reg-alloc found overlapping SCC live range after hardware-register preservation}}
     %next, %next_scc = waveamdmachine.s_add_i32 %iv, %iv
         : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<sgpr, 1>)
           -> (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<scc, 1>)
@@ -34,7 +34,7 @@ func.func @overlapping_scc_live_range(%a: !waveamdmachine.reg<sgpr, 1>,
   %scc = waveamdmachine.s_cmp_lt_i32 %a, %b
       : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<sgpr, 1>)
         -> !waveamdmachine.reg<scc, 1>
-  // expected-error @below {{overlapping SCC live range needs flag spill support}}
+  // expected-error @below {{waveamd-reg-alloc found overlapping SCC live range after hardware-register preservation}}
   %sum, %sum_scc = waveamdmachine.s_add_i32 %a, %b
       : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<sgpr, 1>)
         -> (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<scc, 1>)
@@ -55,7 +55,7 @@ func.func @overlapping_scc_live_range_s_lshl_b64(%a: !waveamdmachine.reg<sgpr, 2
   %scc = waveamdmachine.s_cmp_lt_i32 %x, %y
       : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<sgpr, 1>)
         -> !waveamdmachine.reg<scc, 1>
-  // expected-error @below {{overlapping SCC live range needs flag spill support}}
+  // expected-error @below {{waveamd-reg-alloc found overlapping SCC live range after hardware-register preservation}}
   %shifted, %shift_scc = waveamdmachine.s_lshl_b64 %a, %shift
       : (!waveamdmachine.reg<sgpr, 2>, !waveamdmachine.reg<sgpr, 2>)
         -> (!waveamdmachine.reg<sgpr, 2>, !waveamdmachine.reg<scc, 1>)
@@ -75,7 +75,7 @@ func.func @overlapping_scc_live_range_saveexec(%mask: !waveamdmachine.reg<sgpr, 
   %scc = waveamdmachine.s_cmp_lt_i32 %x, %y
       : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<sgpr, 1>)
         -> !waveamdmachine.reg<scc, 1>
-  // expected-error @below {{overlapping SCC live range needs flag spill support}}
+  // expected-error @below {{waveamd-reg-alloc found overlapping SCC live range after hardware-register preservation}}
   %saved, %save_scc = waveamdmachine.s_and_saveexec_b32 %mask
       : (!waveamdmachine.reg<sgpr, 1>)
         -> (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<scc, 1>)
@@ -96,7 +96,7 @@ func.func @overlapping_scc_live_range_andn2_exec(%saved: !waveamdmachine.reg<sgp
   %scc = waveamdmachine.s_cmp_lt_i32 %x, %y
       : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<sgpr, 1>)
         -> !waveamdmachine.reg<scc, 1>
-  // expected-error @below {{overlapping SCC live range needs flag spill support}}
+  // expected-error @below {{waveamd-reg-alloc found overlapping SCC live range after hardware-register preservation}}
   %exec_scc = waveamdmachine.s_andn2_exec_b32 %saved, %mask
       : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<sgpr, 1>)
         -> !waveamdmachine.reg<scc, 1>
@@ -118,7 +118,7 @@ func.func @overlapping_vcc_live_range(%a: !waveamdmachine.reg<vgpr, 2>,
   %sum0, %vcc0 = waveamdmachine.v_add_u64 %a, %b
       : (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vgpr, 2>)
         -> (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vcc, 1>)
-  // expected-error @below {{overlapping VCC live range needs flag spill support}}
+  // expected-error @below {{waveamd-reg-alloc found overlapping VCC live range after hardware-register preservation}}
   %sum1, %vcc1 = waveamdmachine.v_add_u64 %c, %d
       : (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vgpr, 2>)
         -> (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vcc, 1>)
@@ -139,7 +139,7 @@ func.func @overlapping_vcc_live_range_v_add_u32_vcc(%a: !waveamdmachine.reg<vgpr
   %sum0, %vcc0 = waveamdmachine.v_add_u64 %a, %b
       : (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vgpr, 2>)
         -> (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vcc, 1>)
-  // expected-error @below {{overlapping VCC live range needs flag spill support}}
+  // expected-error @below {{waveamd-reg-alloc found overlapping VCC live range after hardware-register preservation}}
   %sum1, %vcc1 = waveamdmachine.v_add_u32_vcc %c, %d
       : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
         -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vcc, 1>)
@@ -160,7 +160,7 @@ func.func @overlapping_vcc_live_range_v_cmp_u32_vcc(%a: !waveamdmachine.reg<vgpr
   %sum0, %vcc0 = waveamdmachine.v_add_u64 %a, %b
       : (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vgpr, 2>)
         -> (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vcc, 1>)
-  // expected-error @below {{overlapping VCC live range needs flag spill support}}
+  // expected-error @below {{waveamd-reg-alloc found overlapping VCC live range after hardware-register preservation}}
   %mask, %vcc1 = waveamdmachine.v_cmp_lt_u32_vcc %c, %d
       : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
         -> (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<vcc, 1>)

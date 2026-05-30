@@ -8,6 +8,7 @@
 
 #include "mlir/Dialect/Wave/Transforms/Passes.h"
 
+#include "WaveAMDHardwareResources.h"
 #include "WaveAMDRegAllocPrep.h"
 #include "WaveAMDRegLiveIntervals.h"
 #include "WaveAMDRegisterLimits.h"
@@ -116,6 +117,9 @@ struct WaveAMDRegAllocPass
   LogicalResult allocateFunction(func::FuncOp func, RegisterLimits limits,
                                  bool softFail, bool &overflow) {
     if (failed(wave::prepareWaveAMDRegAllocIR(func)))
+      return failure();
+    if (failed(wave::verifyNoHardwareResourceLiveRangeOverlap(
+            func, "waveamd-reg-alloc")))
       return failure();
     FailureOr<wave::WaveAMDLiveIntervalBuildResult> builtIntervals =
         wave::buildWaveAMDLiveIntervals(func);

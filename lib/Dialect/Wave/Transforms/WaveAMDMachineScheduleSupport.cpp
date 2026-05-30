@@ -8,6 +8,7 @@
 
 #include "WaveAMDMachineScheduleSupport.h"
 
+#include "WaveAMDHardwareResources.h"
 #include "WaveAMDMachineScheduleInternal.h"
 #include "WaveAMDRegLiveIntervals.h"
 #include "WaveAMDRegisterLimits.h"
@@ -107,17 +108,6 @@ StringRef getEdgeKindName(EdgeKind kind) {
 
 static bool isMemToken(Value value) {
   return isa<waveamdmachine::MemTokenType>(value.getType());
-}
-
-static std::optional<waveamdmachine::RegClass> getFlagClass(Value value) {
-  auto type = dyn_cast<waveamdmachine::RegType>(value.getType());
-  if (!type)
-    return std::nullopt;
-  waveamdmachine::RegClass cls = type.getRegClass();
-  if (cls == waveamdmachine::RegClass::SCC ||
-      cls == waveamdmachine::RegClass::VCC)
-    return cls;
-  return std::nullopt;
 }
 
 static void addEdge(DependenceGraph &graph, unsigned src, unsigned dst,
@@ -263,27 +253,24 @@ static void addValueEdges(const ScheduleRegion &region, DependenceGraph &graph,
   }
 }
 
-static void addFlagEdges(const ScheduleRegion &region, DependenceGraph &graph) {
-  DenseMap<waveamdmachine::RegClass, unsigned> lastWriter;
-  DenseMap<waveamdmachine::RegClass, SmallVector<unsigned, 4>> readers;
+static void addHardwareResourceEdges(const ScheduleRegion &region,
+                                     DependenceGraph &graph) {
+  DenseMap<unsigned, unsigned> lastWriter;
+  DenseMap<unsigned, SmallVector<unsigned, 4>> readers;
   for (auto [index, op] : llvm::enumerate(region.ops)) {
-    for (Value operand : op->getOperands())
-      if (std::optional<waveamdmachine::RegClass> cls = getFlagClass(operand))
-        readers[*cls].push_back(index);
-
-    SmallVector<waveamdmachine::RegClass, 2> written;
-    for (Value result : op->getResults()) {
-      std::optional<waveamdmachine::RegClass> cls = getFlagClass(result);
-      if (cls && !llvm::is_contained(written, *cls))
-        written.push_back(*cls);
-    }
-    for (waveamdmachine::RegClass cls : written) {
-      if (auto it = lastWriter.find(cls); it != lastWriter.end())
+    wave::HardwareResourceEffects effects =
+        wave::getHardwareResourceEffects(op);
+    for (wave::HardwareResourceKind kind : effects.reads)
+      readers[static_cast<unsigned>(kind)].push_back(index);
+    for (wave::HardwareResourceKind kind : effects.writes) {
+      unsigned key = static_cast<unsigned>(kind);
+      if (DenseMap<unsigned, unsigned>::iterator it = lastWriter.find(key);
+          it != lastWriter.end())
         addEdge(graph, it->second, index, EdgeKind::Flag);
-      for (unsigned reader : readers[cls])
+      for (unsigned reader : readers[key])
         addEdge(graph, reader, index, EdgeKind::Flag);
-      readers[cls].clear();
-      lastWriter[cls] = index;
+      readers[key].clear();
+      lastWriter[key] = index;
     }
   }
 }
@@ -326,7 +313,7 @@ DependenceGraph buildDependenceGraph(const ScheduleRegion &region) {
 
   addValueEdges(region, graph, nodeForOp);
   addLoopCarryEdges(region, graph, nodeForOp);
-  addFlagEdges(region, graph);
+  addHardwareResourceEdges(region, graph);
   return graph;
 }
 

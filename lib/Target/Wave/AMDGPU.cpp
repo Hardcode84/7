@@ -125,6 +125,7 @@ struct KernelInfo {
   X(sMulHiU32, S_MUL_HI_U32_vi, S_MUL_HI_U32_gfx11)                            \
   X(sCmpLtI32, S_CMP_LT_I32_vi, S_CMP_LT_I32_gfx11)                            \
   X(sCmpLgU32, S_CMP_LG_U32_vi, S_CMP_LG_U32_gfx11)                            \
+  X(sCselectB32, S_CSELECT_B32_vi, S_CSELECT_B32_gfx11)                        \
   X(sCbranchScc0, S_CBRANCH_SCC0_vi, S_CBRANCH_SCC0_gfx11)                     \
   X(sCbranchScc1, S_CBRANCH_SCC1_vi, S_CBRANCH_SCC1_gfx11)                     \
   X(sCbranchExecz, S_CBRANCH_EXECZ_vi, S_CBRANCH_EXECZ_gfx11)                  \
@@ -373,6 +374,7 @@ private:
   unsigned sMulHiU32() const { return opcodes.sMulHiU32; }
   unsigned sCmpLtI32() const { return opcodes.sCmpLtI32; }
   unsigned sCmpLgU32() const { return opcodes.sCmpLgU32; }
+  unsigned sCselectB32() const { return opcodes.sCselectB32; }
   unsigned sCbranchScc0() const { return opcodes.sCbranchScc0; }
   unsigned sCbranchScc1() const { return opcodes.sCbranchScc1; }
   unsigned sCbranchExecz() const { return opcodes.sCbranchExecz; }
@@ -1545,6 +1547,24 @@ private:
     if (isa<waveamdmachine::SCmpLgU32Op>(op))
       return emitMC(sCmpLgU32(), {toMCOperand(op.getOperand(0)),
                                   toMCOperand(op.getOperand(1))});
+    if (isa<waveamdmachine::SCSelectB32Op>(op))
+      return emitMC(sCselectB32(),
+                    {toMCOperand(result()), toMCOperand(op.getOperand(1)),
+                     toMCOperand(op.getOperand(2))});
+    if (isa<waveamdmachine::SReadVccB32Op>(op)) {
+      if (wavefrontSize != 32)
+        return op.emitError("s_read_vcc_b32 supports wave32 only");
+      return emitMC(sMovB32(),
+                    {toMCOperand(result()),
+                     llvm::MCOperand::createReg(namedPhysReg("vcc_lo"))});
+    }
+    if (isa<waveamdmachine::SMovVccB32Op>(op)) {
+      if (wavefrontSize != 32)
+        return op.emitError("s_mov_vcc_b32 supports wave32 only");
+      return emitMC(sMovB32(),
+                    {llvm::MCOperand::createReg(namedPhysReg("vcc_lo")),
+                     toMCOperand(op.getOperand(0))});
+    }
     if (isa<waveamdmachine::SCBranchScc0Op>(op))
       return emitMC(sCbranchScc0(),
                     {labelOperand(op.getAttrOfType<StringAttr>("label"))});

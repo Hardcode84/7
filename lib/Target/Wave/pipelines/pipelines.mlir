@@ -48,15 +48,17 @@ module attributes {transform.with_named_sequence} {
       %root: !transform.any_op {transform.consumed}) -> !transform.any_op {
     %r3 = transform.apply_registered_pass "waveamd-insert-ticket-waits" to %root
         : (!transform.any_op) -> !transform.any_op
-    %r4 = transform.apply_registered_pass "waveamd-reg-alloc" to %r3
+    %r4 = transform.apply_registered_pass "waveamd-preserve-hw-regs" to %r3
         : (!transform.any_op) -> !transform.any_op
-    %r5 = transform.apply_registered_pass "waveamd-insert-hazard-waits" to %r4
+    %r5 = transform.apply_registered_pass "waveamd-reg-alloc" to %r4
         : (!transform.any_op) -> !transform.any_op
-    %r6 = transform.apply_registered_pass "waveamd-resource-info" to %r5
+    %r6 = transform.apply_registered_pass "waveamd-insert-hazard-waits" to %r5
         : (!transform.any_op) -> !transform.any_op
-    %r7 = transform.apply_registered_pass "waveamd-metadata" to %r6
+    %r7 = transform.apply_registered_pass "waveamd-resource-info" to %r6
         : (!transform.any_op) -> !transform.any_op
-    transform.yield %r7 : !transform.any_op
+    %r8 = transform.apply_registered_pass "waveamd-metadata" to %r7
+        : (!transform.any_op) -> !transform.any_op
+    transform.yield %r8 : !transform.any_op
   }
 
   transform.named_sequence @waveamd_backend_unscheduled(

@@ -539,6 +539,26 @@ def WaveAMDMachine_SMovB32Op : WaveAMDMachine_UnaryNoResult<"s_mov_b32",
   let assemblyFormat = "$dst `,` $source attr-dict `:` functional-type(operands, results)";
 }
 
+def WaveAMDMachine_SCSelectB32Op : WaveAMDMachine_Op<"s_cselect_b32", [Pure]> {
+  let summary = "select scalar value using SCC";
+  let arguments = (ins WaveAMDMachine_SCC:$cond,
+                       WaveAMDMachine_SGPR1OrImm:$true_value,
+                       WaveAMDMachine_SGPR1OrImm:$false_value);
+  let results = (outs WaveAMDMachine_SGPR1:$result);
+  let assemblyFormat = "$cond `,` $true_value `,` $false_value attr-dict `:` functional-type(operands, results)";
+}
+
+def WaveAMDMachine_SReadVccB32Op : WaveAMDMachine_Op<"s_read_vcc_b32", [Pure]> {
+  let summary = "copy VCC low bits into SGPR";
+  let arguments = (ins WaveAMDMachine_VCC:$source);
+  let results = (outs WaveAMDMachine_SGPR1:$result);
+  let assemblyFormat = "$source attr-dict `:` functional-type(operands, results)";
+}
+
+def WaveAMDMachine_SMovVccB32Op
+    : WaveAMDMachine_UnaryResult<"s_mov_vcc_b32", WaveAMDMachine_SGPR1,
+                                 WaveAMDMachine_VCC, [Pure]>;
+
 // Value-producing scalar move: materialises an SGPR1 holding the
 // given Imm or copies an existing SGPR1/RegOrImm into a fresh
 // allocator-assigned SGPR. Used by the selector to lift loop-IV
