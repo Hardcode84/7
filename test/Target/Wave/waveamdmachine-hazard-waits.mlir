@@ -41,6 +41,54 @@ func.func @no_delay_after_vmcnt_wait(%x: !waveamdmachine.reg<vgpr, 1>, %y: !wave
   return
 }
 
+// CFG joins merge armed VALU-after-LGKM state from every predecessor.
+// Textual block order is irrelevant.
+// CHECK-LABEL: func.func @delay_after_lgkm_wait_across_join
+// CHECK: cf.cond_br
+// CHECK: ^bb{{[0-9]+}}:
+// CHECK-NEXT: waveamdmachine.imm 1
+// CHECK-NEXT: waveamdmachine.s_delay_alu
+// CHECK-NEXT: waveamdmachine.v_add_u32
+// CHECK: waveamdmachine.s_waitcnt
+func.func @delay_after_lgkm_wait_across_join(%cond: i1,
+                                             %x: !waveamdmachine.reg<vgpr, 1>,
+                                             %y: !waveamdmachine.reg<sgpr, 1>) {
+  cf.cond_br %cond, ^wait, ^join
+^join:
+  %sum = waveamdmachine.v_add_u32 %x, %y
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 1>)
+      -> !waveamdmachine.reg<vgpr, 1>
+  return
+^wait:
+  %wait = waveamdmachine.imm 64519 : !waveamdmachine.imm
+  waveamdmachine.s_waitcnt %wait : (!waveamdmachine.imm) -> ()
+  cf.br ^join
+}
+
+// A wait in one sibling arm must not arm the mutually exclusive arm.
+// CHECK-LABEL: func.func @no_delay_after_lgkm_wait_in_sibling_arm
+// CHECK: cf.cond_br
+// CHECK: waveamdmachine.s_waitcnt
+// CHECK-NOT: waveamdmachine.s_delay_alu
+// CHECK: waveamdmachine.v_add_u32
+func.func @no_delay_after_lgkm_wait_in_sibling_arm(
+    %cond: i1,
+    %x: !waveamdmachine.reg<vgpr, 1>,
+    %y: !waveamdmachine.reg<sgpr, 1>) {
+  cf.cond_br %cond, ^wait, ^valu
+^wait:
+  %wait = waveamdmachine.imm 64519 : !waveamdmachine.imm
+  waveamdmachine.s_waitcnt %wait : (!waveamdmachine.imm) -> ()
+  cf.br ^exit
+^valu:
+  %sum = waveamdmachine.v_add_u32 %x, %y
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 1>)
+      -> !waveamdmachine.reg<vgpr, 1>
+  cf.br ^exit
+^exit:
+  return
+}
+
 // A `waveamdmachine.uniform_loop` body must also be inspected: a partial
 // lgkmcnt wait inside the loop has to insert the same VALU mitigation
 // as it would at the top level.
@@ -57,6 +105,52 @@ func.func @delay_inside_uniform_loop(%x: !waveamdmachine.reg<vgpr, 1>, %y: !wave
     %sum = waveamdmachine.v_add_u32 %x, %y : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
     waveamdmachine.continue_if %ec : !waveamdmachine.reg<scc, 1>
   }
+  return
+}
+
+// Parent LGKM state must enter a taken uniform_loop body.
+// CHECK-LABEL: func.func @delay_on_uniform_loop_entry_after_lgkm_wait
+// CHECK: waveamdmachine.s_waitcnt
+// CHECK: waveamdmachine.uniform_loop
+// CHECK: waveamdmachine.imm 1
+// CHECK-NEXT: waveamdmachine.s_delay_alu
+// CHECK-NEXT: waveamdmachine.v_add_u32
+func.func @delay_on_uniform_loop_entry_after_lgkm_wait(
+    %x: !waveamdmachine.reg<vgpr, 1>,
+    %y: !waveamdmachine.reg<sgpr, 1>,
+    %ec: !waveamdmachine.reg<scc, 1>) {
+  %wait = waveamdmachine.imm 64519 : !waveamdmachine.imm
+  waveamdmachine.s_waitcnt %wait : (!waveamdmachine.imm) -> ()
+  waveamdmachine.uniform_loop if %ec : !waveamdmachine.reg<scc, 1> {
+    %sum = waveamdmachine.v_add_u32 %x, %y
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+    waveamdmachine.continue_if %ec : !waveamdmachine.reg<scc, 1>
+  }
+  return
+}
+
+// Uniform_loop exit state must reach the parent continuation.
+// CHECK-LABEL: func.func @delay_after_uniform_loop_exit_lgkm_wait
+// CHECK: waveamdmachine.uniform_loop
+// CHECK: waveamdmachine.s_waitcnt
+// CHECK: waveamdmachine.continue_if
+// CHECK: }
+// CHECK-NEXT: waveamdmachine.imm 1
+// CHECK-NEXT: waveamdmachine.s_delay_alu
+// CHECK-NEXT: waveamdmachine.v_add_u32
+func.func @delay_after_uniform_loop_exit_lgkm_wait(
+    %x: !waveamdmachine.reg<vgpr, 1>,
+    %y: !waveamdmachine.reg<sgpr, 1>,
+    %ec: !waveamdmachine.reg<scc, 1>) {
+  waveamdmachine.uniform_loop if %ec : !waveamdmachine.reg<scc, 1> {
+    %wait = waveamdmachine.imm 64519 : !waveamdmachine.imm
+    waveamdmachine.s_waitcnt %wait : (!waveamdmachine.imm) -> ()
+    waveamdmachine.continue_if %ec : !waveamdmachine.reg<scc, 1>
+  }
+  %sum = waveamdmachine.v_add_u32 %x, %y
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 1>)
+      -> !waveamdmachine.reg<vgpr, 1>
   return
 }
 
@@ -261,10 +355,9 @@ func.func @m0_delay_after_chained_mov(
 }
 
 // MFMA producer in one branch of a `cf.cond_br`, VMEM store in the
-// join. The backward query crosses the block boundary, finds the
-// MFMA in each predecessor, and the gap (0 in the pred + 1 for the
-// `cf.br` terminator + 0 in the join entry = 1) leaves 7 wait states
-// to be inserted as a single `s_nop` (encodes count - 1 = 6).
+// join. Dataflow remaps the MFMA hazard to the join block argument.
+// The `cf.br` terminator counts as one instruction, leaving 7 wait
+// states: one `s_nop` with immediate 6.
 // CHECK-LABEL: func.func @mfma_store_delay_across_cond_br
 // CHECK: cf.cond_br
 // CHECK: waveamdmachine.mfma_f32_16x16x32_f16
@@ -440,12 +533,8 @@ func.func @mfma_carry_consumed_after_loop(
 
 // -----
 
-// Loop-replay must not double-emit the `s_nop` for an M0 hazard
-// inside a `uniform_loop` body. The trailing `s_waitcnt` forces the
-// loop-replay heuristic (VALU-after-LGKM persists across the
-// back-edge), but the `SsaEdge` M0 query is idempotent: on the
-// second walk it finds the `s_nop` from walk 1 already saturating
-// the gap, so only one `s_nop` survives in the body.
+// SSA-edge M0 mitigation inside uniform_loop must stay idempotent
+// while linear LGKM state persists across the back-edge.
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 
 // CHECK-LABEL: func.func @m0_delay_inside_uniform_loop_no_dup

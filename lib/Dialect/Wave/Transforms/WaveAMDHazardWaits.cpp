@@ -6,30 +6,32 @@
 //
 //===----------------------------------------------------------------------===//
 //
-// Driver: flat pre-order walk over every waveamdmachine op in a
-// function, after regalloc. LinearState hazards use walk-local
-// pending state plus one loop replay; SSA-edge hazards query backward
-// through same-block defs, one-hop CFG block args, and region-branch
-// entry/back-edge/exit carries. Regalloc can insert VALU copies, so
-// production pipelines run this pass after allocation.
+// Driver runs after regalloc. Dense forward dataflow tracks the LGKM
+// pending bit and SSA-value hazards through CFG and region edges.
+// Regalloc can insert VALU copies, so production pipelines run this
+// pass after allocation.
 //
 // Design notes: `docs/HazardMitigationDesign.md`.
 
 #include "mlir/Dialect/Wave/Transforms/Passes.h"
 
 #include "Utils/AMDGPUBaseInfo.h"
+#include "mlir/Analysis/DataFlow/DenseAnalysis.h"
+#include "mlir/Analysis/DataFlow/Utils.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Wave/Transforms/WaveAMDRegAllocVerification.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachine.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineTarget.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
+#include "mlir/Interfaces/ControlFlowInterfaces.h"
+#include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/STLExtras.h"
 #include "llvm/MC/MCSubtargetInfo.h"
 #include "llvm/MC/TargetRegistry.h"
 #include "llvm/Support/TargetSelect.h"
 #include "llvm/TargetParser/TargetParser.h"
 #include "llvm/TargetParser/Triple.h"
-#include <functional>
 #include <optional>
 
 namespace mlir::wave {
@@ -38,6 +40,7 @@ namespace mlir::wave {
 } // namespace mlir::wave
 
 using namespace mlir;
+using namespace mlir::dataflow;
 
 namespace {
 
@@ -225,416 +228,308 @@ static std::optional<bool> recomputePendingLgkm(Operation &op,
   return cfg.hasDelayAlu ? lg != cfg.defaultLgkmcnt : true;
 }
 
-// Two execution shapes:
-//   - `LinearState`: pending counter raised by a producer, decremented
-//     by each counted op, consumed by the matching consumer. Right
-//     for hazards with no SSA edge (VALU-after-LGKM-wait: `s_waitcnt`
-//     mutates a global counter that every following VALU op sees).
-//   - `SsaEdge`: on each consumer, walk back to the producer via the
-//     SSA def-use chain and measure the distance in counted ops. Right
-//     for hazards where the producer's result feeds a specific
-//     consumer operand (M0-after-`s_mov_m0`, MFMA-result-as-VMEM-store).
-enum class HazardCategory { LinearState, SsaEdge };
-
-// Strictly between `from` and `to` in the same block: machine-inst
-// count, skipping ops tagged `NoMachineInst`. Caller must ensure
-// `from` precedes `to` in the same block.
-static unsigned countMachineInstsBetween(Operation *from, Operation *to) {
-  assert(from->getBlock() == to->getBlock() &&
-         "countMachineInstsBetween requires same-block operands");
-  unsigned count = 0;
-  for (Operation *cur = from->getNextNode(); cur && cur != to;
-       cur = cur->getNextNode()) {
-    if (!emitsNoMachineInst(*cur))
-      ++count;
-  }
-  return count;
+static bool isControlFlowOp(Operation *op) {
+  return isa<BranchOpInterface, RegionBranchOpInterface,
+             RegionBranchTerminatorOpInterface>(op);
 }
 
-// Machine-inst count from the start of `block` up to (but not
-// including) `op`. Used by cross-block edge resolution.
-static unsigned countFromBlockEntry(Block *block, Operation *op) {
-  unsigned count = 0;
-  for (Operation &cur : *block) {
-    if (&cur == op)
-      break;
-    if (!emitsNoMachineInst(cur))
-      ++count;
-  }
-  return count;
-}
+struct ValueHazards {
+  unsigned m0 = 0;
+  unsigned mfmaStore = 0;
 
-// Result of resolving a producer for an `SsaEdge` consumer operand.
-struct SsaEdgeResult {
-  Operation *producer;
-  unsigned gap;
+  bool empty() const { return m0 == 0 && mfmaStore == 0; }
+
+  bool joinWith(ValueHazards rhs) {
+    unsigned nextM0 = std::max(m0, rhs.m0);
+    unsigned nextMfmaStore = std::max(mfmaStore, rhs.mfmaStore);
+    bool changed = nextM0 != m0 || nextMfmaStore != mfmaStore;
+    m0 = nextM0;
+    mfmaStore = nextMfmaStore;
+    return changed;
+  }
+
+  void advance(unsigned count) {
+    m0 = m0 > count ? m0 - count : 0;
+    mfmaStore = mfmaStore > count ? mfmaStore - count : 0;
+  }
 };
 
-// Successor index of `target` in `terminator`, or nullopt if
-// `target` is not a successor.
-static std::optional<unsigned> findSuccessorIndex(Operation *terminator,
-                                                  Block *target) {
-  for (unsigned i = 0, e = terminator->getNumSuccessors(); i < e; ++i) {
-    if (terminator->getSuccessor(i) == target)
-      return i;
-  }
-  return std::nullopt;
-}
+struct HazardState {
+  bool lgkmPending = false;
+  DenseMap<Value, ValueHazards> values;
 
-// Resolve a single block-arg predecessor edge to a producer. Returns
-// the producer + cumulative gap (producer-to-terminator + terminator +
-// `entryToAnchor`), or `nullopt` if the edge is unanalyzable (multi-hop)
-// or carries a non-producer value.
-static std::optional<SsaEdgeResult>
-resolvePredEdge(BranchOpInterface branchOp, unsigned succIdx, unsigned argIdx,
-                unsigned entryToAnchor,
-                function_ref<bool(Operation &)> isProducer) {
-  SuccessorOperands succOps = branchOp.getSuccessorOperands(succIdx);
-  if (argIdx >= succOps.size())
-    return std::nullopt;
-  Value forwarded = succOps[argIdx];
-  if (!forwarded)
-    return std::nullopt;
-  Operation *fwdDef = forwarded.getDefiningOp();
-  Operation *terminator = branchOp.getOperation();
-  if (!fwdDef || fwdDef->getBlock() != terminator->getBlock())
-    return std::nullopt;
-  if (!isProducer(*fwdDef))
-    return std::nullopt;
-  unsigned defToTerm = countMachineInstsBetween(fwdDef, terminator);
-  unsigned termGap = emitsNoMachineInst(*terminator) ? 0 : 1;
-  return SsaEdgeResult{fwdDef, defToTerm + termGap + entryToAnchor};
-}
-
-// Forwarded value + the op that performs the forwarding. The op is
-// either the parent `RegionBranchOpInterface` op (entry from parent)
-// or a `RegionBranchTerminatorOpInterface` (back-edge or exit). Used
-// as the anchor for the recursive walk on the source side; the gap on
-// the destination side is added by the caller.
-struct RegionBranchSource {
-  Value value;
-  Operation *sourceOp;
-};
-
-// Append every (operand, terminator) pair from terminators inside
-// `parentOp`'s regions whose successor list contains `wantedSucc`.
-// `extract(succ, ops)` maps a matched successor to the operand chosen
-// at the appropriate index.
-template <typename ExtractFn>
-static void collectFromTerminators(Operation *parentOp,
-                                   function_ref<bool(RegionSuccessor)> matches,
-                                   ExtractFn extract,
-                                   SmallVectorImpl<RegionBranchSource> &out) {
-  for (Region &region : parentOp->getRegions()) {
-    for (Block &b : region) {
-      auto term =
-          dyn_cast<RegionBranchTerminatorOpInterface>(b.getTerminator());
-      if (!term)
+  bool joinWith(const HazardState &rhs) {
+    bool changed = false;
+    if (rhs.lgkmPending && !lgkmPending) {
+      lgkmPending = true;
+      changed = true;
+    }
+    for (auto [value, hazards] : rhs.values) {
+      if (hazards.empty())
         continue;
-      SmallVector<RegionSuccessor> succs;
-      SmallVector<Attribute> constOperands(term->getNumOperands(), Attribute());
-      term.getSuccessorRegions(constOperands, succs);
-      for (RegionSuccessor &succ : succs) {
-        if (!matches(succ))
-          continue;
-        MutableOperandRange ops = term.getMutableSuccessorOperands(succ);
-        extract(ops, term.getOperation(), out);
+      changed |= values[value].joinWith(hazards);
+    }
+    return changed;
+  }
+};
+
+class HazardLattice : public AbstractDenseLattice {
+public:
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(HazardLattice)
+
+  using AbstractDenseLattice::AbstractDenseLattice;
+
+  const HazardState &get() const { return state; }
+
+  ChangeResult joinWith(const HazardState &incoming) {
+    return state.joinWith(incoming) ? ChangeResult::Change
+                                    : ChangeResult::NoChange;
+  }
+
+  ChangeResult join(const AbstractDenseLattice &rhs) override {
+    return joinWith(static_cast<const HazardLattice &>(rhs).state);
+  }
+
+  ChangeResult reset() {
+    bool changed = state.lgkmPending || !state.values.empty();
+    state = HazardState();
+    return changed ? ChangeResult::Change : ChangeResult::NoChange;
+  }
+
+  void print(raw_ostream &os) const override {
+    os << "lgkm=" << state.lgkmPending << " values=" << state.values.size();
+  }
+
+private:
+  HazardState state;
+};
+
+static void mergeValueHazards(HazardState &state, Value value,
+                              ValueHazards hazards) {
+  if (hazards.empty())
+    return;
+  state.values[value].joinWith(hazards);
+}
+
+static ValueHazards lookupValueHazards(const HazardState &state, Value value) {
+  auto it = state.values.find(value);
+  return it == state.values.end() ? ValueHazards() : it->second;
+}
+
+static void advanceValueHazards(HazardState &state, unsigned count = 1) {
+  if (count == 0)
+    return;
+  for (auto &entry : llvm::make_early_inc_range(state.values)) {
+    entry.second.advance(count);
+    if (entry.second.empty())
+      state.values.erase(entry.first);
+  }
+}
+
+static void propagateValueHazards(ArrayRef<Value> sources, ValueRange targets,
+                                  HazardState &state) {
+  for (auto [source, target] : llvm::zip(sources, targets))
+    mergeValueHazards(state, target, lookupValueHazards(state, source));
+}
+
+static void collectValues(OperandRange values, SmallVectorImpl<Value> &out) {
+  llvm::append_range(out, values);
+}
+
+static void collectValues(SuccessorOperands values,
+                          SmallVectorImpl<Value> &out) {
+  for (unsigned i = 0, e = values.size(); i < e; ++i)
+    if (Value value = values[i])
+      out.push_back(value);
+}
+
+static void propagateBranchOperands(Operation *terminator, Block *successor,
+                                    HazardState &state) {
+  auto branch = dyn_cast<BranchOpInterface>(terminator);
+  if (!branch)
+    return;
+  for (auto [idx, target] : llvm::enumerate(terminator->getSuccessors())) {
+    if (target != successor)
+      continue;
+    SmallVector<Value> sources;
+    collectValues(branch.getSuccessorOperands(idx), sources);
+    propagateValueHazards(sources, successor->getArguments(), state);
+  }
+}
+
+static void propagateRegionOperands(RegionBranchOpInterface branch,
+                                    std::optional<unsigned> regionFrom,
+                                    std::optional<unsigned> regionTo,
+                                    HazardState &state) {
+  RegionSuccessor successor =
+      regionTo ? RegionSuccessor(&branch->getRegion(*regionTo))
+               : RegionSuccessor::parent();
+
+  SmallVector<Value> sources;
+  if (regionFrom) {
+    Operation *term = branch->getRegion(*regionFrom).front().getTerminator();
+    if (auto regionTerm = dyn_cast<RegionBranchTerminatorOpInterface>(term))
+      collectValues(regionTerm.getSuccessorOperands(successor), sources);
+  } else {
+    collectValues(branch.getEntrySuccessorOperands(successor), sources);
+  }
+  propagateValueHazards(sources, branch.getSuccessorInputs(successor), state);
+}
+
+static void inheritNoInstOperandHazards(Operation *op, HazardState &state) {
+  if (!emitsNoMachineInst(*op) || op->getNumResults() == 0)
+    return;
+  ValueHazards joined;
+  for (Value operand : op->getOperands())
+    joined.joinWith(lookupValueHazards(state, operand));
+  for (Value result : op->getResults())
+    mergeValueHazards(state, result, joined);
+}
+
+static void addProducedHazards(Operation *op, HazardState &state,
+                               const HazardConfig &cfg) {
+  if (isa<waveamdmachine::SMovM0Op>(op)) {
+    for (Value result : op->getResults())
+      mergeValueHazards(state, result,
+                        {/*m0=*/cfg.m0PipelineDelay,
+                         /*mfmaStore=*/0});
+  }
+  if (op->hasTrait<OpTrait::waveamdmachine::MFMAOp>()) {
+    for (Value result : op->getResults())
+      mergeValueHazards(state, result,
+                        {/*m0=*/0,
+                         /*mfmaStore=*/cfg.mfmaResultLatency});
+  }
+}
+
+static void transferHazards(Operation *op, HazardState &state,
+                            const HazardConfig &cfg) {
+  bool controlFlow = isControlFlowOp(op);
+  if (!controlFlow && state.lgkmPending &&
+      op->hasTrait<OpTrait::waveamdmachine::VALUOp>())
+    state.lgkmPending = false;
+
+  if (!emitsNoMachineInst(*op))
+    advanceValueHazards(state);
+
+  if (controlFlow)
+    return;
+
+  inheritNoInstOperandHazards(op, state);
+  addProducedHazards(op, state, cfg);
+
+  if (isa<waveamdmachine::SWaitcntOp>(op)) {
+    std::optional<bool> next = recomputePendingLgkm(*op, cfg);
+    if (next)
+      state.lgkmPending = *next;
+  }
+}
+
+static unsigned getRequiredSsaWait(Operation *op, const HazardState &state) {
+  if (isControlFlowOp(op))
+    return 0;
+  unsigned wait = 0;
+  bool vmemStore = isVMEMStore(*op);
+  for (Value operand : op->getOperands()) {
+    ValueHazards hazards = lookupValueHazards(state, operand);
+    if (isa<waveamdmachine::M0Type>(operand.getType()))
+      wait = std::max(wait, hazards.m0);
+    if (vmemStore)
+      wait = std::max(wait, hazards.mfmaStore);
+  }
+  return wait;
+}
+
+static bool needsValuMitigation(Operation *op, const HazardState &state) {
+  return state.lgkmPending && op->hasTrait<OpTrait::waveamdmachine::VALUOp>();
+}
+
+class HazardAnalysis : public DenseForwardDataFlowAnalysis<HazardLattice> {
+public:
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(HazardAnalysis)
+
+  HazardAnalysis(DataFlowSolver &solver, const HazardConfig &cfg)
+      : DenseForwardDataFlowAnalysis(solver), cfg(cfg) {}
+
+  LogicalResult initialize(Operation *top) override {
+    auto markRegions = [&](Operation *op) {
+      for (Region &region : op->getRegions()) {
+        for (Block &block : region) {
+          auto *blockLive =
+              getOrCreate<Executable>(getProgramPointBefore(&block));
+          propagateIfChanged(blockLive, blockLive->setToLive());
+          Operation *term = block.getTerminator();
+          if (!term)
+            continue;
+          for (Block *successor : term->getSuccessors()) {
+            auto *edgeLive = getOrCreate<Executable>(
+                getLatticeAnchor<CFGEdge>(&block, successor));
+            propagateIfChanged(edgeLive, edgeLive->setToLive());
+          }
+        }
       }
+    };
+    markRegions(top);
+    top->walk(markRegions);
+    return DenseForwardDataFlowAnalysis<HazardLattice>::initialize(top);
+  }
+
+  void setToEntryState(HazardLattice *lattice) override {
+    propagateIfChanged(lattice, lattice->reset());
+  }
+
+  LogicalResult visitOperation(Operation *op, const HazardLattice &before,
+                               HazardLattice *after) override {
+    HazardState next = before.get();
+    transferHazards(op, next, cfg);
+    propagateIfChanged(after, after->joinWith(next));
+    markCFGSuccessorsLive(op, next);
+    return success();
+  }
+
+  void visitBlockTransfer(Block *block, ProgramPoint *point, Block *predecessor,
+                          const HazardLattice &before,
+                          HazardLattice *after) override {
+    HazardState next = before.get();
+    propagateBranchOperands(predecessor->getTerminator(), block, next);
+    propagateIfChanged(after, after->joinWith(next));
+  }
+
+  void visitRegionBranchControlFlowTransfer(RegionBranchOpInterface branch,
+                                            std::optional<unsigned> regionFrom,
+                                            std::optional<unsigned> regionTo,
+                                            const HazardLattice &before,
+                                            HazardLattice *after) override {
+    HazardState next = before.get();
+    if (!regionFrom && !emitsNoMachineInst(*branch))
+      advanceValueHazards(next);
+    propagateRegionOperands(branch, regionFrom, regionTo, next);
+    propagateIfChanged(after, after->joinWith(next));
+  }
+
+private:
+  void markCFGSuccessorsLive(Operation *op, const HazardState &state) {
+    if (op->getNumSuccessors() == 0)
+      return;
+    Block *source = op->getBlock();
+    if (!source)
+      return;
+    for (Block *successor : op->getSuccessors()) {
+      HazardState next = state;
+      propagateBranchOperands(op, successor, next);
+      HazardLattice *blockState = getLattice(getProgramPointBefore(successor));
+      propagateIfChanged(blockState, blockState->joinWith(next));
+      auto *blockLive =
+          getOrCreate<Executable>(getProgramPointBefore(successor));
+      propagateIfChanged(blockLive, blockLive->setToLive());
+      auto *edgeLive =
+          getOrCreate<Executable>(getLatticeAnchor<CFGEdge>(source, successor));
+      propagateIfChanged(edgeLive, edgeLive->setToLive());
     }
   }
-}
 
-// All values that flow into block argument `arg` via region-branch
-// interfaces: entry operands from the parent op (loop init) and
-// back-edge operands from terminators that branch to `arg`'s region
-// (continue_if carry). Empty for blocks that are not the entry block
-// of a region.
-static SmallVector<RegionBranchSource>
-collectRegionBranchSources(BlockArgument arg) {
-  SmallVector<RegionBranchSource> sources;
-  Block *block = arg.getOwner();
-  Region *region = block->getParent();
-  if (!region || block != &region->front())
-    return sources;
-  Operation *parentOp = region->getParentOp();
-  if (!parentOp)
-    return sources;
-  auto regionBranch = dyn_cast<RegionBranchOpInterface>(parentOp);
-  if (!regionBranch)
-    return sources;
-  unsigned argIdx = arg.getArgNumber();
-  RegionSuccessor regionSucc(region);
-  OperandRange entryOps = regionBranch.getEntrySuccessorOperands(regionSucc);
-  if (argIdx < entryOps.size())
-    sources.push_back({entryOps[argIdx], parentOp});
-  collectFromTerminators(
-      parentOp,
-      [&](RegionSuccessor succ) {
-        return !succ.isParent() && succ.getSuccessor() == region;
-      },
-      [&](MutableOperandRange ops, Operation *term,
-          SmallVectorImpl<RegionBranchSource> &out) {
-        if (argIdx < ops.size())
-          out.push_back({Value(ops[argIdx].get()), term});
-      },
-      sources);
-  return sources;
-}
-
-// All values that flow into op result `v` via the
-// `RegionBranchOpInterface`'s exit-to-parent terminators (the carry
-// values on the iteration that branches out, mapped positionally to
-// the op's results).
-static SmallVector<RegionBranchSource> collectRegionResultSources(OpResult v) {
-  SmallVector<RegionBranchSource> sources;
-  Operation *op = v.getOwner();
-  if (!isa<RegionBranchOpInterface>(op))
-    return sources;
-  unsigned resultIdx = v.getResultNumber();
-  collectFromTerminators(
-      op, [](RegionSuccessor succ) { return succ.isParent(); },
-      [&](MutableOperandRange ops, Operation *term,
-          SmallVectorImpl<RegionBranchSource> &out) {
-        if (resultIdx < ops.size())
-          out.push_back({Value(ops[resultIdx].get()), term});
-      },
-      sources);
-  return sources;
-}
-
-// Walk backward from `v` (read at `anchor`) looking for a producer of
-// `isProducer`. Handles:
-//   - Same-block producer: precise.
-//   - Block argument resolved via `BranchOpInterface` predecessor
-//     edges (one CFG hop).
-//   - Block argument of a region-entry block resolved via
-//     `RegionBranchOpInterface` entry operands and any
-//     `RegionBranchTerminatorOpInterface` back-edges. The recursion
-//     uses a visited set so that pass-through carries (where the
-//     terminator forwards the block argument unchanged) do not loop.
-// Multi-hop CFG paths and unknown terminators return `nullopt`;
-// predecessors that carry a non-producer value contribute no edge but
-// don't fail the whole search. The result is the min gap across the
-// raising predecessors / region-branch sources.
-// Combine a recursive result `sub` with `destSideGap` (count from the
-// source op back up to the original consumer's anchor). Keeps the
-// smaller of `best` and the new combined edge.
-static void mergeEdge(std::optional<SsaEdgeResult> &best,
-                      std::optional<SsaEdgeResult> sub, Operation *sourceOp,
-                      unsigned destSideGap) {
-  if (!sub)
-    return;
-  unsigned termGap = emitsNoMachineInst(*sourceOp) ? 0 : 1;
-  unsigned totalGap = sub->gap + termGap + destSideGap;
-  if (!best || totalGap < best->gap)
-    best = SsaEdgeResult{sub->producer, totalGap};
-}
-
-// Forward declarations for the mutually recursive helpers below.
-static std::optional<SsaEdgeResult>
-findProducerImpl(Value v, Operation *anchor,
-                 function_ref<bool(Operation &)> isProducer,
-                 DenseSet<Value> &visited);
-
-// `v` is defined by `def`. If `def` itself is a producer, return the
-// edge. Otherwise, if `def` is a `RegionBranchOpInterface` op,
-// recurse through its exit-to-parent terminators (the consumer reads
-// a value carried out of the loop). Same-block constraint applies.
-static std::optional<SsaEdgeResult>
-findProducerThroughDef(Operation *def, Value v, Operation *anchor,
-                       function_ref<bool(Operation &)> isProducer,
-                       DenseSet<Value> &visited) {
-  if (def->getBlock() != anchor->getBlock())
-    return std::nullopt;
-  if (isProducer(*def))
-    return SsaEdgeResult{def, countMachineInstsBetween(def, anchor)};
-  OpResult res = dyn_cast<OpResult>(v);
-  if (!res || !isa<RegionBranchOpInterface>(def))
-    return std::nullopt;
-  unsigned defToAnchor = countMachineInstsBetween(def, anchor);
-  std::optional<SsaEdgeResult> best;
-  for (const RegionBranchSource &src : collectRegionResultSources(res))
-    mergeEdge(best,
-              findProducerImpl(src.value, src.sourceOp, isProducer, visited),
-              src.sourceOp, defToAnchor);
-  return best;
-}
-
-// `blockArg` is a region-entry block argument. Try each
-// `BranchOpInterface` predecessor (one CFG hop) and each
-// region-branch source (loop init from parent + back-edge from
-// `continue_if`-style terminators).
-static std::optional<SsaEdgeResult>
-findProducerThroughBlockArg(BlockArgument blockArg, Operation *anchor,
-                            function_ref<bool(Operation &)> isProducer,
-                            DenseSet<Value> &visited) {
-  Block *block = blockArg.getOwner();
-  unsigned argIdx = blockArg.getArgNumber();
-  unsigned entryToAnchor = countFromBlockEntry(block, anchor);
-  std::optional<SsaEdgeResult> best;
-  for (Block *pred : block->getPredecessors()) {
-    auto branchOp = dyn_cast<BranchOpInterface>(pred->getTerminator());
-    if (!branchOp)
-      return std::nullopt;
-    std::optional<unsigned> succIdx =
-        findSuccessorIndex(pred->getTerminator(), block);
-    if (!succIdx)
-      return std::nullopt;
-    std::optional<SsaEdgeResult> edge =
-        resolvePredEdge(branchOp, *succIdx, argIdx, entryToAnchor, isProducer);
-    if (!edge)
-      continue;
-    if (!best || edge->gap < best->gap)
-      best = edge;
-  }
-  for (const RegionBranchSource &src : collectRegionBranchSources(blockArg))
-    mergeEdge(best,
-              findProducerImpl(src.value, src.sourceOp, isProducer, visited),
-              src.sourceOp, entryToAnchor);
-  return best;
-}
-
-static std::optional<SsaEdgeResult>
-findProducerImpl(Value v, Operation *anchor,
-                 function_ref<bool(Operation &)> isProducer,
-                 DenseSet<Value> &visited) {
-  if (!visited.insert(v).second)
-    return std::nullopt;
-  if (Operation *def = v.getDefiningOp())
-    return findProducerThroughDef(def, v, anchor, isProducer, visited);
-  return findProducerThroughBlockArg(cast<BlockArgument>(v), anchor, isProducer,
-                                     visited);
-}
-
-static std::optional<SsaEdgeResult>
-findProducer(Value v, Operation *anchor,
-             function_ref<bool(Operation &)> isProducer) {
-  DenseSet<Value> visited;
-  return findProducerImpl(v, anchor, isProducer, visited);
-}
-
-using MitigateFn = std::function<unsigned(
-    Operation &op, unsigned pending, OpBuilder &builder,
-    const HazardConfig &cfg, const llvm::MCSubtargetInfo &sti)>;
-
-using UpdateFn = std::function<unsigned(Operation &op, unsigned pending,
-                                        const HazardConfig &cfg)>;
-
-struct HazardKind {
-  StringRef name;
-  HazardCategory category;
-  // Run at every op. Inserts mitigation if pending is non-zero and the
-  // op consumes the hazard; returns updated pending.
-  MitigateFn mitigate;
-  // Run at every op, after mitigation. Producers raise pending;
-  // counted ops decrement (counter kinds) or pass through (flag kinds).
-  UpdateFn update;
-  // True iff the loop-replay walk should be seeded with this kind's
-  // final state. Only linear wait-state hazards persist across the
-  // replay; edge-count hazards reset to 0.
-  bool persistInReplay;
+  const HazardConfig &cfg;
 };
-
-static HazardKind makeValuLgkmHazard() {
-  return HazardKind{
-      "valu-after-lgkm-wait",
-      HazardCategory::LinearState,
-      [](Operation &op, unsigned pending, OpBuilder &b, const HazardConfig &cfg,
-         const llvm::MCSubtargetInfo &sti) -> unsigned {
-        if (!pending || !op.hasTrait<OpTrait::waveamdmachine::VALUOp>())
-          return pending;
-        insertValuMitigation(op, b, cfg, sti);
-        return 0;
-      },
-      [](Operation &op, unsigned pending, const HazardConfig &cfg) -> unsigned {
-        if (!isa<waveamdmachine::SWaitcntOp>(op))
-          return pending;
-        std::optional<bool> next = recomputePendingLgkm(op, cfg);
-        return next ? (*next ? 1u : 0u) : pending;
-      },
-      /*persistInReplay=*/true,
-  };
-}
-
-// SsaEdge mitigate: for each hazard-bearing operand on `op`, walk
-// back to the producer and emit `requiredGap - currentGap` NOPs if
-// the gap isn't already saturated. Re-running this on the same op
-// (e.g. on the loop replay) is idempotent because previously
-// inserted `s_nop`s themselves count as machine instructions.
-//
-// Multi-operand consumers (none exist today but the contract is
-// here for clarity): the first operand whose edge needs mitigation
-// emits the NOPs; subsequent edges see the now-saturated gap and
-// skip. If two operands legitimately need different gap sizes, this
-// would under-mitigate -- handle that when the case arises.
-static unsigned mitigateSsaEdge(Operation &op, OpBuilder &b,
-                                const llvm::MCSubtargetInfo &sti,
-                                unsigned requiredGap,
-                                function_ref<bool(Type)> operandTypeFilter,
-                                function_ref<bool(Operation &)> isProducer) {
-  for (Value v : op.getOperands()) {
-    if (operandTypeFilter && !operandTypeFilter(v.getType()))
-      continue;
-    auto result = findProducer(v, &op, isProducer);
-    if (!result || result->gap >= requiredGap)
-      continue;
-    insertSNopMitigation(op, requiredGap - result->gap, b, sti);
-    return 0;
-  }
-  return 0;
-}
-
-static HazardKind makeM0Hazard() {
-  return HazardKind{
-      "m0-after-s-mov-m0",
-      HazardCategory::SsaEdge,
-      [](Operation &op, unsigned, OpBuilder &b, const HazardConfig &cfg,
-         const llvm::MCSubtargetInfo &sti) -> unsigned {
-        return mitigateSsaEdge(
-            op, b, sti, cfg.m0PipelineDelay,
-            [](Type t) { return isa<waveamdmachine::M0Type>(t); },
-            [](Operation &p) { return isa<waveamdmachine::SMovM0Op>(p); });
-      },
-      // SsaEdge: no per-op state to advance.
-      [](Operation &, unsigned, const HazardConfig &) -> unsigned { return 0; },
-      /*persistInReplay=*/false,
-  };
-}
-
-static HazardKind makeMfmaStoreHazard() {
-  return HazardKind{
-      "vmem-store-after-mfma",
-      HazardCategory::SsaEdge,
-      [](Operation &op, unsigned, OpBuilder &b, const HazardConfig &cfg,
-         const llvm::MCSubtargetInfo &sti) -> unsigned {
-        if (!isVMEMStore(op))
-          return 0;
-        return mitigateSsaEdge(
-            op, b, sti, cfg.mfmaResultLatency,
-            // The MFMA result is the only VGPR-typed operand that
-            // carries this hazard, but the producer match alone is
-            // enough -- filter accepts every operand.
-            /*operandTypeFilter=*/nullptr, [](Operation &p) {
-              return p.hasTrait<OpTrait::waveamdmachine::MFMAOp>();
-            });
-      },
-      [](Operation &, unsigned, const HazardConfig &) -> unsigned { return 0; },
-      /*persistInReplay=*/false,
-  };
-}
-
-// Order matters only for mitigation insertion at a single op site
-// (the inserted NOPs appear in catalog order between the cursor and
-// `op`). Match the legacy order (M0, MFMA-store, VALU-LGKM) so any
-// future CHECK that depends on instruction-pile ordering keeps
-// matching.
-static SmallVector<HazardKind> buildHazardCatalog(const HazardConfig &) {
-  SmallVector<HazardKind> catalog;
-  catalog.push_back(makeM0Hazard());
-  catalog.push_back(makeMfmaStoreHazard());
-  catalog.push_back(makeValuLgkmHazard());
-  return catalog;
-}
 
 struct WaveAMDHazardWaitsPass
     : public wave::impl::WaveAMDHazardWaitsBase<WaveAMDHazardWaitsPass> {
@@ -667,23 +562,19 @@ struct WaveAMDHazardWaitsPass
   }
 
 private:
-  // True for ops that must not appear in `wave.kernel` funcs at this stage
-  // (ABI lowering should have replaced them).
   static bool isUnloweredKernelArg(Operation &op, func::FuncOp func) {
     return func->hasAttr(wave::WaveDialect::getKernelAttrName()) &&
            isa<waveamdmachine::ArgOp>(op);
   }
-  // True for scalar memory loads missing the required `base` attribute.
+
   static bool isMalformedSMEMLoad(Operation &op) {
     return isa<waveamdmachine::SLoadB32Op, waveamdmachine::SLoadB64Op,
                waveamdmachine::SLoadB128Op>(op) &&
            !op.getAttrOfType<StringAttr>("base");
   }
 
-  // Pre-order walk over every waveamdmachine op in `func`, including
-  // ops nested inside structured regions. Diagnoses malformed input.
-  LogicalResult collectOps(func::FuncOp func,
-                           SmallVectorImpl<Operation *> &ops) {
+  LogicalResult validateInput(func::FuncOp func) {
+    SmallVector<Operation *> ops;
     func.walk<WalkOrder::PreOrder>([&](Operation *op) {
       if (op->getName().getDialectNamespace() ==
           waveamdmachine::WaveAMDMachineDialect::getDialectNamespace())
@@ -701,21 +592,64 @@ private:
     return success();
   }
 
-  // Drive each catalog entry over `ops`. Returns the per-kind pending
-  // state after the last op; the caller uses it to decide whether a
-  // loop-replay walk is required.
-  static SmallVector<unsigned>
-  processOnce(ArrayRef<HazardKind> catalog, ArrayRef<Operation *> ops,
-              ArrayRef<unsigned> initial, OpBuilder &builder,
-              const HazardConfig &cfg, const llvm::MCSubtargetInfo &sti) {
-    SmallVector<unsigned> state(initial.begin(), initial.end());
-    for (Operation *op : ops) {
-      for (size_t i = 0, e = catalog.size(); i < e; ++i)
-        state[i] = catalog[i].mitigate(*op, state[i], builder, cfg, sti);
-      for (size_t i = 0, e = catalog.size(); i < e; ++i)
-        state[i] = catalog[i].update(*op, state[i], cfg);
+  static void collectBlocks(Region &region, SmallVectorImpl<Block *> &blocks) {
+    for (Block &block : region) {
+      blocks.push_back(&block);
+      for (Operation &op : block)
+        for (Region &nested : op.getRegions())
+          collectBlocks(nested, blocks);
     }
-    return state;
+  }
+
+  static void rewriteOp(Operation *op, HazardState &local,
+                        DataFlowSolver &solver, const HazardConfig &cfg,
+                        const llvm::MCSubtargetInfo &sti, OpBuilder &builder) {
+    if (isControlFlowOp(op)) {
+      if (auto *post = solver.lookupState<HazardLattice>(
+              solver.getProgramPointAfter(op)))
+        local = post->get();
+      return;
+    }
+
+    unsigned ssaWait = getRequiredSsaWait(op, local);
+    if (ssaWait) {
+      insertSNopMitigation(*op, ssaWait, builder, sti);
+      advanceValueHazards(local, ssaWait);
+    }
+
+    if (needsValuMitigation(op, local)) {
+      insertValuMitigation(*op, builder, cfg, sti);
+      advanceValueHazards(local);
+      local.lgkmPending = false;
+    }
+
+    transferHazards(op, local, cfg);
+  }
+
+  static void rewriteBlock(Block *block, DataFlowSolver &solver,
+                           const HazardConfig &cfg,
+                           const llvm::MCSubtargetInfo &sti,
+                           OpBuilder &builder) {
+    HazardState local;
+    if (auto *blockLat = solver.lookupState<HazardLattice>(
+            solver.getProgramPointBefore(block)))
+      local = blockLat->get();
+
+    SmallVector<Operation *> ops;
+    for (Operation &op : *block)
+      ops.push_back(&op);
+    for (Operation *op : ops)
+      rewriteOp(op, local, solver, cfg, sti, builder);
+  }
+
+  static void rewriteWithSolver(func::FuncOp func, DataFlowSolver &solver,
+                                const HazardConfig &cfg,
+                                const llvm::MCSubtargetInfo &sti,
+                                OpBuilder &builder) {
+    SmallVector<Block *> blocks;
+    collectBlocks(func.getBody(), blocks);
+    for (Block *block : blocks)
+      rewriteBlock(block, solver, cfg, sti, builder);
   }
 
   LogicalResult processFunction(func::FuncOp func, OpBuilder &builder,
@@ -724,42 +658,17 @@ private:
     if (failed(wave::failIfWaveAMDRegAllocOverflowed(
             func, "waveamd-insert-hazard-waits")))
       return failure();
-    SmallVector<Operation *> ops;
-    if (failed(collectOps(func, ops)))
+    if (failed(validateInput(func)))
       return failure();
 
-    SmallVector<HazardKind> catalog = buildHazardCatalog(cfg);
-    SmallVector<unsigned> zero(catalog.size(), 0);
+    DataFlowSolver solver;
+    loadBaselineAnalyses(solver);
+    solver.load<HazardAnalysis>(cfg);
+    if (failed(solver.initializeAndRun(func)))
+      return failure();
 
-    SmallVector<unsigned> finalState =
-        processOnce(catalog, ops, zero, builder, cfg, sti);
-
-    // Loop replay: a back-edge can carry a kind's pending state from
-    // the body's tail back to the top, so kinds flagged
-    // `persistInReplay` get a second walk seeded with their final
-    // state. Edge-count hazards reset to 0 in the replay.
-    if (!containsLoop(func))
-      return success();
-    SmallVector<unsigned> replaySeed(catalog.size(), 0);
-    bool anyPersisted = false;
-    for (size_t i = 0, e = catalog.size(); i < e; ++i) {
-      if (catalog[i].persistInReplay && finalState[i]) {
-        replaySeed[i] = finalState[i];
-        anyPersisted = true;
-      }
-    }
-    if (anyPersisted)
-      processOnce(catalog, ops, replaySeed, builder, cfg, sti);
+    rewriteWithSolver(func, solver, cfg, sti, builder);
     return success();
-  }
-
-  static bool containsLoop(func::FuncOp func) {
-    bool found = false;
-    func.walk([&](waveamdmachine::UniformLoopOp) {
-      found = true;
-      return WalkResult::interrupt();
-    });
-    return found;
   }
 };
 
