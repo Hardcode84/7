@@ -114,7 +114,8 @@ static LogicalResult requirePackedF16Target(Operation *op, StringRef kind) {
   if (failed(isa))
     return failure();
   if (!waveamdmachine::VPkAddF16Op::isSupportedOnIsa(*isa))
-    return op->emitError("packed f16 ") << kind << " lowering requires gfx9+";
+    return op->emitError("packed f16 ")
+           << kind << " lowering requires gfx9/gfx11";
   return success();
 }
 
@@ -124,7 +125,7 @@ static LogicalResult requirePackedCvtTarget(CastOp op) {
   if (failed(isa))
     return failure();
   if (!waveamdmachine::VCvtPkRtzF16F32Op::isSupportedOnIsa(*isa))
-    return op.emitError("packed f32 to f16 lowering requires gfx10+");
+    return op.emitError("packed f32 to f16 lowering requires gfx11");
   return success();
 }
 
@@ -156,12 +157,10 @@ static LogicalResult requireMmaTarget(waveamd::MmaOp op, MmaKind kind,
   switch (kind) {
   case MmaKind::WmmaI32_16x16x16_IU8:
     return require(
-        waveamdmachine::WmmaI32_16x16x16_IU8Op::isSupportedOnIsa(isa),
-        "gfx11/gfx12");
+        waveamdmachine::WmmaI32_16x16x16_IU8Op::isSupportedOnIsa(isa), "gfx11");
   case MmaKind::WmmaF32_16x16x16_F16:
     return require(
-        waveamdmachine::WmmaF32_16x16x16_F16Op::isSupportedOnIsa(isa),
-        "gfx11/gfx12");
+        waveamdmachine::WmmaF32_16x16x16_F16Op::isSupportedOnIsa(isa), "gfx11");
   case MmaKind::MfmaF32_16x16x16_F16:
     return require(
         waveamdmachine::MfmaF32_16x16x16_F16Op::isSupportedOnIsa(isa),

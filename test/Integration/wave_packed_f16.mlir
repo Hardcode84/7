@@ -1,7 +1,7 @@
 // REQUIRES: host-supports-amdgpu-wmma
 //
 // Packed f16 e2e: lit hardware gate is gfx11/gfx12; target asm tests cover gfx1100.
-// Backend support: gfx10+ for packed f32->f16 RTZ, gfx9+ for packed f16 add/mul/fma.
+// Backend support: gfx11 for packed f32->f16 RTZ, gfx9/gfx11 for packed f16 add/mul/fma.
 //
 // RUN: wave-opt %s --pass-pipeline='builtin.module(wave-set-target-attr{chip=%chip},transform-preload-library{transform-library-paths=%wave_pipelines},transform-interpreter{entry-point=compile_kernels},convert-scf-to-cf,gpu-to-llvm{use-bare-pointers-for-kernels=true},convert-to-llvm,reconcile-unrealized-casts)' \
 // RUN:   | mlir-runner \

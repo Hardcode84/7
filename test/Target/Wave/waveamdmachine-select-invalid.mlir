@@ -70,7 +70,7 @@ func.func @unsupported_packed_f32_to_f16_rounding(%x: !wave.simd<vector<2xf32>, 
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx803"} {
 func.func @unsupported_packed_f16_target(%a: !wave.simd<vector<2xf16>, 64>, %b: !wave.simd<vector<2xf16>, 64>) {
-  // expected-error @below {{packed f16 fadd lowering requires gfx9+}}
+  // expected-error @below {{packed f16 fadd lowering requires gfx9/gfx11}}
   %sum = wave.fadd %a, %b : !wave.simd<vector<2xf16>, 64>, !wave.simd<vector<2xf16>, 64> -> !wave.simd<vector<2xf16>, 64>
   return
 }
@@ -80,7 +80,7 @@ func.func @unsupported_packed_f16_target(%a: !wave.simd<vector<2xf16>, 64>, %b: 
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 func.func @unsupported_packed_f32_to_f16_target(%x: !wave.simd<vector<2xf32>, 64>) {
-  // expected-error @below {{packed f32 to f16 lowering requires gfx10+}}
+  // expected-error @below {{packed f32 to f16 lowering requires gfx11}}
   %h = wave.cast fpconvert %x policy {rounding = #wave.cast_rounding<rtz>} : !wave.simd<vector<2xf32>, 64> -> !wave.simd<vector<2xf16>, 64>
   return
 }
@@ -93,7 +93,20 @@ func.func @unsupported_wmma_target(%x: i32) {
   %a = waveamd.fragment_fill %x : i32 -> !waveamd.fragment<0, i8, 16, 16, 32, 4>
   %b = waveamd.fragment_fill %x : i32 -> !waveamd.fragment<1, i8, 16, 16, 32, 4>
   %acc = waveamd.fragment_fill %x : i32 -> !waveamd.fragment<2, i32, 16, 16, 32, 8>
-  // expected-error @below {{wmma.i32.16x16x16.iu8 lowering requires gfx11/gfx12}}
+  // expected-error @below {{wmma.i32.16x16x16.iu8 lowering requires gfx11}}
+  %result = waveamd.mma "wmma.i32.16x16x16.iu8" %a, %b, %acc : !waveamd.fragment<0, i8, 16, 16, 32, 4>, !waveamd.fragment<1, i8, 16, 16, 32, 4>, !waveamd.fragment<2, i32, 16, 16, 32, 8> -> !waveamd.fragment<2, i32, 16, 16, 32, 8>
+  return
+}
+}
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1200"} {
+func.func @unsupported_wmma_gfx12_target(%x: i32) {
+  %a = waveamd.fragment_fill %x : i32 -> !waveamd.fragment<0, i8, 16, 16, 32, 4>
+  %b = waveamd.fragment_fill %x : i32 -> !waveamd.fragment<1, i8, 16, 16, 32, 4>
+  %acc = waveamd.fragment_fill %x : i32 -> !waveamd.fragment<2, i32, 16, 16, 32, 8>
+  // expected-error @below {{wmma.i32.16x16x16.iu8 lowering requires gfx11}}
   %result = waveamd.mma "wmma.i32.16x16x16.iu8" %a, %b, %acc : !waveamd.fragment<0, i8, 16, 16, 32, 4>, !waveamd.fragment<1, i8, 16, 16, 32, 4>, !waveamd.fragment<2, i32, 16, 16, 32, 8> -> !waveamd.fragment<2, i32, 16, 16, 32, 8>
   return
 }
