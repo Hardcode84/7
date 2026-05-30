@@ -26,7 +26,7 @@ def WaveMeta_Dialect : Dialect {
     width track an unroll factor and collapses to flat SSA
     values after specialisation.
 
-    Design notes: `docs/StaticControlFlowOpsDesign.md`.
+    Pipeline notes: `docs/TransformDialectPipelineStrategy.md`.
   }];
   let hasConstantMaterializer = 1;
   let useDefaultTypePrinterParser = 1;

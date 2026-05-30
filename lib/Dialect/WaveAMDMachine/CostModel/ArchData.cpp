@@ -13,9 +13,8 @@
 
 namespace mlir::waveamdmachine {
 
-// CDNA3 / MI300. FeatureGFX90AInsts ->
-// LLVM AMDGPUBaseInfo.cpp:1265 getMaxWavesPerEU=8,
-// :1394 getVGPRAllocGranule=8, :1431 getTotalNumVGPRs=512.
+// CDNA3 / MI300. LLVM AMDGPUBaseInfo gives 8 waves/EU,
+// VGPR alloc granule 8, total VGPRs 512.
 // Wave64 native unit; 4-cycle SIMD16 issue period.
 static constexpr ArchData kGfx942{
     /*isa=*/{9, 4, 2},
@@ -61,8 +60,8 @@ static constexpr ArchData kGfx1100{
     /*simdIssuePeriod=*/1,
 };
 
-// RDNA4. FeatureISAVersion12 carries Feature1536VGPRs by default
-// (AMDGPU.td:2048). Matches gfx1100 on the structural dimensions.
+// RDNA4. FeatureISAVersion12 carries Feature1536VGPRs by default.
+// Matches gfx1100 on the structural dimensions.
 static constexpr ArchData kGfx1200{
     /*isa=*/{12, 0, 0},
     /*name=*/"gfx1200",

@@ -26,8 +26,7 @@ using ClassFUs = std::array<FunctionalUnit,
 // user error and gracefully degrades; gen_sched_table.py only
 // compares against bindings that LLVM actually publishes.
 
-// CDNA3 / gfx942. SICommonWriteRes (SISchedule.td:171-221) +
-// gfx942 overrides (:301-333).
+// CDNA3 / gfx942. SICommonWriteRes plus gfx942 overrides.
 static constexpr ClassFUs kFUsGfx942 = {
     /*NoInst=*/FunctionalUnit::None,
     /*WriteSALU=*/FunctionalUnit::SALU,
@@ -35,8 +34,8 @@ static constexpr ClassFUs kFUsGfx942 = {
     /*Write64Bit=*/FunctionalUnit::VALU,
     /*WriteFloatFMA=*/FunctionalUnit::VALU,
     /*WriteDouble=*/FunctionalUnit::VALU,
-    /*WriteTrans32=*/FunctionalUnit::VALU, // SICommon HWVALUWriteRes :184.
-    /*WriteSFPU=*/FunctionalUnit::SALU,    // n/a (UnsupportedWriteRes :208).
+    /*WriteTrans32=*/FunctionalUnit::VALU,
+    /*WriteSFPU=*/FunctionalUnit::SALU, // n/a (UnsupportedWriteRes).
     /*Write2PassMAI=*/FunctionalUnit::MFMA_XDL,
     /*Write4PassMAI=*/FunctionalUnit::MFMA_XDL,
     /*Write8PassMAI=*/FunctionalUnit::MFMA_XDL,

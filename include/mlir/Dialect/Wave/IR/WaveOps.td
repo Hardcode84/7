@@ -540,10 +540,10 @@ def Wave_WhereOp : Wave_Op<"where", [
     region is present, it executes under the complementary mask within the
     original active lanes.
 
-    In the MVP lowering, this operation is converted to `scf.if` and relies on
-    target lowering to preserve divergent-control semantics. Later target-specific
-    lowerings can consume `wave.where` directly and lower it to EXEC/predicate
-    manipulation without reconstructing structure from generic control flow.
+    WaveAMDMachine lowering consumes `wave.where` directly: it saves EXEC,
+    installs the then-mask, emits the nested region, optionally installs the
+    else-mask, then restores EXEC. Other targets may lower the same op to
+    predicate manipulation or structured divergent control.
   }];
 
   let arguments = (ins Wave_Mask:$condition);

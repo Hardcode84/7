@@ -16,6 +16,11 @@ The goal is to replace the user-visible fiction of many independent virtual
 threads with a model in which the program operates on a whole wavefront: a
 32-lane or 64-lane SIMD vector with an explicit active-lane mask.
 
+Operation lists below mark current tree support as **Implemented**,
+**Dialect-only**, or **Proposed**. Implemented means the dialect op and
+WaveAMDMachine lowering exist in this repository; it does not imply every type
+or target combination is legal.
+
 ## Motivation
 
 AMDGPU hardware executes wavefronts. A wavefront has a single scalar control
@@ -161,20 +166,30 @@ target feature requirements.
 
 The dialect should contain operations for:
 
-- lane identity and wave identity;
-- a custom `where` operation with an optional `otherwise` region for
+- **Implemented:** lane, workgroup, and workitem identity ops, plus
+  `read_cycles`.
+- **Dialect-only:** subgroup identity and subgroup-size ops.
+- **Implemented:** `where` with an optional `otherwise` region for
   structured lane-mask control;
-- standard MLIR `scf.for`, `scf.if`, and `scf.while` operations for
-  structured uniform control;
-- mask algebra such as `and`, `or`, `not`, `ballot`, `any`, `all`,
-  and `popcount`;
-- explicit crossings between uniform and lane-varying values, including
-  `broadcast`, `read_first`, `read_lane`, reductions, and
-  `assert_uniform`;
-- lane permutations and DPP/permlane-style communication;
-- masked global, LDS, and scratch memory operations;
-- wave-cooperative matrix and packed-data operations that map to AMDGPU MFMA,
-  WMMA, or related instructions.
+- **Implemented:** standard MLIR `scf.for` for uniform loops.
+- **Implemented:** integer/floating arithmetic, compare, numeric cast,
+  pack/extract, select-like lowering through `where`, and range assertion.
+- **Implemented:** `ballot`, `read_first`, and scalar-to-wave `splat`.
+- **Implemented:** tokenized `load`, `store`, `barrier`, `ptr_add`,
+  `index_expr`, and LDS-base ops.
+- **Implemented in WaveAMD:** buffer pointers, fragment pack/unpack/fill,
+  matrix multiply-accumulate, and global/buffer-to-LDS DMA.
+- **Proposed:** mask algebra such as `and`, `or`, `not`, `any`, `all`,
+  `none`, and `popcount`;
+- **Proposed:** explicit crossings between uniform and lane-varying values,
+  including `read_lane`, reductions, and `assert_uniform`;
+- **Proposed:** lane permutations and DPP/permlane-style communication;
+- **Proposed:** higher-level wave-cooperative memory clauses beyond current
+  tokenized load/store/DMA;
+- **Proposed:** standard MLIR `scf.if` and `scf.while` lowering for uniform
+  structured control.
+- **Proposed:** source-level packed-data operations beyond the current
+  target-level packed-math machine ops.
 
 ### Lowering contract
 
@@ -625,32 +640,38 @@ This pattern makes waterfall-like execution explicit when the program needs it.
 
 The initial primitive set should map directly to existing AMDGPU concepts.
 
-Lane identity
-  `lane_id<W>()` returns a `wave<uint32_t, W>` containing the lane number.
-  `mbcnt`-style operations provide prefix counts within masks.
+Lane identity and counters
+  **Implemented:** `lane_id`, `workgroup_id`, `workitem_id`, and
+  `read_cycles`. `lane_id<W>()` returns a `wave<uint32_t, W>` containing the
+  lane number. **Dialect-only:** `subgroup_id` and `subgroup_size`.
+  **Proposed:** `mbcnt`-style prefix counts within masks.
 
 Masks
-  `ballot`, `inverse_ballot`, `any`, `all`, `none`, `popcount`,
-  `first_lane`, and `last_lane` operate on `mask<W>`.
+  **Implemented:** `cmpi` produces `mask<W>` and `ballot` materializes mask
+  bits. **Proposed:** `inverse_ballot`, `any`, `all`, `none`, `popcount`,
+  `first_lane`, and `last_lane`.
 
 Cross-lane movement
-  `read_first`, `read_lane`, `write_lane`, `broadcast`, `shuffle`,
-  `permute`, and DPP-style operations provide explicit lane communication.
+  **Implemented:** `read_first` and scalar-to-wave `splat` / broadcast.
+  **Proposed:** `read_lane`, `write_lane`, `shuffle`, `permute`, and
+  DPP-style operations.
 
 Reductions and scans
-  `reduce_add`, `reduce_min`, `reduce_max`, `reduce_and`,
-  `reduce_or`, and prefix-scan operations operate over active lanes.
+  **Proposed:** `reduce_add`, `reduce_min`, `reduce_max`, `reduce_and`,
+  `reduce_or`, and prefix-scan operations over active lanes.
 
 Memory
-  `load` and `store` over lane-varying addresses are wave memory operations.
-  Scalar loads over uniform addresses remain scalar memory operations when legal.
-  Higher-level operations can express coalesced global accesses, LDS tiling,
-  global-to-LDS movement, and memory clauses. Memory ordering is represented by
+  **Implemented:** tokenized `load`, `store`, `barrier`, `ptr_add`,
+  `index_expr`, LDS base, and WaveAMD global/buffer-to-LDS DMA. Scalar loads
+  over uniform addresses remain scalar memory operations when legal.
+  **Proposed:** higher-level coalesced global accesses, LDS tiling helpers,
+  scratch operations, and memory clauses. Memory ordering is represented by
   explicit memory tokens, not by implicit alias analysis.
 
 Matrix operations
-  MFMA, WMMA, and related operations should be expressed as wave-cooperative
-  operations over typed fragments rather than as per-lane scalar operations.
+  **Implemented in WaveAMD:** typed fragments, fragment pack/unpack/fill, and
+  `waveamd.mma` lowering to supported MFMA/WMMA forms. **Proposed:** broader
+  source-level matrix and packed-data operation families.
 
 ## Wave Matrix Fragments
 
@@ -1137,19 +1158,21 @@ Required source concepts:
 - `mem_token` for explicit memory dependencies;
 - fixed wave-size kernel attributes;
 - custom `where` without arbitrary unstructured mask mutation;
-- standard MLIR `scf.for`, `scf.if`, and `scf.while` for uniform
+- standard MLIR `scf.for` for uniform structured loops;
+- proposed standard MLIR `scf.if` and `scf.while` lowering for other uniform
   structured control.
 
 Required operations:
 
-- lane id and wave id;
-- elementwise arithmetic and compares;
-- `select` and masked assignment;
-- `ballot`, `any`, `all`, and `popcount`;
-- `read_first` and `broadcast`;
-- simple reductions;
-- masked global and LDS load/store;
-- `after`, `join`, and `wait` token operations.
+- **Implemented:** lane, workgroup, and workitem ids.
+- **Dialect-only:** subgroup id and subgroup size.
+- **Implemented:** elementwise arithmetic and compares.
+- **Implemented:** masked assignment through `where`.
+- **Implemented:** `ballot`.
+- **Implemented:** `read_first` and broadcast through `splat`.
+- **Implemented:** masked global/LDS load/store and explicit token operations
+  (`token`, `after`, `join`, `wait`).
+- **Proposed:** `any`, `all`, `popcount`, and simple reductions.
 
 Required lowering:
 

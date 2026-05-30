@@ -52,7 +52,7 @@ SchedClass classifyOp(Operation *op) {
   // clang-format off
   return llvm::TypeSwitch<Operation *, SchedClass>(op)
       // MFMA. Both 16x16x{16,32} map to Write4PassMAI per LLVM
-      // SISchedule.td:317-319 (gfx942) and :351-353 (gfx950).
+      // SISchedule.td on gfx942/gfx950.
       .Case<MfmaF32_16x16x16_F16Op, MfmaF32_16x16x32_F16Op>(
           [](auto) { return SchedClass::Write4PassMAI; })
       // Current WMMA ops lower to gfx11 v_wmma_*: Write32Bit in LLVM.

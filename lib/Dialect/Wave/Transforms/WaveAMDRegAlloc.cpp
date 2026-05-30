@@ -179,11 +179,8 @@ struct WaveAMDRegAllocPass
     });
 
     SmallVector<wave::WaveAMDLiveInterval> active;
-    // Mirrors aster's `AllocConstraints` (RegisterColoring.cpp:82-258):
-    // one `std::set<Allocation>` sorted by `begin` so the allocator
-    // can walk gaps in order and pick the first one wide and aligned
-    // enough. Reserved registers (kernel preloaded SGPRs, v0 for the
-    // packed workitem id) pre-occupy `[0, reserved)`.
+    // Mirrors aster's gap-walking constraint set: reserved registers
+    // pre-occupy `[0, reserved)`.
     std::set<PhysAlloc> live;
     if (reserved > 0 && reserved <= numPhys)
       live.insert(PhysAlloc{0, reserved});
@@ -225,8 +222,7 @@ struct WaveAMDRegAllocPass
   // gap, check whether the requested width fits at `start`; if not,
   // advance `start` to the next `align`-aligned position past the
   // current allocation. After the last allocation, try the tail up to
-  // `maxRegs`. Lifted from aster's `AllocConstraints::alloc`
-  // (RegisterColoring.cpp:212-258).
+  // `maxRegs`.
   static std::optional<unsigned> findFreeSlot(const std::set<PhysAlloc> &live,
                                               unsigned width, unsigned align,
                                               unsigned maxRegs) {

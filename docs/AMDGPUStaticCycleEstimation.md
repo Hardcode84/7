@@ -52,54 +52,53 @@ abstract `SchedWrite` classes (`Write32Bit`, `WriteFloatFMA`,
 `WriteBarrier`, `WriteSFPU`, `WritePseudoScalarTrans`, ...) and binds
 cycle numbers per arch in nine concrete machine models:
 
-| Model | Archs | File:line |
+| Model | Archs | Source |
 |---|---|---|
-| `SIFullSpeedModel` | gfx600/701/hawaii | SISchedule.td:237-253 |
-| `SIQuarterSpeedModel` | most gfx7/8/9 (catch-all) | 255-275 |
-| `SIDPFullSpeedModel` | gfx90a | 277-299 |
-| `SIDPGFX942FullSpeedModel` | gfx942 | 301-333 |
-| `SIDPGFX950FullSpeedModel` | gfx950 | 336-384 |
-| `GFX10SpeedModel` | RDNA1/2 | 387-424 |
-| `GFX11SpeedModel` | RDNA3 (gfx1100) | 426-462 |
-| `GFX12SpeedModel` | gfx1200/1201 | 464-495 |
-| `GFX1250SpeedModel` | gfx1250/1251 | 511-562 |
+| `SIFullSpeedModel` | gfx600/701/hawaii | `SISchedule.td` |
+| `SIQuarterSpeedModel` | most gfx7/8/9 (catch-all) | `SISchedule.td` |
+| `SIDPFullSpeedModel` | gfx90a | `SISchedule.td` |
+| `SIDPGFX942FullSpeedModel` | gfx942 | `SISchedule.td` |
+| `SIDPGFX950FullSpeedModel` | gfx950 | `SISchedule.td` |
+| `GFX10SpeedModel` | RDNA1/2 | `SISchedule.td` |
+| `GFX11SpeedModel` | RDNA3 (gfx1100) | `SISchedule.td` |
+| `GFX12SpeedModel` | gfx1200/1201 | `SISchedule.td` |
+| `GFX1250SpeedModel` | gfx1250/1251 | `SISchedule.td` |
 
-Processor binding: `GCNProcessors.td:23-358`. MFMA/WMMA opcode -> class
-fan-out via `InstRW` regex patterns (SISchedule.td:270-273, 314-331,
-348-367, 540-545). Individual opcodes carry `SchedRW = [...]` tags in
-`VOP1Instructions.td:86,241,271`, `VOP2/3*`, `SMInstructions.td`, etc.
+Processor binding lives in `GCNProcessors.td`. MFMA/WMMA opcode -> class
+fan-out goes through `InstRW` regex patterns in `SISchedule.td`.
+Individual opcodes carry `SchedRW = [...]` tags in `VOP1Instructions.td`,
+`VOP2/3*`, `SMInstructions.td`, etc.
 
 Representative numbers (read off SISchedule.td):
 - `WriteVMEM` = 80 cycles pre-GFX10, **320** for GFX10/11/12/1250.
 - `WriteSALU` = 1 pre-GFX10, **2** after.
 - `WriteFloatFMA` = 5 on GFX10+.
 - `WriteTrans32` = 4 (SI), 10 (GFX10/11), 9 (GFX12), 8 (GFX1250).
-- `IssueWidth = 1` for every model (line 101).
+- `IssueWidth = 1` for every model.
 
-Self-admission in the file (line 167): "latency numbers are taken from
-AMD Accelerated Parallel Processing guide. They may not be accurate."
+Self-admission in `SISchedule.td`: "latency numbers are taken from AMD
+Accelerated Parallel Processing guide. They may not be accurate."
 Treat as upper-bound / bucket approximations, not silicon-cycle-exact.
 
 ### Hazards: separate machinery, not in the SchedModel
 
-`GCNHazardRecognizer.cpp` (3873 lines) carries the inter-instruction
+`GCNHazardRecognizer.cpp` carries the inter-instruction
 wait-state counts the SchedModel does not model:
 - VALU-write-VMEM RAW, DPP, NSA-to-VMEM, lds-direct, vcmpx.
-- AGPR read-after-MFMA pipeline tables. Example at
-  `checkMAIHazards908` line 2503: constants like
+- AGPR read-after-MFMA pipeline tables. `checkMAIHazards908` has constants like
   `MFMA32x32WritesAGPRAccVgprReadWaitStates=18`,
   `MFMA16x16WritesAGPRAccVgprReadWaitStates=10`.
-- `getMFMAPipelineWaitStates` (line 282) reads latency back from the
+- `getMFMAPipelineWaitStates` reads latency back from the
   sched model via `TSchedModel.getWriteProcResBegin(SC)->ReleaseAtCycle`.
 
-`AMDGPUInsertDelayAlu.cpp` (GFX11+) at lines 67, 92-121 hardcodes
+`AMDGPUInsertDelayAlu.cpp` (GFX11+) hardcodes
 `VALU_MAX=5`, `SALU_CYCLES_MAX=4`, and the `INSTID_{VALU,TRANS,SALU}_*`
 delay-class enumeration. This matches RDNA3/4 manual section 5.7
 "ALU Instruction Software Scheduling" (Table 19 in RDNA3, Table 27
 in RDNA4).
 
-`SIInsertWaitcnts.cpp` (4027 lines) materializes waits.
-`AMDGPUWaitcntUtils.h:22-37` defines counter taxonomy:
+`SIInsertWaitcnts.cpp` materializes waits. `AMDGPUWaitcntUtils.h` defines
+counter taxonomy:
 `LOAD_CNT, DS_CNT, EXP_CNT, STORE_CNT` (gfx<12); gfx12+ adds
 `SAMPLE_CNT, BVH_CNT, KM_CNT, X_CNT, ASYNC_CNT`.
 
@@ -155,9 +154,9 @@ cache latency, or divergence.
 
 CDNA's drop from 10 -> 8 waves/SIMD on gfx90a/940/950 is the cost of
 doubling the VGPR file. LLVM corroborates via
-`AMDGPUBaseInfo.cpp:1263` `getMaxWavesPerEU`.
+`AMDGPUBaseInfo.cpp` `getMaxWavesPerEU`.
 
-VGPR alloc granule (`AMDGPUBaseInfo.cpp:1391` `getVGPRAllocGranule`):
+VGPR alloc granule (`AMDGPUBaseInfo.cpp` `getVGPRAllocGranule`):
 gfx90a=8, GFX10.3+=16/8 (wave32/64), GFX10+=8/4, GFX12 dynamic
 (24/12 with `Feature1536VGPRs`).
 
@@ -183,10 +182,10 @@ Only places LLVM acknowledges other waves on the SIMD:
   waves to issue their VMEM instructions as well." Threshold flag
   `--amdgpu-set-wave-priority-valu-insts-threshold=100`. Entry funcs
   only. Off by default; gated on `--amdgpu-set-wave-priority`.
-- `--amdgpu-mfma-padding-ratio` (`GCNHazardRecognizer.cpp:53,2473`):
+- `--amdgpu-mfma-padding-ratio` (`GCNHazardRecognizer.cpp`):
   inserts `s_nop` between neighboring MFMAs only when
-  `MFI->getOccupancy() >= 2`. Comment line 2916: "Pad neighboring MFMA
-  with noops for better inter-wave performance." Default 0 (off).
+  `MFI->getOccupancy() >= 2`. The source comment describes padding
+  neighboring MFMA instructions for inter-wave performance. Default 0 (off).
   **Only LLVM mechanism explicitly conditioned on multi-wave occupancy.**
 - `AMDGPUBarrierLatency.cpp`: 16-cycle synthetic latency on
   `S_BARRIER_SIGNAL -> S_BARRIER_WAIT` DAG edges, 2000-cycle on
@@ -229,7 +228,7 @@ between the SIMDs in the compute unit ... maximum of five issued
 IPC, per-SIMD, per-CU." Per-arch waveslot counts: GCN/CDNA-MI100 =
 10/SIMD, CDNA2 MI2XX = 8/SIMD. CDNA3 silent in that doc.
 
-Modes register: `MODE.DP_RATE` in RDNA3 ISA (~line 1067) enumerates
+Modes register: `MODE.DP_RATE` in the RDNA3 ISA manual enumerates
 double-precision dependent-VALU forwarding distance (1/32, 1/16, 1/8,
 1/4, 1/2, full-rate). Not an occupancy curve, despite the name.
 
@@ -242,7 +241,7 @@ microbenchmarks (Chips & Cheese) only.
 
 ### s_setprio
 
-`SOPInstructions.td:1762-1769`. Takes `i16imm:$simm16`. Real encodings:
+`SOPInstructions.td`. Takes `i16imm:$simm16`. Real encodings:
 gfx6-10/13 at `0x00f`, gfx11/12 at `0x035`. Lowers
 `int_amdgcn_s_setprio`. Immediate is 0-3; the priority->arbitration
 mapping is documented in AMD ISA manuals, not in LLVM.
@@ -253,14 +252,14 @@ LLVM has no inline documentation of semantics.
 
 ### sched_barrier and sched_group_barrier
 
-Builtins documented at `IntrinsicsAMDGPU.td:354-366,379-382`:
+Builtins documented in `IntrinsicsAMDGPU.td`:
 - `sched_barrier(mask)` -- a barrier the LLVM scheduler cannot cross.
   Mask 0 = nothing crosses.
 - `sched_group_barrier(mask, size, sync_id)` -- groups `size`
   instructions of `mask` type and pairs with same-`sync_id`
   siblings; the scheduler emits them adjacent.
 
-Mask values (from `AMDGPUIGroupLP.h:68` `SchedGroupMask`):
+Mask values (from `AMDGPUIGroupLP.h` `SchedGroupMask`):
 
 | Mask | Name |
 |---|---|
@@ -279,8 +278,8 @@ Mask values (from `AMDGPUIGroupLP.h:68` `SchedGroupMask`):
 
 ### iglp_opt strategies
 
-Builtin `__builtin_amdgcn_iglp_opt(strategy_id)`. Strategy IDs in
-`AMDGPUIGroupLP.h:22-27`:
+Builtin `__builtin_amdgcn_iglp_opt(strategy_id)`. Strategy IDs live in
+`AMDGPUIGroupLP.h`:
 
 | ID | Name | Pipeline |
 |---|---|---|
@@ -299,8 +298,8 @@ LLVM emits none of these automatically. Available via builtins:
 - `__builtin_amdgcn_s_sleep_var` (gfx12+, opcode `0x058`).
 - `__builtin_amdgcn_s_sethalt`, `_s_wakeup`.
 - GFX12 named barriers: `s_barrier_signal/wait/init/leave/join/imm`.
-  Lowering at `AMDGPUInstructionSelector.cpp:2446-2470,7097-7269`.
-  `SIProgramInfo.h:86` tracks `num_named_barriers` per kernel.
+  Lowering lives in `AMDGPUInstructionSelector.cpp`. `SIProgramInfo.h`
+  tracks `num_named_barriers` per kernel.
 - `__builtin_amdgcn_s_wakeup_barrier` -- one wave wakes others stuck
   on a barrier.
 

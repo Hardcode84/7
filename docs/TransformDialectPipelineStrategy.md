@@ -147,7 +147,7 @@ path.
 
 ### Parallel dispatch (Stage 5 piece)
 
-`wave.transform.tune`'s trial loop is `llvm::parallelFor` over
+`wave.transform.tune`'s trial loop is `mlir::parallelFor` over
 the configs. Each trial constructs its own
 `transform::TransformState` via
 `transform::detail::makeTransformStateForTesting` -- the public
