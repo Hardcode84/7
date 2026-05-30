@@ -210,6 +210,20 @@ void printScheduleRegionLimitSkip(ScheduleRegion region,
                << "\n";
 }
 
+void emitScheduleRegionLimitRemark(ScheduleRegion region,
+                                   ScheduleSearchLimits limits) {
+  region.first->emitRemark()
+      << "skipped WaveAMDMachine scheduling region: reason=max_region_ops"
+      << " ops=" << region.opCount << " limit=" << limits.maxRegionOps;
+}
+
+void emitScheduleBeamWorkRemark(ScheduleRegion region, int64_t estimatedWork,
+                                ScheduleSearchLimits limits) {
+  region.first->emitRemark()
+      << "skipped WaveAMDMachine beam search: reason=max_beam_work"
+      << " estimated_work=" << estimatedWork << " limit=" << limits.maxBeamWork;
+}
+
 void printOpClasses(ScheduleRegion region, ArchResolution archResolution,
                     const waveamdmachine::EventSimConfig &modelConfig) {
   for (auto [index, op] : llvm::enumerate(region.ops)) {
@@ -1428,6 +1442,8 @@ buildScheduleCandidates(const ScheduleRegion &region,
                      << " estimated_work=" << estimatedBeamWork
                      << " limit=" << limits.maxBeamWork << "\n";
       }
+      if (limits.emitRemarks)
+        emitScheduleBeamWorkRemark(region, estimatedBeamWork, limits);
     } else {
       addGuidedBeamCandidates(candidates, tables, metrics, region, budgets);
     }

@@ -743,6 +743,7 @@ int64_t estimateGuidedBeamSearchWork(unsigned guideCount, unsigned nodeCount) {
   if (nodeCount < 3 || guideCount == 0)
     return 0;
   int64_t work = saturatingMul(guideCount, kDefaultBeamSearchConfig.width);
+  work = saturatingMul(work, kDefaultBeamSearchConfig.branchLimit);
   work = saturatingMul(work, nodeCount);
   return saturatingMul(work, nodeCount);
 }

@@ -123,6 +123,7 @@ struct ScheduleSearchLimits {
   int64_t maxBeamWork = -1;
   int maxRegionOps = -1;
   bool emitDiagnostics = false;
+  bool emitRemarks = false;
 };
 
 struct SchedulePressureContext {
@@ -142,6 +143,10 @@ bool exceedsScheduleRegionLimit(ScheduleRegion region,
                                 ScheduleSearchLimits limits);
 void printScheduleRegionLimitSkip(ScheduleRegion region,
                                   ScheduleSearchLimits limits);
+void emitScheduleRegionLimitRemark(ScheduleRegion region,
+                                   ScheduleSearchLimits limits);
+void emitScheduleBeamWorkRemark(ScheduleRegion region, int64_t estimatedWork,
+                                ScheduleSearchLimits limits);
 
 ArchResolution resolveArch(Operation *op);
 int64_t getHardExcess(RegisterPressureResult pressure);

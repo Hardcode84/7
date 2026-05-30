@@ -67,7 +67,8 @@ struct WaveAMDMachineSchedulePass
       return;
     ScheduleSearchLimits searchLimits{static_cast<int64_t>(maxBeamWork),
                                       maxRegionOps,
-                                      /*emitDiagnostics=*/false};
+                                      /*emitDiagnostics=*/false,
+                                      /*emitRemarks=*/true};
     WalkResult walkResult = root->walk([&](func::FuncOp func) {
       ArchResolution archResolution = resolveArch(func);
       if (failed(
@@ -119,8 +120,11 @@ struct WaveAMDMachineSchedulePass
                      PressureEvaluation pressureEvaluation,
                      const SchedulePressureContext *pressureContext,
                      ScheduleSearchLimits searchLimits) {
-    if (exceedsScheduleRegionLimit(region, searchLimits))
+    if (exceedsScheduleRegionLimit(region, searchLimits)) {
+      if (searchLimits.emitRemarks)
+        emitScheduleRegionLimitRemark(region, searchLimits);
       return;
+    }
     DependenceGraph graph = buildDependenceGraph(region);
     processScheduler(region, graph, archResolution, modelConfig,
                      pressureBudgets, pressureEvaluation, pressureContext,

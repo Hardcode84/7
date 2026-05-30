@@ -82,7 +82,8 @@ struct WaveAMDMachineScheduleReportPass
     StringRef scoreFuncName(scoreFunc);
     ScheduleSearchLimits searchLimits{static_cast<int64_t>(maxBeamWork),
                                       maxRegionOps,
-                                      /*emitDiagnostics=*/true};
+                                      /*emitDiagnostics=*/true,
+                                      /*emitRemarks=*/false};
     WalkResult walkResult = root->walk([&](func::FuncOp func) {
       ArchResolution archResolution = resolveArch(func);
       if (failed(
