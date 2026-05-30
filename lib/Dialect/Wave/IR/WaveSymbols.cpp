@@ -120,16 +120,30 @@ static void setDiagnostic(std::string *diagnostic, std::string message) {
     *diagnostic = std::move(message);
 }
 
-static ixs_node *importNode(Session &session, const ixs_node *node,
-                            std::string *diagnostic, const char *kind) {
-  if (!node) {
-    setDiagnostic(diagnostic, std::string("cannot compose null ") + kind);
+static ixs_node *rawExprNode(ExprHandle value, std::string *diagnostic) {
+  if (!value) {
+    setDiagnostic(diagnostic, "expected non-null wave.expr");
     return nullptr;
   }
-  ixs_node *imported = ixs_import_node(session.raw(), node);
-  if (!imported)
-    setDiagnostic(diagnostic, std::string("out of memory importing ") + kind);
-  return imported;
+  ixs_node *node = mutableNode(value.raw());
+  if (!ixs_node_is_expr(node)) {
+    setDiagnostic(diagnostic, "expected wave.expr node");
+    return nullptr;
+  }
+  return node;
+}
+
+static ixs_node *rawPredNode(PredHandle value, std::string *diagnostic) {
+  if (!value) {
+    setDiagnostic(diagnostic, "expected non-null wave.pred");
+    return nullptr;
+  }
+  ixs_node *node = mutableNode(value.raw());
+  if (!ixs_node_is_pred(node)) {
+    setDiagnostic(diagnostic, "expected wave.pred node");
+    return nullptr;
+  }
+  return node;
 }
 
 struct BufferReaderState {
@@ -479,8 +493,8 @@ mlir::wave::sym::composeExprBinary(Store &store, ExprHandle lhsHandle,
                                    ExprBinaryOp op, ExprHandle rhsHandle,
                                    std::string *diagnostic) {
   Session session(store);
-  ixs_node *lhs = importNode(session, lhsHandle.raw(), diagnostic, "wave.expr");
-  ixs_node *rhs = importNode(session, rhsHandle.raw(), diagnostic, "wave.expr");
+  ixs_node *lhs = rawExprNode(lhsHandle, diagnostic);
+  ixs_node *rhs = rawExprNode(rhsHandle, diagnostic);
   if (!lhs || !rhs)
     return failure();
 
@@ -510,8 +524,7 @@ FailureOr<ExprHandle>
 mlir::wave::sym::composeExprCeil(Store &store, ExprHandle valueHandle,
                                  std::string *diagnostic) {
   Session session(store);
-  ixs_node *value =
-      importNode(session, valueHandle.raw(), diagnostic, "wave.expr");
+  ixs_node *value = rawExprNode(valueHandle, diagnostic);
   if (!value)
     return failure();
   return finishExpr(session.raw(), ixs_ceil(session.raw(), value), diagnostic,
@@ -522,8 +535,7 @@ FailureOr<ExprHandle>
 mlir::wave::sym::composeExprFloor(Store &store, ExprHandle valueHandle,
                                   std::string *diagnostic) {
   Session session(store);
-  ixs_node *value =
-      importNode(session, valueHandle.raw(), diagnostic, "wave.expr");
+  ixs_node *value = rawExprNode(valueHandle, diagnostic);
   if (!value)
     return failure();
   return finishExpr(session.raw(), ixs_floor(session.raw(), value), diagnostic,
@@ -534,8 +546,7 @@ FailureOr<ExprHandle> mlir::wave::sym::composeExprNeg(Store &store,
                                                       ExprHandle valueHandle,
                                                       std::string *diagnostic) {
   Session session(store);
-  ixs_node *value =
-      importNode(session, valueHandle.raw(), diagnostic, "wave.expr");
+  ixs_node *value = rawExprNode(valueHandle, diagnostic);
   if (!value)
     return failure();
   return finishExpr(session.raw(), ixs_neg(session.raw(), value), diagnostic,
@@ -568,8 +579,8 @@ FailureOr<PredHandle> mlir::wave::sym::composePredCmp(Store &store,
                                                       ExprHandle rhsHandle,
                                                       std::string *diagnostic) {
   Session session(store);
-  ixs_node *lhs = importNode(session, lhsHandle.raw(), diagnostic, "wave.expr");
-  ixs_node *rhs = importNode(session, rhsHandle.raw(), diagnostic, "wave.expr");
+  ixs_node *lhs = rawExprNode(lhsHandle, diagnostic);
+  ixs_node *rhs = rawExprNode(rhsHandle, diagnostic);
   if (!lhs || !rhs)
     return failure();
 
@@ -602,8 +613,8 @@ mlir::FailureOr<PredHandle>
 mlir::wave::sym::composePredAnd(Store &store, PredHandle lhsHandle,
                                 PredHandle rhsHandle, std::string *diagnostic) {
   Session session(store);
-  ixs_node *lhs = importNode(session, lhsHandle.raw(), diagnostic, "wave.pred");
-  ixs_node *rhs = importNode(session, rhsHandle.raw(), diagnostic, "wave.pred");
+  ixs_node *lhs = rawPredNode(lhsHandle, diagnostic);
+  ixs_node *rhs = rawPredNode(rhsHandle, diagnostic);
   if (!lhs || !rhs)
     return failure();
   return finishPred(session.raw(), ixs_and(session.raw(), lhs, rhs), diagnostic,
@@ -614,8 +625,8 @@ mlir::FailureOr<PredHandle>
 mlir::wave::sym::composePredOr(Store &store, PredHandle lhsHandle,
                                PredHandle rhsHandle, std::string *diagnostic) {
   Session session(store);
-  ixs_node *lhs = importNode(session, lhsHandle.raw(), diagnostic, "wave.pred");
-  ixs_node *rhs = importNode(session, rhsHandle.raw(), diagnostic, "wave.pred");
+  ixs_node *lhs = rawPredNode(lhsHandle, diagnostic);
+  ixs_node *rhs = rawPredNode(rhsHandle, diagnostic);
   if (!lhs || !rhs)
     return failure();
   return finishPred(session.raw(), ixs_or(session.raw(), lhs, rhs), diagnostic,
@@ -626,12 +637,11 @@ FailureOr<ExprHandle> mlir::wave::sym::simplifyExpr(Store &store,
                                                     ExprHandle value,
                                                     std::string *diagnostic) {
   Session session(store);
-  ixs_node *imported =
-      importNode(session, value.raw(), diagnostic, "wave.expr");
-  if (!imported)
+  ixs_node *expr = rawExprNode(value, diagnostic);
+  if (!expr)
     return failure();
   ixs_node *simplified =
-      ixs_simplify(session.raw(), imported, /*assumptions=*/nullptr, 0);
+      ixs_simplify(session.raw(), expr, /*assumptions=*/nullptr, 0);
   return finishExpr(session.raw(), simplified, diagnostic,
                     "failed to simplify wave.expr");
 }
@@ -640,14 +650,46 @@ FailureOr<PredHandle> mlir::wave::sym::simplifyPred(Store &store,
                                                     PredHandle value,
                                                     std::string *diagnostic) {
   Session session(store);
-  ixs_node *imported =
-      importNode(session, value.raw(), diagnostic, "wave.pred");
-  if (!imported)
+  ixs_node *pred = rawPredNode(value, diagnostic);
+  if (!pred)
     return failure();
   ixs_node *simplified =
-      ixs_simplify(session.raw(), imported, /*assumptions=*/nullptr, 0);
+      ixs_simplify(session.raw(), pred, /*assumptions=*/nullptr, 0);
   return finishPred(session.raw(), simplified, diagnostic,
                     "failed to simplify wave.pred");
+}
+
+FailureOr<ExprHandle>
+mlir::wave::sym::substituteExpr(Store &store, ExprHandle value,
+                                ArrayRef<ExprSubstitution> substitutions,
+                                std::string *diagnostic) {
+  Session session(store);
+  ixs_node *expr = rawExprNode(value, diagnostic);
+  if (!expr)
+    return failure();
+
+  SmallVector<ixs_node *, 4> targets;
+  SmallVector<ixs_node *, 4> replacements;
+  targets.reserve(substitutions.size());
+  replacements.reserve(substitutions.size());
+  for (const ExprSubstitution &substitution : substitutions) {
+    ixs_node *target = rawExprNode(substitution.target, diagnostic);
+    ixs_node *replacement = rawExprNode(substitution.replacement, diagnostic);
+    if (!target || !replacement)
+      return failure();
+    targets.push_back(target);
+    replacements.push_back(replacement);
+  }
+
+  if (targets.size() > std::numeric_limits<uint32_t>::max()) {
+    setDiagnostic(diagnostic, "too many wave.expr substitutions");
+    return failure();
+  }
+  ixs_node *result =
+      ixs_subs_multi(session.raw(), expr, static_cast<uint32_t>(targets.size()),
+                     targets.data(), replacements.data());
+  return finishExpr(session.raw(), result, diagnostic,
+                    "failed to substitute wave.expr");
 }
 
 // `ixs_bounds_add_assumption` only consumes CMP nodes -- an AND-tree
@@ -670,21 +712,18 @@ mlir::wave::sym::simplifyExpr(Store &store, ExprHandle value,
                               ArrayRef<PredHandle> assumptions,
                               std::string *diagnostic) {
   Session session(store);
-  ixs_node *imported =
-      importNode(session, value.raw(), diagnostic, "wave.expr");
-  if (!imported)
+  ixs_node *expr = rawExprNode(value, diagnostic);
+  if (!expr)
     return failure();
-  SmallVector<ixs_node *, 4> importedAssumptions;
+  SmallVector<ixs_node *, 4> rawAssumptions;
   for (PredHandle assumption : assumptions) {
-    ixs_node *imp =
-        importNode(session, assumption.raw(), diagnostic, "wave.pred");
-    if (!imp)
+    ixs_node *pred = rawPredNode(assumption, diagnostic);
+    if (!pred)
       return failure();
-    flattenAssumption(imp, importedAssumptions);
+    flattenAssumption(pred, rawAssumptions);
   }
-  ixs_node *simplified =
-      ixs_simplify(session.raw(), imported, importedAssumptions.data(),
-                   importedAssumptions.size());
+  ixs_node *simplified = ixs_simplify(
+      session.raw(), expr, rawAssumptions.data(), rawAssumptions.size());
   return finishExpr(session.raw(), simplified, diagnostic,
                     "failed to simplify wave.expr");
 }
@@ -693,12 +732,11 @@ FailureOr<ExprHandle> mlir::wave::sym::expandExpr(Store &store,
                                                   ExprHandle value,
                                                   std::string *diagnostic) {
   Session session(store);
-  ixs_node *imported =
-      importNode(session, value.raw(), diagnostic, "wave.expr");
-  if (!imported)
+  ixs_node *expr = rawExprNode(value, diagnostic);
+  if (!expr)
     return failure();
-  return finishExpr(session.raw(), ixs_expand(session.raw(), imported),
-                    diagnostic, "failed to expand wave.expr");
+  return finishExpr(session.raw(), ixs_expand(session.raw(), expr), diagnostic,
+                    "failed to expand wave.expr");
 }
 
 mlir::wave::sym::CheckResult
@@ -707,21 +745,18 @@ mlir::wave::sym::checkPredicate(Store &store, PredHandle predicate,
   if (!predicate)
     return CheckResult::Unknown;
   Session session(store);
-  ixs_node *importedPred =
-      importNode(session, predicate.raw(), /*diagnostic=*/nullptr, "wave.pred");
-  if (!importedPred)
+  ixs_node *rawPred = rawPredNode(predicate, /*diagnostic=*/nullptr);
+  if (!rawPred)
     return CheckResult::Unknown;
-  SmallVector<ixs_node *, 4> importedAssumptions;
+  SmallVector<ixs_node *, 4> rawAssumptions;
   for (PredHandle assumption : assumptions) {
-    ixs_node *imported = importNode(session, assumption.raw(),
-                                    /*diagnostic=*/nullptr, "wave.pred");
-    if (!imported)
+    ixs_node *rawAssumption = rawPredNode(assumption, /*diagnostic=*/nullptr);
+    if (!rawAssumption)
       return CheckResult::Unknown;
-    flattenAssumption(imported, importedAssumptions);
+    flattenAssumption(rawAssumption, rawAssumptions);
   }
-  ixs_check_result result =
-      ixs_check(session.raw(), importedPred, importedAssumptions.data(),
-                importedAssumptions.size());
+  ixs_check_result result = ixs_check(
+      session.raw(), rawPred, rawAssumptions.data(), rawAssumptions.size());
   switch (result) {
   case IXS_CHECK_TRUE:
     return CheckResult::True;

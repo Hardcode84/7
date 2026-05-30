@@ -12,8 +12,10 @@
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/GPU/IR/GPUDialect.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
+#include "mlir/Dialect/Utils/StaticValueUtils.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/DialectImplementation.h"
+#include "mlir/IR/PatternMatch.h"
 #include "mlir/Interfaces/Utils/InferIntRangeCommon.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
@@ -1035,6 +1037,107 @@ static FailureOr<int64_t> reduceIndexBindingWidth(
   return laneWidth;
 }
 
+static int64_t getIndexBindingWidth(Value binding) {
+  Type type = binding.getType();
+  if (auto indexType = dyn_cast<WaveIndexType>(type))
+    return indexType.getWidth();
+  if (auto simdType = dyn_cast<SimdType>(type))
+    return simdType.getWidth();
+  return 0;
+}
+
+static WaveIndexType getCanonicalIndexExprType(MLIRContext *ctx,
+                                               ValueRange bindings) {
+  int64_t width = 0;
+  for (Value binding : bindings)
+    width = std::max(width, getIndexBindingWidth(binding));
+  return WaveIndexType::get(ctx, width);
+}
+
+static LogicalResult collectConstantIndexExprSubstitutions(
+    IndexExprOp op, sym::Store &store,
+    SmallVectorImpl<sym::ExprSubstitution> &substitutions) {
+  for (auto [nameAttr, binding] : llvm::zip(op.getNames(), op.getBindings())) {
+    std::optional<int64_t> constant = getConstantIntValue(binding);
+    if (!constant)
+      continue;
+    StringRef name = cast<StringAttr>(nameAttr).getValue();
+    FailureOr<sym::ExprHandle> target = sym::composeExprSym(store, name);
+    FailureOr<sym::ExprHandle> value = sym::composeExprInt(store, *constant);
+    if (failed(target) || failed(value))
+      return failure();
+    substitutions.push_back({*target, *value});
+  }
+  return success();
+}
+
+static void collectIndexExprFreeSymbols(sym::ExprHandle expr,
+                                        llvm::DenseSet<StringRef> &symbols) {
+  sym::walkSymbolNames(expr, [&](StringRef name) { symbols.insert(name); });
+}
+
+static void collectLiveIndexExprBindings(
+    IndexExprOp op, const llvm::DenseSet<StringRef> &freeSymbols,
+    SmallVectorImpl<StringRef> &names, SmallVectorImpl<Value> &bindings) {
+  for (auto [nameAttr, binding] : llvm::zip(op.getNames(), op.getBindings())) {
+    StringRef name = cast<StringAttr>(nameAttr).getValue();
+    if (!freeSymbols.count(name))
+      continue;
+    names.push_back(name);
+    bindings.push_back(binding);
+  }
+}
+
+namespace {
+struct CanonicalizeIndexExprOp : OpRewritePattern<IndexExprOp> {
+  using OpRewritePattern::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(IndexExprOp op,
+                                PatternRewriter &rewriter) const override {
+    auto *dialect = op->getContext()->getLoadedDialect<WaveDialect>();
+    if (!dialect)
+      return failure();
+    sym::Store &store = dialect->getSymbolStore();
+
+    SmallVector<sym::ExprSubstitution, 4> substitutions;
+    if (failed(collectConstantIndexExprSubstitutions(op, store, substitutions)))
+      return failure();
+
+    FailureOr<sym::ExprHandle> substituted =
+        sym::substituteExpr(store, op.getExpr().getValue(), substitutions);
+    if (failed(substituted))
+      return failure();
+    FailureOr<sym::ExprHandle> simplified =
+        sym::simplifyExpr(store, *substituted);
+    if (failed(simplified))
+      return failure();
+
+    llvm::DenseSet<StringRef> freeSymbols;
+    collectIndexExprFreeSymbols(*simplified, freeSymbols);
+
+    SmallVector<StringRef> names;
+    SmallVector<Value> bindings;
+    collectLiveIndexExprBindings(op, freeSymbols, names, bindings);
+
+    bool exprChanged = !(*simplified == op.getExpr().getValue());
+    bool bindingsChanged = bindings.size() != op.getBindings().size();
+    if (!exprChanged && !bindingsChanged)
+      return failure();
+
+    Type resultType = getCanonicalIndexExprType(op.getContext(), bindings);
+    if (resultType != op.getResult().getType())
+      return failure();
+
+    auto replacement =
+        IndexExprOp::create(rewriter, op.getLoc(), resultType,
+                            ExprAttr::get(op.getContext(), *simplified),
+                            rewriter.getStrArrayAttr(names), bindings);
+    rewriter.replaceOp(op, replacement.getResult());
+    return success();
+  }
+};
+} // namespace
+
 LogicalResult IndexExprOp::verify() {
   auto emit = [this](const Twine &msg) { return emitOpError(msg); };
 
@@ -1063,6 +1166,11 @@ LogicalResult IndexExprOp::verify() {
            << resultType.getWidth() << " disagrees with binding lane width "
            << *laneWidth;
   return success();
+}
+
+void IndexExprOp::getCanonicalizationPatterns(RewritePatternSet &patterns,
+                                              MLIRContext *context) {
+  patterns.add<CanonicalizeIndexExprOp>(context);
 }
 
 #define GET_OP_CLASSES

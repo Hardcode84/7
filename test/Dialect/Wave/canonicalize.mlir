@@ -61,3 +61,24 @@ func.func @pack_extract_swapped_stays(%v: vector<2xf16>) -> vector<2xf16> {
   %p = wave.pack %a, %b : f16, f16 -> vector<2xf16>
   return %p : vector<2xf16>
 }
+
+// CHECK-LABEL: func.func @index_expr_substitute_const
+// CHECK-SAME: (%[[LANE:.*]]: !wave.simd<i32, 32>)
+// CHECK: %[[OFF:.*]] = wave.index_expr <"4 + 2*lid"> ["lid"](%[[LANE]]) : (!wave.simd<i32, 32>) -> !wave.index<32>
+// CHECK: return %[[OFF]] : !wave.index<32>
+func.func @index_expr_substitute_const(%lane: !wave.simd<i32, 32>)
+    -> !wave.index<32> {
+  %k = arith.constant 4 : i32
+  %off = wave.index_expr <"K + 2*lid"> ["K", "lid"](%k, %lane) : (i32, !wave.simd<i32, 32>) -> !wave.index<32>
+  return %off : !wave.index<32>
+}
+
+// CHECK-LABEL: func.func @index_expr_const_cancels_symbol
+// CHECK-SAME: (%[[X:.*]]: i32)
+// CHECK: %[[OFF:.*]] = wave.index_expr <"0"> []() : () -> !wave.index
+// CHECK: return %[[OFF]] : !wave.index
+func.func @index_expr_const_cancels_symbol(%x: i32) -> !wave.index {
+  %k = arith.constant 5 : i32
+  %off = wave.index_expr <"K*x - 5*x"> ["K", "x"](%k, %x) : (i32, i32) -> !wave.index
+  return %off : !wave.index
+}

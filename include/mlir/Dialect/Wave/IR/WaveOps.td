@@ -478,6 +478,7 @@ def Wave_IndexExprOp : Wave_Op<"index_expr", [Pure]> {
     `:` functional-type($bindings, $result)
   }];
   let hasVerifier = 1;
+  let hasCanonicalizer = 1;
 }
 
 def Wave_StoreOp : Wave_Op<"store", [MemoryEffects<[MemWrite]>]> {

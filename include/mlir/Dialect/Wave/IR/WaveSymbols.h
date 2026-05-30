@@ -123,6 +123,11 @@ struct MulFactor {
   int32_t exponent = 0;
 };
 
+struct ExprSubstitution {
+  ExprHandle target;
+  ExprHandle replacement;
+};
+
 bool isExpr(ExprHandle value);
 bool isPred(PredHandle value);
 
@@ -254,6 +259,11 @@ mlir::FailureOr<ExprHandle> simplifyExpr(Store &store, ExprHandle value,
                                          std::string *diagnostic = nullptr);
 mlir::FailureOr<PredHandle> simplifyPred(Store &store, PredHandle value,
                                          std::string *diagnostic = nullptr);
+/// Simultaneous substitution; replacements are not rewritten.
+mlir::FailureOr<ExprHandle>
+substituteExpr(Store &store, ExprHandle value,
+               llvm::ArrayRef<ExprSubstitution> substitutions,
+               std::string *diagnostic = nullptr);
 
 /// Simplify `value` under `assumptions`. AND-of-CMP assumption handles
 /// flatten to their CMP leaves before reaching the simplifier.
