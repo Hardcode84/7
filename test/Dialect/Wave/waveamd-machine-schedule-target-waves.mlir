@@ -67,7 +67,7 @@ func.func @cdna_budget(%a: !waveamdmachine.reg<vgpr, 1>) {
 // TARGET: budgets func=pressure_missing_default hard_vgpr=256 derived_hard_vgpr=256 hard_sgpr=106 derived_hard_sgpr=106 critical_vgpr=disabled critical_sgpr=disabled
 // TARGET: candidate func=pressure_missing_default region=0 name=original cycles=6 delta=0 issued_ops=2 max_vgpr=128 max_sgpr=0 vgpr_hard_excess=0 sgpr_hard_excess=0
 // TARGET: budgets func=cdna_budget hard_vgpr=512 derived_hard_vgpr=512 hard_sgpr=102 derived_hard_sgpr=102 critical_vgpr=64 derived_critical_vgpr=64 critical_sgpr=96 derived_critical_sgpr=96
-// TARGET: candidate func=cdna_budget region=0 name=original cycles=5 delta=0 issued_ops=2 max_vgpr=80 max_sgpr=0 vgpr_hard_excess=0 sgpr_hard_excess=0 vgpr_critical_excess=16 sgpr_critical_excess=0
+// TARGET: candidate func=cdna_budget region=0 name=original cycles=8 delta=0 issued_ops=2 max_vgpr=80 max_sgpr=0 vgpr_hard_excess=0 sgpr_hard_excess=0 vgpr_critical_excess=16 sgpr_critical_excess=0
 
 // ONE: budgets func=module_default hard_vgpr=256 derived_hard_vgpr=256 hard_sgpr=106 derived_hard_sgpr=106 critical_vgpr=disabled critical_sgpr=disabled
 // MAX: budgets func=pressure_missing_default hard_vgpr=256 derived_hard_vgpr=256 hard_sgpr=106 derived_hard_sgpr=106 critical_vgpr=96 derived_critical_vgpr=96 critical_sgpr=106 derived_critical_sgpr=106

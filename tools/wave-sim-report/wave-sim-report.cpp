@@ -59,6 +59,11 @@ static llvm::cl::opt<int>
           llvm::cl::init(1));
 
 static llvm::cl::opt<int>
+    waveSize("wave-size",
+             llvm::cl::desc("wavefront width for issue timing; 0 uses arch"),
+             llvm::cl::init(0));
+
+static llvm::cl::opt<int>
     startDelay("start-delay",
                llvm::cl::desc("cycle delay between consecutive waves"),
                llvm::cl::init(0));
@@ -252,6 +257,10 @@ static bool validateLatencyOverrides() {
          isValidLatencyOverride(ldsValueLatency);
 }
 
+static bool validateWaveSize() {
+  return waveSize == 0 || waveSize == 32 || waveSize == 64;
+}
+
 static bool loadCalibration(std::optional<CalibrationData> &calibration) {
   if (calibrationFile.empty())
     return true;
@@ -287,6 +296,7 @@ static EventSimConfig buildConfig(const CalibrationData *calibration) {
   EventSimConfig config;
   config.waves = std::max(1, waves.getValue());
   config.simds = std::max(1, simds.getValue());
+  config.waveSize = waveSize.getValue();
   config.startDelay = std::max(0, startDelay.getValue());
   config.tripCountOverride = std::max<int64_t>(-1, tripCount.getValue());
   config.calibration = calibration;
@@ -339,6 +349,8 @@ static void printSimulationReport(func::FuncOp func, const ArchData &arch,
   llvm::outs() << "arch: " << arch.name << "\n";
   llvm::outs() << "waves: " << config.waves << "\n";
   llvm::outs() << "simds: " << config.simds << "\n";
+  if (config.waveSize != 0)
+    llvm::outs() << "wave_size: " << config.waveSize << "\n";
   llvm::outs() << "start_delay: " << config.startDelay << "\n";
   if (config.tripCountOverride >= 0)
     llvm::outs() << "trip_count_override: " << config.tripCountOverride << "\n";
@@ -373,6 +385,10 @@ static int report(ModuleOp mod) {
   }
   if (!validateLatencyOverrides()) {
     llvm::errs() << "latency overrides must be -1 or non-negative\n";
+    return 1;
+  }
+  if (!validateWaveSize()) {
+    llvm::errs() << "wave-size must be 0, 32, or 64\n";
     return 1;
   }
   std::optional<CalibrationData> calibration;

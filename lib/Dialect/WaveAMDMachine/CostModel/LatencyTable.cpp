@@ -11,6 +11,7 @@
 #include "llvm/ADT/Twine.h"
 #include "llvm/Support/ErrorHandling.h"
 
+#include <algorithm>
 #include <array>
 
 namespace mlir::waveamdmachine {
@@ -46,6 +47,17 @@ static const ClassLatencies *selectTable(const llvm::AMDGPU::IsaVersion &isa) {
   return nullptr;
 }
 
+static bool isPlainVALUClass(SchedClass cls) {
+  switch (cls) {
+  case SchedClass::Write32Bit:
+  case SchedClass::Write64Bit:
+  case SchedClass::WriteFloatFMA:
+    return true;
+  default:
+    return false;
+  }
+}
+
 int getLatency(const ArchData &arch, SchedClass cls) {
   const ClassLatencies *table = selectTable(arch.isa);
   if (!table)
@@ -54,7 +66,10 @@ int getLatency(const ArchData &arch, SchedClass cls) {
   size_t idx = static_cast<size_t>(cls);
   if (idx >= table->size())
     llvm_unreachable("getLatency: invalid SchedClass");
-  return (*table)[idx];
+  int latency = (*table)[idx];
+  if (isPlainVALUClass(cls))
+    return std::max(latency, arch.valuPipelineDepth);
+  return latency;
 }
 
 } // namespace mlir::waveamdmachine

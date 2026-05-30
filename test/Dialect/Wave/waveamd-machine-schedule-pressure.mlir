@@ -23,22 +23,22 @@ func.func @pressure_guard(%off: !waveamdmachine.reg<vgpr, 1>,
 }
 
 // DISABLED: waveamd-machine-schedule-report budgets func=pressure_guard hard_vgpr=3 derived_hard_vgpr=256 hard_sgpr=106 derived_hard_sgpr=106 critical_vgpr=disabled critical_sgpr=disabled
-// DISABLED: waveamd-machine-schedule-report candidate func=pressure_guard region=0 name=original cycles=332 delta=0 issued_ops=5 max_vgpr=3 max_sgpr=0 vgpr_hard_excess=0 sgpr_hard_excess=0 order=0,1,2,3,4,5
-// DISABLED: waveamd-machine-schedule-report candidate func=pressure_guard region=0 name=critical_path cycles=325 delta=-7 issued_ops=5 max_vgpr=4 max_sgpr=0 vgpr_hard_excess=1 sgpr_hard_excess=0 order=0,4,1,2,3,5
-// DISABLED: waveamd-machine-schedule-report candidate func=pressure_guard region=0 name=beam_0 cycles=327 delta=-5 issued_ops=5 max_vgpr=4 max_sgpr=0 vgpr_hard_excess=1 sgpr_hard_excess=0 order=0,1,2,4,3,5
-// DISABLED: waveamd-machine-schedule-report selected func=pressure_guard region=0 name=critical_path original_cycles=332 selected_cycles=325 delta=-7 action=keep order=0,4,1,2,3,5
+// DISABLED: waveamd-machine-schedule-report candidate func=pressure_guard region=0 name=original cycles=92 delta=0 issued_ops=5 max_vgpr=3 max_sgpr=0 vgpr_hard_excess=0 sgpr_hard_excess=0 order=0,1,2,3,4,5
+// DISABLED: waveamd-machine-schedule-report candidate func=pressure_guard region=0 name=critical_path cycles=85 delta=-7 issued_ops=5 max_vgpr=4 max_sgpr=0 vgpr_hard_excess=1 sgpr_hard_excess=0 order=0,4,1,2,3,5
+// DISABLED: waveamd-machine-schedule-report candidate func=pressure_guard region=0 name=beam_0 cycles=87 delta=-5 issued_ops=5 max_vgpr=4 max_sgpr=0 vgpr_hard_excess=1 sgpr_hard_excess=0 order=0,1,2,4,3,5
+// DISABLED: waveamd-machine-schedule-report selected func=pressure_guard region=0 name=critical_path original_cycles=92 selected_cycles=85 delta=-7 action=keep order=0,4,1,2,3,5
 
 // HARD: waveamd-machine-schedule-report budgets func=pressure_guard hard_vgpr=3 derived_hard_vgpr=256 hard_sgpr=106 derived_hard_sgpr=106 critical_vgpr=disabled critical_sgpr=disabled
-// HARD: waveamd-machine-schedule-report candidate func=pressure_guard region=0 name=original cycles=332 delta=0 issued_ops=5 max_vgpr=3 max_sgpr=0 vgpr_hard_excess=0 sgpr_hard_excess=0 order=0,1,2,3,4,5
-// HARD: waveamd-machine-schedule-report candidate func=pressure_guard region=0 name=critical_path cycles=325 delta=-7 issued_ops=5 max_vgpr=4 max_sgpr=0 vgpr_hard_excess=1 sgpr_hard_excess=0 order=0,4,1,2,3,5
-// HARD: waveamd-machine-schedule-report candidate func=pressure_guard region=0 name=beam_0 cycles=332 delta=0 issued_ops=5 max_vgpr=3 max_sgpr=0 vgpr_hard_excess=0 sgpr_hard_excess=0 order=0,2,1,3,4,5
-// HARD: waveamd-machine-schedule-report selected func=pressure_guard region=0 name=original original_cycles=332 selected_cycles=332 delta=0 action=keep order=0,1,2,3,4,5
+// HARD: waveamd-machine-schedule-report candidate func=pressure_guard region=0 name=original cycles=92 delta=0 issued_ops=5 max_vgpr=3 max_sgpr=0 vgpr_hard_excess=0 sgpr_hard_excess=0 order=0,1,2,3,4,5
+// HARD: waveamd-machine-schedule-report candidate func=pressure_guard region=0 name=critical_path cycles=85 delta=-7 issued_ops=5 max_vgpr=4 max_sgpr=0 vgpr_hard_excess=1 sgpr_hard_excess=0 order=0,4,1,2,3,5
+// HARD: waveamd-machine-schedule-report candidate func=pressure_guard region=0 name=beam_0 cycles=92 delta=0 issued_ops=5 max_vgpr=3 max_sgpr=0 vgpr_hard_excess=0 sgpr_hard_excess=0 order=0,2,1,3,4,5
+// HARD: waveamd-machine-schedule-report selected func=pressure_guard region=0 name=original original_cycles=92 selected_cycles=92 delta=0 action=keep order=0,1,2,3,4,5
 
 // CRIT: waveamd-machine-schedule-report budgets func=pressure_guard hard_vgpr=256 derived_hard_vgpr=256 hard_sgpr=106 derived_hard_sgpr=106 critical_vgpr=3 critical_sgpr=disabled
-// CRIT: waveamd-machine-schedule-report candidate func=pressure_guard region=0 name=original cycles=332 delta=0 issued_ops=5 max_vgpr=3 max_sgpr=0 vgpr_hard_excess=0 sgpr_hard_excess=0 vgpr_critical_excess=0 order=0,1,2,3,4,5
-// CRIT: waveamd-machine-schedule-report candidate func=pressure_guard region=0 name=critical_path cycles=325 delta=-7 issued_ops=5 max_vgpr=4 max_sgpr=0 vgpr_hard_excess=0 sgpr_hard_excess=0 vgpr_critical_excess=1 order=0,4,1,2,3,5
-// CRIT: waveamd-machine-schedule-report candidate func=pressure_guard region=0 name=beam_0 cycles=332 delta=0 issued_ops=5 max_vgpr=3 max_sgpr=0 vgpr_hard_excess=0 sgpr_hard_excess=0 vgpr_critical_excess=0 order=0,2,1,3,4,5
-// CRIT: waveamd-machine-schedule-report selected func=pressure_guard region=0 name=original original_cycles=332 selected_cycles=332 delta=0 action=keep order=0,1,2,3,4,5
+// CRIT: waveamd-machine-schedule-report candidate func=pressure_guard region=0 name=original cycles=92 delta=0 issued_ops=5 max_vgpr=3 max_sgpr=0 vgpr_hard_excess=0 sgpr_hard_excess=0 vgpr_critical_excess=0 order=0,1,2,3,4,5
+// CRIT: waveamd-machine-schedule-report candidate func=pressure_guard region=0 name=critical_path cycles=85 delta=-7 issued_ops=5 max_vgpr=4 max_sgpr=0 vgpr_hard_excess=0 sgpr_hard_excess=0 vgpr_critical_excess=1 order=0,4,1,2,3,5
+// CRIT: waveamd-machine-schedule-report candidate func=pressure_guard region=0 name=beam_0 cycles=92 delta=0 issued_ops=5 max_vgpr=3 max_sgpr=0 vgpr_hard_excess=0 sgpr_hard_excess=0 vgpr_critical_excess=0 order=0,2,1,3,4,5
+// CRIT: waveamd-machine-schedule-report selected func=pressure_guard region=0 name=original original_cycles=92 selected_cycles=92 delta=0 action=keep order=0,1,2,3,4,5
 
 // APPLY-HARD-LABEL: func.func @pressure_guard
 // APPLY-HARD: waveamdmachine.token

@@ -30,6 +30,7 @@ class CalibrationData;
 struct EventSimConfig {
   int waves = 1;
   int simds = 1;
+  int waveSize = 0;
   int startDelay = 0;
   int64_t tripCountOverride = -1;
   const CalibrationData *calibration = nullptr;

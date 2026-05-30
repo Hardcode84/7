@@ -26,11 +26,11 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // PIPELINE: waveamdmachine.global_store_tuple_b32
 
 // ASM-LABEL: matrix_kernel:
-// ASM: s_load_b64 [[OUT:s\[[0-9]+:[0-9]+\]]], s[0:1], 0x0
 // ASM: v_mov_b32_e32 [[A0:v[0-9]+]], 0
 // ASM: v_mov_b32_e32 [[B0:v[0-9]+]], 0
 // ASM: v_mov_b32_e32 [[C0:v[0-9]+]], 7
 // ASM: v_wmma_i32_16x16x16_iu8 [[DST:v\[[0-9]+:[0-9]+\]]], [[A:v\[[0-9]+:[0-9]+\]]], [[B:v\[[0-9]+:[0-9]+\]]], [[C:v\[[0-9]+:[0-9]+\]]]
+// ASM: s_load_b64 [[OUT:s\[[0-9]+:[0-9]+\]]], s[0:1], 0x0
 // ASM: global_store_b128 {{v[0-9]+}}, {{v\[[0-9]+:[0-9]+\]}}, [[OUT]]{{$}}
 // ASM: global_store_b128 {{v[0-9]+}}, {{v\[[0-9]+:[0-9]+\]}}, [[OUT]] offset:16
 // ASM: s_waitcnt_vscnt null, 0x0

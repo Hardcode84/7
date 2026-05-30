@@ -13,6 +13,11 @@
 // RUN: wave-sim-report --func=smem_partial_wait --timeline %s | FileCheck %s --check-prefix=WAITPART
 // RUN: wave-sim-report --func=trip_loop --trip-count=3 %s | FileCheck %s --check-prefix=TRIP
 // RUN: wave-sim-report --func=trip_loop --trip-count=10000 %s | FileCheck %s --check-prefix=TRIPBIG
+// RUN: wave-sim-report --func=wmma_latency --op-latencies %s | FileCheck %s --check-prefix=WMMA
+// RUN: wave-sim-report --func=two_independent_valu --wave-size=64 --timeline %s | FileCheck %s --check-prefix=W64
+// RUN: wave-sim-report --func=one_salu --waves=8 --simds=8 %s | FileCheck %s --check-prefix=CUCAP
+// RUN: wave-sim-report --func=tuple_cu_cap --waves=6 --simds=6 --timeline %s | FileCheck %s --check-prefix=TUPLECU
+// RUN: wave-sim-report --func=vmem_value_ready --timeline %s | FileCheck %s --check-prefix=VMEMVALUE
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
   func.func @two_dep_salu(%init: !waveamdmachine.reg<sgpr, 1>) {
@@ -60,6 +65,19 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
         : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
            !waveamdmachine.reg<sgpr, 2>, !waveamdmachine.mem.token)
           -> !waveamdmachine.mem.token
+    return
+  }
+
+  func.func @vmem_value_ready(%off: !waveamdmachine.reg<vgpr, 1>,
+                              %base: !waveamdmachine.reg<sgpr, 2>,
+                              %value: !waveamdmachine.reg<vgpr, 1>) {
+    %tok0 = waveamdmachine.token : !waveamdmachine.mem.token
+    %load, %tok1 = waveamdmachine.global_load_b32 %off, %base after %tok0
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 2>, !waveamdmachine.mem.token)
+          -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+    %sum = waveamdmachine.v_add_u32 %load, %value
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
     return
   }
 
@@ -115,6 +133,43 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
           !waveamdmachine.reg<scc, 1>
           carries(%next#0 : !waveamdmachine.reg<sgpr, 1>)
     } -> !waveamdmachine.reg<sgpr, 1>
+    return
+  }
+
+  func.func @wmma_latency(%a: !waveamdmachine.reg<vgpr, 8>,
+                          %b: !waveamdmachine.reg<vgpr, 8>,
+                          %acc: !waveamdmachine.reg<vgpr, 8>) {
+    %result = waveamdmachine.wmma_f32_16x16x16_f16 %a, %b, %acc
+        : (!waveamdmachine.reg<vgpr, 8>, !waveamdmachine.reg<vgpr, 8>,
+           !waveamdmachine.reg<vgpr, 8>) -> !waveamdmachine.reg<vgpr, 8>
+    return
+  }
+
+  func.func @two_independent_valu(%a: !waveamdmachine.reg<vgpr, 1>,
+                                  %b: !waveamdmachine.reg<vgpr, 1>,
+                                  %c: !waveamdmachine.reg<vgpr, 1>,
+                                  %d: !waveamdmachine.reg<vgpr, 1>) {
+    %lhs = waveamdmachine.v_add_u32 %a, %b
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+    %rhs = waveamdmachine.v_add_u32 %c, %d
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+    return
+  }
+
+  func.func @one_salu() {
+    %one = waveamdmachine.imm 1 : !waveamdmachine.imm
+    %r = waveamdmachine.s_mov_b32_value %one :
+        (!waveamdmachine.imm) -> !waveamdmachine.reg<sgpr, 1>
+    return
+  }
+
+  func.func @tuple_cu_cap(%off: !waveamdmachine.reg<vgpr, 1>,
+                          %base: !waveamdmachine.reg<sgpr, 2>) {
+    %load, %tok = waveamdmachine.global_load_tuple_b32 %off, %base
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 2>)
+          -> (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.mem.token)
     return
   }
 }
@@ -193,3 +248,33 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // TRIPBIG: trip_count_override: 10000
 // TRIPBIG: total_cycles: 20000
 // TRIPBIG: issued_ops: 10000
+
+// WMMA: op_latencies:
+// WMMA: op=waveamdmachine.wmma_f32_16x16x16_f16 class=Write16PassWMMA fu=VALU latency=64
+
+// W64: func: two_independent_valu
+// W64: wave_size: 64
+// W64: total_cycles: 7
+// W64: issue cycle=0 wave=0 simd=0 fu=VALU op=waveamdmachine.v_add_u32
+// W64: issue cycle=2 wave=0 simd=0 fu=VALU op=waveamdmachine.v_add_u32
+
+// CUCAP: func: one_salu
+// CUCAP: waves: 8
+// CUCAP: simds: 8
+// CUCAP: total_cycles: 3
+// CUCAP: issued_ops: 8
+
+// TUPLECU: issue cycle=0 wave=0 simd=0 fu=VMEM op=waveamdmachine.global_load_tuple_b32
+// TUPLECU: issue cycle=0 wave=1 simd=1 fu=VMEM op=waveamdmachine.global_load_tuple_b32
+// TUPLECU: issue cycle=0 wave=2 simd=2 fu=VMEM op=waveamdmachine.global_load_tuple_b32
+// TUPLECU: issue cycle=0 wave=3 simd=3 fu=VMEM op=waveamdmachine.global_load_tuple_b32
+// TUPLECU: issue cycle=0 wave=4 simd=4 fu=VMEM op=waveamdmachine.global_load_tuple_b32
+// TUPLECU-NOT: issue cycle=1
+// TUPLECU-NOT: issue cycle=2
+// TUPLECU-NOT: issue cycle=3
+// TUPLECU: issue cycle=4 wave=5 simd=5 fu=VMEM op=waveamdmachine.global_load_tuple_b32
+
+// VMEMVALUE: func: vmem_value_ready
+// VMEMVALUE: issue cycle=0 wave=0 simd=0 fu=VMEM op=waveamdmachine.global_load_b32
+// VMEMVALUE: issue cycle=80 wave=0 simd=0 fu=VALU op=waveamdmachine.v_add_u32
+// VMEMVALUE: value_ready cycle=80 wave=0 simd=0 fu=VMEM op=waveamdmachine.global_load_b32

@@ -272,6 +272,7 @@ private:
   SmallVector<SimdState> simds;
   std::priority_queue<EventSimEvent, std::vector<EventSimEvent>, EventLater>
       events;
+  DenseMap<int64_t, unsigned> cuIssueCounts;
   bool structuredProgram = false;
 
   void initialize();
@@ -283,6 +284,10 @@ private:
   void pruneCounters(WaveState &wave, int64_t cycle);
   int64_t operandReadyCycle(const WaveState &wave, Operation *op) const;
   int64_t waitcntReadyCycle(WaveState &wave, Operation *op, int64_t cycle);
+  int getIssuePeriod() const;
+  int64_t cuIssueReadyCycle(int64_t cycle, unsigned issues, int period) const;
+  void pruneCuIssueCounts(int64_t cycle);
+  void consumeCuIssueSlots(int64_t cycle, unsigned issues, int period);
   int64_t opReadyCycle(WaveState &wave, int64_t cycle);
   int selectReadyWave(int simd, int64_t cycle);
   LogicalResult stepWave(WaveState &wave, int64_t cycle, bool &issued);
@@ -432,6 +437,59 @@ int64_t EventSimulator::waitcntReadyCycle(WaveState &wave, Operation *op,
   return cycle;
 }
 
+static unsigned getNativeWaveSize(const ArchData &arch) {
+  return arch.isa.Major >= 10 ? 32 : 64;
+}
+
+int EventSimulator::getIssuePeriod() const {
+  int period = std::max(1, arch.simdIssuePeriod);
+  unsigned waveSize =
+      config.waveSize > 0 ? config.waveSize : getNativeWaveSize(arch);
+  if (waveSize == 64)
+    period *= std::max(1, arch.wave64IssueMultiplier);
+  return period;
+}
+
+static int64_t issueCycle(int64_t start, unsigned issue, int period) {
+  return start + static_cast<int64_t>(issue) * period;
+}
+
+int64_t EventSimulator::cuIssueReadyCycle(int64_t cycle, unsigned issues,
+                                          int period) const {
+  unsigned cap = static_cast<unsigned>(arch.issuesPerCUPerCycle);
+  while (true) {
+    std::optional<int64_t> nextStart;
+    for (unsigned issue : llvm::seq<unsigned>(0, issues)) {
+      int64_t currentIssueCycle = issueCycle(cycle, issue, period);
+      if (cuIssueCounts.lookup(currentIssueCycle) < cap)
+        continue;
+      nextStart = currentIssueCycle - static_cast<int64_t>(issue) * period + 1;
+      break;
+    }
+    if (!nextStart)
+      return cycle;
+    cycle = std::max<int64_t>(cycle + 1, *nextStart);
+  }
+}
+
+void EventSimulator::pruneCuIssueCounts(int64_t cycle) {
+  for (auto &entry : llvm::make_early_inc_range(cuIssueCounts))
+    if (entry.first < cycle)
+      cuIssueCounts.erase(entry.first);
+}
+
+void EventSimulator::consumeCuIssueSlots(int64_t cycle, unsigned issues,
+                                         int period) {
+  pruneCuIssueCounts(cycle);
+  for (unsigned issue : llvm::seq<unsigned>(0, issues)) {
+    int64_t currentIssueCycle = issueCycle(cycle, issue, period);
+    unsigned &count = cuIssueCounts[currentIssueCycle];
+    assert(count < static_cast<unsigned>(arch.issuesPerCUPerCycle) &&
+           "CU issue cap exceeded");
+    ++count;
+  }
+}
+
 int64_t EventSimulator::opReadyCycle(WaveState &wave, int64_t cycle) {
   if (wave.done)
     return cycle;
@@ -448,6 +506,9 @@ int64_t EventSimulator::opReadyCycle(WaveState &wave, int64_t cycle) {
   FunctionalUnit fu = funit(arch, cls);
   ready = std::max(ready, simd.issueReady);
   ready = std::max(ready, simd.fuReady[static_cast<size_t>(fu)]);
+  unsigned issues = std::max(1u, getIssueCount(op));
+  int period = getIssuePeriod();
+  ready = cuIssueReadyCycle(ready, issues, period);
   return ready;
 }
 
@@ -546,7 +607,7 @@ LogicalResult EventSimulator::executeIssued(WaveState &wave, Operation *op,
   SchedClass cls = classifyOp(op);
   FunctionalUnit fu = funit(arch, cls);
   unsigned issues = std::max(1u, getIssueCount(op));
-  int period = std::max(1, arch.simdIssuePeriod);
+  int period = getIssuePeriod();
   int dependencyLatency = getConfiguredLatency(arch, cls, config);
   int64_t lastIssue = cycle + static_cast<int64_t>(issues - 1) * period;
   int64_t ready = lastIssue + dependencyLatency;
@@ -563,6 +624,7 @@ LogicalResult EventSimulator::executeIssued(WaveState &wave, Operation *op,
   simd.issueReady = nextIssue;
   simd.fuReady[static_cast<size_t>(fu)] = nextIssue;
   simd.rrCursor = (wave.id + 1) % static_cast<int>(waves.size());
+  consumeCuIssueSlots(cycle, issues, period);
 
   ++out.issuedOps;
   recordNow({cycle, EventSimEventKind::OpIssued, wave.id, wave.simd, op, fu,

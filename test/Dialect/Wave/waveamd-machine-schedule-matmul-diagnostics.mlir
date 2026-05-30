@@ -33,5 +33,5 @@ func.func @matmul_loop_candidate(%off: !waveamdmachine.reg<vgpr, 1>,
 }
 }
 
-// DIAG: waveamd-machine-schedule-report candidate func=matmul_loop_candidate region=1 name=original cycles=326 delta=0 issued_ops=6 max_vgpr=11 max_sgpr=1 order=0,1,2,3,4,5,6
-// DIAG: waveamd-machine-schedule-report selected func=matmul_loop_candidate region=1 name=original original_cycles=326 selected_cycles=326 delta=0 action=keep order=0,1,2,3,4,5,6
+// DIAG: waveamd-machine-schedule-report candidate func=matmul_loop_candidate region=1 name=original cycles=86 delta=0 issued_ops=6 max_vgpr=11 max_sgpr=1 order=0,1,2,3,4,5,6
+// DIAG: waveamd-machine-schedule-report selected func=matmul_loop_candidate region=1 name=original original_cycles=86 selected_cycles=86 delta=0 action=keep order=0,1,2,3,4,5,6

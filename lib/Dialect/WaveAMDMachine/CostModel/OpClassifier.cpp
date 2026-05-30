@@ -55,9 +55,8 @@ SchedClass classifyOp(Operation *op) {
       // SISchedule.td on gfx942/gfx950.
       .Case<MfmaF32_16x16x16_F16Op, MfmaF32_16x16x32_F16Op>(
           [](auto) { return SchedClass::Write4PassMAI; })
-      // Current WMMA ops lower to gfx11 v_wmma_*: Write32Bit in LLVM.
       .Case<WmmaF32_16x16x16_F16Op, WmmaI32_16x16x16_IU8Op>(
-          [](auto) { return SchedClass::Write32Bit; })
+          [](auto) { return SchedClass::Write16PassWMMA; })
       // LDS (ds_* family).
       .Case<DsLoadB16Op, DsLoadB32Op, DsLoadB64Op, DsLoadB96Op, DsLoadB128Op,
             DsLoadTupleB32Op, DsStoreB16Op, DsStoreB32Op, DsStoreB64Op,

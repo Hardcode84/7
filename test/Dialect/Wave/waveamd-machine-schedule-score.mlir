@@ -64,11 +64,11 @@ func.func @wmma_latency(%a: !waveamdmachine.reg<vgpr, 8>,
 }
 }
 
-// LOWER: waveamd-machine-schedule-report score func=candidate_lower region=0 order=original cycles=326 issued_ops=3
-// LOWER: waveamd-machine-schedule-report score func=candidate_lower region=0 order=candidate cycles=325 issued_ops=3
+// LOWER: waveamd-machine-schedule-report score func=candidate_lower region=0 order=original cycles=86 issued_ops=3
+// LOWER: waveamd-machine-schedule-report score func=candidate_lower region=0 order=candidate cycles=85 issued_ops=3
 
-// BUDGET: waveamd-machine-schedule-report score func=candidate_lower region=0 order=original cycles=326 issued_ops=3 max_vgpr=3 max_sgpr=0 vgpr_hard_excess=1 sgpr_hard_excess=0 vgpr_critical_excess=0 sgpr_critical_excess=0
-// BUDGET: waveamd-machine-schedule-report score func=candidate_lower region=0 order=candidate cycles=325 issued_ops=3 max_vgpr=3 max_sgpr=0 vgpr_hard_excess=1 sgpr_hard_excess=0 vgpr_critical_excess=0 sgpr_critical_excess=0
+// BUDGET: waveamd-machine-schedule-report score func=candidate_lower region=0 order=original cycles=86 issued_ops=3 max_vgpr=3 max_sgpr=0 vgpr_hard_excess=1 sgpr_hard_excess=0 vgpr_critical_excess=0 sgpr_critical_excess=0
+// BUDGET: waveamd-machine-schedule-report score func=candidate_lower region=0 order=candidate cycles=85 issued_ops=3 max_vgpr=3 max_sgpr=0 vgpr_hard_excess=1 sgpr_hard_excess=0 vgpr_critical_excess=0 sgpr_critical_excess=0
 
 // LOWER-VALUE: waveamd-machine-schedule-report score func=candidate_lower region=0 order=original cycles=26 issued_ops=3
 // LOWER-VALUE: waveamd-machine-schedule-report score func=candidate_lower region=0 order=candidate cycles=25 issued_ops=3
@@ -79,8 +79,8 @@ func.func @wmma_latency(%a: !waveamdmachine.reg<vgpr, 8>,
 // LOWER-MW: waveamd-machine-schedule-report score func=candidate_lower region=0 order=original cycles={{[0-9]+}} issued_ops=12
 // LOWER-MW: waveamd-machine-schedule-report score func=candidate_lower region=0 order=candidate cycles={{[0-9]+}} issued_ops=12
 
-// GREATER: waveamd-machine-schedule-report score func=candidate_greater region=0 order=original cycles=325 issued_ops=3
-// GREATER: waveamd-machine-schedule-report score func=candidate_greater region=0 order=candidate cycles=326 issued_ops=3
+// GREATER: waveamd-machine-schedule-report score func=candidate_greater region=0 order=original cycles=85 issued_ops=3
+// GREATER: waveamd-machine-schedule-report score func=candidate_greater region=0 order=candidate cycles=86 issued_ops=3
 
 // EQUAL: waveamd-machine-schedule-report score func=candidate_equal region=0 order=original cycles=6 issued_ops=2
 // EQUAL: waveamd-machine-schedule-report score func=candidate_equal region=0 order=candidate cycles=6 issued_ops=2
@@ -88,5 +88,5 @@ func.func @wmma_latency(%a: !waveamdmachine.reg<vgpr, 8>,
 // INVALID: waveamd-machine-schedule-report score func=candidate_invalid region=0 order=original cycles=10 issued_ops=2
 // INVALID: waveamd-machine-schedule-report score func=candidate_invalid region=0 order=candidate fallback=original reason=candidate_order_breaks_dependency
 
-// WMMA: waveamd-machine-schedule-report score func=wmma_latency region=0 order=original cycles=10 issued_ops=2
-// WMMA: waveamd-machine-schedule-report score func=wmma_latency region=0 order=candidate cycles=10 issued_ops=2
+// WMMA: waveamd-machine-schedule-report score func=wmma_latency region=0 order=original cycles=128 issued_ops=2
+// WMMA: waveamd-machine-schedule-report score func=wmma_latency region=0 order=candidate cycles=128 issued_ops=2

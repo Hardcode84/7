@@ -17,11 +17,14 @@
 #include "mlir/IR/Operation.h"
 #include "llvm/Support/ErrorHandling.h"
 
+#include <algorithm>
+
 namespace mlir::waveamdmachine {
 
 namespace {
 
 namespace traits = ::mlir::OpTrait::waveamdmachine;
+static constexpr int kDefaultVMEMValueLatency = 80;
 
 static bool isLDSIssuer(Operation *op) {
   return op->hasTrait<traits::LDSLoadOp>() ||
@@ -93,8 +96,10 @@ int getMemoryValueLatency(const ArchData &arch, Operation *op,
                           const CalibrationData *calibration) {
   SchedClass cls = classifyOp(op);
   int defaultLatency = getConfiguredLatency(arch, cls, calibration);
-  if (op->hasTrait<traits::VMEMLoadOp>())
-    return overrideOrDefault(overrides.vmemLoad, defaultLatency);
+  if (op->hasTrait<traits::VMEMLoadOp>()) {
+    int valueLatency = std::min(defaultLatency, kDefaultVMEMValueLatency);
+    return overrideOrDefault(overrides.vmemLoad, valueLatency);
+  }
   if (isLDSLoad(op))
     return overrideOrDefault(overrides.lds, defaultLatency);
   if (isSMEMLoad(op))
