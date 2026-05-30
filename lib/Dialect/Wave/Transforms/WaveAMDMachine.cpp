@@ -655,10 +655,7 @@ materializeWideSymbol(WaveAMDMachineSelector &S, sym::ExprHandle expr,
   StringRef name = sym::ExprView(expr).getSymbolName();
   for (const auto &binding : bindings)
     if (binding.first == name)
-      return isReg(binding.second, waveamdmachine::RegClass::VGPR, 1) ||
-                     isVGPR2(binding.second)
-                 ? ensureVGPR2(S, user->getLoc(), binding.second)
-                 : ensureSGPR2(S, user->getLoc(), binding.second);
+      return ensureVGPR2(S, user->getLoc(), binding.second);
   return user->emitError("full-address index_expr leaf '")
          << name << "' has no binding";
 }

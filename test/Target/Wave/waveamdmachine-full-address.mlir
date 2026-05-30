@@ -1,5 +1,6 @@
 // RUN: wave-opt --waveamd-to-machine %s | FileCheck %s --check-prefix=SELECT
 // RUN: wave-opt --waveamd-to-machine %s | wave-opt | FileCheck %s --check-prefix=SELECT
+// RUN: wave-opt --waveamd-to-machine --waveamd-abi-lowering --waveamd-reg-alloc --waveamd-resource-info %s | FileCheck %s --check-prefix=VERIFY
 // RUN: wave-opt --waveamd-to-machine %s | wave-translate --wave-to-amdgpu-asm - | FileCheck %s --check-prefix=ASM
 // RUN: wave-opt --waveamd-to-machine %s | wave-translate --wave-to-amdgpu-asm - | llvm-mc -triple=amdgcn-amd-amdhsa -mcpu=gfx1100 -filetype=obj -o /dev/null
 
@@ -99,6 +100,35 @@ func.func @global_loop_carry_mixed_addr64(%out: !wave.ptr<i32, #wave.global>) at
         -> !wave.simd<!wave.ptr<i32, #wave.global>, 32>
     scf.yield %next : !wave.simd<!wave.ptr<i32, #wave.global>, 32>
   }
+  return
+}
+
+// SELECT-LABEL: func.func @global_addr64_two_uniform_products
+// SELECT: %[[WGX:.*]] = waveamdmachine.s_workgroup_id_x
+// SELECT: %[[WGY:.*]] = waveamdmachine.s_workgroup_id_y
+// SELECT: waveamdmachine.s_mov_b64_imm 4294967296
+// SELECT: waveamdmachine.v_mul_u64
+// SELECT: waveamdmachine.s_mov_b64_imm 8589934592
+// SELECT: waveamdmachine.v_mul_u64
+// SELECT-NOT: waveamdmachine.s_mul_u64
+// SELECT: waveamdmachine.global_store_b32_addr64
+// VERIFY-LABEL: func.func @global_addr64_two_uniform_products
+// VERIFY: waveamdmachine.global_store_b32_addr64
+// ASM-LABEL: global_addr64_two_uniform_products:
+// ASM: global_store_b32 v[{{[0-9]+}}:{{[0-9]+}}], v{{[0-9]+}}, off
+func.func @global_addr64_two_uniform_products(%out: !wave.ptr<i32, #wave.global>) attributes {wave.kernel} {
+  %lane = wave.lane_id : !wave.simd<i32, 32>
+  %wgid_x = wave.workgroup_id 0
+  %wgid_y = wave.workgroup_id 1
+  %off = wave.index_expr <"lid + 1073741824*wgx + 2147483648*wgy">
+      ["lid", "wgx", "wgy"] (%lane, %wgid_x, %wgid_y)
+      : (!wave.simd<i32, 32>, i32, i32) -> !wave.index<32>
+  %ptrs = wave.ptr_add %out, %off
+      : !wave.ptr<i32, #wave.global>, !wave.index<32>
+      -> !wave.simd<!wave.ptr<i32, #wave.global>, 32>
+  %tok = wave.store %lane -> %ptrs
+      : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<i32, #wave.global>, 32>)
+      -> !wave.mem.token
   return
 }
 
