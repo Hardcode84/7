@@ -304,7 +304,9 @@ def pipeline_text(
       %root: !transform.any_op {{transform.consumed}}) -> !transform.any_op {{
     %rpack = transform.apply_registered_pass "wave-form-packed-math" to %root
         : (!transform.any_op) -> !transform.any_op
-    %r0 = transform.apply_registered_pass "waveamd-to-machine" to %rpack
+    %rsimp = transform.apply_registered_pass "wave-simplify-index-exprs" to %rpack
+        : (!transform.any_op) -> !transform.any_op
+    %r0 = transform.apply_registered_pass "waveamd-to-machine" to %rsimp
         : (!transform.any_op) -> !transform.any_op
     %rk = transform.apply_registered_pass "canonicalize" to %r0
         : (!transform.any_op) -> !transform.any_op

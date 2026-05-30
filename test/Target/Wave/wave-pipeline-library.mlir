@@ -1,0 +1,9 @@
+// RUN: FileCheck %s --check-prefix=PIPELINE < %wave_pipelines
+
+// PIPELINE: transform.apply_registered_pass "wave-combine-pointer-offsets"
+// PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
+// PIPELINE-NEXT: transform.apply_registered_pass "wave-simplify-index-exprs"
+// PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
+// PIPELINE-NEXT: transform.apply_registered_pass "canonicalize"
+// PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
+// PIPELINE-NEXT: transform.apply_registered_pass "waveamd-to-machine"

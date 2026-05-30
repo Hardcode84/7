@@ -22,7 +22,9 @@ module attributes {transform.with_named_sequence} {
         : (!transform.any_op) -> !transform.any_op
     %roff0 = transform.apply_registered_pass "wave-combine-pointer-offsets" to %rpack
         : (!transform.any_op) -> !transform.any_op
-    %roff = transform.apply_registered_pass "canonicalize" to %roff0
+    %rsimp = transform.apply_registered_pass "wave-simplify-index-exprs" to %roff0
+        : (!transform.any_op) -> !transform.any_op
+    %roff = transform.apply_registered_pass "canonicalize" to %rsimp
         : (!transform.any_op) -> !transform.any_op
     %r0 = transform.apply_registered_pass "waveamd-to-machine" to %roff
         : (!transform.any_op) -> !transform.any_op
