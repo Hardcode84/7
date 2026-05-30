@@ -108,6 +108,113 @@ struct KernelInfo {
   SmallVector<KernelArgInfo> args;
 };
 
+#define WAVE_AMDGPU_OPCODE_LIST(X)                                             \
+  X(sMovB32, S_MOV_B32_vi, S_MOV_B32_gfx11)                                    \
+  X(sAddI32, S_ADD_I32_vi, S_ADD_I32_gfx11)                                    \
+  X(sMulI32, S_MUL_I32_vi, S_MUL_I32_gfx11)                                    \
+  X(sLshlB32, S_LSHL_B32_vi, S_LSHL_B32_gfx11)                                 \
+  X(sLshrB32, S_LSHR_B32_vi, S_LSHR_B32_gfx11)                                 \
+  X(sAndB32, S_AND_B32_vi, S_AND_B32_gfx11)                                    \
+  X(sAndn2B32, S_ANDN2_B32_vi, S_ANDN2_B32_gfx11)                              \
+  X(sAndn2B64, S_ANDN2_B64_vi, S_ANDN2_B64_gfx11)                              \
+  X(sAndSaveexecB64, S_AND_SAVEEXEC_B64_vi, S_AND_SAVEEXEC_B64_gfx11)          \
+  X(sMovB64, S_MOV_B64_vi, S_MOV_B64_gfx11)                                    \
+  X(sAddU32, S_ADD_U32_vi, S_ADD_U32_gfx11)                                    \
+  X(sAddcU32, S_ADDC_U32_vi, S_ADDC_U32_gfx11)                                 \
+  X(sMulHiU32, S_MUL_HI_U32_vi, S_MUL_HI_U32_gfx11)                            \
+  X(sCmpLtI32, S_CMP_LT_I32_vi, S_CMP_LT_I32_gfx11)                            \
+  X(sCmpLgU32, S_CMP_LG_U32_vi, S_CMP_LG_U32_gfx11)                            \
+  X(sCbranchScc0, S_CBRANCH_SCC0_vi, S_CBRANCH_SCC0_gfx11)                     \
+  X(sCbranchScc1, S_CBRANCH_SCC1_vi, S_CBRANCH_SCC1_gfx11)                     \
+  X(sCbranchExecz, S_CBRANCH_EXECZ_vi, S_CBRANCH_EXECZ_gfx11)                  \
+  X(sLoadB32, S_LOAD_DWORD_IMM_vi, S_LOAD_B32_IMM_gfx11)                       \
+  X(sLoadB64, S_LOAD_DWORDX2_IMM_vi, S_LOAD_B64_IMM_gfx11)                     \
+  X(sLoadB128, S_LOAD_DWORDX4_IMM_vi, S_LOAD_B128_IMM_gfx11)                   \
+  X(sWaitcnt, S_WAITCNT_vi, S_WAITCNT_gfx11)                                   \
+  X(sNop, S_NOP_vi, S_NOP_gfx11)                                               \
+  X(sSetprio, S_SETPRIO_vi, S_SETPRIO_gfx11)                                   \
+  X(sBarrier, S_BARRIER_vi, S_BARRIER_gfx11)                                   \
+  X(sEndpgm, S_ENDPGM_vi, S_ENDPGM_gfx11)                                      \
+  X(sSetpcB64, S_SETPC_B64_vi, S_SETPC_B64_gfx11)                              \
+  X(vMbcntLo, V_MBCNT_LO_U32_B32_e64_vi, V_MBCNT_LO_U32_B32_e64_gfx11)         \
+  X(vMovB32, V_MOV_B32_e32_vi, V_MOV_B32_e32_gfx11)                            \
+  X(vLshlrevB32, V_LSHLREV_B32_e32_vi, V_LSHLREV_B32_e32_gfx11)                \
+  X(vLshrrevB32, V_LSHRREV_B32_e32_vi, V_LSHRREV_B32_e32_gfx11)                \
+  X(vReadfirstlaneB32, V_READFIRSTLANE_B32_vi, V_READFIRSTLANE_B32_gfx11)      \
+  X(vMulLoU32, V_MUL_LO_U32_vi, V_MUL_LO_U32_e64_gfx11)                        \
+  X(vAddF32, V_ADD_F32_e32_vi, V_ADD_F32_e32_gfx11)                            \
+  X(vSubF32, V_SUB_F32_e32_vi, V_SUB_F32_e32_gfx11)                            \
+  X(vMulF32, V_MUL_F32_e32_vi, V_MUL_F32_e32_gfx11)                            \
+  X(vMaxF32, V_MAX_F32_e32_vi, V_MAX_F32_e32_gfx11)                            \
+  X(vExpF32, V_EXP_F32_e32_vi, V_EXP_F32_e32_gfx11)                            \
+  X(vRcpF32, V_RCP_F32_e32_vi, V_RCP_F32_e32_gfx11)                            \
+  X(vCmpEqU32, V_CMP_EQ_U32_e64_vi, V_CMP_EQ_U32_e64_gfx11)                    \
+  X(vCmpNeU32, V_CMP_NE_U32_e64_vi, V_CMP_NE_U32_e64_gfx11)                    \
+  X(vCmpLtU32, V_CMP_LT_U32_e64_vi, V_CMP_LT_U32_e64_gfx11)                    \
+  X(vCmpLeU32, V_CMP_LE_U32_e64_vi, V_CMP_LE_U32_e64_gfx11)                    \
+  X(vCmpGtU32, V_CMP_GT_U32_e64_vi, V_CMP_GT_U32_e64_gfx11)                    \
+  X(vCmpGeU32, V_CMP_GE_U32_e64_vi, V_CMP_GE_U32_e64_gfx11)                    \
+  X(bufferStoreB32, BUFFER_STORE_DWORD_OFFEN_vi,                               \
+    BUFFER_STORE_DWORD_OFFEN_gfx11)                                            \
+  X(bufferLoadB32, BUFFER_LOAD_DWORD_OFFEN_vi, BUFFER_LOAD_DWORD_OFFEN_gfx11)  \
+  X(globalStoreB32, GLOBAL_STORE_DWORD_SADDR_vi,                               \
+    GLOBAL_STORE_DWORD_SADDR_gfx11)                                            \
+  X(globalLoadB32, GLOBAL_LOAD_DWORD_SADDR_vi, GLOBAL_LOAD_DWORD_SADDR_gfx11)  \
+  X(globalLoadB64, GLOBAL_LOAD_DWORDX2_SADDR_vi,                               \
+    GLOBAL_LOAD_DWORDX2_SADDR_gfx11)                                           \
+  X(globalLoadB96, GLOBAL_LOAD_DWORDX3_SADDR_vi,                               \
+    GLOBAL_LOAD_DWORDX3_SADDR_gfx11)                                           \
+  X(globalLoadB128, GLOBAL_LOAD_DWORDX4_SADDR_vi,                              \
+    GLOBAL_LOAD_DWORDX4_SADDR_gfx11)                                           \
+  X(globalStoreB64, GLOBAL_STORE_DWORDX2_SADDR_vi,                             \
+    GLOBAL_STORE_DWORDX2_SADDR_gfx11)                                          \
+  X(globalStoreB96, GLOBAL_STORE_DWORDX3_SADDR_vi,                             \
+    GLOBAL_STORE_DWORDX3_SADDR_gfx11)                                          \
+  X(globalStoreB128, GLOBAL_STORE_DWORDX4_SADDR_vi,                            \
+    GLOBAL_STORE_DWORDX4_SADDR_gfx11)                                          \
+  X(bufferLoadB64, BUFFER_LOAD_DWORDX2_OFFEN_vi,                               \
+    BUFFER_LOAD_DWORDX2_OFFEN_gfx11)                                           \
+  X(bufferLoadB96, BUFFER_LOAD_DWORDX3_OFFEN_vi,                               \
+    BUFFER_LOAD_DWORDX3_OFFEN_gfx11)                                           \
+  X(bufferLoadB128, BUFFER_LOAD_DWORDX4_OFFEN_vi,                              \
+    BUFFER_LOAD_DWORDX4_OFFEN_gfx11)                                           \
+  X(bufferStoreB64, BUFFER_STORE_DWORDX2_OFFEN_vi,                             \
+    BUFFER_STORE_DWORDX2_OFFEN_gfx11)                                          \
+  X(bufferStoreB96, BUFFER_STORE_DWORDX3_OFFEN_vi,                             \
+    BUFFER_STORE_DWORDX3_OFFEN_gfx11)                                          \
+  X(bufferStoreB128, BUFFER_STORE_DWORDX4_OFFEN_vi,                            \
+    BUFFER_STORE_DWORDX4_OFFEN_gfx11)                                          \
+  X(dsReadB64, DS_READ_B64_vi_gfx9, DS_READ_B64_gfx11)                         \
+  X(dsReadB96, DS_READ_B96_vi_gfx9, DS_READ_B96_gfx11)                         \
+  X(dsReadB128, DS_READ_B128_vi_gfx9, DS_READ_B128_gfx11)                      \
+  X(dsWriteB64, DS_WRITE_B64_vi_gfx9, DS_WRITE_B64_gfx11)                      \
+  X(dsWriteB96, DS_WRITE_B96_vi_gfx9, DS_WRITE_B96_gfx11)                      \
+  X(dsWriteB128, DS_WRITE_B128_vi_gfx9, DS_WRITE_B128_gfx11)                   \
+  X(bufferLoadLdsB32, BUFFER_LOAD_DWORD_LDS_OFFEN_vi,                          \
+    BUFFER_LOAD_DWORD_LDS_OFFEN_gfx10)                                         \
+  X(dsReadB32, DS_READ_B32_vi_gfx9, DS_READ_B32_gfx11)                         \
+  X(dsWriteB32, DS_WRITE_B32_vi_gfx9, DS_WRITE_B32_gfx11)
+
+struct AMDGPUOpcodeSet {
+#define WAVE_AMDGPU_OPCODE_FIELD(name, viOpcode, gfx11Opcode) unsigned name = 0;
+  WAVE_AMDGPU_OPCODE_LIST(WAVE_AMDGPU_OPCODE_FIELD)
+#undef WAVE_AMDGPU_OPCODE_FIELD
+};
+
+static AMDGPUOpcodeSet
+makeAMDGPUOpcodeSet(const llvm::AMDGPU::IsaVersion &isa) {
+  bool useVIEncoding = isa.Major == 8 || isa.Major == 9;
+  AMDGPUOpcodeSet opcodes;
+#define WAVE_AMDGPU_OPCODE_INIT(name, viOpcode, gfx11Opcode)                   \
+  opcodes.name =                                                               \
+      useVIEncoding ? llvm::AMDGPU::viOpcode : llvm::AMDGPU::gfx11Opcode;
+  WAVE_AMDGPU_OPCODE_LIST(WAVE_AMDGPU_OPCODE_INIT)
+#undef WAVE_AMDGPU_OPCODE_INIT
+  return opcodes;
+}
+
+#undef WAVE_AMDGPU_OPCODE_LIST
+
 class WaveAMDGPUEmitter {
 public:
   explicit WaveAMDGPUEmitter(raw_ostream &os) : os(os) {}
@@ -144,6 +251,7 @@ private:
   std::unique_ptr<llvm::MCInstPrinter> instPrinter;
   SmallVector<KernelInfo> kernels;
   llvm::AMDGPU::IsaVersion isaVersion;
+  AMDGPUOpcodeSet opcodes;
   std::string targetTriple = kDefaultTargetTriple.str();
   std::string targetChip = kDefaultTargetChip.str();
   unsigned wavefrontSize = 32;
@@ -199,6 +307,7 @@ private:
     if (failed(checkSupportedBackendTarget(module, targetTriple, targetChip,
                                            isaVersion)))
       return failure();
+    opcodes = makeAMDGPUOpcodeSet(isaVersion);
     std::optional<unsigned> defaultWavefrontSize =
         waveamdmachine::getAMDGPUDefaultWavefrontSize(targetChip);
     if (!defaultWavefrontSize)
@@ -220,162 +329,45 @@ private:
   bool isGfx11() const { return isaVersion.Major == 11; }
   bool isGfx90APlus() const { return llvm::AMDGPU::isGFX90A(*sti); }
 
-  unsigned sMovB32() const {
-    return isGfx8Or9() ? llvm::AMDGPU::S_MOV_B32_vi
-                       : llvm::AMDGPU::S_MOV_B32_gfx11;
-  }
-  unsigned sAddI32() const {
-    return isGfx8Or9() ? llvm::AMDGPU::S_ADD_I32_vi
-                       : llvm::AMDGPU::S_ADD_I32_gfx11;
-  }
-  unsigned sMulI32() const {
-    return isGfx8Or9() ? llvm::AMDGPU::S_MUL_I32_vi
-                       : llvm::AMDGPU::S_MUL_I32_gfx11;
-  }
-  unsigned sLshlB32() const {
-    return isGfx8Or9() ? llvm::AMDGPU::S_LSHL_B32_vi
-                       : llvm::AMDGPU::S_LSHL_B32_gfx11;
-  }
-  unsigned sLshrB32() const {
-    return isGfx8Or9() ? llvm::AMDGPU::S_LSHR_B32_vi
-                       : llvm::AMDGPU::S_LSHR_B32_gfx11;
-  }
-  unsigned sAndB32() const {
-    return isGfx8Or9() ? llvm::AMDGPU::S_AND_B32_vi
-                       : llvm::AMDGPU::S_AND_B32_gfx11;
-  }
-  unsigned sAndn2B32() const {
-    return isGfx8Or9() ? llvm::AMDGPU::S_ANDN2_B32_vi
-                       : llvm::AMDGPU::S_ANDN2_B32_gfx11;
-  }
-  unsigned sAndn2B64() const {
-    return isGfx8Or9() ? llvm::AMDGPU::S_ANDN2_B64_vi
-                       : llvm::AMDGPU::S_ANDN2_B64_gfx11;
-  }
-  unsigned sAndSaveexecB64() const {
-    return isGfx8Or9() ? llvm::AMDGPU::S_AND_SAVEEXEC_B64_vi
-                       : llvm::AMDGPU::S_AND_SAVEEXEC_B64_gfx11;
-  }
-  unsigned sMovB64() const {
-    return isGfx8Or9() ? llvm::AMDGPU::S_MOV_B64_vi
-                       : llvm::AMDGPU::S_MOV_B64_gfx11;
-  }
-  unsigned sAddU32() const {
-    return isGfx8Or9() ? llvm::AMDGPU::S_ADD_U32_vi
-                       : llvm::AMDGPU::S_ADD_U32_gfx11;
-  }
-  unsigned sAddcU32() const {
-    return isGfx8Or9() ? llvm::AMDGPU::S_ADDC_U32_vi
-                       : llvm::AMDGPU::S_ADDC_U32_gfx11;
-  }
-  unsigned sMulHiU32() const {
-    return isGfx8Or9() ? llvm::AMDGPU::S_MUL_HI_U32_vi
-                       : llvm::AMDGPU::S_MUL_HI_U32_gfx11;
-  }
-  unsigned sCmpLtI32() const {
-    return isGfx8Or9() ? llvm::AMDGPU::S_CMP_LT_I32_vi
-                       : llvm::AMDGPU::S_CMP_LT_I32_gfx11;
-  }
-  unsigned sCmpLgU32() const {
-    return isGfx8Or9() ? llvm::AMDGPU::S_CMP_LG_U32_vi
-                       : llvm::AMDGPU::S_CMP_LG_U32_gfx11;
-  }
-  unsigned sCbranchScc0() const {
-    return isGfx8Or9() ? llvm::AMDGPU::S_CBRANCH_SCC0_vi
-                       : llvm::AMDGPU::S_CBRANCH_SCC0_gfx11;
-  }
-  unsigned sCbranchScc1() const {
-    return isGfx8Or9() ? llvm::AMDGPU::S_CBRANCH_SCC1_vi
-                       : llvm::AMDGPU::S_CBRANCH_SCC1_gfx11;
-  }
-  unsigned sCbranchExecz() const {
-    return isGfx8Or9() ? llvm::AMDGPU::S_CBRANCH_EXECZ_vi
-                       : llvm::AMDGPU::S_CBRANCH_EXECZ_gfx11;
-  }
-  unsigned sLoadB32() const {
-    return isGfx8Or9() ? llvm::AMDGPU::S_LOAD_DWORD_IMM_vi
-                       : llvm::AMDGPU::S_LOAD_B32_IMM_gfx11;
-  }
-  unsigned sLoadB64() const {
-    return isGfx8Or9() ? llvm::AMDGPU::S_LOAD_DWORDX2_IMM_vi
-                       : llvm::AMDGPU::S_LOAD_B64_IMM_gfx11;
-  }
-  unsigned sLoadB128() const {
-    return isGfx8Or9() ? llvm::AMDGPU::S_LOAD_DWORDX4_IMM_vi
-                       : llvm::AMDGPU::S_LOAD_B128_IMM_gfx11;
-  }
-  unsigned sWaitcnt() const {
-    return isGfx8Or9() ? llvm::AMDGPU::S_WAITCNT_vi
-                       : llvm::AMDGPU::S_WAITCNT_gfx11;
-  }
-  unsigned sNop() const {
-    return isGfx8Or9() ? llvm::AMDGPU::S_NOP_vi : llvm::AMDGPU::S_NOP_gfx11;
-  }
-  unsigned sSetprio() const {
-    return isGfx8Or9() ? llvm::AMDGPU::S_SETPRIO_vi
-                       : llvm::AMDGPU::S_SETPRIO_gfx11;
-  }
-  unsigned sBarrier() const {
-    return isGfx8Or9() ? llvm::AMDGPU::S_BARRIER_vi
-                       : llvm::AMDGPU::S_BARRIER_gfx11;
-  }
-  unsigned sEndpgm() const {
-    return isGfx8Or9() ? llvm::AMDGPU::S_ENDPGM_vi
-                       : llvm::AMDGPU::S_ENDPGM_gfx11;
-  }
-  unsigned sSetpcB64() const {
-    return isGfx8Or9() ? llvm::AMDGPU::S_SETPC_B64_vi
-                       : llvm::AMDGPU::S_SETPC_B64_gfx11;
-  }
-
-  unsigned vMbcntLo() const {
-    return isGfx8Or9() ? llvm::AMDGPU::V_MBCNT_LO_U32_B32_e64_vi
-                       : llvm::AMDGPU::V_MBCNT_LO_U32_B32_e64_gfx11;
-  }
-  unsigned vMovB32() const {
-    return isGfx8Or9() ? llvm::AMDGPU::V_MOV_B32_e32_vi
-                       : llvm::AMDGPU::V_MOV_B32_e32_gfx11;
-  }
-  unsigned vLshlrevB32() const {
-    return isGfx8Or9() ? llvm::AMDGPU::V_LSHLREV_B32_e32_vi
-                       : llvm::AMDGPU::V_LSHLREV_B32_e32_gfx11;
-  }
-  unsigned vLshrrevB32() const {
-    return isGfx8Or9() ? llvm::AMDGPU::V_LSHRREV_B32_e32_vi
-                       : llvm::AMDGPU::V_LSHRREV_B32_e32_gfx11;
-  }
-  unsigned vReadfirstlaneB32() const {
-    return isGfx8Or9() ? llvm::AMDGPU::V_READFIRSTLANE_B32_vi
-                       : llvm::AMDGPU::V_READFIRSTLANE_B32_gfx11;
-  }
-  unsigned vMulLoU32() const {
-    return isGfx8Or9() ? llvm::AMDGPU::V_MUL_LO_U32_vi
-                       : llvm::AMDGPU::V_MUL_LO_U32_e64_gfx11;
-  }
-  unsigned vAddF32() const {
-    return isGfx8Or9() ? llvm::AMDGPU::V_ADD_F32_e32_vi
-                       : llvm::AMDGPU::V_ADD_F32_e32_gfx11;
-  }
-  unsigned vSubF32() const {
-    return isGfx8Or9() ? llvm::AMDGPU::V_SUB_F32_e32_vi
-                       : llvm::AMDGPU::V_SUB_F32_e32_gfx11;
-  }
-  unsigned vMulF32() const {
-    return isGfx8Or9() ? llvm::AMDGPU::V_MUL_F32_e32_vi
-                       : llvm::AMDGPU::V_MUL_F32_e32_gfx11;
-  }
-  unsigned vMaxF32() const {
-    return isGfx8Or9() ? llvm::AMDGPU::V_MAX_F32_e32_vi
-                       : llvm::AMDGPU::V_MAX_F32_e32_gfx11;
-  }
-  unsigned vExpF32() const {
-    return isGfx8Or9() ? llvm::AMDGPU::V_EXP_F32_e32_vi
-                       : llvm::AMDGPU::V_EXP_F32_e32_gfx11;
-  }
-  unsigned vRcpF32() const {
-    return isGfx8Or9() ? llvm::AMDGPU::V_RCP_F32_e32_vi
-                       : llvm::AMDGPU::V_RCP_F32_e32_gfx11;
-  }
+  unsigned sMovB32() const { return opcodes.sMovB32; }
+  unsigned sAddI32() const { return opcodes.sAddI32; }
+  unsigned sMulI32() const { return opcodes.sMulI32; }
+  unsigned sLshlB32() const { return opcodes.sLshlB32; }
+  unsigned sLshrB32() const { return opcodes.sLshrB32; }
+  unsigned sAndB32() const { return opcodes.sAndB32; }
+  unsigned sAndn2B32() const { return opcodes.sAndn2B32; }
+  unsigned sAndn2B64() const { return opcodes.sAndn2B64; }
+  unsigned sAndSaveexecB64() const { return opcodes.sAndSaveexecB64; }
+  unsigned sMovB64() const { return opcodes.sMovB64; }
+  unsigned sAddU32() const { return opcodes.sAddU32; }
+  unsigned sAddcU32() const { return opcodes.sAddcU32; }
+  unsigned sMulHiU32() const { return opcodes.sMulHiU32; }
+  unsigned sCmpLtI32() const { return opcodes.sCmpLtI32; }
+  unsigned sCmpLgU32() const { return opcodes.sCmpLgU32; }
+  unsigned sCbranchScc0() const { return opcodes.sCbranchScc0; }
+  unsigned sCbranchScc1() const { return opcodes.sCbranchScc1; }
+  unsigned sCbranchExecz() const { return opcodes.sCbranchExecz; }
+  unsigned sLoadB32() const { return opcodes.sLoadB32; }
+  unsigned sLoadB64() const { return opcodes.sLoadB64; }
+  unsigned sLoadB128() const { return opcodes.sLoadB128; }
+  unsigned sWaitcnt() const { return opcodes.sWaitcnt; }
+  unsigned sNop() const { return opcodes.sNop; }
+  unsigned sSetprio() const { return opcodes.sSetprio; }
+  unsigned sBarrier() const { return opcodes.sBarrier; }
+  unsigned sEndpgm() const { return opcodes.sEndpgm; }
+  unsigned sSetpcB64() const { return opcodes.sSetpcB64; }
+  unsigned vMbcntLo() const { return opcodes.vMbcntLo; }
+  unsigned vMovB32() const { return opcodes.vMovB32; }
+  unsigned vLshlrevB32() const { return opcodes.vLshlrevB32; }
+  unsigned vLshrrevB32() const { return opcodes.vLshrrevB32; }
+  unsigned vReadfirstlaneB32() const { return opcodes.vReadfirstlaneB32; }
+  unsigned vMulLoU32() const { return opcodes.vMulLoU32; }
+  unsigned vAddF32() const { return opcodes.vAddF32; }
+  unsigned vSubF32() const { return opcodes.vSubF32; }
+  unsigned vMulF32() const { return opcodes.vMulF32; }
+  unsigned vMaxF32() const { return opcodes.vMaxF32; }
+  unsigned vExpF32() const { return opcodes.vExpF32; }
+  unsigned vRcpF32() const { return opcodes.vRcpF32; }
   unsigned vCvtF16F32() const {
     if (isGfx8Or9())
       return llvm::AMDGPU::V_CVT_F16_F32_e64_vi;
@@ -443,30 +435,12 @@ private:
       return llvm::AMDGPU::V_PK_FMA_F16_gfx12;
     return llvm::AMDGPU::V_PK_FMA_F16_gfx13;
   }
-  unsigned vCmpEqU32() const {
-    return isGfx8Or9() ? llvm::AMDGPU::V_CMP_EQ_U32_e64_vi
-                       : llvm::AMDGPU::V_CMP_EQ_U32_e64_gfx11;
-  }
-  unsigned vCmpNeU32() const {
-    return isGfx8Or9() ? llvm::AMDGPU::V_CMP_NE_U32_e64_vi
-                       : llvm::AMDGPU::V_CMP_NE_U32_e64_gfx11;
-  }
-  unsigned vCmpLtU32() const {
-    return isGfx8Or9() ? llvm::AMDGPU::V_CMP_LT_U32_e64_vi
-                       : llvm::AMDGPU::V_CMP_LT_U32_e64_gfx11;
-  }
-  unsigned vCmpLeU32() const {
-    return isGfx8Or9() ? llvm::AMDGPU::V_CMP_LE_U32_e64_vi
-                       : llvm::AMDGPU::V_CMP_LE_U32_e64_gfx11;
-  }
-  unsigned vCmpGtU32() const {
-    return isGfx8Or9() ? llvm::AMDGPU::V_CMP_GT_U32_e64_vi
-                       : llvm::AMDGPU::V_CMP_GT_U32_e64_gfx11;
-  }
-  unsigned vCmpGeU32() const {
-    return isGfx8Or9() ? llvm::AMDGPU::V_CMP_GE_U32_e64_vi
-                       : llvm::AMDGPU::V_CMP_GE_U32_e64_gfx11;
-  }
+  unsigned vCmpEqU32() const { return opcodes.vCmpEqU32; }
+  unsigned vCmpNeU32() const { return opcodes.vCmpNeU32; }
+  unsigned vCmpLtU32() const { return opcodes.vCmpLtU32; }
+  unsigned vCmpLeU32() const { return opcodes.vCmpLeU32; }
+  unsigned vCmpGtU32() const { return opcodes.vCmpGtU32; }
+  unsigned vCmpGeU32() const { return opcodes.vCmpGeU32; }
   unsigned mfmaF32_16x16x16F16() const {
     return isGfx90APlus() ? llvm::AMDGPU::V_MFMA_F32_16X16X16F16_gfx940_vcd
                           : llvm::AMDGPU::V_MFMA_F32_16X16X16F16_vi;
@@ -478,8 +452,7 @@ private:
   unsigned bufferStoreB32() const {
     if (isGfx90APlus())
       return llvm::AMDGPU::BUFFER_STORE_DWORD_OFFEN_gfx90a;
-    return isGfx8Or9() ? llvm::AMDGPU::BUFFER_STORE_DWORD_OFFEN_vi
-                       : llvm::AMDGPU::BUFFER_STORE_DWORD_OFFEN_gfx11;
+    return opcodes.bufferStoreB32;
   }
 
   unsigned bufferStoreB16() const {
@@ -495,8 +468,7 @@ private:
   unsigned bufferLoadB32() const {
     if (isGfx90APlus())
       return llvm::AMDGPU::BUFFER_LOAD_DWORD_OFFEN_gfx90a;
-    return isGfx8Or9() ? llvm::AMDGPU::BUFFER_LOAD_DWORD_OFFEN_vi
-                       : llvm::AMDGPU::BUFFER_LOAD_DWORD_OFFEN_gfx11;
+    return opcodes.bufferLoadB32;
   }
 
   unsigned bufferLoadB16() const {
@@ -509,10 +481,7 @@ private:
     return llvm::AMDGPU::BUFFER_LOAD_USHORT_OFFEN_gfx11;
   }
 
-  unsigned globalStoreB32() const {
-    return isGfx8Or9() ? llvm::AMDGPU::GLOBAL_STORE_DWORD_SADDR_vi
-                       : llvm::AMDGPU::GLOBAL_STORE_DWORD_SADDR_gfx11;
-  }
+  unsigned globalStoreB32() const { return opcodes.globalStoreB32; }
 
   unsigned globalStoreB32Addr64() const {
     if (isGfx8Or9())
@@ -550,10 +519,7 @@ private:
     return llvm::AMDGPU::GLOBAL_STORE_SHORT_gfx13;
   }
 
-  unsigned globalLoadB32() const {
-    return isGfx8Or9() ? llvm::AMDGPU::GLOBAL_LOAD_DWORD_SADDR_vi
-                       : llvm::AMDGPU::GLOBAL_LOAD_DWORD_SADDR_gfx11;
-  }
+  unsigned globalLoadB32() const { return opcodes.globalLoadB32; }
 
   unsigned globalLoadB32Addr64() const {
     if (isGfx8Or9())
@@ -591,95 +557,24 @@ private:
     return llvm::AMDGPU::GLOBAL_LOAD_USHORT_gfx13;
   }
 
-  unsigned globalLoadB64() const {
-    return isGfx8Or9() ? llvm::AMDGPU::GLOBAL_LOAD_DWORDX2_SADDR_vi
-                       : llvm::AMDGPU::GLOBAL_LOAD_DWORDX2_SADDR_gfx11;
-  }
-
-  unsigned globalLoadB96() const {
-    return isGfx8Or9() ? llvm::AMDGPU::GLOBAL_LOAD_DWORDX3_SADDR_vi
-                       : llvm::AMDGPU::GLOBAL_LOAD_DWORDX3_SADDR_gfx11;
-  }
-
-  unsigned globalLoadB128() const {
-    return isGfx8Or9() ? llvm::AMDGPU::GLOBAL_LOAD_DWORDX4_SADDR_vi
-                       : llvm::AMDGPU::GLOBAL_LOAD_DWORDX4_SADDR_gfx11;
-  }
-
-  unsigned globalStoreB64() const {
-    return isGfx8Or9() ? llvm::AMDGPU::GLOBAL_STORE_DWORDX2_SADDR_vi
-                       : llvm::AMDGPU::GLOBAL_STORE_DWORDX2_SADDR_gfx11;
-  }
-
-  unsigned globalStoreB96() const {
-    return isGfx8Or9() ? llvm::AMDGPU::GLOBAL_STORE_DWORDX3_SADDR_vi
-                       : llvm::AMDGPU::GLOBAL_STORE_DWORDX3_SADDR_gfx11;
-  }
-
-  unsigned globalStoreB128() const {
-    return isGfx8Or9() ? llvm::AMDGPU::GLOBAL_STORE_DWORDX4_SADDR_vi
-                       : llvm::AMDGPU::GLOBAL_STORE_DWORDX4_SADDR_gfx11;
-  }
-
-  unsigned bufferLoadB64() const {
-    return isGfx8Or9() ? llvm::AMDGPU::BUFFER_LOAD_DWORDX2_OFFEN_vi
-                       : llvm::AMDGPU::BUFFER_LOAD_DWORDX2_OFFEN_gfx11;
-  }
-
-  unsigned bufferLoadB96() const {
-    return isGfx8Or9() ? llvm::AMDGPU::BUFFER_LOAD_DWORDX3_OFFEN_vi
-                       : llvm::AMDGPU::BUFFER_LOAD_DWORDX3_OFFEN_gfx11;
-  }
-
-  unsigned bufferLoadB128() const {
-    return isGfx8Or9() ? llvm::AMDGPU::BUFFER_LOAD_DWORDX4_OFFEN_vi
-                       : llvm::AMDGPU::BUFFER_LOAD_DWORDX4_OFFEN_gfx11;
-  }
-
-  unsigned bufferStoreB64() const {
-    return isGfx8Or9() ? llvm::AMDGPU::BUFFER_STORE_DWORDX2_OFFEN_vi
-                       : llvm::AMDGPU::BUFFER_STORE_DWORDX2_OFFEN_gfx11;
-  }
-
-  unsigned bufferStoreB96() const {
-    return isGfx8Or9() ? llvm::AMDGPU::BUFFER_STORE_DWORDX3_OFFEN_vi
-                       : llvm::AMDGPU::BUFFER_STORE_DWORDX3_OFFEN_gfx11;
-  }
-
-  unsigned bufferStoreB128() const {
-    return isGfx8Or9() ? llvm::AMDGPU::BUFFER_STORE_DWORDX4_OFFEN_vi
-                       : llvm::AMDGPU::BUFFER_STORE_DWORDX4_OFFEN_gfx11;
-  }
-
-  unsigned dsReadB64() const {
-    return isGfx8Or9() ? llvm::AMDGPU::DS_READ_B64_vi_gfx9
-                       : llvm::AMDGPU::DS_READ_B64_gfx11;
-  }
-
-  unsigned dsReadB96() const {
-    return isGfx8Or9() ? llvm::AMDGPU::DS_READ_B96_vi_gfx9
-                       : llvm::AMDGPU::DS_READ_B96_gfx11;
-  }
-
-  unsigned dsReadB128() const {
-    return isGfx8Or9() ? llvm::AMDGPU::DS_READ_B128_vi_gfx9
-                       : llvm::AMDGPU::DS_READ_B128_gfx11;
-  }
-
-  unsigned dsWriteB64() const {
-    return isGfx8Or9() ? llvm::AMDGPU::DS_WRITE_B64_vi_gfx9
-                       : llvm::AMDGPU::DS_WRITE_B64_gfx11;
-  }
-
-  unsigned dsWriteB96() const {
-    return isGfx8Or9() ? llvm::AMDGPU::DS_WRITE_B96_vi_gfx9
-                       : llvm::AMDGPU::DS_WRITE_B96_gfx11;
-  }
-
-  unsigned dsWriteB128() const {
-    return isGfx8Or9() ? llvm::AMDGPU::DS_WRITE_B128_vi_gfx9
-                       : llvm::AMDGPU::DS_WRITE_B128_gfx11;
-  }
+  unsigned globalLoadB64() const { return opcodes.globalLoadB64; }
+  unsigned globalLoadB96() const { return opcodes.globalLoadB96; }
+  unsigned globalLoadB128() const { return opcodes.globalLoadB128; }
+  unsigned globalStoreB64() const { return opcodes.globalStoreB64; }
+  unsigned globalStoreB96() const { return opcodes.globalStoreB96; }
+  unsigned globalStoreB128() const { return opcodes.globalStoreB128; }
+  unsigned bufferLoadB64() const { return opcodes.bufferLoadB64; }
+  unsigned bufferLoadB96() const { return opcodes.bufferLoadB96; }
+  unsigned bufferLoadB128() const { return opcodes.bufferLoadB128; }
+  unsigned bufferStoreB64() const { return opcodes.bufferStoreB64; }
+  unsigned bufferStoreB96() const { return opcodes.bufferStoreB96; }
+  unsigned bufferStoreB128() const { return opcodes.bufferStoreB128; }
+  unsigned dsReadB64() const { return opcodes.dsReadB64; }
+  unsigned dsReadB96() const { return opcodes.dsReadB96; }
+  unsigned dsReadB128() const { return opcodes.dsReadB128; }
+  unsigned dsWriteB64() const { return opcodes.dsWriteB64; }
+  unsigned dsWriteB96() const { return opcodes.dsWriteB96; }
+  unsigned dsWriteB128() const { return opcodes.dsWriteB128; }
 
   unsigned globalLoadLdsB32() const {
     return isGfx90APlus() ? llvm::AMDGPU::GLOBAL_LOAD_LDS_DWORD_SADDR_gfx940
@@ -694,8 +589,7 @@ private:
   unsigned bufferLoadLdsB32() const {
     if (isGfx90APlus())
       return llvm::AMDGPU::BUFFER_LOAD_DWORD_LDS_OFFEN_gfx90a;
-    return isGfx8Or9() ? llvm::AMDGPU::BUFFER_LOAD_DWORD_LDS_OFFEN_vi
-                       : llvm::AMDGPU::BUFFER_LOAD_DWORD_LDS_OFFEN_gfx10;
+    return opcodes.bufferLoadLdsB32;
   }
 
   unsigned bufferLoadLdsB128() const {
@@ -704,10 +598,7 @@ private:
     return llvm::AMDGPU::BUFFER_LOAD_DWORDX4_LDS_OFFEN_vi;
   }
 
-  unsigned dsReadB32() const {
-    return isGfx8Or9() ? llvm::AMDGPU::DS_READ_B32_vi_gfx9
-                       : llvm::AMDGPU::DS_READ_B32_gfx11;
-  }
+  unsigned dsReadB32() const { return opcodes.dsReadB32; }
 
   unsigned dsReadB16() const {
     if (isGfx8Or9())
@@ -721,10 +612,7 @@ private:
     return llvm::AMDGPU::DS_READ_U16_gfx13;
   }
 
-  unsigned dsWriteB32() const {
-    return isGfx8Or9() ? llvm::AMDGPU::DS_WRITE_B32_vi_gfx9
-                       : llvm::AMDGPU::DS_WRITE_B32_gfx11;
-  }
+  unsigned dsWriteB32() const { return opcodes.dsWriteB32; }
 
   unsigned dsWriteB16() const {
     if (isGfx8Or9())
