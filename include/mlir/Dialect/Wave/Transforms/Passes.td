@@ -56,6 +56,19 @@ def WaveCombinePointerOffsets : Pass<"wave-combine-pointer-offsets"> {
   ];
 }
 
+def WaveSimplifyIndexExprs : Pass<"wave-simplify-index-exprs"> {
+  let summary = "Simplify Wave index expressions with integer range facts";
+  let description = [{
+    Runs MLIR integer range analysis, converts proven binding ranges into
+    ixsimpl assumptions, and rewrites `wave.index_expr` expressions and binding
+    lists when analysis makes symbols redundant.
+  }];
+  let dependentDialects = [
+    "func::FuncDialect",
+    "wave::WaveDialect"
+  ];
+}
+
 def WaveAMDABILowering
     : Pass<"waveamd-abi-lowering"> {
   let summary = "Lower WaveAMDMachine function arguments to the AMDGPU kernel ABI";

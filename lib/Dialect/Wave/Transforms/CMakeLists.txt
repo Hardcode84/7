@@ -23,6 +23,7 @@ add_mlir_dialect_library(MLIRWaveTransforms
   WaveFormPackedMath.cpp
   WaveMetaSpecialize.cpp
   WaveSetTargetAttr.cpp
+  WaveSimplifyIndexExprs.cpp
 
   ADDITIONAL_HEADER_DIRS
   ${MLIR_MAIN_INCLUDE_DIR}/mlir/Dialect/Wave
