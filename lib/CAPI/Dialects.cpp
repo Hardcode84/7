@@ -8,7 +8,6 @@
 
 #include "Wave-c/Dialects.h"
 
-#include "ixsimpl.h"
 #include "mlir/CAPI/IR.h"
 #include "mlir/CAPI/Registration.h"
 #include "mlir/CAPI/Support.h"
@@ -28,8 +27,6 @@ namespace mlir::wave {
 std::unique_ptr<::mlir::Pass> createWaveMetaSpecialize();
 } // namespace mlir::wave
 #include "llvm/ADT/StringRef.h"
-
-#include <cstring>
 
 using namespace mlir;
 
@@ -144,28 +141,6 @@ MlirAttribute mlirWaveExprAttrGetFromText(MlirContext ctx, MlirStringRef text) {
   return wrap(wave::ExprAttr::get(context, *handle));
 }
 
-namespace {
-struct BufferReaderState {
-  const uint8_t *data;
-  size_t length;
-  size_t pos;
-};
-
-bool bufferReaderRead(void *userdata, void *buf, size_t len) {
-  auto *state = static_cast<BufferReaderState *>(userdata);
-  if (state->pos + len > state->length)
-    return false;
-  std::memcpy(buf, state->data + state->pos, len);
-  state->pos += len;
-  return true;
-}
-
-size_t bufferReaderRemaining(void *userdata) {
-  auto *state = static_cast<BufferReaderState *>(userdata);
-  return state->length - state->pos;
-}
-} // namespace
-
 MlirAttribute mlirWaveExprAttrGetFromBytes(MlirContext ctx,
                                            const uint8_t *bytes,
                                            size_t length) {
@@ -173,18 +148,10 @@ MlirAttribute mlirWaveExprAttrGetFromBytes(MlirContext ctx,
   auto *dialect = context->getOrLoadDialect<wave::WaveDialect>();
   if (!dialect)
     return MlirAttribute{nullptr};
-  BufferReaderState state{bytes, length, 0};
-  ixs_reader reader{bufferReaderRead, bufferReaderRemaining, &state};
-  wave::sym::Store &store = dialect->getSymbolStore();
-  wave::sym::Session session(store);
-  ixs_node *node = ixs_deserialize_node(session.raw(), &reader);
-  if (!node || ixs_node_tag(node) == IXS_PARSE_ERROR) {
-    emitError(UnknownLoc::get(context))
-        << "failed to deserialize wave.expr bytes";
-    return MlirAttribute{nullptr};
-  }
   std::string diagnostic;
-  auto handle = wave::sym::importExpr(store, node, &diagnostic);
+  auto handle = wave::sym::deserializeExpr(
+      dialect->getSymbolStore(), llvm::ArrayRef<uint8_t>(bytes, length),
+      &diagnostic);
   if (failed(handle)) {
     emitError(UnknownLoc::get(context))
         << "failed to materialize wave.expr from bytes: " << diagnostic;

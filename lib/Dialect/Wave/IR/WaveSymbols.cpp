@@ -17,6 +17,7 @@
 
 #include <array>
 #include <cassert>
+#include <cstring>
 #include <limits>
 #include <numeric>
 #include <utility>
@@ -129,6 +130,25 @@ static ixs_node *importNode(Session &session, const ixs_node *node,
   if (!imported)
     setDiagnostic(diagnostic, std::string("out of memory importing ") + kind);
   return imported;
+}
+
+struct BufferReaderState {
+  llvm::ArrayRef<uint8_t> bytes;
+  size_t pos = 0;
+};
+
+static bool bufferReaderRead(void *userdata, void *buf, size_t len) {
+  auto *state = static_cast<BufferReaderState *>(userdata);
+  if (len > state->bytes.size() - state->pos)
+    return false;
+  std::memcpy(buf, state->bytes.data() + state->pos, len);
+  state->pos += len;
+  return true;
+}
+
+static size_t bufferReaderRemaining(void *userdata) {
+  auto *state = static_cast<BufferReaderState *>(userdata);
+  return state->bytes.size() - state->pos;
 }
 
 static void walkSymbolNamesImpl(const ixs_node *node,
@@ -400,6 +420,16 @@ FailureOr<PredHandle> mlir::wave::sym::parsePred(Store &store,
     return failure();
   }
   return PredHandle(node);
+}
+
+FailureOr<ExprHandle>
+mlir::wave::sym::deserializeExpr(Store &store, ArrayRef<uint8_t> bytes,
+                                 std::string *diagnostic) {
+  Session session(store);
+  BufferReaderState state{bytes, 0};
+  ixs_reader reader{bufferReaderRead, bufferReaderRemaining, &state};
+  return finishExpr(session.raw(), ixs_deserialize_node(session.raw(), &reader),
+                    diagnostic, "failed to deserialize wave.expr bytes");
 }
 
 FailureOr<ExprHandle> mlir::wave::sym::importExpr(Store &store,

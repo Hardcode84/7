@@ -96,7 +96,7 @@ static TermKind classifyIndexExprResult(WaveAMDMachineSelector &S,
     if (std::optional<sym::PredHandle> a = S.bindingAssumption(binding, key))
       offset.assumptions.push_back(*a);
   }
-  sym::ExprHandle expr{op.getExpr().getNode()};
+  sym::ExprHandle expr = op.getExpr().getValue();
   FailureOr<sym::ExprHandle> simplified =
       sym::simplifyExpr(S.symbolStore(), expr, offset.assumptions);
   offset.expr = succeeded(simplified) ? *simplified : expr;

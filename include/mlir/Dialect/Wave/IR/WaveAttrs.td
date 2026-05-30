@@ -70,9 +70,6 @@ def Wave_ExprAttr : Wave_Attr<"Expr", "expr"> {
   let parameters = (ins Wave_ExprHandleParameter:$value);
   let assemblyFormat = "`<` $value `>`";
   let genVerifyDecl = 1;
-  let extraClassDeclaration = [{
-    const ixs_node *getNode() const { return getValue().raw(); }
-  }];
 }
 
 def Wave_PredAttr : Wave_Attr<"Pred", "pred"> {
@@ -84,9 +81,6 @@ def Wave_PredAttr : Wave_Attr<"Pred", "pred"> {
   let parameters = (ins Wave_PredHandleParameter:$value);
   let assemblyFormat = "`<` $value `>`";
   let genVerifyDecl = 1;
-  let extraClassDeclaration = [{
-    const ixs_node *getNode() const { return getValue().raw(); }
-  }];
 }
 
 def Wave_GlobalAddressSpaceAttr : Wave_Attr<"GlobalAddressSpace", "global"> {

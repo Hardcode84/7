@@ -2116,7 +2116,7 @@ LogicalResult WaveAMDMachineSelector::selectIndexExpr(IndexExprOp op) {
     if (std::optional<sym::PredHandle> a = bindingAssumption(binding, key))
       pointerOffset.assumptions.push_back(*a);
   }
-  sym::ExprHandle exprHandle{op.getExpr().getNode()};
+  sym::ExprHandle exprHandle = op.getExpr().getValue();
   FailureOr<sym::ExprHandle> simplified =
       sym::simplifyExpr(symbolStore(), exprHandle, pointerOffset.assumptions);
   pointerOffset.expr = succeeded(simplified) ? *simplified : exprHandle;

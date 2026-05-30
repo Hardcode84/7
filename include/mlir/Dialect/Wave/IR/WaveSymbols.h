@@ -210,6 +210,9 @@ mlir::FailureOr<ExprHandle> parseExpr(Store &store, llvm::StringRef text,
                                       std::string *diagnostic = nullptr);
 mlir::FailureOr<PredHandle> parsePred(Store &store, llvm::StringRef text,
                                       std::string *diagnostic = nullptr);
+mlir::FailureOr<ExprHandle> deserializeExpr(Store &store,
+                                            llvm::ArrayRef<uint8_t> bytes,
+                                            std::string *diagnostic = nullptr);
 
 mlir::FailureOr<ExprHandle> importExpr(Store &store, const ixs_node *foreign,
                                        std::string *diagnostic = nullptr);

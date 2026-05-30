@@ -137,9 +137,8 @@ static void bindWaveIndexType(nb::module_ &m) {
 
 // #wave.expr constructors. `get_from_bytes` is the structural path:
 // callers pass the bytes produced by `ixsimpl.Context.serialize(expr)`
-// and the dialect deserializes into its own symbol store via
-// `ixs_deserialize_node`. `get` keeps the legacy text-parse entry
-// point for callers that genuinely start from text.
+// and the dialect deserializes into its own symbol store. `get` keeps
+// the legacy text-parse entry point for callers that start from text.
 static void bindExprAttr(nb::module_ &m) {
   mlir_attribute_subclass(m, "ExprAttr", mlirWaveAttributeIsAExpr)
       .def_classmethod(
