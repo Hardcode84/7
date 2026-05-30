@@ -248,6 +248,18 @@ private:
     return isGfx8Or9() ? llvm::AMDGPU::S_ANDN2_B32_vi
                        : llvm::AMDGPU::S_ANDN2_B32_gfx11;
   }
+  unsigned sAndn2B64() const {
+    return isGfx8Or9() ? llvm::AMDGPU::S_ANDN2_B64_vi
+                       : llvm::AMDGPU::S_ANDN2_B64_gfx11;
+  }
+  unsigned sAndSaveexecB64() const {
+    return isGfx8Or9() ? llvm::AMDGPU::S_AND_SAVEEXEC_B64_vi
+                       : llvm::AMDGPU::S_AND_SAVEEXEC_B64_gfx11;
+  }
+  unsigned sMovB64() const {
+    return isGfx8Or9() ? llvm::AMDGPU::S_MOV_B64_vi
+                       : llvm::AMDGPU::S_MOV_B64_gfx11;
+  }
   unsigned sAddU32() const {
     return isGfx8Or9() ? llvm::AMDGPU::S_ADD_U32_vi
                        : llvm::AMDGPU::S_ADD_U32_gfx11;
@@ -991,6 +1003,8 @@ private:
       return llvm::AMDGPU::VCC;
     if (name == "m0")
       return llvm::AMDGPU::M0;
+    if (name == "exec")
+      return llvm::AMDGPU::EXEC;
     if (name == "exec_lo")
       return llvm::AMDGPU::EXEC_LO;
     if (name == "null")
@@ -1771,9 +1785,18 @@ private:
       return emitMC(llvm::AMDGPU::S_AND_SAVEEXEC_B32_gfx11,
                     {toMCOperand(result()), toMCOperand(op.getOperand(0))});
     }
+    if (isa<waveamdmachine::SAndSaveexecB64Op>(op))
+      return emitMC(sAndSaveexecB64(),
+                    {toMCOperand(result()), toMCOperand(op.getOperand(0))});
     if (isa<waveamdmachine::SAndn2ExecB32Op>(op)) {
       return emitMC(sAndn2B32(),
                     {llvm::MCOperand::createReg(namedPhysReg("exec_lo")),
+                     toMCOperand(op.getOperand(0)),
+                     toMCOperand(op.getOperand(1))});
+    }
+    if (isa<waveamdmachine::SAndn2ExecB64Op>(op)) {
+      return emitMC(sAndn2B64(),
+                    {llvm::MCOperand::createReg(namedPhysReg("exec")),
                      toMCOperand(op.getOperand(0)),
                      toMCOperand(op.getOperand(1))});
     }
@@ -1783,6 +1806,11 @@ private:
     if (isa<waveamdmachine::SMovExecLoOp>(op)) {
       return emitMC(sMovB32(),
                     {llvm::MCOperand::createReg(namedPhysReg("exec_lo")),
+                     toMCOperand(op.getOperand(0))});
+    }
+    if (isa<waveamdmachine::SMovExecB64Op>(op)) {
+      return emitMC(sMovB64(),
+                    {llvm::MCOperand::createReg(namedPhysReg("exec")),
                      toMCOperand(op.getOperand(0))});
     }
     if (isa<waveamdmachine::SMovM0Op>(op))

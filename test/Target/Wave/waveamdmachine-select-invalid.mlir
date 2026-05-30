@@ -147,6 +147,18 @@ func.func @gfx942_rejects_wave32(%x: i32) {
 
 // -----
 
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx942"} {
+// expected-error @below {{WaveAMDMachine backend target gfx942 uses wave64 but function requires wave32}}
+func.func @gfx942_rejects_where_wave32_mask(%active: !wave.mask<32>) {
+  wave.where %active {
+    wave.yield
+  } : !wave.mask<32>
+  return
+}
+}
+
+// -----
+
 func.func @kernel_return_value(%x: i32) -> i32 attributes {wave.kernel} {
   // expected-error @below {{kernel functions must return void}}
   return %x : i32

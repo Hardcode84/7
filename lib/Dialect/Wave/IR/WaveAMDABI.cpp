@@ -17,6 +17,8 @@ using namespace mlir;
 using namespace mlir::waveamd;
 
 static unsigned bitWidth(Type type) {
+  if (auto mask = dyn_cast<wave::MaskType>(type))
+    return mask.getWidth();
   if (auto vecTy = dyn_cast<VectorType>(type)) {
     Type elementType = vecTy.getElementType();
     if (elementType.isIntOrFloat())

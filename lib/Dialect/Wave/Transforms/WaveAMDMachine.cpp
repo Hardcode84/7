@@ -2661,31 +2661,85 @@ Value WaveAMDMachineSelector::materializeSGPR1(Location loc, Value v) {
   return v;
 }
 
+static LogicalResult validateWhereMaskWidth(WhereOp op, unsigned maskWidth) {
+  if (maskWidth != 32 && maskWidth != 64)
+    return op.emitError("WaveAMDMachine backend supports only wave32/wave64 "
+                        "wave.where masks");
+  if (!waveamdmachine::findAMDGPUTargetModule(op))
+    return success();
+  FailureOr<unsigned> targetWidth =
+      waveamdmachine::getAMDGPUDefaultWavefrontSize(
+          op, "WaveAMDMachine wave.where lowering");
+  if (failed(targetWidth))
+    return failure();
+  if (maskWidth != *targetWidth)
+    return op.emitError("wave.where mask width ")
+           << maskWidth << " does not match target wave" << *targetWidth;
+  return success();
+}
+
+static Value saveExecMask(OpBuilder &builder, Location loc, Value condition,
+                          unsigned maskWidth) {
+  MLIRContext *context = builder.getContext();
+  if (maskWidth == 64) {
+    waveamdmachine::SAndSaveexecB64Op saveExec =
+        waveamdmachine::SAndSaveexecB64Op::create(
+            builder, loc,
+            getRegType(context, waveamdmachine::RegClass::SGPR, 2),
+            getSCCType(context), condition);
+    return saveExec.getSavedExec();
+  }
+  waveamdmachine::SAndSaveexecB32Op saveExec =
+      waveamdmachine::SAndSaveexecB32Op::create(
+          builder, loc, getRegType(context, waveamdmachine::RegClass::SGPR),
+          getSCCType(context), condition);
+  return saveExec.getSavedExec();
+}
+
+static void selectElseExecMask(OpBuilder &builder, Location loc,
+                               Value savedExec, Value condition,
+                               unsigned maskWidth) {
+  if (maskWidth == 64) {
+    waveamdmachine::SAndn2ExecB64Op::create(
+        builder, loc, getSCCType(builder.getContext()), savedExec, condition);
+    return;
+  }
+  waveamdmachine::SAndn2ExecB32Op::create(
+      builder, loc, getSCCType(builder.getContext()), savedExec, condition);
+}
+
+static void restoreExecMask(OpBuilder &builder, Location loc, Value savedExec,
+                            unsigned maskWidth) {
+  if (maskWidth == 64) {
+    waveamdmachine::SMovExecB64Op::create(builder, loc, savedExec);
+    return;
+  }
+  waveamdmachine::SMovExecLoOp::create(builder, loc, savedExec);
+}
+
 LogicalResult WaveAMDMachineSelector::selectWhere(WhereOp op) {
+  auto maskType = cast<MaskType>(op.getCondition().getType());
+  unsigned maskWidth = maskType.getWidth();
+  if (failed(validateWhereMaskWidth(op, maskWidth)))
+    return failure();
+
   std::string endLabel = makeLabel("endif");
   std::string elseLabel =
       op.getElseRegion().empty() ? endLabel : makeLabel("else");
   Value condition = expect(op.getCondition(), op);
-  waveamdmachine::SAndSaveexecB32Op saveExec =
-      waveamdmachine::SAndSaveexecB32Op::create(
-          builder, op.getLoc(),
-          getRegType(op.getContext(), waveamdmachine::RegClass::SGPR),
-          getSCCType(op.getContext()), condition);
-  Value savedExec = saveExec.getSavedExec();
+  Value savedExec = saveExecMask(builder, op.getLoc(), condition, maskWidth);
   waveamdmachine::SCBranchExeczOp::create(builder, op.getLoc(), elseLabel);
   if (failed(selectRegion(op.getThenRegion())))
     return failure();
   if (!op.getElseRegion().empty()) {
-    waveamdmachine::SAndn2ExecB32Op::create(builder, op.getLoc(),
-                                            getSCCType(op.getContext()),
-                                            savedExec, condition);
+    selectElseExecMask(builder, op.getLoc(), savedExec, condition, maskWidth);
     waveamdmachine::SCBranchExeczOp::create(builder, op.getLoc(), endLabel);
     waveamdmachine::LabelOp::create(builder, op.getLoc(), elseLabel);
     if (failed(selectRegion(op.getElseRegion())))
       return failure();
   }
   waveamdmachine::LabelOp::create(builder, op.getLoc(), endLabel);
-  waveamdmachine::SMovExecLoOp::create(builder, op.getLoc(), savedExec);
+  restoreExecMask(builder, op.getLoc(), savedExec, maskWidth);
   eraseIfTopLevel(op);
   return success();
 }

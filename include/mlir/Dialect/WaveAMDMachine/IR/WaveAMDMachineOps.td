@@ -617,9 +617,24 @@ def WaveAMDMachine_SAndSaveexecB32Op : WaveAMDMachine_Op<"s_and_saveexec_b32"> {
   );
   let assemblyFormat = "$mask attr-dict `:` functional-type(operands, results)";
 }
+def WaveAMDMachine_SAndSaveexecB64Op : WaveAMDMachine_Op<"s_and_saveexec_b64"> {
+  let summary = "save EXEC, mask EXEC, and set SCC";
+  let arguments = (ins WaveAMDMachine_SGPR2:$mask);
+  let results = (outs
+    WaveAMDMachine_SGPR2:$saved_exec,
+    WaveAMDMachine_SCC:$scc
+  );
+  let assemblyFormat = "$mask attr-dict `:` functional-type(operands, results)";
+}
 def WaveAMDMachine_SAndn2ExecB32Op : WaveAMDMachine_Op<"s_andn2_exec_b32"> {
   let summary = "set EXEC to lhs & ~rhs and set SCC";
   let arguments = (ins WaveAMDMachine_SGPR1:$lhs, WaveAMDMachine_SGPR1:$rhs);
+  let results = (outs WaveAMDMachine_SCC:$scc);
+  let assemblyFormat = "$lhs `,` $rhs attr-dict `:` functional-type(operands, results)";
+}
+def WaveAMDMachine_SAndn2ExecB64Op : WaveAMDMachine_Op<"s_andn2_exec_b64"> {
+  let summary = "set EXEC to lhs & ~rhs and set SCC";
+  let arguments = (ins WaveAMDMachine_SGPR2:$lhs, WaveAMDMachine_SGPR2:$rhs);
   let results = (outs WaveAMDMachine_SCC:$scc);
   let assemblyFormat = "$lhs `,` $rhs attr-dict `:` functional-type(operands, results)";
 }
@@ -629,6 +644,8 @@ def WaveAMDMachine_SCBranchExeczOp : WaveAMDMachine_ZeroResult<"s_cbranch_execz"
 }
 def WaveAMDMachine_SMovExecLoOp : WaveAMDMachine_UnaryNoResult<"s_mov_exec_lo",
                                                           WaveAMDMachine_SGPR1>;
+def WaveAMDMachine_SMovExecB64Op : WaveAMDMachine_UnaryNoResult<"s_mov_exec_b64",
+                                                          WaveAMDMachine_SGPR2>;
 def WaveAMDMachine_SMovM0Op
     : WaveAMDMachine_UnaryResult<"s_mov_m0", WaveAMDMachine_SGPR1, WaveAMDMachine_M0>;
 def WaveAMDMachine_SEndpgmOp : WaveAMDMachine_ZeroResult<"s_endpgm">;
