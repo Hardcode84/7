@@ -52,6 +52,8 @@ static int getModelLatency(const waveamdmachine::ArchData &arch,
 
 static bool isKnownMemoryOp(Operation *op) {
   return op->hasTrait<traits::SMEMLoadOp>() ||
+         op->hasTrait<traits::LDSLoadOp>() ||
+         op->hasTrait<traits::LDSStoreOp>() ||
          op->hasTrait<traits::VMEMLoadOp>() ||
          op->hasTrait<traits::VMEMStoreOp>();
 }
@@ -1187,6 +1189,8 @@ GraphTables buildGraphTables(const ScheduleRegion &region,
 
 static bool isMemoryIssuer(Operation *op) {
   return op->hasTrait<traits::SMEMLoadOp>() ||
+         op->hasTrait<traits::LDSLoadOp>() ||
+         op->hasTrait<traits::LDSStoreOp>() ||
          op->hasTrait<traits::VMEMLoadOp>() ||
          op->hasTrait<traits::VMEMStoreOp>();
 }

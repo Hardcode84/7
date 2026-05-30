@@ -57,6 +57,7 @@ classification decision:
   `v_workitem_id_x`, `tuple_*`, `wait`, `token_join`). Used by gap
   counting to skip ops that don't consume a wait state.
 - `VALUOp`, `VMEMLoadOp`, `VMEMStoreOp`, `SMEMLoadOp`,
+  `LDSLoadOp`, `LDSStoreOp`,
   `WaitcntOp`, `TokenOp`, `TokenJoinOp` -- pre-existing functional
   classifiers used both here and in other passes.
 - `MFMAOp` -- the MFMA producer set for the VMEM-store hazard.

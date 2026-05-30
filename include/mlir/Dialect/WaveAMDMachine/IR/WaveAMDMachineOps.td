@@ -49,6 +49,8 @@ class WaveAMDMachine_Op<string mnemonic, list<Trait> traits = []> :
 
 def WaveAMDMachine_VALU : NativeOpTrait<"waveamdmachine::VALUOp">;
 def WaveAMDMachine_SMEMLoad : NativeOpTrait<"waveamdmachine::SMEMLoadOp">;
+def WaveAMDMachine_LDSLoad : NativeOpTrait<"waveamdmachine::LDSLoadOp">;
+def WaveAMDMachine_LDSStore : NativeOpTrait<"waveamdmachine::LDSStoreOp">;
 def WaveAMDMachine_VMEMLoad : NativeOpTrait<"waveamdmachine::VMEMLoadOp">;
 def WaveAMDMachine_VMEMStore : NativeOpTrait<"waveamdmachine::VMEMStoreOp">;
 def WaveAMDMachine_Waitcnt : NativeOpTrait<"waveamdmachine::WaitcntOp">;
@@ -1256,11 +1258,9 @@ def WaveAMDMachine_GlobalStoreTupleB32Op
 // LDS ("group_segment_fixed_size") loads and stores share the same
 // per-workgroup arena: the address operand is a 32-bit byte offset into
 // LDS and an optional immediate `offset:imm` is folded into the
-// hardware instruction. Both kinds drain through `lgkmcnt`; we model
-// that by tagging them with the SMEM-load trait, which the waitcnt pass
-// already routes to the LGKM counter.
+// hardware instruction. Both kinds drain through `lgkmcnt`.
 def WaveAMDMachine_DsLoadB16Op
-    : WaveAMDMachine_DsMemoryOp<"ds_load_b16", [WaveAMDMachine_SMEMLoad]> {
+    : WaveAMDMachine_DsMemoryOp<"ds_load_b16", [WaveAMDMachine_LDSLoad]> {
   let summary = "LDS 16-bit load";
   let arguments = (ins WaveAMDMachine_VGPR1:$addr,
                        Optional<WaveAMDMachine_MemToken>:$dependency,
@@ -1274,7 +1274,7 @@ def WaveAMDMachine_DsLoadB16Op
 }
 
 def WaveAMDMachine_DsLoadB32Op
-    : WaveAMDMachine_DsMemoryOp<"ds_load_b32", [WaveAMDMachine_SMEMLoad]> {
+    : WaveAMDMachine_DsMemoryOp<"ds_load_b32", [WaveAMDMachine_LDSLoad]> {
   let summary = "LDS 32-bit load";
   let arguments = (ins WaveAMDMachine_VGPR1:$addr,
                        Optional<WaveAMDMachine_MemToken>:$dependency,
@@ -1288,7 +1288,7 @@ def WaveAMDMachine_DsLoadB32Op
 }
 
 def WaveAMDMachine_DsLoadTupleB32Op
-    : WaveAMDMachine_DsMemoryOp<"ds_load_tuple_b32", [WaveAMDMachine_SMEMLoad]> {
+    : WaveAMDMachine_DsMemoryOp<"ds_load_tuple_b32", [WaveAMDMachine_LDSLoad]> {
   let summary = "LDS load of N consecutive 32-bit values into a VGPR tuple";
   let description = [{
     Loads `N` consecutive dwords from LDS at `addr + offset + i*4` for
@@ -1309,7 +1309,7 @@ def WaveAMDMachine_DsLoadTupleB32Op
 }
 
 def WaveAMDMachine_DsStoreB16Op
-    : WaveAMDMachine_DsMemoryOp<"ds_store_b16", [WaveAMDMachine_SMEMLoad]> {
+    : WaveAMDMachine_DsMemoryOp<"ds_store_b16", [WaveAMDMachine_LDSStore]> {
   let summary = "LDS 16-bit store";
   let arguments = (ins WaveAMDMachine_VGPR1:$addr, WaveAMDMachine_VGPR1:$value,
                        Optional<WaveAMDMachine_MemToken>:$dependency,
@@ -1322,7 +1322,7 @@ def WaveAMDMachine_DsStoreB16Op
 }
 
 def WaveAMDMachine_DsStoreB32Op
-    : WaveAMDMachine_DsMemoryOp<"ds_store_b32", [WaveAMDMachine_SMEMLoad]> {
+    : WaveAMDMachine_DsMemoryOp<"ds_store_b32", [WaveAMDMachine_LDSStore]> {
   let summary = "LDS 32-bit store";
   let arguments = (ins WaveAMDMachine_VGPR1:$addr, WaveAMDMachine_VGPR1:$value,
                        Optional<WaveAMDMachine_MemToken>:$dependency,
@@ -1335,7 +1335,7 @@ def WaveAMDMachine_DsStoreB32Op
 }
 
 def WaveAMDMachine_DsLoadB64Op
-    : WaveAMDMachine_DsMemoryOp<"ds_load_b64", [WaveAMDMachine_SMEMLoad]> {
+    : WaveAMDMachine_DsMemoryOp<"ds_load_b64", [WaveAMDMachine_LDSLoad]> {
   let summary = "LDS 64-bit load";
   let arguments = (ins WaveAMDMachine_VGPR1:$addr,
                        Optional<WaveAMDMachine_MemToken>:$dependency,
@@ -1349,7 +1349,7 @@ def WaveAMDMachine_DsLoadB64Op
 }
 
 def WaveAMDMachine_DsLoadB96Op
-    : WaveAMDMachine_DsMemoryOp<"ds_load_b96", [WaveAMDMachine_SMEMLoad]> {
+    : WaveAMDMachine_DsMemoryOp<"ds_load_b96", [WaveAMDMachine_LDSLoad]> {
   let summary = "LDS 96-bit load";
   let arguments = (ins WaveAMDMachine_VGPR1:$addr,
                        Optional<WaveAMDMachine_MemToken>:$dependency,
@@ -1363,7 +1363,7 @@ def WaveAMDMachine_DsLoadB96Op
 }
 
 def WaveAMDMachine_DsLoadB128Op
-    : WaveAMDMachine_DsMemoryOp<"ds_load_b128", [WaveAMDMachine_SMEMLoad]> {
+    : WaveAMDMachine_DsMemoryOp<"ds_load_b128", [WaveAMDMachine_LDSLoad]> {
   let summary = "LDS 128-bit load";
   let arguments = (ins WaveAMDMachine_VGPR1:$addr,
                        Optional<WaveAMDMachine_MemToken>:$dependency,
@@ -1377,7 +1377,7 @@ def WaveAMDMachine_DsLoadB128Op
 }
 
 def WaveAMDMachine_DsStoreB64Op
-    : WaveAMDMachine_DsMemoryOp<"ds_store_b64", [WaveAMDMachine_SMEMLoad]> {
+    : WaveAMDMachine_DsMemoryOp<"ds_store_b64", [WaveAMDMachine_LDSStore]> {
   let summary = "LDS 64-bit store";
   let arguments = (ins WaveAMDMachine_VGPR1:$addr, WaveAMDMachine_VGPR2:$value,
                        Optional<WaveAMDMachine_MemToken>:$dependency,
@@ -1390,7 +1390,7 @@ def WaveAMDMachine_DsStoreB64Op
 }
 
 def WaveAMDMachine_DsStoreB96Op
-    : WaveAMDMachine_DsMemoryOp<"ds_store_b96", [WaveAMDMachine_SMEMLoad]> {
+    : WaveAMDMachine_DsMemoryOp<"ds_store_b96", [WaveAMDMachine_LDSStore]> {
   let summary = "LDS 96-bit store";
   let arguments = (ins WaveAMDMachine_VGPR1:$addr, WaveAMDMachine_VGPR3:$value,
                        Optional<WaveAMDMachine_MemToken>:$dependency,
@@ -1403,7 +1403,7 @@ def WaveAMDMachine_DsStoreB96Op
 }
 
 def WaveAMDMachine_DsStoreB128Op
-    : WaveAMDMachine_DsMemoryOp<"ds_store_b128", [WaveAMDMachine_SMEMLoad]> {
+    : WaveAMDMachine_DsMemoryOp<"ds_store_b128", [WaveAMDMachine_LDSStore]> {
   let summary = "LDS 128-bit store";
   let arguments = (ins WaveAMDMachine_VGPR1:$addr, WaveAMDMachine_VGPR4:$value,
                        Optional<WaveAMDMachine_MemToken>:$dependency,
@@ -1416,7 +1416,7 @@ def WaveAMDMachine_DsStoreB128Op
 }
 
 def WaveAMDMachine_DsStoreTupleB32Op
-    : WaveAMDMachine_DsMemoryOp<"ds_store_tuple_b32", [WaveAMDMachine_SMEMLoad]> {
+    : WaveAMDMachine_DsMemoryOp<"ds_store_tuple_b32", [WaveAMDMachine_LDSStore]> {
   let summary = "LDS store of a VGPR tuple as N consecutive 32-bit values";
   let description = [{
     Stores the `N` components of the `value` VGPR tuple to LDS at

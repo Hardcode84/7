@@ -24,18 +24,16 @@ namespace {
 namespace traits = ::mlir::OpTrait::waveamdmachine;
 
 static bool isLDSIssuer(Operation *op) {
-  return isa<DsLoadB32Op, DsLoadB64Op, DsLoadB96Op, DsLoadB128Op,
-             DsLoadTupleB32Op, DsStoreB32Op, DsStoreB64Op, DsStoreB96Op,
-             DsStoreB128Op, DsStoreTupleB32Op>(op);
+  return op->hasTrait<traits::LDSLoadOp>() ||
+         op->hasTrait<traits::LDSStoreOp>();
 }
 
 static bool isLDSLoad(Operation *op) {
-  return isa<DsLoadB32Op, DsLoadB64Op, DsLoadB96Op, DsLoadB128Op,
-             DsLoadTupleB32Op>(op);
+  return op->hasTrait<traits::LDSLoadOp>();
 }
 
 static bool isSMEMLoad(Operation *op) {
-  return isa<SLoadB32Op, SLoadB64Op, SLoadB128Op>(op);
+  return op->hasTrait<traits::SMEMLoadOp>();
 }
 
 static bool hasRegisterResult(Operation *op) {
@@ -63,7 +61,7 @@ MemoryCounterKind getMemoryCounterKind(Operation *op) {
     return MemoryCounterKind::Vmem;
   if (op->hasTrait<traits::VMEMStoreOp>())
     return MemoryCounterKind::Vscnt;
-  if (op->hasTrait<traits::SMEMLoadOp>() || isLDSIssuer(op))
+  if (isSMEMLoad(op) || isLDSIssuer(op))
     return MemoryCounterKind::Lgkm;
   return MemoryCounterKind::None;
 }
@@ -79,7 +77,7 @@ int getMemoryCounterLatency(const ArchData &arch, Operation *op,
     return overrideOrDefault(overrides.vmemStore, defaultLatency);
   if (isLDSIssuer(op))
     return overrideOrDefault(overrides.lds, defaultLatency);
-  if (op->hasTrait<traits::SMEMLoadOp>())
+  if (isSMEMLoad(op))
     return overrideOrDefault(overrides.smemLoad, defaultLatency);
   llvm_unreachable("op has no memory counter timing");
 }

@@ -9,6 +9,7 @@
 // RUN: wave-sim-report --func=smem_value_ready --timeline --smem-value-latency=7 %s | FileCheck %s --check-prefix=VALUE
 // RUN: wave-sim-report --func=mem_token_issue_ready --timeline %s | FileCheck %s --check-prefix=TOKEN
 // RUN: wave-sim-report --func=lds_wait --timeline --lds-counter-latency=7 %s | FileCheck %s --check-prefix=LDSCOUNTER
+// RUN: wave-sim-report --func=lds_b16_latency --op-latencies --lds-counter-latency=7 --lds-value-latency=11 --smem-counter-latency=97 --smem-value-latency=101 %s | FileCheck %s --check-prefix=LDSB16LAT
 // RUN: wave-sim-report --func=smem_partial_wait --timeline %s | FileCheck %s --check-prefix=WAITPART
 // RUN: wave-sim-report --func=trip_loop --trip-count=3 %s | FileCheck %s --check-prefix=TRIP
 
@@ -68,6 +69,16 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
         : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
           -> !waveamdmachine.mem.token
     waveamdmachine.s_waitcnt %zero : (!waveamdmachine.imm) -> ()
+    return
+  }
+
+  func.func @lds_b16_latency(%addr: !waveamdmachine.reg<vgpr, 1>) {
+    %load, %tok = waveamdmachine.ds_load_b16 %addr
+        : (!waveamdmachine.reg<vgpr, 1>)
+          -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+    %store = waveamdmachine.ds_store_b16 %addr, %load after %tok
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+           !waveamdmachine.mem.token) -> !waveamdmachine.mem.token
     return
   }
 
@@ -163,6 +174,10 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // LDSCOUNTER: issue cycle=0 wave=0 simd=0 fu=LGKM op=waveamdmachine.ds_store_b32
 // LDSCOUNTER-DAG: counter_drained cycle=7 wave=0 simd=0 fu=LGKM counter=lgkm op=waveamdmachine.ds_store_b32
 // LDSCOUNTER-DAG: counter_drained cycle=7 wave=0 simd=0 op=waveamdmachine.s_waitcnt
+
+// LDSB16LAT: op_latencies:
+// LDSB16LAT: op_index=0 op=waveamdmachine.ds_load_b16 class=WriteLDS fu=LGKM latency=20 counter_latency=7 value_latency=11 issues=1
+// LDSB16LAT: op_index=1 op=waveamdmachine.ds_store_b16 class=WriteLDS fu=LGKM latency=20 counter_latency=7 issues=1
 
 // WAITPART: issue cycle=0 wave=0 simd=0 fu=LGKM op=waveamdmachine.s_load_b32
 // WAITPART: issue cycle=1 wave=0 simd=0 fu=LGKM op=waveamdmachine.s_load_b32

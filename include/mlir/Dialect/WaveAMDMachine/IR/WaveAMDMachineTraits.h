@@ -21,6 +21,12 @@ template <typename ConcreteType>
 class SMEMLoadOp : public TraitBase<ConcreteType, SMEMLoadOp> {};
 
 template <typename ConcreteType>
+class LDSLoadOp : public TraitBase<ConcreteType, LDSLoadOp> {};
+
+template <typename ConcreteType>
+class LDSStoreOp : public TraitBase<ConcreteType, LDSStoreOp> {};
+
+template <typename ConcreteType>
 class VMEMLoadOp : public TraitBase<ConcreteType, VMEMLoadOp> {};
 
 template <typename ConcreteType>

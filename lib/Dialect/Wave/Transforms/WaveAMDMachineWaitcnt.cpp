@@ -325,6 +325,11 @@ static bool isSMEMLoadTrait(Operation *op) {
   return op->hasTrait<OpTrait::waveamdmachine::SMEMLoadOp>();
 }
 
+static bool isLDSIssuer(Operation *op) {
+  return op->hasTrait<OpTrait::waveamdmachine::LDSLoadOp>() ||
+         op->hasTrait<OpTrait::waveamdmachine::LDSStoreOp>();
+}
+
 static bool isVMEMLoad(Operation *op) {
   return op->hasTrait<OpTrait::waveamdmachine::VMEMLoadOp>();
 }
@@ -343,7 +348,8 @@ static bool isTokenOnlyOp(Operation *op) {
 }
 
 static bool isMemoryIssuer(Operation *op) {
-  return isSMEMLoadTrait(op) || isVMEMLoad(op) || isVMEMStore(op);
+  return isSMEMLoadTrait(op) || isLDSIssuer(op) || isVMEMLoad(op) ||
+         isVMEMStore(op);
 }
 
 // Operand reads here are branch arguments, not value uses; framework
