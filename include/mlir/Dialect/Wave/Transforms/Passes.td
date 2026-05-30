@@ -384,8 +384,8 @@ def WaveMetaSpecialize
   let options = [
     Option<"errorOnResidual", "error-on-residual", "bool",
            /*default=*/"true",
-           "Fail the pass when any wavemeta.* op or !wavemeta.ptuple "
-           "type remains after specialisation.">
+           "Emit residual-specific diagnostics when any wavemeta.* op or "
+           "!wavemeta.ptuple type remains after specialisation.">
   ];
 }
 
