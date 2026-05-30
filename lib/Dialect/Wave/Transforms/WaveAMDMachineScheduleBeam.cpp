@@ -70,7 +70,7 @@ struct PressureModel {
 
 struct BeamPressureState {
   SmallVector<unsigned, 32> remainingUses;
-  SmallVector<uint8_t, 32> active;
+  BitVector active;
   unsigned currentVGPR = 0;
   unsigned currentSGPR = 0;
   unsigned maxVGPR = 0;
@@ -87,7 +87,7 @@ struct PressurePreview {
 struct BeamState {
   SmallVector<unsigned, 16> pending;
   BeamPressureState pressure;
-  BitVector ready;
+  SmallVector<unsigned, 16> ready;
   BitVector scheduled;
   int64_t rank = 0;
   unsigned discrepancies = 0;
@@ -144,9 +144,9 @@ static bool isVGPRPressureValue(const PressureModel &model, unsigned value) {
 
 static void addPressure(BeamPressureState &state, const PressureModel &model,
                         unsigned value) {
-  if (state.active[value])
+  if (state.active.test(value))
     return;
-  state.active[value] = 1;
+  state.active.set(value);
   unsigned width = getPressureWidth(model.values[value].type);
   if (isVGPRPressureValue(model, value)) {
     state.currentVGPR += width;
@@ -159,9 +159,9 @@ static void addPressure(BeamPressureState &state, const PressureModel &model,
 
 static void dropPressure(BeamPressureState &state, const PressureModel &model,
                          unsigned value) {
-  if (!state.active[value])
+  if (!state.active.test(value))
     return;
-  state.active[value] = 0;
+  state.active.reset(value);
   unsigned width = getPressureWidth(model.values[value].type);
   if (isVGPRPressureValue(model, value)) {
     assert(state.currentVGPR >= width && "VGPR pressure underflow");
@@ -174,7 +174,7 @@ static void dropPressure(BeamPressureState &state, const PressureModel &model,
 
 static bool isPreviewActive(const BeamPressureState &state,
                             ArrayRef<unsigned> added, unsigned value) {
-  return state.active[value] || llvm::is_contained(added, value);
+  return state.active.test(value) || llvm::is_contained(added, value);
 }
 
 static void addPreviewPressure(PressurePreview &preview,
@@ -231,7 +231,7 @@ static int64_t getPreviewPeakPressure(const PressurePreview &preview) {
 static BeamPressureState makeInitialPressureState(const PressureModel &model) {
   BeamPressureState state;
   state.remainingUses = model.initialRemainingUses;
-  state.active.assign(model.values.size(), 0);
+  state.active.resize(model.values.size());
   return state;
 }
 
@@ -347,12 +347,11 @@ static BeamState makeInitialBeamState(const GraphTables &tables,
                                       const PressureModel &pressureModel) {
   BeamState state;
   state.pending = tables.pendingPreds;
-  state.ready.resize(tables.pendingPreds.size());
   state.scheduled.resize(tables.pendingPreds.size());
   state.pressure = makeInitialPressureState(pressureModel);
   for (auto [index, count] : llvm::enumerate(tables.pendingPreds))
     if (count == 0)
-      state.ready.set(index);
+      state.ready.push_back(index);
   return state;
 }
 
@@ -384,6 +383,12 @@ static unsigned countUnlockedSuccessors(unsigned node,
     if (pending[succ] == 1)
       ++unlocked;
   return unlocked;
+}
+
+static void insertReadyNode(SmallVectorImpl<unsigned> &ready, unsigned node) {
+  auto it = llvm::lower_bound(ready, node);
+  if (it == ready.end() || *it != node)
+    ready.insert(it, node);
 }
 
 static ReadyChoice scoreReadyChoice(
@@ -453,7 +458,7 @@ static SmallVector<ReadyChoice, 8> getReadyChoices(
     const RegisterPressureBudgets &budgets, const BeamSearchConfig &config) {
   SmallVector<ReadyChoice, 8> choices;
   unsigned nextGuide = getNextGuideNode(state, guide);
-  for (unsigned node : state.ready.set_bits())
+  for (unsigned node : state.ready)
     choices.push_back(scoreReadyChoice(node, state, tables, metrics, nextGuide,
                                        guidePositions, pressureModel, budgets,
                                        config));
@@ -472,8 +477,9 @@ buildNextBeamState(const BeamState &state, const ReadyChoice &choice,
   BeamState next = state;
   unsigned node = choice.node;
   assert(traceIndex < traces.size() && "trace slot must be preallocated");
-  assert(next.ready.test(node) && "selected node must be ready");
-  next.ready.reset(node);
+  auto readyIt = llvm::find(next.ready, node);
+  assert(readyIt != next.ready.end() && "selected node must be ready");
+  next.ready.erase(readyIt);
   next.scheduled.set(node);
   advanceGuideCursor(next, guide);
   next.trace = traceIndex;
@@ -488,7 +494,7 @@ buildNextBeamState(const BeamState &state, const ReadyChoice &choice,
     assert(next.pending[succ] > 0 && "successor predecessor count underflow");
     --next.pending[succ];
     if (next.pending[succ] == 0)
-      next.ready.set(succ);
+      insertReadyNode(next.ready, succ);
   }
   return next;
 }
