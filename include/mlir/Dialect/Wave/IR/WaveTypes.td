@@ -30,6 +30,7 @@ def Wave_SimdType : Wave_Type<"Simd", "simd"> {
 
   let parameters = (ins "mlir::Type":$elementType, "int64_t":$width);
   let assemblyFormat = "`<` $elementType `,` $width `>`";
+  let genVerifyDecl = 1;
 }
 
 def Wave_MaskType : Wave_Type<"Mask", "mask"> {
@@ -42,6 +43,7 @@ def Wave_MaskType : Wave_Type<"Mask", "mask"> {
 
   let parameters = (ins "int64_t":$width);
   let assemblyFormat = "`<` $width `>`";
+  let genVerifyDecl = 1;
 }
 
 def Wave_MemTokenType : Wave_Type<"MemToken", "mem.token"> {
@@ -66,6 +68,7 @@ def Wave_PtrType : Wave_Type<"Ptr", "ptr"> {
   let parameters = (ins "mlir::Type":$elementType,
                         "mlir::Attribute":$addressSpace);
   let assemblyFormat = "`<` $elementType `,` $addressSpace `>`";
+  let genVerifyDecl = 1;
 }
 
 def Wave_IndexType : Wave_Type<"WaveIndex", "index"> {

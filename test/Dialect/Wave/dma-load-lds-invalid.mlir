@@ -116,7 +116,7 @@ func.func @make_buffer_range_not_i32(%p: !wave.ptr<i32, #wave.global>, %r: i64) 
 // -----
 
 func.func @fragment_fill_unsupported_wave(%s: i32) {
-  // expected-error @below {{only wave32 and wave64 fragments are supported}}
+  // expected-error @below {{fragment wave size must be 32 or 64}}
   %f = waveamd.fragment_fill %s : i32 -> !waveamd.fragment<0, f16, 16, 16, 16, 2>
   return
 }

@@ -2813,6 +2813,15 @@ static bool isSupportedWaveIndexType(WaveIndexType type) {
   return width == 0 || width == 32 || width == 64;
 }
 
+static bool isSupportedFragmentType(waveamd::FragmentType type) {
+  int64_t role = type.getRole();
+  int64_t waveSize = type.getWaveSize();
+  return (role == 0 || role == 1 || role == 2) &&
+         type.getElementType().isIntOrFloat() && type.getRows() > 0 &&
+         type.getColumns() > 0 && (waveSize == 32 || waveSize == 64) &&
+         type.getRegisters() > 0;
+}
+
 static bool isSupportedWaveType(Type type) {
   if (auto ptrType = dyn_cast<PtrType>(type))
     return isSupportedBoundaryType(ptrType.getElementType());
@@ -2822,12 +2831,28 @@ static bool isSupportedWaveType(Type type) {
     return maskType.getWidth() == 32 || maskType.getWidth() == 64;
   if (auto indexType = dyn_cast<WaveIndexType>(type))
     return isSupportedWaveIndexType(indexType);
-  return isa<MemTokenType, waveamd::FragmentType>(type);
+  if (auto fragmentType = dyn_cast<waveamd::FragmentType>(type))
+    return isSupportedFragmentType(fragmentType);
+  return isa<MemTokenType>(type);
+}
+
+static bool isSupportedMachineRegType(waveamdmachine::RegType type) {
+  int64_t width = type.getWidth();
+  int64_t index = type.getIndex();
+  if (width <= 0 || index < -1)
+    return false;
+  waveamdmachine::RegClass regClass = type.getRegClass();
+  if (regClass != waveamdmachine::RegClass::SCC &&
+      regClass != waveamdmachine::RegClass::VCC)
+    return true;
+  return width == 1 && index == -1;
 }
 
 static bool isSupportedMachineType(Type type) {
-  return isa<waveamdmachine::RegType, waveamdmachine::ImmType,
-             waveamdmachine::MemTokenType, waveamdmachine::M0Type>(type);
+  if (auto regType = dyn_cast<waveamdmachine::RegType>(type))
+    return isSupportedMachineRegType(regType);
+  return isa<waveamdmachine::ImmType, waveamdmachine::MemTokenType,
+             waveamdmachine::M0Type>(type);
 }
 
 static bool isSupportedBoundaryType(Type type) {

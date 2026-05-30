@@ -77,6 +77,27 @@ static bool is16x16Fragment(FragmentType type) {
 }
 } // namespace
 
+LogicalResult FragmentType::verify(function_ref<InFlightDiagnostic()> emitError,
+                                   int64_t role, Type elementType, int64_t rows,
+                                   int64_t columns, int64_t waveSize,
+                                   int64_t registers) {
+  if (!isValidFragmentRole(role))
+    return emitError() << "fragment role must be 0 (A), 1 (B), or 2 (acc)";
+  if (!elementType)
+    return emitError() << "fragment element type must be non-null";
+  if (!elementType.isIntOrFloat())
+    return emitError() << "fragment element type must be integer or float";
+  if (rows <= 0)
+    return emitError() << "fragment row count must be positive";
+  if (columns <= 0)
+    return emitError() << "fragment column count must be positive";
+  if (waveSize != 32 && waveSize != 64)
+    return emitError() << "fragment wave size must be 32 or 64";
+  if (registers <= 0)
+    return emitError() << "fragment register count must be positive";
+  return success();
+}
+
 LogicalResult FragmentPackOp::verify() {
   auto fragmentType = cast<FragmentType>(getResult().getType());
   auto simdType = cast<wave::SimdType>(getRegisters().getType());
@@ -100,11 +121,7 @@ LogicalResult FragmentFillOp::verify() {
   auto fragmentType = cast<FragmentType>(getResult().getType());
   if (!getSource().getType().isInteger(32))
     return emitOpError("source must be an i32 bit pattern");
-  if (fragmentType.getWaveSize() != 32 && fragmentType.getWaveSize() != 64)
-    return emitOpError("only wave32 and wave64 fragments are supported");
   int64_t role = fragmentType.getRole();
-  if (!isValidFragmentRole(role))
-    return emitOpError("fragment role must be 0 (A), 1 (B), or 2 (acc)");
   if (!is16x16Fragment(fragmentType))
     return emitOpError("only 16x16 fragments are supported for now");
   if (role != 2 && !isValidABFragment(fragmentType))

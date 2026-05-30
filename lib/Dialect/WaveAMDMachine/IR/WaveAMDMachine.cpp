@@ -36,6 +36,25 @@ void WaveAMDMachineDialect::registerTypes() {
       >();
 }
 
+static bool isSingletonFlagRegClass(RegClass regClass) {
+  return regClass == RegClass::SCC || regClass == RegClass::VCC;
+}
+
+LogicalResult RegType::verify(function_ref<InFlightDiagnostic()> emitError,
+                              RegClass regClass, int64_t width, int64_t index) {
+  if (width <= 0)
+    return emitError() << "register width must be positive";
+  if (index < -1)
+    return emitError() << "register index must be -1 (virtual) or non-negative";
+  if (!isSingletonFlagRegClass(regClass))
+    return success();
+  if (width != 1)
+    return emitError() << "SCC/VCC register width must be 1";
+  if (index != -1)
+    return emitError() << "SCC/VCC registers cannot have a physical index";
+  return success();
+}
+
 #define GET_TYPEDEF_CLASSES
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineOpsTypes.cpp.inc"
 
@@ -138,48 +157,6 @@ LogicalResult MfmaF32_16x16x32_F16Op::verify() {
       failed(verifyVGPRWidth(*this, getOperand(2), 4, "accumulator operand")) ||
       failed(verifyVGPRWidth(*this, getResult(), 4, "result")))
     return failure();
-  return success();
-}
-
-LogicalResult GlobalStoreTupleB32Op::verify() {
-  auto valueType = cast<RegType>(getOperand(1).getType());
-  if (valueType.getWidth() < 1)
-    return emitOpError("value tuple width must be at least 1");
-  return success();
-}
-
-LogicalResult GlobalLoadTupleB32Op::verify() {
-  auto resultType = cast<RegType>(getResult().getType());
-  if (resultType.getWidth() < 1)
-    return emitOpError("result tuple width must be at least 1");
-  return success();
-}
-
-LogicalResult BufferLoadTupleB32Op::verify() {
-  auto resultType = cast<RegType>(getResult().getType());
-  if (resultType.getWidth() < 1)
-    return emitOpError("result tuple width must be at least 1");
-  return success();
-}
-
-LogicalResult BufferStoreTupleB32Op::verify() {
-  auto valueType = cast<RegType>(getOperand(1).getType());
-  if (valueType.getWidth() < 1)
-    return emitOpError("value tuple width must be at least 1");
-  return success();
-}
-
-LogicalResult DsLoadTupleB32Op::verify() {
-  auto resultType = cast<RegType>(getResult().getType());
-  if (resultType.getWidth() < 1)
-    return emitOpError("result tuple width must be at least 1");
-  return success();
-}
-
-LogicalResult DsStoreTupleB32Op::verify() {
-  auto valueType = cast<RegType>(getValue().getType());
-  if (valueType.getWidth() < 1)
-    return emitOpError("value tuple width must be at least 1");
   return success();
 }
 

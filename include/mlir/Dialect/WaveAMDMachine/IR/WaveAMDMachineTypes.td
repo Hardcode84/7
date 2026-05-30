@@ -48,6 +48,7 @@ def WaveAMDMachine_RegType : WaveAMDMachine_Type<"Reg", "reg"> {
                         "int64_t":$width,
                         DefaultValuedParameter<"int64_t", "-1">:$index);
   let assemblyFormat = "`<` $regClass `,` $width (`,` $index^)? `>`";
+  let genVerifyDecl = 1;
 }
 
 def WaveAMDMachine_ImmType : WaveAMDMachine_Type<"Imm", "imm"> {

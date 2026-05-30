@@ -781,7 +781,6 @@ def WaveAMDMachine_GlobalLoadTupleB32Op
     $offset `,` $base (`after` $dependency^)? (`offset` $inst_offset^)?
     attr-dict `:` functional-type(operands, results)
   }];
-  let hasVerifier = 1;
 }
 
 // Global LDS DMA ops have no inst-offset slot in the hardware
@@ -1148,7 +1147,6 @@ def WaveAMDMachine_BufferLoadTupleB32Op
     (`after` $dependency^)? (`offset` $inst_offset^)?
     attr-dict `:` functional-type(operands, results)
   }];
-  let hasVerifier = 1;
 }
 
 // Buffer LDS DMA ops have no inst-offset slot in the hardware
@@ -1231,7 +1229,6 @@ def WaveAMDMachine_BufferStoreTupleB32Op
     (`after` $dependency^)? (`offset` $inst_offset^)?
     attr-dict `:` functional-type(operands, results)
   }];
-  let hasVerifier = 1;
 }
 def WaveAMDMachine_GlobalStoreTupleB32Op
     : WaveAMDMachine_GlobalMemoryOp<"global_store_tuple_b32", [WaveAMDMachine_VMEMStore, MemoryEffects<[MemWrite]>]> {
@@ -1252,7 +1249,6 @@ def WaveAMDMachine_GlobalStoreTupleB32Op
     (`offset` $inst_offset^)?
     attr-dict `:` functional-type(operands, results)
   }];
-  let hasVerifier = 1;
 }
 
 // LDS ("group_segment_fixed_size") loads and stores share the same
@@ -1305,7 +1301,6 @@ def WaveAMDMachine_DsLoadTupleB32Op
     $addr (`after` $dependency^)? (`offset` $offset^)?
     attr-dict `:` functional-type(operands, results)
   }];
-  let hasVerifier = 1;
 }
 
 def WaveAMDMachine_DsStoreB16Op
@@ -1432,7 +1427,6 @@ def WaveAMDMachine_DsStoreTupleB32Op
     $addr `,` $value (`after` $dependency^)? (`offset` $offset^)?
     attr-dict `:` functional-type(operands, results)
   }];
-  let hasVerifier = 1;
 }
 
 def WaveAMDMachine_SBarrierOp : WaveAMDMachine_Op<"s_barrier"> {

@@ -107,10 +107,39 @@ TunePow2InAttr::verify(function_ref<InFlightDiagnostic()> emitError,
   return success();
 }
 
+static bool isWaveExecutionWidth(int64_t width) {
+  return width == 32 || width == 64;
+}
+
+LogicalResult SimdType::verify(function_ref<InFlightDiagnostic()> emitError,
+                               Type elementType, int64_t width) {
+  if (!elementType)
+    return emitError() << "SIMD element type must be non-null";
+  if (!isWaveExecutionWidth(width))
+    return emitError() << "wave SIMD width must be 32 or 64";
+  return success();
+}
+
+LogicalResult MaskType::verify(function_ref<InFlightDiagnostic()> emitError,
+                               int64_t width) {
+  if (!isWaveExecutionWidth(width))
+    return emitError() << "wave mask width must be 32 or 64";
+  return success();
+}
+
+LogicalResult PtrType::verify(function_ref<InFlightDiagnostic()> emitError,
+                              Type elementType, Attribute addressSpace) {
+  if (!elementType)
+    return emitError() << "pointer element type must be non-null";
+  if (!addressSpace)
+    return emitError() << "pointer address space must be non-null";
+  return success();
+}
+
 LogicalResult
 WaveIndexType::verify(function_ref<InFlightDiagnostic()> emitError,
                       int64_t width) {
-  if (width != 0 && width != 32 && width != 64)
+  if (width != 0 && !isWaveExecutionWidth(width))
     return emitError() << "wave index width must be 0 (uniform), 32, or 64";
   return success();
 }
@@ -133,8 +162,6 @@ LogicalResult SplatOp::verify() {
   auto simdType = cast<SimdType>(getResult().getType());
   if (simdType.getElementType() != getSource().getType())
     return emitOpError("source type must match SIMD element type");
-  if (simdType.getWidth() != 32 && simdType.getWidth() != 64)
-    return emitOpError("only wave32 and wave64 are supported for now");
   return success();
 }
 
@@ -543,8 +570,6 @@ verifyWaveFloatSimd(Type type, bool allowScalarF16, bool allowPackedF16,
   Type elementType = simdType.getElementType();
   if (!isAllowedWaveFloatElement(elementType, allowScalarF16, allowPackedF16))
     return emitError(getWaveFloatElementError(allowScalarF16, allowPackedF16));
-  if (simdType.getWidth() != 32 && simdType.getWidth() != 64)
-    return emitError("only wave32 and wave64 are supported");
   return success();
 }
 
@@ -736,8 +761,6 @@ LogicalResult WorkitemIdOp::verify() {
   auto simdType = cast<SimdType>(getResult().getType());
   if (!simdType.getElementType().isInteger(32))
     return emitOpError("result SIMD element type must be i32");
-  if (simdType.getWidth() != 32 && simdType.getWidth() != 64)
-    return emitOpError("only wave32 and wave64 workitem_id are supported");
   return success();
 }
 

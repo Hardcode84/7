@@ -505,7 +505,7 @@ func.func @splat_element_mismatch(%v: i32) {
 // -----
 
 func.func @splat_unsupported_wave_width(%v: i32) {
-  // expected-error @+1 {{only wave32 and wave64 are supported for now}}
+  // expected-error @+1 {{wave SIMD width must be 32 or 64}}
   %s = wave.splat %v : i32 -> !wave.simd<i32, 16>
   return
 }
@@ -513,7 +513,7 @@ func.func @splat_unsupported_wave_width(%v: i32) {
 // -----
 
 func.func @workitem_id_unsupported_wave_width() {
-  // expected-error @+1 {{only wave32 and wave64 workitem_id are supported}}
+  // expected-error @+1 {{wave SIMD width must be 32 or 64}}
   %x = wave.workitem_id 0 : !wave.simd<i32, 16>
   return
 }

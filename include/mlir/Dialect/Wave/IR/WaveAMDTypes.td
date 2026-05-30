@@ -36,6 +36,7 @@ def WaveAMD_FragmentType : WaveAMD_Type<"Fragment", "fragment"> {
                         "int64_t":$registers);
   let assemblyFormat =
       "`<` $role `,` $elementType `,` $rows `,` $columns `,` $waveSize `,` $registers `>`";
+  let genVerifyDecl = 1;
 }
 
 def WaveAMD_Fragment

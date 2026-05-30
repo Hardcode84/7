@@ -104,13 +104,12 @@ func.func @v_mov_b32_tuple_registers_mismatch(%src: !waveamdmachine.imm) {
 
 // -----
 
-// Substring "tuple width must be at least 1" covers all six tuple load/store
-// op variants (Buffer/Global/Ds Load/StoreTupleB32Op).
+// Zero-width tuples die in RegType verification before op checks.
 func.func @global_load_tuple_b32_zero_width(%off: !waveamdmachine.reg<vgpr, 1>,
                                             %base: !waveamdmachine.reg<sgpr, 2>) {
-  // expected-error @below {{tuple width must be at least 1}}
   %r, %t = waveamdmachine.global_load_tuple_b32 %off, %base
       : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 2>)
+      // expected-error @below {{register width must be positive}}
       -> (!waveamdmachine.reg<vgpr, 0>, !waveamdmachine.mem.token)
   return
 }
