@@ -10,6 +10,8 @@
 // dialect's symbolic offset algebra. Storage is opaque: handles round-
 // trip via the dialect-owned `Store` and only touch text at the MLIR
 // parser/printer boundary.
+// Raw ixsimpl boundary: header exposes handles; implementation owns ixs_*
+// calls.
 //
 //===----------------------------------------------------------------------===//
 

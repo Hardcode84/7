@@ -83,6 +83,13 @@ repos:
         # could open or close a gap.
         files: '^(lib/.+\.cpp|test/.+\.mlir|build_tools/check_verifier_coverage\.py)$'
 
+      - id: check-ixsimpl-boundary
+        name: check ixsimpl C API boundary
+        entry: python build_tools/check_ixsimpl_boundary.py
+        language: python
+        pass_filenames: false
+        files: '^(include/.+\.(h|td)|lib/.+\.(cpp|h|td)|tools/.+\.(cpp|h)|build_tools/check_ixsimpl_boundary\.py|\.pre-commit-config\.yaml)$'
+
       - id: gen-sched-table
         name: check generated scheduler tables vs SISchedule.td
         entry: python build_tools/gen_sched_table.py --check
