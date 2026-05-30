@@ -27,7 +27,6 @@ KERNEL_NAME = "wmma_f16_matmul_tiled"
 @dataclass(frozen=True)
 class Variant:
     name: str
-    insert_pingpong: bool
     apply_schedule: bool
     schedule_model: str = "single"
 
@@ -54,15 +53,13 @@ class VariantResult:
 
 
 VARIANTS = {
-    "baseline": Variant("baseline", insert_pingpong=False, apply_schedule=False),
-    "scheduled": Variant("scheduled", insert_pingpong=False, apply_schedule=True),
+    "baseline": Variant("baseline", apply_schedule=False),
+    "scheduled": Variant("scheduled", apply_schedule=True),
     "scheduled_multiwave": Variant(
         "scheduled_multiwave",
-        insert_pingpong=False,
         apply_schedule=True,
         schedule_model="multi",
     ),
-    "pingpong": Variant("pingpong", insert_pingpong=True, apply_schedule=False),
 }
 
 PRESSURE_BUDGET_OPTIONS = (
@@ -246,92 +243,104 @@ def schedule_report_options(
     return {**report_options, **scheduler_policy_options(variant, args)}
 
 
-def format_pass_options(options: dict[str, bool | int | str]) -> str:
-    pieces: list[str] = []
-    for name, value in options.items():
-        if isinstance(value, bool):
-            value_text = "true" if value else "false"
-        elif isinstance(value, str):
-            value_text = '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
-        else:
-            value_text = str(value)
-        pieces.append(f'"{name}" = {value_text}')
-    return ", ".join(pieces)
+def backend_pipeline_path(build_dir: Path) -> Path:
+    return build_dir / "share/wave-mlir/pipelines/pipelines.mlir"
+
+
+def read_backend_pipeline(build_dir: Path) -> str:
+    path = backend_pipeline_path(build_dir)
+    if not path.exists():
+        sys.exit(f"backend pipeline library missing: {path}")
+    return path.read_text()
+
+
+def import_mlir_bindings(build_dir: Path):
+    package_path = build_dir / "python_packages/wave_mlir"
+    sys.path.insert(0, str(package_path))
+    try:
+        from mlir import ir
+        from mlir.dialects import transform
+    except ModuleNotFoundError as err:
+        raise SystemExit(
+            f"MLIR Python bindings missing under {package_path}: {err}"
+        ) from err
+    return ir, transform
+
+
+def erase_default_entry(ir, module) -> None:
+    for op in list(module.body.operations):
+        attr = op.attributes.get("sym_name")
+        if attr is not None and ir.StringAttr(attr).value == "__transform_main":
+            op.operation.erase()
+            return
+    sys.exit("backend pipeline library missing __transform_main")
+
+
+def append_calibration_entry(
+    ir,
+    transform,
+    module,
+    schedule_options: dict[str, bool | int | str],
+    report_options: dict[str, bool | int | str],
+) -> None:
+    any_op = transform.AnyOpType.get()
+    with ir.InsertionPoint(module.body):
+        seq = transform.NamedSequenceOp(
+            "__transform_main",
+            [any_op],
+            [any_op],
+            arg_attrs=[{"transform.consumed": ir.UnitAttr.get()}],
+        )
+
+    block = seq.body
+    root = block.arguments[0]
+    with ir.InsertionPoint(block):
+        lowered = transform.IncludeOp(
+            [any_op],
+            "waveamd_backend_lower",
+            transform.FailurePropagationMode.Propagate,
+            [root],
+        ).result
+        finish_input = lowered
+        if report_options:
+            finish_input = transform.ApplyRegisteredPassOp(
+                any_op,
+                finish_input,
+                "waveamd-machine-schedule-report",
+                options=report_options,
+            ).result
+        if schedule_options:
+            finish_input = transform.ApplyRegisteredPassOp(
+                any_op,
+                finish_input,
+                "waveamd-machine-schedule",
+                options=schedule_options,
+            ).result
+        finish_input = transform.IncludeOp(
+            [any_op],
+            "waveamd_backend_finish",
+            transform.FailurePropagationMode.Propagate,
+            [finish_input],
+        ).result
+        transform.YieldOp([finish_input])
 
 
 def pipeline_text(
+    build_dir: Path,
     *,
-    insert_pingpong: bool,
     schedule_options: dict[str, bool | int | str],
     report_options: dict[str, bool | int | str],
 ) -> str:
-    insert = ""
-    if insert_pingpong:
-        insert = (
-            "    wave.transform.insert_pingpong_barriers from %rl\n"
-            "        : (!transform.any_op) -> ()\n"
+    ir, transform = import_mlir_bindings(build_dir)
+    with ir.Context() as ctx, ir.Location.unknown(ctx):
+        module = ir.Module.parse(read_backend_pipeline(build_dir))
+        erase_default_entry(ir, module)
+        append_calibration_entry(
+            ir, transform, module, schedule_options, report_options
         )
-    report = ""
-    schedule = ""
-    schedule_input = "%r2"
-    wait_input = schedule_input
-    if report_options:
-        option_text = format_pass_options(report_options)
-        report = (
-            "    %rr = transform.apply_registered_pass "
-            '"waveamd-machine-schedule-report" '
-            "with\n"
-            f"        options = {{ {option_text} }}\n"
-            f"        to {schedule_input} : (!transform.any_op) -> !transform.any_op\n"
-        )
-        schedule_input = "%rr"
-        wait_input = schedule_input
-    if schedule_options:
-        option_text = format_pass_options(schedule_options)
-        schedule = (
-            '    %rs = transform.apply_registered_pass "waveamd-machine-schedule" '
-            "with\n"
-            f"        options = {{ {option_text} }}\n"
-            f"        to {schedule_input} : (!transform.any_op) -> !transform.any_op\n"
-        )
-        wait_input = "%rs"
-    ticket_wait = (
-        '    %r3 = transform.apply_registered_pass "waveamd-insert-ticket-waits" '
-        f"to {wait_input}"
-    )
-    return f"""module attributes {{transform.with_named_sequence}} {{
-  transform.named_sequence @__transform_main(
-      %root: !transform.any_op {{transform.consumed}}) -> !transform.any_op {{
-    %rpack = transform.apply_registered_pass "wave-form-packed-math" to %root
-        : (!transform.any_op) -> !transform.any_op
-    %rsimp = transform.apply_registered_pass "wave-simplify-index-exprs" to %rpack
-        : (!transform.any_op) -> !transform.any_op
-    %r0 = transform.apply_registered_pass "waveamd-to-machine" to %rsimp
-        : (!transform.any_op) -> !transform.any_op
-    %rk = transform.apply_registered_pass "canonicalize" to %r0
-        : (!transform.any_op) -> !transform.any_op
-    %rc = transform.apply_registered_pass "cse" to %rk
-        : (!transform.any_op) -> !transform.any_op
-    %rl = transform.apply_registered_pass "loop-invariant-code-motion" to %rc
-        : (!transform.any_op) -> !transform.any_op
-{insert}    %r1 = transform.apply_registered_pass "waveamd-abi-lowering" to %rl
-        : (!transform.any_op) -> !transform.any_op
-    %r2 = transform.apply_registered_pass "waveamd-decompose-mem-tuples" to %r1
-        : (!transform.any_op) -> !transform.any_op
-{report}{schedule}{ticket_wait}
-        : (!transform.any_op) -> !transform.any_op
-    %r4 = transform.apply_registered_pass "waveamd-insert-hazard-waits" to %r3
-        : (!transform.any_op) -> !transform.any_op
-    %r5 = transform.apply_registered_pass "waveamd-reg-alloc" to %r4
-        : (!transform.any_op) -> !transform.any_op
-    %r6 = transform.apply_registered_pass "waveamd-resource-info" to %r5
-        : (!transform.any_op) -> !transform.any_op
-    %r7 = transform.apply_registered_pass "waveamd-metadata" to %r6
-        : (!transform.any_op) -> !transform.any_op
-    transform.yield %r7 : !transform.any_op
-  }}
-}}
-"""
+        if not module.operation.verify():
+            sys.exit("generated calibration pipeline failed verification")
+        return str(module)
 
 
 def write_pipeline(tmp: Path, variant: Variant, args: argparse.Namespace) -> Path:
@@ -339,7 +348,7 @@ def write_pipeline(tmp: Path, variant: Variant, args: argparse.Namespace) -> Pat
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         pipeline_text(
-            insert_pingpong=variant.insert_pingpong,
+            args.build_dir,
             schedule_options=schedule_pass_options(variant, args),
             report_options=schedule_report_options(variant, args),
         )
@@ -630,10 +639,7 @@ def build_argparser() -> argparse.ArgumentParser:
         "--variants",
         type=parse_variants,
         default=parse_variants("baseline,scheduled"),
-        help=(
-            "comma-separated variants: baseline, scheduled, "
-            "scheduled_multiwave, pingpong"
-        ),
+        help="comma-separated variants: baseline, scheduled, scheduled_multiwave",
     )
     ap.add_argument("--print-candidates", action="store_true")
     ap.add_argument("--print-score", action="store_true")
