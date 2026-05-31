@@ -71,7 +71,8 @@ static void addRangeAssumption(WaveAMDMachineSelector &S, PointerOffset &offset,
 
 static FailureOr<PointerOffset>
 makeSymbolicCarry(WaveAMDMachineSelector &S, StringRef name, Value value,
-                  TermKind kind, std::optional<int64_t> hi = {}) {
+                  TermKind kind, std::optional<int64_t> hi = {},
+                  bool inferValueRange = true) {
   FailureOr<sym::ExprHandle> expr = sym::composeExprSym(S.symbolStore(), name);
   if (failed(expr))
     return failure();
@@ -80,8 +81,11 @@ makeSymbolicCarry(WaveAMDMachineSelector &S, StringRef name, Value value,
   offset.bindings.push_back({name.str(), value, kind});
   if (hi)
     addRangeAssumption(S, offset, name, *hi);
-  else if (std::optional<sym::PredHandle> a = S.bindingAssumption(value, name))
-    offset.assumptions.push_back(*a);
+  else if (inferValueRange) {
+    std::optional<sym::PredHandle> a = S.bindingAssumption(value, name);
+    if (a)
+      offset.assumptions.push_back(*a);
+  }
   return offset;
 }
 
@@ -91,7 +95,8 @@ static LogicalResult addSymbolicStride(WaveAMDMachineSelector &S,
                                        int64_t scale) {
   S.values[strideValue] = strideValue;
   FailureOr<PointerOffset> stride =
-      makeSymbolicCarry(S, name, strideValue, TermKind::Uniform);
+      makeSymbolicCarry(S, name, strideValue, TermKind::Uniform, std::nullopt,
+                        /*inferValueRange=*/false);
   if (failed(stride))
     return failure();
   if (std::optional<sym::PredHandle> a =
