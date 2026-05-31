@@ -27,16 +27,24 @@ using namespace mlir::wave;
 
 namespace {
 
-struct StoreGroup {
-  SmallVector<StoreOp> stores;
-  SmallVector<Value> lanes;
+enum class MemoryGroupKind { Load, Store };
+
+struct MemoryGroup {
+  SmallVector<Operation *> ops;
+  SmallVector<Value> payloads;
   MemoryAddress address;
   Value accessPtr;
   Type scalarElementType;
-  StoreOp firstOp;
-  StoreOp lastOp;
+  Operation *firstOp = nullptr;
+  Operation *lastOp = nullptr;
   int64_t simdWidth = 0;
   unsigned spanElements = 0;
+  MemoryGroupKind kind;
+};
+
+struct AddressOrderedGroups {
+  const MemoryGroup *lo;
+  const MemoryGroup *hi;
 };
 
 static std::optional<PtrType> getPointerType(Type type) {
@@ -68,18 +76,57 @@ static bool hasNoEffects(Operation *op) {
   return effects.empty();
 }
 
-static bool tokenUsedOnlyBy(Value token, StoreOp op) {
-  if (!token.hasOneUse())
-    return false;
-  return token.use_begin()->getOwner() == op.getOperation() &&
-         op.getDependency() == token;
+static Value getMemoryPtr(Operation *op) {
+  if (LoadOp load = dyn_cast<LoadOp>(op))
+    return load.getPtr();
+  return cast<StoreOp>(op).getPtr();
 }
 
-static std::optional<Type> getScalarStoreElementType(StoreOp op) {
+static Value getMemoryPayload(Operation *op) {
+  if (LoadOp load = dyn_cast<LoadOp>(op))
+    return load.getValue();
+  return cast<StoreOp>(op).getValue();
+}
+
+static Value getMemoryDependency(Operation *op) {
+  if (LoadOp load = dyn_cast<LoadOp>(op))
+    return load.getDependency();
+  return cast<StoreOp>(op).getDependency();
+}
+
+static Value getMemoryToken(Operation *op) {
+  if (LoadOp load = dyn_cast<LoadOp>(op))
+    return load.getToken();
+  return cast<StoreOp>(op).getToken();
+}
+
+static MemoryGroupKind getMemoryGroupKind(Operation *op) {
+  if (isa<LoadOp>(op))
+    return MemoryGroupKind::Load;
+  return MemoryGroupKind::Store;
+}
+
+static bool tokenUsedOnlyBy(Value token, Operation *op) {
+  if (!token.hasOneUse())
+    return false;
+  return token.use_begin()->getOwner() == op &&
+         getMemoryDependency(op) == token;
+}
+
+static bool valueAvailableBefore(Value value, Operation *op) {
+  Operation *def = value.getDefiningOp();
+  if (!def)
+    return true;
+  if (def->getBlock() != op->getBlock())
+    return true;
+  return def->isBeforeInBlock(op);
+}
+
+static std::optional<Type> getScalarElementType(Operation *op) {
   if (!op->getAttrs().empty())
     return std::nullopt;
 
-  SimdType simdType = dyn_cast<SimdType>(op.getValue().getType());
+  SimdType simdType = dyn_cast<SimdType>(getMemoryPayload(op).getType());
   if (!simdType)
     return std::nullopt;
   Type scalarElementType = simdType.getElementType();
@@ -89,14 +136,16 @@ static std::optional<Type> getScalarStoreElementType(StoreOp op) {
 }
 
 static FailureOr<std::optional<unsigned>>
-getStoreSpanElements(StoreOp op, Type scalarElementType) {
+getSpanElements(Operation *op, Type scalarElementType) {
   std::optional<unsigned> ptrBits =
-      getPointerElementBits(op.getPtr().getType());
+      getPointerElementBits(getMemoryPtr(op).getType());
   if (!ptrBits || *ptrBits == 0)
     return std::optional<unsigned>{};
 
-  FailureOr<MemoryPayloadShape> shape = getMemoryPayloadShape(
-      scalarElementType, [&](const Twine &msg) { return op.emitOpError(msg); });
+  FailureOr<MemoryPayloadShape> shape =
+      getMemoryPayloadShape(scalarElementType, [&](const Twine &msg) {
+        return op->emitOpError(msg);
+      });
   if (failed(shape))
     return failure();
   if (shape->payloadBits % *ptrBits != 0)
@@ -104,126 +153,135 @@ getStoreSpanElements(StoreOp op, Type scalarElementType) {
   return std::optional<unsigned>{shape->payloadBits / *ptrBits};
 }
 
-static FailureOr<std::optional<StoreGroup>> getStoreSeed(StoreOp op,
-                                                         WaveDialect &dialect) {
-  std::optional<Type> scalarElementType = getScalarStoreElementType(op);
+static FailureOr<std::optional<MemoryGroup>>
+getMemorySeed(Operation *op, WaveDialect &dialect) {
+  std::optional<Type> scalarElementType = getScalarElementType(op);
   if (!scalarElementType)
-    return std::optional<StoreGroup>{};
+    return std::optional<MemoryGroup>{};
   FailureOr<std::optional<unsigned>> spanElements =
-      getStoreSpanElements(op, *scalarElementType);
+      getSpanElements(op, *scalarElementType);
   if (failed(spanElements))
     return failure();
   if (!*spanElements)
-    return std::optional<StoreGroup>{};
+    return std::optional<MemoryGroup>{};
   FailureOr<std::optional<MemoryAddress>> address =
-      normalizeMemoryAddress(op.getPtr(), dialect);
+      normalizeMemoryAddress(getMemoryPtr(op), dialect);
   if (failed(address))
-    return op.emitOpError("failed to normalize store address");
+    return op->emitOpError("failed to normalize memory address");
   if (!*address)
-    return std::optional<StoreGroup>{};
+    return std::optional<MemoryGroup>{};
 
-  StoreGroup group;
-  group.stores.push_back(op);
-  group.lanes.push_back(op.getValue());
+  MemoryGroup group;
+  group.ops.push_back(op);
+  group.payloads.push_back(getMemoryPayload(op));
   group.address = std::move(**address);
-  group.accessPtr = op.getPtr();
+  group.accessPtr = getMemoryPtr(op);
   group.scalarElementType = *scalarElementType;
   group.firstOp = op;
   group.lastOp = op;
-  group.simdWidth = cast<SimdType>(op.getValue().getType()).getWidth();
+  group.simdWidth = cast<SimdType>(getMemoryPayload(op).getType()).getWidth();
   group.spanElements = **spanElements;
-  return std::optional<StoreGroup>{std::move(group)};
+  group.kind = getMemoryGroupKind(op);
+  return std::optional<MemoryGroup>{std::move(group)};
 }
 
-static bool compatibleStoreGroups(const StoreGroup &lhs,
-                                  const StoreGroup &rhs) {
-  return lhs.scalarElementType == rhs.scalarElementType &&
+static bool compatibleGroups(const MemoryGroup &lhs, const MemoryGroup &rhs) {
+  return lhs.kind == rhs.kind &&
+         lhs.scalarElementType == rhs.scalarElementType &&
          lhs.simdWidth == rhs.simdWidth && lhs.address.base == rhs.address.base;
 }
 
-static bool mergeableStoreGroupWidth(const StoreGroup &lhs,
-                                     const StoreGroup &rhs) {
-  return lhs.lanes.size() == rhs.lanes.size() &&
+static bool mergeableGroupWidth(const MemoryGroup &lhs,
+                                const MemoryGroup &rhs) {
+  return lhs.payloads.size() == rhs.payloads.size() &&
          lhs.spanElements == rhs.spanElements;
 }
 
-static void appendAddressOrderedLanes(SmallVectorImpl<Value> &dst,
-                                      const StoreGroup &group) {
-  dst.append(group.lanes);
-}
-
-static std::optional<std::pair<const StoreGroup *, const StoreGroup *>>
-getTokenOrderedGroups(const StoreGroup &lhs, const StoreGroup &rhs) {
-  StoreOp lhsLast = lhs.lastOp;
-  StoreOp rhsFirst = rhs.firstOp;
-  StoreOp rhsLast = rhs.lastOp;
-  StoreOp lhsFirst = lhs.firstOp;
-  if (lhsLast->isBeforeInBlock(rhsFirst))
+static std::optional<std::pair<const MemoryGroup *, const MemoryGroup *>>
+getTokenOrderedGroups(const MemoryGroup &lhs, const MemoryGroup &rhs) {
+  if (lhs.lastOp->isBeforeInBlock(rhs.firstOp))
     return std::make_pair(&lhs, &rhs);
-  if (rhsLast->isBeforeInBlock(lhsFirst))
+  if (rhs.lastOp->isBeforeInBlock(lhs.firstOp))
     return std::make_pair(&rhs, &lhs);
   return std::nullopt;
 }
 
-static FailureOr<std::optional<StoreGroup>>
-tryMergeStoreGroups(WaveDialect &dialect, const StoreGroup &lhs,
-                    const StoreGroup &rhs) {
-  if (!compatibleStoreGroups(lhs, rhs) || !mergeableStoreGroupWidth(lhs, rhs))
-    return std::optional<StoreGroup>{};
-  std::optional<std::pair<const StoreGroup *, const StoreGroup *>> ordered =
-      getTokenOrderedGroups(lhs, rhs);
-  if (!ordered)
-    return std::optional<StoreGroup>{};
-  StoreOp earlierLast = ordered->first->lastOp;
-  StoreOp laterFirst = ordered->second->firstOp;
-  if (!tokenUsedOnlyBy(earlierLast.getToken(), laterFirst))
-    return std::optional<StoreGroup>{};
-
+static FailureOr<std::optional<AddressOrderedGroups>>
+getAddressOrderedGroups(WaveDialect &dialect, const MemoryGroup &lhs,
+                        const MemoryGroup &rhs) {
   FailureOr<std::optional<int64_t>> delta =
       computeConstantMemoryAddressDelta(dialect, rhs.address, lhs.address);
   if (failed(delta))
     return failure();
   if (!*delta)
-    return std::optional<StoreGroup>{};
+    return std::optional<AddressOrderedGroups>{};
 
-  const StoreGroup *lo = nullptr;
-  const StoreGroup *hi = nullptr;
-  if (**delta == static_cast<int64_t>(lhs.spanElements)) {
-    lo = &lhs;
-    hi = &rhs;
-  } else if (**delta == -static_cast<int64_t>(rhs.spanElements)) {
-    lo = &rhs;
-    hi = &lhs;
-  } else {
-    return std::optional<StoreGroup>{};
-  }
-
-  StoreGroup merged;
-  merged.stores.append(ordered->first->stores.begin(),
-                       ordered->first->stores.end());
-  merged.stores.append(ordered->second->stores.begin(),
-                       ordered->second->stores.end());
-  appendAddressOrderedLanes(merged.lanes, *lo);
-  appendAddressOrderedLanes(merged.lanes, *hi);
-  merged.address = lo->address;
-  merged.accessPtr = lo->accessPtr;
-  merged.scalarElementType = lhs.scalarElementType;
-  merged.firstOp = ordered->first->firstOp;
-  merged.lastOp = ordered->second->lastOp;
-  merged.simdWidth = lhs.simdWidth;
-  merged.spanElements = lhs.spanElements + rhs.spanElements;
-  return std::optional<StoreGroup>{std::move(merged)};
+  if (**delta == static_cast<int64_t>(lhs.spanElements))
+    return std::optional<AddressOrderedGroups>{
+        AddressOrderedGroups{&lhs, &rhs}};
+  if (**delta == -static_cast<int64_t>(rhs.spanElements))
+    return std::optional<AddressOrderedGroups>{
+        AddressOrderedGroups{&rhs, &lhs}};
+  return std::optional<AddressOrderedGroups>{};
 }
 
-static FailureOr<SmallVector<StoreGroup, 8>>
-mergeStorePartition(WaveDialect &dialect, SmallVector<StoreGroup, 8> groups) {
+static MemoryGroup
+buildMergedGroup(std::pair<const MemoryGroup *, const MemoryGroup *> ordered,
+                 AddressOrderedGroups addressOrdered) {
+  MemoryGroup merged;
+  merged.ops.append(ordered.first->ops);
+  merged.ops.append(ordered.second->ops);
+  merged.payloads.append(addressOrdered.lo->payloads);
+  merged.payloads.append(addressOrdered.hi->payloads);
+  merged.address = addressOrdered.lo->address;
+  merged.accessPtr = addressOrdered.lo->accessPtr;
+  merged.scalarElementType = ordered.first->scalarElementType;
+  merged.firstOp = ordered.first->firstOp;
+  merged.lastOp = ordered.second->lastOp;
+  merged.simdWidth = ordered.first->simdWidth;
+  merged.spanElements =
+      ordered.first->spanElements + ordered.second->spanElements;
+  merged.kind = ordered.first->kind;
+  return merged;
+}
+
+static FailureOr<std::optional<MemoryGroup>>
+tryMergeGroups(WaveDialect &dialect, const MemoryGroup &lhs,
+               const MemoryGroup &rhs) {
+  if (!compatibleGroups(lhs, rhs) || !mergeableGroupWidth(lhs, rhs))
+    return std::optional<MemoryGroup>{};
+  std::optional<std::pair<const MemoryGroup *, const MemoryGroup *>> ordered =
+      getTokenOrderedGroups(lhs, rhs);
+  if (!ordered)
+    return std::optional<MemoryGroup>{};
+  if (!tokenUsedOnlyBy(getMemoryToken(ordered->first->lastOp),
+                       ordered->second->firstOp))
+    return std::optional<MemoryGroup>{};
+
+  FailureOr<std::optional<AddressOrderedGroups>> addressOrdered =
+      getAddressOrderedGroups(dialect, lhs, rhs);
+  if (failed(addressOrdered))
+    return failure();
+  if (!*addressOrdered)
+    return std::optional<MemoryGroup>{};
+
+  const MemoryGroup *lo = (**addressOrdered).lo;
+  if (lo->kind == MemoryGroupKind::Load &&
+      !valueAvailableBefore(lo->accessPtr, ordered->first->firstOp))
+    return std::optional<MemoryGroup>{};
+  return std::optional<MemoryGroup>{
+      buildMergedGroup(*ordered, **addressOrdered)};
+}
+
+static FailureOr<SmallVector<MemoryGroup, 8>>
+mergePartition(WaveDialect &dialect, SmallVector<MemoryGroup, 8> groups) {
   bool changed = true;
   while (changed) {
     changed = false;
     for (unsigned idx : llvm::seq<unsigned>(0, groups.size())) {
       for (unsigned other : llvm::seq<unsigned>(idx + 1, groups.size())) {
-        FailureOr<std::optional<StoreGroup>> merged =
-            tryMergeStoreGroups(dialect, groups[idx], groups[other]);
+        FailureOr<std::optional<MemoryGroup>> merged =
+            tryMergeGroups(dialect, groups[idx], groups[other]);
         if (failed(merged))
           return failure();
         if (*merged) {
@@ -240,16 +298,18 @@ mergeStorePartition(WaveDialect &dialect, SmallVector<StoreGroup, 8> groups) {
   return groups;
 }
 
-static LogicalResult mergeStoreSegment(WaveDialect &dialect,
-                                       ArrayRef<StoreGroup> segment,
-                                       SmallVectorImpl<StoreGroup> &rewrites) {
+static LogicalResult mergeSegment(WaveDialect &dialect,
+                                  ArrayRef<MemoryGroup> segment,
+                                  SmallVectorImpl<MemoryGroup> &rewrites) {
   if (segment.size() < 2)
     return success();
-  SmallVector<SmallVector<StoreGroup, 8>, 8> partitions;
-  for (const StoreGroup &group : segment) {
-    auto partition = llvm::find_if(partitions, [&](ArrayRef<StoreGroup> part) {
-      return compatibleStoreGroups(part.front(), group);
-    });
+
+  SmallVector<SmallVector<MemoryGroup, 8>, 8> partitions;
+  for (const MemoryGroup &group : segment) {
+    SmallVector<SmallVector<MemoryGroup, 8>, 8>::iterator partition =
+        llvm::find_if(partitions, [&](ArrayRef<MemoryGroup> part) {
+          return compatibleGroups(part.front(), group);
+        });
     if (partition == partitions.end()) {
       partitions.push_back({group});
       continue;
@@ -257,52 +317,75 @@ static LogicalResult mergeStoreSegment(WaveDialect &dialect,
     partition->push_back(group);
   }
 
-  for (SmallVector<StoreGroup, 8> &partition : partitions) {
-    FailureOr<SmallVector<StoreGroup, 8>> merged =
-        mergeStorePartition(dialect, std::move(partition));
+  for (SmallVector<MemoryGroup, 8> &partition : partitions) {
+    FailureOr<SmallVector<MemoryGroup, 8>> merged =
+        mergePartition(dialect, std::move(partition));
     if (failed(merged))
       return failure();
-    for (StoreGroup &group : *merged)
-      if (group.stores.size() > 1)
+    for (MemoryGroup &group : *merged)
+      if (group.ops.size() > 1)
         rewrites.push_back(std::move(group));
   }
   return success();
 }
 
-static Type getPackedStoreType(MLIRContext *ctx, const StoreGroup &group) {
-  auto vectorType = VectorType::get({static_cast<int64_t>(group.lanes.size())},
-                                    group.scalarElementType);
+static Type getPackedType(MLIRContext *ctx, const MemoryGroup &group) {
+  auto vectorType = VectorType::get(
+      {static_cast<int64_t>(group.payloads.size())}, group.scalarElementType);
   return SimdType::get(ctx, vectorType, group.simdWidth);
 }
 
-static void rewriteStoreGroup(IRRewriter &rewriter, StoreGroup &group) {
-  StoreOp last = group.lastOp;
+static void rewriteStoreGroup(IRRewriter &rewriter, MemoryGroup &group) {
+  StoreOp last = cast<StoreOp>(group.lastOp);
   MLIRContext *ctx = last->getContext();
-  Type packedType = getPackedStoreType(ctx, group);
+  Type packedType = getPackedType(ctx, group);
   rewriter.setInsertionPoint(last);
   PackOp pack = PackOp::create(rewriter, last.getLoc(), packedType,
-                               ValueRange(group.lanes));
+                               ValueRange(group.payloads));
   StoreOp store = StoreOp::create(
       rewriter, last.getLoc(), last.getToken().getType(), pack.getResult(),
-      group.accessPtr, group.firstOp.getDependency());
+      group.accessPtr, getMemoryDependency(group.firstOp));
   rewriter.replaceAllUsesWith(last.getToken(), store.getToken());
-  for (StoreOp op : llvm::reverse(group.stores))
+  for (Operation *op : llvm::reverse(group.ops))
+    rewriter.eraseOp(op);
+}
+
+static void rewriteLoadGroup(IRRewriter &rewriter, MemoryGroup &group) {
+  LoadOp first = cast<LoadOp>(group.firstOp);
+  MLIRContext *ctx = first->getContext();
+  Type packedType = getPackedType(ctx, group);
+  rewriter.setInsertionPoint(first);
+  LoadOp load = LoadOp::create(rewriter, first.getLoc(), packedType,
+                               first.getToken().getType(), group.accessPtr,
+                               getMemoryDependency(group.firstOp));
+
+  rewriter.setInsertionPointAfter(load);
+  for (auto [idx, oldValue] : llvm::enumerate(group.payloads)) {
+    Value extracted = ExtractOp::create(
+        rewriter, first.getLoc(), oldValue.getType(), load.getValue(),
+        rewriter.getI64IntegerAttr(static_cast<int64_t>(idx)));
+    rewriter.replaceAllUsesWith(oldValue, extracted);
+  }
+  rewriter.replaceAllUsesWith(getMemoryToken(group.lastOp), load.getToken());
+  for (Operation *op : llvm::reverse(group.ops))
     rewriter.eraseOp(op);
 }
 
 static LogicalResult
 collectBlockRewrites(Block &block, WaveDialect &dialect,
-                     SmallVectorImpl<StoreGroup> &rewrites) {
-  SmallVector<StoreGroup, 8> segment;
+                     SmallVectorImpl<MemoryGroup> &rewrites) {
+  SmallVector<MemoryGroup, 8> segment;
   auto flush = [&]() -> LogicalResult {
-    LogicalResult result = mergeStoreSegment(dialect, segment, rewrites);
+    LogicalResult result = mergeSegment(dialect, segment, rewrites);
     segment.clear();
     return result;
   };
 
   for (Operation &op : block) {
-    if (StoreOp store = dyn_cast<StoreOp>(&op)) {
-      FailureOr<std::optional<StoreGroup>> seed = getStoreSeed(store, dialect);
+    // Tokens define memory order; unchained opposite-kind ops keep segment
+    // open.
+    if (isa<LoadOp, StoreOp>(&op)) {
+      FailureOr<std::optional<MemoryGroup>> seed = getMemorySeed(&op, dialect);
       if (failed(seed))
         return failure();
       if (!*seed) {
@@ -322,11 +405,19 @@ collectBlockRewrites(Block &block, WaveDialect &dialect,
 
 static LogicalResult coalesceBlock(Block &block, WaveDialect &dialect,
                                    IRRewriter &rewriter, bool &changed) {
-  SmallVector<StoreGroup, 8> rewrites;
+  SmallVector<MemoryGroup, 8> rewrites;
   if (failed(collectBlockRewrites(block, dialect, rewrites)))
     return failure();
-  for (StoreGroup &group : llvm::reverse(rewrites)) {
+  for (MemoryGroup &group : llvm::reverse(rewrites)) {
+    if (group.kind != MemoryGroupKind::Store)
+      continue;
     rewriteStoreGroup(rewriter, group);
+    changed = true;
+  }
+  for (MemoryGroup &group : llvm::reverse(rewrites)) {
+    if (group.kind != MemoryGroupKind::Load)
+      continue;
+    rewriteLoadGroup(rewriter, group);
     changed = true;
   }
   return success();

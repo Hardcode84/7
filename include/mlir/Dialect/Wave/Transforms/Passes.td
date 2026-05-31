@@ -47,9 +47,9 @@ def WaveCoalesceMemory : Pass<"wave-coalesce-memory"> {
   let summary = "Coalesce adjacent Wave memory ops into vector payloads";
   let description = [{
     Coalesces same-block Wave memory operations with compatible token chains
-    and constant symbolic address deltas. Store coalescing starts from scalar
-    lane-varying stores and recursively merges equal-width adjacent groups into
-    vector payload stores.
+    and constant symbolic address deltas. Load and store coalescing start from
+    scalar lane-varying ops and recursively merge equal-width adjacent groups
+    into vector payload memory ops.
   }];
   let dependentDialects = [
     "func::FuncDialect",
