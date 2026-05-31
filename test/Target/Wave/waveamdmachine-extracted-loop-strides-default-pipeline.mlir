@@ -35,4 +35,34 @@ func.func @default_pipeline_extracted_strided_kloop(
   }
   return
 }
+
+// DEFAULT-LABEL: func.func @default_pipeline_extracted_nested_symbolic_stride
+// DEFAULT: waveamdmachine.metadata
+// DEFAULT: waveamdmachine.uniform_loop
+// DEFAULT: waveamdmachine.uniform_loop
+func.func @default_pipeline_extracted_nested_symbolic_stride(
+    %a: !wave.ptr<f16, #wave.global>, %n_raw: i32, %m: i32)
+    attributes {wave.kernel} {
+  %c0 = arith.constant 0 : i32
+  %c1 = arith.constant 1 : i32
+  %n = wave.assume_range %n_raw, [0, 31] : i32
+  %wi = wave.workitem_id 0 : !wave.simd<i32, 32>
+  scf.for %i = %c0 to %n step %c1 : i32 {
+    scf.for %j = %c1 to %m step %c1 : i32 {
+      %off = wave.index_expr <"16*i*j + 64*Mod(wi, 16)">
+          ["i", "j", "wi"](%i, %j, %wi)
+          : (i32, i32, !wave.simd<i32, 32>) -> !wave.simd<index, 32>
+      %p = wave.ptr_add %a, %off
+          : !wave.ptr<f16, #wave.global>, !wave.simd<index, 32>
+          -> !wave.simd<!wave.ptr<f16, #wave.global>, 32>
+      %v, %t = wave.load %p
+          : (!wave.simd<!wave.ptr<f16, #wave.global>, 32>)
+          -> (!wave.simd<vector<8xi32>, 32>, !wave.mem.token)
+      wave.store %v -> %p
+          : (!wave.simd<vector<8xi32>, 32>,
+             !wave.simd<!wave.ptr<f16, #wave.global>, 32>) -> !wave.mem.token
+    }
+  }
+  return
+}
 }

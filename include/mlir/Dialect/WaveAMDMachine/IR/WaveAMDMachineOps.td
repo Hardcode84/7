@@ -1668,7 +1668,7 @@ def WaveAMDMachine_UniformLoopOp : WaveAMDMachine_Op<"uniform_loop", [
     ["getEntrySuccessorOperands", "getSuccessorInputs"]>,
   DeclareOpInterfaceMethods<LoopLikeOpInterface,
     ["getLoopRegions", "getRegionIterArgs", "getYieldedValuesMutable",
-     "getLoopResults"]>,
+     "getLoopResults", "moveOutOfLoop"]>,
   RecursiveMemoryEffects
 ]> {
   let summary = "structured wave-uniform loop with explicit IV bookkeeping";
