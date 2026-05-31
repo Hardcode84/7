@@ -24,7 +24,9 @@ module attributes {transform.with_named_sequence} {
         : (!transform.any_op) -> !transform.any_op
     %rsimp = transform.apply_registered_pass "wave-simplify-index-exprs" to %roff0
         : (!transform.any_op) -> !transform.any_op
-    %roff = transform.apply_registered_pass "canonicalize" to %rsimp
+    %rstride = transform.apply_registered_pass "wave-extract-loop-strides" to %rsimp
+        : (!transform.any_op) -> !transform.any_op
+    %roff = transform.apply_registered_pass "canonicalize" to %rstride
         : (!transform.any_op) -> !transform.any_op
     %r0 = transform.apply_registered_pass "waveamd-to-machine" to %roff
         : (!transform.any_op) -> !transform.any_op

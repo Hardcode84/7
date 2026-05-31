@@ -4,6 +4,8 @@
 // PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
 // PIPELINE-NEXT: transform.apply_registered_pass "wave-simplify-index-exprs"
 // PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
+// PIPELINE-NEXT: transform.apply_registered_pass "wave-extract-loop-strides"
+// PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
 // PIPELINE-NEXT: transform.apply_registered_pass "canonicalize"
 // PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
 // PIPELINE-NEXT: transform.apply_registered_pass "waveamd-to-machine"

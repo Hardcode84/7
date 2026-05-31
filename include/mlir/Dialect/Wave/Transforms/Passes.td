@@ -69,6 +69,22 @@ def WaveSimplifyIndexExprs : Pass<"wave-simplify-index-exprs"> {
   ];
 }
 
+def WaveExtractLoopStrides : Pass<"wave-extract-loop-strides"> {
+  let summary = "Expose IV-linear Wave pointer offsets as loop-carried strides";
+  let description = [{
+    Rewrites loop-local `wave.ptr_add(base, wave.index_expr(... iv ...))`
+    address formation into a pointer iter_arg when ixsimpl proves the
+    per-iteration stride `expr(iv + step) - expr(iv)` no longer depends on the
+    loop IV. Machine lowering can then choose SGPR base carries, buffer soffset
+    marching, or fallback from the ordinary carried-pointer form.
+  }];
+  let dependentDialects = [
+    "func::FuncDialect",
+    "scf::SCFDialect",
+    "wave::WaveDialect"
+  ];
+}
+
 def WaveAMDABILowering
     : Pass<"waveamd-abi-lowering"> {
   let summary = "Lower WaveAMDMachine function arguments to the AMDGPU kernel ABI";
