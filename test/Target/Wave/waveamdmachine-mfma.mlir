@@ -54,7 +54,8 @@ func.func @mfma_gfx950_f16xf32_kernel(%out: !wave.ptr<i32, #wave.global>)
 // ASM: v_mul_lo_u32 [[MUL:v[0-9]+]], [[IMM]], {{[vs][0-9]+}}
 func.func @gfx950_literal_mul_kernel(%out: !wave.ptr<i32, #wave.global>)
     attributes {wave.kernel} {
-  %wi = wave.workitem_id 0 : !wave.simd<i32, 64>
+  %wi_raw = wave.workitem_id 0 : !wave.simd<i32, 64>
+  %wi = wave.assume_range %wi_raw, [0, 63] : !wave.simd<i32, 64>
   %c256 = arith.constant 256 : i32
   %v256 = wave.splat %c256 : i32 -> !wave.simd<i32, 64>
   %value = wave.muli %v256, %wi

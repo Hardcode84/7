@@ -44,6 +44,23 @@ func.func @global_raw_constant_overflow(%out: !wave.ptr<i32, #wave.global>) attr
   return
 }
 
+// SELECT-LABEL: func.func @global_raw_unbounded_offset_addr64
+// SELECT: waveamdmachine.global_store_b32_addr64
+// ASM-LABEL: global_raw_unbounded_offset_addr64:
+// ASM: global_store_b32 v[{{[0-9]+}}:{{[0-9]+}}], v{{[0-9]+}}, off
+func.func @global_raw_unbounded_offset_addr64(%out: !wave.ptr<i32, #wave.global>, %raw: i32) attributes {wave.kernel} {
+  %lane = wave.lane_id : !wave.simd<i32, 32>
+  %ptr = wave.ptr_add %out, %raw
+      : !wave.ptr<i32, #wave.global>, i32 -> !wave.ptr<i32, #wave.global>
+  %ptrs = wave.ptr_add %ptr, %lane
+      : !wave.ptr<i32, #wave.global>, !wave.simd<i32, 32>
+      -> !wave.simd<!wave.ptr<i32, #wave.global>, 32>
+  %tok = wave.store %lane -> %ptrs
+      : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<i32, #wave.global>, 32>)
+      -> !wave.mem.token
+  return
+}
+
 // SELECT-LABEL: func.func @global_mixed_index_and_raw_ptr_add
 // SELECT: %[[RAW_ID:.*]] = waveamdmachine.v_workitem_id_x
 // SELECT: %[[RAW:.*]] = waveamdmachine.v_lshlrev_b32 %[[RAW_ID]],

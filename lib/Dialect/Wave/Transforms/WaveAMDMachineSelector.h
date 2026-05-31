@@ -76,6 +76,8 @@ struct CarrySnapshot {
   std::string bodyOffsetName;
   std::string resultOffsetName;
   std::string strideName;
+  std::optional<int64_t> bodyU32Upper;
+  std::optional<int64_t> resultU32Upper;
   enum class Kind { WMValue, Pointer };
   Value carry;
   Value base;
@@ -232,8 +234,8 @@ public:
   unsigned nextLabel = 0;
 
   // ---- address-planning helpers -----------------------------------------
-  std::optional<sym::PredHandle> bindingAssumption(Value binding,
-                                                   StringRef name);
+  std::optional<sym::PredHandle>
+  bindingAssumption(Value binding, StringRef name, int64_t scale = 1);
   sym::Store &symbolStore();
   bool slotFitsU32(sym::ExprHandle expr, ArrayRef<sym::PredHandle> assumptions);
   SmallVector<NamedAttribute> instOffsetAttrs(int64_t value,

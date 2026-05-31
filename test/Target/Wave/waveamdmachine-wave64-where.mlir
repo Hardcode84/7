@@ -21,7 +21,8 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx942"} {
 func.func @where_wave64_else(%out: !wave.ptr<i32, #wave.global>,
                              %active: !wave.mask<64>)
     attributes {wave.kernel} {
-  %wi = wave.workitem_id 0 : !wave.simd<i32, 64>
+  %wi_raw = wave.workitem_id 0 : !wave.simd<i32, 64>
+  %wi = wave.assume_range %wi_raw, [0, 63] : !wave.simd<i32, 64>
   %one = arith.constant 1 : i32
   %vone = wave.splat %one : i32 -> !wave.simd<i32, 64>
   %other = wave.addi %wi, %vone

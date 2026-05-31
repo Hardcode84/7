@@ -1041,7 +1041,7 @@ def _emit_kernel(bld: dsl.FunctionBuilder, cfg: _MatmulConfig) -> None:
 
     # The fourth kernel arg is the pipelined-loop trip count
     # (`K / (16 * wave_k_tiles) - 1`, precomputed on host).
-    trip_count_i32 = bld.args[3]
+    trip_count_i32 = bld.assume_range(bld.args[3], 0, max(cfg.virtual_k_steps - 1, 0))
     zero_i32 = bld.constant(dsl.i32(), 0)
     one_i32 = bld.constant(dsl.i32(), 1)
 

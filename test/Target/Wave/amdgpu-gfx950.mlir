@@ -14,7 +14,8 @@ func.func @buffer_store_kernel(%out: !wave.ptr<i32, #wave.global>)
   %range = arith.constant 128 : i32
   %buffer = waveamd.make_buffer %out, %range
       : !wave.ptr<i32, #wave.global>, i32 -> !wave.ptr<i32, #waveamd.buffer>
-  %wi = wave.workitem_id 0 : !wave.simd<i32, 64>
+  %wi_raw = wave.workitem_id 0 : !wave.simd<i32, 64>
+  %wi = wave.assume_range %wi_raw, [0, 63] : !wave.simd<i32, 64>
   %ptrs = wave.ptr_add %buffer, %wi
       : !wave.ptr<i32, #waveamd.buffer>, !wave.simd<i32, 64>
       -> !wave.simd<!wave.ptr<i32, #waveamd.buffer>, 64>
@@ -35,7 +36,8 @@ func.func @buffer_store_kernel(%out: !wave.ptr<i32, #wave.global>)
 // CHECK: amdhsa.target:   amdgcn-amd-amdhsa--gfx950
 func.func @lds_echo_kernel(%out: !wave.ptr<i32, #wave.global>)
     attributes {wave.kernel, wave.lds_size = 256 : i64} {
-  %wi = wave.workitem_id 0 : !wave.simd<i32, 64>
+  %wi_raw = wave.workitem_id 0 : !wave.simd<i32, 64>
+  %wi = wave.assume_range %wi_raw, [0, 63] : !wave.simd<i32, 64>
   %lds = wave.lds_base : !wave.ptr<i32, #wave.shared>
   %lds_ptrs = wave.ptr_add %lds, %wi
       : !wave.ptr<i32, #wave.shared>, !wave.simd<i32, 64>

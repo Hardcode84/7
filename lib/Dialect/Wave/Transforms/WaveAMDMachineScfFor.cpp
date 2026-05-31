@@ -19,6 +19,7 @@
 #include "WaveAMDMachineSelector.h"
 
 #include "mlir/Dialect/Utils/StaticValueUtils.h"
+#include "llvm/Support/CheckedArithmetic.h"
 
 using namespace mlir;
 using namespace mlir::wave;
@@ -33,34 +34,69 @@ static std::string makeLoopSymbol(WaveAMDMachineSelector &S, StringRef stem) {
   return (Twine("__wave_loop_") + stem + "_" + Twine(S.nextLabel++)).str();
 }
 
-static FailureOr<PointerOffset> makeSymbolicCarry(WaveAMDMachineSelector &S,
-                                                  StringRef name, Value value,
-                                                  TermKind kind,
-                                                  bool assumeU32 = false) {
+static constexpr int64_t u32Max = (int64_t{1} << 32) - 1;
+
+static std::optional<int64_t> proveU32Upper(WaveAMDMachineSelector &S,
+                                            const PointerOffset &offset) {
+  if (!offset.expr)
+    return int64_t{0};
+  if (!S.slotFitsU32(offset.expr, offset.assumptions))
+    return std::nullopt;
+  int64_t lo = 0;
+  int64_t hi = u32Max;
+  while (lo < hi) {
+    int64_t mid = lo + (hi - lo) / 2;
+    if (sym::provablyInRange(S.symbolStore(), offset.expr, offset.assumptions,
+                             /*lo=*/0, mid)) {
+      hi = mid;
+      continue;
+    }
+    lo = mid + 1;
+  }
+  return hi;
+}
+
+static bool offsetFitsU32(WaveAMDMachineSelector &S,
+                          const PointerOffset &offset) {
+  return !offset.expr || S.slotFitsU32(offset.expr, offset.assumptions);
+}
+
+static void addRangeAssumption(WaveAMDMachineSelector &S, PointerOffset &offset,
+                               StringRef name, int64_t hi) {
+  FailureOr<sym::PredHandle> range =
+      sym::rangeAssumption(S.symbolStore(), name, int64_t{0}, hi);
+  if (succeeded(range))
+    offset.assumptions.push_back(*range);
+}
+
+static FailureOr<PointerOffset>
+makeSymbolicCarry(WaveAMDMachineSelector &S, StringRef name, Value value,
+                  TermKind kind, std::optional<int64_t> hi = {}) {
   FailureOr<sym::ExprHandle> expr = sym::composeExprSym(S.symbolStore(), name);
   if (failed(expr))
     return failure();
   PointerOffset offset;
   offset.expr = *expr;
   offset.bindings.push_back({name.str(), value, kind});
-  if (kind == TermKind::Lane || assumeU32) {
-    FailureOr<sym::PredHandle> range = sym::rangeAssumption(
-        S.symbolStore(), name, int64_t{0}, (int64_t{1} << 32) - 1);
-    if (succeeded(range))
-      offset.assumptions.push_back(*range);
-  }
+  if (hi)
+    addRangeAssumption(S, offset, name, *hi);
+  else if (std::optional<sym::PredHandle> a = S.bindingAssumption(value, name))
+    offset.assumptions.push_back(*a);
   return offset;
 }
 
 static LogicalResult addSymbolicStride(WaveAMDMachineSelector &S,
                                        PointerOffset &offset, Value strideValue,
-                                       StringRef name) {
+                                       StringRef name, Value rangeSource,
+                                       int64_t scale) {
   S.values[strideValue] = strideValue;
   FailureOr<PointerOffset> stride =
-      makeSymbolicCarry(S, name, strideValue, TermKind::Uniform,
-                        /*assumeU32=*/true);
+      makeSymbolicCarry(S, name, strideValue, TermKind::Uniform);
   if (failed(stride))
     return failure();
+  if (std::optional<sym::PredHandle> a =
+          S.bindingAssumption(rangeSource, name, scale))
+    stride->assumptions.push_back(*a);
   FailureOr<sym::ExprHandle> expr =
       offset.expr ? sym::composeExprBinary(S.symbolStore(), offset.expr,
                                            sym::ExprBinaryOp::Add, stride->expr)
@@ -123,6 +159,131 @@ static TermKind classifyPointerYield(WaveAMDMachineSelector &S, Value value,
   return TermKind::Lane;
 }
 
+static std::optional<int64_t>
+constantPtrAdvanceBytes(WaveAMDMachineSelector &S, Value value, Value iterArg) {
+  Value cur = value;
+  int64_t elems = 0;
+  while (auto add = cur.getDefiningOp<PtrAddOp>()) {
+    std::optional<int64_t> off = getConstantIntValue(add.getOffset());
+    if (!off)
+      return std::nullopt;
+    std::optional<int64_t> next = llvm::checkedAdd(elems, *off);
+    if (!next)
+      return std::nullopt;
+    elems = *next;
+    cur = add.getBase();
+  }
+  if (cur != iterArg)
+    return std::nullopt;
+  return llvm::checkedMul(
+      elems, static_cast<int64_t>(S.elementSizeBytes(iterArg.getType())));
+}
+
+static LogicalResult
+addTripCountAssumption(WaveAMDMachineSelector &S, scf::ForOp op, StringRef name,
+                       SmallVectorImpl<sym::PredHandle> &assumptions) {
+  if (std::optional<int64_t> upper = getConstantIntValue(op.getUpperBound())) {
+    FailureOr<sym::PredHandle> range =
+        sym::rangeAssumption(S.symbolStore(), name, *upper, *upper);
+    if (failed(range))
+      return failure();
+    assumptions.push_back(*range);
+    return success();
+  }
+  if (std::optional<sym::PredHandle> range =
+          S.bindingAssumption(op.getUpperBound(), name)) {
+    assumptions.push_back(*range);
+    return success();
+  }
+  return failure();
+}
+
+static FailureOr<sym::ExprHandle>
+appendExpr(WaveAMDMachineSelector &S, sym::ExprHandle lhs, sym::ExprHandle rhs,
+           ArrayRef<sym::PredHandle> assumptions) {
+  if (!lhs)
+    return rhs;
+  FailureOr<sym::ExprHandle> expr =
+      sym::composeExprBinary(S.symbolStore(), lhs, sym::ExprBinaryOp::Add, rhs);
+  if (failed(expr))
+    return failure();
+  FailureOr<sym::ExprHandle> simplified =
+      sym::simplifyExpr(S.symbolStore(), *expr, assumptions);
+  return succeeded(simplified) ? *simplified : *expr;
+}
+
+static bool isNormalizedUnitLoop(scf::ForOp op) {
+  std::optional<int64_t> lo = getConstantIntValue(op.getLowerBound());
+  std::optional<int64_t> step = getConstantIntValue(op.getStep());
+  return lo && *lo == 0 && step && *step == 1;
+}
+
+static FailureOr<sym::ExprHandle>
+buildAccumulatingCarryExpr(WaveAMDMachineSelector &S, scf::ForOp op,
+                           const PointerOffset &offset, int64_t deltaBytes,
+                           SmallVectorImpl<sym::PredHandle> &assumptions) {
+  std::string tripName = makeLoopSymbol(S, "ptr_trip");
+  if (failed(addTripCountAssumption(S, op, tripName, assumptions)))
+    return failure();
+  FailureOr<sym::ExprHandle> trip =
+      sym::composeExprSym(S.symbolStore(), tripName);
+  FailureOr<sym::ExprHandle> delta =
+      sym::composeExprInt(S.symbolStore(), deltaBytes);
+  if (failed(trip) || failed(delta))
+    return failure();
+  FailureOr<sym::ExprHandle> advance = sym::composeExprBinary(
+      S.symbolStore(), *trip, sym::ExprBinaryOp::Mul, *delta);
+  if (failed(advance))
+    return failure();
+  return appendExpr(S, offset.expr, *advance, assumptions);
+}
+
+static bool proveAccumulatingCarryFitsU32(WaveAMDMachineSelector &S,
+                                          scf::ForOp op,
+                                          const PointerOffset &offset,
+                                          int64_t deltaBytes) {
+  if (!offsetFitsU32(S, offset))
+    return false;
+  if (deltaBytes == 0)
+    return true;
+  if (deltaBytes < 0)
+    return false;
+  if (!isNormalizedUnitLoop(op))
+    return false;
+
+  SmallVector<sym::PredHandle, 4> assumptions(offset.assumptions.begin(),
+                                              offset.assumptions.end());
+  FailureOr<sym::ExprHandle> total =
+      buildAccumulatingCarryExpr(S, op, offset, deltaBytes, assumptions);
+  return succeeded(total) && S.slotFitsU32(*total, assumptions);
+}
+
+static LogicalResult proveLoopCarryFitsU32(WaveAMDMachineSelector &S,
+                                           scf::ForOp op,
+                                           const PointerOffset &offset,
+                                           Value yieldValue, Value iterArg,
+                                           CarrySnapshot &snap) {
+  std::optional<int64_t> entryUpper = proveU32Upper(S, offset);
+  if (!entryUpper)
+    return op.emitError(
+        "scf.for pointer carry offset must fit proven unsigned 32-bit");
+
+  if (snap.strideBytes != 0) {
+    snap.bodyU32Upper = entryUpper;
+    return success();
+  }
+
+  std::optional<int64_t> advance =
+      constantPtrAdvanceBytes(S, yieldValue, iterArg);
+  if (!advance || !proveAccumulatingCarryFitsU32(S, op, offset, *advance))
+    return op.emitError("scf.for pointer carry offset must fit proven "
+                        "unsigned 32-bit for every iteration");
+
+  snap.bodyU32Upper = u32Max;
+  snap.resultU32Upper = u32Max;
+  return success();
+}
+
 // Wave-uniform per-iter advance (bytes) for global carry `i` the body
 // may march on the scalar base, else 0. Eligible: normalized loop, dead
 // post-loop result, constant-offset ptr_add chain back to the iter arg.
@@ -133,16 +294,9 @@ static int64_t stridedCarryBytes(WaveAMDMachineSelector &S, scf::ForOp op,
   if (!lo || *lo != 0 || !step || *step != 1 || !op.getResult(i).use_empty())
     return 0;
   Value arg = op.getRegionIterArgs()[i];
-  Value cur = cast<scf::YieldOp>(op.getBody()->getTerminator()).getOperand(i);
-  int64_t elems = 0;
-  while (auto add = cur.getDefiningOp<PtrAddOp>()) {
-    std::optional<int64_t> off = getConstantIntValue(add.getOffset());
-    if (!off)
-      return 0;
-    elems += *off;
-    cur = add.getBase();
-  }
-  return cur == arg && elems ? elems * S.elementSizeBytes(arg.getType()) : 0;
+  Value y = cast<scf::YieldOp>(op.getBody()->getTerminator()).getOperand(i);
+  std::optional<int64_t> bytes = constantPtrAdvanceBytes(S, y, arg);
+  return bytes && *bytes != 0 ? *bytes : 0;
 }
 
 // `base + iv * strideBytes` as an SGPR pair: scale the IV in the scalar
@@ -207,6 +361,10 @@ LogicalResult snapshotScfCarries(WaveAMDMachineSelector &S, scf::ForOp op,
       snap.bodyOffsetName = makeLoopSymbol(S, "ptr_body");
       snap.resultOffsetName = makeLoopSymbol(S, "ptr_result");
       snap.strideName = makeLoopSymbol(S, "ptr_stride");
+      if (failed(proveLoopCarryFitsU32(S, op, offsetIt->second,
+                                       yield.getOperand(idx),
+                                       op.getRegionIterArgs()[idx], snap)))
+        return failure();
       out.push_back(std::move(snap));
       continue;
     }
@@ -256,7 +414,7 @@ void bindLoopBodyArgs(WaveAMDMachineSelector &S, scf::ForOp op, Block &loopBody,
       S.values[blockCarry] = blockCarry;
       FailureOr<PointerOffset> symbolic =
           makeSymbolicCarry(S, snap.bodyOffsetName, blockCarry, snap.offsetKind,
-                            /*assumeU32=*/true);
+                            snap.bodyU32Upper);
       if (succeeded(symbolic))
         S.pointerIndexOffsets[scfArg] = *symbolic;
       else
@@ -342,7 +500,7 @@ void bindLoopResults(WaveAMDMachineSelector &S, scf::ForOp op, Operation *loop,
       S.values[wmResult] = wmResult;
       FailureOr<PointerOffset> symbolic =
           makeSymbolicCarry(S, snap.resultOffsetName, wmResult, snap.offsetKind,
-                            /*assumeU32=*/true);
+                            snap.resultU32Upper);
       if (succeeded(symbolic))
         S.pointerIndexOffsets[scfResult] = *symbolic;
       else
@@ -369,7 +527,8 @@ static void rebindStridedPointerCarries(WaveAMDMachineSelector &S,
       if (auto symIt = S.pointerIndexOffsets.find(scfArg);
           symIt != S.pointerIndexOffsets.end())
         if (failed(addSymbolicStride(S, symIt->second, strideValue,
-                                     snap.strideName)))
+                                     snap.strideName, op.getInductionVar(),
+                                     snap.strideBytes)))
           S.pointerIndexOffsets.erase(scfArg);
       continue;
     }

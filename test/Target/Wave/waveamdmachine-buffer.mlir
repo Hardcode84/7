@@ -32,6 +32,28 @@ func.func @buffer_store_kernel(%out: !wave.ptr<i32, #wave.global>, %x: i32) attr
   return
 }
 
+// SELECT-LABEL: func.func @buffer_bounded_raw_uniform_uses_soffset
+// SELECT-DAG: %[[U:.*]] = waveamdmachine.arg {index = 1 : i64, pointer = false}
+// SELECT-DAG: %[[LANE:.*]] = waveamdmachine.v_mbcnt_lo
+// SELECT: %[[SBYTE:[^,]+]], %{{.*}} = waveamdmachine.s_lshl_b32 %[[U]],
+// SELECT: waveamdmachine.buffer_store_b32 %{{.*}}, {{.*}}, {{.*}}, %[[SBYTE]]
+func.func @buffer_bounded_raw_uniform_uses_soffset(%out: !wave.ptr<i32, #wave.global>, %u_raw: i32) attributes {wave.kernel} {
+  %u = wave.assume_range %u_raw, [0, 1023] : i32
+  %range = arith.constant 4096 : i32
+  %buffer = waveamd.make_buffer %out, %range
+      : !wave.ptr<i32, #wave.global>, i32 -> !wave.ptr<i32, #waveamd.buffer>
+  %lane = wave.lane_id : !wave.simd<i32, 32>
+  %ptr = wave.ptr_add %buffer, %u
+      : !wave.ptr<i32, #waveamd.buffer>, i32 -> !wave.ptr<i32, #waveamd.buffer>
+  %ptrs = wave.ptr_add %ptr, %lane
+      : !wave.ptr<i32, #waveamd.buffer>, !wave.simd<i32, 32>
+      -> !wave.simd<!wave.ptr<i32, #waveamd.buffer>, 32>
+  %tok = wave.store %lane -> %ptrs
+      : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<i32, #waveamd.buffer>, 32>)
+      -> !wave.mem.token
+  return
+}
+
 // Single-dword `wave.load` through a buffer pointer: the selector lowers
 // it to `waveamdmachine.buffer_load_b32`, and the AMDGPU printer emits a
 // `buffer_load_dword ..., 0 offen` (no offset suffix for component 0).

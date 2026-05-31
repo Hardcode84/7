@@ -251,3 +251,75 @@ func.func @buffer_unbounded_uniform_needs_range(%out: !wave.ptr<i32, #wave.globa
   return
 }
 }
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
+func.func @buffer_raw_unbounded_offset_needs_range(%out: !wave.ptr<i32, #wave.global>, %raw: i32) attributes {wave.kernel} {
+  %range = arith.constant 4096 : i32
+  %buf = waveamd.make_buffer %out, %range
+      : !wave.ptr<i32, #wave.global>, i32 -> !wave.ptr<i32, #waveamd.buffer>
+  %lane = wave.lane_id : !wave.simd<i32, 32>
+  %ptr = wave.ptr_add %buf, %raw
+      : !wave.ptr<i32, #waveamd.buffer>, i32 -> !wave.ptr<i32, #waveamd.buffer>
+  %ptrs = wave.ptr_add %ptr, %lane
+      : !wave.ptr<i32, #waveamd.buffer>, !wave.simd<i32, 32>
+      -> !wave.simd<!wave.ptr<i32, #waveamd.buffer>, 32>
+  // expected-error @below {{buffer memory op offset must fit proven unsigned 32-bit}}
+  %tok = wave.store %lane -> %ptrs
+      : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<i32, #waveamd.buffer>, 32>)
+      -> !wave.mem.token
+  return
+}
+}
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
+func.func @buffer_raw_overwide_offset_errors(%out: !wave.ptr<i32, #wave.global>, %raw_base: i32) attributes {wave.kernel} {
+  %raw = wave.assume_range %raw_base, [1073741824, 1073741824] : i32
+  %range = arith.constant 4096 : i32
+  %buf = waveamd.make_buffer %out, %range
+      : !wave.ptr<i32, #wave.global>, i32 -> !wave.ptr<i32, #waveamd.buffer>
+  %lane = wave.lane_id : !wave.simd<i32, 32>
+  %ptr = wave.ptr_add %buf, %raw
+      : !wave.ptr<i32, #waveamd.buffer>, i32 -> !wave.ptr<i32, #waveamd.buffer>
+  %ptrs = wave.ptr_add %ptr, %lane
+      : !wave.ptr<i32, #waveamd.buffer>, !wave.simd<i32, 32>
+      -> !wave.simd<!wave.ptr<i32, #waveamd.buffer>, 32>
+  // expected-error @below {{buffer memory op offset must fit proven unsigned 32-bit}}
+  %tok = wave.store %lane -> %ptrs
+      : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<i32, #waveamd.buffer>, 32>)
+      -> !wave.mem.token
+  return
+}
+}
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
+func.func @buffer_loop_dynamic_carry_needs_bound(%out: !wave.ptr<i32, #wave.global>, %delta: i32) attributes {wave.kernel} {
+  %c0 = arith.constant 0 : i32
+  %c1 = arith.constant 1 : i32
+  %c4 = arith.constant 4 : i32
+  %range = arith.constant 4096 : i32
+  %buf = waveamd.make_buffer %out, %range
+      : !wave.ptr<i32, #wave.global>, i32 -> !wave.ptr<i32, #waveamd.buffer>
+  %lane = wave.lane_id : !wave.simd<i32, 32>
+  %p0 = wave.ptr_add %buf, %lane
+      : !wave.ptr<i32, #waveamd.buffer>, !wave.simd<i32, 32>
+      -> !wave.simd<!wave.ptr<i32, #waveamd.buffer>, 32>
+  // expected-error @below {{scf.for pointer carry offset must fit proven unsigned 32-bit for every iteration}}
+  %res = scf.for %i = %c0 to %c4 step %c1 iter_args(%q = %p0)
+      -> (!wave.simd<!wave.ptr<i32, #waveamd.buffer>, 32>) : i32 {
+    %tok = wave.store %lane -> %q
+        : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<i32, #waveamd.buffer>, 32>)
+        -> !wave.mem.token
+    %next = wave.ptr_add %q, %delta
+        : !wave.simd<!wave.ptr<i32, #waveamd.buffer>, 32>, i32
+        -> !wave.simd<!wave.ptr<i32, #waveamd.buffer>, 32>
+    scf.yield %next : !wave.simd<!wave.ptr<i32, #waveamd.buffer>, 32>
+  }
+  return
+}
+}

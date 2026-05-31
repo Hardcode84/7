@@ -334,14 +334,15 @@ LogicalResult WaveAMDMachineSelector::run() {
   return success();
 }
 
-// Look up the proven signed integer range of `binding` and convert
-// it into an ixsimpl `name in [lo, hi]` assumption. Returns
-// `nullopt` for SIMD bindings whose lattice is unset, or for
-// bindings whose lattice is the trivial `maxRange` (no info).
-std::optional<sym::PredHandle>
-WaveAMDMachineSelector::bindingAssumption(Value binding, StringRef name) {
+struct IntRange64 {
+  int64_t lo = 0;
+  int64_t hi = 0;
+};
+
+static std::optional<ConstantIntRanges>
+finiteSignedRange(WaveAMDMachineSelector &S, Value binding) {
   const dataflow::IntegerValueRangeLattice *lattice =
-      rangeSolver.lookupState<dataflow::IntegerValueRangeLattice>(binding);
+      S.rangeSolver.lookupState<dataflow::IntegerValueRangeLattice>(binding);
   if (!lattice)
     return std::nullopt;
   IntegerValueRange ivr = lattice->getValue();
@@ -349,15 +350,41 @@ WaveAMDMachineSelector::bindingAssumption(Value binding, StringRef name) {
     return std::nullopt;
   ConstantIntRanges range = ivr.getValue();
   unsigned w = range.smin().getBitWidth();
-  if (w == 0)
+  if (w == 0 || w > 64)
     return std::nullopt;
   APInt sminBound = APInt::getSignedMinValue(w);
   APInt smaxBound = APInt::getSignedMaxValue(w);
   if (range.smin() == sminBound && range.smax() == smaxBound)
     return std::nullopt;
+  return range;
+}
+
+static std::optional<IntRange64> scaleRange64(ConstantIntRanges range,
+                                              int64_t scale) {
+  if (scale == 0)
+    return IntRange64{0, 0};
+  std::optional<int64_t> lo =
+      llvm::checkedMul(range.smin().getSExtValue(), scale);
+  std::optional<int64_t> hi =
+      llvm::checkedMul(range.smax().getSExtValue(), scale);
+  if (!lo || !hi)
+    return std::nullopt;
+  if (scale < 0)
+    std::swap(lo, hi);
+  return IntRange64{*lo, *hi};
+}
+
+std::optional<sym::PredHandle>
+WaveAMDMachineSelector::bindingAssumption(Value binding, StringRef name,
+                                          int64_t scale) {
+  std::optional<ConstantIntRanges> range = finiteSignedRange(*this, binding);
+  if (!range)
+    return std::nullopt;
+  std::optional<IntRange64> scaled = scaleRange64(*range, scale);
+  if (!scaled)
+    return std::nullopt;
   auto handle =
-      sym::rangeAssumption(symbolStore(), name, range.smin().getSExtValue(),
-                           range.smax().getSExtValue());
+      sym::rangeAssumption(symbolStore(), name, scaled->lo, scaled->hi);
   if (failed(handle))
     return std::nullopt;
   return *handle;
@@ -2212,10 +2239,10 @@ static FailureOr<PointerOffset> mergePointerOffsets(WaveAMDMachineSelector &S,
 
 static FailureOr<PointerOffset>
 planRawPtrAddByteOffset(WaveAMDMachineSelector &S, PtrAddOp op, unsigned size) {
-  Value raw = S.expect(op.getOffset(), op);
-  TermKind kind = isLaneVaryingType(op.getOffset().getType())
-                      ? TermKind::Lane
-                      : TermKind::Uniform;
+  Value source = op.getOffset();
+  Value raw = S.expect(source, op);
+  TermKind kind =
+      isLaneVaryingType(source.getType()) ? TermKind::Lane : TermKind::Uniform;
   FailureOr<Value> scaled = kind == TermKind::Uniform
                                 ? scaleSOffset(S, op.getLoc(), raw, size)
                                 : scaleVOffset(S, op.getLoc(), raw, size);
@@ -2233,10 +2260,9 @@ planRawPtrAddByteOffset(WaveAMDMachineSelector &S, PtrAddOp op, unsigned size) {
   PointerOffset offset;
   offset.expr = *expr;
   offset.bindings.push_back({name, *scaled, kind});
-  FailureOr<sym::PredHandle> range = sym::rangeAssumption(
-      S.symbolStore(), name, int64_t{0}, (int64_t{1} << 32) - 1);
-  if (succeeded(range))
-    offset.assumptions.push_back(*range);
+  if (std::optional<sym::PredHandle> a =
+          S.bindingAssumption(source, name, size))
+    offset.assumptions.push_back(*a);
   return offset;
 }
 

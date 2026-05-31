@@ -15,7 +15,8 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 // ASM: global_load_lds_dword
 func.func @global_dma_lds(%in: !wave.ptr<i32, #wave.global>)
     attributes {wave.kernel, wave.lds_size = 128 : i64} {
-  %wi = wave.workitem_id 0 : !wave.simd<i32, 64>
+  %wi_raw = wave.workitem_id 0 : !wave.simd<i32, 64>
+  %wi = wave.assume_range %wi_raw, [0, 63] : !wave.simd<i32, 64>
   %src = wave.ptr_add %in, %wi
       : !wave.ptr<i32, #wave.global>, !wave.simd<i32, 64>
       -> !wave.simd<!wave.ptr<i32, #wave.global>, 64>
@@ -37,7 +38,8 @@ func.func @global_dma_lds(%in: !wave.ptr<i32, #wave.global>)
 // ASM: global_load_lds_dwordx4
 func.func @global_dma_lds_b128(%in: !wave.ptr<i32, #wave.global>)
     attributes {wave.kernel, wave.lds_size = 512 : i64} {
-  %wi = wave.workitem_id 0 : !wave.simd<i32, 64>
+  %wi_raw = wave.workitem_id 0 : !wave.simd<i32, 64>
+  %wi = wave.assume_range %wi_raw, [0, 63] : !wave.simd<i32, 64>
   %src = wave.ptr_add %in, %wi
       : !wave.ptr<i32, #wave.global>, !wave.simd<i32, 64>
       -> !wave.simd<!wave.ptr<i32, #wave.global>, 64>
@@ -59,7 +61,8 @@ func.func @global_dma_lds_b128(%in: !wave.ptr<i32, #wave.global>)
 // ASM: global_load_lds_dwordx4
 func.func @global_dma_lds_uniform_mul_dest(%in: !wave.ptr<i32, #wave.global>)
     attributes {wave.kernel, wave.lds_size = 1024 : i64} {
-  %wi = wave.workitem_id 0 : !wave.simd<i32, 64>
+  %wi_raw = wave.workitem_id 0 : !wave.simd<i32, 64>
+  %wi = wave.assume_range %wi_raw, [0, 63] : !wave.simd<i32, 64>
   %src = wave.ptr_add %in, %wi
       : !wave.ptr<i32, #wave.global>, !wave.simd<i32, 64>
       -> !wave.simd<!wave.ptr<i32, #wave.global>, 64>
@@ -88,7 +91,8 @@ func.func @global_dma_lds_uniform_mul_dest(%in: !wave.ptr<i32, #wave.global>)
 // ASM: global_load_lds_dwordx4
 func.func @global_dma_lds_uniform_dest_add(%in: !wave.ptr<i32, #wave.global>)
     attributes {wave.kernel, wave.lds_size = 2048 : i64} {
-  %wi = wave.workitem_id 0 : !wave.simd<i32, 64>
+  %wi_raw = wave.workitem_id 0 : !wave.simd<i32, 64>
+  %wi = wave.assume_range %wi_raw, [0, 63] : !wave.simd<i32, 64>
   %src = wave.ptr_add %in, %wi
       : !wave.ptr<i32, #wave.global>, !wave.simd<i32, 64>
       -> !wave.simd<!wave.ptr<i32, #wave.global>, 64>
@@ -115,7 +119,8 @@ func.func @global_dma_lds_uniform_dest_add(%in: !wave.ptr<i32, #wave.global>)
 // ASM-NOT: offset:
 func.func @global_dma_lds_source_const_offset(%in: !wave.ptr<i32, #wave.global>)
     attributes {wave.kernel, wave.lds_size = 512 : i64} {
-  %wi = wave.workitem_id 0 : !wave.simd<i32, 64>
+  %wi_raw = wave.workitem_id 0 : !wave.simd<i32, 64>
+  %wi = wave.assume_range %wi_raw, [0, 63] : !wave.simd<i32, 64>
   %src_off = wave.index_expr <"64 + wi"> ["wi"](%wi)
       : (!wave.simd<i32, 64>) -> !wave.index<64>
   %src = wave.ptr_add %in, %src_off
@@ -142,7 +147,8 @@ func.func @buffer_dma_lds(%in: !wave.ptr<i32, #wave.global>)
   %range = arith.constant 128 : i32
   %buffer = waveamd.make_buffer %in, %range
       : !wave.ptr<i32, #wave.global>, i32 -> !wave.ptr<i32, #waveamd.buffer>
-  %wi = wave.workitem_id 0 : !wave.simd<i32, 64>
+  %wi_raw = wave.workitem_id 0 : !wave.simd<i32, 64>
+  %wi = wave.assume_range %wi_raw, [0, 63] : !wave.simd<i32, 64>
   %src = wave.ptr_add %buffer, %wi
       : !wave.ptr<i32, #waveamd.buffer>, !wave.simd<i32, 64>
       -> !wave.simd<!wave.ptr<i32, #waveamd.buffer>, 64>
@@ -167,7 +173,8 @@ func.func @buffer_dma_lds_b128(%in: !wave.ptr<i32, #wave.global>)
   %range = arith.constant 128 : i32
   %buffer = waveamd.make_buffer %in, %range
       : !wave.ptr<i32, #wave.global>, i32 -> !wave.ptr<i32, #waveamd.buffer>
-  %wi = wave.workitem_id 0 : !wave.simd<i32, 64>
+  %wi_raw = wave.workitem_id 0 : !wave.simd<i32, 64>
+  %wi = wave.assume_range %wi_raw, [0, 63] : !wave.simd<i32, 64>
   %src = wave.ptr_add %buffer, %wi
       : !wave.ptr<i32, #waveamd.buffer>, !wave.simd<i32, 64>
       -> !wave.simd<!wave.ptr<i32, #waveamd.buffer>, 64>

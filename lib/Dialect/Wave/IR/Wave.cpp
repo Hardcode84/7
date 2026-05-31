@@ -678,6 +678,44 @@ normalizeWaveArithRanges(ArrayRef<ConstantIntRanges> argRanges, unsigned bits) {
   return normalized;
 }
 
+void SplatOp::inferResultRanges(ArrayRef<ConstantIntRanges> argRanges,
+                                SetIntRangeFn setResultRange) {
+  SimdType simd = cast<SimdType>(getResult().getType());
+  if (!isa<IntegerType>(simd.getElementType()))
+    return;
+  unsigned bits = cast<IntegerType>(simd.getElementType()).getWidth();
+  setResultRange(getResult(), normalizeWaveArithRange(argRanges[0], bits));
+}
+
+void BinaryOp::inferResultRanges(ArrayRef<ConstantIntRanges> argRanges,
+                                 SetIntRangeFn setResultRange) {
+  SimdType simd = cast<SimdType>(getResult().getType());
+  if (!isa<IntegerType>(simd.getElementType()))
+    return;
+  unsigned bits = cast<IntegerType>(simd.getElementType()).getWidth();
+  SmallVector<ConstantIntRanges, 2> ranges =
+      normalizeWaveArithRanges(argRanges, bits);
+
+  StringRef kind = getKind();
+  if (kind == "andi") {
+    setResultRange(getResult(), mlir::intrange::inferAnd(ranges));
+    return;
+  }
+  if (kind == "ori") {
+    setResultRange(getResult(), mlir::intrange::inferOr(ranges));
+    return;
+  }
+  if (kind == "xori") {
+    setResultRange(getResult(), mlir::intrange::inferXor(ranges));
+    return;
+  }
+  if (kind == "shri") {
+    setResultRange(getResult(), mlir::intrange::inferShrU(ranges));
+    return;
+  }
+  setResultRange(getResult(), ConstantIntRanges::maxRange(bits));
+}
+
 void AddiOp::inferResultRanges(ArrayRef<ConstantIntRanges> argRanges,
                                SetIntRangeFn setResultRange) {
   unsigned bits = waveArithElementWidth(getResult().getType());

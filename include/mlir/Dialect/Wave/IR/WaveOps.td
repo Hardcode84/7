@@ -128,7 +128,8 @@ def Wave_BallotOp : Wave_Op<"ballot", [NoMemoryEffect]> {
   let hasVerifier = 1;
 }
 
-def Wave_SplatOp : Wave_Op<"splat", [Pure]> {
+def Wave_SplatOp : Wave_Op<"splat", [Pure,
+    DeclareOpInterfaceMethods<InferIntRangeInterface, ["inferResultRanges"]>]> {
   let summary = "broadcast a scalar value into a lane-varying SIMD value";
   let description = [{
     Broadcasts an ordinary scalar value into a `!wave.simd<T, W>`. Lowering to
@@ -141,7 +142,8 @@ def Wave_SplatOp : Wave_Op<"splat", [Pure]> {
   let hasVerifier = 1;
 }
 
-def Wave_BinaryOp : Wave_Op<"binary", [Pure]> {
+def Wave_BinaryOp : Wave_Op<"binary", [Pure,
+    DeclareOpInterfaceMethods<InferIntRangeInterface, ["inferResultRanges"]>]> {
   let summary = "lane-wise integer binary operation";
   let description = [{
     Applies an integer binary operation lane-wise to two SIMD values.

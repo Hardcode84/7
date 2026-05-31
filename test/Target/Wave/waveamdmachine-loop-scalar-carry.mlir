@@ -24,17 +24,19 @@ func.func @uniform_buffer_pointer_carry(%a: !wave.ptr<i32, #wave.global>,
     attributes {wave.kernel} {
   %c0 = arith.constant 0 : i32
   %c1 = arith.constant 1 : i32
+  %n_bounded = wave.assume_range %n, [0, 1023] : i32
   %buf = waveamd.make_buffer %a, %range
       : !wave.ptr<i32, #wave.global>, i32 -> !wave.ptr<i32, #waveamd.buffer>
   %lane = wave.lane_id : !wave.simd<i32, 32>
-  %wg = wave.workgroup_id 0
+  %wg_raw = wave.workgroup_id 0
+  %wg = wave.assume_range %wg_raw, [0, 1023] : i32
   %vx = wave.splat %x : i32 -> !wave.simd<i32, 32>
   %off = wave.index_expr <"floor(1/32*lid) + wg"> ["lid", "wg"] (%lane, %wg)
       : (!wave.simd<i32, 32>, i32) -> !wave.index<32>
   %p0 = wave.ptr_add %buf, %off
       : !wave.ptr<i32, #waveamd.buffer>, !wave.index<32>
       -> !wave.simd<!wave.ptr<i32, #waveamd.buffer>, 32>
-  %res = scf.for %i = %c0 to %n step %c1 iter_args(%q = %p0)
+  %res = scf.for %i = %c0 to %n_bounded step %c1 iter_args(%q = %p0)
       -> (!wave.simd<!wave.ptr<i32, #waveamd.buffer>, 32>) : i32 {
     %tok = wave.store %vx -> %q
         : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<i32, #waveamd.buffer>, 32>)

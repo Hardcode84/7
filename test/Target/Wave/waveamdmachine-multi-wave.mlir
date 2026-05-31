@@ -33,7 +33,8 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 func.func @multi_wave_kernel(%out: !wave.ptr<i32, #wave.global>) attributes {wave.kernel} {
   %wg = wave.workgroup_id 0
   %vwg = wave.splat %wg : i32 -> !wave.simd<i32, 32>
-  %wi = wave.workitem_id 0 : !wave.simd<i32, 32>
+  %wi_raw = wave.workitem_id 0 : !wave.simd<i32, 32>
+  %wi = wave.assume_range %wi_raw, [0, 31] : !wave.simd<i32, 32>
   %sum = wave.addi %wi, %vwg : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
   %ptrs = wave.ptr_add %out, %wi : !wave.ptr<i32, #wave.global>, !wave.simd<i32, 32> -> !wave.simd<!wave.ptr<i32, #wave.global>, 32>
   %tok = wave.store %sum -> %ptrs : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<i32, #wave.global>, 32>) -> !wave.mem.token
