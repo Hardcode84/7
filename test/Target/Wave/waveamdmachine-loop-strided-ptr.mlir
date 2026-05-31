@@ -152,6 +152,62 @@ func.func @strided_non_normalized_kloop(%a: !wave.ptr<f16, #wave.global>,
 }
 }
 
+// CHECK-LABEL: func.func @strided_dynamic_uniform_kloop
+// CHECK: %[[STRIDE:.*]], %{{.*}} = waveamdmachine.s_lshl_b32
+// CHECK: %[[LOOP:.*]]:4 = waveamdmachine.uniform_loop
+// CHECK: ^bb0(%{{.*}}: !waveamdmachine.reg<sgpr, 1>, %[[V0:.*]]: !waveamdmachine.reg<vgpr, 1>, %[[V1:.*]]: !waveamdmachine.reg<vgpr, 1>, %[[B:.*]]: !waveamdmachine.reg<sgpr, 2>):
+// CHECK: global_load_tuple_b32 %[[V0]], %[[B]]
+// CHECK: global_load_tuple_b32 %[[V1]], %[[B]]
+// CHECK-NOT: waveamdmachine.v_add_u32
+// CHECK: %[[NB:.*]], %{{.*}} = waveamdmachine.s_add_u64_u32 %[[B]], %[[STRIDE]]
+// CHECK-NEXT: %[[BC:.*]] = waveamdmachine.s_cmp_lt_i32
+// CHECK-NEXT: waveamdmachine.continue_if %[[BC]]
+// CHECK-SAME: %[[NB]]
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
+func.func @strided_dynamic_uniform_kloop(%a: !wave.ptr<f16, #wave.global>,
+                                         %n: i32, %delta_raw: i32)
+    attributes {wave.kernel} {
+  %c0 = arith.constant 0 : i32
+  %c1 = arith.constant 1 : i32
+  %c1024 = arith.constant 1024 : i32
+  %wi = wave.workitem_id 0 : !wave.simd<i32, 32>
+  %off = wave.index_expr <"64*Mod(wi, 16)"> ["wi"](%wi)
+      : (!wave.simd<i32, 32>) -> !wave.index<32>
+  %delta = wave.assume_range %delta_raw, [1, 32] : i32
+  %p0 = wave.ptr_add %a, %off
+      : !wave.ptr<f16, #wave.global>, !wave.index<32>
+      -> !wave.simd<!wave.ptr<f16, #wave.global>, 32>
+  %p1 = wave.ptr_add %p0, %c1024
+      : !wave.simd<!wave.ptr<f16, #wave.global>, 32>, i32
+      -> !wave.simd<!wave.ptr<f16, #wave.global>, 32>
+  scf.for %i = %c0 to %n step %c1 iter_args(%q0 = %p0, %q1 = %p1)
+      -> (!wave.simd<!wave.ptr<f16, #wave.global>, 32>,
+          !wave.simd<!wave.ptr<f16, #wave.global>, 32>) : i32 {
+    %v0, %t0 = wave.load %q0
+        : (!wave.simd<!wave.ptr<f16, #wave.global>, 32>)
+        -> (!wave.simd<vector<8xi32>, 32>, !wave.mem.token)
+    %v1, %t1 = wave.load %q1
+        : (!wave.simd<!wave.ptr<f16, #wave.global>, 32>)
+        -> (!wave.simd<vector<8xi32>, 32>, !wave.mem.token)
+    wave.store %v0 -> %q1
+        : (!wave.simd<vector<8xi32>, 32>,
+           !wave.simd<!wave.ptr<f16, #wave.global>, 32>) -> !wave.mem.token
+    wave.store %v1 -> %q0
+        : (!wave.simd<vector<8xi32>, 32>,
+           !wave.simd<!wave.ptr<f16, #wave.global>, 32>) -> !wave.mem.token
+    %n0 = wave.ptr_add %q0, %delta
+        : !wave.simd<!wave.ptr<f16, #wave.global>, 32>, i32
+        -> !wave.simd<!wave.ptr<f16, #wave.global>, 32>
+    %n1 = wave.ptr_add %q1, %delta
+        : !wave.simd<!wave.ptr<f16, #wave.global>, 32>, i32
+        -> !wave.simd<!wave.ptr<f16, #wave.global>, 32>
+    scf.yield %n0, %n1 : !wave.simd<!wave.ptr<f16, #wave.global>, 32>,
+                         !wave.simd<!wave.ptr<f16, #wave.global>, 32>
+  }
+  return
+}
+}
+
 // CHECK-LABEL: func.func @strided_live_result
 // CHECK: %[[LOOP:.*]]:3 = waveamdmachine.uniform_loop
 // CHECK: ^bb0(%{{.*}}: !waveamdmachine.reg<sgpr, 1>, %[[V:.*]]: !waveamdmachine.reg<vgpr, 1>, %[[B:.*]]: !waveamdmachine.reg<sgpr, 2>):

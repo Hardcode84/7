@@ -38,9 +38,10 @@ static constexpr int64_t u32Max = (int64_t{1} << 32) - 1;
 static constexpr int64_t noStridedBaseGroup = -1;
 
 struct StridedBaseCarry {
+  StrideBytes stride;
   Value base;
   Value bodyBase;
-  int64_t strideBytes = 0;
+  Value byteStride;
 };
 
 static std::optional<int64_t> proveU32Upper(WaveAMDMachineSelector &S,
@@ -66,6 +67,38 @@ static std::optional<int64_t> proveU32Upper(WaveAMDMachineSelector &S,
 static bool offsetFitsU32(WaveAMDMachineSelector &S,
                           const PointerOffset &offset) {
   return !offset.expr || S.slotFitsU32(offset.expr, offset.assumptions);
+}
+
+static bool hasStride(const StrideBytes &stride) {
+  return stride.imm != 0 || !stride.terms.empty();
+}
+
+static bool isImmediateStride(const StrideBytes &stride) {
+  return stride.terms.empty();
+}
+
+static bool sameStride(const StrideBytes &lhs, const StrideBytes &rhs) {
+  if (lhs.imm != rhs.imm || lhs.terms.size() != rhs.terms.size())
+    return false;
+  for (auto [l, r] : llvm::zip(lhs.terms, rhs.terms))
+    if (l.value != r.value || l.scale != r.scale)
+      return false;
+  return true;
+}
+
+static bool isDefinedInside(Operation *scope, Value value) {
+  if (Operation *def = value.getDefiningOp())
+    return scope->isAncestor(def);
+  Region *region = cast<BlockArgument>(value).getOwner()->getParent();
+  while (region) {
+    Operation *parent = region->getParentOp();
+    if (!parent)
+      return false;
+    if (parent == scope)
+      return true;
+    region = parent->getParentRegion();
+  }
+  return false;
 }
 
 static void addRangeAssumption(WaveAMDMachineSelector &S, PointerOffset &offset,
@@ -127,6 +160,42 @@ static bool isLaneVaryingValue(Type type) {
   if (auto idx = dyn_cast<WaveIndexType>(type))
     return idx.getWidth() != 0;
   return false;
+}
+
+static LogicalResult appendStrideImm(StrideBytes &stride, int64_t value) {
+  std::optional<int64_t> sum = llvm::checkedAdd(stride.imm, value);
+  if (!sum)
+    return failure();
+  stride.imm = *sum;
+  return success();
+}
+
+static LogicalResult appendStrideTerm(StrideBytes &stride, Value value,
+                                      int64_t scale) {
+  for (StrideTerm &term : stride.terms) {
+    if (term.value != value)
+      continue;
+    std::optional<int64_t> sum = llvm::checkedAdd(term.scale, scale);
+    if (!sum)
+      return failure();
+    term.scale = *sum;
+    return success();
+  }
+  stride.terms.push_back({value, scale});
+  return success();
+}
+
+static LogicalResult appendPtrStrideOffset(scf::ForOp op, StrideBytes &stride,
+                                           Value source, int64_t scale) {
+  if (std::optional<int64_t> raw = getConstantIntValue(source)) {
+    std::optional<int64_t> bytes = llvm::checkedMul(*raw, scale);
+    if (!bytes)
+      return failure();
+    return appendStrideImm(stride, *bytes);
+  }
+  if (isLaneVaryingValue(source.getType()) || isDefinedInside(op, source))
+    return failure();
+  return appendStrideTerm(stride, source, scale);
 }
 
 static TermKind loopCarryKind(TermKind kind) {
@@ -224,6 +293,68 @@ appendExpr(WaveAMDMachineSelector &S, sym::ExprHandle lhs, sym::ExprHandle rhs,
   return succeeded(simplified) ? *simplified : *expr;
 }
 
+static FailureOr<sym::ExprHandle> scaleStrideTerm(WaveAMDMachineSelector &S,
+                                                  sym::ExprHandle expr,
+                                                  int64_t scale) {
+  if (scale == 1)
+    return expr;
+  FailureOr<sym::ExprHandle> scaleExpr =
+      sym::composeExprInt(S.symbolStore(), scale);
+  if (failed(scaleExpr))
+    return failure();
+  FailureOr<sym::ExprHandle> scaled = sym::composeExprBinary(
+      S.symbolStore(), expr, sym::ExprBinaryOp::Mul, *scaleExpr);
+  if (failed(scaled))
+    return failure();
+  return sym::expandExpr(S.symbolStore(), *scaled);
+}
+
+static FailureOr<PointerOffset> buildStrideOffset(WaveAMDMachineSelector &S,
+                                                  const StrideBytes &stride,
+                                                  StringRef nameStem) {
+  PointerOffset offset;
+  if (stride.imm != 0) {
+    FailureOr<sym::ExprHandle> imm =
+        sym::composeExprInt(S.symbolStore(), stride.imm);
+    if (failed(imm))
+      return failure();
+    offset.expr = *imm;
+  }
+  for (const StrideTerm &term : stride.terms) {
+    std::string name = makeLoopSymbol(S, nameStem);
+    FailureOr<sym::ExprHandle> sym = sym::composeExprSym(S.symbolStore(), name);
+    if (failed(sym))
+      return failure();
+    offset.bindings.push_back({name, term.value, TermKind::Uniform});
+    if (std::optional<sym::PredHandle> a =
+            S.bindingAssumption(term.value, name))
+      offset.assumptions.push_back(*a);
+    FailureOr<sym::ExprHandle> scaled = scaleStrideTerm(S, *sym, term.scale);
+    if (failed(scaled))
+      return failure();
+    FailureOr<sym::ExprHandle> expr =
+        appendExpr(S, offset.expr, *scaled, offset.assumptions);
+    if (failed(expr))
+      return failure();
+    offset.expr = *expr;
+  }
+  if (!offset.expr) {
+    FailureOr<sym::ExprHandle> zero =
+        sym::composeExprInt(S.symbolStore(), int64_t{0});
+    if (failed(zero))
+      return failure();
+    offset.expr = *zero;
+  }
+  return offset;
+}
+
+static bool strideFitsU32(WaveAMDMachineSelector &S,
+                          const StrideBytes &stride) {
+  FailureOr<PointerOffset> offset = buildStrideOffset(S, stride, "ptr_stride");
+  return succeeded(offset) && offset->expr &&
+         S.slotFitsU32(offset->expr, offset->assumptions);
+}
+
 static bool isNormalizedUnitLoop(scf::ForOp op) {
   std::optional<int64_t> lo = getConstantIntValue(op.getLowerBound());
   std::optional<int64_t> step = getConstantIntValue(op.getStep());
@@ -280,7 +411,7 @@ static LogicalResult proveLoopCarryFitsU32(WaveAMDMachineSelector &S,
     return op.emitError(
         "scf.for pointer carry offset must fit proven unsigned 32-bit");
 
-  if (snap.strideBytes != 0) {
+  if (hasStride(snap.stride)) {
     snap.bodyU32Upper = entryUpper;
     snap.resultU32Upper = entryUpper;
     return success();
@@ -297,39 +428,100 @@ static LogicalResult proveLoopCarryFitsU32(WaveAMDMachineSelector &S,
   return success();
 }
 
-// Constant positive per-iter pointer advance in bytes, else 0.
-static int64_t stridedCarryBytes(WaveAMDMachineSelector &S, scf::ForOp op,
-                                 unsigned i) {
+static std::optional<StrideBytes> stridedCarryBytes(WaveAMDMachineSelector &S,
+                                                    scf::ForOp op, unsigned i) {
   Value arg = op.getRegionIterArgs()[i];
   Value y = cast<scf::YieldOp>(op.getBody()->getTerminator()).getOperand(i);
-  std::optional<int64_t> bytes = constantPtrAdvanceBytes(S, y, arg);
-  // s_add_u64_u32 zero-extends the per-iter delta.
-  return bytes && *bytes > 0 && *bytes <= u32Max ? *bytes : 0;
+  if (std::optional<int64_t> bytes = constantPtrAdvanceBytes(S, y, arg))
+    if (*bytes > 0 && *bytes <= u32Max)
+      return StrideBytes{{}, *bytes};
+  int64_t scale = static_cast<int64_t>(S.elementSizeBytes(arg.getType()));
+  StrideBytes stride;
+  while (auto add = y.getDefiningOp<PtrAddOp>()) {
+    if (failed(appendPtrStrideOffset(op, stride, add.getOffset(), scale)))
+      return std::nullopt;
+    y = add.getBase();
+  }
+  if (y != arg || !hasStride(stride) || !strideFitsU32(S, stride))
+    return std::nullopt;
+  return stride;
 }
 
-static bool canUseStridedCarry(scf::ForOp op, unsigned idx, bool isBuffer) {
+static bool canUseStridedCarry(scf::ForOp op, unsigned idx, bool isBuffer,
+                               const StrideBytes &stride) {
   if (!isBuffer)
     return true;
+  if (!isImmediateStride(stride))
+    return false;
   return isNormalizedUnitLoop(op) && op.getResult(idx).use_empty();
 }
 
+static FailureOr<Value> materializeDynamicStride(WaveAMDMachineSelector &S,
+                                                 Operation *user,
+                                                 const StrideBytes &stride) {
+  FailureOr<PointerOffset> offset =
+      buildStrideOffset(S, stride, "ptr_stride_value");
+  if (failed(offset))
+    return failure();
+  FailureOr<Value> value = materializePointerOffsetValue(S, user, *offset);
+  if (failed(value))
+    return failure();
+  return S.ensureSGPR1(user->getLoc(), *value);
+}
+
 static Value advanceStridedBase(WaveAMDMachineSelector &S, Location loc,
-                                Value base, int64_t strideBytes) {
+                                Value base, const StridedBaseCarry &group) {
   Type sgpr2 =
       getRegType(S.builder.getContext(), waveamdmachine::RegClass::SGPR, 2);
+  Value stride = group.byteStride ? group.byteStride
+                                  : createImm(S.builder, loc, group.stride.imm);
   return waveamdmachine::SAddU64U32Op::create(
              S.builder, loc, sgpr2, getSCCType(S.builder.getContext()), base,
-             createImm(S.builder, loc, strideBytes))
+             stride)
       .getResult();
 }
 
-static int64_t getStridedBaseGroup(SmallVectorImpl<StridedBaseCarry> &groups,
-                                   Value base, int64_t strideBytes) {
+static FailureOr<int64_t>
+getStridedBaseGroup(WaveAMDMachineSelector &S, scf::ForOp op,
+                    SmallVectorImpl<StridedBaseCarry> &groups, Value base,
+                    const StrideBytes &stride) {
   for (auto [idx, group] : llvm::enumerate(groups))
-    if (group.base == base && group.strideBytes == strideBytes)
+    if (group.base == base && sameStride(group.stride, stride))
       return static_cast<int64_t>(idx);
-  groups.push_back(StridedBaseCarry{base, {}, strideBytes});
+  Value byteStride;
+  if (!isImmediateStride(stride)) {
+    FailureOr<Value> materialized = materializeDynamicStride(S, op, stride);
+    if (failed(materialized))
+      return failure();
+    byteStride = *materialized;
+  }
+  groups.push_back(StridedBaseCarry{stride, base, {}, byteStride});
   return static_cast<int64_t>(groups.size() - 1);
+}
+
+static StrideBytes selectStridedCarry(WaveAMDMachineSelector &S, scf::ForOp op,
+                                      unsigned idx, Value initArg,
+                                      bool isBuffer) {
+  if (S.isSharedPointer(initArg.getType()))
+    return {};
+  std::optional<StrideBytes> stride = stridedCarryBytes(S, op, idx);
+  if (!stride || !canUseStridedCarry(op, idx, isBuffer, *stride))
+    return {};
+  return std::move(*stride);
+}
+
+static LogicalResult
+attachStridedBaseGroup(WaveAMDMachineSelector &S, scf::ForOp op,
+                       SmallVectorImpl<StridedBaseCarry> &groups,
+                       CarrySnapshot &snap) {
+  if (!hasStride(snap.stride) || snap.isBuffer)
+    return success();
+  FailureOr<int64_t> group =
+      getStridedBaseGroup(S, op, groups, snap.base, snap.stride);
+  if (failed(group))
+    return failure();
+  snap.stridedBaseGroup = *group;
+  return success();
 }
 
 static LogicalResult
@@ -344,13 +536,8 @@ snapshotPointerScfCarry(WaveAMDMachineSelector &S, scf::ForOp op,
         "scf.for pointer iter arg has no WaveAMDMachine sidecar");
   TermKind initKind = classifyPointerOffset(S, offsetIt->second);
   bool isBuffer = S.pointerBuffers.lookup(initArg);
-  int64_t stride = 0;
-  if (!S.isSharedPointer(initArg.getType())) {
-    int64_t bytes = stridedCarryBytes(S, op, idx);
-    if (bytes != 0 && canUseStridedCarry(op, idx, isBuffer))
-      stride = bytes;
-  }
-  TermKind yieldKind = stride != 0
+  StrideBytes stride = selectStridedCarry(S, op, idx, initArg, isBuffer);
+  TermKind yieldKind = hasStride(stride)
                            ? initKind
                            : classifyPointerYield(S, yield.getOperand(idx),
                                                   op.getRegionIterArgs()[idx],
@@ -365,11 +552,11 @@ snapshotPointerScfCarry(WaveAMDMachineSelector &S, scf::ForOp op,
   snap.carry = *carry;
   snap.base = baseIt->second;
   snap.globalBase = S.pointerGlobalBases.lookup(initArg);
-  snap.strideBytes = stride;
+  snap.stride = std::move(stride);
   snap.offsetKind = carryKind;
   snap.isBuffer = isBuffer;
-  if (stride != 0 && !isBuffer)
-    snap.stridedBaseGroup = getStridedBaseGroup(groups, baseIt->second, stride);
+  if (failed(attachStridedBaseGroup(S, op, groups, snap)))
+    return failure();
   snap.bodyOffsetName = makeLoopSymbol(S, "ptr_body");
   snap.resultOffsetName = makeLoopSymbol(S, "ptr_result");
   snap.strideName = makeLoopSymbol(S, "ptr_stride");
@@ -477,7 +664,7 @@ static LogicalResult collectPointerYieldCarry(WaveAMDMachineSelector &S,
                                               scf::YieldOp yield, Value y,
                                               const CarrySnapshot &snap,
                                               SmallVectorImpl<Value> &out) {
-  if (snap.strideBytes != 0) {
+  if (hasStride(snap.stride)) {
     out.push_back(snap.carry);
     return success();
   }
@@ -518,7 +705,7 @@ static Value resultPointerBase(Operation *loop,
                                ArrayRef<CarrySnapshot> snapshots,
                                ArrayRef<StridedBaseCarry> groups,
                                const CarrySnapshot &snap) {
-  if (snap.strideBytes == 0 || snap.isBuffer)
+  if (!hasStride(snap.stride) || snap.isBuffer)
     return snap.base;
   assert(snap.stridedBaseGroup != noStridedBaseGroup &&
          "global strided carry must have base group");
@@ -536,7 +723,7 @@ static void bindPointerLoopResult(WaveAMDMachineSelector &S, Value scfResult,
                                   const CarrySnapshot &snap) {
   Value base = resultPointerBase(loop, snapshots, groups, snap);
   S.pointerBases[scfResult] = base;
-  if (snap.strideBytes != 0 && !snap.isBuffer)
+  if (hasStride(snap.stride) && !snap.isBuffer)
     S.pointerGlobalBases[scfResult] = base;
   else if (snap.globalBase)
     S.pointerGlobalBases[scfResult] = snap.globalBase;
@@ -574,18 +761,20 @@ static void rebindStridedPointerCarries(WaveAMDMachineSelector &S,
                                         ArrayRef<StridedBaseCarry> groups) {
   Location loc = op.getLoc();
   for (auto [idx, snap] : llvm::enumerate(snapshots)) {
-    if (snap.kind != CarrySnapshot::Kind::Pointer || snap.strideBytes == 0)
+    if (snap.kind != CarrySnapshot::Kind::Pointer || !hasStride(snap.stride))
       continue;
     Value scfArg = op.getRegionIterArgs()[idx];
     Value iv = loopBody.getArgument(0);
     if (snap.isBuffer) {
+      assert(isImmediateStride(snap.stride) &&
+             "buffer strided carry must use immediate stride");
       Value strideValue = S.mulUniformValues(
-          loc, iv, createImm(S.builder, loc, snap.strideBytes));
+          loc, iv, createImm(S.builder, loc, snap.stride.imm));
       if (auto symIt = S.pointerIndexOffsets.find(scfArg);
           symIt != S.pointerIndexOffsets.end())
         if (failed(addSymbolicStride(S, symIt->second, strideValue,
                                      snap.strideName, op.getInductionVar(),
-                                     snap.strideBytes)))
+                                     snap.stride.imm)))
           S.pointerIndexOffsets.erase(scfArg);
       continue;
     }
@@ -602,8 +791,7 @@ static void collectStridedBaseCarries(WaveAMDMachineSelector &S, Location loc,
                                       ArrayRef<StridedBaseCarry> groups,
                                       SmallVectorImpl<Value> &out) {
   for (const StridedBaseCarry &group : groups)
-    out.push_back(
-        advanceStridedBase(S, loc, group.bodyBase, group.strideBytes));
+    out.push_back(advanceStridedBase(S, loc, group.bodyBase, group));
 }
 
 } // namespace

@@ -323,3 +323,53 @@ func.func @buffer_loop_dynamic_carry_needs_bound(%out: !wave.ptr<i32, #wave.glob
   return
 }
 }
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
+func.func @global_loop_dynamic_carry_unbounded_rejected(%out: !wave.ptr<f16, #wave.global>,
+                                                        %n: i32, %delta: i32)
+    attributes {wave.kernel} {
+  %c0 = arith.constant 0 : i32
+  %c1 = arith.constant 1 : i32
+  %lane = wave.lane_id : !wave.simd<i32, 32>
+  %ptr = wave.ptr_add %out, %lane
+      : !wave.ptr<f16, #wave.global>, !wave.simd<i32, 32>
+      -> !wave.simd<!wave.ptr<f16, #wave.global>, 32>
+  // expected-error @below {{scf.for pointer carry offset must fit proven unsigned 32-bit for every iteration}}
+  scf.for %i = %c0 to %n step %c1 iter_args(%q = %ptr)
+      -> (!wave.simd<!wave.ptr<f16, #wave.global>, 32>) : i32 {
+    %next = wave.ptr_add %q, %delta
+        : !wave.simd<!wave.ptr<f16, #wave.global>, 32>, i32
+        -> !wave.simd<!wave.ptr<f16, #wave.global>, 32>
+    scf.yield %next : !wave.simd<!wave.ptr<f16, #wave.global>, 32>
+  }
+  return
+}
+}
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
+func.func @global_loop_dynamic_carry_negative_rejected(%out: !wave.ptr<f16, #wave.global>,
+                                                       %n: i32,
+                                                       %delta_raw: i32)
+    attributes {wave.kernel} {
+  %c0 = arith.constant 0 : i32
+  %c1 = arith.constant 1 : i32
+  %delta = wave.assume_range %delta_raw, [-4, 32] : i32
+  %lane = wave.lane_id : !wave.simd<i32, 32>
+  %ptr = wave.ptr_add %out, %lane
+      : !wave.ptr<f16, #wave.global>, !wave.simd<i32, 32>
+      -> !wave.simd<!wave.ptr<f16, #wave.global>, 32>
+  // expected-error @below {{scf.for pointer carry offset must fit proven unsigned 32-bit for every iteration}}
+  scf.for %i = %c0 to %n step %c1 iter_args(%q = %ptr)
+      -> (!wave.simd<!wave.ptr<f16, #wave.global>, 32>) : i32 {
+    %next = wave.ptr_add %q, %delta
+        : !wave.simd<!wave.ptr<f16, #wave.global>, 32>, i32
+        -> !wave.simd<!wave.ptr<f16, #wave.global>, 32>
+    scf.yield %next : !wave.simd<!wave.ptr<f16, #wave.global>, 32>
+  }
+  return
+}
+}
