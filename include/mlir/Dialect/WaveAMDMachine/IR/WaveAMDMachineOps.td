@@ -23,6 +23,8 @@ defvar WaveAMDMachine_Gfx90APlus =
     "(isa.Minor == 5 && isa.Stepping == 0))";
 defvar WaveAMDMachine_Gfx950 =
     "isa.Major == 9 && isa.Minor == 5 && isa.Stepping == 0";
+defvar WaveAMDMachine_Gfx8To13 =
+    "isa.Major >= 8 && isa.Major <= 13";
 
 // Every WaveAMDMachine op gets a static `isSupportedOnIsa(IsaVersion)`
 // classifier. The default is "supported everywhere"; gated ops
@@ -231,6 +233,16 @@ class WaveAMDMachine_TernaryResult<string mnemonic, Type operandType, Type resul
   let assemblyFormat = "$a `,` $b `,` $c attr-dict `:` functional-type(operands, results)";
 }
 
+class WaveAMDMachine_TernaryIntResult<string mnemonic>
+    : WaveAMDMachine_Op<mnemonic, [WaveAMDMachine_VALU, Pure]> {
+  let archPredicate = WaveAMDMachine_Gfx8To13;
+  let arguments = (ins WaveAMDMachine_RegOrImm:$a,
+                       WaveAMDMachine_RegOrImm:$b,
+                       WaveAMDMachine_RegOrImm:$c);
+  let results = (outs WaveAMDMachine_VGPR1:$result);
+  let assemblyFormat = "$a `,` $b `,` $c attr-dict `:` functional-type(operands, results)";
+}
+
 class WaveAMDMachine_PackedBinaryResult<string mnemonic>
     : WaveAMDMachine_Op<mnemonic, [WaveAMDMachine_VALU, Pure]> {
   let archPredicate = "isa.Major == 9 || isa.Major == 11";
@@ -426,6 +438,18 @@ def WaveAMDMachine_VLshrrevB32Op
 def WaveAMDMachine_VMulLoU32Op
     : WaveAMDMachine_BinaryResult<"v_mul_lo_u32", WaveAMDMachine_RegOrImm,
                                WaveAMDMachine_VGPR1, [WaveAMDMachine_VALU]>;
+def WaveAMDMachine_VAdd3U32Op
+    : WaveAMDMachine_TernaryIntResult<"v_add3_u32">;
+def WaveAMDMachine_VLshlAddU32Op
+    : WaveAMDMachine_TernaryIntResult<"v_lshl_add_u32">;
+def WaveAMDMachine_VAddLshlU32Op
+    : WaveAMDMachine_TernaryIntResult<"v_add_lshl_u32">;
+def WaveAMDMachine_VAndOrB32Op
+    : WaveAMDMachine_TernaryIntResult<"v_and_or_b32">;
+def WaveAMDMachine_VOr3B32Op
+    : WaveAMDMachine_TernaryIntResult<"v_or3_b32">;
+def WaveAMDMachine_VXadU32Op
+    : WaveAMDMachine_TernaryIntResult<"v_xad_u32">;
 def WaveAMDMachine_VAddF32Op
     : WaveAMDMachine_BinaryResult<"v_add_f32", WaveAMDMachine_VGPR1,
                                WaveAMDMachine_VGPR1, [WaveAMDMachine_VALU]>;

@@ -144,6 +144,12 @@ struct KernelInfo {
   X(vLshrrevB32, V_LSHRREV_B32_e32_vi, V_LSHRREV_B32_e32_gfx11)                \
   X(vReadfirstlaneB32, V_READFIRSTLANE_B32_vi, V_READFIRSTLANE_B32_gfx11)      \
   X(vMulLoU32, V_MUL_LO_U32_vi, V_MUL_LO_U32_e64_gfx11)                        \
+  X(vAdd3U32, V_ADD3_U32_vi, V_ADD3_U32_e64_gfx11)                             \
+  X(vLshlAddU32, V_LSHL_ADD_U32_vi, V_LSHL_ADD_U32_e64_gfx11)                  \
+  X(vAddLshlU32, V_ADD_LSHL_U32_vi, V_ADD_LSHL_U32_e64_gfx11)                  \
+  X(vAndOrB32, V_AND_OR_B32_vi, V_AND_OR_B32_e64_gfx11)                        \
+  X(vOr3B32, V_OR3_B32_vi, V_OR3_B32_e64_gfx11)                                \
+  X(vXadU32, V_XAD_U32_vi, V_XAD_U32_e64_gfx11)                                \
   X(vAddF32, V_ADD_F32_e32_vi, V_ADD_F32_e32_gfx11)                            \
   X(vSubF32, V_SUB_F32_e32_vi, V_SUB_F32_e32_gfx11)                            \
   X(vMulF32, V_MUL_F32_e32_vi, V_MUL_F32_e32_gfx11)                            \
@@ -395,6 +401,12 @@ private:
   unsigned vLshrrevB32() const { return opcodes.vLshrrevB32; }
   unsigned vReadfirstlaneB32() const { return opcodes.vReadfirstlaneB32; }
   unsigned vMulLoU32() const { return opcodes.vMulLoU32; }
+  unsigned vAdd3U32() const { return opcodes.vAdd3U32; }
+  unsigned vLshlAddU32() const { return opcodes.vLshlAddU32; }
+  unsigned vAddLshlU32() const { return opcodes.vAddLshlU32; }
+  unsigned vAndOrB32() const { return opcodes.vAndOrB32; }
+  unsigned vOr3B32() const { return opcodes.vOr3B32; }
+  unsigned vXadU32() const { return opcodes.vXadU32; }
   unsigned vAddF32() const { return opcodes.vAddF32; }
   unsigned vSubF32() const { return opcodes.vSubF32; }
   unsigned vMulF32() const { return opcodes.vMulF32; }
@@ -977,6 +989,12 @@ private:
          llvm::MCOperand::createImm(0), llvm::MCOperand::createImm(0)});
   }
 
+  LogicalResult emitTernaryInt(unsigned opcode, Operation &op) {
+    return emitMC(
+        opcode, {toMCOperand(op.getResult(0)), toMCOperand(op.getOperand(0)),
+                 toMCOperand(op.getOperand(1)), toMCOperand(op.getOperand(2))});
+  }
+
   // Shared emit shapes for the width-parameterised mem ops. The MC
   // operand order is what the LLVM AMDGPU printer expects per family:
   //   GLOBAL_*_SADDR: vdst/vdata, saddr, vaddr, offset, cpol
@@ -1280,6 +1298,17 @@ private:
       // unconstrained so we emit (vdst, src0, src1) as-is without the
       // VOP2 swap dance.
       return emitVMulLoU32(op, result(), op.getOperand(0), op.getOperand(1));
+    if (isa<waveamdmachine::VAdd3U32Op, waveamdmachine::VLshlAddU32Op,
+            waveamdmachine::VAddLshlU32Op, waveamdmachine::VAndOrB32Op,
+            waveamdmachine::VOr3B32Op, waveamdmachine::VXadU32Op>(op)) {
+      unsigned opcode = isa<waveamdmachine::VAdd3U32Op>(op)      ? vAdd3U32()
+                        : isa<waveamdmachine::VLshlAddU32Op>(op) ? vLshlAddU32()
+                        : isa<waveamdmachine::VAddLshlU32Op>(op) ? vAddLshlU32()
+                        : isa<waveamdmachine::VAndOrB32Op>(op)   ? vAndOrB32()
+                        : isa<waveamdmachine::VOr3B32Op>(op)     ? vOr3B32()
+                                                                 : vXadU32();
+      return emitTernaryInt(opcode, op);
+    }
     if (isa<waveamdmachine::VAddF32Op, waveamdmachine::VSubF32Op,
             waveamdmachine::VMulF32Op, waveamdmachine::VMaxF32Op>(op)) {
       unsigned opcode = isa<waveamdmachine::VAddF32Op>(op)   ? vAddF32()
