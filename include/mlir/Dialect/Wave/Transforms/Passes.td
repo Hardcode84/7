@@ -43,6 +43,20 @@ def WaveFormPackedMath : Pass<"wave-form-packed-math"> {
   ];
 }
 
+def WaveCoalesceMemory : Pass<"wave-coalesce-memory"> {
+  let summary = "Coalesce adjacent Wave memory ops into vector payloads";
+  let description = [{
+    Coalesces same-block Wave memory operations with compatible token chains
+    and constant symbolic address deltas. Store coalescing starts from scalar
+    lane-varying stores and recursively merges equal-width adjacent groups into
+    vector payload stores.
+  }];
+  let dependentDialects = [
+    "func::FuncDialect",
+    "wave::WaveDialect"
+  ];
+}
+
 def WaveCombinePointerOffsets : Pass<"wave-combine-pointer-offsets"> {
   let summary = "Combine chained Wave pointer offsets into one symbolic offset";
   let description = [{
