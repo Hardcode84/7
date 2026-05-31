@@ -175,6 +175,22 @@ static bool emitsNoMachineInst(Operation &op) {
   return op.hasTrait<OpTrait::waveamdmachine::NoMachineInst>();
 }
 
+static bool isCDNA3Family(const llvm::AMDGPU::IsaVersion &isa) {
+  return isa.Major == 9 && isa.Minor == 4;
+}
+
+static bool isCDNA4Family(const llvm::AMDGPU::IsaVersion &isa) {
+  return isa.Major == 9 && isa.Minor == 5;
+}
+
+static unsigned getMfmaStoreLatency(const llvm::AMDGPU::IsaVersion &isa) {
+  if (isCDNA3Family(isa))
+    return 7;
+  if (isCDNA4Family(isa))
+    return 8;
+  return 8;
+}
+
 struct HazardConfig {
   bool hasDelayAlu;
   llvm::AMDGPU::IsaVersion isaVersion;
@@ -186,11 +202,7 @@ struct HazardConfig {
   // GCNHazardRecognizer.cpp's setreg / m0-write hazard checks.
   unsigned m0PipelineDelay;
 
-  // Wait states between an MFMA result becoming readable and a
-  // VMEM store consuming it. Conservative worst-case from
-  // GCNHazardRecognizer.cpp's MFMA latency tables; per-variant
-  // tightening (gfx950 has more granular cases) is left to a
-  // future pass that knows the MFMA shape.
+  // 4-pass XDL write -> VMEM/VALU: CDNA3 Table 37 = 7, CDNA4 Table 38 = 8.
   unsigned mfmaResultLatency;
 };
 
@@ -518,14 +530,16 @@ struct WaveAMDHazardWaitsPass
         createSubtargetInfo(root);
     if (failed(sti))
       return signalPassFailure();
+    llvm::AMDGPU::IsaVersion isaVersion =
+        llvm::AMDGPU::getIsaVersion((*sti)->getCPU());
     HazardConfig cfg{
         llvm::AMDGPU::isGFX11Plus(**sti),
-        llvm::AMDGPU::getIsaVersion((*sti)->getCPU()),
+        isaVersion,
         /*defaultLgkmcnt=*/0,
         amdgpu_compat::SDelayAlu::encode(
             amdgpu_compat::SDelayAlu::DelayType::VALU, 1),
         /*m0PipelineDelay=*/1,
-        /*mfmaResultLatency=*/8,
+        /*mfmaResultLatency=*/getMfmaStoreLatency(isaVersion),
     };
     cfg.defaultLgkmcnt = llvm::AMDGPU::decodeLgkmcnt(
         cfg.isaVersion, llvm::AMDGPU::getWaitcntBitMask(cfg.isaVersion));

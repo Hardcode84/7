@@ -178,6 +178,26 @@ func.func @nop_delay_on_gfx10(%x: !waveamdmachine.reg<vgpr, 1>, %y: !waveamdmach
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 
+// CHECK-LABEL: func.func @cdna4_mfma_result_store_delay
+// CHECK: waveamdmachine.mfma_f32_16x16x32_f16
+// CHECK-NEXT: waveamdmachine.imm 7
+// CHECK-NEXT: waveamdmachine.s_nop
+// CHECK-NEXT: waveamdmachine.global_store_b128
+func.func @cdna4_mfma_result_store_delay(
+    %a: !waveamdmachine.reg<vgpr, 4>,
+    %b: !waveamdmachine.reg<vgpr, 4>,
+    %acc: !waveamdmachine.reg<vgpr, 4>,
+    %off: !waveamdmachine.reg<vgpr, 1>,
+    %base: !waveamdmachine.reg<sgpr, 2>) {
+  %r = waveamdmachine.mfma_f32_16x16x32_f16 %a, %b, %acc
+      : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
+         !waveamdmachine.reg<vgpr, 4>) -> !waveamdmachine.reg<vgpr, 4>
+  %tok = waveamdmachine.global_store_b128 %off, %r, %base
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 4>,
+         !waveamdmachine.reg<sgpr, 2>) -> !waveamdmachine.mem.token
+  return
+}
+
 // CHECK-LABEL: func.func @m0_delay_before_lds_dma
 // CHECK: waveamdmachine.s_mov_m0
 // CHECK-NEXT: waveamdmachine.imm 0
@@ -220,25 +240,37 @@ func.func @m0_delay_after_waitcnt(
   return
 }
 
-// CHECK-LABEL: func.func @mfma_result_store_delay
-// CHECK: waveamdmachine.mfma_f32_16x16x32_f16
-// CHECK-NEXT: waveamdmachine.imm 7
+}
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx942"} {
+
+// CHECK-LABEL: func.func @cdna3_mfma_result_store_delay
+// CHECK: waveamdmachine.mfma_f32_16x16x16_f16
+// CHECK-NEXT: waveamdmachine.imm 6
 // CHECK-NEXT: waveamdmachine.s_nop
 // CHECK-NEXT: waveamdmachine.global_store_b128
-func.func @mfma_result_store_delay(
-    %a: !waveamdmachine.reg<vgpr, 4>,
-    %b: !waveamdmachine.reg<vgpr, 4>,
+func.func @cdna3_mfma_result_store_delay(
+    %a: !waveamdmachine.reg<vgpr, 2>,
+    %b: !waveamdmachine.reg<vgpr, 2>,
     %acc: !waveamdmachine.reg<vgpr, 4>,
     %off: !waveamdmachine.reg<vgpr, 1>,
     %base: !waveamdmachine.reg<sgpr, 2>) {
-  %r = waveamdmachine.mfma_f32_16x16x32_f16 %a, %b, %acc
-      : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
+  %r = waveamdmachine.mfma_f32_16x16x16_f16 %a, %b, %acc
+      : (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vgpr, 2>,
          !waveamdmachine.reg<vgpr, 4>) -> !waveamdmachine.reg<vgpr, 4>
   %tok = waveamdmachine.global_store_b128 %off, %r, %base
       : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 4>,
          !waveamdmachine.reg<sgpr, 2>) -> !waveamdmachine.mem.token
   return
 }
+
+}
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 
 // CHECK-LABEL: func.func @mfma_result_store_delay_ignores_preloaded
 // CHECK: waveamdmachine.mfma_f32_16x16x32_f16

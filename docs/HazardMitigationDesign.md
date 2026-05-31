@@ -1,8 +1,7 @@
 # Hazard mitigation: architecture
 
 How `lib/Dialect/Wave/Transforms/WaveAMDHazardWaits.cpp` models and
-inserts AMDGPU hazard-mitigation NOPs, why it's shaped the way it is,
-and what the comparable upstream and aster designs look like.
+inserts AMDGPU hazard-mitigation NOPs, and why it's shaped the way it is.
 
 ## Where the pass sits
 
@@ -25,7 +24,7 @@ Three hazards are modeled today:
 |---|---|---|---|
 | VALU after LGKM-clearing wait | `s_waitcnt` with non-default lgkm | any `VALUOp`-trait op | 1 cycle (`s_delay_alu` on gfx11+, `s_nop 0` elsewhere) |
 | M0 read after `s_mov_m0` | `s_mov_m0` | any op with a `!m0`-typed operand | 1 instruction |
-| VMEM store after MFMA | any `MFMAOp`-trait op | any `VMEMStoreOp`-trait op consuming the MFMA result | 8 instructions |
+| VMEM store after 4-pass MFMA | any `MFMAOp`-trait op | any `VMEMStoreOp`-trait op consuming the MFMA result | 7 instructions on CDNA3, 8 on CDNA4 and other targets |
 
 ## Lattice Shape
 
@@ -39,13 +38,13 @@ Three hazards are modeled today:
 Joins OR the LGKM bit and take max countdown per `(Value, hazard)`.
 Each counted instruction decrements all active SSA countdowns. Producer
 ops seed result hazards: `s_mov_m0` seeds `m0 = 1`, and MFMA ops seed
-`mfmaStore = 8`. No-machine-inst forwarding ops conservatively copy
+`mfmaStore = 7/8`. No-machine-inst forwarding ops conservatively copy
 operand hazards to results.
 
 Constants for the gaps live in `HazardConfig` (`m0PipelineDelay = 1`,
-`mfmaResultLatency = 8`) with comments citing upstream
-`GCNHazardRecognizer.cpp`. `valuDep1` is the `s_delay_alu` encoding
-for "wait one VALU cycle", computed once at pass start.
+`mfmaResultLatency = 7/8` for CDNA3/CDNA4 4-pass MFMA store use).
+`valuDep1` is the `s_delay_alu` encoding for "wait one VALU cycle",
+computed once at pass start.
 
 ## Trait-based classification
 
@@ -97,14 +96,9 @@ that count, then applies the VALU-after-LGKM mitigation if needed.
   walks with state memoization. No central catalog.
   `AMDGPUWaitSGPRHazards.{h,cpp}` is a separate post-schedule pass
   for gfx12 SGPR RAW hazards using per-block dataflow.
-- Aster: `aster/lib/Dialect/AMDGCN/...` declares ~30 hazard kinds as
-  tablegen attributes, builds an opcode-indexed dense map at pass
-  start, and runs a forward dataflow over the lattice of active
-  hazards.
 
-Wave uses the same broad shape: dense forward dataflow for active
-hazards, with trait-based op classification from the local
-WaveAMDMachine dialect.
+Wave uses dense forward dataflow for active hazards, with trait-based
+op classification from the local WaveAMDMachine dialect.
 
 ## Deferred work
 
@@ -113,10 +107,9 @@ still needs waits, but not which movable instructions should fill the
 gap. A later pass can use the same state to try local code motion
 before falling back to `s_nop`.
 
-**Tablegen-described catalog.** Aster's full formalism (hazards as
-parameterized attributes with subcase tables) only pays off once we
-ship ~10+ hazard kinds with multiple subcases each. Three direct C++
-hazards are fine for now.
+**Tablegen-described catalog.** A generated hazard catalog only pays
+off once we ship 10+ hazard kinds with multiple subcases each. Three
+direct C++ hazards are fine for now.
 
 **Forwarding precision.** No-machine-inst ops conservatively copy the
 union of operand hazards to all results. That is safe for current
