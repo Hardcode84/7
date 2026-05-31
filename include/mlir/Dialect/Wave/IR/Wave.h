@@ -18,8 +18,11 @@
 #include "mlir/Interfaces/ControlFlowInterfaces.h"
 #include "mlir/Interfaces/InferIntRangeInterface.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
+#include "llvm/ADT/SmallVector.h"
 
 #include <memory>
+#include <optional>
+#include <string>
 
 #include "mlir/Dialect/Wave/IR/WaveOpsDialect.h.inc"
 #include "mlir/Dialect/Wave/IR/WaveOpsEnums.h.inc"
@@ -38,10 +41,28 @@ struct MemoryPayloadShape {
   bool useB16Op;
 };
 
+struct MemoryAddressBinding {
+  std::string name;
+  Value value;
+};
+
+struct MemoryAddress {
+  SmallVector<MemoryAddressBinding> bindings;
+  Value base;
+  sym::ExprHandle elementOffset;
+};
+
 Type getIndexExprResultType(MLIRContext *ctx, ValueRange bindings);
 FailureOr<MemoryPayloadShape> getMemoryPayloadShape(
     Type elementType,
     function_ref<InFlightDiagnostic(const Twine &)> emitError);
+FailureOr<std::optional<MemoryAddress>>
+normalizeMemoryAddress(Value ptr, WaveDialect &dialect);
+FailureOr<std::optional<sym::ExprHandle>>
+computeMemoryAddressDelta(WaveDialect &dialect, const MemoryAddress &lhs,
+                          const MemoryAddress &rhs);
+FailureOr<std::optional<int64_t>> computeConstantMemoryAddressDelta(
+    WaveDialect &dialect, const MemoryAddress &lhs, const MemoryAddress &rhs);
 } // namespace mlir::wave
 
 #define GET_OP_CLASSES

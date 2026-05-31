@@ -1,6 +1,7 @@
 add_mlir_dialect_library(MLIRWaveDialect
   PARTIAL_SOURCES_INTENDED
   Wave.cpp
+  WaveMemoryAddress.cpp
   WaveSymbols.cpp
   WaveTransformOps.cpp
 
