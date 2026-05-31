@@ -86,6 +86,14 @@ func.func @fragment_unpack_not_vector(%f: !waveamd.fragment<2, f32, 16, 16, 32, 
 
 // -----
 
+func.func @fragment_unpack_bad_vector_element(%f: !waveamd.fragment<2, f32, 16, 16, 32, 8>) {
+  // expected-error @below {{result vector element type must be 32 bits wide}}
+  %v = waveamd.fragment_unpack %f : !waveamd.fragment<2, f32, 16, 16, 32, 8> -> !wave.simd<vector<8xi16>, 32>
+  return
+}
+
+// -----
+
 func.func @fragment_unpack_register_mismatch(%f: !waveamd.fragment<2, f32, 16, 16, 32, 8>) {
   // expected-error @below {{result vector element count (4) must match fragment register count (8)}}
   %v = waveamd.fragment_unpack %f : !waveamd.fragment<2, f32, 16, 16, 32, 8> -> !wave.simd<vector<4xi32>, 32>

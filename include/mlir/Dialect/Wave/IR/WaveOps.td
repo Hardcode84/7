@@ -505,14 +505,10 @@ def Wave_LoadOp : Wave_Op<"load", [MemoryEffects<[MemRead]>]> {
 
     The result shape is driven entirely by the result SIMD type:
 
-    * `!wave.simd<T, W>` -- each lane loads exactly one 16- or 32-bit
-      `T` element.
+    * `!wave.simd<T, W>` -- each lane loads one 16- or 32-bit `T` element.
     * `!wave.simd<vector<N x T'>, W>` -- each lane loads `N` consecutive
-      32-bit transport elements `T'` starting at its pointer. The total
-      per-lane payload is `N * 32` bits; the pointer element type may be
-      any 16- or 32-bit type as long as `N * 32 % bitwidth(T_ptr) == 0`,
-      i.e. the destination tuple covers an integer number of pointer
-      elements.
+      byte-sized elements. The payload must fit a 16-bit memory op or whole
+      32-bit dword ops, and must cover an integer number of pointer elements.
 
     Memory ordering follows the usual Wave token discipline: the optional
     `dependency` token sequences this load after a prior memory op, and

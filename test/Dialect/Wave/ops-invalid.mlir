@@ -41,8 +41,32 @@ func.func @load_bad_scalar_width(%p: !wave.ptr<i32, #wave.global>) {
 // -----
 
 func.func @load_bad_vector_element(%p: !wave.ptr<i32, #wave.global>) {
-  // expected-error @+1 {{vector element type must be 32 bits wide}}
-  %v, %t = wave.load %p : (!wave.ptr<i32, #wave.global>) -> (!wave.simd<vector<4xi16>, 32>, !wave.mem.token)
+  // expected-error @+1 {{vector payload must be 16 bits or a multiple of 32 bits}}
+  %v, %t = wave.load %p : (!wave.ptr<i32, #wave.global>) -> (!wave.simd<vector<3xi16>, 32>, !wave.mem.token)
+  return
+}
+
+// -----
+
+func.func @load_bad_vector_i24_element(%p: !wave.ptr<i32, #wave.global>) {
+  // expected-error @+1 {{vector element type must be 8, 16, or 32 bits wide}}
+  %v, %t = wave.load %p : (!wave.ptr<i32, #wave.global>) -> (!wave.simd<vector<4xi24>, 32>, !wave.mem.token)
+  return
+}
+
+// -----
+
+func.func @load_bad_scalar_i8(%p: !wave.ptr<i8, #wave.global>) {
+  // expected-error @+1 {{scalar payload element type must be 16 or 32 bits wide}}
+  %v, %t = wave.load %p : (!wave.ptr<i8, #wave.global>) -> (!wave.simd<i8, 32>, !wave.mem.token)
+  return
+}
+
+// -----
+
+func.func @load_bad_vector_i8_width(%p: !wave.ptr<i8, #wave.global>) {
+  // expected-error @+1 {{vector payload must be 16 bits or a multiple of 32 bits}}
+  %v, %t = wave.load %p : (!wave.ptr<i8, #wave.global>) -> (!wave.simd<vector<1xi8>, 32>, !wave.mem.token)
   return
 }
 

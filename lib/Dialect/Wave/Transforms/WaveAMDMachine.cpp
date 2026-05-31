@@ -1621,66 +1621,90 @@ LogicalResult WaveAMDMachineSelector::selectFRcp(FRcpOp op) {
   return selectF32<waveamdmachine::VRcpF32Op>(*this, op, op.getSource());
 }
 
+static FailureOr<MemoryPayloadShape>
+getSimdVectorPayloadShape(Operation *op, Type type, StringRef kind) {
+  auto simdType = dyn_cast<SimdType>(type);
+  if (!simdType || !isa<VectorType>(simdType.getElementType()))
+    return op->emitError("WaveAMDMachine ")
+           << kind << " lowering supports only SIMD vector memory payloads";
+  return getMemoryPayloadShape(
+      simdType.getElementType(),
+      [&](const Twine &msg) { return op->emitError(msg); });
+}
+
+static Value maskLowBits(WaveAMDMachineSelector &S, Location loc, Value value,
+                         unsigned bits) {
+  if (bits == 32)
+    return value;
+  Type vgprType =
+      getRegType(S.builder.getContext(), waveamdmachine::RegClass::VGPR);
+  Value mask = createImm(S.builder, loc, (int64_t{1} << bits) - 1);
+  return waveamdmachine::VAndB32Op::create(S.builder, loc, vgprType, value,
+                                           mask);
+}
+
 LogicalResult WaveAMDMachineSelector::selectPack(PackOp op) {
-  Type resultType = op.getResult().getType();
+  FailureOr<MemoryPayloadShape> shape =
+      getSimdVectorPayloadShape(op, op.getResult().getType(), "pack");
+  if (failed(shape))
+    return failure();
+
+  Location loc = op.getLoc();
   Type vgprType = getRegType(op.getContext(), waveamdmachine::RegClass::VGPR);
-  if (isSimdPackedF32(resultType)) {
-    SmallVector<Value, 2> elements;
-    for (Value input : op.getInputs())
-      elements.push_back(ensureVGPRForVSrc1(op.getLoc(), expect(input, op)));
+  SmallVector<Value> words(shape->registers);
+  for (auto [index, input] : llvm::enumerate(op.getInputs())) {
+    unsigned bitOffset = index * shape->elementBits;
+    unsigned wordIndex = bitOffset / 32;
+    unsigned wordShift = bitOffset % 32;
+    Value value = ensureVGPRForVSrc1(loc, expect(input, op));
+    value = maskLowBits(*this, loc, value, shape->elementBits);
+    if (wordShift)
+      value = waveamdmachine::VLshlrevB32Op::create(
+          builder, loc, vgprType, value, createImm(builder, loc, wordShift));
+    if (!words[wordIndex]) {
+      words[wordIndex] = value;
+      continue;
+    }
+    words[wordIndex] = waveamdmachine::VOrB32Op::create(
+        builder, loc, vgprType, words[wordIndex], value);
+  }
+
+  if (words.size() == 1) {
+    values[op.getResult()] = words.front();
+  } else {
+    Type tupleType = getRegType(op.getContext(), waveamdmachine::RegClass::VGPR,
+                                shape->registers);
     values[op.getResult()] = waveamdmachine::TupleFromElementsOp::create(
-        builder, op.getLoc(),
-        getRegType(op.getContext(), waveamdmachine::RegClass::VGPR,
-                   /*width=*/2),
-        elements);
-    eraseIfTopLevel(op);
-    return success();
+        builder, loc, tupleType, words);
   }
-  if (isSimdPackedF16(resultType)) {
-    Value lo = ensureVGPRForVSrc1(op.getLoc(), expect(op.getInputs()[0], op));
-    Value hi = ensureVGPRForVSrc1(op.getLoc(), expect(op.getInputs()[1], op));
-    Value mask = createImm(builder, op.getLoc(), 0xffff);
-    Value shift = createImm(builder, op.getLoc(), 16);
-    Value loMasked = waveamdmachine::VAndB32Op::create(builder, op.getLoc(),
-                                                       vgprType, lo, mask);
-    Value hiShifted = waveamdmachine::VLshlrevB32Op::create(
-        builder, op.getLoc(), vgprType, hi, shift);
-    values[op.getResult()] = waveamdmachine::VOrB32Op::create(
-        builder, op.getLoc(), vgprType, loMasked, hiShifted);
-    eraseIfTopLevel(op);
-    return success();
-  }
-  return op.emitError(
-      "WaveAMDMachine pack lowering supports only SIMD vector<2xf32/f16>");
+  eraseIfTopLevel(op);
+  return success();
 }
 
 LogicalResult WaveAMDMachineSelector::selectExtract(ExtractOp op) {
-  Type sourceType = op.getSource().getType();
-  Value source = expect(op.getSource(), op);
+  FailureOr<MemoryPayloadShape> shape =
+      getSimdVectorPayloadShape(op, op.getSource().getType(), "extract");
+  if (failed(shape))
+    return failure();
+
+  Location loc = op.getLoc();
   Type vgprType = getRegType(op.getContext(), waveamdmachine::RegClass::VGPR);
-  if (isSimdPackedF32(sourceType)) {
-    SmallVector<Type, 2> elementTypes = {vgprType, vgprType};
-    auto split = waveamdmachine::TupleToElementsOp::create(
-        builder, op.getLoc(), elementTypes, source);
-    values[op.getResult()] = split.getElements()[op.getIndex()];
-    eraseIfTopLevel(op);
-    return success();
+  Value word = expect(op.getSource(), op);
+  unsigned bitOffset = op.getIndex() * shape->elementBits;
+  unsigned wordIndex = bitOffset / 32;
+  unsigned wordShift = bitOffset % 32;
+  if (shape->registers != 1) {
+    SmallVector<Type> elementTypes(shape->registers, vgprType);
+    auto split = waveamdmachine::TupleToElementsOp::create(builder, loc,
+                                                           elementTypes, word);
+    word = split.getElements()[wordIndex];
   }
-  if (isSimdPackedF16(sourceType)) {
-    Value shiftOrMask =
-        createImm(builder, op.getLoc(), op.getIndex() == 0 ? 0xffff : 16);
-    if (op.getIndex() == 0) {
-      values[op.getResult()] = waveamdmachine::VAndB32Op::create(
-          builder, op.getLoc(), vgprType, source, shiftOrMask);
-    } else {
-      values[op.getResult()] = waveamdmachine::VLshrrevB32Op::create(
-          builder, op.getLoc(), vgprType, source, shiftOrMask);
-    }
-    eraseIfTopLevel(op);
-    return success();
-  }
-  return op.emitError(
-      "WaveAMDMachine extract lowering supports only SIMD vector<2xf32/f16>");
+  if (wordShift)
+    word = waveamdmachine::VLshrrevB32Op::create(
+        builder, loc, vgprType, word, createImm(builder, loc, wordShift));
+  values[op.getResult()] = maskLowBits(*this, loc, word, shape->elementBits);
+  eraseIfTopLevel(op);
+  return success();
 }
 
 static CastRounding getFpConvertRounding(CastOp op) {

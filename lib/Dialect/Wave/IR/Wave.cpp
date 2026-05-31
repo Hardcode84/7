@@ -825,112 +825,114 @@ void WorkitemIdOp::inferResultRanges(ArrayRef<ConstantIntRanges>,
   setRange(getResult(), ConstantIntRanges::fromSigned(lo, hi));
 }
 
-namespace {
-// Decode a SIMD result element type into a (per-lane payload size in bits,
-// transport element bit-width). For a scalar result, the transport width
-// equals the payload width. For a vector result, the transport width is
-// the vector element width.
-struct LoadShape {
-  unsigned payloadBits;
-  unsigned transportBits;
-};
-} // namespace
+static MemoryPayloadShape getMemoryPayloadShape(unsigned elementBits,
+                                                unsigned payloadBits) {
+  return MemoryPayloadShape{elementBits, payloadBits,
+                            payloadBits <= 32 ? 1 : payloadBits / 32,
+                            payloadBits == 16};
+}
 
-static FailureOr<LoadShape>
-decodeLoadShape(Type resultElementType,
-                function_ref<InFlightDiagnostic(const Twine &)> emitError) {
-  if (auto vecTy = dyn_cast<VectorType>(resultElementType)) {
-    if (vecTy.getRank() != 1)
-      return emitError("vector result must be 1-D");
-    Type elt = vecTy.getElementType();
-    if (!elt.isIntOrFloat())
-      return emitError("vector element type must be integer or float");
-    unsigned eltBits = elt.getIntOrFloatBitWidth();
-    if (eltBits != 32)
-      return emitError("vector element type must be 32 bits wide");
-    return LoadShape{static_cast<unsigned>(vecTy.getNumElements()) * eltBits,
-                     eltBits};
-  }
-  if (!resultElementType.isIntOrFloat())
-    return emitError("result element type must be integer or float");
-  unsigned bits = resultElementType.getIntOrFloatBitWidth();
+static FailureOr<MemoryPayloadShape> getScalarMemoryPayloadShape(
+    Type elementType,
+    function_ref<InFlightDiagnostic(const Twine &)> emitError) {
+  if (!elementType.isIntOrFloat())
+    return emitError("payload element type must be integer or float");
+  unsigned bits = elementType.getIntOrFloatBitWidth();
   if (bits != 16 && bits != 32)
-    return emitError("scalar result element type must be 16 or 32 bits wide");
-  return LoadShape{bits, bits};
+    return emitError("scalar payload element type must be 16 or 32 bits wide");
+  return getMemoryPayloadShape(bits, bits);
+}
+
+static FailureOr<MemoryPayloadShape> getVectorMemoryPayloadShape(
+    VectorType vecTy,
+    function_ref<InFlightDiagnostic(const Twine &)> emitError) {
+  if (vecTy.getRank() != 1)
+    return emitError("vector payload must be 1-D");
+  Type scalarType = vecTy.getElementType();
+  if (!scalarType.isIntOrFloat())
+    return emitError("vector element type must be integer or float");
+  unsigned scalarBits = scalarType.getIntOrFloatBitWidth();
+  if (scalarBits != 8 && scalarBits != 16 && scalarBits != 32)
+    return emitError("vector element type must be 8, 16, or 32 bits wide");
+  uint64_t payloadBits = vecTy.getNumElements() * scalarBits;
+  if (payloadBits != 16 && payloadBits % 32 != 0)
+    return emitError("vector payload must be 16 bits or a multiple of 32 bits");
+  return getMemoryPayloadShape(scalarBits, static_cast<unsigned>(payloadBits));
+}
+
+FailureOr<MemoryPayloadShape> mlir::wave::getMemoryPayloadShape(
+    Type elementType,
+    function_ref<InFlightDiagnostic(const Twine &)> emitError) {
+  if (auto vecTy = dyn_cast<VectorType>(elementType))
+    return getVectorMemoryPayloadShape(vecTy, emitError);
+  return getScalarMemoryPayloadShape(elementType, emitError);
+}
+
+static FailureOr<Type> getMemoryPointerElementType(
+    Type ptrType, int64_t simdWidth, StringRef widthError,
+    function_ref<InFlightDiagnostic(const Twine &)> emitError) {
+  if (auto wavePtr = dyn_cast<PtrType>(ptrType))
+    return wavePtr.getElementType();
+  auto ptrSimdType = dyn_cast<SimdType>(ptrType);
+  if (!ptrSimdType)
+    return emitError("expected wave pointer operand");
+  auto wavePtr = dyn_cast<PtrType>(ptrSimdType.getElementType());
+  if (!wavePtr)
+    return emitError("pointer SIMD element type must be a wave pointer");
+  if (ptrSimdType.getWidth() != simdWidth)
+    return emitError(widthError);
+  return wavePtr.getElementType();
+}
+
+static FailureOr<unsigned> getMemoryPointerElementBits(
+    Type ptrElementType,
+    function_ref<InFlightDiagnostic(const Twine &)> emitError) {
+  if (!ptrElementType.isIntOrFloat())
+    return emitError("pointer element type must be integer or float");
+  unsigned ptrBits = ptrElementType.getIntOrFloatBitWidth();
+  if (ptrBits != 8 && ptrBits != 16 && ptrBits != 32)
+    return emitError(
+        "only 8-, 16-, and 32-bit pointer element types are supported");
+  return ptrBits;
+}
+
+static LogicalResult verifyMemoryPayloadFitsPointer(
+    Type payloadElementType, Type ptrElementType,
+    function_ref<InFlightDiagnostic(const Twine &)> emitError) {
+  FailureOr<unsigned> ptrBits =
+      getMemoryPointerElementBits(ptrElementType, emitError);
+  FailureOr<MemoryPayloadShape> shape =
+      getMemoryPayloadShape(payloadElementType, emitError);
+  if (failed(ptrBits) || failed(shape))
+    return failure();
+  if (shape->payloadBits % *ptrBits != 0)
+    return emitError("per-lane payload must be a multiple of the pointer "
+                     "element bit width");
+  return success();
 }
 
 LogicalResult StoreOp::verify() {
   auto emit = [this](const Twine &msg) { return emitOpError(msg); };
   auto simdType = cast<SimdType>(getValue().getType());
-  Type ptrType = getPtr().getType();
-  Type ptrElementType;
-  if (auto wavePtr = dyn_cast<PtrType>(ptrType)) {
-    ptrElementType = wavePtr.getElementType();
-  } else if (auto ptrSimdType = dyn_cast<SimdType>(ptrType)) {
-    auto wavePtr = dyn_cast<PtrType>(ptrSimdType.getElementType());
-    if (!wavePtr)
-      return emit("pointer SIMD element type must be a wave pointer");
-    if (ptrSimdType.getWidth() != simdType.getWidth())
-      return emit("pointer SIMD width must match value SIMD width");
-    ptrElementType = wavePtr.getElementType();
-  } else {
-    return emit("expected wave pointer operand");
-  }
-
-  if (!ptrElementType.isIntOrFloat())
-    return emit("pointer element type must be integer or float");
-  unsigned ptrBits = ptrElementType.getIntOrFloatBitWidth();
-  if (ptrBits != 16 && ptrBits != 32)
-    return emit("only 16- and 32-bit pointer element types are supported");
-
-  // Scalar SIMD values store one element per lane (legacy path, no
-  // shape decoding required). Vector SIMD values stage a tuple of
-  // `N` 32-bit transport elements per lane, like `wave.load`.
-  FailureOr<LoadShape> shape = decodeLoadShape(simdType.getElementType(), emit);
-  if (failed(shape))
+  FailureOr<Type> ptrElementType = getMemoryPointerElementType(
+      getPtr().getType(), simdType.getWidth(),
+      "pointer SIMD width must match value SIMD width", emit);
+  if (failed(ptrElementType))
     return failure();
-  if (shape->payloadBits % ptrBits != 0)
-    return emit("per-lane payload must be a multiple of the pointer "
-                "element bit width");
-  return success();
+  return verifyMemoryPayloadFitsPointer(simdType.getElementType(),
+                                        *ptrElementType, emit);
 }
 
 LogicalResult LoadOp::verify() {
   auto emit = [this](const Twine &msg) { return emitOpError(msg); };
   auto resultSimd = cast<SimdType>(getValue().getType());
-
-  Type ptrType = getPtr().getType();
-  Type ptrElementType;
-  if (auto wavePtr = dyn_cast<PtrType>(ptrType)) {
-    ptrElementType = wavePtr.getElementType();
-  } else if (auto ptrSimdType = dyn_cast<SimdType>(ptrType)) {
-    auto wavePtr = dyn_cast<PtrType>(ptrSimdType.getElementType());
-    if (!wavePtr)
-      return emit("pointer SIMD element type must be a wave pointer");
-    if (ptrSimdType.getWidth() != resultSimd.getWidth())
-      return emit("pointer SIMD width must match result SIMD width");
-    ptrElementType = wavePtr.getElementType();
-  } else {
-    return emit("expected wave pointer operand");
-  }
-
-  if (!ptrElementType.isIntOrFloat())
-    return emit("pointer element type must be integer or float");
-  unsigned ptrBits = ptrElementType.getIntOrFloatBitWidth();
-  if (ptrBits != 16 && ptrBits != 32)
-    return emit("only 16- and 32-bit pointer element types are supported");
-
-  FailureOr<LoadShape> shape =
-      decodeLoadShape(resultSimd.getElementType(), emit);
-  if (failed(shape))
+  FailureOr<Type> ptrElementType = getMemoryPointerElementType(
+      getPtr().getType(), resultSimd.getWidth(),
+      "pointer SIMD width must match result SIMD width", emit);
+  if (failed(ptrElementType))
     return failure();
-
-  // Per-lane payload must cover an integer number of pointer elements
-  // (i.e. the load addresses an integer number of in-memory elements).
-  if (shape->payloadBits % ptrBits != 0)
-    return emit("per-lane payload must be a multiple of the pointer "
-                "element bit width");
-  return success();
+  return verifyMemoryPayloadFitsPointer(resultSimd.getElementType(),
+                                        *ptrElementType, emit);
 }
 
 namespace {

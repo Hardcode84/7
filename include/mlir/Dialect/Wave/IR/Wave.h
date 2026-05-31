@@ -31,7 +31,17 @@
 #include "mlir/Dialect/Wave/IR/WaveOpsTypes.h.inc"
 
 namespace mlir::wave {
+struct MemoryPayloadShape {
+  unsigned elementBits;
+  unsigned payloadBits;
+  unsigned registers;
+  bool useB16Op;
+};
+
 Type getIndexExprResultType(MLIRContext *ctx, ValueRange bindings);
+FailureOr<MemoryPayloadShape> getMemoryPayloadShape(
+    Type elementType,
+    function_ref<InFlightDiagnostic(const Twine &)> emitError);
 } // namespace mlir::wave
 
 #define GET_OP_CLASSES

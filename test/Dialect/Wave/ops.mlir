@@ -45,6 +45,53 @@ func.func @wave_ops(%pred: i1, %value: i32, %out: !wave.ptr<i32, #wave.global>) 
   func.return %first : i32
 }
 
+// CHECK-LABEL: func.func @wave_vector_memory_payloads
+func.func @wave_vector_memory_payloads(%p8: !wave.ptr<i8, #wave.global>,
+                                       %p16: !wave.ptr<i16, #wave.global>,
+                                       %pbf16: !wave.ptr<bf16, #wave.global>,
+                                       %pf32: !wave.ptr<f32, #wave.global>) {
+  // CHECK: wave.load {{.*}} : (!wave.ptr<i8, #wave.global>) -> (!wave.simd<vector<2xi8>, 32>, !wave.mem.token)
+  %i8x2, %t0 = wave.load %p8
+      : (!wave.ptr<i8, #wave.global>)
+      -> (!wave.simd<vector<2xi8>, 32>, !wave.mem.token)
+  // CHECK: wave.store {{.*}} : (!wave.simd<vector<2xi8>, 32>, !wave.ptr<i8, #wave.global>, !wave.mem.token) -> !wave.mem.token
+  %t1 = wave.store %i8x2 -> %p8 after %t0
+      : (!wave.simd<vector<2xi8>, 32>, !wave.ptr<i8, #wave.global>,
+         !wave.mem.token)
+      -> !wave.mem.token
+
+  // CHECK: wave.load {{.*}} after {{.*}} : (!wave.ptr<i16, #wave.global>, !wave.mem.token) -> (!wave.simd<vector<4xi16>, 32>, !wave.mem.token)
+  %i16x4, %t2 = wave.load %p16 after %t1
+      : (!wave.ptr<i16, #wave.global>, !wave.mem.token)
+      -> (!wave.simd<vector<4xi16>, 32>, !wave.mem.token)
+  // CHECK: wave.store {{.*}} : (!wave.simd<vector<4xi16>, 32>, !wave.ptr<i16, #wave.global>, !wave.mem.token) -> !wave.mem.token
+  %t3 = wave.store %i16x4 -> %p16 after %t2
+      : (!wave.simd<vector<4xi16>, 32>, !wave.ptr<i16, #wave.global>,
+         !wave.mem.token)
+      -> !wave.mem.token
+
+  // CHECK: wave.load {{.*}} after {{.*}} : (!wave.ptr<bf16, #wave.global>, !wave.mem.token) -> (!wave.simd<vector<2xbf16>, 32>, !wave.mem.token)
+  %bf16x2, %t4 = wave.load %pbf16 after %t3
+      : (!wave.ptr<bf16, #wave.global>, !wave.mem.token)
+      -> (!wave.simd<vector<2xbf16>, 32>, !wave.mem.token)
+  // CHECK: wave.store {{.*}} : (!wave.simd<vector<2xbf16>, 32>, !wave.ptr<bf16, #wave.global>, !wave.mem.token) -> !wave.mem.token
+  %t5 = wave.store %bf16x2 -> %pbf16 after %t4
+      : (!wave.simd<vector<2xbf16>, 32>, !wave.ptr<bf16, #wave.global>,
+         !wave.mem.token)
+      -> !wave.mem.token
+
+  // CHECK: wave.load {{.*}} after {{.*}} : (!wave.ptr<f32, #wave.global>, !wave.mem.token) -> (!wave.simd<vector<2xf32>, 32>, !wave.mem.token)
+  %f32x2, %t6 = wave.load %pf32 after %t5
+      : (!wave.ptr<f32, #wave.global>, !wave.mem.token)
+      -> (!wave.simd<vector<2xf32>, 32>, !wave.mem.token)
+  // CHECK: wave.store {{.*}} : (!wave.simd<vector<2xf32>, 32>, !wave.ptr<f32, #wave.global>, !wave.mem.token) -> !wave.mem.token
+  %t7 = wave.store %f32x2 -> %pf32 after %t6
+      : (!wave.simd<vector<2xf32>, 32>, !wave.ptr<f32, #wave.global>,
+         !wave.mem.token)
+      -> !wave.mem.token
+  return
+}
+
 // CHECK-LABEL: func.func @wave_int_arith
 func.func @wave_int_arith(%uA: i32, %uB: i32, %vA: !wave.simd<i32, 32>, %vB: !wave.simd<i32, 32>) {
   // Uniform-uniform: result is the bare iN.
