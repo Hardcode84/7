@@ -30,6 +30,10 @@
 #define GET_TYPEDEF_CLASSES
 #include "mlir/Dialect/Wave/IR/WaveOpsTypes.h.inc"
 
+namespace mlir::wave {
+Type getIndexExprResultType(MLIRContext *ctx, ValueRange bindings);
+} // namespace mlir::wave
+
 #define GET_OP_CLASSES
 #include "mlir/Dialect/Wave/IR/WaveOps.h.inc"
 

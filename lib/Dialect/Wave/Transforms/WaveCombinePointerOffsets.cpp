@@ -194,12 +194,6 @@ private:
   unsigned nextRawSymbol = 0;
 };
 
-static int64_t getResultWidth(Type type) {
-  if (SimdType simd = dyn_cast<SimdType>(type))
-    return simd.getWidth();
-  return 0;
-}
-
 static SmallVector<PtrAddOp> collectPtrAddChain(PtrAddOp op) {
   SmallVector<PtrAddOp> chain;
   for (PtrAddOp cur = op; cur; cur = cur.getBase().getDefiningOp<PtrAddOp>())
@@ -242,11 +236,10 @@ static void rewritePtrAddChain(IRRewriter &rewriter, PtrAddOp op,
 
   MLIRContext *ctx = op->getContext();
   rewriter.setInsertionPoint(op);
-  auto index =
-      IndexExprOp::create(rewriter, op.getLoc(),
-                          WaveIndexType::get(ctx, getResultWidth(op.getType())),
-                          ExprAttr::get(ctx, combined.expr),
-                          rewriter.getStrArrayAttr(nameRefs), bindings);
+  Type indexType = getIndexExprResultType(ctx, bindings);
+  auto index = IndexExprOp::create(
+      rewriter, op.getLoc(), indexType, ExprAttr::get(ctx, combined.expr),
+      rewriter.getStrArrayAttr(nameRefs), bindings);
   PtrAddOp replacement =
       PtrAddOp::create(rewriter, op.getLoc(), op.getType(),
                        chain.back()->getOperand(0), index.getResult());

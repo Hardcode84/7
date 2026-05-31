@@ -1117,11 +1117,8 @@ static int64_t getIndexExprWidth(ValueRange bindings) {
   return width;
 }
 
-static Type getPreservedIndexExprType(Type currentType, MLIRContext *ctx,
-                                      ValueRange bindings) {
+Type mlir::wave::getIndexExprResultType(MLIRContext *ctx, ValueRange bindings) {
   int64_t width = getIndexExprWidth(bindings);
-  if (isa<WaveIndexType>(currentType))
-    return WaveIndexType::get(ctx, width);
   return width == 0 ? IndexType::get(ctx)
                     : Type(SimdType::get(ctx, IndexType::get(ctx), width));
 }
@@ -1221,10 +1218,7 @@ struct CanonicalizeIndexExprOp : OpRewritePattern<IndexExprOp> {
     if (!exprChanged && !bindingsChanged)
       return failure();
 
-    Type resultType = getPreservedIndexExprType(op.getResult().getType(),
-                                                op.getContext(), bindings);
-    if (resultType != op.getResult().getType())
-      return failure();
+    Type resultType = getIndexExprResultType(op.getContext(), bindings);
 
     auto replacement =
         IndexExprOp::create(rewriter, op.getLoc(), resultType,

@@ -301,22 +301,6 @@ findCandidate(scf::ForOp loop, sym::Store &store) {
   return std::optional<LoopStrideCandidate>{};
 }
 
-static int64_t getIndexBindingWidth(Value binding) {
-  Type type = binding.getType();
-  if (WaveIndexType indexType = dyn_cast<WaveIndexType>(type))
-    return indexType.getWidth();
-  if (SimdType simdType = dyn_cast<SimdType>(type))
-    return simdType.getWidth();
-  return 0;
-}
-
-static WaveIndexType getIndexExprType(MLIRContext *ctx, ValueRange bindings) {
-  int64_t width = 0;
-  for (Value binding : bindings)
-    width = std::max(width, getIndexBindingWidth(binding));
-  return WaveIndexType::get(ctx, width);
-}
-
 static bool isScalarOffset(Type type) {
   if (type.isIndex())
     return true;
@@ -336,7 +320,7 @@ static IndexExprOp createIndexExpr(IRRewriter &rewriter, Location loc,
     nameRefs.push_back(name);
   for (Value binding : expr.bindings)
     bindings.push_back(map ? map->lookupOrDefault(binding) : binding);
-  Type type = getIndexExprType(ctx, bindings);
+  Type type = getIndexExprResultType(ctx, bindings);
   return IndexExprOp::create(rewriter, loc, type, ExprAttr::get(ctx, expr.expr),
                              rewriter.getStrArrayAttr(nameRefs), bindings);
 }

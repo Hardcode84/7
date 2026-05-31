@@ -82,22 +82,6 @@ collectIndexExprAssumptions(IndexExprOp op, DataFlowSolver &solver,
   return assumptions;
 }
 
-static int64_t getIndexBindingWidth(Value binding) {
-  Type type = binding.getType();
-  if (WaveIndexType indexType = dyn_cast<WaveIndexType>(type))
-    return indexType.getWidth();
-  if (SimdType simdType = dyn_cast<SimdType>(type))
-    return simdType.getWidth();
-  return 0;
-}
-
-static WaveIndexType getIndexExprType(MLIRContext *ctx, ValueRange bindings) {
-  int64_t width = 0;
-  for (Value binding : bindings)
-    width = std::max(width, getIndexBindingWidth(binding));
-  return WaveIndexType::get(ctx, width);
-}
-
 static void collectFreeSymbols(sym::ExprHandle expr,
                                llvm::DenseSet<StringRef> &symbols) {
   sym::walkSymbolNames(expr, [&](StringRef name) { symbols.insert(name); });
@@ -119,10 +103,7 @@ static void collectLiveBindings(IndexExprOp op,
 static bool rewriteIndexExpr(IRRewriter &rewriter, IndexExprOp op,
                              sym::ExprHandle expr, ArrayRef<StringRef> names,
                              ValueRange bindings) {
-  Type resultType = getIndexExprType(op.getContext(), bindings);
-  if (resultType != op.getResult().getType())
-    return false;
-
+  Type resultType = getIndexExprResultType(op.getContext(), bindings);
   rewriter.setInsertionPoint(op);
   auto replacement = IndexExprOp::create(
       rewriter, op.getLoc(), resultType, ExprAttr::get(op.getContext(), expr),
