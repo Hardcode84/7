@@ -67,15 +67,10 @@ HardwareResourceEffects getHardwareResourceEffects(Operation *op) {
             getHardwareResourceForValue(result))
       addUnique(effects.writes, *kind);
 
-  if (isa<waveamdmachine::SCBranchExeczOp>(op))
+  namespace traits = OpTrait::waveamdmachine;
+  if (op->hasTrait<traits::ReadsExecOp>())
     addUnique(effects.reads, HardwareResourceKind::EXEC);
-  if (isa<waveamdmachine::SAndSaveexecB32Op, waveamdmachine::SAndSaveexecB64Op>(
-          op)) {
-    addUnique(effects.reads, HardwareResourceKind::EXEC);
-    addUnique(effects.writes, HardwareResourceKind::EXEC);
-  }
-  if (isa<waveamdmachine::SAndn2ExecB32Op, waveamdmachine::SAndn2ExecB64Op,
-          waveamdmachine::SMovExecLoOp, waveamdmachine::SMovExecB64Op>(op))
+  if (op->hasTrait<traits::WritesExecOp>())
     addUnique(effects.writes, HardwareResourceKind::EXEC);
   return effects;
 }

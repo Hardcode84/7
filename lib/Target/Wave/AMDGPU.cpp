@@ -227,6 +227,8 @@ static_assert(llvm::AMDGPU::SGPR4_SGPR5_SGPR6_SGPR7 ==
               "SGPR quad enum layout must be contiguous");
 static_assert(llvm::AMDGPU::VGPR1 == llvm::AMDGPU::VGPR0 + 1,
               "VGPR enum layout must be contiguous");
+static_assert(llvm::AMDGPU::VGPR1_LO16 == llvm::AMDGPU::VGPR0_LO16 + 1,
+              "VGPR_LO16 enum layout must be contiguous");
 static_assert(llvm::AMDGPU::VGPR1_VGPR2 == llvm::AMDGPU::VGPR0_VGPR1 + 1,
               "VGPR pair enum layout must be contiguous");
 static_assert(llvm::AMDGPU::VGPR1_VGPR2_VGPR3 ==

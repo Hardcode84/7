@@ -58,6 +58,8 @@ def WaveAMDMachine_TokenTrait : NativeOpTrait<"waveamdmachine::TokenOp">;
 def WaveAMDMachine_TokenJoinTrait : NativeOpTrait<"waveamdmachine::TokenJoinOp">;
 def WaveAMDMachine_NoMachineInst : NativeOpTrait<"waveamdmachine::NoMachineInst">;
 def WaveAMDMachine_MFMA : NativeOpTrait<"waveamdmachine::MFMAOp">;
+def WaveAMDMachine_ReadsExec : NativeOpTrait<"waveamdmachine::ReadsExecOp">;
+def WaveAMDMachine_WritesExec : NativeOpTrait<"waveamdmachine::WritesExecOp">;
 
 def WaveAMDMachine_SGPR
     : Type<CPred<"::llvm::isa<::mlir::waveamdmachine::RegType>($_self) && "
@@ -630,7 +632,10 @@ def WaveAMDMachine_SSetprioOp : WaveAMDMachine_UnaryNoResult<"s_setprio",
                                                              WaveAMDMachine_Imm>;
 def WaveAMDMachine_SDelayAluOp : WaveAMDMachine_UnaryNoResult<"s_delay_alu",
                                                          WaveAMDMachine_Imm>;
-def WaveAMDMachine_SAndSaveexecB32Op : WaveAMDMachine_Op<"s_and_saveexec_b32"> {
+def WaveAMDMachine_SAndSaveexecB32Op
+    : WaveAMDMachine_Op<"s_and_saveexec_b32",
+                        [WaveAMDMachine_ReadsExec,
+                         WaveAMDMachine_WritesExec]> {
   let summary = "save EXEC, mask EXEC, and set SCC";
   let arguments = (ins WaveAMDMachine_SGPR1:$mask);
   let results = (outs
@@ -639,7 +644,10 @@ def WaveAMDMachine_SAndSaveexecB32Op : WaveAMDMachine_Op<"s_and_saveexec_b32"> {
   );
   let assemblyFormat = "$mask attr-dict `:` functional-type(operands, results)";
 }
-def WaveAMDMachine_SAndSaveexecB64Op : WaveAMDMachine_Op<"s_and_saveexec_b64"> {
+def WaveAMDMachine_SAndSaveexecB64Op
+    : WaveAMDMachine_Op<"s_and_saveexec_b64",
+                        [WaveAMDMachine_ReadsExec,
+                         WaveAMDMachine_WritesExec]> {
   let summary = "save EXEC, mask EXEC, and set SCC";
   let arguments = (ins WaveAMDMachine_SGPR2:$mask);
   let results = (outs
@@ -648,26 +656,31 @@ def WaveAMDMachine_SAndSaveexecB64Op : WaveAMDMachine_Op<"s_and_saveexec_b64"> {
   );
   let assemblyFormat = "$mask attr-dict `:` functional-type(operands, results)";
 }
-def WaveAMDMachine_SAndn2ExecB32Op : WaveAMDMachine_Op<"s_andn2_exec_b32"> {
+def WaveAMDMachine_SAndn2ExecB32Op
+    : WaveAMDMachine_Op<"s_andn2_exec_b32", [WaveAMDMachine_WritesExec]> {
   let summary = "set EXEC to lhs & ~rhs and set SCC";
   let arguments = (ins WaveAMDMachine_SGPR1:$lhs, WaveAMDMachine_SGPR1:$rhs);
   let results = (outs WaveAMDMachine_SCC:$scc);
   let assemblyFormat = "$lhs `,` $rhs attr-dict `:` functional-type(operands, results)";
 }
-def WaveAMDMachine_SAndn2ExecB64Op : WaveAMDMachine_Op<"s_andn2_exec_b64"> {
+def WaveAMDMachine_SAndn2ExecB64Op
+    : WaveAMDMachine_Op<"s_andn2_exec_b64", [WaveAMDMachine_WritesExec]> {
   let summary = "set EXEC to lhs & ~rhs and set SCC";
   let arguments = (ins WaveAMDMachine_SGPR2:$lhs, WaveAMDMachine_SGPR2:$rhs);
   let results = (outs WaveAMDMachine_SCC:$scc);
   let assemblyFormat = "$lhs `,` $rhs attr-dict `:` functional-type(operands, results)";
 }
-def WaveAMDMachine_SCBranchExeczOp : WaveAMDMachine_ZeroResult<"s_cbranch_execz"> {
+def WaveAMDMachine_SCBranchExeczOp
+    : WaveAMDMachine_ZeroResult<"s_cbranch_execz", [WaveAMDMachine_ReadsExec]> {
   let arguments = (ins StrAttr:$label);
   let assemblyFormat = "$label attr-dict";
 }
 def WaveAMDMachine_SMovExecLoOp : WaveAMDMachine_UnaryNoResult<"s_mov_exec_lo",
-                                                          WaveAMDMachine_SGPR1>;
+                                                          WaveAMDMachine_SGPR1,
+                                                          [WaveAMDMachine_WritesExec]>;
 def WaveAMDMachine_SMovExecB64Op : WaveAMDMachine_UnaryNoResult<"s_mov_exec_b64",
-                                                          WaveAMDMachine_SGPR2>;
+                                                          WaveAMDMachine_SGPR2,
+                                                          [WaveAMDMachine_WritesExec]>;
 def WaveAMDMachine_SMovM0Op
     : WaveAMDMachine_UnaryResult<"s_mov_m0", WaveAMDMachine_SGPR1, WaveAMDMachine_M0>;
 def WaveAMDMachine_SEndpgmOp : WaveAMDMachine_ZeroResult<"s_endpgm">;

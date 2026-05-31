@@ -106,6 +106,8 @@ _wave_pipelines = (
 )
 if _wave_pipelines.exists():
     config.substitutions.append(("%wave_pipelines", str(_wave_pipelines)))
+else:
+    lit_config.fatal(f"missing Wave pipeline library: {_wave_pipelines}")
 
 # Tool search order: our build's bin first (wave-opt, wave-translate),
 # then the LLVM install (llvm-mc, ld.lld, llvm-readelf, FileCheck if

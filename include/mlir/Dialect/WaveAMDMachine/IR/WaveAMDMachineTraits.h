@@ -54,6 +54,12 @@ class NoMachineInst : public TraitBase<ConcreteType, NoMachineInst> {};
 template <typename ConcreteType>
 class MFMAOp : public TraitBase<ConcreteType, MFMAOp> {};
 
+template <typename ConcreteType>
+class ReadsExecOp : public TraitBase<ConcreteType, ReadsExecOp> {};
+
+template <typename ConcreteType>
+class WritesExecOp : public TraitBase<ConcreteType, WritesExecOp> {};
+
 } // namespace mlir::OpTrait::waveamdmachine
 
 #endif // MLIR_DIALECT_WAVEAMDMACHINE_IR_WAVEAMDMACHINETRAITS_H

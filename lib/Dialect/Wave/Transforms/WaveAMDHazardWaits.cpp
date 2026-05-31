@@ -483,7 +483,6 @@ public:
     HazardState next = before.get();
     transferHazards(op, next, cfg);
     propagateIfChanged(after, after->joinWith(next));
-    markCFGSuccessorsLive(op, next);
     return success();
   }
 
@@ -505,27 +504,6 @@ public:
       advanceValueHazards(next);
     propagateRegionOperands(branch, regionFrom, regionTo, next);
     propagateIfChanged(after, after->joinWith(next));
-  }
-
-private:
-  void markCFGSuccessorsLive(Operation *op, const HazardState &state) {
-    if (op->getNumSuccessors() == 0)
-      return;
-    Block *source = op->getBlock();
-    if (!source)
-      return;
-    for (Block *successor : op->getSuccessors()) {
-      HazardState next = state;
-      propagateBranchOperands(op, successor, next);
-      HazardLattice *blockState = getLattice(getProgramPointBefore(successor));
-      propagateIfChanged(blockState, blockState->joinWith(next));
-      auto *blockLive =
-          getOrCreate<Executable>(getProgramPointBefore(successor));
-      propagateIfChanged(blockLive, blockLive->setToLive());
-      auto *edgeLive =
-          getOrCreate<Executable>(getLatticeAnchor<CFGEdge>(source, successor));
-      propagateIfChanged(edgeLive, edgeLive->setToLive());
-    }
   }
 
   const HazardConfig &cfg;

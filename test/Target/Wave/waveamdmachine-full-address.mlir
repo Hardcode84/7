@@ -1,4 +1,5 @@
 // RUN: wave-opt --waveamd-to-machine %s | FileCheck %s --check-prefix=SELECT
+// RUN: wave-opt --wave-simplify-index-exprs --waveamd-to-machine %s | FileCheck %s --check-prefix=SELECT
 // RUN: wave-opt --waveamd-to-machine %s | wave-opt | FileCheck %s --check-prefix=SELECT
 // RUN: wave-opt --waveamd-to-machine --waveamd-abi-lowering --waveamd-reg-alloc --waveamd-resource-info %s | FileCheck %s --check-prefix=VERIFY
 // RUN: wave-opt --waveamd-to-machine %s | wave-translate --wave-to-amdgpu-asm - | FileCheck %s --check-prefix=ASM
