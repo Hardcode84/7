@@ -26,6 +26,7 @@ module = build_flash_attention_f32_module(
 )
 module_text = str(module)
 assert module_text.count("waveamd.mma") == 4
+assert module_text.count("waveamd.make_buffer") == 4
 assert "iter_args" in module_text
 unrolled = build_flash_attention_f32_module(
     block_m=16,
@@ -63,6 +64,7 @@ small = build_flash_attention_f32_module(
 )
 small_text = str(small)
 assert small_text.count("waveamd.mma") == 4
+assert small_text.count("waveamd.make_buffer") == 4
 small_multi = build_flash_attention_f32_module(
     block_m=8,
     block_n=8,
@@ -75,6 +77,7 @@ assert small_multi_text.count("waveamd.mma") == 8
 assert "iter_args" in small_multi_text
 print("fa-mfma ok")
 print("fa-unrolled ok")
+print("fa-buffer ok")
 print("fa-multi mma", module_text.count("waveamd.mma"), "iter_args ok")
 print(
     "fa-single mma",
@@ -89,11 +92,13 @@ print(module_text)
 # CHECK: fa-ref 256 512 512 256
 # CHECK: fa-mfma ok
 # CHECK: fa-unrolled ok
+# CHECK: fa-buffer ok
 # CHECK: fa-multi mma 4 iter_args ok
 # CHECK: fa-single mma 4 casts {{[1-9][0-9]*}}
 # CHECK: fa-small mma 4
 # CHECK: fa-small-multi mma 8 iter_args ok
 # CHECK: func.func @flash_attention_f32
+# CHECK: waveamd.make_buffer
 # CHECK: waveamd.mma
 # CHECK: waveamd.fragment_unpack
 # CHECK: wave.fmul

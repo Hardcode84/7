@@ -98,18 +98,6 @@ class _FlashAttentionConfig:
         return self.seq_len * self.head_dim
 
     @property
-    def q_storage_elements(self) -> int:
-        return self.mma.m_tile * self.head_dim
-
-    @property
-    def k_storage_rows(self) -> int:
-        return self.seq_len + (self.mma.n_tile - self.block_n)
-
-    @property
-    def k_storage_elements(self) -> int:
-        return self.k_storage_rows * self.head_dim
-
-    @property
     def out_elements(self) -> int:
         return self.q_elements
 
@@ -283,6 +271,17 @@ def _target_waves_attrs(target_waves: int | None) -> dict[str, dsl.Attribute]:
 def _zero_f16_simd(bld: dsl.FunctionBuilder, wave_size: int) -> dsl.Value:
     zero = bld.splat(bld.constant(dsl.f32(), 0.0), dsl.f32(), wave_size)
     return bld.fpconvert(zero, dsl.simd_type(dsl.f16(), width=wave_size))
+
+
+def _wrap_in_buffer(
+    bld: dsl.FunctionBuilder,
+    ptr: dsl.Value,
+    element_type: dsl.Type,
+    num_elements: int,
+    bytes_per_element: int,
+) -> dsl.Value:
+    range_bytes = bld.constant(dsl.i32(), num_elements * bytes_per_element)
+    return bld.make_buffer(ptr, range_bytes, dsl.buffer_ptr_type(element_type))
 
 
 @dataclass(frozen=True)
@@ -1285,6 +1284,10 @@ def _emit_multi_tile_mma_kernel(
 
 def _emit_kernel(bld: dsl.FunctionBuilder, cfg: _FlashAttentionConfig) -> None:
     q_arg, k_arg, v_arg, out_arg = bld.args
+    q_arg = _wrap_in_buffer(bld, q_arg, dsl.f16(), cfg.q_elements, 2)
+    k_arg = _wrap_in_buffer(bld, k_arg, dsl.f16(), cfg.kv_elements, 2)
+    v_arg = _wrap_in_buffer(bld, v_arg, dsl.f16(), cfg.kv_elements, 2)
+    out_arg = _wrap_in_buffer(bld, out_arg, dsl.f32(), cfg.out_elements, 4)
     lane = bld.assume_range(
         bld.workitem_id(axis=0, width=cfg.mma.wave_size),
         0,
@@ -1326,12 +1329,6 @@ def _emit_zero_fill(
         bld.memref_store(zero, buf, [i])
 
 
-def _pad_values(values: tuple[float, ...], count: int) -> tuple[float, ...]:
-    if len(values) > count:
-        raise ValueError(f"cannot pad {len(values)} values down to {count}")
-    return values + (0.0,) * (count - len(values))
-
-
 def _emit_host(bld: dsl.FunctionBuilder, cfg: _FlashAttentionConfig) -> None:
     index = dsl.index_type()
     f16 = dsl.f16()
@@ -1348,17 +1345,13 @@ def _emit_host(bld: dsl.FunctionBuilder, cfg: _FlashAttentionConfig) -> None:
         random_seed=cfg.random_seed,
         seq_n=cfg.seq_n,
     )
-    q_buf = bld.alloc([cfg.q_storage_elements], f16)
-    k_buf = bld.alloc([cfg.k_storage_elements], f16)
+    q_buf = bld.alloc([cfg.q_elements], f16)
+    k_buf = bld.alloc([cfg.kv_elements], f16)
     v_buf = bld.alloc([cfg.kv_elements], f16)
     out_buf = bld.alloc([cfg.out_elements], f32)
 
-    _emit_constant_fill(
-        bld, q_buf, _pad_values(q_values, cfg.q_storage_elements), f16, index
-    )
-    _emit_constant_fill(
-        bld, k_buf, _pad_values(k_values, cfg.k_storage_elements), f16, index
-    )
+    _emit_constant_fill(bld, q_buf, q_values, f16, index)
+    _emit_constant_fill(bld, k_buf, k_values, f16, index)
     _emit_constant_fill(bld, v_buf, v_values, f16, index)
     _emit_zero_fill(bld, out_buf, cfg.out_elements, index)
 
