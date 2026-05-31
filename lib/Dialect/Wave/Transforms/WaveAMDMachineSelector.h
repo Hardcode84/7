@@ -68,37 +68,6 @@ struct AddressPlan {
   int64_t instOffset = 0;
 };
 
-struct StrideTerm {
-  Value value;
-  int64_t scale = 1;
-};
-
-struct StrideBytes {
-  llvm::SmallVector<StrideTerm, 2> terms;
-  int64_t imm = 0;
-};
-
-// Per-iter-arg snapshot captured at the scf.for boundary. Pointer carries
-// thread base metadata plus one offset value through the loop.
-//
-// Non-empty `stride`: body marches base or buffer soffset by stride.
-struct CarrySnapshot {
-  StrideBytes stride;
-  std::string bodyOffsetName;
-  std::string resultOffsetName;
-  std::string strideName;
-  std::optional<int64_t> bodyU32Upper;
-  std::optional<int64_t> resultU32Upper;
-  enum class Kind { WMValue, Pointer };
-  Value carry;
-  Value base;
-  Value globalBase;
-  int64_t stridedBaseGroup = -1;
-  Kind kind;
-  TermKind offsetKind = TermKind::Lane;
-  bool isBuffer = false;
-};
-
 // Small free helpers used by every selection TU.
 
 inline mlir::waveamdmachine::RegType

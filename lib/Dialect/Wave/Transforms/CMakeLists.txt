@@ -6,6 +6,7 @@ add_mlir_dialect_library(MLIRWaveTransforms
   WaveAMDMachine.cpp
   WaveAMDMachineIndexExpr.cpp
   WaveAMDMachineLoadStore.cpp
+  WaveAMDMachineLoopCarryPlan.cpp
   WaveAMDMachineScfFor.cpp
   WaveAMDMachineSchedule.cpp
   WaveAMDMachineScheduleBeam.cpp
