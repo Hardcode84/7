@@ -102,20 +102,6 @@ MlirAttribute mlirWavePtrTypeGetAddressSpace(MlirType type) {
   return wrap(llvm::cast<wave::PtrType>(unwrap(type)).getAddressSpace());
 }
 
-bool mlirWaveTypeIsAWaveIndex(MlirType type) {
-  return llvm::isa<wave::WaveIndexType>(unwrap(type));
-}
-
-// Transitional legacy !wave.index API. New offset builders use builtin
-// index or !wave.simd<index, W>.
-MlirType mlirWaveWaveIndexTypeGet(MlirContext ctx, int64_t width) {
-  return wrap(wave::WaveIndexType::get(unwrap(ctx), width));
-}
-
-int64_t mlirWaveWaveIndexTypeGetWidth(MlirType type) {
-  return llvm::cast<wave::WaveIndexType>(unwrap(type)).getWidth();
-}
-
 //===----------------------------------------------------------------------===//
 // Wave symbolic-expression attribute
 //===----------------------------------------------------------------------===//

@@ -48,9 +48,6 @@ from mlir._mlir_libs._waveDialectsNanobind import (
     register_dialects,
     register_passes,
 )
-from mlir._mlir_libs._waveDialectsNanobind import (
-    WaveIndexType as _WaveIndexType,
-)
 from mlir.dialects import arith, func, gpu, memref, scf, wave, waveamd, wavemeta
 from mlir.dialects.arith import CmpIPredicate
 from mlir.ir import (
@@ -167,16 +164,6 @@ def mem_token_type() -> Type:
     return MemTokenType.get(context=_current_context())
 
 
-def wave_index_type(width: int = 0) -> Type:
-    """Build legacy `!wave.index`.
-
-    Transitional compatibility hook. New symbolic offsets use builtin
-    `index` or `!wave.simd<index, W>`; remove this after legacy IR
-    migration.
-    """
-    return _WaveIndexType.get(width=width, context=_current_context())
-
-
 def global_address_space() -> Attribute:
     return GlobalAddressSpaceAttr.get(context=_current_context())
 
@@ -260,18 +247,13 @@ def _arith_result_type(lhs: Value, rhs: Value) -> Type:
 def _binding_lane_width(values: Iterable[Value]) -> int:
     """Reduce binding operand types to a single non-zero lane width.
 
-    Uniform scalars contribute zero. Lane-varying SIMD operands and
-    legacy `!wave.index<W>` must agree on `W`.
+    Uniform scalars contribute zero. Lane-varying SIMD operands must agree on
+    `W`.
     """
     lane = 0
     for v in values:
         ty = v.type
-        if SimdType.isinstance(ty):
-            width = SimdType(ty).width
-        elif _WaveIndexType.isinstance(ty):
-            width = _WaveIndexType(ty).width
-        else:
-            width = 0
+        width = SimdType(ty).width if SimdType.isinstance(ty) else 0
         if width == 0:
             continue
         if lane and lane != width:
@@ -285,8 +267,6 @@ def _binding_lane_width(values: Iterable[Value]) -> int:
 def _lane_width(type_: Type) -> int:
     if SimdType.isinstance(type_):
         return int(SimdType(type_).width)
-    if _WaveIndexType.isinstance(type_):
-        return int(_WaveIndexType(type_).width)
     return 0
 
 

@@ -136,14 +136,6 @@ LogicalResult PtrType::verify(function_ref<InFlightDiagnostic()> emitError,
   return success();
 }
 
-LogicalResult
-WaveIndexType::verify(function_ref<InFlightDiagnostic()> emitError,
-                      int64_t width) {
-  if (width != 0 && !isWaveExecutionWidth(width))
-    return emitError() << "wave index width must be 0 (uniform), 32, or 64";
-  return success();
-}
-
 void WaveDialect::registerAttributes() {
   addAttributes<
 #define GET_ATTRDEF_LIST
@@ -983,10 +975,7 @@ verifyPtrAddOffset(Type offsetType,
       return emitError("SIMD offset element type must be index or i32");
     return offsetSimd.getWidth();
   }
-  if (auto offsetIndex = dyn_cast<WaveIndexType>(offsetType))
-    return offsetIndex.getWidth();
-  return emitError("offset must be index, integer, index/i32 SIMD, or "
-                   "!wave.index");
+  return emitError("offset must be index, integer, or index/i32 SIMD");
 }
 
 // Check that `resultType` matches `pointerType` when both base and offset are
@@ -1044,15 +1033,13 @@ static FailureOr<int64_t> classifyIndexBinding(
       return emitError("integer binding must be signless");
     return int64_t{0};
   }
-  if (auto indexType = dyn_cast<WaveIndexType>(type))
-    return indexType.getWidth();
   if (auto simdType = dyn_cast<SimdType>(type)) {
     Type elementType = simdType.getElementType();
     if (!elementType.isIndex() && !elementType.isInteger(32))
       return emitError("SIMD binding element type must be index or i32");
     return simdType.getWidth();
   }
-  return emitError("binding must be index, signless integer, !wave.index, or "
+  return emitError("binding must be index, signless integer, or "
                    "!wave.simd<index/i32, W>");
 }
 
@@ -1103,8 +1090,6 @@ static FailureOr<int64_t> reduceIndexBindingWidth(
 
 static int64_t getIndexBindingWidth(Value binding) {
   Type type = binding.getType();
-  if (auto indexType = dyn_cast<WaveIndexType>(type))
-    return indexType.getWidth();
   if (auto simdType = dyn_cast<SimdType>(type))
     return simdType.getWidth();
   return 0;
@@ -1126,13 +1111,6 @@ Type mlir::wave::getIndexExprResultType(MLIRContext *ctx, ValueRange bindings) {
 static LogicalResult verifyIndexExprResultType(
     Type resultType, int64_t laneWidth,
     function_ref<InFlightDiagnostic(const Twine &)> emitError) {
-  if (auto legacy = dyn_cast<WaveIndexType>(resultType)) {
-    if (legacy.getWidth() != laneWidth)
-      return emitError("result width ")
-             << legacy.getWidth() << " disagrees with binding lane width "
-             << laneWidth;
-    return success();
-  }
   if (laneWidth == 0) {
     if (!resultType.isIndex())
       return emitError("uniform result must be index");

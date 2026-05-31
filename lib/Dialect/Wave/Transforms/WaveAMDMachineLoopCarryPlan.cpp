@@ -75,13 +75,7 @@ static bool isDefinedInside(Operation *scope, Value value) {
   return false;
 }
 
-static bool isLaneVaryingValue(Type type) {
-  if (isa<SimdType>(type))
-    return true;
-  if (auto idx = dyn_cast<WaveIndexType>(type))
-    return idx.getWidth() != 0;
-  return false;
-}
+static bool isLaneVaryingValue(Type type) { return isa<SimdType>(type); }
 
 static LogicalResult appendStrideImm(StrideBytes &stride, int64_t value) {
   std::optional<int64_t> sum = llvm::checkedAdd(stride.imm, value);

@@ -458,11 +458,10 @@ def Wave_IndexExprOp : Wave_Op<"index_expr", [Pure]> {
     `$expr` must equal the set of `$names` (bijective).
 
     Binding operand types are restricted to either wave-uniform scalars
-    (builtin `index`, signless integer, legacy `!wave.index` with no
-    width) or lane-varying SIMD values (`!wave.simd<i32, W>`,
-    `!wave.simd<index, W>`, legacy `!wave.index<W>`). New IR uses
-    builtin `index` for uniform results and `!wave.simd<index, W>` for
-    lane-varying results.
+    (builtin `index`, signless integer) or lane-varying SIMD values
+    (`!wave.simd<i32, W>`, `!wave.simd<index, W>`). Results use builtin
+    `index` for uniform offsets and `!wave.simd<index, W>` for lane-varying
+    offsets.
 
     The op is pure: equal `$expr`, `$bindings`, and `$names` CSE.
   }];

@@ -71,30 +71,6 @@ def Wave_PtrType : Wave_Type<"Ptr", "ptr"> {
   let genVerifyDecl = 1;
 }
 
-def Wave_IndexType : Wave_Type<"WaveIndex", "index"> {
-  let summary = "symbolic-offset index value";
-  let description = [{
-    A `!wave.index` value is the result of a `wave.index_expr` op: an integer
-    offset whose defining op carries a `#wave.expr` symbolic form plus the
-    bindings of its free symbols.
-
-    The optional `W` parameter is the subgroup wave width when the value is
-    lane-varying. `!wave.index` (no width) is wave-uniform and behaves like a
-    scalar `index`. `!wave.index<W>` is lane-varying and behaves like a
-    `!wave.simd<i32, W>` at the addressing layer.
-
-    The C++ class is `mlir::wave::WaveIndexType` to avoid colliding with the
-    built-in `mlir::IndexType`; the IR mnemonic remains `wave.index`.
-  }];
-
-  let parameters = (ins DefaultValuedParameter<"int64_t", "0">:$width);
-  let assemblyFormat = "(`<` $width^ `>`)?";
-  let genVerifyDecl = 1;
-  let extraClassDeclaration = [{
-    bool isUniform() const { return getWidth() == 0; }
-  }];
-}
-
 def Wave_Simd : Type<CPred<"::llvm::isa<::mlir::wave::SimdType>($_self)">,
                      "wave SIMD type">;
 
@@ -108,13 +84,8 @@ def Wave_MemToken
 def Wave_Ptr : Type<CPred<"::llvm::isa<::mlir::wave::PtrType>($_self)">,
                     "wave pointer type">;
 
-def Wave_Index
-    : Type<CPred<"::llvm::isa<::mlir::wave::WaveIndexType>($_self)">,
-           "wave index type">;
-
 def Wave_IndexValue
     : Type<CPred<"$_self.isIndex() || "
-                 "::llvm::isa<::mlir::wave::WaveIndexType>($_self) || "
                  "(::llvm::isa<::mlir::wave::SimdType>($_self) && "
                  "::llvm::cast<::mlir::wave::SimdType>($_self)"
                  ".getElementType().isIndex())">,

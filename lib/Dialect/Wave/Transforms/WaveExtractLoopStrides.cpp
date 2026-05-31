@@ -306,8 +306,6 @@ static bool isScalarOffset(Type type) {
     return true;
   if (isa<IntegerType>(type))
     return true;
-  if (WaveIndexType indexType = dyn_cast<WaveIndexType>(type))
-    return indexType.getWidth() == 0;
   return false;
 }
 

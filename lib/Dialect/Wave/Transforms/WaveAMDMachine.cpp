@@ -55,14 +55,7 @@ using namespace mlir::waveamd;
 
 namespace mlir::wave::wmsel {
 
-// SIMD values and lane-pinned !wave.index<W> are lane-varying.
-static bool isLaneVaryingType(Type type) {
-  if (isa<SimdType>(type))
-    return true;
-  if (auto idx = dyn_cast<WaveIndexType>(type))
-    return idx.getWidth() != 0;
-  return false;
-}
+static bool isLaneVaryingType(Type type) { return isa<SimdType>(type); }
 
 static unsigned bitWidth(Type type) {
   if (auto vecTy = dyn_cast<VectorType>(type)) {
@@ -196,8 +189,6 @@ static LogicalResult noteTypeWaveWidth(Operation *diagOp, Type type,
     return noteWaveWidth(diagOp, required, simd.getWidth());
   if (auto mask = dyn_cast<MaskType>(type))
     return noteWaveWidth(diagOp, required, mask.getWidth());
-  if (auto index = dyn_cast<WaveIndexType>(type))
-    return noteWaveWidth(diagOp, required, index.getWidth());
   if (auto fragment = dyn_cast<waveamd::FragmentType>(type))
     return noteWaveWidth(diagOp, required, fragment.getWaveSize());
   if (auto tuple = dyn_cast<TupleType>(type)) {
@@ -2842,11 +2833,6 @@ static bool isSupportedSimdPayloadType(SimdType type) {
          isSupportedBoundaryType(type.getElementType());
 }
 
-static bool isSupportedWaveIndexType(WaveIndexType type) {
-  int64_t width = type.getWidth();
-  return width == 0 || width == 32 || width == 64;
-}
-
 static bool isSupportedFragmentType(waveamd::FragmentType type) {
   int64_t role = type.getRole();
   int64_t waveSize = type.getWaveSize();
@@ -2863,8 +2849,6 @@ static bool isSupportedWaveType(Type type) {
     return isSupportedSimdPayloadType(simdType);
   if (auto maskType = dyn_cast<MaskType>(type))
     return maskType.getWidth() == 32 || maskType.getWidth() == 64;
-  if (auto indexType = dyn_cast<WaveIndexType>(type))
-    return isSupportedWaveIndexType(indexType);
   if (auto fragmentType = dyn_cast<waveamd::FragmentType>(type))
     return isSupportedFragmentType(fragmentType);
   return isa<MemTokenType>(type);

@@ -122,21 +122,6 @@ static void bindPtrType(nb::module_ &m) {
       });
 }
 
-static void bindWaveIndexType(nb::module_ &m) {
-  // Transitional legacy !wave.index binding. Python builders emit builtin
-  // index / !wave.simd<index, W> for new symbolic offsets.
-  mlir_type_subclass(m, "WaveIndexType", mlirWaveTypeIsAWaveIndex)
-      .def_classmethod(
-          "get",
-          [](nb::object &cls, int64_t width, MlirContext ctx) {
-            return cls(mlirWaveWaveIndexTypeGet(ctx, width));
-          },
-          nb::arg("cls"), nb::arg("width") = 0, nb::arg("context"))
-      .def_property_readonly("width", [](MlirType self) {
-        return mlirWaveWaveIndexTypeGetWidth(self);
-      });
-}
-
 // #wave.expr constructors. `get_from_bytes` is the structural path:
 // callers pass the bytes produced by `ixsimpl.Context.serialize(expr)`
 // and the dialect deserializes into its own symbol store. `get` keeps
@@ -235,7 +220,6 @@ NB_MODULE(_waveDialectsNanobind, m) {
   bindMaskType(m);
   bindMemTokenType(m);
   bindPtrType(m);
-  bindWaveIndexType(m);
 
   // Wave symbolic attributes.
   bindExprAttr(m);

@@ -50,11 +50,6 @@ MLIR_CAPI_EXPORTED MlirType mlirWavePtrTypeGet(MlirType elementType,
 MLIR_CAPI_EXPORTED MlirType mlirWavePtrTypeGetElementType(MlirType type);
 MLIR_CAPI_EXPORTED MlirAttribute mlirWavePtrTypeGetAddressSpace(MlirType type);
 
-MLIR_CAPI_EXPORTED bool mlirWaveTypeIsAWaveIndex(MlirType type);
-MLIR_CAPI_EXPORTED MlirType mlirWaveWaveIndexTypeGet(MlirContext ctx,
-                                                     int64_t width);
-MLIR_CAPI_EXPORTED int64_t mlirWaveWaveIndexTypeGetWidth(MlirType type);
-
 //===----------------------------------------------------------------------===//
 // Wave symbolic-expression attribute (text constructor)
 //===----------------------------------------------------------------------===//
