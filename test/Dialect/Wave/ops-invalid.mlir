@@ -114,7 +114,7 @@ func.func @muli_simd_element_bits(%a: !wave.simd<i32, 32>, %b: !wave.simd<i32, 3
 
 func.func @index_expr_count_mismatch(%lane: !wave.simd<i32, 32>) {
   // expected-error @+1 {{expected one name per binding}}
-  %v = wave.index_expr #wave.expr<"lid"> ["lid", "x"] (%lane) : (!wave.simd<i32, 32>) -> !wave.index<32>
+  %v = wave.index_expr #wave.expr<"lid"> ["lid", "x"] (%lane) : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
   return
 }
 
@@ -122,7 +122,7 @@ func.func @index_expr_count_mismatch(%lane: !wave.simd<i32, 32>) {
 
 func.func @index_expr_unbound_symbol(%lane: !wave.simd<i32, 32>) {
   // expected-error @+1 {{free symbol 'K' has no binding}}
-  %v = wave.index_expr #wave.expr<"lid + K"> ["lid"] (%lane) : (!wave.simd<i32, 32>) -> !wave.index<32>
+  %v = wave.index_expr #wave.expr<"lid + K"> ["lid"] (%lane) : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
   return
 }
 
@@ -130,7 +130,7 @@ func.func @index_expr_unbound_symbol(%lane: !wave.simd<i32, 32>) {
 
 func.func @index_expr_stray_binding(%lane: !wave.simd<i32, 32>, %k: i32) {
   // expected-error @+1 {{binding name 'K' is not a free symbol of the expression}}
-  %v = wave.index_expr #wave.expr<"lid"> ["lid", "K"] (%lane, %k) : (!wave.simd<i32, 32>, i32) -> !wave.index<32>
+  %v = wave.index_expr #wave.expr<"lid"> ["lid", "K"] (%lane, %k) : (!wave.simd<i32, 32>, i32) -> !wave.simd<index, 32>
   return
 }
 
@@ -138,15 +138,15 @@ func.func @index_expr_stray_binding(%lane: !wave.simd<i32, 32>, %k: i32) {
 
 func.func @index_expr_duplicate_name(%lane: !wave.simd<i32, 32>) {
   // expected-error @+1 {{duplicate binding name 'lid'}}
-  %v = wave.index_expr #wave.expr<"lid"> ["lid", "lid"] (%lane, %lane) : (!wave.simd<i32, 32>, !wave.simd<i32, 32>) -> !wave.index<32>
+  %v = wave.index_expr #wave.expr<"lid"> ["lid", "lid"] (%lane, %lane) : (!wave.simd<i32, 32>, !wave.simd<i32, 32>) -> !wave.simd<index, 32>
   return
 }
 
 // -----
 
 func.func @index_expr_width_mismatch(%lane: !wave.simd<i32, 32>) {
-  // expected-error @+1 {{result width 0 disagrees with binding lane width 32}}
-  %v = wave.index_expr #wave.expr<"lid"> ["lid"] (%lane) : (!wave.simd<i32, 32>) -> !wave.index
+  // expected-error @+1 {{lane-varying result must be !wave.simd<index, W>}}
+  %v = wave.index_expr #wave.expr<"lid"> ["lid"] (%lane) : (!wave.simd<i32, 32>) -> index
   return
 }
 
@@ -178,7 +178,7 @@ func.func @index_expr_lane_new_result_mismatch(%lane: !wave.simd<i32, 32>) {
 
 func.func @index_expr_conflicting_widths(%lane32: !wave.simd<i32, 32>, %lane64: !wave.simd<i32, 64>) {
   // expected-error @+1 {{conflicting lane-varying binding widths}}
-  %v = wave.index_expr #wave.expr<"a + b"> ["a", "b"] (%lane32, %lane64) : (!wave.simd<i32, 32>, !wave.simd<i32, 64>) -> !wave.index<32>
+  %v = wave.index_expr #wave.expr<"a + b"> ["a", "b"] (%lane32, %lane64) : (!wave.simd<i32, 32>, !wave.simd<i32, 64>) -> !wave.simd<index, 32>
   return
 }
 
@@ -186,7 +186,7 @@ func.func @index_expr_conflicting_widths(%lane32: !wave.simd<i32, 32>, %lane64: 
 
 func.func @index_expr_empty_name(%lane: !wave.simd<i32, 32>) {
   // expected-error @+1 {{binding name must be non-empty}}
-  %v = wave.index_expr #wave.expr<"lid"> [""] (%lane) : (!wave.simd<i32, 32>) -> !wave.index<32>
+  %v = wave.index_expr #wave.expr<"lid"> [""] (%lane) : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
   return
 }
 

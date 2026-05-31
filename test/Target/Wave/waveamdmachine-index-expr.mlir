@@ -26,8 +26,8 @@ func.func @mixed_offset(%out: !wave.ptr<i32, #wave.global>, %x: i32) attributes 
   %wgid_y_raw = wave.workgroup_id 1
   %wgid_y = wave.assume_range %wgid_y_raw, [0, 1023] : i32
   %k = arith.constant 16 : i32
-  %off = wave.index_expr <"4*lid + K + wgid_y"> ["K", "lid", "wgid_y"] (%k, %lane, %wgid_y) : (i32, !wave.simd<i32, 32>, i32) -> !wave.index<32>
-  %ptrs = wave.ptr_add %out, %off : !wave.ptr<i32, #wave.global>, !wave.index<32> -> !wave.simd<!wave.ptr<i32, #wave.global>, 32>
+  %off = wave.index_expr <"4*lid + K + wgid_y"> ["K", "lid", "wgid_y"] (%k, %lane, %wgid_y) : (i32, !wave.simd<i32, 32>, i32) -> !wave.simd<index, 32>
+  %ptrs = wave.ptr_add %out, %off : !wave.ptr<i32, #wave.global>, !wave.simd<index, 32> -> !wave.simd<!wave.ptr<i32, #wave.global>, 32>
   %vx = wave.splat %x : i32 -> !wave.simd<i32, 32>
   %val = wave.addi %lane, %vx : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
   %tok = wave.store %val -> %ptrs : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<i32, #wave.global>, 32>) -> !wave.mem.token
@@ -46,8 +46,8 @@ func.func @mixed_offset(%out: !wave.ptr<i32, #wave.global>, %x: i32) attributes 
 // CHECK-NOT: offset
 func.func @passthrough(%out: !wave.ptr<i32, #wave.global>, %x: i32) attributes {wave.kernel} {
   %lane = wave.lane_id : !wave.simd<i32, 32>
-  %off = wave.index_expr <"lid"> ["lid"] (%lane) : (!wave.simd<i32, 32>) -> !wave.index<32>
-  %ptrs = wave.ptr_add %out, %off : !wave.ptr<i32, #wave.global>, !wave.index<32> -> !wave.simd<!wave.ptr<i32, #wave.global>, 32>
+  %off = wave.index_expr <"lid"> ["lid"] (%lane) : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
+  %ptrs = wave.ptr_add %out, %off : !wave.ptr<i32, #wave.global>, !wave.simd<index, 32> -> !wave.simd<!wave.ptr<i32, #wave.global>, 32>
   %vx = wave.splat %x : i32 -> !wave.simd<i32, 32>
   %val = wave.addi %lane, %vx : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
   %tok = wave.store %val -> %ptrs : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<i32, #wave.global>, 32>) -> !wave.mem.token
@@ -135,8 +135,8 @@ func.func @buffer_buckets(%out: !wave.ptr<i32, #wave.global>, %x: i32) attribute
   %buf = waveamd.make_buffer %out, %range : !wave.ptr<i32, #wave.global>, i32 -> !wave.ptr<i32, #waveamd.buffer>
   %vx = wave.splat %x : i32 -> !wave.simd<i32, 32>
   %sum = wave.addi %lane, %vx : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
-  %off = wave.index_expr <"lid + wgid_x + wgid_y + K"> ["K", "lid", "wgid_x", "wgid_y"] (%k, %lane, %wgid_x, %wgid_y) : (i32, !wave.simd<i32, 32>, i32, i32) -> !wave.index<32>
-  %ptrs = wave.ptr_add %buf, %off : !wave.ptr<i32, #waveamd.buffer>, !wave.index<32> -> !wave.simd<!wave.ptr<i32, #waveamd.buffer>, 32>
+  %off = wave.index_expr <"lid + wgid_x + wgid_y + K"> ["K", "lid", "wgid_x", "wgid_y"] (%k, %lane, %wgid_x, %wgid_y) : (i32, !wave.simd<i32, 32>, i32, i32) -> !wave.simd<index, 32>
+  %ptrs = wave.ptr_add %buf, %off : !wave.ptr<i32, #waveamd.buffer>, !wave.simd<index, 32> -> !wave.simd<!wave.ptr<i32, #waveamd.buffer>, 32>
   %tok = wave.store %sum -> %ptrs : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<i32, #waveamd.buffer>, 32>) -> !wave.mem.token
   return
 }
@@ -155,9 +155,9 @@ func.func @buffer_bounded_uniform_arg_uses_soffset(%out: !wave.ptr<i32, #wave.gl
   %buf = waveamd.make_buffer %out, %range
       : !wave.ptr<i32, #wave.global>, i32 -> !wave.ptr<i32, #waveamd.buffer>
   %off = wave.index_expr <"lid + 16*u"> ["lid", "u"] (%lane, %u)
-      : (!wave.simd<i32, 32>, i32) -> !wave.index<32>
+      : (!wave.simd<i32, 32>, i32) -> !wave.simd<index, 32>
   %ptrs = wave.ptr_add %buf, %off
-      : !wave.ptr<i32, #waveamd.buffer>, !wave.index<32>
+      : !wave.ptr<i32, #waveamd.buffer>, !wave.simd<index, 32>
       -> !wave.simd<!wave.ptr<i32, #waveamd.buffer>, 32>
   %tok = wave.store %lane -> %ptrs
       : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<i32, #waveamd.buffer>, 32>)
@@ -190,9 +190,9 @@ func.func @nested_uniform_summand_stays_sgpr(%out: !wave.ptr<i32, #wave.global>)
       : !wave.ptr<i32, #wave.global>, i32 -> !wave.ptr<i32, #waveamd.buffer>
   %off = wave.index_expr <"lid + (wgid_x + 1)*(wgid_y + 2)">
       ["lid", "wgid_x", "wgid_y"] (%lane, %wgid_x, %wgid_y)
-      : (!wave.simd<i32, 32>, i32, i32) -> !wave.index<32>
+      : (!wave.simd<i32, 32>, i32, i32) -> !wave.simd<index, 32>
   %ptrs = wave.ptr_add %buf, %off
-      : !wave.ptr<i32, #waveamd.buffer>, !wave.index<32>
+      : !wave.ptr<i32, #waveamd.buffer>, !wave.simd<index, 32>
       -> !wave.simd<!wave.ptr<i32, #waveamd.buffer>, 32>
   %tok = wave.store %lane -> %ptrs
       : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<i32, #waveamd.buffer>, 32>)
@@ -213,8 +213,8 @@ func.func @nested_uniform_summand_stays_sgpr(%out: !wave.ptr<i32, #wave.global>)
 func.func @range_drives_const_fold(%out: !wave.ptr<i32, #wave.global>, %x: i32, %v: i32) attributes {wave.kernel} {
   %lane = wave.lane_id : !wave.simd<i32, 32>
   %a = wave.assume_range %x, [16, 16] : i32
-  %off = wave.index_expr <"K + lid"> ["K", "lid"] (%a, %lane) : (i32, !wave.simd<i32, 32>) -> !wave.index<32>
-  %ptrs = wave.ptr_add %out, %off : !wave.ptr<i32, #wave.global>, !wave.index<32> -> !wave.simd<!wave.ptr<i32, #wave.global>, 32>
+  %off = wave.index_expr <"K + lid"> ["K", "lid"] (%a, %lane) : (i32, !wave.simd<i32, 32>) -> !wave.simd<index, 32>
+  %ptrs = wave.ptr_add %out, %off : !wave.ptr<i32, #wave.global>, !wave.simd<index, 32> -> !wave.simd<!wave.ptr<i32, #wave.global>, 32>
   %vv = wave.splat %v : i32 -> !wave.simd<i32, 32>
   %val = wave.addi %lane, %vv : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
   %tok = wave.store %val -> %ptrs : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<i32, #wave.global>, 32>) -> !wave.mem.token

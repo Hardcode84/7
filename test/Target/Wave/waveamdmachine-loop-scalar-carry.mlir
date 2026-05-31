@@ -32,9 +32,9 @@ func.func @uniform_buffer_pointer_carry(%a: !wave.ptr<i32, #wave.global>,
   %wg = wave.assume_range %wg_raw, [0, 1023] : i32
   %vx = wave.splat %x : i32 -> !wave.simd<i32, 32>
   %off = wave.index_expr <"floor(1/32*lid) + wg"> ["lid", "wg"] (%lane, %wg)
-      : (!wave.simd<i32, 32>, i32) -> !wave.index<32>
+      : (!wave.simd<i32, 32>, i32) -> !wave.simd<index, 32>
   %p0 = wave.ptr_add %buf, %off
-      : !wave.ptr<i32, #waveamd.buffer>, !wave.index<32>
+      : !wave.ptr<i32, #waveamd.buffer>, !wave.simd<index, 32>
       -> !wave.simd<!wave.ptr<i32, #waveamd.buffer>, 32>
   %res = scf.for %i = %c0 to %n_bounded step %c1 iter_args(%q = %p0)
       -> (!wave.simd<!wave.ptr<i32, #waveamd.buffer>, 32>) : i32 {

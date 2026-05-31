@@ -13,8 +13,8 @@ func.func @strided_buf(%a: !wave.ptr<f16, #wave.global>, %n: i32, %r: i32)
   %buf = waveamd.make_buffer %a, %r : !wave.ptr<f16, #wave.global>, i32 -> !wave.ptr<f16, #waveamd.buffer>
   %wi = wave.workitem_id 0 : !wave.simd<i32, 32>
   %off = wave.index_expr <"64*Mod(wi, 16)"> ["wi"](%wi)
-      : (!wave.simd<i32, 32>) -> !wave.index<32>
-  %p0 = wave.ptr_add %buf, %off : !wave.ptr<f16, #waveamd.buffer>, !wave.index<32>
+      : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
+  %p0 = wave.ptr_add %buf, %off : !wave.ptr<f16, #waveamd.buffer>, !wave.simd<index, 32>
       -> !wave.simd<!wave.ptr<f16, #waveamd.buffer>, 32>
   scf.for %i = %c0 to %n_bounded step %c1 iter_args(%q = %p0)
       -> (!wave.simd<!wave.ptr<f16, #waveamd.buffer>, 32>) : i32 {

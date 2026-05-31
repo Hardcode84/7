@@ -69,9 +69,9 @@ func.func @global_dma_lds_uniform_mul_dest(%in: !wave.ptr<i32, #wave.global>)
   %lds = wave.lds_base : !wave.ptr<i32, #wave.shared>
   %first = wave.read_first %wi : !wave.simd<i32, 64> -> i32
   %off = wave.index_expr <"512*floor(1/64*wi_first)"> ["wi_first"](%first)
-      : (i32) -> !wave.index
+      : (i32) -> index
   %dst = wave.ptr_add %lds, %off
-      : !wave.ptr<i32, #wave.shared>, !wave.index -> !wave.ptr<i32, #wave.shared>
+      : !wave.ptr<i32, #wave.shared>, index -> !wave.ptr<i32, #wave.shared>
   %tok0 = wave.token : !wave.mem.token
   %tok = waveamd.dma_load_lds %src -> %dst after %tok0 {bytes = 16 : i64}
       : (!wave.simd<!wave.ptr<i32, #wave.global>, 64>,
@@ -99,9 +99,9 @@ func.func @global_dma_lds_uniform_dest_add(%in: !wave.ptr<i32, #wave.global>)
   %lds = wave.lds_base : !wave.ptr<i32, #wave.shared>
   %first = wave.read_first %wi : !wave.simd<i32, 64> -> i32
   %off = wave.index_expr <"256 + 512*floor(1/64*wi_first)"> ["wi_first"](%first)
-      : (i32) -> !wave.index
+      : (i32) -> index
   %dst = wave.ptr_add %lds, %off
-      : !wave.ptr<i32, #wave.shared>, !wave.index -> !wave.ptr<i32, #wave.shared>
+      : !wave.ptr<i32, #wave.shared>, index -> !wave.ptr<i32, #wave.shared>
   %tok0 = wave.token : !wave.mem.token
   %tok = waveamd.dma_load_lds %src -> %dst after %tok0 {bytes = 16 : i64}
       : (!wave.simd<!wave.ptr<i32, #wave.global>, 64>,
@@ -122,9 +122,9 @@ func.func @global_dma_lds_source_const_offset(%in: !wave.ptr<i32, #wave.global>)
   %wi_raw = wave.workitem_id 0 : !wave.simd<i32, 64>
   %wi = wave.assume_range %wi_raw, [0, 63] : !wave.simd<i32, 64>
   %src_off = wave.index_expr <"64 + wi"> ["wi"](%wi)
-      : (!wave.simd<i32, 64>) -> !wave.index<64>
+      : (!wave.simd<i32, 64>) -> !wave.simd<index, 64>
   %src = wave.ptr_add %in, %src_off
-      : !wave.ptr<i32, #wave.global>, !wave.index<64>
+      : !wave.ptr<i32, #wave.global>, !wave.simd<index, 64>
       -> !wave.simd<!wave.ptr<i32, #wave.global>, 64>
   %lds = wave.lds_base : !wave.ptr<i32, #wave.shared>
   %tok0 = wave.token : !wave.mem.token

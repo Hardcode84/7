@@ -25,8 +25,8 @@ func.func @uniform_i32_arith(%out: !wave.ptr<i32, #wave.global>) attributes {wav
   %two = arith.constant 2 : i32
   %shifted = wave.shli %scaled, %two : i32, i32 -> i32
   // Make the shifted result live so it survives DCE.
-  %off = wave.index_expr <"S"> ["S"] (%shifted) : (i32) -> !wave.index
-  %ptr = wave.ptr_add %out, %off : !wave.ptr<i32, #wave.global>, !wave.index -> !wave.ptr<i32, #wave.global>
+  %off = wave.index_expr <"S"> ["S"] (%shifted) : (i32) -> index
+  %ptr = wave.ptr_add %out, %off : !wave.ptr<i32, #wave.global>, index -> !wave.ptr<i32, #wave.global>
   return
 }
 

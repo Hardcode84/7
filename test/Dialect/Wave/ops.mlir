@@ -193,22 +193,22 @@ func.func @wave_index_expr(%lane: !wave.simd<i32, 32>,
                            %k: i32,
                            %wgid: i32,
                            %buffer: !wave.ptr<i32, #wave.global>) {
-  // Uniform-only bindings collapse to !wave.index (no width).
-  // CHECK: wave.index_expr <"K + wgid_y"> ["K", "wgid_y"](%{{.*}}, %{{.*}}) : (i32, i32) -> !wave.index
-  %u = wave.index_expr #wave.expr<"K + wgid_y"> ["K", "wgid_y"] (%k, %wgid) : (i32, i32) -> !wave.index
+  // Uniform-only bindings collapse to index (no width).
+  // CHECK: wave.index_expr <"K + wgid_y"> ["K", "wgid_y"](%{{.*}}, %{{.*}}) : (i32, i32) -> index
+  %u = wave.index_expr #wave.expr<"K + wgid_y"> ["K", "wgid_y"] (%k, %wgid) : (i32, i32) -> index
 
-  // Lane-varying binding pins the result to !wave.index<32>. The printer
+  // Lane-varying binding pins the result to !wave.simd<index, 32>. The printer
   // emits the ixsimpl canonical form of the expr text (terms reordered).
-  // CHECK: wave.index_expr <"K + 4*lid"> ["K", "lid"](%{{.*}}, %{{.*}}) : (i32, !wave.simd<i32, 32>) -> !wave.index<32>
-  %v = wave.index_expr #wave.expr<"4*lid + K"> ["K", "lid"] (%k, %lane) : (i32, !wave.simd<i32, 32>) -> !wave.index<32>
+  // CHECK: wave.index_expr <"K + 4*lid"> ["K", "lid"](%{{.*}}, %{{.*}}) : (i32, !wave.simd<i32, 32>) -> !wave.simd<index, 32>
+  %v = wave.index_expr #wave.expr<"4*lid + K"> ["K", "lid"] (%k, %lane) : (i32, !wave.simd<i32, 32>) -> !wave.simd<index, 32>
 
   // Constant expression: zero bindings.
-  // CHECK: wave.index_expr <"42"> []() : () -> !wave.index
-  %c = wave.index_expr #wave.expr<"42"> [] () : () -> !wave.index
+  // CHECK: wave.index_expr <"42"> []() : () -> index
+  %c = wave.index_expr #wave.expr<"42"> [] () : () -> index
 
   // The lane-varying index feeds straight into ptr_add as the offset.
-  // CHECK: wave.ptr_add {{.*}} : !wave.ptr<i32, #wave.global>, !wave.index<32> -> !wave.simd<!wave.ptr<i32, #wave.global>, 32>
-  %ptrs = wave.ptr_add %buffer, %v : !wave.ptr<i32, #wave.global>, !wave.index<32> -> !wave.simd<!wave.ptr<i32, #wave.global>, 32>
+  // CHECK: wave.ptr_add {{.*}} : !wave.ptr<i32, #wave.global>, !wave.simd<index, 32> -> !wave.simd<!wave.ptr<i32, #wave.global>, 32>
+  %ptrs = wave.ptr_add %buffer, %v : !wave.ptr<i32, #wave.global>, !wave.simd<index, 32> -> !wave.simd<!wave.ptr<i32, #wave.global>, 32>
 
   func.return
 }

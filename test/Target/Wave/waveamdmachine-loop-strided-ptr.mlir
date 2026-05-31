@@ -12,8 +12,8 @@ func.func @strided_kloop(%a: !wave.ptr<f16, #wave.global>, %n: i32)
   %c1024 = arith.constant 1024 : i32
   %wi = wave.workitem_id 0 : !wave.simd<i32, 32>
   %off = wave.index_expr <"64*Mod(wi, 16)"> ["wi"](%wi)
-      : (!wave.simd<i32, 32>) -> !wave.index<32>
-  %p0 = wave.ptr_add %a, %off : !wave.ptr<f16, #wave.global>, !wave.index<32>
+      : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
+  %p0 = wave.ptr_add %a, %off : !wave.ptr<f16, #wave.global>, !wave.simd<index, 32>
       -> !wave.simd<!wave.ptr<f16, #wave.global>, 32>
   %p1 = wave.ptr_add %p0, %c1024 : !wave.simd<!wave.ptr<f16, #wave.global>, 32>, i32
       -> !wave.simd<!wave.ptr<f16, #wave.global>, 32>
@@ -75,12 +75,12 @@ func.func @strided_two_base_kloop(%a: !wave.ptr<f16, #wave.global>,
   %c16 = arith.constant 16 : i32
   %wi = wave.workitem_id 0 : !wave.simd<i32, 32>
   %off = wave.index_expr <"64*Mod(wi, 16)"> ["wi"](%wi)
-      : (!wave.simd<i32, 32>) -> !wave.index<32>
+      : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
   %p0 = wave.ptr_add %a, %off
-      : !wave.ptr<f16, #wave.global>, !wave.index<32>
+      : !wave.ptr<f16, #wave.global>, !wave.simd<index, 32>
       -> !wave.simd<!wave.ptr<f16, #wave.global>, 32>
   %p1 = wave.ptr_add %b, %off
-      : !wave.ptr<f16, #wave.global>, !wave.index<32>
+      : !wave.ptr<f16, #wave.global>, !wave.simd<index, 32>
       -> !wave.simd<!wave.ptr<f16, #wave.global>, 32>
   scf.for %i = %c0 to %n step %c1
       iter_args(%q0 = %p0, %q1 = %p1)
@@ -131,9 +131,9 @@ func.func @strided_non_normalized_kloop(%a: !wave.ptr<f16, #wave.global>,
   %c16 = arith.constant 16 : i32
   %wi = wave.workitem_id 0 : !wave.simd<i32, 32>
   %off = wave.index_expr <"64*Mod(wi, 16)"> ["wi"](%wi)
-      : (!wave.simd<i32, 32>) -> !wave.index<32>
+      : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
   %p0 = wave.ptr_add %a, %off
-      : !wave.ptr<f16, #wave.global>, !wave.index<32>
+      : !wave.ptr<f16, #wave.global>, !wave.simd<index, 32>
       -> !wave.simd<!wave.ptr<f16, #wave.global>, 32>
   scf.for %i = %c4 to %n step %c2 iter_args(%q = %p0)
       -> (!wave.simd<!wave.ptr<f16, #wave.global>, 32>) : i32 {
@@ -172,10 +172,10 @@ func.func @strided_dynamic_uniform_kloop(%a: !wave.ptr<f16, #wave.global>,
   %c1024 = arith.constant 1024 : i32
   %wi = wave.workitem_id 0 : !wave.simd<i32, 32>
   %off = wave.index_expr <"64*Mod(wi, 16)"> ["wi"](%wi)
-      : (!wave.simd<i32, 32>) -> !wave.index<32>
+      : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
   %delta = wave.assume_range %delta_raw, [1, 32] : i32
   %p0 = wave.ptr_add %a, %off
-      : !wave.ptr<f16, #wave.global>, !wave.index<32>
+      : !wave.ptr<f16, #wave.global>, !wave.simd<index, 32>
       -> !wave.simd<!wave.ptr<f16, #wave.global>, 32>
   %p1 = wave.ptr_add %p0, %c1024
       : !wave.simd<!wave.ptr<f16, #wave.global>, 32>, i32
@@ -225,9 +225,9 @@ func.func @strided_live_result(%a: !wave.ptr<f16, #wave.global>, %n: i32)
   %c16 = arith.constant 16 : i32
   %wi = wave.workitem_id 0 : !wave.simd<i32, 32>
   %off = wave.index_expr <"64*Mod(wi, 16)"> ["wi"](%wi)
-      : (!wave.simd<i32, 32>) -> !wave.index<32>
+      : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
   %p0 = wave.ptr_add %a, %off
-      : !wave.ptr<f16, #wave.global>, !wave.index<32>
+      : !wave.ptr<f16, #wave.global>, !wave.simd<index, 32>
       -> !wave.simd<!wave.ptr<f16, #wave.global>, 32>
   %qf = scf.for %i = %c0 to %n step %c1 iter_args(%q = %p0)
       -> (!wave.simd<!wave.ptr<f16, #wave.global>, 32>) : i32 {

@@ -17,9 +17,9 @@ func.func @extracted_strided_kloop(%a: !wave.ptr<f16, #wave.global>, %n: i32)
   %wi = wave.workitem_id 0 : !wave.simd<i32, 32>
   scf.for %i = %c0 to %n step %c1 : i32 {
     %off = wave.index_expr <"128*i + 64*Mod(wi, 16)"> ["i", "wi"](%i, %wi)
-        : (i32, !wave.simd<i32, 32>) -> !wave.index<32>
+        : (i32, !wave.simd<i32, 32>) -> !wave.simd<index, 32>
     %p = wave.ptr_add %a, %off
-        : !wave.ptr<f16, #wave.global>, !wave.index<32>
+        : !wave.ptr<f16, #wave.global>, !wave.simd<index, 32>
         -> !wave.simd<!wave.ptr<f16, #wave.global>, 32>
     %v, %t = wave.load %p
         : (!wave.simd<!wave.ptr<f16, #wave.global>, 32>)

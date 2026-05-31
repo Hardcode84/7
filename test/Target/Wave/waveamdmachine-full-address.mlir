@@ -15,9 +15,9 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 func.func @global_constant_overflow(%out: !wave.ptr<i32, #wave.global>) attributes {wave.kernel} {
   %lane = wave.lane_id : !wave.simd<i32, 32>
   %off = wave.index_expr <"1073741824 + lid"> ["lid"] (%lane)
-      : (!wave.simd<i32, 32>) -> !wave.index<32>
+      : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
   %ptrs = wave.ptr_add %out, %off
-      : !wave.ptr<i32, #wave.global>, !wave.index<32>
+      : !wave.ptr<i32, #wave.global>, !wave.simd<index, 32>
       -> !wave.simd<!wave.ptr<i32, #wave.global>, 32>
   %tok = wave.store %lane -> %ptrs
       : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<i32, #wave.global>, 32>)
@@ -76,9 +76,9 @@ func.func @global_mixed_index_and_raw_ptr_add(%out: !wave.ptr<i32, #wave.global>
       : !wave.ptr<i32, #wave.global>, !wave.simd<i32, 32>
       -> !wave.simd<!wave.ptr<i32, #wave.global>, 32>
   %off = wave.index_expr <"1073741824 + lid"> ["lid"] (%lane)
-      : (!wave.simd<i32, 32>) -> !wave.index<32>
+      : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
   %ptrs = wave.ptr_add %raw, %off
-      : !wave.simd<!wave.ptr<i32, #wave.global>, 32>, !wave.index<32>
+      : !wave.simd<!wave.ptr<i32, #wave.global>, 32>, !wave.simd<index, 32>
       -> !wave.simd<!wave.ptr<i32, #wave.global>, 32>
   %tok = wave.store %lane -> %ptrs
       : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<i32, #wave.global>, 32>)
@@ -106,9 +106,9 @@ func.func @global_loop_carry_mixed_addr64(%out: !wave.ptr<i32, #wave.global>) at
   scf.for %i = %lo to %hi step %step iter_args(%q = %raw)
       -> (!wave.simd<!wave.ptr<i32, #wave.global>, 32>) : i32 {
     %off = wave.index_expr <"1073741824 + lid"> ["lid"] (%lane)
-        : (!wave.simd<i32, 32>) -> !wave.index<32>
+        : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
     %ptrs = wave.ptr_add %q, %off
-        : !wave.simd<!wave.ptr<i32, #wave.global>, 32>, !wave.index<32>
+        : !wave.simd<!wave.ptr<i32, #wave.global>, 32>, !wave.simd<index, 32>
         -> !wave.simd<!wave.ptr<i32, #wave.global>, 32>
     %tok = wave.store %lane -> %ptrs
         : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<i32, #wave.global>, 32>)
@@ -140,9 +140,9 @@ func.func @global_addr64_two_uniform_products(%out: !wave.ptr<i32, #wave.global>
   %wgid_y = wave.workgroup_id 1
   %off = wave.index_expr <"lid + 1073741824*wgx + 2147483648*wgy">
       ["lid", "wgx", "wgy"] (%lane, %wgid_x, %wgid_y)
-      : (!wave.simd<i32, 32>, i32, i32) -> !wave.index<32>
+      : (!wave.simd<i32, 32>, i32, i32) -> !wave.simd<index, 32>
   %ptrs = wave.ptr_add %out, %off
-      : !wave.ptr<i32, #wave.global>, !wave.index<32>
+      : !wave.ptr<i32, #wave.global>, !wave.simd<index, 32>
       -> !wave.simd<!wave.ptr<i32, #wave.global>, 32>
   %tok = wave.store %lane -> %ptrs
       : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<i32, #wave.global>, 32>)
@@ -157,9 +157,9 @@ func.func @global_addr64_two_uniform_products(%out: !wave.ptr<i32, #wave.global>
 func.func @global_load_constant_overflow(%out: !wave.ptr<i32, #wave.global>) attributes {wave.kernel} {
   %lane = wave.lane_id : !wave.simd<i32, 32>
   %off = wave.index_expr <"1073741824 + lid"> ["lid"] (%lane)
-      : (!wave.simd<i32, 32>) -> !wave.index<32>
+      : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
   %ptrs = wave.ptr_add %out, %off
-      : !wave.ptr<i32, #wave.global>, !wave.index<32>
+      : !wave.ptr<i32, #wave.global>, !wave.simd<index, 32>
       -> !wave.simd<!wave.ptr<i32, #wave.global>, 32>
   %value, %load_token = wave.load %ptrs
       : (!wave.simd<!wave.ptr<i32, #wave.global>, 32>)
