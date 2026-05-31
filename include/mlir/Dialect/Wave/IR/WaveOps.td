@@ -452,21 +452,17 @@ def Wave_PtrAddOp : Wave_Op<"ptr_add", [Pure]> {
 def Wave_IndexExprOp : Wave_Op<"index_expr", [Pure]> {
   let summary = "materialize a symbolic offset as a wave index value";
   let description = [{
-    Produces a `!wave.index` value defined by a symbolic expression and a
+    Produces an index-shaped value defined by a symbolic expression and a
     list of bindings. Each binding pairs an SSA operand with the name of
     a free symbol referenced by the expression. The free-symbol set of
     `$expr` must equal the set of `$names` (bijective).
 
     Binding operand types are restricted to either wave-uniform scalars
-    (signless integer, `!wave.index` with no width) or lane-varying
-    SIMD values (`!wave.simd<i32, W>`, `!wave.index<W>`). The result
-    width is the unique non-zero wave width across the lane-varying
-    bindings; with no lane-varying binding the result is `!wave.index`
-    (uniform).
-
-    Built-in `index` is intentionally not accepted -- offset math here
-    stays in fixed-width integer land. Cast `index` SSA values to i32
-    at the producer before feeding them in.
+    (builtin `index`, signless integer, legacy `!wave.index` with no
+    width) or lane-varying SIMD values (`!wave.simd<i32, W>`,
+    `!wave.simd<index, W>`, legacy `!wave.index<W>`). New IR uses
+    builtin `index` for uniform results and `!wave.simd<index, W>` for
+    lane-varying results.
 
     The op is pure: equal `$expr`, `$bindings`, and `$names` CSE.
   }];
@@ -474,7 +470,7 @@ def Wave_IndexExprOp : Wave_Op<"index_expr", [Pure]> {
   let arguments = (ins Wave_ExprAttr:$expr,
                        StrArrayAttr:$names,
                        Variadic<AnyType>:$bindings);
-  let results = (outs Wave_Index:$result);
+  let results = (outs Wave_IndexValue:$result);
   let assemblyFormat = [{
     $expr $names `(` $bindings `)` attr-dict
     `:` functional-type($bindings, $result)

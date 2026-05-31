@@ -978,13 +978,15 @@ verifyPtrAddOffset(Type offsetType,
     return int64_t{0};
   }
   if (auto offsetSimd = dyn_cast<SimdType>(offsetType)) {
-    if (!offsetSimd.getElementType().isInteger(32))
-      return emitError("SIMD offset element type must be i32");
+    Type elementType = offsetSimd.getElementType();
+    if (!elementType.isIndex() && !elementType.isInteger(32))
+      return emitError("SIMD offset element type must be index or i32");
     return offsetSimd.getWidth();
   }
   if (auto offsetIndex = dyn_cast<WaveIndexType>(offsetType))
     return offsetIndex.getWidth();
-  return emitError("offset must be index, integer, i32 SIMD, or !wave.index");
+  return emitError("offset must be index, integer, index/i32 SIMD, or "
+                   "!wave.index");
 }
 
 // Check that `resultType` matches `pointerType` when both base and offset are
@@ -1032,11 +1034,11 @@ LogicalResult PtrAddOp::verify() {
 }
 
 // Classify an index_expr binding by its operand type. Returns 0 for
-// uniform scalars and a positive wave width for lane-varying bindings;
-// failure for any unsupported binding type. Built-in `index` is
-// deliberately not accepted -- offset math stays in fixed-width territory.
+// uniform scalars and a positive wave width for lane-varying bindings.
 static FailureOr<int64_t> classifyIndexBinding(
     Type type, function_ref<InFlightDiagnostic(const Twine &)> emitError) {
+  if (type.isIndex())
+    return int64_t{0};
   if (auto intType = dyn_cast<IntegerType>(type)) {
     if (!intType.isSignless())
       return emitError("integer binding must be signless");
@@ -1045,12 +1047,13 @@ static FailureOr<int64_t> classifyIndexBinding(
   if (auto indexType = dyn_cast<WaveIndexType>(type))
     return indexType.getWidth();
   if (auto simdType = dyn_cast<SimdType>(type)) {
-    if (!simdType.getElementType().isInteger(32))
-      return emitError("SIMD binding element type must be i32");
+    Type elementType = simdType.getElementType();
+    if (!elementType.isIndex() && !elementType.isInteger(32))
+      return emitError("SIMD binding element type must be index or i32");
     return simdType.getWidth();
   }
-  return emitError(
-      "binding must be signless integer, !wave.index, or !wave.simd<i32, W>");
+  return emitError("binding must be index, signless integer, !wave.index, or "
+                   "!wave.simd<index/i32, W>");
 }
 
 // Bijection check: every entry in `names` is a non-empty unique string
@@ -1107,12 +1110,45 @@ static int64_t getIndexBindingWidth(Value binding) {
   return 0;
 }
 
-static WaveIndexType getCanonicalIndexExprType(MLIRContext *ctx,
-                                               ValueRange bindings) {
+static int64_t getIndexExprWidth(ValueRange bindings) {
   int64_t width = 0;
   for (Value binding : bindings)
     width = std::max(width, getIndexBindingWidth(binding));
-  return WaveIndexType::get(ctx, width);
+  return width;
+}
+
+static Type getPreservedIndexExprType(Type currentType, MLIRContext *ctx,
+                                      ValueRange bindings) {
+  int64_t width = getIndexExprWidth(bindings);
+  if (isa<WaveIndexType>(currentType))
+    return WaveIndexType::get(ctx, width);
+  return width == 0 ? IndexType::get(ctx)
+                    : Type(SimdType::get(ctx, IndexType::get(ctx), width));
+}
+
+static LogicalResult verifyIndexExprResultType(
+    Type resultType, int64_t laneWidth,
+    function_ref<InFlightDiagnostic(const Twine &)> emitError) {
+  if (auto legacy = dyn_cast<WaveIndexType>(resultType)) {
+    if (legacy.getWidth() != laneWidth)
+      return emitError("result width ")
+             << legacy.getWidth() << " disagrees with binding lane width "
+             << laneWidth;
+    return success();
+  }
+  if (laneWidth == 0) {
+    if (!resultType.isIndex())
+      return emitError("uniform result must be index");
+    return success();
+  }
+  auto simdType = dyn_cast<SimdType>(resultType);
+  if (!simdType || !simdType.getElementType().isIndex())
+    return emitError("lane-varying result must be !wave.simd<index, W>");
+  if (simdType.getWidth() != laneWidth)
+    return emitError("result width ")
+           << simdType.getWidth() << " disagrees with binding lane width "
+           << laneWidth;
+  return success();
 }
 
 static LogicalResult collectConstantIndexExprSubstitutions(
@@ -1185,7 +1221,8 @@ struct CanonicalizeIndexExprOp : OpRewritePattern<IndexExprOp> {
     if (!exprChanged && !bindingsChanged)
       return failure();
 
-    Type resultType = getCanonicalIndexExprType(op.getContext(), bindings);
+    Type resultType = getPreservedIndexExprType(op.getResult().getType(),
+                                                op.getContext(), bindings);
     if (resultType != op.getResult().getType())
       return failure();
 
@@ -1221,12 +1258,7 @@ LogicalResult IndexExprOp::verify() {
   if (failed(laneWidth))
     return failure();
 
-  auto resultType = cast<WaveIndexType>(getResult().getType());
-  if (resultType.getWidth() != *laneWidth)
-    return emit("result width ")
-           << resultType.getWidth() << " disagrees with binding lane width "
-           << *laneWidth;
-  return success();
+  return verifyIndexExprResultType(getResult().getType(), *laneWidth, emit);
 }
 
 void IndexExprOp::getCanonicalizationPatterns(RewritePatternSet &patterns,

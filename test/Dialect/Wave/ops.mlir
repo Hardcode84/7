@@ -212,3 +212,23 @@ func.func @wave_index_expr(%lane: !wave.simd<i32, 32>,
 
   func.return
 }
+
+// CHECK-LABEL: func.func @wave_index_expr_index_shaped
+func.func @wave_index_expr_index_shaped(%lane_i32: !wave.simd<i32, 32>,
+                                        %lane_idx: !wave.simd<index, 32>,
+                                        %k: index,
+                                        %buffer: !wave.ptr<i32, #wave.global>) {
+  // CHECK: wave.index_expr <"K"> ["K"](%{{.*}}) : (index) -> index
+  %u = wave.index_expr #wave.expr<"K"> ["K"] (%k) : (index) -> index
+
+  // CHECK: wave.index_expr <"K + lid"> ["K", "lid"](%{{.*}}, %{{.*}}) : (index, !wave.simd<i32, 32>) -> !wave.simd<index, 32>
+  %v = wave.index_expr #wave.expr<"K + lid"> ["K", "lid"] (%k, %lane_i32) : (index, !wave.simd<i32, 32>) -> !wave.simd<index, 32>
+
+  // CHECK: wave.index_expr <"idx"> ["idx"](%{{.*}}) : (!wave.simd<index, 32>) -> !wave.simd<index, 32>
+  %w = wave.index_expr #wave.expr<"idx"> ["idx"] (%lane_idx) : (!wave.simd<index, 32>) -> !wave.simd<index, 32>
+
+  // CHECK: wave.ptr_add {{.*}} : !wave.ptr<i32, #wave.global>, !wave.simd<index, 32> -> !wave.simd<!wave.ptr<i32, #wave.global>, 32>
+  %ptrs = wave.ptr_add %buffer, %v : !wave.ptr<i32, #wave.global>, !wave.simd<index, 32> -> !wave.simd<!wave.ptr<i32, #wave.global>, 32>
+
+  func.return
+}

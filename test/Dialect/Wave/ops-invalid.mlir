@@ -152,6 +152,30 @@ func.func @index_expr_width_mismatch(%lane: !wave.simd<i32, 32>) {
 
 // -----
 
+func.func @index_expr_uniform_new_result_mismatch(%k: i32) {
+  // expected-error @+1 {{uniform result must be index}}
+  %v = wave.index_expr #wave.expr<"K"> ["K"] (%k) : (i32) -> !wave.simd<index, 32>
+  return
+}
+
+// -----
+
+func.func @index_expr_new_width_mismatch(%lane: !wave.simd<i32, 32>) {
+  // expected-error @+1 {{result width 64 disagrees with binding lane width 32}}
+  %v = wave.index_expr #wave.expr<"lid"> ["lid"] (%lane) : (!wave.simd<i32, 32>) -> !wave.simd<index, 64>
+  return
+}
+
+// -----
+
+func.func @index_expr_lane_new_result_mismatch(%lane: !wave.simd<i32, 32>) {
+  // expected-error @+1 {{lane-varying result must be !wave.simd<index, W>}}
+  %v = wave.index_expr #wave.expr<"lid"> ["lid"] (%lane) : (!wave.simd<i32, 32>) -> index
+  return
+}
+
+// -----
+
 func.func @index_expr_conflicting_widths(%lane32: !wave.simd<i32, 32>, %lane64: !wave.simd<i32, 64>) {
   // expected-error @+1 {{conflicting lane-varying binding widths}}
   %v = wave.index_expr #wave.expr<"a + b"> ["a", "b"] (%lane32, %lane64) : (!wave.simd<i32, 32>, !wave.simd<i32, 64>) -> !wave.index<32>

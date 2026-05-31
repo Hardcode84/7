@@ -112,6 +112,14 @@ def Wave_Index
     : Type<CPred<"::llvm::isa<::mlir::wave::WaveIndexType>($_self)">,
            "wave index type">;
 
+def Wave_IndexValue
+    : Type<CPred<"$_self.isIndex() || "
+                 "::llvm::isa<::mlir::wave::WaveIndexType>($_self) || "
+                 "(::llvm::isa<::mlir::wave::SimdType>($_self) && "
+                 "::llvm::cast<::mlir::wave::SimdType>($_self)"
+                 ".getElementType().isIndex())">,
+           "index-shaped wave offset type">;
+
 def Wave_1DVector
     : Type<And<[CPred<"::llvm::isa<::mlir::VectorType>($_self)">,
                 CPred<"::llvm::cast<::mlir::VectorType>($_self).getRank() == "
