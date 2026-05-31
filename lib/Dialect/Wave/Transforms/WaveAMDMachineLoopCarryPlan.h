@@ -11,6 +11,8 @@
 
 #include "WaveAMDMachineSelector.h"
 
+#include <memory>
+
 namespace mlir::wave::wmsel {
 
 struct StrideTerm {
@@ -20,6 +22,7 @@ struct StrideTerm {
 
 struct StrideBytes {
   llvm::SmallVector<StrideTerm, 2> terms;
+  std::shared_ptr<PointerOffset> symbolic;
   int64_t imm = 0;
 };
 
@@ -53,11 +56,12 @@ struct ScfForCarryPlan {
 };
 
 inline bool hasStride(const StrideBytes &stride) {
-  return stride.imm != 0 || !stride.terms.empty();
+  return stride.imm != 0 || (stride.symbolic && stride.symbolic->expr) ||
+         !stride.terms.empty();
 }
 
 inline bool isImmediateStride(const StrideBytes &stride) {
-  return stride.terms.empty();
+  return (!stride.symbolic || !stride.symbolic->expr) && stride.terms.empty();
 }
 
 LogicalResult planScfForCarries(WaveAMDMachineSelector &S, scf::ForOp op,

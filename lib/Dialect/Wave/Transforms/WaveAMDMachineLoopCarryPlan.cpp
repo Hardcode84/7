@@ -51,15 +51,6 @@ static bool offsetFitsU32(WaveAMDMachineSelector &S,
   return !offset.expr || S.slotFitsU32(offset.expr, offset.assumptions);
 }
 
-static bool sameStride(const StrideBytes &lhs, const StrideBytes &rhs) {
-  if (lhs.imm != rhs.imm || lhs.terms.size() != rhs.terms.size())
-    return false;
-  for (auto [l, r] : llvm::zip(lhs.terms, rhs.terms))
-    if (l.value != r.value || l.scale != r.scale)
-      return false;
-  return true;
-}
-
 static bool isDefinedInside(Operation *scope, Value value) {
   if (Operation *def = value.getDefiningOp())
     return scope->isAncestor(def);
@@ -100,6 +91,145 @@ static LogicalResult appendStrideTerm(StrideBytes &stride, Value value,
   return success();
 }
 
+static bool samePointerBinding(const PointerOffsetBinding &lhs,
+                               const PointerOffsetBinding &rhs) {
+  return lhs.name == rhs.name && lhs.value == rhs.value && lhs.kind == rhs.kind;
+}
+
+static bool samePointerBindings(ArrayRef<PointerOffsetBinding> lhs,
+                                ArrayRef<PointerOffsetBinding> rhs) {
+  return lhs.size() == rhs.size() &&
+         llvm::all_of(llvm::zip(lhs, rhs), [](auto pair) {
+           return samePointerBinding(std::get<0>(pair), std::get<1>(pair));
+         });
+}
+
+static bool samePreds(ArrayRef<sym::PredHandle> lhs,
+                      ArrayRef<sym::PredHandle> rhs) {
+  return lhs.size() == rhs.size() &&
+         llvm::all_of(llvm::zip(lhs, rhs), [](auto pair) {
+           return std::get<0>(pair) == std::get<1>(pair);
+         });
+}
+
+static bool samePointerOffset(const PointerOffset *lhs,
+                              const PointerOffset *rhs) {
+  if (static_cast<bool>(lhs) != static_cast<bool>(rhs))
+    return false;
+  return !lhs || (lhs->expr == rhs->expr &&
+                  samePointerBindings(lhs->bindings, rhs->bindings) &&
+                  samePreds(lhs->assumptions, rhs->assumptions));
+}
+
+static bool sameStrideTerms(ArrayRef<StrideTerm> lhs,
+                            ArrayRef<StrideTerm> rhs) {
+  return lhs.size() == rhs.size() &&
+         llvm::all_of(llvm::zip(lhs, rhs), [](auto pair) {
+           const StrideTerm &l = std::get<0>(pair);
+           const StrideTerm &r = std::get<1>(pair);
+           return l.value == r.value && l.scale == r.scale;
+         });
+}
+
+static bool sameStride(const StrideBytes &lhs, const StrideBytes &rhs) {
+  return lhs.imm == rhs.imm &&
+         samePointerOffset(lhs.symbolic.get(), rhs.symbolic.get()) &&
+         sameStrideTerms(lhs.terms, rhs.terms);
+}
+
+static LogicalResult appendPointerBindings(PointerOffset &dst,
+                                           const PointerOffset &src) {
+  for (const PointerOffsetBinding &binding : src.bindings) {
+    auto it = llvm::find_if(dst.bindings, [&](const PointerOffsetBinding &old) {
+      return old.name == binding.name;
+    });
+    if (it != dst.bindings.end()) {
+      if (!samePointerBinding(*it, binding))
+        return failure();
+      continue;
+    }
+    dst.bindings.push_back(binding);
+  }
+  llvm::append_range(dst.assumptions, src.assumptions);
+  return success();
+}
+
+static FailureOr<sym::ExprHandle>
+simplifyStrideExpr(WaveAMDMachineSelector &S, sym::ExprHandle expr,
+                   ArrayRef<sym::PredHandle> assumptions) {
+  FailureOr<sym::ExprHandle> simplified =
+      sym::simplifyExpr(S.symbolStore(), expr, assumptions);
+  return succeeded(simplified) ? *simplified : expr;
+}
+
+static FailureOr<PointerOffset> scaleSymbolicStride(WaveAMDMachineSelector &S,
+                                                    const PointerOffset &offset,
+                                                    int64_t scale) {
+  PointerOffset out = offset;
+  if (!out.expr || scale == 1)
+    return out;
+  FailureOr<sym::ExprHandle> scaleExpr =
+      sym::composeExprInt(S.symbolStore(), scale);
+  if (failed(scaleExpr))
+    return failure();
+  FailureOr<sym::ExprHandle> scaled = sym::composeExprBinary(
+      S.symbolStore(), out.expr, sym::ExprBinaryOp::Mul, *scaleExpr);
+  if (failed(scaled))
+    return failure();
+  FailureOr<sym::ExprHandle> expanded =
+      sym::expandExpr(S.symbolStore(), *scaled);
+  if (failed(expanded))
+    return failure();
+  FailureOr<sym::ExprHandle> simplified =
+      simplifyStrideExpr(S, *expanded, out.assumptions);
+  if (failed(simplified))
+    return failure();
+  out.expr = *simplified;
+  return out;
+}
+
+static PointerOffset &getSymbolicStride(StrideBytes &stride) {
+  if (!stride.symbolic)
+    stride.symbolic = std::make_shared<PointerOffset>();
+  return *stride.symbolic;
+}
+
+static LogicalResult appendSymbolicStride(WaveAMDMachineSelector &S,
+                                          StrideBytes &stride,
+                                          const PointerOffset &offset) {
+  PointerOffset &symbolic = getSymbolicStride(stride);
+  if (failed(appendPointerBindings(symbolic, offset)))
+    return failure();
+  if (!offset.expr)
+    return success();
+  if (!symbolic.expr) {
+    symbolic.expr = offset.expr;
+    return success();
+  }
+  FailureOr<sym::ExprHandle> expr = sym::composeExprBinary(
+      S.symbolStore(), symbolic.expr, sym::ExprBinaryOp::Add, offset.expr);
+  if (failed(expr))
+    return failure();
+  FailureOr<sym::ExprHandle> simplified =
+      simplifyStrideExpr(S, *expr, symbolic.assumptions);
+  if (failed(simplified))
+    return failure();
+  symbolic.expr = *simplified;
+  return success();
+}
+
+static LogicalResult appendSymbolicStrideOffset(WaveAMDMachineSelector &S,
+                                                StrideBytes &stride,
+                                                const PointerOffset &offset,
+                                                int64_t scale) {
+  if (classifyPointerOffset(S, offset) == TermKind::Lane)
+    return failure();
+  FailureOr<PointerOffset> scaled = scaleSymbolicStride(S, offset, scale);
+  if (failed(scaled))
+    return failure();
+  return appendSymbolicStride(S, stride, *scaled);
+}
+
 static std::optional<int64_t>
 constantPtrOffsetElements(WaveAMDMachineSelector &S, Value source) {
   if (std::optional<int64_t> raw = getConstantIntValue(source))
@@ -122,6 +252,9 @@ static LogicalResult appendPtrStrideOffset(WaveAMDMachineSelector &S,
   }
   if (isLaneVaryingValue(source.getType()) || isDefinedInside(op, source))
     return failure();
+  auto it = S.indexOffsets.find(source);
+  if (it != S.indexOffsets.end())
+    return appendSymbolicStrideOffset(S, stride, it->second, scale);
   return appendStrideTerm(stride, source, scale);
 }
 
@@ -236,42 +369,69 @@ static FailureOr<sym::ExprHandle> scaleStrideTerm(WaveAMDMachineSelector &S,
   return sym::expandExpr(S.symbolStore(), *scaled);
 }
 
+static LogicalResult appendStrideImmOffset(WaveAMDMachineSelector &S,
+                                           PointerOffset &offset, int64_t imm) {
+  if (imm == 0)
+    return success();
+  FailureOr<sym::ExprHandle> immExpr =
+      sym::composeExprInt(S.symbolStore(), imm);
+  if (failed(immExpr))
+    return failure();
+  FailureOr<sym::ExprHandle> expr =
+      appendExpr(S, offset.expr, *immExpr, offset.assumptions);
+  if (failed(expr))
+    return failure();
+  offset.expr = *expr;
+  return success();
+}
+
+static LogicalResult appendStrideTermOffset(WaveAMDMachineSelector &S,
+                                            PointerOffset &offset,
+                                            const StrideTerm &term,
+                                            StringRef nameStem) {
+  std::string name = makeLoopSymbol(S, nameStem);
+  FailureOr<sym::ExprHandle> sym = sym::composeExprSym(S.symbolStore(), name);
+  if (failed(sym))
+    return failure();
+  offset.bindings.push_back({name, term.value, TermKind::Uniform});
+  if (std::optional<sym::PredHandle> a = S.bindingAssumption(term.value, name))
+    offset.assumptions.push_back(*a);
+  FailureOr<sym::ExprHandle> scaled = scaleStrideTerm(S, *sym, term.scale);
+  if (failed(scaled))
+    return failure();
+  FailureOr<sym::ExprHandle> expr =
+      appendExpr(S, offset.expr, *scaled, offset.assumptions);
+  if (failed(expr))
+    return failure();
+  offset.expr = *expr;
+  return success();
+}
+
+static LogicalResult ensureStrideOffsetExpr(WaveAMDMachineSelector &S,
+                                            PointerOffset &offset) {
+  if (offset.expr)
+    return success();
+  FailureOr<sym::ExprHandle> zero =
+      sym::composeExprInt(S.symbolStore(), int64_t{0});
+  if (failed(zero))
+    return failure();
+  offset.expr = *zero;
+  return success();
+}
+
 static FailureOr<PointerOffset> buildStrideOffset(WaveAMDMachineSelector &S,
                                                   const StrideBytes &stride,
                                                   StringRef nameStem) {
   PointerOffset offset;
-  if (stride.imm != 0) {
-    FailureOr<sym::ExprHandle> imm =
-        sym::composeExprInt(S.symbolStore(), stride.imm);
-    if (failed(imm))
+  if (stride.symbolic)
+    offset = *stride.symbolic;
+  if (failed(appendStrideImmOffset(S, offset, stride.imm)))
+    return failure();
+  for (const StrideTerm &term : stride.terms)
+    if (failed(appendStrideTermOffset(S, offset, term, nameStem)))
       return failure();
-    offset.expr = *imm;
-  }
-  for (const StrideTerm &term : stride.terms) {
-    std::string name = makeLoopSymbol(S, nameStem);
-    FailureOr<sym::ExprHandle> sym = sym::composeExprSym(S.symbolStore(), name);
-    if (failed(sym))
-      return failure();
-    offset.bindings.push_back({name, term.value, TermKind::Uniform});
-    if (std::optional<sym::PredHandle> a =
-            S.bindingAssumption(term.value, name))
-      offset.assumptions.push_back(*a);
-    FailureOr<sym::ExprHandle> scaled = scaleStrideTerm(S, *sym, term.scale);
-    if (failed(scaled))
-      return failure();
-    FailureOr<sym::ExprHandle> expr =
-        appendExpr(S, offset.expr, *scaled, offset.assumptions);
-    if (failed(expr))
-      return failure();
-    offset.expr = *expr;
-  }
-  if (!offset.expr) {
-    FailureOr<sym::ExprHandle> zero =
-        sym::composeExprInt(S.symbolStore(), int64_t{0});
-    if (failed(zero))
-      return failure();
-    offset.expr = *zero;
-  }
+  if (failed(ensureStrideOffsetExpr(S, offset)))
+    return failure();
   return offset;
 }
 
@@ -360,8 +520,11 @@ static std::optional<StrideBytes> stridedCarryBytes(WaveAMDMachineSelector &S,
   Value arg = op.getRegionIterArgs()[i];
   Value y = cast<scf::YieldOp>(op.getBody()->getTerminator()).getOperand(i);
   if (std::optional<int64_t> bytes = constantPtrAdvanceBytes(S, y, arg))
-    if (*bytes > 0 && *bytes <= u32Max)
-      return StrideBytes{{}, *bytes};
+    if (*bytes > 0 && *bytes <= u32Max) {
+      StrideBytes stride;
+      stride.imm = *bytes;
+      return stride;
+    }
   int64_t scale = static_cast<int64_t>(S.elementSizeBytes(arg.getType()));
   StrideBytes stride;
   while (auto add = y.getDefiningOp<PtrAddOp>()) {

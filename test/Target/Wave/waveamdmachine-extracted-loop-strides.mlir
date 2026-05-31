@@ -31,3 +31,41 @@ func.func @extracted_strided_kloop(%a: !wave.ptr<f16, #wave.global>, %n: i32)
   return
 }
 }
+
+// CHECK-LABEL: func.func @extracted_nested_symbolic_stride
+// CHECK: %[[STRIDE:.*]], %{{.*}} = waveamdmachine.s_lshl_b32
+// CHECK: %[[INNER:.*]]:3 = waveamdmachine.uniform_loop
+// CHECK: ^bb0(%{{.*}}: !waveamdmachine.reg<sgpr, 1>, %[[VOFF:.*]]: !waveamdmachine.reg<vgpr, 1>, %[[BASE:.*]]: !waveamdmachine.reg<sgpr, 2>):
+// CHECK: global_load_tuple_b32 %[[VOFF]], %[[BASE]]
+// CHECK-NOT: waveamdmachine.v_add_u32
+// CHECK: %[[NEXT:.*]], %{{.*}} = waveamdmachine.s_add_u64_u32 %[[BASE]], %[[STRIDE]]
+// CHECK-NEXT: %[[COND:.*]] = waveamdmachine.s_cmp_lt_i32
+// CHECK-NEXT: waveamdmachine.continue_if %[[COND]]
+// CHECK-SAME: %[[NEXT]]
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
+func.func @extracted_nested_symbolic_stride(
+    %a: !wave.ptr<f16, #wave.global>, %n_raw: i32, %m: i32)
+    attributes {wave.kernel} {
+  %c0 = arith.constant 0 : i32
+  %c1 = arith.constant 1 : i32
+  %n = wave.assume_range %n_raw, [0, 31] : i32
+  %wi = wave.workitem_id 0 : !wave.simd<i32, 32>
+  scf.for %i = %c0 to %n step %c1 : i32 {
+    scf.for %j = %c1 to %m step %c1 : i32 {
+      %off = wave.index_expr <"16*i*j + 64*Mod(wi, 16)">
+          ["i", "j", "wi"](%i, %j, %wi)
+          : (i32, i32, !wave.simd<i32, 32>) -> !wave.simd<index, 32>
+      %p = wave.ptr_add %a, %off
+          : !wave.ptr<f16, #wave.global>, !wave.simd<index, 32>
+          -> !wave.simd<!wave.ptr<f16, #wave.global>, 32>
+      %v, %t = wave.load %p
+          : (!wave.simd<!wave.ptr<f16, #wave.global>, 32>)
+          -> (!wave.simd<vector<8xi32>, 32>, !wave.mem.token)
+      wave.store %v -> %p
+          : (!wave.simd<vector<8xi32>, 32>,
+             !wave.simd<!wave.ptr<f16, #wave.global>, 32>) -> !wave.mem.token
+    }
+  }
+  return
+}
+}
