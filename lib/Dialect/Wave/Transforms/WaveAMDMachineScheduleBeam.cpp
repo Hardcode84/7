@@ -41,8 +41,7 @@ struct BeamSearchConfig {
   unsigned width = 12;                      // states kept per depth
   unsigned branchLimit = 4;                 // ready choices expanded per state
   unsigned candidateLimit = 8;              // completed beam orders emitted
-  unsigned parallelChoiceParentMin = 32;    // parents scored in parallel
-  unsigned parallelStateChildMin = 32;      // next states built in parallel
+  unsigned parallelChoiceParentChunk = 4;   // parents per choice task
 };
 
 static constexpr BeamSearchConfig kDefaultBeamSearchConfig;
@@ -650,11 +649,20 @@ static SmallVector<BeamChild, 32> buildBeamChildren(
         getReadyChoices(beam[parentIndex], tables, metrics, guide,
                         guidePositions, pressureModel, budgets, config);
   };
-  if (beam.size() >= config.parallelChoiceParentMin)
-    parallelFor(context, 0, beam.size(), buildChoices);
-  else
-    for (size_t parentIndex : llvm::seq<size_t>(0, beam.size()))
+
+  size_t chunk = config.parallelChoiceParentChunk;
+  if (beam.size() > chunk) {
+    size_t chunkCount = (beam.size() + chunk - 1) / chunk;
+    parallelFor(context, 0, chunkCount, [&](size_t chunkIndex) {
+      size_t begin = chunkIndex * chunk;
+      size_t end = std::min(begin + chunk, beam.size());
+      for (size_t parentIndex : llvm::seq(begin, end))
+        buildChoices(parentIndex);
+    });
+  } else {
+    for (size_t parentIndex : llvm::seq(beam.size()))
       buildChoices(parentIndex);
+  }
 
   SmallVector<BeamChild, 32> children;
   for (auto [parentIndex, choices] : llvm::enumerate(choicesByParent))
@@ -664,27 +672,19 @@ static SmallVector<BeamChild, 32> buildBeamChildren(
 }
 
 static SmallVector<BeamState, 16>
-buildNextBeam(MLIRContext *context, ArrayRef<BeamState> beam,
-              ArrayRef<BeamChild> children, const GraphTables &tables,
-              ArrayRef<unsigned> guide, const PressureModel &pressureModel,
+buildNextBeam(ArrayRef<BeamState> beam, ArrayRef<BeamChild> children,
+              const GraphTables &tables, ArrayRef<unsigned> guide,
+              const PressureModel &pressureModel,
               const RegisterPressureBudgets &budgets,
-              const BeamSearchConfig &config,
               SmallVectorImpl<BeamTrace> &traces) {
   SmallVector<BeamState, 16> nextBeam;
-  nextBeam.resize(children.size());
+  nextBeam.reserve(children.size());
   unsigned traceBase = traces.size();
   traces.resize(traceBase + children.size());
-  auto buildState = [&](size_t childIndex) {
-    const BeamChild &child = children[childIndex];
-    nextBeam[childIndex] = buildNextBeamState(
-        beam[child.parent], child.choice, tables, guide, pressureModel, budgets,
-        traces, traceBase + childIndex);
-  };
-  if (children.size() >= config.parallelStateChildMin)
-    parallelFor(context, 0, children.size(), buildState);
-  else
-    for (size_t childIndex : llvm::seq<size_t>(0, children.size()))
-      buildState(childIndex);
+  for (auto [childIndex, child] : llvm::enumerate(children))
+    nextBeam.push_back(buildNextBeamState(beam[child.parent], child.choice,
+                                          tables, guide, pressureModel, budgets,
+                                          traces, traceBase + childIndex));
   return nextBeam;
 }
 
@@ -709,8 +709,8 @@ runGuidedBeamSearch(MLIRContext *context, const GraphTables &tables,
     if (children.empty())
       break;
     pruneBeamChildren(children, beam, budgets, config);
-    beam = buildNextBeam(context, beam, children, tables, guide, pressureModel,
-                         budgets, config, traces);
+    beam = buildNextBeam(beam, children, tables, guide, pressureModel, budgets,
+                         traces);
   }
 
   SmallVector<BeamResult, 8> results;
