@@ -45,9 +45,11 @@ from mlir._mlir_libs._waveDialectsNanobind import (
     PtrType,
     SharedAddressSpaceAttr,
     SimdType,
-    WaveIndexType,
     register_dialects,
     register_passes,
+)
+from mlir._mlir_libs._waveDialectsNanobind import (
+    WaveIndexType as _WaveIndexType,
 )
 from mlir.dialects import arith, func, gpu, memref, scf, wave, waveamd, wavemeta
 from mlir.dialects.arith import CmpIPredicate
@@ -166,13 +168,13 @@ def mem_token_type() -> Type:
 
 
 def wave_index_type(width: int = 0) -> Type:
-    """Build a `!wave.index` value type.
+    """Build legacy `!wave.index`.
 
-    `width=0` is the uniform (scalar) form. A non-zero `width` denotes the
-    lane-varying form: one per-lane element across a subgroup of that
-    width.
+    Transitional compatibility hook. New symbolic offsets use builtin
+    `index` or `!wave.simd<index, W>`; remove this after legacy IR
+    migration.
     """
-    return WaveIndexType.get(width=width, context=_current_context())
+    return _WaveIndexType.get(width=width, context=_current_context())
 
 
 def global_address_space() -> Attribute:
@@ -258,17 +260,16 @@ def _arith_result_type(lhs: Value, rhs: Value) -> Type:
 def _binding_lane_width(values: Iterable[Value]) -> int:
     """Reduce binding operand types to a single non-zero lane width.
 
-    Uniform operands (`index`, signless int, uniform `!wave.index`)
-    contribute zero. Lane-varying operands (`!wave.simd<i32, W>`,
-    `!wave.index<W>`) must agree on `W`.
+    Uniform scalars contribute zero. Lane-varying SIMD operands and
+    legacy `!wave.index<W>` must agree on `W`.
     """
     lane = 0
     for v in values:
         ty = v.type
         if SimdType.isinstance(ty):
             width = SimdType(ty).width
-        elif WaveIndexType.isinstance(ty):
-            width = WaveIndexType(ty).width
+        elif _WaveIndexType.isinstance(ty):
+            width = _WaveIndexType(ty).width
         else:
             width = 0
         if width == 0:
@@ -284,9 +285,15 @@ def _binding_lane_width(values: Iterable[Value]) -> int:
 def _lane_width(type_: Type) -> int:
     if SimdType.isinstance(type_):
         return int(SimdType(type_).width)
-    if WaveIndexType.isinstance(type_):
-        return int(WaveIndexType(type_).width)
+    if _WaveIndexType.isinstance(type_):
+        return int(_WaveIndexType(type_).width)
     return 0
+
+
+def _index_expr_result_type(width: int) -> Type:
+    if width == 0:
+        return index_type()
+    return simd_type(index_type(), width)
 
 
 # ---------------------------------------------------------------------------
@@ -657,9 +664,9 @@ class FunctionBuilder:
         simplifier might have dropped.
 
         When `result_type` is omitted the lane width is inferred from
-        the binding operand types: a `!wave.simd<i32, W>` or
-        `!wave.index<W>` binding pins the result to `!wave.index<W>`;
-        otherwise the result is the uniform `!wave.index`.
+        the binding operand types: lane-varying bindings produce
+        `!wave.simd<index, W>`, otherwise the result is builtin
+        `index`.
         """
         binding_map: dict[str, Value] = {}
         for key, value in (bindings or {}).items():
@@ -670,7 +677,9 @@ class FunctionBuilder:
             raise ValueError(f"free symbols missing from bindings: {sorted(unknown)}")
         filtered = {n: binding_map[n] for n in binding_map if n in free_names}
         if result_type is None:
-            result_type = wave_index_type(_binding_lane_width(filtered.values()))
+            result_type = _index_expr_result_type(
+                _binding_lane_width(filtered.values())
+            )
         expr_attr = ExprAttr.get_from_bytes(
             sym_ctx.serialize(expr), context=_current_context()
         )
@@ -1021,7 +1030,6 @@ __all__ = [
     "PtrType",
     "SharedAddressSpaceAttr",
     "SimdType",
-    "WaveIndexType",
     "buffer_address_space",
     "buffer_ptr_type",
     "ceil",
@@ -1046,5 +1054,4 @@ __all__ = [
     "sym_ctx",
     "unranked_memref_type",
     "vector_type",
-    "wave_index_type",
 ]

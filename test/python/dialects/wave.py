@@ -133,12 +133,11 @@ def test_typed_bindings():
         assert casted_frag.wave_size == 32
         assert casted_frag.registers == 8
 
-        uniform_idx = w.wave_index_type()
-        lane_idx = w.wave_index_type(32)
-        assert w.WaveIndexType.isinstance(uniform_idx)
-        assert w.WaveIndexType.isinstance(lane_idx)
-        assert w.WaveIndexType(uniform_idx).width == 0
-        assert w.WaveIndexType(lane_idx).width == 32
+        idx = w.index_type()
+        lane_idx = w.simd_type(idx, 32)
+        assert str(idx) == "index"
+        assert w.SimdType.isinstance(lane_idx)
+        assert w.SimdType(lane_idx).element_type == idx
 
         expr = w.ExprAttr.get("4*lid + K", context=w.Context.current)
         assert w.ExprAttr.isinstance(expr)
@@ -211,10 +210,10 @@ def test_index_expr():
             wgid = w.sym("wgid_y")
             lid = w.sym("lid")
 
-            # Uniform-only bindings -> result is `!wave.index`.
+            # Uniform-only bindings -> result is `index`.
             _u = f.index_expr(K + wgid, {K: k, wgid: wgid_y})
 
-            # Lane-varying binding pins the result to `!wave.index<32>`.
+            # Lane-varying binding pins the result to `!wave.simd<index, 32>`.
             off = f.index_expr(4 * lid + K, {K: k, lid: lane})
 
             # Zero bindings -> constant expression.
@@ -228,12 +227,12 @@ def test_index_expr():
             f.store(f.splat(f.constant(w.i32(), 0)), ptrs)
         # CHECK: func.func @index_expr_kernel
         # CHECK: wave.index_expr <"K + wgid_y"> ["K", "wgid_y"]
-        # CHECK-SAME: -> !wave.index
+        # CHECK-SAME: -> index
         # CHECK: wave.index_expr <"K + 4*lid"> ["K", "lid"]
-        # CHECK-SAME: -> !wave.index<32>
+        # CHECK-SAME: -> !wave.simd<index, 32>
         # CHECK: wave.index_expr <"42"> []()
-        # CHECK-SAME: -> !wave.index
-        # CHECK: wave.ptr_add {{.*}} !wave.index<32>
+        # CHECK-SAME: -> index
+        # CHECK: wave.ptr_add {{.*}} !wave.simd<index, 32>
         print(m.module)
 
 

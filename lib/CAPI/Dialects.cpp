@@ -106,6 +106,8 @@ bool mlirWaveTypeIsAWaveIndex(MlirType type) {
   return llvm::isa<wave::WaveIndexType>(unwrap(type));
 }
 
+// Transitional legacy !wave.index API. New offset builders use builtin
+// index or !wave.simd<index, W>.
 MlirType mlirWaveWaveIndexTypeGet(MlirContext ctx, int64_t width) {
   return wrap(wave::WaveIndexType::get(unwrap(ctx), width));
 }

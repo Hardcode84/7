@@ -123,6 +123,8 @@ static void bindPtrType(nb::module_ &m) {
 }
 
 static void bindWaveIndexType(nb::module_ &m) {
+  // Transitional legacy !wave.index binding. Python builders emit builtin
+  // index / !wave.simd<index, W> for new symbolic offsets.
   mlir_type_subclass(m, "WaveIndexType", mlirWaveTypeIsAWaveIndex)
       .def_classmethod(
           "get",
