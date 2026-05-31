@@ -200,8 +200,7 @@ selectGlobalOrBufferStore(WaveAMDMachineSelector &S, StoreOp op, Value base,
   if (failed(plan))
     return failure();
   if (plan->fullAddressRemainderExpr && isBuffer)
-    return op.emitError(
-        "buffer memory op offset exceeds buffer address fields");
+    return emitBufferAddressFieldError(op.getOperation());
   if (plan->fullAddressRemainderExpr)
     return selectFullAddressStore(S, op, globalBase, *plan, registers,
                                   scalar16);
@@ -397,8 +396,7 @@ selectGlobalOrBufferLoad(WaveAMDMachineSelector &S, LoadOp op, Value base,
   if (failed(plan))
     return failure();
   if (plan->fullAddressRemainderExpr && isBuffer)
-    return op.emitError(
-        "buffer memory op offset exceeds buffer address fields");
+    return emitBufferAddressFieldError(op.getOperation());
   if (plan->fullAddressRemainderExpr)
     return selectFullAddressLoad(S, op, globalBase, *plan, registers, scalar16);
   FailureOr<WaveAMDMachineSelector::BucketedOperands> buckets =

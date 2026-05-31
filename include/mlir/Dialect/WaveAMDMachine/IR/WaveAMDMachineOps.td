@@ -999,7 +999,7 @@ def WaveAMDMachine_BufferStoreB32Op
     inst_offset]`. `soffset` is the wave-uniform contribution (SGPR
     or immediate); callers pass `waveamdmachine.imm 0` when there is no
     S bucket. `inst_offset` folds into the instruction's 12-bit
-    signed immediate field and defaults to 0.
+    unsigned immediate field and defaults to 0.
   }];
   let arguments = (ins WaveAMDMachine_VGPR1:$offset, WaveAMDMachine_VGPR1:$value,
                        WaveAMDMachine_SGPR4:$descriptor,

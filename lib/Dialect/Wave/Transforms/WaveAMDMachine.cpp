@@ -2554,8 +2554,7 @@ materializeDmaSourceBuckets(WaveAMDMachineSelector &S, waveamd::DmaLoadLdsOp op,
     return failure();
   if (plan->fullAddressRemainderExpr) {
     if (isBuffer)
-      return op.emitError(
-          "buffer memory op offset exceeds buffer address fields");
+      return emitBufferAddressFieldError(op.getOperation());
     FailureOr<sym::ExprHandle> voffset =
         appendAddressExpr(S, plan->voffsetExpr, plan->fullAddressRemainderExpr,
                           plan->assumptions);

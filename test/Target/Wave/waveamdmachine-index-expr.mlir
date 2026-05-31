@@ -58,8 +58,7 @@ func.func @passthrough(%out: !wave.ptr<i32, #wave.global>, %x: i32) attributes {
 // wgid_y terms stay SGPR-side and feed the buffer_store_b32 soffset
 // operand. K=8 scaled x4 -> inst_offset = 32. The
 // `wave.assume_range` wrappers bound each workgroup_id so the
-// scaled sum provably fits the 32-bit S slot; without them the
-// emit-time spec check would demote the bucket to voffset.
+// scaled sum provably fits the unsigned 32-bit S slot.
 // CHECK-LABEL: func.func @buffer_buckets
 // CHECK: %[[LANE:.*]] = waveamdmachine.v_mbcnt_lo
 // CHECK: %[[WGX:.*]] = waveamdmachine.s_workgroup_id_x
@@ -83,6 +82,30 @@ func.func @buffer_buckets(%out: !wave.ptr<i32, #wave.global>, %x: i32) attribute
   %off = wave.index_expr <"lid + wgid_x + wgid_y + K"> ["K", "lid", "wgid_x", "wgid_y"] (%k, %lane, %wgid_x, %wgid_y) : (i32, !wave.simd<i32, 32>, i32, i32) -> !wave.index<32>
   %ptrs = wave.ptr_add %buf, %off : !wave.ptr<i32, #waveamd.buffer>, !wave.index<32> -> !wave.simd<!wave.ptr<i32, #waveamd.buffer>, 32>
   %tok = wave.store %sum -> %ptrs : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<i32, #waveamd.buffer>, 32>) -> !wave.mem.token
+  return
+}
+
+// Bounded uniform i32 can occupy the unsigned S slot.
+// CHECK-LABEL: func.func @buffer_bounded_uniform_arg_uses_soffset
+// CHECK-DAG: %[[U:.*]] = waveamdmachine.arg {index = 1 : i64, pointer = false}
+// CHECK-DAG: %[[LANE:.*]] = waveamdmachine.v_mbcnt_lo
+// CHECK: %[[VBYTE:.*]] = waveamdmachine.v_lshlrev_b32 %[[LANE]],
+// CHECK: %[[SBYTE:[^,]+]], %{{.*}} = waveamdmachine.s_lshl_b32 %[[U]],
+// CHECK: waveamdmachine.buffer_store_b32 %[[VBYTE]], {{.*}}, {{.*}}, %[[SBYTE]]
+func.func @buffer_bounded_uniform_arg_uses_soffset(%out: !wave.ptr<i32, #wave.global>, %u_raw: i32) attributes {wave.kernel} {
+  %lane = wave.lane_id : !wave.simd<i32, 32>
+  %u = wave.assume_range %u_raw, [0, 1023] : i32
+  %range = arith.constant 4096 : i32
+  %buf = waveamd.make_buffer %out, %range
+      : !wave.ptr<i32, #wave.global>, i32 -> !wave.ptr<i32, #waveamd.buffer>
+  %off = wave.index_expr <"lid + 16*u"> ["lid", "u"] (%lane, %u)
+      : (!wave.simd<i32, 32>, i32) -> !wave.index<32>
+  %ptrs = wave.ptr_add %buf, %off
+      : !wave.ptr<i32, #waveamd.buffer>, !wave.index<32>
+      -> !wave.simd<!wave.ptr<i32, #waveamd.buffer>, 32>
+  %tok = wave.store %lane -> %ptrs
+      : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<i32, #waveamd.buffer>, 32>)
+      -> !wave.mem.token
   return
 }
 

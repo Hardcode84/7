@@ -106,6 +106,12 @@ inline mlir::waveamdmachine::RegType getVCCType(MLIRContext *ctx) {
                                             /*width=*/1, /*index=*/-1);
 }
 
+inline LogicalResult emitBufferAddressFieldError(Operation *op) {
+  return op->emitError("buffer memory op offset must fit proven unsigned "
+                       "32-bit voffset/soffset fields; add wave.assume_range "
+                       "for bounded offsets");
+}
+
 // Pinned variant: the resulting register's physical index is fixed up
 // front (HSA-loader-preloaded SGPRs s2..s4, workitem_id VGPR v0, ...).
 inline mlir::waveamdmachine::RegType

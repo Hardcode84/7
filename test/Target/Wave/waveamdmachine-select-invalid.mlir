@@ -202,7 +202,7 @@ func.func @buffer_store_offset_overflow(%out: !wave.ptr<i32, #wave.global>) attr
   %ptrs = wave.ptr_add %buf, %off
       : !wave.ptr<i32, #waveamd.buffer>, !wave.index<32>
       -> !wave.simd<!wave.ptr<i32, #waveamd.buffer>, 32>
-  // expected-error @below {{buffer memory op offset exceeds buffer address fields}}
+  // expected-error @below {{buffer memory op offset must fit proven unsigned 32-bit}}
   %tok = wave.store %lane -> %ptrs
       : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<i32, #waveamd.buffer>, 32>)
       -> !wave.mem.token
@@ -223,10 +223,31 @@ func.func @buffer_load_offset_overflow(%out: !wave.ptr<i32, #wave.global>) attri
   %ptrs = wave.ptr_add %buf, %off
       : !wave.ptr<i32, #waveamd.buffer>, !wave.index<32>
       -> !wave.simd<!wave.ptr<i32, #waveamd.buffer>, 32>
-  // expected-error @below {{buffer memory op offset exceeds buffer address fields}}
+  // expected-error @below {{buffer memory op offset must fit proven unsigned 32-bit}}
   %value, %tok = wave.load %ptrs
       : (!wave.simd<!wave.ptr<i32, #waveamd.buffer>, 32>)
       -> (!wave.simd<i32, 32>, !wave.mem.token)
+  return
+}
+}
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
+func.func @buffer_unbounded_uniform_needs_range(%out: !wave.ptr<i32, #wave.global>, %u: i32) attributes {wave.kernel} {
+  %range = arith.constant 4096 : i32
+  %buf = waveamd.make_buffer %out, %range
+      : !wave.ptr<i32, #wave.global>, i32 -> !wave.ptr<i32, #waveamd.buffer>
+  %lane = wave.lane_id : !wave.simd<i32, 32>
+  %off = wave.index_expr <"lid + 16*u"> ["lid", "u"] (%lane, %u)
+      : (!wave.simd<i32, 32>, i32) -> !wave.index<32>
+  %ptrs = wave.ptr_add %buf, %off
+      : !wave.ptr<i32, #waveamd.buffer>, !wave.index<32>
+      -> !wave.simd<!wave.ptr<i32, #waveamd.buffer>, 32>
+  // expected-error @below {{buffer memory op offset must fit proven unsigned 32-bit}}
+  %tok = wave.store %lane -> %ptrs
+      : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<i32, #waveamd.buffer>, 32>)
+      -> !wave.mem.token
   return
 }
 }

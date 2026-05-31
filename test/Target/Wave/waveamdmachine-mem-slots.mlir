@@ -4,12 +4,12 @@
 // RUN: wave-translate --wave-to-amdgpu-asm %s | llvm-mc -triple=amdgcn-amd-amdhsa -mcpu=gfx1100 -filetype=obj -o /dev/null
 
 // The MUBUF / GLOBAL memory ops expose explicit address fields:
-//   * Global ops: a `inst_offset` I64 attr (folds into the MUBUF
-//     12/13-bit signed immediate field). No native `soffset` on gfx11
+//   * Global ops: a `inst_offset` I64 attr (folds into the 13-bit
+//     signed immediate field). No native `soffset` on gfx11
 //     global; address planning folds any S contribution into V.
 //   * Buffer ops: an `soffset` SGPR1OrImm operand (use
-//     `waveamdmachine.imm 0` for "no S") plus the same `inst_offset`
-//     attr.
+//     `waveamdmachine.imm 0` for "no S") plus unsigned 12-bit
+//     `inst_offset`.
 // LDS ops already carry an `offset` immediate attr -- nothing new.
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {

@@ -994,15 +994,16 @@ is structurally simple because the input is structurally rich:
 
 The destination memory op describes the slots it actually has through
 an op interface (`AddressFieldsOpInterface`): `inst_offset` bit width
-and signedness, presence of an `soffset` operand. The bucketizer
-treats those as a per-op contract rather than baking AMDGPU-specific
-constants into the selector. A summand whose proven range exceeds the
-slot it would have ridden demotes to the next-wider slot at emit time
+and signedness, presence of an `soffset` operand. Hardware register
+offset slots (`voffset` and buffer `soffset`) are unsigned 32-bit byte
+offsets, so placement requires a proven `[0, 2^32-1]` range; i32 width
+alone is not enough. A summand whose proven range exceeds the slot it
+would have ridden demotes to the next-wider slot at emit time
 (`inst_offset` overflow demotes to `soffset`, `soffset` overflow
 demotes to `voffset`). If the final voffset is not provably unsigned
 32-bit, the selector materializes a VGPR64 address and uses the
-non-SADDR global form. Buffer pointers retain the original global base
-for that fallback; the normal OFFEN path remains the common case.
+non-SADDR global form. Buffer pointers must fit V / S / inst fields;
+they have no full-address fallback.
 
 The visible payoff for the kernel author is small: wrapping each
 workgroup id with `assume_range` and writing the address as a single
