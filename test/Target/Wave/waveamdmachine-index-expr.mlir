@@ -54,6 +54,62 @@ func.func @passthrough(%out: !wave.ptr<i32, #wave.global>, %x: i32) attributes {
   return
 }
 
+// CHECK-LABEL: func.func @constant_index_offset
+// CHECK: %[[LANE:.*]] = waveamdmachine.v_mbcnt_lo
+// CHECK: %[[VOFFSET:.*]] = waveamdmachine.v_lshlrev_b32 %[[LANE]],
+// CHECK: waveamdmachine.global_store_b32 %[[VOFFSET]], {{.*}} offset 28
+func.func @constant_index_offset(%out: !wave.ptr<i32, #wave.global>, %x: i32) attributes {wave.kernel} {
+  %lane = wave.lane_id : !wave.simd<i32, 32>
+  %off = arith.constant 7 : index
+  %base = wave.ptr_add %out, %off
+      : !wave.ptr<i32, #wave.global>, index -> !wave.ptr<i32, #wave.global>
+  %ptrs = wave.ptr_add %base, %lane
+      : !wave.ptr<i32, #wave.global>, !wave.simd<i32, 32>
+      -> !wave.simd<!wave.ptr<i32, #wave.global>, 32>
+  %vx = wave.splat %x : i32 -> !wave.simd<i32, 32>
+  %tok = wave.store %vx -> %ptrs
+      : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<i32, #wave.global>, 32>)
+      -> !wave.mem.token
+  return
+}
+
+// CHECK-LABEL: func.func @symbolic_index_typed_offset
+// CHECK: %[[LANE:.*]] = waveamdmachine.v_mbcnt_lo
+// CHECK: %[[VOFFSET:.*]] = waveamdmachine.v_lshlrev_b32 %[[LANE]],
+// CHECK: waveamdmachine.global_store_b32 %[[VOFFSET]], {{.*}} offset 64
+func.func @symbolic_index_typed_offset(%out: !wave.ptr<i32, #wave.global>, %x: i32) attributes {wave.kernel} {
+  %lane = wave.lane_id : !wave.simd<i32, 32>
+  %k = arith.constant 16 : index
+  %off = wave.index_expr <"K + lid"> ["K", "lid"] (%k, %lane)
+      : (index, !wave.simd<i32, 32>) -> !wave.simd<index, 32>
+  %ptrs = wave.ptr_add %out, %off
+      : !wave.ptr<i32, #wave.global>, !wave.simd<index, 32>
+      -> !wave.simd<!wave.ptr<i32, #wave.global>, 32>
+  %vx = wave.splat %x : i32 -> !wave.simd<i32, 32>
+  %tok = wave.store %vx -> %ptrs
+      : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<i32, #wave.global>, 32>)
+      -> !wave.mem.token
+  return
+}
+
+// CHECK-LABEL: func.func @raw_simd_index_offset
+// CHECK-DAG: %[[IDX:.*]] = waveamdmachine.arg {index = 1 : i64, pointer = false}
+// CHECK: %[[VOFFSET:.*]] = waveamdmachine.v_lshlrev_b32 %[[IDX]],
+// CHECK: %[[ADDR64:.*]], %{{.*}} = waveamdmachine.v_add_u64
+// CHECK: waveamdmachine.global_store_b32_addr64 %[[ADDR64]],
+func.func @raw_simd_index_offset(%out: !wave.ptr<i32, #wave.global>,
+                                 %idx: !wave.simd<index, 32>,
+                                 %x: i32) attributes {wave.kernel} {
+  %ptrs = wave.ptr_add %out, %idx
+      : !wave.ptr<i32, #wave.global>, !wave.simd<index, 32>
+      -> !wave.simd<!wave.ptr<i32, #wave.global>, 32>
+  %vx = wave.splat %x : i32 -> !wave.simd<i32, 32>
+  %tok = wave.store %vx -> %ptrs
+      : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<i32, #wave.global>, 32>)
+      -> !wave.mem.token
+  return
+}
+
 // Buffer destination has the soffset slot, so the scaled wgid_x /
 // wgid_y terms stay SGPR-side and feed the buffer_store_b32 soffset
 // operand. K=8 scaled x4 -> inst_offset = 32. The

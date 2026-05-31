@@ -55,8 +55,7 @@ using namespace mlir::waveamd;
 
 namespace mlir::wave::wmsel {
 
-// Lane-varying iff the binding is a SIMD value or a lane-pinned
-// !wave.index<W>; uniform iff !wave.index<0> or any scalar.
+// SIMD values and lane-pinned !wave.index<W> are lane-varying.
 static bool isLaneVaryingType(Type type) {
   if (isa<SimdType>(type))
     return true;
@@ -1175,6 +1174,17 @@ LogicalResult WaveAMDMachineSelector::selectConstant(arith::ConstantIntOp op) {
 }
 
 LogicalResult WaveAMDMachineSelector::selectConstant(arith::ConstantOp op) {
+  if (IntegerAttr attr = dyn_cast<IntegerAttr>(op.getValue())) {
+    if (!op.getType().isIndex())
+      return op.emitError("unsupported arith.constant integer attribute");
+    if (!attr.getValue().isSignedIntN(64))
+      return op.emitError("index constant must fit signed 64-bit");
+    values[op.getResult()] =
+        createImm(builder, op.getLoc(), attr.getValue().getSExtValue());
+    eraseIfTopLevel(op);
+    return success();
+  }
+
   FloatAttr attr = dyn_cast<FloatAttr>(op.getValue());
   if (!attr)
     return op.emitError("unsupported arith.constant attribute");
