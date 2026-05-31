@@ -1188,6 +1188,17 @@ struct CanonicalizeIndexExprOp : OpRewritePattern<IndexExprOp> {
 
   LogicalResult matchAndRewrite(IndexExprOp op,
                                 PatternRewriter &rewriter) const override {
+    if (op.getBindings().empty() && op.getResult().getType().isIndex()) {
+      std::optional<int64_t> value =
+          sym::getIntegerLiteralValue(op.getExpr().getValue());
+      if (value) {
+        Value constant =
+            arith::ConstantIndexOp::create(rewriter, op.getLoc(), *value);
+        rewriter.replaceOp(op, constant);
+        return success();
+      }
+    }
+
     auto *dialect = op->getContext()->getLoadedDialect<WaveDialect>();
     if (!dialect)
       return failure();

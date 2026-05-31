@@ -106,18 +106,9 @@ static LogicalResult appendStrideTerm(StrideBytes &stride, Value value,
   return success();
 }
 
-static std::optional<int64_t> constantIndexExprValue(Value source) {
-  IndexExprOp index = source.getDefiningOp<IndexExprOp>();
-  if (!index || !index.getBindings().empty())
-    return std::nullopt;
-  return sym::getIntegerLiteralValue(index.getExpr().getValue());
-}
-
 static std::optional<int64_t>
 constantPtrOffsetElements(WaveAMDMachineSelector &S, Value source) {
   if (std::optional<int64_t> raw = getConstantIntValue(source))
-    return raw;
-  if (std::optional<int64_t> raw = constantIndexExprValue(source))
     return raw;
   auto it = S.indexOffsets.find(source);
   if (it == S.indexOffsets.end() || !it->second.expr ||

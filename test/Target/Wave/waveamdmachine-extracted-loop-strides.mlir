@@ -1,4 +1,4 @@
-// RUN: wave-opt --wave-extract-loop-strides --waveamd-to-machine --canonicalize --cse %s | FileCheck %s
+// RUN: wave-opt --wave-extract-loop-strides --canonicalize --cse --waveamd-to-machine --canonicalize --cse %s | FileCheck %s
 
 // CHECK-LABEL: func.func @extracted_strided_kloop
 // CHECK: %[[LOOP:.*]]:3 = waveamdmachine.uniform_loop

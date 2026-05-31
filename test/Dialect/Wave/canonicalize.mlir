@@ -75,10 +75,18 @@ func.func @index_expr_substitute_const(%lane: !wave.simd<i32, 32>)
 
 // CHECK-LABEL: func.func @index_expr_const_cancels_symbol
 // CHECK-SAME: (%[[X:.*]]: i32)
-// CHECK: %[[OFF:.*]] = wave.index_expr <"0"> []() : () -> index
+// CHECK: %[[OFF:.*]] = arith.constant 0 : index
 // CHECK: return %[[OFF]] : index
 func.func @index_expr_const_cancels_symbol(%x: i32) -> index {
   %k = arith.constant 5 : i32
   %off = wave.index_expr <"K*x - 5*x"> ["K", "x"](%k, %x) : (i32, i32) -> index
+  return %off : index
+}
+
+// CHECK-LABEL: func.func @index_expr_argless_literal
+// CHECK: %[[OFF:.*]] = arith.constant 42 : index
+// CHECK: return %[[OFF]] : index
+func.func @index_expr_argless_literal() -> index {
+  %off = wave.index_expr <"42"> []() : () -> index
   return %off : index
 }
