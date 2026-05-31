@@ -18,11 +18,25 @@ module attributes {transform.with_named_sequence} {
         : (!transform.any_op) -> !transform.any_op
     %rmeta = transform.apply_registered_pass "canonicalize" to %rm
         : (!transform.any_op) -> !transform.any_op
-    %rpack = transform.apply_registered_pass "wave-form-packed-math" to %rmeta
+    %roff0 = transform.apply_registered_pass "wave-combine-pointer-offsets" to %rmeta
         : (!transform.any_op) -> !transform.any_op
-    %roff0 = transform.apply_registered_pass "wave-combine-pointer-offsets" to %rpack
+    %rsimp0 = transform.apply_registered_pass "wave-simplify-index-exprs" to %roff0
         : (!transform.any_op) -> !transform.any_op
-    %rsimp = transform.apply_registered_pass "wave-simplify-index-exprs" to %roff0
+    %rmem = transform.apply_registered_pass "wave-coalesce-memory" to %rsimp0
+        : (!transform.any_op) -> !transform.any_op
+    %rcanon0 = transform.apply_registered_pass "canonicalize" to %rmem
+        : (!transform.any_op) -> !transform.any_op
+    %rcse0 = transform.apply_registered_pass "cse" to %rcanon0
+        : (!transform.any_op) -> !transform.any_op
+    %rpack = transform.apply_registered_pass "wave-form-packed-math" to %rcse0
+        : (!transform.any_op) -> !transform.any_op
+    %rcanon1 = transform.apply_registered_pass "canonicalize" to %rpack
+        : (!transform.any_op) -> !transform.any_op
+    %rcse1 = transform.apply_registered_pass "cse" to %rcanon1
+        : (!transform.any_op) -> !transform.any_op
+    %roff1 = transform.apply_registered_pass "wave-combine-pointer-offsets" to %rcse1
+        : (!transform.any_op) -> !transform.any_op
+    %rsimp = transform.apply_registered_pass "wave-simplify-index-exprs" to %roff1
         : (!transform.any_op) -> !transform.any_op
     %rstride = transform.apply_registered_pass "wave-extract-loop-strides" to %rsimp
         : (!transform.any_op) -> !transform.any_op
