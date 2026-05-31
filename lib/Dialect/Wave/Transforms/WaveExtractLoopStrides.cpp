@@ -354,7 +354,8 @@ static Value createPtrAdd(IRRewriter &rewriter, Location loc, Type resultType,
 
 static void cloneBodyWithCarriedPointer(IRRewriter &rewriter, scf::ForOp src,
                                         scf::ForOp dst,
-                                        LoopStrideCandidate candidate) {
+                                        LoopStrideCandidate candidate,
+                                        Value strideValue) {
   Block &srcBody = *src.getBody();
   Block &dstBody = *dst.getBody();
   Value ptrCarry = dstBody.getArgument(srcBody.getNumArguments());
@@ -379,11 +380,9 @@ static void cloneBodyWithCarriedPointer(IRRewriter &rewriter, scf::ForOp src,
   for (Value value : srcYield.getOperands())
     yielded.push_back(map.lookupOrDefault(value));
 
-  IndexExprOp stride =
-      createIndexExpr(rewriter, candidate.ptrAdd.getLoc(), src->getContext(),
-                      candidate.stride, &map);
   yielded.push_back(createPtrAdd(rewriter, candidate.ptrAdd.getLoc(),
-                                 candidate.ptrAdd.getType(), ptrCarry, stride));
+                                 candidate.ptrAdd.getType(), ptrCarry,
+                                 map.lookupOrDefault(strideValue)));
   scf::YieldOp::create(rewriter, srcYield.getLoc(), yielded);
 }
 
@@ -401,6 +400,8 @@ static void rewriteLoop(IRRewriter &rewriter, scf::ForOp loop,
   Value basePtr = createPtrAdd(rewriter, candidate.ptrAdd.getLoc(),
                                candidate.ptrAdd.getType(),
                                candidate.ptrAdd.getBase(), base.getResult());
+  IndexExprOp stride = createIndexExpr(rewriter, candidate.ptrAdd.getLoc(),
+                                       loop->getContext(), candidate.stride);
 
   SmallVector<Value> initArgs(loop.getInitArgs().begin(),
                               loop.getInitArgs().end());
@@ -409,7 +410,8 @@ static void rewriteLoop(IRRewriter &rewriter, scf::ForOp loop,
       scf::ForOp::create(rewriter, loc, loop.getLowerBound(),
                          loop.getUpperBound(), loop.getStep(), initArgs);
   copyLoopAttrs(loop, newLoop);
-  cloneBodyWithCarriedPointer(rewriter, loop, newLoop, candidate);
+  cloneBodyWithCarriedPointer(rewriter, loop, newLoop, candidate,
+                              stride.getResult());
 
   rewriter.replaceOp(loop,
                      newLoop.getResults().take_front(loop.getNumResults()));

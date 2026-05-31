@@ -106,9 +106,30 @@ static LogicalResult appendStrideTerm(StrideBytes &stride, Value value,
   return success();
 }
 
-static LogicalResult appendPtrStrideOffset(scf::ForOp op, StrideBytes &stride,
+static std::optional<int64_t> constantIndexExprValue(Value source) {
+  IndexExprOp index = source.getDefiningOp<IndexExprOp>();
+  if (!index || !index.getBindings().empty())
+    return std::nullopt;
+  return sym::getIntegerLiteralValue(index.getExpr().getValue());
+}
+
+static std::optional<int64_t>
+constantPtrOffsetElements(WaveAMDMachineSelector &S, Value source) {
+  if (std::optional<int64_t> raw = getConstantIntValue(source))
+    return raw;
+  if (std::optional<int64_t> raw = constantIndexExprValue(source))
+    return raw;
+  auto it = S.indexOffsets.find(source);
+  if (it == S.indexOffsets.end() || !it->second.expr ||
+      !it->second.bindings.empty())
+    return std::nullopt;
+  return sym::getIntegerLiteralValue(it->second.expr);
+}
+
+static LogicalResult appendPtrStrideOffset(WaveAMDMachineSelector &S,
+                                           scf::ForOp op, StrideBytes &stride,
                                            Value source, int64_t scale) {
-  if (std::optional<int64_t> raw = getConstantIntValue(source)) {
+  if (std::optional<int64_t> raw = constantPtrOffsetElements(S, source)) {
     std::optional<int64_t> bytes = llvm::checkedMul(*raw, scale);
     if (!bytes)
       return failure();
@@ -166,7 +187,7 @@ constantPtrAdvanceBytes(WaveAMDMachineSelector &S, Value value, Value iterArg) {
   Value cur = value;
   int64_t elems = 0;
   while (auto add = cur.getDefiningOp<PtrAddOp>()) {
-    std::optional<int64_t> off = getConstantIntValue(add.getOffset());
+    std::optional<int64_t> off = constantPtrOffsetElements(S, add.getOffset());
     if (!off)
       return std::nullopt;
     std::optional<int64_t> next = llvm::checkedAdd(elems, *off);
@@ -359,7 +380,7 @@ static std::optional<StrideBytes> stridedCarryBytes(WaveAMDMachineSelector &S,
   int64_t scale = static_cast<int64_t>(S.elementSizeBytes(arg.getType()));
   StrideBytes stride;
   while (auto add = y.getDefiningOp<PtrAddOp>()) {
-    if (failed(appendPtrStrideOffset(op, stride, add.getOffset(), scale)))
+    if (failed(appendPtrStrideOffset(S, op, stride, add.getOffset(), scale)))
       return std::nullopt;
     y = add.getBase();
   }

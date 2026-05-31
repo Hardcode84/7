@@ -5,10 +5,10 @@
 // CHECK: %[[WI:.*]] = wave.workitem_id 0
 // CHECK: %[[BASE_OFF:.*]] = wave.index_expr <"64*Mod(wi, 16)"> ["wi"](%[[WI]])
 // CHECK: %[[BASE_PTR:.*]] = wave.ptr_add %{{.*}}, %[[BASE_OFF]]
+// CHECK: %[[STRIDE:.*]] = wave.index_expr <"128"> []()
 // CHECK: scf.for %[[IV:.*]] = {{.*}} iter_args(%[[PTR:.*]] = %[[BASE_PTR]])
 // CHECK: wave.load %[[PTR]]
 // CHECK: wave.store {{.*}} -> %[[PTR]]
-// CHECK: %[[STRIDE:.*]] = wave.index_expr <"128"> []()
 // CHECK: %[[NEXT:.*]] = wave.ptr_add %[[PTR]], %[[STRIDE]]
 // CHECK: scf.yield %[[NEXT]]
 func.func @extract_iv_stride(%a: !wave.ptr<f16, #wave.global>, %n: i32)
@@ -38,8 +38,8 @@ func.func @extract_iv_stride(%a: !wave.ptr<f16, #wave.global>, %n: i32)
 // CHECK: %[[WI:.*]] = wave.workitem_id 0
 // CHECK: %[[BASE_OFF:.*]] = wave.index_expr <"64 + 64*Mod(wi, 16)"> ["wi"](%[[WI]])
 // CHECK: %[[BASE_PTR:.*]] = wave.ptr_add %{{.*}}, %[[BASE_OFF]]
-// CHECK: scf.for %[[IV:.*]] = {{.*}} iter_args(%[[PTR:.*]] = %[[BASE_PTR]])
 // CHECK: %[[STRIDE:.*]] = wave.index_expr <"32"> []()
+// CHECK: scf.for %[[IV:.*]] = {{.*}} iter_args(%[[PTR:.*]] = %[[BASE_PTR]])
 // CHECK: %[[NEXT:.*]] = wave.ptr_add %[[PTR]], %[[STRIDE]]
 // CHECK: scf.yield %[[NEXT]]
 func.func @non_unit_step(%a: !wave.ptr<f16, #wave.global>, %n: i32)
@@ -96,13 +96,13 @@ func.func @reject_nonlinear(%a: !wave.ptr<f16, #wave.global>, %n: i32)
 // CHECK: %[[WI:.*]] = wave.workitem_id 0
 // CHECK: %[[BASE_OFF:.*]] = wave.index_expr <"64*Mod(wi, 16)"> ["wi"](%[[WI]])
 // CHECK: %[[BASE_PTR:.*]] = wave.ptr_add %{{.*}}, %[[BASE_OFF]]
+// CHECK: %[[OUTER_STRIDE:.*]] = wave.index_expr <"1024"> []()
 // CHECK: scf.for %[[I:.*]] = {{.*}} iter_args(%[[OUTER_PTR:.*]] = %[[BASE_PTR]])
+// CHECK: %[[INNER_STRIDE:.*]] = wave.index_expr <"128"> []()
 // CHECK: scf.for %[[J:.*]] = {{.*}} iter_args(%[[INNER_PTR:.*]] = %[[OUTER_PTR]])
 // CHECK: wave.load %[[INNER_PTR]]
-// CHECK: %[[INNER_STRIDE:.*]] = wave.index_expr <"128"> []()
 // CHECK: %[[INNER_NEXT:.*]] = wave.ptr_add %[[INNER_PTR]], %[[INNER_STRIDE]]
 // CHECK: scf.yield %[[INNER_NEXT]]
-// CHECK: %[[OUTER_STRIDE:.*]] = wave.index_expr <"1024"> []()
 // CHECK: %[[OUTER_NEXT:.*]] = wave.ptr_add %[[OUTER_PTR]], %[[OUTER_STRIDE]]
 // CHECK: scf.yield %[[OUTER_NEXT]]
 func.func @nested_two_ivs(%a: !wave.ptr<f16, #wave.global>, %n: i32,
@@ -134,12 +134,12 @@ func.func @nested_two_ivs(%a: !wave.ptr<f16, #wave.global>, %n: i32,
 // CHECK-LABEL: func.func @nested_cross_iv
 // CHECK: %[[BASE_OFF:.*]] = wave.index_expr <"64*Mod(wi, 16)">
 // CHECK: %[[BASE_PTR:.*]] = wave.ptr_add %{{.*}}, %[[BASE_OFF]]
+// CHECK: %[[OUTER_STRIDE:.*]] = wave.index_expr <"16"> []()
 // CHECK: scf.for %[[I:.*]] = {{.*}} iter_args(%[[OUTER_PTR:.*]] = %[[BASE_PTR]])
-// CHECK: scf.for %[[J:.*]] = {{.*}} iter_args(%[[INNER_PTR:.*]] = %[[OUTER_PTR]])
 // CHECK: %[[INNER_STRIDE:.*]] = wave.index_expr <"16*i"> ["i"](%[[I]])
+// CHECK: scf.for %[[J:.*]] = {{.*}} iter_args(%[[INNER_PTR:.*]] = %[[OUTER_PTR]])
 // CHECK: %[[INNER_NEXT:.*]] = wave.ptr_add %[[INNER_PTR]], %[[INNER_STRIDE]]
 // CHECK: scf.yield %[[INNER_NEXT]]
-// CHECK: %[[OUTER_STRIDE:.*]] = wave.index_expr <"16"> []()
 // CHECK: %[[OUTER_NEXT:.*]] = wave.ptr_add %[[OUTER_PTR]], %[[OUTER_STRIDE]]
 // CHECK: scf.yield %[[OUTER_NEXT]]
 func.func @nested_cross_iv(%a: !wave.ptr<f16, #wave.global>, %n: i32,
@@ -173,8 +173,8 @@ func.func @nested_cross_iv(%a: !wave.ptr<f16, #wave.global>, %n: i32,
 // CHECK: %[[ZERO:.*]] = wave.index_expr <"0"> []()
 // CHECK: %[[SCALAR_PTR:.*]] = wave.ptr_add %{{.*}}, %[[ZERO]]
 // CHECK: %[[BASE_PTR:.*]] = wave.splat %[[SCALAR_PTR]]
-// CHECK: scf.for %[[I:.*]] = {{.*}} iter_args(%[[PTR:.*]] = %[[BASE_PTR]])
 // CHECK: %[[STRIDE:.*]] = wave.index_expr <"16*wi"> ["wi"](%[[WI]])
+// CHECK: scf.for %[[I:.*]] = {{.*}} iter_args(%[[PTR:.*]] = %[[BASE_PTR]])
 // CHECK: %[[NEXT:.*]] = wave.ptr_add %[[PTR]], %[[STRIDE]]
 // CHECK: scf.yield %[[NEXT]]
 func.func @simd_stride_scalar_base(%a: !wave.ptr<f16, #wave.global>, %n: i32)
