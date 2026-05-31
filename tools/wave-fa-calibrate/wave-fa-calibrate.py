@@ -662,12 +662,32 @@ def validate_args(args: argparse.Namespace, chip: str) -> None:
         bool(args.head_dim & (args.head_dim - 1)), "--head-dim must be a power of two"
     )
     exit_if(
-        args.block_m != 16 or args.block_n != 16,
-        "MMA FA kernel requires --block-m=16 and --block-n=16",
+        args.block_m > 16 or args.block_n > 16,
+        "MMA FA kernel requires --block-m/--block-n to fit in the 16x16 MMA tile",
     )
+    exit_if(bool(args.block_n & (args.block_n - 1)), "--block-n must be a power of two")
     exit_if(args.seq_n % args.block_n != 0, "--seq-n must be a multiple of --block-n")
+    wave_size = 64 if chip.startswith("gfx950") else 32
     k_tile = 32 if chip.startswith("gfx950") else 16
     exit_if(args.head_dim % k_tile != 0, f"--head-dim must be a multiple of {k_tile}")
+    for name, count in (
+        ("--block-m * --block-n", args.block_m * args.block_n),
+        ("--block-m * 16", args.block_m * 16),
+        ("16 * --block-n", 16 * args.block_n),
+        (
+            "--block-m * padded probability columns",
+            args.block_m * (k_tile - args.block_n),
+        ),
+        (
+            "padded probability rows * MMA K",
+            (16 - args.block_m) * k_tile,
+        ),
+        ("16 * padded value columns", 16 * (k_tile - args.block_n)),
+    ):
+        exit_if(
+            count % wave_size != 0,
+            f"{name} must be a multiple of wave{wave_size}; got {count}",
+        )
 
 
 def main() -> int:

@@ -32,13 +32,22 @@ class _MmaVariant:
     wave_size: int = 32
     lane_k_elems: int = 0
     k_tile: int = 16
+    m_tile: int = 16
+    n_tile: int = 16
     score_layout: str = "wmma"
 
 
 _MMA_VARIANTS = {
     "wmma": _MmaVariant("wmma", "wmma.f32.16x16x16.f16", 8, 8),
     "mfma_gfx950": _MmaVariant(
-        "mfma_gfx950", "mfma.f32.16x16x32.f16", 4, 4, 64, 8, 32, "mfma"
+        "mfma_gfx950",
+        "mfma.f32.16x16x32.f16",
+        4,
+        4,
+        wave_size=64,
+        lane_k_elems=8,
+        k_tile=32,
+        score_layout="mfma",
     ),
 }
 
@@ -89,6 +98,18 @@ class _FlashAttentionConfig:
         return self.seq_len * self.head_dim
 
     @property
+    def q_storage_elements(self) -> int:
+        return self.mma.m_tile * self.head_dim
+
+    @property
+    def k_storage_rows(self) -> int:
+        return self.seq_len + (self.mma.n_tile - self.block_n)
+
+    @property
+    def k_storage_elements(self) -> int:
+        return self.k_storage_rows * self.head_dim
+
+    @property
     def out_elements(self) -> int:
         return self.q_elements
 
@@ -98,19 +119,19 @@ class _FlashAttentionConfig:
 
     @property
     def score_lds_bytes(self) -> int:
-        return self.block_m * self.block_n * 4
+        return self.mma.m_tile * self.mma.n_tile * 4
 
     @property
     def prob_lds_bytes(self) -> int:
-        return self.block_m * self.mma.k_tile * 2
+        return self.mma.m_tile * self.mma.k_tile * 2
 
     @property
     def value_lds_bytes(self) -> int:
-        return 16 * self.mma.k_tile * 2
+        return self.mma.n_tile * self.mma.k_tile * 2
 
     @property
     def denom_lds_bytes(self) -> int:
-        return self.block_m * 16 * 4
+        return self.block_m * self.mma.n_tile * 4
 
     @property
     def lds_bytes(self) -> int:
@@ -134,11 +155,13 @@ def _validate_positive_config(cfg: _FlashAttentionConfig) -> None:
 
 
 def _validate_mma_config(cfg: _FlashAttentionConfig) -> None:
-    if cfg.block_m != 16 or cfg.block_n != 16:
+    if cfg.block_m > cfg.mma.m_tile or cfg.block_n > cfg.mma.n_tile:
         raise ValueError(
-            "MMA FA kernel requires block_m=16 and block_n=16; "
+            "MMA FA kernel requires block_m/block_n to fit in one MMA tile; "
             f"got block_m={cfg.block_m}, block_n={cfg.block_n}"
         )
+    if cfg.block_n & (cfg.block_n - 1):
+        raise ValueError(f"block_n must be a power of two; got {cfg.block_n}")
     if cfg.head_dim & (cfg.head_dim - 1):
         raise ValueError(f"head_dim must be a power of two; got {cfg.head_dim}")
     if cfg.head_dim % cfg.mma.k_tile:
@@ -155,6 +178,27 @@ def _validate_mma_config(cfg: _FlashAttentionConfig) -> None:
             "block_m * head_dim must be a multiple of the matrix wave size; "
             f"got {cfg.out_elements} and wave{cfg.mma.wave_size}"
         )
+    for name, count in (
+        ("block_m * block_n", cfg.block_m * cfg.block_n),
+        ("block_m * mma_n", cfg.block_m * cfg.mma.n_tile),
+        ("mma_n * block_n", cfg.mma.n_tile * cfg.block_n),
+        (
+            "block_m * padded probability columns",
+            cfg.block_m * (cfg.mma.k_tile - cfg.block_n),
+        ),
+        (
+            "padded probability rows * mma_k",
+            (cfg.mma.m_tile - cfg.block_m) * cfg.mma.k_tile,
+        ),
+        (
+            "mma_n * padded value columns",
+            cfg.mma.n_tile * (cfg.mma.k_tile - cfg.block_n),
+        ),
+    ):
+        if count % cfg.mma.wave_size:
+            raise ValueError(
+                f"{name} must be a multiple of wave{cfg.mma.wave_size}; " f"got {count}"
+            )
 
 
 def _rand_values(
@@ -254,16 +298,46 @@ class _OnlineSoftmaxState:
     denom: dsl.Value
 
 
+@dataclass(frozen=True)
+class _OnlineScratch:
+    score_ptr: dsl.Value
+    prob_ptr: dsl.Value
+    value_ptr: dsl.Value
+    denom_ptr: dsl.Value
+
+
+@dataclass(frozen=True)
+class _OnlineTileState:
+    score_states: list[_OnlineSoftmaxState]
+    output_states: list[_OnlineSoftmaxState]
+    accs: list[dsl.Value]
+
+
 def _kernel_types(cfg: _FlashAttentionConfig) -> _KernelTypes:
     return _KernelTypes(
         a=dsl.fragment_type(
-            0, dsl.f16(), 16, 16, cfg.mma.wave_size, cfg.mma.ab_registers
+            0,
+            dsl.f16(),
+            cfg.mma.m_tile,
+            cfg.mma.n_tile,
+            cfg.mma.wave_size,
+            cfg.mma.ab_registers,
         ),
         b=dsl.fragment_type(
-            1, dsl.f16(), 16, 16, cfg.mma.wave_size, cfg.mma.ab_registers
+            1,
+            dsl.f16(),
+            cfg.mma.m_tile,
+            cfg.mma.n_tile,
+            cfg.mma.wave_size,
+            cfg.mma.ab_registers,
         ),
         acc=dsl.fragment_type(
-            2, dsl.f32(), 16, 16, cfg.mma.wave_size, cfg.mma.acc_registers
+            2,
+            dsl.f32(),
+            cfg.mma.m_tile,
+            cfg.mma.n_tile,
+            cfg.mma.wave_size,
+            cfg.mma.acc_registers,
         ),
     )
 
@@ -278,10 +352,10 @@ def _load_q_fragment(
 ) -> dsl.Value:
     lane_sym = dsl.sym("fa_lane")
     lane_expr = dsl.mod(lane_sym, cfg.mma.wave_size)
-    lane_mod16 = dsl.mod(lane_expr, 16)
-    lane_k_off = dsl.floor(lane_expr / 16) * cfg.mma.lane_k_elems
+    lane_row = dsl.mod(lane_expr, cfg.mma.m_tile)
+    lane_k_off = dsl.floor(lane_expr / cfg.mma.m_tile) * cfg.mma.lane_k_elems
     q_off = bld.index_expr(
-        lane_mod16 * cfg.head_dim + lane_k_off + k_step * cfg.mma.k_tile,
+        lane_row * cfg.head_dim + lane_k_off + k_step * cfg.mma.k_tile,
         bindings={lane_sym: lane_value},
     )
     frag, _ = bld.fragment_load(bld.ptr_add(q_ptr, q_off), types.a)
@@ -300,12 +374,12 @@ def _load_k_fragment(
 ) -> dsl.Value:
     lane_sym = dsl.sym("fa_lane")
     lane_expr = dsl.mod(lane_sym, cfg.mma.wave_size)
-    lane_mod16 = dsl.mod(lane_expr, 16)
-    lane_k_off = dsl.floor(lane_expr / 16) * cfg.mma.lane_k_elems
+    lane_col = dsl.mod(lane_expr, cfg.mma.n_tile)
+    lane_k_off = dsl.floor(lane_expr / cfg.mma.n_tile) * cfg.mma.lane_k_elems
     expr_bindings = dict(bindings or {})
     expr_bindings[lane_sym] = lane_value
     k_off = bld.index_expr(
-        (start_n + lane_mod16) * cfg.head_dim + lane_k_off + k_step * cfg.mma.k_tile,
+        (start_n + lane_col) * cfg.head_dim + lane_k_off + k_step * cfg.mma.k_tile,
         bindings=expr_bindings,
     )
     frag, _ = bld.fragment_load(bld.ptr_add(k_ptr, k_off), types.b)
@@ -323,10 +397,10 @@ def _load_row_major_fragment(
 ) -> dsl.Value:
     lane_sym = dsl.sym("fa_lane")
     lane_expr = dsl.mod(lane_sym, cfg.mma.wave_size)
-    lane_mod16 = dsl.mod(lane_expr, 16)
-    lane_k_off = dsl.floor(lane_expr / 16) * cfg.mma.lane_k_elems
+    lane_row = dsl.mod(lane_expr, cfg.mma.m_tile)
+    lane_k_off = dsl.floor(lane_expr / cfg.mma.m_tile) * cfg.mma.lane_k_elems
     off = bld.index_expr(
-        lane_mod16 * row_stride + lane_k_off,
+        lane_row * row_stride + lane_k_off,
         bindings={lane_sym: lane_value},
     )
     frag, _ = bld.fragment_load(bld.ptr_add(ptr, off), frag_type, after=after)
@@ -378,9 +452,9 @@ def _score_slot_expr(
     col: int | ixsimpl.Expr,
 ) -> int | ixsimpl.Expr:
     if cfg.mma.score_layout == "wmma":
-        return (_mod_expr(row, 2) * 16 + col) * cfg.mma.acc_registers + _floor_div_expr(
-            row, 2
-        )
+        return (
+            _mod_expr(row, 2) * cfg.mma.n_tile + col
+        ) * cfg.mma.acc_registers + _floor_div_expr(row, 2)
     if cfg.mma.score_layout == "mfma":
         return (row * 4 + _mod_expr(col, 4)) * cfg.mma.acc_registers + (
             _floor_div_expr(col, 4)
@@ -388,8 +462,16 @@ def _score_slot_expr(
     raise AssertionError(f"unknown score layout {cfg.mma.score_layout}")
 
 
-def _online_state_steps(cfg: _FlashAttentionConfig) -> int:
+def _score_state_steps(cfg: _FlashAttentionConfig) -> int:
     return (cfg.block_m * cfg.block_n) // cfg.mma.wave_size
+
+
+def _output_state_steps(cfg: _FlashAttentionConfig) -> int:
+    return (cfg.block_m * cfg.mma.n_tile) // cfg.mma.wave_size
+
+
+def _score_states_match_output_layout(cfg: _FlashAttentionConfig) -> bool:
+    return cfg.block_n == cfg.mma.n_tile
 
 
 def _flatten_online_state(states: list[_OnlineSoftmaxState]) -> tuple[dsl.Value, ...]:
@@ -421,7 +503,7 @@ def _stage_probability_tile(
     f16_simd = dsl.simd_type(dsl.f16(), width=cfg.mma.wave_size)
     tokens: list[dsl.Value] = []
 
-    for step in range(_online_state_steps(cfg)):
+    for step in range(_score_state_steps(cfg)):
         elem = lane_expr + step * cfg.mma.wave_size
         row = dsl.floor(elem / cfg.block_n)
         col = dsl.mod(elem, cfg.block_n)
@@ -451,15 +533,7 @@ def _stage_probability_tile(
         p_off = bld.index_expr(row * cfg.mma.k_tile + col, bindings=bindings)
         tokens.append(bld.store(prob_h, bld.ptr_add(prob_ptr, p_off), after=after))
 
-    pad_cols = cfg.mma.k_tile - cfg.block_n
-    if pad_cols:
-        zero = _zero_f16_simd(bld, cfg.mma.wave_size)
-        for step in range((cfg.block_m * pad_cols) // cfg.mma.wave_size):
-            elem = lane_expr + step * cfg.mma.wave_size
-            row = dsl.floor(elem / pad_cols)
-            col = cfg.block_n + dsl.mod(elem, pad_cols)
-            p_off = bld.index_expr(row * cfg.mma.k_tile + col, bindings=bindings)
-            tokens.append(bld.store(zero, bld.ptr_add(prob_ptr, p_off), after=after))
+    tokens.extend(_stage_probability_padding(bld, cfg, prob_ptr, lane, after))
 
     return bld.barrier(*tokens)
 
@@ -480,7 +554,7 @@ def _stage_online_probability_tile(
     states: list[_OnlineSoftmaxState] = []
     tokens: list[dsl.Value] = []
 
-    for step in range(_online_state_steps(cfg)):
+    for step in range(_score_state_steps(cfg)):
         elem = lane_expr + step * cfg.mma.wave_size
         row = dsl.floor(elem / cfg.block_n)
         col = dsl.mod(elem, cfg.block_n)
@@ -521,17 +595,189 @@ def _stage_online_probability_tile(
         tokens.append(bld.store(prob_h, bld.ptr_add(prob_ptr, p_off), after=after))
         states.append(_OnlineSoftmaxState(row_max, denom))
 
-    pad_cols = cfg.mma.k_tile - cfg.block_n
-    if pad_cols:
-        zero = _zero_f16_simd(bld, cfg.mma.wave_size)
-        for step in range((cfg.block_m * pad_cols) // cfg.mma.wave_size):
-            elem = lane_expr + step * cfg.mma.wave_size
-            row = dsl.floor(elem / pad_cols)
-            col = cfg.block_n + dsl.mod(elem, pad_cols)
-            p_off = bld.index_expr(row * cfg.mma.k_tile + col, bindings=bindings)
-            tokens.append(bld.store(zero, bld.ptr_add(prob_ptr, p_off), after=after))
+    tokens.extend(_stage_probability_padding(bld, cfg, prob_ptr, lane, after))
 
     return states, bld.barrier(*tokens)
+
+
+def _compute_output_online_states(
+    bld: dsl.FunctionBuilder,
+    cfg: _FlashAttentionConfig,
+    score_ptr: dsl.Value,
+    lane: dsl.Value,
+    after: dsl.Value,
+    old_states: list[_OnlineSoftmaxState] | None = None,
+) -> list[_OnlineSoftmaxState]:
+    lane_sym = dsl.sym("fa_lane")
+    lane_expr = dsl.mod(lane_sym, cfg.mma.wave_size)
+    bindings = {lane_sym: lane}
+    states: list[_OnlineSoftmaxState] = []
+
+    for step in range(_output_state_steps(cfg)):
+        elem = lane_expr + step * cfg.mma.wave_size
+        row = dsl.floor(elem / cfg.mma.n_tile)
+        scores: list[dsl.Value] = []
+        for n in range(cfg.block_n):
+            score_idx = bld.index_expr(_score_slot_expr(cfg, row, n), bindings=bindings)
+            score, _ = bld.load(
+                bld.ptr_add(score_ptr, score_idx),
+                dsl.simd_type(dsl.f32(), width=cfg.mma.wave_size),
+                after=after,
+            )
+            scores.append(score)
+
+        tile_max = _max_all(bld, tuple(scores))
+        if old_states is None:
+            row_max = tile_max
+            denom: dsl.Value | None = None
+        else:
+            old = old_states[step]
+            row_max = bld.fmax(old.row_max, tile_max)
+            alpha = bld.fexp2(bld.fsub(old.row_max, row_max))
+            denom = bld.fmul(old.denom, alpha)
+
+        for score in scores:
+            prob = bld.fexp2(bld.fsub(score, row_max))
+            denom = prob if denom is None else bld.fadd(denom, prob)
+        assert denom is not None
+        states.append(_OnlineSoftmaxState(row_max, denom))
+
+    return states
+
+
+def _stage_probability_padding(
+    bld: dsl.FunctionBuilder,
+    cfg: _FlashAttentionConfig,
+    prob_ptr: dsl.Value,
+    lane: dsl.Value,
+    after: dsl.Value,
+) -> list[dsl.Value]:
+    tokens: list[dsl.Value] = []
+    tokens.extend(
+        _store_zero_region(
+            bld,
+            cfg,
+            prob_ptr,
+            row_offset=0,
+            row_count=cfg.block_m,
+            col_offset=cfg.block_n,
+            col_count=cfg.mma.k_tile - cfg.block_n,
+            row_stride=cfg.mma.k_tile,
+            lane=lane,
+            after=after,
+        )
+    )
+    tokens.extend(
+        _store_zero_region(
+            bld,
+            cfg,
+            prob_ptr,
+            row_offset=cfg.block_m,
+            row_count=cfg.mma.m_tile - cfg.block_m,
+            col_offset=0,
+            col_count=cfg.mma.k_tile,
+            row_stride=cfg.mma.k_tile,
+            lane=lane,
+            after=after,
+        )
+    )
+    return tokens
+
+
+def _store_zero_region(
+    bld: dsl.FunctionBuilder,
+    cfg: _FlashAttentionConfig,
+    ptr: dsl.Value,
+    *,
+    row_offset: int,
+    row_count: int,
+    col_offset: int,
+    col_count: int,
+    row_stride: int,
+    lane: dsl.Value,
+    after: dsl.Value,
+) -> list[dsl.Value]:
+    if row_count == 0 or col_count == 0:
+        return []
+
+    tokens: list[dsl.Value] = []
+    offset = col_offset
+    remaining = col_count
+    while remaining:
+        chunk = 1 << (remaining.bit_length() - 1)
+        tokens.extend(
+            _store_zero_region_chunk(
+                bld,
+                cfg,
+                ptr,
+                row_offset=row_offset,
+                row_count=row_count,
+                col_offset=offset,
+                col_count=chunk,
+                row_stride=row_stride,
+                lane=lane,
+                after=after,
+            )
+        )
+        offset += chunk
+        remaining -= chunk
+    return tokens
+
+
+def _store_zero_region_chunk(
+    bld: dsl.FunctionBuilder,
+    cfg: _FlashAttentionConfig,
+    ptr: dsl.Value,
+    *,
+    row_offset: int,
+    row_count: int,
+    col_offset: int,
+    col_count: int,
+    row_stride: int,
+    lane: dsl.Value,
+    after: dsl.Value,
+) -> list[dsl.Value]:
+    if (row_count * col_count) % cfg.mma.wave_size:
+        raise ValueError(
+            "zero-fill region chunk must map to whole waves; "
+            f"got rows={row_count}, cols={col_count}, wave={cfg.mma.wave_size}"
+        )
+
+    lane_sym = dsl.sym("fa_lane")
+    lane_expr = dsl.mod(lane_sym, cfg.mma.wave_size)
+    bindings = {lane_sym: lane}
+    zero = _zero_f16_simd(bld, cfg.mma.wave_size)
+    tokens: list[dsl.Value] = []
+
+    for step in range((row_count * col_count) // cfg.mma.wave_size):
+        elem = lane_expr + step * cfg.mma.wave_size
+        row = row_offset + dsl.floor(elem / col_count)
+        col = col_offset + dsl.mod(elem, col_count)
+        off = bld.index_expr(row * row_stride + col, bindings=bindings)
+        tokens.append(bld.store(zero, bld.ptr_add(ptr, off), after=after))
+    return tokens
+
+
+def _stage_value_padding(
+    bld: dsl.FunctionBuilder,
+    cfg: _FlashAttentionConfig,
+    value_ptr: dsl.Value,
+    lane: dsl.Value,
+    after: dsl.Value,
+) -> list[dsl.Value]:
+    pad_cols = cfg.mma.k_tile - cfg.block_n
+    return _store_zero_region(
+        bld,
+        cfg,
+        value_ptr,
+        row_offset=0,
+        row_count=cfg.mma.n_tile,
+        col_offset=cfg.block_n,
+        col_count=pad_cols,
+        row_stride=cfg.mma.k_tile,
+        lane=lane,
+        after=after,
+    )
 
 
 def _stage_value_tile(
@@ -552,7 +798,7 @@ def _stage_value_tile(
     f16_simd = dsl.simd_type(dsl.f16(), width=cfg.mma.wave_size)
     tokens: list[dsl.Value] = []
 
-    for step in range((16 * cfg.block_n) // cfg.mma.wave_size):
+    for step in range((cfg.mma.n_tile * cfg.block_n) // cfg.mma.wave_size):
         elem = lane_expr + step * cfg.mma.wave_size
         d_col = dsl.floor(elem / cfg.block_n)
         n = dsl.mod(elem, cfg.block_n)
@@ -564,18 +810,7 @@ def _stage_value_tile(
         lds_off = bld.index_expr(d_col * cfg.mma.k_tile + n, bindings=expr_bindings)
         tokens.append(bld.store(value, bld.ptr_add(value_ptr, lds_off), after=token))
 
-    pad_cols = cfg.mma.k_tile - cfg.block_n
-    if pad_cols:
-        zero = _zero_f16_simd(bld, cfg.mma.wave_size)
-        for step in range((16 * pad_cols) // cfg.mma.wave_size):
-            elem = lane_expr + step * cfg.mma.wave_size
-            d_col = dsl.floor(elem / pad_cols)
-            n = cfg.block_n + dsl.mod(elem, pad_cols)
-            lds_off = bld.index_expr(
-                d_col * cfg.mma.k_tile + n,
-                bindings=expr_bindings,
-            )
-            tokens.append(bld.store(zero, bld.ptr_add(value_ptr, lds_off), after=after))
+    tokens.extend(_stage_value_padding(bld, cfg, value_ptr, lane, after))
 
     return bld.barrier(*tokens)
 
@@ -593,10 +828,10 @@ def _store_fragment_as_row_major(
     lane_expr = dsl.mod(lane_sym, cfg.mma.wave_size)
     bindings = {lane_sym: lane}
     tokens: list[dsl.Value] = []
-    for step in range((16 * 16) // cfg.mma.wave_size):
+    for step in range(_output_state_steps(cfg)):
         elem = lane_expr + step * cfg.mma.wave_size
-        row = dsl.floor(elem / 16)
-        col = dsl.mod(elem, 16)
+        row = dsl.floor(elem / cfg.mma.n_tile)
+        col = dsl.mod(elem, cfg.mma.n_tile)
         scratch_off = bld.index_expr(_score_slot_expr(cfg, row, col), bindings=bindings)
         value, token = bld.load(
             bld.ptr_add(scratch_ptr, scratch_off),
@@ -649,8 +884,8 @@ def _scale_acc_fragment_rows(
 
     for step, (old, new) in enumerate(zip(old_states, new_states, strict=True)):
         elem = lane_expr + step * cfg.mma.wave_size
-        row = dsl.floor(elem / 16)
-        col = dsl.mod(elem, 16)
+        row = dsl.floor(elem / cfg.mma.n_tile)
+        col = dsl.mod(elem, cfg.mma.n_tile)
         scratch_off = bld.index_expr(_score_slot_expr(cfg, row, col), bindings=bindings)
         value, token = bld.load(
             bld.ptr_add(scratch_ptr, scratch_off),
@@ -682,9 +917,9 @@ def _store_denoms(
 
     for step, state in enumerate(states):
         elem = lane_expr + step * cfg.mma.wave_size
-        row = dsl.floor(elem / 16)
-        col = dsl.mod(elem, 16)
-        off = bld.index_expr(row * 16 + col, bindings=bindings)
+        row = dsl.floor(elem / cfg.mma.n_tile)
+        col = dsl.mod(elem, cfg.mma.n_tile)
+        off = bld.index_expr(row * cfg.mma.n_tile + col, bindings=bindings)
         tokens.append(bld.store(state.denom, bld.ptr_add(denom_ptr, off), after=after))
 
     return bld.barrier(*tokens)
@@ -708,12 +943,12 @@ def _store_normalized_fragment_as_row_major(
     bindings = {lane_sym: lane}
     tokens: list[dsl.Value] = []
 
-    for step in range(_online_state_steps(cfg)):
+    for step in range(_output_state_steps(cfg)):
         elem = lane_expr + step * cfg.mma.wave_size
-        row = dsl.floor(elem / 16)
-        col = dsl.mod(elem, 16)
+        row = dsl.floor(elem / cfg.mma.n_tile)
+        col = dsl.mod(elem, cfg.mma.n_tile)
         scratch_off = bld.index_expr(_score_slot_expr(cfg, row, col), bindings=bindings)
-        denom_off = bld.index_expr(row * 16 + col, bindings=bindings)
+        denom_off = bld.index_expr(row * cfg.mma.n_tile + col, bindings=bindings)
         value, value_token = bld.load(
             bld.ptr_add(scratch_ptr, scratch_off),
             dsl.simd_type(dsl.f32(), width=cfg.mma.wave_size),
@@ -809,6 +1044,185 @@ def _emit_first_online_accs(
     return accs
 
 
+def _alloc_online_scratch(
+    bld: dsl.FunctionBuilder, cfg: _FlashAttentionConfig
+) -> _OnlineScratch:
+    score_ptr = bld.lds_base(dsl.f32())
+    prob_ptr = bld.lds_base(dsl.f16(), offset=cfg.score_lds_bytes)
+    value_ptr = bld.lds_base(dsl.f16(), offset=cfg.score_lds_bytes + cfg.prob_lds_bytes)
+    denom_ptr = bld.lds_base(
+        dsl.f32(),
+        offset=cfg.score_lds_bytes + cfg.prob_lds_bytes + cfg.value_lds_bytes,
+    )
+    return _OnlineScratch(score_ptr, prob_ptr, value_ptr, denom_ptr)
+
+
+def _flatten_online_tile_state(
+    cfg: _FlashAttentionConfig, state: _OnlineTileState
+) -> tuple[dsl.Value, ...]:
+    if _score_states_match_output_layout(cfg):
+        return (*_flatten_online_state(state.score_states), *state.accs)
+    return (
+        *_flatten_online_state(state.score_states),
+        *_flatten_online_state(state.output_states),
+        *state.accs,
+    )
+
+
+def _split_online_tile_state(
+    cfg: _FlashAttentionConfig, values: tuple[dsl.Value, ...]
+) -> _OnlineTileState:
+    score_steps = _score_state_steps(cfg)
+    score_states = _split_online_state(values, score_steps)
+    if _score_states_match_output_layout(cfg):
+        return _OnlineTileState(
+            score_states, score_states, list(values[score_steps * 2 :])
+        )
+
+    state_offset = score_steps * 2
+    output_steps = _output_state_steps(cfg)
+    output_states = _split_online_state(values[state_offset:], output_steps)
+    accs = list(values[state_offset + output_steps * 2 :])
+    return _OnlineTileState(score_states, output_states, accs)
+
+
+def _emit_initial_online_tile(
+    bld: dsl.FunctionBuilder,
+    cfg: _FlashAttentionConfig,
+    types: _KernelTypes,
+    q_arg: dsl.Value,
+    k_arg: dsl.Value,
+    v_arg: dsl.Value,
+    scratch: _OnlineScratch,
+    lane: dsl.Value,
+    scratch_dep: dsl.Value,
+) -> _OnlineTileState:
+    qk = _emit_qk_tile(bld, cfg, types, q_arg, k_arg, lane, 0)
+    score_store = bld.fragment_store(qk, scratch.score_ptr, after=scratch_dep)
+    score_ready = bld.barrier(score_store)
+    score_states, prob_ready = _stage_online_probability_tile(
+        bld, cfg, scratch.score_ptr, scratch.prob_ptr, lane, score_ready
+    )
+    if _score_states_match_output_layout(cfg):
+        output_states = score_states
+    else:
+        output_states = _compute_output_online_states(
+            bld, cfg, scratch.score_ptr, lane, score_ready
+        )
+    accs = _emit_first_online_accs(
+        bld,
+        cfg,
+        types,
+        v_arg,
+        scratch.prob_ptr,
+        scratch.value_ptr,
+        lane,
+        score_ready,
+        prob_ready,
+    )
+    return _OnlineTileState(score_states, output_states, accs)
+
+
+def _emit_next_online_accs(
+    bld: dsl.FunctionBuilder,
+    cfg: _FlashAttentionConfig,
+    types: _KernelTypes,
+    v_arg: dsl.Value,
+    scratch: _OnlineScratch,
+    lane: dsl.Value,
+    start_n: _ExprLike,
+    bindings: dict[ixsimpl.Expr, dsl.Value],
+    prob_ready: dsl.Value,
+    score_ready: dsl.Value,
+    old_state: _OnlineTileState,
+    next_output_states: list[_OnlineSoftmaxState],
+) -> list[dsl.Value]:
+    next_accs: list[dsl.Value] = []
+    for d_tile, old_acc in enumerate(old_state.accs):
+        value_ready = _stage_value_tile(
+            bld,
+            cfg,
+            v_arg,
+            scratch.value_ptr,
+            lane,
+            start_n,
+            d_tile,
+            score_ready,
+            bindings=bindings,
+        )
+        operands_ready = bld.barrier(prob_ready, value_ready)
+        scaled_acc = _scale_acc_fragment_rows(
+            bld,
+            cfg,
+            types,
+            old_acc,
+            scratch.score_ptr,
+            lane,
+            old_state.output_states,
+            next_output_states,
+            operands_ready,
+        )
+        p_frag = _load_row_major_fragment(
+            bld, cfg, scratch.prob_ptr, types.a, cfg.mma.k_tile, lane, operands_ready
+        )
+        v_frag = _load_row_major_fragment(
+            bld, cfg, scratch.value_ptr, types.b, cfg.mma.k_tile, lane, operands_ready
+        )
+        next_accs.append(bld.mma(cfg.mma.kind, p_frag, v_frag, scaled_acc))
+    return next_accs
+
+
+def _emit_next_online_tile(
+    bld: dsl.FunctionBuilder,
+    cfg: _FlashAttentionConfig,
+    types: _KernelTypes,
+    q_arg: dsl.Value,
+    k_arg: dsl.Value,
+    v_arg: dsl.Value,
+    scratch: _OnlineScratch,
+    lane: dsl.Value,
+    loop_iv: dsl.Value,
+    old_state: _OnlineTileState,
+) -> _OnlineTileState:
+    lane_sym = dsl.sym("fa_lane")
+    tile_sym = dsl.sym("fa_tile")
+    start_n = tile_sym * cfg.block_n
+    bindings = {lane_sym: lane, tile_sym: loop_iv}
+    qk = _emit_qk_tile(bld, cfg, types, q_arg, k_arg, lane, start_n, bindings)
+    score_store = bld.fragment_store(qk, scratch.score_ptr, after=bld.token())
+    score_ready = bld.barrier(score_store)
+    score_states, prob_ready = _stage_online_probability_tile(
+        bld,
+        cfg,
+        scratch.score_ptr,
+        scratch.prob_ptr,
+        lane,
+        score_ready,
+        old_state.score_states,
+    )
+    if _score_states_match_output_layout(cfg):
+        output_states = score_states
+    else:
+        output_states = _compute_output_online_states(
+            bld, cfg, scratch.score_ptr, lane, score_ready, old_state.output_states
+        )
+    accs = _emit_next_online_accs(
+        bld,
+        cfg,
+        types,
+        v_arg,
+        scratch,
+        lane,
+        start_n,
+        bindings,
+        prob_ready,
+        score_ready,
+        old_state,
+        output_states,
+    )
+    return _OnlineTileState(score_states, output_states, accs)
+
+
 def _emit_multi_tile_mma_kernel(
     bld: dsl.FunctionBuilder,
     cfg: _FlashAttentionConfig,
@@ -819,89 +1233,53 @@ def _emit_multi_tile_mma_kernel(
     out_arg: dsl.Value,
     lane: dsl.Value,
 ) -> None:
-    lane_sym = dsl.sym("fa_lane")
-    score_ptr = bld.lds_base(dsl.f32())
-    prob_ptr = bld.lds_base(dsl.f16(), offset=cfg.score_lds_bytes)
-    value_ptr = bld.lds_base(dsl.f16(), offset=cfg.score_lds_bytes + cfg.prob_lds_bytes)
-    denom_ptr = bld.lds_base(
-        dsl.f32(),
-        offset=cfg.score_lds_bytes + cfg.prob_lds_bytes + cfg.value_lds_bytes,
-    )
+    scratch = _alloc_online_scratch(bld, cfg)
     scratch_dep = bld.token()
-    qk = _emit_qk_tile(bld, cfg, types, q_arg, k_arg, lane, 0)
-    score_store = bld.fragment_store(qk, score_ptr, after=scratch_dep)
-    score_ready = bld.barrier(score_store)
-    states, prob_ready = _stage_online_probability_tile(
-        bld, cfg, score_ptr, prob_ptr, lane, score_ready
-    )
-    accs = _emit_first_online_accs(
-        bld, cfg, types, v_arg, prob_ptr, value_ptr, lane, score_ready, prob_ready
+    state = _emit_initial_online_tile(
+        bld, cfg, types, q_arg, k_arg, v_arg, scratch, lane, scratch_dep
     )
 
     num_tiles = cfg.seq_len // cfg.block_n
     if num_tiles > 1:
         c1 = bld.constant(dsl.i32(), 1)
         upper = bld.constant(dsl.i32(), num_tiles)
-        state_steps = _online_state_steps(cfg)
-        init_args = (*_flatten_online_state(states), *accs)
         with bld.for_loop(
-            c1, upper, c1, init_args=init_args, unroll=cfg.tile_loop_unroll
+            c1,
+            upper,
+            c1,
+            init_args=_flatten_online_tile_state(cfg, state),
+            unroll=cfg.tile_loop_unroll,
         ) as loop:
-            tile_sym = dsl.sym("fa_tile")
-            loop_args = tuple(loop.inner_iter_args)
-            loop_states = _split_online_state(loop_args, state_steps)
-            loop_accs = loop_args[state_steps * 2 :]
-            start_n = tile_sym * cfg.block_n
-            bindings = {lane_sym: lane, tile_sym: loop.induction_variable}
-            qk = _emit_qk_tile(bld, cfg, types, q_arg, k_arg, lane, start_n, bindings)
-            score_store = bld.fragment_store(qk, score_ptr, after=bld.token())
-            score_ready = bld.barrier(score_store)
-            next_states, prob_ready = _stage_online_probability_tile(
-                bld, cfg, score_ptr, prob_ptr, lane, score_ready, loop_states
+            loop_state = _split_online_tile_state(cfg, tuple(loop.inner_iter_args))
+            next_state = _emit_next_online_tile(
+                bld,
+                cfg,
+                types,
+                q_arg,
+                k_arg,
+                v_arg,
+                scratch,
+                lane,
+                loop.induction_variable,
+                loop_state,
             )
-            next_accs: list[dsl.Value] = []
+            bld.yield_(_flatten_online_tile_state(cfg, next_state))
+        state = _split_online_tile_state(cfg, tuple(loop.results))
 
-            for d_tile, old_acc in enumerate(loop_accs):
-                value_ready = _stage_value_tile(
-                    bld,
-                    cfg,
-                    v_arg,
-                    value_ptr,
-                    lane,
-                    start_n,
-                    d_tile,
-                    score_ready,
-                    bindings=bindings,
-                )
-                operands_ready = bld.barrier(prob_ready, value_ready)
-                scaled_acc = _scale_acc_fragment_rows(
-                    bld,
-                    cfg,
-                    types,
-                    old_acc,
-                    score_ptr,
-                    lane,
-                    loop_states,
-                    next_states,
-                    operands_ready,
-                )
-                p_frag = _load_row_major_fragment(
-                    bld, cfg, prob_ptr, types.a, cfg.mma.k_tile, lane, operands_ready
-                )
-                v_frag = _load_row_major_fragment(
-                    bld, cfg, value_ptr, types.b, cfg.mma.k_tile, lane, operands_ready
-                )
-                next_accs.append(bld.mma(cfg.mma.kind, p_frag, v_frag, scaled_acc))
-
-            bld.yield_((*_flatten_online_state(next_states), *next_accs))
-        result_values = tuple(loop.results)
-        states = _split_online_state(result_values, state_steps)
-        accs = list(result_values[state_steps * 2 :])
-
-    scratch_dep = _store_denoms(bld, cfg, denom_ptr, lane, states, scratch_dep)
-    for d_tile, acc in enumerate(accs):
+    scratch_dep = _store_denoms(
+        bld, cfg, scratch.denom_ptr, lane, state.output_states, scratch_dep
+    )
+    for d_tile, acc in enumerate(state.accs):
         scratch_dep = _store_normalized_fragment_as_row_major(
-            bld, cfg, acc, score_ptr, denom_ptr, out_arg, lane, d_tile, scratch_dep
+            bld,
+            cfg,
+            acc,
+            scratch.score_ptr,
+            scratch.denom_ptr,
+            out_arg,
+            lane,
+            d_tile,
+            scratch_dep,
         )
 
 
@@ -948,6 +1326,12 @@ def _emit_zero_fill(
         bld.memref_store(zero, buf, [i])
 
 
+def _pad_values(values: tuple[float, ...], count: int) -> tuple[float, ...]:
+    if len(values) > count:
+        raise ValueError(f"cannot pad {len(values)} values down to {count}")
+    return values + (0.0,) * (count - len(values))
+
+
 def _emit_host(bld: dsl.FunctionBuilder, cfg: _FlashAttentionConfig) -> None:
     index = dsl.index_type()
     f16 = dsl.f16()
@@ -964,13 +1348,17 @@ def _emit_host(bld: dsl.FunctionBuilder, cfg: _FlashAttentionConfig) -> None:
         random_seed=cfg.random_seed,
         seq_n=cfg.seq_n,
     )
-    q_buf = bld.alloc([cfg.q_elements], f16)
-    k_buf = bld.alloc([cfg.kv_elements], f16)
+    q_buf = bld.alloc([cfg.q_storage_elements], f16)
+    k_buf = bld.alloc([cfg.k_storage_elements], f16)
     v_buf = bld.alloc([cfg.kv_elements], f16)
     out_buf = bld.alloc([cfg.out_elements], f32)
 
-    _emit_constant_fill(bld, q_buf, q_values, f16, index)
-    _emit_constant_fill(bld, k_buf, k_values, f16, index)
+    _emit_constant_fill(
+        bld, q_buf, _pad_values(q_values, cfg.q_storage_elements), f16, index
+    )
+    _emit_constant_fill(
+        bld, k_buf, _pad_values(k_values, cfg.k_storage_elements), f16, index
+    )
     _emit_constant_fill(bld, v_buf, v_values, f16, index)
     _emit_zero_fill(bld, out_buf, cfg.out_elements, index)
 

@@ -59,20 +59,45 @@ def _validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) ->
     matrix_intrinsic = _select_matrix_intrinsic(args.chip, args.matrix_intrinsic)
     _parser_error_if(
         parser,
-        args.block_m != 16 or args.block_n != 16,
-        "--block-m and --block-n must both be 16 for MMA attention",
+        args.block_m > 16 or args.block_n > 16,
+        "--block-m and --block-n must fit in the 16x16 MMA tile",
+    )
+    _parser_error_if(
+        parser,
+        bool(args.block_n & (args.block_n - 1)),
+        "--block-n must be a power of two",
     )
     _parser_error_if(
         parser,
         args.seq_n is not None and args.seq_n % args.block_n != 0,
         "--seq-n must be a multiple of --block-n",
     )
+    wave_size = 64 if matrix_intrinsic == "mfma_gfx950" else 32
     k_tile = 32 if matrix_intrinsic == "mfma_gfx950" else 16
     _parser_error_if(
         parser,
         args.head_dim % k_tile != 0,
         f"--head-dim must be a multiple of {k_tile}",
     )
+    for name, count in (
+        ("--block-m * --block-n", args.block_m * args.block_n),
+        ("--block-m * 16", args.block_m * 16),
+        ("16 * --block-n", 16 * args.block_n),
+        (
+            "--block-m * padded probability columns",
+            args.block_m * (k_tile - args.block_n),
+        ),
+        (
+            "padded probability rows * MMA K",
+            (16 - args.block_m) * k_tile,
+        ),
+        ("16 * padded value columns", 16 * (k_tile - args.block_n)),
+    ):
+        _parser_error_if(
+            parser,
+            count % wave_size != 0,
+            f"{name} must be a multiple of wave{wave_size}; got {count}",
+        )
 
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:

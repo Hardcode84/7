@@ -15,6 +15,7 @@ ref = compute_flash_attention_f32_reference(16, 16, 16, random_seed=11, seq_n=32
 print("fa-ref", len(q0), len(k0), len(v0), len(ref))
 assert len(compute_flash_attention_f32_reference(16, 16, 32, seq_n=16)) == 512
 assert len(compute_flash_attention_f32_reference(16, 16, 64, seq_n=16)) == 1024
+assert len(compute_flash_attention_f32_reference(8, 8, 32, seq_n=8)) == 256
 
 module = build_flash_attention_f32_module(
     block_m=16,
@@ -53,6 +54,25 @@ single = build_flash_attention_f32_module(
 single_text = str(single)
 assert single_text.count("waveamd.mma") == 4
 assert single_text.count("wave.cast") > 0
+small = build_flash_attention_f32_module(
+    block_m=8,
+    block_n=8,
+    head_dim=32,
+    random_seed=11,
+    seq_n=8,
+)
+small_text = str(small)
+assert small_text.count("waveamd.mma") == 4
+small_multi = build_flash_attention_f32_module(
+    block_m=8,
+    block_n=8,
+    head_dim=32,
+    random_seed=11,
+    seq_n=16,
+)
+small_multi_text = str(small_multi)
+assert small_multi_text.count("waveamd.mma") == 8
+assert "iter_args" in small_multi_text
 print("fa-mfma ok")
 print("fa-unrolled ok")
 print("fa-multi mma", module_text.count("waveamd.mma"), "iter_args ok")
@@ -62,6 +82,8 @@ print(
     "casts",
     single_text.count("wave.cast"),
 )
+print("fa-small mma", small_text.count("waveamd.mma"))
+print("fa-small-multi mma", small_multi_text.count("waveamd.mma"), "iter_args ok")
 print(module_text)
 
 # CHECK: fa-ref 256 512 512 256
@@ -69,6 +91,8 @@ print(module_text)
 # CHECK: fa-unrolled ok
 # CHECK: fa-multi mma 4 iter_args ok
 # CHECK: fa-single mma 4 casts {{[1-9][0-9]*}}
+# CHECK: fa-small mma 4
+# CHECK: fa-small-multi mma 8 iter_args ok
 # CHECK: func.func @flash_attention_f32
 # CHECK: waveamd.mma
 # CHECK: waveamd.fragment_unpack
