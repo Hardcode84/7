@@ -191,6 +191,49 @@ static unsigned getMfmaStoreLatency(const llvm::AMDGPU::IsaVersion &isa) {
   return 8;
 }
 
+static unsigned getMfmaSrcABLatency(const llvm::AMDGPU::IsaVersion &isa) {
+  if (isCDNA3Family(isa))
+    return 7;
+  if (isCDNA4Family(isa))
+    return 8;
+  return 8;
+}
+
+static unsigned getMfmaSrcCOverlapLatency(const llvm::AMDGPU::IsaVersion &isa) {
+  if (isCDNA3Family(isa))
+    return 5;
+  if (isCDNA4Family(isa))
+    return 6;
+  return 6;
+}
+
+static unsigned getMfmaSrcCReadWarLatency(const llvm::AMDGPU::IsaVersion &isa) {
+  return isCDNA3Family(isa) || isCDNA4Family(isa) ? 3 : 0;
+}
+
+static unsigned getValuWriteVGPRMfmaLatency() { return 2; }
+
+static unsigned
+getValuWriteVGPRReadlaneLatency(const llvm::AMDGPU::IsaVersion &isa) {
+  return isCDNA3Family(isa) || isCDNA4Family(isa) ? 1 : 0;
+}
+
+static unsigned
+getValuWriteSGPRValuReadLatency(const llvm::AMDGPU::IsaVersion &isa) {
+  return isCDNA3Family(isa) || isCDNA4Family(isa) ? 2 : 0;
+}
+
+static unsigned getValuWriteSGPRVmemReadLatency() { return 5; }
+
+static unsigned
+getValuWriteExecMfmaLatency(const llvm::AMDGPU::IsaVersion &isa) {
+  return isa.Major == 9 ? 4 : 0;
+}
+
+static unsigned getStoreWriteDataLatency(const llvm::AMDGPU::IsaVersion &isa) {
+  return isCDNA3Family(isa) || isCDNA4Family(isa) ? 2 : 1;
+}
+
 struct HazardConfig {
   bool hasDelayAlu;
   llvm::AMDGPU::IsaVersion isaVersion;
@@ -204,6 +247,16 @@ struct HazardConfig {
 
   // 4-pass XDL write -> VMEM/VALU: CDNA3 Table 37 = 7, CDNA4 Table 38 = 8.
   unsigned mfmaResultLatency;
+  // Mirrors LLVM AMDGPU GCNHazardRecognizer CDNA post-RA waits.
+  unsigned mfmaSrcABLatency;
+  unsigned mfmaSrcCOverlapLatency;
+  unsigned mfmaSrcCReadWarLatency;
+  unsigned valuWriteVGPRMfmaLatency;
+  unsigned valuWriteVGPRReadlaneLatency;
+  unsigned valuWriteSGPRValuReadLatency;
+  unsigned valuWriteSGPRVmemReadLatency;
+  unsigned valuWriteExecMfmaLatency;
+  unsigned storeWriteDataLatency;
 };
 
 // Insert `count` `s_nop`s right before `op`.
@@ -266,9 +319,56 @@ struct ValueHazards {
   }
 };
 
+struct RegSpan {
+  waveamdmachine::RegClass regClass;
+  int64_t begin = 0;
+  int64_t end = 0;
+
+  bool operator==(const RegSpan &rhs) const {
+    return regClass == rhs.regClass && begin == rhs.begin && end == rhs.end;
+  }
+};
+
+enum class PhysicalHazardKind : uint8_t {
+  MfmaWrite,
+  MfmaSrcCRead,
+  ValuWriteVGPR,
+  ValuWriteSGPR,
+  StoreWriteData,
+};
+
+struct PhysicalHazard {
+  RegSpan span;
+  PhysicalHazardKind kind;
+  unsigned limit = 0;
+  unsigned remaining = 0;
+};
+
 struct HazardState {
   bool lgkmPending = false;
   DenseMap<Value, ValueHazards> values;
+  SmallVector<PhysicalHazard, 16> physical;
+  unsigned valuWriteVcc = 0;
+  unsigned execToMfma = 0;
+
+  static bool joinMax(unsigned &lhs, unsigned rhs) {
+    unsigned next = std::max(lhs, rhs);
+    bool changed = next != lhs;
+    lhs = next;
+    return changed;
+  }
+
+  bool joinPhysicalHazard(const PhysicalHazard &hazard) {
+    for (PhysicalHazard &existing : physical) {
+      if (!(existing.span == hazard.span) || existing.kind != hazard.kind)
+        continue;
+      bool changed = joinMax(existing.limit, hazard.limit);
+      changed |= joinMax(existing.remaining, hazard.remaining);
+      return changed;
+    }
+    physical.push_back(hazard);
+    return true;
+  }
 
   bool joinWith(const HazardState &rhs) {
     bool changed = false;
@@ -281,6 +381,10 @@ struct HazardState {
         continue;
       changed |= values[value].joinWith(hazards);
     }
+    for (const PhysicalHazard &hazard : rhs.physical)
+      changed |= joinPhysicalHazard(hazard);
+    changed |= joinMax(valuWriteVcc, rhs.valuWriteVcc);
+    changed |= joinMax(execToMfma, rhs.execToMfma);
     return changed;
   }
 };
@@ -303,13 +407,17 @@ public:
   }
 
   ChangeResult reset() {
-    bool changed = state.lgkmPending || !state.values.empty();
+    bool changed = state.lgkmPending || !state.values.empty() ||
+                   !state.physical.empty() || state.valuWriteVcc ||
+                   state.execToMfma;
     state = HazardState();
     return changed ? ChangeResult::Change : ChangeResult::NoChange;
   }
 
   void print(raw_ostream &os) const override {
-    os << "lgkm=" << state.lgkmPending << " values=" << state.values.size();
+    os << "lgkm=" << state.lgkmPending << " values=" << state.values.size()
+       << " physical=" << state.physical.size() << " vcc=" << state.valuWriteVcc
+       << " exec=" << state.execToMfma;
   }
 
 private:
@@ -336,6 +444,68 @@ static void advanceValueHazards(HazardState &state, unsigned count = 1) {
     if (entry.second.empty())
       state.values.erase(entry.first);
   }
+}
+
+static std::optional<RegSpan> getAllocatedRegSpan(Value value) {
+  auto type = dyn_cast<waveamdmachine::RegType>(value.getType());
+  if (!type || type.getIndex() < 0)
+    return std::nullopt;
+  return RegSpan{type.getRegClass(), type.getIndex(),
+                 type.getIndex() + type.getWidth()};
+}
+
+static bool overlaps(RegSpan lhs, RegSpan rhs) {
+  return lhs.regClass == rhs.regClass && lhs.begin < rhs.end &&
+         rhs.begin < lhs.end;
+}
+
+static bool isVGPRSpan(RegSpan span) {
+  return span.regClass == waveamdmachine::RegClass::VGPR;
+}
+
+static bool isSGPRSpan(RegSpan span) {
+  return span.regClass == waveamdmachine::RegClass::SGPR;
+}
+
+static void mergePhysicalHazard(HazardState &state, PhysicalHazard hazard) {
+  if (hazard.remaining == 0)
+    return;
+  for (PhysicalHazard &existing : state.physical) {
+    if (!(existing.span == hazard.span) || existing.kind != hazard.kind)
+      continue;
+    existing.limit = std::max(existing.limit, hazard.limit);
+    existing.remaining = std::max(existing.remaining, hazard.remaining);
+    return;
+  }
+  state.physical.push_back(hazard);
+}
+
+static void advancePhysicalHazards(HazardState &state, unsigned count = 1) {
+  if (count == 0)
+    return;
+  SmallVector<PhysicalHazard, 16> kept;
+  kept.reserve(state.physical.size());
+  for (PhysicalHazard hazard : state.physical) {
+    hazard.remaining = hazard.remaining > count ? hazard.remaining - count : 0;
+    if (hazard.remaining)
+      kept.push_back(hazard);
+  }
+  state.physical = std::move(kept);
+  state.valuWriteVcc =
+      state.valuWriteVcc > count ? state.valuWriteVcc - count : 0;
+  state.execToMfma = state.execToMfma > count ? state.execToMfma - count : 0;
+}
+
+static void advanceHazards(HazardState &state, unsigned count = 1) {
+  advanceValueHazards(state, count);
+  advancePhysicalHazards(state, count);
+}
+
+static unsigned waitForHazardAge(const PhysicalHazard &hazard,
+                                 unsigned required) {
+  assert(hazard.limit >= hazard.remaining && "malformed hazard age");
+  unsigned elapsed = hazard.limit - hazard.remaining;
+  return required > elapsed ? required - elapsed : 0;
 }
 
 static void propagateValueHazards(ArrayRef<Value> sources, ValueRange targets,
@@ -398,6 +568,228 @@ static void inheritNoInstOperandHazards(Operation *op, HazardState &state) {
     mergeValueHazards(state, result, joined);
 }
 
+static bool isMFMA(Operation *op) {
+  return op->hasTrait<OpTrait::waveamdmachine::MFMAOp>();
+}
+
+static bool isLegacyVALU(Operation *op) {
+  return op->hasTrait<OpTrait::waveamdmachine::VALUOp>() && !isMFMA(op);
+}
+
+static bool isVMEM(Operation *op) {
+  return op->hasTrait<OpTrait::waveamdmachine::VMEMLoadOp>() ||
+         op->hasTrait<OpTrait::waveamdmachine::VMEMStoreOp>();
+}
+
+static bool isMemory(Operation *op) {
+  return isVMEM(op) || op->hasTrait<OpTrait::waveamdmachine::LDSLoadOp>() ||
+         op->hasTrait<OpTrait::waveamdmachine::LDSStoreOp>();
+}
+
+static std::optional<Value> getWideStoreData(Operation *op) {
+  if (!isa<waveamdmachine::GlobalStoreB96Op, waveamdmachine::GlobalStoreB128Op,
+           waveamdmachine::BufferStoreB96Op, waveamdmachine::BufferStoreB128Op>(
+          op))
+    return std::nullopt;
+  return op->getOperand(1);
+}
+
+static unsigned getVGPRWriteHazardLimit(const HazardConfig &cfg) {
+  return std::max(cfg.valuWriteVGPRMfmaLatency,
+                  cfg.valuWriteVGPRReadlaneLatency);
+}
+
+static unsigned getSGPRWriteHazardLimit(const HazardConfig &cfg) {
+  return std::max(cfg.valuWriteSGPRValuReadLatency,
+                  cfg.valuWriteSGPRVmemReadLatency);
+}
+
+static unsigned getMfmaUseWait(unsigned operandIndex, RegSpan use,
+                               const PhysicalHazard &hazard,
+                               const HazardConfig &cfg) {
+  if (hazard.kind == PhysicalHazardKind::ValuWriteVGPR)
+    return waitForHazardAge(hazard, cfg.valuWriteVGPRMfmaLatency);
+  if (hazard.kind != PhysicalHazardKind::MfmaWrite)
+    return 0;
+  if (operandIndex != 2)
+    return waitForHazardAge(hazard, cfg.mfmaSrcABLatency);
+  if (use == hazard.span)
+    return 0;
+  return waitForHazardAge(hazard, cfg.mfmaSrcCOverlapLatency);
+}
+
+static unsigned getNonMfmaUseWait(Operation *op, RegSpan use,
+                                  const PhysicalHazard &hazard,
+                                  const HazardConfig &cfg) {
+  if (hazard.kind == PhysicalHazardKind::MfmaWrite &&
+      (isMemory(op) || isLegacyVALU(op)))
+    return waitForHazardAge(hazard, cfg.mfmaResultLatency);
+
+  if (hazard.kind == PhysicalHazardKind::ValuWriteVGPR &&
+      isa<waveamdmachine::VReadfirstlaneB32Op>(op))
+    return waitForHazardAge(hazard, cfg.valuWriteVGPRReadlaneLatency);
+
+  if (hazard.kind == PhysicalHazardKind::ValuWriteSGPR && isSGPRSpan(use)) {
+    if (isVMEM(op))
+      return waitForHazardAge(hazard, cfg.valuWriteSGPRVmemReadLatency);
+    if (isLegacyVALU(op))
+      return waitForHazardAge(hazard, cfg.valuWriteSGPRValuReadLatency);
+  }
+
+  return 0;
+}
+
+static unsigned getPhysicalUseWait(Operation *op, unsigned operandIndex,
+                                   RegSpan use, const PhysicalHazard &hazard,
+                                   const HazardConfig &cfg) {
+  if (!overlaps(use, hazard.span))
+    return 0;
+  if (isMFMA(op))
+    return getMfmaUseWait(operandIndex, use, hazard, cfg);
+  return getNonMfmaUseWait(op, use, hazard, cfg);
+}
+
+static unsigned getPhysicalDefWait(Operation *op, RegSpan def,
+                                   const PhysicalHazard &hazard,
+                                   const HazardConfig &cfg) {
+  if (!overlaps(def, hazard.span))
+    return 0;
+
+  if (hazard.kind == PhysicalHazardKind::MfmaWrite &&
+      (isMemory(op) || isLegacyVALU(op)))
+    return waitForHazardAge(hazard, cfg.mfmaResultLatency);
+
+  if (hazard.kind == PhysicalHazardKind::MfmaSrcCRead && isLegacyVALU(op))
+    return waitForHazardAge(hazard, cfg.mfmaSrcCReadWarLatency);
+
+  if (hazard.kind == PhysicalHazardKind::StoreWriteData &&
+      op->hasTrait<OpTrait::waveamdmachine::VALUOp>() && isVGPRSpan(def))
+    return waitForHazardAge(hazard, cfg.storeWriteDataLatency);
+
+  return 0;
+}
+
+static unsigned getOperandPhysicalWait(Operation *op, const HazardState &state,
+                                       const HazardConfig &cfg) {
+  unsigned wait = 0;
+  for (auto [operandIndex, operand] : llvm::enumerate(op->getOperands())) {
+    std::optional<RegSpan> span = getAllocatedRegSpan(operand);
+    if (!span)
+      continue;
+    for (const PhysicalHazard &hazard : state.physical)
+      wait = std::max(wait,
+                      getPhysicalUseWait(op, operandIndex, *span, hazard, cfg));
+  }
+  return wait;
+}
+
+static unsigned getResultPhysicalWait(Operation *op, const HazardState &state,
+                                      const HazardConfig &cfg) {
+  unsigned wait = 0;
+  for (Value result : op->getResults()) {
+    std::optional<RegSpan> span = getAllocatedRegSpan(result);
+    if (!span)
+      continue;
+    for (const PhysicalHazard &hazard : state.physical)
+      wait = std::max(wait, getPhysicalDefWait(op, *span, hazard, cfg));
+  }
+  return wait;
+}
+
+static unsigned getVccReadWait(Operation *op, const HazardState &state) {
+  if (!op->hasTrait<OpTrait::waveamdmachine::VALUOp>())
+    return 0;
+  for (Value operand : op->getOperands()) {
+    auto type = dyn_cast<waveamdmachine::RegType>(operand.getType());
+    if (type && type.getRegClass() == waveamdmachine::RegClass::VCC)
+      return state.valuWriteVcc;
+  }
+  return 0;
+}
+
+static unsigned getRequiredPhysicalWait(Operation *op, const HazardState &state,
+                                        const HazardConfig &cfg) {
+  if (isControlFlowOp(op))
+    return 0;
+
+  unsigned wait = 0;
+  if (isMFMA(op))
+    wait = std::max(wait, state.execToMfma);
+  wait = std::max(wait, getOperandPhysicalWait(op, state, cfg));
+  wait = std::max(wait, getResultPhysicalWait(op, state, cfg));
+  return std::max(wait, getVccReadWait(op, state));
+}
+
+static void addPhysicalHazard(HazardState &state, RegSpan span,
+                              PhysicalHazardKind kind, unsigned limit) {
+  mergePhysicalHazard(state,
+                      PhysicalHazard{/*span=*/span, /*kind=*/kind,
+                                     /*limit=*/limit, /*remaining=*/limit});
+}
+
+static void addProducedMfmaPhysicalHazards(Operation *op, HazardState &state,
+                                           const HazardConfig &cfg) {
+  for (Value result : op->getResults())
+    if (std::optional<RegSpan> span = getAllocatedRegSpan(result))
+      addPhysicalHazard(state, *span, PhysicalHazardKind::MfmaWrite,
+                        cfg.mfmaResultLatency);
+  if (!cfg.mfmaSrcCReadWarLatency)
+    return;
+  if (std::optional<RegSpan> span = getAllocatedRegSpan(op->getOperand(2)))
+    addPhysicalHazard(state, *span, PhysicalHazardKind::MfmaSrcCRead,
+                      cfg.mfmaSrcCReadWarLatency);
+}
+
+static void addProducedValuRegHazard(Value result, HazardState &state,
+                                     const HazardConfig &cfg) {
+  auto type = dyn_cast<waveamdmachine::RegType>(result.getType());
+  if (!type)
+    return;
+  if (type.getRegClass() == waveamdmachine::RegClass::VCC) {
+    state.valuWriteVcc =
+        std::max(state.valuWriteVcc, cfg.valuWriteSGPRValuReadLatency);
+    return;
+  }
+  std::optional<RegSpan> span = getAllocatedRegSpan(result);
+  if (!span)
+    return;
+  if (isVGPRSpan(*span))
+    addPhysicalHazard(state, *span, PhysicalHazardKind::ValuWriteVGPR,
+                      getVGPRWriteHazardLimit(cfg));
+  if (isSGPRSpan(*span))
+    addPhysicalHazard(state, *span, PhysicalHazardKind::ValuWriteSGPR,
+                      getSGPRWriteHazardLimit(cfg));
+}
+
+static void addProducedValuPhysicalHazards(Operation *op, HazardState &state,
+                                           const HazardConfig &cfg) {
+  if (op->hasTrait<OpTrait::waveamdmachine::WritesExecOp>())
+    state.execToMfma = std::max(state.execToMfma, cfg.valuWriteExecMfmaLatency);
+  for (Value result : op->getResults())
+    addProducedValuRegHazard(result, state, cfg);
+}
+
+static void addProducedStorePhysicalHazards(Operation *op, HazardState &state,
+                                            const HazardConfig &cfg) {
+  std::optional<Value> data = getWideStoreData(op);
+  if (!data)
+    return;
+  if (std::optional<RegSpan> span = getAllocatedRegSpan(*data))
+    addPhysicalHazard(state, *span, PhysicalHazardKind::StoreWriteData,
+                      cfg.storeWriteDataLatency);
+}
+
+static void addProducedPhysicalHazards(Operation *op, HazardState &state,
+                                       const HazardConfig &cfg) {
+  if (isMFMA(op)) {
+    addProducedMfmaPhysicalHazards(op, state, cfg);
+    return;
+  }
+  if (isLegacyVALU(op))
+    addProducedValuPhysicalHazards(op, state, cfg);
+  addProducedStorePhysicalHazards(op, state, cfg);
+}
+
 static void addProducedHazards(Operation *op, HazardState &state,
                                const HazardConfig &cfg) {
   if (isa<waveamdmachine::SMovM0Op>(op)) {
@@ -412,6 +804,7 @@ static void addProducedHazards(Operation *op, HazardState &state,
                         {/*m0=*/0,
                          /*mfmaStore=*/cfg.mfmaResultLatency});
   }
+  addProducedPhysicalHazards(op, state, cfg);
 }
 
 static void transferHazards(Operation *op, HazardState &state,
@@ -422,7 +815,7 @@ static void transferHazards(Operation *op, HazardState &state,
     state.lgkmPending = false;
 
   if (!emitsNoMachineInst(*op))
-    advanceValueHazards(state);
+    advanceHazards(state);
 
   if (controlFlow)
     return;
@@ -513,7 +906,7 @@ public:
                                             HazardLattice *after) override {
     HazardState next = before.get();
     if (!regionFrom && !emitsNoMachineInst(*branch))
-      advanceValueHazards(next);
+      advanceHazards(next);
     propagateRegionOperands(branch, regionFrom, regionTo, next);
     propagateIfChanged(after, after->joinWith(next));
   }
@@ -540,6 +933,17 @@ struct WaveAMDHazardWaitsPass
             amdgpu_compat::SDelayAlu::DelayType::VALU, 1),
         /*m0PipelineDelay=*/1,
         /*mfmaResultLatency=*/getMfmaStoreLatency(isaVersion),
+        /*mfmaSrcABLatency=*/getMfmaSrcABLatency(isaVersion),
+        /*mfmaSrcCOverlapLatency=*/getMfmaSrcCOverlapLatency(isaVersion),
+        /*mfmaSrcCReadWarLatency=*/getMfmaSrcCReadWarLatency(isaVersion),
+        /*valuWriteVGPRMfmaLatency=*/getValuWriteVGPRMfmaLatency(),
+        /*valuWriteVGPRReadlaneLatency=*/
+        getValuWriteVGPRReadlaneLatency(isaVersion),
+        /*valuWriteSGPRValuReadLatency=*/
+        getValuWriteSGPRValuReadLatency(isaVersion),
+        /*valuWriteSGPRVmemReadLatency=*/getValuWriteSGPRVmemReadLatency(),
+        /*valuWriteExecMfmaLatency=*/getValuWriteExecMfmaLatency(isaVersion),
+        /*storeWriteDataLatency=*/getStoreWriteDataLatency(isaVersion),
     };
     cfg.defaultLgkmcnt = llvm::AMDGPU::decodeLgkmcnt(
         cfg.isaVersion, llvm::AMDGPU::getWaitcntBitMask(cfg.isaVersion));
@@ -603,15 +1007,16 @@ private:
       return;
     }
 
-    unsigned ssaWait = getRequiredSsaWait(op, local);
-    if (ssaWait) {
-      insertSNopMitigation(*op, ssaWait, builder, sti);
-      advanceValueHazards(local, ssaWait);
+    unsigned wait = std::max(getRequiredSsaWait(op, local),
+                             getRequiredPhysicalWait(op, local, cfg));
+    if (wait) {
+      insertSNopMitigation(*op, wait, builder, sti);
+      advanceHazards(local, wait);
     }
 
     if (needsValuMitigation(op, local)) {
       insertValuMitigation(*op, builder, cfg, sti);
-      advanceValueHazards(local);
+      advanceHazards(local);
       local.lgkmPending = false;
     }
 

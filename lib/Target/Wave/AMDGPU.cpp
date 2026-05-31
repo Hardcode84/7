@@ -164,6 +164,12 @@ struct KernelInfo {
   X(vCmpLeU32, V_CMP_LE_U32_e64_vi, V_CMP_LE_U32_e64_gfx11)                    \
   X(vCmpGtU32, V_CMP_GT_U32_e64_vi, V_CMP_GT_U32_e64_gfx11)                    \
   X(vCmpGeU32, V_CMP_GE_U32_e64_vi, V_CMP_GE_U32_e64_gfx11)                    \
+  X(vCmpxEqU32, V_CMPX_EQ_U32_e64_vi, V_CMPX_EQ_U32_e64_gfx11)                 \
+  X(vCmpxNeU32, V_CMPX_NE_U32_e64_vi, V_CMPX_NE_U32_e64_gfx11)                 \
+  X(vCmpxLtU32, V_CMPX_LT_U32_e64_vi, V_CMPX_LT_U32_e64_gfx11)                 \
+  X(vCmpxLeU32, V_CMPX_LE_U32_e64_vi, V_CMPX_LE_U32_e64_gfx11)                 \
+  X(vCmpxGtU32, V_CMPX_GT_U32_e64_vi, V_CMPX_GT_U32_e64_gfx11)                 \
+  X(vCmpxGeU32, V_CMPX_GE_U32_e64_vi, V_CMPX_GE_U32_e64_gfx11)                 \
   X(bufferStoreB32, BUFFER_STORE_DWORD_OFFEN_vi,                               \
     BUFFER_STORE_DWORD_OFFEN_gfx11)                                            \
   X(bufferLoadB32, BUFFER_LOAD_DWORD_OFFEN_vi, BUFFER_LOAD_DWORD_OFFEN_gfx11)  \
@@ -456,6 +462,12 @@ private:
   unsigned vCmpLeU32() const { return opcodes.vCmpLeU32; }
   unsigned vCmpGtU32() const { return opcodes.vCmpGtU32; }
   unsigned vCmpGeU32() const { return opcodes.vCmpGeU32; }
+  unsigned vCmpxEqU32() const { return opcodes.vCmpxEqU32; }
+  unsigned vCmpxNeU32() const { return opcodes.vCmpxNeU32; }
+  unsigned vCmpxLtU32() const { return opcodes.vCmpxLtU32; }
+  unsigned vCmpxLeU32() const { return opcodes.vCmpxLeU32; }
+  unsigned vCmpxGtU32() const { return opcodes.vCmpxGtU32; }
+  unsigned vCmpxGeU32() const { return opcodes.vCmpxGeU32; }
   unsigned mfmaF32_16x16x16F16() const {
     return isGfx90APlus() ? llvm::AMDGPU::V_MFMA_F32_16X16X16F16_gfx940_vcd
                           : llvm::AMDGPU::V_MFMA_F32_16X16X16F16_vi;
@@ -1377,6 +1389,20 @@ private:
       if (!supportsPackedF16())
         return op.emitError("v_pk_fma_f16 requires gfx9/gfx11");
       return emitPackedTernary(vPkFmaF16(), op);
+    }
+    if (isa<waveamdmachine::VCmpxEqU32Op, waveamdmachine::VCmpxNeU32Op,
+            waveamdmachine::VCmpxLtU32Op, waveamdmachine::VCmpxLeU32Op,
+            waveamdmachine::VCmpxGtU32Op, waveamdmachine::VCmpxGeU32Op>(op)) {
+      unsigned opcode = isa<waveamdmachine::VCmpxEqU32Op>(op)   ? vCmpxEqU32()
+                        : isa<waveamdmachine::VCmpxNeU32Op>(op) ? vCmpxNeU32()
+                        : isa<waveamdmachine::VCmpxLtU32Op>(op) ? vCmpxLtU32()
+                        : isa<waveamdmachine::VCmpxLeU32Op>(op) ? vCmpxLeU32()
+                        : isa<waveamdmachine::VCmpxGtU32Op>(op) ? vCmpxGtU32()
+                                                                : vCmpxGeU32();
+      llvm::MCOperand exec = llvm::MCOperand::createReg(
+          namedPhysReg(wavefrontSize == 32 ? "exec_lo" : "exec"));
+      return emitMC(opcode, {exec, toMCOperand(op.getOperand(0)),
+                             toMCOperand(op.getOperand(1))});
     }
     if (isa<waveamdmachine::VCmpEqU32Op, waveamdmachine::VCmpEqU32VccOp,
             waveamdmachine::VCmpNeU32Op, waveamdmachine::VCmpNeU32VccOp,

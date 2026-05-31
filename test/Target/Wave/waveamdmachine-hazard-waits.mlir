@@ -266,6 +266,48 @@ func.func @cdna3_mfma_result_store_delay(
   return
 }
 
+// CHECK-LABEL: func.func @cdna3_mfma_src_ab_overlap
+// CHECK: waveamdmachine.mfma_f32_16x16x16_f16
+// CHECK-NEXT: waveamdmachine.imm 6
+// CHECK-NEXT: waveamdmachine.s_nop
+// CHECK-NEXT: waveamdmachine.mfma_f32_16x16x16_f16
+func.func @cdna3_mfma_src_ab_overlap(
+    %a: !waveamdmachine.reg<vgpr, 2, 0>,
+    %b: !waveamdmachine.reg<vgpr, 2, 4>,
+    %acc: !waveamdmachine.reg<vgpr, 4, 8>,
+    %next_a: !waveamdmachine.reg<vgpr, 2, 10>,
+    %next_b: !waveamdmachine.reg<vgpr, 2, 20>,
+    %next_acc: !waveamdmachine.reg<vgpr, 4, 24>) {
+  %r = waveamdmachine.mfma_f32_16x16x16_f16 %a, %b, %acc
+      : (!waveamdmachine.reg<vgpr, 2, 0>, !waveamdmachine.reg<vgpr, 2, 4>,
+         !waveamdmachine.reg<vgpr, 4, 8>) -> !waveamdmachine.reg<vgpr, 4, 8>
+  %next = waveamdmachine.mfma_f32_16x16x16_f16 %next_a, %next_b, %next_acc
+      : (!waveamdmachine.reg<vgpr, 2, 10>, !waveamdmachine.reg<vgpr, 2, 20>,
+         !waveamdmachine.reg<vgpr, 4, 24>) -> !waveamdmachine.reg<vgpr, 4, 32>
+  return
+}
+
+// CHECK-LABEL: func.func @cdna3_mfma_src_c_overlap
+// CHECK: waveamdmachine.mfma_f32_16x16x16_f16
+// CHECK-NEXT: waveamdmachine.imm 4
+// CHECK-NEXT: waveamdmachine.s_nop
+// CHECK-NEXT: waveamdmachine.mfma_f32_16x16x16_f16
+func.func @cdna3_mfma_src_c_overlap(
+    %a: !waveamdmachine.reg<vgpr, 2, 0>,
+    %b: !waveamdmachine.reg<vgpr, 2, 4>,
+    %acc: !waveamdmachine.reg<vgpr, 4, 8>,
+    %next_a: !waveamdmachine.reg<vgpr, 2, 20>,
+    %next_b: !waveamdmachine.reg<vgpr, 2, 24>,
+    %next_acc: !waveamdmachine.reg<vgpr, 4, 10>) {
+  %r = waveamdmachine.mfma_f32_16x16x16_f16 %a, %b, %acc
+      : (!waveamdmachine.reg<vgpr, 2, 0>, !waveamdmachine.reg<vgpr, 2, 4>,
+         !waveamdmachine.reg<vgpr, 4, 8>) -> !waveamdmachine.reg<vgpr, 4, 8>
+  %next = waveamdmachine.mfma_f32_16x16x16_f16 %next_a, %next_b, %next_acc
+      : (!waveamdmachine.reg<vgpr, 2, 20>, !waveamdmachine.reg<vgpr, 2, 24>,
+         !waveamdmachine.reg<vgpr, 4, 10>) -> !waveamdmachine.reg<vgpr, 4, 32>
+  return
+}
+
 }
 
 // -----
@@ -305,6 +347,241 @@ func.func @mfma_result_store_delay_ignores_preloaded(
   %tok = waveamdmachine.global_store_b128 %off, %r, %base
       : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 4>,
          !waveamdmachine.reg<sgpr, 2>) -> !waveamdmachine.mem.token
+  return
+}
+
+// CHECK-LABEL: func.func @cdna4_mfma_src_ab_overlap
+// CHECK: waveamdmachine.mfma_f32_16x16x32_f16
+// CHECK-NEXT: waveamdmachine.imm 7
+// CHECK-NEXT: waveamdmachine.s_nop
+// CHECK-NEXT: waveamdmachine.mfma_f32_16x16x32_f16
+func.func @cdna4_mfma_src_ab_overlap(
+    %a: !waveamdmachine.reg<vgpr, 4, 0>,
+    %b: !waveamdmachine.reg<vgpr, 4, 4>,
+    %acc: !waveamdmachine.reg<vgpr, 4, 8>,
+    %next_a: !waveamdmachine.reg<vgpr, 4, 10>,
+    %next_b: !waveamdmachine.reg<vgpr, 4, 20>,
+    %next_acc: !waveamdmachine.reg<vgpr, 4, 24>) {
+  %r = waveamdmachine.mfma_f32_16x16x32_f16 %a, %b, %acc
+      : (!waveamdmachine.reg<vgpr, 4, 0>, !waveamdmachine.reg<vgpr, 4, 4>,
+         !waveamdmachine.reg<vgpr, 4, 8>) -> !waveamdmachine.reg<vgpr, 4, 8>
+  %next = waveamdmachine.mfma_f32_16x16x32_f16 %next_a, %next_b, %next_acc
+      : (!waveamdmachine.reg<vgpr, 4, 10>, !waveamdmachine.reg<vgpr, 4, 20>,
+         !waveamdmachine.reg<vgpr, 4, 24>) -> !waveamdmachine.reg<vgpr, 4, 32>
+  return
+}
+
+// CHECK-LABEL: func.func @cdna4_mfma_src_c_exact_no_delay
+// CHECK: waveamdmachine.mfma_f32_16x16x32_f16
+// CHECK-NEXT: waveamdmachine.mfma_f32_16x16x32_f16
+func.func @cdna4_mfma_src_c_exact_no_delay(
+    %a: !waveamdmachine.reg<vgpr, 4, 0>,
+    %b: !waveamdmachine.reg<vgpr, 4, 4>,
+    %acc: !waveamdmachine.reg<vgpr, 4, 8>,
+    %next_a: !waveamdmachine.reg<vgpr, 4, 20>,
+    %next_b: !waveamdmachine.reg<vgpr, 4, 24>) {
+  %r = waveamdmachine.mfma_f32_16x16x32_f16 %a, %b, %acc
+      : (!waveamdmachine.reg<vgpr, 4, 0>, !waveamdmachine.reg<vgpr, 4, 4>,
+         !waveamdmachine.reg<vgpr, 4, 8>) -> !waveamdmachine.reg<vgpr, 4, 8>
+  %next = waveamdmachine.mfma_f32_16x16x32_f16 %next_a, %next_b, %r
+      : (!waveamdmachine.reg<vgpr, 4, 20>, !waveamdmachine.reg<vgpr, 4, 24>,
+         !waveamdmachine.reg<vgpr, 4, 8>) -> !waveamdmachine.reg<vgpr, 4, 32>
+  return
+}
+
+// CHECK-LABEL: func.func @cdna4_mfma_src_c_overlap
+// CHECK: waveamdmachine.mfma_f32_16x16x32_f16
+// CHECK-NEXT: waveamdmachine.imm 5
+// CHECK-NEXT: waveamdmachine.s_nop
+// CHECK-NEXT: waveamdmachine.mfma_f32_16x16x32_f16
+func.func @cdna4_mfma_src_c_overlap(
+    %a: !waveamdmachine.reg<vgpr, 4, 0>,
+    %b: !waveamdmachine.reg<vgpr, 4, 4>,
+    %acc: !waveamdmachine.reg<vgpr, 4, 8>,
+    %next_a: !waveamdmachine.reg<vgpr, 4, 20>,
+    %next_b: !waveamdmachine.reg<vgpr, 4, 24>,
+    %next_acc: !waveamdmachine.reg<vgpr, 4, 10>) {
+  %r = waveamdmachine.mfma_f32_16x16x32_f16 %a, %b, %acc
+      : (!waveamdmachine.reg<vgpr, 4, 0>, !waveamdmachine.reg<vgpr, 4, 4>,
+         !waveamdmachine.reg<vgpr, 4, 8>) -> !waveamdmachine.reg<vgpr, 4, 8>
+  %next = waveamdmachine.mfma_f32_16x16x32_f16 %next_a, %next_b, %next_acc
+      : (!waveamdmachine.reg<vgpr, 4, 20>, !waveamdmachine.reg<vgpr, 4, 24>,
+         !waveamdmachine.reg<vgpr, 4, 10>) -> !waveamdmachine.reg<vgpr, 4, 32>
+  return
+}
+
+// CHECK-LABEL: func.func @cdna4_mfma_result_valu_read_overlap
+// CHECK: waveamdmachine.mfma_f32_16x16x32_f16
+// CHECK-NEXT: waveamdmachine.imm 7
+// CHECK-NEXT: waveamdmachine.s_nop
+// CHECK-NEXT: waveamdmachine.v_add_u32
+func.func @cdna4_mfma_result_valu_read_overlap(
+    %a: !waveamdmachine.reg<vgpr, 4, 0>,
+    %b: !waveamdmachine.reg<vgpr, 4, 4>,
+    %acc: !waveamdmachine.reg<vgpr, 4, 8>,
+    %overlap: !waveamdmachine.reg<vgpr, 1, 9>,
+    %s: !waveamdmachine.reg<sgpr, 1, 0>) {
+  %r = waveamdmachine.mfma_f32_16x16x32_f16 %a, %b, %acc
+      : (!waveamdmachine.reg<vgpr, 4, 0>, !waveamdmachine.reg<vgpr, 4, 4>,
+         !waveamdmachine.reg<vgpr, 4, 8>) -> !waveamdmachine.reg<vgpr, 4, 8>
+  %sum = waveamdmachine.v_add_u32 %overlap, %s
+      : (!waveamdmachine.reg<vgpr, 1, 9>, !waveamdmachine.reg<sgpr, 1, 0>)
+      -> !waveamdmachine.reg<vgpr, 1, 30>
+  return
+}
+
+// CHECK-LABEL: func.func @cdna4_mfma_result_valu_write_overlap
+// CHECK: waveamdmachine.mfma_f32_16x16x32_f16
+// CHECK-NEXT: waveamdmachine.imm 7
+// CHECK-NEXT: waveamdmachine.s_nop
+// CHECK-NEXT: waveamdmachine.v_add_u32
+func.func @cdna4_mfma_result_valu_write_overlap(
+    %a: !waveamdmachine.reg<vgpr, 4, 0>,
+    %b: !waveamdmachine.reg<vgpr, 4, 4>,
+    %acc: !waveamdmachine.reg<vgpr, 4, 8>,
+    %x: !waveamdmachine.reg<vgpr, 1, 30>,
+    %s: !waveamdmachine.reg<sgpr, 1, 0>) {
+  %r = waveamdmachine.mfma_f32_16x16x32_f16 %a, %b, %acc
+      : (!waveamdmachine.reg<vgpr, 4, 0>, !waveamdmachine.reg<vgpr, 4, 4>,
+         !waveamdmachine.reg<vgpr, 4, 8>) -> !waveamdmachine.reg<vgpr, 4, 8>
+  %sum = waveamdmachine.v_add_u32 %x, %s
+      : (!waveamdmachine.reg<vgpr, 1, 30>, !waveamdmachine.reg<sgpr, 1, 0>)
+      -> !waveamdmachine.reg<vgpr, 1, 9>
+  return
+}
+
+// CHECK-LABEL: func.func @cdna4_mfma_result_vmem_write_overlap
+// CHECK: waveamdmachine.mfma_f32_16x16x32_f16
+// CHECK-NEXT: waveamdmachine.imm 7
+// CHECK-NEXT: waveamdmachine.s_nop
+// CHECK-NEXT: waveamdmachine.buffer_load_b32
+func.func @cdna4_mfma_result_vmem_write_overlap(
+    %a: !waveamdmachine.reg<vgpr, 4, 0>,
+    %b: !waveamdmachine.reg<vgpr, 4, 4>,
+    %acc: !waveamdmachine.reg<vgpr, 4, 8>,
+    %off: !waveamdmachine.reg<vgpr, 1, 30>,
+    %desc: !waveamdmachine.reg<sgpr, 4, 0>,
+    %zero: !waveamdmachine.reg<sgpr, 1, 4>,
+    %dep: !waveamdmachine.mem.token) {
+  %r = waveamdmachine.mfma_f32_16x16x32_f16 %a, %b, %acc
+      : (!waveamdmachine.reg<vgpr, 4, 0>, !waveamdmachine.reg<vgpr, 4, 4>,
+         !waveamdmachine.reg<vgpr, 4, 8>) -> !waveamdmachine.reg<vgpr, 4, 8>
+  %loaded, %tok = waveamdmachine.buffer_load_b32 %off, %desc, %zero after %dep
+      : (!waveamdmachine.reg<vgpr, 1, 30>, !waveamdmachine.reg<sgpr, 4, 0>,
+         !waveamdmachine.reg<sgpr, 1, 4>, !waveamdmachine.mem.token)
+      -> (!waveamdmachine.reg<vgpr, 1, 9>, !waveamdmachine.mem.token)
+  return
+}
+
+// CHECK-LABEL: func.func @store_writedata_overwrite_delay
+// CHECK: waveamdmachine.global_store_b128
+// CHECK-NEXT: waveamdmachine.imm 1
+// CHECK-NEXT: waveamdmachine.s_nop
+// CHECK-NEXT: waveamdmachine.v_add_u32
+func.func @store_writedata_overwrite_delay(
+    %off: !waveamdmachine.reg<vgpr, 1, 0>,
+    %data: !waveamdmachine.reg<vgpr, 4, 8>,
+    %base: !waveamdmachine.reg<sgpr, 2, 0>,
+    %x: !waveamdmachine.reg<vgpr, 1, 30>,
+    %s: !waveamdmachine.reg<sgpr, 1, 2>) {
+  %tok = waveamdmachine.global_store_b128 %off, %data, %base
+      : (!waveamdmachine.reg<vgpr, 1, 0>, !waveamdmachine.reg<vgpr, 4, 8>,
+         !waveamdmachine.reg<sgpr, 2, 0>) -> !waveamdmachine.mem.token
+  %sum = waveamdmachine.v_add_u32 %x, %s
+      : (!waveamdmachine.reg<vgpr, 1, 30>, !waveamdmachine.reg<sgpr, 1, 2>)
+      -> !waveamdmachine.reg<vgpr, 1, 9>
+  return
+}
+
+// CHECK-LABEL: func.func @valu_sgpr_to_vmem_delay
+// CHECK: waveamdmachine.v_cmp_eq_u32
+// CHECK-NEXT: waveamdmachine.imm 4
+// CHECK-NEXT: waveamdmachine.s_nop
+// CHECK-NEXT: waveamdmachine.buffer_load_b32
+func.func @valu_sgpr_to_vmem_delay(
+    %x: !waveamdmachine.reg<vgpr, 1, 0>,
+    %y: !waveamdmachine.reg<vgpr, 1, 1>,
+    %off: !waveamdmachine.reg<vgpr, 1, 2>,
+    %desc: !waveamdmachine.reg<sgpr, 4, 0>,
+    %dep: !waveamdmachine.mem.token) {
+  %soffset = waveamdmachine.v_cmp_eq_u32 %x, %y
+      : (!waveamdmachine.reg<vgpr, 1, 0>, !waveamdmachine.reg<vgpr, 1, 1>)
+      -> !waveamdmachine.reg<sgpr, 1, 20>
+  %loaded, %tok = waveamdmachine.buffer_load_b32 %off, %desc, %soffset after %dep
+      : (!waveamdmachine.reg<vgpr, 1, 2>, !waveamdmachine.reg<sgpr, 4, 0>,
+         !waveamdmachine.reg<sgpr, 1, 20>, !waveamdmachine.mem.token)
+      -> (!waveamdmachine.reg<vgpr, 1, 30>, !waveamdmachine.mem.token)
+  return
+}
+
+// CHECK-LABEL: func.func @valu_sgpr_to_valu_delay
+// CHECK: waveamdmachine.v_cmp_eq_u32
+// CHECK-NEXT: waveamdmachine.imm 1
+// CHECK-NEXT: waveamdmachine.s_nop
+// CHECK-NEXT: waveamdmachine.v_add_u32
+func.func @valu_sgpr_to_valu_delay(
+    %x: !waveamdmachine.reg<vgpr, 1, 0>,
+    %y: !waveamdmachine.reg<vgpr, 1, 1>,
+    %v: !waveamdmachine.reg<vgpr, 1, 2>) {
+  %s = waveamdmachine.v_cmp_eq_u32 %x, %y
+      : (!waveamdmachine.reg<vgpr, 1, 0>, !waveamdmachine.reg<vgpr, 1, 1>)
+      -> !waveamdmachine.reg<sgpr, 1, 20>
+  %sum = waveamdmachine.v_add_u32 %v, %s
+      : (!waveamdmachine.reg<vgpr, 1, 2>, !waveamdmachine.reg<sgpr, 1, 20>)
+      -> !waveamdmachine.reg<vgpr, 1, 30>
+  return
+}
+
+// CHECK-LABEL: func.func @valu_vgpr_to_readfirstlane_delay
+// CHECK: waveamdmachine.v_add_u32
+// CHECK-NEXT: waveamdmachine.imm 0
+// CHECK-NEXT: waveamdmachine.s_nop
+// CHECK-NEXT: waveamdmachine.v_readfirstlane_b32
+func.func @valu_vgpr_to_readfirstlane_delay(
+    %x: !waveamdmachine.reg<vgpr, 1, 0>,
+    %s: !waveamdmachine.reg<sgpr, 1, 0>) {
+  %sum = waveamdmachine.v_add_u32 %x, %s
+      : (!waveamdmachine.reg<vgpr, 1, 0>, !waveamdmachine.reg<sgpr, 1, 0>)
+      -> !waveamdmachine.reg<vgpr, 1, 8>
+  %first = waveamdmachine.v_readfirstlane_b32 %sum
+      : (!waveamdmachine.reg<vgpr, 1, 8>) -> !waveamdmachine.reg<sgpr, 1, 20>
+  return
+}
+
+// CHECK-LABEL: func.func @cmpx_exec_to_mfma_delay
+// CHECK: waveamdmachine.v_cmpx_eq_u32
+// CHECK-NEXT: waveamdmachine.imm 3
+// CHECK-NEXT: waveamdmachine.s_nop
+// CHECK-NEXT: waveamdmachine.mfma_f32_16x16x32_f16
+func.func @cmpx_exec_to_mfma_delay(
+    %x: !waveamdmachine.reg<vgpr, 1, 0>,
+    %y: !waveamdmachine.reg<vgpr, 1, 1>,
+    %a: !waveamdmachine.reg<vgpr, 4, 8>,
+    %b: !waveamdmachine.reg<vgpr, 4, 12>,
+    %acc: !waveamdmachine.reg<vgpr, 4, 16>) {
+  waveamdmachine.v_cmpx_eq_u32 %x, %y
+      : (!waveamdmachine.reg<vgpr, 1, 0>, !waveamdmachine.reg<vgpr, 1, 1>) -> ()
+  %r = waveamdmachine.mfma_f32_16x16x32_f16 %a, %b, %acc
+      : (!waveamdmachine.reg<vgpr, 4, 8>, !waveamdmachine.reg<vgpr, 4, 12>,
+         !waveamdmachine.reg<vgpr, 4, 16>) -> !waveamdmachine.reg<vgpr, 4, 20>
+  return
+}
+
+// CHECK-LABEL: func.func @non_exec_compare_does_not_delay_mfma
+// CHECK: waveamdmachine.v_cmp_eq_u32_vcc
+// CHECK-NEXT: waveamdmachine.mfma_f32_16x16x32_f16
+func.func @non_exec_compare_does_not_delay_mfma(
+    %x: !waveamdmachine.reg<vgpr, 1, 0>,
+    %y: !waveamdmachine.reg<vgpr, 1, 1>,
+    %a: !waveamdmachine.reg<vgpr, 4, 8>,
+    %b: !waveamdmachine.reg<vgpr, 4, 12>,
+    %acc: !waveamdmachine.reg<vgpr, 4, 16>) {
+  %mask, %vcc = waveamdmachine.v_cmp_eq_u32_vcc %x, %y
+      : (!waveamdmachine.reg<vgpr, 1, 0>, !waveamdmachine.reg<vgpr, 1, 1>)
+      -> (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<vcc, 1>)
+  %r = waveamdmachine.mfma_f32_16x16x32_f16 %a, %b, %acc
+      : (!waveamdmachine.reg<vgpr, 4, 8>, !waveamdmachine.reg<vgpr, 4, 12>,
+         !waveamdmachine.reg<vgpr, 4, 16>) -> !waveamdmachine.reg<vgpr, 4, 20>
   return
 }
 

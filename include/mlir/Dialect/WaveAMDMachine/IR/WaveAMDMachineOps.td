@@ -505,36 +505,55 @@ class WaveAMDMachine_VCmpU32Vcc<string mnemonic>
   let results = (outs WaveAMDMachine_SGPR1:$result, WaveAMDMachine_VCC:$vcc);
   let assemblyFormat = "$lhs `,` $rhs attr-dict `:` functional-type(operands, results)";
 }
+class WaveAMDMachine_VCmpxU32<string mnemonic>
+    : WaveAMDMachine_Op<mnemonic, [WaveAMDMachine_VALU,
+                                   WaveAMDMachine_WritesExec]> {
+  let arguments = (ins WaveAMDMachine_RegOrImm:$lhs,
+                       WaveAMDMachine_RegOrImm:$rhs);
+  let assemblyFormat = "$lhs `,` $rhs attr-dict `:` functional-type(operands, results)";
+}
 def WaveAMDMachine_VCmpEqU32Op
     : WaveAMDMachine_BinaryResult<"v_cmp_eq_u32", WaveAMDMachine_RegOrImm,
                                WaveAMDMachine_SGPR1, [WaveAMDMachine_VALU]>;
 def WaveAMDMachine_VCmpEqU32VccOp
     : WaveAMDMachine_VCmpU32Vcc<"v_cmp_eq_u32_vcc">;
+def WaveAMDMachine_VCmpxEqU32Op
+    : WaveAMDMachine_VCmpxU32<"v_cmpx_eq_u32">;
 def WaveAMDMachine_VCmpNeU32Op
     : WaveAMDMachine_BinaryResult<"v_cmp_ne_u32", WaveAMDMachine_RegOrImm,
                                WaveAMDMachine_SGPR1, [WaveAMDMachine_VALU]>;
 def WaveAMDMachine_VCmpNeU32VccOp
     : WaveAMDMachine_VCmpU32Vcc<"v_cmp_ne_u32_vcc">;
+def WaveAMDMachine_VCmpxNeU32Op
+    : WaveAMDMachine_VCmpxU32<"v_cmpx_ne_u32">;
 def WaveAMDMachine_VCmpLtU32Op
     : WaveAMDMachine_BinaryResult<"v_cmp_lt_u32", WaveAMDMachine_RegOrImm,
                                WaveAMDMachine_SGPR1, [WaveAMDMachine_VALU]>;
 def WaveAMDMachine_VCmpLtU32VccOp
     : WaveAMDMachine_VCmpU32Vcc<"v_cmp_lt_u32_vcc">;
+def WaveAMDMachine_VCmpxLtU32Op
+    : WaveAMDMachine_VCmpxU32<"v_cmpx_lt_u32">;
 def WaveAMDMachine_VCmpLeU32Op
     : WaveAMDMachine_BinaryResult<"v_cmp_le_u32", WaveAMDMachine_RegOrImm,
                                WaveAMDMachine_SGPR1, [WaveAMDMachine_VALU]>;
 def WaveAMDMachine_VCmpLeU32VccOp
     : WaveAMDMachine_VCmpU32Vcc<"v_cmp_le_u32_vcc">;
+def WaveAMDMachine_VCmpxLeU32Op
+    : WaveAMDMachine_VCmpxU32<"v_cmpx_le_u32">;
 def WaveAMDMachine_VCmpGtU32Op
     : WaveAMDMachine_BinaryResult<"v_cmp_gt_u32", WaveAMDMachine_RegOrImm,
                                WaveAMDMachine_SGPR1, [WaveAMDMachine_VALU]>;
 def WaveAMDMachine_VCmpGtU32VccOp
     : WaveAMDMachine_VCmpU32Vcc<"v_cmp_gt_u32_vcc">;
+def WaveAMDMachine_VCmpxGtU32Op
+    : WaveAMDMachine_VCmpxU32<"v_cmpx_gt_u32">;
 def WaveAMDMachine_VCmpGeU32Op
     : WaveAMDMachine_BinaryResult<"v_cmp_ge_u32", WaveAMDMachine_RegOrImm,
                                WaveAMDMachine_SGPR1, [WaveAMDMachine_VALU]>;
 def WaveAMDMachine_VCmpGeU32VccOp
     : WaveAMDMachine_VCmpU32Vcc<"v_cmp_ge_u32_vcc">;
+def WaveAMDMachine_VCmpxGeU32Op
+    : WaveAMDMachine_VCmpxU32<"v_cmpx_ge_u32">;
 def WaveAMDMachine_VReadfirstlaneB32Op
     : WaveAMDMachine_UnaryResult<"v_readfirstlane_b32", WaveAMDMachine_VGPR1,
                               WaveAMDMachine_SGPR1, [WaveAMDMachine_VALU, Pure]>;
@@ -554,14 +573,16 @@ def WaveAMDMachine_WmmaF32_16x16x16_F16Op
 def WaveAMDMachine_MfmaF32_16x16x16_F16Op
     : WaveAMDMachine_TernaryResult<"mfma_f32_16x16x16_f16", WaveAMDMachine_VGPR,
                                 WaveAMDMachine_VGPR,
-                                [WaveAMDMachine_VALU, WaveAMDMachine_MFMA]> {
+                                [WaveAMDMachine_VALU, WaveAMDMachine_MFMA,
+                                 WaveAMDMachine_ReadsExec]> {
   let hasVerifier = 1;
   let archPredicate = WaveAMDMachine_Gfx90APlus;
 }
 def WaveAMDMachine_MfmaF32_16x16x32_F16Op
     : WaveAMDMachine_TernaryResult<"mfma_f32_16x16x32_f16", WaveAMDMachine_VGPR,
                                 WaveAMDMachine_VGPR,
-                                [WaveAMDMachine_VALU, WaveAMDMachine_MFMA]> {
+                                [WaveAMDMachine_VALU, WaveAMDMachine_MFMA,
+                                 WaveAMDMachine_ReadsExec]> {
   let hasVerifier = 1;
   let archPredicate = WaveAMDMachine_Gfx950;
 }
