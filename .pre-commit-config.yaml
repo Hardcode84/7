@@ -88,7 +88,7 @@ repos:
         entry: python build_tools/check_ixsimpl_boundary.py
         language: python
         pass_filenames: false
-        files: '^(include/.+\.(h|td)|lib/.+\.(cpp|h|td)|tools/.+\.(cpp|h)|build_tools/check_ixsimpl_boundary\.py|\.pre-commit-config\.yaml)$'
+        files: '^(include/.+\.(h|td)|lib/.+\.(cpp|h|td)|python/.+\.(cpp|h)|tools/.+\.(cpp|h)|build_tools/check_ixsimpl_boundary\.py|\.pre-commit-config\.yaml)$'
 
       - id: gen-sched-table
         name: check generated scheduler tables vs SISchedule.td

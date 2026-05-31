@@ -11,7 +11,7 @@ from collections.abc import Iterable
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-SOURCE_ROOTS = ("include", "lib", "tools")
+SOURCE_ROOTS = ("include", "lib", "python", "tools")
 SOURCE_SUFFIXES = {".c", ".cc", ".cpp", ".h", ".hpp", ".td"}
 ALLOWED_PATHS = {
     Path("include/mlir/Dialect/Wave/IR/WaveSymbols.h"),
