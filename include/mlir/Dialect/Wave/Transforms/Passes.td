@@ -140,6 +140,21 @@ def WaveAMDDecomposeMemTuples
   ];
 }
 
+def WaveAMDFormFusedInt
+    : Pass<"waveamd-form-fused-int"> {
+  let summary = "Form fused integer WaveAMDMachine VALU ops";
+  let description = [{
+    Function-local greedy peephole over selected WaveAMDMachine integer ops.
+    The pass only rewrites same-block single-use producer/consumer chains into
+    first-class target-supported fused ops, preserving memory tokens and
+    hardware flag SSA by construction.
+  }];
+  let dependentDialects = [
+    "func::FuncDialect",
+    "waveamdmachine::WaveAMDMachineDialect"
+  ];
+}
+
 def WaveAMDTicketWaits
     : Pass<"waveamd-insert-ticket-waits"> {
   let summary = "Insert WaveAMDMachine waitcnt instructions using ticket scoreboards";

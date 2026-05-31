@@ -1,0 +1,204 @@
+// RUN: wave-opt --split-input-file --waveamd-form-fused-int %s | FileCheck %s
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
+
+// CHECK-LABEL: func.func @add_add
+// CHECK-NOT: waveamdmachine.v_add_u32
+// CHECK: [[OUT:%.*]] = waveamdmachine.v_add3_u32
+func.func @add_add(%a: !waveamdmachine.reg<vgpr, 1>,
+                   %b: !waveamdmachine.reg<vgpr, 1>,
+                   %c: !waveamdmachine.reg<vgpr, 1>)
+    -> !waveamdmachine.reg<vgpr, 1> {
+  %ab = waveamdmachine.v_add_u32 %a, %b
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+  %abc = waveamdmachine.v_add_u32 %ab, %c
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+  return %abc : !waveamdmachine.reg<vgpr, 1>
+}
+
+// CHECK-LABEL: func.func @shift_add
+// CHECK-NOT: waveamdmachine.v_lshlrev_b32
+// CHECK: [[OUT:%.*]] = waveamdmachine.v_lshl_add_u32
+func.func @shift_add(%a: !waveamdmachine.reg<vgpr, 1>,
+                     %b: !waveamdmachine.reg<vgpr, 1>)
+    -> !waveamdmachine.reg<vgpr, 1> {
+  %one = waveamdmachine.imm 1 : !waveamdmachine.imm
+  %shifted = waveamdmachine.v_lshlrev_b32 %a, %one
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.imm)
+          -> !waveamdmachine.reg<vgpr, 1>
+  %out = waveamdmachine.v_add_u32 %shifted, %b
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+  return %out : !waveamdmachine.reg<vgpr, 1>
+}
+
+// CHECK-LABEL: func.func @add_shift
+// CHECK-NOT: waveamdmachine.v_add_u32
+// CHECK: [[OUT:%.*]] = waveamdmachine.v_add_lshl_u32
+func.func @add_shift(%a: !waveamdmachine.reg<vgpr, 1>,
+                     %b: !waveamdmachine.reg<vgpr, 1>)
+    -> !waveamdmachine.reg<vgpr, 1> {
+  %one = waveamdmachine.imm 1 : !waveamdmachine.imm
+  %sum = waveamdmachine.v_add_u32 %a, %b
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+  %out = waveamdmachine.v_lshlrev_b32 %sum, %one
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.imm)
+          -> !waveamdmachine.reg<vgpr, 1>
+  return %out : !waveamdmachine.reg<vgpr, 1>
+}
+
+// CHECK-LABEL: func.func @and_or
+// CHECK-NOT: waveamdmachine.v_and_b32
+// CHECK: [[OUT:%.*]] = waveamdmachine.v_and_or_b32
+func.func @and_or(%a: !waveamdmachine.reg<vgpr, 1>,
+                  %b: !waveamdmachine.reg<vgpr, 1>,
+                  %c: !waveamdmachine.reg<vgpr, 1>)
+    -> !waveamdmachine.reg<vgpr, 1> {
+  %and = waveamdmachine.v_and_b32 %a, %b
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+  %out = waveamdmachine.v_or_b32 %and, %c
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+  return %out : !waveamdmachine.reg<vgpr, 1>
+}
+
+// CHECK-LABEL: func.func @or_or
+// CHECK-NOT: waveamdmachine.v_or_b32
+// CHECK: [[OUT:%.*]] = waveamdmachine.v_or3_b32
+func.func @or_or(%a: !waveamdmachine.reg<vgpr, 1>,
+                 %b: !waveamdmachine.reg<vgpr, 1>,
+                 %c: !waveamdmachine.reg<vgpr, 1>)
+    -> !waveamdmachine.reg<vgpr, 1> {
+  %or0 = waveamdmachine.v_or_b32 %a, %b
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+  %out = waveamdmachine.v_or_b32 %or0, %c
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+  return %out : !waveamdmachine.reg<vgpr, 1>
+}
+
+// CHECK-LABEL: func.func @xor_add
+// CHECK-NOT: waveamdmachine.v_xor_b32
+// CHECK: [[OUT:%.*]] = waveamdmachine.v_xad_u32
+func.func @xor_add(%a: !waveamdmachine.reg<vgpr, 1>,
+                   %b: !waveamdmachine.reg<vgpr, 1>,
+                   %c: !waveamdmachine.reg<vgpr, 1>)
+    -> !waveamdmachine.reg<vgpr, 1> {
+  %xor = waveamdmachine.v_xor_b32 %a, %b
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+  %out = waveamdmachine.v_add_u32 %xor, %c
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+  return %out : !waveamdmachine.reg<vgpr, 1>
+}
+
+}
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
+
+// CHECK-LABEL: func.func @multi_use
+// CHECK-NOT: waveamdmachine.v_add3_u32
+// CHECK: [[INNER:%.*]] = waveamdmachine.v_add_u32
+// CHECK: waveamdmachine.v_add_u32 [[INNER]]
+// CHECK: waveamdmachine.v_add_u32 [[INNER]]
+func.func @multi_use(%a: !waveamdmachine.reg<vgpr, 1>,
+                     %b: !waveamdmachine.reg<vgpr, 1>,
+                     %c: !waveamdmachine.reg<vgpr, 1>,
+                     %d: !waveamdmachine.reg<vgpr, 1>)
+    -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>) {
+  %ab = waveamdmachine.v_add_u32 %a, %b
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+  %abc = waveamdmachine.v_add_u32 %ab, %c
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+  %abd = waveamdmachine.v_add_u32 %ab, %d
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+  return %abc, %abd : !waveamdmachine.reg<vgpr, 1>,
+                      !waveamdmachine.reg<vgpr, 1>
+}
+
+// CHECK-LABEL: func.func @scalar_stays_scalar
+// CHECK-NOT: waveamdmachine.v_add3_u32
+// CHECK: waveamdmachine.s_add_i32
+// CHECK: waveamdmachine.s_add_i32
+func.func @scalar_stays_scalar(%a: !waveamdmachine.reg<sgpr, 1>,
+                               %b: !waveamdmachine.reg<sgpr, 1>,
+                               %c: !waveamdmachine.reg<sgpr, 1>)
+    -> !waveamdmachine.reg<sgpr, 1> {
+  %ab, %scc0 = waveamdmachine.s_add_i32 %a, %b
+      : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<sgpr, 1>)
+          -> (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<scc, 1>)
+  %abc, %scc1 = waveamdmachine.s_add_i32 %ab, %c
+      : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<sgpr, 1>)
+          -> (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<scc, 1>)
+  return %abc : !waveamdmachine.reg<sgpr, 1>
+}
+
+// CHECK-LABEL: func.func @mad_requires_range_or_target
+// CHECK-NOT: waveamdmachine.v_mad
+// CHECK: waveamdmachine.v_mul_lo_u32
+// CHECK: waveamdmachine.v_add_u32
+func.func @mad_requires_range_or_target(%a: !waveamdmachine.reg<vgpr, 1>,
+                                        %b: !waveamdmachine.reg<vgpr, 1>,
+                                        %c: !waveamdmachine.reg<vgpr, 1>)
+    -> !waveamdmachine.reg<vgpr, 1> {
+  %mul = waveamdmachine.v_mul_lo_u32 %a, %b
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+  %out = waveamdmachine.v_add_u32 %mul, %c
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+  return %out : !waveamdmachine.reg<vgpr, 1>
+}
+
+}
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx942"} {
+
+// CHECK-LABEL: func.func @constant_bus_reject
+// CHECK-NOT: waveamdmachine.v_add3_u32
+// CHECK: [[INNER:%.*]] = waveamdmachine.v_add_u32
+// CHECK: waveamdmachine.v_add_u32 [[INNER]]
+func.func @constant_bus_reject(%s0: !waveamdmachine.reg<sgpr, 1>,
+                               %s1: !waveamdmachine.reg<sgpr, 1>,
+                               %v: !waveamdmachine.reg<vgpr, 1>)
+    -> !waveamdmachine.reg<vgpr, 1> {
+  %sum = waveamdmachine.v_add_u32 %s0, %v
+      : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+  %out = waveamdmachine.v_add_u32 %sum, %s1
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+  return %out : !waveamdmachine.reg<vgpr, 1>
+}
+
+// CHECK-LABEL: func.func @gfx9_literal_reject
+// CHECK-NOT: waveamdmachine.v_lshl_add_u32
+// CHECK: [[SHIFTED:%.*]] = waveamdmachine.v_lshlrev_b32
+// CHECK: waveamdmachine.v_add_u32 [[SHIFTED]]
+func.func @gfx9_literal_reject(%a: !waveamdmachine.reg<vgpr, 1>)
+    -> !waveamdmachine.reg<vgpr, 1> {
+  %shift = waveamdmachine.imm 2 : !waveamdmachine.imm
+  %literal = waveamdmachine.imm 256 : !waveamdmachine.imm
+  %shifted = waveamdmachine.v_lshlrev_b32 %a, %shift
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.imm)
+          -> !waveamdmachine.reg<vgpr, 1>
+  %out = waveamdmachine.v_add_u32 %shifted, %literal
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.imm)
+          -> !waveamdmachine.reg<vgpr, 1>
+  return %out : !waveamdmachine.reg<vgpr, 1>
+}
+
+}

@@ -42,6 +42,10 @@ func.func @candidate_lower(%off: !waveamdmachine.reg<vgpr, 1>,
       : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
          !waveamdmachine.reg<sgpr, 2>, !waveamdmachine.mem.token)
         -> !waveamdmachine.mem.token
+  %tok3 = waveamdmachine.global_store_b32 %off, %ind, %base after %tok2
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+         !waveamdmachine.reg<sgpr, 2>, !waveamdmachine.mem.token)
+        -> !waveamdmachine.mem.token
   return
 }
 }
