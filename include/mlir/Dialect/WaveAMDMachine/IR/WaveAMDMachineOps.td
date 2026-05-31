@@ -1545,13 +1545,12 @@ def WaveAMDMachine_SAddU64Op : WaveAMDMachine_Op<"s_add_u64", [Pure]> {
 // 64-bit base + zero-extended 32-bit offset. Expands to `s_add_u32`
 // (low) + `s_addc_u32 hi, hi, 0` (high) -- the high addend is an
 // immediate, so unlike a full `s_add_u64` it needs no second register
-// pair and no `tuple_from_elements` to widen the offset. Lets the IV
-// recompute fold a scalar byte offset into a pointer base.
+// pair and no `tuple_from_elements` to widen the offset.
 def WaveAMDMachine_SAddU64U32Op : WaveAMDMachine_Op<"s_add_u64_u32", [Pure]> {
   let summary = "scalar 64-bit base + zero-extended 32-bit offset";
   let arguments = (ins
     WaveAMDMachine_SGPR2:$base,
-    WaveAMDMachine_SGPR1:$offset
+    WaveAMDMachine_SGPR1OrImm:$offset
   );
   let results = (outs WaveAMDMachine_SGPR2:$result, WaveAMDMachine_SCC:$scc);
   let assemblyFormat = "$base `,` $offset attr-dict `:` functional-type(operands, results)";

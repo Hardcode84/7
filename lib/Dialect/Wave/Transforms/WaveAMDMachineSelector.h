@@ -71,7 +71,7 @@ struct AddressPlan {
 // Per-iter-arg snapshot captured at the scf.for boundary. Pointer carries
 // thread base metadata plus one offset value through the loop.
 //
-// `strideBytes != 0`: body rematerializes `base + iv * strideBytes`.
+// `strideBytes != 0`: body marches base or buffer soffset by stride.
 struct CarrySnapshot {
   std::string bodyOffsetName;
   std::string resultOffsetName;
@@ -83,6 +83,7 @@ struct CarrySnapshot {
   Value base;
   Value globalBase;
   int64_t strideBytes = 0;
+  int64_t stridedBaseGroup = -1;
   Kind kind;
   TermKind offsetKind = TermKind::Lane;
   bool isBuffer = false;
