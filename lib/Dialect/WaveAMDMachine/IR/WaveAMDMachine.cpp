@@ -64,27 +64,6 @@ static bool isRegClassWidth(Type type, RegClass regClass, int64_t width) {
          regType.getWidth() == width;
 }
 
-static bool isSingletonResourceType(Type type) {
-  if (isa<M0Type>(type))
-    return true;
-  RegType regType = dyn_cast<RegType>(type);
-  return regType && isSingletonFlagRegClass(regType.getRegClass());
-}
-
-static bool touchesSingletonResource(Operation *op) {
-  namespace traits = OpTrait::waveamdmachine;
-  if (op->hasTrait<traits::ReadsExecOp>() ||
-      op->hasTrait<traits::WritesExecOp>())
-    return true;
-  for (Value operand : op->getOperands())
-    if (isSingletonResourceType(operand.getType()))
-      return true;
-  for (Value result : op->getResults())
-    if (isSingletonResourceType(result.getType()))
-      return true;
-  return false;
-}
-
 static LogicalResult verifyVGPRWidth(Operation *op, Value value, int64_t width,
                                      StringRef name) {
   if (!isRegClassWidth(value.getType(), RegClass::VGPR, width))
@@ -249,13 +228,6 @@ UniformLoopOp::getYieldedValuesMutable() {
 
 std::optional<ResultRange> UniformLoopOp::getLoopResults() {
   return getResults();
-}
-
-void UniformLoopOp::moveOutOfLoop(Operation *op) {
-  // Singleton resources need explicit save/reload across region boundaries.
-  if (touchesSingletonResource(op))
-    return;
-  op->moveBefore(*this);
 }
 
 LogicalResult ContinueIfOp::verify() {

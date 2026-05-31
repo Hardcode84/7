@@ -27,6 +27,8 @@ using namespace mlir;
 
 namespace {
 
+using SavedResourceMap = DenseMap<Value, Value>;
+
 static unsigned resourceIndex(wave::HardwareResourceKind kind) {
   return static_cast<unsigned>(kind);
 }
@@ -69,14 +71,56 @@ struct ResourceBlockInfo {
   DenseSet<Value> definedInBlock;
 };
 
+static LogicalResult preserveRegion(Region &region, unsigned wavefrontSize,
+                                    SavedResourceMap saved);
+
+static Operation *getPositionedAncestor(Operation *op,
+                                        const ResourceBlockInfo &info) {
+  for (Operation *cur = op; cur; cur = cur->getParentOp()) {
+    if (info.positions.contains(cur))
+      return cur;
+  }
+  return nullptr;
+}
+
+static bool isDefinedInside(Operation *owner, Value value) {
+  if (Operation *def = value.getDefiningOp())
+    return owner->isAncestor(def);
+  Block *block = cast<BlockArgument>(value).getOwner();
+  Operation *parent = block->getParentOp();
+  return parent == owner || (parent && owner->isAncestor(parent));
+}
+
 static void noteUse(Value value, Operation *owner, ResourceBlockInfo &info) {
   if (!wave::getHardwareResourceForValue(value))
     return;
-  DenseMap<Operation *, unsigned>::iterator it = info.positions.find(owner);
+  Operation *positioned = getPositionedAncestor(owner, info);
+  if (!positioned)
+    return;
+  DenseMap<Operation *, unsigned>::iterator it =
+      info.positions.find(positioned);
   if (it == info.positions.end())
     return;
   unsigned &last = info.lastUse[value];
   last = std::max(last, it->second);
+}
+
+static void noteNestedUses(Operation *owner, Region &region,
+                           ResourceBlockInfo &info) {
+  for (Block &block : region) {
+    for (Operation &op : block) {
+      for (Value operand : op.getOperands())
+        if (!isDefinedInside(owner, operand))
+          noteUse(operand, &op, info);
+      for (Region &nested : op.getRegions())
+        noteNestedUses(owner, nested, info);
+    }
+  }
+}
+
+static void noteNestedUses(Operation *op, ResourceBlockInfo &info) {
+  for (Region &nested : op->getRegions())
+    noteNestedUses(op, nested, info);
 }
 
 static void noteResultUses(Operation *op, ResourceBlockInfo &info) {
@@ -85,8 +129,9 @@ static void noteResultUses(Operation *op, ResourceBlockInfo &info) {
       continue;
     info.definedInBlock.insert(result);
     for (OpOperand &use : result.getUses()) {
+      Operation *positioned = getPositionedAncestor(use.getOwner(), info);
       DenseMap<Operation *, unsigned>::iterator it =
-          info.positions.find(use.getOwner());
+          positioned ? info.positions.find(positioned) : info.positions.end();
       unsigned index =
           it == info.positions.end() ? info.ops.size() : it->second;
       unsigned &last = info.lastUse[result];
@@ -105,6 +150,8 @@ static ResourceBlockInfo collectBlockInfo(Block &block) {
     for (Value operand : op->getOperands())
       noteUse(operand, op, info);
   for (Operation *op : info.ops)
+    noteNestedUses(op, info);
+  for (Operation *op : info.ops)
     noteResultUses(op, info);
   return info;
 }
@@ -122,15 +169,18 @@ static Value getResultForResource(Operation *op,
 
 class BlockPreserver {
 public:
-  BlockPreserver(Block &block, unsigned wavefrontSize)
+  BlockPreserver(Block &block, unsigned wavefrontSize, SavedResourceMap saved)
       : builder(block.getParentOp()->getContext()),
-        info(collectBlockInfo(block)), wavefrontSize(wavefrontSize) {}
+        info(collectBlockInfo(block)), saved(saved),
+        wavefrontSize(wavefrontSize) {}
 
   LogicalResult run() {
     initializeLiveIn();
     for (auto [index, op] : llvm::enumerate(info.ops)) {
       currentIndex = index;
       if (failed(ensureOperandsAvailable(op)))
+        return failure();
+      if (failed(preserveNestedRegions(op)))
         return failure();
       retireOperands(op, index);
       if (failed(handleWrites(op)))
@@ -149,6 +199,8 @@ private:
       std::optional<wave::HardwareResourceKind> kind =
           wave::getHardwareResourceForValue(value);
       if (!kind)
+        continue;
+      if (saved.contains(value))
         continue;
       current[resourceIndex(*kind)] = value;
     }
@@ -179,6 +231,68 @@ private:
         current[slot] = {};
       saved.erase(operand);
     }
+  }
+
+  static void collectNestedCaptures(Operation *owner, Region &region,
+                                    SmallVectorImpl<Value> &captures) {
+    for (Block &block : region) {
+      for (Operation &op : block) {
+        for (Value operand : op.getOperands()) {
+          if (!wave::getHardwareResourceForValue(operand))
+            continue;
+          if (isDefinedInside(owner, operand))
+            continue;
+          if (!llvm::is_contained(captures, operand))
+            captures.push_back(operand);
+        }
+        for (Region &nested : op.getRegions())
+          collectNestedCaptures(owner, nested, captures);
+      }
+    }
+  }
+
+  static void collectNestedCaptures(Operation *op,
+                                    SmallVectorImpl<Value> &captures) {
+    for (Region &nested : op->getRegions())
+      collectNestedCaptures(op, nested, captures);
+  }
+
+  LogicalResult ensureSavedForNestedUse(Value value,
+                                        wave::HardwareResourceKind kind,
+                                        Operation *before) {
+    if (saved.contains(value))
+      return success();
+    unsigned slot = resourceIndex(kind);
+    if (current[slot] != value)
+      return before->emitError("waveamd-preserve-hw-regs cannot preserve ")
+             << wave::getHardwareResourceName(kind)
+             << " captured by a nested region after it was clobbered";
+    return spillValue(value, kind, before);
+  }
+
+  LogicalResult saveNestedCaptures(Operation *op) {
+    SmallVector<Value, 4> captures;
+    collectNestedCaptures(op, captures);
+    for (Value value : captures) {
+      std::optional<wave::HardwareResourceKind> kind =
+          wave::getHardwareResourceForValue(value);
+      if (!kind)
+        continue;
+      if (failed(ensureSavedForNestedUse(value, *kind, op)))
+        return failure();
+    }
+    return success();
+  }
+
+  LogicalResult preserveNestedRegions(Operation *op) {
+    if (op->getNumRegions() == 0)
+      return success();
+    if (failed(saveNestedCaptures(op)))
+      return failure();
+    for (Region &nested : op->getRegions())
+      if (failed(preserveRegion(nested, wavefrontSize, saved)))
+        return failure();
+    return success();
   }
 
   LogicalResult handleWrites(Operation *op) {
@@ -311,25 +425,22 @@ private:
   OpBuilder builder;
   ResourceBlockInfo info;
   std::array<Value, 4> current = {};
-  DenseMap<Value, Value> saved;
+  SavedResourceMap saved;
   unsigned wavefrontSize = 32;
   unsigned currentIndex = 0;
 };
 
-static LogicalResult preserveBlock(Block &block, unsigned wavefrontSize) {
-  BlockPreserver preserver(block, wavefrontSize);
+static LogicalResult preserveBlock(Block &block, unsigned wavefrontSize,
+                                   SavedResourceMap saved) {
+  BlockPreserver preserver(block, wavefrontSize, saved);
   return preserver.run();
 }
 
-static LogicalResult preserveRegion(Region &region, unsigned wavefrontSize) {
-  for (Block &block : region) {
-    if (failed(preserveBlock(block, wavefrontSize)))
+static LogicalResult preserveRegion(Region &region, unsigned wavefrontSize,
+                                    SavedResourceMap saved) {
+  for (Block &block : region)
+    if (failed(preserveBlock(block, wavefrontSize, saved)))
       return failure();
-    for (Operation &op : block)
-      for (Region &nested : op.getRegions())
-        if (failed(preserveRegion(nested, wavefrontSize)))
-          return failure();
-  }
   return success();
 }
 
@@ -347,7 +458,8 @@ struct WaveAMDPreserveHardwareRegsPass
               func, "waveamd-preserve-hw-regs");
       if (failed(wavefrontSize))
         return WalkResult::interrupt();
-      if (failed(preserveRegion(func.getBody(), *wavefrontSize)))
+      if (failed(preserveRegion(func.getBody(), *wavefrontSize,
+                                SavedResourceMap{})))
         return WalkResult::interrupt();
       return WalkResult::advance();
     });

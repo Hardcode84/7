@@ -557,9 +557,10 @@ def WaveAMDMachine_SReadVccB32Op : WaveAMDMachine_Op<"s_read_vcc_b32", [Pure]> {
   let assemblyFormat = "$source attr-dict `:` functional-type(operands, results)";
 }
 
+// VCC reload writes singleton flag state; LICM must keep it local.
 def WaveAMDMachine_SMovVccB32Op
     : WaveAMDMachine_UnaryResult<"s_mov_vcc_b32", WaveAMDMachine_SGPR1,
-                                 WaveAMDMachine_VCC, [Pure]>;
+                                 WaveAMDMachine_VCC>;
 
 // Value-producing scalar move: materialises an SGPR1 holding the
 // given Imm or copies an existing SGPR1/RegOrImm into a fresh
@@ -1635,7 +1636,8 @@ def WaveAMDMachine_SCmpLtI32Op : WaveAMDMachine_Op<"s_cmp_lt_i32", [Pure]> {
   let assemblyFormat = "$lhs `,` $rhs attr-dict `:` functional-type(operands, results)";
 }
 
-def WaveAMDMachine_SCmpLgU32Op : WaveAMDMachine_Op<"s_cmp_lg_u32", [Pure]> {
+// SCC reload form writes singleton flag state; LICM must keep it local.
+def WaveAMDMachine_SCmpLgU32Op : WaveAMDMachine_Op<"s_cmp_lg_u32"> {
   let summary = "scalar unsigned not-equal compare (sets SCC)";
   let arguments = (ins
     WaveAMDMachine_SGPR1OrImm:$lhs,
@@ -1668,7 +1670,7 @@ def WaveAMDMachine_UniformLoopOp : WaveAMDMachine_Op<"uniform_loop", [
     ["getEntrySuccessorOperands", "getSuccessorInputs"]>,
   DeclareOpInterfaceMethods<LoopLikeOpInterface,
     ["getLoopRegions", "getRegionIterArgs", "getYieldedValuesMutable",
-     "getLoopResults", "moveOutOfLoop"]>,
+     "getLoopResults"]>,
   RecursiveMemoryEffects
 ]> {
   let summary = "structured wave-uniform loop with explicit IV bookkeeping";

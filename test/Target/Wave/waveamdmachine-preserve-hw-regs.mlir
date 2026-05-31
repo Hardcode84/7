@@ -30,6 +30,70 @@ func.func @preserve_scc(%a: !waveamdmachine.reg<sgpr, 1>,
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
+// CHECK-LABEL: func.func @preserve_nested_scc_capture
+// CHECK: %[[OUTER:.+]] = waveamdmachine.s_cmp_lt_i32
+// CHECK: %[[OUTER_SAVE:.+]] = waveamdmachine.s_cselect_b32 %[[OUTER]]
+// CHECK: %[[INNER:.+]] = waveamdmachine.s_cmp_lt_i32
+// CHECK: %[[INNER_SAVE:.+]] = waveamdmachine.s_cselect_b32 %[[INNER]]
+// CHECK: %[[OUTER_RELOAD:.+]] = waveamdmachine.s_cmp_lg_u32 %[[OUTER_SAVE]]
+// CHECK: waveamdmachine.uniform_loop if %[[OUTER_RELOAD]]
+// CHECK: ^bb0
+// CHECK: waveamdmachine.s_lshl_b32
+// CHECK: %[[INNER_RELOAD:.+]] = waveamdmachine.s_cmp_lg_u32 %[[INNER_SAVE]]
+// CHECK-NEXT: waveamdmachine.uniform_loop if %[[INNER_RELOAD]]
+func.func @preserve_nested_scc_capture(%n: !waveamdmachine.reg<sgpr, 1>,
+                                       %m: !waveamdmachine.reg<sgpr, 1>) {
+  %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+  %one = waveamdmachine.imm 1 : !waveamdmachine.imm
+  %five = waveamdmachine.imm 5 : !waveamdmachine.imm
+  %lo = waveamdmachine.s_mov_b32_value %zero
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<sgpr, 1>
+  %outer = waveamdmachine.s_cmp_lt_i32 %lo, %n
+      : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<sgpr, 1>)
+        -> !waveamdmachine.reg<scc, 1>
+  %inner_lo = waveamdmachine.s_mov_b32_value %one
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<sgpr, 1>
+  %inner = waveamdmachine.s_cmp_lt_i32 %inner_lo, %m
+      : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<sgpr, 1>)
+        -> !waveamdmachine.reg<scc, 1>
+  %r = waveamdmachine.uniform_loop if %outer : !waveamdmachine.reg<scc, 1>
+      carries(%lo : !waveamdmachine.reg<sgpr, 1>) {
+  ^bb0(%i: !waveamdmachine.reg<sgpr, 1>):
+    %shift, %shift_scc = waveamdmachine.s_lshl_b32 %i, %five
+        : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.imm)
+        -> (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<scc, 1>)
+    %inner_r = waveamdmachine.uniform_loop if %inner
+        : !waveamdmachine.reg<scc, 1>
+        carries(%inner_lo : !waveamdmachine.reg<sgpr, 1>) {
+    ^bb0(%j: !waveamdmachine.reg<sgpr, 1>):
+      %next_j, %next_j_scc = waveamdmachine.s_add_i32 %j, %one
+          : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.imm)
+          -> (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<scc, 1>)
+      %inner_back = waveamdmachine.s_cmp_lt_i32 %next_j, %m
+          : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<sgpr, 1>)
+          -> !waveamdmachine.reg<scc, 1>
+      waveamdmachine.continue_if %inner_back
+          : !waveamdmachine.reg<scc, 1>
+          carries(%next_j : !waveamdmachine.reg<sgpr, 1>)
+    } -> !waveamdmachine.reg<sgpr, 1>
+    %next_i, %next_i_scc = waveamdmachine.s_add_i32 %i, %one
+        : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.imm)
+        -> (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<scc, 1>)
+    %outer_back = waveamdmachine.s_cmp_lt_i32 %next_i, %n
+        : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<sgpr, 1>)
+        -> !waveamdmachine.reg<scc, 1>
+    waveamdmachine.continue_if %outer_back : !waveamdmachine.reg<scc, 1>
+        carries(%next_i : !waveamdmachine.reg<sgpr, 1>)
+  } -> !waveamdmachine.reg<sgpr, 1>
+  return
+}
+
+}
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
+
 // CHECK-LABEL: func.func @preserve_vcc
 // CHECK: %[[SUM0:.+]], %[[VCC0:.+]] = waveamdmachine.v_add_u64
 // CHECK: %[[SAVED:.+]] = waveamdmachine.s_read_vcc_b32 %[[VCC0]]
