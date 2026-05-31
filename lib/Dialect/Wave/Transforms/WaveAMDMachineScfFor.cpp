@@ -282,6 +282,7 @@ static LogicalResult proveLoopCarryFitsU32(WaveAMDMachineSelector &S,
 
   if (snap.strideBytes != 0) {
     snap.bodyU32Upper = entryUpper;
+    snap.resultU32Upper = entryUpper;
     return success();
   }
 
@@ -296,20 +297,20 @@ static LogicalResult proveLoopCarryFitsU32(WaveAMDMachineSelector &S,
   return success();
 }
 
-// Wave-uniform per-iter advance (bytes) for global carry `i` the body
-// may march on the scalar base, else 0. Eligible: normalized loop, dead
-// post-loop result, constant-offset ptr_add chain back to the iter arg.
+// Constant positive per-iter pointer advance in bytes, else 0.
 static int64_t stridedCarryBytes(WaveAMDMachineSelector &S, scf::ForOp op,
                                  unsigned i) {
-  std::optional<int64_t> lo = getConstantIntValue(op.getLowerBound());
-  std::optional<int64_t> step = getConstantIntValue(op.getStep());
-  if (!lo || *lo != 0 || !step || *step != 1 || !op.getResult(i).use_empty())
-    return 0;
   Value arg = op.getRegionIterArgs()[i];
   Value y = cast<scf::YieldOp>(op.getBody()->getTerminator()).getOperand(i);
   std::optional<int64_t> bytes = constantPtrAdvanceBytes(S, y, arg);
   // s_add_u64_u32 zero-extends the per-iter delta.
   return bytes && *bytes > 0 && *bytes <= u32Max ? *bytes : 0;
+}
+
+static bool canUseStridedCarry(scf::ForOp op, unsigned idx, bool isBuffer) {
+  if (!isBuffer)
+    return true;
+  return isNormalizedUnitLoop(op) && op.getResult(idx).use_empty();
 }
 
 static Value advanceStridedBase(WaveAMDMachineSelector &S, Location loc,
@@ -342,8 +343,13 @@ snapshotPointerScfCarry(WaveAMDMachineSelector &S, scf::ForOp op,
     return op.emitError(
         "scf.for pointer iter arg has no WaveAMDMachine sidecar");
   TermKind initKind = classifyPointerOffset(S, offsetIt->second);
-  int64_t stride =
-      !S.isSharedPointer(initArg.getType()) ? stridedCarryBytes(S, op, idx) : 0;
+  bool isBuffer = S.pointerBuffers.lookup(initArg);
+  int64_t stride = 0;
+  if (!S.isSharedPointer(initArg.getType())) {
+    int64_t bytes = stridedCarryBytes(S, op, idx);
+    if (bytes != 0 && canUseStridedCarry(op, idx, isBuffer))
+      stride = bytes;
+  }
   TermKind yieldKind = stride != 0
                            ? initKind
                            : classifyPointerYield(S, yield.getOperand(idx),
@@ -355,7 +361,6 @@ snapshotPointerScfCarry(WaveAMDMachineSelector &S, scf::ForOp op,
   if (failed(carry))
     return failure();
 
-  bool isBuffer = S.pointerBuffers.lookup(initArg);
   snap.kind = CarrySnapshot::Kind::Pointer;
   snap.carry = *carry;
   snap.base = baseIt->second;
@@ -509,27 +514,54 @@ LogicalResult collectYieldCarries(WaveAMDMachineSelector &S, scf::YieldOp yield,
   return success();
 }
 
+static Value resultPointerBase(Operation *loop,
+                               ArrayRef<CarrySnapshot> snapshots,
+                               ArrayRef<StridedBaseCarry> groups,
+                               const CarrySnapshot &snap) {
+  if (snap.strideBytes == 0 || snap.isBuffer)
+    return snap.base;
+  assert(snap.stridedBaseGroup != noStridedBaseGroup &&
+         "global strided carry must have base group");
+  assert(static_cast<size_t>(snap.stridedBaseGroup) < groups.size() &&
+         "global strided carry group out of range");
+  unsigned firstBaseResult = 1 + snapshots.size();
+  return loop->getResult(firstBaseResult +
+                         static_cast<unsigned>(snap.stridedBaseGroup));
+}
+
+static void bindPointerLoopResult(WaveAMDMachineSelector &S, Value scfResult,
+                                  Value wmResult, Operation *loop,
+                                  ArrayRef<CarrySnapshot> snapshots,
+                                  ArrayRef<StridedBaseCarry> groups,
+                                  const CarrySnapshot &snap) {
+  Value base = resultPointerBase(loop, snapshots, groups, snap);
+  S.pointerBases[scfResult] = base;
+  if (snap.strideBytes != 0 && !snap.isBuffer)
+    S.pointerGlobalBases[scfResult] = base;
+  else if (snap.globalBase)
+    S.pointerGlobalBases[scfResult] = snap.globalBase;
+  S.values[wmResult] = wmResult;
+  FailureOr<PointerOffset> symbolic = makeSymbolicCarry(
+      S, snap.resultOffsetName, wmResult, snap.offsetKind, snap.resultU32Upper);
+  if (succeeded(symbolic))
+    S.pointerIndexOffsets[scfResult] = *symbolic;
+  else
+    S.pointerIndexOffsets.erase(scfResult);
+  S.pointerBuffers[scfResult] = snap.isBuffer;
+}
+
 // Rebind the scf.for results to the waveamdmachine loop op results,
 // skipping the synthetic IV carry at slot 0. Pointer carries get
 // their sidecar entries reconstructed from the captured base.
 void bindLoopResults(WaveAMDMachineSelector &S, scf::ForOp op, Operation *loop,
-                     ArrayRef<CarrySnapshot> snapshots) {
+                     ArrayRef<CarrySnapshot> snapshots,
+                     ArrayRef<StridedBaseCarry> groups) {
   for (auto [idx, scfResult] : llvm::enumerate(op.getResults())) {
     Value wmResult = loop->getResult(idx + 1);
     const CarrySnapshot &snap = snapshots[idx];
     if (snap.kind == CarrySnapshot::Kind::Pointer) {
-      S.pointerBases[scfResult] = snap.base;
-      if (snap.globalBase)
-        S.pointerGlobalBases[scfResult] = snap.globalBase;
-      S.values[wmResult] = wmResult;
-      FailureOr<PointerOffset> symbolic =
-          makeSymbolicCarry(S, snap.resultOffsetName, wmResult, snap.offsetKind,
-                            snap.resultU32Upper);
-      if (succeeded(symbolic))
-        S.pointerIndexOffsets[scfResult] = *symbolic;
-      else
-        S.pointerIndexOffsets.erase(scfResult);
-      S.pointerBuffers[scfResult] = snap.isBuffer;
+      bindPointerLoopResult(S, scfResult, wmResult, loop, snapshots, groups,
+                            snap);
       continue;
     }
     S.values[scfResult] = wmResult;
@@ -631,7 +663,7 @@ LogicalResult selectScfFor(WaveAMDMachineSelector &S, scf::ForOp op) {
   waveamdmachine::ContinueIfOp::create(S.builder, loc, backCond, carryOperands);
 
   S.builder.setInsertionPointAfter(loop);
-  bindLoopResults(S, op, loop, snapshots);
+  bindLoopResults(S, op, loop, snapshots, stridedBaseGroups);
   S.eraseIfTopLevel(op);
   return success();
 }
