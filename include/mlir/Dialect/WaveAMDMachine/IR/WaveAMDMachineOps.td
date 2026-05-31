@@ -14,6 +14,7 @@ include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineInterfaces.td"
 include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineTypes.td"
 include "mlir/IR/OpBase.td"
 include "mlir/Interfaces/ControlFlowInterfaces.td"
+include "mlir/Interfaces/InferIntRangeInterface.td"
 include "mlir/Interfaces/LoopLikeInterface.td"
 include "mlir/Interfaces/SideEffectInterfaces.td"
 
@@ -243,6 +244,14 @@ class WaveAMDMachine_TernaryIntResult<string mnemonic>
   let assemblyFormat = "$a `,` $b `,` $c attr-dict `:` functional-type(operands, results)";
 }
 
+class WaveAMDMachine_BinaryU32Result<string mnemonic>
+    : WaveAMDMachine_BinaryResult<mnemonic, WaveAMDMachine_RegOrImm,
+                                  WaveAMDMachine_VGPR1,
+                                  [WaveAMDMachine_VALU,
+                                   DeclareOpInterfaceMethods<
+                                       InferIntRangeInterface,
+                                       ["inferResultRanges"]>]>;
+
 class WaveAMDMachine_PackedBinaryResult<string mnemonic>
     : WaveAMDMachine_Op<mnemonic, [WaveAMDMachine_VALU, Pure]> {
   let archPredicate = "isa.Major == 9 || isa.Major == 11";
@@ -299,7 +308,8 @@ def WaveAMDMachine_ArgOp : WaveAMDMachine_Op<"arg", [
 
 def WaveAMDMachine_ImmOp : WaveAMDMachine_Op<"imm", [
   Pure,
-  WaveAMDMachine_NoMachineInst
+  WaveAMDMachine_NoMachineInst,
+  DeclareOpInterfaceMethods<InferIntRangeInterface, ["inferResultRanges"]>
 ]> {
   let summary = "machine immediate";
   let arguments = (ins I64Attr:$value);
@@ -410,8 +420,7 @@ def WaveAMDMachine_TupleFromElementsOp
   let hasVerifier = 1;
 }
 def WaveAMDMachine_VAddU32Op
-    : WaveAMDMachine_BinaryResult<"v_add_u32", WaveAMDMachine_RegOrImm,
-                               WaveAMDMachine_VGPR1, [WaveAMDMachine_VALU]>;
+    : WaveAMDMachine_BinaryU32Result<"v_add_u32">;
 def WaveAMDMachine_VAddU32VccOp
     : WaveAMDMachine_Op<"v_add_u32_vcc", [WaveAMDMachine_VALU, Pure]> {
   let summary = "vector 32-bit add (sets VCC)";
@@ -421,25 +430,23 @@ def WaveAMDMachine_VAddU32VccOp
   let assemblyFormat = "$lhs `,` $rhs attr-dict `:` functional-type(operands, results)";
 }
 def WaveAMDMachine_VAndB32Op
-    : WaveAMDMachine_BinaryResult<"v_and_b32", WaveAMDMachine_RegOrImm,
-                               WaveAMDMachine_VGPR1, [WaveAMDMachine_VALU]>;
+    : WaveAMDMachine_BinaryU32Result<"v_and_b32">;
 def WaveAMDMachine_VOrB32Op
-    : WaveAMDMachine_BinaryResult<"v_or_b32", WaveAMDMachine_RegOrImm,
-                               WaveAMDMachine_VGPR1, [WaveAMDMachine_VALU]>;
+    : WaveAMDMachine_BinaryU32Result<"v_or_b32">;
 def WaveAMDMachine_VXorB32Op
-    : WaveAMDMachine_BinaryResult<"v_xor_b32", WaveAMDMachine_RegOrImm,
-                               WaveAMDMachine_VGPR1, [WaveAMDMachine_VALU]>;
+    : WaveAMDMachine_BinaryU32Result<"v_xor_b32">;
 def WaveAMDMachine_VLshlrevB32Op
-    : WaveAMDMachine_BinaryResult<"v_lshlrev_b32", WaveAMDMachine_RegOrImm,
-                               WaveAMDMachine_VGPR1, [WaveAMDMachine_VALU]>;
+    : WaveAMDMachine_BinaryU32Result<"v_lshlrev_b32">;
 def WaveAMDMachine_VLshrrevB32Op
-    : WaveAMDMachine_BinaryResult<"v_lshrrev_b32", WaveAMDMachine_RegOrImm,
-                               WaveAMDMachine_VGPR1, [WaveAMDMachine_VALU]>;
+    : WaveAMDMachine_BinaryU32Result<"v_lshrrev_b32">;
 def WaveAMDMachine_VMulLoU32Op
-    : WaveAMDMachine_BinaryResult<"v_mul_lo_u32", WaveAMDMachine_RegOrImm,
-                               WaveAMDMachine_VGPR1, [WaveAMDMachine_VALU]>;
+    : WaveAMDMachine_BinaryU32Result<"v_mul_lo_u32">;
 def WaveAMDMachine_VAdd3U32Op
     : WaveAMDMachine_TernaryIntResult<"v_add3_u32">;
+def WaveAMDMachine_VMadI32I24Op
+    : WaveAMDMachine_TernaryIntResult<"v_mad_i32_i24">;
+def WaveAMDMachine_VMadU32U24Op
+    : WaveAMDMachine_TernaryIntResult<"v_mad_u32_u24">;
 def WaveAMDMachine_VLshlAddU32Op
     : WaveAMDMachine_TernaryIntResult<"v_lshl_add_u32">;
 def WaveAMDMachine_VAddLshlU32Op

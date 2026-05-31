@@ -12,7 +12,11 @@
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/DialectImplementation.h"
 #include "mlir/Interfaces/ControlFlowInterfaces.h"
+#include "mlir/Interfaces/Utils/InferIntRangeCommon.h"
 #include "llvm/ADT/TypeSwitch.h"
+
+#include <cstdint>
+#include <limits>
 
 using namespace mlir;
 using namespace mlir::waveamdmachine;
@@ -70,6 +74,81 @@ static LogicalResult verifyVGPRWidth(Operation *op, Value value, int64_t width,
     return op->emitOpError()
            << name << " must be !waveamdmachine.reg<vgpr, " << width << ">";
   return success();
+}
+
+static ConstantIntRanges
+normalizeMachineU32Range(const ConstantIntRanges &range) {
+  unsigned bits = range.umin().getBitWidth();
+  if (bits == 32)
+    return range;
+  if (bits == 0 || bits > 32)
+    return ConstantIntRanges::maxRange(32);
+  return {range.umin().zext(32), range.umax().zext(32), range.smin().sext(32),
+          range.smax().sext(32)};
+}
+
+static SmallVector<ConstantIntRanges, 2>
+normalizeMachineU32Ranges(ArrayRef<ConstantIntRanges> ranges) {
+  SmallVector<ConstantIntRanges, 2> normalized;
+  normalized.reserve(ranges.size());
+  for (const ConstantIntRanges &range : ranges)
+    normalized.push_back(normalizeMachineU32Range(range));
+  return normalized;
+}
+
+void ImmOp::inferResultRanges(ArrayRef<ConstantIntRanges>,
+                              SetIntRangeFn setResultRange) {
+  int64_t value = getValue();
+  if (value < std::numeric_limits<int32_t>::min() ||
+      value > std::numeric_limits<uint32_t>::max()) {
+    setResultRange(getResult(), ConstantIntRanges::maxRange(32));
+    return;
+  }
+
+  APInt bits(64, static_cast<uint64_t>(value), /*isSigned=*/true);
+  setResultRange(getResult(), ConstantIntRanges::constant(bits.trunc(32)));
+}
+
+void VAddU32Op::inferResultRanges(ArrayRef<ConstantIntRanges> argRanges,
+                                  SetIntRangeFn setResultRange) {
+  setResultRange(getResult(), mlir::intrange::inferAdd(
+                                  normalizeMachineU32Ranges(argRanges)));
+}
+
+void VAndB32Op::inferResultRanges(ArrayRef<ConstantIntRanges> argRanges,
+                                  SetIntRangeFn setResultRange) {
+  setResultRange(getResult(), mlir::intrange::inferAnd(
+                                  normalizeMachineU32Ranges(argRanges)));
+}
+
+void VOrB32Op::inferResultRanges(ArrayRef<ConstantIntRanges> argRanges,
+                                 SetIntRangeFn setResultRange) {
+  setResultRange(getResult(),
+                 mlir::intrange::inferOr(normalizeMachineU32Ranges(argRanges)));
+}
+
+void VXorB32Op::inferResultRanges(ArrayRef<ConstantIntRanges> argRanges,
+                                  SetIntRangeFn setResultRange) {
+  setResultRange(getResult(), mlir::intrange::inferXor(
+                                  normalizeMachineU32Ranges(argRanges)));
+}
+
+void VLshlrevB32Op::inferResultRanges(ArrayRef<ConstantIntRanges> argRanges,
+                                      SetIntRangeFn setResultRange) {
+  setResultRange(getResult(), mlir::intrange::inferShl(
+                                  normalizeMachineU32Ranges(argRanges)));
+}
+
+void VLshrrevB32Op::inferResultRanges(ArrayRef<ConstantIntRanges> argRanges,
+                                      SetIntRangeFn setResultRange) {
+  setResultRange(getResult(), mlir::intrange::inferShrU(
+                                  normalizeMachineU32Ranges(argRanges)));
+}
+
+void VMulLoU32Op::inferResultRanges(ArrayRef<ConstantIntRanges> argRanges,
+                                    SetIntRangeFn setResultRange) {
+  setResultRange(getResult(), mlir::intrange::inferMul(
+                                  normalizeMachineU32Ranges(argRanges)));
 }
 
 LogicalResult VMovB32TupleOp::verify() {

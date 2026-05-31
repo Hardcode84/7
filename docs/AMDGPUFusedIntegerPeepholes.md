@@ -61,8 +61,8 @@ Match machine integer semantics, not source-language intent.
 - Bitwise families operate on raw `b32`; no mask or predicate reinterpretation.
 - Shift-add families require logical-left-shift semantics and the same shift
   count interpretation as the destination ISA instruction.
-- Signedness-sensitive MAD/narrow forms require proven operand ranges and exact
-  low/high-half behaviour. Do not infer signedness from op names alone.
+- Signedness-sensitive MAD/narrow forms use `IntegerRangeAnalysis` facts on
+  the multiply operands. Do not infer signedness from op names alone.
 - Flag-producing forms (`*_vcc`, scalar ops with SCC results, compares) are not
   source ops for this peephole family.
 
@@ -76,6 +76,8 @@ Match machine integer semantics, not source-language intent.
 | `v_or_b32(v_and_b32(x, y), z)` | `v_and_or_b32 x, y, z` | Bitwise only. |
 | `v_or_b32(v_or_b32(x, y), z)` | `v_or3_b32 x, y, z` | Existing nested OR edge only. |
 | `v_add_u32(v_xor_b32(x, y), z)` | `v_xad_u32 x, y, z` | XOR result single-use; add is modulo. |
+| `v_add_u32(v_mul_lo_u32(x, y), z)` | `v_mad_u32_u24 x, y, z` | `x` and `y` proven in unsigned 24-bit range. |
+| `v_add_u32(v_mul_lo_u32(x, y), z)` | `v_mad_i32_i24 x, y, z` | `x` and `y` proven in signed 24-bit range. |
 
 Commuted outer operands are legal when the outer op is commutative and the
 result still satisfies constant-bus and copy rules.

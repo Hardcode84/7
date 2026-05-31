@@ -85,7 +85,8 @@ SchedClass classifyOp(Operation *op) {
           [](auto) { return SchedClass::Write64Bit; })
       .Case<VCvtF16F32Op, VCvtF32F16Op, VCvtPkRtzF16F32Op, VPkAddF16Op,
             VPkMulF16Op, VPkFmaF16Op, VAdd3U32Op, VLshlAddU32Op,
-            VAddLshlU32Op, VAndOrB32Op, VOr3B32Op, VXadU32Op>(
+            VAddLshlU32Op, VAndOrB32Op, VOr3B32Op, VXadU32Op, VMadI32I24Op,
+            VMadU32U24Op>(
           [](auto) { return SchedClass::Write32Bit; })
       .Case<VExpF32Op, VRcpF32Op>(
           [](auto) { return SchedClass::WriteTrans32; })

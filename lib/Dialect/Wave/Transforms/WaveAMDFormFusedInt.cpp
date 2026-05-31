@@ -9,6 +9,9 @@
 #include "mlir/Dialect/Wave/Transforms/Passes.h"
 
 #include "Utils/AMDGPUBaseInfo.h"
+#include "mlir/Analysis/DataFlow/IntegerRangeAnalysis.h"
+#include "mlir/Analysis/DataFlow/Utils.h"
+#include "mlir/Analysis/DataFlowFramework.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachine.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineTarget.h"
@@ -26,6 +29,7 @@ namespace mlir::wave {
 } // namespace mlir::wave
 
 using namespace mlir;
+using namespace mlir::dataflow;
 using namespace mlir::wave;
 using namespace mlir::waveamdmachine;
 
@@ -101,6 +105,43 @@ static InnerOp matchSingleUseProducer(Value value, Operation *consumer) {
   return inner;
 }
 
+static std::optional<ConstantIntRanges>
+normalizeU32Range(const ConstantIntRanges &range) {
+  unsigned bits = range.umin().getBitWidth();
+  if (bits == 0 || bits > 32)
+    return std::nullopt;
+  if (bits == 32)
+    return range;
+  return ConstantIntRanges(range.umin().zext(32), range.umax().zext(32),
+                           range.smin().sext(32), range.smax().sext(32));
+}
+
+static std::optional<ConstantIntRanges> getU32Range(DataFlowSolver &solver,
+                                                    Value value) {
+  const IntegerValueRangeLattice *lattice =
+      solver.lookupState<IntegerValueRangeLattice>(value);
+  if (!lattice)
+    return std::nullopt;
+  IntegerValueRange valueRange = lattice->getValue();
+  if (valueRange.isUninitialized())
+    return std::nullopt;
+  return normalizeU32Range(valueRange.getValue());
+}
+
+static bool isProvenU24(const ConstantIntRanges &range) {
+  if (range.umin().getBitWidth() != 32)
+    return false;
+  return range.umax().ule(APInt::getLowBitsSet(32, 24));
+}
+
+static bool isProvenI24(const ConstantIntRanges &range) {
+  if (range.smin().getBitWidth() != 32)
+    return false;
+  APInt min = APInt::getSignedMinValue(24).sext(32);
+  APInt max = APInt::getSignedMaxValue(24).sext(32);
+  return range.smin().sge(min) && range.smax().sle(max);
+}
+
 template <typename NewOp, typename OldOp>
 static void replaceWithTernary(PatternRewriter &rewriter, OldOp oldOp,
                                Operation *deadProducer, Value a, Value b,
@@ -143,6 +184,56 @@ static LogicalResult tryFuseNestedBinary(PatternRewriter &rewriter, OldOp oldOp,
 
   return failure();
 }
+
+class DataFlowListener : public RewriterBase::Listener {
+public:
+  DataFlowListener(DataFlowSolver &solver) : solver(solver) {}
+
+protected:
+  void notifyOperationErased(Operation *op) override {
+    solver.eraseState(solver.getProgramPointAfter(op));
+    for (Value result : op->getResults())
+      solver.eraseState(result);
+  }
+
+  DataFlowSolver &solver;
+};
+
+struct Mad24FusionPattern : public OpRewritePattern<VAddU32Op> {
+  Mad24FusionPattern(MLIRContext *context, const llvm::AMDGPU::IsaVersion &isa,
+                     DataFlowSolver &solver)
+      : OpRewritePattern<VAddU32Op>(context), isa(isa), solver(solver) {}
+
+  LogicalResult matchAndRewrite(VAddU32Op op,
+                                PatternRewriter &rewriter) const override {
+    if (succeeded(tryFuse(op, op.getLhs(), op.getRhs(), rewriter)))
+      return success();
+    return tryFuse(op, op.getRhs(), op.getLhs(), rewriter);
+  }
+
+  LogicalResult tryFuse(VAddU32Op op, Value maybeMul, Value addend,
+                        PatternRewriter &rewriter) const {
+    VMulLoU32Op inner = matchSingleUseProducer<VMulLoU32Op>(maybeMul, op);
+    if (!inner)
+      return failure();
+
+    std::optional<ConstantIntRanges> lhs = getU32Range(solver, inner.getLhs());
+    std::optional<ConstantIntRanges> rhs = getU32Range(solver, inner.getRhs());
+    if (!lhs || !rhs)
+      return failure();
+
+    if (isProvenU24(*lhs) && isProvenU24(*rhs))
+      return tryReplaceTernary<VMadU32U24Op>(
+          rewriter, op, inner, inner.getLhs(), inner.getRhs(), addend, isa);
+    if (isProvenI24(*lhs) && isProvenI24(*rhs))
+      return tryReplaceTernary<VMadI32I24Op>(
+          rewriter, op, inner, inner.getLhs(), inner.getRhs(), addend, isa);
+    return failure();
+  }
+
+  llvm::AMDGPU::IsaVersion isa;
+  DataFlowSolver &solver;
+};
 
 struct AddFusionPattern : public OpRewritePattern<VAddU32Op> {
   AddFusionPattern(MLIRContext *context, const llvm::AMDGPU::IsaVersion &isa)
@@ -220,9 +311,22 @@ static LogicalResult runOnFunc(func::FuncOp func) {
     return failure();
 
   RewritePatternSet patterns(func.getContext());
+  DataFlowSolver solver;
+  loadBaselineAnalyses(solver);
+  solver.load<IntegerRangeAnalysis>();
+  if (failed(solver.initializeAndRun(func)))
+    return func.emitError("IntegerRangeAnalysis failed for fused-int pass");
+
+  patterns.add<Mad24FusionPattern>(func.getContext(), *isa, solver);
   patterns.add<AddFusionPattern, LshlFusionPattern, OrFusionPattern>(
       func.getContext(), *isa);
-  return applyPatternsGreedily(func, std::move(patterns));
+  DataFlowListener listener(solver);
+  return applyPatternsGreedily(
+      func, std::move(patterns),
+      GreedyRewriteConfig()
+          .enableFolding(false)
+          .setRegionSimplificationLevel(GreedySimplifyRegionLevel::Disabled)
+          .setListener(&listener));
 }
 
 struct WaveAMDFormFusedIntPass

@@ -15,5 +15,7 @@ add_mlir_dialect_library(MLIRWaveAMDMachineDialect
 
   LINK_LIBS PUBLIC
   MLIRControlFlowInterfaces
+  MLIRInferIntRangeCommon
+  MLIRInferIntRangeInterface
   MLIRIR
   )

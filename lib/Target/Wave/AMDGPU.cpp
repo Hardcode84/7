@@ -145,6 +145,8 @@ struct KernelInfo {
   X(vReadfirstlaneB32, V_READFIRSTLANE_B32_vi, V_READFIRSTLANE_B32_gfx11)      \
   X(vMulLoU32, V_MUL_LO_U32_vi, V_MUL_LO_U32_e64_gfx11)                        \
   X(vAdd3U32, V_ADD3_U32_vi, V_ADD3_U32_e64_gfx11)                             \
+  X(vMadI32I24, V_MAD_I32_I24_vi, V_MAD_I32_I24_e64_gfx11)                     \
+  X(vMadU32U24, V_MAD_U32_U24_vi, V_MAD_U32_U24_e64_gfx11)                     \
   X(vLshlAddU32, V_LSHL_ADD_U32_vi, V_LSHL_ADD_U32_e64_gfx11)                  \
   X(vAddLshlU32, V_ADD_LSHL_U32_vi, V_ADD_LSHL_U32_e64_gfx11)                  \
   X(vAndOrB32, V_AND_OR_B32_vi, V_AND_OR_B32_e64_gfx11)                        \
@@ -402,6 +404,8 @@ private:
   unsigned vReadfirstlaneB32() const { return opcodes.vReadfirstlaneB32; }
   unsigned vMulLoU32() const { return opcodes.vMulLoU32; }
   unsigned vAdd3U32() const { return opcodes.vAdd3U32; }
+  unsigned vMadI32I24() const { return opcodes.vMadI32I24; }
+  unsigned vMadU32U24() const { return opcodes.vMadU32U24; }
   unsigned vLshlAddU32() const { return opcodes.vLshlAddU32; }
   unsigned vAddLshlU32() const { return opcodes.vAddLshlU32; }
   unsigned vAndOrB32() const { return opcodes.vAndOrB32; }
@@ -995,6 +999,13 @@ private:
                  toMCOperand(op.getOperand(1)), toMCOperand(op.getOperand(2))});
   }
 
+  LogicalResult emitTernaryIntClamp(unsigned opcode, Operation &op) {
+    return emitMC(opcode,
+                  {toMCOperand(op.getResult(0)), toMCOperand(op.getOperand(0)),
+                   toMCOperand(op.getOperand(1)), toMCOperand(op.getOperand(2)),
+                   llvm::MCOperand::createImm(0)});
+  }
+
   // Shared emit shapes for the width-parameterised mem ops. The MC
   // operand order is what the LLVM AMDGPU printer expects per family:
   //   GLOBAL_*_SADDR: vdst/vdata, saddr, vaddr, offset, cpol
@@ -1298,6 +1309,11 @@ private:
       // unconstrained so we emit (vdst, src0, src1) as-is without the
       // VOP2 swap dance.
       return emitVMulLoU32(op, result(), op.getOperand(0), op.getOperand(1));
+    if (isa<waveamdmachine::VMadI32I24Op, waveamdmachine::VMadU32U24Op>(op)) {
+      unsigned opcode =
+          isa<waveamdmachine::VMadI32I24Op>(op) ? vMadI32I24() : vMadU32U24();
+      return emitTernaryIntClamp(opcode, op);
+    }
     if (isa<waveamdmachine::VAdd3U32Op, waveamdmachine::VLshlAddU32Op,
             waveamdmachine::VAddLshlU32Op, waveamdmachine::VAndOrB32Op,
             waveamdmachine::VOr3B32Op, waveamdmachine::VXadU32Op>(op)) {

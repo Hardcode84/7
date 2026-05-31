@@ -98,6 +98,63 @@ func.func @xor_add(%a: !waveamdmachine.reg<vgpr, 1>,
   return %out : !waveamdmachine.reg<vgpr, 1>
 }
 
+// CHECK-LABEL: func.func @mad_u24_masked
+// CHECK-NOT: waveamdmachine.v_mul_lo_u32
+// CHECK: [[OUT:%.*]] = waveamdmachine.v_mad_u32_u24
+func.func @mad_u24_masked(%a: !waveamdmachine.reg<vgpr, 1>,
+                          %b: !waveamdmachine.reg<vgpr, 1>,
+                          %c: !waveamdmachine.reg<vgpr, 1>)
+    -> !waveamdmachine.reg<vgpr, 1> {
+  %mask = waveamdmachine.imm 16777215 : !waveamdmachine.imm
+  %am = waveamdmachine.v_and_b32 %a, %mask
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.imm)
+          -> !waveamdmachine.reg<vgpr, 1>
+  %bm = waveamdmachine.v_and_b32 %b, %mask
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.imm)
+          -> !waveamdmachine.reg<vgpr, 1>
+  %mul = waveamdmachine.v_mul_lo_u32 %am, %bm
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+  %out = waveamdmachine.v_add_u32 %mul, %c
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+  return %out : !waveamdmachine.reg<vgpr, 1>
+}
+
+// CHECK-LABEL: func.func @mad_i24_signed_imm
+// CHECK-NOT: waveamdmachine.v_mul_lo_u32
+// CHECK: [[NEG:%.*]] = waveamdmachine.imm -3
+// CHECK: [[OUT:%.*]] = waveamdmachine.v_mad_i32_i24 [[NEG]],
+func.func @mad_i24_signed_imm(%c: !waveamdmachine.reg<vgpr, 1>)
+    -> !waveamdmachine.reg<vgpr, 1> {
+  %neg = waveamdmachine.imm -3 : !waveamdmachine.imm
+  %five = waveamdmachine.imm 5 : !waveamdmachine.imm
+  %mul = waveamdmachine.v_mul_lo_u32 %neg, %five
+      : (!waveamdmachine.imm, !waveamdmachine.imm)
+          -> !waveamdmachine.reg<vgpr, 1>
+  %out = waveamdmachine.v_add_u32 %mul, %c
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+  return %out : !waveamdmachine.reg<vgpr, 1>
+}
+
+// CHECK-LABEL: func.func @mad_reject_out_of_range
+// CHECK-NOT: waveamdmachine.v_mad
+// CHECK: waveamdmachine.v_mul_lo_u32
+// CHECK: waveamdmachine.v_add_u32
+func.func @mad_reject_out_of_range(%c: !waveamdmachine.reg<vgpr, 1>)
+    -> !waveamdmachine.reg<vgpr, 1> {
+  %wide = waveamdmachine.imm 16777216 : !waveamdmachine.imm
+  %one = waveamdmachine.imm 1 : !waveamdmachine.imm
+  %mul = waveamdmachine.v_mul_lo_u32 %wide, %one
+      : (!waveamdmachine.imm, !waveamdmachine.imm)
+          -> !waveamdmachine.reg<vgpr, 1>
+  %out = waveamdmachine.v_add_u32 %mul, %c
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+  return %out : !waveamdmachine.reg<vgpr, 1>
+}
+
 }
 
 // -----
@@ -197,6 +254,23 @@ func.func @gfx9_literal_reject(%a: !waveamdmachine.reg<vgpr, 1>)
           -> !waveamdmachine.reg<vgpr, 1>
   %out = waveamdmachine.v_add_u32 %shifted, %literal
       : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.imm)
+          -> !waveamdmachine.reg<vgpr, 1>
+  return %out : !waveamdmachine.reg<vgpr, 1>
+}
+
+// CHECK-LABEL: func.func @mad_gfx9_literal_reject
+// CHECK-NOT: waveamdmachine.v_mad
+// CHECK: [[MUL:%.*]] = waveamdmachine.v_mul_lo_u32
+// CHECK: waveamdmachine.v_add_u32 [[MUL]]
+func.func @mad_gfx9_literal_reject(%a: !waveamdmachine.reg<vgpr, 1>)
+    -> !waveamdmachine.reg<vgpr, 1> {
+  %literal = waveamdmachine.imm 100000 : !waveamdmachine.imm
+  %two = waveamdmachine.imm 2 : !waveamdmachine.imm
+  %mul = waveamdmachine.v_mul_lo_u32 %literal, %two
+      : (!waveamdmachine.imm, !waveamdmachine.imm)
+          -> !waveamdmachine.reg<vgpr, 1>
+  %out = waveamdmachine.v_add_u32 %mul, %a
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
           -> !waveamdmachine.reg<vgpr, 1>
   return %out : !waveamdmachine.reg<vgpr, 1>
 }
