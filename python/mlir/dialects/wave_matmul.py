@@ -480,13 +480,20 @@ def _dma_swizzle_phase(cfg: _MatmulConfig) -> int:
     return min(8, cfg.mma.k_tile // cfg.mma.lane_k_elems)
 
 
+def _dma_swizzle_rows_per_phase(cfg: _MatmulConfig) -> int:
+    if cfg.mma.name != "mfma_gfx950":
+        return 1
+    return 2
+
+
 def _dma_logical_col(
     cfg: _MatmulConfig, row: int | dsl.Expr, physical_col: int | dsl.Expr
 ) -> int | dsl.Expr:
     phase = _dma_swizzle_phase(cfg)
     if phase < 2:
         return physical_col
-    return dsl.xor(dsl.mod(row, phase), physical_col)
+    row_phase = dsl.floor(row / _dma_swizzle_rows_per_phase(cfg))
+    return dsl.xor(dsl.mod(row_phase, phase), physical_col)
 
 
 def _emit_dma_staging_ptrs(

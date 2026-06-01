@@ -5,7 +5,7 @@
 // RUN: %python %S/../../../examples/wave/wmma_matmul_tiled.py --chip=gfx950 --m=128 --n=64 --k=64 --bm=2 --bn=2 --wave-m-tiles=2 --wave-n-tiles=2 --wave-k-tiles=2 --use-dma-lds --dump-asm 2>/dev/null \
 // RUN:   | FileCheck %s --check-prefix=ASM
 //
-// IR: wave.index_expr <{{.*xor}}
+// IR: wave.index_expr <{{.*xor.*floor\(1/2\*Mod\(wi, 16\)\).*}}>
 // IR: waveamd.dma_load_lds
 // IR: waveamd.mma "mfma.f32.16x16x32.f16"
 //
