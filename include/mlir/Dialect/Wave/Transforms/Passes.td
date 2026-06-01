@@ -61,8 +61,10 @@ def WaveCombinePointerOffsets : Pass<"wave-combine-pointer-offsets"> {
   let summary = "Combine chained Wave pointer offsets into one symbolic offset";
   let description = [{
     Folds chained `wave.ptr_add` offsets into one `wave.index_expr` feeding a
-    single `wave.ptr_add`. This preserves current `wave.ptr_add` element-offset
-    semantics; byte address planning is derived later by machine selection.
+    single `wave.ptr_add`, and composes `wave.index_expr` values used as
+    bindings by other `wave.index_expr` ops. This preserves current
+    `wave.ptr_add` element-offset semantics; byte address planning is derived
+    later by machine selection.
   }];
   let dependentDialects = [
     "func::FuncDialect",
