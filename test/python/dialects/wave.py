@@ -224,6 +224,8 @@ def test_index_expr():
             # Lane-varying binding pins the result to `!wave.simd<index, 32>`.
             off = f.index_expr(4 * lid + K, {K: k, lid: lane})
 
+            _x = f.index_expr(w.xor(lid, w.sym_ctx.int_(31)), {lid: lane})
+
             # Zero bindings -> constant expression.
             _c = f.index_expr(w.sym_ctx.int_(42), {})
 
@@ -237,6 +239,8 @@ def test_index_expr():
         # CHECK: wave.index_expr <"K + wgid_y"> ["K", "wgid_y"]
         # CHECK-SAME: -> index
         # CHECK: wave.index_expr <"K + 4*lid"> ["K", "lid"]
+        # CHECK-SAME: -> !wave.simd<index, 32>
+        # CHECK: wave.index_expr <"xor(31, lid)"> ["lid"]
         # CHECK-SAME: -> !wave.simd<index, 32>
         # CHECK: wave.index_expr <"42"> []()
         # CHECK-SAME: -> index

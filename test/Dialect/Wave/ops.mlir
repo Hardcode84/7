@@ -275,6 +275,9 @@ func.func @wave_index_expr(%lane: !wave.simd<i32, 32>,
   // CHECK: wave.index_expr <"K + 4*lid"> ["K", "lid"](%{{.*}}, %{{.*}}) : (i32, !wave.simd<i32, 32>) -> !wave.simd<index, 32>
   %v = wave.index_expr #wave.expr<"4*lid + K"> ["K", "lid"] (%k, %lane) : (i32, !wave.simd<i32, 32>) -> !wave.simd<index, 32>
 
+  // CHECK: wave.index_expr <"xor(31, lid)"> ["lid"](%{{.*}}) : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
+  %x = wave.index_expr #wave.expr<"xor(lid, 31)"> ["lid"] (%lane) : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
+
   // Constant expression: zero bindings.
   // CHECK: wave.index_expr <"42"> []() : () -> index
   %c = wave.index_expr #wave.expr<"42"> [] () : () -> index

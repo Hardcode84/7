@@ -43,6 +43,28 @@ func.func @raw_wave_arith(%out: !wave.ptr<#wave.global, i32>) attributes {wave.k
 
 // -----
 
+// CHECK-LABEL: func.func @raw_wave_xor
+func.func @raw_wave_xor(%out: !wave.ptr<#wave.global, i32>) attributes {wave.kernel} {
+  %lane = wave.lane_id : !wave.simd<i32, 32>
+  %c31 = arith.constant 31 : i32
+  %mask = wave.splat %c31 : i32 -> !wave.simd<i32, 32>
+  %swizzled = wave.binary "xori" %lane, %mask
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  %base = wave.ptr_add %out, %c31
+      : !wave.ptr<#wave.global, i32>, i32 -> !wave.ptr<#wave.global, i32>
+  // CHECK: %[[OFF:.*]] = wave.index_expr <"31 + xor(31, raw0)"> ["raw0"](%{{.*}}) : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
+  // CHECK: wave.ptr_add %arg0, %[[OFF]]
+  %ptrs = wave.ptr_add %base, %swizzled
+      : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 32>
+      -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
+  %value, %token = wave.load %ptrs
+      : (!wave.simd<!wave.ptr<#wave.global, i32>, 32>)
+      -> (!wave.simd<i32, 32>, !wave.mem.token)
+  return
+}
+
+// -----
+
 // CHECK-LABEL: func.func @opaque_raw_skips
 func.func @opaque_raw_skips(%out: !wave.ptr<#wave.global, i32>,
                             %a: i32,

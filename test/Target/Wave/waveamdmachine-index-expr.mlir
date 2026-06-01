@@ -221,4 +221,50 @@ func.func @range_drives_const_fold(%out: !wave.ptr<#wave.global, i32>, %x: i32, 
   return
 }
 
+// CHECK-LABEL: func.func @xor_lane_swizzle_global
+// CHECK: %[[LANE:.*]] = waveamdmachine.v_mbcnt_lo
+// CHECK: %[[MASK:.*]] = waveamdmachine.imm 31
+// CHECK: %[[XOR:.*]] = waveamdmachine.v_xor_b32 %[[MASK]], %[[LANE]]
+// CHECK: %[[VOFFSET:.*]] = waveamdmachine.v_lshlrev_b32 %[[XOR]],
+// CHECK: waveamdmachine.global_store_b32 %[[VOFFSET]],
+func.func @xor_lane_swizzle_global(%out: !wave.ptr<#wave.global, i32>, %x: i32) attributes {wave.kernel} {
+  %lane_raw = wave.lane_id : !wave.simd<i32, 32>
+  %lane = wave.assume_range %lane_raw, [0, 31] : !wave.simd<i32, 32>
+  %off = wave.index_expr <"xor(lid, 31)"> ["lid"](%lane)
+      : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
+  %ptrs = wave.ptr_add %out, %off
+      : !wave.ptr<#wave.global, i32>, !wave.simd<index, 32>
+      -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
+  %vx = wave.splat %x : i32 -> !wave.simd<i32, 32>
+  %tok = wave.store %vx -> %ptrs
+      : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>)
+      -> !wave.mem.token
+  return
+}
+
+// CHECK-LABEL: func.func @xor_uniform_buffer_soffset
+// CHECK-DAG: %[[U:.*]] = waveamdmachine.arg {index = 1 : i64, pointer = false}
+// CHECK-DAG: %[[LANE:.*]] = waveamdmachine.v_mbcnt_lo
+// CHECK: %[[VBYTE:.*]] = waveamdmachine.v_lshlrev_b32 %[[LANE]],
+// CHECK: %[[SXOR:[^,]+]], %{{.*}} = waveamdmachine.s_xor_b32 {{.*}}, %[[U]]
+// CHECK: %[[SOFFSET:[^,]+]], %{{.*}} = waveamdmachine.s_lshl_b32 %[[SXOR]],
+// CHECK: waveamdmachine.buffer_store_b32 %[[VBYTE]], {{.*}}, {{.*}}, %[[SOFFSET]]
+func.func @xor_uniform_buffer_soffset(%out: !wave.ptr<#wave.global, i32>, %u_raw: i32) attributes {wave.kernel} {
+  %lane = wave.lane_id : !wave.simd<i32, 32>
+  %u = wave.assume_range %u_raw, [0, 31] : i32
+  %range = arith.constant 1024 : i32
+  %buf = waveamd.make_buffer %out, %range
+      : !wave.ptr<#wave.global, i32>, i32 -> !wave.ptr<#waveamd.buffer, i32>
+  %off = wave.index_expr <"lid + xor(u, 31)"> ["lid", "u"](%lane, %u)
+      : (!wave.simd<i32, 32>, i32) -> !wave.simd<index, 32>
+  %ptrs = wave.ptr_add %buf, %off
+      : !wave.ptr<#waveamd.buffer, i32>, !wave.simd<index, 32>
+      -> !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 32>
+  %vx = wave.splat %u : i32 -> !wave.simd<i32, 32>
+  %tok = wave.store %vx -> %ptrs
+      : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 32>)
+      -> !wave.mem.token
+  return
+}
+
 }

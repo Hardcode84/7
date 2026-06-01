@@ -128,6 +128,10 @@ private:
                              skip, depth + 1);
     if (ShliOp shl = value.getDefiningOp<ShliOp>())
       return buildShiftExpr(shl, skip, depth + 1);
+    if (BinaryOp bin = value.getDefiningOp<BinaryOp>())
+      if (bin.getKind() == "xori")
+        return buildBinaryExpr(bin.getLhs(), sym::ExprBinaryOp::Xor,
+                               bin.getRhs(), skip, depth + 1);
     skip = true;
     return failure();
   }

@@ -446,9 +446,150 @@ sym::Store &WaveAMDMachineSelector::symbolStore() {
   return func.getContext()->getLoadedDialect<WaveDialect>()->getSymbolStore();
 }
 
+static std::optional<uint64_t> checkedAddU32Bound(uint64_t lhs, uint64_t rhs) {
+  constexpr uint64_t u32Max = (uint64_t{1} << 32) - 1;
+  if (lhs > u32Max || rhs > u32Max || lhs > u32Max - rhs)
+    return std::nullopt;
+  return lhs + rhs;
+}
+
+static std::optional<uint64_t> checkedMulU32Bound(uint64_t lhs, uint64_t rhs) {
+  constexpr uint64_t u32Max = (uint64_t{1} << 32) - 1;
+  if (lhs != 0 && rhs > u32Max / lhs)
+    return std::nullopt;
+  return lhs * rhs;
+}
+
+static std::optional<uint64_t>
+exprU32UpperBound(WaveAMDMachineSelector &S, sym::ExprHandle expr,
+                  ArrayRef<sym::PredHandle> assumptions);
+
+static std::optional<uint64_t>
+addExprU32UpperBound(WaveAMDMachineSelector &S, sym::ExprHandle expr,
+                     ArrayRef<sym::PredHandle> assumptions) {
+  uint64_t bound = 0;
+  sym::ExprView view(expr);
+  if (std::optional<int64_t> constant =
+          sym::getIntegerLiteralValue(view.getAddConstant())) {
+    if (*constant < 0)
+      return std::nullopt;
+    bound = static_cast<uint64_t>(*constant);
+  } else {
+    return std::nullopt;
+  }
+  for (uint32_t index = 0, n = view.getAddTermCount(); index < n; ++index) {
+    sym::AddTerm addTerm = view.getAddTerm(index);
+    std::optional<int64_t> coeff =
+        sym::getIntegerLiteralValue(addTerm.coefficient);
+    if (!coeff || *coeff < 0)
+      return std::nullopt;
+    std::optional<uint64_t> term =
+        exprU32UpperBound(S, addTerm.term, assumptions);
+    if (!term)
+      return std::nullopt;
+    std::optional<uint64_t> scaled =
+        checkedMulU32Bound(static_cast<uint64_t>(*coeff), *term);
+    if (!scaled)
+      return std::nullopt;
+    std::optional<uint64_t> next = checkedAddU32Bound(bound, *scaled);
+    if (!next)
+      return std::nullopt;
+    bound = *next;
+  }
+  return bound;
+}
+
+static std::optional<uint64_t>
+mulExprU32UpperBound(WaveAMDMachineSelector &S, sym::ExprHandle expr,
+                     ArrayRef<sym::PredHandle> assumptions) {
+  sym::ExprView view(expr);
+  std::optional<int64_t> coeff =
+      sym::getIntegerLiteralValue(view.getMulCoefficient());
+  if (!coeff || *coeff < 0)
+    return std::nullopt;
+  uint64_t bound = static_cast<uint64_t>(*coeff);
+  for (uint32_t index = 0, n = view.getMulFactorCount(); index < n; ++index) {
+    sym::MulFactor factor = view.getMulFactor(index);
+    if (factor.exponent <= 0)
+      return std::nullopt;
+    std::optional<uint64_t> factorBound =
+        exprU32UpperBound(S, factor.base, assumptions);
+    if (!factorBound)
+      return std::nullopt;
+    for (int32_t exp = 0; exp < factor.exponent; ++exp) {
+      std::optional<uint64_t> next = checkedMulU32Bound(bound, *factorBound);
+      if (!next)
+        return std::nullopt;
+      bound = *next;
+    }
+  }
+  return bound;
+}
+
+static std::optional<uint64_t>
+xorExprU32UpperBound(WaveAMDMachineSelector &S, sym::ExprHandle expr,
+                     ArrayRef<sym::PredHandle> assumptions) {
+  sym::ExprView view(expr);
+  std::optional<uint64_t> lhs =
+      exprU32UpperBound(S, view.getBinaryLhs(), assumptions);
+  std::optional<uint64_t> rhs =
+      exprU32UpperBound(S, view.getBinaryRhs(), assumptions);
+  if (!lhs || !rhs)
+    return std::nullopt;
+  uint64_t maxOperand = std::max(*lhs, *rhs);
+  if (maxOperand == 0)
+    return uint64_t{0};
+  return llvm::PowerOf2Ceil(maxOperand + 1) - 1;
+}
+
+static std::optional<uint64_t>
+exprU32UpperBound(WaveAMDMachineSelector &S, sym::ExprHandle expr,
+                  ArrayRef<sym::PredHandle> assumptions) {
+  constexpr uint64_t u32Max = (uint64_t{1} << 32) - 1;
+  if (std::optional<int64_t> value = sym::getIntegerLiteralValue(expr)) {
+    if (*value < 0 || static_cast<uint64_t>(*value) > u32Max)
+      return std::nullopt;
+    return static_cast<uint64_t>(*value);
+  }
+  if (sym::provablyInRange(S.symbolStore(), expr, assumptions, 0, u32Max)) {
+    uint64_t lo = 0;
+    uint64_t hi = u32Max;
+    while (lo < hi) {
+      uint64_t mid = lo + (hi - lo) / 2;
+      if (sym::provablyInRange(S.symbolStore(), expr, assumptions, 0, mid))
+        hi = mid;
+      else
+        lo = mid + 1;
+    }
+    return hi;
+  }
+  sym::ExprView view(expr);
+  switch (view.getKind()) {
+  case sym::ExprKind::Add:
+    return addExprU32UpperBound(S, expr, assumptions);
+  case sym::ExprKind::Mul:
+    return mulExprU32UpperBound(S, expr, assumptions);
+  case sym::ExprKind::Xor:
+    return xorExprU32UpperBound(S, expr, assumptions);
+  default:
+    break;
+  }
+  return std::nullopt;
+}
+
+static bool exprFitsU32ByUpperBound(WaveAMDMachineSelector &S,
+                                    sym::ExprHandle expr,
+                                    ArrayRef<sym::PredHandle> assumptions) {
+  if (std::optional<uint64_t> bound = exprU32UpperBound(S, expr, assumptions))
+    return *bound <= (uint64_t{1} << 32) - 1;
+  return false;
+}
+
 bool WaveAMDMachineSelector::slotFitsU32(
     sym::ExprHandle expr, ArrayRef<sym::PredHandle> assumptions) {
-  return sym::provablyFitsU32(symbolStore(), expr, assumptions);
+  if (sym::provablyFitsU32(symbolStore(), expr, assumptions))
+    return true;
+  return exprFitsU32ByUpperBound(*this, expr, assumptions);
 }
 
 static std::optional<int64_t> staticIntLiteral(sym::ExprHandle expr) {

@@ -98,7 +98,7 @@ SchedClass classifyOp(Operation *op) {
             SDelayAluOp, SLshlB32Op, SLshlB64Op, SLshrB32Op, SMovB32Op,
             SMovB32TupleOp, SMovB32ValueOp, SMovB64ImmOp, SMovExecLoOp,
             SMovM0Op, SMovVccB32Op, SMulI32Op, SMulU64Op, SNopOp,
-            SReadVccB32Op, SSetprioOp, SGetregShaderCyclesOp>(
+            SReadVccB32Op, SSetprioOp, SGetregShaderCyclesOp, SXorB32Op>(
           [](auto) { return SchedClass::WriteSALU; })
       .Default(fallbackClassify);
   // clang-format on

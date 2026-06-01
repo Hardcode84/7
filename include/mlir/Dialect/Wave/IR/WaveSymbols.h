@@ -75,7 +75,7 @@ private:
   const ixs_node *node = nullptr;
 };
 
-enum class ExprBinaryOp { Add, Sub, Mul, Div, Mod };
+enum class ExprBinaryOp { Add, Sub, Mul, Div, Mod, Xor };
 enum class PredCmpOp { Lt, Le, Gt, Ge, Eq, Ne };
 
 enum class ExprKind {

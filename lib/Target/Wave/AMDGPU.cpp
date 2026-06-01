@@ -116,6 +116,7 @@ struct KernelInfo {
   X(sLshlB32, S_LSHL_B32_vi, S_LSHL_B32_gfx11)                                 \
   X(sLshrB32, S_LSHR_B32_vi, S_LSHR_B32_gfx11)                                 \
   X(sAndB32, S_AND_B32_vi, S_AND_B32_gfx11)                                    \
+  X(sXorB32, S_XOR_B32_vi, S_XOR_B32_gfx11)                                    \
   X(sAndn2B32, S_ANDN2_B32_vi, S_ANDN2_B32_gfx11)                              \
   X(sAndn2B64, S_ANDN2_B64_vi, S_ANDN2_B64_gfx11)                              \
   X(sAndSaveexecB64, S_AND_SAVEEXEC_B64_vi, S_AND_SAVEEXEC_B64_gfx11)          \
@@ -381,6 +382,7 @@ private:
   unsigned sLshlB32() const { return opcodes.sLshlB32; }
   unsigned sLshrB32() const { return opcodes.sLshrB32; }
   unsigned sAndB32() const { return opcodes.sAndB32; }
+  unsigned sXorB32() const { return opcodes.sXorB32; }
   unsigned sAndn2B32() const { return opcodes.sAndn2B32; }
   unsigned sAndn2B64() const { return opcodes.sAndn2B64; }
   unsigned sAndSaveexecB64() const { return opcodes.sAndSaveexecB64; }
@@ -1481,6 +1483,10 @@ private:
                                  toMCOperand(op.getOperand(1))});
     if (isa<waveamdmachine::SAndB32Op>(op))
       return emitMC(sAndB32(), {toMCOperand(op.getResult(0)),
+                                toMCOperand(op.getOperand(0)),
+                                toMCOperand(op.getOperand(1))});
+    if (isa<waveamdmachine::SXorB32Op>(op))
+      return emitMC(sXorB32(), {toMCOperand(op.getResult(0)),
                                 toMCOperand(op.getOperand(0)),
                                 toMCOperand(op.getOperand(1))});
     if (isa<waveamdmachine::SAddU64Op>(op)) {

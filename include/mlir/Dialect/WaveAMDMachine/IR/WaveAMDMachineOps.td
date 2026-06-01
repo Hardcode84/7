@@ -1585,6 +1585,14 @@ def WaveAMDMachine_SAndB32Op : WaveAMDMachine_Op<"s_and_b32", [Pure]> {
   let assemblyFormat = "$lhs `,` $rhs attr-dict `:` functional-type(operands, results)";
 }
 
+def WaveAMDMachine_SXorB32Op : WaveAMDMachine_Op<"s_xor_b32", [Pure]> {
+  let summary = "scalar 32-bit bitwise XOR";
+  let arguments = (ins WaveAMDMachine_SGPR1OrImm:$lhs,
+                       WaveAMDMachine_SGPR1OrImm:$rhs);
+  let results = (outs WaveAMDMachine_SGPR1:$result, WaveAMDMachine_SCC:$scc);
+  let assemblyFormat = "$lhs `,` $rhs attr-dict `:` functional-type(operands, results)";
+}
+
 // 64-bit scalar add. The asm printer expands this into the carry-chain
 // pair `s_add_u32` (low) + `s_addc_u32` (high). The intermediate SCC is
 // consumed by the second instruction and discarded after.

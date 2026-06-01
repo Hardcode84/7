@@ -515,6 +515,9 @@ mlir::wave::sym::composeExprBinary(Store &store, ExprHandle lhsHandle,
   case ExprBinaryOp::Mod:
     node = ixs_mod(session.raw(), lhs, rhs);
     break;
+  case ExprBinaryOp::Xor:
+    node = ixs_xor(session.raw(), lhs, rhs);
+    break;
   }
   return finishExpr(session.raw(), node, diagnostic,
                     "failed to compose wave.expr");

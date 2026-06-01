@@ -100,6 +100,7 @@ def sym(name: str) -> ixsimpl.Expr:
 floor = ixsimpl.floor
 ceil = ixsimpl.ceil
 mod = ixsimpl.mod
+xor = ixsimpl.xor_
 
 
 # ---------------------------------------------------------------------------

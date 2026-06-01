@@ -235,6 +235,55 @@ FailureOr<Value> materializeMod(WaveAMDMachineSelector &S, sym::ExprHandle expr,
   return S.andMask(user->getLoc(), *lhsValue, *rhsInt - 1);
 }
 
+std::optional<Value> foldXorImmediates(WaveAMDMachineSelector &S, Location loc,
+                                       Value lhs, Value rhs) {
+  std::optional<int64_t> lhsImm = S.getImmediateValue(lhs);
+  std::optional<int64_t> rhsImm = S.getImmediateValue(rhs);
+  if (lhsImm && rhsImm)
+    return createImm(S.builder, loc, *lhsImm ^ *rhsImm);
+  if (lhsImm && *lhsImm == 0)
+    return rhs;
+  if (rhsImm && *rhsImm == 0)
+    return lhs;
+  return std::nullopt;
+}
+
+Value materializeUniformXor(WaveAMDMachineSelector &S, Location loc, Value lhs,
+                            Value rhs) {
+  return waveamdmachine::SXorB32Op::create(
+             S.builder, loc,
+             getRegType(S.builder.getContext(), waveamdmachine::RegClass::SGPR),
+             getSCCType(S.builder.getContext()), lhs, rhs)
+      .getResult();
+}
+
+Value materializeLaneXor(WaveAMDMachineSelector &S, Location loc, Value lhs,
+                         Value rhs) {
+  return waveamdmachine::VXorB32Op::create(
+             S.builder, loc,
+             getRegType(S.builder.getContext(), waveamdmachine::RegClass::VGPR),
+             lhs, rhs)
+      .getResult();
+}
+
+FailureOr<Value> materializeXor(WaveAMDMachineSelector &S, sym::ExprHandle expr,
+                                Operation *user,
+                                const llvm::StringMap<Value> &subs) {
+  Location loc = user->getLoc();
+  sym::ExprView view(expr);
+  FailureOr<Value> lhs =
+      materializeIndexExprNode(S, view.getBinaryLhs(), user, subs);
+  FailureOr<Value> rhs =
+      materializeIndexExprNode(S, view.getBinaryRhs(), user, subs);
+  if (failed(lhs) || failed(rhs))
+    return failure();
+  if (std::optional<Value> folded = foldXorImmediates(S, loc, *lhs, *rhs))
+    return *folded;
+  if (S.isUniformValue(*lhs) && S.isUniformValue(*rhs))
+    return materializeUniformXor(S, loc, *lhs, *rhs);
+  return materializeLaneXor(S, loc, *lhs, *rhs);
+}
+
 TermKind classifyAdd(WaveAMDMachineSelector &S, sym::ExprHandle expr,
                      const llvm::StringMap<TermKind> &symKinds) {
   sym::ExprView view(expr);
@@ -437,6 +486,32 @@ appendRemainingAddends(WaveAMDMachineSelector &S,
 
 // ---- public surface (declared in WaveAMDMachineSelector.h) ----------------
 
+static FailureOr<Value>
+materializeCompoundIndexExprNode(WaveAMDMachineSelector &S,
+                                 sym::ExprHandle expr, Operation *user,
+                                 const llvm::StringMap<Value> &subs) {
+  sym::ExprView view(expr);
+  switch (view.getKind()) {
+  case sym::ExprKind::Add:
+    return materializeAdd(S, expr, user, subs);
+  case sym::ExprKind::Mul:
+    return materializeMul(S, expr, user, subs);
+  case sym::ExprKind::Floor:
+    return materializeFloor(S, expr, user, subs);
+  case sym::ExprKind::Ceil:
+    return materializeCeil(S, expr, user, subs);
+  case sym::ExprKind::Mod:
+    return materializeMod(S, expr, user, subs);
+  case sym::ExprKind::Xor:
+    return materializeXor(S, expr, user, subs);
+  default:
+    break;
+  }
+  return user->emitError(
+             "wave.index_expr selection does not support expression kind ")
+         << static_cast<int>(view.getKind());
+}
+
 FailureOr<Value> materializeIndexExprNode(WaveAMDMachineSelector &S,
                                           sym::ExprHandle expr, Operation *user,
                                           const llvm::StringMap<Value> &subs) {
@@ -448,24 +523,36 @@ FailureOr<Value> materializeIndexExprNode(WaveAMDMachineSelector &S,
     break;
   case sym::ExprKind::Rational:
     return materializeRational(S, expr, user);
-  case sym::ExprKind::Symbol:
+  case sym::ExprKind::Symbol: {
     return materializeSymbol(S, expr, user, subs);
-  case sym::ExprKind::Add:
-    return materializeAdd(S, expr, user, subs);
-  case sym::ExprKind::Mul:
-    return materializeMul(S, expr, user, subs);
-  case sym::ExprKind::Floor:
-    return materializeFloor(S, expr, user, subs);
-  case sym::ExprKind::Ceil:
-    return materializeCeil(S, expr, user, subs);
-  case sym::ExprKind::Mod:
-    return materializeMod(S, expr, user, subs);
+  }
   default:
-    break;
+    return materializeCompoundIndexExprNode(S, expr, user, subs);
   }
   return user->emitError(
              "wave.index_expr selection does not support expression kind ")
          << static_cast<int>(view.getKind());
+}
+
+static TermKind
+classifyCompoundTerm(WaveAMDMachineSelector &S, sym::ExprHandle expr,
+                     const llvm::StringMap<TermKind> &symKinds) {
+  sym::ExprView view(expr);
+  switch (view.getKind()) {
+  case sym::ExprKind::Add:
+    return classifyAdd(S, expr, symKinds);
+  case sym::ExprKind::Mul:
+    return classifyMul(S, expr, symKinds);
+  case sym::ExprKind::Floor:
+  case sym::ExprKind::Ceil:
+    return classifyTerm(S, view.getUnaryArg(), symKinds);
+  case sym::ExprKind::Mod:
+  case sym::ExprKind::Xor:
+    return std::max(classifyTerm(S, view.getBinaryLhs(), symKinds),
+                    classifyTerm(S, view.getBinaryRhs(), symKinds));
+  default:
+    return TermKind::Lane;
+  }
 }
 
 TermKind classifyTerm(WaveAMDMachineSelector &S, sym::ExprHandle expr,
@@ -480,18 +567,8 @@ TermKind classifyTerm(WaveAMDMachineSelector &S, sym::ExprHandle expr,
     auto it = symKinds.find(name);
     return it == symKinds.end() ? TermKind::Lane : it->second;
   }
-  case sym::ExprKind::Add:
-    return classifyAdd(S, expr, symKinds);
-  case sym::ExprKind::Mul:
-    return classifyMul(S, expr, symKinds);
-  case sym::ExprKind::Floor:
-  case sym::ExprKind::Ceil:
-    return classifyTerm(S, view.getUnaryArg(), symKinds);
-  case sym::ExprKind::Mod:
-    return std::max(classifyTerm(S, view.getBinaryLhs(), symKinds),
-                    classifyTerm(S, view.getBinaryRhs(), symKinds));
   default:
-    return TermKind::Lane;
+    return classifyCompoundTerm(S, expr, symKinds);
   }
 }
 
