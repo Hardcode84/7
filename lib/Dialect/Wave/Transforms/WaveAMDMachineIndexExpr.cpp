@@ -307,7 +307,6 @@ TermKind classifyMul(WaveAMDMachineSelector &S, sym::ExprHandle expr,
 struct AddressPlanAddend {
   sym::ExprHandle expr;
   TermKind kind = TermKind::Lane;
-  bool taken = false;
 };
 
 static bool isOneExpr(sym::ExprHandle expr) {
@@ -398,7 +397,7 @@ collectPlanAddend(WaveAMDMachineSelector &S, sym::ExprHandle term,
   if (isZeroExpr(*scaled))
     return success();
   addends.push_back(
-      {*scaled, classifyScaledAddend(S, term, termCoeff, symKinds), false});
+      {*scaled, classifyScaledAddend(S, term, termCoeff, symKinds)});
   return success();
 }
 
@@ -413,7 +412,7 @@ collectPlanAddends(WaveAMDMachineSelector &S, sym::ExprHandle expr,
                              addends);
   sym::ExprHandle coeff = view.getAddConstant();
   if (!isZeroExpr(coeff))
-    addends.push_back({coeff, TermKind::Const, false});
+    addends.push_back({coeff, TermKind::Const});
   uint32_t nterms = view.getAddTermCount();
   for (uint32_t i = 0; i < nterms; ++i) {
     sym::AddTerm term = view.getAddTerm(i);
@@ -429,57 +428,86 @@ static FailureOr<sym::ExprHandle> expandPlanExpr(WaveAMDMachineSelector &S,
   return sym::expandExpr(S.symbolStore(), expr);
 }
 
-static LogicalResult takeInstOffsetAddends(
-    WaveAMDMachineSelector &S, const waveamdmachine::AddressFieldSpec &spec,
-    SmallVectorImpl<AddressPlanAddend> &addends, AddressPlan &plan) {
-  for (AddressPlanAddend &addend : addends) {
-    if (addend.taken || addend.kind != TermKind::Const)
+static LogicalResult appendPlanRemainder(WaveAMDMachineSelector &S,
+                                         sym::ExprHandle expr,
+                                         AddressPlan &plan) {
+  return appendPlanExpr(S, expr, plan.assumptions,
+                        plan.fullAddressRemainderExpr);
+}
+
+static LogicalResult
+takeInstOffsetAddends(WaveAMDMachineSelector &S,
+                      const waveamdmachine::AddressFieldSpec &spec,
+                      ArrayRef<AddressPlanAddend> addends, AddressPlan &plan) {
+  for (const AddressPlanAddend &addend : addends) {
+    if (addend.kind != TermKind::Const)
       continue;
     std::optional<int64_t> value = sym::getIntegerLiteralValue(addend.expr);
     std::optional<int64_t> next =
         value ? llvm::checkedAdd(plan.instOffset, *value) : std::nullopt;
     if (next && instOffsetFits(*next, spec)) {
       plan.instOffset = *next;
-      addend.taken = true;
       continue;
     }
-    if (failed(appendPlanExpr(S, addend.expr, plan.assumptions,
-                              plan.fullAddressRemainderExpr)))
+    if (failed(appendPlanRemainder(S, addend.expr, plan)))
       return failure();
-    addend.taken = true;
   }
   return success();
 }
 
-static void takeFirstPlanSlot(WaveAMDMachineSelector &S, TermKind kind,
-                              SmallVectorImpl<AddressPlanAddend> &addends,
-                              AddressPlan &plan, sym::ExprHandle &slotExpr) {
-  if (slotExpr)
-    return;
-  for (AddressPlanAddend &addend : addends) {
-    if (addend.taken || addend.kind != kind)
+static FailureOr<bool> tryAppendPlanSlot(WaveAMDMachineSelector &S,
+                                         sym::ExprHandle expr,
+                                         AddressPlan &plan,
+                                         sym::ExprHandle &slotExpr) {
+  if (!expr)
+    return true;
+  sym::ExprHandle candidate = slotExpr;
+  if (failed(appendPlanExpr(S, expr, plan.assumptions, candidate)))
+    return failure();
+  if (!S.slotFitsU32(candidate, plan.assumptions))
+    return false;
+  slotExpr = candidate;
+  return true;
+}
+
+static LogicalResult packPlanSlotAddends(WaveAMDMachineSelector &S,
+                                         TermKind kind,
+                                         ArrayRef<AddressPlanAddend> addends,
+                                         AddressPlan &plan,
+                                         sym::ExprHandle &slotExpr) {
+  for (const AddressPlanAddend &addend : addends) {
+    if (addend.kind != kind)
       continue;
-    if (!S.slotFitsU32(addend.expr, plan.assumptions))
-      continue;
-    slotExpr = addend.expr;
-    addend.taken = true;
-    return;
+    FailureOr<bool> took = tryAppendPlanSlot(S, addend.expr, plan, slotExpr);
+    if (failed(took))
+      return failure();
+    if (!*took && failed(appendPlanRemainder(S, addend.expr, plan)))
+      return failure();
   }
+  return success();
 }
 
 static LogicalResult
-appendRemainingAddends(WaveAMDMachineSelector &S,
-                       SmallVectorImpl<AddressPlanAddend> &addends,
-                       AddressPlan &plan) {
-  for (AddressPlanAddend &addend : addends) {
-    if (addend.taken)
-      continue;
-    if (failed(appendPlanExpr(S, addend.expr, plan.assumptions,
-                              plan.fullAddressRemainderExpr)))
+appendPlanAddendsRemainder(WaveAMDMachineSelector &S, TermKind kind,
+                           ArrayRef<AddressPlanAddend> addends,
+                           AddressPlan &plan) {
+  for (const AddressPlanAddend &addend : addends)
+    if (addend.kind == kind &&
+        failed(appendPlanRemainder(S, addend.expr, plan)))
       return failure();
-    addend.taken = true;
-  }
   return success();
+}
+
+static LogicalResult
+assignPlanAddends(WaveAMDMachineSelector &S,
+                  const waveamdmachine::AddressFieldSpec &spec,
+                  ArrayRef<AddressPlanAddend> addends, AddressPlan &plan) {
+  if (failed(takeInstOffsetAddends(S, spec, addends, plan)))
+    return failure();
+  if (spec.hasSoffset)
+    return packPlanSlotAddends(S, TermKind::Uniform, addends, plan,
+                               plan.soffsetExpr);
+  return appendPlanAddendsRemainder(S, TermKind::Uniform, addends, plan);
 }
 
 } // namespace
@@ -597,12 +625,10 @@ planAddressFields(WaveAMDMachineSelector &S, const PointerOffset &offset,
   SmallVector<AddressPlanAddend, 8> addends;
   if (failed(collectPlanAddends(S, expr, symKinds, plan.assumptions, addends)))
     return failure();
-  if (failed(takeInstOffsetAddends(S, spec, addends, plan)))
+  if (failed(assignPlanAddends(S, spec, addends, plan)))
     return failure();
-  if (spec.hasSoffset)
-    takeFirstPlanSlot(S, TermKind::Uniform, addends, plan, plan.soffsetExpr);
-  takeFirstPlanSlot(S, TermKind::Lane, addends, plan, plan.voffsetExpr);
-  if (failed(appendRemainingAddends(S, addends, plan)))
+  if (failed(packPlanSlotAddends(S, TermKind::Lane, addends, plan,
+                                 plan.voffsetExpr)))
     return failure();
   return plan;
 }

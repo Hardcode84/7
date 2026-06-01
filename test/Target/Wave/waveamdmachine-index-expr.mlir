@@ -267,4 +267,34 @@ func.func @xor_uniform_buffer_soffset(%out: !wave.ptr<#wave.global, i32>, %u_raw
   return
 }
 
+// CHECK-LABEL: func.func @buffer_subset_packs_uniform_slots
+// CHECK-DAG: %[[U:.*]] = waveamdmachine.arg {index = 1 : i64, pointer = false}
+// CHECK-DAG: %[[V:.*]] = waveamdmachine.arg {index = 2 : i64, pointer = false}
+// CHECK-DAG: %[[LANE:.*]] = waveamdmachine.v_mbcnt_lo
+// CHECK: %[[VBYTE:.*]] = waveamdmachine.v_lshlrev_b32 %[[LANE]],
+// CHECK: %[[VSCALE:[^,]+]], %{{.*}} = waveamdmachine.s_lshl_b32 %[[V]],
+// CHECK: %[[VOFFSET:.*]] = waveamdmachine.v_add_u32 %[[VBYTE]], %[[VSCALE]]
+// CHECK: %[[USCALE:[^,]+]], %{{.*}} = waveamdmachine.s_lshl_b32 %[[U]],
+// CHECK: waveamdmachine.buffer_store_b32 %[[VOFFSET]], {{.*}}, {{.*}}, %[[USCALE]]
+func.func @buffer_subset_packs_uniform_slots(%out: !wave.ptr<#wave.global, i32>,
+                                             %u_raw: i32, %v_raw: i32) attributes {wave.kernel} {
+  %lane_raw = wave.lane_id : !wave.simd<i32, 32>
+  %lane = wave.assume_range %lane_raw, [0, 31] : !wave.simd<i32, 32>
+  %u = wave.assume_range %u_raw, [0, 1073741823] : i32
+  %v = wave.assume_range %v_raw, [0, 1073741791] : i32
+  %range = arith.constant 4096 : i32
+  %buf = waveamd.make_buffer %out, %range
+      : !wave.ptr<#wave.global, i32>, i32 -> !wave.ptr<#waveamd.buffer, i32>
+  %off = wave.index_expr <"lid + u + v"> ["lid", "u", "v"](%lane, %u, %v)
+      : (!wave.simd<i32, 32>, i32, i32) -> !wave.simd<index, 32>
+  %ptrs = wave.ptr_add %buf, %off
+      : !wave.ptr<#waveamd.buffer, i32>, !wave.simd<index, 32>
+      -> !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 32>
+  %vx = wave.splat %u : i32 -> !wave.simd<i32, 32>
+  %tok = wave.store %vx -> %ptrs
+      : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 32>)
+      -> !wave.mem.token
+  return
+}
+
 }
