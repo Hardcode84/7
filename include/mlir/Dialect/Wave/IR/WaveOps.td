@@ -332,17 +332,18 @@ def Wave_AssumeRangeOp : Wave_Op<"assume_range", [
       * `lo` / `hi` need not fit the value's representable range. The
         analysis clamps to the bit-width.
 
-    Accepts a signless integer or `!wave.simd<iN, W>` value; the latter
-    means "every lane is in `[lo, hi]`" and is published on the SIMD
-    value's lattice entry using the element bit-width.
+    Accepts a signless integer, index, or SIMD of either; SIMD means
+    "every lane is in `[lo, hi]`".
   }];
 
   let arguments = (ins
-      AnyTypeOf<[AnySignlessInteger, Wave_SimdOfSignlessInteger]>:$value,
+      AnyTypeOf<[AnySignlessInteger, Wave_SimdOfSignlessInteger,
+                 Wave_IndexValue]>:$value,
       SI64Attr:$lo,
       SI64Attr:$hi);
   let results = (outs
-      AnyTypeOf<[AnySignlessInteger, Wave_SimdOfSignlessInteger]>:$result);
+      AnyTypeOf<[AnySignlessInteger, Wave_SimdOfSignlessInteger,
+                 Wave_IndexValue]>:$result);
   let assemblyFormat = [{
     $value `,` `[` $lo `,` $hi `]` attr-dict `:` type($value)
   }];

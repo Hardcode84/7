@@ -233,12 +233,16 @@ func.func @wave_pack_extract_ops(%a: f16, %b: f16, %c: f16,
 
 // CHECK-LABEL: func.func @wave_assume_range
 func.func @wave_assume_range(%u32: i32, %u64: i64,
-                             %v: !wave.simd<i32, 32>) {
+                             %idx: index, %v: !wave.simd<i32, 32>,
+                             %vidx: !wave.simd<index, 32>) {
   // CHECK: wave.assume_range {{.*}}, [0, 31] : i32
   %0 = wave.assume_range %u32, [0, 31] : i32
 
   // CHECK: wave.assume_range {{.*}}, [-128, 127] : i64
   %1 = wave.assume_range %u64, [-128, 127] : i64
+
+  // CHECK: wave.assume_range {{.*}}, [0, 1023] : index
+  %idx0 = wave.assume_range %idx, [0, 1023] : index
 
   // SIMD operand: per-lane assertion. Interface stays dormant on this
   // path (upstream IntRangeAnalysis is scalar-only), but the op
@@ -246,6 +250,9 @@ func.func @wave_assume_range(%u32: i32, %u64: i64,
   // consumers.
   // CHECK: wave.assume_range {{.*}}, [0, 31] : !wave.simd<i32, 32>
   %2 = wave.assume_range %v, [0, 31] : !wave.simd<i32, 32>
+
+  // CHECK: wave.assume_range {{.*}}, [0, 31] : !wave.simd<index, 32>
+  %vidx0 = wave.assume_range %vidx, [0, 31] : !wave.simd<index, 32>
 
   // Empty range (lo > hi) is legal -- signals an unreachable branch.
   // CHECK: wave.assume_range {{.*}}, [10, 5] : i32

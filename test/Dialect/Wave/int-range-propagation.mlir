@@ -56,6 +56,16 @@ func.func @chain_propagation(%v: i32, %w: i32) -> i1 {
   return %cmp : i1
 }
 
+// CHECK-LABEL: func.func @index_assume_range
+// CHECK-NEXT: %[[T:.*]] = arith.constant true
+// CHECK-NEXT: return %[[T]] : i1
+func.func @index_assume_range(%v: index) -> i1 {
+  %a = wave.assume_range %v, [0, 10] : index
+  %hundred = arith.constant 100 : index
+  %cmp = arith.cmpi slt, %a, %hundred : index
+  return %cmp : i1
+}
+
 // Id-op range seeds: workgroup_id contributes [0, INT32_MAX] without
 // any `wave.assume_range`. The lower bound alone is enough for the
 // non-negativity check to fold.

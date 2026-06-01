@@ -744,12 +744,10 @@ void ShliOp::inferResultRanges(ArrayRef<ConstantIntRanges> argRanges,
 
 void AssumeRangeOp::inferResultRangesFromOptional(
     ArrayRef<IntegerValueRange> argRanges, SetIntLatticeFn setResultRange) {
-  // Bit-width comes from the element type for SIMD payloads, the type
-  // itself for scalars. SetIntLatticeFn happily publishes on either.
   Type ty = getResult().getType();
   if (auto simd = dyn_cast<SimdType>(ty))
     ty = simd.getElementType();
-  unsigned bits = cast<IntegerType>(ty).getWidth();
+  unsigned bits = ConstantIntRanges::getStorageBitwidth(ty);
   APInt lo(bits, static_cast<int64_t>(getLo()), /*isSigned=*/true);
   APInt hi(bits, static_cast<int64_t>(getHi()), /*isSigned=*/true);
   ConstantIntRanges asserted = ConstantIntRanges::fromSigned(lo, hi);
