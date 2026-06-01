@@ -37,7 +37,7 @@ int main(int argc, char **argv) {
   check(hipModuleGetFunction(&kernel, module, "buffer_store_kernel"),
         "hipModuleGetFunction");
 
-  constexpr int lanes = 32;
+  int lanes = props.warpSize;
   constexpr int x = 7;
   int32_t *deviceOut = nullptr;
   check(hipMalloc(&deviceOut, lanes * sizeof(int32_t)), "hipMalloc");
@@ -69,6 +69,6 @@ int main(int argc, char **argv) {
 
   if (!ok)
     return 1;
-  std::printf("buffer_store_kernel ok: lanes 0..31 plus %d verified\n", x);
+  std::printf("buffer_store_kernel ok: %d lanes plus %d verified\n", lanes, x);
   return 0;
 }

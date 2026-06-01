@@ -1401,12 +1401,18 @@ LogicalResult WaveAMDMachineSelector::selectConstant(arith::ConstantOp op) {
 
 LogicalResult WaveAMDMachineSelector::selectLaneId(LaneIdOp op) {
   auto simdType = cast<SimdType>(op.getType());
-  if (!simdType.getElementType().isInteger(32) || simdType.getWidth() != 32)
+  if (!simdType.getElementType().isInteger(32) ||
+      (simdType.getWidth() != 32 && simdType.getWidth() != 64))
     return op.emitError(
-        "WaveAMDMachine backend supports only !wave.simd<i32, 32> lane_id");
-  values[op.getResult()] = waveamdmachine::VMbcntLoOp::create(
+        "WaveAMDMachine backend supports only !wave.simd<i32, 32/64> lane_id");
+  Value lane = waveamdmachine::VMbcntLoOp::create(
       builder, op.getLoc(),
       getRegType(op.getContext(), waveamdmachine::RegClass::VGPR));
+  if (simdType.getWidth() == 64)
+    lane = waveamdmachine::VMbcntHiOp::create(
+        builder, op.getLoc(),
+        getRegType(op.getContext(), waveamdmachine::RegClass::VGPR), lane);
+  values[op.getResult()] = lane;
   eraseIfTopLevel(op);
   return success();
 }
@@ -2124,12 +2130,14 @@ static bool usesLegacyVCmpVcc(const WaveAMDMachineSelector &selector) {
 
 LogicalResult WaveAMDMachineSelector::selectCmp(CmpIOp op) {
   auto maskType = cast<MaskType>(op.getType());
-  if (maskType.getWidth() != 32)
-    return op.emitError("WaveAMDMachine backend supports only !wave.mask<32>");
+  if (maskType.getWidth() != 32 && maskType.getWidth() != 64)
+    return op.emitError(
+        "WaveAMDMachine backend supports only !wave.mask<32/64>");
   std::optional<U32CmpKind> kind = getU32CmpKind(op.getPredicate());
   if (!kind)
     return op.emitError("unsupported wave.cmpi predicate");
-  Type sgprType = getRegType(op.getContext(), waveamdmachine::RegClass::SGPR);
+  Type sgprType = getRegType(op.getContext(), waveamdmachine::RegClass::SGPR,
+                             maskType.getWidth() / 32);
   Value lhs = expect(op.getLhs(), op);
   Value rhs = expect(op.getRhs(), op);
   Value result =

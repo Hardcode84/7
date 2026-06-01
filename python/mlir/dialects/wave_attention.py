@@ -9,6 +9,7 @@ from __future__ import annotations
 import math
 import struct
 from dataclasses import dataclass
+from typing import TypeAlias
 
 import ixsimpl
 from mlir.dialects import wave_dsl as dsl
@@ -20,7 +21,7 @@ _F16_PTR_HELPER = "wave_memref_to_ptr_global_f16"
 _F32_PTR_HELPER = "wave_memref_to_ptr_global_f32"
 _PRINT_HELPER = "printMemrefF32"
 _TARGET_WAVES_ATTR = "waveamdmachine.target_waves"
-type _ExprLike = int | ixsimpl.Expr
+_ExprLike: TypeAlias = int | ixsimpl.Expr  # noqa: UP040 (Python 3.11)
 
 
 @dataclass(frozen=True)

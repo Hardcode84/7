@@ -84,6 +84,16 @@ set(WAVE_LLVM_PROJECT_SRC_DIR
 set(WAVE_LLVM_PROJECT_BUILD_DIR
     "${CMAKE_SOURCE_DIR}/build/llvm-build"
     CACHE PATH "llvm-project build directory (AMDGPU TableGen output)")
+if(NOT LLVM_EXTERNAL_LIT AND EXISTS "${WAVE_LLVM_PROJECT_BUILD_DIR}/bin/llvm-lit")
+  set(LLVM_EXTERNAL_LIT "${WAVE_LLVM_PROJECT_BUILD_DIR}/bin/llvm-lit"
+      CACHE STRING "Command used to spawn lit" FORCE)
+endif()
+if(LLVM_EXTERNAL_LIT)
+  file(MAKE_DIRECTORY "${LLVM_RUNTIME_OUTPUT_INTDIR}")
+  execute_process(
+    COMMAND "${CMAKE_COMMAND}" -E create_symlink
+            "${LLVM_EXTERNAL_LIT}" "${LLVM_RUNTIME_OUTPUT_INTDIR}/llvm-lit")
+endif()
 
 # The imported CMakeLists reference these names directly.
 set(LLVM_MAIN_SRC_DIR "${WAVE_LLVM_PROJECT_SRC_DIR}/llvm")

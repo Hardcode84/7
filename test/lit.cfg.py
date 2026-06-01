@@ -60,10 +60,25 @@ def _detect_amdgpu_chip() -> str | None:
     return None
 
 
+def _default_wave_width(chip: str) -> int | None:
+    if chip.startswith(("gfx10", "gfx11", "gfx12")):
+        return 32
+    if chip.startswith(("gfx8", "gfx9")):
+        return 64
+    return None
+
+
 _chip = _detect_amdgpu_chip()
 if _chip:
     config.available_features.add("host-supports-amdgpu")
     config.substitutions.append(("%chip", _chip))
+    _wave_width = _default_wave_width(_chip)
+    if _wave_width:
+        config.available_features.add("host-supports-amdgpu-wave")
+        config.available_features.add(f"host-supports-amdgpu-wave{_wave_width}")
+        config.substitutions.append(("%wave_width", str(_wave_width)))
+        config.substitutions.append(("%wave_last", str(_wave_width - 1)))
+        config.substitutions.append(("%wave_bytes", str(_wave_width * 4)))
     # WMMA (`v_wmma_*`) instructions exist on gfx11 and gfx12 only.
     if _chip.startswith(("gfx11", "gfx12")):
         config.available_features.add("host-supports-amdgpu-wmma")

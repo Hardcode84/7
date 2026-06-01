@@ -31,8 +31,8 @@ func.func @unsupported_source_type(%m: memref<4xi32>) attributes {wave.kernel} {
 // -----
 
 func.func @unsupported_lane_id_width() {
-  // expected-error @below {{WaveAMDMachine backend supports only !wave.simd<i32, 32> lane_id}}
-  %lane = wave.lane_id : !wave.simd<i32, 64>
+  // expected-error @below {{WaveAMDMachine backend supports only !wave.simd<i32, 32/64> lane_id}}
+  %lane = wave.lane_id : !wave.simd<i64, 64>
   return
 }
 

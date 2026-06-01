@@ -141,6 +141,7 @@ struct KernelInfo {
   X(sEndpgm, S_ENDPGM_vi, S_ENDPGM_gfx11)                                      \
   X(sSetpcB64, S_SETPC_B64_vi, S_SETPC_B64_gfx11)                              \
   X(vMbcntLo, V_MBCNT_LO_U32_B32_e64_vi, V_MBCNT_LO_U32_B32_e64_gfx11)         \
+  X(vMbcntHi, V_MBCNT_HI_U32_B32_e64_vi, V_MBCNT_HI_U32_B32_e64_gfx11)         \
   X(vMovB32, V_MOV_B32_e32_vi, V_MOV_B32_e32_gfx11)                            \
   X(vAndB32, V_AND_B32_e32_vi, V_AND_B32_e32_gfx11)                            \
   X(vOrB32, V_OR_B32_e32_vi, V_OR_B32_e32_gfx11)                               \
@@ -411,6 +412,7 @@ private:
   unsigned sEndpgm() const { return opcodes.sEndpgm; }
   unsigned sSetpcB64() const { return opcodes.sSetpcB64; }
   unsigned vMbcntLo() const { return opcodes.vMbcntLo; }
+  unsigned vMbcntHi() const { return opcodes.vMbcntHi; }
   unsigned vMovB32() const { return opcodes.vMovB32; }
   unsigned vAndB32() const { return opcodes.vAndB32; }
   unsigned vOrB32() const { return opcodes.vOrB32; }
@@ -1219,6 +1221,10 @@ private:
       return emitMC(vMbcntLo(),
                     {toMCOperand(result()), llvm::MCOperand::createImm(-1),
                      llvm::MCOperand::createImm(0)});
+    if (isa<waveamdmachine::VMbcntHiOp>(op))
+      return emitMC(vMbcntHi(),
+                    {toMCOperand(result()), llvm::MCOperand::createImm(-1),
+                     toMCOperand(op.getOperand(0))});
     // hwreg(HW_REG_SHADER_CYCLES=29, offset=0, size=32) packed as
     // id | (offset << 6) | ((size - 1) << 11) = 0xF81D. Gated on
     // gfx11 by archPredicate; emitter assumes the dispatcher already
@@ -1461,6 +1467,11 @@ private:
         return failure();
       if (!writesVcc)
         return success();
+      auto resultType = cast<waveamdmachine::RegType>(result().getType());
+      if (resultType.getWidth() == 2)
+        return emitMC(sMovB64(),
+                      {toMCOperand(result()),
+                       llvm::MCOperand::createReg(namedPhysReg("vcc"))});
       return emitMC(sMovB32(),
                     {toMCOperand(result()),
                      llvm::MCOperand::createReg(namedPhysReg("vcc_lo"))});
