@@ -297,6 +297,32 @@ func.func @buffer_raw_overwide_offset_errors(%out: !wave.ptr<#wave.global, i32>,
 
 // -----
 
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
+func.func @buffer_dma_lds_unbounded_source_offset_needs_range(
+    %in: !wave.ptr<#wave.global, i32>, %u: i32)
+    attributes {wave.kernel, wave.lds_size = 512 : i64} {
+  %range = arith.constant 4096 : i32
+  %buf = waveamd.make_buffer %in, %range
+      : !wave.ptr<#wave.global, i32>, i32 -> !wave.ptr<#waveamd.buffer, i32>
+  %wi_raw = wave.workitem_id 0 : !wave.simd<i32, 64>
+  %wi = wave.assume_range %wi_raw, [0, 63] : !wave.simd<i32, 64>
+  %off = wave.index_expr <"wi + 16*u"> ["wi", "u"](%wi, %u)
+      : (!wave.simd<i32, 64>, i32) -> !wave.simd<index, 64>
+  %src = wave.ptr_add %buf, %off
+      : !wave.ptr<#waveamd.buffer, i32>, !wave.simd<index, 64>
+      -> !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>
+  %lds = wave.lds_base : !wave.ptr<#wave.shared, i32>
+  %tok0 = wave.token : !wave.mem.token
+  // expected-error @below {{buffer memory op offset must fit proven unsigned 32-bit}}
+  %tok = waveamd.dma_load_lds %src -> %lds after %tok0 {bytes = 16 : i64}
+      : (!wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>,
+         !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
+  return
+}
+}
+
+// -----
+
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 func.func @buffer_loop_dynamic_carry_needs_bound(%out: !wave.ptr<#wave.global, i32>, %delta: i32) attributes {wave.kernel} {
   %c0 = arith.constant 0 : i32
