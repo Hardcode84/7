@@ -62,13 +62,28 @@ def WaveCombinePointerOffsets : Pass<"wave-combine-pointer-offsets"> {
   let description = [{
     Folds chained `wave.ptr_add` offsets into one `wave.index_expr` feeding a
     single `wave.ptr_add`, and composes `wave.index_expr` values used as
-    bindings by other `wave.index_expr` ops. This preserves current
-    `wave.ptr_add` element-offset semantics; byte address planning is derived
-    later by machine selection.
+    bindings by other `wave.index_expr` ops.
   }];
   let dependentDialects = [
     "func::FuncDialect",
     "wave::WaveDialect"
+  ];
+}
+
+def WaveNormalizePointerOffsets : Pass<"wave-normalize-pointer-offsets"> {
+  let summary = "Normalize Wave typed pointers to byte-addressed pointers";
+  let description = [{
+    Converts typed `!wave.ptr<#space, T>` values to opaque byte-addressed
+    `!wave.ptr<#space>` values and scales `wave.ptr_add` offsets by the
+    original element size. Downstream pointer-offset planning then sees byte
+    offsets only.
+  }];
+  let dependentDialects = [
+    "arith::ArithDialect",
+    "func::FuncDialect",
+    "scf::SCFDialect",
+    "wave::WaveDialect",
+    "waveamd::WaveAMDDialect"
   ];
 }
 

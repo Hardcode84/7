@@ -85,10 +85,13 @@ func.func @shared_binding_name(%out: !wave.ptr<#wave.global, i32>,
 
 // -----
 
-// CHECK-LABEL: func.func @name_collision_skips
-func.func @name_collision_skips(%out: !wave.ptr<#wave.global, i32>,
-                                %a: !wave.simd<i32, 32>,
-                                %b: !wave.simd<i32, 32>) attributes {wave.kernel} {
+// CHECK-LABEL: func.func @name_collision_renames
+// CHECK-SAME: ([[OUT:%.*]]: !wave.ptr<#wave.global, i32>,
+// CHECK-SAME: [[A:%.*]]: !wave.simd<i32, 32>,
+// CHECK-SAME: [[B:%.*]]: !wave.simd<i32, 32>)
+func.func @name_collision_renames(%out: !wave.ptr<#wave.global, i32>,
+                                  %a: !wave.simd<i32, 32>,
+                                  %b: !wave.simd<i32, 32>) attributes {wave.kernel} {
   %off0 = wave.index_expr <"x"> ["x"](%a)
       : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
   %base = wave.ptr_add %out, %off0
@@ -96,7 +99,8 @@ func.func @name_collision_skips(%out: !wave.ptr<#wave.global, i32>,
       -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
   %off1 = wave.index_expr <"x"> ["x"](%b)
       : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
-  // CHECK: wave.ptr_add %{{.*}}, %{{.*}} : !wave.simd<!wave.ptr<#wave.global, i32>, 32>, !wave.simd<index, 32>
+  // CHECK: [[OFF:%.*]] = wave.index_expr <"x + x0"> ["x", "x0"]([[A]], [[B]]) : (!wave.simd<i32, 32>, !wave.simd<i32, 32>) -> !wave.simd<index, 32>
+  // CHECK: wave.ptr_add [[OUT]], [[OFF]]
   %ptrs = wave.ptr_add %base, %off1
       : !wave.simd<!wave.ptr<#wave.global, i32>, 32>, !wave.simd<index, 32>
       -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>

@@ -18,7 +18,9 @@ module attributes {transform.with_named_sequence} {
         : (!transform.any_op) -> !transform.any_op
     %rmeta = transform.apply_registered_pass "canonicalize" to %rm
         : (!transform.any_op) -> !transform.any_op
-    %roff0 = transform.apply_registered_pass "wave-combine-pointer-offsets" to %rmeta
+    %rnorm = transform.apply_registered_pass "wave-normalize-pointer-offsets" to %rmeta
+        : (!transform.any_op) -> !transform.any_op
+    %roff0 = transform.apply_registered_pass "wave-combine-pointer-offsets" to %rnorm
         : (!transform.any_op) -> !transform.any_op
     %rsimp0 = transform.apply_registered_pass "wave-simplify-index-exprs" to %roff0
         : (!transform.any_op) -> !transform.any_op
@@ -34,7 +36,9 @@ module attributes {transform.with_named_sequence} {
         : (!transform.any_op) -> !transform.any_op
     %rcse1 = transform.apply_registered_pass "cse" to %rcanon1
         : (!transform.any_op) -> !transform.any_op
-    %roff1 = transform.apply_registered_pass "wave-combine-pointer-offsets" to %rcse1
+    %rnorm1 = transform.apply_registered_pass "wave-normalize-pointer-offsets" to %rcse1
+        : (!transform.any_op) -> !transform.any_op
+    %roff1 = transform.apply_registered_pass "wave-combine-pointer-offsets" to %rnorm1
         : (!transform.any_op) -> !transform.any_op
     %rsimp = transform.apply_registered_pass "wave-simplify-index-exprs" to %roff1
         : (!transform.any_op) -> !transform.any_op

@@ -28,6 +28,7 @@ add_mlir_dialect_library(MLIRWaveTransforms
   WaveExtractLoopStrides.cpp
   WaveFormPackedMath.cpp
   WaveMetaSpecialize.cpp
+  WaveNormalizePointerOffsets.cpp
   WaveSetTargetAttr.cpp
   WaveSimplifyIndexExprs.cpp
 

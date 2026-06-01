@@ -53,25 +53,43 @@ public:
   }
 
 private:
-  LogicalResult append(IndexExprOp op, bool &skip) {
+  LogicalResult append(IndexExprOp op, bool &) {
+    SmallVector<sym::ExprSubstitution> substitutions;
     for (auto [nameAttr, binding] :
          llvm::zip(op.getNames(), op.getBindings())) {
       StringRef name = cast<StringAttr>(nameAttr).getValue();
       llvm::StringMap<Value>::iterator it = bindingByName.find(name);
-      if (it != bindingByName.end() && it->second != binding) {
-        skip = true;
-        return success();
-      }
-    }
-    for (auto [nameAttr, binding] :
-         llvm::zip(op.getNames(), op.getBindings())) {
-      StringRef name = cast<StringAttr>(nameAttr).getValue();
-      if (bindingByName.contains(name))
+      if (it == bindingByName.end()) {
+        bindingByName[name] = binding;
+        bindings.push_back({name.str(), binding});
         continue;
-      bindingByName[name] = binding;
-      bindings.push_back({name.str(), binding});
+      }
+
+      if (it->second == binding)
+        continue;
+
+      std::string fresh = freshName(name);
+      auto [freshIt, inserted] = bindingByName.try_emplace(fresh, binding);
+      (void)inserted;
+      StringRef freshRef = freshIt->getKey();
+      bindings.push_back({freshRef.str(), binding});
+      FailureOr<sym::ExprHandle> target = sym::composeExprSym(store, name);
+      FailureOr<sym::ExprHandle> replacement =
+          sym::composeExprSym(store, freshRef);
+      if (failed(target) || failed(replacement))
+        return failure();
+      substitutions.push_back({*target, *replacement});
     }
-    return appendExpr(op.getExpr().getValue());
+
+    sym::ExprHandle expr = op.getExpr().getValue();
+    if (!substitutions.empty()) {
+      FailureOr<sym::ExprHandle> substituted =
+          sym::substituteExpr(store, expr, substitutions);
+      if (failed(substituted))
+        return failure();
+      expr = *substituted;
+    }
+    return appendExpr(expr);
   }
 
   LogicalResult appendConstant(int64_t value) {
@@ -166,9 +184,9 @@ private:
     return success();
   }
 
-  std::string freshName() {
+  std::string freshName(StringRef stem = "raw") {
     for (;;) {
-      std::string name = llvm::formatv("raw{0}", nextRawSymbol++).str();
+      std::string name = llvm::formatv("{0}{1}", stem, nextRawSymbol++).str();
       if (!bindingByName.contains(name))
         return name;
     }
