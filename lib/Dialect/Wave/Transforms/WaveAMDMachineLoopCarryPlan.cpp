@@ -264,20 +264,10 @@ static TermKind loopCarryKind(TermKind kind) {
 
 static TermKind classifyIndexExprResult(WaveAMDMachineSelector &S,
                                         IndexExprOp op) {
-  PointerOffset offset;
-  for (auto [nameAttr, binding] : llvm::zip(op.getNames(), op.getBindings())) {
-    StringRef key = cast<StringAttr>(nameAttr).getValue();
-    TermKind kind = isLaneVaryingValue(binding.getType()) ? TermKind::Lane
-                                                          : TermKind::Uniform;
-    offset.bindings.push_back({key.str(), binding, kind});
-    if (std::optional<sym::PredHandle> a = S.bindingAssumption(binding, key))
-      offset.assumptions.push_back(*a);
-  }
-  sym::ExprHandle expr = op.getExpr().getValue();
-  FailureOr<sym::ExprHandle> simplified =
-      sym::simplifyExpr(S.symbolStore(), expr, offset.assumptions);
-  offset.expr = succeeded(simplified) ? *simplified : expr;
-  return classifyPointerOffset(S, offset);
+  FailureOr<PointerOffset> offset = makePointerOffset(S, op);
+  if (failed(offset))
+    return TermKind::Lane;
+  return classifyPointerOffset(S, *offset);
 }
 
 static TermKind classifyPointerYield(WaveAMDMachineSelector &S, Value value,

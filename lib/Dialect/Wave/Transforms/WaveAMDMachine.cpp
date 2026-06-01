@@ -2384,32 +2384,62 @@ Value WaveAMDMachineSelector::addUniformBytes(Location loc, Value acc,
 }
 
 LogicalResult WaveAMDMachineSelector::selectIndexExpr(IndexExprOp op) {
-  PointerOffset pointerOffset;
-  for (auto [nameAttr, binding] : llvm::zip(op.getNames(), op.getBindings())) {
-    StringRef key = cast<StringAttr>(nameAttr).getValue();
-    TermKind kind = isLaneVaryingType(binding.getType()) ? TermKind::Lane
-                                                         : TermKind::Uniform;
-    pointerOffset.bindings.push_back({key.str(), binding, kind});
-    if (std::optional<sym::PredHandle> a = bindingAssumption(binding, key))
-      pointerOffset.assumptions.push_back(*a);
-  }
-  sym::ExprHandle exprHandle = op.getExpr().getValue();
-  FailureOr<sym::ExprHandle> simplified =
-      sym::simplifyExpr(symbolStore(), exprHandle, pointerOffset.assumptions);
-  pointerOffset.expr = succeeded(simplified) ? *simplified : exprHandle;
+  FailureOr<PointerOffset> pointerOffset = makePointerOffset(*this, op);
+  if (failed(pointerOffset))
+    return failure();
   bool needsValue =
       llvm::any_of(op.getResult().getUsers(),
                    [](Operation *user) { return !isa<PtrAddOp>(user); });
-  indexOffsets[op.getResult()] = pointerOffset;
+  indexOffsets[op.getResult()] = *pointerOffset;
   if (needsValue) {
     FailureOr<Value> value =
-        materializePointerOffsetValue(*this, op, pointerOffset);
+        materializePointerOffsetValue(*this, op, *pointerOffset);
     if (failed(value))
       return failure();
     values[op.getResult()] = *value;
   }
   eraseIfTopLevel(op);
   return success();
+}
+
+static TermKind convertBindingKind(SymbolicOffsetBindingKind kind) {
+  if (kind == SymbolicOffsetBindingKind::Uniform)
+    return TermKind::Uniform;
+  return TermKind::Lane;
+}
+
+FailureOr<PointerOffset> makePointerOffset(WaveAMDMachineSelector &S,
+                                           const SymbolicOffset &offset) {
+  PointerOffset pointerOffset;
+  pointerOffset.assumptions = offset.assumptions;
+  pointerOffset.expr = offset.expr;
+  for (const SymbolicOffsetBinding &binding : offset.bindings) {
+    StringRef name = sym::ExprView(binding.name).getSymbolName();
+    if (name.empty())
+      return failure();
+    pointerOffset.bindings.push_back(
+        {name.str(), binding.value, convertBindingKind(binding.kind)});
+    if (std::optional<sym::PredHandle> a =
+            S.bindingAssumption(binding.value, name))
+      pointerOffset.assumptions.push_back(*a);
+  }
+  if (!pointerOffset.expr)
+    return pointerOffset;
+  FailureOr<sym::ExprHandle> simplified = sym::simplifyExpr(
+      S.symbolStore(), pointerOffset.expr, pointerOffset.assumptions);
+  pointerOffset.expr = succeeded(simplified) ? *simplified : pointerOffset.expr;
+  return pointerOffset;
+}
+
+FailureOr<PointerOffset> makePointerOffset(WaveAMDMachineSelector &S,
+                                           IndexExprOp op) {
+  FailureOr<SymbolicOffset> offset = getIndexExprSymbolicOffset(op);
+  if (failed(offset))
+    return failure();
+  FailureOr<PointerOffset> pointerOffset = makePointerOffset(S, *offset);
+  if (failed(pointerOffset))
+    return op.emitError("failed to build symbolic pointer offset");
+  return pointerOffset;
 }
 
 static bool samePointerBinding(const PointerOffsetBinding &lhs,

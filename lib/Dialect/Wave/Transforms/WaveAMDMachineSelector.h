@@ -139,6 +139,12 @@ FailureOr<Value> materializeIndexExprNode(WaveAMDMachineSelector &S,
                                           sym::ExprHandle expr, Operation *user,
                                           const llvm::StringMap<Value> &subs);
 
+FailureOr<PointerOffset> makePointerOffset(WaveAMDMachineSelector &S,
+                                           const SymbolicOffset &offset);
+
+FailureOr<PointerOffset> makePointerOffset(WaveAMDMachineSelector &S,
+                                           IndexExprOp op);
+
 TermKind classifyTerm(WaveAMDMachineSelector &S, sym::ExprHandle expr,
                       const llvm::StringMap<TermKind> &symKinds);
 

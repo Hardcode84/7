@@ -20,6 +20,7 @@
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/FormatVariadic.h"
 
+#include <cassert>
 #include <limits>
 #include <string>
 
@@ -318,8 +319,10 @@ static void rewritePtrAddChain(IRRewriter &rewriter, PtrAddOp op,
   SmallVector<std::string> names;
   SmallVector<StringRef> nameRefs;
   SmallVector<Value> bindings;
-  for (MemoryAddressBinding &binding : address.bindings) {
-    names.push_back(binding.name);
+  for (const SymbolicOffsetBinding &binding : address.offset.bindings) {
+    StringRef name = sym::ExprView(binding.name).getSymbolName();
+    assert(!name.empty() && "symbolic offset binding must have a name");
+    names.push_back(name.str());
     bindings.push_back(binding.value);
   }
   for (StringRef name : names)
@@ -328,10 +331,9 @@ static void rewritePtrAddChain(IRRewriter &rewriter, PtrAddOp op,
   MLIRContext *ctx = op->getContext();
   rewriter.setInsertionPoint(op);
   Type indexType = getIndexExprResultType(ctx, bindings);
-  IndexExprOp index =
-      IndexExprOp::create(rewriter, op.getLoc(), indexType,
-                          ExprAttr::get(ctx, address.elementOffset),
-                          rewriter.getStrArrayAttr(nameRefs), bindings);
+  IndexExprOp index = IndexExprOp::create(
+      rewriter, op.getLoc(), indexType, ExprAttr::get(ctx, address.offset.expr),
+      rewriter.getStrArrayAttr(nameRefs), bindings);
   PtrAddOp replacement = PtrAddOp::create(rewriter, op.getLoc(), op.getType(),
                                           address.base, index.getResult());
   rewriter.replaceOp(op, replacement.getResult());

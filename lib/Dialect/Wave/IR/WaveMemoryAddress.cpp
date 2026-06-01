@@ -9,11 +9,11 @@
 #include "mlir/Dialect/Wave/IR/Wave.h"
 
 #include "mlir/Dialect/Utils/StaticValueUtils.h"
-#include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/StringMap.h"
 #include "llvm/Support/FormatVariadic.h"
 
+#include <algorithm>
 #include <optional>
 #include <string>
 
@@ -49,39 +49,49 @@ public:
     FailureOr<sym::ExprHandle> simplified = sym::simplifyExpr(store, expr);
     if (failed(simplified))
       return failure();
-    return MemoryAddress{std::move(bindings), base, *simplified};
+    offset.expr = *simplified;
+    return MemoryAddress{std::move(offset), base};
   }
 
 private:
   LogicalResult append(IndexExprOp op, bool &) {
+    FailureOr<SymbolicOffset> symbolic = getIndexExprSymbolicOffset(op);
+    if (failed(symbolic))
+      return failure();
+    return appendSymbolicOffset(*symbolic);
+  }
+
+  LogicalResult appendSymbolicOffset(const SymbolicOffset &symbolic) {
     SmallVector<sym::ExprSubstitution> substitutions;
-    for (auto [nameAttr, binding] :
-         llvm::zip(op.getNames(), op.getBindings())) {
-      StringRef name = cast<StringAttr>(nameAttr).getValue();
+    for (const SymbolicOffsetBinding &binding : symbolic.bindings) {
+      StringRef name = symbolName(binding);
       llvm::StringMap<Value>::iterator it = bindingByName.find(name);
       if (it == bindingByName.end()) {
-        bindingByName[name] = binding;
-        bindings.push_back({name.str(), binding});
+        bindingByName[name] = binding.value;
+        offset.bindings.push_back(binding);
+        offset.laneWidth = std::max(offset.laneWidth, symbolic.laneWidth);
         continue;
       }
 
-      if (it->second == binding)
+      if (it->second == binding.value)
         continue;
 
       std::string fresh = freshName(name);
-      auto [freshIt, inserted] = bindingByName.try_emplace(fresh, binding);
+      auto [freshIt, inserted] =
+          bindingByName.try_emplace(fresh, binding.value);
       (void)inserted;
       StringRef freshRef = freshIt->getKey();
-      bindings.push_back({freshRef.str(), binding});
-      FailureOr<sym::ExprHandle> target = sym::composeExprSym(store, name);
       FailureOr<sym::ExprHandle> replacement =
           sym::composeExprSym(store, freshRef);
-      if (failed(target) || failed(replacement))
+      if (failed(replacement))
         return failure();
-      substitutions.push_back({*target, *replacement});
+      offset.bindings.push_back({*replacement, binding.value, binding.kind});
+      offset.laneWidth = std::max(offset.laneWidth, symbolic.laneWidth);
+      substitutions.push_back({binding.name, *replacement});
     }
+    llvm::append_range(offset.assumptions, symbolic.assumptions);
 
-    sym::ExprHandle expr = op.getExpr().getValue();
+    sym::ExprHandle expr = symbolic.expr;
     if (!substitutions.empty()) {
       FailureOr<sym::ExprHandle> substituted =
           sym::substituteExpr(store, expr, substitutions);
@@ -170,8 +180,19 @@ private:
     FailureOr<sym::ExprHandle> sym = sym::composeExprSym(store, name);
     if (failed(sym))
       return failure();
+    SymbolicOffsetBindingKind kind = SymbolicOffsetBindingKind::Uniform;
+    if (auto simdType = dyn_cast<SimdType>(value.getType())) {
+      kind = SymbolicOffsetBindingKind::Lane;
+      offset.laneWidth =
+          std::max(offset.laneWidth, unsigned(simdType.getWidth()));
+    } else if (auto intType = dyn_cast<IntegerType>(value.getType())) {
+      if (!intType.isSignless())
+        return failure();
+    } else if (!value.getType().isIndex()) {
+      return failure();
+    }
     bindingByName[name] = value;
-    bindings.push_back({name, value});
+    offset.bindings.push_back({*sym, value, kind});
     return *sym;
   }
 
@@ -196,7 +217,11 @@ private:
     }
   }
 
-  SmallVector<MemoryAddressBinding> bindings;
+  static StringRef symbolName(const SymbolicOffsetBinding &binding) {
+    return sym::ExprView(binding.name).getSymbolName();
+  }
+
+  SymbolicOffset offset;
   llvm::StringMap<Value> bindingByName;
   sym::Store &store;
   sym::ExprHandle expr;
@@ -214,38 +239,31 @@ static FailureOr<sym::ExprHandle>
 substituteDeltaBindings(WaveDialect &dialect, const MemoryAddress &lhs,
                         const MemoryAddress &rhs) {
   sym::Store &store = dialect.getSymbolStore();
-  llvm::StringMap<Value> lhsByName;
-  DenseMap<Value, StringRef> lhsNameByValue;
-  for (const MemoryAddressBinding &binding : lhs.bindings) {
-    lhsByName[binding.name] = binding.value;
-    lhsNameByValue.try_emplace(binding.value, binding.name);
-  }
 
   SmallVector<sym::ExprSubstitution> substitutions;
-  for (const MemoryAddressBinding &binding : rhs.bindings) {
-    llvm::StringMap<Value>::iterator nameIt = lhsByName.find(binding.name);
-    if (nameIt != lhsByName.end()) {
-      if (nameIt->second != binding.value)
+  for (const SymbolicOffsetBinding &binding : rhs.offset.bindings) {
+    auto lhsByName = llvm::find_if(lhs.offset.bindings,
+                                   [&](const SymbolicOffsetBinding &candidate) {
+                                     return candidate.name == binding.name;
+                                   });
+    if (lhsByName != lhs.offset.bindings.end()) {
+      if (lhsByName->value != binding.value)
         return failure();
       continue;
     }
 
-    DenseMap<Value, StringRef>::iterator valueIt =
-        lhsNameByValue.find(binding.value);
-    if (valueIt == lhsNameByValue.end())
+    auto lhsByValue = llvm::find_if(
+        lhs.offset.bindings, [&](const SymbolicOffsetBinding &candidate) {
+          return candidate.value == binding.value;
+        });
+    if (lhsByValue == lhs.offset.bindings.end())
       continue;
-    FailureOr<sym::ExprHandle> target =
-        sym::composeExprSym(store, binding.name);
-    FailureOr<sym::ExprHandle> replacement =
-        sym::composeExprSym(store, valueIt->second);
-    if (failed(target) || failed(replacement))
-      return failure();
-    substitutions.push_back({*target, *replacement});
+    substitutions.push_back({binding.name, lhsByValue->name});
   }
 
   if (substitutions.empty())
-    return rhs.elementOffset;
-  return sym::substituteExpr(store, rhs.elementOffset, substitutions);
+    return rhs.offset.expr;
+  return sym::substituteExpr(store, rhs.offset.expr, substitutions);
 }
 
 } // namespace
@@ -289,7 +307,7 @@ FailureOr<std::optional<sym::ExprHandle>> mlir::wave::computeMemoryAddressDelta(
 
   sym::Store &store = dialect.getSymbolStore();
   FailureOr<sym::ExprHandle> diff = sym::composeExprBinary(
-      store, lhs.elementOffset, sym::ExprBinaryOp::Sub, *rhsExpr);
+      store, lhs.offset.expr, sym::ExprBinaryOp::Sub, *rhsExpr);
   if (failed(diff))
     return failure();
   FailureOr<sym::ExprHandle> simplified = sym::simplifyExpr(store, *diff);

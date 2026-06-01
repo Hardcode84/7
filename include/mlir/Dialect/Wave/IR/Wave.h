@@ -22,7 +22,6 @@
 
 #include <memory>
 #include <optional>
-#include <string>
 
 #include "mlir/Dialect/Wave/IR/WaveOpsDialect.h.inc"
 #include "mlir/Dialect/Wave/IR/WaveOpsEnums.h.inc"
@@ -34,6 +33,8 @@
 #include "mlir/Dialect/Wave/IR/WaveOpsTypes.h.inc"
 
 namespace mlir::wave {
+class IndexExprOp;
+
 struct MemoryPayloadShape {
   unsigned elementBits;
   unsigned payloadBits;
@@ -58,15 +59,9 @@ struct SymbolicOffset {
   bool isUniform() const { return laneWidth == 0; }
 };
 
-struct MemoryAddressBinding {
-  std::string name;
-  Value value;
-};
-
 struct MemoryAddress {
-  SmallVector<MemoryAddressBinding> bindings;
+  SymbolicOffset offset;
   Value base;
-  sym::ExprHandle elementOffset;
 };
 
 FailureOr<SymbolicOffsetBindingKind> classifySymbolicOffsetBinding(
@@ -74,6 +69,7 @@ FailureOr<SymbolicOffsetBindingKind> classifySymbolicOffsetBinding(
 unsigned getSymbolicOffsetLaneWidth(ValueRange bindings);
 Type getSymbolicOffsetResultType(MLIRContext *ctx, unsigned laneWidth);
 Type getIndexExprResultType(MLIRContext *ctx, ValueRange bindings);
+FailureOr<SymbolicOffset> getIndexExprSymbolicOffset(IndexExprOp op);
 FailureOr<MemoryPayloadShape> getMemoryPayloadShape(
     Type elementType,
     function_ref<InFlightDiagnostic(const Twine &)> emitError);

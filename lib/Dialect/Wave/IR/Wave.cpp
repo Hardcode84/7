@@ -1138,6 +1138,32 @@ Type mlir::wave::getIndexExprResultType(MLIRContext *ctx, ValueRange bindings) {
   return getSymbolicOffsetResultType(ctx, getSymbolicOffsetLaneWidth(bindings));
 }
 
+FailureOr<SymbolicOffset>
+mlir::wave::getIndexExprSymbolicOffset(IndexExprOp op) {
+  WaveDialect *dialect = op->getContext()->getLoadedDialect<WaveDialect>();
+  if (!dialect)
+    return op.emitError("Wave dialect is not loaded");
+
+  sym::Store &store = dialect->getSymbolStore();
+  SymbolicOffset offset;
+  offset.expr = op.getExpr().getValue();
+  offset.laneWidth = getSymbolicOffsetLaneWidth(op.getBindings());
+  for (auto [nameAttr, binding] : llvm::zip(op.getNames(), op.getBindings())) {
+    StringRef name = cast<StringAttr>(nameAttr).getValue();
+    FailureOr<sym::ExprHandle> sym = sym::composeExprSym(store, name);
+    if (failed(sym))
+      return op.emitError("failed to compose binding symbol '") << name << "'";
+    FailureOr<SymbolicOffsetBindingKind> kind =
+        classifySymbolicOffsetBinding(binding.getType(), [&](const Twine &msg) {
+          return op.emitOpError(msg);
+        });
+    if (failed(kind))
+      return failure();
+    offset.bindings.push_back({*sym, binding, *kind});
+  }
+  return offset;
+}
+
 static LogicalResult verifyIndexExprResultType(
     Type resultType, int64_t laneWidth,
     function_ref<InFlightDiagnostic(const Twine &)> emitError) {
