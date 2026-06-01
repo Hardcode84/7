@@ -18,5 +18,5 @@ print(module)
 # CHECK-SAME: wave.lds_size = 16384
 # CHECK: wave.read_first
 # CHECK-COUNT-4: waveamd.dma_load_lds
-# CHECK: wave.wait
+# CHECK: wave.barrier
 # CHECK: waveamd.mma "mfma.f32.16x16x32.f16"

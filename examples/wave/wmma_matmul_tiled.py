@@ -51,6 +51,17 @@ from common import (
     run_module,
 )
 
+_GFX950_SW_PIPELINE = {
+    "bm": 2,
+    "bn": 2,
+    "wave_m_tiles": 4,
+    "wave_n_tiles": 4,
+    "wave_k_tiles": 2,
+    "use_buffer": True,
+    "use_dma_lds": True,
+    "matrix_intrinsic": "mfma_gfx950",
+}
+
 
 def _add_shape_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
@@ -112,6 +123,12 @@ def _add_tile_args(parser: argparse.ArgumentParser) -> None:
 
 def _add_codegen_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
+        "--kernel-profile",
+        choices=("manual", "gfx950-sw-pipeline"),
+        default="manual",
+        help="preload a high-level kernel shape; manual leaves tile args unchanged",
+    )
+    parser.add_argument(
         "--use-buffer",
         action="store_true",
         help="wrap the A and B kernel inputs in waveamd.make_buffer so "
@@ -154,6 +171,9 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     _add_codegen_args(parser)
     _add_runner_args(parser)
     args = parser.parse_args(argv)
+    if args.kernel_profile == "gfx950-sw-pipeline":
+        for name, value in _GFX950_SW_PIPELINE.items():
+            setattr(args, name, value)
     if args.target_waves < 0:
         parser.error("--target-waves must be non-negative")
     return args

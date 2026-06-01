@@ -662,11 +662,9 @@ def _dma_issue(
     dma_tokens: list[dsl.Value] = []
     for ptr, lds_ptr in zip(a_ptrs, staging.a_dma_lds_ptrs, strict=True):
         tok = bld.dma_load_lds(ptr, lds_ptr, after=dep, bytes=16)
-        bld.wait(tok)
         dma_tokens.append(tok)
     for ptr, lds_ptr in zip(b_ptrs, staging.b_dma_lds_ptrs, strict=True):
         tok = bld.dma_load_lds(ptr, lds_ptr, after=dep, bytes=16)
-        bld.wait(tok)
         dma_tokens.append(tok)
     return dma_tokens
 
@@ -747,8 +745,6 @@ class _LoopState:
     accs: tuple[dsl.Value, ...]
     afs: tuple[dsl.Value, ...]
     bfs: tuple[dsl.Value, ...]
-    aps: tuple[dsl.Value, ...]
-    bps: tuple[dsl.Value, ...]
 
 
 def _kernel_types(cfg: _MatmulConfig) -> _KernelTypes:
@@ -799,14 +795,33 @@ def _advance_ptrs(
     return tuple(bld.ptr_add(ptr, offset) for ptr in ptrs)
 
 
+def _load_ptrs_for_step(
+    bld: dsl.FunctionBuilder,
+    cfg: _MatmulConfig,
+    ptrs: _TilePtrs,
+    loop_iv: dsl.Value,
+    virtual_k_stride: dsl.Value,
+) -> tuple[tuple[dsl.Value, ...], tuple[dsl.Value, ...]]:
+    a0 = ptrs.a_dma0 if cfg.use_dma_lds else ptrs.a0
+    b0 = ptrs.b_dma0 if cfg.use_dma_lds else ptrs.b0
+    max_step = max(cfg.virtual_k_steps - 1, 1)
+    step = bld.addi(loop_iv, bld.constant(dsl.i32(), 1))
+    step = bld.assume_range(step, 1, max_step)
+    offset = bld.muli(step, virtual_k_stride)
+    offset = bld.assume_range(
+        offset,
+        cfg.mma.k_tile * cfg.wave_k_tiles,
+        cfg.mma.k_tile * cfg.wave_k_tiles * max_step,
+    )
+    return _advance_ptrs(bld, a0, offset), _advance_ptrs(bld, b0, offset)
+
+
 def _initial_loop_args(
     bld: dsl.FunctionBuilder,
     cfg: _MatmulConfig,
     types: _KernelTypes,
     staging: _LdsStaging,
     ptrs: _TilePtrs,
-    a_step_offset: dsl.Value,
-    b_step_offset: dsl.Value,
 ) -> tuple[dsl.Value, ...]:
     init_acc = bld.fragment_fill(bld.constant(dsl.i32(), 0), types.acc)
     a0 = ptrs.a_dma0 if cfg.use_dma_lds else ptrs.a0
@@ -824,24 +839,15 @@ def _initial_loop_args(
         *init_accs,
         a_pt,
         b_pt,
-        *_advance_ptrs(bld, a0, a_step_offset),
-        *_advance_ptrs(bld, b0, b_step_offset),
     )
 
 
 def _split_loop_state(values: tuple[dsl.Value, ...], cfg: _MatmulConfig) -> _LoopState:
-    """Iter-args layout: `tiles_per_wave` acc scalars, then ONE nested
-    parametric ptuple slot per side (A then B), then variadic ptrs.
-    """
     acc_end = cfg.tiles_per_wave
-    a_ptr_start = acc_end + 2
-    a_ptr_end = a_ptr_start + cfg.wave_k_tiles * cfg.wave_m_tiles
     return _LoopState(
         accs=values[:acc_end],
         afs=(values[acc_end],),
         bfs=(values[acc_end + 1],),
-        aps=values[a_ptr_start:a_ptr_end],
-        bps=values[a_ptr_end:],
     )
 
 
@@ -979,27 +985,16 @@ def _emit_pipelined_step(
     types: _KernelTypes,
     staging: _LdsStaging,
     state: _LoopState,
-    a_step_offset: dsl.Value,
-    b_step_offset: dsl.Value,
+    a_ptrs: tuple[dsl.Value, ...],
+    b_ptrs: tuple[dsl.Value, ...],
 ) -> list[dsl.Value]:
-    # Issue this step's global loads, run the wmma grid on last step's
-    # frags while they are in flight, then drain them through LDS. The
-    # wmma sits between global_load and ds_store, overlapping VMEM
-    # latency with compute. The dma path overlaps via its own waits.
-    # Issue this step's global loads, run the wmma grid on last step's
-    # frags while they are in flight, then drain them through LDS: wmma
-    # sits between global_load and ds_store, overlapping VMEM latency.
-    # dma path overlaps via its own waits.
-    # Issue this step's loads, run the wmma grid on last step's frags
-    # while they are in flight, then drain through LDS: wmma sits between
-    # global_load/dma and ds_store, overlapping VMEM latency. Loads ride
-    # across the grid, so K unroll trades down for the overlap.
+    # Tokens keep this step's VMEM/DMA live across the previous MMA grid.
     if cfg.use_dma_lds:
-        dma_tokens = _dma_issue(bld, state.aps, state.bps, staging)
+        dma_tokens = _dma_issue(bld, a_ptrs, b_ptrs, staging)
         new_accs = _emit_mma_grid(bld, cfg, state.afs, state.bfs, state.accs)
         new_afs, new_bfs = _dma_drain(bld, dma_tokens, types.a, types.b, staging)
     else:
-        a_loads, b_loads = _lds_global_loads(bld, state.aps, state.bps, staging)
+        a_loads, b_loads = _lds_global_loads(bld, a_ptrs, b_ptrs, staging)
         new_accs = _emit_mma_grid(bld, cfg, state.afs, state.bfs, state.accs)
         new_afs, new_bfs = _lds_store_reload(
             bld, a_loads, b_loads, types.a, types.b, staging
@@ -1015,8 +1010,6 @@ def _emit_pipelined_step(
         *new_accs,
         a_pt,
         b_pt,
-        *_advance_ptrs(bld, state.aps, a_step_offset),
-        *_advance_ptrs(bld, state.bps, b_step_offset),
     ]
 
 
@@ -1053,9 +1046,7 @@ def _emit_kernel(bld: dsl.FunctionBuilder, cfg: _MatmulConfig) -> None:
     staging = _emit_lds_staging(bld, cfg, coords)
     virtual_k_stride = bld.constant(dsl.i32(), cfg.mma.k_tile * cfg.wave_k_tiles)
     ptrs = _initial_tile_ptrs(bld, cfg, coords)
-    init_args = _initial_loop_args(
-        bld, cfg, types, staging, ptrs, virtual_k_stride, virtual_k_stride
-    )
+    init_args = _initial_loop_args(bld, cfg, types, staging, ptrs)
 
     # The fourth kernel arg is the pipelined-loop trip count
     # (`K / (16 * wave_k_tiles) - 1`, precomputed on host).
@@ -1070,6 +1061,10 @@ def _emit_kernel(bld: dsl.FunctionBuilder, cfg: _MatmulConfig) -> None:
         init_args=init_args,
     ) as forop:
         state = _split_loop_state(tuple(forop.inner_iter_args), cfg)
+        loop_iv = bld.assume_range(
+            forop.induction_variable, 0, max(cfg.virtual_k_steps - 2, 0)
+        )
+        a_ptrs, b_ptrs = _load_ptrs_for_step(bld, cfg, ptrs, loop_iv, virtual_k_stride)
         bld.yield_(
             _emit_pipelined_step(
                 bld,
@@ -1077,8 +1072,8 @@ def _emit_kernel(bld: dsl.FunctionBuilder, cfg: _MatmulConfig) -> None:
                 types,
                 staging,
                 state,
-                virtual_k_stride,
-                virtual_k_stride,
+                a_ptrs,
+                b_ptrs,
             )
         )
 
