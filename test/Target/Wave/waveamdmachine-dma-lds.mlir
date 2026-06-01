@@ -13,18 +13,18 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 // ASM-LABEL: global_dma_lds:
 // ASM: s_mov_b32 m0,
 // ASM: global_load_lds_dword
-func.func @global_dma_lds(%in: !wave.ptr<i32, #wave.global>)
+func.func @global_dma_lds(%in: !wave.ptr<#wave.global, i32>)
     attributes {wave.kernel, wave.lds_size = 128 : i64} {
   %wi_raw = wave.workitem_id 0 : !wave.simd<i32, 64>
   %wi = wave.assume_range %wi_raw, [0, 63] : !wave.simd<i32, 64>
   %src = wave.ptr_add %in, %wi
-      : !wave.ptr<i32, #wave.global>, !wave.simd<i32, 64>
-      -> !wave.simd<!wave.ptr<i32, #wave.global>, 64>
-  %lds = wave.lds_base : !wave.ptr<i32, #wave.shared>
+      : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 64>
+      -> !wave.simd<!wave.ptr<#wave.global, i32>, 64>
+  %lds = wave.lds_base : !wave.ptr<#wave.shared, i32>
   %tok0 = wave.token : !wave.mem.token
   %tok = waveamd.dma_load_lds %src -> %lds after %tok0 {bytes = 4 : i64}
-      : (!wave.simd<!wave.ptr<i32, #wave.global>, 64>,
-         !wave.ptr<i32, #wave.shared>, !wave.mem.token) -> !wave.mem.token
+      : (!wave.simd<!wave.ptr<#wave.global, i32>, 64>,
+         !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
   return
 }
 
@@ -36,18 +36,18 @@ func.func @global_dma_lds(%in: !wave.ptr<i32, #wave.global>)
 // ASM-LABEL: global_dma_lds_b128:
 // ASM: s_mov_b32 m0,
 // ASM: global_load_lds_dwordx4
-func.func @global_dma_lds_b128(%in: !wave.ptr<i32, #wave.global>)
+func.func @global_dma_lds_b128(%in: !wave.ptr<#wave.global, i32>)
     attributes {wave.kernel, wave.lds_size = 512 : i64} {
   %wi_raw = wave.workitem_id 0 : !wave.simd<i32, 64>
   %wi = wave.assume_range %wi_raw, [0, 63] : !wave.simd<i32, 64>
   %src = wave.ptr_add %in, %wi
-      : !wave.ptr<i32, #wave.global>, !wave.simd<i32, 64>
-      -> !wave.simd<!wave.ptr<i32, #wave.global>, 64>
-  %lds = wave.lds_base : !wave.ptr<i32, #wave.shared>
+      : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 64>
+      -> !wave.simd<!wave.ptr<#wave.global, i32>, 64>
+  %lds = wave.lds_base : !wave.ptr<#wave.shared, i32>
   %tok0 = wave.token : !wave.mem.token
   %tok = waveamd.dma_load_lds %src -> %lds after %tok0 {bytes = 16 : i64}
-      : (!wave.simd<!wave.ptr<i32, #wave.global>, 64>,
-         !wave.ptr<i32, #wave.shared>, !wave.mem.token) -> !wave.mem.token
+      : (!wave.simd<!wave.ptr<#wave.global, i32>, 64>,
+         !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
   return
 }
 
@@ -59,23 +59,23 @@ func.func @global_dma_lds_b128(%in: !wave.ptr<i32, #wave.global>)
 // ASM-LABEL: global_dma_lds_uniform_mul_dest:
 // ASM: s_mov_b32 m0,
 // ASM: global_load_lds_dwordx4
-func.func @global_dma_lds_uniform_mul_dest(%in: !wave.ptr<i32, #wave.global>)
+func.func @global_dma_lds_uniform_mul_dest(%in: !wave.ptr<#wave.global, i32>)
     attributes {wave.kernel, wave.lds_size = 1024 : i64} {
   %wi_raw = wave.workitem_id 0 : !wave.simd<i32, 64>
   %wi = wave.assume_range %wi_raw, [0, 63] : !wave.simd<i32, 64>
   %src = wave.ptr_add %in, %wi
-      : !wave.ptr<i32, #wave.global>, !wave.simd<i32, 64>
-      -> !wave.simd<!wave.ptr<i32, #wave.global>, 64>
-  %lds = wave.lds_base : !wave.ptr<i32, #wave.shared>
+      : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 64>
+      -> !wave.simd<!wave.ptr<#wave.global, i32>, 64>
+  %lds = wave.lds_base : !wave.ptr<#wave.shared, i32>
   %first = wave.read_first %wi : !wave.simd<i32, 64> -> i32
   %off = wave.index_expr <"512*floor(1/64*wi_first)"> ["wi_first"](%first)
       : (i32) -> index
   %dst = wave.ptr_add %lds, %off
-      : !wave.ptr<i32, #wave.shared>, index -> !wave.ptr<i32, #wave.shared>
+      : !wave.ptr<#wave.shared, i32>, index -> !wave.ptr<#wave.shared, i32>
   %tok0 = wave.token : !wave.mem.token
   %tok = waveamd.dma_load_lds %src -> %dst after %tok0 {bytes = 16 : i64}
-      : (!wave.simd<!wave.ptr<i32, #wave.global>, 64>,
-         !wave.ptr<i32, #wave.shared>, !wave.mem.token) -> !wave.mem.token
+      : (!wave.simd<!wave.ptr<#wave.global, i32>, 64>,
+         !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
   return
 }
 
@@ -89,23 +89,23 @@ func.func @global_dma_lds_uniform_mul_dest(%in: !wave.ptr<i32, #wave.global>)
 // ASM: s_add_i32 [[M0SRC:s[0-9]+]],
 // ASM-NEXT: s_mov_b32 m0, [[M0SRC]]
 // ASM: global_load_lds_dwordx4
-func.func @global_dma_lds_uniform_dest_add(%in: !wave.ptr<i32, #wave.global>)
+func.func @global_dma_lds_uniform_dest_add(%in: !wave.ptr<#wave.global, i32>)
     attributes {wave.kernel, wave.lds_size = 2048 : i64} {
   %wi_raw = wave.workitem_id 0 : !wave.simd<i32, 64>
   %wi = wave.assume_range %wi_raw, [0, 63] : !wave.simd<i32, 64>
   %src = wave.ptr_add %in, %wi
-      : !wave.ptr<i32, #wave.global>, !wave.simd<i32, 64>
-      -> !wave.simd<!wave.ptr<i32, #wave.global>, 64>
-  %lds = wave.lds_base : !wave.ptr<i32, #wave.shared>
+      : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 64>
+      -> !wave.simd<!wave.ptr<#wave.global, i32>, 64>
+  %lds = wave.lds_base : !wave.ptr<#wave.shared, i32>
   %first = wave.read_first %wi : !wave.simd<i32, 64> -> i32
   %off = wave.index_expr <"256 + 512*floor(1/64*wi_first)"> ["wi_first"](%first)
       : (i32) -> index
   %dst = wave.ptr_add %lds, %off
-      : !wave.ptr<i32, #wave.shared>, index -> !wave.ptr<i32, #wave.shared>
+      : !wave.ptr<#wave.shared, i32>, index -> !wave.ptr<#wave.shared, i32>
   %tok0 = wave.token : !wave.mem.token
   %tok = waveamd.dma_load_lds %src -> %dst after %tok0 {bytes = 16 : i64}
-      : (!wave.simd<!wave.ptr<i32, #wave.global>, 64>,
-         !wave.ptr<i32, #wave.shared>, !wave.mem.token) -> !wave.mem.token
+      : (!wave.simd<!wave.ptr<#wave.global, i32>, 64>,
+         !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
   return
 }
 
@@ -117,20 +117,20 @@ func.func @global_dma_lds_uniform_dest_add(%in: !wave.ptr<i32, #wave.global>)
 // ASM: s_mov_b32 m0,
 // ASM: global_load_lds_dwordx4
 // ASM-NOT: offset:
-func.func @global_dma_lds_source_const_offset(%in: !wave.ptr<i32, #wave.global>)
+func.func @global_dma_lds_source_const_offset(%in: !wave.ptr<#wave.global, i32>)
     attributes {wave.kernel, wave.lds_size = 512 : i64} {
   %wi_raw = wave.workitem_id 0 : !wave.simd<i32, 64>
   %wi = wave.assume_range %wi_raw, [0, 63] : !wave.simd<i32, 64>
   %src_off = wave.index_expr <"64 + wi"> ["wi"](%wi)
       : (!wave.simd<i32, 64>) -> !wave.simd<index, 64>
   %src = wave.ptr_add %in, %src_off
-      : !wave.ptr<i32, #wave.global>, !wave.simd<index, 64>
-      -> !wave.simd<!wave.ptr<i32, #wave.global>, 64>
-  %lds = wave.lds_base : !wave.ptr<i32, #wave.shared>
+      : !wave.ptr<#wave.global, i32>, !wave.simd<index, 64>
+      -> !wave.simd<!wave.ptr<#wave.global, i32>, 64>
+  %lds = wave.lds_base : !wave.ptr<#wave.shared, i32>
   %tok0 = wave.token : !wave.mem.token
   %tok = waveamd.dma_load_lds %src -> %lds after %tok0 {bytes = 16 : i64}
-      : (!wave.simd<!wave.ptr<i32, #wave.global>, 64>,
-         !wave.ptr<i32, #wave.shared>, !wave.mem.token) -> !wave.mem.token
+      : (!wave.simd<!wave.ptr<#wave.global, i32>, 64>,
+         !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
   return
 }
 
@@ -142,21 +142,21 @@ func.func @global_dma_lds_source_const_offset(%in: !wave.ptr<i32, #wave.global>)
 // ASM-LABEL: buffer_dma_lds:
 // ASM: s_mov_b32 m0,
 // ASM: buffer_load_dword {{.*}} lds
-func.func @buffer_dma_lds(%in: !wave.ptr<i32, #wave.global>)
+func.func @buffer_dma_lds(%in: !wave.ptr<#wave.global, i32>)
     attributes {wave.kernel, wave.lds_size = 128 : i64} {
   %range = arith.constant 128 : i32
   %buffer = waveamd.make_buffer %in, %range
-      : !wave.ptr<i32, #wave.global>, i32 -> !wave.ptr<i32, #waveamd.buffer>
+      : !wave.ptr<#wave.global, i32>, i32 -> !wave.ptr<#waveamd.buffer, i32>
   %wi_raw = wave.workitem_id 0 : !wave.simd<i32, 64>
   %wi = wave.assume_range %wi_raw, [0, 63] : !wave.simd<i32, 64>
   %src = wave.ptr_add %buffer, %wi
-      : !wave.ptr<i32, #waveamd.buffer>, !wave.simd<i32, 64>
-      -> !wave.simd<!wave.ptr<i32, #waveamd.buffer>, 64>
-  %lds = wave.lds_base : !wave.ptr<i32, #wave.shared>
+      : !wave.ptr<#waveamd.buffer, i32>, !wave.simd<i32, 64>
+      -> !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>
+  %lds = wave.lds_base : !wave.ptr<#wave.shared, i32>
   %tok0 = wave.token : !wave.mem.token
   %tok = waveamd.dma_load_lds %src -> %lds after %tok0 {bytes = 4 : i64}
-      : (!wave.simd<!wave.ptr<i32, #waveamd.buffer>, 64>,
-         !wave.ptr<i32, #wave.shared>, !wave.mem.token) -> !wave.mem.token
+      : (!wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>,
+         !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
   return
 }
 
@@ -168,21 +168,21 @@ func.func @buffer_dma_lds(%in: !wave.ptr<i32, #wave.global>)
 // ASM-LABEL: buffer_dma_lds_b128:
 // ASM: s_mov_b32 m0,
 // ASM: buffer_load_dwordx4 {{.*}} lds
-func.func @buffer_dma_lds_b128(%in: !wave.ptr<i32, #wave.global>)
+func.func @buffer_dma_lds_b128(%in: !wave.ptr<#wave.global, i32>)
     attributes {wave.kernel, wave.lds_size = 512 : i64} {
   %range = arith.constant 128 : i32
   %buffer = waveamd.make_buffer %in, %range
-      : !wave.ptr<i32, #wave.global>, i32 -> !wave.ptr<i32, #waveamd.buffer>
+      : !wave.ptr<#wave.global, i32>, i32 -> !wave.ptr<#waveamd.buffer, i32>
   %wi_raw = wave.workitem_id 0 : !wave.simd<i32, 64>
   %wi = wave.assume_range %wi_raw, [0, 63] : !wave.simd<i32, 64>
   %src = wave.ptr_add %buffer, %wi
-      : !wave.ptr<i32, #waveamd.buffer>, !wave.simd<i32, 64>
-      -> !wave.simd<!wave.ptr<i32, #waveamd.buffer>, 64>
-  %lds = wave.lds_base : !wave.ptr<i32, #wave.shared>
+      : !wave.ptr<#waveamd.buffer, i32>, !wave.simd<i32, 64>
+      -> !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>
+  %lds = wave.lds_base : !wave.ptr<#wave.shared, i32>
   %tok0 = wave.token : !wave.mem.token
   %tok = waveamd.dma_load_lds %src -> %lds after %tok0 {bytes = 16 : i64}
-      : (!wave.simd<!wave.ptr<i32, #waveamd.buffer>, 64>,
-         !wave.ptr<i32, #wave.shared>, !wave.mem.token) -> !wave.mem.token
+      : (!wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>,
+         !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
   return
 }
 

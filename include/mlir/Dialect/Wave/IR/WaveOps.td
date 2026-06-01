@@ -481,8 +481,8 @@ def Wave_IndexExprOp : Wave_Op<"index_expr", [Pure]> {
 def Wave_StoreOp : Wave_Op<"store", [MemoryEffects<[MemWrite]>]> {
   let summary = "store a lane-varying SIMD value to memory";
   let description = [{
-    Stores a value to a `!wave.ptr<T, space>` or lane-varying
-    `!wave.simd<!wave.ptr<T, space>, W>` pointer.
+    Stores a value to a `!wave.ptr<space, T>` or lane-varying
+    `!wave.simd<!wave.ptr<space, T>, W>` pointer.
   }];
 
   let arguments = (ins Wave_Simd:$value,
@@ -498,9 +498,9 @@ def Wave_LoadOp : Wave_Op<"load", [MemoryEffects<[MemRead]>]> {
   let description = [{
     Each active lane loads from the address derived from `$ptr`:
 
-    * With a plain `!wave.ptr<T, space>`, every lane reads the same
+    * With a plain `!wave.ptr<space, T>`, every lane reads the same
       pointer (a wave-uniform broadcast load).
-    * With `!wave.simd<!wave.ptr<T, space>, W>`, each lane reads from its
+    * With `!wave.simd<!wave.ptr<space, T>, W>`, each lane reads from its
       own pointer.
 
     The result shape is driven entirely by the result SIMD type:

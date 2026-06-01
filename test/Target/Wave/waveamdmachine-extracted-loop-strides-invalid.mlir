@@ -2,7 +2,7 @@
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 func.func @unbounded_nested_symbolic_stride(
-    %a: !wave.ptr<f16, #wave.global>, %n: i32, %m: i32)
+    %a: !wave.ptr<#wave.global, f16>, %n: i32, %m: i32)
     attributes {wave.kernel} {
   %c0 = arith.constant 0 : i32
   %c1 = arith.constant 1 : i32
@@ -14,14 +14,14 @@ func.func @unbounded_nested_symbolic_stride(
           ["i", "j", "wi"](%i, %j, %wi)
           : (i32, i32, !wave.simd<i32, 32>) -> !wave.simd<index, 32>
       %p = wave.ptr_add %a, %off
-          : !wave.ptr<f16, #wave.global>, !wave.simd<index, 32>
-          -> !wave.simd<!wave.ptr<f16, #wave.global>, 32>
+          : !wave.ptr<#wave.global, f16>, !wave.simd<index, 32>
+          -> !wave.simd<!wave.ptr<#wave.global, f16>, 32>
       %v, %t = wave.load %p
-          : (!wave.simd<!wave.ptr<f16, #wave.global>, 32>)
+          : (!wave.simd<!wave.ptr<#wave.global, f16>, 32>)
           -> (!wave.simd<vector<8xi32>, 32>, !wave.mem.token)
       wave.store %v -> %p
           : (!wave.simd<vector<8xi32>, 32>,
-             !wave.simd<!wave.ptr<f16, #wave.global>, 32>) -> !wave.mem.token
+             !wave.simd<!wave.ptr<#wave.global, f16>, 32>) -> !wave.mem.token
     }
   }
   return

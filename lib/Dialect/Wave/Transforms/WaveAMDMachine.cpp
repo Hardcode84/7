@@ -1928,10 +1928,17 @@ LogicalResult WaveAMDMachineSelector::selectReadFirst(ReadFirstOp op) {
 }
 
 unsigned WaveAMDMachineSelector::elementSizeBytes(Type type) {
-  if (auto ptr = dyn_cast<PtrType>(type))
+  if (auto ptr = dyn_cast<PtrType>(type)) {
+    if (!ptr.getElementType())
+      return 1;
     type = ptr.getElementType();
-  if (auto simd = dyn_cast<SimdType>(type))
-    type = cast<PtrType>(simd.getElementType()).getElementType();
+  }
+  if (auto simd = dyn_cast<SimdType>(type)) {
+    auto ptr = cast<PtrType>(simd.getElementType());
+    if (!ptr.getElementType())
+      return 1;
+    type = ptr.getElementType();
+  }
   return (bitWidth(type) + 7) / 8;
 }
 
@@ -2867,8 +2874,11 @@ static bool isSupportedFragmentType(waveamd::FragmentType type) {
 }
 
 static bool isSupportedWaveType(Type type) {
-  if (auto ptrType = dyn_cast<PtrType>(type))
+  if (auto ptrType = dyn_cast<PtrType>(type)) {
+    if (!ptrType.getElementType())
+      return true;
     return isSupportedBoundaryType(ptrType.getElementType());
+  }
   if (auto simdType = dyn_cast<SimdType>(type))
     return isSupportedSimdPayloadType(simdType);
   if (auto maskType = dyn_cast<MaskType>(type))

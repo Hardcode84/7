@@ -2,7 +2,7 @@
 // RUN: wave-opt %s | wave-opt | FileCheck %s
 
 // CHECK-LABEL: func.func @wave_ops
-func.func @wave_ops(%pred: i1, %value: i32, %out: !wave.ptr<i32, #wave.global>) -> i32 {
+func.func @wave_ops(%pred: i1, %value: i32, %out: !wave.ptr<#wave.global, i32>) -> i32 {
   // CHECK: wave.lane_id : !wave.simd<i32, 32>
   %lane = wave.lane_id : !wave.simd<i32, 32>
   // CHECK: wave.splat
@@ -28,12 +28,12 @@ func.func @wave_ops(%pred: i1, %value: i32, %out: !wave.ptr<i32, #wave.global>) 
   // CHECK: wave.read_first {{.*}} : !wave.simd<i32, 32> -> i32
   %first = wave.read_first %sum : !wave.simd<i32, 32> -> i32
   // CHECK: wave.store
-  %tok = wave.store %sum -> %out : (!wave.simd<i32, 32>, !wave.ptr<i32, #wave.global>) -> !wave.mem.token
+  %tok = wave.store %sum -> %out : (!wave.simd<i32, 32>, !wave.ptr<#wave.global, i32>) -> !wave.mem.token
 
-  // CHECK: wave.load {{.*}} : (!wave.ptr<i32, #wave.global>) -> (!wave.simd<i32, 32>, !wave.mem.token)
-  %ld, %ld_tok = wave.load %out : (!wave.ptr<i32, #wave.global>) -> (!wave.simd<i32, 32>, !wave.mem.token)
-  // CHECK: wave.load {{.*}} after {{.*}} : (!wave.ptr<i32, #wave.global>, !wave.mem.token) -> (!wave.simd<vector<8xi32>, 32>, !wave.mem.token)
-  %ld8, %ld8_tok = wave.load %out after %ld_tok : (!wave.ptr<i32, #wave.global>, !wave.mem.token) -> (!wave.simd<vector<8xi32>, 32>, !wave.mem.token)
+  // CHECK: wave.load {{.*}} : (!wave.ptr<#wave.global, i32>) -> (!wave.simd<i32, 32>, !wave.mem.token)
+  %ld, %ld_tok = wave.load %out : (!wave.ptr<#wave.global, i32>) -> (!wave.simd<i32, 32>, !wave.mem.token)
+  // CHECK: wave.load {{.*}} after {{.*}} : (!wave.ptr<#wave.global, i32>, !wave.mem.token) -> (!wave.simd<vector<8xi32>, 32>, !wave.mem.token)
+  %ld8, %ld8_tok = wave.load %out after %ld_tok : (!wave.ptr<#wave.global, i32>, !wave.mem.token) -> (!wave.simd<vector<8xi32>, 32>, !wave.mem.token)
 
   // CHECK: wave.where
   wave.where %mask {
@@ -46,49 +46,68 @@ func.func @wave_ops(%pred: i1, %value: i32, %out: !wave.ptr<i32, #wave.global>) 
 }
 
 // CHECK-LABEL: func.func @wave_vector_memory_payloads
-func.func @wave_vector_memory_payloads(%p8: !wave.ptr<i8, #wave.global>,
-                                       %p16: !wave.ptr<i16, #wave.global>,
-                                       %pbf16: !wave.ptr<bf16, #wave.global>,
-                                       %pf32: !wave.ptr<f32, #wave.global>) {
-  // CHECK: wave.load {{.*}} : (!wave.ptr<i8, #wave.global>) -> (!wave.simd<vector<2xi8>, 32>, !wave.mem.token)
+func.func @wave_vector_memory_payloads(%p8: !wave.ptr<#wave.global, i8>,
+                                       %p16: !wave.ptr<#wave.global, i16>,
+                                       %pbf16: !wave.ptr<#wave.global, bf16>,
+                                       %pf32: !wave.ptr<#wave.global, f32>) {
+  // CHECK: wave.load {{.*}} : (!wave.ptr<#wave.global, i8>) -> (!wave.simd<vector<2xi8>, 32>, !wave.mem.token)
   %i8x2, %t0 = wave.load %p8
-      : (!wave.ptr<i8, #wave.global>)
+      : (!wave.ptr<#wave.global, i8>)
       -> (!wave.simd<vector<2xi8>, 32>, !wave.mem.token)
-  // CHECK: wave.store {{.*}} : (!wave.simd<vector<2xi8>, 32>, !wave.ptr<i8, #wave.global>, !wave.mem.token) -> !wave.mem.token
+  // CHECK: wave.store {{.*}} : (!wave.simd<vector<2xi8>, 32>, !wave.ptr<#wave.global, i8>, !wave.mem.token) -> !wave.mem.token
   %t1 = wave.store %i8x2 -> %p8 after %t0
-      : (!wave.simd<vector<2xi8>, 32>, !wave.ptr<i8, #wave.global>,
+      : (!wave.simd<vector<2xi8>, 32>, !wave.ptr<#wave.global, i8>,
          !wave.mem.token)
       -> !wave.mem.token
 
-  // CHECK: wave.load {{.*}} after {{.*}} : (!wave.ptr<i16, #wave.global>, !wave.mem.token) -> (!wave.simd<vector<4xi16>, 32>, !wave.mem.token)
+  // CHECK: wave.load {{.*}} after {{.*}} : (!wave.ptr<#wave.global, i16>, !wave.mem.token) -> (!wave.simd<vector<4xi16>, 32>, !wave.mem.token)
   %i16x4, %t2 = wave.load %p16 after %t1
-      : (!wave.ptr<i16, #wave.global>, !wave.mem.token)
+      : (!wave.ptr<#wave.global, i16>, !wave.mem.token)
       -> (!wave.simd<vector<4xi16>, 32>, !wave.mem.token)
-  // CHECK: wave.store {{.*}} : (!wave.simd<vector<4xi16>, 32>, !wave.ptr<i16, #wave.global>, !wave.mem.token) -> !wave.mem.token
+  // CHECK: wave.store {{.*}} : (!wave.simd<vector<4xi16>, 32>, !wave.ptr<#wave.global, i16>, !wave.mem.token) -> !wave.mem.token
   %t3 = wave.store %i16x4 -> %p16 after %t2
-      : (!wave.simd<vector<4xi16>, 32>, !wave.ptr<i16, #wave.global>,
+      : (!wave.simd<vector<4xi16>, 32>, !wave.ptr<#wave.global, i16>,
          !wave.mem.token)
       -> !wave.mem.token
 
-  // CHECK: wave.load {{.*}} after {{.*}} : (!wave.ptr<bf16, #wave.global>, !wave.mem.token) -> (!wave.simd<vector<2xbf16>, 32>, !wave.mem.token)
+  // CHECK: wave.load {{.*}} after {{.*}} : (!wave.ptr<#wave.global, bf16>, !wave.mem.token) -> (!wave.simd<vector<2xbf16>, 32>, !wave.mem.token)
   %bf16x2, %t4 = wave.load %pbf16 after %t3
-      : (!wave.ptr<bf16, #wave.global>, !wave.mem.token)
+      : (!wave.ptr<#wave.global, bf16>, !wave.mem.token)
       -> (!wave.simd<vector<2xbf16>, 32>, !wave.mem.token)
-  // CHECK: wave.store {{.*}} : (!wave.simd<vector<2xbf16>, 32>, !wave.ptr<bf16, #wave.global>, !wave.mem.token) -> !wave.mem.token
+  // CHECK: wave.store {{.*}} : (!wave.simd<vector<2xbf16>, 32>, !wave.ptr<#wave.global, bf16>, !wave.mem.token) -> !wave.mem.token
   %t5 = wave.store %bf16x2 -> %pbf16 after %t4
-      : (!wave.simd<vector<2xbf16>, 32>, !wave.ptr<bf16, #wave.global>,
+      : (!wave.simd<vector<2xbf16>, 32>, !wave.ptr<#wave.global, bf16>,
          !wave.mem.token)
       -> !wave.mem.token
 
-  // CHECK: wave.load {{.*}} after {{.*}} : (!wave.ptr<f32, #wave.global>, !wave.mem.token) -> (!wave.simd<vector<2xf32>, 32>, !wave.mem.token)
+  // CHECK: wave.load {{.*}} after {{.*}} : (!wave.ptr<#wave.global, f32>, !wave.mem.token) -> (!wave.simd<vector<2xf32>, 32>, !wave.mem.token)
   %f32x2, %t6 = wave.load %pf32 after %t5
-      : (!wave.ptr<f32, #wave.global>, !wave.mem.token)
+      : (!wave.ptr<#wave.global, f32>, !wave.mem.token)
       -> (!wave.simd<vector<2xf32>, 32>, !wave.mem.token)
-  // CHECK: wave.store {{.*}} : (!wave.simd<vector<2xf32>, 32>, !wave.ptr<f32, #wave.global>, !wave.mem.token) -> !wave.mem.token
+  // CHECK: wave.store {{.*}} : (!wave.simd<vector<2xf32>, 32>, !wave.ptr<#wave.global, f32>, !wave.mem.token) -> !wave.mem.token
   %t7 = wave.store %f32x2 -> %pf32 after %t6
-      : (!wave.simd<vector<2xf32>, 32>, !wave.ptr<f32, #wave.global>,
+      : (!wave.simd<vector<2xf32>, 32>, !wave.ptr<#wave.global, f32>,
          !wave.mem.token)
       -> !wave.mem.token
+  return
+}
+
+// CHECK-LABEL: func.func @wave_opaque_pointers
+func.func @wave_opaque_pointers(%raw: !wave.ptr<#wave.global>, %x: i32) {
+  %lane = wave.lane_id : !wave.simd<i32, 32>
+  // CHECK: wave.ptr_add {{.*}} : !wave.ptr<#wave.global>, !wave.simd<i32, 32> -> !wave.simd<!wave.ptr<#wave.global>, 32>
+  %ptrs = wave.ptr_add %raw, %lane
+      : !wave.ptr<#wave.global>, !wave.simd<i32, 32>
+      -> !wave.simd<!wave.ptr<#wave.global>, 32>
+  %vx = wave.splat %x : i32 -> !wave.simd<i32, 32>
+  // CHECK: wave.store {{.*}} : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.global>, 32>) -> !wave.mem.token
+  %t0 = wave.store %vx -> %ptrs
+      : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.global>, 32>)
+      -> !wave.mem.token
+  // CHECK: wave.load {{.*}} after {{.*}} : (!wave.simd<!wave.ptr<#wave.global>, 32>, !wave.mem.token) -> (!wave.simd<i32, 32>, !wave.mem.token)
+  %loaded, %t1 = wave.load %ptrs after %t0
+      : (!wave.simd<!wave.ptr<#wave.global>, 32>, !wave.mem.token)
+      -> (!wave.simd<i32, 32>, !wave.mem.token)
   return
 }
 
@@ -239,7 +258,7 @@ func.func @wave_assume_range(%u32: i32, %u64: i64,
 func.func @wave_index_expr(%lane: !wave.simd<i32, 32>,
                            %k: i32,
                            %wgid: i32,
-                           %buffer: !wave.ptr<i32, #wave.global>) {
+                           %buffer: !wave.ptr<#wave.global, i32>) {
   // Uniform-only bindings collapse to index (no width).
   // CHECK: wave.index_expr <"K + wgid_y"> ["K", "wgid_y"](%{{.*}}, %{{.*}}) : (i32, i32) -> index
   %u = wave.index_expr #wave.expr<"K + wgid_y"> ["K", "wgid_y"] (%k, %wgid) : (i32, i32) -> index
@@ -254,8 +273,8 @@ func.func @wave_index_expr(%lane: !wave.simd<i32, 32>,
   %c = wave.index_expr #wave.expr<"42"> [] () : () -> index
 
   // The lane-varying index feeds straight into ptr_add as the offset.
-  // CHECK: wave.ptr_add {{.*}} : !wave.ptr<i32, #wave.global>, !wave.simd<index, 32> -> !wave.simd<!wave.ptr<i32, #wave.global>, 32>
-  %ptrs = wave.ptr_add %buffer, %v : !wave.ptr<i32, #wave.global>, !wave.simd<index, 32> -> !wave.simd<!wave.ptr<i32, #wave.global>, 32>
+  // CHECK: wave.ptr_add {{.*}} : !wave.ptr<#wave.global, i32>, !wave.simd<index, 32> -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
+  %ptrs = wave.ptr_add %buffer, %v : !wave.ptr<#wave.global, i32>, !wave.simd<index, 32> -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
 
   func.return
 }
@@ -264,7 +283,7 @@ func.func @wave_index_expr(%lane: !wave.simd<i32, 32>,
 func.func @wave_index_expr_index_shaped(%lane_i32: !wave.simd<i32, 32>,
                                         %lane_idx: !wave.simd<index, 32>,
                                         %k: index,
-                                        %buffer: !wave.ptr<i32, #wave.global>) {
+                                        %buffer: !wave.ptr<#wave.global, i32>) {
   // CHECK: wave.index_expr <"K"> ["K"](%{{.*}}) : (index) -> index
   %u = wave.index_expr #wave.expr<"K"> ["K"] (%k) : (index) -> index
 
@@ -274,8 +293,8 @@ func.func @wave_index_expr_index_shaped(%lane_i32: !wave.simd<i32, 32>,
   // CHECK: wave.index_expr <"idx"> ["idx"](%{{.*}}) : (!wave.simd<index, 32>) -> !wave.simd<index, 32>
   %w = wave.index_expr #wave.expr<"idx"> ["idx"] (%lane_idx) : (!wave.simd<index, 32>) -> !wave.simd<index, 32>
 
-  // CHECK: wave.ptr_add {{.*}} : !wave.ptr<i32, #wave.global>, !wave.simd<index, 32> -> !wave.simd<!wave.ptr<i32, #wave.global>, 32>
-  %ptrs = wave.ptr_add %buffer, %v : !wave.ptr<i32, #wave.global>, !wave.simd<index, 32> -> !wave.simd<!wave.ptr<i32, #wave.global>, 32>
+  // CHECK: wave.ptr_add {{.*}} : !wave.ptr<#wave.global, i32>, !wave.simd<index, 32> -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
+  %ptrs = wave.ptr_add %buffer, %v : !wave.ptr<#wave.global, i32>, !wave.simd<index, 32> -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
 
   func.return
 }

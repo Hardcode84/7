@@ -9,18 +9,18 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx942"} {
 // CHECK: buffer_store_dword
 // CHECK: s_waitcnt
 // CHECK: s_endpgm
-func.func @buffer_store_kernel(%out: !wave.ptr<i32, #wave.global>)
+func.func @buffer_store_kernel(%out: !wave.ptr<#wave.global, i32>)
     attributes {wave.kernel} {
   %range = arith.constant 128 : i32
   %buffer = waveamd.make_buffer %out, %range
-      : !wave.ptr<i32, #wave.global>, i32 -> !wave.ptr<i32, #waveamd.buffer>
+      : !wave.ptr<#wave.global, i32>, i32 -> !wave.ptr<#waveamd.buffer, i32>
   %wi_raw = wave.workitem_id 0 : !wave.simd<i32, 64>
   %wi = wave.assume_range %wi_raw, [0, 63] : !wave.simd<i32, 64>
   %ptrs = wave.ptr_add %buffer, %wi
-      : !wave.ptr<i32, #waveamd.buffer>, !wave.simd<i32, 64>
-      -> !wave.simd<!wave.ptr<i32, #waveamd.buffer>, 64>
+      : !wave.ptr<#waveamd.buffer, i32>, !wave.simd<i32, 64>
+      -> !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>
   %store_token = wave.store %wi -> %ptrs
-      : (!wave.simd<i32, 64>, !wave.simd<!wave.ptr<i32, #waveamd.buffer>, 64>)
+      : (!wave.simd<i32, 64>, !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>)
       -> !wave.mem.token
   return
 }

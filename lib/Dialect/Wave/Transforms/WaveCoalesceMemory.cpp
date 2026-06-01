@@ -48,21 +48,19 @@ struct AddressOrderedGroups {
 };
 
 static std::optional<PtrType> getPointerType(Type type) {
-  if (PtrType ptrType = dyn_cast<PtrType>(type))
-    return ptrType;
-  SimdType simdType = dyn_cast<SimdType>(type);
-  if (!simdType)
-    return std::nullopt;
-  if (PtrType ptrType = dyn_cast<PtrType>(simdType.getElementType()))
-    return ptrType;
-  return std::nullopt;
+  return getWavePointerType(type);
 }
 
 static std::optional<unsigned> getPointerElementBits(Type type) {
   std::optional<PtrType> ptrType = getPointerType(type);
-  if (!ptrType || !ptrType->getElementType().isIntOrFloat())
+  if (!ptrType)
     return std::nullopt;
-  return ptrType->getElementType().getIntOrFloatBitWidth();
+  Type elementType = ptrType->getElementType();
+  if (!elementType)
+    return 8;
+  if (!elementType.isIntOrFloat())
+    return std::nullopt;
+  return elementType.getIntOrFloatBitWidth();
 }
 
 static bool hasNoEffects(Operation *op) {

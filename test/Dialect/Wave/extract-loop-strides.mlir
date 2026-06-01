@@ -11,7 +11,7 @@
 // CHECK: wave.store {{.*}} -> %[[PTR]]
 // CHECK: %[[NEXT:.*]] = wave.ptr_add %[[PTR]], %[[STRIDE]]
 // CHECK: scf.yield %[[NEXT]]
-func.func @extract_iv_stride(%a: !wave.ptr<f16, #wave.global>, %n: i32)
+func.func @extract_iv_stride(%a: !wave.ptr<#wave.global, f16>, %n: i32)
     attributes {wave.kernel} {
   %c0 = arith.constant 0 : i32
   %c1 = arith.constant 1 : i32
@@ -20,14 +20,14 @@ func.func @extract_iv_stride(%a: !wave.ptr<f16, #wave.global>, %n: i32)
     %off = wave.index_expr <"128*i + 64*Mod(wi, 16)"> ["i", "wi"](%i, %wi)
         : (i32, !wave.simd<i32, 32>) -> !wave.simd<index, 32>
     %p = wave.ptr_add %a, %off
-        : !wave.ptr<f16, #wave.global>, !wave.simd<index, 32>
-        -> !wave.simd<!wave.ptr<f16, #wave.global>, 32>
+        : !wave.ptr<#wave.global, f16>, !wave.simd<index, 32>
+        -> !wave.simd<!wave.ptr<#wave.global, f16>, 32>
     %v, %t = wave.load %p
-        : (!wave.simd<!wave.ptr<f16, #wave.global>, 32>)
+        : (!wave.simd<!wave.ptr<#wave.global, f16>, 32>)
         -> (!wave.simd<vector<8xi32>, 32>, !wave.mem.token)
     wave.store %v -> %p
         : (!wave.simd<vector<8xi32>, 32>,
-           !wave.simd<!wave.ptr<f16, #wave.global>, 32>) -> !wave.mem.token
+           !wave.simd<!wave.ptr<#wave.global, f16>, 32>) -> !wave.mem.token
   }
   return
 }
@@ -42,7 +42,7 @@ func.func @extract_iv_stride(%a: !wave.ptr<f16, #wave.global>, %n: i32)
 // CHECK: scf.for %[[IV:.*]] = {{.*}} iter_args(%[[PTR:.*]] = %[[BASE_PTR]])
 // CHECK: %[[NEXT:.*]] = wave.ptr_add %[[PTR]], %[[STRIDE]]
 // CHECK: scf.yield %[[NEXT]]
-func.func @non_unit_step(%a: !wave.ptr<f16, #wave.global>, %n: i32)
+func.func @non_unit_step(%a: !wave.ptr<#wave.global, f16>, %n: i32)
     attributes {wave.kernel} {
   %c2 = arith.constant 2 : i32
   %c4 = arith.constant 4 : i32
@@ -51,14 +51,14 @@ func.func @non_unit_step(%a: !wave.ptr<f16, #wave.global>, %n: i32)
     %off = wave.index_expr <"16*i + 64*Mod(wi, 16)"> ["i", "wi"](%i, %wi)
         : (i32, !wave.simd<i32, 32>) -> !wave.simd<index, 32>
     %p = wave.ptr_add %a, %off
-        : !wave.ptr<f16, #wave.global>, !wave.simd<index, 32>
-        -> !wave.simd<!wave.ptr<f16, #wave.global>, 32>
+        : !wave.ptr<#wave.global, f16>, !wave.simd<index, 32>
+        -> !wave.simd<!wave.ptr<#wave.global, f16>, 32>
     %v, %t = wave.load %p
-        : (!wave.simd<!wave.ptr<f16, #wave.global>, 32>)
+        : (!wave.simd<!wave.ptr<#wave.global, f16>, 32>)
         -> (!wave.simd<vector<8xi32>, 32>, !wave.mem.token)
     wave.store %v -> %p
         : (!wave.simd<vector<8xi32>, 32>,
-           !wave.simd<!wave.ptr<f16, #wave.global>, 32>) -> !wave.mem.token
+           !wave.simd<!wave.ptr<#wave.global, f16>, 32>) -> !wave.mem.token
   }
   return
 }
@@ -69,7 +69,7 @@ func.func @non_unit_step(%a: !wave.ptr<f16, #wave.global>, %n: i32)
 // CHECK: scf.for
 // CHECK-NOT: iter_args
 // CHECK: wave.index_expr <"i**2 + 64*Mod(wi, 16)"> ["i", "wi"]{{.*}} -> !wave.simd<index, 32>
-func.func @reject_nonlinear(%a: !wave.ptr<f16, #wave.global>, %n: i32)
+func.func @reject_nonlinear(%a: !wave.ptr<#wave.global, f16>, %n: i32)
     attributes {wave.kernel} {
   %c0 = arith.constant 0 : i32
   %c1 = arith.constant 1 : i32
@@ -78,14 +78,14 @@ func.func @reject_nonlinear(%a: !wave.ptr<f16, #wave.global>, %n: i32)
     %off = wave.index_expr <"i*i + 64*Mod(wi, 16)"> ["i", "wi"](%i, %wi)
         : (i32, !wave.simd<i32, 32>) -> !wave.simd<index, 32>
     %p = wave.ptr_add %a, %off
-        : !wave.ptr<f16, #wave.global>, !wave.simd<index, 32>
-        -> !wave.simd<!wave.ptr<f16, #wave.global>, 32>
+        : !wave.ptr<#wave.global, f16>, !wave.simd<index, 32>
+        -> !wave.simd<!wave.ptr<#wave.global, f16>, 32>
     %v, %t = wave.load %p
-        : (!wave.simd<!wave.ptr<f16, #wave.global>, 32>)
+        : (!wave.simd<!wave.ptr<#wave.global, f16>, 32>)
         -> (!wave.simd<vector<8xi32>, 32>, !wave.mem.token)
     wave.store %v -> %p
         : (!wave.simd<vector<8xi32>, 32>,
-           !wave.simd<!wave.ptr<f16, #wave.global>, 32>) -> !wave.mem.token
+           !wave.simd<!wave.ptr<#wave.global, f16>, 32>) -> !wave.mem.token
   }
   return
 }
@@ -105,7 +105,7 @@ func.func @reject_nonlinear(%a: !wave.ptr<f16, #wave.global>, %n: i32)
 // CHECK: scf.yield %[[INNER_NEXT]]
 // CHECK: %[[OUTER_NEXT:.*]] = wave.ptr_add %[[OUTER_PTR]], %[[OUTER_STRIDE]]
 // CHECK: scf.yield %[[OUTER_NEXT]]
-func.func @nested_two_ivs(%a: !wave.ptr<f16, #wave.global>, %n: i32,
+func.func @nested_two_ivs(%a: !wave.ptr<#wave.global, f16>, %n: i32,
                           %m: i32) attributes {wave.kernel} {
   %c0 = arith.constant 0 : i32
   %c1 = arith.constant 1 : i32
@@ -116,14 +116,14 @@ func.func @nested_two_ivs(%a: !wave.ptr<f16, #wave.global>, %n: i32,
           ["i", "j", "wi"](%i, %j, %wi)
           : (i32, i32, !wave.simd<i32, 32>) -> !wave.simd<index, 32>
       %p = wave.ptr_add %a, %off
-          : !wave.ptr<f16, #wave.global>, !wave.simd<index, 32>
-          -> !wave.simd<!wave.ptr<f16, #wave.global>, 32>
+          : !wave.ptr<#wave.global, f16>, !wave.simd<index, 32>
+          -> !wave.simd<!wave.ptr<#wave.global, f16>, 32>
       %v, %t = wave.load %p
-          : (!wave.simd<!wave.ptr<f16, #wave.global>, 32>)
+          : (!wave.simd<!wave.ptr<#wave.global, f16>, 32>)
           -> (!wave.simd<vector<8xi32>, 32>, !wave.mem.token)
       wave.store %v -> %p
           : (!wave.simd<vector<8xi32>, 32>,
-             !wave.simd<!wave.ptr<f16, #wave.global>, 32>) -> !wave.mem.token
+             !wave.simd<!wave.ptr<#wave.global, f16>, 32>) -> !wave.mem.token
     }
   }
   return
@@ -142,7 +142,7 @@ func.func @nested_two_ivs(%a: !wave.ptr<f16, #wave.global>, %n: i32,
 // CHECK: scf.yield %[[INNER_NEXT]]
 // CHECK: %[[OUTER_NEXT:.*]] = wave.ptr_add %[[OUTER_PTR]], %[[OUTER_STRIDE]]
 // CHECK: scf.yield %[[OUTER_NEXT]]
-func.func @nested_cross_iv(%a: !wave.ptr<f16, #wave.global>, %n: i32,
+func.func @nested_cross_iv(%a: !wave.ptr<#wave.global, f16>, %n: i32,
                            %m: i32) attributes {wave.kernel} {
   %c0 = arith.constant 0 : i32
   %c1 = arith.constant 1 : i32
@@ -153,14 +153,14 @@ func.func @nested_cross_iv(%a: !wave.ptr<f16, #wave.global>, %n: i32,
           ["i", "j", "wi"](%i, %j, %wi)
           : (i32, i32, !wave.simd<i32, 32>) -> !wave.simd<index, 32>
       %p = wave.ptr_add %a, %off
-          : !wave.ptr<f16, #wave.global>, !wave.simd<index, 32>
-          -> !wave.simd<!wave.ptr<f16, #wave.global>, 32>
+          : !wave.ptr<#wave.global, f16>, !wave.simd<index, 32>
+          -> !wave.simd<!wave.ptr<#wave.global, f16>, 32>
       %v, %t = wave.load %p
-          : (!wave.simd<!wave.ptr<f16, #wave.global>, 32>)
+          : (!wave.simd<!wave.ptr<#wave.global, f16>, 32>)
           -> (!wave.simd<vector<8xi32>, 32>, !wave.mem.token)
       wave.store %v -> %p
           : (!wave.simd<vector<8xi32>, 32>,
-             !wave.simd<!wave.ptr<f16, #wave.global>, 32>) -> !wave.mem.token
+             !wave.simd<!wave.ptr<#wave.global, f16>, 32>) -> !wave.mem.token
     }
   }
   return
@@ -177,7 +177,7 @@ func.func @nested_cross_iv(%a: !wave.ptr<f16, #wave.global>, %n: i32,
 // CHECK: scf.for %[[I:.*]] = {{.*}} iter_args(%[[PTR:.*]] = %[[BASE_PTR]])
 // CHECK: %[[NEXT:.*]] = wave.ptr_add %[[PTR]], %[[STRIDE]]
 // CHECK: scf.yield %[[NEXT]]
-func.func @simd_stride_scalar_base(%a: !wave.ptr<f16, #wave.global>, %n: i32)
+func.func @simd_stride_scalar_base(%a: !wave.ptr<#wave.global, f16>, %n: i32)
     attributes {wave.kernel} {
   %c0 = arith.constant 0 : i32
   %c1 = arith.constant 1 : i32
@@ -186,14 +186,14 @@ func.func @simd_stride_scalar_base(%a: !wave.ptr<f16, #wave.global>, %n: i32)
     %off = wave.index_expr <"16*i*wi"> ["i", "wi"](%i, %wi)
         : (i32, !wave.simd<i32, 32>) -> !wave.simd<index, 32>
     %p = wave.ptr_add %a, %off
-        : !wave.ptr<f16, #wave.global>, !wave.simd<index, 32>
-        -> !wave.simd<!wave.ptr<f16, #wave.global>, 32>
+        : !wave.ptr<#wave.global, f16>, !wave.simd<index, 32>
+        -> !wave.simd<!wave.ptr<#wave.global, f16>, 32>
     %v, %t = wave.load %p
-        : (!wave.simd<!wave.ptr<f16, #wave.global>, 32>)
+        : (!wave.simd<!wave.ptr<#wave.global, f16>, 32>)
         -> (!wave.simd<vector<8xi32>, 32>, !wave.mem.token)
     wave.store %v -> %p
         : (!wave.simd<vector<8xi32>, 32>,
-           !wave.simd<!wave.ptr<f16, #wave.global>, 32>) -> !wave.mem.token
+           !wave.simd<!wave.ptr<#wave.global, f16>, 32>) -> !wave.mem.token
   }
   return
 }

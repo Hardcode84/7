@@ -181,13 +181,6 @@ private:
   unsigned nextRawSymbol = 0;
 };
 
-static bool isWavePointerLike(Type type) {
-  if (isa<PtrType>(type))
-    return true;
-  SimdType simdType = dyn_cast<SimdType>(type);
-  return simdType && isa<PtrType>(simdType.getElementType());
-}
-
 static SmallVector<PtrAddOp> collectPtrAddChain(PtrAddOp op) {
   SmallVector<PtrAddOp> chain;
   for (PtrAddOp cur = op; cur; cur = cur.getBase().getDefiningOp<PtrAddOp>())
@@ -237,7 +230,7 @@ substituteDeltaBindings(WaveDialect &dialect, const MemoryAddress &lhs,
 
 FailureOr<std::optional<MemoryAddress>>
 mlir::wave::normalizeMemoryAddress(Value ptr, WaveDialect &dialect) {
-  if (!isWavePointerLike(ptr.getType()))
+  if (!isWavePointerLikeType(ptr.getType()))
     return std::optional<MemoryAddress>{};
 
   MemoryAddressOffsetBuilder builder(dialect);

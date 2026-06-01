@@ -61,14 +61,14 @@ gpu.module @kernels {
   // lane. With 32 lanes that lays the full 16x16 = 256-element
   // result out contiguously, so a 256-element output buffer receives
   // all 16s.
-  func.func @wmma_iu8_matmul_const(%out: !wave.ptr<i32, #wave.global>)
+  func.func @wmma_iu8_matmul_const(%out: !wave.ptr<#wave.global, i32>)
       attributes {gpu.kernel, wave.kernel} {
     %ones_i8x4 = arith.constant 0x01010101 : i32
     %acc_init  = arith.constant 0 : i32
     %base      = arith.constant 0 : index
 
     %ptr = wave.ptr_add %out, %base
-        : !wave.ptr<i32, #wave.global>, index -> !wave.ptr<i32, #wave.global>
+        : !wave.ptr<#wave.global, i32>, index -> !wave.ptr<#wave.global, i32>
 
     %a   = waveamd.fragment_fill %ones_i8x4
         : i32 -> !waveamd.fragment<0, i8, 16, 16, 32, 4>
@@ -89,14 +89,14 @@ gpu.module @kernels {
     %lane_off = wave.muli %lane, %r_simd
         : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
     %tuple_ptr = wave.ptr_add %ptr, %lane_off
-        : !wave.ptr<i32, #wave.global>, !wave.simd<i32, 32>
-        -> !wave.simd<!wave.ptr<i32, #wave.global>, 32>
+        : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 32>
+        -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
     %regs = waveamd.fragment_unpack %d
         : !waveamd.fragment<2, i32, 16, 16, 32, 8>
         -> !wave.simd<vector<8xi32>, 32>
     %tok = wave.store %regs -> %tuple_ptr
         : (!wave.simd<vector<8xi32>, 32>,
-           !wave.simd<!wave.ptr<i32, #wave.global>, 32>) -> !wave.mem.token
+           !wave.simd<!wave.ptr<#wave.global, i32>, 32>) -> !wave.mem.token
     return
   }
 
@@ -106,18 +106,18 @@ gpu.module @kernels {
   // fragments end up all-ones. The f32 accumulator starts at 0.0f, so:
   //   D[i][j] = sum_{k=0..15} 1.0 * 1.0 + 0.0 = 16.0  (bit pattern 0x41800000)
   //
-  // The output pointer is still typed `!wave.ptr<i32, ...>` because
+  // The output pointer is still typed `!wave.ptr<..., i32>` because
   // the unpack + `wave.store` chain treats the per-lane payload as a
   // `vector<R x i32>` regardless of whether the fragment holds i32 or
   // f32; reinterpret the resulting buffer as f32 on the host side.
-  func.func @wmma_f16_matmul_const(%out: !wave.ptr<i32, #wave.global>)
+  func.func @wmma_f16_matmul_const(%out: !wave.ptr<#wave.global, i32>)
       attributes {gpu.kernel, wave.kernel} {
     %ones_f16x2 = arith.constant 0x3c003c00 : i32  // (f16)1.0 in both halves
     %acc_init   = arith.constant 0 : i32           // (f32)0.0
     %base       = arith.constant 0 : index
 
     %ptr = wave.ptr_add %out, %base
-        : !wave.ptr<i32, #wave.global>, index -> !wave.ptr<i32, #wave.global>
+        : !wave.ptr<#wave.global, i32>, index -> !wave.ptr<#wave.global, i32>
 
     %a   = waveamd.fragment_fill %ones_f16x2
         : i32 -> !waveamd.fragment<0, f16, 16, 16, 32, 8>
@@ -138,14 +138,14 @@ gpu.module @kernels {
     %lane_off = wave.muli %lane, %r_simd
         : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
     %tuple_ptr = wave.ptr_add %ptr, %lane_off
-        : !wave.ptr<i32, #wave.global>, !wave.simd<i32, 32>
-        -> !wave.simd<!wave.ptr<i32, #wave.global>, 32>
+        : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 32>
+        -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
     %regs = waveamd.fragment_unpack %d
         : !waveamd.fragment<2, f32, 16, 16, 32, 8>
         -> !wave.simd<vector<8xi32>, 32>
     %tok = wave.store %regs -> %tuple_ptr
         : (!wave.simd<vector<8xi32>, 32>,
-           !wave.simd<!wave.ptr<i32, #wave.global>, 32>) -> !wave.mem.token
+           !wave.simd<!wave.ptr<#wave.global, i32>, 32>) -> !wave.mem.token
     return
   }
 }

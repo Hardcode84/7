@@ -29,20 +29,20 @@ func.func @shader_cycles_pair() attributes {wave.kernel} {
 // ASM: s_getreg_b32 s{{[0-9]+}}, hwreg(HW_REG_SHADER_CYCLES)
 // ASM: v_mov_b32_e32 v{{[0-9]+}}, s{{[0-9]+}}
 // ASM: buffer_store_b32
-func.func @store_one_cycle(%out: !wave.ptr<i32, #wave.global>)
+func.func @store_one_cycle(%out: !wave.ptr<#wave.global, i32>)
     attributes {wave.kernel} {
   %range = arith.constant 128 : i32
   %buffer = waveamd.make_buffer %out, %range
-      : !wave.ptr<i32, #wave.global>, i32 -> !wave.ptr<i32, #waveamd.buffer>
+      : !wave.ptr<#wave.global, i32>, i32 -> !wave.ptr<#waveamd.buffer, i32>
   %lane = wave.lane_id : !wave.simd<i32, 32>
   %ptrs = wave.ptr_add %buffer, %lane
-      : !wave.ptr<i32, #waveamd.buffer>, !wave.simd<i32, 32>
-        -> !wave.simd<!wave.ptr<i32, #waveamd.buffer>, 32>
+      : !wave.ptr<#waveamd.buffer, i32>, !wave.simd<i32, 32>
+        -> !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 32>
   %t = wave.read_cycles : i32
   %t_simd = wave.splat %t : i32 -> !wave.simd<i32, 32>
   %tok = wave.store %t_simd -> %ptrs
       : (!wave.simd<i32, 32>,
-         !wave.simd<!wave.ptr<i32, #waveamd.buffer>, 32>) -> !wave.mem.token
+         !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 32>) -> !wave.mem.token
   return
 }
 

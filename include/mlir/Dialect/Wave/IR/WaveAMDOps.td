@@ -22,7 +22,7 @@ class WaveAMD_Op<string mnemonic, list<Trait> traits = []> :
 def WaveAMD_MakeBufferOp : WaveAMD_Op<"make_buffer", [Pure]> {
   let summary = "construct an AMD buffer pointer from a flat/global pointer";
   let description = [{
-    Constructs a `!wave.ptr<T, #waveamd.buffer>` value from a uniform base
+    Constructs a `!wave.ptr<#waveamd.buffer, T>` value from a uniform base
     pointer and a uniform byte range. The resulting pointer is represented by a
     uniform AMD buffer descriptor plus the lane-varying i32 offset carried by
     subsequent `wave.ptr_add` operations.

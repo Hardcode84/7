@@ -47,6 +47,9 @@ MLIR_CAPI_EXPORTED MlirType mlirWaveMemTokenTypeGet(MlirContext ctx);
 MLIR_CAPI_EXPORTED bool mlirWaveTypeIsAPtr(MlirType type);
 MLIR_CAPI_EXPORTED MlirType mlirWavePtrTypeGet(MlirType elementType,
                                                MlirAttribute addressSpace);
+MLIR_CAPI_EXPORTED MlirType
+mlirWavePtrTypeGetOpaque(MlirContext ctx, MlirAttribute addressSpace);
+MLIR_CAPI_EXPORTED bool mlirWavePtrTypeHasElementType(MlirType type);
 MLIR_CAPI_EXPORTED MlirType mlirWavePtrTypeGetElementType(MlirType type);
 MLIR_CAPI_EXPORTED MlirAttribute mlirWavePtrTypeGetAddressSpace(MlirType type);
 

@@ -14,7 +14,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 
 // ASM-LABEL: mfma_gfx950_f16xf32_kernel:
 // ASM: v_mfma_f32_16x16x32_f16 [[DST:v\[[0-9]+:[0-9]+\]]], [[A:v\[[0-9]+:[0-9]+\]]], [[B:v\[[0-9]+:[0-9]+\]]], [[C:v\[[0-9]+:[0-9]+\]]]
-func.func @mfma_gfx950_f16xf32_kernel(%out: !wave.ptr<i32, #wave.global>)
+func.func @mfma_gfx950_f16xf32_kernel(%out: !wave.ptr<#wave.global, i32>)
     attributes {wave.kernel} {
   %zero = arith.constant 0 : i32
   %a = waveamd.fragment_fill %zero
@@ -38,21 +38,21 @@ func.func @mfma_gfx950_f16xf32_kernel(%out: !wave.ptr<i32, #wave.global>)
   %lane_off = wave.muli %lane, %r_simd
       : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
   %tuple_ptr = wave.ptr_add %out, %lane_off
-      : !wave.ptr<i32, #wave.global>, !wave.simd<i32, 64>
-      -> !wave.simd<!wave.ptr<i32, #wave.global>, 64>
+      : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 64>
+      -> !wave.simd<!wave.ptr<#wave.global, i32>, 64>
   %regs = waveamd.fragment_unpack %result
       : !waveamd.fragment<2, f32, 16, 16, 64, 4>
       -> !wave.simd<vector<4xi32>, 64>
   %store_token = wave.store %regs -> %tuple_ptr
       : (!wave.simd<vector<4xi32>, 64>,
-         !wave.simd<!wave.ptr<i32, #wave.global>, 64>) -> !wave.mem.token
+         !wave.simd<!wave.ptr<#wave.global, i32>, 64>) -> !wave.mem.token
   return
 }
 
 // ASM-LABEL: gfx950_literal_mul_kernel:
 // ASM: v_mov_b32_e32 [[IMM:v[0-9]+]], 0x100
 // ASM: v_mul_lo_u32 [[MUL:v[0-9]+]], [[IMM]], {{[vs][0-9]+}}
-func.func @gfx950_literal_mul_kernel(%out: !wave.ptr<i32, #wave.global>)
+func.func @gfx950_literal_mul_kernel(%out: !wave.ptr<#wave.global, i32>)
     attributes {wave.kernel} {
   %wi_raw = wave.workitem_id 0 : !wave.simd<i32, 64>
   %wi = wave.assume_range %wi_raw, [0, 63] : !wave.simd<i32, 64>
@@ -61,10 +61,10 @@ func.func @gfx950_literal_mul_kernel(%out: !wave.ptr<i32, #wave.global>)
   %value = wave.muli %v256, %wi
       : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
   %ptrs = wave.ptr_add %out, %wi
-      : !wave.ptr<i32, #wave.global>, !wave.simd<i32, 64>
-      -> !wave.simd<!wave.ptr<i32, #wave.global>, 64>
+      : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 64>
+      -> !wave.simd<!wave.ptr<#wave.global, i32>, 64>
   %store_token = wave.store %value -> %ptrs
-      : (!wave.simd<i32, 64>, !wave.simd<!wave.ptr<i32, #wave.global>, 64>)
+      : (!wave.simd<i32, 64>, !wave.simd<!wave.ptr<#wave.global, i32>, 64>)
       -> !wave.mem.token
   return
 }

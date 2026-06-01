@@ -128,12 +128,25 @@ LogicalResult MaskType::verify(function_ref<InFlightDiagnostic()> emitError,
 }
 
 LogicalResult PtrType::verify(function_ref<InFlightDiagnostic()> emitError,
-                              Type elementType, Attribute addressSpace) {
-  if (!elementType)
-    return emitError() << "pointer element type must be non-null";
+                              Attribute addressSpace, Type elementType) {
   if (!addressSpace)
     return emitError() << "pointer address space must be non-null";
   return success();
+}
+
+std::optional<PtrType> mlir::wave::getWavePointerType(Type type) {
+  if (PtrType ptrType = dyn_cast<PtrType>(type))
+    return ptrType;
+  SimdType simdType = dyn_cast<SimdType>(type);
+  if (!simdType)
+    return std::nullopt;
+  if (PtrType ptrType = dyn_cast<PtrType>(simdType.getElementType()))
+    return ptrType;
+  return std::nullopt;
+}
+
+bool mlir::wave::isWavePointerLikeType(Type type) {
+  return getWavePointerType(type).has_value();
 }
 
 void WaveDialect::registerAttributes() {
@@ -868,11 +881,13 @@ FailureOr<MemoryPayloadShape> mlir::wave::getMemoryPayloadShape(
   return getScalarMemoryPayloadShape(elementType, emitError);
 }
 
-static FailureOr<Type> getMemoryPointerElementType(
+static FailureOr<std::optional<Type>> getMemoryPointerElementType(
     Type ptrType, int64_t simdWidth, StringRef widthError,
     function_ref<InFlightDiagnostic(const Twine &)> emitError) {
   if (auto wavePtr = dyn_cast<PtrType>(ptrType))
-    return wavePtr.getElementType();
+    return wavePtr.getElementType()
+               ? std::optional<Type>(wavePtr.getElementType())
+               : std::nullopt;
   auto ptrSimdType = dyn_cast<SimdType>(ptrType);
   if (!ptrSimdType)
     return emitError("expected wave pointer operand");
@@ -881,7 +896,9 @@ static FailureOr<Type> getMemoryPointerElementType(
     return emitError("pointer SIMD element type must be a wave pointer");
   if (ptrSimdType.getWidth() != simdWidth)
     return emitError(widthError);
-  return wavePtr.getElementType();
+  return wavePtr.getElementType()
+             ? std::optional<Type>(wavePtr.getElementType())
+             : std::nullopt;
 }
 
 static FailureOr<unsigned> getMemoryPointerElementBits(
@@ -897,13 +914,17 @@ static FailureOr<unsigned> getMemoryPointerElementBits(
 }
 
 static LogicalResult verifyMemoryPayloadFitsPointer(
-    Type payloadElementType, Type ptrElementType,
+    Type payloadElementType, std::optional<Type> ptrElementType,
     function_ref<InFlightDiagnostic(const Twine &)> emitError) {
-  FailureOr<unsigned> ptrBits =
-      getMemoryPointerElementBits(ptrElementType, emitError);
   FailureOr<MemoryPayloadShape> shape =
       getMemoryPayloadShape(payloadElementType, emitError);
-  if (failed(ptrBits) || failed(shape))
+  if (failed(shape))
+    return failure();
+  if (!ptrElementType)
+    return success();
+  FailureOr<unsigned> ptrBits =
+      getMemoryPointerElementBits(*ptrElementType, emitError);
+  if (failed(ptrBits))
     return failure();
   if (shape->payloadBits % *ptrBits != 0)
     return emitError("per-lane payload must be a multiple of the pointer "
@@ -914,7 +935,7 @@ static LogicalResult verifyMemoryPayloadFitsPointer(
 LogicalResult StoreOp::verify() {
   auto emit = [this](const Twine &msg) { return emitOpError(msg); };
   auto simdType = cast<SimdType>(getValue().getType());
-  FailureOr<Type> ptrElementType = getMemoryPointerElementType(
+  FailureOr<std::optional<Type>> ptrElementType = getMemoryPointerElementType(
       getPtr().getType(), simdType.getWidth(),
       "pointer SIMD width must match value SIMD width", emit);
   if (failed(ptrElementType))
@@ -926,7 +947,7 @@ LogicalResult StoreOp::verify() {
 LogicalResult LoadOp::verify() {
   auto emit = [this](const Twine &msg) { return emitOpError(msg); };
   auto resultSimd = cast<SimdType>(getValue().getType());
-  FailureOr<Type> ptrElementType = getMemoryPointerElementType(
+  FailureOr<std::optional<Type>> ptrElementType = getMemoryPointerElementType(
       getPtr().getType(), resultSimd.getWidth(),
       "pointer SIMD width must match result SIMD width", emit);
   if (failed(ptrElementType))
@@ -1268,3 +1289,12 @@ void IndexExprOp::getCanonicalizationPatterns(RewritePatternSet &patterns,
 
 #define GET_ATTRDEF_CLASSES
 #include "mlir/Dialect/Wave/IR/WaveOpsAttributes.cpp.inc"
+
+PtrType PtrType::get(MLIRContext *context, Type elementType,
+                     Attribute addressSpace) {
+  return PtrType::get(context, addressSpace, elementType);
+}
+
+PtrType PtrType::get(MLIRContext *context, Attribute addressSpace) {
+  return PtrType::get(context, addressSpace, Type());
+}

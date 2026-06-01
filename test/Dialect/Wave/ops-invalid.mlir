@@ -24,49 +24,49 @@ func.func @bad_workitem_element_type() {
 
 // -----
 
-func.func @load_bad_ptr_simd_width(%p: !wave.simd<!wave.ptr<i32, #wave.global>, 64>) {
+func.func @load_bad_ptr_simd_width(%p: !wave.simd<!wave.ptr<#wave.global, i32>, 64>) {
   // expected-error @+1 {{pointer SIMD width must match result SIMD width}}
-  %v, %t = wave.load %p : (!wave.simd<!wave.ptr<i32, #wave.global>, 64>) -> (!wave.simd<i32, 32>, !wave.mem.token)
+  %v, %t = wave.load %p : (!wave.simd<!wave.ptr<#wave.global, i32>, 64>) -> (!wave.simd<i32, 32>, !wave.mem.token)
   return
 }
 
 // -----
 
-func.func @load_bad_scalar_width(%p: !wave.ptr<i32, #wave.global>) {
+func.func @load_bad_scalar_width(%p: !wave.ptr<#wave.global, i32>) {
   // expected-error @+1 {{per-lane payload must be a multiple of the pointer element bit width}}
-  %v, %t = wave.load %p : (!wave.ptr<i32, #wave.global>) -> (!wave.simd<i16, 32>, !wave.mem.token)
+  %v, %t = wave.load %p : (!wave.ptr<#wave.global, i32>) -> (!wave.simd<i16, 32>, !wave.mem.token)
   return
 }
 
 // -----
 
-func.func @load_bad_vector_element(%p: !wave.ptr<i32, #wave.global>) {
+func.func @load_bad_vector_element(%p: !wave.ptr<#wave.global, i32>) {
   // expected-error @+1 {{vector payload must be 16 bits or a multiple of 32 bits}}
-  %v, %t = wave.load %p : (!wave.ptr<i32, #wave.global>) -> (!wave.simd<vector<3xi16>, 32>, !wave.mem.token)
+  %v, %t = wave.load %p : (!wave.ptr<#wave.global, i32>) -> (!wave.simd<vector<3xi16>, 32>, !wave.mem.token)
   return
 }
 
 // -----
 
-func.func @load_bad_vector_i24_element(%p: !wave.ptr<i32, #wave.global>) {
+func.func @load_bad_vector_i24_element(%p: !wave.ptr<#wave.global, i32>) {
   // expected-error @+1 {{vector element type must be 8, 16, or 32 bits wide}}
-  %v, %t = wave.load %p : (!wave.ptr<i32, #wave.global>) -> (!wave.simd<vector<4xi24>, 32>, !wave.mem.token)
+  %v, %t = wave.load %p : (!wave.ptr<#wave.global, i32>) -> (!wave.simd<vector<4xi24>, 32>, !wave.mem.token)
   return
 }
 
 // -----
 
-func.func @load_bad_scalar_i8(%p: !wave.ptr<i8, #wave.global>) {
+func.func @load_bad_scalar_i8(%p: !wave.ptr<#wave.global, i8>) {
   // expected-error @+1 {{scalar payload element type must be 16 or 32 bits wide}}
-  %v, %t = wave.load %p : (!wave.ptr<i8, #wave.global>) -> (!wave.simd<i8, 32>, !wave.mem.token)
+  %v, %t = wave.load %p : (!wave.ptr<#wave.global, i8>) -> (!wave.simd<i8, 32>, !wave.mem.token)
   return
 }
 
 // -----
 
-func.func @load_bad_vector_i8_width(%p: !wave.ptr<i8, #wave.global>) {
+func.func @load_bad_vector_i8_width(%p: !wave.ptr<#wave.global, i8>) {
   // expected-error @+1 {{vector payload must be 16 bits or a multiple of 32 bits}}
-  %v, %t = wave.load %p : (!wave.ptr<i8, #wave.global>) -> (!wave.simd<vector<1xi8>, 32>, !wave.mem.token)
+  %v, %t = wave.load %p : (!wave.ptr<#wave.global, i8>) -> (!wave.simd<vector<1xi8>, 32>, !wave.mem.token)
   return
 }
 
@@ -80,10 +80,10 @@ func.func @load_bad_ptr_kind(%p: i64) {
 
 // -----
 
-func.func @assume_range_on_ptr(%p: !wave.ptr<i32, #wave.global>) -> !wave.ptr<i32, #wave.global> {
+func.func @assume_range_on_ptr(%p: !wave.ptr<#wave.global, i32>) -> !wave.ptr<#wave.global, i32> {
   // expected-error @+1 {{operand #0 must be signless integer or wave SIMD of signless integer}}
-  %r = wave.assume_range %p, [0, 100] : !wave.ptr<i32, #wave.global>
-  return %r : !wave.ptr<i32, #wave.global>
+  %r = wave.assume_range %p, [0, 100] : !wave.ptr<#wave.global, i32>
+  return %r : !wave.ptr<#wave.global, i32>
 }
 
 // -----
@@ -328,9 +328,9 @@ func.func @cast_signedness_on_fpconvert(%x: !wave.simd<f32, 32>) {
 
 // -----
 
-func.func @cast_non_numeric(%p: !wave.ptr<i32, #wave.global>) {
+func.func @cast_non_numeric(%p: !wave.ptr<#wave.global, i32>) {
   // expected-error @+1 {{cast type must be a signless integer or float}}
-  %r = wave.cast intconvert %p : !wave.ptr<i32, #wave.global> -> i32
+  %r = wave.cast intconvert %p : !wave.ptr<#wave.global, i32> -> i32
   return
 }
 
@@ -530,7 +530,7 @@ func.func @cmpi_result_mask_width(%a: !wave.simd<i32, 32>, %b: !wave.simd<i32, 3
 
 func.func @lds_base_wrong_address_space() {
   // expected-error @+1 {{result pointer must live in the shared address space}}
-  %p = wave.lds_base : !wave.ptr<i32, #wave.global>
+  %p = wave.lds_base : !wave.ptr<#wave.global, i32>
   return
 }
 

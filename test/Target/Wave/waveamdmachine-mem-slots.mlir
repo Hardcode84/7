@@ -21,7 +21,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // ASM-LABEL: global_slots:
 // ASM: global_load_b32 v{{[0-9]+}}, v{{[0-9]+}}, s[{{[0-9]+}}:{{[0-9]+}}] offset:16
 // ASM: global_store_b32 v{{[0-9]+}}, v{{[0-9]+}}, s[{{[0-9]+}}:{{[0-9]+}}] offset:32
-func.func @global_slots(%arg0: !wave.ptr<i32, #wave.global>) attributes {wave.kernel} {
+func.func @global_slots(%arg0: !wave.ptr<#wave.global, i32>) attributes {wave.kernel} {
   %base = waveamdmachine.arg {index = 0 : i64, pointer = true} : !waveamdmachine.reg<sgpr, 2>
   %off = waveamdmachine.v_mbcnt_lo : !waveamdmachine.reg<vgpr, 1>
   %v, %tok = waveamdmachine.global_load_b32 %off, %base offset 16 : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 2>) -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
@@ -37,7 +37,7 @@ func.func @global_slots(%arg0: !wave.ptr<i32, #wave.global>) attributes {wave.ke
 // ASM-LABEL: buffer_slots:
 // ASM: buffer_load_b32 v{{[0-9]+}}, v{{[0-9]+}}, s[{{[0-9]+}}:{{[0-9]+}}], s{{[0-9]+}} offen offset:16
 // ASM: buffer_store_b32 v{{[0-9]+}}, v{{[0-9]+}}, s[{{[0-9]+}}:{{[0-9]+}}], s{{[0-9]+}} offen offset:32
-func.func @buffer_slots(%arg0: !wave.ptr<i32, #wave.global>) attributes {wave.kernel} {
+func.func @buffer_slots(%arg0: !wave.ptr<#wave.global, i32>) attributes {wave.kernel} {
   %base = waveamdmachine.arg {index = 0 : i64, pointer = true} : !waveamdmachine.reg<sgpr, 2>
   %off = waveamdmachine.v_mbcnt_lo : !waveamdmachine.reg<vgpr, 1>
   %range = waveamdmachine.imm 128 : !waveamdmachine.imm

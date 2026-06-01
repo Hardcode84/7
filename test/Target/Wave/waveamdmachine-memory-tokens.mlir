@@ -18,13 +18,13 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // TICKET-NEXT: waveamdmachine.wait
 // TICKET-NOT: waveamdmachine.s_waitcnt_vscnt
 // TICKET: waveamdmachine.s_endpgm
-func.func @token_kernel(%out: !wave.ptr<i32, #wave.global>, %x: i32) attributes {wave.kernel} {
+func.func @token_kernel(%out: !wave.ptr<#wave.global, i32>, %x: i32) attributes {wave.kernel} {
   %lane = wave.lane_id : !wave.simd<i32, 32>
   %vx = wave.splat %x : i32 -> !wave.simd<i32, 32>
-  %ptrs = wave.ptr_add %out, %lane : !wave.ptr<i32, #wave.global>, !wave.simd<i32, 32> -> !wave.simd<!wave.ptr<i32, #wave.global>, 32>
-  %t0 = wave.store %vx -> %ptrs : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<i32, #wave.global>, 32>) -> !wave.mem.token
+  %ptrs = wave.ptr_add %out, %lane : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 32> -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
+  %t0 = wave.store %vx -> %ptrs : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>) -> !wave.mem.token
   %t1 = wave.after %t0 : !wave.mem.token -> !wave.mem.token
-  %t2 = wave.store %vx -> %ptrs after %t1 : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<i32, #wave.global>, 32>, !wave.mem.token) -> !wave.mem.token
+  %t2 = wave.store %vx -> %ptrs after %t1 : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>, !wave.mem.token) -> !wave.mem.token
   wave.wait %t2 : !wave.mem.token
   return
 }
@@ -39,12 +39,12 @@ func.func @token_kernel(%out: !wave.ptr<i32, #wave.global>, %x: i32) attributes 
 // TICKET: waveamdmachine.token_join
 // TICKET: waveamdmachine.s_waitcnt_vscnt
 // TICKET-NEXT: waveamdmachine.wait
-func.func @join_kernel(%out: !wave.ptr<i32, #wave.global>, %x: i32) attributes {wave.kernel} {
+func.func @join_kernel(%out: !wave.ptr<#wave.global, i32>, %x: i32) attributes {wave.kernel} {
   %lane = wave.lane_id : !wave.simd<i32, 32>
   %vx = wave.splat %x : i32 -> !wave.simd<i32, 32>
-  %ptrs = wave.ptr_add %out, %lane : !wave.ptr<i32, #wave.global>, !wave.simd<i32, 32> -> !wave.simd<!wave.ptr<i32, #wave.global>, 32>
-  %a = wave.store %vx -> %ptrs : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<i32, #wave.global>, 32>) -> !wave.mem.token
-  %b = wave.store %vx -> %ptrs : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<i32, #wave.global>, 32>) -> !wave.mem.token
+  %ptrs = wave.ptr_add %out, %lane : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 32> -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
+  %a = wave.store %vx -> %ptrs : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>) -> !wave.mem.token
+  %b = wave.store %vx -> %ptrs : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>) -> !wave.mem.token
   %both = wave.join %a, %b : !wave.mem.token, !wave.mem.token -> !wave.mem.token
   wave.wait %both : !wave.mem.token
   return

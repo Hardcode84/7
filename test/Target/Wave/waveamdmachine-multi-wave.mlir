@@ -30,14 +30,14 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // ASM:   .amdhsa_system_sgpr_workgroup_id_x 1
 // ASM:   .amdhsa_system_sgpr_workgroup_id_y 0
 // ASM:   .amdhsa_system_sgpr_workgroup_id_z 0
-func.func @multi_wave_kernel(%out: !wave.ptr<i32, #wave.global>) attributes {wave.kernel} {
+func.func @multi_wave_kernel(%out: !wave.ptr<#wave.global, i32>) attributes {wave.kernel} {
   %wg = wave.workgroup_id 0
   %vwg = wave.splat %wg : i32 -> !wave.simd<i32, 32>
   %wi_raw = wave.workitem_id 0 : !wave.simd<i32, 32>
   %wi = wave.assume_range %wi_raw, [0, 31] : !wave.simd<i32, 32>
   %sum = wave.addi %wi, %vwg : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
-  %ptrs = wave.ptr_add %out, %wi : !wave.ptr<i32, #wave.global>, !wave.simd<i32, 32> -> !wave.simd<!wave.ptr<i32, #wave.global>, 32>
-  %tok = wave.store %sum -> %ptrs : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<i32, #wave.global>, 32>) -> !wave.mem.token
+  %ptrs = wave.ptr_add %out, %wi : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 32> -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
+  %tok = wave.store %sum -> %ptrs : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>) -> !wave.mem.token
   return
 }
 
@@ -47,13 +47,13 @@ func.func @multi_wave_kernel(%out: !wave.ptr<i32, #wave.global>) attributes {wav
 // ASM:   .amdhsa_system_sgpr_workgroup_id_x 1
 // ASM:   .amdhsa_system_sgpr_workgroup_id_y 1
 // ASM:   .amdhsa_system_sgpr_workgroup_id_z 0
-func.func @multi_axis_kernel(%out: !wave.ptr<i32, #wave.global>) attributes {wave.kernel} {
+func.func @multi_axis_kernel(%out: !wave.ptr<#wave.global, i32>) attributes {wave.kernel} {
   %wg_y = wave.workgroup_id 1
   %vwg_y = wave.splat %wg_y : i32 -> !wave.simd<i32, 32>
   %lane = wave.lane_id : !wave.simd<i32, 32>
   %sum = wave.addi %lane, %vwg_y : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
-  %ptrs = wave.ptr_add %out, %lane : !wave.ptr<i32, #wave.global>, !wave.simd<i32, 32> -> !wave.simd<!wave.ptr<i32, #wave.global>, 32>
-  %tok = wave.store %sum -> %ptrs : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<i32, #wave.global>, 32>) -> !wave.mem.token
+  %ptrs = wave.ptr_add %out, %lane : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 32> -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
+  %tok = wave.store %sum -> %ptrs : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>) -> !wave.mem.token
   return
 }
 

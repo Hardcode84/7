@@ -44,8 +44,8 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // ASM-NEXT: .value_kind:     by_value
 // ASM: .kernarg_segment_size: 40
 func.func @kernarg_layout(%x: i32, %wide: i64,
-                          %out: !wave.ptr<i32, #wave.global>,
-                          %buf: !wave.ptr<i32, #waveamd.buffer>)
+                          %out: !wave.ptr<#wave.global, i32>,
+                          %buf: !wave.ptr<#waveamd.buffer, i32>)
     attributes {wave.kernel} {
   return
 }

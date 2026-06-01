@@ -19,14 +19,14 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // PIPE-LABEL: func.func @uniform_buffer_pointer_carry
 // PIPE: waveamdmachine.uniform_loop
 // PIPE: waveamdmachine.buffer_store_b32
-func.func @uniform_buffer_pointer_carry(%a: !wave.ptr<i32, #wave.global>,
+func.func @uniform_buffer_pointer_carry(%a: !wave.ptr<#wave.global, i32>,
                                         %n: i32, %range: i32, %x: i32)
     attributes {wave.kernel} {
   %c0 = arith.constant 0 : i32
   %c1 = arith.constant 1 : i32
   %n_bounded = wave.assume_range %n, [0, 1023] : i32
   %buf = waveamd.make_buffer %a, %range
-      : !wave.ptr<i32, #wave.global>, i32 -> !wave.ptr<i32, #waveamd.buffer>
+      : !wave.ptr<#wave.global, i32>, i32 -> !wave.ptr<#waveamd.buffer, i32>
   %lane = wave.lane_id : !wave.simd<i32, 32>
   %wg_raw = wave.workgroup_id 0
   %wg = wave.assume_range %wg_raw, [0, 1023] : i32
@@ -34,20 +34,20 @@ func.func @uniform_buffer_pointer_carry(%a: !wave.ptr<i32, #wave.global>,
   %off = wave.index_expr <"floor(1/32*lid) + wg"> ["lid", "wg"] (%lane, %wg)
       : (!wave.simd<i32, 32>, i32) -> !wave.simd<index, 32>
   %p0 = wave.ptr_add %buf, %off
-      : !wave.ptr<i32, #waveamd.buffer>, !wave.simd<index, 32>
-      -> !wave.simd<!wave.ptr<i32, #waveamd.buffer>, 32>
+      : !wave.ptr<#waveamd.buffer, i32>, !wave.simd<index, 32>
+      -> !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 32>
   %res = scf.for %i = %c0 to %n_bounded step %c1 iter_args(%q = %p0)
-      -> (!wave.simd<!wave.ptr<i32, #waveamd.buffer>, 32>) : i32 {
+      -> (!wave.simd<!wave.ptr<#waveamd.buffer, i32>, 32>) : i32 {
     %tok = wave.store %vx -> %q
-        : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<i32, #waveamd.buffer>, 32>)
+        : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 32>)
         -> !wave.mem.token
     %nq = wave.ptr_add %q, %c1
-        : !wave.simd<!wave.ptr<i32, #waveamd.buffer>, 32>, i32
-        -> !wave.simd<!wave.ptr<i32, #waveamd.buffer>, 32>
-    scf.yield %nq : !wave.simd<!wave.ptr<i32, #waveamd.buffer>, 32>
+        : !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 32>, i32
+        -> !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 32>
+    scf.yield %nq : !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 32>
   }
   %tok2 = wave.store %vx -> %res
-      : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<i32, #waveamd.buffer>, 32>)
+      : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 32>)
       -> !wave.mem.token
   return
 }

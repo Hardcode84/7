@@ -14,7 +14,7 @@
 module attributes {gpu.container_module} {
 
 gpu.module @kernels {
-  func.func @packed_f16_math(%dst: !wave.ptr<f32, #wave.global>)
+  func.func @packed_f16_math(%dst: !wave.ptr<#wave.global, f32>)
       attributes {gpu.kernel, wave.kernel} {
     %c1f = arith.constant 1.000000e+00 : f32
     %c2f = arith.constant 2.000000e+00 : f32
@@ -78,17 +78,17 @@ gpu.module @kernels {
         : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
 
     %lo_ptrs = wave.ptr_add %dst, %lane
-        : !wave.ptr<f32, #wave.global>, !wave.simd<i32, 32>
-        -> !wave.simd<!wave.ptr<f32, #wave.global>, 32>
+        : !wave.ptr<#wave.global, f32>, !wave.simd<i32, 32>
+        -> !wave.simd<!wave.ptr<#wave.global, f32>, 32>
     %hi_ptrs = wave.ptr_add %dst, %hi_lane
-        : !wave.ptr<f32, #wave.global>, !wave.simd<i32, 32>
-        -> !wave.simd<!wave.ptr<f32, #wave.global>, 32>
+        : !wave.ptr<#wave.global, f32>, !wave.simd<i32, 32>
+        -> !wave.simd<!wave.ptr<#wave.global, f32>, 32>
 
     %lo_tok = wave.store %lo -> %lo_ptrs
-        : (!wave.simd<f32, 32>, !wave.simd<!wave.ptr<f32, #wave.global>, 32>)
+        : (!wave.simd<f32, 32>, !wave.simd<!wave.ptr<#wave.global, f32>, 32>)
         -> !wave.mem.token
     %hi_tok = wave.store %hi -> %hi_ptrs after %lo_tok
-        : (!wave.simd<f32, 32>, !wave.simd<!wave.ptr<f32, #wave.global>, 32>,
+        : (!wave.simd<f32, 32>, !wave.simd<!wave.ptr<#wave.global, f32>, 32>,
            !wave.mem.token)
         -> !wave.mem.token
     return
@@ -96,7 +96,7 @@ gpu.module @kernels {
 }
 
 func.func private @wave_memref_to_ptr_global_f32(memref<64xf32>)
-    -> !wave.ptr<f32, #wave.global> attributes {llvm.emit_c_interface}
+    -> !wave.ptr<#wave.global, f32> attributes {llvm.emit_c_interface}
 
 func.func private @printMemrefF32(memref<*xf32>)
     attributes {llvm.emit_c_interface}
@@ -119,11 +119,11 @@ func.func @main() {
   gpu.host_register %unranked : memref<*xf32>
 
   %p = func.call @wave_memref_to_ptr_global_f32(%storage)
-      : (memref<64xf32>) -> !wave.ptr<f32, #wave.global>
+      : (memref<64xf32>) -> !wave.ptr<#wave.global, f32>
 
   gpu.launch_func @kernels::@packed_f16_math
       blocks in (%c1, %c1, %c1) threads in (%c32, %c1, %c1)
-      args(%p : !wave.ptr<f32, #wave.global>)
+      args(%p : !wave.ptr<#wave.global, f32>)
 
   func.call @printMemrefF32(%unranked) : (memref<*xf32>) -> ()
   return

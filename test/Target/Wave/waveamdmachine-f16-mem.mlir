@@ -14,33 +14,33 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // ASM: ds_store_b16
 // ASM: ds_load_u16
 // ASM: global_store_b16
-func.func @f16_global_shared(%in: !wave.ptr<f16, #wave.global>,
-                             %out: !wave.ptr<f16, #wave.global>)
+func.func @f16_global_shared(%in: !wave.ptr<#wave.global, f16>,
+                             %out: !wave.ptr<#wave.global, f16>)
     attributes {wave.kernel, wave.lds_size = 64 : i64} {
   %lane = wave.lane_id : !wave.simd<i32, 32>
   %ip = wave.ptr_add %in, %lane
-      : !wave.ptr<f16, #wave.global>, !wave.simd<i32, 32>
-      -> !wave.simd<!wave.ptr<f16, #wave.global>, 32>
+      : !wave.ptr<#wave.global, f16>, !wave.simd<i32, 32>
+      -> !wave.simd<!wave.ptr<#wave.global, f16>, 32>
   %v, %tok = wave.load %ip
-      : (!wave.simd<!wave.ptr<f16, #wave.global>, 32>)
+      : (!wave.simd<!wave.ptr<#wave.global, f16>, 32>)
       -> (!wave.simd<f16, 32>, !wave.mem.token)
-  %lds = wave.lds_base : !wave.ptr<f16, #wave.shared>
+  %lds = wave.lds_base : !wave.ptr<#wave.shared, f16>
   %lp = wave.ptr_add %lds, %lane
-      : !wave.ptr<f16, #wave.shared>, !wave.simd<i32, 32>
-      -> !wave.simd<!wave.ptr<f16, #wave.shared>, 32>
+      : !wave.ptr<#wave.shared, f16>, !wave.simd<i32, 32>
+      -> !wave.simd<!wave.ptr<#wave.shared, f16>, 32>
   %st = wave.store %v -> %lp after %tok
-      : (!wave.simd<f16, 32>, !wave.simd<!wave.ptr<f16, #wave.shared>, 32>,
+      : (!wave.simd<f16, 32>, !wave.simd<!wave.ptr<#wave.shared, f16>, 32>,
          !wave.mem.token)
       -> !wave.mem.token
   %barrier = wave.barrier %st : (!wave.mem.token) -> !wave.mem.token
   %lv:2 = wave.load %lp after %barrier
-      : (!wave.simd<!wave.ptr<f16, #wave.shared>, 32>, !wave.mem.token)
+      : (!wave.simd<!wave.ptr<#wave.shared, f16>, 32>, !wave.mem.token)
       -> (!wave.simd<f16, 32>, !wave.mem.token)
   %op = wave.ptr_add %out, %lane
-      : !wave.ptr<f16, #wave.global>, !wave.simd<i32, 32>
-      -> !wave.simd<!wave.ptr<f16, #wave.global>, 32>
+      : !wave.ptr<#wave.global, f16>, !wave.simd<i32, 32>
+      -> !wave.simd<!wave.ptr<#wave.global, f16>, 32>
   %final = wave.store %lv#0 -> %op after %lv#1
-      : (!wave.simd<f16, 32>, !wave.simd<!wave.ptr<f16, #wave.global>, 32>,
+      : (!wave.simd<f16, 32>, !wave.simd<!wave.ptr<#wave.global, f16>, 32>,
          !wave.mem.token)
       -> !wave.mem.token
   return
@@ -52,20 +52,20 @@ func.func @f16_global_shared(%in: !wave.ptr<f16, #wave.global>,
 // ASM-LABEL: f16_buffer:
 // ASM: buffer_load_u16
 // ASM: buffer_store_b16
-func.func @f16_buffer(%base: !wave.ptr<f16, #wave.global>)
+func.func @f16_buffer(%base: !wave.ptr<#wave.global, f16>)
     attributes {wave.kernel} {
   %range = arith.constant 128 : i32
   %buffer = waveamd.make_buffer %base, %range
-      : !wave.ptr<f16, #wave.global>, i32 -> !wave.ptr<f16, #waveamd.buffer>
+      : !wave.ptr<#wave.global, f16>, i32 -> !wave.ptr<#waveamd.buffer, f16>
   %lane = wave.lane_id : !wave.simd<i32, 32>
   %ptrs = wave.ptr_add %buffer, %lane
-      : !wave.ptr<f16, #waveamd.buffer>, !wave.simd<i32, 32>
-      -> !wave.simd<!wave.ptr<f16, #waveamd.buffer>, 32>
+      : !wave.ptr<#waveamd.buffer, f16>, !wave.simd<i32, 32>
+      -> !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 32>
   %v, %tok = wave.load %ptrs
-      : (!wave.simd<!wave.ptr<f16, #waveamd.buffer>, 32>)
+      : (!wave.simd<!wave.ptr<#waveamd.buffer, f16>, 32>)
       -> (!wave.simd<f16, 32>, !wave.mem.token)
   %st = wave.store %v -> %ptrs after %tok
-      : (!wave.simd<f16, 32>, !wave.simd<!wave.ptr<f16, #waveamd.buffer>, 32>,
+      : (!wave.simd<f16, 32>, !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 32>,
          !wave.mem.token)
       -> !wave.mem.token
   return

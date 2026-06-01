@@ -35,11 +35,11 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // ASM: global_store_b128 {{v[0-9]+}}, {{v\[[0-9]+:[0-9]+\]}}, [[OUT]] offset:16
 // ASM: s_waitcnt_vscnt null, 0x0
 // ASM: s_endpgm
-func.func @matrix_kernel(%out: !wave.ptr<i32, #wave.global>) attributes {wave.kernel} {
+func.func @matrix_kernel(%out: !wave.ptr<#wave.global, i32>) attributes {wave.kernel} {
   %zero = arith.constant 0 : i32
   %seven = arith.constant 7 : i32
   %base = arith.constant 0 : i32
-  %ptr = wave.ptr_add %out, %base : !wave.ptr<i32, #wave.global>, i32 -> !wave.ptr<i32, #wave.global>
+  %ptr = wave.ptr_add %out, %base : !wave.ptr<#wave.global, i32>, i32 -> !wave.ptr<#wave.global, i32>
   %a = waveamd.fragment_fill %zero : i32 -> !waveamd.fragment<0, i8, 16, 16, 32, 4>
   %b = waveamd.fragment_fill %zero : i32 -> !waveamd.fragment<1, i8, 16, 16, 32, 4>
   %acc = waveamd.fragment_fill %seven : i32 -> !waveamd.fragment<2, i32, 16, 16, 32, 8>
@@ -48,9 +48,9 @@ func.func @matrix_kernel(%out: !wave.ptr<i32, #wave.global>) attributes {wave.ke
   %r = arith.constant 8 : i32
   %r_simd = wave.splat %r : i32 -> !wave.simd<i32, 32>
   %lane_off = wave.muli %lane, %r_simd : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
-  %tuple_ptr = wave.ptr_add %ptr, %lane_off : !wave.ptr<i32, #wave.global>, !wave.simd<i32, 32> -> !wave.simd<!wave.ptr<i32, #wave.global>, 32>
+  %tuple_ptr = wave.ptr_add %ptr, %lane_off : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 32> -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
   %regs = waveamd.fragment_unpack %result : !waveamd.fragment<2, i32, 16, 16, 32, 8> -> !wave.simd<vector<8xi32>, 32>
-  %store_token = wave.store %regs -> %tuple_ptr : (!wave.simd<vector<8xi32>, 32>, !wave.simd<!wave.ptr<i32, #wave.global>, 32>) -> !wave.mem.token
+  %store_token = wave.store %regs -> %tuple_ptr : (!wave.simd<vector<8xi32>, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>) -> !wave.mem.token
   return
 }
 
@@ -69,11 +69,11 @@ func.func @matrix_kernel(%out: !wave.ptr<i32, #wave.global>) attributes {wave.ke
 // ASM: global_store_b128 {{v[0-9]+}}, {{v\[[0-9]+:[0-9]+\]}}, {{s\[[0-9]+:[0-9]+\]}}{{$}}
 // ASM: global_store_b128 {{v[0-9]+}}, {{v\[[0-9]+:[0-9]+\]}}, {{s\[[0-9]+:[0-9]+\]}} offset:16
 // ASM: s_endpgm
-func.func @matrix_f16_kernel(%out: !wave.ptr<i32, #wave.global>) attributes {wave.kernel} {
+func.func @matrix_f16_kernel(%out: !wave.ptr<#wave.global, i32>) attributes {wave.kernel} {
   %zero = arith.constant 0 : i32
   %seven_as_f32_bits = arith.constant 1088421888 : i32
   %base = arith.constant 0 : i32
-  %ptr = wave.ptr_add %out, %base : !wave.ptr<i32, #wave.global>, i32 -> !wave.ptr<i32, #wave.global>
+  %ptr = wave.ptr_add %out, %base : !wave.ptr<#wave.global, i32>, i32 -> !wave.ptr<#wave.global, i32>
   %a = waveamd.fragment_fill %zero : i32 -> !waveamd.fragment<0, f16, 16, 16, 32, 8>
   %b = waveamd.fragment_fill %zero : i32 -> !waveamd.fragment<1, f16, 16, 16, 32, 8>
   %acc = waveamd.fragment_fill %seven_as_f32_bits : i32 -> !waveamd.fragment<2, f32, 16, 16, 32, 8>
@@ -82,9 +82,9 @@ func.func @matrix_f16_kernel(%out: !wave.ptr<i32, #wave.global>) attributes {wav
   %r = arith.constant 8 : i32
   %r_simd = wave.splat %r : i32 -> !wave.simd<i32, 32>
   %lane_off = wave.muli %lane, %r_simd : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
-  %tuple_ptr = wave.ptr_add %ptr, %lane_off : !wave.ptr<i32, #wave.global>, !wave.simd<i32, 32> -> !wave.simd<!wave.ptr<i32, #wave.global>, 32>
+  %tuple_ptr = wave.ptr_add %ptr, %lane_off : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 32> -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
   %regs = waveamd.fragment_unpack %result : !waveamd.fragment<2, f32, 16, 16, 32, 8> -> !wave.simd<vector<8xi32>, 32>
-  %store_token = wave.store %regs -> %tuple_ptr : (!wave.simd<vector<8xi32>, 32>, !wave.simd<!wave.ptr<i32, #wave.global>, 32>) -> !wave.mem.token
+  %store_token = wave.store %regs -> %tuple_ptr : (!wave.simd<vector<8xi32>, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>) -> !wave.mem.token
   return
 }
 

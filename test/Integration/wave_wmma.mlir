@@ -23,13 +23,13 @@
 module attributes {gpu.container_module} {
 
 gpu.module @kernels {
-  func.func @wmma_iu8_matmul_const(%out: !wave.ptr<i32, #wave.global>)
+  func.func @wmma_iu8_matmul_const(%out: !wave.ptr<#wave.global, i32>)
       attributes {gpu.kernel, wave.kernel} {
     %ones_i8x4 = arith.constant 0x01010101 : i32
     %acc_init  = arith.constant 0 : i32
     %base      = arith.constant 0 : i32
     %ptr = wave.ptr_add %out, %base
-        : !wave.ptr<i32, #wave.global>, i32 -> !wave.ptr<i32, #wave.global>
+        : !wave.ptr<#wave.global, i32>, i32 -> !wave.ptr<#wave.global, i32>
     %a   = waveamd.fragment_fill %ones_i8x4
         : i32 -> !waveamd.fragment<0, i8, 16, 16, 32, 4>
     %b   = waveamd.fragment_fill %ones_i8x4
@@ -47,20 +47,20 @@ gpu.module @kernels {
     %lane_off = wave.muli %lane, %r_simd
         : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
     %tuple_ptr = wave.ptr_add %ptr, %lane_off
-        : !wave.ptr<i32, #wave.global>, !wave.simd<i32, 32>
-        -> !wave.simd<!wave.ptr<i32, #wave.global>, 32>
+        : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 32>
+        -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
     %regs = waveamd.fragment_unpack %d
         : !waveamd.fragment<2, i32, 16, 16, 32, 8>
         -> !wave.simd<vector<8xi32>, 32>
     %tok = wave.store %regs -> %tuple_ptr
         : (!wave.simd<vector<8xi32>, 32>,
-           !wave.simd<!wave.ptr<i32, #wave.global>, 32>) -> !wave.mem.token
+           !wave.simd<!wave.ptr<#wave.global, i32>, 32>) -> !wave.mem.token
     return
   }
 }
 
 func.func private @wave_memref_to_ptr_global_i32(memref<256xi32>)
-    -> !wave.ptr<i32, #wave.global> attributes {llvm.emit_c_interface}
+    -> !wave.ptr<#wave.global, i32> attributes {llvm.emit_c_interface}
 
 func.func private @printMemrefI32(memref<*xi32>)
     attributes {llvm.emit_c_interface}
@@ -84,11 +84,11 @@ func.func @main() {
   gpu.host_register %unranked : memref<*xi32>
 
   %p = func.call @wave_memref_to_ptr_global_i32(%storage)
-      : (memref<256xi32>) -> !wave.ptr<i32, #wave.global>
+      : (memref<256xi32>) -> !wave.ptr<#wave.global, i32>
 
   gpu.launch_func @kernels::@wmma_iu8_matmul_const
       blocks in (%c1, %c1, %c1) threads in (%c32, %c1, %c1)
-      args(%p : !wave.ptr<i32, #wave.global>)
+      args(%p : !wave.ptr<#wave.global, i32>)
 
   func.call @printMemrefI32(%unranked) : (memref<*xi32>) -> ()
   return

@@ -77,6 +77,8 @@ Type getIndexExprResultType(MLIRContext *ctx, ValueRange bindings);
 FailureOr<MemoryPayloadShape> getMemoryPayloadShape(
     Type elementType,
     function_ref<InFlightDiagnostic(const Twine &)> emitError);
+std::optional<PtrType> getWavePointerType(Type type);
+bool isWavePointerLikeType(Type type);
 FailureOr<std::optional<MemoryAddress>>
 normalizeMemoryAddress(Value ptr, WaveDialect &dialect);
 FailureOr<std::optional<sym::ExprHandle>>

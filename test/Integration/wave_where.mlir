@@ -16,22 +16,22 @@
 module attributes {gpu.container_module} {
 
 gpu.module @kernels {
-  func.func @write_under_mask(%dst: !wave.ptr<i32, #wave.global>, %limit: i32)
+  func.func @write_under_mask(%dst: !wave.ptr<#wave.global, i32>, %limit: i32)
       attributes {gpu.kernel, wave.kernel} {
     %range = arith.constant 128 : i32
     %buffer = waveamd.make_buffer %dst, %range
-        : !wave.ptr<i32, #wave.global>, i32 -> !wave.ptr<i32, #waveamd.buffer>
+        : !wave.ptr<#wave.global, i32>, i32 -> !wave.ptr<#waveamd.buffer, i32>
     %lane = wave.lane_id : !wave.simd<i32, 32>
     %vlimit = wave.splat %limit : i32 -> !wave.simd<i32, 32>
     %active = wave.cmpi ult %lane, %vlimit
         : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.mask<32>
     %ptrs = wave.ptr_add %buffer, %lane
-        : !wave.ptr<i32, #waveamd.buffer>, !wave.simd<i32, 32>
-        -> !wave.simd<!wave.ptr<i32, #waveamd.buffer>, 32>
+        : !wave.ptr<#waveamd.buffer, i32>, !wave.simd<i32, 32>
+        -> !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 32>
     wave.where %active {
       %tok = wave.store %lane -> %ptrs
           : (!wave.simd<i32, 32>,
-             !wave.simd<!wave.ptr<i32, #waveamd.buffer>, 32>)
+             !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 32>)
           -> !wave.mem.token
       wave.yield
     } : !wave.mask<32>
@@ -40,7 +40,7 @@ gpu.module @kernels {
 }
 
 func.func private @wave_memref_to_ptr_global_i32(memref<32xi32>)
-    -> !wave.ptr<i32, #wave.global> attributes {llvm.emit_c_interface}
+    -> !wave.ptr<#wave.global, i32> attributes {llvm.emit_c_interface}
 
 func.func private @printMemrefI32(memref<*xi32>)
     attributes {llvm.emit_c_interface}
@@ -62,11 +62,11 @@ func.func @main() {
   gpu.host_register %unranked : memref<*xi32>
 
   %p = func.call @wave_memref_to_ptr_global_i32(%storage)
-      : (memref<32xi32>) -> !wave.ptr<i32, #wave.global>
+      : (memref<32xi32>) -> !wave.ptr<#wave.global, i32>
 
   gpu.launch_func @kernels::@write_under_mask
       blocks in (%c1, %c1, %c1) threads in (%c32, %c1, %c1)
-      args(%p : !wave.ptr<i32, #wave.global>, %limit : i32)
+      args(%p : !wave.ptr<#wave.global, i32>, %limit : i32)
 
   func.call @printMemrefI32(%unranked) : (memref<*xi32>) -> ()
   return

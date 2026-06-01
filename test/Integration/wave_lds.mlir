@@ -18,20 +18,20 @@
 module attributes {gpu.container_module} {
 
 gpu.module @kernels {
-  func.func @lds_mirror(%dst: !wave.ptr<i32, #wave.global>)
+  func.func @lds_mirror(%dst: !wave.ptr<#wave.global, i32>)
       attributes {gpu.kernel, wave.kernel, wave.lds_size = 128 : i64} {
     %c31 = arith.constant 31 : i32
     %v31 = wave.splat %c31 : i32 -> !wave.simd<i32, 32>
 
     %lane = wave.lane_id : !wave.simd<i32, 32>
-    %lds = wave.lds_base : !wave.ptr<i32, #wave.shared>
+    %lds = wave.lds_base : !wave.ptr<#wave.shared, i32>
 
     // Write: LDS[lane] = lane.
     %store_ptrs = wave.ptr_add %lds, %lane
-        : !wave.ptr<i32, #wave.shared>, !wave.simd<i32, 32>
-        -> !wave.simd<!wave.ptr<i32, #wave.shared>, 32>
+        : !wave.ptr<#wave.shared, i32>, !wave.simd<i32, 32>
+        -> !wave.simd<!wave.ptr<#wave.shared, i32>, 32>
     %store_token = wave.store %lane -> %store_ptrs
-        : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<i32, #wave.shared>, 32>)
+        : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.shared, i32>, 32>)
         -> !wave.mem.token
 
     %barrier_token = wave.barrier %store_token : (!wave.mem.token) -> !wave.mem.token
@@ -42,25 +42,25 @@ gpu.module @kernels {
     %mirror = wave.binary "xori" %lane, %v31
         : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
     %load_ptrs = wave.ptr_add %lds, %mirror
-        : !wave.ptr<i32, #wave.shared>, !wave.simd<i32, 32>
-        -> !wave.simd<!wave.ptr<i32, #wave.shared>, 32>
+        : !wave.ptr<#wave.shared, i32>, !wave.simd<i32, 32>
+        -> !wave.simd<!wave.ptr<#wave.shared, i32>, 32>
     %loaded:2 = wave.load %load_ptrs after %barrier_token
-        : (!wave.simd<!wave.ptr<i32, #wave.shared>, 32>, !wave.mem.token)
+        : (!wave.simd<!wave.ptr<#wave.shared, i32>, 32>, !wave.mem.token)
         -> (!wave.simd<i32, 32>, !wave.mem.token)
 
     // Store back into global so the host can verify the result.
     %out_ptrs = wave.ptr_add %dst, %lane
-        : !wave.ptr<i32, #wave.global>, !wave.simd<i32, 32>
-        -> !wave.simd<!wave.ptr<i32, #wave.global>, 32>
+        : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 32>
+        -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
     %final_token = wave.store %loaded#0 -> %out_ptrs after %loaded#1
-        : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<i32, #wave.global>, 32>, !wave.mem.token)
+        : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>, !wave.mem.token)
         -> !wave.mem.token
     return
   }
 }
 
 func.func private @wave_memref_to_ptr_global_i32(memref<32xi32>)
-    -> !wave.ptr<i32, #wave.global> attributes {llvm.emit_c_interface}
+    -> !wave.ptr<#wave.global, i32> attributes {llvm.emit_c_interface}
 
 func.func private @printMemrefI32(memref<*xi32>)
     attributes {llvm.emit_c_interface}
@@ -81,11 +81,11 @@ func.func @main() {
   gpu.host_register %unranked : memref<*xi32>
 
   %p = func.call @wave_memref_to_ptr_global_i32(%storage)
-      : (memref<32xi32>) -> !wave.ptr<i32, #wave.global>
+      : (memref<32xi32>) -> !wave.ptr<#wave.global, i32>
 
   gpu.launch_func @kernels::@lds_mirror
       blocks in (%c1, %c1, %c1) threads in (%c32, %c1, %c1)
-      args(%p : !wave.ptr<i32, #wave.global>)
+      args(%p : !wave.ptr<#wave.global, i32>)
 
   func.call @printMemrefI32(%unranked) : (memref<*xi32>) -> ()
   return

@@ -9,18 +9,18 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 // CHECK: buffer_store_dword
 // CHECK: s_waitcnt
 // CHECK: s_endpgm
-func.func @buffer_store_kernel(%out: !wave.ptr<i32, #wave.global>)
+func.func @buffer_store_kernel(%out: !wave.ptr<#wave.global, i32>)
     attributes {wave.kernel} {
   %range = arith.constant 128 : i32
   %buffer = waveamd.make_buffer %out, %range
-      : !wave.ptr<i32, #wave.global>, i32 -> !wave.ptr<i32, #waveamd.buffer>
+      : !wave.ptr<#wave.global, i32>, i32 -> !wave.ptr<#waveamd.buffer, i32>
   %wi_raw = wave.workitem_id 0 : !wave.simd<i32, 64>
   %wi = wave.assume_range %wi_raw, [0, 63] : !wave.simd<i32, 64>
   %ptrs = wave.ptr_add %buffer, %wi
-      : !wave.ptr<i32, #waveamd.buffer>, !wave.simd<i32, 64>
-      -> !wave.simd<!wave.ptr<i32, #waveamd.buffer>, 64>
+      : !wave.ptr<#waveamd.buffer, i32>, !wave.simd<i32, 64>
+      -> !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>
   %store_token = wave.store %wi -> %ptrs
-      : (!wave.simd<i32, 64>, !wave.simd<!wave.ptr<i32, #waveamd.buffer>, 64>)
+      : (!wave.simd<i32, 64>, !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>)
       -> !wave.mem.token
   return
 }
@@ -34,26 +34,26 @@ func.func @buffer_store_kernel(%out: !wave.ptr<i32, #wave.global>)
 // CHECK: ds_read_b32
 // CHECK: .wavefront_size: 64
 // CHECK: amdhsa.target:   amdgcn-amd-amdhsa--gfx950
-func.func @lds_echo_kernel(%out: !wave.ptr<i32, #wave.global>)
+func.func @lds_echo_kernel(%out: !wave.ptr<#wave.global, i32>)
     attributes {wave.kernel, wave.lds_size = 256 : i64} {
   %wi_raw = wave.workitem_id 0 : !wave.simd<i32, 64>
   %wi = wave.assume_range %wi_raw, [0, 63] : !wave.simd<i32, 64>
-  %lds = wave.lds_base : !wave.ptr<i32, #wave.shared>
+  %lds = wave.lds_base : !wave.ptr<#wave.shared, i32>
   %lds_ptrs = wave.ptr_add %lds, %wi
-      : !wave.ptr<i32, #wave.shared>, !wave.simd<i32, 64>
-      -> !wave.simd<!wave.ptr<i32, #wave.shared>, 64>
+      : !wave.ptr<#wave.shared, i32>, !wave.simd<i32, 64>
+      -> !wave.simd<!wave.ptr<#wave.shared, i32>, 64>
   %store_token = wave.store %wi -> %lds_ptrs
-      : (!wave.simd<i32, 64>, !wave.simd<!wave.ptr<i32, #wave.shared>, 64>)
+      : (!wave.simd<i32, 64>, !wave.simd<!wave.ptr<#wave.shared, i32>, 64>)
       -> !wave.mem.token
   %barrier_token = wave.barrier %store_token : (!wave.mem.token) -> !wave.mem.token
   %loaded:2 = wave.load %lds_ptrs after %barrier_token
-      : (!wave.simd<!wave.ptr<i32, #wave.shared>, 64>, !wave.mem.token)
+      : (!wave.simd<!wave.ptr<#wave.shared, i32>, 64>, !wave.mem.token)
       -> (!wave.simd<i32, 64>, !wave.mem.token)
   %out_ptrs = wave.ptr_add %out, %wi
-      : !wave.ptr<i32, #wave.global>, !wave.simd<i32, 64>
-      -> !wave.simd<!wave.ptr<i32, #wave.global>, 64>
+      : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 64>
+      -> !wave.simd<!wave.ptr<#wave.global, i32>, 64>
   %final_token = wave.store %loaded#0 -> %out_ptrs after %loaded#1
-      : (!wave.simd<i32, 64>, !wave.simd<!wave.ptr<i32, #wave.global>, 64>,
+      : (!wave.simd<i32, 64>, !wave.simd<!wave.ptr<#wave.global, i32>, 64>,
          !wave.mem.token)
       -> !wave.mem.token
   return

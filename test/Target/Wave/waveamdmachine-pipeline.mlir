@@ -60,12 +60,12 @@ func.func @where_test(%limit: i32) -> i32 {
 // METADATA: module attributes {{{.*}}waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"{{.*}}}
 // METADATA-LABEL: func.func @kernel_test
 // METADATA-SAME: waveamdmachine.metadata
-func.func @kernel_test(%out: !wave.ptr<i32, #wave.global>, %x: i32) attributes {wave.kernel} {
+func.func @kernel_test(%out: !wave.ptr<#wave.global, i32>, %x: i32) attributes {wave.kernel} {
   %lane = wave.lane_id : !wave.simd<i32, 32>
   %vx = wave.splat %x : i32 -> !wave.simd<i32, 32>
   %sum = wave.addi %lane, %vx : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
-  %ptrs = wave.ptr_add %out, %lane : !wave.ptr<i32, #wave.global>, !wave.simd<i32, 32> -> !wave.simd<!wave.ptr<i32, #wave.global>, 32>
-  %store_token = wave.store %sum -> %ptrs : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<i32, #wave.global>, 32>) -> !wave.mem.token
+  %ptrs = wave.ptr_add %out, %lane : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 32> -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
+  %store_token = wave.store %sum -> %ptrs : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>) -> !wave.mem.token
   return
 }
 

@@ -59,16 +59,22 @@ def Wave_MemTokenType : Wave_Type<"MemToken", "mem.token"> {
 def Wave_PtrType : Wave_Type<"Ptr", "ptr"> {
   let summary = "Wave pointer";
   let description = [{
-    A `!wave.ptr<T, #space>` value is a pointer to an element of type `T` in an
-    arbitrary address space attribute. The `wave` dialect defines
-    `#wave.global`, `#wave.shared`, and `#wave.private`; target-specific
-    dialects may provide additional address-space attributes.
+    A `!wave.ptr<#space, T>` value is a pointer to an element of type `T` in an
+    arbitrary address space attribute. A `!wave.ptr<#space>` value is
+    byte-addressed. The `wave` dialect defines `#wave.global`, `#wave.shared`,
+    and `#wave.private`; target-specific dialects may provide additional
+    address-space attributes.
   }];
 
-  let parameters = (ins "mlir::Type":$elementType,
-                        "mlir::Attribute":$addressSpace);
-  let assemblyFormat = "`<` $elementType `,` $addressSpace `>`";
+  let parameters = (ins "mlir::Attribute":$addressSpace,
+                        OptionalParameter<"mlir::Type">:$elementType);
+  let assemblyFormat = "`<` $addressSpace (`,` $elementType^)? `>`";
   let genVerifyDecl = 1;
+  let extraClassDeclaration = [{
+    static PtrType get(MLIRContext *context, Type elementType,
+                       Attribute addressSpace);
+    static PtrType get(MLIRContext *context, Attribute addressSpace);
+  }];
 }
 
 def Wave_Simd : Type<CPred<"::llvm::isa<::mlir::wave::SimdType>($_self)">,

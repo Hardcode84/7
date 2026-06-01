@@ -6,8 +6,8 @@
 //
 //===----------------------------------------------------------------------===//
 //
-// Type-conversion-only bridge: maps `!wave.ptr<T,
-// #wave.{global,shared,private}>` onto `!llvm.ptr<addrspace>` so host code can
+// Type-conversion-only bridge: maps `!wave.ptr<#wave.{global,shared,private},
+// T>` onto `!llvm.ptr<addrspace>` so host code can
 // hold and forward Wave pointers (kernel ABI handles) through the standard
 // convert-to-llvm pipeline. The device-side wave ops (wave.store, wave.ptr_add,
 // ...) are never LLVM-lowered; they are consumed by wave-translate on the
@@ -24,7 +24,7 @@ class LLVMTypeConverter;
 
 namespace wave {
 
-/// Add the `!wave.ptr<T, #space>` -> `!llvm.ptr<addrspace>` conversion to
+/// Add the `!wave.ptr<#space, T>` -> `!llvm.ptr<addrspace>` conversion to
 /// `converter`. Idempotent; safe to call from multiple lowering entry points.
 void populateWaveToLLVMTypeConversions(LLVMTypeConverter &converter);
 

@@ -109,14 +109,32 @@ static void bindPtrType(nb::module_ &m) {
   mlir_type_subclass(m, "PtrType", mlirWaveTypeIsAPtr)
       .def_classmethod(
           "get",
-          [](nb::object &cls, MlirType elementType,
-             MlirAttribute addressSpace) {
+          [](nb::object &cls, nb::object first, nb::object second) {
+            if (second.is_none()) {
+              MlirAttribute addressSpace = nb::cast<MlirAttribute>(first);
+              return cls(mlirWavePtrTypeGetOpaque(
+                  mlirAttributeGetContext(addressSpace), addressSpace));
+            }
+            MlirType elementType = nb::cast<MlirType>(first);
+            MlirAttribute addressSpace = nb::cast<MlirAttribute>(second);
             return cls(mlirWavePtrTypeGet(elementType, addressSpace));
           },
-          nb::arg("cls"), nb::arg("element_type"), nb::arg("address_space"))
-      .def_property_readonly(
-          "element_type",
-          [](MlirType self) { return mlirWavePtrTypeGetElementType(self); })
+          nb::arg("cls"), nb::arg("element_or_address_space"),
+          nb::arg("address_space") = nb::none())
+      .def_classmethod(
+          "get_opaque",
+          [](nb::object &cls, MlirAttribute addressSpace) {
+            return cls(mlirWavePtrTypeGetOpaque(
+                mlirAttributeGetContext(addressSpace), addressSpace));
+          },
+          nb::arg("cls"), nb::arg("address_space"))
+      .def_property_readonly("element_type",
+                             [](MlirType self) -> nb::object {
+                               if (!mlirWavePtrTypeHasElementType(self))
+                                 return nb::none();
+                               return nb::cast(
+                                   mlirWavePtrTypeGetElementType(self));
+                             })
       .def_property_readonly("address_space", [](MlirType self) {
         return mlirWavePtrTypeGetAddressSpace(self);
       });

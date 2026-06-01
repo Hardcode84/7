@@ -17,7 +17,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // SELECT: waveamdmachine.s_lshl_b32 {{.*}} -> (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<scc, 1>)
 // SELECT-NOT: waveamdmachine.v_add_u32
 // SELECT-NOT: waveamdmachine.v_mul_lo_u32
-func.func @uniform_i32_arith(%out: !wave.ptr<i32, #wave.global>) attributes {wave.kernel} {
+func.func @uniform_i32_arith(%out: !wave.ptr<#wave.global, i32>) attributes {wave.kernel} {
   %wgid = wave.workgroup_id 0
   %four = arith.constant 4 : i32
   %sum = wave.addi %wgid, %four : i32, i32 -> i32
@@ -26,7 +26,7 @@ func.func @uniform_i32_arith(%out: !wave.ptr<i32, #wave.global>) attributes {wav
   %shifted = wave.shli %scaled, %two : i32, i32 -> i32
   // Make the shifted result live so it survives DCE.
   %off = wave.index_expr <"S"> ["S"] (%shifted) : (i32) -> index
-  %ptr = wave.ptr_add %out, %off : !wave.ptr<i32, #wave.global>, index -> !wave.ptr<i32, #wave.global>
+  %ptr = wave.ptr_add %out, %off : !wave.ptr<#wave.global, i32>, index -> !wave.ptr<#wave.global, i32>
   return
 }
 
@@ -36,14 +36,14 @@ func.func @uniform_i32_arith(%out: !wave.ptr<i32, #wave.global>) attributes {wav
 // SELECT: %[[LANE:.*]] = waveamdmachine.v_mbcnt_lo
 // SELECT: %[[WGID:.*]] = waveamdmachine.s_workgroup_id_x
 // SELECT: %[[ADD:.*]] = waveamdmachine.v_add_u32 %[[WGID]], %[[LANE]]
-func.func @mixed_i32_addi(%out: !wave.ptr<i32, #wave.global>) attributes {wave.kernel} {
+func.func @mixed_i32_addi(%out: !wave.ptr<#wave.global, i32>) attributes {wave.kernel} {
   %lane = wave.lane_id : !wave.simd<i32, 32>
   %wgid = wave.workgroup_id 0
   %off = wave.addi %wgid, %lane : i32, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
-  %ptrs = wave.ptr_add %out, %off : !wave.ptr<i32, #wave.global>, !wave.simd<i32, 32> -> !wave.simd<!wave.ptr<i32, #wave.global>, 32>
+  %ptrs = wave.ptr_add %out, %off : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 32> -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
   %c0 = arith.constant 0 : i32
   %v = wave.splat %c0 : i32 -> !wave.simd<i32, 32>
-  %tok = wave.store %v -> %ptrs : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<i32, #wave.global>, 32>) -> !wave.mem.token
+  %tok = wave.store %v -> %ptrs : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>) -> !wave.mem.token
   return
 }
 

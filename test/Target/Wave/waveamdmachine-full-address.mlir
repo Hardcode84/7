@@ -12,15 +12,15 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // SELECT-NOT: waveamdmachine.global_store_b32 %
 // ASM-LABEL: global_constant_overflow:
 // ASM: global_store_b32 v[{{[0-9]+}}:{{[0-9]+}}], v{{[0-9]+}}, off
-func.func @global_constant_overflow(%out: !wave.ptr<i32, #wave.global>) attributes {wave.kernel} {
+func.func @global_constant_overflow(%out: !wave.ptr<#wave.global, i32>) attributes {wave.kernel} {
   %lane = wave.lane_id : !wave.simd<i32, 32>
   %off = wave.index_expr <"1073741824 + lid"> ["lid"] (%lane)
       : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
   %ptrs = wave.ptr_add %out, %off
-      : !wave.ptr<i32, #wave.global>, !wave.simd<index, 32>
-      -> !wave.simd<!wave.ptr<i32, #wave.global>, 32>
+      : !wave.ptr<#wave.global, i32>, !wave.simd<index, 32>
+      -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
   %tok = wave.store %lane -> %ptrs
-      : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<i32, #wave.global>, 32>)
+      : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>)
       -> !wave.mem.token
   return
 }
@@ -30,16 +30,16 @@ func.func @global_constant_overflow(%out: !wave.ptr<i32, #wave.global>) attribut
 // SELECT: waveamdmachine.global_store_b32_addr64
 // ASM-LABEL: global_raw_constant_overflow:
 // ASM: global_store_b32 v[{{[0-9]+}}:{{[0-9]+}}], v{{[0-9]+}}, off
-func.func @global_raw_constant_overflow(%out: !wave.ptr<i32, #wave.global>) attributes {wave.kernel} {
+func.func @global_raw_constant_overflow(%out: !wave.ptr<#wave.global, i32>) attributes {wave.kernel} {
   %raw = arith.constant 1073741824 : i32
   %lane = wave.lane_id : !wave.simd<i32, 32>
   %ptr = wave.ptr_add %out, %raw
-      : !wave.ptr<i32, #wave.global>, i32 -> !wave.ptr<i32, #wave.global>
+      : !wave.ptr<#wave.global, i32>, i32 -> !wave.ptr<#wave.global, i32>
   %ptrs = wave.ptr_add %ptr, %lane
-      : !wave.ptr<i32, #wave.global>, !wave.simd<i32, 32>
-      -> !wave.simd<!wave.ptr<i32, #wave.global>, 32>
+      : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 32>
+      -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
   %tok = wave.store %lane -> %ptrs
-      : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<i32, #wave.global>, 32>)
+      : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>)
       -> !wave.mem.token
   return
 }
@@ -48,15 +48,15 @@ func.func @global_raw_constant_overflow(%out: !wave.ptr<i32, #wave.global>) attr
 // SELECT: waveamdmachine.global_store_b32_addr64
 // ASM-LABEL: global_raw_unbounded_offset_addr64:
 // ASM: global_store_b32 v[{{[0-9]+}}:{{[0-9]+}}], v{{[0-9]+}}, off
-func.func @global_raw_unbounded_offset_addr64(%out: !wave.ptr<i32, #wave.global>, %raw: i32) attributes {wave.kernel} {
+func.func @global_raw_unbounded_offset_addr64(%out: !wave.ptr<#wave.global, i32>, %raw: i32) attributes {wave.kernel} {
   %lane = wave.lane_id : !wave.simd<i32, 32>
   %ptr = wave.ptr_add %out, %raw
-      : !wave.ptr<i32, #wave.global>, i32 -> !wave.ptr<i32, #wave.global>
+      : !wave.ptr<#wave.global, i32>, i32 -> !wave.ptr<#wave.global, i32>
   %ptrs = wave.ptr_add %ptr, %lane
-      : !wave.ptr<i32, #wave.global>, !wave.simd<i32, 32>
-      -> !wave.simd<!wave.ptr<i32, #wave.global>, 32>
+      : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 32>
+      -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
   %tok = wave.store %lane -> %ptrs
-      : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<i32, #wave.global>, 32>)
+      : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>)
       -> !wave.mem.token
   return
 }
@@ -69,19 +69,19 @@ func.func @global_raw_unbounded_offset_addr64(%out: !wave.ptr<i32, #wave.global>
 // SELECT: waveamdmachine.global_store_b32_addr64 %[[ADDR]]
 // ASM-LABEL: global_mixed_index_and_raw_ptr_add:
 // ASM: global_store_b32 v[{{[0-9]+}}:{{[0-9]+}}], v{{[0-9]+}}, off
-func.func @global_mixed_index_and_raw_ptr_add(%out: !wave.ptr<i32, #wave.global>) attributes {wave.kernel} {
+func.func @global_mixed_index_and_raw_ptr_add(%out: !wave.ptr<#wave.global, i32>) attributes {wave.kernel} {
   %raw_off = wave.workitem_id 0 : !wave.simd<i32, 32>
   %lane = wave.lane_id : !wave.simd<i32, 32>
   %raw = wave.ptr_add %out, %raw_off
-      : !wave.ptr<i32, #wave.global>, !wave.simd<i32, 32>
-      -> !wave.simd<!wave.ptr<i32, #wave.global>, 32>
+      : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 32>
+      -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
   %off = wave.index_expr <"1073741824 + lid"> ["lid"] (%lane)
       : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
   %ptrs = wave.ptr_add %raw, %off
-      : !wave.simd<!wave.ptr<i32, #wave.global>, 32>, !wave.simd<index, 32>
-      -> !wave.simd<!wave.ptr<i32, #wave.global>, 32>
+      : !wave.simd<!wave.ptr<#wave.global, i32>, 32>, !wave.simd<index, 32>
+      -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
   %tok = wave.store %lane -> %ptrs
-      : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<i32, #wave.global>, 32>)
+      : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>)
       -> !wave.mem.token
   return
 }
@@ -94,29 +94,29 @@ func.func @global_mixed_index_and_raw_ptr_add(%out: !wave.ptr<i32, #wave.global>
 // SELECT: waveamdmachine.global_store_b32_addr64
 // ASM-LABEL: global_loop_carry_mixed_addr64:
 // ASM: global_store_b32 v[{{[0-9]+}}:{{[0-9]+}}], v{{[0-9]+}}, off
-func.func @global_loop_carry_mixed_addr64(%out: !wave.ptr<i32, #wave.global>) attributes {wave.kernel} {
+func.func @global_loop_carry_mixed_addr64(%out: !wave.ptr<#wave.global, i32>) attributes {wave.kernel} {
   %lo = arith.constant 0 : i32
   %hi = arith.constant 1 : i32
   %step = arith.constant 1 : i32
   %stride = arith.constant 16 : i32
   %lane = wave.lane_id : !wave.simd<i32, 32>
   %raw = wave.ptr_add %out, %lane
-      : !wave.ptr<i32, #wave.global>, !wave.simd<i32, 32>
-      -> !wave.simd<!wave.ptr<i32, #wave.global>, 32>
+      : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 32>
+      -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
   scf.for %i = %lo to %hi step %step iter_args(%q = %raw)
-      -> (!wave.simd<!wave.ptr<i32, #wave.global>, 32>) : i32 {
+      -> (!wave.simd<!wave.ptr<#wave.global, i32>, 32>) : i32 {
     %off = wave.index_expr <"1073741824 + lid"> ["lid"] (%lane)
         : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
     %ptrs = wave.ptr_add %q, %off
-        : !wave.simd<!wave.ptr<i32, #wave.global>, 32>, !wave.simd<index, 32>
-        -> !wave.simd<!wave.ptr<i32, #wave.global>, 32>
+        : !wave.simd<!wave.ptr<#wave.global, i32>, 32>, !wave.simd<index, 32>
+        -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
     %tok = wave.store %lane -> %ptrs
-        : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<i32, #wave.global>, 32>)
+        : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>)
         -> !wave.mem.token
     %next = wave.ptr_add %q, %stride
-        : !wave.simd<!wave.ptr<i32, #wave.global>, 32>, i32
-        -> !wave.simd<!wave.ptr<i32, #wave.global>, 32>
-    scf.yield %next : !wave.simd<!wave.ptr<i32, #wave.global>, 32>
+        : !wave.simd<!wave.ptr<#wave.global, i32>, 32>, i32
+        -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
+    scf.yield %next : !wave.simd<!wave.ptr<#wave.global, i32>, 32>
   }
   return
 }
@@ -134,7 +134,7 @@ func.func @global_loop_carry_mixed_addr64(%out: !wave.ptr<i32, #wave.global>) at
 // VERIFY: waveamdmachine.global_store_b32_addr64
 // ASM-LABEL: global_addr64_two_uniform_products:
 // ASM: global_store_b32 v[{{[0-9]+}}:{{[0-9]+}}], v{{[0-9]+}}, off
-func.func @global_addr64_two_uniform_products(%out: !wave.ptr<i32, #wave.global>) attributes {wave.kernel} {
+func.func @global_addr64_two_uniform_products(%out: !wave.ptr<#wave.global, i32>) attributes {wave.kernel} {
   %lane = wave.lane_id : !wave.simd<i32, 32>
   %wgid_x = wave.workgroup_id 0
   %wgid_y = wave.workgroup_id 1
@@ -142,10 +142,10 @@ func.func @global_addr64_two_uniform_products(%out: !wave.ptr<i32, #wave.global>
       ["lid", "wgx", "wgy"] (%lane, %wgid_x, %wgid_y)
       : (!wave.simd<i32, 32>, i32, i32) -> !wave.simd<index, 32>
   %ptrs = wave.ptr_add %out, %off
-      : !wave.ptr<i32, #wave.global>, !wave.simd<index, 32>
-      -> !wave.simd<!wave.ptr<i32, #wave.global>, 32>
+      : !wave.ptr<#wave.global, i32>, !wave.simd<index, 32>
+      -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
   %tok = wave.store %lane -> %ptrs
-      : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<i32, #wave.global>, 32>)
+      : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>)
       -> !wave.mem.token
   return
 }
@@ -154,18 +154,18 @@ func.func @global_addr64_two_uniform_products(%out: !wave.ptr<i32, #wave.global>
 // SELECT: waveamdmachine.global_load_b32_addr64
 // ASM-LABEL: global_load_constant_overflow:
 // ASM: global_load_b32 v{{[0-9]+}}, v[{{[0-9]+}}:{{[0-9]+}}], off
-func.func @global_load_constant_overflow(%out: !wave.ptr<i32, #wave.global>) attributes {wave.kernel} {
+func.func @global_load_constant_overflow(%out: !wave.ptr<#wave.global, i32>) attributes {wave.kernel} {
   %lane = wave.lane_id : !wave.simd<i32, 32>
   %off = wave.index_expr <"1073741824 + lid"> ["lid"] (%lane)
       : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
   %ptrs = wave.ptr_add %out, %off
-      : !wave.ptr<i32, #wave.global>, !wave.simd<index, 32>
-      -> !wave.simd<!wave.ptr<i32, #wave.global>, 32>
+      : !wave.ptr<#wave.global, i32>, !wave.simd<index, 32>
+      -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
   %value, %load_token = wave.load %ptrs
-      : (!wave.simd<!wave.ptr<i32, #wave.global>, 32>)
+      : (!wave.simd<!wave.ptr<#wave.global, i32>, 32>)
       -> (!wave.simd<i32, 32>, !wave.mem.token)
   %tok = wave.store %value -> %ptrs after %load_token
-      : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<i32, #wave.global>, 32>, !wave.mem.token)
+      : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>, !wave.mem.token)
       -> !wave.mem.token
   return
 }

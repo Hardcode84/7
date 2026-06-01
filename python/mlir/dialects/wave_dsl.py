@@ -187,8 +187,16 @@ def ptr_type(
     return PtrType.get(element_type or i32(), address_space or global_address_space())
 
 
+def opaque_ptr_type(address_space: Attribute | None = None) -> Type:
+    return PtrType.get_opaque(address_space or global_address_space())
+
+
 def buffer_ptr_type(element_type: Type | None = None) -> Type:
     return ptr_type(element_type, buffer_address_space())
+
+
+def opaque_buffer_ptr_type() -> Type:
+    return opaque_ptr_type(buffer_address_space())
 
 
 def simd_ptr_type(
@@ -789,7 +797,7 @@ class FunctionBuilder:
         """Load a fragment by stitching a tuple ``wave.load`` and pack.
 
         ``ptr`` must already encode the per-lane base address (typically
-        a ``!wave.simd<!wave.ptr<T, space>, W>`` produced by
+        a ``!wave.simd<!wave.ptr<space, T>, W>`` produced by
         ``ptr_add`` of a uniform base and a lane-varying offset). The
         helper widens the load to the fragment's register count and
         threads the resulting memory token back to the caller so it can
@@ -1025,6 +1033,8 @@ __all__ = [
     "mem_token_type",
     "mod",
     "module",
+    "opaque_buffer_ptr_type",
+    "opaque_ptr_type",
     "private_address_space",
     "ptr_type",
     "shared_address_space",

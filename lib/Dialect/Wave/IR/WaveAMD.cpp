@@ -247,7 +247,8 @@ LogicalResult DmaLoadLdsOp::verify() {
   auto destPtr = cast<wave::PtrType>(getDest().getType());
   if (!isa<wave::SharedAddressSpaceAttr>(destPtr.getAddressSpace()))
     return emitOpError("destination pointer must be shared");
-  if (!destPtr.getElementType().isInteger(32))
+  Type destElementType = destPtr.getElementType();
+  if (destElementType && !destElementType.isInteger(32))
     return emitOpError("destination pointer element type must be i32");
   return success();
 }

@@ -2,9 +2,9 @@
 // RUN: wave-opt %s --pass-pipeline='builtin.module(transform-preload-library{transform-library-paths=%wave_pipelines},transform-interpreter{entry-point=waveamd_backend})' | FileCheck %s --check-prefix=SCHEDULED
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100", wavemeta.params = {}} {
-func.func @load_source_dialects(%p: !wave.ptr<i32, #wave.global>, %range: i32) {
+func.func @load_source_dialects(%p: !wave.ptr<#wave.global, i32>, %range: i32) {
   %lane = wave.lane_id : !wave.simd<i32, 32>
-  %buf = waveamd.make_buffer %p, %range : !wave.ptr<i32, #wave.global>, i32 -> !wave.ptr<i32, #waveamd.buffer>
+  %buf = waveamd.make_buffer %p, %range : !wave.ptr<#wave.global, i32>, i32 -> !wave.ptr<#waveamd.buffer, i32>
   return
 }
 

@@ -369,7 +369,7 @@ class _TileCoords:
 def _wrap_in_buffer(
     bld: dsl.FunctionBuilder, ptr: dsl.Value, num_elements: int
 ) -> dsl.Value:
-    """Build a ``!wave.ptr<f16, #waveamd.buffer>`` from a global f16 pointer.
+    """Build a ``!wave.ptr<#waveamd.buffer, f16>`` from a global f16 pointer.
 
     The buffer descriptor's NUM_RECORDS field is set in bytes (the
     32-bit/format flag in :func:`MakeBufferRsrcOp` => byte-stride

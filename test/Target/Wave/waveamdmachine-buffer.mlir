@@ -21,14 +21,14 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // ASM: s_load_b64
 // ASM: s_mov_b32
 // ASM: buffer_store_b32 {{v[0-9]+}}, {{v[0-9]+}}, {{s\[[0-9]+:[0-9]+\]}}, 0 offen
-func.func @buffer_store_kernel(%out: !wave.ptr<i32, #wave.global>, %x: i32) attributes {wave.kernel} {
+func.func @buffer_store_kernel(%out: !wave.ptr<#wave.global, i32>, %x: i32) attributes {wave.kernel} {
   %range = arith.constant 128 : i32
-  %buffer = waveamd.make_buffer %out, %range : !wave.ptr<i32, #wave.global>, i32 -> !wave.ptr<i32, #waveamd.buffer>
+  %buffer = waveamd.make_buffer %out, %range : !wave.ptr<#wave.global, i32>, i32 -> !wave.ptr<#waveamd.buffer, i32>
   %lane = wave.lane_id : !wave.simd<i32, 32>
   %vx = wave.splat %x : i32 -> !wave.simd<i32, 32>
   %sum = wave.addi %lane, %vx : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
-  %ptrs = wave.ptr_add %buffer, %lane : !wave.ptr<i32, #waveamd.buffer>, !wave.simd<i32, 32> -> !wave.simd<!wave.ptr<i32, #waveamd.buffer>, 32>
-  %store_token = wave.store %sum -> %ptrs : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<i32, #waveamd.buffer>, 32>) -> !wave.mem.token
+  %ptrs = wave.ptr_add %buffer, %lane : !wave.ptr<#waveamd.buffer, i32>, !wave.simd<i32, 32> -> !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 32>
+  %store_token = wave.store %sum -> %ptrs : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 32>) -> !wave.mem.token
   return
 }
 
@@ -37,19 +37,19 @@ func.func @buffer_store_kernel(%out: !wave.ptr<i32, #wave.global>, %x: i32) attr
 // SELECT-DAG: %[[LANE:.*]] = waveamdmachine.v_mbcnt_lo
 // SELECT: %[[SBYTE:[^,]+]], %{{.*}} = waveamdmachine.s_lshl_b32 %[[U]],
 // SELECT: waveamdmachine.buffer_store_b32 %{{.*}}, {{.*}}, {{.*}}, %[[SBYTE]]
-func.func @buffer_bounded_raw_uniform_uses_soffset(%out: !wave.ptr<i32, #wave.global>, %u_raw: i32) attributes {wave.kernel} {
+func.func @buffer_bounded_raw_uniform_uses_soffset(%out: !wave.ptr<#wave.global, i32>, %u_raw: i32) attributes {wave.kernel} {
   %u = wave.assume_range %u_raw, [0, 1023] : i32
   %range = arith.constant 4096 : i32
   %buffer = waveamd.make_buffer %out, %range
-      : !wave.ptr<i32, #wave.global>, i32 -> !wave.ptr<i32, #waveamd.buffer>
+      : !wave.ptr<#wave.global, i32>, i32 -> !wave.ptr<#waveamd.buffer, i32>
   %lane = wave.lane_id : !wave.simd<i32, 32>
   %ptr = wave.ptr_add %buffer, %u
-      : !wave.ptr<i32, #waveamd.buffer>, i32 -> !wave.ptr<i32, #waveamd.buffer>
+      : !wave.ptr<#waveamd.buffer, i32>, i32 -> !wave.ptr<#waveamd.buffer, i32>
   %ptrs = wave.ptr_add %ptr, %lane
-      : !wave.ptr<i32, #waveamd.buffer>, !wave.simd<i32, 32>
-      -> !wave.simd<!wave.ptr<i32, #waveamd.buffer>, 32>
+      : !wave.ptr<#waveamd.buffer, i32>, !wave.simd<i32, 32>
+      -> !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 32>
   %tok = wave.store %lane -> %ptrs
-      : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<i32, #waveamd.buffer>, 32>)
+      : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 32>)
       -> !wave.mem.token
   return
 }
@@ -71,14 +71,14 @@ func.func @buffer_bounded_raw_uniform_uses_soffset(%out: !wave.ptr<i32, #wave.gl
 // ASM-NOT: offset:
 // ASM: s_waitcnt {{.*}}vmcnt
 // ASM: global_store_b32
-func.func @buffer_load_kernel(%in: !wave.ptr<i32, #wave.global>, %out: !wave.ptr<i32, #wave.global>) attributes {wave.kernel} {
+func.func @buffer_load_kernel(%in: !wave.ptr<#wave.global, i32>, %out: !wave.ptr<#wave.global, i32>) attributes {wave.kernel} {
   %range = arith.constant 128 : i32
-  %buffer = waveamd.make_buffer %in, %range : !wave.ptr<i32, #wave.global>, i32 -> !wave.ptr<i32, #waveamd.buffer>
+  %buffer = waveamd.make_buffer %in, %range : !wave.ptr<#wave.global, i32>, i32 -> !wave.ptr<#waveamd.buffer, i32>
   %lane = wave.lane_id : !wave.simd<i32, 32>
-  %iptrs = wave.ptr_add %buffer, %lane : !wave.ptr<i32, #waveamd.buffer>, !wave.simd<i32, 32> -> !wave.simd<!wave.ptr<i32, #waveamd.buffer>, 32>
-  %v, %tok = wave.load %iptrs : (!wave.simd<!wave.ptr<i32, #waveamd.buffer>, 32>) -> (!wave.simd<i32, 32>, !wave.mem.token)
-  %optrs = wave.ptr_add %out, %lane : !wave.ptr<i32, #wave.global>, !wave.simd<i32, 32> -> !wave.simd<!wave.ptr<i32, #wave.global>, 32>
-  %store_token = wave.store %v -> %optrs after %tok : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<i32, #wave.global>, 32>, !wave.mem.token) -> !wave.mem.token
+  %iptrs = wave.ptr_add %buffer, %lane : !wave.ptr<#waveamd.buffer, i32>, !wave.simd<i32, 32> -> !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 32>
+  %v, %tok = wave.load %iptrs : (!wave.simd<!wave.ptr<#waveamd.buffer, i32>, 32>) -> (!wave.simd<i32, 32>, !wave.mem.token)
+  %optrs = wave.ptr_add %out, %lane : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 32> -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
+  %store_token = wave.store %v -> %optrs after %tok : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>, !wave.mem.token) -> !wave.mem.token
   return
 }
 
@@ -94,20 +94,20 @@ func.func @buffer_load_kernel(%in: !wave.ptr<i32, #wave.global>, %out: !wave.ptr
 // ASM: buffer_load_b128 v{{\[[0-9]+:[0-9]+\]}}, {{v[0-9]+}}, {{s\[[0-9]+:[0-9]+\]}}, 0 offen{{$}}
 // ASM: buffer_load_b128 v{{\[[0-9]+:[0-9]+\]}}, {{v[0-9]+}}, {{s\[[0-9]+:[0-9]+\]}}, 0 offen offset:16
 // ASM: s_waitcnt {{.*}}vmcnt
-func.func @buffer_load_tuple_kernel(%in: !wave.ptr<i32, #wave.global>, %out: !wave.ptr<i32, #wave.global>) attributes {wave.kernel} {
+func.func @buffer_load_tuple_kernel(%in: !wave.ptr<#wave.global, i32>, %out: !wave.ptr<#wave.global, i32>) attributes {wave.kernel} {
   %range = arith.constant 1024 : i32
-  %buffer = waveamd.make_buffer %in, %range : !wave.ptr<i32, #wave.global>, i32 -> !wave.ptr<i32, #waveamd.buffer>
+  %buffer = waveamd.make_buffer %in, %range : !wave.ptr<#wave.global, i32>, i32 -> !wave.ptr<#waveamd.buffer, i32>
   %lane = wave.lane_id : !wave.simd<i32, 32>
-  %iptrs = wave.ptr_add %buffer, %lane : !wave.ptr<i32, #waveamd.buffer>, !wave.simd<i32, 32> -> !wave.simd<!wave.ptr<i32, #waveamd.buffer>, 32>
-  %v, %tok = wave.load %iptrs : (!wave.simd<!wave.ptr<i32, #waveamd.buffer>, 32>) -> (!wave.simd<vector<8xi32>, 32>, !wave.mem.token)
-  %optrs = wave.ptr_add %out, %lane : !wave.ptr<i32, #wave.global>, !wave.simd<i32, 32> -> !wave.simd<!wave.ptr<i32, #wave.global>, 32>
+  %iptrs = wave.ptr_add %buffer, %lane : !wave.ptr<#waveamd.buffer, i32>, !wave.simd<i32, 32> -> !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 32>
+  %v, %tok = wave.load %iptrs : (!wave.simd<!wave.ptr<#waveamd.buffer, i32>, 32>) -> (!wave.simd<vector<8xi32>, 32>, !wave.mem.token)
+  %optrs = wave.ptr_add %out, %lane : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 32> -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
   %frag = waveamd.fragment_pack %v : !wave.simd<vector<8xi32>, 32> -> !waveamd.fragment<2, f32, 16, 16, 32, 8>
   %r = arith.constant 8 : i32
   %r_simd = wave.splat %r : i32 -> !wave.simd<i32, 32>
   %lane_off = wave.muli %lane, %r_simd : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
-  %tuple_ptr = wave.ptr_add %optrs, %lane_off : !wave.simd<!wave.ptr<i32, #wave.global>, 32>, !wave.simd<i32, 32> -> !wave.simd<!wave.ptr<i32, #wave.global>, 32>
+  %tuple_ptr = wave.ptr_add %optrs, %lane_off : !wave.simd<!wave.ptr<#wave.global, i32>, 32>, !wave.simd<i32, 32> -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
   %regs = waveamd.fragment_unpack %frag : !waveamd.fragment<2, f32, 16, 16, 32, 8> -> !wave.simd<vector<8xi32>, 32>
-  %store_token = wave.store %regs -> %tuple_ptr after %tok : (!wave.simd<vector<8xi32>, 32>, !wave.simd<!wave.ptr<i32, #wave.global>, 32>, !wave.mem.token) -> !wave.mem.token
+  %store_token = wave.store %regs -> %tuple_ptr after %tok : (!wave.simd<vector<8xi32>, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>, !wave.mem.token) -> !wave.mem.token
   return
 }
 

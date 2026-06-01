@@ -94,6 +94,15 @@ MlirType mlirWavePtrTypeGet(MlirType elementType, MlirAttribute addressSpace) {
   return wrap(wave::PtrType::get(elt.getContext(), elt, unwrap(addressSpace)));
 }
 
+MlirType mlirWavePtrTypeGetOpaque(MlirContext ctx, MlirAttribute addressSpace) {
+  return wrap(wave::PtrType::get(unwrap(ctx), unwrap(addressSpace)));
+}
+
+bool mlirWavePtrTypeHasElementType(MlirType type) {
+  return static_cast<bool>(
+      llvm::cast<wave::PtrType>(unwrap(type)).getElementType());
+}
+
 MlirType mlirWavePtrTypeGetElementType(MlirType type) {
   return wrap(llvm::cast<wave::PtrType>(unwrap(type)).getElementType());
 }

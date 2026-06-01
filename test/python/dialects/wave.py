@@ -113,6 +113,14 @@ def test_typed_bindings():
         assert casted_ptr.element_type == f32
         assert casted_ptr.address_space == global_addr
 
+        opaque = w.opaque_ptr_type(global_addr)
+        assert w.PtrType.isinstance(opaque)
+        opaque_ptr = w.PtrType(opaque)
+        assert opaque_ptr.element_type is None
+        assert opaque_ptr.address_space == global_addr
+        print(opaque)
+        # CHECK: !wave.ptr<#wave.global>
+
         mask = w.mask_type(32)
         assert w.MaskType.isinstance(mask)
         assert w.MaskType(mask).width == 32
@@ -162,8 +170,8 @@ def test_waveamd_buffer_pointer_type():
             f.ptr_add(buffer, lane, w.simd_type(w.buffer_ptr_type(w.i32())))
         # CHECK: func.func @buffer_ptr_kernel
         # CHECK: waveamd.make_buffer
-        # CHECK: !wave.ptr<i32, #waveamd.buffer>
-        # CHECK: !wave.simd<!wave.ptr<i32, #waveamd.buffer>, 32>
+        # CHECK: !wave.ptr<#waveamd.buffer, i32>
+        # CHECK: !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 32>
         print(m.module)
 
 

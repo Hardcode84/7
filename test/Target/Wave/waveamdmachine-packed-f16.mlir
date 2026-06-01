@@ -15,7 +15,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // ASM: v_pk_add_f16 [[ADD:v[0-9]+]], [[PK]], [[A]]
 // ASM: v_pk_mul_f16 [[MUL:v[0-9]+]], [[ADD]], [[PK]] op_sel:[1,0] op_sel_hi:[0,1] clamp
 // ASM: v_pk_fma_f16 {{v[0-9]+}}, [[MUL]], [[ADD]], [[PK]] op_sel:[1,0,1] op_sel_hi:[1,1,0]
-func.func @packed_f16_roundtrip(%out: !wave.ptr<i32, #wave.global>)
+func.func @packed_f16_roundtrip(%out: !wave.ptr<#wave.global, i32>)
     attributes {wave.kernel} {
   %base = waveamdmachine.arg {index = 0 : i64, pointer = true}
       : !waveamdmachine.reg<sgpr, 2>
