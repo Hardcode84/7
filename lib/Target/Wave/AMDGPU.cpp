@@ -117,6 +117,7 @@ struct KernelInfo {
   X(sLshrB32, S_LSHR_B32_vi, S_LSHR_B32_gfx11)                                 \
   X(sAndB32, S_AND_B32_vi, S_AND_B32_gfx11)                                    \
   X(sXorB32, S_XOR_B32_vi, S_XOR_B32_gfx11)                                    \
+  X(sXorB64, S_XOR_B64_vi, S_XOR_B64_gfx11)                                    \
   X(sAndn2B32, S_ANDN2_B32_vi, S_ANDN2_B32_gfx11)                              \
   X(sAndn2B64, S_ANDN2_B64_vi, S_ANDN2_B64_gfx11)                              \
   X(sAndSaveexecB64, S_AND_SAVEEXEC_B64_vi, S_AND_SAVEEXEC_B64_gfx11)          \
@@ -141,6 +142,9 @@ struct KernelInfo {
   X(sSetpcB64, S_SETPC_B64_vi, S_SETPC_B64_gfx11)                              \
   X(vMbcntLo, V_MBCNT_LO_U32_B32_e64_vi, V_MBCNT_LO_U32_B32_e64_gfx11)         \
   X(vMovB32, V_MOV_B32_e32_vi, V_MOV_B32_e32_gfx11)                            \
+  X(vAndB32, V_AND_B32_e32_vi, V_AND_B32_e32_gfx11)                            \
+  X(vOrB32, V_OR_B32_e32_vi, V_OR_B32_e32_gfx11)                               \
+  X(vXorB32, V_XOR_B32_e32_vi, V_XOR_B32_e32_gfx11)                            \
   X(vLshlrevB32, V_LSHLREV_B32_e32_vi, V_LSHLREV_B32_e32_gfx11)                \
   X(vLshrrevB32, V_LSHRREV_B32_e32_vi, V_LSHRREV_B32_e32_gfx11)                \
   X(vReadfirstlaneB32, V_READFIRSTLANE_B32_vi, V_READFIRSTLANE_B32_gfx11)      \
@@ -383,6 +387,7 @@ private:
   unsigned sLshrB32() const { return opcodes.sLshrB32; }
   unsigned sAndB32() const { return opcodes.sAndB32; }
   unsigned sXorB32() const { return opcodes.sXorB32; }
+  unsigned sXorB64() const { return opcodes.sXorB64; }
   unsigned sAndn2B32() const { return opcodes.sAndn2B32; }
   unsigned sAndn2B64() const { return opcodes.sAndn2B64; }
   unsigned sAndSaveexecB64() const { return opcodes.sAndSaveexecB64; }
@@ -407,6 +412,9 @@ private:
   unsigned sSetpcB64() const { return opcodes.sSetpcB64; }
   unsigned vMbcntLo() const { return opcodes.vMbcntLo; }
   unsigned vMovB32() const { return opcodes.vMovB32; }
+  unsigned vAndB32() const { return opcodes.vAndB32; }
+  unsigned vOrB32() const { return opcodes.vOrB32; }
+  unsigned vXorB32() const { return opcodes.vXorB32; }
   unsigned vLshlrevB32() const { return opcodes.vLshlrevB32; }
   unsigned vLshrrevB32() const { return opcodes.vLshrrevB32; }
   unsigned vReadfirstlaneB32() const { return opcodes.vReadfirstlaneB32; }
@@ -1302,11 +1310,9 @@ private:
       // Wave selection emits these with a VGPR on one side.
       if (!isVGPR(rhs))
         std::swap(lhs, rhs);
-      unsigned opcode = isa<waveamdmachine::VAndB32Op>(op)
-                            ? llvm::AMDGPU::V_AND_B32_e32_gfx11
-                        : isa<waveamdmachine::VOrB32Op>(op)
-                            ? llvm::AMDGPU::V_OR_B32_e32_gfx11
-                            : llvm::AMDGPU::V_XOR_B32_e32_gfx11;
+      unsigned opcode = isa<waveamdmachine::VAndB32Op>(op)  ? vAndB32()
+                        : isa<waveamdmachine::VOrB32Op>(op) ? vOrB32()
+                                                            : vXorB32();
       return emitMC(
           opcode, {toMCOperand(result()), toMCOperand(lhs), toMCOperand(rhs)});
     }
@@ -1489,6 +1495,10 @@ private:
       return emitMC(sXorB32(), {toMCOperand(op.getResult(0)),
                                 toMCOperand(op.getOperand(0)),
                                 toMCOperand(op.getOperand(1))});
+    if (isa<waveamdmachine::SXorB64Op>(op))
+      return emitMC(sXorB64(), {toMCOperand(op.getResult(0)),
+                                toMCOperand(op.getOperand(0)),
+                                toMCOperand(op.getOperand(1))});
     if (isa<waveamdmachine::SAddU64Op>(op)) {
       // Carry-chain: `s_add_u32 lo` sets SCC; `s_addc_u32 hi` consumes
       // and re-sets it. Component splits go through the SGPR helper.
@@ -1592,6 +1602,18 @@ private:
         return failure();
       return emitVAddU32(toMCVGPRComponent(res, 1), toMCVGPRComponent(res, 1),
                          toMCOperand(scratch), op);
+    }
+    if (isa<waveamdmachine::VXorB64Op>(op)) {
+      Value res = op.getResult(0);
+      Value lhs = op.getOperand(0);
+      Value rhs = op.getOperand(1);
+      if (failed(emitMC(vXorB32(),
+                        {toMCVGPRComponent(res, 0), toMCVGPRComponent(lhs, 0),
+                         toMCVGPRComponent(rhs, 0)})))
+        return failure();
+      return emitMC(vXorB32(),
+                    {toMCVGPRComponent(res, 1), toMCVGPRComponent(lhs, 1),
+                     toMCVGPRComponent(rhs, 1)});
     }
     if (isa<waveamdmachine::SLshlB64Op>(op))
       // Hardware reads only the low 32 bits of the shift amount; pass

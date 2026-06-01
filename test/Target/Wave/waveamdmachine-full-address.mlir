@@ -150,6 +150,26 @@ func.func @global_addr64_two_uniform_products(%out: !wave.ptr<#wave.global, i32>
   return
 }
 
+// SELECT-LABEL: func.func @global_addr64_xor
+// SELECT: waveamdmachine.v_xor_b64
+// SELECT: waveamdmachine.global_store_b32_addr64
+// ASM-LABEL: global_addr64_xor:
+// ASM: v_xor_b32
+// ASM: v_xor_b32
+// ASM: global_store_b32 v[{{[0-9]+}}:{{[0-9]+}}], v{{[0-9]+}}, off
+func.func @global_addr64_xor(%out: !wave.ptr<#wave.global, i32>) attributes {wave.kernel} {
+  %lane = wave.lane_id : !wave.simd<i32, 32>
+  %off = wave.index_expr <"xor(lid, 1073741824)"> ["lid"] (%lane)
+      : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
+  %ptrs = wave.ptr_add %out, %off
+      : !wave.ptr<#wave.global, i32>, !wave.simd<index, 32>
+      -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
+  %tok = wave.store %lane -> %ptrs
+      : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>)
+      -> !wave.mem.token
+  return
+}
+
 // SELECT-LABEL: func.func @global_load_constant_overflow
 // SELECT: waveamdmachine.global_load_b32_addr64
 // ASM-LABEL: global_load_constant_overflow:

@@ -696,6 +696,23 @@ static Value mulWide(WaveAMDMachineSelector &S, Location loc, Value lhs,
       .getResult();
 }
 
+static Value xorWide(WaveAMDMachineSelector &S, Location loc, Value lhs,
+                     Value rhs) {
+  if (isWideVGPR(lhs) || isWideVGPR(rhs)) {
+    Type resultType =
+        getRegType(S.builder.getContext(), waveamdmachine::RegClass::VGPR, 2);
+    return waveamdmachine::VXorB64Op::create(S.builder, loc, resultType,
+                                             ensureVGPR2(S, loc, lhs),
+                                             ensureVGPR2(S, loc, rhs));
+  }
+  Type resultType =
+      getRegType(S.builder.getContext(), waveamdmachine::RegClass::SGPR, 2);
+  return waveamdmachine::SXorB64Op::create(
+             S.builder, loc, resultType, getSCCType(S.builder.getContext()),
+             ensureSGPR2(S, loc, lhs), ensureSGPR2(S, loc, rhs))
+      .getResult();
+}
+
 static FailureOr<Value>
 materializeWideIndexExprNode(WaveAMDMachineSelector &S, sym::ExprHandle expr,
                              Operation *user,
@@ -838,9 +855,22 @@ static FailureOr<Value> materializeWideRational(WaveAMDMachineSelector &S,
 }
 
 static FailureOr<Value>
-materializeWideIndexExprNode(WaveAMDMachineSelector &S, sym::ExprHandle expr,
-                             Operation *user,
-                             ArrayRef<std::pair<std::string, Value>> bindings) {
+materializeWideXor(WaveAMDMachineSelector &S, sym::ExprHandle expr,
+                   Operation *user,
+                   ArrayRef<std::pair<std::string, Value>> bindings) {
+  sym::ExprView view(expr);
+  FailureOr<Value> lhs =
+      materializeWideIndexExprNode(S, view.getBinaryLhs(), user, bindings);
+  FailureOr<Value> rhs =
+      materializeWideIndexExprNode(S, view.getBinaryRhs(), user, bindings);
+  if (failed(lhs) || failed(rhs))
+    return failure();
+  return xorWide(S, user->getLoc(), *lhs, *rhs);
+}
+
+static FailureOr<Value> materializeWidePrimitiveIndexExprNode(
+    WaveAMDMachineSelector &S, sym::ExprHandle expr, Operation *user,
+    ArrayRef<std::pair<std::string, Value>> bindings) {
   sym::ExprView view(expr);
   switch (view.getKind()) {
   case sym::ExprKind::Integer:
@@ -851,20 +881,46 @@ materializeWideIndexExprNode(WaveAMDMachineSelector &S, sym::ExprHandle expr,
     return materializeWideRational(S, expr, user);
   case sym::ExprKind::Symbol:
     return materializeWideSymbol(S, expr, user, bindings);
+  default:
+    break;
+  }
+  return user->emitError("full-address index_expr leaf unsupported expression "
+                         "kind ")
+         << static_cast<int>(view.getKind());
+}
+
+static FailureOr<Value> materializeWideCompoundIndexExprNode(
+    WaveAMDMachineSelector &S, sym::ExprHandle expr, Operation *user,
+    ArrayRef<std::pair<std::string, Value>> bindings) {
+  sym::ExprView view(expr);
+  switch (view.getKind()) {
   case sym::ExprKind::Add:
     return materializeWideAdd(S, expr, user, bindings);
   case sym::ExprKind::Mul:
     return materializeWideMul(S, expr, user, bindings);
+  case sym::ExprKind::Xor:
+    return materializeWideXor(S, expr, user, bindings);
   case sym::ExprKind::Floor:
   case sym::ExprKind::Ceil:
   case sym::ExprKind::Mod:
-    return user->emitError(
-        "full-address index_expr supports only add/mul expressions");
+    return user->emitError("full-address index_expr supports only add/mul/xor "
+                           "expressions");
   default:
     break;
   }
   return user->emitError("full-address index_expr unsupported expression kind ")
          << static_cast<int>(view.getKind());
+}
+
+static FailureOr<Value>
+materializeWideIndexExprNode(WaveAMDMachineSelector &S, sym::ExprHandle expr,
+                             Operation *user,
+                             ArrayRef<std::pair<std::string, Value>> bindings) {
+  sym::ExprKind kind = sym::ExprView(expr).getKind();
+  if (kind == sym::ExprKind::Integer || kind == sym::ExprKind::Rational ||
+      kind == sym::ExprKind::Symbol)
+    return materializeWidePrimitiveIndexExprNode(S, expr, user, bindings);
+  return materializeWideCompoundIndexExprNode(S, expr, user, bindings);
 }
 
 static Value sgprPairToVGPRPair(WaveAMDMachineSelector &S, Location loc,
@@ -1441,27 +1497,52 @@ static Value buildWaveBinary(OpBuilder &builder, Location loc, Type resultType,
   return Value{};
 }
 
+static bool isSupportedWaveBinaryKind(StringRef kind) {
+  return kind == "shri" || kind == "andi" || kind == "ori" || kind == "xori";
+}
+
+static LogicalResult selectBinaryI64Xor(WaveAMDMachineSelector &S,
+                                        BinaryOp op) {
+  Value lhs = ensureVGPR2(S, op.getLoc(), S.expect(op.getLhs(), op));
+  Value rhs = ensureVGPR2(S, op.getLoc(), S.expect(op.getRhs(), op));
+  Type resultType =
+      getRegType(op.getContext(), waveamdmachine::RegClass::VGPR, 2);
+  S.values[op.getResult()] = waveamdmachine::VXorB64Op::create(
+      S.builder, op.getLoc(), resultType, lhs, rhs);
+  S.eraseIfTopLevel(op);
+  return success();
+}
+
+static void prepareWaveBinaryOperands(WaveAMDMachineSelector &S, BinaryOp op,
+                                      StringRef kind, Value &lhs, Value &rhs) {
+  if (kind == "shri") {
+    lhs = S.ensureVGPRForVSrc1(op.getLoc(), lhs);
+    return;
+  }
+  if (isImm(rhs))
+    rhs = S.ensureVGPRForVSrc1(op.getLoc(), rhs);
+  if (!isVGPR(lhs) && !isVGPR(rhs))
+    lhs = S.ensureVGPRForVSrc1(op.getLoc(), lhs);
+}
+
 LogicalResult WaveAMDMachineSelector::selectBinary(BinaryOp op) {
   // addi / muli / shli have moved to dedicated wave.addi / muli / shli
   // ops with full uniform-and-SIMD support; reject those kinds here so
   // stragglers fail loudly instead of silently going through the old
   // SIMD-only path.
   StringRef kind = op.getKind();
-  if (kind != "shri" && kind != "andi" && kind != "ori" && kind != "xori")
+  if (!isSupportedWaveBinaryKind(kind))
     return op.emitError("unsupported wave.binary kind '")
            << kind
            << "' (addi/muli/shli migrated to wave.addi/wave.muli/wave.shli)";
+  unsigned bits = waveArithElementBits(op.getResult().getType());
+  if (bits == 64 && kind == "xori")
+    return selectBinaryI64Xor(*this, op);
+  if (bits != 32)
+    return op.emitOpError("supports i64 only for xori (got i") << bits << ")";
   Value lhs = expect(op.getLhs(), op);
   Value rhs = expect(op.getRhs(), op);
-  // VOP2 shift / commutative ops require `vsrc1` to be a VGPR.
-  if (kind == "shri") {
-    lhs = ensureVGPRForVSrc1(op.getLoc(), lhs);
-  } else {
-    if (isImm(rhs))
-      rhs = ensureVGPRForVSrc1(op.getLoc(), rhs);
-    if (!isVGPR(lhs) && !isVGPR(rhs))
-      lhs = ensureVGPRForVSrc1(op.getLoc(), lhs);
-  }
+  prepareWaveBinaryOperands(*this, op, kind, lhs, rhs);
   Type vgprType = getRegType(op.getContext(), waveamdmachine::RegClass::VGPR);
   values[op.getResult()] =
       buildWaveBinary(builder, op.getLoc(), vgprType, kind, lhs, rhs);

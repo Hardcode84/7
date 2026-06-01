@@ -37,7 +37,8 @@ enum class SchedClass : uint8_t {
   // v_mov_b32, ...). RDNA: 5-cycle dependent latency.
   Write32Bit,
 
-  // 64-bit VALU expansions (v_add_u64, v_mul_u64, v_lshlrev_b64).
+  // 64-bit VALU expansions (v_add_u64, v_mul_u64, v_xor_b64,
+  // v_lshlrev_b64).
   // Treated as a separate class because upstream LLVM costs them
   // higher than Write32Bit.
   Write64Bit,

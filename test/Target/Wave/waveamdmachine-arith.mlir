@@ -115,6 +115,14 @@ func.func @simd_i64_shl(%a: !wave.simd<i64, 32>, %b: !wave.simd<i64, 32>) attrib
   return
 }
 
+// SIMD i64 xor lowers as a 64-bit vector op, not two truncated i32 values.
+// SELECT-LABEL: func.func @simd_i64_xor
+// SELECT: waveamdmachine.v_xor_b64 {{.*}} : (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vgpr, 2>) -> !waveamdmachine.reg<vgpr, 2>
+func.func @simd_i64_xor(%a: !wave.simd<i64, 32>, %b: !wave.simd<i64, 32>) attributes {wave.kernel} {
+  %x = wave.binary "xori" %a, %b : !wave.simd<i64, 32>, !wave.simd<i64, 32> -> !wave.simd<i64, 32>
+  return
+}
+
 }
 
 // -----

@@ -81,7 +81,7 @@ SchedClass classifyOp(Operation *op) {
             SSetpcB64Op, SEndpgmOp>(
           [](auto) { return SchedClass::WriteBranch; })
       // 64-bit VALU expansions (charged differently from 32-bit).
-      .Case<VAddU64Op, VMulU64Op, VLshlrevB64Op>(
+      .Case<VAddU64Op, VMulU64Op, VXorB64Op, VLshlrevB64Op>(
           [](auto) { return SchedClass::Write64Bit; })
       .Case<VCvtF16F32Op, VCvtF32F16Op, VCvtPkRtzF16F32Op, VPkAddF16Op,
             VPkMulF16Op, VPkFmaF16Op, VAdd3U32Op, VLshlAddU32Op,
@@ -98,7 +98,8 @@ SchedClass classifyOp(Operation *op) {
             SDelayAluOp, SLshlB32Op, SLshlB64Op, SLshrB32Op, SMovB32Op,
             SMovB32TupleOp, SMovB32ValueOp, SMovB64ImmOp, SMovExecLoOp,
             SMovM0Op, SMovVccB32Op, SMulI32Op, SMulU64Op, SNopOp,
-            SReadVccB32Op, SSetprioOp, SGetregShaderCyclesOp, SXorB32Op>(
+            SReadVccB32Op, SSetprioOp, SGetregShaderCyclesOp, SXorB32Op,
+            SXorB64Op>(
           [](auto) { return SchedClass::WriteSALU; })
       .Default(fallbackClassify);
   // clang-format on
