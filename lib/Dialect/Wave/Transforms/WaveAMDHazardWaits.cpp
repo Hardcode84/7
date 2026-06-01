@@ -761,12 +761,24 @@ static void addProducedValuRegHazard(Value result, HazardState &state,
                       getSGPRWriteHazardLimit(cfg));
 }
 
+static bool isCopiedVccCompareSGPRResult(Operation *op, unsigned resultIndex) {
+  if (resultIndex != 0)
+    return false;
+  return isa<waveamdmachine::VCmpEqU32VccOp, waveamdmachine::VCmpNeU32VccOp,
+             waveamdmachine::VCmpLtU32VccOp, waveamdmachine::VCmpLeU32VccOp,
+             waveamdmachine::VCmpGtU32VccOp, waveamdmachine::VCmpGeU32VccOp>(
+      op);
+}
+
 static void addProducedValuPhysicalHazards(Operation *op, HazardState &state,
                                            const HazardConfig &cfg) {
   if (op->hasTrait<OpTrait::waveamdmachine::WritesExecOp>())
     state.execToMfma = std::max(state.execToMfma, cfg.valuWriteExecMfmaLatency);
-  for (Value result : op->getResults())
+  for (auto [resultIndex, result] : llvm::enumerate(op->getResults())) {
+    if (isCopiedVccCompareSGPRResult(op, resultIndex))
+      continue;
     addProducedValuRegHazard(result, state, cfg);
+  }
 }
 
 static void addProducedStorePhysicalHazards(Operation *op, HazardState &state,

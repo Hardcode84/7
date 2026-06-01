@@ -514,6 +514,25 @@ func.func @valu_sgpr_to_vmem_delay(
   return
 }
 
+// CHECK-LABEL: func.func @vcc_compare_copied_sgpr_to_vmem_no_delay
+// CHECK: waveamdmachine.v_cmp_eq_u32_vcc
+// CHECK-NEXT: waveamdmachine.buffer_load_b32
+func.func @vcc_compare_copied_sgpr_to_vmem_no_delay(
+    %x: !waveamdmachine.reg<vgpr, 1, 0>,
+    %y: !waveamdmachine.reg<vgpr, 1, 1>,
+    %off: !waveamdmachine.reg<vgpr, 1, 2>,
+    %desc: !waveamdmachine.reg<sgpr, 4, 0>,
+    %dep: !waveamdmachine.mem.token) {
+  %mask, %vcc = waveamdmachine.v_cmp_eq_u32_vcc %x, %y
+      : (!waveamdmachine.reg<vgpr, 1, 0>, !waveamdmachine.reg<vgpr, 1, 1>)
+      -> (!waveamdmachine.reg<sgpr, 1, 20>, !waveamdmachine.reg<vcc, 1>)
+  %loaded, %tok = waveamdmachine.buffer_load_b32 %off, %desc, %mask after %dep
+      : (!waveamdmachine.reg<vgpr, 1, 2>, !waveamdmachine.reg<sgpr, 4, 0>,
+         !waveamdmachine.reg<sgpr, 1, 20>, !waveamdmachine.mem.token)
+      -> (!waveamdmachine.reg<vgpr, 1, 30>, !waveamdmachine.mem.token)
+  return
+}
+
 // CHECK-LABEL: func.func @valu_sgpr_to_valu_delay
 // CHECK: waveamdmachine.v_cmp_eq_u32
 // CHECK-NEXT: waveamdmachine.imm 1
@@ -527,6 +546,22 @@ func.func @valu_sgpr_to_valu_delay(
       : (!waveamdmachine.reg<vgpr, 1, 0>, !waveamdmachine.reg<vgpr, 1, 1>)
       -> !waveamdmachine.reg<sgpr, 1, 20>
   %sum = waveamdmachine.v_add_u32 %v, %s
+      : (!waveamdmachine.reg<vgpr, 1, 2>, !waveamdmachine.reg<sgpr, 1, 20>)
+      -> !waveamdmachine.reg<vgpr, 1, 30>
+  return
+}
+
+// CHECK-LABEL: func.func @vcc_compare_copied_sgpr_to_valu_no_delay
+// CHECK: waveamdmachine.v_cmp_eq_u32_vcc
+// CHECK-NEXT: waveamdmachine.v_add_u32
+func.func @vcc_compare_copied_sgpr_to_valu_no_delay(
+    %x: !waveamdmachine.reg<vgpr, 1, 0>,
+    %y: !waveamdmachine.reg<vgpr, 1, 1>,
+    %v: !waveamdmachine.reg<vgpr, 1, 2>) {
+  %mask, %vcc = waveamdmachine.v_cmp_eq_u32_vcc %x, %y
+      : (!waveamdmachine.reg<vgpr, 1, 0>, !waveamdmachine.reg<vgpr, 1, 1>)
+      -> (!waveamdmachine.reg<sgpr, 1, 20>, !waveamdmachine.reg<vcc, 1>)
+  %sum = waveamdmachine.v_add_u32 %v, %mask
       : (!waveamdmachine.reg<vgpr, 1, 2>, !waveamdmachine.reg<sgpr, 1, 20>)
       -> !waveamdmachine.reg<vgpr, 1, 30>
   return
