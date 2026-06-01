@@ -44,7 +44,7 @@ struct MemoryPayloadShape {
 enum class SymbolicOffsetBindingKind { Uniform, Lane };
 
 struct SymbolicOffsetBinding {
-  std::string name;
+  sym::ExprHandle name;
   Value value;
   SymbolicOffsetBindingKind kind = SymbolicOffsetBindingKind::Lane;
 };
@@ -53,7 +53,6 @@ struct SymbolicOffset {
   SmallVector<SymbolicOffsetBinding, 4> bindings;
   SmallVector<sym::PredHandle, 2> assumptions;
   sym::ExprHandle expr;
-  int64_t elementBytes = 1;
   unsigned laneWidth = 0;
 
   bool isUniform() const { return laneWidth == 0; }
