@@ -87,6 +87,7 @@ register_passes()
 # identity stable (e.g. `sym("lane")` is the same node for every kernel
 # in this interpreter), keeping structural imports deterministic.
 sym_ctx: ixsimpl.Context = ixsimpl.Context()
+Expr = ixsimpl.Expr
 
 
 def sym(name: str) -> ixsimpl.Expr:
@@ -1003,6 +1004,7 @@ __all__ = [
     "BufferAddressSpaceAttr",
     "CastKind",
     "CmpIPredicate",
+    "Expr",
     "ExprAttr",
     "F16Type",
     "F32Type",

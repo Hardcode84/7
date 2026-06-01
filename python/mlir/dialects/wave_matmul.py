@@ -474,6 +474,21 @@ def _fragment_slot_indices(
     )
 
 
+def _dma_swizzle_phase(cfg: _MatmulConfig) -> int:
+    if cfg.mma.name != "mfma_gfx950":
+        return 1
+    return min(8, cfg.mma.k_tile // cfg.mma.lane_k_elems)
+
+
+def _dma_logical_col(
+    cfg: _MatmulConfig, row: int | dsl.Expr, physical_col: int | dsl.Expr
+) -> int | dsl.Expr:
+    phase = _dma_swizzle_phase(cfg)
+    if phase < 2:
+        return physical_col
+    return dsl.xor(dsl.mod(row, phase), physical_col)
+
+
 def _emit_dma_staging_ptrs(
     bld: dsl.FunctionBuilder,
     cfg: _MatmulConfig,
@@ -491,6 +506,7 @@ def _emit_dma_staging_ptrs(
     lane = dsl.mod(wi, cfg.mma.wave_size)
     lane_mod16 = dsl.mod(wi, 16)
     lane_k_group = dsl.floor(lane / 16)
+    read_k_group = _dma_logical_col(cfg, lane_mod16, lane_k_group)
 
     def dma_slot_ptr(slot: int) -> dsl.Value:
         slot_off = bld.index_expr(
@@ -505,7 +521,7 @@ def _emit_dma_staging_ptrs(
             wave_id * (slots_per_wave * cfg.mma.lds_dwords_per_frag)
             + slot * cfg.mma.lds_dwords_per_frag
             + lane_mod16 * (cfg.mma.k_tile // 2)
-            + lane_k_group * (cfg.mma.lane_k_elems // 2),
+            + read_k_group * (cfg.mma.lane_k_elems // 2),
             bindings=bindings,
         )
         return bld.ptr_add(lds, slot_off)
@@ -760,9 +776,11 @@ def _initial_tile_ptrs(
         wi = dsl.sym("wi")
         lane = dsl.mod(wi, cfg.mma.wave_size)
         chunks_per_row = cfg.mma.k_tile // cfg.mma.lane_k_elems
+        row = dsl.floor(lane / chunks_per_row)
+        physical_col = dsl.mod(lane, chunks_per_row)
+        logical_col = _dma_logical_col(cfg, row, physical_col)
         dma_lane_off = bld.index_expr(
-            dsl.floor(lane / chunks_per_row) * cfg.K
-            + dsl.mod(lane, chunks_per_row) * cfg.mma.lane_k_elems,
+            row * cfg.K + logical_col * cfg.mma.lane_k_elems,
             bindings={wi: coords.wi},
         )
         a_dma_base = bld.ptr_add(coords.a_tile_base, dma_lane_off)
