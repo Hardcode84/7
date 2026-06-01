@@ -69,6 +69,11 @@ def _validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) ->
     )
     _parser_error_if(
         parser,
+        matrix_intrinsic == "mfma_gfx950" and args.block_n != 16,
+        "--block-n must be 16 for gfx950 MFMA",
+    )
+    _parser_error_if(
+        parser,
         args.seq_n is not None and args.seq_n % args.block_n != 0,
         "--seq-n must be a multiple of --block-n",
     )

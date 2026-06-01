@@ -143,7 +143,7 @@ def _validate_positive_config(cfg: _FlashAttentionConfig) -> None:
         _require_positive("tile_loop_unroll", cfg.tile_loop_unroll)
 
 
-def _validate_mma_config(cfg: _FlashAttentionConfig) -> None:
+def _validate_mma_shape(cfg: _FlashAttentionConfig) -> None:
     if cfg.block_m > cfg.mma.m_tile or cfg.block_n > cfg.mma.n_tile:
         raise ValueError(
             "MMA FA kernel requires block_m/block_n to fit in one MMA tile; "
@@ -151,6 +151,14 @@ def _validate_mma_config(cfg: _FlashAttentionConfig) -> None:
         )
     if cfg.block_n & (cfg.block_n - 1):
         raise ValueError(f"block_n must be a power of two; got {cfg.block_n}")
+    if cfg.mma.score_layout == "mfma" and cfg.block_n != cfg.mma.n_tile:
+        raise ValueError(
+            f"{cfg.matrix_intrinsic} requires block_n={cfg.mma.n_tile}; "
+            f"got {cfg.block_n}"
+        )
+
+
+def _validate_mma_k(cfg: _FlashAttentionConfig) -> None:
     if cfg.head_dim & (cfg.head_dim - 1):
         raise ValueError(f"head_dim must be a power of two; got {cfg.head_dim}")
     if cfg.head_dim % cfg.mma.k_tile:
@@ -167,6 +175,9 @@ def _validate_mma_config(cfg: _FlashAttentionConfig) -> None:
             "block_m * head_dim must be a multiple of the matrix wave size; "
             f"got {cfg.out_elements} and wave{cfg.mma.wave_size}"
         )
+
+
+def _validate_mma_wave_tiles(cfg: _FlashAttentionConfig) -> None:
     for name, count in (
         ("block_m * block_n", cfg.block_m * cfg.block_n),
         ("block_m * mma_n", cfg.block_m * cfg.mma.n_tile),
@@ -188,6 +199,12 @@ def _validate_mma_config(cfg: _FlashAttentionConfig) -> None:
             raise ValueError(
                 f"{name} must be a multiple of wave{cfg.mma.wave_size}; " f"got {count}"
             )
+
+
+def _validate_mma_config(cfg: _FlashAttentionConfig) -> None:
+    _validate_mma_shape(cfg)
+    _validate_mma_k(cfg)
+    _validate_mma_wave_tiles(cfg)
 
 
 def _rand_values(
@@ -456,9 +473,10 @@ def _score_slot_expr(
             _mod_expr(row, 2) * cfg.mma.n_tile + col
         ) * cfg.mma.acc_registers + _floor_div_expr(row, 2)
     if cfg.mma.score_layout == "mfma":
-        return (row * 4 + _mod_expr(col, 4)) * cfg.mma.acc_registers + (
-            _floor_div_expr(col, 4)
-        )
+        group = cfg.mma.acc_registers
+        return (
+            _floor_div_expr(row, group) * cfg.mma.n_tile + col
+        ) * cfg.mma.acc_registers + _mod_expr(row, group)
     raise AssertionError(f"unknown score layout {cfg.mma.score_layout}")
 
 
