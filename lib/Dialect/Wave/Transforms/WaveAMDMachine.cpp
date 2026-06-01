@@ -1063,6 +1063,18 @@ planCompleteAddressExpr(WaveAMDMachineSelector &S, const AddressPlan &plan) {
   return appendAddressExpr(S, *withVoffset, plan.soffsetExpr, plan.assumptions);
 }
 
+static Value
+materializeSoffsetImmPolicy(WaveAMDMachineSelector &S, Location loc,
+                            Value soffset,
+                            const waveamdmachine::AddressFieldSpec &spec) {
+  if (spec.soffsetImmPolicy != waveamdmachine::SOffsetImmPolicy::ZeroImmOnly)
+    return soffset;
+  std::optional<int64_t> imm = S.getImmediateValue(soffset);
+  if (!imm || *imm == 0)
+    return soffset;
+  return S.materializeSGPR1(loc, soffset);
+}
+
 } // namespace
 
 FailureOr<AddressPlan>
@@ -1104,6 +1116,8 @@ materializePlanBuckets(WaveAMDMachineSelector &S, Operation *user,
     } else {
       out.soffset = createImm(S.builder, user->getLoc(), 0);
     }
+    out.soffset =
+        materializeSoffsetImmPolicy(S, user->getLoc(), out.soffset, spec);
   }
   out.instOffset = plan.instOffset;
   return out;

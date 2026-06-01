@@ -1077,6 +1077,20 @@ private:
                    llvm::MCOperand::createImm(0)});
   }
 
+  LogicalResult emitBufferLoadLds(Operation &op, unsigned opcode) {
+    if (std::optional<unsigned> imm = getImmediate(op.getOperand(2)))
+      if (*imm != 0)
+        return op.emitError(
+            "buffer_load_lds nonzero literal soffset must be SGPR");
+    int64_t instOffset = getIntAttr(&op, "inst_offset", 0);
+    int64_t aux = getIntAttr(&op, "aux", 0);
+    return emitMC(opcode,
+                  {toMCOperand(op.getOperand(0)), toMCOperand(op.getOperand(1)),
+                   toMCOperand(op.getOperand(2)),
+                   llvm::MCOperand::createImm(instOffset),
+                   llvm::MCOperand::createImm(aux)});
+  }
+
   LogicalResult emitBufferStore(Operation &op, unsigned opcode) {
     int64_t instOffset = getIntAttr(&op, "inst_offset", 0);
     return emitMC(opcode,
@@ -1880,23 +1894,10 @@ private:
                      llvm::MCOperand::createImm(aux)});
     }
     if (isa<waveamdmachine::BufferLoadLdsB32Op>(op)) {
-      int64_t instOffset = getIntAttr(&op, "inst_offset", 0);
-      int64_t aux = getIntAttr(&op, "aux", 0);
-      return emitMC(bufferLoadLdsB32(), {toMCOperand(op.getOperand(0)),
-                                         toMCOperand(op.getOperand(1)),
-                                         toMCOperand(op.getOperand(2)),
-                                         llvm::MCOperand::createImm(instOffset),
-                                         llvm::MCOperand::createImm(aux)});
+      return emitBufferLoadLds(op, bufferLoadLdsB32());
     }
     if (isa<waveamdmachine::BufferLoadLdsB128Op>(op)) {
-      int64_t instOffset = getIntAttr(&op, "inst_offset", 0);
-      int64_t aux = getIntAttr(&op, "aux", 0);
-      return emitMC(bufferLoadLdsB128(),
-                    {toMCOperand(op.getOperand(0)),
-                     toMCOperand(op.getOperand(1)),
-                     toMCOperand(op.getOperand(2)),
-                     llvm::MCOperand::createImm(instOffset),
-                     llvm::MCOperand::createImm(aux)});
+      return emitBufferLoadLds(op, bufferLoadLdsB128());
     }
     if (isa<waveamdmachine::DsLoadB16Op>(op))
       return emitDsLoad(op, dsReadB16());

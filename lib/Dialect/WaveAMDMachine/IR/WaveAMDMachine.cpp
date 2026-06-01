@@ -239,6 +239,21 @@ LogicalResult MfmaF32_16x16x32_F16Op::verify() {
   return success();
 }
 
+static LogicalResult verifyUniformLoopTerminator(UniformLoopOp loop,
+                                                 ContinueIfOp terminator) {
+  if (terminator.getCarries().size() != loop.getInits().size())
+    return terminator.emitOpError(
+        "carries count must match parent uniform_loop inits");
+  for (auto [carry, init] :
+       llvm::zip(terminator.getCarries(), loop.getInits())) {
+    if (carry.getType() != init.getType())
+      return terminator.emitOpError(
+                 "carry types must match parent uniform_loop init types: ")
+             << carry.getType() << " vs " << init.getType();
+  }
+  return success();
+}
+
 LogicalResult UniformLoopOp::verify() {
   Block &body = getBody().front();
   if (body.getNumArguments() != getInits().size())
@@ -259,7 +274,8 @@ LogicalResult UniformLoopOp::verify() {
   if (body.empty() || !isa<ContinueIfOp>(body.back()))
     return emitOpError(
         "body must be terminated by a waveamdmachine.continue_if");
-  return success();
+  ContinueIfOp terminator = cast<ContinueIfOp>(body.back());
+  return verifyUniformLoopTerminator(*this, terminator);
 }
 
 // Body region successors (from the WaveAMDMachine perspective):
@@ -307,21 +323,6 @@ UniformLoopOp::getYieldedValuesMutable() {
 
 std::optional<ResultRange> UniformLoopOp::getLoopResults() {
   return getResults();
-}
-
-LogicalResult ContinueIfOp::verify() {
-  // The `HasParent<UniformLoopOp>` trait on the op definition
-  // guarantees this lookup succeeds before the verifier runs.
-  auto parent = (*this)->getParentOfType<UniformLoopOp>();
-  if (getCarries().size() != parent.getInits().size())
-    return emitOpError("carries count must match parent uniform_loop inits");
-  for (auto [carry, init] : llvm::zip(getCarries(), parent.getInits())) {
-    if (carry.getType() != init.getType())
-      return emitOpError(
-                 "carry types must match parent uniform_loop init types: ")
-             << carry.getType() << " vs " << init.getType();
-  }
-  return success();
 }
 
 // continue_if forwards $carries to either the body block (back-edge,

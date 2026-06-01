@@ -217,4 +217,35 @@ func.func @buffer_dma_lds_bounded_source_soffset(
   return
 }
 
+// SELECT-LABEL: func.func @buffer_dma_lds_source_const_soffset
+// SELECT-DAG: %[[WI:.*]] = waveamdmachine.v_workitem_id_x
+// SELECT-DAG: %[[VOFFSET:.*]] = waveamdmachine.v_lshlrev_b32 %[[WI]],
+// SELECT-DAG: %[[SOIMM:.*]] = waveamdmachine.imm 2048
+// SELECT-DAG: %[[SOFFSET:.*]] = waveamdmachine.s_mov_b32_value %[[SOIMM]]
+// SELECT: waveamdmachine.buffer_load_lds_b128 %[[VOFFSET]], {{.*}}, %[[SOFFSET]],
+
+// ASM-LABEL: buffer_dma_lds_source_const_soffset:
+// ASM: s_mov_b32 [[SOFFSET:s[0-9]+]], 0x800
+// ASM: buffer_load_dwordx4 {{v[0-9]+}}, s[{{[0-9]+}}:{{[0-9]+}}], [[SOFFSET]] offen lds
+func.func @buffer_dma_lds_source_const_soffset(
+    %in: !wave.ptr<#wave.global, i32>)
+    attributes {wave.kernel, wave.lds_size = 512 : i64} {
+  %range = arith.constant 4096 : i32
+  %buffer = waveamd.make_buffer %in, %range
+      : !wave.ptr<#wave.global, i32>, i32 -> !wave.ptr<#waveamd.buffer, i32>
+  %wi_raw = wave.workitem_id 0 : !wave.simd<i32, 64>
+  %wi = wave.assume_range %wi_raw, [0, 63] : !wave.simd<i32, 64>
+  %off = wave.index_expr <"512 + wi"> ["wi"](%wi)
+      : (!wave.simd<i32, 64>) -> !wave.simd<index, 64>
+  %src = wave.ptr_add %buffer, %off
+      : !wave.ptr<#waveamd.buffer, i32>, !wave.simd<index, 64>
+      -> !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>
+  %lds = wave.lds_base : !wave.ptr<#wave.shared, i32>
+  %tok0 = wave.token : !wave.mem.token
+  %tok = waveamd.dma_load_lds %src -> %lds after %tok0 {bytes = 16 : i64}
+      : (!wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>,
+         !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
+  return
+}
+
 }

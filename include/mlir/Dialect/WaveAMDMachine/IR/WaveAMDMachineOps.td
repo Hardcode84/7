@@ -1235,10 +1235,8 @@ def WaveAMDMachine_BufferLoadTupleB32Op
   }];
 }
 
-// Buffer LDS DMA ops have no inst-offset slot in the hardware
-// encoding -- the const component sinks into `soffset` (which the
-// op does carry). Spec mirrors the `Global` variant's policy with
-// `hasSoffset=true`: AddressPlan routes constants to soffset.
+// Buffer LDS DMA ops have no inst-offset slot. Constants route to
+// `soffset`, but nonzero immediates must materialize through SGPR.
 def WaveAMDMachine_BufferLoadLdsB32Op
     : WaveAMDMachine_BufferMemoryOp<"buffer_load_lds_b32", [WaveAMDMachine_VMEMLoad, MemoryEffects<[MemRead, MemWrite]>]> {
   let summary = "buffer-to-LDS 32-bit DMA load";
@@ -1262,7 +1260,8 @@ def WaveAMDMachine_BufferLoadLdsB32Op
   let extraClassDefinition = [{
     ::mlir::waveamdmachine::AddressFieldSpec $cppClass::getAddressFieldSpec() {
       return {/*instOffsetBits=*/0, /*instOffsetSigned=*/false,
-              /*hasSoffset=*/true};
+              /*hasSoffset=*/true,
+              ::mlir::waveamdmachine::SOffsetImmPolicy::ZeroImmOnly};
     }
   }];
 }
@@ -1288,7 +1287,8 @@ def WaveAMDMachine_BufferLoadLdsB128Op
   let extraClassDefinition = [{
     ::mlir::waveamdmachine::AddressFieldSpec $cppClass::getAddressFieldSpec() {
       return {/*instOffsetBits=*/0, /*instOffsetSigned=*/false,
-              /*hasSoffset=*/true};
+              /*hasSoffset=*/true,
+              ::mlir::waveamdmachine::SOffsetImmPolicy::ZeroImmOnly};
     }
   }];
 }
@@ -1807,7 +1807,6 @@ def WaveAMDMachine_ContinueIfOp : WaveAMDMachine_Op<"continue_if", [
     attr-dict
   }];
 
-  let hasVerifier = 1;
 }
 
 #endif // MLIR_DIALECT_WAVEAMDMACHINE_IR_WAVEAMDMACHINEOPS_TD

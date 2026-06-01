@@ -14,6 +14,8 @@
 
 namespace mlir::waveamdmachine {
 
+enum class SOffsetImmPolicy : uint8_t { AnyImm, ZeroImmOnly };
+
 /// Per-op layout for the V / S / inst-offset address fields.
 /// `voffset` is always present on a memory op, so it is not modeled
 /// here. `instOffsetBits == 0` means the op has no inst-offset slot.
@@ -22,6 +24,7 @@ struct AddressFieldSpec {
   unsigned instOffsetBits = 0;
   bool instOffsetSigned = false;
   bool hasSoffset = false;
+  SOffsetImmPolicy soffsetImmPolicy = SOffsetImmPolicy::AnyImm;
 };
 
 /// Closed interval `[lo, hi]` for the spec's inst-offset slot, or
