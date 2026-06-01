@@ -1024,25 +1024,50 @@ LogicalResult PtrAddOp::verify() {
                             resultWidth, emit);
 }
 
-// Classify an index_expr binding by its operand type. Returns 0 for
-// uniform scalars and a positive wave width for lane-varying bindings.
-static FailureOr<int64_t> classifyIndexBinding(
+FailureOr<SymbolicOffsetBindingKind> mlir::wave::classifySymbolicOffsetBinding(
     Type type, function_ref<InFlightDiagnostic(const Twine &)> emitError) {
   if (type.isIndex())
-    return int64_t{0};
+    return SymbolicOffsetBindingKind::Uniform;
   if (auto intType = dyn_cast<IntegerType>(type)) {
     if (!intType.isSignless())
       return emitError("integer binding must be signless");
-    return int64_t{0};
+    return SymbolicOffsetBindingKind::Uniform;
   }
   if (auto simdType = dyn_cast<SimdType>(type)) {
     Type elementType = simdType.getElementType();
     if (!elementType.isIndex() && !elementType.isInteger(32))
       return emitError("SIMD binding element type must be index or i32");
-    return simdType.getWidth();
+    return SymbolicOffsetBindingKind::Lane;
   }
   return emitError("binding must be index, signless integer, or "
                    "!wave.simd<index/i32, W>");
+}
+
+unsigned mlir::wave::getSymbolicOffsetLaneWidth(ValueRange bindings) {
+  unsigned width = 0;
+  for (Value binding : bindings)
+    if (auto simdType = dyn_cast<SimdType>(binding.getType()))
+      width = std::max(width, static_cast<unsigned>(simdType.getWidth()));
+  return width;
+}
+
+Type mlir::wave::getSymbolicOffsetResultType(MLIRContext *ctx,
+                                             unsigned laneWidth) {
+  return laneWidth == 0
+             ? IndexType::get(ctx)
+             : Type(SimdType::get(ctx, IndexType::get(ctx), laneWidth));
+}
+
+// Uniform scalars have width 0; lane bindings return SIMD width.
+static FailureOr<int64_t> classifyIndexBinding(
+    Type type, function_ref<InFlightDiagnostic(const Twine &)> emitError) {
+  FailureOr<SymbolicOffsetBindingKind> kind =
+      classifySymbolicOffsetBinding(type, emitError);
+  if (failed(kind))
+    return failure();
+  if (*kind == SymbolicOffsetBindingKind::Uniform)
+    return int64_t{0};
+  return cast<SimdType>(type).getWidth();
 }
 
 // Bijection check: every entry in `names` is a non-empty unique string
@@ -1090,24 +1115,8 @@ static FailureOr<int64_t> reduceIndexBindingWidth(
   return laneWidth;
 }
 
-static int64_t getIndexBindingWidth(Value binding) {
-  Type type = binding.getType();
-  if (auto simdType = dyn_cast<SimdType>(type))
-    return simdType.getWidth();
-  return 0;
-}
-
-static int64_t getIndexExprWidth(ValueRange bindings) {
-  int64_t width = 0;
-  for (Value binding : bindings)
-    width = std::max(width, getIndexBindingWidth(binding));
-  return width;
-}
-
 Type mlir::wave::getIndexExprResultType(MLIRContext *ctx, ValueRange bindings) {
-  int64_t width = getIndexExprWidth(bindings);
-  return width == 0 ? IndexType::get(ctx)
-                    : Type(SimdType::get(ctx, IndexType::get(ctx), width));
+  return getSymbolicOffsetResultType(ctx, getSymbolicOffsetLaneWidth(bindings));
 }
 
 static LogicalResult verifyIndexExprResultType(

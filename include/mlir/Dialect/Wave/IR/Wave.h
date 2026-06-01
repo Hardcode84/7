@@ -41,6 +41,24 @@ struct MemoryPayloadShape {
   bool useB16Op;
 };
 
+enum class SymbolicOffsetBindingKind { Uniform, Lane };
+
+struct SymbolicOffsetBinding {
+  std::string name;
+  Value value;
+  SymbolicOffsetBindingKind kind = SymbolicOffsetBindingKind::Lane;
+};
+
+struct SymbolicOffset {
+  SmallVector<SymbolicOffsetBinding, 4> bindings;
+  SmallVector<sym::PredHandle, 2> assumptions;
+  sym::ExprHandle expr;
+  int64_t elementBytes = 1;
+  unsigned laneWidth = 0;
+
+  bool isUniform() const { return laneWidth == 0; }
+};
+
 struct MemoryAddressBinding {
   std::string name;
   Value value;
@@ -52,6 +70,10 @@ struct MemoryAddress {
   sym::ExprHandle elementOffset;
 };
 
+FailureOr<SymbolicOffsetBindingKind> classifySymbolicOffsetBinding(
+    Type type, function_ref<InFlightDiagnostic(const Twine &)> emitError);
+unsigned getSymbolicOffsetLaneWidth(ValueRange bindings);
+Type getSymbolicOffsetResultType(MLIRContext *ctx, unsigned laneWidth);
 Type getIndexExprResultType(MLIRContext *ctx, ValueRange bindings);
 FailureOr<MemoryPayloadShape> getMemoryPayloadShape(
     Type elementType,
