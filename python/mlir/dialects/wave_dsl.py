@@ -53,6 +53,7 @@ from mlir.dialects.arith import CmpIPredicate
 from mlir.ir import (
     ArrayAttr,
     Attribute,
+    BF16Type,
     Block,
     Context,
     F16Type,
@@ -142,6 +143,10 @@ def i64_attr(value: int) -> IntegerAttr:
 
 def f16() -> F16Type:
     return F16Type.get()
+
+
+def bf16() -> BF16Type:
+    return BF16Type.get()
 
 
 def f32() -> F32Type:
@@ -1003,6 +1008,7 @@ def module() -> ModuleBuilder:
 
 
 __all__ = [
+    "BF16Type",
     "BufferAddressSpaceAttr",
     "CastKind",
     "CmpIPredicate",
@@ -1023,6 +1029,7 @@ __all__ = [
     "PtrType",
     "SharedAddressSpaceAttr",
     "SimdType",
+    "bf16",
     "buffer_address_space",
     "buffer_ptr_type",
     "ceil",

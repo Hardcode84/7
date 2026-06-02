@@ -70,6 +70,11 @@ static bool isGfx950(const llvm::AMDGPU::IsaVersion &isa) {
   return isa.Major == 9 && isa.Minor == 5 && isa.Stepping == 0;
 }
 
+static bool isGfx940PlusIsa(const llvm::AMDGPU::IsaVersion &isa) {
+  return isa.Major == 9 &&
+         (isa.Minor == 4 || (isa.Minor == 5 && isa.Stepping == 0));
+}
+
 static LogicalResult
 checkSupportedBackendTarget(ModuleOp module, StringRef triple, StringRef chip,
                             const llvm::AMDGPU::IsaVersion &isa) {
@@ -385,6 +390,7 @@ private:
   }
   bool isGfx11() const { return isaVersion.Major == 11; }
   bool isGfx90APlus() const { return llvm::AMDGPU::isGFX90A(*sti); }
+  bool isGfx940Plus() const { return isGfx940PlusIsa(isaVersion); }
   unsigned gfx11Opcode(unsigned opcode) const {
     if (!isGfx11())
       llvm_unreachable("backend target gate admits only gfx8/gfx9/gfx11");
@@ -496,8 +502,14 @@ private:
     return isGfx90APlus() ? llvm::AMDGPU::V_MFMA_F32_16X16X16F16_gfx940_vcd
                           : llvm::AMDGPU::V_MFMA_F32_16X16X16F16_vi;
   }
+  unsigned mfmaF32_16x16x16BF16() const {
+    return llvm::AMDGPU::V_MFMA_F32_16X16X16BF16_1K_gfx940_vcd;
+  }
   unsigned mfmaF32_16x16x32F16() const {
     return llvm::AMDGPU::V_MFMA_F32_16X16X32_F16_gfx940_vcd;
+  }
+  unsigned mfmaF32_16x16x32BF16() const {
+    return llvm::AMDGPU::V_MFMA_F32_16X16X32_BF16_gfx940_vcd;
   }
 
   unsigned bufferStoreB32() const {
@@ -1417,6 +1429,14 @@ private:
            toMCOperand(op.getOperand(1)), llvm::MCOperand::createImm(0),
            toMCOperand(op.getOperand(2)), llvm::MCOperand::createImm(0),
            llvm::MCOperand::createImm(0)});
+    if (isa<waveamdmachine::WmmaF32_16x16x16_BF16Op>(op))
+      return emitMC(
+          llvm::AMDGPU::V_WMMA_F32_16X16X16_BF16_twoaddr_w32_gfx11,
+          {toMCOperand(result()), llvm::MCOperand::createImm(0),
+           toMCOperand(op.getOperand(0)), llvm::MCOperand::createImm(0),
+           toMCOperand(op.getOperand(1)), llvm::MCOperand::createImm(0),
+           toMCOperand(op.getOperand(2)), llvm::MCOperand::createImm(0),
+           llvm::MCOperand::createImm(0)});
     if (isa<waveamdmachine::MfmaF32_16x16x16_F16Op>(op)) {
       if (!isGfx90APlus())
         return op.emitError("mfma.f32.16x16x16.f16 requires gfx90a+");
@@ -1427,11 +1447,31 @@ private:
            llvm::MCOperand::createImm(0), llvm::MCOperand::createImm(0),
            llvm::MCOperand::createImm(0)});
     }
+    if (isa<waveamdmachine::MfmaF32_16x16x16_BF16Op>(op)) {
+      if (!isGfx940Plus())
+        return op.emitError("mfma.f32.16x16x16.bf16 requires gfx940+");
+      return emitMC(
+          mfmaF32_16x16x16BF16(),
+          {toMCOperand(result()), toMCOperand(op.getOperand(0)),
+           toMCOperand(op.getOperand(1)), toMCOperand(op.getOperand(2)),
+           llvm::MCOperand::createImm(0), llvm::MCOperand::createImm(0),
+           llvm::MCOperand::createImm(0)});
+    }
     if (isa<waveamdmachine::MfmaF32_16x16x32_F16Op>(op)) {
       if (!isGfx950(isaVersion))
         return op.emitError("mfma.f32.16x16x32.f16 requires gfx950");
       return emitMC(
           mfmaF32_16x16x32F16(),
+          {toMCOperand(result()), toMCOperand(op.getOperand(0)),
+           toMCOperand(op.getOperand(1)), toMCOperand(op.getOperand(2)),
+           llvm::MCOperand::createImm(0), llvm::MCOperand::createImm(0),
+           llvm::MCOperand::createImm(0)});
+    }
+    if (isa<waveamdmachine::MfmaF32_16x16x32_BF16Op>(op)) {
+      if (!isGfx950(isaVersion))
+        return op.emitError("mfma.f32.16x16x32.bf16 requires gfx950");
+      return emitMC(
+          mfmaF32_16x16x32BF16(),
           {toMCOperand(result()), toMCOperand(op.getOperand(0)),
            toMCOperand(op.getOperand(1)), toMCOperand(op.getOperand(2)),
            llvm::MCOperand::createImm(0), llvm::MCOperand::createImm(0),

@@ -2,7 +2,7 @@
 #  See https://llvm.org/LICENSE.txt for license information.
 #  SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-"""Builder for tiled Wave f16xf16xf32 matmul kernels + host driver.
+"""Builder for tiled Wave matmul kernels + host driver.
 
 This module assembles the module *programmatically* through the MLIR
 Python bindings (see :mod:`wave_dsl`). It returns a live
@@ -84,20 +84,36 @@ class _MmaVariant:
 
 
 _MMA_VARIANTS = {
-    "wmma": _MmaVariant("wmma", "wmma.f32.16x16x16.f16", 8, 8),
-    "mfma": _MmaVariant("mfma", "mfma.f32.16x16x16.f16", 2, 4),
-    "mfma_gfx950": _MmaVariant("mfma_gfx950", "mfma.f32.16x16x32.f16", 4, 4, 64, 8, 32),
+    ("wmma", "f16"): _MmaVariant("wmma", "wmma.f32.16x16x16.f16", 8, 8),
+    ("wmma", "bf16"): _MmaVariant("wmma", "wmma.f32.16x16x16.bf16", 8, 8),
+    ("mfma", "f16"): _MmaVariant("mfma", "mfma.f32.16x16x16.f16", 2, 4),
+    ("mfma", "bf16"): _MmaVariant("mfma", "mfma.f32.16x16x16.bf16", 2, 4),
+    ("mfma_gfx950", "f16"): _MmaVariant(
+        "mfma_gfx950", "mfma.f32.16x16x32.f16", 4, 4, 64, 8, 32
+    ),
+    ("mfma_gfx950", "bf16"): _MmaVariant(
+        "mfma_gfx950", "mfma.f32.16x16x32.bf16", 4, 4, 64, 8, 32
+    ),
 }
 
 
-def _select_mma_variant(name: str) -> _MmaVariant:
+def _select_mma_variant(name: str, input_type: str) -> _MmaVariant:
     try:
-        return _MMA_VARIANTS[name]
+        return _MMA_VARIANTS[(name, input_type)]
     except KeyError as exc:
-        choices = ", ".join(sorted(_MMA_VARIANTS))
+        choices = ", ".join(
+            f"{variant}/{dtype}" for variant, dtype in sorted(_MMA_VARIANTS)
+        )
         raise ValueError(
-            f"unknown matrix intrinsic '{name}'; expected {choices}"
+            f"unknown matrix intrinsic/input type '{name}/{input_type}'; "
+            f"expected {choices}"
         ) from exc
+
+
+def _validate_choice(name: str, value: str, choices: tuple[str, str]) -> None:
+    if value not in choices:
+        expected = " or ".join(f"'{choice}'" for choice in choices)
+        raise ValueError(f"{name} must be {expected}; got {value}")
 
 
 @dataclass(frozen=True)
@@ -113,6 +129,7 @@ class _MatmulConfig:
     use_buffer: bool = False
     use_dma_lds: bool = False
     matrix_intrinsic: str = "wmma"
+    input_type: str = "f16"
     output_type: str = "f32"
     random_data: bool = False
     random_seed: int = 0
@@ -132,7 +149,7 @@ class _MatmulConfig:
     @property
     def b_elements(self) -> int:
         # B is laid out in column-major K x N order (== row-major N x K), so
-        # lane L's contiguous-16-f16 slice for column j lives at j * K.
+        # lane L's contiguous-16 slice for column j lives at j * K.
         return self.N * self.K
 
     @property
@@ -142,6 +159,14 @@ class _MatmulConfig:
     @property
     def c_type(self) -> dsl.Type:
         return dsl.f16() if self.output_type == "f16" else dsl.f32()
+
+    @property
+    def input_element_type(self) -> dsl.Type:
+        return dsl.bf16() if self.input_type == "bf16" else dsl.f16()
+
+    @property
+    def input_element_bytes(self) -> int:
+        return 2
 
     @property
     def c_element_bytes(self) -> int:
@@ -199,7 +224,7 @@ class _MatmulConfig:
 
     @property
     def mma(self) -> _MmaVariant:
-        return _select_mma_variant(self.matrix_intrinsic)
+        return _select_mma_variant(self.matrix_intrinsic, self.input_type)
 
 
 def _validate_positive_shape(cfg: _MatmulConfig) -> None:
@@ -215,8 +240,8 @@ def _validate_positive_shape(cfg: _MatmulConfig) -> None:
             f"wave_n_tiles={cfg.wave_n_tiles}, "
             f"wave_k_tiles={cfg.wave_k_tiles}"
         )
-    if cfg.output_type not in ("f32", "f16"):
-        raise ValueError(f"output_type must be 'f32' or 'f16'; got {cfg.output_type}")
+    _validate_choice("output_type", cfg.output_type, ("f32", "f16"))
+    _validate_choice("input_type", cfg.input_type, ("f16", "bf16"))
 
 
 def _validate_tile_shape(cfg: _MatmulConfig) -> None:
@@ -271,6 +296,7 @@ def _validate_dma_lds_shape(cfg: _MatmulConfig) -> None:
 _KERNEL_NAME = "wmma_f16_matmul_tiled"
 _GPU_MODULE_NAME = "kernels"
 _F16_PTR_HELPER = "wave_memref_to_ptr_global_f16"
+_BF16_PTR_HELPER = "wave_memref_to_ptr_global_bf16"
 _F32_PTR_HELPER = "wave_memref_to_ptr_global_f32"
 _PRINT_HELPER = "printMemrefF32"
 _PRINT_F16_HELPER = "printMemrefF16"
@@ -304,25 +330,37 @@ def _round_f16(value: float) -> float:
     return float(struct.unpack("<e", struct.pack("<e", value))[0])
 
 
+def _round_bf16(value: float) -> float:
+    bits = struct.unpack("<I", struct.pack("<f", float(value)))[0]
+    rounded = bits + 0x7FFF + ((bits >> 16) & 1)
+    return float(struct.unpack("<f", struct.pack("<I", rounded & 0xFFFF0000))[0])
+
+
+def _round_input(value: float, input_type: str) -> float:
+    return _round_bf16(value) if input_type == "bf16" else _round_f16(value)
+
+
 def generate_wmma_f16_matmul_inputs(
     M: int,
     N: int,
     K: int,
     *,
+    input_type: str = "f16",
     random_data: bool = False,
     random_seed: int = 0,
 ) -> tuple[tuple[float, ...], tuple[float, ...]]:
     if random_data:
-        return (
-            _deterministic_random_values(M * K, seed=random_seed, stream=0),
-            _deterministic_random_values(N * K, seed=random_seed, stream=1),
-        )
+        a_values = _deterministic_random_values(M * K, seed=random_seed, stream=0)
+        b_values = _deterministic_random_values(N * K, seed=random_seed, stream=1)
+    else:
+        a_half = (M * K) // 2
+        b_half = (N * K) // 2
+        a_values = tuple([1.0] * a_half + [2.0] * (M * K - a_half))
+        b_values = tuple([1.0] * b_half + [2.0] * (N * K - b_half))
 
-    a_half = (M * K) // 2
-    b_half = (N * K) // 2
     return (
-        tuple([1.0] * a_half + [2.0] * (M * K - a_half)),
-        tuple([1.0] * b_half + [2.0] * (N * K - b_half)),
+        tuple(_round_input(value, input_type) for value in a_values),
+        tuple(_round_input(value, input_type) for value in b_values),
     )
 
 
@@ -358,6 +396,7 @@ def compute_wmma_f16_matmul_reference_buffer(
     random_data: bool = False,
     random_seed: int = 0,
     matrix_intrinsic: str = "wmma",
+    input_type: str = "f16",
     output_type: str = "f32",
 ) -> tuple[float, ...]:
     cfg = _MatmulConfig(
@@ -372,10 +411,16 @@ def compute_wmma_f16_matmul_reference_buffer(
         random_data=random_data,
         random_seed=random_seed,
         matrix_intrinsic=matrix_intrinsic,
+        input_type=input_type,
         output_type=output_type,
     )
     a_values, b_values = generate_wmma_f16_matmul_inputs(
-        M, N, K, random_data=random_data, random_seed=random_seed
+        M,
+        N,
+        K,
+        input_type=input_type,
+        random_data=random_data,
+        random_seed=random_seed,
     )
     out: list[float] = []
     for wg_m in range(cfg.M_blocks):
@@ -440,8 +485,20 @@ def _emit_tile_coords(bld: dsl.FunctionBuilder, cfg: _MatmulConfig) -> _TileCoor
     """
     a_arg, b_arg, c_arg = bld.args[0], bld.args[1], bld.args[2]
     if cfg.use_buffer:
-        a_arg = _wrap_in_buffer(bld, a_arg, cfg.a_elements, dsl.f16(), 2)
-        b_arg = _wrap_in_buffer(bld, b_arg, cfg.b_elements, dsl.f16(), 2)
+        a_arg = _wrap_in_buffer(
+            bld,
+            a_arg,
+            cfg.a_elements,
+            cfg.input_element_type,
+            cfg.input_element_bytes,
+        )
+        b_arg = _wrap_in_buffer(
+            bld,
+            b_arg,
+            cfg.b_elements,
+            cfg.input_element_type,
+            cfg.input_element_bytes,
+        )
 
     wi_val = bld.assume_range(
         bld.workitem_id(axis=0, width=cfg.mma.wave_size),
@@ -963,10 +1020,20 @@ class _LoopState:
 def _kernel_types(cfg: _MatmulConfig) -> _KernelTypes:
     return _KernelTypes(
         a=dsl.fragment_type(
-            0, dsl.f16(), 16, 16, cfg.mma.wave_size, cfg.mma.ab_registers
+            0,
+            cfg.input_element_type,
+            16,
+            16,
+            cfg.mma.wave_size,
+            cfg.mma.ab_registers,
         ),
         b=dsl.fragment_type(
-            1, dsl.f16(), 16, 16, cfg.mma.wave_size, cfg.mma.ab_registers
+            1,
+            cfg.input_element_type,
+            16,
+            16,
+            cfg.mma.wave_size,
+            cfg.mma.ab_registers,
         ),
         acc=dsl.fragment_type(
             2, dsl.f32(), 16, 16, cfg.mma.wave_size, cfg.mma.acc_registers
@@ -1399,6 +1466,19 @@ def _emit_constant_fill(
         )
 
 
+def _emit_input_ptr(
+    bld: dsl.FunctionBuilder, buf: dsl.Value, cfg: _MatmulConfig
+) -> dsl.Value:
+    input_type = cfg.input_element_type
+    input_helper = _BF16_PTR_HELPER if cfg.input_type == "bf16" else _F16_PTR_HELPER
+    [ptr] = bld.call(
+        input_helper,
+        [bld.memref_cast(buf, dsl.dynamic_1d_memref_type(input_type))],
+        [dsl.ptr_type(input_type)],
+    )
+    return ptr
+
+
 def _emit_kernel(bld: dsl.FunctionBuilder, cfg: _MatmulConfig) -> None:
     """Populate tiled matmul kernel body."""
     coords = _emit_tile_coords(bld, cfg)
@@ -1483,8 +1563,7 @@ def _emit_host(bld: dsl.FunctionBuilder, cfg: _MatmulConfig) -> None:
     pin down directly.
     """
     index = dsl.index_type()
-    f16 = dsl.f16()
-    f16_ptr = dsl.ptr_type(f16)
+    input_type = cfg.input_element_type
     c_type = cfg.c_type
     c_ptr_type = dsl.ptr_type(c_type)
 
@@ -1495,12 +1574,12 @@ def _emit_host(bld: dsl.FunctionBuilder, cfg: _MatmulConfig) -> None:
     threads = bld.constant(index, cfg.threads_per_workgroup)
     c_total = bld.constant(index, cfg.total_elements)
 
-    one_f16 = bld.constant(f16, 1.0)
-    two_f16 = bld.constant(f16, 2.0)
+    one_input = bld.constant(input_type, 1.0)
+    two_input = bld.constant(input_type, 2.0)
     zero_c = bld.constant(c_type, 0.0)
 
-    a_buf = bld.alloc([cfg.a_elements], f16)
-    b_buf = bld.alloc([cfg.b_elements], f16)
+    a_buf = bld.alloc([cfg.a_elements], input_type)
+    b_buf = bld.alloc([cfg.b_elements], input_type)
     c_buf = bld.alloc([cfg.total_elements], c_type)
 
     if cfg.random_data:
@@ -1508,29 +1587,30 @@ def _emit_host(bld: dsl.FunctionBuilder, cfg: _MatmulConfig) -> None:
             cfg.M,
             cfg.N,
             cfg.K,
+            input_type=cfg.input_type,
             random_data=True,
             random_seed=cfg.random_seed,
         )
-        _emit_constant_fill(bld, a_buf, a_values, f16, index)
-        _emit_constant_fill(bld, b_buf, b_values, f16, index)
+        _emit_constant_fill(bld, a_buf, a_values, input_type, index)
+        _emit_constant_fill(bld, b_buf, b_values, input_type, index)
     else:
         # A is row-major MxK: rows [0, M/2) -> first M*K/2 elements (1.0);
         # rows [M/2, M) -> the rest (2.0).
         a_half = bld.constant(index, cfg.a_elements // 2)
         a_total = bld.constant(index, cfg.a_elements)
         with bld.for_loop(c0, a_half, c1) as i:
-            bld.memref_store(one_f16, a_buf, [i])
+            bld.memref_store(one_input, a_buf, [i])
         with bld.for_loop(a_half, a_total, c1) as i:
-            bld.memref_store(two_f16, a_buf, [i])
+            bld.memref_store(two_input, a_buf, [i])
 
         # B is column-major KxN (== row-major NxK): columns [0, N/2) -> first
         # N*K/2 elements (1.0); columns [N/2, N) -> the rest (2.0).
         b_half = bld.constant(index, cfg.b_elements // 2)
         b_total = bld.constant(index, cfg.b_elements)
         with bld.for_loop(c0, b_half, c1) as i:
-            bld.memref_store(one_f16, b_buf, [i])
+            bld.memref_store(one_input, b_buf, [i])
         with bld.for_loop(b_half, b_total, c1) as i:
-            bld.memref_store(two_f16, b_buf, [i])
+            bld.memref_store(two_input, b_buf, [i])
 
     with bld.for_loop(c0, c_total, c1) as i:
         bld.memref_store(zero_c, c_buf, [i])
@@ -1540,13 +1620,10 @@ def _emit_host(bld: dsl.FunctionBuilder, cfg: _MatmulConfig) -> None:
     bld.host_register(bld.cast_unranked(b_buf))
     bld.host_register(c_unranked)
 
-    # The f16 helper is declared with a dynamic 1-D shape so it can take
-    # both A (M*K) and B (N*K) memrefs through a single C symbol; the cast
-    # is purely a static-vs-dynamic shape erasure.
-    dyn_f16 = dsl.dynamic_1d_memref_type(f16)
-    [a_ptr] = bld.call(_F16_PTR_HELPER, [bld.memref_cast(a_buf, dyn_f16)], [f16_ptr])
-    [b_ptr] = bld.call(_F16_PTR_HELPER, [bld.memref_cast(b_buf, dyn_f16)], [f16_ptr])
+    a_ptr = _emit_input_ptr(bld, a_buf, cfg)
+    b_ptr = _emit_input_ptr(bld, b_buf, cfg)
     if cfg.output_type == "f16":
+        dyn_f16 = dsl.dynamic_1d_memref_type(dsl.f16())
         [c_ptr] = bld.call(
             _F16_PTR_HELPER, [bld.memref_cast(c_buf, dyn_f16)], [c_ptr_type]
         )
@@ -1579,13 +1656,14 @@ def build_wmma_f16_matmul_module(
     use_buffer: bool = False,
     use_dma_lds: bool = False,
     matrix_intrinsic: str = "wmma",
+    input_type: str = "f16",
     output_type: str = "f32",
     random_data: bool = False,
     random_seed: int = 0,
     skip_specialize: bool = False,
     target_waves: int | None = None,
 ) -> Module:
-    """Return an MLIR module for the tiled f16 matmul host + kernel."""
+    """Return an MLIR module for the tiled matmul host + kernel."""
     cfg = _MatmulConfig(
         M=M,
         N=N,
@@ -1598,18 +1676,26 @@ def build_wmma_f16_matmul_module(
         use_buffer=use_buffer,
         use_dma_lds=use_dma_lds,
         matrix_intrinsic=matrix_intrinsic,
+        input_type=input_type,
         output_type=output_type,
         random_data=random_data,
         random_seed=random_seed,
     )
     bld = dsl.ModuleBuilder()
     with bld:
+        input_helper = _BF16_PTR_HELPER if cfg.input_type == "bf16" else _F16_PTR_HELPER
         bld.declare_external(
-            _F16_PTR_HELPER,
-            [dsl.dynamic_1d_memref_type(dsl.f16())],
-            [dsl.ptr_type(dsl.f16())],
+            input_helper,
+            [dsl.dynamic_1d_memref_type(cfg.input_element_type)],
+            [dsl.ptr_type(cfg.input_element_type)],
         )
         if cfg.output_type == "f16":
+            if cfg.input_type != "f16":
+                bld.declare_external(
+                    _F16_PTR_HELPER,
+                    [dsl.dynamic_1d_memref_type(dsl.f16())],
+                    [dsl.ptr_type(dsl.f16())],
+                )
             bld.declare_external(
                 _PRINT_F16_HELPER,
                 [dsl.unranked_memref_type(dsl.f16())],
@@ -1628,8 +1714,8 @@ def build_wmma_f16_matmul_module(
             )
 
         kernel_inputs = [
-            dsl.ptr_type(dsl.f16()),
-            dsl.ptr_type(dsl.f16()),
+            dsl.ptr_type(cfg.input_element_type),
+            dsl.ptr_type(cfg.input_element_type),
             dsl.ptr_type(cfg.c_type),
             # Software-pipeline loop trip count: K // 16 - 1.
             dsl.i32(),

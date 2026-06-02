@@ -58,10 +58,11 @@ namespace {
 // Layout constraints for an A or B operand fragment.
 static bool isValidABFragment(FragmentType type) {
   bool isIU8 = type.getElementType().isInteger(8) && type.getRegisters() == 4;
-  bool isF16 = type.getElementType().isF16() &&
-               (type.getRegisters() == 2 || type.getRegisters() == 4 ||
-                type.getRegisters() == 8);
-  return isIU8 || isF16;
+  bool isFloat16 =
+      (type.getElementType().isF16() || type.getElementType().isBF16()) &&
+      (type.getRegisters() == 2 || type.getRegisters() == 4 ||
+       type.getRegisters() == 8);
+  return isIU8 || isFloat16;
 }
 // Layout constraints for an accumulator fragment.
 static bool isValidAccFragment(FragmentType type) {
@@ -126,7 +127,7 @@ LogicalResult FragmentFillOp::verify() {
     return emitOpError("only 16x16 fragments are supported for now");
   if (role != 2 && !isValidABFragment(fragmentType))
     return emitOpError("A/B fragments must be i8 fragments with 4 registers "
-                       "or f16 fragments with 2 or 8 registers");
+                       "or f16/bf16 fragments with 2, 4, or 8 registers");
   if (role == 2 && !isValidAccFragment(fragmentType))
     return emitOpError(
         "accumulator fragments must be 32-bit fragments with 4 or 8 registers");
@@ -166,6 +167,10 @@ static bool matchF16AB(FragmentType type, int64_t role) {
   return type.getRole() == role && type.getElementType().isF16() &&
          type.getRegisters() == 8 && isWmma16x16x16(type);
 }
+static bool matchBF16AB(FragmentType type, int64_t role) {
+  return type.getRole() == role && type.getElementType().isBF16() &&
+         type.getRegisters() == 8 && isWmma16x16x16(type);
+}
 static bool matchF32Acc(FragmentType type) {
   return type.getRole() == 2 && type.getElementType().isF32() &&
          type.getRegisters() == 8 && isWmma16x16x16(type);
@@ -174,12 +179,20 @@ static bool matchMfmaF16AB(FragmentType type, int64_t role) {
   return type.getRole() == role && type.getElementType().isF16() &&
          type.getRegisters() == 2 && isWmma16x16x16(type);
 }
+static bool matchMfmaBF16AB(FragmentType type, int64_t role) {
+  return type.getRole() == role && type.getElementType().isBF16() &&
+         type.getRegisters() == 2 && isWmma16x16x16(type);
+}
 static bool matchMfmaF32Acc(FragmentType type) {
   return type.getRole() == 2 && type.getElementType().isF32() &&
          type.getRegisters() == 4 && isWmma16x16x16(type);
 }
 static bool matchMfmaGfx950F16AB(FragmentType type, int64_t role) {
   return type.getRole() == role && type.getElementType().isF16() &&
+         type.getRegisters() == 4 && isMfmaGfx95016x16x32(type);
+}
+static bool matchMfmaGfx950BF16AB(FragmentType type, int64_t role) {
+  return type.getRole() == role && type.getElementType().isBF16() &&
          type.getRegisters() == 4 && isMfmaGfx95016x16x32(type);
 }
 static bool matchMfmaGfx950F32Acc(FragmentType type) {
@@ -194,11 +207,20 @@ static constexpr WmmaShape kWmmaShapes[] = {
     {"wmma.f32.16x16x16.f16", matchF16AB, matchF32Acc,
      "must be a 16x16 f16 wave32 fragment with 8 registers",
      "accumulator must be a 16x16 f32 wave32 fragment with 8 registers"},
+    {"wmma.f32.16x16x16.bf16", matchBF16AB, matchF32Acc,
+     "must be a 16x16 bf16 wave32 fragment with 8 registers",
+     "accumulator must be a 16x16 f32 wave32 fragment with 8 registers"},
     {"mfma.f32.16x16x16.f16", matchMfmaF16AB, matchMfmaF32Acc,
      "must be a 16x16 f16 wave32 fragment with 2 registers",
      "accumulator must be a 16x16 f32 wave32 fragment with 4 registers"},
+    {"mfma.f32.16x16x16.bf16", matchMfmaBF16AB, matchMfmaF32Acc,
+     "must be a 16x16 bf16 wave32 fragment with 2 registers",
+     "accumulator must be a 16x16 f32 wave32 fragment with 4 registers"},
     {"mfma.f32.16x16x32.f16", matchMfmaGfx950F16AB, matchMfmaGfx950F32Acc,
      "must be a 16x16 f16 wave64 fragment with 4 registers",
+     "accumulator must be a 16x16 f32 wave64 fragment with 4 registers"},
+    {"mfma.f32.16x16x32.bf16", matchMfmaGfx950BF16AB, matchMfmaGfx950F32Acc,
+     "must be a 16x16 bf16 wave64 fragment with 4 registers",
      "accumulator must be a 16x16 f32 wave64 fragment with 4 registers"},
 };
 } // namespace

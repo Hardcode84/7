@@ -64,9 +64,11 @@ SchedClass classifyOp(Operation *op) {
   return llvm::TypeSwitch<Operation *, SchedClass>(op)
       // MFMA. Both 16x16x{16,32} map to Write4PassMAI per LLVM
       // SISchedule.td on gfx942/gfx950.
-      .Case<MfmaF32_16x16x16_F16Op, MfmaF32_16x16x32_F16Op>(
+      .Case<MfmaF32_16x16x16_F16Op, MfmaF32_16x16x16_BF16Op,
+            MfmaF32_16x16x32_F16Op, MfmaF32_16x16x32_BF16Op>(
           [](auto) { return SchedClass::Write4PassMAI; })
-      .Case<WmmaF32_16x16x16_F16Op, WmmaI32_16x16x16_IU8Op>(
+      .Case<WmmaF32_16x16x16_F16Op, WmmaF32_16x16x16_BF16Op,
+            WmmaI32_16x16x16_IU8Op>(
           [](auto) { return SchedClass::Write16PassWMMA; })
       // Scalar memory (s_load_*).
       .Case<SLoadB32Op, SLoadB64Op, SLoadB128Op>(

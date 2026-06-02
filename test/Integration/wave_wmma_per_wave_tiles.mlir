@@ -30,6 +30,12 @@
 //
 // F16OUT: CPU comparison passed
 //
+// bf16 A/B input path:
+// RUN: %python %S/../../examples/wave/wmma_matmul_tiled.py --chip=%chip --m=32 --n=32 --k=32 --bm=1 --bn=1 --wave-m-tiles=2 --wave-n-tiles=2 --use-buffer --input-type=bf16 --compare-cpu --seed=17 \
+// RUN:   | FileCheck %s --check-prefix=BF16
+//
+// BF16: CPU comparison passed
+//
 // K=64 with --wave-k-tiles=2 (collapses K loop to a single fragment
 // group, exercises the multi-K-step LDS slot layout):
 // RUN: %python %S/../../examples/wave/wmma_matmul_tiled.py --chip=%chip --m=32 --n=32 --k=64 --bm=1 --bn=1 --wave-m-tiles=2 --wave-n-tiles=2 --wave-k-tiles=2 --use-buffer --compare-cpu --seed=11 \

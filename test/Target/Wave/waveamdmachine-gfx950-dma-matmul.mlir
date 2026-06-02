@@ -11,6 +11,8 @@
 // RUN:   | FileCheck %s --check-prefix=ASMBUF
 // RUN: %python %S/../../../examples/wave/wmma_matmul_tiled.py --chip=gfx950 --kernel-profile=gfx950-sw-pipeline --m=128 --n=128 --k=192 --dump-asm 2>/dev/null \
 // RUN:   | FileCheck %s --check-prefix=ASMPIPE
+// RUN: %python %S/../../../examples/wave/wmma_matmul_tiled.py --chip=gfx950 --m=16 --n=16 --k=32 --matrix-intrinsic=mfma_gfx950 --input-type=bf16 --dump-asm 2>/dev/null \
+// RUN:   | FileCheck %s --check-prefix=ASMBF16
 //
 // IR: wave.index_expr <{{.*xor.*floor\(1/2\*Mod\(wi, 16\)\).*}}>
 // IR: waveamd.dma_load_lds
@@ -48,6 +50,9 @@
 // ASMPIPE-LABEL: wmma_f16_matmul_tiled:
 // ASMPIPE: s_waitcnt vmcnt(8)
 // ASMPIPE-NEXT: s_barrier
+
+// ASMBF16-LABEL: wmma_f16_matmul_tiled:
+// ASMBF16: v_mfma_f32_16x16x32_bf16
 // ASMPIPE: ds_read_b128
 // ASMPIPE: s_waitcnt lgkmcnt(0)
 // ASMPIPE-NEXT: buffer_load_dwordx4

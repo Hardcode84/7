@@ -51,10 +51,13 @@ void *_mlir_ciface_wave_memref_to_ptr_global_f32(StridedMemRef1D<float> *m) {
   return toGlobalPtr(m);
 }
 
-// `f16` has no native C++ type; we use a `uint16_t` slot since the helper
-// only needs the data pointer's bit address. The MLIR memref descriptor
-// layout is element-size driven, so `f16` and `i16` map to the same ABI.
+// 16-bit floats use uint16_t slots; helper only needs the bit address.
 void *_mlir_ciface_wave_memref_to_ptr_global_f16(StridedMemRef1D<uint16_t> *m) {
+  return toGlobalPtr(m);
+}
+
+void *
+_mlir_ciface_wave_memref_to_ptr_global_bf16(StridedMemRef1D<uint16_t> *m) {
   return toGlobalPtr(m);
 }
 

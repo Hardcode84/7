@@ -132,7 +132,7 @@ func.func @fragment_fill_bad_role(%s: i32) {
 // -----
 
 func.func @fragment_fill_bad_ab_layout(%s: i32) {
-  // expected-error @below {{A/B fragments must be i8 fragments with 4 registers or f16 fragments with 2 or 8 registers}}
+  // expected-error @below {{A/B fragments must be i8 fragments with 4 registers or f16/bf16 fragments with 2, 4, or 8 registers}}
   %f = waveamd.fragment_fill %s : i32 -> !waveamd.fragment<0, f16, 16, 16, 32, 6>
   return
 }

@@ -22,6 +22,9 @@ defvar WaveAMDMachine_Gfx90APlus =
     "isa.Major == 9 && ((isa.Minor == 0 && isa.Stepping == 10) || " #
     "(isa.Minor == 4 && isa.Stepping == 2) || " #
     "(isa.Minor == 5 && isa.Stepping == 0))";
+defvar WaveAMDMachine_Gfx940Plus =
+    "isa.Major == 9 && (isa.Minor == 4 || " #
+    "(isa.Minor == 5 && isa.Stepping == 0))";
 defvar WaveAMDMachine_Gfx950 =
     "isa.Major == 9 && isa.Minor == 5 && isa.Stepping == 0";
 defvar WaveAMDMachine_Gfx8To13 =
@@ -659,6 +662,12 @@ def WaveAMDMachine_WmmaF32_16x16x16_F16Op
   let hasVerifier = 1;
   let archPredicate = "isa.Major == 11";
 }
+def WaveAMDMachine_WmmaF32_16x16x16_BF16Op
+    : WaveAMDMachine_TernaryResult<"wmma_f32_16x16x16_bf16", WaveAMDMachine_VGPR,
+                                WaveAMDMachine_VGPR, [WaveAMDMachine_VALU]> {
+  let hasVerifier = 1;
+  let archPredicate = "isa.Major == 11";
+}
 def WaveAMDMachine_MfmaF32_16x16x16_F16Op
     : WaveAMDMachine_TernaryResult<"mfma_f32_16x16x16_f16", WaveAMDMachine_VGPR,
                                 WaveAMDMachine_VGPR,
@@ -667,8 +676,24 @@ def WaveAMDMachine_MfmaF32_16x16x16_F16Op
   let hasVerifier = 1;
   let archPredicate = WaveAMDMachine_Gfx90APlus;
 }
+def WaveAMDMachine_MfmaF32_16x16x16_BF16Op
+    : WaveAMDMachine_TernaryResult<"mfma_f32_16x16x16_bf16", WaveAMDMachine_VGPR,
+                                WaveAMDMachine_VGPR,
+                                [WaveAMDMachine_VALU, WaveAMDMachine_MFMA,
+                                 WaveAMDMachine_ReadsExec]> {
+  let hasVerifier = 1;
+  let archPredicate = WaveAMDMachine_Gfx940Plus;
+}
 def WaveAMDMachine_MfmaF32_16x16x32_F16Op
     : WaveAMDMachine_TernaryResult<"mfma_f32_16x16x32_f16", WaveAMDMachine_VGPR,
+                                WaveAMDMachine_VGPR,
+                                [WaveAMDMachine_VALU, WaveAMDMachine_MFMA,
+                                 WaveAMDMachine_ReadsExec]> {
+  let hasVerifier = 1;
+  let archPredicate = WaveAMDMachine_Gfx950;
+}
+def WaveAMDMachine_MfmaF32_16x16x32_BF16Op
+    : WaveAMDMachine_TernaryResult<"mfma_f32_16x16x32_bf16", WaveAMDMachine_VGPR,
                                 WaveAMDMachine_VGPR,
                                 [WaveAMDMachine_VALU, WaveAMDMachine_MFMA,
                                  WaveAMDMachine_ReadsExec]> {

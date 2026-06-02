@@ -9,8 +9,12 @@ from mlir.dialects.wave_matmul import (
 a0, b0 = generate_wmma_f16_matmul_inputs(32, 32, 32, random_data=True, random_seed=7)
 a1, b1 = generate_wmma_f16_matmul_inputs(32, 32, 32, random_data=True, random_seed=7)
 a2, _ = generate_wmma_f16_matmul_inputs(32, 32, 32, random_data=True, random_seed=8)
+abf16, bbf16 = generate_wmma_f16_matmul_inputs(
+    32, 32, 32, input_type="bf16", random_data=True, random_seed=7
+)
 assert a0 == a1 and b0 == b1
 assert a0 != a2
+assert len(abf16) == len(a0) and len(bbf16) == len(b0)
 ref = compute_wmma_f16_matmul_reference_buffer(
     32,
     32,
@@ -23,6 +27,14 @@ ref = compute_wmma_f16_matmul_reference_buffer(
     matrix_intrinsic="mfma",
 )
 print("random-ref", len(a0), len(b0), len(ref))
+ref_bf16 = compute_wmma_f16_matmul_reference_buffer(
+    16,
+    16,
+    32,
+    matrix_intrinsic="mfma_gfx950",
+    input_type="bf16",
+)
+print("bf16-ref", len(ref_bf16), ref_bf16[0])
 ref_f32 = compute_wmma_f16_matmul_reference_buffer(
     16,
     16,
@@ -64,7 +76,17 @@ module_f16 = build_wmma_f16_matmul_module(
 )
 print(module_f16)
 
+module_bf16 = build_wmma_f16_matmul_module(
+    M=16,
+    N=16,
+    K=32,
+    matrix_intrinsic="mfma_gfx950",
+    input_type="bf16",
+)
+print(module_bf16)
+
 # CHECK: random-ref 1024 1024 1024
+# CHECK: bf16-ref 256 32.0
 # CHECK: f16-ref-rounding -132.5625 -132.5
 # CHECK-LABEL: func.func @wmma_f16_matmul_tiled
 # CHECK-SAME: wave.lds_size = 2048
@@ -83,3 +105,7 @@ print(module_f16)
 # CHECK-SAME: !wave.simd<f32, 32> -> !wave.simd<f16, 32>
 # CHECK: wave.pack
 # CHECK-SAME: -> !wave.simd<vector<2xf16>, 32>
+# CHECK: func.func private @wave_memref_to_ptr_global_bf16
+# CHECK: func.func @wmma_f16_matmul_tiled
+# CHECK-SAME: !wave.ptr<#wave.global, bf16>
+# CHECK: waveamd.mma "mfma.f32.16x16x32.bf16"

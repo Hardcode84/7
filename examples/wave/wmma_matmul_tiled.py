@@ -3,12 +3,12 @@
 #  See https://llvm.org/LICENSE.txt for license information.
 #  SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-"""Emit a tiled Wave f16xf16xf32 matmul MLIR module for a given shape.
+"""Emit a tiled Wave matmul MLIR module for a given shape.
 
-The kernel allocates host-side ``MxK`` (A) and ``NxK`` (B) f16 buffers
-filled with 1.0 and an ``MxN`` f32 output, then issues ``wave.load`` +
+The kernel allocates host-side ``MxK`` (A) and ``NxK`` (B) input buffers
+filled with 1.0 and an ``MxN`` output, then issues ``wave.load`` +
 ``waveamd.fragment_pack`` per K-tile, accumulates with ``waveamd.mma``,
-and stores the f32 accumulator. With the all-ones fill the host can
+and stores the accumulator. With the all-ones fill the host can
 check the result element-wise against ``K`` (each output element is
 :math:`\\sum_{k=0}^{K-1} 1.0 \\cdot 1.0 = K`).
 
@@ -157,6 +157,12 @@ def _add_codegen_args(parser: argparse.ArgumentParser) -> None:
         help="stamp waveamdmachine.target_waves on the kernel; 0 omits it",
     )
     parser.add_argument(
+        "--input-type",
+        choices=("f16", "bf16"),
+        default="f16",
+        help="input element type for A and B",
+    )
+    parser.add_argument(
         "--output-type",
         choices=("f32", "f16"),
         default="f32",
@@ -168,7 +174,7 @@ def _add_runner_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--random-data",
         action="store_true",
-        help="fill A/B with deterministic pseudo-random f16 values",
+        help="fill A/B with deterministic pseudo-random input values",
     )
     add_execution_args(parser, default_atol=_DEFAULT_ATOL, default_rtol=_DEFAULT_RTOL)
 
@@ -260,6 +266,7 @@ def main(argv: list[str] | None = None) -> int:
         use_buffer=args.use_buffer,
         use_dma_lds=args.use_dma_lds,
         matrix_intrinsic=matrix_intrinsic,
+        input_type=args.input_type,
         output_type=args.output_type,
         random_data=random_data,
         random_seed=args.seed,
@@ -296,6 +303,7 @@ def main(argv: list[str] | None = None) -> int:
         random_data=True,
         random_seed=args.seed,
         matrix_intrinsic=matrix_intrinsic,
+        input_type=args.input_type,
         output_type=args.output_type,
     )
     ok, message = _compare_tile_multisets(
