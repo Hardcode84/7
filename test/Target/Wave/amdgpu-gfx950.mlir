@@ -5,6 +5,11 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 // CHECK: .amdgcn_target "amdgcn-amd-amdhsa--gfx950"
 
 // CHECK-LABEL: buffer_store_kernel:
+// CHECK: s_load_dwordx2 s[2:3], s[0:1], 0x0
+// CHECK: s_waitcnt lgkmcnt(0)
+// CHECK: s_branch [[ENTRY:.*kernarg_preload_entry]]
+// CHECK: .p2align 8
+// CHECK: [[ENTRY]]:
 // CHECK-NOT: s_load_dword
 // CHECK: buffer_store_dword
 // CHECK: s_waitcnt

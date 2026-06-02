@@ -23,6 +23,13 @@
 //
 // ASM: .amdgcn_target "amdgcn-amd-amdhsa--gfx950"
 // ASM-LABEL: wmma_f16_matmul_tiled:
+// ASM: s_load_dwordx2 s[2:3], s[0:1], 0x0
+// ASM: s_load_dwordx4 s[4:7], s[0:1], 0x8
+// ASM: s_load_dword s8, s[0:1], 0x18
+// ASM: s_waitcnt lgkmcnt(0)
+// ASM: s_branch [[ENTRY:.*kernarg_preload_entry]]
+// ASM: .p2align 8
+// ASM: [[ENTRY]]:
 // ASM-NOT: s_load_dword
 // ASM: v_xor_b32_e32
 // ASM: global_load_lds_dwordx4

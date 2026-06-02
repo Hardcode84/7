@@ -129,12 +129,14 @@ struct KernelInfo {
   X(sCmpLtI32, S_CMP_LT_I32_vi, S_CMP_LT_I32_gfx11)                            \
   X(sCmpLgU32, S_CMP_LG_U32_vi, S_CMP_LG_U32_gfx11)                            \
   X(sCselectB32, S_CSELECT_B32_vi, S_CSELECT_B32_gfx11)                        \
+  X(sBranch, S_BRANCH_vi, S_BRANCH_gfx11)                                      \
   X(sCbranchScc0, S_CBRANCH_SCC0_vi, S_CBRANCH_SCC0_gfx11)                     \
   X(sCbranchScc1, S_CBRANCH_SCC1_vi, S_CBRANCH_SCC1_gfx11)                     \
   X(sCbranchExecz, S_CBRANCH_EXECZ_vi, S_CBRANCH_EXECZ_gfx11)                  \
   X(sLoadB32, S_LOAD_DWORD_IMM_vi, S_LOAD_B32_IMM_gfx11)                       \
   X(sLoadB64, S_LOAD_DWORDX2_IMM_vi, S_LOAD_B64_IMM_gfx11)                     \
   X(sLoadB128, S_LOAD_DWORDX4_IMM_vi, S_LOAD_B128_IMM_gfx11)                   \
+  X(sLoadB256, S_LOAD_DWORDX8_IMM_vi, S_LOAD_B256_IMM_gfx11)                   \
   X(sWaitcnt, S_WAITCNT_vi, S_WAITCNT_gfx11)                                   \
   X(sNop, S_NOP_vi, S_NOP_gfx11)                                               \
   X(sSetprio, S_SETPRIO_vi, S_SETPRIO_gfx11)                                   \
@@ -246,6 +248,10 @@ static_assert(llvm::AMDGPU::SGPR2_SGPR3 == llvm::AMDGPU::SGPR0_SGPR1 + 1,
 static_assert(llvm::AMDGPU::SGPR4_SGPR5_SGPR6_SGPR7 ==
                   llvm::AMDGPU::SGPR0_SGPR1_SGPR2_SGPR3 + 1,
               "SGPR quad enum layout must be contiguous");
+static_assert(
+    llvm::AMDGPU::SGPR4_SGPR5_SGPR6_SGPR7_SGPR8_SGPR9_SGPR10_SGPR11 ==
+        llvm::AMDGPU::SGPR0_SGPR1_SGPR2_SGPR3_SGPR4_SGPR5_SGPR6_SGPR7 + 1,
+    "SGPR octuple enum layout must be contiguous");
 static_assert(llvm::AMDGPU::VGPR1 == llvm::AMDGPU::VGPR0 + 1,
               "VGPR enum layout must be contiguous");
 static_assert(llvm::AMDGPU::VGPR1_LO16 == llvm::AMDGPU::VGPR0_LO16 + 1,
@@ -400,12 +406,14 @@ private:
   unsigned sCmpLtI32() const { return opcodes.sCmpLtI32; }
   unsigned sCmpLgU32() const { return opcodes.sCmpLgU32; }
   unsigned sCselectB32() const { return opcodes.sCselectB32; }
+  unsigned sBranch() const { return opcodes.sBranch; }
   unsigned sCbranchScc0() const { return opcodes.sCbranchScc0; }
   unsigned sCbranchScc1() const { return opcodes.sCbranchScc1; }
   unsigned sCbranchExecz() const { return opcodes.sCbranchExecz; }
   unsigned sLoadB32() const { return opcodes.sLoadB32; }
   unsigned sLoadB64() const { return opcodes.sLoadB64; }
   unsigned sLoadB128() const { return opcodes.sLoadB128; }
+  unsigned sLoadB256() const { return opcodes.sLoadB256; }
   unsigned sWaitcnt() const { return opcodes.sWaitcnt; }
   unsigned sNop() const { return opcodes.sNop; }
   unsigned sSetprio() const { return opcodes.sSetprio; }
@@ -648,22 +656,39 @@ private:
       return func.emitError(
           "WaveAMDMachine AMDGPU emitter supports one-block funcs");
     bool isKernel = func->hasAttr(wave::WaveDialect::getKernelAttrName());
+    wave::WaveAMDKernelEntryRegs entryRegs;
     if (isKernel) {
-      wave::WaveAMDKernelEntryRegs entryRegs =
-          wave::getWaveAMDKernelEntryRegs(func);
+      entryRegs = wave::getWaveAMDKernelEntryRegs(func);
       if (failed(verifyKernelDescriptor(func, entryRegs)))
         return failure();
     }
+
+    bool emitPreloadCompatProlog = false;
+    if (isKernel && entryRegs.kernargPreloadDwords != 0) {
+      FailureOr<bool> needsProlog =
+          wave::needsWaveAMDKernargPreloadCompatProlog(func,
+                                                       "wave-to-amdgpu-asm");
+      if (failed(needsProlog))
+        return failure();
+      emitPreloadCompatProlog = *needsProlog;
+    }
+
+    loopCounter = 0;
+    funcLabelPrefix = (".L" + Twine(func.getSymName())).str();
 
     os << "\n\t.globl\t" << func.getSymName() << "\n";
     os << "\t.p2align\t8\n";
     os << "\t.type\t" << func.getSymName() << ",@function\n";
     os << func.getSymName() << ":\n";
+    if (emitPreloadCompatProlog) {
+      std::string realEntryLabel = funcLabelPrefix + ".kernarg_preload_entry";
+      if (failed(emitKernargPreloadCompatProlog(entryRegs, realEntryLabel)))
+        return failure();
+      os << "\t.p2align\t8\n";
+      os << realEntryLabel << ":\n";
+    }
     emitLine(
         StringRef("; wave backend: WaveAMDMachine MLIR pipeline finalized"));
-
-    loopCounter = 0;
-    funcLabelPrefix = (".L" + Twine(func.getSymName())).str();
 
     for (Operation &op : func.getBody().front()) {
       if (isa<func::ReturnOp>(op))
@@ -718,6 +743,55 @@ private:
       return func.emitError("wave-to-amdgpu-asm kernarg preload offset must be "
                             "less than 512 dwords");
     return wave::verifyWaveAMDKernargPreloadTarget(func, "wave-to-amdgpu-asm");
+  }
+
+  static unsigned chooseKernargPreloadLoadWidth(unsigned phys,
+                                                unsigned remainingDwords) {
+    if (remainingDwords >= 8 && phys % 4 == 0)
+      return 8;
+    if (remainingDwords >= 4 && phys % 4 == 0)
+      return 4;
+    if (remainingDwords >= 2 && phys % 2 == 0)
+      return 2;
+    return 1;
+  }
+
+  LogicalResult
+  emitKernargPreloadCompatProlog(const wave::WaveAMDKernelEntryRegs &entryRegs,
+                                 StringRef realEntryLabel) {
+    unsigned remainingDwords = entryRegs.kernargPreloadDwords;
+    unsigned preloadSGPR =
+        entryRegs.kernargSegmentPtrSGPR + entryRegs.kernargSegmentPtrWidth;
+    unsigned offsetBytes = entryRegs.kernargPreloadOffsetDwords * 4;
+    unsigned kernargPtr = mcSGPRReg(entryRegs.kernargSegmentPtrSGPR,
+                                    entryRegs.kernargSegmentPtrWidth);
+    while (remainingDwords != 0) {
+      unsigned width =
+          chooseKernargPreloadLoadWidth(preloadSGPR, remainingDwords);
+      unsigned opcode = sLoadB32();
+      if (width == 8)
+        opcode = sLoadB256();
+      else if (width == 4)
+        opcode = sLoadB128();
+      else if (width == 2)
+        opcode = sLoadB64();
+      if (failed(emitMC(opcode, {llvm::MCOperand::createReg(
+                                     mcSGPRReg(preloadSGPR, width)),
+                                 llvm::MCOperand::createReg(kernargPtr),
+                                 llvm::MCOperand::createImm(offsetBytes),
+                                 llvm::MCOperand::createImm(0)})))
+        return failure();
+      preloadSGPR += width;
+      offsetBytes += width * 4;
+      remainingDwords -= width;
+    }
+
+    unsigned waitcnt = llvm::AMDGPU::encodeWaitcnt(
+        isaVersion, llvm::AMDGPU::getVmcntBitMask(isaVersion),
+        llvm::AMDGPU::getExpcntBitMask(isaVersion), /*lgkmcnt=*/0);
+    if (failed(emitMC(sWaitcnt(), {llvm::MCOperand::createImm(waitcnt)})))
+      return failure();
+    return emitMC(sBranch(), {labelOperand(realEntryLabel)});
   }
 
   LogicalResult emitKernelDescriptor(func::FuncOp func) {
@@ -931,11 +1005,26 @@ private:
     unsigned phys = getPhys(value);
     if (regType.getRegClass() == waveamdmachine::RegClass::VGPR)
       return mcVGPRReg(phys, regType.getWidth());
-    if (regType.getWidth() == 4)
-      return llvm::AMDGPU::SGPR0_SGPR1_SGPR2_SGPR3 + phys / 4;
-    if (regType.getWidth() == 2)
+    return mcSGPRReg(phys, regType.getWidth());
+  }
+
+  unsigned mcSGPRReg(unsigned phys, unsigned width) const {
+    switch (width) {
+    case 1:
+      return llvm::AMDGPU::SGPR0 + phys;
+    case 2:
+      assert(phys % 2 == 0 && "SGPR pair must be aligned");
       return llvm::AMDGPU::SGPR0_SGPR1 + phys / 2;
-    return llvm::AMDGPU::SGPR0 + phys;
+    case 4:
+      assert(phys % 4 == 0 && "SGPR quad must be aligned");
+      return llvm::AMDGPU::SGPR0_SGPR1_SGPR2_SGPR3 + phys / 4;
+    case 8:
+      assert(phys % 4 == 0 && "SGPR octuple must be SReg_256 aligned");
+      return llvm::AMDGPU::SGPR0_SGPR1_SGPR2_SGPR3_SGPR4_SGPR5_SGPR6_SGPR7 +
+             phys / 4;
+    default:
+      llvm_unreachable("unsupported SGPR tuple width");
+    }
   }
 
   unsigned mcVGPRReg(unsigned phys, unsigned width) const {
