@@ -129,6 +129,22 @@ FailureOr<bool> supportsWaveAMDKernargPreload(Operation *op,
   return llvm::AMDGPU::hasKernargPreload(**sti);
 }
 
+static bool isGfx125x(const llvm::AMDGPU::IsaVersion &isa) {
+  return isa.Major == 12 && isa.Minor == 5;
+}
+
+FailureOr<bool> needsWaveAMDKernargPreloadCompatProlog(Operation *op,
+                                                       StringRef consumer) {
+  FailureOr<std::unique_ptr<llvm::MCSubtargetInfo>> sti =
+      createSubtargetInfo(op, consumer);
+  if (failed(sti))
+    return failure();
+  if (!llvm::AMDGPU::hasKernargPreload(**sti))
+    return false;
+  llvm::AMDGPU::IsaVersion isa = llvm::AMDGPU::getIsaVersion((*sti)->getCPU());
+  return !isGfx125x(isa);
+}
+
 LogicalResult verifyWaveAMDKernargPreloadTarget(func::FuncOp func,
                                                 StringRef consumer) {
   if (!hasWaveAMDKernargPreloadRequest(func))
@@ -140,6 +156,23 @@ LogicalResult verifyWaveAMDKernargPreloadTarget(func::FuncOp func,
     return success();
   return func.emitError(consumer)
          << " kernarg preload requires target with kernarg-preload feature";
+}
+
+LogicalResult verifyWaveAMDKernargPreloadRuntimeSupport(func::FuncOp func,
+                                                        StringRef consumer) {
+  if (!hasWaveAMDKernargPreloadRequest(func))
+    return success();
+  if (failed(verifyWaveAMDKernargPreloadTarget(func, consumer)))
+    return failure();
+  FailureOr<bool> needsProlog =
+      needsWaveAMDKernargPreloadCompatProlog(func, consumer);
+  if (failed(needsProlog))
+    return failure();
+  if (!*needsProlog)
+    return success();
+  return func.emitError(consumer)
+         << " kernarg preload requires a compatibility prolog on this target; "
+            "Wave backend does not implement one";
 }
 
 FailureOr<WaveAMDRegisterLimits> getWaveAMDRegisterLimits(Operation *op) {

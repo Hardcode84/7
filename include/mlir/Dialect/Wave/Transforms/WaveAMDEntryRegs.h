@@ -48,8 +48,12 @@ WaveAMDKernelEntryRegs getWaveAMDKernelEntryRegs(func::FuncOp func);
 bool hasWaveAMDKernargPreloadRequest(func::FuncOp func);
 FailureOr<bool> supportsWaveAMDKernargPreload(Operation *op,
                                               StringRef consumer);
+FailureOr<bool> needsWaveAMDKernargPreloadCompatProlog(Operation *op,
+                                                       StringRef consumer);
 LogicalResult verifyWaveAMDKernargPreloadTarget(func::FuncOp func,
                                                 StringRef consumer);
+LogicalResult verifyWaveAMDKernargPreloadRuntimeSupport(func::FuncOp func,
+                                                        StringRef consumer);
 unsigned getWaveAMDReservedSGPRs(func::FuncOp func);
 unsigned getWaveAMDReservedVGPRs(func::FuncOp func);
 std::string getWaveAMDSGPRName(unsigned index, unsigned width);

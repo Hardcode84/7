@@ -1,8 +1,6 @@
 // RUN: wave-opt --waveamd-to-machine %s | FileCheck %s --check-prefix=SELECT
 // RUN: wave-opt --waveamd-to-machine --waveamd-abi-lowering %s | FileCheck %s --check-prefix=ABI
 // RUN: wave-opt --waveamd-to-machine --waveamd-abi-lowering --waveamd-reg-alloc --waveamd-resource-info %s | FileCheck %s --check-prefix=REGALLOC
-// RUN: wave-opt --waveamd-to-machine --waveamd-abi-lowering --waveamd-reg-alloc --waveamd-resource-info %s | wave-translate --wave-to-amdgpu-asm - | FileCheck %s --check-prefix=ASM
-// RUN: wave-opt --waveamd-to-machine --waveamd-abi-lowering --waveamd-reg-alloc --waveamd-resource-info %s | wave-translate --wave-to-amdgpu-asm - | llvm-mc -triple=amdgcn-amd-amdhsa -mcpu=gfx942 -filetype=obj -o /dev/null
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx942"} {
 
@@ -21,12 +19,6 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx942"} {
 // REGALLOC: waveamdmachine.s_workgroup_id_y : !waveamdmachine.reg<sgpr, 1, 5>
 // REGALLOC: waveamdmachine.v_workitem_id_x : !waveamdmachine.reg<vgpr, 1, 0>
 
-// ASM-LABEL: .amdhsa_kernel kernarg_preload_shifts_system_sgprs
-// ASM: .amdhsa_user_sgpr_count 4
-// ASM: .amdhsa_user_sgpr_kernarg_segment_ptr 1
-// ASM: .amdhsa_user_sgpr_kernarg_preload_length 2
-// ASM: .amdhsa_user_sgpr_kernarg_preload_offset 0
-// ASM: .amdhsa_system_sgpr_workgroup_id_x 1
 func.func @kernarg_preload_shifts_system_sgprs()
     attributes {wave.kernel, waveamdmachine.kernarg_preload_length = 2 : i64} {
   %wg_x = wave.workgroup_id 0
@@ -56,10 +48,6 @@ func.func @kernarg_preload_shifts_system_sgprs()
 // REGALLOC: waveamdmachine.kernarg_preload {dword_offset = 0 : i64} : !waveamdmachine.reg<sgpr, 1, 2>
 // REGALLOC: waveamdmachine.kernarg_preload {dword_offset = 1 : i64} : !waveamdmachine.reg<sgpr, 2, 3>
 
-// ASM-LABEL: .amdhsa_kernel preloaded_arg_prefix
-// ASM: .amdhsa_user_sgpr_count 5
-// ASM: .amdhsa_user_sgpr_kernarg_preload_length 3
-// ASM: .amdhsa_user_sgpr_kernarg_preload_offset 0
 func.func @preloaded_arg_prefix(%x: i32, %wide: i64,
                                 %out: !wave.ptr<#wave.global, i32>,
                                 %buf: !wave.ptr<#waveamd.buffer, i32>)
@@ -77,10 +65,6 @@ func.func @preloaded_arg_prefix(%x: i32, %wide: i64,
 // REGALLOC: waveamdmachine.kernarg_preload {dword_offset = 0 : i64} : !waveamdmachine.reg<sgpr, 2, 2>
 // REGALLOC: waveamdmachine.kernarg_preload {dword_offset = 2 : i64} : !waveamdmachine.reg<sgpr, 4, 4>
 
-// ASM-LABEL: .amdhsa_kernel preloaded_pointer_args
-// ASM: .amdhsa_user_sgpr_count 8
-// ASM: .amdhsa_user_sgpr_kernarg_preload_length 6
-// ASM: .amdhsa_user_sgpr_kernarg_preload_offset 0
 func.func @preloaded_pointer_args(%out: !wave.ptr<#wave.global, i32>,
                                   %buf: !wave.ptr<#waveamd.buffer, i32>)
     attributes {wave.kernel, waveamdmachine.kernarg_preload_length = 6 : i64} {

@@ -648,9 +648,12 @@ private:
       return func.emitError(
           "WaveAMDMachine AMDGPU emitter supports one-block funcs");
     bool isKernel = func->hasAttr(wave::WaveDialect::getKernelAttrName());
-    if (isKernel && failed(wave::verifyWaveAMDKernargPreloadTarget(
-                        func, "wave-to-amdgpu-asm")))
-      return failure();
+    if (isKernel) {
+      wave::WaveAMDKernelEntryRegs entryRegs =
+          wave::getWaveAMDKernelEntryRegs(func);
+      if (failed(verifyKernelDescriptor(func, entryRegs)))
+        return failure();
+    }
 
     os << "\n\t.globl\t" << func.getSymName() << "\n";
     os << "\t.p2align\t8\n";
@@ -714,7 +717,8 @@ private:
         entryRegs.kernargPreloadOffsetDwords >= 512)
       return func.emitError("wave-to-amdgpu-asm kernarg preload offset must be "
                             "less than 512 dwords");
-    return success();
+    return wave::verifyWaveAMDKernargPreloadRuntimeSupport(
+        func, "wave-to-amdgpu-asm");
   }
 
   LogicalResult emitKernelDescriptor(func::FuncOp func) {

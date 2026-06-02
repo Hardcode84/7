@@ -38,9 +38,8 @@ static SchedClass fallbackClassify(Operation *op) {
 }
 
 SchedClass classifyOp(Operation *op) {
-  // Trait pre-filter for two large categories: anything that emits
-  // no asm (pseudos, preloaded reg projections, s_waitcnt) and the
-  // full VMEM load/store family.
+  // Trait pre-filter for two large categories: ops that do not advance
+  // instruction-distance hazards and the full VMEM load/store family.
   if (op->hasTrait<traits::NoMachineInst>())
     return SchedClass::NoInst;
   if (op->hasTrait<traits::VMEMLoadOp>() || op->hasTrait<traits::VMEMStoreOp>())
