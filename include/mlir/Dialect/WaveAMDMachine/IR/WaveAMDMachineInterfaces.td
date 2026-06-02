@@ -29,4 +29,20 @@ def WaveAMDMachine_AddressFieldsOpInterface
   ];
 }
 
+def WaveAMDMachine_WaitcntInfoOpInterface
+    : OpInterface<"WaitcntInfoOpInterface"> {
+  let cppNamespace = "::mlir::waveamdmachine";
+  let description = [{
+    Waitcnt counter metadata for machine ops.
+  }];
+  let methods = [
+    InterfaceMethod<
+      [{Waitcnt counter metadata for this op.}],
+      "::mlir::waveamdmachine::WaitcntInfo",
+      "getWaitcntInfo",
+      (ins)
+    >,
+  ];
+}
+
 #endif // MLIR_DIALECT_WAVEAMDMACHINE_IR_WAVEAMDMACHINEINTERFACES_TD

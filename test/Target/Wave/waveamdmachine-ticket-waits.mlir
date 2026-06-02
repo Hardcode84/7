@@ -3,16 +3,59 @@
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
-// CHECK-LABEL: func.func @lgkm_nonzero_distance
+// CHECK-LABEL: func.func @lds_nonzero_distance
+// CHECK: waveamdmachine.ds_load_b32
+// CHECK: waveamdmachine.ds_load_b32
+// CHECK: waveamdmachine.imm 64535
+// CHECK-NEXT: waveamdmachine.s_waitcnt
+// CHECK-NEXT: waveamdmachine.v_add_u32
+func.func @lds_nonzero_distance(%x: !waveamdmachine.reg<vgpr, 1>) {
+  %a = waveamdmachine.ds_load_b32 %x : (!waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
+  %b = waveamdmachine.ds_load_b32 %x : (!waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
+  %sum = waveamdmachine.v_add_u32 %x, %a : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
+  return
+}
+
+}
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
+
+// CHECK-LABEL: func.func @mixed_lgkm_events_clamp_zero
+// CHECK: waveamdmachine.ds_load_b32
+// CHECK: waveamdmachine.s_load_b32
+// CHECK: waveamdmachine.imm 64519
+// CHECK-NEXT: waveamdmachine.s_waitcnt
+// CHECK-NEXT: waveamdmachine.v_add_u32
+func.func @mixed_lgkm_events_clamp_zero(%x: !waveamdmachine.reg<vgpr, 1>) {
+  %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+  %lds = waveamdmachine.ds_load_b32 %x : (!waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
+  %smem = waveamdmachine.s_load_b32 %zero, "s[0:1]" : (!waveamdmachine.imm) -> !waveamdmachine.reg<sgpr, 1>
+  %sum = waveamdmachine.v_add_u32 %x, %lds : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
+  return
+}
+
+}
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
+
+// CHECK-LABEL: func.func @existing_nonzero_smem_wait_not_sufficient
 // CHECK: waveamdmachine.s_load_b32
 // CHECK: waveamdmachine.s_load_b32
 // CHECK: waveamdmachine.imm 64535
 // CHECK-NEXT: waveamdmachine.s_waitcnt
+// CHECK-NEXT: waveamdmachine.imm 64519
+// CHECK-NEXT: waveamdmachine.s_waitcnt
 // CHECK-NEXT: waveamdmachine.v_add_u32
-func.func @lgkm_nonzero_distance(%x: !waveamdmachine.reg<vgpr, 1>) {
+func.func @existing_nonzero_smem_wait_not_sufficient(%x: !waveamdmachine.reg<vgpr, 1>) {
   %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
   %a = waveamdmachine.s_load_b32 %zero, "s[0:1]" : (!waveamdmachine.imm) -> !waveamdmachine.reg<sgpr, 1>
   %b = waveamdmachine.s_load_b32 %zero, "s[0:1]" : (!waveamdmachine.imm) -> !waveamdmachine.reg<sgpr, 1>
+  %loose = waveamdmachine.imm 64535 : !waveamdmachine.imm
+  waveamdmachine.s_waitcnt %loose : (!waveamdmachine.imm) -> ()
   %sum = waveamdmachine.v_add_u32 %x, %a : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
   return
 }

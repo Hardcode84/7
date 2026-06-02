@@ -9,12 +9,14 @@
 //
 // Token-based waitcnt insertion. Each in-flight memory op is named by its
 // SSA result Value (or nullptr for fire-and-forget stores). Lattice entry
-// is (value, counter, position): position counts newer same-counter issues
-// queued behind it, so `vmcnt(position)` is the exact drain. CFG joins
-// merge with MIN -- a wait larger than the path-minimum returns before
-// the token drains. Tokens whose def block doesn't dominate the successor
-// collapse to a per-counter nullptr sentinel at MIN of escaping positions.
-// `s_endpgm` forces `vscnt(0)` so VMEM stores don't leak past kernel exit.
+// is (value, counter, event, position): position counts newer same-counter
+// issues queued behind it, so `vmcnt(position)` is the exact in-order drain.
+// SMEM and mixed LGKM event brackets are out-of-order, so they clamp to
+// `lgkmcnt(0)`. CFG joins merge with MIN -- a wait larger than the
+// path-minimum returns before the token drains. Tokens whose def block
+// doesn't dominate the successor collapse to a per-counter nullptr sentinel
+// at MIN of escaping positions. `s_endpgm` forces `vscnt(0)` so VMEM stores
+// don't leak past kernel exit.
 //
 //===----------------------------------------------------------------------===//
 
@@ -56,14 +58,41 @@ enum class Counter : unsigned { Vmem = 0, Lgkm = 1, Vscnt = 2 };
 static constexpr unsigned kNumCounters = 3;
 static constexpr unsigned kSaturatePosition = 63;
 
+static unsigned eventMask(waveamdmachine::WaitcntEvent event) {
+  return static_cast<unsigned>(event);
+}
+
+static bool hasMultipleEvents(unsigned mask) {
+  return mask && (mask & (mask - 1));
+}
+
+static std::optional<Counter>
+toCounter(waveamdmachine::WaitcntCounter counter) {
+  switch (counter) {
+  case waveamdmachine::WaitcntCounter::Vmem:
+    return Counter::Vmem;
+  case waveamdmachine::WaitcntCounter::Lgkm:
+    return Counter::Lgkm;
+  case waveamdmachine::WaitcntCounter::Vscnt:
+    return Counter::Vscnt;
+  case waveamdmachine::WaitcntCounter::None:
+    return std::nullopt;
+  }
+  llvm_unreachable("bad waitcnt counter");
+}
+
 // Null `id` is the per-counter unknown sentinel.
 struct Token {
   Value id;
   Counter counter;
+  unsigned events;
   unsigned position;
+  bool outOfOrder;
 
   bool isUnknown() const { return !id; }
 };
+
+static unsigned activeEventMask(ArrayRef<Token> tokens, Counter counter);
 
 static bool sortKey(const Token &a, const Token &b) {
   if (a.counter != b.counter)
@@ -114,7 +143,8 @@ struct WaitState {
     if (tokens.size() != rhs.tokens.size())
       return false;
     for (auto [a, b] : llvm::zip(tokens, rhs.tokens))
-      if (!sameKey(a, b) || a.position != b.position)
+      if (!sameKey(a, b) || a.events != b.events || a.position != b.position ||
+          a.outOfOrder != b.outOfOrder)
         return false;
     return true;
   }
@@ -158,17 +188,40 @@ private:
 
 namespace lat {
 
-// On (counter, id) collision: take MIN of positions.
+struct TokenAggregate {
+  std::optional<unsigned> position;
+  unsigned events = 0;
+  bool outOfOrder = false;
+};
+
+static void mergeInto(TokenAggregate &agg, const Token &token) {
+  if (!agg.position || token.position < *agg.position)
+    agg.position = token.position;
+  agg.events |= token.events;
+  agg.outOfOrder |= token.outOfOrder;
+}
+
+// On (counter, id) collision: MIN position, OR event constraints.
 static bool insertOrMin(SmallVectorImpl<Token> &tokens, Token tok) {
   auto it = llvm::lower_bound(tokens, tok, [](const Token &a, const Token &b) {
     return sortKey(a, b);
   });
   if (it != tokens.end() && sameKey(*it, tok)) {
+    bool changed = false;
     if (tok.position < it->position) {
       it->position = tok.position;
-      return true;
+      changed = true;
     }
-    return false;
+    unsigned events = it->events | tok.events;
+    if (events != it->events) {
+      it->events = events;
+      changed = true;
+    }
+    if (tok.outOfOrder && !it->outOfOrder) {
+      it->outOfOrder = true;
+      changed = true;
+    }
+    return changed;
   }
   tokens.insert(it, tok);
   return true;
@@ -181,8 +234,9 @@ static bool insertOrReplace(SmallVectorImpl<Token> &tokens, Token tok) {
     return sortKey(a, b);
   });
   if (it != tokens.end() && sameKey(*it, tok)) {
-    if (it->position != tok.position) {
-      it->position = tok.position;
+    if (it->events != tok.events || it->position != tok.position ||
+        it->outOfOrder != tok.outOfOrder) {
+      *it = tok;
       return true;
     }
     return false;
@@ -203,12 +257,19 @@ static void bumpCounter(SmallVectorImpl<Token> &tokens, Counter counter,
 // `cnt(threshold)` drains position >= threshold (positions < threshold stay).
 static void dropDrained(SmallVectorImpl<Token> &tokens, Counter counter,
                         unsigned threshold) {
-  tokens.erase(std::remove_if(tokens.begin(), tokens.end(),
-                              [&](const Token &t) {
-                                return t.counter == counter &&
-                                       t.position >= threshold;
-                              }),
-               tokens.end());
+  unsigned liveEvents = activeEventMask(tokens, counter);
+  tokens.erase(
+      std::remove_if(tokens.begin(), tokens.end(),
+                     [&](const Token &t) {
+                       if (t.counter != counter || t.position < threshold)
+                         return false;
+                       if (threshold == 0 || t.counter != Counter::Lgkm)
+                         return true;
+                       if (t.outOfOrder || hasMultipleEvents(liveEvents))
+                         return false;
+                       return true;
+                     }),
+      tokens.end());
 }
 
 static void applyWait(SmallVectorImpl<Token> &tokens,
@@ -222,7 +283,7 @@ static void applyWait(SmallVectorImpl<Token> &tokens,
 }
 
 static const Token *find(ArrayRef<Token> tokens, Counter counter, Value id) {
-  Token key{id, counter, 0};
+  Token key{id, counter, 0, 0, false};
   auto it = llvm::lower_bound(tokens, key, [](const Token &a, const Token &b) {
     return sortKey(a, b);
   });
@@ -243,7 +304,7 @@ static Block *definingBlock(Value id) {
 // nullptr sentinel at MIN of escaping positions. Idempotent.
 static void collapseEscaping(WaitState &state, Block *target,
                              DominanceInfo &dom) {
-  std::array<std::optional<unsigned>, kNumCounters> minPos = {};
+  std::array<TokenAggregate, kNumCounters> escaping = {};
   SmallVector<Token, 4> kept;
   kept.reserve(state.tokens.size());
   for (const Token &t : state.tokens) {
@@ -252,15 +313,14 @@ static void collapseEscaping(WaitState &state, Block *target,
       kept.push_back(t);
       continue;
     }
-    unsigned slot = static_cast<unsigned>(t.counter);
-    if (!minPos[slot] || t.position < *minPos[slot])
-      minPos[slot] = t.position;
+    mergeInto(escaping[static_cast<unsigned>(t.counter)], t);
   }
   state.tokens = std::move(kept);
   for (unsigned i = 0; i < kNumCounters; ++i) {
-    if (minPos[i])
+    if (escaping[i].position)
       insertOrMin(state.tokens,
-                  Token{Value(), static_cast<Counter>(i), *minPos[i]});
+                  Token{Value(), static_cast<Counter>(i), escaping[i].events,
+                        *escaping[i].position, escaping[i].outOfOrder});
   }
 }
 
@@ -268,16 +328,18 @@ static void collapseEscaping(WaitState &state, Block *target,
 // tagged result. No tagged result -> one anonymous (nullptr) entry so
 // `s_endpgm`'s vscnt drain can find untokenized stores.
 static bool issue(WaitState &state, Counter counter, unsigned count,
-                  ValueRange tagged) {
+                  unsigned events, bool outOfOrder, ValueRange tagged) {
   if (count == 0)
     count = 1;
   bumpCounter(state.tokens, counter, count);
   bool changed = false;
   if (tagged.empty()) {
-    changed |= insertOrReplace(state.tokens, Token{Value(), counter, 0});
+    changed |= insertOrReplace(state.tokens,
+                               Token{Value(), counter, events, 0, outOfOrder});
   } else {
     for (Value v : tagged)
-      changed |= insertOrReplace(state.tokens, Token{v, counter, 0});
+      changed |= insertOrReplace(state.tokens,
+                                 Token{v, counter, events, 0, outOfOrder});
   }
   return changed;
 }
@@ -285,20 +347,19 @@ static bool issue(WaitState &state, Counter counter, unsigned count,
 // Per-counter MIN over `sources`' tokens, re-keyed under `result`.
 static SmallVector<Token, 3> mergeSources(ArrayRef<Token> tokens,
                                           ValueRange sources, Value result) {
-  std::array<std::optional<unsigned>, kNumCounters> pos = {};
+  std::array<TokenAggregate, kNumCounters> merged = {};
   for (Value src : sources) {
     for (const Token &t : tokens) {
       if (t.id != src)
         continue;
-      unsigned slot = static_cast<unsigned>(t.counter);
-      if (!pos[slot] || t.position < *pos[slot])
-        pos[slot] = t.position;
+      mergeInto(merged[static_cast<unsigned>(t.counter)], t);
     }
   }
   SmallVector<Token, 3> out;
   for (unsigned i = 0; i < kNumCounters; ++i) {
-    if (pos[i])
-      out.push_back(Token{result, static_cast<Counter>(i), *pos[i]});
+    if (merged[i].position)
+      out.push_back(Token{result, static_cast<Counter>(i), merged[i].events,
+                          *merged[i].position, merged[i].outOfOrder});
   }
   return out;
 }
@@ -321,23 +382,6 @@ static bool isWaveAMDMachineOp(Operation *op) {
          waveamdmachine::WaveAMDMachineDialect::getDialectNamespace();
 }
 
-static bool isSMEMLoadTrait(Operation *op) {
-  return op->hasTrait<OpTrait::waveamdmachine::SMEMLoadOp>();
-}
-
-static bool isLDSIssuer(Operation *op) {
-  return op->hasTrait<OpTrait::waveamdmachine::LDSLoadOp>() ||
-         op->hasTrait<OpTrait::waveamdmachine::LDSStoreOp>();
-}
-
-static bool isVMEMLoad(Operation *op) {
-  return op->hasTrait<OpTrait::waveamdmachine::VMEMLoadOp>();
-}
-
-static bool isVMEMStore(Operation *op) {
-  return op->hasTrait<OpTrait::waveamdmachine::VMEMStoreOp>();
-}
-
 static bool isWaitcntOp(Operation *op) {
   return op->hasTrait<OpTrait::waveamdmachine::WaitcntOp>();
 }
@@ -347,9 +391,14 @@ static bool isTokenOnlyOp(Operation *op) {
          op->hasTrait<OpTrait::waveamdmachine::TokenJoinOp>();
 }
 
+static waveamdmachine::WaitcntInfo getWaitcntInfo(Operation *op) {
+  if (auto info = dyn_cast<waveamdmachine::WaitcntInfoOpInterface>(op))
+    return info.getWaitcntInfo();
+  return {};
+}
+
 static bool isMemoryIssuer(Operation *op) {
-  return isSMEMLoadTrait(op) || isLDSIssuer(op) || isVMEMLoad(op) ||
-         isVMEMStore(op);
+  return getWaitcntInfo(op).isIssuer();
 }
 
 // Operand reads here are branch arguments, not value uses; framework
@@ -385,27 +434,6 @@ static OpKind classifyOp(Operation *op) {
   return OpKind::Generic;
 }
 
-// Tuple loads/stores expand to N hardware issues; bump by N or the
-// last dword is still pending.
-static unsigned getIssueCount(Operation *op) {
-  if (isa<waveamdmachine::DsLoadTupleB32Op,
-          waveamdmachine::GlobalLoadTupleB32Op,
-          waveamdmachine::BufferLoadTupleB32Op>(op))
-    return cast<waveamdmachine::RegType>(op->getResult(0).getType()).getWidth();
-  if (isa<waveamdmachine::DsStoreTupleB32Op>(op))
-    return cast<waveamdmachine::RegType>(op->getOperand(1).getType())
-        .getWidth();
-  return 1;
-}
-
-static Counter counterOf(Operation *op) {
-  if (isVMEMLoad(op))
-    return Counter::Vmem;
-  if (isVMEMStore(op))
-    return Counter::Vscnt;
-  return Counter::Lgkm;
-}
-
 // Both MemToken and register results tag the same issue so consumers
 // can depend via either edge.
 static void collectIssuerResults(Operation *op, SmallVectorImpl<Value> &out) {
@@ -438,6 +466,23 @@ static std::optional<unsigned> getImmediate(Value value) {
   return std::nullopt;
 }
 
+static unsigned activeEventMask(ArrayRef<Token> tokens, Counter counter) {
+  unsigned mask = 0;
+  for (const Token &token : tokens)
+    if (token.counter == counter)
+      mask |= token.events;
+  return mask;
+}
+
+static unsigned waitPosition(const WaitState &state, const Token &token) {
+  if (token.outOfOrder)
+    return 0;
+  if (token.counter == Counter::Lgkm &&
+      hasMultipleEvents(activeEventMask(state.tokens, Counter::Lgkm)))
+    return 0;
+  return token.position;
+}
+
 //===----------------------------------------------------------------------===//
 // Consumer-dep collection and wait computation
 //===----------------------------------------------------------------------===//
@@ -466,7 +511,7 @@ static WaitRequirement computeRequirement(Operation *op,
   if (llvm::isa<waveamdmachine::SEndpgmOp>(op)) {
     for (const Token &t : state.tokens) {
       if (t.counter == Counter::Vscnt)
-        req.requireDrain(Counter::Vscnt, t.position);
+        req.requireDrain(Counter::Vscnt, waitPosition(state, t));
     }
     return req;
   }
@@ -474,16 +519,21 @@ static WaitRequirement computeRequirement(Operation *op,
     for (unsigned ci = 0; ci < kNumCounters; ++ci) {
       Counter c = static_cast<Counter>(ci);
       if (const Token *t = lat::find(state.tokens, c, operand))
-        req.requireDrain(c, t->position);
+        req.requireDrain(c, waitPosition(state, *t));
     }
   }
   return req;
 }
 
 static void recordIssue(Operation *op, WaitState &state) {
+  waveamdmachine::WaitcntInfo info = getWaitcntInfo(op);
+  std::optional<Counter> counter = toCounter(info.counter);
+  if (!counter)
+    return;
   SmallVector<Value, 2> results;
   collectIssuerResults(op, results);
-  lat::issue(state, counterOf(op), getIssueCount(op), results);
+  lat::issue(state, *counter, info.issueCount, eventMask(info.event),
+             info.outOfOrder, results);
 }
 
 // Each result inherits per-counter MIN over operands. Used by s_barrier,
@@ -718,7 +768,7 @@ private:
       for (unsigned ci = 0; ci < kNumCounters; ++ci) {
         Counter c = static_cast<Counter>(ci);
         if (const Token *t = lat::find(state.tokens, c, op))
-          added.push_back(Token{dst, c, t->position});
+          added.push_back(Token{dst, c, t->events, t->position, t->outOfOrder});
       }
     }
     for (const Token &t : added)

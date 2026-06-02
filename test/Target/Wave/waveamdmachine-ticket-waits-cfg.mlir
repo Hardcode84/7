@@ -1,35 +1,34 @@
 // RUN: wave-opt --waveamd-insert-ticket-waits -split-input-file %s | FileCheck %s
 // RUN: wave-opt --waveamd-insert-ticket-waits -split-input-file %s | wave-opt -split-input-file | FileCheck %s
 
-// Both arms of a `cf.cond_br` issue exactly one extra `s_load_b32`
-// before forwarding the original scalar to the merge block. The merge
+// Both arms of a `cf.cond_br` issue exactly one extra `ds_load_b32`
+// before forwarding the original LDS value to the merge block. The merge
 // arm sees `%a` at the same position (1) on every path, so the join
 // agrees on `lgkmcnt(1)`. Encoded as `imm 64535` for gfx1100.
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
 // CHECK-LABEL: func.func @cfg_join_nonzero
-// CHECK: waveamdmachine.s_load_b32
+// CHECK: waveamdmachine.ds_load_b32
 // CHECK: cf.cond_br
-// CHECK: waveamdmachine.s_load_b32
+// CHECK: waveamdmachine.ds_load_b32
 // CHECK: cf.br
-// CHECK: waveamdmachine.s_load_b32
+// CHECK: waveamdmachine.ds_load_b32
 // CHECK: cf.br
-// CHECK: ^bb{{[0-9]+}}(%{{[0-9]+}}: !waveamdmachine.reg<sgpr, 1>)
+// CHECK: ^bb{{[0-9]+}}(%{{[0-9]+}}: !waveamdmachine.reg<vgpr, 1>)
 // CHECK-NEXT: waveamdmachine.imm 64535
 // CHECK-NEXT: waveamdmachine.s_waitcnt
 // CHECK-NEXT: waveamdmachine.v_add_u32
 func.func @cfg_join_nonzero(%cond: i1, %x: !waveamdmachine.reg<vgpr, 1>) {
-  %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
-  %a = waveamdmachine.s_load_b32 %zero, "s[0:1]" : (!waveamdmachine.imm) -> !waveamdmachine.reg<sgpr, 1>
+  %a = waveamdmachine.ds_load_b32 %x : (!waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
   cf.cond_br %cond, ^then, ^else
 ^then:
-  %b = waveamdmachine.s_load_b32 %zero, "s[0:1]" : (!waveamdmachine.imm) -> !waveamdmachine.reg<sgpr, 1>
-  cf.br ^merge(%a : !waveamdmachine.reg<sgpr, 1>)
+  %b = waveamdmachine.ds_load_b32 %x : (!waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
+  cf.br ^merge(%a : !waveamdmachine.reg<vgpr, 1>)
 ^else:
-  %c = waveamdmachine.s_load_b32 %zero, "s[0:1]" : (!waveamdmachine.imm) -> !waveamdmachine.reg<sgpr, 1>
-  cf.br ^merge(%a : !waveamdmachine.reg<sgpr, 1>)
-^merge(%m: !waveamdmachine.reg<sgpr, 1>):
-  %sum = waveamdmachine.v_add_u32 %x, %m : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
+  %c = waveamdmachine.ds_load_b32 %x : (!waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
+  cf.br ^merge(%a : !waveamdmachine.reg<vgpr, 1>)
+^merge(%m: !waveamdmachine.reg<vgpr, 1>):
+  %sum = waveamdmachine.v_add_u32 %x, %m : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
   return
 }
 
@@ -95,7 +94,7 @@ func.func @block_arg_ticket(%x: !waveamdmachine.reg<vgpr, 1>) {
 
 // -----
 
-// Both arms of the `scf.if` issue one extra `s_load_b32` before
+// Both arms of the `scf.if` issue one extra `ds_load_b32` before
 // yielding the outer `%a`. The region-branch join sees `%a` (and the
 // yielded `%r`) at position 1 from every arm, so the wait below the
 // `scf.if` is `lgkmcnt(1)` = `imm 64535`.
@@ -103,22 +102,21 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
 // CHECK-LABEL: func.func @structured_if_nonzero
 // CHECK: scf.if
-// CHECK: waveamdmachine.s_load_b32
-// CHECK: waveamdmachine.s_load_b32
+// CHECK: waveamdmachine.ds_load_b32
+// CHECK: waveamdmachine.ds_load_b32
 // CHECK: waveamdmachine.imm 64535
 // CHECK-NEXT: waveamdmachine.s_waitcnt
 // CHECK-NEXT: waveamdmachine.v_add_u32
 func.func @structured_if_nonzero(%cond: i1, %x: !waveamdmachine.reg<vgpr, 1>) {
-  %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
-  %a = waveamdmachine.s_load_b32 %zero, "s[0:1]" : (!waveamdmachine.imm) -> !waveamdmachine.reg<sgpr, 1>
-  %r = scf.if %cond -> (!waveamdmachine.reg<sgpr, 1>) {
-    %b = waveamdmachine.s_load_b32 %zero, "s[0:1]" : (!waveamdmachine.imm) -> !waveamdmachine.reg<sgpr, 1>
-    scf.yield %a : !waveamdmachine.reg<sgpr, 1>
+  %a = waveamdmachine.ds_load_b32 %x : (!waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
+  %r = scf.if %cond -> (!waveamdmachine.reg<vgpr, 1>) {
+    %b = waveamdmachine.ds_load_b32 %x : (!waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
+    scf.yield %a : !waveamdmachine.reg<vgpr, 1>
   } else {
-    %c = waveamdmachine.s_load_b32 %zero, "s[0:1]" : (!waveamdmachine.imm) -> !waveamdmachine.reg<sgpr, 1>
-    scf.yield %a : !waveamdmachine.reg<sgpr, 1>
+    %c = waveamdmachine.ds_load_b32 %x : (!waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
+    scf.yield %a : !waveamdmachine.reg<vgpr, 1>
   }
-  %sum = waveamdmachine.v_add_u32 %x, %r : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
+  %sum = waveamdmachine.v_add_u32 %x, %r : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
   return
 }
 
@@ -159,20 +157,19 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
 // CHECK-LABEL: func.func @structured_for_double_buffer
 // CHECK: scf.for
-// CHECK: waveamdmachine.s_load_b32
+// CHECK: waveamdmachine.ds_load_b32
 // CHECK-NEXT: waveamdmachine.imm 64535
 // CHECK-NEXT: waveamdmachine.s_waitcnt
 // CHECK-NEXT: waveamdmachine.v_add_u32
 func.func @structured_for_double_buffer(%x: !waveamdmachine.reg<vgpr, 1>) {
-  %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
-  %init = waveamdmachine.s_load_b32 %zero, "s[0:1]" : (!waveamdmachine.imm) -> !waveamdmachine.reg<sgpr, 1>
+  %init = waveamdmachine.ds_load_b32 %x : (!waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
   %c0 = arith.constant 0 : index
   %c4 = arith.constant 4 : index
   %c1 = arith.constant 1 : index
-  %res = scf.for %i = %c0 to %c4 step %c1 iter_args(%cur = %init) -> (!waveamdmachine.reg<sgpr, 1>) {
-    %next = waveamdmachine.s_load_b32 %zero, "s[0:1]" : (!waveamdmachine.imm) -> !waveamdmachine.reg<sgpr, 1>
-    %sum = waveamdmachine.v_add_u32 %x, %cur : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
-    scf.yield %next : !waveamdmachine.reg<sgpr, 1>
+  %res = scf.for %i = %c0 to %c4 step %c1 iter_args(%cur = %init) -> (!waveamdmachine.reg<vgpr, 1>) {
+    %next = waveamdmachine.ds_load_b32 %x : (!waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
+    %sum = waveamdmachine.v_add_u32 %x, %cur : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
+    scf.yield %next : !waveamdmachine.reg<vgpr, 1>
   }
   return
 }
@@ -185,23 +182,22 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
 // CHECK-LABEL: func.func @structured_for_triple_buffer
 // CHECK: scf.for
-// CHECK: waveamdmachine.s_load_b32
+// CHECK: waveamdmachine.ds_load_b32
 // CHECK-NEXT: waveamdmachine.imm 64551
 // CHECK-NEXT: waveamdmachine.s_waitcnt
 // CHECK-NEXT: waveamdmachine.v_add_u32
 func.func @structured_for_triple_buffer(%x: !waveamdmachine.reg<vgpr, 1>) {
-  %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
-  %init0 = waveamdmachine.s_load_b32 %zero, "s[0:1]" : (!waveamdmachine.imm) -> !waveamdmachine.reg<sgpr, 1>
-  %init1 = waveamdmachine.s_load_b32 %zero, "s[0:1]" : (!waveamdmachine.imm) -> !waveamdmachine.reg<sgpr, 1>
+  %init0 = waveamdmachine.ds_load_b32 %x : (!waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
+  %init1 = waveamdmachine.ds_load_b32 %x : (!waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
   %c0 = arith.constant 0 : index
   %c4 = arith.constant 4 : index
   %c1 = arith.constant 1 : index
   %r0, %r1 = scf.for %i = %c0 to %c4 step %c1
       iter_args(%cur = %init0, %nextBuf = %init1)
-      -> (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<sgpr, 1>) {
-    %future0 = waveamdmachine.s_load_b32 %zero, "s[0:1]" : (!waveamdmachine.imm) -> !waveamdmachine.reg<sgpr, 1>
-    %sum = waveamdmachine.v_add_u32 %x, %cur : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
-    scf.yield %nextBuf, %future0 : !waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<sgpr, 1>
+      -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>) {
+    %future0 = waveamdmachine.ds_load_b32 %x : (!waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
+    %sum = waveamdmachine.v_add_u32 %x, %cur : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
+    scf.yield %nextBuf, %future0 : !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>
   }
   return
 }

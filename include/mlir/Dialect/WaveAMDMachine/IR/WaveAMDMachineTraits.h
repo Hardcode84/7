@@ -12,6 +12,32 @@
 
 #include "mlir/IR/OpDefinition.h"
 
+namespace mlir::waveamdmachine {
+
+enum class WaitcntCounter : unsigned { None = 0, Vmem, Lgkm, Vscnt };
+
+enum class WaitcntEvent : unsigned {
+  None = 0,
+  Vmem = 1u << 0,
+  VmemStore = 1u << 1,
+  Lds = 1u << 2,
+  Smem = 1u << 3,
+  Flat = 1u << 4,
+  Gds = 1u << 5,
+  Message = 1u << 6,
+};
+
+struct WaitcntInfo {
+  WaitcntCounter counter = WaitcntCounter::None;
+  WaitcntEvent event = WaitcntEvent::None;
+  unsigned issueCount = 0;
+  bool outOfOrder = false;
+
+  bool isIssuer() const { return counter != WaitcntCounter::None; }
+};
+
+} // namespace mlir::waveamdmachine
+
 namespace mlir::OpTrait::waveamdmachine {
 
 template <typename ConcreteType>

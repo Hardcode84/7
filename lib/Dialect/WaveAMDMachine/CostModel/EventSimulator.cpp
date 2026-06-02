@@ -116,11 +116,9 @@ static std::optional<unsigned> getImmediate(Value value) {
 }
 
 static unsigned getIssueCount(Operation *op) {
-  if (isa<DsLoadTupleB32Op, GlobalLoadTupleB32Op, BufferLoadTupleB32Op>(op))
-    return cast<RegType>(op->getResult(0).getType()).getWidth();
-  if (isa<DsStoreTupleB32Op>(op))
-    return cast<RegType>(op->getOperand(1).getType()).getWidth();
-  return 1;
+  if (auto info = dyn_cast<WaitcntInfoOpInterface>(op))
+    return info.getWaitcntInfo().issueCount;
+  return 0;
 }
 
 static int64_t getTripCount(UniformLoopOp loop, const EventSimConfig &config) {

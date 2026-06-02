@@ -77,12 +77,11 @@ func.func @wave_kernel(%out: !wave.ptr<#wave.global, i32>, %x: i32) attributes {
   // CHECK: v_mbcnt_lo_u32_b32 [[LANE:v[0-9]+]], -1, 0
   %lane = wave.lane_id : !wave.simd<i32, 32>
   %vx = wave.splat %x : i32 -> !wave.simd<i32, 32>
-  // CHECK: s_waitcnt lgkmcnt(1)
+  // CHECK: s_waitcnt lgkmcnt(0)
   // CHECK: s_delay_alu instid0(VALU_DEP_1)
   // CHECK: v_add_nc_u32_e32 [[SUM:v[0-9]+]], [[X]], [[LANE]]
   %sum = wave.addi %lane, %vx : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
   // CHECK: v_lshlrev_b32_e32 [[OFFSET:v[0-9]+]], 2, [[LANE]]
-  // CHECK: s_waitcnt lgkmcnt(0)
   // CHECK: global_store_b32 [[OFFSET]], [[SUM]], [[OUT]]
   %ptrs = wave.ptr_add %out, %lane : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 32> -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
   %store_token = wave.store %sum -> %ptrs : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>) -> !wave.mem.token
@@ -196,18 +195,14 @@ func.func @wave_buffer_tuple_load(%in: !wave.ptr<#wave.global, i32>,
 }
 
 // Two back-to-back global tuple loads followed by two LDS stores must
-// emit `s_waitcnt vmcnt(8)` before the *first* `ds_store_b32`, leaving
-// the second load's 8 dwords in flight while the first drains. This
-// is the memory overlap that makes software-pipelined LDS staging
-// worthwhile on RDNA3 (no direct global->LDS DMA). A serialized
-// schedule (load A; store A; load B; store B) would only ever see
-// `vmcnt(0)` waits.
+// emit nonzero `vmcnt` before the first `ds_store_b128`, leaving the
+// second load's chunks in flight while the first drains.
 //
 // The post-emission cleanup must also collapse the run of waitcnts
 // the per-op emission inserts: each block of 8 dword issues from a
 // tuple gets *one* `s_waitcnt` ahead of it, never one per dword. The
-// schedule below pins exactly five s_waitcnt lines in the kernel
-// body (lgkmcnt(1), lgkmcnt(0), vmcnt(8), vmcnt(0), and the trailing
+// schedule below pins exactly four s_waitcnt lines in the kernel
+// body (lgkmcnt(0), vmcnt(2), vmcnt(0), and the trailing
 // vscnt flush), so any future regression that re-introduces a
 // per-dword `s_waitcnt lgkmcnt(N)` between the 8 `ds_store_b32`s
 // will surface here.
@@ -224,10 +219,9 @@ func.func @wave_two_tuple_loads_overlap(%a_in: !wave.ptr<#wave.global, i32>,
   %c256v = wave.splat %c256 : i32 -> !wave.simd<i32, 32>
   %slot_b_off = wave.addi %lane, %c256v : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
   %slot_b = wave.ptr_add %lds, %slot_b_off : !wave.ptr<#wave.shared, i32>, !wave.simd<i32, 32> -> !wave.simd<!wave.ptr<#wave.shared, i32>, 32>
-  // CHECK: s_waitcnt lgkmcnt(1)
+  // CHECK: s_waitcnt lgkmcnt(0)
   // CHECK-NEXT: global_load_b128 {{v\[[0-9]+:[0-9]+\], v[0-9]+, s\[6:7\]$}}
   // CHECK-NEXT: global_load_b128 {{.*}} s[6:7] offset
-  // CHECK-NEXT: s_waitcnt lgkmcnt(0)
   // CHECK-NEXT: global_load_b128 {{v\[[0-9]+:[0-9]+\], v[0-9]+, s\[8:9\]$}}
   // CHECK-NEXT: global_load_b128 {{.*}} s[8:9] offset
   // CHECK-NOT: ds_store_b128

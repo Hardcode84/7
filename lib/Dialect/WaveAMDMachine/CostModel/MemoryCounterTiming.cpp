@@ -13,7 +13,6 @@
 #include "mlir/Dialect/WaveAMDMachine/CostModel/LatencyTable.h"
 #include "mlir/Dialect/WaveAMDMachine/CostModel/OpClassifier.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachine.h"
-#include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineTraits.h"
 #include "mlir/IR/Operation.h"
 #include "llvm/Support/ErrorHandling.h"
 
@@ -23,20 +22,16 @@ namespace mlir::waveamdmachine {
 
 namespace {
 
-namespace traits = ::mlir::OpTrait::waveamdmachine;
 static constexpr int kDefaultVMEMValueLatency = 80;
 
+static WaitcntInfo getWaitcntInfo(Operation *op) {
+  if (auto info = dyn_cast<WaitcntInfoOpInterface>(op))
+    return info.getWaitcntInfo();
+  return {};
+}
+
 static bool isLDSIssuer(Operation *op) {
-  return op->hasTrait<traits::LDSLoadOp>() ||
-         op->hasTrait<traits::LDSStoreOp>();
-}
-
-static bool isLDSLoad(Operation *op) {
-  return op->hasTrait<traits::LDSLoadOp>();
-}
-
-static bool isSMEMLoad(Operation *op) {
-  return op->hasTrait<traits::SMEMLoadOp>();
+  return getWaitcntInfo(op).event == WaitcntEvent::Lds;
 }
 
 static bool hasRegisterResult(Operation *op) {
@@ -44,6 +39,15 @@ static bool hasRegisterResult(Operation *op) {
     if (!isa<MemTokenType>(result.getType()))
       return true;
   return false;
+}
+
+static bool isLDSLoad(Operation *op) {
+  WaitcntInfo info = getWaitcntInfo(op);
+  return info.event == WaitcntEvent::Lds && hasRegisterResult(op);
+}
+
+static bool isSMEMLoad(Operation *op) {
+  return getWaitcntInfo(op).event == WaitcntEvent::Smem;
 }
 
 static int overrideOrDefault(int overrideLatency, int defaultLatency) {
@@ -60,12 +64,16 @@ static int getConfiguredLatency(const ArchData &arch, SchedClass cls,
 } // namespace
 
 MemoryCounterKind getMemoryCounterKind(Operation *op) {
-  if (op->hasTrait<traits::VMEMLoadOp>())
+  switch (getWaitcntInfo(op).counter) {
+  case WaitcntCounter::Vmem:
     return MemoryCounterKind::Vmem;
-  if (op->hasTrait<traits::VMEMStoreOp>())
-    return MemoryCounterKind::Vscnt;
-  if (isSMEMLoad(op) || isLDSIssuer(op))
+  case WaitcntCounter::Lgkm:
     return MemoryCounterKind::Lgkm;
+  case WaitcntCounter::Vscnt:
+    return MemoryCounterKind::Vscnt;
+  case WaitcntCounter::None:
+    break;
+  }
   return MemoryCounterKind::None;
 }
 
@@ -74,9 +82,9 @@ int getMemoryCounterLatency(const ArchData &arch, Operation *op,
                             const CalibrationData *calibration) {
   SchedClass cls = classifyOp(op);
   int defaultLatency = getConfiguredLatency(arch, cls, calibration);
-  if (op->hasTrait<traits::VMEMLoadOp>())
+  if (getWaitcntInfo(op).counter == WaitcntCounter::Vmem)
     return overrideOrDefault(overrides.vmemLoad, defaultLatency);
-  if (op->hasTrait<traits::VMEMStoreOp>())
+  if (getWaitcntInfo(op).counter == WaitcntCounter::Vscnt)
     return overrideOrDefault(overrides.vmemStore, defaultLatency);
   if (isLDSIssuer(op))
     return overrideOrDefault(overrides.lds, defaultLatency);
@@ -88,7 +96,8 @@ int getMemoryCounterLatency(const ArchData &arch, Operation *op,
 bool hasMemoryValueLatency(Operation *op) {
   if (!hasRegisterResult(op))
     return false;
-  return op->hasTrait<traits::VMEMLoadOp>() || isLDSLoad(op) || isSMEMLoad(op);
+  return getWaitcntInfo(op).counter == WaitcntCounter::Vmem || isLDSLoad(op) ||
+         isSMEMLoad(op);
 }
 
 int getMemoryValueLatency(const ArchData &arch, Operation *op,
@@ -96,7 +105,7 @@ int getMemoryValueLatency(const ArchData &arch, Operation *op,
                           const CalibrationData *calibration) {
   SchedClass cls = classifyOp(op);
   int defaultLatency = getConfiguredLatency(arch, cls, calibration);
-  if (op->hasTrait<traits::VMEMLoadOp>()) {
+  if (getWaitcntInfo(op).counter == WaitcntCounter::Vmem) {
     int valueLatency = std::min(defaultLatency, kDefaultVMEMValueLatency);
     return overrideOrDefault(overrides.vmemLoad, valueLatency);
   }

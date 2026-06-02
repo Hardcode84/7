@@ -52,11 +52,9 @@ static int getModelLatency(const waveamdmachine::ArchData &arch,
 }
 
 static bool isKnownMemoryOp(Operation *op) {
-  return op->hasTrait<traits::SMEMLoadOp>() ||
-         op->hasTrait<traits::LDSLoadOp>() ||
-         op->hasTrait<traits::LDSStoreOp>() ||
-         op->hasTrait<traits::VMEMLoadOp>() ||
-         op->hasTrait<traits::VMEMStoreOp>();
+  if (auto info = dyn_cast<waveamdmachine::WaitcntInfoOpInterface>(op))
+    return info.getWaitcntInfo().isIssuer();
+  return false;
 }
 
 static bool hasUnknownMemoryEffects(Operation *op) {
@@ -1189,11 +1187,9 @@ GraphTables buildGraphTables(const ScheduleRegion &region,
 }
 
 static bool isMemoryIssuer(Operation *op) {
-  return op->hasTrait<traits::SMEMLoadOp>() ||
-         op->hasTrait<traits::LDSLoadOp>() ||
-         op->hasTrait<traits::LDSStoreOp>() ||
-         op->hasTrait<traits::VMEMLoadOp>() ||
-         op->hasTrait<traits::VMEMStoreOp>();
+  if (auto info = dyn_cast<waveamdmachine::WaitcntInfoOpInterface>(op))
+    return info.getWaitcntInfo().isIssuer();
+  return false;
 }
 
 static bool isMatrixOp(Operation *op) {
