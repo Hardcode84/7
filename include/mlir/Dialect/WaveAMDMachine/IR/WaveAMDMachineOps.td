@@ -250,7 +250,7 @@ class WaveAMDMachine_BufferMemoryOp<string mnemonic, list<Trait> traits = []>
   }];
 }
 
-class WaveAMDMachine_DsMemoryOp<string mnemonic, list<Trait> traits = []>
+class WaveAMDMachine_DsOp<string mnemonic, list<Trait> traits = []>
     : WaveAMDMachine_Op<mnemonic,
         !listconcat(traits,
           [DeclareOpInterfaceMethods<WaveAMDMachine_AddressFieldsOpInterface>])> {
@@ -261,6 +261,9 @@ class WaveAMDMachine_DsMemoryOp<string mnemonic, list<Trait> traits = []>
     }
   }];
 }
+
+class WaveAMDMachine_DsMemoryOp<string mnemonic, list<Trait> traits = []>
+    : WaveAMDMachine_DsOp<mnemonic, traits> {}
 
 class WaveAMDMachine_ZeroOperandResult<string mnemonic, Type resultType,
                                     list<Trait> traits = []>
@@ -1636,6 +1639,44 @@ def WaveAMDMachine_DsStoreTupleB32Op
     $addr `,` $value (`after` $dependency^)? (`offset` $offset^)?
     attr-dict `:` functional-type(operands, results)
   }];
+}
+
+def WaveAMDMachine_DsSwizzleB32Op
+    : WaveAMDMachine_DsOp<"ds_swizzle_b32">,
+      WaveAMDMachine_LDSInfo<"1"> {
+  let summary = "DS lane swizzle";
+  let archPredicate = WaveAMDMachine_Gfx8To13;
+  let arguments = (ins WaveAMDMachine_VGPR1:$source,
+                       DefaultValuedAttr<I64Attr, "0">:$offset);
+  let results = (outs WaveAMDMachine_VGPR1:$result);
+  let assemblyFormat = [{
+    $source (`offset` $offset^)? attr-dict `:`
+    functional-type(operands, results)
+  }];
+}
+
+class WaveAMDMachine_DsPermuteB32Base<string mnemonic>
+    : WaveAMDMachine_DsOp<mnemonic>,
+      WaveAMDMachine_LDSInfo<"1"> {
+  let archPredicate = WaveAMDMachine_Gfx8To13;
+  let arguments = (ins WaveAMDMachine_VGPR1:$addr,
+                       WaveAMDMachine_VGPR1:$data,
+                       DefaultValuedAttr<I64Attr, "0">:$offset);
+  let results = (outs WaveAMDMachine_VGPR1:$result);
+  let assemblyFormat = [{
+    $addr `,` $data (`offset` $offset^)? attr-dict `:`
+    functional-type(operands, results)
+  }];
+}
+
+def WaveAMDMachine_DsPermuteB32Op
+    : WaveAMDMachine_DsPermuteB32Base<"ds_permute_b32"> {
+  let summary = "DS lane permute";
+}
+
+def WaveAMDMachine_DsBpermuteB32Op
+    : WaveAMDMachine_DsPermuteB32Base<"ds_bpermute_b32"> {
+  let summary = "DS lane broadcast permute";
 }
 
 def WaveAMDMachine_SBarrierOp : WaveAMDMachine_Op<"s_barrier"> {

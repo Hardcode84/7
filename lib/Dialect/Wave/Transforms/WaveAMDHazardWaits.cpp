@@ -581,9 +581,19 @@ static bool isVMEM(Operation *op) {
          op->hasTrait<OpTrait::waveamdmachine::VMEMStoreOp>();
 }
 
-static bool isMemory(Operation *op) {
-  return isVMEM(op) || op->hasTrait<OpTrait::waveamdmachine::LDSLoadOp>() ||
-         op->hasTrait<OpTrait::waveamdmachine::LDSStoreOp>();
+static waveamdmachine::WaitcntInfo getWaitcntInfo(Operation *op) {
+  if (waveamdmachine::WaitcntInfoOpInterface info =
+          dyn_cast<waveamdmachine::WaitcntInfoOpInterface>(op))
+    return info.getWaitcntInfo();
+  return {};
+}
+
+static bool issuesLdsWaitcnt(Operation *op) {
+  return getWaitcntInfo(op).event == waveamdmachine::WaitcntEvent::Lds;
+}
+
+static bool isMfmaResultHazardConsumer(Operation *op) {
+  return isVMEM(op) || issuesLdsWaitcnt(op) || isLegacyVALU(op);
 }
 
 static std::optional<Value> getWideStoreData(Operation *op) {
@@ -622,7 +632,7 @@ static unsigned getNonMfmaUseWait(Operation *op, RegSpan use,
                                   const PhysicalHazard &hazard,
                                   const HazardConfig &cfg) {
   if (hazard.kind == PhysicalHazardKind::MfmaWrite &&
-      (isMemory(op) || isLegacyVALU(op)))
+      isMfmaResultHazardConsumer(op))
     return waitForHazardAge(hazard, cfg.mfmaResultLatency);
 
   if (hazard.kind == PhysicalHazardKind::ValuWriteVGPR &&
@@ -656,7 +666,7 @@ static unsigned getPhysicalDefWait(Operation *op, RegSpan def,
     return 0;
 
   if (hazard.kind == PhysicalHazardKind::MfmaWrite &&
-      (isMemory(op) || isLegacyVALU(op)))
+      isMfmaResultHazardConsumer(op))
     return waitForHazardAge(hazard, cfg.mfmaResultLatency);
 
   if (hazard.kind == PhysicalHazardKind::MfmaSrcCRead && isLegacyVALU(op))

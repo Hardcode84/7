@@ -218,6 +218,9 @@ struct KernelInfo {
   X(bufferLoadLdsB32, BUFFER_LOAD_DWORD_LDS_OFFEN_vi,                          \
     BUFFER_LOAD_DWORD_LDS_OFFEN_gfx10)                                         \
   X(dsReadB32, DS_READ_B32_vi_gfx9, DS_READ_B32_gfx11)                         \
+  X(dsSwizzleB32, DS_SWIZZLE_B32_vi, DS_SWIZZLE_B32_gfx11)                     \
+  X(dsPermuteB32, DS_PERMUTE_B32_vi, DS_PERMUTE_B32_gfx11)                     \
+  X(dsBpermuteB32, DS_BPERMUTE_B32_vi, DS_BPERMUTE_B32_gfx11)                  \
   X(dsWriteB32, DS_WRITE_B32_vi_gfx9, DS_WRITE_B32_gfx11)
 
 struct AMDGPUOpcodeSet {
@@ -607,6 +610,9 @@ private:
   }
 
   unsigned dsReadB32() const { return opcodes.dsReadB32; }
+  unsigned dsSwizzleB32() const { return opcodes.dsSwizzleB32; }
+  unsigned dsPermuteB32() const { return opcodes.dsPermuteB32; }
+  unsigned dsBpermuteB32() const { return opcodes.dsBpermuteB32; }
 
   unsigned dsReadB16() const {
     if (isGfx8Or9())
@@ -1241,6 +1247,13 @@ private:
                   {toMCOperand(op.getOperand(0)), toMCOperand(op.getOperand(1)),
                    llvm::MCOperand::createImm(getIntAttr(&op, "offset", 0)),
                    llvm::MCOperand::createImm(0)});
+  }
+
+  LogicalResult emitDsPermute(Operation &op, unsigned opcode) {
+    return emitMC(opcode,
+                  {toMCOperand(op.getResult(0)), toMCOperand(op.getOperand(0)),
+                   toMCOperand(op.getOperand(1)),
+                   llvm::MCOperand::createImm(getIntAttr(&op, "offset", 0))});
   }
 
   LogicalResult emitVAddU32(llvm::MCOperand dst, llvm::MCOperand lhs,
@@ -2030,6 +2043,12 @@ private:
       return emitDsLoad(op, dsReadB96());
     if (isa<waveamdmachine::DsLoadB128Op>(op))
       return emitDsLoad(op, dsReadB128());
+    if (isa<waveamdmachine::DsSwizzleB32Op>(op))
+      return emitDsLoad(op, dsSwizzleB32());
+    if (isa<waveamdmachine::DsPermuteB32Op>(op))
+      return emitDsPermute(op, dsPermuteB32());
+    if (isa<waveamdmachine::DsBpermuteB32Op>(op))
+      return emitDsPermute(op, dsBpermuteB32());
     if (isa<waveamdmachine::DsStoreB16Op>(op))
       return emitDsStore(op, dsWriteB16());
     if (isa<waveamdmachine::DsStoreB32Op>(op))

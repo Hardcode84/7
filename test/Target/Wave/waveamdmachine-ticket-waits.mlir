@@ -3,6 +3,56 @@
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
+// CHECK-LABEL: func.func @ds_swizzle_is_lgkm_issuer
+// CHECK: waveamdmachine.ds_swizzle_b32
+// CHECK-NEXT: waveamdmachine.ds_swizzle_b32
+// CHECK-NEXT: waveamdmachine.imm 64535
+// CHECK-NEXT: waveamdmachine.s_waitcnt
+// CHECK-NEXT: waveamdmachine.v_add_u32
+func.func @ds_swizzle_is_lgkm_issuer(%x: !waveamdmachine.reg<vgpr, 1>) {
+  %a = waveamdmachine.ds_swizzle_b32 %x offset 31
+      : (!waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
+  %b = waveamdmachine.ds_swizzle_b32 %x offset 31
+      : (!waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
+  %sum = waveamdmachine.v_add_u32 %x, %a
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
+  return
+}
+
+// CHECK-LABEL: func.func @ds_permute_is_lgkm_issuer
+// CHECK: waveamdmachine.ds_permute_b32
+// CHECK-NEXT: waveamdmachine.ds_permute_b32
+// CHECK-NEXT: waveamdmachine.imm 64535
+// CHECK-NEXT: waveamdmachine.s_waitcnt
+// CHECK-NEXT: waveamdmachine.v_add_u32
+func.func @ds_permute_is_lgkm_issuer(%x: !waveamdmachine.reg<vgpr, 1>,
+                                     %y: !waveamdmachine.reg<vgpr, 1>) {
+  %a = waveamdmachine.ds_permute_b32 %x, %y offset 4
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
+  %b = waveamdmachine.ds_permute_b32 %x, %y offset 4
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
+  %sum = waveamdmachine.v_add_u32 %x, %a
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
+  return
+}
+
+// CHECK-LABEL: func.func @ds_bpermute_is_lgkm_issuer
+// CHECK: waveamdmachine.ds_bpermute_b32
+// CHECK-NEXT: waveamdmachine.ds_bpermute_b32
+// CHECK-NEXT: waveamdmachine.imm 64535
+// CHECK-NEXT: waveamdmachine.s_waitcnt
+// CHECK-NEXT: waveamdmachine.v_add_u32
+func.func @ds_bpermute_is_lgkm_issuer(%x: !waveamdmachine.reg<vgpr, 1>,
+                                      %y: !waveamdmachine.reg<vgpr, 1>) {
+  %a = waveamdmachine.ds_bpermute_b32 %x, %y offset 8
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
+  %b = waveamdmachine.ds_bpermute_b32 %x, %y offset 8
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
+  %sum = waveamdmachine.v_add_u32 %x, %a
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
+  return
+}
+
 // CHECK-LABEL: func.func @lds_nonzero_distance
 // CHECK: waveamdmachine.ds_load_b32
 // CHECK: waveamdmachine.ds_load_b32

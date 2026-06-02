@@ -37,6 +37,16 @@ static SchedClass fallbackClassify(Operation *op) {
 #endif
 }
 
+static WaitcntInfo getWaitcntInfo(Operation *op) {
+  if (WaitcntInfoOpInterface info = dyn_cast<WaitcntInfoOpInterface>(op))
+    return info.getWaitcntInfo();
+  return {};
+}
+
+static bool issuesLdsWaitcnt(Operation *op) {
+  return getWaitcntInfo(op).event == WaitcntEvent::Lds;
+}
+
 SchedClass classifyOp(Operation *op) {
   // Trait pre-filter for two large categories: ops that do not advance
   // instruction-distance hazards and the full VMEM load/store family.
@@ -44,6 +54,8 @@ SchedClass classifyOp(Operation *op) {
     return SchedClass::NoInst;
   if (op->hasTrait<traits::VMEMLoadOp>() || op->hasTrait<traits::VMEMStoreOp>())
     return SchedClass::WriteVMEM;
+  if (issuesLdsWaitcnt(op))
+    return SchedClass::WriteLDS;
 
   // Type-driven dispatch for the rest. Lists are exhaustive over
   // the current dialect; new ops trigger the fallback path which
@@ -56,11 +68,6 @@ SchedClass classifyOp(Operation *op) {
           [](auto) { return SchedClass::Write4PassMAI; })
       .Case<WmmaF32_16x16x16_F16Op, WmmaI32_16x16x16_IU8Op>(
           [](auto) { return SchedClass::Write16PassWMMA; })
-      // LDS (ds_* family).
-      .Case<DsLoadB16Op, DsLoadB32Op, DsLoadB64Op, DsLoadB96Op, DsLoadB128Op,
-            DsLoadTupleB32Op, DsStoreB16Op, DsStoreB32Op, DsStoreB64Op,
-            DsStoreB96Op, DsStoreB128Op, DsStoreTupleB32Op>(
-          [](auto) { return SchedClass::WriteLDS; })
       // Scalar memory (s_load_*).
       .Case<SLoadB32Op, SLoadB64Op, SLoadB128Op>(
           [](auto) { return SchedClass::WriteSMEM; })
