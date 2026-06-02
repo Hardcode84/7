@@ -488,15 +488,15 @@ def _emit_tile_coords(bld: dsl.FunctionBuilder, cfg: _MatmulConfig) -> _TileCoor
         + wg_n * (cfg.waves_per_workgroup * cfg.tiles_per_wave * 256),
         bindings=sym_to_val,
     )
+    c_base = bld.ptr_add(c_arg, c_cta_off)
     if cfg.use_buffer:
-        c_arg = _wrap_in_buffer(
+        c_base = _wrap_in_buffer(
             bld,
-            c_arg,
-            cfg.c_elements,
+            c_base,
+            cfg.waves_per_workgroup * cfg.tiles_per_wave * 256,
             _output_element_type(cfg),
             cfg.c_element_bytes,
         )
-    c_base = bld.ptr_add(c_arg, c_cta_off)
     c_wave_off = bld.index_expr(
         wave_id * (cfg.tiles_per_wave * 256),
         bindings=sym_to_val,
