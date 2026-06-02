@@ -32,6 +32,35 @@ func.func @buffer_store_kernel(%out: !wave.ptr<#wave.global, i32>, %x: i32) attr
   return
 }
 
+// SELECT-LABEL: func.func @buffer_make_buffer_uniform_base_offset
+// SELECT: %[[WG:.*]] = waveamdmachine.s_workgroup_id_x
+// SELECT: %[[SHIFT:.*]] = waveamdmachine.imm 10 : !waveamdmachine.imm
+// SELECT: %[[BASE_OFF:[^,]+]], %{{.*}} = waveamdmachine.s_lshl_b32 %[[WG]], %[[SHIFT]]
+// SELECT: %[[WIDE_OFF:.*]] = waveamdmachine.tuple_from_elements %[[BASE_OFF]],
+// SELECT: %[[SRD_BASE:.*]], %{{.*}} = waveamdmachine.s_add_u64 {{.*}}, %[[WIDE_OFF]]
+// SELECT: %[[DESC:.*]] = waveamdmachine.make_buffer_rsrc %[[SRD_BASE]]
+// SELECT: %[[ZERO:.*]] = waveamdmachine.imm 0
+// SELECT: waveamdmachine.buffer_store_b32 {{.*}}, {{.*}}, %[[DESC]], %[[ZERO]]
+func.func @buffer_make_buffer_uniform_base_offset(%out: !wave.ptr<#wave.global, i32>)
+    attributes {wave.kernel} {
+  %range = arith.constant 1024 : i32
+  %wg_raw = wave.workgroup_id 0
+  %wg = wave.assume_range %wg_raw, [0, 1023] : i32
+  %tile = wave.index_expr <"256*wg"> ["wg"](%wg) : (i32) -> index
+  %base = wave.ptr_add %out, %tile
+      : !wave.ptr<#wave.global, i32>, index -> !wave.ptr<#wave.global, i32>
+  %buffer = waveamd.make_buffer %base, %range
+      : !wave.ptr<#wave.global, i32>, i32 -> !wave.ptr<#waveamd.buffer, i32>
+  %lane = wave.lane_id : !wave.simd<i32, 32>
+  %ptrs = wave.ptr_add %buffer, %lane
+      : !wave.ptr<#waveamd.buffer, i32>, !wave.simd<i32, 32>
+      -> !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 32>
+  %tok = wave.store %lane -> %ptrs
+      : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 32>)
+      -> !wave.mem.token
+  return
+}
+
 // SELECT-LABEL: func.func @buffer_bounded_raw_uniform_uses_soffset
 // SELECT-DAG: %[[U:.*]] = waveamdmachine.arg {index = 1 : i64, pointer = false}
 // SELECT-DAG: %[[LANE:.*]] = waveamdmachine.v_mbcnt_lo

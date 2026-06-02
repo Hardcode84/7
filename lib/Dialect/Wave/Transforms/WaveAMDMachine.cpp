@@ -2639,6 +2639,16 @@ WaveAMDMachineSelector::selectMakeBuffer(waveamd::MakeBufferOp op) {
   Value baseValue = baseIt->second;
   Value globalBase = pointerGlobalBases.lookup(op.getBase());
   PointerOffset baseOffset = offsetIt->second;
+  if (baseOffset.expr &&
+      classifyPointerOffset(*this, baseOffset) != TermKind::Lane) {
+    FailureOr<Value> offset =
+        materializePointerOffsetValue(*this, op.getOperation(), baseOffset);
+    if (failed(offset))
+      return failure();
+    baseValue = addWide(*this, op.getLoc(), baseValue, *offset);
+    globalBase = baseValue;
+    baseOffset = {};
+  }
   Value descriptor = waveamdmachine::MakeBufferRsrcOp::create(
       builder, op.getLoc(),
       getRegType(op.getContext(), waveamdmachine::RegClass::SGPR, 4), baseValue,
