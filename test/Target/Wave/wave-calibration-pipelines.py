@@ -2,6 +2,9 @@
 
 # CHECK: matmul_pipeline: ok
 # CHECK: fa_pipeline: ok
+# CHECK: matmul_explicit_gfx950_wave_size: ok
+# CHECK: matmul_auto_gfx950_wave_size: ok
+# CHECK: matmul_runner_gfx950_wave_size: ok
 # CHECK: matmul_pingpong_removed: ok
 
 from __future__ import annotations
@@ -96,6 +99,93 @@ def check_calibration_entry(label: str, module) -> None:
     print(f"{label}: ok")
 
 
+def check_matmul_wave_size(matmul) -> None:
+    explicit = argparse.Namespace(chip="gfx950", matrix_intrinsic="auto")
+    require(
+        "matmul_explicit_gfx950_wave_size",
+        matmul.kernel_wave_size(explicit) == 64,
+        "explicit gfx950 should use wave64",
+    )
+    forced = argparse.Namespace(chip="gfx1100", matrix_intrinsic="mfma_gfx950")
+    require(
+        "matmul_explicit_gfx950_wave_size",
+        matmul.kernel_wave_size(forced) == 64,
+        "explicit mfma_gfx950 should use wave64",
+    )
+    rdna = argparse.Namespace(chip="gfx1100", matrix_intrinsic="auto")
+    require(
+        "matmul_explicit_gfx950_wave_size",
+        matmul.kernel_wave_size(rdna) == 32,
+        "gfx1100 auto should use wave32",
+    )
+    print("matmul_explicit_gfx950_wave_size: ok")
+
+    auto = argparse.Namespace(chip="", matrix_intrinsic="auto")
+    old_detect = matmul.detect_chip
+    try:
+        matmul.detect_chip = lambda: "gfx950"
+        chip = matmul.resolve_chip(auto)
+    finally:
+        matmul.detect_chip = old_detect
+    require("matmul_auto_gfx950_wave_size", chip == "gfx950", "bad resolved chip")
+    require(
+        "matmul_auto_gfx950_wave_size",
+        auto.chip == "gfx950",
+        "resolved chip not stored",
+    )
+    require(
+        "matmul_auto_gfx950_wave_size",
+        matmul.kernel_wave_size(auto) == 64,
+        "auto gfx950 should use wave64",
+    )
+    print("matmul_auto_gfx950_wave_size: ok")
+
+
+def check_matmul_runner_wave_size(matmul) -> None:
+    args = argparse.Namespace(
+        m=32,
+        n=32,
+        k=64,
+        bm=1,
+        bn=2,
+        wave_m_tiles=1,
+        wave_n_tiles=1,
+        wave_k_tiles=1,
+        matrix_intrinsic="auto",
+        chip="gfx950",
+        output_type="f32",
+        iters=1,
+        warmup=0,
+        no_check=True,
+    )
+    captured: list[list[str]] = []
+    old_run = matmul.run
+    try:
+
+        def fake_run(cmd, env=None):
+            captured.append(cmd)
+            return "per_launch_cycles_wallclock: 1\nper_launch_us: 1.0\n"
+
+        matmul.run = fake_run
+        matmul.run_hw(Path("runner"), Path("kernel.hsaco"), args, "/tmp")
+    finally:
+        matmul.run = old_run
+    require("matmul_runner_gfx950_wave_size", bool(captured), "runner not called")
+    cmd = captured[0]
+    require(
+        "matmul_runner_gfx950_wave_size",
+        "--wave-size" in cmd,
+        "missing --wave-size",
+    )
+    index = cmd.index("--wave-size")
+    require(
+        "matmul_runner_gfx950_wave_size",
+        cmd[index + 1] == "64",
+        "runner should receive wave64",
+    )
+    print("matmul_runner_gfx950_wave_size: ok")
+
+
 def main() -> int:
     matmul = load_module(
         "wave_matmul_calibrate",
@@ -107,6 +197,8 @@ def main() -> int:
     )
     check_calibration_entry("matmul_pipeline", matmul)
     check_calibration_entry("fa_pipeline", fa)
+    check_matmul_wave_size(matmul)
+    check_matmul_runner_wave_size(matmul)
     try:
         matmul.parse_variants("pingpong")
     except argparse.ArgumentTypeError:

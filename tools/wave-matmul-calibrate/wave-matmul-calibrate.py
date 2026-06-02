@@ -140,6 +140,12 @@ def detect_chip() -> str:
     sys.exit("rocminfo did not report a gfx Name")
 
 
+def resolve_chip(args: argparse.Namespace) -> str:
+    chip = args.chip or detect_chip()
+    args.chip = chip
+    return chip
+
+
 def build_example_args(args: argparse.Namespace, chip: str) -> list[str]:
     cmd = [
         sys.executable,
@@ -430,6 +436,14 @@ def compute_loop_trip_count(args: argparse.Namespace) -> int:
     return max(virtual_k_steps - 1, 0)
 
 
+def kernel_wave_size(args: argparse.Namespace) -> int:
+    if args.matrix_intrinsic == "mfma_gfx950":
+        return 64
+    if args.matrix_intrinsic == "auto" and args.chip.startswith("gfx95"):
+        return 64
+    return 32
+
+
 def div_exact(num: int, den: int, what: str) -> int:
     if den <= 0 or num % den != 0:
         sys.exit(what)
@@ -508,6 +522,8 @@ def run_hw(
         str(args.wave_n_tiles),
         "--wave-k-tiles",
         str(args.wave_k_tiles),
+        "--wave-size",
+        str(kernel_wave_size(args)),
         "--c-type",
         args.output_type,
         "--iters",
@@ -690,7 +706,7 @@ def validate_args(args: argparse.Namespace) -> None:
 def main() -> int:
     args = build_argparser().parse_args()
     validate_args(args)
-    chip = args.chip or detect_chip()
+    chip = resolve_chip(args)
     variants = args.variants
 
     tmp_ctx = None if args.keep_tmp else tempfile.TemporaryDirectory()

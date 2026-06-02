@@ -32,6 +32,7 @@ struct Args {
   int waveMTiles = 1;
   int waveNTiles = 1;
   int waveKTiles = 1;
+  int waveSize = 32;
   CType cType = CType::F32;
   int iters = 1000;
   int warmupIters = 10;
@@ -55,6 +56,7 @@ static void usage() {
               "  --wave-m-tiles N       per-wave M tiles (default 1)\n"
               "  --wave-n-tiles N       per-wave N tiles (default 1)\n"
               "  --wave-k-tiles N       per-wave K tiles (default 1)\n"
+              "  --wave-size N          lanes per wave (default 32)\n"
               "  --c-type f32|f16       output element type (default f32)\n"
               "  --iters N              launch iterations (default 1000)\n"
               "  --warmup N             warmup launches (default 10)\n"
@@ -88,6 +90,7 @@ static void setWaveNTiles(Args &a, const char *v) {
 static void setWaveKTiles(Args &a, const char *v) {
   a.waveKTiles = parseInt(v);
 }
+static void setWaveSize(Args &a, const char *v) { a.waveSize = parseInt(v); }
 static void setCType(Args &a, const char *v) {
   if (std::strcmp(v, "f32") == 0) {
     a.cType = CType::F32;
@@ -111,6 +114,7 @@ static constexpr FlagHandler kFlags[] = {
     {"--wave-m-tiles", setWaveMTiles},
     {"--wave-n-tiles", setWaveNTiles},
     {"--wave-k-tiles", setWaveKTiles},
+    {"--wave-size", setWaveSize},
     {"--c-type", setCType},
     {"--iters", setIters},
     {"--warmup", setWarmup},
@@ -178,6 +182,7 @@ static void validateArgs(const Args &a) {
   requirePositive(a.waveMTiles, "wave-m-tiles must be positive");
   requirePositive(a.waveNTiles, "wave-n-tiles must be positive");
   requirePositive(a.waveKTiles, "wave-k-tiles must be positive");
+  requirePositive(a.waveSize, "wave-size must be positive");
 }
 
 static Args parseArgs(int argc, char **argv) {
@@ -287,7 +292,7 @@ int main(int argc, char **argv) {
 
   int blocksX = divExact(a.m, 16 * a.bm * a.waveMTiles, "bad M blocking");
   int blocksY = divExact(a.n, 16 * a.bn * a.waveNTiles, "bad N blocking");
-  int blockThreads = a.bm * a.bn * 32;
+  int blockThreads = a.bm * a.bn * a.waveSize;
   int virtualKSteps = divExact(a.k, 16 * a.waveKTiles, "bad K blocking");
   int tripCount = std::max(virtualKSteps - 1, 0);
 
@@ -349,10 +354,9 @@ int main(int argc, char **argv) {
               props.gcnArchName, clockMHz);
   std::printf("kernel: %s\n", a.kernel);
   std::printf("shape: m=%d n=%d k=%d bm=%d bn=%d wave_m_tiles=%d "
-              "wave_n_tiles=%d wave_k_tiles=%d\n",
+              "wave_n_tiles=%d wave_k_tiles=%d wave_size=%d c_type=%s\n",
               a.m, a.n, a.k, a.bm, a.bn, a.waveMTiles, a.waveNTiles,
-              a.waveKTiles);
-  std::printf("c_type: %s\n", getCTypeName(a.cType));
+              a.waveKTiles, a.waveSize, getCTypeName(a.cType));
   std::printf("grid: %d,%d,1 block: %d,1,1 waves_per_workgroup=%d\n", blocksX,
               blocksY, blockThreads, a.bm * a.bn);
   std::printf("loop_trip_count: %d\n", tripCount);
