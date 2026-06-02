@@ -5,6 +5,7 @@
 # CHECK: matmul_explicit_gfx950_wave_size: ok
 # CHECK: matmul_auto_gfx950_wave_size: ok
 # CHECK: matmul_runner_gfx950_wave_size: ok
+# CHECK: matmul_dma_sim_trip_count: ok
 # CHECK: matmul_pingpong_removed: ok
 
 from __future__ import annotations
@@ -186,6 +187,60 @@ def check_matmul_runner_wave_size(matmul) -> None:
     print("matmul_runner_gfx950_wave_size: ok")
 
 
+def check_matmul_dma_sim_trip_count(matmul) -> None:
+    base = argparse.Namespace(k=64, wave_k_tiles=2, use_dma_lds=False)
+    require(
+        "matmul_dma_sim_trip_count",
+        matmul.compute_kernel_arg_trip_count(base) == 1,
+        "kernel arg trip count drifted",
+    )
+    require(
+        "matmul_dma_sim_trip_count",
+        matmul.compute_sim_loop_trip_count(base) == 1,
+        "non-DMA sim trip count should be V - 1",
+    )
+
+    dma = argparse.Namespace(k=64, wave_k_tiles=2, use_dma_lds=True)
+    require(
+        "matmul_dma_sim_trip_count",
+        matmul.compute_kernel_arg_trip_count(dma) == 1,
+        "DMA launch trip count should stay V - 1",
+    )
+    require(
+        "matmul_dma_sim_trip_count",
+        matmul.compute_sim_loop_trip_count(dma) == 0,
+        "DMA sim trip count should be V - 2",
+    )
+
+    report_args = argparse.Namespace(
+        k=96,
+        wave_k_tiles=2,
+        use_dma_lds=True,
+        bm=2,
+        bn=2,
+        calibration_file=None,
+    )
+    captured: list[list[str]] = []
+    old_run = matmul.run
+    try:
+
+        def fake_run(cmd, env=None):
+            captured.append(cmd)
+            return "total_cycles: 7\n"
+
+        matmul.run = fake_run
+        matmul.run_sim_reports(Path("build"), Path("machine.mlir"), report_args)
+    finally:
+        matmul.run = old_run
+    require("matmul_dma_sim_trip_count", bool(captured), "sim report not called")
+    require(
+        "matmul_dma_sim_trip_count",
+        all("--trip-count=1" in cmd for cmd in captured),
+        "DMA sim reports should use V - 2",
+    )
+    print("matmul_dma_sim_trip_count: ok")
+
+
 def main() -> int:
     matmul = load_module(
         "wave_matmul_calibrate",
@@ -199,6 +254,7 @@ def main() -> int:
     check_calibration_entry("fa_pipeline", fa)
     check_matmul_wave_size(matmul)
     check_matmul_runner_wave_size(matmul)
+    check_matmul_dma_sim_trip_count(matmul)
     try:
         matmul.parse_variants("pingpong")
     except argparse.ArgumentTypeError:

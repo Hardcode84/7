@@ -431,9 +431,24 @@ def parse_total_cycles(text: str) -> int:
     return int(match.group(1))
 
 
-def compute_loop_trip_count(args: argparse.Namespace) -> int:
-    virtual_k_steps = div_exact(args.k, 16 * args.wave_k_tiles, "bad K blocking")
+def compute_virtual_k_steps(args: argparse.Namespace) -> int:
+    return div_exact(args.k, 16 * args.wave_k_tiles, "bad K blocking")
+
+
+def compute_kernel_arg_trip_count(args: argparse.Namespace) -> int:
+    virtual_k_steps = compute_virtual_k_steps(args)
     return max(virtual_k_steps - 1, 0)
+
+
+def compute_sim_loop_trip_count(args: argparse.Namespace) -> int:
+    virtual_k_steps = compute_virtual_k_steps(args)
+    if args.use_dma_lds:
+        return max(virtual_k_steps - 2, 0)
+    return max(virtual_k_steps - 1, 0)
+
+
+def compute_loop_trip_count(args: argparse.Namespace) -> int:
+    return compute_sim_loop_trip_count(args)
 
 
 def kernel_wave_size(args: argparse.Namespace) -> int:
@@ -454,7 +469,7 @@ def run_sim_reports(
     build_dir: Path, machine_mlir: Path, args: argparse.Namespace
 ) -> dict[tuple[int, int, int], int]:
     wave_sim = build_dir / "bin/wave-sim-report"
-    trip_count = compute_loop_trip_count(args)
+    trip_count = compute_sim_loop_trip_count(args)
     out: dict[tuple[int, int, int], int] = {}
     for waves, simds, delay in sim_report_specs(args):
         text = run(
@@ -720,7 +735,8 @@ def main() -> int:
             f"shape: m={args.m} n={args.n} k={args.k} bm={args.bm} bn={args.bn} "
             f"wave_m_tiles={args.wave_m_tiles} wave_n_tiles={args.wave_n_tiles} "
             f"wave_k_tiles={args.wave_k_tiles} target_waves={args.target_waves}\n"
-            f"sim_loop_trip_count: {compute_loop_trip_count(args)}"
+            f"kernel_arg_trip_count: {compute_kernel_arg_trip_count(args)}\n"
+            f"sim_loop_trip_count: {compute_sim_loop_trip_count(args)}"
         )
         results: list[VariantResult] = []
         for variant in variants:
