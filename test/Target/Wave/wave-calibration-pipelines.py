@@ -5,6 +5,7 @@
 # CHECK: matmul_explicit_gfx950_wave_size: ok
 # CHECK: matmul_auto_gfx950_wave_size: ok
 # CHECK: matmul_runner_gfx950_wave_size: ok
+# CHECK: matmul_bf16_forwarding: ok
 # CHECK: matmul_dma_sim_trip_count: ok
 # CHECK: matmul_pingpong_removed: ok
 
@@ -154,6 +155,7 @@ def check_matmul_runner_wave_size(matmul) -> None:
         wave_k_tiles=1,
         matrix_intrinsic="auto",
         chip="gfx950",
+        input_type="f16",
         output_type="f32",
         iters=1,
         warmup=0,
@@ -185,6 +187,62 @@ def check_matmul_runner_wave_size(matmul) -> None:
         "runner should receive wave64",
     )
     print("matmul_runner_gfx950_wave_size: ok")
+
+
+def check_matmul_bf16_forwarding(matmul) -> None:
+    args = argparse.Namespace(
+        m=32,
+        n=32,
+        k=64,
+        bm=1,
+        bn=2,
+        wave_m_tiles=1,
+        wave_n_tiles=1,
+        wave_k_tiles=1,
+        use_buffer=False,
+        use_dma_lds=False,
+        matrix_intrinsic="mfma_gfx950",
+        chip="gfx950",
+        input_type="bf16",
+        output_type="f32",
+        target_waves=0,
+        iters=1,
+        warmup=0,
+        no_check=True,
+    )
+    example_cmd = matmul.build_example_args(args, "gfx950")
+    require(
+        "matmul_bf16_forwarding",
+        "--input-type=bf16" in example_cmd,
+        "example command missing bf16 input type",
+    )
+
+    captured: list[list[str]] = []
+    old_run = matmul.run
+    try:
+
+        def fake_run(cmd, env=None):
+            captured.append(cmd)
+            return "per_launch_cycles_wallclock: 1\nper_launch_us: 1.0\n"
+
+        matmul.run = fake_run
+        matmul.run_hw(Path("runner"), Path("kernel.hsaco"), args, "/tmp")
+    finally:
+        matmul.run = old_run
+    require("matmul_bf16_forwarding", bool(captured), "runner not called")
+    cmd = captured[0]
+    require(
+        "matmul_bf16_forwarding",
+        "--input-type" in cmd,
+        "runner command missing --input-type",
+    )
+    index = cmd.index("--input-type")
+    require(
+        "matmul_bf16_forwarding",
+        cmd[index + 1] == "bf16",
+        "runner should receive bf16",
+    )
+    print("matmul_bf16_forwarding: ok")
 
 
 def check_matmul_dma_sim_trip_count(matmul) -> None:
@@ -254,6 +312,7 @@ def main() -> int:
     check_calibration_entry("fa_pipeline", fa)
     check_matmul_wave_size(matmul)
     check_matmul_runner_wave_size(matmul)
+    check_matmul_bf16_forwarding(matmul)
     check_matmul_dma_sim_trip_count(matmul)
     try:
         matmul.parse_variants("pingpong")

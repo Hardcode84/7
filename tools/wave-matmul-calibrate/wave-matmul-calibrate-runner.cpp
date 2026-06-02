@@ -20,6 +20,7 @@
 namespace {
 
 enum class CType { F32, F16 };
+enum class InputType { F16, BF16 };
 
 struct Args {
   const char *hsaco = nullptr;
@@ -33,6 +34,7 @@ struct Args {
   int waveNTiles = 1;
   int waveKTiles = 1;
   int waveSize = 32;
+  InputType inputType = InputType::F16;
   CType cType = CType::F32;
   int iters = 1000;
   int warmupIters = 10;
@@ -57,6 +59,7 @@ static void usage() {
               "  --wave-n-tiles N       per-wave N tiles (default 1)\n"
               "  --wave-k-tiles N       per-wave K tiles (default 1)\n"
               "  --wave-size N          lanes per wave (default 32)\n"
+              "  --input-type f16|bf16  input element type (default f16)\n"
               "  --c-type f32|f16       output element type (default f32)\n"
               "  --iters N              launch iterations (default 1000)\n"
               "  --warmup N             warmup launches (default 10)\n"
@@ -91,6 +94,17 @@ static void setWaveKTiles(Args &a, const char *v) {
   a.waveKTiles = parseInt(v);
 }
 static void setWaveSize(Args &a, const char *v) { a.waveSize = parseInt(v); }
+static void setInputType(Args &a, const char *v) {
+  if (std::strcmp(v, "f16") == 0) {
+    a.inputType = InputType::F16;
+    return;
+  }
+  if (std::strcmp(v, "bf16") == 0) {
+    a.inputType = InputType::BF16;
+    return;
+  }
+  die("bad --input-type; expected f16 or bf16");
+}
 static void setCType(Args &a, const char *v) {
   if (std::strcmp(v, "f32") == 0) {
     a.cType = CType::F32;
@@ -115,6 +129,7 @@ static constexpr FlagHandler kFlags[] = {
     {"--wave-n-tiles", setWaveNTiles},
     {"--wave-k-tiles", setWaveKTiles},
     {"--wave-size", setWaveSize},
+    {"--input-type", setInputType},
     {"--c-type", setCType},
     {"--iters", setIters},
     {"--warmup", setWarmup},
@@ -267,6 +282,14 @@ static const char *getCTypeName(CType type) {
   return type == CType::F16 ? "f16" : "f32";
 }
 
+static const char *getInputTypeName(InputType type) {
+  return type == InputType::BF16 ? "bf16" : "f16";
+}
+
+static uint16_t oneBits(InputType type) {
+  return type == InputType::BF16 ? 0x3f80 : 0x3c00;
+}
+
 static void copyAndCheckOutput(void *deviceC, size_t cBytes, int cElements,
                                const Args &a) {
   if (!a.checkOutput)
@@ -306,8 +329,10 @@ int main(int argc, char **argv) {
   checkHip(hipModuleLoad(&mod, a.hsaco), "hipModuleLoad");
   checkHip(hipModuleGetFunction(&kfn, mod, a.kernel), "hipModuleGetFunction");
 
-  std::vector<uint16_t> hostA(static_cast<size_t>(a.m) * a.k, 0x3c00);
-  std::vector<uint16_t> hostB(static_cast<size_t>(a.n) * a.k, 0x3c00);
+  std::vector<uint16_t> hostA(static_cast<size_t>(a.m) * a.k,
+                              oneBits(a.inputType));
+  std::vector<uint16_t> hostB(static_cast<size_t>(a.n) * a.k,
+                              oneBits(a.inputType));
   int cElements = a.m * a.n;
   size_t cBytes = static_cast<size_t>(cElements) *
                   (a.cType == CType::F16 ? sizeof(uint16_t) : sizeof(float));
@@ -354,9 +379,11 @@ int main(int argc, char **argv) {
               props.gcnArchName, clockMHz);
   std::printf("kernel: %s\n", a.kernel);
   std::printf("shape: m=%d n=%d k=%d bm=%d bn=%d wave_m_tiles=%d "
-              "wave_n_tiles=%d wave_k_tiles=%d wave_size=%d c_type=%s\n",
+              "wave_n_tiles=%d wave_k_tiles=%d wave_size=%d input_type=%s "
+              "c_type=%s\n",
               a.m, a.n, a.k, a.bm, a.bn, a.waveMTiles, a.waveNTiles,
-              a.waveKTiles, a.waveSize, getCTypeName(a.cType));
+              a.waveKTiles, a.waveSize, getInputTypeName(a.inputType),
+              getCTypeName(a.cType));
   std::printf("grid: %d,%d,1 block: %d,1,1 waves_per_workgroup=%d\n", blocksX,
               blocksY, blockThreads, a.bm * a.bn);
   std::printf("loop_trip_count: %d\n", tripCount);

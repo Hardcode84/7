@@ -166,6 +166,8 @@ def build_example_args(args: argparse.Namespace, chip: str) -> list[str]:
         cmd.append("--use-dma-lds")
     if args.matrix_intrinsic != "auto":
         cmd.append(f"--matrix-intrinsic={args.matrix_intrinsic}")
+    if args.input_type != "f16":
+        cmd.append(f"--input-type={args.input_type}")
     if args.output_type != "f32":
         cmd.append(f"--output-type={args.output_type}")
     if args.target_waves:
@@ -539,6 +541,8 @@ def run_hw(
         str(args.wave_k_tiles),
         "--wave-size",
         str(kernel_wave_size(args)),
+        "--input-type",
+        args.input_type,
         "--c-type",
         args.output_type,
         "--iters",
@@ -663,6 +667,7 @@ def build_argparser() -> argparse.ArgumentParser:
         default="auto",
     )
     ap.add_argument("--output-type", choices=("f32", "f16"), default="f32")
+    ap.add_argument("--input-type", choices=("f16", "bf16"), default="f16")
     ap.add_argument("--iters", type=int, default=1000)
     ap.add_argument("--warmup", type=int, default=10)
     ap.add_argument(
@@ -734,7 +739,8 @@ def main() -> int:
             f"chip: {chip}\n"
             f"shape: m={args.m} n={args.n} k={args.k} bm={args.bm} bn={args.bn} "
             f"wave_m_tiles={args.wave_m_tiles} wave_n_tiles={args.wave_n_tiles} "
-            f"wave_k_tiles={args.wave_k_tiles} target_waves={args.target_waves}\n"
+            f"wave_k_tiles={args.wave_k_tiles} target_waves={args.target_waves} "
+            f"input_type={args.input_type} output_type={args.output_type}\n"
             f"kernel_arg_trip_count: {compute_kernel_arg_trip_count(args)}\n"
             f"sim_loop_trip_count: {compute_sim_loop_trip_count(args)}"
         )
