@@ -402,12 +402,7 @@ static bool isMemoryIssuer(Operation *op) {
 }
 
 static bool isTupleMemoryOp(Operation *op) {
-  return llvm::isa<
-      waveamdmachine::GlobalLoadTupleB32Op,
-      waveamdmachine::BufferLoadTupleB32Op, waveamdmachine::DsLoadTupleB32Op,
-      waveamdmachine::GlobalStoreTupleB32Op,
-      waveamdmachine::BufferStoreTupleB32Op, waveamdmachine::DsStoreTupleB32Op>(
-      op);
+  return op->hasTrait<OpTrait::waveamdmachine::TupleMemoryOp>();
 }
 
 // Operand reads here are branch arguments, not value uses; framework

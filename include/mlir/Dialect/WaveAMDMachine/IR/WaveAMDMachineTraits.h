@@ -59,6 +59,9 @@ template <typename ConcreteType>
 class VMEMStoreOp : public TraitBase<ConcreteType, VMEMStoreOp> {};
 
 template <typename ConcreteType>
+class TupleMemoryOp : public TraitBase<ConcreteType, TupleMemoryOp> {};
+
+template <typename ConcreteType>
 class WaitcntOp : public TraitBase<ConcreteType, WaitcntOp> {};
 
 template <typename ConcreteType>

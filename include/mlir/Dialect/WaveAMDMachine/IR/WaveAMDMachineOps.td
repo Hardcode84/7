@@ -111,6 +111,7 @@ def WaveAMDMachine_LDSLoad : NativeOpTrait<"waveamdmachine::LDSLoadOp">;
 def WaveAMDMachine_LDSStore : NativeOpTrait<"waveamdmachine::LDSStoreOp">;
 def WaveAMDMachine_VMEMLoad : NativeOpTrait<"waveamdmachine::VMEMLoadOp">;
 def WaveAMDMachine_VMEMStore : NativeOpTrait<"waveamdmachine::VMEMStoreOp">;
+def WaveAMDMachine_TupleMemory : NativeOpTrait<"waveamdmachine::TupleMemoryOp">;
 def WaveAMDMachine_Waitcnt : NativeOpTrait<"waveamdmachine::WaitcntOp">;
 def WaveAMDMachine_TokenTrait : NativeOpTrait<"waveamdmachine::TokenOp">;
 def WaveAMDMachine_TokenJoinTrait : NativeOpTrait<"waveamdmachine::TokenJoinOp">;
@@ -918,7 +919,7 @@ def WaveAMDMachine_GlobalLoadB128Op
 }
 
 def WaveAMDMachine_GlobalLoadTupleB32Op
-    : WaveAMDMachine_GlobalMemoryOp<"global_load_tuple_b32", [WaveAMDMachine_VMEMLoad, MemoryEffects<[MemRead]>]>,
+    : WaveAMDMachine_GlobalMemoryOp<"global_load_tuple_b32", [WaveAMDMachine_VMEMLoad, WaveAMDMachine_TupleMemory, MemoryEffects<[MemRead]>]>,
       WaveAMDMachine_VMEMTupleLoadInfo {
   let summary = "global load of N consecutive 32-bit values into a VGPR tuple";
   let description = [{
@@ -1300,7 +1301,7 @@ def WaveAMDMachine_BufferStoreB128Op
 }
 
 def WaveAMDMachine_BufferLoadTupleB32Op
-    : WaveAMDMachine_BufferMemoryOp<"buffer_load_tuple_b32", [WaveAMDMachine_VMEMLoad, MemoryEffects<[MemRead]>]>,
+    : WaveAMDMachine_BufferMemoryOp<"buffer_load_tuple_b32", [WaveAMDMachine_VMEMLoad, WaveAMDMachine_TupleMemory, MemoryEffects<[MemRead]>]>,
       WaveAMDMachine_VMEMTupleLoadInfo {
   let summary = "buffer load of N consecutive 32-bit values into a VGPR tuple";
   let description = [{
@@ -1383,7 +1384,7 @@ def WaveAMDMachine_BufferLoadLdsB128Op
 }
 
 def WaveAMDMachine_BufferStoreTupleB32Op
-    : WaveAMDMachine_BufferMemoryOp<"buffer_store_tuple_b32", [WaveAMDMachine_VMEMStore, MemoryEffects<[MemWrite]>]>,
+    : WaveAMDMachine_BufferMemoryOp<"buffer_store_tuple_b32", [WaveAMDMachine_VMEMStore, WaveAMDMachine_TupleMemory, MemoryEffects<[MemWrite]>]>,
       WaveAMDMachine_VMEMTupleStoreInfo {
   let summary = "buffer 32-bit store of a VGPR tuple component";
   let description = [{
@@ -1405,7 +1406,7 @@ def WaveAMDMachine_BufferStoreTupleB32Op
   }];
 }
 def WaveAMDMachine_GlobalStoreTupleB32Op
-    : WaveAMDMachine_GlobalMemoryOp<"global_store_tuple_b32", [WaveAMDMachine_VMEMStore, MemoryEffects<[MemWrite]>]>,
+    : WaveAMDMachine_GlobalMemoryOp<"global_store_tuple_b32", [WaveAMDMachine_VMEMStore, WaveAMDMachine_TupleMemory, MemoryEffects<[MemWrite]>]>,
       WaveAMDMachine_VMEMTupleStoreInfo {
   let summary = "global 32-bit store of a VGPR tuple component";
   let description = [{
@@ -1462,7 +1463,7 @@ def WaveAMDMachine_DsLoadB32Op
 }
 
 def WaveAMDMachine_DsLoadTupleB32Op
-    : WaveAMDMachine_DsMemoryOp<"ds_load_tuple_b32", [WaveAMDMachine_LDSLoad]>,
+    : WaveAMDMachine_DsMemoryOp<"ds_load_tuple_b32", [WaveAMDMachine_LDSLoad, WaveAMDMachine_TupleMemory]>,
       WaveAMDMachine_LDSTupleLoadInfo {
   let summary = "LDS load of N consecutive 32-bit values into a VGPR tuple";
   let description = [{
@@ -1598,7 +1599,7 @@ def WaveAMDMachine_DsStoreB128Op
 }
 
 def WaveAMDMachine_DsStoreTupleB32Op
-    : WaveAMDMachine_DsMemoryOp<"ds_store_tuple_b32", [WaveAMDMachine_LDSStore]>,
+    : WaveAMDMachine_DsMemoryOp<"ds_store_tuple_b32", [WaveAMDMachine_LDSStore, WaveAMDMachine_TupleMemory]>,
       WaveAMDMachine_LDSTupleStoreInfo {
   let summary = "LDS store of a VGPR tuple as N consecutive 32-bit values";
   let description = [{
