@@ -145,9 +145,13 @@ void printUtilitySmoke(sym::Store &store, sym::ExprHandle x) {
       mustCompose(store, seven, sym::ExprBinaryOp::Div, two);
   sym::ExprHandle xQuarter =
       mustCompose(store, x, sym::ExprBinaryOp::Div, four);
+  sym::ExprHandle xHalf = mustCompose(store, x, sym::ExprBinaryOp::Div, two);
   sym::ExprHandle denomExpr =
       mustCompose(store, sevenHalf, sym::ExprBinaryOp::Add, xQuarter);
   printLiteral("denominator-lcm", sym::collectDenominator(denomExpr));
+  sym::ExprHandle modQuarter =
+      mustCompose(store, xQuarter, sym::ExprBinaryOp::Mod, xHalf);
+  printLiteral("denominator-mod-rational", sym::collectDenominator(modQuarter));
 
   auto rangeAssumption = sym::rangeAssumption(store, "x", 0, 31);
   if (failed(rangeAssumption)) {

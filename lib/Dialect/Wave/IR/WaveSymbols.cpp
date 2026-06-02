@@ -820,33 +820,64 @@ mlir::wave::sym::getIntegerLiteralValue(ExprHandle value) {
   return std::nullopt;
 }
 
+static bool hasUnitDenominator(ExprKind kind) {
+  return kind == ExprKind::Integer || kind == ExprKind::Symbol ||
+         kind == ExprKind::Floor || kind == ExprKind::Ceil;
+}
+
+static std::optional<int64_t> collectRationalDenominator(ExprView view) {
+  std::optional<RationalLiteral> rational = view.getRational();
+  if (!rational)
+    return std::nullopt;
+  return rational->denominator > 0 ? rational->denominator : 1;
+}
+
+static std::optional<int64_t> collectAddDenominator(ExprView view) {
+  std::optional<int64_t> d = collectDenominator(view.getAddConstant());
+  for (uint32_t i = 0, e = view.getAddTermCount(); i != e; ++i) {
+    AddTerm term = view.getAddTerm(i);
+    d = checkedLCM(d, collectDenominator(term.coefficient));
+    d = checkedLCM(d, collectDenominator(term.term));
+  }
+  return d;
+}
+
+static std::optional<int64_t> collectMulDenominator(ExprView view) {
+  std::optional<int64_t> d = collectDenominator(view.getMulCoefficient());
+  for (uint32_t i = 0, e = view.getMulFactorCount(); i != e; ++i)
+    d = checkedLCM(d, collectDenominator(view.getMulFactor(i).base));
+  return d;
+}
+
+static std::optional<int64_t> collectBinaryLCMDenominator(ExprView view) {
+  return checkedLCM(collectDenominator(view.getBinaryLhs()),
+                    collectDenominator(view.getBinaryRhs()));
+}
+
+static std::optional<int64_t> collectXorDenominator(ExprView view) {
+  std::optional<int64_t> lhs = collectDenominator(view.getBinaryLhs());
+  std::optional<int64_t> rhs = collectDenominator(view.getBinaryRhs());
+  if (!lhs || !rhs || *lhs != 1 || *rhs != 1)
+    return std::nullopt;
+  return 1;
+}
+
 std::optional<int64_t> mlir::wave::sym::collectDenominator(ExprHandle value) {
   ExprView view(value);
   ExprKind kind = view.getKind();
-  if (kind == ExprKind::Invalid)
-    return std::nullopt;
-  if (kind == ExprKind::Rational) {
-    std::optional<RationalLiteral> rational = view.getRational();
-    if (!rational)
-      return std::nullopt;
-    return rational->denominator > 0 ? rational->denominator : 1;
-  }
-  if (kind == ExprKind::Add) {
-    std::optional<int64_t> d = collectDenominator(view.getAddConstant());
-    for (uint32_t i = 0, e = view.getAddTermCount(); i != e; ++i) {
-      AddTerm term = view.getAddTerm(i);
-      d = checkedLCM(d, collectDenominator(term.coefficient));
-      d = checkedLCM(d, collectDenominator(term.term));
-    }
-    return d;
-  }
-  if (kind == ExprKind::Mul) {
-    std::optional<int64_t> d = collectDenominator(view.getMulCoefficient());
-    for (uint32_t i = 0, e = view.getMulFactorCount(); i != e; ++i)
-      d = checkedLCM(d, collectDenominator(view.getMulFactor(i).base));
-    return d;
-  }
-  return 1;
+  if (hasUnitDenominator(kind))
+    return 1;
+  if (kind == ExprKind::Rational)
+    return collectRationalDenominator(view);
+  if (kind == ExprKind::Add)
+    return collectAddDenominator(view);
+  if (kind == ExprKind::Mul)
+    return collectMulDenominator(view);
+  if (kind == ExprKind::Max || kind == ExprKind::Min || kind == ExprKind::Mod)
+    return collectBinaryLCMDenominator(view);
+  if (kind == ExprKind::Xor)
+    return collectXorDenominator(view);
+  return std::nullopt;
 }
 
 void mlir::wave::sym::walkSymbolNames(

@@ -12,6 +12,7 @@
 // Expansion, denominator-LCM, and u32 range wrappers stay behind WaveSymbols.
 // CHECK: expanded-product: 2 + 3*x + x**2
 // CHECK: denominator-lcm: 4
+// CHECK: denominator-mod-rational: 4
 // CHECK: fits-u32: true
 // CHECK: fits-u32-unbounded: false
 

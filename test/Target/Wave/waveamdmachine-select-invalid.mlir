@@ -192,6 +192,30 @@ func.func @index_expr_byte_scale_overflow(%out: !wave.ptr<#wave.global, i32>) at
 // -----
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
+func.func @floor_dynamic_denominator_buffer(%out: !wave.ptr<#wave.global, i32>,
+                                            %u_raw: i32) attributes {wave.kernel} {
+  %lane_raw = wave.lane_id : !wave.simd<i32, 32>
+  %lane = wave.assume_range %lane_raw, [0, 31] : !wave.simd<i32, 32>
+  %u = wave.assume_range %u_raw, [1, 31] : i32
+  %range = arith.constant 4096 : i32
+  %buf = waveamd.make_buffer %out, %range
+      : !wave.ptr<#wave.global, i32>, i32 -> !wave.ptr<#waveamd.buffer, i32>
+  %off = wave.index_expr <"floor(lid/u)"> ["lid", "u"](%lane, %u)
+      : (!wave.simd<i32, 32>, i32) -> !wave.simd<index, 32>
+  %ptrs = wave.ptr_add %buf, %off
+      : !wave.ptr<#waveamd.buffer, i32>, !wave.simd<index, 32>
+      -> !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 32>
+  // expected-error @below {{wave.index_expr floor needs a static denominator}}
+  %tok = wave.store %lane -> %ptrs
+      : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 32>)
+      -> !wave.mem.token
+  return
+}
+}
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 func.func @buffer_store_offset_overflow(%out: !wave.ptr<#wave.global, i32>) attributes {wave.kernel} {
   %range = arith.constant 64 : i32
   %buf = waveamd.make_buffer %out, %range
