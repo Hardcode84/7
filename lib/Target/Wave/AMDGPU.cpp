@@ -688,8 +688,9 @@ private:
                                           slot.offset, slot.size,
                                           slot.isGlobalBuffer});
       }
+      if (failed(emitKernelDescriptor(func)))
+        return failure();
       kernels.push_back(info);
-      emitKernelDescriptor(func);
     }
     return success();
   }
@@ -701,7 +702,22 @@ private:
     return waveamd::getKernargSegmentSize(func.getFunctionType().getInputs());
   }
 
-  void emitKernelDescriptor(func::FuncOp func) {
+  LogicalResult
+  verifyKernelDescriptor(func::FuncOp func,
+                         const wave::WaveAMDKernelEntryRegs &entryRegs) const {
+    unsigned maxUserSGPRs = llvm::AMDGPU::getMaxNumUserSGPRs(*sti);
+    if (entryRegs.userSGPRCount > maxUserSGPRs)
+      return func.emitError("wave-to-amdgpu-asm kernarg preload consumes ")
+             << entryRegs.userSGPRCount << " user SGPRs, but target supports "
+             << maxUserSGPRs;
+    if (entryRegs.kernargPreloadDwords != 0 &&
+        entryRegs.kernargPreloadOffsetDwords >= 1024)
+      return func.emitError("wave-to-amdgpu-asm kernarg preload offset must be "
+                            "less than 1024 dwords");
+    return success();
+  }
+
+  LogicalResult emitKernelDescriptor(func::FuncOp func) {
     unsigned kernargSize = getKernelArgSize(func);
     unsigned sgprCount = getIntAttr(func, "waveamdmachine.sgpr_count", 6);
     unsigned vgprCount = getIntAttr(func, "waveamdmachine.vgpr_count", 1);
@@ -716,6 +732,9 @@ private:
       if (isa<waveamdmachine::SWorkgroupIdZOp>(op))
         usesWgZ = true;
     });
+    if (failed(verifyKernelDescriptor(func, entryRegs)))
+      return failure();
+
     os << "\t.section\t.rodata,\"a\",@progbits\n";
     os << "\t.p2align\t6, 0x0\n";
     os << "\t.amdhsa_kernel " << func.getSymName() << "\n";
@@ -725,6 +744,12 @@ private:
     os << "\t\t.amdhsa_user_sgpr_count " << entryRegs.userSGPRCount << "\n";
     os << "\t\t.amdhsa_user_sgpr_kernarg_segment_ptr "
        << (entryRegs.kernargSegmentPtrWidth != 0 ? 1 : 0) << "\n";
+    if (entryRegs.kernargPreloadDwords != 0) {
+      os << "\t\t.amdhsa_user_sgpr_kernarg_preload_length "
+         << entryRegs.kernargPreloadDwords << "\n";
+      os << "\t\t.amdhsa_user_sgpr_kernarg_preload_offset "
+         << entryRegs.kernargPreloadOffsetDwords << "\n";
+    }
     if (!isGfx8Or9() && wavefrontSize == 32) {
       os << "\t\t.amdhsa_wavefront_size32 1\n";
       os << "\t\t.amdhsa_uses_dynamic_stack 0\n";
@@ -772,6 +797,7 @@ private:
     os << "\t.set .L" << func.getSymName() << ".has_dyn_sized_stack, 0\n";
     os << "\t.set .L" << func.getSymName() << ".has_recursion, 0\n";
     os << "\t.set .L" << func.getSymName() << ".has_indirect_call, 0\n";
+    return success();
   }
 
   void emitMetadata() {

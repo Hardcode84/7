@@ -25,6 +25,9 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
 // ASM: .amdhsa_kernel kernarg_layout
 // ASM: .amdhsa_kernarg_size 40
+// ASM: .amdhsa_user_sgpr_kernarg_segment_ptr 1
+// ASM-NOT: .amdhsa_user_sgpr_kernarg_preload_length
+// ASM: .amdhsa_system_sgpr_workgroup_id_x
 // ASM: .name:           arg0
 // ASM-NEXT: .offset:         0
 // ASM-NEXT: .size:           4
