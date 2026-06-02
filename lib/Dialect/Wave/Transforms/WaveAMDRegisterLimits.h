@@ -10,6 +10,7 @@
 #define MLIR_DIALECT_WAVE_TRANSFORMS_WAVEAMDREGISTERLIMITS_H
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/Wave/Transforms/WaveAMDEntryRegs.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/Operation.h"
 #include "mlir/Support/LLVM.h"
@@ -28,8 +29,6 @@ struct WaveAMDRegisterLimits {
 };
 
 FailureOr<WaveAMDRegisterLimits> getWaveAMDRegisterLimits(Operation *op);
-unsigned getWaveAMDReservedSGPRs(func::FuncOp func);
-unsigned getWaveAMDReservedVGPRs(func::FuncOp func);
 unsigned getEffectiveWaveAMDRegisterBudget(unsigned budget, unsigned reserved);
 unsigned getMaxWaveAMDRegisterBudgetForWaves(ArrayRef<unsigned> budgets,
                                              unsigned targetWaves);

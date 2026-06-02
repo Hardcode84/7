@@ -23,6 +23,7 @@
 #include "mlir/Dialect/Wave/IR/WaveAMDABI.h"
 #include "mlir/Dialect/Wave/IR/WaveMeta.h"
 #include "mlir/Dialect/Wave/IR/WaveSymbols.h"
+#include "mlir/Dialect/Wave/Transforms/WaveAMDEntryRegs.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachine.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineTarget.h"
 #include "mlir/IR/Builders.h"
@@ -1423,25 +1424,16 @@ LogicalResult WaveAMDMachineSelector::selectReadCycles(ReadCyclesOp op) {
 }
 
 LogicalResult WaveAMDMachineSelector::selectWorkgroupId(WorkgroupIdOp op) {
-  int64_t sgprIndex;
-  switch (op.getAxis()) {
-  case 0:
-    sgprIndex = 2;
-    break;
-  case 1:
-    sgprIndex = 3;
-    break;
-  case 2:
-    sgprIndex = 4;
-    break;
-  default:
+  unsigned axis = op.getAxis();
+  if (axis > 2)
     return op.emitError("workgroup_id axis must be 0, 1, or 2");
-  }
+  WaveAMDKernelEntryRegs entryRegs = getWaveAMDKernelEntryRegs(func);
+  unsigned sgprIndex = entryRegs.workgroupIdSGPR(axis);
   Type pinned =
       getPinnedRegType(op.getContext(), waveamdmachine::RegClass::SGPR,
                        /*width=*/1, sgprIndex);
   Value result;
-  switch (op.getAxis()) {
+  switch (axis) {
   case 0:
     result =
         waveamdmachine::SWorkgroupIdXOp::create(builder, op.getLoc(), pinned);
@@ -1467,7 +1459,8 @@ LogicalResult WaveAMDMachineSelector::selectWorkitemId(WorkitemIdOp op) {
   values[op.getResult()] = waveamdmachine::VWorkitemIdXOp::create(
       builder, op.getLoc(),
       getPinnedRegType(op.getContext(), waveamdmachine::RegClass::VGPR,
-                       /*width=*/1, /*index=*/0));
+                       /*width=*/1,
+                       getWaveAMDKernelEntryRegs(func).workitemIdXVGPR));
   eraseIfTopLevel(op);
   return success();
 }

@@ -419,11 +419,7 @@ def WaveAMDMachine_VMbcntHiOp
                                  WaveAMDMachine_VGPR1,
                                  [WaveAMDMachine_VALU, Pure]>;
 
-// Preloaded workgroup ids live in fixed SGPRs (s2..s4 on RDNA3 when the
-// kernel descriptor requests them). The selector materializes these ops
-// with their result RegType pinned to the right physical index; the asm
-// printer emits nothing because the value is already in the register on
-// kernel entry.
+// Descriptor-loaded workgroup ids live in layout-assigned system SGPRs.
 def WaveAMDMachine_SWorkgroupIdXOp
     : WaveAMDMachine_ZeroOperandResult<"s_workgroup_id_x", WaveAMDMachine_SGPR1,
                                        [WaveAMDMachine_NoMachineInst, Pure]>;
@@ -434,8 +430,7 @@ def WaveAMDMachine_SWorkgroupIdZOp
     : WaveAMDMachine_ZeroOperandResult<"s_workgroup_id_z", WaveAMDMachine_SGPR1,
                                        [WaveAMDMachine_NoMachineInst, Pure]>;
 
-// Preloaded workitem id (packed) lives in `v0`. Only the X half is
-// exposed today; Y/Z would need additional descriptor flags.
+// Packed workitem id X lives in layout-assigned entry VGPR.
 def WaveAMDMachine_VWorkitemIdXOp
     : WaveAMDMachine_ZeroOperandResult<"v_workitem_id_x", WaveAMDMachine_VGPR1,
                                        [WaveAMDMachine_NoMachineInst, Pure]>;

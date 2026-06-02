@@ -10,6 +10,7 @@
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Wave/IR/WaveAMDABI.h"
+#include "mlir/Dialect/Wave/Transforms/WaveAMDEntryRegs.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachine.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
@@ -104,7 +105,9 @@ private:
 
   static LogicalResult lowerArgOp(Operation &op,
                                   ArrayRef<waveamd::KernargSlot> layout,
-                                  TypeRange argTypes, OpBuilder &builder) {
+                                  TypeRange argTypes,
+                                  const wave::WaveAMDKernelEntryRegs &entryRegs,
+                                  OpBuilder &builder) {
     auto info = validateArgOp(op);
     if (failed(info))
       return failure();
@@ -132,9 +135,11 @@ private:
 
     builder.setInsertionPoint(&op);
     Value offsetImm = createImm(builder, op.getLoc(), slot.offset);
+    std::string base = wave::getWaveAMDSGPRName(
+        entryRegs.kernargSegmentPtrSGPR, entryRegs.kernargSegmentPtrWidth);
     Value loaded =
         createKernArgLoad(builder, op.getLoc(), op.getResult(0).getType(),
-                          offsetImm, regType.getWidth(), "s[0:1]");
+                          offsetImm, regType.getWidth(), base);
     op.getResult(0).replaceAllUsesWith(loaded);
     op.erase();
     return success();
@@ -144,10 +149,12 @@ private:
     TypeRange argTypes = func.getFunctionType().getInputs();
     SmallVector<waveamd::KernargSlot> layout =
         waveamd::getKernargLayout(argTypes);
+    wave::WaveAMDKernelEntryRegs entryRegs =
+        wave::getWaveAMDKernelEntryRegs(func);
     for (Operation &op : llvm::make_early_inc_range(func.getBody().front())) {
       if (!isa<waveamdmachine::ArgOp>(op))
         continue;
-      if (failed(lowerArgOp(op, layout, argTypes, builder)))
+      if (failed(lowerArgOp(op, layout, argTypes, entryRegs, builder)))
         return failure();
     }
     unsigned kernargSize = waveamd::getKernargSegmentSize(argTypes);

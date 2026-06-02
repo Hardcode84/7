@@ -202,7 +202,7 @@ func.func @long_blocker_no_monotonic_cursor() {
 // -----
 
 // =============================================================
-// 8. SGPR kernel preload reserves five registers (s0..s4). The
+// 8. SGPR kernel entry reserves five registers (s0..s4). The
 // first allocatable SGPR is s5, not s0. Mirrors the v0 reservation
 // on the VGPR side but with a wider prefix.
 // =============================================================
@@ -211,6 +211,25 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // CHECK-LABEL: func.func @sgpr_kernel_reserves_first_five
 // CHECK: %{{.+}} = waveamdmachine.s_mov_b32_tuple {{.*}} : (!waveamdmachine.imm) -> !waveamdmachine.reg<sgpr, 1, 5>
 func.func @sgpr_kernel_reserves_first_five() attributes {wave.kernel} {
+  %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+  %s = waveamdmachine.s_mov_b32_tuple %zero {registers = 1 : i64} : (!waveamdmachine.imm) -> !waveamdmachine.reg<sgpr, 1>
+  return
+}
+
+}
+
+// -----
+
+// =============================================================
+// 8b. Kernarg preload dwords extend the user-SGPR prefix. Two
+// preloaded dwords shift first allocatable SGPR from s5 to s7.
+// =============================================================
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
+
+// CHECK-LABEL: func.func @kernarg_preload_reserves_extra_user_sgprs
+// CHECK: %{{.+}} = waveamdmachine.s_mov_b32_tuple {{.*}} : (!waveamdmachine.imm) -> !waveamdmachine.reg<sgpr, 1, 7>
+func.func @kernarg_preload_reserves_extra_user_sgprs()
+    attributes {wave.kernel, waveamdmachine.kernarg_preload_length = 2 : i64} {
   %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
   %s = waveamdmachine.s_mov_b32_tuple %zero {registers = 1 : i64} : (!waveamdmachine.imm) -> !waveamdmachine.reg<sgpr, 1>
   return

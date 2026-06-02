@@ -94,8 +94,7 @@ inline LogicalResult emitBufferAddressFieldError(Operation *op) {
                        "for bounded offsets");
 }
 
-// Pinned variant: the resulting register's physical index is fixed up
-// front (HSA-loader-preloaded SGPRs s2..s4, workitem_id VGPR v0, ...).
+// Pinned entry/live-in registers bypass normal allocation.
 inline mlir::waveamdmachine::RegType
 getPinnedRegType(MLIRContext *ctx, mlir::waveamdmachine::RegClass cls,
                  unsigned width, int64_t index) {

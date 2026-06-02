@@ -11,15 +11,74 @@
 #include "Utils/AMDGPUBaseInfo.h"
 #include "mlir/Dialect/Wave/IR/Wave.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineTarget.h"
+#include "llvm/ADT/Twine.h"
 #include "llvm/MC/MCSubtargetInfo.h"
 #include "llvm/MC/TargetRegistry.h"
 #include "llvm/Support/TargetSelect.h"
 #include "llvm/TargetParser/TargetParser.h"
 #include "llvm/TargetParser/Triple.h"
 
+#include <limits>
+
 using namespace mlir;
 
 namespace mlir::wave {
+
+StringRef getWaveAMDKernargPreloadLengthAttrName() {
+  return "waveamdmachine.kernarg_preload_length";
+}
+
+StringRef getWaveAMDKernargPreloadOffsetAttrName() {
+  return "waveamdmachine.kernarg_preload_offset";
+}
+
+static unsigned getUnsignedIntegerAttr(Operation *op, StringRef name) {
+  auto attr = op->getAttrOfType<IntegerAttr>(name);
+  if (!attr)
+    return 0;
+  int64_t value = attr.getInt();
+  if (value <= 0)
+    return 0;
+  if (value > std::numeric_limits<unsigned>::max())
+    return std::numeric_limits<unsigned>::max();
+  return static_cast<unsigned>(value);
+}
+
+WaveAMDKernelEntryRegs getWaveAMDKernelEntryRegs(func::FuncOp func) {
+  WaveAMDKernelEntryRegs regs;
+  if (!func || !func->hasAttr(wave::WaveDialect::getKernelAttrName()))
+    return regs;
+
+  regs.kernargSegmentPtrSGPR = 0;
+  regs.kernargSegmentPtrWidth = 2;
+  regs.kernargPreloadDwords = getUnsignedIntegerAttr(
+      func.getOperation(), getWaveAMDKernargPreloadLengthAttrName());
+  regs.userSGPRCount = regs.kernargSegmentPtrWidth + regs.kernargPreloadDwords;
+
+  unsigned workgroupBase = regs.userSGPRCount;
+  regs.workgroupIdSGPRs = {workgroupBase, workgroupBase + 1, workgroupBase + 2};
+  regs.reservedSGPRs = regs.userSGPRCount + regs.workgroupIdSGPRs.size();
+  regs.workitemIdXVGPR = 0;
+  regs.reservedVGPRs = 1;
+  return regs;
+}
+
+unsigned getWaveAMDReservedSGPRs(func::FuncOp func) {
+  return getWaveAMDKernelEntryRegs(func).reservedSGPRs;
+}
+
+unsigned getWaveAMDReservedVGPRs(func::FuncOp func) {
+  return getWaveAMDKernelEntryRegs(func).reservedVGPRs;
+}
+
+std::string getWaveAMDSGPRName(unsigned index, unsigned width) {
+  assert(width > 0 && "SGPR tuple must be non-empty");
+  if (width == 1)
+    return ("s" + llvm::Twine(index)).str();
+  return ("s[" + llvm::Twine(index) + ":" + llvm::Twine(index + width - 1) +
+          "]")
+      .str();
+}
 
 static FailureOr<std::unique_ptr<llvm::MCSubtargetInfo>>
 createSubtargetInfo(Operation *op) {
@@ -78,16 +137,6 @@ FailureOr<WaveAMDRegisterLimits> getWaveAMDRegisterLimits(Operation *op) {
         sti->get(), waves, /*DynamicVGPRBlockSize=*/0);
   }
   return limits;
-}
-
-unsigned getWaveAMDReservedSGPRs(func::FuncOp func) {
-  // Kernel ABI preloads kernarg + workgroup ids in s[0:4].
-  return func->hasAttr(wave::WaveDialect::getKernelAttrName()) ? 5 : 0;
-}
-
-unsigned getWaveAMDReservedVGPRs(func::FuncOp func) {
-  // Kernel ABI preloads packed workitem id in v0.
-  return func->hasAttr(wave::WaveDialect::getKernelAttrName()) ? 1 : 0;
 }
 
 unsigned getEffectiveWaveAMDRegisterBudget(unsigned budget, unsigned reserved) {

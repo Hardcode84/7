@@ -19,6 +19,7 @@
 #include "mlir/Dialect/Wave/IR/WaveAMD.h"
 #include "mlir/Dialect/Wave/IR/WaveAMDABI.h"
 #include "mlir/Dialect/Wave/Transforms/Passes.h"
+#include "mlir/Dialect/Wave/Transforms/WaveAMDEntryRegs.h"
 #include "mlir/Dialect/Wave/Transforms/WaveAMDRegAllocVerification.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachine.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineTarget.h"
@@ -703,6 +704,8 @@ private:
     unsigned ldsSize = getIntAttr(func, "waveamdmachine.lds_size", 0);
     bool usesWgY = false;
     bool usesWgZ = false;
+    wave::WaveAMDKernelEntryRegs entryRegs =
+        wave::getWaveAMDKernelEntryRegs(func);
     func.walk([&](Operation *op) {
       if (isa<waveamdmachine::SWorkgroupIdYOp>(op))
         usesWgY = true;
@@ -715,8 +718,9 @@ private:
     os << "\t\t.amdhsa_group_segment_fixed_size " << ldsSize << "\n";
     os << "\t\t.amdhsa_private_segment_fixed_size 0\n";
     os << "\t\t.amdhsa_kernarg_size " << kernargSize << "\n";
-    os << "\t\t.amdhsa_user_sgpr_count 2\n";
-    os << "\t\t.amdhsa_user_sgpr_kernarg_segment_ptr 1\n";
+    os << "\t\t.amdhsa_user_sgpr_count " << entryRegs.userSGPRCount << "\n";
+    os << "\t\t.amdhsa_user_sgpr_kernarg_segment_ptr "
+       << (entryRegs.kernargSegmentPtrWidth != 0 ? 1 : 0) << "\n";
     if (!isGfx8Or9() && wavefrontSize == 32) {
       os << "\t\t.amdhsa_wavefront_size32 1\n";
       os << "\t\t.amdhsa_uses_dynamic_stack 0\n";
@@ -1204,11 +1208,7 @@ private:
             waveamdmachine::TokenOp, waveamdmachine::TokenJoinOp,
             waveamdmachine::WaitOp>(&op))
       return success();
-    // Preloaded values delivered by the HSA loader: the SSA value already
-    // lives in its pinned register (s2/s3/s4 or v0) at kernel entry, so
-    // there is nothing to emit here. The descriptor flips the matching
-    // `.amdhsa_system_sgpr_workgroup_id_*` / `.amdhsa_system_vgpr_workitem_id`
-    // bits to make the loader perform the preload.
+    // HSA loader delivered these into pinned entry registers.
     if (isa<waveamdmachine::SWorkgroupIdXOp, waveamdmachine::SWorkgroupIdYOp,
             waveamdmachine::SWorkgroupIdZOp, waveamdmachine::VWorkitemIdXOp>(
             &op))
