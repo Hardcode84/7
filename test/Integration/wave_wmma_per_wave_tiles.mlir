@@ -24,6 +24,12 @@
 //
 // N2: CPU comparison passed
 //
+// f16 C output: CPU reference is rounded to f16 before comparison.
+// RUN: %python %S/../../examples/wave/wmma_matmul_tiled.py --chip=%chip --m=16 --n=16 --k=32 --bm=1 --bn=1 --use-buffer --output-type=f16 --compare-cpu --seed=13 \
+// RUN:   | FileCheck %s --check-prefix=F16OUT
+//
+// F16OUT: CPU comparison passed
+//
 // K=64 with --wave-k-tiles=2 (collapses K loop to a single fragment
 // group, exercises the multi-K-step LDS slot layout):
 // RUN: %python %S/../../examples/wave/wmma_matmul_tiled.py --chip=%chip --m=32 --n=32 --k=64 --bm=1 --bn=1 --wave-m-tiles=2 --wave-n-tiles=2 --wave-k-tiles=2 --use-buffer --compare-cpu --seed=11 \

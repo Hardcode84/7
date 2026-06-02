@@ -160,6 +160,8 @@ def build_example_args(args: argparse.Namespace, chip: str) -> list[str]:
         cmd.append("--use-dma-lds")
     if args.matrix_intrinsic != "auto":
         cmd.append(f"--matrix-intrinsic={args.matrix_intrinsic}")
+    if args.output_type != "f32":
+        cmd.append(f"--output-type={args.output_type}")
     if args.target_waves:
         cmd.append(f"--target-waves={args.target_waves}")
     return cmd
@@ -506,6 +508,8 @@ def run_hw(
         str(args.wave_n_tiles),
         "--wave-k-tiles",
         str(args.wave_k_tiles),
+        "--c-type",
+        args.output_type,
         "--iters",
         str(args.iters),
         "--warmup",
@@ -627,6 +631,7 @@ def build_argparser() -> argparse.ArgumentParser:
         choices=("auto", "wmma", "mfma", "mfma_gfx950"),
         default="auto",
     )
+    ap.add_argument("--output-type", choices=("f32", "f16"), default="f32")
     ap.add_argument("--iters", type=int, default=1000)
     ap.add_argument("--warmup", type=int, default=10)
     ap.add_argument(

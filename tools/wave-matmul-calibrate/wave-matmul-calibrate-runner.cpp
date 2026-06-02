@@ -19,6 +19,8 @@
 
 namespace {
 
+enum class CType { F32, F16 };
+
 struct Args {
   const char *hsaco = nullptr;
   const char *kernel = nullptr;
@@ -30,6 +32,7 @@ struct Args {
   int waveMTiles = 1;
   int waveNTiles = 1;
   int waveKTiles = 1;
+  CType cType = CType::F32;
   int iters = 1000;
   int warmupIters = 10;
   bool checkOutput = true;
@@ -52,6 +55,7 @@ static void usage() {
               "  --wave-m-tiles N       per-wave M tiles (default 1)\n"
               "  --wave-n-tiles N       per-wave N tiles (default 1)\n"
               "  --wave-k-tiles N       per-wave K tiles (default 1)\n"
+              "  --c-type f32|f16       output element type (default f32)\n"
               "  --iters N              launch iterations (default 1000)\n"
               "  --warmup N             warmup launches (default 10)\n"
               "  --no-check             skip all-ones output check\n");
@@ -84,6 +88,17 @@ static void setWaveNTiles(Args &a, const char *v) {
 static void setWaveKTiles(Args &a, const char *v) {
   a.waveKTiles = parseInt(v);
 }
+static void setCType(Args &a, const char *v) {
+  if (std::strcmp(v, "f32") == 0) {
+    a.cType = CType::F32;
+    return;
+  }
+  if (std::strcmp(v, "f16") == 0) {
+    a.cType = CType::F16;
+    return;
+  }
+  die("bad --c-type; expected f32 or f16");
+}
 static void setIters(Args &a, const char *v) { a.iters = parseInt(v); }
 static void setWarmup(Args &a, const char *v) { a.warmupIters = parseInt(v); }
 
@@ -96,6 +111,7 @@ static constexpr FlagHandler kFlags[] = {
     {"--wave-m-tiles", setWaveMTiles},
     {"--wave-n-tiles", setWaveNTiles},
     {"--wave-k-tiles", setWaveKTiles},
+    {"--c-type", setCType},
     {"--iters", setIters},
     {"--warmup", setWarmup},
 };
@@ -190,12 +206,41 @@ static int divExact(int num, int den, const char *what) {
   return num / den;
 }
 
-static void validateOutput(const std::vector<float> &hostC, int k) {
+static float halfToFloat(uint16_t h) {
+  uint32_t sign = (static_cast<uint32_t>(h & 0x8000)) << 16;
+  uint32_t exp = (h >> 10) & 0x1f;
+  uint32_t mant = h & 0x03ff;
+  uint32_t bits = 0;
+  if (exp == 0) {
+    if (mant == 0) {
+      bits = sign;
+    } else {
+      exp = 1;
+      while ((mant & 0x0400) == 0) {
+        mant <<= 1;
+        --exp;
+      }
+      mant &= 0x03ff;
+      bits = sign | ((exp + 112) << 23) | (mant << 13);
+    }
+  } else if (exp == 0x1f) {
+    bits = sign | 0x7f800000 | (mant << 13);
+  } else {
+    bits = sign | ((exp + 112) << 23) | (mant << 13);
+  }
+  float out;
+  std::memcpy(&out, &bits, sizeof(out));
+  return out;
+}
+
+template <typename ReadFn>
+static void validateOutput(int elements, int k, ReadFn readValue) {
   double worst = 0.0;
   int worstIdx = -1;
   double expected = static_cast<double>(k);
-  for (int i = 0, e = static_cast<int>(hostC.size()); i < e; ++i) {
-    double diff = std::fabs(static_cast<double>(hostC[i]) - expected);
+  for (int i = 0; i < elements; ++i) {
+    double got = static_cast<double>(readValue(i));
+    double diff = std::fabs(got - expected);
     if (diff > worst) {
       worst = diff;
       worstIdx = i;
@@ -205,12 +250,34 @@ static void validateOutput(const std::vector<float> &hostC, int k) {
     std::fprintf(stderr,
                  "output_check: failed index=%d expected=%.6f got=%.6f "
                  "abs_diff=%.6f\n",
-                 worstIdx, expected, static_cast<double>(hostC[worstIdx]),
+                 worstIdx, expected, static_cast<double>(readValue(worstIdx)),
                  worst);
     std::exit(1);
   }
   std::printf("output_check: passed max_abs_diff=%.6f index=%d\n", worst,
               worstIdx);
+}
+
+static const char *getCTypeName(CType type) {
+  return type == CType::F16 ? "f16" : "f32";
+}
+
+static void copyAndCheckOutput(void *deviceC, size_t cBytes, int cElements,
+                               const Args &a) {
+  if (!a.checkOutput)
+    return;
+  if (a.cType == CType::F16) {
+    std::vector<uint16_t> hostC(cElements);
+    checkHip(hipMemcpy(hostC.data(), deviceC, cBytes, hipMemcpyDeviceToHost),
+             "hipMemcpy C");
+    validateOutput(cElements, a.k,
+                   [&](int i) { return halfToFloat(hostC[i]); });
+    return;
+  }
+  std::vector<float> hostC(cElements);
+  checkHip(hipMemcpy(hostC.data(), deviceC, cBytes, hipMemcpyDeviceToHost),
+           "hipMemcpy C");
+  validateOutput(cElements, a.k, [&](int i) { return hostC[i]; });
 }
 
 } // namespace
@@ -236,21 +303,23 @@ int main(int argc, char **argv) {
 
   std::vector<uint16_t> hostA(static_cast<size_t>(a.m) * a.k, 0x3c00);
   std::vector<uint16_t> hostB(static_cast<size_t>(a.n) * a.k, 0x3c00);
-  std::vector<float> hostC(static_cast<size_t>(a.m) * a.n, 0.0f);
+  int cElements = a.m * a.n;
+  size_t cBytes = static_cast<size_t>(cElements) *
+                  (a.cType == CType::F16 ? sizeof(uint16_t) : sizeof(float));
 
   uint16_t *deviceA = nullptr;
   uint16_t *deviceB = nullptr;
-  float *deviceC = nullptr;
+  void *deviceC = nullptr;
   checkHip(hipMalloc(&deviceA, hostA.size() * sizeof(uint16_t)), "hipMalloc A");
   checkHip(hipMalloc(&deviceB, hostB.size() * sizeof(uint16_t)), "hipMalloc B");
-  checkHip(hipMalloc(&deviceC, hostC.size() * sizeof(float)), "hipMalloc C");
+  checkHip(hipMalloc(&deviceC, cBytes), "hipMalloc C");
   checkHip(hipMemcpy(deviceA, hostA.data(), hostA.size() * sizeof(uint16_t),
                      hipMemcpyHostToDevice),
            "hipMemcpy A");
   checkHip(hipMemcpy(deviceB, hostB.data(), hostB.size() * sizeof(uint16_t),
                      hipMemcpyHostToDevice),
            "hipMemcpy B");
-  checkHip(hipMemset(deviceC, 0, hostC.size() * sizeof(float)), "hipMemset C");
+  checkHip(hipMemset(deviceC, 0, cBytes), "hipMemset C");
 
   void *kernelArgs[] = {&deviceA, &deviceB, &deviceC, &tripCount};
 
@@ -276,10 +345,6 @@ int main(int argc, char **argv) {
   double perLaunchUs = (elapsedMs * 1000.0) / a.iters;
   double perLaunchCycles = perLaunchUs * (clockHz / 1e6);
 
-  checkHip(hipMemcpy(hostC.data(), deviceC, hostC.size() * sizeof(float),
-                     hipMemcpyDeviceToHost),
-           "hipMemcpy C");
-
   std::printf("device: %s (%s) shader_clock_mhz=%.0f\n", props.name,
               props.gcnArchName, clockMHz);
   std::printf("kernel: %s\n", a.kernel);
@@ -287,6 +352,7 @@ int main(int argc, char **argv) {
               "wave_n_tiles=%d wave_k_tiles=%d\n",
               a.m, a.n, a.k, a.bm, a.bn, a.waveMTiles, a.waveNTiles,
               a.waveKTiles);
+  std::printf("c_type: %s\n", getCTypeName(a.cType));
   std::printf("grid: %d,%d,1 block: %d,1,1 waves_per_workgroup=%d\n", blocksX,
               blocksY, blockThreads, a.bm * a.bn);
   std::printf("loop_trip_count: %d\n", tripCount);
@@ -294,8 +360,7 @@ int main(int argc, char **argv) {
   std::printf("total_ms: %.3f\n", elapsedMs);
   std::printf("per_launch_us: %.3f\n", perLaunchUs);
   std::printf("per_launch_cycles_wallclock: %.0f\n", perLaunchCycles);
-  if (a.checkOutput)
-    validateOutput(hostC, a.k);
+  copyAndCheckOutput(deviceC, cBytes, cElements, a);
 
   checkHip(hipFree(deviceA), "hipFree A");
   checkHip(hipFree(deviceB), "hipFree B");

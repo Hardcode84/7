@@ -62,6 +62,9 @@ _GFX950_SW_PIPELINE = {
     "matrix_intrinsic": "mfma_gfx950",
 }
 
+_DEFAULT_ATOL = 1.0e-3
+_DEFAULT_RTOL = 1.0e-3
+
 
 def _add_shape_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
@@ -153,6 +156,12 @@ def _add_codegen_args(parser: argparse.ArgumentParser) -> None:
         default=0,
         help="stamp waveamdmachine.target_waves on the kernel; 0 omits it",
     )
+    parser.add_argument(
+        "--output-type",
+        choices=("f32", "f16"),
+        default="f32",
+        help="output element type for C",
+    )
 
 
 def _add_runner_args(parser: argparse.ArgumentParser) -> None:
@@ -161,7 +170,7 @@ def _add_runner_args(parser: argparse.ArgumentParser) -> None:
         action="store_true",
         help="fill A/B with deterministic pseudo-random f16 values",
     )
-    add_execution_args(parser, default_atol=1.0e-3, default_rtol=1.0e-3)
+    add_execution_args(parser, default_atol=_DEFAULT_ATOL, default_rtol=_DEFAULT_RTOL)
 
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:
@@ -251,6 +260,7 @@ def main(argv: list[str] | None = None) -> int:
         use_buffer=args.use_buffer,
         use_dma_lds=args.use_dma_lds,
         matrix_intrinsic=matrix_intrinsic,
+        output_type=args.output_type,
         random_data=random_data,
         random_seed=args.seed,
         target_waves=args.target_waves or None,
@@ -286,6 +296,7 @@ def main(argv: list[str] | None = None) -> int:
         random_data=True,
         random_seed=args.seed,
         matrix_intrinsic=matrix_intrinsic,
+        output_type=args.output_type,
     )
     ok, message = _compare_tile_multisets(
         parse_runner_values(output),

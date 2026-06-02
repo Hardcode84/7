@@ -50,11 +50,12 @@ Shape constraints:
 
 from __future__ import annotations
 
+import struct
 from dataclasses import dataclass
 
 from mlir._mlir_libs._waveDialectsNanobind import PTupleType
+from mlir.dialects import wave, waveamd, wavemeta
 from mlir.dialects import wave_dsl as dsl
-from mlir.dialects import wavemeta
 from mlir.ir import (
     DictAttr,
     IndexType,
@@ -114,6 +115,7 @@ class _MatmulConfig:
     use_buffer: bool = False
     use_dma_lds: bool = False
     matrix_intrinsic: str = "wmma"
+    output_type: str = "f32"
     random_data: bool = False
     random_seed: int = 0
 
@@ -134,6 +136,10 @@ class _MatmulConfig:
         # B is laid out in column-major K x N order (== row-major N x K), so
         # lane L's contiguous-16-f16 slice for column j lives at j * K.
         return self.N * self.K
+
+    @property
+    def c_type(self) -> dsl.Type:
+        return dsl.f16() if self.output_type == "f16" else dsl.f32()
 
     @property
     def waves_per_workgroup(self) -> int:
@@ -195,6 +201,8 @@ def _validate_positive_shape(cfg: _MatmulConfig) -> None:
             f"wave_n_tiles={cfg.wave_n_tiles}, "
             f"wave_k_tiles={cfg.wave_k_tiles}"
         )
+    if cfg.output_type not in ("f32", "f16"):
+        raise ValueError(f"output_type must be 'f32' or 'f16'; got {cfg.output_type}")
 
 
 def _validate_tile_shape(cfg: _MatmulConfig) -> None:
@@ -239,6 +247,7 @@ _GPU_MODULE_NAME = "kernels"
 _F16_PTR_HELPER = "wave_memref_to_ptr_global_f16"
 _F32_PTR_HELPER = "wave_memref_to_ptr_global_f32"
 _PRINT_HELPER = "printMemrefF32"
+_PRINT_F16_HELPER = "printMemrefF16"
 _TARGET_WAVES_ATTR = "waveamdmachine.target_waves"
 
 
@@ -263,6 +272,10 @@ def _deterministic_random_values(
         state = (1664525 * state + 1013904223) & 0xFFFFFFFF
         values.append((((state >> 24) % 17) - 8) * 0.25)
     return tuple(values)
+
+
+def _round_f16(value: float) -> float:
+    return float(struct.unpack("<e", struct.pack("<e", value))[0])
 
 
 def generate_wmma_f16_matmul_inputs(
@@ -319,6 +332,7 @@ def compute_wmma_f16_matmul_reference_buffer(
     random_data: bool = False,
     random_seed: int = 0,
     matrix_intrinsic: str = "wmma",
+    output_type: str = "f32",
 ) -> tuple[float, ...]:
     cfg = _MatmulConfig(
         M=M,
@@ -332,6 +346,7 @@ def compute_wmma_f16_matmul_reference_buffer(
         random_data=random_data,
         random_seed=random_seed,
         matrix_intrinsic=matrix_intrinsic,
+        output_type=output_type,
     )
     a_values, b_values = generate_wmma_f16_matmul_inputs(
         M, N, K, random_data=random_data, random_seed=random_seed
@@ -351,6 +366,8 @@ def compute_wmma_f16_matmul_reference_buffer(
                         out.extend(
                             _reference_tile(cfg, a_values, b_values, m_tile, n_tile)
                         )
+    if cfg.output_type == "f16":
+        return tuple(_round_f16(value) for value in out)
     return tuple(out)
 
 
@@ -1028,7 +1045,53 @@ def _store_final_tiles(
 ) -> None:
     final_accs = _emit_mma_grid(bld, cfg, state.afs, state.bfs, state.accs)
     for acc, c_ptr in zip(final_accs, c_ptrs, strict=True):
-        bld.fragment_store(acc, c_ptr)
+        if cfg.output_type == "f16":
+            _fragment_store_f16(bld, cfg, acc, c_ptr)
+        else:
+            bld.fragment_store(acc, c_ptr)
+
+
+def _fragment_store_f16(
+    bld: dsl.FunctionBuilder,
+    cfg: _MatmulConfig,
+    fragment: dsl.Value,
+    ptr: dsl.Value,
+    *,
+    after: dsl.Value | None = None,
+) -> dsl.Value:
+    if cfg.mma.acc_registers % 2 != 0:
+        raise ValueError("f16 output needs an even accumulator register count")
+    regs_type = dsl.simd_type(
+        dsl.vector_type(cfg.mma.acc_registers, dsl.f32()), width=cfg.mma.wave_size
+    )
+    regs = waveamd.FragmentUnpackOp(regs_type, fragment).result
+    wi_sym = dsl.sym("__wave_dsl_frag_wi")
+    wi_val = bld.assume_range(
+        bld.workitem_id(axis=0, width=cfg.mma.wave_size),
+        0,
+        cfg.threads_per_workgroup - 1,
+    )
+    lane_off = bld.index_expr(
+        dsl.mod(wi_sym, cfg.mma.wave_size) * cfg.mma.acc_registers,
+        {wi_sym: wi_val},
+    )
+    lane_off = bld.assume_range(
+        lane_off, 0, (cfg.mma.wave_size - 1) * cfg.mma.acc_registers
+    )
+    base = bld.ptr_add(ptr, lane_off)
+    f32_simd = dsl.simd_type(dsl.f32(), width=cfg.mma.wave_size)
+    f16_simd = dsl.simd_type(dsl.f16(), width=cfg.mma.wave_size)
+    f16_pair = dsl.simd_type(dsl.vector_type(2, dsl.f16()), width=cfg.mma.wave_size)
+    tokens: list[dsl.Value] = []
+    for i in range(0, cfg.mma.acc_registers, 2):
+        lo = wave.ExtractOp(f32_simd, regs, i).result
+        hi = wave.ExtractOp(f32_simd, regs, i + 1).result
+        packed = wave.PackOp(
+            f16_pair,
+            [bld.fpconvert(lo, f16_simd), bld.fpconvert(hi, f16_simd)],
+        ).result
+        tokens.append(bld.store(packed, _ptr_add_const(bld, base, i), after=after))
+    return tokens[0] if len(tokens) == 1 else bld.join(*tokens)
 
 
 def _emit_constant_fill(
@@ -1104,9 +1167,9 @@ def _emit_host(bld: dsl.FunctionBuilder, cfg: _MatmulConfig) -> None:
     """
     index = dsl.index_type()
     f16 = dsl.f16()
-    f32 = dsl.f32()
     f16_ptr = dsl.ptr_type(f16)
-    f32_ptr = dsl.ptr_type(f32)
+    c_type = cfg.c_type
+    c_ptr_type = dsl.ptr_type(c_type)
 
     c0 = bld.constant(index, 0)
     c1 = bld.constant(index, 1)
@@ -1117,11 +1180,11 @@ def _emit_host(bld: dsl.FunctionBuilder, cfg: _MatmulConfig) -> None:
 
     one_f16 = bld.constant(f16, 1.0)
     two_f16 = bld.constant(f16, 2.0)
-    zero_f32 = bld.constant(f32, 0.0)
+    zero_c = bld.constant(c_type, 0.0)
 
     a_buf = bld.alloc([cfg.a_elements], f16)
     b_buf = bld.alloc([cfg.b_elements], f16)
-    c_buf = bld.alloc([cfg.total_elements], f32)
+    c_buf = bld.alloc([cfg.total_elements], c_type)
 
     if cfg.random_data:
         a_values, b_values = generate_wmma_f16_matmul_inputs(
@@ -1153,7 +1216,7 @@ def _emit_host(bld: dsl.FunctionBuilder, cfg: _MatmulConfig) -> None:
             bld.memref_store(two_f16, b_buf, [i])
 
     with bld.for_loop(c0, c_total, c1) as i:
-        bld.memref_store(zero_f32, c_buf, [i])
+        bld.memref_store(zero_c, c_buf, [i])
 
     c_unranked = bld.cast_unranked(c_buf)
     bld.host_register(bld.cast_unranked(a_buf))
@@ -1166,7 +1229,12 @@ def _emit_host(bld: dsl.FunctionBuilder, cfg: _MatmulConfig) -> None:
     dyn_f16 = dsl.dynamic_1d_memref_type(f16)
     [a_ptr] = bld.call(_F16_PTR_HELPER, [bld.memref_cast(a_buf, dyn_f16)], [f16_ptr])
     [b_ptr] = bld.call(_F16_PTR_HELPER, [bld.memref_cast(b_buf, dyn_f16)], [f16_ptr])
-    [c_ptr] = bld.call(_F32_PTR_HELPER, [c_buf], [f32_ptr])
+    if cfg.output_type == "f16":
+        [c_ptr] = bld.call(
+            _F16_PTR_HELPER, [bld.memref_cast(c_buf, dyn_f16)], [c_ptr_type]
+        )
+    else:
+        [c_ptr] = bld.call(_F32_PTR_HELPER, [c_buf], [c_ptr_type])
 
     trip_count_value = bld.constant(dsl.i32(), max(cfg.virtual_k_steps - 1, 0))
     launch_operands = [a_ptr, b_ptr, c_ptr, trip_count_value]
@@ -1177,7 +1245,8 @@ def _emit_host(bld: dsl.FunctionBuilder, cfg: _MatmulConfig) -> None:
         block=(threads, c1, c1),
         operands=launch_operands,
     )
-    bld.call(_PRINT_HELPER, [c_unranked])
+    print_helper = _PRINT_F16_HELPER if cfg.output_type == "f16" else _PRINT_HELPER
+    bld.call(print_helper, [c_unranked])
 
 
 def build_wmma_f16_matmul_module(
@@ -1193,6 +1262,7 @@ def build_wmma_f16_matmul_module(
     use_buffer: bool = False,
     use_dma_lds: bool = False,
     matrix_intrinsic: str = "wmma",
+    output_type: str = "f32",
     random_data: bool = False,
     random_seed: int = 0,
     skip_specialize: bool = False,
@@ -1211,6 +1281,7 @@ def build_wmma_f16_matmul_module(
         use_buffer=use_buffer,
         use_dma_lds=use_dma_lds,
         matrix_intrinsic=matrix_intrinsic,
+        output_type=output_type,
         random_data=random_data,
         random_seed=random_seed,
     )
@@ -1221,21 +1292,28 @@ def build_wmma_f16_matmul_module(
             [dsl.dynamic_1d_memref_type(dsl.f16())],
             [dsl.ptr_type(dsl.f16())],
         )
-        bld.declare_external(
-            _F32_PTR_HELPER,
-            [dsl.MemRefType.get([cfg.total_elements], dsl.f32())],
-            [dsl.ptr_type(dsl.f32())],
-        )
-        bld.declare_external(
-            _PRINT_HELPER,
-            [dsl.unranked_memref_type(dsl.f32())],
-            [],
-        )
+        if cfg.output_type == "f16":
+            bld.declare_external(
+                _PRINT_F16_HELPER,
+                [dsl.unranked_memref_type(dsl.f16())],
+                [],
+            )
+        else:
+            bld.declare_external(
+                _F32_PTR_HELPER,
+                [dsl.MemRefType.get([cfg.total_elements], dsl.f32())],
+                [dsl.ptr_type(dsl.f32())],
+            )
+            bld.declare_external(
+                _PRINT_HELPER,
+                [dsl.unranked_memref_type(dsl.f32())],
+                [],
+            )
 
         kernel_inputs = [
             dsl.ptr_type(dsl.f16()),
             dsl.ptr_type(dsl.f16()),
-            dsl.ptr_type(dsl.f32()),
+            dsl.ptr_type(cfg.c_type),
             # Software-pipeline loop trip count: K // 16 - 1.
             dsl.i32(),
         ]
