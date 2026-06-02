@@ -202,6 +202,11 @@ def WaveAMDMachine_RegOrImm
                  "::llvm::isa<::mlir::waveamdmachine::ImmType>($_self)">,
            "WaveAMDMachine register or immediate">;
 
+def WaveAMDMachine_RegOrMemToken
+    : Type<CPred<"::llvm::isa<::mlir::waveamdmachine::RegType>($_self) || "
+                 "::llvm::isa<::mlir::waveamdmachine::MemTokenType>($_self)">,
+           "WaveAMDMachine register or memory token">;
+
 def WaveAMDMachine_PackedOpSel2Attr
     : ConfinedAttr<I64Attr, [IntMinValue<0>, IntMaxValue<3>]>;
 def WaveAMDMachine_PackedOpSel3Attr
@@ -1931,8 +1936,8 @@ def WaveAMDMachine_UniformLoopOp : WaveAMDMachine_Op<"uniform_loop", [
   }];
 
   let arguments = (ins Optional<WaveAMDMachine_SCC>:$entry_cond,
-                       Variadic<WaveAMDMachine_Reg>:$inits);
-  let results = (outs Variadic<WaveAMDMachine_Reg>:$results);
+                       Variadic<WaveAMDMachine_RegOrMemToken>:$inits);
+  let results = (outs Variadic<WaveAMDMachine_RegOrMemToken>:$results);
   let regions = (region SizedRegion<1>:$body);
 
   let assemblyFormat = [{
@@ -1963,7 +1968,7 @@ def WaveAMDMachine_ContinueIfOp : WaveAMDMachine_Op<"continue_if", [
   }];
 
   let arguments = (ins WaveAMDMachine_SCC:$cond,
-                       Variadic<WaveAMDMachine_Reg>:$carries);
+                       Variadic<WaveAMDMachine_RegOrMemToken>:$carries);
 
   let assemblyFormat = [{
     $cond `:` type($cond)

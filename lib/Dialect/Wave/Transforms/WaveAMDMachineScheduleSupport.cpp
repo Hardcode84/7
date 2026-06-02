@@ -22,6 +22,7 @@
 #include "mlir/Interfaces/SideEffectInterfaces.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/Support/Error.h"
 #include "llvm/TargetParser/TargetParser.h"
 
@@ -273,6 +274,24 @@ static void addHardwareResourceEdges(const ScheduleRegion &region,
   }
 }
 
+static Operation *
+resolveLoopCarryDef(Value value, Block *body,
+                    waveamdmachine::ContinueIfOp terminator,
+                    llvm::SmallPtrSetImpl<BlockArgument> &seenArgs) {
+  if (Operation *def = value.getDefiningOp())
+    return def;
+  BlockArgument arg = dyn_cast<BlockArgument>(value);
+  if (!arg || arg.getOwner() != body)
+    return nullptr;
+  if (!seenArgs.insert(arg).second)
+    return nullptr;
+  unsigned argIndex = arg.getArgNumber();
+  if (argIndex >= terminator.getCarries().size())
+    return nullptr;
+  return resolveLoopCarryDef(terminator.getCarries()[argIndex], body,
+                             terminator, seenArgs);
+}
+
 static void addLoopCarryEdges(const ScheduleRegion &region,
                               DependenceGraph &graph,
                               DenseMap<Operation *, unsigned> &nodeForOp) {
@@ -293,7 +312,11 @@ static void addLoopCarryEdges(const ScheduleRegion &region,
       unsigned argIndex = arg.getArgNumber();
       if (argIndex >= term.getCarries().size())
         continue;
-      Operation *carryDef = term.getCarries()[argIndex].getDefiningOp();
+      llvm::SmallPtrSet<BlockArgument, 4> seenArgs;
+      Operation *carryDef = resolveLoopCarryDef(term.getCarries()[argIndex],
+                                                block, term, seenArgs);
+      if (!carryDef)
+        continue;
       auto it = nodeForOp.find(carryDef);
       if (it == nodeForOp.end())
         continue;

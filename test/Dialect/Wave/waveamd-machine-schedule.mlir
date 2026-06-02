@@ -104,6 +104,24 @@ func.func @m0_edges(%off: !waveamdmachine.reg<vgpr, 1>,
   return
 }
 
+func.func @token_loop_carry_edges(%off: !waveamdmachine.reg<vgpr, 1>,
+                                  %base: !waveamdmachine.reg<sgpr, 2>,
+                                  %dep: !waveamdmachine.mem.token,
+                                  %scc: !waveamdmachine.reg<scc, 1>) {
+  %result = waveamdmachine.uniform_loop carries(%dep : !waveamdmachine.mem.token) {
+  ^bb0(%tok: !waveamdmachine.mem.token):
+    %loaded, %tok1 = waveamdmachine.global_load_b32 %off, %base after %tok
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 2>,
+           !waveamdmachine.mem.token)
+          -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+    %next = waveamdmachine.token_join %tok1
+        : (!waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+    waveamdmachine.continue_if %scc : !waveamdmachine.reg<scc, 1> carries(%next : !waveamdmachine.mem.token)
+  } -> !waveamdmachine.mem.token
+  waveamdmachine.wait %result : (!waveamdmachine.mem.token) -> ()
+  return
+}
+
 func.func private @opaque()
 
 func.func @hard_boundaries(%a: !waveamdmachine.reg<vgpr, 1>,
@@ -169,6 +187,9 @@ transform.named_sequence @__transform_main(%root: !transform.any_op {transform.c
 // DEPS: waveamd-machine-schedule-report deps func=m0_edges region=0 nodes=3
 // DEPS: waveamd-machine-schedule-report edge region=0 kind=ssa 0->1 src=waveamdmachine.s_mov_m0 dst=waveamdmachine.global_load_lds_b32
 // DEPS: waveamd-machine-schedule-report edge region=0 kind=flag 1->2 src=waveamdmachine.global_load_lds_b32 dst=waveamdmachine.s_mov_m0
+// DEPS: waveamd-machine-schedule-report deps func=token_loop_carry_edges region=0 nodes=2 edges=2
+// DEPS: waveamd-machine-schedule-report edge region=0 kind=mem_token 0->1 src=waveamdmachine.global_load_b32 dst=waveamdmachine.token_join
+// DEPS: waveamd-machine-schedule-report edge region=0 kind=loop_carry recurrence 1->0 src=waveamdmachine.token_join dst=waveamdmachine.global_load_b32
 
 // SCORE: waveamd-machine-schedule-report score func=regions region=0 order=original cycles=
 // SCORE-SAME: issued_ops=2
