@@ -29,3 +29,20 @@ func.func @bad_arg_result_count() attributes {wave.kernel} {
   "waveamdmachine.arg"() {index = 0 : i64, pointer = false} : () -> ()
   return
 }
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
+
+func.func @zero_length_kernarg_preload_is_noop()
+    attributes {wave.kernel, waveamdmachine.kernarg_preload_length = 0 : i64} {
+  return
+}
+
+// expected-error @below {{waveamd-abi-lowering kernarg preload requires target with kernarg-preload feature}}
+func.func @unsupported_kernarg_preload_target()
+    attributes {wave.kernel, waveamdmachine.kernarg_preload_length = 1 : i64} {
+  return
+}
+
+}

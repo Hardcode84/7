@@ -44,6 +44,13 @@ static unsigned getUnsignedIntegerAttr(Operation *op, StringRef name) {
   return static_cast<unsigned>(value);
 }
 
+bool hasWaveAMDKernargPreloadRequest(func::FuncOp func) {
+  if (!func)
+    return false;
+  return getUnsignedIntegerAttr(func.getOperation(),
+                                getWaveAMDKernargPreloadLengthAttrName()) > 0;
+}
+
 WaveAMDKernelEntryRegs getWaveAMDKernelEntryRegs(func::FuncOp func) {
   WaveAMDKernelEntryRegs regs;
   if (!func || !func->hasAttr(wave::WaveDialect::getKernelAttrName()))
@@ -81,9 +88,9 @@ std::string getWaveAMDSGPRName(unsigned index, unsigned width) {
 }
 
 static FailureOr<std::unique_ptr<llvm::MCSubtargetInfo>>
-createSubtargetInfo(Operation *op) {
+createSubtargetInfo(Operation *op, StringRef consumer) {
   FailureOr<waveamdmachine::AMDGPUTarget> target =
-      waveamdmachine::getAMDGPUTarget(op, "waveamd register limits");
+      waveamdmachine::getAMDGPUTarget(op, consumer);
   if (failed(target))
     return failure();
 
@@ -111,9 +118,31 @@ createSubtargetInfo(Operation *op) {
   return sti;
 }
 
+FailureOr<bool> supportsWaveAMDKernargPreload(Operation *op,
+                                              StringRef consumer) {
+  FailureOr<std::unique_ptr<llvm::MCSubtargetInfo>> sti =
+      createSubtargetInfo(op, consumer);
+  if (failed(sti))
+    return failure();
+  return llvm::AMDGPU::hasKernargPreload(**sti);
+}
+
+LogicalResult verifyWaveAMDKernargPreloadTarget(func::FuncOp func,
+                                                StringRef consumer) {
+  if (!hasWaveAMDKernargPreloadRequest(func))
+    return success();
+  FailureOr<bool> supported = supportsWaveAMDKernargPreload(func, consumer);
+  if (failed(supported))
+    return failure();
+  if (*supported)
+    return success();
+  return func.emitError(consumer)
+         << " kernarg preload requires target with kernarg-preload feature";
+}
+
 FailureOr<WaveAMDRegisterLimits> getWaveAMDRegisterLimits(Operation *op) {
   FailureOr<std::unique_ptr<llvm::MCSubtargetInfo>> sti =
-      createSubtargetInfo(op);
+      createSubtargetInfo(op, "waveamd register limits");
   if (failed(sti))
     return failure();
 

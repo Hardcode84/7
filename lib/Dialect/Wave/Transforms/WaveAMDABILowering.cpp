@@ -146,6 +146,9 @@ private:
   }
 
   static LogicalResult lowerKernel(func::FuncOp func, OpBuilder &builder) {
+    if (failed(wave::verifyWaveAMDKernargPreloadTarget(func,
+                                                       "waveamd-abi-lowering")))
+      return failure();
     TypeRange argTypes = func.getFunctionType().getInputs();
     SmallVector<waveamd::KernargSlot> layout =
         waveamd::getKernargLayout(argTypes);

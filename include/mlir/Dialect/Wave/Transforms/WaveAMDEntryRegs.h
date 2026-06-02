@@ -10,12 +10,15 @@
 #define MLIR_DIALECT_WAVE_TRANSFORMS_WAVEAMDENTRYREGS_H
 
 #include "mlir/Support/LLVM.h"
+#include "mlir/Support/LogicalResult.h"
 
 #include <array>
 #include <cassert>
 #include <string>
 
 namespace mlir {
+class Operation;
+
 namespace func {
 class FuncOp;
 } // namespace func
@@ -41,6 +44,11 @@ struct WaveAMDKernelEntryRegs {
 StringRef getWaveAMDKernargPreloadLengthAttrName();
 StringRef getWaveAMDKernargPreloadOffsetAttrName();
 WaveAMDKernelEntryRegs getWaveAMDKernelEntryRegs(func::FuncOp func);
+bool hasWaveAMDKernargPreloadRequest(func::FuncOp func);
+FailureOr<bool> supportsWaveAMDKernargPreload(Operation *op,
+                                              StringRef consumer);
+LogicalResult verifyWaveAMDKernargPreloadTarget(func::FuncOp func,
+                                                StringRef consumer);
 unsigned getWaveAMDReservedSGPRs(func::FuncOp func);
 unsigned getWaveAMDReservedVGPRs(func::FuncOp func);
 std::string getWaveAMDSGPRName(unsigned index, unsigned width);

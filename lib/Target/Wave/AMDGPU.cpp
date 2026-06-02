@@ -647,6 +647,10 @@ private:
     if (!func.getBody().hasOneBlock())
       return func.emitError(
           "WaveAMDMachine AMDGPU emitter supports one-block funcs");
+    bool isKernel = func->hasAttr(wave::WaveDialect::getKernelAttrName());
+    if (isKernel && failed(wave::verifyWaveAMDKernargPreloadTarget(
+                        func, "wave-to-amdgpu-asm")))
+      return failure();
 
     os << "\n\t.globl\t" << func.getSymName() << "\n";
     os << "\t.p2align\t8\n";
@@ -670,7 +674,7 @@ private:
 
     os << "\t.size\t" << func.getSymName() << ", .-" << func.getSymName()
        << "\n";
-    if (func->hasAttr(wave::WaveDialect::getKernelAttrName())) {
+    if (isKernel) {
       KernelInfo info;
       info.name = func.getSymName().str();
       info.kernargSize = getKernelArgSize(func);
