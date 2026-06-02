@@ -279,6 +279,16 @@ mlir::FailureOr<ExprHandle> expandExpr(Store &store, ExprHandle value,
 /// Three-valued result of a predicate entailment query.
 enum class CheckResult { True, False, Unknown };
 
+struct RationalEndpoint {
+  int64_t numerator = 0;
+  int64_t denominator = 1;
+};
+
+struct InferredRange {
+  std::optional<RationalEndpoint> lower;
+  std::optional<RationalEndpoint> upper;
+};
+
 /// Decide whether `predicate` is provably true / false under
 /// `assumptions`. Returns `Unknown` when inconclusive.
 CheckResult checkPredicate(Store &store, PredHandle predicate,
@@ -295,6 +305,12 @@ bool provablyInRange(Store &store, ExprHandle expr,
                      int64_t hi);
 bool provablyFitsU32(Store &store, ExprHandle expr,
                      llvm::ArrayRef<PredHandle> assumptions);
+std::optional<InferredRange> inferRange(Store &store, ExprHandle expr,
+                                        llvm::ArrayRef<PredHandle> assumptions);
+std::optional<int64_t>
+inferNonNegativeUpperBound(Store &store, ExprHandle expr,
+                           llvm::ArrayRef<PredHandle> assumptions,
+                           int64_t maxUpper);
 
 /// Integer payload of a structurally-integral expression. `nullopt`
 /// for non-integral nodes.

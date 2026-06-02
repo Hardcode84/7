@@ -49,9 +49,11 @@
 // CHECK: hash-consed-symbol: true
 
 // Range queries via `sym::provablyInRange`. Assumption `x in [0, 31]`
-// flattens through the AND-of-CMPs wrapper into two CMP leaves; the
-// `4*x+1` linear expression then ranges over [1, 125].
+// feeds `ixs_range`; `4*x+1` then ranges over [1, 125].
 // CHECK: x-nonneg: true
+// CHECK: range-lower: 1
+// CHECK: range-upper: 125
+// CHECK: range-u32-upper: 125
 // CHECK: fits-tight: true
 // CHECK: fits-loose: true
 // CHECK: overflows-upper: false

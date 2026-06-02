@@ -551,18 +551,9 @@ exprU32UpperBound(WaveAMDMachineSelector &S, sym::ExprHandle expr,
       return std::nullopt;
     return static_cast<uint64_t>(*value);
   }
-  if (sym::provablyInRange(S.symbolStore(), expr, assumptions, 0, u32Max)) {
-    uint64_t lo = 0;
-    uint64_t hi = u32Max;
-    while (lo < hi) {
-      uint64_t mid = lo + (hi - lo) / 2;
-      if (sym::provablyInRange(S.symbolStore(), expr, assumptions, 0, mid))
-        hi = mid;
-      else
-        lo = mid + 1;
-    }
-    return hi;
-  }
+  if (std::optional<int64_t> upper = sym::inferNonNegativeUpperBound(
+          S.symbolStore(), expr, assumptions, static_cast<int64_t>(u32Max)))
+    return static_cast<uint64_t>(*upper);
   sym::ExprView view(expr);
   switch (view.getKind()) {
   case sym::ExprKind::Add:
@@ -587,8 +578,6 @@ static bool exprFitsU32ByUpperBound(WaveAMDMachineSelector &S,
 
 bool WaveAMDMachineSelector::slotFitsU32(
     sym::ExprHandle expr, ArrayRef<sym::PredHandle> assumptions) {
-  if (sym::provablyFitsU32(symbolStore(), expr, assumptions))
-    return true;
   return exprFitsU32ByUpperBound(*this, expr, assumptions);
 }
 

@@ -130,6 +130,19 @@ void printRange(llvm::StringRef label, sym::Store &store, sym::ExprHandle expr,
                << "\n";
 }
 
+void printRational(llvm::StringRef label,
+                   std::optional<sym::RationalEndpoint> value) {
+  llvm::outs() << label << ": ";
+  if (!value) {
+    llvm::outs() << "none\n";
+    return;
+  }
+  llvm::outs() << value->numerator;
+  if (value->denominator != 1)
+    llvm::outs() << "/" << value->denominator;
+  llvm::outs() << "\n";
+}
+
 void printUtilitySmoke(sym::Store &store, sym::ExprHandle x) {
   sym::ExprHandle one = mustBuildInt(store, 1);
   sym::ExprHandle two = mustBuildInt(store, 2);
@@ -253,6 +266,13 @@ void runRangeQueries(sym::Store &store, sym::ExprHandle x,
   sym::ExprHandle one = mustBuildInt(store, 1);
   sym::ExprHandle linear =
       mustCompose(store, fourX, sym::ExprBinaryOp::Add, one);
+  std::optional<sym::InferredRange> inferred =
+      sym::inferRange(store, linear, assumptions);
+  printRational("range-lower", inferred ? inferred->lower : std::nullopt);
+  printRational("range-upper", inferred ? inferred->upper : std::nullopt);
+  printLiteral("range-u32-upper",
+               sym::inferNonNegativeUpperBound(store, linear, assumptions,
+                                               /*maxUpper=*/1000));
 
   printRange("fits-tight", store, linear, assumptions, 1, 125);
   printRange("fits-loose", store, linear, assumptions, -1000, 1000);

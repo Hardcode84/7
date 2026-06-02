@@ -704,7 +704,7 @@ mlir::wave::sym::substituteExpr(Store &store, ExprHandle value,
 
 // `ixs_bounds_add_assumption` only consumes CMP nodes -- an AND-tree
 // produced by `composePredAnd` is silently ignored. Flatten before
-// handing off to `ixs_check` / `ixs_simplify`.
+// handing off to ixsimpl queries.
 static void flattenAssumption(ixs_node *node,
                               SmallVectorImpl<ixs_node *> &out) {
   if (!node)
@@ -715,6 +715,28 @@ static void flattenAssumption(ixs_node *node,
     return;
   }
   out.push_back(node);
+}
+
+static int compareRationalToInteger(RationalEndpoint value, int64_t integer) {
+  assert(value.denominator > 0 && "expected positive denominator");
+  __int128 lhs = static_cast<__int128>(value.numerator);
+  __int128 rhs =
+      static_cast<__int128>(integer) * static_cast<__int128>(value.denominator);
+  if (lhs < rhs)
+    return -1;
+  if (lhs > rhs)
+    return 1;
+  return 0;
+}
+
+static std::optional<int64_t> ceilRational(RationalEndpoint value) {
+  if (value.denominator <= 0)
+    return std::nullopt;
+  int64_t quotient = value.numerator / value.denominator;
+  int64_t remainder = value.numerator % value.denominator;
+  if (remainder != 0 && value.numerator > 0)
+    ++quotient;
+  return quotient;
 }
 
 FailureOr<ExprHandle>
@@ -796,24 +818,59 @@ mlir::wave::sym::rangeAssumption(Store &store, StringRef name, int64_t lo,
 bool mlir::wave::sym::provablyInRange(Store &store, ExprHandle expr,
                                       ArrayRef<PredHandle> assumptions,
                                       int64_t lo, int64_t hi) {
-  if (!expr)
+  std::optional<InferredRange> range = inferRange(store, expr, assumptions);
+  if (!range || !range->lower || !range->upper)
     return false;
-  auto loConst = composeExprInt(store, lo);
-  auto hiConst = composeExprInt(store, hi);
-  if (failed(loConst) || failed(hiConst))
-    return false;
-  auto geLo = composePredCmp(store, expr, PredCmpOp::Ge, *loConst);
-  auto leHi = composePredCmp(store, expr, PredCmpOp::Le, *hiConst);
-  if (failed(geLo) || failed(leHi))
-    return false;
-  return checkPredicate(store, *geLo, assumptions) == CheckResult::True &&
-         checkPredicate(store, *leHi, assumptions) == CheckResult::True;
+  return compareRationalToInteger(*range->lower, lo) >= 0 &&
+         compareRationalToInteger(*range->upper, hi) <= 0;
 }
 
 bool mlir::wave::sym::provablyFitsU32(Store &store, ExprHandle expr,
                                       ArrayRef<PredHandle> assumptions) {
-  return provablyInRange(store, expr, assumptions, int64_t{0},
-                         (int64_t{1} << 32) - 1);
+  return inferNonNegativeUpperBound(store, expr, assumptions,
+                                    (int64_t{1} << 32) - 1)
+      .has_value();
+}
+
+std::optional<InferredRange>
+mlir::wave::sym::inferRange(Store &store, ExprHandle expr,
+                            ArrayRef<PredHandle> assumptions) {
+  if (!expr)
+    return std::nullopt;
+  Session session(store);
+  ixs_node *rawExpr = rawExprNode(expr, /*diagnostic=*/nullptr);
+  if (!rawExpr)
+    return std::nullopt;
+  SmallVector<ixs_node *, 4> rawAssumptions;
+  for (PredHandle assumption : assumptions) {
+    ixs_node *rawAssumption = rawPredNode(assumption, /*diagnostic=*/nullptr);
+    if (!rawAssumption)
+      return std::nullopt;
+    flattenAssumption(rawAssumption, rawAssumptions);
+  }
+  ixs_range_result rawRange;
+  if (!ixs_range(session.raw(), rawExpr, rawAssumptions.data(),
+                 rawAssumptions.size(), &rawRange))
+    return std::nullopt;
+  InferredRange range;
+  if (rawRange.has_lower)
+    range.lower = RationalEndpoint{rawRange.lower_p, rawRange.lower_q};
+  if (rawRange.has_upper)
+    range.upper = RationalEndpoint{rawRange.upper_p, rawRange.upper_q};
+  return range;
+}
+
+std::optional<int64_t>
+mlir::wave::sym::inferNonNegativeUpperBound(Store &store, ExprHandle expr,
+                                            ArrayRef<PredHandle> assumptions,
+                                            int64_t maxUpper) {
+  std::optional<InferredRange> range = inferRange(store, expr, assumptions);
+  if (!range || !range->lower || !range->upper)
+    return std::nullopt;
+  if (compareRationalToInteger(*range->lower, 0) < 0 ||
+      compareRationalToInteger(*range->upper, maxUpper) > 0)
+    return std::nullopt;
+  return ceilRational(*range->upper);
 }
 
 std::optional<int64_t>

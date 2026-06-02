@@ -30,20 +30,12 @@ static std::optional<int64_t> proveU32Upper(WaveAMDMachineSelector &S,
                                             const PointerOffset &offset) {
   if (!offset.expr)
     return int64_t{0};
-  if (!S.slotFitsU32(offset.expr, offset.assumptions))
-    return std::nullopt;
-  int64_t lo = 0;
-  int64_t hi = u32Max;
-  while (lo < hi) {
-    int64_t mid = lo + (hi - lo) / 2;
-    if (sym::provablyInRange(S.symbolStore(), offset.expr, offset.assumptions,
-                             /*lo=*/0, mid)) {
-      hi = mid;
-      continue;
-    }
-    lo = mid + 1;
-  }
-  return hi;
+  if (std::optional<int64_t> upper = sym::inferNonNegativeUpperBound(
+          S.symbolStore(), offset.expr, offset.assumptions, u32Max))
+    return *upper;
+  if (S.slotFitsU32(offset.expr, offset.assumptions))
+    return u32Max;
+  return std::nullopt;
 }
 
 static bool offsetFitsU32(WaveAMDMachineSelector &S,
