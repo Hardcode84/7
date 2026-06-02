@@ -1208,14 +1208,7 @@ private:
     auto result = [&]() { return op.getResult(0); };
     StringRef name = op.getName().getStringRef();
 
-    if (isa<waveamdmachine::ImmOp, waveamdmachine::ArgOp,
-            waveamdmachine::KernargPreloadOp, waveamdmachine::TokenOp,
-            waveamdmachine::TokenJoinOp, waveamdmachine::WaitOp>(&op))
-      return success();
-    // HSA loader delivered these into pinned entry registers.
-    if (isa<waveamdmachine::SWorkgroupIdXOp, waveamdmachine::SWorkgroupIdYOp,
-            waveamdmachine::SWorkgroupIdZOp, waveamdmachine::VWorkitemIdXOp>(
-            &op))
+    if (op.hasTrait<OpTrait::waveamdmachine::NoAsmEmission>())
       return success();
     if (isa<waveamdmachine::LabelOp>(op)) {
       os << op.getAttrOfType<StringAttr>("name").str() << ":\n";
@@ -1237,12 +1230,6 @@ private:
       return emitMC(
           llvm::AMDGPU::S_GETREG_B32_gfx11,
           {toMCOperand(result()), llvm::MCOperand::createImm(0xF81D)});
-    // Pure SSA renames: the regalloc has already aliased each element
-    // to its slot of the tuple's physical block (`tuple_phys + i`), so
-    // there is nothing to emit.
-    if (isa<waveamdmachine::TupleToElementsOp>(op) ||
-        isa<waveamdmachine::TupleFromElementsOp>(op))
-      return success();
     if (isa<waveamdmachine::VMovB32TupleOp>(op)) {
       auto regType = cast<waveamdmachine::RegType>(result().getType());
       Value src = op.getOperand(0);

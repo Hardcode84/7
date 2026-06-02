@@ -116,6 +116,7 @@ def WaveAMDMachine_Waitcnt : NativeOpTrait<"waveamdmachine::WaitcntOp">;
 def WaveAMDMachine_TokenTrait : NativeOpTrait<"waveamdmachine::TokenOp">;
 def WaveAMDMachine_TokenJoinTrait : NativeOpTrait<"waveamdmachine::TokenJoinOp">;
 def WaveAMDMachine_NoMachineInst : NativeOpTrait<"waveamdmachine::NoMachineInst">;
+def WaveAMDMachine_NoAsmEmission : NativeOpTrait<"waveamdmachine::NoAsmEmission">;
 def WaveAMDMachine_MFMA : NativeOpTrait<"waveamdmachine::MFMAOp">;
 def WaveAMDMachine_ReadsExec : NativeOpTrait<"waveamdmachine::ReadsExecOp">;
 def WaveAMDMachine_WritesExec : NativeOpTrait<"waveamdmachine::WritesExecOp">;
@@ -356,6 +357,7 @@ class WaveAMDMachine_BinaryNoResult<string mnemonic, Type operandType,
 
 def WaveAMDMachine_ArgOp : WaveAMDMachine_Op<"arg", [
   WaveAMDMachine_NoMachineInst,
+  WaveAMDMachine_NoAsmEmission,
   Pure
 ]> {
   let summary = "selected function argument";
@@ -366,6 +368,7 @@ def WaveAMDMachine_ArgOp : WaveAMDMachine_Op<"arg", [
 
 def WaveAMDMachine_KernargPreloadOp : WaveAMDMachine_Op<"kernarg_preload", [
   WaveAMDMachine_NoMachineInst,
+  WaveAMDMachine_NoAsmEmission,
   Pure
 ]> {
   let summary = "preloaded kernel argument live-in";
@@ -377,6 +380,7 @@ def WaveAMDMachine_KernargPreloadOp : WaveAMDMachine_Op<"kernarg_preload", [
 def WaveAMDMachine_ImmOp : WaveAMDMachine_Op<"imm", [
   Pure,
   WaveAMDMachine_NoMachineInst,
+  WaveAMDMachine_NoAsmEmission,
   DeclareOpInterfaceMethods<InferIntRangeInterface, ["inferResultRanges"]>
 ]> {
   let summary = "machine immediate";
@@ -388,7 +392,8 @@ def WaveAMDMachine_ImmOp : WaveAMDMachine_Op<"imm", [
 def WaveAMDMachine_TokenOp : WaveAMDMachine_Op<"token", [
   Pure,
   WaveAMDMachine_TokenTrait,
-  WaveAMDMachine_NoMachineInst
+  WaveAMDMachine_NoMachineInst,
+  WaveAMDMachine_NoAsmEmission
 ]> {
   let summary = "empty machine memory token";
   let results = (outs WaveAMDMachine_MemToken:$result);
@@ -396,7 +401,8 @@ def WaveAMDMachine_TokenOp : WaveAMDMachine_Op<"token", [
 }
 
 def WaveAMDMachine_TokenJoinOp : WaveAMDMachine_Op<"token_join",
-    [Pure, WaveAMDMachine_TokenJoinTrait, WaveAMDMachine_NoMachineInst]> {
+    [Pure, WaveAMDMachine_TokenJoinTrait, WaveAMDMachine_NoMachineInst,
+     WaveAMDMachine_NoAsmEmission]> {
   let summary = "join machine memory tokens";
   let arguments = (ins Variadic<WaveAMDMachine_MemToken>:$dependencies);
   let results = (outs WaveAMDMachine_MemToken:$result);
@@ -411,7 +417,8 @@ def WaveAMDMachine_AfterOp : WaveAMDMachine_Op<"after",
   let assemblyFormat = "$dependencies attr-dict `:` functional-type(operands, results)";
 }
 
-def WaveAMDMachine_WaitOp : WaveAMDMachine_Op<"wait", [WaveAMDMachine_NoMachineInst]> {
+def WaveAMDMachine_WaitOp : WaveAMDMachine_Op<"wait",
+    [WaveAMDMachine_NoMachineInst, WaveAMDMachine_NoAsmEmission]> {
   let summary = "wait for machine memory token dependencies";
   let arguments = (ins Variadic<WaveAMDMachine_MemToken>:$dependencies);
   let assemblyFormat = "$dependencies attr-dict `:` functional-type(operands, results)";
@@ -434,18 +441,22 @@ def WaveAMDMachine_VMbcntHiOp
 // Descriptor-loaded workgroup ids live in layout-assigned system SGPRs.
 def WaveAMDMachine_SWorkgroupIdXOp
     : WaveAMDMachine_ZeroOperandResult<"s_workgroup_id_x", WaveAMDMachine_SGPR1,
-                                       [WaveAMDMachine_NoMachineInst, Pure]>;
+                                       [WaveAMDMachine_NoMachineInst,
+                                        WaveAMDMachine_NoAsmEmission, Pure]>;
 def WaveAMDMachine_SWorkgroupIdYOp
     : WaveAMDMachine_ZeroOperandResult<"s_workgroup_id_y", WaveAMDMachine_SGPR1,
-                                       [WaveAMDMachine_NoMachineInst, Pure]>;
+                                       [WaveAMDMachine_NoMachineInst,
+                                        WaveAMDMachine_NoAsmEmission, Pure]>;
 def WaveAMDMachine_SWorkgroupIdZOp
     : WaveAMDMachine_ZeroOperandResult<"s_workgroup_id_z", WaveAMDMachine_SGPR1,
-                                       [WaveAMDMachine_NoMachineInst, Pure]>;
+                                       [WaveAMDMachine_NoMachineInst,
+                                        WaveAMDMachine_NoAsmEmission, Pure]>;
 
 // Packed workitem id X lives in layout-assigned entry VGPR.
 def WaveAMDMachine_VWorkitemIdXOp
     : WaveAMDMachine_ZeroOperandResult<"v_workitem_id_x", WaveAMDMachine_VGPR1,
-                                       [WaveAMDMachine_NoMachineInst, Pure]>;
+                                       [WaveAMDMachine_NoMachineInst,
+                                        WaveAMDMachine_NoAsmEmission, Pure]>;
 
 def WaveAMDMachine_VMovB32TupleOp
     : WaveAMDMachine_UnaryResult<"v_mov_b32_tuple", WaveAMDMachine_RegOrImm,
@@ -466,7 +477,8 @@ def WaveAMDMachine_VMovB32TupleOp
 def WaveAMDMachine_TupleToElementsOp
     : WaveAMDMachine_Op<"tuple_to_elements",
                        [Pure, WaveAMDMachine_TokenJoinTrait,
-                        WaveAMDMachine_NoMachineInst]> {
+                        WaveAMDMachine_NoMachineInst,
+                        WaveAMDMachine_NoAsmEmission]> {
   let summary = "split a GPR tuple into mixed-width GPR pieces";
   let arguments = (ins WaveAMDMachine_GPR:$tuple);
   let results = (outs Variadic<WaveAMDMachine_GPR>:$elements);
@@ -478,7 +490,8 @@ def WaveAMDMachine_TupleToElementsOp
 def WaveAMDMachine_TupleFromElementsOp
     : WaveAMDMachine_Op<"tuple_from_elements",
                      [Pure, WaveAMDMachine_TokenJoinTrait,
-                      WaveAMDMachine_NoMachineInst]> {
+                      WaveAMDMachine_NoMachineInst,
+                      WaveAMDMachine_NoAsmEmission]> {
   let summary = "concatenate mixed-width GPR pieces into a GPR tuple";
   let arguments = (ins Variadic<WaveAMDMachine_GPR>:$elements);
   let results = (outs WaveAMDMachine_GPR:$tuple);
