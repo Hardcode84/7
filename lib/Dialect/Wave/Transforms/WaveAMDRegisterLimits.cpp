@@ -60,6 +60,8 @@ WaveAMDKernelEntryRegs getWaveAMDKernelEntryRegs(func::FuncOp func) {
   regs.kernargSegmentPtrWidth = 2;
   regs.kernargPreloadDwords = getUnsignedIntegerAttr(
       func.getOperation(), getWaveAMDKernargPreloadLengthAttrName());
+  regs.kernargPreloadOffsetDwords = getUnsignedIntegerAttr(
+      func.getOperation(), getWaveAMDKernargPreloadOffsetAttrName());
   regs.userSGPRCount = regs.kernargSegmentPtrWidth + regs.kernargPreloadDwords;
 
   unsigned workgroupBase = regs.userSGPRCount;

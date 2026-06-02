@@ -148,15 +148,21 @@ static bool physicalRangesOverlap(const PhysicalLiveRange &lhs,
   return lhs.physStart < rhs.physEnd && rhs.physStart < lhs.physEnd;
 }
 
-static bool isAllowedReservedValue(Value value,
-                                   const wave::WaveAMDKernelEntryRegs &regs) {
-  Operation *def = value.getDefiningOp();
-  if (!def)
-    return false;
-  auto type = cast<waveamdmachine::RegType>(value.getType());
+static bool
+isAllowedKernargPreloadValue(waveamdmachine::RegType type,
+                             const wave::WaveAMDKernelEntryRegs &regs) {
   int64_t index = type.getIndex();
-  if (type.getWidth() != 1)
+  if (!wave::isWaveAMDSGPR(type) || index < 0)
     return false;
+  unsigned begin = static_cast<unsigned>(index);
+  unsigned end = begin + type.getWidth();
+  unsigned preloadBegin = regs.kernargSegmentPtrWidth;
+  unsigned preloadEnd = preloadBegin + regs.kernargPreloadDwords;
+  return preloadBegin <= begin && end <= preloadEnd;
+}
+
+static bool isAllowedEntryRegValue(Operation *def, int64_t index,
+                                   const wave::WaveAMDKernelEntryRegs &regs) {
   if (isa<waveamdmachine::VWorkitemIdXOp>(def))
     return index == regs.workitemIdXVGPR;
   if (isa<waveamdmachine::SWorkgroupIdXOp>(def))
@@ -166,6 +172,20 @@ static bool isAllowedReservedValue(Value value,
   if (isa<waveamdmachine::SWorkgroupIdZOp>(def))
     return index == regs.workgroupIdSGPR(2);
   return false;
+}
+
+static bool isAllowedReservedValue(Value value,
+                                   const wave::WaveAMDKernelEntryRegs &regs) {
+  Operation *def = value.getDefiningOp();
+  if (!def)
+    return false;
+  auto type = cast<waveamdmachine::RegType>(value.getType());
+  int64_t index = type.getIndex();
+  if (isa<waveamdmachine::KernargPreloadOp>(def))
+    return isAllowedKernargPreloadValue(type, regs);
+  if (type.getWidth() != 1)
+    return false;
+  return isAllowedEntryRegValue(def, index, regs);
 }
 
 static LogicalResult verifyNotInReservedRange(

@@ -1209,8 +1209,8 @@ private:
     StringRef name = op.getName().getStringRef();
 
     if (isa<waveamdmachine::ImmOp, waveamdmachine::ArgOp,
-            waveamdmachine::TokenOp, waveamdmachine::TokenJoinOp,
-            waveamdmachine::WaitOp>(&op))
+            waveamdmachine::KernargPreloadOp, waveamdmachine::TokenOp,
+            waveamdmachine::TokenJoinOp, waveamdmachine::WaitOp>(&op))
       return success();
     // HSA loader delivered these into pinned entry registers.
     if (isa<waveamdmachine::SWorkgroupIdXOp, waveamdmachine::SWorkgroupIdYOp,

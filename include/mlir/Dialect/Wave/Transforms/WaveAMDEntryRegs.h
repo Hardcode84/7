@@ -31,6 +31,7 @@ struct WaveAMDKernelEntryRegs {
   unsigned kernargSegmentPtrSGPR = 0;
   unsigned kernargSegmentPtrWidth = 0;
   unsigned kernargPreloadDwords = 0;
+  unsigned kernargPreloadOffsetDwords = 0;
   unsigned workitemIdXVGPR = 0;
   unsigned reservedSGPRs = 0;
   unsigned reservedVGPRs = 0;

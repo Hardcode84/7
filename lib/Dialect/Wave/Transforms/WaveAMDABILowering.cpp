@@ -51,6 +51,33 @@ static Value createKernArgLoad(OpBuilder &builder, Location loc,
                                              offsetImm, base);
 }
 
+static bool isCoveredByPreload(const waveamd::KernargSlot &slot,
+                               const wave::WaveAMDKernelEntryRegs &entryRegs) {
+  if (entryRegs.kernargPreloadDwords == 0 ||
+      entryRegs.kernargPreloadOffsetDwords != 0)
+    return false;
+  if (slot.offset % 4 != 0 || slot.size % 4 != 0)
+    return false;
+  unsigned start = slot.offset / 4;
+  unsigned width = slot.size / 4;
+  return start <= entryRegs.kernargPreloadDwords &&
+         width <= entryRegs.kernargPreloadDwords - start;
+}
+
+static Value
+createKernargPreload(OpBuilder &builder, Location loc,
+                     waveamdmachine::RegType regType,
+                     const waveamd::KernargSlot &slot,
+                     const wave::WaveAMDKernelEntryRegs &entryRegs) {
+  unsigned dwordOffset = slot.offset / 4;
+  unsigned physIndex = entryRegs.kernargSegmentPtrWidth + dwordOffset;
+  waveamdmachine::RegType pinnedType = waveamdmachine::RegType::get(
+      builder.getContext(), waveamdmachine::RegClass::SGPR, regType.getWidth(),
+      physIndex);
+  return waveamdmachine::KernargPreloadOp::create(builder, loc, pinnedType,
+                                                  dwordOffset);
+}
+
 struct WaveAMDABILoweringPass
     : public wave::impl::WaveAMDABILoweringBase<WaveAMDABILoweringPass> {
   void runOnOperation() override {
@@ -134,12 +161,18 @@ private:
           "argument type");
 
     builder.setInsertionPoint(&op);
-    Value offsetImm = createImm(builder, op.getLoc(), slot.offset);
-    std::string base = wave::getWaveAMDSGPRName(
-        entryRegs.kernargSegmentPtrSGPR, entryRegs.kernargSegmentPtrWidth);
-    Value loaded =
-        createKernArgLoad(builder, op.getLoc(), op.getResult(0).getType(),
-                          offsetImm, regType.getWidth(), base);
+    Value loaded;
+    if (isCoveredByPreload(slot, entryRegs)) {
+      loaded =
+          createKernargPreload(builder, op.getLoc(), regType, slot, entryRegs);
+    } else {
+      Value offsetImm = createImm(builder, op.getLoc(), slot.offset);
+      std::string base = wave::getWaveAMDSGPRName(
+          entryRegs.kernargSegmentPtrSGPR, entryRegs.kernargSegmentPtrWidth);
+      loaded =
+          createKernArgLoad(builder, op.getLoc(), op.getResult(0).getType(),
+                            offsetImm, regType.getWidth(), base);
+    }
     op.getResult(0).replaceAllUsesWith(loaded);
     op.erase();
     return success();

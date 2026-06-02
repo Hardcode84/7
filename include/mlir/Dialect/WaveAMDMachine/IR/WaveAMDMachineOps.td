@@ -205,6 +205,8 @@ def WaveAMDMachine_PackedOpSel2Attr
     : ConfinedAttr<I64Attr, [IntMinValue<0>, IntMaxValue<3>]>;
 def WaveAMDMachine_PackedOpSel3Attr
     : ConfinedAttr<I64Attr, [IntMinValue<0>, IntMaxValue<7>]>;
+def WaveAMDMachine_NonNegativeI64Attr
+    : ConfinedAttr<I64Attr, [IntMinValue<0>]>;
 
 // Any allocatable register class (SGPR, VGPR, AGPR). Excludes hardware flags.
 def WaveAMDMachine_GPR
@@ -359,6 +361,16 @@ def WaveAMDMachine_ArgOp : WaveAMDMachine_Op<"arg", [
   let summary = "selected function argument";
   let arguments = (ins I64Attr:$index, BoolAttr:$pointer);
   let results = (outs WaveAMDMachine_Reg:$result);
+  let assemblyFormat = "attr-dict `:` type($result)";
+}
+
+def WaveAMDMachine_KernargPreloadOp : WaveAMDMachine_Op<"kernarg_preload", [
+  WaveAMDMachine_NoMachineInst,
+  Pure
+]> {
+  let summary = "preloaded kernel argument live-in";
+  let arguments = (ins WaveAMDMachine_NonNegativeI64Attr:$dword_offset);
+  let results = (outs WaveAMDMachine_SGPR:$result);
   let assemblyFormat = "attr-dict `:` type($result)";
 }
 
