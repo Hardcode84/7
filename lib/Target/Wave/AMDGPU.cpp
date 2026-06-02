@@ -1204,6 +1204,8 @@ private:
   }
 
   LogicalResult emitBufferLoad(Operation &op, unsigned opcode) {
+    if (failed(rejectNonZeroLiteralSoffset(op, op.getOperand(2))))
+      return failure();
     int64_t instOffset = getIntAttr(&op, "inst_offset", 0);
     return emitMC(opcode,
                   {toMCOperand(op.getResult(0)), toMCOperand(op.getOperand(0)),
@@ -1213,10 +1215,8 @@ private:
   }
 
   LogicalResult emitBufferLoadLds(Operation &op, unsigned opcode) {
-    if (std::optional<unsigned> imm = getImmediate(op.getOperand(2)))
-      if (*imm != 0)
-        return op.emitError(
-            "buffer_load_lds nonzero literal soffset must be SGPR");
+    if (failed(rejectNonZeroLiteralSoffset(op, op.getOperand(2))))
+      return failure();
     int64_t instOffset = getIntAttr(&op, "inst_offset", 0);
     int64_t aux = getIntAttr(&op, "aux", 0);
     return emitMC(opcode,
@@ -1227,12 +1227,21 @@ private:
   }
 
   LogicalResult emitBufferStore(Operation &op, unsigned opcode) {
+    if (failed(rejectNonZeroLiteralSoffset(op, op.getOperand(3))))
+      return failure();
     int64_t instOffset = getIntAttr(&op, "inst_offset", 0);
     return emitMC(opcode,
                   {toMCOperand(op.getOperand(1)), toMCOperand(op.getOperand(0)),
                    toMCOperand(op.getOperand(2)), toMCOperand(op.getOperand(3)),
                    llvm::MCOperand::createImm(instOffset),
                    llvm::MCOperand::createImm(0)});
+  }
+
+  LogicalResult rejectNonZeroLiteralSoffset(Operation &op, Value soffset) {
+    if (std::optional<unsigned> imm = getImmediate(soffset))
+      if (*imm != 0)
+        return op.emitError("buffer nonzero literal soffset must be SGPR");
+    return success();
   }
 
   LogicalResult emitDsLoad(Operation &op, unsigned opcode) {

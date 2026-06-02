@@ -83,6 +83,45 @@ func.func @buffer_bounded_raw_uniform_uses_soffset(%out: !wave.ptr<#wave.global,
   return
 }
 
+// SELECT-LABEL: func.func @buffer_const_soffset_materializes_sgpr
+// SELECT-DAG: %[[SOIMM:.*]] = waveamdmachine.imm 4096 : !waveamdmachine.imm
+// SELECT-DAG: %[[SOFFSET:.*]] = waveamdmachine.s_mov_b32_value %[[SOIMM]]
+// SELECT: waveamdmachine.buffer_load_b32 {{.*}}, {{.*}}, %[[SOFFSET]]
+// SELECT-DAG: %[[SOIMM_STORE:.*]] = waveamdmachine.imm 4096 : !waveamdmachine.imm
+// SELECT-DAG: %[[SOFFSET_STORE:.*]] = waveamdmachine.s_mov_b32_value %[[SOIMM_STORE]]
+// SELECT: waveamdmachine.buffer_store_b32 {{.*}}, {{.*}}, {{.*}}, %[[SOFFSET_STORE]]
+
+// ASM-LABEL: buffer_const_soffset_materializes_sgpr:
+// ASM: s_mov_b32 [[SOFFSET:s[0-9]+]], 0x1000
+// ASM: buffer_load_b32 {{v[0-9]+}}, {{v[0-9]+}}, {{s\[[0-9]+:[0-9]+\]}}, [[SOFFSET]] offen
+// ASM: buffer_store_b32 {{v[0-9]+}}, {{v[0-9]+}}, {{s\[[0-9]+:[0-9]+\]}}, [[SOFFSET]] offen
+func.func @buffer_const_soffset_materializes_sgpr(
+    %in: !wave.ptr<#wave.global, i32>, %out: !wave.ptr<#wave.global, i32>)
+    attributes {wave.kernel} {
+  %range = arith.constant 8192 : i32
+  %in_buffer = waveamd.make_buffer %in, %range
+      : !wave.ptr<#wave.global, i32>, i32 -> !wave.ptr<#waveamd.buffer, i32>
+  %out_buffer = waveamd.make_buffer %out, %range
+      : !wave.ptr<#wave.global, i32>, i32 -> !wave.ptr<#waveamd.buffer, i32>
+  %lane = wave.lane_id : !wave.simd<i32, 32>
+  %off = wave.index_expr <"1024 + lid"> ["lid"](%lane)
+      : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
+  %in_ptrs = wave.ptr_add %in_buffer, %off
+      : !wave.ptr<#waveamd.buffer, i32>, !wave.simd<index, 32>
+      -> !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 32>
+  %v, %tok = wave.load %in_ptrs
+      : (!wave.simd<!wave.ptr<#waveamd.buffer, i32>, 32>)
+      -> (!wave.simd<i32, 32>, !wave.mem.token)
+  %out_ptrs = wave.ptr_add %out_buffer, %off
+      : !wave.ptr<#waveamd.buffer, i32>, !wave.simd<index, 32>
+      -> !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 32>
+  %store_token = wave.store %v -> %out_ptrs after %tok
+      : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 32>,
+         !wave.mem.token)
+      -> !wave.mem.token
+  return
+}
+
 // Single-dword `wave.load` through a buffer pointer: the selector lowers
 // it to `waveamdmachine.buffer_load_b32`, and the AMDGPU printer emits a
 // `buffer_load_dword ..., 0 offen` (no offset suffix for component 0).

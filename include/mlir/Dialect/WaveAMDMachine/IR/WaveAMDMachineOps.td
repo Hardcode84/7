@@ -250,7 +250,8 @@ class WaveAMDMachine_BufferMemoryOp<string mnemonic, list<Trait> traits = []>
   let extraClassDefinition = [{
     ::mlir::waveamdmachine::AddressFieldSpec $cppClass::getAddressFieldSpec() {
       return {/*instOffsetBits=*/12, /*instOffsetSigned=*/false,
-              /*hasSoffset=*/true};
+              /*hasSoffset=*/true,
+              ::mlir::waveamdmachine::SOffsetImmPolicy::ZeroImmOnly};
     }
   }];
 }
