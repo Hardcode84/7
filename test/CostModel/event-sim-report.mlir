@@ -169,7 +169,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
                           %base: !waveamdmachine.reg<sgpr, 2>) {
     %load, %tok = waveamdmachine.global_load_tuple_b32 %off, %base
         : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 2>)
-          -> (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.mem.token)
+          -> (!waveamdmachine.reg<vgpr, 16>, !waveamdmachine.mem.token)
     return
   }
 }

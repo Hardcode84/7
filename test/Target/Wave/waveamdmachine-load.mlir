@@ -27,8 +27,8 @@ func.func @scalar_load_kernel(%in: !wave.ptr<#wave.global, i32>, %out: !wave.ptr
   return
 }
 
-// A tuple wave.load lowers to a single global_load_tuple_b32 op that the
-// asm printer expands into N consecutive global_load_dword instructions.
+// A tuple wave.load selects a tuple op; backend start decomposes it to
+// wide chunks before asm.
 // SELECT-LABEL: func.func @tuple_load_kernel
 // SELECT: waveamdmachine.global_load_tuple_b32{{.*}} : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 2>) -> (!waveamdmachine.reg<vgpr, 8>, !waveamdmachine.mem.token)
 

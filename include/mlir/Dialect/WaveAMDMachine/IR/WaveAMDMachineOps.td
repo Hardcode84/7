@@ -85,19 +85,25 @@ defvar WaveAMDMachine_ResultRegWidth =
 defvar WaveAMDMachine_ValueRegWidth =
     "::llvm::cast<::mlir::waveamdmachine::RegType>(" #
     "this->getOperation()->getOperand(1).getType()).getWidth()";
+defvar WaveAMDMachine_ResultRegChunkCount =
+    "((::llvm::cast<::mlir::waveamdmachine::RegType>(" #
+    "this->getOperation()->getResult(0).getType()).getWidth() + 3) / 4)";
+defvar WaveAMDMachine_ValueRegChunkCount =
+    "((::llvm::cast<::mlir::waveamdmachine::RegType>(" #
+    "this->getOperation()->getOperand(1).getType()).getWidth() + 3) / 4)";
 
 class WaveAMDMachine_VMEMTupleLoadInfo
     : WaveAMDMachine_WaitcntInfo<"Vmem", "Vmem",
-                                 WaveAMDMachine_ResultRegWidth>;
+                                 WaveAMDMachine_ResultRegChunkCount>;
 class WaveAMDMachine_VMEMTupleStoreInfo
     : WaveAMDMachine_WaitcntInfo<"Vscnt", "VmemStore",
-                                 WaveAMDMachine_ValueRegWidth>;
+                                 WaveAMDMachine_ValueRegChunkCount>;
 class WaveAMDMachine_LDSTupleLoadInfo
     : WaveAMDMachine_WaitcntInfo<"Lgkm", "Lds",
-                                 WaveAMDMachine_ResultRegWidth>;
+                                 WaveAMDMachine_ResultRegChunkCount>;
 class WaveAMDMachine_LDSTupleStoreInfo
     : WaveAMDMachine_WaitcntInfo<"Lgkm", "Lds",
-                                 WaveAMDMachine_ValueRegWidth>;
+                                 WaveAMDMachine_ValueRegChunkCount>;
 
 def WaveAMDMachine_VALU : NativeOpTrait<"waveamdmachine::VALUOp">;
 def WaveAMDMachine_SMEMLoad : NativeOpTrait<"waveamdmachine::SMEMLoadOp">;
@@ -918,9 +924,8 @@ def WaveAMDMachine_GlobalLoadTupleB32Op
   let description = [{
     Loads `N` consecutive dwords from `base + offset + inst_offset +
     i*4` into the `N` components of a single VGPR tuple result of
-    width `N`. Expands to `N` `global_load_dword` instructions in the
-    AMDGPU printer; the tuple width is therefore the result register
-    width.
+    width `N`. Waitcnt issue count matches the b32/b64/b96/b128 chunks
+    produced by `waveamd-decompose-mem-tuples`.
   }];
   let arguments = (ins WaveAMDMachine_VGPR1:$offset, WaveAMDMachine_SGPR2:$base,
                        Optional<WaveAMDMachine_MemToken>:$dependency,
@@ -1301,10 +1306,8 @@ def WaveAMDMachine_BufferLoadTupleB32Op
   let description = [{
     Loads `N` consecutive dwords from `descriptor[offset + soffset +
     inst_offset + i*4]` into the `N` components of a single VGPR
-    tuple result of width `N`. Expands to `N` `buffer_load_dword`
-    instructions (each with a `offset:(inst_offset + i*4)`
-    immediate) in the AMDGPU printer; the tuple width is the result
-    register width.
+    tuple result of width `N`. Waitcnt issue count matches the
+    b32/b64/b96/b128 chunks produced by `waveamd-decompose-mem-tuples`.
   }];
   let arguments = (ins WaveAMDMachine_VGPR1:$offset, WaveAMDMachine_SGPR4:$descriptor,
                        WaveAMDMachine_SGPR1OrImm:$soffset,
@@ -1384,12 +1387,10 @@ def WaveAMDMachine_BufferStoreTupleB32Op
       WaveAMDMachine_VMEMTupleStoreInfo {
   let summary = "buffer 32-bit store of a VGPR tuple component";
   let description = [{
-    Stores the `component`-th 32-bit slice of the `value` VGPR tuple to
-    the buffer described by `descriptor` at the lane VGPR offset plus
-    `soffset + inst_offset + component * 4`. Mirrors
-    `global_store_tuple_b32`: each dword-store is its own IR op so
-    per-component memory tokens thread through the bucketed
-    `wave.store` tuple selector in `selectGlobalOrBufferStore`.
+    Stores `N` consecutive dwords from the `value` VGPR tuple to the
+    buffer described by `descriptor` at the lane VGPR offset plus
+    `soffset + inst_offset + i*4`. Waitcnt issue count matches the
+    b32/b64/b96/b128 chunks produced by `waveamd-decompose-mem-tuples`.
   }];
   let arguments = (ins WaveAMDMachine_VGPR1:$offset, WaveAMDMachine_VGPR:$value,
                        WaveAMDMachine_SGPR4:$descriptor,
@@ -1411,7 +1412,8 @@ def WaveAMDMachine_GlobalStoreTupleB32Op
     Per-component dword store: writes lane `component` of the `value`
     VGPR tuple to `base + offset + inst_offset + component * 4`.
     `inst_offset` lands in the instruction's 13-bit signed immediate
-    slot together with `component * 4`.
+    slot together with `component * 4`. Waitcnt issue count matches the
+    b32/b64/b96/b128 chunks produced by `waveamd-decompose-mem-tuples`.
   }];
   let arguments = (ins WaveAMDMachine_VGPR1:$offset, WaveAMDMachine_VGPR:$value,
                        WaveAMDMachine_SGPR2:$base,
@@ -1466,8 +1468,8 @@ def WaveAMDMachine_DsLoadTupleB32Op
   let description = [{
     Loads `N` consecutive dwords from LDS at `addr + offset + i*4` for
     `i` in `[0, N)` into the `N` components of a single VGPR tuple
-    result of width `N`. Expands to `N` `ds_read_b32` instructions in
-    the AMDGPU printer; the tuple width is the result register width.
+    result of width `N`. Waitcnt issue count matches the b32/b64/b96/b128
+    chunks produced by `waveamd-decompose-mem-tuples`.
   }];
   let arguments = (ins WaveAMDMachine_VGPR1:$addr,
                        Optional<WaveAMDMachine_MemToken>:$dependency,
@@ -1601,9 +1603,9 @@ def WaveAMDMachine_DsStoreTupleB32Op
   let summary = "LDS store of a VGPR tuple as N consecutive 32-bit values";
   let description = [{
     Stores the `N` components of the `value` VGPR tuple to LDS at
-    `addr + offset + i*4` for `i` in `[0, N)`. Expands to `N`
-    `ds_write_b32` instructions in the AMDGPU printer; the tuple
-    width is the value register width.
+    `addr + offset + i*4` for `i` in `[0, N)`. Waitcnt issue count
+    matches the b32/b64/b96/b128 chunks produced by
+    `waveamd-decompose-mem-tuples`.
   }];
   let arguments = (ins WaveAMDMachine_VGPR1:$addr, WaveAMDMachine_VGPR:$value,
                        Optional<WaveAMDMachine_MemToken>:$dependency,

@@ -22,3 +22,34 @@ func.func @missing_smem_base() {
 }
 
 }
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
+
+func.func @tuple_load_not_decomposed(%off: !waveamdmachine.reg<vgpr, 1>,
+                                     %base: !waveamdmachine.reg<sgpr, 2>) {
+  // expected-error @below {{waveamd-insert-ticket-waits expects tuple memory ops to be decomposed first}}
+  %regs, %tok = waveamdmachine.global_load_tuple_b32 %off, %base
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 2>)
+        -> (!waveamdmachine.reg<vgpr, 8>, !waveamdmachine.mem.token)
+  return
+}
+
+}
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
+
+func.func @tuple_store_not_decomposed(%off: !waveamdmachine.reg<vgpr, 1>,
+                                      %value: !waveamdmachine.reg<vgpr, 8>,
+                                      %base: !waveamdmachine.reg<sgpr, 2>) {
+  // expected-error @below {{waveamd-insert-ticket-waits expects tuple memory ops to be decomposed first}}
+  %tok = waveamdmachine.global_store_tuple_b32 %off, %value, %base
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 8>,
+         !waveamdmachine.reg<sgpr, 2>) -> !waveamdmachine.mem.token
+  return
+}
+
+}

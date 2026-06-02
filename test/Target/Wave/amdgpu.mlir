@@ -133,9 +133,8 @@ func.func @wave_lds_echo(%out: !wave.ptr<#wave.global, i32>)
 // CHECK: .amdhsa_kernel wave_lds_echo
 // CHECK: .amdhsa_group_segment_fixed_size 128
 
-// A tuple-width wave.load/store through a shared pointer lowers to
-// N consecutive ds_read_b32 / ds_write_b32 instructions, with `offset:i*4`
-// folded into the immediate field on each instruction.
+// Tuple-width shared memory lowers to wide chunks with byte offsets
+// folded into each instruction.
 // CHECK-LABEL: wave_lds_tuple_echo:
 func.func @wave_lds_tuple_echo(%in: !wave.ptr<#wave.global, i32>,
                                %out: !wave.ptr<#wave.global, i32>)

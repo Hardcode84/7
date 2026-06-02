@@ -3,7 +3,7 @@
 // RUN: wave-opt --waveamd-reg-alloc -split-input-file %s | FileCheck %s --check-prefix=REGALLOC
 // RUN: wave-opt --waveamd-reg-alloc -split-input-file %s | wave-opt -split-input-file | FileCheck %s --check-prefix=REGALLOC
 
-// Lit coverage for the post-decompose IR shape: N scalar loads +
+// Lit coverage for the post-decompose IR shape: memory chunks +
 // `tuple_from_elements` (data) + `token_join` (token); tuple
 // consumer via the gather. Asserts (a) the waitcnt scoreboard
 // propagates per-counter token state through the gather without
@@ -71,8 +71,8 @@ func.func @decomposed_load_gather_regalloc(%off: !waveamdmachine.reg<vgpr, 1>,
 
 // -----
 
-// Store side: tuple_to_elements + N scalar stores. Each scalar
-// store's per-slot element should alias the tuple's `phys + i`.
+// Store side: tuple_to_elements + scalar stores. Each scalar store's
+// per-slot element should alias the tuple's `phys + i`.
 //
 // REGALLOC-LABEL: func.func @decomposed_store_split_regalloc
 // REGALLOC: %[[T:.+]] = waveamdmachine.v_mov_b32_tuple {{.*}} -> !waveamdmachine.reg<vgpr, 4, 0>

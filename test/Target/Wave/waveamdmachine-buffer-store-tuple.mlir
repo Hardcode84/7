@@ -4,9 +4,8 @@
 // RUN: wave-translate --wave-to-amdgpu-asm %s | llvm-mc -triple=amdgcn-amd-amdhsa -mcpu=gfx1100 -filetype=obj -o /dev/null
 
 // `waveamdmachine.buffer_store_tuple_b32` is the single op that covers
-// an N-dword tuple store on the buffer path. Asm emit expands it to
-// N consecutive `buffer_store_b32` instructions at
-// `inst_offset + i*4`.
+// an N-dword tuple store on the buffer path. Backend start decomposes
+// it to wide chunks before asm.
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 

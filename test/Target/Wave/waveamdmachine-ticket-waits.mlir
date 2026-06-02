@@ -100,35 +100,62 @@ func.func @existing_wait_satisfies_use(%x: !waveamdmachine.reg<vgpr, 1>) {
 
 // -----
 
-// Software-pipelined LDS staging exposes memory overlap when two
-// tuple-loads are issued before either of their LDS stores: the
-// first store only needs the *first* load drained, so the second
-// tuple's 8 hardware issues are allowed to remain in flight. This
-// pins down the resulting `s_waitcnt vmcnt(8)` (imm 9207) for the
-// first store and the trailing `vmcnt(0)` (imm 1015) for the second.
-// Without this scheduling the pass would emit two conservative
-// `vmcnt(0)` waits and serialize the two global tuples.
+// Post-decompose width-8 tuple shape: two b128 chunks per logical
+// tuple. First LDS store waits at `vmcnt(2)` and leaves the second
+// tuple's two chunks in flight.
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
-// CHECK-LABEL: func.func @overlap_two_tuple_loads
-// CHECK: waveamdmachine.global_load_tuple_b32
-// CHECK-NEXT: waveamdmachine.global_load_tuple_b32
-// CHECK-NEXT: waveamdmachine.imm 9207
+// CHECK-LABEL: func.func @overlap_two_chunked_loads
+// CHECK: waveamdmachine.global_load_b128
+// CHECK-NEXT: waveamdmachine.global_load_b128
+// CHECK-NEXT: waveamdmachine.global_load_b128
+// CHECK-NEXT: waveamdmachine.global_load_b128
+// CHECK-NEXT: waveamdmachine.token_join
+// CHECK-NEXT: waveamdmachine.token_join
+// CHECK-NEXT: waveamdmachine.imm 3063
 // CHECK-NEXT: waveamdmachine.s_waitcnt
-// CHECK-NEXT: waveamdmachine.ds_store_tuple_b32
+// CHECK-NEXT: waveamdmachine.ds_store_b128
+// CHECK-NEXT: waveamdmachine.ds_store_b128
 // CHECK-NEXT: waveamdmachine.imm 1015
 // CHECK-NEXT: waveamdmachine.s_waitcnt
-// CHECK-NEXT: waveamdmachine.ds_store_tuple_b32
-func.func @overlap_two_tuple_loads(%a_off: !waveamdmachine.reg<vgpr, 1>,
-                                   %a_base: !waveamdmachine.reg<sgpr, 2>,
-                                   %b_off: !waveamdmachine.reg<vgpr, 1>,
-                                   %b_base: !waveamdmachine.reg<sgpr, 2>,
-                                   %lds_a: !waveamdmachine.reg<vgpr, 1>,
-                                   %lds_b: !waveamdmachine.reg<vgpr, 1>) {
-  %a_regs, %a_tok = waveamdmachine.global_load_tuple_b32 %a_off, %a_base : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 2>) -> (!waveamdmachine.reg<vgpr, 8>, !waveamdmachine.mem.token)
-  %b_regs, %b_tok = waveamdmachine.global_load_tuple_b32 %b_off, %b_base : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 2>) -> (!waveamdmachine.reg<vgpr, 8>, !waveamdmachine.mem.token)
-  %a_st = waveamdmachine.ds_store_tuple_b32 %lds_a, %a_regs after %a_tok : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 8>, !waveamdmachine.mem.token) -> !waveamdmachine.mem.token
-  %b_st = waveamdmachine.ds_store_tuple_b32 %lds_b, %b_regs after %b_tok : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 8>, !waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+// CHECK-NEXT: waveamdmachine.ds_store_b128
+// CHECK-NEXT: waveamdmachine.ds_store_b128
+func.func @overlap_two_chunked_loads(%a_off: !waveamdmachine.reg<vgpr, 1>,
+                                     %a_base: !waveamdmachine.reg<sgpr, 2>,
+                                     %b_off: !waveamdmachine.reg<vgpr, 1>,
+                                     %b_base: !waveamdmachine.reg<sgpr, 2>,
+                                     %lds_a: !waveamdmachine.reg<vgpr, 1>,
+                                     %lds_b: !waveamdmachine.reg<vgpr, 1>) {
+  %a0, %a_t0 = waveamdmachine.global_load_b128 %a_off, %a_base
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 2>)
+        -> (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.mem.token)
+  %a1, %a_t1 = waveamdmachine.global_load_b128 %a_off, %a_base offset 16
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 2>)
+        -> (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.mem.token)
+  %b0, %b_t0 = waveamdmachine.global_load_b128 %b_off, %b_base
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 2>)
+        -> (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.mem.token)
+  %b1, %b_t1 = waveamdmachine.global_load_b128 %b_off, %b_base offset 16
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 2>)
+        -> (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.mem.token)
+  %a_tok = waveamdmachine.token_join %a_t0, %a_t1
+      : (!waveamdmachine.mem.token, !waveamdmachine.mem.token)
+        -> !waveamdmachine.mem.token
+  %b_tok = waveamdmachine.token_join %b_t0, %b_t1
+      : (!waveamdmachine.mem.token, !waveamdmachine.mem.token)
+        -> !waveamdmachine.mem.token
+  %a_s0 = waveamdmachine.ds_store_b128 %lds_a, %a0 after %a_tok
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 4>,
+         !waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+  %a_s1 = waveamdmachine.ds_store_b128 %lds_a, %a1 after %a_tok offset 16
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 4>,
+         !waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+  %b_s0 = waveamdmachine.ds_store_b128 %lds_b, %b0 after %b_tok
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 4>,
+         !waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+  %b_s1 = waveamdmachine.ds_store_b128 %lds_b, %b1 after %b_tok offset 16
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 4>,
+         !waveamdmachine.mem.token) -> !waveamdmachine.mem.token
   return
 }
 

@@ -401,6 +401,15 @@ static bool isMemoryIssuer(Operation *op) {
   return getWaitcntInfo(op).isIssuer();
 }
 
+static bool isTupleMemoryOp(Operation *op) {
+  return llvm::isa<
+      waveamdmachine::GlobalLoadTupleB32Op,
+      waveamdmachine::BufferLoadTupleB32Op, waveamdmachine::DsLoadTupleB32Op,
+      waveamdmachine::GlobalStoreTupleB32Op,
+      waveamdmachine::BufferStoreTupleB32Op, waveamdmachine::DsStoreTupleB32Op>(
+      op);
+}
+
 // Operand reads here are branch arguments, not value uses; framework
 // hooks remap tokens to successors instead.
 static bool isControlFlowOp(Operation *op) {
@@ -490,6 +499,9 @@ static unsigned waitPosition(const WaitState &state, const Token &token) {
 static LogicalResult validateWaveAMDMachineOp(Operation *op) {
   if (!isWaveAMDMachineOp(op))
     return success();
+  if (isTupleMemoryOp(op))
+    return op->emitError("waveamd-insert-ticket-waits expects tuple memory "
+                         "ops to be decomposed first");
   if (auto func = op->getParentOfType<func::FuncOp>();
       func && func->hasAttr(wave::WaveDialect::getKernelAttrName()) &&
       llvm::isa<waveamdmachine::ArgOp>(op))
