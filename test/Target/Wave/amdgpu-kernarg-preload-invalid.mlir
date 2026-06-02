@@ -2,10 +2,10 @@
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx942"} {
 
-// expected-error @below {{wave-to-amdgpu-asm kernarg preload offset must be less than 1024 dwords}}
+// expected-error @below {{wave-to-amdgpu-asm kernarg preload offset must be less than 512 dwords}}
 func.func @bad_preload_offset()
     attributes {wave.kernel, waveamdmachine.kernarg_preload_length = 1 : i64,
-                waveamdmachine.kernarg_preload_offset = 1024 : i64} {
+                waveamdmachine.kernarg_preload_offset = 512 : i64} {
   waveamdmachine.s_endpgm
   return
 }

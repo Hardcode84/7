@@ -711,9 +711,9 @@ private:
              << entryRegs.userSGPRCount << " user SGPRs, but target supports "
              << maxUserSGPRs;
     if (entryRegs.kernargPreloadDwords != 0 &&
-        entryRegs.kernargPreloadOffsetDwords >= 1024)
+        entryRegs.kernargPreloadOffsetDwords >= 512)
       return func.emitError("wave-to-amdgpu-asm kernarg preload offset must be "
-                            "less than 1024 dwords");
+                            "less than 512 dwords");
     return success();
   }
 
