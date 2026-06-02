@@ -450,7 +450,8 @@ def Wave_PtrAddOp : Wave_Op<"ptr_add", [Pure]> {
   let hasVerifier = 1;
 }
 
-def Wave_IndexExprOp : Wave_Op<"index_expr", [Pure]> {
+def Wave_IndexExprOp : Wave_Op<"index_expr", [Pure,
+    DeclareOpInterfaceMethods<InferIntRangeInterface, ["inferResultRanges"]>]> {
   let summary = "materialize a symbolic offset as a wave index value";
   let description = [{
     Produces an index-shaped value defined by a symbolic expression and a

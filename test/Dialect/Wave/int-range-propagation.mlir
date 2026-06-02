@@ -66,6 +66,27 @@ func.func @index_assume_range(%v: index) -> i1 {
   return %cmp : i1
 }
 
+// CHECK-LABEL: func.func @index_expr_range
+// CHECK-NEXT: %[[T:.*]] = arith.constant true
+// CHECK-NEXT: return %[[T]] : i1
+func.func @index_expr_range(%v: i32) -> i1 {
+  %a = wave.assume_range %v, [0, 10] : i32
+  %off = wave.index_expr <"1 + 4*x"> ["x"](%a) : (i32) -> index
+  %limit = arith.constant 42 : index
+  %cmp = arith.cmpi slt, %off, %limit : index  // [1, 41] < 42
+  return %cmp : i1
+}
+
+// CHECK-LABEL: func.func @index_expr_simd_no_crash
+// CHECK: wave.index_expr
+// CHECK: return
+func.func @index_expr_simd_no_crash() -> !wave.simd<index, 32> {
+  %lane = wave.lane_id : !wave.simd<i32, 32>
+  %off = wave.index_expr <"1 + 2*lid"> ["lid"](%lane)
+      : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
+  return %off : !wave.simd<index, 32>
+}
+
 // Id-op range seeds: workgroup_id contributes [0, INT32_MAX] without
 // any `wave.assume_range`. The lower bound alone is enough for the
 // non-negativity check to fold.

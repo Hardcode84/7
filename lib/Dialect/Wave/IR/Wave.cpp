@@ -683,6 +683,102 @@ normalizeWaveArithRanges(ArrayRef<ConstantIntRanges> argRanges, unsigned bits) {
   return normalized;
 }
 
+static bool isFullSignedRange(const ConstantIntRanges &range) {
+  unsigned width = range.smin().getBitWidth();
+  if (width == 0)
+    return true;
+  return range.smin() == APInt::getSignedMinValue(width) &&
+         range.smax() == APInt::getSignedMaxValue(width);
+}
+
+static std::optional<int64_t> getSExtI64(const APInt &value) {
+  if (!value.isSignedIntN(64))
+    return std::nullopt;
+  return value.getSExtValue();
+}
+
+static std::optional<sym::PredHandle>
+buildIndexExprRangeAssumption(sym::Store &store, StringRef name,
+                              const ConstantIntRanges &range) {
+  if (isFullSignedRange(range))
+    return std::nullopt;
+  std::optional<int64_t> lo = getSExtI64(range.smin());
+  std::optional<int64_t> hi = getSExtI64(range.smax());
+  if (!lo || !hi)
+    return std::nullopt;
+  FailureOr<sym::PredHandle> assumption =
+      sym::rangeAssumption(store, name, *lo, *hi);
+  if (failed(assumption))
+    return std::nullopt;
+  return *assumption;
+}
+
+static SmallVector<sym::PredHandle, 4>
+buildIndexExprRangeAssumptions(sym::Store &store, ArrayAttr names,
+                               ArrayRef<ConstantIntRanges> argRanges) {
+  SmallVector<sym::PredHandle, 4> assumptions;
+  for (auto [nameAttr, range] : llvm::zip(names, argRanges)) {
+    StringRef name = cast<StringAttr>(nameAttr).getValue();
+    std::optional<sym::PredHandle> assumption =
+        buildIndexExprRangeAssumption(store, name, range);
+    if (assumption)
+      assumptions.push_back(*assumption);
+  }
+  return assumptions;
+}
+
+static std::optional<int64_t> floorRational(sym::RationalEndpoint value) {
+  if (value.denominator <= 0)
+    return std::nullopt;
+  int64_t quotient = value.numerator / value.denominator;
+  int64_t remainder = value.numerator % value.denominator;
+  if (remainder != 0 && value.numerator < 0)
+    --quotient;
+  return quotient;
+}
+
+static std::optional<int64_t> ceilRational(sym::RationalEndpoint value) {
+  if (value.denominator <= 0)
+    return std::nullopt;
+  int64_t quotient = value.numerator / value.denominator;
+  int64_t remainder = value.numerator % value.denominator;
+  if (remainder != 0 && value.numerator > 0)
+    ++quotient;
+  return quotient;
+}
+
+static unsigned indexValueElementWidth(Type type) {
+  if (auto simd = dyn_cast<SimdType>(type))
+    type = simd.getElementType();
+  return ConstantIntRanges::getStorageBitwidth(type);
+}
+
+static bool fitsSignedWidth(int64_t value, unsigned bits) {
+  return bits >= 64 || APInt(64, value, /*isSigned=*/true).isSignedIntN(bits);
+}
+
+static std::optional<ConstantIntRanges>
+buildIndexExprResultRange(sym::Store &store, sym::ExprHandle expr,
+                          Type resultType,
+                          ArrayRef<sym::PredHandle> assumptions) {
+  std::optional<sym::InferredRange> range =
+      sym::inferRange(store, expr, assumptions);
+  if (!range || !range->lower || !range->upper)
+    return std::nullopt;
+
+  std::optional<int64_t> lo = floorRational(*range->lower);
+  std::optional<int64_t> hi = ceilRational(*range->upper);
+  if (!lo || !hi)
+    return std::nullopt;
+  unsigned bits = indexValueElementWidth(resultType);
+  if (bits == 0 || !fitsSignedWidth(*lo, bits) || !fitsSignedWidth(*hi, bits))
+    return std::nullopt;
+
+  APInt loValue(bits, *lo, /*isSigned=*/true);
+  APInt hiValue(bits, *hi, /*isSigned=*/true);
+  return ConstantIntRanges::fromSigned(loValue, hiValue);
+}
+
 void SplatOp::inferResultRanges(ArrayRef<ConstantIntRanges> argRanges,
                                 SetIntRangeFn setResultRange) {
   SimdType simd = cast<SimdType>(getResult().getType());
@@ -761,6 +857,22 @@ void AssumeRangeOp::inferResultRangesFromOptional(
           ? IntegerValueRange{asserted}
           : IntegerValueRange{asserted.intersection(incoming.getValue())};
   setResultRange(getResult(), out);
+}
+
+void IndexExprOp::inferResultRanges(ArrayRef<ConstantIntRanges> argRanges,
+                                    SetIntRangeFn setResultRange) {
+  WaveDialect *dialect = getContext()->getLoadedDialect<WaveDialect>();
+  if (!dialect)
+    return;
+  sym::Store &store = dialect->getSymbolStore();
+
+  SmallVector<sym::PredHandle, 4> assumptions =
+      buildIndexExprRangeAssumptions(store, getNames(), argRanges);
+  std::optional<ConstantIntRanges> range = buildIndexExprResultRange(
+      store, getExpr().getValue(), getResult().getType(), assumptions);
+  if (!range)
+    return;
+  setResultRange(getResult(), *range);
 }
 
 LogicalResult CmpIOp::verify() {
