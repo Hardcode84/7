@@ -95,6 +95,13 @@ def sym(name: str) -> ixsimpl.Expr:
     return sym_ctx.sym(name)
 
 
+def _expr_node_ptr(expr: ixsimpl.Expr) -> int:
+    try:
+        return int(expr.node_ptr)
+    except AttributeError as exc:
+        raise RuntimeError("ixsimpl Expr.node_ptr required") from exc
+
+
 # Re-export the ixsimpl algebraic helpers callers reach for when
 # building `wave.index_expr` expressions. Keeps the DSL the single
 # import point for kernel builders -- no separate `import ixsimpl`.
@@ -644,14 +651,9 @@ class FunctionBuilder:
         Python-side data model fully structural -- no string names
         crossing between the expression builder and the binding map.
 
-        We hand the dialect the canonical binary serialization
-        (`sym_ctx.serialize(expr)`) which it deserializes into its
-        own symbol store -- the structural bridge ixsimpl documents
-        for cross-context transfer, with no text on the FFI path.
-        Bindings are filtered to the expression's actual free
-        symbols, so callers can pass a superset (e.g. a per-kernel
-        binding dict) without tracking which symbols ixsimpl's
-        simplifier might have dropped.
+        The dialect imports `expr.node_ptr` into its own symbol store.
+        Bindings are filtered to actual free symbols, so callers can pass a
+        superset without tracking which symbols simplification dropped.
 
         When `result_type` is omitted the lane width is inferred from
         the binding operand types: lane-varying bindings produce
@@ -670,8 +672,8 @@ class FunctionBuilder:
             result_type = _index_expr_result_type(
                 _binding_lane_width(filtered.values())
             )
-        expr_attr = ExprAttr.get_from_bytes(
-            sym_ctx.serialize(expr), context=_current_context()
+        expr_attr = ExprAttr.get_from_node_ptr(
+            _expr_node_ptr(expr), context=_current_context()
         )
         names_attr = ArrayAttr.get([StringAttr.get(n) for n in filtered])
         return wave.IndexExprOp(

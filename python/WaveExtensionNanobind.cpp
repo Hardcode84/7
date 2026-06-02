@@ -140,10 +140,8 @@ static void bindPtrType(nb::module_ &m) {
       });
 }
 
-// #wave.expr constructors. `get_from_bytes` is the structural path:
-// callers pass the bytes produced by `ixsimpl.Context.serialize(expr)`
-// and the dialect deserializes into its own symbol store. `get` keeps
-// the legacy text-parse entry point for callers that start from text.
+// `get_from_node_ptr` imports Python ixsimpl nodes into the dialect store.
+// `get_from_bytes` stays for durable serialized blobs.
 static void bindExprAttr(nb::module_ &m) {
   mlir_attribute_subclass(m, "ExprAttr", mlirWaveAttributeIsAExpr)
       .def_classmethod(
@@ -157,6 +155,15 @@ static void bindExprAttr(nb::module_ &m) {
             return cls(attr);
           },
           nb::arg("cls"), nb::arg("text"), nb::arg("context"))
+      .def_classmethod(
+          "get_from_node_ptr",
+          [](nb::object &cls, uintptr_t nodePtr, MlirContext ctx) {
+            MlirAttribute attr = mlirWaveExprAttrGetFromNodePtr(ctx, nodePtr);
+            if (!attr.ptr)
+              throw nb::value_error("failed to import wave.expr node");
+            return cls(attr);
+          },
+          nb::arg("cls"), nb::arg("node_ptr"), nb::arg("context"))
       .def_classmethod(
           "get_from_bytes",
           [](nb::object &cls, nb::bytes data, MlirContext ctx) {

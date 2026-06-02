@@ -138,6 +138,23 @@ MlirAttribute mlirWaveExprAttrGetFromText(MlirContext ctx, MlirStringRef text) {
   return wrap(wave::ExprAttr::get(context, *handle));
 }
 
+MlirAttribute mlirWaveExprAttrGetFromNodePtr(MlirContext ctx,
+                                             uintptr_t nodePtr) {
+  MLIRContext *context = unwrap(ctx);
+  auto *dialect = context->getOrLoadDialect<wave::WaveDialect>();
+  if (!dialect)
+    return MlirAttribute{nullptr};
+  std::string diagnostic;
+  FailureOr<wave::sym::ExprHandle> handle = wave::sym::importExprFromNodePtr(
+      dialect->getSymbolStore(), nodePtr, &diagnostic);
+  if (failed(handle)) {
+    emitError(UnknownLoc::get(context))
+        << "failed to import wave.expr node: " << diagnostic;
+    return MlirAttribute{nullptr};
+  }
+  return wrap(wave::ExprAttr::get(context, *handle));
+}
+
 MlirAttribute mlirWaveExprAttrGetFromBytes(MlirContext ctx,
                                            const uint8_t *bytes,
                                            size_t length) {

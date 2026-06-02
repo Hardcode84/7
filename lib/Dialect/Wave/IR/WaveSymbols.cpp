@@ -467,6 +467,13 @@ FailureOr<ExprHandle> mlir::wave::sym::importExpr(Store &store,
   return ExprHandle(node);
 }
 
+FailureOr<ExprHandle>
+mlir::wave::sym::importExprFromNodePtr(Store &store, uintptr_t nodePtr,
+                                       std::string *diagnostic) {
+  const ixs_node *node = reinterpret_cast<const ixs_node *>(nodePtr);
+  return importExpr(store, node, diagnostic);
+}
+
 FailureOr<PredHandle> mlir::wave::sym::importPred(Store &store,
                                                   const ixs_node *foreign,
                                                   std::string *diagnostic) {

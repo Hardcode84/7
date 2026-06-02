@@ -149,11 +149,12 @@ def test_typed_bindings():
 
         expr = w.ExprAttr.get("4*lid + K", context=w.Context.current)
         assert w.ExprAttr.isinstance(expr)
-        expr_from_bytes = w.ExprAttr.get_from_bytes(
-            w.sym_ctx.serialize(4 * w.sym("lid") + w.sym("K")),
+        raw_expr = 4 * w.sym("lid") + w.sym("K")
+        expr_from_node = w.ExprAttr.get_from_node_ptr(
+            raw_expr.node_ptr,
             context=w.Context.current,
         )
-        assert w.ExprAttr.isinstance(expr_from_bytes)
+        assert w.ExprAttr.isinstance(expr_from_node)
         print("ok")
         # CHECK: ok
 
