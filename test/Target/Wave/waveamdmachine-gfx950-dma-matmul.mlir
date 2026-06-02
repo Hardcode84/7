@@ -7,6 +7,10 @@
 // RUN:   | FileCheck %s --check-prefix=PRELOAD
 // RUN: %python %S/../../../examples/wave/wmma_matmul_tiled.py --chip=gfx950 --m=128 --n=64 --k=64 --bm=2 --bn=2 --wave-m-tiles=2 --wave-n-tiles=2 --wave-k-tiles=2 --use-dma-lds --dump-asm 2>/dev/null \
 // RUN:   | FileCheck %s --check-prefix=ASM
+// RUN: %python %S/../../../examples/wave/wmma_matmul_tiled.py --chip=gfx950 --kernel-profile=gfx950-sw-pipeline --m=128 --n=128 --k=64 --dump-asm 2>/dev/null \
+// RUN:   | FileCheck %s --check-prefix=ASMBUF
+// RUN: %python %S/../../../examples/wave/wmma_matmul_tiled.py --chip=gfx950 --kernel-profile=gfx950-sw-pipeline --m=128 --n=128 --k=192 --dump-asm 2>/dev/null \
+// RUN:   | FileCheck %s --check-prefix=ASMPIPE
 //
 // IR: wave.index_expr <{{.*xor.*floor\(1/2\*Mod\(wi, 16\)\).*}}>
 // IR: waveamd.dma_load_lds
@@ -17,7 +21,6 @@
 // PRELOAD: waveamdmachine.kernarg_preload {dword_offset = 0 : i64} : !waveamdmachine.reg<sgpr, 2, 2>
 // PRELOAD: waveamdmachine.kernarg_preload {dword_offset = 2 : i64} : !waveamdmachine.reg<sgpr, 2, 4>
 // PRELOAD: waveamdmachine.kernarg_preload {dword_offset = 4 : i64} : !waveamdmachine.reg<sgpr, 2, 6>
-// PRELOAD: waveamdmachine.kernarg_preload {dword_offset = 6 : i64} : !waveamdmachine.reg<sgpr, 1, 8>
 // PRELOAD-NOT: waveamdmachine.s_load_b
 // PRELOAD: waveamdmachine.v_workitem_id_x
 //
@@ -37,3 +40,16 @@
 // ASM: v_mfma_f32_16x16x32_f16
 // ASM: .amdhsa_user_sgpr_kernarg_preload_length 7
 // ASM: .amdhsa_user_sgpr_kernarg_preload_offset 0
+
+// ASMBUF-LABEL: wmma_f16_matmul_tiled:
+// ASMBUF: buffer_load_dwordx4
+// ASMBUF: buffer_store_dwordx4
+
+// ASMPIPE-LABEL: wmma_f16_matmul_tiled:
+// ASMPIPE: s_waitcnt vmcnt(8)
+// ASMPIPE-NEXT: s_barrier
+// ASMPIPE: ds_read_b128
+// ASMPIPE: s_waitcnt lgkmcnt(0)
+// ASMPIPE-NEXT: buffer_load_dwordx4
+// ASMPIPE: s_waitcnt vmcnt(8)
+// ASMPIPE-NEXT: s_barrier

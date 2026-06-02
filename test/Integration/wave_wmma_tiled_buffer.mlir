@@ -1,12 +1,12 @@
 // REQUIRES: host-supports-amdgpu-wmma
 //
-// End-to-end check for the tiled WMMA f16xf16xf32 matmul with the A
-// and B kernel inputs wrapped in `waveamd.make_buffer` (`--use-buffer`).
+// End-to-end check for the tiled WMMA f16xf16xf32 matmul with the A,
+// B, and C kernel inputs wrapped in `waveamd.make_buffer` (`--use-buffer`).
 // Every per-K-step fragment load lowers to a tuple
 // `buffer_load_b32`, which the AMDGPU printer expands into eight
 // consecutive `buffer_load_dword ..., 0 offen offset:i*4` instructions
-// before each fragment rides through the per-wave LDS slot. The C
-// fragment store stays on the global path.
+// before each fragment rides through the per-wave LDS slot. C fragment
+// stores lower to buffer stores.
 //
 // The kernel math is unchanged from `wave_wmma_tiled_multi.mlir`, so
 // the same per-axis 1.0/2.0 fill pins the same C tile values

@@ -6,7 +6,10 @@
 // RUN:   | FileCheck %s --check-prefix=DMA-F16
 // RUN: %python %S/../../examples/wave/wmma_matmul_tiled.py --chip=%chip --kernel-profile=gfx950-sw-pipeline --m=128 --n=128 --k=64 --compare-cpu --seed=3 \
 // RUN:   | FileCheck %s --check-prefix=PIPE
+// RUN: %python %S/../../examples/wave/wmma_matmul_tiled.py --chip=%chip --kernel-profile=gfx950-sw-pipeline --m=128 --n=128 --k=192 --compare-cpu --seed=3 \
+// RUN:   | FileCheck %s --check-prefix=PIPE3
 //
 // DMA: CPU comparison passed
 // DMA-F16: CPU comparison passed
 // PIPE: CPU comparison passed
+// PIPE3: CPU comparison passed
