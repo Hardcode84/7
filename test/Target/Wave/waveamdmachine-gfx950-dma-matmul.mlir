@@ -2,6 +2,9 @@
 //
 // RUN: %python %S/../../../examples/wave/wmma_matmul_tiled.py --chip=gfx950 --m=32 --n=32 --k=64 --bm=2 --bn=2 --wave-k-tiles=2 --use-dma-lds 2>/dev/null \
 // RUN:   | FileCheck %s --check-prefix=IR
+// RUN: %python %S/../../../examples/wave/wmma_matmul_tiled.py --chip=gfx950 --m=32 --n=32 --k=64 --bm=2 --bn=2 --wave-k-tiles=2 --use-dma-lds 2>/dev/null \
+// RUN:   | wave-opt --pass-pipeline='builtin.module(wave-set-target-attr{chip=gfx950},transform-preload-library{transform-library-paths=%wave_pipelines},transform-interpreter{entry-point=waveamd_backend_unscheduled})' \
+// RUN:   | FileCheck %s --check-prefix=PRELOAD
 // RUN: %python %S/../../../examples/wave/wmma_matmul_tiled.py --chip=gfx950 --m=128 --n=64 --k=64 --bm=2 --bn=2 --wave-m-tiles=2 --wave-n-tiles=2 --wave-k-tiles=2 --use-dma-lds --dump-asm 2>/dev/null \
 // RUN:   | FileCheck %s --check-prefix=ASM
 //
@@ -9,8 +12,20 @@
 // IR: waveamd.dma_load_lds
 // IR: waveamd.mma "mfma.f32.16x16x32.f16"
 //
+// PRELOAD-LABEL: func.func @wmma_f16_matmul_tiled
+// PRELOAD-SAME: waveamdmachine.kernarg_preload_length = 7 : i64
+// PRELOAD: waveamdmachine.kernarg_preload {dword_offset = 0 : i64} : !waveamdmachine.reg<sgpr, 2, 2>
+// PRELOAD: waveamdmachine.kernarg_preload {dword_offset = 2 : i64} : !waveamdmachine.reg<sgpr, 2, 4>
+// PRELOAD: waveamdmachine.kernarg_preload {dword_offset = 4 : i64} : !waveamdmachine.reg<sgpr, 2, 6>
+// PRELOAD: waveamdmachine.kernarg_preload {dword_offset = 6 : i64} : !waveamdmachine.reg<sgpr, 1, 8>
+// PRELOAD-NOT: waveamdmachine.s_load_b
+// PRELOAD: waveamdmachine.v_workitem_id_x
+//
 // ASM: .amdgcn_target "amdgcn-amd-amdhsa--gfx950"
 // ASM-LABEL: wmma_f16_matmul_tiled:
+// ASM-NOT: s_load_dword
 // ASM: v_xor_b32_e32
 // ASM: global_load_lds_dwordx4
 // ASM: v_mfma_f32_16x16x32_f16
+// ASM: .amdhsa_user_sgpr_kernarg_preload_length 7
+// ASM: .amdhsa_user_sgpr_kernarg_preload_offset 0

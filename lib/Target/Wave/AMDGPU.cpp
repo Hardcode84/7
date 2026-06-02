@@ -717,8 +717,7 @@ private:
         entryRegs.kernargPreloadOffsetDwords >= 512)
       return func.emitError("wave-to-amdgpu-asm kernarg preload offset must be "
                             "less than 512 dwords");
-    return wave::verifyWaveAMDKernargPreloadRuntimeSupport(
-        func, "wave-to-amdgpu-asm");
+    return wave::verifyWaveAMDKernargPreloadTarget(func, "wave-to-amdgpu-asm");
   }
 
   LogicalResult emitKernelDescriptor(func::FuncOp func) {

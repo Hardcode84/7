@@ -16,19 +16,6 @@ func.func @bad_preload_offset()
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx942"} {
 
-// expected-error @below {{wave-to-amdgpu-asm kernarg preload requires a compatibility prolog on this target; Wave backend does not implement one}}
-func.func @preload_requires_prolog()
-    attributes {wave.kernel, waveamdmachine.kernarg_preload_length = 1 : i64} {
-  waveamdmachine.s_endpgm
-  return
-}
-
-}
-
-// -----
-
-module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx942"} {
-
 // expected-error @below {{wave-to-amdgpu-asm kernarg preload consumes 34 user SGPRs, but target supports}}
 func.func @too_many_preload_sgprs()
     attributes {wave.kernel, waveamdmachine.kernarg_preload_length = 32 : i64} {

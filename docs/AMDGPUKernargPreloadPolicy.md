@@ -1,7 +1,7 @@
 # AMDGPU Kernarg Preload Policy
 
-Status: Wave models kernarg preload in IR, but final asm rejects it on current
-backend targets.
+Status: Wave enables kernarg preload by default on targets with the LLVM
+`kernarg-preload` feature.
 
 LLVM reference:
 
@@ -13,15 +13,13 @@ LLVM reference:
 
 Wave policy:
 
-- ABI lowering may form `waveamdmachine.kernarg_preload` values for analysis,
-  scheduling, and regalloc tests.
-- `wave-to-amdgpu-asm` emits preload metadata only for targets that do not need
-  the compatibility prolog.
-- The current emitter supports gfx8/gfx9/gfx11. The preload-capable targets in
-  that set are gfx9-class and need the prolog, so positive preload length hard
-  fails at asm emission.
-- Default pipelines must not enable kernarg preload until either gfx125x backend
-  support lands or a compatibility prolog is implemented.
+- ABI lowering preloads the longest complete kernarg prefix that fits target
+  user-SGPR limits when the kernel has no explicit preload attrs.
+- Explicit `waveamdmachine.kernarg_preload_length` / `_offset` attrs keep
+  caller policy intact.
+- `wave-to-amdgpu-asm` emits preload metadata for preload-capable targets.
+- Compatibility prolog is still missing, so old firmware that does not skip the
+  256-byte prolog window remains a follow-up.
 
 Prolog implementation plan:
 

@@ -12,11 +12,13 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx942"} {
 // SELECT: waveamdmachine.s_mov_exec_b64
 //
 // ASM-LABEL: where_wave64_else:
-// ASM: s_load_dwordx2 [[MASK:s\[[0-9]+:[0-9]+\]]], s[0:1], 0x8
-// ASM: s_and_saveexec_b64 [[SAVE:s\[[0-9]+:[0-9]+\]]], [[MASK]]
-// ASM: s_andn2_b64 exec, [[SAVE]], [[MASK]]
+// ASM-NOT: s_load_dword
+// ASM: s_and_saveexec_b64 [[SAVE:s\[[0-9]+:[0-9]+\]]], s[4:5]
+// ASM: s_andn2_b64 exec, [[SAVE]], s[4:5]
 // ASM: s_mov_b64 exec, [[SAVE]]
 // ASM: .amdhsa_kernel where_wave64_else
+// ASM: .amdhsa_user_sgpr_kernarg_preload_length 4
+// ASM: .amdhsa_user_sgpr_kernarg_preload_offset 0
 // ASM: .wavefront_size: 64
 func.func @where_wave64_else(%out: !wave.ptr<#wave.global, i32>,
                              %active: !wave.mask<64>)

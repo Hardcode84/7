@@ -9,7 +9,9 @@
 #include "WaveAMDRegisterLimits.h"
 
 #include "Utils/AMDGPUBaseInfo.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Wave/IR/Wave.h"
+#include "mlir/Dialect/Wave/IR/WaveAMDABI.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineTarget.h"
 #include "llvm/ADT/Twine.h"
 #include "llvm/MC/MCSubtargetInfo.h"
@@ -62,6 +64,10 @@ WaveAMDKernelEntryRegs getWaveAMDKernelEntryRegs(func::FuncOp func) {
       func.getOperation(), getWaveAMDKernargPreloadLengthAttrName());
   regs.kernargPreloadOffsetDwords = getUnsignedIntegerAttr(
       func.getOperation(), getWaveAMDKernargPreloadOffsetAttrName());
+  if (regs.kernargPreloadDwords == 0 &&
+      !func->hasAttr(getWaveAMDKernargPreloadLengthAttrName()) &&
+      !func->hasAttr(getWaveAMDKernargPreloadOffsetAttrName()))
+    regs.kernargPreloadDwords = getWaveAMDDefaultKernargPreloadDwords(func);
   regs.userSGPRCount = regs.kernargSegmentPtrWidth + regs.kernargPreloadDwords;
 
   unsigned workgroupBase = regs.userSGPRCount;
@@ -127,6 +133,44 @@ FailureOr<bool> supportsWaveAMDKernargPreload(Operation *op,
   if (failed(sti))
     return failure();
   return llvm::AMDGPU::hasKernargPreload(**sti);
+}
+
+FailureOr<unsigned> getWaveAMDMaxKernargPreloadDwords(Operation *op,
+                                                      StringRef consumer) {
+  FailureOr<std::unique_ptr<llvm::MCSubtargetInfo>> sti =
+      createSubtargetInfo(op, consumer);
+  if (failed(sti))
+    return failure();
+  if (!llvm::AMDGPU::hasKernargPreload(**sti))
+    return 0;
+  unsigned maxUserSGPRs = llvm::AMDGPU::getMaxNumUserSGPRs(**sti);
+  if (maxUserSGPRs <= 2)
+    return 0;
+  return maxUserSGPRs - 2;
+}
+
+static unsigned getCompletePrefixDwords(ArrayRef<waveamd::KernargSlot> layout,
+                                        unsigned maxDwords) {
+  unsigned prefix = 0;
+  for (const waveamd::KernargSlot &slot : layout) {
+    unsigned end = (slot.offset + slot.size + 3) / 4;
+    if (end > maxDwords)
+      break;
+    prefix = end;
+  }
+  return prefix;
+}
+
+unsigned getWaveAMDDefaultKernargPreloadDwords(func::FuncOp func) {
+  if (!waveamdmachine::findAMDGPUTargetModule(func))
+    return 0;
+  FailureOr<unsigned> maxDwords =
+      getWaveAMDMaxKernargPreloadDwords(func, "waveamd entry registers");
+  if (failed(maxDwords))
+    return 0;
+  SmallVector<waveamd::KernargSlot> layout =
+      waveamd::getKernargLayout(func.getFunctionType().getInputs());
+  return getCompletePrefixDwords(layout, *maxDwords);
 }
 
 static bool isGfx125x(const llvm::AMDGPU::IsaVersion &isa) {

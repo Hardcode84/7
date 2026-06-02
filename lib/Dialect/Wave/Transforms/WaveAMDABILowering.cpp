@@ -64,6 +64,17 @@ static bool isCoveredByPreload(const waveamd::KernargSlot &slot,
          width <= entryRegs.kernargPreloadDwords - start;
 }
 
+static void applyDefaultKernargPreload(func::FuncOp func, OpBuilder &builder) {
+  if (func->hasAttr(wave::getWaveAMDKernargPreloadLengthAttrName()) ||
+      func->hasAttr(wave::getWaveAMDKernargPreloadOffsetAttrName()))
+    return;
+  unsigned preloadDwords = wave::getWaveAMDDefaultKernargPreloadDwords(func);
+  if (preloadDwords == 0)
+    return;
+  func->setAttr(wave::getWaveAMDKernargPreloadLengthAttrName(),
+                builder.getI64IntegerAttr(preloadDwords));
+}
+
 static Value
 createKernargPreload(OpBuilder &builder, Location loc,
                      waveamdmachine::RegType regType,
@@ -179,12 +190,13 @@ private:
   }
 
   static LogicalResult lowerKernel(func::FuncOp func, OpBuilder &builder) {
-    if (failed(wave::verifyWaveAMDKernargPreloadTarget(func,
-                                                       "waveamd-abi-lowering")))
-      return failure();
     TypeRange argTypes = func.getFunctionType().getInputs();
     SmallVector<waveamd::KernargSlot> layout =
         waveamd::getKernargLayout(argTypes);
+    applyDefaultKernargPreload(func, builder);
+    if (failed(wave::verifyWaveAMDKernargPreloadTarget(func,
+                                                       "waveamd-abi-lowering")))
+      return failure();
     wave::WaveAMDKernelEntryRegs entryRegs =
         wave::getWaveAMDKernelEntryRegs(func);
     for (Operation &op : llvm::make_early_inc_range(func.getBody().front())) {

@@ -45,9 +45,12 @@ struct WaveAMDKernelEntryRegs {
 StringRef getWaveAMDKernargPreloadLengthAttrName();
 StringRef getWaveAMDKernargPreloadOffsetAttrName();
 WaveAMDKernelEntryRegs getWaveAMDKernelEntryRegs(func::FuncOp func);
+unsigned getWaveAMDDefaultKernargPreloadDwords(func::FuncOp func);
 bool hasWaveAMDKernargPreloadRequest(func::FuncOp func);
 FailureOr<bool> supportsWaveAMDKernargPreload(Operation *op,
                                               StringRef consumer);
+FailureOr<unsigned> getWaveAMDMaxKernargPreloadDwords(Operation *op,
+                                                      StringRef consumer);
 FailureOr<bool> needsWaveAMDKernargPreloadCompatProlog(Operation *op,
                                                        StringRef consumer);
 LogicalResult verifyWaveAMDKernargPreloadTarget(func::FuncOp func,
