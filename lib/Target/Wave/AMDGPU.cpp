@@ -746,12 +746,13 @@ private:
   }
 
   static unsigned chooseKernargPreloadLoadWidth(unsigned phys,
+                                                unsigned offsetDwords,
                                                 unsigned remainingDwords) {
-    if (remainingDwords >= 8 && phys % 4 == 0)
+    if (remainingDwords >= 8 && phys % 4 == 0 && offsetDwords % 8 == 0)
       return 8;
-    if (remainingDwords >= 4 && phys % 4 == 0)
+    if (remainingDwords >= 4 && phys % 4 == 0 && offsetDwords % 4 == 0)
       return 4;
-    if (remainingDwords >= 2 && phys % 2 == 0)
+    if (remainingDwords >= 2 && phys % 2 == 0 && offsetDwords % 2 == 0)
       return 2;
     return 1;
   }
@@ -762,12 +763,12 @@ private:
     unsigned remainingDwords = entryRegs.kernargPreloadDwords;
     unsigned preloadSGPR =
         entryRegs.kernargSegmentPtrSGPR + entryRegs.kernargSegmentPtrWidth;
-    unsigned offsetBytes = entryRegs.kernargPreloadOffsetDwords * 4;
+    unsigned offsetDwords = entryRegs.kernargPreloadOffsetDwords;
     unsigned kernargPtr = mcSGPRReg(entryRegs.kernargSegmentPtrSGPR,
                                     entryRegs.kernargSegmentPtrWidth);
     while (remainingDwords != 0) {
-      unsigned width =
-          chooseKernargPreloadLoadWidth(preloadSGPR, remainingDwords);
+      unsigned width = chooseKernargPreloadLoadWidth(preloadSGPR, offsetDwords,
+                                                     remainingDwords);
       unsigned opcode = sLoadB32();
       if (width == 8)
         opcode = sLoadB256();
@@ -778,11 +779,11 @@ private:
       if (failed(emitMC(opcode, {llvm::MCOperand::createReg(
                                      mcSGPRReg(preloadSGPR, width)),
                                  llvm::MCOperand::createReg(kernargPtr),
-                                 llvm::MCOperand::createImm(offsetBytes),
+                                 llvm::MCOperand::createImm(offsetDwords * 4),
                                  llvm::MCOperand::createImm(0)})))
         return failure();
       preloadSGPR += width;
-      offsetBytes += width * 4;
+      offsetDwords += width;
       remainingDwords -= width;
     }
 
