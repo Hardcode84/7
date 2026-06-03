@@ -6,6 +6,7 @@
 # CHECK: matmul_auto_gfx950_wave_size: ok
 # CHECK: matmul_runner_gfx950_wave_size: ok
 # CHECK: matmul_bf16_forwarding: ok
+# CHECK: matmul_mxfp4_forwarding_and_trip_count: ok
 # CHECK: matmul_dma_sim_trip_count: ok
 # CHECK: matmul_pingpong_removed: ok
 
@@ -245,6 +246,127 @@ def check_matmul_bf16_forwarding(matmul) -> None:
     print("matmul_bf16_forwarding: ok")
 
 
+def make_mxfp4_args() -> argparse.Namespace:
+    return argparse.Namespace(
+        m=16,
+        n=16,
+        k=256,
+        bm=1,
+        bn=1,
+        wave_m_tiles=1,
+        wave_n_tiles=1,
+        wave_k_tiles=1,
+        use_buffer=False,
+        use_dma_lds=False,
+        matrix_intrinsic="auto",
+        chip="gfx950",
+        input_type="mxfp4",
+        output_type="f32",
+        cta_swizzle_xcds=1,
+        cta_group_m=1,
+        target_waves=0,
+        iters=1,
+        warmup=0,
+        no_check=True,
+    )
+
+
+def check_mxfp4_trip_count(matmul, args: argparse.Namespace) -> None:
+    example_cmd = matmul.build_example_args(args, "gfx950")
+    require(
+        "matmul_mxfp4_forwarding_and_trip_count",
+        "--input-type=mxfp4" in example_cmd,
+        "example command missing mxfp4 input type",
+    )
+    require(
+        "matmul_mxfp4_forwarding_and_trip_count",
+        matmul.mma_k_tile(args) == 128,
+        "MXFP4 should use K tile 128",
+    )
+    require(
+        "matmul_mxfp4_forwarding_and_trip_count",
+        matmul.compute_kernel_arg_trip_count(args) == 1,
+        "MXFP4 kernel arg trip count should be K/128 - 1",
+    )
+    require(
+        "matmul_mxfp4_forwarding_and_trip_count",
+        matmul.compute_sim_loop_trip_count(args) == 1,
+        "MXFP4 sim trip count should be K/128 - 1",
+    )
+
+
+def check_mxfp4_target_validation(matmul, args: argparse.Namespace) -> None:
+    validate_args = argparse.Namespace(
+        **vars(args),
+        repeats=1,
+        calibration_file=None,
+        pressure_vgpr_budget=-1,
+        pressure_sgpr_budget=-1,
+        pressure_critical_vgpr_budget=-1,
+        pressure_critical_sgpr_budget=-1,
+    )
+    validate_args.chip = "gfx1100"
+    try:
+        matmul.validate_args(validate_args)
+    except SystemExit:
+        pass
+    else:
+        require(
+            "matmul_mxfp4_forwarding_and_trip_count",
+            False,
+            "MXFP4 should reject non-gfx950 targets",
+        )
+
+
+def check_mxfp4_runner_forwarding(matmul, args: argparse.Namespace) -> None:
+    captured: list[list[str]] = []
+    old_run = matmul.run
+    try:
+
+        def fake_run(cmd, env=None):
+            captured.append(cmd)
+            return "per_launch_cycles_wallclock: 1\nper_launch_us: 1.0\n"
+
+        matmul.run = fake_run
+        matmul.run_hw(Path("runner"), Path("kernel.hsaco"), args, "/tmp")
+    finally:
+        matmul.run = old_run
+    require(
+        "matmul_mxfp4_forwarding_and_trip_count",
+        bool(captured),
+        "runner not called",
+    )
+    cmd = captured[0]
+    require(
+        "matmul_mxfp4_forwarding_and_trip_count",
+        "--input-type" in cmd,
+        "runner command missing --input-type",
+    )
+    require(
+        "matmul_mxfp4_forwarding_and_trip_count",
+        cmd[cmd.index("--input-type") + 1] == "mxfp4",
+        "runner should receive mxfp4",
+    )
+    require(
+        "matmul_mxfp4_forwarding_and_trip_count",
+        "--wave-size" in cmd,
+        "runner command missing --wave-size",
+    )
+    require(
+        "matmul_mxfp4_forwarding_and_trip_count",
+        cmd[cmd.index("--wave-size") + 1] == "64",
+        "runner should receive wave64",
+    )
+
+
+def check_matmul_mxfp4_forwarding_and_trip_count(matmul) -> None:
+    args = make_mxfp4_args()
+    check_mxfp4_trip_count(matmul, args)
+    check_mxfp4_target_validation(matmul, args)
+    check_mxfp4_runner_forwarding(matmul, args)
+    print("matmul_mxfp4_forwarding_and_trip_count: ok")
+
+
 def check_matmul_dma_sim_trip_count(matmul) -> None:
     base = argparse.Namespace(k=64, wave_k_tiles=2, use_dma_lds=False)
     require(
@@ -268,6 +390,20 @@ def check_matmul_dma_sim_trip_count(matmul) -> None:
         "matmul_dma_sim_trip_count",
         matmul.compute_sim_loop_trip_count(dma) == 0,
         "DMA sim trip count should be V - 2",
+    )
+
+    gfx950 = argparse.Namespace(
+        k=64,
+        wave_k_tiles=1,
+        use_dma_lds=False,
+        matrix_intrinsic="auto",
+        chip="gfx950",
+        input_type="f16",
+    )
+    require(
+        "matmul_dma_sim_trip_count",
+        matmul.compute_kernel_arg_trip_count(gfx950) == 1,
+        "gfx950 f16 should use K/32 - 1",
     )
 
     report_args = argparse.Namespace(
@@ -313,6 +449,7 @@ def main() -> int:
     check_matmul_wave_size(matmul)
     check_matmul_runner_wave_size(matmul)
     check_matmul_bf16_forwarding(matmul)
+    check_matmul_mxfp4_forwarding_and_trip_count(matmul)
     check_matmul_dma_sim_trip_count(matmul)
     try:
         matmul.parse_variants("pingpong")

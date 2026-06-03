@@ -10,6 +10,7 @@
 #include <hip/hip_runtime_api.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -20,7 +21,7 @@
 namespace {
 
 enum class CType { F32, F16 };
-enum class InputType { F16, BF16 };
+enum class InputType { F16, BF16, MXFP4 };
 
 struct Args {
   const char *hsaco = nullptr;
@@ -48,22 +49,23 @@ struct Args {
 
 static void usage() {
   std::fprintf(
-      stderr, "usage: wave-matmul-calibrate-runner [options] <hsaco> <kernel>\n"
-              "options:\n"
-              "  --m N                  output rows (default 32)\n"
-              "  --n N                  output cols (default 32)\n"
-              "  --k N                  contraction dim (default 32)\n"
-              "  --bm N                 M waves per block (default 1)\n"
-              "  --bn N                 N waves per block (default 2)\n"
-              "  --wave-m-tiles N       per-wave M tiles (default 1)\n"
-              "  --wave-n-tiles N       per-wave N tiles (default 1)\n"
-              "  --wave-k-tiles N       per-wave K tiles (default 1)\n"
-              "  --wave-size N          lanes per wave (default 32)\n"
-              "  --input-type f16|bf16  input element type (default f16)\n"
-              "  --c-type f32|f16       output element type (default f32)\n"
-              "  --iters N              launch iterations (default 1000)\n"
-              "  --warmup N             warmup launches (default 10)\n"
-              "  --no-check             skip all-ones output check\n");
+      stderr,
+      "usage: wave-matmul-calibrate-runner [options] <hsaco> <kernel>\n"
+      "options:\n"
+      "  --m N                  output rows (default 32)\n"
+      "  --n N                  output cols (default 32)\n"
+      "  --k N                  contraction dim (default 32)\n"
+      "  --bm N                 M waves per block (default 1)\n"
+      "  --bn N                 N waves per block (default 2)\n"
+      "  --wave-m-tiles N       per-wave M tiles (default 1)\n"
+      "  --wave-n-tiles N       per-wave N tiles (default 1)\n"
+      "  --wave-k-tiles N       per-wave K tiles (default 1)\n"
+      "  --wave-size N          lanes per wave (default 32)\n"
+      "  --input-type f16|bf16|mxfp4  input element type (default f16)\n"
+      "  --c-type f32|f16       output element type (default f32)\n"
+      "  --iters N              launch iterations (default 1000)\n"
+      "  --warmup N             warmup launches (default 10)\n"
+      "  --no-check             skip all-ones output check\n");
 }
 
 static int parseInt(const char *s) {
@@ -103,7 +105,11 @@ static void setInputType(Args &a, const char *v) {
     a.inputType = InputType::BF16;
     return;
   }
-  die("bad --input-type; expected f16 or bf16");
+  if (std::strcmp(v, "mxfp4") == 0) {
+    a.inputType = InputType::MXFP4;
+    return;
+  }
+  die("bad --input-type; expected f16, bf16, or mxfp4");
 }
 static void setCType(Args &a, const char *v) {
   if (std::strcmp(v, "f32") == 0) {
@@ -198,6 +204,8 @@ static void validateArgs(const Args &a) {
   requirePositive(a.waveNTiles, "wave-n-tiles must be positive");
   requirePositive(a.waveKTiles, "wave-k-tiles must be positive");
   requirePositive(a.waveSize, "wave-size must be positive");
+  if (a.inputType == InputType::MXFP4 && a.waveSize != 64)
+    die("MXFP4 calibration expects wave-size 64");
 }
 
 static Args parseArgs(int argc, char **argv) {
@@ -283,11 +291,118 @@ static const char *getCTypeName(CType type) {
 }
 
 static const char *getInputTypeName(InputType type) {
-  return type == InputType::BF16 ? "bf16" : "f16";
+  switch (type) {
+  case InputType::F16:
+    return "f16";
+  case InputType::BF16:
+    return "bf16";
+  case InputType::MXFP4:
+    return "mxfp4";
+  }
+  die("unknown input type");
 }
 
 static uint16_t oneBits(InputType type) {
-  return type == InputType::BF16 ? 0x3f80 : 0x3c00;
+  switch (type) {
+  case InputType::F16:
+    return 0x3c00;
+  case InputType::BF16:
+    return 0x3f80;
+  case InputType::MXFP4:
+    die("MXFP4 input is byte packed");
+  }
+  die("unknown input type");
+}
+
+static bool isMXFP4(InputType type) { return type == InputType::MXFP4; }
+
+static int mmaKTile(const Args &a) {
+  if (isMXFP4(a.inputType))
+    return 128;
+  if (a.waveSize == 64)
+    return 32;
+  return 16;
+}
+
+static std::vector<uint8_t> makeInputBytes(int rows, int k, InputType type) {
+  size_t elements = static_cast<size_t>(rows) * k;
+  if (isMXFP4(type)) {
+    if (elements % 2 != 0)
+      die("MXFP4 input element count must be even");
+    return std::vector<uint8_t>(elements / 2, 0x22);
+  }
+
+  uint16_t bits = oneBits(type);
+  std::vector<uint8_t> bytes(elements * sizeof(bits));
+  for (size_t i = 0; i < elements; ++i)
+    std::memcpy(bytes.data() + i * sizeof(bits), &bits, sizeof(bits));
+  return bytes;
+}
+
+static std::vector<uint8_t> makeMXFP4ScaleBytes(int rows, int k) {
+  int groups = divExact(k, 32, "bad MXFP4 scale groups");
+  return std::vector<uint8_t>(static_cast<size_t>(rows) * groups, 0x7f);
+}
+
+struct DeviceBuffers {
+  void *deviceA = nullptr;
+  void *deviceB = nullptr;
+  void *deviceAScale = nullptr;
+  void *deviceBScale = nullptr;
+  void *deviceC = nullptr;
+  int cElements = 0;
+  size_t cBytes = 0;
+};
+
+static DeviceBuffers prepareDeviceBuffers(const Args &a) {
+  std::vector<uint8_t> hostA = makeInputBytes(a.m, a.k, a.inputType);
+  std::vector<uint8_t> hostB = makeInputBytes(a.n, a.k, a.inputType);
+  std::vector<uint8_t> hostAScale;
+  std::vector<uint8_t> hostBScale;
+  if (isMXFP4(a.inputType)) {
+    hostAScale = makeMXFP4ScaleBytes(a.m, a.k);
+    hostBScale = makeMXFP4ScaleBytes(a.n, a.k);
+  }
+
+  DeviceBuffers b;
+  b.cElements = a.m * a.n;
+  b.cBytes = static_cast<size_t>(b.cElements) *
+             (a.cType == CType::F16 ? sizeof(uint16_t) : sizeof(float));
+  checkHip(hipMalloc(&b.deviceA, hostA.size()), "hipMalloc A");
+  checkHip(hipMalloc(&b.deviceB, hostB.size()), "hipMalloc B");
+  if (isMXFP4(a.inputType)) {
+    checkHip(hipMalloc(&b.deviceAScale, hostAScale.size()),
+             "hipMalloc A scale");
+    checkHip(hipMalloc(&b.deviceBScale, hostBScale.size()),
+             "hipMalloc B scale");
+  }
+  checkHip(hipMalloc(&b.deviceC, b.cBytes), "hipMalloc C");
+  checkHip(
+      hipMemcpy(b.deviceA, hostA.data(), hostA.size(), hipMemcpyHostToDevice),
+      "hipMemcpy A");
+  checkHip(
+      hipMemcpy(b.deviceB, hostB.data(), hostB.size(), hipMemcpyHostToDevice),
+      "hipMemcpy B");
+  if (isMXFP4(a.inputType)) {
+    checkHip(hipMemcpy(b.deviceAScale, hostAScale.data(), hostAScale.size(),
+                       hipMemcpyHostToDevice),
+             "hipMemcpy A scale");
+    checkHip(hipMemcpy(b.deviceBScale, hostBScale.data(), hostBScale.size(),
+                       hipMemcpyHostToDevice),
+             "hipMemcpy B scale");
+  }
+  checkHip(hipMemset(b.deviceC, 0, b.cBytes), "hipMemset C");
+  return b;
+}
+
+static void freeDeviceBuffers(DeviceBuffers &b) {
+  checkHip(hipFree(b.deviceA), "hipFree A");
+  checkHip(hipFree(b.deviceB), "hipFree B");
+  if (b.deviceAScale)
+    checkHip(hipFree(b.deviceAScale), "hipFree A scale");
+  if (b.deviceBScale)
+    checkHip(hipFree(b.deviceBScale), "hipFree B scale");
+  checkHip(hipFree(b.deviceC), "hipFree C");
 }
 
 static void copyAndCheckOutput(void *deviceC, size_t cBytes, int cElements,
@@ -316,7 +431,8 @@ int main(int argc, char **argv) {
   int blocksX = divExact(a.m, 16 * a.bm * a.waveMTiles, "bad M blocking");
   int blocksY = divExact(a.n, 16 * a.bn * a.waveNTiles, "bad N blocking");
   int blockThreads = a.bm * a.bn * a.waveSize;
-  int virtualKSteps = divExact(a.k, 16 * a.waveKTiles, "bad K blocking");
+  int virtualKSteps =
+      divExact(a.k, mmaKTile(a) * a.waveKTiles, "bad K blocking");
   int tripCount = std::max(virtualKSteps - 1, 0);
 
   hipDeviceProp_t props;
@@ -329,33 +445,18 @@ int main(int argc, char **argv) {
   checkHip(hipModuleLoad(&mod, a.hsaco), "hipModuleLoad");
   checkHip(hipModuleGetFunction(&kfn, mod, a.kernel), "hipModuleGetFunction");
 
-  std::vector<uint16_t> hostA(static_cast<size_t>(a.m) * a.k,
-                              oneBits(a.inputType));
-  std::vector<uint16_t> hostB(static_cast<size_t>(a.n) * a.k,
-                              oneBits(a.inputType));
-  int cElements = a.m * a.n;
-  size_t cBytes = static_cast<size_t>(cElements) *
-                  (a.cType == CType::F16 ? sizeof(uint16_t) : sizeof(float));
-
-  uint16_t *deviceA = nullptr;
-  uint16_t *deviceB = nullptr;
-  void *deviceC = nullptr;
-  checkHip(hipMalloc(&deviceA, hostA.size() * sizeof(uint16_t)), "hipMalloc A");
-  checkHip(hipMalloc(&deviceB, hostB.size() * sizeof(uint16_t)), "hipMalloc B");
-  checkHip(hipMalloc(&deviceC, cBytes), "hipMalloc C");
-  checkHip(hipMemcpy(deviceA, hostA.data(), hostA.size() * sizeof(uint16_t),
-                     hipMemcpyHostToDevice),
-           "hipMemcpy A");
-  checkHip(hipMemcpy(deviceB, hostB.data(), hostB.size() * sizeof(uint16_t),
-                     hipMemcpyHostToDevice),
-           "hipMemcpy B");
-  checkHip(hipMemset(deviceC, 0, cBytes), "hipMemset C");
-
-  void *kernelArgs[] = {&deviceA, &deviceB, &deviceC, &tripCount};
+  DeviceBuffers buffers = prepareDeviceBuffers(a);
+  std::array<void *, 4> kernelArgs = {&buffers.deviceA, &buffers.deviceB,
+                                      &buffers.deviceC, &tripCount};
+  std::array<void *, 6> mxfp4KernelArgs = {
+      &buffers.deviceA,      &buffers.deviceB,      &buffers.deviceC,
+      &buffers.deviceAScale, &buffers.deviceBScale, &tripCount};
+  void **activeKernelArgs =
+      isMXFP4(a.inputType) ? mxfp4KernelArgs.data() : kernelArgs.data();
 
   for (int i = 0; i < a.warmupIters; ++i)
     checkHip(hipModuleLaunchKernel(kfn, blocksX, blocksY, 1, blockThreads, 1, 1,
-                                   0, nullptr, kernelArgs, nullptr),
+                                   0, nullptr, activeKernelArgs, nullptr),
              "warmup launch");
   checkHip(hipDeviceSynchronize(), "warmup sync");
 
@@ -365,7 +466,7 @@ int main(int argc, char **argv) {
   checkHip(hipEventRecord(start, nullptr), "event record start");
   for (int i = 0; i < a.iters; ++i)
     checkHip(hipModuleLaunchKernel(kfn, blocksX, blocksY, 1, blockThreads, 1, 1,
-                                   0, nullptr, kernelArgs, nullptr),
+                                   0, nullptr, activeKernelArgs, nullptr),
              "timed launch");
   checkHip(hipEventRecord(stop, nullptr), "event record stop");
   checkHip(hipEventSynchronize(stop), "event sync stop");
@@ -391,10 +492,7 @@ int main(int argc, char **argv) {
   std::printf("total_ms: %.3f\n", elapsedMs);
   std::printf("per_launch_us: %.3f\n", perLaunchUs);
   std::printf("per_launch_cycles_wallclock: %.0f\n", perLaunchCycles);
-  copyAndCheckOutput(deviceC, cBytes, cElements, a);
-
-  checkHip(hipFree(deviceA), "hipFree A");
-  checkHip(hipFree(deviceB), "hipFree B");
-  checkHip(hipFree(deviceC), "hipFree C");
+  copyAndCheckOutput(buffers.deviceC, buffers.cBytes, buffers.cElements, a);
+  freeDeviceBuffers(buffers);
   return 0;
 }

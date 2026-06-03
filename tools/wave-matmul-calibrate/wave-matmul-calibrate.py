@@ -439,8 +439,28 @@ def parse_total_cycles(text: str) -> int:
     return int(match.group(1))
 
 
+def selected_matrix_intrinsic(args: argparse.Namespace) -> str:
+    requested = getattr(args, "matrix_intrinsic", "auto")
+    if requested != "auto":
+        return requested
+    chip = getattr(args, "chip", "")
+    if chip.startswith("gfx95"):
+        return "mfma_gfx950"
+    if chip.startswith("gfx9"):
+        return "mfma"
+    return "wmma"
+
+
+def mma_k_tile(args: argparse.Namespace) -> int:
+    if getattr(args, "input_type", "f16") == "mxfp4":
+        return 128
+    if selected_matrix_intrinsic(args) == "mfma_gfx950":
+        return 32
+    return 16
+
+
 def compute_virtual_k_steps(args: argparse.Namespace) -> int:
-    return div_exact(args.k, 16 * args.wave_k_tiles, "bad K blocking")
+    return div_exact(args.k, mma_k_tile(args) * args.wave_k_tiles, "bad K blocking")
 
 
 def compute_kernel_arg_trip_count(args: argparse.Namespace) -> int:
@@ -673,7 +693,7 @@ def build_argparser() -> argparse.ArgumentParser:
         default="auto",
     )
     ap.add_argument("--output-type", choices=("f32", "f16"), default="f32")
-    ap.add_argument("--input-type", choices=("f16", "bf16"), default="f16")
+    ap.add_argument("--input-type", choices=("f16", "bf16", "mxfp4"), default="f16")
     ap.add_argument("--cta-swizzle-xcds", type=int, default=1)
     ap.add_argument("--cta-group-m", type=int, default=1)
     ap.add_argument("--iters", type=int, default=1000)
@@ -719,6 +739,22 @@ def build_argparser() -> argparse.ArgumentParser:
     return ap
 
 
+def validate_mxfp4_args(args: argparse.Namespace) -> None:
+    if args.input_type == "mxfp4":
+        if args.chip != "gfx950":
+            sys.exit("--input-type=mxfp4 requires gfx950")
+        if selected_matrix_intrinsic(args) != "mfma_gfx950":
+            sys.exit("--input-type=mxfp4 requires gfx950 MFMA")
+        if args.use_dma_lds:
+            sys.exit("MXFP4 calibration does not support --use-dma-lds yet")
+
+
+def validate_pressure_budget_args(args: argparse.Namespace) -> None:
+    for _, name in PRESSURE_BUDGET_OPTIONS:
+        if getattr(args, name) < -1:
+            sys.exit(f"--{name.replace('_', '-')} must be >= -1")
+
+
 def validate_args(args: argparse.Namespace) -> None:
     if args.repeats <= 0:
         sys.exit("--repeats must be positive")
@@ -730,15 +766,14 @@ def validate_args(args: argparse.Namespace) -> None:
         sys.exit("--cta-group-m must be >= 1")
     if args.calibration_file is not None and not args.calibration_file.exists():
         sys.exit(f"--calibration-file does not exist: {args.calibration_file}")
-    for _, name in PRESSURE_BUDGET_OPTIONS:
-        if getattr(args, name) < -1:
-            sys.exit(f"--{name.replace('_', '-')} must be >= -1")
+    validate_mxfp4_args(args)
+    validate_pressure_budget_args(args)
 
 
 def main() -> int:
     args = build_argparser().parse_args()
-    validate_args(args)
     chip = resolve_chip(args)
+    validate_args(args)
     variants = args.variants
 
     tmp_ctx = None if args.keep_tmp else tempfile.TemporaryDirectory()
