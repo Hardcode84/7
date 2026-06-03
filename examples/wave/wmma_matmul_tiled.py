@@ -157,6 +157,18 @@ def _add_codegen_args(parser: argparse.ArgumentParser) -> None:
         help="stamp waveamdmachine.target_waves on the kernel; 0 omits it",
     )
     parser.add_argument(
+        "--cta-swizzle-xcds",
+        type=int,
+        default=1,
+        help="remap CTAs across this many XCDs; 1 disables XCD remap",
+    )
+    parser.add_argument(
+        "--cta-group-m",
+        type=int,
+        default=1,
+        help="Gluon-style M grouping after linear CTA remap; 1 disables grouping",
+    )
+    parser.add_argument(
         "--input-type",
         choices=("f16", "bf16"),
         default="f16",
@@ -270,6 +282,8 @@ def main(argv: list[str] | None = None) -> int:
         output_type=args.output_type,
         random_data=random_data,
         random_seed=args.seed,
+        cta_swizzle_xcds=args.cta_swizzle_xcds,
+        cta_group_m=args.cta_group_m,
         target_waves=args.target_waves or None,
     )
     module_text = str(module)
@@ -305,6 +319,8 @@ def main(argv: list[str] | None = None) -> int:
         matrix_intrinsic=matrix_intrinsic,
         input_type=args.input_type,
         output_type=args.output_type,
+        cta_swizzle_xcds=args.cta_swizzle_xcds,
+        cta_group_m=args.cta_group_m,
     )
     ok, message = _compare_tile_multisets(
         parse_runner_values(output),

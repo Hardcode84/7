@@ -133,6 +133,8 @@ class _MatmulConfig:
     output_type: str = "f32"
     random_data: bool = False
     random_seed: int = 0
+    cta_swizzle_xcds: int = 1
+    cta_group_m: int = 1
 
     def __post_init__(self) -> None:
         _validate_positive_shape(self)
@@ -233,6 +235,20 @@ def _validate_positive_shape(cfg: _MatmulConfig) -> None:
             raise ValueError(f"{dim} must be a positive multiple of 16; got {val}")
     if cfg.BM < 1 or cfg.BN < 1:
         raise ValueError(f"BM and BN must be >= 1; got BM={cfg.BM}, BN={cfg.BN}")
+    _validate_cta_remap_params(cfg)
+    _validate_wave_tile_counts(cfg)
+    _validate_choice("output_type", cfg.output_type, ("f32", "f16"))
+    _validate_choice("input_type", cfg.input_type, ("f16", "bf16"))
+
+
+def _validate_cta_remap_params(cfg: _MatmulConfig) -> None:
+    if cfg.cta_swizzle_xcds < 1:
+        raise ValueError(f"cta_swizzle_xcds must be >= 1; got {cfg.cta_swizzle_xcds}")
+    if cfg.cta_group_m < 1:
+        raise ValueError(f"cta_group_m must be >= 1; got {cfg.cta_group_m}")
+
+
+def _validate_wave_tile_counts(cfg: _MatmulConfig) -> None:
     if cfg.wave_m_tiles < 1 or cfg.wave_n_tiles < 1 or cfg.wave_k_tiles < 1:
         raise ValueError(
             f"wave_m_tiles, wave_n_tiles and wave_k_tiles must be >= 1; "
@@ -240,8 +256,6 @@ def _validate_positive_shape(cfg: _MatmulConfig) -> None:
             f"wave_n_tiles={cfg.wave_n_tiles}, "
             f"wave_k_tiles={cfg.wave_k_tiles}"
         )
-    _validate_choice("output_type", cfg.output_type, ("f32", "f16"))
-    _validate_choice("input_type", cfg.input_type, ("f16", "bf16"))
 
 
 def _validate_tile_shape(cfg: _MatmulConfig) -> None:
@@ -277,6 +291,18 @@ def _validate_tile_shape(cfg: _MatmulConfig) -> None:
         raise ValueError(
             f"BM * BN must be <= 32 (RDNA3 workgroup wave cap); "
             f"got BM={cfg.BM}, BN={cfg.BN} (product={cfg.waves_per_workgroup})"
+        )
+    if cfg.cta_swizzle_xcds > 1:
+        total_ctas = cfg.M_blocks * cfg.N_blocks
+        if total_ctas % cfg.cta_swizzle_xcds != 0:
+            raise ValueError(
+                "cta_swizzle_xcds currently requires total CTA count to divide "
+                f"evenly; got total={total_ctas}, xcds={cfg.cta_swizzle_xcds}"
+            )
+    if cfg.M_blocks % cfg.cta_group_m != 0:
+        raise ValueError(
+            "cta_group_m currently requires M_blocks to divide evenly; "
+            f"got M_blocks={cfg.M_blocks}, cta_group_m={cfg.cta_group_m}"
         )
 
 
@@ -398,6 +424,8 @@ def compute_wmma_f16_matmul_reference_buffer(
     matrix_intrinsic: str = "wmma",
     input_type: str = "f16",
     output_type: str = "f32",
+    cta_swizzle_xcds: int = 1,
+    cta_group_m: int = 1,
 ) -> tuple[float, ...]:
     cfg = _MatmulConfig(
         M=M,
@@ -413,6 +441,8 @@ def compute_wmma_f16_matmul_reference_buffer(
         matrix_intrinsic=matrix_intrinsic,
         input_type=input_type,
         output_type=output_type,
+        cta_swizzle_xcds=cta_swizzle_xcds,
+        cta_group_m=cta_group_m,
     )
     a_values, b_values = generate_wmma_f16_matmul_inputs(
         M,
@@ -473,6 +503,40 @@ def _output_element_type(cfg: _MatmulConfig) -> dsl.Type:
     return dsl.f16() if cfg.output_type == "f16" else dsl.f32()
 
 
+def _emit_cta_coords(
+    bld: dsl.FunctionBuilder,
+    cfg: _MatmulConfig,
+) -> tuple[dsl.Value, dsl.Value]:
+    wg_m_raw = bld.assume_range(bld.workgroup_id(axis=0), 0, cfg.M_blocks - 1)
+    wg_n_raw = bld.assume_range(bld.workgroup_id(axis=1), 0, cfg.N_blocks - 1)
+    if cfg.cta_swizzle_xcds == 1 and cfg.cta_group_m == 1:
+        return wg_m_raw, wg_n_raw
+
+    raw_m = dsl.sym("wg_m_raw")
+    raw_n = dsl.sym("wg_n_raw")
+    raw_pid = raw_n * cfg.M_blocks + raw_m
+    pid = raw_pid
+    if cfg.cta_swizzle_xcds > 1:
+        pids_per_xcd = (cfg.M_blocks * cfg.N_blocks) // cfg.cta_swizzle_xcds
+        pid = dsl.mod(raw_pid, cfg.cta_swizzle_xcds) * pids_per_xcd + dsl.floor(
+            raw_pid / cfg.cta_swizzle_xcds
+        )
+
+    group_span = cfg.cta_group_m * cfg.N_blocks
+    pid_in_group = dsl.mod(pid, group_span)
+    wg_m = dsl.floor(pid / group_span) * cfg.cta_group_m + dsl.mod(
+        pid_in_group, cfg.cta_group_m
+    )
+    wg_n = dsl.floor(pid_in_group / cfg.cta_group_m)
+    bindings = {raw_m: wg_m_raw, raw_n: wg_n_raw}
+    wg_m_val = bld.index_expr(wg_m, bindings=bindings)
+    wg_n_val = bld.index_expr(wg_n, bindings=bindings)
+    return (
+        bld.assume_range(wg_m_val, 0, cfg.M_blocks - 1),
+        bld.assume_range(wg_n_val, 0, cfg.N_blocks - 1),
+    )
+
+
 def _emit_tile_coords(bld: dsl.FunctionBuilder, cfg: _MatmulConfig) -> _TileCoords:
     """Compute the per-wave (lane, A/B/C base ptrs) from workitem ids.
 
@@ -505,8 +569,7 @@ def _emit_tile_coords(bld: dsl.FunctionBuilder, cfg: _MatmulConfig) -> _TileCoor
         0,
         cfg.threads_per_workgroup - 1,
     )
-    wg_m_val = bld.assume_range(bld.workgroup_id(axis=0), 0, cfg.M_blocks - 1)
-    wg_n_val = bld.assume_range(bld.workgroup_id(axis=1), 0, cfg.N_blocks - 1)
+    wg_m_val, wg_n_val = _emit_cta_coords(bld, cfg)
 
     # Symbolic offset side via the shared `dsl.sym_ctx`. wave_id /
     # m_wave / n_wave / lane_mod16 ride floor / mod nodes lowered to shr / and.
@@ -1643,6 +1706,88 @@ def _emit_host(bld: dsl.FunctionBuilder, cfg: _MatmulConfig) -> None:
     bld.call(print_helper, [c_unranked])
 
 
+def _make_matmul_config(
+    M: int,
+    N: int,
+    K: int,
+    *,
+    BM: int,
+    BN: int,
+    wave_m_tiles: int,
+    wave_n_tiles: int,
+    wave_k_tiles: int,
+    use_buffer: bool,
+    use_dma_lds: bool,
+    matrix_intrinsic: str,
+    input_type: str,
+    output_type: str,
+    random_data: bool,
+    random_seed: int,
+    cta_swizzle_xcds: int,
+    cta_group_m: int,
+) -> _MatmulConfig:
+    return _MatmulConfig(
+        M=M,
+        N=N,
+        K=K,
+        BM=BM,
+        BN=BN,
+        wave_m_tiles=wave_m_tiles,
+        wave_n_tiles=wave_n_tiles,
+        wave_k_tiles=wave_k_tiles,
+        use_buffer=use_buffer,
+        use_dma_lds=use_dma_lds,
+        matrix_intrinsic=matrix_intrinsic,
+        input_type=input_type,
+        output_type=output_type,
+        random_data=random_data,
+        random_seed=random_seed,
+        cta_swizzle_xcds=cta_swizzle_xcds,
+        cta_group_m=cta_group_m,
+    )
+
+
+def _declare_matmul_externals(bld: dsl.ModuleBuilder, cfg: _MatmulConfig) -> None:
+    input_helper = _BF16_PTR_HELPER if cfg.input_type == "bf16" else _F16_PTR_HELPER
+    bld.declare_external(
+        input_helper,
+        [dsl.dynamic_1d_memref_type(cfg.input_element_type)],
+        [dsl.ptr_type(cfg.input_element_type)],
+    )
+    if cfg.output_type == "f16":
+        if cfg.input_type != "f16":
+            bld.declare_external(
+                _F16_PTR_HELPER,
+                [dsl.dynamic_1d_memref_type(dsl.f16())],
+                [dsl.ptr_type(dsl.f16())],
+            )
+        bld.declare_external(
+            _PRINT_F16_HELPER,
+            [dsl.unranked_memref_type(dsl.f16())],
+            [],
+        )
+        return
+    bld.declare_external(
+        _F32_PTR_HELPER,
+        [dsl.MemRefType.get([cfg.total_elements], dsl.f32())],
+        [dsl.ptr_type(dsl.f32())],
+    )
+    bld.declare_external(
+        _PRINT_HELPER,
+        [dsl.unranked_memref_type(dsl.f32())],
+        [],
+    )
+
+
+def _kernel_input_types(cfg: _MatmulConfig) -> list[dsl.Type]:
+    return [
+        dsl.ptr_type(cfg.input_element_type),
+        dsl.ptr_type(cfg.input_element_type),
+        dsl.ptr_type(cfg.c_type),
+        dsl.i32(),
+    ]
+
+
 def build_wmma_f16_matmul_module(
     M: int,
     N: int,
@@ -1660,11 +1805,13 @@ def build_wmma_f16_matmul_module(
     output_type: str = "f32",
     random_data: bool = False,
     random_seed: int = 0,
+    cta_swizzle_xcds: int = 1,
+    cta_group_m: int = 1,
     skip_specialize: bool = False,
     target_waves: int | None = None,
 ) -> Module:
     """Return an MLIR module for the tiled matmul host + kernel."""
-    cfg = _MatmulConfig(
+    cfg = _make_matmul_config(
         M=M,
         N=N,
         K=K,
@@ -1680,53 +1827,18 @@ def build_wmma_f16_matmul_module(
         output_type=output_type,
         random_data=random_data,
         random_seed=random_seed,
+        cta_swizzle_xcds=cta_swizzle_xcds,
+        cta_group_m=cta_group_m,
     )
     bld = dsl.ModuleBuilder()
     with bld:
-        input_helper = _BF16_PTR_HELPER if cfg.input_type == "bf16" else _F16_PTR_HELPER
-        bld.declare_external(
-            input_helper,
-            [dsl.dynamic_1d_memref_type(cfg.input_element_type)],
-            [dsl.ptr_type(cfg.input_element_type)],
-        )
-        if cfg.output_type == "f16":
-            if cfg.input_type != "f16":
-                bld.declare_external(
-                    _F16_PTR_HELPER,
-                    [dsl.dynamic_1d_memref_type(dsl.f16())],
-                    [dsl.ptr_type(dsl.f16())],
-                )
-            bld.declare_external(
-                _PRINT_F16_HELPER,
-                [dsl.unranked_memref_type(dsl.f16())],
-                [],
-            )
-        else:
-            bld.declare_external(
-                _F32_PTR_HELPER,
-                [dsl.MemRefType.get([cfg.total_elements], dsl.f32())],
-                [dsl.ptr_type(dsl.f32())],
-            )
-            bld.declare_external(
-                _PRINT_HELPER,
-                [dsl.unranked_memref_type(dsl.f32())],
-                [],
-            )
-
-        kernel_inputs = [
-            dsl.ptr_type(cfg.input_element_type),
-            dsl.ptr_type(cfg.input_element_type),
-            dsl.ptr_type(cfg.c_type),
-            # Software-pipeline loop trip count: K // 16 - 1.
-            dsl.i32(),
-        ]
-        lds_size = cfg.lds_bytes
+        _declare_matmul_externals(bld, cfg)
         with (
             bld.gpu_module(_GPU_MODULE_NAME) as gmod,
             gmod.kernel(
                 _KERNEL_NAME,
-                kernel_inputs,
-                lds_size=lds_size,
+                _kernel_input_types(cfg),
+                lds_size=cfg.lds_bytes,
                 attrs=_target_waves_attrs(target_waves),
             ) as fb,
         ):

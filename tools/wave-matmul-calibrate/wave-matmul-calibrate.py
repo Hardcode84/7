@@ -170,6 +170,12 @@ def build_example_args(args: argparse.Namespace, chip: str) -> list[str]:
         cmd.append(f"--input-type={args.input_type}")
     if args.output_type != "f32":
         cmd.append(f"--output-type={args.output_type}")
+    cta_swizzle_xcds = getattr(args, "cta_swizzle_xcds", 1)
+    cta_group_m = getattr(args, "cta_group_m", 1)
+    if cta_swizzle_xcds != 1:
+        cmd.append(f"--cta-swizzle-xcds={cta_swizzle_xcds}")
+    if cta_group_m != 1:
+        cmd.append(f"--cta-group-m={cta_group_m}")
     if args.target_waves:
         cmd.append(f"--target-waves={args.target_waves}")
     return cmd
@@ -668,6 +674,8 @@ def build_argparser() -> argparse.ArgumentParser:
     )
     ap.add_argument("--output-type", choices=("f32", "f16"), default="f32")
     ap.add_argument("--input-type", choices=("f16", "bf16"), default="f16")
+    ap.add_argument("--cta-swizzle-xcds", type=int, default=1)
+    ap.add_argument("--cta-group-m", type=int, default=1)
     ap.add_argument("--iters", type=int, default=1000)
     ap.add_argument("--warmup", type=int, default=10)
     ap.add_argument(
@@ -716,6 +724,10 @@ def validate_args(args: argparse.Namespace) -> None:
         sys.exit("--repeats must be positive")
     if args.target_waves < 0:
         sys.exit("--target-waves must be non-negative")
+    if args.cta_swizzle_xcds < 1:
+        sys.exit("--cta-swizzle-xcds must be >= 1")
+    if args.cta_group_m < 1:
+        sys.exit("--cta-group-m must be >= 1")
     if args.calibration_file is not None and not args.calibration_file.exists():
         sys.exit(f"--calibration-file does not exist: {args.calibration_file}")
     for _, name in PRESSURE_BUDGET_OPTIONS:
@@ -741,6 +753,8 @@ def main() -> int:
             f"wave_m_tiles={args.wave_m_tiles} wave_n_tiles={args.wave_n_tiles} "
             f"wave_k_tiles={args.wave_k_tiles} target_waves={args.target_waves} "
             f"input_type={args.input_type} output_type={args.output_type}\n"
+            f"cta_swizzle_xcds={args.cta_swizzle_xcds} "
+            f"cta_group_m={args.cta_group_m}\n"
             f"kernel_arg_trip_count: {compute_kernel_arg_trip_count(args)}\n"
             f"sim_loop_trip_count: {compute_sim_loop_trip_count(args)}"
         )

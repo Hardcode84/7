@@ -2,6 +2,8 @@
 //
 // RUN: %python %S/../../../examples/wave/wmma_matmul_tiled.py --chip=gfx950 --m=32 --n=32 --k=64 --bm=2 --bn=2 --wave-k-tiles=2 --use-dma-lds 2>/dev/null \
 // RUN:   | FileCheck %s --check-prefix=IR
+// RUN: %python %S/../../../examples/wave/wmma_matmul_tiled.py --chip=gfx950 --m=1024 --n=1024 --k=64 --bm=2 --bn=2 --wave-m-tiles=4 --wave-n-tiles=4 --wave-k-tiles=2 --use-dma-lds --cta-swizzle-xcds=8 --cta-group-m=4 2>/dev/null \
+// RUN:   | FileCheck %s --check-prefix=REMAP
 // RUN: %python %S/../../../examples/wave/wmma_matmul_tiled.py --chip=gfx950 --m=32 --n=32 --k=64 --bm=2 --bn=2 --wave-k-tiles=2 --use-dma-lds 2>/dev/null \
 // RUN:   | wave-opt --pass-pipeline='builtin.module(wave-set-target-attr{chip=gfx950},transform-preload-library{transform-library-paths=%wave_pipelines},transform-interpreter{entry-point=waveamd_backend_unscheduled})' \
 // RUN:   | FileCheck %s --check-prefix=PRELOAD
@@ -17,6 +19,10 @@
 // IR: wave.index_expr <{{.*xor.*floor\(1/2\*Mod\(wi, 16\)\).*}}>
 // IR: waveamd.dma_load_lds
 // IR: waveamd.mma "mfma.f32.16x16x32.f16"
+//
+// REMAP: wave.index_expr <{{.*wg_m_raw.*wg_n_raw.*}}>
+// REMAP: wave.index_expr <{{.*wg_m_raw.*wg_n_raw.*}}>
+// REMAP: waveamd.dma_load_lds
 //
 // PRELOAD-LABEL: func.func @wmma_f16_matmul_tiled
 // PRELOAD-SAME: waveamdmachine.kernarg_preload_length = 7 : i64
