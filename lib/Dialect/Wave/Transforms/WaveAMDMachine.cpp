@@ -131,6 +131,7 @@ enum class MmaKind {
   MfmaF32_16x16x16_BF16,
   MfmaF32_16x16x32_F16,
   MfmaF32_16x16x32_BF16,
+  MfmaScaleF32_16x16x128_F4F4,
   Unsupported,
 };
 
@@ -143,48 +144,63 @@ static MmaKind parseMmaKind(StringRef kind) {
       .Case("mfma.f32.16x16x16.bf16", MmaKind::MfmaF32_16x16x16_BF16)
       .Case("mfma.f32.16x16x32.f16", MmaKind::MfmaF32_16x16x32_F16)
       .Case("mfma.f32.16x16x32.bf16", MmaKind::MfmaF32_16x16x32_BF16)
+      .Case("mfma.scale.f32.16x16x128.f4.f4",
+            MmaKind::MfmaScaleF32_16x16x128_F4F4)
       .Default(MmaKind::Unsupported);
 }
 
-static LogicalResult requireMmaTarget(waveamd::MmaOp op, MmaKind kind,
-                                      const llvm::AMDGPU::IsaVersion &isa) {
-  auto require = [&](bool supported, StringRef requirement) -> LogicalResult {
-    if (supported)
-      return success();
-    return op.emitError() << op.getKind() << " lowering requires "
-                          << requirement;
-  };
+static bool isMmaTargetSupported(MmaKind kind,
+                                 const llvm::AMDGPU::IsaVersion &isa) {
   switch (kind) {
   case MmaKind::WmmaI32_16x16x16_IU8:
-    return require(
-        waveamdmachine::WmmaI32_16x16x16_IU8Op::isSupportedOnIsa(isa), "gfx11");
+    return waveamdmachine::WmmaI32_16x16x16_IU8Op::isSupportedOnIsa(isa);
   case MmaKind::WmmaF32_16x16x16_F16:
-    return require(
-        waveamdmachine::WmmaF32_16x16x16_F16Op::isSupportedOnIsa(isa), "gfx11");
+    return waveamdmachine::WmmaF32_16x16x16_F16Op::isSupportedOnIsa(isa);
   case MmaKind::WmmaF32_16x16x16_BF16:
-    return require(
-        waveamdmachine::WmmaF32_16x16x16_BF16Op::isSupportedOnIsa(isa),
-        "gfx11");
+    return waveamdmachine::WmmaF32_16x16x16_BF16Op::isSupportedOnIsa(isa);
   case MmaKind::MfmaF32_16x16x16_F16:
-    return require(
-        waveamdmachine::MfmaF32_16x16x16_F16Op::isSupportedOnIsa(isa),
-        "gfx90a+");
+    return waveamdmachine::MfmaF32_16x16x16_F16Op::isSupportedOnIsa(isa);
   case MmaKind::MfmaF32_16x16x16_BF16:
-    return require(
-        waveamdmachine::MfmaF32_16x16x16_BF16Op::isSupportedOnIsa(isa),
-        "gfx940+");
+    return waveamdmachine::MfmaF32_16x16x16_BF16Op::isSupportedOnIsa(isa);
   case MmaKind::MfmaF32_16x16x32_F16:
-    return require(
-        waveamdmachine::MfmaF32_16x16x32_F16Op::isSupportedOnIsa(isa),
-        "gfx950");
+    return waveamdmachine::MfmaF32_16x16x32_F16Op::isSupportedOnIsa(isa);
   case MmaKind::MfmaF32_16x16x32_BF16:
-    return require(
-        waveamdmachine::MfmaF32_16x16x32_BF16Op::isSupportedOnIsa(isa),
-        "gfx950");
+    return waveamdmachine::MfmaF32_16x16x32_BF16Op::isSupportedOnIsa(isa);
+  case MmaKind::MfmaScaleF32_16x16x128_F4F4:
+    return waveamdmachine::MfmaScaleF32_16x16x128_F4F4Op::isSupportedOnIsa(isa);
   case MmaKind::Unsupported:
-    return success();
+    return true;
   }
   llvm_unreachable("unknown MMA kind");
+}
+
+static StringRef mmaTargetRequirement(MmaKind kind) {
+  switch (kind) {
+  case MmaKind::WmmaI32_16x16x16_IU8:
+  case MmaKind::WmmaF32_16x16x16_F16:
+  case MmaKind::WmmaF32_16x16x16_BF16:
+    return "gfx11";
+  case MmaKind::MfmaF32_16x16x16_F16:
+    return "gfx90a+";
+  case MmaKind::MfmaF32_16x16x16_BF16:
+    return "gfx940+";
+  case MmaKind::MfmaF32_16x16x32_F16:
+  case MmaKind::MfmaF32_16x16x32_BF16:
+  case MmaKind::MfmaScaleF32_16x16x128_F4F4:
+    return "gfx950";
+  case MmaKind::Unsupported:
+    return "";
+  }
+  llvm_unreachable("unknown MMA kind");
+}
+
+static LogicalResult requireMmaTarget(Operation *op, StringRef kindName,
+                                      MmaKind kind,
+                                      const llvm::AMDGPU::IsaVersion &isa) {
+  if (isMmaTargetSupported(kind, isa))
+    return success();
+  return op->emitError() << kindName << " lowering requires "
+                         << mmaTargetRequirement(kind);
 }
 
 static Value createMachineMma(MmaKind kind, OpBuilder &builder, Location loc,
@@ -218,6 +234,7 @@ static Value createMachineMma(MmaKind kind, OpBuilder &builder, Location loc,
     return waveamdmachine::MfmaF32_16x16x32_BF16Op::create(
                builder, loc, resultType, a, b, acc)
         .getResult();
+  case MmaKind::MfmaScaleF32_16x16x128_F4F4:
   case MmaKind::Unsupported:
     return {};
   }
@@ -1388,6 +1405,7 @@ LogicalResult WaveAMDMachineSelector::selectOperation(Operation *op) {
       .Case<waveamd::FragmentPackOp>(
           [&](auto o) { return selectFragmentPack(o); })
       .Case<waveamd::MmaOp>([&](auto o) { return selectMma(o); })
+      .Case<waveamd::MmaScaleOp>([&](auto o) { return selectMmaScale(o); })
       .Case<waveamd::DmaLoadLdsOp>([&](auto o) { return selectDmaLoadLds(o); })
       .Case<waveamd::FragmentUnpackOp>(
           [&](auto o) { return selectFragmentUnpack(o); })
@@ -2889,7 +2907,7 @@ LogicalResult WaveAMDMachineSelector::selectMma(waveamd::MmaOp op) {
       getTargetIsaVersion(op, "matrix lowering");
   if (failed(isa))
     return failure();
-  if (failed(requireMmaTarget(op, mmaKind, *isa)))
+  if (failed(requireMmaTarget(op.getOperation(), kind, mmaKind, *isa)))
     return failure();
   auto resultType = cast<waveamd::FragmentType>(op.getResult().getType());
   Type vgprTuple = getRegType(op.getContext(), waveamdmachine::RegClass::VGPR,
@@ -2901,6 +2919,35 @@ LogicalResult WaveAMDMachineSelector::selectMma(waveamd::MmaOp op) {
       createMachineMma(mmaKind, builder, op.getLoc(), vgprTuple, a, b, acc);
   if (!result)
     return op.emitError("unsupported WaveAMDMachine matrix operation kind");
+  values[op.getResult()] = result;
+  eraseIfTopLevel(op);
+  return success();
+}
+
+LogicalResult WaveAMDMachineSelector::selectMmaScale(waveamd::MmaScaleOp op) {
+  MmaKind mmaKind = parseMmaKind(op.getKind());
+  if (mmaKind != MmaKind::MfmaScaleF32_16x16x128_F4F4)
+    return op.emitError("unsupported WaveAMDMachine scaled matrix operation "
+                        "kind");
+  FailureOr<llvm::AMDGPU::IsaVersion> isa =
+      getTargetIsaVersion(op, "scaled matrix lowering");
+  if (failed(isa))
+    return failure();
+  if (failed(requireMmaTarget(op.getOperation(), op.getKind(), mmaKind, *isa)))
+    return failure();
+
+  waveamd::FragmentType resultType =
+      cast<waveamd::FragmentType>(op.getResult().getType());
+  Type vgprTuple = getRegType(op.getContext(), waveamdmachine::RegClass::VGPR,
+                              resultType.getRegisters());
+  Value result =
+      waveamdmachine::MfmaScaleF32_16x16x128_F4F4Op::create(
+          builder, op.getLoc(), vgprTuple, expect(op.getA(), op),
+          expect(op.getB(), op), expect(op.getAcc(), op),
+          ensureVGPRForVSrc1(op.getLoc(), expect(op.getAScale(), op)),
+          ensureVGPRForVSrc1(op.getLoc(), expect(op.getBScale(), op)),
+          op.getScaleIdxA(), op.getScaleIdxB())
+          .getResult();
   values[op.getResult()] = result;
   eraseIfTopLevel(op);
   return success();

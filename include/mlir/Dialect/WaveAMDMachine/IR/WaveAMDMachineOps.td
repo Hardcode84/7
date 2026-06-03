@@ -214,6 +214,8 @@ def WaveAMDMachine_PackedOpSel2Attr
     : ConfinedAttr<I64Attr, [IntMinValue<0>, IntMaxValue<3>]>;
 def WaveAMDMachine_PackedOpSel3Attr
     : ConfinedAttr<I64Attr, [IntMinValue<0>, IntMaxValue<7>]>;
+def WaveAMDMachine_ScaleIndexAttr
+    : ConfinedAttr<I64Attr, [IntMinValue<0>, IntMaxValue<3>]>;
 def WaveAMDMachine_NonNegativeI64Attr
     : ConfinedAttr<I64Attr, [IntMinValue<0>]>;
 
@@ -720,6 +722,22 @@ def WaveAMDMachine_MfmaF32_16x16x32_BF16Op
                                 WaveAMDMachine_VGPR,
                                 [WaveAMDMachine_VALU, WaveAMDMachine_MFMA,
                                  WaveAMDMachine_ReadsExec]> {
+  let hasVerifier = 1;
+  let archPredicate = WaveAMDMachine_Gfx950;
+}
+def WaveAMDMachine_MfmaScaleF32_16x16x128_F4F4Op
+    : WaveAMDMachine_Op<"mfma_scale_f32_16x16x128_f4_f4",
+                        [WaveAMDMachine_VALU, WaveAMDMachine_MFMA,
+                         WaveAMDMachine_ReadsExec, Pure]> {
+  let arguments = (ins WaveAMDMachine_VGPR:$a,
+                       WaveAMDMachine_VGPR:$b,
+                       WaveAMDMachine_VGPR:$acc,
+                       WaveAMDMachine_VGPR1:$a_scale,
+                       WaveAMDMachine_VGPR1:$b_scale,
+                       DefaultValuedAttr<WaveAMDMachine_ScaleIndexAttr, "0">:$scale_idx_a,
+                       DefaultValuedAttr<WaveAMDMachine_ScaleIndexAttr, "0">:$scale_idx_b);
+  let results = (outs WaveAMDMachine_VGPR:$result);
+  let assemblyFormat = "$a `,` $b `,` $acc `,` $a_scale `,` $b_scale attr-dict `:` functional-type(operands, results)";
   let hasVerifier = 1;
   let archPredicate = WaveAMDMachine_Gfx950;
 }

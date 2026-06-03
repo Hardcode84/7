@@ -305,6 +305,7 @@ public:
   LogicalResult selectFragmentPack(waveamd::FragmentPackOp op);
   LogicalResult selectFragmentUnpack(waveamd::FragmentUnpackOp op);
   LogicalResult selectMma(waveamd::MmaOp op);
+  LogicalResult selectMmaScale(waveamd::MmaScaleOp op);
   LogicalResult selectDmaLoadLds(waveamd::DmaLoadLdsOp op);
   LogicalResult selectReturn(func::ReturnOp op);
 };

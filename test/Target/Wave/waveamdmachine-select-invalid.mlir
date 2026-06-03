@@ -127,6 +127,20 @@ func.func @unsupported_mfma_gfx950_target(%x: i32) {
 
 // -----
 
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx942"} {
+func.func @unsupported_scaled_mfma_gfx950_target(%x: i32) {
+  %scale = wave.splat %x : i32 -> !wave.simd<i32, 64>
+  %a = waveamd.fragment_fill %x : i32 -> !waveamd.fragment<0, i8, 16, 16, 64, 4>
+  %b = waveamd.fragment_fill %x : i32 -> !waveamd.fragment<1, i8, 16, 16, 64, 4>
+  %acc = waveamd.fragment_fill %x : i32 -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
+  // expected-error @below {{mfma.scale.f32.16x16x128.f4.f4 lowering requires gfx950}}
+  %result = waveamd.mma_scale "mfma.scale.f32.16x16x128.f4.f4" %a, %scale, %b, %scale, %acc : !waveamd.fragment<0, i8, 16, 16, 64, 4>, !wave.simd<i32, 64>, !waveamd.fragment<1, i8, 16, 16, 64, 4>, !wave.simd<i32, 64>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
+  return
+}
+}
+
+// -----
+
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 func.func @unsupported_mfma_family(%x: i32) {
   %a = waveamd.fragment_fill %x : i32 -> !waveamd.fragment<0, f16, 16, 16, 32, 2>

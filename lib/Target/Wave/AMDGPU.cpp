@@ -513,6 +513,9 @@ private:
   unsigned mfmaF32_16x16x32BF16() const {
     return llvm::AMDGPU::V_MFMA_F32_16X16X32_BF16_gfx940_vcd;
   }
+  unsigned mfmaScaleF32_16x16x128F4F4() const {
+    return llvm::AMDGPU::V_MFMA_SCALE_F32_16X16X128_F8F6F4_f4_f4_gfx940_vcd;
+  }
 
   unsigned bufferStoreB32() const {
     if (isGfx90APlus())
@@ -1505,6 +1508,24 @@ private:
            toMCOperand(op.getOperand(1)), toMCOperand(op.getOperand(2)),
            llvm::MCOperand::createImm(0), llvm::MCOperand::createImm(0),
            llvm::MCOperand::createImm(0)});
+    }
+    if (waveamdmachine::MfmaScaleF32_16x16x128_F4F4Op scaleOp =
+            dyn_cast<waveamdmachine::MfmaScaleF32_16x16x128_F4F4Op>(op)) {
+      if (!isGfx950(isaVersion))
+        return scaleOp.emitError(
+            "mfma.scale.f32.16x16x128.f4.f4 requires gfx950");
+      unsigned scaleIdxA = scaleOp.getScaleIdxA();
+      unsigned scaleIdxB = scaleOp.getScaleIdxB();
+      return emitMC(
+          mfmaScaleF32_16x16x128F4F4(),
+          {toMCOperand(result()), toMCOperand(scaleOp.getA()),
+           toMCOperand(scaleOp.getB()), toMCOperand(scaleOp.getAcc()),
+           llvm::MCOperand::createImm(4), llvm::MCOperand::createImm(4),
+           toMCOperand(scaleOp.getAScale()), toMCOperand(scaleOp.getBScale()),
+           llvm::MCOperand::createImm(
+               packedSrcMods(scaleIdxA & 1, scaleIdxA >> 1, 0)),
+           llvm::MCOperand::createImm(
+               packedSrcMods(scaleIdxB & 1, scaleIdxB >> 1, 0))});
     }
     if (isa<waveamdmachine::VAddU32Op>(op)) {
       Value lhs = op.getOperand(0);

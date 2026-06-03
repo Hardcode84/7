@@ -299,6 +299,17 @@ LogicalResult MfmaF32_16x16x32_BF16Op::verify() {
   return success();
 }
 
+LogicalResult MfmaScaleF32_16x16x128_F4F4Op::verify() {
+  if (failed(verifyVGPRWidth(*this, getA(), 4, "A operand")) ||
+      failed(verifyVGPRWidth(*this, getB(), 4, "B operand")) ||
+      failed(verifyVGPRWidth(*this, getAcc(), 4, "accumulator operand")) ||
+      failed(verifyVGPRWidth(*this, getAScale(), 1, "A scale operand")) ||
+      failed(verifyVGPRWidth(*this, getBScale(), 1, "B scale operand")) ||
+      failed(verifyVGPRWidth(*this, getResult(), 4, "result")))
+    return failure();
+  return success();
+}
+
 static LogicalResult verifyUniformLoopTerminator(UniformLoopOp loop,
                                                  ContinueIfOp terminator) {
   if (terminator.getCarries().size() != loop.getInits().size())

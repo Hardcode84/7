@@ -40,6 +40,20 @@ func.func @bad_wmma_width(%a: !waveamdmachine.reg<vgpr, 8>, %b: !waveamdmachine.
 
 // -----
 
+func.func @bad_mfma_scale_index(%a: !waveamdmachine.reg<vgpr, 4>,
+                                %b: !waveamdmachine.reg<vgpr, 4>,
+                                %acc: !waveamdmachine.reg<vgpr, 4>,
+                                %scale: !waveamdmachine.reg<vgpr, 1>) {
+  // expected-error @below {{attribute 'scale_idx_a' failed to satisfy constraint}}
+  %r = waveamdmachine.mfma_scale_f32_16x16x128_f4_f4 %a, %b, %acc, %scale, %scale {scale_idx_a = 4 : i64}
+      : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
+         !waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 1>,
+         !waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 4>
+  return
+}
+
+// -----
+
 func.func @tuple_to_elements_wrong_count(%t: !waveamdmachine.reg<vgpr, 8>) {
   // expected-error @below {{element widths sum (4) must match tuple register width (8)}}
   %e:4 = waveamdmachine.tuple_to_elements %t

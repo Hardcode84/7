@@ -195,9 +195,17 @@ static bool matchMfmaGfx950BF16AB(FragmentType type, int64_t role) {
   return type.getRole() == role && type.getElementType().isBF16() &&
          type.getRegisters() == 4 && isMfmaGfx95016x16x32(type);
 }
+static bool matchMfmaGfx950F4AB(FragmentType type, int64_t role) {
+  return type.getRole() == role && type.getElementType().isInteger(8) &&
+         type.getRegisters() == 4 && isMfmaGfx95016x16x32(type);
+}
 static bool matchMfmaGfx950F32Acc(FragmentType type) {
   return type.getRole() == 2 && type.getElementType().isF32() &&
          type.getRegisters() == 4 && isMfmaGfx95016x16x32(type);
+}
+static bool isScaleI32Wave64(Type type) {
+  wave::SimdType simd = dyn_cast<wave::SimdType>(type);
+  return simd && simd.getWidth() == 64 && simd.getElementType().isInteger(32);
 }
 
 static constexpr WmmaShape kWmmaShapes[] = {
@@ -248,6 +256,49 @@ LogicalResult MmaOp::verify() {
     return emitOpError(shape->accError);
   if (resultType != accType)
     return emitOpError("result type must match accumulator type");
+  return success();
+}
+
+static LogicalResult verifyMmaScaleAttrs(MmaScaleOp op) {
+  if (op.getKind() != "mfma.scale.f32.16x16x128.f4.f4")
+    return op.emitOpError("unsupported scaled matrix operation kind");
+  return success();
+}
+
+static LogicalResult verifyMmaScaleFragments(MmaScaleOp op) {
+  auto aType = cast<FragmentType>(op.getA().getType());
+  auto bType = cast<FragmentType>(op.getB().getType());
+  auto accType = cast<FragmentType>(op.getAcc().getType());
+  auto resultType = cast<FragmentType>(op.getResult().getType());
+  if (!matchMfmaGfx950F4AB(aType, 0))
+    return op.emitOpError("A operand must be a 16x16 packed-f4 wave64 fragment "
+                          "with 4 registers");
+  if (!matchMfmaGfx950F4AB(bType, 1))
+    return op.emitOpError("B operand must be a 16x16 packed-f4 wave64 fragment "
+                          "with 4 registers");
+  if (!matchMfmaGfx950F32Acc(accType))
+    return op.emitOpError(
+        "accumulator must be a 16x16 f32 wave64 fragment with 4 registers");
+  if (resultType != accType)
+    return op.emitOpError("result type must match accumulator type");
+  return success();
+}
+
+static LogicalResult verifyMmaScaleTypes(MmaScaleOp op) {
+  if (!isScaleI32Wave64(op.getAScale().getType()))
+    return op.emitOpError("A scale must be !wave.simd<i32, 64>");
+  if (!isScaleI32Wave64(op.getBScale().getType()))
+    return op.emitOpError("B scale must be !wave.simd<i32, 64>");
+  return success();
+}
+
+LogicalResult MmaScaleOp::verify() {
+  if (failed(verifyMmaScaleAttrs(*this)))
+    return failure();
+  if (failed(verifyMmaScaleFragments(*this)))
+    return failure();
+  if (failed(verifyMmaScaleTypes(*this)))
+    return failure();
   return success();
 }
 

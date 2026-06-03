@@ -103,6 +103,21 @@ def WaveAMD_MmaOp : WaveAMD_Op<"mma", [Pure]> {
   let hasVerifier = 1;
 }
 
+def WaveAMD_MmaScaleOp : WaveAMD_Op<"mma_scale", [Pure]> {
+  let summary = "AMD scaled matrix multiply-accumulate";
+  let arguments = (ins StrAttr:$kind,
+                       WaveAMD_Fragment:$a,
+                       Wave_Simd:$a_scale,
+                       WaveAMD_Fragment:$b,
+                       Wave_Simd:$b_scale,
+                       WaveAMD_Fragment:$acc,
+                       DefaultValuedAttr<ConfinedAttr<I64Attr, [IntMinValue<0>, IntMaxValue<3>]>, "0">:$scale_idx_a,
+                       DefaultValuedAttr<ConfinedAttr<I64Attr, [IntMinValue<0>, IntMaxValue<3>]>, "0">:$scale_idx_b);
+  let results = (outs WaveAMD_Fragment:$result);
+  let assemblyFormat = "$kind $a `,` $a_scale `,` $b `,` $b_scale `,` $acc attr-dict `:` qualified(type($a)) `,` qualified(type($a_scale)) `,` qualified(type($b)) `,` qualified(type($b_scale)) `,` qualified(type($acc)) `->` qualified(type($result))";
+  let hasVerifier = 1;
+}
+
 def WaveAMD_DmaLoadLdsOp : WaveAMD_Op<"dma_load_lds", [MemoryEffects<[MemRead, MemWrite]>]> {
   let summary = "DMA one dword from global or buffer memory into LDS";
   let description = [{
