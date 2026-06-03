@@ -147,6 +147,7 @@ def configure_and_build(
         # MLIR ROCm runner library (used by mlir-runner integration tests).
         "-DMLIR_ENABLE_ROCM_RUNNER=ON",
         f"-DMLIR_ENABLE_BINDINGS_PYTHON={'ON' if enable_python_bindings else 'OFF'}",
+        f"-DPython3_EXECUTABLE={sys.executable}",
     ]
     run(cmake_args)
 
