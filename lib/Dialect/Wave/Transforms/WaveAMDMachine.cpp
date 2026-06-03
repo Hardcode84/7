@@ -3074,7 +3074,29 @@ static void restoreExecMask(OpBuilder &builder, Location loc, Value savedExec,
   waveamdmachine::SMovExecLoOp::create(builder, loc, savedExec);
 }
 
+static void bindWhereResult(WaveAMDMachineSelector &S, Value result,
+                            Value yielded, Operation *user) {
+  S.values[result] = S.expect(yielded, user);
+  if (auto it = S.pointerBases.find(yielded); it != S.pointerBases.end())
+    S.pointerBases[result] = it->second;
+  if (auto it = S.pointerGlobalBases.find(yielded);
+      it != S.pointerGlobalBases.end())
+    S.pointerGlobalBases[result] = it->second;
+  if (auto it = S.pointerIndexOffsets.find(yielded);
+      it != S.pointerIndexOffsets.end())
+    S.pointerIndexOffsets[result] = it->second;
+  if (auto it = S.indexOffsets.find(yielded); it != S.indexOffsets.end())
+    S.indexOffsets[result] = it->second;
+  if (auto it = S.pointerBuffers.find(yielded); it != S.pointerBuffers.end())
+    S.pointerBuffers[result] = it->second;
+}
+
 LogicalResult WaveAMDMachineSelector::selectWhere(WhereOp op) {
+  if (!op.getResults().empty() && !op.getElseRegion().empty())
+    return op.emitError(
+        "WaveAMDMachine lowering does not support result-bearing "
+        "wave.where with otherwise");
+
   auto maskType = cast<MaskType>(op.getCondition().getType());
   unsigned maskWidth = maskType.getWidth();
   if (failed(validateWhereMaskWidth(op, maskWidth)))
@@ -3088,6 +3110,7 @@ LogicalResult WaveAMDMachineSelector::selectWhere(WhereOp op) {
   waveamdmachine::SCBranchExeczOp::create(builder, op.getLoc(), elseLabel);
   if (failed(selectRegion(op.getThenRegion())))
     return failure();
+  auto thenYield = cast<YieldOp>(op.getThenRegion().front().getTerminator());
   if (!op.getElseRegion().empty()) {
     selectElseExecMask(builder, op.getLoc(), savedExec, condition, maskWidth);
     waveamdmachine::SCBranchExeczOp::create(builder, op.getLoc(), endLabel);
@@ -3097,6 +3120,9 @@ LogicalResult WaveAMDMachineSelector::selectWhere(WhereOp op) {
   }
   waveamdmachine::LabelOp::create(builder, op.getLoc(), endLabel);
   restoreExecMask(builder, op.getLoc(), savedExec, maskWidth);
+  for (auto [result, yielded] :
+       llvm::zip_equal(op.getResults(), thenYield.getValues()))
+    bindWhereResult(*this, result, yielded, op);
   eraseIfTopLevel(op);
   return success();
 }

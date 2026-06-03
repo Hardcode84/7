@@ -179,6 +179,29 @@ LogicalResult BinaryOp::verify() {
   return success();
 }
 
+LogicalResult WhereOp::verify() {
+  auto verifyYield = [&](Region &region, StringRef name) -> LogicalResult {
+    auto yield = dyn_cast<YieldOp>(region.front().getTerminator());
+    if (!yield)
+      return emitOpError(name) << " region must be terminated by wave.yield";
+    if (yield.getValues().size() != getResults().size())
+      return emitOpError(name)
+             << " region yield operand count must match op result count";
+    for (auto [idx, val] : llvm::enumerate(yield.getValues())) {
+      if (val.getType() != getResults()[idx].getType())
+        return emitOpError(name)
+               << " region yield operand #" << idx << " type " << val.getType()
+               << " must match result type " << getResults()[idx].getType();
+    }
+    return success();
+  };
+  if (failed(verifyYield(getThenRegion(), "then")))
+    return failure();
+  if (!getElseRegion().empty())
+    return verifyYield(getElseRegion(), "else");
+  return success();
+}
+
 namespace {
 enum class WaveCastElementKind { Int, Float };
 

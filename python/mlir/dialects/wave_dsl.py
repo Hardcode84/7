@@ -122,6 +122,7 @@ CastKind = wave.CastKind
 
 class _YieldKind(Enum):
     SCF = auto()
+    WAVE = auto()
     WAVEMETA = auto()
 
 
@@ -602,16 +603,29 @@ class FunctionBuilder:
         return wave.ReadFirstOp(result_type, value).result
 
     @contextmanager
-    def where(self, condition: Value) -> Iterator[None]:
-        """Open a single-region `wave.where` and switch IR insertion into
-        the then-block. The terminating `wave.yield` is emitted on
-        context exit. No otherwise region.
+    def where(
+        self, condition: Value, result_types: Sequence[Type] = ()
+    ) -> Iterator[wave.WhereOp]:
+        """Open a single-region `wave.where`.
+
+        The context yields the op. Use `bld.yield_(...)` for result-bearing
+        regions; empty regions get `wave.yield` on context exit.
         """
-        op = wave.WhereOp(condition)
+        op = wave.WhereOp(list(result_types), condition)
         block = op.thenRegion.blocks.append()
         with InsertionPoint(block):
-            yield
-            wave.YieldOp()
+            self._yield_stack.append(_YieldKind.WAVE)
+            try:
+                yield op
+                has_yield = len(block.operations) > 0 and isinstance(
+                    block.operations[-1], wave.YieldOp
+                )
+                if not result_types and not has_yield:
+                    wave.YieldOp([])
+                if result_types and not has_yield:
+                    raise RuntimeError("result-bearing wave.where must yield values")
+            finally:
+                self._yield_stack.pop()
 
     def addi(self, lhs: Value, rhs: Value) -> Value:
         return wave.AddiOp(_arith_result_type(lhs, rhs), lhs, rhs).result
@@ -969,6 +983,9 @@ class FunctionBuilder:
                 self._yield_stack.pop()
 
     def yield_(self, values: Sequence[Value] = ()) -> None:
+        if self._yield_stack and self._yield_stack[-1] is _YieldKind.WAVE:
+            wave.YieldOp(list(values))
+            return
         if self._yield_stack and self._yield_stack[-1] is _YieldKind.WAVEMETA:
             wavemeta.YieldOp(list(values))
             return

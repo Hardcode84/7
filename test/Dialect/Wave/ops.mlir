@@ -42,6 +42,14 @@ func.func @wave_ops(%pred: i1, %value: i32, %out: !wave.ptr<#wave.global, i32>) 
     wave.yield
   } : !wave.mask<32>
 
+  // CHECK: [[WHERE:%.*]]:2 = wave.where
+  %where_sum, %where_tok = wave.where %mask {
+    %inc = wave.addi %sum, %vvalue : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+    wave.yield %inc, %ld_tok : !wave.simd<i32, 32>, !wave.mem.token
+  } : !wave.mask<32> -> !wave.simd<i32, 32>, !wave.mem.token
+  // CHECK: wave.store [[WHERE]]#0
+  %where_store = wave.store %where_sum -> %out after %where_tok : (!wave.simd<i32, 32>, !wave.ptr<#wave.global, i32>, !wave.mem.token) -> !wave.mem.token
+
   func.return %first : i32
 }
 

@@ -96,6 +96,38 @@ func.func @assume_range_on_signed(%v: si32) -> si32 {
 
 // -----
 
+func.func @where_yield_arity_mismatch(%mask: !wave.mask<32>, %v: !wave.simd<i32, 32>) {
+  // expected-error @below {{then region yield operand count must match op result count}}
+  %r = wave.where %mask {
+    wave.yield
+  } : !wave.mask<32> -> !wave.simd<i32, 32>
+  return
+}
+
+// -----
+
+func.func @where_yield_type_mismatch(%mask: !wave.mask<32>, %v: !wave.simd<i64, 32>) {
+  // expected-error @below {{then region yield operand #0 type '!wave.simd<i64, 32>' must match result type '!wave.simd<i32, 32>'}}
+  %r = wave.where %mask {
+    wave.yield %v : !wave.simd<i64, 32>
+  } : !wave.mask<32> -> !wave.simd<i32, 32>
+  return
+}
+
+// -----
+
+func.func @where_bad_terminator(%mask: !wave.mask<32>) {
+  // expected-error @below {{then region must be terminated by wave.yield}}
+  "wave.where"(%mask) ({
+    "scf.yield"() : () -> ()
+  }, {
+    "wave.yield"() : () -> ()
+  }) : (!wave.mask<32>) -> ()
+  return
+}
+
+// -----
+
 func.func @addi_width_mismatch(%a: i32, %b: i64) {
   // expected-error @+1 {{operand element bit-widths must match}}
   %0 = wave.addi %a, %b : i32, i64 -> i32

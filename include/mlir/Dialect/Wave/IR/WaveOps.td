@@ -29,11 +29,16 @@ def Wave_YieldOp : Wave_Op<"yield", [Pure, ReturnLike, Terminator,
   let description = [{
     Terminates a Wave dialect structured region.
 
-    The MVP Wave dialect currently uses `wave.yield` only for side-effecting
-    `wave.where` regions with no yielded values.
+    `wave.where` regions yield the values forwarded as the parent op results.
+    Without an `otherwise` region, inactive lanes in yielded data values are
+    unspecified.
   }];
 
-  let assemblyFormat = "attr-dict";
+  let arguments = (ins Variadic<AnyType>:$values);
+  let builders = [
+    OpBuilder<(ins), [{ build($_builder, $_state, ::mlir::ValueRange{}); }]>
+  ];
+  let assemblyFormat = "($values^ `:` type($values))? attr-dict";
 }
 
 def Wave_LaneIdOp : Wave_Op<"lane_id", [Pure,
@@ -542,12 +547,15 @@ def Wave_WhereOp : Wave_Op<"where", [
   }];
 
   let arguments = (ins Wave_Mask:$condition);
+  let results = (outs Variadic<AnyType>:$results);
   let regions = (region SizedRegion<1>:$thenRegion,
                         MaxSizedRegion<1>:$elseRegion);
 
   let assemblyFormat = [{
     $condition $thenRegion (`otherwise` $elseRegion^)? attr-dict `:` qualified(type($condition))
+    (`->` type($results)^)?
   }];
+  let hasVerifier = 1;
 }
 
 #endif // MLIR_DIALECT_WAVE_IR_WAVEOPS_TD
