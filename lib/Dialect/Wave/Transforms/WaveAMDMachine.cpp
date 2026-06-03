@@ -1447,14 +1447,15 @@ LogicalResult WaveAMDMachineSelector::selectConstant(arith::ConstantOp op) {
 }
 
 static FailureOr<unsigned>
-getPoisonPayloadBits(Type type, function_ref<InFlightDiagnostic()> emitError) {
+getRegisterPayloadBits(Type type,
+                       function_ref<InFlightDiagnostic()> emitError) {
   if (auto simdType = dyn_cast<SimdType>(type))
     type = simdType.getElementType();
   if (auto vectorType = dyn_cast<VectorType>(type)) {
     if (vectorType.getRank() != 1 || vectorType.isScalable())
-      return emitError() << "unsupported ub.poison result type " << type;
+      return emitError() << "unsupported register payload type " << type;
     FailureOr<unsigned> elementBits =
-        getPoisonPayloadBits(vectorType.getElementType(), emitError);
+        getRegisterPayloadBits(vectorType.getElementType(), emitError);
     if (failed(elementBits))
       return failure();
     return *elementBits * vectorType.getNumElements();
@@ -1463,18 +1464,18 @@ getPoisonPayloadBits(Type type, function_ref<InFlightDiagnostic()> emitError) {
     return 32;
   if (auto intType = dyn_cast<IntegerType>(type)) {
     if (!intType.isSignless())
-      return emitError() << "unsupported ub.poison result type " << type;
+      return emitError() << "unsupported register payload type " << type;
     return intType.getWidth();
   }
   if (auto floatType = dyn_cast<FloatType>(type))
     return floatType.getWidth();
-  return emitError() << "unsupported ub.poison result type " << type;
+  return emitError() << "unsupported register payload type " << type;
 }
 
 static FailureOr<unsigned>
-getPoisonRegisterWidth(Type type,
-                       function_ref<InFlightDiagnostic()> emitError) {
-  FailureOr<unsigned> bits = getPoisonPayloadBits(type, emitError);
+getRegisterPayloadWidth(Type type,
+                        function_ref<InFlightDiagnostic()> emitError) {
+  FailureOr<unsigned> bits = getRegisterPayloadBits(type, emitError);
   if (failed(bits))
     return failure();
   return std::max<unsigned>(1, llvm::divideCeil(*bits, 32u));
@@ -1505,7 +1506,7 @@ LogicalResult WaveAMDMachineSelector::selectPoison(ub::PoisonOp op) {
   }
 
   FailureOr<unsigned> width =
-      getPoisonRegisterWidth(type, [&]() { return op.emitError(); });
+      getRegisterPayloadWidth(type, [&]() { return op.emitError(); });
   if (failed(width))
     return failure();
 
@@ -3167,12 +3168,70 @@ static void bindWhereResult(WaveAMDMachineSelector &S, Value result,
     S.pointerBuffers[result] = it->second;
 }
 
-LogicalResult WaveAMDMachineSelector::selectWhere(WhereOp op) {
-  if (!op.getResults().empty() && !op.getElseRegion().empty())
+static bool isPointerLikeWhereResult(Type type) {
+  if (isa<PtrType>(type))
+    return true;
+  if (auto simdType = dyn_cast<SimdType>(type))
+    return isa<PtrType>(simdType.getElementType());
+  return false;
+}
+
+static LogicalResult validateWhereMergeSource(WhereOp op, Value value,
+                                              unsigned width, StringRef name) {
+  waveamdmachine::RegType regType =
+      dyn_cast<waveamdmachine::RegType>(value.getType());
+  if (!regType) {
+    if (isa<waveamdmachine::ImmType>(value.getType()) && width == 1)
+      return success();
+    return op.emitError(name) << " yield cannot be merged as a SIMD value";
+  }
+  if (regType.getWidth() != width)
+    return op.emitError(name) << " yield register width " << regType.getWidth()
+                              << " does not match result width " << width;
+  if (regType.getRegClass() != waveamdmachine::RegClass::VGPR &&
+      regType.getRegClass() != waveamdmachine::RegClass::SGPR)
+    return op.emitError(name) << " yield must be VGPR or SGPR";
+  return success();
+}
+
+static LogicalResult mergeWhereResult(WaveAMDMachineSelector &S, WhereOp op,
+                                      Value result, Value thenYield,
+                                      Value elseYield, Value condition) {
+  Type resultType = result.getType();
+  Value thenValue = S.expect(thenYield, op);
+  Value elseValue = S.expect(elseYield, op);
+  if (isa<MemTokenType>(resultType)) {
+    S.values[result] = waveamdmachine::TokenJoinOp::create(
+        S.builder, op.getLoc(), getMemTokenType(op.getContext()),
+        ValueRange{thenValue, elseValue});
+    return success();
+  }
+  if (isPointerLikeWhereResult(resultType))
     return op.emitError(
         "WaveAMDMachine lowering does not support result-bearing "
-        "wave.where with otherwise");
+        "wave.where with otherwise for pointer results");
+  if (!isa<SimdType>(resultType))
+    return op.emitError(
+        "WaveAMDMachine lowering supports result-bearing wave.where "
+        "with otherwise only for SIMD data or memory tokens");
+  FailureOr<unsigned> width =
+      getRegisterPayloadWidth(resultType, [&]() { return op.emitError(); });
+  if (failed(width))
+    return failure();
+  if (failed(validateWhereMergeSource(op, thenValue, *width, "then")) ||
+      failed(validateWhereMergeSource(op, elseValue, *width, "else")))
+    return failure();
+  if (isa<waveamdmachine::ImmType>(thenValue.getType()) &&
+      isa<waveamdmachine::ImmType>(elseValue.getType()))
+    thenValue = S.ensureVGPRForVSrc1(op.getLoc(), thenValue);
+  S.values[result] = waveamdmachine::VCndmaskB32TupleOp::create(
+      S.builder, op.getLoc(),
+      getRegType(op.getContext(), waveamdmachine::RegClass::VGPR, *width),
+      elseValue, thenValue, condition);
+  return success();
+}
 
+LogicalResult WaveAMDMachineSelector::selectWhere(WhereOp op) {
   auto maskType = cast<MaskType>(op.getCondition().getType());
   unsigned maskWidth = maskType.getWidth();
   if (failed(validateWhereMaskWidth(op, maskWidth)))
@@ -3187,18 +3246,28 @@ LogicalResult WaveAMDMachineSelector::selectWhere(WhereOp op) {
   if (failed(selectRegion(op.getThenRegion())))
     return failure();
   auto thenYield = cast<YieldOp>(op.getThenRegion().front().getTerminator());
+  YieldOp elseYield;
   if (!op.getElseRegion().empty()) {
+    waveamdmachine::LabelOp::create(builder, op.getLoc(), elseLabel);
     selectElseExecMask(builder, op.getLoc(), savedExec, condition, maskWidth);
     waveamdmachine::SCBranchExeczOp::create(builder, op.getLoc(), endLabel);
-    waveamdmachine::LabelOp::create(builder, op.getLoc(), elseLabel);
     if (failed(selectRegion(op.getElseRegion())))
       return failure();
+    elseYield = cast<YieldOp>(op.getElseRegion().front().getTerminator());
   }
   waveamdmachine::LabelOp::create(builder, op.getLoc(), endLabel);
   restoreExecMask(builder, op.getLoc(), savedExec, maskWidth);
-  for (auto [result, yielded] :
-       llvm::zip_equal(op.getResults(), thenYield.getValues()))
-    bindWhereResult(*this, result, yielded, op);
+  if (op.getElseRegion().empty()) {
+    for (auto [result, yielded] :
+         llvm::zip_equal(op.getResults(), thenYield.getValues()))
+      bindWhereResult(*this, result, yielded, op);
+  } else {
+    for (auto [result, thenValue, elseValue] : llvm::zip_equal(
+             op.getResults(), thenYield.getValues(), elseYield.getValues()))
+      if (failed(mergeWhereResult(*this, op, result, thenValue, elseValue,
+                                  condition)))
+        return failure();
+  }
   eraseIfTopLevel(op);
   return success();
 }

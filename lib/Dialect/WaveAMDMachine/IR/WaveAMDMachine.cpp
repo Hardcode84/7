@@ -161,6 +161,39 @@ LogicalResult VMovB32TupleOp::verify() {
   return success();
 }
 
+static LogicalResult verifyCndmaskSource(Operation *op, Value value,
+                                         unsigned resultWidth, StringRef name) {
+  RegType regType = dyn_cast<RegType>(value.getType());
+  if (!regType) {
+    assert(isa<ImmType>(value.getType()) &&
+           "ODS permits only registers or immediates");
+    if (resultWidth != 1)
+      return op->emitOpError(name)
+             << " immediate source requires width-1 result";
+    return success();
+  }
+  if (regType.getWidth() != resultWidth)
+    return op->emitOpError(name) << " source width " << regType.getWidth()
+                                 << " must match result width " << resultWidth;
+  if (regType.getRegClass() != RegClass::VGPR &&
+      regType.getRegClass() != RegClass::SGPR)
+    return op->emitOpError(name) << " source must be VGPR or SGPR";
+  return success();
+}
+
+LogicalResult VCndmaskB32TupleOp::verify() {
+  RegType resultType = cast<RegType>(getResult().getType());
+  if (failed(verifyCndmaskSource(*this, getFalseValue(), resultType.getWidth(),
+                                 "false")) ||
+      failed(verifyCndmaskSource(*this, getTrueValue(), resultType.getWidth(),
+                                 "true")))
+    return failure();
+  RegType conditionType = cast<RegType>(getCondition().getType());
+  if (conditionType.getWidth() != 1 && conditionType.getWidth() != 2)
+    return emitOpError("condition width must be 1 or 2");
+  return success();
+}
+
 LogicalResult SMovB32TupleOp::verify() {
   auto resultType = cast<RegType>(getResult().getType());
   if (auto registers = (*this)->getAttrOfType<IntegerAttr>("registers")) {

@@ -486,6 +486,19 @@ def WaveAMDMachine_VMovB32TupleOp
   let hasVerifier = 1;
 }
 
+def WaveAMDMachine_VCndmaskB32TupleOp
+    : WaveAMDMachine_Op<"v_cndmask_b32_tuple",
+                        [WaveAMDMachine_VALU, Pure]> {
+  let summary = "vector lane select using an SGPR mask";
+  let arguments = (ins WaveAMDMachine_RegOrImm:$false_value,
+                       WaveAMDMachine_RegOrImm:$true_value,
+                       WaveAMDMachine_SGPR:$condition);
+  let results = (outs WaveAMDMachine_VGPR:$result);
+  let assemblyFormat =
+      "$false_value `,` $true_value `,` $condition attr-dict `:` functional-type(operands, results)";
+  let hasVerifier = 1;
+}
+
 // Pure SSA renames between a GPR tuple (SGPR/VGPR/AGPR) and its
 // constituent GPR pieces. Elements may be any width as long as
 // their widths sum to the tuple width, and all pieces must share

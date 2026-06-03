@@ -104,6 +104,54 @@ func.func @v_mov_b32_tuple_registers_mismatch(%src: !waveamdmachine.imm) {
 
 // -----
 
+func.func @v_cndmask_immediate_wide_result(%src: !waveamdmachine.reg<vgpr, 2>,
+                                           %cond: !waveamdmachine.reg<sgpr, 1>) {
+  %imm = waveamdmachine.imm 7 : !waveamdmachine.imm
+  // expected-error @below {{immediate source requires width-1 result}}
+  %r = waveamdmachine.v_cndmask_b32_tuple %imm, %src, %cond
+      : (!waveamdmachine.imm, !waveamdmachine.reg<vgpr, 2>,
+         !waveamdmachine.reg<sgpr, 1>) -> !waveamdmachine.reg<vgpr, 2>
+  return
+}
+
+// -----
+
+func.func @v_cndmask_source_width_mismatch(%narrow: !waveamdmachine.reg<vgpr, 1>,
+                                           %wide: !waveamdmachine.reg<vgpr, 2>,
+                                           %cond: !waveamdmachine.reg<sgpr, 1>) {
+  // expected-error @below {{source width 1 must match result width 2}}
+  %r = waveamdmachine.v_cndmask_b32_tuple %narrow, %wide, %cond
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 2>,
+         !waveamdmachine.reg<sgpr, 1>) -> !waveamdmachine.reg<vgpr, 2>
+  return
+}
+
+// -----
+
+func.func @v_cndmask_flag_source(%flag: !waveamdmachine.reg<vcc, 1>,
+                                 %src: !waveamdmachine.reg<vgpr, 1>,
+                                 %cond: !waveamdmachine.reg<sgpr, 1>) {
+  // expected-error @below {{source must be VGPR or SGPR}}
+  %r = waveamdmachine.v_cndmask_b32_tuple %flag, %src, %cond
+      : (!waveamdmachine.reg<vcc, 1>, !waveamdmachine.reg<vgpr, 1>,
+         !waveamdmachine.reg<sgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
+  return
+}
+
+// -----
+
+func.func @v_cndmask_bad_condition_width(%false: !waveamdmachine.reg<vgpr, 1>,
+                                         %true: !waveamdmachine.reg<vgpr, 1>,
+                                         %cond: !waveamdmachine.reg<sgpr, 4>) {
+  // expected-error @below {{condition width must be 1 or 2}}
+  %r = waveamdmachine.v_cndmask_b32_tuple %false, %true, %cond
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+         !waveamdmachine.reg<sgpr, 4>) -> !waveamdmachine.reg<vgpr, 1>
+  return
+}
+
+// -----
+
 // Zero-width tuples die in RegType verification before op checks.
 func.func @global_load_tuple_b32_zero_width(%off: !waveamdmachine.reg<vgpr, 1>,
                                             %base: !waveamdmachine.reg<sgpr, 2>) {

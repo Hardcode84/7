@@ -58,8 +58,8 @@ func.func @wave_where_else(%limit: i32, %out: !wave.ptr<#wave.global, i32>) -> i
     %t0 = wave.store %then -> %ptrs : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>) -> !wave.mem.token
     wave.yield
   } otherwise {
-    // CHECK: s_and_not1_b32 exec_lo, [[SAVE]], [[MASK]]
     // CHECK: [[ELSE]]:
+    // CHECK: s_and_not1_b32 exec_lo, [[SAVE]], [[MASK]]
     // CHECK: v_xor_b32_e32
     %else = wave.binary "xori" %lane, %vlimit : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
     %t1 = wave.store %else -> %ptrs : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>) -> !wave.mem.token

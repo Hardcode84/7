@@ -151,6 +151,7 @@ struct KernelInfo {
   X(vMbcntLo, V_MBCNT_LO_U32_B32_e64_vi, V_MBCNT_LO_U32_B32_e64_gfx11)         \
   X(vMbcntHi, V_MBCNT_HI_U32_B32_e64_vi, V_MBCNT_HI_U32_B32_e64_gfx11)         \
   X(vMovB32, V_MOV_B32_e32_vi, V_MOV_B32_e32_gfx11)                            \
+  X(vCndmaskB32, V_CNDMASK_B32_e64_vi, V_CNDMASK_B32_e64_gfx11)                \
   X(vAndB32, V_AND_B32_e32_vi, V_AND_B32_e32_gfx11)                            \
   X(vOrB32, V_OR_B32_e32_vi, V_OR_B32_e32_gfx11)                               \
   X(vXorB32, V_XOR_B32_e32_vi, V_XOR_B32_e32_gfx11)                            \
@@ -432,6 +433,7 @@ private:
   unsigned vMbcntLo() const { return opcodes.vMbcntLo; }
   unsigned vMbcntHi() const { return opcodes.vMbcntHi; }
   unsigned vMovB32() const { return opcodes.vMovB32; }
+  unsigned vCndmaskB32() const { return opcodes.vCndmaskB32; }
   unsigned vAndB32() const { return opcodes.vAndB32; }
   unsigned vOrB32() const { return opcodes.vOrB32; }
   unsigned vXorB32() const { return opcodes.vXorB32; }
@@ -1091,6 +1093,18 @@ private:
                                       component);
   }
 
+  llvm::MCOperand toMCB32Component(Value value, unsigned component) {
+    waveamdmachine::RegType regType =
+        dyn_cast<waveamdmachine::RegType>(value.getType());
+    if (!regType || regType.getWidth() == 1)
+      return toMCOperand(value);
+    if (regType.getRegClass() == waveamdmachine::RegClass::VGPR)
+      return toMCVGPRComponent(value, component);
+    if (regType.getRegClass() == waveamdmachine::RegClass::SGPR)
+      return toMCSGPRComponent(value, component);
+    llvm_unreachable("expected GPR tuple component");
+  }
+
   llvm::MCOperand toMCOperand(Value value) {
     if (Operation *def = value.getDefiningOp())
       if (isa<waveamdmachine::ImmOp>(def))
@@ -1396,6 +1410,21 @@ private:
         if (failed(emitMC(vMovB32(), {toMCVGPRComponent(result(), i), srcOp})))
           return failure();
       }
+      return success();
+    }
+    if (isa<waveamdmachine::VCndmaskB32TupleOp>(op)) {
+      waveamdmachine::RegType regType =
+          cast<waveamdmachine::RegType>(result().getType());
+      Value falseValue = op.getOperand(0);
+      Value trueValue = op.getOperand(1);
+      Value condition = op.getOperand(2);
+      for (unsigned i : llvm::seq<unsigned>(0, regType.getWidth()))
+        if (failed(emitMC(
+                vCndmaskB32(),
+                {toMCVGPRComponent(result(), i), llvm::MCOperand::createImm(0),
+                 toMCB32Component(falseValue, i), llvm::MCOperand::createImm(0),
+                 toMCB32Component(trueValue, i), toMCOperand(condition)})))
+          return failure();
       return success();
     }
     if (isa<waveamdmachine::SMovB32TupleOp>(op)) {
