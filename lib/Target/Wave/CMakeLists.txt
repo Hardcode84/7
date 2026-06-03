@@ -54,6 +54,7 @@ add_mlir_translation_library(MLIRTargetWave
   MLIRTransformDialect
   MLIRTransformDialectTransforms
   MLIRTranslateLib
+  MLIRUBDialect
   MLIRWaveDialect
   MLIRWaveAMDMachineDialect
   MLIRWaveTransforms

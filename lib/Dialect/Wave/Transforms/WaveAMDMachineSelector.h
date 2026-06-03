@@ -22,6 +22,7 @@
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
+#include "mlir/Dialect/UB/IR/UBOps.h"
 #include "mlir/Dialect/Wave/IR/Wave.h"
 #include "mlir/Dialect/Wave/IR/WaveAMD.h"
 #include "mlir/Dialect/Wave/IR/WaveSymbols.h"
@@ -260,6 +261,7 @@ public:
   // ---- per-op selectors --------------------------------------------------
   LogicalResult selectConstant(arith::ConstantIntOp op);
   LogicalResult selectConstant(arith::ConstantOp op);
+  LogicalResult selectPoison(ub::PoisonOp op);
   LogicalResult selectLaneId(LaneIdOp op);
   LogicalResult selectReadCycles(ReadCyclesOp op);
   LogicalResult selectWorkgroupId(WorkgroupIdOp op);

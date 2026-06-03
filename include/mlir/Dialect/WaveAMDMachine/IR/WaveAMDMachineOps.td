@@ -389,6 +389,16 @@ def WaveAMDMachine_KernargPreloadOp : WaveAMDMachine_Op<"kernarg_preload", [
   let assemblyFormat = "attr-dict `:` type($result)";
 }
 
+def WaveAMDMachine_UninitOp : WaveAMDMachine_Op<"uninit", [
+  WaveAMDMachine_NoMachineInst,
+  WaveAMDMachine_NoAsmEmission,
+  Pure
+]> {
+  let summary = "uninitialized machine register";
+  let results = (outs WaveAMDMachine_GPR:$result);
+  let assemblyFormat = "attr-dict `:` type($result)";
+}
+
 def WaveAMDMachine_ImmOp : WaveAMDMachine_Op<"imm", [
   Pure,
   WaveAMDMachine_NoMachineInst,

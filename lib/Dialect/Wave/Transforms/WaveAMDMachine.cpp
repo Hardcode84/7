@@ -18,6 +18,7 @@
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
+#include "mlir/Dialect/UB/IR/UBOps.h"
 #include "mlir/Dialect/Wave/IR/Wave.h"
 #include "mlir/Dialect/Wave/IR/WaveAMD.h"
 #include "mlir/Dialect/Wave/IR/WaveAMDABI.h"
@@ -1347,6 +1348,7 @@ LogicalResult WaveAMDMachineSelector::selectOperation(Operation *op) {
   return llvm::TypeSwitch<Operation *, LogicalResult>(op)
       .Case<arith::ConstantIntOp>([&](auto o) { return selectConstant(o); })
       .Case<arith::ConstantOp>([&](auto o) { return selectConstant(o); })
+      .Case<ub::PoisonOp>([&](auto o) { return selectPoison(o); })
       .Case<LaneIdOp>([&](auto o) { return selectLaneId(o); })
       .Case<ReadCyclesOp>([&](auto o) { return selectReadCycles(o); })
       .Case<WorkgroupIdOp>([&](auto o) { return selectWorkgroupId(o); })
@@ -1440,6 +1442,80 @@ LogicalResult WaveAMDMachineSelector::selectConstant(arith::ConstantOp op) {
     return op.emitError("floating constant must be 16 or 32 bits wide");
   values[op.getResult()] = createImm(
       builder, op.getLoc(), attr.getValue().bitcastToAPInt().getZExtValue());
+  eraseIfTopLevel(op);
+  return success();
+}
+
+static FailureOr<unsigned>
+getPoisonPayloadBits(Type type, function_ref<InFlightDiagnostic()> emitError) {
+  if (auto simdType = dyn_cast<SimdType>(type))
+    type = simdType.getElementType();
+  if (auto vectorType = dyn_cast<VectorType>(type)) {
+    if (vectorType.getRank() != 1 || vectorType.isScalable())
+      return emitError() << "unsupported ub.poison result type " << type;
+    FailureOr<unsigned> elementBits =
+        getPoisonPayloadBits(vectorType.getElementType(), emitError);
+    if (failed(elementBits))
+      return failure();
+    return *elementBits * vectorType.getNumElements();
+  }
+  if (type.isIndex())
+    return 32;
+  if (auto intType = dyn_cast<IntegerType>(type)) {
+    if (!intType.isSignless())
+      return emitError() << "unsupported ub.poison result type " << type;
+    return intType.getWidth();
+  }
+  if (auto floatType = dyn_cast<FloatType>(type))
+    return floatType.getWidth();
+  return emitError() << "unsupported ub.poison result type " << type;
+}
+
+static FailureOr<unsigned>
+getPoisonRegisterWidth(Type type,
+                       function_ref<InFlightDiagnostic()> emitError) {
+  FailureOr<unsigned> bits = getPoisonPayloadBits(type, emitError);
+  if (failed(bits))
+    return failure();
+  return std::max<unsigned>(1, llvm::divideCeil(*bits, 32u));
+}
+
+static Value materializeUninitGPR(OpBuilder &builder, Location loc,
+                                  waveamdmachine::RegClass regClass,
+                                  unsigned width) {
+  return waveamdmachine::UninitOp::create(
+      builder, loc, getRegType(builder.getContext(), regClass, width));
+}
+
+LogicalResult WaveAMDMachineSelector::selectPoison(ub::PoisonOp op) {
+  Type type = op.getType();
+  if (auto maskType = dyn_cast<MaskType>(type)) {
+    unsigned width = maskType.getWidth() / 32;
+    values[op.getResult()] = materializeUninitGPR(
+        builder, op.getLoc(), waveamdmachine::RegClass::SGPR, width);
+    eraseIfTopLevel(op);
+    return success();
+  }
+
+  if (isa<MemTokenType>(type)) {
+    values[op.getResult()] = waveamdmachine::TokenOp::create(
+        builder, op.getLoc(), getMemTokenType(op.getContext()));
+    eraseIfTopLevel(op);
+    return success();
+  }
+
+  FailureOr<unsigned> width =
+      getPoisonRegisterWidth(type, [&]() { return op.emitError(); });
+  if (failed(width))
+    return failure();
+
+  if (isa<SimdType>(type)) {
+    values[op.getResult()] = materializeUninitGPR(
+        builder, op.getLoc(), waveamdmachine::RegClass::VGPR, *width);
+  } else {
+    values[op.getResult()] = materializeUninitGPR(
+        builder, op.getLoc(), waveamdmachine::RegClass::SGPR, *width);
+  }
   eraseIfTopLevel(op);
   return success();
 }
