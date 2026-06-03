@@ -47,6 +47,10 @@ void *_mlir_ciface_wave_memref_to_ptr_global_i32(StridedMemRef1D<int32_t> *m) {
   return toGlobalPtr(m);
 }
 
+void *_mlir_ciface_wave_memref_to_ptr_global_i8(StridedMemRef1D<int8_t> *m) {
+  return toGlobalPtr(m);
+}
+
 void *_mlir_ciface_wave_memref_to_ptr_global_f32(StridedMemRef1D<float> *m) {
   return toGlobalPtr(m);
 }

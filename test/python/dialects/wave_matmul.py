@@ -3,6 +3,7 @@
 from mlir.dialects.wave_matmul import (
     build_wmma_f16_matmul_module,
     compute_wmma_f16_matmul_reference_buffer,
+    generate_mxfp4_scale_inputs,
     generate_wmma_f16_matmul_inputs,
 )
 
@@ -35,6 +36,22 @@ ref_bf16 = compute_wmma_f16_matmul_reference_buffer(
     input_type="bf16",
 )
 print("bf16-ref", len(ref_bf16), ref_bf16[0])
+mxfp4_scales = generate_mxfp4_scale_inputs(16, 16, 128)
+print(
+    "mxfp4-scales",
+    len(mxfp4_scales[0]),
+    len(mxfp4_scales[1]),
+    mxfp4_scales[0][0],
+    mxfp4_scales[1][-1],
+)
+ref_mxfp4 = compute_wmma_f16_matmul_reference_buffer(
+    16,
+    16,
+    128,
+    matrix_intrinsic="mfma_gfx950",
+    input_type="mxfp4",
+)
+print("mxfp4-ref", len(ref_mxfp4), ref_mxfp4[0], ref_mxfp4[-1])
 ref_f32 = compute_wmma_f16_matmul_reference_buffer(
     16,
     16,
@@ -85,8 +102,19 @@ module_bf16 = build_wmma_f16_matmul_module(
 )
 print(module_bf16)
 
+module_mxfp4 = build_wmma_f16_matmul_module(
+    M=16,
+    N=16,
+    K=128,
+    matrix_intrinsic="mfma_gfx950",
+    input_type="mxfp4",
+)
+print(module_mxfp4)
+
 # CHECK: random-ref 1024 1024 1024
 # CHECK: bf16-ref 256 32.0
+# CHECK: mxfp4-scales 64 64 127 125
+# CHECK: mxfp4-ref 256 128.0 64.0
 # CHECK: f16-ref-rounding -132.5625 -132.5
 # CHECK-LABEL: func.func @wmma_f16_matmul_tiled
 # CHECK-SAME: wave.lds_size = 2048
@@ -109,3 +137,18 @@ print(module_bf16)
 # CHECK: func.func @wmma_f16_matmul_tiled
 # CHECK-SAME: !wave.ptr<#wave.global, bf16>
 # CHECK: waveamd.mma "mfma.f32.16x16x32.bf16"
+# CHECK: func.func private @wave_memref_to_ptr_global_i8
+# CHECK: func.func @wmma_f16_matmul_tiled
+# CHECK-SAME: !wave.ptr<#wave.global, i8>
+# CHECK-SAME: !wave.ptr<#wave.global, i8>
+# CHECK-SAME: !wave.ptr<#wave.global, f32>
+# CHECK-SAME: !wave.ptr<#wave.global, i8>
+# CHECK-SAME: !wave.ptr<#wave.global, i8>
+# CHECK-SAME: i32
+# CHECK: %{{.*}}, %{{.*}} = wave.load
+# CHECK-SAME: !wave.ptr<#wave.global, i8>
+# CHECK: %{{.*}}, %{{.*}} = wave.load
+# CHECK-SAME: !wave.ptr<#wave.global, i8>
+# CHECK: waveamd.mma_scale "mfma.scale.f32.16x16x128.f4.f4"
+# CHECK-SAME: !wave.simd<i32, 64>
+# CHECK-SAME: !wave.simd<i32, 64>

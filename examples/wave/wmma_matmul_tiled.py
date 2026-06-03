@@ -170,7 +170,7 @@ def _add_codegen_args(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--input-type",
-        choices=("f16", "bf16"),
+        choices=("f16", "bf16", "mxfp4"),
         default="f16",
         help="input element type for A and B",
     )
@@ -265,7 +265,7 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     matrix_intrinsic = _select_matrix_intrinsic(args.chip, args.matrix_intrinsic)
-    random_data = args.random_data or args.compare_cpu
+    random_data = args.random_data or (args.compare_cpu and args.input_type != "mxfp4")
     module = build_wmma_f16_matmul_module(
         M=args.m,
         N=args.n,
@@ -314,7 +314,7 @@ def main(argv: list[str] | None = None) -> int:
         wave_m_tiles=args.wave_m_tiles,
         wave_n_tiles=args.wave_n_tiles,
         wave_k_tiles=args.wave_k_tiles,
-        random_data=True,
+        random_data=random_data,
         random_seed=args.seed,
         matrix_intrinsic=matrix_intrinsic,
         input_type=args.input_type,

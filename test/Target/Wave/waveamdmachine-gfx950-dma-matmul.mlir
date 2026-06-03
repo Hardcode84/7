@@ -15,6 +15,8 @@
 // RUN:   | FileCheck %s --check-prefix=ASMPIPE
 // RUN: %python %S/../../../examples/wave/wmma_matmul_tiled.py --chip=gfx950 --m=16 --n=16 --k=32 --matrix-intrinsic=mfma_gfx950 --input-type=bf16 --dump-asm 2>/dev/null \
 // RUN:   | FileCheck %s --check-prefix=ASMBF16
+// RUN: %python %S/../../../examples/wave/wmma_matmul_tiled.py --chip=gfx950 --m=16 --n=16 --k=128 --matrix-intrinsic=mfma_gfx950 --input-type=mxfp4 --dump-asm 2>/dev/null \
+// RUN:   | FileCheck %s --check-prefix=ASMMXFP4
 //
 // IR: wave.index_expr <{{.*xor.*floor\(1/2\*Mod\(wi, 16\)\).*}}>
 // IR: waveamd.dma_load_lds
@@ -59,6 +61,22 @@
 
 // ASMBF16-LABEL: wmma_f16_matmul_tiled:
 // ASMBF16: v_mfma_f32_16x16x32_bf16
+
+// ASMMXFP4: .amdgcn_target "amdgcn-amd-amdhsa--gfx950"
+// ASMMXFP4-LABEL: wmma_f16_matmul_tiled:
+// ASMMXFP4: s_load_dwordx2 s{{\[}}[[A:[0-9]+]]:[[A1:[0-9]+]]{{\]}}, s[0:1], 0x0
+// ASMMXFP4: s_load_dwordx2 s{{\[}}[[B:[0-9]+]]:[[B1:[0-9]+]]{{\]}}, s[0:1], 0x8
+// ASMMXFP4: s_load_dwordx2 s{{\[}}[[C:[0-9]+]]:[[C1:[0-9]+]]{{\]}}, s[0:1], 0x10
+// ASMMXFP4: s_load_dwordx2 s{{\[}}[[SA:[0-9]+]]:[[SA1:[0-9]+]]{{\]}}, s[0:1], 0x18
+// ASMMXFP4: s_load_dwordx2 s{{\[}}[[SB:[0-9]+]]:[[SB1:[0-9]+]]{{\]}}, s[0:1], 0x20
+// ASMMXFP4: s_load_dword s{{[0-9]+}}, s[0:1], 0x28
+// ASMMXFP4: global_load_dwordx4 v{{\[}}[[AV:[0-9]+]]:[[AV1:[0-9]+]]{{\]}}, v{{[0-9]+}}, s{{\[}}[[A]]:[[A1]]{{\]}}
+// ASMMXFP4: global_load_dwordx4 v{{\[}}[[BV:[0-9]+]]:[[BV1:[0-9]+]]{{\]}}, v{{[0-9]+}}, s{{\[}}[[B]]:[[B1]]{{\]}}
+// ASMMXFP4: global_load_dword v[[SAV:[0-9]+]], v{{[0-9]+}}, s{{\[}}[[SA]]:[[SA1]]{{\]}}
+// ASMMXFP4: global_load_dword v[[SBV:[0-9]+]], v{{[0-9]+}}, s{{\[}}[[SB]]:[[SB1]]{{\]}}
+// ASMMXFP4: v_mfma_scale_f32_16x16x128_f8f6f4 v{{\[[0-9]+:[0-9]+\]}}, v{{\[[0-9]+:[0-9]+\]}}, v{{\[[0-9]+:[0-9]+\]}}, v{{\[[0-9]+:[0-9]+\]}}, v[[SAV]], v[[SBV]] op_sel_hi:[0,0,0] cbsz:4 blgp:4
+// ASMMXFP4: .amdhsa_kernarg_size 48
+// ASMMXFP4: .amdhsa_user_sgpr_kernarg_preload_length 11
 // ASMPIPE: ds_read_b128
 // ASMPIPE: s_waitcnt lgkmcnt(0)
 // ASMPIPE-NEXT: buffer_load_dwordx4

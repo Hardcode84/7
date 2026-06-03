@@ -836,6 +836,30 @@ class FunctionBuilder:
     def mma(self, kind: str, a: Value, b: Value, acc: Value) -> Value:
         return waveamd.MmaOp(acc.type, kind, a, b, acc).result
 
+    def mma_scale(
+        self,
+        kind: str,
+        a: Value,
+        a_scale: Value,
+        b: Value,
+        b_scale: Value,
+        acc: Value,
+        *,
+        scale_idx_a: int = 0,
+        scale_idx_b: int = 0,
+    ) -> Value:
+        return waveamd.MmaScaleOp(
+            acc.type,
+            kind,
+            a,
+            a_scale,
+            b,
+            b_scale,
+            acc,
+            scale_idx_a=scale_idx_a,
+            scale_idx_b=scale_idx_b,
+        ).result
+
     def fragment_store(
         self, fragment: Value, ptr: Value, *, after: Value | None = None
     ) -> Value:

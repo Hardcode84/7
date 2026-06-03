@@ -94,6 +94,9 @@ _MMA_VARIANTS = {
     ("mfma_gfx950", "bf16"): _MmaVariant(
         "mfma_gfx950", "mfma.f32.16x16x32.bf16", 4, 4, 64, 8, 32
     ),
+    ("mfma_gfx950", "mxfp4"): _MmaVariant(
+        "mfma_gfx950", "mfma.scale.f32.16x16x128.f4.f4", 4, 4, 64, 32, 128
+    ),
 }
 
 
@@ -110,7 +113,7 @@ def _select_mma_variant(name: str, input_type: str) -> _MmaVariant:
         ) from exc
 
 
-def _validate_choice(name: str, value: str, choices: tuple[str, str]) -> None:
+def _validate_choice(name: str, value: str, choices: tuple[str, ...]) -> None:
     if value not in choices:
         expected = " or ".join(f"'{choice}'" for choice in choices)
         raise ValueError(f"{name} must be {expected}; got {value}")
@@ -146,13 +149,13 @@ class _MatmulConfig:
 
     @property
     def a_elements(self) -> int:
-        return self.M * self.K
+        return self.M * self.storage_K
 
     @property
     def b_elements(self) -> int:
         # B is laid out in column-major K x N order (== row-major N x K), so
         # lane L's contiguous-16 slice for column j lives at j * K.
-        return self.N * self.K
+        return self.N * self.storage_K
 
     @property
     def c_elements(self) -> int:
@@ -164,11 +167,47 @@ class _MatmulConfig:
 
     @property
     def input_element_type(self) -> dsl.Type:
+        if self.input_type == "mxfp4":
+            return dsl.i8()
         return dsl.bf16() if self.input_type == "bf16" else dsl.f16()
 
     @property
     def input_element_bytes(self) -> int:
-        return 2
+        return 1 if self.uses_packed_mxfp4 else 2
+
+    @property
+    def uses_packed_mxfp4(self) -> bool:
+        return self.input_type == "mxfp4"
+
+    @property
+    def storage_K(self) -> int:
+        return self.K // 2 if self.uses_packed_mxfp4 else self.K
+
+    @property
+    def storage_k_tile(self) -> int:
+        return self.mma.k_tile // 2 if self.uses_packed_mxfp4 else self.mma.k_tile
+
+    @property
+    def storage_lane_k_elems(self) -> int:
+        if self.uses_packed_mxfp4:
+            return self.mma.lane_k_elems // 2
+        return self.mma.lane_k_elems
+
+    @property
+    def scale_groups(self) -> int:
+        return self.K // 32
+
+    @property
+    def a_scale_elements(self) -> int:
+        return self.M * self.scale_groups
+
+    @property
+    def b_scale_elements(self) -> int:
+        return self.N * self.scale_groups
+
+    @property
+    def trip_count_arg_index(self) -> int:
+        return 5 if self.uses_packed_mxfp4 else 3
 
     @property
     def c_element_bytes(self) -> int:
@@ -238,7 +277,9 @@ def _validate_positive_shape(cfg: _MatmulConfig) -> None:
     _validate_cta_remap_params(cfg)
     _validate_wave_tile_counts(cfg)
     _validate_choice("output_type", cfg.output_type, ("f32", "f16"))
-    _validate_choice("input_type", cfg.input_type, ("f16", "bf16"))
+    _validate_choice("input_type", cfg.input_type, ("f16", "bf16", "mxfp4"))
+    if cfg.uses_packed_mxfp4 and cfg.random_data:
+        raise ValueError("MXFP4 random input generation is not wired yet")
 
 
 def _validate_cta_remap_params(cfg: _MatmulConfig) -> None:
@@ -259,6 +300,7 @@ def _validate_wave_tile_counts(cfg: _MatmulConfig) -> None:
 
 
 def _validate_tile_shape(cfg: _MatmulConfig) -> None:
+    _validate_mxfp4_shape(cfg)
     if not _is_power_of_two(cfg.BN):
         raise ValueError(
             f"BN must be a positive power of two (for the wave-id "
@@ -309,6 +351,8 @@ def _validate_tile_shape(cfg: _MatmulConfig) -> None:
 def _validate_dma_lds_shape(cfg: _MatmulConfig) -> None:
     if not cfg.use_dma_lds:
         return
+    if cfg.uses_packed_mxfp4:
+        raise ValueError("MXFP4 DMA LDS staging needs scale pipeline support")
     if cfg.mma.name != "mfma_gfx950":
         raise ValueError("use_dma_lds is currently supported only for gfx950 MFMA")
     a_slots = cfg.wave_k_tiles * cfg.BM * cfg.wave_m_tiles
@@ -319,10 +363,18 @@ def _validate_dma_lds_shape(cfg: _MatmulConfig) -> None:
         raise ValueError("DMA LDS B slots must divide evenly across waves")
 
 
+def _validate_mxfp4_shape(cfg: _MatmulConfig) -> None:
+    if not cfg.uses_packed_mxfp4:
+        return
+    if cfg.wave_m_tiles != 1 or cfg.wave_n_tiles != 1 or cfg.wave_k_tiles != 1:
+        raise ValueError("MXFP4 scaled MFMA currently supports one tile per wave")
+
+
 _KERNEL_NAME = "wmma_f16_matmul_tiled"
 _GPU_MODULE_NAME = "kernels"
 _F16_PTR_HELPER = "wave_memref_to_ptr_global_f16"
 _BF16_PTR_HELPER = "wave_memref_to_ptr_global_bf16"
+_I8_PTR_HELPER = "wave_memref_to_ptr_global_i8"
 _F32_PTR_HELPER = "wave_memref_to_ptr_global_f32"
 _PRINT_HELPER = "printMemrefF32"
 _PRINT_F16_HELPER = "printMemrefF16"
@@ -363,7 +415,32 @@ def _round_bf16(value: float) -> float:
 
 
 def _round_input(value: float, input_type: str) -> float:
+    if input_type == "mxfp4":
+        return value
     return _round_bf16(value) if input_type == "bf16" else _round_f16(value)
+
+
+def _e8m0_to_f32(raw: int) -> float:
+    return 2.0 ** (raw - 127)
+
+
+def _mxfp4_scale_raw_values(
+    rows: int, groups: int, high: int, low: int
+) -> tuple[int, ...]:
+    half_rows = rows // 2
+    return tuple(
+        high if row < half_rows else low for row in range(rows) for _ in range(groups)
+    )
+
+
+def generate_mxfp4_scale_inputs(
+    M: int, N: int, K: int
+) -> tuple[tuple[int, ...], tuple[int, ...]]:
+    groups = K // 32
+    return (
+        _mxfp4_scale_raw_values(M, groups, 0x7F, 0x7E),
+        _mxfp4_scale_raw_values(N, groups, 0x7F, 0x7D),
+    )
 
 
 def generate_wmma_f16_matmul_inputs(
@@ -375,6 +452,8 @@ def generate_wmma_f16_matmul_inputs(
     random_data: bool = False,
     random_seed: int = 0,
 ) -> tuple[tuple[float, ...], tuple[float, ...]]:
+    if random_data and input_type == "mxfp4":
+        raise ValueError("MXFP4 random input generation is not wired yet")
     if random_data:
         a_values = _deterministic_random_values(M * K, seed=random_seed, stream=0)
         b_values = _deterministic_random_values(N * K, seed=random_seed, stream=1)
@@ -396,6 +475,8 @@ def _reference_tile(
     b_values: tuple[float, ...],
     m_tile: int,
     n_tile: int,
+    a_scales: tuple[int, ...] | None = None,
+    b_scales: tuple[int, ...] | None = None,
 ) -> tuple[float, ...]:
     tile: list[float] = []
     for mi in range(16):
@@ -404,7 +485,14 @@ def _reference_tile(
             n = n_tile * 16 + nj
             acc = 0.0
             for k in range(cfg.K):
-                acc += a_values[m * cfg.K + k] * b_values[n * cfg.K + k]
+                a = a_values[m * cfg.K + k]
+                b = b_values[n * cfg.K + k]
+                if cfg.uses_packed_mxfp4:
+                    assert a_scales is not None and b_scales is not None
+                    group = k // 32
+                    a *= _e8m0_to_f32(a_scales[m * cfg.scale_groups + group])
+                    b *= _e8m0_to_f32(b_scales[n * cfg.scale_groups + group])
+                acc += a * b
             tile.append(acc)
     return tuple(tile)
 
@@ -452,6 +540,10 @@ def compute_wmma_f16_matmul_reference_buffer(
         random_data=random_data,
         random_seed=random_seed,
     )
+    a_scales: tuple[int, ...] | None = None
+    b_scales: tuple[int, ...] | None = None
+    if cfg.uses_packed_mxfp4:
+        a_scales, b_scales = generate_mxfp4_scale_inputs(M, N, K)
     out: list[float] = []
     for wg_m in range(cfg.M_blocks):
         for wg_n in range(cfg.N_blocks):
@@ -465,7 +557,15 @@ def compute_wmma_f16_matmul_reference_buffer(
                         m_tile = m_base + m_wave * cfg.wave_m_tiles + i
                         n_tile = n_base + n_wave * cfg.wave_n_tiles + j
                         out.extend(
-                            _reference_tile(cfg, a_values, b_values, m_tile, n_tile)
+                            _reference_tile(
+                                cfg,
+                                a_values,
+                                b_values,
+                                m_tile,
+                                n_tile,
+                                a_scales,
+                                b_scales,
+                            )
                         )
     if cfg.output_type == "f16":
         return tuple(_round_f16(value) for value in out)
@@ -485,6 +585,8 @@ class _TileCoords:
     b_tile_base: dsl.Value
     a_lane_base: dsl.Value
     b_lane_base: dsl.Value
+    a_scale_base: dsl.Value | None
+    b_scale_base: dsl.Value | None
     c_ptr: dsl.Value
 
 
@@ -538,16 +640,10 @@ def _emit_cta_coords(
 
 
 def _emit_tile_coords(bld: dsl.FunctionBuilder, cfg: _MatmulConfig) -> _TileCoords:
-    """Compute the per-wave (lane, A/B/C base ptrs) from workitem ids.
-
-    All address arithmetic -- including the shri / andi pieces that
-    decompose `wi` into `wave_id`, `m_wave`, `n_wave`, and lane into
-    `lane_mod16` -- lives inside one `wave.index_expr` per pointer.
-    Address expression materialization lowers the non-linear
-    bits to shr / and at code-emit time, so the kernel surface stays
-    structurally symbolic.
-    """
+    """Compute per-wave A/B/C pointer coordinates."""
     a_arg, b_arg, c_arg = bld.args[0], bld.args[1], bld.args[2]
+    a_scale_arg = bld.args[3] if cfg.uses_packed_mxfp4 else None
+    b_scale_arg = bld.args[4] if cfg.uses_packed_mxfp4 else None
     if cfg.use_buffer:
         a_arg = _wrap_in_buffer(
             bld,
@@ -581,17 +677,17 @@ def _emit_tile_coords(bld: dsl.FunctionBuilder, cfg: _MatmulConfig) -> _TileCoor
     n_wave = dsl.mod(wave_id, cfg.BN)
     lane = dsl.mod(wi, cfg.mma.wave_size)
     lane_mod16 = dsl.mod(wi, 16)
-    lane_k_off = dsl.floor(lane / 16) * cfg.mma.lane_k_elems
+    lane_k_off = dsl.floor(lane / 16) * cfg.storage_lane_k_elems
     sym_to_val = {wi: wi_val, wg_m: wg_m_val, wg_n: wg_n_val}
 
-    stride_per_tile = 16 * cfg.K
+    stride_per_tile = 16 * cfg.storage_K
     a_tile_off = bld.index_expr(
         wg_m * (cfg.BM * cfg.wave_m_tiles * stride_per_tile)
         + m_wave * (cfg.wave_m_tiles * stride_per_tile),
         bindings=sym_to_val,
     )
     a_tile_base = bld.ptr_add(a_arg, a_tile_off)
-    a_off = bld.index_expr(lane_mod16 * cfg.K + lane_k_off, bindings=sym_to_val)
+    a_off = bld.index_expr(lane_mod16 * cfg.storage_K + lane_k_off, bindings=sym_to_val)
     a_lane_base = bld.ptr_add(a_tile_base, a_off)
 
     b_tile_off = bld.index_expr(
@@ -600,7 +696,7 @@ def _emit_tile_coords(bld: dsl.FunctionBuilder, cfg: _MatmulConfig) -> _TileCoor
         bindings=sym_to_val,
     )
     b_tile_base = bld.ptr_add(b_arg, b_tile_off)
-    b_off = bld.index_expr(lane_mod16 * cfg.K + lane_k_off, bindings=sym_to_val)
+    b_off = bld.index_expr(lane_mod16 * cfg.storage_K + lane_k_off, bindings=sym_to_val)
     b_lane_base = bld.ptr_add(b_tile_base, b_off)
 
     c_cta_off = bld.index_expr(
@@ -633,6 +729,8 @@ def _emit_tile_coords(bld: dsl.FunctionBuilder, cfg: _MatmulConfig) -> _TileCoor
         b_tile_base=b_tile_base,
         a_lane_base=a_lane_base,
         b_lane_base=b_lane_base,
+        a_scale_base=a_scale_arg,
+        b_scale_base=b_scale_arg,
         c_ptr=c_ptr,
     )
 
@@ -1049,7 +1147,7 @@ def _tile_fragment_ptrs(
     count: int,
 ) -> tuple[dsl.Value, ...]:
     return tuple(
-        _ptr_add_const(bld, base, i * 16 * cfg.K + k * cfg.mma.k_tile)
+        _ptr_add_const(bld, base, i * 16 * cfg.storage_K + k * cfg.storage_k_tile)
         for k in range(cfg.wave_k_tiles)
         for i in range(count)
     )
@@ -1076,6 +1174,8 @@ class _LoopState:
     accs: tuple[dsl.Value, ...]
     afs: tuple[dsl.Value, ...]
     bfs: tuple[dsl.Value, ...]
+    a_scale: dsl.Value | None = None
+    b_scale: dsl.Value | None = None
     dma_token: dsl.Value | None = None
     reuse_token: dsl.Value | None = None
 
@@ -1160,10 +1260,44 @@ def _load_ptrs_for_step(
     offset = bld.muli(step, virtual_k_stride)
     offset = bld.assume_range(
         offset,
-        cfg.mma.k_tile * cfg.wave_k_tiles,
-        cfg.mma.k_tile * cfg.wave_k_tiles * max_step,
+        cfg.storage_k_tile * cfg.wave_k_tiles,
+        cfg.storage_k_tile * cfg.wave_k_tiles * max_step,
     )
     return _advance_ptrs(bld, a0, offset), _advance_ptrs(bld, b0, offset)
+
+
+def _load_mxfp4_scales(
+    bld: dsl.FunctionBuilder,
+    cfg: _MatmulConfig,
+    coords: _TileCoords,
+    step: dsl.Value | int,
+) -> tuple[dsl.Value, dsl.Value]:
+    if coords.a_scale_base is None or coords.b_scale_base is None:
+        raise ValueError("MXFP4 scale buffers are required")
+    wi = dsl.sym("wi")
+    wg_m = dsl.sym("wg_m")
+    wg_n = dsl.sym("wg_n")
+    bindings = {wi: coords.wi, wg_m: coords.wg_m, wg_n: coords.wg_n}
+    step_expr: int | dsl.Expr
+    if isinstance(step, int):
+        step_expr = step
+    else:
+        step_sym = dsl.sym("step")
+        bindings[step_sym] = step
+        step_expr = step_sym
+    wave_id = dsl.floor(wi / cfg.mma.wave_size)
+    m_wave = dsl.floor(wave_id / cfg.BN)
+    n_wave = dsl.mod(wave_id, cfg.BN)
+    lane_mod16 = dsl.mod(wi, 16)
+    scale_k = step_expr * (cfg.mma.k_tile // 32)
+    m = (wg_m * cfg.BM + m_wave) * 16 + lane_mod16
+    n = (wg_n * cfg.BN + n_wave) * 16 + lane_mod16
+    a_off = bld.index_expr(m * cfg.scale_groups + scale_k, bindings=bindings)
+    b_off = bld.index_expr(n * cfg.scale_groups + scale_k, bindings=bindings)
+    load_type = dsl.simd_type(dsl.i32(), width=cfg.mma.wave_size)
+    a_scale, _ = bld.load(bld.ptr_add(coords.a_scale_base, a_off), load_type)
+    b_scale, _ = bld.load(bld.ptr_add(coords.b_scale_base, b_off), load_type)
+    return a_scale, b_scale
 
 
 def _initial_loop_args(
@@ -1171,6 +1305,7 @@ def _initial_loop_args(
     cfg: _MatmulConfig,
     types: _KernelTypes,
     staging: _LdsStaging,
+    coords: _TileCoords,
     ptrs: _TilePtrs,
     virtual_k_stride: dsl.Value,
 ) -> tuple[dsl.Value, ...]:
@@ -1218,6 +1353,8 @@ def _initial_loop_args(
         a_pt,
         b_pt,
     ]
+    if cfg.uses_packed_mxfp4:
+        args.extend(_load_mxfp4_scales(bld, cfg, coords, 0))
     if ready_token is not None:
         assert reuse_token is not None
         args.append(ready_token)
@@ -1227,16 +1364,23 @@ def _initial_loop_args(
 
 def _split_loop_state(values: tuple[dsl.Value, ...], cfg: _MatmulConfig) -> _LoopState:
     acc_end = cfg.tiles_per_wave
-    dma_token = (
-        values[acc_end + 2] if cfg.use_dma_lds and cfg.virtual_k_steps > 1 else None
-    )
+    cursor = acc_end + 2
+    a_scale = None
+    b_scale = None
+    if cfg.uses_packed_mxfp4:
+        a_scale = values[cursor]
+        b_scale = values[cursor + 1]
+        cursor += 2
+    dma_token = values[cursor] if cfg.use_dma_lds and cfg.virtual_k_steps > 1 else None
     reuse_token = (
-        values[acc_end + 3] if cfg.use_dma_lds and cfg.virtual_k_steps > 1 else None
+        values[cursor + 1] if cfg.use_dma_lds and cfg.virtual_k_steps > 1 else None
     )
     return _LoopState(
         accs=values[:acc_end],
         afs=(values[acc_end],),
         bfs=(values[acc_end + 1],),
+        a_scale=a_scale,
+        b_scale=b_scale,
         dma_token=dma_token,
         reuse_token=reuse_token,
     )
@@ -1313,6 +1457,8 @@ def _emit_mma_grid(
     afs: tuple[dsl.Value, ...],
     bfs: tuple[dsl.Value, ...],
     accs: tuple[dsl.Value, ...],
+    a_scale: dsl.Value | None = None,
+    b_scale: dsl.Value | None = None,
 ) -> tuple[dsl.Value, ...]:
     """Triply-nested `wavemeta.static_for` over (k, i, j); the
     specialiser unrolls all three once the tile-factor params bind.
@@ -1359,7 +1505,14 @@ def _emit_mma_grid(
                 acc_idx = (i * wn + j).v
                 bf = wavemeta.TupleGetOp(bf_type, b_row, j_iv).result
                 acc_old = wavemeta.TupleGetOp(acc_type, accs_kij, acc_idx).result
-                acc_new = bld.mma(cfg.mma.kind, af, bf, acc_old)
+                if cfg.uses_packed_mxfp4:
+                    if a_scale is None or b_scale is None:
+                        raise ValueError("MXFP4 scaled MFMA requires scale operands")
+                    acc_new = bld.mma_scale(
+                        cfg.mma.kind, af, a_scale, bf, b_scale, acc_old
+                    )
+                else:
+                    acc_new = bld.mma(cfg.mma.kind, af, bf, acc_old)
                 accs_kij_new = wavemeta.TupleSetOp(
                     acc_pt_type, accs_kij, acc_idx, acc_new
                 ).result
@@ -1380,6 +1533,7 @@ def _emit_pipelined_step(
     b_ptrs: tuple[dsl.Value, ...],
     ready_lds_offset: int | dsl.Value = 0,
     next_lds_offset: int | dsl.Value = 0,
+    next_scales: tuple[dsl.Value, dsl.Value] | None = None,
 ) -> list[dsl.Value]:
     if cfg.use_dma_lds:
         if state.dma_token is None or state.reuse_token is None:
@@ -1395,7 +1549,9 @@ def _emit_pipelined_step(
                 lds_offset=next_lds_offset,
             ),
         )
-        new_accs = _emit_mma_grid(bld, cfg, state.afs, state.bfs, state.accs)
+        new_accs = _emit_mma_grid(
+            bld, cfg, state.afs, state.bfs, state.accs, state.a_scale, state.b_scale
+        )
         new_afs, new_bfs, reuse_token = _dma_drain(
             bld,
             state.dma_token,
@@ -1408,7 +1564,9 @@ def _emit_pipelined_step(
         next_token = None
         reuse_token = None
         a_loads, b_loads = _lds_global_loads(bld, a_ptrs, b_ptrs, staging)
-        new_accs = _emit_mma_grid(bld, cfg, state.afs, state.bfs, state.accs)
+        new_accs = _emit_mma_grid(
+            bld, cfg, state.afs, state.bfs, state.accs, state.a_scale, state.b_scale
+        )
         new_afs, new_bfs = _lds_store_reload(
             bld, a_loads, b_loads, types.a, types.b, staging
         )
@@ -1423,6 +1581,7 @@ def _emit_pipelined_step(
         *new_accs,
         a_pt,
         b_pt,
+        *(() if next_scales is None else next_scales),
         *(() if next_token is None else (next_token,)),
         *(() if reuse_token is None else (reuse_token,)),
     ]
@@ -1437,7 +1596,9 @@ def _emit_dma_tail_step(
 ) -> _LoopState:
     if state.dma_token is None:
         raise ValueError("DMA tail step requires a ready token")
-    new_accs = _emit_mma_grid(bld, cfg, state.afs, state.bfs, state.accs)
+    new_accs = _emit_mma_grid(
+        bld, cfg, state.afs, state.bfs, state.accs, state.a_scale, state.b_scale
+    )
     tail_step = cfg.virtual_k_steps - 1
     new_afs, new_bfs, _ = _dma_drain(
         bld,
@@ -1463,7 +1624,9 @@ def _store_final_tiles(
     state: _LoopState,
     c_ptrs: tuple[dsl.Value, ...],
 ) -> None:
-    final_accs = _emit_mma_grid(bld, cfg, state.afs, state.bfs, state.accs)
+    final_accs = _emit_mma_grid(
+        bld, cfg, state.afs, state.bfs, state.accs, state.a_scale, state.b_scale
+    )
     for acc, c_ptr in zip(final_accs, c_ptrs, strict=True):
         if cfg.output_type == "f16":
             _fragment_store_f16(bld, cfg, acc, c_ptr)
@@ -1517,7 +1680,7 @@ def _fragment_store_f16(
 def _emit_constant_fill(
     bld: dsl.FunctionBuilder,
     buf: dsl.Value,
-    values: tuple[float, ...],
+    values: tuple[int | float, ...],
     element_type: dsl.Type,
     index_type: dsl.Type,
 ) -> None:
@@ -1533,7 +1696,10 @@ def _emit_input_ptr(
     bld: dsl.FunctionBuilder, buf: dsl.Value, cfg: _MatmulConfig
 ) -> dsl.Value:
     input_type = cfg.input_element_type
-    input_helper = _BF16_PTR_HELPER if cfg.input_type == "bf16" else _F16_PTR_HELPER
+    if cfg.input_type == "mxfp4":
+        input_helper = _I8_PTR_HELPER
+    else:
+        input_helper = _BF16_PTR_HELPER if cfg.input_type == "bf16" else _F16_PTR_HELPER
     [ptr] = bld.call(
         input_helper,
         [bld.memref_cast(buf, dsl.dynamic_1d_memref_type(input_type))],
@@ -1542,21 +1708,204 @@ def _emit_input_ptr(
     return ptr
 
 
+def _emit_i8_ptr(bld: dsl.FunctionBuilder, buf: dsl.Value) -> dsl.Value:
+    [ptr] = bld.call(
+        _I8_PTR_HELPER,
+        [bld.memref_cast(buf, dsl.dynamic_1d_memref_type(dsl.i8()))],
+        [dsl.ptr_type(dsl.i8())],
+    )
+    return ptr
+
+
+@dataclass(frozen=True)
+class _HostBuffers:
+    a: dsl.Value
+    b: dsl.Value
+    c: dsl.Value
+    a_scale: dsl.Value | None = None
+    b_scale: dsl.Value | None = None
+
+
+def _host_input_constants(
+    bld: dsl.FunctionBuilder,
+    cfg: _MatmulConfig,
+    input_type: dsl.Type,
+    c_type: dsl.Type,
+) -> tuple[dsl.Value, dsl.Value, dsl.Value]:
+    if cfg.uses_packed_mxfp4:
+        return (
+            bld.constant(input_type, 0x22),
+            bld.constant(input_type, 0x44),
+            bld.constant(c_type, 0.0),
+        )
+    return (
+        bld.constant(input_type, 1.0),
+        bld.constant(input_type, 2.0),
+        bld.constant(c_type, 0.0),
+    )
+
+
+def _alloc_host_buffers(
+    bld: dsl.FunctionBuilder,
+    cfg: _MatmulConfig,
+    input_type: dsl.Type,
+    c_type: dsl.Type,
+) -> _HostBuffers:
+    a_scale = (
+        bld.alloc([cfg.a_scale_elements], dsl.i8()) if cfg.uses_packed_mxfp4 else None
+    )
+    b_scale = (
+        bld.alloc([cfg.b_scale_elements], dsl.i8()) if cfg.uses_packed_mxfp4 else None
+    )
+    return _HostBuffers(
+        a=bld.alloc([cfg.a_elements], input_type),
+        b=bld.alloc([cfg.b_elements], input_type),
+        c=bld.alloc([cfg.total_elements], c_type),
+        a_scale=a_scale,
+        b_scale=b_scale,
+    )
+
+
+def _fill_host_inputs(
+    bld: dsl.FunctionBuilder,
+    cfg: _MatmulConfig,
+    buffers: _HostBuffers,
+    one_input: dsl.Value,
+    two_input: dsl.Value,
+    index: dsl.Type,
+    c0: dsl.Value,
+    c1: dsl.Value,
+) -> None:
+    if cfg.random_data:
+        a_values, b_values = generate_wmma_f16_matmul_inputs(
+            cfg.M,
+            cfg.N,
+            cfg.K,
+            input_type=cfg.input_type,
+            random_data=True,
+            random_seed=cfg.random_seed,
+        )
+        _emit_constant_fill(bld, buffers.a, a_values, cfg.input_element_type, index)
+        _emit_constant_fill(bld, buffers.b, b_values, cfg.input_element_type, index)
+        return
+
+    a_half = bld.constant(index, cfg.a_elements // 2)
+    a_total = bld.constant(index, cfg.a_elements)
+    with bld.for_loop(c0, a_half, c1) as i:
+        bld.memref_store(one_input, buffers.a, [i])
+    with bld.for_loop(a_half, a_total, c1) as i:
+        bld.memref_store(two_input, buffers.a, [i])
+
+    b_half = bld.constant(index, cfg.b_elements // 2)
+    b_total = bld.constant(index, cfg.b_elements)
+    with bld.for_loop(c0, b_half, c1) as i:
+        bld.memref_store(one_input, buffers.b, [i])
+    with bld.for_loop(b_half, b_total, c1) as i:
+        bld.memref_store(two_input, buffers.b, [i])
+
+
+def _fill_mxfp4_scales(
+    bld: dsl.FunctionBuilder,
+    cfg: _MatmulConfig,
+    buffers: _HostBuffers,
+    index: dsl.Type,
+) -> None:
+    if not cfg.uses_packed_mxfp4:
+        return
+    assert buffers.a_scale is not None and buffers.b_scale is not None
+    a_scales, b_scales = generate_mxfp4_scale_inputs(cfg.M, cfg.N, cfg.K)
+    _emit_constant_fill(bld, buffers.a_scale, a_scales, dsl.i8(), index)
+    _emit_constant_fill(bld, buffers.b_scale, b_scales, dsl.i8(), index)
+
+
+def _zero_host_output(
+    bld: dsl.FunctionBuilder,
+    buffers: _HostBuffers,
+    c_total: dsl.Value,
+    zero_c: dsl.Value,
+    c0: dsl.Value,
+    c1: dsl.Value,
+) -> None:
+    with bld.for_loop(c0, c_total, c1) as i:
+        bld.memref_store(zero_c, buffers.c, [i])
+
+
+def _host_register_buffers(
+    bld: dsl.FunctionBuilder, cfg: _MatmulConfig, buffers: _HostBuffers
+) -> dsl.Value:
+    c_unranked = bld.cast_unranked(buffers.c)
+    bld.host_register(bld.cast_unranked(buffers.a))
+    bld.host_register(bld.cast_unranked(buffers.b))
+    if cfg.uses_packed_mxfp4:
+        assert buffers.a_scale is not None and buffers.b_scale is not None
+        bld.host_register(bld.cast_unranked(buffers.a_scale))
+        bld.host_register(bld.cast_unranked(buffers.b_scale))
+    bld.host_register(c_unranked)
+    return c_unranked
+
+
+def _emit_output_ptr(
+    bld: dsl.FunctionBuilder, cfg: _MatmulConfig, c_buf: dsl.Value
+) -> dsl.Value:
+    c_ptr_type = dsl.ptr_type(cfg.c_type)
+    if cfg.output_type == "f16":
+        dyn_f16 = dsl.dynamic_1d_memref_type(dsl.f16())
+        [c_ptr] = bld.call(
+            _F16_PTR_HELPER, [bld.memref_cast(c_buf, dyn_f16)], [c_ptr_type]
+        )
+        return c_ptr
+    [c_ptr] = bld.call(_F32_PTR_HELPER, [c_buf], [c_ptr_type])
+    return c_ptr
+
+
+def _emit_matmul_launch(
+    bld: dsl.FunctionBuilder,
+    cfg: _MatmulConfig,
+    buffers: _HostBuffers,
+    grid: tuple[dsl.Value, dsl.Value, dsl.Value],
+    block: tuple[dsl.Value, dsl.Value, dsl.Value],
+) -> None:
+    a_ptr = _emit_input_ptr(bld, buffers.a, cfg)
+    b_ptr = _emit_input_ptr(bld, buffers.b, cfg)
+    c_ptr = _emit_output_ptr(bld, cfg, buffers.c)
+    trip_count = bld.constant(dsl.i32(), max(cfg.virtual_k_steps - 1, 0))
+    operands = [a_ptr, b_ptr, c_ptr, trip_count]
+    if cfg.uses_packed_mxfp4:
+        assert buffers.a_scale is not None and buffers.b_scale is not None
+        operands = [
+            a_ptr,
+            b_ptr,
+            c_ptr,
+            _emit_i8_ptr(bld, buffers.a_scale),
+            _emit_i8_ptr(bld, buffers.b_scale),
+            trip_count,
+        ]
+    bld.launch(
+        _GPU_MODULE_NAME,
+        _KERNEL_NAME,
+        grid=grid,
+        block=block,
+        operands=operands,
+    )
+
+
 def _emit_kernel(bld: dsl.FunctionBuilder, cfg: _MatmulConfig) -> None:
     """Populate tiled matmul kernel body."""
     coords = _emit_tile_coords(bld, cfg)
     types = _kernel_types(cfg)
     staging = _emit_lds_staging(bld, cfg, coords)
-    virtual_k_stride = bld.constant(dsl.i32(), cfg.mma.k_tile * cfg.wave_k_tiles)
+    virtual_k_stride = bld.constant(dsl.i32(), cfg.storage_k_tile * cfg.wave_k_tiles)
     ptrs = _initial_tile_ptrs(bld, cfg, coords)
-    init_args = _initial_loop_args(bld, cfg, types, staging, ptrs, virtual_k_stride)
+    init_args = _initial_loop_args(
+        bld, cfg, types, staging, coords, ptrs, virtual_k_stride
+    )
     if cfg.use_dma_lds and cfg.virtual_k_steps == 1:
         _store_final_tiles(bld, cfg, _split_loop_state(tuple(init_args), cfg), ptrs.c)
         return
 
-    # The fourth kernel arg is the pipelined-loop trip count
-    # (`K / (16 * wave_k_tiles) - 1`, precomputed on host).
-    trip_count_i32 = bld.assume_range(bld.args[3], 0, max(cfg.virtual_k_steps - 1, 0))
+    trip_count_i32 = bld.assume_range(
+        bld.args[cfg.trip_count_arg_index], 0, max(cfg.virtual_k_steps - 1, 0)
+    )
     if cfg.use_dma_lds and cfg.virtual_k_steps > 1:
         trip_count_i32 = bld.constant(dsl.i32(), max(cfg.virtual_k_steps - 2, 0))
     zero_i32 = bld.constant(dsl.i32(), 0)
@@ -1591,6 +1940,10 @@ def _emit_kernel(bld: dsl.FunctionBuilder, cfg: _MatmulConfig) -> None:
         else:
             ready_lds_offset = 0
             next_lds_offset = 0
+        next_scales = None
+        if cfg.uses_packed_mxfp4:
+            next_step = bld.addi(loop_iv, bld.constant(dsl.i32(), 1))
+            next_scales = _load_mxfp4_scales(bld, cfg, coords, next_step)
         bld.yield_(
             _emit_pipelined_step(
                 bld,
@@ -1602,6 +1955,7 @@ def _emit_kernel(bld: dsl.FunctionBuilder, cfg: _MatmulConfig) -> None:
                 b_ptrs,
                 ready_lds_offset,
                 next_lds_offset,
+                next_scales,
             )
         )
 
@@ -1612,23 +1966,10 @@ def _emit_kernel(bld: dsl.FunctionBuilder, cfg: _MatmulConfig) -> None:
 
 
 def _emit_host(bld: dsl.FunctionBuilder, cfg: _MatmulConfig) -> None:
-    """Populate the host ``main`` that allocates, launches, and prints.
-
-    The validation fill uses a per-axis split so each output element
-    depends on *both* A and B (so we can distinguish "matmul actually
-    ran" from "kernel happened to sum K ones"):
-
-      * A[i, k] = 1.0 for i in [0, M/2) and 2.0 for i in [M/2, M).
-      * B[k, j] = 1.0 for j in [0, N/2) and 2.0 for j in [N/2, N).
-
-    With that fill, C[i, j] = K * a(i) * b(j) takes values K, 2K, 4K
-    across the four output quadrants -- a pattern the lit CHECK lines
-    pin down directly.
-    """
+    """Populate host main."""
     index = dsl.index_type()
     input_type = cfg.input_element_type
     c_type = cfg.c_type
-    c_ptr_type = dsl.ptr_type(c_type)
 
     c0 = bld.constant(index, 0)
     c1 = bld.constant(index, 1)
@@ -1637,70 +1978,19 @@ def _emit_host(bld: dsl.FunctionBuilder, cfg: _MatmulConfig) -> None:
     threads = bld.constant(index, cfg.threads_per_workgroup)
     c_total = bld.constant(index, cfg.total_elements)
 
-    one_input = bld.constant(input_type, 1.0)
-    two_input = bld.constant(input_type, 2.0)
-    zero_c = bld.constant(c_type, 0.0)
+    one_input, two_input, zero_c = _host_input_constants(bld, cfg, input_type, c_type)
+    buffers = _alloc_host_buffers(bld, cfg, input_type, c_type)
+    _fill_host_inputs(bld, cfg, buffers, one_input, two_input, index, c0, c1)
+    _fill_mxfp4_scales(bld, cfg, buffers, index)
+    _zero_host_output(bld, buffers, c_total, zero_c, c0, c1)
 
-    a_buf = bld.alloc([cfg.a_elements], input_type)
-    b_buf = bld.alloc([cfg.b_elements], input_type)
-    c_buf = bld.alloc([cfg.total_elements], c_type)
-
-    if cfg.random_data:
-        a_values, b_values = generate_wmma_f16_matmul_inputs(
-            cfg.M,
-            cfg.N,
-            cfg.K,
-            input_type=cfg.input_type,
-            random_data=True,
-            random_seed=cfg.random_seed,
-        )
-        _emit_constant_fill(bld, a_buf, a_values, input_type, index)
-        _emit_constant_fill(bld, b_buf, b_values, input_type, index)
-    else:
-        # A is row-major MxK: rows [0, M/2) -> first M*K/2 elements (1.0);
-        # rows [M/2, M) -> the rest (2.0).
-        a_half = bld.constant(index, cfg.a_elements // 2)
-        a_total = bld.constant(index, cfg.a_elements)
-        with bld.for_loop(c0, a_half, c1) as i:
-            bld.memref_store(one_input, a_buf, [i])
-        with bld.for_loop(a_half, a_total, c1) as i:
-            bld.memref_store(two_input, a_buf, [i])
-
-        # B is column-major KxN (== row-major NxK): columns [0, N/2) -> first
-        # N*K/2 elements (1.0); columns [N/2, N) -> the rest (2.0).
-        b_half = bld.constant(index, cfg.b_elements // 2)
-        b_total = bld.constant(index, cfg.b_elements)
-        with bld.for_loop(c0, b_half, c1) as i:
-            bld.memref_store(one_input, b_buf, [i])
-        with bld.for_loop(b_half, b_total, c1) as i:
-            bld.memref_store(two_input, b_buf, [i])
-
-    with bld.for_loop(c0, c_total, c1) as i:
-        bld.memref_store(zero_c, c_buf, [i])
-
-    c_unranked = bld.cast_unranked(c_buf)
-    bld.host_register(bld.cast_unranked(a_buf))
-    bld.host_register(bld.cast_unranked(b_buf))
-    bld.host_register(c_unranked)
-
-    a_ptr = _emit_input_ptr(bld, a_buf, cfg)
-    b_ptr = _emit_input_ptr(bld, b_buf, cfg)
-    if cfg.output_type == "f16":
-        dyn_f16 = dsl.dynamic_1d_memref_type(dsl.f16())
-        [c_ptr] = bld.call(
-            _F16_PTR_HELPER, [bld.memref_cast(c_buf, dyn_f16)], [c_ptr_type]
-        )
-    else:
-        [c_ptr] = bld.call(_F32_PTR_HELPER, [c_buf], [c_ptr_type])
-
-    trip_count_value = bld.constant(dsl.i32(), max(cfg.virtual_k_steps - 1, 0))
-    launch_operands = [a_ptr, b_ptr, c_ptr, trip_count_value]
-    bld.launch(
-        _GPU_MODULE_NAME,
-        _KERNEL_NAME,
+    c_unranked = _host_register_buffers(bld, cfg, buffers)
+    _emit_matmul_launch(
+        bld,
+        cfg,
+        buffers,
         grid=(blocks_m, blocks_n, c1),
         block=(threads, c1, c1),
-        operands=launch_operands,
     )
     print_helper = _PRINT_F16_HELPER if cfg.output_type == "f16" else _PRINT_HELPER
     bld.call(print_helper, [c_unranked])
@@ -1748,7 +2038,10 @@ def _make_matmul_config(
 
 
 def _declare_matmul_externals(bld: dsl.ModuleBuilder, cfg: _MatmulConfig) -> None:
-    input_helper = _BF16_PTR_HELPER if cfg.input_type == "bf16" else _F16_PTR_HELPER
+    if cfg.input_type == "mxfp4":
+        input_helper = _I8_PTR_HELPER
+    else:
+        input_helper = _BF16_PTR_HELPER if cfg.input_type == "bf16" else _F16_PTR_HELPER
     bld.declare_external(
         input_helper,
         [dsl.dynamic_1d_memref_type(cfg.input_element_type)],
@@ -1780,12 +2073,15 @@ def _declare_matmul_externals(bld: dsl.ModuleBuilder, cfg: _MatmulConfig) -> Non
 
 
 def _kernel_input_types(cfg: _MatmulConfig) -> list[dsl.Type]:
-    return [
+    args = [
         dsl.ptr_type(cfg.input_element_type),
         dsl.ptr_type(cfg.input_element_type),
         dsl.ptr_type(cfg.c_type),
-        dsl.i32(),
     ]
+    if cfg.uses_packed_mxfp4:
+        args.extend([dsl.ptr_type(dsl.i8()), dsl.ptr_type(dsl.i8())])
+    args.append(dsl.i32())
+    return args
 
 
 def build_wmma_f16_matmul_module(
@@ -1868,5 +2164,6 @@ def _attach_wavemeta_params(module: Module, cfg: _MatmulConfig) -> None:
 __all__ = [
     "build_wmma_f16_matmul_module",
     "compute_wmma_f16_matmul_reference_buffer",
+    "generate_mxfp4_scale_inputs",
     "generate_wmma_f16_matmul_inputs",
 ]
