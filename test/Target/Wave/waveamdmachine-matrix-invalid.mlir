@@ -39,6 +39,30 @@ func.func @bad_mma_scale_kind(%x: i32) {
 
 // -----
 
+func.func @bad_mma_scale_a_fragment(%x: i32) {
+  %scale = wave.splat %x : i32 -> !wave.simd<i32, 64>
+  %bad_a = waveamd.fragment_fill %x : i32 -> !waveamd.fragment<1, i8, 16, 16, 64, 4>
+  %b = waveamd.fragment_fill %x : i32 -> !waveamd.fragment<1, i8, 16, 16, 64, 4>
+  %acc = waveamd.fragment_fill %x : i32 -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
+  // expected-error @below {{A operand must be a 16x16 packed-f4 wave64 fragment with 4 registers}}
+  %result = waveamd.mma_scale "mfma.scale.f32.16x16x128.f4.f4" %bad_a, %scale, %b, %scale, %acc : !waveamd.fragment<1, i8, 16, 16, 64, 4>, !wave.simd<i32, 64>, !waveamd.fragment<1, i8, 16, 16, 64, 4>, !wave.simd<i32, 64>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
+  return
+}
+
+// -----
+
+func.func @bad_mma_scale_b_fragment(%x: i32) {
+  %scale = wave.splat %x : i32 -> !wave.simd<i32, 64>
+  %a = waveamd.fragment_fill %x : i32 -> !waveamd.fragment<0, i8, 16, 16, 64, 4>
+  %bad_b = waveamd.fragment_fill %x : i32 -> !waveamd.fragment<0, i8, 16, 16, 64, 4>
+  %acc = waveamd.fragment_fill %x : i32 -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
+  // expected-error @below {{B operand must be a 16x16 packed-f4 wave64 fragment with 4 registers}}
+  %result = waveamd.mma_scale "mfma.scale.f32.16x16x128.f4.f4" %a, %scale, %bad_b, %scale, %acc : !waveamd.fragment<0, i8, 16, 16, 64, 4>, !wave.simd<i32, 64>, !waveamd.fragment<0, i8, 16, 16, 64, 4>, !wave.simd<i32, 64>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
+  return
+}
+
+// -----
+
 func.func @bad_mma_scale_acc(%x: i32) {
   %scale = wave.splat %x : i32 -> !wave.simd<i32, 64>
   %a = waveamd.fragment_fill %x : i32 -> !waveamd.fragment<0, i8, 16, 16, 64, 4>
@@ -46,6 +70,18 @@ func.func @bad_mma_scale_acc(%x: i32) {
   %acc = waveamd.fragment_fill %x : i32 -> !waveamd.fragment<2, i32, 16, 16, 64, 4>
   // expected-error @below {{accumulator must be a 16x16 f32 wave64 fragment with 4 registers}}
   %result = waveamd.mma_scale "mfma.scale.f32.16x16x128.f4.f4" %a, %scale, %b, %scale, %acc : !waveamd.fragment<0, i8, 16, 16, 64, 4>, !wave.simd<i32, 64>, !waveamd.fragment<1, i8, 16, 16, 64, 4>, !wave.simd<i32, 64>, !waveamd.fragment<2, i32, 16, 16, 64, 4> -> !waveamd.fragment<2, i32, 16, 16, 64, 4>
+  return
+}
+
+// -----
+
+func.func @bad_mma_scale_result(%x: i32) {
+  %scale = wave.splat %x : i32 -> !wave.simd<i32, 64>
+  %a = waveamd.fragment_fill %x : i32 -> !waveamd.fragment<0, i8, 16, 16, 64, 4>
+  %b = waveamd.fragment_fill %x : i32 -> !waveamd.fragment<1, i8, 16, 16, 64, 4>
+  %acc = waveamd.fragment_fill %x : i32 -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
+  // expected-error @below {{result type must match accumulator type}}
+  %result = waveamd.mma_scale "mfma.scale.f32.16x16x128.f4.f4" %a, %scale, %b, %scale, %acc : !waveamd.fragment<0, i8, 16, 16, 64, 4>, !wave.simd<i32, 64>, !waveamd.fragment<1, i8, 16, 16, 64, 4>, !wave.simd<i32, 64>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 2>
   return
 }
 

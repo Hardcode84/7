@@ -54,6 +54,105 @@ func.func @bad_mfma_scale_index(%a: !waveamdmachine.reg<vgpr, 4>,
 
 // -----
 
+func.func @bad_mfma_scale_b_index(%a: !waveamdmachine.reg<vgpr, 4>,
+                                  %b: !waveamdmachine.reg<vgpr, 4>,
+                                  %acc: !waveamdmachine.reg<vgpr, 4>,
+                                  %scale: !waveamdmachine.reg<vgpr, 1>) {
+  // expected-error @below {{attribute 'scale_idx_b' failed to satisfy constraint}}
+  %r = waveamdmachine.mfma_scale_f32_16x16x128_f4_f4 %a, %b, %acc, %scale, %scale {scale_idx_b = 4 : i64}
+      : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
+         !waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 1>,
+         !waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 4>
+  return
+}
+
+// -----
+
+func.func @bad_mfma_scale_a_width(%a: !waveamdmachine.reg<vgpr, 2>,
+                                  %b: !waveamdmachine.reg<vgpr, 4>,
+                                  %acc: !waveamdmachine.reg<vgpr, 4>,
+                                  %scale: !waveamdmachine.reg<vgpr, 1>) {
+  // expected-error @below {{A operand must be !waveamdmachine.reg<vgpr, 4>}}
+  %r = waveamdmachine.mfma_scale_f32_16x16x128_f4_f4 %a, %b, %acc, %scale, %scale
+      : (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vgpr, 4>,
+         !waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 1>,
+         !waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 4>
+  return
+}
+
+// -----
+
+func.func @bad_mfma_scale_b_width(%a: !waveamdmachine.reg<vgpr, 4>,
+                                  %b: !waveamdmachine.reg<vgpr, 2>,
+                                  %acc: !waveamdmachine.reg<vgpr, 4>,
+                                  %scale: !waveamdmachine.reg<vgpr, 1>) {
+  // expected-error @below {{B operand must be !waveamdmachine.reg<vgpr, 4>}}
+  %r = waveamdmachine.mfma_scale_f32_16x16x128_f4_f4 %a, %b, %acc, %scale, %scale
+      : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 2>,
+         !waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 1>,
+         !waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 4>
+  return
+}
+
+// -----
+
+func.func @bad_mfma_scale_acc_width(%a: !waveamdmachine.reg<vgpr, 4>,
+                                    %b: !waveamdmachine.reg<vgpr, 4>,
+                                    %acc: !waveamdmachine.reg<vgpr, 2>,
+                                    %scale: !waveamdmachine.reg<vgpr, 1>) {
+  // expected-error @below {{accumulator operand must be !waveamdmachine.reg<vgpr, 4>}}
+  %r = waveamdmachine.mfma_scale_f32_16x16x128_f4_f4 %a, %b, %acc, %scale, %scale
+      : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
+         !waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vgpr, 1>,
+         !waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 4>
+  return
+}
+
+// -----
+
+func.func @bad_mfma_scale_a_scale_width(%a: !waveamdmachine.reg<vgpr, 4>,
+                                        %b: !waveamdmachine.reg<vgpr, 4>,
+                                        %acc: !waveamdmachine.reg<vgpr, 4>,
+                                        %scale: !waveamdmachine.reg<vgpr, 2>) {
+  // expected-error @below {{operand #3 must be WaveAMDMachine scalar VGPR register}}
+  %r = waveamdmachine.mfma_scale_f32_16x16x128_f4_f4 %a, %b, %acc, %scale, %scale
+      : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
+         !waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 2>,
+         !waveamdmachine.reg<vgpr, 2>) -> !waveamdmachine.reg<vgpr, 4>
+  return
+}
+
+// -----
+
+func.func @bad_mfma_scale_b_scale_width(%a: !waveamdmachine.reg<vgpr, 4>,
+                                        %b: !waveamdmachine.reg<vgpr, 4>,
+                                        %acc: !waveamdmachine.reg<vgpr, 4>,
+                                        %good_scale: !waveamdmachine.reg<vgpr, 1>,
+                                        %bad_scale: !waveamdmachine.reg<vgpr, 2>) {
+  // expected-error @below {{operand #4 must be WaveAMDMachine scalar VGPR register}}
+  %r = waveamdmachine.mfma_scale_f32_16x16x128_f4_f4 %a, %b, %acc, %good_scale, %bad_scale
+      : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
+         !waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 1>,
+         !waveamdmachine.reg<vgpr, 2>) -> !waveamdmachine.reg<vgpr, 4>
+  return
+}
+
+// -----
+
+func.func @bad_mfma_scale_result_width(%a: !waveamdmachine.reg<vgpr, 4>,
+                                       %b: !waveamdmachine.reg<vgpr, 4>,
+                                       %acc: !waveamdmachine.reg<vgpr, 4>,
+                                       %scale: !waveamdmachine.reg<vgpr, 1>) {
+  // expected-error @below {{result must be !waveamdmachine.reg<vgpr, 4>}}
+  %r = waveamdmachine.mfma_scale_f32_16x16x128_f4_f4 %a, %b, %acc, %scale, %scale
+      : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
+         !waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 1>,
+         !waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 2>
+  return
+}
+
+// -----
+
 func.func @tuple_to_elements_wrong_count(%t: !waveamdmachine.reg<vgpr, 8>) {
   // expected-error @below {{element widths sum (4) must match tuple register width (8)}}
   %e:4 = waveamdmachine.tuple_to_elements %t
