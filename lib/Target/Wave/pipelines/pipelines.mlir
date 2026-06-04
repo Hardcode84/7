@@ -76,8 +76,9 @@ module attributes {transform.with_named_sequence} {
         : (!transform.any_op) -> !transform.any_op
     %r4 = transform.apply_registered_pass "waveamd-preserve-hw-regs" to %rlin
         : (!transform.any_op) -> !transform.any_op
-    %r5 = transform.apply_registered_pass "waveamd-reg-alloc" to %r4
-        : (!transform.any_op) -> !transform.any_op
+    %r5 = transform.apply_registered_pass "waveamd-reg-alloc" with
+        options = { "agpr-bank-spill" = true }
+        to %r4 : (!transform.any_op) -> !transform.any_op
     %r6 = transform.apply_registered_pass "waveamd-insert-hazard-waits" to %r5
         : (!transform.any_op) -> !transform.any_op
     %r7 = transform.apply_registered_pass "waveamd-resource-info" to %r6
