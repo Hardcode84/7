@@ -705,15 +705,13 @@ static Value ensureSGPR2(WaveAMDMachineSelector &S, Location loc, Value v) {
 static Value ensureVGPR2(WaveAMDMachineSelector &S, Location loc, Value v) {
   if (isVGPR2(v))
     return v;
-  if (isSGPR2(v)) {
-    Type sgpr1 =
-        getRegType(S.builder.getContext(), waveamdmachine::RegClass::SGPR, 1);
-    auto split = waveamdmachine::TupleToElementsOp::create(
-        S.builder, loc, TypeRange{sgpr1, sgpr1}, v);
-    Value lo = S.ensureVGPRForVSrc1(loc, split.getElements()[0]);
-    Value hi = S.ensureVGPRForVSrc1(loc, split.getElements()[1]);
-    return tuple2(S, loc, waveamdmachine::RegClass::VGPR, lo, hi);
-  }
+  if (isSGPR2(v))
+    return waveamdmachine::VMovB32TupleOp::create(
+               S.builder, loc,
+               getRegType(S.builder.getContext(),
+                          waveamdmachine::RegClass::VGPR, 2),
+               v)
+        .getResult();
   Value lo = S.ensureVGPRForVSrc1(loc, v);
   Value hi = S.ensureVGPRForVSrc1(loc, createImm(S.builder, loc, 0));
   return tuple2(S, loc, waveamdmachine::RegClass::VGPR, lo, hi);

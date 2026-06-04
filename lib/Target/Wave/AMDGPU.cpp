@@ -1366,13 +1366,8 @@ private:
     if (isa<waveamdmachine::VMovB32TupleOp>(op)) {
       auto regType = cast<waveamdmachine::RegType>(result().getType());
       Value src = op.getOperand(0);
-      auto srcType = dyn_cast<waveamdmachine::RegType>(src.getType());
-      bool srcTuple = srcType &&
-                      srcType.getRegClass() == waveamdmachine::RegClass::VGPR &&
-                      srcType.getWidth() == regType.getWidth();
       for (unsigned i = 0, e = regType.getWidth(); i != e; ++i) {
-        llvm::MCOperand srcOp =
-            srcTuple ? toMCVGPRComponent(src, i) : toMCOperand(src);
+        llvm::MCOperand srcOp = toMCB32Component(src, i);
         if (failed(emitMC(vMovB32(), {toMCVGPRComponent(result(), i), srcOp})))
           return failure();
       }
