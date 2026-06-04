@@ -194,6 +194,14 @@ class _MatmulConfig:
         return self.mma.lane_k_elems
 
     @property
+    def storage_k_tile_dwords(self) -> int:
+        return self.storage_k_tile * self.input_element_bytes // 4
+
+    @property
+    def storage_lane_k_dwords(self) -> int:
+        return self.storage_lane_k_elems * self.input_element_bytes // 4
+
+    @property
     def scale_groups(self) -> int:
         return self.K // 32
 
@@ -362,8 +370,6 @@ def _validate_tile_shape(cfg: _MatmulConfig) -> None:
 def _validate_dma_lds_shape(cfg: _MatmulConfig) -> None:
     if not cfg.use_dma_lds:
         return
-    if cfg.uses_packed_mxfp4:
-        raise ValueError("MXFP4 DMA LDS staging needs scale pipeline support")
     if cfg.mma.name != "mfma_gfx950":
         raise ValueError("use_dma_lds is currently supported only for gfx950 MFMA")
     a_slots = cfg.wave_k_tiles * cfg.BM * cfg.wave_m_tiles
@@ -887,11 +893,11 @@ def _emit_dma_cta_staging_ptrs(
         slot = _dma_slot_expr(cfg, slot_per_wave, wave_id)
         k_tile, m_tile = _dma_slot_major_minor(slot, geom.block_m_tiles)
         off = bld.index_expr(
-            wg_m * (geom.block_m_tiles * 16 * cfg.K)
-            + m_tile * (16 * cfg.K)
-            + k_tile * cfg.mma.k_tile
-            + src_row * cfg.K
-            + src_k_group * cfg.mma.lane_k_elems,
+            wg_m * (geom.block_m_tiles * 16 * cfg.storage_K)
+            + m_tile * (16 * cfg.storage_K)
+            + k_tile * cfg.storage_k_tile
+            + src_row * cfg.storage_K
+            + src_k_group * cfg.storage_lane_k_elems,
             bindings=bindings,
         )
         return bld.ptr_add(coords.a_base, off)
@@ -900,11 +906,11 @@ def _emit_dma_cta_staging_ptrs(
         slot = _dma_slot_expr(cfg, slot_per_wave, wave_id)
         k_tile, n_tile = _dma_slot_major_minor(slot, geom.block_n_tiles)
         off = bld.index_expr(
-            wg_n * (geom.block_n_tiles * 16 * cfg.K)
-            + n_tile * (16 * cfg.K)
-            + k_tile * cfg.mma.k_tile
-            + src_row * cfg.K
-            + src_k_group * cfg.mma.lane_k_elems,
+            wg_n * (geom.block_n_tiles * 16 * cfg.storage_K)
+            + n_tile * (16 * cfg.storage_K)
+            + k_tile * cfg.storage_k_tile
+            + src_row * cfg.storage_K
+            + src_k_group * cfg.storage_lane_k_elems,
             bindings=bindings,
         )
         return bld.ptr_add(coords.b_base, off)
@@ -913,8 +919,8 @@ def _emit_dma_cta_staging_ptrs(
         slot_off = bld.index_expr(
             base
             + slot * geom.dwords_per_slot
-            + lane_mod16 * (cfg.mma.k_tile // 2)
-            + read_k_group * (cfg.mma.lane_k_elems // 2),
+            + lane_mod16 * cfg.storage_k_tile_dwords
+            + read_k_group * cfg.storage_lane_k_dwords,
             bindings=bindings,
         )
         return bld.ptr_add(lds, slot_off)
@@ -1741,7 +1747,7 @@ def _emit_pipelined_step(
             state.accs,
             coords=coords,
             scale_step=scale_step,
-            scale_lds_offset=current_lds_offset,
+            scale_lds_offset=0,
             scale_after=state.reuse_token,
             scale_tokens=scale_tokens,
         )
@@ -1764,6 +1770,8 @@ def _emit_pipelined_step(
             staging,
             lds_offset=ready_lds_offset,
         )
+        if cfg.uses_packed_mxfp4:
+            reuse_token = _join_tokens(bld, [reuse_token, *scale_tokens])
     else:
         next_token = None
         reuse_token = None
@@ -1806,13 +1814,25 @@ def _emit_dma_tail_step(
     cfg: _MatmulConfig,
     types: _KernelTypes,
     staging: _LdsStaging,
+    coords: _TileCoords,
     state: _LoopState,
 ) -> _LoopState:
     if state.dma_token is None:
         raise ValueError("DMA tail step requires a ready token")
-    new_accs = _emit_mma_grid(bld, cfg, state.afs, state.bfs, state.accs)
+    scale_tokens: list[dsl.Value] = []
+    new_accs = _emit_mma_grid(
+        bld,
+        cfg,
+        state.afs,
+        state.bfs,
+        state.accs,
+        coords=coords,
+        scale_step=cfg.virtual_k_steps - 2,
+        scale_after=state.reuse_token,
+        scale_tokens=scale_tokens,
+    )
     tail_step = cfg.virtual_k_steps - 1
-    new_afs, new_bfs, _ = _dma_drain(
+    new_afs, new_bfs, reuse_token = _dma_drain(
         bld,
         state.dma_token,
         types.a,
@@ -1831,6 +1851,7 @@ def _emit_dma_tail_step(
         accs=tuple(new_accs),
         afs=(a_pt,),
         bfs=(b_pt,),
+        reuse_token=_join_tokens(bld, [reuse_token, *scale_tokens]),
     )
 
 
@@ -2196,8 +2217,9 @@ def _emit_kernel(bld: dsl.FunctionBuilder, cfg: _MatmulConfig) -> None:
     final_scale_step = cfg.virtual_k_steps - 1
     final_scale_lds_offset: dsl.Value | int = 0
     if cfg.use_dma_lds and cfg.virtual_k_steps > 1:
-        final_state = _emit_dma_tail_step(bld, cfg, types, staging, final_state)
-        final_scale_lds_offset = _dma_buffer_offset(bld, cfg, final_scale_step)
+        final_state = _emit_dma_tail_step(bld, cfg, types, staging, coords, final_state)
+        if not cfg.uses_packed_mxfp4:
+            final_scale_lds_offset = _dma_buffer_offset(bld, cfg, final_scale_step)
     _store_final_tiles(
         bld,
         cfg,

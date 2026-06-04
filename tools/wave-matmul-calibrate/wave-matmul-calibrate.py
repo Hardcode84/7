@@ -745,8 +745,6 @@ def validate_mxfp4_args(args: argparse.Namespace) -> None:
             sys.exit("--input-type=mxfp4 requires gfx950")
         if selected_matrix_intrinsic(args) != "mfma_gfx950":
             sys.exit("--input-type=mxfp4 requires gfx950 MFMA")
-        if args.use_dma_lds:
-            sys.exit("MXFP4 calibration does not support --use-dma-lds yet")
 
 
 def validate_pressure_budget_args(args: argparse.Namespace) -> None:

@@ -7,6 +7,7 @@
 # CHECK: matmul_runner_gfx950_wave_size: ok
 # CHECK: matmul_bf16_forwarding: ok
 # CHECK: matmul_mxfp4_forwarding_and_trip_count: ok
+# CHECK: matmul_mxfp4_dma_forwarding: ok
 # CHECK: matmul_dma_sim_trip_count: ok
 # CHECK: matmul_pingpong_removed: ok
 
@@ -367,6 +368,38 @@ def check_matmul_mxfp4_forwarding_and_trip_count(matmul) -> None:
     print("matmul_mxfp4_forwarding_and_trip_count: ok")
 
 
+def check_matmul_mxfp4_dma_forwarding(matmul) -> None:
+    args = make_mxfp4_args()
+    args.use_dma_lds = True
+    validate_args = argparse.Namespace(
+        **vars(args),
+        repeats=1,
+        calibration_file=None,
+        pressure_vgpr_budget=-1,
+        pressure_sgpr_budget=-1,
+        pressure_critical_vgpr_budget=-1,
+        pressure_critical_sgpr_budget=-1,
+    )
+    matmul.validate_args(validate_args)
+    example_cmd = matmul.build_example_args(args, "gfx950")
+    require(
+        "matmul_mxfp4_dma_forwarding",
+        "--input-type=mxfp4" in example_cmd,
+        "example command missing mxfp4 input type",
+    )
+    require(
+        "matmul_mxfp4_dma_forwarding",
+        "--use-dma-lds" in example_cmd,
+        "example command missing DMA LDS flag",
+    )
+    require(
+        "matmul_mxfp4_dma_forwarding",
+        matmul.compute_sim_loop_trip_count(args) == 0,
+        "MXFP4 DMA sim trip count should use V - 2",
+    )
+    print("matmul_mxfp4_dma_forwarding: ok")
+
+
 def check_matmul_dma_sim_trip_count(matmul) -> None:
     base = argparse.Namespace(k=64, wave_k_tiles=2, use_dma_lds=False)
     require(
@@ -450,6 +483,7 @@ def main() -> int:
     check_matmul_runner_wave_size(matmul)
     check_matmul_bf16_forwarding(matmul)
     check_matmul_mxfp4_forwarding_and_trip_count(matmul)
+    check_matmul_mxfp4_dma_forwarding(matmul)
     check_matmul_dma_sim_trip_count(matmul)
     try:
         matmul.parse_variants("pingpong")

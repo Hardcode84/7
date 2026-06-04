@@ -17,6 +17,8 @@
 // RUN:   | FileCheck %s --check-prefix=ASMBF16
 // RUN: %python %S/../../../examples/wave/wmma_matmul_tiled.py --chip=gfx950 --m=32 --n=32 --k=128 --wave-m-tiles=2 --wave-n-tiles=2 --matrix-intrinsic=mfma_gfx950 --input-type=mxfp4 --dump-asm 2>/dev/null \
 // RUN:   | FileCheck %s --check-prefix=ASMMXFP4
+// RUN: %python %S/../../../examples/wave/wmma_matmul_tiled.py --chip=gfx950 --m=16 --n=16 --k=256 --matrix-intrinsic=mfma_gfx950 --input-type=mxfp4 --use-dma-lds --dump-asm 2>/dev/null \
+// RUN:   | FileCheck %s --check-prefix=ASMMXFP4-DMA
 //
 // IR: wave.index_expr <{{.*xor.*floor\(1/2\*Mod\(wi, 16\)\).*}}>
 // IR: waveamd.dma_load_lds
@@ -84,6 +86,21 @@
 // ASMMXFP4: .amdhsa_group_segment_fixed_size 6144
 // ASMMXFP4: .amdhsa_kernarg_size 48
 // ASMMXFP4: .amdhsa_user_sgpr_kernarg_preload_length 11
+
+// ASMMXFP4-DMA-LABEL: wmma_f16_matmul_tiled:
+// ASMMXFP4-DMA: global_load_lds_dwordx4
+// ASMMXFP4-DMA: global_load_lds_dwordx4
+// ASMMXFP4-DMA: global_load_dword v{{[0-9]+}}, v{{[0-9]+}}, s{{\[[0-9]+:[0-9]+\]}}
+// ASMMXFP4-DMA: ds_write_b8 {{v[0-9]+}}, {{v[0-9]+}} offset:4096
+// ASMMXFP4-DMA: ds_read_b64_tr_b8 {{v\[[0-9]+:[0-9]+\]}}, {{v[0-9]+}} offset:4096
+// ASMMXFP4-DMA: v_mfma_scale_f32_16x16x128_f8f6f4
+// ASMMXFP4-DMA: ds_read_b128 {{v\[[0-9]+:[0-9]+\]}}, {{v[0-9]+}} offset:2048
+// ASMMXFP4-DMA: global_load_dword v{{[0-9]+}}, v{{[0-9]+}}, s{{\[[0-9]+:[0-9]+\]}} offset:4
+// ASMMXFP4-DMA: ds_write_b8 {{v[0-9]+}}, {{v[0-9]+}} offset:4096
+// ASMMXFP4-DMA: ds_read_b64_tr_b8 {{v\[[0-9]+:[0-9]+\]}}, {{v[0-9]+}} offset:4096
+// ASMMXFP4-DMA: v_mfma_scale_f32_16x16x128_f8f6f4
+// ASMMXFP4-DMA: .amdhsa_group_segment_fixed_size 5120
+
 // ASMPIPE: ds_read_b128
 // ASMPIPE: s_waitcnt lgkmcnt(0)
 // ASMPIPE-NEXT: buffer_load_dwordx4
