@@ -15,7 +15,7 @@
 // RUN:   | FileCheck %s --check-prefix=ASMPIPE
 // RUN: %python %S/../../../examples/wave/wmma_matmul_tiled.py --chip=gfx950 --m=16 --n=16 --k=32 --matrix-intrinsic=mfma_gfx950 --input-type=bf16 --dump-asm 2>/dev/null \
 // RUN:   | FileCheck %s --check-prefix=ASMBF16
-// RUN: %python %S/../../../examples/wave/wmma_matmul_tiled.py --chip=gfx950 --m=16 --n=16 --k=128 --matrix-intrinsic=mfma_gfx950 --input-type=mxfp4 --dump-asm 2>/dev/null \
+// RUN: %python %S/../../../examples/wave/wmma_matmul_tiled.py --chip=gfx950 --m=32 --n=32 --k=128 --wave-m-tiles=2 --wave-n-tiles=2 --matrix-intrinsic=mfma_gfx950 --input-type=mxfp4 --dump-asm 2>/dev/null \
 // RUN:   | FileCheck %s --check-prefix=ASMMXFP4
 //
 // IR: wave.index_expr <{{.*xor.*floor\(1/2\*Mod\(wi, 16\)\).*}}>
@@ -73,7 +73,9 @@
 // ASMMXFP4: global_load_dwordx4 v{{\[}}[[AV:[0-9]+]]:[[AV1:[0-9]+]]{{\]}}, v{{[0-9]+}}, s{{\[}}[[A]]:[[A1]]{{\]}}
 // ASMMXFP4: global_load_dwordx4 v{{\[}}[[BV:[0-9]+]]:[[BV1:[0-9]+]]{{\]}}, v{{[0-9]+}}, s{{\[}}[[B]]:[[B1]]{{\]}}
 // ASMMXFP4: global_load_dword v[[SAV:[0-9]+]], v{{[0-9]+}}, s{{\[}}[[SA]]:[[SA1]]{{\]}}
+// ASMMXFP4: global_load_dword v{{[0-9]+}}, v{{[0-9]+}}, s{{\[}}[[SA]]:[[SA1]]{{\]}} offset:64
 // ASMMXFP4: global_load_dword v[[SBV:[0-9]+]], v{{[0-9]+}}, s{{\[}}[[SB]]:[[SB1]]{{\]}}
+// ASMMXFP4: global_load_dword v{{[0-9]+}}, v{{[0-9]+}}, s{{\[}}[[SB]]:[[SB1]]{{\]}} offset:64
 // ASMMXFP4: v_mfma_scale_f32_16x16x128_f8f6f4 v{{\[[0-9]+:[0-9]+\]}}, v{{\[[0-9]+:[0-9]+\]}}, v{{\[[0-9]+:[0-9]+\]}}, v{{\[[0-9]+:[0-9]+\]}}, v[[SAV]], v[[SBV]] op_sel_hi:[0,0,0] cbsz:4 blgp:4
 // ASMMXFP4: .amdhsa_kernarg_size 48
 // ASMMXFP4: .amdhsa_user_sgpr_kernarg_preload_length 11

@@ -103,9 +103,11 @@ module_bf16 = build_wmma_f16_matmul_module(
 print(module_bf16)
 
 module_mxfp4 = build_wmma_f16_matmul_module(
-    M=16,
-    N=16,
+    M=32,
+    N=32,
     K=128,
+    wave_m_tiles=2,
+    wave_n_tiles=2,
     matrix_intrinsic="mfma_gfx950",
     input_type="mxfp4",
 )
@@ -113,8 +115,8 @@ print(module_mxfp4)
 
 # CHECK: random-ref 1024 1024 1024
 # CHECK: bf16-ref 256 32.0
-# CHECK: mxfp4-scales 64 64 127 125
-# CHECK: mxfp4-ref 256 128.0 64.0
+# CHECK: mxfp4-scales 64 64 127 122
+# CHECK: mxfp4-ref 256 42.5 21.25
 # CHECK: f16-ref-rounding -132.5625 -132.5
 # CHECK-LABEL: func.func @wmma_f16_matmul_tiled
 # CHECK-SAME: wave.lds_size = 2048
@@ -149,6 +151,6 @@ print(module_mxfp4)
 # CHECK-SAME: !wave.ptr<#wave.global, i8>
 # CHECK: %{{.*}}, %{{.*}} = wave.load
 # CHECK-SAME: !wave.ptr<#wave.global, i8>
-# CHECK: waveamd.mma_scale "mfma.scale.f32.16x16x128.f4.f4"
+# CHECK-COUNT-4: waveamd.mma_scale "mfma.scale.f32.16x16x128.f4.f4"
 # CHECK-SAME: !wave.simd<i32, 64>
 # CHECK-SAME: !wave.simd<i32, 64>
