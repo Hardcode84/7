@@ -342,6 +342,59 @@ def test_mask_where():
         print(m.module)
 
 
+# CHECK-LABEL: TEST: test_mask_where_otherwise
+@run
+def test_mask_where_otherwise():
+    with w.module() as m:
+        with m.function("where_otherwise_kernel", [w.i32()], kernel=True) as f:
+            (limit,) = f.args
+            lane = f.lane_id()
+            vlimit = f.splat(limit)
+            active = f.cmpi("ult", lane, vlimit)
+            with f.where(active, [w.simd_type(w.i32())]) as where:
+                f.yield_([lane])
+                with where.otherwise():
+                    fallback = f.splat(f.constant(w.i32(), 7))
+                    f.yield_([fallback])
+            _selected = where.results[0]
+        # CHECK: func.func @where_otherwise_kernel
+        # CHECK: [[LANE:%.*]] = wave.lane_id
+        # CHECK: [[VLIM:%.*]] = wave.splat
+        # CHECK: [[MASK:%.*]] = wave.cmpi ult [[LANE]], [[VLIM]]
+        # CHECK: [[SELECTED:%.*]] = wave.where [[MASK]] {
+        # CHECK:   wave.yield [[LANE]]
+        # CHECK: } otherwise {
+        # CHECK:   [[FALLBACK:%.*]] = wave.splat
+        # CHECK:   wave.yield [[FALLBACK]]
+        # CHECK: } : !wave.mask<32> -> !wave.simd<i32, 32>
+        print(m.module)
+
+
+# CHECK-LABEL: TEST: test_uniform_if_otherwise
+@run
+def test_uniform_if_otherwise():
+    with w.module() as m:
+        with m.function("uniform_if_kernel", [], kernel=True) as f:
+            cond = f.constant(w.i1(), 1)
+            lhs = f.constant(w.i32(), 11)
+            rhs = f.constant(w.i32(), 22)
+            with f.if_(cond, [w.i32()], otherwise=True) as ifop:
+                f.yield_([lhs])
+                with ifop.otherwise():
+                    f.yield_([rhs])
+            _selected = ifop.results[0]
+        # CHECK: func.func @uniform_if_kernel
+        # CHECK: [[COND:%.*]] = arith.constant true
+        # CHECK: [[LHS:%.*]] = arith.constant 11
+        # CHECK: [[RHS:%.*]] = arith.constant 22
+        # CHECK: [[SELECTED:%.*]] = scf.if [[COND]] -> (i32) {
+        # CHECK:   scf.yield [[LHS]] : i32
+        # CHECK: } else {
+        # CHECK:   scf.yield [[RHS]] : i32
+        # CHECK: }
+        print(m.module)
+
+
 # CHECK-LABEL: TEST: test_uniform_for_loop_nonzero_trip
 @run
 def test_uniform_for_loop_nonzero_trip():

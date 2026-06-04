@@ -32,6 +32,7 @@ from collections.abc import Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from enum import Enum, auto
 from types import TracebackType
+from typing import Any
 
 import ixsimpl
 from mlir._mlir_libs._waveDialectsNanobind import (
@@ -133,6 +134,30 @@ class _YieldKind(Enum):
     SCF = auto()
     WAVE = auto()
     WAVEMETA = auto()
+
+
+def _ends_with(block: Block, op_type: type) -> bool:
+    return len(block.operations) > 0 and isinstance(block.operations[-1], op_type)
+
+
+def _finish_wave_region(block: Block, result_types: Sequence[Type]) -> None:
+    if _ends_with(block, wave.YieldOp):
+        return
+    if result_types:
+        raise RuntimeError("result-bearing wave.where region must yield values")
+    wave.YieldOp([])
+
+
+def _finish_scf_region(block: Block, result_types: Sequence[Type]) -> None:
+    if _ends_with(block, scf.YieldOp):
+        return
+    if result_types:
+        raise RuntimeError("result-bearing scf.if region must yield values")
+    scf.YieldOp([])
+
+
+def i1() -> IntegerType:
+    return IntegerType.get_signless(1)
 
 
 def i8() -> IntegerType:
@@ -530,6 +555,70 @@ class _GpuModuleBuilder:
             func.ReturnOp([])
 
 
+class _WhereBuilder:
+    def __init__(
+        self,
+        builder: FunctionBuilder,
+        op: wave.WhereOp,
+        result_types: Sequence[Type],
+        then_block: Block,
+    ) -> None:
+        self.builder = builder
+        self.op = op
+        self.result_types = list(result_types)
+        self.then_block = then_block
+        self.else_block: Block | None = None
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.op, name)
+
+    @contextmanager
+    def otherwise(self) -> Iterator[_WhereBuilder]:
+        if self.else_block is not None:
+            raise RuntimeError("wave.where otherwise region already exists")
+        self.else_block = self.op.elseRegion.blocks.append()
+        with InsertionPoint(self.else_block):
+            self.builder._yield_stack.append(_YieldKind.WAVE)
+            try:
+                yield self
+                _finish_wave_region(self.else_block, self.result_types)
+            finally:
+                self.builder._yield_stack.pop()
+
+
+class _IfBuilder:
+    def __init__(
+        self,
+        builder: FunctionBuilder,
+        op: scf.IfOp,
+        result_types: Sequence[Type],
+        has_else: bool,
+    ) -> None:
+        self.builder = builder
+        self.op = op
+        self.result_types = list(result_types)
+        self.has_else = has_else
+        self.else_entered = False
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.op, name)
+
+    @contextmanager
+    def otherwise(self) -> Iterator[_IfBuilder]:
+        if not self.has_else:
+            raise RuntimeError("scf.if was created without an else region")
+        if self.else_entered:
+            raise RuntimeError("scf.if else region already entered")
+        self.else_entered = True
+        with InsertionPoint(self.op.else_block):
+            self.builder._yield_stack.append(_YieldKind.SCF)
+            try:
+                yield self
+                _finish_scf_region(self.op.else_block, self.result_types)
+            finally:
+                self.builder._yield_stack.pop()
+
+
 class FunctionBuilder:
     """Per-function helper that wires common arith / Wave / WaveAMD ops."""
 
@@ -632,27 +721,41 @@ class FunctionBuilder:
         return wave.ReadFirstOp(result_type, value).result
 
     @contextmanager
+    def if_(
+        self,
+        condition: Value,
+        result_types: Sequence[Type] = (),
+        *,
+        otherwise: bool = False,
+    ) -> Iterator[_IfBuilder]:
+        if result_types and not otherwise:
+            raise ValueError("result-bearing scf.if requires otherwise=True")
+        op = scf.IfOp(condition, list(result_types), has_else=otherwise)
+        if_builder = _IfBuilder(self, op, result_types, otherwise)
+        with InsertionPoint(op.then_block):
+            self._yield_stack.append(_YieldKind.SCF)
+            try:
+                yield if_builder
+                _finish_scf_region(op.then_block, result_types)
+            finally:
+                self._yield_stack.pop()
+        if otherwise and not if_builder.else_entered:
+            with InsertionPoint(op.else_block):
+                _finish_scf_region(op.else_block, result_types)
+
+    @contextmanager
     def where(
         self, condition: Value, result_types: Sequence[Type] = ()
-    ) -> Iterator[wave.WhereOp]:
-        """Open a single-region `wave.where`.
-
-        The context yields the op. Use `bld.yield_(...)` for result-bearing
-        regions; empty regions get `wave.yield` on context exit.
-        """
+    ) -> Iterator[_WhereBuilder]:
+        """Open `wave.where`; call `.otherwise()` for the else arm."""
         op = wave.WhereOp(list(result_types), condition)
         block = op.thenRegion.blocks.append()
+        where_builder = _WhereBuilder(self, op, result_types, block)
         with InsertionPoint(block):
             self._yield_stack.append(_YieldKind.WAVE)
             try:
-                yield op
-                has_yield = len(block.operations) > 0 and isinstance(
-                    block.operations[-1], wave.YieldOp
-                )
-                if not result_types and not has_yield:
-                    wave.YieldOp([])
-                if result_types and not has_yield:
-                    raise RuntimeError("result-bearing wave.where must yield values")
+                yield where_builder
+                _finish_wave_region(block, result_types)
             finally:
                 self._yield_stack.pop()
 
