@@ -27,6 +27,14 @@ func.func @wave_ops(%pred: i1, %value: i32, %out: !wave.ptr<#wave.global, i32>) 
   %bits = wave.ballot %mask : !wave.mask<32> -> i32
   // CHECK: wave.read_first {{.*}} : !wave.simd<i32, 32> -> i32
   %first = wave.read_first %sum : !wave.simd<i32, 32> -> i32
+  // CHECK: wave.select {{.*}} : i32
+  %selected = wave.select %pred, %value, %first : i32
+  // CHECK: wave.select {{.*}} : !wave.simd<i32, 32>
+  %whole_simd = wave.select %pred, %sum, %vvalue : !wave.simd<i32, 32>
+  // CHECK: wave.select {{.*}} : !wave.mask<32>, !wave.simd<i32, 32>
+  %lane_select = wave.select %mask, %sum, %vvalue : !wave.mask<32>, !wave.simd<i32, 32>
+  // CHECK: wave.select {{.*}} : !wave.mask<32>, !wave.mask<32>
+  %mask_select = wave.select %mask, %mask, %mask : !wave.mask<32>, !wave.mask<32>
   // CHECK: wave.store
   %tok = wave.store %sum -> %out : (!wave.simd<i32, 32>, !wave.ptr<#wave.global, i32>) -> !wave.mem.token
 

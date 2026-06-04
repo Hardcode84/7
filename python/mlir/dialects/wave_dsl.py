@@ -597,6 +597,9 @@ class FunctionBuilder:
     def fpconvert(self, source: Value, result_type: Type) -> Value:
         return self.cast(source, result_type, CastKind.FpConvert)
 
+    def select(self, condition: Value, true_value: Value, false_value: Value) -> Value:
+        return wave.SelectOp(true_value.type, condition, true_value, false_value).result
+
     def cmpi(
         self,
         predicate: CmpIPredicate | str,

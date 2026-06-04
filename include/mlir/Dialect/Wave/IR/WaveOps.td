@@ -170,6 +170,25 @@ def Wave_CastOp : Wave_Op<"cast", [Pure]> {
   let hasVerifier = 1;
 }
 
+def Wave_SelectOp : Wave_Op<"select", [
+    Pure, AllTypesMatch<["true_value", "false_value", "result"]>]> {
+  let summary = "select a Wave value";
+  let description = [{
+    Selects between two values. An `i1` condition selects the whole value,
+    including uniform scalars, pointers, SIMD values, and masks. A
+    `!wave.mask<W>` condition selects lane-wise and therefore requires a
+    lane-shaped result with the same width (`!wave.simd<..., W>` or
+    `!wave.mask<W>`).
+  }];
+
+  let arguments = (ins AnyType:$condition,
+                       AnyType:$true_value,
+                       AnyType:$false_value);
+  let results = (outs AnyType:$result);
+  let hasCustomAssemblyFormat = 1;
+  let hasVerifier = 1;
+}
+
 def Wave_PackOp : Wave_Op<"pack", [Pure, SameTypeOperands]> {
   let summary = "pack values into a vector";
   let arguments = (ins Variadic<AnyType>:$inputs);

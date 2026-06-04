@@ -181,6 +181,61 @@ LogicalResult BinaryOp::verify() {
   return success();
 }
 
+ParseResult SelectOp::parse(OpAsmParser &parser, OperationState &result) {
+  Type conditionType;
+  Type resultType;
+  SmallVector<OpAsmParser::UnresolvedOperand, 3> operands;
+  if (parser.parseOperandList(operands, /*requiredOperandCount=*/3) ||
+      parser.parseOptionalAttrDict(result.attributes) ||
+      parser.parseColonType(resultType))
+    return failure();
+
+  if (succeeded(parser.parseOptionalComma())) {
+    conditionType = resultType;
+    if (parser.parseType(resultType))
+      return failure();
+  } else {
+    conditionType = parser.getBuilder().getI1Type();
+  }
+
+  result.addTypes(resultType);
+  return parser.resolveOperands(operands,
+                                {conditionType, resultType, resultType},
+                                parser.getNameLoc(), result.operands);
+}
+
+void SelectOp::print(OpAsmPrinter &p) {
+  p << " " << getOperands();
+  p.printOptionalAttrDict((*this)->getAttrs());
+  p << " : ";
+  if (isa<MaskType>(getCondition().getType()))
+    p << getCondition().getType() << ", ";
+  p << getType();
+}
+
+LogicalResult SelectOp::verify() {
+  Type condType = getCondition().getType();
+  Type resultType = getResult().getType();
+  if (isa<MemTokenType>(resultType))
+    return emitOpError("cannot select memory tokens");
+  if (condType.isInteger(1))
+    return success();
+  auto maskType = dyn_cast<MaskType>(condType);
+  if (!maskType)
+    return emitOpError("condition must be i1 or !wave.mask");
+  if (auto simdType = dyn_cast<SimdType>(resultType)) {
+    if (simdType.getWidth() != maskType.getWidth())
+      return emitOpError("SIMD result width must match mask width");
+    return success();
+  }
+  if (auto resultMaskType = dyn_cast<MaskType>(resultType)) {
+    if (resultMaskType.getWidth() != maskType.getWidth())
+      return emitOpError("result mask width must match condition mask width");
+    return success();
+  }
+  return emitOpError("mask condition requires SIMD or mask result");
+}
+
 LogicalResult WhereOp::verify() {
   auto verifyYield = [&](Region &region, StringRef name) -> LogicalResult {
     auto yield = dyn_cast<YieldOp>(region.front().getTerminator());

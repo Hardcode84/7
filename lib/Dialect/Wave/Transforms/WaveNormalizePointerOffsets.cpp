@@ -225,7 +225,7 @@ populatePointerOffsetNormalizationPatterns(RewritePatternSet &patterns,
   patterns.add<NormalizePtrAddOp, ConvertWhereOp, ConvertNoRegionOp<LdsBaseOp>,
                ConvertNoRegionOp<LoadOp>, ConvertNoRegionOp<StoreOp>,
                ConvertNoRegionOp<SplatOp>, ConvertNoRegionOp<YieldOp>,
-               ConvertNoRegionOp<ReadFirstOp>,
+               ConvertNoRegionOp<ReadFirstOp>, ConvertNoRegionOp<SelectOp>,
                ConvertNoRegionOp<waveamd::MakeBufferOp>,
                ConvertNoRegionOp<waveamd::DmaLoadLdsOp>>(converter, ctx);
   populateAnyFunctionOpInterfaceTypeConversionPattern(patterns, converter);

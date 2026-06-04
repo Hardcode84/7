@@ -1389,6 +1389,7 @@ LogicalResult WaveAMDMachineSelector::selectOperation(Operation *op) {
       .Case<FRcpOp>([&](auto o) { return selectFRcp(o); })
       .Case<IndexExprOp>([&](auto o) { return selectIndexExpr(o); })
       .Case<CmpIOp>([&](auto o) { return selectCmp(o); })
+      .Case<SelectOp>([&](auto o) { return selectSelect(o); })
       .Case<BallotOp>([&](auto o) { return selectBallot(o); })
       .Case<ReadFirstOp>([&](auto o) { return selectReadFirst(o); })
       .Case<PtrAddOp>([&](auto o) { return selectPtrAdd(o); })
@@ -2280,6 +2281,458 @@ LogicalResult WaveAMDMachineSelector::selectCmp(CmpIOp op) {
                              getVCCType(op.getContext()), lhs, rhs)
           : createVCmpU32(builder, op.getLoc(), *kind, sgprType, lhs, rhs);
   values[op.getResult()] = result;
+  eraseIfTopLevel(op);
+  return success();
+}
+
+static bool isMachineImm(Value value) {
+  return isa<waveamdmachine::ImmType>(value.getType());
+}
+
+static FailureOr<unsigned> getMachineWordWidth(Operation *op, Value value) {
+  if (auto regType = dyn_cast<waveamdmachine::RegType>(value.getType()))
+    return regType.getWidth();
+  if (isMachineImm(value))
+    return 1;
+  op->emitError("select source must be a machine register or immediate");
+  return failure();
+}
+
+static FailureOr<SmallVector<Value, 2>>
+splitSGPRWords(WaveAMDMachineSelector &S, Operation *op, Value value,
+               unsigned width) {
+  if (width == 1)
+    return SmallVector<Value, 2>{S.ensureSGPR1(op->getLoc(), value)};
+  if (width == 2 && isMachineImm(value))
+    value = ensureSGPR2(S, op->getLoc(), value);
+  auto regType = dyn_cast<waveamdmachine::RegType>(value.getType());
+  if (!regType || regType.getRegClass() != waveamdmachine::RegClass::SGPR ||
+      regType.getWidth() != width)
+    return op->emitError("wide scalar select source must be an SGPR tuple");
+  Type sgpr1 = getRegType(op->getContext(), waveamdmachine::RegClass::SGPR, 1);
+  SmallVector<Type, 2> elementTypes(width, sgpr1);
+  auto split = waveamdmachine::TupleToElementsOp::create(
+      S.builder, op->getLoc(), elementTypes, value);
+  SmallVector<Value, 2> elements;
+  llvm::append_range(elements, split.getElements());
+  return elements;
+}
+
+static Value gatherSGPRWords(WaveAMDMachineSelector &S, Location loc,
+                             ArrayRef<Value> words) {
+  if (words.size() == 1)
+    return words.front();
+  Type resultType = getRegType(S.builder.getContext(),
+                               waveamdmachine::RegClass::SGPR, words.size());
+  return waveamdmachine::TupleFromElementsOp::create(S.builder, loc, resultType,
+                                                     words)
+      .getTuple();
+}
+
+static Value createSCCFromI1(WaveAMDMachineSelector &S, SelectOp op) {
+  Value condition = S.ensureSGPR1(op.getLoc(), S.expect(op.getCondition(), op));
+  return waveamdmachine::SCmpLgU32Op::create(
+             S.builder, op.getLoc(), getSCCType(op.getContext()), condition,
+             createImm(S.builder, op.getLoc(), 0))
+      .getResult();
+}
+
+static FailureOr<Value> createScalarSelect(WaveAMDMachineSelector &S,
+                                           Operation *op, Value scc,
+                                           Value trueValue, Value falseValue,
+                                           unsigned width) {
+  FailureOr<SmallVector<Value, 2>> trueWords =
+      splitSGPRWords(S, op, trueValue, width);
+  FailureOr<SmallVector<Value, 2>> falseWords =
+      splitSGPRWords(S, op, falseValue, width);
+  if (failed(trueWords) || failed(falseWords))
+    return failure();
+  SmallVector<Value, 2> resultWords;
+  Type sgpr1 = getRegType(op->getContext(), waveamdmachine::RegClass::SGPR, 1);
+  for (auto [trueWord, falseWord] : llvm::zip_equal(*trueWords, *falseWords)) {
+    if (isMachineImm(trueWord) && isMachineImm(falseWord))
+      trueWord = S.materializeSGPR1(op->getLoc(), trueWord);
+    resultWords.push_back(
+        waveamdmachine::SCSelectB32Op::create(S.builder, op->getLoc(), sgpr1,
+                                              scc, trueWord, falseWord)
+            .getResult());
+  }
+  return gatherSGPRWords(S, op->getLoc(), resultWords);
+}
+
+static FailureOr<Value> createFullMaskFromSCC(WaveAMDMachineSelector &S,
+                                              Operation *op, Value scc,
+                                              unsigned width) {
+  return createScalarSelect(S, op, scc, createImm(S.builder, op->getLoc(), -1),
+                            createImm(S.builder, op->getLoc(), 0), width);
+}
+
+static Value createLaneSelect(WaveAMDMachineSelector &S, Operation *op,
+                              Value condition, Value trueValue,
+                              Value falseValue, unsigned width) {
+  if (width == 1 && isMachineImm(trueValue) && isMachineImm(falseValue))
+    trueValue = S.ensureVGPRForVSrc1(op->getLoc(), trueValue);
+  Type resultType =
+      getRegType(op->getContext(), waveamdmachine::RegClass::VGPR, width);
+  return waveamdmachine::VCndmaskB32TupleOp::create(S.builder, op->getLoc(),
+                                                    resultType, falseValue,
+                                                    trueValue, condition)
+      .getResult();
+}
+
+static FailureOr<Value> createMaskSelect(WaveAMDMachineSelector &S, SelectOp op,
+                                         Value condition, Value trueValue,
+                                         Value falseValue, unsigned width) {
+  FailureOr<SmallVector<Value, 2>> condWords =
+      splitSGPRWords(S, op, condition, width);
+  FailureOr<SmallVector<Value, 2>> trueWords =
+      splitSGPRWords(S, op, trueValue, width);
+  FailureOr<SmallVector<Value, 2>> falseWords =
+      splitSGPRWords(S, op, falseValue, width);
+  if (failed(condWords) || failed(trueWords) || failed(falseWords))
+    return failure();
+  SmallVector<Value, 2> resultWords;
+  Type sgpr1 = getRegType(op.getContext(), waveamdmachine::RegClass::SGPR, 1);
+  Type scc = getSCCType(op.getContext());
+  for (auto [condWord, trueWord, falseWord] :
+       llvm::zip_equal(*condWords, *trueWords, *falseWords)) {
+    Value diff = waveamdmachine::SXorB32Op::create(
+                     S.builder, op.getLoc(), sgpr1, scc, trueWord, falseWord)
+                     .getResult();
+    Value selectedDiff = waveamdmachine::SAndB32Op::create(
+                             S.builder, op.getLoc(), sgpr1, scc, condWord, diff)
+                             .getResult();
+    resultWords.push_back(
+        waveamdmachine::SXorB32Op::create(S.builder, op.getLoc(), sgpr1, scc,
+                                          falseWord, selectedDiff)
+            .getResult());
+  }
+  return gatherSGPRWords(S, op.getLoc(), resultWords);
+}
+
+static FailureOr<Value>
+materializePointerSelectOffsetWideVGPR(WaveAMDMachineSelector &S, SelectOp op,
+                                       const PointerOffset &offset) {
+  Value value;
+  if (offset.expr) {
+    SmallVector<std::pair<std::string, Value>, 4> bindings;
+    for (const PointerOffsetBinding &binding : offset.bindings)
+      bindings.push_back({binding.name, S.expect(binding.value, op)});
+    FailureOr<Value> wide =
+        materializeWideIndexExprNode(S, offset.expr, op, bindings);
+    if (failed(wide))
+      return failure();
+    value = *wide;
+  } else {
+    value = createWideImm(S, op.getLoc(), 0);
+  }
+  return ensureVGPR2(S, op.getLoc(), value);
+}
+
+static FailureOr<Value>
+materializePointerSelectOffset(WaveAMDMachineSelector &S, SelectOp op,
+                               const PointerOffset &offset, TermKind kind,
+                               bool offsetFitsU32) {
+  if (kind == TermKind::Lane) {
+    if (offsetFitsU32)
+      return materializePointerOffsetVGPR(S, op.getOperation(), offset);
+    return materializePointerSelectOffsetWideVGPR(S, op, offset);
+  }
+  if (offsetFitsU32)
+    return materializeUniformPointerOffsetCarry(S, op.getOperation(), offset);
+  FailureOr<Value> value =
+      materializePointerOffsetValue(S, op.getOperation(), offset);
+  if (failed(value))
+    return failure();
+  return ensureSGPR2(S, op.getLoc(), *value);
+}
+
+struct PointerSelectMetadata {
+  Value base;
+  Value globalBase;
+  PointerOffset offset;
+  bool isBuffer = false;
+};
+
+static FailureOr<PointerSelectMetadata>
+lookupPointerSelectMetadata(WaveAMDMachineSelector &S, SelectOp op,
+                            Value pointer, StringRef arm) {
+  auto baseIt = S.pointerBases.find(pointer);
+  auto offsetIt = S.pointerIndexOffsets.find(pointer);
+  if (baseIt == S.pointerBases.end() || offsetIt == S.pointerIndexOffsets.end())
+    return op.emitError(arm) << " pointer is missing address metadata";
+  return PointerSelectMetadata{
+      baseIt->second, S.pointerGlobalBases.lookup(pointer), offsetIt->second,
+      S.pointerBuffers.lookup(pointer)};
+}
+
+static bool pointerSelectOffsetFitsU32(WaveAMDMachineSelector &S,
+                                       const PointerOffset &offset) {
+  return !offset.expr || S.slotFitsU32(offset.expr, offset.assumptions);
+}
+
+static LogicalResult requireSamePointerSelectBase(SelectOp op, Value lhs,
+                                                  Value rhs, StringRef name) {
+  if (lhs == rhs)
+    return success();
+  return op.emitError("lane pointer select requires matching ") << name;
+}
+
+static FailureOr<Value>
+createUniformPointerBaseSelect(WaveAMDMachineSelector &S, SelectOp op,
+                               Value scc, Value trueBase, Value falseBase) {
+  if (trueBase == falseBase)
+    return trueBase;
+  FailureOr<unsigned> trueWidth = getMachineWordWidth(op, trueBase);
+  FailureOr<unsigned> falseWidth = getMachineWordWidth(op, falseBase);
+  if (failed(trueWidth) || failed(falseWidth))
+    return failure();
+  if (*trueWidth != *falseWidth) {
+    op.emitError("pointer select base width mismatch");
+    return failure();
+  }
+  return createScalarSelect(S, op, scc, trueBase, falseBase, *trueWidth);
+}
+
+static LogicalResult addSelectedPointerOffset(WaveAMDMachineSelector &S,
+                                              SelectOp op,
+                                              PointerOffset &offset,
+                                              Value selected, TermKind kind,
+                                              bool offsetFitsU32) {
+  std::string name = (Twine("__wave_select_ptr_") + Twine(S.nextLabel++)).str();
+  FailureOr<sym::ExprHandle> expr = sym::composeExprSym(S.symbolStore(), name);
+  if (failed(expr))
+    return op.emitError("failed to compose wave.select pointer offset");
+  offset.expr = *expr;
+  offset.bindings.push_back({name, selected, kind});
+  if (!offsetFitsU32) {
+    S.values[selected] = selected;
+    return success();
+  }
+  FailureOr<sym::PredHandle> range =
+      sym::rangeAssumption(S.symbolStore(), name, 0, (int64_t{1} << 32) - 1);
+  if (failed(range))
+    return op.emitError("failed to compose wave.select pointer offset range");
+  offset.assumptions.push_back(*range);
+  S.values[selected] = selected;
+  return success();
+}
+
+struct PointerSelectCondition {
+  Value laneCondition;
+  Value scc;
+};
+
+static FailureOr<PointerSelectCondition>
+buildPointerSelectCondition(WaveAMDMachineSelector &S, SelectOp op,
+                            bool maskCondition, bool resultIsLane,
+                            const PointerSelectMetadata &trueMetadata,
+                            const PointerSelectMetadata &falseMetadata) {
+  if (maskCondition) {
+    if (failed(requireSamePointerSelectBase(
+            op, trueMetadata.base, falseMetadata.base, "pointer bases")) ||
+        failed(requireSamePointerSelectBase(op, trueMetadata.globalBase,
+                                            falseMetadata.globalBase,
+                                            "global bases")))
+      return failure();
+    return PointerSelectCondition{S.expect(op.getCondition(), op), Value()};
+  }
+
+  Value scc = createSCCFromI1(S, op);
+  Value condition;
+  if (resultIsLane) {
+    unsigned maskWidth = cast<SimdType>(op.getType()).getWidth() / 32;
+    FailureOr<Value> fullMask = createFullMaskFromSCC(S, op, scc, maskWidth);
+    if (failed(fullMask))
+      return failure();
+    condition = *fullMask;
+  }
+  return PointerSelectCondition{condition, scc};
+}
+
+struct PointerSelectBase {
+  Value base;
+  Value globalBase;
+};
+
+static FailureOr<PointerSelectBase>
+selectPointerBases(WaveAMDMachineSelector &S, SelectOp op, bool maskCondition,
+                   Value scc, const PointerSelectMetadata &trueMetadata,
+                   const PointerSelectMetadata &falseMetadata) {
+  if (maskCondition)
+    return PointerSelectBase{trueMetadata.base, trueMetadata.globalBase};
+
+  FailureOr<Value> selectedBase = createUniformPointerBaseSelect(
+      S, op, scc, trueMetadata.base, falseMetadata.base);
+  if (failed(selectedBase))
+    return failure();
+
+  Value globalBase = trueMetadata.globalBase;
+  if (trueMetadata.globalBase || falseMetadata.globalBase) {
+    if (!trueMetadata.globalBase || !falseMetadata.globalBase) {
+      op.emitError("pointer select requires matching global bases");
+      return failure();
+    }
+    FailureOr<Value> selectedGlobalBase = createUniformPointerBaseSelect(
+        S, op, scc, trueMetadata.globalBase, falseMetadata.globalBase);
+    if (failed(selectedGlobalBase))
+      return failure();
+    globalBase = *selectedGlobalBase;
+  }
+  return PointerSelectBase{*selectedBase, globalBase};
+}
+
+static FailureOr<Value> selectPointerOffset(
+    WaveAMDMachineSelector &S, SelectOp op, TermKind kind, Value laneCondition,
+    Value scc, const PointerSelectMetadata &trueMetadata,
+    const PointerSelectMetadata &falseMetadata, bool offsetFitsU32) {
+  FailureOr<Value> trueOffset = materializePointerSelectOffset(
+      S, op, trueMetadata.offset, kind, offsetFitsU32);
+  FailureOr<Value> falseOffset = materializePointerSelectOffset(
+      S, op, falseMetadata.offset, kind, offsetFitsU32);
+  if (failed(trueOffset) || failed(falseOffset))
+    return failure();
+
+  FailureOr<unsigned> trueWidth = getMachineWordWidth(op, *trueOffset);
+  FailureOr<unsigned> falseWidth = getMachineWordWidth(op, *falseOffset);
+  if (failed(trueWidth) || failed(falseWidth))
+    return failure();
+  if (*trueWidth != *falseWidth) {
+    op.emitError("pointer select offset width mismatch");
+    return failure();
+  }
+
+  if (kind == TermKind::Lane)
+    return createLaneSelect(S, op, laneCondition, *trueOffset, *falseOffset,
+                            *trueWidth);
+  return createScalarSelect(S, op, scc, *trueOffset, *falseOffset, *trueWidth);
+}
+
+static LogicalResult bindSelectedPointer(WaveAMDMachineSelector &S, SelectOp op,
+                                         const PointerSelectBase &base,
+                                         const PointerSelectMetadata &metadata,
+                                         TermKind offsetKind,
+                                         Value selectedOffset,
+                                         bool offsetFitsU32) {
+  PointerOffset offset;
+  if (failed(addSelectedPointerOffset(S, op, offset, selectedOffset, offsetKind,
+                                      offsetFitsU32)))
+    return failure();
+  Value result = op.getResult();
+  S.values[result] = base.base;
+  S.pointerBases[result] = base.base;
+  if (base.globalBase)
+    S.pointerGlobalBases[result] = base.globalBase;
+  S.pointerIndexOffsets[result] = std::move(offset);
+  S.pointerBuffers[result] = metadata.isBuffer;
+  return success();
+}
+
+static LogicalResult selectPointer(WaveAMDMachineSelector &S, SelectOp op,
+                                   bool maskCondition) {
+  FailureOr<PointerSelectMetadata> trueMetadata =
+      lookupPointerSelectMetadata(S, op, op.getTrueValue(), "true");
+  FailureOr<PointerSelectMetadata> falseMetadata =
+      lookupPointerSelectMetadata(S, op, op.getFalseValue(), "false");
+  if (failed(trueMetadata) || failed(falseMetadata))
+    return failure();
+  if (trueMetadata->isBuffer != falseMetadata->isBuffer)
+    return op.emitError("pointer select requires matching pointer kinds");
+
+  bool resultIsLane = isa<SimdType>(op.getType());
+  TermKind offsetKind = resultIsLane ? TermKind::Lane : TermKind::Uniform;
+  FailureOr<PointerSelectCondition> condition = buildPointerSelectCondition(
+      S, op, maskCondition, resultIsLane, *trueMetadata, *falseMetadata);
+  if (failed(condition))
+    return failure();
+
+  FailureOr<PointerSelectBase> base = selectPointerBases(
+      S, op, maskCondition, condition->scc, *trueMetadata, *falseMetadata);
+  if (failed(base))
+    return failure();
+
+  bool offsetFitsU32 = pointerSelectOffsetFitsU32(S, trueMetadata->offset) &&
+                       pointerSelectOffsetFitsU32(S, falseMetadata->offset);
+  FailureOr<Value> selectedOffset = selectPointerOffset(
+      S, op, offsetKind, condition->laneCondition, condition->scc,
+      *trueMetadata, *falseMetadata, offsetFitsU32);
+  if (failed(selectedOffset))
+    return failure();
+
+  return bindSelectedPointer(S, op, *base, *trueMetadata, offsetKind,
+                             *selectedOffset, offsetFitsU32);
+}
+
+static LogicalResult selectMaskValue(WaveAMDMachineSelector &S, SelectOp op,
+                                     bool maskCondition, Value trueValue,
+                                     Value falseValue, MaskType resultType) {
+  unsigned width = resultType.getWidth() / 32;
+  FailureOr<Value> selected =
+      maskCondition ? createMaskSelect(S, op, S.expect(op.getCondition(), op),
+                                       trueValue, falseValue, width)
+                    : createScalarSelect(S, op, createSCCFromI1(S, op),
+                                         trueValue, falseValue, width);
+  if (failed(selected))
+    return failure();
+  S.values[op.getResult()] = *selected;
+  return success();
+}
+
+static LogicalResult selectRegisterValue(WaveAMDMachineSelector &S, SelectOp op,
+                                         bool maskCondition, Value trueValue,
+                                         Value falseValue, Type resultType) {
+  FailureOr<unsigned> width =
+      getRegisterPayloadWidth(resultType, [&]() { return op.emitError(); });
+  if (failed(width))
+    return failure();
+  if (maskCondition) {
+    S.values[op.getResult()] = createLaneSelect(
+        S, op, S.expect(op.getCondition(), op), trueValue, falseValue, *width);
+    return success();
+  }
+
+  Value scc = createSCCFromI1(S, op);
+  if (isa<SimdType>(resultType)) {
+    unsigned maskWidth = cast<SimdType>(resultType).getWidth() / 32;
+    FailureOr<Value> condition = createFullMaskFromSCC(S, op, scc, maskWidth);
+    if (failed(condition))
+      return failure();
+    S.values[op.getResult()] =
+        createLaneSelect(S, op, *condition, trueValue, falseValue, *width);
+  } else {
+    FailureOr<Value> selected =
+        createScalarSelect(S, op, scc, trueValue, falseValue, *width);
+    if (failed(selected))
+      return failure();
+    S.values[op.getResult()] = *selected;
+  }
+  return success();
+}
+
+LogicalResult WaveAMDMachineSelector::selectSelect(SelectOp op) {
+  bool maskCondition = isa<MaskType>(op.getCondition().getType());
+  Type resultType = op.getType();
+  if (isWavePointerLikeType(resultType)) {
+    if (failed(selectPointer(*this, op, maskCondition)))
+      return failure();
+    eraseIfTopLevel(op);
+    return success();
+  }
+
+  Value trueValue = expect(op.getTrueValue(), op);
+  Value falseValue = expect(op.getFalseValue(), op);
+  LogicalResult result =
+      llvm::TypeSwitch<Type, LogicalResult>(resultType)
+          .Case<MaskType>([&](MaskType maskType) {
+            return selectMaskValue(*this, op, maskCondition, trueValue,
+                                   falseValue, maskType);
+          })
+          .Default([&](Type type) {
+            return selectRegisterValue(*this, op, maskCondition, trueValue,
+                                       falseValue, type);
+          });
+  if (failed(result))
+    return failure();
   eraseIfTopLevel(op);
   return success();
 }

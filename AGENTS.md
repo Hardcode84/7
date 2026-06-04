@@ -121,6 +121,8 @@ Same rule covers docstrings, commit bodies, and PR descriptions. Wit is welcome,
 
 ## Commits
 
+- New features require a `test/Integration` test. Target/dialect lit is
+  supporting coverage, not a replacement.
 - Before every commit, run full lit and integration tests:
   `cmake --build build --target check-wave-mlir -j $(nproc)` and
   `build/bin/llvm-lit -sv build/test --filter='Integration'`.

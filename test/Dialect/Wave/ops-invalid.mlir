@@ -592,6 +592,52 @@ func.func @cmpi_result_mask_width(%a: !wave.simd<i32, 32>, %b: !wave.simd<i32, 3
 
 // -----
 
+func.func @select_rejects_bad_condition(%pred: i32, %a: i32, %b: i32) {
+  // expected-error @+1 {{condition must be i1 or !wave.mask}}
+  %r = "wave.select"(%pred, %a, %b) : (i32, i32, i32) -> i32
+  return
+}
+
+// -----
+
+func.func @select_rejects_token(%pred: i1) {
+  %t0 = wave.token : !wave.mem.token
+  %t1 = wave.token : !wave.mem.token
+  // expected-error @+1 {{cannot select memory tokens}}
+  %r = wave.select %pred, %t0, %t1 : !wave.mem.token
+  return
+}
+
+// -----
+
+func.func @select_mask_requires_lane_shaped_result(%m: !wave.mask<32>, %a: i32, %b: i32) {
+  // expected-error @+1 {{mask condition requires SIMD or mask result}}
+  %r = wave.select %m, %a, %b : !wave.mask<32>, i32
+  return
+}
+
+// -----
+
+func.func @select_mask_simd_width_mismatch(%m: !wave.mask<64>,
+                                           %a: !wave.simd<i32, 32>,
+                                           %b: !wave.simd<i32, 32>) {
+  // expected-error @+1 {{SIMD result width must match mask width}}
+  %r = wave.select %m, %a, %b : !wave.mask<64>, !wave.simd<i32, 32>
+  return
+}
+
+// -----
+
+func.func @select_mask_result_width_mismatch(%m: !wave.mask<64>,
+                                             %a: !wave.mask<32>,
+                                             %b: !wave.mask<32>) {
+  // expected-error @+1 {{result mask width must match condition mask width}}
+  %r = wave.select %m, %a, %b : !wave.mask<64>, !wave.mask<32>
+  return
+}
+
+// -----
+
 func.func @lds_base_wrong_address_space() {
   // expected-error @+1 {{result pointer must live in the shared address space}}
   %p = wave.lds_base : !wave.ptr<#wave.global, i32>
