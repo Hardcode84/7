@@ -20,6 +20,7 @@
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/MathExtras.h"
+#include "llvm/Support/raw_ostream.h"
 #include <optional>
 #include <set>
 
@@ -37,6 +38,23 @@ struct RegisterLimits {
   unsigned numVGPR = 0;
   unsigned numAGPR = 0;
 };
+
+static constexpr llvm::StringLiteral kPressureClassAttr =
+    "waveamdmachine.regalloc_pressure_class";
+static constexpr llvm::StringLiteral kPressureLimitAttr =
+    "waveamdmachine.regalloc_pressure_limit";
+static constexpr llvm::StringLiteral kPressureLiveDwordsAttr =
+    "waveamdmachine.regalloc_pressure_live_dwords";
+static constexpr llvm::StringLiteral kPressureOverlapsAttr =
+    "waveamdmachine.regalloc_pressure_overlaps";
+static constexpr llvm::StringLiteral kPressurePositionAttr =
+    "waveamdmachine.regalloc_pressure_position";
+static constexpr llvm::StringLiteral kPressureReliefAttr =
+    "waveamdmachine.regalloc_pressure_required_relief";
+static constexpr llvm::StringLiteral kPressureRequestAttr =
+    "waveamdmachine.regalloc_pressure_request";
+static constexpr llvm::StringLiteral kPressureReservedAttr =
+    "waveamdmachine.regalloc_pressure_reserved";
 
 static void setRegPhys(Value v, unsigned phys) {
   auto rt = cast<waveamdmachine::RegType>(v.getType());
@@ -78,6 +96,26 @@ static bool hasLiveIntervals(ArrayRef<wave::WaveAMDLiveInterval> intervals) {
   });
 }
 
+struct PressureIntervalRef {
+  SmallVector<int64_t> resultIndices;
+  SmallVector<int64_t> slotOffsets;
+  SmallVector<int64_t> valuePositions;
+  unsigned start = 0;
+  unsigned end = 0;
+  unsigned width = 0;
+};
+
+struct RegisterPressurePoint {
+  SmallVector<PressureIntervalRef> overlaps;
+  PressureIntervalRef request;
+  StringRef regClass;
+  unsigned limit = 0;
+  unsigned liveDwords = 0;
+  unsigned position = 0;
+  unsigned requiredRelief = 0;
+  unsigned reserved = 0;
+};
+
 struct WaveAMDRegAllocPass
     : public wave::impl::WaveAMDRegAllocBase<WaveAMDRegAllocPass> {
   using WaveAMDRegAllocBase::WaveAMDRegAllocBase;
@@ -86,44 +124,71 @@ struct WaveAMDRegAllocPass
     FailureOr<RegisterLimits> limits = getRegisterLimits(getOperation());
     if (failed(limits))
       return signalPassFailure();
-    if (vgprLimitOverride >= 0)
-      limits->numVGPR =
-          std::min(limits->numVGPR, static_cast<unsigned>(vgprLimitOverride));
-    if (sgprLimitOverride >= 0)
-      limits->numSGPR =
-          std::min(limits->numSGPR, static_cast<unsigned>(sgprLimitOverride));
-    SmallVector<func::FuncOp> kernels;
-    getOperation().walk([&](func::FuncOp f) {
-      if (!f.isExternal())
-        kernels.push_back(f);
-    });
+    applyLimitOverrides(*limits);
+
     Builder builder(&getContext());
     int64_t overflowedCount = 0;
     getOperation()->removeAttr(
         wave::getWaveAMDRegAllocOverflowedCountAttrName());
-    for (func::FuncOp func : kernels) {
-      bool overflow = false;
-      func->removeAttr(wave::getWaveAMDRegAllocOverflowedAttrName());
-      if (failed(allocateFunction(func, *limits, markOverflow, overflow)))
+    for (func::FuncOp func : collectFunctions())
+      if (failed(processFunction(func, *limits, builder, overflowedCount)))
         return signalPassFailure();
-      if (overflow) {
-        func->setAttr(wave::getWaveAMDRegAllocOverflowedAttrName(),
-                      builder.getI64IntegerAttr(1));
-        ++overflowedCount;
-        continue;
-      }
-      if (failed(wave::verifyWaveAMDRegAllocation(
-              func, "waveamd-reg-alloc",
-              wave::WaveAMDRegAllocVerificationScope::Results)))
-        return signalPassFailure();
-    }
+
     if (markOverflow)
       getOperation()->setAttr(wave::getWaveAMDRegAllocOverflowedCountAttrName(),
                               builder.getI64IntegerAttr(overflowedCount));
   }
 
-  LogicalResult allocateFunction(func::FuncOp func, RegisterLimits limits,
-                                 bool softFail, bool &overflow) {
+  void applyLimitOverrides(RegisterLimits &limits) {
+    if (vgprLimitOverride >= 0)
+      limits.numVGPR =
+          std::min(limits.numVGPR, static_cast<unsigned>(vgprLimitOverride));
+    if (sgprLimitOverride >= 0)
+      limits.numSGPR =
+          std::min(limits.numSGPR, static_cast<unsigned>(sgprLimitOverride));
+  }
+
+  SmallVector<func::FuncOp> collectFunctions() {
+    SmallVector<func::FuncOp> funcs;
+    getOperation().walk([&](func::FuncOp f) {
+      if (!f.isExternal())
+        funcs.push_back(f);
+    });
+    return funcs;
+  }
+
+  LogicalResult processFunction(func::FuncOp func, RegisterLimits limits,
+                                Builder &builder, int64_t &overflowedCount) {
+    bool overflow = false;
+    std::optional<RegisterPressurePoint> pressure;
+    clearOverflowAttrs(func);
+    if (failed(
+            allocateFunction(func, limits, markOverflow, overflow, pressure)))
+      return failure();
+    if (overflow) {
+      markOverflowed(func, pressure, builder);
+      ++overflowedCount;
+      return success();
+    }
+    return wave::verifyWaveAMDRegAllocation(
+        func, "waveamd-reg-alloc",
+        wave::WaveAMDRegAllocVerificationScope::Results);
+  }
+
+  static void
+  markOverflowed(func::FuncOp func,
+                 const std::optional<RegisterPressurePoint> &pressure,
+                 Builder &builder) {
+    func->setAttr(wave::getWaveAMDRegAllocOverflowedAttrName(),
+                  builder.getI64IntegerAttr(1));
+    if (pressure)
+      setPressureAttrs(func, *pressure, builder);
+  }
+
+  LogicalResult
+  allocateFunction(func::FuncOp func, RegisterLimits limits, bool softFail,
+                   bool &overflow,
+                   std::optional<RegisterPressurePoint> &pressure) {
     if (failed(wave::prepareWaveAMDRegAllocIR(func)))
       return failure();
     if (failed(wave::verifyNoHardwareResourceLiveRangeOverlap(
@@ -137,22 +202,47 @@ struct WaveAMDRegAllocPass
 
     unsigned sgprReserved = wave::getWaveAMDReservedSGPRs(func);
     unsigned vgprReserved = wave::getWaveAMDReservedVGPRs(func);
-    if (failed(validateReservedLimit(func, "SGPR", limits.numSGPR,
-                                     sgprReserved)) ||
-        failed(
-            validateReservedLimit(func, "VGPR", limits.numVGPR, vgprReserved)))
+    if (failed(
+            validateReservedLimits(func, limits, sgprReserved, vgprReserved)))
       return failure();
     if (limits.numAGPR == 0 && hasLiveIntervals(intervals.agprs))
       return func.emitError(
           "waveamd-reg-alloc AGPR registers require target with AGPR support");
+    return allocateRegisterClasses(func, intervals, limits, sgprReserved,
+                                   vgprReserved, softFail, overflow, pressure,
+                                   builtIntervals->positions);
+  }
+
+  LogicalResult validateReservedLimits(func::FuncOp func, RegisterLimits limits,
+                                       unsigned sgprReserved,
+                                       unsigned vgprReserved) {
+    if (failed(
+            validateReservedLimit(func, "SGPR", limits.numSGPR, sgprReserved)))
+      return failure();
+    return validateReservedLimit(func, "VGPR", limits.numVGPR, vgprReserved);
+  }
+
+  LogicalResult
+  allocateRegisterClasses(func::FuncOp func,
+                          wave::WaveAMDLiveIntervalSet &intervals,
+                          RegisterLimits limits, unsigned sgprReserved,
+                          unsigned vgprReserved, bool softFail, bool &overflow,
+                          std::optional<RegisterPressurePoint> &pressure,
+                          const DenseMap<Operation *, unsigned> &positions) {
     if (failed(allocateClass(func, intervals.sgprs, limits.numSGPR,
-                             sgprReserved, softFail, overflow)))
+                             sgprReserved, softFail, overflow, pressure,
+                             positions, "SGPR")))
       return failure();
+    if (overflow)
+      return success();
     if (failed(allocateClass(func, intervals.vgprs, limits.numVGPR,
-                             vgprReserved, softFail, overflow)))
+                             vgprReserved, softFail, overflow, pressure,
+                             positions, "VGPR")))
       return failure();
+    if (overflow)
+      return success();
     return allocateClass(func, intervals.agprs, limits.numAGPR, /*reserved=*/0,
-                         softFail, overflow);
+                         softFail, overflow, pressure, positions, "AGPR");
   }
 
   // Physically-allocated half-open span `[begin, begin + size)` in a
@@ -190,7 +280,9 @@ struct WaveAMDRegAllocPass
 
   LogicalResult allocateClass(
       func::FuncOp func, MutableArrayRef<wave::WaveAMDLiveInterval> intervals,
-      unsigned numPhys, unsigned reserved, bool softFail, bool &overflow) {
+      unsigned numPhys, unsigned reserved, bool softFail, bool &overflow,
+      std::optional<RegisterPressurePoint> &pressure,
+      const DenseMap<Operation *, unsigned> &positions, StringRef regClass) {
     llvm::stable_sort(intervals, [](const wave::WaveAMDLiveInterval &lhs,
                                     const wave::WaveAMDLiveInterval &rhs) {
       return lhs.start < rhs.start;
@@ -217,12 +309,25 @@ struct WaveAMDRegAllocPass
       unsigned align = std::max<unsigned>(1, llvm::PowerOf2Ceil(width));
       std::optional<unsigned> phys = findFreeSlot(live, width, align, numPhys);
       if (!phys) {
+        if (!pressure)
+          pressure =
+              buildPressurePoint(regClass, interval, active, live, positions,
+                                 interval.start, numPhys, reserved);
         if (softFail) {
           overflow = true;
           return success();
         }
-        return func.emitError(
-            "WaveAMDMachine register allocator ran out of registers");
+        InFlightDiagnostic diag =
+            func.emitError()
+            << "WaveAMDMachine register allocator ran "
+               "out of "
+            << regClass << " registers at position " << pressure->position
+            << " (limit=" << pressure->limit
+            << ", live_dwords=" << pressure->liveDwords
+            << ", required_relief=" << pressure->requiredRelief << ")";
+        diag << "; request=" << formatInterval(pressure->request)
+             << "; overlaps=" << formatIntervals(pressure->overlaps);
+        return failure();
       }
       for (auto [v, off] : llvm::zip(interval.values, interval.slotOffsets))
         setRegPhys(v, *phys + off);
@@ -256,6 +361,168 @@ struct WaveAMDRegAllocPass
     if (start + width <= maxRegs)
       return start;
     return std::nullopt;
+  }
+
+  static void clearOverflowAttrs(func::FuncOp func) {
+    func->removeAttr(wave::getWaveAMDRegAllocOverflowedAttrName());
+    func->removeAttr(kPressureClassAttr);
+    func->removeAttr(kPressureLimitAttr);
+    func->removeAttr(kPressureLiveDwordsAttr);
+    func->removeAttr(kPressureOverlapsAttr);
+    func->removeAttr(kPressurePositionAttr);
+    func->removeAttr(kPressureReliefAttr);
+    func->removeAttr(kPressureRequestAttr);
+    func->removeAttr(kPressureReservedAttr);
+  }
+
+  static unsigned
+  valuePosition(Value value, const DenseMap<Operation *, unsigned> &positions,
+                unsigned fallback) {
+    if (Operation *def = value.getDefiningOp())
+      return positions.lookup(def);
+    return fallback;
+  }
+
+  static int64_t resultIndex(Value value) {
+    if (auto result = dyn_cast<OpResult>(value))
+      return result.getResultNumber();
+    return -1;
+  }
+
+  static PressureIntervalRef
+  buildIntervalRef(const wave::WaveAMDLiveInterval &interval,
+                   const DenseMap<Operation *, unsigned> &positions) {
+    PressureIntervalRef ref;
+    ref.start = interval.start;
+    ref.end = interval.end;
+    ref.width = interval.type.getWidth();
+    for (auto [value, slot] :
+         llvm::zip(interval.values, interval.slotOffsets)) {
+      ref.valuePositions.push_back(valuePosition(value, positions, ref.start));
+      ref.resultIndices.push_back(resultIndex(value));
+      ref.slotOffsets.push_back(slot);
+    }
+    return ref;
+  }
+
+  static unsigned liveDwords(const std::set<PhysAlloc> &live) {
+    unsigned dwords = 0;
+    for (const PhysAlloc &alloc : live)
+      dwords += alloc.size;
+    return dwords;
+  }
+
+  static unsigned estimateRelief(unsigned liveWidth, unsigned requestWidth,
+                                 unsigned limit) {
+    if (liveWidth + requestWidth > limit)
+      return liveWidth + requestWidth - limit;
+    return 1;
+  }
+
+  static RegisterPressurePoint
+  buildPressurePoint(StringRef regClass,
+                     const wave::WaveAMDLiveInterval &request,
+                     ArrayRef<wave::WaveAMDLiveInterval> active,
+                     const std::set<PhysAlloc> &live,
+                     const DenseMap<Operation *, unsigned> &positions,
+                     unsigned position, unsigned limit, unsigned reserved) {
+    RegisterPressurePoint point;
+    point.regClass = regClass;
+    point.limit = limit;
+    point.liveDwords = liveDwords(live);
+    point.position = position;
+    point.request = buildIntervalRef(request, positions);
+    point.requiredRelief =
+        estimateRelief(point.liveDwords, point.request.width, limit);
+    point.reserved = reserved;
+
+    for (const wave::WaveAMDLiveInterval &interval : active)
+      point.overlaps.push_back(buildIntervalRef(interval, positions));
+    llvm::stable_sort(point.overlaps, [](const PressureIntervalRef &lhs,
+                                         const PressureIntervalRef &rhs) {
+      if (lhs.start != rhs.start)
+        return lhs.start < rhs.start;
+      if (lhs.end != rhs.end)
+        return lhs.end < rhs.end;
+      if (lhs.width != rhs.width)
+        return lhs.width < rhs.width;
+      return std::lexicographical_compare(
+          lhs.valuePositions.begin(), lhs.valuePositions.end(),
+          rhs.valuePositions.begin(), rhs.valuePositions.end());
+    });
+    return point;
+  }
+
+  static DictionaryAttr intervalAttr(Builder &builder,
+                                     const PressureIntervalRef &interval) {
+    return builder.getDictionaryAttr({
+        builder.getNamedAttr("end", builder.getI64IntegerAttr(interval.end)),
+        builder.getNamedAttr("result_indices", builder.getDenseI64ArrayAttr(
+                                                   interval.resultIndices)),
+        builder.getNamedAttr(
+            "slot_offsets", builder.getDenseI64ArrayAttr(interval.slotOffsets)),
+        builder.getNamedAttr("start",
+                             builder.getI64IntegerAttr(interval.start)),
+        builder.getNamedAttr("value_positions", builder.getDenseI64ArrayAttr(
+                                                    interval.valuePositions)),
+        builder.getNamedAttr("width",
+                             builder.getI64IntegerAttr(interval.width)),
+    });
+  }
+
+  static ArrayAttr intervalArrayAttr(Builder &builder,
+                                     ArrayRef<PressureIntervalRef> intervals) {
+    SmallVector<Attribute> attrs;
+    for (const PressureIntervalRef &interval : intervals)
+      attrs.push_back(intervalAttr(builder, interval));
+    return builder.getArrayAttr(attrs);
+  }
+
+  static void setPressureAttrs(func::FuncOp func,
+                               const RegisterPressurePoint &pressure,
+                               Builder &builder) {
+    func->setAttr(kPressureClassAttr, builder.getStringAttr(pressure.regClass));
+    func->setAttr(kPressureLimitAttr,
+                  builder.getI64IntegerAttr(pressure.limit));
+    func->setAttr(kPressureLiveDwordsAttr,
+                  builder.getI64IntegerAttr(pressure.liveDwords));
+    func->setAttr(kPressureOverlapsAttr,
+                  intervalArrayAttr(builder, pressure.overlaps));
+    func->setAttr(kPressurePositionAttr,
+                  builder.getI64IntegerAttr(pressure.position));
+    func->setAttr(kPressureReliefAttr,
+                  builder.getI64IntegerAttr(pressure.requiredRelief));
+    func->setAttr(kPressureRequestAttr,
+                  intervalAttr(builder, pressure.request));
+    func->setAttr(kPressureReservedAttr,
+                  builder.getI64IntegerAttr(pressure.reserved));
+  }
+
+  static std::string formatInterval(const PressureIntervalRef &interval) {
+    std::string out;
+    llvm::raw_string_ostream os(out);
+    os << "{start=" << interval.start << ", end=" << interval.end
+       << ", width=" << interval.width << ", values=[";
+    llvm::interleaveComma(llvm::seq<size_t>(0, interval.valuePositions.size()),
+                          os, [&](size_t i) {
+                            os << interval.valuePositions[i] << "."
+                               << interval.resultIndices[i] << "+"
+                               << interval.slotOffsets[i];
+                          });
+    os << "]}";
+    return out;
+  }
+
+  static std::string formatIntervals(ArrayRef<PressureIntervalRef> intervals) {
+    std::string out;
+    llvm::raw_string_ostream os(out);
+    os << "[";
+    llvm::interleaveComma(intervals, os,
+                          [&](const PressureIntervalRef &interval) {
+                            os << formatInterval(interval);
+                          });
+    os << "]";
+    return out;
   }
 };
 

@@ -349,7 +349,9 @@ def WaveAMDRegAlloc
     production consumers to fail or skip that func explicitly, and
     -- once the module has been walked -- stamps a module-level
     `waveamdmachine.regalloc_overflowed_count = i64 N` summarising
-    how many kernels overflowed.
+    how many kernels overflowed. Overflowed funcs also carry the first
+    pressure point: register class, position, requested interval,
+    overlapping live intervals, and estimated dwords of relief needed.
 
     `vgpr-limit` / `sgpr-limit` override the per-class budget below
     the subtarget default; -1 keeps the target's number. Test-only

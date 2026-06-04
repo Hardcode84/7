@@ -213,7 +213,7 @@ func.func @unsupported_register_class() {
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
-// expected-error @below {{WaveAMDMachine register allocator ran out of registers}}
+// expected-error @below {{WaveAMDMachine register allocator ran out of VGPR registers at position 1}}
 func.func @too_many_vgprs() {
   %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
   %reg = waveamdmachine.v_mov_b32_tuple %zero {registers = 257 : i64} : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 257>
