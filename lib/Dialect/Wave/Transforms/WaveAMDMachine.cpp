@@ -3222,6 +3222,7 @@ struct PointerWhereBinding {
   std::optional<unsigned> baseResult;
   std::optional<unsigned> globalBaseResult;
   unsigned offsetResult = 0;
+  bool offsetFitsU32 = true;
   bool isBuffer = false;
 };
 
@@ -3265,14 +3266,39 @@ lookupPointerWhereMetadata(WaveAMDMachineSelector &S, WhereOp op, Value pointer,
       S.pointerBuffers.lookup(pointer)};
 }
 
+static bool pointerWhereOffsetFitsU32(WaveAMDMachineSelector &S,
+                                      const PointerOffset &offset) {
+  return !offset.expr || S.slotFitsU32(offset.expr, offset.assumptions);
+}
+
+static FailureOr<Value>
+materializePointerWhereOffsetWide(WaveAMDMachineSelector &S, WhereOp op,
+                                  const PointerOffset &offset) {
+  Value value;
+  if (offset.expr) {
+    SmallVector<std::pair<std::string, Value>, 4> bindings;
+    for (const PointerOffsetBinding &binding : offset.bindings)
+      bindings.push_back({binding.name, S.expect(binding.value, op)});
+    FailureOr<Value> wide =
+        materializeWideIndexExprNode(S, offset.expr, op, bindings);
+    if (failed(wide))
+      return failure();
+    value = *wide;
+  } else {
+    value = createWideImm(S, op.getLoc(), 0);
+  }
+  return ensureVGPR2(S, op.getLoc(), value);
+}
+
 static FailureOr<Value>
 materializePointerWhereOffset(WaveAMDMachineSelector &S, WhereOp op,
                               SelectedWhereRegion &selected,
-                              const PointerOffset &offset) {
+                              const PointerOffset &offset, bool offsetFitsU32) {
   auto savedIP = S.builder.saveInsertionPoint();
   S.builder.setInsertionPointToEnd(&selected.region.front());
   FailureOr<Value> value =
-      materializePointerOffsetVGPR(S, op.getOperation(), offset);
+      offsetFitsU32 ? materializePointerOffsetVGPR(S, op.getOperation(), offset)
+                    : materializePointerWhereOffsetWide(S, op, offset);
   S.builder.restoreInsertionPoint(savedIP);
   return value;
 }
@@ -3296,13 +3322,18 @@ static bool isDefinedInRegion(Value value, Region &region) {
 
 static LogicalResult addSelectedPointerOffset(WaveAMDMachineSelector &S,
                                               WhereOp op, PointerOffset &offset,
-                                              Value selected) {
+                                              Value selected,
+                                              bool offsetFitsU32) {
   std::string name = (Twine("__wave_where_ptr_") + Twine(S.nextLabel++)).str();
   FailureOr<sym::ExprHandle> expr = sym::composeExprSym(S.symbolStore(), name);
   if (failed(expr))
     return op.emitError("failed to compose wave.where pointer offset");
   offset.expr = *expr;
   offset.bindings.push_back({name, selected, TermKind::Lane});
+  if (!offsetFitsU32) {
+    S.values[selected] = selected;
+    return success();
+  }
   FailureOr<sym::PredHandle> range =
       sym::rangeAssumption(S.symbolStore(), name, 0, (int64_t{1} << 32) - 1);
   if (failed(range))
@@ -3320,8 +3351,9 @@ static LogicalResult addNoElsePointerResult(WaveAMDMachineSelector &S,
       lookupPointerWhereMetadata(S, op, thenRegion.sourceYields[idx], "then");
   if (failed(metadata))
     return failure();
-  FailureOr<Value> offset =
-      materializePointerWhereOffset(S, op, thenRegion, metadata->offset);
+  bool offsetFitsU32 = pointerWhereOffsetFitsU32(S, metadata->offset);
+  FailureOr<Value> offset = materializePointerWhereOffset(
+      S, op, thenRegion, metadata->offset, offsetFitsU32);
   if (failed(offset))
     return failure();
 
@@ -3340,6 +3372,7 @@ static LogicalResult addNoElsePointerResult(WaveAMDMachineSelector &S,
       pointer.commonGlobalBase = metadata->globalBase;
   }
   pointer.offsetResult = plan.addResult((*offset).getType(), *offset);
+  pointer.offsetFitsU32 = offsetFitsU32;
   pointer.isBuffer = metadata->isBuffer;
   plan.bindings.push_back({std::nullopt, pointer});
   return success();
@@ -3375,10 +3408,12 @@ static LogicalResult addOtherwisePointerResult(WaveAMDMachineSelector &S,
                                              "global bases")))
     return failure();
 
-  FailureOr<Value> thenOffset =
-      materializePointerWhereOffset(S, op, thenRegion, thenMetadata->offset);
-  FailureOr<Value> elseOffset =
-      materializePointerWhereOffset(S, op, elseRegion, elseMetadata->offset);
+  bool offsetFitsU32 = pointerWhereOffsetFitsU32(S, thenMetadata->offset) &&
+                       pointerWhereOffsetFitsU32(S, elseMetadata->offset);
+  FailureOr<Value> thenOffset = materializePointerWhereOffset(
+      S, op, thenRegion, thenMetadata->offset, offsetFitsU32);
+  FailureOr<Value> elseOffset = materializePointerWhereOffset(
+      S, op, elseRegion, elseMetadata->offset, offsetFitsU32);
   if (failed(thenOffset) || failed(elseOffset))
     return failure();
 
@@ -3388,6 +3423,7 @@ static LogicalResult addOtherwisePointerResult(WaveAMDMachineSelector &S,
   pointer.commonGlobalBase = thenMetadata->globalBase;
   pointer.offsetResult =
       plan.addResult((*thenOffset).getType(), *thenOffset, *elseOffset);
+  pointer.offsetFitsU32 = offsetFitsU32;
   pointer.isBuffer = thenMetadata->isBuffer;
   plan.bindings.push_back({std::nullopt, pointer});
   return success();
@@ -3485,7 +3521,8 @@ bindPointerWhereResult(WaveAMDMachineSelector &S, WhereOp op,
   if (globalBase)
     S.pointerGlobalBases[sourceResult] = globalBase;
   PointerOffset selectedOffset;
-  if (failed(addSelectedPointerOffset(S, op, selectedOffset, offset)))
+  if (failed(addSelectedPointerOffset(S, op, selectedOffset, offset,
+                                      pointer.offsetFitsU32)))
     return failure();
   S.pointerIndexOffsets[sourceResult] = std::move(selectedOffset);
   S.pointerBuffers[sourceResult] = pointer.isBuffer;
