@@ -101,9 +101,10 @@ func.func @mfma_gfx950_mxfp4_kernel(%out: !wave.ptr<#wave.global, i32>)
 }
 
 // SELECT-LABEL: func.func @mfma_gfx950_mxfp4_transposed_scale_kernel
-// SELECT: waveamdmachine.ds_read_tr_b64_b8
-// SELECT: waveamdmachine.tuple_to_elements
-// SELECT: waveamdmachine.mfma_scale_f32_16x16x128_f4_f4{{.*}} : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 4>
+// SELECT: %[[TR:.*]], %[[TOK:.*]] = waveamdmachine.ds_read_tr_b64_b8
+// SELECT-NEXT: %[[SPLIT:.*]]:2 = waveamdmachine.tuple_to_elements %[[TR]]
+// SELECT-NEXT: %[[SCALE:.*]] = waveamdmachine.v_mov_b32_tuple %[[SPLIT]]#0
+// SELECT-NEXT: waveamdmachine.mfma_scale_f32_16x16x128_f4_f4 {{.*}}, %[[SCALE]], %[[SCALE]] : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 4>
 
 // ASM-LABEL: mfma_gfx950_mxfp4_transposed_scale_kernel:
 // ASM: ds_read_b64_tr_b8 {{v\[[0-9]+:[0-9]+\]}}, {{v[0-9]+}}

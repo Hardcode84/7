@@ -3425,16 +3425,38 @@ LogicalResult WaveAMDMachineSelector::selectMmaScale(waveamd::MmaScaleOp op) {
   Type vgprTuple = getRegType(op.getContext(), waveamdmachine::RegClass::VGPR,
                               resultType.getRegisters());
   auto getScale = [&](Value scale) -> Value {
+    if (Value cached = mmaScaleScalarVGPRs.lookup(scale))
+      return cached;
     Value raw = expect(scale, op);
     SimdType simdType = cast<SimdType>(scale.getType());
     VectorType vecType = dyn_cast<VectorType>(simdType.getElementType());
     if (!vecType)
       return ensureVGPRForVSrc1(op.getLoc(), raw);
+    waveamdmachine::RegType rawType =
+        cast<waveamdmachine::RegType>(raw.getType());
+    if (rawType.getRegClass() != waveamdmachine::RegClass::VGPR)
+      return ensureVGPRForVSrc1(op.getLoc(), raw);
+    Operation *def = raw.getDefiningOp();
+    if (!def) {
+      Type vgpr1 = getRegType(op.getContext(), waveamdmachine::RegClass::VGPR);
+      waveamdmachine::TupleToElementsOp split =
+          waveamdmachine::TupleToElementsOp::create(
+              builder, op.getLoc(), SmallVector<Type, 2>{vgpr1, vgpr1}, raw);
+      return split.getElements().front();
+    }
+
+    OpBuilder::InsertionGuard guard(builder);
+    builder.setInsertionPointAfter(def);
     Type vgpr1 = getRegType(op.getContext(), waveamdmachine::RegClass::VGPR);
+    SmallVector<Type, 4> elementTypes(rawType.getWidth(), vgpr1);
     waveamdmachine::TupleToElementsOp split =
-        waveamdmachine::TupleToElementsOp::create(
-            builder, op.getLoc(), SmallVector<Type, 2>{vgpr1, vgpr1}, raw);
-    return split.getElements().front();
+        waveamdmachine::TupleToElementsOp::create(builder, op.getLoc(),
+                                                  elementTypes, raw);
+    Value copy = waveamdmachine::VMovB32TupleOp::create(
+                     builder, op.getLoc(), vgpr1, split.getElements().front())
+                     .getResult();
+    mmaScaleScalarVGPRs[scale] = copy;
+    return copy;
   };
   Value result = waveamdmachine::MfmaScaleF32_16x16x128_F4F4Op::create(
                      builder, op.getLoc(), vgprTuple, expect(op.getA(), op),
