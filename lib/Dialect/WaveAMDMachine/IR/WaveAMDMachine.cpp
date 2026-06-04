@@ -243,6 +243,56 @@ LogicalResult ExecIfOp::verify() {
   return verifyExecIfYield(*this, getElseRegion(), "else", hasElse);
 }
 
+void ExecIfOp::getSuccessorRegions(RegionBranchPoint point,
+                                   SmallVectorImpl<RegionSuccessor> &regions) {
+  bool hasElse = !getElseRegion().empty();
+  if (point.isParent()) {
+    regions.push_back(RegionSuccessor(&getThenRegion()));
+    if (hasElse)
+      regions.push_back(RegionSuccessor(&getElseRegion()));
+    else if (getNumResults() == 0)
+      regions.push_back(RegionSuccessor::parent());
+    return;
+  }
+
+  RegionBranchTerminatorOpInterface term =
+      point.getTerminatorPredecessorOrNull();
+  Region *source = term->getParentRegion();
+  if (source == &getThenRegion() && hasElse)
+    regions.push_back(RegionSuccessor(&getElseRegion()));
+  regions.push_back(RegionSuccessor::parent());
+}
+
+OperandRange ExecIfOp::getEntrySuccessorOperands(RegionSuccessor successor) {
+  return OperandRange((*this)->operand_end(), (*this)->operand_end());
+}
+
+ValueRange ExecIfOp::getSuccessorInputs(RegionSuccessor successor) {
+  if (successor.isParent())
+    return getResults();
+  return ValueRange();
+}
+
+bool ExecIfOp::areTypesCompatible(Type lhs, Type rhs) {
+  if (lhs == rhs)
+    return true;
+  RegType resultReg = dyn_cast<RegType>(rhs);
+  if (!resultReg || resultReg.getRegClass() != RegClass::VGPR)
+    return false;
+  if (RegType sourceReg = dyn_cast<RegType>(lhs))
+    return sourceReg.getWidth() == resultReg.getWidth() &&
+           isExecIfMergeRegClass(sourceReg.getRegClass());
+  return isa<ImmType>(lhs) && resultReg.getWidth() == 1;
+}
+
+MutableOperandRange
+YieldOp::getMutableSuccessorOperands(RegionSuccessor successor) {
+  MutableOperandRange values = getValuesMutable();
+  if (successor.isParent())
+    return values;
+  return values.slice(0, 0);
+}
+
 static LogicalResult verifyCndmaskSource(Operation *op, Value value,
                                          unsigned resultWidth, StringRef name) {
   RegType regType = dyn_cast<RegType>(value.getType());

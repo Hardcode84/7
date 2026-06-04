@@ -1,6 +1,66 @@
 // RUN: wave-opt --waveamd-insert-ticket-waits -split-input-file %s | FileCheck %s
 // RUN: wave-opt --waveamd-insert-ticket-waits -split-input-file %s | wave-opt -split-input-file | FileCheck %s
 
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
+
+// CHECK-LABEL: func.func @exec_if_token_result
+// CHECK: waveamdmachine.exec_if
+// CHECK: waveamdmachine.global_store_b32
+// CHECK: otherwise
+// CHECK: waveamdmachine.global_store_b32
+// CHECK: waveamdmachine.imm 0
+// CHECK-NEXT: waveamdmachine.s_waitcnt_vscnt
+// CHECK-NEXT: waveamdmachine.wait
+func.func @exec_if_token_result(%cond: !waveamdmachine.reg<sgpr, 1>,
+                                %off: !waveamdmachine.reg<vgpr, 1>,
+                                %val: !waveamdmachine.reg<vgpr, 1>,
+                                %base: !waveamdmachine.reg<sgpr, 2>) {
+  %tok = waveamdmachine.exec_if %cond {
+    %then = waveamdmachine.global_store_b32 %off, %val, %base
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+           !waveamdmachine.reg<sgpr, 2>) -> !waveamdmachine.mem.token
+    waveamdmachine.yield %then : !waveamdmachine.mem.token
+  } otherwise {
+    %else = waveamdmachine.global_store_b32 %off, %val, %base
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+           !waveamdmachine.reg<sgpr, 2>) -> !waveamdmachine.mem.token
+    waveamdmachine.yield %else : !waveamdmachine.mem.token
+  } : !waveamdmachine.reg<sgpr, 1> -> !waveamdmachine.mem.token
+  waveamdmachine.wait %tok : (!waveamdmachine.mem.token) -> ()
+  return
+}
+
+// CHECK-LABEL: func.func @exec_if_branch_min_vscnt
+// CHECK: waveamdmachine.global_store_b32
+// CHECK: waveamdmachine.exec_if
+// CHECK: waveamdmachine.global_store_b32
+// CHECK: otherwise
+// CHECK: waveamdmachine.imm 0
+// CHECK-NEXT: waveamdmachine.s_waitcnt_vscnt
+// CHECK-NEXT: waveamdmachine.wait
+func.func @exec_if_branch_min_vscnt(%cond: !waveamdmachine.reg<sgpr, 1>,
+                                    %off: !waveamdmachine.reg<vgpr, 1>,
+                                    %val: !waveamdmachine.reg<vgpr, 1>,
+                                    %base: !waveamdmachine.reg<sgpr, 2>) {
+  %old = waveamdmachine.global_store_b32 %off, %val, %base
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+         !waveamdmachine.reg<sgpr, 2>) -> !waveamdmachine.mem.token
+  waveamdmachine.exec_if %cond {
+    waveamdmachine.global_store_b32 %off, %val, %base
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+           !waveamdmachine.reg<sgpr, 2>) -> ()
+    waveamdmachine.yield
+  } otherwise {
+    waveamdmachine.yield
+  } : !waveamdmachine.reg<sgpr, 1>
+  waveamdmachine.wait %old : (!waveamdmachine.mem.token) -> ()
+  return
+}
+
+}
+
+// -----
+
 // Both arms of a `cf.cond_br` issue exactly one extra `ds_load_b32`
 // before forwarding the original LDS value to the merge block. The merge
 // arm sees `%a` at the same position (1) on every path, so the join

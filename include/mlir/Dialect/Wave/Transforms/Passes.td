@@ -189,8 +189,9 @@ def WaveAMDLinearizeExecIf
   let summary = "Linearize WaveAMDMachine EXEC-masked regions";
   let description = [{
     Lowers `waveamdmachine.exec_if` into explicit EXEC save/mask/branch/restore
-    instructions and labels. Runs after CSE/scheduling and before waitcnt,
-    regalloc, hazard waits, and ISA emission consume a linear stream.
+    instructions and labels. Runs after ticket waits consume structured token
+    control flow and before regalloc, hazard waits, and ISA emission consume a
+    linear stream.
   }];
   let dependentDialects = [
     "func::FuncDialect",

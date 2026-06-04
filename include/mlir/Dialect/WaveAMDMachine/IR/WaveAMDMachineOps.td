@@ -901,7 +901,9 @@ def WaveAMDMachine_YieldOp : WaveAMDMachine_Op<"yield", [
   Pure,
   ReturnLike,
   Terminator,
-  HasParent<"ExecIfOp">
+  HasParent<"ExecIfOp">,
+  DeclareOpInterfaceMethods<RegionBranchTerminatorOpInterface,
+    ["getMutableSuccessorOperands"]>
 ]> {
   let summary = "exec_if region terminator";
   let arguments = (ins Variadic<AnyType>:$values);
@@ -913,6 +915,9 @@ def WaveAMDMachine_YieldOp : WaveAMDMachine_Op<"yield", [
 
 def WaveAMDMachine_ExecIfOp : WaveAMDMachine_Op<"exec_if", [
   SingleBlockImplicitTerminator<"YieldOp">,
+  DeclareOpInterfaceMethods<RegionBranchOpInterface,
+    ["getEntrySuccessorOperands", "getSuccessorInputs",
+     "areTypesCompatible"]>,
   RecursiveMemoryEffects,
   NoRegionArguments,
   WaveAMDMachine_ReadsExec,
