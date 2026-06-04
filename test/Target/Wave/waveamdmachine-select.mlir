@@ -32,6 +32,47 @@ func.func @select_lane(%limit: i32) -> i32 {
   return %first : i32
 }
 
+// SELECT-LABEL: func.func @select_lane_immediate_splats
+// SELECT-DAG: [[TRUE_IMM:%.*]] = waveamdmachine.imm 7
+// SELECT-DAG: [[FALSE_IMM:%.*]] = waveamdmachine.imm 100000
+// SELECT: [[FALSE:%.*]] = waveamdmachine.v_mov_b32_tuple [[FALSE_IMM]]
+// SELECT: [[TRUE:%.*]] = waveamdmachine.v_mov_b32_tuple [[TRUE_IMM]]
+// SELECT: waveamdmachine.v_cndmask_b32_tuple [[FALSE]], [[TRUE]],
+// ASM-LABEL: select_lane_immediate_splats:
+// ASM: v_cndmask_b32_e64
+func.func @select_lane_immediate_splats(%limit: i32) -> i32 {
+  %c7 = arith.constant 7 : i32
+  %c100000 = arith.constant 100000 : i32
+  %lane = wave.lane_id : !wave.simd<i32, 32>
+  %vlimit = wave.splat %limit : i32 -> !wave.simd<i32, 32>
+  %active = wave.cmpi ult %lane, %vlimit
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.mask<32>
+  %v7 = wave.splat %c7 : i32 -> !wave.simd<i32, 32>
+  %v100000 = wave.splat %c100000 : i32 -> !wave.simd<i32, 32>
+  %r = wave.select %active, %v7, %v100000
+      : !wave.mask<32>, !wave.simd<i32, 32>
+  %first = wave.read_first %r : !wave.simd<i32, 32> -> i32
+  return %first : i32
+}
+
+// SELECT-LABEL: func.func @select_lane_sgpr_pair_splats
+// SELECT-DAG: [[TRUE_ARG:%.*]] = waveamdmachine.arg {{.*}} : !waveamdmachine.reg<sgpr, 2>
+// SELECT-DAG: [[FALSE_ARG:%.*]] = waveamdmachine.arg {{.*}} : !waveamdmachine.reg<sgpr, 2>
+// SELECT: [[FALSE:%.*]] = waveamdmachine.v_mov_b32_tuple [[FALSE_ARG]]
+// SELECT: [[TRUE:%.*]] = waveamdmachine.v_mov_b32_tuple [[TRUE_ARG]]
+// SELECT: waveamdmachine.v_cndmask_b32_tuple [[FALSE]], [[TRUE]],
+func.func @select_lane_sgpr_pair_splats(%a: i64, %b: i64, %limit: i32) {
+  %lane = wave.lane_id : !wave.simd<i32, 32>
+  %vlimit = wave.splat %limit : i32 -> !wave.simd<i32, 32>
+  %active = wave.cmpi ult %lane, %vlimit
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.mask<32>
+  %va = wave.splat %a : i64 -> !wave.simd<i64, 32>
+  %vb = wave.splat %b : i64 -> !wave.simd<i64, 32>
+  %r = wave.select %active, %va, %vb
+      : !wave.mask<32>, !wave.simd<i64, 32>
+  return
+}
+
 // SELECT-LABEL: func.func @select_whole_simd
 // SELECT: waveamdmachine.s_cmp_lg_u32
 // SELECT: [[MASK:%.*]] = waveamdmachine.s_cselect_b32

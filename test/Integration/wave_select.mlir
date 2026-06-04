@@ -19,6 +19,8 @@ gpu.module @kernels {
     %c16 = arith.constant 16 : i32
     %c100 = arith.constant 100 : i32
     %c200 = arith.constant 200 : i32
+    %c300 = arith.constant 300 : i32
+    %c400 = arith.constant 400 : i32
     %c999 = arith.constant 999 : i32
     %lane = wave.lane_id : !wave.simd<i32, @W@>
     %v8 = wave.splat %c8 : i32 -> !wave.simd<i32, @W@>
@@ -31,8 +33,14 @@ gpu.module @kernels {
 
     %hundred = wave.select %flag, %c100, %c999 : i32
     %v100 = wave.splat %hundred : i32 -> !wave.simd<i32, @W@>
-    %selected = wave.select %lt8, %lane, %v100
+    %selected_base = wave.select %lt8, %lane, %v100
         : !wave.mask<@W@>, !wave.simd<i32, @W@>
+    %v300 = wave.splat %c300 : i32 -> !wave.simd<i32, @W@>
+    %v400 = wave.splat %c400 : i32 -> !wave.simd<i32, @W@>
+    %selected_bias = wave.select %lt8, %v300, %v400
+        : !wave.mask<@W@>, !wave.simd<i32, @W@>
+    %selected = wave.addi %selected_base, %selected_bias
+        : !wave.simd<i32, @W@>, !wave.simd<i32, @W@> -> !wave.simd<i32, @W@>
 
     %lane_plus8 = wave.addi %lane, %v8
         : !wave.simd<i32, @W@>, !wave.simd<i32, @W@> -> !wave.simd<i32, @W@>
@@ -79,7 +87,7 @@ func.func private @wave_memref_to_ptr_global_i32(memref<32xi32>)
 func.func private @printMemrefI32(memref<*xi32>)
     attributes {llvm.emit_c_interface}
 
-// CHECK: [0, 1, 2, 3, 4, 5, 6, 7, 200, 200, 200, 200, 200, 200, 200, 200, 200, 200, 200, 200, 200, 200, 200, 200, 100, 100, 100, 100, 100, 100, 100, 100]
+// CHECK: [300, 301, 302, 303, 304, 305, 306, 307, 200, 200, 200, 200, 200, 200, 200, 200, 200, 200, 200, 200, 200, 200, 200, 200, 500, 500, 500, 500, 500, 500, 500, 500]
 func.func @main() {
   %c0 = arith.constant 0 : index
   %c1 = arith.constant 1 : index

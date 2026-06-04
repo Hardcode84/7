@@ -2365,16 +2365,45 @@ static FailureOr<Value> createFullMaskFromSCC(WaveAMDMachineSelector &S,
                             createImm(S.builder, op->getLoc(), 0), width);
 }
 
-static Value createLaneSelect(WaveAMDMachineSelector &S, Operation *op,
-                              Value condition, Value trueValue,
-                              Value falseValue, unsigned width) {
-  if (width == 1 && isMachineImm(trueValue) && isMachineImm(falseValue))
-    trueValue = S.ensureVGPRForVSrc1(op->getLoc(), trueValue);
+static FailureOr<Value> ensureLaneSelectVGPR(WaveAMDMachineSelector &S,
+                                             Operation *op, Value value,
+                                             unsigned width) {
+  Type resultType =
+      getRegType(op->getContext(), waveamdmachine::RegClass::VGPR, width);
+  waveamdmachine::RegType regType =
+      dyn_cast<waveamdmachine::RegType>(value.getType());
+  if (!regType) {
+    if (!isMachineImm(value))
+      return op->emitError("lane select source must be register or immediate");
+    return waveamdmachine::VMovB32TupleOp::create(S.builder, op->getLoc(),
+                                                  resultType, value)
+        .getResult();
+  }
+
+  if (regType.getRegClass() == waveamdmachine::RegClass::VGPR &&
+      regType.getWidth() == width)
+    return value;
+  if (regType.getRegClass() == waveamdmachine::RegClass::SGPR &&
+      regType.getWidth() == width)
+    return waveamdmachine::VMovB32TupleOp::create(S.builder, op->getLoc(),
+                                                  resultType, value)
+        .getResult();
+  return op->emitError("lane select source width/register class mismatch");
+}
+
+static FailureOr<Value> createLaneSelect(WaveAMDMachineSelector &S,
+                                         Operation *op, Value condition,
+                                         Value trueValue, Value falseValue,
+                                         unsigned width) {
+  FailureOr<Value> falseVGPR = ensureLaneSelectVGPR(S, op, falseValue, width);
+  FailureOr<Value> trueVGPR = ensureLaneSelectVGPR(S, op, trueValue, width);
+  if (failed(falseVGPR) || failed(trueVGPR))
+    return failure();
   Type resultType =
       getRegType(op->getContext(), waveamdmachine::RegClass::VGPR, width);
   return waveamdmachine::VCndmaskB32TupleOp::create(S.builder, op->getLoc(),
-                                                    resultType, falseValue,
-                                                    trueValue, condition)
+                                                    resultType, *falseVGPR,
+                                                    *trueVGPR, condition)
       .getResult();
 }
 
@@ -2684,8 +2713,11 @@ static LogicalResult selectRegisterValue(WaveAMDMachineSelector &S, SelectOp op,
   if (failed(width))
     return failure();
   if (maskCondition) {
-    S.values[op.getResult()] = createLaneSelect(
+    FailureOr<Value> selected = createLaneSelect(
         S, op, S.expect(op.getCondition(), op), trueValue, falseValue, *width);
+    if (failed(selected))
+      return failure();
+    S.values[op.getResult()] = *selected;
     return success();
   }
 
@@ -2695,8 +2727,11 @@ static LogicalResult selectRegisterValue(WaveAMDMachineSelector &S, SelectOp op,
     FailureOr<Value> condition = createFullMaskFromSCC(S, op, scc, maskWidth);
     if (failed(condition))
       return failure();
-    S.values[op.getResult()] =
+    FailureOr<Value> selected =
         createLaneSelect(S, op, *condition, trueValue, falseValue, *width);
+    if (failed(selected))
+      return failure();
+    S.values[op.getResult()] = *selected;
   } else {
     FailureOr<Value> selected =
         createScalarSelect(S, op, scc, trueValue, falseValue, *width);
