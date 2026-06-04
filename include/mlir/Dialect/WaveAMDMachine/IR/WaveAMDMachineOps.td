@@ -2154,11 +2154,7 @@ def WaveAMDMachine_SAddU64U32Op : WaveAMDMachine_Op<"s_add_u64_u32", [Pure]> {
   let assemblyFormat = "$base `,` $offset attr-dict `:` functional-type(operands, results)";
 }
 
-// 64-bit vector add. Expanded to `v_add_co_u32` (low) +
-// `v_addc_co_u32` (high) with the carry threaded through `vcc_lo` on
-// wave32. Documented constraint: vcc_lo must not be live across the
-// pair -- our offset-math path doesn't touch it, so we leave that to
-// the producer to enforce.
+// 64-bit vector add. Expanded as a target carry-chain pair through VCC.
 def WaveAMDMachine_VAddU64Op : WaveAMDMachine_Op<"v_add_u64", [Pure]> {
   let summary = "vector 64-bit unsigned add";
   let arguments = (ins WaveAMDMachine_VGPR2:$lhs, WaveAMDMachine_VGPR2:$rhs);

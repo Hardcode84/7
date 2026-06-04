@@ -1737,14 +1737,26 @@ private:
                      llvm::MCOperand::createImm(0)});
     }
     if (isa<waveamdmachine::VAddU64Op>(op)) {
-      // wave32 carry register: vcc_lo. Documented constraint that
-      // nothing else clobbers it across this pair.
       Value res = op.getResult(0);
       Value lhs = op.getOperand(0);
       Value rhs = op.getOperand(1);
+      llvm::MCOperand clamp = llvm::MCOperand::createImm(0);
+      if (isaVersion.Major == 9) {
+        llvm::MCOperand vcc = llvm::MCOperand::createReg(namedPhysReg("vcc"));
+        if (failed(emitMC(llvm::AMDGPU::V_ADD_CO_U32_e64_gfx9,
+                          {toMCVGPRComponent(res, 0), vcc,
+                           toMCVGPRComponent(lhs, 0), toMCVGPRComponent(rhs, 0),
+                           clamp})))
+          return failure();
+        return emitMC(llvm::AMDGPU::V_ADDC_CO_U32_e64_gfx9,
+                      {toMCVGPRComponent(res, 1), vcc,
+                       toMCVGPRComponent(lhs, 1), toMCVGPRComponent(rhs, 1),
+                       vcc, clamp});
+      }
+      if (isaVersion.Major != 11)
+        return op.emitError("v_add_u64 unsupported on this target");
       llvm::MCOperand vccLo =
           llvm::MCOperand::createReg(namedPhysReg("vcc_lo"));
-      llvm::MCOperand clamp = llvm::MCOperand::createImm(0);
       if (failed(emitMC(llvm::AMDGPU::V_ADD_CO_U32_e64_gfx11,
                         {toMCVGPRComponent(res, 0), vccLo,
                          toMCVGPRComponent(lhs, 0), toMCVGPRComponent(rhs, 0),
