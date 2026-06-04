@@ -29,6 +29,25 @@ def test_generic_wave_kernel():
         print(m.module)
 
 
+# CHECK-LABEL: TEST: test_generic_wave_kernel_attrs
+@run
+def test_generic_wave_kernel_attrs():
+    with w.module() as m:
+        with m.function(
+            "generic_wave_kernel_attrs",
+            [],
+            kernel=True,
+            lds_size=128,
+            attrs={"waveamdmachine.target_waves": w.i64_attr(2)},
+        ):
+            pass
+        # CHECK: func.func @generic_wave_kernel_attrs()
+        # CHECK-SAME: wave.kernel
+        # CHECK-SAME: wave.lds_size = 128 : i64
+        # CHECK-SAME: waveamdmachine.target_waves = 2 : i64
+        print(m.module)
+
+
 # CHECK-LABEL: TEST: test_waveamd_matrix_kernel
 @run
 def test_waveamd_matrix_kernel():

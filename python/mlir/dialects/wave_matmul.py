@@ -2192,6 +2192,14 @@ def _emit_matmul_launch(
     )
 
 
+def _kernel_trip_count_source(
+    bld: dsl.FunctionBuilder, cfg: _MatmulConfig
+) -> dsl.Value:
+    if len(bld.args) > cfg.trip_count_arg_index:
+        return bld.args[cfg.trip_count_arg_index]
+    return bld.constant(dsl.i32(), max(cfg.virtual_k_steps - 1, 0))
+
+
 def _emit_kernel(bld: dsl.FunctionBuilder, cfg: _MatmulConfig) -> None:
     """Populate tiled matmul kernel body."""
     coords = _emit_tile_coords(bld, cfg)
@@ -2209,7 +2217,7 @@ def _emit_kernel(bld: dsl.FunctionBuilder, cfg: _MatmulConfig) -> None:
         return
 
     trip_count_i32 = bld.assume_range(
-        bld.args[cfg.trip_count_arg_index], 0, max(cfg.virtual_k_steps - 1, 0)
+        _kernel_trip_count_source(bld, cfg), 0, max(cfg.virtual_k_steps - 1, 0)
     )
     if cfg.use_dma_lds and cfg.virtual_k_steps > 1:
         trip_count_i32 = bld.constant(dsl.i32(), max(cfg.virtual_k_steps - 2, 0))
@@ -2389,7 +2397,9 @@ def _declare_matmul_externals(bld: dsl.ModuleBuilder, cfg: _MatmulConfig) -> Non
     )
 
 
-def _kernel_input_types(cfg: _MatmulConfig) -> list[dsl.Type]:
+def _kernel_input_types(
+    cfg: _MatmulConfig, *, include_trip_count: bool = True
+) -> list[dsl.Type]:
     args = [
         dsl.ptr_type(cfg.input_element_type),
         dsl.ptr_type(cfg.input_element_type),
@@ -2397,7 +2407,8 @@ def _kernel_input_types(cfg: _MatmulConfig) -> list[dsl.Type]:
     ]
     if cfg.uses_packed_mxfp4:
         args.extend([dsl.ptr_type(dsl.i8()), dsl.ptr_type(dsl.i8())])
-    args.append(dsl.i32())
+    if include_trip_count:
+        args.append(dsl.i32())
     return args
 
 

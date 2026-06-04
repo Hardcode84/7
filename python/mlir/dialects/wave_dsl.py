@@ -450,6 +450,8 @@ class ModuleBuilder:
         results: Sequence[Type] = (),
         *,
         kernel: bool = False,
+        lds_size: int | None = None,
+        attrs: Mapping[str, Attribute] | None = None,
     ) -> Iterator[FunctionBuilder]:
         """Generic ``func.func`` builder at module scope.
 
@@ -461,6 +463,11 @@ class ModuleBuilder:
         op = func.FuncOp(name, (list(inputs), list(results)))
         if kernel:
             op.attributes["wave.kernel"] = UnitAttr.get()
+        if lds_size is not None:
+            op.attributes["wave.lds_size"] = i64_attr(lds_size)
+        if attrs is not None:
+            for attr_name, attr in attrs.items():
+                op.attributes[attr_name] = attr
         block = op.add_entry_block()
         with InsertionPoint(block):
             yield FunctionBuilder(block)

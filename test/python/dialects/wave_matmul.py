@@ -1,5 +1,7 @@
 # RUN: %PYTHON %s | FileCheck %s
 
+import mlir.dialects.wave_matmul as wm
+from mlir.dialects import wave_dsl as dsl
 from mlir.dialects.wave_matmul import (
     build_wmma_f16_matmul_module,
     compute_wmma_f16_matmul_reference_buffer,
@@ -144,6 +146,44 @@ module_mxfp4 = build_wmma_f16_matmul_module(
 )
 print(module_mxfp4)
 
+static_cfg = wm._make_matmul_config(
+    M=16,
+    N=16,
+    K=32,
+    BM=1,
+    BN=1,
+    wave_m_tiles=1,
+    wave_n_tiles=1,
+    wave_k_tiles=1,
+    use_buffer=False,
+    use_dma_lds=False,
+    matrix_intrinsic="wmma",
+    input_type="f16",
+    output_type="f32",
+    random_data=False,
+    random_seed=0,
+    cta_swizzle_xcds=1,
+    cta_group_m=1,
+)
+static_bld = dsl.ModuleBuilder()
+with static_bld:
+    wm._declare_matmul_externals(static_bld, static_cfg)
+    with static_bld.function(
+        "static_matmul_kernel",
+        wm._kernel_input_types(static_cfg, include_trip_count=False),
+        kernel=True,
+        lds_size=static_cfg.lds_bytes,
+    ) as fb:
+        wm._emit_kernel(fb, static_cfg)
+    wm._attach_wavemeta_params(static_bld.module, static_cfg)
+    dsl.specialize_wavemeta(static_bld.module)
+static_text = str(static_bld.module)
+static_signature = static_text.split("func.func @static_matmul_kernel", 1)[1].split(
+    ")", 1
+)[0]
+assert "i32" not in static_signature
+print(static_bld.module)
+
 # CHECK: random-ref 1024 1024 1024
 # CHECK: bf16-ref 256 32.0
 # CHECK: mxfp4-scales 64 64 127 122
@@ -196,3 +236,8 @@ print(module_mxfp4)
 # CHECK-COUNT-4: waveamd.mma_scale "mfma.scale.f32.16x16x128.f4.f4"
 # CHECK-SAME: !wave.simd<vector<8xi8>, 64>
 # CHECK-SAME: !wave.simd<vector<8xi8>, 64>
+# CHECK-LABEL: func.func @static_matmul_kernel
+# CHECK-SAME: wave.lds_size = 2048 : i64
+# CHECK: %[[TRIP:.*]] = arith.constant 1 : i32
+# CHECK: %[[ASSUME:.*]] = wave.assume %[[TRIP]] as "x" {{\[.*\]}} : i32
+# CHECK: scf.for %{{.*}} = %{{.*}} to %[[ASSUME]] step
