@@ -21,8 +21,10 @@ namespace mlir::wave {
 struct WaveAMDRegisterLimits {
   unsigned addressableSGPRs = 0;
   unsigned addressableVGPRs = 0;
+  unsigned addressableAGPRs = 0;
   unsigned sgprAllocGranule = 0;
   unsigned vgprAllocGranule = 0;
+  unsigned agprAllocGranule = 0;
   unsigned maxWavesPerEU = 0;
   SmallVector<unsigned, 32> maxSGPRsForWaves;
   SmallVector<unsigned, 32> maxVGPRsForWaves;

@@ -28,7 +28,8 @@ struct PhysicalLiveRange {
 };
 
 static bool isAllocatedClass(waveamdmachine::RegType type) {
-  return wave::isWaveAMDSGPR(type) || wave::isWaveAMDVGPR(type);
+  return wave::isWaveAMDSGPR(type) || wave::isWaveAMDVGPR(type) ||
+         wave::isWaveAMDAGPR(type);
 }
 
 static Operation *diagOpForValue(Value value, func::FuncOp func) {
@@ -48,7 +49,8 @@ static LogicalResult verifyValueAllocated(Value value, func::FuncOp func,
   Operation *diagOp = diagOpForValue(value, func);
   if (!isAllocatedClass(type))
     return diagOp->emitError()
-           << consumer << " supports only SGPR and VGPR register classes";
+           << consumer
+           << " supports only SGPR, VGPR, and AGPR register classes";
   if (type.getIndex() < 0)
     return diagOp->emitError()
            << consumer << " requires allocated register values";
@@ -270,8 +272,11 @@ mlir::wave::verifyWaveAMDRegAllocation(func::FuncOp func, StringRef consumer,
   if (failed(verifyNoInterference(func, builtIntervals->intervals.sgprs,
                                   consumer, "SGPR", regs.reservedSGPRs, regs)))
     return failure();
-  return verifyNoInterference(func, builtIntervals->intervals.vgprs, consumer,
-                              "VGPR", regs.reservedVGPRs, regs);
+  if (failed(verifyNoInterference(func, builtIntervals->intervals.vgprs,
+                                  consumer, "VGPR", regs.reservedVGPRs, regs)))
+    return failure();
+  return verifyNoInterference(func, builtIntervals->intervals.agprs, consumer,
+                              "AGPR", /*reserved=*/0, regs);
 }
 
 LogicalResult mlir::wave::verifyWaveAMDRegAllocations(

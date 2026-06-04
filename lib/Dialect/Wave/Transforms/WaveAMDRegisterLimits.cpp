@@ -177,6 +177,10 @@ static bool isGfx125x(const llvm::AMDGPU::IsaVersion &isa) {
   return isa.Major == 12 && isa.Minor == 5;
 }
 
+static unsigned getAddressableAGPRs(const llvm::MCSubtargetInfo &sti) {
+  return llvm::AMDGPU::hasMAIInsts(sti) ? 256 : 0;
+}
+
 FailureOr<bool> needsWaveAMDKernargPreloadCompatProlog(Operation *op,
                                                        StringRef consumer) {
   FailureOr<std::unique_ptr<llvm::MCSubtargetInfo>> sti =
@@ -230,10 +234,12 @@ FailureOr<WaveAMDRegisterLimits> getWaveAMDRegisterLimits(Operation *op) {
       llvm::AMDGPU::IsaInfo::getAddressableNumSGPRs(sti->get());
   limits.addressableVGPRs = llvm::AMDGPU::IsaInfo::getAddressableNumVGPRs(
       sti->get(), /*DynamicVGPRBlockSize=*/0);
+  limits.addressableAGPRs = getAddressableAGPRs(**sti);
   limits.sgprAllocGranule =
       llvm::AMDGPU::IsaInfo::getSGPRAllocGranule(sti->get());
   limits.vgprAllocGranule = llvm::AMDGPU::IsaInfo::getVGPRAllocGranule(
       sti->get(), /*DynamicVGPRBlockSize=*/0);
+  limits.agprAllocGranule = limits.vgprAllocGranule;
   limits.maxWavesPerEU = llvm::AMDGPU::IsaInfo::getMaxWavesPerEU(sti->get());
   limits.maxSGPRsForWaves.assign(limits.maxWavesPerEU + 1, 0);
   limits.maxVGPRsForWaves.assign(limits.maxWavesPerEU + 1, 0);

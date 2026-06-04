@@ -28,6 +28,10 @@ bool isWaveAMDVGPR(waveamdmachine::RegType type) {
   return type.getRegClass() == waveamdmachine::RegClass::VGPR;
 }
 
+bool isWaveAMDAGPR(waveamdmachine::RegType type) {
+  return type.getRegClass() == waveamdmachine::RegClass::AGPR;
+}
+
 // SCC is a single hardware bit; no physical register allocation.
 bool isWaveAMDSCC(waveamdmachine::RegType type) {
   return type.getRegClass() == waveamdmachine::RegClass::SCC;
@@ -64,10 +68,11 @@ intervalsFor(waveamdmachine::RegType rt,
              wave::WaveAMDLiveIntervalSet &intervals) {
   if (wave::isWaveAMDSGPR(rt))
     return {&intervals.sgprs, &intervals.sgprIntervals};
-  return {&intervals.vgprs, &intervals.vgprIntervals};
+  if (wave::isWaveAMDVGPR(rt))
+    return {&intervals.vgprs, &intervals.vgprIntervals};
+  return {&intervals.agprs, &intervals.agprIntervals};
 }
 
-// Find or create `value`'s interval in the matching SGPR/VGPR bucket.
 static FailureOr<unsigned>
 ensureInterval(Value value, unsigned pos,
                wave::WaveAMDLiveIntervalSet &intervals, Operation *errOp,
@@ -77,9 +82,10 @@ ensureInterval(Value value, unsigned pos,
   auto rt = cast<waveamdmachine::RegType>(value.getType());
   if (wave::isWaveAMDFlagReg(rt))
     return failure();
-  if (!wave::isWaveAMDSGPR(rt) && !wave::isWaveAMDVGPR(rt))
-    return errOp->emitError("waveamd-reg-alloc supports only SGPR and "
-                            "VGPR register classes");
+  if (!wave::isWaveAMDSGPR(rt) && !wave::isWaveAMDVGPR(rt) &&
+      !wave::isWaveAMDAGPR(rt))
+    return errOp->emitError("waveamd-reg-alloc supports only SGPR, VGPR, and "
+                            "AGPR register classes");
   if (rt.getIndex() >= 0 && !includeAllocated)
     return failure();
   auto [bucket, table] = intervalsFor(rt, intervals);

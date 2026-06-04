@@ -35,6 +35,7 @@ namespace {
 struct RegisterLimits {
   unsigned numSGPR = 0;
   unsigned numVGPR = 0;
+  unsigned numAGPR = 0;
 };
 
 static void setRegPhys(Value v, unsigned phys) {
@@ -56,6 +57,7 @@ static FailureOr<RegisterLimits> getRegisterLimits(ModuleOp module) {
   RegisterLimits limits;
   limits.numSGPR = targetLimits->addressableSGPRs;
   limits.numVGPR = targetLimits->addressableVGPRs;
+  limits.numAGPR = targetLimits->addressableAGPRs;
   return limits;
 }
 
@@ -68,6 +70,12 @@ static LogicalResult validateReservedLimit(func::FuncOp func, StringRef cls,
          << "waveamd-reg-alloc " << cls
          << " limit leaves fewer registers than reserved kernel ABI prefix "
          << "(available=" << numPhys << ", reserved=" << reserved << ")";
+}
+
+static bool hasLiveIntervals(ArrayRef<wave::WaveAMDLiveInterval> intervals) {
+  return llvm::any_of(intervals, [](const wave::WaveAMDLiveInterval &interval) {
+    return !interval.values.empty();
+  });
 }
 
 struct WaveAMDRegAllocPass
@@ -134,10 +142,16 @@ struct WaveAMDRegAllocPass
         failed(
             validateReservedLimit(func, "VGPR", limits.numVGPR, vgprReserved)))
       return failure();
+    if (limits.numAGPR == 0 && hasLiveIntervals(intervals.agprs))
+      return func.emitError(
+          "waveamd-reg-alloc AGPR registers require target with AGPR support");
     if (failed(allocateClass(func, intervals.sgprs, limits.numSGPR,
                              sgprReserved, softFail, overflow)))
       return failure();
-    return allocateClass(func, intervals.vgprs, limits.numVGPR, vgprReserved,
+    if (failed(allocateClass(func, intervals.vgprs, limits.numVGPR,
+                             vgprReserved, softFail, overflow)))
+      return failure();
+    return allocateClass(func, intervals.agprs, limits.numAGPR, /*reserved=*/0,
                          softFail, overflow);
   }
 

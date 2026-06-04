@@ -37,3 +37,20 @@ func.func @interfering_sgprs() {
       : (!waveamdmachine.reg<sgpr, 1, 0>) -> !waveamdmachine.reg<sgpr, 1, 2>
   return
 }
+
+// -----
+
+// expected-error @below {{waveamd-resource-info found interfering AGPR register live ranges}}
+func.func @interfering_agprs() {
+  %off = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1, 1>
+  %base = waveamdmachine.uninit : !waveamdmachine.reg<sgpr, 2, 6>
+  %a = waveamdmachine.uninit : !waveamdmachine.reg<agpr, 1, 0>
+  %b = waveamdmachine.uninit : !waveamdmachine.reg<agpr, 1, 0>
+  %store_a = waveamdmachine.global_store_b32 %off, %a, %base
+      : (!waveamdmachine.reg<vgpr, 1, 1>, !waveamdmachine.reg<agpr, 1, 0>,
+         !waveamdmachine.reg<sgpr, 2, 6>) -> !waveamdmachine.mem.token
+  %store_b = waveamdmachine.global_store_b32 %off, %b, %base after %store_a
+      : (!waveamdmachine.reg<vgpr, 1, 1>, !waveamdmachine.reg<agpr, 1, 0>,
+         !waveamdmachine.reg<sgpr, 2, 6>, !waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+  return
+}

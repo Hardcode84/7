@@ -40,9 +40,11 @@ struct WaveAMDLiveInterval {
 struct WaveAMDLiveIntervalSet {
   SmallVector<WaveAMDLiveInterval> sgprs;
   SmallVector<WaveAMDLiveInterval> vgprs;
+  SmallVector<WaveAMDLiveInterval> agprs;
   // Loop carries map init / block arg / continue carry / result together.
   DenseMap<Value, unsigned> sgprIntervals;
   DenseMap<Value, unsigned> vgprIntervals;
+  DenseMap<Value, unsigned> agprIntervals;
 };
 
 struct WaveAMDLiveIntervalBuildResult {
@@ -59,6 +61,7 @@ struct WaveAMDLiveIntervalOrderOverride {
 bool isWaveAMDReg(Value value);
 bool isWaveAMDSGPR(waveamdmachine::RegType type);
 bool isWaveAMDVGPR(waveamdmachine::RegType type);
+bool isWaveAMDAGPR(waveamdmachine::RegType type);
 bool isWaveAMDSCC(waveamdmachine::RegType type);
 bool isWaveAMDVCC(waveamdmachine::RegType type);
 bool isWaveAMDFlagReg(waveamdmachine::RegType type);

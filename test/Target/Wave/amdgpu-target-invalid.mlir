@@ -24,3 +24,18 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1300"} {
     return
   }
 }
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
+  func.func @unsupported_agpr() {
+    %off = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1, 1>
+    %base = waveamdmachine.uninit : !waveamdmachine.reg<sgpr, 2, 6>
+    // expected-error @below {{wave-to-amdgpu-asm AGPR registers require target with AGPR support}}
+    %agpr = waveamdmachine.uninit : !waveamdmachine.reg<agpr, 1, 0>
+    %token = waveamdmachine.global_store_b32 %off, %agpr, %base
+        : (!waveamdmachine.reg<vgpr, 1, 1>, !waveamdmachine.reg<agpr, 1, 0>,
+           !waveamdmachine.reg<sgpr, 2, 6>) -> !waveamdmachine.mem.token
+    return
+  }
+}

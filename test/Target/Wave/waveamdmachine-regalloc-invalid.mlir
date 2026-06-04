@@ -201,8 +201,8 @@ func.func @reserved_sgpr_pin_rejected() attributes {wave.kernel} {
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
+// expected-error @below {{waveamd-reg-alloc AGPR registers require target with AGPR support}}
 func.func @unsupported_register_class() {
-  // expected-error @below {{waveamd-reg-alloc supports only SGPR and VGPR register classes}}
   %reg = waveamdmachine.arg {index = 0 : i64, pointer = false} : !waveamdmachine.reg<agpr, 1>
   return
 }

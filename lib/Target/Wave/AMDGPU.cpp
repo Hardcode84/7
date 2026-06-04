@@ -108,11 +108,12 @@ struct KernelArgInfo {
 
 struct KernelInfo {
   std::string name;
+  SmallVector<KernelArgInfo> args;
   unsigned kernargSize = 0;
   unsigned sgprCount = 0;
   unsigned vgprCount = 0;
+  unsigned agprCount = 0;
   unsigned ldsSize = 0;
-  SmallVector<KernelArgInfo> args;
 };
 
 #include "AMDGPUOpcodes.def"
@@ -165,6 +166,20 @@ static_assert(
     llvm::AMDGPU::VGPR1_VGPR2_VGPR3_VGPR4_VGPR5_VGPR6_VGPR7_VGPR8 ==
         llvm::AMDGPU::VGPR0_VGPR1_VGPR2_VGPR3_VGPR4_VGPR5_VGPR6_VGPR7 + 1,
     "VGPR octuple enum layout must be contiguous");
+static_assert(llvm::AMDGPU::AGPR1 == llvm::AMDGPU::AGPR0 + 1,
+              "AGPR enum layout must be contiguous");
+static_assert(llvm::AMDGPU::AGPR1_AGPR2 == llvm::AMDGPU::AGPR0_AGPR1 + 1,
+              "AGPR pair enum layout must be contiguous");
+static_assert(llvm::AMDGPU::AGPR1_AGPR2_AGPR3 ==
+                  llvm::AMDGPU::AGPR0_AGPR1_AGPR2 + 1,
+              "AGPR triple enum layout must be contiguous");
+static_assert(llvm::AMDGPU::AGPR1_AGPR2_AGPR3_AGPR4 ==
+                  llvm::AMDGPU::AGPR0_AGPR1_AGPR2_AGPR3 + 1,
+              "AGPR quad enum layout must be contiguous");
+static_assert(
+    llvm::AMDGPU::AGPR1_AGPR2_AGPR3_AGPR4_AGPR5_AGPR6_AGPR7_AGPR8 ==
+        llvm::AMDGPU::AGPR0_AGPR1_AGPR2_AGPR3_AGPR4_AGPR5_AGPR6_AGPR7 + 1,
+    "AGPR octuple enum layout must be contiguous");
 
 class WaveAMDGPUEmitter {
 public:
@@ -175,6 +190,8 @@ public:
     if (!module)
       return op->emitError("wave AMDGPU backend expects a module operation");
     if (failed(initializeMC(op)))
+      return failure();
+    if (failed(verifyAGPRTargetSupport(module)))
       return failure();
     if (failed(wave::verifyWaveAMDRegAllocations(
             module, "wave-to-amdgpu-asm",
@@ -280,6 +297,7 @@ private:
   bool isGfx11() const { return isaVersion.Major == 11; }
   bool isGfx90APlus() const { return llvm::AMDGPU::isGFX90A(*sti); }
   bool isGfx940Plus() const { return isGfx940PlusIsa(isaVersion); }
+  bool hasAGPRs() const { return llvm::AMDGPU::hasMAIInsts(*sti); }
   unsigned gfx11Opcode(unsigned opcode) const {
     if (!isGfx11())
       llvm_unreachable("backend target gate admits only gfx8/gfx9/gfx11");
@@ -693,7 +711,9 @@ private:
       info.name = func.getSymName().str();
       info.kernargSize = getKernelArgSize(func);
       info.sgprCount = getIntAttr(func, "waveamdmachine.sgpr_count", 6);
-      info.vgprCount = getIntAttr(func, "waveamdmachine.vgpr_count", 1);
+      unsigned archVGPRCount = getIntAttr(func, "waveamdmachine.vgpr_count", 1);
+      info.agprCount = getIntAttr(func, "waveamdmachine.agpr_count", 0);
+      info.vgprCount = getTotalVGPRCount(archVGPRCount, info.agprCount);
       info.ldsSize = getIntAttr(func, "waveamdmachine.lds_size", 0);
       SmallVector<waveamd::KernargSlot> layout =
           waveamd::getKernargLayout(func.getFunctionType().getInputs());
@@ -714,6 +734,48 @@ private:
             func->getAttrOfType<IntegerAttr>("waveamdmachine.kernarg_size"))
       return attr.getInt();
     return waveamd::getKernargSegmentSize(func.getFunctionType().getInputs());
+  }
+
+  static bool isAGPRType(Type type) {
+    auto regType = dyn_cast<waveamdmachine::RegType>(type);
+    return regType && regType.getRegClass() == waveamdmachine::RegClass::AGPR;
+  }
+
+  LogicalResult verifyAGPRTargetSupport(ModuleOp module) const {
+    if (hasAGPRs())
+      return success();
+    WalkResult walk = module.walk([&](Operation *op) {
+      for (Value value :
+           llvm::concat<Value>(op->getOperands(), op->getResults())) {
+        if (!isAGPRType(value.getType()))
+          continue;
+        op->emitError()
+            << "wave-to-amdgpu-asm AGPR registers require target with AGPR "
+               "support";
+        return WalkResult::interrupt();
+      }
+      for (Region &region : op->getRegions())
+        for (Block &block : region)
+          for (BlockArgument arg : block.getArguments())
+            if (isAGPRType(arg.getType())) {
+              op->emitError()
+                  << "wave-to-amdgpu-asm AGPR registers require target with "
+                     "AGPR support";
+              return WalkResult::interrupt();
+            }
+      return WalkResult::advance();
+    });
+    return success(!walk.wasInterrupted());
+  }
+
+  static unsigned alignUp(unsigned value, unsigned granule) {
+    return ((value + granule - 1) / granule) * granule;
+  }
+
+  unsigned getTotalVGPRCount(unsigned archVGPRCount, unsigned agprCount) const {
+    if (isGfx90APlus() && agprCount != 0)
+      return alignUp(archVGPRCount, 4) + agprCount;
+    return std::max(archVGPRCount, agprCount);
   }
 
   LogicalResult
@@ -785,6 +847,8 @@ private:
     unsigned kernargSize = getKernelArgSize(func);
     unsigned sgprCount = getIntAttr(func, "waveamdmachine.sgpr_count", 6);
     unsigned vgprCount = getIntAttr(func, "waveamdmachine.vgpr_count", 1);
+    unsigned agprCount = getIntAttr(func, "waveamdmachine.agpr_count", 0);
+    unsigned totalVGPRCount = getTotalVGPRCount(vgprCount, agprCount);
     unsigned ldsSize = getIntAttr(func, "waveamdmachine.lds_size", 0);
     bool usesWgY = false;
     bool usesWgZ = false;
@@ -826,10 +890,10 @@ private:
        << "\n";
     os << "\t\t.amdhsa_system_sgpr_workgroup_info 0\n";
     os << "\t\t.amdhsa_system_vgpr_workitem_id 0\n";
-    os << "\t\t.amdhsa_next_free_vgpr " << vgprCount << "\n";
+    os << "\t\t.amdhsa_next_free_vgpr " << totalVGPRCount << "\n";
     os << "\t\t.amdhsa_next_free_sgpr " << sgprCount << "\n";
     if (isGfx90APlus()) {
-      unsigned accumOffset = (std::max(vgprCount, 1u) + 3u) & ~3u;
+      unsigned accumOffset = alignUp(std::max(vgprCount, 1u), 4);
       os << "\t\t.amdhsa_accum_offset " << accumOffset << "\n";
     }
     os << "\t\t.amdhsa_reserve_vcc 0\n";
@@ -851,7 +915,8 @@ private:
     os << "\t.text\n";
     os << "\t.set .L" << func.getSymName() << ".num_vgpr, " << vgprCount
        << "\n";
-    os << "\t.set .L" << func.getSymName() << ".num_agpr, 0\n";
+    os << "\t.set .L" << func.getSymName() << ".num_agpr, " << agprCount
+       << "\n";
     os << "\t.set .L" << func.getSymName() << ".numbered_sgpr, " << sgprCount
        << "\n";
     os << "\t.set .L" << func.getSymName() << ".num_named_barrier, 0\n";
@@ -906,6 +971,8 @@ private:
       os << "    .symbol:         " << kernel.name << ".kd\n";
       os << "    .uses_dynamic_stack: false\n";
       os << "    .vgpr_count:     " << kernel.vgprCount << "\n";
+      if (hasAGPRs())
+        os << "    .agpr_count:     " << kernel.agprCount << "\n";
       os << "    .vgpr_spill_count: 0\n";
       os << "    .wavefront_size: " << wavefrontSize << "\n";
       os << "    .workgroup_processor_mode: 1\n";
@@ -928,8 +995,11 @@ private:
   std::string physReg(Value value) const {
     auto regType = cast<waveamdmachine::RegType>(value.getType());
     unsigned phys = getPhys(value);
-    StringRef prefix =
-        regType.getRegClass() == waveamdmachine::RegClass::VGPR ? "v" : "s";
+    StringRef prefix = "s";
+    if (regType.getRegClass() == waveamdmachine::RegClass::VGPR)
+      prefix = "v";
+    if (regType.getRegClass() == waveamdmachine::RegClass::AGPR)
+      prefix = "a";
     if (regType.getWidth() == 1)
       return (prefix + Twine(phys)).str();
     return (prefix + Twine("[") + Twine(phys) + ":" +
@@ -968,6 +1038,12 @@ private:
         return llvm::AMDGPU::SGPR0 + phys;
       llvm_unreachable("unknown physical register name");
     }
+    if (name.consume_front("a")) {
+      unsigned phys = 0;
+      if (!name.getAsInteger(10, phys))
+        return llvm::AMDGPU::AGPR0 + phys;
+      llvm_unreachable("unknown physical register name");
+    }
     if (name == "s0")
       return llvm::AMDGPU::SGPR0;
     if (name == "s[0:1]")
@@ -992,6 +1068,8 @@ private:
     unsigned phys = getPhys(value);
     if (regType.getRegClass() == waveamdmachine::RegClass::VGPR)
       return mcVGPRReg(phys, regType.getWidth());
+    if (regType.getRegClass() == waveamdmachine::RegClass::AGPR)
+      return mcAGPRReg(phys, regType.getWidth());
     return mcSGPRReg(phys, regType.getWidth());
   }
 
@@ -1032,6 +1110,24 @@ private:
     }
   }
 
+  unsigned mcAGPRReg(unsigned phys, unsigned width) const {
+    switch (width) {
+    case 1:
+      return llvm::AMDGPU::AGPR0 + phys;
+    case 2:
+      return llvm::AMDGPU::AGPR0_AGPR1 + phys;
+    case 3:
+      return llvm::AMDGPU::AGPR0_AGPR1_AGPR2 + phys;
+    case 4:
+      return llvm::AMDGPU::AGPR0_AGPR1_AGPR2_AGPR3 + phys;
+    case 8:
+      return llvm::AMDGPU::AGPR0_AGPR1_AGPR2_AGPR3_AGPR4_AGPR5_AGPR6_AGPR7 +
+             phys;
+    default:
+      llvm_unreachable("unsupported AGPR tuple width");
+    }
+  }
+
   llvm::MCOperand toMCVGPRComponent(Value value, unsigned component) const {
     auto regType = cast<waveamdmachine::RegType>(value.getType());
     if (regType.getRegClass() != waveamdmachine::RegClass::VGPR ||
@@ -1059,6 +1155,14 @@ private:
                                       component);
   }
 
+  llvm::MCOperand toMCAGPRComponent(Value value, unsigned component) const {
+    auto regType = cast<waveamdmachine::RegType>(value.getType());
+    if (regType.getRegClass() != waveamdmachine::RegClass::AGPR ||
+        component >= regType.getWidth())
+      llvm_unreachable("expected valid AGPR tuple component");
+    return llvm::MCOperand::createReg(mcAGPRReg(getPhys(value) + component, 1));
+  }
+
   llvm::MCOperand toMCB32Component(Value value, unsigned component) {
     waveamdmachine::RegType regType =
         dyn_cast<waveamdmachine::RegType>(value.getType());
@@ -1068,6 +1172,8 @@ private:
       return toMCVGPRComponent(value, component);
     if (regType.getRegClass() == waveamdmachine::RegClass::SGPR)
       return toMCSGPRComponent(value, component);
+    if (regType.getRegClass() == waveamdmachine::RegClass::AGPR)
+      return toMCAGPRComponent(value, component);
     llvm_unreachable("expected GPR tuple component");
   }
 

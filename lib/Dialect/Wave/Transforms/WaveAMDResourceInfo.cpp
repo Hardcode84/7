@@ -32,15 +32,21 @@ static bool isVGPR(waveamdmachine::RegType type) {
   return type.getRegClass() == waveamdmachine::RegClass::VGPR;
 }
 
+static bool isAGPR(waveamdmachine::RegType type) {
+  return type.getRegClass() == waveamdmachine::RegClass::AGPR;
+}
+
 static void clearResourceAttrs(func::FuncOp func) {
   func->removeAttr("waveamdmachine.sgpr_count");
   func->removeAttr("waveamdmachine.vgpr_count");
+  func->removeAttr("waveamdmachine.agpr_count");
   func->removeAttr("waveamdmachine.lds_size");
 }
 
 static void clearModuleResourceAttrs(ModuleOp mod) {
   mod->removeAttr("waveamdmachine.sgpr_count_max");
   mod->removeAttr("waveamdmachine.vgpr_count_max");
+  mod->removeAttr("waveamdmachine.agpr_count_max");
   mod->removeAttr("waveamdmachine.lds_size_max");
 }
 
@@ -60,6 +66,7 @@ struct WaveAMDResourceInfoPass
   struct MaxRegs {
     unsigned sgpr;
     unsigned vgpr;
+    unsigned agpr;
   };
   // Update `out` with the high-water mark of a single result's
   // register footprint. Returns true on a hard error (unallocated
@@ -82,6 +89,8 @@ struct WaveAMDResourceInfoPass
       out.sgpr = std::max(out.sgpr, end);
     if (isVGPR(regType))
       out.vgpr = std::max(out.vgpr, end);
+    if (isAGPR(regType))
+      out.agpr = std::max(out.agpr, end);
     return false;
   }
 
@@ -105,7 +114,7 @@ struct WaveAMDResourceInfoPass
 
   MaxRegs collectMaxRegs(func::FuncOp func, bool &failed) {
     MaxRegs out{wave::getWaveAMDReservedSGPRs(func),
-                wave::getWaveAMDReservedVGPRs(func)};
+                wave::getWaveAMDReservedVGPRs(func), 0};
     for (Operation &op : func.getBody().front()) {
       scanOp(op, out, failed);
       if (failed)
@@ -125,6 +134,7 @@ struct WaveAMDResourceInfoPass
     });
     int64_t maxSgpr = 0;
     int64_t maxVgpr = 0;
+    int64_t maxAgpr = 0;
     int64_t maxLds = 0;
     bool sawKernel = false;
     for (func::FuncOp func : kernels) {
@@ -142,10 +152,13 @@ struct WaveAMDResourceInfoPass
       bool isKernel = func->hasAttr(wave::WaveDialect::getKernelAttrName());
       unsigned sgprCount = std::max(regs.sgpr, getMinReportedSGPRs(func));
       unsigned vgprCount = std::max(regs.vgpr, getMinReportedVGPRs(func));
+      unsigned agprCount = regs.agpr;
       func->setAttr("waveamdmachine.sgpr_count",
                     builder.getI64IntegerAttr(sgprCount));
       func->setAttr("waveamdmachine.vgpr_count",
                     builder.getI64IntegerAttr(vgprCount));
+      func->setAttr("waveamdmachine.agpr_count",
+                    builder.getI64IntegerAttr(agprCount));
       int64_t lds = 0;
       if (auto ldsAttr = func->getAttrOfType<IntegerAttr>("wave.lds_size")) {
         lds = ldsAttr.getInt();
@@ -157,6 +170,7 @@ struct WaveAMDResourceInfoPass
       sawKernel = true;
       maxSgpr = std::max<int64_t>(maxSgpr, sgprCount);
       maxVgpr = std::max<int64_t>(maxVgpr, vgprCount);
+      maxAgpr = std::max<int64_t>(maxAgpr, agprCount);
       maxLds = std::max<int64_t>(maxLds, lds);
     }
     if (sawKernel) {
@@ -164,6 +178,8 @@ struct WaveAMDResourceInfoPass
                    builder.getI64IntegerAttr(maxSgpr));
       mod->setAttr("waveamdmachine.vgpr_count_max",
                    builder.getI64IntegerAttr(maxVgpr));
+      mod->setAttr("waveamdmachine.agpr_count_max",
+                   builder.getI64IntegerAttr(maxAgpr));
       mod->setAttr("waveamdmachine.lds_size_max",
                    builder.getI64IntegerAttr(maxLds));
     }
