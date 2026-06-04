@@ -17,6 +17,7 @@
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachine.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/MathExtras.h"
@@ -55,6 +56,8 @@ static constexpr llvm::StringLiteral kPressureRequestAttr =
     "waveamdmachine.regalloc_pressure_request";
 static constexpr llvm::StringLiteral kPressureReservedAttr =
     "waveamdmachine.regalloc_pressure_reserved";
+static constexpr llvm::StringLiteral kAGPRCandidatesAttr =
+    "waveamdmachine.regalloc_agpr_candidates";
 
 static void setRegPhys(Value v, unsigned phys) {
   auto rt = cast<waveamdmachine::RegType>(v.getType());
@@ -105,7 +108,17 @@ struct PressureIntervalRef {
   unsigned width = 0;
 };
 
+struct AGPRConversionCandidate {
+  SmallVector<PressureIntervalRef> intervals;
+  unsigned agprDwords = 0;
+  unsigned bridgeCount = 0;
+  unsigned overlapDwords = 0;
+  unsigned order = 0;
+  unsigned reliefDwords = 0;
+};
+
 struct RegisterPressurePoint {
+  SmallVector<AGPRConversionCandidate> agprCandidates;
   SmallVector<PressureIntervalRef> overlaps;
   PressureIntervalRef request;
   StringRef regClass;
@@ -231,18 +244,22 @@ struct WaveAMDRegAllocPass
                           const DenseMap<Operation *, unsigned> &positions) {
     if (failed(allocateClass(func, intervals.sgprs, limits.numSGPR,
                              sgprReserved, softFail, overflow, pressure,
-                             positions, "SGPR")))
+                             positions, "SGPR", intervals.agprs,
+                             /*agprCandidateLimit=*/0)))
       return failure();
     if (overflow)
       return success();
+    unsigned agprCandidateLimit = rankAgprCandidates ? limits.numAGPR : 0;
     if (failed(allocateClass(func, intervals.vgprs, limits.numVGPR,
                              vgprReserved, softFail, overflow, pressure,
-                             positions, "VGPR")))
+                             positions, "VGPR", intervals.agprs,
+                             agprCandidateLimit)))
       return failure();
     if (overflow)
       return success();
     return allocateClass(func, intervals.agprs, limits.numAGPR, /*reserved=*/0,
-                         softFail, overflow, pressure, positions, "AGPR");
+                         softFail, overflow, pressure, positions, "AGPR",
+                         intervals.agprs, /*agprCandidateLimit=*/0);
   }
 
   // Physically-allocated half-open span `[begin, begin + size)` in a
@@ -278,11 +295,47 @@ struct WaveAMDRegAllocPass
     active = std::move(stillActive);
   }
 
+  LogicalResult handleAllocationFailure(
+      func::FuncOp func, MutableArrayRef<wave::WaveAMDLiveInterval> intervals,
+      const wave::WaveAMDLiveInterval &request,
+      ArrayRef<wave::WaveAMDLiveInterval> active,
+      const std::set<PhysAlloc> &live, unsigned numPhys, unsigned reserved,
+      bool softFail, bool &overflow,
+      std::optional<RegisterPressurePoint> &pressure,
+      const DenseMap<Operation *, unsigned> &positions, StringRef regClass,
+      ArrayRef<wave::WaveAMDLiveInterval> agprIntervals,
+      unsigned agprCandidateLimit) {
+    if (!pressure)
+      pressure = buildPressurePoint(regClass, request, active, live, positions,
+                                    request.start, numPhys, reserved);
+    if (agprCandidateLimit > 0 && regClass == "VGPR")
+      pressure->agprCandidates =
+          buildAGPRCandidates(intervals, active, request, agprIntervals,
+                              positions, request.start, agprCandidateLimit);
+    if (softFail) {
+      overflow = true;
+      return success();
+    }
+    InFlightDiagnostic diag =
+        func.emitError() << "WaveAMDMachine register allocator ran "
+                            "out of "
+                         << regClass << " registers at position "
+                         << pressure->position << " (limit=" << pressure->limit
+                         << ", live_dwords=" << pressure->liveDwords
+                         << ", required_relief=" << pressure->requiredRelief
+                         << ")";
+    diag << "; request=" << formatInterval(pressure->request)
+         << "; overlaps=" << formatIntervals(pressure->overlaps);
+    return failure();
+  }
+
   LogicalResult allocateClass(
       func::FuncOp func, MutableArrayRef<wave::WaveAMDLiveInterval> intervals,
       unsigned numPhys, unsigned reserved, bool softFail, bool &overflow,
       std::optional<RegisterPressurePoint> &pressure,
-      const DenseMap<Operation *, unsigned> &positions, StringRef regClass) {
+      const DenseMap<Operation *, unsigned> &positions, StringRef regClass,
+      ArrayRef<wave::WaveAMDLiveInterval> agprIntervals,
+      unsigned agprCandidateLimit) {
     llvm::stable_sort(intervals, [](const wave::WaveAMDLiveInterval &lhs,
                                     const wave::WaveAMDLiveInterval &rhs) {
       return lhs.start < rhs.start;
@@ -308,27 +361,11 @@ struct WaveAMDRegAllocPass
       // power-of-two widths the pipeline currently produces.
       unsigned align = std::max<unsigned>(1, llvm::PowerOf2Ceil(width));
       std::optional<unsigned> phys = findFreeSlot(live, width, align, numPhys);
-      if (!phys) {
-        if (!pressure)
-          pressure =
-              buildPressurePoint(regClass, interval, active, live, positions,
-                                 interval.start, numPhys, reserved);
-        if (softFail) {
-          overflow = true;
-          return success();
-        }
-        InFlightDiagnostic diag =
-            func.emitError()
-            << "WaveAMDMachine register allocator ran "
-               "out of "
-            << regClass << " registers at position " << pressure->position
-            << " (limit=" << pressure->limit
-            << ", live_dwords=" << pressure->liveDwords
-            << ", required_relief=" << pressure->requiredRelief << ")";
-        diag << "; request=" << formatInterval(pressure->request)
-             << "; overlaps=" << formatIntervals(pressure->overlaps);
-        return failure();
-      }
+      if (!phys)
+        return handleAllocationFailure(func, intervals, interval, active, live,
+                                       numPhys, reserved, softFail, overflow,
+                                       pressure, positions, regClass,
+                                       agprIntervals, agprCandidateLimit);
       for (auto [v, off] : llvm::zip(interval.values, interval.slotOffsets))
         setRegPhys(v, *phys + off);
       live.insert(PhysAlloc{*phys, width});
@@ -363,6 +400,300 @@ struct WaveAMDRegAllocPass
     return std::nullopt;
   }
 
+  static bool intervalContains(const wave::WaveAMDLiveInterval &interval,
+                               unsigned position) {
+    return interval.start <= position && position <= interval.end;
+  }
+
+  static bool intervalsOverlap(const wave::WaveAMDLiveInterval &lhs,
+                               const wave::WaveAMDLiveInterval &rhs) {
+    return lhs.start <= rhs.end && rhs.start <= lhs.end;
+  }
+
+  static DenseMap<Value, unsigned>
+  buildValueIntervalMap(ArrayRef<wave::WaveAMDLiveInterval> intervals) {
+    DenseMap<Value, unsigned> valueToInterval;
+    for (auto [index, interval] : llvm::enumerate(intervals))
+      for (Value value : interval.values)
+        valueToInterval[value] = index;
+    return valueToInterval;
+  }
+
+  static void addIntervalByValue(
+      Value value, const DenseMap<Value, unsigned> &valueToInterval,
+      llvm::DenseSet<unsigned> &seen, SmallVectorImpl<unsigned> &worklist) {
+    auto it = valueToInterval.find(value);
+    if (it == valueToInterval.end())
+      return;
+    if (seen.insert(it->second).second)
+      worklist.push_back(it->second);
+  }
+
+  static bool isMFMA(Operation *op) {
+    return op && op->hasTrait<OpTrait::waveamdmachine::MFMAOp>();
+  }
+
+  static bool isMFMAResult(Value value) {
+    Operation *def = value.getDefiningOp();
+    return isMFMA(def) && def->getNumResults() == 1 &&
+           value == def->getResult(0);
+  }
+
+  static bool isTupleRename(Operation *op) {
+    return isa_and_nonnull<waveamdmachine::TupleFromElementsOp,
+                           waveamdmachine::TupleToElementsOp>(op);
+  }
+
+  static bool
+  allRegisterEndpointsInGroup(Operation *op,
+                              const llvm::DenseSet<Value> &groupValues) {
+    for (Value operand : op->getOperands())
+      if (isa<waveamdmachine::RegType>(operand.getType()) &&
+          !groupValues.contains(operand))
+        return false;
+    for (Value result : op->getResults())
+      if (isa<waveamdmachine::RegType>(result.getType()) &&
+          !groupValues.contains(result))
+        return false;
+    return true;
+  }
+
+  static void collectMFMAAccumulatorClosure(
+      unsigned seed, ArrayRef<wave::WaveAMDLiveInterval> intervals,
+      const DenseMap<Value, unsigned> &valueToInterval,
+      SmallVectorImpl<unsigned> &group) {
+    llvm::DenseSet<unsigned> seen;
+    SmallVector<unsigned> worklist;
+    seen.insert(seed);
+    worklist.push_back(seed);
+
+    while (!worklist.empty()) {
+      unsigned intervalIndex = worklist.pop_back_val();
+      group.push_back(intervalIndex);
+      for (Value value : intervals[intervalIndex].values) {
+        if (isMFMAResult(value))
+          addIntervalByValue(value.getDefiningOp()->getOperand(2),
+                             valueToInterval, seen, worklist);
+        for (OpOperand &use : value.getUses()) {
+          Operation *user = use.getOwner();
+          if (isMFMA(user) && use.getOperandNumber() == 2 &&
+              user->getNumResults() == 1)
+            addIntervalByValue(user->getResult(0), valueToInterval, seen,
+                               worklist);
+        }
+      }
+    }
+    llvm::sort(group);
+  }
+
+  static bool hasGroup(ArrayRef<SmallVector<unsigned>> groups,
+                       ArrayRef<unsigned> candidate) {
+    return llvm::any_of(
+        groups, [&](ArrayRef<unsigned> group) { return group == candidate; });
+  }
+
+  static llvm::DenseSet<Value>
+  collectGroupValues(ArrayRef<unsigned> group,
+                     ArrayRef<wave::WaveAMDLiveInterval> intervals) {
+    llvm::DenseSet<Value> values;
+    for (unsigned intervalIndex : group)
+      for (Value value : intervals[intervalIndex].values)
+        values.insert(value);
+    return values;
+  }
+
+  static bool canDefineAGPR(Value value,
+                            const llvm::DenseSet<Value> &groupValues) {
+    Operation *def = value.getDefiningOp();
+    if (!def)
+      return false;
+    if (isa<waveamdmachine::UninitOp>(def))
+      return true;
+    if (isTupleRename(def))
+      return allRegisterEndpointsInGroup(def, groupValues);
+    if (isMFMA(def) && def->getNumResults() == 1 && value == def->getResult(0))
+      return def->getNumOperands() > 2 &&
+             groupValues.contains(def->getOperand(2));
+    return false;
+  }
+
+  static bool canConsumeAGPR(OpOperand &use,
+                             const llvm::DenseSet<Value> &groupValues) {
+    Operation *user = use.getOwner();
+    unsigned operandNumber = use.getOperandNumber();
+    if (isMFMA(user)) {
+      if (operandNumber < 2)
+        return true;
+      if (operandNumber == 2 && user->getNumResults() == 1)
+        return groupValues.contains(user->getResult(0));
+      return false;
+    }
+    if (isa<waveamdmachine::VAccvgprReadB32TupleOp>(user) && operandNumber == 0)
+      return true;
+    if (isTupleRename(user))
+      return allRegisterEndpointsInGroup(user, groupValues);
+    return false;
+  }
+
+  static unsigned
+  countAGPRBridgeBoundaries(ArrayRef<unsigned> group,
+                            ArrayRef<wave::WaveAMDLiveInterval> intervals) {
+    llvm::DenseSet<Value> groupValues = collectGroupValues(group, intervals);
+    unsigned bridges = 0;
+    for (unsigned intervalIndex : group) {
+      for (Value value : intervals[intervalIndex].values) {
+        if (!canDefineAGPR(value, groupValues))
+          ++bridges;
+        for (OpOperand &use : value.getUses())
+          if (!canConsumeAGPR(use, groupValues))
+            ++bridges;
+      }
+    }
+    return bridges;
+  }
+
+  static unsigned liveDwordsAt(ArrayRef<unsigned> group,
+                               ArrayRef<wave::WaveAMDLiveInterval> intervals,
+                               unsigned position) {
+    unsigned dwords = 0;
+    for (unsigned intervalIndex : group)
+      if (intervalContains(intervals[intervalIndex], position))
+        dwords += intervals[intervalIndex].type.getWidth();
+    return dwords;
+  }
+
+  static unsigned liveDwordsAt(ArrayRef<wave::WaveAMDLiveInterval> intervals,
+                               unsigned position) {
+    unsigned dwords = 0;
+    for (const wave::WaveAMDLiveInterval &interval : intervals)
+      if (intervalContains(interval, position))
+        dwords += interval.type.getWidth();
+    return dwords;
+  }
+
+  static unsigned
+  maxGroupLiveDwords(ArrayRef<unsigned> group,
+                     ArrayRef<wave::WaveAMDLiveInterval> intervals) {
+    unsigned maxDwords = 0;
+    for (unsigned intervalIndex : group) {
+      const wave::WaveAMDLiveInterval &interval = intervals[intervalIndex];
+      maxDwords =
+          std::max(maxDwords, liveDwordsAt(group, intervals, interval.start));
+      maxDwords =
+          std::max(maxDwords, liveDwordsAt(group, intervals, interval.end));
+    }
+    return maxDwords;
+  }
+
+  static unsigned overlapDwords(ArrayRef<unsigned> group,
+                                ArrayRef<wave::WaveAMDLiveInterval> intervals) {
+    unsigned overlap = 0;
+    for (unsigned intervalIndex : group) {
+      const wave::WaveAMDLiveInterval &interval = intervals[intervalIndex];
+      overlap += interval.type.getWidth() * (interval.end - interval.start + 1);
+    }
+    return overlap;
+  }
+
+  static bool fitsAGPRSpace(ArrayRef<unsigned> group,
+                            ArrayRef<wave::WaveAMDLiveInterval> vgprs,
+                            ArrayRef<wave::WaveAMDLiveInterval> agprs,
+                            unsigned agprLimit) {
+    if (maxGroupLiveDwords(group, vgprs) > agprLimit)
+      return false;
+
+    SmallVector<unsigned> points;
+    for (unsigned intervalIndex : group) {
+      points.push_back(vgprs[intervalIndex].start);
+      points.push_back(vgprs[intervalIndex].end);
+    }
+    for (const wave::WaveAMDLiveInterval &agpr : agprs) {
+      bool overlapsGroup = llvm::any_of(group, [&](unsigned intervalIndex) {
+        return intervalsOverlap(agpr, vgprs[intervalIndex]);
+      });
+      if (!overlapsGroup)
+        continue;
+      points.push_back(agpr.start);
+      points.push_back(agpr.end);
+    }
+    llvm::sort(points);
+    points.erase(std::unique(points.begin(), points.end()), points.end());
+
+    return llvm::all_of(points, [&](unsigned position) {
+      return liveDwordsAt(group, vgprs, position) +
+                 liveDwordsAt(agprs, position) <=
+             agprLimit;
+    });
+  }
+
+  static AGPRConversionCandidate
+  buildAGPRCandidate(ArrayRef<unsigned> group,
+                     ArrayRef<wave::WaveAMDLiveInterval> intervals,
+                     const DenseMap<Operation *, unsigned> &positions,
+                     unsigned pressurePosition, unsigned order) {
+    AGPRConversionCandidate candidate;
+    candidate.order = order;
+    candidate.bridgeCount = countAGPRBridgeBoundaries(group, intervals);
+    candidate.reliefDwords = liveDwordsAt(group, intervals, pressurePosition);
+    candidate.overlapDwords = overlapDwords(group, intervals);
+    candidate.agprDwords = maxGroupLiveDwords(group, intervals);
+    for (unsigned intervalIndex : group)
+      candidate.intervals.push_back(
+          buildIntervalRef(intervals[intervalIndex], positions));
+    return candidate;
+  }
+
+  static bool betterAGPRCandidate(const AGPRConversionCandidate &lhs,
+                                  const AGPRConversionCandidate &rhs) {
+    if (lhs.bridgeCount != rhs.bridgeCount)
+      return lhs.bridgeCount < rhs.bridgeCount;
+    if (lhs.reliefDwords != rhs.reliefDwords)
+      return lhs.reliefDwords > rhs.reliefDwords;
+    if (lhs.overlapDwords != rhs.overlapDwords)
+      return lhs.overlapDwords > rhs.overlapDwords;
+    if (lhs.agprDwords != rhs.agprDwords)
+      return lhs.agprDwords < rhs.agprDwords;
+    return lhs.order < rhs.order;
+  }
+
+  static SmallVector<AGPRConversionCandidate>
+  buildAGPRCandidates(ArrayRef<wave::WaveAMDLiveInterval> intervals,
+                      ArrayRef<wave::WaveAMDLiveInterval> active,
+                      const wave::WaveAMDLiveInterval &request,
+                      ArrayRef<wave::WaveAMDLiveInterval> agprIntervals,
+                      const DenseMap<Operation *, unsigned> &positions,
+                      unsigned pressurePosition, unsigned agprLimit) {
+    DenseMap<Value, unsigned> valueToInterval =
+        buildValueIntervalMap(intervals);
+    SmallVector<SmallVector<unsigned>> groups;
+    auto addSeed = [&](const wave::WaveAMDLiveInterval &interval) {
+      if (interval.values.empty())
+        return;
+      auto it = valueToInterval.find(interval.values.front());
+      if (it == valueToInterval.end())
+        return;
+      SmallVector<unsigned> group;
+      collectMFMAAccumulatorClosure(it->second, intervals, valueToInterval,
+                                    group);
+      if (!hasGroup(groups, group))
+        groups.push_back(std::move(group));
+    };
+
+    for (const wave::WaveAMDLiveInterval &interval : active)
+      addSeed(interval);
+    addSeed(request);
+
+    SmallVector<AGPRConversionCandidate> candidates;
+    for (auto [order, group] : llvm::enumerate(groups)) {
+      if (!fitsAGPRSpace(group, intervals, agprIntervals, agprLimit))
+        continue;
+      candidates.push_back(buildAGPRCandidate(group, intervals, positions,
+                                              pressurePosition, order));
+    }
+    llvm::stable_sort(candidates, betterAGPRCandidate);
+    return candidates;
+  }
+
   static void clearOverflowAttrs(func::FuncOp func) {
     func->removeAttr(wave::getWaveAMDRegAllocOverflowedAttrName());
     func->removeAttr(kPressureClassAttr);
@@ -373,6 +704,7 @@ struct WaveAMDRegAllocPass
     func->removeAttr(kPressureReliefAttr);
     func->removeAttr(kPressureRequestAttr);
     func->removeAttr(kPressureReservedAttr);
+    func->removeAttr(kAGPRCandidatesAttr);
   }
 
   static unsigned
@@ -478,6 +810,31 @@ struct WaveAMDRegAllocPass
     return builder.getArrayAttr(attrs);
   }
 
+  static DictionaryAttr
+  candidateAttr(Builder &builder, const AGPRConversionCandidate &candidate) {
+    return builder.getDictionaryAttr({
+        builder.getNamedAttr("agpr_dwords",
+                             builder.getI64IntegerAttr(candidate.agprDwords)),
+        builder.getNamedAttr("bridge_count",
+                             builder.getI64IntegerAttr(candidate.bridgeCount)),
+        builder.getNamedAttr("intervals",
+                             intervalArrayAttr(builder, candidate.intervals)),
+        builder.getNamedAttr("overlap_dwords", builder.getI64IntegerAttr(
+                                                   candidate.overlapDwords)),
+        builder.getNamedAttr("relief_dwords",
+                             builder.getI64IntegerAttr(candidate.reliefDwords)),
+    });
+  }
+
+  static ArrayAttr
+  candidateArrayAttr(Builder &builder,
+                     ArrayRef<AGPRConversionCandidate> candidates) {
+    SmallVector<Attribute> attrs;
+    for (const AGPRConversionCandidate &candidate : candidates)
+      attrs.push_back(candidateAttr(builder, candidate));
+    return builder.getArrayAttr(attrs);
+  }
+
   static void setPressureAttrs(func::FuncOp func,
                                const RegisterPressurePoint &pressure,
                                Builder &builder) {
@@ -496,6 +853,9 @@ struct WaveAMDRegAllocPass
                   intervalAttr(builder, pressure.request));
     func->setAttr(kPressureReservedAttr,
                   builder.getI64IntegerAttr(pressure.reserved));
+    if (!pressure.agprCandidates.empty())
+      func->setAttr(kAGPRCandidatesAttr,
+                    candidateArrayAttr(builder, pressure.agprCandidates));
   }
 
   static std::string formatInterval(const PressureIntervalRef &interval) {
