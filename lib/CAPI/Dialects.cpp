@@ -112,7 +112,7 @@ MlirAttribute mlirWavePtrTypeGetAddressSpace(MlirType type) {
 }
 
 //===----------------------------------------------------------------------===//
-// Wave symbolic-expression attribute
+// Wave symbolic attributes
 //===----------------------------------------------------------------------===//
 
 bool mlirWaveAttributeIsAExpr(MlirAttribute attr) {
@@ -172,6 +172,63 @@ MlirAttribute mlirWaveExprAttrGetFromBytes(MlirContext ctx,
     return MlirAttribute{nullptr};
   }
   return wrap(wave::ExprAttr::get(context, *handle));
+}
+
+bool mlirWaveAttributeIsAPred(MlirAttribute attr) {
+  return llvm::isa<wave::PredAttr>(unwrap(attr));
+}
+
+MlirAttribute mlirWavePredAttrGetFromText(MlirContext ctx, MlirStringRef text) {
+  MLIRContext *context = unwrap(ctx);
+  auto *dialect = context->getOrLoadDialect<wave::WaveDialect>();
+  if (!dialect)
+    return MlirAttribute{nullptr};
+  std::string diagnostic;
+  auto handle = wave::sym::parsePred(dialect->getSymbolStore(),
+                                     llvm::StringRef(text.data, text.length),
+                                     &diagnostic);
+  if (failed(handle)) {
+    emitError(UnknownLoc::get(context))
+        << "failed to parse wave.pred text: " << diagnostic;
+    return MlirAttribute{nullptr};
+  }
+  return wrap(wave::PredAttr::get(context, *handle));
+}
+
+MlirAttribute mlirWavePredAttrGetFromNodePtr(MlirContext ctx,
+                                             uintptr_t nodePtr) {
+  MLIRContext *context = unwrap(ctx);
+  auto *dialect = context->getOrLoadDialect<wave::WaveDialect>();
+  if (!dialect)
+    return MlirAttribute{nullptr};
+  std::string diagnostic;
+  FailureOr<wave::sym::PredHandle> handle = wave::sym::importPredFromNodePtr(
+      dialect->getSymbolStore(), nodePtr, &diagnostic);
+  if (failed(handle)) {
+    emitError(UnknownLoc::get(context))
+        << "failed to import wave.pred node: " << diagnostic;
+    return MlirAttribute{nullptr};
+  }
+  return wrap(wave::PredAttr::get(context, *handle));
+}
+
+MlirAttribute mlirWavePredAttrGetFromBytes(MlirContext ctx,
+                                           const uint8_t *bytes,
+                                           size_t length) {
+  MLIRContext *context = unwrap(ctx);
+  auto *dialect = context->getOrLoadDialect<wave::WaveDialect>();
+  if (!dialect)
+    return MlirAttribute{nullptr};
+  std::string diagnostic;
+  auto handle = wave::sym::deserializePred(
+      dialect->getSymbolStore(), llvm::ArrayRef<uint8_t>(bytes, length),
+      &diagnostic);
+  if (failed(handle)) {
+    emitError(UnknownLoc::get(context))
+        << "failed to materialize wave.pred from bytes: " << diagnostic;
+    return MlirAttribute{nullptr};
+  }
+  return wrap(wave::PredAttr::get(context, *handle));
 }
 
 //===----------------------------------------------------------------------===//

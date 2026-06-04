@@ -24,7 +24,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 func.func @mixed_offset(%out: !wave.ptr<#wave.global, i32>, %x: i32) attributes {wave.kernel} {
   %lane = wave.lane_id : !wave.simd<i32, 32>
   %wgid_y_raw = wave.workgroup_id 1
-  %wgid_y = wave.assume_range %wgid_y_raw, [0, 1023] : i32
+  %wgid_y = wave.assume %wgid_y_raw as "x" [#wave.pred<"x >= 0">, #wave.pred<"x <= 1023">] : i32
   %k = arith.constant 16 : i32
   %off = wave.index_expr <"4*lid + K + wgid_y"> ["K", "lid", "wgid_y"] (%k, %lane, %wgid_y) : (i32, !wave.simd<i32, 32>, i32) -> !wave.simd<index, 32>
   %ptrs = wave.ptr_add %out, %off : !wave.ptr<#wave.global, i32>, !wave.simd<index, 32> -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
@@ -113,7 +113,7 @@ func.func @raw_simd_index_offset(%out: !wave.ptr<#wave.global, i32>,
 // Buffer destination has the soffset slot, so the scaled wgid_x /
 // wgid_y terms stay SGPR-side and feed the buffer_store_b32 soffset
 // operand. K=8 scaled x4 -> inst_offset = 32. The
-// `wave.assume_range` wrappers bound each workgroup_id so the
+// `wave.assume` wrappers bound each workgroup_id so the
 // scaled sum provably fits the unsigned 32-bit S slot.
 // CHECK-LABEL: func.func @buffer_buckets
 // CHECK: %[[LANE:.*]] = waveamdmachine.v_mbcnt_lo
@@ -128,8 +128,8 @@ func.func @buffer_buckets(%out: !wave.ptr<#wave.global, i32>, %x: i32) attribute
   %lane = wave.lane_id : !wave.simd<i32, 32>
   %wgid_x_raw = wave.workgroup_id 0
   %wgid_y_raw = wave.workgroup_id 1
-  %wgid_x = wave.assume_range %wgid_x_raw, [0, 1023] : i32
-  %wgid_y = wave.assume_range %wgid_y_raw, [0, 1023] : i32
+  %wgid_x = wave.assume %wgid_x_raw as "x" [#wave.pred<"x >= 0">, #wave.pred<"x <= 1023">] : i32
+  %wgid_y = wave.assume %wgid_y_raw as "x" [#wave.pred<"x >= 0">, #wave.pred<"x <= 1023">] : i32
   %k = arith.constant 8 : i32
   %range = arith.constant 256 : i32
   %buf = waveamd.make_buffer %out, %range : !wave.ptr<#wave.global, i32>, i32 -> !wave.ptr<#waveamd.buffer, i32>
@@ -150,7 +150,7 @@ func.func @buffer_buckets(%out: !wave.ptr<#wave.global, i32>, %x: i32) attribute
 // CHECK: waveamdmachine.buffer_store_b32 %[[VBYTE]], {{.*}}, {{.*}}, %[[SBYTE]]
 func.func @buffer_bounded_uniform_arg_uses_soffset(%out: !wave.ptr<#wave.global, i32>, %u_raw: i32) attributes {wave.kernel} {
   %lane = wave.lane_id : !wave.simd<i32, 32>
-  %u = wave.assume_range %u_raw, [0, 1023] : i32
+  %u = wave.assume %u_raw as "x" [#wave.pred<"x >= 0">, #wave.pred<"x <= 1023">] : i32
   %range = arith.constant 4096 : i32
   %buf = waveamd.make_buffer %out, %range
       : !wave.ptr<#wave.global, i32>, i32 -> !wave.ptr<#waveamd.buffer, i32>
@@ -183,8 +183,8 @@ func.func @nested_uniform_summand_stays_sgpr(%out: !wave.ptr<#wave.global, i32>)
   %lane = wave.lane_id : !wave.simd<i32, 32>
   %wgid_x_raw = wave.workgroup_id 0
   %wgid_y_raw = wave.workgroup_id 1
-  %wgid_x = wave.assume_range %wgid_x_raw, [0, 15] : i32
-  %wgid_y = wave.assume_range %wgid_y_raw, [0, 15] : i32
+  %wgid_x = wave.assume %wgid_x_raw as "x" [#wave.pred<"x >= 0">, #wave.pred<"x <= 15">] : i32
+  %wgid_y = wave.assume %wgid_y_raw as "x" [#wave.pred<"x >= 0">, #wave.pred<"x <= 15">] : i32
   %range = arith.constant 4096 : i32
   %buf = waveamd.make_buffer %out, %range
       : !wave.ptr<#wave.global, i32>, i32 -> !wave.ptr<#waveamd.buffer, i32>
@@ -200,7 +200,7 @@ func.func @nested_uniform_summand_stays_sgpr(%out: !wave.ptr<#wave.global, i32>)
   return
 }
 
-// IntRangeAnalysis-driven fold: `wave.assume_range` pins `%a` to a
+// IntRangeAnalysis-driven fold: `wave.assume` pins `%a` to a
 // provable point range `[16, 16]`. Selection runs IntegerRangeAnalysis
 // over the body and builds ixsimpl assumptions per binding; `ixs_simplify`
 // then collapses `K + lid` to `lid + 16` even though `K` is bound to a
@@ -212,12 +212,27 @@ func.func @nested_uniform_summand_stays_sgpr(%out: !wave.ptr<#wave.global, i32>)
 // CHECK: waveamdmachine.global_store_b32 %[[VBYTE]], {{.*}} offset 64
 func.func @range_drives_const_fold(%out: !wave.ptr<#wave.global, i32>, %x: i32, %v: i32) attributes {wave.kernel} {
   %lane = wave.lane_id : !wave.simd<i32, 32>
-  %a = wave.assume_range %x, [16, 16] : i32
+  %a = wave.assume %x as "x" [#wave.pred<"x >= 16">, #wave.pred<"x <= 16">] : i32
   %off = wave.index_expr <"K + lid"> ["K", "lid"] (%a, %lane) : (i32, !wave.simd<i32, 32>) -> !wave.simd<index, 32>
   %ptrs = wave.ptr_add %out, %off : !wave.ptr<#wave.global, i32>, !wave.simd<index, 32> -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
   %vv = wave.splat %v : i32 -> !wave.simd<i32, 32>
   %val = wave.addi %lane, %vv : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
   %tok = wave.store %val -> %ptrs : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>) -> !wave.mem.token
+  return
+}
+
+// CHECK-LABEL: func.func @divisibility_drives_const_fold
+// CHECK: %[[LANE:.*]] = waveamdmachine.v_mbcnt_lo
+// CHECK-NOT: waveamdmachine.s_add_i32
+// CHECK: %[[VBYTE:.*]] = waveamdmachine.v_lshlrev_b32 %[[LANE]],
+// CHECK: waveamdmachine.global_store_b32 %[[VBYTE]], {{.*}} offset 16
+func.func @divisibility_drives_const_fold(%out: !wave.ptr<#wave.global, i32>, %u_raw: i32, %x: i32) attributes {wave.kernel} {
+  %lane = wave.lane_id : !wave.simd<i32, 32>
+  %u = wave.assume %u_raw as "x" [#wave.pred<"Mod(x, 16) == 0">] : i32
+  %off = wave.index_expr <"lid + Mod(U, 8) + 4"> ["U", "lid"] (%u, %lane) : (i32, !wave.simd<i32, 32>) -> !wave.simd<index, 32>
+  %ptrs = wave.ptr_add %out, %off : !wave.ptr<#wave.global, i32>, !wave.simd<index, 32> -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
+  %vx = wave.splat %x : i32 -> !wave.simd<i32, 32>
+  %tok = wave.store %vx -> %ptrs : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>) -> !wave.mem.token
   return
 }
 
@@ -270,7 +285,7 @@ func.func @ceil_nested_floor_global(%out: !wave.ptr<#wave.global, i32>, %x: i32)
 // CHECK: waveamdmachine.global_store_b32 %[[VOFFSET]],
 func.func @xor_lane_swizzle_global(%out: !wave.ptr<#wave.global, i32>, %x: i32) attributes {wave.kernel} {
   %lane_raw = wave.lane_id : !wave.simd<i32, 32>
-  %lane = wave.assume_range %lane_raw, [0, 31] : !wave.simd<i32, 32>
+  %lane = wave.assume %lane_raw as "x" [#wave.pred<"x >= 0">, #wave.pred<"x <= 31">] : !wave.simd<i32, 32>
   %off = wave.index_expr <"xor(lid, 31)"> ["lid"](%lane)
       : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
   %ptrs = wave.ptr_add %out, %off
@@ -292,7 +307,7 @@ func.func @xor_lane_swizzle_global(%out: !wave.ptr<#wave.global, i32>, %x: i32) 
 // CHECK: waveamdmachine.buffer_store_b32 %[[VBYTE]], {{.*}}, {{.*}}, %[[SOFFSET]]
 func.func @xor_uniform_buffer_soffset(%out: !wave.ptr<#wave.global, i32>, %u_raw: i32) attributes {wave.kernel} {
   %lane = wave.lane_id : !wave.simd<i32, 32>
-  %u = wave.assume_range %u_raw, [0, 31] : i32
+  %u = wave.assume %u_raw as "x" [#wave.pred<"x >= 0">, #wave.pred<"x <= 31">] : i32
   %range = arith.constant 1024 : i32
   %buf = waveamd.make_buffer %out, %range
       : !wave.ptr<#wave.global, i32>, i32 -> !wave.ptr<#waveamd.buffer, i32>
@@ -320,9 +335,9 @@ func.func @xor_uniform_buffer_soffset(%out: !wave.ptr<#wave.global, i32>, %u_raw
 func.func @buffer_subset_packs_uniform_slots(%out: !wave.ptr<#wave.global, i32>,
                                              %u_raw: i32, %v_raw: i32) attributes {wave.kernel} {
   %lane_raw = wave.lane_id : !wave.simd<i32, 32>
-  %lane = wave.assume_range %lane_raw, [0, 31] : !wave.simd<i32, 32>
-  %u = wave.assume_range %u_raw, [0, 1073741823] : i32
-  %v = wave.assume_range %v_raw, [0, 1073741791] : i32
+  %lane = wave.assume %lane_raw as "x" [#wave.pred<"x >= 0">, #wave.pred<"x <= 31">] : !wave.simd<i32, 32>
+  %u = wave.assume %u_raw as "x" [#wave.pred<"x >= 0">, #wave.pred<"x <= 1073741823">] : i32
+  %v = wave.assume %v_raw as "x" [#wave.pred<"x >= 0">, #wave.pred<"x <= 1073741791">] : i32
   %range = arith.constant 4096 : i32
   %buf = waveamd.make_buffer %out, %range
       : !wave.ptr<#wave.global, i32>, i32 -> !wave.ptr<#waveamd.buffer, i32>

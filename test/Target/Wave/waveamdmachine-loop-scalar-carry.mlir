@@ -24,12 +24,12 @@ func.func @uniform_buffer_pointer_carry(%a: !wave.ptr<#wave.global, i32>,
     attributes {wave.kernel} {
   %c0 = arith.constant 0 : i32
   %c1 = arith.constant 1 : i32
-  %n_bounded = wave.assume_range %n, [0, 1023] : i32
+  %n_bounded = wave.assume %n as "x" [#wave.pred<"x >= 0">, #wave.pred<"x <= 1023">] : i32
   %buf = waveamd.make_buffer %a, %range
       : !wave.ptr<#wave.global, i32>, i32 -> !wave.ptr<#waveamd.buffer, i32>
   %lane = wave.lane_id : !wave.simd<i32, 32>
   %wg_raw = wave.workgroup_id 0
-  %wg = wave.assume_range %wg_raw, [0, 1023] : i32
+  %wg = wave.assume %wg_raw as "x" [#wave.pred<"x >= 0">, #wave.pred<"x <= 1023">] : i32
   %vx = wave.splat %x : i32 -> !wave.simd<i32, 32>
   %off = wave.index_expr <"floor(1/32*lid) + wg"> ["lid", "wg"] (%lane, %wg)
       : (!wave.simd<i32, 32>, i32) -> !wave.simd<index, 32>

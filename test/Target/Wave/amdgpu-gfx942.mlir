@@ -20,7 +20,7 @@ func.func @buffer_store_kernel(%out: !wave.ptr<#wave.global, i32>)
   %buffer = waveamd.make_buffer %out, %range
       : !wave.ptr<#wave.global, i32>, i32 -> !wave.ptr<#waveamd.buffer, i32>
   %wi_raw = wave.workitem_id 0 : !wave.simd<i32, 64>
-  %wi = wave.assume_range %wi_raw, [0, 63] : !wave.simd<i32, 64>
+  %wi = wave.assume %wi_raw as "x" [#wave.pred<"x >= 0">, #wave.pred<"x <= 63">] : !wave.simd<i32, 64>
   %ptrs = wave.ptr_add %buffer, %wi
       : !wave.ptr<#waveamd.buffer, i32>, !wave.simd<i32, 64>
       -> !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>

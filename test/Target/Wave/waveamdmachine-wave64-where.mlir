@@ -30,7 +30,7 @@ func.func @where_wave64_else(%out: !wave.ptr<#wave.global, i32>,
                              %active: !wave.mask<64>)
     attributes {wave.kernel} {
   %wi_raw = wave.workitem_id 0 : !wave.simd<i32, 64>
-  %wi = wave.assume_range %wi_raw, [0, 63] : !wave.simd<i32, 64>
+  %wi = wave.assume %wi_raw as "x" [#wave.pred<"x >= 0">, #wave.pred<"x <= 63">] : !wave.simd<i32, 64>
   %one = arith.constant 1 : i32
   %vone = wave.splat %one : i32 -> !wave.simd<i32, 64>
   %other = wave.addi %wi, %vone

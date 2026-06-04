@@ -54,7 +54,7 @@ MLIR_CAPI_EXPORTED MlirType mlirWavePtrTypeGetElementType(MlirType type);
 MLIR_CAPI_EXPORTED MlirAttribute mlirWavePtrTypeGetAddressSpace(MlirType type);
 
 //===----------------------------------------------------------------------===//
-// Wave symbolic-expression attribute
+// Wave symbolic attributes
 //===----------------------------------------------------------------------===//
 
 // Returns a #wave.expr attribute parsed from `text`. On parse failure
@@ -71,6 +71,14 @@ mlirWaveExprAttrGetFromNodePtr(MlirContext ctx, uintptr_t nodePtr);
 
 // Build from ixsimpl's stable binary serialization.
 MLIR_CAPI_EXPORTED MlirAttribute mlirWaveExprAttrGetFromBytes(
+    MlirContext ctx, const uint8_t *bytes, size_t length);
+
+MLIR_CAPI_EXPORTED bool mlirWaveAttributeIsAPred(MlirAttribute attr);
+MLIR_CAPI_EXPORTED MlirAttribute
+mlirWavePredAttrGetFromText(MlirContext ctx, MlirStringRef text);
+MLIR_CAPI_EXPORTED MlirAttribute
+mlirWavePredAttrGetFromNodePtr(MlirContext ctx, uintptr_t nodePtr);
+MLIR_CAPI_EXPORTED MlirAttribute mlirWavePredAttrGetFromBytes(
     MlirContext ctx, const uint8_t *bytes, size_t length);
 
 //===----------------------------------------------------------------------===//

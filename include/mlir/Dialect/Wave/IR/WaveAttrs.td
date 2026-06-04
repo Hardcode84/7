@@ -12,6 +12,7 @@
 include "mlir/Dialect/Wave/IR/WaveBase.td"
 include "mlir/Dialect/Wave/IR/WaveEnums.td"
 include "mlir/IR/AttrTypeBase.td"
+include "mlir/IR/CommonAttrConstraints.td"
 
 class Wave_Attr<string name, string attrMnemonic, list<Trait> traits = []>
     : AttrDef<Wave_Dialect, name, traits> {
@@ -82,6 +83,9 @@ def Wave_PredAttr : Wave_Attr<"Pred", "pred"> {
   let assemblyFormat = "`<` $value `>`";
   let genVerifyDecl = 1;
 }
+
+def Wave_PredArrayAttr
+    : TypedArrayAttrBase<Wave_PredAttr, "wave predicate array attribute">;
 
 def Wave_GlobalAddressSpaceAttr : Wave_Attr<"GlobalAddressSpace", "global"> {
   let summary = "global memory address space";

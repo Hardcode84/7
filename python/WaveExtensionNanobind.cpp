@@ -178,6 +178,42 @@ static void bindExprAttr(nb::module_ &m) {
           nb::arg("cls"), nb::arg("data"), nb::arg("context"));
 }
 
+static void bindPredAttr(nb::module_ &m) {
+  mlir_attribute_subclass(m, "PredAttr", mlirWaveAttributeIsAPred)
+      .def_classmethod(
+          "get",
+          [](nb::object &cls, const std::string &text, MlirContext ctx) {
+            MlirStringRef ref{text.data(), text.size()};
+            MlirAttribute attr = mlirWavePredAttrGetFromText(ctx, ref);
+            if (!attr.ptr)
+              throw nb::value_error(
+                  ("invalid wave.pred text: " + text).c_str());
+            return cls(attr);
+          },
+          nb::arg("cls"), nb::arg("text"), nb::arg("context"))
+      .def_classmethod(
+          "get_from_node_ptr",
+          [](nb::object &cls, uintptr_t nodePtr, MlirContext ctx) {
+            MlirAttribute attr = mlirWavePredAttrGetFromNodePtr(ctx, nodePtr);
+            if (!attr.ptr)
+              throw nb::value_error("failed to import wave.pred node");
+            return cls(attr);
+          },
+          nb::arg("cls"), nb::arg("node_ptr"), nb::arg("context"))
+      .def_classmethod(
+          "get_from_bytes",
+          [](nb::object &cls, nb::bytes data, MlirContext ctx) {
+            const uint8_t *buf =
+                reinterpret_cast<const uint8_t *>(data.c_str());
+            MlirAttribute attr =
+                mlirWavePredAttrGetFromBytes(ctx, buf, data.size());
+            if (!attr.ptr)
+              throw nb::value_error("failed to deserialize wave.pred bytes");
+            return cls(attr);
+          },
+          nb::arg("cls"), nb::arg("data"), nb::arg("context"));
+}
+
 static void bindFragmentType(nb::module_ &m) {
   mlir_type_subclass(m, "FragmentType", mlirWaveAMDTypeIsAFragment)
       .def_classmethod(
@@ -248,6 +284,7 @@ NB_MODULE(_waveDialectsNanobind, m) {
 
   // Wave symbolic attributes.
   bindExprAttr(m);
+  bindPredAttr(m);
 
   // Wave address-space attributes.
   bindAddressSpaceAttr(m, "GlobalAddressSpaceAttr",

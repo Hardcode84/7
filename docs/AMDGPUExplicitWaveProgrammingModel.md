@@ -957,15 +957,17 @@ without needing to undo the lowering's intermediate state. This
 identity story is the reason the carrier op exists at the wave level
 rather than as an analysis attached to ordinary arith chains.
 
-Range information is a separate carrier op: `wave.assume_range %v,
-[lo, hi]` is identity at runtime and a producer-side assertion of a
-signed integer interval. The kernel author already knows the grid
-dimensions, the tile sizes, and which workgroup-id ranges are safely
-representable in 32 bits; the dialect refuses to rediscover those by
-inference and instead takes them from the source program. Wrapping a
-single SSA value with `assume_range` is enough; the bound flows
-through `InferIntRangeInterface` to every consumer that opts in,
-including the bucketizer's slot-fit checks.
+Predicate information is a separate carrier op: `wave.assume %v as
+"x" [#wave.pred<"...">]` is identity at runtime and a producer-side
+assertion over one SSA value. The Python DSL's `assume_range` helper
+emits two predicates, `x >= lo` and `x <= hi`. The kernel author
+already knows the grid dimensions, tile sizes, divisibility facts, and
+which workgroup-id ranges are safely representable in 32 bits; the
+dialect refuses to rediscover those by inference and instead takes
+them from the source program. Wrapping a single SSA value is enough;
+the predicate flows through `InferIntRangeInterface` and symbolic
+simplification to every consumer that opts in, including the
+bucketizer's slot-fit checks.
 
 ### Bucketization
 
@@ -981,7 +983,7 @@ is structurally simple because the input is structurally rich:
   whose reachable symbols are all uniform contributes to the soffset
   slot; one that touches a lane-varying symbol contributes to voffset;
   a fully literal one accumulates into inst_offset.
-- Range assumptions composed from `wave.assume_range` plus
+- Range and divisibility assumptions composed from `wave.assume` plus
   `IntegerRangeAnalysis` feed an `ixs_simplify` pass before
   classification, so anything provably constant under the proven
   bounds collapses out of the symbolic form rather than getting
@@ -1006,8 +1008,8 @@ non-SADDR global form. Buffer pointers must fit V / S / inst fields;
 they have no full-address fallback.
 
 The visible payoff for the kernel author is small: wrapping each
-workgroup id with `assume_range` and writing the address as a single
-`index_expr` is enough. The bucketizer translates the resulting
+workgroup id with Python `assume_range` sugar and writing the address
+as a single `index_expr` is enough. The bucketizer translates the resulting
 symbolic form into the V / S / inst-offset shape the hardware expects,
 including the SGPR-side multiplies and shifts that move the uniform
 contribution off the VGPR critical path. There is no second pass that

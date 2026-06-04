@@ -80,18 +80,50 @@ func.func @load_bad_ptr_kind(%p: i64) {
 
 // -----
 
-func.func @assume_range_on_ptr(%p: !wave.ptr<#wave.global, i32>) -> !wave.ptr<#wave.global, i32> {
+func.func @assume_on_ptr(%p: !wave.ptr<#wave.global, i32>) -> !wave.ptr<#wave.global, i32> {
   // expected-error @+1 {{operand #0 must be signless integer or wave SIMD of signless integer}}
-  %r = wave.assume_range %p, [0, 100] : !wave.ptr<#wave.global, i32>
+  %r = wave.assume %p as "x" [#wave.pred<"x >= 0">, #wave.pred<"x <= 100">] : !wave.ptr<#wave.global, i32>
   return %r : !wave.ptr<#wave.global, i32>
 }
 
 // -----
 
-func.func @assume_range_on_signed(%v: si32) -> si32 {
+func.func @assume_on_signed(%v: si32) -> si32 {
   // expected-error @+1 {{operand #0 must be signless integer or wave SIMD of signless integer}}
-  %r = wave.assume_range %v, [0, 100] : si32
+  %r = wave.assume %v as "x" [#wave.pred<"x >= 0">, #wave.pred<"x <= 100">] : si32
   return %r : si32
+}
+
+// -----
+
+func.func @assume_empty_name(%v: i32) -> i32 {
+  // expected-error @+1 {{symbol name must be non-empty}}
+  %r = wave.assume %v as "" [#wave.pred<"x >= 0">] : i32
+  return %r : i32
+}
+
+// -----
+
+func.func @assume_empty_predicates(%v: i32) -> i32 {
+  // expected-error @+1 {{requires at least one predicate}}
+  %r = wave.assume %v as "x" [] : i32
+  return %r : i32
+}
+
+// -----
+
+func.func @assume_undeclared_symbol(%v: i32) -> i32 {
+  // expected-error @+1 {{references undeclared symbol `y`}}
+  %r = wave.assume %v as "x" [#wave.pred<"y >= 0">] : i32
+  return %r : i32
+}
+
+// -----
+
+func.func @assume_or_predicate(%v: i32) -> i32 {
+  // expected-error @+1 {{predicate #0 must be a comparison or AND of comparisons}}
+  %r = wave.assume %v as "x" [#wave.pred<"x >= 0 | x <= 10">] : i32
+  return %r : i32
 }
 
 // -----

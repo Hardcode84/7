@@ -50,9 +50,7 @@ makeSymbolicCarry(WaveAMDMachineSelector &S, StringRef name, Value value,
   if (hi)
     addRangeAssumption(S, offset, name, *hi);
   else if (inferValueRange) {
-    std::optional<sym::PredHandle> a = S.bindingAssumption(value, name);
-    if (a)
-      offset.assumptions.push_back(*a);
+    S.appendBindingAssumptions(value, name, offset.assumptions);
   }
   return offset;
 }
@@ -67,9 +65,7 @@ static LogicalResult addSymbolicStride(WaveAMDMachineSelector &S,
                         /*inferValueRange=*/false);
   if (failed(stride))
     return failure();
-  if (std::optional<sym::PredHandle> a =
-          S.bindingAssumption(rangeSource, name, scale))
-    stride->assumptions.push_back(*a);
+  S.appendBindingAssumptions(rangeSource, name, stride->assumptions, scale);
   FailureOr<sym::ExprHandle> expr =
       offset.expr ? sym::composeExprBinary(S.symbolStore(), offset.expr,
                                            sym::ExprBinaryOp::Add, stride->expr)

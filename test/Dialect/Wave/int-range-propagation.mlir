@@ -1,7 +1,7 @@
 // RUN: wave-opt --int-range-optimizations %s | FileCheck %s
 // RUN: wave-opt --int-range-optimizations %s | wave-opt | FileCheck %s
 
-// `wave.assume_range` + the InferIntRangeInterface implementations on
+// `wave.assume` + the InferIntRangeInterface implementations on
 // `wave.addi` / `wave.muli` / `wave.shli` together let upstream
 // `IntRangeAnalysis` see ranges flow through the wave-arith layer.
 // `int-range-optimizations` consumes that range info; a comparison
@@ -11,7 +11,7 @@
 // CHECK-NEXT: %[[T:.*]] = arith.constant true
 // CHECK-NEXT: return %[[T]] : i1
 func.func @addi_propagation(%v: i32) -> i1 {
-  %a = wave.assume_range %v, [0, 10] : i32
+  %a = wave.assume %v as "x" [#wave.pred<"x >= 0">, #wave.pred<"x <= 10">] : i32
   %sum = wave.addi %a, %a : i32, i32 -> i32    // proves to [0, 20]
   %hundred = arith.constant 100 : i32
   %cmp = arith.cmpi slt, %sum, %hundred : i32  // always true
@@ -22,7 +22,7 @@ func.func @addi_propagation(%v: i32) -> i1 {
 // CHECK-NEXT: %[[T:.*]] = arith.constant true
 // CHECK-NEXT: return %[[T]] : i1
 func.func @muli_propagation(%v: i32) -> i1 {
-  %a = wave.assume_range %v, [0, 5] : i32
+  %a = wave.assume %v as "x" [#wave.pred<"x >= 0">, #wave.pred<"x <= 5">] : i32
   %prod = wave.muli %a, %a : i32, i32 -> i32   // proves to [0, 25]
   %hundred = arith.constant 100 : i32
   %cmp = arith.cmpi slt, %prod, %hundred : i32 // always true
@@ -33,8 +33,8 @@ func.func @muli_propagation(%v: i32) -> i1 {
 // CHECK-NEXT: %[[T:.*]] = arith.constant true
 // CHECK-NEXT: return %[[T]] : i1
 func.func @shli_propagation(%v: i32, %s: i32) -> i1 {
-  %a = wave.assume_range %v, [0, 5] : i32
-  %sh = wave.assume_range %s, [2, 2] : i32     // exactly 2
+  %a = wave.assume %v as "x" [#wave.pred<"x >= 0">, #wave.pred<"x <= 5">] : i32
+  %sh = wave.assume %s as "x" [#wave.pred<"x >= 2">, #wave.pred<"x <= 2">] : i32     // exactly 2
   %shifted = wave.shli %a, %sh : i32, i32 -> i32  // proves to [0, 20]
   %hundred = arith.constant 100 : i32
   %cmp = arith.cmpi slt, %shifted, %hundred : i32 // always true
@@ -47,8 +47,8 @@ func.func @shli_propagation(%v: i32, %s: i32) -> i1 {
 // CHECK-NEXT: %[[T:.*]] = arith.constant true
 // CHECK-NEXT: return %[[T]] : i1
 func.func @chain_propagation(%v: i32, %w: i32) -> i1 {
-  %a = wave.assume_range %v, [0, 3] : i32
-  %b = wave.assume_range %w, [0, 3] : i32
+  %a = wave.assume %v as "x" [#wave.pred<"x >= 0">, #wave.pred<"x <= 3">] : i32
+  %b = wave.assume %w as "x" [#wave.pred<"x >= 0">, #wave.pred<"x <= 3">] : i32
   %sum = wave.addi %a, %b : i32, i32 -> i32        // [0, 6]
   %prod = wave.muli %sum, %sum : i32, i32 -> i32   // [0, 36]
   %fifty = arith.constant 50 : i32
@@ -56,11 +56,11 @@ func.func @chain_propagation(%v: i32, %w: i32) -> i1 {
   return %cmp : i1
 }
 
-// CHECK-LABEL: func.func @index_assume_range
+// CHECK-LABEL: func.func @index_assume
 // CHECK-NEXT: %[[T:.*]] = arith.constant true
 // CHECK-NEXT: return %[[T]] : i1
-func.func @index_assume_range(%v: index) -> i1 {
-  %a = wave.assume_range %v, [0, 10] : index
+func.func @index_assume(%v: index) -> i1 {
+  %a = wave.assume %v as "x" [#wave.pred<"x >= 0">, #wave.pred<"x <= 10">] : index
   %hundred = arith.constant 100 : index
   %cmp = arith.cmpi slt, %a, %hundred : index
   return %cmp : i1
@@ -70,7 +70,7 @@ func.func @index_assume_range(%v: index) -> i1 {
 // CHECK-NEXT: %[[T:.*]] = arith.constant true
 // CHECK-NEXT: return %[[T]] : i1
 func.func @index_expr_range(%v: i32) -> i1 {
-  %a = wave.assume_range %v, [0, 10] : i32
+  %a = wave.assume %v as "x" [#wave.pred<"x >= 0">, #wave.pred<"x <= 10">] : i32
   %off = wave.index_expr <"1 + 4*x"> ["x"](%a) : (i32) -> index
   %limit = arith.constant 42 : index
   %cmp = arith.cmpi slt, %off, %limit : index  // [1, 41] < 42
@@ -88,7 +88,7 @@ func.func @index_expr_simd_no_crash() -> !wave.simd<index, 32> {
 }
 
 // Id-op range seeds: workgroup_id contributes [0, INT32_MAX] without
-// any `wave.assume_range`. The lower bound alone is enough for the
+// any `wave.assume`. The lower bound alone is enough for the
 // non-negativity check to fold.
 // CHECK-LABEL: func.func @workgroup_id_nonneg
 // CHECK-NEXT: %[[T:.*]] = arith.constant true

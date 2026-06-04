@@ -438,20 +438,21 @@ static std::optional<IntRange64> scaleRange64(ConstantIntRanges range,
   return IntRange64{*lo, *hi};
 }
 
-std::optional<sym::PredHandle>
-WaveAMDMachineSelector::bindingAssumption(Value binding, StringRef name,
-                                          int64_t scale) {
+void WaveAMDMachineSelector::appendBindingAssumptions(
+    Value binding, StringRef name,
+    SmallVectorImpl<sym::PredHandle> &assumptions, int64_t scale) {
   std::optional<ConstantIntRanges> range = finiteSignedRange(*this, binding);
-  if (!range)
-    return std::nullopt;
-  std::optional<IntRange64> scaled = scaleRange64(*range, scale);
-  if (!scaled)
-    return std::nullopt;
-  auto handle =
-      sym::rangeAssumption(symbolStore(), name, scaled->lo, scaled->hi);
-  if (failed(handle))
-    return std::nullopt;
-  return *handle;
+  if (range) {
+    std::optional<IntRange64> scaled = scaleRange64(*range, scale);
+    if (scaled) {
+      FailureOr<sym::PredHandle> handle =
+          sym::rangeAssumption(symbolStore(), name, scaled->lo, scaled->hi);
+      if (succeeded(handle))
+        assumptions.push_back(*handle);
+    }
+  }
+  if (scale == 1)
+    appendAssumePredicates(symbolStore(), binding, name, assumptions);
 }
 
 static std::optional<int64_t> checkedAddImm(std::optional<int64_t> lhs,
@@ -1371,7 +1372,7 @@ LogicalResult WaveAMDMachineSelector::selectOperation(Operation *op) {
       .Case<WorkgroupIdOp>([&](auto o) { return selectWorkgroupId(o); })
       .Case<WorkitemIdOp>([&](auto o) { return selectWorkitemId(o); })
       .Case<SplatOp>([&](auto o) { return selectSplat(o); })
-      .Case<AssumeRangeOp>([&](auto o) { return selectAssumeRange(o); })
+      .Case<AssumeOp>([&](auto o) { return selectAssume(o); })
       .Case<BinaryOp>([&](auto o) { return selectBinary(o); })
       .Case<PackOp>([&](auto o) { return selectPack(o); })
       .Case<ExtractOp>([&](auto o) { return selectExtract(o); })
@@ -1621,10 +1622,9 @@ LogicalResult WaveAMDMachineSelector::selectSplat(SplatOp op) {
   return success();
 }
 
-// `wave.assume_range` is identity at runtime: the asserted range is
-// a producer-side hint for IntRangeAnalysis, not a runtime check.
+// `wave.assume` is a producer-side proof, not a runtime check.
 // The selected value passes straight through.
-LogicalResult WaveAMDMachineSelector::selectAssumeRange(AssumeRangeOp op) {
+LogicalResult WaveAMDMachineSelector::selectAssume(AssumeOp op) {
   values[op.getResult()] = expect(op.getValue(), op);
   eraseIfTopLevel(op);
   return success();
@@ -2573,9 +2573,7 @@ FailureOr<PointerOffset> makePointerOffset(WaveAMDMachineSelector &S,
       return failure();
     pointerOffset.bindings.push_back(
         {name.str(), binding.value, convertBindingKind(binding.kind)});
-    if (std::optional<sym::PredHandle> a =
-            S.bindingAssumption(binding.value, name))
-      pointerOffset.assumptions.push_back(*a);
+    S.appendBindingAssumptions(binding.value, name, pointerOffset.assumptions);
   }
   if (!pointerOffset.expr)
     return pointerOffset;
@@ -2698,9 +2696,7 @@ planRawPtrAddByteOffset(WaveAMDMachineSelector &S, PtrAddOp op, unsigned size) {
   PointerOffset offset;
   offset.expr = *expr;
   offset.bindings.push_back({name, *scaled, kind});
-  if (std::optional<sym::PredHandle> a =
-          S.bindingAssumption(source, name, size))
-    offset.assumptions.push_back(*a);
+  S.appendBindingAssumptions(source, name, offset.assumptions, size);
   return offset;
 }
 

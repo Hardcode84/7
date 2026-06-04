@@ -45,7 +45,7 @@ func.func @buffer_make_buffer_uniform_base_offset(%out: !wave.ptr<#wave.global, 
     attributes {wave.kernel} {
   %range = arith.constant 1024 : i32
   %wg_raw = wave.workgroup_id 0
-  %wg = wave.assume_range %wg_raw, [0, 1023] : i32
+  %wg = wave.assume %wg_raw as "x" [#wave.pred<"x >= 0">, #wave.pred<"x <= 1023">] : i32
   %tile = wave.index_expr <"256*wg"> ["wg"](%wg) : (i32) -> index
   %base = wave.ptr_add %out, %tile
       : !wave.ptr<#wave.global, i32>, index -> !wave.ptr<#wave.global, i32>
@@ -67,7 +67,7 @@ func.func @buffer_make_buffer_uniform_base_offset(%out: !wave.ptr<#wave.global, 
 // SELECT: %[[SBYTE:[^,]+]], %{{.*}} = waveamdmachine.s_lshl_b32 %[[U]],
 // SELECT: waveamdmachine.buffer_store_b32 %{{.*}}, {{.*}}, {{.*}}, %[[SBYTE]]
 func.func @buffer_bounded_raw_uniform_uses_soffset(%out: !wave.ptr<#wave.global, i32>, %u_raw: i32) attributes {wave.kernel} {
-  %u = wave.assume_range %u_raw, [0, 1023] : i32
+  %u = wave.assume %u_raw as "x" [#wave.pred<"x >= 0">, #wave.pred<"x <= 1023">] : i32
   %range = arith.constant 4096 : i32
   %buffer = waveamd.make_buffer %out, %range
       : !wave.ptr<#wave.global, i32>, i32 -> !wave.ptr<#waveamd.buffer, i32>

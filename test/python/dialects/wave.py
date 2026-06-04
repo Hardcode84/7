@@ -155,8 +155,36 @@ def test_typed_bindings():
             context=w.Context.current,
         )
         assert w.ExprAttr.isinstance(expr_from_node)
+
+        pred = w.PredAttr.get("K >= 0", context=w.Context.current)
+        assert w.PredAttr.isinstance(pred)
+        raw_pred = w.sym_ctx.eq(
+            w.mod(w.sym("K"), w.sym_ctx.int_(16)), w.sym_ctx.int_(0)
+        )
+        pred_from_node = w.PredAttr.get_from_node_ptr(
+            raw_pred.node_ptr,
+            context=w.Context.current,
+        )
+        assert w.PredAttr.isinstance(pred_from_node)
         print("ok")
         # CHECK: ok
+
+
+# CHECK-LABEL: TEST: test_assume_helpers
+@run
+def test_assume_helpers():
+    with w.module() as m:
+        with m.function("assume_kernel", [w.i32()], kernel=True) as f:
+            (x,) = f.args
+            _bounded = f.assume_range(x, 0, 31)
+            _divisible = f.assume_divisible(x, 16)
+            y = w.sym("y")
+            _manual = f.assume(x, [y >= w.sym_ctx.int_(0)], name="y")
+        # CHECK: func.func @assume_kernel
+        # CHECK: wave.assume {{.*}} as "x" {{\[.*\]}} : i32
+        # CHECK: wave.assume {{.*}} as "x" [#wave.pred<"Mod(x, 16) == 0">] : i32
+        # CHECK: wave.assume {{.*}} as "y" [#wave.pred<"y >= 0">] : i32
+        print(m.module)
 
 
 # CHECK-LABEL: TEST: test_waveamd_buffer_pointer_type

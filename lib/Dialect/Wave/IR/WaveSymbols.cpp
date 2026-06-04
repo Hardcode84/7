@@ -446,6 +446,16 @@ mlir::wave::sym::deserializeExpr(Store &store, ArrayRef<uint8_t> bytes,
                     diagnostic, "failed to deserialize wave.expr bytes");
 }
 
+FailureOr<PredHandle>
+mlir::wave::sym::deserializePred(Store &store, ArrayRef<uint8_t> bytes,
+                                 std::string *diagnostic) {
+  Session session(store);
+  BufferReaderState state{bytes, 0};
+  ixs_reader reader{bufferReaderRead, bufferReaderRemaining, &state};
+  return finishPred(session.raw(), ixs_deserialize_node(session.raw(), &reader),
+                    diagnostic, "failed to deserialize wave.pred bytes");
+}
+
 FailureOr<ExprHandle> mlir::wave::sym::importExpr(Store &store,
                                                   const ixs_node *foreign,
                                                   std::string *diagnostic) {
@@ -472,6 +482,13 @@ mlir::wave::sym::importExprFromNodePtr(Store &store, uintptr_t nodePtr,
                                        std::string *diagnostic) {
   const ixs_node *node = reinterpret_cast<const ixs_node *>(nodePtr);
   return importExpr(store, node, diagnostic);
+}
+
+FailureOr<PredHandle>
+mlir::wave::sym::importPredFromNodePtr(Store &store, uintptr_t nodePtr,
+                                       std::string *diagnostic) {
+  const ixs_node *node = reinterpret_cast<const ixs_node *>(nodePtr);
+  return importPred(store, node, diagnostic);
 }
 
 FailureOr<PredHandle> mlir::wave::sym::importPred(Store &store,
@@ -700,6 +717,39 @@ mlir::wave::sym::substituteExpr(Store &store, ExprHandle value,
                      targets.data(), replacements.data());
   return finishExpr(session.raw(), result, diagnostic,
                     "failed to substitute wave.expr");
+}
+
+FailureOr<PredHandle>
+mlir::wave::sym::substitutePred(Store &store, PredHandle value,
+                                ArrayRef<ExprSubstitution> substitutions,
+                                std::string *diagnostic) {
+  Session session(store);
+  ixs_node *pred = rawPredNode(value, diagnostic);
+  if (!pred)
+    return failure();
+
+  SmallVector<ixs_node *, 4> targets;
+  SmallVector<ixs_node *, 4> replacements;
+  targets.reserve(substitutions.size());
+  replacements.reserve(substitutions.size());
+  for (const ExprSubstitution &substitution : substitutions) {
+    ixs_node *target = rawExprNode(substitution.target, diagnostic);
+    ixs_node *replacement = rawExprNode(substitution.replacement, diagnostic);
+    if (!target || !replacement)
+      return failure();
+    targets.push_back(target);
+    replacements.push_back(replacement);
+  }
+
+  if (targets.size() > std::numeric_limits<uint32_t>::max()) {
+    setDiagnostic(diagnostic, "too many wave.pred substitutions");
+    return failure();
+  }
+  ixs_node *result =
+      ixs_subs_multi(session.raw(), pred, static_cast<uint32_t>(targets.size()),
+                     targets.data(), replacements.data());
+  return finishPred(session.raw(), result, diagnostic,
+                    "failed to substitute wave.pred");
 }
 
 // `ixs_bounds_add_assumption` only consumes CMP nodes -- an AND-tree

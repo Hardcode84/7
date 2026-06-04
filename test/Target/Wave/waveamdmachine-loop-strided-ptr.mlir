@@ -173,7 +173,7 @@ func.func @strided_dynamic_uniform_kloop(%a: !wave.ptr<#wave.global, f16>,
   %wi = wave.workitem_id 0 : !wave.simd<i32, 32>
   %off = wave.index_expr <"64*Mod(wi, 16)"> ["wi"](%wi)
       : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
-  %delta = wave.assume_range %delta_raw, [1, 32] : i32
+  %delta = wave.assume %delta_raw as "x" [#wave.pred<"x >= 1">, #wave.pred<"x <= 32">] : i32
   %p0 = wave.ptr_add %a, %off
       : !wave.ptr<#wave.global, f16>, !wave.simd<index, 32>
       -> !wave.simd<!wave.ptr<#wave.global, f16>, 32>

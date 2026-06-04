@@ -220,8 +220,14 @@ mlir::FailureOr<PredHandle> parsePred(Store &store, llvm::StringRef text,
 mlir::FailureOr<ExprHandle> deserializeExpr(Store &store,
                                             llvm::ArrayRef<uint8_t> bytes,
                                             std::string *diagnostic = nullptr);
+mlir::FailureOr<PredHandle> deserializePred(Store &store,
+                                            llvm::ArrayRef<uint8_t> bytes,
+                                            std::string *diagnostic = nullptr);
 mlir::FailureOr<ExprHandle>
 importExprFromNodePtr(Store &store, uintptr_t nodePtr,
+                      std::string *diagnostic = nullptr);
+mlir::FailureOr<PredHandle>
+importPredFromNodePtr(Store &store, uintptr_t nodePtr,
                       std::string *diagnostic = nullptr);
 
 mlir::FailureOr<ExprHandle> importExpr(Store &store, const ixs_node *foreign,
@@ -265,6 +271,10 @@ mlir::FailureOr<PredHandle> simplifyPred(Store &store, PredHandle value,
 /// Simultaneous substitution; replacements are not rewritten.
 mlir::FailureOr<ExprHandle>
 substituteExpr(Store &store, ExprHandle value,
+               llvm::ArrayRef<ExprSubstitution> substitutions,
+               std::string *diagnostic = nullptr);
+mlir::FailureOr<PredHandle>
+substitutePred(Store &store, PredHandle value,
                llvm::ArrayRef<ExprSubstitution> substitutions,
                std::string *diagnostic = nullptr);
 

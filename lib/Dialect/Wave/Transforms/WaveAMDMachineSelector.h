@@ -91,7 +91,7 @@ inline mlir::waveamdmachine::RegType getVCCType(MLIRContext *ctx) {
 
 inline LogicalResult emitBufferAddressFieldError(Operation *op) {
   return op->emitError("buffer memory op offset must fit proven unsigned "
-                       "32-bit voffset/soffset fields; add wave.assume_range "
+                       "32-bit voffset/soffset fields; add wave.assume "
                        "for bounded offsets");
 }
 
@@ -220,8 +220,9 @@ public:
   unsigned nextLabel = 0;
 
   // ---- address-planning helpers -----------------------------------------
-  std::optional<sym::PredHandle>
-  bindingAssumption(Value binding, StringRef name, int64_t scale = 1);
+  void appendBindingAssumptions(Value binding, StringRef name,
+                                SmallVectorImpl<sym::PredHandle> &assumptions,
+                                int64_t scale = 1);
   sym::Store &symbolStore();
   bool slotFitsU32(sym::ExprHandle expr, ArrayRef<sym::PredHandle> assumptions);
   SmallVector<NamedAttribute> instOffsetAttrs(int64_t value,
@@ -267,7 +268,7 @@ public:
   LogicalResult selectWorkgroupId(WorkgroupIdOp op);
   LogicalResult selectWorkitemId(WorkitemIdOp op);
   LogicalResult selectSplat(SplatOp op);
-  LogicalResult selectAssumeRange(AssumeRangeOp op);
+  LogicalResult selectAssume(AssumeOp op);
   LogicalResult selectBinary(BinaryOp op);
   LogicalResult selectPack(PackOp op);
   LogicalResult selectExtract(ExtractOp op);

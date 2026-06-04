@@ -119,7 +119,7 @@ print(module_mxfp4)
 # CHECK-LABEL: func.func @wmma_f16_matmul_tiled
 # CHECK-SAME: wave.lds_size = 2048
 # CHECK-NOT: wavemeta.
-# CHECK: %[[TRIP:.*]] = wave.assume_range %arg3, [0, 0] : i32
+# CHECK: %[[TRIP:.*]] = wave.assume %arg3 as "x" {{\[.*\]}} : i32
 # CHECK: scf.for %{{.*}} = %{{.*}} to %[[TRIP]] step
 # CHECK-COUNT-8: waveamd.mma "mfma.f32.16x16x16.f16"
 # CHECK: wave.load

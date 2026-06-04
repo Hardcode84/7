@@ -53,7 +53,7 @@ func.func @pipeline_extracted_nested_symbolic_stride(
     attributes {wave.kernel} {
   %c0 = arith.constant 0 : i32
   %c1 = arith.constant 1 : i32
-  %n = wave.assume_range %n_raw, [0, 31] : i32
+  %n = wave.assume %n_raw as "x" [#wave.pred<"x >= 0">, #wave.pred<"x <= 31">] : i32
   %wi = wave.workitem_id 0 : !wave.simd<i32, 32>
   scf.for %i = %c0 to %n step %c1 : i32 {
     scf.for %j = %c1 to %m step %c1 : i32 {

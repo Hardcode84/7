@@ -149,7 +149,7 @@ func.func @mfma_gfx950_bf16xf32_kernel(%out: !wave.ptr<#wave.global, i32>)
 func.func @gfx950_literal_mul_kernel(%out: !wave.ptr<#wave.global, i32>)
     attributes {wave.kernel} {
   %wi_raw = wave.workitem_id 0 : !wave.simd<i32, 64>
-  %wi = wave.assume_range %wi_raw, [0, 63] : !wave.simd<i32, 64>
+  %wi = wave.assume %wi_raw as "x" [#wave.pred<"x >= 0">, #wave.pred<"x <= 63">] : !wave.simd<i32, 64>
   %c256 = arith.constant 256 : i32
   %v256 = wave.splat %c256 : i32 -> !wave.simd<i32, 64>
   %value = wave.muli %v256, %wi

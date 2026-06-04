@@ -74,10 +74,10 @@ collectIndexExprAssumptions(IndexExprOp op, DataFlowSolver &solver,
   SmallVector<sym::PredHandle> assumptions;
   for (auto [nameAttr, binding] : llvm::zip(op.getNames(), op.getBindings())) {
     StringRef name = cast<StringAttr>(nameAttr).getValue();
-    std::optional<sym::PredHandle> assumption =
-        buildRangeAssumption(solver, store, binding, name);
-    if (assumption)
+    if (std::optional<sym::PredHandle> assumption =
+            buildRangeAssumption(solver, store, binding, name))
       assumptions.push_back(*assumption);
+    appendAssumePredicates(store, binding, name, assumptions);
   }
   return assumptions;
 }

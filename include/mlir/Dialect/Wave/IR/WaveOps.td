@@ -311,47 +311,30 @@ def Wave_FRcpOp : Wave_FloatSimdUnary<"frcp"> {
   let summary = "lane-wise f32 reciprocal";
 }
 
-def Wave_AssumeRangeOp : Wave_Op<"assume_range", [
+def Wave_AssumeOp : Wave_Op<"assume", [
     Pure, AllTypesMatch<["value", "result"]>,
     DeclareOpInterfaceMethods<InferIntRangeInterface,
                               ["inferResultRangesFromOptional"]>
   ]> {
-  let summary = "assert a signed integer range on a value";
+  let summary = "assert symbolic integer predicates on a value";
   let description = [{
-    Identity at runtime. Producer-side assertion that `$value`, treated
-    as a signed integer, satisfies `lo <= value <= hi`. The op feeds
-    upstream `IntRangeAnalysis` through `InferIntRangeInterface` so
-    consuming ops that also implement the interface (the `arith.*`
-    family, plus any wave op that opts in later) can propagate the
-    bound.
-
-    The op overrides `inferResultRangesFromOptional` rather than
-    `inferResultRanges` so that it produces a range even when the
-    operand's incoming range is uninitialized -- which is the common
-    case for function args and other "first observation" points where
-    `assume_range` actually earns its keep.
-
-    The op is intentionally permissive:
-      * `lo > hi` is legal -- signals an empty range. Useful inside a
-        dead branch where the producer wants to assert unreachability.
-      * `lo` / `hi` need not fit the value's representable range. The
-        analysis clamps to the bit-width.
-
-    Accepts a signless integer, index, or SIMD of either; SIMD means
-    "every lane is in `[lo, hi]`".
+    Identity at runtime. Producer-side assertion that `$value`, bound to
+    `$name`, satisfies every predicate in `$assumptions`. SIMD operands
+    assert the predicates lane-wise.
   }];
 
   let arguments = (ins
       AnyTypeOf<[AnySignlessInteger, Wave_SimdOfSignlessInteger,
                  Wave_IndexValue]>:$value,
-      SI64Attr:$lo,
-      SI64Attr:$hi);
+      StrAttr:$name,
+      Wave_PredArrayAttr:$assumptions);
   let results = (outs
       AnyTypeOf<[AnySignlessInteger, Wave_SimdOfSignlessInteger,
                  Wave_IndexValue]>:$result);
   let assemblyFormat = [{
-    $value `,` `[` $lo `,` $hi `]` attr-dict `:` type($value)
+    $value `as` $name $assumptions attr-dict `:` type($value)
   }];
+  let hasVerifier = 1;
 }
 
 def Wave_CmpIOp : Wave_Op<"cmpi", [Pure]> {

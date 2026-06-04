@@ -21,6 +21,8 @@
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/TypeSwitch.h"
 
+#include <array>
+
 using namespace mlir;
 using namespace mlir::wave;
 
@@ -736,18 +738,23 @@ buildIndexExprRangeAssumption(sym::Store &store, StringRef name,
   return *assumption;
 }
 
-static SmallVector<sym::PredHandle, 4>
-buildIndexExprRangeAssumptions(sym::Store &store, ArrayAttr names,
-                               ArrayRef<ConstantIntRanges> argRanges) {
-  SmallVector<sym::PredHandle, 4> assumptions;
-  for (auto [nameAttr, range] : llvm::zip(names, argRanges)) {
-    StringRef name = cast<StringAttr>(nameAttr).getValue();
-    std::optional<sym::PredHandle> assumption =
-        buildIndexExprRangeAssumption(store, name, range);
-    if (assumption)
-      assumptions.push_back(*assumption);
-  }
-  return assumptions;
+void mlir::wave::appendRangeAndAssumePredicates(
+    sym::Store &store, Value binding, StringRef name,
+    const ConstantIntRanges &range,
+    SmallVectorImpl<sym::PredHandle> &assumptions) {
+  std::optional<sym::PredHandle> assumption =
+      buildIndexExprRangeAssumption(store, name, range);
+  if (assumption)
+    assumptions.push_back(*assumption);
+  appendAssumePredicates(store, binding, name, assumptions);
+}
+
+static SmallVector<sym::PredHandle, 4> getPredicateHandles(ArrayAttr attrs) {
+  SmallVector<sym::PredHandle, 4> handles;
+  handles.reserve(attrs.size());
+  for (Attribute attr : attrs)
+    handles.push_back(cast<PredAttr>(attr).getValue());
+  return handles;
 }
 
 static std::optional<int64_t> floorRational(sym::RationalEndpoint value) {
@@ -800,6 +807,40 @@ buildIndexExprResultRange(sym::Store &store, sym::ExprHandle expr,
   APInt loValue(bits, *lo, /*isSigned=*/true);
   APInt hiValue(bits, *hi, /*isSigned=*/true);
   return ConstantIntRanges::fromSigned(loValue, hiValue);
+}
+
+static std::optional<ConstantIntRanges>
+buildAssumePredicateRange(sym::Store &store, StringRef name, Type resultType,
+                          ArrayAttr attrs) {
+  FailureOr<sym::ExprHandle> expr = sym::composeExprSym(store, name);
+  if (failed(expr))
+    return std::nullopt;
+  SmallVector<sym::PredHandle, 4> assumptions = getPredicateHandles(attrs);
+  return buildIndexExprResultRange(store, *expr, resultType, assumptions);
+}
+
+void mlir::wave::appendAssumePredicates(
+    sym::Store &store, Value binding, StringRef name,
+    SmallVectorImpl<sym::PredHandle> &assumptions) {
+  FailureOr<sym::ExprHandle> replacement = sym::composeExprSym(store, name);
+  if (failed(replacement))
+    return;
+
+  while (auto assume = binding.getDefiningOp<AssumeOp>()) {
+    FailureOr<sym::ExprHandle> target =
+        sym::composeExprSym(store, assume.getName());
+    if (failed(target))
+      return;
+    std::array<sym::ExprSubstitution, 1> substitutions{
+        sym::ExprSubstitution{*target, *replacement}};
+    for (Attribute attr : assume.getAssumptions()) {
+      FailureOr<sym::PredHandle> pred = sym::substitutePred(
+          store, cast<PredAttr>(attr).getValue(), substitutions);
+      if (succeeded(pred))
+        assumptions.push_back(*pred);
+    }
+    binding = assume.getValue();
+  }
 }
 
 void SplatOp::inferResultRanges(ArrayRef<ConstantIntRanges> argRanges,
@@ -861,24 +902,27 @@ void ShliOp::inferResultRanges(ArrayRef<ConstantIntRanges> argRanges,
                                   normalizeWaveArithRanges(argRanges, bits)));
 }
 
-void AssumeRangeOp::inferResultRangesFromOptional(
+void AssumeOp::inferResultRangesFromOptional(
     ArrayRef<IntegerValueRange> argRanges, SetIntLatticeFn setResultRange) {
-  Type ty = getResult().getType();
-  if (auto simd = dyn_cast<SimdType>(ty))
-    ty = simd.getElementType();
-  unsigned bits = ConstantIntRanges::getStorageBitwidth(ty);
-  APInt lo(bits, static_cast<int64_t>(getLo()), /*isSigned=*/true);
-  APInt hi(bits, static_cast<int64_t>(getHi()), /*isSigned=*/true);
-  ConstantIntRanges asserted = ConstantIntRanges::fromSigned(lo, hi);
-  // Override `inferResultRangesFromOptional` so the assertion seeds the
-  // analysis even when the operand's lattice is still uninitialized
-  // (e.g. function args, no producer with the interface). When the
-  // operand range is known, narrow further by intersection.
+  WaveDialect *dialect = getContext()->getLoadedDialect<WaveDialect>();
+  if (!dialect)
+    return;
+
   IntegerValueRange incoming = argRanges[0];
+  std::optional<ConstantIntRanges> asserted =
+      buildAssumePredicateRange(dialect->getSymbolStore(), getName(),
+                                getResult().getType(), getAssumptions());
+  if (!asserted) {
+    if (incoming.isUninitialized())
+      return;
+    setResultRange(getResult(), incoming);
+    return;
+  }
+
   IntegerValueRange out =
       incoming.isUninitialized()
-          ? IntegerValueRange{asserted}
-          : IntegerValueRange{asserted.intersection(incoming.getValue())};
+          ? IntegerValueRange{*asserted}
+          : IntegerValueRange{asserted->intersection(incoming.getValue())};
   setResultRange(getResult(), out);
 }
 
@@ -889,13 +933,55 @@ void IndexExprOp::inferResultRanges(ArrayRef<ConstantIntRanges> argRanges,
     return;
   sym::Store &store = dialect->getSymbolStore();
 
-  SmallVector<sym::PredHandle, 4> assumptions =
-      buildIndexExprRangeAssumptions(store, getNames(), argRanges);
+  SmallVector<sym::PredHandle, 4> assumptions;
+  for (auto [nameAttr, binding, range] :
+       llvm::zip(getNames(), getBindings(), argRanges)) {
+    StringRef name = cast<StringAttr>(nameAttr).getValue();
+    appendRangeAndAssumePredicates(store, binding, name, range, assumptions);
+  }
   std::optional<ConstantIntRanges> range = buildIndexExprResultRange(
       store, getExpr().getValue(), getResult().getType(), assumptions);
   if (!range)
     return;
   setResultRange(getResult(), *range);
+}
+
+static bool isCmpAndTree(sym::PredHandle pred) {
+  sym::PredView view(pred);
+  if (!view.isValid())
+    return false;
+  if (view.getKind() == sym::PredKind::Cmp)
+    return true;
+  if (view.getKind() != sym::PredKind::And)
+    return false;
+  for (uint32_t i : llvm::seq<uint32_t>(0, view.getLogicArgCount()))
+    if (!isCmpAndTree(view.getLogicArg(i)))
+      return false;
+  return true;
+}
+
+LogicalResult AssumeOp::verify() {
+  if (getName().empty())
+    return emitOpError("symbol name must be non-empty");
+  if (getAssumptions().empty())
+    return emitOpError("requires at least one predicate");
+
+  for (auto [index, attr] : llvm::enumerate(getAssumptions())) {
+    sym::PredHandle pred = cast<PredAttr>(attr).getValue();
+    if (!isCmpAndTree(pred))
+      return emitOpError("predicate #")
+             << index << " must be a comparison or AND of comparisons";
+
+    std::optional<StringRef> badName;
+    sym::walkSymbolNames(pred, [&](StringRef name) {
+      if (name != getName() && !badName)
+        badName = name;
+    });
+    if (badName)
+      return emitOpError("predicate #")
+             << index << " references undeclared symbol `" << *badName << "`";
+  }
+  return success();
 }
 
 LogicalResult CmpIOp::verify() {
@@ -942,8 +1028,8 @@ LogicalResult WorkitemIdOp::verify() {
 
 // Seed `IntRangeAnalysis` from the wave-axis id ops. We don't know
 // grid / block dims at this layer, so all upper bounds default to
-// INT32_MAX; the producer wraps with `wave.assume_range` when a
-// tighter bound is needed. lane_id is the exception -- the SIMD wave
+// INT32_MAX; the producer wraps with `wave.assume` when a tighter
+// bound is needed. lane_id is the exception -- the SIMD wave
 // width gives us a tight `[0, W-1]` per lane.
 
 void LaneIdOp::inferResultRanges(ArrayRef<ConstantIntRanges>,

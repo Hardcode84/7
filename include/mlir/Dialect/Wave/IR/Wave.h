@@ -69,6 +69,12 @@ FailureOr<SymbolicOffsetBindingKind> classifySymbolicOffsetBinding(
 unsigned getSymbolicOffsetLaneWidth(ValueRange bindings);
 Type getSymbolicOffsetResultType(MLIRContext *ctx, unsigned laneWidth);
 Type getIndexExprResultType(MLIRContext *ctx, ValueRange bindings);
+void appendAssumePredicates(sym::Store &store, Value binding, StringRef name,
+                            SmallVectorImpl<sym::PredHandle> &assumptions);
+void appendRangeAndAssumePredicates(
+    sym::Store &store, Value binding, StringRef name,
+    const ConstantIntRanges &range,
+    SmallVectorImpl<sym::PredHandle> &assumptions);
 FailureOr<SymbolicOffset> getIndexExprSymbolicOffset(IndexExprOp op);
 FailureOr<MemoryPayloadShape> getMemoryPayloadShape(
     Type elementType,

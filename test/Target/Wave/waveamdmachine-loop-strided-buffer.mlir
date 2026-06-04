@@ -9,7 +9,7 @@ func.func @strided_buf(%a: !wave.ptr<#wave.global, f16>, %n: i32, %r: i32)
   %c0 = arith.constant 0 : i32
   %c1 = arith.constant 1 : i32
   %c16 = arith.constant 16 : i32
-  %n_bounded = wave.assume_range %n, [0, 1023] : i32
+  %n_bounded = wave.assume %n as "x" [#wave.pred<"x >= 0">, #wave.pred<"x <= 1023">] : i32
   %buf = waveamd.make_buffer %a, %r : !wave.ptr<#wave.global, f16>, i32 -> !wave.ptr<#waveamd.buffer, f16>
   %wi = wave.workitem_id 0 : !wave.simd<i32, 32>
   %off = wave.index_expr <"64*Mod(wi, 16)"> ["wi"](%wi)

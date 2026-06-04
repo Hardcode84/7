@@ -41,6 +41,7 @@ from mlir._mlir_libs._waveDialectsNanobind import (
     GlobalAddressSpaceAttr,
     MaskType,
     MemTokenType,
+    PredAttr,
     PrivateAddressSpaceAttr,
     PtrType,
     SharedAddressSpaceAttr,
@@ -96,11 +97,19 @@ def sym(name: str) -> ixsimpl.Expr:
     return sym_ctx.sym(name)
 
 
-def _expr_node_ptr(expr: ixsimpl.Expr) -> int:
+def _ixsimpl_node_ptr(expr: ixsimpl.Expr) -> int:
     try:
         return int(expr.node_ptr)
     except AttributeError as exc:
         raise RuntimeError("ixsimpl Expr.node_ptr required") from exc
+
+
+def _pred_attr(pred: ixsimpl.Expr) -> PredAttr:
+    if not pred.is_pred:
+        raise TypeError("wave.assume expects ixsimpl predicate nodes")
+    return PredAttr.get_from_node_ptr(
+        _ixsimpl_node_ptr(pred), context=_current_context()
+    )
 
 
 # Re-export the ixsimpl algebraic helpers callers reach for when
@@ -546,16 +555,26 @@ class FunctionBuilder:
     ) -> Value:
         return wave.WorkitemIdOp(simd_type(element_type, width), axis).result
 
-    def assume_range(self, value: Value, lo: int, hi: int) -> Value:
-        """Identity at runtime; seeds IRA with `lo <= value <= hi`.
+    def assume(
+        self,
+        value: Value,
+        assumptions: Sequence[ixsimpl.Expr],
+        *,
+        name: str = "x",
+    ) -> Value:
+        """Identity at runtime; asserts ixsimpl predicates over `name`."""
+        attrs = ArrayAttr.get([_pred_attr(pred) for pred in assumptions])
+        return wave.AssumeOp(value.type, value, name, attrs).result
 
-        The WaveAMDMachine address planner's width-fit check turns a tighter
-        proven range into a soffset bucket survival: e.g. wrapping
-        `wave.workgroup_id` with `assume_range(_, 0, grid_dim - 1)`
-        lets `wg * stride` fit 32-bit and ride the SGPR soffset slot
-        instead of demoting to voffset.
-        """
-        return wave.AssumeRangeOp(value.type, value, lo, hi).result
+    def assume_range(self, value: Value, lo: int, hi: int) -> Value:
+        """Identity at runtime; asserts `lo <= value <= hi`."""
+        x = sym_ctx.sym("x")
+        return self.assume(value, [x >= lo, x <= hi], name="x")
+
+    def assume_divisible(self, value: Value, divisor: int) -> Value:
+        """Identity at runtime; asserts `value % divisor == 0`."""
+        x = sym_ctx.sym("x")
+        return self.assume(value, [sym_ctx.eq(x % divisor, 0)], name="x")
 
     def splat(
         self, value: Value, element_type: Type | None = None, width: int = 32
@@ -692,7 +711,7 @@ class FunctionBuilder:
                 _binding_lane_width(filtered.values())
             )
         expr_attr = ExprAttr.get_from_node_ptr(
-            _expr_node_ptr(expr), context=_current_context()
+            _ixsimpl_node_ptr(expr), context=_current_context()
         )
         names_attr = ArrayAttr.get([StringAttr.get(n) for n in filtered])
         return wave.IndexExprOp(
@@ -1066,6 +1085,7 @@ __all__ = [
     "MemRefType",
     "MemTokenType",
     "ModuleBuilder",
+    "PredAttr",
     "PrivateAddressSpaceAttr",
     "PtrType",
     "SharedAddressSpaceAttr",

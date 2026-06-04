@@ -313,11 +313,10 @@ addTripCountAssumption(WaveAMDMachineSelector &S, scf::ForOp op, StringRef name,
     assumptions.push_back(*range);
     return success();
   }
-  if (std::optional<sym::PredHandle> range =
-          S.bindingAssumption(op.getUpperBound(), name)) {
-    assumptions.push_back(*range);
+  size_t oldSize = assumptions.size();
+  S.appendBindingAssumptions(op.getUpperBound(), name, assumptions);
+  if (assumptions.size() != oldSize)
     return success();
-  }
   return failure();
 }
 
@@ -376,8 +375,7 @@ static LogicalResult appendStrideTermOffset(WaveAMDMachineSelector &S,
   if (failed(sym))
     return failure();
   offset.bindings.push_back({name, term.value, TermKind::Uniform});
-  if (std::optional<sym::PredHandle> a = S.bindingAssumption(term.value, name))
-    offset.assumptions.push_back(*a);
+  S.appendBindingAssumptions(term.value, name, offset.assumptions);
   FailureOr<sym::ExprHandle> scaled = scaleStrideTerm(S, *sym, term.scale);
   if (failed(scaled))
     return failure();

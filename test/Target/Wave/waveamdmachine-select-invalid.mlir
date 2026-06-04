@@ -209,8 +209,8 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 func.func @floor_dynamic_denominator_buffer(%out: !wave.ptr<#wave.global, i32>,
                                             %u_raw: i32) attributes {wave.kernel} {
   %lane_raw = wave.lane_id : !wave.simd<i32, 32>
-  %lane = wave.assume_range %lane_raw, [0, 31] : !wave.simd<i32, 32>
-  %u = wave.assume_range %u_raw, [1, 31] : i32
+  %lane = wave.assume %lane_raw as "x" [#wave.pred<"x >= 0">, #wave.pred<"x <= 31">] : !wave.simd<i32, 32>
+  %u = wave.assume %u_raw as "x" [#wave.pred<"x >= 1">, #wave.pred<"x <= 31">] : i32
   %range = arith.constant 4096 : i32
   %buf = waveamd.make_buffer %out, %range
       : !wave.ptr<#wave.global, i32>, i32 -> !wave.ptr<#waveamd.buffer, i32>
@@ -315,7 +315,7 @@ func.func @buffer_raw_unbounded_offset_needs_range(%out: !wave.ptr<#wave.global,
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 func.func @buffer_raw_overwide_offset_errors(%out: !wave.ptr<#wave.global, i32>, %raw_base: i32) attributes {wave.kernel} {
-  %raw = wave.assume_range %raw_base, [1073741824, 1073741824] : i32
+  %raw = wave.assume %raw_base as "x" [#wave.pred<"x >= 1073741824">, #wave.pred<"x <= 1073741824">] : i32
   %range = arith.constant 4096 : i32
   %buf = waveamd.make_buffer %out, %range
       : !wave.ptr<#wave.global, i32>, i32 -> !wave.ptr<#waveamd.buffer, i32>
@@ -343,7 +343,7 @@ func.func @buffer_dma_lds_unbounded_source_offset_needs_range(
   %buf = waveamd.make_buffer %in, %range
       : !wave.ptr<#wave.global, i32>, i32 -> !wave.ptr<#waveamd.buffer, i32>
   %wi_raw = wave.workitem_id 0 : !wave.simd<i32, 64>
-  %wi = wave.assume_range %wi_raw, [0, 63] : !wave.simd<i32, 64>
+  %wi = wave.assume %wi_raw as "x" [#wave.pred<"x >= 0">, #wave.pred<"x <= 63">] : !wave.simd<i32, 64>
   %off = wave.index_expr <"wi + 16*u"> ["wi", "u"](%wi, %u)
       : (!wave.simd<i32, 64>, i32) -> !wave.simd<index, 64>
   %src = wave.ptr_add %buf, %off
@@ -421,7 +421,7 @@ func.func @global_loop_dynamic_carry_negative_rejected(%out: !wave.ptr<#wave.glo
     attributes {wave.kernel} {
   %c0 = arith.constant 0 : i32
   %c1 = arith.constant 1 : i32
-  %delta = wave.assume_range %delta_raw, [-4, 32] : i32
+  %delta = wave.assume %delta_raw as "x" [#wave.pred<"x >= -4">, #wave.pred<"x <= 32">] : i32
   %lane = wave.lane_id : !wave.simd<i32, 32>
   %ptr = wave.ptr_add %out, %lane
       : !wave.ptr<#wave.global, f16>, !wave.simd<i32, 32>
