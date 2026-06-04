@@ -180,6 +180,36 @@ public:
   }
 };
 
+class ConvertWhereOp : public OpConversionPattern<WhereOp> {
+public:
+  using OpConversionPattern::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(WhereOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    SmallVector<Type> resultTypes;
+    if (failed(
+            getTypeConverter()->convertTypes(op.getResultTypes(), resultTypes)))
+      return failure();
+
+    OperationState state(op.getLoc(), WhereOp::getOperationName());
+    state.addOperands(adaptor.getCondition());
+    state.addTypes(resultTypes);
+    state.addAttributes(op->getAttrs());
+    state.addRegion();
+    state.addRegion();
+    WhereOp replacement = cast<WhereOp>(rewriter.create(state));
+    rewriter.inlineRegionBefore(op.getThenRegion(), replacement.getThenRegion(),
+                                replacement.getThenRegion().end());
+    if (!op.getElseRegion().empty())
+      rewriter.inlineRegionBefore(op.getElseRegion(),
+                                  replacement.getElseRegion(),
+                                  replacement.getElseRegion().end());
+    rewriter.replaceOp(op, replacement.getResults());
+    return success();
+  }
+};
+
 static bool hasLegalTypes(const TypeConverter &converter, Operation *op) {
   if (!converter.isLegal(op))
     return false;
@@ -192,9 +222,10 @@ static void
 populatePointerOffsetNormalizationPatterns(RewritePatternSet &patterns,
                                            const TypeConverter &converter) {
   MLIRContext *ctx = patterns.getContext();
-  patterns.add<NormalizePtrAddOp, ConvertNoRegionOp<LdsBaseOp>,
+  patterns.add<NormalizePtrAddOp, ConvertWhereOp, ConvertNoRegionOp<LdsBaseOp>,
                ConvertNoRegionOp<LoadOp>, ConvertNoRegionOp<StoreOp>,
-               ConvertNoRegionOp<SplatOp>, ConvertNoRegionOp<ReadFirstOp>,
+               ConvertNoRegionOp<SplatOp>, ConvertNoRegionOp<YieldOp>,
+               ConvertNoRegionOp<ReadFirstOp>,
                ConvertNoRegionOp<waveamd::MakeBufferOp>,
                ConvertNoRegionOp<waveamd::DmaLoadLdsOp>>(converter, ctx);
   populateAnyFunctionOpInterfaceTypeConversionPattern(patterns, converter);

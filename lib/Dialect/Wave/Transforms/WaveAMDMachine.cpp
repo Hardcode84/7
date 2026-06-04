@@ -3181,54 +3181,277 @@ static LogicalResult validateWhereMergeSource(WhereOp op, Value value,
   return success();
 }
 
+struct SelectedWhereRegion {
+  Region region;
+  SmallVector<Value> sourceYields;
+  SmallVector<Value> machineYields;
+};
+
 static LogicalResult selectMachineWhereRegion(WaveAMDMachineSelector &S,
-                                              Region &src, Region &dst,
-                                              SmallVectorImpl<Value> &yielded) {
-  dst.emplaceBlock();
+                                              Region &src,
+                                              SelectedWhereRegion &selected) {
+  selected.region.emplaceBlock();
   auto savedIP = S.builder.saveInsertionPoint();
-  S.builder.setInsertionPointToStart(&dst.front());
+  S.builder.setInsertionPointToStart(&selected.region.front());
   if (failed(S.selectRegion(src))) {
     S.builder.restoreInsertionPoint(savedIP);
     return failure();
   }
   YieldOp yield = cast<YieldOp>(src.front().getTerminator());
-  for (Value value : yield.getValues())
-    yielded.push_back(S.expect(value, yield));
-  waveamdmachine::YieldOp::create(S.builder, yield.getLoc(), yielded);
+  for (Value value : yield.getValues()) {
+    selected.sourceYields.push_back(value);
+    selected.machineYields.push_back(S.expect(value, yield));
+  }
   S.builder.restoreInsertionPoint(savedIP);
   return success();
 }
 
-static LogicalResult getExecIfResultTypes(WhereOp op, ArrayRef<Value> thenYield,
-                                          ArrayRef<Value> elseYield,
-                                          SmallVectorImpl<Type> &types) {
-  bool hasElse = !op.getElseRegion().empty();
+static void appendMachineYield(WaveAMDMachineSelector &S,
+                               SelectedWhereRegion &selected, Location loc,
+                               ArrayRef<Value> values) {
+  auto savedIP = S.builder.saveInsertionPoint();
+  S.builder.setInsertionPointToEnd(&selected.region.front());
+  waveamdmachine::YieldOp::create(S.builder, loc, values);
+  S.builder.restoreInsertionPoint(savedIP);
+}
+
+struct PointerWhereBinding {
+  unsigned sourceIndex = 0;
+  Value commonBase;
+  Value commonGlobalBase;
+  std::optional<unsigned> baseResult;
+  std::optional<unsigned> globalBaseResult;
+  unsigned offsetResult = 0;
+  bool isBuffer = false;
+};
+
+struct WhereResultBinding {
+  std::optional<unsigned> valueResult;
+  std::optional<PointerWhereBinding> pointer;
+};
+
+struct WhereResultPlan {
+  SmallVector<Type> resultTypes;
+  SmallVector<Value> thenValues;
+  SmallVector<Value> elseValues;
+  SmallVector<WhereResultBinding> bindings;
+
+  unsigned addResult(Type type, Value thenValue, Value elseValue = {}) {
+    unsigned index = resultTypes.size();
+    resultTypes.push_back(type);
+    thenValues.push_back(thenValue);
+    if (elseValue)
+      elseValues.push_back(elseValue);
+    return index;
+  }
+};
+
+struct PointerWhereMetadata {
+  Value base;
+  Value globalBase;
+  PointerOffset offset;
+  bool isBuffer = false;
+};
+
+static FailureOr<PointerWhereMetadata>
+lookupPointerWhereMetadata(WaveAMDMachineSelector &S, WhereOp op, Value pointer,
+                           StringRef arm) {
+  auto baseIt = S.pointerBases.find(pointer);
+  auto offsetIt = S.pointerIndexOffsets.find(pointer);
+  if (baseIt == S.pointerBases.end() || offsetIt == S.pointerIndexOffsets.end())
+    return op.emitError(arm) << " pointer yield is missing address metadata";
+  return PointerWhereMetadata{
+      baseIt->second, S.pointerGlobalBases.lookup(pointer), offsetIt->second,
+      S.pointerBuffers.lookup(pointer)};
+}
+
+static FailureOr<Value>
+materializePointerWhereOffset(WaveAMDMachineSelector &S, WhereOp op,
+                              SelectedWhereRegion &selected,
+                              const PointerOffset &offset) {
+  auto savedIP = S.builder.saveInsertionPoint();
+  S.builder.setInsertionPointToEnd(&selected.region.front());
+  FailureOr<Value> value =
+      materializePointerOffsetVGPR(S, op.getOperation(), offset);
+  S.builder.restoreInsertionPoint(savedIP);
+  return value;
+}
+
+static bool isNestedInRegion(Region *parent, Region &region) {
+  while (parent) {
+    if (parent == &region)
+      return true;
+    Operation *parentOp = parent->getParentOp();
+    parent = parentOp ? parentOp->getParentRegion() : nullptr;
+  }
+  return false;
+}
+
+static bool isDefinedInRegion(Value value, Region &region) {
+  if (BlockArgument arg = dyn_cast<BlockArgument>(value))
+    return isNestedInRegion(arg.getOwner()->getParent(), region);
+  Operation *def = value.getDefiningOp();
+  return def && isNestedInRegion(def->getParentRegion(), region);
+}
+
+static LogicalResult addSelectedPointerOffset(WaveAMDMachineSelector &S,
+                                              WhereOp op, PointerOffset &offset,
+                                              Value selected) {
+  std::string name = (Twine("__wave_where_ptr_") + Twine(S.nextLabel++)).str();
+  FailureOr<sym::ExprHandle> expr = sym::composeExprSym(S.symbolStore(), name);
+  if (failed(expr))
+    return op.emitError("failed to compose wave.where pointer offset");
+  offset.expr = *expr;
+  offset.bindings.push_back({name, selected, TermKind::Lane});
+  FailureOr<sym::PredHandle> range =
+      sym::rangeAssumption(S.symbolStore(), name, 0, (int64_t{1} << 32) - 1);
+  if (failed(range))
+    return op.emitError("failed to compose wave.where pointer offset range");
+  offset.assumptions.push_back(*range);
+  S.values[selected] = selected;
+  return success();
+}
+
+static LogicalResult addNoElsePointerResult(WaveAMDMachineSelector &S,
+                                            WhereOp op, unsigned idx,
+                                            SelectedWhereRegion &thenRegion,
+                                            WhereResultPlan &plan) {
+  FailureOr<PointerWhereMetadata> metadata =
+      lookupPointerWhereMetadata(S, op, thenRegion.sourceYields[idx], "then");
+  if (failed(metadata))
+    return failure();
+  FailureOr<Value> offset =
+      materializePointerWhereOffset(S, op, thenRegion, metadata->offset);
+  if (failed(offset))
+    return failure();
+
+  PointerWhereBinding pointer;
+  pointer.sourceIndex = idx;
+  if (isDefinedInRegion(metadata->base, thenRegion.region))
+    pointer.baseResult =
+        plan.addResult(metadata->base.getType(), metadata->base);
+  else
+    pointer.commonBase = metadata->base;
+  if (metadata->globalBase) {
+    if (isDefinedInRegion(metadata->globalBase, thenRegion.region))
+      pointer.globalBaseResult =
+          plan.addResult(metadata->globalBase.getType(), metadata->globalBase);
+    else
+      pointer.commonGlobalBase = metadata->globalBase;
+  }
+  pointer.offsetResult = plan.addResult((*offset).getType(), *offset);
+  pointer.isBuffer = metadata->isBuffer;
+  plan.bindings.push_back({std::nullopt, pointer});
+  return success();
+}
+
+static LogicalResult requireMatchingPointerWhereBase(WhereOp op, Value lhs,
+                                                     Value rhs,
+                                                     StringRef name) {
+  if (lhs == rhs)
+    return success();
+  return op.emitError("wave.where pointer otherwise requires matching ")
+         << name;
+}
+
+static LogicalResult addOtherwisePointerResult(WaveAMDMachineSelector &S,
+                                               WhereOp op, unsigned idx,
+                                               SelectedWhereRegion &thenRegion,
+                                               SelectedWhereRegion &elseRegion,
+                                               WhereResultPlan &plan) {
+  FailureOr<PointerWhereMetadata> thenMetadata =
+      lookupPointerWhereMetadata(S, op, thenRegion.sourceYields[idx], "then");
+  FailureOr<PointerWhereMetadata> elseMetadata =
+      lookupPointerWhereMetadata(S, op, elseRegion.sourceYields[idx], "else");
+  if (failed(thenMetadata) || failed(elseMetadata))
+    return failure();
+  if (thenMetadata->isBuffer != elseMetadata->isBuffer)
+    return op.emitError(
+        "wave.where pointer otherwise requires matching pointer kinds");
+  if (failed(requireMatchingPointerWhereBase(
+          op, thenMetadata->base, elseMetadata->base, "pointer bases")) ||
+      failed(requireMatchingPointerWhereBase(op, thenMetadata->globalBase,
+                                             elseMetadata->globalBase,
+                                             "global bases")))
+    return failure();
+
+  FailureOr<Value> thenOffset =
+      materializePointerWhereOffset(S, op, thenRegion, thenMetadata->offset);
+  FailureOr<Value> elseOffset =
+      materializePointerWhereOffset(S, op, elseRegion, elseMetadata->offset);
+  if (failed(thenOffset) || failed(elseOffset))
+    return failure();
+
+  PointerWhereBinding pointer;
+  pointer.sourceIndex = idx;
+  pointer.commonBase = thenMetadata->base;
+  pointer.commonGlobalBase = thenMetadata->globalBase;
+  pointer.offsetResult =
+      plan.addResult((*thenOffset).getType(), *thenOffset, *elseOffset);
+  pointer.isBuffer = thenMetadata->isBuffer;
+  plan.bindings.push_back({std::nullopt, pointer});
+  return success();
+}
+
+static LogicalResult addPointerResult(WaveAMDMachineSelector &S, WhereOp op,
+                                      unsigned idx,
+                                      SelectedWhereRegion &thenRegion,
+                                      SelectedWhereRegion &elseRegion,
+                                      WhereResultPlan &plan) {
+  if (op.getElseRegion().empty())
+    return addNoElsePointerResult(S, op, idx, thenRegion, plan);
+  return addOtherwisePointerResult(S, op, idx, thenRegion, elseRegion, plan);
+}
+
+static LogicalResult addDataResult(WhereOp op, unsigned idx,
+                                   SelectedWhereRegion &thenRegion,
+                                   SelectedWhereRegion &elseRegion,
+                                   WhereResultPlan &plan) {
+  Value result = op.getResult(idx);
+  Value thenValue = thenRegion.machineYields[idx];
+  if (op.getElseRegion().empty()) {
+    unsigned resultIndex = plan.addResult(thenValue.getType(), thenValue);
+    plan.bindings.push_back({resultIndex, std::nullopt});
+    return success();
+  }
+  Value elseValue = elseRegion.machineYields[idx];
+  Type resultType = result.getType();
+  if (isa<MemTokenType>(resultType)) {
+    unsigned resultIndex =
+        plan.addResult(getMemTokenType(op.getContext()), thenValue, elseValue);
+    plan.bindings.push_back({resultIndex, std::nullopt});
+    return success();
+  }
+  if (!isa<SimdType>(resultType))
+    return op.emitError(
+        "WaveAMDMachine lowering supports result-bearing wave.where "
+        "with otherwise only for SIMD data, pointers, or memory tokens");
+  FailureOr<unsigned> width =
+      getRegisterPayloadWidth(resultType, [&]() { return op.emitError(); });
+  if (failed(width))
+    return failure();
+  if (failed(validateWhereMergeSource(op, thenValue, *width, "then")) ||
+      failed(validateWhereMergeSource(op, elseValue, *width, "else")))
+    return failure();
+  Type type =
+      getRegType(op.getContext(), waveamdmachine::RegClass::VGPR, *width);
+  unsigned resultIndex = plan.addResult(type, thenValue, elseValue);
+  plan.bindings.push_back({resultIndex, std::nullopt});
+  return success();
+}
+
+static LogicalResult buildWhereResultPlan(WaveAMDMachineSelector &S, WhereOp op,
+                                          SelectedWhereRegion &thenRegion,
+                                          SelectedWhereRegion &elseRegion,
+                                          WhereResultPlan &plan) {
   for (auto [idx, result] : llvm::enumerate(op.getResults())) {
-    if (isPointerLikeWhereResult(result.getType()))
-      return op.emitError(
-          "WaveAMDMachine lowering does not support result-bearing "
-          "wave.where for pointer results");
-    if (!hasElse) {
-      types.push_back(thenYield[idx].getType());
+    if (isPointerLikeWhereResult(result.getType())) {
+      if (failed(addPointerResult(S, op, idx, thenRegion, elseRegion, plan)))
+        return failure();
       continue;
     }
-    if (isa<MemTokenType>(result.getType())) {
-      types.push_back(getMemTokenType(op.getContext()));
-      continue;
-    }
-    if (!isa<SimdType>(result.getType()))
-      return op.emitError(
-          "WaveAMDMachine lowering supports result-bearing wave.where "
-          "with otherwise only for SIMD data or memory tokens");
-    FailureOr<unsigned> width = getRegisterPayloadWidth(
-        result.getType(), [&]() { return op.emitError(); });
-    if (failed(width))
+    if (failed(addDataResult(op, idx, thenRegion, elseRegion, plan)))
       return failure();
-    if (failed(validateWhereMergeSource(op, thenYield[idx], *width, "then")) ||
-        failed(validateWhereMergeSource(op, elseYield[idx], *width, "else")))
-      return failure();
-    types.push_back(
-        getRegType(op.getContext(), waveamdmachine::RegClass::VGPR, *width));
   }
   return success();
 }
@@ -3244,53 +3467,87 @@ createExecIf(WaveAMDMachineSelector &S, Location loc, Value condition,
   return cast<waveamdmachine::ExecIfOp>(S.builder.create(state));
 }
 
-static void bindExecIfResults(WaveAMDMachineSelector &S, WhereOp op,
-                              waveamdmachine::ExecIfOp execIf) {
-  for (auto [result, selected] :
-       llvm::zip_equal(op.getResults(), execIf.getResults()))
-    S.values[result] = selected;
+static LogicalResult
+bindPointerWhereResult(WaveAMDMachineSelector &S, WhereOp op,
+                       waveamdmachine::ExecIfOp execIf,
+                       const PointerWhereBinding &pointer) {
+  Value sourceResult = op.getResult(pointer.sourceIndex);
+  Value base = pointer.commonBase;
+  if (!base)
+    base = execIf.getResult(*pointer.baseResult);
+  assert(base && "pointer where base missing");
+  Value globalBase = pointer.commonGlobalBase;
+  if (!globalBase && pointer.globalBaseResult)
+    globalBase = execIf.getResult(*pointer.globalBaseResult);
+  Value offset = execIf.getResult(pointer.offsetResult);
+  S.values[sourceResult] = base;
+  S.pointerBases[sourceResult] = base;
+  if (globalBase)
+    S.pointerGlobalBases[sourceResult] = globalBase;
+  PointerOffset selectedOffset;
+  if (failed(addSelectedPointerOffset(S, op, selectedOffset, offset)))
+    return failure();
+  S.pointerIndexOffsets[sourceResult] = std::move(selectedOffset);
+  S.pointerBuffers[sourceResult] = pointer.isBuffer;
+  return success();
+}
+
+static LogicalResult bindWhereResults(WaveAMDMachineSelector &S, WhereOp op,
+                                      waveamdmachine::ExecIfOp execIf,
+                                      const WhereResultPlan &plan) {
+  for (auto [sourceResult, binding] :
+       llvm::zip_equal(op.getResults(), plan.bindings)) {
+    if (binding.pointer) {
+      if (failed(bindPointerWhereResult(S, op, execIf, *binding.pointer)))
+        return failure();
+      continue;
+    }
+    Value selected = execIf.getResult(*binding.valueResult);
+    S.values[sourceResult] = selected;
+    S.values[selected] = selected;
+  }
+  return success();
 }
 
 static LogicalResult validateWhereResultCount(WhereOp op,
-                                              ArrayRef<Value> thenYield,
-                                              ArrayRef<Value> elseYield) {
-  if (thenYield.size() != op.getNumResults())
+                                              SelectedWhereRegion &thenRegion,
+                                              SelectedWhereRegion &elseRegion) {
+  if (thenRegion.sourceYields.size() != op.getNumResults())
     return op.emitError("then yield count must match result count");
-  if (!op.getElseRegion().empty() && elseYield.size() != op.getNumResults())
+  if (!op.getElseRegion().empty() &&
+      elseRegion.sourceYields.size() != op.getNumResults())
     return op.emitError("else yield count must match result count");
   return success();
 }
 
 static LogicalResult prepareExecIfRegions(WaveAMDMachineSelector &S, WhereOp op,
-                                          Region &thenRegion,
-                                          Region &elseRegion,
-                                          SmallVectorImpl<Value> &thenYield,
-                                          SmallVectorImpl<Value> &elseYield) {
-  if (failed(selectMachineWhereRegion(S, op.getThenRegion(), thenRegion,
-                                      thenYield)))
+                                          SelectedWhereRegion &thenRegion,
+                                          SelectedWhereRegion &elseRegion) {
+  if (failed(selectMachineWhereRegion(S, op.getThenRegion(), thenRegion)))
     return failure();
   if (!op.getElseRegion().empty() &&
-      failed(selectMachineWhereRegion(S, op.getElseRegion(), elseRegion,
-                                      elseYield)))
+      failed(selectMachineWhereRegion(S, op.getElseRegion(), elseRegion)))
     return failure();
-  return validateWhereResultCount(op, thenYield, elseYield);
+  return validateWhereResultCount(op, thenRegion, elseRegion);
 }
 
 static LogicalResult createStructuredWhere(WaveAMDMachineSelector &S,
                                            WhereOp op, Value condition) {
-  Region thenRegion;
-  Region elseRegion;
-  SmallVector<Value> thenYield;
-  SmallVector<Value> elseYield;
-  if (failed(prepareExecIfRegions(S, op, thenRegion, elseRegion, thenYield,
-                                  elseYield)))
+  SelectedWhereRegion thenRegion;
+  SelectedWhereRegion elseRegion;
+  if (failed(prepareExecIfRegions(S, op, thenRegion, elseRegion)))
     return failure();
-  SmallVector<Type> resultTypes;
-  if (failed(getExecIfResultTypes(op, thenYield, elseYield, resultTypes)))
+  WhereResultPlan plan;
+  if (failed(buildWhereResultPlan(S, op, thenRegion, elseRegion, plan)))
     return failure();
-  waveamdmachine::ExecIfOp execIf = createExecIf(
-      S, op.getLoc(), condition, resultTypes, thenRegion, elseRegion);
-  bindExecIfResults(S, op, execIf);
+  appendMachineYield(S, thenRegion, op.getLoc(), plan.thenValues);
+  if (!op.getElseRegion().empty())
+    appendMachineYield(S, elseRegion, op.getLoc(), plan.elseValues);
+  waveamdmachine::ExecIfOp execIf =
+      createExecIf(S, op.getLoc(), condition, plan.resultTypes,
+                   thenRegion.region, elseRegion.region);
+  if (failed(bindWhereResults(S, op, execIf, plan)))
+    return failure();
   S.builder.setInsertionPointAfter(execIf);
   return success();
 }

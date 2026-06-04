@@ -186,6 +186,35 @@ func.func @gfx942_rejects_where_wave32_mask(%active: !wave.mask<32>) {
 
 // -----
 
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
+func.func @where_otherwise_pointer_different_base(
+    %a: !wave.ptr<#wave.global, i32>, %b: !wave.ptr<#wave.global, i32>,
+    %limit: i32) attributes {wave.kernel} {
+  %lane = wave.lane_id : !wave.simd<i32, 32>
+  %vlimit = wave.splat %limit : i32 -> !wave.simd<i32, 32>
+  %active = wave.cmpi ult %lane, %vlimit
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.mask<32>
+  // expected-error @below {{wave.where pointer otherwise requires matching pointer bases}}
+  %ptrs = wave.where %active {
+    %then_ptr = wave.ptr_add %a, %lane
+        : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 32>
+        -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
+    wave.yield %then_ptr : !wave.simd<!wave.ptr<#wave.global, i32>, 32>
+  } otherwise {
+    %else_ptr = wave.ptr_add %b, %lane
+        : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 32>
+        -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
+    wave.yield %else_ptr : !wave.simd<!wave.ptr<#wave.global, i32>, 32>
+  } : !wave.mask<32> -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
+  %tok = wave.store %lane -> %ptrs
+      : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>)
+      -> !wave.mem.token
+  return
+}
+}
+
+// -----
+
 func.func @kernel_return_value(%x: i32) -> i32 attributes {wave.kernel} {
   // expected-error @below {{kernel functions must return void}}
   return %x : i32

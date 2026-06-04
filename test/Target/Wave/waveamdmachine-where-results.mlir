@@ -218,4 +218,69 @@ func.func @where_otherwise_recomputes_else_address(
   return
 }
 
+// SELECT-LABEL: func.func @where_yields_pointer
+// SELECT: waveamdmachine.exec_if
+// SELECT: waveamdmachine.yield {{.*}} : !waveamdmachine.reg<vgpr, 1>
+// SELECT: waveamdmachine.global_store_b32
+// ASM-LABEL: where_yields_pointer:
+// ASM: global_store_b32
+func.func @where_yields_pointer(%out: !wave.ptr<#wave.global, i32>,
+                                %limit: i32) attributes {wave.kernel} {
+  %c4 = arith.constant 4 : i32
+  %lane = wave.lane_id : !wave.simd<i32, 32>
+  %vlimit = wave.splat %limit : i32 -> !wave.simd<i32, 32>
+  %active = wave.cmpi ult %lane, %vlimit
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.mask<32>
+  %ptrs = wave.where %active {
+    %offset = wave.addi %lane, %c4
+        : !wave.simd<i32, 32>, i32 -> !wave.simd<i32, 32>
+    %ptr = wave.ptr_add %out, %offset
+        : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 32>
+        -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
+    wave.yield %ptr : !wave.simd<!wave.ptr<#wave.global, i32>, 32>
+  } : !wave.mask<32> -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
+  %tok = wave.store %lane -> %ptrs
+      : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>)
+      -> !wave.mem.token
+  wave.wait %tok : !wave.mem.token
+  return
+}
+
+// SELECT-LABEL: func.func @where_otherwise_yields_same_base_pointer
+// SELECT: waveamdmachine.exec_if
+// SELECT: otherwise
+// SELECT: waveamdmachine.global_store_b32
+// LINEAR-LABEL: func.func @where_otherwise_yields_same_base_pointer
+// LINEAR: waveamdmachine.v_cndmask_b32_tuple
+// LINEAR: waveamdmachine.global_store_b32
+// ASM-LABEL: where_otherwise_yields_same_base_pointer:
+// ASM: v_cndmask_b32_e64
+// ASM: global_store_b32
+func.func @where_otherwise_yields_same_base_pointer(
+    %out: !wave.ptr<#wave.global, i32>, %limit: i32) attributes {wave.kernel} {
+  %c4 = arith.constant 4 : i32
+  %lane = wave.lane_id : !wave.simd<i32, 32>
+  %vlimit = wave.splat %limit : i32 -> !wave.simd<i32, 32>
+  %active = wave.cmpi ult %lane, %vlimit
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.mask<32>
+  %ptrs = wave.where %active {
+    %then_ptr = wave.ptr_add %out, %lane
+        : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 32>
+        -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
+    wave.yield %then_ptr : !wave.simd<!wave.ptr<#wave.global, i32>, 32>
+  } otherwise {
+    %else_offset = wave.addi %lane, %c4
+        : !wave.simd<i32, 32>, i32 -> !wave.simd<i32, 32>
+    %else_ptr = wave.ptr_add %out, %else_offset
+        : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 32>
+        -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
+    wave.yield %else_ptr : !wave.simd<!wave.ptr<#wave.global, i32>, 32>
+  } : !wave.mask<32> -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
+  %tok = wave.store %lane -> %ptrs
+      : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>)
+      -> !wave.mem.token
+  wave.wait %tok : !wave.mem.token
+  return
+}
+
 }
