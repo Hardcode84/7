@@ -1639,6 +1639,20 @@ def WaveAMDMachine_DsStoreB32Op
   }];
 }
 
+def WaveAMDMachine_DsStoreB8Op
+    : WaveAMDMachine_DsMemoryOp<"ds_store_b8", [WaveAMDMachine_LDSStore]>,
+      WaveAMDMachine_LDSInfo<"1"> {
+  let summary = "LDS 8-bit store";
+  let arguments = (ins WaveAMDMachine_VGPR1:$addr, WaveAMDMachine_VGPR1:$value,
+                       Optional<WaveAMDMachine_MemToken>:$dependency,
+                       DefaultValuedAttr<I64Attr, "0">:$offset);
+  let results = (outs Optional<WaveAMDMachine_MemToken>:$token);
+  let assemblyFormat = [{
+    $addr `,` $value (`after` $dependency^)? (`offset` $offset^)?
+    attr-dict `:` functional-type(operands, results)
+  }];
+}
+
 def WaveAMDMachine_DsLoadB64Op
     : WaveAMDMachine_DsMemoryOp<"ds_load_b64", [WaveAMDMachine_LDSLoad]>,
       WaveAMDMachine_LDSInfo<"1"> {
@@ -1652,6 +1666,40 @@ def WaveAMDMachine_DsLoadB64Op
     $addr (`after` $dependency^)? (`offset` $offset^)?
     attr-dict `:` functional-type(operands, results)
   }];
+}
+
+def WaveAMDMachine_DsReadTrB64B4Op
+    : WaveAMDMachine_DsMemoryOp<"ds_read_tr_b64_b4",
+                                [WaveAMDMachine_LDSLoad]>,
+      WaveAMDMachine_LDSInfo<"1"> {
+  let summary = "gfx950 LDS 64-bit transposed read over 4 lanes";
+  let arguments = (ins WaveAMDMachine_VGPR1:$addr,
+                       Optional<WaveAMDMachine_MemToken>:$dependency,
+                       DefaultValuedAttr<I64Attr, "0">:$offset);
+  let results = (outs WaveAMDMachine_VGPR2:$result,
+                      Optional<WaveAMDMachine_MemToken>:$token);
+  let assemblyFormat = [{
+    $addr (`after` $dependency^)? (`offset` $offset^)?
+    attr-dict `:` functional-type(operands, results)
+  }];
+  let archPredicate = WaveAMDMachine_Gfx950;
+}
+
+def WaveAMDMachine_DsReadTrB64B8Op
+    : WaveAMDMachine_DsMemoryOp<"ds_read_tr_b64_b8",
+                                [WaveAMDMachine_LDSLoad]>,
+      WaveAMDMachine_LDSInfo<"1"> {
+  let summary = "gfx950 LDS 64-bit transposed read over 8 lanes";
+  let arguments = (ins WaveAMDMachine_VGPR1:$addr,
+                       Optional<WaveAMDMachine_MemToken>:$dependency,
+                       DefaultValuedAttr<I64Attr, "0">:$offset);
+  let results = (outs WaveAMDMachine_VGPR2:$result,
+                      Optional<WaveAMDMachine_MemToken>:$token);
+  let assemblyFormat = [{
+    $addr (`after` $dependency^)? (`offset` $offset^)?
+    attr-dict `:` functional-type(operands, results)
+  }];
+  let archPredicate = WaveAMDMachine_Gfx950;
 }
 
 def WaveAMDMachine_DsLoadB96Op

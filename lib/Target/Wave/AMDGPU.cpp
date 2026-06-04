@@ -216,8 +216,11 @@ struct KernelInfo {
   X(bufferStoreB128, BUFFER_STORE_DWORDX4_OFFEN_vi,                            \
     BUFFER_STORE_DWORDX4_OFFEN_gfx11)                                          \
   X(dsReadB64, DS_READ_B64_vi_gfx9, DS_READ_B64_gfx11)                         \
+  X(dsReadB64TrB4, DS_READ_B64_TR_B4_vi, DS_READ_B64_TR_B4)                    \
+  X(dsReadB64TrB8, DS_READ_B64_TR_B8_vi, DS_READ_B64_TR_B8)                    \
   X(dsReadB96, DS_READ_B96_vi_gfx9, DS_READ_B96_gfx11)                         \
   X(dsReadB128, DS_READ_B128_vi_gfx9, DS_READ_B128_gfx11)                      \
+  X(dsWriteB8, DS_WRITE_B8_vi_gfx9, DS_WRITE_B8_gfx11)                         \
   X(dsWriteB64, DS_WRITE_B64_vi_gfx9, DS_WRITE_B64_gfx11)                      \
   X(dsWriteB96, DS_WRITE_B96_vi_gfx9, DS_WRITE_B96_gfx11)                      \
   X(dsWriteB128, DS_WRITE_B128_vi_gfx9, DS_WRITE_B128_gfx11)                   \
@@ -598,8 +601,11 @@ private:
   unsigned bufferStoreB96() const { return opcodes.bufferStoreB96; }
   unsigned bufferStoreB128() const { return opcodes.bufferStoreB128; }
   unsigned dsReadB64() const { return opcodes.dsReadB64; }
+  unsigned dsReadB64TrB4() const { return opcodes.dsReadB64TrB4; }
+  unsigned dsReadB64TrB8() const { return opcodes.dsReadB64TrB8; }
   unsigned dsReadB96() const { return opcodes.dsReadB96; }
   unsigned dsReadB128() const { return opcodes.dsReadB128; }
+  unsigned dsWriteB8() const { return opcodes.dsWriteB8; }
   unsigned dsWriteB64() const { return opcodes.dsWriteB64; }
   unsigned dsWriteB96() const { return opcodes.dsWriteB96; }
   unsigned dsWriteB128() const { return opcodes.dsWriteB128; }
@@ -2138,6 +2144,16 @@ private:
       return emitDsLoad(op, dsReadB32());
     if (isa<waveamdmachine::DsLoadB64Op>(op))
       return emitDsLoad(op, dsReadB64());
+    if (isa<waveamdmachine::DsReadTrB64B4Op>(op)) {
+      if (!waveamdmachine::DsReadTrB64B4Op::isSupportedOnIsa(isaVersion))
+        return op.emitError("ds_read_tr_b64_b4 requires gfx950");
+      return emitDsLoad(op, dsReadB64TrB4());
+    }
+    if (isa<waveamdmachine::DsReadTrB64B8Op>(op)) {
+      if (!waveamdmachine::DsReadTrB64B8Op::isSupportedOnIsa(isaVersion))
+        return op.emitError("ds_read_tr_b64_b8 requires gfx950");
+      return emitDsLoad(op, dsReadB64TrB8());
+    }
     if (isa<waveamdmachine::DsLoadB96Op>(op))
       return emitDsLoad(op, dsReadB96());
     if (isa<waveamdmachine::DsLoadB128Op>(op))
@@ -2150,6 +2166,8 @@ private:
       return emitDsPermute(op, dsBpermuteB32());
     if (isa<waveamdmachine::DsStoreB16Op>(op))
       return emitDsStore(op, dsWriteB16());
+    if (isa<waveamdmachine::DsStoreB8Op>(op))
+      return emitDsStore(op, dsWriteB8());
     if (isa<waveamdmachine::DsStoreB32Op>(op))
       return emitDsStore(op, dsWriteB32());
     if (isa<waveamdmachine::DsStoreB64Op>(op))

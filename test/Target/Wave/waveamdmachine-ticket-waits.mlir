@@ -90,6 +90,42 @@ func.func @mixed_lgkm_events_clamp_zero(%x: !waveamdmachine.reg<vgpr, 1>) {
 
 // -----
 
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
+
+// CHECK-LABEL: func.func @gfx950_ds_byte_and_transpose_are_lgkm_issuers
+// CHECK: waveamdmachine.ds_store_b8
+// CHECK: waveamdmachine.imm
+// CHECK-NEXT: waveamdmachine.s_waitcnt
+// CHECK-NEXT: waveamdmachine.wait
+// CHECK: waveamdmachine.ds_read_tr_b64_b4
+// CHECK-NEXT: waveamdmachine.ds_read_tr_b64_b8
+// CHECK: waveamdmachine.imm
+// CHECK-NEXT: waveamdmachine.s_waitcnt
+// CHECK-NEXT: waveamdmachine.v_add_u32
+func.func @gfx950_ds_byte_and_transpose_are_lgkm_issuers(%x: !waveamdmachine.reg<vgpr, 1>) {
+  %store = waveamdmachine.ds_store_b8 %x, %x
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.mem.token
+  waveamdmachine.wait %store : (!waveamdmachine.mem.token) -> ()
+  %b4, %tok4 = waveamdmachine.ds_read_tr_b64_b4 %x
+      : (!waveamdmachine.reg<vgpr, 1>)
+        -> (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.mem.token)
+  %b8, %tok8 = waveamdmachine.ds_read_tr_b64_b8 %x
+      : (!waveamdmachine.reg<vgpr, 1>)
+        -> (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.mem.token)
+  %lo, %hi = waveamdmachine.tuple_to_elements %b4
+      : (!waveamdmachine.reg<vgpr, 2>)
+        -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+  %sum = waveamdmachine.v_add_u32 %x, %lo
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  return
+}
+
+}
+
+// -----
+
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
 // CHECK-LABEL: func.func @existing_nonzero_smem_wait_not_sufficient
