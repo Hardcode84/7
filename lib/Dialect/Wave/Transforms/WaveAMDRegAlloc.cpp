@@ -316,9 +316,14 @@ struct WaveAMDRegAllocPass
       if (use->get() != original)
         continue;
       Operation *user = use->getOwner();
-      if (original != agpr &&
-          isa<waveamdmachine::VAccvgprWriteB32TupleOp>(user))
+      if (auto write =
+              dyn_cast<waveamdmachine::VAccvgprWriteB32TupleOp>(user)) {
+        if (write.getResult() != agpr) {
+          write.getResult().replaceAllUsesWith(agpr);
+          write.erase();
+        }
         continue;
+      }
       if (canConsumeAGPR(*use, groupValues)) {
         use->set(agpr);
         continue;
@@ -727,12 +732,19 @@ struct WaveAMDRegAllocPass
     });
   }
 
+  static bool isAGPRReload(Value value) {
+    return isa_and_nonnull<waveamdmachine::VAccvgprReadB32TupleOp>(
+        value.getDefiningOp());
+  }
+
   static bool canMaterializeAndProgressAGPRCandidate(
       ArrayRef<unsigned> group, ArrayRef<wave::WaveAMDLiveInterval> intervals) {
     llvm::DenseSet<Value> groupValues = collectGroupValues(group, intervals);
     bool canProgress = false;
     for (unsigned intervalIndex : group) {
       for (Value value : intervals[intervalIndex].values) {
+        if (isAGPRReload(value))
+          return false;
         if (canDefineAGPR(value, groupValues)) {
           canProgress = true;
           continue;
