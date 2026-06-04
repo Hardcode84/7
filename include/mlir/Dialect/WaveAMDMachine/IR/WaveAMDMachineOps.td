@@ -27,6 +27,10 @@ defvar WaveAMDMachine_Gfx940Plus =
     "(isa.Minor == 5 && isa.Stepping == 0))";
 defvar WaveAMDMachine_Gfx950 =
     "isa.Major == 9 && isa.Minor == 5 && isa.Stepping == 0";
+defvar WaveAMDMachine_AGPRTarget =
+    "isa.Major == 9 && ((isa.Minor == 0 && " #
+    "(isa.Stepping == 8 || isa.Stepping == 10)) || " #
+    "isa.Minor == 4 || (isa.Minor == 5 && isa.Stepping == 0))";
 defvar WaveAMDMachine_Gfx8To13 =
     "isa.Major >= 8 && isa.Major <= 13";
 
@@ -176,6 +180,17 @@ def WaveAMDMachine_VGPR4
                  "::llvm::cast<::mlir::waveamdmachine::RegType>($_self).getWidth() == 4">,
            "WaveAMDMachine VGPR quad register">;
 
+def WaveAMDMachine_AGPR
+    : Type<CPred<"::llvm::isa<::mlir::waveamdmachine::RegType>($_self) && "
+                 "::llvm::cast<::mlir::waveamdmachine::RegType>($_self).getRegClass() == ::mlir::waveamdmachine::RegClass::AGPR">,
+           "WaveAMDMachine AGPR register">;
+
+def WaveAMDMachine_AVGPR
+    : Type<CPred<"::llvm::isa<::mlir::waveamdmachine::RegType>($_self) && "
+                 "(::llvm::cast<::mlir::waveamdmachine::RegType>($_self).getRegClass() == ::mlir::waveamdmachine::RegClass::VGPR || "
+                 "::llvm::cast<::mlir::waveamdmachine::RegType>($_self).getRegClass() == ::mlir::waveamdmachine::RegClass::AGPR)">,
+           "WaveAMDMachine VGPR or AGPR register">;
+
 // SCC is the status condition code: a 1-bit hardware register implicitly
 // written by scalar ALU ops (s_cmp_*, s_add_i32 carry-out, ...) and read
 // by s_cbranch_scc0/1. There is exactly one physical SCC, so the
@@ -201,9 +216,11 @@ def WaveAMDMachine_SGPR1OrImm
            "WaveAMDMachine SGPR or immediate">;
 
 def WaveAMDMachine_RegOrImm
-    : Type<CPred<"::llvm::isa<::mlir::waveamdmachine::RegType>($_self) || "
+    : Type<CPred<"(::llvm::isa<::mlir::waveamdmachine::RegType>($_self) && "
+                 "(::llvm::cast<::mlir::waveamdmachine::RegType>($_self).getRegClass() == ::mlir::waveamdmachine::RegClass::SGPR || "
+                 "::llvm::cast<::mlir::waveamdmachine::RegType>($_self).getRegClass() == ::mlir::waveamdmachine::RegClass::VGPR)) || "
                  "::llvm::isa<::mlir::waveamdmachine::ImmType>($_self)">,
-           "WaveAMDMachine register or immediate">;
+           "WaveAMDMachine SGPR/VGPR register or immediate">;
 
 def WaveAMDMachine_RegOrMemToken
     : Type<CPred<"::llvm::isa<::mlir::waveamdmachine::RegType>($_self) || "
@@ -501,6 +518,24 @@ def WaveAMDMachine_VCndmaskB32TupleOp
   let hasVerifier = 1;
 }
 
+def WaveAMDMachine_VAccvgprReadB32TupleOp
+    : WaveAMDMachine_UnaryResult<"v_accvgpr_read_b32_tuple",
+                                 WaveAMDMachine_AGPR, WaveAMDMachine_VGPR,
+                                 [WaveAMDMachine_VALU, Pure]> {
+  let summary = "copy an AGPR tuple into VGPRs";
+  let archPredicate = WaveAMDMachine_AGPRTarget;
+  let hasVerifier = 1;
+}
+
+def WaveAMDMachine_VAccvgprWriteB32TupleOp
+    : WaveAMDMachine_UnaryResult<"v_accvgpr_write_b32_tuple",
+                                 WaveAMDMachine_VGPR, WaveAMDMachine_AGPR,
+                                 [WaveAMDMachine_VALU, Pure]> {
+  let summary = "copy a VGPR tuple into AGPRs";
+  let archPredicate = WaveAMDMachine_AGPRTarget;
+  let hasVerifier = 1;
+}
+
 // Pure SSA renames between a GPR tuple (SGPR/VGPR/AGPR) and its
 // constituent GPR pieces. Elements may be any width as long as
 // their widths sum to the tuple width, and all pieces must share
@@ -694,34 +729,34 @@ def WaveAMDMachine_WmmaF32_16x16x16_BF16Op
   let archPredicate = "isa.Major == 11";
 }
 def WaveAMDMachine_MfmaF32_16x16x16_F16Op
-    : WaveAMDMachine_TernaryResult<"mfma_f32_16x16x16_f16", WaveAMDMachine_VGPR,
-                                WaveAMDMachine_VGPR,
-                                [WaveAMDMachine_VALU, WaveAMDMachine_MFMA,
-                                 WaveAMDMachine_ReadsExec]> {
+    : WaveAMDMachine_TernaryResult<"mfma_f32_16x16x16_f16", WaveAMDMachine_AVGPR,
+                                   WaveAMDMachine_AVGPR,
+                                   [WaveAMDMachine_VALU, WaveAMDMachine_MFMA,
+                                    WaveAMDMachine_ReadsExec]> {
   let hasVerifier = 1;
   let archPredicate = WaveAMDMachine_Gfx90APlus;
 }
 def WaveAMDMachine_MfmaF32_16x16x16_BF16Op
-    : WaveAMDMachine_TernaryResult<"mfma_f32_16x16x16_bf16", WaveAMDMachine_VGPR,
-                                WaveAMDMachine_VGPR,
-                                [WaveAMDMachine_VALU, WaveAMDMachine_MFMA,
-                                 WaveAMDMachine_ReadsExec]> {
+    : WaveAMDMachine_TernaryResult<"mfma_f32_16x16x16_bf16", WaveAMDMachine_AVGPR,
+                                   WaveAMDMachine_AVGPR,
+                                   [WaveAMDMachine_VALU, WaveAMDMachine_MFMA,
+                                    WaveAMDMachine_ReadsExec]> {
   let hasVerifier = 1;
   let archPredicate = WaveAMDMachine_Gfx940Plus;
 }
 def WaveAMDMachine_MfmaF32_16x16x32_F16Op
-    : WaveAMDMachine_TernaryResult<"mfma_f32_16x16x32_f16", WaveAMDMachine_VGPR,
-                                WaveAMDMachine_VGPR,
-                                [WaveAMDMachine_VALU, WaveAMDMachine_MFMA,
-                                 WaveAMDMachine_ReadsExec]> {
+    : WaveAMDMachine_TernaryResult<"mfma_f32_16x16x32_f16", WaveAMDMachine_AVGPR,
+                                   WaveAMDMachine_AVGPR,
+                                   [WaveAMDMachine_VALU, WaveAMDMachine_MFMA,
+                                    WaveAMDMachine_ReadsExec]> {
   let hasVerifier = 1;
   let archPredicate = WaveAMDMachine_Gfx950;
 }
 def WaveAMDMachine_MfmaF32_16x16x32_BF16Op
-    : WaveAMDMachine_TernaryResult<"mfma_f32_16x16x32_bf16", WaveAMDMachine_VGPR,
-                                WaveAMDMachine_VGPR,
-                                [WaveAMDMachine_VALU, WaveAMDMachine_MFMA,
-                                 WaveAMDMachine_ReadsExec]> {
+    : WaveAMDMachine_TernaryResult<"mfma_f32_16x16x32_bf16", WaveAMDMachine_AVGPR,
+                                   WaveAMDMachine_AVGPR,
+                                   [WaveAMDMachine_VALU, WaveAMDMachine_MFMA,
+                                    WaveAMDMachine_ReadsExec]> {
   let hasVerifier = 1;
   let archPredicate = WaveAMDMachine_Gfx950;
 }
@@ -729,14 +764,14 @@ def WaveAMDMachine_MfmaScaleF32_16x16x128_F4F4Op
     : WaveAMDMachine_Op<"mfma_scale_f32_16x16x128_f4_f4",
                         [WaveAMDMachine_VALU, WaveAMDMachine_MFMA,
                          WaveAMDMachine_ReadsExec, Pure]> {
-  let arguments = (ins WaveAMDMachine_VGPR:$a,
-                       WaveAMDMachine_VGPR:$b,
-                       WaveAMDMachine_VGPR:$acc,
+  let arguments = (ins WaveAMDMachine_AVGPR:$a,
+                       WaveAMDMachine_AVGPR:$b,
+                       WaveAMDMachine_AVGPR:$acc,
                        WaveAMDMachine_VGPR1:$a_scale,
                        WaveAMDMachine_VGPR1:$b_scale,
                        DefaultValuedAttr<WaveAMDMachine_ScaleIndexAttr, "0">:$scale_idx_a,
                        DefaultValuedAttr<WaveAMDMachine_ScaleIndexAttr, "0">:$scale_idx_b);
-  let results = (outs WaveAMDMachine_VGPR:$result);
+  let results = (outs WaveAMDMachine_AVGPR:$result);
   let assemblyFormat = "$a `,` $b `,` $acc `,` $a_scale `,` $b_scale attr-dict `:` functional-type(operands, results)";
   let hasVerifier = 1;
   let archPredicate = WaveAMDMachine_Gfx950;

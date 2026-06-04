@@ -34,6 +34,10 @@ static bool isVGPR(waveamdmachine::RegType type) {
   return type.getRegClass() == waveamdmachine::RegClass::VGPR;
 }
 
+static bool isAGPR(waveamdmachine::RegType type) {
+  return type.getRegClass() == waveamdmachine::RegClass::AGPR;
+}
+
 static std::optional<waveamdmachine::RegType> trackedRegType(Value v) {
   if (!isReg(v))
     return std::nullopt;
@@ -65,6 +69,16 @@ static FailureOr<Value> duplicateRegValue(OpBuilder &builder, Location loc,
         waveamdmachine::SMovB32TupleOp::create(builder, loc, resultType, v);
     copy->setAttr("registers", builder.getI64IntegerAttr(rt.getWidth()));
     return copy.getResult();
+  }
+  if (isAGPR(rt)) {
+    auto vgprType = waveamdmachine::RegType::get(
+        rt.getContext(), waveamdmachine::RegClass::VGPR, rt.getWidth(),
+        /*index=*/-1);
+    auto read = waveamdmachine::VAccvgprReadB32TupleOp::create(builder, loc,
+                                                               vgprType, v);
+    auto write = waveamdmachine::VAccvgprWriteB32TupleOp::create(
+        builder, loc, resultType, read.getResult());
+    return write.getResult();
   }
   return emitError(loc, "duplicateRegValue: unsupported register class / "
                         "width for duplicate iter_arg init");

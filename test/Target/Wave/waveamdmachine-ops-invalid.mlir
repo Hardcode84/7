@@ -72,7 +72,7 @@ func.func @bad_mfma_scale_a_width(%a: !waveamdmachine.reg<vgpr, 2>,
                                   %b: !waveamdmachine.reg<vgpr, 4>,
                                   %acc: !waveamdmachine.reg<vgpr, 4>,
                                   %scale: !waveamdmachine.reg<vgpr, 1>) {
-  // expected-error @below {{A operand must be !waveamdmachine.reg<vgpr, 4>}}
+  // expected-error @below {{A operand must be !waveamdmachine.reg<vgpr|agpr, 4>}}
   %r = waveamdmachine.mfma_scale_f32_16x16x128_f4_f4 %a, %b, %acc, %scale, %scale
       : (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vgpr, 4>,
          !waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 1>,
@@ -86,7 +86,7 @@ func.func @bad_mfma_scale_b_width(%a: !waveamdmachine.reg<vgpr, 4>,
                                   %b: !waveamdmachine.reg<vgpr, 2>,
                                   %acc: !waveamdmachine.reg<vgpr, 4>,
                                   %scale: !waveamdmachine.reg<vgpr, 1>) {
-  // expected-error @below {{B operand must be !waveamdmachine.reg<vgpr, 4>}}
+  // expected-error @below {{B operand must be !waveamdmachine.reg<vgpr|agpr, 4>}}
   %r = waveamdmachine.mfma_scale_f32_16x16x128_f4_f4 %a, %b, %acc, %scale, %scale
       : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 2>,
          !waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 1>,
@@ -100,7 +100,7 @@ func.func @bad_mfma_scale_acc_width(%a: !waveamdmachine.reg<vgpr, 4>,
                                     %b: !waveamdmachine.reg<vgpr, 4>,
                                     %acc: !waveamdmachine.reg<vgpr, 2>,
                                     %scale: !waveamdmachine.reg<vgpr, 1>) {
-  // expected-error @below {{accumulator operand must be !waveamdmachine.reg<vgpr, 4>}}
+  // expected-error @below {{accumulator operand must be !waveamdmachine.reg<vgpr|agpr, 4>}}
   %r = waveamdmachine.mfma_scale_f32_16x16x128_f4_f4 %a, %b, %acc, %scale, %scale
       : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
          !waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vgpr, 1>,
@@ -143,11 +143,44 @@ func.func @bad_mfma_scale_result_width(%a: !waveamdmachine.reg<vgpr, 4>,
                                        %b: !waveamdmachine.reg<vgpr, 4>,
                                        %acc: !waveamdmachine.reg<vgpr, 4>,
                                        %scale: !waveamdmachine.reg<vgpr, 1>) {
-  // expected-error @below {{result must be !waveamdmachine.reg<vgpr, 4>}}
+  // expected-error @below {{result must be !waveamdmachine.reg<vgpr|agpr, 4>}}
   %r = waveamdmachine.mfma_scale_f32_16x16x128_f4_f4 %a, %b, %acc, %scale, %scale
       : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
          !waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 1>,
          !waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 2>
+  return
+}
+
+// -----
+
+func.func @bad_mfma_acc_result_bank(%a: !waveamdmachine.reg<vgpr, 4>,
+                                    %b: !waveamdmachine.reg<vgpr, 4>,
+                                    %acc: !waveamdmachine.reg<agpr, 4>) {
+  // expected-error @below {{accumulator/result register classes must match}}
+  %r = waveamdmachine.mfma_f32_16x16x32_f16 %a, %b, %acc
+      : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
+         !waveamdmachine.reg<agpr, 4>) -> !waveamdmachine.reg<vgpr, 4>
+  return
+}
+
+// -----
+
+func.func @bad_agpr_store_value(%offset: !waveamdmachine.reg<vgpr, 1>,
+                                %value: !waveamdmachine.reg<agpr, 1>,
+                                %base: !waveamdmachine.reg<sgpr, 2>) {
+  // expected-error @below {{operand #1 must be WaveAMDMachine SGPR/VGPR register or immediate}}
+  %token = waveamdmachine.global_store_b32 %offset, %value, %base
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<agpr, 1>,
+         !waveamdmachine.reg<sgpr, 2>) -> !waveamdmachine.mem.token
+  return
+}
+
+// -----
+
+func.func @bad_accvgpr_read_width(%source: !waveamdmachine.reg<agpr, 2>) {
+  // expected-error @below {{source and result widths must match}}
+  %r = waveamdmachine.v_accvgpr_read_b32_tuple %source
+      : (!waveamdmachine.reg<agpr, 2>) -> !waveamdmachine.reg<vgpr, 1>
   return
 }
 
@@ -244,7 +277,7 @@ func.func @v_cndmask_source_width_mismatch(%narrow: !waveamdmachine.reg<vgpr, 1>
 func.func @v_cndmask_flag_source(%flag: !waveamdmachine.reg<vcc, 1>,
                                  %src: !waveamdmachine.reg<vgpr, 1>,
                                  %cond: !waveamdmachine.reg<sgpr, 1>) {
-  // expected-error @below {{source must be VGPR or SGPR}}
+  // expected-error @below {{operand #0 must be WaveAMDMachine SGPR/VGPR register or immediate}}
   %r = waveamdmachine.v_cndmask_b32_tuple %flag, %src, %cond
       : (!waveamdmachine.reg<vcc, 1>, !waveamdmachine.reg<vgpr, 1>,
          !waveamdmachine.reg<sgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>

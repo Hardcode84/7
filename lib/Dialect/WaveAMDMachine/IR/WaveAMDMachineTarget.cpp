@@ -74,6 +74,12 @@ mlir::waveamdmachine::getAMDGPUTargetIsaVersion(Operation *op,
   return isa;
 }
 
+bool mlir::waveamdmachine::supportsAGPRs(const llvm::AMDGPU::IsaVersion &isa) {
+  return isa.Major == 9 &&
+         ((isa.Minor == 0 && (isa.Stepping == 8 || isa.Stepping == 10)) ||
+          isa.Minor == 4 || (isa.Minor == 5 && isa.Stepping == 0));
+}
+
 std::optional<unsigned>
 mlir::waveamdmachine::getAMDGPUDefaultWavefrontSize(StringRef chip) {
   llvm::AMDGPU::IsaVersion isa = llvm::AMDGPU::getIsaVersion(chip);

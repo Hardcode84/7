@@ -297,7 +297,7 @@ private:
   bool isGfx11() const { return isaVersion.Major == 11; }
   bool isGfx90APlus() const { return llvm::AMDGPU::isGFX90A(*sti); }
   bool isGfx940Plus() const { return isGfx940PlusIsa(isaVersion); }
-  bool hasAGPRs() const { return llvm::AMDGPU::hasMAIInsts(*sti); }
+  bool hasAGPRs() const { return waveamdmachine::supportsAGPRs(isaVersion); }
   unsigned gfx11Opcode(unsigned opcode) const {
     if (!isGfx11())
       llvm_unreachable("backend target gate admits only gfx8/gfx9/gfx11");
@@ -406,21 +406,38 @@ private:
   unsigned vCmpxLeU32() const { return opcodes.vCmpxLeU32; }
   unsigned vCmpxGtU32() const { return opcodes.vCmpxGtU32; }
   unsigned vCmpxGeU32() const { return opcodes.vCmpxGeU32; }
-  unsigned mfmaF32_16x16x16F16() const {
-    return isGfx90APlus() ? llvm::AMDGPU::V_MFMA_F32_16X16X16F16_gfx940_vcd
-                          : llvm::AMDGPU::V_MFMA_F32_16X16X16F16_vi;
+  unsigned mfmaF32_16x16x16F16(bool agprCD) const {
+    if (isGfx940Plus())
+      return agprCD ? llvm::AMDGPU::V_MFMA_F32_16X16X16F16_gfx940_acd
+                    : llvm::AMDGPU::V_MFMA_F32_16X16X16F16_gfx940_vcd;
+    return agprCD ? llvm::AMDGPU::V_MFMA_F32_16X16X16F16_gfx90a_acd
+                  : llvm::AMDGPU::V_MFMA_F32_16X16X16F16_gfx90a_vcd;
   }
-  unsigned mfmaF32_16x16x16BF16() const {
-    return llvm::AMDGPU::V_MFMA_F32_16X16X16BF16_1K_gfx940_vcd;
+  unsigned mfmaF32_16x16x16BF16(bool agprCD) const {
+    return agprCD ? llvm::AMDGPU::V_MFMA_F32_16X16X16BF16_1K_gfx940_acd
+                  : llvm::AMDGPU::V_MFMA_F32_16X16X16BF16_1K_gfx940_vcd;
   }
-  unsigned mfmaF32_16x16x32F16() const {
-    return llvm::AMDGPU::V_MFMA_F32_16X16X32_F16_gfx940_vcd;
+  unsigned mfmaF32_16x16x32F16(bool agprCD) const {
+    return agprCD ? llvm::AMDGPU::V_MFMA_F32_16X16X32_F16_gfx940_acd
+                  : llvm::AMDGPU::V_MFMA_F32_16X16X32_F16_gfx940_vcd;
   }
-  unsigned mfmaF32_16x16x32BF16() const {
-    return llvm::AMDGPU::V_MFMA_F32_16X16X32_BF16_gfx940_vcd;
+  unsigned mfmaF32_16x16x32BF16(bool agprCD) const {
+    return agprCD ? llvm::AMDGPU::V_MFMA_F32_16X16X32_BF16_gfx940_acd
+                  : llvm::AMDGPU::V_MFMA_F32_16X16X32_BF16_gfx940_vcd;
   }
-  unsigned mfmaScaleF32_16x16x128F4F4() const {
-    return llvm::AMDGPU::V_MFMA_SCALE_F32_16X16X128_F8F6F4_f4_f4_gfx940_vcd;
+  unsigned mfmaScaleF32_16x16x128F4F4(bool agprCD) const {
+    return agprCD ? llvm::AMDGPU::
+                        V_MFMA_SCALE_F32_16X16X128_F8F6F4_f4_f4_gfx940_acd
+                  : llvm::AMDGPU::
+                        V_MFMA_SCALE_F32_16X16X128_F8F6F4_f4_f4_gfx940_vcd;
+  }
+
+  unsigned vAccvgprReadB32() const {
+    return llvm::AMDGPU::V_ACCVGPR_READ_B32_vi;
+  }
+
+  unsigned vAccvgprWriteB32() const {
+    return llvm::AMDGPU::V_ACCVGPR_WRITE_B32_vi;
   }
 
   unsigned bufferStoreB32() const {
@@ -1509,6 +1526,28 @@ private:
       }
       return success();
     }
+    if (isa<waveamdmachine::VAccvgprReadB32TupleOp>(op)) {
+      if (!hasAGPRs())
+        return op.emitError("v_accvgpr_read_b32 requires AGPR support");
+      auto regType = cast<waveamdmachine::RegType>(result().getType());
+      Value src = op.getOperand(0);
+      for (unsigned i : llvm::seq<unsigned>(0, regType.getWidth()))
+        if (failed(emitMC(vAccvgprReadB32(), {toMCVGPRComponent(result(), i),
+                                              toMCAGPRComponent(src, i)})))
+          return failure();
+      return success();
+    }
+    if (isa<waveamdmachine::VAccvgprWriteB32TupleOp>(op)) {
+      if (!hasAGPRs())
+        return op.emitError("v_accvgpr_write_b32 requires AGPR support");
+      auto regType = cast<waveamdmachine::RegType>(result().getType());
+      Value src = op.getOperand(0);
+      for (unsigned i : llvm::seq<unsigned>(0, regType.getWidth()))
+        if (failed(emitMC(vAccvgprWriteB32(), {toMCAGPRComponent(result(), i),
+                                               toMCVGPRComponent(src, i)})))
+          return failure();
+      return success();
+    }
     if (isa<waveamdmachine::WmmaI32_16x16x16_IU8Op>(op))
       return emitMC(
           llvm::AMDGPU::V_WMMA_I32_16X16X16_IU8_twoaddr_w32_gfx11,
@@ -1537,7 +1576,7 @@ private:
       if (!isGfx90APlus())
         return op.emitError("mfma.f32.16x16x16.f16 requires gfx90a+");
       return emitMC(
-          mfmaF32_16x16x16F16(),
+          mfmaF32_16x16x16F16(isAGPRType(result().getType())),
           {toMCOperand(result()), toMCOperand(op.getOperand(0)),
            toMCOperand(op.getOperand(1)), toMCOperand(op.getOperand(2)),
            llvm::MCOperand::createImm(0), llvm::MCOperand::createImm(0),
@@ -1547,7 +1586,7 @@ private:
       if (!isGfx940Plus())
         return op.emitError("mfma.f32.16x16x16.bf16 requires gfx940+");
       return emitMC(
-          mfmaF32_16x16x16BF16(),
+          mfmaF32_16x16x16BF16(isAGPRType(result().getType())),
           {toMCOperand(result()), toMCOperand(op.getOperand(0)),
            toMCOperand(op.getOperand(1)), toMCOperand(op.getOperand(2)),
            llvm::MCOperand::createImm(0), llvm::MCOperand::createImm(0),
@@ -1557,7 +1596,7 @@ private:
       if (!isGfx950(isaVersion))
         return op.emitError("mfma.f32.16x16x32.f16 requires gfx950");
       return emitMC(
-          mfmaF32_16x16x32F16(),
+          mfmaF32_16x16x32F16(isAGPRType(result().getType())),
           {toMCOperand(result()), toMCOperand(op.getOperand(0)),
            toMCOperand(op.getOperand(1)), toMCOperand(op.getOperand(2)),
            llvm::MCOperand::createImm(0), llvm::MCOperand::createImm(0),
@@ -1567,7 +1606,7 @@ private:
       if (!isGfx950(isaVersion))
         return op.emitError("mfma.f32.16x16x32.bf16 requires gfx950");
       return emitMC(
-          mfmaF32_16x16x32BF16(),
+          mfmaF32_16x16x32BF16(isAGPRType(result().getType())),
           {toMCOperand(result()), toMCOperand(op.getOperand(0)),
            toMCOperand(op.getOperand(1)), toMCOperand(op.getOperand(2)),
            llvm::MCOperand::createImm(0), llvm::MCOperand::createImm(0),
@@ -1581,7 +1620,7 @@ private:
       unsigned scaleIdxA = scaleOp.getScaleIdxA();
       unsigned scaleIdxB = scaleOp.getScaleIdxB();
       return emitMC(
-          mfmaScaleF32_16x16x128F4F4(),
+          mfmaScaleF32_16x16x128F4F4(isAGPRType(result().getType())),
           {toMCOperand(result()), toMCOperand(scaleOp.getA()),
            toMCOperand(scaleOp.getB()), toMCOperand(scaleOp.getAcc()),
            llvm::MCOperand::createImm(4), llvm::MCOperand::createImm(4),

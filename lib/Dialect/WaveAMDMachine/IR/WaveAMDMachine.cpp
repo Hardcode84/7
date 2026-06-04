@@ -69,11 +69,35 @@ static bool isRegClassWidth(Type type, RegClass regClass, int64_t width) {
          regType.getWidth() == width;
 }
 
+static bool isVGPROrAGPR(RegClass regClass) {
+  return regClass == RegClass::VGPR || regClass == RegClass::AGPR;
+}
+
 static LogicalResult verifyVGPRWidth(Operation *op, Value value, int64_t width,
                                      StringRef name) {
   if (!isRegClassWidth(value.getType(), RegClass::VGPR, width))
     return op->emitOpError()
            << name << " must be !waveamdmachine.reg<vgpr, " << width << ">";
+  return success();
+}
+
+static LogicalResult verifyAVGPRWidth(Operation *op, Value value, int64_t width,
+                                      StringRef name) {
+  auto regType = dyn_cast<RegType>(value.getType());
+  if (!regType || !isVGPROrAGPR(regType.getRegClass()) ||
+      regType.getWidth() != width)
+    return op->emitOpError()
+           << name << " must be !waveamdmachine.reg<vgpr|agpr, " << width
+           << ">";
+  return success();
+}
+
+static LogicalResult verifySameAVGPRClass(Operation *op, Value lhs, Value rhs,
+                                          StringRef name) {
+  auto lhsType = cast<RegType>(lhs.getType());
+  auto rhsType = cast<RegType>(rhs.getType());
+  if (lhsType.getRegClass() != rhsType.getRegClass())
+    return op->emitOpError() << name << " register classes must match";
   return success();
 }
 
@@ -307,9 +331,6 @@ static LogicalResult verifyCndmaskSource(Operation *op, Value value,
   if (regType.getWidth() != resultWidth)
     return op->emitOpError(name) << " source width " << regType.getWidth()
                                  << " must match result width " << resultWidth;
-  if (regType.getRegClass() != RegClass::VGPR &&
-      regType.getRegClass() != RegClass::SGPR)
-    return op->emitOpError(name) << " source must be VGPR or SGPR";
   return success();
 }
 
@@ -323,6 +344,22 @@ LogicalResult VCndmaskB32TupleOp::verify() {
   RegType conditionType = cast<RegType>(getCondition().getType());
   if (conditionType.getWidth() != 1 && conditionType.getWidth() != 2)
     return emitOpError("condition width must be 1 or 2");
+  return success();
+}
+
+LogicalResult VAccvgprReadB32TupleOp::verify() {
+  auto sourceType = cast<RegType>(getSource().getType());
+  auto resultType = cast<RegType>(getResult().getType());
+  if (sourceType.getWidth() != resultType.getWidth())
+    return emitOpError("source and result widths must match");
+  return success();
+}
+
+LogicalResult VAccvgprWriteB32TupleOp::verify() {
+  auto sourceType = cast<RegType>(getSource().getType());
+  auto resultType = cast<RegType>(getResult().getType());
+  if (sourceType.getWidth() != resultType.getWidth())
+    return emitOpError("source and result widths must match");
   return success();
 }
 
@@ -396,48 +433,62 @@ LogicalResult WmmaF32_16x16x16_BF16Op::verify() {
 }
 
 LogicalResult MfmaF32_16x16x16_F16Op::verify() {
-  if (failed(verifyVGPRWidth(*this, getOperand(0), 2, "A operand")) ||
-      failed(verifyVGPRWidth(*this, getOperand(1), 2, "B operand")) ||
-      failed(verifyVGPRWidth(*this, getOperand(2), 4, "accumulator operand")) ||
-      failed(verifyVGPRWidth(*this, getResult(), 4, "result")))
+  if (failed(verifyAVGPRWidth(*this, getOperand(0), 2, "A operand")) ||
+      failed(verifyAVGPRWidth(*this, getOperand(1), 2, "B operand")) ||
+      failed(
+          verifyAVGPRWidth(*this, getOperand(2), 4, "accumulator operand")) ||
+      failed(verifyAVGPRWidth(*this, getResult(), 4, "result")) ||
+      failed(verifySameAVGPRClass(*this, getOperand(2), getResult(),
+                                  "accumulator/result")))
     return failure();
   return success();
 }
 
 LogicalResult MfmaF32_16x16x16_BF16Op::verify() {
-  if (failed(verifyVGPRWidth(*this, getOperand(0), 2, "A operand")) ||
-      failed(verifyVGPRWidth(*this, getOperand(1), 2, "B operand")) ||
-      failed(verifyVGPRWidth(*this, getOperand(2), 4, "accumulator operand")) ||
-      failed(verifyVGPRWidth(*this, getResult(), 4, "result")))
+  if (failed(verifyAVGPRWidth(*this, getOperand(0), 2, "A operand")) ||
+      failed(verifyAVGPRWidth(*this, getOperand(1), 2, "B operand")) ||
+      failed(
+          verifyAVGPRWidth(*this, getOperand(2), 4, "accumulator operand")) ||
+      failed(verifyAVGPRWidth(*this, getResult(), 4, "result")) ||
+      failed(verifySameAVGPRClass(*this, getOperand(2), getResult(),
+                                  "accumulator/result")))
     return failure();
   return success();
 }
 
 LogicalResult MfmaF32_16x16x32_F16Op::verify() {
-  if (failed(verifyVGPRWidth(*this, getOperand(0), 4, "A operand")) ||
-      failed(verifyVGPRWidth(*this, getOperand(1), 4, "B operand")) ||
-      failed(verifyVGPRWidth(*this, getOperand(2), 4, "accumulator operand")) ||
-      failed(verifyVGPRWidth(*this, getResult(), 4, "result")))
+  if (failed(verifyAVGPRWidth(*this, getOperand(0), 4, "A operand")) ||
+      failed(verifyAVGPRWidth(*this, getOperand(1), 4, "B operand")) ||
+      failed(
+          verifyAVGPRWidth(*this, getOperand(2), 4, "accumulator operand")) ||
+      failed(verifyAVGPRWidth(*this, getResult(), 4, "result")) ||
+      failed(verifySameAVGPRClass(*this, getOperand(2), getResult(),
+                                  "accumulator/result")))
     return failure();
   return success();
 }
 
 LogicalResult MfmaF32_16x16x32_BF16Op::verify() {
-  if (failed(verifyVGPRWidth(*this, getOperand(0), 4, "A operand")) ||
-      failed(verifyVGPRWidth(*this, getOperand(1), 4, "B operand")) ||
-      failed(verifyVGPRWidth(*this, getOperand(2), 4, "accumulator operand")) ||
-      failed(verifyVGPRWidth(*this, getResult(), 4, "result")))
+  if (failed(verifyAVGPRWidth(*this, getOperand(0), 4, "A operand")) ||
+      failed(verifyAVGPRWidth(*this, getOperand(1), 4, "B operand")) ||
+      failed(
+          verifyAVGPRWidth(*this, getOperand(2), 4, "accumulator operand")) ||
+      failed(verifyAVGPRWidth(*this, getResult(), 4, "result")) ||
+      failed(verifySameAVGPRClass(*this, getOperand(2), getResult(),
+                                  "accumulator/result")))
     return failure();
   return success();
 }
 
 LogicalResult MfmaScaleF32_16x16x128_F4F4Op::verify() {
-  if (failed(verifyVGPRWidth(*this, getA(), 4, "A operand")) ||
-      failed(verifyVGPRWidth(*this, getB(), 4, "B operand")) ||
-      failed(verifyVGPRWidth(*this, getAcc(), 4, "accumulator operand")) ||
+  if (failed(verifyAVGPRWidth(*this, getA(), 4, "A operand")) ||
+      failed(verifyAVGPRWidth(*this, getB(), 4, "B operand")) ||
+      failed(verifyAVGPRWidth(*this, getAcc(), 4, "accumulator operand")) ||
       failed(verifyVGPRWidth(*this, getAScale(), 1, "A scale operand")) ||
       failed(verifyVGPRWidth(*this, getBScale(), 1, "B scale operand")) ||
-      failed(verifyVGPRWidth(*this, getResult(), 4, "result")))
+      failed(verifyAVGPRWidth(*this, getResult(), 4, "result")) ||
+      failed(verifySameAVGPRClass(*this, getAcc(), getResult(),
+                                  "accumulator/result")))
     return failure();
   return success();
 }

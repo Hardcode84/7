@@ -46,11 +46,15 @@ func.func @interfering_agprs() {
   %base = waveamdmachine.uninit : !waveamdmachine.reg<sgpr, 2, 6>
   %a = waveamdmachine.uninit : !waveamdmachine.reg<agpr, 1, 0>
   %b = waveamdmachine.uninit : !waveamdmachine.reg<agpr, 1, 0>
-  %store_a = waveamdmachine.global_store_b32 %off, %a, %base
-      : (!waveamdmachine.reg<vgpr, 1, 1>, !waveamdmachine.reg<agpr, 1, 0>,
+  %read_a = waveamdmachine.v_accvgpr_read_b32_tuple %a
+      : (!waveamdmachine.reg<agpr, 1, 0>) -> !waveamdmachine.reg<vgpr, 1, 2>
+  %read_b = waveamdmachine.v_accvgpr_read_b32_tuple %b
+      : (!waveamdmachine.reg<agpr, 1, 0>) -> !waveamdmachine.reg<vgpr, 1, 3>
+  %store_a = waveamdmachine.global_store_b32 %off, %read_a, %base
+      : (!waveamdmachine.reg<vgpr, 1, 1>, !waveamdmachine.reg<vgpr, 1, 2>,
          !waveamdmachine.reg<sgpr, 2, 6>) -> !waveamdmachine.mem.token
-  %store_b = waveamdmachine.global_store_b32 %off, %b, %base after %store_a
-      : (!waveamdmachine.reg<vgpr, 1, 1>, !waveamdmachine.reg<agpr, 1, 0>,
+  %store_b = waveamdmachine.global_store_b32 %off, %read_b, %base after %store_a
+      : (!waveamdmachine.reg<vgpr, 1, 1>, !waveamdmachine.reg<vgpr, 1, 3>,
          !waveamdmachine.reg<sgpr, 2, 6>, !waveamdmachine.mem.token) -> !waveamdmachine.mem.token
   return
 }

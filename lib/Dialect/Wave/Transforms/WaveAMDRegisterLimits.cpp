@@ -178,7 +178,8 @@ static bool isGfx125x(const llvm::AMDGPU::IsaVersion &isa) {
 }
 
 static unsigned getAddressableAGPRs(const llvm::MCSubtargetInfo &sti) {
-  return llvm::AMDGPU::hasMAIInsts(sti) ? 256 : 0;
+  llvm::AMDGPU::IsaVersion isa = llvm::AMDGPU::getIsaVersion(sti.getCPU());
+  return waveamdmachine::supportsAGPRs(isa) ? 256 : 0;
 }
 
 FailureOr<bool> needsWaveAMDKernargPreloadCompatProlog(Operation *op,

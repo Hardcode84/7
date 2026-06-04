@@ -40,6 +40,8 @@ FailureOr<AMDGPUTarget> getAMDGPUTarget(Operation *op,
 FailureOr<llvm::AMDGPU::IsaVersion>
 getAMDGPUTargetIsaVersion(Operation *op, llvm::StringRef consumer);
 
+bool supportsAGPRs(const llvm::AMDGPU::IsaVersion &isa);
+
 std::optional<unsigned> getAMDGPUDefaultWavefrontSize(llvm::StringRef chip);
 
 FailureOr<unsigned> getAMDGPUDefaultWavefrontSize(Operation *op,
