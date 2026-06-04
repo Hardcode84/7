@@ -24,9 +24,11 @@ config.excludes = ["Inputs", "lit.cfg.py", "lit.site.cfg.py"]
 _wave_python_root = str(
     Path(config.wave_mlir_obj_root) / "python_packages" / "wave_mlir"
 )
+_wave_python_mlir_libs = str(Path(_wave_python_root) / "mlir" / "_mlir_libs")
 if Path(_wave_python_root).is_dir():
     llvm_config.with_environment("PYTHONPATH", _wave_python_root, append_path=True)
     config.available_features.add("wave-python-bindings")
+    config.substitutions.append(("%wave_python_mlir_libs", _wave_python_mlir_libs))
 else:
     # Without the bindings, the dialect-Python smoke tests cannot run.
     config.excludes = [*config.excludes, "python"]
@@ -38,6 +40,8 @@ config.substitutions.append(("%PATH%", config.environment["PATH"]))
 config.substitutions.append(("%shlibext", config.llvm_shlib_ext))
 config.substitutions.append(("%python", f'"{sys.executable}"'))
 config.substitutions.append(("%PYTHON", f'"{sys.executable}"'))
+if sys.platform.startswith("linux"):
+    config.available_features.add("linux")
 
 llvm_config.with_system_environment(["HOME", "INCLUDE", "LIB", "TMP", "TEMP"])
 
@@ -137,11 +141,27 @@ tool_dirs = [config.wave_mlir_tools_dir, config.llvm_tools_dir]
 extra = getattr(config, "llvm_build_tools_dir", "")
 if extra and extra not in tool_dirs:
     tool_dirs.append(extra)
+llvm_nm_subst = None
+llvm_readelf_subst = None
+for tool_dir in tool_dirs:
+    llvm_nm = Path(tool_dir) / "llvm-nm"
+    if llvm_nm.exists() and not llvm_nm_subst:
+        llvm_nm_subst = str(llvm_nm)
+    llvm_readelf = Path(tool_dir) / "llvm-readelf"
+    if llvm_readelf.exists() and not llvm_readelf_subst:
+        llvm_readelf_subst = str(llvm_readelf)
+    if llvm_nm_subst and llvm_readelf_subst:
+        break
+if llvm_nm_subst:
+    config.substitutions.append(("%llvm_nm", llvm_nm_subst))
+if llvm_readelf_subst:
+    config.substitutions.append(("%llvm_readelf", llvm_readelf_subst))
 
 tools = [
     ToolSubst("FileCheck", unresolved="fatal"),
     ToolSubst("count", unresolved="fatal"),
     ToolSubst("not", unresolved="fatal"),
+    ToolSubst("llvm-nm", unresolved="fatal"),
     ToolSubst("wave-calibrate-report", unresolved="fatal"),
     ToolSubst("wave-opt", unresolved="fatal"),
     ToolSubst("wave-sim-report", unresolved="fatal"),

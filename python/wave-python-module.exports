@@ -1,0 +1,12 @@
+/*
+ * SPDX-FileCopyrightText: 2026 wave-mlir contributors
+ *
+ * SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+ */
+
+{
+  global:
+    PyInit_*;
+  local:
+    *;
+};
