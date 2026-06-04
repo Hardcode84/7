@@ -526,6 +526,14 @@ private:
     return opcodes.bufferStoreB32;
   }
 
+  unsigned bufferStoreB8() const {
+    if (isGfx90APlus())
+      return llvm::AMDGPU::BUFFER_STORE_BYTE_OFFEN_gfx90a;
+    if (isGfx8Or9())
+      return llvm::AMDGPU::BUFFER_STORE_BYTE_OFFEN_vi;
+    return gfx11Opcode(llvm::AMDGPU::BUFFER_STORE_BYTE_OFFEN_gfx11);
+  }
+
   unsigned bufferStoreB16() const {
     if (isGfx90APlus())
       return llvm::AMDGPU::BUFFER_STORE_SHORT_OFFEN_gfx90a;
@@ -540,6 +548,22 @@ private:
     return opcodes.bufferLoadB32;
   }
 
+  unsigned bufferLoadU8() const {
+    if (isGfx90APlus())
+      return llvm::AMDGPU::BUFFER_LOAD_UBYTE_OFFEN_gfx90a;
+    if (isGfx8Or9())
+      return llvm::AMDGPU::BUFFER_LOAD_UBYTE_OFFEN_vi;
+    return gfx11Opcode(llvm::AMDGPU::BUFFER_LOAD_UBYTE_OFFEN_gfx11);
+  }
+
+  unsigned bufferLoadI8() const {
+    if (isGfx90APlus())
+      return llvm::AMDGPU::BUFFER_LOAD_SBYTE_OFFEN_gfx90a;
+    if (isGfx8Or9())
+      return llvm::AMDGPU::BUFFER_LOAD_SBYTE_OFFEN_vi;
+    return gfx11Opcode(llvm::AMDGPU::BUFFER_LOAD_SBYTE_OFFEN_gfx11);
+  }
+
   unsigned bufferLoadB16() const {
     if (isGfx90APlus())
       return llvm::AMDGPU::BUFFER_LOAD_USHORT_OFFEN_gfx90a;
@@ -550,10 +574,22 @@ private:
 
   unsigned globalStoreB32() const { return opcodes.globalStoreB32; }
 
+  unsigned globalStoreB8() const {
+    if (isGfx8Or9())
+      return llvm::AMDGPU::GLOBAL_STORE_BYTE_SADDR_vi;
+    return gfx11Opcode(llvm::AMDGPU::GLOBAL_STORE_BYTE_SADDR_gfx11);
+  }
+
   unsigned globalStoreB32Addr64() const {
     if (isGfx8Or9())
       return llvm::AMDGPU::GLOBAL_STORE_DWORD_vi;
     return gfx11Opcode(llvm::AMDGPU::GLOBAL_STORE_DWORD_gfx11);
+  }
+
+  unsigned globalStoreB8Addr64() const {
+    if (isGfx8Or9())
+      return llvm::AMDGPU::GLOBAL_STORE_BYTE_vi;
+    return gfx11Opcode(llvm::AMDGPU::GLOBAL_STORE_BYTE_gfx11);
   }
 
   unsigned globalStoreB16() const {
@@ -570,10 +606,34 @@ private:
 
   unsigned globalLoadB32() const { return opcodes.globalLoadB32; }
 
+  unsigned globalLoadU8() const {
+    if (isGfx8Or9())
+      return llvm::AMDGPU::GLOBAL_LOAD_UBYTE_SADDR_vi;
+    return gfx11Opcode(llvm::AMDGPU::GLOBAL_LOAD_UBYTE_SADDR_gfx11);
+  }
+
+  unsigned globalLoadI8() const {
+    if (isGfx8Or9())
+      return llvm::AMDGPU::GLOBAL_LOAD_SBYTE_SADDR_vi;
+    return gfx11Opcode(llvm::AMDGPU::GLOBAL_LOAD_SBYTE_SADDR_gfx11);
+  }
+
   unsigned globalLoadB32Addr64() const {
     if (isGfx8Or9())
       return llvm::AMDGPU::GLOBAL_LOAD_DWORD_vi;
     return gfx11Opcode(llvm::AMDGPU::GLOBAL_LOAD_DWORD_gfx11);
+  }
+
+  unsigned globalLoadU8Addr64() const {
+    if (isGfx8Or9())
+      return llvm::AMDGPU::GLOBAL_LOAD_UBYTE_vi;
+    return gfx11Opcode(llvm::AMDGPU::GLOBAL_LOAD_UBYTE_gfx11);
+  }
+
+  unsigned globalLoadI8Addr64() const {
+    if (isGfx8Or9())
+      return llvm::AMDGPU::GLOBAL_LOAD_SBYTE_vi;
+    return gfx11Opcode(llvm::AMDGPU::GLOBAL_LOAD_SBYTE_gfx11);
   }
 
   unsigned globalLoadB16() const {
@@ -636,6 +696,18 @@ private:
   unsigned dsSwizzleB32() const { return opcodes.dsSwizzleB32; }
   unsigned dsPermuteB32() const { return opcodes.dsPermuteB32; }
   unsigned dsBpermuteB32() const { return opcodes.dsBpermuteB32; }
+
+  unsigned dsReadU8() const {
+    if (isGfx8Or9())
+      return llvm::AMDGPU::DS_READ_U8_vi_gfx9;
+    return gfx11Opcode(llvm::AMDGPU::DS_READ_U8_gfx11);
+  }
+
+  unsigned dsReadI8() const {
+    if (isGfx8Or9())
+      return llvm::AMDGPU::DS_READ_I8_vi_gfx9;
+    return gfx11Opcode(llvm::AMDGPU::DS_READ_I8_gfx11);
+  }
 
   unsigned dsReadB16() const {
     if (isGfx8Or9())
@@ -2024,10 +2096,14 @@ private:
     if (isa<waveamdmachine::VReadfirstlaneB32Op>(op))
       return emitMC(vReadfirstlaneB32(),
                     {toMCOperand(result()), toMCOperand(op.getOperand(0))});
+    if (isa<waveamdmachine::GlobalStoreB8Addr64Op>(op))
+      return emitGlobalAddrStore(op, globalStoreB8Addr64());
     if (isa<waveamdmachine::GlobalStoreB16Addr64Op>(op))
       return emitGlobalAddrStore(op, globalStoreB16Addr64());
     if (isa<waveamdmachine::GlobalStoreB32Addr64Op>(op))
       return emitGlobalAddrStore(op, globalStoreB32Addr64());
+    if (isa<waveamdmachine::GlobalStoreB8Op>(op))
+      return emitGlobalStore(op, globalStoreB8());
     if (isa<waveamdmachine::GlobalStoreB16Op>(op))
       return emitGlobalStore(op, globalStoreB16());
     if (isa<waveamdmachine::GlobalStoreB32Op>(op))
@@ -2042,10 +2118,18 @@ private:
     //   vdst, saddr, vaddr, offset, cpol
     // -- the SADDR variants put the SGPR base first, unlike the *non*-SADDR
     // store variants we use elsewhere.
+    if (isa<waveamdmachine::GlobalLoadU8Addr64Op>(op))
+      return emitGlobalAddrLoad(op, globalLoadU8Addr64());
+    if (isa<waveamdmachine::GlobalLoadI8Addr64Op>(op))
+      return emitGlobalAddrLoad(op, globalLoadI8Addr64());
     if (isa<waveamdmachine::GlobalLoadB16Addr64Op>(op))
       return emitGlobalAddrLoad(op, globalLoadB16Addr64());
     if (isa<waveamdmachine::GlobalLoadB32Addr64Op>(op))
       return emitGlobalAddrLoad(op, globalLoadB32Addr64());
+    if (isa<waveamdmachine::GlobalLoadU8Op>(op))
+      return emitGlobalLoad(op, globalLoadU8());
+    if (isa<waveamdmachine::GlobalLoadI8Op>(op))
+      return emitGlobalLoad(op, globalLoadI8());
     if (isa<waveamdmachine::GlobalLoadB16Op>(op))
       return emitGlobalLoad(op, globalLoadB16());
     if (isa<waveamdmachine::GlobalLoadB32Op>(op))
@@ -2095,6 +2179,8 @@ private:
     //          soffset(SGPR1OrImm), [dep], inst_offset attr
     //   LOAD : offset(VGPR1), descriptor(SGPR4),
     //          soffset(SGPR1OrImm), [dep], inst_offset attr
+    if (isa<waveamdmachine::BufferStoreB8Op>(op))
+      return emitBufferStore(op, bufferStoreB8());
     if (isa<waveamdmachine::BufferStoreB16Op>(op))
       return emitBufferStore(op, bufferStoreB16());
     if (isa<waveamdmachine::BufferStoreB32Op>(op))
@@ -2105,6 +2191,10 @@ private:
       return emitBufferStore(op, bufferStoreB96());
     if (isa<waveamdmachine::BufferStoreB128Op>(op))
       return emitBufferStore(op, bufferStoreB128());
+    if (isa<waveamdmachine::BufferLoadU8Op>(op))
+      return emitBufferLoad(op, bufferLoadU8());
+    if (isa<waveamdmachine::BufferLoadI8Op>(op))
+      return emitBufferLoad(op, bufferLoadI8());
     if (isa<waveamdmachine::BufferLoadB16Op>(op))
       return emitBufferLoad(op, bufferLoadB16());
     if (isa<waveamdmachine::BufferLoadB32Op>(op))
@@ -2138,6 +2228,10 @@ private:
     if (isa<waveamdmachine::BufferLoadLdsB128Op>(op)) {
       return emitBufferLoadLds(op, bufferLoadLdsB128());
     }
+    if (isa<waveamdmachine::DsLoadU8Op>(op))
+      return emitDsLoad(op, dsReadU8());
+    if (isa<waveamdmachine::DsLoadI8Op>(op))
+      return emitDsLoad(op, dsReadI8());
     if (isa<waveamdmachine::DsLoadB16Op>(op))
       return emitDsLoad(op, dsReadB16());
     if (isa<waveamdmachine::DsLoadB32Op>(op))

@@ -930,6 +930,42 @@ def WaveAMDMachine_ExecIfOp : WaveAMDMachine_Op<"exec_if", [
   let hasVerifier = 1;
 }
 
+def WaveAMDMachine_GlobalLoadU8Op
+    : WaveAMDMachine_GlobalMemoryOp<"global_load_u8", [WaveAMDMachine_VMEMLoad, MemoryEffects<[MemRead]>]>,
+      WaveAMDMachine_VMEMLoadInfo {
+  let summary = "global unsigned 8-bit load through an SGPR base";
+  let description = [{
+    Zero-extends the loaded byte into the result VGPR.
+  }];
+  let arguments = (ins WaveAMDMachine_VGPR1:$offset, WaveAMDMachine_SGPR2:$base,
+                       Optional<WaveAMDMachine_MemToken>:$dependency,
+                       DefaultValuedAttr<I64Attr, "0">:$inst_offset);
+  let results = (outs WaveAMDMachine_VGPR1:$result,
+                      Optional<WaveAMDMachine_MemToken>:$token);
+  let assemblyFormat = [{
+    $offset `,` $base (`after` $dependency^)? (`offset` $inst_offset^)?
+    attr-dict `:` functional-type(operands, results)
+  }];
+}
+
+def WaveAMDMachine_GlobalLoadI8Op
+    : WaveAMDMachine_GlobalMemoryOp<"global_load_i8", [WaveAMDMachine_VMEMLoad, MemoryEffects<[MemRead]>]>,
+      WaveAMDMachine_VMEMLoadInfo {
+  let summary = "global signed 8-bit load through an SGPR base";
+  let description = [{
+    Sign-extends the loaded byte into the result VGPR.
+  }];
+  let arguments = (ins WaveAMDMachine_VGPR1:$offset, WaveAMDMachine_SGPR2:$base,
+                       Optional<WaveAMDMachine_MemToken>:$dependency,
+                       DefaultValuedAttr<I64Attr, "0">:$inst_offset);
+  let results = (outs WaveAMDMachine_VGPR1:$result,
+                      Optional<WaveAMDMachine_MemToken>:$token);
+  let assemblyFormat = [{
+    $offset `,` $base (`after` $dependency^)? (`offset` $inst_offset^)?
+    attr-dict `:` functional-type(operands, results)
+  }];
+}
+
 def WaveAMDMachine_GlobalLoadB16Op
     : WaveAMDMachine_GlobalMemoryOp<"global_load_b16", [WaveAMDMachine_VMEMLoad, MemoryEffects<[MemRead]>]>,
       WaveAMDMachine_VMEMLoadInfo {
@@ -963,6 +999,42 @@ def WaveAMDMachine_GlobalLoadB32Op
                       Optional<WaveAMDMachine_MemToken>:$token);
   let assemblyFormat = [{
     $offset `,` $base (`after` $dependency^)? (`offset` $inst_offset^)?
+    attr-dict `:` functional-type(operands, results)
+  }];
+}
+
+def WaveAMDMachine_GlobalLoadU8Addr64Op
+    : WaveAMDMachine_GlobalMemoryOp<"global_load_u8_addr64", [WaveAMDMachine_VMEMLoad, MemoryEffects<[MemRead]>]>,
+      WaveAMDMachine_VMEMLoadInfo {
+  let summary = "global unsigned 8-bit load through a VGPR64 address";
+  let description = [{
+    Zero-extends the loaded byte into the result VGPR.
+  }];
+  let arguments = (ins WaveAMDMachine_VGPR2:$address,
+                       Optional<WaveAMDMachine_MemToken>:$dependency,
+                       DefaultValuedAttr<I64Attr, "0">:$inst_offset);
+  let results = (outs WaveAMDMachine_VGPR1:$result,
+                      Optional<WaveAMDMachine_MemToken>:$token);
+  let assemblyFormat = [{
+    $address (`after` $dependency^)? (`offset` $inst_offset^)?
+    attr-dict `:` functional-type(operands, results)
+  }];
+}
+
+def WaveAMDMachine_GlobalLoadI8Addr64Op
+    : WaveAMDMachine_GlobalMemoryOp<"global_load_i8_addr64", [WaveAMDMachine_VMEMLoad, MemoryEffects<[MemRead]>]>,
+      WaveAMDMachine_VMEMLoadInfo {
+  let summary = "global signed 8-bit load through a VGPR64 address";
+  let description = [{
+    Sign-extends the loaded byte into the result VGPR.
+  }];
+  let arguments = (ins WaveAMDMachine_VGPR2:$address,
+                       Optional<WaveAMDMachine_MemToken>:$dependency,
+                       DefaultValuedAttr<I64Attr, "0">:$inst_offset);
+  let results = (outs WaveAMDMachine_VGPR1:$result,
+                      Optional<WaveAMDMachine_MemToken>:$token);
+  let assemblyFormat = [{
+    $address (`after` $dependency^)? (`offset` $inst_offset^)?
     attr-dict `:` functional-type(operands, results)
   }];
 }
@@ -1134,6 +1206,22 @@ def WaveAMDMachine_MakeBufferRsrcOp
   let assemblyFormat = "$base `,` $range attr-dict `:` functional-type(operands, results)";
 }
 
+def WaveAMDMachine_GlobalStoreB8Op
+    : WaveAMDMachine_GlobalMemoryOp<"global_store_b8", [WaveAMDMachine_VMEMStore, MemoryEffects<[MemWrite]>]>,
+      WaveAMDMachine_VMEMStoreInfo {
+  let summary = "global 8-bit store through an SGPR base";
+  let arguments = (ins WaveAMDMachine_VGPR1:$offset, WaveAMDMachine_RegOrImm:$value,
+                       WaveAMDMachine_SGPR2:$base,
+                       Optional<WaveAMDMachine_MemToken>:$dependency,
+                       DefaultValuedAttr<I64Attr, "0">:$inst_offset);
+  let results = (outs Optional<WaveAMDMachine_MemToken>:$token);
+  let assemblyFormat = [{
+    $offset `,` $value `,` $base (`after` $dependency^)?
+    (`offset` $inst_offset^)?
+    attr-dict `:` functional-type(operands, results)
+  }];
+}
+
 def WaveAMDMachine_GlobalStoreB16Op
     : WaveAMDMachine_GlobalMemoryOp<"global_store_b16", [WaveAMDMachine_VMEMStore, MemoryEffects<[MemWrite]>]>,
       WaveAMDMachine_VMEMStoreInfo {
@@ -1166,6 +1254,21 @@ def WaveAMDMachine_GlobalStoreB32Op
   let results = (outs Optional<WaveAMDMachine_MemToken>:$token);
   let assemblyFormat = [{
     $offset `,` $value `,` $base (`after` $dependency^)?
+    (`offset` $inst_offset^)?
+    attr-dict `:` functional-type(operands, results)
+  }];
+}
+
+def WaveAMDMachine_GlobalStoreB8Addr64Op
+    : WaveAMDMachine_GlobalMemoryOp<"global_store_b8_addr64", [WaveAMDMachine_VMEMStore, MemoryEffects<[MemWrite]>]>,
+      WaveAMDMachine_VMEMStoreInfo {
+  let summary = "global 8-bit store through a VGPR64 address";
+  let arguments = (ins WaveAMDMachine_VGPR2:$address, WaveAMDMachine_VGPR1:$value,
+                       Optional<WaveAMDMachine_MemToken>:$dependency,
+                       DefaultValuedAttr<I64Attr, "0">:$inst_offset);
+  let results = (outs Optional<WaveAMDMachine_MemToken>:$token);
+  let assemblyFormat = [{
+    $address `,` $value (`after` $dependency^)?
     (`offset` $inst_offset^)?
     attr-dict `:` functional-type(operands, results)
   }];
@@ -1248,6 +1351,23 @@ def WaveAMDMachine_GlobalStoreB128Op
     attr-dict `:` functional-type(operands, results)
   }];
 }
+def WaveAMDMachine_BufferStoreB8Op
+    : WaveAMDMachine_BufferMemoryOp<"buffer_store_b8", [WaveAMDMachine_VMEMStore, MemoryEffects<[MemWrite]>]>,
+      WaveAMDMachine_VMEMStoreInfo {
+  let summary = "buffer 8-bit store through an SGPR descriptor and VGPR offset";
+  let arguments = (ins WaveAMDMachine_VGPR1:$offset, WaveAMDMachine_VGPR1:$value,
+                       WaveAMDMachine_SGPR4:$descriptor,
+                       WaveAMDMachine_SGPR1OrImm:$soffset,
+                       Optional<WaveAMDMachine_MemToken>:$dependency,
+                       DefaultValuedAttr<I64Attr, "0">:$inst_offset);
+  let results = (outs Optional<WaveAMDMachine_MemToken>:$token);
+  let assemblyFormat = [{
+    $offset `,` $value `,` $descriptor `,` $soffset
+    (`after` $dependency^)? (`offset` $inst_offset^)?
+    attr-dict `:` functional-type(operands, results)
+  }];
+}
+
 def WaveAMDMachine_BufferStoreB16Op
     : WaveAMDMachine_BufferMemoryOp<"buffer_store_b16", [WaveAMDMachine_VMEMStore, MemoryEffects<[MemWrite]>]>,
       WaveAMDMachine_VMEMStoreInfo {
@@ -1288,6 +1408,46 @@ def WaveAMDMachine_BufferStoreB32Op
     attr-dict `:` functional-type(operands, results)
   }];
 }
+def WaveAMDMachine_BufferLoadU8Op
+    : WaveAMDMachine_BufferMemoryOp<"buffer_load_u8", [WaveAMDMachine_VMEMLoad, MemoryEffects<[MemRead]>]>,
+      WaveAMDMachine_VMEMLoadInfo {
+  let summary = "buffer unsigned 8-bit load through an SGPR descriptor and VGPR offset";
+  let description = [{
+    Zero-extends the loaded byte into the result VGPR.
+  }];
+  let arguments = (ins WaveAMDMachine_VGPR1:$offset, WaveAMDMachine_SGPR4:$descriptor,
+                       WaveAMDMachine_SGPR1OrImm:$soffset,
+                       Optional<WaveAMDMachine_MemToken>:$dependency,
+                       DefaultValuedAttr<I64Attr, "0">:$inst_offset);
+  let results = (outs WaveAMDMachine_VGPR1:$result,
+                      Optional<WaveAMDMachine_MemToken>:$token);
+  let assemblyFormat = [{
+    $offset `,` $descriptor `,` $soffset
+    (`after` $dependency^)? (`offset` $inst_offset^)?
+    attr-dict `:` functional-type(operands, results)
+  }];
+}
+
+def WaveAMDMachine_BufferLoadI8Op
+    : WaveAMDMachine_BufferMemoryOp<"buffer_load_i8", [WaveAMDMachine_VMEMLoad, MemoryEffects<[MemRead]>]>,
+      WaveAMDMachine_VMEMLoadInfo {
+  let summary = "buffer signed 8-bit load through an SGPR descriptor and VGPR offset";
+  let description = [{
+    Sign-extends the loaded byte into the result VGPR.
+  }];
+  let arguments = (ins WaveAMDMachine_VGPR1:$offset, WaveAMDMachine_SGPR4:$descriptor,
+                       WaveAMDMachine_SGPR1OrImm:$soffset,
+                       Optional<WaveAMDMachine_MemToken>:$dependency,
+                       DefaultValuedAttr<I64Attr, "0">:$inst_offset);
+  let results = (outs WaveAMDMachine_VGPR1:$result,
+                      Optional<WaveAMDMachine_MemToken>:$token);
+  let assemblyFormat = [{
+    $offset `,` $descriptor `,` $soffset
+    (`after` $dependency^)? (`offset` $inst_offset^)?
+    attr-dict `:` functional-type(operands, results)
+  }];
+}
+
 def WaveAMDMachine_BufferLoadB16Op
     : WaveAMDMachine_BufferMemoryOp<"buffer_load_b16", [WaveAMDMachine_VMEMLoad, MemoryEffects<[MemRead]>]>,
       WaveAMDMachine_VMEMLoadInfo {
@@ -1560,6 +1720,42 @@ def WaveAMDMachine_GlobalStoreTupleB32Op
 // per-workgroup arena: the address operand is a 32-bit byte offset into
 // LDS and an optional immediate `offset:imm` is folded into the
 // hardware instruction. Both kinds drain through `lgkmcnt`.
+def WaveAMDMachine_DsLoadU8Op
+    : WaveAMDMachine_DsMemoryOp<"ds_load_u8", [WaveAMDMachine_LDSLoad]>,
+      WaveAMDMachine_LDSInfo<"1"> {
+  let summary = "LDS unsigned 8-bit load";
+  let description = [{
+    Zero-extends the loaded byte into the result VGPR.
+  }];
+  let arguments = (ins WaveAMDMachine_VGPR1:$addr,
+                       Optional<WaveAMDMachine_MemToken>:$dependency,
+                       DefaultValuedAttr<I64Attr, "0">:$offset);
+  let results = (outs WaveAMDMachine_VGPR1:$result,
+                      Optional<WaveAMDMachine_MemToken>:$token);
+  let assemblyFormat = [{
+    $addr (`after` $dependency^)? (`offset` $offset^)?
+    attr-dict `:` functional-type(operands, results)
+  }];
+}
+
+def WaveAMDMachine_DsLoadI8Op
+    : WaveAMDMachine_DsMemoryOp<"ds_load_i8", [WaveAMDMachine_LDSLoad]>,
+      WaveAMDMachine_LDSInfo<"1"> {
+  let summary = "LDS signed 8-bit load";
+  let description = [{
+    Sign-extends the loaded byte into the result VGPR.
+  }];
+  let arguments = (ins WaveAMDMachine_VGPR1:$addr,
+                       Optional<WaveAMDMachine_MemToken>:$dependency,
+                       DefaultValuedAttr<I64Attr, "0">:$offset);
+  let results = (outs WaveAMDMachine_VGPR1:$result,
+                      Optional<WaveAMDMachine_MemToken>:$token);
+  let assemblyFormat = [{
+    $addr (`after` $dependency^)? (`offset` $offset^)?
+    attr-dict `:` functional-type(operands, results)
+  }];
+}
+
 def WaveAMDMachine_DsLoadB16Op
     : WaveAMDMachine_DsMemoryOp<"ds_load_b16", [WaveAMDMachine_LDSLoad]>,
       WaveAMDMachine_LDSInfo<"1"> {

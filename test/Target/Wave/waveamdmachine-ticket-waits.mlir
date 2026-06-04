@@ -66,6 +66,19 @@ func.func @lds_nonzero_distance(%x: !waveamdmachine.reg<vgpr, 1>) {
   return
 }
 
+// CHECK-LABEL: func.func @lds_byte_loads_are_lgkm_issuers
+// CHECK: waveamdmachine.ds_load_u8
+// CHECK-NEXT: waveamdmachine.ds_load_i8
+// CHECK-NEXT: waveamdmachine.imm 64535
+// CHECK-NEXT: waveamdmachine.s_waitcnt
+// CHECK-NEXT: waveamdmachine.v_add_u32
+func.func @lds_byte_loads_are_lgkm_issuers(%x: !waveamdmachine.reg<vgpr, 1>) {
+  %a = waveamdmachine.ds_load_u8 %x : (!waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
+  %b = waveamdmachine.ds_load_i8 %x : (!waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
+  %sum = waveamdmachine.v_add_u32 %x, %a : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
+  return
+}
+
 }
 
 // -----
