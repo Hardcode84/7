@@ -141,6 +141,24 @@ func.func @unsupported_scaled_mfma_gfx950_target(%x: i32) {
 
 // -----
 
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx942"} {
+func.func @unsupported_transpose_load_gfx950_target()
+    attributes {wave.kernel, waveamdmachine.lds_size = 256 : i64} {
+  %lds = wave.lds_base : !wave.ptr<#wave.shared, i8>
+  %lane = wave.lane_id : !wave.simd<i32, 64>
+  %ptr = wave.ptr_add %lds, %lane
+      : !wave.ptr<#wave.shared, i8>, !wave.simd<i32, 64>
+      -> !wave.simd<!wave.ptr<#wave.shared, i8>, 64>
+  // expected-error @below {{transpose load lowering requires gfx950}}
+  %v, %tok = waveamd.transpose_load %ptr
+      : (!wave.simd<!wave.ptr<#wave.shared, i8>, 64>)
+        -> (!wave.simd<vector<8xi8>, 64>, !wave.mem.token)
+  return
+}
+}
+
+// -----
+
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 func.func @unsupported_mfma_family(%x: i32) {
   %a = waveamd.fragment_fill %x : i32 -> !waveamd.fragment<0, f16, 16, 16, 32, 2>

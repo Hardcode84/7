@@ -2982,6 +2982,15 @@ static LogicalResult selectDsReadTr(WaveAMDMachineSelector &S, Operation *op,
   SimdType simdType = cast<SimdType>(valueResult.getType());
   VectorType vectorType = cast<VectorType>(simdType.getElementType());
   bool useB8Op = vectorType.getElementType().isInteger(8);
+  FailureOr<llvm::AMDGPU::IsaVersion> isa =
+      getTargetIsaVersion(op, "transpose load lowering");
+  if (failed(isa))
+    return failure();
+  bool supported =
+      useB8Op ? waveamdmachine::DsReadTrB64B8Op::isSupportedOnIsa(*isa)
+              : waveamdmachine::DsReadTrB64B4Op::isSupportedOnIsa(*isa);
+  if (!supported)
+    return op->emitError("transpose load lowering requires gfx950");
   waveamdmachine::AddressFieldSpec spec =
       useB8Op ? waveamdmachine::DsReadTrB64B8Op::getAddressFieldSpec()
               : waveamdmachine::DsReadTrB64B4Op::getAddressFieldSpec();
