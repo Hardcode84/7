@@ -60,10 +60,45 @@ static constexpr llvm::StringLiteral kAGPRCandidatesAttr =
     "waveamdmachine.regalloc_agpr_candidates";
 
 static void setRegPhys(Value v, unsigned phys) {
-  auto rt = cast<waveamdmachine::RegType>(v.getType());
+  waveamdmachine::RegType rt = cast<waveamdmachine::RegType>(v.getType());
   v.setType(waveamdmachine::RegType::get(rt.getContext(), rt.getRegClass(),
                                          rt.getWidth(),
                                          static_cast<int64_t>(phys)));
+}
+
+static waveamdmachine::RegType
+getVirtualRegType(Value v, waveamdmachine::RegClass regClass) {
+  waveamdmachine::RegType rt = cast<waveamdmachine::RegType>(v.getType());
+  return waveamdmachine::RegType::get(rt.getContext(), regClass, rt.getWidth(),
+                                      /*index=*/-1);
+}
+
+static void setRegClass(Value v, waveamdmachine::RegClass regClass) {
+  v.setType(getVirtualRegType(v, regClass));
+}
+
+static bool isVirtualVGPRValue(Value value) {
+  waveamdmachine::RegType regType =
+      dyn_cast<waveamdmachine::RegType>(value.getType());
+  return regType && regType.getRegClass() == waveamdmachine::RegClass::VGPR &&
+         regType.getIndex() < 0;
+}
+
+static unsigned countVirtualVGPRValues(Operation *op) {
+  unsigned count = 0;
+  for (Value result : op->getResults())
+    if (isVirtualVGPRValue(result))
+      ++count;
+  for (Region &region : op->getRegions()) {
+    for (Block &block : region) {
+      for (BlockArgument arg : block.getArguments())
+        if (isVirtualVGPRValue(arg))
+          ++count;
+      for (Operation &nested : block)
+        count += countVirtualVGPRValues(&nested);
+    }
+  }
+  return count;
 }
 
 static FailureOr<RegisterLimits> getRegisterLimits(ModuleOp module) {
@@ -109,7 +144,8 @@ struct PressureIntervalRef {
 };
 
 struct AGPRConversionCandidate {
-  SmallVector<PressureIntervalRef> intervals;
+  SmallVector<PressureIntervalRef, 2> intervals;
+  SmallVector<Value, 4> values;
   unsigned agprDwords = 0;
   unsigned bridgeCount = 0;
   unsigned overlapDwords = 0;
@@ -118,7 +154,7 @@ struct AGPRConversionCandidate {
 };
 
 struct RegisterPressurePoint {
-  SmallVector<AGPRConversionCandidate> agprCandidates;
+  SmallVector<AGPRConversionCandidate, 4> agprCandidates;
   SmallVector<PressureIntervalRef> overlaps;
   PressureIntervalRef request;
   StringRef regClass;
@@ -198,6 +234,103 @@ struct WaveAMDRegAllocPass
       setPressureAttrs(func, *pressure, builder);
   }
 
+  LogicalResult finishUnrelievedOverflow(
+      func::FuncOp func, bool softFail, bool &overflow,
+      const std::optional<RegisterPressurePoint> &pressure) {
+    if (softFail) {
+      overflow = true;
+      return success();
+    }
+    if (!pressure)
+      return func.emitError("waveamd-reg-alloc overflowed without pressure "
+                            "diagnostics");
+    InFlightDiagnostic diag =
+        func.emitError()
+        << "waveamd-reg-alloc could not find a legal AGPR bank-spill "
+           "candidate for "
+        << pressure->regClass << " pressure at position " << pressure->position
+        << " (limit=" << pressure->limit
+        << ", live_dwords=" << pressure->liveDwords
+        << ", required_relief=" << pressure->requiredRelief << ")";
+    diag << "; request=" << formatInterval(pressure->request)
+         << "; overlaps=" << formatIntervals(pressure->overlaps);
+    return failure();
+  }
+
+  LogicalResult
+  finishAGPRProgressBound(func::FuncOp func, bool softFail, bool &overflow,
+                          const std::optional<RegisterPressurePoint> &pressure,
+                          unsigned progressBound) {
+    if (softFail) {
+      overflow = true;
+      return success();
+    }
+    if (!pressure)
+      return func.emitError("waveamd-reg-alloc hit AGPR bank-spill progress "
+                            "bound without pressure diagnostics");
+    return func.emitError()
+           << "waveamd-reg-alloc hit AGPR bank-spill progress bound "
+           << "(bound=" << progressBound
+           << ") before relieving VGPR pressure at position "
+           << pressure->position;
+  }
+
+  LogicalResult applyAGPRCandidate(func::FuncOp func,
+                                   const AGPRConversionCandidate &candidate,
+                                   OpBuilder &builder) {
+    llvm::DenseSet<Value> groupValues(candidate.values.begin(),
+                                      candidate.values.end());
+    SmallVector<std::pair<Value, Value>, 4> agprValues;
+    for (Value value : candidate.values) {
+      if (!isa<waveamdmachine::RegType>(value.getType()))
+        continue;
+      if (canDefineAGPR(value, groupValues)) {
+        setRegClass(value, waveamdmachine::RegClass::AGPR);
+        agprValues.push_back({value, value});
+        continue;
+      }
+      Operation *def = value.getDefiningOp();
+      if (!def)
+        return func.emitError()
+               << "waveamd-reg-alloc cannot bank-spill block argument "
+               << value;
+      builder.setInsertionPointAfter(def);
+      auto write = waveamdmachine::VAccvgprWriteB32TupleOp::create(
+          builder, def->getLoc(),
+          getVirtualRegType(value, waveamdmachine::RegClass::AGPR), value);
+      agprValues.push_back({value, write.getResult()});
+    }
+
+    for (const std::pair<Value, Value> &mapping : agprValues)
+      rewriteAGPRUses(mapping.first, mapping.second, groupValues, builder);
+    return success();
+  }
+
+  static void rewriteAGPRUses(Value original, Value agpr,
+                              const llvm::DenseSet<Value> &groupValues,
+                              OpBuilder &builder) {
+    SmallVector<OpOperand *> uses;
+    for (OpOperand &use : original.getUses())
+      uses.push_back(&use);
+    for (OpOperand *use : uses) {
+      if (use->get() != original)
+        continue;
+      Operation *user = use->getOwner();
+      if (original != agpr &&
+          isa<waveamdmachine::VAccvgprWriteB32TupleOp>(user))
+        continue;
+      if (canConsumeAGPR(*use, groupValues)) {
+        use->set(agpr);
+        continue;
+      }
+      builder.setInsertionPoint(user);
+      auto read = waveamdmachine::VAccvgprReadB32TupleOp::create(
+          builder, user->getLoc(),
+          getVirtualRegType(agpr, waveamdmachine::RegClass::VGPR), agpr);
+      use->set(read.getResult());
+    }
+  }
+
   LogicalResult
   allocateFunction(func::FuncOp func, RegisterLimits limits, bool softFail,
                    bool &overflow,
@@ -207,6 +340,18 @@ struct WaveAMDRegAllocPass
     if (failed(wave::verifyNoHardwareResourceLiveRangeOverlap(
             func, "waveamd-reg-alloc")))
       return failure();
+    if (agprBankSpill)
+      return allocateFunctionWithAGPRBankSpill(func, limits, softFail, overflow,
+                                               pressure);
+    return allocateFunctionAttempt(func, limits, softFail, overflow, pressure,
+                                   rankAgprCandidates);
+  }
+
+  LogicalResult
+  allocateFunctionAttempt(func::FuncOp func, RegisterLimits limits,
+                          bool softFail, bool &overflow,
+                          std::optional<RegisterPressurePoint> &pressure,
+                          bool buildAgprCandidates) {
     FailureOr<wave::WaveAMDLiveIntervalBuildResult> builtIntervals =
         wave::buildWaveAMDLiveIntervals(func);
     if (failed(builtIntervals))
@@ -221,9 +366,37 @@ struct WaveAMDRegAllocPass
     if (limits.numAGPR == 0 && hasLiveIntervals(intervals.agprs))
       return func.emitError(
           "waveamd-reg-alloc AGPR registers require target with AGPR support");
-    return allocateRegisterClasses(func, intervals, limits, sgprReserved,
-                                   vgprReserved, softFail, overflow, pressure,
-                                   builtIntervals->positions);
+    return allocateRegisterClasses(
+        func, intervals, limits, sgprReserved, vgprReserved, softFail, overflow,
+        pressure, builtIntervals->positions, buildAgprCandidates);
+  }
+
+  LogicalResult allocateFunctionWithAGPRBankSpill(
+      func::FuncOp func, RegisterLimits limits, bool softFail, bool &overflow,
+      std::optional<RegisterPressurePoint> &pressure) {
+    unsigned progressBound = countVirtualVGPRValues(func.getOperation());
+    for (unsigned iter : llvm::seq<unsigned>(0, progressBound + 1)) {
+      bool attemptOverflow = false;
+      std::optional<RegisterPressurePoint> attemptPressure;
+      if (failed(allocateFunctionAttempt(func, limits, /*softFail=*/true,
+                                         attemptOverflow, attemptPressure,
+                                         /*buildAgprCandidates=*/true)))
+        return failure();
+      if (!attemptOverflow)
+        return success();
+      pressure = std::move(attemptPressure);
+      if (!pressure || pressure->regClass != "VGPR" ||
+          pressure->agprCandidates.empty())
+        return finishUnrelievedOverflow(func, softFail, overflow, pressure);
+      if (iter == progressBound)
+        return finishAGPRProgressBound(func, softFail, overflow, pressure,
+                                       progressBound);
+      OpBuilder builder(func.getContext());
+      if (failed(applyAGPRCandidate(func, pressure->agprCandidates.front(),
+                                    builder)))
+        return failure();
+    }
+    llvm_unreachable("loop exits through success or overflow handling");
   }
 
   LogicalResult validateReservedLimits(func::FuncOp func, RegisterLimits limits,
@@ -241,7 +414,8 @@ struct WaveAMDRegAllocPass
                           RegisterLimits limits, unsigned sgprReserved,
                           unsigned vgprReserved, bool softFail, bool &overflow,
                           std::optional<RegisterPressurePoint> &pressure,
-                          const DenseMap<Operation *, unsigned> &positions) {
+                          const DenseMap<Operation *, unsigned> &positions,
+                          bool buildAgprCandidates) {
     if (failed(allocateClass(func, intervals.sgprs, limits.numSGPR,
                              sgprReserved, softFail, overflow, pressure,
                              positions, "SGPR", intervals.agprs,
@@ -249,7 +423,7 @@ struct WaveAMDRegAllocPass
       return failure();
     if (overflow)
       return success();
-    unsigned agprCandidateLimit = rankAgprCandidates ? limits.numAGPR : 0;
+    unsigned agprCandidateLimit = buildAgprCandidates ? limits.numAGPR : 0;
     if (failed(allocateClass(func, intervals.vgprs, limits.numVGPR,
                              vgprReserved, softFail, overflow, pressure,
                              positions, "VGPR", intervals.agprs,
@@ -275,24 +449,31 @@ struct WaveAMDRegAllocPass
     bool operator<(const PhysAlloc &o) const { return begin < o.begin; }
   };
 
-  // Release every active interval whose end position is before `pos`,
-  // dropping its `PhysAlloc` from `live` so the freed slot rejoins the
-  // gap-walking pool. Mirrors the bitmap clear in the previous
-  // implementation, just keyed by interval.
-  void expireOld(SmallVectorImpl<wave::WaveAMDLiveInterval> &active,
+  struct ActiveAlloc {
+    wave::WaveAMDLiveInterval interval;
+    PhysAlloc phys;
+  };
+
+  // Staged assignments keep values virtual until the class succeeds.
+  void expireOld(SmallVectorImpl<ActiveAlloc> &active,
                  std::set<PhysAlloc> &live, unsigned pos) {
-    SmallVector<wave::WaveAMDLiveInterval> stillActive;
-    for (wave::WaveAMDLiveInterval interval : active) {
-      if (interval.end >= pos) {
-        stillActive.push_back(interval);
+    SmallVector<ActiveAlloc> stillActive;
+    for (ActiveAlloc alloc : active) {
+      if (alloc.interval.end >= pos) {
+        stillActive.push_back(alloc);
         continue;
       }
-      auto rt =
-          cast<waveamdmachine::RegType>(interval.values.front().getType());
-      live.erase(PhysAlloc{static_cast<unsigned>(rt.getIndex()),
-                           static_cast<unsigned>(rt.getWidth())});
+      live.erase(alloc.phys);
     }
     active = std::move(stillActive);
+  }
+
+  static SmallVector<wave::WaveAMDLiveInterval>
+  collectActiveIntervals(ArrayRef<ActiveAlloc> active) {
+    SmallVector<wave::WaveAMDLiveInterval> intervals;
+    for (const ActiveAlloc &alloc : active)
+      intervals.push_back(alloc.interval);
+    return intervals;
   }
 
   LogicalResult handleAllocationFailure(
@@ -341,13 +522,13 @@ struct WaveAMDRegAllocPass
       return lhs.start < rhs.start;
     });
 
-    SmallVector<wave::WaveAMDLiveInterval> active;
-    // Mirrors aster's gap-walking constraint set: reserved registers
-    // pre-occupy `[0, reserved)`.
+    SmallVector<ActiveAlloc> active;
+    // Reserved registers pre-occupy `[0, reserved)`.
     std::set<PhysAlloc> live;
     if (reserved > 0 && reserved <= numPhys)
       live.insert(PhysAlloc{0, reserved});
 
+    SmallVector<std::pair<Value, unsigned>> assignments;
     for (wave::WaveAMDLiveInterval interval : intervals) {
       if (interval.values.empty())
         continue;
@@ -361,20 +542,25 @@ struct WaveAMDRegAllocPass
       // power-of-two widths the pipeline currently produces.
       unsigned align = std::max<unsigned>(1, llvm::PowerOf2Ceil(width));
       std::optional<unsigned> phys = findFreeSlot(live, width, align, numPhys);
-      if (!phys)
-        return handleAllocationFailure(func, intervals, interval, active, live,
-                                       numPhys, reserved, softFail, overflow,
-                                       pressure, positions, regClass,
-                                       agprIntervals, agprCandidateLimit);
+      if (!phys) {
+        SmallVector<wave::WaveAMDLiveInterval> activeIntervals =
+            collectActiveIntervals(active);
+        return handleAllocationFailure(
+            func, intervals, interval, activeIntervals, live, numPhys, reserved,
+            softFail, overflow, pressure, positions, regClass, agprIntervals,
+            agprCandidateLimit);
+      }
       for (auto [v, off] : llvm::zip(interval.values, interval.slotOffsets))
-        setRegPhys(v, *phys + off);
-      live.insert(PhysAlloc{*phys, width});
-      active.push_back(interval);
-      llvm::sort(active, [](const wave::WaveAMDLiveInterval &lhs,
-                            const wave::WaveAMDLiveInterval &rhs) {
-        return lhs.end < rhs.end;
+        assignments.push_back({v, *phys + off});
+      PhysAlloc allocation{*phys, width};
+      live.insert(allocation);
+      active.push_back(ActiveAlloc{interval, allocation});
+      llvm::sort(active, [](const ActiveAlloc &lhs, const ActiveAlloc &rhs) {
+        return lhs.interval.end < rhs.interval.end;
       });
     }
+    for (auto [value, phys] : assignments)
+      setRegPhys(value, phys);
     return success();
   }
 
@@ -535,6 +721,30 @@ struct WaveAMDRegAllocPass
     return false;
   }
 
+  static bool hasNonAGPRWriteUse(Value value) {
+    return llvm::any_of(value.getUses(), [](OpOperand &use) {
+      return !isa<waveamdmachine::VAccvgprWriteB32TupleOp>(use.getOwner());
+    });
+  }
+
+  static bool canMaterializeAndProgressAGPRCandidate(
+      ArrayRef<unsigned> group, ArrayRef<wave::WaveAMDLiveInterval> intervals) {
+    llvm::DenseSet<Value> groupValues = collectGroupValues(group, intervals);
+    bool canProgress = false;
+    for (unsigned intervalIndex : group) {
+      for (Value value : intervals[intervalIndex].values) {
+        if (canDefineAGPR(value, groupValues)) {
+          canProgress = true;
+          continue;
+        }
+        if (!value.getDefiningOp())
+          return false;
+        canProgress |= hasNonAGPRWriteUse(value);
+      }
+    }
+    return canProgress;
+  }
+
   static unsigned
   countAGPRBridgeBoundaries(ArrayRef<unsigned> group,
                             ArrayRef<wave::WaveAMDLiveInterval> intervals) {
@@ -637,9 +847,11 @@ struct WaveAMDRegAllocPass
     candidate.reliefDwords = liveDwordsAt(group, intervals, pressurePosition);
     candidate.overlapDwords = overlapDwords(group, intervals);
     candidate.agprDwords = maxGroupLiveDwords(group, intervals);
-    for (unsigned intervalIndex : group)
-      candidate.intervals.push_back(
-          buildIntervalRef(intervals[intervalIndex], positions));
+    for (unsigned intervalIndex : group) {
+      const wave::WaveAMDLiveInterval &interval = intervals[intervalIndex];
+      candidate.values.append(interval.values);
+      candidate.intervals.push_back(buildIntervalRef(interval, positions));
+    }
     return candidate;
   }
 
@@ -656,7 +868,7 @@ struct WaveAMDRegAllocPass
     return lhs.order < rhs.order;
   }
 
-  static SmallVector<AGPRConversionCandidate>
+  static SmallVector<AGPRConversionCandidate, 4>
   buildAGPRCandidates(ArrayRef<wave::WaveAMDLiveInterval> intervals,
                       ArrayRef<wave::WaveAMDLiveInterval> active,
                       const wave::WaveAMDLiveInterval &request,
@@ -683,9 +895,11 @@ struct WaveAMDRegAllocPass
       addSeed(interval);
     addSeed(request);
 
-    SmallVector<AGPRConversionCandidate> candidates;
+    SmallVector<AGPRConversionCandidate, 4> candidates;
     for (auto [order, group] : llvm::enumerate(groups)) {
       if (!fitsAGPRSpace(group, intervals, agprIntervals, agprLimit))
+        continue;
+      if (!canMaterializeAndProgressAGPRCandidate(group, intervals))
         continue;
       candidates.push_back(buildAGPRCandidate(group, intervals, positions,
                                               pressurePosition, order));

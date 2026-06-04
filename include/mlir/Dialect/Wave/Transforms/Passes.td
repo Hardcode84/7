@@ -366,6 +366,8 @@ def WaveAMDRegAlloc
            "Annotate overflowed funcs instead of failing the pass.">,
     Option<"rankAgprCandidates", "rank-agpr-candidates", "bool", /*default=*/"false",
            "Annotate VGPR pressure overflows with ranked VGPR-to-AGPR candidates.">,
+    Option<"agprBankSpill", "agpr-bank-spill", "bool", /*default=*/"false",
+           "Retry VGPR allocation by moving ranked VGPR intervals to AGPRs.">,
     Option<"vgprLimitOverride", "vgpr-limit", "int", /*default=*/"-1",
            "Cap VGPRs below the subtarget default; -1 means no cap.">,
     Option<"sgprLimitOverride", "sgpr-limit", "int", /*default=*/"-1",
