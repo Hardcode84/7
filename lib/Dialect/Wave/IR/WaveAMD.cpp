@@ -207,6 +207,17 @@ static bool isScaleI32Wave64(Type type) {
   wave::SimdType simd = dyn_cast<wave::SimdType>(type);
   return simd && simd.getWidth() == 64 && simd.getElementType().isInteger(32);
 }
+static bool isScaleI8TransposeWave64(Type type) {
+  wave::SimdType simd = dyn_cast<wave::SimdType>(type);
+  if (!simd || simd.getWidth() != 64)
+    return false;
+  VectorType vecType = dyn_cast<VectorType>(simd.getElementType());
+  return vecType && vecType.getRank() == 1 && vecType.getNumElements() == 8 &&
+         vecType.getElementType().isInteger(8);
+}
+static bool isMmaScaleType(Type type) {
+  return isScaleI32Wave64(type) || isScaleI8TransposeWave64(type);
+}
 
 static constexpr WmmaShape kWmmaShapes[] = {
     {"wmma.i32.16x16x16.iu8", matchIU8AB, matchI32Acc,
@@ -285,10 +296,12 @@ static LogicalResult verifyMmaScaleFragments(MmaScaleOp op) {
 }
 
 static LogicalResult verifyMmaScaleTypes(MmaScaleOp op) {
-  if (!isScaleI32Wave64(op.getAScale().getType()))
-    return op.emitOpError("A scale must be !wave.simd<i32, 64>");
-  if (!isScaleI32Wave64(op.getBScale().getType()))
-    return op.emitOpError("B scale must be !wave.simd<i32, 64>");
+  if (!isMmaScaleType(op.getAScale().getType()))
+    return op.emitOpError("A scale must be !wave.simd<i32, 64> or "
+                          "!wave.simd<vector<8xi8>, 64>");
+  if (!isMmaScaleType(op.getBScale().getType()))
+    return op.emitOpError("B scale must be !wave.simd<i32, 64> or "
+                          "!wave.simd<vector<8xi8>, 64>");
   return success();
 }
 

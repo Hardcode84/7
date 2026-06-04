@@ -151,6 +151,14 @@ print(module_mxfp4)
 # CHECK-SAME: !wave.ptr<#wave.global, i8>
 # CHECK: %{{.*}}, %{{.*}} = wave.load
 # CHECK-SAME: !wave.ptr<#wave.global, i8>
+# CHECK: wave.lds_base
+# CHECK-SAME: !wave.ptr<#wave.shared, i8>
+# CHECK: wave.load
+# CHECK-SAME: -> (!wave.simd<vector<4xi8>, 64>, !wave.mem.token)
+# CHECK: wave.store
+# CHECK-SAME: !wave.simd<i8, 64>
+# CHECK: waveamd.transpose_load
+# CHECK-SAME: -> (!wave.simd<vector<8xi8>, 64>, !wave.mem.token)
 # CHECK-COUNT-4: waveamd.mma_scale "mfma.scale.f32.16x16x128.f4.f4"
-# CHECK-SAME: !wave.simd<i32, 64>
-# CHECK-SAME: !wave.simd<i32, 64>
+# CHECK-SAME: !wave.simd<vector<8xi8>, 64>
+# CHECK-SAME: !wave.simd<vector<8xi8>, 64>

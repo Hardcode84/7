@@ -3391,14 +3391,24 @@ LogicalResult WaveAMDMachineSelector::selectMmaScale(waveamd::MmaScaleOp op) {
       cast<waveamd::FragmentType>(op.getResult().getType());
   Type vgprTuple = getRegType(op.getContext(), waveamdmachine::RegClass::VGPR,
                               resultType.getRegisters());
-  Value result =
-      waveamdmachine::MfmaScaleF32_16x16x128_F4F4Op::create(
-          builder, op.getLoc(), vgprTuple, expect(op.getA(), op),
-          expect(op.getB(), op), expect(op.getAcc(), op),
-          ensureVGPRForVSrc1(op.getLoc(), expect(op.getAScale(), op)),
-          ensureVGPRForVSrc1(op.getLoc(), expect(op.getBScale(), op)),
-          op.getScaleIdxA(), op.getScaleIdxB())
-          .getResult();
+  auto getScale = [&](Value scale) -> Value {
+    Value raw = expect(scale, op);
+    SimdType simdType = cast<SimdType>(scale.getType());
+    VectorType vecType = dyn_cast<VectorType>(simdType.getElementType());
+    if (!vecType)
+      return ensureVGPRForVSrc1(op.getLoc(), raw);
+    Type vgpr1 = getRegType(op.getContext(), waveamdmachine::RegClass::VGPR);
+    waveamdmachine::TupleToElementsOp split =
+        waveamdmachine::TupleToElementsOp::create(
+            builder, op.getLoc(), SmallVector<Type, 2>{vgpr1, vgpr1}, raw);
+    return split.getElements().front();
+  };
+  Value result = waveamdmachine::MfmaScaleF32_16x16x128_F4F4Op::create(
+                     builder, op.getLoc(), vgprTuple, expect(op.getA(), op),
+                     expect(op.getB(), op), expect(op.getAcc(), op),
+                     getScale(op.getAScale()), getScale(op.getBScale()),
+                     op.getScaleIdxA(), op.getScaleIdxB())
+                     .getResult();
   values[op.getResult()] = result;
   eraseIfTopLevel(op);
   return success();
