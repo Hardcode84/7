@@ -279,6 +279,8 @@ class _MatmulConfig:
     def scale_lds_bytes(self) -> int:
         if not self.uses_packed_mxfp4:
             return 0
+        if self.use_dma_lds:
+            return 0
         scale_tiles = self.BM * self.wave_m_tiles + self.BN * self.wave_n_tiles
         return scale_tiles * 512
 
@@ -1378,7 +1380,8 @@ def _mxfp4_scale_layout(
 def _scale_lds_base(
     bld: dsl.FunctionBuilder, cfg: _MatmulConfig, lds_offset: dsl.Value | int
 ) -> dsl.Value:
-    lds = bld.lds_base(dsl.i8(), offset=cfg.data_lds_bytes)
+    lds_base_offset = 0 if cfg.use_dma_lds else cfg.data_lds_bytes
+    lds = bld.lds_base(dsl.i8(), offset=lds_base_offset)
     if isinstance(lds_offset, int):
         if lds_offset == 0:
             return lds
@@ -1788,9 +1791,14 @@ def _emit_pipelined_step(
             state.accs,
             coords=coords,
             scale_step=scale_step,
-            scale_lds_offset=0,
+            scale_lds_offset=current_lds_offset,
             scale_after=state.reuse_token,
             scale_tokens=scale_tokens,
+        )
+        dma_after = (
+            _join_tokens(bld, [state.reuse_token, *scale_tokens])
+            if cfg.uses_packed_mxfp4
+            else state.reuse_token
         )
         next_token = _join_tokens(
             bld,
@@ -1799,7 +1807,7 @@ def _emit_pipelined_step(
                 a_ptrs,
                 b_ptrs,
                 staging,
-                after=state.reuse_token,
+                after=dma_after,
                 lds_offset=next_lds_offset,
             ),
         )
@@ -1811,8 +1819,6 @@ def _emit_pipelined_step(
             staging,
             lds_offset=ready_lds_offset,
         )
-        if cfg.uses_packed_mxfp4:
-            reuse_token = _join_tokens(bld, [reuse_token, *scale_tokens])
     else:
         next_token = None
         reuse_token = None
@@ -1861,6 +1867,7 @@ def _emit_dma_tail_step(
     if state.dma_token is None:
         raise ValueError("DMA tail step requires a ready token")
     scale_tokens: list[dsl.Value] = []
+    current_step = cfg.virtual_k_steps - 2
     new_accs = _emit_mma_grid(
         bld,
         cfg,
@@ -1868,7 +1875,8 @@ def _emit_dma_tail_step(
         state.bfs,
         state.accs,
         coords=coords,
-        scale_step=cfg.virtual_k_steps - 2,
+        scale_step=current_step,
+        scale_lds_offset=_dma_buffer_offset(bld, cfg, current_step),
         scale_after=state.reuse_token,
         scale_tokens=scale_tokens,
     )
@@ -2277,8 +2285,7 @@ def _emit_kernel(bld: dsl.FunctionBuilder, cfg: _MatmulConfig) -> None:
     final_scale_lds_offset: dsl.Value | int = 0
     if cfg.use_dma_lds and cfg.virtual_k_steps > 1:
         final_state = _emit_dma_tail_step(bld, cfg, types, staging, coords, final_state)
-        if not cfg.uses_packed_mxfp4:
-            final_scale_lds_offset = _dma_buffer_offset(bld, cfg, final_scale_step)
+        final_scale_lds_offset = _dma_buffer_offset(bld, cfg, final_scale_step)
     _store_final_tiles(
         bld,
         cfg,
