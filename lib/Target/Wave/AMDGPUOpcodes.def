@@ -1,0 +1,125 @@
+//===- AMDGPUOpcodes.def - Wave AMDGPU opcode list -------------*- C++ -*-===//
+//
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-FileCopyrightText: 2026 wave-mlir contributors
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+//
+//===----------------------------------------------------------------------===//
+
+#define WAVE_AMDGPU_OPCODE_LIST(X)                                             \
+  X(sMovB32, S_MOV_B32_vi, S_MOV_B32_gfx11)                                    \
+  X(sAddI32, S_ADD_I32_vi, S_ADD_I32_gfx11)                                    \
+  X(sMulI32, S_MUL_I32_vi, S_MUL_I32_gfx11)                                    \
+  X(sLshlB32, S_LSHL_B32_vi, S_LSHL_B32_gfx11)                                 \
+  X(sLshrB32, S_LSHR_B32_vi, S_LSHR_B32_gfx11)                                 \
+  X(sAndB32, S_AND_B32_vi, S_AND_B32_gfx11)                                    \
+  X(sXorB32, S_XOR_B32_vi, S_XOR_B32_gfx11)                                    \
+  X(sXorB64, S_XOR_B64_vi, S_XOR_B64_gfx11)                                    \
+  X(sAndn2B32, S_ANDN2_B32_vi, S_ANDN2_B32_gfx11)                              \
+  X(sAndn2B64, S_ANDN2_B64_vi, S_ANDN2_B64_gfx11)                              \
+  X(sAndSaveexecB64, S_AND_SAVEEXEC_B64_vi, S_AND_SAVEEXEC_B64_gfx11)          \
+  X(sMovB64, S_MOV_B64_vi, S_MOV_B64_gfx11)                                    \
+  X(sAddU32, S_ADD_U32_vi, S_ADD_U32_gfx11)                                    \
+  X(sAddcU32, S_ADDC_U32_vi, S_ADDC_U32_gfx11)                                 \
+  X(sMulHiU32, S_MUL_HI_U32_vi, S_MUL_HI_U32_gfx11)                            \
+  X(sCmpLtI32, S_CMP_LT_I32_vi, S_CMP_LT_I32_gfx11)                            \
+  X(sCmpLgU32, S_CMP_LG_U32_vi, S_CMP_LG_U32_gfx11)                            \
+  X(sCselectB32, S_CSELECT_B32_vi, S_CSELECT_B32_gfx11)                        \
+  X(sBranch, S_BRANCH_vi, S_BRANCH_gfx11)                                      \
+  X(sCbranchScc0, S_CBRANCH_SCC0_vi, S_CBRANCH_SCC0_gfx11)                     \
+  X(sCbranchScc1, S_CBRANCH_SCC1_vi, S_CBRANCH_SCC1_gfx11)                     \
+  X(sCbranchExecz, S_CBRANCH_EXECZ_vi, S_CBRANCH_EXECZ_gfx11)                  \
+  X(sLoadB32, S_LOAD_DWORD_IMM_vi, S_LOAD_B32_IMM_gfx11)                       \
+  X(sLoadB64, S_LOAD_DWORDX2_IMM_vi, S_LOAD_B64_IMM_gfx11)                     \
+  X(sLoadB128, S_LOAD_DWORDX4_IMM_vi, S_LOAD_B128_IMM_gfx11)                   \
+  X(sLoadB256, S_LOAD_DWORDX8_IMM_vi, S_LOAD_B256_IMM_gfx11)                   \
+  X(sWaitcnt, S_WAITCNT_vi, S_WAITCNT_gfx11)                                   \
+  X(sNop, S_NOP_vi, S_NOP_gfx11)                                               \
+  X(sSetprio, S_SETPRIO_vi, S_SETPRIO_gfx11)                                   \
+  X(sBarrier, S_BARRIER_vi, S_BARRIER_gfx11)                                   \
+  X(sEndpgm, S_ENDPGM_vi, S_ENDPGM_gfx11)                                      \
+  X(sSetpcB64, S_SETPC_B64_vi, S_SETPC_B64_gfx11)                              \
+  X(vMbcntLo, V_MBCNT_LO_U32_B32_e64_vi, V_MBCNT_LO_U32_B32_e64_gfx11)         \
+  X(vMbcntHi, V_MBCNT_HI_U32_B32_e64_vi, V_MBCNT_HI_U32_B32_e64_gfx11)         \
+  X(vMovB32, V_MOV_B32_e32_vi, V_MOV_B32_e32_gfx11)                            \
+  X(vCndmaskB32, V_CNDMASK_B32_e64_vi, V_CNDMASK_B32_e64_gfx11)                \
+  X(vAndB32, V_AND_B32_e32_vi, V_AND_B32_e32_gfx11)                            \
+  X(vOrB32, V_OR_B32_e32_vi, V_OR_B32_e32_gfx11)                               \
+  X(vXorB32, V_XOR_B32_e32_vi, V_XOR_B32_e32_gfx11)                            \
+  X(vLshlrevB32, V_LSHLREV_B32_e32_vi, V_LSHLREV_B32_e32_gfx11)                \
+  X(vLshrrevB32, V_LSHRREV_B32_e32_vi, V_LSHRREV_B32_e32_gfx11)                \
+  X(vReadfirstlaneB32, V_READFIRSTLANE_B32_vi, V_READFIRSTLANE_B32_gfx11)      \
+  X(vMulLoU32, V_MUL_LO_U32_vi, V_MUL_LO_U32_e64_gfx11)                        \
+  X(vAdd3U32, V_ADD3_U32_vi, V_ADD3_U32_e64_gfx11)                             \
+  X(vMadI32I24, V_MAD_I32_I24_vi, V_MAD_I32_I24_e64_gfx11)                     \
+  X(vMadU32U24, V_MAD_U32_U24_vi, V_MAD_U32_U24_e64_gfx11)                     \
+  X(vLshlAddU32, V_LSHL_ADD_U32_vi, V_LSHL_ADD_U32_e64_gfx11)                  \
+  X(vAddLshlU32, V_ADD_LSHL_U32_vi, V_ADD_LSHL_U32_e64_gfx11)                  \
+  X(vAndOrB32, V_AND_OR_B32_vi, V_AND_OR_B32_e64_gfx11)                        \
+  X(vOr3B32, V_OR3_B32_vi, V_OR3_B32_e64_gfx11)                                \
+  X(vXadU32, V_XAD_U32_vi, V_XAD_U32_e64_gfx11)                                \
+  X(vAddF32, V_ADD_F32_e32_vi, V_ADD_F32_e32_gfx11)                            \
+  X(vSubF32, V_SUB_F32_e32_vi, V_SUB_F32_e32_gfx11)                            \
+  X(vMulF32, V_MUL_F32_e32_vi, V_MUL_F32_e32_gfx11)                            \
+  X(vMaxF32, V_MAX_F32_e32_vi, V_MAX_F32_e32_gfx11)                            \
+  X(vExpF32, V_EXP_F32_e32_vi, V_EXP_F32_e32_gfx11)                            \
+  X(vRcpF32, V_RCP_F32_e32_vi, V_RCP_F32_e32_gfx11)                            \
+  X(vCmpEqU32, V_CMP_EQ_U32_e64_vi, V_CMP_EQ_U32_e64_gfx11)                    \
+  X(vCmpNeU32, V_CMP_NE_U32_e64_vi, V_CMP_NE_U32_e64_gfx11)                    \
+  X(vCmpLtU32, V_CMP_LT_U32_e64_vi, V_CMP_LT_U32_e64_gfx11)                    \
+  X(vCmpLeU32, V_CMP_LE_U32_e64_vi, V_CMP_LE_U32_e64_gfx11)                    \
+  X(vCmpGtU32, V_CMP_GT_U32_e64_vi, V_CMP_GT_U32_e64_gfx11)                    \
+  X(vCmpGeU32, V_CMP_GE_U32_e64_vi, V_CMP_GE_U32_e64_gfx11)                    \
+  X(vCmpxEqU32, V_CMPX_EQ_U32_e64_vi, V_CMPX_EQ_U32_e64_gfx11)                 \
+  X(vCmpxNeU32, V_CMPX_NE_U32_e64_vi, V_CMPX_NE_U32_e64_gfx11)                 \
+  X(vCmpxLtU32, V_CMPX_LT_U32_e64_vi, V_CMPX_LT_U32_e64_gfx11)                 \
+  X(vCmpxLeU32, V_CMPX_LE_U32_e64_vi, V_CMPX_LE_U32_e64_gfx11)                 \
+  X(vCmpxGtU32, V_CMPX_GT_U32_e64_vi, V_CMPX_GT_U32_e64_gfx11)                 \
+  X(vCmpxGeU32, V_CMPX_GE_U32_e64_vi, V_CMPX_GE_U32_e64_gfx11)                 \
+  X(bufferStoreB32, BUFFER_STORE_DWORD_OFFEN_vi,                               \
+    BUFFER_STORE_DWORD_OFFEN_gfx11)                                            \
+  X(bufferLoadB32, BUFFER_LOAD_DWORD_OFFEN_vi, BUFFER_LOAD_DWORD_OFFEN_gfx11)  \
+  X(globalStoreB32, GLOBAL_STORE_DWORD_SADDR_vi,                               \
+    GLOBAL_STORE_DWORD_SADDR_gfx11)                                            \
+  X(globalLoadB32, GLOBAL_LOAD_DWORD_SADDR_vi, GLOBAL_LOAD_DWORD_SADDR_gfx11)  \
+  X(globalLoadB64, GLOBAL_LOAD_DWORDX2_SADDR_vi,                               \
+    GLOBAL_LOAD_DWORDX2_SADDR_gfx11)                                           \
+  X(globalLoadB96, GLOBAL_LOAD_DWORDX3_SADDR_vi,                               \
+    GLOBAL_LOAD_DWORDX3_SADDR_gfx11)                                           \
+  X(globalLoadB128, GLOBAL_LOAD_DWORDX4_SADDR_vi,                              \
+    GLOBAL_LOAD_DWORDX4_SADDR_gfx11)                                           \
+  X(globalStoreB64, GLOBAL_STORE_DWORDX2_SADDR_vi,                             \
+    GLOBAL_STORE_DWORDX2_SADDR_gfx11)                                          \
+  X(globalStoreB96, GLOBAL_STORE_DWORDX3_SADDR_vi,                             \
+    GLOBAL_STORE_DWORDX3_SADDR_gfx11)                                          \
+  X(globalStoreB128, GLOBAL_STORE_DWORDX4_SADDR_vi,                            \
+    GLOBAL_STORE_DWORDX4_SADDR_gfx11)                                          \
+  X(bufferLoadB64, BUFFER_LOAD_DWORDX2_OFFEN_vi,                               \
+    BUFFER_LOAD_DWORDX2_OFFEN_gfx11)                                           \
+  X(bufferLoadB96, BUFFER_LOAD_DWORDX3_OFFEN_vi,                               \
+    BUFFER_LOAD_DWORDX3_OFFEN_gfx11)                                           \
+  X(bufferLoadB128, BUFFER_LOAD_DWORDX4_OFFEN_vi,                              \
+    BUFFER_LOAD_DWORDX4_OFFEN_gfx11)                                           \
+  X(bufferStoreB64, BUFFER_STORE_DWORDX2_OFFEN_vi,                             \
+    BUFFER_STORE_DWORDX2_OFFEN_gfx11)                                          \
+  X(bufferStoreB96, BUFFER_STORE_DWORDX3_OFFEN_vi,                             \
+    BUFFER_STORE_DWORDX3_OFFEN_gfx11)                                          \
+  X(bufferStoreB128, BUFFER_STORE_DWORDX4_OFFEN_vi,                            \
+    BUFFER_STORE_DWORDX4_OFFEN_gfx11)                                          \
+  X(dsReadB64, DS_READ_B64_vi_gfx9, DS_READ_B64_gfx11)                         \
+  X(dsReadB64TrB4, DS_READ_B64_TR_B4_vi, DS_READ_B64_TR_B4)                    \
+  X(dsReadB64TrB8, DS_READ_B64_TR_B8_vi, DS_READ_B64_TR_B8)                    \
+  X(dsReadB96, DS_READ_B96_vi_gfx9, DS_READ_B96_gfx11)                         \
+  X(dsReadB128, DS_READ_B128_vi_gfx9, DS_READ_B128_gfx11)                      \
+  X(dsWriteB8, DS_WRITE_B8_vi_gfx9, DS_WRITE_B8_gfx11)                         \
+  X(dsWriteB64, DS_WRITE_B64_vi_gfx9, DS_WRITE_B64_gfx11)                      \
+  X(dsWriteB96, DS_WRITE_B96_vi_gfx9, DS_WRITE_B96_gfx11)                      \
+  X(dsWriteB128, DS_WRITE_B128_vi_gfx9, DS_WRITE_B128_gfx11)                   \
+  X(bufferLoadLdsB32, BUFFER_LOAD_DWORD_LDS_OFFEN_vi,                          \
+    BUFFER_LOAD_DWORD_LDS_OFFEN_gfx10)                                         \
+  X(dsReadB32, DS_READ_B32_vi_gfx9, DS_READ_B32_gfx11)                         \
+  X(dsSwizzleB32, DS_SWIZZLE_B32_vi, DS_SWIZZLE_B32_gfx11)                     \
+  X(dsPermuteB32, DS_PERMUTE_B32_vi, DS_PERMUTE_B32_gfx11)                     \
+  X(dsBpermuteB32, DS_BPERMUTE_B32_vi, DS_BPERMUTE_B32_gfx11)                  \
+  X(dsWriteB32, DS_WRITE_B32_vi_gfx9, DS_WRITE_B32_gfx11)
