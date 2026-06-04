@@ -825,14 +825,26 @@ def WaveAMDMachine_SGetregShaderCyclesOp
   let archPredicate = "isa.Major == 11";
   let summary = "read HW_REG_SHADER_CYCLES via s_getreg_b32 (RDNA3)";
 }
-def WaveAMDMachine_SWaitcntOp : WaveAMDMachine_UnaryNoResult<"s_waitcnt",
-                                                        WaveAMDMachine_Imm,
-                                                        [WaveAMDMachine_Waitcnt,
-                                                         WaveAMDMachine_NoMachineInst]>;
-def WaveAMDMachine_SWaitcntVscntOp : WaveAMDMachine_UnaryNoResult<"s_waitcnt_vscnt",
-                                                             WaveAMDMachine_Imm,
-                                                             [WaveAMDMachine_Waitcnt,
-                                                              WaveAMDMachine_NoMachineInst]>;
+def WaveAMDMachine_SWaitcntOp
+    : WaveAMDMachine_Op<"s_waitcnt",
+                        [WaveAMDMachine_Waitcnt,
+                         WaveAMDMachine_NoMachineInst]> {
+  let arguments = (ins OptionalAttr<I32Attr>:$vmcnt,
+                       OptionalAttr<I32Attr>:$expcnt,
+                       OptionalAttr<I32Attr>:$lgkmcnt);
+  let assemblyFormat = [{
+    oilist(`vmcnt` `(` $vmcnt `)`
+         | `expcnt` `(` $expcnt `)`
+         | `lgkmcnt` `(` $lgkmcnt `)`) attr-dict
+  }];
+}
+def WaveAMDMachine_SWaitcntVscntOp
+    : WaveAMDMachine_Op<"s_waitcnt_vscnt",
+                        [WaveAMDMachine_Waitcnt,
+                         WaveAMDMachine_NoMachineInst]> {
+  let arguments = (ins I32Attr:$vscnt);
+  let assemblyFormat = "`vscnt` `(` $vscnt `)` attr-dict";
+}
 def WaveAMDMachine_SNopOp : WaveAMDMachine_UnaryNoResult<"s_nop", WaveAMDMachine_Imm>;
 // Set wave issue priority (0..3). Free, dynamic nudge for the HW
 // issue arbiter -- prefer this over cycle counting when biasing

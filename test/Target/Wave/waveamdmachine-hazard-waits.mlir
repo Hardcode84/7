@@ -9,8 +9,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // CHECK-NEXT: waveamdmachine.s_delay_alu
 // CHECK-NEXT: waveamdmachine.v_add_u32
 func.func @delay_after_lgkm_wait(%x: !waveamdmachine.reg<vgpr, 1>, %y: !waveamdmachine.reg<sgpr, 1>) {
-  %wait = waveamdmachine.imm 64519 : !waveamdmachine.imm
-  waveamdmachine.s_waitcnt %wait : (!waveamdmachine.imm) -> ()
+  waveamdmachine.s_waitcnt lgkmcnt(0)
   %sum = waveamdmachine.v_add_u32 %x, %y : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
   return
 }
@@ -22,8 +21,7 @@ func.func @delay_after_lgkm_wait(%x: !waveamdmachine.reg<vgpr, 1>, %y: !waveamdm
 // CHECK-NEXT: waveamdmachine.v_cvt_f16_f32
 // CHECK-NEXT: waveamdmachine.v_cvt_f32_f16
 func.func @delay_before_fpconvert_after_lgkm_wait(%x: !waveamdmachine.reg<vgpr, 1>) {
-  %wait = waveamdmachine.imm 64519 : !waveamdmachine.imm
-  waveamdmachine.s_waitcnt %wait : (!waveamdmachine.imm) -> ()
+  waveamdmachine.s_waitcnt lgkmcnt(0)
   %h = waveamdmachine.v_cvt_f16_f32 %x
       : (!waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
   %f = waveamdmachine.v_cvt_f32_f16 %h
@@ -35,8 +33,7 @@ func.func @delay_before_fpconvert_after_lgkm_wait(%x: !waveamdmachine.reg<vgpr, 
 // CHECK: waveamdmachine.s_waitcnt
 // CHECK-NEXT: waveamdmachine.v_add_u32
 func.func @no_delay_after_vmcnt_wait(%x: !waveamdmachine.reg<vgpr, 1>, %y: !waveamdmachine.reg<sgpr, 1>) {
-  %wait = waveamdmachine.imm 1023 : !waveamdmachine.imm
-  waveamdmachine.s_waitcnt %wait : (!waveamdmachine.imm) -> ()
+  waveamdmachine.s_waitcnt vmcnt(0)
   %sum = waveamdmachine.v_add_u32 %x, %y : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
   return
 }
@@ -60,8 +57,7 @@ func.func @delay_after_lgkm_wait_across_join(%cond: i1,
       -> !waveamdmachine.reg<vgpr, 1>
   return
 ^wait:
-  %wait = waveamdmachine.imm 64519 : !waveamdmachine.imm
-  waveamdmachine.s_waitcnt %wait : (!waveamdmachine.imm) -> ()
+  waveamdmachine.s_waitcnt lgkmcnt(0)
   cf.br ^join
 }
 
@@ -77,8 +73,7 @@ func.func @no_delay_after_lgkm_wait_in_sibling_arm(
     %y: !waveamdmachine.reg<sgpr, 1>) {
   cf.cond_br %cond, ^wait, ^valu
 ^wait:
-  %wait = waveamdmachine.imm 64519 : !waveamdmachine.imm
-  waveamdmachine.s_waitcnt %wait : (!waveamdmachine.imm) -> ()
+  waveamdmachine.s_waitcnt lgkmcnt(0)
   cf.br ^exit
 ^valu:
   %sum = waveamdmachine.v_add_u32 %x, %y
@@ -100,8 +95,7 @@ func.func @no_delay_after_lgkm_wait_in_sibling_arm(
 // CHECK-NEXT: waveamdmachine.v_add_u32
 func.func @delay_inside_uniform_loop(%x: !waveamdmachine.reg<vgpr, 1>, %y: !waveamdmachine.reg<sgpr, 1>, %ec: !waveamdmachine.reg<scc, 1>) {
   waveamdmachine.uniform_loop if %ec : !waveamdmachine.reg<scc, 1> {
-    %wait = waveamdmachine.imm 64519 : !waveamdmachine.imm
-    waveamdmachine.s_waitcnt %wait : (!waveamdmachine.imm) -> ()
+    waveamdmachine.s_waitcnt lgkmcnt(0)
     %sum = waveamdmachine.v_add_u32 %x, %y : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
     waveamdmachine.continue_if %ec : !waveamdmachine.reg<scc, 1>
   }
@@ -119,8 +113,7 @@ func.func @delay_on_uniform_loop_entry_after_lgkm_wait(
     %x: !waveamdmachine.reg<vgpr, 1>,
     %y: !waveamdmachine.reg<sgpr, 1>,
     %ec: !waveamdmachine.reg<scc, 1>) {
-  %wait = waveamdmachine.imm 64519 : !waveamdmachine.imm
-  waveamdmachine.s_waitcnt %wait : (!waveamdmachine.imm) -> ()
+  waveamdmachine.s_waitcnt lgkmcnt(0)
   waveamdmachine.uniform_loop if %ec : !waveamdmachine.reg<scc, 1> {
     %sum = waveamdmachine.v_add_u32 %x, %y
         : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 1>)
@@ -144,8 +137,7 @@ func.func @delay_after_uniform_loop_exit_lgkm_wait(
     %y: !waveamdmachine.reg<sgpr, 1>,
     %ec: !waveamdmachine.reg<scc, 1>) {
   waveamdmachine.uniform_loop if %ec : !waveamdmachine.reg<scc, 1> {
-    %wait = waveamdmachine.imm 64519 : !waveamdmachine.imm
-    waveamdmachine.s_waitcnt %wait : (!waveamdmachine.imm) -> ()
+    waveamdmachine.s_waitcnt lgkmcnt(0)
     waveamdmachine.continue_if %ec : !waveamdmachine.reg<scc, 1>
   }
   %sum = waveamdmachine.v_add_u32 %x, %y
@@ -166,8 +158,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1030"} {
 // CHECK-NEXT: waveamdmachine.s_nop
 // CHECK-NEXT: waveamdmachine.v_add_u32
 func.func @nop_delay_on_gfx10(%x: !waveamdmachine.reg<vgpr, 1>, %y: !waveamdmachine.reg<sgpr, 1>) {
-  %wait = waveamdmachine.imm 0 : !waveamdmachine.imm
-  waveamdmachine.s_waitcnt %wait : (!waveamdmachine.imm) -> ()
+  waveamdmachine.s_waitcnt lgkmcnt(0)
   %sum = waveamdmachine.v_add_u32 %x, %y : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
   return
 }
@@ -219,8 +210,7 @@ func.func @m0_delay_before_lds_dma(
 
 // CHECK-LABEL: func.func @m0_delay_after_waitcnt
 // CHECK: waveamdmachine.s_mov_m0
-// CHECK-NEXT: waveamdmachine.imm 0
-// CHECK-NEXT: waveamdmachine.s_waitcnt
+// CHECK-NEXT: waveamdmachine.s_waitcnt lgkmcnt(0)
 // CHECK-NEXT: waveamdmachine.imm 0
 // CHECK-NEXT: waveamdmachine.s_nop
 // CHECK-NEXT: waveamdmachine.global_load_lds_b128
@@ -231,8 +221,7 @@ func.func @m0_delay_after_waitcnt(
     %dep: !waveamdmachine.mem.token) {
   %m0 = waveamdmachine.s_mov_m0 %dst
       : (!waveamdmachine.reg<sgpr, 1>) -> !waveamdmachine.m0
-  %wait = waveamdmachine.imm 0 : !waveamdmachine.imm
-  waveamdmachine.s_waitcnt %wait : (!waveamdmachine.imm) -> ()
+  waveamdmachine.s_waitcnt lgkmcnt(0)
   %tok = waveamdmachine.global_load_lds_b128 %off, %base, %m0 after %dep
       : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 2>,
          !waveamdmachine.m0, !waveamdmachine.mem.token)
@@ -903,8 +892,7 @@ func.func @m0_delay_inside_uniform_loop_no_dup(
         : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 2>,
            !waveamdmachine.m0, !waveamdmachine.mem.token)
         -> !waveamdmachine.mem.token
-    %wait = waveamdmachine.imm 0 : !waveamdmachine.imm
-    waveamdmachine.s_waitcnt %wait : (!waveamdmachine.imm) -> ()
+    waveamdmachine.s_waitcnt lgkmcnt(0)
     waveamdmachine.continue_if %ec : !waveamdmachine.reg<scc, 1>
   }
   return

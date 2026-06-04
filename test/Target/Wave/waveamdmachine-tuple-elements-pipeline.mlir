@@ -25,8 +25,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // WAIT: waveamdmachine.global_load_b32
 // WAIT-NOT: s_waitcnt
 // WAIT: waveamdmachine.tuple_from_elements
-// WAIT: waveamdmachine.imm 1015
-// WAIT-NEXT: waveamdmachine.s_waitcnt
+// WAIT: waveamdmachine.s_waitcnt vmcnt(0)
 // WAIT-NEXT: waveamdmachine.v_mov_b32_tuple
 func.func @decomposed_load_gather_waitcnt(%off: !waveamdmachine.reg<vgpr, 1>,
                                            %base: !waveamdmachine.reg<sgpr, 2>) {
@@ -114,8 +113,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // WAIT-LABEL: func.func @tuple_load_into_wmma_waitcnt
 // WAIT-COUNT-8: waveamdmachine.global_load_b32
 // WAIT: waveamdmachine.tuple_from_elements
-// WAIT: waveamdmachine.imm 1015
-// WAIT-NEXT: waveamdmachine.s_waitcnt
+// WAIT: waveamdmachine.s_waitcnt vmcnt(0)
 // WAIT-NEXT: waveamdmachine.wmma_f32_16x16x16_f16
 func.func @tuple_load_into_wmma_waitcnt(%off: !waveamdmachine.reg<vgpr, 1>,
                                          %base: !waveamdmachine.reg<sgpr, 2>,

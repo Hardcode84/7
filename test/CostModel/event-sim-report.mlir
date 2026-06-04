@@ -36,7 +36,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
     %step = waveamdmachine.imm 1 : !waveamdmachine.imm
     %load = waveamdmachine.s_load_b32 %zero, "s[0:1]" :
         (!waveamdmachine.imm) -> !waveamdmachine.reg<sgpr, 1>
-    waveamdmachine.s_waitcnt %zero : (!waveamdmachine.imm) -> ()
+    waveamdmachine.s_waitcnt lgkmcnt(0)
     %sum:2 = waveamdmachine.s_add_i32 %load, %step :
         (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.imm) ->
         (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<scc, 1>)
@@ -87,7 +87,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
     %store = waveamdmachine.ds_store_b32 %addr, %value
         : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
           -> !waveamdmachine.mem.token
-    waveamdmachine.s_waitcnt %zero : (!waveamdmachine.imm) -> ()
+    waveamdmachine.s_waitcnt lgkmcnt(0)
     return
   }
 
@@ -105,17 +105,15 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
     %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
     %four = waveamdmachine.imm 4 : !waveamdmachine.imm
     %step = waveamdmachine.imm 1 : !waveamdmachine.imm
-    %lgkm1 = waveamdmachine.imm 64535 : !waveamdmachine.imm
-    %lgkm0 = waveamdmachine.imm 64519 : !waveamdmachine.imm
     %a = waveamdmachine.s_load_b32 %zero, "s[0:1]" :
         (!waveamdmachine.imm) -> !waveamdmachine.reg<sgpr, 1>
     %b = waveamdmachine.s_load_b32 %four, "s[0:1]" :
         (!waveamdmachine.imm) -> !waveamdmachine.reg<sgpr, 1>
-    waveamdmachine.s_waitcnt %lgkm1 : (!waveamdmachine.imm) -> ()
+    waveamdmachine.s_waitcnt lgkmcnt(1)
     %sum_a:2 = waveamdmachine.s_add_i32 %a, %step :
         (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.imm) ->
         (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<scc, 1>)
-    waveamdmachine.s_waitcnt %lgkm0 : (!waveamdmachine.imm) -> ()
+    waveamdmachine.s_waitcnt lgkmcnt(0)
     %sum_b:2 = waveamdmachine.s_add_i32 %b, %step :
         (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.imm) ->
         (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<scc, 1>)

@@ -22,8 +22,7 @@ func.func @regalloc_inserted_valu_copy_after_wait() attributes {wave.kernel} {
   %ec = waveamdmachine.s_cmp_lt_i32 %zero, %four
       : (!waveamdmachine.imm, !waveamdmachine.imm)
         -> !waveamdmachine.reg<scc, 1>
-  %wait = waveamdmachine.imm 64519 : !waveamdmachine.imm
-  waveamdmachine.s_waitcnt %wait : (!waveamdmachine.imm) -> ()
+  waveamdmachine.s_waitcnt lgkmcnt(0)
   %results:3 = waveamdmachine.uniform_loop if %ec : !waveamdmachine.reg<scc, 1>
       carries(%iv, %init, %init :
               !waveamdmachine.reg<sgpr, 1>,

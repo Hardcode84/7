@@ -159,14 +159,6 @@ createSubtargetInfo(Operation *op) {
   return sti;
 }
 
-static std::optional<unsigned> getImmediate(Value value) {
-  Operation *def = value.getDefiningOp();
-  if (!def || !isa<waveamdmachine::ImmOp>(def))
-    return std::nullopt;
-  return static_cast<unsigned>(
-      def->getAttrOfType<IntegerAttr>("value").getInt());
-}
-
 static bool isVMEMStore(Operation &op) {
   return op.hasTrait<OpTrait::waveamdmachine::VMEMStoreOp>();
 }
@@ -280,17 +272,16 @@ static void insertValuMitigation(Operation &op, OpBuilder &b,
   insertNoops(b, op.getLoc(), /*count=*/1, sti);
 }
 
-// Decode `op` (an `s_waitcnt`) and return the new value of the LGKM
-// pending flag, or `nullopt` if the immediate isn't statically known
-// (the existing pending value should be kept).
+// Only explicit lgkmcnt waits affect LGKM hazard state.
 static std::optional<bool> recomputePendingLgkm(Operation &op,
                                                 const HazardConfig &cfg) {
-  auto imm = getImmediate(op.getOperand(0));
-  if (!imm)
+  auto wait = dyn_cast<waveamdmachine::SWaitcntOp>(op);
+  if (!wait)
     return std::nullopt;
-  unsigned vm = 0, exp = 0, lg = 0;
-  llvm::AMDGPU::decodeWaitcnt(cfg.isaVersion, *imm, vm, exp, lg);
-  return cfg.hasDelayAlu ? lg != cfg.defaultLgkmcnt : true;
+  std::optional<uint32_t> lg = wait.getLgkmcnt();
+  if (!lg)
+    return std::nullopt;
+  return cfg.hasDelayAlu ? *lg != cfg.defaultLgkmcnt : true;
 }
 
 static bool isControlFlowOp(Operation *op) {

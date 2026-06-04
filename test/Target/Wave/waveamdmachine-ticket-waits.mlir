@@ -6,8 +6,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // CHECK-LABEL: func.func @ds_swizzle_is_lgkm_issuer
 // CHECK: waveamdmachine.ds_swizzle_b32
 // CHECK-NEXT: waveamdmachine.ds_swizzle_b32
-// CHECK-NEXT: waveamdmachine.imm 64535
-// CHECK-NEXT: waveamdmachine.s_waitcnt
+// CHECK-NEXT: waveamdmachine.s_waitcnt lgkmcnt(1)
 // CHECK-NEXT: waveamdmachine.v_add_u32
 func.func @ds_swizzle_is_lgkm_issuer(%x: !waveamdmachine.reg<vgpr, 1>) {
   %a = waveamdmachine.ds_swizzle_b32 %x offset 31
@@ -22,8 +21,7 @@ func.func @ds_swizzle_is_lgkm_issuer(%x: !waveamdmachine.reg<vgpr, 1>) {
 // CHECK-LABEL: func.func @ds_permute_is_lgkm_issuer
 // CHECK: waveamdmachine.ds_permute_b32
 // CHECK-NEXT: waveamdmachine.ds_permute_b32
-// CHECK-NEXT: waveamdmachine.imm 64535
-// CHECK-NEXT: waveamdmachine.s_waitcnt
+// CHECK-NEXT: waveamdmachine.s_waitcnt lgkmcnt(1)
 // CHECK-NEXT: waveamdmachine.v_add_u32
 func.func @ds_permute_is_lgkm_issuer(%x: !waveamdmachine.reg<vgpr, 1>,
                                      %y: !waveamdmachine.reg<vgpr, 1>) {
@@ -39,8 +37,7 @@ func.func @ds_permute_is_lgkm_issuer(%x: !waveamdmachine.reg<vgpr, 1>,
 // CHECK-LABEL: func.func @ds_bpermute_is_lgkm_issuer
 // CHECK: waveamdmachine.ds_bpermute_b32
 // CHECK-NEXT: waveamdmachine.ds_bpermute_b32
-// CHECK-NEXT: waveamdmachine.imm 64535
-// CHECK-NEXT: waveamdmachine.s_waitcnt
+// CHECK-NEXT: waveamdmachine.s_waitcnt lgkmcnt(1)
 // CHECK-NEXT: waveamdmachine.v_add_u32
 func.func @ds_bpermute_is_lgkm_issuer(%x: !waveamdmachine.reg<vgpr, 1>,
                                       %y: !waveamdmachine.reg<vgpr, 1>) {
@@ -56,8 +53,7 @@ func.func @ds_bpermute_is_lgkm_issuer(%x: !waveamdmachine.reg<vgpr, 1>,
 // CHECK-LABEL: func.func @lds_nonzero_distance
 // CHECK: waveamdmachine.ds_load_b32
 // CHECK: waveamdmachine.ds_load_b32
-// CHECK: waveamdmachine.imm 64535
-// CHECK-NEXT: waveamdmachine.s_waitcnt
+// CHECK: waveamdmachine.s_waitcnt lgkmcnt(1)
 // CHECK-NEXT: waveamdmachine.v_add_u32
 func.func @lds_nonzero_distance(%x: !waveamdmachine.reg<vgpr, 1>) {
   %a = waveamdmachine.ds_load_b32 %x : (!waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
@@ -69,8 +65,7 @@ func.func @lds_nonzero_distance(%x: !waveamdmachine.reg<vgpr, 1>) {
 // CHECK-LABEL: func.func @lds_byte_loads_are_lgkm_issuers
 // CHECK: waveamdmachine.ds_load_u8
 // CHECK-NEXT: waveamdmachine.ds_load_i8
-// CHECK-NEXT: waveamdmachine.imm 64535
-// CHECK-NEXT: waveamdmachine.s_waitcnt
+// CHECK-NEXT: waveamdmachine.s_waitcnt lgkmcnt(1)
 // CHECK-NEXT: waveamdmachine.v_add_u32
 func.func @lds_byte_loads_are_lgkm_issuers(%x: !waveamdmachine.reg<vgpr, 1>) {
   %a = waveamdmachine.ds_load_u8 %x : (!waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
@@ -88,8 +83,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // CHECK-LABEL: func.func @mixed_lgkm_events_clamp_zero
 // CHECK: waveamdmachine.ds_load_b32
 // CHECK: waveamdmachine.s_load_b32
-// CHECK: waveamdmachine.imm 64519
-// CHECK-NEXT: waveamdmachine.s_waitcnt
+// CHECK: waveamdmachine.s_waitcnt lgkmcnt(0)
 // CHECK-NEXT: waveamdmachine.v_add_u32
 func.func @mixed_lgkm_events_clamp_zero(%x: !waveamdmachine.reg<vgpr, 1>) {
   %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
@@ -107,13 +101,11 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 
 // CHECK-LABEL: func.func @gfx950_ds_byte_and_transpose_are_lgkm_issuers
 // CHECK: waveamdmachine.ds_store_b8
-// CHECK: waveamdmachine.imm
-// CHECK-NEXT: waveamdmachine.s_waitcnt
+// CHECK: waveamdmachine.s_waitcnt lgkmcnt(0)
 // CHECK-NEXT: waveamdmachine.wait
 // CHECK: waveamdmachine.ds_read_tr_b64_b4
 // CHECK-NEXT: waveamdmachine.ds_read_tr_b64_b8
-// CHECK: waveamdmachine.imm
-// CHECK-NEXT: waveamdmachine.s_waitcnt
+// CHECK: waveamdmachine.s_waitcnt lgkmcnt(1)
 // CHECK-NEXT: waveamdmachine.v_add_u32
 func.func @gfx950_ds_byte_and_transpose_are_lgkm_issuers(%x: !waveamdmachine.reg<vgpr, 1>) {
   %store = waveamdmachine.ds_store_b8 %x, %x
@@ -144,17 +136,14 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // CHECK-LABEL: func.func @existing_nonzero_smem_wait_not_sufficient
 // CHECK: waveamdmachine.s_load_b32
 // CHECK: waveamdmachine.s_load_b32
-// CHECK: waveamdmachine.imm 64535
-// CHECK-NEXT: waveamdmachine.s_waitcnt
-// CHECK-NEXT: waveamdmachine.imm 64519
-// CHECK-NEXT: waveamdmachine.s_waitcnt
+// CHECK: waveamdmachine.s_waitcnt lgkmcnt(1)
+// CHECK-NEXT: waveamdmachine.s_waitcnt lgkmcnt(0)
 // CHECK-NEXT: waveamdmachine.v_add_u32
 func.func @existing_nonzero_smem_wait_not_sufficient(%x: !waveamdmachine.reg<vgpr, 1>) {
   %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
   %a = waveamdmachine.s_load_b32 %zero, "s[0:1]" : (!waveamdmachine.imm) -> !waveamdmachine.reg<sgpr, 1>
   %b = waveamdmachine.s_load_b32 %zero, "s[0:1]" : (!waveamdmachine.imm) -> !waveamdmachine.reg<sgpr, 1>
-  %loose = waveamdmachine.imm 64535 : !waveamdmachine.imm
-  waveamdmachine.s_waitcnt %loose : (!waveamdmachine.imm) -> ()
+  waveamdmachine.s_waitcnt lgkmcnt(1)
   %sum = waveamdmachine.v_add_u32 %x, %a : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
   return
 }
@@ -167,8 +156,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
 // CHECK-LABEL: func.func @store_uses_vscnt
 // CHECK: waveamdmachine.global_store_b32
-// CHECK: waveamdmachine.imm 0
-// CHECK-NEXT: waveamdmachine.s_waitcnt_vscnt
+// CHECK: waveamdmachine.s_waitcnt_vscnt vscnt(0)
 // CHECK-NEXT: waveamdmachine.s_endpgm
 func.func @store_uses_vscnt(%offset: !waveamdmachine.reg<vgpr, 1>, %value: !waveamdmachine.reg<vgpr, 1>, %base: !waveamdmachine.reg<sgpr, 2>) {
   waveamdmachine.global_store_b32 %offset, %value, %base : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 2>) -> ()
@@ -189,8 +177,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 func.func @existing_wait_satisfies_use(%x: !waveamdmachine.reg<vgpr, 1>) {
   %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
   %a = waveamdmachine.s_load_b32 %zero, "s[0:1]" : (!waveamdmachine.imm) -> !waveamdmachine.reg<sgpr, 1>
-  %wait = waveamdmachine.imm 64519 : !waveamdmachine.imm
-  waveamdmachine.s_waitcnt %wait : (!waveamdmachine.imm) -> ()
+  waveamdmachine.s_waitcnt lgkmcnt(0)
   %sum = waveamdmachine.v_add_u32 %x, %a : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
   return
 }
@@ -211,12 +198,10 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // CHECK-NEXT: waveamdmachine.global_load_b128
 // CHECK-NEXT: waveamdmachine.token_join
 // CHECK-NEXT: waveamdmachine.token_join
-// CHECK-NEXT: waveamdmachine.imm 3063
-// CHECK-NEXT: waveamdmachine.s_waitcnt
+// CHECK-NEXT: waveamdmachine.s_waitcnt vmcnt(2)
 // CHECK-NEXT: waveamdmachine.ds_store_b128
 // CHECK-NEXT: waveamdmachine.ds_store_b128
-// CHECK-NEXT: waveamdmachine.imm 1015
-// CHECK-NEXT: waveamdmachine.s_waitcnt
+// CHECK-NEXT: waveamdmachine.s_waitcnt vmcnt(0)
 // CHECK-NEXT: waveamdmachine.ds_store_b128
 // CHECK-NEXT: waveamdmachine.ds_store_b128
 func.func @overlap_two_chunked_loads(%a_off: !waveamdmachine.reg<vgpr, 1>,
@@ -270,8 +255,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
 // CHECK-LABEL: func.func @consecutive_consumers_dedupe_lgkm
 // CHECK: waveamdmachine.s_load_b32
-// CHECK: waveamdmachine.imm 64519
-// CHECK-NEXT: waveamdmachine.s_waitcnt
+// CHECK: waveamdmachine.s_waitcnt lgkmcnt(0)
 // CHECK-NEXT: waveamdmachine.v_add_u32
 // CHECK-NOT: waveamdmachine.s_waitcnt
 // CHECK: waveamdmachine.v_add_u32
@@ -300,10 +284,9 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // drain. The chained `v_xor` keeps the consumer live and the trailing
 // `v_add_u32` reuses the already-drained scalar load: the cleanup
 // must drop the second `s_waitcnt` and the IR holds a single
-// `imm 64519 + s_waitcnt` for the whole block.
+// one `lgkmcnt(0)` wait for the whole block.
 // CHECK: waveamdmachine.s_load_b32
-// CHECK: waveamdmachine.imm 64519
-// CHECK-NEXT: waveamdmachine.s_waitcnt
+// CHECK: waveamdmachine.s_waitcnt lgkmcnt(0)
 // CHECK-NEXT: waveamdmachine.v_add_u32
 // CHECK-NEXT: waveamdmachine.v_xor_b32
 // CHECK-NOT: waveamdmachine.s_waitcnt
@@ -330,8 +313,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
 // CHECK-LABEL: func.func @vscnt_dedupe
 // CHECK: waveamdmachine.global_store_b32
-// CHECK: waveamdmachine.imm 0
-// CHECK-NEXT: waveamdmachine.s_waitcnt_vscnt
+// CHECK: waveamdmachine.s_waitcnt_vscnt vscnt(0)
 // CHECK-NEXT: waveamdmachine.s_endpgm
 // CHECK-NOT: waveamdmachine.s_waitcnt_vscnt
 // CHECK: waveamdmachine.s_endpgm

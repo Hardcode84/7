@@ -2025,11 +2025,15 @@ private:
            llvm::MCOperand::createReg(
                namedPhysReg(op.getAttrOfType<StringAttr>("base").getValue())),
            toMCOperand(op.getOperand(0)), llvm::MCOperand::createImm(0)});
-    if (isa<waveamdmachine::SWaitcntOp>(op))
-      return emitMCValues(sWaitcnt(), op.getOperands());
-    if (isa<waveamdmachine::SWaitcntVscntOp>(op)) {
+    if (auto wait = dyn_cast<waveamdmachine::SWaitcntOp>(op)) {
+      unsigned encoded = llvm::AMDGPU::encodeWaitcnt(
+          isaVersion, wait.getVmcnt().value_or(~0u),
+          wait.getExpcnt().value_or(~0u), wait.getLgkmcnt().value_or(~0u));
+      return emitMC(sWaitcnt(), {llvm::MCOperand::createImm(encoded)});
+    }
+    if (auto wait = dyn_cast<waveamdmachine::SWaitcntVscntOp>(op)) {
       if (isGfx8Or9()) {
-        unsigned vmcnt = getImmediate(op.getOperand(0)).value_or(0);
+        unsigned vmcnt = wait.getVscnt();
         unsigned encoded =
             llvm::AMDGPU::encodeWaitcnt(isaVersion, vmcnt, /*expcnt=*/~0u,
                                         /*lgkmcnt=*/~0u);
@@ -2037,7 +2041,7 @@ private:
       }
       return emitMC(llvm::AMDGPU::S_WAITCNT_VSCNT_gfx11,
                     {llvm::MCOperand::createReg(namedPhysReg("null")),
-                     toMCOperand(op.getOperand(0))});
+                     llvm::MCOperand::createImm(wait.getVscnt())});
     }
     if (isa<waveamdmachine::SNopOp>(op))
       return emitMCValues(sNop(), op.getOperands());

@@ -8,8 +8,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // CHECK: waveamdmachine.global_store_b32
 // CHECK: otherwise
 // CHECK: waveamdmachine.global_store_b32
-// CHECK: waveamdmachine.imm 0
-// CHECK-NEXT: waveamdmachine.s_waitcnt_vscnt
+// CHECK: waveamdmachine.s_waitcnt_vscnt vscnt(0)
 // CHECK-NEXT: waveamdmachine.wait
 func.func @exec_if_token_result(%cond: !waveamdmachine.reg<sgpr, 1>,
                                 %off: !waveamdmachine.reg<vgpr, 1>,
@@ -35,8 +34,7 @@ func.func @exec_if_token_result(%cond: !waveamdmachine.reg<sgpr, 1>,
 // CHECK: waveamdmachine.exec_if
 // CHECK: waveamdmachine.global_store_b32
 // CHECK: otherwise
-// CHECK: waveamdmachine.imm 0
-// CHECK-NEXT: waveamdmachine.s_waitcnt_vscnt
+// CHECK: waveamdmachine.s_waitcnt_vscnt vscnt(0)
 // CHECK-NEXT: waveamdmachine.wait
 func.func @exec_if_branch_min_vscnt(%cond: !waveamdmachine.reg<sgpr, 1>,
                                     %off: !waveamdmachine.reg<vgpr, 1>,
@@ -64,7 +62,7 @@ func.func @exec_if_branch_min_vscnt(%cond: !waveamdmachine.reg<sgpr, 1>,
 // Both arms of a `cf.cond_br` issue exactly one extra `ds_load_b32`
 // before forwarding the original LDS value to the merge block. The merge
 // arm sees `%a` at the same position (1) on every path, so the join
-// agrees on `lgkmcnt(1)`. Encoded as `imm 64535` for gfx1100.
+// agrees on `lgkmcnt(1)`.
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
 // CHECK-LABEL: func.func @cfg_join_nonzero
@@ -75,8 +73,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // CHECK: waveamdmachine.ds_load_b32
 // CHECK: cf.br
 // CHECK: ^bb{{[0-9]+}}(%{{[0-9]+}}: !waveamdmachine.reg<vgpr, 1>)
-// CHECK-NEXT: waveamdmachine.imm 64535
-// CHECK-NEXT: waveamdmachine.s_waitcnt
+// CHECK-NEXT: waveamdmachine.s_waitcnt lgkmcnt(1)
 // CHECK-NEXT: waveamdmachine.v_add_u32
 func.func @cfg_join_nonzero(%cond: i1, %x: !waveamdmachine.reg<vgpr, 1>) {
   %a = waveamdmachine.ds_load_b32 %x : (!waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
@@ -99,7 +96,7 @@ func.func @cfg_join_nonzero(%cond: i1, %x: !waveamdmachine.reg<vgpr, 1>) {
 // Same shape but ONLY the `then` arm issues an extra load: at the merge
 // the join sees `%a` at position 1 (through `then`) and position 0
 // (through `else`). The static-correct wait is `lgkmcnt(MIN(1, 0)) = 0`
-// = `imm 64519`. A `lgkmcnt(1)` here would be unsafe on the `else`
+// = `lgkmcnt(0)`. A `lgkmcnt(1)` here would be unsafe on the `else`
 // path because the hardware lgkmcnt is already 1 (just `%a`), so the
 // wait would return without `%a` ever draining.
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
@@ -111,8 +108,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // CHECK: cf.br
 // CHECK: cf.br
 // CHECK: ^bb{{[0-9]+}}(%{{[0-9]+}}: !waveamdmachine.reg<sgpr, 1>)
-// CHECK-NEXT: waveamdmachine.imm 64519
-// CHECK-NEXT: waveamdmachine.s_waitcnt
+// CHECK-NEXT: waveamdmachine.s_waitcnt lgkmcnt(0)
 // CHECK-NEXT: waveamdmachine.v_add_u32
 func.func @cfg_join_uneven_min(%cond: i1, %x: !waveamdmachine.reg<vgpr, 1>) {
   %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
@@ -138,8 +134,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // CHECK: waveamdmachine.s_load_b32
 // CHECK: cf.br
 // CHECK: ^bb{{[0-9]+}}(%{{[0-9]+}}: !waveamdmachine.reg<sgpr, 1>)
-// CHECK-NEXT: waveamdmachine.imm 64519
-// CHECK-NEXT: waveamdmachine.s_waitcnt
+// CHECK-NEXT: waveamdmachine.s_waitcnt lgkmcnt(0)
 // CHECK-NEXT: waveamdmachine.v_add_u32
 func.func @block_arg_ticket(%x: !waveamdmachine.reg<vgpr, 1>) {
   %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
@@ -157,15 +152,14 @@ func.func @block_arg_ticket(%x: !waveamdmachine.reg<vgpr, 1>) {
 // Both arms of the `scf.if` issue one extra `ds_load_b32` before
 // yielding the outer `%a`. The region-branch join sees `%a` (and the
 // yielded `%r`) at position 1 from every arm, so the wait below the
-// `scf.if` is `lgkmcnt(1)` = `imm 64535`.
+// `scf.if` is `lgkmcnt(1)`.
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
 // CHECK-LABEL: func.func @structured_if_nonzero
 // CHECK: scf.if
 // CHECK: waveamdmachine.ds_load_b32
 // CHECK: waveamdmachine.ds_load_b32
-// CHECK: waveamdmachine.imm 64535
-// CHECK-NEXT: waveamdmachine.s_waitcnt
+// CHECK: waveamdmachine.s_waitcnt lgkmcnt(1)
 // CHECK-NEXT: waveamdmachine.v_add_u32
 func.func @structured_if_nonzero(%cond: i1, %x: !waveamdmachine.reg<vgpr, 1>) {
   %a = waveamdmachine.ds_load_b32 %x : (!waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
@@ -186,15 +180,14 @@ func.func @structured_if_nonzero(%cond: i1, %x: !waveamdmachine.reg<vgpr, 1>) {
 
 // Only the `then` arm of the `scf.if` issues an extra load. The
 // region-branch join sees `%a` at position 1 (through `then`) and 0
-// (through `else`); MIN = 0 -> `lgkmcnt(0)` = `imm 64519`. `lgkmcnt(1)`
+// (through `else`); MIN = 0 -> `lgkmcnt(0)`. `lgkmcnt(1)`
 // would be unsafe on the `else` path (lgkmcnt is already 1 there).
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
 // CHECK-LABEL: func.func @structured_if_uneven_min
 // CHECK: scf.if
 // CHECK: waveamdmachine.s_load_b32
-// CHECK: waveamdmachine.imm 64519
-// CHECK-NEXT: waveamdmachine.s_waitcnt
+// CHECK: waveamdmachine.s_waitcnt lgkmcnt(0)
 // CHECK-NEXT: waveamdmachine.v_add_u32
 func.func @structured_if_uneven_min(%cond: i1, %x: !waveamdmachine.reg<vgpr, 1>) {
   %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
@@ -218,8 +211,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // CHECK-LABEL: func.func @structured_for_double_buffer
 // CHECK: scf.for
 // CHECK: waveamdmachine.ds_load_b32
-// CHECK-NEXT: waveamdmachine.imm 64535
-// CHECK-NEXT: waveamdmachine.s_waitcnt
+// CHECK-NEXT: waveamdmachine.s_waitcnt lgkmcnt(1)
 // CHECK-NEXT: waveamdmachine.v_add_u32
 func.func @structured_for_double_buffer(%x: !waveamdmachine.reg<vgpr, 1>) {
   %init = waveamdmachine.ds_load_b32 %x : (!waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
@@ -243,8 +235,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // CHECK-LABEL: func.func @structured_for_triple_buffer
 // CHECK: scf.for
 // CHECK: waveamdmachine.ds_load_b32
-// CHECK-NEXT: waveamdmachine.imm 64551
-// CHECK-NEXT: waveamdmachine.s_waitcnt
+// CHECK-NEXT: waveamdmachine.s_waitcnt lgkmcnt(2)
 // CHECK-NEXT: waveamdmachine.v_add_u32
 func.func @structured_for_triple_buffer(%x: !waveamdmachine.reg<vgpr, 1>) {
   %init0 = waveamdmachine.ds_load_b32 %x : (!waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
@@ -278,12 +269,10 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // CHECK-LABEL: func.func @uniform_loop_two_vmem
 // CHECK: waveamdmachine.uniform_loop
 // CHECK:   waveamdmachine.global_load_b32
-// CHECK-NEXT: waveamdmachine.imm 1015
-// CHECK-NEXT: waveamdmachine.s_waitcnt
+// CHECK-NEXT: waveamdmachine.s_waitcnt vmcnt(0)
 // CHECK-NEXT: waveamdmachine.v_add_u32
 // CHECK: waveamdmachine.global_load_b32
-// CHECK-NEXT: waveamdmachine.imm 1015
-// CHECK-NEXT: waveamdmachine.s_waitcnt
+// CHECK-NEXT: waveamdmachine.s_waitcnt vmcnt(0)
 // CHECK-NEXT: waveamdmachine.v_add_u32
 func.func @uniform_loop_two_vmem(%off: !waveamdmachine.reg<vgpr, 1>, %base: !waveamdmachine.reg<sgpr, 2>, %ec: !waveamdmachine.reg<scc, 1>) {
   waveamdmachine.uniform_loop if %ec : !waveamdmachine.reg<scc, 1> {

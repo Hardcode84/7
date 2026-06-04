@@ -454,22 +454,6 @@ static FailureOr<llvm::AMDGPU::IsaVersion> getIsaVersion(Operation *op) {
       op, "waveamd-insert-ticket-waits");
 }
 
-static waveamdmachine::ImmType getImmType(MLIRContext *ctx) {
-  return waveamdmachine::ImmType::get(ctx);
-}
-
-static Value createImm(OpBuilder &builder, Location loc, int64_t value) {
-  return waveamdmachine::ImmOp::create(builder, loc,
-                                       getImmType(builder.getContext()),
-                                       builder.getI64IntegerAttr(value));
-}
-
-static std::optional<unsigned> getImmediate(Value value) {
-  if (auto op = value.getDefiningOp<waveamdmachine::ImmOp>())
-    return static_cast<unsigned>(op.getValue());
-  return std::nullopt;
-}
-
 static unsigned activeEventMask(ArrayRef<Token> tokens, Counter counter) {
   unsigned mask = 0;
   for (const Token &token : tokens)
@@ -554,27 +538,20 @@ static void deriveResultTokens(Operation *op, WaitState &state) {
   }
 }
 
-// Decode existing s_waitcnt and apply its drain to the state.
+// Apply explicit waitcnt drain attrs to the state.
 static void observeExistingWaitcnt(Operation *op, WaitState &state,
                                    const llvm::AMDGPU::IsaVersion &isaVer) {
-  if (llvm::isa<waveamdmachine::SWaitcntOp>(op)) {
-    auto imm = getImmediate(op->getOperand(0));
-    if (!imm)
-      return;
-    unsigned vm = 0, exp = 0, lg = 0;
-    llvm::AMDGPU::decodeWaitcnt(isaVer, *imm, vm, exp, lg);
+  if (auto wait = llvm::dyn_cast<waveamdmachine::SWaitcntOp>(op)) {
     unsigned vmMax = llvm::AMDGPU::getVmcntBitMask(isaVer);
     unsigned lgMax = llvm::AMDGPU::getLgkmcntBitMask(isaVer);
-    if (vm < vmMax)
-      lat::dropDrained(state.tokens, Counter::Vmem, vm);
-    if (lg < lgMax)
-      lat::dropDrained(state.tokens, Counter::Lgkm, lg);
+    if (std::optional<uint32_t> vm = wait.getVmcnt(); vm && *vm < vmMax)
+      lat::dropDrained(state.tokens, Counter::Vmem, *vm);
+    if (std::optional<uint32_t> lg = wait.getLgkmcnt(); lg && *lg < lgMax)
+      lat::dropDrained(state.tokens, Counter::Lgkm, *lg);
     return;
   }
-  if (llvm::isa<waveamdmachine::SWaitcntVscntOp>(op)) {
-    if (auto imm = getImmediate(op->getOperand(0)))
-      lat::dropDrained(state.tokens, Counter::Vscnt, *imm);
-  }
+  if (auto wait = llvm::dyn_cast<waveamdmachine::SWaitcntVscntOp>(op))
+    lat::dropDrained(state.tokens, Counter::Vscnt, wait.getVscnt());
 }
 
 // `emit` is a no-op during analysis, the s_waitcnt emitter during rewrite.
@@ -790,20 +767,23 @@ private:
 // Rewrite step
 //===----------------------------------------------------------------------===//
 
+static IntegerAttr getCounterAttr(OpBuilder &builder, unsigned value) {
+  return builder.getI32IntegerAttr(value);
+}
+
 static void emitWaits(OpBuilder &builder, Operation *op,
-                      const WaitRequirement &req,
-                      const llvm::AMDGPU::IsaVersion &isaVer) {
+                      const WaitRequirement &req) {
   builder.setInsertionPoint(op);
   if (req.vmcnt || req.lgkmcnt) {
-    unsigned encoded =
-        llvm::AMDGPU::encodeWaitcnt(isaVer, req.vmcnt.value_or(~0u),
-                                    /*expcnt=*/~0u, req.lgkmcnt.value_or(~0u));
     waveamdmachine::SWaitcntOp::create(
-        builder, op->getLoc(), createImm(builder, op->getLoc(), encoded));
+        builder, op->getLoc(),
+        req.vmcnt ? getCounterAttr(builder, *req.vmcnt) : IntegerAttr(),
+        /*expcnt=*/IntegerAttr(),
+        req.lgkmcnt ? getCounterAttr(builder, *req.lgkmcnt) : IntegerAttr());
   }
   if (req.vscnt) {
     waveamdmachine::SWaitcntVscntOp::create(
-        builder, op->getLoc(), createImm(builder, op->getLoc(), *req.vscnt));
+        builder, op->getLoc(), getCounterAttr(builder, *req.vscnt));
   }
 }
 
@@ -879,7 +859,7 @@ struct WaveAMDTicketWaitsPass
     }
     auto emit = [&](Operation *op, const WaitRequirement &req) {
       if (req.hasWait())
-        emitWaits(builder, op, req, isaVer);
+        emitWaits(builder, op, req);
     };
     runTransfer(op, local, isaVer, emit);
   }
