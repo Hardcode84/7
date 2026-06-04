@@ -1,11 +1,11 @@
 // RUN: wave-opt --waveamd-to-machine %s | FileCheck %s --check-prefix=SELECT
 // RUN: wave-opt --waveamd-to-machine %s | wave-opt | FileCheck %s --check-prefix=SELECT
 // RUN: wave-opt --waveamd-to-machine --waveamd-abi-lowering %s | FileCheck %s --check-prefix=ABI
-// RUN: wave-opt --waveamd-to-machine --waveamd-abi-lowering --waveamd-insert-ticket-waits %s | FileCheck %s --check-prefix=TICKET
-// RUN: wave-opt --waveamd-to-machine --waveamd-abi-lowering --waveamd-insert-ticket-waits --waveamd-insert-hazard-waits %s | FileCheck %s --check-prefix=HAZARD
-// RUN: wave-opt --waveamd-to-machine --waveamd-abi-lowering --waveamd-insert-ticket-waits --waveamd-reg-alloc --waveamd-insert-hazard-waits %s | FileCheck %s --check-prefix=REGALLOC
-// RUN: wave-opt --waveamd-to-machine --waveamd-abi-lowering --waveamd-insert-ticket-waits --waveamd-reg-alloc --waveamd-insert-hazard-waits --waveamd-resource-info %s | FileCheck %s --check-prefix=RESOURCE
-// RUN: wave-opt --waveamd-to-machine --waveamd-abi-lowering --waveamd-insert-ticket-waits --waveamd-reg-alloc --waveamd-insert-hazard-waits --waveamd-resource-info --waveamd-metadata %s | FileCheck %s --check-prefix=METADATA
+// RUN: wave-opt --waveamd-to-machine --waveamd-abi-lowering --waveamd-linearize-exec-if --waveamd-insert-ticket-waits %s | FileCheck %s --check-prefix=TICKET
+// RUN: wave-opt --waveamd-to-machine --waveamd-abi-lowering --waveamd-linearize-exec-if --waveamd-insert-ticket-waits --waveamd-insert-hazard-waits %s | FileCheck %s --check-prefix=HAZARD
+// RUN: wave-opt --waveamd-to-machine --waveamd-abi-lowering --waveamd-linearize-exec-if --waveamd-insert-ticket-waits --waveamd-reg-alloc --waveamd-insert-hazard-waits %s | FileCheck %s --check-prefix=REGALLOC
+// RUN: wave-opt --waveamd-to-machine --waveamd-abi-lowering --waveamd-linearize-exec-if --waveamd-insert-ticket-waits --waveamd-reg-alloc --waveamd-insert-hazard-waits --waveamd-resource-info %s | FileCheck %s --check-prefix=RESOURCE
+// RUN: wave-opt --waveamd-to-machine --waveamd-abi-lowering --waveamd-linearize-exec-if --waveamd-insert-ticket-waits --waveamd-reg-alloc --waveamd-insert-hazard-waits --waveamd-resource-info --waveamd-metadata %s | FileCheck %s --check-prefix=METADATA
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
@@ -13,10 +13,9 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // SELECT: waveamdmachine.arg {index = 0 : i64, pointer = false} : !waveamdmachine.reg<sgpr, 1>
 // SELECT: waveamdmachine.v_mbcnt_lo : !waveamdmachine.reg<vgpr, 1>
 // SELECT: waveamdmachine.v_cmp_lt_u32
-// SELECT: waveamdmachine.s_and_saveexec_b32
-// SELECT: waveamdmachine.s_cbranch_execz ".Lwave_where_test_endif_0"
-// SELECT: waveamdmachine.label ".Lwave_where_test_endif_0"
-// SELECT: waveamdmachine.s_mov_exec_lo
+// SELECT: waveamdmachine.exec_if
+// SELECT: waveamdmachine.v_add_u32
+// SELECT: } : !waveamdmachine.reg<sgpr, 1>
 func.func @where_test(%limit: i32) -> i32 {
   %lane = wave.lane_id : !wave.simd<i32, 32>
   %vlimit = wave.splat %limit : i32 -> !wave.simd<i32, 32>

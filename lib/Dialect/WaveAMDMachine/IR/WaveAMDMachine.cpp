@@ -13,6 +13,7 @@
 #include "mlir/IR/DialectImplementation.h"
 #include "mlir/Interfaces/ControlFlowInterfaces.h"
 #include "mlir/Interfaces/Utils/InferIntRangeCommon.h"
+#include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/TypeSwitch.h"
 
 #include <cstdint>
@@ -159,6 +160,87 @@ LogicalResult VMovB32TupleOp::verify() {
           "registers attribute must match result register width");
   }
   return success();
+}
+
+static bool isExecIfMergeRegClass(RegClass regClass) {
+  return regClass == RegClass::VGPR || regClass == RegClass::SGPR;
+}
+
+static LogicalResult verifyExecIfTokenMergeSource(ExecIfOp op, Type resultType,
+                                                  Value value, StringRef arm) {
+  if (value.getType() == resultType)
+    return success();
+  return op.emitOpError() << arm << " yield type must match memory token";
+}
+
+static LogicalResult verifyExecIfRegMergeSource(ExecIfOp op, RegType resultReg,
+                                                RegType sourceReg,
+                                                StringRef arm) {
+  if (sourceReg.getWidth() != resultReg.getWidth())
+    return op.emitOpError()
+           << arm << " yield register width must match result width";
+  if (!isExecIfMergeRegClass(sourceReg.getRegClass()))
+    return op.emitOpError() << arm << " yield must be VGPR or SGPR";
+  return success();
+}
+
+static LogicalResult verifyExecIfDataMergeSource(ExecIfOp op, Type resultType,
+                                                 Value value, StringRef arm) {
+  RegType resultReg = dyn_cast<RegType>(resultType);
+  if (!resultReg || resultReg.getRegClass() != RegClass::VGPR)
+    return op.emitOpError()
+           << "data results with otherwise must be VGPR values";
+  if (RegType sourceReg = dyn_cast<RegType>(value.getType()))
+    return verifyExecIfRegMergeSource(op, resultReg, sourceReg, arm);
+  if (isa<ImmType>(value.getType()) && resultReg.getWidth() == 1)
+    return success();
+  return op.emitOpError() << arm << " yield must be register or immediate";
+}
+
+static LogicalResult verifyExecIfMergeSource(ExecIfOp op, Type resultType,
+                                             Value value, StringRef arm) {
+  if (isa<MemTokenType>(resultType))
+    return verifyExecIfTokenMergeSource(op, resultType, value, arm);
+  return verifyExecIfDataMergeSource(op, resultType, value, arm);
+}
+
+static LogicalResult verifyExecIfNoElseSource(ExecIfOp op, Type resultType,
+                                              Value value, StringRef arm) {
+  if (resultType != value.getType())
+    return op.emitOpError() << arm << " yield type must match result type";
+  return success();
+}
+
+static LogicalResult verifyExecIfYield(ExecIfOp op, Region &region,
+                                       StringRef arm, bool hasElse) {
+  if (region.empty())
+    return success();
+  YieldOp yield = dyn_cast<YieldOp>(region.front().getTerminator());
+  if (!yield)
+    return op.emitOpError() << arm << " region must terminate with yield";
+  if (yield.getValues().size() != op.getNumResults())
+    return op.emitOpError()
+           << arm << " yield operand count must match result count";
+  for (auto [result, value] :
+       llvm::zip_equal(op.getResults(), yield.getValues())) {
+    LogicalResult verified =
+        hasElse ? verifyExecIfMergeSource(op, result.getType(), value, arm)
+                : verifyExecIfNoElseSource(op, result.getType(), value, arm);
+    if (failed(verified))
+      return failure();
+  }
+  return success();
+}
+
+LogicalResult ExecIfOp::verify() {
+  RegType condType = cast<RegType>(getCondition().getType());
+  if (condType.getRegClass() != RegClass::SGPR ||
+      (condType.getWidth() != 1 && condType.getWidth() != 2))
+    return emitOpError("condition must be SGPR1 or SGPR2");
+  bool hasElse = !getElseRegion().empty();
+  if (failed(verifyExecIfYield(*this, getThenRegion(), "then", hasElse)))
+    return failure();
+  return verifyExecIfYield(*this, getElseRegion(), "else", hasElse);
 }
 
 static LogicalResult verifyCndmaskSource(Operation *op, Value value,

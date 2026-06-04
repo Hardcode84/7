@@ -265,6 +265,48 @@ func.func @v_cndmask_bad_condition_width(%false: !waveamdmachine.reg<vgpr, 1>,
 
 // -----
 
+func.func @exec_if_bad_condition(%cond: !waveamdmachine.reg<sgpr, 4>) {
+  // expected-error @below {{condition must be SGPR1 or SGPR2}}
+  waveamdmachine.exec_if %cond {
+    waveamdmachine.yield
+  } : !waveamdmachine.reg<sgpr, 4>
+  return
+}
+
+// -----
+
+func.func @exec_if_bad_terminator(%cond: !waveamdmachine.reg<sgpr, 1>) {
+  // expected-error @below {{then region must terminate with yield}}
+  waveamdmachine.exec_if %cond {
+  ^bb0:
+    cf.br ^bb0
+  } : !waveamdmachine.reg<sgpr, 1>
+  return
+}
+
+// -----
+
+func.func @exec_if_yield_count_mismatch(%cond: !waveamdmachine.reg<sgpr, 1>) {
+  // expected-error @below {{then yield operand count must match result count}}
+  %r = waveamdmachine.exec_if %cond {
+    waveamdmachine.yield
+  } : !waveamdmachine.reg<sgpr, 1> -> !waveamdmachine.reg<vgpr, 1>
+  return
+}
+
+// -----
+
+func.func @exec_if_yield_type_mismatch(%cond: !waveamdmachine.reg<sgpr, 1>,
+                                       %value: !waveamdmachine.reg<sgpr, 1>) {
+  // expected-error @below {{then yield type must match result type}}
+  %r = waveamdmachine.exec_if %cond {
+    waveamdmachine.yield %value : !waveamdmachine.reg<sgpr, 1>
+  } : !waveamdmachine.reg<sgpr, 1> -> !waveamdmachine.reg<vgpr, 1>
+  return
+}
+
+// -----
+
 // Zero-width tuples die in RegType verification before op checks.
 func.func @global_load_tuple_b32_zero_width(%off: !waveamdmachine.reg<vgpr, 1>,
                                             %base: !waveamdmachine.reg<sgpr, 2>) {

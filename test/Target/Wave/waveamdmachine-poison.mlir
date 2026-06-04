@@ -1,7 +1,8 @@
 // RUN: wave-opt --waveamd-to-machine --split-input-file %s | FileCheck %s
 // RUN: wave-opt --waveamd-to-machine --split-input-file %s | wave-opt --split-input-file | FileCheck %s
 // RUN: wave-opt --waveamd-to-machine --waveamd-abi-lowering \
-// RUN:   --waveamd-decompose-mem-tuples --waveamd-insert-ticket-waits \
+// RUN:   --waveamd-decompose-mem-tuples --waveamd-linearize-exec-if \
+// RUN:   --waveamd-insert-ticket-waits \
 // RUN:   --waveamd-reg-alloc --waveamd-insert-hazard-waits \
 // RUN:   --split-input-file %s | FileCheck %s --check-prefix=REGALLOC
 // RUN: wave-translate --wave-to-amdgpu-asm --split-input-file %s | FileCheck %s --check-prefix=ASM
@@ -61,7 +62,7 @@ func.func @packed_simd_poison_store(%out: !wave.ptr<#wave.global, i32>)
 
 // CHECK-LABEL: func.func @mask_poison_where32
 // CHECK: %[[MASK:.+]] = waveamdmachine.uninit : !waveamdmachine.reg<sgpr, 1>
-// CHECK: waveamdmachine.s_and_saveexec_b32 %[[MASK]]
+// CHECK: waveamdmachine.exec_if %[[MASK]]
 // REGALLOC-LABEL: func.func @mask_poison_where32
 // REGALLOC: waveamdmachine.uninit : !waveamdmachine.reg<sgpr, 1, {{[0-9]+}}>
 func.func @mask_poison_where32(%out: !wave.ptr<#wave.global, i32>)
@@ -88,7 +89,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx942"} {
 
 // CHECK-LABEL: func.func @mask_poison_where64
 // CHECK: %[[MASK:.+]] = waveamdmachine.uninit : !waveamdmachine.reg<sgpr, 2>
-// CHECK: waveamdmachine.s_and_saveexec_b64 %[[MASK]]
+// CHECK: waveamdmachine.exec_if %[[MASK]]
 // REGALLOC-LABEL: func.func @mask_poison_where64
 // REGALLOC: waveamdmachine.uninit : !waveamdmachine.reg<sgpr, 2, {{[0-9]+}}>
 func.func @mask_poison_where64() attributes {wave.kernel} {

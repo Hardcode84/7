@@ -184,6 +184,20 @@ def WaveAMDTicketWaits
   ];
 }
 
+def WaveAMDLinearizeExecIf
+    : Pass<"waveamd-linearize-exec-if"> {
+  let summary = "Linearize WaveAMDMachine EXEC-masked regions";
+  let description = [{
+    Lowers `waveamdmachine.exec_if` into explicit EXEC save/mask/branch/restore
+    instructions and labels. Runs after CSE/scheduling and before waitcnt,
+    regalloc, hazard waits, and ISA emission consume a linear stream.
+  }];
+  let dependentDialects = [
+    "func::FuncDialect",
+    "waveamdmachine::WaveAMDMachineDialect"
+  ];
+}
+
 def WaveAMDPreserveHardwareRegs
     : Pass<"waveamd-preserve-hw-regs"> {
   let summary = "Preserve singleton WaveAMDMachine hardware registers";
@@ -210,8 +224,8 @@ def WaveAMDMachineSchedule
     Intended placement is before ticket-wait and hazard-wait insertion. Hard
     boundaries include terminators, labels, branches, waitcnts, workgroup
     barriers, priority changes, region-bearing ops, and unsupported
-    side-effecting ops. `uniform_loop` bodies are scanned as nested local
-    regions, but the loop op itself is never part of an outer region.
+    side-effecting ops. `uniform_loop` and `exec_if` bodies are scanned as
+    nested local regions, but region ops are never part of an outer region.
   }];
   let dependentDialects = [
     "func::FuncDialect",

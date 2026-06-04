@@ -897,6 +897,39 @@ def WaveAMDMachine_SMovM0Op
 def WaveAMDMachine_SEndpgmOp : WaveAMDMachine_ZeroResult<"s_endpgm">;
 def WaveAMDMachine_SSetpcB64Op : WaveAMDMachine_ZeroResult<"s_setpc_b64">;
 
+def WaveAMDMachine_YieldOp : WaveAMDMachine_Op<"yield", [
+  Pure,
+  ReturnLike,
+  Terminator,
+  HasParent<"ExecIfOp">
+]> {
+  let summary = "exec_if region terminator";
+  let arguments = (ins Variadic<AnyType>:$values);
+  let builders = [
+    OpBuilder<(ins), [{ build($_builder, $_state, ::mlir::ValueRange{}); }]>
+  ];
+  let assemblyFormat = "($values^ `:` type($values))? attr-dict";
+}
+
+def WaveAMDMachine_ExecIfOp : WaveAMDMachine_Op<"exec_if", [
+  SingleBlockImplicitTerminator<"YieldOp">,
+  RecursiveMemoryEffects,
+  NoRegionArguments,
+  WaveAMDMachine_ReadsExec,
+  WaveAMDMachine_WritesExec
+]> {
+  let summary = "structured EXEC-masked region";
+  let arguments = (ins WaveAMDMachine_SGPR:$condition);
+  let results = (outs Variadic<AnyType>:$results);
+  let regions = (region SizedRegion<1>:$thenRegion,
+                        MaxSizedRegion<1>:$elseRegion);
+  let assemblyFormat = [{
+    $condition $thenRegion (`otherwise` $elseRegion^)? attr-dict
+    `:` type($condition) (`->` type($results)^)?
+  }];
+  let hasVerifier = 1;
+}
+
 def WaveAMDMachine_GlobalLoadB16Op
     : WaveAMDMachine_GlobalMemoryOp<"global_load_b16", [WaveAMDMachine_VMEMLoad, MemoryEffects<[MemRead]>]>,
       WaveAMDMachine_VMEMLoadInfo {

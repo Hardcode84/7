@@ -134,6 +134,22 @@ func.func @hard_boundaries(%a: !waveamdmachine.reg<vgpr, 1>,
   return
 }
 
+func.func @exec_if_regions(%cond: !waveamdmachine.reg<sgpr, 1>,
+                           %a: !waveamdmachine.reg<vgpr, 1>,
+                           %b: !waveamdmachine.reg<vgpr, 1>) {
+  %pre = waveamdmachine.v_add_u32 %a, %b : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
+  waveamdmachine.exec_if %cond {
+    %then0 = waveamdmachine.v_add_u32 %pre, %b : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
+    %then1 = waveamdmachine.v_add_u32 %then0, %b : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
+    waveamdmachine.yield
+  } otherwise {
+    %else0 = waveamdmachine.v_add_u32 %pre, %b : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
+    waveamdmachine.yield
+  } : !waveamdmachine.reg<sgpr, 1>
+  %post = waveamdmachine.v_add_u32 %pre, %b : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
+  return
+}
+
 transform.named_sequence @body(
     %mod: !transform.any_op {transform.consumed},
     %trial: !transform.param<i64> {transform.readonly}) {
@@ -164,6 +180,10 @@ transform.named_sequence @__transform_main(%root: !transform.any_op {transform.c
 // REGION: waveamd-machine-schedule-report region func=hard_boundaries block=0 region=0 ops=1 first=waveamdmachine.v_add_u32 last=waveamdmachine.v_add_u32
 // REGION: waveamd-machine-schedule-report region func=hard_boundaries block=0 region=1 ops=1 first=waveamdmachine.v_add_u32 last=waveamdmachine.v_add_u32
 // REGION: waveamd-machine-schedule-report region func=hard_boundaries block=0 region=2 ops=1 first=waveamdmachine.v_add_u32 last=waveamdmachine.v_add_u32
+// REGION: waveamd-machine-schedule-report region func=exec_if_regions block=0 region=0 ops=1 first=waveamdmachine.v_add_u32 last=waveamdmachine.v_add_u32
+// REGION: waveamd-machine-schedule-report region func=exec_if_regions block=1 region=1 ops=2 first=waveamdmachine.v_add_u32 last=waveamdmachine.v_add_u32
+// REGION: waveamd-machine-schedule-report region func=exec_if_regions block=2 region=2 ops=1 first=waveamdmachine.v_add_u32 last=waveamdmachine.v_add_u32
+// REGION: waveamd-machine-schedule-report region func=exec_if_regions block=0 region=3 ops=1 first=waveamdmachine.v_add_u32 last=waveamdmachine.v_add_u32
 
 // DEPS: waveamd-machine-schedule-report deps func=regions region=0 nodes=4
 // DEPS: waveamd-machine-schedule-report edge region=0 kind=ssa 2->3 src=waveamdmachine.v_add_u32 dst=waveamdmachine.v_add_u32

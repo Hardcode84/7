@@ -148,15 +148,28 @@ private:
     ops.clear();
   }
 
+  void collectNested(Operation &op) {
+    if (auto loop = dyn_cast<waveamdmachine::UniformLoopOp>(op)) {
+      for (Block &nested : loop.getBody())
+        collectBlock(nested);
+      return;
+    }
+    if (auto execIf = dyn_cast<waveamdmachine::ExecIfOp>(op)) {
+      for (Block &nested : execIf.getThenRegion())
+        collectBlock(nested);
+      for (Block &nested : execIf.getElseRegion())
+        collectBlock(nested);
+      return;
+    }
+  }
+
   void collectBlock(Block &block) {
     unsigned blockOrdinal = nextBlock++;
     SmallVector<Operation *, 16> ops;
     for (Operation &op : block) {
       if (isHardBoundary(&op)) {
         flush(ops, blockOrdinal);
-        if (auto loop = dyn_cast<waveamdmachine::UniformLoopOp>(op))
-          for (Block &nested : loop.getBody())
-            collectBlock(nested);
+        collectNested(op);
         continue;
       }
       ops.push_back(&op);

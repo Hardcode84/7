@@ -28,7 +28,7 @@ func.func @wave_where(%limit: i32, %out: !wave.ptr<#wave.global, i32>) -> i32 {
   // CHECK: v_cmp_lt_u32_e64 [[MASK:s[0-9]+]], [[LANE]], [[ARG:s[0-9]+]]
   %active = wave.cmpi ult %lane, %vlimit : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.mask<32>
   // CHECK: s_and_saveexec_b32 [[SAVE:s[0-9]+]], [[MASK]]
-  // CHECK: s_cbranch_execz [[END:.Lwave_wave_where_endif_[0-9]+]]
+  // CHECK: s_cbranch_execz [[END:.Lwave_wave_where_exec_endif_[0-9]+]]
   wave.where %active {
     // CHECK: v_add_nc_u32_e32
     %sum = wave.addi %lane, %vlimit : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
@@ -51,7 +51,7 @@ func.func @wave_where_else(%limit: i32, %out: !wave.ptr<#wave.global, i32>) -> i
   // CHECK: v_cmp_lt_u32_e64 [[MASK:s[0-9]+]], [[LANE]], [[ARG:s[0-9]+]]
   %active = wave.cmpi ult %lane, %vlimit : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.mask<32>
   // CHECK: s_and_saveexec_b32 [[SAVE:s[0-9]+]], [[MASK]]
-  // CHECK: s_cbranch_execz [[ELSE:.Lwave_wave_where_else_else_[0-9]+]]
+  // CHECK: s_cbranch_execz [[ELSE:.Lwave_wave_where_else_exec_else_[0-9]+]]
   wave.where %active {
     // CHECK: v_add_nc_u32_e32
     %then = wave.addi %lane, %vlimit : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>

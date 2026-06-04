@@ -7,9 +7,11 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx942"} {
 // SELECT-LABEL: func.func @where_wave64_else
 // SELECT: waveamdmachine.arg {index = 0 : i64, pointer = true} : !waveamdmachine.reg<sgpr, 2>
 // SELECT: waveamdmachine.arg {index = 1 : i64, pointer = false} : !waveamdmachine.reg<sgpr, 2>
-// SELECT: waveamdmachine.s_and_saveexec_b64
-// SELECT: waveamdmachine.s_andn2_exec_b64
-// SELECT: waveamdmachine.s_mov_exec_b64
+// SELECT: waveamdmachine.exec_if {{.*}} {
+// SELECT: waveamdmachine.global_store_b32
+// SELECT: } otherwise {
+// SELECT: waveamdmachine.global_store_b32
+// SELECT: } : !waveamdmachine.reg<sgpr, 2>
 //
 // ASM-LABEL: where_wave64_else:
 // ASM: s_load_dwordx2 s[2:3], s[0:1], 0x0

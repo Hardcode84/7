@@ -3155,62 +3155,6 @@ static LogicalResult validateWhereMaskWidth(WhereOp op, unsigned maskWidth) {
   return success();
 }
 
-static Value saveExecMask(OpBuilder &builder, Location loc, Value condition,
-                          unsigned maskWidth) {
-  MLIRContext *context = builder.getContext();
-  if (maskWidth == 64) {
-    waveamdmachine::SAndSaveexecB64Op saveExec =
-        waveamdmachine::SAndSaveexecB64Op::create(
-            builder, loc,
-            getRegType(context, waveamdmachine::RegClass::SGPR, 2),
-            getSCCType(context), condition);
-    return saveExec.getSavedExec();
-  }
-  waveamdmachine::SAndSaveexecB32Op saveExec =
-      waveamdmachine::SAndSaveexecB32Op::create(
-          builder, loc, getRegType(context, waveamdmachine::RegClass::SGPR),
-          getSCCType(context), condition);
-  return saveExec.getSavedExec();
-}
-
-static void selectElseExecMask(OpBuilder &builder, Location loc,
-                               Value savedExec, Value condition,
-                               unsigned maskWidth) {
-  if (maskWidth == 64) {
-    waveamdmachine::SAndn2ExecB64Op::create(
-        builder, loc, getSCCType(builder.getContext()), savedExec, condition);
-    return;
-  }
-  waveamdmachine::SAndn2ExecB32Op::create(
-      builder, loc, getSCCType(builder.getContext()), savedExec, condition);
-}
-
-static void restoreExecMask(OpBuilder &builder, Location loc, Value savedExec,
-                            unsigned maskWidth) {
-  if (maskWidth == 64) {
-    waveamdmachine::SMovExecB64Op::create(builder, loc, savedExec);
-    return;
-  }
-  waveamdmachine::SMovExecLoOp::create(builder, loc, savedExec);
-}
-
-static void bindWhereResult(WaveAMDMachineSelector &S, Value result,
-                            Value yielded, Operation *user) {
-  S.values[result] = S.expect(yielded, user);
-  if (auto it = S.pointerBases.find(yielded); it != S.pointerBases.end())
-    S.pointerBases[result] = it->second;
-  if (auto it = S.pointerGlobalBases.find(yielded);
-      it != S.pointerGlobalBases.end())
-    S.pointerGlobalBases[result] = it->second;
-  if (auto it = S.pointerIndexOffsets.find(yielded);
-      it != S.pointerIndexOffsets.end())
-    S.pointerIndexOffsets[result] = it->second;
-  if (auto it = S.indexOffsets.find(yielded); it != S.indexOffsets.end())
-    S.indexOffsets[result] = it->second;
-  if (auto it = S.pointerBuffers.find(yielded); it != S.pointerBuffers.end())
-    S.pointerBuffers[result] = it->second;
-}
-
 static bool isPointerLikeWhereResult(Type type) {
   if (isa<PtrType>(type))
     return true;
@@ -3237,40 +3181,117 @@ static LogicalResult validateWhereMergeSource(WhereOp op, Value value,
   return success();
 }
 
-static LogicalResult mergeWhereResult(WaveAMDMachineSelector &S, WhereOp op,
-                                      Value result, Value thenYield,
-                                      Value elseYield, Value condition) {
-  Type resultType = result.getType();
-  Value thenValue = S.expect(thenYield, op);
-  Value elseValue = S.expect(elseYield, op);
-  if (isa<MemTokenType>(resultType)) {
-    S.values[result] = waveamdmachine::TokenJoinOp::create(
-        S.builder, op.getLoc(), getMemTokenType(op.getContext()),
-        ValueRange{thenValue, elseValue});
-    return success();
+static LogicalResult selectMachineWhereRegion(WaveAMDMachineSelector &S,
+                                              Region &src, Region &dst,
+                                              SmallVectorImpl<Value> &yielded) {
+  dst.emplaceBlock();
+  auto savedIP = S.builder.saveInsertionPoint();
+  S.builder.setInsertionPointToStart(&dst.front());
+  if (failed(S.selectRegion(src))) {
+    S.builder.restoreInsertionPoint(savedIP);
+    return failure();
   }
-  if (isPointerLikeWhereResult(resultType))
-    return op.emitError(
-        "WaveAMDMachine lowering does not support result-bearing "
-        "wave.where with otherwise for pointer results");
-  if (!isa<SimdType>(resultType))
-    return op.emitError(
-        "WaveAMDMachine lowering supports result-bearing wave.where "
-        "with otherwise only for SIMD data or memory tokens");
-  FailureOr<unsigned> width =
-      getRegisterPayloadWidth(resultType, [&]() { return op.emitError(); });
-  if (failed(width))
+  YieldOp yield = cast<YieldOp>(src.front().getTerminator());
+  for (Value value : yield.getValues())
+    yielded.push_back(S.expect(value, yield));
+  waveamdmachine::YieldOp::create(S.builder, yield.getLoc(), yielded);
+  S.builder.restoreInsertionPoint(savedIP);
+  return success();
+}
+
+static LogicalResult getExecIfResultTypes(WhereOp op, ArrayRef<Value> thenYield,
+                                          ArrayRef<Value> elseYield,
+                                          SmallVectorImpl<Type> &types) {
+  bool hasElse = !op.getElseRegion().empty();
+  for (auto [idx, result] : llvm::enumerate(op.getResults())) {
+    if (isPointerLikeWhereResult(result.getType()))
+      return op.emitError(
+          "WaveAMDMachine lowering does not support result-bearing "
+          "wave.where for pointer results");
+    if (!hasElse) {
+      types.push_back(thenYield[idx].getType());
+      continue;
+    }
+    if (isa<MemTokenType>(result.getType())) {
+      types.push_back(getMemTokenType(op.getContext()));
+      continue;
+    }
+    if (!isa<SimdType>(result.getType()))
+      return op.emitError(
+          "WaveAMDMachine lowering supports result-bearing wave.where "
+          "with otherwise only for SIMD data or memory tokens");
+    FailureOr<unsigned> width = getRegisterPayloadWidth(
+        result.getType(), [&]() { return op.emitError(); });
+    if (failed(width))
+      return failure();
+    if (failed(validateWhereMergeSource(op, thenYield[idx], *width, "then")) ||
+        failed(validateWhereMergeSource(op, elseYield[idx], *width, "else")))
+      return failure();
+    types.push_back(
+        getRegType(op.getContext(), waveamdmachine::RegClass::VGPR, *width));
+  }
+  return success();
+}
+
+static waveamdmachine::ExecIfOp
+createExecIf(WaveAMDMachineSelector &S, Location loc, Value condition,
+             TypeRange resultTypes, Region &thenRegion, Region &elseRegion) {
+  OperationState state(loc, "waveamdmachine.exec_if");
+  state.addOperands(condition);
+  state.addTypes(resultTypes);
+  state.addRegion()->takeBody(thenRegion);
+  state.addRegion()->takeBody(elseRegion);
+  return cast<waveamdmachine::ExecIfOp>(S.builder.create(state));
+}
+
+static void bindExecIfResults(WaveAMDMachineSelector &S, WhereOp op,
+                              waveamdmachine::ExecIfOp execIf) {
+  for (auto [result, selected] :
+       llvm::zip_equal(op.getResults(), execIf.getResults()))
+    S.values[result] = selected;
+}
+
+static LogicalResult validateWhereResultCount(WhereOp op,
+                                              ArrayRef<Value> thenYield,
+                                              ArrayRef<Value> elseYield) {
+  if (thenYield.size() != op.getNumResults())
+    return op.emitError("then yield count must match result count");
+  if (!op.getElseRegion().empty() && elseYield.size() != op.getNumResults())
+    return op.emitError("else yield count must match result count");
+  return success();
+}
+
+static LogicalResult prepareExecIfRegions(WaveAMDMachineSelector &S, WhereOp op,
+                                          Region &thenRegion,
+                                          Region &elseRegion,
+                                          SmallVectorImpl<Value> &thenYield,
+                                          SmallVectorImpl<Value> &elseYield) {
+  if (failed(selectMachineWhereRegion(S, op.getThenRegion(), thenRegion,
+                                      thenYield)))
     return failure();
-  if (failed(validateWhereMergeSource(op, thenValue, *width, "then")) ||
-      failed(validateWhereMergeSource(op, elseValue, *width, "else")))
+  if (!op.getElseRegion().empty() &&
+      failed(selectMachineWhereRegion(S, op.getElseRegion(), elseRegion,
+                                      elseYield)))
     return failure();
-  if (isa<waveamdmachine::ImmType>(thenValue.getType()) &&
-      isa<waveamdmachine::ImmType>(elseValue.getType()))
-    thenValue = S.ensureVGPRForVSrc1(op.getLoc(), thenValue);
-  S.values[result] = waveamdmachine::VCndmaskB32TupleOp::create(
-      S.builder, op.getLoc(),
-      getRegType(op.getContext(), waveamdmachine::RegClass::VGPR, *width),
-      elseValue, thenValue, condition);
+  return validateWhereResultCount(op, thenYield, elseYield);
+}
+
+static LogicalResult createStructuredWhere(WaveAMDMachineSelector &S,
+                                           WhereOp op, Value condition) {
+  Region thenRegion;
+  Region elseRegion;
+  SmallVector<Value> thenYield;
+  SmallVector<Value> elseYield;
+  if (failed(prepareExecIfRegions(S, op, thenRegion, elseRegion, thenYield,
+                                  elseYield)))
+    return failure();
+  SmallVector<Type> resultTypes;
+  if (failed(getExecIfResultTypes(op, thenYield, elseYield, resultTypes)))
+    return failure();
+  waveamdmachine::ExecIfOp execIf = createExecIf(
+      S, op.getLoc(), condition, resultTypes, thenRegion, elseRegion);
+  bindExecIfResults(S, op, execIf);
+  S.builder.setInsertionPointAfter(execIf);
   return success();
 }
 
@@ -3280,37 +3301,9 @@ LogicalResult WaveAMDMachineSelector::selectWhere(WhereOp op) {
   if (failed(validateWhereMaskWidth(op, maskWidth)))
     return failure();
 
-  std::string endLabel = makeLabel("endif");
-  std::string elseLabel =
-      op.getElseRegion().empty() ? endLabel : makeLabel("else");
   Value condition = expect(op.getCondition(), op);
-  Value savedExec = saveExecMask(builder, op.getLoc(), condition, maskWidth);
-  waveamdmachine::SCBranchExeczOp::create(builder, op.getLoc(), elseLabel);
-  if (failed(selectRegion(op.getThenRegion())))
+  if (failed(createStructuredWhere(*this, op, condition)))
     return failure();
-  auto thenYield = cast<YieldOp>(op.getThenRegion().front().getTerminator());
-  YieldOp elseYield;
-  if (!op.getElseRegion().empty()) {
-    waveamdmachine::LabelOp::create(builder, op.getLoc(), elseLabel);
-    selectElseExecMask(builder, op.getLoc(), savedExec, condition, maskWidth);
-    waveamdmachine::SCBranchExeczOp::create(builder, op.getLoc(), endLabel);
-    if (failed(selectRegion(op.getElseRegion())))
-      return failure();
-    elseYield = cast<YieldOp>(op.getElseRegion().front().getTerminator());
-  }
-  waveamdmachine::LabelOp::create(builder, op.getLoc(), endLabel);
-  restoreExecMask(builder, op.getLoc(), savedExec, maskWidth);
-  if (op.getElseRegion().empty()) {
-    for (auto [result, yielded] :
-         llvm::zip_equal(op.getResults(), thenYield.getValues()))
-      bindWhereResult(*this, result, yielded, op);
-  } else {
-    for (auto [result, thenValue, elseValue] : llvm::zip_equal(
-             op.getResults(), thenYield.getValues(), elseYield.getValues()))
-      if (failed(mergeWhereResult(*this, op, result, thenValue, elseValue,
-                                  condition)))
-        return failure();
-  }
   eraseIfTopLevel(op);
   return success();
 }
