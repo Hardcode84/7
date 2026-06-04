@@ -297,8 +297,6 @@ def _validate_positive_shape(cfg: _MatmulConfig) -> None:
     _validate_wave_tile_counts(cfg)
     _validate_choice("output_type", cfg.output_type, ("f32", "f16"))
     _validate_choice("input_type", cfg.input_type, ("f16", "bf16", "mxfp4"))
-    if cfg.uses_packed_mxfp4 and cfg.random_data:
-        raise ValueError("MXFP4 random input generation is not wired yet")
 
 
 def _validate_cta_remap_params(cfg: _MatmulConfig) -> None:
@@ -441,6 +439,43 @@ def _e8m0_to_f32(raw: int) -> float:
     return 2.0 ** (raw - 127)
 
 
+def _deterministic_mxfp4_codes(
+    count: int, *, seed: int, stream: int
+) -> tuple[int, ...]:
+    state = (seed ^ ((stream + 1) * 0x9E3779B9)) & 0xFFFFFFFF
+    values: list[int] = []
+    for _ in range(count):
+        state = (1664525 * state + 1013904223) & 0xFFFFFFFF
+        values.append(0x2 if ((state >> 31) & 1) else 0x4)
+    return tuple(values)
+
+
+def _mxfp4_code_to_f32(raw: int) -> float:
+    if raw == 0x2:
+        return 1.0
+    if raw == 0x4:
+        return 2.0
+    raise ValueError(f"unsupported MXFP4 test code {raw}")
+
+
+def _pack_mxfp4_codes(values: tuple[int, ...]) -> tuple[int, ...]:
+    if len(values) % 2 != 0:
+        raise ValueError("MXFP4 packed input length must be even")
+    return tuple(values[i] | (values[i + 1] << 4) for i in range(0, len(values), 2))
+
+
+def generate_mxfp4_packed_matmul_inputs(
+    M: int,
+    N: int,
+    K: int,
+    *,
+    random_seed: int = 0,
+) -> tuple[tuple[int, ...], tuple[int, ...]]:
+    a_codes = _deterministic_mxfp4_codes(M * K, seed=random_seed, stream=0)
+    b_codes = _deterministic_mxfp4_codes(N * K, seed=random_seed, stream=1)
+    return _pack_mxfp4_codes(a_codes), _pack_mxfp4_codes(b_codes)
+
+
 def _mxfp4_scale_raw_values(
     rows: int, groups: int, high: int, low: int
 ) -> tuple[int, ...]:
@@ -471,9 +506,14 @@ def generate_wmma_f16_matmul_inputs(
     random_data: bool = False,
     random_seed: int = 0,
 ) -> tuple[tuple[float, ...], tuple[float, ...]]:
-    if random_data and input_type == "mxfp4":
-        raise ValueError("MXFP4 random input generation is not wired yet")
     if random_data:
+        if input_type == "mxfp4":
+            a_codes = _deterministic_mxfp4_codes(M * K, seed=random_seed, stream=0)
+            b_codes = _deterministic_mxfp4_codes(N * K, seed=random_seed, stream=1)
+            return (
+                tuple(_mxfp4_code_to_f32(value) for value in a_codes),
+                tuple(_mxfp4_code_to_f32(value) for value in b_codes),
+            )
         a_values = _deterministic_random_values(M * K, seed=random_seed, stream=0)
         b_values = _deterministic_random_values(N * K, seed=random_seed, stream=1)
     else:
@@ -2030,6 +2070,16 @@ def _fill_host_inputs(
     c1: dsl.Value,
 ) -> None:
     if cfg.random_data:
+        if cfg.uses_packed_mxfp4:
+            a_packed, b_packed = generate_mxfp4_packed_matmul_inputs(
+                cfg.M,
+                cfg.N,
+                cfg.K,
+                random_seed=cfg.random_seed,
+            )
+            _emit_constant_fill(bld, buffers.a, a_packed, cfg.input_element_type, index)
+            _emit_constant_fill(bld, buffers.b, b_packed, cfg.input_element_type, index)
+            return
         a_values, b_values = generate_wmma_f16_matmul_inputs(
             cfg.M,
             cfg.N,
@@ -2431,6 +2481,7 @@ def _attach_wavemeta_params(module: Module, cfg: _MatmulConfig) -> None:
 __all__ = [
     "build_wmma_f16_matmul_module",
     "compute_wmma_f16_matmul_reference_buffer",
+    "generate_mxfp4_packed_matmul_inputs",
     "generate_mxfp4_scale_inputs",
     "generate_wmma_f16_matmul_inputs",
 ]

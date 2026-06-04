@@ -3,6 +3,7 @@
 from mlir.dialects.wave_matmul import (
     build_wmma_f16_matmul_module,
     compute_wmma_f16_matmul_reference_buffer,
+    generate_mxfp4_packed_matmul_inputs,
     generate_mxfp4_scale_inputs,
     generate_wmma_f16_matmul_inputs,
 )
@@ -52,6 +53,24 @@ ref_mxfp4 = compute_wmma_f16_matmul_reference_buffer(
     input_type="mxfp4",
 )
 print("mxfp4-ref", len(ref_mxfp4), ref_mxfp4[0], ref_mxfp4[-1])
+mxfp4_a0, mxfp4_b0 = generate_mxfp4_packed_matmul_inputs(16, 16, 128, random_seed=7)
+mxfp4_a1, mxfp4_b1 = generate_mxfp4_packed_matmul_inputs(16, 16, 128, random_seed=7)
+mxfp4_a2, _ = generate_mxfp4_packed_matmul_inputs(16, 16, 128, random_seed=8)
+assert mxfp4_a0 == mxfp4_a1 and mxfp4_b0 == mxfp4_b1
+assert mxfp4_a0 != mxfp4_a2
+print("mxfp4-packed-random", len(mxfp4_a0), len(mxfp4_b0), mxfp4_a0[0], mxfp4_b0[-1])
+ref_mxfp4_random = compute_wmma_f16_matmul_reference_buffer(
+    16,
+    16,
+    128,
+    random_data=True,
+    random_seed=7,
+    matrix_intrinsic="mfma_gfx950",
+    input_type="mxfp4",
+)
+print(
+    "mxfp4-random-ref", len(ref_mxfp4_random), ref_mxfp4_random[0], ref_mxfp4_random[-1]
+)
 ref_f32 = compute_wmma_f16_matmul_reference_buffer(
     16,
     16,
@@ -73,6 +92,18 @@ rounding_pair = next(
     pair for pair in zip(ref_f32, ref_f16, strict=True) if pair[0] != pair[1]
 )
 print("f16-ref-rounding", rounding_pair[0], rounding_pair[1])
+
+module_mxfp4_random = build_wmma_f16_matmul_module(
+    M=16,
+    N=16,
+    K=128,
+    matrix_intrinsic="mfma_gfx950",
+    input_type="mxfp4",
+    random_data=True,
+    random_seed=7,
+)
+assert "memref.store" in str(module_mxfp4_random)
+print("mxfp4-random-module ok")
 
 module = build_wmma_f16_matmul_module(
     M=32,
@@ -117,7 +148,10 @@ print(module_mxfp4)
 # CHECK: bf16-ref 256 32.0
 # CHECK: mxfp4-scales 64 64 127 122
 # CHECK: mxfp4-ref 256 42.5 21.25
+# CHECK: mxfp4-packed-random 1024 1024 68 34
+# CHECK: mxfp4-random-ref 256 92.703125 12.6484375
 # CHECK: f16-ref-rounding -132.5625 -132.5
+# CHECK: mxfp4-random-module ok
 # CHECK-LABEL: func.func @wmma_f16_matmul_tiled
 # CHECK-SAME: wave.lds_size = 2048
 # CHECK-NOT: wavemeta.
