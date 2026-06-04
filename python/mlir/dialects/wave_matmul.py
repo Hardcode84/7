@@ -52,7 +52,7 @@ import struct
 from dataclasses import dataclass
 
 from mlir._mlir_libs._waveDialectsNanobind import PTupleType
-from mlir.dialects import arith, wave, waveamd, wavemeta
+from mlir.dialects import wave, waveamd, wavemeta
 from mlir.dialects import wave_dsl as dsl
 from mlir.ir import (
     DictAttr,
@@ -1343,7 +1343,8 @@ def _scale_lds_base(
         if lds_offset == 0:
             return lds
         return _ptr_add_const(bld, lds, lds_offset * 4)
-    byte_offset = arith.MulIOp(lds_offset, bld.constant(lds_offset.type, 4)).result
+    offset = dsl.sym("scale_lds_offset")
+    byte_offset = bld.index_expr(offset * 4, bindings={offset: lds_offset})
     return bld.ptr_add(lds, byte_offset)
 
 
