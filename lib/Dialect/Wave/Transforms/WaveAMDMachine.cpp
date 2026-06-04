@@ -1407,6 +1407,8 @@ LogicalResult WaveAMDMachineSelector::selectOperation(Operation *op) {
           [&](auto o) { return selectFragmentPack(o); })
       .Case<waveamd::MmaOp>([&](auto o) { return selectMma(o); })
       .Case<waveamd::MmaScaleOp>([&](auto o) { return selectMmaScale(o); })
+      .Case<waveamd::TransposeLoadOp>(
+          [&](auto o) { return selectTransposeLoad(o); })
       .Case<waveamd::DmaLoadLdsOp>([&](auto o) { return selectDmaLoadLds(o); })
       .Case<waveamd::FragmentUnpackOp>(
           [&](auto o) { return selectFragmentUnpack(o); })
@@ -2947,6 +2949,73 @@ LogicalResult WaveAMDMachineSelector::selectMmaScale(waveamd::MmaScaleOp op) {
   values[op.getResult()] = result;
   eraseIfTopLevel(op);
   return success();
+}
+
+static FailureOr<WaveAMDMachineSelector::BucketedOperands>
+materializeLdsAddress(WaveAMDMachineSelector &S, Operation *op,
+                      const PointerOffset &offset,
+                      waveamdmachine::AddressFieldSpec spec) {
+  FailureOr<AddressPlan> plan = planMemoryAddress(S, op, offset, spec);
+  if (failed(plan))
+    return failure();
+  if (plan->fullAddressRemainderExpr)
+    return op->emitError("LDS memory op offset exceeds address fields");
+  return materializePlanBuckets(S, op, *plan, spec);
+}
+
+static FailureOr<std::pair<Value, PointerOffset>>
+lookupLdsPointer(WaveAMDMachineSelector &S, Value ptr, Operation *op) {
+  auto baseIt = S.pointerBases.find(ptr);
+  auto offsetIt = S.pointerIndexOffsets.find(ptr);
+  if (baseIt == S.pointerBases.end() || offsetIt == S.pointerIndexOffsets.end())
+    return op->emitError("WaveAMDMachine backend expects selected LDS pointer");
+  return std::make_pair(baseIt->second, offsetIt->second);
+}
+
+static LogicalResult selectDsReadTr(WaveAMDMachineSelector &S, Operation *op,
+                                    Value source, Value dependency,
+                                    Value valueResult, Value tokenResult) {
+  FailureOr<std::pair<Value, PointerOffset>> ptr =
+      lookupLdsPointer(S, source, op);
+  if (failed(ptr))
+    return failure();
+  SimdType simdType = cast<SimdType>(valueResult.getType());
+  VectorType vectorType = cast<VectorType>(simdType.getElementType());
+  bool useB8Op = vectorType.getElementType().isInteger(8);
+  waveamdmachine::AddressFieldSpec spec =
+      useB8Op ? waveamdmachine::DsReadTrB64B8Op::getAddressFieldSpec()
+              : waveamdmachine::DsReadTrB64B4Op::getAddressFieldSpec();
+  FailureOr<WaveAMDMachineSelector::BucketedOperands> buckets =
+      materializeLdsAddress(S, op, ptr->second, spec);
+  if (failed(buckets))
+    return failure();
+  Value addr = S.ensureVGPRForVSrc1(
+      op->getLoc(),
+      S.addByteOffsets(op->getLoc(), ptr->first, buckets->voffset));
+  Type regType =
+      getRegType(op->getContext(), waveamdmachine::RegClass::VGPR, 2);
+  Type tokenType = getMemTokenType(op->getContext());
+  Value dep = dependency ? S.expect(dependency, op) : Value{};
+  Operation *load = nullptr;
+  if (useB8Op) {
+    load = waveamdmachine::DsReadTrB64B8Op::create(S.builder, op->getLoc(),
+                                                   regType, tokenType, addr,
+                                                   dep, buckets->instOffset);
+  } else {
+    load = waveamdmachine::DsReadTrB64B4Op::create(S.builder, op->getLoc(),
+                                                   regType, tokenType, addr,
+                                                   dep, buckets->instOffset);
+  }
+  S.values[valueResult] = load->getResult(0);
+  S.values[tokenResult] = load->getResult(1);
+  S.eraseIfTopLevel(op);
+  return success();
+}
+
+LogicalResult
+WaveAMDMachineSelector::selectTransposeLoad(waveamd::TransposeLoadOp op) {
+  return selectDsReadTr(*this, op.getOperation(), op.getSource(),
+                        op.getDependency(), op.getValue(), op.getToken());
 }
 
 struct DmaPointers {

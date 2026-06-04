@@ -39,6 +39,7 @@ struct MemoryPayloadShape {
   unsigned elementBits;
   unsigned payloadBits;
   unsigned registers;
+  bool useB8Op;
   bool useB16Op;
 };
 

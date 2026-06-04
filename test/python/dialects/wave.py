@@ -220,6 +220,22 @@ def test_waveamd_dma_load_lds():
         print(m.module)
 
 
+# CHECK-LABEL: TEST: test_waveamd_transpose_load
+@run
+def test_waveamd_transpose_load():
+    with w.module() as m:
+        with m.function("transpose_load_kernel", [], kernel=True) as f:
+            lane = f.lane_id(width=64)
+            lds = f.lds_base(w.i8())
+            ptr = f.ptr_add(
+                lds, lane, w.simd_ptr_type(w.i8(), w.shared_address_space(), 64)
+            )
+            f.transpose_load(ptr)
+        # CHECK: waveamd.transpose_load
+        # CHECK-SAME: -> (!wave.simd<vector<8xi8>, 64>, !wave.mem.token)
+        print(m.module)
+
+
 # CHECK-LABEL: TEST: test_wave_cast_helper
 @run
 def test_wave_cast_helper():

@@ -326,6 +326,63 @@ LogicalResult DmaLoadLdsOp::verify() {
   return success();
 }
 
+namespace {
+struct SharedPointerInfo {
+  wave::PtrType ptr;
+  std::optional<int64_t> simdWidth;
+};
+
+static FailureOr<SharedPointerInfo>
+getSharedPointerInfo(Operation *op, Value value, StringRef name) {
+  Type type = value.getType();
+  std::optional<int64_t> simdWidth;
+  if (auto simdType = dyn_cast<wave::SimdType>(type)) {
+    simdWidth = simdType.getWidth();
+    type = simdType.getElementType();
+  }
+  auto ptrType = dyn_cast<wave::PtrType>(type);
+  if (!ptrType)
+    return op->emitOpError() << name << " must be a wave pointer";
+  if (!isa<wave::SharedAddressSpaceAttr>(ptrType.getAddressSpace()))
+    return op->emitOpError() << name << " pointer must be shared";
+  return SharedPointerInfo{ptrType, simdWidth};
+}
+
+static LogicalResult verifyTransposeLoadResult(Operation *op, Value value) {
+  auto simdType = cast<wave::SimdType>(value.getType());
+  auto vecType = dyn_cast<VectorType>(simdType.getElementType());
+  if (simdType.getWidth() != 64)
+    return op->emitOpError("result SIMD width must be 64");
+  if (!vecType || vecType.getRank() != 1)
+    return op->emitOpError("result SIMD element type must be a 1-D vector");
+  Type elementType = vecType.getElementType();
+  if (elementType.isInteger(4)) {
+    if (vecType.getNumElements() == 16)
+      return success();
+    return op->emitOpError("i4 transpose load result must have 16 elements");
+  }
+  if (elementType.isInteger(8)) {
+    if (vecType.getNumElements() == 8)
+      return success();
+    return op->emitOpError("i8 transpose load result must have 8 elements");
+  }
+  return op->emitOpError("transpose load result element type must be i4 or i8");
+}
+} // namespace
+
+LogicalResult TransposeLoadOp::verify() {
+  FailureOr<SharedPointerInfo> source =
+      getSharedPointerInfo(getOperation(), getSource(), "source");
+  if (failed(source))
+    return failure();
+  if (source->simdWidth && *source->simdWidth != 64)
+    return emitOpError("source SIMD width must be 64");
+  Type elementType = source->ptr.getElementType();
+  if (elementType && !elementType.isInteger(8))
+    return emitOpError("source pointer element type must be i8");
+  return verifyTransposeLoadResult(getOperation(), getValue());
+}
+
 LogicalResult FragmentUnpackOp::verify() {
   auto fragmentType = cast<FragmentType>(getFragment().getType());
   auto simdType = cast<wave::SimdType>(getRegisters().getType());

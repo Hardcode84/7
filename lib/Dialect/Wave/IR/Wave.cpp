@@ -1061,7 +1061,7 @@ static MemoryPayloadShape getMemoryPayloadShape(unsigned elementBits,
                                                 unsigned payloadBits) {
   return MemoryPayloadShape{elementBits, payloadBits,
                             payloadBits <= 32 ? 1 : payloadBits / 32,
-                            payloadBits == 16};
+                            payloadBits == 8, payloadBits == 16};
 }
 
 static FailureOr<MemoryPayloadShape> getScalarMemoryPayloadShape(
@@ -1070,8 +1070,9 @@ static FailureOr<MemoryPayloadShape> getScalarMemoryPayloadShape(
   if (!elementType.isIntOrFloat())
     return emitError("payload element type must be integer or float");
   unsigned bits = elementType.getIntOrFloatBitWidth();
-  if (bits != 16 && bits != 32)
-    return emitError("scalar payload element type must be 16 or 32 bits wide");
+  if (bits != 8 && bits != 16 && bits != 32)
+    return emitError(
+        "scalar payload element type must be 8, 16, or 32 bits wide");
   return getMemoryPayloadShape(bits, bits);
 }
 
@@ -1084,8 +1085,9 @@ static FailureOr<MemoryPayloadShape> getVectorMemoryPayloadShape(
   if (!scalarType.isIntOrFloat())
     return emitError("vector element type must be integer or float");
   unsigned scalarBits = scalarType.getIntOrFloatBitWidth();
-  if (scalarBits != 8 && scalarBits != 16 && scalarBits != 32)
-    return emitError("vector element type must be 8, 16, or 32 bits wide");
+  if (scalarBits != 4 && scalarBits != 8 && scalarBits != 16 &&
+      scalarBits != 32)
+    return emitError("vector element type must be 4, 8, 16, or 32 bits wide");
   uint64_t payloadBits = vecTy.getNumElements() * scalarBits;
   if (payloadBits != 16 && payloadBits % 32 != 0)
     return emitError("vector payload must be 16 bits or a multiple of 32 bits");

@@ -3,6 +3,29 @@
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
+// CHECK-LABEL: func.func @i8_scalar_uses_b8
+// CHECK: waveamdmachine.global_load_u8
+// CHECK: waveamdmachine.global_store_b8
+func.func @i8_scalar_uses_b8(%in: !wave.ptr<#wave.global, i8>,
+                             %out: !wave.ptr<#wave.global, i8>)
+    attributes {wave.kernel} {
+  %lane = wave.lane_id : !wave.simd<i32, 32>
+  %ip = wave.ptr_add %in, %lane
+      : !wave.ptr<#wave.global, i8>, !wave.simd<i32, 32>
+      -> !wave.simd<!wave.ptr<#wave.global, i8>, 32>
+  %op = wave.ptr_add %out, %lane
+      : !wave.ptr<#wave.global, i8>, !wave.simd<i32, 32>
+      -> !wave.simd<!wave.ptr<#wave.global, i8>, 32>
+  %v, %tok = wave.load %ip
+      : (!wave.simd<!wave.ptr<#wave.global, i8>, 32>)
+      -> (!wave.simd<i8, 32>, !wave.mem.token)
+  %st = wave.store %v -> %op after %tok
+      : (!wave.simd<i8, 32>,
+         !wave.simd<!wave.ptr<#wave.global, i8>, 32>, !wave.mem.token)
+      -> !wave.mem.token
+  return
+}
+
 // CHECK-LABEL: func.func @i8_pair_uses_b16
 // CHECK: waveamdmachine.global_load_b16
 // CHECK: waveamdmachine.global_store_b16

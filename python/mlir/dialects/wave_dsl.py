@@ -799,6 +799,19 @@ class FunctionBuilder:
             mem_token_type(), source, dest, after, bytes=bytes, aux=aux
         ).token
 
+    def transpose_load(
+        self,
+        source: Value,
+        result_type: Type | None = None,
+        *,
+        after: Value | None = None,
+    ) -> tuple[Value, Value]:
+        result_type = result_type or simd_type(vector_type(8, i8()), width=64)
+        op = waveamd.TransposeLoadOp(
+            result_type, mem_token_type(), source, dependency=after
+        )
+        return op.value, op.token
+
     def fragment_fill(self, value: Value, frag_type: Type) -> Value:
         return waveamd.FragmentFillOp(frag_type, value).result
 

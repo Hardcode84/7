@@ -117,6 +117,17 @@ def Wave_1DVectorOrSimdOf1DVector
     : Type<Or<[Wave_1DVector.predicate, Wave_SimdOf1DVector.predicate]>,
            "1-D vector or wave SIMD of 1-D vector">;
 
+def Wave_SimdOfPtr
+    : Type<And<[CPred<"::llvm::isa<::mlir::wave::SimdType>($_self)">,
+                CPred<"::llvm::isa<::mlir::wave::PtrType>("
+                      "::llvm::cast<::mlir::wave::SimdType>($_self)"
+                      ".getElementType())">]>,
+           "wave SIMD of pointer">;
+
+def Wave_PtrOrSimdPtr
+    : Type<Or<[Wave_Ptr.predicate, Wave_SimdOfPtr.predicate]>,
+           "wave pointer or wave SIMD of pointer">;
+
 // `!wave.simd<iN, W>` where iN is a signless integer.
 def Wave_SimdOfSignlessInteger
     : Type<And<[CPred<"::llvm::isa<::mlir::wave::SimdType>($_self)">,

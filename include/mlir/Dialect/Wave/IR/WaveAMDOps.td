@@ -140,4 +140,14 @@ def WaveAMD_DmaLoadLdsOp : WaveAMD_Op<"dma_load_lds", [MemoryEffects<[MemRead, M
   let hasVerifier = 1;
 }
 
+def WaveAMD_TransposeLoadOp : WaveAMD_Op<"transpose_load", [MemoryEffects<[MemRead]>]> {
+  let summary = "gfx950 LDS transpose load";
+  let arguments = (ins Wave_PtrOrSimdPtr:$source,
+                       Optional<Wave_MemToken>:$dependency);
+  let results = (outs Wave_SimdOf1DVector:$value,
+                      Wave_MemToken:$token);
+  let assemblyFormat = "$source (`after` $dependency^)? attr-dict `:` functional-type(operands, results)";
+  let hasVerifier = 1;
+}
+
 #endif // MLIR_DIALECT_WAVE_IR_WAVEAMDOPS_TD
