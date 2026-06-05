@@ -35,9 +35,21 @@ using namespace mlir;
 namespace {
 
 struct RegisterLimits {
+  SmallVector<unsigned, 32> maxSGPRsForWaves;
+  SmallVector<unsigned, 32> maxVGPRsForWaves;
+  std::optional<unsigned> totalVGPRLimit;
   unsigned numSGPR = 0;
   unsigned numVGPR = 0;
   unsigned numAGPR = 0;
+  unsigned maxWavesPerEU = 0;
+  unsigned targetWaves = 0;
+  bool agprCountsAgainstVGPRs = false;
+};
+
+struct AllocatedRegisterCounts {
+  unsigned sgpr = 0;
+  unsigned vgpr = 0;
+  unsigned agpr = 0;
 };
 
 static constexpr llvm::StringLiteral kPressureClassAttr =
@@ -58,6 +70,8 @@ static constexpr llvm::StringLiteral kPressureReservedAttr =
     "waveamdmachine.regalloc_pressure_reserved";
 static constexpr llvm::StringLiteral kAGPRCandidatesAttr =
     "waveamdmachine.regalloc_agpr_candidates";
+static constexpr llvm::StringLiteral kTargetWavesAttr =
+    "waveamdmachine.target_waves";
 
 static void setRegPhys(Value v, unsigned phys) {
   waveamdmachine::RegType rt = cast<waveamdmachine::RegType>(v.getType());
@@ -101,6 +115,32 @@ static unsigned countVirtualVGPRValues(Operation *op) {
   return count;
 }
 
+static Attribute findTargetWavesAttr(Operation *op) {
+  for (Operation *cur = op; cur; cur = cur->getParentOp())
+    if (Attribute attr = cur->getAttr(kTargetWavesAttr))
+      return attr;
+  return {};
+}
+
+static FailureOr<unsigned> getTargetWaves(func::FuncOp func,
+                                          const RegisterLimits &limits) {
+  Attribute attr = findTargetWavesAttr(func);
+  if (!attr)
+    return 0;
+  auto intAttr = dyn_cast<IntegerAttr>(attr);
+  if (!intAttr)
+    return func.emitError("waveamd-reg-alloc ")
+           << kTargetWavesAttr << " must be an integer attribute";
+  int64_t value = intAttr.getInt();
+  if (value <= 0)
+    return func.emitError("waveamd-reg-alloc ")
+           << kTargetWavesAttr << " must be positive";
+  if (static_cast<uint64_t>(value) > limits.maxWavesPerEU)
+    return func.emitError("waveamd-reg-alloc ")
+           << kTargetWavesAttr << " exceeds target wave capacity";
+  return static_cast<unsigned>(value);
+}
+
 static FailureOr<RegisterLimits> getRegisterLimits(ModuleOp module) {
   if (!module->hasAttr("waveamdmachine.target"))
     return module.emitError(
@@ -114,6 +154,10 @@ static FailureOr<RegisterLimits> getRegisterLimits(ModuleOp module) {
   limits.numSGPR = targetLimits->addressableSGPRs;
   limits.numVGPR = targetLimits->addressableVGPRs;
   limits.numAGPR = targetLimits->addressableAGPRs;
+  limits.maxWavesPerEU = targetLimits->maxWavesPerEU;
+  limits.maxSGPRsForWaves = targetLimits->maxSGPRsForWaves;
+  limits.maxVGPRsForWaves = targetLimits->maxVGPRsForWaves;
+  limits.agprCountsAgainstVGPRs = targetLimits->agprCountsAgainstVGPRs;
   return limits;
 }
 
@@ -197,6 +241,29 @@ struct WaveAMDRegAllocPass
           std::min(limits.numSGPR, static_cast<unsigned>(sgprLimitOverride));
   }
 
+  static LogicalResult applyTargetWavesLimits(func::FuncOp func,
+                                              RegisterLimits &limits) {
+    FailureOr<unsigned> targetWaves = getTargetWaves(func, limits);
+    if (failed(targetWaves))
+      return failure();
+    if (*targetWaves == 0)
+      return success();
+
+    unsigned vgprBudget = wave::getMaxWaveAMDRegisterBudgetForWaves(
+        limits.maxVGPRsForWaves, *targetWaves);
+    unsigned sgprBudget = wave::getMaxWaveAMDRegisterBudgetForWaves(
+        limits.maxSGPRsForWaves, *targetWaves);
+    if (vgprBudget == 0 || sgprBudget == 0)
+      return func.emitError("waveamd-reg-alloc ")
+             << kTargetWavesAttr << " has no register budget for this target";
+
+    limits.totalVGPRLimit = vgprBudget;
+    limits.numVGPR = std::min(limits.numVGPR, vgprBudget);
+    limits.numSGPR = std::min(limits.numSGPR, sgprBudget);
+    limits.targetWaves = *targetWaves;
+    return success();
+  }
+
   SmallVector<func::FuncOp> collectFunctions() {
     SmallVector<func::FuncOp> funcs;
     getOperation().walk([&](func::FuncOp f) {
@@ -210,6 +277,8 @@ struct WaveAMDRegAllocPass
                                 Builder &builder, int64_t &overflowedCount) {
     bool overflow = false;
     std::optional<RegisterPressurePoint> pressure;
+    if (failed(applyTargetWavesLimits(func, limits)))
+      return failure();
     clearOverflowAttrs(func);
     if (failed(
             allocateFunction(func, limits, markOverflow, overflow, pressure)))
@@ -349,14 +418,15 @@ struct WaveAMDRegAllocPass
       return allocateFunctionWithAGPRBankSpill(func, limits, softFail, overflow,
                                                pressure);
     return allocateFunctionAttempt(func, limits, softFail, overflow, pressure,
-                                   rankAgprCandidates);
+                                   rankAgprCandidates,
+                                   /*enforceFinalBudgets=*/true);
   }
 
   LogicalResult
   allocateFunctionAttempt(func::FuncOp func, RegisterLimits limits,
                           bool softFail, bool &overflow,
                           std::optional<RegisterPressurePoint> &pressure,
-                          bool buildAgprCandidates) {
+                          bool buildAgprCandidates, bool enforceFinalBudgets) {
     FailureOr<wave::WaveAMDLiveIntervalBuildResult> builtIntervals =
         wave::buildWaveAMDLiveIntervals(func);
     if (failed(builtIntervals))
@@ -371,9 +441,108 @@ struct WaveAMDRegAllocPass
     if (limits.numAGPR == 0 && hasLiveIntervals(intervals.agprs))
       return func.emitError(
           "waveamd-reg-alloc AGPR registers require target with AGPR support");
-    return allocateRegisterClasses(
-        func, intervals, limits, sgprReserved, vgprReserved, softFail, overflow,
-        pressure, builtIntervals->positions, buildAgprCandidates);
+    if (failed(allocateRegisterClasses(func, intervals, limits, sgprReserved,
+                                       vgprReserved, softFail, overflow,
+                                       pressure, builtIntervals->positions,
+                                       buildAgprCandidates)))
+      return failure();
+    if (overflow || !enforceFinalBudgets)
+      return success();
+    return enforceAllocatedRegisterBudgets(func, limits, softFail, overflow);
+  }
+
+  static unsigned allocatedRegCount(ArrayRef<wave::WaveAMDLiveInterval> ivs) {
+    unsigned count = 0;
+    for (const wave::WaveAMDLiveInterval &interval : ivs) {
+      for (Value value : interval.values) {
+        auto type = dyn_cast<waveamdmachine::RegType>(value.getType());
+        if (!type || type.getIndex() < 0)
+          continue;
+        unsigned end = static_cast<unsigned>(type.getIndex()) +
+                       static_cast<unsigned>(type.getWidth());
+        count = std::max(count, end);
+      }
+    }
+    return count;
+  }
+
+  static FailureOr<AllocatedRegisterCounts>
+  getAllocatedRegisterCounts(func::FuncOp func) {
+    FailureOr<wave::WaveAMDLiveIntervalBuildResult> builtIntervals =
+        wave::buildAllocatedWaveAMDLiveIntervals(func);
+    if (failed(builtIntervals))
+      return failure();
+
+    AllocatedRegisterCounts counts;
+    counts.sgpr = std::max(allocatedRegCount(builtIntervals->intervals.sgprs),
+                           wave::getWaveAMDReservedSGPRs(func));
+    counts.vgpr = std::max(allocatedRegCount(builtIntervals->intervals.vgprs),
+                           wave::getWaveAMDReservedVGPRs(func));
+    counts.agpr = allocatedRegCount(builtIntervals->intervals.agprs);
+    return counts;
+  }
+
+  static unsigned alignUp(unsigned value, unsigned granule) {
+    return ((value + granule - 1) / granule) * granule;
+  }
+
+  static unsigned getTotalVGPRCount(const RegisterLimits &limits,
+                                    AllocatedRegisterCounts counts) {
+    if (limits.agprCountsAgainstVGPRs && counts.agpr != 0)
+      return alignUp(counts.vgpr, 4) + counts.agpr;
+    return std::max(counts.vgpr, counts.agpr);
+  }
+
+  static LogicalResult enforceSGPRBudget(func::FuncOp func,
+                                         const RegisterLimits &limits,
+                                         AllocatedRegisterCounts counts,
+                                         bool softFail, bool &overflow) {
+    if (counts.sgpr <= limits.numSGPR)
+      return success();
+    if (softFail) {
+      overflow = true;
+      return success();
+    }
+    return func.emitError()
+           << "waveamd-reg-alloc SGPR count exceeds register budget (count="
+           << counts.sgpr << ", limit=" << limits.numSGPR
+           << ", target_waves=" << limits.targetWaves << ")";
+  }
+
+  static LogicalResult enforceTotalVGPRBudget(func::FuncOp func,
+                                              const RegisterLimits &limits,
+                                              AllocatedRegisterCounts counts,
+                                              bool softFail, bool &overflow) {
+    if (!limits.totalVGPRLimit)
+      return success();
+    unsigned total = getTotalVGPRCount(limits, counts);
+    if (total <= *limits.totalVGPRLimit)
+      return success();
+    if (softFail) {
+      overflow = true;
+      return success();
+    }
+    return func.emitError()
+           << "waveamd-reg-alloc total VGPR count exceeds target-waves budget "
+              "(total="
+           << total << ", limit=" << *limits.totalVGPRLimit
+           << ", vgpr=" << counts.vgpr << ", agpr=" << counts.agpr
+           << ", target_waves=" << limits.targetWaves << ")";
+  }
+
+  static LogicalResult
+  enforceAllocatedRegisterBudgets(func::FuncOp func,
+                                  const RegisterLimits &limits, bool softFail,
+                                  bool &overflow) {
+    FailureOr<AllocatedRegisterCounts> counts =
+        getAllocatedRegisterCounts(func);
+    if (failed(counts))
+      return failure();
+    if (failed(enforceSGPRBudget(func, limits, *counts, softFail, overflow)))
+      return failure();
+    if (overflow)
+      return success();
+    return enforceTotalVGPRBudget(func, limits, *counts, softFail, overflow);
   }
 
   LogicalResult allocateFunctionWithAGPRBankSpill(
@@ -385,10 +554,12 @@ struct WaveAMDRegAllocPass
       std::optional<RegisterPressurePoint> attemptPressure;
       if (failed(allocateFunctionAttempt(func, limits, /*softFail=*/true,
                                          attemptOverflow, attemptPressure,
-                                         /*buildAgprCandidates=*/true)))
+                                         /*buildAgprCandidates=*/true,
+                                         /*enforceFinalBudgets=*/false)))
         return failure();
       if (!attemptOverflow)
-        return success();
+        return enforceAllocatedRegisterBudgets(func, limits, softFail,
+                                               overflow);
       pressure = std::move(attemptPressure);
       if (!pressure || pressure->regClass != "VGPR" ||
           pressure->agprCandidates.empty())

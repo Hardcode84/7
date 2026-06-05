@@ -242,6 +242,7 @@ FailureOr<WaveAMDRegisterLimits> getWaveAMDRegisterLimits(Operation *op) {
       sti->get(), /*DynamicVGPRBlockSize=*/0);
   limits.agprAllocGranule = limits.vgprAllocGranule;
   limits.maxWavesPerEU = llvm::AMDGPU::IsaInfo::getMaxWavesPerEU(sti->get());
+  limits.agprCountsAgainstVGPRs = llvm::AMDGPU::isGFX90A(**sti);
   limits.maxSGPRsForWaves.assign(limits.maxWavesPerEU + 1, 0);
   limits.maxVGPRsForWaves.assign(limits.maxWavesPerEU + 1, 0);
   for (unsigned waves = 1; waves <= limits.maxWavesPerEU; ++waves) {

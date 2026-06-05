@@ -5,7 +5,8 @@
 // RUN:   | wave-translate --wave-to-amdgpu-asm - \
 // RUN:   | llvm-mc -triple=amdgcn-amd-amdhsa -mcpu=gfx950 -filetype=obj -o /dev/null
 
-module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950",
+                   waveamdmachine.target_waves = 4 : i64} {
 
 // ASM-LABEL: agpr_bank_spill_codegen:
 // ASM: v_mfma_f32_16x16x32_f16 {{a\[[0-9]+:[0-9]+\]}}, {{a\[[0-9]+:[0-9]+\]}}, {{[av]\[[0-9]+:[0-9]+\]}}, {{a\[[0-9]+:[0-9]+\]}}

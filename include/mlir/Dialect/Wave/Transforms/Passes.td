@@ -353,10 +353,9 @@ def WaveAMDRegAlloc
     pressure point: register class, position, requested interval,
     overlapping live intervals, and estimated dwords of relief needed.
 
-    `vgpr-limit` / `sgpr-limit` override the per-class budget below
-    the subtarget default; -1 keeps the target's number. Test-only
-    knob (and a foot-gun in production: shrinking below what the
-    pipeline needs guarantees overflow).
+    `waveamdmachine.target_waves` caps SGPR/VGPR allocation with the
+    subtarget occupancy tables. `vgpr-limit` / `sgpr-limit` can still
+    shrink those caps for tests; -1 keeps the derived budget.
   }];
   let dependentDialects = [
     "waveamdmachine::WaveAMDMachineDialect"
