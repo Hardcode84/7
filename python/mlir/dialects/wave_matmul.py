@@ -1401,8 +1401,8 @@ def _stage_mxfp4_scale_tiles(
     if coords.a_scale_base is None or coords.b_scale_base is None:
         raise ValueError("MXFP4 scale buffers are required")
     layout = _mxfp4_scale_layout(cfg, coords, step)
-    load_type = dsl.simd_type(dsl.vector_type(4, dsl.i8()), width=cfg.mma.wave_size)
     store_type = dsl.simd_type(dsl.i8(), width=cfg.mma.wave_size)
+    load_type = store_type
     lds = _scale_lds_base(bld, cfg, lds_offset)
     dep = bld.barrier(after) if after is not None else None
     tokens: list[dsl.Value] = []
@@ -1415,9 +1415,8 @@ def _stage_mxfp4_scale_tiles(
             tile * 512 + layout.lane_scale_group * 128 + layout.lane_mod16,
             bindings=layout.bindings,
         )
-        low = wave.ExtractOp(store_type, raw, 0).result
         store_dep = load_token if dep is None else bld.join(dep, load_token)
-        tokens.append(bld.store(low, bld.ptr_add(lds, lds_off), after=store_dep))
+        tokens.append(bld.store(raw, bld.ptr_add(lds, lds_off), after=store_dep))
 
     for i in range(cfg.wave_m_tiles):
         scale_tile = layout.m_wave * cfg.wave_m_tiles + i
