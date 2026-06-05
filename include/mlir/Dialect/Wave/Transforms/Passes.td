@@ -70,6 +70,18 @@ def WaveCombinePointerOffsets : Pass<"wave-combine-pointer-offsets"> {
   ];
 }
 
+def WaveGenerateIndexExprs : Pass<"wave-generate-index-exprs"> {
+  let summary = "Generate Wave index expressions for pointer offset arithmetic";
+  let description = [{
+    Promotes supported index-typed `wave.binary` arithmetic in address contexts
+    to `wave.index_expr`. The pass rewrites `wave.ptr_add` offsets and
+    `wave.index_expr` bindings, leaving unrelated arithmetic in SSA form.
+  }];
+  let dependentDialects = [
+    "wave::WaveDialect"
+  ];
+}
+
 def WaveNormalizePointerOffsets : Pass<"wave-normalize-pointer-offsets"> {
   let summary = "Normalize Wave typed pointers to byte-addressed pointers";
   let description = [{

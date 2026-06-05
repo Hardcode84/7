@@ -112,16 +112,25 @@ static bool rewriteIndexExpr(IRRewriter &rewriter, IndexExprOp op,
   return true;
 }
 
+static FailureOr<sym::ExprHandle>
+expandAndSimplify(sym::Store &store, sym::ExprHandle expr,
+                  ArrayRef<sym::PredHandle> assumptions) {
+  if (FailureOr<sym::ExprHandle> expanded = sym::expandExpr(store, expr);
+      succeeded(expanded))
+    expr = *expanded;
+  if (assumptions.empty())
+    return sym::simplifyExpr(store, expr);
+  return sym::simplifyExpr(store, expr, assumptions);
+}
+
 static FailureOr<bool> simplifyIndexExpr(IRRewriter &rewriter, IndexExprOp op,
                                          DataFlowSolver &solver,
                                          sym::Store &store) {
   SmallVector<sym::PredHandle> assumptions =
       collectIndexExprAssumptions(op, solver, store);
-  if (assumptions.empty())
-    return false;
 
   FailureOr<sym::ExprHandle> simplified =
-      sym::simplifyExpr(store, op.getExpr().getValue(), assumptions);
+      expandAndSimplify(store, op.getExpr().getValue(), assumptions);
   if (failed(simplified))
     return op.emitError("failed to range-simplify wave.index_expr");
 

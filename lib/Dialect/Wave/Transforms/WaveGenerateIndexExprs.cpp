@@ -1,0 +1,654 @@
+//===- WaveGenerateIndexExprs.cpp - Symbolize address math ------*- C++ -*-===//
+//
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+//
+//===----------------------------------------------------------------------===//
+
+#include "mlir/Dialect/Wave/Transforms/Passes.h"
+
+#include "mlir/Dialect/Utils/StaticValueUtils.h"
+#include "mlir/Dialect/Wave/IR/Wave.h"
+#include "mlir/IR/PatternMatch.h"
+#include "mlir/Transforms/GreedyPatternRewriteDriver.h"
+#include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/DenseSet.h"
+#include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/StringMap.h"
+#include "llvm/Support/FormatVariadic.h"
+
+#include <cassert>
+#include <limits>
+#include <optional>
+#include <string>
+
+namespace mlir::wave {
+#define GEN_PASS_DEF_WAVEGENERATEINDEXEXPRS
+#include "mlir/Dialect/Wave/Transforms/Passes.h.inc"
+} // namespace mlir::wave
+
+using namespace mlir;
+using namespace mlir::wave;
+
+namespace {
+
+static constexpr unsigned kMaxSymbolicValueDepth = 64;
+
+struct IndexExprBinding {
+  std::string name;
+  Value value;
+};
+
+struct BindingState {
+  SmallVector<IndexExprBinding> bindings;
+  llvm::DenseMap<Value, StringRef> byValue;
+  llvm::StringMap<Value> reserved;
+  llvm::StringMap<Value> emitted;
+};
+
+static StringRef symbolName(const SymbolicOffsetBinding &binding) {
+  StringRef name = sym::ExprView(binding.name).getSymbolName();
+  assert(!name.empty() && "symbolic offset binding must have a name");
+  return name;
+}
+
+static FailureOr<sym::ExprHandle> symbolExpr(sym::Store &store,
+                                             StringRef name) {
+  return sym::composeExprSym(store, name);
+}
+
+static std::string freshBindingName(StringRef stem,
+                                    const llvm::StringMap<Value> &reserved) {
+  for (unsigned index :
+       llvm::seq<unsigned>(0, std::numeric_limits<unsigned>::max())) {
+    std::string candidate = llvm::formatv("{0}_{1}", stem, index).str();
+    if (!reserved.contains(candidate))
+      return candidate;
+  }
+  llvm_unreachable("exhausted symbolic binding names");
+}
+
+static StringRef reserveBindingName(StringRef requested, Value value,
+                                    BindingState &state) {
+  auto valueIt = state.byValue.find(value);
+  if (valueIt != state.byValue.end())
+    return valueIt->second;
+
+  StringRef selected = requested;
+  auto nameIt = state.reserved.find(requested);
+  if (nameIt != state.reserved.end() && nameIt->second != value) {
+    std::string fresh = freshBindingName(requested, state.reserved);
+    auto [it, inserted] = state.reserved.try_emplace(fresh, value);
+    (void)inserted;
+    state.byValue[value] = it->getKey();
+    return it->getKey();
+  }
+
+  auto [it, inserted] = state.reserved.try_emplace(selected, value);
+  if (!inserted)
+    it->second = value;
+  state.byValue[value] = it->getKey();
+  return it->getKey();
+}
+
+static LogicalResult appendBinding(BindingState &state, StringRef name,
+                                   Value value) {
+  auto [it, inserted] = state.emitted.try_emplace(name, value);
+  if (!inserted && it->second != value)
+    return failure();
+  if (!inserted)
+    return success();
+  state.bindings.push_back({name.str(), value});
+  return success();
+}
+
+static FailureOr<sym::ExprHandle>
+remapSymbolicOffset(sym::Store &store, const SymbolicOffset &offset,
+                    BindingState &state) {
+  SmallVector<sym::ExprSubstitution> substitutions;
+  for (const SymbolicOffsetBinding &binding : offset.bindings) {
+    StringRef oldName = symbolName(binding);
+    StringRef newName = reserveBindingName(oldName, binding.value, state);
+    if (failed(appendBinding(state, newName, binding.value)))
+      return failure();
+    if (newName == oldName)
+      continue;
+
+    FailureOr<sym::ExprHandle> target = symbolExpr(store, oldName);
+    FailureOr<sym::ExprHandle> replacement = symbolExpr(store, newName);
+    if (failed(target) || failed(replacement))
+      return failure();
+    substitutions.push_back({*target, *replacement});
+  }
+
+  if (substitutions.empty())
+    return offset.expr;
+  return sym::substituteExpr(store, offset.expr, substitutions);
+}
+
+static void appendNameRefs(ArrayRef<IndexExprBinding> bindings,
+                           SmallVectorImpl<StringRef> &names) {
+  for (const IndexExprBinding &binding : bindings)
+    names.push_back(binding.name);
+}
+
+static void appendValues(ArrayRef<IndexExprBinding> bindings,
+                         SmallVectorImpl<Value> &values) {
+  for (const IndexExprBinding &binding : bindings)
+    values.push_back(binding.value);
+}
+
+static void collectFreeSymbols(sym::ExprHandle expr,
+                               llvm::DenseSet<StringRef> &symbols) {
+  sym::walkSymbolNames(expr, [&](StringRef name) { symbols.insert(name); });
+}
+
+static SmallVector<IndexExprBinding>
+collectLiveBindings(sym::ExprHandle expr, ArrayRef<IndexExprBinding> bindings) {
+  llvm::DenseSet<StringRef> freeSymbols;
+  collectFreeSymbols(expr, freeSymbols);
+
+  SmallVector<IndexExprBinding> liveBindings;
+  for (const IndexExprBinding &binding : bindings)
+    if (freeSymbols.contains(binding.name))
+      liveBindings.push_back(binding);
+  return liveBindings;
+}
+
+static SmallVector<SymbolicOffsetBinding>
+collectLiveBindings(sym::ExprHandle expr,
+                    ArrayRef<SymbolicOffsetBinding> bindings) {
+  llvm::DenseSet<StringRef> freeSymbols;
+  collectFreeSymbols(expr, freeSymbols);
+
+  SmallVector<SymbolicOffsetBinding> liveBindings;
+  for (const SymbolicOffsetBinding &binding : bindings)
+    if (freeSymbols.contains(symbolName(binding)))
+      liveBindings.push_back(binding);
+  return liveBindings;
+}
+
+static bool isIndexValueType(Type type) {
+  if (type.isIndex())
+    return true;
+  if (auto simdType = dyn_cast<SimdType>(type))
+    return simdType.getElementType().isIndex();
+  return false;
+}
+
+static bool isIndexBinaryOp(BinaryOp op) {
+  return isIndexValueType(op.getResult().getType()) &&
+         isIndexValueType(op.getLhs().getType()) &&
+         isIndexValueType(op.getRhs().getType());
+}
+
+class SymbolicValueBuilder {
+public:
+  explicit SymbolicValueBuilder(WaveDialect &dialect)
+      : store(dialect.getSymbolStore()) {}
+
+  FailureOr<std::optional<SymbolicOffset>> build(Value value) {
+    if (!hasSymbolicRoot(value))
+      return std::optional<SymbolicOffset>{};
+
+    bool skip = false;
+    FailureOr<sym::ExprHandle> expr = buildExpr(value, skip, false);
+    if (skip)
+      return std::optional<SymbolicOffset>{};
+    if (failed(expr))
+      return failure();
+    FailureOr<sym::ExprHandle> simplified = sym::simplifyExpr(store, *expr);
+    if (failed(simplified))
+      return failure();
+    offset.expr = *simplified;
+    return std::optional<SymbolicOffset>{std::move(offset)};
+  }
+
+private:
+  static bool hasSymbolicRoot(Value value) {
+    if (BinaryOp binary = value.getDefiningOp<BinaryOp>())
+      return isIndexBinaryOp(binary);
+    if (SplatOp splat = value.getDefiningOp<SplatOp>())
+      return hasSymbolicRoot(splat.getSource());
+    return false;
+  }
+
+  FailureOr<sym::ExprHandle> buildExpr(Value value, bool &skip, bool allowLeaf,
+                                       unsigned depth = 0) {
+    if (depth > kMaxSymbolicValueDepth) {
+      skip = true;
+      return failure();
+    }
+    if (std::optional<int64_t> constant = getConstantIntValue(value))
+      return sym::composeExprInt(store, *constant);
+    if (IndexExprOp indexExpr = value.getDefiningOp<IndexExprOp>())
+      return buildIndexExpr(indexExpr);
+    if (SplatOp splat = value.getDefiningOp<SplatOp>())
+      return buildExpr(splat.getSource(), skip, allowLeaf, depth + 1);
+    if (BinaryOp binary = value.getDefiningOp<BinaryOp>())
+      return buildBinary(binary, skip, depth + 1);
+    if (allowLeaf)
+      return bindSymbol(value, skip);
+    skip = true;
+    return failure();
+  }
+
+  FailureOr<sym::ExprHandle> buildIndexExpr(IndexExprOp op) {
+    FailureOr<SymbolicOffset> symbolic = getIndexExprSymbolicOffset(op);
+    if (failed(symbolic))
+      return failure();
+    return appendOffset(*symbolic);
+  }
+
+  FailureOr<sym::ExprHandle> buildBinary(BinaryOp op, bool &skip,
+                                         unsigned depth) {
+    if (!isIndexBinaryOp(op)) {
+      skip = true;
+      return failure();
+    }
+    if (op.getKind() == BinaryKind::ShLI)
+      return buildShift(op, skip, depth);
+
+    std::optional<sym::ExprBinaryOp> kind = convertBinaryKind(op.getKind());
+    if (!kind) {
+      skip = true;
+      return failure();
+    }
+    FailureOr<sym::ExprHandle> lhs = buildExpr(op.getLhs(), skip, true, depth);
+    if (skip || failed(lhs))
+      return failure();
+    FailureOr<sym::ExprHandle> rhs = buildExpr(op.getRhs(), skip, true, depth);
+    if (skip || failed(rhs))
+      return failure();
+    return sym::composeExprBinary(store, *lhs, *kind, *rhs);
+  }
+
+  static std::optional<sym::ExprBinaryOp> convertBinaryKind(BinaryKind kind) {
+    switch (kind) {
+    case BinaryKind::AddI:
+      return sym::ExprBinaryOp::Add;
+    case BinaryKind::SubI:
+      return sym::ExprBinaryOp::Sub;
+    case BinaryKind::MulI:
+      return sym::ExprBinaryOp::Mul;
+    case BinaryKind::XOrI:
+      return sym::ExprBinaryOp::Xor;
+    default:
+      return std::nullopt;
+    }
+  }
+
+  FailureOr<sym::ExprHandle> buildShift(BinaryOp op, bool &skip,
+                                        unsigned depth) {
+    std::optional<int64_t> shift = getConstantIntValue(op.getRhs());
+    if (!shift || *shift < 0 || *shift >= 63) {
+      skip = true;
+      return failure();
+    }
+    FailureOr<sym::ExprHandle> lhs = buildExpr(op.getLhs(), skip, true, depth);
+    if (skip || failed(lhs))
+      return failure();
+    FailureOr<sym::ExprHandle> scale =
+        sym::composeExprInt(store, int64_t{1} << *shift);
+    if (failed(scale))
+      return failure();
+    return sym::composeExprBinary(store, *lhs, sym::ExprBinaryOp::Mul, *scale);
+  }
+
+  FailureOr<sym::ExprHandle> bindSymbol(Value value, bool &skip) {
+    std::optional<SymbolicOffsetBindingKind> kind =
+        classifyBindingType(value.getType());
+    if (!kind) {
+      skip = true;
+      return failure();
+    }
+
+    auto valueIt = nameByValue.find(value);
+    if (valueIt != nameByValue.end())
+      return sym::composeExprSym(store, valueIt->second);
+
+    std::string name = freshName();
+    FailureOr<sym::ExprHandle> expr = sym::composeExprSym(store, name);
+    if (failed(expr))
+      return failure();
+    if (*kind == SymbolicOffsetBindingKind::Lane)
+      offset.laneWidth =
+          std::max(offset.laneWidth,
+                   unsigned(cast<SimdType>(value.getType()).getWidth()));
+    auto [it, inserted] = bindingByName.try_emplace(name, value);
+    (void)inserted;
+    nameByValue[value] = it->getKey();
+    offset.bindings.push_back({*expr, value, *kind});
+    return *expr;
+  }
+
+  static std::optional<SymbolicOffsetBindingKind>
+  classifyBindingType(Type type) {
+    if (type.isIndex())
+      return SymbolicOffsetBindingKind::Uniform;
+    if (auto intType = dyn_cast<IntegerType>(type)) {
+      if (!intType.isSignless())
+        return std::nullopt;
+      return SymbolicOffsetBindingKind::Uniform;
+    }
+    if (auto simdType = dyn_cast<SimdType>(type)) {
+      Type element = simdType.getElementType();
+      if (element.isIndex() || element.isInteger(32))
+        return SymbolicOffsetBindingKind::Lane;
+    }
+    return std::nullopt;
+  }
+
+  FailureOr<sym::ExprHandle> appendOffset(const SymbolicOffset &symbolic) {
+    SmallVector<sym::ExprSubstitution> substitutions;
+    for (const SymbolicOffsetBinding &binding : symbolic.bindings) {
+      StringRef name = symbolName(binding);
+      auto valueIt = nameByValue.find(binding.value);
+      if (valueIt != nameByValue.end()) {
+        FailureOr<sym::ExprHandle> replacement =
+            sym::composeExprSym(store, valueIt->second);
+        if (failed(replacement))
+          return failure();
+        substitutions.push_back({binding.name, *replacement});
+        continue;
+      }
+      auto existing = bindingByName.find(name);
+      if (existing == bindingByName.end()) {
+        auto [it, inserted] = bindingByName.try_emplace(name, binding.value);
+        (void)inserted;
+        nameByValue[binding.value] = it->getKey();
+        offset.bindings.push_back(binding);
+        offset.laneWidth = std::max(offset.laneWidth, symbolic.laneWidth);
+        continue;
+      }
+      if (existing->second == binding.value)
+        continue;
+
+      std::string fresh = freshName(name);
+      auto [freshIt, inserted] =
+          bindingByName.try_emplace(fresh, binding.value);
+      (void)inserted;
+      nameByValue[binding.value] = freshIt->getKey();
+      FailureOr<sym::ExprHandle> replacement =
+          sym::composeExprSym(store, freshIt->getKey());
+      if (failed(replacement))
+        return failure();
+      offset.bindings.push_back({*replacement, binding.value, binding.kind});
+      offset.laneWidth = std::max(offset.laneWidth, symbolic.laneWidth);
+      substitutions.push_back({binding.name, *replacement});
+    }
+
+    if (substitutions.empty())
+      return symbolic.expr;
+    return sym::substituteExpr(store, symbolic.expr, substitutions);
+  }
+
+  std::string freshName(StringRef stem = "raw") {
+    for (;;) {
+      std::string name = llvm::formatv("{0}{1}", stem, nextRawSymbol++).str();
+      if (!bindingByName.contains(name))
+        return name;
+    }
+  }
+
+  SymbolicOffset offset;
+  llvm::DenseMap<Value, StringRef> nameByValue;
+  llvm::StringMap<Value> bindingByName;
+  sym::Store &store;
+  unsigned nextRawSymbol = 0;
+};
+
+static IndexExprOp createIndexExpr(OpBuilder &builder, Location loc,
+                                   MLIRContext *ctx,
+                                   const SymbolicOffset &offset) {
+  SmallVector<SymbolicOffsetBinding> liveBindings =
+      collectLiveBindings(offset.expr, offset.bindings);
+  SmallVector<StringRef> nameRefs;
+  SmallVector<Value> values;
+  for (const SymbolicOffsetBinding &binding : liveBindings) {
+    nameRefs.push_back(symbolName(binding));
+    values.push_back(binding.value);
+  }
+
+  Type resultType = getIndexExprResultType(ctx, values);
+  return IndexExprOp::create(builder, loc, resultType,
+                             ExprAttr::get(ctx, offset.expr),
+                             builder.getStrArrayAttr(nameRefs), values);
+}
+
+static IndexExprOp createIndexExpr(OpBuilder &builder, Location loc,
+                                   MLIRContext *ctx, sym::ExprHandle expr,
+                                   ArrayRef<IndexExprBinding> bindings) {
+  SmallVector<StringRef> nameRefs;
+  SmallVector<Value> values;
+  appendNameRefs(bindings, nameRefs);
+  appendValues(bindings, values);
+
+  Type resultType = getIndexExprResultType(ctx, values);
+  return IndexExprOp::create(builder, loc, resultType, ExprAttr::get(ctx, expr),
+                             builder.getStrArrayAttr(nameRefs), values);
+}
+
+static std::optional<int64_t> getOffsetWidth(Type type) {
+  if (type.isIndex())
+    return int64_t{0};
+  if (isa<IntegerType>(type))
+    return int64_t{0};
+  if (auto simd = dyn_cast<SimdType>(type)) {
+    Type element = simd.getElementType();
+    if (element.isIndex() || element.isInteger(32))
+      return simd.getWidth();
+  }
+  return std::nullopt;
+}
+
+static std::optional<int64_t> getPointerWidth(Type type) {
+  if (isa<PtrType>(type))
+    return int64_t{0};
+  if (auto simd = dyn_cast<SimdType>(type))
+    if (isa<PtrType>(simd.getElementType()))
+      return simd.getWidth();
+  return std::nullopt;
+}
+
+static bool preservesPtrAddResult(PtrAddOp op, Type offsetType) {
+  std::optional<int64_t> baseWidth = getPointerWidth(op.getBase().getType());
+  std::optional<int64_t> offsetWidth = getOffsetWidth(offsetType);
+  if (!baseWidth || !offsetWidth)
+    return false;
+  int64_t resultWidth = std::max(*baseWidth, *offsetWidth);
+  if (resultWidth == 0)
+    return isa<PtrType>(op.getResult().getType());
+  auto result = dyn_cast<SimdType>(op.getResult().getType());
+  return result && result.getWidth() == resultWidth;
+}
+
+static Type getIndexExprType(MLIRContext *ctx,
+                             ArrayRef<IndexExprBinding> bindings) {
+  SmallVector<Value> values;
+  appendValues(bindings, values);
+  return getIndexExprResultType(ctx, values);
+}
+
+static Type getIndexExprType(MLIRContext *ctx, const SymbolicOffset &offset) {
+  SmallVector<Value> values;
+  for (const SymbolicOffsetBinding &binding :
+       collectLiveBindings(offset.expr, offset.bindings))
+    values.push_back(binding.value);
+  return getIndexExprResultType(ctx, values);
+}
+
+static FailureOr<bool> rewritePtrAdd(PatternRewriter &rewriter, PtrAddOp op,
+                                     WaveDialect &dialect) {
+  SymbolicValueBuilder builder(dialect);
+  FailureOr<std::optional<SymbolicOffset>> offset =
+      builder.build(op.getOffset());
+  if (failed(offset))
+    return op.emitError("failed to generate wave.index_expr offset");
+  if (!*offset)
+    return false;
+
+  Type indexType = getIndexExprType(op.getContext(), **offset);
+  if (!preservesPtrAddResult(op, indexType))
+    return false;
+
+  rewriter.setInsertionPoint(op);
+  IndexExprOp index =
+      createIndexExpr(rewriter, op.getLoc(), op.getContext(), **offset);
+  rewriter.modifyOpInPlace(
+      op, [&] { op.getOffsetMutable().assign(index.getResult()); });
+  return true;
+}
+
+static void seedBindingNames(IndexExprOp op, BindingState &state) {
+  for (auto [nameAttr, value] : llvm::zip(op.getNames(), op.getBindings())) {
+    StringRef name = cast<StringAttr>(nameAttr).getValue();
+    state.reserved[name] = value;
+  }
+  for (auto [nameAttr, value] : llvm::zip(op.getNames(), op.getBindings())) {
+    StringRef name = cast<StringAttr>(nameAttr).getValue();
+    llvm::StringMap<Value>::iterator it = state.reserved.find(name);
+    state.byValue.try_emplace(value, it->getKey());
+  }
+}
+
+static FailureOr<bool> collectGeneratedBindingRewrite(
+    IndexExprOp op, WaveDialect &dialect, BindingState &state, StringRef name,
+    Value value, SmallVectorImpl<sym::ExprSubstitution> &substitutions) {
+  SymbolicValueBuilder builder(dialect);
+  FailureOr<std::optional<SymbolicOffset>> symbolic = builder.build(value);
+  if (failed(symbolic))
+    return op.emitError("failed to generate wave.index_expr binding");
+  if (!*symbolic) {
+    if (failed(appendBinding(state, name, value)))
+      return failure();
+    return false;
+  }
+
+  sym::Store &store = dialect.getSymbolStore();
+  FailureOr<sym::ExprHandle> target = symbolExpr(store, name);
+  FailureOr<sym::ExprHandle> replacement =
+      remapSymbolicOffset(store, **symbolic, state);
+  if (failed(target) || failed(replacement))
+    return failure();
+  substitutions.push_back({*target, *replacement});
+  return true;
+}
+
+static FailureOr<sym::ExprHandle>
+substituteAndSimplifyGenerated(IndexExprOp op, sym::Store &store,
+                               ArrayRef<sym::ExprSubstitution> substitutions) {
+  FailureOr<sym::ExprHandle> substituted =
+      sym::substituteExpr(store, op.getExpr().getValue(), substitutions);
+  if (failed(substituted))
+    return op.emitError("failed to substitute generated wave.index_expr");
+  FailureOr<sym::ExprHandle> simplified =
+      sym::simplifyExpr(store, *substituted);
+  if (failed(simplified))
+    return op.emitError("failed to simplify generated wave.index_expr");
+  return *simplified;
+}
+
+static FailureOr<bool> rewriteIndexExpr(PatternRewriter &rewriter,
+                                        IndexExprOp op, WaveDialect &dialect) {
+  sym::Store &store = dialect.getSymbolStore();
+  BindingState state;
+  seedBindingNames(op, state);
+
+  SmallVector<sym::ExprSubstitution> substitutions;
+  bool changed = false;
+  for (auto [nameAttr, value] : llvm::zip(op.getNames(), op.getBindings())) {
+    StringRef name = cast<StringAttr>(nameAttr).getValue();
+    FailureOr<bool> bindingChanged = collectGeneratedBindingRewrite(
+        op, dialect, state, name, value, substitutions);
+    if (failed(bindingChanged))
+      return failure();
+    changed |= *bindingChanged;
+  }
+
+  if (!changed)
+    return false;
+
+  FailureOr<sym::ExprHandle> simplified =
+      substituteAndSimplifyGenerated(op, store, substitutions);
+  if (failed(simplified))
+    return failure();
+  SmallVector<IndexExprBinding> liveBindings =
+      collectLiveBindings(*simplified, state.bindings);
+  if (getIndexExprType(op.getContext(), liveBindings) !=
+      op.getResult().getType())
+    return false;
+
+  rewriter.setInsertionPoint(op);
+  IndexExprOp replacement = createIndexExpr(
+      rewriter, op.getLoc(), op.getContext(), *simplified, liveBindings);
+  rewriter.replaceOp(op, replacement.getResult());
+  return true;
+}
+
+struct GeneratePtrAddIndexExprPattern : OpRewritePattern<PtrAddOp> {
+  GeneratePtrAddIndexExprPattern(MLIRContext *context, bool &hadFailure)
+      : OpRewritePattern(context), hadFailure(hadFailure) {}
+
+  LogicalResult matchAndRewrite(PtrAddOp op,
+                                PatternRewriter &rewriter) const override {
+    WaveDialect *dialect = op->getContext()->getLoadedDialect<WaveDialect>();
+    if (!dialect) {
+      op.emitError("Wave dialect is not loaded");
+      hadFailure = true;
+      return failure();
+    }
+
+    FailureOr<bool> rewritten = rewritePtrAdd(rewriter, op, *dialect);
+    if (failed(rewritten)) {
+      hadFailure = true;
+      return failure();
+    }
+    return success(*rewritten);
+  }
+
+  bool &hadFailure;
+};
+
+struct GenerateIndexExprBindingPattern : OpRewritePattern<IndexExprOp> {
+  GenerateIndexExprBindingPattern(MLIRContext *context, bool &hadFailure)
+      : OpRewritePattern(context), hadFailure(hadFailure) {}
+
+  LogicalResult matchAndRewrite(IndexExprOp op,
+                                PatternRewriter &rewriter) const override {
+    WaveDialect *dialect = op->getContext()->getLoadedDialect<WaveDialect>();
+    if (!dialect) {
+      op.emitError("Wave dialect is not loaded");
+      hadFailure = true;
+      return failure();
+    }
+
+    FailureOr<bool> rewritten = rewriteIndexExpr(rewriter, op, *dialect);
+    if (failed(rewritten)) {
+      hadFailure = true;
+      return failure();
+    }
+    return success(*rewritten);
+  }
+
+  bool &hadFailure;
+};
+
+struct WaveGenerateIndexExprsPass
+    : public wave::impl::WaveGenerateIndexExprsBase<
+          WaveGenerateIndexExprsPass> {
+  void runOnOperation() override {
+    bool failed = false;
+    RewritePatternSet patterns(&getContext());
+    patterns
+        .add<GenerateIndexExprBindingPattern, GeneratePtrAddIndexExprPattern>(
+            &getContext(), failed);
+    if (mlir::failed(
+            applyPatternsGreedily(getOperation(), std::move(patterns))) ||
+        failed)
+      return signalPassFailure();
+  }
+};
+
+} // namespace

@@ -35,3 +35,16 @@ func.func @divisibility_folds_mod(%k_raw: i32) -> index {
   %off = wave.index_expr <"Mod(K, 8)"> ["K"](%k) : (i32) -> index
   return %off : index
 }
+
+// -----
+
+// CHECK-LABEL: func.func @expands_scaled_sum
+// CHECK-SAME: (%[[K:.*]]: i32)
+// CHECK: %[[LANE:.*]] = wave.lane_id : !wave.simd<i32, 32>
+// CHECK: %[[OFF:.*]] = wave.index_expr <"256*K + 4*lid"> ["K", "lid"](%[[K]], %[[LANE]]) : (i32, !wave.simd<i32, 32>) -> !wave.simd<index, 32>
+// CHECK: return %[[OFF]] : !wave.simd<index, 32>
+func.func @expands_scaled_sum(%k: i32) -> !wave.simd<index, 32> {
+  %lane = wave.lane_id : !wave.simd<i32, 32>
+  %off = wave.index_expr <"4*(64*K + lid)"> ["K", "lid"](%k, %lane) : (i32, !wave.simd<i32, 32>) -> !wave.simd<index, 32>
+  return %off : !wave.simd<index, 32>
+}
