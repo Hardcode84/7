@@ -79,6 +79,12 @@ Same rule covers docstrings, commit bodies, and PR descriptions. Wit is welcome,
   `str(...)` is for humans and printers; data that crosses a boundary
   uses the structural path.
 
+## Implementation Discipline
+
+- **No shortcuts, never overfit.** Implement the general mechanism, not a
+  known input. Goldens are conformance tests, not templates. Unsupported
+  features return clear errors; no fabricated ops or canned output.
+
 ## Language and MLIR Guidelines
 
 ### Python
@@ -123,8 +129,9 @@ Same rule covers docstrings, commit bodies, and PR descriptions. Wit is welcome,
 
 - New features require a `test/Integration` test. Target/dialect lit is
   supporting coverage, not a replacement.
-- Before every commit, run full lit and integration tests:
-  `cmake --build build --target check-wave-mlir -j $(nproc)` and
+- Before every commit, run full lit, wavec, and integration tests:
+  `cmake --build build --target check-wave-mlir -j $(nproc)`,
+  `cmake --build build --target check-wavec -j $(nproc)`, and
   `build/bin/llvm-lit -sv build/test --filter='Integration'`.
 - Small, focused commits. One logical change per commit. If you're wondering whether to split — split.
 - Commit messages should be descriptive, or at least funny. Not both is acceptable. Neither is not.

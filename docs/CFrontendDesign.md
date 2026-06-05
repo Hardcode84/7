@@ -440,55 +440,6 @@ not legal, decides it.
   surface is not C, so Clang patching or builtin-smuggling is unavoidable on
   that path.
 
-## Implementation rules
-
-Constraints on the `wavec` implementation; the Stages below assume them.
-The MLIR Toy tutorial is the *pattern* reference (recursive-descent ->
-emit), not the language: lexer/parser/AST/sema are **C99**, emitting through
-the MLIR C API (`mlir-c` + `include/Wave-c/Dialects.h`).
-
-- **No shortcuts, never overfit.** Implement the general mechanism, never
-  the specific case. The goldens are conformance *tests*, not targets to
-  special-case -- the frontend must *derive* each one through general
-  lowering, never by recognizing the input. An unimplemented feature returns
-  a clear error (`error: <feature> not supported`); that is always
-  acceptable. Faking, hardcoding, or pattern-matching a known input to emit a
-  canned result is never acceptable, not even as a temporary stub.
-- **C99, pedantic, no extensions.** Build `-std=c99 -pedantic -Werror`; no
-  GNU/clang extensions. Portable to any conforming compiler.
-- **No OS-specific functions.** No POSIX/Win32 in the core; file I/O stays at
-  the entry point. The parser is pure computation over a byte buffer.
-- **ASCII only, no unicode.** Matches the lexer character classes
-  (`letter`/`digit` are ASCII) and the project `check-ascii-only` hook.
-- **C++ only as the MLIR bridge.** IR is built via the C API
-  (`mlirOperationCreate` with op-name strings, as the Python DSL does -- no
-  per-op builders in `Wave-c`). A thin C++ shim appears only where the C API
-  is insufficient (e.g. driving the pass pipeline), never in the front.
-- **Standalone parser, zero deps.** Lexer/parser/AST/sema link only libc --
-  no MLIR, no ixsimpl, no third-party libraries -- and MLIR logic never
-  interleaves into them. Parse + sema is a pure phase (bytes -> arena AST ->
-  checked AST); a *separate* AST -> MLIR lowering stage consumes the AST. The
-  parser builds and tests with none of the MLIR toolchain present.
-  Consequence: ixsimpl is a *lowering* dependency, not a parser one -- the
-  parser emits `x + i` as an AST node; lowering picks `ptr_add` vs
-  `index_expr` and builds the symbolic expr.
-- **Every stage tested independently.** Each phase has tests at its own
-  interface, not only end-to-end: lexer -> token stream, parser -> AST
-  shape, sema -> accept/reject + diagnostics, lowering -> IR (the goldens).
-  The boundary being a real data structure is what makes this possible --
-  feed the input form, assert the output form. No stage is validated only
-  through the next; testing solely end-to-end is itself a shortcut.
-- **Arena allocation, page-aligned (4 KiB).** All AST and scratch memory
-  bump-allocates from aligned arenas; free the arena wholesale, not per node.
-- **No individual `malloc`/`free`.** No per-node heap ops -- everything from
-  an arena. No leaks, no use-after-free, one allocator surface.
-- **Bounded recursion.** The recursive-descent parser carries an explicit
-  depth counter and errors past a fixed cap, so pathological nesting cannot
-  overflow the C stack (cf. the dialect's depth-8 offset builder).
-- **No global state.** All state -- arenas, the MLIR context, the symbol
-  table, the depth counter -- threads through an explicit context struct.
-  Reentrant, testable, no file-scope mutables.
-
 ## Stages
 
 v1 scope: saxpy + `if`/`for`/`while`. Matmul/fragments come later.
