@@ -108,6 +108,81 @@ static char *read_file(const char *path, size_t *out_len) {
   return buf;
 }
 
+#if defined(WAVEC_HAVE_LOWERING) && WAVEC_HAVE_LOWERING
+static int run_lower_stage(const char *path, Program *program,
+                           DiagList *diags) {
+  char *mlir;
+  (void)path;
+  mlir = wavec_lower_to_mlir(program, diags);
+  if (mlir == NULL)
+    return 1;
+  fputs(mlir, stdout);
+  wavec_lower_free(mlir);
+  return 0;
+}
+#endif
+
+#if defined(WAVEC_HAVE_SEMA) && WAVEC_HAVE_SEMA
+static int run_sema_stage(const char *path, Arena *arena, DiagList *diags,
+                          Program *program) {
+  SemaContext sctx;
+  (void)arena;
+  sema_context_init(&sctx, arena, diags);
+  if (!sema_check(&sctx, program))
+    return 1;
+#if defined(WAVEC_HAVE_LOWERING) && WAVEC_HAVE_LOWERING
+  return run_lower_stage(path, program, diags);
+#else
+  fprintf(stderr, "%s: note: lowering bridge not built; stopping after sema\n",
+          path);
+  return 0;
+#endif
+}
+#endif
+
+#if defined(WAVEC_HAVE_PARSE) && WAVEC_HAVE_PARSE
+static int run_parse_stage(const char *path, const char *src, size_t src_len,
+                           Arena *arena, DiagList *diags, TokenArray toks) {
+  ParseContext pctx;
+  Program *program;
+
+  parse_context_init(&pctx, toks.tokens, toks.count, src, src_len, arena,
+                     diags);
+  program = parse_program(&pctx);
+  if (program == NULL || diag_has_errors(diags))
+    return 1;
+#if defined(WAVEC_HAVE_SEMA) && WAVEC_HAVE_SEMA
+  return run_sema_stage(path, arena, diags, program);
+#else
+  fprintf(stderr, "%s: note: sema stage not built; stopping after parse\n",
+          path);
+  return 0;
+#endif
+}
+#endif
+
+#if defined(WAVEC_HAVE_LEX) && WAVEC_HAVE_LEX
+static int run_lex_stage(const char *path, const char *src, size_t src_len,
+                         Arena *arena, DiagList *diags) {
+  LexContext lex_ctx;
+  TokenArray toks;
+
+  lex_ctx.src = src;
+  lex_ctx.src_len = src_len;
+  lex_ctx.arena = arena;
+  lex_ctx.diags = diags;
+  toks = lex_tokenize(&lex_ctx);
+#if defined(WAVEC_HAVE_PARSE) && WAVEC_HAVE_PARSE
+  return run_parse_stage(path, src, src_len, arena, diags, toks);
+#else
+  fprintf(stderr,
+          "%s: note: parser stage not built; stopping after lex (%lu tokens)\n",
+          path, (unsigned long)toks.count);
+  return 0;
+#endif
+}
+#endif
+
 int main(int argc, char **argv) {
   const char *path;
   char *src;
@@ -139,63 +214,7 @@ int main(int argc, char **argv) {
   status = 0;
 
 #if defined(WAVEC_HAVE_LEX) && WAVEC_HAVE_LEX
-  {
-    LexContext lex_ctx;
-    TokenArray toks;
-
-    /* Stage 1: lex. */
-    lex_ctx.src = src;
-    lex_ctx.src_len = src_len;
-    lex_ctx.arena = &arena;
-    lex_ctx.diags = &diags;
-    toks = lex_tokenize(&lex_ctx);
-
-#if defined(WAVEC_HAVE_PARSE) && WAVEC_HAVE_PARSE
-    {
-      ParseContext pctx;
-      Program *program;
-
-      parse_context_init(&pctx, toks.tokens, toks.count, src, src_len, &arena,
-                         &diags);
-      program = parse_program(&pctx);
-
-      if (program == NULL || diag_has_errors(&diags)) {
-        status = 1;
-      } else {
-#if defined(WAVEC_HAVE_SEMA) && WAVEC_HAVE_SEMA
-        SemaContext sctx;
-        sema_context_init(&sctx, &arena, &diags);
-        if (!sema_check(&sctx, program)) {
-          status = 1;
-        } else {
-#if defined(WAVEC_HAVE_LOWERING) && WAVEC_HAVE_LOWERING
-          char *mlir = wavec_lower_to_mlir(program, &diags);
-          if (mlir == NULL) {
-            status = 1;
-          } else {
-            fputs(mlir, stdout);
-            wavec_lower_free(mlir);
-          }
-#else
-          fprintf(stderr,
-                  "%s: note: lowering bridge not built; stopping after sema\n",
-                  path);
-#endif /* lowering */
-        }
-      }
-#else
-        fprintf(stderr,
-                "%s: note: sema stage not built; stopping after parse\n", path);
-      }
-#endif /* sema */
-    }
-#else
-    fprintf(stderr,
-            "%s: note: parser stage not built; stopping after lex "
-            "(%lu tokens)\n",
-            path, (unsigned long)toks.count);
-#endif /* parse */
-  }
+  status = run_lex_stage(path, src, src_len, &arena, &diags);
 #else
   fprintf(stderr, "%s: note: lexer stage not built; nothing to do\n", path);
 #endif /* lex */

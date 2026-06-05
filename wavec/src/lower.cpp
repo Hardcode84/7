@@ -172,21 +172,6 @@ static MlirNamedAttribute namedAttr(LowerCtx &lc, const char *name,
 static bool scalarIsFloat(ScalarKind k) {
   return k == SCALAR_HALF || k == SCALAR_FLOAT;
 }
-static bool scalarIsInt(ScalarKind k) {
-  switch (k) {
-  case SCALAR_INT8:
-  case SCALAR_INT16:
-  case SCALAR_INT32:
-  case SCALAR_INT64:
-  case SCALAR_UINT8:
-  case SCALAR_UINT16:
-  case SCALAR_UINT32:
-  case SCALAR_UINT64:
-    return true;
-  default:
-    return false;
-  }
-}
 static bool scalarIsSigned(ScalarKind k) {
   return k == SCALAR_INT8 || k == SCALAR_INT16 || k == SCALAR_INT32 ||
          k == SCALAR_INT64;
@@ -210,29 +195,42 @@ static unsigned scalarIntBits(ScalarKind k) {
   }
 }
 
-// A scalar element kind -> the builtin/Wave element MlirType. Null on
-// unsupported (token has no element form here).
+enum class ScalarMlirKind { Invalid, I1, F16, F32, Index, Token, Integer };
+
+struct ScalarMlirInfo {
+  ScalarMlirKind kind;
+  unsigned bits;
+};
+
+static const ScalarMlirInfo kScalarMlirInfo[] = {
+    {ScalarMlirKind::I1, 1},       {ScalarMlirKind::F16, 16},
+    {ScalarMlirKind::F32, 32},     {ScalarMlirKind::Index, 0},
+    {ScalarMlirKind::Token, 0},    {ScalarMlirKind::Integer, 8},
+    {ScalarMlirKind::Integer, 16}, {ScalarMlirKind::Integer, 32},
+    {ScalarMlirKind::Integer, 64}, {ScalarMlirKind::Integer, 8},
+    {ScalarMlirKind::Integer, 16}, {ScalarMlirKind::Integer, 32},
+    {ScalarMlirKind::Integer, 64},
+};
+
 static MlirType scalarToType(LowerCtx &lc, ScalarKind k) {
-  switch (k) {
-  case SCALAR_BOOL:
+  if ((unsigned)k >= sizeof(kScalarMlirInfo) / sizeof(kScalarMlirInfo[0]))
+    return MlirType{nullptr};
+  ScalarMlirInfo info = kScalarMlirInfo[k];
+  switch (info.kind) {
+  case ScalarMlirKind::I1:
     return mlirIntegerTypeGet(lc.ctx, 1);
-  case SCALAR_HALF:
+  case ScalarMlirKind::F16:
     return mlirF16TypeGet(lc.ctx);
-  case SCALAR_FLOAT:
+  case ScalarMlirKind::F32:
     return mlirF32TypeGet(lc.ctx);
-  case SCALAR_INDEX:
+  case ScalarMlirKind::Index:
     return mlirIndexTypeGet(lc.ctx);
-  case SCALAR_TOKEN:
+  case ScalarMlirKind::Token:
     return mlirWaveMemTokenTypeGet(lc.ctx);
-  case SCALAR_INT8:
-  case SCALAR_INT16:
-  case SCALAR_INT32:
-  case SCALAR_INT64:
-  case SCALAR_UINT8:
-  case SCALAR_UINT16:
-  case SCALAR_UINT32:
-  case SCALAR_UINT64:
-    return mlirIntegerTypeGet(lc.ctx, scalarIntBits(k));
+  case ScalarMlirKind::Integer:
+    return mlirIntegerTypeGet(lc.ctx, info.bits);
+  case ScalarMlirKind::Invalid:
+    return MlirType{nullptr};
   }
   return MlirType{nullptr};
 }
@@ -391,29 +389,26 @@ static const char *floatBinName(TokenKind op) {
 
 // Map a comparison token to a wave/arith predicate code, choosing signed vs
 // unsigned from the operand element-int signedness.
+struct CmpPredEntry {
+  TokenKind op;
+  int signedPred;
+  int unsignedPred;
+};
+
+static const CmpPredEntry kCmpPreds[] = {
+    {TOK_EQ, CMP_EQ, CMP_EQ},   {TOK_NE, CMP_NE, CMP_NE},
+    {TOK_LT, CMP_SLT, CMP_ULT}, {TOK_LE, CMP_SLE, CMP_ULE},
+    {TOK_GT, CMP_SGT, CMP_UGT}, {TOK_GE, CMP_SGE, CMP_UGE},
+};
+
 static bool cmpPred(TokenKind op, bool isSignedInt, int *out) {
-  switch (op) {
-  case TOK_EQ:
-    *out = CMP_EQ;
+  for (const CmpPredEntry &pred : kCmpPreds) {
+    if (pred.op != op)
+      continue;
+    *out = isSignedInt ? pred.signedPred : pred.unsignedPred;
     return true;
-  case TOK_NE:
-    *out = CMP_NE;
-    return true;
-  case TOK_LT:
-    *out = isSignedInt ? CMP_SLT : CMP_ULT;
-    return true;
-  case TOK_LE:
-    *out = isSignedInt ? CMP_SLE : CMP_ULE;
-    return true;
-  case TOK_GT:
-    *out = isSignedInt ? CMP_SGT : CMP_UGT;
-    return true;
-  case TOK_GE:
-    *out = isSignedInt ? CMP_SGE : CMP_UGE;
-    return true;
-  default:
-    return false;
   }
+  return false;
 }
 
 static bool isCompareTok(TokenKind op) {
@@ -453,118 +448,102 @@ static MlirValue matchSimd(LowerCtx &lc, MlirValue v, int64_t width) {
   return v;
 }
 
-static bool lowerBinary(LowerCtx &lc, const Expr *e, MlirValue *out) {
+static MlirType ptrAddResultType(MlirValue base, MlirValue off) {
+  MlirType baseTy = mlirValueGetType(base);
+  if (isSimd(baseTy))
+    return baseTy;
+  int64_t offWidth = simdWidth(mlirValueGetType(off));
+  return (offWidth != 0) ? mlirWaveSimdTypeGet(baseTy, offWidth) : baseTy;
+}
+
+static bool lowerPointerBinary(LowerCtx &lc, const Expr *e, MlirValue lhs,
+                               MlirValue rhs, bool lhsPtr, bool rhsPtr,
+                               MlirValue *out, bool *handled) {
   const ExprBinary &b = e->as.binary;
-  MlirValue lhs, rhs;
-  if (!lowerExpr(lc, b.lhs, &lhs) || !lowerExpr(lc, b.rhs, &rhs))
-    return false;
-
-  MlirType lt = mlirValueGetType(lhs), rt = mlirValueGetType(rhs);
-  bool anySimd = isSimd(lt) || isSimd(rt);
-  bool isFloat = typeIsFloat(lt) || typeIsFloat(rt);
-  int64_t width = simdWidth(isSimd(lt) ? lt : rt);
-
-  // Pointer arithmetic: `ptr + offset` -> wave.ptr_add. The base is either a
-  // uniform !wave.ptr or a per-lane simd<ptr>; the offset carries the lane
-  // width. Result: simd<ptr, W> for a lane offset, else the base type.
-  bool lhsPtr = isPtrLike(lt);
-  bool rhsPtr = isPtrLike(rt);
-  if ((lhsPtr || rhsPtr) && b.op == TOK_PLUS) {
-    MlirValue base = lhsPtr ? lhs : rhs;
-    MlirValue off = lhsPtr ? rhs : lhs;
-    MlirType baseTy = mlirValueGetType(base);
-    MlirType resTy;
-    if (isSimd(baseTy)) {
-      resTy = baseTy;
-    } else {
-      int64_t offWidth = simdWidth(mlirValueGetType(off));
-      resTy = (offWidth != 0) ? mlirWaveSimdTypeGet(baseTy, offWidth) : baseTy;
-    }
-    MlirOperation op = buildOp(lc, "wave.ptr_add", {base, off}, {resTy});
-    *out = op0(op);
+  *handled = lhsPtr || rhsPtr;
+  if (!*handled)
     return true;
-  }
-  if ((lhsPtr || rhsPtr)) {
+  if (b.op != TOK_PLUS) {
     fail(lc, exprSpan(e), "lowering: only '+' is supported on pointers");
     return false;
   }
+  MlirValue base = lhsPtr ? lhs : rhs;
+  MlirValue off = lhsPtr ? rhs : lhs;
+  MlirOperation op =
+      buildOp(lc, "wave.ptr_add", {base, off}, {ptrAddResultType(base, off)});
+  *out = op0(op);
+  return true;
+}
 
-  if (isCompareTok(b.op)) {
-    // simd -> mask<W>; scalar -> i1 (arith.cmpi). Operands must match: splat
-    // the scalar side for the simd case.
-    int pred;
-    bool signedInt = valueElemSigned(b.lhs) || valueElemSigned(b.rhs);
-    if (!cmpPred(b.op, signedInt, &pred)) {
-      fail(lc, exprSpan(e), "lowering: unsupported comparison operator");
-      return false;
-    }
-    MlirAttribute predAttr =
-        mlirIntegerAttrGet(mlirIntegerTypeGet(lc.ctx, 64), pred);
-    if (anySimd) {
-      lhs = matchSimd(lc, lhs, width);
-      rhs = matchSimd(lc, rhs, width);
-      MlirType maskTy = mlirWaveMaskTypeGet(lc.ctx, width);
-      MlirOperation op = buildOp(lc, "wave.cmpi", {lhs, rhs}, {maskTy},
-                                 {namedAttr(lc, "predicate", predAttr)});
-      *out = op0(op);
-      return true;
-    }
-    if (isFloat) {
-      fail(lc, exprSpan(e), "lowering: float comparison not supported");
-      return false;
-    }
-    MlirType i1 = mlirIntegerTypeGet(lc.ctx, 1);
-    MlirOperation op = buildOp(lc, "arith.cmpi", {lhs, rhs}, {i1},
+static bool lowerCompareBinary(LowerCtx &lc, const Expr *e, MlirValue lhs,
+                               MlirValue rhs, bool anySimd, bool isFloat,
+                               int64_t width, MlirValue *out) {
+  const ExprBinary &b = e->as.binary;
+  int pred;
+  bool signedInt = valueElemSigned(b.lhs) || valueElemSigned(b.rhs);
+  if (!cmpPred(b.op, signedInt, &pred)) {
+    fail(lc, exprSpan(e), "lowering: unsupported comparison operator");
+    return false;
+  }
+  MlirAttribute predAttr =
+      mlirIntegerAttrGet(mlirIntegerTypeGet(lc.ctx, 64), pred);
+  if (anySimd) {
+    lhs = matchSimd(lc, lhs, width);
+    rhs = matchSimd(lc, rhs, width);
+    MlirType maskTy = mlirWaveMaskTypeGet(lc.ctx, width);
+    MlirOperation op = buildOp(lc, "wave.cmpi", {lhs, rhs}, {maskTy},
                                {namedAttr(lc, "predicate", predAttr)});
     *out = op0(op);
     return true;
   }
-
   if (isFloat) {
-    if (anySimd) {
-      // Lane-varying float: wave.f* (simd-only). Splat the scalar side.
-      const char *name = floatBinName(b.op);
-      if (!name) {
-        fail(lc, exprSpan(e), "lowering: unsupported float operator");
-        return false;
-      }
-      lhs = matchSimd(lc, lhs, width);
-      rhs = matchSimd(lc, rhs, width);
-      MlirType resTy = mlirValueGetType(lhs);
-      MlirOperation op = buildOp(lc, name, {lhs, rhs}, {resTy});
-      *out = op0(op);
-      return true;
-    }
-    // Uniform scalar float: wave.f* reject scalar operands, so use arith.*f.
-    const char *aname = nullptr;
-    switch (b.op) {
-    case TOK_PLUS:
-      aname = "arith.addf";
-      break;
-    case TOK_MINUS:
-      aname = "arith.subf";
-      break;
-    case TOK_STAR:
-      aname = "arith.mulf";
-      break;
-    case TOK_SLASH:
-      aname = "arith.divf";
-      break;
-    default:
-      break;
-    }
-    if (!aname) {
-      fail(lc, exprSpan(e), "lowering: unsupported float operator");
-      return false;
-    }
-    MlirType resTy = mlirValueGetType(lhs);
-    MlirOperation op = buildOp(lc, aname, {lhs, rhs}, {resTy});
-    *out = op0(op);
-    return true;
+    fail(lc, exprSpan(e), "lowering: float comparison not supported");
+    return false;
   }
+  MlirType i1 = mlirIntegerTypeGet(lc.ctx, 1);
+  MlirOperation op = buildOp(lc, "arith.cmpi", {lhs, rhs}, {i1},
+                             {namedAttr(lc, "predicate", predAttr)});
+  *out = op0(op);
+  return true;
+}
 
-  // Integer arithmetic/bitwise: wave.addi/muli/... broadcast internally.
-  const char *name = intBinName(b.op);
+static const char *floatScalarBinName(TokenKind op) {
+  switch (op) {
+  case TOK_PLUS:
+    return "arith.addf";
+  case TOK_MINUS:
+    return "arith.subf";
+  case TOK_STAR:
+    return "arith.mulf";
+  case TOK_SLASH:
+    return "arith.divf";
+  default:
+    return nullptr;
+  }
+}
+
+static bool lowerFloatBinary(LowerCtx &lc, const Expr *e, MlirValue lhs,
+                             MlirValue rhs, bool anySimd, int64_t width,
+                             MlirValue *out) {
+  const ExprBinary &b = e->as.binary;
+  const char *name = anySimd ? floatBinName(b.op) : floatScalarBinName(b.op);
+  if (!name) {
+    fail(lc, exprSpan(e), "lowering: unsupported float operator");
+    return false;
+  }
+  if (anySimd) {
+    lhs = matchSimd(lc, lhs, width);
+    rhs = matchSimd(lc, rhs, width);
+  }
+  MlirType resTy = mlirValueGetType(lhs);
+  MlirOperation op = buildOp(lc, name, {lhs, rhs}, {resTy});
+  *out = op0(op);
+  return true;
+}
+
+static bool lowerIntBinary(LowerCtx &lc, const Expr *e, MlirValue lhs,
+                           MlirValue rhs, MlirValue *out) {
+  const char *name = intBinName(e->as.binary.op);
   if (!name) {
     fail(lc, exprSpan(e), "lowering: unsupported integer operator");
     return false;
@@ -573,6 +552,32 @@ static bool lowerBinary(LowerCtx &lc, const Expr *e, MlirValue *out) {
   MlirOperation op = buildOp(lc, name, {lhs, rhs}, {resTy});
   *out = op0(op);
   return true;
+}
+
+static bool lowerBinary(LowerCtx &lc, const Expr *e, MlirValue *out) {
+  const ExprBinary &b = e->as.binary;
+  MlirValue lhs;
+  MlirValue rhs;
+  bool handled;
+  if (!lowerExpr(lc, b.lhs, &lhs) || !lowerExpr(lc, b.rhs, &rhs))
+    return false;
+
+  MlirType lt = mlirValueGetType(lhs);
+  MlirType rt = mlirValueGetType(rhs);
+  bool anySimd = isSimd(lt) || isSimd(rt);
+  bool isFloat = typeIsFloat(lt) || typeIsFloat(rt);
+  int64_t width = simdWidth(isSimd(lt) ? lt : rt);
+
+  if (!lowerPointerBinary(lc, e, lhs, rhs, isPtrLike(lt), isPtrLike(rt), out,
+                          &handled))
+    return false;
+  if (handled)
+    return true;
+  if (isCompareTok(b.op))
+    return lowerCompareBinary(lc, e, lhs, rhs, anySimd, isFloat, width, out);
+  if (isFloat)
+    return lowerFloatBinary(lc, e, lhs, rhs, anySimd, width, out);
+  return lowerIntBinary(lc, e, lhs, rhs, out);
 }
 
 //===----------------------------------------------------------------------===//
@@ -629,318 +634,330 @@ static bool lowerLoad(LowerCtx &lc, const ExprCall &call, SourceSpan span,
 
 // Returns the wave.cast kind code + whether a policy attr is required; fills
 // the policy attribute (a dict) when needed. False on an unsupported cast.
+static bool setPolicyAttr(LowerCtx &lc, SourceSpan span, const char *name,
+                          const char *asmText, MlirAttribute *policyOut) {
+  MlirAttribute attr = mlirAttributeParseGet(lc.ctx, sr(asmText));
+  if (mlirAttributeIsNull(attr)) {
+    fail(lc, span, "lowering: failed to build cast policy");
+    return false;
+  }
+  MlirNamedAttribute entry = namedAttr(lc, name, attr);
+  *policyOut = mlirDictionaryAttrGet(lc.ctx, 1, &entry);
+  return true;
+}
+
+static bool maybeIntExtensionPolicy(LowerCtx &lc, ScalarKind srcK,
+                                    ScalarKind dstK, SourceSpan span,
+                                    bool *hasPolicy, MlirAttribute *policyOut) {
+  if (scalarIntBits(dstK) <= scalarIntBits(srcK))
+    return true;
+  *hasPolicy = true;
+  return setPolicyAttr(lc, span, "extension",
+                       scalarIsSigned(srcK) ? "#wave.cast_extension<sign>"
+                                            : "#wave.cast_extension<zero>",
+                       policyOut);
+}
+
+static bool setSignednessPolicy(LowerCtx &lc, ScalarKind intK, SourceSpan span,
+                                bool *hasPolicy, MlirAttribute *policyOut) {
+  *hasPolicy = true;
+  return setPolicyAttr(lc, span, "signedness",
+                       scalarIsSigned(intK) ? "#wave.cast_signedness<signed>"
+                                            : "#wave.cast_signedness<unsigned>",
+                       policyOut);
+}
+
 static bool buildCastPolicy(LowerCtx &lc, ScalarKind srcK, ScalarKind dstK,
                             SourceSpan span, int *kindOut, bool *hasPolicy,
                             MlirAttribute *policyOut) {
-  *hasPolicy = false;
   bool sFloat = scalarIsFloat(srcK), dFloat = scalarIsFloat(dstK);
-  bool sInt = scalarIsInt(srcK), dInt = scalarIsInt(dstK);
+  *hasPolicy = false;
   if (sFloat && dFloat) {
-    *kindOut = CAST_FPCONVERT; // rounding defaults rne; no policy in golden.
+    *kindOut = CAST_FPCONVERT;
     return true;
   }
-  if (sInt && dInt) {
+  if (!sFloat && !dFloat) {
     *kindOut = CAST_INTCONVERT;
-    unsigned sb = scalarIntBits(srcK), db = scalarIntBits(dstK);
-    if (db > sb) {
-      // Widening: extension policy from source signedness.
-      const char *ext = scalarIsSigned(srcK) ? "#wave.cast_extension<sign>"
-                                             : "#wave.cast_extension<zero>";
-      MlirAttribute extAttr = mlirAttributeParseGet(lc.ctx, sr(ext));
-      if (mlirAttributeIsNull(extAttr)) {
-        fail(lc, span, "lowering: failed to build cast extension policy");
-        return false;
-      }
-      MlirNamedAttribute entry = namedAttr(lc, "extension", extAttr);
-      *policyOut = mlirDictionaryAttrGet(lc.ctx, 1, &entry);
-      *hasPolicy = true;
-    }
-    return true;
+    return maybeIntExtensionPolicy(lc, srcK, dstK, span, hasPolicy, policyOut);
   }
-  if (sInt && dFloat) {
+  if (!sFloat && dFloat) {
     *kindOut = CAST_INT_TO_FP;
-    const char *sg = scalarIsSigned(srcK) ? "#wave.cast_signedness<signed>"
-                                          : "#wave.cast_signedness<unsigned>";
-    MlirAttribute sgAttr = mlirAttributeParseGet(lc.ctx, sr(sg));
-    if (mlirAttributeIsNull(sgAttr)) {
-      fail(lc, span, "lowering: failed to build cast signedness policy");
-      return false;
-    }
-    MlirNamedAttribute entry = namedAttr(lc, "signedness", sgAttr);
-    *policyOut = mlirDictionaryAttrGet(lc.ctx, 1, &entry);
-    *hasPolicy = true;
-    return true;
+    return setSignednessPolicy(lc, srcK, span, hasPolicy, policyOut);
   }
-  if (sFloat && dInt) {
+  if (sFloat && !dFloat) {
     *kindOut = CAST_FP_TO_INT;
-    const char *sg = scalarIsSigned(dstK) ? "#wave.cast_signedness<signed>"
-                                          : "#wave.cast_signedness<unsigned>";
-    MlirAttribute sgAttr = mlirAttributeParseGet(lc.ctx, sr(sg));
-    if (mlirAttributeIsNull(sgAttr)) {
-      fail(lc, span, "lowering: failed to build cast signedness policy");
-      return false;
-    }
-    MlirNamedAttribute entry = namedAttr(lc, "signedness", sgAttr);
-    *policyOut = mlirDictionaryAttrGet(lc.ctx, 1, &entry);
-    *hasPolicy = true;
-    return true;
+    return setSignednessPolicy(lc, dstK, span, hasPolicy, policyOut);
   }
   fail(lc, span, "lowering: unsupported cast element kinds");
   return false;
 }
 
-// Dispatch a call expression. `wantValue` controls whether a value result is
-// required (true) or a void-producing builtin like store/wait is allowed.
-static bool lowerCall(LowerCtx &lc, const Expr *e, MlirValue *out) {
-  const ExprCall &call = e->as.call;
-  const Expr *callee = call.callee;
-  SourceSpan span = exprSpan(e);
+static int64_t callIntGarg(const ExprCall &call, int64_t fallback) {
+  if (call.garg_count == 1 && call.gargs[0].kind == GARG_INT)
+    return (int64_t)call.gargs[0].int_value;
+  return fallback;
+}
 
-  if (callee->kind != EXPR_IDENT) {
-    fail(lc, span, "lowering: only builtin calls are supported");
+static bool lowerLaneIdCall(LowerCtx &lc, const Expr *e, MlirValue *out) {
+  int64_t width = callIntGarg(e->as.call, 32);
+  MlirType i32 = mlirIntegerTypeGet(lc.ctx, 32);
+  MlirType resTy = mlirWaveSimdTypeGet(i32, width);
+  MlirOperation op = buildOp(lc, "wave.lane_id", {}, {resTy});
+  *out = op0(op);
+  return true;
+}
+
+static bool lowerWorkgroupAxis(LowerCtx &lc, int64_t axis, MlirValue *out) {
+  MlirType i32 = mlirIntegerTypeGet(lc.ctx, 32);
+  MlirAttribute axAttr =
+      mlirIntegerAttrGet(mlirIntegerTypeGet(lc.ctx, 64), axis);
+  MlirOperation op = buildOp(lc, "wave.workgroup_id", {}, {i32},
+                             {namedAttr(lc, "axis", axAttr)});
+  *out = op0(op);
+  return true;
+}
+
+static bool lowerWaveIdCall(LowerCtx &lc, const Expr *, MlirValue *out) {
+  return lowerWorkgroupAxis(lc, 0, out);
+}
+
+static bool lowerWorkgroupIdCall(LowerCtx &lc, const Expr *e, MlirValue *out) {
+  return lowerWorkgroupAxis(lc, callIntGarg(e->as.call, 0), out);
+}
+
+static bool lowerWorkitemIdCall(LowerCtx &lc, const Expr *e, MlirValue *out) {
+  const ExprCall &call = e->as.call;
+  int64_t axis = callIntGarg(call, 0);
+  const TypeRef *rt = (const TypeRef *)e->sema_type;
+  MlirType resTy =
+      (rt != nullptr) ? lowerType(lc, rt)
+                      : mlirWaveSimdTypeGet(mlirIntegerTypeGet(lc.ctx, 32), 32);
+  MlirAttribute axAttr =
+      mlirIntegerAttrGet(mlirIntegerTypeGet(lc.ctx, 64), axis);
+  MlirOperation op = buildOp(lc, "wave.workitem_id", {}, {resTy},
+                             {namedAttr(lc, "axis", axAttr)});
+  *out = op0(op);
+  return true;
+}
+
+static bool lowerLoadCall(LowerCtx &lc, const Expr *e, MlirValue *out) {
+  MlirValue value;
+  MlirValue token;
+  if (!lowerLoad(lc, e->as.call, exprSpan(e), &value, &token))
+    return false;
+  *out = value;
+  return true;
+}
+
+static bool lowerStoreCall(LowerCtx &lc, const Expr *e, MlirValue *out) {
+  const ExprCall &call = e->as.call;
+  SourceSpan span = exprSpan(e);
+  if (call.arg_count != 2) {
+    fail(lc, span, "lowering: store expects (value, ptr)");
     return false;
   }
-
-  // lane_id<W>() -> wave.lane_id : simd<i32, W>.
-  if (identIs(callee, "lane_id")) {
-    int64_t width = 32;
-    if (call.garg_count == 1 && call.gargs[0].kind == GARG_INT)
-      width = (int64_t)call.gargs[0].int_value;
-    MlirType i32 = mlirIntegerTypeGet(lc.ctx, 32);
-    MlirType resTy = mlirWaveSimdTypeGet(i32, width);
-    MlirOperation op = buildOp(lc, "wave.lane_id", {}, {resTy});
-    *out = op0(op);
-    return true;
-  }
-
-  // wave_id_in_grid() -> wave.workgroup_id 0 : i32. v1 models one wave per
-  // workgroup, so the grid-global wave id is the workgroup id (the same
-  // stand-in the saxpy golden uses); a general lowering, not input recognition.
-  if (identIs(callee, "wave_id_in_grid")) {
-    MlirType i32 = mlirIntegerTypeGet(lc.ctx, 32);
-    MlirAttribute axAttr =
-        mlirIntegerAttrGet(mlirIntegerTypeGet(lc.ctx, 64), 0);
-    MlirOperation op = buildOp(lc, "wave.workgroup_id", {}, {i32},
-                               {namedAttr(lc, "axis", axAttr)});
-    *out = op0(op);
-    return true;
-  }
-
-  // workgroup_id<ax>() -> wave.workgroup_id {axis} : i32 (uniform).
-  if (identIs(callee, "workgroup_id")) {
-    int64_t axis = 0;
-    if (call.garg_count == 1 && call.gargs[0].kind == GARG_INT)
-      axis = (int64_t)call.gargs[0].int_value;
-    MlirType i32 = mlirIntegerTypeGet(lc.ctx, 32);
-    MlirAttribute axAttr =
-        mlirIntegerAttrGet(mlirIntegerTypeGet(lc.ctx, 64), axis);
-    MlirOperation op = buildOp(lc, "wave.workgroup_id", {}, {i32},
-                               {namedAttr(lc, "axis", axAttr)});
-    *out = op0(op);
-    return true;
-  }
-
-  // workitem_id<ax>() -> wave.workitem_id {axis} : simd<i32, W>.
-  if (identIs(callee, "workitem_id")) {
-    int64_t axis = 0;
-    if (call.garg_count == 1 && call.gargs[0].kind == GARG_INT)
-      axis = (int64_t)call.gargs[0].int_value;
-    // Result width = kernel wave size N, taken from sema's annotation -- NOT
-    // hardcoded 32 (that produced wrong IR in wave64 kernels).
-    const TypeRef *rt = (const TypeRef *)e->sema_type;
-    MlirType resTy =
-        (rt != nullptr)
-            ? lowerType(lc, rt)
-            : mlirWaveSimdTypeGet(mlirIntegerTypeGet(lc.ctx, 32), 32);
-    MlirAttribute axAttr =
-        mlirIntegerAttrGet(mlirIntegerTypeGet(lc.ctx, 64), axis);
-    MlirOperation op = buildOp(lc, "wave.workitem_id", {}, {resTy},
-                               {namedAttr(lc, "axis", axAttr)});
-    *out = op0(op);
-    return true;
-  }
-
-  // load(ptr [after t]) in expression position: yields value, drops token.
-  if (identIs(callee, "load")) {
-    MlirValue value, token;
-    if (!lowerLoad(lc, call, span, &value, &token))
+  MlirValue value;
+  MlirValue ptr;
+  if (!lowerExpr(lc, call.args[0], &value) ||
+      !lowerExpr(lc, call.args[1], &ptr))
+    return false;
+  std::vector<MlirValue> operands = {value, ptr};
+  if (call.has_dep) {
+    MlirValue dep;
+    if (!lowerExpr(lc, call.dep, &dep))
       return false;
-    *out = value;
-    return true;
+    operands.push_back(dep);
   }
+  MlirType tokTy = mlirWaveMemTokenTypeGet(lc.ctx);
+  MlirOperation op = buildOp(lc, "wave.store", operands, {tokTy});
+  *out = op0(op);
+  return true;
+}
 
-  // store(value, ptr [after t]) -> wave.store : token.
-  if (identIs(callee, "store")) {
-    if (call.arg_count != 2) {
-      fail(lc, span, "lowering: store expects (value, ptr)");
+static bool lowerTokenOperands(LowerCtx &lc, const ExprCall &call,
+                               std::vector<MlirValue> &operands) {
+  for (size_t i = 0; i < call.arg_count; ++i) {
+    MlirValue token;
+    if (!lowerExpr(lc, call.args[i], &token))
+      return false;
+    operands.push_back(token);
+  }
+  return true;
+}
+
+static bool lowerTokenResultCall(LowerCtx &lc, const Expr *e,
+                                 const char *opName, MlirValue *out) {
+  std::vector<MlirValue> operands;
+  if (!lowerTokenOperands(lc, e->as.call, operands))
+    return false;
+  MlirType tokTy = mlirWaveMemTokenTypeGet(lc.ctx);
+  MlirOperation op = buildOp(lc, opName, operands, {tokTy});
+  *out = op0(op);
+  return true;
+}
+
+static bool lowerBarrierCall(LowerCtx &lc, const Expr *e, MlirValue *out) {
+  return lowerTokenResultCall(lc, e, "wave.barrier", out);
+}
+
+static bool lowerJoinCall(LowerCtx &lc, const Expr *e, MlirValue *out) {
+  return lowerTokenResultCall(lc, e, "wave.join", out);
+}
+
+static bool lowerWaitCall(LowerCtx &lc, const Expr *e, MlirValue *out) {
+  std::vector<MlirValue> operands;
+  if (!lowerTokenOperands(lc, e->as.call, operands))
+    return false;
+  buildOp(lc, "wave.wait", operands, {});
+  *out = MlirValue{nullptr};
+  return true;
+}
+
+static bool lowerLdsBaseCall(LowerCtx &lc, const Expr *e, MlirValue *out) {
+  const ExprCall &call = e->as.call;
+  SourceSpan span = exprSpan(e);
+  MlirType elem = mlirIntegerTypeGet(lc.ctx, 32);
+  int64_t off = 0;
+  if (call.garg_count == 1 && call.gargs[0].kind == GARG_TYPE) {
+    elem = lowerType(lc, call.gargs[0].type);
+    if (mlirTypeIsNull(elem)) {
+      fail(lc, span, "lowering: unsupported lds_base element type");
       return false;
     }
-    MlirValue value, ptr;
-    if (!lowerExpr(lc, call.args[0], &value) ||
-        !lowerExpr(lc, call.args[1], &ptr))
+  }
+  if (call.arg_count == 1) {
+    const Expr *a = call.args[0];
+    if (a->kind != EXPR_INT_LIT) {
+      fail(lc, span, "lowering: lds_base offset must be a constant");
       return false;
-    std::vector<MlirValue> operands = {value, ptr};
-    if (call.has_dep) {
-      MlirValue dep;
-      if (!lowerExpr(lc, call.dep, &dep))
-        return false;
-      operands.push_back(dep);
     }
-    MlirType tokTy = mlirWaveMemTokenTypeGet(lc.ctx);
-    MlirOperation op = buildOp(lc, "wave.store", operands, {tokTy});
-    *out = op0(op);
+    off = (int64_t)a->as.int_lit.value;
+  }
+  MlirType ptrTy =
+      mlirWavePtrTypeGet(elem, mlirWaveSharedAddressSpaceAttrGet(lc.ctx));
+  MlirAttribute offAttr =
+      mlirIntegerAttrGet(mlirIntegerTypeGet(lc.ctx, 64), off);
+  MlirOperation op = buildOp(lc, "wave.lds_base", {}, {ptrTy},
+                             {namedAttr(lc, "offset", offAttr)});
+  *out = op0(op);
+  return true;
+}
+
+static bool lowerIndexCastCall(LowerCtx &lc, const Expr *e, MlirValue *out) {
+  const ExprCall &call = e->as.call;
+  SourceSpan span = exprSpan(e);
+  if (call.arg_count != 1) {
+    fail(lc, span, "lowering: index_cast expects one argument");
+    return false;
+  }
+  MlirValue v;
+  if (!lowerExpr(lc, call.args[0], &v))
+    return false;
+  const TypeRef *rt = (const TypeRef *)e->sema_type;
+  if (!rt) {
+    fail(lc, span, "lowering: index_cast result type unknown");
+    return false;
+  }
+  MlirType resTy = lowerType(lc, rt);
+  if (mlirTypeIsNull(resTy)) {
+    fail(lc, span, "lowering: unsupported index_cast result type");
+    return false;
+  }
+  MlirOperation op = buildOp(lc, "arith.index_cast", {v}, {resTy});
+  *out = op0(op);
+  return true;
+}
+
+static bool castSourceKind(const Expr *arg, ScalarKind *srcK) {
+  const TypeRef *argT = (const TypeRef *)arg->sema_type;
+  if (argT && argT->kind == TYPE_SCALAR) {
+    *srcK = argT->scalar;
     return true;
   }
-
-  // barrier(t...) -> wave.barrier : token.
-  if (identIs(callee, "barrier")) {
-    std::vector<MlirValue> operands;
-    for (size_t i = 0; i < call.arg_count; ++i) {
-      MlirValue t;
-      if (!lowerExpr(lc, call.args[i], &t))
-        return false;
-      operands.push_back(t);
-    }
-    MlirType tokTy = mlirWaveMemTokenTypeGet(lc.ctx);
-    MlirOperation op = buildOp(lc, "wave.barrier", operands, {tokTy});
-    *out = op0(op);
+  if (argT && (argT->kind == TYPE_SIMD || argT->kind == TYPE_VECTOR) &&
+      argT->element && argT->element->kind == TYPE_SCALAR) {
+    *srcK = argT->element->scalar;
     return true;
   }
+  return false;
+}
 
-  // join(t...) -> wave.join : token.
-  if (identIs(callee, "join")) {
-    std::vector<MlirValue> operands;
-    for (size_t i = 0; i < call.arg_count; ++i) {
-      MlirValue t;
-      if (!lowerExpr(lc, call.args[i], &t))
-        return false;
-      operands.push_back(t);
-    }
-    MlirType tokTy = mlirWaveMemTokenTypeGet(lc.ctx);
-    MlirOperation op = buildOp(lc, "wave.join", operands, {tokTy});
-    *out = op0(op);
-    return true;
+static bool lowerCastCall(LowerCtx &lc, const Expr *e, MlirValue *out) {
+  const ExprCall &call = e->as.call;
+  SourceSpan span = exprSpan(e);
+  if (call.arg_count != 1 || call.garg_count != 1 ||
+      call.gargs[0].kind != GARG_TYPE) {
+    fail(lc, span, "lowering: cast expects cast<T>(value)");
+    return false;
   }
-
-  // wait(t...) -> wave.wait : () (no result).
-  if (identIs(callee, "wait")) {
-    std::vector<MlirValue> operands;
-    for (size_t i = 0; i < call.arg_count; ++i) {
-      MlirValue t;
-      if (!lowerExpr(lc, call.args[i], &t))
-        return false;
-      operands.push_back(t);
-    }
-    buildOp(lc, "wave.wait", operands, {});
-    *out = MlirValue{nullptr};
-    return true;
+  MlirValue v;
+  if (!lowerExpr(lc, call.args[0], &v))
+    return false;
+  const TypeRef *dstTypeRef = call.gargs[0].type;
+  if (dstTypeRef->kind != TYPE_SCALAR) {
+    fail(lc, span, "lowering: cast target must be a scalar element type");
+    return false;
   }
-
-  // lds_base<T>([K]) -> wave.lds_base {offset=K} : shared T*.
-  if (identIs(callee, "lds_base")) {
-    MlirType elem = mlirIntegerTypeGet(lc.ctx, 32);
-    if (call.garg_count == 1 && call.gargs[0].kind == GARG_TYPE) {
-      elem = lowerType(lc, call.gargs[0].type);
-      if (mlirTypeIsNull(elem)) {
-        fail(lc, span, "lowering: unsupported lds_base element type");
-        return false;
-      }
-    }
-    int64_t off = 0;
-    if (call.arg_count == 1) {
-      const Expr *a = call.args[0];
-      if (a->kind == EXPR_INT_LIT)
-        off = (int64_t)a->as.int_lit.value;
-      else {
-        fail(lc, span, "lowering: lds_base offset must be a constant");
-        return false;
-      }
-    }
-    MlirType ptrTy =
-        mlirWavePtrTypeGet(elem, mlirWaveSharedAddressSpaceAttrGet(lc.ctx));
-    MlirAttribute offAttr =
-        mlirIntegerAttrGet(mlirIntegerTypeGet(lc.ctx, 64), off);
-    MlirOperation op = buildOp(lc, "wave.lds_base", {}, {ptrTy},
-                               {namedAttr(lc, "offset", offAttr)});
-    *out = op0(op);
-    return true;
+  ScalarKind srcK;
+  ScalarKind dstK = dstTypeRef->scalar;
+  if (!castSourceKind(call.args[0], &srcK)) {
+    fail(lc, span, "lowering: cannot determine cast source element type");
+    return false;
   }
+  int kind;
+  bool hasPolicy;
+  MlirAttribute policy;
+  if (!buildCastPolicy(lc, srcK, dstK, span, &kind, &hasPolicy, &policy))
+    return false;
+  MlirType srcTy = mlirValueGetType(v);
+  MlirType dstElem = scalarToType(lc, dstK);
+  MlirType resTy =
+      isSimd(srcTy)
+          ? mlirWaveSimdTypeGet(dstElem, mlirWaveSimdTypeGetWidth(srcTy))
+          : dstElem;
+  std::vector<MlirNamedAttribute> attrs;
+  attrs.push_back(namedAttr(
+      lc, "kind", mlirIntegerAttrGet(mlirIntegerTypeGet(lc.ctx, 32), kind)));
+  if (hasPolicy)
+    attrs.push_back(namedAttr(lc, "policy", policy));
+  MlirOperation op = buildOp(lc, "wave.cast", {v}, {resTy}, attrs);
+  *out = op0(op);
+  return true;
+}
 
-  // index_cast(x) -> arith.index_cast : index <-> int. Result type from sema.
-  if (identIs(callee, "index_cast")) {
-    if (call.arg_count != 1) {
-      fail(lc, span, "lowering: index_cast expects one argument");
-      return false;
-    }
-    MlirValue v;
-    if (!lowerExpr(lc, call.args[0], &v))
-      return false;
-    const TypeRef *rt = (const TypeRef *)e->sema_type;
-    if (!rt) {
-      fail(lc, span, "lowering: index_cast result type unknown");
-      return false;
-    }
-    MlirType resTy = lowerType(lc, rt);
-    if (mlirTypeIsNull(resTy)) {
-      fail(lc, span, "lowering: unsupported index_cast result type");
-      return false;
-    }
-    MlirOperation op = buildOp(lc, "arith.index_cast", {v}, {resTy});
-    *out = op0(op);
-    return true;
+typedef bool (*LowerCallFn)(LowerCtx &, const Expr *, MlirValue *);
+
+struct LowerCallEntry {
+  const char *name;
+  LowerCallFn lower;
+};
+
+static const LowerCallEntry kLowerCalls[] = {
+    {"lane_id", lowerLaneIdCall},
+    {"wave_id_in_grid", lowerWaveIdCall},
+    {"workgroup_id", lowerWorkgroupIdCall},
+    {"workitem_id", lowerWorkitemIdCall},
+    {"load", lowerLoadCall},
+    {"store", lowerStoreCall},
+    {"barrier", lowerBarrierCall},
+    {"join", lowerJoinCall},
+    {"wait", lowerWaitCall},
+    {"lds_base", lowerLdsBaseCall},
+    {"index_cast", lowerIndexCastCall},
+    {"cast", lowerCastCall},
+};
+
+static bool lowerCall(LowerCtx &lc, const Expr *e, MlirValue *out) {
+  const Expr *callee = e->as.call.callee;
+  if (callee->kind != EXPR_IDENT) {
+    fail(lc, exprSpan(e), "lowering: only builtin calls are supported");
+    return false;
   }
-
-  // cast<T>(x) -> wave.cast {kind[, policy]} : simd<U> -> simd<T>.
-  if (identIs(callee, "cast")) {
-    if (call.arg_count != 1 || call.garg_count != 1 ||
-        call.gargs[0].kind != GARG_TYPE) {
-      fail(lc, span, "lowering: cast expects cast<T>(value)");
-      return false;
-    }
-    MlirValue v;
-    if (!lowerExpr(lc, call.args[0], &v))
-      return false;
-    MlirType srcTy = mlirValueGetType(v);
-    // Target element kind from the generic arg; lane shape inherited.
-    const TypeRef *dstTypeRef = call.gargs[0].type;
-    if (dstTypeRef->kind != TYPE_SCALAR) {
-      fail(lc, span, "lowering: cast target must be a scalar element type");
-      return false;
-    }
-    ScalarKind dstK = dstTypeRef->scalar;
-    // Source element kind: recover from sema type of the argument.
-    const TypeRef *argT = (const TypeRef *)call.args[0]->sema_type;
-    ScalarKind srcK;
-    if (argT && argT->kind == TYPE_SCALAR)
-      srcK = argT->scalar;
-    else if (argT && (argT->kind == TYPE_SIMD || argT->kind == TYPE_VECTOR) &&
-             argT->element && argT->element->kind == TYPE_SCALAR)
-      srcK = argT->element->scalar;
-    else {
-      fail(lc, span, "lowering: cannot determine cast source element type");
-      return false;
-    }
-    int kind;
-    bool hasPolicy;
-    MlirAttribute policy;
-    if (!buildCastPolicy(lc, srcK, dstK, span, &kind, &hasPolicy, &policy))
-      return false;
-    MlirType dstElem = scalarToType(lc, dstK);
-    MlirType resTy =
-        isSimd(srcTy)
-            ? mlirWaveSimdTypeGet(dstElem, mlirWaveSimdTypeGetWidth(srcTy))
-            : dstElem;
-    std::vector<MlirNamedAttribute> attrs;
-    attrs.push_back(namedAttr(
-        lc, "kind", mlirIntegerAttrGet(mlirIntegerTypeGet(lc.ctx, 32), kind)));
-    if (hasPolicy)
-      attrs.push_back(namedAttr(lc, "policy", policy));
-    MlirOperation op = buildOp(lc, "wave.cast", {v}, {resTy}, attrs);
-    *out = op0(op);
-    return true;
+  for (const LowerCallEntry &entry : kLowerCalls) {
+    if (identIs(callee, entry.name))
+      return entry.lower(lc, e, out);
   }
-
-  fail(lc, span, "lowering: unsupported builtin or call");
+  fail(lc, exprSpan(e), "lowering: unsupported builtin or call");
   return false;
 }
 
@@ -956,6 +973,81 @@ static MlirType litType(LowerCtx &lc, const Expr *e) {
   return lowerType(lc, t);
 }
 
+static bool lowerIntLiteral(LowerCtx &lc, const Expr *e, MlirValue *out) {
+  MlirType t = litType(lc, e);
+  if (mlirTypeIsNull(t)) {
+    fail(lc, exprSpan(e), "lowering: integer literal without a resolved type");
+    return false;
+  }
+  int64_t width = simdWidth(t);
+  MlirType elem = elementOf(t);
+  if (!mlirTypeIsAInteger(elem) && !mlirTypeIsAIndex(elem)) {
+    fail(lc, exprSpan(e),
+         "lowering: integer literal mapped to non-integer type");
+    return false;
+  }
+  MlirValue c = makeIntConst(lc, elem, (int64_t)e->as.int_lit.value);
+  *out = (width != 0) ? makeSplat(lc, c, width) : c;
+  return true;
+}
+
+static bool lowerFloatLiteral(LowerCtx &lc, const Expr *e, MlirValue *out) {
+  MlirType t = litType(lc, e);
+  MlirType elem = elementOf(t);
+  if (mlirTypeIsNull(t) || !mlirTypeIsAFloat(elem)) {
+    fail(lc, exprSpan(e), "lowering: float literal without a resolved type");
+    return false;
+  }
+  int64_t width = simdWidth(t);
+  MlirValue c = makeFloatConst(lc, elem, e->as.float_lit.value);
+  *out = (width != 0) ? makeSplat(lc, c, width) : c;
+  return true;
+}
+
+static bool lowerIdentExpr(LowerCtx &lc, const Expr *e, MlirValue *out) {
+  Binding *b = lookup(lc, e->as.ident.name, e->as.ident.name_len);
+  if (!b) {
+    std::string m = "lowering: unbound identifier '";
+    m.append(e->as.ident.name, e->as.ident.name_len);
+    m += "'";
+    fail(lc, exprSpan(e), m);
+    return false;
+  }
+  *out = b->value;
+  return true;
+}
+
+static bool lowerTokenSeed(LowerCtx &lc, MlirValue *out) {
+  MlirType tokTy = mlirWaveMemTokenTypeGet(lc.ctx);
+  MlirOperation op = buildOp(lc, "wave.token", {}, {tokTy});
+  *out = op0(op);
+  return true;
+}
+
+static bool lowerExprInner(LowerCtx &lc, const Expr *e, MlirValue *out) {
+  switch (e->kind) {
+  case EXPR_INT_LIT:
+    return lowerIntLiteral(lc, e, out);
+  case EXPR_FLOAT_LIT:
+    return lowerFloatLiteral(lc, e, out);
+  case EXPR_IDENT:
+    return lowerIdentExpr(lc, e, out);
+  case EXPR_TOKEN_SEED: {
+    return lowerTokenSeed(lc, out);
+  }
+  case EXPR_PAREN:
+    return lowerExpr(lc, e->as.paren, out);
+  case EXPR_UNARY:
+    fail(lc, exprSpan(e), "lowering: unary operators not supported");
+    return false;
+  case EXPR_BINARY:
+    return lowerBinary(lc, e, out);
+  case EXPR_CALL:
+    return lowerCall(lc, e, out);
+  }
+  return false;
+}
+
 static bool lowerExpr(LowerCtx &lc, const Expr *e, MlirValue *out) {
   if (lc.failed)
     return false;
@@ -964,76 +1056,7 @@ static bool lowerExpr(LowerCtx &lc, const Expr *e, MlirValue *out) {
     --lc.depth;
     return false;
   }
-  bool ok = true;
-  switch (e->kind) {
-  case EXPR_INT_LIT: {
-    MlirType t = litType(lc, e);
-    if (mlirTypeIsNull(t)) {
-      fail(lc, exprSpan(e),
-           "lowering: integer literal without a resolved type");
-      ok = false;
-      break;
-    }
-    // A literal whose resolved type is simd broadcasts: scalar const + splat.
-    int64_t width = simdWidth(t);
-    MlirType elem = elementOf(t);
-    if (mlirTypeIsAInteger(elem) || mlirTypeIsAIndex(elem)) {
-      MlirValue c = makeIntConst(lc, elem, (int64_t)e->as.int_lit.value);
-      *out = (width != 0) ? makeSplat(lc, c, width) : c;
-    } else {
-      fail(lc, exprSpan(e),
-           "lowering: integer literal mapped to non-integer type");
-      ok = false;
-    }
-    break;
-  }
-  case EXPR_FLOAT_LIT: {
-    MlirType t = litType(lc, e);
-    MlirType elem = elementOf(t);
-    if (mlirTypeIsNull(t) || !mlirTypeIsAFloat(elem)) {
-      fail(lc, exprSpan(e),
-           "lowering: float literal without a resolved float type");
-      ok = false;
-      break;
-    }
-    int64_t width = simdWidth(t);
-    MlirValue c = makeFloatConst(lc, elem, e->as.float_lit.value);
-    *out = (width != 0) ? makeSplat(lc, c, width) : c;
-    break;
-  }
-  case EXPR_IDENT: {
-    Binding *b = lookup(lc, e->as.ident.name, e->as.ident.name_len);
-    if (!b) {
-      std::string m = "lowering: unbound identifier '";
-      m.append(e->as.ident.name, e->as.ident.name_len);
-      m += "'";
-      fail(lc, exprSpan(e), m);
-      ok = false;
-      break;
-    }
-    *out = b->value;
-    break;
-  }
-  case EXPR_TOKEN_SEED: {
-    MlirType tokTy = mlirWaveMemTokenTypeGet(lc.ctx);
-    MlirOperation op = buildOp(lc, "wave.token", {}, {tokTy});
-    *out = op0(op);
-    break;
-  }
-  case EXPR_PAREN:
-    ok = lowerExpr(lc, e->as.paren, out);
-    break;
-  case EXPR_UNARY:
-    fail(lc, exprSpan(e), "lowering: unary operators not supported");
-    ok = false;
-    break;
-  case EXPR_BINARY:
-    ok = lowerBinary(lc, e, out);
-    break;
-  case EXPR_CALL:
-    ok = lowerCall(lc, e, out);
-    break;
-  }
+  bool ok = lowerExprInner(lc, e, out);
   --lc.depth;
   return ok && !lc.failed;
 }
@@ -1058,43 +1081,75 @@ collectAssignedBlock(const StmtBlock &blk,
     collectAssigned(blk.stmts[i], assigned, declaredInside);
 }
 
+using CollectFn = void (*)(const Stmt *, std::vector<const BoundName *> &,
+                           std::vector<const BoundName *> &);
+
+static void collectDecl(const Stmt *s, std::vector<const BoundName *> &,
+                        std::vector<const BoundName *> &declaredInside) {
+  declaredInside.push_back(&s->as.decl.name);
+}
+
+static void collectDestructure(const Stmt *s, std::vector<const BoundName *> &,
+                               std::vector<const BoundName *> &declaredInside) {
+  for (size_t i = 0; i < s->as.destructure.name_count; ++i)
+    declaredInside.push_back(&s->as.destructure.names[i]);
+}
+
+static void collectAssign(const Stmt *s,
+                          std::vector<const BoundName *> &assigned,
+                          std::vector<const BoundName *> &) {
+  assigned.push_back(&s->as.assign.target);
+}
+
+static void collectCond(const Stmt *s, std::vector<const BoundName *> &assigned,
+                        std::vector<const BoundName *> &declaredInside) {
+  if (s->as.cond.then_block)
+    collectAssignedBlock(s->as.cond.then_block->as.block, assigned,
+                         declaredInside);
+  if (s->as.cond.else_block)
+    collectAssignedBlock(s->as.cond.else_block->as.block, assigned,
+                         declaredInside);
+}
+
+static void collectFor(const Stmt *s, std::vector<const BoundName *> &assigned,
+                       std::vector<const BoundName *> &declaredInside) {
+  if (s->as.for_.body)
+    collectAssignedBlock(s->as.for_.body->as.block, assigned, declaredInside);
+}
+
+static void collectWhile(const Stmt *s,
+                         std::vector<const BoundName *> &assigned,
+                         std::vector<const BoundName *> &declaredInside) {
+  if (s->as.while_.body)
+    collectAssignedBlock(s->as.while_.body->as.block, assigned, declaredInside);
+}
+
+static void collectBlock(const Stmt *s,
+                         std::vector<const BoundName *> &assigned,
+                         std::vector<const BoundName *> &declaredInside) {
+  collectAssignedBlock(s->as.block, assigned, declaredInside);
+}
+
+struct CollectEntry {
+  StmtKind kind;
+  CollectFn fn;
+};
+
+static const CollectEntry kCollectEntries[] = {
+    {STMT_DECL, collectDecl},     {STMT_DESTRUCTURE, collectDestructure},
+    {STMT_ASSIGN, collectAssign}, {STMT_IF, collectCond},
+    {STMT_WHERE, collectCond},    {STMT_FOR, collectFor},
+    {STMT_WHILE, collectWhile},   {STMT_BLOCK, collectBlock},
+};
+
 static void collectAssigned(const Stmt *s,
                             std::vector<const BoundName *> &assigned,
                             std::vector<const BoundName *> &declaredInside) {
-  switch (s->kind) {
-  case STMT_DECL:
-    declaredInside.push_back(&s->as.decl.name);
-    break;
-  case STMT_DESTRUCTURE:
-    for (size_t i = 0; i < s->as.destructure.name_count; ++i)
-      declaredInside.push_back(&s->as.destructure.names[i]);
-    break;
-  case STMT_ASSIGN:
-    assigned.push_back(&s->as.assign.target);
-    break;
-  case STMT_IF:
-  case STMT_WHERE:
-    if (s->as.cond.then_block)
-      collectAssignedBlock(s->as.cond.then_block->as.block, assigned,
-                           declaredInside);
-    if (s->as.cond.else_block)
-      collectAssignedBlock(s->as.cond.else_block->as.block, assigned,
-                           declaredInside);
-    break;
-  case STMT_FOR:
-    if (s->as.for_.body)
-      collectAssignedBlock(s->as.for_.body->as.block, assigned, declaredInside);
-    break;
-  case STMT_WHILE:
-    if (s->as.while_.body)
-      collectAssignedBlock(s->as.while_.body->as.block, assigned,
-                           declaredInside);
-    break;
-  case STMT_BLOCK:
-    collectAssignedBlock(s->as.block, assigned, declaredInside);
-    break;
-  case STMT_CALL:
-    break;
+  for (const CollectEntry &entry : kCollectEntries) {
+    if (entry.kind != s->kind)
+      continue;
+    entry.fn(s, assigned, declaredInside);
+    return;
   }
 }
 
@@ -1208,6 +1263,62 @@ static void emitYield(LowerCtx &lc, MlirBlock blk, bool waveRegion,
   lc.block = saved;
 }
 
+static void fillCarryTypesAndInputs(const std::vector<Carry> &carries,
+                                    std::vector<MlirType> &resultTypes,
+                                    std::vector<MlirValue> &carryIn) {
+  for (const Carry &cy : carries) {
+    resultTypes.push_back(mlirValueGetType(cy.incoming));
+    carryIn.push_back(cy.incoming);
+  }
+}
+
+static MlirBlock appendEmptyBlock(MlirRegion region) {
+  MlirBlock block = mlirBlockCreate(0, nullptr, nullptr);
+  mlirRegionAppendOwnedBlock(region, block);
+  return block;
+}
+
+static void rebindCarriesFromOp(LowerCtx &lc, const std::vector<Carry> &carries,
+                                MlirOperation op) {
+  for (size_t i = 0; i < carries.size(); ++i) {
+    Binding *b = lookup(lc, carries[i].name, carries[i].name_len);
+    if (b)
+      b->value = mlirOperationGetResult(op, (intptr_t)i);
+  }
+}
+
+static bool lowerRegionBody(LowerCtx &lc, MlirBlock block, const Stmt *body,
+                            const std::vector<Carry> &carries,
+                            const std::vector<MlirValue> &carryIn,
+                            bool waveRegion,
+                            std::vector<MlirRegion> cleanupRegions) {
+  std::vector<MlirValue> finals;
+  if (!runBody(lc, block, body, carries, carryIn, finals)) {
+    destroyRegions(cleanupRegions);
+    return false;
+  }
+  emitYield(lc, block, waveRegion, finals);
+  return true;
+}
+
+static bool lowerElseRegion(LowerCtx &lc, MlirBlock block, const Stmt *body,
+                            const std::vector<Carry> &carries,
+                            const std::vector<MlirValue> &carryIn,
+                            bool waveRegion,
+                            std::vector<MlirRegion> cleanupRegions) {
+  std::vector<MlirValue> finals;
+  if (body != nullptr) {
+    if (!runBody(lc, block, body, carries, carryIn, finals)) {
+      destroyRegions(cleanupRegions);
+      return false;
+    }
+  } else {
+    finals = carryIn;
+  }
+  emitYield(lc, block, waveRegion, finals);
+  return true;
+}
+
 static bool lowerWhere(LowerCtx &lc, const Stmt *s) {
   const StmtCond &c = s->as.cond;
   MlirValue mask;
@@ -1220,49 +1331,25 @@ static bool lowerWhere(LowerCtx &lc, const Stmt *s) {
   }
 
   std::vector<Carry> carries = computeCarries(lc, c.then_block, c.else_block);
-
   std::vector<MlirType> resultTypes;
-  for (const Carry &cy : carries)
-    resultTypes.push_back(mlirValueGetType(cy.incoming));
+  std::vector<MlirValue> carryIn;
+  fillCarryTypesAndInputs(carries, resultTypes, carryIn);
 
-  // then region.
   MlirRegion thenRegion = mlirRegionCreate();
-  MlirBlock thenBlk = mlirBlockCreate(0, nullptr, nullptr);
-  mlirRegionAppendOwnedBlock(thenRegion, thenBlk);
-  // otherwise region: always present in generic form; only populated when
-  // there is an explicit otherwise or carries need a carried-in yield.
+  MlirBlock thenBlk = appendEmptyBlock(thenRegion);
   MlirRegion elseRegion = mlirRegionCreate();
   MlirBlock elseBlk{nullptr};
   bool haveElse = (c.else_block != nullptr) || !carries.empty();
-  if (haveElse) {
-    elseBlk = mlirBlockCreate(0, nullptr, nullptr);
-    mlirRegionAppendOwnedBlock(elseRegion, elseBlk);
-  }
+  if (haveElse)
+    elseBlk = appendEmptyBlock(elseRegion);
 
-  std::vector<MlirValue> thenCarryIn;
-  for (const Carry &cy : carries)
-    thenCarryIn.push_back(cy.incoming);
-
-  std::vector<MlirValue> thenFinals;
-  if (!runBody(lc, thenBlk, c.then_block, carries, thenCarryIn, thenFinals)) {
-    destroyRegions({thenRegion, elseRegion});
+  if (!lowerRegionBody(lc, thenBlk, c.then_block, carries, carryIn,
+                       /*waveRegion=*/true, {thenRegion, elseRegion}))
     return false;
-  }
-  emitYield(lc, thenBlk, /*waveRegion=*/true, thenFinals);
-
   if (haveElse) {
-    std::vector<MlirValue> elseFinals;
-    if (c.else_block) {
-      if (!runBody(lc, elseBlk, c.else_block, carries, thenCarryIn,
-                   elseFinals)) {
-        destroyRegions({thenRegion, elseRegion});
-        return false;
-      }
-    } else {
-      // then-only with carries: inactive lanes keep carried-in values.
-      elseFinals = thenCarryIn;
-    }
-    emitYield(lc, elseBlk, /*waveRegion=*/true, elseFinals);
+    if (!lowerElseRegion(lc, elseBlk, c.else_block, carries, carryIn,
+                         /*waveRegion=*/true, {thenRegion, elseRegion}))
+      return false;
   }
 
   std::vector<MlirRegion> regions = {thenRegion, elseRegion};
@@ -1270,13 +1357,7 @@ static bool lowerWhere(LowerCtx &lc, const Stmt *s) {
       buildOp(lc, "wave.where", {mask}, resultTypes, {}, regions);
   if (mlirOperationIsNull(op))
     return false;
-
-  // Rebind carried locals to the where results in the enclosing scope.
-  for (size_t i = 0; i < carries.size(); ++i) {
-    Binding *b = lookup(lc, carries[i].name, carries[i].name_len);
-    if (b)
-      b->value = mlirOperationGetResult(op, (intptr_t)i);
-  }
+  rebindCarriesFromOp(lc, carries, op);
   return true;
 }
 
@@ -1293,97 +1374,86 @@ static bool lowerIf(LowerCtx &lc, const Stmt *s) {
 
   std::vector<Carry> carries = computeCarries(lc, c.then_block, c.else_block);
   std::vector<MlirType> resultTypes;
-  for (const Carry &cy : carries)
-    resultTypes.push_back(mlirValueGetType(cy.incoming));
-
   std::vector<MlirValue> carryIn;
-  for (const Carry &cy : carries)
-    carryIn.push_back(cy.incoming);
+  fillCarryTypesAndInputs(carries, resultTypes, carryIn);
 
   MlirRegion thenRegion = mlirRegionCreate();
-  MlirBlock thenBlk = mlirBlockCreate(0, nullptr, nullptr);
-  mlirRegionAppendOwnedBlock(thenRegion, thenBlk);
+  MlirBlock thenBlk = appendEmptyBlock(thenRegion);
   MlirRegion elseRegion = mlirRegionCreate();
-  // scf.if needs an else region whenever it has results; synthesize one that
-  // yields carried-in when the source has no else.
   bool haveElse = (c.else_block != nullptr) || !carries.empty();
   MlirBlock elseBlk{nullptr};
-  if (haveElse) {
-    elseBlk = mlirBlockCreate(0, nullptr, nullptr);
-    mlirRegionAppendOwnedBlock(elseRegion, elseBlk);
-  }
+  if (haveElse)
+    elseBlk = appendEmptyBlock(elseRegion);
 
-  std::vector<MlirValue> thenFinals;
-  if (!runBody(lc, thenBlk, c.then_block, carries, carryIn, thenFinals)) {
-    destroyRegions({thenRegion, elseRegion});
+  if (!lowerRegionBody(lc, thenBlk, c.then_block, carries, carryIn,
+                       /*waveRegion=*/false, {thenRegion, elseRegion}))
     return false;
-  }
-  emitYield(lc, thenBlk, /*waveRegion=*/false, thenFinals);
-
   if (haveElse) {
-    std::vector<MlirValue> elseFinals;
-    if (c.else_block) {
-      if (!runBody(lc, elseBlk, c.else_block, carries, carryIn, elseFinals)) {
-        destroyRegions({thenRegion, elseRegion});
-        return false;
-      }
-    } else {
-      elseFinals = carryIn;
-    }
-    emitYield(lc, elseBlk, /*waveRegion=*/false, elseFinals);
+    if (!lowerElseRegion(lc, elseBlk, c.else_block, carries, carryIn,
+                         /*waveRegion=*/false, {thenRegion, elseRegion}))
+      return false;
   }
 
   std::vector<MlirRegion> regions = {thenRegion, elseRegion};
   MlirOperation op = buildOp(lc, "scf.if", {cond}, resultTypes, {}, regions);
   if (mlirOperationIsNull(op))
     return false;
-  for (size_t i = 0; i < carries.size(); ++i) {
-    Binding *b = lookup(lc, carries[i].name, carries[i].name_len);
-    if (b)
-      b->value = mlirOperationGetResult(op, (intptr_t)i);
+  rebindCarriesFromOp(lc, carries, op);
+  return true;
+}
+
+struct LoweredForHeader {
+  MlirValue lb;
+  MlirValue ub;
+  MlirValue step;
+  MlirType ivTy;
+};
+
+static bool lowerForHeader(LowerCtx &lc, const Stmt *s,
+                           LoweredForHeader &header) {
+  const StmtFor &f = s->as.for_;
+  if (!lowerExpr(lc, f.lb, &header.lb) || !lowerExpr(lc, f.ub, &header.ub))
+    return false;
+  header.ivTy = lowerType(lc, f.iv_type);
+  if (mlirTypeIsNull(header.ivTy)) {
+    fail(lc, stmtSpan(s), "lowering: unsupported for induction-variable type");
+    return false;
+  }
+  if (f.step) {
+    if (!lowerExpr(lc, f.step, &header.step))
+      return false;
+  } else {
+    header.step = makeIntConst(lc, header.ivTy, 1);
   }
   return true;
 }
 
-static bool lowerFor(LowerCtx &lc, const Stmt *s) {
-  const StmtFor &f = s->as.for_;
-  MlirValue lb, ub;
-  if (!lowerExpr(lc, f.lb, &lb) || !lowerExpr(lc, f.ub, &ub))
-    return false;
-  MlirType ivTy = lowerType(lc, f.iv_type);
-  if (mlirTypeIsNull(ivTy)) {
-    fail(lc, stmtSpan(s), "lowering: unsupported for induction-variable type");
-    return false;
-  }
-  MlirValue step;
-  if (f.step) {
-    if (!lowerExpr(lc, f.step, &step))
-      return false;
-  } else {
-    step = makeIntConst(lc, ivTy, 1);
-  }
-
-  std::vector<Carry> carries = computeCarries(lc, f.body);
-  std::vector<MlirType> resultTypes;
-  for (const Carry &cy : carries)
-    resultTypes.push_back(mlirValueGetType(cy.incoming));
-
-  // Body block args: IV first, then one per carry.
-  std::vector<MlirType> argTypes;
-  std::vector<MlirLocation> argLocs;
+static void makeForBlockArgs(LowerCtx &lc, MlirType ivTy,
+                             const std::vector<Carry> &carries,
+                             std::vector<MlirType> &argTypes,
+                             std::vector<MlirLocation> &argLocs) {
   argTypes.push_back(ivTy);
   argLocs.push_back(lc.loc);
   for (const Carry &cy : carries) {
     argTypes.push_back(mlirValueGetType(cy.incoming));
     argLocs.push_back(lc.loc);
   }
+}
 
-  MlirRegion region = mlirRegionCreate();
+static MlirBlock createForBodyBlock(LowerCtx &lc, MlirType ivTy,
+                                    const std::vector<Carry> &carries,
+                                    MlirRegion region) {
+  std::vector<MlirType> argTypes;
+  std::vector<MlirLocation> argLocs;
+  makeForBlockArgs(lc, ivTy, carries, argTypes, argLocs);
   MlirBlock body = mlirBlockCreate((intptr_t)argTypes.size(), argTypes.data(),
                                    argLocs.data());
   mlirRegionAppendOwnedBlock(region, body);
+  return body;
+}
 
-  // Bind IV name + carries to block args; lower body.
+static bool lowerForBody(LowerCtx &lc, const StmtFor &f, MlirBlock body,
+                         const std::vector<Carry> &carries) {
   std::vector<MlirValue> carryArgs;
   for (size_t i = 0; i < carries.size(); ++i)
     carryArgs.push_back(mlirBlockGetArgument(body, (intptr_t)(i + 1)));
@@ -1397,33 +1467,50 @@ static bool lowerFor(LowerCtx &lc, const Stmt *s) {
     bindNew(lc, carries[i].name, carries[i].name_len, carryArgs[i]);
   bool ok = lowerBlock(lc, f.body);
   std::vector<MlirValue> finals;
-  if (ok)
+  if (ok) {
     for (const Carry &cy : carries) {
       Binding *b = lookup(lc, cy.name, cy.name_len);
       finals.push_back(b ? b->value : cy.incoming);
     }
-  // scf.for body terminator is scf.yield of the carries.
-  if (ok)
     buildOp(lc, "scf.yield", finals, {});
+  }
   lc.env.resize(envMark);
   lc.block = saved;
-  if (!ok) {
+  return ok;
+}
+
+static MlirOperation buildForOp(LowerCtx &lc, const LoweredForHeader &header,
+                                MlirRegion region,
+                                const std::vector<Carry> &carries,
+                                const std::vector<MlirType> &resultTypes) {
+  std::vector<MlirValue> operands = {header.lb, header.ub, header.step};
+  for (const Carry &cy : carries)
+    operands.push_back(cy.incoming);
+  std::vector<MlirRegion> regions = {region};
+  return buildOp(lc, "scf.for", operands, resultTypes, {}, regions);
+}
+
+static bool lowerFor(LowerCtx &lc, const Stmt *s) {
+  const StmtFor &f = s->as.for_;
+  LoweredForHeader header;
+  if (!lowerForHeader(lc, s, header))
+    return false;
+
+  std::vector<Carry> carries = computeCarries(lc, f.body);
+  std::vector<MlirType> resultTypes;
+  for (const Carry &cy : carries)
+    resultTypes.push_back(mlirValueGetType(cy.incoming));
+  MlirRegion region = mlirRegionCreate();
+  MlirBlock body = createForBodyBlock(lc, header.ivTy, carries, region);
+  if (!lowerForBody(lc, f, body, carries)) {
     destroyRegions({region});
     return false;
   }
 
-  std::vector<MlirValue> operands = {lb, ub, step};
-  for (const Carry &cy : carries)
-    operands.push_back(cy.incoming);
-  std::vector<MlirRegion> regions = {region};
-  MlirOperation op = buildOp(lc, "scf.for", operands, resultTypes, {}, regions);
+  MlirOperation op = buildForOp(lc, header, region, carries, resultTypes);
   if (mlirOperationIsNull(op))
     return false;
-  for (size_t i = 0; i < carries.size(); ++i) {
-    Binding *b = lookup(lc, carries[i].name, carries[i].name_len);
-    if (b)
-      b->value = mlirOperationGetResult(op, (intptr_t)i);
-  }
+  rebindCarriesFromOp(lc, carries, op);
   return true;
 }
 
@@ -1453,104 +1540,130 @@ static TokenKind compoundToBinop(TokenKind op) {
   }
 }
 
-static bool lowerStmtImpl(LowerCtx &lc, const Stmt *s) {
-  switch (s->kind) {
-  case STMT_DECL: {
-    MlirValue v;
-    if (!lowerExpr(lc, s->as.decl.init, &v))
-      return false;
-    // Broadcast a scalar initializer to the declared simd type.
-    MlirType declTy = lowerType(lc, s->as.decl.type);
-    if (!mlirTypeIsNull(declTy))
-      v = coerceToType(lc, v, declTy);
-    bindNew(lc, s->as.decl.name.name, s->as.decl.name.name_len, v);
-    return true;
-  }
-  case STMT_DESTRUCTURE: {
-    // Only `load` yields multiple results in v1: (value, token).
-    const Expr *init = s->as.destructure.init;
-    if (init->kind != EXPR_CALL || !identIs(init->as.call.callee, "load")) {
-      fail(lc, stmtSpan(s),
-           "lowering: destructuring only supported for load(...)");
-      return false;
-    }
-    if (s->as.destructure.name_count != 2) {
-      fail(lc, stmtSpan(s),
-           "lowering: load destructure binds exactly (value, token)");
-      return false;
-    }
-    MlirValue value, token;
-    if (!lowerLoad(lc, init->as.call, stmtSpan(s), &value, &token))
-      return false;
-    bindNew(lc, s->as.destructure.names[0].name,
-            s->as.destructure.names[0].name_len, value);
-    bindNew(lc, s->as.destructure.names[1].name,
-            s->as.destructure.names[1].name_len, token);
-    return true;
-  }
-  case STMT_ASSIGN: {
-    const StmtAssign &a = s->as.assign;
-    Binding *b = lookup(lc, a.target.name, a.target.name_len);
-    if (!b) {
-      std::string m = "lowering: assignment to unbound '";
-      m.append(a.target.name, a.target.name_len);
-      m += "'";
-      fail(lc, stmtSpan(s), m);
-      return false;
-    }
-    MlirValue rhs;
-    if (a.op == TOK_ASSIGN) {
-      if (!lowerExpr(lc, a.value, &rhs))
-        return false;
-    } else {
-      // Compound: build (target binop value) using the current binding.
-      TokenKind binop = compoundToBinop(a.op);
-      if (binop == TOK_EOF) {
-        fail(lc, stmtSpan(s), "lowering: unsupported compound assignment");
-        return false;
-      }
-      Expr lhsE;
-      memset(&lhsE, 0, sizeof(lhsE));
-      lhsE.kind = EXPR_IDENT;
-      lhsE.span = a.target.span;
-      lhsE.as.ident.name = a.target.name;
-      lhsE.as.ident.name_len = a.target.name_len;
-      lhsE.sema_type = nullptr;
-      Expr binE;
-      memset(&binE, 0, sizeof(binE));
-      binE.kind = EXPR_BINARY;
-      binE.span = stmtSpan(s);
-      binE.as.binary.op = binop;
-      binE.as.binary.lhs = &lhsE;
-      binE.as.binary.rhs = a.value;
-      binE.sema_type = nullptr;
-      if (!lowerBinary(lc, &binE, &rhs))
-        return false;
-      b = lookup(lc, a.target.name, a.target.name_len);
-    }
-    if (b) {
-      // Broadcast a scalar RHS to the target's simd type (carry shape stays
-      // consistent so the region's yields all agree).
-      b->value = coerceToType(lc, rhs, mlirValueGetType(b->value));
-    }
-    return true;
-  }
-  case STMT_CALL: {
-    MlirValue ignored;
-    return lowerExpr(lc, s->as.call.call, &ignored);
-  }
-  case STMT_IF:
-    return lowerIf(lc, s);
-  case STMT_WHERE:
-    return lowerWhere(lc, s);
-  case STMT_FOR:
-    return lowerFor(lc, s);
-  case STMT_WHILE:
-    fail(lc, stmtSpan(s), "lowering: while loops not supported");
+static bool lowerDeclStmt(LowerCtx &lc, const Stmt *s) {
+  MlirValue v;
+  if (!lowerExpr(lc, s->as.decl.init, &v))
     return false;
-  case STMT_BLOCK:
-    return lowerBlock(lc, s);
+  MlirType declTy = lowerType(lc, s->as.decl.type);
+  if (!mlirTypeIsNull(declTy))
+    v = coerceToType(lc, v, declTy);
+  bindNew(lc, s->as.decl.name.name, s->as.decl.name.name_len, v);
+  return true;
+}
+
+static bool lowerDestructureStmt(LowerCtx &lc, const Stmt *s) {
+  const Expr *init = s->as.destructure.init;
+  if (init->kind != EXPR_CALL || !identIs(init->as.call.callee, "load")) {
+    fail(lc, stmtSpan(s),
+         "lowering: destructuring only supported for load(...)");
+    return false;
   }
+  if (s->as.destructure.name_count != 2) {
+    fail(lc, stmtSpan(s),
+         "lowering: load destructure binds exactly (value, token)");
+    return false;
+  }
+  MlirValue value, token;
+  if (!lowerLoad(lc, init->as.call, stmtSpan(s), &value, &token))
+    return false;
+  bindNew(lc, s->as.destructure.names[0].name,
+          s->as.destructure.names[0].name_len, value);
+  bindNew(lc, s->as.destructure.names[1].name,
+          s->as.destructure.names[1].name_len, token);
+  return true;
+}
+
+static void buildIdentExpr(const StmtAssign &a, Expr &lhsE) {
+  memset(&lhsE, 0, sizeof(lhsE));
+  lhsE.kind = EXPR_IDENT;
+  lhsE.span = a.target.span;
+  lhsE.as.ident.name = a.target.name;
+  lhsE.as.ident.name_len = a.target.name_len;
+  lhsE.sema_type = nullptr;
+}
+
+static bool lowerCompoundAssign(LowerCtx &lc, const Stmt *s, Expr &lhsE,
+                                MlirValue *rhs) {
+  const StmtAssign &a = s->as.assign;
+  TokenKind binop = compoundToBinop(a.op);
+  if (binop == TOK_EOF) {
+    fail(lc, stmtSpan(s), "lowering: unsupported compound assignment");
+    return false;
+  }
+  buildIdentExpr(a, lhsE);
+
+  Expr binE;
+  memset(&binE, 0, sizeof(binE));
+  binE.kind = EXPR_BINARY;
+  binE.span = stmtSpan(s);
+  binE.as.binary.op = binop;
+  binE.as.binary.lhs = &lhsE;
+  binE.as.binary.rhs = a.value;
+  binE.sema_type = nullptr;
+  return lowerBinary(lc, &binE, rhs);
+}
+
+static bool lowerAssignRhs(LowerCtx &lc, const Stmt *s, MlirValue *rhs) {
+  const StmtAssign &a = s->as.assign;
+  if (a.op == TOK_ASSIGN)
+    return lowerExpr(lc, a.value, rhs);
+  Expr lhsE;
+  return lowerCompoundAssign(lc, s, lhsE, rhs);
+}
+
+static bool lowerAssignStmt(LowerCtx &lc, const Stmt *s) {
+  const StmtAssign &a = s->as.assign;
+  Binding *b = lookup(lc, a.target.name, a.target.name_len);
+  if (!b) {
+    std::string m = "lowering: assignment to unbound '";
+    m.append(a.target.name, a.target.name_len);
+    m += "'";
+    fail(lc, stmtSpan(s), m);
+    return false;
+  }
+
+  MlirValue rhs;
+  if (!lowerAssignRhs(lc, s, &rhs))
+    return false;
+  b = lookup(lc, a.target.name, a.target.name_len);
+  if (b)
+    b->value = coerceToType(lc, rhs, mlirValueGetType(b->value));
+  return true;
+}
+
+static bool lowerCallStmt(LowerCtx &lc, const Stmt *s) {
+  MlirValue ignored;
+  return lowerExpr(lc, s->as.call.call, &ignored);
+}
+
+static bool lowerWhileStmt(LowerCtx &lc, const Stmt *s) {
+  fail(lc, stmtSpan(s), "lowering: while loops not supported");
+  return false;
+}
+
+using LowerStmtFn = bool (*)(LowerCtx &, const Stmt *);
+
+struct LowerStmtEntry {
+  StmtKind kind;
+  LowerStmtFn lower;
+};
+
+static const LowerStmtEntry kLowerStmts[] = {
+    {STMT_DECL, lowerDeclStmt},
+    {STMT_DESTRUCTURE, lowerDestructureStmt},
+    {STMT_ASSIGN, lowerAssignStmt},
+    {STMT_CALL, lowerCallStmt},
+    {STMT_IF, lowerIf},
+    {STMT_WHERE, lowerWhere},
+    {STMT_FOR, lowerFor},
+    {STMT_WHILE, lowerWhileStmt},
+    {STMT_BLOCK, lowerBlock},
+};
+
+static bool lowerStmtImpl(LowerCtx &lc, const Stmt *s) {
+  for (const LowerStmtEntry &entry : kLowerStmts)
+    if (entry.kind == s->kind)
+      return entry.lower(lc, s);
   fail(lc, stmtSpan(s), "lowering: unknown statement");
   return false;
 }

@@ -162,106 +162,40 @@ static const char *builder_finish(Builder *b) {
 /* Spelling tables                                                       */
 /*===----------------------------------------------------------------===*/
 
-/* Canonical spelling of a ScalarKind (the surface keyword). */
+static const char *const kScalarNames[] = {
+    [SCALAR_BOOL] = "bool",       [SCALAR_HALF] = "half",
+    [SCALAR_FLOAT] = "float",     [SCALAR_INDEX] = "index",
+    [SCALAR_TOKEN] = "token",     [SCALAR_INT8] = "int8_t",
+    [SCALAR_INT16] = "int16_t",   [SCALAR_INT32] = "int32_t",
+    [SCALAR_INT64] = "int64_t",   [SCALAR_UINT8] = "uint8_t",
+    [SCALAR_UINT16] = "uint16_t", [SCALAR_UINT32] = "uint32_t",
+    [SCALAR_UINT64] = "uint64_t",
+};
+
 static const char *scalar_name(ScalarKind k) {
-  switch (k) {
-  case SCALAR_BOOL:
-    return "bool";
-  case SCALAR_HALF:
-    return "half";
-  case SCALAR_FLOAT:
-    return "float";
-  case SCALAR_INDEX:
-    return "index";
-  case SCALAR_TOKEN:
-    return "token";
-  case SCALAR_INT8:
-    return "int8_t";
-  case SCALAR_INT16:
-    return "int16_t";
-  case SCALAR_INT32:
-    return "int32_t";
-  case SCALAR_INT64:
-    return "int64_t";
-  case SCALAR_UINT8:
-    return "uint8_t";
-  case SCALAR_UINT16:
-    return "uint16_t";
-  case SCALAR_UINT32:
-    return "uint32_t";
-  case SCALAR_UINT64:
-    return "uint64_t";
-  }
+  if ((unsigned)k < sizeof(kScalarNames) / sizeof(kScalarNames[0]) &&
+      kScalarNames[k] != NULL)
+    return kScalarNames[k];
   return "?";
 }
 
-/* Spelling of a binary/unary/assign operator TokenKind as it appears in
- * source. Used so the dump echoes operators readably and deterministically. */
+static const char *const kOpNames[TOK__COUNT] = {
+    [TOK_PLUS] = "+",      [TOK_MINUS] = "-",     [TOK_STAR] = "*",
+    [TOK_SLASH] = "/",     [TOK_PERCENT] = "%",   [TOK_SHL] = "<<",
+    [TOK_SHR] = ">>",      [TOK_LT] = "<",        [TOK_LE] = "<=",
+    [TOK_GT] = ">",        [TOK_GE] = ">=",       [TOK_EQ] = "==",
+    [TOK_NE] = "!=",       [TOK_AMP] = "&",       [TOK_PIPE] = "|",
+    [TOK_CARET] = "^",     [TOK_TILDE] = "~",     [TOK_BANG] = "!",
+    [TOK_AMPAMP] = "&&",   [TOK_PIPEPIPE] = "||", [TOK_ASSIGN] = "=",
+    [TOK_PLUS_EQ] = "+=",  [TOK_MINUS_EQ] = "-=", [TOK_STAR_EQ] = "*=",
+    [TOK_SLASH_EQ] = "/=", [TOK_AMP_EQ] = "&=",   [TOK_PIPE_EQ] = "|=",
+    [TOK_CARET_EQ] = "^=", [TOK_SHL_EQ] = "<<=",  [TOK_SHR_EQ] = ">>=",
+};
+
 static const char *op_name(TokenKind k) {
-  switch (k) {
-  case TOK_PLUS:
-    return "+";
-  case TOK_MINUS:
-    return "-";
-  case TOK_STAR:
-    return "*";
-  case TOK_SLASH:
-    return "/";
-  case TOK_PERCENT:
-    return "%";
-  case TOK_SHL:
-    return "<<";
-  case TOK_SHR:
-    return ">>";
-  case TOK_LT:
-    return "<";
-  case TOK_LE:
-    return "<=";
-  case TOK_GT:
-    return ">";
-  case TOK_GE:
-    return ">=";
-  case TOK_EQ:
-    return "==";
-  case TOK_NE:
-    return "!=";
-  case TOK_AMP:
-    return "&";
-  case TOK_PIPE:
-    return "|";
-  case TOK_CARET:
-    return "^";
-  case TOK_TILDE:
-    return "~";
-  case TOK_BANG:
-    return "!";
-  case TOK_AMPAMP:
-    return "&&";
-  case TOK_PIPEPIPE:
-    return "||";
-  case TOK_ASSIGN:
-    return "=";
-  case TOK_PLUS_EQ:
-    return "+=";
-  case TOK_MINUS_EQ:
-    return "-=";
-  case TOK_STAR_EQ:
-    return "*=";
-  case TOK_SLASH_EQ:
-    return "/=";
-  case TOK_AMP_EQ:
-    return "&=";
-  case TOK_PIPE_EQ:
-    return "|=";
-  case TOK_CARET_EQ:
-    return "^=";
-  case TOK_SHL_EQ:
-    return "<<=";
-  case TOK_SHR_EQ:
-    return ">>=";
-  default:
-    return "?";
-  }
+  if ((unsigned)k < TOK__COUNT && kOpNames[k] != NULL)
+    return kOpNames[k];
+  return "?";
 }
 
 /*===----------------------------------------------------------------===*/
@@ -491,6 +425,125 @@ static void dump_call(Builder *b, const Expr *e, int level,
   builder_putc(b, ')');
 }
 
+static void dump_int_expr(Builder *b, const Expr *e,
+                          const AstDumpOptions *opts) {
+  builder_puts(b, "(int ");
+  builder_put_u64(b, e->as.int_lit.value);
+  if (e->as.int_lit.is_hex)
+    builder_puts(b, " hex");
+  if (opts->include_types)
+    dump_type_annotation(b, e);
+  builder_putc(b, ')');
+}
+
+static void dump_float_expr(Builder *b, const Expr *e,
+                            const AstDumpOptions *opts) {
+  builder_puts(b, "(float ");
+  builder_put_double(b, e->as.float_lit.value);
+  if (e->as.float_lit.has_f_suffix)
+    builder_puts(b, " f");
+  if (opts->include_types)
+    dump_type_annotation(b, e);
+  builder_putc(b, ')');
+}
+
+static void dump_ident_expr(Builder *b, const Expr *e,
+                            const AstDumpOptions *opts) {
+  builder_puts(b, "(ident ");
+  builder_put_quoted(b, e->as.ident.name, e->as.ident.name_len);
+  if (opts->include_types)
+    dump_type_annotation(b, e);
+  builder_putc(b, ')');
+}
+
+static void dump_paren_expr(Builder *b, const Expr *e, int level,
+                            const AstDumpOptions *opts) {
+  builder_puts(b, "(paren");
+  if (opts->include_types)
+    dump_type_annotation(b, e);
+  builder_putc(b, '\n');
+  dump_expr(b, e->as.paren, level + 1, opts);
+  builder_putc(b, '\n');
+  builder_indent(b, level);
+  builder_putc(b, ')');
+}
+
+static void dump_unary_expr(Builder *b, const Expr *e, int level,
+                            const AstDumpOptions *opts) {
+  builder_puts(b, "(unary \"");
+  builder_puts(b, op_name(e->as.unary.op));
+  builder_putc(b, '"');
+  if (opts->include_types)
+    dump_type_annotation(b, e);
+  builder_putc(b, '\n');
+  dump_expr(b, e->as.unary.operand, level + 1, opts);
+  builder_putc(b, '\n');
+  builder_indent(b, level);
+  builder_putc(b, ')');
+}
+
+static void dump_binary_expr(Builder *b, const Expr *e, int level,
+                             const AstDumpOptions *opts) {
+  builder_puts(b, "(binary \"");
+  builder_puts(b, op_name(e->as.binary.op));
+  builder_putc(b, '"');
+  if (opts->include_types)
+    dump_type_annotation(b, e);
+  builder_putc(b, '\n');
+  dump_expr(b, e->as.binary.lhs, level + 1, opts);
+  builder_putc(b, '\n');
+  dump_expr(b, e->as.binary.rhs, level + 1, opts);
+  builder_putc(b, '\n');
+  builder_indent(b, level);
+  builder_putc(b, ')');
+}
+
+static void dump_int_expr_dispatch(Builder *b, const Expr *e, int level,
+                                   const AstDumpOptions *opts) {
+  (void)level;
+  dump_int_expr(b, e, opts);
+}
+
+static void dump_float_expr_dispatch(Builder *b, const Expr *e, int level,
+                                     const AstDumpOptions *opts) {
+  (void)level;
+  dump_float_expr(b, e, opts);
+}
+
+static void dump_ident_expr_dispatch(Builder *b, const Expr *e, int level,
+                                     const AstDumpOptions *opts) {
+  (void)level;
+  dump_ident_expr(b, e, opts);
+}
+
+static void dump_token_seed_expr(Builder *b, const Expr *e, int level,
+                                 const AstDumpOptions *opts) {
+  (void)level;
+  builder_puts(b, "(token-seed");
+  if (opts->include_types)
+    dump_type_annotation(b, e);
+  builder_putc(b, ')');
+}
+
+typedef void (*DumpExprFn)(Builder *, const Expr *, int,
+                           const AstDumpOptions *);
+
+typedef struct ExprDumpEntry {
+  ExprKind kind;
+  DumpExprFn dump;
+} ExprDumpEntry;
+
+static const ExprDumpEntry kExprDumpers[] = {
+    {EXPR_INT_LIT, dump_int_expr_dispatch},
+    {EXPR_FLOAT_LIT, dump_float_expr_dispatch},
+    {EXPR_IDENT, dump_ident_expr_dispatch},
+    {EXPR_TOKEN_SEED, dump_token_seed_expr},
+    {EXPR_PAREN, dump_paren_expr},
+    {EXPR_UNARY, dump_unary_expr},
+    {EXPR_BINARY, dump_binary_expr},
+    {EXPR_CALL, dump_call},
+};
+
 static void dump_expr(Builder *b, const Expr *e, int level,
                       const AstDumpOptions *opts) {
   builder_indent(b, level);
@@ -499,78 +552,9 @@ static void dump_expr(Builder *b, const Expr *e, int level,
     return;
   }
 
-  switch (e->kind) {
-  case EXPR_INT_LIT:
-    builder_puts(b, "(int ");
-    builder_put_u64(b, e->as.int_lit.value);
-    if (e->as.int_lit.is_hex)
-      builder_puts(b, " hex");
-    if (opts->include_types)
-      dump_type_annotation(b, e);
-    builder_putc(b, ')');
-    break;
-  case EXPR_FLOAT_LIT:
-    builder_puts(b, "(float ");
-    builder_put_double(b, e->as.float_lit.value);
-    if (e->as.float_lit.has_f_suffix)
-      builder_puts(b, " f");
-    if (opts->include_types)
-      dump_type_annotation(b, e);
-    builder_putc(b, ')');
-    break;
-  case EXPR_IDENT:
-    builder_puts(b, "(ident ");
-    builder_put_quoted(b, e->as.ident.name, e->as.ident.name_len);
-    if (opts->include_types)
-      dump_type_annotation(b, e);
-    builder_putc(b, ')');
-    break;
-  case EXPR_TOKEN_SEED:
-    builder_puts(b, "(token-seed");
-    if (opts->include_types)
-      dump_type_annotation(b, e);
-    builder_putc(b, ')');
-    break;
-  case EXPR_PAREN:
-    builder_puts(b, "(paren");
-    if (opts->include_types)
-      dump_type_annotation(b, e);
-    builder_putc(b, '\n');
-    dump_expr(b, e->as.paren, level + 1, opts);
-    builder_putc(b, '\n');
-    builder_indent(b, level);
-    builder_putc(b, ')');
-    break;
-  case EXPR_UNARY:
-    builder_puts(b, "(unary \"");
-    builder_puts(b, op_name(e->as.unary.op));
-    builder_putc(b, '"');
-    if (opts->include_types)
-      dump_type_annotation(b, e);
-    builder_putc(b, '\n');
-    dump_expr(b, e->as.unary.operand, level + 1, opts);
-    builder_putc(b, '\n');
-    builder_indent(b, level);
-    builder_putc(b, ')');
-    break;
-  case EXPR_BINARY:
-    builder_puts(b, "(binary \"");
-    builder_puts(b, op_name(e->as.binary.op));
-    builder_putc(b, '"');
-    if (opts->include_types)
-      dump_type_annotation(b, e);
-    builder_putc(b, '\n');
-    dump_expr(b, e->as.binary.lhs, level + 1, opts);
-    builder_putc(b, '\n');
-    dump_expr(b, e->as.binary.rhs, level + 1, opts);
-    builder_putc(b, '\n');
-    builder_indent(b, level);
-    builder_putc(b, ')');
-    break;
-  case EXPR_CALL:
-    dump_call(b, e, level, opts);
-    break;
-  }
+  for (size_t i = 0; i < sizeof(kExprDumpers) / sizeof(kExprDumpers[0]); ++i)
+    if (kExprDumpers[i].kind == e->kind)
+      kExprDumpers[i].dump(b, e, level, opts);
 }
 
 /*===----------------------------------------------------------------===*/
@@ -610,6 +594,140 @@ static void dump_block_body(Builder *b, const Stmt *blk, int level,
   builder_putc(b, ')');
 }
 
+static void dump_decl_stmt(Builder *b, const Stmt *s, int level,
+                           const AstDumpOptions *opts) {
+  builder_puts(b, "(decl ");
+  dump_type(b, s->as.decl.type);
+  builder_putc(b, ' ');
+  dump_bound_name(b, &s->as.decl.name);
+  builder_putc(b, '\n');
+  dump_expr(b, s->as.decl.init, level + 1, opts);
+  builder_putc(b, '\n');
+  builder_indent(b, level);
+  builder_putc(b, ')');
+}
+
+static void dump_destructure_stmt(Builder *b, const Stmt *s, int level,
+                                  const AstDumpOptions *opts) {
+  size_t i;
+  builder_puts(b, "(destructure (names");
+  for (i = 0; i < s->as.destructure.name_count; i++) {
+    builder_putc(b, ' ');
+    dump_bound_name(b, &s->as.destructure.names[i]);
+  }
+  builder_puts(b, ")\n");
+  dump_expr(b, s->as.destructure.init, level + 1, opts);
+  builder_putc(b, '\n');
+  builder_indent(b, level);
+  builder_putc(b, ')');
+}
+
+static void dump_assign_stmt(Builder *b, const Stmt *s, int level,
+                             const AstDumpOptions *opts) {
+  builder_puts(b, "(assign \"");
+  builder_puts(b, op_name(s->as.assign.op));
+  builder_puts(b, "\" ");
+  dump_bound_name(b, &s->as.assign.target);
+  builder_putc(b, '\n');
+  dump_expr(b, s->as.assign.value, level + 1, opts);
+  builder_putc(b, '\n');
+  builder_indent(b, level);
+  builder_putc(b, ')');
+}
+
+static void dump_call_stmt(Builder *b, const Stmt *s, int level,
+                           const AstDumpOptions *opts) {
+  builder_puts(b, "(call-stmt\n");
+  dump_expr(b, s->as.call.call, level + 1, opts);
+  builder_putc(b, '\n');
+  builder_indent(b, level);
+  builder_putc(b, ')');
+}
+
+static void dump_cond_header(Builder *b, const Expr *cond, int level,
+                             const AstDumpOptions *opts) {
+  builder_indent(b, level + 1);
+  builder_puts(b, "(cond\n");
+  dump_expr(b, cond, level + 2, opts);
+  builder_putc(b, '\n');
+  builder_indent(b, level + 1);
+  builder_puts(b, ")\n");
+}
+
+static void dump_cond_stmt(Builder *b, const Stmt *s, int level,
+                           const AstDumpOptions *opts) {
+  builder_puts(b, s->kind == STMT_IF ? "(if\n" : "(where\n");
+  dump_cond_header(b, s->as.cond.cond, level, opts);
+  builder_indent(b, level + 1);
+  dump_block_body(b, s->as.cond.then_block, level + 1, opts);
+  if (s->as.cond.else_block != NULL) {
+    builder_putc(b, '\n');
+    builder_indent(b, level + 1);
+    builder_puts(b, s->kind == STMT_IF ? "(else " : "(otherwise ");
+    dump_block_body(b, s->as.cond.else_block, level + 1, opts);
+    builder_putc(b, ')');
+  }
+  builder_putc(b, '\n');
+  builder_indent(b, level);
+  builder_putc(b, ')');
+}
+
+static void dump_for_bound(Builder *b, const char *tag, const Expr *expr,
+                           int level, const AstDumpOptions *opts) {
+  builder_indent(b, level + 1);
+  builder_puts(b, tag);
+  builder_putc(b, '\n');
+  dump_expr(b, expr, level + 2, opts);
+  builder_putc(b, '\n');
+  builder_indent(b, level + 1);
+  builder_puts(b, ")\n");
+}
+
+static void dump_for_stmt(Builder *b, const Stmt *s, int level,
+                          const AstDumpOptions *opts) {
+  builder_puts(b, "(for ");
+  dump_type(b, s->as.for_.iv_type);
+  builder_putc(b, ' ');
+  dump_bound_name(b, &s->as.for_.iv_name);
+  builder_putc(b, '\n');
+  dump_for_bound(b, "(lb", s->as.for_.lb, level, opts);
+  dump_for_bound(b, "(ub", s->as.for_.ub, level, opts);
+  if (s->as.for_.step != NULL)
+    dump_for_bound(b, "(step", s->as.for_.step, level, opts);
+  builder_indent(b, level + 1);
+  dump_block_body(b, s->as.for_.body, level + 1, opts);
+  builder_putc(b, '\n');
+  builder_indent(b, level);
+  builder_putc(b, ')');
+}
+
+static void dump_while_stmt(Builder *b, const Stmt *s, int level,
+                            const AstDumpOptions *opts) {
+  builder_puts(b, "(while\n");
+  dump_cond_header(b, s->as.while_.cond, level, opts);
+  builder_indent(b, level + 1);
+  dump_block_body(b, s->as.while_.body, level + 1, opts);
+  builder_putc(b, '\n');
+  builder_indent(b, level);
+  builder_putc(b, ')');
+}
+
+typedef void (*DumpStmtFn)(Builder *, const Stmt *, int,
+                           const AstDumpOptions *);
+
+typedef struct StmtDumpEntry {
+  StmtKind kind;
+  DumpStmtFn dump;
+} StmtDumpEntry;
+
+static const StmtDumpEntry kStmtDumpers[] = {
+    {STMT_DECL, dump_decl_stmt},     {STMT_DESTRUCTURE, dump_destructure_stmt},
+    {STMT_ASSIGN, dump_assign_stmt}, {STMT_CALL, dump_call_stmt},
+    {STMT_IF, dump_cond_stmt},       {STMT_WHERE, dump_cond_stmt},
+    {STMT_FOR, dump_for_stmt},       {STMT_WHILE, dump_while_stmt},
+    {STMT_BLOCK, dump_block_body},
+};
+
 static void dump_stmt(Builder *b, const Stmt *s, int level,
                       const AstDumpOptions *opts) {
   builder_indent(b, level);
@@ -618,129 +736,9 @@ static void dump_stmt(Builder *b, const Stmt *s, int level,
     return;
   }
 
-  switch (s->kind) {
-  case STMT_DECL:
-    builder_puts(b, "(decl ");
-    dump_type(b, s->as.decl.type);
-    builder_putc(b, ' ');
-    dump_bound_name(b, &s->as.decl.name);
-    builder_putc(b, '\n');
-    dump_expr(b, s->as.decl.init, level + 1, opts);
-    builder_putc(b, '\n');
-    builder_indent(b, level);
-    builder_putc(b, ')');
-    break;
-  case STMT_DESTRUCTURE: {
-    size_t i;
-    builder_puts(b, "(destructure (names");
-    for (i = 0; i < s->as.destructure.name_count; i++) {
-      builder_putc(b, ' ');
-      dump_bound_name(b, &s->as.destructure.names[i]);
-    }
-    builder_puts(b, ")\n");
-    dump_expr(b, s->as.destructure.init, level + 1, opts);
-    builder_putc(b, '\n');
-    builder_indent(b, level);
-    builder_putc(b, ')');
-    break;
-  }
-  case STMT_ASSIGN:
-    builder_puts(b, "(assign \"");
-    builder_puts(b, op_name(s->as.assign.op));
-    builder_puts(b, "\" ");
-    dump_bound_name(b, &s->as.assign.target);
-    builder_putc(b, '\n');
-    dump_expr(b, s->as.assign.value, level + 1, opts);
-    builder_putc(b, '\n');
-    builder_indent(b, level);
-    builder_putc(b, ')');
-    break;
-  case STMT_CALL:
-    builder_puts(b, "(call-stmt\n");
-    dump_expr(b, s->as.call.call, level + 1, opts);
-    builder_putc(b, '\n');
-    builder_indent(b, level);
-    builder_putc(b, ')');
-    break;
-  case STMT_IF:
-  case STMT_WHERE:
-    builder_puts(b, s->kind == STMT_IF ? "(if\n" : "(where\n");
-    /* condition */
-    builder_indent(b, level + 1);
-    builder_puts(b, "(cond\n");
-    dump_expr(b, s->as.cond.cond, level + 2, opts);
-    builder_putc(b, '\n');
-    builder_indent(b, level + 1);
-    builder_puts(b, ")\n");
-    /* then */
-    builder_indent(b, level + 1);
-    dump_block_body(b, s->as.cond.then_block, level + 1, opts);
-    /* optional else/otherwise */
-    if (s->as.cond.else_block != NULL) {
-      builder_putc(b, '\n');
-      builder_indent(b, level + 1);
-      builder_puts(b, s->kind == STMT_IF ? "(else " : "(otherwise ");
-      dump_block_body(b, s->as.cond.else_block, level + 1, opts);
-      builder_putc(b, ')');
-    }
-    builder_putc(b, '\n');
-    builder_indent(b, level);
-    builder_putc(b, ')');
-    break;
-  case STMT_FOR:
-    builder_puts(b, "(for ");
-    dump_type(b, s->as.for_.iv_type);
-    builder_putc(b, ' ');
-    dump_bound_name(b, &s->as.for_.iv_name);
-    builder_putc(b, '\n');
-    /* lb */
-    builder_indent(b, level + 1);
-    builder_puts(b, "(lb\n");
-    dump_expr(b, s->as.for_.lb, level + 2, opts);
-    builder_putc(b, '\n');
-    builder_indent(b, level + 1);
-    builder_puts(b, ")\n");
-    /* ub */
-    builder_indent(b, level + 1);
-    builder_puts(b, "(ub\n");
-    dump_expr(b, s->as.for_.ub, level + 2, opts);
-    builder_putc(b, '\n');
-    builder_indent(b, level + 1);
-    builder_puts(b, ")\n");
-    /* optional step */
-    if (s->as.for_.step != NULL) {
-      builder_indent(b, level + 1);
-      builder_puts(b, "(step\n");
-      dump_expr(b, s->as.for_.step, level + 2, opts);
-      builder_putc(b, '\n');
-      builder_indent(b, level + 1);
-      builder_puts(b, ")\n");
-    }
-    /* body */
-    builder_indent(b, level + 1);
-    dump_block_body(b, s->as.for_.body, level + 1, opts);
-    builder_putc(b, '\n');
-    builder_indent(b, level);
-    builder_putc(b, ')');
-    break;
-  case STMT_WHILE:
-    builder_puts(b, "(while\n");
-    builder_indent(b, level + 1);
-    builder_puts(b, "(cond\n");
-    dump_expr(b, s->as.while_.cond, level + 2, opts);
-    builder_putc(b, '\n');
-    builder_indent(b, level + 1);
-    builder_puts(b, ")\n");
-    builder_indent(b, level + 1);
-    dump_block_body(b, s->as.while_.body, level + 1, opts);
-    builder_putc(b, '\n');
-    builder_indent(b, level);
-    builder_putc(b, ')');
-    break;
-  case STMT_BLOCK:
-    dump_block_body(b, s, level, opts);
-    break;
-  }
+  for (size_t i = 0; i < sizeof(kStmtDumpers) / sizeof(kStmtDumpers[0]); ++i)
+    if (kStmtDumpers[i].kind == s->kind)
+      kStmtDumpers[i].dump(b, s, level, opts);
 }
 
 /*===----------------------------------------------------------------===*/

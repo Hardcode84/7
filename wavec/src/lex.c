@@ -253,69 +253,73 @@ static void lex_ident(Scanner *s) {
  * are surfaced as TOK_ERROR with a diagnostic -- a clear error, never a
  * silent or faked acceptance.
  */
+static int lex_hex_number(Scanner *s, uint32_t off, uint32_t line,
+                          uint32_t col) {
+  if (peek(s, 0) != '0' || (peek(s, 1) != 'x' && peek(s, 1) != 'X'))
+    return 0;
+  advance_n(s, 2);
+  if (!is_hex_digit(peek(s, 0))) {
+    while (is_ident_continue(peek(s, 0)))
+      advance(s);
+    lex_error(s, off, line, col,
+              "hex literal needs at least one hex digit after 0x");
+    emit(s, TOK_ERROR, off, line, col);
+    return 1;
+  }
+  while (is_hex_digit(peek(s, 0)))
+    advance(s);
+  emit(s, TOK_INT_LIT, off, line, col);
+  return 1;
+}
+
+static int lex_fraction(Scanner *s) {
+  if (peek(s, 0) == '.' && is_digit(peek(s, 1))) {
+    advance(s);
+    while (is_digit(peek(s, 0)))
+      advance(s);
+    return 1;
+  }
+  return 0;
+}
+
+static int lex_exponent(Scanner *s) {
+  if (peek(s, 0) == 'e' || peek(s, 0) == 'E') {
+    size_t sign_at = (peek(s, 1) == '+' || peek(s, 1) == '-') ? 1u : 0u;
+    if (is_digit(peek(s, 1u + sign_at))) {
+      advance(s);
+      if (sign_at != 0u)
+        advance(s);
+      while (is_digit(peek(s, 0)))
+        advance(s);
+      return 1;
+    }
+  }
+  return 0;
+}
+
+static int lex_decimal_tail(Scanner *s) {
+  int is_float;
+  while (is_digit(peek(s, 0)))
+    advance(s);
+
+  is_float = lex_fraction(s);
+  if (lex_exponent(s))
+    is_float = 1;
+
+  if (is_float && peek(s, 0) == 'f')
+    advance(s);
+  return is_float;
+}
+
 static void lex_number(Scanner *s) {
   uint32_t off = (uint32_t)s->pos;
   uint32_t line = s->line;
   uint32_t col = s->col;
-  int is_float = 0;
+  int is_float;
 
-  /* Hex: "0x" / "0X" then one-or-more hex digits. Hex has no float form. */
-  if (peek(s, 0) == '0' && (peek(s, 1) == 'x' || peek(s, 1) == 'X')) {
-    advance(s); /* 0 */
-    advance(s); /* x */
-    if (!is_hex_digit(peek(s, 0))) {
-      /* "0x" with no following hex digit: consume any trailing ident-ish
-       * bytes so the error span is the whole bogus token, then report. */
-      while (is_ident_continue(peek(s, 0)))
-        advance(s);
-      lex_error(s, off, line, col,
-                "hex literal needs at least one hex digit after 0x");
-      emit(s, TOK_ERROR, off, line, col);
-      return;
-    }
-    while (is_hex_digit(peek(s, 0)))
-      advance(s);
-    emit(s, TOK_INT_LIT, off, line, col);
+  if (lex_hex_number(s, off, line, col))
     return;
-  }
-
-  /* Decimal integer part. */
-  while (is_digit(peek(s, 0)))
-    advance(s);
-
-  /* Fraction: only if the '.' is immediately followed by a digit. A '.'
-   * followed by another '.' (the range token) or by a non-digit leaves
-   * the integer intact -- this is the "0..n" vs "0.5" rule. */
-  if (peek(s, 0) == '.' && is_digit(peek(s, 1))) {
-    is_float = 1;
-    advance(s); /* '.' */
-    while (is_digit(peek(s, 0)))
-      advance(s);
-  }
-
-  /* Exponent: "e"/"E" [sign] digit {digit}. Valid after an integer part
-   * (the exponent-only float, "1e9") or after a fraction. */
-  if (peek(s, 0) == 'e' || peek(s, 0) == 'E') {
-    size_t sign_at = (peek(s, 1) == '+' || peek(s, 1) == '-') ? 1u : 0u;
-    if (is_digit(peek(s, 1u + sign_at))) {
-      is_float = 1;
-      advance(s); /* e/E */
-      if (sign_at != 0u)
-        advance(s); /* sign */
-      while (is_digit(peek(s, 0)))
-        advance(s);
-    }
-    /* An 'e' with no following digits is not an exponent: leave it for
-     * the next token (it will lex as an identifier). The number so far
-     * is a valid int or float without the exponent. */
-  }
-
-  /* Optional 'f' float suffix. Only a float may take it; "3f" is not a
-   * valid token in this grammar (no integer 'f' suffix), so an 'f' right
-   * after a bare integer is left to lex as a separate identifier. */
-  if (is_float && peek(s, 0) == 'f')
-    advance(s);
-
+  is_float = lex_decimal_tail(s);
   emit(s, is_float ? TOK_FLOAT_LIT : TOK_INT_LIT, off, line, col);
 }
 
@@ -360,226 +364,60 @@ static int skip_block_comment(Scanner *s) {
  * token). The caller has already ruled out whitespace, comments,
  * identifiers and numbers, so `c` is a punctuation lead byte (or junk).
  */
+typedef struct PunctRule {
+  const char *text;
+  TokenKind kind;
+} PunctRule;
+
+static const PunctRule kPunctRules[] = {
+    {"<<=", TOK_SHL_EQ},  {">>=", TOK_SHR_EQ}, {"[[", TOK_LATTR},
+    {"]]", TOK_RATTR},    {"..", TOK_DOTDOT},  {"+=", TOK_PLUS_EQ},
+    {"-=", TOK_MINUS_EQ}, {"->", TOK_ARROW},   {"*=", TOK_STAR_EQ},
+    {"/=", TOK_SLASH_EQ}, {"<<", TOK_SHL},     {">>", TOK_SHR},
+    {"<=", TOK_LE},       {">=", TOK_GE},      {"==", TOK_EQ},
+    {"!=", TOK_NE},       {"&&", TOK_AMPAMP},  {"&=", TOK_AMP_EQ},
+    {"||", TOK_PIPEPIPE}, {"|=", TOK_PIPE_EQ}, {"^=", TOK_CARET_EQ},
+    {"(", TOK_LPAREN},    {")", TOK_RPAREN},   {"{", TOK_LBRACE},
+    {"}", TOK_RBRACE},    {"[", TOK_LBRACKET}, {"]", TOK_RBRACKET},
+    {",", TOK_COMMA},     {";", TOK_SEMI},     {"+", TOK_PLUS},
+    {"-", TOK_MINUS},     {"*", TOK_STAR},     {"/", TOK_SLASH},
+    {"%", TOK_PERCENT},   {"<", TOK_LT},       {">", TOK_GT},
+    {"=", TOK_ASSIGN},    {"!", TOK_BANG},     {"&", TOK_AMP},
+    {"|", TOK_PIPE},      {"^", TOK_CARET},    {"~", TOK_TILDE},
+};
+
+static int punct_matches(Scanner *s, const char *text) {
+  size_t i;
+  for (i = 0; text[i] != '\0'; i++) {
+    if (peek(s, i) != (unsigned char)text[i])
+      return 0;
+  }
+  return 1;
+}
+
 static void lex_punct(Scanner *s) {
   uint32_t off = (uint32_t)s->pos;
   uint32_t line = s->line;
   uint32_t col = s->col;
   int c = peek(s, 0);
-  int c1 = peek(s, 1);
-  int c2 = peek(s, 2);
 
-  switch (c) {
-  case '(':
-    advance(s);
-    emit(s, TOK_LPAREN, off, line, col);
-    return;
-  case ')':
-    advance(s);
-    emit(s, TOK_RPAREN, off, line, col);
-    return;
-  case '{':
-    advance(s);
-    emit(s, TOK_LBRACE, off, line, col);
-    return;
-  case '}':
-    advance(s);
-    emit(s, TOK_RBRACE, off, line, col);
-    return;
-  case '[':
-    if (c1 == '[') { /* "[[" attribute open. */
-      advance_n(s, 2);
-      emit(s, TOK_LATTR, off, line, col);
-      return;
-    }
-    advance(s);
-    emit(s, TOK_LBRACKET, off, line, col);
-    return;
-  case ']':
-    if (c1 == ']') { /* "]]" attribute close. */
-      advance_n(s, 2);
-      emit(s, TOK_RATTR, off, line, col);
-      return;
-    }
-    advance(s);
-    emit(s, TOK_RBRACKET, off, line, col);
-    return;
-  case ',':
-    advance(s);
-    emit(s, TOK_COMMA, off, line, col);
-    return;
-  case ';':
-    advance(s);
-    emit(s, TOK_SEMI, off, line, col);
-    return;
-  case '.':
-    if (c1 == '.') { /* ".." range token (maximal munch; never a float). */
-      advance_n(s, 2);
-      emit(s, TOK_DOTDOT, off, line, col);
-      return;
-    }
-    /* A lone '.' is not a token in this grammar (a float keeps its dot
-     * via lex_number; ".5"/"0." do not occur). Report and recover. */
-    advance(s);
-    lex_error(s, off, line, col, "stray '.' is not a valid token");
-    emit(s, TOK_ERROR, off, line, col);
-    return;
-  case '+':
-    if (c1 == '=') { /* "+=" */
-      advance_n(s, 2);
-      emit(s, TOK_PLUS_EQ, off, line, col);
-      return;
-    }
-    advance(s);
-    emit(s, TOK_PLUS, off, line, col);
-    return;
-  case '-':
-    if (c1 == '=') { /* "-=" */
-      advance_n(s, 2);
-      emit(s, TOK_MINUS_EQ, off, line, col);
-      return;
-    }
-    if (c1 == '>') { /* "->" reserved punctuation. */
-      advance_n(s, 2);
-      emit(s, TOK_ARROW, off, line, col);
-      return;
-    }
-    advance(s);
-    emit(s, TOK_MINUS, off, line, col);
-    return;
-  case '*':
-    if (c1 == '=') { /* "*=" */
-      advance_n(s, 2);
-      emit(s, TOK_STAR_EQ, off, line, col);
-      return;
-    }
-    advance(s);
-    emit(s, TOK_STAR, off, line, col);
-    return;
-  case '/':
-    /* '/' as a token only: line and block comments are handled by the
-     * scan driver before lex_punct is reached, so here it is divide or
-     * the "/=" compound assign. */
-    if (c1 == '=') { /* "/=" */
-      advance_n(s, 2);
-      emit(s, TOK_SLASH_EQ, off, line, col);
-      return;
-    }
-    advance(s);
-    emit(s, TOK_SLASH, off, line, col);
-    return;
-  case '%':
-    advance(s);
-    emit(s, TOK_PERCENT, off, line, col);
-    return;
-  case '<':
-    if (c1 == '<' && c2 == '=') { /* "<<=" */
-      advance_n(s, 3);
-      emit(s, TOK_SHL_EQ, off, line, col);
-      return;
-    }
-    if (c1 == '<') { /* "<<" */
-      advance_n(s, 2);
-      emit(s, TOK_SHL, off, line, col);
-      return;
-    }
-    if (c1 == '=') { /* "<=" */
-      advance_n(s, 2);
-      emit(s, TOK_LE, off, line, col);
-      return;
-    }
-    advance(s); /* "<" (compare or type-args open; parser decides). */
-    emit(s, TOK_LT, off, line, col);
-    return;
-  case '>':
-    if (c1 == '>' && c2 == '=') { /* ">>=" */
-      advance_n(s, 3);
-      emit(s, TOK_SHR_EQ, off, line, col);
-      return;
-    }
-    if (c1 == '>') { /* ">>" (may be re-split by the parser in generics). */
-      advance_n(s, 2);
-      emit(s, TOK_SHR, off, line, col);
-      return;
-    }
-    if (c1 == '=') { /* ">=" */
-      advance_n(s, 2);
-      emit(s, TOK_GE, off, line, col);
-      return;
-    }
-    advance(s); /* ">" (compare or type-args close; parser decides). */
-    emit(s, TOK_GT, off, line, col);
-    return;
-  case '=':
-    if (c1 == '=') { /* "==" */
-      advance_n(s, 2);
-      emit(s, TOK_EQ, off, line, col);
-      return;
-    }
-    advance(s);
-    emit(s, TOK_ASSIGN, off, line, col);
-    return;
-  case '!':
-    if (c1 == '=') { /* "!=" */
-      advance_n(s, 2);
-      emit(s, TOK_NE, off, line, col);
-      return;
-    }
-    advance(s);
-    emit(s, TOK_BANG, off, line, col);
-    return;
-  case '&':
-    if (c1 == '&') { /* "&&" */
-      advance_n(s, 2);
-      emit(s, TOK_AMPAMP, off, line, col);
-      return;
-    }
-    if (c1 == '=') { /* "&=" */
-      advance_n(s, 2);
-      emit(s, TOK_AMP_EQ, off, line, col);
-      return;
-    }
-    advance(s);
-    emit(s, TOK_AMP, off, line, col);
-    return;
-  case '|':
-    if (c1 == '|') { /* "||" */
-      advance_n(s, 2);
-      emit(s, TOK_PIPEPIPE, off, line, col);
-      return;
-    }
-    if (c1 == '=') { /* "|=" */
-      advance_n(s, 2);
-      emit(s, TOK_PIPE_EQ, off, line, col);
-      return;
-    }
-    advance(s);
-    emit(s, TOK_PIPE, off, line, col);
-    return;
-  case '^':
-    if (c1 == '=') { /* "^=" */
-      advance_n(s, 2);
-      emit(s, TOK_CARET_EQ, off, line, col);
-      return;
-    }
-    advance(s);
-    emit(s, TOK_CARET, off, line, col);
-    return;
-  case '~':
-    advance(s);
-    emit(s, TOK_TILDE, off, line, col);
-    return;
-  default:
-    /* Any other byte (including a non-ASCII byte > 0x7f, an '@', '$',
-     * '`', backslash, control char) begins no token. Emit one TOK_ERROR
-     * per bad byte and continue so the user sees every error. */
-    advance(s);
-    if (c >= 0x80)
-      lex_error(s, off, line, col, "non-ASCII byte in source (ASCII-only)");
-    else
-      lex_error(s, off, line, col, "unexpected character");
-    emit(s, TOK_ERROR, off, line, col);
+  size_t i;
+  for (i = 0; i < sizeof(kPunctRules) / sizeof(kPunctRules[0]); i++) {
+    if (!punct_matches(s, kPunctRules[i].text))
+      continue;
+    advance_n(s, strlen(kPunctRules[i].text));
+    emit(s, kPunctRules[i].kind, off, line, col);
     return;
   }
+
+  advance(s);
+  if (c == '.')
+    lex_error(s, off, line, col, "stray '.' is not a valid token");
+  else if (c >= 0x80)
+    lex_error(s, off, line, col, "non-ASCII byte in source (ASCII-only)");
+  else
+    lex_error(s, off, line, col, "unexpected character");
+  emit(s, TOK_ERROR, off, line, col);
 }
 
 /* --- The scan driver (shared by both passes). ------------------------- */
@@ -591,57 +429,47 @@ static void lex_punct(Scanner *s) {
  * dropped; an unterminated block comment is reported as an error at its
  * opening but still consumed to EOF.
  */
-static void scan_all(Scanner *s) {
-  for (;;) {
-    int c = peek(s, 0);
-
-    if (c < 0)
-      break; /* end of input. */
-
-    if (is_space(c)) {
-      advance(s);
-      continue;
-    }
-
-    /* Comments take priority over the '/' operator (maximal munch on the
-     * two-byte introducers). */
-    if (c == '/' && peek(s, 1) == '/') {
-      skip_line_comment(s);
-      continue;
-    }
-    if (c == '/' && peek(s, 1) == '*') {
-      uint32_t off = (uint32_t)s->pos;
-      uint32_t line = s->line;
-      uint32_t col = s->col;
-      if (!skip_block_comment(s)) {
-        /* Reached EOF without a closing: report once at the opener. The
-         * span covers from "/" "*" to EOF (pos is now at len). */
-        lex_error(s, off, line, col, "unterminated block comment");
-        /* No token is emitted for a comment; the loop will see EOF next. */
-      }
-      continue;
-    }
-
-    if (is_ident_start(c)) {
-      lex_ident(s);
-      continue;
-    }
-
-    if (is_digit(c)) {
-      lex_number(s);
-      continue;
-    }
-
-    /* Everything else is punctuation/operator or a bad byte. */
-    lex_punct(s);
+static int scan_space_or_comment(Scanner *s) {
+  int c = peek(s, 0);
+  if (is_space(c)) {
+    advance(s);
+    return 1;
   }
-
-  /* Exactly one trailing EOF. Its span is the empty range at end-of-
-   * input (len 0), per token.h. */
-  {
+  if (c == '/' && peek(s, 1) == '/') {
+    skip_line_comment(s);
+    return 1;
+  }
+  if (c == '/' && peek(s, 1) == '*') {
     uint32_t off = (uint32_t)s->pos;
-    emit(s, TOK_EOF, off, s->line, s->col);
+    uint32_t line = s->line;
+    uint32_t col = s->col;
+    if (!skip_block_comment(s))
+      lex_error(s, off, line, col, "unterminated block comment");
+    return 1;
   }
+  return 0;
+}
+
+static void scan_one(Scanner *s) {
+  int c = peek(s, 0);
+  if (is_ident_start(c)) {
+    lex_ident(s);
+    return;
+  }
+  if (is_digit(c)) {
+    lex_number(s);
+    return;
+  }
+  lex_punct(s);
+}
+
+static void scan_all(Scanner *s) {
+  while (peek(s, 0) >= 0) {
+    if (scan_space_or_comment(s))
+      continue;
+    scan_one(s);
+  }
+  emit(s, TOK_EOF, (uint32_t)s->pos, s->line, s->col);
 }
 
 /* --- Public entry point. ---------------------------------------------- */

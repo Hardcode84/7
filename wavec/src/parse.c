@@ -151,6 +151,26 @@ static int token_text_is(ParseContext *ctx, const Token *t, const char *lit) {
  * truncated to fit). Writes into `buf` (size `cap`) and always
  * NUL-terminates. Returns buf for convenience.
  */
+static void diag_put_char(char *buf, size_t cap, size_t *w, char c) {
+  if (*w + 1u < cap)
+    buf[(*w)++] = c;
+}
+
+static void diag_put_cstr(char *buf, size_t cap, size_t *w, const char *s) {
+  size_t i;
+  for (i = 0; s[i] != '\0'; i++)
+    diag_put_char(buf, cap, w, s[i]);
+}
+
+static void diag_put_token(ParseContext *ctx, char *buf, size_t cap, size_t *w,
+                           const Token *t) {
+  uint32_t len;
+  const char *text = token_text(ctx, t, &len);
+  uint32_t i;
+  for (i = 0; i < len; i++)
+    diag_put_char(buf, cap, w, text[i]);
+}
+
 static const char *diag_fmt2(ParseContext *ctx, char *buf, size_t cap,
                              const char *fmt, const char *s_arg,
                              const Token *t_arg) {
@@ -160,20 +180,16 @@ static const char *diag_fmt2(ParseContext *ctx, char *buf, size_t cap,
     return buf;
   while (fmt[i] != '\0' && w + 1u < cap) {
     if (fmt[i] == '%' && fmt[i + 1] == 's' && s_arg != NULL) {
-      size_t j = 0;
-      while (s_arg[j] != '\0' && w + 1u < cap)
-        buf[w++] = s_arg[j++];
+      diag_put_cstr(buf, cap, &w, s_arg);
       i += 2;
-    } else if (fmt[i] == '%' && fmt[i + 1] == 't' && t_arg != NULL) {
-      uint32_t tl;
-      const char *ts = token_text(ctx, t_arg, &tl);
-      uint32_t k = 0;
-      while (k < tl && w + 1u < cap)
-        buf[w++] = ts[k++];
-      i += 2;
-    } else {
-      buf[w++] = fmt[i++];
+      continue;
     }
+    if (fmt[i] == '%' && fmt[i + 1] == 't' && t_arg != NULL) {
+      diag_put_token(ctx, buf, cap, &w, t_arg);
+      i += 2;
+      continue;
+    }
+    diag_put_char(buf, cap, &w, fmt[i++]);
   }
   buf[w] = '\0';
   return buf;
@@ -320,59 +336,31 @@ static void **ptrvec_finish(ParseContext *ctx, PtrVec *v, size_t *out_count) {
 /* Token classification helpers                                          */
 /*===----------------------------------------------------------------===*/
 
-/* Is this token kind a scalar_type keyword (the closed scalar set)? */
+static const int kScalarTypeKw[TOK__COUNT] = {
+    [TOK_KW_BOOL] = 1,   [TOK_KW_HALF] = 1,   [TOK_KW_FLOAT] = 1,
+    [TOK_KW_INT8] = 1,   [TOK_KW_INT16] = 1,  [TOK_KW_INT32] = 1,
+    [TOK_KW_INT64] = 1,  [TOK_KW_UINT8] = 1,  [TOK_KW_UINT16] = 1,
+    [TOK_KW_UINT32] = 1, [TOK_KW_UINT64] = 1,
+};
+
 static int is_scalar_type_kw(TokenKind k) {
-  switch (k) {
-  case TOK_KW_BOOL:
-  case TOK_KW_HALF:
-  case TOK_KW_FLOAT:
-  case TOK_KW_INT8:
-  case TOK_KW_INT16:
-  case TOK_KW_INT32:
-  case TOK_KW_INT64:
-  case TOK_KW_UINT8:
-  case TOK_KW_UINT16:
-  case TOK_KW_UINT32:
-  case TOK_KW_UINT64:
-    return 1;
-  default:
-    return 0;
-  }
+  return (unsigned)k < TOK__COUNT && kScalarTypeKw[k];
 }
 
-/* Map a scalar_type / index / token keyword to its ScalarKind. The caller
- * has already verified the kind is one of these. */
+static const ScalarKind kScalarKindByToken[TOK__COUNT] = {
+    [TOK_KW_BOOL] = SCALAR_BOOL,     [TOK_KW_HALF] = SCALAR_HALF,
+    [TOK_KW_FLOAT] = SCALAR_FLOAT,   [TOK_KW_INDEX] = SCALAR_INDEX,
+    [TOK_KW_TOKEN] = SCALAR_TOKEN,   [TOK_KW_INT8] = SCALAR_INT8,
+    [TOK_KW_INT16] = SCALAR_INT16,   [TOK_KW_INT32] = SCALAR_INT32,
+    [TOK_KW_INT64] = SCALAR_INT64,   [TOK_KW_UINT8] = SCALAR_UINT8,
+    [TOK_KW_UINT16] = SCALAR_UINT16, [TOK_KW_UINT32] = SCALAR_UINT32,
+    [TOK_KW_UINT64] = SCALAR_UINT64,
+};
+
 static ScalarKind scalar_kind_of(TokenKind k) {
-  switch (k) {
-  case TOK_KW_BOOL:
-    return SCALAR_BOOL;
-  case TOK_KW_HALF:
-    return SCALAR_HALF;
-  case TOK_KW_FLOAT:
-    return SCALAR_FLOAT;
-  case TOK_KW_INDEX:
-    return SCALAR_INDEX;
-  case TOK_KW_TOKEN:
-    return SCALAR_TOKEN;
-  case TOK_KW_INT8:
-    return SCALAR_INT8;
-  case TOK_KW_INT16:
-    return SCALAR_INT16;
-  case TOK_KW_INT32:
-    return SCALAR_INT32;
-  case TOK_KW_INT64:
-    return SCALAR_INT64;
-  case TOK_KW_UINT8:
-    return SCALAR_UINT8;
-  case TOK_KW_UINT16:
-    return SCALAR_UINT16;
-  case TOK_KW_UINT32:
-    return SCALAR_UINT32;
-  case TOK_KW_UINT64:
-    return SCALAR_UINT64;
-  default:
-    return SCALAR_BOOL; /* unreachable when guarded by the predicates. */
-  }
+  if ((unsigned)k < TOK__COUNT)
+    return kScalarKindByToken[k];
+  return SCALAR_BOOL;
 }
 
 /* Does a token kind begin a `type`? (the leading `shared` or a base_type
@@ -416,23 +404,15 @@ static int is_iv_type_kw(TokenKind k) {
   }
 }
 
-/* Is `k` an assign_op (the `=` family)? (rule 7 lookahead). */
+static const int kAssignOps[TOK__COUNT] = {
+    [TOK_ASSIGN] = 1,  [TOK_PLUS_EQ] = 1,  [TOK_MINUS_EQ] = 1,
+    [TOK_STAR_EQ] = 1, [TOK_SLASH_EQ] = 1, [TOK_AMP_EQ] = 1,
+    [TOK_PIPE_EQ] = 1, [TOK_CARET_EQ] = 1, [TOK_SHL_EQ] = 1,
+    [TOK_SHR_EQ] = 1,
+};
+
 static int is_assign_op(TokenKind k) {
-  switch (k) {
-  case TOK_ASSIGN:
-  case TOK_PLUS_EQ:
-  case TOK_MINUS_EQ:
-  case TOK_STAR_EQ:
-  case TOK_SLASH_EQ:
-  case TOK_AMP_EQ:
-  case TOK_PIPE_EQ:
-  case TOK_CARET_EQ:
-  case TOK_SHL_EQ:
-  case TOK_SHR_EQ:
-    return 1;
-  default:
-    return 0;
-  }
+  return (unsigned)k < TOK__COUNT && kAssignOps[k];
 }
 
 /*
@@ -448,39 +428,18 @@ static int is_assign_op(TokenKind k) {
  * naturally. Level 1 (postfix) and 2 (unary) are handled structurally,
  * not here, so the binops occupy bands 3..12 -> binding power 10..1.
  */
+static const int kBinopPrec[TOK__COUNT] = {
+    [TOK_STAR] = 10,  [TOK_SLASH] = 10,   [TOK_PERCENT] = 10, [TOK_PLUS] = 9,
+    [TOK_MINUS] = 9,  [TOK_SHL] = 8,      [TOK_SHR] = 8,      [TOK_LT] = 7,
+    [TOK_LE] = 7,     [TOK_GT] = 7,       [TOK_GE] = 7,       [TOK_EQ] = 6,
+    [TOK_NE] = 6,     [TOK_AMP] = 5,      [TOK_CARET] = 4,    [TOK_PIPE] = 3,
+    [TOK_AMPAMP] = 2, [TOK_PIPEPIPE] = 1,
+};
+
 static int binop_prec(TokenKind k) {
-  switch (k) {
-  case TOK_STAR:
-  case TOK_SLASH:
-  case TOK_PERCENT:
-    return 10; /* table band 3 */
-  case TOK_PLUS:
-  case TOK_MINUS:
-    return 9; /* band 4 */
-  case TOK_SHL:
-  case TOK_SHR:
-    return 8; /* band 5 */
-  case TOK_LT:
-  case TOK_LE:
-  case TOK_GT:
-  case TOK_GE:
-    return 7; /* band 6 */
-  case TOK_EQ:
-  case TOK_NE:
-    return 6; /* band 7 */
-  case TOK_AMP:
-    return 5; /* band 8 */
-  case TOK_CARET:
-    return 4; /* band 9 */
-  case TOK_PIPE:
-    return 3; /* band 10 */
-  case TOK_AMPAMP:
-    return 2; /* band 11 */
-  case TOK_PIPEPIPE:
-    return 1; /* band 12 */
-  default:
-    return 0; /* not a binop */
-  }
+  if ((unsigned)k < TOK__COUNT)
+    return kBinopPrec[k];
+  return 0;
 }
 
 /*
@@ -595,104 +554,149 @@ static int close_angle(ParseContext *ctx, const char *msg) {
 /* Decode a TOK_INT_LIT token's value. Sets *is_hex. Saturates on
  * overflow to UINT64_MAX (the literal is still recorded; sema may range-
  * check). Assumes the lexer validated the digit shape. */
-static uint64_t decode_int_lit(ParseContext *ctx, const Token *t, int *is_hex) {
-  uint32_t len;
-  const char *s = token_text(ctx, t, &len);
+static int hex_digit_value(char c, unsigned *out) {
+  if (c >= '0' && c <= '9') {
+    *out = (unsigned)(c - '0');
+    return 1;
+  }
+  if (c >= 'a' && c <= 'f') {
+    *out = (unsigned)(c - 'a' + 10);
+    return 1;
+  }
+  if (c >= 'A' && c <= 'F') {
+    *out = (unsigned)(c - 'A' + 10);
+    return 1;
+  }
+  return 0;
+}
+
+static uint64_t decode_hex_digits(const char *s, uint32_t len, uint32_t start) {
   uint64_t v = 0;
-  uint32_t i = 0;
-  *is_hex = 0;
-  if (len >= 2u && s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) {
-    *is_hex = 1;
-    i = 2;
-    for (; i < len; i++) {
-      char c = s[i];
-      unsigned d;
-      if (c >= '0' && c <= '9')
-        d = (unsigned)(c - '0');
-      else if (c >= 'a' && c <= 'f')
-        d = (unsigned)(c - 'a' + 10);
-      else if (c >= 'A' && c <= 'F')
-        d = (unsigned)(c - 'A' + 10);
-      else
-        break; /* defensive: lexer should not include other chars. */
-      v = v * 16u + d;
-    }
-  } else {
-    for (; i < len; i++) {
-      char c = s[i];
-      if (c < '0' || c > '9')
-        break;
-      v = v * 10u + (uint64_t)(c - '0');
-    }
+  uint32_t i;
+  for (i = start; i < len; i++) {
+    unsigned d;
+    if (!hex_digit_value(s[i], &d))
+      break;
+    v = v * 16u + d;
   }
   return v;
 }
 
-/* Decode a TOK_FLOAT_LIT into a double and record the `f` suffix. A small
- * portable scanner (no strtod, to keep locale/OS dependence out). */
-static double decode_float_lit(ParseContext *ctx, const Token *t,
-                               int *has_f_suffix) {
+static uint64_t decode_dec_digits(const char *s, uint32_t len) {
+  uint64_t v = 0;
+  uint32_t i;
+  for (i = 0; i < len; i++) {
+    char c = s[i];
+    if (c < '0' || c > '9')
+      break;
+    v = v * 10u + (uint64_t)(c - '0');
+  }
+  return v;
+}
+
+static uint64_t decode_int_lit(ParseContext *ctx, const Token *t, int *is_hex) {
   uint32_t len;
   const char *s = token_text(ctx, t, &len);
-  double mant = 0.0;
-  double frac_scale = 1.0;
-  int seen_dot = 0;
-  int exp_sign = 1;
-  int exp_val = 0;
-  int has_exp = 0;
-  uint32_t i = 0;
-  *has_f_suffix = 0;
+  *is_hex = 0;
+  if (len >= 2u && s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) {
+    *is_hex = 1;
+    return decode_hex_digits(s, len, 2);
+  }
+  return decode_dec_digits(s, len);
+}
 
-  for (; i < len; i++) {
+/* Decode a TOK_FLOAT_LIT into a double and record the `f` suffix. A small
+ * portable scanner (no strtod, to keep locale/OS dependence out). */
+typedef struct FloatDecode {
+  double mant;
+  double frac_scale;
+  int seen_dot;
+  int exp_sign;
+  int exp_val;
+  int has_exp;
+  int has_f_suffix;
+} FloatDecode;
+
+static void float_take_digit(FloatDecode *d, char c) {
+  if (d->seen_dot) {
+    d->frac_scale *= 0.1;
+    d->mant += (double)(c - '0') * d->frac_scale;
+  } else {
+    d->mant = d->mant * 10.0 + (double)(c - '0');
+  }
+}
+
+static void float_take_exponent(FloatDecode *d, const char *s, uint32_t len,
+                                uint32_t *i) {
+  d->has_exp = 1;
+  (*i)++;
+  if (*i < len && (s[*i] == '+' || s[*i] == '-')) {
+    if (s[*i] == '-')
+      d->exp_sign = -1;
+    (*i)++;
+  }
+  while (*i < len && s[*i] >= '0' && s[*i] <= '9') {
+    if (d->exp_val < 1000)
+      d->exp_val = d->exp_val * 10 + (s[*i] - '0');
+    (*i)++;
+  }
+}
+
+static void float_scan(FloatDecode *d, const char *s, uint32_t len) {
+  uint32_t i = 0;
+  while (i < len) {
     char c = s[i];
     if (c >= '0' && c <= '9') {
-      if (seen_dot) {
-        frac_scale *= 0.1;
-        mant += (double)(c - '0') * frac_scale;
-      } else {
-        mant = mant * 10.0 + (double)(c - '0');
-      }
-    } else if (c == '.') {
-      seen_dot = 1;
-    } else if (c == 'e' || c == 'E') {
-      has_exp = 1;
+      float_take_digit(d, c);
       i++;
-      if (i < len && (s[i] == '+' || s[i] == '-')) {
-        if (s[i] == '-')
-          exp_sign = -1;
-        i++;
-      }
-      for (; i < len; i++) {
-        char d = s[i];
-        if (d < '0' || d > '9')
-          break;
-        /* Cap accumulation: any exponent past ~308 makes a double 0/inf
-           anyway, and an unbounded run overflows int (UB) and the pow loop. */
-        if (exp_val < 1000)
-          exp_val = exp_val * 10 + (d - '0');
-      }
-      i--; /* the outer loop will i++ again. */
-    } else if (c == 'f' || c == 'F') {
-      *has_f_suffix = 1;
-      break;
-    } else {
-      break;
+      continue;
     }
+    if (c == '.') {
+      d->seen_dot = 1;
+      i++;
+      continue;
+    }
+    if (c == 'e' || c == 'E') {
+      float_take_exponent(d, s, len, &i);
+      continue;
+    }
+    if (c == 'f' || c == 'F')
+      d->has_f_suffix = 1;
+    break;
   }
+}
 
-  if (has_exp) {
-    int e = exp_sign * exp_val;
+static double apply_float_exp(FloatDecode *d) {
+  if (d->has_exp) {
+    int e = d->exp_sign * d->exp_val;
     double p = 1.0;
     int k;
     int n = e < 0 ? -e : e;
     for (k = 0; k < n; k++)
       p *= 10.0;
     if (e < 0)
-      mant /= p;
+      d->mant /= p;
     else
-      mant *= p;
+      d->mant *= p;
   }
-  return mant;
+  return d->mant;
+}
+
+static double decode_float_lit(ParseContext *ctx, const Token *t,
+                               int *has_f_suffix) {
+  uint32_t len;
+  const char *s = token_text(ctx, t, &len);
+  FloatDecode d;
+  d.mant = 0.0;
+  d.frac_scale = 1.0;
+  d.seen_dot = 0;
+  d.exp_sign = 1;
+  d.exp_val = 0;
+  d.has_exp = 0;
+  d.has_f_suffix = 0;
+  float_scan(&d, s, len);
+  *has_f_suffix = d.has_f_suffix;
+  return apply_float_exp(&d);
 }
 
 /*===----------------------------------------------------------------===*/
@@ -724,110 +728,94 @@ static uint64_t parse_int_lit_value(ParseContext *ctx, const char *msg,
  *           | vector "<" type "," int_lit ">" ;
  * Returns a TypeRef with kind/scalar/element/width set, or NULL on error.
  */
+static TypeRef *parse_scalar_base_type(ParseContext *ctx, const Token *t,
+                                       SourceSpan start) {
+  TypeRef *ty = new_type(ctx, TYPE_SCALAR, start);
+  if (ty == NULL)
+    return NULL;
+  ty->scalar = scalar_kind_of(t->kind);
+  advance(ctx);
+  return ty;
+}
+
+static TypeRef *parse_sized_payload_type(ParseContext *ctx, TypeKind kind,
+                                         SourceSpan start) {
+  TypeRef *ty;
+  TypeRef *elem;
+  int ok;
+  uint64_t width;
+  SourceSpan end;
+  advance(ctx);
+  if (!expect(ctx, TOK_LT, "expected '<' after type constructor"))
+    return NULL;
+  elem = parse_type(ctx);
+  if (elem == NULL)
+    return NULL;
+  if (!expect(ctx, TOK_COMMA, "expected ',' in type constructor"))
+    return NULL;
+  width = parse_int_lit_value(ctx, "expected integer width in type constructor",
+                              &ok);
+  if (!ok)
+    return NULL;
+  end = span_of_token(cur(ctx));
+  if (!close_angle(ctx, "expected '>' to close type constructor"))
+    return NULL;
+  ty = new_type(ctx, kind, span_join(start, end));
+  if (ty == NULL)
+    return NULL;
+  ty->element = elem;
+  ty->width = width;
+  return ty;
+}
+
+static TypeRef *parse_mask_type(ParseContext *ctx, SourceSpan start) {
+  TypeRef *ty;
+  int ok;
+  uint64_t width;
+  SourceSpan end;
+  advance(ctx);
+  if (!expect(ctx, TOK_LT, "expected '<' after 'mask'"))
+    return NULL;
+  width =
+      parse_int_lit_value(ctx, "expected integer width in 'mask<...>'", &ok);
+  if (!ok)
+    return NULL;
+  end = span_of_token(cur(ctx));
+  if (!close_angle(ctx, "expected '>' to close 'mask<...>'"))
+    return NULL;
+  ty = new_type(ctx, TYPE_MASK, span_join(start, end));
+  if (ty == NULL)
+    return NULL;
+  ty->width = width;
+  return ty;
+}
+
 static TypeRef *parse_base_type(ParseContext *ctx) {
   const Token *t = cur(ctx);
   SourceSpan start = span_of_token(t);
+  TypeRef *ty = NULL;
 
   if (!recurse_enter(ctx))
     return NULL;
 
   if (is_scalar_type_kw(t->kind) || t->kind == TOK_KW_INDEX ||
-      t->kind == TOK_KW_TOKEN) {
-    TypeRef *ty = new_type(ctx, TYPE_SCALAR, start);
-    if (ty == NULL) {
-      recurse_leave(ctx);
-      return NULL;
-    }
-    ty->scalar = scalar_kind_of(t->kind);
-    advance(ctx);
-    recurse_leave(ctx);
-    return ty;
-  }
-
-  if (t->kind == TOK_KW_FRAGMENT) {
-    /* Reserved with no v1 production: a clear, honest error. */
+      t->kind == TOK_KW_TOKEN)
+    ty = parse_scalar_base_type(ctx, t, start);
+  else if (t->kind == TOK_KW_SIMD)
+    ty = parse_sized_payload_type(ctx, TYPE_SIMD, start);
+  else if (t->kind == TOK_KW_VECTOR)
+    ty = parse_sized_payload_type(ctx, TYPE_VECTOR, start);
+  else if (t->kind == TOK_KW_MASK)
+    ty = parse_mask_type(ctx, start);
+  else if (t->kind == TOK_KW_FRAGMENT) {
     error_here(ctx, "fragment type not supported");
     advance(ctx);
-    recurse_leave(ctx);
-    return NULL;
+  } else {
+    error_here(ctx, "expected a type, found '%t'");
   }
 
-  if (t->kind == TOK_KW_SIMD || t->kind == TOK_KW_VECTOR) {
-    TypeKind tk = (t->kind == TOK_KW_SIMD) ? TYPE_SIMD : TYPE_VECTOR;
-    TypeRef *ty;
-    TypeRef *elem;
-    int ok;
-    uint64_t w;
-    SourceSpan end;
-    advance(ctx); /* consume simd/vector */
-    if (!expect(ctx, TOK_LT, "expected '<' after type constructor")) {
-      recurse_leave(ctx);
-      return NULL;
-    }
-    elem = parse_type(ctx);
-    if (elem == NULL) {
-      recurse_leave(ctx);
-      return NULL;
-    }
-    if (!expect(ctx, TOK_COMMA, "expected ',' in type constructor")) {
-      recurse_leave(ctx);
-      return NULL;
-    }
-    w = parse_int_lit_value(ctx, "expected integer width in type constructor",
-                            &ok);
-    if (!ok) {
-      recurse_leave(ctx);
-      return NULL;
-    }
-    end = span_of_token(cur(ctx));
-    if (!close_angle(ctx, "expected '>' to close type constructor")) {
-      recurse_leave(ctx);
-      return NULL;
-    }
-    ty = new_type(ctx, tk, span_join(start, end));
-    if (ty == NULL) {
-      recurse_leave(ctx);
-      return NULL;
-    }
-    ty->element = elem;
-    ty->width = w;
-    recurse_leave(ctx);
-    return ty;
-  }
-
-  if (t->kind == TOK_KW_MASK) {
-    TypeRef *ty;
-    int ok;
-    uint64_t w;
-    SourceSpan end;
-    advance(ctx); /* consume mask */
-    if (!expect(ctx, TOK_LT, "expected '<' after 'mask'")) {
-      recurse_leave(ctx);
-      return NULL;
-    }
-    w = parse_int_lit_value(ctx, "expected integer width in 'mask<...>'", &ok);
-    if (!ok) {
-      recurse_leave(ctx);
-      return NULL;
-    }
-    end = span_of_token(cur(ctx));
-    if (!close_angle(ctx, "expected '>' to close 'mask<...>'")) {
-      recurse_leave(ctx);
-      return NULL;
-    }
-    ty = new_type(ctx, TYPE_MASK, span_join(start, end));
-    if (ty == NULL) {
-      recurse_leave(ctx);
-      return NULL;
-    }
-    ty->width = w;
-    recurse_leave(ctx);
-    return ty;
-  }
-
-  error_here(ctx, "expected a type, found '%t'");
   recurse_leave(ctx);
-  return NULL;
+  return ty;
 }
 
 /* type = [ "shared" ] base_type [ "*" ] ; */
@@ -892,91 +880,84 @@ static int parse_garg(ParseContext *ctx, GArg *out) {
  * `has_generic` is set (the caller decides via rule 2). The `(` is
  * mandatory for a call_tail.
  */
-static Expr *parse_call_tail(ParseContext *ctx, Expr *callee, int has_generic) {
-  PtrVec gargs;
-  PtrVec args;
-  GArg *garg_arr = NULL;
-  size_t garg_count = 0;
-  Expr **arg_arr = NULL;
-  size_t arg_count = 0;
-  Expr *dep = NULL;
-  int has_dep = 0;
-  Expr *call;
-  SourceSpan end;
-  size_t i;
-
-  ptrvec_init(&gargs);
-  ptrvec_init(&args);
-
-  if (has_generic) {
-    /* consume '<' garg {',' garg} '>' */
-    advance(ctx); /* '<' */
-    for (;;) {
-      GArg *g = (GArg *)arena_alloc(ctx->arena, sizeof(GArg), sizeof(void *));
-      if (g == NULL)
-        return NULL;
-      if (!parse_garg(ctx, g))
-        return NULL;
-      ptrvec_push(&gargs, g);
-      if (cur_kind(ctx) == TOK_COMMA) {
-        advance(ctx);
-        continue;
-      }
+static int parse_generic_args(ParseContext *ctx, PtrVec *gargs) {
+  advance(ctx);
+  for (;;) {
+    GArg *g = (GArg *)arena_alloc(ctx->arena, sizeof(GArg), sizeof(void *));
+    if (g == NULL)
+      return 0;
+    if (!parse_garg(ctx, g))
+      return 0;
+    ptrvec_push(gargs, g);
+    if (cur_kind(ctx) != TOK_COMMA)
       break;
-    }
-    if (!close_angle(ctx, "expected '>' to close generic arguments"))
-      return NULL;
-  }
-
-  if (!expect(ctx, TOK_LPAREN, "expected '(' to begin call arguments"))
-    return NULL;
-
-  /* args = expr {"," expr} ; with the optional trailing `after expr`.
-   * An empty arg list is allowed (e.g. lane_id<32>(), token()-like). */
-  if (cur_kind(ctx) != TOK_RPAREN && cur_kind(ctx) != TOK_KW_AFTER) {
-    for (;;) {
-      Expr *a = parse_expr(ctx);
-      if (a == NULL)
-        return NULL;
-      ptrvec_push(&args, a);
-      if (cur_kind(ctx) == TOK_COMMA) {
-        advance(ctx);
-        continue;
-      }
-      break;
-    }
-  }
-
-  /* rule 5: a trailing `after expr` is the dependency token, not an arg. */
-  if (cur_kind(ctx) == TOK_KW_AFTER) {
     advance(ctx);
-    dep = parse_expr(ctx);
-    if (dep == NULL)
-      return NULL;
-    has_dep = 1;
   }
+  return close_angle(ctx, "expected '>' to close generic arguments");
+}
 
-  end = span_of_token(cur(ctx));
-  if (!expect(ctx, TOK_RPAREN, "expected ')' to close call arguments"))
+static int parse_value_args(ParseContext *ctx, PtrVec *args) {
+  if (cur_kind(ctx) == TOK_RPAREN || cur_kind(ctx) == TOK_KW_AFTER)
+    return 1;
+  for (;;) {
+    Expr *a = parse_expr(ctx);
+    if (a == NULL)
+      return 0;
+    ptrvec_push(args, a);
+    if (cur_kind(ctx) != TOK_COMMA)
+      return 1;
+    advance(ctx);
+  }
+}
+
+static int parse_after_dep(ParseContext *ctx, Expr **dep, int *has_dep) {
+  *dep = NULL;
+  *has_dep = 0;
+  if (cur_kind(ctx) != TOK_KW_AFTER)
+    return 1;
+  advance(ctx);
+  *dep = parse_expr(ctx);
+  if (*dep == NULL)
+    return 0;
+  *has_dep = 1;
+  return 1;
+}
+
+static GArg *finish_gargs(ParseContext *ctx, PtrVec *gargs,
+                          size_t *garg_count) {
+  GArg *arr;
+  size_t i;
+  *garg_count = 0;
+  if (gargs->count == 0)
     return NULL;
+  arr = (GArg *)arena_alloc(ctx->arena, gargs->count * sizeof(GArg),
+                            sizeof(void *));
+  if (arr == NULL)
+    return NULL;
+  for (i = 0; i < gargs->count; i++)
+    arr[i] = *(GArg *)gargs->items[i];
+  *garg_count = gargs->count;
+  return arr;
+}
 
-  garg_arr = (GArg *)NULL;
-  if (gargs.count > 0) {
-    garg_arr = (GArg *)arena_alloc(ctx->arena, gargs.count * sizeof(GArg),
-                                   sizeof(void *));
-    if (garg_arr == NULL)
-      return NULL;
-    for (i = 0; i < gargs.count; i++)
-      garg_arr[i] = *(GArg *)gargs.items[i];
-    garg_count = gargs.count;
-  }
-  if (gargs.overflow)
+static Expr *finish_call_tail(ParseContext *ctx, Expr *callee, PtrVec *gargs,
+                              PtrVec *args, Expr *dep, int has_dep,
+                              SourceSpan end) {
+  GArg *garg_arr;
+  Expr **arg_arr;
+  size_t garg_count = 0;
+  size_t arg_count = 0;
+  Expr *call;
+
+  garg_arr = finish_gargs(ctx, gargs, &garg_count);
+  if (gargs->count > 0 && garg_arr == NULL)
+    return NULL;
+  if (gargs->overflow)
     error_here(ctx, "too many generic arguments");
-
-  arg_arr = (Expr **)ptrvec_finish(ctx, &args, &arg_count);
-  if (args.count > 0 && arg_arr == NULL)
+  arg_arr = (Expr **)ptrvec_finish(ctx, args, &arg_count);
+  if (args->count > 0 && arg_arr == NULL)
     return NULL;
-  if (args.overflow)
+  if (args->overflow)
     error_here(ctx, "too many call arguments");
 
   call = new_expr(ctx, EXPR_CALL, span_join(callee->span, end));
@@ -992,85 +973,125 @@ static Expr *parse_call_tail(ParseContext *ctx, Expr *callee, int has_generic) {
   return call;
 }
 
+static Expr *parse_call_tail(ParseContext *ctx, Expr *callee, int has_generic) {
+  PtrVec gargs;
+  PtrVec args;
+  Expr *dep;
+  int has_dep;
+  SourceSpan end;
+
+  ptrvec_init(&gargs);
+  ptrvec_init(&args);
+
+  if (has_generic && !parse_generic_args(ctx, &gargs))
+    return NULL;
+  if (!expect(ctx, TOK_LPAREN, "expected '(' to begin call arguments"))
+    return NULL;
+  if (!parse_value_args(ctx, &args))
+    return NULL;
+  if (!parse_after_dep(ctx, &dep, &has_dep))
+    return NULL;
+  end = span_of_token(cur(ctx));
+  if (!expect(ctx, TOK_RPAREN, "expected ')' to close call arguments"))
+    return NULL;
+  return finish_call_tail(ctx, callee, &gargs, &args, dep, has_dep, end);
+}
+
 /*
  * primary = int_lit | float_lit | ident
  *         | "token" "(" ")"          (the empty-token seed)
  *         | "(" expr ")" ;
  */
+static Expr *parse_int_primary(ParseContext *ctx, const Token *t,
+                               SourceSpan sp) {
+  Expr *e;
+  int is_hex;
+  uint64_t v = decode_int_lit(ctx, t, &is_hex);
+  advance(ctx);
+  e = new_expr(ctx, EXPR_INT_LIT, sp);
+  if (e == NULL)
+    return NULL;
+  e->as.int_lit.value = v;
+  e->as.int_lit.is_hex = is_hex;
+  return e;
+}
+
+static Expr *parse_float_primary(ParseContext *ctx, const Token *t,
+                                 SourceSpan sp) {
+  Expr *e;
+  int has_f;
+  double v = decode_float_lit(ctx, t, &has_f);
+  advance(ctx);
+  e = new_expr(ctx, EXPR_FLOAT_LIT, sp);
+  if (e == NULL)
+    return NULL;
+  e->as.float_lit.value = v;
+  e->as.float_lit.has_f_suffix = has_f;
+  return e;
+}
+
+static Expr *parse_ident_primary(ParseContext *ctx, const Token *t,
+                                 SourceSpan sp) {
+  Expr *e;
+  uint32_t len;
+  const char *name = token_text(ctx, t, &len);
+  advance(ctx);
+  e = new_expr(ctx, EXPR_IDENT, sp);
+  if (e == NULL)
+    return NULL;
+  e->as.ident.name = name;
+  e->as.ident.name_len = len;
+  return e;
+}
+
+static Expr *parse_token_seed(ParseContext *ctx, SourceSpan sp) {
+  Expr *e;
+  SourceSpan end;
+  advance(ctx);
+  if (!expect(ctx, TOK_LPAREN, "expected '(' after 'token'"))
+    return NULL;
+  end = span_of_token(cur(ctx));
+  if (!expect(ctx, TOK_RPAREN, "expected ')' for the empty 'token()' seed"))
+    return NULL;
+  e = new_expr(ctx, EXPR_TOKEN_SEED, span_join(sp, end));
+  return e;
+}
+
+static Expr *parse_paren_primary(ParseContext *ctx, SourceSpan sp) {
+  Expr *e;
+  Expr *inner;
+  SourceSpan end;
+  advance(ctx);
+  inner = parse_expr(ctx);
+  if (inner == NULL)
+    return NULL;
+  end = span_of_token(cur(ctx));
+  if (!expect(ctx, TOK_RPAREN,
+              "expected ')' to close parenthesized expression"))
+    return NULL;
+  e = new_expr(ctx, EXPR_PAREN, span_join(sp, end));
+  if (e == NULL)
+    return NULL;
+  e->as.paren = inner;
+  return e;
+}
+
 static Expr *parse_primary(ParseContext *ctx) {
   const Token *t = cur(ctx);
   SourceSpan sp = span_of_token(t);
-  Expr *e;
 
-  switch (t->kind) {
-  case TOK_INT_LIT: {
-    int is_hex;
-    uint64_t v = decode_int_lit(ctx, t, &is_hex);
-    advance(ctx);
-    e = new_expr(ctx, EXPR_INT_LIT, sp);
-    if (e == NULL)
-      return NULL;
-    e->as.int_lit.value = v;
-    e->as.int_lit.is_hex = is_hex;
-    return e;
-  }
-  case TOK_FLOAT_LIT: {
-    int has_f;
-    double v = decode_float_lit(ctx, t, &has_f);
-    advance(ctx);
-    e = new_expr(ctx, EXPR_FLOAT_LIT, sp);
-    if (e == NULL)
-      return NULL;
-    e->as.float_lit.value = v;
-    e->as.float_lit.has_f_suffix = has_f;
-    return e;
-  }
-  case TOK_IDENT: {
-    uint32_t len;
-    const char *name = token_text(ctx, t, &len);
-    advance(ctx);
-    e = new_expr(ctx, EXPR_IDENT, sp);
-    if (e == NULL)
-      return NULL;
-    e->as.ident.name = name;
-    e->as.ident.name_len = len;
-    return e;
-  }
-  case TOK_KW_TOKEN: {
-    /* token() seed: the reserved type used as a nullary constructor. The
-     * grammar requires exactly "(" ")" here. */
-    SourceSpan end;
-    advance(ctx); /* 'token' */
-    if (!expect(ctx, TOK_LPAREN, "expected '(' after 'token'"))
-      return NULL;
-    end = span_of_token(cur(ctx));
-    if (!expect(ctx, TOK_RPAREN, "expected ')' for the empty 'token()' seed"))
-      return NULL;
-    e = new_expr(ctx, EXPR_TOKEN_SEED, span_join(sp, end));
-    return e;
-  }
-  case TOK_LPAREN: {
-    Expr *inner;
-    SourceSpan end;
-    advance(ctx); /* '(' */
-    inner = parse_expr(ctx);
-    if (inner == NULL)
-      return NULL;
-    end = span_of_token(cur(ctx));
-    if (!expect(ctx, TOK_RPAREN,
-                "expected ')' to close parenthesized "
-                "expression"))
-      return NULL;
-    e = new_expr(ctx, EXPR_PAREN, span_join(sp, end));
-    if (e == NULL)
-      return NULL;
-    e->as.paren = inner;
-    return e;
-  }
-  default:
-    error_here(ctx, "expected an expression, found '%t'");
-    return NULL;
-  }
+  if (t->kind == TOK_INT_LIT)
+    return parse_int_primary(ctx, t, sp);
+  if (t->kind == TOK_FLOAT_LIT)
+    return parse_float_primary(ctx, t, sp);
+  if (t->kind == TOK_IDENT)
+    return parse_ident_primary(ctx, t, sp);
+  if (t->kind == TOK_KW_TOKEN)
+    return parse_token_seed(ctx, sp);
+  if (t->kind == TOK_LPAREN)
+    return parse_paren_primary(ctx, sp);
+  error_here(ctx, "expected an expression, found '%t'");
+  return NULL;
 }
 
 /*
@@ -1263,13 +1284,51 @@ static Stmt *parse_decl_stmt(ParseContext *ctx) {
 
 /* destructure: "auto" "[" ident {"," ident} "]" "=" expr ";" . The `auto`
  * has been confirmed by the caller. */
+static int parse_destructure_names(ParseContext *ctx, PtrVec *names) {
+  for (;;) {
+    const Token *t = cur(ctx);
+    BoundName *b;
+    if (t->kind != TOK_IDENT) {
+      error_here(ctx, "expected an identifier in destructuring, found "
+                      "'%t'");
+      return 0;
+    }
+    b = (BoundName *)arena_alloc(ctx->arena, sizeof(BoundName), sizeof(void *));
+    if (b == NULL)
+      return 0;
+    *b = bound_name_of(ctx, t);
+    advance(ctx);
+    ptrvec_push(names, b);
+    if (cur_kind(ctx) == TOK_COMMA) {
+      advance(ctx);
+      continue;
+    }
+    return 1;
+  }
+  return 0;
+}
+
+static BoundName *finish_destructure_names(ParseContext *ctx, PtrVec *names) {
+  BoundName *arr;
+  size_t i;
+  if (names->count == 0) {
+    error_here(ctx, "destructuring must bind at least one name");
+    return NULL;
+  }
+  arr = (BoundName *)arena_alloc(ctx->arena, names->count * sizeof(BoundName),
+                                 sizeof(void *));
+  if (arr == NULL)
+    return NULL;
+  for (i = 0; i < names->count; i++)
+    arr[i] = *(BoundName *)names->items[i];
+  return arr;
+}
+
 static Stmt *parse_destructure_stmt(ParseContext *ctx) {
   PtrVec names;
   BoundName *name_arr;
-  size_t name_count = 0;
   Expr *init;
   Stmt *s;
-  size_t i;
   SourceSpan start = span_of_token(cur(ctx));
 
   advance(ctx); /* 'auto' */
@@ -1277,26 +1336,8 @@ static Stmt *parse_destructure_stmt(ParseContext *ctx) {
     return NULL;
 
   ptrvec_init(&names);
-  for (;;) {
-    const Token *t = cur(ctx);
-    BoundName *b;
-    if (t->kind != TOK_IDENT) {
-      error_here(ctx, "expected an identifier in destructuring, found "
-                      "'%t'");
-      return NULL;
-    }
-    b = (BoundName *)arena_alloc(ctx->arena, sizeof(BoundName), sizeof(void *));
-    if (b == NULL)
-      return NULL;
-    *b = bound_name_of(ctx, t);
-    advance(ctx);
-    ptrvec_push(&names, b);
-    if (cur_kind(ctx) == TOK_COMMA) {
-      advance(ctx);
-      continue;
-    }
-    break;
-  }
+  if (!parse_destructure_names(ctx, &names))
+    return NULL;
 
   if (!expect(ctx, TOK_RBRACKET, "expected ']' to close destructuring list"))
     return NULL;
@@ -1312,24 +1353,15 @@ static Stmt *parse_destructure_stmt(ParseContext *ctx) {
   if (names.overflow)
     error_here(ctx, "too many names in destructuring");
 
-  /* Copy the BoundName values out into a contiguous arena array. */
-  name_count = names.count;
-  if (name_count == 0) {
-    error_here(ctx, "destructuring must bind at least one name");
-    return NULL;
-  }
-  name_arr = (BoundName *)arena_alloc(
-      ctx->arena, name_count * sizeof(BoundName), sizeof(void *));
+  name_arr = finish_destructure_names(ctx, &names);
   if (name_arr == NULL)
     return NULL;
-  for (i = 0; i < name_count; i++)
-    name_arr[i] = *(BoundName *)names.items[i];
 
   s = new_stmt(ctx, STMT_DESTRUCTURE, span_join(start, init->span));
   if (s == NULL)
     return NULL;
   s->as.destructure.names = name_arr;
-  s->as.destructure.name_count = name_count;
+  s->as.destructure.name_count = names.count;
   s->as.destructure.init = init;
   return s;
 }
@@ -1401,6 +1433,21 @@ static Stmt *parse_ident_led_stmt(ParseContext *ctx) {
  * shape; `is_where` selects the keyword set and the AST kind. The
  * dangling else/otherwise binds here, to the nearest unmatched
  * if/where (rule 6), because the optional clause is consumed eagerly. */
+static int parse_condition_header(ParseContext *ctx, int is_where,
+                                  Expr **cond) {
+  advance(ctx);
+  if (!expect(ctx, TOK_LPAREN,
+              is_where ? "expected '(' after 'where'"
+                       : "expected '(' after 'if'"))
+    return 0;
+  *cond = parse_expr(ctx);
+  if (*cond == NULL)
+    return 0;
+  if (!expect(ctx, TOK_RPAREN, "expected ')' after condition"))
+    return 0;
+  return 1;
+}
+
 static Stmt *parse_cond_stmt(ParseContext *ctx, int is_where) {
   SourceSpan start = span_of_token(cur(ctx));
   Expr *cond;
@@ -1410,17 +1457,8 @@ static Stmt *parse_cond_stmt(ParseContext *ctx, int is_where) {
   TokenKind else_kw = is_where ? TOK_KW_OTHERWISE : TOK_KW_ELSE;
   SourceSpan end;
 
-  advance(ctx); /* 'if' or 'where' */
-  if (!expect(ctx, TOK_LPAREN,
-              is_where ? "expected '(' after 'where'"
-                       : "expected '(' after 'if'"))
+  if (!parse_condition_header(ctx, is_where, &cond))
     return NULL;
-  cond = parse_expr(ctx);
-  if (cond == NULL)
-    return NULL;
-  if (!expect(ctx, TOK_RPAREN, "expected ')' after condition"))
-    return NULL;
-
   then_block = parse_block(ctx);
   if (then_block == NULL)
     return NULL;
@@ -1449,57 +1487,70 @@ static Stmt *parse_cond_stmt(ParseContext *ctx, int is_where) {
  * parse_expr stops before it; we then consume `..` explicitly. The IV
  * type is restricted to iv_type keywords by the grammar (sema re-checks).
  */
-static Stmt *parse_for_stmt(ParseContext *ctx) {
-  SourceSpan start = span_of_token(cur(ctx));
-  TypeRef *iv_type;
+static int parse_for_iv(ParseContext *ctx, TypeRef **iv_type,
+                        BoundName *iv_name) {
   const Token *name_tok;
-  BoundName iv_name;
-  Expr *lb;
-  Expr *ub;
-  Expr *step = NULL;
-  Stmt *body;
-  Stmt *s;
-
-  advance(ctx); /* 'for' */
-
   if (!is_iv_type_kw(cur_kind(ctx))) {
     error_here(ctx, "expected an induction-variable type "
                     "(index or a sized int), found '%t'");
-    return NULL;
+    return 0;
   }
-  /* iv_type is a plain scalar base type (no shared/pointer/generic). */
-  iv_type = new_type(ctx, TYPE_SCALAR, span_of_token(cur(ctx)));
-  if (iv_type == NULL)
-    return NULL;
-  iv_type->scalar = scalar_kind_of(cur_kind(ctx));
+  *iv_type = new_type(ctx, TYPE_SCALAR, span_of_token(cur(ctx)));
+  if (*iv_type == NULL)
+    return 0;
+  (*iv_type)->scalar = scalar_kind_of(cur_kind(ctx));
   advance(ctx);
 
   name_tok = cur(ctx);
   if (name_tok->kind != TOK_IDENT) {
     error_here(ctx, "expected the induction variable name, found '%t'");
-    return NULL;
+    return 0;
   }
-  iv_name = bound_name_of(ctx, name_tok);
+  *iv_name = bound_name_of(ctx, name_tok);
   advance(ctx);
+  return 1;
+}
+
+static int parse_for_range(ParseContext *ctx, Expr **lb, Expr **ub,
+                           Expr **step) {
+  *step = NULL;
 
   if (!expect(ctx, TOK_KW_IN, "expected 'in' in for-loop header"))
-    return NULL;
+    return 0;
 
-  lb = parse_expr(ctx);
-  if (lb == NULL)
-    return NULL;
+  *lb = parse_expr(ctx);
+  if (*lb == NULL)
+    return 0;
   if (!expect(ctx, TOK_DOTDOT, "expected '..' between for-loop bounds"))
-    return NULL;
-  ub = parse_expr(ctx);
-  if (ub == NULL)
-    return NULL;
+    return 0;
+  *ub = parse_expr(ctx);
+  if (*ub == NULL)
+    return 0;
 
   if (cur_kind(ctx) == TOK_KW_STEP) {
     advance(ctx);
-    step = parse_expr(ctx);
-    if (step == NULL)
-      return NULL;
+    *step = parse_expr(ctx);
+    if (*step == NULL)
+      return 0;
   }
+  return 1;
+}
+
+static Stmt *parse_for_stmt(ParseContext *ctx) {
+  SourceSpan start = span_of_token(cur(ctx));
+  TypeRef *iv_type;
+  BoundName iv_name;
+  Expr *lb;
+  Expr *ub;
+  Expr *step;
+  Stmt *body;
+  Stmt *s;
+
+  advance(ctx); /* 'for' */
+  if (!parse_for_iv(ctx, &iv_type, &iv_name))
+    return NULL;
+  if (!parse_for_range(ctx, &lb, &ub, &step))
+    return NULL;
 
   body = parse_block(ctx);
   if (body == NULL)
@@ -1588,62 +1639,71 @@ static Stmt *parse_stmt(ParseContext *ctx) {
 
 /* block = "{" { stmt } "}" ; On a failed child statement, resync to the
  * next boundary and keep going so multiple errors surface. */
+static int recover_block_stmt(ParseContext *ctx, size_t before) {
+  resync_stmt(ctx);
+  if (ctx->pos != before)
+    return 1;
+  if (cur_kind(ctx) == TOK_RBRACE || at_eof(ctx))
+    return 0;
+  advance(ctx);
+  return 1;
+}
+
+static void parse_block_stmts(ParseContext *ctx, PtrVec *stmts) {
+  while (cur_kind(ctx) != TOK_RBRACE && !at_eof(ctx)) {
+    size_t before = ctx->pos;
+    Stmt *child = parse_stmt(ctx);
+    if (child != NULL) {
+      ptrvec_push(stmts, child);
+      continue;
+    }
+    if (!recover_block_stmt(ctx, before))
+      break;
+  }
+}
+
+static Stmt *finish_block(ParseContext *ctx, SourceSpan start, PtrVec *stmts,
+                          SourceSpan end) {
+  Stmt **stmt_arr;
+  size_t stmt_count = 0;
+  Stmt *s;
+  if (stmts->overflow)
+    error_here(ctx, "too many statements in a block");
+
+  stmt_arr = (Stmt **)ptrvec_finish(ctx, stmts, &stmt_count);
+  if (stmts->count > 0 && stmt_arr == NULL)
+    return NULL;
+
+  s = new_stmt(ctx, STMT_BLOCK, span_join(start, end));
+  if (s == NULL)
+    return NULL;
+  s->as.block.stmts = stmt_arr;
+  s->as.block.stmt_count = stmt_count;
+  return s;
+}
+
 static Stmt *parse_block(ParseContext *ctx) {
   SourceSpan start = span_of_token(cur(ctx));
   PtrVec stmts;
-  Stmt **stmt_arr;
-  size_t stmt_count = 0;
   Stmt *s;
   SourceSpan end;
 
   if (!recurse_enter(ctx))
     return NULL;
-
   if (!expect(ctx, TOK_LBRACE, "expected '{' to begin a block")) {
     recurse_leave(ctx);
     return NULL;
   }
 
   ptrvec_init(&stmts);
-  while (cur_kind(ctx) != TOK_RBRACE && !at_eof(ctx)) {
-    Stmt *child = parse_stmt(ctx);
-    if (child == NULL) {
-      /* Recover: skip to the next statement boundary and continue. If no
-       * progress is possible (e.g. stuck on `}`/EOF), break out. */
-      size_t before = ctx->pos;
-      resync_stmt(ctx);
-      if (ctx->pos == before) {
-        if (cur_kind(ctx) == TOK_RBRACE || at_eof(ctx))
-          break;
-        advance(ctx); /* force progress to avoid an infinite loop. */
-      }
-      continue;
-    }
-    ptrvec_push(&stmts, child);
-  }
-
-  if (stmts.overflow)
-    error_here(ctx, "too many statements in a block");
+  parse_block_stmts(ctx, &stmts);
 
   end = span_of_token(cur(ctx));
   if (!expect(ctx, TOK_RBRACE, "expected '}' to close a block")) {
     recurse_leave(ctx);
     return NULL;
   }
-
-  stmt_arr = (Stmt **)ptrvec_finish(ctx, &stmts, &stmt_count);
-  if (stmts.count > 0 && stmt_arr == NULL) {
-    recurse_leave(ctx);
-    return NULL;
-  }
-
-  s = new_stmt(ctx, STMT_BLOCK, span_join(start, end));
-  if (s == NULL) {
-    recurse_leave(ctx);
-    return NULL;
-  }
-  s->as.block.stmts = stmt_arr;
-  s->as.block.stmt_count = stmt_count;
+  s = finish_block(ctx, start, &stmts, end);
   recurse_leave(ctx);
   return s;
 }
@@ -1731,55 +1791,25 @@ static Param *parse_param(ParseContext *ctx) {
  * On a header error we resync to the top level so the program loop can
  * continue past a broken kernel.
  */
-static Kernel *parse_kernel(ParseContext *ctx) {
-  SourceSpan start = span_of_token(cur(ctx));
-  Kernel *kern;
-  PtrVec attrs;
-  PtrVec params;
-  Attribute **attr_arr;
-  size_t attr_count = 0;
-  Param **param_arr;
-  size_t param_count = 0;
-  const Token *name_tok;
-
-  if (!expect(ctx, TOK_KW_KERNEL, "expected 'kernel'"))
-    return NULL;
-
-  ptrvec_init(&attrs);
+static int parse_attributes(ParseContext *ctx, PtrVec *attrs) {
   while (cur_kind(ctx) == TOK_LATTR) {
     Attribute *a = parse_attribute(ctx);
     if (a == NULL)
-      return NULL;
-    ptrvec_push(&attrs, a);
+      return 0;
+    ptrvec_push(attrs, a);
   }
-  if (attrs.overflow)
+  if (attrs->overflow)
     error_here(ctx, "too many attributes on a kernel");
+  return 1;
+}
 
-  if (!expect(ctx, TOK_KW_VOID, "expected 'void' (kernels return void in v1)"))
-    return NULL;
-
-  name_tok = cur(ctx);
-  if (name_tok->kind != TOK_IDENT) {
-    error_here(ctx, "expected a kernel name, found '%t'");
-    return NULL;
-  }
-
-  kern = (Kernel *)arena_alloc(ctx->arena, sizeof(Kernel), sizeof(void *));
-  if (kern == NULL)
-    return NULL;
-  kern->name = bound_name_of(ctx, name_tok);
-  advance(ctx);
-
-  if (!expect(ctx, TOK_LPAREN, "expected '(' after the kernel name"))
-    return NULL;
-
-  ptrvec_init(&params);
+static int parse_params(ParseContext *ctx, PtrVec *params) {
   if (cur_kind(ctx) != TOK_RPAREN) {
     for (;;) {
       Param *p = parse_param(ctx);
       if (p == NULL)
-        return NULL;
-      ptrvec_push(&params, p);
+        return 0;
+      ptrvec_push(params, p);
       if (cur_kind(ctx) == TOK_COMMA) {
         advance(ctx);
         continue;
@@ -1787,24 +1817,69 @@ static Kernel *parse_kernel(ParseContext *ctx) {
       break;
     }
   }
-  if (params.overflow)
+  if (params->overflow)
     error_here(ctx, "too many kernel parameters");
+  return 1;
+}
 
+static int finish_kernel_lists(ParseContext *ctx, Kernel *kern, PtrVec *attrs,
+                               PtrVec *params) {
+  size_t attr_count = 0;
+  size_t param_count = 0;
+  kern->attrs = (Attribute **)ptrvec_finish(ctx, attrs, &attr_count);
+  if (attrs->count > 0 && kern->attrs == NULL)
+    return 0;
+  kern->params = (Param **)ptrvec_finish(ctx, params, &param_count);
+  if (params->count > 0 && kern->params == NULL)
+    return 0;
+  kern->attr_count = attr_count;
+  kern->param_count = param_count;
+  return 1;
+}
+
+static Kernel *parse_kernel_name(ParseContext *ctx) {
+  const Token *name_tok = cur(ctx);
+  Kernel *kern;
+  if (name_tok->kind != TOK_IDENT) {
+    error_here(ctx, "expected a kernel name, found '%t'");
+    return NULL;
+  }
+  kern = (Kernel *)arena_alloc(ctx->arena, sizeof(Kernel), sizeof(void *));
+  if (kern == NULL)
+    return NULL;
+  kern->name = bound_name_of(ctx, name_tok);
+  advance(ctx);
+  return kern;
+}
+
+static Kernel *parse_kernel(ParseContext *ctx) {
+  SourceSpan start = span_of_token(cur(ctx));
+  Kernel *kern;
+  PtrVec attrs;
+  PtrVec params;
+
+  if (!expect(ctx, TOK_KW_KERNEL, "expected 'kernel'"))
+    return NULL;
+
+  ptrvec_init(&attrs);
+  if (!parse_attributes(ctx, &attrs))
+    return NULL;
+  if (!expect(ctx, TOK_KW_VOID, "expected 'void' (kernels return void in v1)"))
+    return NULL;
+
+  kern = parse_kernel_name(ctx);
+  if (kern == NULL)
+    return NULL;
+
+  if (!expect(ctx, TOK_LPAREN, "expected '(' after the kernel name"))
+    return NULL;
+  ptrvec_init(&params);
+  if (!parse_params(ctx, &params))
+    return NULL;
   if (!expect(ctx, TOK_RPAREN, "expected ')' to close the parameter list"))
     return NULL;
-
-  /* Build exact arena arrays from the temporaries. */
-  attr_arr = (Attribute **)ptrvec_finish(ctx, &attrs, &attr_count);
-  if (attrs.count > 0 && attr_arr == NULL)
+  if (!finish_kernel_lists(ctx, kern, &attrs, &params))
     return NULL;
-  param_arr = (Param **)ptrvec_finish(ctx, &params, &param_count);
-  if (params.count > 0 && param_arr == NULL)
-    return NULL;
-
-  kern->attrs = attr_arr;
-  kern->attr_count = attr_count;
-  kern->params = param_arr;
-  kern->param_count = param_count;
 
   kern->body = parse_block(ctx);
   if (kern->body == NULL)
@@ -1813,12 +1888,57 @@ static Kernel *parse_kernel(ParseContext *ctx) {
   return kern;
 }
 
+static void recover_toplevel(ParseContext *ctx, size_t before) {
+  resync_toplevel(ctx);
+  if (ctx->pos == before && !at_eof(ctx))
+    advance(ctx);
+}
+
+static void parse_program_kernels(ParseContext *ctx, PtrVec *kernels,
+                                  SourceSpan *first, SourceSpan *last,
+                                  int *have_span) {
+  while (!at_eof(ctx)) {
+    size_t before = ctx->pos;
+    Kernel *k;
+    if (cur_kind(ctx) != TOK_KW_KERNEL) {
+      error_here(ctx, "expected a top-level 'kernel', found '%t'");
+      recover_toplevel(ctx, before);
+      continue;
+    }
+    k = parse_kernel(ctx);
+    if (k == NULL) {
+      recover_toplevel(ctx, before);
+      continue;
+    }
+    if (!*have_span) {
+      *first = k->span;
+      *have_span = 1;
+    }
+    *last = k->span;
+    ptrvec_push(kernels, k);
+  }
+}
+
+static int finish_program(ParseContext *ctx, Program *prog, PtrVec *kernels,
+                          SourceSpan first, SourceSpan last, int have_span) {
+  size_t kern_count = 0;
+  if (kernels->overflow)
+    error_here(ctx, "too many kernels in the translation unit");
+  prog->kernels = (Kernel **)ptrvec_finish(ctx, kernels, &kern_count);
+  if (kernels->count > 0 && prog->kernels == NULL) {
+    diag_emit(ctx->diags, DIAG_ERROR, span_empty(),
+              "out of memory allocating the kernel list");
+    return 0;
+  }
+  prog->kernel_count = kern_count;
+  prog->span = have_span ? span_join(first, last) : span_empty();
+  return 1;
+}
+
 /* program = { kernel } ; */
 Program *parse_program(ParseContext *ctx) {
   Program *prog;
   PtrVec kernels;
-  Kernel **kern_arr;
-  size_t kern_count = 0;
   SourceSpan first = span_empty();
   SourceSpan last = span_empty();
   int have_span = 0;
@@ -1831,43 +1951,9 @@ Program *parse_program(ParseContext *ctx) {
   }
 
   ptrvec_init(&kernels);
-  while (!at_eof(ctx)) {
-    Kernel *k;
-    size_t before = ctx->pos;
-    if (cur_kind(ctx) != TOK_KW_KERNEL) {
-      error_here(ctx, "expected a top-level 'kernel', found '%t'");
-      resync_toplevel(ctx);
-      if (ctx->pos == before && !at_eof(ctx))
-        advance(ctx);
-      continue;
-    }
-    k = parse_kernel(ctx);
-    if (k == NULL) {
-      resync_toplevel(ctx);
-      if (ctx->pos == before && !at_eof(ctx))
-        advance(ctx);
-      continue;
-    }
-    if (!have_span) {
-      first = k->span;
-      have_span = 1;
-    }
-    last = k->span;
-    ptrvec_push(&kernels, k);
-  }
-
-  if (kernels.overflow)
-    error_here(ctx, "too many kernels in the translation unit");
-
-  kern_arr = (Kernel **)ptrvec_finish(ctx, &kernels, &kern_count);
-  if (kernels.count > 0 && kern_arr == NULL) {
-    diag_emit(ctx->diags, DIAG_ERROR, span_empty(),
-              "out of memory allocating the kernel list");
+  parse_program_kernels(ctx, &kernels, &first, &last, &have_span);
+  if (!finish_program(ctx, prog, &kernels, first, last, have_span))
     return NULL;
-  }
-  prog->kernels = kern_arr;
-  prog->kernel_count = kern_count;
-  prog->span = have_span ? span_join(first, last) : span_empty();
   return prog;
 }
 

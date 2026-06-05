@@ -57,168 +57,90 @@ static TokenArray lex_str(const char *src, Arena *arena, DiagList *diags) {
   return lex_tokenize(&ctx);
 }
 
-/* Human-readable name for a kind, for failure messages. Only the kinds
- * the tests touch need a precise name; the rest fall through to a number
- * so an unexpected kind is still identifiable. */
+static const char *const kKindNames[TOK__COUNT] = {
+    [TOK_EOF] = "EOF",
+    [TOK_ERROR] = "ERROR",
+    [TOK_KW_KERNEL] = "kernel",
+    [TOK_KW_VOID] = "void",
+    [TOK_KW_AUTO] = "auto",
+    [TOK_KW_IF] = "if",
+    [TOK_KW_ELSE] = "else",
+    [TOK_KW_WHERE] = "where",
+    [TOK_KW_OTHERWISE] = "otherwise",
+    [TOK_KW_FOR] = "for",
+    [TOK_KW_IN] = "in",
+    [TOK_KW_STEP] = "step",
+    [TOK_KW_WHILE] = "while",
+    [TOK_KW_AFTER] = "after",
+    [TOK_KW_SHARED] = "shared",
+    [TOK_KW_BOOL] = "bool",
+    [TOK_KW_HALF] = "half",
+    [TOK_KW_FLOAT] = "float",
+    [TOK_KW_INDEX] = "index",
+    [TOK_KW_TOKEN] = "token",
+    [TOK_KW_INT8] = "int8_t",
+    [TOK_KW_INT16] = "int16_t",
+    [TOK_KW_INT32] = "int32_t",
+    [TOK_KW_INT64] = "int64_t",
+    [TOK_KW_UINT8] = "uint8_t",
+    [TOK_KW_UINT16] = "uint16_t",
+    [TOK_KW_UINT32] = "uint32_t",
+    [TOK_KW_UINT64] = "uint64_t",
+    [TOK_KW_SIMD] = "simd",
+    [TOK_KW_MASK] = "mask",
+    [TOK_KW_VECTOR] = "vector",
+    [TOK_KW_FRAGMENT] = "fragment",
+    [TOK_IDENT] = "IDENT",
+    [TOK_INT_LIT] = "INT",
+    [TOK_FLOAT_LIT] = "FLOAT",
+    [TOK_LPAREN] = "(",
+    [TOK_RPAREN] = ")",
+    [TOK_LBRACE] = "{",
+    [TOK_RBRACE] = "}",
+    [TOK_LBRACKET] = "[",
+    [TOK_RBRACKET] = "]",
+    [TOK_LATTR] = "[[",
+    [TOK_RATTR] = "]]",
+    [TOK_COMMA] = ",",
+    [TOK_SEMI] = ";",
+    [TOK_DOTDOT] = "..",
+    [TOK_ARROW] = "->",
+    [TOK_ASSIGN] = "=",
+    [TOK_PLUS_EQ] = "+=",
+    [TOK_MINUS_EQ] = "-=",
+    [TOK_STAR_EQ] = "*=",
+    [TOK_SLASH_EQ] = "/=",
+    [TOK_AMP_EQ] = "&=",
+    [TOK_PIPE_EQ] = "|=",
+    [TOK_CARET_EQ] = "^=",
+    [TOK_SHL_EQ] = "<<=",
+    [TOK_SHR_EQ] = ">>=",
+    [TOK_PLUS] = "+",
+    [TOK_MINUS] = "-",
+    [TOK_STAR] = "*",
+    [TOK_SLASH] = "/",
+    [TOK_PERCENT] = "%",
+    [TOK_SHL] = "<<",
+    [TOK_SHR] = ">>",
+    [TOK_LT] = "<",
+    [TOK_LE] = "<=",
+    [TOK_GT] = ">",
+    [TOK_GE] = ">=",
+    [TOK_EQ] = "==",
+    [TOK_NE] = "!=",
+    [TOK_AMP] = "&",
+    [TOK_PIPE] = "|",
+    [TOK_CARET] = "^",
+    [TOK_TILDE] = "~",
+    [TOK_BANG] = "!",
+    [TOK_AMPAMP] = "&&",
+    [TOK_PIPEPIPE] = "||",
+};
+
 static const char *kind_name(TokenKind k) {
-  switch (k) {
-  case TOK_EOF:
-    return "EOF";
-  case TOK_ERROR:
-    return "ERROR";
-  case TOK_KW_KERNEL:
-    return "kernel";
-  case TOK_KW_VOID:
-    return "void";
-  case TOK_KW_AUTO:
-    return "auto";
-  case TOK_KW_IF:
-    return "if";
-  case TOK_KW_ELSE:
-    return "else";
-  case TOK_KW_WHERE:
-    return "where";
-  case TOK_KW_OTHERWISE:
-    return "otherwise";
-  case TOK_KW_FOR:
-    return "for";
-  case TOK_KW_IN:
-    return "in";
-  case TOK_KW_STEP:
-    return "step";
-  case TOK_KW_WHILE:
-    return "while";
-  case TOK_KW_AFTER:
-    return "after";
-  case TOK_KW_SHARED:
-    return "shared";
-  case TOK_KW_BOOL:
-    return "bool";
-  case TOK_KW_HALF:
-    return "half";
-  case TOK_KW_FLOAT:
-    return "float";
-  case TOK_KW_INDEX:
-    return "index";
-  case TOK_KW_TOKEN:
-    return "token";
-  case TOK_KW_INT8:
-    return "int8_t";
-  case TOK_KW_INT16:
-    return "int16_t";
-  case TOK_KW_INT32:
-    return "int32_t";
-  case TOK_KW_INT64:
-    return "int64_t";
-  case TOK_KW_UINT8:
-    return "uint8_t";
-  case TOK_KW_UINT16:
-    return "uint16_t";
-  case TOK_KW_UINT32:
-    return "uint32_t";
-  case TOK_KW_UINT64:
-    return "uint64_t";
-  case TOK_KW_SIMD:
-    return "simd";
-  case TOK_KW_MASK:
-    return "mask";
-  case TOK_KW_VECTOR:
-    return "vector";
-  case TOK_KW_FRAGMENT:
-    return "fragment";
-  case TOK_IDENT:
-    return "IDENT";
-  case TOK_INT_LIT:
-    return "INT";
-  case TOK_FLOAT_LIT:
-    return "FLOAT";
-  case TOK_LPAREN:
-    return "(";
-  case TOK_RPAREN:
-    return ")";
-  case TOK_LBRACE:
-    return "{";
-  case TOK_RBRACE:
-    return "}";
-  case TOK_LBRACKET:
-    return "[";
-  case TOK_RBRACKET:
-    return "]";
-  case TOK_LATTR:
-    return "[[";
-  case TOK_RATTR:
-    return "]]";
-  case TOK_COMMA:
-    return ",";
-  case TOK_SEMI:
-    return ";";
-  case TOK_DOTDOT:
-    return "..";
-  case TOK_ARROW:
-    return "->";
-  case TOK_ASSIGN:
-    return "=";
-  case TOK_PLUS_EQ:
-    return "+=";
-  case TOK_MINUS_EQ:
-    return "-=";
-  case TOK_STAR_EQ:
-    return "*=";
-  case TOK_SLASH_EQ:
-    return "/=";
-  case TOK_AMP_EQ:
-    return "&=";
-  case TOK_PIPE_EQ:
-    return "|=";
-  case TOK_CARET_EQ:
-    return "^=";
-  case TOK_SHL_EQ:
-    return "<<=";
-  case TOK_SHR_EQ:
-    return ">>=";
-  case TOK_PLUS:
-    return "+";
-  case TOK_MINUS:
-    return "-";
-  case TOK_STAR:
-    return "*";
-  case TOK_SLASH:
-    return "/";
-  case TOK_PERCENT:
-    return "%";
-  case TOK_SHL:
-    return "<<";
-  case TOK_SHR:
-    return ">>";
-  case TOK_LT:
-    return "<";
-  case TOK_LE:
-    return "<=";
-  case TOK_GT:
-    return ">";
-  case TOK_GE:
-    return ">=";
-  case TOK_EQ:
-    return "==";
-  case TOK_NE:
-    return "!=";
-  case TOK_AMP:
-    return "&";
-  case TOK_PIPE:
-    return "|";
-  case TOK_CARET:
-    return "^";
-  case TOK_TILDE:
-    return "~";
-  case TOK_BANG:
-    return "!";
-  case TOK_AMPAMP:
-    return "&&";
-  case TOK_PIPEPIPE:
-    return "||";
-  default:
-    return "?";
-  }
+  if ((unsigned)k < TOK__COUNT && kKindNames[k] != NULL)
+    return kKindNames[k];
+  return "?";
 }
 
 /*

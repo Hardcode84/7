@@ -181,116 +181,80 @@ Stmt *whereStmt(Expr *cond, Stmt *thenBlk, Stmt *elseBlk) {
   return s;
 }
 
-// Build the saxpy kernel AST. `swapLoads` permutes the two loads to make an
-// overfit probe (a permuted-but-valid program must NOT print the canonical
-// golden text).
-Program *buildSaxpy(bool swapLoads) {
-  TypeRef *f32 = scalarType(SCALAR_FLOAT, 0, 0);
-  TypeRef *u32 = scalarType(SCALAR_UINT32, 0, 0);
-  TypeRef *fptr = scalarType(SCALAR_FLOAT, 1, 0); // float*
-  TypeRef *simdU32 = simdType(scalarType(SCALAR_UINT32, 0, 0), 32);
-  TypeRef *simdF32 = simdType(scalarType(SCALAR_FLOAT, 0, 0), 32);
-  TypeRef *mask32 = maskType(32);
+Param *param(TypeRef *ty, const char *name);
+Program *makeProgram(const char *kname, Param **params, size_t nparams,
+                     Stmt *bodyBlk, const char *attrName, uint64_t attrArg);
 
-  // lane = lane_id<32>();
-  Stmt *sLane =
-      declStmt(simdU32, "lane", call("lane_id", 1, 32, nullptr, 0, simdU32));
-  // wave = workgroup_id<0>();
-  Stmt *sWave =
-      declStmt(u32, "wave", call("workgroup_id", 1, 0, nullptr, 0, u32));
-  // i = wave * 32 + lane;
-  Expr *mul = binary(TOK_STAR, ident("wave", u32), intLit(32, u32), u32);
-  Expr *add = binary(TOK_PLUS, mul, ident("lane", simdU32), simdU32);
-  Stmt *sI = declStmt(simdU32, "i", add);
-  // active = i < n;
-  Expr *cmp = binary(TOK_LT, ident("i", simdU32), ident("n", u32), mask32);
-  Stmt *sActive = declStmt(mask32, "active", cmp);
+struct SaxpyTypes {
+  TypeRef *f32;
+  TypeRef *u32;
+  TypeRef *fptr;
+  TypeRef *simdU32;
+  TypeRef *simdF32;
+  TypeRef *simdFPtr;
+  TypeRef *mask32;
+};
 
-  // xptr = x + i; yptr = y + i;  (hoisted, as in saxpy_gen.py).
-  TypeRef *simdFPtr = simdType(fptr, 32);
-  Expr *xi = binary(TOK_PLUS, ident("x", fptr), ident("i", simdU32), simdFPtr);
-  Expr *yi = binary(TOK_PLUS, ident("y", fptr), ident("i", simdU32), simdFPtr);
-  Stmt *sXptr = declStmt(simdFPtr, "xptr", xi);
-  Stmt *sYptr = declStmt(simdFPtr, "yptr", yi);
+SaxpyTypes makeSaxpyTypes() {
+  SaxpyTypes t;
+  t.f32 = scalarType(SCALAR_FLOAT, 0, 0);
+  t.u32 = scalarType(SCALAR_UINT32, 0, 0);
+  t.fptr = scalarType(SCALAR_FLOAT, 1, 0);
+  t.simdU32 = simdType(scalarType(SCALAR_UINT32, 0, 0), 32);
+  t.simdF32 = simdType(scalarType(SCALAR_FLOAT, 0, 0), 32);
+  t.simdFPtr = simdType(t.fptr, 32);
+  t.mask32 = maskType(32);
+  return t;
+}
 
-  // where (active) { xv = load(xptr); yv = load(yptr); store(a*xv+yv, yptr); }
-  Expr *xptrRef = ident("xptr", simdFPtr);
-  Expr *yptrRef = ident("yptr", simdFPtr);
-  Expr *loadX = call("load", 0, 0, &xptrRef, 1, simdF32);
-  Expr *loadY = call("load", 0, 0, &yptrRef, 1, simdF32);
-  Stmt *sXv = declStmt(simdF32, "xv", loadX);
-  Stmt *sYv = declStmt(simdF32, "yv", loadY);
-
-  // a*xv + yv -> store to yptr.
-  Expr *axv = binary(TOK_STAR, ident("a", f32), ident("xv", simdF32), simdF32);
-  Expr *res = binary(TOK_PLUS, axv, ident("yv", simdF32), simdF32);
-  Expr *storeArgs[2] = {res, ident("yptr", simdFPtr)};
+Stmt *buildSaxpyWhere(const SaxpyTypes &t, bool swapLoads) {
+  Expr *xptrRef = ident("xptr", t.simdFPtr);
+  Expr *yptrRef = ident("yptr", t.simdFPtr);
+  Expr *loadX = call("load", 0, 0, &xptrRef, 1, t.simdF32);
+  Expr *loadY = call("load", 0, 0, &yptrRef, 1, t.simdF32);
+  Stmt *sXv = declStmt(t.simdF32, "xv", loadX);
+  Stmt *sYv = declStmt(t.simdF32, "yv", loadY);
+  Expr *axv =
+      binary(TOK_STAR, ident("a", t.f32), ident("xv", t.simdF32), t.simdF32);
+  Expr *res = binary(TOK_PLUS, axv, ident("yv", t.simdF32), t.simdF32);
+  Expr *storeArgs[2] = {res, ident("yptr", t.simdFPtr)};
   Stmt *sStore = callStmt(call("store", 0, 0, storeArgs, 2, nullptr));
 
-  Stmt *bodyStmts[3];
-  if (!swapLoads) {
-    bodyStmts[0] = sXv;
-    bodyStmts[1] = sYv;
-  } else {
+  Stmt *bodyStmts[3] = {sXv, sYv, sStore};
+  if (swapLoads) {
     bodyStmts[0] = sYv;
     bodyStmts[1] = sXv;
   }
-  bodyStmts[2] = sStore;
-  Stmt *whereBody = block(bodyStmts, 3);
-  Stmt *sWhere = whereStmt(ident("active", mask32), whereBody, nullptr);
+  return whereStmt(ident("active", t.mask32), block(bodyStmts, 3), nullptr);
+}
 
-  Stmt *top[7] = {sLane, sWave, sI, sActive, sXptr, sYptr, sWhere};
-  Stmt *body = block(top, 7);
+Stmt *buildSaxpyBody(const SaxpyTypes &t, bool swapLoads) {
+  Stmt *sLane = declStmt(t.simdU32, "lane",
+                         call("lane_id", 1, 32, nullptr, 0, t.simdU32));
+  Stmt *sWave =
+      declStmt(t.u32, "wave", call("workgroup_id", 1, 0, nullptr, 0, t.u32));
+  Expr *mul = binary(TOK_STAR, ident("wave", t.u32), intLit(32, t.u32), t.u32);
+  Expr *add = binary(TOK_PLUS, mul, ident("lane", t.simdU32), t.simdU32);
+  Stmt *sI = declStmt(t.simdU32, "i", add);
+  Expr *cmp =
+      binary(TOK_LT, ident("i", t.simdU32), ident("n", t.u32), t.mask32);
+  Stmt *sActive = declStmt(t.mask32, "active", cmp);
+  Expr *xi =
+      binary(TOK_PLUS, ident("x", t.fptr), ident("i", t.simdU32), t.simdFPtr);
+  Expr *yi =
+      binary(TOK_PLUS, ident("y", t.fptr), ident("i", t.simdU32), t.simdFPtr);
+  Stmt *sXptr = declStmt(t.simdFPtr, "xptr", xi);
+  Stmt *sYptr = declStmt(t.simdFPtr, "yptr", yi);
+  Stmt *top[7] = {
+      sLane, sWave, sI, sActive, sXptr, sYptr, buildSaxpyWhere(t, swapLoads)};
+  return block(top, 7);
+}
 
-  // Params: float* x, float* y, float a, uint32_t n.
-  Param *px = make<Param>();
-  memset(px, 0, sizeof(*px));
-  px->type = fptr;
-  px->name = boundName("x");
-  px->span = noSpan();
-  Param *py = make<Param>();
-  memset(py, 0, sizeof(*py));
-  py->type = fptr;
-  py->name = boundName("y");
-  py->span = noSpan();
-  Param *pa = make<Param>();
-  memset(pa, 0, sizeof(*pa));
-  pa->type = f32;
-  pa->name = boundName("a");
-  pa->span = noSpan();
-  Param *pn = make<Param>();
-  memset(pn, 0, sizeof(*pn));
-  pn->type = u32;
-  pn->name = boundName("n");
-  pn->span = noSpan();
-
-  Param **params = static_cast<Param **>(
-      arena_alloc(&g_arena, sizeof(Param *) * 4, sizeof(void *)));
-  params[0] = px;
-  params[1] = py;
-  params[2] = pa;
-  params[3] = pn;
-
-  Kernel *k = make<Kernel>();
-  memset(k, 0, sizeof(*k));
-  k->name = boundName("saxpy");
-  k->params = params;
-  k->param_count = 4;
-  k->attrs = nullptr;
-  k->attr_count = 0;
-  k->body = body;
-  k->span = noSpan();
-
-  Kernel **kernels = static_cast<Kernel **>(
-      arena_alloc(&g_arena, sizeof(Kernel *), sizeof(void *)));
-  kernels[0] = k;
-
-  Program *p = make<Program>();
-  memset(p, 0, sizeof(*p));
-  p->kernels = kernels;
-  p->kernel_count = 1;
-  p->span = noSpan();
-  return p;
+Program *buildSaxpy(bool swapLoads) {
+  SaxpyTypes t = makeSaxpyTypes();
+  Param *ps[4] = {param(t.fptr, "x"), param(t.fptr, "y"), param(t.f32, "a"),
+                  param(t.u32, "n")};
+  return makeProgram("saxpy", ps, 4, buildSaxpyBody(t, swapLoads), nullptr, 0);
 }
 
 // --- extra builders for the other goldens ---------------------------------
@@ -681,6 +645,41 @@ Program *buildUnsupported() {
   return makeProgram("unsupported", ps, 2, body, nullptr, 0);
 }
 
+Program *buildSaxpyDefault() { return buildSaxpy(false); }
+Program *buildSaxpySwap() { return buildSaxpy(true); }
+
+using BuildProgramFn = Program *(*)();
+
+struct LowerMode {
+  const char *name;
+  BuildProgramFn build;
+};
+
+static const LowerMode kLowerModes[] = {
+    {"saxpy", buildSaxpyDefault},
+    {"--swap", buildSaxpySwap},
+    {"reduce_sum", buildReduceSum},
+    {"where_carry", buildWhereCarry},
+    {"where_otherwise", buildWhereOtherwise},
+    {"uniform_if_else", buildUniformIfElse},
+    {"cast_f32_f16", buildCastF32F16},
+    {"lds_roundtrip", buildLdsRoundtrip},
+    {"unsupported", buildUnsupported},
+};
+
+Program *selectProgram(const char *mode) {
+  for (const LowerMode &entry : kLowerModes)
+    if (strcmp(mode, entry.name) == 0)
+      return entry.build();
+  return nullptr;
+}
+
+void printLoweringErrors() {
+  fprintf(stderr, "lowering failed:\n");
+  for (Diag *d = g_diags.head; d; d = d->next)
+    fprintf(stderr, "  %s\n", d->message);
+}
+
 } // namespace
 
 int main(int argc, char **argv) {
@@ -691,29 +690,9 @@ int main(int argc, char **argv) {
   }
   diag_list_init(&g_diags, &g_arena);
 
-  // Mode selection: which golden's AST to lower. Default = saxpy; --swap is
-  // the overfit probe (permuted saxpy must NOT print the canned golden).
   const char *mode = (argc > 1) ? argv[1] : "saxpy";
-  Program *p = nullptr;
-  if (strcmp(mode, "saxpy") == 0)
-    p = buildSaxpy(false);
-  else if (strcmp(mode, "--swap") == 0)
-    p = buildSaxpy(true);
-  else if (strcmp(mode, "reduce_sum") == 0)
-    p = buildReduceSum();
-  else if (strcmp(mode, "where_carry") == 0)
-    p = buildWhereCarry();
-  else if (strcmp(mode, "where_otherwise") == 0)
-    p = buildWhereOtherwise();
-  else if (strcmp(mode, "uniform_if_else") == 0)
-    p = buildUniformIfElse();
-  else if (strcmp(mode, "cast_f32_f16") == 0)
-    p = buildCastF32F16();
-  else if (strcmp(mode, "lds_roundtrip") == 0)
-    p = buildLdsRoundtrip();
-  else if (strcmp(mode, "unsupported") == 0)
-    p = buildUnsupported();
-  else {
+  Program *p = selectProgram(mode);
+  if (p == nullptr) {
     fprintf(stderr, "unknown mode '%s'\n", mode);
     arena_destroy(&g_arena);
     return 2;
@@ -721,9 +700,7 @@ int main(int argc, char **argv) {
 
   char *mlir = wavec_lower_to_mlir(p, &g_diags);
   if (mlir == nullptr) {
-    fprintf(stderr, "lowering failed:\n");
-    for (Diag *d = g_diags.head; d; d = d->next)
-      fprintf(stderr, "  %s\n", d->message);
+    printLoweringErrors();
     arena_destroy(&g_arena);
     return 1;
   }

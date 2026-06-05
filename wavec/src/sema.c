@@ -148,6 +148,12 @@ static void err_uu(Checker *c, SourceSpan span, const char *fmt,
   diag_emit(c->diags, DIAG_ERROR, span, buf);
 }
 
+static SourceSpan empty_span(void) {
+  SourceSpan s;
+  memset(&s, 0, sizeof(s));
+  return s;
+}
+
 /*===----------------------------------------------------------------===*/
 /* Canonical type construction + classification                          */
 /*===----------------------------------------------------------------===*/
@@ -240,26 +246,17 @@ static int sk_is_float(ScalarKind k) {
   return k == SCALAR_FLOAT || k == SCALAR_HALF;
 }
 
-/* Bit width of a sized int / float scalar kind (0 for non-numeric). */
+static const unsigned kScalarBits[] = {
+    [SCALAR_HALF] = 16,   [SCALAR_FLOAT] = 32,  [SCALAR_INT8] = 8,
+    [SCALAR_INT16] = 16,  [SCALAR_INT32] = 32,  [SCALAR_INT64] = 64,
+    [SCALAR_UINT8] = 8,   [SCALAR_UINT16] = 16, [SCALAR_UINT32] = 32,
+    [SCALAR_UINT64] = 64,
+};
+
 static unsigned sk_bits(ScalarKind k) {
-  switch (k) {
-  case SCALAR_INT8:
-  case SCALAR_UINT8:
-    return 8;
-  case SCALAR_INT16:
-  case SCALAR_UINT16:
-  case SCALAR_HALF:
-    return 16;
-  case SCALAR_INT32:
-  case SCALAR_UINT32:
-  case SCALAR_FLOAT:
-    return 32;
-  case SCALAR_INT64:
-  case SCALAR_UINT64:
-    return 64;
-  default:
-    return 0;
-  }
+  if ((unsigned)k < sizeof(kScalarBits) / sizeof(kScalarBits[0]))
+    return kScalarBits[k];
+  return 0;
 }
 
 /* A scalar numeric element usable as a simd/vector element or a pointer
@@ -321,19 +318,15 @@ static int scalar_compatible(ScalarKind a, ScalarKind b) {
 
 /* Structural assignment-compatibility of two canonical types (ignoring
  * literal polymorphism, handled separately at the call site). */
-static int type_compatible(const TypeRef *a, const TypeRef *b) {
-  if (a == NULL || b == NULL)
-    return 0;
-  if (is_pointer(a) || is_pointer(b)) {
-    if (!is_pointer(a) || !is_pointer(b))
-      return 0;
-    if (a->is_shared != b->is_shared)
-      return 0;
-    return a->kind == TYPE_SCALAR && b->kind == TYPE_SCALAR &&
-           scalar_compatible(a->scalar, b->scalar);
-  }
-  if (a->kind != b->kind)
-    return 0;
+static int pointer_compatible(const TypeRef *a, const TypeRef *b) {
+  return is_pointer(a) && is_pointer(b) && a->is_shared == b->is_shared &&
+         a->kind == TYPE_SCALAR && b->kind == TYPE_SCALAR &&
+         scalar_compatible(a->scalar, b->scalar);
+}
+
+static int type_compatible(const TypeRef *a, const TypeRef *b);
+
+static int same_kind_compatible(const TypeRef *a, const TypeRef *b) {
   switch (a->kind) {
   case TYPE_SCALAR:
     return scalar_compatible(a->scalar, b->scalar);
@@ -348,36 +341,30 @@ static int type_compatible(const TypeRef *a, const TypeRef *b) {
   return 0;
 }
 
-/* Human-readable name of a scalar kind, for diagnostics. */
+static int type_compatible(const TypeRef *a, const TypeRef *b) {
+  if (a == NULL || b == NULL)
+    return 0;
+  if (is_pointer(a) || is_pointer(b))
+    return pointer_compatible(a, b);
+  if (a->kind != b->kind)
+    return 0;
+  return same_kind_compatible(a, b);
+}
+
+static const char *const kScalarNames[] = {
+    [SCALAR_BOOL] = "bool",       [SCALAR_HALF] = "half",
+    [SCALAR_FLOAT] = "float",     [SCALAR_INDEX] = "index",
+    [SCALAR_TOKEN] = "token",     [SCALAR_INT8] = "int8_t",
+    [SCALAR_INT16] = "int16_t",   [SCALAR_INT32] = "int32_t",
+    [SCALAR_INT64] = "int64_t",   [SCALAR_UINT8] = "uint8_t",
+    [SCALAR_UINT16] = "uint16_t", [SCALAR_UINT32] = "uint32_t",
+    [SCALAR_UINT64] = "uint64_t",
+};
+
 static const char *scalar_name(ScalarKind k) {
-  switch (k) {
-  case SCALAR_BOOL:
-    return "bool";
-  case SCALAR_HALF:
-    return "half";
-  case SCALAR_FLOAT:
-    return "float";
-  case SCALAR_INDEX:
-    return "index";
-  case SCALAR_TOKEN:
-    return "token";
-  case SCALAR_INT8:
-    return "int8_t";
-  case SCALAR_INT16:
-    return "int16_t";
-  case SCALAR_INT32:
-    return "int32_t";
-  case SCALAR_INT64:
-    return "int64_t";
-  case SCALAR_UINT8:
-    return "uint8_t";
-  case SCALAR_UINT16:
-    return "uint16_t";
-  case SCALAR_UINT32:
-    return "uint32_t";
-  case SCALAR_UINT64:
-    return "uint64_t";
-  }
+  if ((unsigned)k < sizeof(kScalarNames) / sizeof(kScalarNames[0]) &&
+      kScalarNames[k] != NULL)
+    return kScalarNames[k];
   return "?";
 }
 
@@ -483,111 +470,122 @@ static void check_block(Checker *c, Stmt *block);
  *   - fragment is not supported in v1.
  * Returns NULL and emits a diagnostic on any violation.
  */
+static TypeRef *resolve_type(Checker *c, const TypeRef *t);
+
+static TypeRef *resolve_pointer_type(Checker *c, const TypeRef *t) {
+  if (t->kind != TYPE_SCALAR) {
+    err(c, t->span, "pointer base must be a scalar element type (e.g. float*)");
+    return NULL;
+  }
+  if (!sk_is_numeric(t->scalar)) {
+    err_name(c, t->span, "'%s' is not a valid pointer element type",
+             scalar_name(t->scalar), (uint32_t)strlen(scalar_name(t->scalar)));
+    return NULL;
+  }
+  return ptr_type(c, t->scalar, t->is_shared);
+}
+
+static int require_type_width(Checker *c, const TypeRef *t, const char *what) {
+  if (!c->has_wave_n) {
+    char buf[SEMA_MSG_CAP];
+    snprintf(buf, sizeof(buf),
+             "%s<W> requires the kernel wave size; add "
+             "[[amdgpu_wave_size(N)]]",
+             what);
+    err(c, t->span, buf);
+    return 0;
+  }
+  if (t->width != c->wave_n) {
+    char buf[SEMA_MSG_CAP];
+    snprintf(buf, sizeof(buf),
+             "%s width %llu must equal the kernel wave size %llu", what,
+             (unsigned long long)t->width, (unsigned long long)c->wave_n);
+    err(c, t->span, buf);
+    return 0;
+  }
+  return 1;
+}
+
+static TypeRef *resolve_mask_type(Checker *c, const TypeRef *t) {
+  if (!require_type_width(c, t, "mask"))
+    return NULL;
+  return mask_type(c, t->width);
+}
+
+static TypeRef *resolve_simd_element(Checker *c, const TypeRef *elem) {
+  if (elem == NULL) {
+    err(c, empty_span(), "simd<T,W> requires an element type");
+    return NULL;
+  }
+  if (elem->kind == TYPE_VECTOR)
+    return resolve_type(c, elem);
+  if (elem->kind != TYPE_SCALAR || elem->is_pointer) {
+    err(c, elem->span,
+        "simd element must be a numeric scalar or a vector payload");
+    return NULL;
+  }
+  if (!sk_is_numeric(elem->scalar)) {
+    err_name(c, elem->span, "simd element '%s' must be a numeric scalar",
+             scalar_name(elem->scalar),
+             (uint32_t)strlen(scalar_name(elem->scalar)));
+    return NULL;
+  }
+  return scalar_type(c, elem->scalar);
+}
+
+static TypeRef *resolve_simd_type(Checker *c, const TypeRef *t) {
+  TypeRef *elem;
+  if (!require_type_width(c, t, "simd"))
+    return NULL;
+  elem = resolve_simd_element(c, t->element);
+  if (elem == NULL)
+    return NULL;
+  return simd_type(c, elem, t->width);
+}
+
+static TypeRef *resolve_vector_type(Checker *c, const TypeRef *t) {
+  TypeRef *elem;
+  TypeRef *vt;
+  if (t->element == NULL || t->element->kind != TYPE_SCALAR ||
+      t->element->is_pointer || !sk_is_numeric(t->element->scalar)) {
+    err(c, t->span, "vector<T,N> element must be a numeric scalar");
+    return NULL;
+  }
+  if (t->width == 0 || t->width > 2147483647u) {
+    err(c, t->span, "vector<T,N> length must be between 1 and 2147483647");
+    return NULL;
+  }
+  elem = scalar_type(c, t->element->scalar);
+  if (elem == NULL)
+    return NULL;
+  vt = new_type(c);
+  if (vt == NULL)
+    return NULL;
+  vt->kind = TYPE_VECTOR;
+  vt->element = elem;
+  vt->width = t->width;
+  return vt;
+}
+
 static TypeRef *resolve_type(Checker *c, const TypeRef *t) {
   if (t == NULL)
     return NULL;
-
   if (t->is_shared && !t->is_pointer) {
     err(c, t->span, "'shared' requires a pointer type (shared T*)");
     return NULL;
   }
-
-  if (t->is_pointer) {
-    /* A pointer's base must be a scalar numeric element. */
-    if (t->kind != TYPE_SCALAR) {
-      err(c, t->span,
-          "pointer base must be a scalar element type (e.g. float*)");
-      return NULL;
-    }
-    if (!sk_is_numeric(t->scalar)) {
-      err_name(c, t->span, "'%s' is not a valid pointer element type",
-               scalar_name(t->scalar),
-               (uint32_t)strlen(scalar_name(t->scalar)));
-      return NULL;
-    }
-    return ptr_type(c, t->scalar, t->is_shared);
-  }
+  if (t->is_pointer)
+    return resolve_pointer_type(c, t);
 
   switch (t->kind) {
   case TYPE_SCALAR:
     return scalar_type(c, t->scalar);
-
   case TYPE_MASK:
-    if (!c->has_wave_n) {
-      err(c, t->span,
-          "mask<W> requires the kernel wave size; add [[amdgpu_wave_size(N)]]");
-      return NULL;
-    }
-    if (t->width != c->wave_n) {
-      err_uu(c, t->span, "mask width %llu must equal the kernel wave size %llu",
-             (unsigned long long)t->width, (unsigned long long)c->wave_n);
-      return NULL;
-    }
-    return mask_type(c, t->width);
-
-  case TYPE_SIMD: {
-    TypeRef *elem;
-    if (!c->has_wave_n) {
-      err(c, t->span,
-          "simd<T,W> requires the kernel wave size; add "
-          "[[amdgpu_wave_size(N)]]");
-      return NULL;
-    }
-    if (t->width != c->wave_n) {
-      err_uu(c, t->span, "simd width %llu must equal the kernel wave size %llu",
-             (unsigned long long)t->width, (unsigned long long)c->wave_n);
-      return NULL;
-    }
-    if (t->element == NULL) {
-      err(c, t->span, "simd<T,W> requires an element type");
-      return NULL;
-    }
-    /* Element is either a numeric scalar or a vector-of-numeric payload. */
-    if (t->element->kind == TYPE_SCALAR && !t->element->is_pointer) {
-      if (!sk_is_numeric(t->element->scalar)) {
-        err_name(c, t->element->span,
-                 "simd element '%s' must be a numeric scalar",
-                 scalar_name(t->element->scalar),
-                 (uint32_t)strlen(scalar_name(t->element->scalar)));
-        return NULL;
-      }
-      elem = scalar_type(c, t->element->scalar);
-    } else if (t->element->kind == TYPE_VECTOR) {
-      elem = resolve_type(c, t->element);
-      if (elem == NULL)
-        return NULL;
-    } else {
-      err(c, t->element->span,
-          "simd element must be a numeric scalar or a vector payload");
-      return NULL;
-    }
-    return simd_type(c, elem, t->width);
-  }
-
-  case TYPE_VECTOR: {
-    TypeRef *elem;
-    TypeRef *vt;
-    if (t->element == NULL || t->element->kind != TYPE_SCALAR ||
-        t->element->is_pointer || !sk_is_numeric(t->element->scalar)) {
-      err(c, t->span, "vector<T,N> element must be a numeric scalar");
-      return NULL;
-    }
-    if (t->width == 0 || t->width > 2147483647u) {
-      err(c, t->span, "vector<T,N> length must be between 1 and 2147483647");
-      return NULL;
-    }
-    elem = scalar_type(c, t->element->scalar);
-    if (elem == NULL)
-      return NULL;
-    vt = new_type(c);
-    if (vt == NULL)
-      return NULL;
-    vt->kind = TYPE_VECTOR;
-    vt->element = elem;
-    vt->width = t->width;
-    return vt;
-  }
-
+    return resolve_mask_type(c, t);
+  case TYPE_SIMD:
+    return resolve_simd_type(c, t);
+  case TYPE_VECTOR:
+    return resolve_vector_type(c, t);
   case TYPE_FRAGMENT:
     err(c, t->span, "fragment types are not supported");
     return NULL;
@@ -893,49 +891,54 @@ typedef enum CastKindSel {
  * and returns 0. This is the cast kind/policy derivation the design and
  * the task call out; lowering re-derives the same way from the types.
  */
+static int derive_int_convert(Checker *c, SourceSpan span, ScalarKind src,
+                              ScalarKind tgt) {
+  if (sk_bits(tgt) <= sk_bits(src))
+    return 1;
+  if (!sk_is_sized_int(src)) {
+    err(c, span, "cast<T>: widening int conversion needs a sized-int source");
+    return 0;
+  }
+  (void)sk_is_signed_int(src);
+  return 1;
+}
+
+static int derive_int_to_fp(Checker *c, SourceSpan span, ScalarKind src) {
+  if (sk_is_sized_int(src)) {
+    (void)sk_is_signed_int(src);
+    return 1;
+  }
+  err(c, span, "cast<T>: int->fp needs a sized-int source for signedness");
+  return 0;
+}
+
+static int derive_fp_to_int(Checker *c, SourceSpan span, ScalarKind tgt) {
+  if (sk_is_sized_int(tgt)) {
+    (void)sk_is_signed_int(tgt);
+    return 1;
+  }
+  err(c, span, "cast<T>: fp->int needs a sized-int target for signedness");
+  return 0;
+}
+
 static int derive_cast(Checker *c, SourceSpan span, ScalarKind src,
                        ScalarKind tgt, CastKindSel *kind_out) {
   int src_fp = sk_is_float(src);
   int tgt_fp = sk_is_float(tgt);
-
   if (src_fp && tgt_fp) {
     *kind_out = CAST_FPCONVERT;
     return 1;
   }
   if (!src_fp && !tgt_fp) {
     *kind_out = CAST_INTCONVERT;
-    /* Widening needs an extension policy from the source signedness. */
-    if (sk_bits(tgt) > sk_bits(src)) {
-      /* sk_is_signed_int classifies the source; either answer (sign- or
-       * zero-extend) is a valid extension, so the policy is always
-       * formable for a sized int. Guard anyway so a future non-sized int
-       * source surfaces a clear error rather than a wrong cast. */
-      if (!sk_is_sized_int(src)) {
-        err(c, span,
-            "cast<T>: widening int conversion needs a sized-int source");
-        return 0;
-      }
-      (void)sk_is_signed_int(src); /* extension = sign|zero from this. */
-    }
-    return 1;
+    return derive_int_convert(c, span, src, tgt);
   }
   if (!src_fp && tgt_fp) {
     *kind_out = CAST_INT_TO_FP;
-    if (!sk_is_sized_int(src)) {
-      err(c, span, "cast<T>: int->fp needs a sized-int source for signedness");
-      return 0;
-    }
-    (void)sk_is_signed_int(src); /* signedness = signed|unsigned from src. */
-    return 1;
+    return derive_int_to_fp(c, span, src);
   }
-  /* src_fp && !tgt_fp */
   *kind_out = CAST_FP_TO_INT;
-  if (!sk_is_sized_int(tgt)) {
-    err(c, span, "cast<T>: fp->int needs a sized-int target for signedness");
-    return 0;
-  }
-  (void)sk_is_signed_int(tgt); /* signedness = signed|unsigned from target. */
-  return 1;
+  return derive_fp_to_int(c, span, tgt);
 }
 
 /*
@@ -946,13 +949,8 @@ static int derive_cast(Checker *c, SourceSpan span, ScalarKind src,
  * the checks here are existence/category checks). Result inherits the
  * lane shape: cast<T>(simd<U,W>) -> simd<T,W>, cast<T>(U) -> T.
  */
-static TypeRef *type_cast(Checker *c, Expr *e) {
-  TypeRef *tgt;
-  TypeRef *src;
-  ScalarKind se;
-  Expr *arg;
-
-  tgt = garg_type(c, e, 0);
+static TypeRef *cast_target_type(Checker *c, Expr *e) {
+  TypeRef *tgt = garg_type(c, e, 0);
   if (tgt == NULL)
     return NULL;
   if (e->as.call.garg_count != 1) {
@@ -964,29 +962,48 @@ static TypeRef *type_cast(Checker *c, Expr *e) {
         "cast<T>: target T must be a numeric scalar (half/float/sized int)");
     return NULL;
   }
+  return tgt;
+}
+
+static TypeRef *cast_source_type(Checker *c, Expr *arg) {
+  TypeRef *src = check_expr(c, arg);
+  if (src == NULL)
+    return NULL;
+  if (!is_untyped_literal(arg))
+    return src;
+  if (arg->kind == EXPR_INT_LIT)
+    (void)coerce_literal_to_scalar(c, arg, SCALAR_INT32);
+  else
+    (void)coerce_literal_to_scalar(c, arg, SCALAR_FLOAT);
+  return (TypeRef *)arg->sema_type;
+}
+
+static int cast_source_element(Checker *c, Expr *arg, TypeRef *src,
+                               ScalarKind *se) {
+  if (element_scalar(src, se) && sk_is_numeric(*se))
+    return 1;
+  err(c, arg->span,
+      "cast<T>: source must be a numeric scalar or simd of numeric");
+  return 0;
+}
+
+static TypeRef *type_cast(Checker *c, Expr *e) {
+  TypeRef *tgt;
+  TypeRef *src;
+  ScalarKind se;
+  Expr *arg;
+
+  tgt = cast_target_type(c, e);
+  if (tgt == NULL)
+    return NULL;
   if (!require_argc(c, e, 1, "cast"))
     return NULL;
   arg = e->as.call.args[0];
-  src = check_expr(c, arg);
+  src = cast_source_type(c, arg);
   if (src == NULL)
     return NULL;
-
-  /* The source must be a numeric scalar or simd-of-numeric. A bare
-   * literal source has no inherent precision; default it (int->int32,
-   * float->float) so a cast literal still type-checks deterministically. */
-  if (is_untyped_literal(arg)) {
-    if (arg->kind == EXPR_INT_LIT)
-      (void)coerce_literal_to_scalar(c, arg, SCALAR_INT32);
-    else
-      (void)coerce_literal_to_scalar(c, arg, SCALAR_FLOAT);
-    src = (TypeRef *)arg->sema_type;
-  }
-
-  if (!element_scalar(src, &se) || !sk_is_numeric(se)) {
-    err(c, arg->span,
-        "cast<T>: source must be a numeric scalar or simd of numeric");
+  if (!cast_source_element(c, arg, src, &se))
     return NULL;
-  }
 
   /* Derive the cast kind and validate its required policy is formable
    * from the static element kinds (rejects a cast whose policy cannot be
@@ -1103,40 +1120,54 @@ static TypeRef *type_load(Checker *c, Expr *e) {
  * store(value, ptr [after t]): value is simd<T,N>, ptr is T* with a
  * matching element; yields a token. Value-first to match the IR.
  */
-static TypeRef *type_store(Checker *c, Expr *e) {
-  TypeRef *v;
-  TypeRef *p;
+static TypeRef *check_store_pointer(Checker *c, Expr *ptr_expr) {
+  TypeRef *p = check_expr(c, ptr_expr);
+  if (p == NULL)
+    return NULL;
+  if (is_pointer(p))
+    return p;
+  err(c, ptr_expr->span, "store target must be a pointer");
+  return NULL;
+}
+
+static int check_store_value(Checker *c, Expr *value_expr, TypeRef *p,
+                             SourceSpan span) {
+  TypeRef *v = check_expr(c, value_expr);
   ScalarKind ve;
-  if (!no_gargs(c, e, "store"))
-    return NULL;
-  if (!require_argc(c, e, 2, "store"))
-    return NULL;
-  v = check_expr(c, e->as.call.args[0]);
-  p = check_expr(c, e->as.call.args[1]);
-  if (v == NULL || p == NULL)
-    return NULL;
-  if (!is_pointer(p)) {
-    err(c, e->as.call.args[1]->span, "store target must be a pointer");
-    return NULL;
-  }
-  /* A bare literal store value adopts the pointee element type. */
-  if (is_untyped_literal(e->as.call.args[0]))
-    (void)coerce_literal_to_scalar(c, e->as.call.args[0], p->scalar);
-  v = (TypeRef *)e->as.call.args[0]->sema_type;
+  if (v == NULL)
+    return 0;
+  if (is_untyped_literal(value_expr))
+    (void)coerce_literal_to_scalar(c, value_expr, p->scalar);
+  v = (TypeRef *)value_expr->sema_type;
   if (!is_simd(v)) {
-    err(c, e->as.call.args[0]->span,
+    err(c, value_expr->span,
         "store value must be a simd<T,W> (lane-varying) value");
-    return NULL;
+    return 0;
   }
-  if (!element_scalar(v, &ve) || !scalar_compatible(ve, p->scalar)) {
+  if (element_scalar(v, &ve) && scalar_compatible(ve, p->scalar))
+    return 1;
+  {
     char buf[SEMA_MSG_CAP];
     snprintf(buf, sizeof(buf),
              "store value element '%s' does not match pointer element '%s'",
              element_scalar(v, &ve) ? scalar_name(ve) : "?",
              scalar_name(p->scalar));
-    err(c, e->span, buf);
-    return NULL;
+    err(c, span, buf);
   }
+  return 0;
+}
+
+static TypeRef *type_store(Checker *c, Expr *e) {
+  TypeRef *p;
+  if (!no_gargs(c, e, "store"))
+    return NULL;
+  if (!require_argc(c, e, 2, "store"))
+    return NULL;
+  p = check_store_pointer(c, e->as.call.args[1]);
+  if (p == NULL)
+    return NULL;
+  if (!check_store_value(c, e->as.call.args[0], p, e->span))
+    return NULL;
   if (!check_dep_token(c, e))
     return NULL;
   return scalar_type(c, SCALAR_TOKEN);
@@ -1169,141 +1200,162 @@ static int is_void_marker(const TypeRef *t) {
  * Returns the result type (possibly the void marker for `wait`), or NULL
  * on error. Unknown callee names are reported as not-supported / unknown.
  */
+static TypeRef *type_lane_id(Checker *c, Expr *e) {
+  uint64_t w;
+  uint64_t n;
+  if (e->as.call.garg_count != 1) {
+    err(c, e->span, "lane_id<W> takes exactly one width argument");
+    return NULL;
+  }
+  if (!garg_int(c, e, 0, &w))
+    return NULL;
+  if (!require_wave_n(c, e->span, &n))
+    return NULL;
+  if (w != n) {
+    err_uu(c, e->span,
+           "lane_id width %llu must equal the kernel wave size %llu",
+           (unsigned long long)w, (unsigned long long)n);
+    return NULL;
+  }
+  if (!require_argc(c, e, 0, "lane_id"))
+    return NULL;
+  if (!no_dep(c, e, "lane_id"))
+    return NULL;
+  return simd_type(c, scalar_type(c, SCALAR_INT32), n);
+}
+
+static TypeRef *type_wave_id_in_grid(Checker *c, Expr *e) {
+  if (!no_gargs(c, e, "wave_id_in_grid"))
+    return NULL;
+  if (!require_argc(c, e, 0, "wave_id_in_grid"))
+    return NULL;
+  if (!no_dep(c, e, "wave_id_in_grid"))
+    return NULL;
+  return scalar_type(c, SCALAR_UINT32);
+}
+
+static TypeRef *type_workgroup_id(Checker *c, Expr *e) {
+  uint64_t w;
+  if (!garg_int(c, e, 0, &w) || e->as.call.garg_count != 1) {
+    err(c, e->span, "workgroup_id<ax> takes one axis argument (0..2)");
+    return NULL;
+  }
+  if (w > 2) {
+    err_u(c, e->span, "workgroup_id axis %llu out of range (0..2)", w);
+    return NULL;
+  }
+  if (!require_argc(c, e, 0, "workgroup_id"))
+    return NULL;
+  if (!no_dep(c, e, "workgroup_id"))
+    return NULL;
+  return scalar_type(c, SCALAR_UINT32);
+}
+
+static TypeRef *type_workitem_id(Checker *c, Expr *e) {
+  uint64_t w;
+  uint64_t n;
+  if (!garg_int(c, e, 0, &w) || e->as.call.garg_count != 1) {
+    err(c, e->span, "workitem_id<ax> takes one axis argument (0..2)");
+    return NULL;
+  }
+  if (w > 2) {
+    err_u(c, e->span, "workitem_id axis %llu out of range (0..2)", w);
+    return NULL;
+  }
+  if (!require_argc(c, e, 0, "workitem_id"))
+    return NULL;
+  if (!require_wave_n(c, e->span, &n))
+    return NULL;
+  if (!no_dep(c, e, "workitem_id"))
+    return NULL;
+  return simd_type(c, scalar_type(c, SCALAR_INT32), n);
+}
+
+static TypeRef *type_barrier(Checker *c, Expr *e) {
+  if (!no_gargs(c, e, "barrier"))
+    return NULL;
+  if (!check_all_token_args(c, e, /*allow_zero=*/1, "barrier"))
+    return NULL;
+  if (e->as.call.has_dep) {
+    err(c, e->span,
+        "barrier dependencies are passed as arguments, not 'after'");
+    return NULL;
+  }
+  return scalar_type(c, SCALAR_TOKEN);
+}
+
+static TypeRef *type_join(Checker *c, Expr *e) {
+  if (!no_gargs(c, e, "join"))
+    return NULL;
+  if (!check_all_token_args(c, e, /*allow_zero=*/0, "join"))
+    return NULL;
+  if (!no_dep(c, e, "join"))
+    return NULL;
+  return scalar_type(c, SCALAR_TOKEN);
+}
+
+static TypeRef *type_wait(Checker *c, Expr *e) {
+  if (!no_gargs(c, e, "wait"))
+    return NULL;
+  if (!check_all_token_args(c, e, /*allow_zero=*/0, "wait"))
+    return NULL;
+  if (!no_dep(c, e, "wait"))
+    return NULL;
+  return void_marker(c);
+}
+
+static TypeRef *type_lds_base_checked(Checker *c, Expr *e) {
+  if (!no_dep(c, e, "lds_base"))
+    return NULL;
+  return type_lds_base(c, e);
+}
+
+static TypeRef *type_index_cast_checked(Checker *c, Expr *e) {
+  if (!no_dep(c, e, "index_cast"))
+    return NULL;
+  return type_index_cast(c, e);
+}
+
+static TypeRef *type_cast_checked(Checker *c, Expr *e) {
+  if (!no_dep(c, e, "cast"))
+    return NULL;
+  return type_cast(c, e);
+}
+
+typedef TypeRef *(*BuiltinTyper)(Checker *c, Expr *e);
+
+typedef struct BuiltinEntry {
+  const char *name;
+  BuiltinTyper type;
+} BuiltinEntry;
+
+static const BuiltinEntry kBuiltins[] = {
+    {"lane_id", type_lane_id},
+    {"wave_id_in_grid", type_wave_id_in_grid},
+    {"workgroup_id", type_workgroup_id},
+    {"workitem_id", type_workitem_id},
+    {"load", type_load},
+    {"store", type_store},
+    {"barrier", type_barrier},
+    {"join", type_join},
+    {"wait", type_wait},
+    {"lds_base", type_lds_base_checked},
+    {"index_cast", type_index_cast_checked},
+    {"cast", type_cast_checked},
+};
+
 static TypeRef *type_builtin_call(Checker *c, Expr *e) {
   const Expr *callee = e->as.call.callee;
-  uint64_t w;
+  size_t i;
 
   if (callee == NULL || callee->kind != EXPR_IDENT) {
     err(c, e->span, "call of a non-identifier is not supported");
     return NULL;
   }
 
-  if (name_is(callee, "lane_id")) {
-    uint64_t n;
-    if (e->as.call.garg_count != 1) {
-      err(c, e->span, "lane_id<W> takes exactly one width argument");
-      return NULL;
-    }
-    if (!garg_int(c, e, 0, &w))
-      return NULL;
-    if (!require_wave_n(c, e->span, &n))
-      return NULL;
-    if (w != n) {
-      err_uu(c, e->span,
-             "lane_id width %llu must equal the kernel wave size %llu",
-             (unsigned long long)w, (unsigned long long)n);
-      return NULL;
-    }
-    if (!require_argc(c, e, 0, "lane_id"))
-      return NULL;
-    if (e->as.call.has_dep) {
-      err(c, e->span, "lane_id does not take an 'after' dependency");
-      return NULL;
-    }
-    return simd_type(c, scalar_type(c, SCALAR_INT32), n);
-  }
-
-  if (name_is(callee, "wave_id_in_grid")) {
-    if (!no_gargs(c, e, "wave_id_in_grid"))
-      return NULL;
-    if (!require_argc(c, e, 0, "wave_id_in_grid"))
-      return NULL;
-    if (!no_dep(c, e, "wave_id_in_grid"))
-      return NULL;
-    return scalar_type(c, SCALAR_UINT32);
-  }
-
-  if (name_is(callee, "workgroup_id")) {
-    if (!garg_int(c, e, 0, &w) || e->as.call.garg_count != 1) {
-      err(c, e->span, "workgroup_id<ax> takes one axis argument (0..2)");
-      return NULL;
-    }
-    if (w > 2) {
-      err_u(c, e->span, "workgroup_id axis %llu out of range (0..2)", w);
-      return NULL;
-    }
-    if (!require_argc(c, e, 0, "workgroup_id"))
-      return NULL;
-    if (!no_dep(c, e, "workgroup_id"))
-      return NULL;
-    return scalar_type(c, SCALAR_UINT32);
-  }
-
-  if (name_is(callee, "workitem_id")) {
-    uint64_t n;
-    if (!garg_int(c, e, 0, &w) || e->as.call.garg_count != 1) {
-      err(c, e->span, "workitem_id<ax> takes one axis argument (0..2)");
-      return NULL;
-    }
-    if (w > 2) {
-      err_u(c, e->span, "workitem_id axis %llu out of range (0..2)", w);
-      return NULL;
-    }
-    if (!require_argc(c, e, 0, "workitem_id"))
-      return NULL;
-    if (!require_wave_n(c, e->span, &n))
-      return NULL;
-    if (!no_dep(c, e, "workitem_id"))
-      return NULL;
-    return simd_type(c, scalar_type(c, SCALAR_INT32), n);
-  }
-
-  if (name_is(callee, "load"))
-    return type_load(c, e);
-  if (name_is(callee, "store"))
-    return type_store(c, e);
-
-  if (name_is(callee, "barrier")) {
-    if (!no_gargs(c, e, "barrier"))
-      return NULL;
-    if (!check_all_token_args(c, e, /*allow_zero=*/1, "barrier"))
-      return NULL;
-    if (e->as.call.has_dep) {
-      err(c, e->span,
-          "barrier dependencies are passed as arguments, not 'after'");
-      return NULL;
-    }
-    return scalar_type(c, SCALAR_TOKEN);
-  }
-
-  if (name_is(callee, "join")) {
-    if (!no_gargs(c, e, "join"))
-      return NULL;
-    if (!check_all_token_args(c, e, /*allow_zero=*/0, "join"))
-      return NULL;
-    if (e->as.call.has_dep) {
-      err(c, e->span, "join does not take an 'after' dependency");
-      return NULL;
-    }
-    return scalar_type(c, SCALAR_TOKEN);
-  }
-
-  if (name_is(callee, "wait")) {
-    if (!no_gargs(c, e, "wait"))
-      return NULL;
-    if (!check_all_token_args(c, e, /*allow_zero=*/0, "wait"))
-      return NULL;
-    if (e->as.call.has_dep) {
-      err(c, e->span, "wait does not take an 'after' dependency");
-      return NULL;
-    }
-    return void_marker(c); /* wait yields no value. */
-  }
-
-  if (name_is(callee, "lds_base")) {
-    if (!no_dep(c, e, "lds_base"))
-      return NULL;
-    return type_lds_base(c, e);
-  }
-  if (name_is(callee, "index_cast")) {
-    if (!no_dep(c, e, "index_cast"))
-      return NULL;
-    return type_index_cast(c, e);
-  }
-  if (name_is(callee, "cast")) {
-    if (!no_dep(c, e, "cast"))
-      return NULL;
-    return type_cast(c, e);
+  for (i = 0; i < sizeof(kBuiltins) / sizeof(kBuiltins[0]); i++) {
+    if (name_is(callee, kBuiltins[i].name))
+      return kBuiltins[i].type(c, e);
   }
 
   /* A name that is in scope as a value cannot be "called" in v1 (no user
@@ -1324,53 +1376,59 @@ static TypeRef *type_builtin_call(Checker *c, Expr *e) {
 /*===----------------------------------------------------------------===*/
 
 /* Check a unary operator expression. */
+static TypeRef *check_unary_minus(Checker *c, Expr *e, TypeRef *t) {
+  ScalarKind ek;
+  if (is_untyped_literal(e->as.unary.operand)) {
+    t = (TypeRef *)e->as.unary.operand->sema_type;
+    if (t == NULL)
+      t = scalar_type(c, SCALAR_INT32);
+    e->sema_type = t;
+    return t;
+  }
+  if ((is_scalar(t) && sk_is_numeric(t->scalar)) ||
+      (is_simd(t) && element_scalar(t, &ek) && sk_is_numeric(ek))) {
+    e->sema_type = t;
+    return t;
+  }
+  err(c, e->span, "unary '-' requires a numeric scalar or simd operand");
+  return NULL;
+}
+
+static TypeRef *check_unary_tilde(Checker *c, Expr *e, TypeRef *t) {
+  ScalarKind ek;
+  if (is_mask(t)) {
+    e->sema_type = t;
+    return t;
+  }
+  if ((is_scalar(t) && sk_is_sized_int(t->scalar)) ||
+      (is_simd(t) && element_scalar(t, &ek) && sk_is_sized_int(ek))) {
+    e->sema_type = t;
+    return t;
+  }
+  err(c, e->span, "unary '~' requires an integer scalar/simd or a mask");
+  return NULL;
+}
+
+static TypeRef *check_unary_bang(Checker *c, Expr *e, TypeRef *t) {
+  if (is_bool(t) || is_mask(t)) {
+    e->sema_type = t;
+    return t;
+  }
+  err(c, e->span, "unary '!' requires a bool or a mask");
+  return NULL;
+}
+
 static TypeRef *check_unary(Checker *c, Expr *e) {
   TypeRef *t = check_expr(c, e->as.unary.operand);
   TokenKind op = e->as.unary.op;
-  ScalarKind ek;
   if (t == NULL)
     return NULL;
-
-  if (op == TOK_MINUS) {
-    if (is_untyped_literal(e->as.unary.operand)) {
-      /* -<literal> stays a literal of the same (defaulted) shape. */
-      t = (TypeRef *)e->as.unary.operand->sema_type;
-      if (t == NULL)
-        t = scalar_type(c, SCALAR_INT32);
-      e->sema_type = t;
-      return t;
-    }
-    if ((is_scalar(t) && sk_is_numeric(t->scalar)) ||
-        (is_simd(t) && element_scalar(t, &ek) && sk_is_numeric(ek))) {
-      e->sema_type = t;
-      return t;
-    }
-    err(c, e->span, "unary '-' requires a numeric scalar or simd operand");
-    return NULL;
-  }
-
-  if (op == TOK_TILDE) {
-    if (is_mask(t)) {
-      e->sema_type = t;
-      return t;
-    }
-    if ((is_scalar(t) && sk_is_sized_int(t->scalar)) ||
-        (is_simd(t) && element_scalar(t, &ek) && sk_is_sized_int(ek))) {
-      e->sema_type = t;
-      return t;
-    }
-    err(c, e->span, "unary '~' requires an integer scalar/simd or a mask");
-    return NULL;
-  }
-
-  if (op == TOK_BANG) {
-    if (is_bool(t) || is_mask(t)) {
-      e->sema_type = t;
-      return t;
-    }
-    err(c, e->span, "unary '!' requires a bool or a mask");
-    return NULL;
-  }
+  if (op == TOK_MINUS)
+    return check_unary_minus(c, e, t);
+  if (op == TOK_TILDE)
+    return check_unary_tilde(c, e, t);
+  if (op == TOK_BANG)
+    return check_unary_bang(c, e, t);
 
   err(c, e->span, "unsupported unary operator");
   return NULL;
@@ -1379,6 +1437,139 @@ static TypeRef *check_unary(Checker *c, Expr *e) {
 /* Check a binary operator expression, applying the Type Rules: scalar
  * broadcasts into simd; compare yields mask (simd) or bool (scalar);
  * pointer +/- offset; mask algebra; uniform logical on bool. */
+static TypeRef *try_pointer_binary(Checker *c, Expr *e, TypeRef *lt,
+                                   TypeRef *rt, Expr *le, Expr *re,
+                                   TokenKind op, int *handled) {
+  *handled = 0;
+  if (op != TOK_PLUS && op != TOK_MINUS)
+    return NULL;
+  if (is_pointer(lt) && !is_pointer(rt)) {
+    *handled = 1;
+    e->sema_type = type_ptr_offset(c, e, lt, rt, re);
+    return e->sema_type;
+  }
+  if (is_pointer(rt) && !is_pointer(lt) && op == TOK_PLUS) {
+    *handled = 1;
+    e->sema_type = type_ptr_offset(c, e, rt, lt, le);
+    return e->sema_type;
+  }
+  if (is_pointer(lt) || is_pointer(rt)) {
+    *handled = 1;
+    err(c, e->span, "unsupported pointer arithmetic");
+  }
+  return NULL;
+}
+
+static TypeRef *try_mask_binary(Checker *c, Expr *e, TypeRef *lt, TypeRef *rt,
+                                TokenKind op, int *handled) {
+  *handled = op_is_bitwise(op) && is_mask(lt) && is_mask(rt);
+  if (!*handled)
+    return NULL;
+  if (lt->width != rt->width) {
+    err(c, e->span, "mask operands must have the same width");
+    return NULL;
+  }
+  e->sema_type = mask_type(c, lt->width);
+  return e->sema_type;
+}
+
+static TypeRef *try_logical_binary(Checker *c, Expr *e, TypeRef *lt,
+                                   TypeRef *rt, TokenKind op, int *handled) {
+  *handled = op_is_logical(op);
+  if (!*handled)
+    return NULL;
+  if (is_bool(lt) && is_bool(rt)) {
+    e->sema_type = scalar_type(c, SCALAR_BOOL);
+    return e->sema_type;
+  }
+  err(c, e->span,
+      "logical '&&'/'||' require bool operands (use '&'/'|' for mask algebra)");
+  return NULL;
+}
+
+static ScalarKind default_literal_kind(Expr *e) {
+  return e->kind == EXPR_INT_LIT ? SCALAR_INT32 : SCALAR_FLOAT;
+}
+
+static void coerce_binary_literals(Checker *c, Expr *le, Expr *re, TypeRef **lt,
+                                   TypeRef **rt) {
+  ScalarKind ek;
+  if (is_untyped_literal(le) && !is_untyped_literal(re)) {
+    if (element_scalar(*rt, &ek))
+      (void)coerce_literal_to_scalar(c, le, ek);
+    *lt = (TypeRef *)le->sema_type;
+    return;
+  }
+  if (is_untyped_literal(re) && !is_untyped_literal(le)) {
+    if (element_scalar(*lt, &ek))
+      (void)coerce_literal_to_scalar(c, re, ek);
+    *rt = (TypeRef *)re->sema_type;
+    return;
+  }
+  if (is_untyped_literal(le) && is_untyped_literal(re)) {
+    (void)coerce_literal_to_scalar(c, le, default_literal_kind(le));
+    (void)coerce_literal_to_scalar(c, re, default_literal_kind(re));
+    *lt = (TypeRef *)le->sema_type;
+    *rt = (TypeRef *)re->sema_type;
+  }
+}
+
+static int check_numeric_inputs(Checker *c, Expr *e, TypeRef *lt, TypeRef *rt,
+                                ScalarKind *lk, ScalarKind *rk) {
+  if (!element_scalar(lt, lk) || !element_scalar(rt, rk)) {
+    err(c, e->span, "operator requires numeric scalar or simd operands");
+    return 0;
+  }
+  if (is_simd(lt) && is_simd(rt) && lt->width != rt->width) {
+    err(c, e->span, "simd operands must have the same width");
+    return 0;
+  }
+  return 1;
+}
+
+static int check_numeric_op(Checker *c, Expr *e, TokenKind op, ScalarKind lk,
+                            ScalarKind rk, ScalarKind *unified) {
+  if (!unify_numeric(lk, rk, unified)) {
+    char buf[SEMA_MSG_CAP];
+    snprintf(buf, sizeof(buf),
+             "incompatible operand element types ('%s' and '%s')",
+             scalar_name(lk), scalar_name(rk));
+    err(c, e->span, buf);
+    return 0;
+  }
+  if (op_requires_int(op) && !sk_is_sized_int(*unified)) {
+    err(c, e->span, "operator requires integer operands");
+    return 0;
+  }
+  if (op_is_bitwise(op) && !sk_is_sized_int(*unified)) {
+    err(c, e->span, "bitwise operator requires integer operands");
+    return 0;
+  }
+  return 1;
+}
+
+static TypeRef *finish_numeric_binary(Checker *c, Expr *e, TypeRef *lt,
+                                      TypeRef *rt, TokenKind op,
+                                      ScalarKind unified) {
+  int l_simd = is_simd(lt);
+  int r_simd = is_simd(rt);
+  if (op_is_compare(op)) {
+    e->sema_type = (l_simd || r_simd)
+                       ? mask_type(c, l_simd ? lt->width : rt->width)
+                       : scalar_type(c, SCALAR_BOOL);
+    return e->sema_type;
+  }
+  if (op_is_arith(op) || op_is_bitwise(op)) {
+    e->sema_type = (l_simd || r_simd)
+                       ? simd_type(c, scalar_type(c, unified),
+                                   l_simd ? lt->width : rt->width)
+                       : scalar_type(c, unified);
+    return e->sema_type;
+  }
+  err(c, e->span, "unsupported binary operator");
+  return NULL;
+}
+
 static TypeRef *check_binary(Checker *c, Expr *e) {
   TokenKind op = e->as.binary.op;
   Expr *le = e->as.binary.lhs;
@@ -1387,131 +1578,29 @@ static TypeRef *check_binary(Checker *c, Expr *e) {
   TypeRef *rt = check_expr(c, re);
   ScalarKind lk;
   ScalarKind rk;
+  ScalarKind unified;
+  int handled;
 
   if (lt == NULL || rt == NULL)
     return NULL;
+  TypeRef *special = try_pointer_binary(c, e, lt, rt, le, re, op, &handled);
+  if (handled)
+    return special;
+  special = try_mask_binary(c, e, lt, rt, op, &handled);
+  if (handled)
+    return special;
+  special = try_logical_binary(c, e, lt, rt, op, &handled);
+  if (handled)
+    return special;
 
-  /* Pointer arithmetic: ptr +/- integer-offset (no other pointer ops). */
-  if (op == TOK_PLUS || op == TOK_MINUS) {
-    if (is_pointer(lt) && !is_pointer(rt)) {
-      TypeRef *r = type_ptr_offset(c, e, lt, rt, re);
-      if (r != NULL)
-        e->sema_type = r;
-      return r;
-    }
-    if (is_pointer(rt) && !is_pointer(lt) && op == TOK_PLUS) {
-      TypeRef *r = type_ptr_offset(c, e, rt, lt, le);
-      if (r != NULL)
-        e->sema_type = r;
-      return r;
-    }
-    if (is_pointer(lt) || is_pointer(rt)) {
-      err(c, e->span, "unsupported pointer arithmetic");
-      return NULL;
-    }
-  }
-
-  /* Mask algebra: & | ^ on two masks of equal width -> mask. */
-  if (op_is_bitwise(op) && is_mask(lt) && is_mask(rt)) {
-    if (lt->width != rt->width) {
-      err(c, e->span, "mask operands must have the same width");
-      return NULL;
-    }
-    e->sema_type = mask_type(c, lt->width);
-    return e->sema_type;
-  }
-
-  /* Uniform logical && || : bool operands -> bool. */
-  if (op_is_logical(op)) {
-    if (is_bool(lt) && is_bool(rt)) {
-      e->sema_type = scalar_type(c, SCALAR_BOOL);
-      return e->sema_type;
-    }
-    err(c, e->span,
-        "logical '&&'/'||' require bool operands "
-        "(use '&'/'|' for mask algebra)");
-    return NULL;
-  }
-
-  /* From here, operands must be numeric scalar/simd. First settle literal
-   * polymorphism: if exactly one side is a literal, adopt the other's
-   * element kind; if both are literals, default both to int32/float. */
-  if (is_untyped_literal(le) && !is_untyped_literal(re)) {
-    ScalarKind ek;
-    if (element_scalar(rt, &ek))
-      (void)coerce_literal_to_scalar(c, le, ek);
-    lt = (TypeRef *)le->sema_type;
-  } else if (is_untyped_literal(re) && !is_untyped_literal(le)) {
-    ScalarKind ek;
-    if (element_scalar(lt, &ek))
-      (void)coerce_literal_to_scalar(c, re, ek);
-    rt = (TypeRef *)re->sema_type;
-  } else if (is_untyped_literal(le) && is_untyped_literal(re)) {
-    ScalarKind def = (le->kind == EXPR_INT_LIT) ? SCALAR_INT32 : SCALAR_FLOAT;
-    (void)coerce_literal_to_scalar(c, le, def);
-    def = (re->kind == EXPR_INT_LIT) ? SCALAR_INT32 : SCALAR_FLOAT;
-    (void)coerce_literal_to_scalar(c, re, def);
-    lt = (TypeRef *)le->sema_type;
-    rt = (TypeRef *)re->sema_type;
-  }
+  coerce_binary_literals(c, le, re, &lt, &rt);
   if (lt == NULL || rt == NULL)
     return NULL;
-
-  /* Establish the element kinds, requiring numeric scalar/simd. */
-  if (!element_scalar(lt, &lk) || !element_scalar(rt, &rk)) {
-    err(c, e->span, "operator requires numeric scalar or simd operands");
+  if (!check_numeric_inputs(c, e, lt, rt, &lk, &rk))
     return NULL;
-  }
-  {
-    int l_simd = is_simd(lt);
-    int r_simd = is_simd(rt);
-    ScalarKind unified;
-
-    if (l_simd && r_simd && lt->width != rt->width) {
-      err(c, e->span, "simd operands must have the same width");
-      return NULL;
-    }
-    if (!unify_numeric(lk, rk, &unified)) {
-      char buf[SEMA_MSG_CAP];
-      snprintf(buf, sizeof(buf),
-               "incompatible operand element types ('%s' and '%s')",
-               scalar_name(lk), scalar_name(rk));
-      err(c, e->span, buf);
-      return NULL;
-    }
-    if (op_requires_int(op) && !sk_is_sized_int(unified)) {
-      err(c, e->span, "operator requires integer operands");
-      return NULL;
-    }
-    if (op_is_bitwise(op) && !sk_is_sized_int(unified)) {
-      err(c, e->span, "bitwise operator requires integer operands");
-      return NULL;
-    }
-
-    if (op_is_compare(op)) {
-      /* Compare: simd -> mask<W>; scalar -> bool. */
-      if (l_simd || r_simd) {
-        uint64_t w = l_simd ? lt->width : rt->width;
-        e->sema_type = mask_type(c, w);
-      } else {
-        e->sema_type = scalar_type(c, SCALAR_BOOL);
-      }
-      return e->sema_type;
-    }
-
-    if (op_is_arith(op) || op_is_bitwise(op)) {
-      if (l_simd || r_simd) {
-        uint64_t w = l_simd ? lt->width : rt->width;
-        e->sema_type = simd_type(c, scalar_type(c, unified), w);
-      } else {
-        e->sema_type = scalar_type(c, unified);
-      }
-      return e->sema_type;
-    }
-  }
-
-  err(c, e->span, "unsupported binary operator");
-  return NULL;
+  if (!check_numeric_op(c, e, op, lk, rk, &unified))
+    return NULL;
+  return finish_numeric_binary(c, e, lt, rt, op, unified);
 }
 
 /* Check an identifier reference: resolve to an in-scope symbol; enforce
@@ -1535,15 +1624,15 @@ static TypeRef *check_ident(Checker *c, Expr *e) {
 
 /* Top-level expression dispatch. Fills e->sema_type as a side effect and
  * returns the same type (NULL on error). */
-static TypeRef *check_expr(Checker *c, Expr *e) {
+static TypeRef *check_call_expr(Checker *c, Expr *e) {
+  TypeRef *t = type_builtin_call(c, e);
+  if (t != NULL && !is_void_marker(t))
+    e->sema_type = t;
+  return t;
+}
+
+static TypeRef *check_expr_inner(Checker *c, Expr *e) {
   TypeRef *t;
-  if (e == NULL)
-    return NULL;
-  if (c->depth >= SEMA_MAX_DEPTH) {
-    err(c, e->span, "maximum expression nesting depth exceeded");
-    return NULL;
-  }
-  c->depth++;
   t = NULL;
   switch (e->kind) {
   case EXPR_INT_LIT:
@@ -1575,13 +1664,22 @@ static TypeRef *check_expr(Checker *c, Expr *e) {
     t = check_binary(c, e);
     break;
   case EXPR_CALL:
-    t = type_builtin_call(c, e);
-    if (t != NULL && !is_void_marker(t))
-      e->sema_type = t;
-    /* For a void builtin we leave sema_type NULL but return the marker so
-     * statement context can accept it; expression context rejects it. */
+    t = check_call_expr(c, e);
     break;
   }
+  return t;
+}
+
+static TypeRef *check_expr(Checker *c, Expr *e) {
+  TypeRef *t;
+  if (e == NULL)
+    return NULL;
+  if (c->depth >= SEMA_MAX_DEPTH) {
+    err(c, e->span, "maximum expression nesting depth exceeded");
+    return NULL;
+  }
+  c->depth++;
+  t = check_expr_inner(c, e);
   c->depth--;
   return t;
 }
@@ -1608,33 +1706,17 @@ static TypeRef *check_value_expr(Checker *c, Expr *e) {
  * use-before-def; it becomes defined afterward. The initializer must be
  * assignment-compatible with the declared type (with literal adoption and
  * scalar->simd broadcast). */
-static void check_decl(Checker *c, Stmt *s) {
-  TypeRef *declared;
+static void check_bad_decl(Checker *c, Stmt *s) {
+  (void)sym_declare(c, &s->as.decl.name, NULL, /*defined=*/1);
+  if (s->as.decl.init != NULL)
+    (void)check_expr(c, s->as.decl.init);
+}
+
+static void check_decl_init(Checker *c, Stmt *s, TypeRef *declared) {
   TypeRef *it;
-  Symbol *sym;
-  Expr *init;
-
-  declared = resolve_type(c, s->as.decl.type);
-  if (declared == NULL) {
-    /* Still introduce the name (defined) so later uses do not cascade
-     * into spurious undeclared errors. */
-    sym = sym_declare(c, &s->as.decl.name, NULL, /*defined=*/1);
-    (void)sym;
-    if (s->as.decl.init != NULL)
-      (void)check_expr(c, s->as.decl.init);
-    return;
-  }
-  if (is_pointer(declared) && declared->is_shared) {
-    /* A `shared T*` local must be produced by lds_base; assigning an
-     * arbitrary value is fine type-wise as long as compatible. */
-  }
-
-  sym = sym_declare(c, &s->as.decl.name, declared, /*defined=*/0);
-  init = s->as.decl.init;
+  Expr *init = s->as.decl.init;
   if (init == NULL) {
     err(c, s->span, "declaration requires an initializer");
-    if (sym != NULL)
-      sym->defined = 1;
     return;
   }
   it = check_value_expr(c, init);
@@ -1655,6 +1737,18 @@ static void check_decl(Checker *c, Stmt *s) {
       err(c, s->span, buf);
     }
   }
+}
+
+static void check_decl(Checker *c, Stmt *s) {
+  TypeRef *declared = resolve_type(c, s->as.decl.type);
+  Symbol *sym;
+  if (declared == NULL) {
+    check_bad_decl(c, s);
+    return;
+  }
+
+  sym = sym_declare(c, &s->as.decl.name, declared, /*defined=*/0);
+  check_decl_init(c, s, declared);
   if (sym != NULL)
     sym->defined = 1;
 }
@@ -1663,34 +1757,39 @@ static void check_decl(Checker *c, Stmt *s) {
  * producer is `load`, which yields (simd<T,N>, token); the destructure
  * must bind exactly two names. The names enter scope undefined, then
  * become defined. */
-static void check_destructure(Checker *c, Stmt *s) {
+static int check_load_destructure(Checker *c, Stmt *s, TypeRef **vty,
+                                  TypeRef **tty) {
   Expr *init = s->as.destructure.init;
-  size_t i;
-  TypeRef *vty = NULL;
-  TypeRef *tty = NULL;
-  int ok = 0;
-
-  /* Bind the names first (undefined) so a self-reference is caught. */
-  for (i = 0; i < s->as.destructure.name_count; i++)
-    (void)sym_declare(c, &s->as.destructure.names[i], NULL, /*defined=*/0);
-
   if (init == NULL || init->kind != EXPR_CALL ||
       !name_is(init->as.call.callee, "load")) {
     err(c, s->span,
         "destructuring 'auto [..]' is only supported for load(...)");
-  } else if (s->as.destructure.name_count != 2) {
+    return 0;
+  }
+  if (s->as.destructure.name_count != 2) {
     err(c, s->span,
         "load destructuring binds exactly two names: value and token");
     (void)check_expr(c, init);
-  } else {
-    /* load(...) result is simd<T,N>; the captured token is a token. */
-    vty = type_load(c, init);
-    if (vty != NULL) {
-      init->sema_type = vty;
-      tty = scalar_type(c, SCALAR_TOKEN);
-      ok = 1;
-    }
+    return 0;
   }
+  *vty = type_load(c, init);
+  if (*vty == NULL)
+    return 0;
+  init->sema_type = *vty;
+  *tty = scalar_type(c, SCALAR_TOKEN);
+  return 1;
+}
+
+static void check_destructure(Checker *c, Stmt *s) {
+  size_t i;
+  TypeRef *vty = NULL;
+  TypeRef *tty = NULL;
+  int ok;
+
+  for (i = 0; i < s->as.destructure.name_count; i++)
+    (void)sym_declare(c, &s->as.destructure.names[i], NULL, /*defined=*/0);
+
+  ok = check_load_destructure(c, s, &vty, &tty);
 
   for (i = 0; i < s->as.destructure.name_count; i++) {
     Symbol *sym = sym_lookup(c, s->as.destructure.names[i].name,
@@ -1709,18 +1808,75 @@ static void check_destructure(Checker *c, Stmt *s) {
  * inputs. We allow assigning to any in-scope name for now, but a compound
  * assign requires the target already defined). The RHS must be
  * assignment-compatible with the target's type. */
+static void check_unknown_assign(Checker *c, Stmt *s) {
+  err_name(c, s->as.assign.target.span,
+           "assignment to undeclared identifier '%s'", s->as.assign.target.name,
+           s->as.assign.target.name_len);
+  (void)check_expr(c, s->as.assign.value);
+}
+
+static void check_simple_assign(Checker *c, Stmt *s, Symbol *sym, TypeRef *rt) {
+  TypeRef *coerced = coerce_to(c, s->as.assign.value, rt, sym->type);
+  if (coerced != NULL)
+    return;
+  {
+    char buf[SEMA_MSG_CAP];
+    if (is_scalar(sym->type) && is_simd(rt))
+      snprintf(buf, sizeof(buf),
+               "cannot assign a simd value to a scalar '%s' "
+               "(no implicit simd->scalar; use read_first/reduce)",
+               type_category(sym->type));
+    else
+      snprintf(buf, sizeof(buf), "cannot assign a '%s' to a '%s'",
+               type_category(rt), type_category(sym->type));
+    err(c, s->span, buf);
+  }
+}
+
+static int compound_rhs_compatible(Checker *c, Stmt *s, Symbol *sym,
+                                   TypeRef **rt) {
+  ScalarKind lk;
+  ScalarKind rk;
+  ScalarKind u;
+  if (!element_scalar(sym->type, &lk))
+    return 0;
+  if (is_untyped_literal(s->as.assign.value))
+    (void)coerce_literal_to_scalar(c, s->as.assign.value, lk);
+  *rt = (TypeRef *)s->as.assign.value->sema_type;
+  if (*rt == NULL || !element_scalar(*rt, &rk))
+    return 0;
+  if (!unify_numeric(lk, rk, &u))
+    return 0;
+  if (is_scalar(sym->type) && is_simd(*rt)) {
+    err(c, s->span,
+        "cannot assign a simd value to a scalar "
+        "(no implicit simd->scalar; use read_first/reduce)");
+    return 0;
+  }
+  return 1;
+}
+
+static void check_compound_assign(Checker *c, Stmt *s, Symbol *sym,
+                                  TypeRef *rt) {
+  if (compound_rhs_compatible(c, s, sym, &rt))
+    return;
+  {
+    char buf[SEMA_MSG_CAP];
+    snprintf(buf, sizeof(buf),
+             "compound assignment operand types are incompatible with '%s'",
+             type_category(sym->type));
+    err(c, s->span, buf);
+  }
+}
+
 static void check_assign(Checker *c, Stmt *s) {
   Symbol *sym =
       sym_lookup(c, s->as.assign.target.name, s->as.assign.target.name_len);
   TypeRef *rt;
-  TokenKind op = s->as.assign.op;
-  int is_compound = (op != TOK_ASSIGN);
+  int is_compound = (s->as.assign.op != TOK_ASSIGN);
 
   if (sym == NULL) {
-    err_name(c, s->as.assign.target.span,
-             "assignment to undeclared identifier '%s'",
-             s->as.assign.target.name, s->as.assign.target.name_len);
-    (void)check_expr(c, s->as.assign.value);
+    check_unknown_assign(c, s);
     return;
   }
   if (is_compound && !sym->defined) {
@@ -1731,57 +1887,10 @@ static void check_assign(Checker *c, Stmt *s) {
 
   rt = check_value_expr(c, s->as.assign.value);
   if (rt != NULL && sym->type != NULL) {
-    if (is_compound) {
-      /* A compound assignment is `lhs = lhs OP rhs`: the result must be
-       * assignable back to lhs. Reuse the operator-result checking by
-       * requiring numeric compatibility for arithmetic/bitwise/shift and
-       * the simd-broadcast rule, then assignability of the result. */
-      ScalarKind lk;
-      ScalarKind rk;
-      int compound_ok = 0;
-      if (element_scalar(sym->type, &lk)) {
-        if (is_untyped_literal(s->as.assign.value))
-          (void)coerce_literal_to_scalar(c, s->as.assign.value, lk);
-        rt = (TypeRef *)s->as.assign.value->sema_type;
-        if (rt != NULL && element_scalar(rt, &rk)) {
-          ScalarKind u;
-          if (unify_numeric(lk, rk, &u)) {
-            /* scalar may broadcast into a simd lhs; a simd rhs into a
-             * scalar lhs is an implicit simd->scalar narrowing: reject. */
-            if (is_scalar(sym->type) && is_simd(rt)) {
-              err(c, s->span,
-                  "cannot assign a simd value to a scalar "
-                  "(no implicit simd->scalar; use read_first/reduce)");
-            } else {
-              compound_ok = 1;
-            }
-          }
-        }
-      }
-      if (!compound_ok) {
-        char buf[SEMA_MSG_CAP];
-        snprintf(buf, sizeof(buf),
-                 "compound assignment operand types are incompatible with '%s'",
-                 type_category(sym->type));
-        err(c, s->span, buf);
-      }
-    } else {
-      TypeRef *coerced = coerce_to(c, s->as.assign.value, rt, sym->type);
-      if (coerced == NULL) {
-        char buf[SEMA_MSG_CAP];
-        /* A simd RHS into a scalar LHS is the canonical implicit
-         * simd->scalar error called out by the design. */
-        if (is_scalar(sym->type) && is_simd(rt))
-          snprintf(buf, sizeof(buf),
-                   "cannot assign a simd value to a scalar '%s' "
-                   "(no implicit simd->scalar; use read_first/reduce)",
-                   type_category(sym->type));
-        else
-          snprintf(buf, sizeof(buf), "cannot assign a '%s' to a '%s'",
-                   type_category(rt), type_category(sym->type));
-        err(c, s->span, buf);
-      }
-    }
+    if (is_compound)
+      check_compound_assign(c, s, sym, rt);
+    else
+      check_simple_assign(c, s, sym, rt);
   }
   if (sym != NULL)
     sym->defined = 1;
@@ -1838,31 +1947,45 @@ static void restore_defined(Checker *c, const int *snap, size_t n) {
  * variable leaves it undefined, yielding a use-before-def at a later
  * read: the some-but-not-all-branch rule).
  */
+static void check_cond_type(Checker *c, Stmt *s, TypeRef *ct, int is_where) {
+  if (ct == NULL)
+    return;
+  if (is_where) {
+    if (!is_mask(ct))
+      err(c, s->as.cond.cond->span,
+          "'where' requires a mask<W> condition (a bool belongs in 'if')");
+    return;
+  }
+  if (is_bool(ct))
+    return;
+  if (is_mask(ct)) {
+    err(c, s->as.cond.cond->span,
+        "'if' requires a uniform bool condition; a mask<W> must be consumed by "
+        "'where'");
+  } else {
+    err(c, s->as.cond.cond->span, "'if' requires a uniform bool condition");
+  }
+}
+
+static void merge_cond_defined(Checker *c, const int *before,
+                               const int *after_then, size_t before_n,
+                               int has_else) {
+  size_t i;
+  for (i = 0; i < before_n && i < c->sym_count; i++) {
+    int then_def = after_then[i];
+    int else_def = has_else ? c->syms[i].defined : 0;
+    c->syms[i].defined =
+        has_else ? before[i] || (then_def && else_def) : before[i];
+  }
+}
+
 static void check_cond(Checker *c, Stmt *s, int is_where) {
   TypeRef *ct = check_expr(c, s->as.cond.cond);
   int *before;
   int *after_then;
   size_t before_n;
-  size_t i;
 
-  if (ct != NULL) {
-    if (is_where) {
-      if (!is_mask(ct)) {
-        err(c, s->as.cond.cond->span,
-            "'where' requires a mask<W> condition (a bool belongs in 'if')");
-      }
-    } else {
-      if (!is_bool(ct)) {
-        if (is_mask(ct))
-          err(c, s->as.cond.cond->span,
-              "'if' requires a uniform bool condition; a mask<W> must be "
-              "consumed by 'where'");
-        else
-          err(c, s->as.cond.cond->span,
-              "'if' requires a uniform bool condition");
-      }
-    }
-  }
+  check_cond_type(c, s, ct, is_where);
 
   before = snapshot_defined(c);
   before_n = c->sym_count;
@@ -1882,20 +2005,9 @@ static void check_cond(Checker *c, Stmt *s, int is_where) {
 
   if (s->as.cond.else_block != NULL) {
     check_block(c, s->as.cond.else_block);
-    /* Merge: defined-after = before || (then && else). Both snapshots and
-     * the current state are indexed by the same outer symbols (inner-scope
-     * symbols are gone). */
-    for (i = 0; i < before_n && i < c->sym_count; i++) {
-      int then_def = after_then[i];
-      int else_def = c->syms[i].defined;
-      c->syms[i].defined = before[i] || (then_def && else_def);
-    }
+    merge_cond_defined(c, before, after_then, before_n, /*has_else=*/1);
   } else {
-    /* No else/otherwise: the fall-through path keeps the pre-state, so a
-     * variable is defined-after only if it was defined-before. A
-     * then-only new definition does NOT make it defined-after. */
-    for (i = 0; i < before_n && i < c->sym_count; i++)
-      c->syms[i].defined = before[i];
+    merge_cond_defined(c, before, after_then, before_n, /*has_else=*/0);
   }
 }
 
@@ -1907,14 +2019,8 @@ static void check_cond(Checker *c, Stmt *s, int is_where) {
  * stay defined (carry); variables first defined inside the body are NOT
  * defined after (the loop may iterate zero times).
  */
-static void check_for(Checker *c, Stmt *s) {
-  TypeRef *iv;
-  int *before;
-  size_t before_n;
-  size_t i;
-  ScalarKind ik;
-
-  iv = resolve_type(c, s->as.for_.iv_type);
+static TypeRef *check_for_iv_type(Checker *c, Stmt *s, ScalarKind *ik) {
+  TypeRef *iv = resolve_type(c, s->as.for_.iv_type);
   if (iv != NULL) {
     if (!is_scalar(iv) || !(is_index(iv) || sk_is_sized_int(iv->scalar))) {
       err(c, s->as.for_.iv_type->span,
@@ -1922,58 +2028,67 @@ static void check_for(Checker *c, Stmt *s) {
       iv = NULL;
     }
   }
+  if (iv != NULL && is_scalar(iv))
+    (void)element_scalar(iv, ik);
+  return iv;
+}
 
-  /* Bounds and step are uniform and unify to the IV type. */
-  if (iv != NULL && is_scalar(iv) && element_scalar(iv, &ik)) {
-    Expr *bounds[3];
-    size_t nb = 0;
-    bounds[nb++] = s->as.for_.lb;
-    bounds[nb++] = s->as.for_.ub;
-    if (s->as.for_.step != NULL)
-      bounds[nb++] = s->as.for_.step;
-    for (i = 0; i < nb; i++) {
-      Expr *b = bounds[i];
-      TypeRef *bt = check_value_expr(c, b);
-      if (bt == NULL)
-        continue;
-      if (is_untyped_literal(b)) {
-        (void)coerce_literal_to_scalar(c, b, ik);
-        continue;
-      }
-      if (!is_scalar(bt) || !scalar_compatible(bt->scalar, ik)) {
-        err(c, b->span,
-            "for bound/step must be a uniform scalar matching the IV type");
-      }
-    }
-  } else {
-    /* Even if the IV is invalid, check the bound expressions so their
-     * own errors surface. */
+static void check_for_bound(Checker *c, Expr *b, ScalarKind ik) {
+  TypeRef *bt = check_value_expr(c, b);
+  if (bt == NULL)
+    return;
+  if (is_untyped_literal(b)) {
+    (void)coerce_literal_to_scalar(c, b, ik);
+    return;
+  }
+  if (!is_scalar(bt) || !scalar_compatible(bt->scalar, ik)) {
+    err(c, b->span,
+        "for bound/step must be a uniform scalar matching the IV type");
+  }
+}
+
+static void check_for_bounds(Checker *c, Stmt *s, TypeRef *iv, ScalarKind ik) {
+  if (iv == NULL) {
     (void)check_value_expr(c, s->as.for_.lb);
     (void)check_value_expr(c, s->as.for_.ub);
     if (s->as.for_.step != NULL)
       (void)check_value_expr(c, s->as.for_.step);
+    return;
   }
+  check_for_bound(c, s->as.for_.lb, ik);
+  check_for_bound(c, s->as.for_.ub, ik);
+  if (s->as.for_.step != NULL)
+    check_for_bound(c, s->as.for_.step, ik);
+}
 
-  before = snapshot_defined(c);
-  before_n = c->sym_count;
-
+static void check_for_body(Checker *c, Stmt *s, TypeRef *iv) {
+  size_t k;
   scope_enter(c);
   if (iv != NULL)
     (void)sym_declare(c, &s->as.for_.iv_name, iv, /*defined=*/1);
   else
     (void)sym_declare(c, &s->as.for_.iv_name, NULL, /*defined=*/1);
-  /* The body is itself a block; check its statements in this scope so the
-   * IV is visible. */
   if (s->as.for_.body != NULL && s->as.for_.body->kind == STMT_BLOCK) {
-    size_t k;
     for (k = 0; k < s->as.for_.body->as.block.stmt_count; k++)
       check_stmt(c, s->as.for_.body->as.block.stmts[k]);
   }
   scope_leave(c);
+}
 
-  /* After the loop: variables defined before stay defined; variables that
-   * were undefined before remain undefined (zero-trip possibility). A NULL
-   * snapshot (OOM, diagnosed) skips the restore safely. */
+static void check_for(Checker *c, Stmt *s) {
+  TypeRef *iv;
+  int *before;
+  size_t before_n;
+  size_t i;
+  ScalarKind ik = SCALAR_INDEX;
+
+  iv = check_for_iv_type(c, s, &ik);
+  check_for_bounds(c, s, iv, ik);
+
+  before = snapshot_defined(c);
+  before_n = c->sym_count;
+  check_for_body(c, s, iv);
+
   if (before != NULL) {
     for (i = 0; i < before_n && i < c->sym_count; i++)
       c->syms[i].defined = before[i];
@@ -2023,15 +2138,7 @@ static void check_block(Checker *c, Stmt *block) {
   scope_leave(c);
 }
 
-/* Statement dispatch. */
-static void check_stmt(Checker *c, Stmt *s) {
-  if (s == NULL)
-    return;
-  if (c->depth >= SEMA_MAX_DEPTH) {
-    err(c, s->span, "maximum statement nesting depth exceeded");
-    return;
-  }
-  c->depth++;
+static void check_stmt_inner(Checker *c, Stmt *s) {
   switch (s->kind) {
   case STMT_DECL:
     check_decl(c, s);
@@ -2061,6 +2168,18 @@ static void check_stmt(Checker *c, Stmt *s) {
     check_block(c, s);
     break;
   }
+}
+
+/* Statement dispatch. */
+static void check_stmt(Checker *c, Stmt *s) {
+  if (s == NULL)
+    return;
+  if (c->depth >= SEMA_MAX_DEPTH) {
+    err(c, s->span, "maximum statement nesting depth exceeded");
+    return;
+  }
+  c->depth++;
+  check_stmt_inner(c, s);
   c->depth--;
 }
 
@@ -2082,6 +2201,56 @@ static int attr_name_is(const Attribute *a, const char *s) {
  * c->has_wave_n. amdgpu_wave_size is required (it fixes the wave width
  * every simd/mask uses); its absence is reported here.
  */
+static void check_wave_attr(Checker *c, Attribute *a, int *seen_wave) {
+  if (!a->has_arg) {
+    err(c, a->span, "[[amdgpu_wave_size]] requires an integer argument");
+    return;
+  }
+  if (*seen_wave) {
+    err(c, a->span, "duplicate [[amdgpu_wave_size]] attribute");
+    return;
+  }
+  *seen_wave = 1;
+  if (a->arg == 0) {
+    err(c, a->span, "[[amdgpu_wave_size(N)]] must be a positive width");
+    return;
+  }
+  if (a->arg != 32 && a->arg != 64) {
+    err(c, a->span, "[[amdgpu_wave_size(N)]] must be 32 or 64");
+    return;
+  }
+  c->wave_n = a->arg;
+  c->has_wave_n = 1;
+}
+
+static void check_lds_attr(Checker *c, Attribute *a, int *seen_lds) {
+  if (!a->has_arg) {
+    err(c, a->span, "[[amdgpu_lds_size]] requires an integer argument");
+    return;
+  }
+  if (*seen_lds) {
+    err(c, a->span, "duplicate [[amdgpu_lds_size]] attribute");
+    return;
+  }
+  *seen_lds = 1;
+}
+
+static void check_attribute(Checker *c, Attribute *a, int *seen_wave,
+                            int *seen_lds) {
+  if (attr_name_is(a, "amdgpu_wave_size")) {
+    check_wave_attr(c, a, seen_wave);
+    return;
+  }
+  if (attr_name_is(a, "amdgpu_lds_size")) {
+    check_lds_attr(c, a, seen_lds);
+    return;
+  }
+  err_name(c, a->span,
+           "unknown attribute '%s' (only amdgpu_wave_size "
+           "and amdgpu_lds_size are allowed)",
+           a->name, a->name_len);
+}
+
 static void check_attributes(Checker *c, Kernel *k) {
   size_t i;
   int seen_wave = 0;
@@ -2089,48 +2258,8 @@ static void check_attributes(Checker *c, Kernel *k) {
 
   c->wave_n = 0;
   c->has_wave_n = 0;
-
-  for (i = 0; i < k->attr_count; i++) {
-    Attribute *a = k->attrs[i];
-    if (attr_name_is(a, "amdgpu_wave_size")) {
-      if (!a->has_arg) {
-        err(c, a->span, "[[amdgpu_wave_size]] requires an integer argument");
-        continue;
-      }
-      if (seen_wave) {
-        err(c, a->span, "duplicate [[amdgpu_wave_size]] attribute");
-        continue;
-      }
-      seen_wave = 1;
-      if (a->arg == 0) {
-        err(c, a->span, "[[amdgpu_wave_size(N)]] must be a positive width");
-        continue;
-      }
-      if (a->arg != 32 && a->arg != 64) {
-        err(c, a->span, "[[amdgpu_wave_size(N)]] must be 32 or 64");
-        continue;
-      }
-      c->wave_n = a->arg;
-      c->has_wave_n = 1;
-    } else if (attr_name_is(a, "amdgpu_lds_size")) {
-      if (!a->has_arg) {
-        err(c, a->span, "[[amdgpu_lds_size]] requires an integer argument");
-        continue;
-      }
-      if (seen_lds) {
-        err(c, a->span, "duplicate [[amdgpu_lds_size]] attribute");
-        continue;
-      }
-      seen_lds = 1;
-      /* Value is recorded by lowering; sema only validates the form. */
-    } else {
-      err_name(c, a->span,
-               "unknown attribute '%s' (only amdgpu_wave_size "
-               "and amdgpu_lds_size are allowed)",
-               a->name, a->name_len);
-    }
-  }
-
+  for (i = 0; i < k->attr_count; i++)
+    check_attribute(c, k->attrs[i], &seen_wave, &seen_lds);
   if (!seen_wave)
     err(c, k->span, "kernel requires the [[amdgpu_wave_size(N)]] attribute");
 }
