@@ -115,7 +115,6 @@ set_target_properties(wavec PROPERTIES
 find_program(WAVEC_FILECHECK FileCheck
   PATHS
     ${LLVM_TOOLS_BINARY_DIR}
-    ${WAVE_LLVM_BUILD_TOOLS_DIR}
     ${LLVM_INSTALL_DIR}/bin
 )
 if(WAVEC_FILECHECK)
