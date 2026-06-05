@@ -30,6 +30,31 @@ func.func @uniform_i32_arith(%out: !wave.ptr<#wave.global, i32>) attributes {wav
   return
 }
 
+// SELECT-LABEL: func.func @uniform_i32_add_immediates
+// SELECT: waveamdmachine.imm 3
+// SELECT-NOT: waveamdmachine.s_add_i32
+func.func @uniform_i32_add_immediates(%out: !wave.ptr<#wave.global, i32>) attributes {wave.kernel} {
+  %one = arith.constant 1 : i32
+  %two = arith.constant 2 : i32
+  %sum = wave.binary addi %one, %two : i32, i32 -> i32
+  %off = wave.index_expr <"S"> ["S"] (%sum) : (i32) -> index
+  %ptr = wave.ptr_add %out, %off : !wave.ptr<#wave.global, i32>, index -> !wave.ptr<#wave.global, i32>
+  return
+}
+
+// SELECT-LABEL: func.func @uniform_i32_add_lhs_immediate
+// SELECT: %[[WGID:.*]] = waveamdmachine.s_workgroup_id_x
+// SELECT: %[[FOUR:.*]] = waveamdmachine.imm 4
+// SELECT: waveamdmachine.s_add_i32 %[[WGID]], %[[FOUR]]
+func.func @uniform_i32_add_lhs_immediate(%out: !wave.ptr<#wave.global, i32>) attributes {wave.kernel} {
+  %wgid = wave.workgroup_id 0
+  %four = arith.constant 4 : i32
+  %sum = wave.binary addi %four, %wgid : i32, i32 -> i32
+  %off = wave.index_expr <"S"> ["S"] (%sum) : (i32) -> index
+  %ptr = wave.ptr_add %out, %off : !wave.ptr<#wave.global, i32>, index -> !wave.ptr<#wave.global, i32>
+  return
+}
+
 // Mixed uniform/SIMD i32 add: SIMD operand routes through v_add_u32
 // with the usual SGPR-in-vsrc0 shuffle.
 // SELECT-LABEL: func.func @mixed_i32_addi

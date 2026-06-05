@@ -1699,11 +1699,7 @@ LogicalResult WaveAMDMachineSelector::selectBinaryAddI32(BinaryOp op) {
   Value lhs = expect(op.getLhs(), op);
   Value rhs = expect(op.getRhs(), op);
   if (!isBinarySimd(op)) {
-    auto added = waveamdmachine::SAddI32Op::create(
-        builder, op.getLoc(),
-        getRegType(op.getContext(), waveamdmachine::RegClass::SGPR),
-        getSCCType(op.getContext()), lhs, rhs);
-    values[op.getResult()] = added.getResult();
+    values[op.getResult()] = addUniformBytes(op.getLoc(), lhs, rhs);
     eraseIfTopLevel(op);
     return success();
   }
