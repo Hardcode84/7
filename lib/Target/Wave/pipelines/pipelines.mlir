@@ -83,13 +83,16 @@ module attributes {transform.with_named_sequence} {
     %r5 = transform.apply_registered_pass "waveamd-reg-alloc" with
         options = { "agpr-bank-spill" = true }
         to %r4 : (!transform.any_op) -> !transform.any_op
-    %r6 = transform.apply_registered_pass "waveamd-insert-hazard-waits" to %r5
+    // Regalloc can add copies that consume memory results.
+    %r6 = transform.apply_registered_pass "waveamd-insert-ticket-waits" to %r5
         : (!transform.any_op) -> !transform.any_op
-    %r7 = transform.apply_registered_pass "waveamd-resource-info" to %r6
+    %r7 = transform.apply_registered_pass "waveamd-insert-hazard-waits" to %r6
         : (!transform.any_op) -> !transform.any_op
-    %r8 = transform.apply_registered_pass "waveamd-metadata" to %r7
+    %r8 = transform.apply_registered_pass "waveamd-resource-info" to %r7
         : (!transform.any_op) -> !transform.any_op
-    transform.yield %r8 : !transform.any_op
+    %r9 = transform.apply_registered_pass "waveamd-metadata" to %r8
+        : (!transform.any_op) -> !transform.any_op
+    transform.yield %r9 : !transform.any_op
   }
 
   transform.named_sequence @waveamd_backend_unscheduled(
