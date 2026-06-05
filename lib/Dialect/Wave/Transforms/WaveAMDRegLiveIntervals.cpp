@@ -194,6 +194,15 @@ static LogicalResult coalesce(Value primary, Value extra, unsigned pos,
   return success();
 }
 
+static FailureOr<unsigned>
+getIntervalSlotOffset(Value value, const wave::WaveAMDLiveInterval &interval,
+                      Operation *errOp) {
+  for (auto [v, off] : llvm::zip(interval.values, interval.slotOffsets))
+    if (v == value)
+      return off;
+  return errOp->emitError("live interval table is missing value slot");
+}
+
 static bool operationIsInside(Operation *root, Operation *op) {
   for (Operation *cur = op; cur; cur = cur->getParentOp())
     if (cur == root)
@@ -207,6 +216,36 @@ static bool valueIsDefinedInside(Operation *root, Value value) {
   if (auto arg = dyn_cast<BlockArgument>(value))
     return operationIsInside(root, arg.getOwner()->getParentOp());
   return false;
+}
+
+static bool isMFMA(Operation *op) {
+  return op && op->hasTrait<OpTrait::waveamdmachine::MFMAOp>();
+}
+
+struct MFMAAccumulatorAlias {
+  Value acc;
+  Value result;
+  waveamdmachine::RegType type;
+};
+
+static std::optional<MFMAAccumulatorAlias>
+getMFMAAccumulatorAlias(Operation &op) {
+  if (!isMFMA(&op) || op.getNumOperands() <= 2 || op.getNumResults() != 1)
+    return std::nullopt;
+  Value acc = op.getOperand(2);
+  if (!llvm::hasSingleElement(acc.getUses()))
+    return std::nullopt;
+  Value resultValue = op.getResult(0);
+  std::optional<waveamdmachine::RegType> rt =
+      wave::getTrackedWaveAMDRegType(acc);
+  std::optional<waveamdmachine::RegType> resultRt =
+      wave::getTrackedWaveAMDRegType(resultValue);
+  if (!rt || !resultRt)
+    return std::nullopt;
+  if (rt->getRegClass() != resultRt->getRegClass() ||
+      rt->getWidth() != resultRt->getWidth())
+    return std::nullopt;
+  return MFMAAccumulatorAlias{acc, resultValue, *rt};
 }
 
 class LiveIntervalBuilder {
@@ -436,6 +475,21 @@ private:
     return success();
   }
 
+  LogicalResult coalesceMFMAAccumulatorOp(Operation &op, unsigned pos) {
+    std::optional<MFMAAccumulatorAlias> alias = getMFMAAccumulatorAlias(op);
+    if (!alias)
+      return success();
+    auto [bucket, table] = intervalsFor(alias->type, result.intervals);
+    if (!table->contains(alias->acc))
+      return success();
+    FailureOr<unsigned> accSlot = getIntervalSlotOffset(
+        alias->acc, (*bucket)[table->lookup(alias->acc)], &op);
+    if (failed(accSlot))
+      return failure();
+    return coalesce(alias->acc, alias->result, pos, result.intervals, &op,
+                    *accSlot);
+  }
+
   bool tupleRenameHandlesOperandUses(Operation *op) {
     if (isa<waveamdmachine::TupleToElementsOp>(op))
       return true;
@@ -465,6 +519,8 @@ private:
       if (!tupleRenameHandlesOperandUses(op))
         for (Value operand : op->getOperands())
           extendInterval(operand, pos);
+      if (failed(coalesceMFMAAccumulatorOp(*op, pos)))
+        return failure();
       if (failed(coalesceTupleElementOps(*op, pos)))
         return failure();
       if (auto loop = dyn_cast<waveamdmachine::UniformLoopOp>(op))

@@ -2,7 +2,7 @@
 
 // CHECK-LABEL: func.func @rank_mfma_accumulator_before_generic
 // CHECK-SAME: waveamdmachine.regalloc_agpr_candidates = [
-// CHECK-SAME: {agpr_dwords = 8 : i64, bridge_count = 1 : i64
+// CHECK-SAME: {agpr_dwords = 4 : i64, bridge_count = 1 : i64
 // CHECK-SAME: relief_dwords = 4 : i64}
 // CHECK-SAME: {agpr_dwords = 4 : i64, bridge_count = 2 : i64
 // CHECK-SAME: waveamdmachine.regalloc_pressure_class = "VGPR"
@@ -42,10 +42,43 @@ func.func @rank_mfma_accumulator_before_generic() {
 
 // -----
 
+// RUN: wave-opt --waveamd-reg-alloc='mark-overflow=true rank-agpr-candidates=true' -split-input-file %s | FileCheck %s --check-prefix=DEFAULT
+
+// DEFAULT-LABEL: func.func @default_text_vgpr_cap
+// DEFAULT-SAME: waveamdmachine.regalloc_agpr_candidates = [
+// DEFAULT-SAME: {agpr_dwords = 4 : i64, bridge_count = 1 : i64
+// DEFAULT-SAME: waveamdmachine.regalloc_pressure_limit = 256 : i64
+// DEFAULT-SAME: waveamdmachine.regalloc_pressure_request = {{.*}}width = 252 : i64}
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
+
+func.func @default_text_vgpr_cap() {
+  %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+  %a = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 4>
+  %b = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 4>
+  %acc = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 4>
+  %mfma = waveamdmachine.mfma_f32_16x16x32_f16 %a, %b, %acc
+      : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
+         !waveamdmachine.reg<vgpr, 4>) -> !waveamdmachine.reg<vgpr, 4>
+  %generic = waveamdmachine.v_mov_b32_tuple %zero {registers = 252 : i64}
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 252>
+  %request = waveamdmachine.v_mov_b32_tuple %zero {registers = 4 : i64}
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 4>
+  %use_mfma = waveamdmachine.v_mov_b32_tuple %mfma {registers = 4 : i64}
+      : (!waveamdmachine.reg<vgpr, 4>) -> !waveamdmachine.reg<vgpr, 4>
+  %use_generic = waveamdmachine.v_mov_b32_tuple %generic {registers = 252 : i64}
+      : (!waveamdmachine.reg<vgpr, 252>) -> !waveamdmachine.reg<vgpr, 252>
+  return
+}
+
+}
+
+// -----
+
 // CHECK-LABEL: func.func @tuple_renames_do_not_add_bridges
 // CHECK-SAME: waveamdmachine.regalloc_agpr_candidates = [
 // CHECK-SAME: {agpr_dwords = 8 : i64, bridge_count = 1 : i64
-// CHECK-SAME: relief_dwords = 8 : i64}
+// CHECK-SAME: relief_dwords = 4 : i64}
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 

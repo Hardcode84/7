@@ -38,6 +38,10 @@ static bool isAGPR(waveamdmachine::RegType type) {
   return type.getRegClass() == waveamdmachine::RegClass::AGPR;
 }
 
+static bool isMFMA(Operation *op) {
+  return op && op->hasTrait<OpTrait::waveamdmachine::MFMAOp>();
+}
+
 static std::optional<waveamdmachine::RegType> trackedRegType(Value v) {
   if (!isReg(v))
     return std::nullopt;
@@ -80,8 +84,7 @@ static FailureOr<Value> duplicateRegValue(OpBuilder &builder, Location loc,
         builder, loc, resultType, read.getResult());
     return write.getResult();
   }
-  return emitError(loc, "duplicateRegValue: unsupported register class / "
-                        "width for duplicate iter_arg init");
+  return emitError(loc, "duplicateRegValue: unsupported register class/width");
 }
 
 static LogicalResult splitDuplicateLoopInits(func::FuncOp func) {
@@ -103,6 +106,31 @@ static LogicalResult splitDuplicateLoopInits(func::FuncOp func) {
         return failure();
       loop.getInitsMutable()[i].assign(*dup);
     }
+  }
+  return success();
+}
+
+static LogicalResult splitDuplicateMFMAAccumulatorInputs(func::FuncOp func) {
+  SmallVector<Operation *> ops;
+  func.walk([&](Operation *op) {
+    if (isMFMA(op))
+      ops.push_back(op);
+  });
+
+  OpBuilder builder(func.getContext());
+  for (Operation *op : ops) {
+    if (op->getNumOperands() <= 2)
+      continue;
+    Value acc = op->getOperand(2);
+    if (!trackedRegType(acc))
+      continue;
+    if (llvm::hasSingleElement(acc.getUses()))
+      continue;
+    builder.setInsertionPoint(op);
+    FailureOr<Value> dup = duplicateRegValue(builder, op->getLoc(), acc);
+    if (failed(dup))
+      return failure();
+    op->setOperand(2, *dup);
   }
   return success();
 }
@@ -284,6 +312,8 @@ LogicalResult mlir::wave::prepareWaveAMDRegAllocIR(func::FuncOp func) {
   if (failed(materializeLoopBackedgeCopies(func)))
     return failure();
   if (failed(splitDuplicateLoopInits(func)))
+    return failure();
+  if (failed(splitDuplicateMFMAAccumulatorInputs(func)))
     return failure();
   return splitTupleElementSharing(func);
 }

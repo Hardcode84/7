@@ -20,6 +20,7 @@
 #include "llvm/TargetParser/TargetParser.h"
 #include "llvm/TargetParser/Triple.h"
 
+#include <algorithm>
 #include <limits>
 
 using namespace mlir;
@@ -177,6 +178,9 @@ static bool isGfx125x(const llvm::AMDGPU::IsaVersion &isa) {
   return isa.Major == 12 && isa.Minor == 5;
 }
 
+// Text ISA names only v0..v255.
+static constexpr unsigned kTextAsmVGPRLimit = 256;
+
 static unsigned getAddressableAGPRs(const llvm::MCSubtargetInfo &sti) {
   llvm::AMDGPU::IsaVersion isa = llvm::AMDGPU::getIsaVersion(sti.getCPU());
   return waveamdmachine::supportsAGPRs(isa) ? 256 : 0;
@@ -233,8 +237,10 @@ FailureOr<WaveAMDRegisterLimits> getWaveAMDRegisterLimits(Operation *op) {
   WaveAMDRegisterLimits limits;
   limits.addressableSGPRs =
       llvm::AMDGPU::IsaInfo::getAddressableNumSGPRs(sti->get());
-  limits.addressableVGPRs = llvm::AMDGPU::IsaInfo::getAddressableNumVGPRs(
-      sti->get(), /*DynamicVGPRBlockSize=*/0);
+  limits.addressableVGPRs =
+      std::min(llvm::AMDGPU::IsaInfo::getAddressableNumVGPRs(
+                   sti->get(), /*DynamicVGPRBlockSize=*/0),
+               kTextAsmVGPRLimit);
   limits.addressableAGPRs = getAddressableAGPRs(**sti);
   limits.sgprAllocGranule =
       llvm::AMDGPU::IsaInfo::getSGPRAllocGranule(sti->get());
