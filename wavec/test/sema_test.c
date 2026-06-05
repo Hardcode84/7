@@ -420,6 +420,19 @@ static void expect_reject(Arena *a, Program *prog, const char *needle,
   }
 }
 
+static void expect_reject2(Arena *a, Program *prog, const char *first,
+                           const char *second, const char *label) {
+  DiagList d;
+  int ok = run_sema(a, prog, &d);
+  CHECK(!ok, label);
+  if (!diag_contains(&d, first) || !diag_contains(&d, second)) {
+    fprintf(stderr, "expected REJECT with '%s' and '%s': %s\n", first, second,
+            label);
+    dump_diags(label, &d);
+    g_failures++;
+  }
+}
+
 /*===----------------------------------------------------------------===*/
 /* ACCEPT cases                                                          */
 /*===----------------------------------------------------------------===*/
@@ -951,7 +964,7 @@ static void test_reject_missing_wave_size(void) {
   body[0] = s_decl(&a, ty_simd(&a, ty_scalar(&a, SCALAR_INT32), 32), "v",
                    e_lane_id(&a, 32));
   prog = program1(&a, kernel(&a, "k", NULL, 0, NULL, 0, s_block(&a, body, 1)));
-  expect_reject(&a, prog, "amdgpu_wave_size", "missing wave size rejected");
+  expect_reject(&a, prog, "simd<T,W> requires", "missing wave size rejected");
   arena_destroy(&a);
 }
 
@@ -1022,6 +1035,24 @@ static void test_reject_store_mismatch(void) {
   prog = prog_wave(&a, 32, params, 2, body, 1);
   expect_reject(&a, prog, "does not match pointer element",
                 "store element mismatch rejected");
+  arena_destroy(&a);
+}
+
+/* store(value, ptr) diagnoses both bad operands. */
+static void test_reject_store_bad_operands(void) {
+  Arena a = arena_create(1u << 18);
+  Param **params = (Param **)xalloc(&a, sizeof(Param *));
+  Stmt **body = stmt_arr(&a, 1);
+  Program *prog;
+  Expr **ar = expr_arr(&a, 2);
+  params[0] = param(&a, ty_scalar(&a, SCALAR_UINT32), "bad");
+  ar[0] = e_ident(&a, "bad");
+  ar[1] = e_ident(&a, "bad");
+  body[0] = s_call(&a, e_call(&a, "store", NULL, 0, ar, 2, NULL));
+  prog = prog_wave(&a, 32, params, 1, body, 1);
+  expect_reject2(&a, prog, "store target must be a pointer",
+                 "store value must be a simd<T,W>",
+                 "store rejects bad value and pointer");
   arena_destroy(&a);
 }
 
@@ -1534,6 +1565,7 @@ int main(void) {
   test_reject_for_iv_type();
   test_reject_shared_param();
   test_reject_store_mismatch();
+  test_reject_store_bad_operands();
   test_reject_void_in_value();
   test_reject_int_in_if();
   test_reject_duplicate_wave_size();

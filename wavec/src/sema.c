@@ -485,13 +485,21 @@ static TypeRef *resolve_pointer_type(Checker *c, const TypeRef *t) {
   return ptr_type(c, t->scalar, t->is_shared);
 }
 
+static const char *width_syntax(const char *what) {
+  if (strcmp(what, "simd") == 0)
+    return "simd<T,W>";
+  if (strcmp(what, "mask") == 0)
+    return "mask<W>";
+  return what;
+}
+
 static int require_type_width(Checker *c, const TypeRef *t, const char *what) {
   if (!c->has_wave_n) {
     char buf[SEMA_MSG_CAP];
     snprintf(buf, sizeof(buf),
-             "%s<W> requires the kernel wave size; add "
+             "%s requires the kernel wave size; add "
              "[[amdgpu_wave_size(N)]]",
-             what);
+             width_syntax(what));
     err(c, t->span, buf);
     return 0;
   }
@@ -1120,30 +1128,33 @@ static TypeRef *type_load(Checker *c, Expr *e) {
  * store(value, ptr [after t]): value is simd<T,N>, ptr is T* with a
  * matching element; yields a token. Value-first to match the IR.
  */
-static TypeRef *check_store_pointer(Checker *c, Expr *ptr_expr) {
-  TypeRef *p = check_expr(c, ptr_expr);
+static int check_store_pointer(Checker *c, Expr *ptr_expr, TypeRef *p) {
   if (p == NULL)
-    return NULL;
+    return 0;
   if (is_pointer(p))
-    return p;
+    return 1;
   err(c, ptr_expr->span, "store target must be a pointer");
-  return NULL;
+  return 0;
 }
 
-static int check_store_value(Checker *c, Expr *value_expr, TypeRef *p,
-                             SourceSpan span) {
-  TypeRef *v = check_expr(c, value_expr);
-  ScalarKind ve;
+static int check_store_value_shape(Checker *c, Expr *value_expr, TypeRef *v) {
   if (v == NULL)
     return 0;
+  if (is_simd(v))
+    return 1;
+  err(c, value_expr->span,
+      "store value must be a simd<T,W> (lane-varying) value");
+  return 0;
+}
+
+static int check_store_value(Checker *c, Expr *value_expr, TypeRef *v,
+                             TypeRef *p, SourceSpan span) {
+  ScalarKind ve;
   if (is_untyped_literal(value_expr))
     (void)coerce_literal_to_scalar(c, value_expr, p->scalar);
   v = (TypeRef *)value_expr->sema_type;
-  if (!is_simd(v)) {
-    err(c, value_expr->span,
-        "store value must be a simd<T,W> (lane-varying) value");
+  if (!check_store_value_shape(c, value_expr, v))
     return 0;
-  }
   if (element_scalar(v, &ve) && scalar_compatible(ve, p->scalar))
     return 1;
   {
@@ -1158,15 +1169,21 @@ static int check_store_value(Checker *c, Expr *value_expr, TypeRef *p,
 }
 
 static TypeRef *type_store(Checker *c, Expr *e) {
+  TypeRef *v;
   TypeRef *p;
+  int ok;
   if (!no_gargs(c, e, "store"))
     return NULL;
   if (!require_argc(c, e, 2, "store"))
     return NULL;
-  p = check_store_pointer(c, e->as.call.args[1]);
-  if (p == NULL)
-    return NULL;
-  if (!check_store_value(c, e->as.call.args[0], p, e->span))
+  v = check_expr(c, e->as.call.args[0]);
+  p = check_expr(c, e->as.call.args[1]);
+  ok = check_store_pointer(c, e->as.call.args[1], p);
+  if (!ok)
+    (void)check_store_value_shape(c, e->as.call.args[0], v);
+  if (ok && !check_store_value(c, e->as.call.args[0], v, p, e->span))
+    ok = 0;
+  if (!ok)
     return NULL;
   if (!check_dep_token(c, e))
     return NULL;
