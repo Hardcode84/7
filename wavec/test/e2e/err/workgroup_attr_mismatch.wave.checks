@@ -1,0 +1,1 @@
+CHECK: error: workgroup size must equal wave size times waves per workgroup

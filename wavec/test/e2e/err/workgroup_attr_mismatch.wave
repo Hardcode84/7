@@ -1,0 +1,5 @@
+kernel [[amdgpu_wave_size(32)]]
+       [[amdgpu_waves_per_workgroup(3)]]
+       [[amdgpu_workgroup_size(64)]]
+void workgroup_attr_mismatch() {
+}

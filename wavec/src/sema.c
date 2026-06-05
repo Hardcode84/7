@@ -57,6 +57,8 @@
  * fixed cap because the arena never grows; generous for any v1 kernel. */
 #define SEMA_MAX_SYMBOLS 4096
 
+#define SEMA_MAX_WORKGROUP_SIZE 1024
+
 /* Stack buffer size for formatting a single diagnostic message. Sized
  * with headroom over the longest fixed message text plus any embedded
  * identifier (capped at SEMA_NAME_CAP) so snprintf never truncates a
@@ -2679,14 +2681,15 @@ static int attr_name_is(const Attribute *a, const char *s) {
   return a->name_len == len && memcmp(a->name, s, len) == 0;
 }
 
-/*
- * Validate the closed attribute set on a kernel and extract the wave
- * size N. amdgpu_wave_size(int) and amdgpu_lds_size(int) are the only
- * permitted attributes; each REQUIRES its integer argument. Any other
- * name is an error. Duplicates of either are errors. Sets c->wave_n /
- * c->has_wave_n. amdgpu_wave_size is required (it fixes the wave width
- * every simd/mask uses); its absence is reported here.
- */
+typedef struct AttrState {
+  uint64_t waves_per_workgroup;
+  uint64_t workgroup_size;
+  int seen_wave;
+  int seen_lds;
+  int seen_waves_per_workgroup;
+  int seen_workgroup_size;
+} AttrState;
+
 static void check_wave_attr(Checker *c, Attribute *a, int *seen_wave) {
   if (!a->has_arg) {
     err(c, a->span, "[[amdgpu_wave_size]] requires an integer argument");
@@ -2709,45 +2712,119 @@ static void check_wave_attr(Checker *c, Attribute *a, int *seen_wave) {
   c->has_wave_n = 1;
 }
 
-static void check_lds_attr(Checker *c, Attribute *a, int *seen_lds) {
+static void check_lds_attr(Checker *c, Attribute *a, AttrState *state) {
   if (!a->has_arg) {
     err(c, a->span, "[[amdgpu_lds_size]] requires an integer argument");
     return;
   }
-  if (*seen_lds) {
+  if (state->seen_lds) {
     err(c, a->span, "duplicate [[amdgpu_lds_size]] attribute");
     return;
   }
-  *seen_lds = 1;
+  state->seen_lds = 1;
 }
 
-static void check_attribute(Checker *c, Attribute *a, int *seen_wave,
-                            int *seen_lds) {
+static void check_waves_per_workgroup_attr(Checker *c, Attribute *a,
+                                           AttrState *state) {
+  if (!a->has_arg) {
+    err(c, a->span,
+        "[[amdgpu_waves_per_workgroup]] requires an integer argument");
+    return;
+  }
+  if (state->seen_waves_per_workgroup) {
+    err(c, a->span, "duplicate [[amdgpu_waves_per_workgroup]] attribute");
+    return;
+  }
+  state->seen_waves_per_workgroup = 1;
+  state->waves_per_workgroup = a->arg;
+  if (a->arg == 0)
+    err(c, a->span,
+        "[[amdgpu_waves_per_workgroup(N)]] must be a positive count");
+}
+
+static void check_workgroup_size_attr(Checker *c, Attribute *a,
+                                      AttrState *state) {
+  if (!a->has_arg) {
+    err(c, a->span, "[[amdgpu_workgroup_size]] requires an integer argument");
+    return;
+  }
+  if (state->seen_workgroup_size) {
+    err(c, a->span, "duplicate [[amdgpu_workgroup_size]] attribute");
+    return;
+  }
+  state->seen_workgroup_size = 1;
+  state->workgroup_size = a->arg;
+  if (a->arg == 0)
+    err(c, a->span, "[[amdgpu_workgroup_size(N)]] must be positive");
+  if (a->arg > SEMA_MAX_WORKGROUP_SIZE)
+    err(c, a->span, "[[amdgpu_workgroup_size(N)]] must be <= 1024");
+}
+
+static void check_attribute(Checker *c, Attribute *a, AttrState *state) {
   if (attr_name_is(a, "amdgpu_wave_size")) {
-    check_wave_attr(c, a, seen_wave);
+    check_wave_attr(c, a, &state->seen_wave);
     return;
   }
   if (attr_name_is(a, "amdgpu_lds_size")) {
-    check_lds_attr(c, a, seen_lds);
+    check_lds_attr(c, a, state);
+    return;
+  }
+  if (attr_name_is(a, "amdgpu_waves_per_workgroup")) {
+    check_waves_per_workgroup_attr(c, a, state);
+    return;
+  }
+  if (attr_name_is(a, "amdgpu_workgroup_size")) {
+    check_workgroup_size_attr(c, a, state);
     return;
   }
   err_name(c, a->span,
-           "unknown attribute '%s' (only amdgpu_wave_size "
-           "and amdgpu_lds_size are allowed)",
+           "unknown attribute '%s' (only amdgpu_wave_size, "
+           "amdgpu_lds_size, amdgpu_waves_per_workgroup, "
+           "and amdgpu_workgroup_size are allowed)",
            a->name, a->name_len);
+}
+
+static int waves_exceed_workgroup(uint64_t wave_n, uint64_t waves) {
+  return waves > SEMA_MAX_WORKGROUP_SIZE / wave_n;
+}
+
+static int launch_attrs_mismatch(uint64_t wave_n, const AttrState *state) {
+  if (!state->seen_waves_per_workgroup || !state->seen_workgroup_size)
+    return 0;
+  if (waves_exceed_workgroup(wave_n, state->waves_per_workgroup))
+    return 0;
+  return state->waves_per_workgroup * wave_n != state->workgroup_size;
+}
+
+static void check_launch_attrs(Checker *c, Kernel *k, const AttrState *state) {
+  if (!state->seen_wave) {
+    err(c, k->span, "kernel requires the [[amdgpu_wave_size(N)]] attribute");
+    return;
+  }
+  if (!c->has_wave_n)
+    return;
+
+  if (state->seen_waves_per_workgroup &&
+      waves_exceed_workgroup(c->wave_n, state->waves_per_workgroup))
+    err(c, k->span, "[[amdgpu_waves_per_workgroup(N)]] exceeds 1024 threads");
+  if (state->seen_workgroup_size && state->workgroup_size % c->wave_n != 0)
+    err(c, k->span,
+        "[[amdgpu_workgroup_size(N)]] must be a multiple of wave size");
+  if (launch_attrs_mismatch(c->wave_n, state))
+    err(c, k->span,
+        "workgroup size must equal wave size times waves per workgroup");
 }
 
 static void check_attributes(Checker *c, Kernel *k) {
   size_t i;
-  int seen_wave = 0;
-  int seen_lds = 0;
+  AttrState state;
 
+  memset(&state, 0, sizeof(state));
   c->wave_n = 0;
   c->has_wave_n = 0;
   for (i = 0; i < k->attr_count; i++)
-    check_attribute(c, k->attrs[i], &seen_wave, &seen_lds);
-  if (!seen_wave)
-    err(c, k->span, "kernel requires the [[amdgpu_wave_size(N)]] attribute");
+    check_attribute(c, k->attrs[i], &state);
+  check_launch_attrs(c, k, &state);
 }
 
 /* Check one kernel: attributes (-> N), then parameters (scope 0), then

@@ -1,0 +1,14 @@
+CHECK-LABEL: func.func @workgroup_attrs
+CHECK-DAG: gpu.known_block_size = array<i32: 64, 1, 1>
+CHECK-DAG: wave.workgroup_size = array<i32: 64, 1, 1>
+CHECK-DAG: wave.waves_per_workgroup = 2 : i64
+CHECK: wave.workgroup_id 0
+CHECK: wave.binary muli
+CHECK: wave.subgroup_id
+CHECK: arith.index_cast
+CHECK: wave.binary addi
+CHECK: wave.store
+CHECK-LABEL: func.func @fixed_workgroup_size
+CHECK-DAG: gpu.known_block_size = array<i32: 96, 1, 1>
+CHECK-DAG: wave.workgroup_size = array<i32: 96, 1, 1>
+CHECK-DAG: wave.waves_per_workgroup = 3 : i64

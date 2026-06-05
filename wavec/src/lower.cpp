@@ -30,6 +30,7 @@ extern "C" {
 
 #include "Wave-c/Dialects.h"
 
+#include <array>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -81,11 +82,12 @@ struct Binding {
 
 // Per-lower state. No globals: everything threads through here.
 struct LowerCtx {
+  std::vector<Binding> env;
   MlirContext ctx;
   MlirLocation loc;
   MlirBlock block; // current insertion point
-  std::vector<Binding> env;
   DiagList *diags;
+  uint64_t waves_per_workgroup;
   unsigned depth;
   bool failed;
 };
@@ -428,6 +430,15 @@ static bool intBinKind(TokenKind op, bool signedInt, bool indexResult,
     return true;
   }
   return false;
+}
+
+static MlirValue makeWaveIntBinary(LowerCtx &lc, MlirValue lhs, MlirValue rhs,
+                                   BinaryKindCode kind, MlirType resultTy) {
+  MlirAttribute kindAttr = mlirIntegerAttrGet(mlirIntegerTypeGet(lc.ctx, 32),
+                                              static_cast<int64_t>(kind));
+  MlirOperation op = buildOp(lc, "wave.binary", {lhs, rhs}, {resultTy},
+                             {namedAttr(lc, "kind", kindAttr)});
+  return op0(op);
 }
 
 static const char *floatBinName(TokenKind op) {
@@ -834,7 +845,23 @@ static bool lowerWorkgroupAxis(LowerCtx &lc, int64_t axis, MlirValue *out) {
 }
 
 static bool lowerWaveIdCall(LowerCtx &lc, const Expr *, MlirValue *out) {
-  return lowerWorkgroupAxis(lc, 0, out);
+  if (lc.waves_per_workgroup <= 1)
+    return lowerWorkgroupAxis(lc, 0, out);
+
+  MlirValue workgroup;
+  if (!lowerWorkgroupAxis(lc, 0, &workgroup))
+    return false;
+
+  MlirType i32 = mlirIntegerTypeGet(lc.ctx, 32);
+  MlirValue waves = makeIntConst(lc, i32, (int64_t)lc.waves_per_workgroup);
+  MlirValue base = makeWaveIntBinary(lc, workgroup, waves, BINARY_MULI, i32);
+  MlirOperation subgroupOp =
+      buildOp(lc, "wave.subgroup_id", {}, {mlirIndexTypeGet(lc.ctx)});
+  MlirValue subgroupIndex = op0(subgroupOp);
+  MlirOperation cast = buildOp(lc, "arith.index_cast", {subgroupIndex}, {i32});
+  MlirValue subgroup = op0(cast);
+  *out = makeWaveIntBinary(lc, base, subgroup, BINARY_ADDI, i32);
+  return !lc.failed;
 }
 
 static bool lowerWorkgroupIdCall(LowerCtx &lc, const Expr *e, MlirValue *out) {
@@ -1922,13 +1949,15 @@ static bool lowerBlock(LowerCtx &lc, const Stmt *blk) {
 // Kernel + module.
 //===----------------------------------------------------------------------===//
 
-// Read [[amdgpu_lds_size(N)]] off a kernel, if present. Returns true if found.
-static bool kernelLdsSize(const Kernel *k, uint64_t *out) {
+static bool attrNameIs(const Attribute *a, const char *name) {
+  size_t len = strlen(name);
+  return a->name_len == len && memcmp(a->name, name, len) == 0;
+}
+
+static bool kernelAttrValue(const Kernel *k, const char *name, uint64_t *out) {
   for (size_t i = 0; i < k->attr_count; ++i) {
     const Attribute *a = k->attrs[i];
-    static const char ks[] = "amdgpu_lds_size";
-    if (a->name_len == sizeof(ks) - 1 &&
-        memcmp(a->name, ks, sizeof(ks) - 1) == 0 && a->has_arg) {
+    if (attrNameIs(a, name) && a->has_arg) {
       *out = a->arg;
       return true;
     }
@@ -1936,7 +1965,48 @@ static bool kernelLdsSize(const Kernel *k, uint64_t *out) {
   return false;
 }
 
+struct KernelLaunchMetadata {
+  uint64_t wave_n;
+  uint64_t waves_per_workgroup;
+  uint64_t workgroup_size;
+  bool explicit_launch;
+};
+
+static KernelLaunchMetadata getKernelLaunchMetadata(const Kernel *k) {
+  KernelLaunchMetadata metadata;
+  metadata.wave_n = 32;
+  metadata.waves_per_workgroup = 1;
+  metadata.workgroup_size = 32;
+  metadata.explicit_launch = false;
+
+  uint64_t value;
+  if (kernelAttrValue(k, "amdgpu_wave_size", &value) && value != 0)
+    metadata.wave_n = value;
+
+  if (kernelAttrValue(k, "amdgpu_waves_per_workgroup", &value) && value != 0) {
+    metadata.waves_per_workgroup = value;
+    metadata.workgroup_size = metadata.wave_n * value;
+    metadata.explicit_launch = true;
+  }
+  if (kernelAttrValue(k, "amdgpu_workgroup_size", &value) && value != 0) {
+    metadata.workgroup_size = value;
+    metadata.waves_per_workgroup =
+        metadata.wave_n == 0 ? 1 : value / metadata.wave_n;
+    metadata.explicit_launch = true;
+  }
+  return metadata;
+}
+
+static MlirAttribute blockSizeAttr(LowerCtx &lc, uint64_t workgroupSize) {
+  std::array<int32_t, 3> blockSize = {static_cast<int32_t>(workgroupSize), 1,
+                                      1};
+  return mlirDenseI32ArrayGet(lc.ctx, (intptr_t)blockSize.size(),
+                              blockSize.data());
+}
+
 static bool lowerKernel(LowerCtx &lc, MlirBlock moduleBody, const Kernel *k) {
+  KernelLaunchMetadata launch = getKernelLaunchMetadata(k);
+
   // Parameter types.
   std::vector<MlirType> inputs;
   for (size_t i = 0; i < k->param_count; ++i) {
@@ -1966,10 +2036,19 @@ static bool lowerKernel(LowerCtx &lc, MlirBlock moduleBody, const Kernel *k) {
   attrs.push_back(namedAttr(lc, "function_type", mlirTypeAttrGet(funcTy)));
   attrs.push_back(namedAttr(lc, "wave.kernel", mlirUnitAttrGet(lc.ctx)));
   uint64_t lds;
-  if (kernelLdsSize(k, &lds))
+  if (kernelAttrValue(k, "amdgpu_lds_size", &lds))
     attrs.push_back(namedAttr(
         lc, "wave.lds_size",
         mlirIntegerAttrGet(mlirIntegerTypeGet(lc.ctx, 64), (int64_t)lds)));
+  if (launch.explicit_launch) {
+    MlirAttribute workgroupSizeAttr = blockSizeAttr(lc, launch.workgroup_size);
+    attrs.push_back(
+        namedAttr(lc, "wave.waves_per_workgroup",
+                  mlirIntegerAttrGet(mlirIntegerTypeGet(lc.ctx, 64),
+                                     (int64_t)launch.waves_per_workgroup)));
+    attrs.push_back(namedAttr(lc, "wave.workgroup_size", workgroupSizeAttr));
+    attrs.push_back(namedAttr(lc, "gpu.known_block_size", workgroupSizeAttr));
+  }
   mlirOperationStateAddAttributes(&st, (intptr_t)attrs.size(), attrs.data());
   MlirRegion regionArr[1] = {bodyRegion};
   mlirOperationStateAddOwnedRegions(&st, 1, regionArr);
@@ -1983,6 +2062,8 @@ static bool lowerKernel(LowerCtx &lc, MlirBlock moduleBody, const Kernel *k) {
   // Bind params to block args, lower the body, append func.return.
   size_t envMark = lc.env.size();
   MlirBlock saved = lc.block;
+  uint64_t savedWavesPerWorkgroup = lc.waves_per_workgroup;
+  lc.waves_per_workgroup = launch.waves_per_workgroup;
   lc.block = entry;
   for (size_t i = 0; i < k->param_count; ++i)
     bindNew(lc, k->params[i]->name.name, k->params[i]->name.name_len,
@@ -1993,6 +2074,7 @@ static bool lowerKernel(LowerCtx &lc, MlirBlock moduleBody, const Kernel *k) {
     buildOp(lc, "func.return", {}, {});
   lc.env.resize(envMark);
   lc.block = saved;
+  lc.waves_per_workgroup = savedWavesPerWorkgroup;
   return ok;
 }
 
@@ -2056,6 +2138,7 @@ extern "C" char *wavec_lower_to_mlir(const Program *program, DiagList *diags) {
   lc.loc = loc;
   lc.block = moduleBody;
   lc.diags = diags;
+  lc.waves_per_workgroup = 1;
   lc.depth = 0;
   lc.failed = false;
 

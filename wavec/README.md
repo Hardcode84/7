@@ -166,6 +166,8 @@ What the v1 frontend lowers end-to-end (each verified through `wave-opt`):
 |---|---|---|
 | `kernel [[amdgpu_wave_size(N)]] void f(...)` | `func.func` + `wave.kernel` | yes |
 | `[[amdgpu_lds_size(N)]]` | `wave.lds_size` attr | yes |
+| `[[amdgpu_waves_per_workgroup(N)]]` | `wave.waves_per_workgroup`, `wave.workgroup_size`, `gpu.known_block_size` | yes |
+| `[[amdgpu_workgroup_size(N)]]` | `wave.workgroup_size`, `gpu.known_block_size` | yes |
 | scalar params `bool/half/float/index/int*_t/uint*_t`, `T*`, `shared T*` | `f32`/`i32`/`index`/`!wave.ptr<#global\|#shared, T>` | yes |
 | `simd<T,W>` / `mask<W>` / `vector<T,N>` / `fragment<role,T,M,N,W,R>` | `!wave.simd` / `!wave.mask` / `vector<NxT>` / `!waveamd.fragment` | yes |
 | arithmetic: int `+ - * / % << >> & \| ^`; simd-float `+ - *`; scalar-float `+ - * /` (scalar broadcast) | `wave.binary`, `wave.f{add,sub,mul}`, `arith.{addf,subf,mulf,divf}`, `wave.splat` | yes |
@@ -211,7 +213,7 @@ zero output, e.g.:
 - The end-to-end `saxpy.wave` output is the structural golden minus the
   generator's manual hoist + the backend's CSE (documented above); byte
   equality is asserted on the hoisted-AST lowering path.
-- `while`, unary operators, reduction/ballot helpers, and launch metadata
-  remain open growth items. They error honestly today.
+- `while`, unary operators, and reduction/ballot helpers remain open growth
+  items. They error honestly today.
 - v0 emits textual IR piped to `wave-opt`. The in-memory C-API switch and
   `wave-translate --wave-to-amdgpu-asm` end-to-end run are future work.

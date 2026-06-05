@@ -311,6 +311,8 @@ Near 1:1 with ops that already exist:
 | Source | Wave IR | Type |
 |---|---|---|
 | `kernel [[amdgpu_wave_size(32)]] void f(...)` | `func.func` + wave-size attr | -- |
+| `[[amdgpu_waves_per_workgroup(N)]]` | launch attrs + `gpu.known_block_size` | -- |
+| `[[amdgpu_workgroup_size(N)]]` | launch attrs + `gpu.known_block_size` | -- |
 | `float *x`, `float a`, `uint32_t n` | `!wave.ptr<#global,f32>`, `f32`, `i32` | uniform |
 | `lane_id<32>()` | `wave.lane_id` | `!wave.simd<i32,32>` |
 | `wave_id_in_grid()` | `workgroup_id*waves_per_wg + wave.subgroup_id` | uniform `i32` |

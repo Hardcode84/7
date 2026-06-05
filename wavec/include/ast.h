@@ -350,8 +350,7 @@ struct Stmt {
 /*
  * An attribute `[[ ident [ ( int_lit ) ] ]]`. `name`/`name_len` is the
  * attribute identifier (a source slice). `has_arg`/`arg` carry the
- * optional integer argument. The closed attribute set
- * (amdgpu_wave_size, amdgpu_lds_size) is validated in sema, not here.
+ * optional integer argument. Sema validates the closed kernel attr set.
  */
 struct Attribute {
   const char *name;

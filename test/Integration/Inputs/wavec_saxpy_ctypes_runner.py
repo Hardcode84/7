@@ -4,6 +4,7 @@
 import argparse
 import ctypes
 import random
+import re
 from pathlib import Path
 
 HIP_MEMCPY_HOST_TO_DEVICE = 1
@@ -69,10 +70,52 @@ class Hip:
         raise RuntimeError(f"{what}: {message}")
 
 
-def parse_sizes(raw: str, wave_size: int) -> list[int]:
+def parse_sizes(raw: str, wave_size: int, workgroup_size: int) -> list[int]:
     if raw:
         return [int(item) for item in raw.split(",") if item]
-    return [0, 1, wave_size - 1, wave_size, wave_size + 7, 2 * wave_size + 3]
+    values = [
+        0,
+        1,
+        wave_size - 1,
+        wave_size,
+        wave_size + 7,
+        workgroup_size - 1,
+        workgroup_size,
+        workgroup_size + 7,
+        2 * workgroup_size + 3,
+    ]
+    return sorted({value for value in values if value >= 0})
+
+
+def parse_workgroup_size_from_wave_ir(path: Path, kernel: str) -> int | None:
+    text = path.read_text()
+    func_pattern = rf"func\.func\s+@{re.escape(kernel)}\b.*?attributes\s+\{{([^}}]*)\}}"
+    func = re.search(func_pattern, text, re.DOTALL)
+    if not func:
+        return None
+    attr_pattern = (
+        r"(?:gpu\.known_block_size|wave\.workgroup_size)\s*=\s*"
+        r"array<i32:\s*([0-9]+),\s*1,\s*1>"
+    )
+    match = re.search(attr_pattern, func.group(1))
+    if not match:
+        return None
+    return int(match.group(1))
+
+
+def resolve_workgroup_size(args: argparse.Namespace) -> int:
+    workgroup_size = args.workgroup_size
+    if args.wave_ir:
+        sidecar_size = parse_workgroup_size_from_wave_ir(args.wave_ir, args.kernel)
+        if sidecar_size is not None:
+            workgroup_size = sidecar_size
+    if workgroup_size is None:
+        workgroup_size = args.wave_size
+    if workgroup_size <= 0:
+        raise ValueError("workgroup size must be positive")
+    if workgroup_size % args.wave_size != 0:
+        raise ValueError("workgroup size must be a multiple of wave size")
+    return workgroup_size
 
 
 def round_up(value: int, step: int) -> int:
@@ -130,7 +173,7 @@ def free_device(hip: Hip, device: ctypes.c_void_p, what: str):
 def launch_saxpy(
     hip: Hip,
     function: ctypes.c_void_p,
-    wave_size: int,
+    workgroup_size: int,
     grid_x: int,
     device_x: ctypes.c_void_p,
     device_y: ctypes.c_void_p,
@@ -153,7 +196,7 @@ def launch_saxpy(
             grid_x,
             1,
             1,
-            wave_size,
+            workgroup_size,
             1,
             1,
             0,
@@ -182,8 +225,9 @@ def check_result(
 
 
 def run(args: argparse.Namespace):
-    sizes = parse_sizes(args.sizes, args.wave_size)
-    elem_count = round_up(max([*sizes, 1]), args.wave_size)
+    workgroup_size = resolve_workgroup_size(args)
+    sizes = parse_sizes(args.sizes, args.wave_size, workgroup_size)
+    elem_count = round_up(max([*sizes, 1]), workgroup_size)
     x, y = make_data(elem_count, args.seed)
 
     hip = Hip(args.hip_lib)
@@ -210,13 +254,13 @@ def run(args: argparse.Namespace):
         hip.check(hip.lib.hipMalloc(ctypes.byref(device_y), byte_count), "hipMalloc y")
         try:
             copy_to_device(hip, device_x, x)
-            grid_x = elem_count // args.wave_size
+            grid_x = elem_count // workgroup_size
             for n in sizes:
                 copy_to_device(hip, device_y, y)
                 launch_saxpy(
                     hip,
                     function,
-                    args.wave_size,
+                    workgroup_size,
                     grid_x,
                     device_x,
                     device_y,
@@ -238,6 +282,8 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--hip-lib", required=True)
     parser.add_argument("--wave-size", type=int, required=True)
+    parser.add_argument("--workgroup-size", type=int)
+    parser.add_argument("--wave-ir", type=Path)
     parser.add_argument("--alpha", type=float, default=1.5)
     parser.add_argument("--seed", type=int, default=17)
     parser.add_argument("--sizes", default="")

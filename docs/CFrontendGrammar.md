@@ -198,8 +198,9 @@ and the postfix `call_tail` bind tighter than any binary operator.
 ## Sema-only rules (not in the CFG)
 
 - `shared` requires at least one `*`; a `shared` non-pointer is a type error.
-- Attributes are a closed set: `amdgpu_wave_size(int)` and
-  `amdgpu_lds_size(int)`, each requiring its int; other names are errors.
+- Attributes are a closed set: `amdgpu_wave_size(int)`,
+  `amdgpu_lds_size(int)`, `amdgpu_waves_per_workgroup(int)`, and
+  `amdgpu_workgroup_size(int)`, each requiring its int; other names are errors.
 - `if` takes `bool`, `where` takes `mask<W>` (the checker rejects the other);
   the `for` IV is `int`/`index` (`iv_type`); `lane_id<W>`/`simd<T,W>`/
   `mask<W>` all use the kernel `W` from `[[amdgpu_wave_size(W)]]` (the
