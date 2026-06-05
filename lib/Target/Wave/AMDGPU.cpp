@@ -113,7 +113,7 @@ struct KernelInfo {
   unsigned sgprCount = 0;
   unsigned vgprCount = 0;
   unsigned agprCount = 0;
-  unsigned ldsSize = 0;
+  unsigned fixedLdsSize = 0;
 };
 
 #include "AMDGPUOpcodes.def"
@@ -666,6 +666,14 @@ private:
     return fallback;
   }
 
+  FailureOr<unsigned> getFixedLDSSize(func::FuncOp func) const {
+    unsigned total = getIntAttr(func, "waveamdmachine.lds_size", 0);
+    unsigned dynamic = getIntAttr(func, "waveamdmachine.dynamic_lds_size", 0);
+    if (dynamic > total)
+      return func.emitError("dynamic LDS size exceeds total LDS size");
+    return total - dynamic;
+  }
+
   bool getBoolAttr(Operation *op, StringRef name, bool fallback) const {
     if (auto attr = op->getAttrOfType<BoolAttr>(name))
       return attr.getValue();
@@ -731,7 +739,10 @@ private:
       unsigned archVGPRCount = getIntAttr(func, "waveamdmachine.vgpr_count", 1);
       info.agprCount = getIntAttr(func, "waveamdmachine.agpr_count", 0);
       info.vgprCount = getTotalVGPRCount(archVGPRCount, info.agprCount);
-      info.ldsSize = getIntAttr(func, "waveamdmachine.lds_size", 0);
+      FailureOr<unsigned> fixedLdsSize = getFixedLDSSize(func);
+      if (failed(fixedLdsSize))
+        return failure();
+      info.fixedLdsSize = *fixedLdsSize;
       SmallVector<waveamd::KernargSlot> layout =
           waveamd::getKernargLayout(func.getFunctionType().getInputs());
       for (auto [index, slot] : llvm::enumerate(layout)) {
@@ -866,7 +877,9 @@ private:
     unsigned vgprCount = getIntAttr(func, "waveamdmachine.vgpr_count", 1);
     unsigned agprCount = getIntAttr(func, "waveamdmachine.agpr_count", 0);
     unsigned totalVGPRCount = getTotalVGPRCount(vgprCount, agprCount);
-    unsigned ldsSize = getIntAttr(func, "waveamdmachine.lds_size", 0);
+    FailureOr<unsigned> fixedLdsSize = getFixedLDSSize(func);
+    if (failed(fixedLdsSize))
+      return failure();
     bool usesWgY = false;
     bool usesWgZ = false;
     wave::WaveAMDKernelEntryRegs entryRegs =
@@ -883,7 +896,7 @@ private:
     os << "\t.section\t.rodata,\"a\",@progbits\n";
     os << "\t.p2align\t6, 0x0\n";
     os << "\t.amdhsa_kernel " << func.getSymName() << "\n";
-    os << "\t\t.amdhsa_group_segment_fixed_size " << ldsSize << "\n";
+    os << "\t\t.amdhsa_group_segment_fixed_size " << *fixedLdsSize << "\n";
     os << "\t\t.amdhsa_private_segment_fixed_size 0\n";
     os << "\t\t.amdhsa_kernarg_size " << kernargSize << "\n";
     os << "\t\t.amdhsa_user_sgpr_count " << entryRegs.userSGPRCount << "\n";
@@ -977,7 +990,7 @@ private:
           os << "        .value_kind:     by_value\n";
         }
       }
-      os << "    .group_segment_fixed_size: " << kernel.ldsSize << "\n";
+      os << "    .group_segment_fixed_size: " << kernel.fixedLdsSize << "\n";
       os << "    .kernarg_segment_align: 8\n";
       os << "    .kernarg_segment_size: " << kernel.kernargSize << "\n";
       os << "    .max_flat_workgroup_size: 1024\n";

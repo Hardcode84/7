@@ -41,6 +41,7 @@ static void clearResourceAttrs(func::FuncOp func) {
   func->removeAttr("waveamdmachine.vgpr_count");
   func->removeAttr("waveamdmachine.agpr_count");
   func->removeAttr("waveamdmachine.lds_size");
+  func->removeAttr("waveamdmachine.dynamic_lds_size");
 }
 
 static void clearModuleResourceAttrs(ModuleOp mod) {
@@ -56,6 +57,27 @@ static unsigned getMinReportedSGPRs(func::FuncOp func) {
 
 static unsigned getMinReportedVGPRs(func::FuncOp func) {
   return std::max(1u, wave::getWaveAMDReservedVGPRs(func));
+}
+
+static int64_t collectLDSBytes(func::FuncOp func, OpBuilder &builder) {
+  int64_t fixedLds = 0;
+  int64_t dynamicLds = 0;
+  bool hasLds = false;
+  if (auto ldsAttr = func->getAttrOfType<IntegerAttr>("wave.lds_size")) {
+    fixedLds = ldsAttr.getInt();
+    hasLds = true;
+  }
+  if (auto ldsAttr =
+          func->getAttrOfType<IntegerAttr>("wave.dynamic_lds_size")) {
+    dynamicLds = ldsAttr.getInt();
+    hasLds = true;
+    func->setAttr("waveamdmachine.dynamic_lds_size",
+                  builder.getI64IntegerAttr(dynamicLds));
+  }
+  int64_t lds = fixedLds + dynamicLds;
+  if (hasLds)
+    func->setAttr("waveamdmachine.lds_size", builder.getI64IntegerAttr(lds));
+  return lds;
 }
 
 struct WaveAMDResourceInfoPass
@@ -159,12 +181,7 @@ struct WaveAMDResourceInfoPass
                     builder.getI64IntegerAttr(vgprCount));
       func->setAttr("waveamdmachine.agpr_count",
                     builder.getI64IntegerAttr(agprCount));
-      int64_t lds = 0;
-      if (auto ldsAttr = func->getAttrOfType<IntegerAttr>("wave.lds_size")) {
-        lds = ldsAttr.getInt();
-        func->setAttr("waveamdmachine.lds_size",
-                      builder.getI64IntegerAttr(lds));
-      }
+      int64_t lds = collectLDSBytes(func, builder);
       if (!isKernel)
         continue;
       sawKernel = true;

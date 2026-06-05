@@ -145,7 +145,20 @@ module_mxfp4 = build_wmma_f16_matmul_module(
     matrix_intrinsic="mfma_gfx950",
     input_type="mxfp4",
 )
+print("mxfp4-module")
 print(module_mxfp4)
+
+module_dynamic_lds = build_wmma_f16_matmul_module(
+    M=64,
+    N=64,
+    K=64,
+    BM=4,
+    BN=4,
+    wave_k_tiles=2,
+    matrix_intrinsic="mfma_gfx950",
+)
+print("dynamic-lds-module")
+print(module_dynamic_lds)
 
 static_cfg = wm._make_matmul_config(
     M=16,
@@ -202,8 +215,7 @@ print(static_bld.module)
 # CHECK: wave.load
 # CHECK-COUNT-4: waveamd.fragment_unpack
 # CHECK: func.func private @printMemrefF16
-# CHECK: func.func @wmma_f16_matmul_tiled
-# CHECK-SAME: !wave.ptr<#wave.global, f16>
+# CHECK: func.func @wmma_f16_matmul_tiled(%{{.*}}!wave.ptr<#wave.global, f16>
 # CHECK: waveamd.fragment_unpack
 # CHECK-SAME: !waveamd.fragment<2, f32, 16, 16, 32, 8> -> !wave.simd<vector<8xf32>, 32>
 # CHECK: wave.cast fpconvert
@@ -211,9 +223,9 @@ print(static_bld.module)
 # CHECK: wave.pack
 # CHECK-SAME: -> !wave.simd<vector<2xf16>, 32>
 # CHECK: func.func private @wave_memref_to_ptr_global_bf16
-# CHECK: func.func @wmma_f16_matmul_tiled
-# CHECK-SAME: !wave.ptr<#wave.global, bf16>
+# CHECK: func.func @wmma_f16_matmul_tiled(%{{.*}}!wave.ptr<#wave.global, bf16>
 # CHECK: waveamd.mma "mfma.f32.16x16x32.bf16"
+# CHECK: mxfp4-module
 # CHECK: func.func private @wave_memref_to_ptr_global_i8
 # CHECK: func.func @wmma_f16_matmul_tiled
 # CHECK-SAME: !wave.ptr<#wave.global, i8>
@@ -237,6 +249,11 @@ print(static_bld.module)
 # CHECK-COUNT-8: waveamd.mma_scale "mfma.scale.f32.16x16x128.f4.f4"
 # CHECK-SAME: !wave.simd<vector<8xi8>, 64>
 # CHECK-SAME: !wave.simd<vector<8xi8>, 64>
+# CHECK: dynamic-lds-module
+# CHECK: attributes {gpu.kernel, wave.dynamic_lds_size = 65536 : i64, wave.kernel, wave.lds_size = 0 : i64}
+# CHECK: arith.constant 65536 : i32
+# CHECK: gpu.launch_func
+# CHECK-SAME: dynamic_shared_memory_size
 # CHECK-LABEL: func.func @static_matmul_kernel
 # CHECK-SAME: wave.lds_size = 2048 : i64
 # CHECK: %[[TRIP:.*]] = arith.constant 1 : i32

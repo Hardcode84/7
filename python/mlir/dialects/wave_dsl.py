@@ -1177,12 +1177,14 @@ class FunctionBuilder:
         grid: tuple[Value, Value, Value],
         block: tuple[Value, Value, Value],
         operands: Sequence[Value] = (),
+        dynamic_shared_memory_size: Value | None = None,
     ) -> None:
         gpu.LaunchFuncOp(
             kernel=[gpu_module, kernel],
             grid_size=grid,
             block_size=block,
             kernel_operands=list(operands),
+            dynamic_shared_memory_size=dynamic_shared_memory_size,
         )
 
     def host_register(self, unranked_ref: Value) -> None:

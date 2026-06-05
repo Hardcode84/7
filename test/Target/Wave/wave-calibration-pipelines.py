@@ -8,6 +8,7 @@
 # CHECK: matmul_bf16_forwarding: ok
 # CHECK: matmul_mxfp4_forwarding_and_trip_count: ok
 # CHECK: matmul_mxfp4_dma_forwarding: ok
+# CHECK: matmul_dynamic_lds_forwarding: ok
 # CHECK: matmul_dma_sim_trip_count: ok
 # CHECK: matmul_pingpong_removed: ok
 
@@ -400,6 +401,66 @@ def check_matmul_mxfp4_dma_forwarding(matmul) -> None:
     print("matmul_mxfp4_dma_forwarding: ok")
 
 
+def check_matmul_dynamic_lds_forwarding(matmul) -> None:
+    args = argparse.Namespace(
+        m=64,
+        n=64,
+        k=64,
+        bm=4,
+        bn=4,
+        wave_m_tiles=1,
+        wave_n_tiles=1,
+        wave_k_tiles=2,
+        use_buffer=False,
+        use_dma_lds=False,
+        matrix_intrinsic="mfma_gfx950",
+        chip="gfx950",
+        input_type="f16",
+        output_type="f32",
+        cta_swizzle_xcds=1,
+        cta_group_m=1,
+        target_waves=0,
+        iters=1,
+        warmup=0,
+        no_check=True,
+    )
+    require(
+        "matmul_dynamic_lds_forwarding",
+        matmul.compute_lds_bytes(args) == 65536,
+        "bad dynamic LDS fixture",
+    )
+    require(
+        "matmul_dynamic_lds_forwarding",
+        matmul.compute_dynamic_lds_bytes(args) == 65536,
+        "dynamic LDS threshold not applied",
+    )
+    captured: list[list[str]] = []
+    old_run = matmul.run
+    try:
+
+        def fake_run(cmd, env=None):
+            captured.append(cmd)
+            return "per_launch_cycles_wallclock: 1\nper_launch_us: 1.0\n"
+
+        matmul.run = fake_run
+        matmul.run_hw(Path("runner"), Path("kernel.hsaco"), args, "/tmp")
+    finally:
+        matmul.run = old_run
+    require("matmul_dynamic_lds_forwarding", bool(captured), "runner not called")
+    cmd = captured[0]
+    require(
+        "matmul_dynamic_lds_forwarding",
+        "--dynamic-lds" in cmd,
+        "runner command missing --dynamic-lds",
+    )
+    require(
+        "matmul_dynamic_lds_forwarding",
+        cmd[cmd.index("--dynamic-lds") + 1] == "65536",
+        "runner should receive dynamic LDS bytes",
+    )
+    print("matmul_dynamic_lds_forwarding: ok")
+
+
 def check_matmul_dma_sim_trip_count(matmul) -> None:
     base = argparse.Namespace(k=64, wave_k_tiles=2, use_dma_lds=False)
     require(
@@ -484,6 +545,7 @@ def main() -> int:
     check_matmul_bf16_forwarding(matmul)
     check_matmul_mxfp4_forwarding_and_trip_count(matmul)
     check_matmul_mxfp4_dma_forwarding(matmul)
+    check_matmul_dynamic_lds_forwarding(matmul)
     check_matmul_dma_sim_trip_count(matmul)
     try:
         matmul.parse_variants("pingpong")

@@ -394,6 +394,8 @@ _F32_PTR_HELPER = "wave_memref_to_ptr_global_f32"
 _PRINT_HELPER = "printMemrefF32"
 _PRINT_F16_HELPER = "printMemrefF16"
 _TARGET_WAVES_ATTR = "waveamdmachine.target_waves"
+_DYNAMIC_LDS_ATTR = "wave.dynamic_lds_size"
+_STATIC_LDS_LIMIT = 64 * 1024
 
 
 def _splat_const(bld: dsl.FunctionBuilder, value: int) -> dsl.Value:
@@ -406,6 +408,24 @@ def _target_waves_attrs(target_waves: int | None) -> dict[str, dsl.Attribute]:
     if target_waves <= 0:
         raise ValueError(f"target_waves must be positive; got {target_waves}")
     return {_TARGET_WAVES_ATTR: dsl.i64_attr(target_waves)}
+
+
+def _dynamic_lds_bytes(cfg: _MatmulConfig) -> int:
+    return cfg.lds_bytes if cfg.lds_bytes >= _STATIC_LDS_LIMIT else 0
+
+
+def _fixed_lds_bytes(cfg: _MatmulConfig) -> int:
+    return 0 if _dynamic_lds_bytes(cfg) else cfg.lds_bytes
+
+
+def _kernel_attrs(
+    cfg: _MatmulConfig, target_waves: int | None
+) -> dict[str, dsl.Attribute]:
+    attrs = _target_waves_attrs(target_waves)
+    dynamic_lds = _dynamic_lds_bytes(cfg)
+    if dynamic_lds:
+        attrs[_DYNAMIC_LDS_ATTR] = dsl.i64_attr(dynamic_lds)
+    return attrs
 
 
 def _deterministic_random_values(
@@ -2218,12 +2238,16 @@ def _emit_matmul_launch(
             _emit_i8_ptr(bld, buffers.b_scale),
             trip_count,
         ]
+    dynamic_lds = _dynamic_lds_bytes(cfg)
     bld.launch(
         _GPU_MODULE_NAME,
         _KERNEL_NAME,
         grid=grid,
         block=block,
         operands=operands,
+        dynamic_shared_memory_size=(
+            bld.constant(dsl.i32(), dynamic_lds) if dynamic_lds else None
+        ),
     )
 
 
@@ -2496,8 +2520,8 @@ def build_wmma_f16_matmul_module(
             gmod.kernel(
                 _KERNEL_NAME,
                 _kernel_input_types(cfg),
-                lds_size=cfg.lds_bytes,
-                attrs=_target_waves_attrs(target_waves),
+                lds_size=_fixed_lds_bytes(cfg),
+                attrs=_kernel_attrs(cfg, target_waves),
             ) as fb,
         ):
             _emit_kernel(fb, cfg)

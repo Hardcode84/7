@@ -15,6 +15,8 @@
 // RUN:   | FileCheck %s --check-prefix=ASMPIPE
 // RUN: %python %S/../../../examples/wave/wmma_matmul_tiled.py --chip=gfx950 --m=16 --n=16 --k=32 --matrix-intrinsic=mfma_gfx950 --input-type=bf16 --dump-asm 2>/dev/null \
 // RUN:   | FileCheck %s --check-prefix=ASMBF16
+// RUN: %python %S/../../../examples/wave/wmma_matmul_tiled.py --chip=gfx950 --m=64 --n=64 --k=64 --bm=4 --bn=4 --wave-k-tiles=2 --matrix-intrinsic=mfma_gfx950 --dump-asm 2>/dev/null \
+// RUN:   | FileCheck %s --check-prefix=ASMDYN
 // RUN: %python %S/../../../examples/wave/wmma_matmul_tiled.py --chip=gfx950 --m=32 --n=32 --k=128 --wave-m-tiles=2 --wave-n-tiles=2 --matrix-intrinsic=mfma_gfx950 --input-type=mxfp4 --dump-asm 2>/dev/null \
 // RUN:   | FileCheck %s --check-prefix=ASMMXFP4
 // RUN: %python %S/../../../examples/wave/wmma_matmul_tiled.py --chip=gfx950 --m=16 --n=16 --k=256 --matrix-intrinsic=mfma_gfx950 --input-type=mxfp4 --use-dma-lds --dump-asm 2>/dev/null \
@@ -65,6 +67,9 @@
 
 // ASMBF16-LABEL: wmma_f16_matmul_tiled:
 // ASMBF16: v_mfma_f32_16x16x32_bf16
+
+// ASMDYN-LABEL: wmma_f16_matmul_tiled:
+// ASMDYN: .amdhsa_group_segment_fixed_size 0
 
 // ASMMXFP4: .amdgcn_target "amdgcn-amd-amdhsa--gfx950"
 // ASMMXFP4-LABEL: wmma_f16_matmul_tiled:

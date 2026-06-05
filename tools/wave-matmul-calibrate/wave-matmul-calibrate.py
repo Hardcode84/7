@@ -22,6 +22,7 @@ DEFAULT_BUILD = REPO_ROOT / "build"
 EXAMPLE = REPO_ROOT / "examples/wave/wmma_matmul_tiled.py"
 RUNNER_SRC = REPO_ROOT / "tools/wave-matmul-calibrate/wave-matmul-calibrate-runner.cpp"
 KERNEL_NAME = "wmma_f16_matmul_tiled"
+STATIC_LDS_LIMIT = 64 * 1024
 
 
 @dataclass(frozen=True)
@@ -493,6 +494,39 @@ def div_exact(num: int, den: int, what: str) -> int:
     return num // den
 
 
+def lds_dwords_per_frag(args: argparse.Namespace) -> int:
+    intrinsic = selected_matrix_intrinsic(args)
+    if intrinsic == "mfma_gfx950":
+        regs = 4
+    elif intrinsic == "mfma":
+        regs = 2
+    else:
+        regs = 8
+    return regs * kernel_wave_size(args)
+
+
+def compute_lds_bytes(args: argparse.Namespace) -> int:
+    if getattr(args, "use_dma_lds", False):
+        slots = args.wave_k_tiles * (
+            args.bm * args.wave_m_tiles + args.bn * args.wave_n_tiles
+        )
+        one_buffer = slots * lds_dwords_per_frag(args) * 4
+        return one_buffer * (2 if compute_virtual_k_steps(args) > 1 else 1)
+    slots = (
+        args.wave_k_tiles * (args.wave_m_tiles + args.wave_n_tiles) * args.bm * args.bn
+    )
+    data_lds = slots * lds_dwords_per_frag(args) * 4
+    if getattr(args, "input_type", "f16") != "mxfp4":
+        return data_lds
+    scale_tiles = args.bm * args.wave_m_tiles + args.bn * args.wave_n_tiles
+    return data_lds + scale_tiles * 512
+
+
+def compute_dynamic_lds_bytes(args: argparse.Namespace) -> int:
+    lds_bytes = compute_lds_bytes(args)
+    return lds_bytes if lds_bytes >= STATIC_LDS_LIMIT else 0
+
+
 def run_sim_reports(
     build_dir: Path, machine_mlir: Path, args: argparse.Namespace
 ) -> dict[tuple[int, int, int], int]:
@@ -571,6 +605,8 @@ def run_hw(
         args.input_type,
         "--c-type",
         args.output_type,
+        "--dynamic-lds",
+        str(compute_dynamic_lds_bytes(args)),
         "--iters",
         str(args.iters),
         "--warmup",

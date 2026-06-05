@@ -419,10 +419,8 @@ def Wave_LdsBaseOp : Wave_Op<"lds_base", [Pure]> {
     `T` at the offset given by the optional `offset` attribute (in bytes
     from the start of the arena, default 0).
 
-    The kernel is expected to carry a `wave.lds_size` integer attribute
-    expressing the total number of bytes of LDS reserved; lowering uses
-    that value to populate `group_segment_fixed_size` on the kernel
-    descriptor.
+    `wave.lds_size` reserves fixed descriptor LDS bytes. Optional
+    `wave.dynamic_lds_size` reserves launch-provided LDS bytes.
   }];
 
   let arguments = (ins DefaultValuedAttr<I64Attr, "0">:$offset);

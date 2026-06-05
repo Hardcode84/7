@@ -39,6 +39,7 @@ struct Args {
   CType cType = CType::F32;
   int iters = 1000;
   int warmupIters = 10;
+  int dynamicLdsBytes = 0;
   bool checkOutput = true;
 };
 
@@ -63,6 +64,7 @@ static void usage() {
       "  --wave-size N          lanes per wave (default 32)\n"
       "  --input-type f16|bf16|mxfp4  input element type (default f16)\n"
       "  --c-type f32|f16       output element type (default f32)\n"
+      "  --dynamic-lds N        dynamic LDS bytes (default 0)\n"
       "  --iters N              launch iterations (default 1000)\n"
       "  --warmup N             warmup launches (default 10)\n"
       "  --no-check             skip all-ones output check\n");
@@ -124,6 +126,9 @@ static void setCType(Args &a, const char *v) {
 }
 static void setIters(Args &a, const char *v) { a.iters = parseInt(v); }
 static void setWarmup(Args &a, const char *v) { a.warmupIters = parseInt(v); }
+static void setDynamicLds(Args &a, const char *v) {
+  a.dynamicLdsBytes = parseInt(v);
+}
 
 static constexpr FlagHandler kFlags[] = {
     {"--m", setM},
@@ -137,6 +142,7 @@ static constexpr FlagHandler kFlags[] = {
     {"--wave-size", setWaveSize},
     {"--input-type", setInputType},
     {"--c-type", setCType},
+    {"--dynamic-lds", setDynamicLds},
     {"--iters", setIters},
     {"--warmup", setWarmup},
 };
@@ -204,6 +210,8 @@ static void validateArgs(const Args &a) {
   requirePositive(a.waveNTiles, "wave-n-tiles must be positive");
   requirePositive(a.waveKTiles, "wave-k-tiles must be positive");
   requirePositive(a.waveSize, "wave-size must be positive");
+  if (a.dynamicLdsBytes < 0)
+    die("dynamic LDS bytes must be non-negative");
   if (a.inputType == InputType::MXFP4 && a.waveSize != 64)
     die("MXFP4 calibration expects wave-size 64");
 }
@@ -456,7 +464,8 @@ int main(int argc, char **argv) {
 
   for (int i = 0; i < a.warmupIters; ++i)
     checkHip(hipModuleLaunchKernel(kfn, blocksX, blocksY, 1, blockThreads, 1, 1,
-                                   0, nullptr, activeKernelArgs, nullptr),
+                                   a.dynamicLdsBytes, nullptr, activeKernelArgs,
+                                   nullptr),
              "warmup launch");
   checkHip(hipDeviceSynchronize(), "warmup sync");
 
@@ -466,7 +475,8 @@ int main(int argc, char **argv) {
   checkHip(hipEventRecord(start, nullptr), "event record start");
   for (int i = 0; i < a.iters; ++i)
     checkHip(hipModuleLaunchKernel(kfn, blocksX, blocksY, 1, blockThreads, 1, 1,
-                                   0, nullptr, activeKernelArgs, nullptr),
+                                   a.dynamicLdsBytes, nullptr, activeKernelArgs,
+                                   nullptr),
              "timed launch");
   checkHip(hipEventRecord(stop, nullptr), "event record stop");
   checkHip(hipEventSynchronize(stop), "event sync stop");
