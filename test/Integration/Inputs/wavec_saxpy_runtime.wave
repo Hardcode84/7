@@ -1,0 +1,19 @@
+// SPDX-FileCopyrightText: 2026 wave-mlir contributors
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+
+#ifndef W
+#error missing W
+#endif
+
+kernel [[amdgpu_wave_size(W)]]
+void saxpy(float *x, float *y, float a, uint32_t n) {
+  simd<uint32_t, W> lane = lane_id<W>();
+  uint32_t          wave = workgroup_id<0>();
+  simd<uint32_t, W> i    = wave * W + lane;
+  mask<W>           active = i < n;
+  where (active) {
+    simd<float, W> xv = load(x + i);
+    simd<float, W> yv = load(y + i);
+    store(a * xv + yv, y + i);
+  }
+}

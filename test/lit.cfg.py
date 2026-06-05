@@ -114,6 +114,30 @@ _wave_runtime = Path(config.wave_mlir_obj_root) / "lib" / "libwave_runtime.so"
 if _wave_runtime.exists():
     config.substitutions.append(("%wave_runtime", str(_wave_runtime)))
 
+
+def _find_hip_runtime() -> tuple[Path, Path] | None:
+    override = config.environment.get("ROCM_LIB")
+    candidates = [
+        Path(override) if override else None,
+        Path("/opt/rocm/lib"),
+        Path(sys.prefix) / "lib",
+    ]
+    for lib_dir in candidates:
+        if lib_dir is None or not lib_dir.is_dir():
+            continue
+        libs = sorted(lib_dir.glob("libamdhip64.so*"))
+        if libs:
+            return lib_dir, libs[0]
+    return None
+
+
+_hip_runtime = _find_hip_runtime()
+if _hip_runtime:
+    _rocm_lib, _hip_runtime_lib = _hip_runtime
+    config.available_features.add("host-has-hip-runtime")
+    config.substitutions.append(("%rocm_lib", str(_rocm_lib)))
+    config.substitutions.append(("%hip_runtime_lib", str(_hip_runtime_lib)))
+
 # Compilation pipeline library (transform.named_sequence file) staged
 # next to the binary at build time; tests reach it via %wave_pipelines.
 _wave_pipelines = (
