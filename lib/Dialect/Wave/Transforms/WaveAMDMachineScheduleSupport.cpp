@@ -693,7 +693,7 @@ static unsigned computeMaxPressure(ArrayRef<WaveAMDLiveInterval> intervals,
       if (interval.values.empty())
         continue;
       if (interval.start <= pos && pos <= interval.end)
-        pressure += interval.type.getWidth();
+        pressure += getWaveAMDLiveIntervalWidthAt(interval, pos);
     }
     maxPressure = std::max(maxPressure, pressure);
   }
@@ -910,9 +910,11 @@ initializeBoundaryPressure(ArrayRef<WaveAMDLiveInterval> intervals,
                            SmallVectorImpl<LocalPressureBounds> &bounds) {
   for (unsigned index : groups) {
     const WaveAMDLiveInterval &interval = intervals[index];
-    if (interval.start < firstPos && firstPos <= interval.end)
+    if (interval.start < firstPos &&
+        isWaveAMDLiveIntervalLiveAt(interval, firstPos))
       markPressureStart(bounds[index], firstPos);
-    if (interval.start <= lastPos && lastPos < interval.end)
+    if (lastPos < interval.end &&
+        isWaveAMDLiveIntervalLiveAt(interval, lastPos))
       markPressureEnd(bounds[index], lastPos);
   }
 }

@@ -3,6 +3,78 @@
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
+// Only element 0 stays live after the split; slots 1..3 are reusable.
+//
+// CHECK-LABEL: func.func @dead_tuple_slots_reused
+// CHECK: %[[T:.+]] = waveamdmachine.v_mov_b32_tuple {{.*}} -> !waveamdmachine.reg<vgpr, 4, 0>
+// CHECK: %[[PRE:.+]] = waveamdmachine.v_mov_b32_tuple {{.*}} -> !waveamdmachine.reg<vgpr, 1, 4>
+// CHECK: %[[E:.+]]:4 = waveamdmachine.tuple_to_elements %[[T]]
+// CHECK-SAME: -> (!waveamdmachine.reg<vgpr, 1, 0>, !waveamdmachine.reg<vgpr, 1, 1>, !waveamdmachine.reg<vgpr, 1, 2>, !waveamdmachine.reg<vgpr, 1, 3>)
+// CHECK: %[[A:.+]] = waveamdmachine.v_mov_b32_tuple {{.*}} -> !waveamdmachine.reg<vgpr, 1, 1>
+// CHECK: waveamdmachine.v_mov_b32_tuple %[[E]]#0
+// CHECK: waveamdmachine.v_mov_b32_tuple %[[A]]
+// CHECK: waveamdmachine.v_mov_b32_tuple %[[PRE]]
+func.func @dead_tuple_slots_reused() {
+  %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+  %t = waveamdmachine.v_mov_b32_tuple %zero {registers = 4 : i64}
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 4>
+  %pre = waveamdmachine.v_mov_b32_tuple %zero {registers = 1 : i64}
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
+  %e:4 = waveamdmachine.tuple_to_elements %t
+      : (!waveamdmachine.reg<vgpr, 4>) -> (!waveamdmachine.reg<vgpr, 1>,
+                                        !waveamdmachine.reg<vgpr, 1>,
+                                        !waveamdmachine.reg<vgpr, 1>,
+                                        !waveamdmachine.reg<vgpr, 1>)
+  %a = waveamdmachine.v_mov_b32_tuple %zero {registers = 1 : i64}
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
+  %u = waveamdmachine.v_mov_b32_tuple %e#0 {registers = 1 : i64}
+      : (!waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
+  %ua = waveamdmachine.v_mov_b32_tuple %a {registers = 1 : i64}
+      : (!waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
+  %upre = waveamdmachine.v_mov_b32_tuple %pre {registers = 1 : i64}
+      : (!waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
+  return
+}
+
+}
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
+
+// Whole-tuple consumers keep the full tuple range live.
+//
+// CHECK-LABEL: func.func @whole_tuple_user_keeps_slots_live
+// CHECK: %[[T:.+]] = waveamdmachine.v_mov_b32_tuple {{.*}} -> !waveamdmachine.reg<vgpr, 4, 0>
+// CHECK: %[[E:.+]]:4 = waveamdmachine.tuple_to_elements %[[T]]
+// CHECK-SAME: -> (!waveamdmachine.reg<vgpr, 1, 0>, !waveamdmachine.reg<vgpr, 1, 1>, !waveamdmachine.reg<vgpr, 1, 2>, !waveamdmachine.reg<vgpr, 1, 3>)
+// CHECK: %[[A:.+]] = waveamdmachine.v_mov_b32_tuple {{.*}} -> !waveamdmachine.reg<vgpr, 1, 4>
+// CHECK: waveamdmachine.v_mov_b32_tuple %[[T]]
+// CHECK: waveamdmachine.v_mov_b32_tuple %[[A]]
+func.func @whole_tuple_user_keeps_slots_live() {
+  %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+  %t = waveamdmachine.v_mov_b32_tuple %zero {registers = 4 : i64}
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 4>
+  %e:4 = waveamdmachine.tuple_to_elements %t
+      : (!waveamdmachine.reg<vgpr, 4>) -> (!waveamdmachine.reg<vgpr, 1>,
+                                        !waveamdmachine.reg<vgpr, 1>,
+                                        !waveamdmachine.reg<vgpr, 1>,
+                                        !waveamdmachine.reg<vgpr, 1>)
+  %a = waveamdmachine.v_mov_b32_tuple %zero {registers = 1 : i64}
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
+  %u = waveamdmachine.v_mov_b32_tuple %t {registers = 4 : i64}
+      : (!waveamdmachine.reg<vgpr, 4>) -> !waveamdmachine.reg<vgpr, 4>
+  %ua = waveamdmachine.v_mov_b32_tuple %a {registers = 1 : i64}
+      : (!waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
+  return
+}
+
+}
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
+
 // Width-8 tuple split into mixed-width sub-tuples [4, 2, 2]. Each
 // piece lands at its cumulative dword offset within the parent: the
 // width-4 sub-tuple at +0, the first width-2 at +4, the second

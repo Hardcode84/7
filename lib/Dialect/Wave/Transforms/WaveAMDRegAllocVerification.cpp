@@ -21,6 +21,8 @@ using namespace mlir;
 namespace {
 
 struct PhysicalLiveRange {
+  Value value;
+  unsigned intervalIndex = 0;
   unsigned start = 0;
   unsigned end = 0;
   unsigned physStart = 0;
@@ -109,14 +111,14 @@ verifyValuesAllocated(func::FuncOp func, StringRef consumer,
   return success(!walk.wasInterrupted());
 }
 
-static LogicalResult
-buildPhysicalLiveRange(func::FuncOp func,
-                       const wave::WaveAMDLiveInterval &interval,
-                       PhysicalLiveRange &range, StringRef consumer) {
+static LogicalResult buildPhysicalLiveRange(
+    func::FuncOp func, const wave::WaveAMDLiveInterval &interval,
+    unsigned intervalIndex, SmallVectorImpl<PhysicalLiveRange> &ranges,
+    StringRef consumer) {
   std::optional<int64_t> base;
-  unsigned width = 0;
-  for (auto [value, slotOffset] :
-       llvm::zip(interval.values, interval.slotOffsets)) {
+  for (auto [value, slotOffset, start, end] :
+       llvm::zip(interval.values, interval.slotOffsets, interval.valueStarts,
+                 interval.valueEnds)) {
     auto type = cast<waveamdmachine::RegType>(value.getType());
     int64_t index = type.getIndex();
     if (index < static_cast<int64_t>(slotOffset))
@@ -129,14 +131,10 @@ buildPhysicalLiveRange(func::FuncOp func,
       return diagOpForValue(value, func)->emitError()
              << consumer << " found inconsistent physical register aliases";
     }
-    width = std::max<unsigned>(width, slotOffset + type.getWidth());
+    ranges.push_back(PhysicalLiveRange{
+        value, intervalIndex, start, end, static_cast<unsigned>(index),
+        static_cast<unsigned>(index) + static_cast<unsigned>(type.getWidth())});
   }
-  if (!base)
-    return success();
-  range.start = interval.start;
-  range.end = interval.end;
-  range.physStart = static_cast<unsigned>(*base);
-  range.physEnd = range.physStart + width;
   return success();
 }
 
@@ -190,17 +188,50 @@ static bool isAllowedReservedValue(Value value,
   return isAllowedEntryRegValue(def, index, regs);
 }
 
-static LogicalResult verifyNotInReservedRange(
-    func::FuncOp func, const wave::WaveAMDLiveInterval &interval,
-    const PhysicalLiveRange &range, StringRef consumer, StringRef regClass,
-    unsigned reserved, const wave::WaveAMDKernelEntryRegs &regs) {
+static LogicalResult
+verifyNotInReservedRange(func::FuncOp func, const PhysicalLiveRange &range,
+                         StringRef consumer, StringRef regClass,
+                         unsigned reserved,
+                         const wave::WaveAMDKernelEntryRegs &regs) {
   if (reserved == 0 || range.physStart >= reserved)
     return success();
-  for (Value value : interval.values)
-    if (!isAllowedReservedValue(value, regs))
-      return diagOpForValue(value, func)->emitError()
-             << consumer << " found " << regClass
-             << " value allocated in reserved kernel ABI registers";
+  if (isAllowedReservedValue(range.value, regs))
+    return success();
+  return diagOpForValue(range.value, func)->emitError()
+         << consumer << " found " << regClass
+         << " value allocated in reserved kernel ABI registers";
+}
+
+static LogicalResult
+verifyReservedRanges(func::FuncOp func, ArrayRef<PhysicalLiveRange> ranges,
+                     StringRef consumer, StringRef regClass, unsigned reserved,
+                     const wave::WaveAMDKernelEntryRegs &regs) {
+  for (const PhysicalLiveRange &range : ranges)
+    if (failed(verifyNotInReservedRange(func, range, consumer, regClass,
+                                        reserved, regs)))
+      return failure();
+  return success();
+}
+
+static bool canSharePhysicalRange(const PhysicalLiveRange &lhs,
+                                  const PhysicalLiveRange &rhs) {
+  return lhs.intervalIndex == rhs.intervalIndex;
+}
+
+static LogicalResult
+verifyNoRangeInterference(func::FuncOp func, ArrayRef<PhysicalLiveRange> ranges,
+                          StringRef consumer, StringRef regClass) {
+  for (auto [index, lhs] : llvm::enumerate(ranges)) {
+    for (const PhysicalLiveRange &rhs :
+         ArrayRef(ranges).drop_front(index + 1)) {
+      if (canSharePhysicalRange(lhs, rhs))
+        continue;
+      if (!liveRangesOverlap(lhs, rhs) || !physicalRangesOverlap(lhs, rhs))
+        continue;
+      return func.emitError() << consumer << " found interfering " << regClass
+                              << " register live ranges";
+    }
+  }
   return success();
 }
 
@@ -210,27 +241,17 @@ verifyNoInterference(func::FuncOp func,
                      StringRef consumer, StringRef regClass, unsigned reserved,
                      const wave::WaveAMDKernelEntryRegs &regs) {
   SmallVector<PhysicalLiveRange> ranges;
-  for (const wave::WaveAMDLiveInterval &interval : intervals) {
+  for (auto [intervalIndex, interval] : llvm::enumerate(intervals)) {
     if (interval.values.empty())
       continue;
-    PhysicalLiveRange range;
-    if (failed(buildPhysicalLiveRange(func, interval, range, consumer)))
+    if (failed(buildPhysicalLiveRange(func, interval, intervalIndex, ranges,
+                                      consumer)))
       return failure();
-    if (failed(verifyNotInReservedRange(func, interval, range, consumer,
-                                        regClass, reserved, regs)))
-      return failure();
-    ranges.push_back(range);
   }
-  for (auto [index, lhs] : llvm::enumerate(ranges)) {
-    for (const PhysicalLiveRange &rhs :
-         ArrayRef(ranges).drop_front(index + 1)) {
-      if (!liveRangesOverlap(lhs, rhs) || !physicalRangesOverlap(lhs, rhs))
-        continue;
-      return func.emitError() << consumer << " found interfering " << regClass
-                              << " register live ranges";
-    }
-  }
-  return success();
+  if (failed(verifyReservedRanges(func, ranges, consumer, regClass, reserved,
+                                  regs)))
+    return failure();
+  return verifyNoRangeInterference(func, ranges, consumer, regClass);
 }
 
 } // namespace

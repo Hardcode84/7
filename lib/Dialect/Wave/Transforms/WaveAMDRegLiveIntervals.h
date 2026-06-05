@@ -32,15 +32,19 @@ namespace wave {
 struct WaveAMDLiveInterval {
   SmallVector<Value> values;
   SmallVector<unsigned> slotOffsets;
+  SmallVector<unsigned> valueStarts;
+  SmallVector<unsigned> valueEnds;
   waveamdmachine::RegType type;
   unsigned start = std::numeric_limits<unsigned>::max();
   unsigned end = 0;
 };
 
+using WaveAMDLiveIntervalVector = SmallVector<WaveAMDLiveInterval, 0>;
+
 struct WaveAMDLiveIntervalSet {
-  SmallVector<WaveAMDLiveInterval> sgprs;
-  SmallVector<WaveAMDLiveInterval> vgprs;
-  SmallVector<WaveAMDLiveInterval> agprs;
+  WaveAMDLiveIntervalVector sgprs;
+  WaveAMDLiveIntervalVector vgprs;
+  WaveAMDLiveIntervalVector agprs;
   // Loop carries map init / block arg / continue carry / result together.
   DenseMap<Value, unsigned> sgprIntervals;
   DenseMap<Value, unsigned> vgprIntervals;
@@ -67,6 +71,10 @@ bool isWaveAMDVCC(waveamdmachine::RegType type);
 bool isWaveAMDFlagReg(waveamdmachine::RegType type);
 // Skips non-register operands and hardware flags.
 std::optional<waveamdmachine::RegType> getTrackedWaveAMDRegType(Value value);
+unsigned getWaveAMDLiveIntervalWidthAt(const WaveAMDLiveInterval &interval,
+                                       unsigned position);
+bool isWaveAMDLiveIntervalLiveAt(const WaveAMDLiveInterval &interval,
+                                 unsigned position);
 
 FailureOr<WaveAMDLiveIntervalBuildResult>
 buildWaveAMDLiveIntervals(func::FuncOp func);

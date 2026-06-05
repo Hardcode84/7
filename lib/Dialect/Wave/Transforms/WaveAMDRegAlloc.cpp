@@ -23,7 +23,6 @@
 #include "llvm/Support/MathExtras.h"
 #include "llvm/Support/raw_ostream.h"
 #include <optional>
-#include <set>
 
 namespace mlir::wave {
 #define GEN_PASS_DEF_WAVEAMDREGALLOC
@@ -612,59 +611,44 @@ struct WaveAMDRegAllocPass
                          intervals.agprs, /*agprCandidateLimit=*/0);
   }
 
-  // Physically-allocated half-open span `[begin, begin + size)` in a
-  // single register class. The class itself is implicit -- each
-  // allocator pass walks one class at a time and owns its own set.
-  // Sort by `begin` so a `std::set` lets us iterate gaps in order;
-  // intervals never overlap, so the begin-only comparison is also a
-  // sound equality key when we erase on expiration.
-  struct PhysAlloc {
-    unsigned begin;
-    unsigned size;
-    unsigned end() const { return begin + size; }
-    bool operator<(const PhysAlloc &o) const { return begin < o.begin; }
-  };
-
   struct ActiveAlloc {
-    wave::WaveAMDLiveInterval interval;
-    PhysAlloc phys;
+    const wave::WaveAMDLiveInterval *interval = nullptr;
+    unsigned base = 0;
   };
 
   // Staged assignments keep values virtual until the class succeeds.
-  void expireOld(SmallVectorImpl<ActiveAlloc> &active,
-                 std::set<PhysAlloc> &live, unsigned pos) {
+  void expireOld(SmallVectorImpl<ActiveAlloc> &active, unsigned pos) {
     SmallVector<ActiveAlloc> stillActive;
-    for (ActiveAlloc alloc : active) {
-      if (alloc.interval.end >= pos) {
+    for (const ActiveAlloc &alloc : active) {
+      if (alloc.interval->end >= pos) {
         stillActive.push_back(alloc);
         continue;
       }
-      live.erase(alloc.phys);
     }
     active = std::move(stillActive);
   }
 
-  static SmallVector<wave::WaveAMDLiveInterval>
+  static wave::WaveAMDLiveIntervalVector
   collectActiveIntervals(ArrayRef<ActiveAlloc> active) {
-    SmallVector<wave::WaveAMDLiveInterval> intervals;
+    wave::WaveAMDLiveIntervalVector intervals;
     for (const ActiveAlloc &alloc : active)
-      intervals.push_back(alloc.interval);
+      intervals.push_back(*alloc.interval);
     return intervals;
   }
 
   LogicalResult handleAllocationFailure(
       func::FuncOp func, MutableArrayRef<wave::WaveAMDLiveInterval> intervals,
       const wave::WaveAMDLiveInterval &request,
-      ArrayRef<wave::WaveAMDLiveInterval> active,
-      const std::set<PhysAlloc> &live, unsigned numPhys, unsigned reserved,
-      bool softFail, bool &overflow,
+      ArrayRef<wave::WaveAMDLiveInterval> active, unsigned liveDwords,
+      unsigned numPhys, unsigned reserved, bool softFail, bool &overflow,
       std::optional<RegisterPressurePoint> &pressure,
       const DenseMap<Operation *, unsigned> &positions, StringRef regClass,
       ArrayRef<wave::WaveAMDLiveInterval> agprIntervals,
       unsigned agprCandidateLimit) {
     if (!pressure)
-      pressure = buildPressurePoint(regClass, request, active, live, positions,
-                                    request.start, numPhys, reserved);
+      pressure =
+          buildPressurePoint(regClass, request, active, liveDwords, positions,
+                             request.start, numPhys, reserved);
     if (agprCandidateLimit > 0 && regClass == "VGPR")
       pressure->agprCandidates =
           buildAGPRCandidates(intervals, active, request, agprIntervals,
@@ -699,40 +683,28 @@ struct WaveAMDRegAllocPass
     });
 
     SmallVector<ActiveAlloc> active;
-    // Reserved registers pre-occupy `[0, reserved)`.
-    std::set<PhysAlloc> live;
-    if (reserved > 0 && reserved <= numPhys)
-      live.insert(PhysAlloc{0, reserved});
-
     SmallVector<std::pair<Value, unsigned>> assignments;
-    for (wave::WaveAMDLiveInterval interval : intervals) {
+    for (const wave::WaveAMDLiveInterval &interval : intervals) {
       if (interval.values.empty())
         continue;
-      expireOld(active, live, interval.start);
-      unsigned width = interval.type.getWidth();
-      // AMDGPU register classes are sized to the next power of two of
-      // the tuple width: VReg_96 (3 dwords) sits in a 4-aligned class,
-      // VReg_160 (5 dwords) in an 8-aligned class, etc. Pinning the
-      // base to `next_power_of_two(width)` keeps the assembler happy
-      // for the consumer ops, and matches `width` exactly for the
-      // power-of-two widths the pipeline currently produces.
-      unsigned align = std::max<unsigned>(1, llvm::PowerOf2Ceil(width));
-      std::optional<unsigned> phys = findFreeSlot(live, width, align, numPhys);
+      expireOld(active, interval.start);
+      std::optional<unsigned> phys =
+          findFreeSlot(active, interval, reserved, numPhys);
       if (!phys) {
-        SmallVector<wave::WaveAMDLiveInterval> activeIntervals =
+        wave::WaveAMDLiveIntervalVector activeIntervals =
             collectActiveIntervals(active);
+        unsigned liveDwords =
+            reserved + liveDwordsAt(activeIntervals, interval.start);
         return handleAllocationFailure(
-            func, intervals, interval, activeIntervals, live, numPhys, reserved,
-            softFail, overflow, pressure, positions, regClass, agprIntervals,
-            agprCandidateLimit);
+            func, intervals, interval, activeIntervals, liveDwords, numPhys,
+            reserved, softFail, overflow, pressure, positions, regClass,
+            agprIntervals, agprCandidateLimit);
       }
       for (auto [v, off] : llvm::zip(interval.values, interval.slotOffsets))
         assignments.push_back({v, *phys + off});
-      PhysAlloc allocation{*phys, width};
-      live.insert(allocation);
-      active.push_back(ActiveAlloc{interval, allocation});
+      active.push_back(ActiveAlloc{&interval, *phys});
       llvm::sort(active, [](const ActiveAlloc &lhs, const ActiveAlloc &rhs) {
-        return lhs.interval.end < rhs.interval.end;
+        return lhs.interval->end < rhs.interval->end;
       });
     }
     for (auto [value, phys] : assignments)
@@ -740,36 +712,72 @@ struct WaveAMDRegAllocPass
     return success();
   }
 
-  // Walk the gaps between live allocations in `begin` order. For each
-  // gap, check whether the requested width fits at `start`; if not,
-  // advance `start` to the next `align`-aligned position past the
-  // current allocation. After the last allocation, try the tail up to
-  // `maxRegs`.
-  static std::optional<unsigned> findFreeSlot(const std::set<PhysAlloc> &live,
-                                              unsigned width, unsigned align,
-                                              unsigned maxRegs) {
-    auto alignUp = [&](unsigned v) {
-      return ((v + align - 1) / align) * align;
-    };
-    unsigned start = 0;
-    for (const PhysAlloc &a : live) {
-      if (start + width <= a.begin)
-        return start;
-      start = alignUp(a.end());
+  static bool timeOverlap(unsigned lhsStart, unsigned lhsEnd, unsigned rhsStart,
+                          unsigned rhsEnd) {
+    return lhsStart <= rhsEnd && rhsStart <= lhsEnd;
+  }
+
+  static bool physOverlap(unsigned lhsBegin, unsigned lhsWidth,
+                          unsigned rhsBegin, unsigned rhsWidth) {
+    return lhsBegin < rhsBegin + rhsWidth && rhsBegin < lhsBegin + lhsWidth;
+  }
+
+  static bool assignedIntervalsOverlap(const wave::WaveAMDLiveInterval &lhs,
+                                       unsigned lhsBase,
+                                       const wave::WaveAMDLiveInterval &rhs,
+                                       unsigned rhsBase) {
+    for (auto [lhsValue, lhsSlot, lhsStart, lhsEnd] : llvm::zip(
+             lhs.values, lhs.slotOffsets, lhs.valueStarts, lhs.valueEnds)) {
+      unsigned lhsWidth =
+          cast<waveamdmachine::RegType>(lhsValue.getType()).getWidth();
+      for (auto [rhsValue, rhsSlot, rhsStart, rhsEnd] : llvm::zip(
+               rhs.values, rhs.slotOffsets, rhs.valueStarts, rhs.valueEnds)) {
+        if (!timeOverlap(lhsStart, lhsEnd, rhsStart, rhsEnd))
+          continue;
+        unsigned rhsWidth =
+            cast<waveamdmachine::RegType>(rhsValue.getType()).getWidth();
+        if (physOverlap(lhsBase + lhsSlot, lhsWidth, rhsBase + rhsSlot,
+                        rhsWidth))
+          return true;
+      }
     }
-    if (start + width <= maxRegs)
-      return start;
+    return false;
+  }
+
+  static bool baseFits(ArrayRef<ActiveAlloc> active,
+                       const wave::WaveAMDLiveInterval &interval,
+                       unsigned base) {
+    for (const ActiveAlloc &alloc : active)
+      if (assignedIntervalsOverlap(interval, base, *alloc.interval, alloc.base))
+        return false;
+    return true;
+  }
+
+  static std::optional<unsigned>
+  findFreeSlot(ArrayRef<ActiveAlloc> active,
+               const wave::WaveAMDLiveInterval &interval, unsigned reserved,
+               unsigned maxRegs) {
+    unsigned width = interval.type.getWidth();
+    unsigned align = std::max<unsigned>(1, llvm::PowerOf2Ceil(width));
+    unsigned first = alignUp(reserved, align);
+    for (unsigned base = first; base + width <= maxRegs; base += align)
+      if (baseFits(active, interval, base))
+        return base;
     return std::nullopt;
   }
 
   static bool intervalContains(const wave::WaveAMDLiveInterval &interval,
                                unsigned position) {
-    return interval.start <= position && position <= interval.end;
+    return wave::isWaveAMDLiveIntervalLiveAt(interval, position);
   }
 
   static bool intervalsOverlap(const wave::WaveAMDLiveInterval &lhs,
                                const wave::WaveAMDLiveInterval &rhs) {
-    return lhs.start <= rhs.end && rhs.start <= lhs.end;
+    for (auto [lhsStart, lhsEnd] : llvm::zip(lhs.valueStarts, lhs.valueEnds))
+      for (auto [rhsStart, rhsEnd] : llvm::zip(rhs.valueStarts, rhs.valueEnds))
+        if (timeOverlap(lhsStart, lhsEnd, rhsStart, rhsEnd))
+          return true;
+    return false;
   }
 
   static DenseMap<Value, unsigned>
@@ -951,7 +959,8 @@ struct WaveAMDRegAllocPass
     unsigned dwords = 0;
     for (unsigned intervalIndex : group)
       if (intervalContains(intervals[intervalIndex], position))
-        dwords += intervals[intervalIndex].type.getWidth();
+        dwords += wave::getWaveAMDLiveIntervalWidthAt(intervals[intervalIndex],
+                                                      position);
     return dwords;
   }
 
@@ -960,21 +969,28 @@ struct WaveAMDRegAllocPass
     unsigned dwords = 0;
     for (const wave::WaveAMDLiveInterval &interval : intervals)
       if (intervalContains(interval, position))
-        dwords += interval.type.getWidth();
+        dwords += wave::getWaveAMDLiveIntervalWidthAt(interval, position);
     return dwords;
+  }
+
+  static void appendLivePoints(const wave::WaveAMDLiveInterval &interval,
+                               SmallVectorImpl<unsigned> &points) {
+    points.append(interval.valueStarts.begin(), interval.valueStarts.end());
+    points.append(interval.valueEnds.begin(), interval.valueEnds.end());
   }
 
   static unsigned
   maxGroupLiveDwords(ArrayRef<unsigned> group,
                      ArrayRef<wave::WaveAMDLiveInterval> intervals) {
     unsigned maxDwords = 0;
+    SmallVector<unsigned> points;
     for (unsigned intervalIndex : group) {
-      const wave::WaveAMDLiveInterval &interval = intervals[intervalIndex];
-      maxDwords =
-          std::max(maxDwords, liveDwordsAt(group, intervals, interval.start));
-      maxDwords =
-          std::max(maxDwords, liveDwordsAt(group, intervals, interval.end));
+      appendLivePoints(intervals[intervalIndex], points);
     }
+    llvm::sort(points);
+    points.erase(std::unique(points.begin(), points.end()), points.end());
+    for (unsigned position : points)
+      maxDwords = std::max(maxDwords, liveDwordsAt(group, intervals, position));
     return maxDwords;
   }
 
@@ -983,7 +999,8 @@ struct WaveAMDRegAllocPass
     unsigned overlap = 0;
     for (unsigned intervalIndex : group) {
       const wave::WaveAMDLiveInterval &interval = intervals[intervalIndex];
-      overlap += interval.type.getWidth() * (interval.end - interval.start + 1);
+      for (unsigned position : llvm::seq(interval.start, interval.end + 1))
+        overlap += wave::getWaveAMDLiveIntervalWidthAt(interval, position);
     }
     return overlap;
   }
@@ -996,18 +1013,15 @@ struct WaveAMDRegAllocPass
       return false;
 
     SmallVector<unsigned> points;
-    for (unsigned intervalIndex : group) {
-      points.push_back(vgprs[intervalIndex].start);
-      points.push_back(vgprs[intervalIndex].end);
-    }
+    for (unsigned intervalIndex : group)
+      appendLivePoints(vgprs[intervalIndex], points);
     for (const wave::WaveAMDLiveInterval &agpr : agprs) {
       bool overlapsGroup = llvm::any_of(group, [&](unsigned intervalIndex) {
         return intervalsOverlap(agpr, vgprs[intervalIndex]);
       });
       if (!overlapsGroup)
         continue;
-      points.push_back(agpr.start);
-      points.push_back(agpr.end);
+      appendLivePoints(agpr, points);
     }
     llvm::sort(points);
     points.erase(std::unique(points.begin(), points.end()), points.end());
@@ -1134,13 +1148,6 @@ struct WaveAMDRegAllocPass
     return ref;
   }
 
-  static unsigned liveDwords(const std::set<PhysAlloc> &live) {
-    unsigned dwords = 0;
-    for (const PhysAlloc &alloc : live)
-      dwords += alloc.size;
-    return dwords;
-  }
-
   static unsigned estimateRelief(unsigned liveWidth, unsigned requestWidth,
                                  unsigned limit) {
     if (liveWidth + requestWidth > limit)
@@ -1148,21 +1155,20 @@ struct WaveAMDRegAllocPass
     return 1;
   }
 
-  static RegisterPressurePoint
-  buildPressurePoint(StringRef regClass,
-                     const wave::WaveAMDLiveInterval &request,
-                     ArrayRef<wave::WaveAMDLiveInterval> active,
-                     const std::set<PhysAlloc> &live,
-                     const DenseMap<Operation *, unsigned> &positions,
-                     unsigned position, unsigned limit, unsigned reserved) {
+  static RegisterPressurePoint buildPressurePoint(
+      StringRef regClass, const wave::WaveAMDLiveInterval &request,
+      ArrayRef<wave::WaveAMDLiveInterval> active, unsigned liveDwords,
+      const DenseMap<Operation *, unsigned> &positions, unsigned position,
+      unsigned limit, unsigned reserved) {
     RegisterPressurePoint point;
     point.regClass = regClass;
     point.limit = limit;
-    point.liveDwords = liveDwords(live);
+    point.liveDwords = liveDwords;
     point.position = position;
     point.request = buildIntervalRef(request, positions);
-    point.requiredRelief =
-        estimateRelief(point.liveDwords, point.request.width, limit);
+    point.requiredRelief = estimateRelief(
+        point.liveDwords,
+        wave::getWaveAMDLiveIntervalWidthAt(request, position), limit);
     point.reserved = reserved;
 
     for (const wave::WaveAMDLiveInterval &interval : active)

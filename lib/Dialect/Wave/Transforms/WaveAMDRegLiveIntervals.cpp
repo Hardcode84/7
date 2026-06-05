@@ -9,6 +9,7 @@
 #include "WaveAMDRegLiveIntervals.h"
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "llvm/ADT/BitVector.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
 
@@ -54,12 +55,64 @@ std::optional<waveamdmachine::RegType> getTrackedWaveAMDRegType(Value value) {
   return rt;
 }
 
+unsigned getWaveAMDLiveIntervalWidthAt(const WaveAMDLiveInterval &interval,
+                                       unsigned position) {
+  if (interval.values.empty())
+    return 0;
+  unsigned width = interval.type.getWidth();
+  llvm::BitVector live(width);
+  for (auto [value, slot, start, end] :
+       llvm::zip(interval.values, interval.slotOffsets, interval.valueStarts,
+                 interval.valueEnds)) {
+    if (position < start || end < position)
+      continue;
+    unsigned valueWidth =
+        cast<waveamdmachine::RegType>(value.getType()).getWidth();
+    for (unsigned bit : llvm::seq<unsigned>(slot, slot + valueWidth))
+      if (bit < width)
+        live.set(bit);
+  }
+  return live.count();
+}
+
+bool isWaveAMDLiveIntervalLiveAt(const WaveAMDLiveInterval &interval,
+                                 unsigned position) {
+  return getWaveAMDLiveIntervalWidthAt(interval, position) != 0;
+}
+
 } // namespace mlir::wave
 
 namespace {
 
 static unsigned bumpEnd(unsigned cur, unsigned pos) {
   return std::max(cur, pos);
+}
+
+static void updateEnvelope(wave::WaveAMDLiveInterval &interval, unsigned start,
+                           unsigned end) {
+  interval.start = std::min(interval.start, start);
+  interval.end = bumpEnd(interval.end, end);
+}
+
+static void appendIntervalValue(wave::WaveAMDLiveInterval &interval,
+                                Value value, unsigned slotOffset,
+                                unsigned start, unsigned end) {
+  interval.values.push_back(value);
+  interval.slotOffsets.push_back(slotOffset);
+  interval.valueStarts.push_back(start);
+  interval.valueEnds.push_back(end);
+  updateEnvelope(interval, start, end);
+}
+
+static void extendIntervalValue(wave::WaveAMDLiveInterval &interval,
+                                Value value, unsigned pos) {
+  for (auto [index, v] : llvm::enumerate(interval.values)) {
+    if (v != value)
+      continue;
+    interval.valueEnds[index] = bumpEnd(interval.valueEnds[index], pos);
+    interval.end = bumpEnd(interval.end, pos);
+    return;
+  }
 }
 
 static std::pair<SmallVectorImpl<wave::WaveAMDLiveInterval> *,
@@ -90,17 +143,13 @@ ensureInterval(Value value, unsigned pos,
     return failure();
   auto [bucket, table] = intervalsFor(rt, intervals);
   if (auto it = table->find(value); it != table->end()) {
-    (*bucket)[it->second].start = std::min((*bucket)[it->second].start, pos);
-    (*bucket)[it->second].end = bumpEnd((*bucket)[it->second].end, pos);
+    extendIntervalValue((*bucket)[it->second], value, pos);
     return it->second;
   }
   unsigned index = bucket->size();
   wave::WaveAMDLiveInterval interval;
-  interval.values.push_back(value);
-  interval.slotOffsets.push_back(0);
   interval.type = rt;
-  interval.start = pos;
-  interval.end = pos;
+  appendIntervalValue(interval, value, /*slotOffset=*/0, pos, pos);
   bucket->push_back(interval);
   (*table)[value] = index;
   return index;
@@ -120,11 +169,7 @@ static LogicalResult coalesce(Value primary, Value extra, unsigned pos,
   unsigned primIdx = primIt->second;
   auto extraIt = table->find(extra);
   if (extraIt == table->end()) {
-    // First alias for `extra`: place it inside primary's block.
-    (*bucket)[primIdx].values.push_back(extra);
-    (*bucket)[primIdx].slotOffsets.push_back(slotOffset);
-    (*bucket)[primIdx].start = std::min((*bucket)[primIdx].start, pos);
-    (*bucket)[primIdx].end = bumpEnd((*bucket)[primIdx].end, pos);
+    appendIntervalValue((*bucket)[primIdx], extra, slotOffset, pos, pos);
     (*table)[extra] = primIdx;
     return success();
   }
@@ -133,16 +178,19 @@ static LogicalResult coalesce(Value primary, Value extra, unsigned pos,
     return success();
   wave::WaveAMDLiveInterval &prim = (*bucket)[primIdx];
   wave::WaveAMDLiveInterval &ex = (*bucket)[extraIdx];
-  prim.start = std::min(prim.start, ex.start);
-  prim.end = bumpEnd(prim.end, std::max(ex.end, pos));
-  // Existing interval merge: carried offsets shift under primary.
-  for (auto [v, off] : llvm::zip(ex.values, ex.slotOffsets)) {
+  updateEnvelope(prim, ex.start, std::max(ex.end, pos));
+  for (auto [v, off, start, end] :
+       llvm::zip(ex.values, ex.slotOffsets, ex.valueStarts, ex.valueEnds)) {
     prim.values.push_back(v);
     prim.slotOffsets.push_back(slotOffset + off);
+    prim.valueStarts.push_back(start);
+    prim.valueEnds.push_back(bumpEnd(end, pos));
     (*table)[v] = primIdx;
   }
   ex.values.clear();
   ex.slotOffsets.clear();
+  ex.valueStarts.clear();
+  ex.valueEnds.clear();
   return success();
 }
 
@@ -269,7 +317,7 @@ private:
       return;
     auto [bucket, table] = intervalsFor(*rt, result.intervals);
     if (auto it = table->find(value); it != table->end())
-      (*bucket)[it->second].end = bumpEnd((*bucket)[it->second].end, pos);
+      extendIntervalValue((*bucket)[it->second], value, pos);
   }
 
   LogicalResult coalesceLoopEntryCarries(waveamdmachine::UniformLoopOp loop,
@@ -311,15 +359,20 @@ private:
         continue;
       wave::WaveAMDLiveInterval &loopIv = (*bucket)[initIt->second];
       wave::WaveAMDLiveInterval &carryIv = (*bucket)[carryIt->second];
-      loopIv.start = std::min(loopIv.start, carryIv.start);
-      loopIv.end = bumpEnd(loopIv.end, carryIv.end);
-      for (auto [v, off] : llvm::zip(carryIv.values, carryIv.slotOffsets)) {
+      updateEnvelope(loopIv, carryIv.start, carryIv.end);
+      for (auto [v, off, start, end] :
+           llvm::zip(carryIv.values, carryIv.slotOffsets, carryIv.valueStarts,
+                     carryIv.valueEnds)) {
         loopIv.values.push_back(v);
         loopIv.slotOffsets.push_back(off);
+        loopIv.valueStarts.push_back(start);
+        loopIv.valueEnds.push_back(end);
         (*table)[v] = initIt->second;
       }
       carryIv.values.clear();
       carryIv.slotOffsets.clear();
+      carryIv.valueStarts.clear();
+      carryIv.valueEnds.clear();
     }
   }
 
@@ -358,6 +411,7 @@ private:
     // Tuple is primary; elements get cumulative dword offsets.
     auto coalesceTupleElements = [&](auto top) -> LogicalResult {
       Value tuple = top.getTuple();
+      extendInterval(tuple, pos);
       auto rt = wave::getTrackedWaveAMDRegType(tuple);
       if (rt) {
         auto [bucket, table] = intervalsFor(*rt, result.intervals);
@@ -382,6 +436,19 @@ private:
     return success();
   }
 
+  bool tupleRenameHandlesOperandUses(Operation *op) {
+    if (isa<waveamdmachine::TupleToElementsOp>(op))
+      return true;
+    auto fromElems = dyn_cast<waveamdmachine::TupleFromElementsOp>(op);
+    if (!fromElems)
+      return false;
+    auto rt = wave::getTrackedWaveAMDRegType(fromElems.getTuple());
+    if (!rt)
+      return false;
+    auto [bucket, table] = intervalsFor(*rt, result.intervals);
+    return table->contains(fromElems.getTuple());
+  }
+
   LogicalResult walkBlock(Block &block) {
     SmallVector<Operation *> ops;
     if (failed(collectBlockOps(block, ops)))
@@ -395,8 +462,9 @@ private:
         (void)ensureInterval(value, pos, result.intervals, op,
                              includeAllocated);
       }
-      for (Value operand : op->getOperands())
-        extendInterval(operand, pos);
+      if (!tupleRenameHandlesOperandUses(op))
+        for (Value operand : op->getOperands())
+          extendInterval(operand, pos);
       if (failed(coalesceTupleElementOps(*op, pos)))
         return failure();
       if (auto loop = dyn_cast<waveamdmachine::UniformLoopOp>(op))

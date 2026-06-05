@@ -61,6 +61,26 @@ func.func @tuple_from_elements_slot_aliases() {
   return
 }
 
+// Pinned tuple result cannot anchor a virtual coalesced interval; its
+// operands still have normal uses at the gather.
+//
+// CHECK-LABEL: func.func @pinned_tuple_from_elements_keeps_operands_live
+// CHECK: %[[A:.+]] = waveamdmachine.v_mov_b32_tuple {{.*}} -> !waveamdmachine.reg<vgpr, 1, 0>
+// CHECK: %[[B:.+]] = waveamdmachine.v_mov_b32_tuple {{.*}} -> !waveamdmachine.reg<vgpr, 1, 1>
+// CHECK: %{{.+}} = waveamdmachine.tuple_from_elements %[[A]], %[[B]]
+// CHECK-SAME: -> !waveamdmachine.reg<vgpr, 2, 0>
+func.func @pinned_tuple_from_elements_keeps_operands_live() {
+  %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+  %a = waveamdmachine.v_mov_b32_tuple %zero {registers = 1 : i64}
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
+  %b = waveamdmachine.v_mov_b32_tuple %zero {registers = 1 : i64}
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
+  %t = waveamdmachine.tuple_from_elements %a, %b
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+      -> !waveamdmachine.reg<vgpr, 2, 0>
+  return
+}
+
 // Round-trip: split, reassemble, both passes should reuse the same
 // physical block. The intermediate elements alias slots [0..7]
 // of the same v0..v7 block held by both tuples.

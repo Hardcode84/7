@@ -10,8 +10,9 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950",
 
 // ASM-LABEL: agpr_bank_spill_codegen:
 // ASM: v_mfma_f32_16x16x32_f16 {{a\[[0-9]+:[0-9]+\]}}, {{a\[[0-9]+:[0-9]+\]}}, {{[av]\[[0-9]+:[0-9]+\]}}, {{a\[[0-9]+:[0-9]+\]}}
-// ASM: v_accvgpr_read_b32
-// ASM: v_accvgpr_write_b32
+// ASM-DAG: v_accvgpr_read_b32
+// ASM-DAG: v_accvgpr_write_b32
+// ASM: global_store_dword
 // ASM: global_store_dword
 func.func @agpr_bank_spill_codegen() attributes {wave.kernel} {
   %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
@@ -45,9 +46,17 @@ func.func @agpr_bank_spill_codegen() attributes {wave.kernel} {
       : (!waveamdmachine.reg<vgpr, 4>) -> (!waveamdmachine.reg<vgpr, 1>,
           !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
           !waveamdmachine.reg<vgpr, 1>)
+  %generic_elem:4 = waveamdmachine.tuple_to_elements %use_generic0
+      : (!waveamdmachine.reg<vgpr, 4>) -> (!waveamdmachine.reg<vgpr, 1>,
+          !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+          !waveamdmachine.reg<vgpr, 1>)
   %token = waveamdmachine.global_store_b32 %off, %elem#0, %base
       : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
          !waveamdmachine.reg<sgpr, 2>) -> !waveamdmachine.mem.token
+  %token2 = waveamdmachine.global_store_b32 %off, %generic_elem#0, %base after %token offset 4
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+         !waveamdmachine.reg<sgpr, 2>, !waveamdmachine.mem.token)
+      -> !waveamdmachine.mem.token
   waveamdmachine.s_endpgm
   return
 }
