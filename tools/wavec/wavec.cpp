@@ -197,6 +197,11 @@ static bool takeJoinedOrSeparate(int argc, char **argv, int &index,
   return false;
 }
 
+static bool matchesValuedOption(llvm::StringRef arg, llvm::StringRef name) {
+  std::string joined = (name + "=").str();
+  return arg == name || arg.starts_with(joined);
+}
+
 static bool parseEmitOption(DriverOptions &options, llvm::StringRef value) {
   EmitKind kind;
   if (!parseEmitKind(value, kind)) {
@@ -236,19 +241,19 @@ static bool parseValuedLongOption(DriverOptions &options, int argc, char **argv,
                                   bool &handled) {
   handled = true;
   std::string value;
-  if (arg.starts_with("--emit"))
+  if (matchesValuedOption(arg, "--emit"))
     return takeJoinedOrSeparate(argc, argv, index, arg, "--emit", value) &&
            parseEmitOption(options, value);
-  if (arg.starts_with("--target"))
+  if (matchesValuedOption(arg, "--target"))
     return takeJoinedOrSeparate(argc, argv, index, arg, "--target",
                                 options.targetAttr);
-  if (arg.starts_with("--offload-arch"))
+  if (matchesValuedOption(arg, "--offload-arch"))
     return takeJoinedOrSeparate(argc, argv, index, arg, "--offload-arch",
                                 options.offloadArch);
-  if (arg.starts_with("--target-features"))
+  if (matchesValuedOption(arg, "--target-features"))
     return takeJoinedOrSeparate(argc, argv, index, arg, "--target-features",
                                 options.targetFeatures);
-  if (arg.starts_with("--pipeline-file"))
+  if (matchesValuedOption(arg, "--pipeline-file"))
     return takeJoinedOrSeparate(argc, argv, index, arg, "--pipeline-file",
                                 options.pipelineFile);
   handled = false;

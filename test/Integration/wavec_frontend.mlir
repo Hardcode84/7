@@ -5,6 +5,8 @@
 # RUN: wavec -S --offload-arch gfx1100 %S/../../wavec/test/e2e/good/saxpy.wave | FileCheck %s --check-prefix=ASM
 # RUN: wavec -c -o %t.hsaco %S/../../wavec/test/e2e/good/saxpy.wave
 # RUN: %llvm_readelf --notes %t.hsaco | FileCheck %s --check-prefix=NOTE
+# RUN: wavec -c --target-features= -o %t.features.hsaco %S/../../wavec/test/e2e/good/saxpy.wave
+# RUN: %llvm_readelf --notes %t.features.hsaco | FileCheck %s --check-prefix=NOTE
 
 # CHECK: func.func @saxpy
 # CHECK: wave.where
