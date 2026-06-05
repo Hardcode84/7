@@ -36,6 +36,11 @@ for f in "$DIR"/err/*.wave; do
   if ! grep -q 'error:' "$tmp/err"; then
     echo "FAIL err (no diagnostic): $f"; fail=1
   fi
+  if [ -f "$f.checks" ]; then
+    if ! "$FC" "$f.checks" <"$tmp/err" >"$tmp/fc" 2>&1; then
+      echo "FAIL err (FileCheck): $f"; cat "$tmp/fc"; fail=1
+    fi
+  fi
 done
 
 if [ "$fail" -ne 0 ]; then echo "e2e: FAILURES"; exit 1; fi

@@ -1,0 +1,1 @@
+// CHECK: {{.*}}fragment.wave:2:3: error: fragment type not supported

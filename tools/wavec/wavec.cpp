@@ -743,8 +743,9 @@ static bool compilePreprocessedSource(const DriverOptions &options,
   if (ok)
     ok = compileToOutput(result, options);
   if (!ok) {
-    llvm::StringRef name =
-        options.inputFile == "-" ? "<stdin>" : options.inputFile;
+    llvm::StringRef name = options.inputFile;
+    if (name == "-")
+      name = "<stdin>";
     printDiagnostics(name, result.diags);
   }
   return ok;
