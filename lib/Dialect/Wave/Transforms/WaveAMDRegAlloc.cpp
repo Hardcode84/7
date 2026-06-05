@@ -442,6 +442,11 @@ struct WaveAMDRegAllocPass
     if (limits.numAGPR == 0 && hasLiveIntervals(intervals.agprs))
       return func.emitError(
           "waveamd-reg-alloc AGPR registers require target with AGPR support");
+    if (failed(applyAGPRTotalVGPRLimit(func, intervals, limits, softFail,
+                                       overflow)))
+      return failure();
+    if (overflow)
+      return success();
     if (failed(allocateRegisterClasses(func, intervals, limits, sgprReserved,
                                        vgprReserved, softFail, overflow,
                                        pressure, builtIntervals->positions,
@@ -485,6 +490,10 @@ struct WaveAMDRegAllocPass
 
   static unsigned alignUp(unsigned value, unsigned granule) {
     return ((value + granule - 1) / granule) * granule;
+  }
+
+  static unsigned alignDown(unsigned value, unsigned granule) {
+    return (value / granule) * granule;
   }
 
   static unsigned getTotalVGPRCount(const RegisterLimits &limits,
@@ -544,6 +553,46 @@ struct WaveAMDRegAllocPass
     if (overflow)
       return success();
     return enforceTotalVGPRBudget(func, limits, *counts, softFail, overflow);
+  }
+
+  static unsigned maxLiveDwords(ArrayRef<wave::WaveAMDLiveInterval> intervals) {
+    SmallVector<unsigned> points;
+    for (const wave::WaveAMDLiveInterval &interval : intervals)
+      appendLivePoints(interval, points);
+    llvm::sort(points);
+    points.erase(std::unique(points.begin(), points.end()), points.end());
+
+    unsigned maxDwords = 0;
+    for (unsigned position : points)
+      maxDwords = std::max(maxDwords, liveDwordsAt(intervals, position));
+    return maxDwords;
+  }
+
+  static LogicalResult applyAGPRTotalVGPRLimit(
+      func::FuncOp func, const wave::WaveAMDLiveIntervalSet &intervals,
+      RegisterLimits &limits, bool softFail, bool &overflow) {
+    if (!limits.totalVGPRLimit || !limits.agprCountsAgainstVGPRs ||
+        !hasLiveIntervals(intervals.agprs))
+      return success();
+
+    unsigned agprPressure = maxLiveDwords(intervals.agprs);
+    if (agprPressure == 0)
+      return success();
+    if (agprPressure >= *limits.totalVGPRLimit) {
+      if (softFail) {
+        overflow = true;
+        return success();
+      }
+      return func.emitError()
+             << "waveamd-reg-alloc AGPR pressure exceeds total VGPR budget "
+             << "(agpr=" << agprPressure << ", limit=" << *limits.totalVGPRLimit
+             << ", target_waves=" << limits.targetWaves << ")";
+    }
+
+    unsigned vgprBudget =
+        alignDown(*limits.totalVGPRLimit - agprPressure, /*granule=*/4);
+    limits.numVGPR = std::min(limits.numVGPR, vgprBudget);
+    return success();
   }
 
   LogicalResult allocateFunctionWithAGPRBankSpill(
