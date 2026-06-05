@@ -1,0 +1,13 @@
+#define WAVE_WIDTH 32
+#define OFFSET 5
+
+#if WAVE_WIDTH != 32
+#error wrong wave width
+#endif
+
+kernel [[amdgpu_wave_size(WAVE_WIDTH)]]
+void pp(uint32_t *out) {
+  simd<uint32_t, WAVE_WIDTH> lane = lane_id<WAVE_WIDTH>();
+  simd<uint32_t, WAVE_WIDTH> value = lane + OFFSET;
+  store(value, out + lane);
+}

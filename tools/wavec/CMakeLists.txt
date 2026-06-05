@@ -2,12 +2,16 @@ get_property(dialect_libs GLOBAL PROPERTY MLIR_DIALECT_LIBS)
 
 set(LLVM_LINK_COMPONENTS
   Support
+  TargetParser
 )
 
 add_llvm_executable(wavec wavec.cpp)
 
 llvm_update_compile_flags(wavec)
 target_link_libraries(wavec PRIVATE
+  clangBasic
+  clangFrontend
+  clangLex
   ${dialect_libs}
   MLIRIR
   MLIRParser

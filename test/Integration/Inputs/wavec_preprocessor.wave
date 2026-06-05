@@ -1,0 +1,12 @@
+#include "wavec_pp_defs.waveh"
+
+#ifndef W
+#error missing W
+#endif
+
+kernel [[amdgpu_wave_size(W)]]
+void PP_KERNEL_NAME(uint32_t *out) {
+  simd<uint32_t, W> lane = lane_id<W>();
+  simd<uint32_t, W> value = lane + PP_OFFSET;
+  store(value, out + lane);
+}

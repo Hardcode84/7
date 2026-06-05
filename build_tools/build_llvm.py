@@ -108,11 +108,26 @@ def resolve_source(default_source: Path, commit: str) -> Path:
     return default_source
 
 
-def already_installed(install_dir: Path, commit: str) -> bool:
+def already_installed(
+    install_dir: Path,
+    commit: str,
+    enable_python_bindings: bool,
+) -> bool:
     stamp = install_dir / STAMP_FILE
     if not stamp.is_file():
         return False
-    return stamp.read_text().strip() == commit
+    if stamp.read_text().strip() != commit:
+        return False
+    for package in ("llvm", "mlir", "clang", "lld"):
+        if not (install_dir / "lib" / "cmake" / package).is_dir():
+            return False
+    if enable_python_bindings:
+        mlir_libs = (
+            install_dir / "python_packages" / "mlir_core" / "mlir" / "_mlir_libs"
+        )
+        if not any(mlir_libs.glob("_mlir*.so")):
+            return False
+    return True
 
 
 def configure_and_build(
@@ -135,7 +150,7 @@ def configure_and_build(
         str(build_dir),
         f"-DCMAKE_BUILD_TYPE={build_type}",
         f"-DCMAKE_INSTALL_PREFIX={install_dir}",
-        "-DLLVM_ENABLE_PROJECTS=mlir;lld",
+        "-DLLVM_ENABLE_PROJECTS=clang;mlir;lld",
         "-DLLVM_TARGETS_TO_BUILD=AMDGPU;X86",
         "-DLLVM_ENABLE_ASSERTIONS=ON",
         "-DLLVM_ENABLE_RTTI=ON",
@@ -190,7 +205,11 @@ def main(argv: list[str] | None = None) -> int:
     install_dir = args.install_dir.resolve()
     commit = read_pinned_commit()
 
-    if not args.force and already_installed(install_dir, commit):
+    if not args.force and already_installed(
+        install_dir,
+        commit,
+        args.python_bindings,
+    ):
         print(
             f"LLVM already installed at {install_dir} "
             f"(commit {commit[:12]}); use --force to rebuild.",

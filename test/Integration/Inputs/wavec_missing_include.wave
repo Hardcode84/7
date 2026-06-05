@@ -1,0 +1,7 @@
+#include "does_not_exist.waveh"
+
+kernel [[amdgpu_wave_size(32)]]
+void missing(uint32_t *out) {
+  simd<uint32_t, 32> lane = lane_id<32>();
+  store(lane, out + lane);
+}

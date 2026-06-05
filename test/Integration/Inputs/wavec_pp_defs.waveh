@@ -1,0 +1,5 @@
+// SPDX-FileCopyrightText: 2026 wave-mlir contributors
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+
+#define PP_KERNEL_NAME pp_include
+#define PP_OFFSET 11

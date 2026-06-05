@@ -16,6 +16,16 @@ extern "C" {
 #include "sema.h"
 }
 
+#include "clang/Basic/Diagnostic.h"
+#include "clang/Basic/DiagnosticIDs.h"
+#include "clang/Basic/DiagnosticOptions.h"
+#include "clang/Frontend/CompilerInstance.h"
+#include "clang/Frontend/CompilerInvocation.h"
+#include "clang/Frontend/FrontendAction.h"
+#include "clang/Frontend/TextDiagnosticPrinter.h"
+#include "clang/Frontend/Utils.h"
+#include "clang/Lex/PreprocessorOptions.h"
+
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/UB/IR/UBOps.h"
@@ -34,11 +44,13 @@ extern "C" {
 #include "mlir/Target/Wave/AMDGPU.h"
 
 #include "llvm/ADT/SmallString.h"
+#include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/InitLLVM.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/SourceMgr.h"
 #include "llvm/Support/raw_ostream.h"
+#include "llvm/TargetParser/Host.h"
 
 #include <memory>
 #include <string>
@@ -49,10 +61,20 @@ namespace {
 
 constexpr size_t kArenaBytes = 8u * 1024u * 1024u;
 
-enum class EmitKind { Ast, Wave, Asm, Hsaco };
+enum class EmitKind { Preprocessed, Ast, Wave, Asm, Hsaco };
 enum class ParseStatus { Ok, Help, Error };
+enum class MacroActionKind { Define, Undefine };
+
+struct MacroAction {
+  std::string value;
+  MacroActionKind kind;
+};
 
 struct DriverOptions {
+  SmallVector<MacroAction, 4> macroActions;
+  SmallVector<std::string, 4> includeDirs;
+  SmallVector<std::string, 4> systemIncludeDirs;
+  SmallVector<std::string, 4> forcedIncludes;
   std::string inputFile;
   std::string outputFile = "-";
   std::string targetAttr;
@@ -80,6 +102,115 @@ struct FrontendResult {
   Program *program = nullptr;
   std::string waveIR;
 };
+
+class CapturePreprocessedAction : public clang::PreprocessorFrontendAction {
+public:
+  explicit CapturePreprocessedAction(std::string &output) : output(output) {}
+
+private:
+  void ExecuteAction() override {
+    clang::CompilerInstance &compiler = getCompilerInstance();
+    llvm::raw_string_ostream os(output);
+    clang::DoPrintPreprocessedInput(compiler.getPreprocessor(), &os,
+                                    compiler.getPreprocessorOutputOpts());
+  }
+
+  std::string &output;
+};
+
+static void pushArg(SmallVectorImpl<std::string> &storage,
+                    SmallVectorImpl<const char *> &args, llvm::Twine value) {
+  storage.push_back(value.str());
+  args.push_back(storage.back().c_str());
+}
+
+static unsigned countPreprocessorArgs(const DriverOptions &options) {
+  return 9 +
+         2 * (options.macroActions.size() + options.includeDirs.size() +
+              options.systemIncludeDirs.size() + options.forcedIncludes.size());
+}
+
+static void appendPreprocessorArgs(const DriverOptions &options,
+                                   llvm::StringRef mainFile,
+                                   SmallVectorImpl<std::string> &storage,
+                                   SmallVectorImpl<const char *> &args) {
+  pushArg(storage, args, "-triple");
+  pushArg(storage, args, llvm::sys::getDefaultTargetTriple());
+  pushArg(storage, args, "-E");
+  pushArg(storage, args, "-x");
+  pushArg(storage, args, "c");
+  pushArg(storage, args, "-std=c99");
+  pushArg(storage, args, "-undef");
+  pushArg(storage, args, "-P");
+  for (const MacroAction &action : options.macroActions) {
+    switch (action.kind) {
+    case MacroActionKind::Define:
+      pushArg(storage, args, "-D");
+      break;
+    case MacroActionKind::Undefine:
+      pushArg(storage, args, "-U");
+      break;
+    }
+    pushArg(storage, args, action.value);
+  }
+  for (llvm::StringRef dir : options.includeDirs) {
+    pushArg(storage, args, "-I");
+    pushArg(storage, args, dir);
+  }
+  for (llvm::StringRef dir : options.systemIncludeDirs) {
+    pushArg(storage, args, "-isystem");
+    pushArg(storage, args, dir);
+  }
+  for (llvm::StringRef include : options.forcedIncludes) {
+    pushArg(storage, args, "-include");
+    pushArg(storage, args, include);
+  }
+  pushArg(storage, args, mainFile);
+}
+
+static bool preprocessSource(const DriverOptions &options,
+                             llvm::MemoryBufferRef input,
+                             std::string &preprocessed) {
+  std::string mainFile =
+      options.inputFile == "-" ? "stdin.wave" : options.inputFile;
+  SmallVector<std::string, 32> argStorage;
+  argStorage.reserve(countPreprocessorArgs(options));
+  SmallVector<const char *, 32> args;
+  appendPreprocessorArgs(options, mainFile, argStorage, args);
+
+  clang::DiagnosticOptions diagOptions;
+  clang::TextDiagnosticPrinter invocationPrinter(llvm::errs(), diagOptions);
+  llvm::IntrusiveRefCntPtr<clang::DiagnosticIDs> diagIDs(
+      new clang::DiagnosticIDs());
+  clang::DiagnosticsEngine diags(diagIDs, diagOptions, &invocationPrinter,
+                                 /*ShouldOwnClient=*/false);
+
+  std::shared_ptr<clang::CompilerInvocation> invocation =
+      std::make_shared<clang::CompilerInvocation>();
+  if (!clang::CompilerInvocation::CreateFromArgs(*invocation, args, diags,
+                                                 "wavec"))
+    return false;
+
+  invocation->getPreprocessorOpts().UsePredefines = false;
+  invocation->getPreprocessorOpts().DefineTargetOSMacros = false;
+  invocation->getPreprocessorOutputOpts().ShowCPP = true;
+  invocation->getPreprocessorOutputOpts().ShowLineMarkers = false;
+  invocation->getPreprocessorOutputOpts().UseLineDirectives = false;
+
+  std::unique_ptr<llvm::MemoryBuffer> remapped =
+      llvm::MemoryBuffer::getMemBufferCopy(input.getBuffer(), mainFile);
+  invocation->getPreprocessorOpts().addRemappedFile(mainFile,
+                                                    remapped.release());
+
+  clang::CompilerInstance compiler(invocation);
+  compiler.createDiagnostics(
+      new clang::TextDiagnosticPrinter(llvm::errs(), diagOptions),
+      /*ShouldOwnClient=*/true);
+
+  CapturePreprocessedAction action(preprocessed);
+  bool ok = compiler.ExecuteAction(action);
+  return ok && !compiler.getDiagnostics().hasErrorOccurred();
+}
 
 static const char *severityLabel(DiagSeverity severity) {
   switch (severity) {
@@ -137,10 +268,16 @@ static void printHelp(llvm::StringRef argv0) {
       << "OVERVIEW: Wave C driver\n\n"
       << "USAGE: " << argv0 << " [options] <source.wave>\n\n"
       << "OPTIONS:\n"
-      << "  --emit=ast|wave|asm|hsaco  Select output kind (default: wave)\n"
+      << "  --emit=pp|ast|wave|asm|hsaco  Select output kind (default: wave)\n"
       << "  --emit-ast                 Emit parsed AST\n"
+      << "  -E, --preprocess-only      Emit preprocessed Wave source\n"
       << "  -S                         Emit AMDGPU assembly\n"
       << "  -c                         Emit HSACO binary\n"
+      << "  -D <name[=value]>          Define a preprocessor macro\n"
+      << "  -U <name>                  Undefine a preprocessor macro\n"
+      << "  -I <dir>                   Add an include search directory\n"
+      << "  -isystem <dir>             Add a system include search directory\n"
+      << "  -include <file>            Include a file before the main source\n"
       << "  -o <file>                  Write output to <file> (default: "
          "stdout)\n"
       << "  --target <triple--chip>    Full AMDGPU target attr\n"
@@ -169,7 +306,9 @@ static bool setEmitKind(DriverOptions &options, EmitKind kind) {
 }
 
 static bool parseEmitKind(llvm::StringRef value, EmitKind &kind) {
-  if (value == "ast")
+  if (value == "pp" || value == "preprocessed")
+    kind = EmitKind::Preprocessed;
+  else if (value == "ast")
     kind = EmitKind::Ast;
   else if (value == "wave")
     kind = EmitKind::Wave;
@@ -214,6 +353,8 @@ static bool parseEmitOption(DriverOptions &options, llvm::StringRef value) {
 static bool parseModeFlag(DriverOptions &options, llvm::StringRef arg,
                           bool &handled) {
   handled = true;
+  if (arg == "-E" || arg == "--preprocess-only")
+    return setEmitKind(options, EmitKind::Preprocessed);
   if (arg == "--emit-ast")
     return setEmitKind(options, EmitKind::Ast);
   if (arg == "-S")
@@ -236,6 +377,95 @@ static bool parseOutputOption(DriverOptions &options, int argc, char **argv,
   return takeJoinedOrSeparate(argc, argv, index, arg, "-o", options.outputFile);
 }
 
+static bool takeShortJoinedOrSeparate(int argc, char **argv, int &index,
+                                      llvm::StringRef arg, llvm::StringRef name,
+                                      std::string &value) {
+  if (arg.starts_with(name) && arg.size() > name.size()) {
+    value = arg.drop_front(name.size()).str();
+    return true;
+  }
+  if (arg == name && index + 1 < argc) {
+    value = argv[++index];
+    return true;
+  }
+  llvm::errs() << "wavec: " << name << " expects a value\n";
+  return false;
+}
+
+static bool requireNonEmpty(llvm::StringRef option, llvm::StringRef value) {
+  if (!value.empty())
+    return true;
+  llvm::errs() << "wavec: " << option << " expects a non-empty value\n";
+  return false;
+}
+
+static bool parseMacroActionOption(DriverOptions &options, int argc,
+                                   char **argv, int &index, llvm::StringRef arg,
+                                   llvm::StringRef name, MacroActionKind kind,
+                                   bool &handled) {
+  std::string value;
+  handled = arg == name || (arg.starts_with(name) && arg.size() > name.size());
+  if (!handled)
+    return true;
+  if (!takeShortJoinedOrSeparate(argc, argv, index, arg, name, value) ||
+      !requireNonEmpty(name, value))
+    return false;
+  options.macroActions.push_back({value, kind});
+  return true;
+}
+
+static bool parsePreprocessorOption(DriverOptions &options, int argc,
+                                    char **argv, int &index,
+                                    llvm::StringRef arg, bool &handled) {
+  if (!parseMacroActionOption(options, argc, argv, index, arg, "-D",
+                              MacroActionKind::Define, handled))
+    return false;
+  if (handled)
+    return true;
+  return parseMacroActionOption(options, argc, argv, index, arg, "-U",
+                                MacroActionKind::Undefine, handled);
+}
+
+static bool parseIncludeSearchOption(DriverOptions &options, int argc,
+                                     char **argv, int &index,
+                                     llvm::StringRef arg, bool &handled) {
+  std::string value;
+  if (arg == "-I" || (arg.starts_with("-I") && arg.size() > 2)) {
+    handled = true;
+    if (!takeShortJoinedOrSeparate(argc, argv, index, arg, "-I", value) ||
+        !requireNonEmpty("-I", value))
+      return false;
+    options.includeDirs.push_back(value);
+    return true;
+  }
+  if (arg == "-isystem" || arg.starts_with("-isystem=")) {
+    handled = true;
+    if (!takeJoinedOrSeparate(argc, argv, index, arg, "-isystem", value) ||
+        !requireNonEmpty("-isystem", value))
+      return false;
+    options.systemIncludeDirs.push_back(value);
+    return true;
+  }
+  handled = false;
+  return true;
+}
+
+static bool parseForcedIncludeOption(DriverOptions &options, int argc,
+                                     char **argv, int &index,
+                                     llvm::StringRef arg, bool &handled) {
+  std::string value;
+  if (arg == "-include" || arg.starts_with("-include=")) {
+    handled = true;
+    if (!takeJoinedOrSeparate(argc, argv, index, arg, "-include", value) ||
+        !requireNonEmpty("-include", value))
+      return false;
+    options.forcedIncludes.push_back(value);
+    return true;
+  }
+  handled = false;
+  return true;
+}
+
 static bool parseValuedLongOption(DriverOptions &options, int argc, char **argv,
                                   int &index, llvm::StringRef arg,
                                   bool &handled) {
@@ -256,6 +486,31 @@ static bool parseValuedLongOption(DriverOptions &options, int argc, char **argv,
   if (matchesValuedOption(arg, "--pipeline-file"))
     return takeJoinedOrSeparate(argc, argv, index, arg, "--pipeline-file",
                                 options.pipelineFile);
+  handled = false;
+  return true;
+}
+
+using OptionParser = bool (*)(DriverOptions &, int, char **, int &,
+                              llvm::StringRef, bool &);
+
+static bool parseModeOption(DriverOptions &options, int, char **, int &,
+                            llvm::StringRef arg, bool &handled) {
+  return parseModeFlag(options, arg, handled);
+}
+
+static bool parseKnownOption(DriverOptions &options, int argc, char **argv,
+                             int &index, llvm::StringRef arg, bool &handled) {
+  static constexpr OptionParser parsers[] = {
+      parseModeOption,          parseOutputOption,
+      parsePreprocessorOption,  parseIncludeSearchOption,
+      parseForcedIncludeOption, parseValuedLongOption,
+  };
+  for (OptionParser parser : parsers) {
+    if (!parser(options, argc, argv, index, arg, handled))
+      return false;
+    if (handled)
+      return true;
+  }
   handled = false;
   return true;
 }
@@ -285,15 +540,7 @@ static ParseStatus parseOptionOrInput(DriverOptions &options, int argc,
                                       char **argv, int &index,
                                       llvm::StringRef arg) {
   bool handled = false;
-  if (!parseModeFlag(options, arg, handled))
-    return ParseStatus::Error;
-  if (handled)
-    return ParseStatus::Ok;
-  if (!parseOutputOption(options, argc, argv, index, arg, handled))
-    return ParseStatus::Error;
-  if (handled)
-    return ParseStatus::Ok;
-  if (!parseValuedLongOption(options, argc, argv, index, arg, handled))
+  if (!parseKnownOption(options, argc, argv, index, arg, handled))
     return ParseStatus::Error;
   if (handled)
     return ParseStatus::Ok;
@@ -456,6 +703,8 @@ static bool compileToOutput(FrontendResult &result,
   if (!lowerToWaveIR(result))
     return false;
   switch (options.emitKind) {
+  case EmitKind::Preprocessed:
+    llvm_unreachable("handled before parsing");
   case EmitKind::Ast:
     llvm_unreachable("handled above");
   case EmitKind::Wave:
@@ -466,6 +715,39 @@ static bool compileToOutput(FrontendResult &result,
     return emitHsacoOutput(result, options);
   }
   llvm_unreachable("unknown emit kind");
+}
+
+static bool readAndPreprocessSource(const DriverOptions &options,
+                                    std::string &preprocessedSource) {
+  llvm::ErrorOr<std::unique_ptr<llvm::MemoryBuffer>> input =
+      llvm::MemoryBuffer::getFileOrSTDIN(options.inputFile);
+  if (!input) {
+    llvm::errs() << "wavec: cannot read `" << options.inputFile
+                 << "`: " << input.getError().message() << "\n";
+    return false;
+  }
+  return preprocessSource(options, (*input)->getMemBufferRef(),
+                          preprocessedSource);
+}
+
+static bool compilePreprocessedSource(const DriverOptions &options,
+                                      llvm::StringRef source) {
+  FrontendResult result;
+  if (!result.arena.valid()) {
+    llvm::errs() << "wavec: failed to allocate frontend arena\n";
+    return false;
+  }
+  diag_list_init(&result.diags, &result.arena.arena);
+
+  bool ok = parseSource(result, source);
+  if (ok)
+    ok = compileToOutput(result, options);
+  if (!ok) {
+    llvm::StringRef name =
+        options.inputFile == "-" ? "<stdin>" : options.inputFile;
+    printDiagnostics(name, result.diags);
+  }
+  return ok;
 }
 
 } // namespace
@@ -480,29 +762,10 @@ int main(int argc, char **argv) {
   if (parseStatus == ParseStatus::Error)
     return 1;
 
-  llvm::ErrorOr<std::unique_ptr<llvm::MemoryBuffer>> input =
-      llvm::MemoryBuffer::getFileOrSTDIN(options.inputFile);
-  if (!input) {
-    llvm::errs() << "wavec: cannot read `" << options.inputFile
-                 << "`: " << input.getError().message() << "\n";
+  std::string preprocessedSource;
+  if (!readAndPreprocessSource(options, preprocessedSource))
     return 1;
-  }
-
-  FrontendResult result;
-  if (!result.arena.valid()) {
-    llvm::errs() << "wavec: failed to allocate frontend arena\n";
-    return 1;
-  }
-  diag_list_init(&result.diags, &result.arena.arena);
-
-  bool ok = parseSource(result, (*input)->getBuffer());
-  if (ok)
-    ok = compileToOutput(result, options);
-  if (!ok) {
-    llvm::StringRef name =
-        options.inputFile == "-" ? "<stdin>" : options.inputFile;
-    printDiagnostics(name, result.diags);
-    return 1;
-  }
-  return 0;
+  if (options.emitKind == EmitKind::Preprocessed)
+    return writeOutput(options, preprocessedSource, /*binary=*/false) ? 0 : 1;
+  return compilePreprocessedSource(options, preprocessedSource) ? 0 : 1;
 }

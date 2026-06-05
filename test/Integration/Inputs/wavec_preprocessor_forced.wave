@@ -1,0 +1,14 @@
+#ifndef W
+#error missing W
+#endif
+
+#ifndef PP_FORCED_OFFSET
+#error missing forced include
+#endif
+
+kernel [[amdgpu_wave_size(W)]]
+void pp_forced(uint32_t *out) {
+  simd<uint32_t, W> lane = lane_id<W>();
+  simd<uint32_t, W> value = lane + PP_FORCED_OFFSET;
+  store(value, out + lane);
+}

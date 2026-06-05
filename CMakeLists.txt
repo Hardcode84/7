@@ -30,10 +30,11 @@ list(PREPEND CMAKE_PREFIX_PATH "${LLVM_INSTALL_DIR}")
 
 find_package(LLVM CONFIG)
 find_package(MLIR CONFIG)
+find_package(Clang CONFIG)
 find_package(LLD CONFIG)
-if(NOT LLVM_FOUND OR NOT MLIR_FOUND)
+if(NOT LLVM_FOUND OR NOT MLIR_FOUND OR NOT Clang_FOUND)
   message(FATAL_ERROR
-    "Could not find LLVM/MLIR at '${LLVM_INSTALL_DIR}'.\n"
+    "Could not find LLVM/MLIR/Clang at '${LLVM_INSTALL_DIR}'.\n"
     "Build it first:\n"
     "    python build_tools/build_llvm.py\n"
     "Or point at an existing install:\n"
@@ -47,6 +48,7 @@ endif()
 
 message(STATUS "Using LLVMConfig.cmake in: ${LLVM_DIR}")
 message(STATUS "Using MLIRConfig.cmake in: ${MLIR_DIR}")
+message(STATUS "Using ClangConfig.cmake in: ${Clang_DIR}")
 
 list(APPEND CMAKE_MODULE_PATH "${MLIR_CMAKE_DIR}")
 list(APPEND CMAKE_MODULE_PATH "${LLVM_CMAKE_DIR}")
