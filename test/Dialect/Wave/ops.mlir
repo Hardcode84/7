@@ -216,6 +216,17 @@ func.func @wave_cast_ops(%vf32: !wave.simd<f32, 32>, %vf16: !wave.simd<f16, 32>,
   func.return
 }
 
+// CHECK-LABEL: func.func @wave_ptr_cast_ops
+// CHECK-SAME: ([[PTR:%.*]]: !wave.ptr<#wave.global, f32>, [[VPTR:%.*]]: !wave.simd<!wave.ptr<#wave.global, f32>, 32>)
+func.func @wave_ptr_cast_ops(%ptr: !wave.ptr<#wave.global, f32>,
+                             %vptr: !wave.simd<!wave.ptr<#wave.global, f32>, 32>) {
+  // CHECK: [[VEC_PTR:%.*]] = wave.ptr_cast [[PTR]] : !wave.ptr<#wave.global, f32> -> !wave.ptr<#wave.global, vector<8xf32>>
+  %vec_ptr = wave.ptr_cast %ptr : !wave.ptr<#wave.global, f32> -> !wave.ptr<#wave.global, vector<8xf32>>
+  // CHECK: [[SIMD_VEC_PTR:%.*]] = wave.ptr_cast [[VPTR]] : !wave.simd<!wave.ptr<#wave.global, f32>, 32> -> !wave.simd<!wave.ptr<#wave.global, vector<8xf32>>, 32>
+  %simd_vec_ptr = wave.ptr_cast %vptr : !wave.simd<!wave.ptr<#wave.global, f32>, 32> -> !wave.simd<!wave.ptr<#wave.global, vector<8xf32>>, 32>
+  func.return
+}
+
 // CHECK-LABEL: func.func @wave_packed_cast_ops
 // CHECK-SAME: ([[VF32:%.*]]: !wave.simd<vector<2xf32>, 32>, [[VF16:%.*]]: !wave.simd<vector<2xf16>, 32>)
 func.func @wave_packed_cast_ops(%vf32: !wave.simd<vector<2xf32>, 32>,

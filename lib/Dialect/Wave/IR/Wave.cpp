@@ -508,6 +508,44 @@ LogicalResult CastOp::verify() {
   return verifyWaveCastPolicy(*this, *source, *result, *policy);
 }
 
+namespace {
+struct WavePtrCastShape {
+  PtrType ptr;
+  std::optional<int64_t> simdWidth;
+};
+} // namespace
+
+static FailureOr<WavePtrCastShape> classifyWavePtrCastType(
+    Type type, function_ref<InFlightDiagnostic(const Twine &)> emitError) {
+  std::optional<int64_t> simdWidth;
+  if (SimdType simdType = dyn_cast<SimdType>(type)) {
+    simdWidth = simdType.getWidth();
+    type = simdType.getElementType();
+  }
+  PtrType ptr = dyn_cast<PtrType>(type);
+  if (!ptr)
+    return emitError(
+        "ptr_cast type must be a wave pointer or SIMD of pointers");
+  return WavePtrCastShape{ptr, simdWidth};
+}
+
+LogicalResult PtrCastOp::verify() {
+  auto emit = [this](const Twine &msg) { return emitOpError(msg); };
+  FailureOr<WavePtrCastShape> source =
+      classifyWavePtrCastType(getSource().getType(), emit);
+  FailureOr<WavePtrCastShape> result =
+      classifyWavePtrCastType(getResult().getType(), emit);
+  if (failed(source) || failed(result))
+    return failure();
+  if (source->simdWidth.has_value() != result->simdWidth.has_value())
+    return emitOpError("source and result must both be scalar or both be SIMD");
+  if (source->simdWidth && *source->simdWidth != *result->simdWidth)
+    return emitOpError("source and result SIMD widths must match");
+  if (source->ptr.getAddressSpace() != result->ptr.getAddressSpace())
+    return emitOpError("source and result address spaces must match");
+  return success();
+}
+
 static VectorType getWaveVectorPayloadType(Type type) {
   if (SimdType simdType = dyn_cast<SimdType>(type))
     return cast<VectorType>(simdType.getElementType());

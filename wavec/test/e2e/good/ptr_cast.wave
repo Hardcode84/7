@@ -1,0 +1,7 @@
+kernel [[amdgpu_wave_size(32)]]
+void ptr_cast(float *base) {
+  vector<float, 4> *vec = cast<vector<float, 4> *>(base);
+  simd<uint32_t, 32> lane = lane_id<32>();
+  simd<vector<float, 4>, 32> value = load(vec + lane);
+  store(value, vec + lane);
+}

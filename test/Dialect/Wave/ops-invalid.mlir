@@ -400,6 +400,22 @@ func.func @cast_non_numeric(%p: !wave.ptr<#wave.global, i32>) {
 
 // -----
 
+func.func @ptr_cast_non_pointer(%x: i32) {
+  // expected-error @+1 {{ptr_cast type must be a wave pointer or SIMD of pointers}}
+  %r = wave.ptr_cast %x : i32 -> !wave.ptr<#wave.global, i32>
+  return
+}
+
+// -----
+
+func.func @ptr_cast_address_space_mismatch(%p: !wave.ptr<#wave.global, i32>) {
+  // expected-error @+1 {{source and result address spaces must match}}
+  %r = wave.ptr_cast %p : !wave.ptr<#wave.global, i32> -> !wave.ptr<#wave.shared, i32>
+  return
+}
+
+// -----
+
 func.func @cast_unknown_policy(%x: f32) {
   // expected-error @+1 {{unknown policy field 'round'}}
   %r = wave.cast fpconvert %x policy {round = #wave.cast_rounding<rne>} : f32 -> f16

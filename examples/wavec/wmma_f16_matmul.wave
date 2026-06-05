@@ -1,0 +1,65 @@
+// SPDX-FileCopyrightText: 2026 wave-mlir contributors
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+
+#ifndef W
+#define W 32
+#endif
+
+#ifndef M
+#define M 16
+#endif
+
+#ifndef N
+#define N 16
+#endif
+
+#ifndef K
+#define K 16
+#endif
+
+#ifndef K_TILES
+#define K_TILES 1
+#endif
+
+#ifndef N_TILES
+#define N_TILES 1
+#endif
+
+#define A_FRAG fragment<0, half, 16, 16, W, 8>
+#define B_FRAG fragment<1, half, 16, 16, W, 8>
+#define C_FRAG fragment<2, float, 16, 16, W, 8>
+#define FRAG_REGS simd<vector<int32_t, 8>, W>
+#define FRAG_PTR vector<int32_t, 8> *
+
+kernel [[amdgpu_wave_size(W)]]
+       [[amdgpu_workgroup_size(W)]]
+void wavec_wmma_f16_matmul(half *a, half *b, float *c) {
+  uint32_t tile_m = workgroup_id<0>();
+  uint32_t tile_n = workgroup_id<1>();
+  simd<uint32_t, W> lane = lane_id<W>();
+  mask<W> active = lane < 32;
+  where (active) {
+    FRAG_PTR a_frag_ptr = cast<FRAG_PTR>(a);
+    FRAG_PTR b_frag_ptr = cast<FRAG_PTR>(b);
+    FRAG_PTR c_frag_ptr = cast<FRAG_PTR>(c);
+
+    C_FRAG acc = fragment_fill<C_FRAG>(0);
+    for uint32_t kt in 0 .. K_TILES {
+      simd<uint32_t, W> row = lane & 15;
+      uint32_t a_tile_base = tile_m * 16 * K_TILES;
+      uint32_t b_tile_base = tile_n * 16 * K_TILES;
+      simd<uint32_t, W> a_index = a_tile_base + row * K_TILES + kt;
+      simd<uint32_t, W> b_index = b_tile_base + row * K_TILES + kt;
+
+      FRAG_REGS a_regs = load(a_frag_ptr + a_index);
+      FRAG_REGS b_regs = load(b_frag_ptr + b_index);
+      A_FRAG af = fragment_pack<A_FRAG>(a_regs);
+      B_FRAG bf = fragment_pack<B_FRAG>(b_regs);
+      acc = mma_wmma_f32_16x16x16_f16(af, bf, acc);
+    }
+
+    uint32_t c_tile_base = (tile_m * N_TILES + tile_n) * 32;
+    FRAG_REGS regs = fragment_unpack(acc);
+    store(regs, c_frag_ptr + c_tile_base + lane);
+  }
+}

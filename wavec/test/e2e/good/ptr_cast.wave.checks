@@ -1,0 +1,7 @@
+// CHECK-LABEL: func.func @ptr_cast
+// CHECK-SAME: ([[BASE:%.*]]: !wave.ptr<#wave.global, f32>)
+// CHECK: [[CAST:%.*]] = wave.ptr_cast [[BASE]] : !wave.ptr<#wave.global, f32> -> !wave.ptr<#wave.global, vector<4xf32>>
+// CHECK: [[PTRS:%.*]] = wave.ptr_add [[CAST]]
+// CHECK: [[VALUE:%.*]], [[TOKEN:%.*]] = wave.load [[PTRS]]
+// CHECK-SAME: -> (!wave.simd<vector<4xf32>, 32>, !wave.mem.token)
+// CHECK: wave.store [[VALUE]] -> {{%.*}}

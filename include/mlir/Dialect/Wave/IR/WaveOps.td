@@ -174,6 +174,14 @@ def Wave_CastOp : Wave_Op<"cast", [Pure]> {
   let hasVerifier = 1;
 }
 
+def Wave_PtrCastOp : Wave_Op<"ptr_cast", [Pure]> {
+  let summary = "reinterpret a Wave pointer element type";
+  let arguments = (ins AnyType:$source);
+  let results = (outs AnyType:$result);
+  let assemblyFormat = "$source attr-dict `:` type($source) `->` type($result)";
+  let hasVerifier = 1;
+}
+
 def Wave_SelectOp : Wave_Op<"select", [
     Pure, AllTypesMatch<["true_value", "false_value", "result"]>]> {
   let summary = "select a Wave value";

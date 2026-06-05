@@ -1387,6 +1387,7 @@ LogicalResult WaveAMDMachineSelector::selectOperation(Operation *op) {
       .Case<SelectOp>([&](auto o) { return selectSelect(o); })
       .Case<BallotOp>([&](auto o) { return selectBallot(o); })
       .Case<ReadFirstOp>([&](auto o) { return selectReadFirst(o); })
+      .Case<PtrCastOp>([&](auto o) { return selectPtrCast(o); })
       .Case<PtrAddOp>([&](auto o) { return selectPtrAdd(o); })
       .Case<waveamd::MakeBufferOp>([&](auto o) { return selectMakeBuffer(o); })
       .Case<TokenOp>([&](auto o) { return selectToken(o); })
@@ -3220,6 +3221,27 @@ LogicalResult WaveAMDMachineSelector::selectPtrAdd(PtrAddOp op) {
   pointerIndexOffsets[op.getResult()] = std::move(*symbolic);
   pointerBuffers[op.getResult()] = pointerBuffers.lookup(op.getBase());
   values[op.getResult()] = base->baseValue;
+  eraseIfTopLevel(op);
+  return success();
+}
+
+LogicalResult WaveAMDMachineSelector::selectPtrCast(PtrCastOp op) {
+  auto baseIt = pointerBases.find(op.getSource());
+  auto offsetIt = pointerIndexOffsets.find(op.getSource());
+  if (baseIt == pointerBases.end() || offsetIt == pointerIndexOffsets.end())
+    return op.emitError(
+        "WaveAMDMachine backend expects selected source pointer");
+
+  Value baseValue = baseIt->second;
+  Value globalBase = pointerGlobalBases.lookup(op.getSource());
+  PointerOffset offset = offsetIt->second;
+  bool isBuffer = pointerBuffers.lookup(op.getSource());
+  pointerBases[op.getResult()] = baseValue;
+  if (globalBase)
+    pointerGlobalBases[op.getResult()] = globalBase;
+  pointerIndexOffsets[op.getResult()] = std::move(offset);
+  pointerBuffers[op.getResult()] = isBuffer;
+  values[op.getResult()] = baseValue;
   eraseIfTopLevel(op);
   return success();
 }

@@ -1108,9 +1108,10 @@ static TypeRef *cast_target_type(Checker *c, Expr *e) {
     err(c, e->span, "cast<T> takes exactly one type argument");
     return NULL;
   }
+  if (is_pointer(tgt))
+    return tgt;
   if (!is_scalar(tgt) || !sk_is_numeric(tgt->scalar)) {
-    err(c, e->span,
-        "cast<T>: target T must be a numeric scalar (half/float/sized int)");
+    err(c, e->span, "cast<T>: target T must be a numeric scalar or pointer");
     return NULL;
   }
   return tgt;
@@ -1138,6 +1139,20 @@ static int cast_source_element(Checker *c, Expr *arg, TypeRef *src,
   return 0;
 }
 
+static TypeRef *type_pointer_cast(Checker *c, Expr *e, Expr *arg, TypeRef *src,
+                                  TypeRef *tgt) {
+  if (!is_pointer(src)) {
+    err(c, arg->span, "cast<T*>: source must be a pointer");
+    return NULL;
+  }
+  if (src->is_shared != tgt->is_shared) {
+    err(c, e->span,
+        "cast<T*>: source and target pointers must use the same address space");
+    return NULL;
+  }
+  return copy_type(c, tgt);
+}
+
 static TypeRef *type_cast(Checker *c, Expr *e) {
   TypeRef *tgt;
   TypeRef *src;
@@ -1153,6 +1168,8 @@ static TypeRef *type_cast(Checker *c, Expr *e) {
   src = cast_source_type(c, arg);
   if (src == NULL)
     return NULL;
+  if (is_pointer(tgt))
+    return type_pointer_cast(c, e, arg, src, tgt);
   if (!cast_source_element(c, arg, src, &se))
     return NULL;
 

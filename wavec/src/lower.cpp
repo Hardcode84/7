@@ -1124,17 +1124,20 @@ static bool castSourceKind(const Expr *arg, ScalarKind *srcK) {
   return false;
 }
 
-static bool lowerCastCall(LowerCtx &lc, const Expr *e, MlirValue *out) {
-  const ExprCall &call = e->as.call;
-  SourceSpan span = exprSpan(e);
-  if (call.arg_count != 1 || call.garg_count != 1 ||
-      call.gargs[0].kind != GARG_TYPE) {
-    fail(lc, span, "lowering: cast expects cast<T>(value)");
+static bool lowerPointerCastCall(LowerCtx &lc, SourceSpan span, MlirValue v,
+                                 const TypeRef *rt, MlirValue *out) {
+  MlirType resTy = lowerType(lc, rt);
+  if (mlirTypeIsNull(resTy)) {
+    fail(lc, span, "lowering: unsupported pointer cast result type");
     return false;
   }
-  MlirValue v;
-  if (!lowerExpr(lc, call.args[0], &v))
-    return false;
+  MlirOperation op = buildOp(lc, "wave.ptr_cast", {v}, {resTy});
+  *out = op0(op);
+  return true;
+}
+
+static bool lowerNumericCastCall(LowerCtx &lc, const ExprCall &call,
+                                 SourceSpan span, MlirValue v, MlirValue *out) {
   const TypeRef *dstTypeRef = call.gargs[0].type;
   if (dstTypeRef->kind != TYPE_SCALAR) {
     fail(lc, span, "lowering: cast target must be a scalar element type");
@@ -1165,6 +1168,23 @@ static bool lowerCastCall(LowerCtx &lc, const Expr *e, MlirValue *out) {
   MlirOperation op = buildOp(lc, "wave.cast", {v}, {resTy}, attrs);
   *out = op0(op);
   return true;
+}
+
+static bool lowerCastCall(LowerCtx &lc, const Expr *e, MlirValue *out) {
+  const ExprCall &call = e->as.call;
+  SourceSpan span = exprSpan(e);
+  if (call.arg_count != 1 || call.garg_count != 1 ||
+      call.gargs[0].kind != GARG_TYPE) {
+    fail(lc, span, "lowering: cast expects cast<T>(value)");
+    return false;
+  }
+  MlirValue v;
+  if (!lowerExpr(lc, call.args[0], &v))
+    return false;
+  const TypeRef *rt = (const TypeRef *)e->sema_type;
+  if (rt != nullptr && rt->is_pointer)
+    return lowerPointerCastCall(lc, span, v, rt, out);
+  return lowerNumericCastCall(lc, call, span, v, out);
 }
 
 typedef bool (*LowerCallFn)(LowerCtx &, const Expr *, MlirValue *);

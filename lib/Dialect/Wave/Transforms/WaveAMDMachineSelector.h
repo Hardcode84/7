@@ -291,6 +291,7 @@ public:
   LogicalResult selectSelect(SelectOp op);
   LogicalResult selectBallot(BallotOp op);
   LogicalResult selectReadFirst(ReadFirstOp op);
+  LogicalResult selectPtrCast(PtrCastOp op);
   LogicalResult selectPtrAdd(PtrAddOp op);
   LogicalResult selectMakeBuffer(waveamd::MakeBufferOp op);
   LogicalResult selectToken(TokenOp op);
