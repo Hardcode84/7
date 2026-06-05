@@ -213,7 +213,6 @@ public:
   DenseMap<Value, Value> pointerGlobalBases;
   DenseMap<Value, PointerOffset> pointerIndexOffsets;
   DenseMap<Value, PointerOffset> indexOffsets;
-  DenseMap<Value, Value> mmaScaleScalarVGPRs;
   DenseMap<Value, bool> pointerBuffers;
   SmallVector<Operation *> opsToErase;
   DataFlowSolver rangeSolver;
