@@ -11,6 +11,8 @@
 // RUN:   | FileCheck %s --check-prefix=ASM
 // RUN: %python %S/../../../examples/wave/wmma_matmul_tiled.py --chip=gfx950 --kernel-profile=gfx950-sw-pipeline --m=128 --n=128 --k=64 --dump-asm 2>/dev/null \
 // RUN:   | FileCheck %s --check-prefix=ASMBUF
+// RUN: %python %S/../../../examples/wave/wmma_matmul_tiled.py --chip=gfx950 --kernel-profile=gfx950-f16-256x256-16wave --m=1024 --n=512 --k=64 2>/dev/null \
+// RUN:   | FileCheck %s --check-prefix=PROFILE256
 // RUN: %python %S/../../../examples/wave/wmma_matmul_tiled.py --chip=gfx950 --kernel-profile=gfx950-sw-pipeline --m=128 --n=128 --k=192 --dump-asm 2>/dev/null \
 // RUN:   | FileCheck %s --check-prefix=ASMPIPE
 // RUN: %python %S/../../../examples/wave/wmma_matmul_tiled.py --chip=gfx950 --m=16 --n=16 --k=32 --matrix-intrinsic=mfma_gfx950 --input-type=bf16 --dump-asm 2>/dev/null \
@@ -60,6 +62,12 @@
 // ASMBUF-LABEL: wmma_f16_matmul_tiled:
 // ASMBUF: buffer_load_dwordx4
 // ASMBUF: buffer_store_dwordx4
+
+// PROFILE256-LABEL: func.func @wmma_f16_matmul_tiled
+// PROFILE256-SAME: wave.dynamic_lds_size = 65536
+// PROFILE256: waveamd.make_buffer
+// PROFILE256: waveamd.dma_load_lds
+// PROFILE256: waveamd.mma "mfma.f32.16x16x32.f16"
 
 // ASMPIPE-LABEL: wmma_f16_matmul_tiled:
 // ASMPIPE: s_waitcnt vmcnt(8)

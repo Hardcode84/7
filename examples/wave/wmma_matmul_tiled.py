@@ -62,6 +62,26 @@ _GFX950_SW_PIPELINE = {
     "matrix_intrinsic": "mfma_gfx950",
 }
 
+_GFX950_F16_256X256_16WAVE = {
+    "bm": 4,
+    "bn": 4,
+    "wave_m_tiles": 4,
+    "wave_n_tiles": 4,
+    "wave_k_tiles": 1,
+    "use_buffer": True,
+    "use_dma_lds": True,
+    "matrix_intrinsic": "mfma_gfx950",
+    "input_type": "f16",
+    "output_type": "f16",
+    "cta_swizzle_xcds": 8,
+    "cta_group_m": 4,
+}
+
+_KERNEL_PROFILES = {
+    "gfx950-sw-pipeline": _GFX950_SW_PIPELINE,
+    "gfx950-f16-256x256-16wave": _GFX950_F16_256X256_16WAVE,
+}
+
 _DEFAULT_ATOL = 1.0e-3
 _DEFAULT_RTOL = 1.0e-3
 
@@ -127,7 +147,7 @@ def _add_tile_args(parser: argparse.ArgumentParser) -> None:
 def _add_codegen_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--kernel-profile",
-        choices=("manual", "gfx950-sw-pipeline"),
+        choices=("manual", *_KERNEL_PROFILES),
         default="manual",
         help="preload a high-level kernel shape; manual leaves tile args unchanged",
     )
@@ -198,8 +218,8 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     _add_codegen_args(parser)
     _add_runner_args(parser)
     args = parser.parse_args(argv)
-    if args.kernel_profile == "gfx950-sw-pipeline":
-        for name, value in _GFX950_SW_PIPELINE.items():
+    if args.kernel_profile != "manual":
+        for name, value in _KERNEL_PROFILES[args.kernel_profile].items():
             setattr(args, name, value)
     if args.target_waves < 0:
         parser.error("--target-waves must be non-negative")

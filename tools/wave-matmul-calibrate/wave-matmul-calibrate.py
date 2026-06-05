@@ -70,6 +70,33 @@ PRESSURE_BUDGET_OPTIONS = (
     ("pressure-critical-sgpr-budget", "pressure_critical_sgpr_budget"),
 )
 
+KERNEL_PROFILES = {
+    "gfx950-sw-pipeline": {
+        "bm": 2,
+        "bn": 2,
+        "wave_m_tiles": 4,
+        "wave_n_tiles": 4,
+        "wave_k_tiles": 2,
+        "use_buffer": True,
+        "use_dma_lds": True,
+        "matrix_intrinsic": "mfma_gfx950",
+    },
+    "gfx950-f16-256x256-16wave": {
+        "bm": 4,
+        "bn": 4,
+        "wave_m_tiles": 4,
+        "wave_n_tiles": 4,
+        "wave_k_tiles": 1,
+        "use_buffer": True,
+        "use_dma_lds": True,
+        "matrix_intrinsic": "mfma_gfx950",
+        "input_type": "f16",
+        "output_type": "f16",
+        "cta_swizzle_xcds": 8,
+        "cta_group_m": 4,
+    },
+}
+
 
 def add_pressure_budget_options(
     options: dict[str, bool | int | str], args: argparse.Namespace
@@ -712,6 +739,12 @@ def parse_variants(text: str) -> list[Variant]:
 def build_argparser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--chip", default="", help="gfx target; default from rocminfo")
+    ap.add_argument(
+        "--kernel-profile",
+        choices=("manual", *KERNEL_PROFILES),
+        default="manual",
+        help="preload a known kernel shape; manual leaves tile args unchanged",
+    )
     ap.add_argument("--m", type=int, default=32)
     ap.add_argument("--n", type=int, default=32)
     ap.add_argument("--k", type=int, default=32)
@@ -775,6 +808,13 @@ def build_argparser() -> argparse.ArgumentParser:
     return ap
 
 
+def apply_kernel_profile(args: argparse.Namespace) -> None:
+    if args.kernel_profile == "manual":
+        return
+    for name, value in KERNEL_PROFILES[args.kernel_profile].items():
+        setattr(args, name, value)
+
+
 def validate_mxfp4_args(args: argparse.Namespace) -> None:
     if args.input_type == "mxfp4":
         if args.chip != "gfx950":
@@ -806,6 +846,7 @@ def validate_args(args: argparse.Namespace) -> None:
 
 def main() -> int:
     args = build_argparser().parse_args()
+    apply_kernel_profile(args)
     chip = resolve_chip(args)
     validate_args(args)
     variants = args.variants
