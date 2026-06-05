@@ -383,8 +383,6 @@ def _validate_dma_lds_shape(cfg: _MatmulConfig) -> None:
 def _validate_mxfp4_shape(cfg: _MatmulConfig) -> None:
     if not cfg.uses_packed_mxfp4:
         return
-    if cfg.wave_k_tiles != 1:
-        raise ValueError("MXFP4 scaled MFMA currently supports wave_k_tiles=1")
 
 
 _KERNEL_NAME = "wmma_f16_matmul_tiled"
@@ -1471,6 +1469,19 @@ def _read_mxfp4_scale_tile(
     return value, token
 
 
+def _mxfp4_raw_k_step(
+    bld: dsl.FunctionBuilder, cfg: _MatmulConfig, step: dsl.Value | int, k: int
+) -> dsl.Value | int:
+    if cfg.wave_k_tiles == 1 and k == 0:
+        return step
+    if isinstance(step, int):
+        return step * cfg.wave_k_tiles + k
+    scaled = bld.muli(step, bld.constant(dsl.i32(), cfg.wave_k_tiles))
+    if k != 0:
+        scaled = bld.addi(scaled, bld.constant(dsl.i32(), k))
+    return bld.assume_range(scaled, k, cfg.k_steps - 1)
+
+
 def _initial_loop_args(
     bld: dsl.FunctionBuilder,
     cfg: _MatmulConfig,
@@ -1631,53 +1642,70 @@ def _emit_mxfp4_mma_grid(
     scale_after: dsl.Value | None,
     scale_tokens: list[dsl.Value] | None,
 ) -> tuple[dsl.Value, ...]:
-    layout, scale_token = _stage_mxfp4_scale_tiles(
-        bld, cfg, coords, scale_step, lds_offset=scale_lds_offset, after=scale_after
-    )
     index = IndexType.get()
-    c0 = bld.constant(index, 0)
     a_outer_type = PTupleType(afs[0].type)
     b_outer_type = PTupleType(bfs[0].type)
     a_row_type = a_outer_type.element_type
     b_row_type = b_outer_type.element_type
     af_type = PTupleType(a_row_type).element_type
     bf_type = PTupleType(b_row_type).element_type
-    a_row = wavemeta.TupleGetOp(a_row_type, afs[0], c0).result
-    b_row = wavemeta.TupleGetOp(b_row_type, bfs[0], c0).result
-
-    read_tokens: list[dsl.Value] = []
-    a_scales: list[dsl.Value] = []
-    for i in range(cfg.wave_m_tiles):
-        a_tile = layout.m_wave * cfg.wave_m_tiles + i
-        scale, token = _read_mxfp4_scale_tile(
-            bld, cfg, layout, a_tile, scale_token, lds_offset=scale_lds_offset
-        )
-        a_scales.append(scale)
-        read_tokens.append(token)
-
-    b_scales: list[dsl.Value] = []
-    b_scale_base = cfg.BM * cfg.wave_m_tiles
-    for j in range(cfg.wave_n_tiles):
-        b_tile = b_scale_base + layout.n_wave * cfg.wave_n_tiles + j
-        scale, token = _read_mxfp4_scale_tile(
-            bld, cfg, layout, b_tile, scale_token, lds_offset=scale_lds_offset
-        )
-        b_scales.append(scale)
-        read_tokens.append(token)
-    if scale_tokens is not None:
-        scale_tokens.append(_join_tokens(bld, read_tokens))
 
     new_accs = list(accs)
-    for i in range(cfg.wave_m_tiles):
-        i_c = bld.constant(index, i)
-        af = wavemeta.TupleGetOp(af_type, a_row, i_c).result
-        for j in range(cfg.wave_n_tiles):
-            j_c = bld.constant(index, j)
-            bf = wavemeta.TupleGetOp(bf_type, b_row, j_c).result
-            acc_idx = i * cfg.wave_n_tiles + j
-            new_accs[acc_idx] = bld.mma_scale(
-                cfg.mma.kind, af, a_scales[i], bf, b_scales[j], new_accs[acc_idx]
+    next_scale_after = scale_after
+    for k in range(cfg.wave_k_tiles):
+        raw_step = _mxfp4_raw_k_step(bld, cfg, scale_step, k)
+        layout, scale_token = _stage_mxfp4_scale_tiles(
+            bld,
+            cfg,
+            coords,
+            raw_step,
+            lds_offset=scale_lds_offset,
+            after=next_scale_after,
+        )
+
+        read_tokens: list[dsl.Value] = []
+        a_scales: list[dsl.Value] = []
+        for i in range(cfg.wave_m_tiles):
+            a_tile = layout.m_wave * cfg.wave_m_tiles + i
+            scale, token = _read_mxfp4_scale_tile(
+                bld, cfg, layout, a_tile, scale_token, lds_offset=scale_lds_offset
             )
+            a_scales.append(scale)
+            read_tokens.append(token)
+
+        b_scales: list[dsl.Value] = []
+        b_scale_base = cfg.BM * cfg.wave_m_tiles
+        for j in range(cfg.wave_n_tiles):
+            b_tile = b_scale_base + layout.n_wave * cfg.wave_n_tiles + j
+            scale, token = _read_mxfp4_scale_tile(
+                bld, cfg, layout, b_tile, scale_token, lds_offset=scale_lds_offset
+            )
+            b_scales.append(scale)
+            read_tokens.append(token)
+
+        read_token = _join_tokens(bld, read_tokens)
+        next_scale_after = read_token
+        if scale_tokens is not None:
+            scale_tokens.append(read_token)
+
+        k_c = bld.constant(index, k)
+        a_row = wavemeta.TupleGetOp(a_row_type, afs[0], k_c).result
+        b_row = wavemeta.TupleGetOp(b_row_type, bfs[0], k_c).result
+        for i in range(cfg.wave_m_tiles):
+            i_c = bld.constant(index, i)
+            af = wavemeta.TupleGetOp(af_type, a_row, i_c).result
+            for j in range(cfg.wave_n_tiles):
+                j_c = bld.constant(index, j)
+                bf = wavemeta.TupleGetOp(bf_type, b_row, j_c).result
+                acc_idx = i * cfg.wave_n_tiles + j
+                new_accs[acc_idx] = bld.mma_scale(
+                    cfg.mma.kind,
+                    af,
+                    a_scales[i],
+                    bf,
+                    b_scales[j],
+                    new_accs[acc_idx],
+                )
     return tuple(new_accs)
 
 

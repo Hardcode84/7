@@ -14,6 +14,8 @@
 // RUN:   | FileCheck %s --check-prefix=PIPE3
 // RUN: %python %S/../../examples/wave/wmma_matmul_tiled.py --chip=%chip --m=16 --n=16 --k=256 --matrix-intrinsic=mfma_gfx950 --input-type=mxfp4 --use-dma-lds --random-data --compare-cpu \
 // RUN:   | FileCheck %s --check-prefix=DMA-MXFP4
+// RUN: %python %S/../../examples/wave/wmma_matmul_tiled.py --chip=%chip --m=16 --n=16 --k=256 --matrix-intrinsic=mfma_gfx950 --input-type=mxfp4 --wave-k-tiles=2 --use-dma-lds --random-data --compare-cpu \
+// RUN:   | FileCheck %s --check-prefix=DMA-MXFP4-K2
 //
 // DMA: CPU comparison passed
 // DMA-F16: CPU comparison passed
@@ -22,3 +24,4 @@
 // PIPE: CPU comparison passed
 // PIPE3: CPU comparison passed
 // DMA-MXFP4: CPU comparison passed
+// DMA-MXFP4-K2: CPU comparison passed

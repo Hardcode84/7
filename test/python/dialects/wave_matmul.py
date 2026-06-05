@@ -138,9 +138,10 @@ print(module_bf16)
 module_mxfp4 = build_wmma_f16_matmul_module(
     M=32,
     N=32,
-    K=128,
+    K=256,
     wave_m_tiles=2,
     wave_n_tiles=2,
+    wave_k_tiles=2,
     matrix_intrinsic="mfma_gfx950",
     input_type="mxfp4",
 )
@@ -233,7 +234,7 @@ print(static_bld.module)
 # CHECK-SAME: !wave.simd<i8, 64>
 # CHECK: waveamd.transpose_load
 # CHECK-SAME: -> (!wave.simd<vector<8xi8>, 64>, !wave.mem.token)
-# CHECK-COUNT-4: waveamd.mma_scale "mfma.scale.f32.16x16x128.f4.f4"
+# CHECK-COUNT-8: waveamd.mma_scale "mfma.scale.f32.16x16x128.f4.f4"
 # CHECK-SAME: !wave.simd<vector<8xi8>, 64>
 # CHECK-SAME: !wave.simd<vector<8xi8>, 64>
 # CHECK-LABEL: func.func @static_matmul_kernel
