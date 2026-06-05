@@ -482,6 +482,88 @@ func.func @store_writedata_overwrite_delay(
   return
 }
 
+// CHECK-LABEL: func.func @store_b32_writedata_no_delay
+// CHECK: waveamdmachine.global_store_b32
+// CHECK-NEXT: waveamdmachine.v_add_u32
+func.func @store_b32_writedata_no_delay(
+    %off: !waveamdmachine.reg<vgpr, 1, 0>,
+    %data: !waveamdmachine.reg<vgpr, 1, 8>,
+    %base: !waveamdmachine.reg<sgpr, 2, 0>,
+    %x: !waveamdmachine.reg<vgpr, 1, 30>,
+    %s: !waveamdmachine.reg<sgpr, 1, 2>) {
+  %tok = waveamdmachine.global_store_b32 %off, %data, %base
+      : (!waveamdmachine.reg<vgpr, 1, 0>, !waveamdmachine.reg<vgpr, 1, 8>,
+         !waveamdmachine.reg<sgpr, 2, 0>) -> !waveamdmachine.mem.token
+  %sum = waveamdmachine.v_add_u32 %x, %s
+      : (!waveamdmachine.reg<vgpr, 1, 30>, !waveamdmachine.reg<sgpr, 1, 2>)
+      -> !waveamdmachine.reg<vgpr, 1, 8>
+  return
+}
+
+// CHECK-LABEL: func.func @store_b64_writedata_no_delay
+// CHECK: waveamdmachine.global_store_b64
+// CHECK-NEXT: waveamdmachine.v_add_u32
+func.func @store_b64_writedata_no_delay(
+    %off: !waveamdmachine.reg<vgpr, 1, 0>,
+    %data: !waveamdmachine.reg<vgpr, 2, 8>,
+    %base: !waveamdmachine.reg<sgpr, 2, 0>,
+    %x: !waveamdmachine.reg<vgpr, 1, 30>,
+    %s: !waveamdmachine.reg<sgpr, 1, 2>) {
+  %tok = waveamdmachine.global_store_b64 %off, %data, %base
+      : (!waveamdmachine.reg<vgpr, 1, 0>, !waveamdmachine.reg<vgpr, 2, 8>,
+         !waveamdmachine.reg<sgpr, 2, 0>) -> !waveamdmachine.mem.token
+  %sum = waveamdmachine.v_add_u32 %x, %s
+      : (!waveamdmachine.reg<vgpr, 1, 30>, !waveamdmachine.reg<sgpr, 1, 2>)
+      -> !waveamdmachine.reg<vgpr, 1, 9>
+  return
+}
+
+// CHECK-LABEL: func.func @buffer_store_writedata_sgpr_soffset_short_delay
+// CHECK: waveamdmachine.buffer_store_b128
+// CHECK-NEXT: waveamdmachine.imm 0
+// CHECK-NEXT: waveamdmachine.s_nop
+// CHECK-NEXT: waveamdmachine.v_add_u32
+func.func @buffer_store_writedata_sgpr_soffset_short_delay(
+    %off: !waveamdmachine.reg<vgpr, 1, 0>,
+    %data: !waveamdmachine.reg<vgpr, 4, 8>,
+    %desc: !waveamdmachine.reg<sgpr, 4, 0>,
+    %soff: !waveamdmachine.reg<sgpr, 1, 4>,
+    %x: !waveamdmachine.reg<vgpr, 1, 30>,
+    %s: !waveamdmachine.reg<sgpr, 1, 5>) {
+  %tok = waveamdmachine.buffer_store_b128 %off, %data, %desc, %soff
+      : (!waveamdmachine.reg<vgpr, 1, 0>, !waveamdmachine.reg<vgpr, 4, 8>,
+         !waveamdmachine.reg<sgpr, 4, 0>, !waveamdmachine.reg<sgpr, 1, 4>)
+      -> !waveamdmachine.mem.token
+  %sum = waveamdmachine.v_add_u32 %x, %s
+      : (!waveamdmachine.reg<vgpr, 1, 30>, !waveamdmachine.reg<sgpr, 1, 5>)
+      -> !waveamdmachine.reg<vgpr, 1, 9>
+  return
+}
+
+// CHECK-LABEL: func.func @buffer_store_writedata_sgpr_soffset_one_valu_gap
+// CHECK: waveamdmachine.buffer_store_b128
+// CHECK-NEXT: waveamdmachine.v_add_u32
+// CHECK-NEXT: waveamdmachine.v_cvt_f16_f32
+func.func @buffer_store_writedata_sgpr_soffset_one_valu_gap(
+    %off: !waveamdmachine.reg<vgpr, 1, 0>,
+    %data: !waveamdmachine.reg<vgpr, 4, 8>,
+    %desc: !waveamdmachine.reg<sgpr, 4, 0>,
+    %soff: !waveamdmachine.reg<sgpr, 1, 4>,
+    %x: !waveamdmachine.reg<vgpr, 1, 30>,
+    %s: !waveamdmachine.reg<sgpr, 1, 5>,
+    %src: !waveamdmachine.reg<vgpr, 1, 6>) {
+  %tok = waveamdmachine.buffer_store_b128 %off, %data, %desc, %soff
+      : (!waveamdmachine.reg<vgpr, 1, 0>, !waveamdmachine.reg<vgpr, 4, 8>,
+         !waveamdmachine.reg<sgpr, 4, 0>, !waveamdmachine.reg<sgpr, 1, 4>)
+      -> !waveamdmachine.mem.token
+  %sum = waveamdmachine.v_add_u32 %x, %s
+      : (!waveamdmachine.reg<vgpr, 1, 30>, !waveamdmachine.reg<sgpr, 1, 5>)
+      -> !waveamdmachine.reg<vgpr, 1, 1>
+  %half = waveamdmachine.v_cvt_f16_f32 %src
+      : (!waveamdmachine.reg<vgpr, 1, 6>) -> !waveamdmachine.reg<vgpr, 1, 9>
+  return
+}
+
 // CHECK-LABEL: func.func @valu_sgpr_to_vmem_delay
 // CHECK: waveamdmachine.v_cmp_eq_u32
 // CHECK-NEXT: waveamdmachine.imm 4

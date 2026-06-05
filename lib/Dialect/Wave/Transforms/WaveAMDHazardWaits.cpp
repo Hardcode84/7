@@ -222,10 +222,6 @@ getValuWriteExecMfmaLatency(const llvm::AMDGPU::IsaVersion &isa) {
   return isa.Major == 9 ? 4 : 0;
 }
 
-static unsigned getStoreWriteDataLatency(const llvm::AMDGPU::IsaVersion &isa) {
-  return isCDNA3Family(isa) || isCDNA4Family(isa) ? 2 : 1;
-}
-
 struct HazardConfig {
   bool hasDelayAlu;
   llvm::AMDGPU::IsaVersion isaVersion;
@@ -248,7 +244,6 @@ struct HazardConfig {
   unsigned valuWriteSGPRValuReadLatency;
   unsigned valuWriteSGPRVmemReadLatency;
   unsigned valuWriteExecMfmaLatency;
-  unsigned storeWriteDataLatency;
 };
 
 // Insert `count` `s_nop`s right before `op`.
@@ -587,12 +582,49 @@ static bool isMfmaResultHazardConsumer(Operation *op) {
   return isVMEM(op) || issuesLdsWaitcnt(op) || isLegacyVALU(op);
 }
 
-static std::optional<Value> getWideStoreData(Operation *op) {
-  if (!isa<waveamdmachine::GlobalStoreB96Op, waveamdmachine::GlobalStoreB128Op,
-           waveamdmachine::BufferStoreB96Op, waveamdmachine::BufferStoreB128Op>(
+struct StoreWriteDataHazard {
+  Value data;
+  unsigned latency;
+};
+
+static bool isSGPROffset(Value value) {
+  waveamdmachine::RegType regType =
+      dyn_cast<waveamdmachine::RegType>(value.getType());
+  return regType && regType.getRegClass() == waveamdmachine::RegClass::SGPR;
+}
+
+static Value getWideBufferStoreSoffset(Operation *op) {
+  if (waveamdmachine::BufferStoreB96Op store =
+          dyn_cast<waveamdmachine::BufferStoreB96Op>(op))
+    return store.getSoffset();
+  if (waveamdmachine::BufferStoreB128Op store =
+          dyn_cast<waveamdmachine::BufferStoreB128Op>(op))
+    return store.getSoffset();
+  return {};
+}
+
+static unsigned
+getStoreWriteDataLatency(Operation *op,
+                         const llvm::AMDGPU::IsaVersion &isaVersion) {
+  if (!isCDNA3Family(isaVersion) && !isCDNA4Family(isaVersion))
+    return 1;
+  // LLVM gfx940-family keeps a shorter measured window for SGPR SOFFSET.
+  if (Value soffset = getWideBufferStoreSoffset(op);
+      soffset && isSGPROffset(soffset))
+    return 1;
+  return 2;
+}
+
+static std::optional<StoreWriteDataHazard>
+getStoreWriteDataHazard(Operation *op,
+                        const llvm::AMDGPU::IsaVersion &isaVersion) {
+  if (!llvm::isa<
+          waveamdmachine::GlobalStoreB96Op, waveamdmachine::GlobalStoreB128Op,
+          waveamdmachine::BufferStoreB96Op, waveamdmachine::BufferStoreB128Op>(
           op))
     return std::nullopt;
-  return op->getOperand(1);
+  return StoreWriteDataHazard{op->getOperand(1),
+                              getStoreWriteDataLatency(op, isaVersion)};
 }
 
 static unsigned getVGPRWriteHazardLimit(const HazardConfig &cfg) {
@@ -665,7 +697,7 @@ static unsigned getPhysicalDefWait(Operation *op, RegSpan def,
 
   if (hazard.kind == PhysicalHazardKind::StoreWriteData &&
       op->hasTrait<OpTrait::waveamdmachine::VALUOp>() && isVGPRSpan(def))
-    return waitForHazardAge(hazard, cfg.storeWriteDataLatency);
+    return waitForHazardAge(hazard, hazard.limit);
 
   return 0;
 }
@@ -784,12 +816,13 @@ static void addProducedValuPhysicalHazards(Operation *op, HazardState &state,
 
 static void addProducedStorePhysicalHazards(Operation *op, HazardState &state,
                                             const HazardConfig &cfg) {
-  std::optional<Value> data = getWideStoreData(op);
-  if (!data)
+  std::optional<StoreWriteDataHazard> hazard =
+      getStoreWriteDataHazard(op, cfg.isaVersion);
+  if (!hazard)
     return;
-  if (std::optional<RegSpan> span = getAllocatedRegSpan(*data))
+  if (std::optional<RegSpan> span = getAllocatedRegSpan(hazard->data))
     addPhysicalHazard(state, *span, PhysicalHazardKind::StoreWriteData,
-                      cfg.storeWriteDataLatency);
+                      hazard->latency);
 }
 
 static void addProducedPhysicalHazards(Operation *op, HazardState &state,
@@ -956,7 +989,6 @@ struct WaveAMDHazardWaitsPass
         getValuWriteSGPRValuReadLatency(isaVersion),
         /*valuWriteSGPRVmemReadLatency=*/getValuWriteSGPRVmemReadLatency(),
         /*valuWriteExecMfmaLatency=*/getValuWriteExecMfmaLatency(isaVersion),
-        /*storeWriteDataLatency=*/getStoreWriteDataLatency(isaVersion),
     };
     cfg.defaultLgkmcnt = llvm::AMDGPU::decodeLgkmcnt(
         cfg.isaVersion, llvm::AMDGPU::getWaitcntBitMask(cfg.isaVersion));
