@@ -20,6 +20,7 @@ set(WAVE_MLIR_TEST_DEPENDS
   wave-sim-report
   wave-symbols-test
   wave-translate
+  wavec
 )
 
 add_lit_testsuite(check-wave-mlir "Running the wave-mlir regression tests"

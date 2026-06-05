@@ -11,15 +11,26 @@ path = ["**/*.cpp", "**/*.h"]
 precedence = "aggregate"
 SPDX-FileCopyrightText = "2026 wave-mlir contributors"
 
+[[annotations]]
+path = ["wavec/**/*.cpp", "wavec/**/*.h"]
+precedence = "override"
+SPDX-FileCopyrightText = "2026 wave-mlir contributors"
+SPDX-License-Identifier = "Apache-2.0 WITH LLVM-exception"
+
 # File types where the upstream LLVM convention is to omit any SPDX header
 # (tests, examples, docs, CMakeLists, TableGen, some Python). We assert
 # project license and copyright via REUSE.toml.
 [[annotations]]
 path = [
+    "**/*.c",
     "**/*.td",
+    "**/*.cmake",
+    "**/*.checks",
     "**/*.py",
     "**/*.mlir",
     "**/*.rst",
+    "**/*.sh",
+    "**/*.wave",
     "**/CMakeLists.txt",
 ]
 precedence = "aggregate"

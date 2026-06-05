@@ -1,0 +1,3 @@
+// CHECK: scf.for {{.*}} iter_args([[ACC:%.*]] = {{.*}})
+// CHECK: scf.if
+// CHECK: wave.fadd [[ACC]], [[ACC]]

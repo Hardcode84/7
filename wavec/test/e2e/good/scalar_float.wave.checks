@@ -1,0 +1,3 @@
+// CHECK: arith.addf
+// CHECK: arith.mulf
+// CHECK: arith.subf

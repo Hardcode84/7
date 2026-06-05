@@ -54,6 +54,7 @@ list(APPEND CMAKE_MODULE_PATH "${LLVM_CMAKE_DIR}")
 include(TableGen)
 include(AddLLVM)
 include(AddMLIR)
+enable_testing()
 
 # Treat all warnings as errors. `HandleLLVMOptions` routes
 # `LLVM_ENABLE_WERROR` through `-Werror` on gcc/clang and `/WX` on
@@ -104,6 +105,7 @@ add_subdirectory(include)
 add_subdirectory(lib)
 add_subdirectory(runtime)
 add_subdirectory(tools)
+add_subdirectory(wavec)
 
 option(WAVE_ENABLE_PYTHON_BINDINGS
   "Build the Wave/WaveAMD MLIR Python bindings."

@@ -1,0 +1,26 @@
+// saxpy in the Wave C-family language (CFrontendDesign.md "Example").
+//
+// Lowers to the structure of wavec/test/golden/mlir/saxpy.mlir: wave.lane_id /
+// wave.workgroup_id, wave*32+lane, cmpi ult -> mask, wave.where, ptr_add +
+// load per operand, splat a -> fmul -> fadd, value-first store.
+//
+// The golden uses wave.workgroup_id 0 standing in for wave_id_in_grid
+// (saxpy_gen.py / CFrontendDesign.md "Lowering"), so this spells the wave id
+// as workgroup_id<0>(). The golden's source (saxpy_gen.py) also hoists the
+// per-lane addresses x+i / y+i into locals (a simd-of-pointers SSA value);
+// the surface type simd<float*,W> is not declarable, so these stay inline.
+// Faithful (non-CSE) lowering therefore emits the address ops inside the
+// where -- structurally the golden minus the hoist/CSE the backend does,
+// never the frontend.
+kernel [[amdgpu_wave_size(32)]]
+void saxpy(float *x, float *y, float a, uint32_t n) {
+  simd<uint32_t, 32> lane = lane_id<32>();
+  uint32_t           wave = workgroup_id<0>();
+  simd<uint32_t, 32> i    = wave * 32 + lane;
+  mask<32>           active = i < n;
+  where (active) {
+    simd<float, 32> xv = load(x + i);
+    simd<float, 32> yv = load(y + i);
+    store(a * xv + yv, y + i);
+  }
+}

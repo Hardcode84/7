@@ -1,0 +1,1 @@
+// CHECK: arith.constant -1 : i8

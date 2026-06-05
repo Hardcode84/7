@@ -1,0 +1,7 @@
+kernel [[amdgpu_wave_size(32)]]
+void neg(int32_t *out) {
+  simd<uint32_t,32> lane = lane_id<32>();
+  int8_t x = -1;
+  half h = -0.5f;
+  store(lane, out + lane);
+}

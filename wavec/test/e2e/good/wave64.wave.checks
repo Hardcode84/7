@@ -1,0 +1,1 @@
+// CHECK: wave.workitem_id 0 : !wave.simd<i32, 64>

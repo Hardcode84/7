@@ -1,0 +1,6 @@
+kernel [[amdgpu_wave_size(32)]]
+void sf(float x, float y) {
+  float c = x + y;
+  float d = c * x;
+  float e = d - y;
+}

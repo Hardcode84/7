@@ -1,0 +1,3 @@
+kernel [[amdgpu_wave_size(32)]] void k(simd<int32_t,32> a, simd<int32_t,32> b) {
+  simd<int32_t,32> c = a - b;
+}

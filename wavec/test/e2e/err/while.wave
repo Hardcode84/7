@@ -1,0 +1,3 @@
+kernel [[amdgpu_wave_size(32)]] void k(uint32_t n) {
+  while (n < 4) { }
+}

@@ -1,0 +1,2 @@
+kernel [[amdgpu_wave_size(16)]] void f(simd<float,16> a) {
+}

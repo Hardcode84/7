@@ -1,0 +1,5 @@
+kernel [[amdgpu_wave_size(32)]] void k() {
+  simd<uint32_t,32> l = lane_id<32>();
+  mask<32> m = l < l;
+  if (m) { }
+}

@@ -163,6 +163,7 @@ tools = [
     ToolSubst("not", unresolved="fatal"),
     ToolSubst("llvm-nm", unresolved="fatal"),
     ToolSubst("wave-calibrate-report", unresolved="fatal"),
+    ToolSubst("wavec", unresolved="fatal"),
     ToolSubst("wave-opt", unresolved="fatal"),
     ToolSubst("wave-sim-report", unresolved="fatal"),
     ToolSubst("wave-symbols-test", unresolved="fatal"),
