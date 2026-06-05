@@ -1,0 +1,4 @@
+kernel [[amdgpu_wave_size(32)]] void fragment_huge() {
+  fragment<2, float, 18446744073709551615, 16, 32, 8> acc =
+      fragment_fill<fragment<2, float, 18446744073709551615, 16, 32, 8>>(0);
+}

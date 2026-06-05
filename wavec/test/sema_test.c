@@ -1324,18 +1324,25 @@ static void test_reject_while_mask(void) {
   arena_destroy(&a);
 }
 
-/* fragment type is not supported -> clear error (not a fake pass). */
+/* fragment type shape is checked by sema. */
 static void test_reject_fragment(void) {
   Arena a = arena_create(1u << 18);
+  TypeRef *elem = ty_scalar(&a, SCALAR_HALF);
   TypeRef *frag = (TypeRef *)xalloc(&a, sizeof(TypeRef));
   Stmt **body = stmt_arr(&a, 1);
   Program *prog;
   frag->kind = TYPE_FRAGMENT;
+  frag->element = elem;
+  frag->fragment_role = 3;
+  frag->fragment_rows = 16;
+  frag->fragment_cols = 16;
+  frag->width = 32;
+  frag->fragment_registers = 8;
   frag->span = span0();
   body[0] = s_decl(&a, frag, "fr", e_int(&a, 0));
   prog = prog_wave(&a, 32, NULL, 0, body, 1);
-  expect_reject(&a, prog, "fragment types are not supported",
-                "fragment type rejected");
+  expect_reject(&a, prog, "fragment role must be 0, 1, or 2",
+                "invalid fragment role rejected");
   arena_destroy(&a);
 }
 

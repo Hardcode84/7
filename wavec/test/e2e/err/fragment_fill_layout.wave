@@ -1,0 +1,4 @@
+kernel [[amdgpu_wave_size(32)]] void fragment_fill_layout() {
+  fragment<0, float, 16, 16, 32, 8> a =
+      fragment_fill<fragment<0, float, 16, 16, 32, 8>>(0);
+}

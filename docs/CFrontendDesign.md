@@ -58,7 +58,9 @@ Uniformity is part of the type and is never inferred:
   `lds_base<T>(...)`. `#private` not in v1; `#buffer` is `#waveamd.buffer`
   (a target-dialect space), also out. (The spec writes
   `#global` as shorthand for the dialect's `#wave.global`.)
-- fragments for matmul -- later.
+- `fragment<role, T, M, N, W, R>` maps to `!waveamd.fragment`. Load/store
+  sugar stays macro-level: memory moves use `load`/`store` plus
+  `fragment_pack`/`fragment_unpack`.
 
 Generics are element-first: `simd<float, 32>`, `vector<float, 4>`. Surface
 sized ints (`int*_t`/`uint*_t`) and a builtin's `i32` result map to the same
@@ -129,7 +131,8 @@ per the verifier (`Wave.cpp` 388-418 -- three independent policies):
   (`int_to_fp` rounding defaults `rne`). `signedness` is rejected on
   `intconvert`, `extension` is rejected off widening intconvert.
 
-Later: `read_first`, `reduce_*`, `ballot`, `any`, fragment ops + `mma`.
+Implemented: `read_first`, fragment pack/unpack/fill, and explicit
+WMMA/MFMA builtin names. Open: `reduce_*`, `ballot`, `any`.
 
 ## Control flow
 
@@ -442,7 +445,7 @@ not legal, decides it.
 
 ## Stages
 
-v1 scope: saxpy + `if`/`for`/`while`. Matmul/fragments come later.
+v1 scope: saxpy + `if`/`for`/`while` plus fragment/MMA primitives.
 
 0. **Freeze the grammar** (EBNF) for the v1 subset -- drafted in
    [CFrontendGrammar.md](CFrontendGrammar.md). Pins the lexer rules (`<...>`
@@ -461,15 +464,15 @@ v1 scope: saxpy + `if`/`for`/`while`. Matmul/fragments come later.
    end to end: `wavec saxpy | wave-translate --wave-to-amdgpu-asm`, run,
    compare to a CPU saxpy.
 5. **Harden + grow**: in-memory MLIR C API (add
-   `mlirWaveTranslateToAMDGPUAsm`); then `read_first`/`ballot`/`reduce`,
-   then fragments + `mma` for matmul, then `wavemeta` params for tuning.
+   `mlirWaveTranslateToAMDGPUAsm`), reduction/ballot helpers, launch metadata,
+   and tuning params.
 
 ## Open decisions
 
 - IV/offset typing convention: when to prefer `index` vs sized ints for
   ids and loop bounds (style only; the mechanism is settled).
 - Operator/builtin surface beyond v1: spellings for
-  `read_first`/`reduce`/`ballot`/`any` and the fragment + `mma` surface.
+  `reduce`/`ballot`/`any` and launch/tuning metadata.
 
 ## References
 

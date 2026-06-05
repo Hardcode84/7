@@ -79,16 +79,16 @@ typedef enum ScalarKind {
  * constructors carrying an element TypeRef and a width/count; MASK
  * carries only a width. SCALAR uses the `scalar` field.
  *
- * FRAGMENT is reserved (no v1 production) -- present so the enum is
- * complete and the parser can emit a clean "fragment not supported"
- * error rather than a parse failure; its payload is unused in v1.
+ * FRAGMENT carries a wave-cooperative matrix fragment shape.
+ * VOID is an internal sema marker for value-less builtins such as wait.
  */
 typedef enum TypeKind {
-  TYPE_SCALAR,  /* bool/half/float/index/token + sized ints */
-  TYPE_SIMD,    /* simd<elem, width>  -> !wave.simd<T,W> */
-  TYPE_MASK,    /* mask<width>        -> !wave.mask<W>  */
-  TYPE_VECTOR,  /* vector<elem, count> -> vector<N x T> */
-  TYPE_FRAGMENT /* reserved; not produced in v1 */
+  TYPE_SCALAR,   /* bool/half/float/index/token + sized ints */
+  TYPE_SIMD,     /* simd<elem, width>  -> !wave.simd<T,W> */
+  TYPE_MASK,     /* mask<width>        -> !wave.mask<W>  */
+  TYPE_VECTOR,   /* vector<elem, count> -> vector<N x T> */
+  TYPE_FRAGMENT, /* fragment<role, elem, rows, cols, wave, regs> */
+  TYPE_VOID      /* internal sema marker, never parsed */
 } TypeKind;
 
 /*
@@ -97,7 +97,8 @@ typedef enum TypeKind {
  * allows exactly one star; `shared` requires the star -- a sema rule,
  * not enforced here). For SIMD/VECTOR, `element` points at the inner
  * type and `width` holds the int literal; for MASK only `width` is set;
- * for SCALAR only `scalar` is set.
+ * for FRAGMENT, `element`, `width`, and fragment_* hold the shape; for
+ * SCALAR only `scalar` is set.
  *
  * `width` is the literal value as written (the lexer/parser validate it
  * is a non-negative int_lit). The same TypeRef shape is reused for the
@@ -106,10 +107,14 @@ typedef enum TypeKind {
 struct TypeRef {
   TypeKind kind;
   ScalarKind scalar; /* valid when kind == TYPE_SCALAR */
-  TypeRef *element;  /* valid when kind == TYPE_SIMD/TYPE_VECTOR */
-  uint64_t width;    /* lanes (SIMD/MASK) or element count (VECTOR) */
-  int is_shared;     /* leading `shared` qualifier present */
-  int is_pointer;    /* trailing `*` present */
+  TypeRef *element;  /* valid when kind == TYPE_SIMD/TYPE_VECTOR/FRAGMENT */
+  uint64_t width;    /* lanes (SIMD/MASK/FRAGMENT) or element count (VECTOR) */
+  uint64_t fragment_role;
+  uint64_t fragment_rows;
+  uint64_t fragment_cols;
+  uint64_t fragment_registers;
+  int is_shared;  /* leading `shared` qualifier present */
+  int is_pointer; /* trailing `*` present */
   SourceSpan span;
 };
 

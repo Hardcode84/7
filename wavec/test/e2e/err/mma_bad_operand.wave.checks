@@ -1,0 +1,1 @@
+// CHECK: {{.*}}mma_bad_operand.wave:{{[0-9]+}}:{{[0-9]+}}: error: mma B operand does not match selected builtin

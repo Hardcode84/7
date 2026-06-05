@@ -248,7 +248,25 @@ static void dump_type_base(Builder *b, const TypeRef *t) {
     builder_putc(b, ')');
     break;
   case TYPE_FRAGMENT:
-    builder_puts(b, "fragment");
+    builder_puts(b, "(fragment ");
+    builder_put_u64(b, t->fragment_role);
+    builder_putc(b, ' ');
+    if (t->element != NULL)
+      dump_type_inner(b, t->element);
+    else
+      builder_puts(b, "?");
+    builder_putc(b, ' ');
+    builder_put_u64(b, t->fragment_rows);
+    builder_putc(b, ' ');
+    builder_put_u64(b, t->fragment_cols);
+    builder_putc(b, ' ');
+    builder_put_u64(b, t->width);
+    builder_putc(b, ' ');
+    builder_put_u64(b, t->fragment_registers);
+    builder_putc(b, ')');
+    break;
+  case TYPE_VOID:
+    builder_puts(b, "void");
     break;
   }
 }

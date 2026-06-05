@@ -1180,13 +1180,11 @@ static FailureOr<std::optional<Type>> getMemoryPointerElementType(
 static FailureOr<unsigned> getMemoryPointerElementBits(
     Type ptrElementType,
     function_ref<InFlightDiagnostic(const Twine &)> emitError) {
-  if (!ptrElementType.isIntOrFloat())
-    return emitError("pointer element type must be integer or float");
-  unsigned ptrBits = ptrElementType.getIntOrFloatBitWidth();
-  if (ptrBits != 8 && ptrBits != 16 && ptrBits != 32)
-    return emitError(
-        "only 8-, 16-, and 32-bit pointer element types are supported");
-  return ptrBits;
+  FailureOr<MemoryPayloadShape> shape =
+      getMemoryPayloadShape(ptrElementType, emitError);
+  if (failed(shape))
+    return failure();
+  return shape->payloadBits;
 }
 
 static LogicalResult verifyMemoryPayloadFitsPointer(

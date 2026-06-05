@@ -1,9 +1,9 @@
 # wave C-family frontend: v1 grammar
 
 Stage-0 artifact for [CFrontendDesign.md](CFrontendDesign.md). Covers the
-v1 subset: saxpy + `if`/`where`/`for`/`while` + explicit memory tokens. No
-fragments/`mma`, no user functions beyond `kernel`, no value-returning
-kernels.
+v1 subset: saxpy + `if`/`where`/`for`/`while`, explicit memory tokens, and
+fragment/MMA primitives. No user functions beyond `kernel`, no
+value-returning kernels.
 
 Notation: ISO EBNF. `=` defines, `,` concatenates, `|` alternates, `{ }`
 is zero-or-more, `[ ]` is optional, `" "` is a terminal, `(* *)` is a
@@ -44,12 +44,14 @@ int8_t  int16_t  int32_t  int64_t  uint8_t  uint16_t  uint32_t  uint64_t
 simd  mask  vector  fragment  shared
 ```
 
-Builtins (`lane_id`, `wave_id_in_grid`, `workgroup_id`, `workitem_id`,
-`load`, `store`, `barrier`, `wait`, `join`, `lds_base`, `index_cast`,
-`cast`) are **predeclared identifiers**, not reserved words; sema resolves
-them. Generic builtins (take `<...>`): `lane_id<W>`, `cast<T>`, `lds_base<T>`
-(later `read_first`/`reduce`). The empty-token seed is spelled `token()` --
-the `token` type used as a nullary constructor (see Grammar).
+Builtins (`lane_id`, `subgroup_id`, `wave_id_in_grid`, `workgroup_id`,
+`workitem_id`, `load`, `store`, `barrier`, `wait`, `join`, `lds_base`,
+`index_cast`, `cast`, `read_first`, `fragment_unpack`, and the explicit
+`mma_*` names) are **predeclared identifiers**, not reserved words; sema
+resolves them. Generic builtins (take `<...>`): `lane_id<W>`, `cast<T>`,
+`lds_base<T>`, `fragment_fill<T>`, `fragment_pack<T>`. The empty-token seed
+is spelled `token()` -- the `token` type used as a nullary constructor (see
+Grammar).
 
 Punctuation and operators:
 
@@ -76,7 +78,10 @@ base_type  = scalar_type
            | "token"
            | "simd"   , "<" , type , "," , int_lit , ">"
            | "mask"   , "<" , int_lit , ">"
-           | "vector" , "<" , type , "," , int_lit , ">" ;
+           | "vector" , "<" , type , "," , int_lit , ">"
+           | "fragment" , "<" , int_lit , "," , type , ","
+                          int_lit , "," , int_lit , ","
+                          int_lit , "," , int_lit , ">" ;
 scalar_type= "bool" | "float" | "half"
            | "int8_t"  | "int16_t"  | "int32_t"  | "int64_t"
            | "uint8_t" | "uint16_t" | "uint32_t" | "uint64_t" ;
@@ -156,8 +161,9 @@ and the postfix `call_tail` bind tighter than any binary operator.
 
 2. **`<` is type-args or less-than, by the preceding token.** `<` opens a
    type/generic argument list only after a type keyword (`simd`, `mask`,
-   `vector`) or a predeclared generic builtin (`lane_id`, `workgroup_id`,
-   `workitem_id`, `cast`, `lds_base`; later `read_first`/`reduce`).
+   `vector`, `fragment`) or a predeclared generic builtin (`lane_id`,
+   `workgroup_id`, `workitem_id`, `cast`, `lds_base`, `fragment_fill`,
+   `fragment_pack`).
    Everywhere else `<` is the comparison
    operator. The trigger set is fixed and known to the parser, so one token
    of lookahead suffices: `simd<...>`, `lane_id<32>(...)`, `cast<float>(x)`
@@ -187,9 +193,7 @@ and the postfix `call_tail` bind tighter than any binary operator.
    parse-errors. The `assign_op`-vs-`(`/`<` lookahead resolves it.
 
 8. **`>>` in nested args.** A `>>` adjacent to an open type/generic-args
-   context is re-split into two `>` close tokens (the C++11 rule). Latent in
-   v1 -- type constructors end in `, int_lit >` and `lane_id`/`cast`/
-   `lds_base` args do not nest to `>>` -- but pinned for safety.
+   context is re-split into two `>` close tokens (the C++11 rule).
 
 ## Sema-only rules (not in the CFG)
 
@@ -216,18 +220,18 @@ store(scratch, x + i after t);             // value-first; args [scratch, x+i], 
 shared half *lds = lds_base<half>(0);      // 'shared' qualifier; lds_base<T> generic (rule 2)
 simd<float,32> f = cast<float>(xv);        // rule 2: cast<...> generic
 token z = token();                         // token() seed: reserved type as nullary ctor
+fragment<2,float,16,16,32,8> acc = fragment_fill<fragment<2,float,16,16,32,8>>(0);
 ```
 
 ## Not in v1 (grammar)
 
 - User-defined (non-`kernel`) functions; value-returning kernels / `return`.
-- Fragments and `mma` (the matmul surface): new types + builtins, later.
 - The `-> t` load-token clause (alternative to `auto [v,t]`); the spec
   prefers destructuring, so it is omitted here.
 - Arrays / subscript `[]` (outside destructuring), structs, member access.
 - General templates/generics beyond the fixed type constructors and the
-  generic builtins (`lane_id`/`cast`/`lds_base`).
-- `fragment` is reserved for a later stage; it has no v1 production.
+  generic builtins (`lane_id`/`cast`/`lds_base`/`fragment_fill`/
+  `fragment_pack`).
 - No raw pointer deref/address-of (`*p`, `&x`) and no `a[i]` subscript:
   pointers are read/written only via `load`/`store`.
 - No `?:` ternary (use `where`/`if`), no comma operator, no `sizeof`, no

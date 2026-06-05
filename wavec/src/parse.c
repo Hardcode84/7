@@ -11,10 +11,8 @@
  * The grammar is the v1 EBNF in CFrontendGrammar.md. The parser is
  * LL(1) with one token of lookahead after a leading identifier (rule 7).
  * The context-sensitive bits handled here:
- *   - rule 2: `<` opens a generic/type-arg list only after a fixed set of
- *     trigger names (the type constructors simd/mask/vector and the
- *     generic builtins lane_id/cast/lds_base/workgroup_id/workitem_id);
- *     everywhere else `<` is the compare operator.
+ *   - rule 2: `<` opens a generic/type-arg list only after a fixed
+ *     constructor/builtin trigger set. Everywhere else it is compare.
  *   - rule 7: a statement-leading identifier is an assign_stmt if the next
  *     token is an assign_op, else a call_stmt (which must contain `(...)`).
  *   - rule 3: `..` is the range token, never a binop, so expr stops before
@@ -442,21 +440,11 @@ static int binop_prec(TokenKind k) {
   return 0;
 }
 
-/*
- * rule 2 trigger set: an identifier whose lexeme is a generic builtin
- * (takes `<...>`) so a following `<` opens a generic-arg list. The type
- * constructors simd/mask/vector are TOKEN keywords handled in the type
- * grammar; this set is only for the IDENT-spelled generic builtins.
- *
- * Per the grammar/design: lane_id, cast, lds_base (v1), plus
- * workgroup_id and workitem_id which take a const axis `<ax>`. read_first
- * / reduce are later; not predeclared in v1, so omitted (they would parse
- * as plain idents and `<` as compare, which is the correct conservative
- * default and yields a clean parse error in use, never a silent miscompile).
- */
+/* IDENT-spelled generic builtins; type constructors are keyword-led. */
 static int ident_is_generic_builtin(ParseContext *ctx, const Token *t) {
-  static const char *const names[] = {"lane_id", "cast", "lds_base",
-                                      "workgroup_id", "workitem_id"};
+  static const char *const names[] = {
+      "lane_id",       "cast",         "lds_base",   "fragment_fill",
+      "fragment_pack", "workgroup_id", "workitem_id"};
   size_t i;
   size_t n = sizeof(names) / sizeof(names[0]);
   for (i = 0; i < n; i++) {
@@ -577,6 +565,8 @@ static uint64_t decode_hex_digits(const char *s, uint32_t len, uint32_t start) {
     unsigned d;
     if (!hex_digit_value(s[i], &d))
       break;
+    if (v > (UINT64_MAX - d) / 16u)
+      return UINT64_MAX;
     v = v * 16u + d;
   }
   return v;
@@ -589,7 +579,10 @@ static uint64_t decode_dec_digits(const char *s, uint32_t len) {
     char c = s[i];
     if (c < '0' || c > '9')
       break;
-    v = v * 10u + (uint64_t)(c - '0');
+    uint64_t d = (uint64_t)(c - '0');
+    if (v > (UINT64_MAX - d) / 10u)
+      return UINT64_MAX;
+    v = v * 10u + d;
   }
   return v;
 }
@@ -725,7 +718,9 @@ static uint64_t parse_int_lit_value(ParseContext *ctx, const char *msg,
  * base_type = scalar_type | index | token
  *           | simd "<" type "," int_lit ">"
  *           | mask "<" int_lit ">"
- *           | vector "<" type "," int_lit ">" ;
+ *           | vector "<" type "," int_lit ">"
+ *           | fragment "<" int_lit "," type "," int_lit "," int_lit ","
+ *                        int_lit "," int_lit ">" ;
  * Returns a TypeRef with kind/scalar/element/width set, or NULL on error.
  */
 static TypeRef *parse_scalar_base_type(ParseContext *ctx, const Token *t,
@@ -790,6 +785,76 @@ static TypeRef *parse_mask_type(ParseContext *ctx, SourceSpan start) {
   return ty;
 }
 
+static int parse_comma_int(ParseContext *ctx, const char *what, uint64_t *out) {
+  int ok;
+  if (!expect(ctx, TOK_COMMA, "expected ',' in fragment type"))
+    return 0;
+  *out = parse_int_lit_value(ctx, what, &ok);
+  return ok;
+}
+
+typedef struct {
+  TypeRef *elem;
+  uint64_t role;
+  uint64_t rows;
+  uint64_t cols;
+  uint64_t wave;
+  uint64_t regs;
+} FragmentShape;
+
+static int parse_fragment_dims(ParseContext *ctx, FragmentShape *shape) {
+  if (!parse_comma_int(ctx, "expected fragment row count", &shape->rows))
+    return 0;
+  if (!parse_comma_int(ctx, "expected fragment column count", &shape->cols))
+    return 0;
+  if (!parse_comma_int(ctx, "expected fragment wave size", &shape->wave))
+    return 0;
+  return parse_comma_int(ctx, "expected fragment register count", &shape->regs);
+}
+
+static int parse_fragment_shape(ParseContext *ctx, FragmentShape *shape) {
+  int ok;
+  if (!expect(ctx, TOK_LT, "expected '<' after 'fragment'"))
+    return 0;
+  shape->role = parse_int_lit_value(ctx, "expected fragment role", &ok);
+  if (!ok)
+    return 0;
+  if (!expect(ctx, TOK_COMMA, "expected ',' in fragment type"))
+    return 0;
+  shape->elem = parse_type(ctx);
+  if (shape->elem == NULL)
+    return 0;
+  return parse_fragment_dims(ctx, shape);
+}
+
+static TypeRef *build_fragment_type(ParseContext *ctx, SourceSpan start,
+                                    SourceSpan end,
+                                    const FragmentShape *shape) {
+  TypeRef *ty = new_type(ctx, TYPE_FRAGMENT, span_join(start, end));
+  if (ty == NULL)
+    return NULL;
+  ty->element = shape->elem;
+  ty->width = shape->wave;
+  ty->fragment_role = shape->role;
+  ty->fragment_rows = shape->rows;
+  ty->fragment_cols = shape->cols;
+  ty->fragment_registers = shape->regs;
+  return ty;
+}
+
+static TypeRef *parse_fragment_type(ParseContext *ctx, SourceSpan start) {
+  FragmentShape shape;
+  SourceSpan end;
+
+  advance(ctx);
+  if (!parse_fragment_shape(ctx, &shape))
+    return NULL;
+  end = span_of_token(cur(ctx));
+  if (!close_angle(ctx, "expected '>' to close 'fragment<...>'"))
+    return NULL;
+  return build_fragment_type(ctx, start, end, &shape);
+}
+
 static TypeRef *parse_base_type(ParseContext *ctx) {
   const Token *t = cur(ctx);
   SourceSpan start = span_of_token(t);
@@ -807,10 +872,9 @@ static TypeRef *parse_base_type(ParseContext *ctx) {
     ty = parse_sized_payload_type(ctx, TYPE_VECTOR, start);
   else if (t->kind == TOK_KW_MASK)
     ty = parse_mask_type(ctx, start);
-  else if (t->kind == TOK_KW_FRAGMENT) {
-    error_here(ctx, "fragment type not supported");
-    advance(ctx);
-  } else {
+  else if (t->kind == TOK_KW_FRAGMENT)
+    ty = parse_fragment_type(ctx, start);
+  else {
     error_here(ctx, "expected a type, found '%t'");
   }
 

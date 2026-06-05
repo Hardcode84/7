@@ -1,0 +1,7 @@
+// CHECK: waveamd.fragment_fill {{.*}} -> !waveamd.fragment<0, f16, 16, 16, 32, 8>
+// CHECK: waveamd.fragment_fill {{.*}} -> !waveamd.fragment<1, f16, 16, 16, 32, 8>
+// CHECK: waveamd.fragment_unpack
+// CHECK: waveamd.fragment_pack
+// CHECK: waveamd.mma "wmma.f32.16x16x16.f16"
+// CHECK: wave.read_first
+// CHECK: wave.subgroup_id

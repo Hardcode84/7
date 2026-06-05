@@ -1,0 +1,9 @@
+kernel [[amdgpu_wave_size(32)]] void mma_bad_operand() {
+  fragment<0, half, 16, 16, 32, 8> a =
+      fragment_fill<fragment<0, half, 16, 16, 32, 8>>(0);
+  fragment<0, half, 16, 16, 32, 8> b =
+      fragment_fill<fragment<0, half, 16, 16, 32, 8>>(0);
+  fragment<2, float, 16, 16, 32, 8> acc =
+      fragment_fill<fragment<2, float, 16, 16, 32, 8>>(0);
+  acc = mma_wmma_f32_16x16x16_f16(a, b, acc);
+}

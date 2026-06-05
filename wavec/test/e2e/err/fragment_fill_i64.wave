@@ -1,0 +1,4 @@
+kernel [[amdgpu_wave_size(32)]] void fragment_fill_i64(int64_t bits) {
+  fragment<2, float, 16, 16, 32, 8> acc =
+      fragment_fill<fragment<2, float, 16, 16, 32, 8>>(bits);
+}

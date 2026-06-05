@@ -168,6 +168,10 @@ static TypeRef *new_type(Checker *c) {
   t->scalar = SCALAR_BOOL;
   t->element = NULL;
   t->width = 0;
+  t->fragment_role = 0;
+  t->fragment_rows = 0;
+  t->fragment_cols = 0;
+  t->fragment_registers = 0;
   t->is_shared = 0;
   t->is_pointer = 0;
   t->span.offset = 0;
@@ -176,6 +180,8 @@ static TypeRef *new_type(Checker *c) {
   t->span.col = 0;
   return t;
 }
+
+static int require_wave_n(Checker *c, SourceSpan span, uint64_t *out);
 
 /* Build a canonical non-pointer scalar TypeRef of the given kind. */
 static TypeRef *scalar_type(Checker *c, ScalarKind k) {
@@ -208,10 +214,43 @@ static TypeRef *mask_type(Checker *c, uint64_t width) {
   return t;
 }
 
-/* Build a canonical pointer-to-element (scalar element only), with the
- * given address space (is_shared). */
-static TypeRef *ptr_type(Checker *c, ScalarKind elem, int is_shared) {
-  TypeRef *t = scalar_type(c, elem);
+static TypeRef *vector_type(Checker *c, TypeRef *element, uint64_t count) {
+  TypeRef *t = new_type(c);
+  if (t == NULL)
+    return NULL;
+  t->kind = TYPE_VECTOR;
+  t->element = element;
+  t->width = count;
+  return t;
+}
+
+static TypeRef *fragment_type(Checker *c, TypeRef *element, uint64_t role,
+                              uint64_t rows, uint64_t cols, uint64_t wave,
+                              uint64_t regs) {
+  TypeRef *t = new_type(c);
+  if (t == NULL)
+    return NULL;
+  t->kind = TYPE_FRAGMENT;
+  t->element = element;
+  t->width = wave;
+  t->fragment_role = role;
+  t->fragment_rows = rows;
+  t->fragment_cols = cols;
+  t->fragment_registers = regs;
+  return t;
+}
+
+static TypeRef *copy_type(Checker *c, const TypeRef *src) {
+  TypeRef *t = new_type(c);
+  if (t == NULL)
+    return NULL;
+  *t = *src;
+  return t;
+}
+
+/* Build a canonical pointer-to-element with the given address space. */
+static TypeRef *ptr_type(Checker *c, const TypeRef *base, int is_shared) {
+  TypeRef *t = copy_type(c, base);
   if (t == NULL)
     return NULL;
   t->is_pointer = 1;
@@ -316,29 +355,67 @@ static int scalar_compatible(ScalarKind a, ScalarKind b) {
   return 0;
 }
 
+static int same_kind_compatible(const TypeRef *a, const TypeRef *b);
+
 /* Structural assignment-compatibility of two canonical types (ignoring
  * literal polymorphism, handled separately at the call site). */
+static int base_type_compatible(const TypeRef *a, const TypeRef *b) {
+  TypeRef ac = *a;
+  TypeRef bc = *b;
+  ac.is_pointer = 0;
+  bc.is_pointer = 0;
+  ac.is_shared = 0;
+  bc.is_shared = 0;
+  return ac.kind == bc.kind && same_kind_compatible(&ac, &bc);
+}
+
 static int pointer_compatible(const TypeRef *a, const TypeRef *b) {
   return is_pointer(a) && is_pointer(b) && a->is_shared == b->is_shared &&
-         a->kind == TYPE_SCALAR && b->kind == TYPE_SCALAR &&
-         scalar_compatible(a->scalar, b->scalar);
+         base_type_compatible(a, b);
 }
 
 static int type_compatible(const TypeRef *a, const TypeRef *b);
 
-static int same_kind_compatible(const TypeRef *a, const TypeRef *b) {
-  switch (a->kind) {
-  case TYPE_SCALAR:
-    return scalar_compatible(a->scalar, b->scalar);
-  case TYPE_MASK:
-    return a->width == b->width;
-  case TYPE_SIMD:
-  case TYPE_VECTOR:
-    return a->width == b->width && type_compatible(a->element, b->element);
-  case TYPE_FRAGMENT:
+static int same_scalar_compatible(const TypeRef *a, const TypeRef *b) {
+  return scalar_compatible(a->scalar, b->scalar);
+}
+
+static int same_width_compatible(const TypeRef *a, const TypeRef *b) {
+  return a->width == b->width;
+}
+
+static int same_payload_compatible(const TypeRef *a, const TypeRef *b) {
+  if (!same_width_compatible(a, b))
     return 0;
-  }
+  return type_compatible(a->element, b->element);
+}
+
+static int same_fragment_compatible(const TypeRef *a, const TypeRef *b) {
+  if (a->fragment_role != b->fragment_role)
+    return 0;
+  if (a->fragment_rows != b->fragment_rows)
+    return 0;
+  if (a->fragment_cols != b->fragment_cols)
+    return 0;
+  if (!same_width_compatible(a, b))
+    return 0;
+  if (a->fragment_registers != b->fragment_registers)
+    return 0;
+  return type_compatible(a->element, b->element);
+}
+
+static int same_void_compatible(const TypeRef *a, const TypeRef *b) {
+  (void)a;
+  (void)b;
   return 0;
+}
+
+static int same_kind_compatible(const TypeRef *a, const TypeRef *b) {
+  typedef int (*CompatFn)(const TypeRef *, const TypeRef *);
+  static const CompatFn fns[] = {
+      same_scalar_compatible,  same_payload_compatible,  same_width_compatible,
+      same_payload_compatible, same_fragment_compatible, same_void_compatible};
+  return fns[a->kind](a, b);
 }
 
 static int type_compatible(const TypeRef *a, const TypeRef *b) {
@@ -385,6 +462,8 @@ static const char *type_category(const TypeRef *t) {
     return "vector";
   case TYPE_FRAGMENT:
     return "fragment";
+  case TYPE_VOID:
+    return "void";
   }
   return "?";
 }
@@ -456,33 +535,27 @@ static void check_block(Checker *c, Stmt *block);
 /* Type-reference resolution (params, decls, gargs, IV)                  */
 /*===----------------------------------------------------------------===*/
 
-/*
- * Validate a parser-produced TypeRef in place and return a canonical copy
- * (the same shape, but freshly built so result types are independent of
- * the syntactic node). Enforces, recursively:
- *   - shared requires a pointer (Sema-only rule);
- *   - pointer element must be a loadable scalar numeric (half/float/sized
- *     int); no pointers to simd/mask/vector/token/index/bool;
- *   - simd<T,W>/mask<W> use W == kernel N; simd element is a numeric
- *     scalar or a vector-of-numeric payload; simd of bool/index/token is
- *     rejected (mask is the per-lane bool);
- *   - vector<T,N> element is a numeric scalar; N is a free element count;
- *   - fragment is not supported in v1.
- * Returns NULL and emits a diagnostic on any violation.
- */
 static TypeRef *resolve_type(Checker *c, const TypeRef *t);
 
 static TypeRef *resolve_pointer_type(Checker *c, const TypeRef *t) {
-  if (t->kind != TYPE_SCALAR) {
-    err(c, t->span, "pointer base must be a scalar element type (e.g. float*)");
+  TypeRef *base;
+  TypeRef copy = *t;
+  copy.is_pointer = 0;
+  copy.is_shared = 0;
+  if (t->kind != TYPE_SCALAR && t->kind != TYPE_VECTOR) {
+    err(c, t->span, "pointer base must be a numeric scalar or vector type");
     return NULL;
   }
-  if (!sk_is_numeric(t->scalar)) {
+  base = resolve_type(c, &copy);
+  if (base == NULL)
+    return NULL;
+  if (base->kind == TYPE_SCALAR && !sk_is_numeric(base->scalar)) {
     err_name(c, t->span, "'%s' is not a valid pointer element type",
-             scalar_name(t->scalar), (uint32_t)strlen(scalar_name(t->scalar)));
+             scalar_name(base->scalar),
+             (uint32_t)strlen(scalar_name(base->scalar)));
     return NULL;
   }
-  return ptr_type(c, t->scalar, t->is_shared);
+  return ptr_type(c, base, t->is_shared);
 }
 
 static const char *width_syntax(const char *what) {
@@ -575,16 +648,70 @@ static TypeRef *resolve_vector_type(Checker *c, const TypeRef *t) {
   return vt;
 }
 
-static TypeRef *resolve_type(Checker *c, const TypeRef *t) {
-  if (t == NULL)
-    return NULL;
-  if (t->is_shared && !t->is_pointer) {
-    err(c, t->span, "'shared' requires a pointer type (shared T*)");
-    return NULL;
-  }
-  if (t->is_pointer)
-    return resolve_pointer_type(c, t);
+static int resolve_fragment_element(Checker *c, const TypeRef *t);
+static int resolve_fragment_shape(Checker *c, const TypeRef *t);
 
+static TypeRef *resolve_fragment_type(Checker *c, const TypeRef *t) {
+  TypeRef *elem;
+  if (!resolve_fragment_element(c, t))
+    return NULL;
+  if (!resolve_fragment_shape(c, t))
+    return NULL;
+  elem = scalar_type(c, t->element->scalar);
+  if (elem == NULL)
+    return NULL;
+  return fragment_type(c, elem, t->fragment_role, t->fragment_rows,
+                       t->fragment_cols, t->width, t->fragment_registers);
+}
+
+static int resolve_fragment_element(Checker *c, const TypeRef *t) {
+  if (t->element == NULL || t->element->kind != TYPE_SCALAR ||
+      t->element->is_pointer || !sk_is_numeric(t->element->scalar)) {
+    err(c, t->span, "fragment element must be a numeric scalar");
+    return 0;
+  }
+  return 1;
+}
+
+static int fragment_shape_positive(const TypeRef *t) {
+  return t->fragment_rows != 0 && t->fragment_cols != 0 && t->width != 0 &&
+         t->fragment_registers != 0;
+}
+
+static int fragment_shape_fits_i64(const TypeRef *t) {
+  return t->fragment_rows <= (uint64_t)INT64_MAX &&
+         t->fragment_cols <= (uint64_t)INT64_MAX &&
+         t->width <= (uint64_t)INT64_MAX &&
+         t->fragment_registers <= (uint64_t)INT64_MAX;
+}
+
+static int resolve_fragment_shape(Checker *c, const TypeRef *t) {
+  uint64_t n;
+  if (t->fragment_role > 2) {
+    err(c, t->span, "fragment role must be 0, 1, or 2");
+    return 0;
+  }
+  if (!fragment_shape_positive(t)) {
+    err(c, t->span, "fragment dimensions and register count must be positive");
+    return 0;
+  }
+  if (!fragment_shape_fits_i64(t)) {
+    err(c, t->span,
+        "fragment dimensions and register count must fit signed 64-bit");
+    return 0;
+  }
+  if (!require_wave_n(c, t->span, &n))
+    return 0;
+  if (t->width != n) {
+    err_uu(c, t->span,
+           "fragment wave size %llu must equal the kernel wave size %llu",
+           (unsigned long long)t->width, (unsigned long long)n);
+    return 0;
+  }
+  return 1;
+}
+
+static TypeRef *resolve_nonpointer_type(Checker *c, const TypeRef *t) {
   switch (t->kind) {
   case TYPE_SCALAR:
     return scalar_type(c, t->scalar);
@@ -595,12 +722,26 @@ static TypeRef *resolve_type(Checker *c, const TypeRef *t) {
   case TYPE_VECTOR:
     return resolve_vector_type(c, t);
   case TYPE_FRAGMENT:
-    err(c, t->span, "fragment types are not supported");
+    return resolve_fragment_type(c, t);
+  case TYPE_VOID:
+    err(c, t->span, "void is not a value type");
     return NULL;
   }
 
   err(c, t->span, "unrecognized type");
   return NULL;
+}
+
+static TypeRef *resolve_type(Checker *c, const TypeRef *t) {
+  if (t == NULL)
+    return NULL;
+  if (t->is_shared && !t->is_pointer) {
+    err(c, t->span, "'shared' requires a pointer type (shared T*)");
+    return NULL;
+  }
+  if (t->is_pointer)
+    return resolve_pointer_type(c, t);
+  return resolve_nonpointer_type(c, t);
 }
 
 /*===----------------------------------------------------------------===*/
@@ -1061,41 +1202,62 @@ static TypeRef *type_index_cast(Checker *c, Expr *e) {
   return NULL;
 }
 
-/*
- * lds_base<T>([K]): a uniform shared T* into the kernel LDS arena. The
- * optional K is a compile-time byte offset (int literal, default 0). T
- * must be a loadable scalar numeric.
- */
-static TypeRef *type_lds_base(Checker *c, Expr *e) {
-  TypeRef *t;
+static TypeRef *lds_base_type_arg(Checker *c, Expr *e) {
   if (e->as.call.garg_count != 1) {
     err(c, e->span, "lds_base<T> takes exactly one type argument");
     return NULL;
   }
-  t = garg_type(c, e, 0);
+  TypeRef *t = garg_type(c, e, 0);
   if (t == NULL)
     return NULL;
-  if (!is_scalar(t) || !sk_is_numeric(t->scalar)) {
-    err(c, e->span, "lds_base<T>: T must be a numeric scalar element");
+  if ((t->kind != TYPE_SCALAR && t->kind != TYPE_VECTOR) ||
+      (t->kind == TYPE_SCALAR && !sk_is_numeric(t->scalar))) {
+    err(c, e->span, "lds_base<T>: T must be a numeric scalar or vector type");
     return NULL;
   }
+  return t;
+}
+
+static int check_lds_base_offset(Checker *c, Expr *e) {
   if (e->as.call.arg_count > 1) {
     err(c, e->span, "lds_base takes at most one (compile-time) offset");
-    return NULL;
+    return 0;
   }
   if (e->as.call.arg_count == 1) {
     Expr *a = e->as.call.args[0];
     if (a->kind != EXPR_INT_LIT) {
       err(c, a->span, "lds_base offset must be a compile-time integer");
-      return NULL;
+      return 0;
     }
     a->sema_type = scalar_type(c, SCALAR_INT64);
   }
+  return 1;
+}
+
+/*
+ * lds_base<T>([K]): a uniform shared T* into the kernel LDS arena. The
+ * optional K is a compile-time byte offset (int literal, default 0).
+ */
+static TypeRef *type_lds_base(Checker *c, Expr *e) {
+  TypeRef *t = lds_base_type_arg(c, e);
+  if (t == NULL)
+    return NULL;
+  if (!check_lds_base_offset(c, e))
+    return NULL;
   if (e->as.call.has_dep) {
     err(c, e->span, "lds_base does not take an 'after' dependency");
     return NULL;
   }
-  return ptr_type(c, t->scalar, /*is_shared=*/1);
+  return ptr_type(c, t, /*is_shared=*/1);
+}
+
+static TypeRef *pointee_type(Checker *c, const TypeRef *p) {
+  TypeRef *base = copy_type(c, p);
+  if (base == NULL)
+    return NULL;
+  base->is_pointer = 0;
+  base->is_shared = 0;
+  return base;
 }
 
 /*
@@ -1105,6 +1267,7 @@ static TypeRef *type_lds_base(Checker *c, Expr *e) {
  */
 static TypeRef *type_load(Checker *c, Expr *e) {
   TypeRef *p;
+  TypeRef *base;
   uint64_t n;
   if (!no_gargs(c, e, "load"))
     return NULL;
@@ -1121,7 +1284,10 @@ static TypeRef *type_load(Checker *c, Expr *e) {
     return NULL;
   if (!require_wave_n(c, e->span, &n))
     return NULL;
-  return simd_type(c, scalar_type(c, p->scalar), n);
+  base = pointee_type(c, p);
+  if (base == NULL)
+    return NULL;
+  return simd_type(c, base, n);
 }
 
 /*
@@ -1150,19 +1316,22 @@ static int check_store_value_shape(Checker *c, Expr *value_expr, TypeRef *v) {
 static int check_store_value(Checker *c, Expr *value_expr, TypeRef *v,
                              TypeRef *p, SourceSpan span) {
   ScalarKind ve;
-  if (is_untyped_literal(value_expr))
-    (void)coerce_literal_to_scalar(c, value_expr, p->scalar);
+  TypeRef *base = pointee_type(c, p);
+  if (base == NULL)
+    return 0;
+  if (is_untyped_literal(value_expr) && base->kind == TYPE_SCALAR)
+    (void)coerce_literal_to_scalar(c, value_expr, base->scalar);
   v = (TypeRef *)value_expr->sema_type;
   if (!check_store_value_shape(c, value_expr, v))
     return 0;
-  if (element_scalar(v, &ve) && scalar_compatible(ve, p->scalar))
+  if (v->kind == TYPE_SIMD && type_compatible(v->element, base))
     return 1;
   {
     char buf[SEMA_MSG_CAP];
     snprintf(buf, sizeof(buf),
              "store value element '%s' does not match pointer element '%s'",
-             element_scalar(v, &ve) ? scalar_name(ve) : "?",
-             scalar_name(p->scalar));
+             element_scalar(v, &ve) ? scalar_name(ve) : type_category(v),
+             type_category(base));
     err(c, span, buf);
   }
   return 0;
@@ -1190,26 +1359,137 @@ static TypeRef *type_store(Checker *c, Expr *e) {
   return scalar_type(c, SCALAR_TOKEN);
 }
 
-/* A sentinel "no value" type for void-returning builtins (wait). We model
- * it as NULL sema_type plus a separate flag conveyed by returning a
- * special token-less marker: here we return NULL and set a flag on the
- * call by leaving sema_type NULL; the statement context accepts it, an
- * expression context rejects a NULL value type. To distinguish a genuine
- * error (also NULL) from a legitimate void, void builtins set the call's
- * sema_type to a dedicated VOID marker type. */
+static int is_fragment(const TypeRef *t) {
+  return t != NULL && t->kind == TYPE_FRAGMENT && !t->is_pointer;
+}
+
+typedef enum FragElemClass {
+  FRAG_ELEM_I8,
+  FRAG_ELEM_I32,
+  FRAG_ELEM_F16,
+  FRAG_ELEM_F32
+} FragElemClass;
+
+static int fragment_is_16x16(const TypeRef *t) {
+  return t->fragment_rows == 16 && t->fragment_cols == 16;
+}
+
+static int fragment_elem_matches(const TypeRef *t, FragElemClass elem) {
+  ScalarKind k = t->element->scalar;
+  switch (elem) {
+  case FRAG_ELEM_I8:
+    return sk_is_sized_int(k) && sk_bits(k) == 8;
+  case FRAG_ELEM_I32:
+    return sk_is_sized_int(k) && sk_bits(k) == 32;
+  case FRAG_ELEM_F16:
+    return k == SCALAR_HALF;
+  case FRAG_ELEM_F32:
+    return k == SCALAR_FLOAT;
+  }
+  return 0;
+}
+
+static int fragment_matches(const TypeRef *t, uint64_t role, FragElemClass elem,
+                            uint64_t regs, uint64_t wave) {
+  return is_fragment(t) && t->fragment_role == role && t->width == wave &&
+         t->fragment_registers == regs && fragment_is_16x16(t) &&
+         fragment_elem_matches(t, elem);
+}
+
+static int fragment_fill_ab_supported(const TypeRef *t) {
+  if (fragment_elem_matches(t, FRAG_ELEM_I8))
+    return t->fragment_registers == 4;
+  if (fragment_elem_matches(t, FRAG_ELEM_F16))
+    return t->fragment_registers == 2 || t->fragment_registers == 4 ||
+           t->fragment_registers == 8;
+  return 0;
+}
+
+static int fragment_fill_supported(const TypeRef *t) {
+  if (!is_fragment(t) || !fragment_is_16x16(t))
+    return 0;
+  if (t->fragment_role != 2)
+    return fragment_fill_ab_supported(t);
+  return (fragment_elem_matches(t, FRAG_ELEM_I32) ||
+          fragment_elem_matches(t, FRAG_ELEM_F32)) &&
+         (t->fragment_registers == 4 || t->fragment_registers == 8);
+}
+
+typedef struct MmaSpec {
+  const char *name;
+  FragElemClass abElem;
+  FragElemClass accElem;
+  uint64_t abRegs;
+  uint64_t accRegs;
+  uint64_t wave;
+} MmaSpec;
+
+static const MmaSpec *find_mma_spec(const Expr *callee) {
+  static const MmaSpec specs[] = {
+      {"mma_wmma_i32_16x16x16_iu8", FRAG_ELEM_I8, FRAG_ELEM_I32, 4, 8, 32},
+      {"mma_wmma_f32_16x16x16_f16", FRAG_ELEM_F16, FRAG_ELEM_F32, 8, 8, 32},
+      {"mma_mfma_f32_16x16x16_f16", FRAG_ELEM_F16, FRAG_ELEM_F32, 2, 4, 32},
+      {"mma_mfma_f32_16x16x32_f16", FRAG_ELEM_F16, FRAG_ELEM_F32, 4, 4, 64},
+  };
+  size_t i;
+  for (i = 0; i < sizeof(specs) / sizeof(specs[0]); i++)
+    if (name_is(callee, specs[i].name))
+      return &specs[i];
+  return NULL;
+}
+
+static int check_mma_shapes(Checker *c, Expr *e, const MmaSpec *spec,
+                            TypeRef *a, TypeRef *b, TypeRef *acc) {
+  if (!fragment_matches(a, 0, spec->abElem, spec->abRegs, spec->wave)) {
+    err(c, e->as.call.args[0]->span,
+        "mma A operand does not match selected builtin");
+    return 0;
+  }
+  if (!fragment_matches(b, 1, spec->abElem, spec->abRegs, spec->wave)) {
+    err(c, e->as.call.args[1]->span,
+        "mma B operand does not match selected builtin");
+    return 0;
+  }
+  if (!fragment_matches(acc, 2, spec->accElem, spec->accRegs, spec->wave)) {
+    err(c, e->as.call.args[2]->span,
+        "mma accumulator does not match selected builtin");
+    return 0;
+  }
+  return 1;
+}
+
+static TypeRef *simd_vector_payload(const TypeRef *t, uint64_t width,
+                                    uint64_t registers) {
+  if (t == NULL || t->kind != TYPE_SIMD || t->width != width)
+    return NULL;
+  if (t->element == NULL || t->element->kind != TYPE_VECTOR)
+    return NULL;
+  if (t->element->width != registers)
+    return NULL;
+  return t->element->element;
+}
+
+static int is_scalar_i32(const TypeRef *t) {
+  if (t == NULL || t->kind != TYPE_SCALAR || t->is_pointer)
+    return 0;
+  return sk_is_sized_int(t->scalar) && sk_bits(t->scalar) == 32;
+}
+
+static int is_simd_vector_i32(const TypeRef *t, uint64_t width,
+                              uint64_t registers) {
+  return is_scalar_i32(simd_vector_payload(t, width, registers));
+}
+
+/* Dedicated marker: statements accept `wait`, expressions reject it. */
 static TypeRef *void_marker(Checker *c) {
-  /* Represent void as a scalar token? No -- callers must not treat it as a
-   * token. Use a fragment-tagged TypeRef as an internal void marker; it is
-   * never user-constructible (fragment is rejected by resolve_type) and is
-   * only produced here, so an expression context can detect and reject it. */
   TypeRef *t = new_type(c);
   if (t == NULL)
     return NULL;
-  t->kind = TYPE_FRAGMENT; /* internal void sentinel. */
+  t->kind = TYPE_VOID;
   return t;
 }
 static int is_void_marker(const TypeRef *t) {
-  return t != NULL && t->kind == TYPE_FRAGMENT;
+  return t != NULL && t->kind == TYPE_VOID;
 }
 
 /*
@@ -1288,6 +1568,143 @@ static TypeRef *type_workitem_id(Checker *c, Expr *e) {
   return simd_type(c, scalar_type(c, SCALAR_INT32), n);
 }
 
+static TypeRef *type_subgroup_id(Checker *c, Expr *e) {
+  if (!no_gargs(c, e, "subgroup_id"))
+    return NULL;
+  if (!require_argc(c, e, 0, "subgroup_id"))
+    return NULL;
+  if (!no_dep(c, e, "subgroup_id"))
+    return NULL;
+  return scalar_type(c, SCALAR_INDEX);
+}
+
+static TypeRef *type_read_first(Checker *c, Expr *e) {
+  TypeRef *src;
+  if (!no_gargs(c, e, "read_first"))
+    return NULL;
+  if (!require_argc(c, e, 1, "read_first"))
+    return NULL;
+  src = check_expr(c, e->as.call.args[0]);
+  if (src == NULL)
+    return NULL;
+  if (!is_simd(src)) {
+    err(c, e->as.call.args[0]->span, "read_first expects a simd value");
+    return NULL;
+  }
+  if (!no_dep(c, e, "read_first"))
+    return NULL;
+  return src->element;
+}
+
+static TypeRef *type_fragment_fill(Checker *c, Expr *e) {
+  TypeRef *frag;
+  TypeRef *src;
+  if (e->as.call.garg_count != 1) {
+    err(c, e->span, "fragment_fill<T> takes exactly one fragment type");
+    return NULL;
+  }
+  frag = garg_type(c, e, 0);
+  if (!is_fragment(frag)) {
+    err(c, e->span, "fragment_fill<T>: T must be a fragment type");
+    return NULL;
+  }
+  if (!require_argc(c, e, 1, "fragment_fill"))
+    return NULL;
+  src = check_expr(c, e->as.call.args[0]);
+  if (is_untyped_literal(e->as.call.args[0])) {
+    (void)coerce_literal_to_scalar(c, e->as.call.args[0], SCALAR_INT32);
+    src = (TypeRef *)e->as.call.args[0]->sema_type;
+  }
+  if (src == NULL)
+    return NULL;
+  if (!is_scalar_i32(src)) {
+    err(c, e->as.call.args[0]->span,
+        "fragment_fill source must be an i32 bit pattern");
+    return NULL;
+  }
+  if (!fragment_fill_supported(frag)) {
+    err(c, e->span, "fragment_fill unsupported fragment layout");
+    return NULL;
+  }
+  if (!no_dep(c, e, "fragment_fill"))
+    return NULL;
+  return frag;
+}
+
+static TypeRef *type_fragment_pack(Checker *c, Expr *e) {
+  TypeRef *frag;
+  TypeRef *regs;
+  if (e->as.call.garg_count != 1) {
+    err(c, e->span, "fragment_pack<T> takes exactly one fragment type");
+    return NULL;
+  }
+  frag = garg_type(c, e, 0);
+  if (!is_fragment(frag)) {
+    err(c, e->span, "fragment_pack<T>: T must be a fragment type");
+    return NULL;
+  }
+  if (!require_argc(c, e, 1, "fragment_pack"))
+    return NULL;
+  regs = check_expr(c, e->as.call.args[0]);
+  if (regs == NULL)
+    return NULL;
+  if (!is_simd_vector_i32(regs, frag->width, frag->fragment_registers)) {
+    err(c, e->as.call.args[0]->span,
+        "fragment_pack source must be simd<vector<int32_t,R>,W>");
+    return NULL;
+  }
+  if (!no_dep(c, e, "fragment_pack"))
+    return NULL;
+  return frag;
+}
+
+static TypeRef *type_fragment_unpack(Checker *c, Expr *e) {
+  TypeRef *frag;
+  if (!no_gargs(c, e, "fragment_unpack"))
+    return NULL;
+  if (!require_argc(c, e, 1, "fragment_unpack"))
+    return NULL;
+  frag = check_expr(c, e->as.call.args[0]);
+  if (!is_fragment(frag)) {
+    err(c, e->as.call.args[0]->span,
+        "fragment_unpack expects a fragment value");
+    return NULL;
+  }
+  if (!no_dep(c, e, "fragment_unpack"))
+    return NULL;
+  return simd_type(
+      c, vector_type(c, scalar_type(c, SCALAR_INT32), frag->fragment_registers),
+      frag->width);
+}
+
+static TypeRef *type_mma(Checker *c, Expr *e) {
+  const MmaSpec *spec;
+  TypeRef *a;
+  TypeRef *b;
+  TypeRef *acc;
+  if (!no_gargs(c, e, "mma"))
+    return NULL;
+  if (!require_argc(c, e, 3, "mma"))
+    return NULL;
+  a = check_expr(c, e->as.call.args[0]);
+  b = check_expr(c, e->as.call.args[1]);
+  acc = check_expr(c, e->as.call.args[2]);
+  if (!is_fragment(a) || !is_fragment(b) || !is_fragment(acc)) {
+    err(c, e->span, "mma operands must be fragments");
+    return NULL;
+  }
+  spec = find_mma_spec(e->as.call.callee);
+  if (spec == NULL) {
+    err(c, e->span, "unknown mma builtin");
+    return NULL;
+  }
+  if (!check_mma_shapes(c, e, spec, a, b, acc))
+    return NULL;
+  if (!no_dep(c, e, "mma"))
+    return NULL;
+  return acc;
+}
+
 static TypeRef *type_barrier(Checker *c, Expr *e) {
   if (!no_gargs(c, e, "barrier"))
     return NULL;
@@ -1351,6 +1768,8 @@ static const BuiltinEntry kBuiltins[] = {
     {"wave_id_in_grid", type_wave_id_in_grid},
     {"workgroup_id", type_workgroup_id},
     {"workitem_id", type_workitem_id},
+    {"subgroup_id", type_subgroup_id},
+    {"read_first", type_read_first},
     {"load", type_load},
     {"store", type_store},
     {"barrier", type_barrier},
@@ -1359,6 +1778,13 @@ static const BuiltinEntry kBuiltins[] = {
     {"lds_base", type_lds_base_checked},
     {"index_cast", type_index_cast_checked},
     {"cast", type_cast_checked},
+    {"fragment_fill", type_fragment_fill},
+    {"fragment_pack", type_fragment_pack},
+    {"fragment_unpack", type_fragment_unpack},
+    {"mma_wmma_i32_16x16x16_iu8", type_mma},
+    {"mma_wmma_f32_16x16x16_f16", type_mma},
+    {"mma_mfma_f32_16x16x16_f16", type_mma},
+    {"mma_mfma_f32_16x16x32_f16", type_mma},
 };
 
 static TypeRef *type_builtin_call(Checker *c, Expr *e) {

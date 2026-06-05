@@ -64,7 +64,7 @@ typedef enum TokenKind {
   TOK_KW_SIMD,     /* simd     */
   TOK_KW_MASK,     /* mask     */
   TOK_KW_VECTOR,   /* vector   */
-  TOK_KW_FRAGMENT, /* fragment (reserved; no v1 production) */
+  TOK_KW_FRAGMENT, /* fragment */
 
   /* --- Literals and identifiers --- */
   TOK_IDENT,     /* identifier (also predeclared builtins) */

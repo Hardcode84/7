@@ -240,34 +240,60 @@ static MlirAttribute addrSpaceAttr(LowerCtx &lc, bool shared) {
                 : mlirWaveGlobalAddressSpaceAttrGet(lc.ctx);
 }
 
-// Lower a TypeRef to an MlirType. Returns a null MlirType on an unsupported
-// type (caller reports), e.g. fragment.
+static MlirType lowerType(LowerCtx &lc, const TypeRef *t);
+
+static MlirType wrapPointerType(LowerCtx &lc, const TypeRef *t,
+                                MlirType element) {
+  if (mlirTypeIsNull(element))
+    return element;
+  if (t->is_pointer)
+    return mlirWavePtrTypeGet(element, addrSpaceAttr(lc, t->is_shared != 0));
+  return element;
+}
+
+static MlirType lowerScalarType(LowerCtx &lc, const TypeRef *t) {
+  return wrapPointerType(lc, t, scalarToType(lc, t->scalar));
+}
+
+static MlirType lowerSimdType(LowerCtx &lc, const TypeRef *t) {
+  MlirType elem = lowerType(lc, t->element);
+  if (mlirTypeIsNull(elem))
+    return elem;
+  return mlirWaveSimdTypeGet(elem, (int64_t)t->width);
+}
+
+static MlirType lowerVectorType(LowerCtx &lc, const TypeRef *t) {
+  MlirType elem = lowerType(lc, t->element);
+  if (mlirTypeIsNull(elem))
+    return elem;
+  int64_t shape = (int64_t)t->width;
+  return wrapPointerType(lc, t, mlirVectorTypeGet(1, &shape, elem));
+}
+
+static MlirType lowerFragmentType(LowerCtx &lc, const TypeRef *t) {
+  MlirType elem = lowerType(lc, t->element);
+  if (mlirTypeIsNull(elem))
+    return elem;
+  return mlirWaveAMDFragmentTypeGet(
+      lc.ctx, (int64_t)t->fragment_role, elem, (int64_t)t->fragment_rows,
+      (int64_t)t->fragment_cols, (int64_t)t->width,
+      (int64_t)t->fragment_registers);
+}
+
+// Caller reports null result types.
 static MlirType lowerType(LowerCtx &lc, const TypeRef *t) {
   switch (t->kind) {
-  case TYPE_SCALAR: {
-    MlirType elem = scalarToType(lc, t->scalar);
-    if (mlirTypeIsNull(elem))
-      return elem;
-    if (t->is_pointer)
-      return mlirWavePtrTypeGet(elem, addrSpaceAttr(lc, t->is_shared != 0));
-    return elem;
-  }
-  case TYPE_SIMD: {
-    MlirType elem = lowerType(lc, t->element);
-    if (mlirTypeIsNull(elem))
-      return elem;
-    return mlirWaveSimdTypeGet(elem, (int64_t)t->width);
-  }
+  case TYPE_SCALAR:
+    return lowerScalarType(lc, t);
+  case TYPE_SIMD:
+    return lowerSimdType(lc, t);
   case TYPE_MASK:
     return mlirWaveMaskTypeGet(lc.ctx, (int64_t)t->width);
-  case TYPE_VECTOR: {
-    MlirType elem = lowerType(lc, t->element);
-    if (mlirTypeIsNull(elem))
-      return elem;
-    int64_t shape = (int64_t)t->width;
-    return mlirVectorTypeGet(1, &shape, elem);
-  }
+  case TYPE_VECTOR:
+    return lowerVectorType(lc, t);
   case TYPE_FRAGMENT:
+    return lowerFragmentType(lc, t);
+  case TYPE_VOID:
     return MlirType{nullptr};
   }
   return MlirType{nullptr};
@@ -740,6 +766,28 @@ static bool lowerWorkitemIdCall(LowerCtx &lc, const Expr *e, MlirValue *out) {
   return true;
 }
 
+static bool lowerSubgroupIdCall(LowerCtx &lc, const Expr *, MlirValue *out) {
+  MlirType indexTy = mlirIndexTypeGet(lc.ctx);
+  MlirOperation op = buildOp(lc, "wave.subgroup_id", {}, {indexTy});
+  *out = op0(op);
+  return true;
+}
+
+static bool lowerReadFirstCall(LowerCtx &lc, const Expr *e, MlirValue *out) {
+  const ExprCall &call = e->as.call;
+  MlirValue src;
+  if (!lowerExpr(lc, call.args[0], &src))
+    return false;
+  MlirType resTy = lowerType(lc, (const TypeRef *)e->sema_type);
+  if (mlirTypeIsNull(resTy)) {
+    fail(lc, exprSpan(e), "lowering: read_first result type unknown");
+    return false;
+  }
+  MlirOperation op = buildOp(lc, "wave.read_first", {src}, {resTy});
+  *out = op0(op);
+  return true;
+}
+
 static bool lowerLoadCall(LowerCtx &lc, const Expr *e, MlirValue *out) {
   MlirValue value;
   MlirValue token;
@@ -770,6 +818,84 @@ static bool lowerStoreCall(LowerCtx &lc, const Expr *e, MlirValue *out) {
   }
   MlirType tokTy = mlirWaveMemTokenTypeGet(lc.ctx);
   MlirOperation op = buildOp(lc, "wave.store", operands, {tokTy});
+  *out = op0(op);
+  return true;
+}
+
+static bool lowerFragmentFillCall(LowerCtx &lc, const Expr *e, MlirValue *out) {
+  MlirValue src;
+  if (!lowerExpr(lc, e->as.call.args[0], &src))
+    return false;
+  MlirType resTy = lowerType(lc, (const TypeRef *)e->sema_type);
+  if (mlirTypeIsNull(resTy)) {
+    fail(lc, exprSpan(e), "lowering: fragment_fill result type unknown");
+    return false;
+  }
+  MlirOperation op = buildOp(lc, "waveamd.fragment_fill", {src}, {resTy});
+  *out = op0(op);
+  return true;
+}
+
+static bool lowerFragmentPackCall(LowerCtx &lc, const Expr *e, MlirValue *out) {
+  MlirValue regs;
+  if (!lowerExpr(lc, e->as.call.args[0], &regs))
+    return false;
+  MlirType resTy = lowerType(lc, (const TypeRef *)e->sema_type);
+  if (mlirTypeIsNull(resTy)) {
+    fail(lc, exprSpan(e), "lowering: fragment_pack result type unknown");
+    return false;
+  }
+  MlirOperation op = buildOp(lc, "waveamd.fragment_pack", {regs}, {resTy});
+  *out = op0(op);
+  return true;
+}
+
+static bool lowerFragmentUnpackCall(LowerCtx &lc, const Expr *e,
+                                    MlirValue *out) {
+  MlirValue frag;
+  if (!lowerExpr(lc, e->as.call.args[0], &frag))
+    return false;
+  MlirType resTy = lowerType(lc, (const TypeRef *)e->sema_type);
+  if (mlirTypeIsNull(resTy)) {
+    fail(lc, exprSpan(e), "lowering: fragment_unpack result type unknown");
+    return false;
+  }
+  MlirOperation op = buildOp(lc, "waveamd.fragment_unpack", {frag}, {resTy});
+  *out = op0(op);
+  return true;
+}
+
+static const char *mmaKindForBuiltin(const Expr *callee) {
+  if (identIs(callee, "mma_wmma_i32_16x16x16_iu8"))
+    return "wmma.i32.16x16x16.iu8";
+  if (identIs(callee, "mma_wmma_f32_16x16x16_f16"))
+    return "wmma.f32.16x16x16.f16";
+  if (identIs(callee, "mma_mfma_f32_16x16x16_f16"))
+    return "mfma.f32.16x16x16.f16";
+  if (identIs(callee, "mma_mfma_f32_16x16x32_f16"))
+    return "mfma.f32.16x16x32.f16";
+  return nullptr;
+}
+
+static bool lowerMmaCall(LowerCtx &lc, const Expr *e, MlirValue *out) {
+  const ExprCall &call = e->as.call;
+  MlirValue a, b, acc;
+  if (!lowerExpr(lc, call.args[0], &a) || !lowerExpr(lc, call.args[1], &b) ||
+      !lowerExpr(lc, call.args[2], &acc))
+    return false;
+  const char *kind = mmaKindForBuiltin(call.callee);
+  if (kind == nullptr) {
+    fail(lc, exprSpan(e), "lowering: unknown mma builtin");
+    return false;
+  }
+  MlirType resTy = lowerType(lc, (const TypeRef *)e->sema_type);
+  if (mlirTypeIsNull(resTy)) {
+    fail(lc, exprSpan(e), "lowering: mma result type unknown");
+    return false;
+  }
+  MlirAttribute kindAttr = mlirStringAttrGet(lc.ctx, sr(kind));
+  MlirOperation op = buildOp(lc, "waveamd.mma", {a, b, acc}, {resTy},
+                             {namedAttr(lc, "kind", kindAttr)});
   *out = op0(op);
   return true;
 }
@@ -937,6 +1063,8 @@ static const LowerCallEntry kLowerCalls[] = {
     {"wave_id_in_grid", lowerWaveIdCall},
     {"workgroup_id", lowerWorkgroupIdCall},
     {"workitem_id", lowerWorkitemIdCall},
+    {"subgroup_id", lowerSubgroupIdCall},
+    {"read_first", lowerReadFirstCall},
     {"load", lowerLoadCall},
     {"store", lowerStoreCall},
     {"barrier", lowerBarrierCall},
@@ -945,6 +1073,13 @@ static const LowerCallEntry kLowerCalls[] = {
     {"lds_base", lowerLdsBaseCall},
     {"index_cast", lowerIndexCastCall},
     {"cast", lowerCastCall},
+    {"fragment_fill", lowerFragmentFillCall},
+    {"fragment_pack", lowerFragmentPackCall},
+    {"fragment_unpack", lowerFragmentUnpackCall},
+    {"mma_wmma_i32_16x16x16_iu8", lowerMmaCall},
+    {"mma_wmma_f32_16x16x16_f16", lowerMmaCall},
+    {"mma_mfma_f32_16x16x16_f16", lowerMmaCall},
+    {"mma_mfma_f32_16x16x32_f16", lowerMmaCall},
 };
 
 static bool lowerCall(LowerCtx &lc, const Expr *e, MlirValue *out) {

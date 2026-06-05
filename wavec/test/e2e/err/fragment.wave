@@ -1,3 +1,4 @@
 kernel [[amdgpu_wave_size(32)]] void fragment_error() {
-  fragment<0, half, 16, 16, 32, 8> acc;
+  fragment<3, half, 16, 16, 32, 8> acc =
+      fragment_fill<fragment<3, half, 16, 16, 32, 8>>(0);
 }
