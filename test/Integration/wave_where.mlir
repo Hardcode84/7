@@ -123,10 +123,10 @@ gpu.module @kernels {
     %cw_i32 = arith.constant @W@ : i32
     %five = arith.constant 5.000000e+00 : f32
     %pid = wave.workgroup_id 0
-    %base = wave.muli %pid, %cw_i32 : i32, i32 -> i32
+    %base = wave.binary muli %pid, %cw_i32 : i32, i32 -> i32
     %vbase = wave.splat %base : i32 -> !wave.simd<i32, @W@>
     %lane = wave.lane_id : !wave.simd<i32, @W@>
-    %idx = wave.addi %vbase, %lane
+    %idx = wave.binary addi %vbase, %lane
         : !wave.simd<i32, @W@>, !wave.simd<i32, @W@> -> !wave.simd<i32, @W@>
     %vlimit = wave.splat %limit : i32 -> !wave.simd<i32, @W@>
     %active = wave.cmpi ult %idx, %vlimit

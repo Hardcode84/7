@@ -7,8 +7,8 @@ module attributes {gpu.container_module} {
     %c0_i32 = arith.constant 0 : i32
     %c1_i32 = arith.constant 1 : i32
     %2 = scf.for %arg2 = %c0_i32 to %arg1 step %c1_i32 iter_args(%arg3 = %1) -> (!wave.simd<f32, 32>)  : i32 {
-      %5 = wave.muli %arg2, %c32_i32 : i32, i32 -> i32
-      %6 = wave.addi %5, %0 : i32, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+      %5 = wave.binary muli %arg2, %c32_i32 : i32, i32 -> i32
+      %6 = wave.binary addi %5, %0 : i32, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
       %7 = wave.ptr_add %arg0, %6 : !wave.ptr<#wave.global, f32>, !wave.simd<i32, 32> -> !wave.simd<!wave.ptr<#wave.global, f32>, 32>
       %value, %token = wave.load %7 : (!wave.simd<!wave.ptr<#wave.global, f32>, 32>) -> (!wave.simd<f32, 32>, !wave.mem.token)
       %8 = wave.fadd %arg3, %value : !wave.simd<f32, 32>, !wave.simd<f32, 32> -> !wave.simd<f32, 32>

@@ -172,13 +172,70 @@ LogicalResult SplatOp::verify() {
   return success();
 }
 
-LogicalResult BinaryOp::verify() {
-  auto lhsType = getLhs().getType();
-  auto rhsType = getRhs().getType();
-  auto resultType = getResult().getType();
-  if (lhsType != rhsType || lhsType != resultType)
-    return emitOpError("operands and result must have the same SIMD type");
+namespace {
+struct WaveBinaryOperandShape {
+  Type elementType;
+  std::optional<int64_t> simdWidth;
+};
+} // namespace
+
+static FailureOr<WaveBinaryOperandShape> classifyWaveBinaryOperand(
+    Type type, function_ref<InFlightDiagnostic(const Twine &)> emitError) {
+  if (auto intTy = dyn_cast<IntegerType>(type)) {
+    if (!intTy.isSignless())
+      return emitError("integer operand must be signless");
+    return WaveBinaryOperandShape{intTy, std::nullopt};
+  }
+  if (type.isIndex())
+    return WaveBinaryOperandShape{type, std::nullopt};
+  if (auto simdTy = dyn_cast<SimdType>(type)) {
+    Type element = simdTy.getElementType();
+    if (auto intTy = dyn_cast<IntegerType>(element)) {
+      if (!intTy.isSignless())
+        return emitError("SIMD operand element type must be signless");
+      return WaveBinaryOperandShape{intTy, simdTy.getWidth()};
+    }
+    if (element.isIndex())
+      return WaveBinaryOperandShape{element, simdTy.getWidth()};
+    return emitError("SIMD operand element type must be integer or index");
+  }
+  return emitError("operand must be integer, index, or !wave.simd<T, W>");
+}
+
+static LogicalResult verifyWaveBinaryResult(
+    Type resultType, Type elementType, std::optional<int64_t> simdWidth,
+    function_ref<InFlightDiagnostic(const Twine &)> emitError) {
+  if (!simdWidth)
+    return resultType == elementType
+               ? success()
+               : emitError("result type must match operands");
+  auto simdTy = dyn_cast<SimdType>(resultType);
+  if (!simdTy)
+    return emitError(
+        "result must be SIMD because at least one operand is SIMD");
+  if (simdTy.getWidth() != *simdWidth)
+    return emitError("result SIMD wave width must match operands");
+  if (simdTy.getElementType() != elementType)
+    return emitError("result SIMD element type must match operands");
   return success();
+}
+
+LogicalResult BinaryOp::verify() {
+  auto emit = [this](const Twine &msg) { return emitOpError(msg); };
+  FailureOr<WaveBinaryOperandShape> lhs =
+      classifyWaveBinaryOperand(getLhs().getType(), emit);
+  FailureOr<WaveBinaryOperandShape> rhs =
+      classifyWaveBinaryOperand(getRhs().getType(), emit);
+  if (failed(lhs) || failed(rhs))
+    return failure();
+  if (lhs->elementType != rhs->elementType)
+    return emit("operand element types must match");
+  if (lhs->simdWidth && rhs->simdWidth && *lhs->simdWidth != *rhs->simdWidth)
+    return emit("SIMD wave widths must match across operands");
+  std::optional<int64_t> resultSimd =
+      lhs->simdWidth ? lhs->simdWidth : rhs->simdWidth;
+  return verifyWaveBinaryResult(getResult().getType(), lhs->elementType,
+                                resultSimd, emit);
 }
 
 ParseResult SelectOp::parse(OpAsmParser &parser, OperationState &result) {
@@ -543,84 +600,6 @@ OpFoldResult ExtractOp::fold(FoldAdaptor) {
   return pack.getInputs()[index];
 }
 
-namespace {
-// Operand shape for the width-independent arith ops: element bit-width
-// plus an optional SIMD wave width (nullopt = uniform scalar).
-struct WaveArithOperandShape {
-  unsigned elementBits;
-  std::optional<int64_t> simdWidth;
-};
-} // namespace
-
-static FailureOr<WaveArithOperandShape> classifyWaveArithOperand(
-    Type type, function_ref<InFlightDiagnostic(const Twine &)> emitError) {
-  if (auto intTy = dyn_cast<IntegerType>(type)) {
-    if (!intTy.isSignless())
-      return emitError("integer operand must be signless");
-    return WaveArithOperandShape{intTy.getWidth(), std::nullopt};
-  }
-  if (auto simdTy = dyn_cast<SimdType>(type)) {
-    auto eltIntTy = dyn_cast<IntegerType>(simdTy.getElementType());
-    if (!eltIntTy || !eltIntTy.isSignless())
-      return emitError("SIMD operand element type must be a signless integer");
-    return WaveArithOperandShape{eltIntTy.getWidth(), simdTy.getWidth()};
-  }
-  return emitError("operand must be a signless integer or !wave.simd<iN, W>");
-}
-
-static LogicalResult verifyWaveArithResult(
-    Type resultType, unsigned elementBits, std::optional<int64_t> simdWidth,
-    function_ref<InFlightDiagnostic(const Twine &)> emitError) {
-  if (simdWidth) {
-    auto simdTy = dyn_cast<SimdType>(resultType);
-    if (!simdTy)
-      return emitError(
-          "result must be SIMD because at least one operand is SIMD");
-    if (simdTy.getWidth() != *simdWidth)
-      return emitError("result SIMD wave width must match operands");
-    auto eltIntTy = dyn_cast<IntegerType>(simdTy.getElementType());
-    if (!eltIntTy || eltIntTy.getWidth() != elementBits)
-      return emitError("result SIMD element width must match operands");
-    return success();
-  }
-  auto intTy = dyn_cast<IntegerType>(resultType);
-  if (!intTy || intTy.getWidth() != elementBits)
-    return emitError(
-        "result must be a signless integer with the operand element width");
-  return success();
-}
-
-static LogicalResult verifyWaveIntBinaryArith(Operation *op, Type lhsTy,
-                                              Type rhsTy, Type resultTy) {
-  auto emit = [op](const Twine &msg) { return op->emitOpError(msg); };
-  auto lhs = classifyWaveArithOperand(lhsTy, emit);
-  auto rhs = classifyWaveArithOperand(rhsTy, emit);
-  if (failed(lhs) || failed(rhs))
-    return failure();
-  if (lhs->elementBits != rhs->elementBits)
-    return emit("operand element bit-widths must match");
-  if (lhs->simdWidth && rhs->simdWidth && *lhs->simdWidth != *rhs->simdWidth)
-    return emit("SIMD wave widths must match across operands");
-  std::optional<int64_t> resultSimd =
-      lhs->simdWidth ? lhs->simdWidth : rhs->simdWidth;
-  return verifyWaveArithResult(resultTy, lhs->elementBits, resultSimd, emit);
-}
-
-LogicalResult AddiOp::verify() {
-  return verifyWaveIntBinaryArith(getOperation(), getLhs().getType(),
-                                  getRhs().getType(), getResult().getType());
-}
-
-LogicalResult MuliOp::verify() {
-  return verifyWaveIntBinaryArith(getOperation(), getLhs().getType(),
-                                  getRhs().getType(), getResult().getType());
-}
-
-LogicalResult ShliOp::verify() {
-  return verifyWaveIntBinaryArith(getOperation(), getLhs().getType(),
-                                  getRhs().getType(), getResult().getType());
-}
-
 static bool isWavePackedF16Type(Type type) {
   VectorType vectorType = dyn_cast<VectorType>(type);
   return vectorType && vectorType.getRank() == 1 &&
@@ -741,10 +720,11 @@ LogicalResult FRcpOp::verify() {
 // range at the correct width. SIMD chains then propagate through
 // wave-arith uniformly with scalar chains.
 
-static unsigned waveArithElementWidth(Type type) {
+static unsigned waveBinaryElementWidth(Type type) {
   if (auto simd = dyn_cast<SimdType>(type))
     type = simd.getElementType();
-  return cast<IntegerType>(type).getWidth();
+  unsigned bits = ConstantIntRanges::getStorageBitwidth(type);
+  return bits == 0 ? 64 : bits;
 }
 
 static ConstantIntRanges normalizeWaveArithRange(const ConstantIntRanges &range,
@@ -761,6 +741,50 @@ normalizeWaveArithRanges(ArrayRef<ConstantIntRanges> argRanges, unsigned bits) {
   for (const ConstantIntRanges &range : argRanges)
     normalized.push_back(normalizeWaveArithRange(range, bits));
   return normalized;
+}
+
+using WaveBinaryRangeInferFn =
+    ConstantIntRanges (*)(ArrayRef<ConstantIntRanges>);
+
+struct WaveBinaryRangeRule {
+  BinaryKind kind;
+  WaveBinaryRangeInferFn infer;
+};
+
+static ConstantIntRanges
+inferWaveBinaryResultRange(BinaryKind kind, ArrayRef<ConstantIntRanges> ranges,
+                           unsigned bits) {
+  static constexpr std::array<WaveBinaryRangeRule, 13> rules{{
+      {BinaryKind::AddI,
+       [](ArrayRef<ConstantIntRanges> ranges) {
+         return mlir::intrange::inferAdd(ranges);
+       }},
+      {BinaryKind::SubI,
+       [](ArrayRef<ConstantIntRanges> ranges) {
+         return mlir::intrange::inferSub(ranges);
+       }},
+      {BinaryKind::MulI,
+       [](ArrayRef<ConstantIntRanges> ranges) {
+         return mlir::intrange::inferMul(ranges);
+       }},
+      {BinaryKind::ShLI,
+       [](ArrayRef<ConstantIntRanges> ranges) {
+         return mlir::intrange::inferShl(ranges);
+       }},
+      {BinaryKind::ShRUI, mlir::intrange::inferShrU},
+      {BinaryKind::ShRSI, mlir::intrange::inferShrS},
+      {BinaryKind::AndI, mlir::intrange::inferAnd},
+      {BinaryKind::OrI, mlir::intrange::inferOr},
+      {BinaryKind::XOrI, mlir::intrange::inferXor},
+      {BinaryKind::DivUI, mlir::intrange::inferDivU},
+      {BinaryKind::DivSI, mlir::intrange::inferDivS},
+      {BinaryKind::RemUI, mlir::intrange::inferRemU},
+      {BinaryKind::RemSI, mlir::intrange::inferRemS},
+  }};
+  for (const WaveBinaryRangeRule &rule : rules)
+    if (rule.kind == kind)
+      return rule.infer(ranges);
+  return ConstantIntRanges::maxRange(bits);
 }
 
 static bool isFullSignedRange(const ConstantIntRanges &range) {
@@ -901,60 +925,20 @@ void mlir::wave::appendAssumePredicates(
 void SplatOp::inferResultRanges(ArrayRef<ConstantIntRanges> argRanges,
                                 SetIntRangeFn setResultRange) {
   SimdType simd = cast<SimdType>(getResult().getType());
-  if (!isa<IntegerType>(simd.getElementType()))
+  if (!isa<IntegerType>(simd.getElementType()) &&
+      !simd.getElementType().isIndex())
     return;
-  unsigned bits = cast<IntegerType>(simd.getElementType()).getWidth();
+  unsigned bits = waveBinaryElementWidth(simd.getElementType());
   setResultRange(getResult(), normalizeWaveArithRange(argRanges[0], bits));
 }
 
 void BinaryOp::inferResultRanges(ArrayRef<ConstantIntRanges> argRanges,
                                  SetIntRangeFn setResultRange) {
-  SimdType simd = cast<SimdType>(getResult().getType());
-  if (!isa<IntegerType>(simd.getElementType()))
-    return;
-  unsigned bits = cast<IntegerType>(simd.getElementType()).getWidth();
+  unsigned bits = waveBinaryElementWidth(getResult().getType());
   SmallVector<ConstantIntRanges, 2> ranges =
       normalizeWaveArithRanges(argRanges, bits);
-
-  StringRef kind = getKind();
-  if (kind == "andi") {
-    setResultRange(getResult(), mlir::intrange::inferAnd(ranges));
-    return;
-  }
-  if (kind == "ori") {
-    setResultRange(getResult(), mlir::intrange::inferOr(ranges));
-    return;
-  }
-  if (kind == "xori") {
-    setResultRange(getResult(), mlir::intrange::inferXor(ranges));
-    return;
-  }
-  if (kind == "shri") {
-    setResultRange(getResult(), mlir::intrange::inferShrU(ranges));
-    return;
-  }
-  setResultRange(getResult(), ConstantIntRanges::maxRange(bits));
-}
-
-void AddiOp::inferResultRanges(ArrayRef<ConstantIntRanges> argRanges,
-                               SetIntRangeFn setResultRange) {
-  unsigned bits = waveArithElementWidth(getResult().getType());
-  setResultRange(getResult(), mlir::intrange::inferAdd(
-                                  normalizeWaveArithRanges(argRanges, bits)));
-}
-
-void MuliOp::inferResultRanges(ArrayRef<ConstantIntRanges> argRanges,
-                               SetIntRangeFn setResultRange) {
-  unsigned bits = waveArithElementWidth(getResult().getType());
-  setResultRange(getResult(), mlir::intrange::inferMul(
-                                  normalizeWaveArithRanges(argRanges, bits)));
-}
-
-void ShliOp::inferResultRanges(ArrayRef<ConstantIntRanges> argRanges,
-                               SetIntRangeFn setResultRange) {
-  unsigned bits = waveArithElementWidth(getResult().getType());
-  setResultRange(getResult(), mlir::intrange::inferShl(
-                                  normalizeWaveArithRanges(argRanges, bits)));
+  setResultRange(getResult(),
+                 inferWaveBinaryResultRange(getKind(), ranges, bits));
 }
 
 void AssumeOp::inferResultRangesFromOptional(

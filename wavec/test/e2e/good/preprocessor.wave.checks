@@ -1,4 +1,4 @@
 // CHECK: func.func @pp
 // CHECK: wave.lane_id : !wave.simd<i32, 32>
-// CHECK: wave.addi
+// CHECK: wave.binary addi
 // CHECK: wave.store

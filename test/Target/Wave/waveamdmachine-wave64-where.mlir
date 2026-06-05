@@ -35,7 +35,7 @@ func.func @where_wave64_else(%out: !wave.ptr<#wave.global, i32>,
   %wi = wave.assume %wi_raw as "x" [#wave.pred<"x >= 0">, #wave.pred<"x <= 63">] : !wave.simd<i32, 64>
   %one = arith.constant 1 : i32
   %vone = wave.splat %one : i32 -> !wave.simd<i32, 64>
-  %other = wave.addi %wi, %vone
+  %other = wave.binary addi %wi, %vone
       : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
   %ptrs = wave.ptr_add %out, %wi
       : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 64>

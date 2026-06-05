@@ -35,7 +35,7 @@ func.func @multi_wave_kernel(%out: !wave.ptr<#wave.global, i32>) attributes {wav
   %vwg = wave.splat %wg : i32 -> !wave.simd<i32, 32>
   %wi_raw = wave.workitem_id 0 : !wave.simd<i32, 32>
   %wi = wave.assume %wi_raw as "x" [#wave.pred<"x >= 0">, #wave.pred<"x <= 31">] : !wave.simd<i32, 32>
-  %sum = wave.addi %wi, %vwg : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  %sum = wave.binary addi %wi, %vwg : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
   %ptrs = wave.ptr_add %out, %wi : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 32> -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
   %tok = wave.store %sum -> %ptrs : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>) -> !wave.mem.token
   return
@@ -51,7 +51,7 @@ func.func @multi_axis_kernel(%out: !wave.ptr<#wave.global, i32>) attributes {wav
   %wg_y = wave.workgroup_id 1
   %vwg_y = wave.splat %wg_y : i32 -> !wave.simd<i32, 32>
   %lane = wave.lane_id : !wave.simd<i32, 32>
-  %sum = wave.addi %lane, %vwg_y : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  %sum = wave.binary addi %lane, %vwg_y : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
   %ptrs = wave.ptr_add %out, %lane : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 32> -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
   %tok = wave.store %sum -> %ptrs : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>) -> !wave.mem.token
   return

@@ -39,12 +39,12 @@ gpu.module @kernels {
     %v400 = wave.splat %c400 : i32 -> !wave.simd<i32, @W@>
     %selected_bias = wave.select %lt8, %v300, %v400
         : !wave.mask<@W@>, !wave.simd<i32, @W@>
-    %selected = wave.addi %selected_base, %selected_bias
+    %selected = wave.binary addi %selected_base, %selected_bias
         : !wave.simd<i32, @W@>, !wave.simd<i32, @W@> -> !wave.simd<i32, @W@>
 
-    %lane_plus8 = wave.addi %lane, %v8
+    %lane_plus8 = wave.binary addi %lane, %v8
         : !wave.simd<i32, @W@>, !wave.simd<i32, @W@> -> !wave.simd<i32, @W@>
-    %lane_plus16 = wave.addi %lane, %v16
+    %lane_plus16 = wave.binary addi %lane, %v16
         : !wave.simd<i32, @W@>, !wave.simd<i32, @W@> -> !wave.simd<i32, @W@>
     %whole = wave.select %flag, %v200, %lane_plus8
         : !wave.simd<i32, @W@>

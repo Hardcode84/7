@@ -33,7 +33,7 @@ gpu.module @kernels {
     %barrier_token = wave.barrier %store_token : (!wave.mem.token) -> !wave.mem.token
 
     // All-ones lane mask mirrors order.
-    %mirror = wave.binary "xori" %lane, %vlast
+    %mirror = wave.binary xori %lane, %vlast
         : !wave.simd<i32, @W@>, !wave.simd<i32, @W@> -> !wave.simd<i32, @W@>
     %load_ptrs = wave.ptr_add %lds, %mirror
         : !wave.ptr<#wave.shared, i32>, !wave.simd<i32, @W@>

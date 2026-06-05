@@ -2,7 +2,7 @@
 // RUN: wave-opt --int-range-optimizations %s | wave-opt | FileCheck %s
 
 // `wave.assume` + the InferIntRangeInterface implementations on
-// `wave.addi` / `wave.muli` / `wave.shli` together let upstream
+// `wave.binary addi` / `wave.binary muli` / `wave.binary shli` together let upstream
 // `IntRangeAnalysis` see ranges flow through the wave-arith layer.
 // `int-range-optimizations` consumes that range info; a comparison
 // whose result is provably constant collapses to `arith.constant`.
@@ -12,7 +12,7 @@
 // CHECK-NEXT: return %[[T]] : i1
 func.func @addi_propagation(%v: i32) -> i1 {
   %a = wave.assume %v as "x" [#wave.pred<"x >= 0">, #wave.pred<"x <= 10">] : i32
-  %sum = wave.addi %a, %a : i32, i32 -> i32    // proves to [0, 20]
+  %sum = wave.binary addi %a, %a : i32, i32 -> i32    // proves to [0, 20]
   %hundred = arith.constant 100 : i32
   %cmp = arith.cmpi slt, %sum, %hundred : i32  // always true
   return %cmp : i1
@@ -23,7 +23,7 @@ func.func @addi_propagation(%v: i32) -> i1 {
 // CHECK-NEXT: return %[[T]] : i1
 func.func @muli_propagation(%v: i32) -> i1 {
   %a = wave.assume %v as "x" [#wave.pred<"x >= 0">, #wave.pred<"x <= 5">] : i32
-  %prod = wave.muli %a, %a : i32, i32 -> i32   // proves to [0, 25]
+  %prod = wave.binary muli %a, %a : i32, i32 -> i32   // proves to [0, 25]
   %hundred = arith.constant 100 : i32
   %cmp = arith.cmpi slt, %prod, %hundred : i32 // always true
   return %cmp : i1
@@ -35,7 +35,7 @@ func.func @muli_propagation(%v: i32) -> i1 {
 func.func @shli_propagation(%v: i32, %s: i32) -> i1 {
   %a = wave.assume %v as "x" [#wave.pred<"x >= 0">, #wave.pred<"x <= 5">] : i32
   %sh = wave.assume %s as "x" [#wave.pred<"x >= 2">, #wave.pred<"x <= 2">] : i32     // exactly 2
-  %shifted = wave.shli %a, %sh : i32, i32 -> i32  // proves to [0, 20]
+  %shifted = wave.binary shli %a, %sh : i32, i32 -> i32  // proves to [0, 20]
   %hundred = arith.constant 100 : i32
   %cmp = arith.cmpi slt, %shifted, %hundred : i32 // always true
   return %cmp : i1
@@ -49,8 +49,8 @@ func.func @shli_propagation(%v: i32, %s: i32) -> i1 {
 func.func @chain_propagation(%v: i32, %w: i32) -> i1 {
   %a = wave.assume %v as "x" [#wave.pred<"x >= 0">, #wave.pred<"x <= 3">] : i32
   %b = wave.assume %w as "x" [#wave.pred<"x >= 0">, #wave.pred<"x <= 3">] : i32
-  %sum = wave.addi %a, %b : i32, i32 -> i32        // [0, 6]
-  %prod = wave.muli %sum, %sum : i32, i32 -> i32   // [0, 36]
+  %sum = wave.binary addi %a, %b : i32, i32 -> i32        // [0, 6]
+  %prod = wave.binary muli %sum, %sum : i32, i32 -> i32   // [0, 36]
   %fifty = arith.constant 50 : i32
   %cmp = arith.cmpi slt, %prod, %fifty : i32       // always true
   return %cmp : i1
@@ -114,18 +114,18 @@ func.func @workgroup_id_bounded() -> i1 {
 // SIMD chains: the wave-arith ops normalize incoming arg ranges to
 // the result's element bit-width before forwarding to the upstream
 // helpers, so a `wave.lane_id`-seeded `[0, W-1]` range happily flows
-// through `wave.addi` even when the other operand's lattice is at
+// through `wave.binary addi` even when the other operand's lattice is at
 // upstream-side width 0 (SIMD entry state). int-range-optimizations
 // can't fold a SIMD-typed result to a constant -- nothing visible to
 // CHECK for -- but the pass must not crash.
 // CHECK-LABEL: func.func @simd_chain_no_crash
 // CHECK: wave.lane_id
-// CHECK: wave.addi
+// CHECK: wave.binary addi
 // CHECK: return
 func.func @simd_chain_no_crash(%v: !wave.simd<i32, 32>)
     -> !wave.simd<i32, 32> {
   %lane = wave.lane_id : !wave.simd<i32, 32>
-  %sum = wave.addi %lane, %v
+  %sum = wave.binary addi %lane, %v
       : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
   return %sum : !wave.simd<i32, 32>
 }

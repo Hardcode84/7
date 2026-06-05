@@ -12,7 +12,7 @@
 
 # IR: func.func @pp_include
 # IR: wave.lane_id : !wave.simd<i32, 32>
-# IR: wave.addi
+# IR: wave.binary addi
 # IR: wave.store
 
 # PP: kernel {{\[\[}}amdgpu_wave_size(32){{\]\]}}
@@ -20,6 +20,6 @@
 # PP: void pp_include
 
 # FORCED: func.func @pp_forced
-# FORCED: wave.addi
+# FORCED: wave.binary addi
 
 # MISSING: 'does_not_exist.waveh' file not found

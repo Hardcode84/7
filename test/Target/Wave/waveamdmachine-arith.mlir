@@ -20,10 +20,10 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 func.func @uniform_i32_arith(%out: !wave.ptr<#wave.global, i32>) attributes {wave.kernel} {
   %wgid = wave.workgroup_id 0
   %four = arith.constant 4 : i32
-  %sum = wave.addi %wgid, %four : i32, i32 -> i32
-  %scaled = wave.muli %sum, %wgid : i32, i32 -> i32
+  %sum = wave.binary addi %wgid, %four : i32, i32 -> i32
+  %scaled = wave.binary muli %sum, %wgid : i32, i32 -> i32
   %two = arith.constant 2 : i32
-  %shifted = wave.shli %scaled, %two : i32, i32 -> i32
+  %shifted = wave.binary shli %scaled, %two : i32, i32 -> i32
   // Make the shifted result live so it survives DCE.
   %off = wave.index_expr <"S"> ["S"] (%shifted) : (i32) -> index
   %ptr = wave.ptr_add %out, %off : !wave.ptr<#wave.global, i32>, index -> !wave.ptr<#wave.global, i32>
@@ -39,7 +39,7 @@ func.func @uniform_i32_arith(%out: !wave.ptr<#wave.global, i32>) attributes {wav
 func.func @mixed_i32_addi(%out: !wave.ptr<#wave.global, i32>) attributes {wave.kernel} {
   %lane = wave.lane_id : !wave.simd<i32, 32>
   %wgid = wave.workgroup_id 0
-  %off = wave.addi %wgid, %lane : i32, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  %off = wave.binary addi %wgid, %lane : i32, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
   %ptrs = wave.ptr_add %out, %off : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 32> -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
   %c0 = arith.constant 0 : i32
   %v = wave.splat %c0 : i32 -> !wave.simd<i32, 32>
@@ -57,7 +57,7 @@ func.func @mixed_i32_addi(%out: !wave.ptr<#wave.global, i32>) attributes {wave.k
 func.func @uniform_i64_add() attributes {wave.kernel} {
   %a = arith.constant 100 : i64
   %b = arith.constant 200 : i64
-  %sum = wave.addi %a, %b : i64, i64 -> i64
+  %sum = wave.binary addi %a, %b : i64, i64 -> i64
   return
 }
 
@@ -68,7 +68,7 @@ func.func @uniform_i64_add() attributes {wave.kernel} {
 // SELECT-LABEL: func.func @simd_i64_add
 // SELECT: waveamdmachine.v_add_u64 {{.*}} : (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vgpr, 2>) -> (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vcc, 1>)
 func.func @simd_i64_add(%a: !wave.simd<i64, 32>, %b: !wave.simd<i64, 32>) attributes {wave.kernel} {
-  %sum = wave.addi %a, %b : !wave.simd<i64, 32>, !wave.simd<i64, 32> -> !wave.simd<i64, 32>
+  %sum = wave.binary addi %a, %b : !wave.simd<i64, 32>, !wave.simd<i64, 32> -> !wave.simd<i64, 32>
   return
 }
 
@@ -81,7 +81,7 @@ func.func @simd_i64_add(%a: !wave.simd<i64, 32>, %b: !wave.simd<i64, 32>) attrib
 func.func @uniform_i64_mul() attributes {wave.kernel} {
   %a = arith.constant 5 : i64
   %b = arith.constant 7 : i64
-  %p = wave.muli %a, %b : i64, i64 -> i64
+  %p = wave.binary muli %a, %b : i64, i64 -> i64
   return
 }
 
@@ -90,7 +90,7 @@ func.func @uniform_i64_mul() attributes {wave.kernel} {
 // SELECT-LABEL: func.func @simd_i64_mul
 // SELECT: waveamdmachine.v_mul_u64 {{.*}} : (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vgpr, 2>) -> (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vgpr, 1>)
 func.func @simd_i64_mul(%a: !wave.simd<i64, 32>, %b: !wave.simd<i64, 32>) attributes {wave.kernel} {
-  %p = wave.muli %a, %b : !wave.simd<i64, 32>, !wave.simd<i64, 32> -> !wave.simd<i64, 32>
+  %p = wave.binary muli %a, %b : !wave.simd<i64, 32>, !wave.simd<i64, 32> -> !wave.simd<i64, 32>
   return
 }
 
@@ -102,7 +102,7 @@ func.func @simd_i64_mul(%a: !wave.simd<i64, 32>, %b: !wave.simd<i64, 32>) attrib
 func.func @uniform_i64_shl() attributes {wave.kernel} {
   %a = arith.constant 5 : i64
   %b = arith.constant 3 : i64
-  %s = wave.shli %a, %b : i64, i64 -> i64
+  %s = wave.binary shli %a, %b : i64, i64 -> i64
   return
 }
 
@@ -111,7 +111,7 @@ func.func @uniform_i64_shl() attributes {wave.kernel} {
 // SELECT-LABEL: func.func @simd_i64_shl
 // SELECT: waveamdmachine.v_lshlrev_b64 {{.*}} : (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vgpr, 2>) -> !waveamdmachine.reg<vgpr, 2>
 func.func @simd_i64_shl(%a: !wave.simd<i64, 32>, %b: !wave.simd<i64, 32>) attributes {wave.kernel} {
-  %s = wave.shli %a, %b : !wave.simd<i64, 32>, !wave.simd<i64, 32> -> !wave.simd<i64, 32>
+  %s = wave.binary shli %a, %b : !wave.simd<i64, 32>, !wave.simd<i64, 32> -> !wave.simd<i64, 32>
   return
 }
 
@@ -119,7 +119,7 @@ func.func @simd_i64_shl(%a: !wave.simd<i64, 32>, %b: !wave.simd<i64, 32>) attrib
 // SELECT-LABEL: func.func @simd_i64_xor
 // SELECT: waveamdmachine.v_xor_b64 {{.*}} : (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vgpr, 2>) -> !waveamdmachine.reg<vgpr, 2>
 func.func @simd_i64_xor(%a: !wave.simd<i64, 32>, %b: !wave.simd<i64, 32>) attributes {wave.kernel} {
-  %x = wave.binary "xori" %a, %b : !wave.simd<i64, 32>, !wave.simd<i64, 32> -> !wave.simd<i64, 32>
+  %x = wave.binary xori %a, %b : !wave.simd<i64, 32>, !wave.simd<i64, 32> -> !wave.simd<i64, 32>
   return
 }
 
@@ -134,7 +134,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx803"} {
 // SELECT: waveamdmachine.v_add_u32_vcc {{.*}} : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>) -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vcc, 1>)
 func.func @gfx8_simd_i32_addi(%a: !wave.simd<i32, 64>,
                               %b: !wave.simd<i32, 64>) attributes {wave.kernel} {
-  %sum = wave.addi %a, %b : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+  %sum = wave.binary addi %a, %b : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
   return
 }
 
@@ -142,13 +142,11 @@ func.func @gfx8_simd_i32_addi(%a: !wave.simd<i32, 64>,
 
 // -----
 
-// Mixed uniform / SIMD i64 add is not yet lowered (would need an
-// SGPR2->VGPR2 promotion path; the only producer of SIMD i64 today
-// would be such a splat).
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
+// SELECT-LABEL: func.func @mixed_i64_addi
+// SELECT: waveamdmachine.v_add_u64 {{.*}} : (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vgpr, 2>) -> (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vcc, 1>)
 func.func @mixed_i64_addi(%a: i64, %b: !wave.simd<i64, 32>) attributes {wave.kernel} {
-  // expected-error @+1 {{i64 wave.addi with mixed uniform/SIMD operands is not yet supported}}
-  %sum = wave.addi %a, %b : i64, !wave.simd<i64, 32> -> !wave.simd<i64, 32>
+  %sum = wave.binary addi %a, %b : i64, !wave.simd<i64, 32> -> !wave.simd<i64, 32>
   return
 }
 }
@@ -156,9 +154,10 @@ func.func @mixed_i64_addi(%a: i64, %b: !wave.simd<i64, 32>) attributes {wave.ker
 // -----
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
+// SELECT-LABEL: func.func @mixed_i64_muli
+// SELECT: waveamdmachine.v_mul_u64 {{.*}} : (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vgpr, 2>) -> (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vgpr, 1>)
 func.func @mixed_i64_muli(%a: i64, %b: !wave.simd<i64, 32>) attributes {wave.kernel} {
-  // expected-error @+1 {{i64 wave.muli with mixed uniform/SIMD operands is not yet supported}}
-  %p = wave.muli %a, %b : i64, !wave.simd<i64, 32> -> !wave.simd<i64, 32>
+  %p = wave.binary muli %a, %b : i64, !wave.simd<i64, 32> -> !wave.simd<i64, 32>
   return
 }
 }
@@ -166,9 +165,10 @@ func.func @mixed_i64_muli(%a: i64, %b: !wave.simd<i64, 32>) attributes {wave.ker
 // -----
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
+// SELECT-LABEL: func.func @mixed_i64_shli
+// SELECT: waveamdmachine.v_lshlrev_b64 {{.*}} : (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vgpr, 2>) -> !waveamdmachine.reg<vgpr, 2>
 func.func @mixed_i64_shli(%a: i64, %b: !wave.simd<i64, 32>) attributes {wave.kernel} {
-  // expected-error @+1 {{i64 wave.shli with mixed uniform/SIMD operands is not yet supported}}
-  %s = wave.shli %a, %b : i64, !wave.simd<i64, 32> -> !wave.simd<i64, 32>
+  %s = wave.binary shli %a, %b : i64, !wave.simd<i64, 32> -> !wave.simd<i64, 32>
   return
 }
 }

@@ -16,7 +16,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // REGALLOC: waveamdmachine.uninit : !waveamdmachine.reg<sgpr, 1, {{[0-9]+}}>
 func.func @scalar_poison(%x: i32) -> i32 {
   %p = ub.poison : i32
-  %sum = wave.addi %p, %x : i32, i32 -> i32
+  %sum = wave.binary addi %p, %x : i32, i32 -> i32
   return %sum : i32
 }
 

@@ -26,7 +26,7 @@ func.func @raw_wave_arith(%out: !wave.ptr<#wave.global, i32>) attributes {wave.k
   %lane = wave.lane_id : !wave.simd<i32, 32>
   %c8 = arith.constant 8 : i32
   %stride = wave.splat %c8 : i32 -> !wave.simd<i32, 32>
-  %lane_off = wave.muli %lane, %stride
+  %lane_off = wave.binary muli %lane, %stride
       : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
   %base = wave.ptr_add %out, %c8
       : !wave.ptr<#wave.global, i32>, i32 -> !wave.ptr<#wave.global, i32>
@@ -48,7 +48,7 @@ func.func @raw_wave_xor(%out: !wave.ptr<#wave.global, i32>) attributes {wave.ker
   %lane = wave.lane_id : !wave.simd<i32, 32>
   %c31 = arith.constant 31 : i32
   %mask = wave.splat %c31 : i32 -> !wave.simd<i32, 32>
-  %swizzled = wave.binary "xori" %lane, %mask
+  %swizzled = wave.binary xori %lane, %mask
       : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
   %base = wave.ptr_add %out, %c31
       : !wave.ptr<#wave.global, i32>, i32 -> !wave.ptr<#wave.global, i32>

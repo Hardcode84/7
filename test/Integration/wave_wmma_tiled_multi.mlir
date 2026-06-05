@@ -1,12 +1,12 @@
 // REQUIRES: host-supports-amdgpu-wmma
 //
 // End-to-end check for the tiled WMMA f16xf16xf32 matmul with the
-// post-`shri`/`muli` shape constraints relaxed:
+// post-`shrui`/`muli` shape constraints relaxed:
 //
 //   * non-pow-2 K (48 = 3 K-tiles of 16, needs `muli` to scale the
 //     per-lane base offset by K),
 //   * `BM = BN = 2` (4 waves per workgroup; wave-id decomposition uses
-//     `andi` + `shri`, and `M_blocks = N_blocks = 2` no longer needs to
+//     `andi` + `shrui`, and `M_blocks = N_blocks = 2` no longer needs to
 //     be a power of two for the tile-coord math),
 //
 // so the pipeline exercises every new lowering path at once. Each

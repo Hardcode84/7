@@ -168,7 +168,7 @@ What the v1 frontend lowers end-to-end (each verified through `wave-opt`):
 | `[[amdgpu_lds_size(N)]]` | `wave.lds_size` attr | yes |
 | scalar params `bool/half/float/index/int*_t/uint*_t`, `T*`, `shared T*` | `f32`/`i32`/`index`/`!wave.ptr<#global\|#shared, T>` | yes |
 | `simd<T,W>` / `mask<W>` / `vector<T,N>` / `fragment<role,T,M,N,W,R>` | `!wave.simd` / `!wave.mask` / `vector<NxT>` / `!waveamd.fragment` | yes |
-| arithmetic: int `+ * <<`; simd-float `+ - *`; scalar-float `+ - * /` (scalar broadcast) | `wave.addi/muli/shli`, `wave.f{add,sub,mul}`, `arith.{addf,subf,mulf,divf}`, `wave.splat` | yes |
+| arithmetic: int `+ - * / % << >> & \| ^`; simd-float `+ - *`; scalar-float `+ - * /` (scalar broadcast) | `wave.binary`, `wave.f{add,sub,mul}`, `arith.{addf,subf,mulf,divf}`, `wave.splat` | yes |
 | compare `< <= > >= == !=` | simd -> `wave.cmpi` -> `mask`; scalar -> `arith.cmpi` -> i1 (signed/unsigned from int type) | yes |
 | compound assign `+= -= *= ...` | desugar to op + rebind local | yes |
 | pointer `+` offset | `wave.ptr_add` (uniform ptr or simd-of-ptr base) | yes |
@@ -177,7 +177,7 @@ What the v1 frontend lowers end-to-end (each verified through `wave-opt`):
 | `store(v, p [after t])` | `wave.store` (value-first `$v -> $p`) -> token; scalar and vector payloads | yes |
 | `barrier(t...)` / `join(t...)` / `wait(t...)` / `token()` | `wave.barrier` / `join` / `wait` / `token` | yes |
 | `lds_base<T>([K])` | `wave.lds_base {offset=K}` : `shared T*` | yes |
-| `index_cast(x)` | `arith.index_cast` | yes |
+| `index_cast(x)` | `arith.index_cast` / `arith.index_castui` | yes |
 | `cast<T>(x)` (fp<->fp, int<->int, int<->fp) with verifier policies | `wave.cast {kind[, policy]}` | yes |
 | `fragment_fill<T>(bits)` / `fragment_pack<T>(regs)` / `fragment_unpack(frag)` | `waveamd.fragment_fill` / `waveamd.fragment_pack` / `waveamd.fragment_unpack` | yes |
 | `mma_wmma_*` / `mma_mfma_*` explicit builtins | `waveamd.mma` with frontend-selected kind attr | yes |
@@ -192,7 +192,7 @@ Honestly NOT supported in v1 (each returns a clear error, never a fake):
 |---|---|---|
 | `while (c) {...}` | lowering | `lowering: while loops not supported` (parsed + type-checked; lowering refuses -- out of v1 scope) |
 | unary `- ! ~` | lowering | `lowering: unary operators not supported` (parsed; no lowering yet) |
-| integer `- >> & \| ^ /` and simd-float `/` | lowering | `lowering: unsupported integer/float operator` (no Wave dialect op -- never a fabricated op name) |
+| simd-float `/` | lowering | `lowering: unsupported float operator` |
 | `reduce`/`ballot`/`any` | sema | not a known builtin |
 | user (non-`kernel`) functions, value-returning kernels, arrays/subscript, deref/address-of, `?:` | parse | parse error (not in the v1 grammar) |
 

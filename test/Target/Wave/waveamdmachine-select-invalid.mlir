@@ -41,8 +41,8 @@ func.func @unsupported_lane_id_width() {
 func.func @unsupported_binary_kind(%x: i32) {
   %lane = wave.lane_id : !wave.simd<i32, 32>
   %vx = wave.splat %x : i32 -> !wave.simd<i32, 32>
-  // expected-error @below {{unsupported wave.binary kind}}
-  %bad = wave.binary "subi" %lane, %vx : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  // expected-error @below {{unsupported i32 wave.binary kind subi}}
+  %bad = wave.binary subi %lane, %vx : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
   return
 }
 

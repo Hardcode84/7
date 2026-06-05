@@ -32,11 +32,11 @@ func.func @mfma_gfx950_f16xf32_kernel(%out: !wave.ptr<#wave.global, i32>)
   %wi = wave.workitem_id 0 : !wave.simd<i32, 64>
   %mask = arith.constant 63 : i32
   %mask_simd = wave.splat %mask : i32 -> !wave.simd<i32, 64>
-  %lane = wave.binary "andi" %wi, %mask_simd
+  %lane = wave.binary andi %wi, %mask_simd
       : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
   %r = arith.constant 4 : i32
   %r_simd = wave.splat %r : i32 -> !wave.simd<i32, 64>
-  %lane_off = wave.muli %lane, %r_simd
+  %lane_off = wave.binary muli %lane, %r_simd
       : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
   %tuple_ptr = wave.ptr_add %out, %lane_off
       : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 64>
@@ -82,11 +82,11 @@ func.func @mfma_gfx950_mxfp4_kernel(%out: !wave.ptr<#wave.global, i32>)
   %wi = wave.workitem_id 0 : !wave.simd<i32, 64>
   %mask = arith.constant 63 : i32
   %mask_simd = wave.splat %mask : i32 -> !wave.simd<i32, 64>
-  %lane = wave.binary "andi" %wi, %mask_simd
+  %lane = wave.binary andi %wi, %mask_simd
       : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
   %r = arith.constant 4 : i32
   %r_simd = wave.splat %r : i32 -> !wave.simd<i32, 64>
-  %lane_off = wave.muli %lane, %r_simd
+  %lane_off = wave.binary muli %lane, %r_simd
       : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
   %tuple_ptr = wave.ptr_add %out, %lane_off
       : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 64>
@@ -134,7 +134,7 @@ func.func @mfma_gfx950_mxfp4_transposed_scale_kernel(%out: !wave.ptr<#wave.globa
      -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
   %four = arith.constant 4 : i32
   %four_simd = wave.splat %four : i32 -> !wave.simd<i32, 64>
-  %lane_off = wave.muli %lane, %four_simd
+  %lane_off = wave.binary muli %lane, %four_simd
       : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
   %tuple_ptr = wave.ptr_add %out, %lane_off
       : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 64>
@@ -174,11 +174,11 @@ func.func @mfma_gfx950_bf16xf32_kernel(%out: !wave.ptr<#wave.global, i32>)
   %wi = wave.workitem_id 0 : !wave.simd<i32, 64>
   %mask = arith.constant 63 : i32
   %mask_simd = wave.splat %mask : i32 -> !wave.simd<i32, 64>
-  %lane = wave.binary "andi" %wi, %mask_simd
+  %lane = wave.binary andi %wi, %mask_simd
       : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
   %r = arith.constant 4 : i32
   %r_simd = wave.splat %r : i32 -> !wave.simd<i32, 64>
-  %lane_off = wave.muli %lane, %r_simd
+  %lane_off = wave.binary muli %lane, %r_simd
       : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
   %tuple_ptr = wave.ptr_add %out, %lane_off
       : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 64>
@@ -201,7 +201,7 @@ func.func @gfx950_literal_mul_kernel(%out: !wave.ptr<#wave.global, i32>)
   %wi = wave.assume %wi_raw as "x" [#wave.pred<"x >= 0">, #wave.pred<"x <= 63">] : !wave.simd<i32, 64>
   %c256 = arith.constant 256 : i32
   %v256 = wave.splat %c256 : i32 -> !wave.simd<i32, 64>
-  %value = wave.muli %v256, %wi
+  %value = wave.binary muli %v256, %wi
       : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
   %ptrs = wave.ptr_add %out, %wi
       : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 64>

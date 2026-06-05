@@ -371,9 +371,8 @@ static MlirValue coerceToType(LowerCtx &lc, MlirValue v, MlirType target) {
 // Binary / unary arithmetic.
 //===----------------------------------------------------------------------===//
 
-// Result type for wave.addi/muli/shli: simd if any operand simd (element +
-// width from the simd operand), else the scalar lhs type. Mirrors the DSL's
-// _arith_result_type -- broadcast is built into the op (no pre-splat).
+// Result type for wave.binary: simd if any operand simd (element + width from
+// the simd operand), else the scalar lhs type.
 static MlirType arithResultType(MlirValue lhs, MlirValue rhs) {
   MlirType lt = mlirValueGetType(lhs), rt = mlirValueGetType(rhs);
   if (isSimd(lt))
@@ -383,21 +382,52 @@ static MlirType arithResultType(MlirValue lhs, MlirValue rhs) {
   return lt;
 }
 
-// Only ops the Wave dialect actually registers. Integer sub/shr/and/or/xor
-// have NO wave op and float div has none either; these return null so
-// lowerBinary emits an honest "unsupported" error rather than inventing a
-// dialect op name that fails verification.
-static const char *intBinName(TokenKind op) {
-  switch (op) {
-  case TOK_PLUS:
-    return "wave.addi";
-  case TOK_STAR:
-    return "wave.muli";
-  case TOK_SHL:
-    return "wave.shli";
-  default:
-    return nullptr;
+enum BinaryKindCode {
+  BINARY_ADDI = 0,
+  BINARY_SUBI = 1,
+  BINARY_MULI = 2,
+  BINARY_SHLI = 3,
+  BINARY_SHRUI = 4,
+  BINARY_SHRSI = 5,
+  BINARY_ANDI = 6,
+  BINARY_ORI = 7,
+  BINARY_XORI = 8,
+  BINARY_DIVUI = 9,
+  BINARY_DIVSI = 10,
+  BINARY_REMUI = 11,
+  BINARY_REMSI = 12
+};
+
+struct BinaryKindEntry {
+  TokenKind op;
+  BinaryKindCode unsignedKind;
+  BinaryKindCode signedKind;
+};
+
+static constexpr BinaryKindEntry kBinaryKinds[] = {
+    {TOK_PLUS, BINARY_ADDI, BINARY_ADDI},
+    {TOK_MINUS, BINARY_SUBI, BINARY_SUBI},
+    {TOK_STAR, BINARY_MULI, BINARY_MULI},
+    {TOK_SLASH, BINARY_DIVUI, BINARY_DIVSI},
+    {TOK_PERCENT, BINARY_REMUI, BINARY_REMSI},
+    {TOK_SHL, BINARY_SHLI, BINARY_SHLI},
+    {TOK_SHR, BINARY_SHRUI, BINARY_SHRSI},
+    {TOK_AMP, BINARY_ANDI, BINARY_ANDI},
+    {TOK_PIPE, BINARY_ORI, BINARY_ORI},
+    {TOK_CARET, BINARY_XORI, BINARY_XORI},
+};
+
+static bool intBinKind(TokenKind op, bool signedInt, bool indexResult,
+                       int64_t *kind) {
+  for (const BinaryKindEntry &entry : kBinaryKinds) {
+    if (entry.op != op)
+      continue;
+    BinaryKindCode selected =
+        signedInt && !indexResult ? entry.signedKind : entry.unsignedKind;
+    *kind = static_cast<int64_t>(selected);
+    return true;
   }
+  return false;
 }
 
 static const char *floatBinName(TokenKind op) {
@@ -466,6 +496,21 @@ static bool valueElemSigned(const Expr *e) {
   return scalarIsSigned(sk);
 }
 
+static bool valueElemUnsignedSized(const Expr *e) {
+  const TypeRef *t = (const TypeRef *)e->sema_type;
+  if (!t)
+    return false;
+  ScalarKind sk;
+  if (t->kind == TYPE_SCALAR)
+    sk = t->scalar;
+  else if ((t->kind == TYPE_SIMD || t->kind == TYPE_VECTOR) && t->element &&
+           t->element->kind == TYPE_SCALAR)
+    sk = t->element->scalar;
+  else
+    return false;
+  return scalarIntBits(sk) != 0 && !scalarIsSigned(sk);
+}
+
 // Broadcast a scalar operand to match a simd sibling (cmpi/fadd/fmul require
 // matching operand types). Returns the possibly-splatted value.
 static MlirValue matchSimd(LowerCtx &lc, MlirValue v, int64_t width) {
@@ -481,6 +526,9 @@ static MlirType ptrAddResultType(MlirValue base, MlirValue off) {
   int64_t offWidth = simdWidth(mlirValueGetType(off));
   return (offWidth != 0) ? mlirWaveSimdTypeGet(baseTy, offWidth) : baseTy;
 }
+
+static MlirValue castIndexIntScalar(LowerCtx &lc, MlirValue v, MlirType target,
+                                    const Expr *sourceExpr);
 
 static bool lowerPointerBinary(LowerCtx &lc, const Expr *e, MlirValue lhs,
                                MlirValue rhs, bool lhsPtr, bool rhsPtr,
@@ -526,6 +574,12 @@ static bool lowerCompareBinary(LowerCtx &lc, const Expr *e, MlirValue lhs,
     fail(lc, exprSpan(e), "lowering: float comparison not supported");
     return false;
   }
+  MlirType lhsTy = mlirValueGetType(lhs);
+  MlirType rhsTy = mlirValueGetType(rhs);
+  if (mlirTypeIsAIndex(lhsTy) && mlirTypeIsAInteger(rhsTy))
+    rhs = castIndexIntScalar(lc, rhs, lhsTy, b.rhs);
+  else if (mlirTypeIsAIndex(rhsTy) && mlirTypeIsAInteger(lhsTy))
+    lhs = castIndexIntScalar(lc, lhs, rhsTy, b.lhs);
   MlirType i1 = mlirIntegerTypeGet(lc.ctx, 1);
   MlirOperation op = buildOp(lc, "arith.cmpi", {lhs, rhs}, {i1},
                              {namedAttr(lc, "predicate", predAttr)});
@@ -567,15 +621,51 @@ static bool lowerFloatBinary(LowerCtx &lc, const Expr *e, MlirValue lhs,
   return true;
 }
 
+static MlirValue castIndexIntScalar(LowerCtx &lc, MlirValue v, MlirType target,
+                                    const Expr *sourceExpr) {
+  MlirType source = mlirValueGetType(v);
+  if (mlirTypeEqual(source, target))
+    return v;
+  if ((mlirTypeIsAIndex(source) || mlirTypeIsAInteger(source)) &&
+      (mlirTypeIsAIndex(target) || mlirTypeIsAInteger(target))) {
+    const char *opName = mlirTypeIsAIndex(target) &&
+                                 mlirTypeIsAInteger(source) &&
+                                 valueElemUnsignedSized(sourceExpr)
+                             ? "arith.index_castui"
+                             : "arith.index_cast";
+    return op0(buildOp(lc, opName, {v}, {target}));
+  }
+  return v;
+}
+
 static bool lowerIntBinary(LowerCtx &lc, const Expr *e, MlirValue lhs,
                            MlirValue rhs, MlirValue *out) {
-  const char *name = intBinName(e->as.binary.op);
-  if (!name) {
+  const TypeRef *rt = (const TypeRef *)e->sema_type;
+  MlirType resTy = rt ? lowerType(lc, rt) : arithResultType(lhs, rhs);
+  if (mlirTypeIsNull(resTy)) {
+    fail(lc, exprSpan(e), "lowering: unsupported integer result type");
+    return false;
+  }
+  bool indexResult = mlirTypeIsAIndex(elementOf(resTy));
+  int64_t kind;
+  const ExprBinary &b = e->as.binary;
+  bool signedInt = b.op == TOK_SHR
+                       ? valueElemSigned(b.lhs)
+                       : valueElemSigned(b.lhs) || valueElemSigned(b.rhs);
+  if (!intBinKind(b.op, signedInt, indexResult, &kind)) {
     fail(lc, exprSpan(e), "lowering: unsupported integer operator");
     return false;
   }
-  MlirType resTy = arithResultType(lhs, rhs);
-  MlirOperation op = buildOp(lc, name, {lhs, rhs}, {resTy});
+  if (indexResult) {
+    if (!mlirTypeEqual(mlirValueGetType(lhs), resTy))
+      lhs = castIndexIntScalar(lc, lhs, resTy, b.lhs);
+    if (!mlirTypeEqual(mlirValueGetType(rhs), resTy))
+      rhs = castIndexIntScalar(lc, rhs, resTy, b.rhs);
+  }
+  MlirAttribute kindAttr =
+      mlirIntegerAttrGet(mlirIntegerTypeGet(lc.ctx, 32), kind);
+  MlirOperation op = buildOp(lc, "wave.binary", {lhs, rhs}, {resTy},
+                             {namedAttr(lc, "kind", kindAttr)});
   *out = op0(op);
   return true;
 }
@@ -989,8 +1079,7 @@ static bool lowerIndexCastCall(LowerCtx &lc, const Expr *e, MlirValue *out) {
     fail(lc, span, "lowering: unsupported index_cast result type");
     return false;
   }
-  MlirOperation op = buildOp(lc, "arith.index_cast", {v}, {resTy});
-  *out = op0(op);
+  *out = castIndexIntScalar(lc, v, resTy, call.args[0]);
   return true;
 }
 
@@ -1560,6 +1649,9 @@ static bool lowerForHeader(LowerCtx &lc, const Stmt *s,
   } else {
     header.step = makeIntConst(lc, header.ivTy, 1);
   }
+  header.lb = castIndexIntScalar(lc, header.lb, header.ivTy, f.lb);
+  header.ub = castIndexIntScalar(lc, header.ub, header.ivTy, f.ub);
+  header.step = castIndexIntScalar(lc, header.step, header.ivTy, f.step);
   return true;
 }
 

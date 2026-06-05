@@ -18,7 +18,7 @@ func.func @where_yields_value(%limit: i32) -> i32 {
   %active = wave.cmpi ult %lane, %vlimit
       : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.mask<32>
   %chosen = wave.where %active {
-    %sum = wave.addi %lane, %vlimit
+    %sum = wave.binary addi %lane, %vlimit
         : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
     wave.yield %sum : !wave.simd<i32, 32>
   } : !wave.mask<32> -> !wave.simd<i32, 32>
@@ -177,10 +177,10 @@ func.func @where_otherwise_recomputes_else_address(
   %c32 = arith.constant 32 : i32
   %five = arith.constant 5.000000e+00 : f32
   %pid = wave.workgroup_id 0
-  %base = wave.muli %pid, %c32 : i32, i32 -> i32
+  %base = wave.binary muli %pid, %c32 : i32, i32 -> i32
   %vbase = wave.splat %base : i32 -> !wave.simd<i32, 32>
   %lane = wave.lane_id : !wave.simd<i32, 32>
-  %idx = wave.addi %vbase, %lane
+  %idx = wave.binary addi %vbase, %lane
       : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
   %vlimit = wave.splat %limit : i32 -> !wave.simd<i32, 32>
   %active = wave.cmpi ult %idx, %vlimit
@@ -232,7 +232,7 @@ func.func @where_yields_pointer(%out: !wave.ptr<#wave.global, i32>,
   %active = wave.cmpi ult %lane, %vlimit
       : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.mask<32>
   %ptrs = wave.where %active {
-    %offset = wave.addi %lane, %c4
+    %offset = wave.binary addi %lane, %c4
         : !wave.simd<i32, 32>, i32 -> !wave.simd<i32, 32>
     %ptr = wave.ptr_add %out, %offset
         : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 32>
@@ -269,7 +269,7 @@ func.func @where_otherwise_yields_same_base_pointer(
         -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
     wave.yield %then_ptr : !wave.simd<!wave.ptr<#wave.global, i32>, 32>
   } otherwise {
-    %else_offset = wave.addi %lane, %c4
+    %else_offset = wave.binary addi %lane, %c4
         : !wave.simd<i32, 32>, i32 -> !wave.simd<i32, 32>
     %else_ptr = wave.ptr_add %out, %else_offset
         : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 32>

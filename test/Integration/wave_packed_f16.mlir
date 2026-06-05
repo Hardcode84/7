@@ -74,7 +74,7 @@ gpu.module @kernels {
     %c32i = arith.constant 32 : i32
     %v32 = wave.splat %c32i : i32 -> !wave.simd<i32, 32>
     %lane = wave.lane_id : !wave.simd<i32, 32>
-    %hi_lane = wave.addi %lane, %v32
+    %hi_lane = wave.binary addi %lane, %v32
         : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
 
     %lo_ptrs = wave.ptr_add %dst, %lane

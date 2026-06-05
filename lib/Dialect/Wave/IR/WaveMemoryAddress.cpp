@@ -130,18 +130,19 @@ private:
       return bindSymbol(value);
     if (SplatOp splat = value.getDefiningOp<SplatOp>())
       return buildValueExpr(splat.getSource(), skip, depth + 1);
-    if (AddiOp add = value.getDefiningOp<AddiOp>())
-      return buildBinaryExpr(add.getLhs(), sym::ExprBinaryOp::Add, add.getRhs(),
-                             skip, depth + 1);
-    if (MuliOp mul = value.getDefiningOp<MuliOp>())
-      return buildBinaryExpr(mul.getLhs(), sym::ExprBinaryOp::Mul, mul.getRhs(),
-                             skip, depth + 1);
-    if (ShliOp shl = value.getDefiningOp<ShliOp>())
-      return buildShiftExpr(shl, skip, depth + 1);
-    if (BinaryOp bin = value.getDefiningOp<BinaryOp>())
-      if (bin.getKind() == "xori")
+    if (BinaryOp bin = value.getDefiningOp<BinaryOp>()) {
+      if (bin.getKind() == BinaryKind::AddI)
+        return buildBinaryExpr(bin.getLhs(), sym::ExprBinaryOp::Add,
+                               bin.getRhs(), skip, depth + 1);
+      if (bin.getKind() == BinaryKind::MulI)
+        return buildBinaryExpr(bin.getLhs(), sym::ExprBinaryOp::Mul,
+                               bin.getRhs(), skip, depth + 1);
+      if (bin.getKind() == BinaryKind::ShLI)
+        return buildShiftExpr(bin, skip, depth + 1);
+      if (bin.getKind() == BinaryKind::XOrI)
         return buildBinaryExpr(bin.getLhs(), sym::ExprBinaryOp::Xor,
                                bin.getRhs(), skip, depth + 1);
+    }
     skip = true;
     return failure();
   }
@@ -158,7 +159,7 @@ private:
     return sym::composeExprBinary(store, *lhsExpr, op, *rhsExpr);
   }
 
-  FailureOr<sym::ExprHandle> buildShiftExpr(ShliOp op, bool &skip,
+  FailureOr<sym::ExprHandle> buildShiftExpr(BinaryOp op, bool &skip,
                                             unsigned depth) {
     std::optional<int64_t> shift = getConstantIntValue(op.getRhs());
     if (!shift || *shift < 0 || *shift >= 63) {

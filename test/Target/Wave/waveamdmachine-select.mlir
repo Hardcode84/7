@@ -123,7 +123,7 @@ func.func @select_lane_pointer(%out: !wave.ptr<#wave.global, i32>, %limit: i32)
   %then_ptr = wave.ptr_add %out, %lane
       : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 32>
       -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
-  %plus4 = wave.addi %lane, %c4
+  %plus4 = wave.binary addi %lane, %c4
       : !wave.simd<i32, 32>, i32 -> !wave.simd<i32, 32>
   %else_ptr = wave.ptr_add %out, %plus4
       : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 32>

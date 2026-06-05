@@ -109,7 +109,7 @@ value argument.
 | `join(t...)` | `(token...) -> token` | `wave.join` |
 | `token()` | `() -> token` (empty seed) | `wave.token` |
 | `lds_base<T>([K])` | `(const i64 K = 0) -> shared T*` (K = byte offset) | `wave.lds_base` |
-| `index_cast(x)` | `int <-> index` (either direction) | `arith.index_cast` |
+| `index_cast(x)` | `int <-> index` (either direction) | `arith.index_cast` / `arith.index_castui` |
 | `cast<T>(x)` | `(U) -> T` numeric (see cast note) | `wave.cast` |
 
 `lds_base`'s offset is an optional compile-time constant (default 0, folds
@@ -314,7 +314,7 @@ Near 1:1 with ops that already exist:
 | `float *x`, `float a`, `uint32_t n` | `!wave.ptr<#global,f32>`, `f32`, `i32` | uniform |
 | `lane_id<32>()` | `wave.lane_id` | `!wave.simd<i32,32>` |
 | `wave_id_in_grid()` | `workgroup_id*waves_per_wg + wave.subgroup_id` | uniform `i32` |
-| `wave*32 + lane` | `wave.muli` (uniform) -> broadcast -> `wave.addi` | `!wave.simd<i32,32>` |
+| `wave*32 + lane` | `wave.binary muli` (uniform) -> `wave.binary addi` | `!wave.simd<i32,32>` |
 | `i < n` | `wave.cmpi ult` (unsigned operands) | `!wave.mask<32>` |
 | `where (active) {...}` | `wave.where %active {...}` | -- |
 | `load(x + i)` | `wave.ptr_add` (simd<i32> offset) -> `wave.load` + token | `!wave.simd<f32,32>` |

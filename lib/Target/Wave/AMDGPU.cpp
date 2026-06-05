@@ -310,6 +310,7 @@ private:
   unsigned sLshlB32() const { return opcodes.sLshlB32; }
   unsigned sLshrB32() const { return opcodes.sLshrB32; }
   unsigned sAndB32() const { return opcodes.sAndB32; }
+  unsigned sOrB32() const { return opcodes.sOrB32; }
   unsigned sXorB32() const { return opcodes.sXorB32; }
   unsigned sXorB64() const { return opcodes.sXorB64; }
   unsigned sAndn2B32() const { return opcodes.sAndn2B32; }
@@ -1854,6 +1855,10 @@ private:
       return emitMC(sAndB32(), {toMCOperand(op.getResult(0)),
                                 toMCOperand(op.getOperand(0)),
                                 toMCOperand(op.getOperand(1))});
+    if (isa<waveamdmachine::SOrB32Op>(op))
+      return emitMC(sOrB32(), {toMCOperand(op.getResult(0)),
+                               toMCOperand(op.getOperand(0)),
+                               toMCOperand(op.getOperand(1))});
     if (isa<waveamdmachine::SXorB32Op>(op))
       return emitMC(sXorB32(), {toMCOperand(op.getResult(0)),
                                 toMCOperand(op.getOperand(0)),

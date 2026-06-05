@@ -47,7 +47,7 @@ func.func @matrix_kernel(%out: !wave.ptr<#wave.global, i32>) attributes {wave.ke
   %lane = wave.lane_id : !wave.simd<i32, 32>
   %r = arith.constant 8 : i32
   %r_simd = wave.splat %r : i32 -> !wave.simd<i32, 32>
-  %lane_off = wave.muli %lane, %r_simd : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  %lane_off = wave.binary muli %lane, %r_simd : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
   %tuple_ptr = wave.ptr_add %ptr, %lane_off : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 32> -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
   %regs = waveamd.fragment_unpack %result : !waveamd.fragment<2, i32, 16, 16, 32, 8> -> !wave.simd<vector<8xi32>, 32>
   %store_token = wave.store %regs -> %tuple_ptr : (!wave.simd<vector<8xi32>, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>) -> !wave.mem.token
@@ -81,7 +81,7 @@ func.func @matrix_f16_kernel(%out: !wave.ptr<#wave.global, i32>) attributes {wav
   %lane = wave.lane_id : !wave.simd<i32, 32>
   %r = arith.constant 8 : i32
   %r_simd = wave.splat %r : i32 -> !wave.simd<i32, 32>
-  %lane_off = wave.muli %lane, %r_simd : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  %lane_off = wave.binary muli %lane, %r_simd : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
   %tuple_ptr = wave.ptr_add %ptr, %lane_off : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 32> -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
   %regs = waveamd.fragment_unpack %result : !waveamd.fragment<2, f32, 16, 16, 32, 8> -> !wave.simd<vector<8xi32>, 32>
   %store_token = wave.store %regs -> %tuple_ptr : (!wave.simd<vector<8xi32>, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>) -> !wave.mem.token
@@ -115,7 +115,7 @@ func.func @matrix_bf16_kernel(%out: !wave.ptr<#wave.global, i32>) attributes {wa
   %lane = wave.lane_id : !wave.simd<i32, 32>
   %r = arith.constant 8 : i32
   %r_simd = wave.splat %r : i32 -> !wave.simd<i32, 32>
-  %lane_off = wave.muli %lane, %r_simd : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  %lane_off = wave.binary muli %lane, %r_simd : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
   %tuple_ptr = wave.ptr_add %ptr, %lane_off : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 32> -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
   %regs = waveamd.fragment_unpack %result : !waveamd.fragment<2, f32, 16, 16, 32, 8> -> !wave.simd<vector<8xi32>, 32>
   %store_token = wave.store %regs -> %tuple_ptr : (!wave.simd<vector<8xi32>, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>) -> !wave.mem.token

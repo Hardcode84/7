@@ -1,0 +1,17 @@
+kernel [[amdgpu_wave_size(32)]]
+void integer_index_ops(uint32_t *out, uint32_t n, uint32_t stride,
+                       int32_t signed_shift) {
+  simd<uint32_t, 32> lane = lane_id<32>();
+  uint32_t safe = stride | 1;
+  uint32_t q = n / safe;
+  uint32_t r = n % safe;
+  uint32_t low = safe & 7;
+  uint32_t mix = ((n - safe) >> signed_shift) ^ (q | r | low);
+  simd<uint32_t, 32> lanes = (lane - lane + lane) & lane;
+  simd<uint32_t, 32> shifted = (lanes >> lane) ^ lane;
+  index base = index_cast(n);
+  for index k in 0..n step safe {
+    index off = k + base;
+    store(shifted + mix, out + off + lane);
+  }
+}

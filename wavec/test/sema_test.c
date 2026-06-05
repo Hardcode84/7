@@ -1240,21 +1240,17 @@ static void test_accept_index_cast(void) {
   arena_destroy(&a);
 }
 
-/* mixing index and a sized int in arithmetic is rejected (no implicit
- * convert; use index_cast). */
-static void test_reject_index_int_mix(void) {
+static void test_accept_index_int_mix(void) {
   Arena a = arena_create(1u << 18);
   Param **params = (Param **)xalloc(&a, 2 * sizeof(Param *));
   Stmt **body = stmt_arr(&a, 1);
   Program *prog;
   params[0] = param(&a, ty_scalar(&a, SCALAR_INDEX), "ix");
   params[1] = param(&a, ty_scalar(&a, SCALAR_UINT32), "n");
-  /* index r = ix + n;  -> incompatible element types */
   body[0] = s_decl(&a, ty_scalar(&a, SCALAR_INDEX), "r",
                    e_bin(&a, TOK_PLUS, e_ident(&a, "ix"), e_ident(&a, "n")));
   prog = prog_wave(&a, 32, params, 2, body, 1);
-  expect_reject(&a, prog, "incompatible operand element types",
-                "index + int rejected");
+  expect_accept(&a, prog, "index + int accepted");
   arena_destroy(&a);
 }
 
@@ -1580,7 +1576,7 @@ int main(void) {
   test_reject_logical_on_mask();
   test_reject_destructure_arity();
   test_reject_unknown_call();
-  test_reject_index_int_mix();
+  test_accept_index_int_mix();
   test_reject_half_float_mix();
   test_reject_while_mask();
   test_reject_fragment();

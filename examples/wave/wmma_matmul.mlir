@@ -86,7 +86,7 @@ gpu.module @kernels {
     %lane = wave.lane_id : !wave.simd<i32, 32>
     %r = arith.constant 8 : i32
     %r_simd = wave.splat %r : i32 -> !wave.simd<i32, 32>
-    %lane_off = wave.muli %lane, %r_simd
+    %lane_off = wave.binary muli %lane, %r_simd
         : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
     %tuple_ptr = wave.ptr_add %ptr, %lane_off
         : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 32>
@@ -135,7 +135,7 @@ gpu.module @kernels {
     %lane = wave.lane_id : !wave.simd<i32, 32>
     %r = arith.constant 8 : i32
     %r_simd = wave.splat %r : i32 -> !wave.simd<i32, 32>
-    %lane_off = wave.muli %lane, %r_simd
+    %lane_off = wave.binary muli %lane, %r_simd
         : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
     %tuple_ptr = wave.ptr_add %ptr, %lane_off
         : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 32>

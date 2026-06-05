@@ -23,6 +23,29 @@ def Wave_CastKindEnum : I32EnumAttr<"CastKind", "Wave cast kind", [
   let cppNamespace = "::mlir::wave";
 }
 
+def Wave_BinaryKindAddI : I32EnumAttrCase<"AddI", 0, "addi">;
+def Wave_BinaryKindSubI : I32EnumAttrCase<"SubI", 1, "subi">;
+def Wave_BinaryKindMulI : I32EnumAttrCase<"MulI", 2, "muli">;
+def Wave_BinaryKindShLI : I32EnumAttrCase<"ShLI", 3, "shli">;
+def Wave_BinaryKindShRUI : I32EnumAttrCase<"ShRUI", 4, "shrui">;
+def Wave_BinaryKindShRSI : I32EnumAttrCase<"ShRSI", 5, "shrsi">;
+def Wave_BinaryKindAndI : I32EnumAttrCase<"AndI", 6, "andi">;
+def Wave_BinaryKindOrI : I32EnumAttrCase<"OrI", 7, "ori">;
+def Wave_BinaryKindXOrI : I32EnumAttrCase<"XOrI", 8, "xori">;
+def Wave_BinaryKindDivUI : I32EnumAttrCase<"DivUI", 9, "divui">;
+def Wave_BinaryKindDivSI : I32EnumAttrCase<"DivSI", 10, "divsi">;
+def Wave_BinaryKindRemUI : I32EnumAttrCase<"RemUI", 11, "remui">;
+def Wave_BinaryKindRemSI : I32EnumAttrCase<"RemSI", 12, "remsi">;
+
+def Wave_BinaryKindEnum : I32EnumAttr<"BinaryKind", "Wave binary op kind", [
+    Wave_BinaryKindAddI, Wave_BinaryKindSubI, Wave_BinaryKindMulI,
+    Wave_BinaryKindShLI, Wave_BinaryKindShRUI, Wave_BinaryKindShRSI,
+    Wave_BinaryKindAndI, Wave_BinaryKindOrI, Wave_BinaryKindXOrI,
+    Wave_BinaryKindDivUI, Wave_BinaryKindDivSI, Wave_BinaryKindRemUI,
+    Wave_BinaryKindRemSI]> {
+  let cppNamespace = "::mlir::wave";
+}
+
 def Wave_CastRoundingRNE : I32EnumAttrCase<"RNE", 0, "rne">;
 def Wave_CastRoundingRTZ : I32EnumAttrCase<"RTZ", 1, "rtz">;
 def Wave_CastRoundingRTP : I32EnumAttrCase<"RTP", 2, "rtp">;

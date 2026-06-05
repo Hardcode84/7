@@ -917,8 +917,8 @@ workgroup id times a tile stride, wave id times a fragment width, lane
 modulo a tile row, plus constants. Whether each summand is lane-varying
 or uniform, and whether a constant is small enough to ride the
 immediate slot, is structurally obvious in the source program. By the
-time that polynomial has been lowered to a chain of `wave.addi`,
-`wave.muli`, and `wave.binary` ops the structure has been shredded: the
+time that polynomial has been lowered to a chain of `wave.binary addi`,
+`wave.binary muli`, and `wave.binary` ops the structure has been shredded: the
 ADD chain is associative and reorderable, common subexpressions
 collapse, and the only way to recover "this `v_mul_lo_u32` is the
 `wg_m * BM*16*K` term in the A address" is to walk SSA backwards and

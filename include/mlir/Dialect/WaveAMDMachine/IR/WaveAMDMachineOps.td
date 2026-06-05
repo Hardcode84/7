@@ -2150,6 +2150,14 @@ def WaveAMDMachine_SAndB32Op : WaveAMDMachine_Op<"s_and_b32", [Pure]> {
   let assemblyFormat = "$lhs `,` $rhs attr-dict `:` functional-type(operands, results)";
 }
 
+def WaveAMDMachine_SOrB32Op : WaveAMDMachine_Op<"s_or_b32", [Pure]> {
+  let summary = "scalar 32-bit bitwise OR";
+  let arguments = (ins WaveAMDMachine_SGPR1OrImm:$lhs,
+                       WaveAMDMachine_SGPR1OrImm:$rhs);
+  let results = (outs WaveAMDMachine_SGPR1:$result, WaveAMDMachine_SCC:$scc);
+  let assemblyFormat = "$lhs `,` $rhs attr-dict `:` functional-type(operands, results)";
+}
+
 def WaveAMDMachine_SXorB32Op : WaveAMDMachine_Op<"s_xor_b32", [Pure]> {
   let summary = "scalar 32-bit bitwise XOR";
   let arguments = (ins WaveAMDMachine_SGPR1OrImm:$lhs,
@@ -2234,7 +2242,7 @@ def WaveAMDMachine_VXorB64Op
 
 // 64-bit logical left shift. Single-instruction on gfx11 in both the
 // scalar and vector worlds. The shift operand is i64 to match
-// `wave.shli`'s "operands have the same type" rule -- the printer
+// `wave.binary shli`'s "operands have the same type" rule -- the printer
 // extracts the low 32 bits since that's what the hardware reads.
 def WaveAMDMachine_SLshlB64Op : WaveAMDMachine_Op<"s_lshl_b64", [Pure]> {
   let summary = "scalar 64-bit logical left shift (sets SCC)";

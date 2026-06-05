@@ -41,7 +41,7 @@ Shape constraints:
   * ``M``, ``N``, ``K`` are positive multiples of 16.
   * ``BM * wave_m_tiles`` divides ``M / 16``.
   * ``BN * wave_n_tiles`` divides ``N / 16``; ``BN`` is a power of 2 (so the
-    wave-id decomposition uses ``andi`` + ``shri``).
+    wave-id decomposition uses ``andi`` + ``shrui``).
   * ``wave_k_tiles`` divides ``K / 16``.
   * ``BM * BN <= 32`` (RDNA3 caps a workgroup at 32 waves of 32 lanes).
 """

@@ -127,6 +127,7 @@ xor = ixsimpl.xor_
 # ---------------------------------------------------------------------------
 
 
+BinaryKind = wave.BinaryKind
 CastKind = wave.CastKind
 
 
@@ -287,7 +288,7 @@ def _current_context() -> Context:
 
 
 def _arith_result_type(lhs: Value, rhs: Value) -> Type:
-    """Infer the result type for `wave.addi`/`muli`/`shli`.
+    """Infer the result type for integer `wave.binary`.
 
     Result is SIMD if any operand is SIMD; element type follows the
     operands' shared bit-width (we trust the verifier to reject
@@ -677,8 +678,8 @@ class FunctionBuilder:
     ) -> Value:
         return wave.SplatOp(simd_type(element_type or value.type, width), value).result
 
-    def binary(self, kind: str, lhs: Value, rhs: Value) -> Value:
-        return wave.BinaryOp(lhs.type, kind, lhs, rhs).result
+    def binary(self, kind: object, lhs: Value, rhs: Value) -> Value:
+        return wave.BinaryOp(_arith_result_type(lhs, rhs), kind, lhs, rhs).result
 
     def cast(
         self,
@@ -760,13 +761,13 @@ class FunctionBuilder:
                 self._yield_stack.pop()
 
     def addi(self, lhs: Value, rhs: Value) -> Value:
-        return wave.AddiOp(_arith_result_type(lhs, rhs), lhs, rhs).result
+        return self.binary(BinaryKind.AddI, lhs, rhs)
 
     def muli(self, lhs: Value, rhs: Value) -> Value:
-        return wave.MuliOp(_arith_result_type(lhs, rhs), lhs, rhs).result
+        return self.binary(BinaryKind.MulI, lhs, rhs)
 
     def shli(self, lhs: Value, rhs: Value) -> Value:
-        return wave.ShliOp(_arith_result_type(lhs, rhs), lhs, rhs).result
+        return self.binary(BinaryKind.ShLI, lhs, rhs)
 
     def fadd(self, lhs: Value, rhs: Value) -> Value:
         return wave.FAddOp(lhs.type, lhs, rhs).result
@@ -1197,6 +1198,7 @@ def module() -> ModuleBuilder:
 
 __all__ = [
     "BF16Type",
+    "BinaryKind",
     "BufferAddressSpaceAttr",
     "CastKind",
     "CmpIPredicate",

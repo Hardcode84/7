@@ -12,7 +12,7 @@ func.func @buffer_store_kernel(%out: !wave.ptr<#wave.global, i32>, %x: i32) attr
   %buffer = waveamd.make_buffer %out, %range : !wave.ptr<#wave.global, i32>, i32 -> !wave.ptr<#waveamd.buffer, i32>
   %lane = wave.lane_id : !wave.simd<i32, @W@>
   %vx = wave.splat %x : i32 -> !wave.simd<i32, @W@>
-  %sum = wave.addi %lane, %vx : !wave.simd<i32, @W@>, !wave.simd<i32, @W@> -> !wave.simd<i32, @W@>
+  %sum = wave.binary addi %lane, %vx : !wave.simd<i32, @W@>, !wave.simd<i32, @W@> -> !wave.simd<i32, @W@>
   %ptrs = wave.ptr_add %buffer, %lane : !wave.ptr<#waveamd.buffer, i32>, !wave.simd<i32, @W@> -> !wave.simd<!wave.ptr<#waveamd.buffer, i32>, @W@>
   %store_token = wave.store %sum -> %ptrs : (!wave.simd<i32, @W@>, !wave.simd<!wave.ptr<#waveamd.buffer, i32>, @W@>) -> !wave.mem.token
   return

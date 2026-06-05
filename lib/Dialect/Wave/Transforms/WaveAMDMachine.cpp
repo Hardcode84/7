@@ -1375,9 +1375,6 @@ LogicalResult WaveAMDMachineSelector::selectOperation(Operation *op) {
       .Case<PackOp>([&](auto o) { return selectPack(o); })
       .Case<ExtractOp>([&](auto o) { return selectExtract(o); })
       .Case<CastOp>([&](auto o) { return selectCast(o); })
-      .Case<AddiOp>([&](auto o) { return selectAddi(o); })
-      .Case<MuliOp>([&](auto o) { return selectMuli(o); })
-      .Case<ShliOp>([&](auto o) { return selectShli(o); })
       .Case<FAddOp>([&](auto o) { return selectFAdd(o); })
       .Case<FSubOp>([&](auto o) { return selectFSub(o); })
       .Case<FMulOp>([&](auto o) { return selectFMul(o); })
@@ -1631,44 +1628,54 @@ LogicalResult WaveAMDMachineSelector::selectAssume(AssumeOp op) {
   return success();
 }
 
-// Build the matching `v_*` op for a (legacy) `wave.binary` kind.
-// Returns nullptr if `kind` is no longer carried by the binary op
-// (addi / muli / shli migrated to their typed siblings).
-static Value buildWaveBinary(OpBuilder &builder, Location loc, Type resultType,
-                             StringRef kind, Value lhs, Value rhs) {
-  if (kind == "andi")
+static bool isBinarySimd(BinaryOp op) {
+  return isa<SimdType>(op.getResult().getType());
+}
+
+static Value buildVectorBinaryI32(OpBuilder &builder, Location loc,
+                                  Type resultType, BinaryKind kind, Value lhs,
+                                  Value rhs) {
+  if (kind == BinaryKind::AndI)
     return waveamdmachine::VAndB32Op::create(builder, loc, resultType, lhs,
                                              rhs);
-  if (kind == "ori")
+  if (kind == BinaryKind::OrI)
     return waveamdmachine::VOrB32Op::create(builder, loc, resultType, lhs, rhs);
-  if (kind == "xori")
+  if (kind == BinaryKind::XOrI)
     return waveamdmachine::VXorB32Op::create(builder, loc, resultType, lhs,
                                              rhs);
-  if (kind == "shri")
+  if (kind == BinaryKind::ShRUI)
     return waveamdmachine::VLshrrevB32Op::create(builder, loc, resultType, lhs,
                                                  rhs);
   return Value{};
 }
 
-static bool isSupportedWaveBinaryKind(StringRef kind) {
-  return kind == "shri" || kind == "andi" || kind == "ori" || kind == "xori";
+static Value buildScalarBinaryI32(OpBuilder &builder, Location loc,
+                                  Type resultType, BinaryKind kind, Value lhs,
+                                  Value rhs) {
+  Type scc = getSCCType(builder.getContext());
+  if (kind == BinaryKind::AndI)
+    return waveamdmachine::SAndB32Op::create(builder, loc, resultType, scc, lhs,
+                                             rhs)
+        .getResult();
+  if (kind == BinaryKind::OrI)
+    return waveamdmachine::SOrB32Op::create(builder, loc, resultType, scc, lhs,
+                                            rhs)
+        .getResult();
+  if (kind == BinaryKind::XOrI)
+    return waveamdmachine::SXorB32Op::create(builder, loc, resultType, scc, lhs,
+                                             rhs)
+        .getResult();
+  if (kind == BinaryKind::ShRUI)
+    return waveamdmachine::SLshrB32Op::create(builder, loc, resultType, scc,
+                                              lhs, rhs)
+        .getResult();
+  return Value{};
 }
 
-static LogicalResult selectBinaryI64Xor(WaveAMDMachineSelector &S,
-                                        BinaryOp op) {
-  Value lhs = ensureVGPR2(S, op.getLoc(), S.expect(op.getLhs(), op));
-  Value rhs = ensureVGPR2(S, op.getLoc(), S.expect(op.getRhs(), op));
-  Type resultType =
-      getRegType(op.getContext(), waveamdmachine::RegClass::VGPR, 2);
-  S.values[op.getResult()] = waveamdmachine::VXorB64Op::create(
-      S.builder, op.getLoc(), resultType, lhs, rhs);
-  S.eraseIfTopLevel(op);
-  return success();
-}
-
-static void prepareWaveBinaryOperands(WaveAMDMachineSelector &S, BinaryOp op,
-                                      StringRef kind, Value &lhs, Value &rhs) {
-  if (kind == "shri") {
+static void prepareVectorBinaryI32Operands(WaveAMDMachineSelector &S,
+                                           BinaryOp op, BinaryKind kind,
+                                           Value &lhs, Value &rhs) {
+  if (kind == BinaryKind::ShRUI) {
     lhs = S.ensureVGPRForVSrc1(op.getLoc(), lhs);
     return;
   }
@@ -1678,44 +1685,19 @@ static void prepareWaveBinaryOperands(WaveAMDMachineSelector &S, BinaryOp op,
     lhs = S.ensureVGPRForVSrc1(op.getLoc(), lhs);
 }
 
-LogicalResult WaveAMDMachineSelector::selectBinary(BinaryOp op) {
-  // addi / muli / shli have moved to dedicated wave.addi / muli / shli
-  // ops with full uniform-and-SIMD support; reject those kinds here so
-  // stragglers fail loudly instead of silently going through the old
-  // SIMD-only path.
-  StringRef kind = op.getKind();
-  if (!isSupportedWaveBinaryKind(kind))
-    return op.emitError("unsupported wave.binary kind '")
-           << kind
-           << "' (addi/muli/shli migrated to wave.addi/wave.muli/wave.shli)";
-  unsigned bits = waveArithElementBits(op.getResult().getType());
-  if (bits == 64 && kind == "xori")
-    return selectBinaryI64Xor(*this, op);
-  if (bits != 32)
-    return op.emitOpError("supports i64 only for xori (got i") << bits << ")";
-  Value lhs = expect(op.getLhs(), op);
-  Value rhs = expect(op.getRhs(), op);
-  prepareWaveBinaryOperands(*this, op, kind, lhs, rhs);
-  Type vgprType = getRegType(op.getContext(), waveamdmachine::RegClass::VGPR);
-  values[op.getResult()] =
-      buildWaveBinary(builder, op.getLoc(), vgprType, kind, lhs, rhs);
-  eraseIfTopLevel(op);
-  return success();
-}
-
-// Element bit-width of an iN or !wave.simd<iN, W> type. Caller has
-// already verified the type is one of these via the op verifier.
+// Element bit-width of an iN/index or !wave.simd<iN/index, W> type.
 unsigned WaveAMDMachineSelector::waveArithElementBits(Type type) {
   if (auto simd = dyn_cast<SimdType>(type))
-    return simd.getElementType().getIntOrFloatBitWidth();
+    type = simd.getElementType();
+  if (type.isIndex())
+    return 64;
   return cast<IntegerType>(type).getWidth();
 }
 
-LogicalResult WaveAMDMachineSelector::selectAddiI32(AddiOp op) {
+LogicalResult WaveAMDMachineSelector::selectBinaryAddI32(BinaryOp op) {
   Value lhs = expect(op.getLhs(), op);
   Value rhs = expect(op.getRhs(), op);
-  if (!isa<SimdType>(op.getResult().getType())) {
-    // Uniform i32 add: s_add_i32 (with a dead SCC result).
+  if (!isBinarySimd(op)) {
     auto added = waveamdmachine::SAddI32Op::create(
         builder, op.getLoc(),
         getRegType(op.getContext(), waveamdmachine::RegClass::SGPR),
@@ -1724,55 +1706,23 @@ LogicalResult WaveAMDMachineSelector::selectAddiI32(AddiOp op) {
     eraseIfTopLevel(op);
     return success();
   }
-  // SIMD or mixed: v_add_u32 with the existing SGPR-in-vsrc0 shuffle.
   values[op.getResult()] = addByteOffsets(op.getLoc(), lhs, rhs);
   eraseIfTopLevel(op);
   return success();
 }
 
-LogicalResult WaveAMDMachineSelector::selectAddiI64(AddiOp op) {
-  bool lhsSimd = isa<SimdType>(op.getLhs().getType());
-  bool rhsSimd = isa<SimdType>(op.getRhs().getType());
-  if (lhsSimd != rhsSimd)
-    return op.emitOpError(
-        "i64 wave.addi with mixed uniform/SIMD operands is not yet "
-        "supported");
+LogicalResult WaveAMDMachineSelector::selectBinaryAddI64(BinaryOp op) {
   Value lhs = expect(op.getLhs(), op);
   Value rhs = expect(op.getRhs(), op);
-  waveamdmachine::RegClass cls =
-      lhsSimd ? waveamdmachine::RegClass::VGPR : waveamdmachine::RegClass::SGPR;
-  Type resultType = getRegType(op.getContext(), cls, /*width=*/2);
-  Value result;
-  if (lhsSimd)
-    result =
-        waveamdmachine::VAddU64Op::create(builder, op.getLoc(), resultType,
-                                          getVCCType(op.getContext()), lhs, rhs)
-            .getResult();
-  else
-    result =
-        waveamdmachine::SAddU64Op::create(builder, op.getLoc(), resultType,
-                                          getSCCType(op.getContext()), lhs, rhs)
-            .getResult();
-  values[op.getResult()] = result;
+  values[op.getResult()] = addWide(*this, op.getLoc(), lhs, rhs);
   eraseIfTopLevel(op);
   return success();
 }
 
-LogicalResult WaveAMDMachineSelector::selectAddi(AddiOp op) {
-  unsigned bits = waveArithElementBits(op.getResult().getType());
-  if (bits == 32)
-    return selectAddiI32(op);
-  if (bits == 64)
-    return selectAddiI64(op);
-  return op.emitError(
-             "WaveAMDMachine backend only supports i32 / i64 wave.addi (got i")
-         << bits << ")";
-}
-
-LogicalResult WaveAMDMachineSelector::selectMuliI32(MuliOp op) {
+LogicalResult WaveAMDMachineSelector::selectBinaryMulI32(BinaryOp op) {
   Value lhs = expect(op.getLhs(), op);
   Value rhs = expect(op.getRhs(), op);
-  if (!isa<SimdType>(op.getResult().getType())) {
+  if (!isBinarySimd(op)) {
     values[op.getResult()] = waveamdmachine::SMulI32Op::create(
         builder, op.getLoc(),
         getRegType(op.getContext(), waveamdmachine::RegClass::SGPR), lhs, rhs);
@@ -1787,51 +1737,18 @@ LogicalResult WaveAMDMachineSelector::selectMuliI32(MuliOp op) {
   return success();
 }
 
-LogicalResult WaveAMDMachineSelector::selectMuliI64(MuliOp op) {
-  bool lhsSimd = isa<SimdType>(op.getLhs().getType());
-  bool rhsSimd = isa<SimdType>(op.getRhs().getType());
-  if (lhsSimd != rhsSimd)
-    return op.emitOpError(
-        "i64 wave.muli with mixed uniform/SIMD operands is not yet "
-        "supported");
+LogicalResult WaveAMDMachineSelector::selectBinaryMulI64(BinaryOp op) {
   Value lhs = expect(op.getLhs(), op);
   Value rhs = expect(op.getRhs(), op);
-  waveamdmachine::RegClass cls =
-      lhsSimd ? waveamdmachine::RegClass::VGPR : waveamdmachine::RegClass::SGPR;
-  // Multi-result op: [0] is the i64 product, [1] is a scratch
-  // register the asm-printer uses for cross-product temporaries.
-  Type productType = getRegType(op.getContext(), cls, /*width=*/2);
-  Type scratchType = getRegType(op.getContext(), cls, /*width=*/1);
-  Value product;
-  if (lhsSimd)
-    product = waveamdmachine::VMulU64Op::create(
-                  builder, op.getLoc(), productType, scratchType, lhs, rhs)
-                  .getResult();
-  else
-    product = waveamdmachine::SMulU64Op::create(
-                  builder, op.getLoc(), productType, scratchType,
-                  getSCCType(op.getContext()), lhs, rhs)
-                  .getResult();
-  values[op.getResult()] = product;
+  values[op.getResult()] = mulWide(*this, op.getLoc(), lhs, rhs);
   eraseIfTopLevel(op);
   return success();
 }
 
-LogicalResult WaveAMDMachineSelector::selectMuli(MuliOp op) {
-  unsigned bits = waveArithElementBits(op.getResult().getType());
-  if (bits == 32)
-    return selectMuliI32(op);
-  if (bits == 64)
-    return selectMuliI64(op);
-  return op.emitError(
-             "WaveAMDMachine backend only supports i32 / i64 wave.muli (got i")
-         << bits << ")";
-}
-
-LogicalResult WaveAMDMachineSelector::selectShliI32(ShliOp op) {
+LogicalResult WaveAMDMachineSelector::selectBinaryShLI32(BinaryOp op) {
   Value lhs = expect(op.getLhs(), op);
   Value rhs = expect(op.getRhs(), op);
-  if (!isa<SimdType>(op.getResult().getType())) {
+  if (!isBinarySimd(op)) {
     values[op.getResult()] =
         waveamdmachine::SLshlB32Op::create(
             builder, op.getLoc(),
@@ -1841,7 +1758,6 @@ LogicalResult WaveAMDMachineSelector::selectShliI32(ShliOp op) {
     eraseIfTopLevel(op);
     return success();
   }
-  // VOP2 v_lshlrev_b32: shift amount in src0, value (vsrc1) must be VGPR.
   lhs = ensureVGPRForVSrc1(op.getLoc(), lhs);
   values[op.getResult()] = waveamdmachine::VLshlrevB32Op::create(
       builder, op.getLoc(),
@@ -1850,43 +1766,88 @@ LogicalResult WaveAMDMachineSelector::selectShliI32(ShliOp op) {
   return success();
 }
 
-LogicalResult WaveAMDMachineSelector::selectShliI64(ShliOp op) {
-  bool lhsSimd = isa<SimdType>(op.getLhs().getType());
-  bool rhsSimd = isa<SimdType>(op.getRhs().getType());
-  if (lhsSimd != rhsSimd)
-    return op.emitOpError(
-        "i64 wave.shli with mixed uniform/SIMD operands is not yet "
-        "supported");
+LogicalResult WaveAMDMachineSelector::selectBinaryShLI64(BinaryOp op) {
   Value lhs = expect(op.getLhs(), op);
   Value rhs = expect(op.getRhs(), op);
-  waveamdmachine::RegClass cls =
-      lhsSimd ? waveamdmachine::RegClass::VGPR : waveamdmachine::RegClass::SGPR;
-  Type resultType = getRegType(op.getContext(), cls, /*width=*/2);
-  // s_lshl_b64 order is (value, shift); v_lshlrev_b64 (rev) flips it
-  // to (shift, value). Both extract the low 32 of the i64 shift
-  // amount inside the asm printer.
-  Value result;
-  if (lhsSimd)
-    result = waveamdmachine::VLshlrevB64Op::create(builder, op.getLoc(),
-                                                   resultType, rhs, lhs);
-  else
-    result = waveamdmachine::SLshlB64Op::create(
-                 builder, op.getLoc(), resultType, getSCCType(op.getContext()),
-                 lhs, rhs)
-                 .getResult();
-  values[op.getResult()] = result;
+  if (!isBinarySimd(op)) {
+    Type resultType =
+        getRegType(op.getContext(), waveamdmachine::RegClass::SGPR, 2);
+    values[op.getResult()] =
+        waveamdmachine::SLshlB64Op::create(builder, op.getLoc(), resultType,
+                                           getSCCType(op.getContext()),
+                                           ensureSGPR2(*this, op.getLoc(), lhs),
+                                           ensureSGPR2(*this, op.getLoc(), rhs))
+            .getResult();
+    eraseIfTopLevel(op);
+    return success();
+  }
+  Type resultType =
+      getRegType(op.getContext(), waveamdmachine::RegClass::VGPR, 2);
+  values[op.getResult()] = waveamdmachine::VLshlrevB64Op::create(
+      builder, op.getLoc(), resultType, ensureVGPR2(*this, op.getLoc(), rhs),
+      ensureVGPR2(*this, op.getLoc(), lhs));
   eraseIfTopLevel(op);
   return success();
 }
 
-LogicalResult WaveAMDMachineSelector::selectShli(ShliOp op) {
+static LogicalResult selectBinaryI32(WaveAMDMachineSelector &S, BinaryOp op) {
+  BinaryKind kind = op.getKind();
+  if (kind == BinaryKind::AddI)
+    return S.selectBinaryAddI32(op);
+  if (kind == BinaryKind::MulI)
+    return S.selectBinaryMulI32(op);
+  if (kind == BinaryKind::ShLI)
+    return S.selectBinaryShLI32(op);
+  if (kind == BinaryKind::AndI || kind == BinaryKind::OrI ||
+      kind == BinaryKind::XOrI || kind == BinaryKind::ShRUI) {
+    Value lhs = S.expect(op.getLhs(), op);
+    Value rhs = S.expect(op.getRhs(), op);
+    Type resultType = getRegType(
+        op.getContext(), isBinarySimd(op) ? waveamdmachine::RegClass::VGPR
+                                          : waveamdmachine::RegClass::SGPR);
+    if (!isBinarySimd(op)) {
+      S.values[op.getResult()] = buildScalarBinaryI32(
+          S.builder, op.getLoc(), resultType, kind, lhs, rhs);
+      S.eraseIfTopLevel(op);
+      return success();
+    }
+    prepareVectorBinaryI32Operands(S, op, kind, lhs, rhs);
+    S.values[op.getResult()] = buildVectorBinaryI32(S.builder, op.getLoc(),
+                                                    resultType, kind, lhs, rhs);
+    S.eraseIfTopLevel(op);
+    return success();
+  }
+  return op.emitOpError("unsupported i32 wave.binary kind ")
+         << stringifyBinaryKind(kind);
+}
+
+static LogicalResult selectBinaryI64(WaveAMDMachineSelector &S, BinaryOp op) {
+  BinaryKind kind = op.getKind();
+  if (kind == BinaryKind::AddI)
+    return S.selectBinaryAddI64(op);
+  if (kind == BinaryKind::MulI)
+    return S.selectBinaryMulI64(op);
+  if (kind == BinaryKind::ShLI)
+    return S.selectBinaryShLI64(op);
+  if (kind == BinaryKind::XOrI) {
+    Value lhs = S.expect(op.getLhs(), op);
+    Value rhs = S.expect(op.getRhs(), op);
+    S.values[op.getResult()] = xorWide(S, op.getLoc(), lhs, rhs);
+    S.eraseIfTopLevel(op);
+    return success();
+  }
+  return op.emitOpError("unsupported i64 wave.binary kind ")
+         << stringifyBinaryKind(kind);
+}
+
+LogicalResult WaveAMDMachineSelector::selectBinary(BinaryOp op) {
   unsigned bits = waveArithElementBits(op.getResult().getType());
   if (bits == 32)
-    return selectShliI32(op);
+    return selectBinaryI32(*this, op);
   if (bits == 64)
-    return selectShliI64(op);
-  return op.emitError(
-             "WaveAMDMachine backend only supports i32 / i64 wave.shli (got i")
+    return selectBinaryI64(*this, op);
+  return op.emitError("WaveAMDMachine backend only supports i32 / i64 "
+                      "wave.binary (got i")
          << bits << ")";
 }
 

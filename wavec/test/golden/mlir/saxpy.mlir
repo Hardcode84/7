@@ -3,8 +3,8 @@ module attributes {gpu.container_module} {
     %0 = wave.lane_id : !wave.simd<i32, 32>
     %1 = wave.workgroup_id 0
     %c32_i32 = arith.constant 32 : i32
-    %2 = wave.muli %1, %c32_i32 : i32, i32 -> i32
-    %3 = wave.addi %2, %0 : i32, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+    %2 = wave.binary muli %1, %c32_i32 : i32, i32 -> i32
+    %3 = wave.binary addi %2, %0 : i32, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
     %4 = wave.splat %arg3 : i32 -> !wave.simd<i32, 32>
     %5 = wave.cmpi ult %3, %4 : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.mask<32>
     %6 = wave.ptr_add %arg0, %3 : !wave.ptr<#wave.global, f32>, !wave.simd<i32, 32> -> !wave.simd<!wave.ptr<#wave.global, f32>, 32>

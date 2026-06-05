@@ -1991,6 +1991,30 @@ static int check_numeric_op(Checker *c, Expr *e, TokenKind op, ScalarKind lk,
   return 1;
 }
 
+static int scalar_index_or_int(const TypeRef *t, ScalarKind *k) {
+  if (!is_scalar(t))
+    return 0;
+  *k = t->scalar;
+  return *k == SCALAR_INDEX || sk_is_sized_int(*k);
+}
+
+static TypeRef *try_index_binary(Checker *c, Expr *e, TypeRef *lt, TypeRef *rt,
+                                 TokenKind op, int *handled) {
+  ScalarKind lk;
+  ScalarKind rk;
+  *handled = 0;
+  if (!op_is_arith(op) && !op_is_bitwise(op) && !op_is_compare(op))
+    return NULL;
+  if (!scalar_index_or_int(lt, &lk) || !scalar_index_or_int(rt, &rk))
+    return NULL;
+  if (lk != SCALAR_INDEX && rk != SCALAR_INDEX)
+    return NULL;
+  *handled = 1;
+  e->sema_type = op_is_compare(op) ? scalar_type(c, SCALAR_BOOL)
+                                   : scalar_type(c, SCALAR_INDEX);
+  return e->sema_type;
+}
+
 static TypeRef *finish_numeric_binary(Checker *c, Expr *e, TypeRef *lt,
                                       TypeRef *rt, TokenKind op,
                                       ScalarKind unified) {
@@ -2013,37 +2037,53 @@ static TypeRef *finish_numeric_binary(Checker *c, Expr *e, TypeRef *lt,
   return NULL;
 }
 
+static TypeRef *try_special_binary(Checker *c, Expr *e, TypeRef *lt,
+                                   TypeRef *rt, Expr *le, Expr *re,
+                                   TokenKind op, int *handled) {
+  TypeRef *special = try_pointer_binary(c, e, lt, rt, le, re, op, handled);
+  if (*handled)
+    return special;
+  special = try_mask_binary(c, e, lt, rt, op, handled);
+  if (*handled)
+    return special;
+  return try_logical_binary(c, e, lt, rt, op, handled);
+}
+
+static TypeRef *check_numeric_or_index_binary(Checker *c, Expr *e, Expr *le,
+                                              Expr *re, TypeRef *lt,
+                                              TypeRef *rt, TokenKind op) {
+  ScalarKind lk;
+  ScalarKind rk;
+  ScalarKind unified;
+  int handled;
+
+  coerce_binary_literals(c, le, re, &lt, &rt);
+  if (lt == NULL || rt == NULL)
+    return NULL;
+  TypeRef *special = try_index_binary(c, e, lt, rt, op, &handled);
+  if (handled)
+    return special;
+  if (!check_numeric_inputs(c, e, lt, rt, &lk, &rk))
+    return NULL;
+  if (!check_numeric_op(c, e, op, lk, rk, &unified))
+    return NULL;
+  return finish_numeric_binary(c, e, lt, rt, op, unified);
+}
+
 static TypeRef *check_binary(Checker *c, Expr *e) {
   TokenKind op = e->as.binary.op;
   Expr *le = e->as.binary.lhs;
   Expr *re = e->as.binary.rhs;
   TypeRef *lt = check_expr(c, le);
   TypeRef *rt = check_expr(c, re);
-  ScalarKind lk;
-  ScalarKind rk;
-  ScalarKind unified;
   int handled;
 
   if (lt == NULL || rt == NULL)
     return NULL;
-  TypeRef *special = try_pointer_binary(c, e, lt, rt, le, re, op, &handled);
+  TypeRef *special = try_special_binary(c, e, lt, rt, le, re, op, &handled);
   if (handled)
     return special;
-  special = try_mask_binary(c, e, lt, rt, op, &handled);
-  if (handled)
-    return special;
-  special = try_logical_binary(c, e, lt, rt, op, &handled);
-  if (handled)
-    return special;
-
-  coerce_binary_literals(c, le, re, &lt, &rt);
-  if (lt == NULL || rt == NULL)
-    return NULL;
-  if (!check_numeric_inputs(c, e, lt, rt, &lk, &rk))
-    return NULL;
-  if (!check_numeric_op(c, e, op, lk, rk, &unified))
-    return NULL;
-  return finish_numeric_binary(c, e, lt, rt, op, unified);
+  return check_numeric_or_index_binary(c, e, le, re, lt, rt, op);
 }
 
 /* Check an identifier reference: resolve to an in-scope symbol; enforce
@@ -2484,6 +2524,9 @@ static void check_for_bound(Checker *c, Expr *b, ScalarKind ik) {
     (void)coerce_literal_to_scalar(c, b, ik);
     return;
   }
+  if (ik == SCALAR_INDEX && is_scalar(bt) &&
+      (bt->scalar == SCALAR_INDEX || sk_is_sized_int(bt->scalar)))
+    return;
   if (!is_scalar(bt) || !scalar_compatible(bt->scalar, ik)) {
     err(c, b->span,
         "for bound/step must be a uniform scalar matching the IV type");
