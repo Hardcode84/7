@@ -348,11 +348,12 @@ struct WaveAMDRegAllocPass
                                    OpBuilder &builder) {
     llvm::DenseSet<Value> groupValues(candidate.values.begin(),
                                       candidate.values.end());
+    bool allowLoopCarriedAGPR = hasMFMAAccumulatorGroup(groupValues);
     SmallVector<std::pair<Value, Value>, 4> agprValues;
     for (Value value : candidate.values) {
       if (!isa<waveamdmachine::RegType>(value.getType()))
         continue;
-      if (canDefineAGPR(value, groupValues)) {
+      if (canDefineAGPR(value, groupValues, allowLoopCarriedAGPR)) {
         setRegClass(value, waveamdmachine::RegClass::AGPR);
         agprValues.push_back({value, value});
         continue;
@@ -370,13 +371,14 @@ struct WaveAMDRegAllocPass
     }
 
     for (const std::pair<Value, Value> &mapping : agprValues)
-      rewriteAGPRUses(mapping.first, mapping.second, groupValues, builder);
+      rewriteAGPRUses(mapping.first, mapping.second, groupValues,
+                      allowLoopCarriedAGPR, builder);
     return success();
   }
 
   static void rewriteAGPRUses(Value original, Value agpr,
                               const llvm::DenseSet<Value> &groupValues,
-                              OpBuilder &builder) {
+                              bool allowLoopCarriedAGPR, OpBuilder &builder) {
     SmallVector<OpOperand *> uses;
     for (OpOperand &use : original.getUses())
       uses.push_back(&use);
@@ -392,7 +394,7 @@ struct WaveAMDRegAllocPass
         }
         continue;
       }
-      if (canConsumeAGPR(*use, groupValues)) {
+      if (canConsumeAGPR(*use, groupValues, allowLoopCarriedAGPR)) {
         use->set(agpr);
         continue;
       }
@@ -872,8 +874,127 @@ struct WaveAMDRegAllocPass
     return values;
   }
 
+  static std::optional<unsigned> getUniformLoopBodyArgIndex(Value value) {
+    auto arg = dyn_cast<BlockArgument>(value);
+    if (!arg)
+      return std::nullopt;
+    auto loop =
+        dyn_cast<waveamdmachine::UniformLoopOp>(arg.getOwner()->getParentOp());
+    if (!loop || arg.getOwner() != &loop.getBody().front())
+      return std::nullopt;
+    return arg.getArgNumber();
+  }
+
+  static std::optional<unsigned> getUniformLoopResultIndex(Value value) {
+    auto result = dyn_cast<OpResult>(value);
+    if (!result)
+      return std::nullopt;
+    if (!isa<waveamdmachine::UniformLoopOp>(result.getOwner()))
+      return std::nullopt;
+    return result.getResultNumber();
+  }
+
+  static std::optional<unsigned> getUniformLoopInitIndex(OpOperand &use) {
+    auto loop = dyn_cast<waveamdmachine::UniformLoopOp>(use.getOwner());
+    if (!loop)
+      return std::nullopt;
+    MutableOperandRange inits = loop.getInitsMutable();
+    for (unsigned i : llvm::seq<unsigned>(0, inits.size()))
+      if (&inits[i] == &use)
+        return i;
+    return std::nullopt;
+  }
+
+  static std::optional<unsigned> getUniformLoopCarryIndex(OpOperand &use) {
+    auto term = dyn_cast<waveamdmachine::ContinueIfOp>(use.getOwner());
+    if (!term)
+      return std::nullopt;
+    MutableOperandRange carries = term.getCarriesMutable();
+    for (unsigned i : llvm::seq<unsigned>(0, carries.size()))
+      if (&carries[i] == &use)
+        return i;
+    return std::nullopt;
+  }
+
+  static waveamdmachine::UniformLoopOp getParentUniformLoop(Operation *op) {
+    if (auto loop = dyn_cast<waveamdmachine::UniformLoopOp>(op))
+      return loop;
+    if (auto term = dyn_cast<waveamdmachine::ContinueIfOp>(op))
+      return term->getParentOfType<waveamdmachine::UniformLoopOp>();
+    return {};
+  }
+
+  static bool uniformLoopSlotInGroup(waveamdmachine::UniformLoopOp loop,
+                                     unsigned index,
+                                     const llvm::DenseSet<Value> &groupValues) {
+    if (!loop || index >= loop.getInits().size())
+      return false;
+    Block &body = loop.getBody().front();
+    auto term = dyn_cast<waveamdmachine::ContinueIfOp>(body.getTerminator());
+    if (!term || index >= term.getCarries().size())
+      return false;
+    return groupValues.contains(loop.getInits()[index]) ||
+           groupValues.contains(body.getArgument(index)) ||
+           groupValues.contains(loop.getResult(index)) ||
+           groupValues.contains(term.getCarries()[index]);
+  }
+
+  static bool
+  isUniformLoopAGPREndpoint(Value value,
+                            const llvm::DenseSet<Value> &groupValues,
+                            bool allowLoopCarriedAGPR) {
+    if (!allowLoopCarriedAGPR)
+      return false;
+    if (std::optional<unsigned> index = getUniformLoopBodyArgIndex(value)) {
+      auto arg = cast<BlockArgument>(value);
+      auto loop =
+          cast<waveamdmachine::UniformLoopOp>(arg.getOwner()->getParentOp());
+      return uniformLoopSlotInGroup(loop, *index, groupValues);
+    }
+    if (std::optional<unsigned> index = getUniformLoopResultIndex(value)) {
+      auto result = cast<OpResult>(value);
+      auto loop = cast<waveamdmachine::UniformLoopOp>(result.getOwner());
+      return uniformLoopSlotInGroup(loop, *index, groupValues);
+    }
+    return false;
+  }
+
+  static bool isUniformLoopAGPRUse(OpOperand &use,
+                                   const llvm::DenseSet<Value> &groupValues,
+                                   bool allowLoopCarriedAGPR) {
+    if (!allowLoopCarriedAGPR)
+      return false;
+    if (std::optional<unsigned> index = getUniformLoopInitIndex(use))
+      return uniformLoopSlotInGroup(
+          cast<waveamdmachine::UniformLoopOp>(use.getOwner()), *index,
+          groupValues);
+    if (std::optional<unsigned> index = getUniformLoopCarryIndex(use))
+      return uniformLoopSlotInGroup(getParentUniformLoop(use.getOwner()),
+                                    *index, groupValues);
+    return false;
+  }
+
+  static bool
+  hasMFMAAccumulatorGroup(const llvm::DenseSet<Value> &groupValues) {
+    for (Value value : groupValues) {
+      if (isMFMAResult(value))
+        return true;
+      for (OpOperand &use : value.getUses()) {
+        Operation *user = use.getOwner();
+        if (isMFMA(user) && use.getOperandNumber() == 2 &&
+            user->getNumResults() == 1 &&
+            groupValues.contains(user->getResult(0)))
+          return true;
+      }
+    }
+    return false;
+  }
+
   static bool canDefineAGPR(Value value,
-                            const llvm::DenseSet<Value> &groupValues) {
+                            const llvm::DenseSet<Value> &groupValues,
+                            bool allowLoopCarriedAGPR) {
+    if (isUniformLoopAGPREndpoint(value, groupValues, allowLoopCarriedAGPR))
+      return true;
     Operation *def = value.getDefiningOp();
     if (!def)
       return false;
@@ -888,7 +1009,10 @@ struct WaveAMDRegAllocPass
   }
 
   static bool canConsumeAGPR(OpOperand &use,
-                             const llvm::DenseSet<Value> &groupValues) {
+                             const llvm::DenseSet<Value> &groupValues,
+                             bool allowLoopCarriedAGPR) {
+    if (isUniformLoopAGPRUse(use, groupValues, allowLoopCarriedAGPR))
+      return true;
     Operation *user = use.getOwner();
     unsigned operandNumber = use.getOperandNumber();
     if (isMFMA(user)) {
@@ -919,12 +1043,13 @@ struct WaveAMDRegAllocPass
   static bool canMaterializeAndProgressAGPRCandidate(
       ArrayRef<unsigned> group, ArrayRef<wave::WaveAMDLiveInterval> intervals) {
     llvm::DenseSet<Value> groupValues = collectGroupValues(group, intervals);
+    bool allowLoopCarriedAGPR = hasMFMAAccumulatorGroup(groupValues);
     bool canProgress = false;
     for (unsigned intervalIndex : group) {
       for (Value value : intervals[intervalIndex].values) {
         if (isAGPRReload(value))
           return false;
-        if (canDefineAGPR(value, groupValues)) {
+        if (canDefineAGPR(value, groupValues, allowLoopCarriedAGPR)) {
           canProgress = true;
           continue;
         }
@@ -940,13 +1065,14 @@ struct WaveAMDRegAllocPass
   countAGPRBridgeBoundaries(ArrayRef<unsigned> group,
                             ArrayRef<wave::WaveAMDLiveInterval> intervals) {
     llvm::DenseSet<Value> groupValues = collectGroupValues(group, intervals);
+    bool allowLoopCarriedAGPR = hasMFMAAccumulatorGroup(groupValues);
     unsigned bridges = 0;
     for (unsigned intervalIndex : group) {
       for (Value value : intervals[intervalIndex].values) {
-        if (!canDefineAGPR(value, groupValues))
+        if (!canDefineAGPR(value, groupValues, allowLoopCarriedAGPR))
           ++bridges;
         for (OpOperand &use : value.getUses())
-          if (!canConsumeAGPR(use, groupValues))
+          if (!canConsumeAGPR(use, groupValues, allowLoopCarriedAGPR))
             ++bridges;
       }
     }
