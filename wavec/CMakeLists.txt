@@ -43,6 +43,8 @@ set_target_properties(wavefront_lower PROPERTIES
   CXX_STANDARD_REQUIRED ON
 )
 
+add_subdirectory("${CMAKE_SOURCE_DIR}/tools/wavec" "${CMAKE_BINARY_DIR}/tools/wavec")
+
 function(wavec_add_c_test name source)
   add_executable(${name} "${source}")
   target_link_libraries(${name} PRIVATE wavefront)
@@ -88,29 +90,6 @@ add_test(NAME wavec.lower_goldens
     -P ${CMAKE_CURRENT_SOURCE_DIR}/test/check_goldens.cmake
 )
 set_tests_properties(wavec.lower_goldens PROPERTIES LABELS wavec)
-
-add_executable(wavec src/wavec.c)
-target_include_directories(wavec PRIVATE "${WAVEC_INCLUDE_DIR}")
-target_compile_options(wavec PRIVATE
-  $<$<COMPILE_LANGUAGE:C>:${WAVEC_C_FLAGS}>
-)
-target_compile_definitions(wavec PRIVATE
-  WAVEC_HAVE_LEX=1
-  WAVEC_HAVE_LOWERING=1
-  WAVEC_HAVE_PARSE=1
-  WAVEC_HAVE_SEMA=1
-)
-target_link_libraries(wavec PRIVATE
-  wavefront
-  wavefront_lower
-)
-set_target_properties(wavec PROPERTIES
-  C_EXTENSIONS OFF
-  C_STANDARD 99
-  C_STANDARD_REQUIRED ON
-  LINKER_LANGUAGE CXX
-  RUNTIME_OUTPUT_DIRECTORY "${LLVM_RUNTIME_OUTPUT_INTDIR}"
-)
 
 find_program(WAVEC_FILECHECK FileCheck
   PATHS
