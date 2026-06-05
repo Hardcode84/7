@@ -54,6 +54,7 @@ assert_match(where_otherwise "${GOLDEN_DIR}/where_otherwise.mlir")
 assert_match(uniform_if_else "${GOLDEN_DIR}/uniform_if_else.mlir")
 assert_match(cast_f32_f16    "${GOLDEN_DIR}/cast_f32_f16.mlir")
 assert_match(lds_roundtrip   "${GOLDEN_DIR}/lds_roundtrip.mlir")
+assert_match(where_carry     "${GOLDEN_DIR}/where_carry.mlir")
 
 # Overfit probe: the swapped-loads variant must be valid IR yet differ from
 # the saxpy golden (proves derivation from the AST, not a canned template).
