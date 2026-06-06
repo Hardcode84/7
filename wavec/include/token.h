@@ -88,16 +88,17 @@ typedef enum TokenKind {
   TOK_ARROW,  /* -> (reserved punctuation; not in v1 productions) */
 
   /* --- Assignment operators --- */
-  TOK_ASSIGN,   /* =   */
-  TOK_PLUS_EQ,  /* +=  */
-  TOK_MINUS_EQ, /* -=  */
-  TOK_STAR_EQ,  /* *=  */
-  TOK_SLASH_EQ, /* /=  */
-  TOK_AMP_EQ,   /* &=  */
-  TOK_PIPE_EQ,  /* |=  */
-  TOK_CARET_EQ, /* ^=  */
-  TOK_SHL_EQ,   /* <<= */
-  TOK_SHR_EQ,   /* >>= */
+  TOK_ASSIGN,     /* =   */
+  TOK_PLUS_EQ,    /* +=  */
+  TOK_MINUS_EQ,   /* -=  */
+  TOK_STAR_EQ,    /* *=  */
+  TOK_SLASH_EQ,   /* /=  */
+  TOK_PERCENT_EQ, /* %=  */
+  TOK_AMP_EQ,     /* &=  */
+  TOK_PIPE_EQ,    /* |=  */
+  TOK_CARET_EQ,   /* ^=  */
+  TOK_SHL_EQ,     /* <<= */
+  TOK_SHR_EQ,     /* >>= */
 
   /* --- Arithmetic operators --- */
   TOK_PLUS,    /* +  (also unary; star/minus reused) */

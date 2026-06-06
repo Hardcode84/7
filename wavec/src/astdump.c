@@ -180,16 +180,17 @@ static const char *scalar_name(ScalarKind k) {
 }
 
 static const char *const kOpNames[TOK__COUNT] = {
-    [TOK_PLUS] = "+",      [TOK_MINUS] = "-",     [TOK_STAR] = "*",
-    [TOK_SLASH] = "/",     [TOK_PERCENT] = "%",   [TOK_SHL] = "<<",
-    [TOK_SHR] = ">>",      [TOK_LT] = "<",        [TOK_LE] = "<=",
-    [TOK_GT] = ">",        [TOK_GE] = ">=",       [TOK_EQ] = "==",
-    [TOK_NE] = "!=",       [TOK_AMP] = "&",       [TOK_PIPE] = "|",
-    [TOK_CARET] = "^",     [TOK_TILDE] = "~",     [TOK_BANG] = "!",
-    [TOK_AMPAMP] = "&&",   [TOK_PIPEPIPE] = "||", [TOK_ASSIGN] = "=",
-    [TOK_PLUS_EQ] = "+=",  [TOK_MINUS_EQ] = "-=", [TOK_STAR_EQ] = "*=",
-    [TOK_SLASH_EQ] = "/=", [TOK_AMP_EQ] = "&=",   [TOK_PIPE_EQ] = "|=",
-    [TOK_CARET_EQ] = "^=", [TOK_SHL_EQ] = "<<=",  [TOK_SHR_EQ] = ">>=",
+    [TOK_PLUS] = "+",      [TOK_MINUS] = "-",       [TOK_STAR] = "*",
+    [TOK_SLASH] = "/",     [TOK_PERCENT] = "%",     [TOK_SHL] = "<<",
+    [TOK_SHR] = ">>",      [TOK_LT] = "<",          [TOK_LE] = "<=",
+    [TOK_GT] = ">",        [TOK_GE] = ">=",         [TOK_EQ] = "==",
+    [TOK_NE] = "!=",       [TOK_AMP] = "&",         [TOK_PIPE] = "|",
+    [TOK_CARET] = "^",     [TOK_TILDE] = "~",       [TOK_BANG] = "!",
+    [TOK_AMPAMP] = "&&",   [TOK_PIPEPIPE] = "||",   [TOK_ASSIGN] = "=",
+    [TOK_PLUS_EQ] = "+=",  [TOK_MINUS_EQ] = "-=",   [TOK_STAR_EQ] = "*=",
+    [TOK_SLASH_EQ] = "/=", [TOK_PERCENT_EQ] = "%=", [TOK_AMP_EQ] = "&=",
+    [TOK_PIPE_EQ] = "|=",  [TOK_CARET_EQ] = "^=",   [TOK_SHL_EQ] = "<<=",
+    [TOK_SHR_EQ] = ">>=",
 };
 
 static const char *op_name(TokenKind k) {

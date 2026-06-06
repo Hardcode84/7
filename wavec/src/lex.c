@@ -370,20 +370,21 @@ typedef struct PunctRule {
 } PunctRule;
 
 static const PunctRule kPunctRules[] = {
-    {"<<=", TOK_SHL_EQ},  {">>=", TOK_SHR_EQ}, {"[[", TOK_LATTR},
-    {"]]", TOK_RATTR},    {"..", TOK_DOTDOT},  {"+=", TOK_PLUS_EQ},
-    {"-=", TOK_MINUS_EQ}, {"->", TOK_ARROW},   {"*=", TOK_STAR_EQ},
-    {"/=", TOK_SLASH_EQ}, {"<<", TOK_SHL},     {">>", TOK_SHR},
-    {"<=", TOK_LE},       {">=", TOK_GE},      {"==", TOK_EQ},
-    {"!=", TOK_NE},       {"&&", TOK_AMPAMP},  {"&=", TOK_AMP_EQ},
-    {"||", TOK_PIPEPIPE}, {"|=", TOK_PIPE_EQ}, {"^=", TOK_CARET_EQ},
-    {"(", TOK_LPAREN},    {")", TOK_RPAREN},   {"{", TOK_LBRACE},
-    {"}", TOK_RBRACE},    {"[", TOK_LBRACKET}, {"]", TOK_RBRACKET},
-    {",", TOK_COMMA},     {";", TOK_SEMI},     {"+", TOK_PLUS},
-    {"-", TOK_MINUS},     {"*", TOK_STAR},     {"/", TOK_SLASH},
-    {"%", TOK_PERCENT},   {"<", TOK_LT},       {">", TOK_GT},
-    {"=", TOK_ASSIGN},    {"!", TOK_BANG},     {"&", TOK_AMP},
-    {"|", TOK_PIPE},      {"^", TOK_CARET},    {"~", TOK_TILDE},
+    {"<<=", TOK_SHL_EQ},  {">>=", TOK_SHR_EQ},    {"[[", TOK_LATTR},
+    {"]]", TOK_RATTR},    {"..", TOK_DOTDOT},     {"+=", TOK_PLUS_EQ},
+    {"-=", TOK_MINUS_EQ}, {"->", TOK_ARROW},      {"*=", TOK_STAR_EQ},
+    {"/=", TOK_SLASH_EQ}, {"%=", TOK_PERCENT_EQ}, {"<<", TOK_SHL},
+    {">>", TOK_SHR},      {"<=", TOK_LE},         {">=", TOK_GE},
+    {"==", TOK_EQ},       {"!=", TOK_NE},         {"&&", TOK_AMPAMP},
+    {"&=", TOK_AMP_EQ},   {"||", TOK_PIPEPIPE},   {"|=", TOK_PIPE_EQ},
+    {"^=", TOK_CARET_EQ}, {"(", TOK_LPAREN},      {")", TOK_RPAREN},
+    {"{", TOK_LBRACE},    {"}", TOK_RBRACE},      {"[", TOK_LBRACKET},
+    {"]", TOK_RBRACKET},  {",", TOK_COMMA},       {";", TOK_SEMI},
+    {"+", TOK_PLUS},      {"-", TOK_MINUS},       {"*", TOK_STAR},
+    {"/", TOK_SLASH},     {"%", TOK_PERCENT},     {"<", TOK_LT},
+    {">", TOK_GT},        {"=", TOK_ASSIGN},      {"!", TOK_BANG},
+    {"&", TOK_AMP},       {"|", TOK_PIPE},        {"^", TOK_CARET},
+    {"~", TOK_TILDE},
 };
 
 static int punct_matches(Scanner *s, const char *text) {

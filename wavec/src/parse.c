@@ -404,9 +404,9 @@ static int is_iv_type_kw(TokenKind k) {
 
 static const int kAssignOps[TOK__COUNT] = {
     [TOK_ASSIGN] = 1,  [TOK_PLUS_EQ] = 1,  [TOK_MINUS_EQ] = 1,
-    [TOK_STAR_EQ] = 1, [TOK_SLASH_EQ] = 1, [TOK_AMP_EQ] = 1,
-    [TOK_PIPE_EQ] = 1, [TOK_CARET_EQ] = 1, [TOK_SHL_EQ] = 1,
-    [TOK_SHR_EQ] = 1,
+    [TOK_STAR_EQ] = 1, [TOK_SLASH_EQ] = 1, [TOK_PERCENT_EQ] = 1,
+    [TOK_AMP_EQ] = 1,  [TOK_PIPE_EQ] = 1,  [TOK_CARET_EQ] = 1,
+    [TOK_SHL_EQ] = 1,  [TOK_SHR_EQ] = 1,
 };
 
 static int is_assign_op(TokenKind k) {

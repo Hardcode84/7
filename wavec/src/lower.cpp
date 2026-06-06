@@ -76,8 +76,9 @@ static MlirStringRef srn(const char *s, size_t n) {
 // (AST identifiers are not NUL-terminated), so compares are length-bounded.
 struct Binding {
   const char *name;
-  uint32_t name_len;
+  TypeRef *type;
   MlirValue value;
+  uint32_t name_len;
 };
 
 // Per-lower state. No globals: everything threads through here.
@@ -113,9 +114,11 @@ static Binding *lookup(LowerCtx &lc, const char *name, uint32_t len) {
   return nullptr;
 }
 
-static void bindNew(LowerCtx &lc, const char *name, uint32_t len, MlirValue v) {
+static void bindNew(LowerCtx &lc, const char *name, uint32_t len, MlirValue v,
+                    TypeRef *type = nullptr) {
   Binding b;
   b.name = name;
+  b.type = type;
   b.name_len = len;
   b.value = v;
   lc.env.push_back(b);
@@ -1429,14 +1432,23 @@ static void collectAssigned(const Stmt *s,
 // order: by first binding position in the enclosing env.
 struct Carry {
   const char *name;
-  uint32_t name_len;
+  TypeRef *type;
   MlirValue incoming; // value in the enclosing scope at region entry
+  uint32_t name_len;
 };
 
 static bool nameInList(const std::vector<const BoundName *> &v, const char *n,
                        uint32_t len) {
   for (const BoundName *b : v)
     if (b->name_len == len && memcmp(b->name, n, len) == 0)
+      return true;
+  return false;
+}
+
+static bool carryNameInList(const std::vector<Carry> &v, const char *n,
+                            uint32_t len) {
+  for (const Carry &c : v)
+    if (c.name_len == len && memcmp(c.name, n, len) == 0)
       return true;
   return false;
 }
@@ -1456,15 +1468,11 @@ static std::vector<Carry> computeCarries(LowerCtx &lc, const Stmt *thenBlock,
       continue;
     if (nameInList(declaredInside, bnd.name, bnd.name_len))
       continue;
-    bool dup = false;
-    for (const Carry &c : carries)
-      if (c.name_len == bnd.name_len &&
-          memcmp(c.name, bnd.name, bnd.name_len) == 0)
-        dup = true;
-    if (dup)
+    if (carryNameInList(carries, bnd.name, bnd.name_len))
       continue;
     Carry c;
     c.name = bnd.name;
+    c.type = bnd.type;
     c.name_len = bnd.name_len;
     // Incoming is the CURRENT (newest) binding -- what every read sees via
     // lookup() -- not this possibly-shadowed env entry. A name rebound to an
@@ -1472,6 +1480,7 @@ static std::vector<Carry> computeCarries(LowerCtx &lc, const Stmt *thenBlock,
     // value; bnd.value here could feed the body a stale loop-invariant.
     Binding *cur = lookup(lc, bnd.name, bnd.name_len);
     c.incoming = (cur != nullptr) ? cur->value : bnd.value;
+    c.type = (cur != nullptr) ? cur->type : bnd.type;
     carries.push_back(c);
   }
   return carries;
@@ -1492,7 +1501,8 @@ static bool runBody(LowerCtx &lc, MlirBlock target, const Stmt *bodyBlock,
   size_t envMark = lc.env.size();
   lc.block = target;
   for (size_t i = 0; i < carries.size(); ++i)
-    bindNew(lc, carries[i].name, carries[i].name_len, carryBindings[i]);
+    bindNew(lc, carries[i].name, carries[i].name_len, carryBindings[i],
+            carries[i].type);
 
   bool ok = lowerBlock(lc, bodyBlock);
 
@@ -1735,10 +1745,11 @@ static bool lowerForBody(LowerCtx &lc, const StmtFor &f, MlirBlock body,
   MlirBlock saved = lc.block;
   size_t envMark = lc.env.size();
   lc.block = body;
-  bindNew(lc, f.iv_name.name, f.iv_name.name_len,
-          mlirBlockGetArgument(body, 0));
+  bindNew(lc, f.iv_name.name, f.iv_name.name_len, mlirBlockGetArgument(body, 0),
+          f.iv_type);
   for (size_t i = 0; i < carries.size(); ++i)
-    bindNew(lc, carries[i].name, carries[i].name_len, carryArgs[i]);
+    bindNew(lc, carries[i].name, carries[i].name_len, carryArgs[i],
+            carries[i].type);
   bool ok = lowerBlock(lc, f.body);
   std::vector<MlirValue> finals;
   if (ok) {
@@ -1789,29 +1800,23 @@ static bool lowerFor(LowerCtx &lc, const Stmt *s) {
 }
 
 // Compound assignment desugars to the binary op then store-to-local.
+struct CompoundOpMap {
+  TokenKind assign;
+  TokenKind binary;
+};
+
 static TokenKind compoundToBinop(TokenKind op) {
-  switch (op) {
-  case TOK_PLUS_EQ:
-    return TOK_PLUS;
-  case TOK_MINUS_EQ:
-    return TOK_MINUS;
-  case TOK_STAR_EQ:
-    return TOK_STAR;
-  case TOK_SLASH_EQ:
-    return TOK_SLASH;
-  case TOK_AMP_EQ:
-    return TOK_AMP;
-  case TOK_PIPE_EQ:
-    return TOK_PIPE;
-  case TOK_CARET_EQ:
-    return TOK_CARET;
-  case TOK_SHL_EQ:
-    return TOK_SHL;
-  case TOK_SHR_EQ:
-    return TOK_SHR;
-  default:
-    return TOK_EOF;
-  }
+  static constexpr CompoundOpMap kMap[] = {
+      {TOK_PLUS_EQ, TOK_PLUS},       {TOK_MINUS_EQ, TOK_MINUS},
+      {TOK_STAR_EQ, TOK_STAR},       {TOK_SLASH_EQ, TOK_SLASH},
+      {TOK_PERCENT_EQ, TOK_PERCENT}, {TOK_AMP_EQ, TOK_AMP},
+      {TOK_PIPE_EQ, TOK_PIPE},       {TOK_CARET_EQ, TOK_CARET},
+      {TOK_SHL_EQ, TOK_SHL},         {TOK_SHR_EQ, TOK_SHR},
+  };
+  for (const CompoundOpMap &entry : kMap)
+    if (entry.assign == op)
+      return entry.binary;
+  return TOK_EOF;
 }
 
 static bool lowerDeclStmt(LowerCtx &lc, const Stmt *s) {
@@ -1821,7 +1826,8 @@ static bool lowerDeclStmt(LowerCtx &lc, const Stmt *s) {
   MlirType declTy = lowerType(lc, s->as.decl.type);
   if (!mlirTypeIsNull(declTy))
     v = coerceToType(lc, v, declTy);
-  bindNew(lc, s->as.decl.name.name, s->as.decl.name.name_len, v);
+  bindNew(lc, s->as.decl.name.name, s->as.decl.name.name_len, v,
+          s->as.decl.type);
   return true;
 }
 
@@ -1841,19 +1847,20 @@ static bool lowerDestructureStmt(LowerCtx &lc, const Stmt *s) {
   if (!lowerLoad(lc, init->as.call, stmtSpan(s), &value, &token))
     return false;
   bindNew(lc, s->as.destructure.names[0].name,
-          s->as.destructure.names[0].name_len, value);
+          s->as.destructure.names[0].name_len, value,
+          (TypeRef *)init->sema_type);
   bindNew(lc, s->as.destructure.names[1].name,
           s->as.destructure.names[1].name_len, token);
   return true;
 }
 
-static void buildIdentExpr(const StmtAssign &a, Expr &lhsE) {
+static void buildIdentExpr(const StmtAssign &a, Expr &lhsE, TypeRef *type) {
   memset(&lhsE, 0, sizeof(lhsE));
   lhsE.kind = EXPR_IDENT;
   lhsE.span = a.target.span;
   lhsE.as.ident.name = a.target.name;
   lhsE.as.ident.name_len = a.target.name_len;
-  lhsE.sema_type = nullptr;
+  lhsE.sema_type = type;
 }
 
 static bool lowerCompoundAssign(LowerCtx &lc, const Stmt *s, Expr &lhsE,
@@ -1864,7 +1871,15 @@ static bool lowerCompoundAssign(LowerCtx &lc, const Stmt *s, Expr &lhsE,
     fail(lc, stmtSpan(s), "lowering: unsupported compound assignment");
     return false;
   }
-  buildIdentExpr(a, lhsE);
+  Binding *target = lookup(lc, a.target.name, a.target.name_len);
+  if (!target) {
+    std::string m = "lowering: assignment to unbound '";
+    m.append(a.target.name, a.target.name_len);
+    m += "'";
+    fail(lc, stmtSpan(s), m);
+    return false;
+  }
+  buildIdentExpr(a, lhsE, target->type);
 
   Expr binE;
   memset(&binE, 0, sizeof(binE));
@@ -2087,7 +2102,7 @@ static bool lowerKernel(LowerCtx &lc, MlirBlock moduleBody, const Kernel *k) {
   lc.block = entry;
   for (size_t i = 0; i < k->param_count; ++i)
     bindNew(lc, k->params[i]->name.name, k->params[i]->name.name_len,
-            mlirBlockGetArgument(entry, (intptr_t)i));
+            mlirBlockGetArgument(entry, (intptr_t)i), k->params[i]->type);
 
   bool ok = lowerBlock(lc, k->body);
   if (ok)

@@ -1,0 +1,15 @@
+kernel [[amdgpu_wave_size(32)]]
+void compound_signed(uint32_t *out, int32_t sx, uint32_t ux) {
+  int32_t s = sx | 1;
+  s >>= 1;
+  s /= 3;
+  s %= 5;
+
+  uint32_t u = ux | 1;
+  u >>= 1;
+  u /= 3;
+  u %= 5;
+
+  simd<uint32_t, 32> lane = lane_id<32>();
+  store(lane + u, out + lane);
+}

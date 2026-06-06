@@ -110,6 +110,7 @@ static const char *const kKindNames[TOK__COUNT] = {
     [TOK_MINUS_EQ] = "-=",
     [TOK_STAR_EQ] = "*=",
     [TOK_SLASH_EQ] = "/=",
+    [TOK_PERCENT_EQ] = "%=",
     [TOK_AMP_EQ] = "&=",
     [TOK_PIPE_EQ] = "|=",
     [TOK_CARET_EQ] = "^=",
@@ -365,9 +366,9 @@ static void test_arrow_and_token_seed(void) {
 
 /* All the compound assignments, maximal-munched off their bare siblings. */
 static void test_compound_assigns(void) {
-  EXPECT("compound assigns", "+= -= *= /= &= |= ^= <<= >>= =", TOK_PLUS_EQ,
-         TOK_MINUS_EQ, TOK_STAR_EQ, TOK_SLASH_EQ, TOK_AMP_EQ, TOK_PIPE_EQ,
-         TOK_CARET_EQ, TOK_SHL_EQ, TOK_SHR_EQ, TOK_ASSIGN);
+  EXPECT("compound assigns", "+= -= *= /= %= &= |= ^= <<= >>= =", TOK_PLUS_EQ,
+         TOK_MINUS_EQ, TOK_STAR_EQ, TOK_SLASH_EQ, TOK_PERCENT_EQ, TOK_AMP_EQ,
+         TOK_PIPE_EQ, TOK_CARET_EQ, TOK_SHL_EQ, TOK_SHR_EQ, TOK_ASSIGN);
   /* The logical/relational/bitwise two-byte operators. */
   EXPECT("two-byte ops", "== != <= >= && || << >>", TOK_EQ, TOK_NE, TOK_LE,
          TOK_GE, TOK_AMPAMP, TOK_PIPEPIPE, TOK_SHL, TOK_SHR);
