@@ -353,21 +353,23 @@ def WaveAMDRegAlloc
     : Pass<"waveamd-reg-alloc", "ModuleOp"> {
   let summary = "Allocate WaveAMDMachine virtual registers to physical registers";
   let description = [{
-    Linear-scan VGPR/SGPR allocator over WaveAMDMachine IR. In the
-    default mode (`mark-overflow=false`), running out of physical
-    registers fails the pass. In `mark-overflow=true` (used by the
-    autotuning loop) the pass instead annotates the offending func
-    with `waveamdmachine.regalloc_overflowed = i64 1`, leaves later
-    production consumers to fail or skip that func explicitly, and
-    -- once the module has been walked -- stamps a module-level
-    `waveamdmachine.regalloc_overflowed_count = i64 N` summarising
-    how many kernels overflowed. Overflowed funcs also carry the first
-    pressure point: register class, position, requested interval,
-    overlapping live intervals, and estimated dwords of relief needed.
+    Assigns physical indices to WaveAMDMachine SGPR, VGPR, and AGPR virtual
+    register results. Successful allocation preserves fixed physical values,
+    ABI-reserved entry registers, tuple aliases, uniform-loop carry storage,
+    and MFMA accumulator aliases. SCC, VCC, and M0 are singleton
+    resources; overlapping live writes are rejected.
 
-    `waveamdmachine.target_waves` caps SGPR/VGPR allocation with the
-    subtarget occupancy tables. `vgpr-limit` / `sgpr-limit` can still
-    shrink those caps for tests; -1 keeps the derived budget.
+    Default mode fails if no legal assignment exists. With
+    `mark-overflow=true`, overflowed functions get
+    `waveamdmachine.regalloc_overflowed = 1 : i64`, the module gets
+    `waveamdmachine.regalloc_overflowed_count = N : i64`, and pressure
+    attributes describe the reported pressure point when available.
+    Overflowed functions are diagnostics only; production post-regalloc
+    consumers reject or skip them.
+
+    `waveamdmachine.target_waves` narrows SGPR and VGPR budgets and enforces
+    target VGPR-family accounting across VGPRs/AGPRs. `vgpr-limit` /
+    `sgpr-limit` can only shrink those caps.
   }];
   let dependentDialects = [
     "waveamdmachine::WaveAMDMachineDialect"
@@ -378,13 +380,14 @@ def WaveAMDRegAlloc
     Option<"rankAgprCandidates", "rank-agpr-candidates", "bool", /*default=*/"false",
            "Annotate VGPR pressure overflows with ranked VGPR-to-AGPR candidates.">,
     Option<"agprBankSpill", "agpr-bank-spill", "bool", /*default=*/"false",
-           "Retry VGPR allocation by moving ranked VGPR intervals to AGPRs.">,
+           "Allow AGPR-compatible VGPR values to use AGPR storage to reduce VGPR pressure.">,
     Option<"vgprLimitOverride", "vgpr-limit", "int", /*default=*/"-1",
            "Cap VGPRs below the subtarget default; -1 means no cap.">,
     Option<"sgprLimitOverride", "sgpr-limit", "int", /*default=*/"-1",
            "Cap SGPRs below the subtarget default; -1 means no cap.">,
   ];
 }
+
 
 def WaveAMDResourceInfo
     : Pass<"waveamd-resource-info", "ModuleOp"> {

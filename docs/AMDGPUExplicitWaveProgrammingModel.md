@@ -472,7 +472,9 @@ This suggests the following split for a prototype under `mlir/lib/Target/Wave`:
   LLVM register classes, liveness, and resource accounting. A simple allocator
   is useful for early experiments, but the long-term design should reuse AMDGPU
   register classes, subtarget register limits, occupancy calculations, and spill
-  behavior instead of maintaining a parallel model.
+  behavior instead of maintaining a parallel model. Current RegAlloc semantics
+  and the rewrite design are captured in
+  [`WaveAMDRegAllocSemantics.md`](WaveAMDRegAllocSemantics.md).
 
 `AMDGPUABI.cpp`
   Own an MLIR ABI-lowering pass for kernel arguments, kernarg layout,

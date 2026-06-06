@@ -27,7 +27,7 @@
 
 // HAZARD: waveamd-insert-hazard-waits cannot consume overflowed register allocation
 
-// HARD: WaveAMDMachine register allocator ran out of VGPR registers at position 3
+// HARD: waveamd-reg-alloc ran out of VGPR registers at position 3
 // HARD-SAME: required_relief=1
 // HARD-SAME: request={start=3, end=6, width=1, values=[3.0+0]}
 // HARD-SAME: overlaps=[{start=1, end=4, width=1, values=[1.0+0]}, {start=2, end=5, width=1, values=[2.0+0]}]

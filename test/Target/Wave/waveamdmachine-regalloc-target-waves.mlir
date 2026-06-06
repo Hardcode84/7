@@ -3,7 +3,7 @@
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 
-// expected-error @below {{WaveAMDMachine register allocator ran out of VGPR registers}}
+// expected-error @below {{waveamd-reg-alloc ran out of VGPR registers}}
 func.func @target_waves_class_limit(%base_arg: !wave.ptr<#wave.global>)
     attributes {wave.kernel, waveamdmachine.target_waves = 4 : i64} {
   %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
@@ -34,7 +34,7 @@ func.func @target_waves_class_limit(%base_arg: !wave.ptr<#wave.global>)
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx90a"} {
 
-// expected-error @below {{WaveAMDMachine register allocator ran out of VGPR registers}}
+// expected-error @below {{waveamd-reg-alloc ran out of VGPR registers}}
 func.func @target_waves_total_vgpr_limit(%base_arg: !wave.ptr<#wave.global>)
     attributes {wave.kernel, waveamdmachine.target_waves = 4 : i64} {
   %zero = waveamdmachine.imm 0 : !waveamdmachine.imm

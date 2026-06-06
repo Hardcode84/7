@@ -3,8 +3,10 @@
 // CHECK-LABEL: func.func @rank_mfma_accumulator_before_generic
 // CHECK-SAME: waveamdmachine.regalloc_agpr_candidates = [
 // CHECK-SAME: {agpr_dwords = 4 : i64, bridge_count = 1 : i64
+// CHECK-SAME: mfma_accumulator = true
 // CHECK-SAME: relief_dwords = 4 : i64}
 // CHECK-SAME: {agpr_dwords = 4 : i64, bridge_count = 2 : i64
+// CHECK-SAME: mfma_accumulator = false
 // CHECK-SAME: waveamdmachine.regalloc_pressure_class = "VGPR"
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
