@@ -37,11 +37,5 @@
 // PIPELINE-NEXT: transform.apply_registered_pass "waveamd-to-machine"
 // PIPELINE: transform.apply_registered_pass "waveamd-preserve-hw-regs"
 // PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
-// PIPELINE-NEXT: transform.apply_registered_pass "waveamd-reg-alloc" with
-// PIPELINE-NEXT: options = { "agpr-bank-spill" = true }
-// PIPELINE-NEXT: to {{.*}} : (!transform.any_op) -> !transform.any_op
-// PIPELINE-NEXT: // Regalloc can add copies that consume memory results.
-// PIPELINE-NEXT: transform.apply_registered_pass "waveamd-insert-ticket-waits"
-// PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
-// PIPELINE-NEXT: transform.apply_registered_pass "waveamd-insert-hazard-waits"
+// PIPELINE-NEXT: transform.apply_registered_pass "waveamd-reg-alloc" to {{.*}}
 // PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op

@@ -441,8 +441,9 @@ private:
     if (failed(walkBlock(body)))
       return failure();
     coalesceLoopBackEdgeCarries(loop);
-    extendCarriesToLoopEnd(loop, cursor);
-    extendExternalLoopUses(loop, cursor);
+    unsigned loopEnd = cursor - 1;
+    extendCarriesToLoopEnd(loop, loopEnd);
+    extendExternalLoopUses(loop, loopEnd);
     return success();
   }
 

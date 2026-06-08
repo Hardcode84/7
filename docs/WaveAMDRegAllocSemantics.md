@@ -125,33 +125,33 @@ independent accumulator storage.
 When in-place aliasing is not legal, allocation preserves distinct
 physical storage. Required movement must be explicit in IR.
 
-## AGPR Bank Spill
+## Bank Promotion
 
-With `agpr-bank-spill=true`, VGPR pressure may be relieved by placing
-eligible VGPR live ranges in AGPRs. The transformed function must still
-obey the normal success rules.
+Register pressure is relieved by forced storage-bank promotion:
 
-AGPR-compatible definitions and uses consume the AGPR value directly.
-Other boundaries get explicit bridge ops:
+```text
+SGPR -> VGPR -> AGPR
+```
 
-- `v_accvgpr_write_b32_tuple` moves VGPR storage into AGPR storage.
-- `v_accvgpr_read_b32_tuple` moves AGPR storage back into VGPR storage.
+When a bank overflows, the allocator chooses a live promotable storage
+group, moves it into the next bank, rebuilds required bridge ops, and
+restarts allocation from the affected point. Operations still keep their
+machine operand/result bank requirements.
 
-Candidates must fit the AGPR budget and have legal AGPR definitions,
-uses, and bridge points. AGPR reloads are not candidates. Loop-carried
-block arguments may use AGPR storage only for MFMA accumulator groups.
-If AGPR placement cannot relieve the pressure, overflow handling follows
-normal pass mode.
+Bank mismatches get explicit bridge ops:
 
-With `mark-overflow=true`, `rank-agpr-candidates=true` records ranked
-VGPR-to-AGPR candidates on a VGPR overflow. These attributes are
-diagnostics for tuning and debugging, not an ABI.
+- SGPR storage consumed by VGPR users gets a vector materialization.
+- VGPR storage consumed by SGPR users gets `v_readfirstlane_b32`.
+- VGPR storage consumed by AGPR users gets `v_accvgpr_write_b32_tuple`.
+- AGPR storage consumed by VGPR users gets `v_accvgpr_read_b32_tuple`.
 
-Candidate ranking prefers MFMA accumulator groups, then fewer bridge
-points, greater pressure relief, greater live coverage, lower AGPR
-pressure, and original candidate order. Tuple-only renames do not add
-bridge cost. AGPR fit is checked against peak live AGPR pressure, not
-candidate width alone.
+Promotion never moves fixed physical ranges, ABI ranges, or bridge temps.
+If no legal bridge sequence exists, the group is not promotable. If no
+promotion can relieve the pressure, overflow handling follows normal pass
+mode.
+
+The allocator does not expose the old AGPR-bank-spill candidate-ranking
+mode and does not emit `waveamdmachine.regalloc_agpr_candidates`.
 
 ## Overflow Mode
 
@@ -187,7 +187,9 @@ Pressure diagnostic attributes:
 - `waveamdmachine.regalloc_pressure_required_relief`: dwords to remove.
 - `waveamdmachine.regalloc_pressure_request`: interval that did not fit.
 - `waveamdmachine.regalloc_pressure_overlaps`: intervals live there.
-- `waveamdmachine.regalloc_agpr_candidates`: optional AGPR relief plan.
+The allocator also writes internal interval diagnostics under
+`waveamdmachine.regalloc_debug_*` while the diagnostics settle. These
+are debug-only and not an ABI.
 
 Interval diagnostics use:
 
@@ -197,18 +199,10 @@ Interval diagnostics use:
 - `result_indices`: result number, or `-1` for block args.
 - `slot_offsets`: offset from the interval base.
 
-AGPR candidate diagnostics use:
-
-- `agpr_dwords`: maximum AGPR dwords required by the candidate.
-- `bridge_count`: required AGPR/VGPR bridge count.
-- `relief_dwords`: VGPR pressure removed at the reported point.
-- `overlap_dwords`: candidate live coverage.
-- `mfma_accumulator`: candidate preserves an MFMA accumulator chain.
-- `intervals`: intervals moved by the candidate.
-
 ## Rewrite Design
 
-`waveamd-reg-alloc` uses the rewrite implementation. It preserves the observable contract above while making storage constraints explicit.
+`waveamd-reg-alloc` uses the component implementation. It preserves the
+observable contract above while making storage constraints explicit.
 
 The function pipeline is:
 
@@ -222,8 +216,8 @@ The function pipeline is:
    target-waves caps, and VGPR-family accounting.
 5. `PhysicalAllocator`: seed fixed and reserved occupancy, assign virtual
    storage groups per class, and emit pressure diagnostics on failure.
-6. `AGPRBankSpillPlanner`: rank legal VGPR-to-AGPR groups on VGPR
-   pressure, materialize the selected group, rebuild, and retry.
+6. `PromotionMaterializer`: insert SGPR/VGPR/AGPR bridge ops for groups
+   promoted by the allocator, rebuild, and retry.
 7. `Commit`: rewrite result and loop block-argument types with physical
    indices and write or clear overflow diagnostics.
 8. `PostVerify`: run post-regalloc verification as the final gate.
@@ -256,7 +250,7 @@ errors.
 
 `PressurePoint`
   Class, limit, reserved count, position, request interval, live dwords,
-  required relief, active overlaps, optional AGPR candidates.
+  required relief, and active overlaps.
 
 Use weighted union-find for aliases. Each root stores class, required
 width, fixed base, and member value offsets. Union conflicts are repair
@@ -311,17 +305,14 @@ Rewrite-specific internal verifiers should check:
 
 ### Rollout Criteria
 
-Before replacing the default allocator:
+The production allocator is covered by:
 
-- helper unit coverage exists for alias repair, live segments, fixed
-  occupancy, placement failure, and VGPR-family pressure;
-- existing RegAlloc LIT coverage passes or is intentionally relaxed where
-  it asserted non-semantic physical numbers;
-- overflow diagnostic schemas and class-order tie-breaks match current
-  tests;
-- integration tests assemble for tuple subranges, target-waves, AGPR bank
-  spill, and MFMA accumulators;
-- post-regalloc consumers accept the rewrite output.
+- existing RegAlloc LIT coverage, relaxed only where tests asserted
+  non-semantic physical numbers;
+- integration tests for tuple subranges, target-waves, AGPR MFMA
+  accumulators, and promotion bridge codegen;
+- post-regalloc consumers: resource info, hazard waits, metadata, and
+  assembly translation.
 
 ### Complexity And Performance
 

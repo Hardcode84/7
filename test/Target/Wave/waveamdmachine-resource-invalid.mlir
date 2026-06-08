@@ -11,8 +11,10 @@ func.func @unallocated_register() {
 // expected-error @below {{waveamd-resource-info found interfering VGPR register live ranges}}
 func.func @interfering_vgprs() {
   %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+  // expected-note @below {{lhs phys=[0, 1) live=[1, 3)}}
   %a = waveamdmachine.v_mov_b32_tuple %zero {registers = 1 : i64}
       : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1, 0>
+  // expected-note @below {{rhs phys=[0, 1) live=[2, 4)}}
   %b = waveamdmachine.v_mov_b32_tuple %zero {registers = 1 : i64}
       : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1, 0>
   %use_a = waveamdmachine.v_mov_b32_tuple %a {registers = 1 : i64}
@@ -27,8 +29,10 @@ func.func @interfering_vgprs() {
 // expected-error @below {{waveamd-resource-info found interfering SGPR register live ranges}}
 func.func @interfering_sgprs() {
   %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+  // expected-note @below {{lhs phys=[0, 1) live=[1, 3)}}
   %a = waveamdmachine.s_mov_b32_value %zero
       : (!waveamdmachine.imm) -> !waveamdmachine.reg<sgpr, 1, 0>
+  // expected-note @below {{rhs phys=[0, 1) live=[2, 4)}}
   %b = waveamdmachine.s_mov_b32_value %zero
       : (!waveamdmachine.imm) -> !waveamdmachine.reg<sgpr, 1, 0>
   %use_a = waveamdmachine.s_mov_b32_value %a
@@ -44,7 +48,9 @@ func.func @interfering_sgprs() {
 func.func @interfering_agprs() {
   %off = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1, 1>
   %base = waveamdmachine.uninit : !waveamdmachine.reg<sgpr, 2, 6>
+  // expected-note @below {{lhs phys=[0, 1) live=[2, 4)}}
   %a = waveamdmachine.uninit : !waveamdmachine.reg<agpr, 1, 0>
+  // expected-note @below {{rhs phys=[0, 1) live=[3, 5)}}
   %b = waveamdmachine.uninit : !waveamdmachine.reg<agpr, 1, 0>
   %read_a = waveamdmachine.v_accvgpr_read_b32_tuple %a
       : (!waveamdmachine.reg<agpr, 1, 0>) -> !waveamdmachine.reg<vgpr, 1, 2>

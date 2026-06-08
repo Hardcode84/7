@@ -2,15 +2,15 @@
 
 // CHECK: module
 // CHECK-SAME: waveamdmachine.regalloc_overflowed_count = 1 : i64
-// CHECK-LABEL: func.func @sgpr_overflow_reported_before_vgpr
-// CHECK-SAME: waveamdmachine.regalloc_pressure_class = "SGPR"
+// CHECK-LABEL: func.func @sgpr_promotes_then_vgpr_overflows
+// CHECK-SAME: waveamdmachine.regalloc_pressure_class = "VGPR"
 // CHECK-SAME: waveamdmachine.regalloc_pressure_limit = 2 : i64
-// CHECK-SAME: waveamdmachine.regalloc_pressure_position = 3 : i64
+// CHECK-SAME: waveamdmachine.regalloc_pressure_position = 5 : i64
 // CHECK-SAME: waveamdmachine.regalloc_pressure_required_relief = 1 : i64
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
-func.func @sgpr_overflow_reported_before_vgpr() {
+func.func @sgpr_promotes_then_vgpr_overflows() {
   %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
   %s0 = waveamdmachine.s_mov_b32_value %zero
       : (!waveamdmachine.imm) -> !waveamdmachine.reg<sgpr, 1>

@@ -353,11 +353,11 @@ def WaveAMDRegAlloc
     : Pass<"waveamd-reg-alloc", "ModuleOp"> {
   let summary = "Allocate WaveAMDMachine virtual registers to physical registers";
   let description = [{
-    Assigns physical indices to WaveAMDMachine SGPR, VGPR, and AGPR virtual
-    register results. Successful allocation preserves fixed physical values,
+    Flattens WaveAMDMachine operations, builds scalar live intervals, merges
+    tuple/control-flow/MFMA aliases, and assigns physical SGPR, VGPR, and AGPR
+    registers. Successful allocation preserves fixed physical values,
     ABI-reserved entry registers, tuple aliases, uniform-loop carry storage,
-    and MFMA accumulator aliases. SCC, VCC, and M0 are singleton
-    resources; overlapping live writes are rejected.
+    MFMA accumulator aliases, and singleton SCC/VCC/M0 resources.
 
     Default mode fails if no legal assignment exists. With
     `mark-overflow=true`, overflowed functions get
@@ -369,22 +369,25 @@ def WaveAMDRegAlloc
 
     `waveamdmachine.target_waves` narrows SGPR and VGPR budgets and enforces
     target VGPR-family accounting across VGPRs/AGPRs. `vgpr-limit` /
-    `sgpr-limit` can only shrink those caps.
+    `sgpr-limit` / `agpr-limit` can only shrink those caps.
+
+    Register bank pressure is relieved by forced promotion in storage order
+    SGPR -> VGPR -> AGPR. Explicit bridge ops repair producer/consumer bank
+    mismatches.
   }];
   let dependentDialects = [
+    "func::FuncDialect",
     "waveamdmachine::WaveAMDMachineDialect"
   ];
   let options = [
     Option<"markOverflow", "mark-overflow", "bool", /*default=*/"false",
            "Annotate overflowed funcs instead of failing the pass.">,
-    Option<"rankAgprCandidates", "rank-agpr-candidates", "bool", /*default=*/"false",
-           "Annotate VGPR pressure overflows with ranked VGPR-to-AGPR candidates.">,
-    Option<"agprBankSpill", "agpr-bank-spill", "bool", /*default=*/"false",
-           "Allow AGPR-compatible VGPR values to use AGPR storage to reduce VGPR pressure.">,
     Option<"vgprLimitOverride", "vgpr-limit", "int", /*default=*/"-1",
            "Cap VGPRs below the subtarget default; -1 means no cap.">,
     Option<"sgprLimitOverride", "sgpr-limit", "int", /*default=*/"-1",
            "Cap SGPRs below the subtarget default; -1 means no cap.">,
+    Option<"agprLimitOverride", "agpr-limit", "int", /*default=*/"-1",
+           "Cap AGPRs below the subtarget default; -1 means no cap.">
   ];
 }
 

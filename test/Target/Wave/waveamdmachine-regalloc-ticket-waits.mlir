@@ -1,11 +1,12 @@
-// RUN: wave-opt --waveamd-insert-ticket-waits --waveamd-reg-alloc='agpr-bank-spill=true vgpr-limit=4' --waveamd-insert-ticket-waits %s | FileCheck %s
+// RUN: wave-opt --waveamd-insert-ticket-waits --waveamd-reg-alloc='vgpr-limit=4' --waveamd-insert-ticket-waits %s | FileCheck %s
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 
 // CHECK-LABEL: func.func @regalloc_agpr_copy_waits_for_vmem_result
 // CHECK: %[[LOAD:.*]], %[[TOK:.*]] = waveamdmachine.global_load_u8
-// CHECK-NEXT: waveamdmachine.s_waitcnt vmcnt(0)
-// CHECK-NEXT: %[[SPILL:.*]] = waveamdmachine.v_accvgpr_write_b32_tuple %[[LOAD]]
+// CHECK-NOT: %[[LOAD]]
+// CHECK: waveamdmachine.s_waitcnt vmcnt(0)
+// CHECK-NEXT: %[[COPY:.*]] = waveamdmachine.v_mov_b32_tuple %[[LOAD]]
 func.func @regalloc_agpr_copy_waits_for_vmem_result(
     %off: !waveamdmachine.reg<vgpr, 1>,
     %base: !waveamdmachine.reg<sgpr, 2>) {

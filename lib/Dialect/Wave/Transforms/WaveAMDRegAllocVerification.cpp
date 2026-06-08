@@ -228,8 +228,20 @@ verifyNoRangeInterference(func::FuncOp func, ArrayRef<PhysicalLiveRange> ranges,
         continue;
       if (!liveRangesOverlap(lhs, rhs) || !physicalRangesOverlap(lhs, rhs))
         continue;
-      return func.emitError() << consumer << " found interfering " << regClass
-                              << " register live ranges";
+      InFlightDiagnostic diag =
+          func.emitError() << consumer << " found interfering " << regClass
+                           << " register live ranges: lhs phys=["
+                           << lhs.physStart << ", " << lhs.physEnd << ") live=["
+                           << lhs.start << ", " << lhs.end << "), rhs phys=["
+                           << rhs.physStart << ", " << rhs.physEnd << ") live=["
+                           << rhs.start << ", " << rhs.end << ")";
+      diag.attachNote(diagOpForValue(lhs.value, func)->getLoc())
+          << "lhs phys=[" << lhs.physStart << ", " << lhs.physEnd << ") live=["
+          << lhs.start << ", " << lhs.end << ")";
+      diag.attachNote(diagOpForValue(rhs.value, func)->getLoc())
+          << "rhs phys=[" << rhs.physStart << ", " << rhs.physEnd << ") live=["
+          << rhs.start << ", " << rhs.end << ")";
+      return failure();
     }
   }
   return success();
