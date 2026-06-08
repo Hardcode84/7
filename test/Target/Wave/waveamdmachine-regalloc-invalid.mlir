@@ -49,7 +49,7 @@ func.func @overlapping_scc_live_range(%a: !waveamdmachine.reg<sgpr, 1>,
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
 func.func @overlapping_scc_live_range_s_lshl_b64(%a: !waveamdmachine.reg<sgpr, 2>,
-                                                 %shift: !waveamdmachine.reg<sgpr, 2>,
+                                                 %shift: !waveamdmachine.reg<sgpr, 1>,
                                                  %x: !waveamdmachine.reg<sgpr, 1>,
                                                  %y: !waveamdmachine.reg<sgpr, 1>) {
   %scc = waveamdmachine.s_cmp_lt_i32 %x, %y
@@ -57,7 +57,7 @@ func.func @overlapping_scc_live_range_s_lshl_b64(%a: !waveamdmachine.reg<sgpr, 2
         -> !waveamdmachine.reg<scc, 1>
   // expected-error @below {{waveamd-reg-alloc found overlapping SCC live range after hardware-register preservation}}
   %shifted, %shift_scc = waveamdmachine.s_lshl_b64 %a, %shift
-      : (!waveamdmachine.reg<sgpr, 2>, !waveamdmachine.reg<sgpr, 2>)
+      : (!waveamdmachine.reg<sgpr, 2>, !waveamdmachine.reg<sgpr, 1>)
         -> (!waveamdmachine.reg<sgpr, 2>, !waveamdmachine.reg<scc, 1>)
   waveamdmachine.s_cbranch_scc1 %scc : !waveamdmachine.reg<scc, 1>, "taken"
   return

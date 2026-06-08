@@ -119,11 +119,9 @@ func.func @simd_i64_mul(%a: !wave.simd<i64, 32>, %b: !wave.simd<i64, 32>) attrib
   return
 }
 
-// Uniform i64 shift: single-instruction s_lshl_b64. The 64-bit shift
-// operand is allocated as a 2-wide SGPR even though the hardware only
-// reads the low 32 bits; the asm printer extracts the low component.
+// Uniform i64 shift: single-instruction s_lshl_b64 with a 32-bit count.
 // SELECT-LABEL: func.func @uniform_i64_shl
-// SELECT: waveamdmachine.s_lshl_b64 {{.*}} : (!waveamdmachine.reg<sgpr, 2>, !waveamdmachine.reg<sgpr, 2>) -> (!waveamdmachine.reg<sgpr, 2>, !waveamdmachine.reg<scc, 1>)
+// SELECT: waveamdmachine.s_lshl_b64 {{.*}} : (!waveamdmachine.reg<sgpr, 2>, !waveamdmachine.imm) -> (!waveamdmachine.reg<sgpr, 2>, !waveamdmachine.reg<scc, 1>)
 func.func @uniform_i64_shl() attributes {wave.kernel} {
   %a = arith.constant 5 : i64
   %b = arith.constant 3 : i64
@@ -134,7 +132,7 @@ func.func @uniform_i64_shl() attributes {wave.kernel} {
 // SIMD i64 shift: single-instruction v_lshlrev_b64 in `rev` form
 // (shift first, then value).
 // SELECT-LABEL: func.func @simd_i64_shl
-// SELECT: waveamdmachine.v_lshlrev_b64 {{.*}} : (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vgpr, 2>) -> !waveamdmachine.reg<vgpr, 2>
+// SELECT: waveamdmachine.v_lshlrev_b64 {{.*}} : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 2>) -> !waveamdmachine.reg<vgpr, 2>
 func.func @simd_i64_shl(%a: !wave.simd<i64, 32>, %b: !wave.simd<i64, 32>) attributes {wave.kernel} {
   %s = wave.binary shli %a, %b : !wave.simd<i64, 32>, !wave.simd<i64, 32> -> !wave.simd<i64, 32>
   return
@@ -191,7 +189,7 @@ func.func @mixed_i64_muli(%a: i64, %b: !wave.simd<i64, 32>) attributes {wave.ker
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // SELECT-LABEL: func.func @mixed_i64_shli
-// SELECT: waveamdmachine.v_lshlrev_b64 {{.*}} : (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vgpr, 2>) -> !waveamdmachine.reg<vgpr, 2>
+// SELECT: waveamdmachine.v_lshlrev_b64 {{.*}} : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 2>) -> !waveamdmachine.reg<vgpr, 2>
 func.func @mixed_i64_shli(%a: i64, %b: !wave.simd<i64, 32>) attributes {wave.kernel} {
   %s = wave.binary shli %a, %b : i64, !wave.simd<i64, 32> -> !wave.simd<i64, 32>
   return

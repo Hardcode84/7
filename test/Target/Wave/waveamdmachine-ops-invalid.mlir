@@ -177,6 +177,28 @@ func.func @bad_agpr_store_value(%offset: !waveamdmachine.reg<vgpr, 1>,
 
 // -----
 
+func.func @bad_v_add_u64_u32_tuple_offset(%base: !waveamdmachine.reg<vgpr, 2>,
+                                          %offset: !waveamdmachine.reg<vgpr, 2>) {
+  // expected-error @below {{operand #1 must be WaveAMDMachine one-dword SGPR/VGPR register or immediate}}
+  %r, %vcc = waveamdmachine.v_add_u64_u32 %base, %offset
+      : (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vgpr, 2>)
+        -> (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vcc, 1>)
+  return
+}
+
+// -----
+
+func.func @bad_v_lshlrev_b64_tuple_shift(%shift: !waveamdmachine.reg<vgpr, 2>,
+                                         %value: !waveamdmachine.reg<vgpr, 2>) {
+  // expected-error @below {{operand #0 must be WaveAMDMachine one-dword SGPR/VGPR register or immediate}}
+  %r = waveamdmachine.v_lshlrev_b64 %shift, %value
+      : (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vgpr, 2>)
+        -> !waveamdmachine.reg<vgpr, 2>
+  return
+}
+
+// -----
+
 func.func @bad_accvgpr_read_width(%source: !waveamdmachine.reg<agpr, 2>) {
   // expected-error @below {{source and result widths must match}}
   %r = waveamdmachine.v_accvgpr_read_b32_tuple %source

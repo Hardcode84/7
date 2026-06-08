@@ -182,6 +182,21 @@ def WaveAMDFormFusedInt
   ];
 }
 
+def WaveAMDNarrowWideInt
+    : Pass<"waveamd-narrow-wide-int"> {
+  let summary = "Narrow proven 32-bit addends in wide WaveAMDMachine ops";
+  let description = [{
+    Rewrites selected wide integer Machine IR operations when local structure
+    or integer range analysis proves one operand is zero-extended from 32 bits.
+    This preserves arithmetic semantics while avoiding unnecessary two-dword
+    offset tuples before register allocation.
+  }];
+  let dependentDialects = [
+    "func::FuncDialect",
+    "waveamdmachine::WaveAMDMachineDialect"
+  ];
+}
+
 def WaveAMDTicketWaits
     : Pass<"waveamd-insert-ticket-waits"> {
   let summary = "Insert WaveAMDMachine waitcnt instructions using ticket scoreboards";

@@ -673,10 +673,50 @@ static bool isSGPR2(Value v) {
   return isReg(v, waveamdmachine::RegClass::SGPR, 2);
 }
 
+static bool isOneDwordReg(Value v) {
+  auto rt = dyn_cast<waveamdmachine::RegType>(v.getType());
+  return rt && rt.getWidth() == 1;
+}
+
 static bool isWideVGPR(Value v) {
   auto rt = dyn_cast<waveamdmachine::RegType>(v.getType());
   return rt && rt.getRegClass() == waveamdmachine::RegClass::VGPR &&
          rt.getWidth() == 2;
+}
+
+static bool isLocalZero(WaveAMDMachineSelector &S, Value v) {
+  if (std::optional<int64_t> imm = S.getImmediateValue(v))
+    return *imm == 0;
+  if (auto mov = v.getDefiningOp<waveamdmachine::SMovB32ValueOp>())
+    return isLocalZero(S, mov.getSource());
+  if (auto mov = v.getDefiningOp<waveamdmachine::SMovB32TupleOp>())
+    return isLocalZero(S, mov.getSource());
+  if (auto mov = v.getDefiningOp<waveamdmachine::VMovB32TupleOp>())
+    return isLocalZero(S, mov.getSource());
+  return false;
+}
+
+static bool fitsUnsigned32(int64_t value) {
+  return value >= 0 && static_cast<uint64_t>(value) <= (uint64_t{1} << 32) - 1;
+}
+
+static std::optional<Value> zeroExtendedLowDword(WaveAMDMachineSelector &S,
+                                                 Value v) {
+  if (std::optional<int64_t> imm = S.getImmediateValue(v)) {
+    if (fitsUnsigned32(*imm))
+      return v;
+    return std::nullopt;
+  }
+  if (isOneDwordReg(v))
+    return v;
+  auto tuple = v.getDefiningOp<waveamdmachine::TupleFromElementsOp>();
+  if (!tuple || tuple.getElements().size() != 2)
+    return std::nullopt;
+  Value lo = tuple.getElements().front();
+  Value hi = tuple.getElements().back();
+  if (!isOneDwordReg(lo) || !isLocalZero(S, hi))
+    return std::nullopt;
+  return lo;
 }
 
 static Value tuple2(WaveAMDMachineSelector &S, Location loc,
@@ -717,9 +757,44 @@ static Value ensureVGPR2(WaveAMDMachineSelector &S, Location loc, Value v) {
   return tuple2(S, loc, waveamdmachine::RegClass::VGPR, lo, hi);
 }
 
+static Value extractLowDword(WaveAMDMachineSelector &S, Location loc, Value v,
+                             Value source = {}) {
+  if (std::optional<int64_t> imm = S.getImmediateValue(v)) {
+    uint64_t lo = static_cast<uint64_t>(*imm) & 0xffffffffull;
+    return createImm(S.builder, loc, static_cast<int64_t>(lo));
+  }
+  if (auto mov = v.getDefiningOp<waveamdmachine::SMovB64ImmOp>()) {
+    int64_t value = mov.getValue();
+    if (source && source.hasOneUse() && v.use_empty())
+      S.opsToErase.push_back(mov);
+    uint64_t lo = static_cast<uint64_t>(value) & 0xffffffffull;
+    return createImm(S.builder, loc, static_cast<int64_t>(lo));
+  }
+  if (std::optional<Value> low = zeroExtendedLowDword(S, v))
+    return *low;
+  auto rt = dyn_cast<waveamdmachine::RegType>(v.getType());
+  if (!rt || rt.getWidth() == 1)
+    return v;
+  Type elementType = getRegType(S.builder.getContext(), rt.getRegClass(), 1);
+  SmallVector<Type, 2> elementTypes(rt.getWidth(), elementType);
+  auto split = waveamdmachine::TupleToElementsOp::create(S.builder, loc,
+                                                         elementTypes, v);
+  return split.getElements().front();
+}
+
+static Value addWideU32(WaveAMDMachineSelector &S, Location loc, Value base,
+                        Value offset) {
+  Type resultType =
+      getRegType(S.builder.getContext(), waveamdmachine::RegClass::SGPR, 2);
+  return waveamdmachine::SAddU64U32Op::create(
+             S.builder, loc, resultType, getSCCType(S.builder.getContext()),
+             ensureSGPR2(S, loc, base), offset)
+      .getResult();
+}
+
 static Value addWide(WaveAMDMachineSelector &S, Location loc, Value lhs,
                      Value rhs) {
-  if (isWideVGPR(lhs) || isWideVGPR(rhs)) {
+  if (isVGPR(lhs) || isVGPR(rhs)) {
     Type resultType =
         getRegType(S.builder.getContext(), waveamdmachine::RegClass::VGPR, 2);
     return waveamdmachine::VAddU64Op::create(
@@ -732,16 +807,6 @@ static Value addWide(WaveAMDMachineSelector &S, Location loc, Value lhs,
   return waveamdmachine::SAddU64Op::create(
              S.builder, loc, resultType, getSCCType(S.builder.getContext()),
              ensureSGPR2(S, loc, lhs), ensureSGPR2(S, loc, rhs))
-      .getResult();
-}
-
-static Value addWideU32(WaveAMDMachineSelector &S, Location loc, Value base,
-                        Value offset) {
-  Type resultType =
-      getRegType(S.builder.getContext(), waveamdmachine::RegClass::SGPR, 2);
-  return waveamdmachine::SAddU64U32Op::create(
-             S.builder, loc, resultType, getSCCType(S.builder.getContext()),
-             ensureSGPR2(S, loc, base), offset)
       .getResult();
 }
 
@@ -1779,19 +1844,21 @@ LogicalResult WaveAMDMachineSelector::selectBinaryShLI64(BinaryOp op) {
   if (!isBinarySimd(op)) {
     Type resultType =
         getRegType(op.getContext(), waveamdmachine::RegClass::SGPR, 2);
+    Value shift = extractLowDword(*this, op.getLoc(), rhs, op.getRhs());
     values[op.getResult()] =
         waveamdmachine::SLshlB64Op::create(builder, op.getLoc(), resultType,
                                            getSCCType(op.getContext()),
                                            ensureSGPR2(*this, op.getLoc(), lhs),
-                                           ensureSGPR2(*this, op.getLoc(), rhs))
+                                           ensureSGPR1(op.getLoc(), shift))
             .getResult();
     eraseIfTopLevel(op);
     return success();
   }
   Type resultType =
       getRegType(op.getContext(), waveamdmachine::RegClass::VGPR, 2);
+  Value shift = extractLowDword(*this, op.getLoc(), rhs, op.getRhs());
   values[op.getResult()] = waveamdmachine::VLshlrevB64Op::create(
-      builder, op.getLoc(), resultType, ensureVGPR2(*this, op.getLoc(), rhs),
+      builder, op.getLoc(), resultType, shift,
       ensureVGPR2(*this, op.getLoc(), lhs));
   eraseIfTopLevel(op);
   return success();

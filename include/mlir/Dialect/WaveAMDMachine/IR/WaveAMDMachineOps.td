@@ -222,6 +222,14 @@ def WaveAMDMachine_RegOrImm
                  "::llvm::isa<::mlir::waveamdmachine::ImmType>($_self)">,
            "WaveAMDMachine SGPR/VGPR register or immediate">;
 
+def WaveAMDMachine_Reg1OrImm
+    : Type<CPred<"(::llvm::isa<::mlir::waveamdmachine::RegType>($_self) && "
+                 "(::llvm::cast<::mlir::waveamdmachine::RegType>($_self).getRegClass() == ::mlir::waveamdmachine::RegClass::SGPR || "
+                 "::llvm::cast<::mlir::waveamdmachine::RegType>($_self).getRegClass() == ::mlir::waveamdmachine::RegClass::VGPR) && "
+                 "::llvm::cast<::mlir::waveamdmachine::RegType>($_self).getWidth() == 1) || "
+                 "::llvm::isa<::mlir::waveamdmachine::ImmType>($_self)">,
+           "WaveAMDMachine one-dword SGPR/VGPR register or immediate">;
+
 def WaveAMDMachine_RegOrMemToken
     : Type<CPred<"::llvm::isa<::mlir::waveamdmachine::RegType>($_self) || "
                  "::llvm::isa<::mlir::waveamdmachine::MemTokenType>($_self)">,
@@ -2205,6 +2213,17 @@ def WaveAMDMachine_VAddU64Op : WaveAMDMachine_Op<"v_add_u64", [Pure]> {
   let assemblyFormat = "$lhs `,` $rhs attr-dict `:` functional-type(operands, results)";
 }
 
+// Vector mirror of s_add_u64_u32: high addend is literal zero.
+def WaveAMDMachine_VAddU64U32Op : WaveAMDMachine_Op<"v_add_u64_u32", [Pure]> {
+  let summary = "vector 64-bit base + zero-extended 32-bit offset";
+  let arguments = (ins
+    WaveAMDMachine_VGPR2:$base,
+    WaveAMDMachine_Reg1OrImm:$offset
+  );
+  let results = (outs WaveAMDMachine_VGPR2:$result, WaveAMDMachine_VCC:$vcc);
+  let assemblyFormat = "$base `,` $offset attr-dict `:` functional-type(operands, results)";
+}
+
 // 64-bit unsigned multiply (low half). gfx11 has no native u64 mul, so
 // the asm printer expands this into the four-mul-plus-two-add canonical
 // sequence using the `$scratch` SGPR for the cross-product temporaries
@@ -2240,20 +2259,18 @@ def WaveAMDMachine_VXorB64Op
   let assemblyFormat = "$lhs `,` $rhs attr-dict `:` functional-type(operands, results)";
 }
 
-// 64-bit logical left shift. Single-instruction on gfx11 in both the
-// scalar and vector worlds. The shift operand is i64 to match
-// `wave.binary shli`'s "operands have the same type" rule -- the printer
-// extracts the low 32 bits since that's what the hardware reads.
+// Hardware shift count is 32-bit; Wave-level i64 shifts split before this.
 def WaveAMDMachine_SLshlB64Op : WaveAMDMachine_Op<"s_lshl_b64", [Pure]> {
   let summary = "scalar 64-bit logical left shift (sets SCC)";
-  let arguments = (ins WaveAMDMachine_SGPR2:$lhs, WaveAMDMachine_SGPR2:$shift);
+  let arguments = (ins WaveAMDMachine_SGPR2:$lhs,
+                       WaveAMDMachine_SGPR1OrImm:$shift);
   let results = (outs WaveAMDMachine_SGPR2:$result, WaveAMDMachine_SCC:$scc);
   let assemblyFormat = "$lhs `,` $shift attr-dict `:` functional-type(operands, results)";
 }
 
 def WaveAMDMachine_VLshlrevB64Op : WaveAMDMachine_Op<"v_lshlrev_b64", [Pure]> {
   let summary = "vector 64-bit logical left shift";
-  let arguments = (ins WaveAMDMachine_VGPR2:$shift,
+  let arguments = (ins WaveAMDMachine_Reg1OrImm:$shift,
                        WaveAMDMachine_VGPR2:$value);
   let results = (outs WaveAMDMachine_VGPR2:$result);
   let assemblyFormat = "$shift `,` $value attr-dict `:` functional-type(operands, results)";

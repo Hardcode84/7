@@ -1925,6 +1925,34 @@ private:
                      toMCVGPRComponent(lhs, 1), toMCVGPRComponent(rhs, 1),
                      vccLo, clamp});
     }
+    if (isa<waveamdmachine::VAddU64U32Op>(op)) {
+      Value res = op.getResult(0);
+      Value base = op.getOperand(0);
+      llvm::MCOperand offset = toMCOperand(op.getOperand(1));
+      llvm::MCOperand zero = llvm::MCOperand::createImm(0);
+      llvm::MCOperand clamp = llvm::MCOperand::createImm(0);
+      if (isaVersion.Major == 9) {
+        llvm::MCOperand vcc = llvm::MCOperand::createReg(namedPhysReg("vcc"));
+        if (failed(emitMC(llvm::AMDGPU::V_ADD_CO_U32_e64_gfx9,
+                          {toMCVGPRComponent(res, 0), vcc,
+                           toMCVGPRComponent(base, 0), offset, clamp})))
+          return failure();
+        return emitMC(llvm::AMDGPU::V_ADDC_CO_U32_e64_gfx9,
+                      {toMCVGPRComponent(res, 1), vcc,
+                       toMCVGPRComponent(base, 1), zero, vcc, clamp});
+      }
+      if (isaVersion.Major != 11)
+        return op.emitError("v_add_u64_u32 unsupported on this target");
+      llvm::MCOperand vccLo =
+          llvm::MCOperand::createReg(namedPhysReg("vcc_lo"));
+      if (failed(emitMC(llvm::AMDGPU::V_ADD_CO_U32_e64_gfx11,
+                        {toMCVGPRComponent(res, 0), vccLo,
+                         toMCVGPRComponent(base, 0), offset, clamp})))
+        return failure();
+      return emitMC(llvm::AMDGPU::V_ADD_CO_CI_U32_e64_gfx11,
+                    {toMCVGPRComponent(res, 1), vccLo,
+                     toMCVGPRComponent(base, 1), zero, vccLo, clamp});
+    }
     if (isa<waveamdmachine::SMulU64Op>(op)) {
       // 64-bit mul-low expanded as the canonical four-mul, two-add
       // sequence:
@@ -1996,16 +2024,14 @@ private:
                      toMCVGPRComponent(rhs, 1)});
     }
     if (isa<waveamdmachine::SLshlB64Op>(op))
-      // Hardware reads only the low 32 bits of the shift amount; pass
-      // the low component of the 2-wide shift operand.
       return emitMC(llvm::AMDGPU::S_LSHL_B64_gfx11,
                     {toMCOperand(op.getResult(0)),
                      toMCOperand(op.getOperand(0)),
-                     toMCSGPRComponent(op.getOperand(1), 0)});
+                     toMCOperand(op.getOperand(1))});
     if (isa<waveamdmachine::VLshlrevB64Op>(op))
       return emitMC(llvm::AMDGPU::V_LSHLREV_B64_e64_gfx11,
                     {toMCOperand(op.getResult(0)),
-                     toMCVGPRComponent(op.getOperand(0), 0),
+                     toMCOperand(op.getOperand(0)),
                      toMCOperand(op.getOperand(1))});
     if (isa<waveamdmachine::SMovB64ImmOp>(op)) {
       // Lift a 64-bit immediate into an SGPR pair: low half then high.

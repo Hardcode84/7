@@ -75,11 +75,11 @@ func.func @legacy_vcc_edges(%a: !waveamdmachine.reg<vgpr, 1>,
 }
 
 func.func @s_lshl_b64_scc_edges(%a: !waveamdmachine.reg<sgpr, 2>,
-                                %shift: !waveamdmachine.reg<sgpr, 2>,
+                                %shift: !waveamdmachine.reg<sgpr, 1>,
                                 %x: !waveamdmachine.reg<sgpr, 1>,
                                 %y: !waveamdmachine.reg<sgpr, 1>) {
   %shifted, %shift_scc = waveamdmachine.s_lshl_b64 %a, %shift
-      : (!waveamdmachine.reg<sgpr, 2>, !waveamdmachine.reg<sgpr, 2>)
+      : (!waveamdmachine.reg<sgpr, 2>, !waveamdmachine.reg<sgpr, 1>)
         -> (!waveamdmachine.reg<sgpr, 2>, !waveamdmachine.reg<scc, 1>)
   %scc = waveamdmachine.s_cmp_lt_i32 %x, %y
       : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<sgpr, 1>)
