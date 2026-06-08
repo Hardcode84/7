@@ -25,6 +25,12 @@
 // RUN:   | FileCheck %s --check-prefix=ASMMXFP4-DMA
 // RUN: %python %S/../../../examples/wave/wmma_matmul_tiled.py --chip=gfx950 --m=16 --n=16 --k=256 --matrix-intrinsic=mfma_gfx950 --input-type=mxfp4 --wave-k-tiles=2 --use-dma-lds --dump-asm 2>/dev/null \
 // RUN:   | FileCheck %s --check-prefix=ASMMXFP4-DMA-K2
+// RUN: %python %S/../../../examples/wave/wmma_matmul_tiled.py --chip=gfx950 --m=256 --n=256 --k=128 --bm=4 --bn=2 --wave-m-tiles=4 --wave-n-tiles=8 --matrix-intrinsic=mfma_gfx950 --input-type=mxfp4 --output-type=f16 --use-dma-lds --dump-asm 2>/dev/null \
+// RUN:   | FileCheck %s --check-prefix=ASMMXFP4-SCALEPACK
+// RUN: %python %S/../../../examples/wave/wmma_matmul_tiled.py --chip=gfx950 --m=32 --n=32 --k=256 --bm=1 --bn=1 --wave-m-tiles=2 --wave-n-tiles=2 --wave-k-tiles=2 --matrix-intrinsic=mfma_gfx950 --input-type=mxfp4 --output-type=f16 --use-dma-lds --dump-asm 2>/dev/null \
+// RUN:   | FileCheck %s --check-prefix=ASMMXFP4-EPILOGUE
+// RUN: %python %S/../../../examples/wave/wmma_matmul_tiled.py --chip=gfx950 --m=16 --n=16 --k=512 --matrix-intrinsic=mfma_gfx950 --input-type=mxfp4 --use-dma-lds --dump-asm 2>/dev/null \
+// RUN:   | FileCheck %s --check-prefix=ASMMXFP4-DMA-PIPE
 //
 // IR: wave.index_expr <{{.*xor.*floor\(1/2\*Mod\(wi, 16\)\).*}}>
 // IR: waveamd.dma_load_lds
@@ -89,12 +95,12 @@
 // ASMMXFP4: s_load_dword s{{[0-9]+}}, s[0:1], 0x28
 // ASMMXFP4: global_load_dwordx4 v{{\[}}[[AV:[0-9]+]]:[[AV1:[0-9]+]]{{\]}}, v{{[0-9]+}}, s{{\[}}[[A]]:[[A1]]{{\]}}
 // ASMMXFP4: global_load_dwordx4 v{{\[}}[[BV:[0-9]+]]:[[BV1:[0-9]+]]{{\]}}, v{{[0-9]+}}, s{{\[}}[[B]]:[[B1]]{{\]}}
-// ASMMXFP4: global_load_ubyte v{{[0-9]+}}, v{{[0-9]+}}, s{{\[}}[[SA]]:[[SA1]]{{\]}}
-// ASMMXFP4: global_load_ubyte v{{[0-9]+}}, v{{[0-9]+}}, s{{\[}}[[SA]]:[[SA1]]{{\]}} offset:64
-// ASMMXFP4: global_load_ubyte v{{[0-9]+}}, v{{[0-9]+}}, s{{\[}}[[SB]]:[[SB1]]{{\]}}
-// ASMMXFP4: global_load_ubyte v{{[0-9]+}}, v{{[0-9]+}}, s{{\[}}[[SB]]:[[SB1]]{{\]}} offset:64
-// ASMMXFP4: ds_write_b8 {{v[0-9]+}}, {{v[0-9]+}} offset:4096
-// ASMMXFP4: ds_write_b8 {{v[0-9]+}}, {{v[0-9]+}} offset:5632
+// ASMMXFP4: global_load_dwordx4 v{{\[[0-9]+:[0-9]+\]}}, v{{[0-9]+}}, s{{\[}}[[SA]]:[[SA1]]{{\]}}
+// ASMMXFP4: global_load_dwordx4 v{{\[[0-9]+:[0-9]+\]}}, v{{[0-9]+}}, s{{\[}}[[SA]]:[[SA1]]{{\]}} offset:16
+// ASMMXFP4: global_load_dwordx4 v{{\[[0-9]+:[0-9]+\]}}, v{{[0-9]+}}, s{{\[}}[[SB]]:[[SB1]]{{\]}}
+// ASMMXFP4: global_load_dwordx4 v{{\[[0-9]+:[0-9]+\]}}, v{{[0-9]+}}, s{{\[}}[[SB]]:[[SB1]]{{\]}} offset:16
+// ASMMXFP4: ds_write_b128 {{v[0-9]+}}, {{v\[[0-9]+:[0-9]+\]}} offset:4096
+// ASMMXFP4: ds_write_b128 {{v[0-9]+}}, {{v\[[0-9]+:[0-9]+\]}} offset:5632
 // ASMMXFP4: ds_read_b64_tr_b8 {{v\[[0-9]+:[0-9]+\]}}, {{v[0-9]+}} offset:4096
 // ASMMXFP4: ds_read_b64_tr_b8 {{v\[[0-9]+:[0-9]+\]}}, {{v[0-9]+}} offset:5632
 // ASMMXFP4: v_mfma_scale_f32_16x16x128_f8f6f4 v{{\[[0-9]+:[0-9]+\]}}, v{{\[[0-9]+:[0-9]+\]}}, v{{\[[0-9]+:[0-9]+\]}}, v{{\[[0-9]+:[0-9]+\]}}, v{{[0-9]+}}, v{{[0-9]+}} op_sel_hi:[0,0,0] cbsz:4 blgp:4
@@ -105,36 +111,45 @@
 // ASMMXFP4-DMA-LABEL: wmma_f16_matmul_tiled:
 // ASMMXFP4-DMA: global_load_lds_dwordx4
 // ASMMXFP4-DMA: global_load_lds_dwordx4
-// ASMMXFP4-DMA: global_load_ubyte v{{[0-9]+}}, v{{[0-9]+}}, s{{\[[0-9]+:[0-9]+\]}}
-// ASMMXFP4-DMA: ds_write_b8 {{v[0-9]+}}, {{v[0-9]+}}
-// ASMMXFP4-DMA: ds_write_b8 {{v[0-9]+}}, {{v[0-9]+}} offset:512
-// ASMMXFP4-DMA: ds_read_b64_tr_b8 {{v\[[0-9]+:[0-9]+\]}}, {{v[0-9]+}}
-// ASMMXFP4-DMA: ds_read_b64_tr_b8 {{v\[[0-9]+:[0-9]+\]}}, {{v[0-9]+}} offset:512
+// ASMMXFP4-DMA: global_load_lds_dwordx4
+// ASMMXFP4-DMA: global_load_lds_dwordx4
+// ASMMXFP4-DMA: ds_read_b64_tr_b8 {{v\[[0-9]+:[0-9]+\]}}, {{v[0-9]+}} offset:4096
+// ASMMXFP4-DMA: ds_read_b64_tr_b8 {{v\[[0-9]+:[0-9]+\]}}, {{v[0-9]+}} offset:4608
 // ASMMXFP4-DMA: v_mfma_scale_f32_16x16x128_f8f6f4
-// ASMMXFP4-DMA: ds_read_b128 {{v\[[0-9]+:[0-9]+\]}}, {{v[0-9]+}} offset:2048
-// ASMMXFP4-DMA: global_load_ubyte v{{[0-9]+}}, v{{[0-9]+}}, s{{\[[0-9]+:[0-9]+\]}} offset:4
-// ASMMXFP4-DMA: ds_write_b8 {{v[0-9]+}}, {{v[0-9]+}} offset:2048
-// ASMMXFP4-DMA: ds_write_b8 {{v[0-9]+}}, {{v[0-9]+}} offset:2560
-// ASMMXFP4-DMA: ds_read_b64_tr_b8 {{v\[[0-9]+:[0-9]+\]}}, {{v[0-9]+}} offset:2048
-// ASMMXFP4-DMA: ds_read_b64_tr_b8 {{v\[[0-9]+:[0-9]+\]}}, {{v[0-9]+}} offset:2560
+// ASMMXFP4-DMA: ds_read_b64_tr_b8 {{v\[[0-9]+:[0-9]+\]}}, {{v[0-9]+}} offset:5120
+// ASMMXFP4-DMA: ds_read_b64_tr_b8 {{v\[[0-9]+:[0-9]+\]}}, {{v[0-9]+}} offset:5632
 // ASMMXFP4-DMA: v_mfma_scale_f32_16x16x128_f8f6f4
-// ASMMXFP4-DMA: .amdhsa_group_segment_fixed_size 4096
+// ASMMXFP4-DMA: .amdhsa_group_segment_fixed_size 6144
 
 // ASMMXFP4-DMA-K2-LABEL: wmma_f16_matmul_tiled:
-// ASMMXFP4-DMA-K2-COUNT-4: global_load_lds_dwordx4
-// ASMMXFP4-DMA-K2: global_load_ubyte v{{[0-9]+}}, v{{[0-9]+}}, s{{\[[0-9]+:[0-9]+\]}}
-// ASMMXFP4-DMA-K2: ds_write_b8 {{v[0-9]+}}, {{v[0-9]+}}
-// ASMMXFP4-DMA-K2: ds_write_b8 {{v[0-9]+}}, {{v[0-9]+}} offset:512
-// ASMMXFP4-DMA-K2: ds_read_b64_tr_b8 {{v\[[0-9]+:[0-9]+\]}}, {{v[0-9]+}}
-// ASMMXFP4-DMA-K2: ds_read_b64_tr_b8 {{v\[[0-9]+:[0-9]+\]}}, {{v[0-9]+}} offset:512
+// ASMMXFP4-DMA-K2-COUNT-8: global_load_lds_dwordx4
+// ASMMXFP4-DMA-K2: ds_read_b64_tr_b8 {{v\[[0-9]+:[0-9]+\]}}, {{v[0-9]+}} offset:4096
+// ASMMXFP4-DMA-K2: ds_read_b64_tr_b8 {{v\[[0-9]+:[0-9]+\]}}, {{v[0-9]+}} offset:4608
+// ASMMXFP4-DMA-K2: ds_read_b64_tr_b8 {{v\[[0-9]+:[0-9]+\]}}, {{v[0-9]+}} offset:5120
+// ASMMXFP4-DMA-K2: ds_read_b64_tr_b8 {{v\[[0-9]+:[0-9]+\]}}, {{v[0-9]+}} offset:5632
 // ASMMXFP4-DMA-K2: v_mfma_scale_f32_16x16x128_f8f6f4
-// ASMMXFP4-DMA-K2: global_load_ubyte v{{[0-9]+}}, v{{[0-9]+}}, s{{\[[0-9]+:[0-9]+\]}} offset:4
-// ASMMXFP4-DMA-K2: ds_write_b8 {{v[0-9]+}}, {{v[0-9]+}}
-// ASMMXFP4-DMA-K2: ds_write_b8 {{v[0-9]+}}, {{v[0-9]+}} offset:512
-// ASMMXFP4-DMA-K2: ds_read_b64_tr_b8 {{v\[[0-9]+:[0-9]+\]}}, {{v[0-9]+}}
-// ASMMXFP4-DMA-K2: ds_read_b64_tr_b8 {{v\[[0-9]+:[0-9]+\]}}, {{v[0-9]+}} offset:512
 // ASMMXFP4-DMA-K2: v_mfma_scale_f32_16x16x128_f8f6f4
-// ASMMXFP4-DMA-K2: .amdhsa_group_segment_fixed_size 4096
+// ASMMXFP4-DMA-K2: .amdhsa_group_segment_fixed_size 8192
+
+// ASMMXFP4-SCALEPACK-LABEL: wmma_f16_matmul_tiled:
+// ASMMXFP4-SCALEPACK-COUNT-3: ds_read_b64_tr_b8
+// ASMMXFP4-SCALEPACK-COUNT-32: v_mfma_scale_f32_16x16x128_f8f6f4
+// ASMMXFP4-SCALEPACK: op_sel:[1,1,0] op_sel_hi:[1,1,0]
+
+// ASMMXFP4-EPILOGUE-LABEL: wmma_f16_matmul_tiled:
+// ASMMXFP4-EPILOGUE: v_mfma_scale_f32_16x16x128_f8f6f4
+// ASMMXFP4-EPILOGUE: ds_write_b64
+// ASMMXFP4-EPILOGUE: ds_read_b128
+// ASMMXFP4-EPILOGUE: global_store_dwordx4
+// ASMMXFP4-EPILOGUE: v_mfma_scale_f32_16x16x128_f8f6f4
+// ASMMXFP4-EPILOGUE: ds_write_b64
+// ASMMXFP4-EPILOGUE: ds_read_b128
+// ASMMXFP4-EPILOGUE: global_store_dwordx4
+
+// ASMMXFP4-DMA-PIPE-LABEL: wmma_f16_matmul_tiled:
+// ASMMXFP4-DMA-PIPE: ds_read_b64_tr_b8
+// ASMMXFP4-DMA-PIPE: global_load_lds_dwordx4
+// ASMMXFP4-DMA-PIPE: v_mfma_scale_f32_16x16x128_f8f6f4
 
 // ASMPIPE: ds_read_b128
 // ASMPIPE: s_waitcnt lgkmcnt(0)

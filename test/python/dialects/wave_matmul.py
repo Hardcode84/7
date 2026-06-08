@@ -221,7 +221,7 @@ print(static_bld.module)
 # CHECK: wave.cast fpconvert
 # CHECK-SAME: !wave.simd<f32, 32> -> !wave.simd<f16, 32>
 # CHECK: wave.pack
-# CHECK-SAME: -> !wave.simd<vector<2xf16>, 32>
+# CHECK-SAME: -> !wave.simd<vector<8xf16>, 32>
 # CHECK: func.func private @wave_memref_to_ptr_global_bf16
 # CHECK: func.func @wmma_f16_matmul_tiled(%{{.*}}!wave.ptr<#wave.global, bf16>
 # CHECK: waveamd.mma "mfma.f32.16x16x32.bf16"
@@ -241,9 +241,9 @@ print(static_bld.module)
 # CHECK: wave.lds_base
 # CHECK-SAME: !wave.ptr<#wave.shared, i8>
 # CHECK: wave.load
-# CHECK-SAME: -> (!wave.simd<i8, 64>, !wave.mem.token)
+# CHECK-SAME: -> (!wave.simd<vector<16xi8>, 64>, !wave.mem.token)
 # CHECK: wave.store
-# CHECK-SAME: !wave.simd<i8, 64>
+# CHECK-SAME: !wave.simd<vector<16xi8>, 64>
 # CHECK: waveamd.transpose_load
 # CHECK-SAME: -> (!wave.simd<vector<8xi8>, 64>, !wave.mem.token)
 # CHECK-COUNT-8: waveamd.mma_scale "mfma.scale.f32.16x16x128.f4.f4"

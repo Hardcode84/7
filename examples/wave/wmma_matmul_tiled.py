@@ -77,9 +77,25 @@ _GFX950_F16_256X256_16WAVE = {
     "cta_group_m": 4,
 }
 
+_GFX950_MXFP4_256X256_8WAVE = {
+    "bm": 4,
+    "bn": 2,
+    "wave_m_tiles": 4,
+    "wave_n_tiles": 8,
+    "wave_k_tiles": 2,
+    "use_buffer": True,
+    "use_dma_lds": True,
+    "matrix_intrinsic": "mfma_gfx950",
+    "input_type": "mxfp4",
+    "output_type": "f16",
+    "cta_swizzle_xcds": 8,
+    "cta_group_m": 4,
+}
+
 _KERNEL_PROFILES = {
     "gfx950-sw-pipeline": _GFX950_SW_PIPELINE,
     "gfx950-f16-256x256-16wave": _GFX950_F16_256X256_16WAVE,
+    "gfx950-mxfp4-256x256-8wave": _GFX950_MXFP4_256X256_8WAVE,
 }
 
 _DEFAULT_ATOL = 1.0e-3
@@ -200,6 +216,11 @@ def _add_codegen_args(parser: argparse.ArgumentParser) -> None:
         default="f32",
         help="output element type for C",
     )
+    parser.add_argument(
+        "--kernel-only",
+        action="store_true",
+        help="emit only the GPU kernel module, skipping host setup",
+    )
 
 
 def _add_runner_args(parser: argparse.ArgumentParser) -> None:
@@ -223,6 +244,8 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
             setattr(args, name, value)
     if args.target_waves < 0:
         parser.error("--target-waves must be non-negative")
+    if args.kernel_only and (args.run or args.compare_cpu):
+        parser.error("--kernel-only cannot be used with --run/--compare-cpu")
     return args
 
 
@@ -305,6 +328,7 @@ def main(argv: list[str] | None = None) -> int:
         cta_swizzle_xcds=args.cta_swizzle_xcds,
         cta_group_m=args.cta_group_m,
         target_waves=args.target_waves or None,
+        include_host=not args.kernel_only,
     )
     module_text = str(module)
     if args.dump_asm:

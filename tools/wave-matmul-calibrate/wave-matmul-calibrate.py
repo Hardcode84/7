@@ -71,16 +71,6 @@ PRESSURE_BUDGET_OPTIONS = (
 )
 
 KERNEL_PROFILES = {
-    "gfx950-sw-pipeline": {
-        "bm": 2,
-        "bn": 2,
-        "wave_m_tiles": 4,
-        "wave_n_tiles": 4,
-        "wave_k_tiles": 2,
-        "use_buffer": True,
-        "use_dma_lds": True,
-        "matrix_intrinsic": "mfma_gfx950",
-    },
     "gfx950-f16-256x256-16wave": {
         "bm": 4,
         "bn": 4,
@@ -91,6 +81,20 @@ KERNEL_PROFILES = {
         "use_dma_lds": True,
         "matrix_intrinsic": "mfma_gfx950",
         "input_type": "f16",
+        "output_type": "f16",
+        "cta_swizzle_xcds": 8,
+        "cta_group_m": 4,
+    },
+    "gfx950-mxfp4-256x256-8wave": {
+        "bm": 4,
+        "bn": 2,
+        "wave_m_tiles": 4,
+        "wave_n_tiles": 8,
+        "wave_k_tiles": 2,
+        "use_buffer": True,
+        "use_dma_lds": True,
+        "matrix_intrinsic": "mfma_gfx950",
+        "input_type": "mxfp4",
         "output_type": "f16",
         "cta_swizzle_xcds": 8,
         "cta_group_m": 4,
@@ -187,6 +191,7 @@ def build_example_args(args: argparse.Namespace, chip: str) -> list[str]:
         f"--wave-m-tiles={args.wave_m_tiles}",
         f"--wave-n-tiles={args.wave_n_tiles}",
         f"--wave-k-tiles={args.wave_k_tiles}",
+        "--kernel-only",
     ]
     if args.use_buffer:
         cmd.append("--use-buffer")
@@ -204,8 +209,9 @@ def build_example_args(args: argparse.Namespace, chip: str) -> list[str]:
         cmd.append(f"--cta-swizzle-xcds={cta_swizzle_xcds}")
     if cta_group_m != 1:
         cmd.append(f"--cta-group-m={cta_group_m}")
-    if args.target_waves:
-        cmd.append(f"--target-waves={args.target_waves}")
+    target_waves = effective_target_waves(args)
+    if target_waves:
+        cmd.append(f"--target-waves={target_waves}")
     return cmd
 
 
@@ -235,6 +241,16 @@ def waves_per_workgroup(args: argparse.Namespace) -> int:
 
 def spread_simds(args: argparse.Namespace) -> int:
     return min(max(waves_per_workgroup(args), 1), 4)
+
+
+def required_target_waves(args: argparse.Namespace) -> int:
+    waves = waves_per_workgroup(args)
+    simds = spread_simds(args)
+    return (waves + simds - 1) // simds
+
+
+def effective_target_waves(args: argparse.Namespace) -> int:
+    return max(args.target_waves, required_target_waves(args))
 
 
 def sim_report_specs(args: argparse.Namespace) -> list[tuple[int, int, int]]:
@@ -532,21 +548,36 @@ def lds_dwords_per_frag(args: argparse.Namespace) -> int:
     return regs * kernel_wave_size(args)
 
 
+def mxfp4_scale_tiles_per_wave(tile_count: int) -> int:
+    return tile_count // 4 if tile_count % 4 == 0 else tile_count
+
+
+def mxfp4_scale_lds_bytes(args: argparse.Namespace) -> int:
+    scale_tiles = args.bm * mxfp4_scale_tiles_per_wave(
+        args.wave_m_tiles
+    ) + args.bn * mxfp4_scale_tiles_per_wave(args.wave_n_tiles)
+    if getattr(args, "use_dma_lds", False):
+        return 2 * args.wave_k_tiles * scale_tiles * 512
+    return scale_tiles * 512
+
+
 def compute_lds_bytes(args: argparse.Namespace) -> int:
     if getattr(args, "use_dma_lds", False):
         slots = args.wave_k_tiles * (
             args.bm * args.wave_m_tiles + args.bn * args.wave_n_tiles
         )
         one_buffer = slots * lds_dwords_per_frag(args) * 4
-        return one_buffer * (2 if compute_virtual_k_steps(args) > 1 else 1)
+        data_lds = one_buffer * (2 if compute_virtual_k_steps(args) > 1 else 1)
+        if getattr(args, "input_type", "f16") != "mxfp4":
+            return data_lds
+        return data_lds + mxfp4_scale_lds_bytes(args)
     slots = (
         args.wave_k_tiles * (args.wave_m_tiles + args.wave_n_tiles) * args.bm * args.bn
     )
     data_lds = slots * lds_dwords_per_frag(args) * 4
     if getattr(args, "input_type", "f16") != "mxfp4":
         return data_lds
-    scale_tiles = args.bm * args.wave_m_tiles + args.bn * args.wave_n_tiles
-    return data_lds + scale_tiles * 512
+    return data_lds + mxfp4_scale_lds_bytes(args)
 
 
 def compute_dynamic_lds_bytes(args: argparse.Namespace) -> int:
@@ -753,7 +784,12 @@ def build_argparser() -> argparse.ArgumentParser:
     ap.add_argument("--wave-m-tiles", type=int, default=1)
     ap.add_argument("--wave-n-tiles", type=int, default=1)
     ap.add_argument("--wave-k-tiles", type=int, default=1)
-    ap.add_argument("--target-waves", type=int, default=0)
+    ap.add_argument(
+        "--target-waves",
+        type=int,
+        default=0,
+        help="minimum waves per SIMD for regalloc; 0 derives from workgroup shape",
+    )
     ap.add_argument("--use-buffer", action="store_true")
     ap.add_argument("--use-dma-lds", action="store_true")
     ap.add_argument(
@@ -861,7 +897,8 @@ def main() -> int:
             f"chip: {chip}\n"
             f"shape: m={args.m} n={args.n} k={args.k} bm={args.bm} bn={args.bn} "
             f"wave_m_tiles={args.wave_m_tiles} wave_n_tiles={args.wave_n_tiles} "
-            f"wave_k_tiles={args.wave_k_tiles} target_waves={args.target_waves} "
+            f"wave_k_tiles={args.wave_k_tiles} "
+            f"target_waves={effective_target_waves(args)} "
             f"input_type={args.input_type} output_type={args.output_type}\n"
             f"cta_swizzle_xcds={args.cta_swizzle_xcds} "
             f"cta_group_m={args.cta_group_m}\n"

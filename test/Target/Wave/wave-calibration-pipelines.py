@@ -8,6 +8,7 @@
 # CHECK: matmul_bf16_forwarding: ok
 # CHECK: matmul_mxfp4_forwarding_and_trip_count: ok
 # CHECK: matmul_mxfp4_dma_forwarding: ok
+# CHECK: matmul_mxfp4_profile_kernel_only_target_waves: ok
 # CHECK: matmul_dynamic_lds_forwarding: ok
 # CHECK: matmul_dma_sim_trip_count: ok
 # CHECK: matmul_pingpong_removed: ok
@@ -401,6 +402,45 @@ def check_matmul_mxfp4_dma_forwarding(matmul) -> None:
     print("matmul_mxfp4_dma_forwarding: ok")
 
 
+def check_matmul_mxfp4_profile_kernel_only_target_waves(matmul) -> None:
+    values = vars(make_mxfp4_args())
+    values.update(kernel_profile="gfx950-mxfp4-256x256-8wave", k=256)
+    args = argparse.Namespace(**values)
+    matmul.apply_kernel_profile(args)
+    require(
+        "matmul_mxfp4_profile_kernel_only_target_waves",
+        args.bm == 4 and args.bn == 2,
+        "bad MXFP4 profile workgroup shape",
+    )
+    require(
+        "matmul_mxfp4_profile_kernel_only_target_waves",
+        args.input_type == "mxfp4" and args.output_type == "f16",
+        "bad MXFP4 profile dtypes",
+    )
+    require(
+        "matmul_mxfp4_profile_kernel_only_target_waves",
+        matmul.effective_target_waves(args) == 2,
+        "8-wave workgroup should derive 2 target waves per SIMD",
+    )
+    require(
+        "matmul_mxfp4_profile_kernel_only_target_waves",
+        matmul.compute_dynamic_lds_bytes(args) == 81920,
+        "bad MXFP4 DMA LDS byte accounting",
+    )
+    example_cmd = matmul.build_example_args(args, "gfx950")
+    require(
+        "matmul_mxfp4_profile_kernel_only_target_waves",
+        "--kernel-only" in example_cmd,
+        "calibration should request kernel-only example IR",
+    )
+    require(
+        "matmul_mxfp4_profile_kernel_only_target_waves",
+        "--target-waves=2" in example_cmd,
+        "calibration should forward derived target waves",
+    )
+    print("matmul_mxfp4_profile_kernel_only_target_waves: ok")
+
+
 def check_matmul_dynamic_lds_forwarding(matmul) -> None:
     args = argparse.Namespace(
         m=64,
@@ -545,6 +585,7 @@ def main() -> int:
     check_matmul_bf16_forwarding(matmul)
     check_matmul_mxfp4_forwarding_and_trip_count(matmul)
     check_matmul_mxfp4_dma_forwarding(matmul)
+    check_matmul_mxfp4_profile_kernel_only_target_waves(matmul)
     check_matmul_dynamic_lds_forwarding(matmul)
     check_matmul_dma_sim_trip_count(matmul)
     try:

@@ -102,12 +102,12 @@ SchedClass classifyOp(Operation *op) {
       // manipulation, nop, delay_alu. Scalar 64-bit add/mul/shl
       // still run on the SALU pipe.
       .Case<SAddI32Op, SAddU64Op, SAddU64U32Op, SAndB32Op, SAndn2ExecB32Op,
-            SAndSaveexecB32Op, SCmpLgU32Op, SCmpLtI32Op, SCSelectB32Op,
-            SDelayAluOp, SLshlB32Op, SLshlB64Op, SLshrB32Op, SMovB32Op,
-            SMovB32TupleOp, SMovB32ValueOp, SMovB64ImmOp, SMovExecLoOp,
-            SMovM0Op, SMovVccB32Op, SMulI32Op, SMulU64Op, SNopOp,
-            SReadVccB32Op, SSetprioOp, SGetregShaderCyclesOp, SXorB32Op,
-            SXorB64Op>(
+            SAndn2ExecB64Op, SAndSaveexecB32Op, SAndSaveexecB64Op,
+            SCmpLgU32Op, SCmpLtI32Op, SCSelectB32Op, SDelayAluOp, SLshlB32Op,
+            SLshlB64Op, SLshrB32Op, SMovB32Op, SMovB32TupleOp,
+            SMovB32ValueOp, SMovB64ImmOp, SMovExecB64Op, SMovExecLoOp, SMovM0Op,
+            SMovVccB32Op, SMulI32Op, SMulU64Op, SNopOp, SReadVccB32Op,
+            SSetprioOp, SGetregShaderCyclesOp, SXorB32Op, SXorB64Op>(
           [](auto) { return SchedClass::WriteSALU; })
       .Default(fallbackClassify);
   // clang-format on
