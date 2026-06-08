@@ -735,6 +735,16 @@ static Value addWide(WaveAMDMachineSelector &S, Location loc, Value lhs,
       .getResult();
 }
 
+static Value addWideU32(WaveAMDMachineSelector &S, Location loc, Value base,
+                        Value offset) {
+  Type resultType =
+      getRegType(S.builder.getContext(), waveamdmachine::RegClass::SGPR, 2);
+  return waveamdmachine::SAddU64U32Op::create(
+             S.builder, loc, resultType, getSCCType(S.builder.getContext()),
+             ensureSGPR2(S, loc, base), offset)
+      .getResult();
+}
+
 static Value mulWide(WaveAMDMachineSelector &S, Location loc, Value lhs,
                      Value rhs) {
   if (isWideVGPR(lhs) || isWideVGPR(rhs)) {
@@ -3258,7 +3268,10 @@ WaveAMDMachineSelector::selectMakeBuffer(waveamd::MakeBufferOp op) {
         materializePointerOffsetValue(*this, op.getOperation(), baseOffset);
     if (failed(offset))
       return failure();
-    baseValue = addWide(*this, op.getLoc(), baseValue, *offset);
+    if (slotFitsU32(baseOffset.expr, baseOffset.assumptions))
+      baseValue = addWideU32(*this, op.getLoc(), baseValue, *offset);
+    else
+      baseValue = addWide(*this, op.getLoc(), baseValue, *offset);
     globalBase = baseValue;
     baseOffset = {};
   }
