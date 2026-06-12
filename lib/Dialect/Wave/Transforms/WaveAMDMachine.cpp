@@ -782,6 +782,28 @@ static Value extractLowDword(WaveAMDMachineSelector &S, Location loc, Value v,
   return split.getElements().front();
 }
 
+static Value extractHighDword(WaveAMDMachineSelector &S, Location loc,
+                              Value v) {
+  if (std::optional<int64_t> imm = S.getImmediateValue(v)) {
+    uint64_t hi = static_cast<uint64_t>(*imm) >> 32;
+    return createImm(S.builder, loc, static_cast<int64_t>(hi));
+  }
+  if (auto mov = v.getDefiningOp<waveamdmachine::SMovB64ImmOp>()) {
+    uint64_t hi = static_cast<uint64_t>(mov.getValue()) >> 32;
+    return createImm(S.builder, loc, static_cast<int64_t>(hi));
+  }
+  if (zeroExtendedLowDword(S, v))
+    return createImm(S.builder, loc, 0);
+  auto rt = dyn_cast<waveamdmachine::RegType>(v.getType());
+  if (!rt || rt.getWidth() == 1)
+    return createImm(S.builder, loc, 0);
+  Type elementType = getRegType(S.builder.getContext(), rt.getRegClass(), 1);
+  SmallVector<Type, 2> elementTypes(rt.getWidth(), elementType);
+  auto split = waveamdmachine::TupleToElementsOp::create(S.builder, loc,
+                                                         elementTypes, v);
+  return split.getElements()[1];
+}
+
 static Value addWideU32(WaveAMDMachineSelector &S, Location loc, Value base,
                         Value offset) {
   Type resultType =
@@ -2393,11 +2415,160 @@ static bool usesLegacyVCmpVcc(const WaveAMDMachineSelector &selector) {
   return selector.targetIsaMajor && *selector.targetIsaMajor < 10;
 }
 
+struct I64Dwords {
+  Value lo;
+  Value hi;
+};
+
+static I64Dwords splitI64Dwords(WaveAMDMachineSelector &S, Location loc,
+                                Value value) {
+  return {extractLowDword(S, loc, value), extractHighDword(S, loc, value)};
+}
+
+static SmallVector<Value, 2> splitMaskWords(WaveAMDMachineSelector &S,
+                                            Location loc, Value mask) {
+  waveamdmachine::RegType regType =
+      cast<waveamdmachine::RegType>(mask.getType());
+  assert(regType.getRegClass() == waveamdmachine::RegClass::SGPR &&
+         "compare mask must be SGPR");
+  assert((regType.getWidth() == 1 || regType.getWidth() == 2) &&
+         "compare mask must be SGPR1/2");
+  if (regType.getWidth() == 1)
+    return {mask};
+  Type sgpr1 =
+      getRegType(S.builder.getContext(), waveamdmachine::RegClass::SGPR, 1);
+  SmallVector<Type, 2> elementTypes(regType.getWidth(), sgpr1);
+  auto split = waveamdmachine::TupleToElementsOp::create(S.builder, loc,
+                                                         elementTypes, mask);
+  SmallVector<Value, 2> words;
+  llvm::append_range(words, split.getElements());
+  return words;
+}
+
+static Value gatherMaskWords(WaveAMDMachineSelector &S, Location loc,
+                             ArrayRef<Value> words) {
+  if (words.size() == 1)
+    return words.front();
+  Type resultType = getRegType(S.builder.getContext(),
+                               waveamdmachine::RegClass::SGPR, words.size());
+  return waveamdmachine::TupleFromElementsOp::create(S.builder, loc, resultType,
+                                                     words)
+      .getTuple();
+}
+
+enum class MaskCombiner { And, Or };
+
+static Value combineMasks(WaveAMDMachineSelector &S, Location loc, Value lhs,
+                          Value rhs, MaskCombiner combiner) {
+  SmallVector<Value, 2> lhsWords = splitMaskWords(S, loc, lhs);
+  SmallVector<Value, 2> rhsWords = splitMaskWords(S, loc, rhs);
+  assert(lhsWords.size() == rhsWords.size() && "mask word counts must match");
+  Type sgpr1 =
+      getRegType(S.builder.getContext(), waveamdmachine::RegClass::SGPR, 1);
+  Type scc = getSCCType(S.builder.getContext());
+  SmallVector<Value, 2> words;
+  for (auto [lhsWord, rhsWord] : llvm::zip_equal(lhsWords, rhsWords)) {
+    if (combiner == MaskCombiner::And) {
+      words.push_back(waveamdmachine::SAndB32Op::create(S.builder, loc, sgpr1,
+                                                        scc, lhsWord, rhsWord)
+                          .getResult());
+      continue;
+    }
+    words.push_back(waveamdmachine::SOrB32Op::create(S.builder, loc, sgpr1, scc,
+                                                     lhsWord, rhsWord)
+                        .getResult());
+  }
+  return gatherMaskWords(S, loc, words);
+}
+
+static Value andMasks(WaveAMDMachineSelector &S, Location loc, Value lhs,
+                      Value rhs) {
+  return combineMasks(S, loc, lhs, rhs, MaskCombiner::And);
+}
+
+static Value orMasks(WaveAMDMachineSelector &S, Location loc, Value lhs,
+                     Value rhs) {
+  return combineMasks(S, loc, lhs, rhs, MaskCombiner::Or);
+}
+
+static Value createWordCmp(WaveAMDMachineSelector &S, Location loc,
+                           CmpRelation relation, bool signedCmp,
+                           Type resultType, Value lhs, Value rhs) {
+  bool legacyVcc = usesLegacyVCmpVcc(S);
+  if (legacyVcc) {
+    if (isa<waveamdmachine::ImmType>(lhs.getType()))
+      lhs = S.materializeSGPR1(loc, lhs);
+    if (isa<waveamdmachine::ImmType>(rhs.getType()))
+      rhs = S.materializeSGPR1(loc, rhs);
+    if (!isVGPR(lhs) && !isVGPR(rhs))
+      lhs = S.ensureVGPRForVSrc1(loc, lhs);
+    return createVCmpVcc(S.builder, loc, relation, signedCmp, resultType,
+                         getVCCType(S.builder.getContext()), lhs, rhs);
+  }
+  if (isa<waveamdmachine::ImmType>(lhs.getType()) &&
+      isa<waveamdmachine::ImmType>(rhs.getType()))
+    lhs = S.materializeSGPR1(loc, lhs);
+  return createVCmp(S.builder, loc, relation, signedCmp, resultType, lhs, rhs);
+}
+
+static CmpRelation strictHighRelation(CmpRelation relation) {
+  if (relation == CmpRelation::Le)
+    return CmpRelation::Lt;
+  if (relation == CmpRelation::Ge)
+    return CmpRelation::Gt;
+  return relation;
+}
+
+static Value createI64EqMask(WaveAMDMachineSelector &S, Location loc,
+                             Type resultType, I64Dwords lhs, I64Dwords rhs) {
+  Value hiEq =
+      createWordCmp(S, loc, CmpRelation::Eq, false, resultType, lhs.hi, rhs.hi);
+  Value loEq =
+      createWordCmp(S, loc, CmpRelation::Eq, false, resultType, lhs.lo, rhs.lo);
+  return andMasks(S, loc, hiEq, loEq);
+}
+
+static Value createI64NeMask(WaveAMDMachineSelector &S, Location loc,
+                             Type resultType, I64Dwords lhs, I64Dwords rhs) {
+  Value hiNe =
+      createWordCmp(S, loc, CmpRelation::Ne, false, resultType, lhs.hi, rhs.hi);
+  Value loNe =
+      createWordCmp(S, loc, CmpRelation::Ne, false, resultType, lhs.lo, rhs.lo);
+  return orMasks(S, loc, hiNe, loNe);
+}
+
+static Value createI64RelMask(WaveAMDMachineSelector &S, Location loc,
+                              CmpRelation relation, bool signedCmp,
+                              Type resultType, I64Dwords lhs, I64Dwords rhs) {
+  Value hiCmp = createWordCmp(S, loc, strictHighRelation(relation), signedCmp,
+                              resultType, lhs.hi, rhs.hi);
+  Value hiEq =
+      createWordCmp(S, loc, CmpRelation::Eq, false, resultType, lhs.hi, rhs.hi);
+  Value loCmp =
+      createWordCmp(S, loc, relation, false, resultType, lhs.lo, rhs.lo);
+  return orMasks(S, loc, hiCmp, andMasks(S, loc, hiEq, loCmp));
+}
+
+static Value createI64Cmp(WaveAMDMachineSelector &S, Location loc,
+                          CmpRelation relation, bool signedCmp, Type resultType,
+                          Value lhs, Value rhs) {
+  I64Dwords lhsDwords = splitI64Dwords(S, loc, lhs);
+  I64Dwords rhsDwords = splitI64Dwords(S, loc, rhs);
+  if (relation == CmpRelation::Eq)
+    return createI64EqMask(S, loc, resultType, lhsDwords, rhsDwords);
+  if (relation == CmpRelation::Ne)
+    return createI64NeMask(S, loc, resultType, lhsDwords, rhsDwords);
+  return createI64RelMask(S, loc, relation, signedCmp, resultType, lhsDwords,
+                          rhsDwords);
+}
+
 LogicalResult WaveAMDMachineSelector::selectCmp(CmpIOp op) {
   auto simdType = cast<SimdType>(op.getLhs().getType());
-  if (!simdType.getElementType().isInteger(32))
+  IntegerType elementType = dyn_cast<IntegerType>(simdType.getElementType());
+  if (!elementType ||
+      (elementType.getWidth() != 32 && elementType.getWidth() != 64))
     return op.emitError(
-        "WaveAMDMachine backend supports only !wave.simd<i32, W> cmpi "
+        "WaveAMDMachine backend supports only !wave.simd<i32/i64, W> cmpi "
         "operands");
   auto maskType = cast<MaskType>(op.getType());
   if (maskType.getWidth() != 32 && maskType.getWidth() != 64)
@@ -2412,12 +2583,11 @@ LogicalResult WaveAMDMachineSelector::selectCmp(CmpIOp op) {
                              maskType.getWidth() / 32);
   Value lhs = expect(op.getLhs(), op);
   Value rhs = expect(op.getRhs(), op);
-  Value result =
-      usesLegacyVCmpVcc(*this)
-          ? createVCmpVcc(builder, op.getLoc(), *relation, signedCmp, sgprType,
-                          getVCCType(op.getContext()), lhs, rhs)
-          : createVCmp(builder, op.getLoc(), *relation, signedCmp, sgprType,
-                       lhs, rhs);
+  Value result = elementType.getWidth() == 64
+                     ? createI64Cmp(*this, op.getLoc(), *relation, signedCmp,
+                                    sgprType, lhs, rhs)
+                     : createWordCmp(*this, op.getLoc(), *relation, signedCmp,
+                                     sgprType, lhs, rhs);
   values[op.getResult()] = result;
   eraseIfTopLevel(op);
   return success();

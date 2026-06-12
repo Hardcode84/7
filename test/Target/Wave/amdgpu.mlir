@@ -31,6 +31,27 @@ func.func @wave_signed_cmp(%limit: i32) -> i32 {
   return %bits : i32
 }
 
+// CHECK-LABEL: wave_i64_cmp:
+func.func @wave_i64_cmp(%lhs: i64, %rhs: i64) -> i32 {
+  %vlhs = wave.splat %lhs : i64 -> !wave.simd<i64, 32>
+  %vrhs = wave.splat %rhs : i64 -> !wave.simd<i64, 32>
+  // CHECK: v_cmp_lt_u32_e64
+  // CHECK: v_cmp_eq_u32_e64
+  // CHECK: v_cmp_le_u32_e64
+  // CHECK: s_and_b32
+  // CHECK: s_or_b32
+  %ule = wave.cmpi ule %vlhs, %vrhs
+      : !wave.simd<i64, 32>, !wave.simd<i64, 32> -> !wave.mask<32>
+  // CHECK: v_cmp_lt_i32_e64
+  // CHECK: s_or_b32
+  %sle = wave.cmpi sle %vlhs, %vrhs
+      : !wave.simd<i64, 32>, !wave.simd<i64, 32> -> !wave.mask<32>
+  %ubits = wave.ballot %ule : !wave.mask<32> -> i32
+  %sbits = wave.ballot %sle : !wave.mask<32> -> i32
+  %bits = wave.binary ori %ubits, %sbits : i32, i32 -> i32
+  return %bits : i32
+}
+
 // CHECK-LABEL: wave_where:
 func.func @wave_where(%limit: i32, %out: !wave.ptr<#wave.global, i32>) -> i32 {
   // CHECK: v_mbcnt_lo_u32_b32 [[LANE:v[0-9]+]], -1, 0
