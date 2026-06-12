@@ -21,6 +21,7 @@
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
+#include <cstdint>
 #include <memory>
 #include <optional>
 
@@ -82,6 +83,31 @@ struct RegisterBudgets {
   bool agprCountsAgainstVGPRs = false;
 };
 
+enum class LDSSpillPlanStatus : uint8_t {
+  Available,
+  NotKernel,
+  MissingTargetWaves,
+  MissingWorkgroupShape,
+  InvalidWorkgroupShape,
+  InvalidValueBytes,
+  InsufficientLDS,
+};
+
+struct LDSSpillPlan {
+  unsigned existingFixedBytes = 0;
+  unsigned existingDynamicBytes = 0;
+  unsigned reservedSpillBytes = 0;
+  unsigned limitBytes = 0;
+  unsigned availableBytes = 0;
+  unsigned slotBase = 0;
+  unsigned slotBytes = 0;
+  unsigned waveStride = 0;
+  unsigned valueBytes = 0;
+  unsigned wavesPerWorkgroup = 0;
+  unsigned wavefrontSize = 0;
+  LDSSpillPlanStatus status = LDSSpillPlanStatus::NotKernel;
+};
+
 struct PromotionScore {
   unsigned liveDwords = 0;
   unsigned bridgeCost = 0;
@@ -107,6 +133,11 @@ applyBankPromotionProvider(func::FuncOp func, ArrayRef<IntervalGroup *> groups,
                            IntervalGroup *request, unsigned position,
                            RegisterBudgets budgets, Inventory &inventory,
                            const BankPromotionHooks &hooks);
+
+StringRef getLDSSpillPlanStatusName(LDSSpillPlanStatus status);
+LDSSpillPlan planLDSSpillSlot(func::FuncOp func, RegisterBudgets budgets,
+                              unsigned valueBytes,
+                              unsigned reservedSpillBytes = 0);
 
 } // namespace mlir::wave::regalloc
 

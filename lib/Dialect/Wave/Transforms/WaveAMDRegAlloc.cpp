@@ -62,6 +62,8 @@ static constexpr llvm::StringLiteral kFlatOpsAttr =
     "waveamdmachine.regalloc_debug_flat_ops";
 static constexpr llvm::StringLiteral kIntervalsAttr =
     "waveamdmachine.regalloc_debug_intervals";
+static constexpr llvm::StringLiteral kLDSSpillPlanAttr =
+    "waveamdmachine.regalloc_debug_lds_spill_plan";
 static constexpr llvm::StringLiteral kOverflowCountAttr =
     "waveamdmachine.regalloc_debug_overflowed_count";
 static constexpr llvm::StringLiteral kOverflowedAttr =
@@ -1773,6 +1775,7 @@ static void clearDiagnostics(func::FuncOp func) {
   func->removeAttr(kLegacyPressureReservedAttr);
   func->removeAttr(kFlatOpsAttr);
   func->removeAttr(kIntervalsAttr);
+  func->removeAttr(kLDSSpillPlanAttr);
   func->removeAttr(kOverflowedAttr);
   func->removeAttr(kPeakAGPRAttr);
   func->removeAttr(kPeakSGPRAttr);
@@ -1784,7 +1787,57 @@ static void clearDiagnostics(func::FuncOp func) {
   func->removeAttr(kTrackedValuesAttr);
 }
 
-static void setDiagnostics(func::FuncOp func, Inventory &inventory) {
+static std::optional<unsigned> getUnsignedFuncAttr(func::FuncOp func,
+                                                   StringRef name) {
+  IntegerAttr attr = func->getAttrOfType<IntegerAttr>(name);
+  if (!attr)
+    return std::nullopt;
+  int64_t value = attr.getInt();
+  if (value < 0 ||
+      static_cast<uint64_t>(value) > std::numeric_limits<unsigned>::max())
+    return std::nullopt;
+  return static_cast<unsigned>(value);
+}
+
+static DictionaryAttr buildLDSSpillPlanAttr(Builder &builder,
+                                            const LDSSpillPlan &plan) {
+  NamedAttrList attrs;
+  attrs.set("existing_dynamic_bytes",
+            builder.getI64IntegerAttr(plan.existingDynamicBytes));
+  attrs.set("existing_fixed_bytes",
+            builder.getI64IntegerAttr(plan.existingFixedBytes));
+  attrs.set("reserved_spill_bytes",
+            builder.getI64IntegerAttr(plan.reservedSpillBytes));
+  attrs.set("status",
+            builder.getStringAttr(getLDSSpillPlanStatusName(plan.status)));
+  attrs.set("value_bytes", builder.getI64IntegerAttr(plan.valueBytes));
+  if (plan.status == LDSSpillPlanStatus::Available) {
+    attrs.set("available_bytes",
+              builder.getI64IntegerAttr(plan.availableBytes));
+    attrs.set("limit_bytes", builder.getI64IntegerAttr(plan.limitBytes));
+    attrs.set("slot_base", builder.getI64IntegerAttr(plan.slotBase));
+    attrs.set("slot_bytes", builder.getI64IntegerAttr(plan.slotBytes));
+    attrs.set("wave_stride", builder.getI64IntegerAttr(plan.waveStride));
+    attrs.set("wavefront_size", builder.getI64IntegerAttr(plan.wavefrontSize));
+    attrs.set("waves_per_workgroup",
+              builder.getI64IntegerAttr(plan.wavesPerWorkgroup));
+  }
+  return builder.getDictionaryAttr(attrs);
+}
+
+static void setLDSSpillPlanDiagnostics(func::FuncOp func, Builder &builder,
+                                       RegisterBudgets budgets) {
+  unsigned reservedBytes =
+      getUnsignedFuncAttr(func, "waveamdmachine.lds_spill_bytes").value_or(0);
+  LDSSpillPlan plan =
+      planLDSSpillSlot(func, budgets, /*valueBytes=*/4, reservedBytes);
+  if (plan.status == LDSSpillPlanStatus::NotKernel)
+    return;
+  func->setAttr(kLDSSpillPlanAttr, buildLDSSpillPlanAttr(builder, plan));
+}
+
+static void setDiagnostics(func::FuncOp func, Inventory &inventory,
+                           RegisterBudgets budgets) {
   Builder builder(func.getContext());
   func->setAttr(kFlatOpsAttr, builder.getI64IntegerAttr(inventory.ops.size()));
   func->setAttr(kIntervalsAttr, buildIntervalAttrs(builder, inventory));
@@ -1796,6 +1849,7 @@ static void setDiagnostics(func::FuncOp func, Inventory &inventory) {
       builder.getI64IntegerAttr(getActiveScalarIntervalCount(inventory)));
   func->setAttr(kTrackedValuesAttr,
                 builder.getI64IntegerAttr(inventory.intervalFor.size()));
+  setLDSSpillPlanDiagnostics(func, builder, budgets);
 }
 
 static void setOverflowAttrs(func::FuncOp func,
@@ -1845,7 +1899,7 @@ static LogicalResult buildAndAllocate(func::FuncOp func,
         failed(enforceBudgets(func, inventory, budgets, softFail, failure)))
       allocated = mlir::failure();
     if (failed(allocated)) {
-      setDiagnostics(func, inventory);
+      setDiagnostics(func, inventory, budgets);
       return allocated;
     }
     OpBuilder builder(func.getContext());
@@ -1856,7 +1910,7 @@ static LogicalResult buildAndAllocate(func::FuncOp func,
     }
     applyPhysicalAssignments(inventory);
     updatePeaks(inventory);
-    setDiagnostics(func, inventory);
+    setDiagnostics(func, inventory, budgets);
     return success();
   }
   return func.emitError(kPassName)
