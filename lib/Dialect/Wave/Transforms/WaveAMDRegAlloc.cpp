@@ -9,6 +9,7 @@
 #include "mlir/Dialect/Wave/Transforms/Passes.h"
 
 #include "WaveAMDHardwareResources.h"
+#include "WaveAMDRegAllocInternal.h"
 #include "WaveAMDRegAllocPrep.h"
 #include "WaveAMDRegPressureRelief.h"
 #include "WaveAMDRegisterLimits.h"
@@ -30,6 +31,7 @@ namespace mlir::wave {
 } // namespace mlir::wave
 
 using namespace mlir;
+using namespace mlir::wave::regalloc;
 
 namespace {
 
@@ -82,67 +84,6 @@ static constexpr llvm::StringLiteral kTrackedValuesAttr =
     "waveamdmachine.regalloc_debug_tracked_values";
 static constexpr llvm::StringLiteral kTempAttr =
     "waveamdmachine.regalloc_debug_temp";
-
-struct IntervalGroup;
-
-// Live interval for single register tied to a set of aliasing values.
-struct Interval {
-  llvm::SmallDenseSet<Value, 1> values;
-  IntervalGroup *group = nullptr;
-  waveamdmachine::RegType type;
-  unsigned start = 0;
-  unsigned end = 0;
-  bool reserved = false;
-  bool nonPromotable = false;
-};
-
-// List of intervals representing a consecutive range on registers.
-struct IntervalGroup {
-  SmallVector<Interval *> intervals;
-  waveamdmachine::RegClass preferredClass;
-  waveamdmachine::RegClass storageClass;
-  std::optional<unsigned> assignedBase;
-  std::optional<unsigned> fixedBase;
-  unsigned order = 0;
-  bool reserved = false;
-  bool nonPromotable = false;
-  bool allocatable = true;
-};
-
-struct Inventory {
-  SmallVector<Operation *> ops;
-  DenseMap<Operation *, unsigned> positions;
-  DenseMap<Value, Interval *> intervalFor;
-  wave::WaveAMDKernelEntryRegs entryRegs;
-
-  // Storage
-  SmallVector<std::unique_ptr<Interval>> intervals;
-  SmallVector<std::unique_ptr<IntervalGroup>> groups;
-
-  unsigned peakSGPR = 0;
-  unsigned peakVGPR = 0;
-  unsigned peakAGPR = 0;
-  unsigned scalarIntervals = 0;
-  unsigned promotedGroups = 0;
-};
-
-using PressureFailure = wave::WaveAMDPressureFailure;
-using PressureIntervalRef = wave::WaveAMDPressureIntervalRef;
-
-struct RegisterBudgets {
-  SmallVector<unsigned, 32> maxSGPRsForWaves;
-  SmallVector<unsigned, 32> maxVGPRsForWaves;
-  std::optional<unsigned> totalVGPRLimit;
-  unsigned addressableSGPR = 0;
-  unsigned addressableVGPR = 0;
-  unsigned addressableAGPR = 0;
-  unsigned sgpr = 0;
-  unsigned vgpr = 0;
-  unsigned agpr = 0;
-  unsigned maxWavesPerEU = 0;
-  unsigned targetWaves = 0;
-  bool agprCountsAgainstVGPRs = false;
-};
 
 static bool isAllocRegClass(waveamdmachine::RegClass regClass) {
   return regClass == waveamdmachine::RegClass::SGPR ||
@@ -1167,12 +1108,6 @@ static unsigned estimatePromotionBridgeCost(IntervalGroup *group,
   return std::numeric_limits<unsigned>::max();
 }
 
-struct PromotionScore {
-  unsigned liveDwords = 0;
-  unsigned bridgeCost = 0;
-  unsigned end = 0;
-};
-
 static PromotionScore getPromotionScore(IntervalGroup *group, unsigned position,
                                         Inventory &inventory) {
   return {getGroupLiveDwords(group, position),
@@ -1187,27 +1122,16 @@ static bool isBetterPromotionScore(PromotionScore lhs, PromotionScore rhs) {
   return lhs.end > rhs.end;
 }
 
-static IntervalGroup *choosePromotionCandidate(
-    ArrayRef<IntervalGroup *> groups, IntervalGroup *request, unsigned position,
-    RegisterBudgets budgets, const wave::WaveAMDKernelEntryRegs &regs,
-    Inventory &inventory) {
-  IntervalGroup *best = nullptr;
-  PromotionScore bestScore;
-  auto consider = [&](IntervalGroup *group) {
-    if (!isLiveAt(group, position) || !canPromote(group, budgets))
-      return;
-    if (!canFitPromotionTarget(group, groups, budgets, regs))
-      return;
-    PromotionScore score = getPromotionScore(group, position, inventory);
-    if (!best || isBetterPromotionScore(score, bestScore)) {
-      best = group;
-      bestScore = score;
-    }
-  };
-  for (IntervalGroup *group : groups)
-    consider(group);
-  consider(request);
-  return best;
+static BankPromotionHooks getBankPromotionHooks() {
+  BankPromotionHooks hooks;
+  hooks.getRegClassName = getRegClassName;
+  hooks.getNextRegClass = getNextRegClass;
+  hooks.getPromotionScore = getPromotionScore;
+  hooks.isBetterPromotionScore = isBetterPromotionScore;
+  hooks.isLiveAt = static_cast<bool (*)(IntervalGroup *, unsigned)>(&isLiveAt);
+  hooks.canPromote = canPromote;
+  hooks.canFitPromotionTarget = canFitPromotionTarget;
+  return hooks;
 }
 
 static SmallVector<IntervalGroup *> getAllocGroups(Inventory &inventory) {
@@ -1388,15 +1312,17 @@ static LogicalResult allocateOnce(func::FuncOp func, Inventory &inventory,
     }
 
     unsigned position = getGroupStart(group);
-    IntervalGroup *candidate = choosePromotionCandidate(
-        assigned, group, position, budgets, inventory.entryRegs, inventory);
-    if (!candidate) {
+    FailureOr<bool> promotedGroup =
+        applyBankPromotionProvider(func, assigned, group, position, budgets,
+                                   inventory, getBankPromotionHooks());
+    if (failed(promotedGroup))
+      return failure();
+    if (!*promotedGroup) {
       pressureFailure = buildClassPressureFailure(
           inventory, assigned, group, position, group->storageClass,
           getBudget(budgets, group->storageClass));
       return mlir::failure();
     }
-    candidate->storageClass = *getNextRegClass(candidate->storageClass);
     promoted = true;
     return success();
   }

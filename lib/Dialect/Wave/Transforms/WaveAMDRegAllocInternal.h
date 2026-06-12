@@ -1,0 +1,113 @@
+//===- WaveAMDRegAllocInternal.h - Regalloc internals ----------*- C++ -*-===//
+//
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+//
+//===----------------------------------------------------------------------===//
+
+#ifndef MLIR_DIALECT_WAVE_TRANSFORMS_WAVEAMDREGALLOCINTERNAL_H
+#define MLIR_DIALECT_WAVE_TRANSFORMS_WAVEAMDREGALLOCINTERNAL_H
+
+#include "WaveAMDRegPressureRelief.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/Wave/Transforms/WaveAMDEntryRegs.h"
+#include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachine.h"
+#include "mlir/IR/Operation.h"
+#include "mlir/IR/Value.h"
+#include "mlir/Support/LLVM.h"
+#include "mlir/Support/LogicalResult.h"
+#include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/DenseSet.h"
+#include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/StringRef.h"
+#include <memory>
+#include <optional>
+
+namespace mlir::wave::regalloc {
+
+struct IntervalGroup;
+
+struct Interval {
+  llvm::SmallDenseSet<Value, 1> values;
+  IntervalGroup *group = nullptr;
+  waveamdmachine::RegType type;
+  unsigned start = 0;
+  unsigned end = 0;
+  bool reserved = false;
+  bool nonPromotable = false;
+};
+
+struct IntervalGroup {
+  SmallVector<Interval *> intervals;
+  waveamdmachine::RegClass preferredClass;
+  waveamdmachine::RegClass storageClass;
+  std::optional<unsigned> assignedBase;
+  std::optional<unsigned> fixedBase;
+  unsigned order = 0;
+  bool reserved = false;
+  bool nonPromotable = false;
+  bool allocatable = true;
+};
+
+struct Inventory {
+  SmallVector<Operation *> ops;
+  DenseMap<Operation *, unsigned> positions;
+  DenseMap<Value, Interval *> intervalFor;
+  ::mlir::wave::WaveAMDKernelEntryRegs entryRegs;
+  SmallVector<std::unique_ptr<Interval>> intervals;
+  SmallVector<std::unique_ptr<IntervalGroup>> groups;
+  unsigned peakSGPR = 0;
+  unsigned peakVGPR = 0;
+  unsigned peakAGPR = 0;
+  unsigned scalarIntervals = 0;
+  unsigned promotedGroups = 0;
+};
+
+using PressureFailure = ::mlir::wave::WaveAMDPressureFailure;
+using PressureIntervalRef = ::mlir::wave::WaveAMDPressureIntervalRef;
+
+struct RegisterBudgets {
+  SmallVector<unsigned, 32> maxSGPRsForWaves;
+  SmallVector<unsigned, 32> maxVGPRsForWaves;
+  std::optional<unsigned> totalVGPRLimit;
+  unsigned addressableSGPR = 0;
+  unsigned addressableVGPR = 0;
+  unsigned addressableAGPR = 0;
+  unsigned sgpr = 0;
+  unsigned vgpr = 0;
+  unsigned agpr = 0;
+  unsigned maxWavesPerEU = 0;
+  unsigned targetWaves = 0;
+  bool agprCountsAgainstVGPRs = false;
+};
+
+struct PromotionScore {
+  unsigned liveDwords = 0;
+  unsigned bridgeCost = 0;
+  unsigned end = 0;
+};
+
+struct BankPromotionHooks {
+  StringRef (*getRegClassName)(waveamdmachine::RegClass) = nullptr;
+  std::optional<waveamdmachine::RegClass> (*getNextRegClass)(
+      waveamdmachine::RegClass) = nullptr;
+  PromotionScore (*getPromotionScore)(IntervalGroup *, unsigned,
+                                      Inventory &) = nullptr;
+  bool (*isBetterPromotionScore)(PromotionScore, PromotionScore) = nullptr;
+  bool (*isLiveAt)(IntervalGroup *, unsigned) = nullptr;
+  bool (*canPromote)(IntervalGroup *, RegisterBudgets) = nullptr;
+  bool (*canFitPromotionTarget)(
+      IntervalGroup *, ArrayRef<IntervalGroup *>, RegisterBudgets,
+      const ::mlir::wave::WaveAMDKernelEntryRegs &) = nullptr;
+};
+
+FailureOr<bool>
+applyBankPromotionProvider(func::FuncOp func, ArrayRef<IntervalGroup *> groups,
+                           IntervalGroup *request, unsigned position,
+                           RegisterBudgets budgets, Inventory &inventory,
+                           const BankPromotionHooks &hooks);
+
+} // namespace mlir::wave::regalloc
+
+#endif // MLIR_DIALECT_WAVE_TRANSFORMS_WAVEAMDREGALLOCINTERNAL_H
