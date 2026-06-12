@@ -9,35 +9,28 @@
 #ifndef MLIR_DIALECT_WAVE_TRANSFORMS_WAVEAMDREGPRESSURERELIEF_H
 #define MLIR_DIALECT_WAVE_TRANSFORMS_WAVEAMDREGPRESSURERELIEF_H
 
-#include "mlir/IR/Value.h"
 #include "mlir/Support/LLVM.h"
 #include "mlir/Support/LogicalResult.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
 #include <cstdint>
+#include <memory>
+#include <optional>
+#include <string>
+
+namespace llvm {
+class raw_ostream;
+} // namespace llvm
 
 namespace mlir {
+class ArrayAttr;
+class Builder;
+class DictionaryAttr;
+class NamedAttrList;
 class OpBuilder;
 class Operation;
 
 namespace wave {
-
-enum class WaveAMDPressureReliefStorage : uint8_t {
-  SGPR,
-  VGPR,
-  AGPR,
-  LDS,
-  Scratch,
-};
-
-enum class WaveAMDPressureReliefLegality : uint8_t {
-  Legal,
-  UnsupportedStorage,
-  UnsupportedValue,
-  FixedRegister,
-  InsufficientBudget,
-  UnsupportedRegion,
-};
 
 struct WaveAMDPressureIntervalRef {
   SmallVector<int64_t, 4> resultIndices;
@@ -46,6 +39,13 @@ struct WaveAMDPressureIntervalRef {
   unsigned start = 0;
   unsigned end = 0;
   unsigned width = 0;
+};
+
+struct WaveAMDPressureReliefCost {
+  int64_t materializationOps = 0;
+  int64_t loopWeightedOps = 0;
+  int64_t latencyPenalty = 0;
+  int64_t instabilityPenalty = 0;
 };
 
 struct WaveAMDPressureFailure {
@@ -60,67 +60,90 @@ struct WaveAMDPressureFailure {
   bool combinedVGPRAGPR = false;
 };
 
-struct WaveAMDPressureReliefResourceDelta {
-  int64_t sgprDwords = 0;
-  int64_t vgprDwords = 0;
-  int64_t agprDwords = 0;
-  int64_t vgprFamilyDwords = 0;
-  int64_t ldsBytes = 0;
-  int64_t scratchBytes = 0;
-};
-
-struct WaveAMDPressureReliefCost {
-  int64_t materializationOps = 0;
-  int64_t loopWeightedOps = 0;
-  int64_t latencyPenalty = 0;
-  int64_t instabilityPenalty = 0;
-};
-
-struct WaveAMDPressureReliefCandidate {
-  SmallVector<Value, 4> values;
-  WaveAMDPressureReliefResourceDelta resourceDelta;
-  WaveAMDPressureReliefCost cost;
-  StringRef provider;
-  StringRef reason;
-  unsigned reliefDwords = 0;
-  WaveAMDPressureReliefStorage sourceStorage =
-      WaveAMDPressureReliefStorage::VGPR;
-  WaveAMDPressureReliefStorage targetStorage =
-      WaveAMDPressureReliefStorage::AGPR;
-  WaveAMDPressureReliefLegality legality = WaveAMDPressureReliefLegality::Legal;
-};
-
 struct WaveAMDPressureReliefQuery {
   Operation *scope = nullptr;
   const WaveAMDPressureFailure *failure = nullptr;
 };
+
+class WaveAMDPressureReliefBudget {
+public:
+  virtual ~WaveAMDPressureReliefBudget();
+
+  virtual StringRef getName() const = 0;
+  virtual std::optional<int64_t> getLimit() const;
+  virtual std::optional<int64_t> getUsed() const;
+
+  virtual void print(llvm::raw_ostream &os) const;
+  virtual DictionaryAttr getDiagnosticAttr(Builder &builder) const;
+
+protected:
+  virtual void setExtraDiagnosticAttrs(Builder &builder,
+                                       NamedAttrList &attrs) const;
+};
+
+class WaveAMDPressureReliefCandidate {
+public:
+  virtual ~WaveAMDPressureReliefCandidate();
+
+  virtual StringRef getProviderName() const = 0;
+  virtual WaveAMDPressureReliefCost getCost() const = 0;
+  virtual unsigned getReliefDwords() const = 0;
+  virtual std::optional<StringRef> getRejectReason() const;
+
+  bool isLegal() const;
+  virtual void print(llvm::raw_ostream &os, bool selected = false) const;
+  virtual DictionaryAttr getDiagnosticAttr(Builder &builder,
+                                           bool selected = false) const;
+
+protected:
+  virtual void printExtra(llvm::raw_ostream &os) const;
+  virtual void setExtraDiagnosticAttrs(Builder &builder,
+                                       NamedAttrList &attrs) const;
+};
+
+using WaveAMDPressureReliefCandidateList =
+    SmallVector<std::unique_ptr<WaveAMDPressureReliefCandidate>, 4>;
 
 class WaveAMDPressureReliefProvider {
 public:
   virtual ~WaveAMDPressureReliefProvider();
 
   virtual StringRef getName() const = 0;
-  virtual WaveAMDPressureReliefStorage getSourceStorage() const = 0;
-  virtual WaveAMDPressureReliefStorage getTargetStorage() const = 0;
-
-  virtual LogicalResult collectCandidates(
-      const WaveAMDPressureReliefQuery &query,
-      SmallVectorImpl<WaveAMDPressureReliefCandidate> &candidates) const = 0;
-
+  virtual LogicalResult
+  collectCandidates(const WaveAMDPressureReliefQuery &query,
+                    WaveAMDPressureReliefCandidateList &candidates) const = 0;
   virtual LogicalResult
   materialize(const WaveAMDPressureReliefCandidate &candidate,
               OpBuilder &builder) const = 0;
+
+  virtual bool
+  isBetterCandidate(const WaveAMDPressureReliefCandidate &lhs,
+                    const WaveAMDPressureReliefCandidate &rhs) const;
 };
 
-StringRef
-stringifyWaveAMDPressureReliefStorage(WaveAMDPressureReliefStorage storage);
-StringRef
-stringifyWaveAMDPressureReliefLegality(WaveAMDPressureReliefLegality legality);
-bool isLegalWaveAMDPressureReliefCandidate(
-    const WaveAMDPressureReliefCandidate &candidate);
 bool isBetterWaveAMDPressureReliefCandidate(
     const WaveAMDPressureReliefCandidate &lhs,
     const WaveAMDPressureReliefCandidate &rhs);
+std::string
+formatWaveAMDPressureInterval(const WaveAMDPressureIntervalRef &interval);
+std::string
+formatWaveAMDPressureIntervals(ArrayRef<WaveAMDPressureIntervalRef> intervals);
+std::string
+formatWaveAMDPressureReliefCost(const WaveAMDPressureReliefCost &cost);
+std::string formatWaveAMDPressureReliefCandidate(
+    const WaveAMDPressureReliefCandidate &candidate, bool selected = false);
+std::string formatWaveAMDPressureReliefCandidates(
+    ArrayRef<std::unique_ptr<WaveAMDPressureReliefCandidate>> candidates,
+    std::optional<unsigned> selected = std::nullopt);
+DictionaryAttr
+getWaveAMDPressureIntervalAttr(Builder &builder,
+                               const WaveAMDPressureIntervalRef &interval);
+ArrayAttr getWaveAMDPressureIntervalArrayAttr(
+    Builder &builder, ArrayRef<WaveAMDPressureIntervalRef> intervals);
+ArrayAttr getWaveAMDPressureReliefCandidateArrayAttr(
+    Builder &builder,
+    ArrayRef<std::unique_ptr<WaveAMDPressureReliefCandidate>> candidates,
+    std::optional<unsigned> selected = std::nullopt);
 
 } // namespace wave
 } // namespace mlir

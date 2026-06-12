@@ -19,7 +19,6 @@
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
-#include "llvm/Support/raw_ostream.h"
 #include <algorithm>
 #include <limits>
 #include <memory>
@@ -1873,56 +1872,6 @@ static void setDiagnostics(func::FuncOp func, Inventory &inventory) {
                 builder.getI64IntegerAttr(inventory.intervalFor.size()));
 }
 
-static std::string formatPressureInterval(const PressureIntervalRef &interval) {
-  std::string out;
-  llvm::raw_string_ostream os(out);
-  os << "{start=" << interval.start << ", end=" << interval.end
-     << ", width=" << interval.width << ", values=[";
-  llvm::interleaveComma(
-      llvm::seq<size_t>(0, interval.valuePositions.size()), os, [&](size_t i) {
-        os << interval.valuePositions[i] << "." << interval.resultIndices[i]
-           << "+" << interval.slotOffsets[i];
-      });
-  os << "]}";
-  return out;
-}
-
-static std::string
-formatPressureIntervals(ArrayRef<PressureIntervalRef> intervals) {
-  std::string out;
-  llvm::raw_string_ostream os(out);
-  os << "[";
-  llvm::interleaveComma(intervals, os,
-                        [&](const PressureIntervalRef &interval) {
-                          os << formatPressureInterval(interval);
-                        });
-  os << "]";
-  return out;
-}
-
-static DictionaryAttr intervalAttr(Builder &builder,
-                                   const PressureIntervalRef &interval) {
-  return builder.getDictionaryAttr({
-      builder.getNamedAttr("end", builder.getI64IntegerAttr(interval.end)),
-      builder.getNamedAttr("result_indices", builder.getDenseI64ArrayAttr(
-                                                 interval.resultIndices)),
-      builder.getNamedAttr("slot_offsets",
-                           builder.getDenseI64ArrayAttr(interval.slotOffsets)),
-      builder.getNamedAttr("start", builder.getI64IntegerAttr(interval.start)),
-      builder.getNamedAttr("value_positions", builder.getDenseI64ArrayAttr(
-                                                  interval.valuePositions)),
-      builder.getNamedAttr("width", builder.getI64IntegerAttr(interval.width)),
-  });
-}
-
-static ArrayAttr intervalArrayAttr(Builder &builder,
-                                   ArrayRef<PressureIntervalRef> intervals) {
-  SmallVector<Attribute> attrs;
-  for (const PressureIntervalRef &interval : intervals)
-    attrs.push_back(intervalAttr(builder, interval));
-  return builder.getArrayAttr(attrs);
-}
-
 static void setOverflowAttrs(func::FuncOp func,
                              const PressureFailure &failure) {
   Builder builder(func.getContext());
@@ -1933,14 +1882,15 @@ static void setOverflowAttrs(func::FuncOp func,
                 builder.getI64IntegerAttr(failure.limit));
   func->setAttr(kLegacyPressureLiveAttr,
                 builder.getI64IntegerAttr(failure.liveDwords));
-  func->setAttr(kLegacyPressureOverlapsAttr,
-                intervalArrayAttr(builder, failure.overlaps));
+  func->setAttr(
+      kLegacyPressureOverlapsAttr,
+      wave::getWaveAMDPressureIntervalArrayAttr(builder, failure.overlaps));
   func->setAttr(kLegacyPressurePositionAttr,
                 builder.getI64IntegerAttr(failure.position));
   func->setAttr(kLegacyPressureReliefAttr,
                 builder.getI64IntegerAttr(failure.relief));
   func->setAttr(kLegacyPressureRequestAttr,
-                intervalAttr(builder, failure.request));
+                wave::getWaveAMDPressureIntervalAttr(builder, failure.request));
   func->setAttr(kLegacyPressureReservedAttr,
                 builder.getI64IntegerAttr(failure.reserved));
   func->setAttr(kOverflowedAttr, builder.getI64IntegerAttr(1));
@@ -2037,8 +1987,9 @@ struct WaveAMDRegAllocPass
                               << " (limit=" << failure.limit
                               << ", live_dwords=" << failure.liveDwords
                               << ", required_relief=" << failure.relief << ")";
-    diag << "; request=" << formatPressureInterval(failure.request)
-         << "; overlaps=" << formatPressureIntervals(failure.overlaps);
+    diag << "; request=" << wave::formatWaveAMDPressureInterval(failure.request)
+         << "; overlaps="
+         << wave::formatWaveAMDPressureIntervals(failure.overlaps);
   }
 
   static void emitCombinedPressureError(func::FuncOp func,
