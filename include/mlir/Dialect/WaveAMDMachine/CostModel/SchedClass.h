@@ -33,7 +33,7 @@ enum class SchedClass : uint8_t {
   // exec manipulation).
   WriteSALU,
 
-  // Most 32-bit VALU (v_add_u32, v_and_b32, v_cmp_*_u32,
+  // Most 32-bit VALU (v_add_u32, v_and_b32, v_cmp_*_{u32,i32},
   // v_mov_b32, ...). RDNA: 5-cycle dependent latency.
   Write32Bit,
 

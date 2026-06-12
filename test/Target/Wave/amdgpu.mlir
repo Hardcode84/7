@@ -19,6 +19,18 @@ func.func @wave_add(%x: i32) -> i32 {
   return %first : i32
 }
 
+// CHECK-LABEL: wave_signed_cmp:
+func.func @wave_signed_cmp(%limit: i32) -> i32 {
+  // CHECK: v_mbcnt_lo_u32_b32 [[SIGNED_LANE:v[0-9]+]], -1, 0
+  %lane = wave.lane_id : !wave.simd<i32, 32>
+  %vlimit = wave.splat %limit : i32 -> !wave.simd<i32, 32>
+  // CHECK: v_cmp_lt_i32_e64 [[SIGNED_MASK:s[0-9]+]], [[SIGNED_LANE]], [[SIGNED_ARG:s[0-9]+]]
+  %active = wave.cmpi slt %lane, %vlimit
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.mask<32>
+  %bits = wave.ballot %active : !wave.mask<32> -> i32
+  return %bits : i32
+}
+
 // CHECK-LABEL: wave_where:
 func.func @wave_where(%limit: i32, %out: !wave.ptr<#wave.global, i32>) -> i32 {
   // CHECK: v_mbcnt_lo_u32_b32 [[LANE:v[0-9]+]], -1, 0

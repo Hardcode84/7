@@ -72,12 +72,20 @@
   X(vCmpLeU32, V_CMP_LE_U32_e64_vi, V_CMP_LE_U32_e64_gfx11)                    \
   X(vCmpGtU32, V_CMP_GT_U32_e64_vi, V_CMP_GT_U32_e64_gfx11)                    \
   X(vCmpGeU32, V_CMP_GE_U32_e64_vi, V_CMP_GE_U32_e64_gfx11)                    \
+  X(vCmpLtI32, V_CMP_LT_I32_e64_vi, V_CMP_LT_I32_e64_gfx11)                    \
+  X(vCmpLeI32, V_CMP_LE_I32_e64_vi, V_CMP_LE_I32_e64_gfx11)                    \
+  X(vCmpGtI32, V_CMP_GT_I32_e64_vi, V_CMP_GT_I32_e64_gfx11)                    \
+  X(vCmpGeI32, V_CMP_GE_I32_e64_vi, V_CMP_GE_I32_e64_gfx11)                    \
   X(vCmpxEqU32, V_CMPX_EQ_U32_e64_vi, V_CMPX_EQ_U32_e64_gfx11)                 \
   X(vCmpxNeU32, V_CMPX_NE_U32_e64_vi, V_CMPX_NE_U32_e64_gfx11)                 \
   X(vCmpxLtU32, V_CMPX_LT_U32_e64_vi, V_CMPX_LT_U32_e64_gfx11)                 \
   X(vCmpxLeU32, V_CMPX_LE_U32_e64_vi, V_CMPX_LE_U32_e64_gfx11)                 \
   X(vCmpxGtU32, V_CMPX_GT_U32_e64_vi, V_CMPX_GT_U32_e64_gfx11)                 \
   X(vCmpxGeU32, V_CMPX_GE_U32_e64_vi, V_CMPX_GE_U32_e64_gfx11)                 \
+  X(vCmpxLtI32, V_CMPX_LT_I32_e64_vi, V_CMPX_LT_I32_e64_gfx11)                 \
+  X(vCmpxLeI32, V_CMPX_LE_I32_e64_vi, V_CMPX_LE_I32_e64_gfx11)                 \
+  X(vCmpxGtI32, V_CMPX_GT_I32_e64_vi, V_CMPX_GT_I32_e64_gfx11)                 \
+  X(vCmpxGeI32, V_CMPX_GE_I32_e64_vi, V_CMPX_GE_I32_e64_gfx11)                 \
   X(bufferStoreB32, BUFFER_STORE_DWORD_OFFEN_vi,                               \
     BUFFER_STORE_DWORD_OFFEN_gfx11)                                            \
   X(bufferLoadB32, BUFFER_LOAD_DWORD_OFFEN_vi, BUFFER_LOAD_DWORD_OFFEN_gfx11)  \

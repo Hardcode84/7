@@ -26,7 +26,7 @@ gpu.module @kernels {
     %v8 = wave.splat %c8 : i32 -> !wave.simd<i32, @W@>
     %v16 = wave.splat %c16 : i32 -> !wave.simd<i32, @W@>
     %v200 = wave.splat %c200 : i32 -> !wave.simd<i32, @W@>
-    %lt8 = wave.cmpi ult %lane, %v8
+    %lt8 = wave.cmpi slt %lane, %v8
         : !wave.simd<i32, @W@>, !wave.simd<i32, @W@> -> !wave.mask<@W@>
     %lt16 = wave.cmpi ult %lane, %v16
         : !wave.simd<i32, @W@>, !wave.simd<i32, @W@> -> !wave.mask<@W@>

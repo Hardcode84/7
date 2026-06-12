@@ -799,7 +799,9 @@ static bool isCopiedVccCompareSGPRResult(Operation *op, unsigned resultIndex) {
     return false;
   return isa<waveamdmachine::VCmpEqU32VccOp, waveamdmachine::VCmpNeU32VccOp,
              waveamdmachine::VCmpLtU32VccOp, waveamdmachine::VCmpLeU32VccOp,
-             waveamdmachine::VCmpGtU32VccOp, waveamdmachine::VCmpGeU32VccOp>(
+             waveamdmachine::VCmpGtU32VccOp, waveamdmachine::VCmpGeU32VccOp,
+             waveamdmachine::VCmpLtI32VccOp, waveamdmachine::VCmpLeI32VccOp,
+             waveamdmachine::VCmpGtI32VccOp, waveamdmachine::VCmpGeI32VccOp>(
       op);
 }
 

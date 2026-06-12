@@ -38,6 +38,28 @@ func.func @unsupported_lane_id_width() {
 
 // -----
 
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
+func.func @unsupported_i64_signed_cmpi(%x: !wave.simd<i64, 32>) {
+  // expected-error @below {{WaveAMDMachine backend supports only !wave.simd<i32, W> cmpi operands}}
+  %mask = wave.cmpi slt %x, %x
+      : !wave.simd<i64, 32>, !wave.simd<i64, 32> -> !wave.mask<32>
+  return
+}
+}
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
+func.func @unsupported_i64_unsigned_cmpi(%x: !wave.simd<i64, 32>) {
+  // expected-error @below {{WaveAMDMachine backend supports only !wave.simd<i32, W> cmpi operands}}
+  %mask = wave.cmpi ult %x, %x
+      : !wave.simd<i64, 32>, !wave.simd<i64, 32> -> !wave.mask<32>
+  return
+}
+}
+
+// -----
+
 func.func @unsupported_binary_kind(%x: i32) {
   %lane = wave.lane_id : !wave.simd<i32, 32>
   %vx = wave.splat %x : i32 -> !wave.simd<i32, 32>

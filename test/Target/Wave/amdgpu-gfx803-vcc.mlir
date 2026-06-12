@@ -21,4 +21,16 @@ func.func @legacy_vcc_ops(%a: !waveamdmachine.reg<vgpr, 1, 0>,
   return %mask : !waveamdmachine.reg<sgpr, 1, 4>
 }
 
+// CHECK-LABEL: legacy_signed_vcc_cmp:
+func.func @legacy_signed_vcc_cmp(%a: !waveamdmachine.reg<vgpr, 1, 0>,
+                                 %b: !waveamdmachine.reg<vgpr, 1, 1>)
+    -> !waveamdmachine.reg<sgpr, 1, 5> {
+  // CHECK: v_cmp_lt_i32
+  // CHECK: s_mov_b32 s5, vcc_lo
+  %signed_mask, %vcc = waveamdmachine.v_cmp_lt_i32_vcc %a, %b
+      : (!waveamdmachine.reg<vgpr, 1, 0>, !waveamdmachine.reg<vgpr, 1, 1>)
+        -> (!waveamdmachine.reg<sgpr, 1, 5>, !waveamdmachine.reg<vcc, 1>)
+  return %signed_mask : !waveamdmachine.reg<sgpr, 1, 5>
+}
+
 }
