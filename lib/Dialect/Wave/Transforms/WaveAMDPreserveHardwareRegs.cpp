@@ -454,8 +454,8 @@ struct WaveAMDPreserveHardwareRegsPass
       if (func.isExternal())
         return WalkResult::advance();
       FailureOr<unsigned> wavefrontSize =
-          waveamdmachine::getAMDGPUDefaultWavefrontSize(
-              func, "waveamd-preserve-hw-regs");
+          waveamdmachine::getAMDGPUWavefrontSize(func,
+                                                 "waveamd-preserve-hw-regs");
       if (failed(wavefrontSize))
         return WalkResult::interrupt();
       if (failed(preserveRegion(func.getBody(), *wavefrontSize,

@@ -329,8 +329,7 @@ static LogicalResult validateTargetWaveWidth(func::FuncOp func) {
     return success();
 
   FailureOr<unsigned> targetWidth =
-      waveamdmachine::getAMDGPUDefaultWavefrontSize(func,
-                                                    "WaveAMDMachine selection");
+      waveamdmachine::getAMDGPUWavefrontSize(func, "WaveAMDMachine selection");
   if (failed(targetWidth))
     return failure();
 
@@ -4062,9 +4061,8 @@ static LogicalResult validateWhereMaskWidth(WhereOp op, unsigned maskWidth) {
                         "wave.where masks");
   if (!waveamdmachine::findAMDGPUTargetModule(op))
     return success();
-  FailureOr<unsigned> targetWidth =
-      waveamdmachine::getAMDGPUDefaultWavefrontSize(
-          op, "WaveAMDMachine wave.where lowering");
+  FailureOr<unsigned> targetWidth = waveamdmachine::getAMDGPUWavefrontSize(
+      op, "WaveAMDMachine wave.where lowering");
   if (failed(targetWidth))
     return failure();
   if (maskWidth != *targetWidth)

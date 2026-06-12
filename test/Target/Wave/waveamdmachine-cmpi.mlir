@@ -73,6 +73,39 @@ func.func @signed_cmpi_gfx1100(%limit: i32) {
 
 // -----
 
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100",
+                   waveamdmachine.wavefront_size = 64 : i64} {
+
+// CHECK-LABEL: func.func @i64_cmpi_gfx1100_wave64
+// CHECK: waveamdmachine.tuple_to_elements
+// CHECK: waveamdmachine.v_cmp_gt_u32
+// CHECK: waveamdmachine.v_cmp_eq_u32
+// CHECK: waveamdmachine.v_cmp_ge_u32
+// CHECK: waveamdmachine.tuple_to_elements
+// CHECK: waveamdmachine.s_and_b32
+// CHECK: waveamdmachine.s_or_b32
+// CHECK: waveamdmachine.tuple_from_elements
+// CHECK: waveamdmachine.v_cmp_gt_i32
+// CHECK: waveamdmachine.v_cmp_eq_u32
+// CHECK: waveamdmachine.v_cmp_ge_u32
+// CHECK: waveamdmachine.tuple_to_elements
+// CHECK: waveamdmachine.s_and_b32
+// CHECK: waveamdmachine.s_or_b32
+// CHECK: waveamdmachine.tuple_from_elements
+func.func @i64_cmpi_gfx1100_wave64(%lhs: i64, %rhs: i64) {
+  %vlhs = wave.splat %lhs : i64 -> !wave.simd<i64, 64>
+  %vrhs = wave.splat %rhs : i64 -> !wave.simd<i64, 64>
+  %uge = wave.cmpi uge %vlhs, %vrhs
+      : !wave.simd<i64, 64>, !wave.simd<i64, 64> -> !wave.mask<64>
+  %sge = wave.cmpi sge %vlhs, %vrhs
+      : !wave.simd<i64, 64>, !wave.simd<i64, 64> -> !wave.mask<64>
+  return
+}
+
+}
+
+// -----
+
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx803"} {
 
 // CHECK-LABEL: func.func @i64_cmpi_gfx803

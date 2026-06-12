@@ -264,24 +264,36 @@ private:
     if (!target)
       return op->emitError("failed to lookup AMDGPU target: ") << error;
     llvm::MCTargetOptions mcOptions;
-    mri.reset(target->createMCRegInfo(triple));
-    mai.reset(target->createMCAsmInfo(*mri, triple, mcOptions));
-    mcii.reset(target->createMCInstrInfo());
-    sti.reset(target->createMCSubtargetInfo(triple, targetChip, ""));
-    if (!sti)
-      return module.emitError("unsupported AMDGPU target: ")
-             << targetTriple << "--" << targetChip;
     isaVersion = llvm::AMDGPU::getIsaVersion(targetChip);
     if (failed(checkSupportedBackendTarget(module, targetTriple, targetChip,
                                            isaVersion)))
       return failure();
-    opcodes = makeAMDGPUOpcodeSet(isaVersion);
     std::optional<unsigned> defaultWavefrontSize =
         waveamdmachine::getAMDGPUDefaultWavefrontSize(targetChip);
     if (!defaultWavefrontSize)
       return module.emitError("unsupported AMDGPU target: ")
              << targetTriple << "--" << targetChip;
     wavefrontSize = *defaultWavefrontSize;
+    if (targetAttr) {
+      FailureOr<unsigned> targetWavefrontSize =
+          waveamdmachine::getAMDGPUWavefrontSize(module, "wave-to-amdgpu-asm");
+      if (failed(targetWavefrontSize))
+        return failure();
+      wavefrontSize = *targetWavefrontSize;
+    }
+    FailureOr<std::string> features =
+        waveamdmachine::getAMDGPUAssemblerFeatures(module, "",
+                                                   "wave-to-amdgpu-asm");
+    if (failed(features))
+      return failure();
+    mri.reset(target->createMCRegInfo(triple));
+    mai.reset(target->createMCAsmInfo(*mri, triple, mcOptions));
+    mcii.reset(target->createMCInstrInfo());
+    sti.reset(target->createMCSubtargetInfo(triple, targetChip, *features));
+    if (!sti)
+      return module.emitError("unsupported AMDGPU target: ")
+             << targetTriple << "--" << targetChip;
+    opcodes = makeAMDGPUOpcodeSet(isaVersion);
     mcContext = std::make_unique<llvm::MCContext>(triple, *mai, *mri, *sti);
     unsigned asmVariant = mai->getOutputAssemblerDialect();
     instPrinter.reset(

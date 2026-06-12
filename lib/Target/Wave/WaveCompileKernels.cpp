@@ -30,6 +30,8 @@ using namespace mlir::wave;
 
 namespace {
 
+static constexpr char kWavefrontSizeAttr[] = "waveamdmachine.wavefront_size";
+
 struct WaveCompileKernelsPass
     : public wave::impl::WaveCompileKernelsBase<WaveCompileKernelsPass> {
   using Base::Base;
@@ -79,12 +81,21 @@ private:
     OwningOpRef<ModuleOp> stagingRef(ModuleOp::create(loc));
     ModuleOp staging = *stagingRef;
     staging->setAttr("waveamdmachine.target", b.getStringAttr(targetAttrValue));
+    if (Attribute wavefrontSize =
+            gpuMod->getParentOfType<ModuleOp>()->getAttr(kWavefrontSizeAttr))
+      staging->setAttr(kWavefrontSizeAttr, wavefrontSize);
     for (auto func : gpuMod.getOps<func::FuncOp>())
       staging.getBody()->push_back(func.clone().getOperation());
 
+    FailureOr<std::string> resolvedFeatures =
+        waveamdmachine::getAMDGPUAssemblerFeatures(
+            staging.getOperation(), features, "wave-compile-kernels");
+    if (failed(resolvedFeatures))
+      return failure();
+
     SmallVector<char, 0> hsaco;
     if (failed(wave::assembleWaveAMDGPUKernels(staging.getOperation(), triple,
-                                               chip, features, hsaco)))
+                                               chip, *resolvedFeatures, hsaco)))
       return gpuMod.emitError("in-process wave-to-HSACO compilation failed for "
                               "`gpu.module @")
              << gpuMod.getSymName() << "`";
@@ -95,7 +106,7 @@ private:
     auto rocdlTarget = ROCDL::ROCDLTargetAttr::get(
         ctx, /*O=*/3, builder.getStringAttr(triple),
         builder.getStringAttr(chip),
-        /*features=*/builder.getStringAttr(features),
+        /*features=*/builder.getStringAttr(*resolvedFeatures),
         /*abi=*/builder.getStringAttr("600"),
         /*flags=*/DictionaryAttr(),
         /*link=*/ArrayAttr());

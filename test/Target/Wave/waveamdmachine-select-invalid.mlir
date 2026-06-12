@@ -99,7 +99,8 @@ func.func @unsupported_packed_f32_to_f16_target(%x: !wave.simd<vector<2xf32>, 64
 
 // -----
 
-module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1030"} {
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1030",
+                   waveamdmachine.wavefront_size = 32 : i64} {
 func.func @unsupported_wmma_target(%x: i32) {
   %a = waveamd.fragment_fill %x : i32 -> !waveamd.fragment<0, i8, 16, 16, 32, 4>
   %b = waveamd.fragment_fill %x : i32 -> !waveamd.fragment<1, i8, 16, 16, 32, 4>
@@ -112,7 +113,8 @@ func.func @unsupported_wmma_target(%x: i32) {
 
 // -----
 
-module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1200"} {
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1200",
+                   waveamdmachine.wavefront_size = 32 : i64} {
 func.func @unsupported_wmma_gfx12_target(%x: i32) {
   %a = waveamd.fragment_fill %x : i32 -> !waveamd.fragment<0, i8, 16, 16, 32, 4>
   %b = waveamd.fragment_fill %x : i32 -> !waveamd.fragment<1, i8, 16, 16, 32, 4>
@@ -209,6 +211,17 @@ func.func @gfx942_rejects_where_wave32_mask(%active: !wave.mask<32>) {
   wave.where %active {
     wave.yield
   } : !wave.mask<32>
+  return
+}
+}
+
+// -----
+
+// expected-error @below {{WaveAMDMachine selection target gfx942 does not support wave32}}
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx942",
+                   waveamdmachine.wavefront_size = 32 : i64} {
+func.func @gfx942_rejects_wave32_override(%x: i32) {
+  %v = wave.splat %x : i32 -> !wave.simd<i32, 32>
   return
 }
 }

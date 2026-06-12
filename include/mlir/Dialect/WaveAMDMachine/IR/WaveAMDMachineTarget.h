@@ -18,6 +18,7 @@
 #include "llvm/TargetParser/TargetParser.h"
 
 #include <optional>
+#include <string>
 
 namespace mlir::waveamdmachine {
 
@@ -45,6 +46,13 @@ bool supportsAGPRs(const llvm::AMDGPU::IsaVersion &isa);
 std::optional<unsigned> getAMDGPUDefaultWavefrontSize(llvm::StringRef chip);
 
 FailureOr<unsigned> getAMDGPUDefaultWavefrontSize(Operation *op,
+                                                  llvm::StringRef consumer);
+
+FailureOr<unsigned> getAMDGPUWavefrontSize(Operation *op,
+                                           llvm::StringRef consumer);
+
+FailureOr<std::string> getAMDGPUAssemblerFeatures(Operation *op,
+                                                  llvm::StringRef features,
                                                   llvm::StringRef consumer);
 
 } // namespace mlir::waveamdmachine
