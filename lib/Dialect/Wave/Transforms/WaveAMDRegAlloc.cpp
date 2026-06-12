@@ -10,6 +10,7 @@
 
 #include "WaveAMDHardwareResources.h"
 #include "WaveAMDRegAllocPrep.h"
+#include "WaveAMDRegPressureRelief.h"
 #include "WaveAMDRegisterLimits.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Wave/Transforms/WaveAMDRegAllocVerification.h"
@@ -126,26 +127,8 @@ struct Inventory {
   unsigned promotedGroups = 0;
 };
 
-struct PressureIntervalRef {
-  SmallVector<int64_t> resultIndices;
-  SmallVector<int64_t> slotOffsets;
-  SmallVector<int64_t> valuePositions;
-  unsigned start = 0;
-  unsigned end = 0;
-  unsigned width = 0;
-};
-
-struct PressureFailure {
-  SmallVector<PressureIntervalRef> overlaps;
-  PressureIntervalRef request;
-  StringRef regClass;
-  unsigned limit = 0;
-  unsigned liveDwords = 0;
-  unsigned position = 0;
-  unsigned relief = 0;
-  unsigned reserved = 0;
-  bool combinedVGPRAGPR = false;
-};
+using PressureFailure = wave::WaveAMDPressureFailure;
+using PressureIntervalRef = wave::WaveAMDPressureIntervalRef;
 
 struct RegisterBudgets {
   SmallVector<unsigned, 32> maxSGPRsForWaves;
