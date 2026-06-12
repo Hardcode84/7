@@ -62,19 +62,25 @@ static unsigned getMinReportedVGPRs(func::FuncOp func) {
 static int64_t collectLDSBytes(func::FuncOp func, OpBuilder &builder) {
   int64_t fixedLds = 0;
   int64_t dynamicLds = 0;
+  int64_t spillLds = 0;
   bool hasLds = false;
-  if (auto ldsAttr = func->getAttrOfType<IntegerAttr>("wave.lds_size")) {
+  if (IntegerAttr ldsAttr = func->getAttrOfType<IntegerAttr>("wave.lds_size")) {
     fixedLds = ldsAttr.getInt();
     hasLds = true;
   }
-  if (auto ldsAttr =
+  if (IntegerAttr ldsAttr =
           func->getAttrOfType<IntegerAttr>("wave.dynamic_lds_size")) {
     dynamicLds = ldsAttr.getInt();
     hasLds = true;
     func->setAttr("waveamdmachine.dynamic_lds_size",
                   builder.getI64IntegerAttr(dynamicLds));
   }
-  int64_t lds = fixedLds + dynamicLds;
+  if (IntegerAttr ldsAttr =
+          func->getAttrOfType<IntegerAttr>("waveamdmachine.lds_spill_bytes")) {
+    spillLds = ldsAttr.getInt();
+    hasLds = true;
+  }
+  int64_t lds = fixedLds + dynamicLds + spillLds;
   if (hasLds)
     func->setAttr("waveamdmachine.lds_size", builder.getI64IntegerAttr(lds));
   return lds;

@@ -58,6 +58,7 @@ static constexpr llvm::StringLiteral kLegacyPressureRequestAttr =
     "waveamdmachine.regalloc_pressure_request";
 static constexpr llvm::StringLiteral kLegacyPressureReservedAttr =
     "waveamdmachine.regalloc_pressure_reserved";
+static constexpr unsigned kRewriteAttemptLimit = 512;
 static constexpr llvm::StringLiteral kFlatOpsAttr =
     "waveamdmachine.regalloc_debug_flat_ops";
 static constexpr llvm::StringLiteral kIntervalsAttr =
@@ -84,8 +85,7 @@ static constexpr llvm::StringLiteral kScalarIntervalsAttr =
     "waveamdmachine.regalloc_debug_scalar_intervals";
 static constexpr llvm::StringLiteral kTrackedValuesAttr =
     "waveamdmachine.regalloc_debug_tracked_values";
-static constexpr llvm::StringLiteral kTempAttr =
-    "waveamdmachine.regalloc_debug_temp";
+static constexpr llvm::StringLiteral kTempAttr = kRegAllocTempAttr;
 
 static bool isAllocRegClass(waveamdmachine::RegClass regClass) {
   return regClass == waveamdmachine::RegClass::SGPR ||
@@ -1296,7 +1296,7 @@ static LogicalResult allocateOnce(func::FuncOp func, Inventory &inventory,
                                   ArrayRef<IntervalGroup *> groups,
                                   RegisterBudgets budgets,
                                   PressureFailure &pressureFailure,
-                                  bool &promoted) {
+                                  bool &promoted, bool &rewroteIR) {
   SmallVector<IntervalGroup *> assigned;
   for (IntervalGroup *group : groups) {
     if (hasFixedRegister(group)) {
@@ -1320,6 +1320,14 @@ static LogicalResult allocateOnce(func::FuncOp func, Inventory &inventory,
     if (failed(promotedGroup))
       return failure();
     if (!*promotedGroup) {
+      FailureOr<bool> spilledGroup = applyLDSSpillProvider(
+          func, assigned, group, position, budgets, inventory);
+      if (failed(spilledGroup))
+        return failure();
+      if (*spilledGroup) {
+        rewroteIR = true;
+        return success();
+      }
       pressureFailure = buildClassPressureFailure(
           inventory, assigned, group, position, group->storageClass,
           getBudget(budgets, group->storageClass));
@@ -1336,21 +1344,27 @@ static void resetAssignments(ArrayRef<IntervalGroup *> groups) {
     group->assignedBase.reset();
 }
 
-static LogicalResult
-allocateGroups(func::FuncOp func, Inventory &inventory, RegisterBudgets budgets,
-               std::optional<PressureFailure> &failureOut) {
+static LogicalResult allocateGroups(func::FuncOp func, Inventory &inventory,
+                                    RegisterBudgets budgets,
+                                    std::optional<PressureFailure> &failureOut,
+                                    bool &rewroteIR) {
   SmallVector<IntervalGroup *> groups = getAllocGroups(inventory);
   unsigned maxAttempts = groups.size() * 2 + 1;
   for ([[maybe_unused]] unsigned attempt :
        llvm::seq<unsigned>(0, maxAttempts)) {
     resetAssignments(groups);
     bool promoted = false;
+    bool localRewrite = false;
     PressureFailure localFailure;
     if (failed(allocateOnce(func, inventory, groups, budgets, localFailure,
-                            promoted))) {
+                            promoted, localRewrite))) {
       if (!localFailure.regClass.empty())
         failureOut = localFailure;
       return mlir::failure();
+    }
+    if (localRewrite) {
+      rewroteIR = true;
+      return success();
     }
     if (!promoted)
       return success();
@@ -1828,7 +1842,7 @@ static DictionaryAttr buildLDSSpillPlanAttr(Builder &builder,
 static void setLDSSpillPlanDiagnostics(func::FuncOp func, Builder &builder,
                                        RegisterBudgets budgets) {
   unsigned reservedBytes =
-      getUnsignedFuncAttr(func, "waveamdmachine.lds_spill_bytes").value_or(0);
+      getUnsignedFuncAttr(func, kLDSSpillBytesAttr).value_or(0);
   LDSSpillPlan plan =
       planLDSSpillSlot(func, budgets, /*valueBytes=*/4, reservedBytes);
   if (plan.status == LDSSpillPlanStatus::NotKernel)
@@ -1880,41 +1894,61 @@ static void setOverflowAttrs(func::FuncOp func,
                 builder.getI64IntegerAttr(failure.liveDwords));
 }
 
+enum class AllocationAttemptResult { Done, Retry };
+
+static FailureOr<AllocationAttemptResult>
+runAllocationAttempt(func::FuncOp func, RegisterBudgets budgets,
+                     std::optional<PressureFailure> &failure, bool softFail) {
+  Inventory inventory;
+  if (failed(buildInventory(func, inventory)))
+    return mlir::failure();
+  if (failed(validateAGPRSupport(func, budgets, inventory)))
+    return mlir::failure();
+
+  bool rewroteIR = false;
+  LogicalResult allocated =
+      allocateGroups(func, inventory, budgets, failure, rewroteIR);
+  updatePeaks(inventory);
+  if (succeeded(allocated) && rewroteIR)
+    return AllocationAttemptResult::Retry;
+  if (succeeded(allocated) &&
+      failed(enforceBudgets(func, inventory, budgets, softFail, failure)))
+    allocated = mlir::failure();
+  if (failed(allocated)) {
+    setDiagnostics(func, inventory, budgets);
+    return mlir::failure();
+  }
+
+  OpBuilder builder(func.getContext());
+  if (!getPromotedGroups(inventory).empty()) {
+    if (failed(materializePromotions(inventory, builder)))
+      return mlir::failure();
+    return AllocationAttemptResult::Retry;
+  }
+  applyPhysicalAssignments(inventory);
+  updatePeaks(inventory);
+  setDiagnostics(func, inventory, budgets);
+  return AllocationAttemptResult::Done;
+}
+
 static LogicalResult buildAndAllocate(func::FuncOp func,
                                       RegisterBudgets budgets,
                                       std::optional<PressureFailure> &failure,
                                       bool softFail) {
   if (failed(validateReservedLimits(func, budgets)))
     return mlir::failure();
-  for (unsigned attempt : llvm::seq<unsigned>(0, 8)) {
+  for (unsigned attempt : llvm::seq<unsigned>(0, kRewriteAttemptLimit)) {
     (void)attempt;
-    Inventory inventory;
-    if (failed(buildInventory(func, inventory)))
+    FailureOr<AllocationAttemptResult> result =
+        runAllocationAttempt(func, budgets, failure, softFail);
+    if (failed(result))
       return mlir::failure();
-    if (failed(validateAGPRSupport(func, budgets, inventory)))
-      return mlir::failure();
-    LogicalResult allocated = allocateGroups(func, inventory, budgets, failure);
-    updatePeaks(inventory);
-    if (succeeded(allocated) &&
-        failed(enforceBudgets(func, inventory, budgets, softFail, failure)))
-      allocated = mlir::failure();
-    if (failed(allocated)) {
-      setDiagnostics(func, inventory, budgets);
-      return allocated;
-    }
-    OpBuilder builder(func.getContext());
-    if (!getPromotedGroups(inventory).empty()) {
-      if (failed(materializePromotions(inventory, builder)))
-        return mlir::failure();
+    if (*result == AllocationAttemptResult::Retry)
       continue;
-    }
-    applyPhysicalAssignments(inventory);
-    updatePeaks(inventory);
-    setDiagnostics(func, inventory, budgets);
     return success();
   }
-  return func.emitError(kPassName)
-         << " promotion materialization did not converge";
+  return func.emitError(kPassName) << " IR rewrites did not converge after "
+                                   << kRewriteAttemptLimit << " attempts";
 }
 
 static FailureOr<RegisterBudgets> getBudgets(ModuleOp root) {

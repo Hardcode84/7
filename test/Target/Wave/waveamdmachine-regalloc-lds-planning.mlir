@@ -91,6 +91,21 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 // -----
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
+  // CHECK-LABEL: func.func @lds_plan_unsupported_workgroup_shape
+  // CHECK-SAME: waveamdmachine.regalloc_debug_lds_spill_plan =
+  // CHECK-SAME: status = "unsupported_workgroup_shape"
+  func.func @lds_plan_unsupported_workgroup_shape() attributes {
+    wave.kernel,
+    wave.workgroup_size = array<i32: 8, 8, 1>,
+    waveamdmachine.target_waves = 4 : i64
+  } {
+    return
+  }
+}
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
   // CHECK-LABEL: func.func @lds_plan_insufficient_lds
   // CHECK-SAME: waveamdmachine.regalloc_debug_lds_spill_plan =
   // CHECK-SAME: status = "insufficient_lds"

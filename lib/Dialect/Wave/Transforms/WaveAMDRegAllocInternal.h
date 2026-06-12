@@ -27,6 +27,11 @@
 
 namespace mlir::wave::regalloc {
 
+inline constexpr llvm::StringLiteral kRegAllocTempAttr =
+    "waveamdmachine.regalloc_debug_temp";
+inline constexpr llvm::StringLiteral kLDSSpillBytesAttr =
+    "waveamdmachine.lds_spill_bytes";
+
 struct IntervalGroup;
 
 struct Interval {
@@ -89,6 +94,7 @@ enum class LDSSpillPlanStatus : uint8_t {
   MissingTargetWaves,
   MissingWorkgroupShape,
   InvalidWorkgroupShape,
+  UnsupportedWorkgroupShape,
   InvalidValueBytes,
   InsufficientLDS,
 };
@@ -133,6 +139,11 @@ applyBankPromotionProvider(func::FuncOp func, ArrayRef<IntervalGroup *> groups,
                            IntervalGroup *request, unsigned position,
                            RegisterBudgets budgets, Inventory &inventory,
                            const BankPromotionHooks &hooks);
+FailureOr<bool> applyLDSSpillProvider(func::FuncOp func,
+                                      ArrayRef<IntervalGroup *> groups,
+                                      IntervalGroup *request, unsigned position,
+                                      RegisterBudgets budgets,
+                                      Inventory &inventory);
 
 StringRef getLDSSpillPlanStatusName(LDSSpillPlanStatus status);
 LDSSpillPlan planLDSSpillSlot(func::FuncOp func, RegisterBudgets budgets,
