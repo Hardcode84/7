@@ -65,6 +65,8 @@ static constexpr llvm::StringLiteral kIntervalsAttr =
     "waveamdmachine.regalloc_debug_intervals";
 static constexpr llvm::StringLiteral kLDSSpillPlanAttr =
     "waveamdmachine.regalloc_debug_lds_spill_plan";
+static constexpr llvm::StringLiteral kScratchSpillPlanAttr =
+    "waveamdmachine.regalloc_debug_scratch_spill_plan";
 static constexpr llvm::StringLiteral kOverflowCountAttr =
     "waveamdmachine.regalloc_debug_overflowed_count";
 static constexpr llvm::StringLiteral kOverflowedAttr =
@@ -1790,6 +1792,7 @@ static void clearDiagnostics(func::FuncOp func) {
   func->removeAttr(kFlatOpsAttr);
   func->removeAttr(kIntervalsAttr);
   func->removeAttr(kLDSSpillPlanAttr);
+  func->removeAttr(kScratchSpillPlanAttr);
   func->removeAttr(kOverflowedAttr);
   func->removeAttr(kPeakAGPRAttr);
   func->removeAttr(kPeakSGPRAttr);
@@ -1850,6 +1853,36 @@ static void setLDSSpillPlanDiagnostics(func::FuncOp func, Builder &builder,
   func->setAttr(kLDSSpillPlanAttr, buildLDSSpillPlanAttr(builder, plan));
 }
 
+static DictionaryAttr buildScratchSpillPlanAttr(Builder &builder,
+                                                const ScratchSpillPlan &plan) {
+  NamedAttrList attrs;
+  attrs.set("existing_private_bytes",
+            builder.getI64IntegerAttr(plan.existingPrivateBytes));
+  attrs.set("reserved_spill_bytes",
+            builder.getI64IntegerAttr(plan.reservedSpillBytes));
+  attrs.set("status",
+            builder.getStringAttr(getScratchSpillPlanStatusName(plan.status)));
+  attrs.set("uses_flat_scratch", builder.getBoolAttr(plan.usesFlatScratch));
+  attrs.set("value_bytes", builder.getI64IntegerAttr(plan.valueBytes));
+  if (plan.status == ScratchSpillPlanStatus::Available) {
+    attrs.set("slot_base", builder.getI64IntegerAttr(plan.slotBase));
+    attrs.set("slot_bytes", builder.getI64IntegerAttr(plan.slotBytes));
+  }
+  return builder.getDictionaryAttr(attrs);
+}
+
+static void setScratchSpillPlanDiagnostics(func::FuncOp func,
+                                           Builder &builder) {
+  unsigned reservedBytes =
+      getUnsignedFuncAttr(func, kScratchSpillBytesAttr).value_or(0);
+  ScratchSpillPlan plan =
+      planScratchSpillSlot(func, /*valueBytes=*/4, reservedBytes);
+  if (plan.status == ScratchSpillPlanStatus::NotKernel)
+    return;
+  func->setAttr(kScratchSpillPlanAttr,
+                buildScratchSpillPlanAttr(builder, plan));
+}
+
 static void setDiagnostics(func::FuncOp func, Inventory &inventory,
                            RegisterBudgets budgets) {
   Builder builder(func.getContext());
@@ -1864,6 +1897,7 @@ static void setDiagnostics(func::FuncOp func, Inventory &inventory,
   func->setAttr(kTrackedValuesAttr,
                 builder.getI64IntegerAttr(inventory.intervalFor.size()));
   setLDSSpillPlanDiagnostics(func, builder, budgets);
+  setScratchSpillPlanDiagnostics(func, builder);
 }
 
 static void setOverflowAttrs(func::FuncOp func,

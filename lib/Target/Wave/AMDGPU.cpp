@@ -52,6 +52,7 @@
 #include "llvm/TargetParser/Triple.h"
 #include <algorithm>
 #include <cassert>
+#include <limits>
 
 LLD_HAS_DRIVER(elf)
 
@@ -61,6 +62,10 @@ namespace {
 
 static constexpr llvm::StringLiteral kDefaultTargetTriple = "amdgcn-amd-amdhsa";
 static constexpr llvm::StringLiteral kDefaultTargetChip = "gfx1100";
+static constexpr llvm::StringLiteral kPrivateSegmentFixedSizeAttr =
+    "waveamdmachine.private_segment_fixed_size";
+static constexpr llvm::StringLiteral kUsesFlatScratchAttr =
+    "waveamdmachine.uses_flat_scratch";
 
 static bool isSupportedBackendIsa(const llvm::AMDGPU::IsaVersion &isa) {
   return isa.Major == 8 || isa.Major == 9 || isa.Major == 11;
@@ -114,6 +119,7 @@ struct KernelInfo {
   unsigned vgprCount = 0;
   unsigned agprCount = 0;
   unsigned fixedLdsSize = 0;
+  unsigned privateSegmentFixedSize = 0;
 };
 
 #include "AMDGPUOpcodes.def"
@@ -310,6 +316,9 @@ private:
   bool isGfx90APlus() const { return llvm::AMDGPU::isGFX90A(*sti); }
   bool isGfx940Plus() const { return isGfx940PlusIsa(isaVersion); }
   bool hasAGPRs() const { return waveamdmachine::supportsAGPRs(isaVersion); }
+  bool supportsPrivateSegmentEnable() const {
+    return isGfx11() || isGfx940Plus();
+  }
   unsigned gfx11Opcode(unsigned opcode) const {
     if (!isGfx11())
       llvm_unreachable("backend target gate admits only gfx8/gfx9/gfx11");
@@ -695,6 +704,18 @@ private:
     return total - dynamic;
   }
 
+  FailureOr<unsigned> getPrivateSegmentFixedSize(func::FuncOp func) const {
+    IntegerAttr attr =
+        func->getAttrOfType<IntegerAttr>(kPrivateSegmentFixedSizeAttr);
+    if (!attr)
+      return 0;
+    int64_t value = attr.getInt();
+    if (value < 0 ||
+        static_cast<uint64_t>(value) > std::numeric_limits<unsigned>::max())
+      return func.emitError("private segment fixed size must fit u32");
+    return static_cast<unsigned>(value);
+  }
+
   bool getBoolAttr(Operation *op, StringRef name, bool fallback) const {
     if (auto attr = op->getAttrOfType<BoolAttr>(name))
       return attr.getValue();
@@ -764,6 +785,11 @@ private:
       if (failed(fixedLdsSize))
         return failure();
       info.fixedLdsSize = *fixedLdsSize;
+      FailureOr<unsigned> privateSegmentFixedSize =
+          getPrivateSegmentFixedSize(func);
+      if (failed(privateSegmentFixedSize))
+        return failure();
+      info.privateSegmentFixedSize = *privateSegmentFixedSize;
       SmallVector<waveamd::KernargSlot> layout =
           waveamd::getKernargLayout(func.getFunctionType().getInputs());
       for (auto [index, slot] : llvm::enumerate(layout)) {
@@ -839,6 +865,15 @@ private:
         entryRegs.kernargPreloadOffsetDwords >= 512)
       return func.emitError("wave-to-amdgpu-asm kernarg preload offset must be "
                             "less than 512 dwords");
+    FailureOr<unsigned> privateSegmentFixedSize =
+        getPrivateSegmentFixedSize(func);
+    if (failed(privateSegmentFixedSize))
+      return failure();
+    bool usesFlatScratch = getBoolAttr(func, kUsesFlatScratchAttr, false);
+    if ((*privateSegmentFixedSize != 0 || usesFlatScratch) &&
+        !supportsPrivateSegmentEnable())
+      return func.emitError("wave-to-amdgpu-asm private segment requires "
+                            "architected flat scratch target");
     return wave::verifyWaveAMDKernargPreloadTarget(func, "wave-to-amdgpu-asm");
   }
 
@@ -901,6 +936,11 @@ private:
     FailureOr<unsigned> fixedLdsSize = getFixedLDSSize(func);
     if (failed(fixedLdsSize))
       return failure();
+    FailureOr<unsigned> privateSegmentFixedSize =
+        getPrivateSegmentFixedSize(func);
+    if (failed(privateSegmentFixedSize))
+      return failure();
+    bool usesFlatScratch = getBoolAttr(func, kUsesFlatScratchAttr, false);
     bool usesWgY = false;
     bool usesWgZ = false;
     wave::WaveAMDKernelEntryRegs entryRegs =
@@ -918,7 +958,8 @@ private:
     os << "\t.p2align\t6, 0x0\n";
     os << "\t.amdhsa_kernel " << func.getSymName() << "\n";
     os << "\t\t.amdhsa_group_segment_fixed_size " << *fixedLdsSize << "\n";
-    os << "\t\t.amdhsa_private_segment_fixed_size 0\n";
+    os << "\t\t.amdhsa_private_segment_fixed_size " << *privateSegmentFixedSize
+       << "\n";
     os << "\t\t.amdhsa_kernarg_size " << kernargSize << "\n";
     os << "\t\t.amdhsa_user_sgpr_count " << entryRegs.userSGPRCount << "\n";
     os << "\t\t.amdhsa_user_sgpr_kernarg_segment_ptr "
@@ -932,8 +973,11 @@ private:
     if (!isGfx8Or9() && wavefrontSize == 32) {
       os << "\t\t.amdhsa_wavefront_size32 1\n";
       os << "\t\t.amdhsa_uses_dynamic_stack 0\n";
-      os << "\t\t.amdhsa_enable_private_segment 0\n";
     }
+    if (supportsPrivateSegmentEnable())
+      os << "\t\t.amdhsa_enable_private_segment "
+         << ((*privateSegmentFixedSize != 0 || usesFlatScratch) ? 1 : 0)
+         << "\n";
     os << "\t\t.amdhsa_system_sgpr_workgroup_id_x 1\n";
     os << "\t\t.amdhsa_system_sgpr_workgroup_id_y " << (usesWgY ? 1 : 0)
        << "\n";
@@ -971,9 +1015,11 @@ private:
     os << "\t.set .L" << func.getSymName() << ".numbered_sgpr, " << sgprCount
        << "\n";
     os << "\t.set .L" << func.getSymName() << ".num_named_barrier, 0\n";
-    os << "\t.set .L" << func.getSymName() << ".private_seg_size, 0\n";
+    os << "\t.set .L" << func.getSymName() << ".private_seg_size, "
+       << *privateSegmentFixedSize << "\n";
     os << "\t.set .L" << func.getSymName() << ".uses_vcc, 0\n";
-    os << "\t.set .L" << func.getSymName() << ".uses_flat_scratch, 0\n";
+    os << "\t.set .L" << func.getSymName() << ".uses_flat_scratch, "
+       << (usesFlatScratch ? 1 : 0) << "\n";
     os << "\t.set .L" << func.getSymName() << ".has_dyn_sized_stack, 0\n";
     os << "\t.set .L" << func.getSymName() << ".has_recursion, 0\n";
     os << "\t.set .L" << func.getSymName() << ".has_indirect_call, 0\n";
@@ -1016,7 +1062,8 @@ private:
       os << "    .kernarg_segment_size: " << kernel.kernargSize << "\n";
       os << "    .max_flat_workgroup_size: 1024\n";
       os << "    .name:           " << kernel.name << "\n";
-      os << "    .private_segment_fixed_size: 0\n";
+      os << "    .private_segment_fixed_size: "
+         << kernel.privateSegmentFixedSize << "\n";
       os << "    .sgpr_count:     " << kernel.sgprCount << "\n";
       os << "    .sgpr_spill_count: 0\n";
       os << "    .symbol:         " << kernel.name << ".kd\n";

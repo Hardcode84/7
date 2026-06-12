@@ -31,6 +31,10 @@ inline constexpr llvm::StringLiteral kRegAllocTempAttr =
     "waveamdmachine.regalloc_debug_temp";
 inline constexpr llvm::StringLiteral kLDSSpillBytesAttr =
     "waveamdmachine.lds_spill_bytes";
+inline constexpr llvm::StringLiteral kPrivateSegmentFixedSizeAttr =
+    "waveamdmachine.private_segment_fixed_size";
+inline constexpr llvm::StringLiteral kScratchSpillBytesAttr =
+    "waveamdmachine.scratch_spill_bytes";
 
 struct IntervalGroup;
 
@@ -114,6 +118,24 @@ struct LDSSpillPlan {
   LDSSpillPlanStatus status = LDSSpillPlanStatus::NotKernel;
 };
 
+enum class ScratchSpillPlanStatus : uint8_t {
+  Available,
+  NotKernel,
+  UnsupportedTarget,
+  InvalidValueBytes,
+  PrivateSegmentOverflow,
+};
+
+struct ScratchSpillPlan {
+  unsigned existingPrivateBytes = 0;
+  unsigned reservedSpillBytes = 0;
+  unsigned slotBase = 0;
+  unsigned slotBytes = 0;
+  unsigned valueBytes = 0;
+  bool usesFlatScratch = false;
+  ScratchSpillPlanStatus status = ScratchSpillPlanStatus::NotKernel;
+};
+
 struct PromotionScore {
   unsigned liveDwords = 0;
   unsigned bridgeCost = 0;
@@ -149,6 +171,9 @@ StringRef getLDSSpillPlanStatusName(LDSSpillPlanStatus status);
 LDSSpillPlan planLDSSpillSlot(func::FuncOp func, RegisterBudgets budgets,
                               unsigned valueBytes,
                               unsigned reservedSpillBytes = 0);
+StringRef getScratchSpillPlanStatusName(ScratchSpillPlanStatus status);
+ScratchSpillPlan planScratchSpillSlot(func::FuncOp func, unsigned valueBytes,
+                                      unsigned reservedSpillBytes = 0);
 
 } // namespace mlir::wave::regalloc
 

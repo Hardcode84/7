@@ -8,6 +8,7 @@
 
 #include "mlir/Dialect/Wave/Transforms/Passes.h"
 
+#include "WaveAMDRegAllocInternal.h"
 #include "WaveAMDRegisterLimits.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Wave/Transforms/WaveAMDRegAllocVerification.h"
@@ -49,6 +50,7 @@ static void clearModuleResourceAttrs(ModuleOp mod) {
   mod->removeAttr("waveamdmachine.vgpr_count_max");
   mod->removeAttr("waveamdmachine.agpr_count_max");
   mod->removeAttr("waveamdmachine.lds_size_max");
+  mod->removeAttr("waveamdmachine.private_segment_fixed_size_max");
 }
 
 static unsigned getMinReportedSGPRs(func::FuncOp func) {
@@ -84,6 +86,34 @@ static int64_t collectLDSBytes(func::FuncOp func, OpBuilder &builder) {
   if (hasLds)
     func->setAttr("waveamdmachine.lds_size", builder.getI64IntegerAttr(lds));
   return lds;
+}
+
+static int64_t collectPrivateSegmentBytes(func::FuncOp func,
+                                          OpBuilder &builder) {
+  int64_t fixedPrivate = 0;
+  int64_t spillPrivate = 0;
+  bool hasPrivate = false;
+  if (IntegerAttr attr = func->getAttrOfType<IntegerAttr>(
+          wave::regalloc::kScratchSpillBytesAttr)) {
+    spillPrivate = attr.getInt();
+    hasPrivate = true;
+  }
+  if (IntegerAttr attr =
+          func->getAttrOfType<IntegerAttr>("wave.private_segment_fixed_size")) {
+    fixedPrivate = attr.getInt();
+    hasPrivate = true;
+  } else if (IntegerAttr attr = func->getAttrOfType<IntegerAttr>(
+                 wave::regalloc::kPrivateSegmentFixedSizeAttr)) {
+    int64_t totalPrivate = attr.getInt();
+    fixedPrivate =
+        totalPrivate >= spillPrivate ? totalPrivate - spillPrivate : 0;
+    hasPrivate = true;
+  }
+  int64_t privateBytes = fixedPrivate + spillPrivate;
+  if (hasPrivate)
+    func->setAttr(wave::regalloc::kPrivateSegmentFixedSizeAttr,
+                  builder.getI64IntegerAttr(privateBytes));
+  return privateBytes;
 }
 
 struct WaveAMDResourceInfoPass
@@ -164,6 +194,7 @@ struct WaveAMDResourceInfoPass
     int64_t maxVgpr = 0;
     int64_t maxAgpr = 0;
     int64_t maxLds = 0;
+    int64_t maxPrivate = 0;
     bool sawKernel = false;
     for (func::FuncOp func : kernels) {
       clearResourceAttrs(func);
@@ -188,6 +219,7 @@ struct WaveAMDResourceInfoPass
       func->setAttr("waveamdmachine.agpr_count",
                     builder.getI64IntegerAttr(agprCount));
       int64_t lds = collectLDSBytes(func, builder);
+      int64_t privateBytes = collectPrivateSegmentBytes(func, builder);
       if (!isKernel)
         continue;
       sawKernel = true;
@@ -195,6 +227,7 @@ struct WaveAMDResourceInfoPass
       maxVgpr = std::max<int64_t>(maxVgpr, vgprCount);
       maxAgpr = std::max<int64_t>(maxAgpr, agprCount);
       maxLds = std::max<int64_t>(maxLds, lds);
+      maxPrivate = std::max<int64_t>(maxPrivate, privateBytes);
     }
     if (sawKernel) {
       mod->setAttr("waveamdmachine.sgpr_count_max",
@@ -205,6 +238,8 @@ struct WaveAMDResourceInfoPass
                    builder.getI64IntegerAttr(maxAgpr));
       mod->setAttr("waveamdmachine.lds_size_max",
                    builder.getI64IntegerAttr(maxLds));
+      mod->setAttr("waveamdmachine.private_segment_fixed_size_max",
+                   builder.getI64IntegerAttr(maxPrivate));
     }
   }
 };

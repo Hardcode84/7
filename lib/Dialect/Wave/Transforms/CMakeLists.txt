@@ -22,6 +22,7 @@ add_mlir_dialect_library(MLIRWaveTransforms
   WaveAMDRegAllocBankPromotion.cpp
   WaveAMDRegAllocLDS.cpp
   WaveAMDRegAllocPrep.cpp
+  WaveAMDRegAllocScratch.cpp
   WaveAMDRegAllocVerification.cpp
   WaveAMDRegisterLimits.cpp
   WaveAMDRegLiveIntervals.cpp
