@@ -320,6 +320,13 @@ addTripCountAssumption(WaveAMDMachineSelector &S, scf::ForOp op, StringRef name,
   return failure();
 }
 
+static std::optional<int64_t> constantTripCountUpper(scf::ForOp op) {
+  std::optional<llvm::APInt> trip = op.getStaticTripCount();
+  if (!trip || trip->getActiveBits() > 63)
+    return std::nullopt;
+  return static_cast<int64_t>(trip->getZExtValue());
+}
+
 static FailureOr<sym::ExprHandle>
 appendExpr(WaveAMDMachineSelector &S, sym::ExprHandle lhs, sym::ExprHandle rhs,
            ArrayRef<sym::PredHandle> assumptions) {
@@ -429,14 +436,23 @@ static bool isNormalizedUnitLoop(scf::ForOp op) {
 }
 
 static FailureOr<sym::ExprHandle>
-buildAccumulatingCarryExpr(WaveAMDMachineSelector &S, scf::ForOp op,
-                           const PointerOffset &offset, int64_t deltaBytes,
-                           SmallVectorImpl<sym::PredHandle> &assumptions) {
+buildTripCountUpperExpr(WaveAMDMachineSelector &S, scf::ForOp op,
+                        SmallVectorImpl<sym::PredHandle> &assumptions) {
+  if (std::optional<int64_t> trip = constantTripCountUpper(op))
+    return sym::composeExprInt(S.symbolStore(), *trip);
+  if (!isNormalizedUnitLoop(op))
+    return failure();
   std::string tripName = makeLoopSymbol(S, "ptr_trip");
   if (failed(addTripCountAssumption(S, op, tripName, assumptions)))
     return failure();
-  FailureOr<sym::ExprHandle> trip =
-      sym::composeExprSym(S.symbolStore(), tripName);
+  return sym::composeExprSym(S.symbolStore(), tripName);
+}
+
+static FailureOr<sym::ExprHandle>
+buildAccumulatingCarryExpr(WaveAMDMachineSelector &S, scf::ForOp op,
+                           const PointerOffset &offset, int64_t deltaBytes,
+                           SmallVectorImpl<sym::PredHandle> &assumptions) {
+  FailureOr<sym::ExprHandle> trip = buildTripCountUpperExpr(S, op, assumptions);
   FailureOr<sym::ExprHandle> delta =
       sym::composeExprInt(S.symbolStore(), deltaBytes);
   if (failed(trip) || failed(delta))
@@ -457,8 +473,6 @@ static bool proveAccumulatingCarryFitsU32(WaveAMDMachineSelector &S,
   if (deltaBytes == 0)
     return true;
   if (deltaBytes < 0)
-    return false;
-  if (!isNormalizedUnitLoop(op))
     return false;
 
   SmallVector<sym::PredHandle, 4> assumptions(offset.assumptions.begin(),
