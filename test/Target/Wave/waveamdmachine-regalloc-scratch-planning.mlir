@@ -8,7 +8,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
   // CHECK-SAME: slot_base = 20 : i64
   // CHECK-SAME: slot_bytes = 4 : i64
   // CHECK-SAME: status = "available"
-  // CHECK-SAME: uses_flat_scratch = false
+  // CHECK-SAME: uses_flat_scratch = true
   // CHECK-SAME: value_bytes = 4 : i64
   func.func @scratch_plan_available() attributes {
     wave.kernel,

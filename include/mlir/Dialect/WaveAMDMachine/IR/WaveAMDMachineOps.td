@@ -27,6 +27,8 @@ defvar WaveAMDMachine_Gfx940Plus =
     "(isa.Minor == 5 && isa.Stepping == 0))";
 defvar WaveAMDMachine_Gfx950 =
     "isa.Major == 9 && isa.Minor == 5 && isa.Stepping == 0";
+defvar WaveAMDMachine_FlatScratchTarget =
+    "isa.Major == 11 || (isa.Major == 9 && isa.Minor >= 4)";
 defvar WaveAMDMachine_AGPRTarget =
     "isa.Major == 9 && ((isa.Minor == 0 && " #
     "(isa.Stepping == 8 || isa.Stepping == 10)) || " #
@@ -230,6 +232,13 @@ def WaveAMDMachine_Reg1OrImm
                  "::llvm::isa<::mlir::waveamdmachine::ImmType>($_self)">,
            "WaveAMDMachine one-dword SGPR/VGPR register or immediate">;
 
+def WaveAMDMachine_VGPR1OrImm
+    : Type<CPred<"(::llvm::isa<::mlir::waveamdmachine::RegType>($_self) && "
+                 "::llvm::cast<::mlir::waveamdmachine::RegType>($_self).getRegClass() == ::mlir::waveamdmachine::RegClass::VGPR && "
+                 "::llvm::cast<::mlir::waveamdmachine::RegType>($_self).getWidth() == 1) || "
+                 "::llvm::isa<::mlir::waveamdmachine::ImmType>($_self)">,
+           "WaveAMDMachine one-dword VGPR register or immediate">;
+
 def WaveAMDMachine_RegOrMemToken
     : Type<CPred<"::llvm::isa<::mlir::waveamdmachine::RegType>($_self) || "
                  "::llvm::isa<::mlir::waveamdmachine::MemTokenType>($_self)">,
@@ -280,6 +289,20 @@ class WaveAMDMachine_BufferMemoryOp<string mnemonic, list<Trait> traits = []>
   let extraClassDefinition = [{
     ::mlir::waveamdmachine::AddressFieldSpec $cppClass::getAddressFieldSpec() {
       return {/*instOffsetBits=*/12, /*instOffsetSigned=*/false,
+              /*hasSoffset=*/true,
+              ::mlir::waveamdmachine::SOffsetImmPolicy::ZeroImmOnly};
+    }
+  }];
+}
+
+class WaveAMDMachine_ScratchMemoryOp<string mnemonic, list<Trait> traits = []>
+    : WaveAMDMachine_Op<mnemonic,
+        !listconcat(traits,
+          [DeclareOpInterfaceMethods<WaveAMDMachine_AddressFieldsOpInterface>])> {
+  let archPredicate = WaveAMDMachine_FlatScratchTarget;
+  let extraClassDefinition = [{
+    ::mlir::waveamdmachine::AddressFieldSpec $cppClass::getAddressFieldSpec() {
+      return {/*instOffsetBits=*/13, /*instOffsetSigned=*/true,
               /*hasSoffset=*/true,
               ::mlir::waveamdmachine::SOffsetImmPolicy::ZeroImmOnly};
     }
@@ -1799,6 +1822,39 @@ def WaveAMDMachine_GlobalStoreTupleB32Op
   let results = (outs Optional<WaveAMDMachine_MemToken>:$token);
   let assemblyFormat = [{
     $offset `,` $value `,` $base (`after` $dependency^)?
+    (`offset` $inst_offset^)?
+    attr-dict `:` functional-type(operands, results)
+  }];
+}
+
+def WaveAMDMachine_ScratchLoadB32Op
+    : WaveAMDMachine_ScratchMemoryOp<"scratch_load_b32", [WaveAMDMachine_VMEMLoad, MemoryEffects<[MemRead]>]>,
+      WaveAMDMachine_VMEMLoadInfo {
+  let summary = "scratch 32-bit load";
+  let arguments = (ins WaveAMDMachine_VGPR1OrImm:$vaddr,
+                       WaveAMDMachine_SGPR1OrImm:$saddr,
+                       Optional<WaveAMDMachine_MemToken>:$dependency,
+                       DefaultValuedAttr<I64Attr, "0">:$inst_offset);
+  let results = (outs WaveAMDMachine_VGPR1:$result,
+                      Optional<WaveAMDMachine_MemToken>:$token);
+  let assemblyFormat = [{
+    $vaddr `,` $saddr (`after` $dependency^)? (`offset` $inst_offset^)?
+    attr-dict `:` functional-type(operands, results)
+  }];
+}
+
+def WaveAMDMachine_ScratchStoreB32Op
+    : WaveAMDMachine_ScratchMemoryOp<"scratch_store_b32", [WaveAMDMachine_VMEMStore, MemoryEffects<[MemWrite]>]>,
+      WaveAMDMachine_VMEMStoreInfo {
+  let summary = "scratch 32-bit store";
+  let arguments = (ins WaveAMDMachine_VGPR1OrImm:$vaddr,
+                       WaveAMDMachine_VGPR1:$value,
+                       WaveAMDMachine_SGPR1OrImm:$saddr,
+                       Optional<WaveAMDMachine_MemToken>:$dependency,
+                       DefaultValuedAttr<I64Attr, "0">:$inst_offset);
+  let results = (outs Optional<WaveAMDMachine_MemToken>:$token);
+  let assemblyFormat = [{
+    $vaddr `,` $value `,` $saddr (`after` $dependency^)?
     (`offset` $inst_offset^)?
     attr-dict `:` functional-type(operands, results)
   }];

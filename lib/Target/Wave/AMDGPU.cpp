@@ -667,6 +667,34 @@ private:
 
   unsigned dsWriteB32() const { return opcodes.dsWriteB32; }
 
+  unsigned scratchLoadB32Saddr() const { return opcodes.scratchLoadB32; }
+
+  unsigned scratchLoadB32Ve() const {
+    if (isGfx940Plus())
+      return llvm::AMDGPU::SCRATCH_LOAD_DWORD_VE_gfx940;
+    return gfx11Opcode(llvm::AMDGPU::SCRATCH_LOAD_DWORD_gfx11);
+  }
+
+  unsigned scratchLoadB32Svs() const {
+    if (isGfx940Plus())
+      return llvm::AMDGPU::SCRATCH_LOAD_DWORD_SVS_gfx940;
+    return gfx11Opcode(llvm::AMDGPU::SCRATCH_LOAD_DWORD_SVS_gfx11);
+  }
+
+  unsigned scratchStoreB32Saddr() const { return opcodes.scratchStoreB32; }
+
+  unsigned scratchStoreB32Ve() const {
+    if (isGfx940Plus())
+      return llvm::AMDGPU::SCRATCH_STORE_DWORD_VE_gfx940;
+    return gfx11Opcode(llvm::AMDGPU::SCRATCH_STORE_DWORD_gfx11);
+  }
+
+  unsigned scratchStoreB32Svs() const {
+    if (isGfx940Plus())
+      return llvm::AMDGPU::SCRATCH_STORE_DWORD_SVS_gfx940;
+    return gfx11Opcode(llvm::AMDGPU::SCRATCH_STORE_DWORD_SVS_gfx11);
+  }
+
   unsigned dsWriteB16() const {
     if (isGfx8Or9())
       return llvm::AMDGPU::DS_WRITE_B16_vi_gfx9;
@@ -1410,6 +1438,63 @@ private:
                    llvm::MCOperand::createImm(0)});
   }
 
+  LogicalResult emitScratchLoad(Operation &op) {
+    if (failed(rejectNonZeroLiteralScratchVaddr(op, op.getOperand(0))) ||
+        failed(rejectNonZeroLiteralScratchSaddr(op, op.getOperand(1))))
+      return failure();
+    int64_t instOffset = getIntAttr(&op, "inst_offset", 0);
+    bool vaddrOff = getImmediate(op.getOperand(0)).has_value();
+    bool saddrOff = getImmediate(op.getOperand(1)).has_value();
+    if (vaddrOff && saddrOff)
+      return op.emitError(
+          "scratch load requires at least one address register");
+    if (vaddrOff)
+      return emitMC(scratchLoadB32Saddr(),
+                    {toMCOperand(op.getResult(0)),
+                     toMCOperand(op.getOperand(1)),
+                     llvm::MCOperand::createImm(instOffset),
+                     llvm::MCOperand::createImm(0)});
+    if (saddrOff)
+      return emitMC(scratchLoadB32Ve(), {toMCOperand(op.getResult(0)),
+                                         toMCOperand(op.getOperand(0)),
+                                         llvm::MCOperand::createImm(instOffset),
+                                         llvm::MCOperand::createImm(0)});
+    return emitMC(scratchLoadB32Svs(),
+                  {toMCOperand(op.getResult(0)), toMCOperand(op.getOperand(0)),
+                   toMCOperand(op.getOperand(1)),
+                   llvm::MCOperand::createImm(instOffset),
+                   llvm::MCOperand::createImm(0)});
+  }
+
+  LogicalResult emitScratchStore(Operation &op) {
+    if (failed(rejectNonZeroLiteralScratchVaddr(op, op.getOperand(0))) ||
+        failed(rejectNonZeroLiteralScratchSaddr(op, op.getOperand(2))))
+      return failure();
+    int64_t instOffset = getIntAttr(&op, "inst_offset", 0);
+    bool vaddrOff = getImmediate(op.getOperand(0)).has_value();
+    bool saddrOff = getImmediate(op.getOperand(2)).has_value();
+    if (vaddrOff && saddrOff)
+      return op.emitError(
+          "scratch store requires at least one address register");
+    if (vaddrOff)
+      return emitMC(scratchStoreB32Saddr(),
+                    {toMCOperand(op.getOperand(1)),
+                     toMCOperand(op.getOperand(2)),
+                     llvm::MCOperand::createImm(instOffset),
+                     llvm::MCOperand::createImm(0)});
+    if (saddrOff)
+      return emitMC(scratchStoreB32Ve(),
+                    {toMCOperand(op.getOperand(1)),
+                     toMCOperand(op.getOperand(0)),
+                     llvm::MCOperand::createImm(instOffset),
+                     llvm::MCOperand::createImm(0)});
+    return emitMC(scratchStoreB32Svs(),
+                  {toMCOperand(op.getOperand(1)), toMCOperand(op.getOperand(0)),
+                   toMCOperand(op.getOperand(2)),
+                   llvm::MCOperand::createImm(instOffset),
+                   llvm::MCOperand::createImm(0)});
+  }
+
   LogicalResult emitBufferLoadLds(Operation &op, unsigned opcode) {
     if (failed(rejectNonZeroLiteralSoffset(op, op.getOperand(2))))
       return failure();
@@ -1437,6 +1522,20 @@ private:
     if (std::optional<unsigned> imm = getImmediate(soffset))
       if (*imm != 0)
         return op.emitError("buffer nonzero literal soffset must be SGPR");
+    return success();
+  }
+
+  LogicalResult rejectNonZeroLiteralScratchVaddr(Operation &op, Value vaddr) {
+    if (std::optional<unsigned> imm = getImmediate(vaddr))
+      if (*imm != 0)
+        return op.emitError("scratch nonzero literal vaddr must be VGPR");
+    return success();
+  }
+
+  LogicalResult rejectNonZeroLiteralScratchSaddr(Operation &op, Value saddr) {
+    if (std::optional<unsigned> imm = getImmediate(saddr))
+      if (*imm != 0)
+        return op.emitError("scratch nonzero literal saddr must be SGPR");
     return success();
   }
 
@@ -2376,6 +2475,10 @@ private:
       return emitBufferLoad(op, bufferLoadB96());
     if (isa<waveamdmachine::BufferLoadB128Op>(op))
       return emitBufferLoad(op, bufferLoadB128());
+    if (isa<waveamdmachine::ScratchLoadB32Op>(op))
+      return emitScratchLoad(op);
+    if (isa<waveamdmachine::ScratchStoreB32Op>(op))
+      return emitScratchStore(op);
     if (isa<waveamdmachine::GlobalLoadLdsB32Op>(op)) {
       int64_t instOffset = getIntAttr(&op, "inst_offset", 0);
       int64_t aux = getIntAttr(&op, "aux", 0);

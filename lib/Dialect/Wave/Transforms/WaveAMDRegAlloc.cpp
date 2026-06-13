@@ -1294,6 +1294,18 @@ validateFixedGroup(func::FuncOp func, IntervalGroup *group,
   return success();
 }
 
+static FailureOr<bool> applyMemoryPressureRelief(
+    func::FuncOp func, Inventory &inventory, ArrayRef<IntervalGroup *> assigned,
+    IntervalGroup *group, unsigned position, RegisterBudgets budgets) {
+  FailureOr<bool> spilledGroup = applyLDSSpillProvider(
+      func, assigned, group, position, budgets, inventory);
+  if (failed(spilledGroup))
+    return failure();
+  if (*spilledGroup)
+    return true;
+  return applyScratchSpillProvider(func, assigned, group, position, inventory);
+}
+
 static LogicalResult allocateOnce(func::FuncOp func, Inventory &inventory,
                                   ArrayRef<IntervalGroup *> groups,
                                   RegisterBudgets budgets,
@@ -1322,11 +1334,11 @@ static LogicalResult allocateOnce(func::FuncOp func, Inventory &inventory,
     if (failed(promotedGroup))
       return failure();
     if (!*promotedGroup) {
-      FailureOr<bool> spilledGroup = applyLDSSpillProvider(
-          func, assigned, group, position, budgets, inventory);
-      if (failed(spilledGroup))
+      FailureOr<bool> rewroteGroup = applyMemoryPressureRelief(
+          func, inventory, assigned, group, position, budgets);
+      if (failed(rewroteGroup))
         return failure();
-      if (*spilledGroup) {
+      if (*rewroteGroup) {
         rewroteIR = true;
         return success();
       }

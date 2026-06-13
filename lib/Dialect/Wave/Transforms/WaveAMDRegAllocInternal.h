@@ -166,6 +166,11 @@ FailureOr<bool> applyLDSSpillProvider(func::FuncOp func,
                                       IntervalGroup *request, unsigned position,
                                       RegisterBudgets budgets,
                                       Inventory &inventory);
+FailureOr<bool> applyScratchSpillProvider(func::FuncOp func,
+                                          ArrayRef<IntervalGroup *> groups,
+                                          IntervalGroup *request,
+                                          unsigned position,
+                                          Inventory &inventory);
 
 StringRef getLDSSpillPlanStatusName(LDSSpillPlanStatus status);
 LDSSpillPlan planLDSSpillSlot(func::FuncOp func, RegisterBudgets budgets,
