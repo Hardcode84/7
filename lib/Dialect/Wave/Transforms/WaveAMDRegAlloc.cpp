@@ -1294,16 +1294,80 @@ validateFixedGroup(func::FuncOp func, IntervalGroup *group,
   return success();
 }
 
+static bool isLoopCarryUse(Operation *op) {
+  return isa<waveamdmachine::UniformLoopOp, waveamdmachine::ContinueIfOp>(op);
+}
+
+static bool groupLiveAt(IntervalGroup *group, unsigned position) {
+  if (!group)
+    return false;
+  for (Interval *lane : group->intervals)
+    if (lane->start <= position && position <= lane->end)
+      return true;
+  return false;
+}
+
+static bool groupHasLoopCarryUse(IntervalGroup *group) {
+  if (!group)
+    return false;
+  for (Interval *lane : group->intervals)
+    for (Value value : lane->values)
+      for (OpOperand &use : value.getUses())
+        if (isLoopCarryUse(use.getOwner()))
+          return true;
+  return false;
+}
+
+static bool couldTryMemorySpill(IntervalGroup *group, unsigned position) {
+  if (!group || group->reserved || group->nonPromotable ||
+      hasFixedRegister(group))
+    return false;
+  if (group->storageClass != waveamdmachine::RegClass::VGPR ||
+      group->preferredClass != waveamdmachine::RegClass::VGPR)
+    return false;
+  return llvm::any_of(group->intervals, [&](Interval *lane) {
+    return !lane->nonPromotable && lane->start <= position &&
+           position <= lane->end;
+  });
+}
+
+static void setLoopCarrySpillRejectIfNeeded(func::FuncOp func,
+                                            ArrayRef<IntervalGroup *> assigned,
+                                            IntervalGroup *request,
+                                            unsigned position) {
+  if (couldTryMemorySpill(request, position) && groupHasLoopCarryUse(request)) {
+    Builder builder(func.getContext());
+    func->setAttr(kMemorySpillRejectAttr,
+                  builder.getStringAttr(kMemorySpillLoopCarryReject));
+    return;
+  }
+  for (IntervalGroup *group : assigned) {
+    if (!groupLiveAt(group, position) ||
+        !couldTryMemorySpill(group, position) || !groupHasLoopCarryUse(group))
+      continue;
+    Builder builder(func.getContext());
+    func->setAttr(kMemorySpillRejectAttr,
+                  builder.getStringAttr(kMemorySpillLoopCarryReject));
+    return;
+  }
+}
+
 static FailureOr<bool> applyMemoryPressureRelief(
     func::FuncOp func, Inventory &inventory, ArrayRef<IntervalGroup *> assigned,
     IntervalGroup *group, unsigned position, RegisterBudgets budgets) {
+  func->removeAttr(kMemorySpillRejectAttr);
   FailureOr<bool> spilledGroup = applyLDSSpillProvider(
       func, assigned, group, position, budgets, inventory);
   if (failed(spilledGroup))
     return failure();
   if (*spilledGroup)
     return true;
-  return applyScratchSpillProvider(func, assigned, group, position, inventory);
+  FailureOr<bool> scratchSpill =
+      applyScratchSpillProvider(func, assigned, group, position, inventory);
+  if (failed(scratchSpill) || *scratchSpill)
+    return scratchSpill;
+  setLoopCarrySpillRejectIfNeeded(func, assigned, group, position);
+  return false;
 }
 
 static LogicalResult allocateOnce(func::FuncOp func, Inventory &inventory,
@@ -1814,6 +1878,7 @@ static void clearDiagnostics(func::FuncOp func) {
   func->removeAttr(kPressureLiveAttr);
   func->removeAttr(kScalarIntervalsAttr);
   func->removeAttr(kTrackedValuesAttr);
+  func->removeAttr(kMemorySpillRejectAttr);
 }
 
 static std::optional<unsigned> getUnsignedFuncAttr(func::FuncOp func,
@@ -2050,6 +2115,13 @@ struct WaveAMDRegAllocPass
     diag << "; request=" << wave::formatWaveAMDPressureInterval(failure.request)
          << "; overlaps="
          << wave::formatWaveAMDPressureIntervals(failure.overlaps);
+    StringAttr reject = func->getAttrOfType<StringAttr>(kMemorySpillRejectAttr);
+    if (!reject)
+      return;
+    if (reject.getValue() == kMemorySpillLoopCarryReject)
+      diag << "; memory spill cannot materialize loop-carried values";
+    else
+      diag << "; memory spill rejected candidates: " << reject.getValue();
   }
 
   static void emitCombinedPressureError(func::FuncOp func,

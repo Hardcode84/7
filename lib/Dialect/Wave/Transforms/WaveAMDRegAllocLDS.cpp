@@ -107,6 +107,7 @@ public:
       const wave::WaveAMDPressureReliefQuery &query,
       wave::WaveAMDPressureReliefCandidateList &candidates) const override {
     (void)query;
+    sawLoopCarryReject = false;
     unsigned reservedBytes =
         getUnsignedAttr(func, kLDSSpillBytesAttr).value_or(0);
     LDSSpillPlan plan =
@@ -151,6 +152,18 @@ public:
       return lhsSpill.getGroup()->intervals.front()->end >
              rhsSpill.getGroup()->intervals.front()->end;
     return wave::isBetterWaveAMDPressureReliefCandidate(lhs, rhs);
+  }
+
+  void clearNoCandidateDiagnostic() const {
+    func->removeAttr(kMemorySpillRejectAttr);
+  }
+
+  void setNoCandidateDiagnostic() const {
+    if (!sawLoopCarryReject)
+      return;
+    Builder builder(func->getContext());
+    func->setAttr(kMemorySpillRejectAttr,
+                  builder.getStringAttr(kMemorySpillLoopCarryReject));
   }
 
 private:
@@ -202,7 +215,11 @@ private:
     return info && info.getWaitcntInfo().isIssuer();
   }
 
-  static bool hasSimpleUses(Value value, SmallVectorImpl<OpOperand *> &uses) {
+  static bool isLoopCarryUse(Operation *op) {
+    return isa<waveamdmachine::UniformLoopOp, waveamdmachine::ContinueIfOp>(op);
+  }
+
+  bool hasSimpleUses(Value value, SmallVectorImpl<OpOperand *> &uses) const {
     Operation *def = value.getDefiningOp();
     if (!def || isTempOp(def) || isMemoryIssuer(def))
       return false;
@@ -210,6 +227,10 @@ private:
     for (OpOperand &use : value.getUses()) {
       if (isTempOp(use.getOwner()))
         continue;
+      if (isLoopCarryUse(use.getOwner())) {
+        sawLoopCarryReject = true;
+        return false;
+      }
       if (use.getOwner()->getBlock() != block)
         return false;
       uses.push_back(&use);
@@ -341,6 +362,7 @@ private:
   Inventory &inventory;
   IntervalGroup *request = nullptr;
   unsigned position = 0;
+  mutable bool sawLoopCarryReject = false;
 };
 
 static std::optional<unsigned> getUnsignedAttr(Operation *op, StringRef name) {
@@ -639,8 +661,10 @@ FailureOr<bool> mlir::wave::regalloc::applyLDSSpillProvider(
   query.scope = func;
   if (failed(provider.collectCandidates(query, candidates)))
     return failure();
-  if (candidates.empty())
+  if (candidates.empty()) {
+    provider.setNoCandidateDiagnostic();
     return false;
+  }
 
   unsigned selected = 0;
   for (size_t index : llvm::seq<size_t>(1, candidates.size()))
@@ -650,5 +674,6 @@ FailureOr<bool> mlir::wave::regalloc::applyLDSSpillProvider(
   OpBuilder builder(func.getContext());
   if (failed(provider.materialize(*candidates[selected], builder)))
     return failure();
+  provider.clearNoCandidateDiagnostic();
   return true;
 }

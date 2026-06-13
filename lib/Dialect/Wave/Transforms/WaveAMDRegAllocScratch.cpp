@@ -98,6 +98,7 @@ public:
       const wave::WaveAMDPressureReliefQuery &query,
       wave::WaveAMDPressureReliefCandidateList &candidates) const override {
     (void)query;
+    sawLoopCarryReject = false;
     for (IntervalGroup *group : groups)
       collect(group, candidates);
     collect(request, candidates);
@@ -131,6 +132,18 @@ public:
       return lhsSpill.getGroup()->intervals.front()->end >
              rhsSpill.getGroup()->intervals.front()->end;
     return wave::isBetterWaveAMDPressureReliefCandidate(lhs, rhs);
+  }
+
+  void clearNoCandidateDiagnostic() const {
+    func->removeAttr(kMemorySpillRejectAttr);
+  }
+
+  void setNoCandidateDiagnostic() const {
+    if (!sawLoopCarryReject)
+      return;
+    Builder builder(func->getContext());
+    func->setAttr(kMemorySpillRejectAttr,
+                  builder.getStringAttr(kMemorySpillLoopCarryReject));
   }
 
 private:
@@ -171,6 +184,10 @@ private:
     return info && info.getWaitcntInfo().isIssuer();
   }
 
+  static bool isLoopCarryUse(Operation *op) {
+    return isa<waveamdmachine::UniformLoopOp, waveamdmachine::ContinueIfOp>(op);
+  }
+
   bool hasSimpleUses(Value value, SmallVectorImpl<OpOperand *> &uses) const {
     Operation *def = value.getDefiningOp();
     if (!def || isTempOp(def) || isMemoryIssuer(def))
@@ -179,6 +196,10 @@ private:
     for (OpOperand &use : value.getUses()) {
       if (isTempOp(use.getOwner()))
         continue;
+      if (isLoopCarryUse(use.getOwner())) {
+        sawLoopCarryReject = true;
+        return false;
+      }
       if (use.getOwner()->getBlock() != block)
         return false;
       uses.push_back(&use);
@@ -364,6 +385,7 @@ private:
   func::FuncOp func;
   IntervalGroup *request = nullptr;
   unsigned position = 0;
+  mutable bool sawLoopCarryReject = false;
 };
 
 static bool supportsScratchSpillTarget(const llvm::AMDGPU::IsaVersion &isa) {
@@ -482,8 +504,10 @@ FailureOr<bool> mlir::wave::regalloc::applyScratchSpillProvider(
   query.scope = func;
   if (failed(provider.collectCandidates(query, candidates)))
     return failure();
-  if (candidates.empty())
+  if (candidates.empty()) {
+    provider.setNoCandidateDiagnostic();
     return false;
+  }
 
   unsigned selected = 0;
   for (size_t index : llvm::seq<size_t>(1, candidates.size()))
@@ -493,5 +517,6 @@ FailureOr<bool> mlir::wave::regalloc::applyScratchSpillProvider(
   OpBuilder builder(func.getContext());
   if (failed(provider.materialize(*candidates[selected], builder)))
     return failure();
+  provider.clearNoCandidateDiagnostic();
   return true;
 }
