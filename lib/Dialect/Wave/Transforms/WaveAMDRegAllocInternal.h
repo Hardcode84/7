@@ -37,6 +37,8 @@ inline constexpr llvm::StringLiteral kScratchSpillBytesAttr =
     "waveamdmachine.scratch_spill_bytes";
 inline constexpr llvm::StringLiteral kMemorySpillRejectAttr =
     "waveamdmachine.regalloc_debug_memory_spill_reject";
+inline constexpr llvm::StringLiteral kMemorySpillRejectDetailAttr =
+    "waveamdmachine.regalloc_debug_memory_spill_reject_detail";
 inline constexpr llvm::StringLiteral kMemorySpillLoopCarryReject = "loop_carry";
 
 struct IntervalGroup;

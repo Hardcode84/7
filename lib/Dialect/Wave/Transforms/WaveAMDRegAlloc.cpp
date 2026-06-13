@@ -1318,44 +1318,229 @@ static bool groupHasLoopCarryUse(IntervalGroup *group) {
   return false;
 }
 
-static bool couldTryMemorySpill(IntervalGroup *group, unsigned position) {
-  if (!group || group->reserved || group->nonPromotable ||
-      hasFixedRegister(group))
+static bool groupHasTempValue(IntervalGroup *group) {
+  if (!group)
     return false;
-  if (group->storageClass != waveamdmachine::RegClass::VGPR ||
-      group->preferredClass != waveamdmachine::RegClass::VGPR)
+  for (Interval *lane : group->intervals)
+    for (Value value : lane->values)
+      if (Operation *def = value.getDefiningOp())
+        if (def->hasAttr(kTempAttr))
+          return true;
+  return false;
+}
+
+static bool groupHasMemoryIssuerValue(IntervalGroup *group) {
+  if (!group)
     return false;
+  for (Interval *lane : group->intervals)
+    for (Value value : lane->values) {
+      Operation *def = value.getDefiningOp();
+      if (!def)
+        continue;
+      waveamdmachine::WaitcntInfoOpInterface info =
+          dyn_cast<waveamdmachine::WaitcntInfoOpInterface>(def);
+      if (info && info.getWaitcntInfo().isIssuer())
+        return true;
+    }
+  return false;
+}
+
+static bool groupHasCrossBlockUse(IntervalGroup *group) {
+  if (!group)
+    return false;
+  for (Interval *lane : group->intervals) {
+    for (Value value : lane->values) {
+      Operation *def = value.getDefiningOp();
+      if (!def)
+        continue;
+      Block *block = def->getBlock();
+      for (OpOperand &use : value.getUses()) {
+        if (use.getOwner()->hasAttr(kTempAttr) ||
+            isLoopCarryUse(use.getOwner()))
+          continue;
+        if (use.getOwner()->getBlock() != block)
+          return true;
+      }
+    }
+  }
+  return false;
+}
+
+static bool groupHasNonTempUse(IntervalGroup *group) {
+  if (!group)
+    return false;
+  for (Interval *lane : group->intervals)
+    for (Value value : lane->values)
+      for (OpOperand &use : value.getUses())
+        if (!use.getOwner()->hasAttr(kTempAttr))
+          return true;
+  return false;
+}
+
+static bool hasLivePromotableLane(IntervalGroup *group, unsigned position) {
   return llvm::any_of(group->intervals, [&](Interval *lane) {
     return !lane->nonPromotable && lane->start <= position &&
            position <= lane->end;
   });
 }
 
-static void setLoopCarrySpillRejectIfNeeded(func::FuncOp func,
+static bool hasLivePromotableLaneBefore(IntervalGroup *group,
+                                        unsigned position) {
+  return llvm::any_of(group->intervals, [&](Interval *lane) {
+    return !lane->nonPromotable && lane->start < position &&
+           position <= lane->end;
+  });
+}
+
+struct MemorySpillRejectStats {
+  unsigned crossBlock = 0;
+  unsigned eligible = 0;
+  unsigned fixed = 0;
+  unsigned loopCarry = 0;
+  unsigned memoryIssuer = 0;
+  unsigned noUse = 0;
+  unsigned nonPromotable = 0;
+  unsigned startsAtPressure = 0;
+  unsigned temp = 0;
+  unsigned total = 0;
+};
+
+enum class MemorySpillRejectKind : uint8_t {
+  CrossBlock,
+  Eligible,
+  Fixed,
+  LoopCarry,
+  MemoryIssuer,
+  NoUse,
+  NonPromotable,
+  StartsAtPressure,
+  Temp,
+};
+
+static bool shouldInspectMemorySpillReject(IntervalGroup *group,
+                                           unsigned position) {
+  if (!group || !groupLiveAt(group, position))
+    return false;
+  if (group->storageClass != waveamdmachine::RegClass::VGPR ||
+      group->preferredClass != waveamdmachine::RegClass::VGPR)
+    return false;
+  return true;
+}
+
+static bool groupIsNonPromotableAt(IntervalGroup *group, unsigned position) {
+  return group->nonPromotable || !hasLivePromotableLane(group, position);
+}
+
+static MemorySpillRejectKind getMemorySpillUseRejectKind(IntervalGroup *group,
+                                                         unsigned position) {
+  if (!hasLivePromotableLaneBefore(group, position))
+    return MemorySpillRejectKind::StartsAtPressure;
+  if (groupHasMemoryIssuerValue(group))
+    return MemorySpillRejectKind::MemoryIssuer;
+  if (groupHasCrossBlockUse(group))
+    return MemorySpillRejectKind::CrossBlock;
+  if (!groupHasNonTempUse(group))
+    return MemorySpillRejectKind::NoUse;
+  return MemorySpillRejectKind::Eligible;
+}
+
+static MemorySpillRejectKind getMemorySpillRejectKind(IntervalGroup *group,
+                                                      unsigned position) {
+  if (group->reserved || hasFixedRegister(group))
+    return MemorySpillRejectKind::Fixed;
+  if (groupHasLoopCarryUse(group))
+    return MemorySpillRejectKind::LoopCarry;
+  if (groupHasTempValue(group))
+    return MemorySpillRejectKind::Temp;
+  if (groupIsNonPromotableAt(group, position))
+    return MemorySpillRejectKind::NonPromotable;
+  return getMemorySpillUseRejectKind(group, position);
+}
+
+static void incrementMemorySpillReject(MemorySpillRejectStats &stats,
+                                       MemorySpillRejectKind kind) {
+  switch (kind) {
+  case MemorySpillRejectKind::CrossBlock:
+    ++stats.crossBlock;
+    break;
+  case MemorySpillRejectKind::Eligible:
+    ++stats.eligible;
+    break;
+  case MemorySpillRejectKind::Fixed:
+    ++stats.fixed;
+    break;
+  case MemorySpillRejectKind::LoopCarry:
+    ++stats.loopCarry;
+    break;
+  case MemorySpillRejectKind::MemoryIssuer:
+    ++stats.memoryIssuer;
+    break;
+  case MemorySpillRejectKind::NoUse:
+    ++stats.noUse;
+    break;
+  case MemorySpillRejectKind::NonPromotable:
+    ++stats.nonPromotable;
+    break;
+  case MemorySpillRejectKind::StartsAtPressure:
+    ++stats.startsAtPressure;
+    break;
+  case MemorySpillRejectKind::Temp:
+    ++stats.temp;
+    break;
+  }
+}
+
+static void classifyMemorySpillReject(IntervalGroup *group, unsigned position,
+                                      MemorySpillRejectStats &stats) {
+  if (!shouldInspectMemorySpillReject(group, position))
+    return;
+  ++stats.total;
+  incrementMemorySpillReject(stats, getMemorySpillRejectKind(group, position));
+}
+
+static void addRejectCount(Builder &builder, NamedAttrList &attrs,
+                           StringRef name, unsigned count) {
+  if (count == 0)
+    return;
+  attrs.set(name, builder.getI64IntegerAttr(count));
+}
+
+static void setMemorySpillRejectDiagnostics(func::FuncOp func,
                                             ArrayRef<IntervalGroup *> assigned,
                                             IntervalGroup *request,
                                             unsigned position) {
-  if (couldTryMemorySpill(request, position) && groupHasLoopCarryUse(request)) {
-    Builder builder(func.getContext());
+  if (!request || request->storageClass != waveamdmachine::RegClass::VGPR)
+    return;
+  MemorySpillRejectStats stats;
+  classifyMemorySpillReject(request, position, stats);
+  for (IntervalGroup *group : assigned)
+    classifyMemorySpillReject(group, position, stats);
+  if (stats.total == 0)
+    return;
+
+  Builder builder(func.getContext());
+  NamedAttrList attrs;
+  attrs.set("total", builder.getI64IntegerAttr(stats.total));
+  addRejectCount(builder, attrs, "cross_block", stats.crossBlock);
+  addRejectCount(builder, attrs, "eligible", stats.eligible);
+  addRejectCount(builder, attrs, "fixed", stats.fixed);
+  addRejectCount(builder, attrs, "loop_carry", stats.loopCarry);
+  addRejectCount(builder, attrs, "memory_issuer", stats.memoryIssuer);
+  addRejectCount(builder, attrs, "no_use", stats.noUse);
+  addRejectCount(builder, attrs, "non_promotable", stats.nonPromotable);
+  addRejectCount(builder, attrs, "starts_at_pressure", stats.startsAtPressure);
+  addRejectCount(builder, attrs, "temp", stats.temp);
+  func->setAttr(kMemorySpillRejectDetailAttr, builder.getDictionaryAttr(attrs));
+  if (stats.loopCarry != 0)
     func->setAttr(kMemorySpillRejectAttr,
                   builder.getStringAttr(kMemorySpillLoopCarryReject));
-    return;
-  }
-  for (IntervalGroup *group : assigned) {
-    if (!groupLiveAt(group, position) ||
-        !couldTryMemorySpill(group, position) || !groupHasLoopCarryUse(group))
-      continue;
-    Builder builder(func.getContext());
-    func->setAttr(kMemorySpillRejectAttr,
-                  builder.getStringAttr(kMemorySpillLoopCarryReject));
-    return;
-  }
 }
 
 static FailureOr<bool> applyMemoryPressureRelief(
     func::FuncOp func, Inventory &inventory, ArrayRef<IntervalGroup *> assigned,
     IntervalGroup *group, unsigned position, RegisterBudgets budgets) {
   func->removeAttr(kMemorySpillRejectAttr);
+  func->removeAttr(kMemorySpillRejectDetailAttr);
   FailureOr<bool> spilledGroup = applyLDSSpillProvider(
       func, assigned, group, position, budgets, inventory);
   if (failed(spilledGroup))
@@ -1366,7 +1551,7 @@ static FailureOr<bool> applyMemoryPressureRelief(
       applyScratchSpillProvider(func, assigned, group, position, inventory);
   if (failed(scratchSpill) || *scratchSpill)
     return scratchSpill;
-  setLoopCarrySpillRejectIfNeeded(func, assigned, group, position);
+  setMemorySpillRejectDiagnostics(func, assigned, group, position);
   return false;
 }
 
@@ -1879,6 +2064,7 @@ static void clearDiagnostics(func::FuncOp func) {
   func->removeAttr(kScalarIntervalsAttr);
   func->removeAttr(kTrackedValuesAttr);
   func->removeAttr(kMemorySpillRejectAttr);
+  func->removeAttr(kMemorySpillRejectDetailAttr);
 }
 
 static std::optional<unsigned> getUnsignedFuncAttr(func::FuncOp func,
@@ -2104,6 +2290,35 @@ struct WaveAMDRegAllocPass
     return wave::verifyNoHardwareResourceLiveRangeOverlap(func, kPassName);
   }
 
+  static void appendMemorySpillRejectDetail(InFlightDiagnostic &diag,
+                                            DictionaryAttr detail) {
+    if (!detail)
+      return;
+    bool first = true;
+    auto append = [&](StringRef name) {
+      IntegerAttr attr = detail.getAs<IntegerAttr>(name);
+      if (!attr)
+        return;
+      if (first) {
+        diag << "; memory spill reject detail: ";
+        first = false;
+      } else {
+        diag << ", ";
+      }
+      diag << name << "=" << attr.getInt();
+    };
+    append("loop_carry");
+    append("temp");
+    append("starts_at_pressure");
+    append("non_promotable");
+    append("memory_issuer");
+    append("cross_block");
+    append("fixed");
+    append("no_use");
+    append("eligible");
+    append("total");
+  }
+
   static void emitPressureError(func::FuncOp func,
                                 const PressureFailure &failure) {
     InFlightDiagnostic diag = func.emitError()
@@ -2116,12 +2331,17 @@ struct WaveAMDRegAllocPass
          << "; overlaps="
          << wave::formatWaveAMDPressureIntervals(failure.overlaps);
     StringAttr reject = func->getAttrOfType<StringAttr>(kMemorySpillRejectAttr);
-    if (!reject)
+    DictionaryAttr detail =
+        func->getAttrOfType<DictionaryAttr>(kMemorySpillRejectDetailAttr);
+    if (!reject) {
+      appendMemorySpillRejectDetail(diag, detail);
       return;
+    }
     if (reject.getValue() == kMemorySpillLoopCarryReject)
       diag << "; memory spill cannot materialize loop-carried values";
     else
       diag << "; memory spill rejected candidates: " << reject.getValue();
+    appendMemorySpillRejectDetail(diag, detail);
   }
 
   static void emitCombinedPressureError(func::FuncOp func,

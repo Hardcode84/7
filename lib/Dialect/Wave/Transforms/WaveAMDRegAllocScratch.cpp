@@ -136,6 +136,7 @@ public:
 
   void clearNoCandidateDiagnostic() const {
     func->removeAttr(kMemorySpillRejectAttr);
+    func->removeAttr(kMemorySpillRejectDetailAttr);
   }
 
   void setNoCandidateDiagnostic() const {

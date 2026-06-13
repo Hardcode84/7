@@ -4,6 +4,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
 // CHECK: error: waveamd-reg-alloc ran out of SGPR registers
 // CHECK-NOT: memory spill cannot materialize loop-carried values
+// CHECK-NOT: memory spill reject detail
 // CHECK: note: see current operation
 func.func @sgpr_loop_carry_no_memory_spill_diag() attributes {wave.kernel} {
   %zero = waveamdmachine.imm 0 : !waveamdmachine.imm

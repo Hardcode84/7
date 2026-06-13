@@ -5,10 +5,14 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
 // ERR: error: waveamd-reg-alloc ran out of VGPR registers
 // ERR-SAME: memory spill cannot materialize loop-carried values
+// ERR-SAME: memory spill reject detail:
+// ERR-SAME: loop_carry=
 // ERR: waveamdmachine.regalloc_debug_memory_spill_reject = "loop_carry"
+// ERR: waveamdmachine.regalloc_debug_memory_spill_reject_detail = {{.*}}loop_carry
 //
 // SOFT-LABEL: func.func @scratch_spill_rejects_loop_carry
 // SOFT-SAME: waveamdmachine.regalloc_debug_memory_spill_reject = "loop_carry"
+// SOFT-SAME: waveamdmachine.regalloc_debug_memory_spill_reject_detail = {{.*}}loop_carry
 // SOFT-NOT: scratch_load_b32
 // SOFT: waveamdmachine.uniform_loop
 func.func @scratch_spill_rejects_loop_carry()
