@@ -50,7 +50,7 @@ public:
     return cost;
   }
 
-  unsigned getReliefDwords() const override { return 1; }
+  unsigned getReliefDwords() const override { return plan.valueBytes / 4; }
 
   std::optional<StringRef> getRejectReason() const override {
     if (rejectReason.empty())
@@ -87,8 +87,10 @@ private:
 class ScratchSpillProvider final : public wave::WaveAMDPressureReliefProvider {
 public:
   ScratchSpillProvider(func::FuncOp func, ArrayRef<IntervalGroup *> groups,
-                       IntervalGroup *request, unsigned position)
-      : groups(groups), func(func), request(request), position(position) {}
+                       IntervalGroup *request, unsigned position,
+                       Inventory &inventory)
+      : groups(groups), inventory(inventory), func(func), request(request),
+        position(position) {}
 
   StringRef getName() const override { return "scratch-spill"; }
 
@@ -96,16 +98,9 @@ public:
       const wave::WaveAMDPressureReliefQuery &query,
       wave::WaveAMDPressureReliefCandidateList &candidates) const override {
     (void)query;
-    unsigned reservedBytes =
-        getUnsignedAttr(func, kScratchSpillBytesAttr).value_or(0);
-    ScratchSpillPlan plan =
-        planScratchSpillSlot(func, /*valueBytes=*/4, reservedBytes);
-    if (plan.status != ScratchSpillPlanStatus::Available)
-      return success();
-
     for (IntervalGroup *group : groups)
-      collect(group, plan, candidates);
-    collect(request, plan, candidates);
+      collect(group, candidates);
+    collect(request, candidates);
     return success();
   }
 
@@ -129,6 +124,8 @@ public:
         static_cast<const ScratchSpillCandidate &>(lhs);
     const ScratchSpillCandidate &rhsSpill =
         static_cast<const ScratchSpillCandidate &>(rhs);
+    if (lhs.getReliefDwords() != rhs.getReliefDwords())
+      return lhs.getReliefDwords() > rhs.getReliefDwords();
     if (lhsSpill.getGroup()->intervals.front()->end !=
         rhsSpill.getGroup()->intervals.front()->end)
       return lhsSpill.getGroup()->intervals.front()->end >
@@ -147,15 +144,6 @@ private:
     return false;
   }
 
-  static Value getSimpleValue(IntervalGroup *group) {
-    if (!group || group->intervals.size() != 1)
-      return {};
-    Interval *interval = group->intervals.front();
-    if (interval->values.size() != 1)
-      return {};
-    return *interval->values.begin();
-  }
-
   static bool isSpillableGroup(IntervalGroup *group) {
     if (!group || group->reserved || group->nonPromotable ||
         hasFixedRegister(group))
@@ -165,12 +153,12 @@ private:
   }
 
   static bool isEligibleGroup(IntervalGroup *group, unsigned position) {
-    if (!isSpillableGroup(group) || group->intervals.size() != 1)
+    if (!isSpillableGroup(group))
       return false;
-    Interval *lane = group->intervals.front();
-    if (lane->nonPromotable || lane->start > position || lane->end < position)
-      return false;
-    return true;
+    return llvm::any_of(group->intervals, [&](Interval *lane) {
+      return !lane->nonPromotable && lane->start <= position &&
+             position <= lane->end;
+    });
   }
 
   static bool isTempOp(Operation *op) {
@@ -183,7 +171,7 @@ private:
     return info && info.getWaitcntInfo().isIssuer();
   }
 
-  static bool hasSimpleUses(Value value, SmallVectorImpl<OpOperand *> &uses) {
+  bool hasSimpleUses(Value value, SmallVectorImpl<OpOperand *> &uses) const {
     Operation *def = value.getDefiningOp();
     if (!def || isTempOp(def) || isMemoryIssuer(def))
       return false;
@@ -198,22 +186,49 @@ private:
     return !uses.empty();
   }
 
-  void collect(IntervalGroup *group, ScratchSpillPlan plan,
+  bool isValueLiveAt(Value value, ArrayRef<OpOperand *> uses) const {
+    Operation *def = value.getDefiningOp();
+    if (!def)
+      return false;
+    unsigned start = inventory.positions.lookup(def);
+    if (start >= position)
+      return false;
+    unsigned end = start;
+    for (OpOperand *use : uses)
+      end = std::max(end, inventory.positions.lookup(use->getOwner()));
+    return position <= end;
+  }
+
+  void
+  collectValue(IntervalGroup *group, Value value,
                wave::WaveAMDPressureReliefCandidateList &candidates) const {
-    if (!isEligibleGroup(group, position))
-      return;
-    Value value = getSimpleValue(group);
-    if (!value)
-      return;
     waveamdmachine::RegType type =
         cast<waveamdmachine::RegType>(value.getType());
-    if (type.getWidth() != 1)
+    if (type.getRegClass() != waveamdmachine::RegClass::VGPR ||
+        type.getWidth() == 0)
       return;
     SmallVector<OpOperand *> uses;
-    if (!hasSimpleUses(value, uses))
+    if (!hasSimpleUses(value, uses) || !isValueLiveAt(value, uses))
+      return;
+    unsigned reservedBytes =
+        getUnsignedAttr(func, kScratchSpillBytesAttr).value_or(0);
+    ScratchSpillPlan plan =
+        planScratchSpillSlot(func, type.getWidth() * 4, reservedBytes);
+    if (plan.status != ScratchSpillPlanStatus::Available)
       return;
     candidates.push_back(std::make_unique<ScratchSpillCandidate>(
         group, value, plan, uses.size()));
+  }
+
+  void collect(IntervalGroup *group,
+               wave::WaveAMDPressureReliefCandidateList &candidates) const {
+    if (!isEligibleGroup(group, position))
+      return;
+    llvm::SmallDenseSet<Value, 8> seen;
+    for (Interval *lane : group->intervals)
+      for (Value value : lane->values)
+        if (seen.insert(value).second)
+          collectValue(group, value, candidates);
   }
 
   Value createImm(OpBuilder &builder, Location loc, int64_t value) const {
@@ -235,18 +250,49 @@ private:
     return addr.getResult();
   }
 
-  void materializeAddress(OpBuilder &builder, Location loc,
-                          const ScratchSpillPlan &plan, Value &vaddr,
-                          Value &saddr, int64_t &instOffset) const {
+  void materializeAddress(OpBuilder &builder, Location loc, unsigned byteOffset,
+                          Value &vaddr, Value &saddr,
+                          int64_t &instOffset) const {
     Value zero = createImm(builder, loc, 0);
     vaddr = zero;
-    if (plan.slotBase <= kScratchImmediateOffsetMax) {
+    if (byteOffset <= kScratchImmediateOffsetMax) {
       saddr = materializeSGPRAddress(builder, loc, 0);
-      instOffset = plan.slotBase;
+      instOffset = byteOffset;
       return;
     }
-    saddr = materializeSGPRAddress(builder, loc, plan.slotBase);
+    saddr = materializeSGPRAddress(builder, loc, byteOffset);
     instOffset = 0;
+  }
+
+  SmallVector<Type> getScalarVGPRTypes(unsigned width) const {
+    MLIRContext *ctx = func->getContext();
+    Type type = waveamdmachine::RegType::get(
+        ctx, waveamdmachine::RegClass::VGPR, /*width=*/1, /*index=*/-1);
+    return SmallVector<Type>(width, type);
+  }
+
+  SmallVector<Value> splitValue(Value value, OpBuilder &builder,
+                                Location loc) const {
+    waveamdmachine::RegType type =
+        cast<waveamdmachine::RegType>(value.getType());
+    if (type.getWidth() == 1)
+      return {value};
+    waveamdmachine::TupleToElementsOp split =
+        waveamdmachine::TupleToElementsOp::create(
+            builder, loc, getScalarVGPRTypes(type.getWidth()), value);
+    split->setAttr(kRegAllocTempAttr, builder.getUnitAttr());
+    return SmallVector<Value>(split.getElements().begin(),
+                              split.getElements().end());
+  }
+
+  Value joinValue(Type type, ArrayRef<Value> values, OpBuilder &builder,
+                  Location loc) const {
+    if (values.size() == 1)
+      return values.front();
+    waveamdmachine::TupleFromElementsOp join =
+        waveamdmachine::TupleFromElementsOp::create(builder, loc, type, values);
+    join->setAttr(kRegAllocTempAttr, builder.getUnitAttr());
+    return join.getTuple();
   }
 
   LogicalResult materializeValue(const ScratchSpillCandidate &spill,
@@ -261,33 +307,42 @@ private:
     ScratchSpillPlan plan = spill.getPlan();
     Type tokenType = waveamdmachine::MemTokenType::get(builder.getContext());
     builder.setInsertionPointAfter(def);
-    Value storeVaddr;
-    Value storeSaddr;
-    int64_t storeOffset = 0;
-    materializeAddress(builder, def->getLoc(), plan, storeVaddr, storeSaddr,
-                       storeOffset);
-    waveamdmachine::ScratchStoreB32Op store =
-        waveamdmachine::ScratchStoreB32Op::create(
-            builder, def->getLoc(), tokenType, storeVaddr, value, storeSaddr,
-            Value{}, storeOffset);
-    store->setAttr(kRegAllocTempAttr, builder.getUnitAttr());
+    SmallVector<Value> storeValues = splitValue(value, builder, def->getLoc());
+    Value storeToken;
+    for (auto [index, storeValue] : llvm::enumerate(storeValues)) {
+      Value storeVaddr;
+      Value storeSaddr;
+      int64_t storeOffset = 0;
+      materializeAddress(builder, def->getLoc(), plan.slotBase + index * 4,
+                         storeVaddr, storeSaddr, storeOffset);
+      waveamdmachine::ScratchStoreB32Op store =
+          waveamdmachine::ScratchStoreB32Op::create(
+              builder, def->getLoc(), tokenType, storeVaddr, storeValue,
+              storeSaddr, storeToken, storeOffset);
+      store->setAttr(kRegAllocTempAttr, builder.getUnitAttr());
+      storeToken = store.getToken();
+    }
 
     for (OpOperand *use : uses) {
       if (use->get() != value)
         continue;
       Operation *user = use->getOwner();
       builder.setInsertionPoint(user);
-      Value loadVaddr;
-      Value loadSaddr;
-      int64_t loadOffset = 0;
-      materializeAddress(builder, user->getLoc(), plan, loadVaddr, loadSaddr,
-                         loadOffset);
-      waveamdmachine::ScratchLoadB32Op load =
-          waveamdmachine::ScratchLoadB32Op::create(
-              builder, user->getLoc(), value.getType(), tokenType, loadVaddr,
-              loadSaddr, store.getToken(), loadOffset);
-      load->setAttr(kRegAllocTempAttr, builder.getUnitAttr());
-      use->set(load.getResult());
+      SmallVector<Value> loadValues;
+      for (unsigned index : llvm::seq<unsigned>(0, storeValues.size())) {
+        Value loadVaddr;
+        Value loadSaddr;
+        int64_t loadOffset = 0;
+        materializeAddress(builder, user->getLoc(), plan.slotBase + index * 4,
+                           loadVaddr, loadSaddr, loadOffset);
+        waveamdmachine::ScratchLoadB32Op load =
+            waveamdmachine::ScratchLoadB32Op::create(
+                builder, user->getLoc(), storeValues[index].getType(),
+                tokenType, loadVaddr, loadSaddr, storeToken, loadOffset);
+        load->setAttr(kRegAllocTempAttr, builder.getUnitAttr());
+        loadValues.push_back(load.getResult());
+      }
+      use->set(joinValue(value.getType(), loadValues, builder, user->getLoc()));
     }
     return success();
   }
@@ -305,6 +360,7 @@ private:
   }
 
   ArrayRef<IntervalGroup *> groups;
+  Inventory &inventory;
   func::FuncOp func;
   IntervalGroup *request = nullptr;
   unsigned position = 0;
@@ -419,8 +475,8 @@ ScratchSpillPlan mlir::wave::regalloc::planScratchSpillSlot(
 
 FailureOr<bool> mlir::wave::regalloc::applyScratchSpillProvider(
     func::FuncOp func, ArrayRef<IntervalGroup *> groups, IntervalGroup *request,
-    unsigned position, Inventory &) {
-  ScratchSpillProvider provider(func, groups, request, position);
+    unsigned position, Inventory &inventory) {
+  ScratchSpillProvider provider(func, groups, request, position, inventory);
   wave::WaveAMDPressureReliefCandidateList candidates;
   wave::WaveAMDPressureReliefQuery query;
   query.scope = func;

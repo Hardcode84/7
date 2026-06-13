@@ -8,8 +8,9 @@
 #
 # The Python builder is asked for pre-specialise MLIR
 # (skip_specialize=True). The tune body then binds the tile factor,
-# specialises, lowers, regalloc-mark-overflow, hazard-waits,
-# resource-info; the score reads vgpr_count_max off the module.
+# specialises, lowers, regalloc-mark-overflow, reruns ticket waits for
+# regalloc-created memory, hazard-waits, resource-info; the score reads
+# vgpr_count_max off the module.
 
 from mlir.dialects.wave_matmul import build_wmma_f16_matmul_module
 from mlir.ir import Module, UnitAttr
@@ -53,9 +54,11 @@ module attributes {transform.with_named_sequence} {
     %zero = transform.param.constant 0 : i64 -> !transform.param<i64>
     transform.match.param.cmpi eq %overflowed, %zero
         : !transform.param<i64>
-    %m8 = transform.apply_registered_pass "waveamd-insert-hazard-waits" to %m7
+    %m8 = transform.apply_registered_pass "waveamd-insert-ticket-waits" to %m7
         : (!transform.any_op) -> !transform.any_op
-    %m9 = transform.apply_registered_pass "waveamd-resource-info" to %m8
+    %m9 = transform.apply_registered_pass "waveamd-insert-hazard-waits" to %m8
+        : (!transform.any_op) -> !transform.any_op
+    %m10 = transform.apply_registered_pass "waveamd-resource-info" to %m9
         : (!transform.any_op) -> !transform.any_op
     transform.yield
   }
@@ -96,8 +99,8 @@ print(module)
 # With the builder packing A/B frags into nested parametric ptuple
 # iter-args (`ptuple<ptuple<af, M>, "wave_k_tiles">`), the K-loop
 # iter-arg width scales with the bound `wave_k_tiles`. On gfx1100
-# (256 VGPRs / wave): with pointer carries recomputed from ranged bases,
-# K = 4 lands at 224 VGPRs; K = 8 overflows. Tune picks K = 4.
+# (256 VGPRs / wave): K = 8 reaches the VGPR cap and fits after scratch
+# relief. Tune picks K = 8.
 # CHECK-LABEL: module
-# CHECK-SAME: waveamdmachine.vgpr_count_max = 224 : i64
-# CHECK-SAME: wavemeta.params = {wave_k_tiles = 4 : index
+# CHECK-SAME: waveamdmachine.vgpr_count_max = 256 : i64
+# CHECK-SAME: wavemeta.params = {wave_k_tiles = 8 : index
