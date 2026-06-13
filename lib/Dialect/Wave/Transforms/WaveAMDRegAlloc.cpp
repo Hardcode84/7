@@ -17,6 +17,7 @@
 #include "mlir/Dialect/Wave/Transforms/WaveAMDRegAllocVerification.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachine.h"
 #include "mlir/IR/BuiltinOps.h"
+#include "mlir/IR/Remarks.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
@@ -83,6 +84,8 @@ static constexpr llvm::StringLiteral kPressureLimitAttr =
     "waveamdmachine.regalloc_debug_pressure_limit";
 static constexpr llvm::StringLiteral kPressureLiveAttr =
     "waveamdmachine.regalloc_debug_pressure_live_dwords";
+static constexpr llvm::StringLiteral kRemarkCategory =
+    "waveamdmachine-regalloc";
 static constexpr llvm::StringLiteral kScalarIntervalsAttr =
     "waveamdmachine.regalloc_debug_scalar_intervals";
 static constexpr llvm::StringLiteral kTrackedValuesAttr =
@@ -1992,52 +1995,71 @@ static Value selectRepresentative(const Interval &interval,
   return selected;
 }
 
-static DictionaryAttr buildIntervalAttr(Builder &builder, Inventory &inventory,
-                                        Interval *interval) {
-  NamedAttrList attrs;
-  attrs.set("class", builder.getStringAttr(
-                         getRegClassName(interval->type.getRegClass())));
-  attrs.set("end", builder.getI64IntegerAttr(interval->end));
+static unsigned getActiveScalarIntervalCount(Inventory &inventory) {
+  return llvm::count_if(inventory.intervals, [](const auto &interval) {
+    return !interval->values.empty() || interval->reserved;
+  });
+}
+
+static remark::RemarkOpts getRegAllocRemarkOpts(func::FuncOp func,
+                                                StringRef name) {
+  return remark::RemarkOpts::name(name)
+      .category(kRemarkCategory)
+      .function(func.getSymName());
+}
+
+static void emitIntegerMetric(remark::detail::InFlightRemark &remark,
+                              StringRef name, int64_t value) {
+  if (remark)
+    remark << mlir::remark::metric(name, value);
+}
+
+static void emitStringMetric(remark::detail::InFlightRemark &remark,
+                             StringRef name, StringRef value) {
+  if (remark)
+    remark << mlir::remark::detail::Remark::Arg(name, value);
+}
+
+static void emitIntervalRemark(func::FuncOp func, Inventory &inventory,
+                               Interval *interval) {
+  if (interval->values.empty() && !interval->reserved)
+    return;
+  auto remark = mlir::remark::analysis(
+      func.getLoc(), getRegAllocRemarkOpts(func, "regalloc-interval"));
+  if (!remark)
+    return;
+
+  emitStringMetric(remark, "class",
+                   getRegClassName(interval->type.getRegClass()));
+  emitIntegerMetric(remark, "end", interval->end);
   if (interval->type.getIndex() >= 0)
-    attrs.set("fixed", builder.getI64IntegerAttr(interval->type.getIndex()));
+    emitIntegerMetric(remark, "fixed", interval->type.getIndex());
   if (interval->reserved)
-    attrs.set("reserved", builder.getBoolAttr(true));
+    remark << mlir::remark::metric("reserved", true);
   if (interval->group->assignedBase) {
     std::optional<unsigned> laneIndex = getLaneIndex(interval->group, interval);
     if (laneIndex)
-      attrs.set("phys", builder.getI64IntegerAttr(
-                            *interval->group->assignedBase + *laneIndex));
+      emitIntegerMetric(remark, "phys",
+                        *interval->group->assignedBase + *laneIndex);
   }
-  attrs.set("storage_class", builder.getStringAttr(getRegClassName(
-                                 interval->group->storageClass)));
-  attrs.set("position", builder.getI64IntegerAttr(interval->start));
+  emitStringMetric(remark, "storage_class",
+                   getRegClassName(interval->group->storageClass));
+  emitIntegerMetric(remark, "position", interval->start);
   if (interval->group->storageClass != interval->type.getRegClass())
-    attrs.set("promoted", builder.getBoolAttr(true));
+    remark << mlir::remark::metric("promoted", true);
   int64_t resultIndex = -1;
   if (!interval->values.empty()) {
     Value value = selectRepresentative(*interval, inventory);
     resultIndex = getResultIndex(value);
   }
-  attrs.set("result", builder.getI64IntegerAttr(resultIndex));
-  attrs.set("start", builder.getI64IntegerAttr(interval->start));
-  attrs.set("width", builder.getI64IntegerAttr(interval->type.getWidth()));
-  return builder.getDictionaryAttr(attrs);
+  emitIntegerMetric(remark, "result", resultIndex);
+  emitIntegerMetric(remark, "start", interval->start);
+  emitIntegerMetric(remark, "width", interval->type.getWidth());
 }
 
-static ArrayAttr buildIntervalAttrs(Builder &builder, Inventory &inventory) {
-  SmallVector<Attribute> attrs;
-  for (const std::unique_ptr<Interval> &interval : inventory.intervals) {
-    if (interval->values.empty() && !interval->reserved)
-      continue;
-    attrs.push_back(buildIntervalAttr(builder, inventory, interval.get()));
-  }
-  return builder.getArrayAttr(attrs);
-}
-
-static unsigned getActiveScalarIntervalCount(Inventory &inventory) {
-  return llvm::count_if(inventory.intervals, [](const auto &interval) {
-    return !interval->values.empty() || interval->reserved;
-  });
+static void emitIntervalRemarks(func::FuncOp func, Inventory &inventory) {
+  for (const std::unique_ptr<Interval> &interval : inventory.intervals)
+    emitIntervalRemark(func, inventory, interval.get());
 }
 
 static void clearDiagnostics(func::FuncOp func) {
@@ -2067,6 +2089,12 @@ static void clearDiagnostics(func::FuncOp func) {
   func->removeAttr(kMemorySpillRejectDetailAttr);
 }
 
+static void clearTransientRegAllocAttrs(func::FuncOp func) {
+  func->removeAttr(kMemorySpillRejectAttr);
+  func->removeAttr(kMemorySpillRejectDetailAttr);
+  func.walk([](Operation *op) { op->removeAttr(kTempAttr); });
+}
+
 static std::optional<unsigned> getUnsignedFuncAttr(func::FuncOp func,
                                                    StringRef name) {
   IntegerAttr attr = func->getAttrOfType<IntegerAttr>(name);
@@ -2079,116 +2107,119 @@ static std::optional<unsigned> getUnsignedFuncAttr(func::FuncOp func,
   return static_cast<unsigned>(value);
 }
 
-static DictionaryAttr buildLDSSpillPlanAttr(Builder &builder,
-                                            const LDSSpillPlan &plan) {
-  NamedAttrList attrs;
-  attrs.set("existing_dynamic_bytes",
-            builder.getI64IntegerAttr(plan.existingDynamicBytes));
-  attrs.set("existing_fixed_bytes",
-            builder.getI64IntegerAttr(plan.existingFixedBytes));
-  attrs.set("reserved_spill_bytes",
-            builder.getI64IntegerAttr(plan.reservedSpillBytes));
-  attrs.set("status",
-            builder.getStringAttr(getLDSSpillPlanStatusName(plan.status)));
-  attrs.set("value_bytes", builder.getI64IntegerAttr(plan.valueBytes));
-  if (plan.status == LDSSpillPlanStatus::Available) {
-    attrs.set("available_bytes",
-              builder.getI64IntegerAttr(plan.availableBytes));
-    attrs.set("limit_bytes", builder.getI64IntegerAttr(plan.limitBytes));
-    attrs.set("slot_base", builder.getI64IntegerAttr(plan.slotBase));
-    attrs.set("slot_bytes", builder.getI64IntegerAttr(plan.slotBytes));
-    attrs.set("wave_stride", builder.getI64IntegerAttr(plan.waveStride));
-    attrs.set("wavefront_size", builder.getI64IntegerAttr(plan.wavefrontSize));
-    attrs.set("waves_per_workgroup",
-              builder.getI64IntegerAttr(plan.wavesPerWorkgroup));
-  }
-  return builder.getDictionaryAttr(attrs);
-}
-
-static void setLDSSpillPlanDiagnostics(func::FuncOp func, Builder &builder,
-                                       RegisterBudgets budgets) {
+static void emitLDSSpillPlanRemark(func::FuncOp func, RegisterBudgets budgets) {
   unsigned reservedBytes =
       getUnsignedFuncAttr(func, kLDSSpillBytesAttr).value_or(0);
   LDSSpillPlan plan =
       planLDSSpillSlot(func, budgets, /*valueBytes=*/4, reservedBytes);
   if (plan.status == LDSSpillPlanStatus::NotKernel)
     return;
-  func->setAttr(kLDSSpillPlanAttr, buildLDSSpillPlanAttr(builder, plan));
+  auto remark = mlir::remark::analysis(
+      func.getLoc(), getRegAllocRemarkOpts(func, "regalloc-lds-plan"));
+  if (!remark)
+    return;
+  emitIntegerMetric(remark, "existing_dynamic_bytes",
+                    plan.existingDynamicBytes);
+  emitIntegerMetric(remark, "existing_fixed_bytes", plan.existingFixedBytes);
+  emitIntegerMetric(remark, "reserved_spill_bytes", plan.reservedSpillBytes);
+  emitStringMetric(remark, "status", getLDSSpillPlanStatusName(plan.status));
+  emitIntegerMetric(remark, "value_bytes", plan.valueBytes);
+  if (plan.status != LDSSpillPlanStatus::Available)
+    return;
+  emitIntegerMetric(remark, "available_bytes", plan.availableBytes);
+  emitIntegerMetric(remark, "limit_bytes", plan.limitBytes);
+  emitIntegerMetric(remark, "slot_base", plan.slotBase);
+  emitIntegerMetric(remark, "slot_bytes", plan.slotBytes);
+  emitIntegerMetric(remark, "wave_stride", plan.waveStride);
+  emitIntegerMetric(remark, "wavefront_size", plan.wavefrontSize);
+  emitIntegerMetric(remark, "waves_per_workgroup", plan.wavesPerWorkgroup);
 }
 
-static DictionaryAttr buildScratchSpillPlanAttr(Builder &builder,
-                                                const ScratchSpillPlan &plan) {
-  NamedAttrList attrs;
-  attrs.set("existing_private_bytes",
-            builder.getI64IntegerAttr(plan.existingPrivateBytes));
-  attrs.set("reserved_spill_bytes",
-            builder.getI64IntegerAttr(plan.reservedSpillBytes));
-  attrs.set("status",
-            builder.getStringAttr(getScratchSpillPlanStatusName(plan.status)));
-  attrs.set("uses_flat_scratch", builder.getBoolAttr(plan.usesFlatScratch));
-  attrs.set("value_bytes", builder.getI64IntegerAttr(plan.valueBytes));
-  if (plan.status == ScratchSpillPlanStatus::Available) {
-    attrs.set("slot_base", builder.getI64IntegerAttr(plan.slotBase));
-    attrs.set("slot_bytes", builder.getI64IntegerAttr(plan.slotBytes));
-  }
-  return builder.getDictionaryAttr(attrs);
-}
-
-static void setScratchSpillPlanDiagnostics(func::FuncOp func,
-                                           Builder &builder) {
+static void emitScratchSpillPlanRemark(func::FuncOp func) {
   unsigned reservedBytes =
       getUnsignedFuncAttr(func, kScratchSpillBytesAttr).value_or(0);
   ScratchSpillPlan plan =
       planScratchSpillSlot(func, /*valueBytes=*/4, reservedBytes);
   if (plan.status == ScratchSpillPlanStatus::NotKernel)
     return;
-  func->setAttr(kScratchSpillPlanAttr,
-                buildScratchSpillPlanAttr(builder, plan));
+  auto remark = mlir::remark::analysis(
+      func.getLoc(), getRegAllocRemarkOpts(func, "regalloc-scratch-plan"));
+  if (!remark)
+    return;
+  emitIntegerMetric(remark, "existing_private_bytes",
+                    plan.existingPrivateBytes);
+  emitIntegerMetric(remark, "reserved_spill_bytes", plan.reservedSpillBytes);
+  emitStringMetric(remark, "status",
+                   getScratchSpillPlanStatusName(plan.status));
+  remark << mlir::remark::metric("uses_flat_scratch", plan.usesFlatScratch);
+  emitIntegerMetric(remark, "value_bytes", plan.valueBytes);
+  if (plan.status != ScratchSpillPlanStatus::Available)
+    return;
+  emitIntegerMetric(remark, "slot_base", plan.slotBase);
+  emitIntegerMetric(remark, "slot_bytes", plan.slotBytes);
 }
 
-static void setDiagnostics(func::FuncOp func, Inventory &inventory,
-                           RegisterBudgets budgets) {
-  Builder builder(func.getContext());
-  func->setAttr(kFlatOpsAttr, builder.getI64IntegerAttr(inventory.ops.size()));
-  func->setAttr(kIntervalsAttr, buildIntervalAttrs(builder, inventory));
-  func->setAttr(kPeakAGPRAttr, builder.getI64IntegerAttr(inventory.peakAGPR));
-  func->setAttr(kPeakSGPRAttr, builder.getI64IntegerAttr(inventory.peakSGPR));
-  func->setAttr(kPeakVGPRAttr, builder.getI64IntegerAttr(inventory.peakVGPR));
-  func->setAttr(
-      kScalarIntervalsAttr,
-      builder.getI64IntegerAttr(getActiveScalarIntervalCount(inventory)));
-  func->setAttr(kTrackedValuesAttr,
-                builder.getI64IntegerAttr(inventory.intervalFor.size()));
-  setLDSSpillPlanDiagnostics(func, builder, budgets);
-  setScratchSpillPlanDiagnostics(func, builder);
+static void emitRegAllocRemarks(func::FuncOp func, Inventory &inventory,
+                                RegisterBudgets budgets) {
+  auto remark = mlir::remark::analysis(
+      func.getLoc(), getRegAllocRemarkOpts(func, "regalloc-summary"));
+  if (remark) {
+    emitIntegerMetric(remark, "flat_ops", inventory.ops.size());
+    emitIntegerMetric(remark, "peak_agpr", inventory.peakAGPR);
+    emitIntegerMetric(remark, "peak_sgpr", inventory.peakSGPR);
+    emitIntegerMetric(remark, "peak_vgpr", inventory.peakVGPR);
+    emitIntegerMetric(remark, "scalar_intervals",
+                      getActiveScalarIntervalCount(inventory));
+    emitIntegerMetric(remark, "tracked_values", inventory.intervalFor.size());
+  }
+  emitIntervalRemarks(func, inventory);
+  emitLDSSpillPlanRemark(func, budgets);
+  emitScratchSpillPlanRemark(func);
+}
+
+static void emitRejectDetailMetrics(remark::detail::InFlightRemark &remark,
+                                    DictionaryAttr detail) {
+  if (!remark || !detail)
+    return;
+  for (StringRef name : {"loop_carry", "temp", "starts_at_pressure",
+                         "non_promotable", "memory_issuer", "cross_block",
+                         "fixed", "no_use", "eligible", "total"}) {
+    IntegerAttr attr = detail.getAs<IntegerAttr>(name);
+    if (attr)
+      emitIntegerMetric(remark, name, attr.getInt());
+  }
+}
+
+static void emitPressureFailureRemark(func::FuncOp func,
+                                      const PressureFailure &failure) {
+  auto remark = mlir::remark::failed(
+      func.getLoc(), getRegAllocRemarkOpts(func, "regalloc-pressure-failure"));
+  if (!remark)
+    return;
+  emitStringMetric(remark, "class", failure.regClass);
+  emitIntegerMetric(remark, "limit", failure.limit);
+  emitIntegerMetric(remark, "live_dwords", failure.liveDwords);
+  emitIntegerMetric(remark, "position", failure.position);
+  emitIntegerMetric(remark, "required_relief", failure.relief);
+  emitIntegerMetric(remark, "reserved", failure.reserved);
+  remark << mlir::remark::metric("combined_vgpr_agpr",
+                                 failure.combinedVGPRAGPR);
+  emitStringMetric(remark, "request",
+                   wave::formatWaveAMDPressureInterval(failure.request));
+  emitStringMetric(remark, "overlaps",
+                   wave::formatWaveAMDPressureIntervals(failure.overlaps));
+  if (StringAttr reject =
+          func->getAttrOfType<StringAttr>(kMemorySpillRejectAttr))
+    emitStringMetric(remark, "memory_spill_reject", reject.getValue());
+  emitRejectDetailMetrics(remark, func->getAttrOfType<DictionaryAttr>(
+                                      kMemorySpillRejectDetailAttr));
 }
 
 static void setOverflowAttrs(func::FuncOp func,
                              const PressureFailure &failure) {
   Builder builder(func.getContext());
   func->setAttr(kLegacyOverflowedAttr, builder.getI64IntegerAttr(1));
-  func->setAttr(kLegacyPressureClassAttr,
-                builder.getStringAttr(failure.regClass));
-  func->setAttr(kLegacyPressureLimitAttr,
-                builder.getI64IntegerAttr(failure.limit));
-  func->setAttr(kLegacyPressureLiveAttr,
-                builder.getI64IntegerAttr(failure.liveDwords));
-  func->setAttr(
-      kLegacyPressureOverlapsAttr,
-      wave::getWaveAMDPressureIntervalArrayAttr(builder, failure.overlaps));
-  func->setAttr(kLegacyPressurePositionAttr,
-                builder.getI64IntegerAttr(failure.position));
-  func->setAttr(kLegacyPressureReliefAttr,
-                builder.getI64IntegerAttr(failure.relief));
-  func->setAttr(kLegacyPressureRequestAttr,
-                wave::getWaveAMDPressureIntervalAttr(builder, failure.request));
-  func->setAttr(kLegacyPressureReservedAttr,
-                builder.getI64IntegerAttr(failure.reserved));
-  func->setAttr(kOverflowedAttr, builder.getI64IntegerAttr(1));
-  func->setAttr(kPressureClassAttr, builder.getStringAttr(failure.regClass));
-  func->setAttr(kPressureLimitAttr, builder.getI64IntegerAttr(failure.limit));
-  func->setAttr(kPressureLiveAttr,
-                builder.getI64IntegerAttr(failure.liveDwords));
+  (void)failure;
 }
 
 enum class AllocationAttemptResult { Done, Retry };
@@ -2212,7 +2243,7 @@ runAllocationAttempt(func::FuncOp func, RegisterBudgets budgets,
       failed(enforceBudgets(func, inventory, budgets, softFail, failure)))
     allocated = mlir::failure();
   if (failed(allocated)) {
-    setDiagnostics(func, inventory, budgets);
+    emitRegAllocRemarks(func, inventory, budgets);
     return mlir::failure();
   }
 
@@ -2224,7 +2255,8 @@ runAllocationAttempt(func::FuncOp func, RegisterBudgets budgets,
   }
   applyPhysicalAssignments(inventory);
   updatePeaks(inventory);
-  setDiagnostics(func, inventory, budgets);
+  emitRegAllocRemarks(func, inventory, budgets);
+  clearTransientRegAllocAttrs(func);
   return AllocationAttemptResult::Done;
 }
 
@@ -2335,6 +2367,7 @@ struct WaveAMDRegAllocPass
         func->getAttrOfType<DictionaryAttr>(kMemorySpillRejectDetailAttr);
     if (!reject) {
       appendMemorySpillRejectDetail(diag, detail);
+      clearTransientRegAllocAttrs(func);
       return;
     }
     if (reject.getValue() == kMemorySpillLoopCarryReject)
@@ -2342,6 +2375,7 @@ struct WaveAMDRegAllocPass
     else
       diag << "; memory spill rejected candidates: " << reject.getValue();
     appendMemorySpillRejectDetail(diag, detail);
+    clearTransientRegAllocAttrs(func);
   }
 
   static void emitCombinedPressureError(func::FuncOp func,
@@ -2358,8 +2392,10 @@ struct WaveAMDRegAllocPass
   WalkResult handleAllocationFailure(func::FuncOp func, RegisterBudgets budgets,
                                      const PressureFailure &failure,
                                      unsigned &overflowCount) {
+    emitPressureFailureRemark(func, failure);
     if (markOverflow) {
       setOverflowAttrs(func, failure);
+      clearTransientRegAllocAttrs(func);
       ++overflowCount;
       return WalkResult::advance();
     }
@@ -2398,15 +2434,11 @@ struct WaveAMDRegAllocPass
   void setModuleOverflowCount(ModuleOp root, Builder &builder,
                               unsigned overflowCount) {
     if (markOverflow)
-      root->setAttr(kOverflowCountAttr,
-                    builder.getI64IntegerAttr(overflowCount));
-    else
-      root->removeAttr(kOverflowCountAttr);
-    if (markOverflow)
       root->setAttr(kLegacyOverflowCountAttr,
                     builder.getI64IntegerAttr(overflowCount));
     else
       root->removeAttr(kLegacyOverflowCountAttr);
+    root->removeAttr(kOverflowCountAttr);
   }
 
   void runOnOperation() override {

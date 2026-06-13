@@ -185,6 +185,7 @@ tools = [
     ToolSubst("FileCheck", unresolved="fatal"),
     ToolSubst("count", unresolved="fatal"),
     ToolSubst("not", unresolved="fatal"),
+    ToolSubst("split-file", unresolved="fatal"),
     ToolSubst("llvm-nm", unresolved="fatal"),
     ToolSubst("wave-calibrate-report", unresolved="fatal"),
     ToolSubst("wavec", unresolved="fatal"),

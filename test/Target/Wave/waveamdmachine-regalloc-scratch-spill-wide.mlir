@@ -6,7 +6,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // CHECK-SAME: waveamdmachine.private_segment_fixed_size = 16 : i64
 // CHECK-SAME: waveamdmachine.scratch_spill_bytes = 16 : i64
 // CHECK-SAME: waveamdmachine.uses_flat_scratch = true
-// CHECK: %[[PARTS:.*]]:4 = waveamdmachine.tuple_to_elements {{.*}} {waveamdmachine.regalloc_debug_temp}
+// CHECK: %[[PARTS:.*]]:4 = waveamdmachine.tuple_to_elements {{.*}}
 // CHECK: %[[STORE0:.*]] = waveamdmachine.scratch_store_b32 {{.*}}, %[[PARTS]]#0
 // CHECK: %[[STORE1:.*]] = waveamdmachine.scratch_store_b32 {{.*}}, %[[PARTS]]#1, {{.*}} after %[[STORE0]] offset 4
 // CHECK: %[[STORE2:.*]] = waveamdmachine.scratch_store_b32 {{.*}}, %[[PARTS]]#2, {{.*}} after %[[STORE1]] offset 8
@@ -15,7 +15,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // CHECK: %[[LOAD1:.*]], {{.*}} = waveamdmachine.scratch_load_b32 {{.*}} after %[[STORE3]] offset 4
 // CHECK: %[[LOAD2:.*]], {{.*}} = waveamdmachine.scratch_load_b32 {{.*}} after %[[STORE3]] offset 8
 // CHECK: %[[LOAD3:.*]], {{.*}} = waveamdmachine.scratch_load_b32 {{.*}} after %[[STORE3]] offset 12
-// CHECK: waveamdmachine.tuple_from_elements %[[LOAD0]], %[[LOAD1]], %[[LOAD2]], %[[LOAD3]] {waveamdmachine.regalloc_debug_temp}
+// CHECK: waveamdmachine.tuple_from_elements %[[LOAD0]], %[[LOAD1]], %[[LOAD2]], %[[LOAD3]]
 func.func @scratch_spill_wide_tuple_codegen()
     attributes {wave.kernel, waveamdmachine.target_waves = 4 : i64} {
   %zero = waveamdmachine.imm 0 : !waveamdmachine.imm

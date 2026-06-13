@@ -1,12 +1,21 @@
-// RUN: wave-opt --waveamd-reg-alloc='mark-overflow=true sgpr-limit=2 vgpr-limit=2' %s | FileCheck %s
+// RUN: rm -f %t.yaml
+// RUN: wave-opt --waveamd-reg-alloc='mark-overflow=true sgpr-limit=2 vgpr-limit=2' \
+// RUN:   --remarks-filter=waveamdmachine-regalloc --remark-policy=all --remark-format=yaml \
+// RUN:   --remarks-output-file=%t.yaml %s | FileCheck %s
+// RUN: FileCheck %s --input-file=%t.yaml --check-prefix=REMARK
 
 // CHECK: module
 // CHECK-SAME: waveamdmachine.regalloc_overflowed_count = 1 : i64
 // CHECK-LABEL: func.func @sgpr_promotes_then_vgpr_overflows
-// CHECK-SAME: waveamdmachine.regalloc_pressure_class = "VGPR"
-// CHECK-SAME: waveamdmachine.regalloc_pressure_limit = 2 : i64
-// CHECK-SAME: waveamdmachine.regalloc_pressure_position = 5 : i64
-// CHECK-SAME: waveamdmachine.regalloc_pressure_required_relief = 1 : i64
+// CHECK-SAME: waveamdmachine.regalloc_overflowed = 1 : i64
+// CHECK-NOT: waveamdmachine.regalloc_pressure_
+
+// REMARK: Name:            regalloc-pressure-failure
+// REMARK: Function:        sgpr_promotes_then_vgpr_overflows
+// REMARK: class:           VGPR
+// REMARK: limit:           '2'
+// REMARK: position:        '5'
+// REMARK: required_relief: '1'
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 

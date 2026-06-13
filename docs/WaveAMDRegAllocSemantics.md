@@ -165,39 +165,42 @@ With `mark-overflow=true`, allocation overflow is a soft result:
 - The module gets
   `waveamdmachine.regalloc_overflowed_count = N : i64`, including
   `N = 0` when no function overflowed.
-- Pressure diagnostics describe the first reported pressure point when
-  one is available.
+- Pressure detail is emitted through MLIR optimization remarks when
+  remarks are enabled.
 - The function is not a valid allocated program.
 
-For functions that reach allocation, each run owns these attributes.
-Stale overflow and pressure diagnostics are removed before new
-diagnostics are written. Hard input errors before allocation may leave
-prior diagnostics untouched.
+For functions that reach allocation, each run owns these attributes. Stale
+overflow markers and obsolete diagnostic attrs are removed before new state is
+written. Hard input errors before allocation may leave prior state untouched.
 
 Overflowed functions are diagnostic IR only, not valid input to
 production post-regalloc passes.
 
-Pressure diagnostic attributes:
+Regalloc reports use MLIR optimization remarks under category
+`waveamdmachine-regalloc`. Example:
 
-- `waveamdmachine.regalloc_pressure_class`: overflowing class.
-- `waveamdmachine.regalloc_pressure_limit`: class budget.
-- `waveamdmachine.regalloc_pressure_reserved`: reserved prefix size.
-- `waveamdmachine.regalloc_pressure_live_dwords`: live dwords at pressure.
-- `waveamdmachine.regalloc_pressure_position`: program point.
-- `waveamdmachine.regalloc_pressure_required_relief`: dwords to remove.
-- `waveamdmachine.regalloc_pressure_request`: interval that did not fit.
-- `waveamdmachine.regalloc_pressure_overlaps`: intervals live there.
-The allocator also writes internal interval diagnostics under
-`waveamdmachine.regalloc_debug_*` while the diagnostics settle. These
-are debug-only and not an ABI.
+```bash
+wave-opt --waveamd-reg-alloc \
+  --remarks-filter=waveamdmachine-regalloc \
+  --remark-policy=all \
+  --remark-format=yaml \
+  --remarks-output-file=regalloc.yaml input.mlir
+```
 
-Interval diagnostics use:
+Remark names:
 
-- `start`, `end`: live range envelope.
-- `width`: physical width in dwords.
-- `value_positions`: defining positions, or interval start for block args.
-- `result_indices`: result number, or `-1` for block args.
-- `slot_offsets`: offset from the interval base.
+- `regalloc-summary`: function-level inventory and peak pressure.
+- `regalloc-interval`: one live interval.
+- `regalloc-lds-plan`: LDS spill slot planning.
+- `regalloc-scratch-plan`: scratch spill slot planning.
+- `regalloc-pressure-failure`: first reported pressure point.
+
+`regalloc-pressure-failure` contains the overflowing class, class budget,
+reserved prefix size, live dwords, program position, required relief, the
+request interval, active overlaps, and memory-spill rejection counts when
+available.
+
+Default hard failures also print pressure detail in the error diagnostic.
 
 ## Rewrite Design
 
@@ -215,11 +218,11 @@ The function pipeline is:
 4. `BudgetResolver`: compute class budgets, reserved prefixes,
    target-waves caps, and VGPR-family accounting.
 5. `PhysicalAllocator`: seed fixed and reserved occupancy, assign virtual
-   storage groups per class, and emit pressure diagnostics on failure.
+   storage groups per class, and report pressure failures.
 6. `PromotionMaterializer`: insert SGPR/VGPR/AGPR bridge ops for groups
    promoted by the allocator, rebuild, and retry.
 7. `Commit`: rewrite result and loop block-argument types with physical
-   indices and write or clear overflow diagnostics.
+   indices and write or clear overflow markers.
 8. `PostVerify`: run post-regalloc verification as the final gate.
 
 `SemanticRepair` and `ConstraintBuilder` run to a fixed point.

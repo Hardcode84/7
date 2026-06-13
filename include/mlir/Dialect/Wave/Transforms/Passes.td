@@ -377,10 +377,10 @@ def WaveAMDRegAlloc
     Default mode fails if no legal assignment exists. With
     `mark-overflow=true`, overflowed functions get
     `waveamdmachine.regalloc_overflowed = 1 : i64`, the module gets
-    `waveamdmachine.regalloc_overflowed_count = N : i64`, and pressure
-    attributes describe the reported pressure point when available.
-    Overflowed functions are diagnostics only; production post-regalloc
-    consumers reject or skip them.
+    `waveamdmachine.regalloc_overflowed_count = N : i64`, and pressure detail
+    is emitted through MLIR optimization remarks when enabled. Overflowed
+    functions are diagnostics only; production post-regalloc consumers reject
+    or skip them.
 
     `waveamdmachine.target_waves` narrows SGPR and VGPR budgets and enforces
     target VGPR-family accounting across VGPRs/AGPRs. `vgpr-limit` /

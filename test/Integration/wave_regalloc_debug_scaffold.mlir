@@ -1,4 +1,7 @@
-// RUN: wave-opt --waveamd-reg-alloc %s | FileCheck %s
+// RUN: rm -f %t.yaml
+// RUN: wave-opt --waveamd-reg-alloc --remarks-filter=waveamdmachine-regalloc \
+// RUN:   --remark-policy=all --remark-format=yaml --remarks-output-file=%t.yaml %s | FileCheck %s
+// RUN: FileCheck %s --input-file=%t.yaml --check-prefix=REMARK
 // RUN: wave-opt --waveamd-reg-alloc --waveamd-resource-info %s \
 // RUN:   | wave-translate --wave-to-amdgpu-asm - \
 // RUN:   | FileCheck %s --check-prefix=ASM
@@ -9,9 +12,12 @@
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 
 // CHECK-LABEL: func.func @regalloc_debug_scaffold
-// CHECK-SAME: waveamdmachine.regalloc_debug_intervals =
-// CHECK-SAME: waveamdmachine.regalloc_debug_peak_vgpr = 4 : i64
 // CHECK: !waveamdmachine.reg<vgpr, 4, {{[0-9]+}}>
+// CHECK-NOT: regalloc_debug
+// REMARK: Name:            regalloc-summary
+// REMARK: Function:        regalloc_debug_scaffold
+// REMARK: peak_vgpr:       '4'
+// REMARK: tracked_values:  '4'
 // ASM-LABEL: regalloc_debug_scaffold:
 // ASM: s_endpgm
 func.func @regalloc_debug_scaffold() {

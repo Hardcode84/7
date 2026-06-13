@@ -28,7 +28,6 @@ func.func @target_waves_class_limit(%base_arg: !wave.ptr<#wave.global>)
 
 // MARK-LABEL: func.func @target_waves_class_limit
 // MARK-SAME: waveamdmachine.regalloc_overflowed = 1 : i64
-// MARK-SAME: waveamdmachine.regalloc_pressure_limit = 64 : i64
 
 // -----
 
@@ -81,7 +80,6 @@ func.func @target_waves_total_vgpr_limit(%base_arg: !wave.ptr<#wave.global>)
 
 // MARK-LABEL: func.func @target_waves_total_vgpr_limit
 // MARK-SAME: waveamdmachine.regalloc_overflowed = 1 : i64
-// MARK-SAME: waveamdmachine.regalloc_pressure_limit = 64 : i64
 
 // -----
 

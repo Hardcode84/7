@@ -1,5 +1,9 @@
 // RUN: not wave-opt --waveamd-reg-alloc='vgpr-limit=8 agpr-limit=0' %s 2>&1 | FileCheck %s --check-prefix=ERR
-// RUN: wave-opt --waveamd-reg-alloc='mark-overflow=true vgpr-limit=8 agpr-limit=0' %s | FileCheck %s --check-prefix=SOFT
+// RUN: rm -f %t.yaml
+// RUN: wave-opt --waveamd-reg-alloc='mark-overflow=true vgpr-limit=8 agpr-limit=0' \
+// RUN:   --remarks-filter=waveamdmachine-regalloc --remark-policy=all --remark-format=yaml \
+// RUN:   --remarks-output-file=%t.yaml %s | FileCheck %s --check-prefix=SOFT
+// RUN: FileCheck %s --input-file=%t.yaml --check-prefix=REMARK
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
@@ -7,14 +11,17 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // ERR-SAME: memory spill cannot materialize loop-carried values
 // ERR-SAME: memory spill reject detail:
 // ERR-SAME: loop_carry=
-// ERR: waveamdmachine.regalloc_debug_memory_spill_reject = "loop_carry"
-// ERR: waveamdmachine.regalloc_debug_memory_spill_reject_detail = {{.*}}loop_carry
 //
 // SOFT-LABEL: func.func @scratch_spill_rejects_loop_carry
-// SOFT-SAME: waveamdmachine.regalloc_debug_memory_spill_reject = "loop_carry"
-// SOFT-SAME: waveamdmachine.regalloc_debug_memory_spill_reject_detail = {{.*}}loop_carry
+// SOFT-SAME: waveamdmachine.regalloc_overflowed = 1 : i64
 // SOFT-NOT: scratch_load_b32
 // SOFT: waveamdmachine.uniform_loop
+//
+// REMARK: Name:            regalloc-pressure-failure
+// REMARK: Function:        scratch_spill_rejects_loop_carry
+// REMARK: memory_spill_reject: loop_carry
+// REMARK: loop_carry:      '1'
+// REMARK: total:           '2'
 func.func @scratch_spill_rejects_loop_carry()
     attributes {wave.kernel, waveamdmachine.target_waves = 4 : i64} {
   %zero = waveamdmachine.imm 0 : !waveamdmachine.imm

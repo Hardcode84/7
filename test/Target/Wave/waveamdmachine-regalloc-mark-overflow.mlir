@@ -1,25 +1,29 @@
-// RUN: wave-opt --waveamd-reg-alloc='mark-overflow=true vgpr-limit=2' %s | FileCheck %s
+// RUN: rm -f %t.yaml
+// RUN: wave-opt --waveamd-reg-alloc='mark-overflow=true vgpr-limit=2' \
+// RUN:   --remarks-filter=waveamdmachine-regalloc --remark-policy=all --remark-format=yaml \
+// RUN:   --remarks-output-file=%t.yaml %s | FileCheck %s
+// RUN: FileCheck %s --input-file=%t.yaml --check-prefix=REMARK
 // RUN: wave-opt --waveamd-reg-alloc='mark-overflow=true vgpr-limit=2' --waveamd-resource-info %s | FileCheck %s --check-prefix=SKIP
 // RUN: not wave-opt --waveamd-reg-alloc='mark-overflow=true vgpr-limit=2' --waveamd-insert-hazard-waits %s 2>&1 | FileCheck %s --check-prefix=HAZARD
 // RUN: not wave-opt --waveamd-reg-alloc='vgpr-limit=2' %s 2>&1 | FileCheck %s --check-prefix=HARD
 
-// Soft-fail: instead of dying, the regalloc pass annotates the func
-// with `waveamdmachine.regalloc_overflowed` and stamps the module
-// with a count summary. Tune's score sequence can then prune the
-// trial via `get_int_attr` + `match.param.cmpi`.
+// Soft-fail keeps only pruning state in IR. Pressure detail is a remark.
 
 // CHECK: module
 // CHECK-SAME: waveamdmachine.regalloc_overflowed_count = 1 : i64
 // CHECK-LABEL: func.func @too_many_vgprs
 // CHECK-SAME: waveamdmachine.regalloc_overflowed = 1 : i64
-// CHECK-SAME: waveamdmachine.regalloc_pressure_class = "VGPR"
-// CHECK-SAME: waveamdmachine.regalloc_pressure_limit = 2 : i64
-// CHECK-SAME: waveamdmachine.regalloc_pressure_live_dwords = 2 : i64
-// CHECK-SAME: waveamdmachine.regalloc_pressure_overlaps = [{end = 4 : i64, result_indices = array<i64: 0>, slot_offsets = array<i64: 0>, start = 1 : i64, value_positions = array<i64: 1>, width = 1 : i64}, {end = 5 : i64, result_indices = array<i64: 0>, slot_offsets = array<i64: 0>, start = 2 : i64, value_positions = array<i64: 2>, width = 1 : i64}]
-// CHECK-SAME: waveamdmachine.regalloc_pressure_position = 3 : i64
-// CHECK-SAME: waveamdmachine.regalloc_pressure_request = {end = 6 : i64, result_indices = array<i64: 0>, slot_offsets = array<i64: 0>, start = 3 : i64, value_positions = array<i64: 3>, width = 1 : i64}
-// CHECK-SAME: waveamdmachine.regalloc_pressure_required_relief = 1 : i64
-// CHECK-SAME: waveamdmachine.regalloc_pressure_reserved = 0 : i64
+// CHECK-NOT: waveamdmachine.regalloc_pressure_
+
+// REMARK: Name:            regalloc-pressure-failure
+// REMARK: Function:        too_many_vgprs
+// REMARK: class:           VGPR
+// REMARK: limit:           '2'
+// REMARK: live_dwords:     '2'
+// REMARK: position:        '3'
+// REMARK: required_relief: '1'
+// REMARK: request:         '{start=3, end=6, width=1, values=[3.0+0]}'
+// REMARK: overlaps:        '[{start=1, end=4, width=1, values=[1.0+0]}, {start=2, end=5, width=1, values=[2.0+0]}]'
 
 // SKIP-LABEL: func.func @too_many_vgprs
 // SKIP-SAME: waveamdmachine.regalloc_overflowed = 1 : i64
