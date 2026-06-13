@@ -38,12 +38,15 @@ def test_generic_wave_kernel_attrs():
             [],
             kernel=True,
             lds_size=128,
+            workgroup_size=[64, 1, 1],
             attrs={"waveamdmachine.target_waves": w.i64_attr(2)},
         ):
             pass
         # CHECK: func.func @generic_wave_kernel_attrs()
+        # CHECK-SAME: gpu.known_block_size = array<i32: 64, 1, 1>
         # CHECK-SAME: wave.kernel
         # CHECK-SAME: wave.lds_size = 128 : i64
+        # CHECK-SAME: wave.workgroup_size = array<i32: 64, 1, 1>
         # CHECK-SAME: waveamdmachine.target_waves = 2 : i64
         print(m.module)
 

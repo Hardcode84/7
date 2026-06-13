@@ -266,8 +266,23 @@ private:
     Block *block = builder.getInsertionBlock();
     if (!block)
       return {};
-    for (auto it = block->begin(), e = builder.getInsertionPoint(); it != e;
-         ++it) {
+    Block::iterator stop = builder.getInsertionPoint();
+    while (block) {
+      if (Value workitem = findWorkitemIdBefore(block, stop))
+        return workitem;
+      Operation *parent = block->getParentOp();
+      if (!parent)
+        return {};
+      block = parent->getBlock();
+      if (!block)
+        return {};
+      stop = parent->getIterator();
+    }
+    return {};
+  }
+
+  Value findWorkitemIdBefore(Block *block, Block::iterator stop) const {
+    for (auto it = block->begin(); it != stop; ++it) {
       Operation &op = *it;
       waveamdmachine::VWorkitemIdXOp workitem =
           dyn_cast<waveamdmachine::VWorkitemIdXOp>(&op);

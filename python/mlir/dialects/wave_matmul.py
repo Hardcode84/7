@@ -3457,6 +3457,7 @@ def build_wmma_f16_matmul_module(
                 _KERNEL_NAME,
                 _kernel_input_types(cfg),
                 lds_size=_fixed_lds_bytes(cfg),
+                workgroup_size=[cfg.threads_per_workgroup, 1, 1],
                 attrs=_kernel_attrs(cfg, target_waves),
             ) as fb,
         ):

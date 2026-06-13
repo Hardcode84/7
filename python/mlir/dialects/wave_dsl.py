@@ -58,6 +58,7 @@ from mlir.ir import (
     BF16Type,
     Block,
     Context,
+    DenseI32ArrayAttr,
     F16Type,
     F32Type,
     IndexType,
@@ -175,6 +176,10 @@ def i64() -> IntegerType:
 
 def i64_attr(value: int) -> IntegerAttr:
     return IntegerAttr.get(i64(), value)
+
+
+def i32_array_attr(values: Sequence[int]) -> DenseI32ArrayAttr:
+    return DenseI32ArrayAttr.get(values)
 
 
 def f16() -> F16Type:
@@ -477,6 +482,7 @@ class ModuleBuilder:
         *,
         kernel: bool = False,
         lds_size: int | None = None,
+        workgroup_size: Sequence[int] | None = None,
         attrs: Mapping[str, Attribute] | None = None,
     ) -> Iterator[FunctionBuilder]:
         """Generic ``func.func`` builder at module scope.
@@ -491,6 +497,10 @@ class ModuleBuilder:
             op.attributes["wave.kernel"] = UnitAttr.get()
         if lds_size is not None:
             op.attributes["wave.lds_size"] = i64_attr(lds_size)
+        if workgroup_size is not None:
+            attr = i32_array_attr(workgroup_size)
+            op.attributes["wave.workgroup_size"] = attr
+            op.attributes["gpu.known_block_size"] = attr
         if attrs is not None:
             for attr_name, attr in attrs.items():
                 op.attributes[attr_name] = attr
@@ -540,6 +550,7 @@ class _GpuModuleBuilder:
         results: Sequence[Type] = (),
         *,
         lds_size: int | None = None,
+        workgroup_size: Sequence[int] | None = None,
         attrs: Mapping[str, Attribute] | None = None,
     ) -> Iterator[FunctionBuilder]:
         op = func.FuncOp(name, (list(inputs), list(results)))
@@ -547,6 +558,10 @@ class _GpuModuleBuilder:
         op.attributes["wave.kernel"] = UnitAttr.get()
         if lds_size is not None:
             op.attributes["wave.lds_size"] = i64_attr(lds_size)
+        if workgroup_size is not None:
+            attr = i32_array_attr(workgroup_size)
+            op.attributes["wave.workgroup_size"] = attr
+            op.attributes["gpu.known_block_size"] = attr
         if attrs is not None:
             for attr_name, attr in attrs.items():
                 op.attributes[attr_name] = attr

@@ -1444,6 +1444,7 @@ def build_flash_attention_f32_module(
                 _KERNEL_NAME,
                 kernel_inputs,
                 lds_size=cfg.lds_bytes,
+                workgroup_size=[cfg.threads_per_workgroup, 1, 1],
                 attrs=_target_waves_attrs(target_waves),
             ) as fb,
         ):

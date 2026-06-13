@@ -250,7 +250,7 @@ print(static_bld.module)
 # CHECK-SAME: !wave.simd<vector<8xi8>, 64>
 # CHECK-SAME: !wave.simd<vector<8xi8>, 64>
 # CHECK: dynamic-lds-module
-# CHECK: attributes {gpu.kernel, wave.dynamic_lds_size = 65536 : i64, wave.kernel, wave.lds_size = 0 : i64}
+# CHECK: attributes {gpu.kernel, gpu.known_block_size = array<i32: 1024, 1, 1>, wave.dynamic_lds_size = 65536 : i64, wave.kernel, wave.lds_size = 0 : i64, wave.workgroup_size = array<i32: 1024, 1, 1>}
 # CHECK: arith.constant 65536 : i32
 # CHECK: gpu.launch_func
 # CHECK-SAME: dynamic_shared_memory_size
