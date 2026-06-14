@@ -9,6 +9,8 @@
 # CHECK: matmul_mxfp4_forwarding_and_trip_count: ok
 # CHECK: matmul_mxfp4_dma_forwarding: ok
 # CHECK: matmul_mxfp4_profile_kernel_only_target_waves: ok
+# CHECK: matmul_profile_cli_override: ok
+# CHECK: matmul_mxfp4_4wave_profile: ok
 # CHECK: matmul_dynamic_lds_forwarding: ok
 # CHECK: matmul_dma_sim_trip_count: ok
 # CHECK: matmul_pingpong_removed: ok
@@ -403,10 +405,15 @@ def check_matmul_mxfp4_dma_forwarding(matmul) -> None:
 
 
 def check_matmul_mxfp4_profile_kernel_only_target_waves(matmul) -> None:
-    values = vars(make_mxfp4_args())
-    values.update(kernel_profile="gfx950-mxfp4-256x256-8wave", k=256)
-    args = argparse.Namespace(**values)
-    matmul.apply_kernel_profile(args)
+    args = matmul.parse_args(
+        [
+            "--chip=gfx950",
+            "--kernel-profile=gfx950-mxfp4-256x256-8wave",
+            "--k=256",
+            "--skip-hw",
+            "--no-check",
+        ]
+    )
     require(
         "matmul_mxfp4_profile_kernel_only_target_waves",
         args.bm == 4 and args.bn == 2,
@@ -439,6 +446,67 @@ def check_matmul_mxfp4_profile_kernel_only_target_waves(matmul) -> None:
         "calibration should forward derived target waves",
     )
     print("matmul_mxfp4_profile_kernel_only_target_waves: ok")
+
+
+def check_matmul_profile_cli_override(matmul) -> None:
+    args = matmul.parse_args(
+        [
+            "--chip=gfx950",
+            "--kernel-profile=gfx950-mxfp4-256x256-8wave",
+            "--wave-k-tiles=1",
+            "--skip-hw",
+        ]
+    )
+    require(
+        "matmul_profile_cli_override",
+        args.input_type == "mxfp4" and args.output_type == "f16",
+        "profile defaults not applied",
+    )
+    require(
+        "matmul_profile_cli_override",
+        args.wave_k_tiles == 1,
+        "explicit wave_k_tiles should override profile default",
+    )
+    print("matmul_profile_cli_override: ok")
+
+
+def check_matmul_mxfp4_4wave_profile(matmul) -> None:
+    args = matmul.parse_args(
+        [
+            "--chip=gfx950",
+            "--kernel-profile=gfx950-mxfp4-256x256-4wave",
+            "--m=256",
+            "--n=256",
+            "--k=128",
+            "--skip-hw",
+        ]
+    )
+    require(
+        "matmul_mxfp4_4wave_profile",
+        args.bm == 2 and args.bn == 2,
+        "bad 4-wave workgroup shape",
+    )
+    require(
+        "matmul_mxfp4_4wave_profile",
+        args.wave_m_tiles == 8 and args.wave_n_tiles == 8,
+        "bad 4-wave wave tile shape",
+    )
+    require(
+        "matmul_mxfp4_4wave_profile",
+        args.input_type == "mxfp4" and args.output_type == "f16",
+        "bad 4-wave dtypes",
+    )
+    require(
+        "matmul_mxfp4_4wave_profile",
+        matmul.effective_target_waves(args) == 1,
+        "4-wave profile should request one wave per SIMD",
+    )
+    require(
+        "matmul_mxfp4_4wave_profile",
+        matmul.compute_lds_bytes(args) == 40960,
+        "bad 4-wave LDS byte accounting",
+    )
+    print("matmul_mxfp4_4wave_profile: ok")
 
 
 def check_matmul_dynamic_lds_forwarding(matmul) -> None:
@@ -586,6 +654,8 @@ def main() -> int:
     check_matmul_mxfp4_forwarding_and_trip_count(matmul)
     check_matmul_mxfp4_dma_forwarding(matmul)
     check_matmul_mxfp4_profile_kernel_only_target_waves(matmul)
+    check_matmul_profile_cli_override(matmul)
+    check_matmul_mxfp4_4wave_profile(matmul)
     check_matmul_dynamic_lds_forwarding(matmul)
     check_matmul_dma_sim_trip_count(matmul)
     try:

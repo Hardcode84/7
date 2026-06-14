@@ -51,7 +51,9 @@ from common import (
     run_module,
 )
 
-_GFX950_SW_PIPELINE = {
+_ProfileValue = bool | int | str
+
+_GFX950_SW_PIPELINE: dict[str, _ProfileValue] = {
     "bm": 2,
     "bn": 2,
     "wave_m_tiles": 4,
@@ -62,7 +64,7 @@ _GFX950_SW_PIPELINE = {
     "matrix_intrinsic": "mfma_gfx950",
 }
 
-_GFX950_F16_256X256_16WAVE = {
+_GFX950_F16_256X256_16WAVE: dict[str, _ProfileValue] = {
     "bm": 4,
     "bn": 4,
     "wave_m_tiles": 4,
@@ -77,7 +79,7 @@ _GFX950_F16_256X256_16WAVE = {
     "cta_group_m": 4,
 }
 
-_GFX950_MXFP4_256X256_8WAVE = {
+_GFX950_MXFP4_256X256_8WAVE: dict[str, _ProfileValue] = {
     "bm": 4,
     "bn": 2,
     "wave_m_tiles": 4,
@@ -92,10 +94,27 @@ _GFX950_MXFP4_256X256_8WAVE = {
     "cta_group_m": 4,
 }
 
-_KERNEL_PROFILES = {
+_GFX950_MXFP4_256X256_4WAVE: dict[str, _ProfileValue] = {
+    "bm": 2,
+    "bn": 2,
+    "wave_m_tiles": 8,
+    "wave_n_tiles": 8,
+    "wave_k_tiles": 1,
+    "target_waves": 1,
+    "use_buffer": True,
+    "use_dma_lds": True,
+    "matrix_intrinsic": "mfma_gfx950",
+    "input_type": "mxfp4",
+    "output_type": "f16",
+    "cta_swizzle_xcds": 8,
+    "cta_group_m": 4,
+}
+
+_KERNEL_PROFILES: dict[str, dict[str, _ProfileValue]] = {
     "gfx950-sw-pipeline": _GFX950_SW_PIPELINE,
     "gfx950-f16-256x256-16wave": _GFX950_F16_256X256_16WAVE,
     "gfx950-mxfp4-256x256-8wave": _GFX950_MXFP4_256X256_8WAVE,
+    "gfx950-mxfp4-256x256-4wave": _GFX950_MXFP4_256X256_4WAVE,
 }
 
 _DEFAULT_ATOL = 1.0e-3
@@ -238,15 +257,26 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     _add_tile_args(parser)
     _add_codegen_args(parser)
     _add_runner_args(parser)
+    parser.set_defaults(**_profile_defaults(argv))
     args = parser.parse_args(argv)
-    if args.kernel_profile != "manual":
-        for name, value in _KERNEL_PROFILES[args.kernel_profile].items():
-            setattr(args, name, value)
     if args.target_waves < 0:
         parser.error("--target-waves must be non-negative")
     if args.kernel_only and (args.run or args.compare_cpu):
         parser.error("--kernel-only cannot be used with --run/--compare-cpu")
     return args
+
+
+def _profile_defaults(argv: list[str]) -> dict[str, bool | int | str]:
+    parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
+    parser.add_argument(
+        "--kernel-profile",
+        choices=("manual", *_KERNEL_PROFILES),
+        default="manual",
+    )
+    args, _ = parser.parse_known_args(argv)
+    if args.kernel_profile == "manual":
+        return {}
+    return _KERNEL_PROFILES[args.kernel_profile]
 
 
 def _select_matrix_intrinsic(chip: str, requested: str) -> str:

@@ -70,7 +70,9 @@ PRESSURE_BUDGET_OPTIONS = (
     ("pressure-critical-sgpr-budget", "pressure_critical_sgpr_budget"),
 )
 
-KERNEL_PROFILES = {
+ProfileValue = bool | int | str
+
+KERNEL_PROFILES: dict[str, dict[str, ProfileValue]] = {
     "gfx950-f16-256x256-16wave": {
         "bm": 4,
         "bn": 4,
@@ -91,6 +93,21 @@ KERNEL_PROFILES = {
         "wave_m_tiles": 4,
         "wave_n_tiles": 8,
         "wave_k_tiles": 2,
+        "use_buffer": True,
+        "use_dma_lds": True,
+        "matrix_intrinsic": "mfma_gfx950",
+        "input_type": "mxfp4",
+        "output_type": "f16",
+        "cta_swizzle_xcds": 8,
+        "cta_group_m": 4,
+    },
+    "gfx950-mxfp4-256x256-4wave": {
+        "bm": 2,
+        "bn": 2,
+        "wave_m_tiles": 8,
+        "wave_n_tiles": 8,
+        "wave_k_tiles": 1,
+        "target_waves": 1,
         "use_buffer": True,
         "use_dma_lds": True,
         "matrix_intrinsic": "mfma_gfx950",
@@ -844,11 +861,23 @@ def build_argparser() -> argparse.ArgumentParser:
     return ap
 
 
-def apply_kernel_profile(args: argparse.Namespace) -> None:
+def profile_defaults(argv: list[str]) -> dict[str, bool | int | str]:
+    parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
+    parser.add_argument(
+        "--kernel-profile",
+        choices=("manual", *KERNEL_PROFILES),
+        default="manual",
+    )
+    args, _ = parser.parse_known_args(argv)
     if args.kernel_profile == "manual":
-        return
-    for name, value in KERNEL_PROFILES[args.kernel_profile].items():
-        setattr(args, name, value)
+        return {}
+    return KERNEL_PROFILES[args.kernel_profile]
+
+
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = build_argparser()
+    parser.set_defaults(**profile_defaults(argv))
+    return parser.parse_args(argv)
 
 
 def validate_mxfp4_args(args: argparse.Namespace) -> None:
@@ -881,8 +910,7 @@ def validate_args(args: argparse.Namespace) -> None:
 
 
 def main() -> int:
-    args = build_argparser().parse_args()
-    apply_kernel_profile(args)
+    args = parse_args(sys.argv[1:])
     chip = resolve_chip(args)
     validate_args(args)
     variants = args.variants
