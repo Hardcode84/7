@@ -9,6 +9,8 @@
 // RUN:   --waveamd-resource-info %t/nested.mlir | FileCheck %s --check-prefix=NEST
 // RUN: not wave-opt --waveamd-reg-alloc='vgpr-limit=16 agpr-limit=0' \
 // RUN:   %t/bad-init-use.mlir 2>&1 | FileCheck %s --check-prefix=BAD
+// RUN: not wave-opt --waveamd-reg-alloc='vgpr-limit=4 agpr-limit=0' \
+// RUN:   %t/scalar-reject.mlir 2>&1 | FileCheck %s --check-prefix=SCALAR
 
 //--- result-use.mlir
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
@@ -47,6 +49,41 @@ func.func @scratch_loop_carry_result_use()
       -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
           !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
           !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+          !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+  waveamdmachine.s_endpgm
+  return
+}
+
+}
+
+//--- scalar-reject.mlir
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
+
+// SCALAR: error: waveamd-reg-alloc ran out of VGPR registers
+// SCALAR: memory spill cannot materialize loop-carried values
+// SCALAR: memory spill reject detail: loop_carry=1
+func.func @scalar_vgpr_loop_carry_no_memory_spill()
+    attributes {wave.kernel, waveamdmachine.target_waves = 4 : i64} {
+  %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+  %four = waveamdmachine.imm 4 : !waveamdmachine.imm
+  %cond = waveamdmachine.s_cmp_lt_i32 %zero, %four
+      : (!waveamdmachine.imm, !waveamdmachine.imm)
+        -> !waveamdmachine.reg<scc, 1>
+  %acc = waveamdmachine.v_mov_b32_tuple %zero {registers = 1 : i64}
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
+  %tmp = waveamdmachine.v_mov_b32_tuple %zero {registers = 4 : i64}
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 4>
+  %loop = waveamdmachine.uniform_loop if %cond : !waveamdmachine.reg<scc, 1>
+      carries(%acc : !waveamdmachine.reg<vgpr, 1>) {
+  ^bb0(%carry: !waveamdmachine.reg<vgpr, 1>):
+    waveamdmachine.continue_if %cond : !waveamdmachine.reg<scc, 1>
+        carries(%carry : !waveamdmachine.reg<vgpr, 1>)
+  } -> !waveamdmachine.reg<vgpr, 1>
+  %use = waveamdmachine.v_mov_b32_tuple %loop {registers = 1 : i64}
+      : (!waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
+  %parts:4 = waveamdmachine.tuple_to_elements %tmp
+      : (!waveamdmachine.reg<vgpr, 4>)
+      -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
           !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
   waveamdmachine.s_endpgm
   return

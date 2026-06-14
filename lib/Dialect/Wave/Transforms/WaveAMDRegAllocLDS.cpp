@@ -240,16 +240,6 @@ public:
 private:
   static std::optional<unsigned> getUnsignedAttr(Operation *op, StringRef name);
 
-  static bool hasFixedRegister(IntervalGroup *group) {
-    if (group->fixedBase)
-      return true;
-    for (Interval *lane : group->intervals)
-      for (Value value : lane->values)
-        if (cast<waveamdmachine::RegType>(value.getType()).getIndex() >= 0)
-          return true;
-    return false;
-  }
-
   static Value getSimpleValue(IntervalGroup *group) {
     if (!group || group->intervals.size() != 1)
       return {};
@@ -259,46 +249,22 @@ private:
     return *interval->values.begin();
   }
 
-  static bool isSpillableGroup(IntervalGroup *group) {
-    if (!group || group->reserved || group->nonPromotable ||
-        hasFixedRegister(group))
-      return false;
-    return group->storageClass == waveamdmachine::RegClass::VGPR &&
-           group->preferredClass == waveamdmachine::RegClass::VGPR;
-  }
-
-  static bool isEligibleGroup(IntervalGroup *group, unsigned position) {
-    if (!isSpillableGroup(group) || group->intervals.size() != 1)
-      return false;
-    Interval *lane = group->intervals.front();
-    if (lane->nonPromotable || lane->start > position || lane->end < position)
+  static bool isEligibleScalarGroup(IntervalGroup *group, unsigned position) {
+    if (!isMemorySpillEligibleGroup(group, position) ||
+        group->intervals.size() != 1)
       return false;
     return true;
   }
 
-  static bool isTempOp(Operation *op) {
-    return op && op->hasAttr(kRegAllocTempAttr);
-  }
-
-  static bool isMemoryIssuer(Operation *op) {
-    waveamdmachine::WaitcntInfoOpInterface info =
-        dyn_cast<waveamdmachine::WaitcntInfoOpInterface>(op);
-    return info && info.getWaitcntInfo().isIssuer();
-  }
-
-  static bool isLoopCarryUse(Operation *op) {
-    return isa<waveamdmachine::UniformLoopOp, waveamdmachine::ContinueIfOp>(op);
-  }
-
   bool hasSimpleUses(Value value, SmallVectorImpl<OpOperand *> &uses) const {
     Operation *def = value.getDefiningOp();
-    if (!def || isTempOp(def) || isMemoryIssuer(def))
+    if (!def || isRegAllocTempOp(def) || isMemoryIssuerOp(def))
       return false;
     Block *block = def->getBlock();
     for (OpOperand &use : value.getUses()) {
-      if (isTempOp(use.getOwner()))
+      if (isRegAllocTempOp(use.getOwner()))
         continue;
-      if (isLoopCarryUse(use.getOwner())) {
+      if (isLoopCarryUseOp(use.getOwner())) {
         sawLoopCarryReject = true;
         return false;
       }
@@ -311,7 +277,7 @@ private:
 
   void collect(IntervalGroup *group, LDSSpillPlan plan,
                wave::WaveAMDPressureReliefCandidateList &candidates) const {
-    if (!isEligibleGroup(group, position))
+    if (!isEligibleScalarGroup(group, position))
       return;
     Value value = getSimpleValue(group);
     if (!value)

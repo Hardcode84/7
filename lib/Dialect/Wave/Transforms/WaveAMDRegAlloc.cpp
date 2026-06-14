@@ -995,13 +995,7 @@ static std::optional<unsigned> getFixedBase(IntervalGroup *group) {
 }
 
 static bool hasFixedRegister(IntervalGroup *group) {
-  if (group->fixedBase)
-    return true;
-  for (Interval *lane : group->intervals)
-    for (Value value : lane->values)
-      if (cast<waveamdmachine::RegType>(value.getType()).getIndex() >= 0)
-        return true;
-  return false;
+  return isFixedRegisterGroup(group);
 }
 
 static bool isMFMA(Operation *op) {
@@ -1587,9 +1581,7 @@ assignFixedGroups(func::FuncOp func, ArrayRef<IntervalGroup *> groups,
   return success();
 }
 
-static bool isLoopCarryUse(Operation *op) {
-  return isa<waveamdmachine::UniformLoopOp, waveamdmachine::ContinueIfOp>(op);
-}
+static bool isLoopCarryUse(Operation *op) { return isLoopCarryUseOp(op); }
 
 static bool groupLiveAt(IntervalGroup *group, unsigned position) {
   if (!group || group->plannedPressureRelief)
@@ -1617,7 +1609,7 @@ static bool groupHasTempValue(IntervalGroup *group) {
   for (Interval *lane : group->intervals)
     for (Value value : lane->values)
       if (Operation *def = value.getDefiningOp())
-        if (def->hasAttr(kTempAttr))
+        if (isRegAllocTempOp(def))
           return true;
   return false;
 }
@@ -1630,9 +1622,7 @@ static bool groupHasMemoryIssuerValue(IntervalGroup *group) {
       Operation *def = value.getDefiningOp();
       if (!def)
         continue;
-      waveamdmachine::WaitcntInfoOpInterface info =
-          dyn_cast<waveamdmachine::WaitcntInfoOpInterface>(def);
-      if (info && info.getWaitcntInfo().isIssuer())
+      if (isMemoryIssuerOp(def))
         return true;
     }
   return false;
@@ -1648,8 +1638,7 @@ static bool groupHasCrossBlockUse(IntervalGroup *group) {
         continue;
       Block *block = def->getBlock();
       for (OpOperand &use : value.getUses()) {
-        if (use.getOwner()->hasAttr(kTempAttr) ||
-            isLoopCarryUse(use.getOwner()))
+        if (isRegAllocTempOp(use.getOwner()) || isLoopCarryUse(use.getOwner()))
           continue;
         if (use.getOwner()->getBlock() != block)
           return true;
@@ -1665,7 +1654,7 @@ static bool groupHasNonTempUse(IntervalGroup *group) {
   for (Interval *lane : group->intervals)
     for (Value value : lane->values)
       for (OpOperand &use : value.getUses())
-        if (!use.getOwner()->hasAttr(kTempAttr))
+        if (!isRegAllocTempOp(use.getOwner()))
           return true;
   return false;
 }

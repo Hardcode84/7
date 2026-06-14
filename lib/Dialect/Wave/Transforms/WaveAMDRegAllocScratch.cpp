@@ -278,45 +278,8 @@ public:
   void notifyPlanApplied() const override { clearNoCandidateDiagnostic(); }
 
 private:
-  static bool hasFixedRegister(IntervalGroup *group) {
-    if (group->fixedBase)
-      return true;
-    for (Interval *lane : group->intervals)
-      for (Value value : lane->values)
-        if (cast<waveamdmachine::RegType>(value.getType()).getIndex() >= 0)
-          return true;
-    return false;
-  }
-
-  static bool isSpillableGroup(IntervalGroup *group) {
-    if (!group || group->reserved || group->nonPromotable ||
-        hasFixedRegister(group))
-      return false;
-    return group->storageClass == waveamdmachine::RegClass::VGPR &&
-           group->preferredClass == waveamdmachine::RegClass::VGPR;
-  }
-
   static bool isEligibleGroup(IntervalGroup *group, unsigned position) {
-    if (!isSpillableGroup(group))
-      return false;
-    return llvm::any_of(group->intervals, [&](Interval *lane) {
-      return !lane->nonPromotable && lane->start <= position &&
-             position <= lane->end;
-    });
-  }
-
-  static bool isTempOp(Operation *op) {
-    return op && op->hasAttr(kRegAllocTempAttr);
-  }
-
-  static bool isMemoryIssuer(Operation *op) {
-    waveamdmachine::WaitcntInfoOpInterface info =
-        dyn_cast<waveamdmachine::WaitcntInfoOpInterface>(op);
-    return info && info.getWaitcntInfo().isIssuer();
-  }
-
-  static bool isLoopCarryUse(Operation *op) {
-    return isa<waveamdmachine::UniformLoopOp, waveamdmachine::ContinueIfOp>(op);
+    return isMemorySpillEligibleGroup(group, position);
   }
 
   static unsigned getLoopDepth(Operation *op) {
@@ -343,12 +306,12 @@ private:
 
   bool hasSimpleUses(Value value, SmallVectorImpl<OpOperand *> &uses) const {
     Operation *def = value.getDefiningOp();
-    if (!def || isTempOp(def) || isMemoryIssuer(def))
+    if (!def || isRegAllocTempOp(def) || isMemoryIssuerOp(def))
       return false;
     for (OpOperand &use : value.getUses()) {
-      if (isTempOp(use.getOwner()))
+      if (isRegAllocTempOp(use.getOwner()))
         continue;
-      if (isLoopCarryUse(use.getOwner())) {
+      if (isLoopCarryUseOp(use.getOwner())) {
         sawLoopCarryReject = true;
         return false;
       }
@@ -453,15 +416,22 @@ private:
   collectLoopCarry(IntervalGroup *group,
                    wave::WaveAMDPressureReliefCandidateList &candidates) const {
     std::optional<LoopCarrySlot> slot = getLoopCarrySlot(group);
-    if (!slot || !canSpillLoopCarryAtPosition(*slot) ||
-        !hasLocalLoopCarryUses(*slot))
+    if (!slot)
       return false;
+    if (!canSpillLoopCarryAtPosition(*slot) || !hasLocalLoopCarryUses(*slot)) {
+      sawLoopCarryReject = true;
+      return false;
+    }
     Value init = slot->loop.getInits()[slot->index];
     waveamdmachine::RegType type =
         dyn_cast<waveamdmachine::RegType>(init.getType());
     if (!type || type.getRegClass() != waveamdmachine::RegClass::VGPR ||
-        type.getWidth() <= 1 || !valueCoversWholeGroup(group, init))
+        !valueCoversWholeGroup(group, init))
       return false;
+    if (type.getWidth() <= 1) {
+      sawLoopCarryReject = true;
+      return false;
+    }
     if (loopCarryTouchesPressure(*slot))
       return false;
     ScratchSpillPlan plan = getPlanForValue(type);
@@ -889,7 +859,7 @@ private:
     Value init = loopUse->get();
     SmallVector<OpOperand *> uses;
     for (OpOperand &use : init.getUses()) {
-      if (&use == loopUse || isTempOp(use.getOwner()))
+      if (&use == loopUse || isRegAllocTempOp(use.getOwner()))
         continue;
       uses.push_back(&use);
     }

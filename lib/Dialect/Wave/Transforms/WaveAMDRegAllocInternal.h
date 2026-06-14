@@ -82,6 +82,58 @@ struct Inventory {
   unsigned promotedGroups = 0;
 };
 
+inline bool isRegAllocTempOp(Operation *op) {
+  return op && op->hasAttr(kRegAllocTempAttr);
+}
+
+inline bool isMemoryIssuerOp(Operation *op) {
+  if (!op)
+    return false;
+  waveamdmachine::WaitcntInfoOpInterface info =
+      dyn_cast<waveamdmachine::WaitcntInfoOpInterface>(op);
+  return info && info.getWaitcntInfo().isIssuer();
+}
+
+inline bool isLoopCarryUseOp(Operation *op) {
+  return isa<waveamdmachine::UniformLoopOp, waveamdmachine::ContinueIfOp>(op);
+}
+
+inline bool isFixedRegisterGroup(IntervalGroup *group) {
+  if (!group)
+    return false;
+  if (group->fixedBase)
+    return true;
+  for (Interval *lane : group->intervals)
+    for (Value value : lane->values)
+      if (auto type = dyn_cast<waveamdmachine::RegType>(value.getType()))
+        if (type.getIndex() >= 0)
+          return true;
+  return false;
+}
+
+inline bool isMemorySpillVGPRGroup(IntervalGroup *group) {
+  if (!group || group->reserved || group->nonPromotable ||
+      isFixedRegisterGroup(group))
+    return false;
+  return group->storageClass == waveamdmachine::RegClass::VGPR &&
+         group->preferredClass == waveamdmachine::RegClass::VGPR;
+}
+
+inline bool hasLiveMemorySpillLane(IntervalGroup *group, unsigned position) {
+  if (!group)
+    return false;
+  return llvm::any_of(group->intervals, [&](Interval *lane) {
+    return !lane->nonPromotable && lane->start <= position &&
+           position <= lane->end;
+  });
+}
+
+inline bool isMemorySpillEligibleGroup(IntervalGroup *group,
+                                       unsigned position) {
+  return isMemorySpillVGPRGroup(group) &&
+         hasLiveMemorySpillLane(group, position);
+}
+
 using PressureFailure = ::mlir::wave::WaveAMDPressureFailure;
 using PressureIntervalRef = ::mlir::wave::WaveAMDPressureIntervalRef;
 
