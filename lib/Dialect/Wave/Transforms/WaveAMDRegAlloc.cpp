@@ -1572,6 +1572,21 @@ validateFixedGroup(func::FuncOp func, IntervalGroup *group,
   return success();
 }
 
+static LogicalResult
+assignFixedGroups(func::FuncOp func, ArrayRef<IntervalGroup *> groups,
+                  RegisterBudgets budgets,
+                  SmallVectorImpl<IntervalGroup *> &assigned,
+                  const wave::WaveAMDKernelEntryRegs &regs) {
+  for (IntervalGroup *group : groups) {
+    if (!hasFixedRegister(group))
+      continue;
+    if (failed(validateFixedGroup(func, group, budgets, assigned, regs)))
+      return failure();
+    assigned.push_back(group);
+  }
+  return success();
+}
+
 static bool isLoopCarryUse(Operation *op) {
   return isa<waveamdmachine::UniformLoopOp, waveamdmachine::ContinueIfOp>(op);
 }
@@ -1849,14 +1864,12 @@ static LogicalResult allocateOnce(func::FuncOp func, Inventory &inventory,
                                   PressureFailure &pressureFailure,
                                   bool &promoted, bool &rewroteIR) {
   SmallVector<IntervalGroup *> assigned;
+  if (failed(assignFixedGroups(func, groups, budgets, assigned,
+                               inventory.entryRegs)))
+    return failure();
   for (IntervalGroup *group : groups) {
-    if (hasFixedRegister(group)) {
-      if (failed(validateFixedGroup(func, group, budgets, assigned,
-                                    inventory.entryRegs)))
-        return failure();
-      assigned.push_back(group);
+    if (hasFixedRegister(group))
       continue;
-    }
     if (std::optional<unsigned> base =
             findFreeBase(group, budgets, assigned, inventory.entryRegs)) {
       group->assignedBase = *base;

@@ -342,3 +342,51 @@ func.func @exact_fit_at_register_file_tail() {
 }
 
 }
+
+// -----
+
+// =============================================================
+// 13. Fixed ranges reserve lanes before virtual selection.
+// Moving the fixed v0 def later must not let the virtual range grab v0.
+// =============================================================
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
+
+// CHECK-LABEL: func.func @early_fixed_v0_reserves_virtual
+// CHECK: %{{.+}} = waveamdmachine.v_mov_b32_tuple {{.*}} : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1, 0>
+// CHECK: %{{.+}} = waveamdmachine.v_mov_b32_tuple {{.*}} : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1, 1>
+func.func @early_fixed_v0_reserves_virtual() {
+  %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+  %fixed = waveamdmachine.v_mov_b32_tuple %zero {registers = 1 : i64}
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1, 0>
+  %virtual = waveamdmachine.v_mov_b32_tuple %zero {registers = 1 : i64}
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
+  %keep_fixed = waveamdmachine.v_mov_b32_tuple %fixed {registers = 1 : i64}
+      : (!waveamdmachine.reg<vgpr, 1, 0>) -> !waveamdmachine.reg<vgpr, 1>
+  %keep_virtual = waveamdmachine.v_mov_b32_tuple %virtual {registers = 1 : i64}
+      : (!waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
+  return
+}
+
+}
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
+
+// CHECK-LABEL: func.func @late_fixed_v0_reserves_virtual
+// CHECK: %{{.+}} = waveamdmachine.v_mov_b32_tuple {{.*}} : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1, 1>
+// CHECK: %{{.+}} = waveamdmachine.v_mov_b32_tuple {{.*}} : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1, 0>
+func.func @late_fixed_v0_reserves_virtual() {
+  %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+  %virtual = waveamdmachine.v_mov_b32_tuple %zero {registers = 1 : i64}
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
+  %fixed = waveamdmachine.v_mov_b32_tuple %zero {registers = 1 : i64}
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1, 0>
+  %keep_virtual = waveamdmachine.v_mov_b32_tuple %virtual {registers = 1 : i64}
+      : (!waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
+  %keep_fixed = waveamdmachine.v_mov_b32_tuple %fixed {registers = 1 : i64}
+      : (!waveamdmachine.reg<vgpr, 1, 0>) -> !waveamdmachine.reg<vgpr, 1>
+  return
+}
+
+}
