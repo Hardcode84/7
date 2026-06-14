@@ -3,8 +3,8 @@
 # End-to-end autotune over a real WMMA f16 matmul: vary
 # `wave_k_tiles`, run the full wave-to-machine backend per trial,
 # silenceably skip trials that overflow the artificial VGPR budget,
-# score the survivors by `waveamdmachine.vgpr_count_max`, pick the
-# largest count that fits.
+# decompose regalloc memory tuples, score by `vgpr_count_max`, pick the largest
+# count that fits.
 #
 # The Python builder is asked for pre-specialise MLIR
 # (skip_specialize=True). The tune body then binds the tile factor,
@@ -54,11 +54,13 @@ module attributes {transform.with_named_sequence} {
     %zero = transform.param.constant 0 : i64 -> !transform.param<i64>
     transform.match.param.cmpi eq %overflowed, %zero
         : !transform.param<i64>
-    %m8 = transform.apply_registered_pass "waveamd-insert-ticket-waits" to %m7
+    %m8 = transform.apply_registered_pass "waveamd-decompose-mem-tuples" to %m7
         : (!transform.any_op) -> !transform.any_op
-    %m9 = transform.apply_registered_pass "waveamd-insert-hazard-waits" to %m8
+    %m9 = transform.apply_registered_pass "waveamd-insert-ticket-waits" to %m8
         : (!transform.any_op) -> !transform.any_op
-    %m10 = transform.apply_registered_pass "waveamd-resource-info" to %m9
+    %m10 = transform.apply_registered_pass "waveamd-insert-hazard-waits" to %m9
+        : (!transform.any_op) -> !transform.any_op
+    %m11 = transform.apply_registered_pass "waveamd-resource-info" to %m10
         : (!transform.any_op) -> !transform.any_op
     transform.yield
   }

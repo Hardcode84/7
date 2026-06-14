@@ -1843,12 +1843,45 @@ def WaveAMDMachine_ScratchLoadB32Op
   }];
 }
 
+def WaveAMDMachine_ScratchLoadTupleB32Op
+    : WaveAMDMachine_ScratchMemoryOp<"scratch_load_tuple_b32", [WaveAMDMachine_VMEMLoad, WaveAMDMachine_TupleMemory, MemoryEffects<[MemRead]>]>,
+      WaveAMDMachine_VMEMTupleLoadInfo {
+  let summary = "scratch load of N consecutive 32-bit values into a VGPR tuple";
+  let arguments = (ins WaveAMDMachine_VGPR1OrImm:$vaddr,
+                       WaveAMDMachine_SGPR1OrImm:$saddr,
+                       Optional<WaveAMDMachine_MemToken>:$dependency,
+                       DefaultValuedAttr<I64Attr, "0">:$inst_offset);
+  let results = (outs WaveAMDMachine_VGPR:$result,
+                      Optional<WaveAMDMachine_MemToken>:$token);
+  let assemblyFormat = [{
+    $vaddr `,` $saddr (`after` $dependency^)? (`offset` $inst_offset^)?
+    attr-dict `:` functional-type(operands, results)
+  }];
+}
+
 def WaveAMDMachine_ScratchStoreB32Op
     : WaveAMDMachine_ScratchMemoryOp<"scratch_store_b32", [WaveAMDMachine_VMEMStore, MemoryEffects<[MemWrite]>]>,
       WaveAMDMachine_VMEMStoreInfo {
   let summary = "scratch 32-bit store";
   let arguments = (ins WaveAMDMachine_VGPR1OrImm:$vaddr,
                        WaveAMDMachine_VGPR1:$value,
+                       WaveAMDMachine_SGPR1OrImm:$saddr,
+                       Optional<WaveAMDMachine_MemToken>:$dependency,
+                       DefaultValuedAttr<I64Attr, "0">:$inst_offset);
+  let results = (outs Optional<WaveAMDMachine_MemToken>:$token);
+  let assemblyFormat = [{
+    $vaddr `,` $value `,` $saddr (`after` $dependency^)?
+    (`offset` $inst_offset^)?
+    attr-dict `:` functional-type(operands, results)
+  }];
+}
+
+def WaveAMDMachine_ScratchStoreTupleB32Op
+    : WaveAMDMachine_ScratchMemoryOp<"scratch_store_tuple_b32", [WaveAMDMachine_VMEMStore, WaveAMDMachine_TupleMemory, MemoryEffects<[MemWrite]>]>,
+      WaveAMDMachine_VMEMTupleStoreInfo {
+  let summary = "scratch 32-bit store of a VGPR tuple";
+  let arguments = (ins WaveAMDMachine_VGPR1OrImm:$vaddr,
+                       WaveAMDMachine_VGPR:$value,
                        WaveAMDMachine_SGPR1OrImm:$saddr,
                        Optional<WaveAMDMachine_MemToken>:$dependency,
                        DefaultValuedAttr<I64Attr, "0">:$inst_offset);
