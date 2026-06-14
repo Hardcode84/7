@@ -144,12 +144,22 @@ struct ScratchSpillPlan {
   ScratchSpillPlanStatus status = ScratchSpillPlanStatus::NotKernel;
 };
 
-enum class PlannedMemorySpillKind : uint8_t { LDSValue, ScratchValue };
+struct PlannedLoopCarrySpill {
+  waveamdmachine::UniformLoopOp loop;
+  unsigned index = 0;
+};
+
+enum class PlannedMemorySpillKind : uint8_t {
+  LDSValue,
+  ScratchValue,
+  ScratchLoopCarry,
+};
 
 struct PlannedMemorySpill : public wave::WaveAMDPressureReliefPlan {
   LDSSpillPlan ldsPlan;
   ScratchSpillPlan scratchPlan;
   Value value;
+  PlannedLoopCarrySpill loopCarry;
   IntervalGroup *group = nullptr;
   unsigned useCount = 0;
   unsigned reliefDwords = 0;
