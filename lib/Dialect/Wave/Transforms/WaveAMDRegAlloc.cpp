@@ -25,8 +25,10 @@
 #include <limits>
 #include <memory>
 #include <optional>
+#include <tuple>
 
 namespace mlir::wave {
+#define GEN_PASS_DEF_WAVEAMDCLEARREGALLOCASSIGNMENTS
 #define GEN_PASS_DEF_WAVEAMDREGALLOC
 #include "mlir/Dialect/Wave/Transforms/Passes.h.inc"
 } // namespace mlir::wave
@@ -109,11 +111,21 @@ static constexpr llvm::StringLiteral kScalarIntervalsAttr =
 static constexpr llvm::StringLiteral kTrackedValuesAttr =
     "waveamdmachine.regalloc_debug_tracked_values";
 static constexpr llvm::StringLiteral kTempAttr = kRegAllocTempAttr;
+static constexpr llvm::StringLiteral kFixedBlockArgsAttr =
+    "waveamdmachine.regalloc_fixed_block_args";
+static constexpr llvm::StringLiteral kFixedResultsAttr =
+    "waveamdmachine.regalloc_fixed_results";
+static constexpr unsigned kFixedBlockArgRecordSize = 3;
 
 static bool isAllocRegClass(waveamdmachine::RegClass regClass) {
   return regClass == waveamdmachine::RegClass::SGPR ||
          regClass == waveamdmachine::RegClass::VGPR ||
          regClass == waveamdmachine::RegClass::AGPR;
+}
+
+static bool shouldRecordRegAllocAssignments(func::FuncOp func) {
+  return func->hasAttr(kLDSSpillBytesAttr) ||
+         func->hasAttr(kScratchSpillBytesAttr);
 }
 
 static std::optional<waveamdmachine::RegType> getTrackedType(Value value) {
@@ -276,6 +288,231 @@ static void flatten(Block &block, Inventory &inventory) {
       for (Block &nested : region)
         flatten(nested, inventory);
   }
+}
+
+static std::optional<int64_t> getRegionNumber(Operation *op, Region *region) {
+  for (auto [index, candidate] : llvm::enumerate(op->getRegions()))
+    if (&candidate == region)
+      return static_cast<int64_t>(index);
+  return std::nullopt;
+}
+
+static std::optional<int64_t> getBlockNumber(Region *region, Block *block) {
+  for (auto [index, candidate] : llvm::enumerate(*region))
+    if (&candidate == block)
+      return static_cast<int64_t>(index);
+  return std::nullopt;
+}
+
+struct FixedBlockArgumentRecord {
+  int64_t regionNumber;
+  int64_t blockNumber;
+  int64_t argumentNumber;
+};
+
+static bool operator<(const FixedBlockArgumentRecord &lhs,
+                      const FixedBlockArgumentRecord &rhs) {
+  return std::tie(lhs.regionNumber, lhs.blockNumber, lhs.argumentNumber) <
+         std::tie(rhs.regionNumber, rhs.blockNumber, rhs.argumentNumber);
+}
+
+static bool operator==(const FixedBlockArgumentRecord &lhs,
+                       const FixedBlockArgumentRecord &rhs) {
+  return lhs.regionNumber == rhs.regionNumber &&
+         lhs.blockNumber == rhs.blockNumber &&
+         lhs.argumentNumber == rhs.argumentNumber;
+}
+
+static LogicalResult markFixedResult(OpResult result, Builder &builder) {
+  Operation *op = result.getOwner();
+  int64_t resultNumber = result.getResultNumber();
+  DenseI64ArrayAttr oldAttr =
+      op->getAttrOfType<DenseI64ArrayAttr>(kFixedResultsAttr);
+  SmallVector<int64_t> results;
+  if (oldAttr)
+    results.append(oldAttr.asArrayRef().begin(), oldAttr.asArrayRef().end());
+  if (llvm::is_contained(results, resultNumber))
+    return success();
+  results.push_back(resultNumber);
+  llvm::sort(results);
+  results.erase(std::unique(results.begin(), results.end()), results.end());
+  op->setAttr(kFixedResultsAttr, builder.getDenseI64ArrayAttr(results));
+  return success();
+}
+
+static LogicalResult readFixedBlockArgumentRecords(
+    Operation *op, SmallVectorImpl<FixedBlockArgumentRecord> &records) {
+  DenseI64ArrayAttr attr =
+      op->getAttrOfType<DenseI64ArrayAttr>(kFixedBlockArgsAttr);
+  if (!attr)
+    return success();
+  ArrayRef<int64_t> raw = attr.asArrayRef();
+  if (raw.size() % kFixedBlockArgRecordSize != 0)
+    return op->emitError(kPassName)
+           << " has malformed register assignment markers";
+  size_t count = raw.size() / kFixedBlockArgRecordSize;
+  for (size_t recordNumber : llvm::seq<size_t>(0, count)) {
+    size_t index = recordNumber * kFixedBlockArgRecordSize;
+    records.push_back({raw[index], raw[index + 1], raw[index + 2]});
+  }
+  return success();
+}
+
+static void
+writeFixedBlockArgumentRecords(Operation *op,
+                               ArrayRef<FixedBlockArgumentRecord> records,
+                               Builder &builder) {
+  SmallVector<int64_t> raw;
+  for (const FixedBlockArgumentRecord &record : records)
+    raw.append(
+        {record.regionNumber, record.blockNumber, record.argumentNumber});
+  op->setAttr(kFixedBlockArgsAttr, builder.getDenseI64ArrayAttr(raw));
+}
+
+static LogicalResult markFixedBlockArgument(BlockArgument arg,
+                                            Builder &builder) {
+  Block *block = arg.getOwner();
+  Region *region = block->getParent();
+  Operation *parent = region->getParentOp();
+  if (isa<func::FuncOp>(parent))
+    return success();
+  std::optional<int64_t> regionNumber = getRegionNumber(parent, region);
+  std::optional<int64_t> blockNumber = getBlockNumber(region, block);
+  if (!regionNumber || !blockNumber)
+    return failure();
+  FixedBlockArgumentRecord record{*regionNumber, *blockNumber,
+                                  arg.getArgNumber()};
+  SmallVector<FixedBlockArgumentRecord, 4> records;
+  if (failed(readFixedBlockArgumentRecords(parent, records)))
+    return failure();
+  if (!llvm::is_contained(records, record))
+    records.push_back(record);
+  llvm::sort(records);
+  records.erase(std::unique(records.begin(), records.end()), records.end());
+  writeFixedBlockArgumentRecords(parent, records, builder);
+  return success();
+}
+
+static LogicalResult markFixedValue(Value value, Builder &builder) {
+  if (auto result = dyn_cast<OpResult>(value))
+    return markFixedResult(result, builder);
+  return markFixedBlockArgument(cast<BlockArgument>(value), builder);
+}
+
+static void clearRegAllocAssignment(Value value) {
+  auto type = dyn_cast<waveamdmachine::RegType>(value.getType());
+  if (!type || !isAllocRegClass(type.getRegClass()) || type.getIndex() < 0)
+    return;
+  value.setType(waveamdmachine::RegType::get(
+      type.getContext(), type.getRegClass(), type.getWidth(), /*index=*/-1));
+}
+
+static LogicalResult readFixedResultNumbers(Operation *op,
+                                            SmallVectorImpl<int64_t> &results) {
+  DenseI64ArrayAttr attr =
+      op->getAttrOfType<DenseI64ArrayAttr>(kFixedResultsAttr);
+  if (!attr)
+    return success();
+  for (int64_t resultNumber : attr.asArrayRef()) {
+    if (resultNumber < 0 ||
+        static_cast<unsigned>(resultNumber) >= op->getNumResults())
+      return op->emitError(kPassName)
+             << " has invalid register assignment marker";
+    results.push_back(resultNumber);
+  }
+  return success();
+}
+
+static LogicalResult clearResultAssignments(Operation *op) {
+  SmallVector<int64_t, 4> fixedResults;
+  if (failed(readFixedResultNumbers(op, fixedResults)))
+    return failure();
+  for (OpResult result : op->getResults()) {
+    if (llvm::is_contained(fixedResults,
+                           static_cast<int64_t>(result.getResultNumber())))
+      continue;
+    clearRegAllocAssignment(result);
+  }
+  op->removeAttr(kFixedResultsAttr);
+  return success();
+}
+
+static Block *getBlockAt(Region &region, int64_t blockNumber) {
+  if (blockNumber < 0)
+    return nullptr;
+  for (auto [index, block] : llvm::enumerate(region))
+    if (static_cast<int64_t>(index) == blockNumber)
+      return &block;
+  return nullptr;
+}
+
+static LogicalResult
+validateFixedBlockArgumentRecords(Operation *op,
+                                  ArrayRef<FixedBlockArgumentRecord> records) {
+  for (const FixedBlockArgumentRecord &record : records) {
+    if (record.regionNumber < 0 ||
+        static_cast<unsigned>(record.regionNumber) >= op->getNumRegions())
+      return op->emitError(kPassName)
+             << " has invalid register assignment marker";
+    Region &region = op->getRegion(static_cast<unsigned>(record.regionNumber));
+    Block *block = getBlockAt(region, record.blockNumber);
+    if (!block || record.argumentNumber < 0 ||
+        static_cast<unsigned>(record.argumentNumber) >=
+            block->getNumArguments())
+      return op->emitError(kPassName)
+             << " has invalid register assignment marker";
+  }
+  return success();
+}
+
+static bool isFixedBlockArgument(ArrayRef<FixedBlockArgumentRecord> fixedArgs,
+                                 int64_t regionNumber, int64_t blockNumber,
+                                 int64_t argumentNumber) {
+  return llvm::is_contained(
+      fixedArgs,
+      FixedBlockArgumentRecord{regionNumber, blockNumber, argumentNumber});
+}
+
+static LogicalResult
+clearRegionBlockArguments(Region &region, int64_t regionNumber,
+                          ArrayRef<FixedBlockArgumentRecord> fixedArgs) {
+  for (auto [blockNumber, block] : llvm::enumerate(region)) {
+    for (BlockArgument arg : block.getArguments()) {
+      if (isFixedBlockArgument(fixedArgs, regionNumber, blockNumber,
+                               arg.getArgNumber()))
+        continue;
+      clearRegAllocAssignment(arg);
+    }
+  }
+  return success();
+}
+
+static LogicalResult clearBlockArgumentAssignments(Operation *op) {
+  SmallVector<FixedBlockArgumentRecord, 4> fixedArgs;
+  if (failed(readFixedBlockArgumentRecords(op, fixedArgs)))
+    return failure();
+  if (failed(validateFixedBlockArgumentRecords(op, fixedArgs)))
+    return failure();
+  for (auto [regionNumber, region] : llvm::enumerate(op->getRegions()))
+    if (failed(clearRegionBlockArguments(region, regionNumber, fixedArgs)))
+      return failure();
+  op->removeAttr(kFixedBlockArgsAttr);
+  return success();
+}
+
+static LogicalResult clearRegAllocAssignments(ModuleOp root) {
+  WalkResult walk = root->walk([](Operation *op) {
+    if (isa<func::FuncOp>(op))
+      return WalkResult::advance();
+    func::FuncOp func = op->getParentOfType<func::FuncOp>();
+    if (!func || !shouldRecordRegAllocAssignments(func))
+      return WalkResult::advance();
+    if (failed(clearResultAssignments(op)) ||
+        failed(clearBlockArgumentAssignments(op)))
+      return WalkResult::interrupt();
+    return WalkResult::advance();
+  });
+  return success(!walk.wasInterrupted());
 }
 
 static LogicalResult validateBlockRegTypes(Block &block, func::FuncOp func) {
@@ -2046,17 +2283,36 @@ static LogicalResult buildInventory(func::FuncOp func, Inventory &inventory) {
   return success();
 }
 
-static void applyPhysicalAssignments(Inventory &inventory) {
+static bool isFunctionEntryBlockArgument(Value value) {
+  auto arg = dyn_cast<BlockArgument>(value);
+  return arg && isa<func::FuncOp>(arg.getOwner()->getParentOp());
+}
+
+static LogicalResult markFixedValueIfNeeded(Value value, bool recordFixedValues,
+                                            Builder &builder) {
+  if (!recordFixedValues)
+    return success();
+  auto type = cast<waveamdmachine::RegType>(value.getType());
+  if (type.getIndex() < 0)
+    return success();
+  return markFixedValue(value, builder);
+}
+
+static LogicalResult applyPhysicalAssignments(func::FuncOp func,
+                                              Inventory &inventory,
+                                              Builder &builder) {
+  bool recordFixedValues = shouldRecordRegAllocAssignments(func);
   for (auto [value, interval] : inventory.intervalFor) {
-    if (auto arg = dyn_cast<BlockArgument>(value))
-      if (isa<func::FuncOp>(arg.getOwner()->getParentOp()))
-        continue;
+    if (isFunctionEntryBlockArgument(value))
+      continue;
+    if (failed(markFixedValueIfNeeded(value, recordFixedValues, builder)))
+      return failure();
+    auto type = cast<waveamdmachine::RegType>(value.getType());
     IntervalGroup *group = interval->group;
     if (group->plannedPressureRelief)
       continue;
     if (!group->assignedBase)
       continue;
-    auto type = cast<waveamdmachine::RegType>(value.getType());
     if (type.getRegClass() != group->storageClass)
       continue;
     std::optional<unsigned> laneIndex = getLaneIndex(group, interval);
@@ -2066,6 +2322,7 @@ static void applyPhysicalAssignments(Inventory &inventory) {
         type.getContext(), type.getRegClass(), type.getWidth(),
         *group->assignedBase + *laneIndex));
   }
+  return success();
 }
 
 static int64_t getValueOrder(Value value, Inventory &inventory) {
@@ -2343,7 +2600,8 @@ finishSuccessfulAllocation(func::FuncOp func, Inventory &inventory,
       return mlir::failure();
     return AllocationAttemptResult::Retry;
   }
-  applyPhysicalAssignments(inventory);
+  if (failed(applyPhysicalAssignments(func, inventory, builder)))
+    return mlir::failure();
   updatePeaks(inventory);
   emitRegAllocRemarks(func, inventory, budgets);
   clearTransientRegAllocAttrs(func);
@@ -2576,6 +2834,18 @@ struct WaveAMDRegAllocPass
     setModuleOverflowCount(root, builder, overflowCount);
     if (result.wasInterrupted())
       signalPassFailure();
+  }
+};
+
+struct WaveAMDClearRegAllocAssignmentsPass
+    : public wave::impl::WaveAMDClearRegAllocAssignmentsBase<
+          WaveAMDClearRegAllocAssignmentsPass> {
+  using WaveAMDClearRegAllocAssignmentsBase::
+      WaveAMDClearRegAllocAssignmentsBase;
+
+  void runOnOperation() override {
+    if (failed(clearRegAllocAssignments(getOperation())))
+      return signalPassFailure();
   }
 };
 

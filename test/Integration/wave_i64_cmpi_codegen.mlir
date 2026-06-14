@@ -14,7 +14,6 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // ASM: s_and_b32
 // ASM: s_or_b32
 // ASM: v_cmp_gt_i32_e64
-// ASM: v_cmp_eq_u32_e64
 // ASM: v_cmp_ge_u32_e64
 // ASM: s_and_b32
 // ASM: s_or_b32

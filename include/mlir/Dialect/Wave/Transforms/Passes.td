@@ -406,6 +406,19 @@ def WaveAMDRegAlloc
   ];
 }
 
+def WaveAMDClearRegAllocAssignments
+    : Pass<"waveamd-clear-regalloc-assignments", "ModuleOp"> {
+  let summary = "Clear stale WaveAMDMachine physical register assignments";
+  let description = [{
+    Clears physical register indices that were written by an earlier
+    `waveamd-reg-alloc` run. ABI and user-pinned fixed registers are left
+    intact.
+  }];
+  let dependentDialects = [
+    "waveamdmachine::WaveAMDMachineDialect"
+  ];
+}
+
 
 def WaveAMDResourceInfo
     : Pass<"waveamd-resource-info", "ModuleOp"> {

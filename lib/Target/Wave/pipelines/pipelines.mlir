@@ -14,7 +14,9 @@ module attributes {transform.with_named_sequence} {
   // it for subtarget feature selection.
   transform.named_sequence @waveamd_backend_lower(
       %root: !transform.any_op {transform.consumed}) -> !transform.any_op {
-    %rm = transform.apply_registered_pass "wavemeta-specialize" to %root
+    %rclr = transform.apply_registered_pass "waveamd-clear-regalloc-assignments" to %root
+        : (!transform.any_op) -> !transform.any_op
+    %rm = transform.apply_registered_pass "wavemeta-specialize" to %rclr
         : (!transform.any_op) -> !transform.any_op
     %rmeta = transform.apply_registered_pass "canonicalize" to %rm
         : (!transform.any_op) -> !transform.any_op
@@ -76,7 +78,9 @@ module attributes {transform.with_named_sequence} {
 
   transform.named_sequence @waveamd_backend_finish(
       %root: !transform.any_op {transform.consumed}) -> !transform.any_op {
-    %r3 = transform.apply_registered_pass "waveamd-insert-ticket-waits" to %root
+    %rclr = transform.apply_registered_pass "waveamd-clear-regalloc-assignments" to %root
+        : (!transform.any_op) -> !transform.any_op
+    %r3 = transform.apply_registered_pass "waveamd-insert-ticket-waits" to %rclr
         : (!transform.any_op) -> !transform.any_op
     %rlin = transform.apply_registered_pass "waveamd-linearize-exec-if" to %r3
         : (!transform.any_op) -> !transform.any_op
