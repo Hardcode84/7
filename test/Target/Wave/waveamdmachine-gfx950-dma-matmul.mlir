@@ -15,6 +15,8 @@
 // RUN:   | FileCheck %s --check-prefix=PROFILE256
 // RUN: %python %S/../../../examples/wave/wmma_matmul_tiled.py --chip=gfx950 --kernel-profile=gfx950-mxfp4-256x256-4wave --m=1024 --n=1024 --k=128 --kernel-only 2>/dev/null \
 // RUN:   | FileCheck %s --check-prefix=PROFILEMXFP4-4W
+// RUN: %python %S/../../../examples/wave/wmma_matmul_tiled.py --chip=gfx950 --kernel-profile=gfx950-mxfp4-256x256-8wave --m=1024 --n=1024 --k=768 --kernel-only 2>/dev/null \
+// RUN:   | FileCheck %s --check-prefix=PROFILEMXFP4-DMA-OVERLAP
 // RUN: %python %S/../../../examples/wave/wmma_matmul_tiled.py --chip=gfx950 --kernel-profile=gfx950-sw-pipeline --m=128 --n=128 --k=192 --dump-asm 2>/dev/null \
 // RUN:   | FileCheck %s --check-prefix=ASMPIPE
 // RUN: %python %S/../../../examples/wave/wmma_matmul_tiled.py --chip=gfx950 --m=16 --n=16 --k=32 --matrix-intrinsic=mfma_gfx950 --input-type=bf16 --dump-asm 2>/dev/null \
@@ -83,6 +85,30 @@
 // PROFILEMXFP4-4W: waveamd.make_buffer
 // PROFILEMXFP4-4W: waveamd.dma_load_lds
 // PROFILEMXFP4-4W: waveamd.mma_scale "mfma.scale.f32.16x16x128.f4.f4"
+
+// PROFILEMXFP4-DMA-OVERLAP-LABEL: func.func @wmma_f16_matmul_tiled
+// PROFILEMXFP4-DMA-OVERLAP-SAME: wave.workgroup_size = array<i32: 512, 1, 1>
+// PROFILEMXFP4-DMA-OVERLAP: [[ONE:%.*]] = arith.constant 1 : i32
+// PROFILEMXFP4-DMA-OVERLAP: wave.binary ori
+// PROFILEMXFP4-DMA-OVERLAP: wave.where
+// PROFILEMXFP4-DMA-OVERLAP: waveamd.dma_load_lds
+// PROFILEMXFP4-DMA-OVERLAP: wave.join
+// PROFILEMXFP4-DMA-OVERLAP: wave.binary ori
+// PROFILEMXFP4-DMA-OVERLAP: wave.where
+// PROFILEMXFP4-DMA-OVERLAP: waveamd.dma_load_lds
+// PROFILEMXFP4-DMA-OVERLAP: wave.join
+// PROFILEMXFP4-DMA-OVERLAP: scf.for {{%.*}} = {{%.*}} to [[ONE]] step [[ONE]]
+// PROFILEMXFP4-DMA-OVERLAP: waveamd.mma_scale "mfma.scale.f32.16x16x128.f4.f4"
+// PROFILEMXFP4-DMA-OVERLAP: wave.barrier
+// PROFILEMXFP4-DMA-OVERLAP: wave.binary ori
+// PROFILEMXFP4-DMA-OVERLAP: wave.where
+// PROFILEMXFP4-DMA-OVERLAP: waveamd.dma_load_lds
+// PROFILEMXFP4-DMA-OVERLAP: wave.join
+// PROFILEMXFP4-DMA-OVERLAP: wave.binary ori
+// PROFILEMXFP4-DMA-OVERLAP: wave.where
+// PROFILEMXFP4-DMA-OVERLAP: waveamd.dma_load_lds
+// PROFILEMXFP4-DMA-OVERLAP: wave.join
+// PROFILEMXFP4-DMA-OVERLAP: waveamd.mma_scale "mfma.scale.f32.16x16x128.f4.f4"
 
 // ASMPIPE-LABEL: wmma_f16_matmul_tiled:
 // ASMPIPE: s_waitcnt vmcnt(8)

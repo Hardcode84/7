@@ -1582,13 +1582,48 @@ def _stage_mxfp4_scale_tiles_dma_after_dep(
     dep: dsl.Value | None,
 ) -> dsl.Value:
     plan = _mxfp4_scale_dma_plan(bld, cfg, coords, layout, step, lds_offset, dep)
-    scale_dma_lanes = _mxfp4_scale_dma_mask(bld, cfg, coords)
-    with bld.where(scale_dma_lanes, [dsl.mem_token_type()]) as active:
-        tokens: list[dsl.Value] = []
-        _stage_mxfp4_a_scale_dma(bld, cfg, coords, layout, plan, tokens)
-        _stage_mxfp4_b_scale_dma(bld, cfg, coords, layout, plan, tokens)
-        bld.yield_([_join_tokens(bld, tokens)])
-    return active.results[0]
+    if not _use_cta_owned_mxfp4_scale_dma(cfg):
+        with bld.where(
+            _mxfp4_scale_dma_lane_mask(bld, cfg, coords), [dsl.mem_token_type()]
+        ) as active:
+            tokens: list[dsl.Value] = []
+            _stage_mxfp4_a_scale_dma(bld, cfg, coords, layout, plan, tokens)
+            _stage_mxfp4_b_scale_dma(bld, cfg, coords, layout, plan, tokens)
+            bld.yield_([_join_tokens(bld, tokens)])
+        return active.results[0]
+
+    with bld.where(
+        _mxfp4_a_scale_dma_mask(bld, cfg, coords),
+        [dsl.mem_token_type()],
+    ) as active_a:
+        a_tokens: list[dsl.Value] = []
+        _stage_mxfp4_a_scale_dma(bld, cfg, coords, layout, plan, a_tokens)
+        bld.yield_([_join_tokens(bld, a_tokens)])
+    with bld.where(
+        _mxfp4_b_scale_dma_mask(bld, cfg, coords),
+        [dsl.mem_token_type()],
+    ) as active_b:
+        b_tokens: list[dsl.Value] = []
+        _stage_mxfp4_b_scale_dma(bld, cfg, coords, layout, plan, b_tokens)
+        bld.yield_([_join_tokens(bld, b_tokens)])
+    return bld.join(active_a.results[0], active_b.results[0])
+
+
+def _use_cta_owned_mxfp4_scale_dma(cfg: _MatmulConfig) -> bool:
+    return cfg.virtual_k_steps > 1
+
+
+def _mxfp4_scale_dma_wave_id(
+    bld: dsl.FunctionBuilder, cfg: _MatmulConfig, coords: _TileCoords
+) -> dsl.Value:
+    return bld.binary(
+        dsl.BinaryKind.ShRUI,
+        coords.wi,
+        bld.splat(
+            bld.constant(dsl.i32(), cfg.mma.wave_size.bit_length() - 1),
+            width=cfg.mma.wave_size,
+        ),
+    )
 
 
 def _mxfp4_scale_dma_plan(
@@ -1627,7 +1662,51 @@ def _mxfp4_scale_dma_plan(
     )
 
 
-def _mxfp4_scale_dma_mask(
+def _mxfp4_a_scale_dma_mask(
+    bld: dsl.FunctionBuilder,
+    cfg: _MatmulConfig,
+    coords: _TileCoords,
+) -> dsl.Value:
+    wave_id = _mxfp4_scale_dma_wave_id(bld, cfg, coords)
+    owner_value = bld.binary(
+        dsl.BinaryKind.AndI,
+        wave_id,
+        bld.splat(bld.constant(dsl.i32(), cfg.BN - 1), width=cfg.mma.wave_size),
+    )
+    return _mxfp4_scale_dma_mask_for_owner(bld, cfg, coords, owner_value)
+
+
+def _mxfp4_b_scale_dma_mask(
+    bld: dsl.FunctionBuilder,
+    cfg: _MatmulConfig,
+    coords: _TileCoords,
+) -> dsl.Value:
+    wave_id = _mxfp4_scale_dma_wave_id(bld, cfg, coords)
+    owner_value = bld.binary(
+        dsl.BinaryKind.ShRUI,
+        wave_id,
+        bld.splat(bld.constant(dsl.i32(), cfg.log2_BN), width=cfg.mma.wave_size),
+    )
+    return _mxfp4_scale_dma_mask_for_owner(bld, cfg, coords, owner_value)
+
+
+def _mxfp4_scale_dma_mask_for_owner(
+    bld: dsl.FunctionBuilder,
+    cfg: _MatmulConfig,
+    coords: _TileCoords,
+    owner_value: dsl.Value,
+) -> dsl.Value:
+    lane_dma = bld.binary(
+        dsl.BinaryKind.AndI,
+        coords.wi,
+        bld.splat(bld.constant(dsl.i32(), 39), width=cfg.mma.wave_size),
+    )
+    active_value = bld.binary(dsl.BinaryKind.OrI, lane_dma, owner_value)
+    zero = bld.splat(bld.constant(dsl.i32(), 0), width=cfg.mma.wave_size)
+    return bld.cmpi("eq", active_value, zero)
+
+
+def _mxfp4_scale_dma_lane_mask(
     bld: dsl.FunctionBuilder, cfg: _MatmulConfig, coords: _TileCoords
 ) -> dsl.Value:
     lane_dma = bld.binary(
@@ -1885,8 +1964,14 @@ def _stage_mxfp4_scale_batch(
     scale_after: dsl.Value | None,
     *,
     barrier_after: bool = True,
+    barrier_before: bool = True,
 ) -> tuple[list[tuple[_Mxfp4ScaleLayout, dsl.Value | int]], dsl.Value]:
-    dep = bld.barrier(scale_after) if scale_after is not None else None
+    if scale_after is None:
+        dep = None
+    elif barrier_before:
+        dep = bld.barrier(scale_after)
+    else:
+        dep = scale_after
     stride = _mxfp4_scale_lds_stride_dwords(cfg)
     staged: list[tuple[_Mxfp4ScaleLayout, dsl.Value | int]] = []
     tokens: list[dsl.Value] = []
@@ -2555,6 +2640,15 @@ def _emit_pipelined_step(
     ]
 
 
+def _use_mxfp4_regional_dma_step(cfg: _MatmulConfig) -> bool:
+    return (
+        cfg.use_dma_lds
+        and cfg.uses_packed_mxfp4
+        and cfg.wave_n_tiles > 1
+        and cfg.wave_n_tiles % 2 == 0
+    )
+
+
 def _emit_dma_step(
     bld: dsl.FunctionBuilder,
     cfg: _MatmulConfig,
@@ -2600,19 +2694,44 @@ def _emit_dma_step(
         next_scale_step = bld.assume_range(
             next_scale_step, 2, max(cfg.virtual_k_steps - 1, 2)
         )
-        _, new_next_scale_token = _stage_mxfp4_scale_batch(
-            bld,
-            cfg,
-            coords,
-            next_scale_step,
-            _scale_buffer_offset(bld, cfg, next_scale_step),
-            scale_reuse_token,
-            barrier_after=False,
-        )
         new_scale_token = state.next_scale_token
-        new_accs = _emit_mxfp4_mma_grid_scale_sets(
-            bld, cfg, state.afs, state.bfs, state.accs, scale_sets
-        )
+        if _use_mxfp4_regional_dma_step(cfg):
+            n_mid = cfg.wave_n_tiles // 2
+            left_accs = _emit_mxfp4_mma_grid_scale_sets_slice(
+                bld, cfg, state.afs, state.bfs, state.accs, scale_sets, 0, n_mid
+            )
+            _, new_next_scale_token = _stage_mxfp4_scale_batch(
+                bld,
+                cfg,
+                coords,
+                next_scale_step,
+                _scale_buffer_offset(bld, cfg, next_scale_step),
+                scale_reuse_token,
+                barrier_after=False,
+            )
+            new_accs = _emit_mxfp4_mma_grid_scale_sets_slice(
+                bld,
+                cfg,
+                state.afs,
+                state.bfs,
+                left_accs,
+                scale_sets,
+                n_mid,
+                cfg.wave_n_tiles,
+            )
+        else:
+            _, new_next_scale_token = _stage_mxfp4_scale_batch(
+                bld,
+                cfg,
+                coords,
+                next_scale_step,
+                _scale_buffer_offset(bld, cfg, next_scale_step),
+                scale_reuse_token,
+                barrier_after=False,
+            )
+            new_accs = _emit_mxfp4_mma_grid_scale_sets(
+                bld, cfg, state.afs, state.bfs, state.accs, scale_sets
+            )
     elif early_dma:
         scales = _stage_read_mxfp4_scales(
             bld, cfg, coords, scale_step, current_lds_offset, state.reuse_token

@@ -18,7 +18,7 @@
 // RUN:   | FileCheck %s --check-prefix=DMA-MXFP4
 // RUN: %python %S/../../examples/wave/wmma_matmul_tiled.py --chip=%chip --m=16 --n=16 --k=256 --matrix-intrinsic=mfma_gfx950 --input-type=mxfp4 --wave-k-tiles=2 --use-dma-lds --random-data --compare-cpu \
 // RUN:   | FileCheck %s --check-prefix=DMA-MXFP4-K2
-// RUN: %python %S/../../examples/wave/wmma_matmul_tiled.py --chip=%chip --kernel-profile=gfx950-mxfp4-256x256-8wave --m=256 --n=256 --k=256 --random-data --compare-cpu \
+// RUN: %python %S/../../examples/wave/wmma_matmul_tiled.py --chip=%chip --kernel-profile=gfx950-mxfp4-256x256-8wave --m=256 --n=256 --k=768 --random-data --compare-cpu \
 // RUN:   | FileCheck %s --check-prefix=PROFILE-MXFP4
 // RUN: %python %S/../../examples/wave/wmma_matmul_tiled.py --chip=%chip --kernel-profile=gfx950-mxfp4-256x256-4wave --m=256 --n=256 --k=128 --random-data --compare-cpu \
 // RUN:   | FileCheck %s --check-prefix=PROFILE-MXFP4-4W
