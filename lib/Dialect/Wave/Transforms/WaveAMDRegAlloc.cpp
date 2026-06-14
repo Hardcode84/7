@@ -629,6 +629,8 @@ static unsigned getLiveDwords(ArrayRef<std::unique_ptr<Interval>> intervals,
                               waveamdmachine::RegClass regClass) {
   unsigned live = 0;
   for (const std::unique_ptr<Interval> &interval : intervals) {
+    if (interval->group->plannedPressureRelief)
+      continue;
     if (interval->values.empty() && !interval->reserved)
       continue;
     if (interval->group->storageClass != regClass ||
@@ -693,6 +695,8 @@ static void extendExternalLoopUse(Operation *user, Value operand,
 }
 
 static bool isLiveAt(Interval *interval, unsigned position) {
+  if (interval->group->plannedPressureRelief)
+    return false;
   return (!interval->values.empty() || interval->reserved) &&
          interval->start <= position && position <= interval->end;
 }
@@ -725,6 +729,8 @@ static int64_t getResultIndex(Value value) {
 }
 
 static bool hasLiveLanes(IntervalGroup *group) {
+  if (group->plannedPressureRelief)
+    return false;
   return llvm::any_of(group->intervals, [](Interval *lane) {
     return !lane->values.empty() || lane->reserved;
   });
@@ -1002,6 +1008,14 @@ findFreeBase(IntervalGroup *group, RegisterBudgets budgets,
   return std::nullopt;
 }
 
+static bool groupContainsBlockArgument(IntervalGroup *group) {
+  for (Interval *lane : group->intervals)
+    for (Value value : lane->values)
+      if (isa<BlockArgument>(value))
+        return true;
+  return false;
+}
+
 static bool canPromote(IntervalGroup *group, RegisterBudgets budgets) {
   if (group->nonPromotable || hasFixedRegister(group))
     return false;
@@ -1012,8 +1026,11 @@ static bool canPromote(IntervalGroup *group, RegisterBudgets budgets) {
       getNextRegClass(group->storageClass);
   if (!next || getBudget(budgets, *next) < group->intervals.size())
     return false;
-  if (*next == waveamdmachine::RegClass::VGPR)
-    return group->intervals.size() == 1;
+  if (*next == waveamdmachine::RegClass::VGPR) {
+    if (group->intervals.size() != 1)
+      return false;
+    return !groupContainsBlockArgument(group);
+  }
   if (*next == waveamdmachine::RegClass::AGPR)
     return !hasUnpromotableAGPRUse(group);
   return false;
@@ -1323,7 +1340,7 @@ static bool isLoopCarryUse(Operation *op) {
 }
 
 static bool groupLiveAt(IntervalGroup *group, unsigned position) {
-  if (!group)
+  if (!group || group->plannedPressureRelief)
     return false;
   for (Interval *lane : group->intervals)
     if (lane->start <= position && position <= lane->end)
@@ -1562,21 +1579,31 @@ static void setMemorySpillRejectDiagnostics(func::FuncOp func,
 
 static FailureOr<bool> applyMemoryPressureRelief(
     func::FuncOp func, Inventory &inventory, ArrayRef<IntervalGroup *> assigned,
-    IntervalGroup *group, unsigned position, RegisterBudgets budgets) {
+    IntervalGroup *group, unsigned position, RegisterBudgets budgets,
+    const PressureFailure *pressureFailure = nullptr) {
   func->removeAttr(kMemorySpillRejectAttr);
   func->removeAttr(kMemorySpillRejectDetailAttr);
   FailureOr<bool> spilledGroup = applyLDSSpillProvider(
-      func, assigned, group, position, budgets, inventory);
+      func, assigned, group, position, budgets, inventory, pressureFailure);
   if (failed(spilledGroup))
     return failure();
   if (*spilledGroup)
     return true;
-  FailureOr<bool> scratchSpill =
-      applyScratchSpillProvider(func, assigned, group, position, inventory);
+  FailureOr<bool> scratchSpill = applyScratchSpillProvider(
+      func, assigned, group, position, inventory, pressureFailure);
   if (failed(scratchSpill) || *scratchSpill)
     return scratchSpill;
   setMemorySpillRejectDiagnostics(func, assigned, group, position);
   return false;
+}
+
+static FailureOr<bool>
+applyCombinedPressureRelief(func::FuncOp func, Inventory &inventory,
+                            const PressureFailure &failure,
+                            RegisterBudgets budgets) {
+  SmallVector<IntervalGroup *> groups = getAllocGroups(inventory);
+  return applyMemoryPressureRelief(func, inventory, groups, nullptr,
+                                   failure.position, budgets, &failure);
 }
 
 static LogicalResult allocateOnce(func::FuncOp func, Inventory &inventory,
@@ -1607,12 +1634,16 @@ static LogicalResult allocateOnce(func::FuncOp func, Inventory &inventory,
     if (failed(promotedGroup))
       return failure();
     if (!*promotedGroup) {
+      unsigned plannedBefore = inventory.plannedReliefPlans.size();
       FailureOr<bool> rewroteGroup = applyMemoryPressureRelief(
           func, inventory, assigned, group, position, budgets);
       if (failed(rewroteGroup))
         return failure();
       if (*rewroteGroup) {
-        rewroteIR = true;
+        if (inventory.plannedReliefPlans.size() != plannedBefore)
+          promoted = true;
+        else
+          rewroteIR = true;
         return success();
       }
       pressureFailure = buildClassPressureFailure(
@@ -1635,10 +1666,10 @@ static LogicalResult allocateGroups(func::FuncOp func, Inventory &inventory,
                                     RegisterBudgets budgets,
                                     std::optional<PressureFailure> &failureOut,
                                     bool &rewroteIR) {
-  SmallVector<IntervalGroup *> groups = getAllocGroups(inventory);
-  unsigned maxAttempts = groups.size() * 2 + 1;
+  unsigned maxAttempts = inventory.groups.size() * 2 + 1;
   for ([[maybe_unused]] unsigned attempt :
        llvm::seq<unsigned>(0, maxAttempts)) {
+    SmallVector<IntervalGroup *> groups = getAllocGroups(inventory);
     resetAssignments(groups);
     bool promoted = false;
     bool localRewrite = false;
@@ -1950,18 +1981,28 @@ static LogicalResult materializePlannedPressureRelief(func::FuncOp func,
                                                       Inventory &inventory,
                                                       RegisterBudgets budgets,
                                                       OpBuilder &builder) {
-  (void)func;
-  std::unique_ptr<wave::WaveAMDPressureReliefProvider> provider =
-      createBankPromotionProvider({}, nullptr, /*position=*/0, budgets,
-                                  inventory, getBankPromotionHooks());
-  SmallVector<const wave::WaveAMDPressureReliefPlan *, 8> plans;
-  for (const std::unique_ptr<wave::WaveAMDPressureReliefPlan> &plan :
-       inventory.plannedReliefPlans)
-    if (plan->getProviderName() == provider->getName())
-      plans.push_back(plan.get());
-  if (plans.empty())
-    return success();
-  return provider->materializePlans(plans, builder);
+  SmallVector<std::unique_ptr<wave::WaveAMDPressureReliefProvider>, 4>
+      providers;
+  providers.push_back(createBankPromotionProvider({}, nullptr, /*position=*/0,
+                                                  budgets, inventory,
+                                                  getBankPromotionHooks()));
+  providers.push_back(createLDSSpillProvider(func, {}, nullptr, /*position=*/0,
+                                             budgets, inventory));
+  providers.push_back(createScratchSpillProvider(func, {}, nullptr,
+                                                 /*position=*/0, inventory));
+  for (const std::unique_ptr<wave::WaveAMDPressureReliefProvider> &provider :
+       providers) {
+    SmallVector<const wave::WaveAMDPressureReliefPlan *, 8> plans;
+    for (const std::unique_ptr<wave::WaveAMDPressureReliefPlan> &plan :
+         inventory.plannedReliefPlans)
+      if (plan->getProviderName() == provider->getName())
+        plans.push_back(plan.get());
+    if (plans.empty())
+      continue;
+    if (failed(provider->materializePlans(plans, builder)))
+      return failure();
+  }
+  return success();
 }
 
 static LogicalResult materializePendingRelief(func::FuncOp func,
@@ -2011,6 +2052,8 @@ static void applyPhysicalAssignments(Inventory &inventory) {
       if (isa<func::FuncOp>(arg.getOwner()->getParentOp()))
         continue;
     IntervalGroup *group = interval->group;
+    if (group->plannedPressureRelief)
+      continue;
     if (!group->assignedBase)
       continue;
     auto type = cast<waveamdmachine::RegType>(value.getType());
@@ -2277,6 +2320,36 @@ static void setOverflowAttrs(func::FuncOp func,
 
 enum class AllocationAttemptResult { Done, Retry };
 
+static FailureOr<bool> enforceBudgetsOrApplyRelief(
+    func::FuncOp func, Inventory &inventory, RegisterBudgets budgets,
+    std::optional<PressureFailure> &failure, bool softFail) {
+  if (succeeded(enforceBudgets(func, inventory, budgets, softFail, failure)))
+    return true;
+  if (!failure || !failure->combinedVGPRAGPR)
+    return false;
+  FailureOr<bool> relieved =
+      applyCombinedPressureRelief(func, inventory, *failure, budgets);
+  if (failed(relieved))
+    return mlir::failure();
+  return *relieved;
+}
+
+static FailureOr<AllocationAttemptResult>
+finishSuccessfulAllocation(func::FuncOp func, Inventory &inventory,
+                           RegisterBudgets budgets) {
+  OpBuilder builder(func.getContext());
+  if (hasPendingRelief(inventory)) {
+    if (failed(materializePendingRelief(func, inventory, budgets, builder)))
+      return mlir::failure();
+    return AllocationAttemptResult::Retry;
+  }
+  applyPhysicalAssignments(inventory);
+  updatePeaks(inventory);
+  emitRegAllocRemarks(func, inventory, budgets);
+  clearTransientRegAllocAttrs(func);
+  return AllocationAttemptResult::Done;
+}
+
 static FailureOr<AllocationAttemptResult>
 runAllocationAttempt(func::FuncOp func, RegisterBudgets budgets,
                      std::optional<PressureFailure> &failure, bool softFail) {
@@ -2292,25 +2365,20 @@ runAllocationAttempt(func::FuncOp func, RegisterBudgets budgets,
   updatePeaks(inventory);
   if (succeeded(allocated) && rewroteIR)
     return AllocationAttemptResult::Retry;
-  if (succeeded(allocated) &&
-      failed(enforceBudgets(func, inventory, budgets, softFail, failure)))
-    allocated = mlir::failure();
+  if (succeeded(allocated)) {
+    FailureOr<bool> budgetSatisfied = enforceBudgetsOrApplyRelief(
+        func, inventory, budgets, failure, softFail);
+    if (failed(budgetSatisfied))
+      return mlir::failure();
+    if (!*budgetSatisfied)
+      allocated = mlir::failure();
+  }
   if (failed(allocated)) {
     emitRegAllocRemarks(func, inventory, budgets);
     return mlir::failure();
   }
 
-  OpBuilder builder(func.getContext());
-  if (hasPendingRelief(inventory)) {
-    if (failed(materializePendingRelief(func, inventory, budgets, builder)))
-      return mlir::failure();
-    return AllocationAttemptResult::Retry;
-  }
-  applyPhysicalAssignments(inventory);
-  updatePeaks(inventory);
-  emitRegAllocRemarks(func, inventory, budgets);
-  clearTransientRegAllocAttrs(func);
-  return AllocationAttemptResult::Done;
+  return finishSuccessfulAllocation(func, inventory, budgets);
 }
 
 static LogicalResult buildAndAllocate(func::FuncOp func,

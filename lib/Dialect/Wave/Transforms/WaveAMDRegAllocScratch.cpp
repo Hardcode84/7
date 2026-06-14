@@ -31,15 +31,29 @@ static constexpr unsigned kScratchImmediateOffsetMax = 4095;
 static std::optional<unsigned> getUnsignedAttr(Operation *op, StringRef name);
 static unsigned getPrivateSegmentBytes(func::FuncOp func,
                                        unsigned reservedBytes);
+static ScratchSpillPlan buildScratchSpillPlan(func::FuncOp func,
+                                              unsigned valueBytes,
+                                              unsigned reservedSpillBytes,
+                                              unsigned existingBytes);
+
+static bool isCheapVGPRExpr(Operation *op) {
+  return isa_and_nonnull<
+      waveamdmachine::VWorkitemIdXOp, waveamdmachine::VMovB32TupleOp,
+      waveamdmachine::VLshrrevB32Op, waveamdmachine::VLshlrevB32Op,
+      waveamdmachine::VLshlAddU32Op, waveamdmachine::VAddU32Op,
+      waveamdmachine::VAdd3U32Op, waveamdmachine::VAndB32Op,
+      waveamdmachine::VXorB32Op, waveamdmachine::VAndOrB32Op>(op);
+}
 
 class ScratchSpillCandidate final
     : public wave::WaveAMDPressureReliefCandidate {
 public:
   ScratchSpillCandidate(IntervalGroup *group, Value value,
                         ScratchSpillPlan plan, unsigned useCount,
+                        unsigned pressureRelief,
                         StringRef rejectReason = StringRef())
       : rejectReason(rejectReason.str()), plan(plan), group(group),
-        value(value), useCount(useCount) {}
+        value(value), useCount(useCount), pressureRelief(pressureRelief) {}
 
   StringRef getProviderName() const override { return "scratch-spill"; }
 
@@ -50,7 +64,7 @@ public:
     return cost;
   }
 
-  unsigned getReliefDwords() const override { return plan.valueBytes / 4; }
+  unsigned getReliefDwords() const override { return pressureRelief; }
 
   std::optional<StringRef> getRejectReason() const override {
     if (rejectReason.empty())
@@ -62,6 +76,16 @@ public:
   ScratchSpillPlan getPlan() const { return plan; }
   unsigned getUseCount() const { return useCount; }
   Value getValue() const { return value; }
+  std::unique_ptr<wave::WaveAMDPressureReliefPlan> getPlannedSpill() const {
+    PlannedMemorySpill spill;
+    spill.kind = PlannedMemorySpillKind::ScratchValue;
+    spill.group = group;
+    spill.value = value;
+    spill.scratchPlan = plan;
+    spill.useCount = useCount;
+    spill.reliefDwords = pressureRelief;
+    return std::make_unique<PlannedMemorySpill>(spill);
+  }
 
 protected:
   void printExtra(llvm::raw_ostream &os) const override {
@@ -73,6 +97,7 @@ protected:
                                NamedAttrList &attrs) const override {
     attrs.set("slot_base", builder.getI64IntegerAttr(plan.slotBase));
     attrs.set("slot_bytes", builder.getI64IntegerAttr(plan.slotBytes));
+    attrs.set("pressure_relief", builder.getI64IntegerAttr(pressureRelief));
     attrs.set("uses", builder.getI64IntegerAttr(useCount));
   }
 
@@ -82,6 +107,7 @@ private:
   IntervalGroup *group = nullptr;
   Value value;
   unsigned useCount = 0;
+  unsigned pressureRelief = 0;
 };
 
 class ScratchSpillProvider final : public wave::WaveAMDPressureReliefProvider {
@@ -97,7 +123,7 @@ public:
   LogicalResult collectCandidates(
       const wave::WaveAMDPressureReliefQuery &query,
       wave::WaveAMDPressureReliefCandidateList &candidates) const override {
-    (void)query;
+    pressureFailure = query.failure;
     sawLoopCarryReject = false;
     for (IntervalGroup *group : groups)
       collect(group, candidates);
@@ -113,6 +139,37 @@ public:
     if (failed(materializeValue(spill, builder)))
       return failure();
     reserveSlot(spill.getPlan(), builder);
+    return success();
+  }
+
+  std::unique_ptr<wave::WaveAMDPressureReliefPlan> createPlan(
+      const wave::WaveAMDPressureReliefCandidate &candidate) const override {
+    const ScratchSpillCandidate &spill =
+        static_cast<const ScratchSpillCandidate &>(candidate);
+    return spill.getPlannedSpill();
+  }
+
+  void applyPlan(const wave::WaveAMDPressureReliefPlan &plan) const override {
+    const PlannedMemorySpill &spill =
+        static_cast<const PlannedMemorySpill &>(plan);
+    if (spill.group) {
+      spill.group->plannedPressureRelief = true;
+      spill.group->assignedBase.reset();
+    }
+    addPlannedProviderBytes(inventory, getName(), spill.scratchPlan.slotBytes);
+  }
+
+  LogicalResult materializePlan(const wave::WaveAMDPressureReliefPlan &plan,
+                                OpBuilder &builder) const override {
+    const PlannedMemorySpill &spill =
+        static_cast<const PlannedMemorySpill &>(plan);
+    assert(spill.kind == PlannedMemorySpillKind::ScratchValue &&
+           "expected scratch spill");
+    ScratchSpillCandidate candidate(spill.group, spill.value, spill.scratchPlan,
+                                    spill.useCount, spill.reliefDwords);
+    if (failed(materializeValue(candidate, builder)))
+      return failure();
+    reserveSlot(spill.scratchPlan, builder);
     return success();
   }
 
@@ -146,6 +203,10 @@ public:
     func->setAttr(kMemorySpillRejectAttr,
                   builder.getStringAttr(kMemorySpillLoopCarryReject));
   }
+
+  void notifyNoCandidate() const override { setNoCandidateDiagnostic(); }
+
+  void notifyPlanApplied() const override { clearNoCandidateDiagnostic(); }
 
 private:
   static bool hasFixedRegister(IntervalGroup *group) {
@@ -221,25 +282,68 @@ private:
     return position <= end;
   }
 
+  bool valueCoversWholeGroup(IntervalGroup *group, Value value) const {
+    auto type = dyn_cast<waveamdmachine::RegType>(value.getType());
+    if (!type ||
+        static_cast<unsigned>(type.getWidth()) != group->intervals.size())
+      return false;
+    Interval *first = inventory.intervalFor.lookup(value);
+    return first && first->group == group && first == group->intervals.front();
+  }
+
+  ScratchSpillPlan getPlanForValue(waveamdmachine::RegType type) const {
+    unsigned committedBytes =
+        getUnsignedAttr(func, kScratchSpillBytesAttr).value_or(0);
+    unsigned existingBytes = getPrivateSegmentBytes(func, committedBytes);
+    unsigned reservedBytes =
+        committedBytes + getPlannedProviderBytes(inventory, getName());
+    return buildScratchSpillPlan(func, type.getWidth() * 4, reservedBytes,
+                                 existingBytes);
+  }
+
+  bool isCombinedPressure() const {
+    return pressureFailure && pressureFailure->combinedVGPRAGPR;
+  }
+
+  bool hasUseAtPressure(ArrayRef<OpOperand *> uses) const {
+    for (OpOperand *use : uses)
+      if (inventory.positions.lookup(use->getOwner()) ==
+          pressureFailure->position)
+        return true;
+    return false;
+  }
+
+  std::optional<unsigned> getPressureRelief(Value value, unsigned width,
+                                            ArrayRef<OpOperand *> uses) const {
+    if (!isCombinedPressure())
+      return width;
+    if (isCheapVGPRExpr(value.getDefiningOp()))
+      return 0;
+    if (hasUseAtPressure(uses))
+      return 0;
+    return width;
+  }
+
   void
   collectValue(IntervalGroup *group, Value value,
                wave::WaveAMDPressureReliefCandidateList &candidates) const {
     waveamdmachine::RegType type =
         cast<waveamdmachine::RegType>(value.getType());
     if (type.getRegClass() != waveamdmachine::RegClass::VGPR ||
-        type.getWidth() == 0)
+        type.getWidth() == 0 || !valueCoversWholeGroup(group, value))
       return;
     SmallVector<OpOperand *> uses;
     if (!hasSimpleUses(value, uses) || !isValueLiveAt(value, uses))
       return;
-    unsigned reservedBytes =
-        getUnsignedAttr(func, kScratchSpillBytesAttr).value_or(0);
-    ScratchSpillPlan plan =
-        planScratchSpillSlot(func, type.getWidth() * 4, reservedBytes);
+    ScratchSpillPlan plan = getPlanForValue(type);
     if (plan.status != ScratchSpillPlanStatus::Available)
       return;
+    std::optional<unsigned> pressureRelief =
+        getPressureRelief(value, type.getWidth(), uses);
+    if (!pressureRelief || *pressureRelief == 0)
+      return;
     candidates.push_back(std::make_unique<ScratchSpillCandidate>(
-        group, value, plan, uses.size()));
+        group, value, plan, uses.size(), *pressureRelief));
   }
 
   void collect(IntervalGroup *group,
@@ -386,6 +490,7 @@ private:
   func::FuncOp func;
   IntervalGroup *request = nullptr;
   unsigned position = 0;
+  mutable const PressureFailure *pressureFailure = nullptr;
   mutable bool sawLoopCarryReject = false;
 };
 
@@ -448,28 +553,10 @@ static bool checkedAdd(unsigned lhs, unsigned rhs, unsigned &result) {
   return false;
 }
 
-} // namespace
-
-StringRef mlir::wave::regalloc::getScratchSpillPlanStatusName(
-    ScratchSpillPlanStatus status) {
-  switch (status) {
-  case ScratchSpillPlanStatus::Available:
-    return "available";
-  case ScratchSpillPlanStatus::NotKernel:
-    return "not_kernel";
-  case ScratchSpillPlanStatus::UnsupportedTarget:
-    return "unsupported_target";
-  case ScratchSpillPlanStatus::InvalidValueBytes:
-    return "invalid_value_bytes";
-  case ScratchSpillPlanStatus::PrivateSegmentOverflow:
-    return "private_segment_overflow";
-  }
-  llvm_unreachable("unknown scratch spill plan status");
-}
-
-ScratchSpillPlan mlir::wave::regalloc::planScratchSpillSlot(
-    func::FuncOp func, unsigned valueBytes, unsigned reservedSpillBytes) {
-  unsigned existingBytes = getPrivateSegmentBytes(func, reservedSpillBytes);
+static ScratchSpillPlan buildScratchSpillPlan(func::FuncOp func,
+                                              unsigned valueBytes,
+                                              unsigned reservedSpillBytes,
+                                              unsigned existingBytes) {
   if (!func->hasAttr(wave::WaveDialect::getKernelAttrName()))
     return reject(ScratchSpillPlanStatus::NotKernel, existingBytes,
                   reservedSpillBytes, valueBytes);
@@ -496,28 +583,68 @@ ScratchSpillPlan mlir::wave::regalloc::planScratchSpillSlot(
   return available(existingBytes, reservedSpillBytes, valueBytes);
 }
 
-FailureOr<bool> mlir::wave::regalloc::applyScratchSpillProvider(
+} // namespace
+
+StringRef mlir::wave::regalloc::getScratchSpillPlanStatusName(
+    ScratchSpillPlanStatus status) {
+  switch (status) {
+  case ScratchSpillPlanStatus::Available:
+    return "available";
+  case ScratchSpillPlanStatus::NotKernel:
+    return "not_kernel";
+  case ScratchSpillPlanStatus::UnsupportedTarget:
+    return "unsupported_target";
+  case ScratchSpillPlanStatus::InvalidValueBytes:
+    return "invalid_value_bytes";
+  case ScratchSpillPlanStatus::PrivateSegmentOverflow:
+    return "private_segment_overflow";
+  }
+  llvm_unreachable("unknown scratch spill plan status");
+}
+
+ScratchSpillPlan mlir::wave::regalloc::planScratchSpillSlot(
+    func::FuncOp func, unsigned valueBytes, unsigned reservedSpillBytes) {
+  unsigned existingBytes = getPrivateSegmentBytes(func, reservedSpillBytes);
+  return buildScratchSpillPlan(func, valueBytes, reservedSpillBytes,
+                               existingBytes);
+}
+
+std::unique_ptr<wave::WaveAMDPressureReliefProvider>
+mlir::wave::regalloc::createScratchSpillProvider(
     func::FuncOp func, ArrayRef<IntervalGroup *> groups, IntervalGroup *request,
     unsigned position, Inventory &inventory) {
-  ScratchSpillProvider provider(func, groups, request, position, inventory);
+  return std::make_unique<ScratchSpillProvider>(func, groups, request, position,
+                                                inventory);
+}
+
+FailureOr<bool> mlir::wave::regalloc::applyScratchSpillProvider(
+    func::FuncOp func, ArrayRef<IntervalGroup *> groups, IntervalGroup *request,
+    unsigned position, Inventory &inventory,
+    const PressureFailure *pressureFailure) {
+  std::unique_ptr<wave::WaveAMDPressureReliefProvider> provider =
+      createScratchSpillProvider(func, groups, request, position, inventory);
   wave::WaveAMDPressureReliefCandidateList candidates;
   wave::WaveAMDPressureReliefQuery query;
   query.scope = func;
-  if (failed(provider.collectCandidates(query, candidates)))
+  query.failure = pressureFailure;
+  if (failed(provider->collectCandidates(query, candidates)))
     return failure();
   if (candidates.empty()) {
-    provider.setNoCandidateDiagnostic();
+    provider->notifyNoCandidate();
     return false;
   }
 
   unsigned selected = 0;
   for (size_t index : llvm::seq<size_t>(1, candidates.size()))
-    if (provider.isBetterCandidate(*candidates[index], *candidates[selected]))
+    if (provider->isBetterCandidate(*candidates[index], *candidates[selected]))
       selected = index;
 
-  OpBuilder builder(func.getContext());
-  if (failed(provider.materialize(*candidates[selected], builder)))
+  std::unique_ptr<wave::WaveAMDPressureReliefPlan> plan =
+      provider->createPlan(*candidates[selected]);
+  if (!plan)
     return failure();
-  provider.clearNoCandidateDiagnostic();
+  provider->applyPlan(*plan);
+  provider->notifyPlanApplied();
+  recordPlannedPressureRelief(inventory, std::move(plan));
   return true;
 }

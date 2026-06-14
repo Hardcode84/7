@@ -43,12 +43,30 @@ struct WorkgroupShape {
   bool isXLinear() const { return dims[1] == 1 && dims[2] == 1; }
 };
 
+static void getExistingLDSBytes(func::FuncOp func, unsigned &fixedBytes,
+                                unsigned &dynamicBytes, unsigned reservedBytes);
+static LDSSpillPlan buildLDSSpillPlan(func::FuncOp func,
+                                      RegisterBudgets budgets,
+                                      unsigned valueBytes,
+                                      unsigned reservedSpillBytes,
+                                      unsigned fixedLDS, unsigned dynamicLDS);
+
+static bool isCheapVGPRExpr(Operation *op) {
+  return isa_and_nonnull<
+      waveamdmachine::VWorkitemIdXOp, waveamdmachine::VMovB32TupleOp,
+      waveamdmachine::VLshrrevB32Op, waveamdmachine::VLshlrevB32Op,
+      waveamdmachine::VLshlAddU32Op, waveamdmachine::VAddU32Op,
+      waveamdmachine::VAdd3U32Op, waveamdmachine::VAndB32Op,
+      waveamdmachine::VXorB32Op, waveamdmachine::VAndOrB32Op>(op);
+}
+
 class LDSSpillCandidate final : public wave::WaveAMDPressureReliefCandidate {
 public:
   LDSSpillCandidate(IntervalGroup *group, Value value, LDSSpillPlan plan,
-                    unsigned useCount, StringRef rejectReason = StringRef())
+                    unsigned useCount, unsigned pressureRelief,
+                    StringRef rejectReason = StringRef())
       : group(group), value(value), rejectReason(rejectReason.str()),
-        plan(plan), useCount(useCount) {}
+        plan(plan), useCount(useCount), pressureRelief(pressureRelief) {}
 
   StringRef getProviderName() const override { return "lds-spill"; }
 
@@ -59,7 +77,7 @@ public:
     return cost;
   }
 
-  unsigned getReliefDwords() const override { return 1; }
+  unsigned getReliefDwords() const override { return pressureRelief; }
 
   std::optional<StringRef> getRejectReason() const override {
     if (rejectReason.empty())
@@ -71,6 +89,16 @@ public:
   LDSSpillPlan getPlan() const { return plan; }
   unsigned getUseCount() const { return useCount; }
   Value getValue() const { return value; }
+  std::unique_ptr<wave::WaveAMDPressureReliefPlan> getPlannedSpill() const {
+    PlannedMemorySpill spill;
+    spill.kind = PlannedMemorySpillKind::LDSValue;
+    spill.group = group;
+    spill.value = value;
+    spill.ldsPlan = plan;
+    spill.useCount = useCount;
+    spill.reliefDwords = pressureRelief;
+    return std::make_unique<PlannedMemorySpill>(spill);
+  }
 
 protected:
   void printExtra(llvm::raw_ostream &os) const override {
@@ -82,6 +110,7 @@ protected:
                                NamedAttrList &attrs) const override {
     attrs.set("slot_base", builder.getI64IntegerAttr(plan.slotBase));
     attrs.set("slot_bytes", builder.getI64IntegerAttr(plan.slotBytes));
+    attrs.set("pressure_relief", builder.getI64IntegerAttr(pressureRelief));
     attrs.set("uses", builder.getI64IntegerAttr(useCount));
   }
 
@@ -91,6 +120,7 @@ private:
   std::string rejectReason;
   LDSSpillPlan plan;
   unsigned useCount = 0;
+  unsigned pressureRelief = 0;
 };
 
 class LDSSpillProvider final : public wave::WaveAMDPressureReliefProvider {
@@ -106,12 +136,17 @@ public:
   LogicalResult collectCandidates(
       const wave::WaveAMDPressureReliefQuery &query,
       wave::WaveAMDPressureReliefCandidateList &candidates) const override {
-    (void)query;
+    pressureFailure = query.failure;
     sawLoopCarryReject = false;
-    unsigned reservedBytes =
+    unsigned committedBytes =
         getUnsignedAttr(func, kLDSSpillBytesAttr).value_or(0);
-    LDSSpillPlan plan =
-        planLDSSpillSlot(func, budgets, /*valueBytes=*/4, reservedBytes);
+    unsigned fixedLDS = 0;
+    unsigned dynamicLDS = 0;
+    getExistingLDSBytes(func, fixedLDS, dynamicLDS, committedBytes);
+    unsigned reservedBytes =
+        committedBytes + getPlannedProviderBytes(inventory, getName());
+    LDSSpillPlan plan = buildLDSSpillPlan(func, budgets, /*valueBytes=*/4,
+                                          reservedBytes, fixedLDS, dynamicLDS);
     if (plan.status != LDSSpillPlanStatus::Available)
       return success();
     if (plan.wavesPerWorkgroup != 1)
@@ -135,6 +170,37 @@ public:
     if (failed(materializeValue(spill, builder)))
       return failure();
     reserveSlot(spill.getPlan(), builder);
+    return success();
+  }
+
+  std::unique_ptr<wave::WaveAMDPressureReliefPlan> createPlan(
+      const wave::WaveAMDPressureReliefCandidate &candidate) const override {
+    const LDSSpillCandidate &spill =
+        static_cast<const LDSSpillCandidate &>(candidate);
+    return spill.getPlannedSpill();
+  }
+
+  void applyPlan(const wave::WaveAMDPressureReliefPlan &plan) const override {
+    const PlannedMemorySpill &spill =
+        static_cast<const PlannedMemorySpill &>(plan);
+    if (spill.group) {
+      spill.group->plannedPressureRelief = true;
+      spill.group->assignedBase.reset();
+    }
+    addPlannedProviderBytes(inventory, getName(), spill.ldsPlan.slotBytes);
+  }
+
+  LogicalResult materializePlan(const wave::WaveAMDPressureReliefPlan &plan,
+                                OpBuilder &builder) const override {
+    const PlannedMemorySpill &spill =
+        static_cast<const PlannedMemorySpill &>(plan);
+    assert(spill.kind == PlannedMemorySpillKind::LDSValue &&
+           "expected LDS spill");
+    LDSSpillCandidate candidate(spill.group, spill.value, spill.ldsPlan,
+                                spill.useCount, spill.reliefDwords);
+    if (failed(materializeValue(candidate, builder)))
+      return failure();
+    reserveSlot(spill.ldsPlan, builder);
     return success();
   }
 
@@ -166,6 +232,10 @@ public:
     func->setAttr(kMemorySpillRejectAttr,
                   builder.getStringAttr(kMemorySpillLoopCarryReject));
   }
+
+  void notifyNoCandidate() const override { setNoCandidateDiagnostic(); }
+
+  void notifyPlanApplied() const override { clearNoCandidateDiagnostic(); }
 
 private:
   static std::optional<unsigned> getUnsignedAttr(Operation *op, StringRef name);
@@ -253,8 +323,37 @@ private:
     SmallVector<OpOperand *> uses;
     if (!hasSimpleUses(value, uses))
       return;
-    candidates.push_back(
-        std::make_unique<LDSSpillCandidate>(group, value, plan, uses.size()));
+    std::optional<unsigned> pressureRelief =
+        getPressureRelief(value, group, uses);
+    if (!pressureRelief || *pressureRelief == 0)
+      return;
+    candidates.push_back(std::make_unique<LDSSpillCandidate>(
+        group, value, plan, uses.size(), *pressureRelief));
+  }
+
+  bool isCombinedPressure() const {
+    return pressureFailure && pressureFailure->combinedVGPRAGPR;
+  }
+
+  bool hasUseAtPressure(ArrayRef<OpOperand *> uses) const {
+    for (OpOperand *use : uses)
+      if (inventory.positions.lookup(use->getOwner()) ==
+          pressureFailure->position)
+        return true;
+    return false;
+  }
+
+  std::optional<unsigned> getPressureRelief(Value value, IntervalGroup *group,
+                                            ArrayRef<OpOperand *> uses) const {
+    if (!isCombinedPressure())
+      return 1;
+    if (isCheapVGPRExpr(value.getDefiningOp()))
+      return 0;
+    if (group->intervals.front()->start >= pressureFailure->position)
+      return 0;
+    if (hasUseAtPressure(uses))
+      return 0;
+    return 1;
   }
 
   Value createImm(OpBuilder &builder, Location loc, int64_t value) const {
@@ -363,6 +462,7 @@ private:
   Inventory &inventory;
   IntervalGroup *request = nullptr;
   unsigned position = 0;
+  mutable const PressureFailure *pressureFailure = nullptr;
   mutable bool sawLoopCarryReject = false;
 };
 
@@ -584,38 +684,11 @@ buildAvailablePlan(unsigned fixedBytes, unsigned dynamicBytes,
   return plan;
 }
 
-} // namespace
-
-StringRef
-mlir::wave::regalloc::getLDSSpillPlanStatusName(LDSSpillPlanStatus status) {
-  switch (status) {
-  case LDSSpillPlanStatus::Available:
-    return "available";
-  case LDSSpillPlanStatus::NotKernel:
-    return "not_kernel";
-  case LDSSpillPlanStatus::MissingTargetWaves:
-    return "missing_target_waves";
-  case LDSSpillPlanStatus::MissingWorkgroupShape:
-    return "missing_workgroup_shape";
-  case LDSSpillPlanStatus::InvalidWorkgroupShape:
-    return "invalid_workgroup_shape";
-  case LDSSpillPlanStatus::UnsupportedWorkgroupShape:
-    return "unsupported_workgroup_shape";
-  case LDSSpillPlanStatus::InvalidValueBytes:
-    return "invalid_value_bytes";
-  case LDSSpillPlanStatus::InsufficientLDS:
-    return "insufficient_lds";
-  }
-  llvm_unreachable("unknown LDS spill plan status");
-}
-
-LDSSpillPlan mlir::wave::regalloc::planLDSSpillSlot(
-    func::FuncOp func, RegisterBudgets budgets, unsigned valueBytes,
-    unsigned reservedSpillBytes) {
-  unsigned fixedLDS = 0;
-  unsigned dynamicLDS = 0;
-  getExistingLDSBytes(func, fixedLDS, dynamicLDS, reservedSpillBytes);
-
+static LDSSpillPlan buildLDSSpillPlan(func::FuncOp func,
+                                      RegisterBudgets budgets,
+                                      unsigned valueBytes,
+                                      unsigned reservedSpillBytes,
+                                      unsigned fixedLDS, unsigned dynamicLDS) {
   if (std::optional<LDSSpillPlan> plan = getBasicReject(
           func, budgets, fixedLDS, dynamicLDS, reservedSpillBytes, valueBytes))
     return *plan;
@@ -647,34 +720,83 @@ LDSSpillPlan mlir::wave::regalloc::planLDSSpillSlot(
                             limitBytes, usedBytes);
 }
 
+} // namespace
+
+StringRef
+mlir::wave::regalloc::getLDSSpillPlanStatusName(LDSSpillPlanStatus status) {
+  switch (status) {
+  case LDSSpillPlanStatus::Available:
+    return "available";
+  case LDSSpillPlanStatus::NotKernel:
+    return "not_kernel";
+  case LDSSpillPlanStatus::MissingTargetWaves:
+    return "missing_target_waves";
+  case LDSSpillPlanStatus::MissingWorkgroupShape:
+    return "missing_workgroup_shape";
+  case LDSSpillPlanStatus::InvalidWorkgroupShape:
+    return "invalid_workgroup_shape";
+  case LDSSpillPlanStatus::UnsupportedWorkgroupShape:
+    return "unsupported_workgroup_shape";
+  case LDSSpillPlanStatus::InvalidValueBytes:
+    return "invalid_value_bytes";
+  case LDSSpillPlanStatus::InsufficientLDS:
+    return "insufficient_lds";
+  }
+  llvm_unreachable("unknown LDS spill plan status");
+}
+
+LDSSpillPlan mlir::wave::regalloc::planLDSSpillSlot(
+    func::FuncOp func, RegisterBudgets budgets, unsigned valueBytes,
+    unsigned reservedSpillBytes) {
+  unsigned fixedLDS = 0;
+  unsigned dynamicLDS = 0;
+  getExistingLDSBytes(func, fixedLDS, dynamicLDS, reservedSpillBytes);
+  return buildLDSSpillPlan(func, budgets, valueBytes, reservedSpillBytes,
+                           fixedLDS, dynamicLDS);
+}
+
 std::optional<unsigned> LDSSpillProvider::getUnsignedAttr(Operation *op,
                                                           StringRef name) {
   return ::getUnsignedAttr(op, name);
 }
 
-FailureOr<bool> mlir::wave::regalloc::applyLDSSpillProvider(
+std::unique_ptr<wave::WaveAMDPressureReliefProvider>
+mlir::wave::regalloc::createLDSSpillProvider(
     func::FuncOp func, ArrayRef<IntervalGroup *> groups, IntervalGroup *request,
     unsigned position, RegisterBudgets budgets, Inventory &inventory) {
-  LDSSpillProvider provider(func, groups, request, position, budgets,
-                            inventory);
+  return std::make_unique<LDSSpillProvider>(func, groups, request, position,
+                                            budgets, inventory);
+}
+
+FailureOr<bool> mlir::wave::regalloc::applyLDSSpillProvider(
+    func::FuncOp func, ArrayRef<IntervalGroup *> groups, IntervalGroup *request,
+    unsigned position, RegisterBudgets budgets, Inventory &inventory,
+    const PressureFailure *pressureFailure) {
+  std::unique_ptr<wave::WaveAMDPressureReliefProvider> provider =
+      createLDSSpillProvider(func, groups, request, position, budgets,
+                             inventory);
   wave::WaveAMDPressureReliefCandidateList candidates;
   wave::WaveAMDPressureReliefQuery query;
   query.scope = func;
-  if (failed(provider.collectCandidates(query, candidates)))
+  query.failure = pressureFailure;
+  if (failed(provider->collectCandidates(query, candidates)))
     return failure();
   if (candidates.empty()) {
-    provider.setNoCandidateDiagnostic();
+    provider->notifyNoCandidate();
     return false;
   }
 
   unsigned selected = 0;
   for (size_t index : llvm::seq<size_t>(1, candidates.size()))
-    if (provider.isBetterCandidate(*candidates[index], *candidates[selected]))
+    if (provider->isBetterCandidate(*candidates[index], *candidates[selected]))
       selected = index;
 
-  OpBuilder builder(func.getContext());
-  if (failed(provider.materialize(*candidates[selected], builder)))
+  std::unique_ptr<wave::WaveAMDPressureReliefPlan> plan =
+      provider->createPlan(*candidates[selected]);
+  if (!plan)
     return failure();
-  provider.clearNoCandidateDiagnostic();
+  provider->applyPlan(*plan);
+  provider->notifyPlanApplied();
+  recordPlannedPressureRelief(inventory, std::move(plan));
   return true;
 }

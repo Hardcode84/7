@@ -144,6 +144,26 @@ struct ScratchSpillPlan {
   ScratchSpillPlanStatus status = ScratchSpillPlanStatus::NotKernel;
 };
 
+enum class PlannedMemorySpillKind : uint8_t { LDSValue, ScratchValue };
+
+struct PlannedMemorySpill : public wave::WaveAMDPressureReliefPlan {
+  LDSSpillPlan ldsPlan;
+  ScratchSpillPlan scratchPlan;
+  Value value;
+  IntervalGroup *group = nullptr;
+  unsigned useCount = 0;
+  unsigned reliefDwords = 0;
+  PlannedMemorySpillKind kind = PlannedMemorySpillKind::ScratchValue;
+
+  StringRef getProviderName() const override {
+    if (kind == PlannedMemorySpillKind::LDSValue)
+      return "lds-spill";
+    return "scratch-spill";
+  }
+
+  unsigned getReliefDwords() const override { return reliefDwords; }
+};
+
 struct PromotionScore {
   unsigned liveDwords = 0;
   unsigned bridgeCost = 0;
@@ -175,16 +195,24 @@ createBankPromotionProvider(ArrayRef<IntervalGroup *> groups,
                             IntervalGroup *request, unsigned position,
                             RegisterBudgets budgets, Inventory &inventory,
                             const BankPromotionHooks &hooks);
-FailureOr<bool> applyLDSSpillProvider(func::FuncOp func,
-                                      ArrayRef<IntervalGroup *> groups,
-                                      IntervalGroup *request, unsigned position,
-                                      RegisterBudgets budgets,
-                                      Inventory &inventory);
-FailureOr<bool> applyScratchSpillProvider(func::FuncOp func,
-                                          ArrayRef<IntervalGroup *> groups,
-                                          IntervalGroup *request,
-                                          unsigned position,
-                                          Inventory &inventory);
+FailureOr<bool>
+applyLDSSpillProvider(func::FuncOp func, ArrayRef<IntervalGroup *> groups,
+                      IntervalGroup *request, unsigned position,
+                      RegisterBudgets budgets, Inventory &inventory,
+                      const PressureFailure *pressureFailure = nullptr);
+FailureOr<bool>
+applyScratchSpillProvider(func::FuncOp func, ArrayRef<IntervalGroup *> groups,
+                          IntervalGroup *request, unsigned position,
+                          Inventory &inventory,
+                          const PressureFailure *pressureFailure = nullptr);
+std::unique_ptr<wave::WaveAMDPressureReliefProvider>
+createLDSSpillProvider(func::FuncOp func, ArrayRef<IntervalGroup *> groups,
+                       IntervalGroup *request, unsigned position,
+                       RegisterBudgets budgets, Inventory &inventory);
+std::unique_ptr<wave::WaveAMDPressureReliefProvider>
+createScratchSpillProvider(func::FuncOp func, ArrayRef<IntervalGroup *> groups,
+                           IntervalGroup *request, unsigned position,
+                           Inventory &inventory);
 unsigned getPlannedProviderBytes(Inventory &inventory, StringRef provider);
 void addPlannedProviderBytes(Inventory &inventory, StringRef provider,
                              unsigned bytes);
