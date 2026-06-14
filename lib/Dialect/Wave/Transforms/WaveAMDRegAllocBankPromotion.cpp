@@ -36,6 +36,7 @@ public:
   unsigned getReliefDwords() const override { return score.liveDwords; }
 
   IntervalGroup *getGroup() const { return group; }
+  waveamdmachine::RegClass getSourceClass() const { return sourceClass; }
   waveamdmachine::RegClass getTargetClass() const { return targetClass; }
   PromotionScore getScore() const { return score; }
 
@@ -63,13 +64,34 @@ private:
   waveamdmachine::RegClass targetClass;
 };
 
+class BankPromotionPlan final : public wave::WaveAMDPressureReliefPlan {
+public:
+  BankPromotionPlan(IntervalGroup *group, waveamdmachine::RegClass sourceClass,
+                    waveamdmachine::RegClass targetClass, unsigned reliefDwords)
+      : group(group), reliefDwords(reliefDwords), sourceClass(sourceClass),
+        targetClass(targetClass) {}
+
+  StringRef getProviderName() const override { return "bank-promotion"; }
+  unsigned getReliefDwords() const override { return reliefDwords; }
+
+  IntervalGroup *getGroup() const { return group; }
+  waveamdmachine::RegClass getSourceClass() const { return sourceClass; }
+  waveamdmachine::RegClass getTargetClass() const { return targetClass; }
+
+private:
+  IntervalGroup *group = nullptr;
+  unsigned reliefDwords = 0;
+  waveamdmachine::RegClass sourceClass;
+  waveamdmachine::RegClass targetClass;
+};
+
 class BankPromotionProvider final : public wave::WaveAMDPressureReliefProvider {
 public:
   BankPromotionProvider(ArrayRef<IntervalGroup *> groups,
                         IntervalGroup *request, unsigned position,
-                        const RegisterBudgets &budgets,
+                        RegisterBudgets budgets,
                         const wave::WaveAMDKernelEntryRegs &regs,
-                        Inventory &inventory, const BankPromotionHooks &hooks)
+                        Inventory &inventory, BankPromotionHooks hooks)
       : groups(groups), budgets(budgets), regs(regs), inventory(inventory),
         hooks(hooks), request(request), position(position) {}
 
@@ -88,13 +110,37 @@ public:
   LogicalResult
   materialize(const wave::WaveAMDPressureReliefCandidate &candidate,
               OpBuilder &builder) const override {
-    (void)builder;
+    std::unique_ptr<wave::WaveAMDPressureReliefPlan> plan =
+        createPlan(candidate);
+    if (!plan)
+      return failure();
+    applyPlan(*plan);
+    return materializePlan(*plan, builder);
+  }
+
+  std::unique_ptr<wave::WaveAMDPressureReliefPlan> createPlan(
+      const wave::WaveAMDPressureReliefCandidate &candidate) const override {
     const BankPromotionCandidate &promotion =
         static_cast<const BankPromotionCandidate &>(candidate);
+    return std::make_unique<BankPromotionPlan>(
+        promotion.getGroup(), promotion.getSourceClass(),
+        promotion.getTargetClass(), promotion.getReliefDwords());
+  }
+
+  void applyPlan(const wave::WaveAMDPressureReliefPlan &plan) const override {
+    const BankPromotionPlan &promotion =
+        static_cast<const BankPromotionPlan &>(plan);
     IntervalGroup *group = promotion.getGroup();
-    assert(group && "pressure relief candidate must reference a group");
+    assert(group && "pressure relief plan must reference a group");
     group->storageClass = promotion.getTargetClass();
-    return success();
+  }
+
+  LogicalResult materializePlan(const wave::WaveAMDPressureReliefPlan &plan,
+                                OpBuilder &builder) const override {
+    const BankPromotionPlan &promotion =
+        static_cast<const BankPromotionPlan &>(plan);
+    assert(hooks.materialize && "bank promotion materializer missing");
+    return hooks.materialize(promotion.getGroup(), builder);
   }
 
   bool isBetterCandidate(
@@ -125,37 +171,52 @@ private:
   }
 
   ArrayRef<IntervalGroup *> groups;
-  const RegisterBudgets &budgets;
+  RegisterBudgets budgets;
   const wave::WaveAMDKernelEntryRegs &regs;
   Inventory &inventory;
-  const BankPromotionHooks &hooks;
+  BankPromotionHooks hooks;
   IntervalGroup *request = nullptr;
   unsigned position = 0;
 };
 
 } // namespace
 
+std::unique_ptr<wave::WaveAMDPressureReliefProvider>
+mlir::wave::regalloc::createBankPromotionProvider(
+    ArrayRef<IntervalGroup *> groups, IntervalGroup *request, unsigned position,
+    RegisterBudgets budgets, Inventory &inventory,
+    const BankPromotionHooks &hooks) {
+  return std::make_unique<BankPromotionProvider>(groups, request, position,
+                                                 budgets, inventory.entryRegs,
+                                                 inventory, hooks);
+}
+
 FailureOr<bool> mlir::wave::regalloc::applyBankPromotionProvider(
     func::FuncOp func, ArrayRef<IntervalGroup *> groups, IntervalGroup *request,
     unsigned position, RegisterBudgets budgets, Inventory &inventory,
     const BankPromotionHooks &hooks) {
-  BankPromotionProvider provider(groups, request, position, budgets,
-                                 inventory.entryRegs, inventory, hooks);
+  std::unique_ptr<wave::WaveAMDPressureReliefProvider> provider =
+      createBankPromotionProvider(groups, request, position, budgets, inventory,
+                                  hooks);
   wave::WaveAMDPressureReliefCandidateList candidates;
   wave::WaveAMDPressureReliefQuery query;
   query.scope = func;
-  if (failed(provider.collectCandidates(query, candidates)))
+  if (failed(provider->collectCandidates(query, candidates)))
     return failure();
   if (candidates.empty())
     return false;
 
   unsigned selected = 0;
   for (size_t index : llvm::seq<size_t>(1, candidates.size()))
-    if (provider.isBetterCandidate(*candidates[index], *candidates[selected]))
+    if (provider->isBetterCandidate(*candidates[index], *candidates[selected]))
       selected = index;
 
-  OpBuilder builder(func.getContext());
-  if (failed(provider.materialize(*candidates[selected], builder)))
+  std::unique_ptr<wave::WaveAMDPressureReliefPlan> plan =
+      provider->createPlan(*candidates[selected]);
+  if (!plan)
     return failure();
+  provider->applyPlan(*plan);
+  provider->notifyPlanApplied();
+  recordPlannedPressureRelief(inventory, std::move(plan));
   return true;
 }

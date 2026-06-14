@@ -162,6 +162,7 @@ struct BankPromotionHooks {
   bool (*canFitPromotionTarget)(
       IntervalGroup *, ArrayRef<IntervalGroup *>, RegisterBudgets,
       const ::mlir::wave::WaveAMDKernelEntryRegs &) = nullptr;
+  LogicalResult (*materialize)(IntervalGroup *, OpBuilder &) = nullptr;
 };
 
 FailureOr<bool>
@@ -169,6 +170,11 @@ applyBankPromotionProvider(func::FuncOp func, ArrayRef<IntervalGroup *> groups,
                            IntervalGroup *request, unsigned position,
                            RegisterBudgets budgets, Inventory &inventory,
                            const BankPromotionHooks &hooks);
+std::unique_ptr<wave::WaveAMDPressureReliefProvider>
+createBankPromotionProvider(ArrayRef<IntervalGroup *> groups,
+                            IntervalGroup *request, unsigned position,
+                            RegisterBudgets budgets, Inventory &inventory,
+                            const BankPromotionHooks &hooks);
 FailureOr<bool> applyLDSSpillProvider(func::FuncOp func,
                                       ArrayRef<IntervalGroup *> groups,
                                       IntervalGroup *request, unsigned position,

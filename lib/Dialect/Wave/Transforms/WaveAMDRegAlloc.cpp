@@ -1022,6 +1022,8 @@ static bool canPromote(IntervalGroup *group, RegisterBudgets budgets) {
 static unsigned getLiveDwords(Inventory &inventory, unsigned position,
                               waveamdmachine::RegClass regClass);
 static unsigned getGroupLiveDwords(IntervalGroup *group, unsigned position);
+static LogicalResult materializePromotion(IntervalGroup *group,
+                                          OpBuilder &builder);
 
 static bool canFitPromotionTarget(IntervalGroup *group,
                                   ArrayRef<IntervalGroup *> assigned,
@@ -1156,6 +1158,7 @@ static BankPromotionHooks getBankPromotionHooks() {
   hooks.isLiveAt = static_cast<bool (*)(IntervalGroup *, unsigned)>(&isLiveAt);
   hooks.canPromote = canPromote;
   hooks.canFitPromotionTarget = canFitPromotionTarget;
+  hooks.materialize = materializePromotion;
   return hooks;
 }
 
@@ -1922,27 +1925,59 @@ static LogicalResult materializeSGPRPromotion(IntervalGroup *group,
   return success();
 }
 
+static LogicalResult materializePromotion(IntervalGroup *group,
+                                          OpBuilder &builder) {
+  if (group->preferredClass == waveamdmachine::RegClass::SGPR &&
+      group->storageClass == waveamdmachine::RegClass::VGPR)
+    return materializeSGPRPromotion(group, builder);
+  if (group->preferredClass == waveamdmachine::RegClass::VGPR &&
+      group->storageClass == waveamdmachine::RegClass::AGPR)
+    return materializeAGPRPromotion(group, builder);
+  return mlir::emitError(builder.getUnknownLoc(), kPassName)
+         << " unsupported promotion " << getRegClassName(group->preferredClass)
+         << " -> " << getRegClassName(group->storageClass);
+}
+
 static LogicalResult materializePromotions(Inventory &inventory,
                                            OpBuilder &builder) {
-  for (IntervalGroup *group : getPromotedGroups(inventory)) {
-    if (group->preferredClass == waveamdmachine::RegClass::SGPR &&
-        group->storageClass == waveamdmachine::RegClass::VGPR) {
-      if (failed(materializeSGPRPromotion(group, builder)))
-        return failure();
-      continue;
-    }
-    if (group->preferredClass == waveamdmachine::RegClass::VGPR &&
-        group->storageClass == waveamdmachine::RegClass::AGPR) {
-      if (failed(materializeAGPRPromotion(group, builder)))
-        return failure();
-      continue;
-    }
-    return mlir::emitError(builder.getUnknownLoc(), kPassName)
-           << " unsupported promotion "
-           << getRegClassName(group->preferredClass) << " -> "
-           << getRegClassName(group->storageClass);
-  }
+  for (IntervalGroup *group : getPromotedGroups(inventory))
+    if (failed(materializePromotion(group, builder)))
+      return failure();
   return success();
+}
+
+static LogicalResult materializePlannedPressureRelief(func::FuncOp func,
+                                                      Inventory &inventory,
+                                                      RegisterBudgets budgets,
+                                                      OpBuilder &builder) {
+  (void)func;
+  std::unique_ptr<wave::WaveAMDPressureReliefProvider> provider =
+      createBankPromotionProvider({}, nullptr, /*position=*/0, budgets,
+                                  inventory, getBankPromotionHooks());
+  SmallVector<const wave::WaveAMDPressureReliefPlan *, 8> plans;
+  for (const std::unique_ptr<wave::WaveAMDPressureReliefPlan> &plan :
+       inventory.plannedReliefPlans)
+    if (plan->getProviderName() == provider->getName())
+      plans.push_back(plan.get());
+  if (plans.empty())
+    return success();
+  return provider->materializePlans(plans, builder);
+}
+
+static LogicalResult materializePendingRelief(func::FuncOp func,
+                                              Inventory &inventory,
+                                              RegisterBudgets budgets,
+                                              OpBuilder &builder) {
+  if (!inventory.plannedReliefPlans.empty())
+    return materializePlannedPressureRelief(func, inventory, budgets, builder);
+  if (!getPromotedGroups(inventory).empty())
+    return materializePromotions(inventory, builder);
+  return success();
+}
+
+static bool hasPendingRelief(Inventory &inventory) {
+  return !inventory.plannedReliefPlans.empty() ||
+         !getPromotedGroups(inventory).empty();
 }
 
 static LogicalResult buildInventory(func::FuncOp func, Inventory &inventory) {
@@ -2266,8 +2301,8 @@ runAllocationAttempt(func::FuncOp func, RegisterBudgets budgets,
   }
 
   OpBuilder builder(func.getContext());
-  if (!getPromotedGroups(inventory).empty()) {
-    if (failed(materializePromotions(inventory, builder)))
+  if (hasPendingRelief(inventory)) {
+    if (failed(materializePendingRelief(func, inventory, budgets, builder)))
       return mlir::failure();
     return AllocationAttemptResult::Retry;
   }
