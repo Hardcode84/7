@@ -155,18 +155,38 @@ ensureInterval(Value value, unsigned pos,
   return index;
 }
 
+static bool canAliasTypes(waveamdmachine::RegType baseType,
+                          waveamdmachine::RegType valueType, unsigned offset) {
+  if (baseType.getRegClass() != valueType.getRegClass())
+    return false;
+  return offset + valueType.getWidth() <= baseType.getWidth();
+}
+
+static bool canAliasInterval(const wave::WaveAMDLiveInterval &interval,
+                             waveamdmachine::RegType valueType,
+                             unsigned offset) {
+  return canAliasTypes(interval.type, valueType, offset);
+}
+
 // Merge `extra` into `primary`; `slotOffset` pins tuple elements under base.
 static LogicalResult coalesce(Value primary, Value extra, unsigned pos,
                               wave::WaveAMDLiveIntervalSet &intervals,
                               Operation *errOp, unsigned slotOffset = 0) {
-  auto rt = dyn_cast<waveamdmachine::RegType>(primary.getType());
+  std::optional<waveamdmachine::RegType> rt =
+      wave::getTrackedWaveAMDRegType(primary);
   if (!rt)
-    return errOp->emitError("coalesce: primary value is not a register");
-  auto [bucket, table] = intervalsFor(rt, intervals);
+    return success();
+  std::optional<waveamdmachine::RegType> extraRt =
+      wave::getTrackedWaveAMDRegType(extra);
+  if (!extraRt || rt->getRegClass() != extraRt->getRegClass())
+    return success();
+  auto [bucket, table] = intervalsFor(*rt, intervals);
   auto primIt = table->find(primary);
   if (primIt == table->end())
     return errOp->emitError("coalesce: primary has no interval");
   unsigned primIdx = primIt->second;
+  if (!canAliasInterval((*bucket)[primIdx], *extraRt, slotOffset))
+    return success();
   auto extraIt = table->find(extra);
   if (extraIt == table->end()) {
     appendIntervalValue((*bucket)[primIdx], extra, slotOffset, pos, pos);
@@ -447,6 +467,76 @@ private:
     return success();
   }
 
+  LogicalResult coalesceExecIfRegionResults(waveamdmachine::ExecIfOp execIf,
+                                            Region &region, unsigned index,
+                                            unsigned pos) {
+    if (region.empty())
+      return success();
+    auto yield =
+        dyn_cast<waveamdmachine::YieldOp>(region.front().getTerminator());
+    if (!yield || index >= yield.getValues().size())
+      return success();
+    Value resultValue = execIf.getResult(index);
+    auto rt = wave::getTrackedWaveAMDRegType(resultValue);
+    if (!rt)
+      return success();
+    auto [bucket, table] = intervalsFor(*rt, result.intervals);
+    if (!table->contains(resultValue))
+      return success();
+    return coalesce(resultValue, yield.getValues()[index], pos,
+                    result.intervals, execIf);
+  }
+
+  LogicalResult coalesceExecIfResults(waveamdmachine::ExecIfOp execIf,
+                                      unsigned pos) {
+    for (unsigned index : llvm::seq<unsigned>(0, execIf.getNumResults())) {
+      if (failed(coalesceExecIfRegionResults(execIf, execIf.getThenRegion(),
+                                             index, pos)))
+        return failure();
+      if (failed(coalesceExecIfRegionResults(execIf, execIf.getElseRegion(),
+                                             index, pos)))
+        return failure();
+    }
+    return success();
+  }
+
+  LogicalResult walkExecIfRegion(Region &region) {
+    if (region.empty())
+      return success();
+    return walkBlock(region.front());
+  }
+
+  static bool needsConditionForDataMerge(waveamdmachine::ExecIfOp execIf) {
+    if (execIf.getElseRegion().empty())
+      return false;
+    for (Type type : execIf.getResultTypes())
+      if (!isa<waveamdmachine::MemTokenType>(type))
+        return true;
+    return false;
+  }
+
+  LogicalResult processExecIf(waveamdmachine::ExecIfOp execIf, unsigned pos) {
+    if (failed(coalesceExecIfResults(execIf, pos)))
+      return failure();
+    if (failed(walkExecIfRegion(execIf.getThenRegion())))
+      return failure();
+    if (!execIf.getElseRegion().empty())
+      extendInterval(execIf.getCondition(), cursor - 1);
+    if (failed(walkExecIfRegion(execIf.getElseRegion())))
+      return failure();
+    if (needsConditionForDataMerge(execIf))
+      extendInterval(execIf.getCondition(), cursor - 1);
+    return success();
+  }
+
+  LogicalResult processNestedRegions(Operation *op, unsigned pos) {
+    if (auto loop = dyn_cast<waveamdmachine::UniformLoopOp>(op))
+      return processLoop(loop, pos);
+    if (auto execIf = dyn_cast<waveamdmachine::ExecIfOp>(op))
+      return processExecIf(execIf, pos);
+    return success();
+  }
+
   LogicalResult coalesceTupleElementOps(Operation &op, unsigned pos) {
     // Tuple is primary; elements get cumulative dword offsets.
     auto coalesceTupleElements = [&](auto top) -> LogicalResult {
@@ -524,9 +614,8 @@ private:
         return failure();
       if (failed(coalesceTupleElementOps(*op, pos)))
         return failure();
-      if (auto loop = dyn_cast<waveamdmachine::UniformLoopOp>(op))
-        if (failed(processLoop(loop, pos)))
-          return failure();
+      if (failed(processNestedRegions(op, pos)))
+        return failure();
     }
     return success();
   }
