@@ -34,6 +34,24 @@ namespace mlir::wave {
 using namespace mlir;
 using namespace mlir::wave::regalloc;
 
+unsigned mlir::wave::regalloc::getPlannedProviderBytes(Inventory &inventory,
+                                                       StringRef provider) {
+  return inventory.plannedProviderBytes.lookup(provider);
+}
+
+void mlir::wave::regalloc::addPlannedProviderBytes(Inventory &inventory,
+                                                   StringRef provider,
+                                                   unsigned bytes) {
+  inventory.plannedProviderBytes[provider] =
+      inventory.plannedProviderBytes.lookup(provider) + bytes;
+}
+
+void mlir::wave::regalloc::recordPlannedPressureRelief(
+    Inventory &inventory,
+    std::unique_ptr<wave::WaveAMDPressureReliefPlan> plan) {
+  inventory.plannedReliefPlans.push_back(std::move(plan));
+}
+
 namespace {
 
 static constexpr llvm::StringLiteral kPassName = "waveamd-reg-alloc";

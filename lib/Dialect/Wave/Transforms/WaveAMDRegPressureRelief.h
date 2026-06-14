@@ -104,6 +104,17 @@ protected:
 using WaveAMDPressureReliefCandidateList =
     SmallVector<std::unique_ptr<WaveAMDPressureReliefCandidate>, 4>;
 
+class WaveAMDPressureReliefPlan {
+public:
+  virtual ~WaveAMDPressureReliefPlan();
+
+  virtual StringRef getProviderName() const = 0;
+  virtual unsigned getReliefDwords() const = 0;
+};
+
+using WaveAMDPressureReliefPlanList =
+    SmallVector<std::unique_ptr<WaveAMDPressureReliefPlan>, 8>;
+
 class WaveAMDPressureReliefProvider {
 public:
   virtual ~WaveAMDPressureReliefProvider();
@@ -115,6 +126,16 @@ public:
   virtual LogicalResult
   materialize(const WaveAMDPressureReliefCandidate &candidate,
               OpBuilder &builder) const = 0;
+  virtual std::unique_ptr<WaveAMDPressureReliefPlan>
+  createPlan(const WaveAMDPressureReliefCandidate &candidate) const;
+  virtual void applyPlan(const WaveAMDPressureReliefPlan &plan) const;
+  virtual LogicalResult materializePlan(const WaveAMDPressureReliefPlan &plan,
+                                        OpBuilder &builder) const;
+  virtual LogicalResult
+  materializePlans(ArrayRef<const WaveAMDPressureReliefPlan *> plans,
+                   OpBuilder &builder) const;
+  virtual void notifyNoCandidate() const;
+  virtual void notifyPlanApplied() const;
 
   virtual bool
   isBetterCandidate(const WaveAMDPressureReliefCandidate &lhs,

@@ -63,6 +63,7 @@ struct IntervalGroup {
   bool reserved = false;
   bool nonPromotable = false;
   bool allocatable = true;
+  bool plannedPressureRelief = false;
 };
 
 struct Inventory {
@@ -72,6 +73,8 @@ struct Inventory {
   ::mlir::wave::WaveAMDKernelEntryRegs entryRegs;
   SmallVector<std::unique_ptr<Interval>> intervals;
   SmallVector<std::unique_ptr<IntervalGroup>> groups;
+  wave::WaveAMDPressureReliefPlanList plannedReliefPlans;
+  DenseMap<StringRef, unsigned> plannedProviderBytes;
   unsigned peakSGPR = 0;
   unsigned peakVGPR = 0;
   unsigned peakAGPR = 0;
@@ -176,6 +179,12 @@ FailureOr<bool> applyScratchSpillProvider(func::FuncOp func,
                                           IntervalGroup *request,
                                           unsigned position,
                                           Inventory &inventory);
+unsigned getPlannedProviderBytes(Inventory &inventory, StringRef provider);
+void addPlannedProviderBytes(Inventory &inventory, StringRef provider,
+                             unsigned bytes);
+void recordPlannedPressureRelief(
+    Inventory &inventory,
+    std::unique_ptr<wave::WaveAMDPressureReliefPlan> plan);
 
 StringRef getLDSSpillPlanStatusName(LDSSpillPlanStatus status);
 LDSSpillPlan planLDSSpillSlot(func::FuncOp func, RegisterBudgets budgets,

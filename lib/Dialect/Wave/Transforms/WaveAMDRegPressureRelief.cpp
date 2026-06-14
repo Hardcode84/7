@@ -19,6 +19,7 @@ namespace mlir::wave {
 
 WaveAMDPressureReliefBudget::~WaveAMDPressureReliefBudget() = default;
 WaveAMDPressureReliefCandidate::~WaveAMDPressureReliefCandidate() = default;
+WaveAMDPressureReliefPlan::~WaveAMDPressureReliefPlan() = default;
 WaveAMDPressureReliefProvider::~WaveAMDPressureReliefProvider() = default;
 
 std::optional<int64_t> WaveAMDPressureReliefBudget::getLimit() const {
@@ -101,6 +102,33 @@ bool WaveAMDPressureReliefProvider::isBetterCandidate(
     const WaveAMDPressureReliefCandidate &rhs) const {
   return isBetterWaveAMDPressureReliefCandidate(lhs, rhs);
 }
+
+std::unique_ptr<WaveAMDPressureReliefPlan>
+WaveAMDPressureReliefProvider::createPlan(
+    const WaveAMDPressureReliefCandidate &) const {
+  return nullptr;
+}
+
+void WaveAMDPressureReliefProvider::applyPlan(
+    const WaveAMDPressureReliefPlan &) const {}
+
+LogicalResult WaveAMDPressureReliefProvider::materializePlan(
+    const WaveAMDPressureReliefPlan &, OpBuilder &) const {
+  return failure();
+}
+
+LogicalResult WaveAMDPressureReliefProvider::materializePlans(
+    ArrayRef<const WaveAMDPressureReliefPlan *> plans,
+    OpBuilder &builder) const {
+  for (const WaveAMDPressureReliefPlan *plan : plans)
+    if (failed(materializePlan(*plan, builder)))
+      return failure();
+  return success();
+}
+
+void WaveAMDPressureReliefProvider::notifyNoCandidate() const {}
+
+void WaveAMDPressureReliefProvider::notifyPlanApplied() const {}
 
 static int64_t getTotalCost(WaveAMDPressureReliefCost cost) {
   return cost.materializationOps + cost.loopWeightedOps + cost.latencyPenalty +
