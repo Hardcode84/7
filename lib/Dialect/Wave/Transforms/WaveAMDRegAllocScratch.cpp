@@ -1206,35 +1206,3 @@ mlir::wave::regalloc::createScratchSpillProvider(
   return std::make_unique<ScratchSpillProvider>(func, groups, request, position,
                                                 inventory);
 }
-
-FailureOr<bool> mlir::wave::regalloc::applyScratchSpillProvider(
-    func::FuncOp func, ArrayRef<IntervalGroup *> groups, IntervalGroup *request,
-    unsigned position, Inventory &inventory,
-    const PressureFailure *pressureFailure) {
-  std::unique_ptr<wave::WaveAMDPressureReliefProvider> provider =
-      createScratchSpillProvider(func, groups, request, position, inventory);
-  wave::WaveAMDPressureReliefCandidateList candidates;
-  wave::WaveAMDPressureReliefQuery query;
-  query.scope = func;
-  query.failure = pressureFailure;
-  if (failed(provider->collectCandidates(query, candidates)))
-    return failure();
-  if (candidates.empty()) {
-    provider->notifyNoCandidate();
-    return false;
-  }
-
-  unsigned selected = 0;
-  for (size_t index : llvm::seq<size_t>(1, candidates.size()))
-    if (provider->isBetterCandidate(*candidates[index], *candidates[selected]))
-      selected = index;
-
-  std::unique_ptr<wave::WaveAMDPressureReliefPlan> plan =
-      provider->createPlan(*candidates[selected]);
-  if (!plan)
-    return failure();
-  provider->applyPlan(*plan);
-  provider->notifyPlanApplied();
-  recordPlannedPressureRelief(inventory, std::move(plan));
-  return true;
-}

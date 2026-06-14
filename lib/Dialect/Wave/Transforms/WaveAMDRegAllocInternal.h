@@ -247,26 +247,11 @@ struct BankPromotionHooks {
   LogicalResult (*materialize)(IntervalGroup *, OpBuilder &) = nullptr;
 };
 
-FailureOr<bool>
-applyBankPromotionProvider(func::FuncOp func, ArrayRef<IntervalGroup *> groups,
-                           IntervalGroup *request, unsigned position,
-                           RegisterBudgets budgets, Inventory &inventory,
-                           const BankPromotionHooks &hooks);
 std::unique_ptr<wave::WaveAMDPressureReliefProvider>
 createBankPromotionProvider(ArrayRef<IntervalGroup *> groups,
                             IntervalGroup *request, unsigned position,
                             RegisterBudgets budgets, Inventory &inventory,
                             const BankPromotionHooks &hooks);
-FailureOr<bool>
-applyLDSSpillProvider(func::FuncOp func, ArrayRef<IntervalGroup *> groups,
-                      IntervalGroup *request, unsigned position,
-                      RegisterBudgets budgets, Inventory &inventory,
-                      const PressureFailure *pressureFailure = nullptr);
-FailureOr<bool>
-applyScratchSpillProvider(func::FuncOp func, ArrayRef<IntervalGroup *> groups,
-                          IntervalGroup *request, unsigned position,
-                          Inventory &inventory,
-                          const PressureFailure *pressureFailure = nullptr);
 std::unique_ptr<wave::WaveAMDPressureReliefProvider>
 createLDSSpillProvider(func::FuncOp func, ArrayRef<IntervalGroup *> groups,
                        IntervalGroup *request, unsigned position,

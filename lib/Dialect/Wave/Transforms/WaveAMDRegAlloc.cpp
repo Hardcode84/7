@@ -1818,24 +1818,157 @@ static void setMemorySpillRejectDiagnostics(func::FuncOp func,
                   builder.getStringAttr(kMemorySpillLoopCarryReject));
 }
 
-static FailureOr<bool> applyMemoryPressureRelief(
-    func::FuncOp func, Inventory &inventory, ArrayRef<IntervalGroup *> assigned,
-    IntervalGroup *group, unsigned position, RegisterBudgets budgets,
-    const PressureFailure *pressureFailure = nullptr) {
+struct PressureReliefProviderState {
+  PressureReliefProviderState(
+      std::unique_ptr<wave::WaveAMDPressureReliefProvider> provider,
+      unsigned order)
+      : provider(std::move(provider)), order(order) {}
+
+  std::unique_ptr<wave::WaveAMDPressureReliefProvider> provider;
+  wave::WaveAMDPressureReliefCandidateList candidates;
+  unsigned order = 0;
+};
+
+struct PressureReliefCandidateRef {
+  PressureReliefProviderState *state = nullptr;
+  unsigned index = 0;
+};
+
+static const wave::WaveAMDPressureReliefCandidate &
+getPressureReliefCandidate(PressureReliefCandidateRef ref) {
+  return *ref.state->candidates[ref.index];
+}
+
+static int64_t
+getPressureReliefCostTotal(wave::WaveAMDPressureReliefCost cost) {
+  return cost.materializationOps + cost.loopWeightedOps + cost.latencyPenalty +
+         cost.instabilityPenalty;
+}
+
+static bool
+isBetterGlobalPressureReliefCandidate(PressureReliefCandidateRef lhsRef,
+                                      PressureReliefCandidateRef rhsRef) {
+  const wave::WaveAMDPressureReliefCandidate &lhs =
+      getPressureReliefCandidate(lhsRef);
+  const wave::WaveAMDPressureReliefCandidate &rhs =
+      getPressureReliefCandidate(rhsRef);
+  if (lhs.isLegal() != rhs.isLegal())
+    return lhs.isLegal();
+
+  int64_t lhsCost = getPressureReliefCostTotal(lhs.getCost());
+  int64_t rhsCost = getPressureReliefCostTotal(rhs.getCost());
+  if (lhsCost != rhsCost)
+    return lhsCost < rhsCost;
+
+  if (lhs.getReliefDwords() != rhs.getReliefDwords())
+    return lhs.getReliefDwords() > rhs.getReliefDwords();
+
+  if (lhsRef.state == rhsRef.state &&
+      lhsRef.state->provider->isBetterCandidate(lhs, rhs))
+    return true;
+
+  if (lhsRef.state->order != rhsRef.state->order)
+    return lhsRef.state->order < rhsRef.state->order;
+
+  return false;
+}
+
+static void addPressureReliefProvider(
+    SmallVectorImpl<PressureReliefProviderState> &providers,
+    std::unique_ptr<wave::WaveAMDPressureReliefProvider> provider) {
+  providers.emplace_back(std::move(provider), providers.size());
+}
+
+static LogicalResult collectPressureReliefCandidates(
+    MutableArrayRef<PressureReliefProviderState> providers,
+    const wave::WaveAMDPressureReliefQuery &query,
+    SmallVectorImpl<PressureReliefCandidateRef> &candidateRefs) {
+  for (PressureReliefProviderState &state : providers) {
+    if (failed(state.provider->collectCandidates(query, state.candidates)))
+      return failure();
+    for (size_t index : llvm::seq(state.candidates.size()))
+      candidateRefs.push_back({&state, static_cast<unsigned>(index)});
+  }
+  return success();
+}
+
+static std::optional<PressureReliefCandidateRef>
+selectPressureReliefCandidate(ArrayRef<PressureReliefCandidateRef> candidates) {
+  if (candidates.empty())
+    return std::nullopt;
+  PressureReliefCandidateRef selected = candidates.front();
+  for (PressureReliefCandidateRef candidate : candidates.drop_front())
+    if (isBetterGlobalPressureReliefCandidate(candidate, selected))
+      selected = candidate;
+  if (!getPressureReliefCandidate(selected).isLegal())
+    return std::nullopt;
+  return selected;
+}
+
+static void notifyNoPressureReliefCandidate(
+    MutableArrayRef<PressureReliefProviderState> providers) {
+  for (PressureReliefProviderState &state : providers)
+    state.provider->notifyNoCandidate();
+}
+
+static bool shouldTryMemoryPressureRelief(IntervalGroup *request) {
+  return request && request->storageClass == waveamdmachine::RegClass::VGPR;
+}
+
+static FailureOr<bool>
+applyPressureRelief(func::FuncOp func, Inventory &inventory,
+                    ArrayRef<IntervalGroup *> assigned, IntervalGroup *request,
+                    unsigned position, RegisterBudgets budgets,
+                    bool includeBankPromotion, bool includeMemorySpill,
+                    const PressureFailure *pressureFailure = nullptr) {
   func->removeAttr(kMemorySpillRejectAttr);
   func->removeAttr(kMemorySpillRejectDetailAttr);
-  FailureOr<bool> spilledGroup = applyLDSSpillProvider(
-      func, assigned, group, position, budgets, inventory, pressureFailure);
-  if (failed(spilledGroup))
+
+  SmallVector<PressureReliefProviderState, 3> providers;
+  providers.reserve(3);
+  if (includeBankPromotion)
+    addPressureReliefProvider(
+        providers,
+        createBankPromotionProvider(assigned, request, position, budgets,
+                                    inventory, getBankPromotionHooks()));
+  if (includeMemorySpill) {
+    addPressureReliefProvider(
+        providers, createLDSSpillProvider(func, assigned, request, position,
+                                          budgets, inventory));
+    addPressureReliefProvider(
+        providers, createScratchSpillProvider(func, assigned, request, position,
+                                              inventory));
+  }
+  if (providers.empty())
+    return false;
+
+  wave::WaveAMDPressureReliefQuery query;
+  query.scope = func;
+  query.failure = pressureFailure;
+  SmallVector<PressureReliefCandidateRef, 8> candidates;
+  if (failed(collectPressureReliefCandidates(providers, query, candidates)))
     return failure();
-  if (*spilledGroup)
-    return true;
-  FailureOr<bool> scratchSpill = applyScratchSpillProvider(
-      func, assigned, group, position, inventory, pressureFailure);
-  if (failed(scratchSpill) || *scratchSpill)
-    return scratchSpill;
-  setMemorySpillRejectDiagnostics(func, assigned, group, position);
-  return false;
+
+  std::optional<PressureReliefCandidateRef> selected =
+      selectPressureReliefCandidate(candidates);
+  if (!selected) {
+    notifyNoPressureReliefCandidate(providers);
+    if (includeMemorySpill)
+      setMemorySpillRejectDiagnostics(func, assigned, request, position);
+    return false;
+  }
+
+  PressureReliefProviderState &state = *selected->state;
+  const wave::WaveAMDPressureReliefCandidate &candidate =
+      getPressureReliefCandidate(*selected);
+  std::unique_ptr<wave::WaveAMDPressureReliefPlan> plan =
+      state.provider->createPlan(candidate);
+  if (!plan)
+    return failure();
+  state.provider->applyPlan(*plan);
+  state.provider->notifyPlanApplied();
+  recordPlannedPressureRelief(inventory, std::move(plan));
+  return true;
 }
 
 static FailureOr<bool>
@@ -1843,8 +1976,9 @@ applyCombinedPressureRelief(func::FuncOp func, Inventory &inventory,
                             const PressureFailure &failure,
                             RegisterBudgets budgets) {
   SmallVector<IntervalGroup *> groups = getAllocGroups(inventory);
-  return applyMemoryPressureRelief(func, inventory, groups, nullptr,
-                                   failure.position, budgets, &failure);
+  return applyPressureRelief(func, inventory, groups, nullptr, failure.position,
+                             budgets, /*includeBankPromotion=*/false,
+                             /*includeMemorySpill=*/true, &failure);
 }
 
 static LogicalResult allocateOnce(func::FuncOp func, Inventory &inventory,
@@ -1867,30 +2001,23 @@ static LogicalResult allocateOnce(func::FuncOp func, Inventory &inventory,
     }
 
     unsigned position = getGroupStart(group);
-    FailureOr<bool> promotedGroup =
-        applyBankPromotionProvider(func, assigned, group, position, budgets,
-                                   inventory, getBankPromotionHooks());
-    if (failed(promotedGroup))
+    unsigned plannedBefore = inventory.plannedReliefPlans.size();
+    FailureOr<bool> relieved = applyPressureRelief(
+        func, inventory, assigned, group, position, budgets,
+        /*includeBankPromotion=*/true,
+        /*includeMemorySpill=*/shouldTryMemoryPressureRelief(group));
+    if (failed(relieved))
       return failure();
-    if (!*promotedGroup) {
-      unsigned plannedBefore = inventory.plannedReliefPlans.size();
-      FailureOr<bool> rewroteGroup = applyMemoryPressureRelief(
-          func, inventory, assigned, group, position, budgets);
-      if (failed(rewroteGroup))
-        return failure();
-      if (*rewroteGroup) {
-        if (inventory.plannedReliefPlans.size() != plannedBefore)
-          promoted = true;
-        else
-          rewroteIR = true;
-        return success();
-      }
+    if (!*relieved) {
       pressureFailure = buildClassPressureFailure(
           inventory, assigned, group, position, group->storageClass,
           getBudget(budgets, group->storageClass));
       return mlir::failure();
     }
-    promoted = true;
+    if (inventory.plannedReliefPlans.size() != plannedBefore)
+      promoted = true;
+    else
+      rewroteIR = true;
     return success();
   }
   return success();

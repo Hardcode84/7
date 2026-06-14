@@ -733,36 +733,3 @@ mlir::wave::regalloc::createLDSSpillProvider(
   return std::make_unique<LDSSpillProvider>(func, groups, request, position,
                                             budgets, inventory);
 }
-
-FailureOr<bool> mlir::wave::regalloc::applyLDSSpillProvider(
-    func::FuncOp func, ArrayRef<IntervalGroup *> groups, IntervalGroup *request,
-    unsigned position, RegisterBudgets budgets, Inventory &inventory,
-    const PressureFailure *pressureFailure) {
-  std::unique_ptr<wave::WaveAMDPressureReliefProvider> provider =
-      createLDSSpillProvider(func, groups, request, position, budgets,
-                             inventory);
-  wave::WaveAMDPressureReliefCandidateList candidates;
-  wave::WaveAMDPressureReliefQuery query;
-  query.scope = func;
-  query.failure = pressureFailure;
-  if (failed(provider->collectCandidates(query, candidates)))
-    return failure();
-  if (candidates.empty()) {
-    provider->notifyNoCandidate();
-    return false;
-  }
-
-  unsigned selected = 0;
-  for (size_t index : llvm::seq<size_t>(1, candidates.size()))
-    if (provider->isBetterCandidate(*candidates[index], *candidates[selected]))
-      selected = index;
-
-  std::unique_ptr<wave::WaveAMDPressureReliefPlan> plan =
-      provider->createPlan(*candidates[selected]);
-  if (!plan)
-    return failure();
-  provider->applyPlan(*plan);
-  provider->notifyPlanApplied();
-  recordPlannedPressureRelief(inventory, std::move(plan));
-  return true;
-}
