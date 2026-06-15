@@ -127,7 +127,9 @@ physical storage. Required movement must be explicit in IR.
 
 ## Bank Promotion
 
-Register pressure is relieved by forced storage-bank promotion:
+Register pressure is relieved by forced storage-bank promotion and VGPR
+memory spilling. Provider candidates are ranked together by legality, common
+cost, pressure relief, and provider order as the last tie-breaker.
 
 ```text
 SGPR -> VGPR -> AGPR
@@ -149,6 +151,17 @@ Promotion never moves fixed physical ranges, ABI ranges, or bridge temps.
 If no legal bridge sequence exists, the group is not promotable. If no
 promotion can relieve the pressure, overflow handling follows normal pass
 mode.
+
+Memory spilling applies to VGPR storage groups. LDS spills materialize
+width-1 VGPR values through DS load/store ops when one-wave workgroups,
+LDS budget, and addressing constraints make the slot legal. Scratch spills
+materialize VGPR values and supported wide loop carries through private
+scratch slots. SGPR pressure is relieved through SGPR-to-VGPR promotion,
+not direct memory spilling.
+
+VGPR-to-AGPR promotion reduces VGPR-bank pressure, but it does not reduce
+combined VGPR/AGPR target-waves pressure. Combined pressure uses memory-spill
+providers directly.
 
 The allocator does not expose the old AGPR-bank-spill candidate-ranking
 mode and does not emit `waveamdmachine.regalloc_agpr_candidates`.
@@ -198,7 +211,9 @@ Remark names:
 `regalloc-pressure-failure` contains the overflowing class, class budget,
 reserved prefix size, live dwords, program position, required relief, the
 request interval, active overlaps, and memory-spill rejection counts when
-available.
+available. Memory-spill rejection metrics include `memory_spill_reject`
+plus per-reason counts such as `loop_carry`, `starts_at_pressure`, `fixed`,
+and `total`.
 
 Default hard failures also print pressure detail in the error diagnostic.
 
@@ -338,7 +353,8 @@ Design constraints:
 
 ## Non-Goals
 
-The pass does not spill to memory.
+The pass does not spill SGPRs or singleton resources such as SCC, VCC,
+EXEC, and M0 directly to memory.
 
 The pass does not choose occupancy. `waveamdmachine.target_waves`
 expresses an input constraint.
