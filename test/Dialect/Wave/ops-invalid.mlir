@@ -200,6 +200,14 @@ func.func @muli_simd_element_bits(%a: !wave.simd<i32, 32>, %b: !wave.simd<i32, 3
 
 // -----
 
+func.func @xori_overflow_flags(%a: i32, %b: i32) {
+  // expected-error @+1 {{overflow flags require addi, subi, muli, or shli}}
+  %0 = wave.binary xori %a, %b overflow<nsw> : i32, i32 -> i32
+  return
+}
+
+// -----
+
 func.func @index_expr_count_mismatch(%lane: !wave.simd<i32, 32>) {
   // expected-error @+1 {{expected one name per binding}}
   %v = wave.index_expr #wave.expr<"lid"> ["lid", "x"] (%lane) : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>

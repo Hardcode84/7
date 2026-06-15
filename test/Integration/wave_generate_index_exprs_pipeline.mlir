@@ -9,7 +9,7 @@ func.func @generate_after_normalize(%out: !wave.ptr<#wave.global, f32>,
     attributes {wave.kernel} {
   %c16 = arith.constant 16 : index
   %s16 = wave.splat %c16 : index -> !wave.simd<index, 32>
-  %offset = wave.binary addi %idx, %s16 : !wave.simd<index, 32>, !wave.simd<index, 32> -> !wave.simd<index, 32>
+  %offset = wave.binary addi %idx, %s16 overflow<nsw> : !wave.simd<index, 32>, !wave.simd<index, 32> -> !wave.simd<index, 32>
   // CHECK: wave.index_expr <"64 + 4*raw0"> ["raw0"](%[[IDX]]) : (!wave.simd<index, 32>) -> !wave.simd<index, 32>
   %ptr = wave.ptr_add %out, %offset : !wave.ptr<#wave.global, f32>, !wave.simd<index, 32> -> !wave.simd<!wave.ptr<#wave.global, f32>, 32>
   %cst = arith.constant 0.000000e+00 : f32

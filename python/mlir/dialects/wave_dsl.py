@@ -307,6 +307,17 @@ def _arith_result_type(lhs: Value, rhs: Value) -> Type:
     return simd_type(simd.element_type, simd.width)
 
 
+def _overflow_flags_attr(nsw: bool, nuw: bool) -> Attribute | None:
+    flags = []
+    if nsw:
+        flags.append("nsw")
+    if nuw:
+        flags.append("nuw")
+    if not flags:
+        return None
+    return Attribute.parse(f"#arith.overflow<{', '.join(flags)}>")
+
+
 def _binding_lane_width(values: Iterable[Value]) -> int:
     """Reduce binding operand types to a single non-zero lane width.
 
@@ -693,8 +704,26 @@ class FunctionBuilder:
     ) -> Value:
         return wave.SplatOp(simd_type(element_type or value.type, width), value).result
 
-    def binary(self, kind: object, lhs: Value, rhs: Value) -> Value:
-        return wave.BinaryOp(_arith_result_type(lhs, rhs), kind, lhs, rhs).result
+    def binary(
+        self,
+        kind: object,
+        lhs: Value,
+        rhs: Value,
+        *,
+        nsw: bool = False,
+        nuw: bool = False,
+    ) -> Value:
+        overflow_flags = _overflow_flags_attr(nsw, nuw)
+        result_type = _arith_result_type(lhs, rhs)
+        if overflow_flags is None:
+            return wave.BinaryOp(result_type, kind, lhs, rhs).result
+        return wave.BinaryOp(
+            result_type,
+            kind,
+            lhs,
+            rhs,
+            overflowFlags=overflow_flags,
+        ).result
 
     def cast(
         self,
@@ -775,14 +804,25 @@ class FunctionBuilder:
             finally:
                 self._yield_stack.pop()
 
-    def addi(self, lhs: Value, rhs: Value) -> Value:
-        return self.binary(BinaryKind.AddI, lhs, rhs)
+    def addi(
+        self, lhs: Value, rhs: Value, *, nsw: bool = False, nuw: bool = False
+    ) -> Value:
+        return self.binary(BinaryKind.AddI, lhs, rhs, nsw=nsw, nuw=nuw)
 
-    def muli(self, lhs: Value, rhs: Value) -> Value:
-        return self.binary(BinaryKind.MulI, lhs, rhs)
+    def subi(
+        self, lhs: Value, rhs: Value, *, nsw: bool = False, nuw: bool = False
+    ) -> Value:
+        return self.binary(BinaryKind.SubI, lhs, rhs, nsw=nsw, nuw=nuw)
 
-    def shli(self, lhs: Value, rhs: Value) -> Value:
-        return self.binary(BinaryKind.ShLI, lhs, rhs)
+    def muli(
+        self, lhs: Value, rhs: Value, *, nsw: bool = False, nuw: bool = False
+    ) -> Value:
+        return self.binary(BinaryKind.MulI, lhs, rhs, nsw=nsw, nuw=nuw)
+
+    def shli(
+        self, lhs: Value, rhs: Value, *, nsw: bool = False, nuw: bool = False
+    ) -> Value:
+        return self.binary(BinaryKind.ShLI, lhs, rhs, nsw=nsw, nuw=nuw)
 
     def fadd(self, lhs: Value, rhs: Value) -> Value:
         return wave.FAddOp(lhs.type, lhs, rhs).result

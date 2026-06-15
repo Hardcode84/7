@@ -15,6 +15,7 @@ include "mlir/Dialect/Wave/IR/WaveEnums.td"
 include "mlir/Dialect/Wave/IR/WaveTypes.td"
 
 include "mlir/Dialect/Arith/IR/ArithBase.td"
+include "mlir/Dialect/Arith/IR/ArithOpsInterfaces.td"
 include "mlir/IR/OpBase.td"
 include "mlir/Interfaces/ControlFlowInterfaces.td"
 include "mlir/Interfaces/InferIntRangeInterface.td"
@@ -148,7 +149,8 @@ def Wave_SplatOp : Wave_Op<"splat", [Pure,
 }
 
 def Wave_BinaryOp : Wave_Op<"binary", [Pure,
-    DeclareOpInterfaceMethods<InferIntRangeInterface, ["inferResultRanges"]>]> {
+    DeclareOpInterfaceMethods<InferIntRangeInterface, ["inferResultRanges"]>,
+    DeclareOpInterfaceMethods<ArithIntegerOverflowFlagsInterface>]> {
   let summary = "integer binary operation";
   let description = [{
     Applies an integer binary operation to uniform integer/index values, SIMD
@@ -158,9 +160,12 @@ def Wave_BinaryOp : Wave_Op<"binary", [Pure,
 
   let arguments = (ins Wave_BinaryKindEnum:$kind,
                        AnyType:$lhs,
-                       AnyType:$rhs);
+                       AnyType:$rhs,
+                       DefaultValuedAttr<
+                         Arith_IntegerOverflowAttr,
+                         "::mlir::arith::IntegerOverflowFlags::none">:$overflowFlags);
   let results = (outs AnyType:$result);
-  let assemblyFormat = "$kind $lhs `,` $rhs attr-dict `:` qualified(type($lhs)) `,` qualified(type($rhs)) `->` qualified(type($result))";
+  let assemblyFormat = "$kind $lhs `,` $rhs (`overflow` `` $overflowFlags^)? attr-dict `:` qualified(type($lhs)) `,` qualified(type($rhs)) `->` qualified(type($result))";
   let hasVerifier = 1;
 }
 

@@ -130,19 +130,25 @@ private:
       return bindSymbol(value);
     if (SplatOp splat = value.getDefiningOp<SplatOp>())
       return buildValueExpr(splat.getSource(), skip, depth + 1);
-    if (BinaryOp bin = value.getDefiningOp<BinaryOp>()) {
-      if (bin.getKind() == BinaryKind::AddI)
-        return buildBinaryExpr(bin.getLhs(), sym::ExprBinaryOp::Add,
-                               bin.getRhs(), skip, depth + 1);
-      if (bin.getKind() == BinaryKind::MulI)
-        return buildBinaryExpr(bin.getLhs(), sym::ExprBinaryOp::Mul,
-                               bin.getRhs(), skip, depth + 1);
-      if (bin.getKind() == BinaryKind::ShLI)
-        return buildShiftExpr(bin, skip, depth + 1);
-      if (bin.getKind() == BinaryKind::XOrI)
-        return buildBinaryExpr(bin.getLhs(), sym::ExprBinaryOp::Xor,
-                               bin.getRhs(), skip, depth + 1);
-    }
+    if (BinaryOp bin = value.getDefiningOp<BinaryOp>())
+      return buildBinaryValueExpr(bin, skip, depth + 1);
+    skip = true;
+    return failure();
+  }
+
+  FailureOr<sym::ExprHandle> buildBinaryValueExpr(BinaryOp bin, bool &skip,
+                                                  unsigned depth) {
+    if (bin.getKind() == BinaryKind::AddI && bin.hasNoSignedWrap())
+      return buildBinaryExpr(bin.getLhs(), sym::ExprBinaryOp::Add, bin.getRhs(),
+                             skip, depth);
+    if (bin.getKind() == BinaryKind::MulI && bin.hasNoSignedWrap())
+      return buildBinaryExpr(bin.getLhs(), sym::ExprBinaryOp::Mul, bin.getRhs(),
+                             skip, depth);
+    if (bin.getKind() == BinaryKind::ShLI && bin.hasNoSignedWrap())
+      return buildShiftExpr(bin, skip, depth);
+    if (bin.getKind() == BinaryKind::XOrI)
+      return buildBinaryExpr(bin.getLhs(), sym::ExprBinaryOp::Xor, bin.getRhs(),
+                             skip, depth);
     skip = true;
     return failure();
   }

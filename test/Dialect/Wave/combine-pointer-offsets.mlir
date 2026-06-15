@@ -26,12 +26,37 @@ func.func @raw_wave_arith(%out: !wave.ptr<#wave.global, i32>) attributes {wave.k
   %lane = wave.lane_id : !wave.simd<i32, 32>
   %c8 = arith.constant 8 : i32
   %stride = wave.splat %c8 : i32 -> !wave.simd<i32, 32>
-  %lane_off = wave.binary muli %lane, %stride
+  %lane_off = wave.binary muli %lane, %stride overflow<nsw>
       : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
   %base = wave.ptr_add %out, %c8
       : !wave.ptr<#wave.global, i32>, i32 -> !wave.ptr<#wave.global, i32>
   // CHECK: %[[OFF:.*]] = wave.index_expr <"8 + 8*raw0"> ["raw0"](%{{.*}}) : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
   // CHECK: wave.ptr_add %arg0, %[[OFF]]
+  %ptrs = wave.ptr_add %base, %lane_off
+      : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 32>
+      -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
+  %value, %token = wave.load %ptrs
+      : (!wave.simd<!wave.ptr<#wave.global, i32>, 32>)
+      -> (!wave.simd<i32, 32>, !wave.mem.token)
+  return
+}
+
+// -----
+
+// CHECK-LABEL: func.func @unflagged_raw_wave_arith_skips
+func.func @unflagged_raw_wave_arith_skips(%out: !wave.ptr<#wave.global, i32>)
+    attributes {wave.kernel} {
+  %lane = wave.lane_id : !wave.simd<i32, 32>
+  %c8 = arith.constant 8 : i32
+  %stride = wave.splat %c8 : i32 -> !wave.simd<i32, 32>
+  // CHECK: %[[LANE_OFF:.*]] = wave.binary muli
+  %lane_off = wave.binary muli %lane, %stride
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  // CHECK: %[[BASE:.*]] = wave.ptr_add %arg0, %{{.*}}
+  %base = wave.ptr_add %out, %c8
+      : !wave.ptr<#wave.global, i32>, i32 -> !wave.ptr<#wave.global, i32>
+  // CHECK-NOT: wave.index_expr
+  // CHECK: wave.ptr_add %[[BASE]], %[[LANE_OFF]]
   %ptrs = wave.ptr_add %base, %lane_off
       : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 32>
       -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>

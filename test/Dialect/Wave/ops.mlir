@@ -152,6 +152,10 @@ func.func @wave_int_arith(%uA: i32, %uB: i32, %vA: !wave.simd<i32, 32>, %vB: !wa
   %u64b = arith.constant 2 : i64
   // CHECK: wave.binary addi {{.*}} : i64, i64 -> i64
   %6 = wave.binary addi %u64a, %u64b : i64, i64 -> i64
+  // CHECK: wave.binary addi {{.*}} overflow<nsw, nuw> : i32, i32 -> i32
+  %7 = wave.binary addi %uA, %uB overflow<nsw, nuw> : i32, i32 -> i32
+  // CHECK: wave.binary shli {{.*}} overflow<nsw> : i32, i32 -> i32
+  %8 = wave.binary shli %uA, %uB overflow<nsw> : i32, i32 -> i32
 
   func.return
 }

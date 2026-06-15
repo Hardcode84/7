@@ -49,6 +49,66 @@ func.func @chained_assume_range(%v: i32) -> i1 {
   return %cmp : i1
 }
 
+// CHECK-LABEL: func.func @addi_nsw_one_sided_nonnegative
+// CHECK-NEXT: %[[T:.*]] = arith.constant true
+// CHECK-NEXT: return %[[T]] : i1
+func.func @addi_nsw_one_sided_nonnegative(%v: i32) -> i1 {
+  %a = wave.assume %v as "x" [#wave.pred<"x >= 0">] : i32
+  %one = arith.constant 1 : i32
+  %sum = wave.binary addi %a, %one overflow<nsw> : i32, i32 -> i32
+  %zero = arith.constant 0 : i32
+  %cmp = arith.cmpi sge, %sum, %zero : i32
+  return %cmp : i1
+}
+
+// CHECK-LABEL: func.func @subi_nsw_one_sided_nonpositive
+// CHECK-NEXT: %[[T:.*]] = arith.constant true
+// CHECK-NEXT: return %[[T]] : i1
+func.func @subi_nsw_one_sided_nonpositive(%v: i32) -> i1 {
+  %a = wave.assume %v as "x" [#wave.pred<"x <= 0">] : i32
+  %one = arith.constant 1 : i32
+  %diff = wave.binary subi %a, %one overflow<nsw> : i32, i32 -> i32
+  %zero = arith.constant 0 : i32
+  %cmp = arith.cmpi sle, %diff, %zero : i32
+  return %cmp : i1
+}
+
+// CHECK-LABEL: func.func @muli_nsw_nonnegative_product
+// CHECK-NEXT: %[[T:.*]] = arith.constant true
+// CHECK-NEXT: return %[[T]] : i1
+func.func @muli_nsw_nonnegative_product(%x: i32, %y: i32) -> i1 {
+  %a = wave.assume %x as "x" [#wave.pred<"x >= 0">] : i32
+  %b = wave.assume %y as "x" [#wave.pred<"x >= 0">] : i32
+  %prod = wave.binary muli %a, %b overflow<nsw> : i32, i32 -> i32
+  %zero = arith.constant 0 : i32
+  %cmp = arith.cmpi sge, %prod, %zero : i32
+  return %cmp : i1
+}
+
+// CHECK-LABEL: func.func @shli_nsw_nonnegative
+// CHECK-NEXT: %[[T:.*]] = arith.constant true
+// CHECK-NEXT: return %[[T]] : i1
+func.func @shli_nsw_nonnegative(%v: i32) -> i1 {
+  %a = wave.assume %v as "x" [#wave.pred<"x >= 0">] : i32
+  %one = arith.constant 1 : i32
+  %shifted = wave.binary shli %a, %one overflow<nsw> : i32, i32 -> i32
+  %zero = arith.constant 0 : i32
+  %cmp = arith.cmpi sge, %shifted, %zero : i32
+  return %cmp : i1
+}
+
+// CHECK-LABEL: func.func @unflagged_addi_one_sided_stays_dynamic
+// CHECK: wave.binary addi
+// CHECK: arith.cmpi sge
+func.func @unflagged_addi_one_sided_stays_dynamic(%v: i32) -> i1 {
+  %a = wave.assume %v as "x" [#wave.pred<"x >= 0">] : i32
+  %one = arith.constant 1 : i32
+  %sum = wave.binary addi %a, %one : i32, i32 -> i32
+  %zero = arith.constant 0 : i32
+  %cmp = arith.cmpi sge, %sum, %zero : i32
+  return %cmp : i1
+}
+
 // CHECK-LABEL: func.func @muli_propagation
 // CHECK-NEXT: %[[T:.*]] = arith.constant true
 // CHECK-NEXT: return %[[T]] : i1

@@ -220,6 +220,18 @@ static LogicalResult verifyWaveBinaryResult(
   return success();
 }
 
+static bool supportsWaveBinaryOverflowFlags(BinaryKind kind) {
+  switch (kind) {
+  case BinaryKind::AddI:
+  case BinaryKind::SubI:
+  case BinaryKind::MulI:
+  case BinaryKind::ShLI:
+    return true;
+  default:
+    return false;
+  }
+}
+
 LogicalResult BinaryOp::verify() {
   auto emit = [this](const Twine &msg) { return emitOpError(msg); };
   FailureOr<WaveBinaryOperandShape> lhs =
@@ -232,6 +244,9 @@ LogicalResult BinaryOp::verify() {
     return emit("operand element types must match");
   if (lhs->simdWidth && rhs->simdWidth && *lhs->simdWidth != *rhs->simdWidth)
     return emit("SIMD wave widths must match across operands");
+  if (getOverflowFlags() != arith::IntegerOverflowFlags::none &&
+      !supportsWaveBinaryOverflowFlags(getKind()))
+    return emit("overflow flags require addi, subi, muli, or shli");
   std::optional<int64_t> resultSimd =
       lhs->simdWidth ? lhs->simdWidth : rhs->simdWidth;
   return verifyWaveBinaryResult(getResult().getType(), lhs->elementType,
@@ -781,8 +796,18 @@ normalizeWaveArithRanges(ArrayRef<ConstantIntRanges> argRanges, unsigned bits) {
   return normalized;
 }
 
+static intrange::OverflowFlags
+convertWaveOverflowFlags(arith::IntegerOverflowFlags flags) {
+  intrange::OverflowFlags result = intrange::OverflowFlags::None;
+  if (bitEnumContainsAny(flags, arith::IntegerOverflowFlags::nsw))
+    result |= intrange::OverflowFlags::Nsw;
+  if (bitEnumContainsAny(flags, arith::IntegerOverflowFlags::nuw))
+    result |= intrange::OverflowFlags::Nuw;
+  return result;
+}
+
 using WaveBinaryRangeInferFn =
-    ConstantIntRanges (*)(ArrayRef<ConstantIntRanges>);
+    ConstantIntRanges (*)(ArrayRef<ConstantIntRanges>, intrange::OverflowFlags);
 
 struct WaveBinaryRangeRule {
   BinaryKind kind;
@@ -791,37 +816,55 @@ struct WaveBinaryRangeRule {
 
 static ConstantIntRanges
 inferWaveBinaryResultRange(BinaryKind kind, ArrayRef<ConstantIntRanges> ranges,
-                           unsigned bits) {
+                           unsigned bits,
+                           arith::IntegerOverflowFlags overflowFlags) {
+  intrange::OverflowFlags intrangeFlags =
+      convertWaveOverflowFlags(overflowFlags);
   static constexpr std::array<WaveBinaryRangeRule, 13> rules{{
-      {BinaryKind::AddI,
-       [](ArrayRef<ConstantIntRanges> ranges) {
-         return mlir::intrange::inferAdd(ranges);
+      {BinaryKind::AddI, mlir::intrange::inferAdd},
+      {BinaryKind::SubI, mlir::intrange::inferSub},
+      {BinaryKind::MulI, mlir::intrange::inferMul},
+      {BinaryKind::ShLI, mlir::intrange::inferShl},
+      {BinaryKind::ShRUI,
+       [](ArrayRef<ConstantIntRanges> ranges, intrange::OverflowFlags) {
+         return mlir::intrange::inferShrU(ranges);
        }},
-      {BinaryKind::SubI,
-       [](ArrayRef<ConstantIntRanges> ranges) {
-         return mlir::intrange::inferSub(ranges);
+      {BinaryKind::ShRSI,
+       [](ArrayRef<ConstantIntRanges> ranges, intrange::OverflowFlags) {
+         return mlir::intrange::inferShrS(ranges);
        }},
-      {BinaryKind::MulI,
-       [](ArrayRef<ConstantIntRanges> ranges) {
-         return mlir::intrange::inferMul(ranges);
+      {BinaryKind::AndI,
+       [](ArrayRef<ConstantIntRanges> ranges, intrange::OverflowFlags) {
+         return mlir::intrange::inferAnd(ranges);
        }},
-      {BinaryKind::ShLI,
-       [](ArrayRef<ConstantIntRanges> ranges) {
-         return mlir::intrange::inferShl(ranges);
+      {BinaryKind::OrI,
+       [](ArrayRef<ConstantIntRanges> ranges, intrange::OverflowFlags) {
+         return mlir::intrange::inferOr(ranges);
        }},
-      {BinaryKind::ShRUI, mlir::intrange::inferShrU},
-      {BinaryKind::ShRSI, mlir::intrange::inferShrS},
-      {BinaryKind::AndI, mlir::intrange::inferAnd},
-      {BinaryKind::OrI, mlir::intrange::inferOr},
-      {BinaryKind::XOrI, mlir::intrange::inferXor},
-      {BinaryKind::DivUI, mlir::intrange::inferDivU},
-      {BinaryKind::DivSI, mlir::intrange::inferDivS},
-      {BinaryKind::RemUI, mlir::intrange::inferRemU},
-      {BinaryKind::RemSI, mlir::intrange::inferRemS},
+      {BinaryKind::XOrI,
+       [](ArrayRef<ConstantIntRanges> ranges, intrange::OverflowFlags) {
+         return mlir::intrange::inferXor(ranges);
+       }},
+      {BinaryKind::DivUI,
+       [](ArrayRef<ConstantIntRanges> ranges, intrange::OverflowFlags) {
+         return mlir::intrange::inferDivU(ranges);
+       }},
+      {BinaryKind::DivSI,
+       [](ArrayRef<ConstantIntRanges> ranges, intrange::OverflowFlags) {
+         return mlir::intrange::inferDivS(ranges);
+       }},
+      {BinaryKind::RemUI,
+       [](ArrayRef<ConstantIntRanges> ranges, intrange::OverflowFlags) {
+         return mlir::intrange::inferRemU(ranges);
+       }},
+      {BinaryKind::RemSI,
+       [](ArrayRef<ConstantIntRanges> ranges, intrange::OverflowFlags) {
+         return mlir::intrange::inferRemS(ranges);
+       }},
   }};
   for (const WaveBinaryRangeRule &rule : rules)
     if (rule.kind == kind)
-      return rule.infer(ranges);
+      return rule.infer(ranges, intrangeFlags);
   return ConstantIntRanges::maxRange(bits);
 }
 
@@ -999,8 +1042,8 @@ void BinaryOp::inferResultRanges(ArrayRef<ConstantIntRanges> argRanges,
   unsigned bits = waveBinaryElementWidth(getResult().getType());
   SmallVector<ConstantIntRanges, 2> ranges =
       normalizeWaveArithRanges(argRanges, bits);
-  setResultRange(getResult(),
-                 inferWaveBinaryResultRange(getKind(), ranges, bits));
+  setResultRange(getResult(), inferWaveBinaryResultRange(
+                                  getKind(), ranges, bits, getOverflowFlags()));
 }
 
 void ReadFirstOp::inferResultRanges(ArrayRef<ConstantIntRanges> argRanges,

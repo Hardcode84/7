@@ -207,11 +207,30 @@ static bool isSymbolicBinaryOp(BinaryOp op, bool allowI64Integers) {
          isSymbolicValueType(op.getRhs().getType(), allowI64Integers);
 }
 
-static bool isSymbolicRootBinaryOp(BinaryOp op, bool allowI64Integers) {
-  if (isIndexBinaryOp(op))
+static bool isNoSignedWrapSymbolicArithmetic(BinaryKind kind) {
+  switch (kind) {
+  case BinaryKind::AddI:
+  case BinaryKind::SubI:
+  case BinaryKind::MulI:
+  case BinaryKind::ShLI:
     return true;
-  return op.getKind() == BinaryKind::DivSI &&
-         isSymbolicBinaryOp(op, allowI64Integers);
+  default:
+    return false;
+  }
+}
+
+static bool canBuildSymbolicBinaryOp(BinaryOp op, bool allowI64Integers) {
+  if (!isSymbolicBinaryOp(op, allowI64Integers))
+    return false;
+  if (isNoSignedWrapSymbolicArithmetic(op.getKind()))
+    return op.hasNoSignedWrap();
+  return op.getKind() == BinaryKind::XOrI || op.getKind() == BinaryKind::DivSI;
+}
+
+static bool isSymbolicRootBinaryOp(BinaryOp op, bool allowI64Integers) {
+  if (!canBuildSymbolicBinaryOp(op, allowI64Integers))
+    return false;
+  return isIndexBinaryOp(op) || op.getKind() == BinaryKind::DivSI;
 }
 
 static std::optional<int64_t> getSplatOrConstantInt(Value value) {
@@ -346,7 +365,7 @@ private:
 
   FailureOr<sym::ExprHandle> buildBinary(BinaryOp op, bool &skip,
                                          unsigned depth) {
-    if (!isSymbolicBinaryOp(op, allowI64Integers)) {
+    if (!canBuildSymbolicBinaryOp(op, allowI64Integers)) {
       skip = true;
       return failure();
     }
