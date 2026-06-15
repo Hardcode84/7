@@ -10,18 +10,18 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // rename for every shared element so the two intervals stay disjoint.
 //
 // CHECK-LABEL: func.func @shared_operand_gets_copy
-// CHECK: %[[A:.+]] = waveamdmachine.v_mov_b32_tuple {{.*}} -> !waveamdmachine.reg<vgpr, 1, 0>
-// CHECK: %[[B:.+]] = waveamdmachine.v_mov_b32_tuple {{.*}} -> !waveamdmachine.reg<vgpr, 1, 1>
-// CHECK: %[[C:.+]] = waveamdmachine.v_mov_b32_tuple {{.*}} -> !waveamdmachine.reg<vgpr, 1, 2>
-// CHECK: %[[D:.+]] = waveamdmachine.v_mov_b32_tuple {{.*}} -> !waveamdmachine.reg<vgpr, 1, 3>
-// CHECK: %[[E:.+]] = waveamdmachine.v_mov_b32_tuple {{.*}} -> !waveamdmachine.reg<vgpr, 1, 5>
-// CHECK: %[[F:.+]] = waveamdmachine.v_mov_b32_tuple {{.*}} -> !waveamdmachine.reg<vgpr, 1, 6>
-// CHECK: %[[G:.+]] = waveamdmachine.v_mov_b32_tuple {{.*}} -> !waveamdmachine.reg<vgpr, 1, 7>
+// CHECK: %[[A:.+]] = waveamdmachine.v_mov_b32_tuple {{.*}} -> !waveamdmachine.reg<vgpr, 1, [[#SH_T1_BASE:]]>
+// CHECK: %[[B:.+]] = waveamdmachine.v_mov_b32_tuple {{.*}} -> !waveamdmachine.reg<vgpr, 1, [[#SH_T1_BASE+1]]>
+// CHECK: %[[C:.+]] = waveamdmachine.v_mov_b32_tuple {{.*}} -> !waveamdmachine.reg<vgpr, 1, [[#SH_T1_BASE+2]]>
+// CHECK: %[[D:.+]] = waveamdmachine.v_mov_b32_tuple {{.*}} -> !waveamdmachine.reg<vgpr, 1, [[#SH_T1_BASE+3]]>
+// CHECK: %[[E:.+]] = waveamdmachine.v_mov_b32_tuple {{.*}} -> !waveamdmachine.reg<vgpr, 1, [[#SH_E_SLOT:]]>
+// CHECK: %[[F:.+]] = waveamdmachine.v_mov_b32_tuple {{.*}} -> !waveamdmachine.reg<vgpr, 1, [[#SH_E_SLOT+1]]>
+// CHECK: %[[G:.+]] = waveamdmachine.v_mov_b32_tuple {{.*}} -> !waveamdmachine.reg<vgpr, 1, [[#SH_E_SLOT+2]]>
 // CHECK: %[[T1:.+]] = waveamdmachine.tuple_from_elements %[[A]], %[[B]], %[[C]], %[[D]]
-// CHECK-SAME: -> !waveamdmachine.reg<vgpr, 4, 0>
-// CHECK: %[[ACPY:.+]] = waveamdmachine.v_mov_b32_tuple {{.*}} {registers = 1 : i64} : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1, 4>
+// CHECK-SAME: -> !waveamdmachine.reg<vgpr, 4, [[#SH_T1_BASE]]>
+// CHECK: %[[ACPY:.+]] = waveamdmachine.v_mov_b32_tuple {{.*}} {registers = 1 : i64} : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1, [[#SH_E_SLOT-1]]>
 // CHECK: %{{.+}} = waveamdmachine.tuple_from_elements %[[ACPY]], %[[E]], %[[F]], %[[G]]
-// CHECK-SAME: -> !waveamdmachine.reg<vgpr, 4, 4>
+// CHECK-SAME: -> !waveamdmachine.reg<vgpr, 4, [[#SH_E_SLOT-1]]>
 func.func @shared_operand_gets_copy() {
   %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
   %a = waveamdmachine.v_mov_b32_tuple %zero {registers = 1 : i64} : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
@@ -54,12 +54,12 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // per slot.
 //
 // CHECK-LABEL: func.func @broadcast_same_value_per_slot
-// CHECK: %[[A:.+]] = waveamdmachine.v_mov_b32_tuple {{.*}} -> !waveamdmachine.reg<vgpr, 1, 0>
-// CHECK: %[[A1:.+]] = waveamdmachine.v_mov_b32_tuple {{.*}} -> !waveamdmachine.reg<vgpr, 1, 1>
-// CHECK: %[[A2:.+]] = waveamdmachine.v_mov_b32_tuple {{.*}} -> !waveamdmachine.reg<vgpr, 1, 2>
-// CHECK: %[[A3:.+]] = waveamdmachine.v_mov_b32_tuple {{.*}} -> !waveamdmachine.reg<vgpr, 1, 3>
+// CHECK: %[[A:.+]] = waveamdmachine.v_mov_b32_tuple {{.*}} -> !waveamdmachine.reg<vgpr, 1, [[#BCAST_BASE:]]>
+// CHECK: %[[A1:.+]] = waveamdmachine.v_mov_b32_tuple {{.*}} -> !waveamdmachine.reg<vgpr, 1, [[#BCAST_BASE+1]]>
+// CHECK: %[[A2:.+]] = waveamdmachine.v_mov_b32_tuple {{.*}} -> !waveamdmachine.reg<vgpr, 1, [[#BCAST_BASE+2]]>
+// CHECK: %[[A3:.+]] = waveamdmachine.v_mov_b32_tuple {{.*}} -> !waveamdmachine.reg<vgpr, 1, [[#BCAST_BASE+3]]>
 // CHECK: %{{.+}} = waveamdmachine.tuple_from_elements %[[A]], %[[A1]], %[[A2]], %[[A3]]
-// CHECK-SAME: -> !waveamdmachine.reg<vgpr, 4, 0>
+// CHECK-SAME: -> !waveamdmachine.reg<vgpr, 4, [[#BCAST_BASE]]>
 func.func @broadcast_same_value_per_slot() {
   %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
   %a = waveamdmachine.v_mov_b32_tuple %zero {registers = 1 : i64} : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
@@ -82,12 +82,15 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // share the same physical block.
 //
 // CHECK-LABEL: func.func @round_trip_no_copies
-// CHECK: %[[A:.+]] = waveamdmachine.v_mov_b32_tuple {{.*}} -> !waveamdmachine.reg<vgpr, 4, 0>
+// CHECK: %[[A:.+]] = waveamdmachine.v_mov_b32_tuple {{.*}} -> !waveamdmachine.reg<vgpr, 4, [[#SH_RT_BASE:]]>
 // CHECK: %[[E:.+]]:4 = waveamdmachine.tuple_to_elements %[[A]]
-// CHECK-SAME: -> (!waveamdmachine.reg<vgpr, 1, 0>, !waveamdmachine.reg<vgpr, 1, 1>, !waveamdmachine.reg<vgpr, 1, 2>, !waveamdmachine.reg<vgpr, 1, 3>)
+// CHECK-SAME: -> (!waveamdmachine.reg<vgpr, 1, [[#SH_RT_BASE]]>
+// CHECK-SAME: !waveamdmachine.reg<vgpr, 1, [[#SH_RT_BASE+1]]>
+// CHECK-SAME: !waveamdmachine.reg<vgpr, 1, [[#SH_RT_BASE+2]]>
+// CHECK-SAME: !waveamdmachine.reg<vgpr, 1, [[#SH_RT_BASE+3]]>)
 // CHECK-NOT: waveamdmachine.v_mov_b32_tuple %[[E]]
 // CHECK: %{{.+}} = waveamdmachine.tuple_from_elements %[[E]]#0, %[[E]]#1, %[[E]]#2, %[[E]]#3
-// CHECK-SAME: -> !waveamdmachine.reg<vgpr, 4, 0>
+// CHECK-SAME: -> !waveamdmachine.reg<vgpr, 4, [[#SH_RT_BASE]]>
 func.func @round_trip_no_copies() {
   %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
   %a = waveamdmachine.v_mov_b32_tuple %zero {registers = 4 : i64} : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 4>
@@ -115,12 +118,16 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // physical blocks.
 //
 // CHECK-LABEL: func.func @shuffle_needs_copies
-// CHECK: %[[A:.+]] = waveamdmachine.v_mov_b32_tuple {{.*}} -> !waveamdmachine.reg<vgpr, 4, 0>
+// CHECK: %[[A:.+]] = waveamdmachine.v_mov_b32_tuple {{.*}} -> !waveamdmachine.reg<vgpr, 4, [[#SHUF_BASE:]]>
 // CHECK: %[[E:.+]]:4 = waveamdmachine.tuple_to_elements %[[A]]
-// CHECK: %[[C3:.+]] = waveamdmachine.v_mov_b32_tuple %[[E]]#3 {registers = 1 : i64}
-// CHECK: %[[C2:.+]] = waveamdmachine.v_mov_b32_tuple %[[E]]#2 {registers = 1 : i64}
-// CHECK: %[[C1:.+]] = waveamdmachine.v_mov_b32_tuple %[[E]]#1 {registers = 1 : i64}
-// CHECK: %[[C0:.+]] = waveamdmachine.v_mov_b32_tuple %[[E]]#0 {registers = 1 : i64}
+// CHECK-SAME: -> (!waveamdmachine.reg<vgpr, 1, [[#SHUF_BASE]]>
+// CHECK-SAME: !waveamdmachine.reg<vgpr, 1, [[#SHUF_BASE+1]]>
+// CHECK-SAME: !waveamdmachine.reg<vgpr, 1, [[#SHUF_BASE+2]]>
+// CHECK-SAME: !waveamdmachine.reg<vgpr, 1, [[#SHUF_BASE+3]]>)
+// CHECK: %[[C3:.+]] = waveamdmachine.v_mov_b32_tuple %[[E]]#3 {registers = 1 : i64} : (!waveamdmachine.reg<vgpr, 1, [[#SHUF_BASE+3]]>)
+// CHECK: %[[C2:.+]] = waveamdmachine.v_mov_b32_tuple %[[E]]#2 {registers = 1 : i64} : (!waveamdmachine.reg<vgpr, 1, [[#SHUF_BASE+2]]>)
+// CHECK: %[[C1:.+]] = waveamdmachine.v_mov_b32_tuple %[[E]]#1 {registers = 1 : i64} : (!waveamdmachine.reg<vgpr, 1, [[#SHUF_BASE+1]]>)
+// CHECK: %[[C0:.+]] = waveamdmachine.v_mov_b32_tuple %[[E]]#0 {registers = 1 : i64} : (!waveamdmachine.reg<vgpr, 1, [[#SHUF_BASE]]>)
 // CHECK: %{{.+}} = waveamdmachine.tuple_from_elements %[[C3]], %[[C2]], %[[C1]], %[[C0]]
 func.func @shuffle_needs_copies() {
   %zero = waveamdmachine.imm 0 : !waveamdmachine.imm

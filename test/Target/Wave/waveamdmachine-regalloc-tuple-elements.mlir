@@ -3,14 +3,19 @@
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
-// tuple_to_elements pins each result at `tuple_phys + i`. With no
-// kernel reservation the tuple's 8-aligned block lands at v0..v7,
-// so element[i] lands at v[i] verbatim.
+// tuple_to_elements pins each result at `tuple_phys + i`.
 //
 // CHECK-LABEL: func.func @tuple_to_elements_slot_aliases
-// CHECK: %[[T:.+]] = waveamdmachine.v_mov_b32_tuple {{.*}} : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 8, 0>
+// CHECK: %[[T:.+]] = waveamdmachine.v_mov_b32_tuple {{.*}} : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 8, [[#TOE_BASE:]]>
 // CHECK: %{{.+}}:8 = waveamdmachine.tuple_to_elements %[[T]]
-// CHECK-SAME: -> (!waveamdmachine.reg<vgpr, 1, 0>, !waveamdmachine.reg<vgpr, 1, 1>, !waveamdmachine.reg<vgpr, 1, 2>, !waveamdmachine.reg<vgpr, 1, 3>, !waveamdmachine.reg<vgpr, 1, 4>, !waveamdmachine.reg<vgpr, 1, 5>, !waveamdmachine.reg<vgpr, 1, 6>, !waveamdmachine.reg<vgpr, 1, 7>)
+// CHECK-SAME: -> (!waveamdmachine.reg<vgpr, 1, [[#TOE_BASE]]>
+// CHECK-SAME: !waveamdmachine.reg<vgpr, 1, [[#TOE_BASE+1]]>
+// CHECK-SAME: !waveamdmachine.reg<vgpr, 1, [[#TOE_BASE+2]]>
+// CHECK-SAME: !waveamdmachine.reg<vgpr, 1, [[#TOE_BASE+3]]>
+// CHECK-SAME: !waveamdmachine.reg<vgpr, 1, [[#TOE_BASE+4]]>
+// CHECK-SAME: !waveamdmachine.reg<vgpr, 1, [[#TOE_BASE+5]]>
+// CHECK-SAME: !waveamdmachine.reg<vgpr, 1, [[#TOE_BASE+6]]>
+// CHECK-SAME: !waveamdmachine.reg<vgpr, 1, [[#TOE_BASE+7]]>)
 func.func @tuple_to_elements_slot_aliases() {
   %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
   %t = waveamdmachine.v_mov_b32_tuple %zero {registers = 8 : i64}
@@ -27,21 +32,19 @@ func.func @tuple_to_elements_slot_aliases() {
   return
 }
 
-// tuple_from_elements pins each operand at `tuple_phys + i` and the
-// tuple result at `tuple_phys + 0`. With no kernel reservation the
-// width-8 block lands at v0..v7.
+// tuple_from_elements pins each operand at `tuple_phys + i`.
 //
 // CHECK-LABEL: func.func @tuple_from_elements_slot_aliases
-// CHECK: %[[A:.+]] = waveamdmachine.v_mov_b32_tuple {{.*}} -> !waveamdmachine.reg<vgpr, 1, 0>
-// CHECK: %[[B:.+]] = waveamdmachine.v_mov_b32_tuple {{.*}} -> !waveamdmachine.reg<vgpr, 1, 1>
-// CHECK: %[[C:.+]] = waveamdmachine.v_mov_b32_tuple {{.*}} -> !waveamdmachine.reg<vgpr, 1, 2>
-// CHECK: %[[D:.+]] = waveamdmachine.v_mov_b32_tuple {{.*}} -> !waveamdmachine.reg<vgpr, 1, 3>
-// CHECK: %[[E:.+]] = waveamdmachine.v_mov_b32_tuple {{.*}} -> !waveamdmachine.reg<vgpr, 1, 4>
-// CHECK: %[[F:.+]] = waveamdmachine.v_mov_b32_tuple {{.*}} -> !waveamdmachine.reg<vgpr, 1, 5>
-// CHECK: %[[G:.+]] = waveamdmachine.v_mov_b32_tuple {{.*}} -> !waveamdmachine.reg<vgpr, 1, 6>
-// CHECK: %[[H:.+]] = waveamdmachine.v_mov_b32_tuple {{.*}} -> !waveamdmachine.reg<vgpr, 1, 7>
+// CHECK: %[[A:.+]] = waveamdmachine.v_mov_b32_tuple {{.*}} -> !waveamdmachine.reg<vgpr, 1, [[#TFE_BASE:]]>
+// CHECK: %[[B:.+]] = waveamdmachine.v_mov_b32_tuple {{.*}} -> !waveamdmachine.reg<vgpr, 1, [[#TFE_BASE+1]]>
+// CHECK: %[[C:.+]] = waveamdmachine.v_mov_b32_tuple {{.*}} -> !waveamdmachine.reg<vgpr, 1, [[#TFE_BASE+2]]>
+// CHECK: %[[D:.+]] = waveamdmachine.v_mov_b32_tuple {{.*}} -> !waveamdmachine.reg<vgpr, 1, [[#TFE_BASE+3]]>
+// CHECK: %[[E:.+]] = waveamdmachine.v_mov_b32_tuple {{.*}} -> !waveamdmachine.reg<vgpr, 1, [[#TFE_BASE+4]]>
+// CHECK: %[[F:.+]] = waveamdmachine.v_mov_b32_tuple {{.*}} -> !waveamdmachine.reg<vgpr, 1, [[#TFE_BASE+5]]>
+// CHECK: %[[G:.+]] = waveamdmachine.v_mov_b32_tuple {{.*}} -> !waveamdmachine.reg<vgpr, 1, [[#TFE_BASE+6]]>
+// CHECK: %[[H:.+]] = waveamdmachine.v_mov_b32_tuple {{.*}} -> !waveamdmachine.reg<vgpr, 1, [[#TFE_BASE+7]]>
 // CHECK: %{{.+}} = waveamdmachine.tuple_from_elements %[[A]], %[[B]], %[[C]], %[[D]], %[[E]], %[[F]], %[[G]], %[[H]]
-// CHECK-SAME: -> !waveamdmachine.reg<vgpr, 8, 0>
+// CHECK-SAME: -> !waveamdmachine.reg<vgpr, 8, [[#TFE_BASE]]>
 func.func @tuple_from_elements_slot_aliases() {
   %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
   %a = waveamdmachine.v_mov_b32_tuple %zero {registers = 1 : i64} : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
@@ -65,10 +68,10 @@ func.func @tuple_from_elements_slot_aliases() {
 // operands still have normal uses at the gather.
 //
 // CHECK-LABEL: func.func @pinned_tuple_from_elements_keeps_operands_live
-// CHECK: %[[A:.+]] = waveamdmachine.v_mov_b32_tuple {{.*}} -> !waveamdmachine.reg<vgpr, 1, 0>
-// CHECK: %[[B:.+]] = waveamdmachine.v_mov_b32_tuple {{.*}} -> !waveamdmachine.reg<vgpr, 1, 1>
+// CHECK: %[[A:.+]] = waveamdmachine.v_mov_b32_tuple {{.*}} -> !waveamdmachine.reg<vgpr, 1, [[#PIN_BASE:]]>
+// CHECK: %[[B:.+]] = waveamdmachine.v_mov_b32_tuple {{.*}} -> !waveamdmachine.reg<vgpr, 1, [[#PIN_BASE+1]]>
 // CHECK: %{{.+}} = waveamdmachine.tuple_from_elements %[[A]], %[[B]]
-// CHECK-SAME: -> !waveamdmachine.reg<vgpr, 2, 0>
+// CHECK-SAME: -> !waveamdmachine.reg<vgpr, 2, [[#PIN_BASE]]>
 func.func @pinned_tuple_from_elements_keeps_operands_live() {
   %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
   %a = waveamdmachine.v_mov_b32_tuple %zero {registers = 1 : i64}
@@ -82,15 +85,21 @@ func.func @pinned_tuple_from_elements_keeps_operands_live() {
 }
 
 // Round-trip: split, reassemble, both passes should reuse the same
-// physical block. The intermediate elements alias slots [0..7]
-// of the same v0..v7 block held by both tuples.
+// physical block. Intermediate elements alias slots 0..7 of that block.
 //
 // CHECK-LABEL: func.func @tuple_round_trip_slot_aliases
-// CHECK: %[[T0:.+]] = waveamdmachine.v_mov_b32_tuple {{.*}} -> !waveamdmachine.reg<vgpr, 8, 0>
+// CHECK: %[[T0:.+]] = waveamdmachine.v_mov_b32_tuple {{.*}} -> !waveamdmachine.reg<vgpr, 8, [[#RT_BASE:]]>
 // CHECK: %[[E:.+]]:8 = waveamdmachine.tuple_to_elements %[[T0]]
-// CHECK-SAME: -> (!waveamdmachine.reg<vgpr, 1, 0>, !waveamdmachine.reg<vgpr, 1, 1>, !waveamdmachine.reg<vgpr, 1, 2>, !waveamdmachine.reg<vgpr, 1, 3>, !waveamdmachine.reg<vgpr, 1, 4>, !waveamdmachine.reg<vgpr, 1, 5>, !waveamdmachine.reg<vgpr, 1, 6>, !waveamdmachine.reg<vgpr, 1, 7>)
+// CHECK-SAME: -> (!waveamdmachine.reg<vgpr, 1, [[#RT_BASE]]>
+// CHECK-SAME: !waveamdmachine.reg<vgpr, 1, [[#RT_BASE+1]]>
+// CHECK-SAME: !waveamdmachine.reg<vgpr, 1, [[#RT_BASE+2]]>
+// CHECK-SAME: !waveamdmachine.reg<vgpr, 1, [[#RT_BASE+3]]>
+// CHECK-SAME: !waveamdmachine.reg<vgpr, 1, [[#RT_BASE+4]]>
+// CHECK-SAME: !waveamdmachine.reg<vgpr, 1, [[#RT_BASE+5]]>
+// CHECK-SAME: !waveamdmachine.reg<vgpr, 1, [[#RT_BASE+6]]>
+// CHECK-SAME: !waveamdmachine.reg<vgpr, 1, [[#RT_BASE+7]]>)
 // CHECK: %[[T1:.+]] = waveamdmachine.tuple_from_elements %[[E]]#0, %[[E]]#1, %[[E]]#2, %[[E]]#3, %[[E]]#4, %[[E]]#5, %[[E]]#6, %[[E]]#7
-// CHECK-SAME: -> !waveamdmachine.reg<vgpr, 8, 0>
+// CHECK-SAME: -> !waveamdmachine.reg<vgpr, 8, [[#RT_BASE]]>
 func.func @tuple_round_trip_slot_aliases() {
   %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
   %t0 = waveamdmachine.v_mov_b32_tuple %zero {registers = 8 : i64}
