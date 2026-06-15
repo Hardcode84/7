@@ -8,6 +8,39 @@ func.func @unallocated_register() {
 
 // -----
 
+func.func @duplicate_tuple_alias_slot_mismatch(
+    %value: !waveamdmachine.reg<vgpr, 1, 5>) {
+  // expected-error @below {{coalesce: alias slot offset mismatch, existing 0 requested 1}}
+  %tuple = waveamdmachine.tuple_from_elements %value, %value
+      : (!waveamdmachine.reg<vgpr, 1, 5>, !waveamdmachine.reg<vgpr, 1, 5>)
+        -> !waveamdmachine.reg<vgpr, 2, 5>
+  return
+}
+
+// -----
+
+func.func @duplicate_loop_carry_tuple_alias_slot_mismatch() {
+  %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+  %init = waveamdmachine.s_mov_b32_value %zero
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<sgpr, 1, 5>
+  %cond = waveamdmachine.s_cmp_lt_i32 %init, %init
+      : (!waveamdmachine.reg<sgpr, 1, 5>, !waveamdmachine.reg<sgpr, 1, 5>)
+        -> !waveamdmachine.reg<scc, 1>
+  %result = waveamdmachine.uniform_loop if %cond : !waveamdmachine.reg<scc, 1>
+      carries(%init : !waveamdmachine.reg<sgpr, 1, 5>) {
+  ^bb0(%iv: !waveamdmachine.reg<sgpr, 1, 5>):
+    // expected-error @below {{coalesce: alias slot offset mismatch, existing 0 requested 1}}
+    %tuple = waveamdmachine.tuple_from_elements %iv, %iv
+        : (!waveamdmachine.reg<sgpr, 1, 5>, !waveamdmachine.reg<sgpr, 1, 5>)
+          -> !waveamdmachine.reg<sgpr, 2, 5>
+    waveamdmachine.continue_if %cond : !waveamdmachine.reg<scc, 1>
+        carries(%iv : !waveamdmachine.reg<sgpr, 1, 5>)
+  } -> !waveamdmachine.reg<sgpr, 1, 5>
+  return
+}
+
+// -----
+
 // expected-error @below {{waveamd-resource-info found interfering VGPR register live ranges}}
 func.func @interfering_vgprs() {
   %zero = waveamdmachine.imm 0 : !waveamdmachine.imm

@@ -168,6 +168,28 @@ static bool canAliasInterval(const wave::WaveAMDLiveInterval &interval,
   return canAliasTypes(interval.type, valueType, offset);
 }
 
+static FailureOr<unsigned>
+getIntervalSlotOffset(Value value, const wave::WaveAMDLiveInterval &interval,
+                      Operation *errOp) {
+  for (auto [v, off] : llvm::zip(interval.values, interval.slotOffsets))
+    if (v == value)
+      return off;
+  return errOp->emitError("live interval table is missing value slot");
+}
+
+static LogicalResult
+verifySelfCoalesceSlot(Value extra, const wave::WaveAMDLiveInterval &interval,
+                       unsigned slotOffset, Operation *errOp) {
+  FailureOr<unsigned> existingSlot =
+      getIntervalSlotOffset(extra, interval, errOp);
+  if (failed(existingSlot))
+    return failure();
+  if (*existingSlot == slotOffset)
+    return success();
+  return errOp->emitError("coalesce: alias slot offset mismatch, existing ")
+         << *existingSlot << " requested " << slotOffset;
+}
+
 // Merge `extra` into `primary`; `slotOffset` pins tuple elements under base.
 static LogicalResult coalesce(Value primary, Value extra, unsigned pos,
                               wave::WaveAMDLiveIntervalSet &intervals,
@@ -195,7 +217,7 @@ static LogicalResult coalesce(Value primary, Value extra, unsigned pos,
   }
   unsigned extraIdx = extraIt->second;
   if (extraIdx == primIdx)
-    return success();
+    return verifySelfCoalesceSlot(extra, (*bucket)[primIdx], slotOffset, errOp);
   wave::WaveAMDLiveInterval &prim = (*bucket)[primIdx];
   wave::WaveAMDLiveInterval &ex = (*bucket)[extraIdx];
   updateEnvelope(prim, ex.start, std::max(ex.end, pos));
@@ -212,15 +234,6 @@ static LogicalResult coalesce(Value primary, Value extra, unsigned pos,
   ex.valueStarts.clear();
   ex.valueEnds.clear();
   return success();
-}
-
-static FailureOr<unsigned>
-getIntervalSlotOffset(Value value, const wave::WaveAMDLiveInterval &interval,
-                      Operation *errOp) {
-  for (auto [v, off] : llvm::zip(interval.values, interval.slotOffsets))
-    if (v == value)
-      return off;
-  return errOp->emitError("live interval table is missing value slot");
 }
 
 static bool operationIsInside(Operation *root, Operation *op) {
