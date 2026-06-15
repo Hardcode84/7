@@ -149,10 +149,40 @@ static ProgramItem makeLoopEndItem(unsigned loop) {
   return item;
 }
 
-static void appendProgramBlock(Block &block, const EventSimConfig &config,
+static void appendProgramBlock(Block &block, const ArchData &arch,
+                               const EventSimConfig &config,
                                SmallVectorImpl<ProgramItem> &program);
 
-static void appendProgramOp(Operation *op, const EventSimConfig &config,
+static void appendProgramRegion(Region &region, const ArchData &arch,
+                                const EventSimConfig &config,
+                                SmallVectorImpl<ProgramItem> &program) {
+  if (region.empty())
+    return;
+  appendProgramBlock(region.front(), arch, config, program);
+}
+
+static int64_t estimateProgramCost(ArrayRef<ProgramItem> program,
+                                   const ArchData &arch,
+                                   const EventSimConfig &config);
+
+static void
+appendSelectedUniformIfRegion(UniformIfOp uniformIf, const ArchData &arch,
+                              const EventSimConfig &config,
+                              SmallVectorImpl<ProgramItem> &program) {
+  SmallVector<ProgramItem> thenProgram;
+  SmallVector<ProgramItem> elseProgram;
+  appendProgramRegion(uniformIf.getThenRegion(), arch, config, thenProgram);
+  appendProgramRegion(uniformIf.getElseRegion(), arch, config, elseProgram);
+  ArrayRef<ProgramItem> selected =
+      estimateProgramCost(thenProgram, arch, config) >=
+              estimateProgramCost(elseProgram, arch, config)
+          ? ArrayRef<ProgramItem>(thenProgram)
+          : ArrayRef<ProgramItem>(elseProgram);
+  program.append(selected.begin(), selected.end());
+}
+
+static void appendProgramOp(Operation *op, const ArchData &arch,
+                            const EventSimConfig &config,
                             SmallVectorImpl<ProgramItem> &program) {
   if (UniformLoopOp loop = dyn_cast<UniformLoopOp>(op)) {
     int64_t trips = getTripCount(loop, config);
@@ -160,25 +190,29 @@ static void appendProgramOp(Operation *op, const EventSimConfig &config,
       return;
     unsigned loopIndex = program.size();
     program.push_back(makeLoopBeginItem(trips, loopIndex + 1));
-    appendProgramBlock(loop.getBody().front(), config, program);
+    appendProgramBlock(loop.getBody().front(), arch, config, program);
     program.push_back(makeLoopEndItem(loopIndex));
     return;
   }
+  if (UniformIfOp uniformIf = dyn_cast<UniformIfOp>(op))
+    appendSelectedUniformIfRegion(uniformIf, arch, config, program);
   if (isWaveAMDMachineOp(op))
     program.push_back(makeOpItem(op));
 }
 
-static void appendProgramBlock(Block &block, const EventSimConfig &config,
+static void appendProgramBlock(Block &block, const ArchData &arch,
+                               const EventSimConfig &config,
                                SmallVectorImpl<ProgramItem> &program) {
   for (Operation &op : block)
-    appendProgramOp(&op, config, program);
+    appendProgramOp(&op, arch, config, program);
 }
 
 static SmallVector<ProgramItem> buildProgram(func::FuncOp func,
+                                             const ArchData &arch,
                                              const EventSimConfig &config) {
   SmallVector<ProgramItem> program;
   for (Block &block : func.getBody())
-    appendProgramBlock(block, config, program);
+    appendProgramBlock(block, arch, config, program);
   return program;
 }
 
@@ -732,12 +766,24 @@ LogicalResult EventSimulator::run() {
   return success();
 }
 
+static int64_t estimateProgramCost(ArrayRef<ProgramItem> program,
+                                   const ArchData &arch,
+                                   const EventSimConfig &config) {
+  EventSimConfig branchConfig = config;
+  branchConfig.recordTimeline = false;
+  EventSimResult result;
+  EventSimulator simulator(program, arch, branchConfig, result);
+  if (failed(simulator.run()))
+    return kInf;
+  return result.totalCycles;
+}
+
 } // namespace
 
 LogicalResult simulateEventTimeline(func::FuncOp func, const ArchData &arch,
                                     const EventSimConfig &config,
                                     EventSimResult &out) {
-  SmallVector<ProgramItem> program = buildProgram(func, config);
+  SmallVector<ProgramItem> program = buildProgram(func, arch, config);
   out = EventSimResult();
   EventSimulator simulator(program, arch, config, out);
   return simulator.run();

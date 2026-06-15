@@ -582,9 +582,56 @@ private:
     return success();
   }
 
+  LogicalResult
+  coalesceUniformIfRegionResults(waveamdmachine::UniformIfOp uniformIf,
+                                 Region &region, unsigned index, unsigned pos) {
+    if (region.empty())
+      return success();
+    auto yield =
+        dyn_cast<waveamdmachine::YieldOp>(region.front().getTerminator());
+    if (!yield || index >= yield.getValues().size())
+      return success();
+    Value resultValue = uniformIf.getResult(index);
+    auto rt = wave::getTrackedWaveAMDRegType(resultValue);
+    if (!rt)
+      return success();
+    auto [bucket, table] = intervalsFor(*rt, result.intervals);
+    if (!table->contains(resultValue))
+      return success();
+    Value yieldValue = yield.getValues()[index];
+    if (!valueIsDefinedInside(uniformIf, yieldValue))
+      return uniformIf.emitError(
+          "uniform_if register yield must be defined inside the branch");
+    return coalesce(resultValue, yieldValue, pos, result.intervals, uniformIf);
+  }
+
+  LogicalResult coalesceUniformIfResults(waveamdmachine::UniformIfOp uniformIf,
+                                         unsigned pos) {
+    for (unsigned index : llvm::seq<unsigned>(0, uniformIf.getNumResults())) {
+      if (failed(coalesceUniformIfRegionResults(
+              uniformIf, uniformIf.getThenRegion(), index, pos)))
+        return failure();
+      if (failed(coalesceUniformIfRegionResults(
+              uniformIf, uniformIf.getElseRegion(), index, pos)))
+        return failure();
+    }
+    return success();
+  }
+
+  LogicalResult processUniformIf(waveamdmachine::UniformIfOp uniformIf,
+                                 unsigned pos) {
+    if (failed(coalesceUniformIfResults(uniformIf, pos)))
+      return failure();
+    if (failed(walkExecIfRegion(uniformIf.getThenRegion())))
+      return failure();
+    return walkExecIfRegion(uniformIf.getElseRegion());
+  }
+
   LogicalResult processNestedRegions(Operation *op, unsigned pos) {
     if (auto loop = dyn_cast<waveamdmachine::UniformLoopOp>(op))
       return processLoop(loop, pos);
+    if (auto uniformIf = dyn_cast<waveamdmachine::UniformIfOp>(op))
+      return processUniformIf(uniformIf, pos);
     if (auto execIf = dyn_cast<waveamdmachine::ExecIfOp>(op))
       return processExecIf(execIf, pos);
     return walkNestedRegions(op);

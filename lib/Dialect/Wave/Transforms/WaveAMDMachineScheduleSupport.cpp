@@ -154,6 +154,13 @@ private:
         collectBlock(nested);
       return;
     }
+    if (auto uniformIf = dyn_cast<waveamdmachine::UniformIfOp>(op)) {
+      for (Block &nested : uniformIf.getThenRegion())
+        collectBlock(nested);
+      for (Block &nested : uniformIf.getElseRegion())
+        collectBlock(nested);
+      return;
+    }
     if (auto execIf = dyn_cast<waveamdmachine::ExecIfOp>(op)) {
       for (Block &nested : execIf.getThenRegion())
         collectBlock(nested);

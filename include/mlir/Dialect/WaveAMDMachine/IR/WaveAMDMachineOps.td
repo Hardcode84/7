@@ -1013,7 +1013,7 @@ def WaveAMDMachine_YieldOp : WaveAMDMachine_Op<"yield", [
   Pure,
   ReturnLike,
   Terminator,
-  HasParent<"ExecIfOp">,
+  ParentOneOf<["ExecIfOp", "UniformIfOp"]>,
   DeclareOpInterfaceMethods<RegionBranchTerminatorOpInterface,
     ["getMutableSuccessorOperands"]>
 ]> {
@@ -1038,6 +1038,26 @@ def WaveAMDMachine_ExecIfOp : WaveAMDMachine_Op<"exec_if", [
   let summary = "structured EXEC-masked region";
   let arguments = (ins WaveAMDMachine_SGPR:$condition);
   let results = (outs Variadic<AnyType>:$results);
+  let regions = (region SizedRegion<1>:$thenRegion,
+                        MaxSizedRegion<1>:$elseRegion);
+  let assemblyFormat = [{
+    $condition $thenRegion (`otherwise` $elseRegion^)? attr-dict
+    `:` type($condition) (`->` type($results)^)?
+  }];
+  let hasVerifier = 1;
+}
+
+def WaveAMDMachine_UniformIfOp : WaveAMDMachine_Op<"uniform_if", [
+  SingleBlockImplicitTerminator<"YieldOp">,
+  DeclareOpInterfaceMethods<RegionBranchOpInterface,
+    ["getEntrySuccessorOperands", "getSuccessorInputs",
+     "areTypesCompatible"]>,
+  RecursiveMemoryEffects,
+  NoRegionArguments
+]> {
+  let summary = "structured wave-uniform conditional region";
+  let arguments = (ins WaveAMDMachine_SCC:$condition);
+  let results = (outs Variadic<WaveAMDMachine_RegOrMemToken>:$results);
   let regions = (region SizedRegion<1>:$thenRegion,
                         MaxSizedRegion<1>:$elseRegion);
   let assemblyFormat = [{

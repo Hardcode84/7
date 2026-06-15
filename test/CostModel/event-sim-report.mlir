@@ -18,6 +18,7 @@
 // RUN: wave-sim-report --func=one_salu --waves=8 --simds=8 %s | FileCheck %s --check-prefix=CUCAP
 // RUN: wave-sim-report --func=tuple_cu_cap --waves=6 --simds=6 --timeline %s | FileCheck %s --check-prefix=TUPLECU
 // RUN: wave-sim-report --func=vmem_value_ready --timeline %s | FileCheck %s --check-prefix=VMEMVALUE
+// RUN: wave-sim-report --func=uniform_if_report %s | FileCheck %s --check-prefix=UIF
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
   func.func @two_dep_salu(%init: !waveamdmachine.reg<sgpr, 1>) {
@@ -170,6 +171,26 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
           -> (!waveamdmachine.reg<vgpr, 16>, !waveamdmachine.mem.token)
     return
   }
+
+  func.func @uniform_if_report(%cond: !waveamdmachine.reg<scc, 1>,
+                               %init: !waveamdmachine.reg<sgpr, 1>) {
+    %step = waveamdmachine.imm 1 : !waveamdmachine.imm
+    waveamdmachine.uniform_if %cond {
+      %a:2 = waveamdmachine.s_add_i32 %init, %step :
+          (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.imm) ->
+          (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<scc, 1>)
+      waveamdmachine.yield
+    } otherwise {
+      %b:2 = waveamdmachine.s_add_i32 %init, %step :
+          (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.imm) ->
+          (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<scc, 1>)
+      %c:2 = waveamdmachine.s_add_i32 %b#0, %step :
+          (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.imm) ->
+          (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<scc, 1>)
+      waveamdmachine.yield
+    } : !waveamdmachine.reg<scc, 1>
+    return
+  }
 }
 
 // ONE: func: two_dep_salu
@@ -276,3 +297,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // VMEMVALUE: issue cycle=0 wave=0 simd=0 fu=VMEM op=waveamdmachine.global_load_b32
 // VMEMVALUE: issue cycle=80 wave=0 simd=0 fu=VALU op=waveamdmachine.v_add_u32
 // VMEMVALUE: value_ready cycle=80 wave=0 simd=0 fu=VMEM op=waveamdmachine.global_load_b32
+
+// UIF: func: uniform_if_report
+// UIF: total_cycles: 4
+// UIF: issued_ops: 2

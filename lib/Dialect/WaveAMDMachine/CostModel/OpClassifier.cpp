@@ -73,10 +73,11 @@ SchedClass classifyOp(Operation *op) {
       // Scalar memory (s_load_*).
       .Case<SLoadB32Op, SLoadB64Op, SLoadB128Op>(
           [](auto) { return SchedClass::WriteSMEM; })
-      // Structural pseudos: emit no real instruction. ContinueIfOp
-      // is a region terminator -- the actual branch comes from
+      // Structural pseudos: emit no real instruction. Region terminators
+      // only carry structured-control operands; actual branches come from
       // codegen lowering, not from this op directly.
-      .Case<LabelOp, MakeBufferRsrcOp, AfterOp, ContinueIfOp, UniformLoopOp>(
+      .Case<LabelOp, MakeBufferRsrcOp, AfterOp, ContinueIfOp, YieldOp,
+            UniformIfOp, UniformLoopOp>(
           [](auto) { return SchedClass::NoInst; })
       // Barrier.
       .Case<SBarrierOp>(

@@ -135,6 +135,21 @@ static Operation *topLevelBodyOp(Block &body, Operation *op) {
   return op;
 }
 
+static bool operationIsInside(Operation *root, Operation *op) {
+  for (Operation *cur = op; cur; cur = cur->getParentOp())
+    if (cur == root)
+      return true;
+  return false;
+}
+
+static bool valueIsDefinedInside(Operation *root, Value value) {
+  if (Operation *def = value.getDefiningOp())
+    return operationIsInside(root, def);
+  if (auto arg = dyn_cast<BlockArgument>(value))
+    return operationIsInside(root, arg.getOwner()->getParentOp());
+  return false;
+}
+
 static bool hasUseAfter(BlockArgument arg, Operation *op,
                         const DenseMap<Operation *, unsigned> &order) {
   auto posIt = order.find(op);
@@ -300,9 +315,59 @@ static LogicalResult splitTupleElementSharing(func::FuncOp func) {
   return success();
 }
 
+static bool isUniformIfCopyableYield(Value value) {
+  auto rt = dyn_cast<waveamdmachine::RegType>(value.getType());
+  return rt && (isSGPR(rt) || isVGPR(rt));
+}
+
+static LogicalResult
+materializeUniformIfRegionYieldCopies(waveamdmachine::UniformIfOp uniformIf,
+                                      Region &region, OpBuilder &builder) {
+  if (region.empty())
+    return success();
+  auto yield =
+      dyn_cast<waveamdmachine::YieldOp>(region.front().getTerminator());
+  if (!yield)
+    return success();
+  SmallVector<Value> values(yield.getValues());
+  bool changed = false;
+  builder.setInsertionPoint(yield);
+  for (auto [index, value] : llvm::enumerate(values)) {
+    if (!isUniformIfCopyableYield(value))
+      continue;
+    if (valueIsDefinedInside(uniformIf, value))
+      continue;
+    FailureOr<Value> dup = duplicateRegValue(builder, yield.getLoc(), value);
+    if (failed(dup))
+      return failure();
+    values[index] = *dup;
+    changed = true;
+  }
+  if (changed)
+    yield.getValuesMutable().assign(values);
+  return success();
+}
+
+static LogicalResult materializeUniformIfYieldCopies(func::FuncOp func) {
+  SmallVector<waveamdmachine::UniformIfOp> ops;
+  func.walk([&](waveamdmachine::UniformIfOp op) { ops.push_back(op); });
+  OpBuilder builder(func.getContext());
+  for (waveamdmachine::UniformIfOp op : ops) {
+    if (failed(materializeUniformIfRegionYieldCopies(op, op.getThenRegion(),
+                                                     builder)))
+      return failure();
+    if (failed(materializeUniformIfRegionYieldCopies(op, op.getElseRegion(),
+                                                     builder)))
+      return failure();
+  }
+  return success();
+}
+
 } // namespace
 
 LogicalResult mlir::wave::prepareWaveAMDRegAllocIR(func::FuncOp func) {
+  if (failed(materializeUniformIfYieldCopies(func)))
+    return failure();
   if (failed(materializeLoopBackedgeCopies(func)))
     return failure();
   if (failed(splitDuplicateLoopInits(func)))

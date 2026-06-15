@@ -231,9 +231,9 @@ private:
   std::string targetChip = kDefaultTargetChip.str();
   unsigned wavefrontSize = 32;
   unsigned indent = 1;
-  // Per-function counter handing out unique label suffixes for
-  // structured uniform loops, reset at the start of each function.
+  // Per-function counters for structured-control label suffixes.
   unsigned loopCounter = 0;
+  unsigned ifCounter = 0;
   std::string funcLabelPrefix;
 
   LogicalResult initializeMC(Operation *op) {
@@ -786,6 +786,7 @@ private:
     }
 
     loopCounter = 0;
+    ifCounter = 0;
     funcLabelPrefix = (".L" + Twine(func.getSymName())).str();
 
     os << "\n\t.globl\t" << func.getSymName() << "\n";
@@ -1650,6 +1651,41 @@ private:
     return success();
   }
 
+  LogicalResult emitUniformIfRegion(Region &region) {
+    if (region.empty())
+      return success();
+    Block &body = region.front();
+    Operation *term = body.getTerminator();
+    for (Operation &child : body) {
+      if (&child == term)
+        continue;
+      if (failed(emitOperation(child)))
+        return failure();
+    }
+    return success();
+  }
+
+  LogicalResult emitUniformIf(waveamdmachine::UniformIfOp uniformIf) {
+    unsigned id = ifCounter++;
+    bool hasElse = !uniformIf.getElseRegion().empty();
+    std::string endLabel = (funcLabelPrefix + ".if_end_" + Twine(id)).str();
+    std::string elseLabel =
+        hasElse ? (funcLabelPrefix + ".if_else_" + Twine(id)).str() : endLabel;
+    if (failed(emitMC(sCbranchScc0(), {labelOperand(elseLabel)})))
+      return failure();
+    if (failed(emitUniformIfRegion(uniformIf.getThenRegion())))
+      return failure();
+    if (hasElse) {
+      if (failed(emitMC(sBranch(), {labelOperand(endLabel)})))
+        return failure();
+      os << elseLabel << ":\n";
+      if (failed(emitUniformIfRegion(uniformIf.getElseRegion())))
+        return failure();
+    }
+    os << endLabel << ":\n";
+    return success();
+  }
+
   LogicalResult emitOperation(Operation &op) {
     auto operandString = [&](unsigned i) {
       return operandToString(op.getOperand(i));
@@ -2312,6 +2348,8 @@ private:
     if (isa<waveamdmachine::SCBranchScc1Op>(op))
       return emitMC(sCbranchScc1(),
                     {labelOperand(op.getAttrOfType<StringAttr>("label"))});
+    if (auto uniformIf = dyn_cast<waveamdmachine::UniformIfOp>(op))
+      return emitUniformIf(uniformIf);
     if (auto loop = dyn_cast<waveamdmachine::UniformLoopOp>(op))
       return emitUniformLoop(loop);
     if (isa<waveamdmachine::ContinueIfOp>(op))

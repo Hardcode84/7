@@ -362,6 +362,72 @@ func.func @exec_if_yield_type_mismatch(%cond: !waveamdmachine.reg<sgpr, 1>,
 
 // -----
 
+func.func @uniform_if_result_without_else(%cond: !waveamdmachine.reg<scc, 1>,
+                                          %value: !waveamdmachine.reg<sgpr, 1>) {
+  // expected-error @below {{results require else region}}
+  %r = waveamdmachine.uniform_if %cond {
+    waveamdmachine.yield %value : !waveamdmachine.reg<sgpr, 1>
+  } : !waveamdmachine.reg<scc, 1> -> !waveamdmachine.reg<sgpr, 1>
+  return
+}
+
+// -----
+
+func.func @uniform_if_yield_type_mismatch(%cond: !waveamdmachine.reg<scc, 1>,
+                                          %sgpr: !waveamdmachine.reg<sgpr, 1>,
+                                          %vgpr: !waveamdmachine.reg<vgpr, 1>) {
+  // expected-error @below {{else yield type must match result type}}
+  %r = waveamdmachine.uniform_if %cond {
+    waveamdmachine.yield %sgpr : !waveamdmachine.reg<sgpr, 1>
+  } otherwise {
+    waveamdmachine.yield %vgpr : !waveamdmachine.reg<vgpr, 1>
+  } : !waveamdmachine.reg<scc, 1> -> !waveamdmachine.reg<sgpr, 1>
+  return
+}
+
+// -----
+
+func.func @uniform_if_agpr_result(%cond: !waveamdmachine.reg<scc, 1>,
+                                  %value: !waveamdmachine.reg<agpr, 1>) {
+  // expected-error @below {{results must be SGPR, VGPR, or memory tokens}}
+  %r = waveamdmachine.uniform_if %cond {
+    waveamdmachine.yield %value : !waveamdmachine.reg<agpr, 1>
+  } otherwise {
+    waveamdmachine.yield %value : !waveamdmachine.reg<agpr, 1>
+  } : !waveamdmachine.reg<scc, 1> -> !waveamdmachine.reg<agpr, 1>
+  return
+}
+
+// -----
+
+func.func @uniform_if_fixed_register_yields(
+    %cond: !waveamdmachine.reg<scc, 1>,
+    %x: !waveamdmachine.reg<sgpr, 1, 4>,
+    %y: !waveamdmachine.reg<sgpr, 1, 5>) {
+  %r = waveamdmachine.uniform_if %cond {
+    waveamdmachine.yield %x : !waveamdmachine.reg<sgpr, 1, 4>
+  } otherwise {
+    waveamdmachine.yield %y : !waveamdmachine.reg<sgpr, 1, 5>
+  } : !waveamdmachine.reg<scc, 1> -> !waveamdmachine.reg<sgpr, 1, 6>
+  return
+}
+
+// -----
+
+func.func @uniform_if_fixed_vgpr_yields(
+    %cond: !waveamdmachine.reg<scc, 1>,
+    %x: !waveamdmachine.reg<vgpr, 1, 2>,
+    %y: !waveamdmachine.reg<vgpr, 1, 3>) {
+  %r = waveamdmachine.uniform_if %cond {
+    waveamdmachine.yield %x : !waveamdmachine.reg<vgpr, 1, 2>
+  } otherwise {
+    waveamdmachine.yield %y : !waveamdmachine.reg<vgpr, 1, 3>
+  } : !waveamdmachine.reg<scc, 1> -> !waveamdmachine.reg<vgpr, 1, 4>
+  return
+}
+
+// -----
+
 // Zero-width tuples die in RegType verification before op checks.
 func.func @global_load_tuple_b32_zero_width(%off: !waveamdmachine.reg<vgpr, 1>,
                                             %base: !waveamdmachine.reg<sgpr, 2>) {

@@ -233,6 +233,27 @@ static int waitForOp(Operation *op, const MachineState &state,
 
 } // namespace
 
+static int64_t computeIterCost(Block &body, bool useCold,
+                               DataFlowSolver &solver, const ArchData &arch);
+
+static int64_t computeIterRegionCost(Region &region, bool useCold,
+                                     DataFlowSolver &solver,
+                                     const ArchData &arch) {
+  if (region.empty())
+    return 0;
+  return computeIterCost(region.front(), useCold, solver, arch);
+}
+
+static int64_t computeIterUniformIfCost(UniformIfOp uniformIf, bool useCold,
+                                        DataFlowSolver &solver,
+                                        const ArchData &arch) {
+  int64_t thenCost =
+      computeIterRegionCost(uniformIf.getThenRegion(), useCold, solver, arch);
+  int64_t elseCost =
+      computeIterRegionCost(uniformIf.getElseRegion(), useCold, solver, arch);
+  return std::max(thenCost, elseCost);
+}
+
 // Walk one body block (cold or hot trajectory) and return the
 // per-iter cycle cost = max(issueAt + latency) measured from
 // block entry at cycle 0. Used to compute C1 (cold trajectory)
@@ -244,6 +265,13 @@ static int64_t computeIterCost(Block &body, bool useCold,
   for (Operation &op : body) {
     if (op.hasTrait<OpTrait::IsTerminator>())
       continue;
+    if (auto uniformIf = dyn_cast<UniformIfOp>(&op)) {
+      int64_t ifCost =
+          computeIterUniformIfCost(uniformIf, useCold, solver, arch);
+      cycle += ifCost;
+      maxComp = std::max(maxComp, cycle);
+      continue;
+    }
     if (!isa<WaveAMDMachineDialect>(op.getDialect()))
       continue;
     ProgramPoint *beforePt = solver.getProgramPointBefore(&op);
@@ -294,6 +322,14 @@ static int64_t accumulateBlock(Block &block, int64_t entryCycle,
                                DataFlowSolver &solver, const ArchData &arch,
                                PressureAnalysisResult &out);
 
+static int64_t accumulateRegion(Region &region, int64_t entryCycle,
+                                DataFlowSolver &solver, const ArchData &arch,
+                                PressureAnalysisResult &out) {
+  if (region.empty())
+    return entryCycle;
+  return accumulateBlock(region.front(), entryCycle, solver, arch, out);
+}
+
 // Handle a uniform_loop: C1 + (T-1)*Ss per design doc. Returns
 // the post-loop cycle (entry + total loop cycles).
 static int64_t accumulateLoop(UniformLoopOp loop, int64_t entryCycle,
@@ -309,6 +345,16 @@ static int64_t accumulateLoop(UniformLoopOp loop, int64_t entryCycle,
   return entryCycle + loopCycles;
 }
 
+static int64_t accumulateUniformIf(UniformIfOp uniformIf, int64_t entryCycle,
+                                   DataFlowSolver &solver, const ArchData &arch,
+                                   PressureAnalysisResult &out) {
+  int64_t thenCycle = accumulateRegion(uniformIf.getThenRegion(), entryCycle,
+                                       solver, arch, out);
+  int64_t elseCycle = accumulateRegion(uniformIf.getElseRegion(), entryCycle,
+                                       solver, arch, out);
+  return std::max(thenCycle, elseCycle);
+}
+
 static int64_t accumulateBlock(Block &block, int64_t entryCycle,
                                DataFlowSolver &solver, const ArchData &arch,
                                PressureAnalysisResult &out) {
@@ -321,6 +367,12 @@ static int64_t accumulateBlock(Block &block, int64_t entryCycle,
       int64_t postLoop = accumulateLoop(loop, cycle, solver, arch, out);
       cycle = postLoop;
       maxComp = std::max(maxComp, postLoop);
+      continue;
+    }
+    if (auto uniformIf = dyn_cast<UniformIfOp>(&op)) {
+      int64_t postIf = accumulateUniformIf(uniformIf, cycle, solver, arch, out);
+      cycle = postIf;
+      maxComp = std::max(maxComp, postIf);
       continue;
     }
     if (!isa<WaveAMDMachineDialect>(op.getDialect()))

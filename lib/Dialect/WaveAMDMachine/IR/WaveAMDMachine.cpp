@@ -309,6 +309,92 @@ bool ExecIfOp::areTypesCompatible(Type lhs, Type rhs) {
   return isa<ImmType>(lhs) && resultReg.getWidth() == 1;
 }
 
+static bool isUniformIfResultRegClass(RegClass regClass) {
+  return regClass == RegClass::VGPR || regClass == RegClass::SGPR;
+}
+
+bool UniformIfOp::areTypesCompatible(Type lhs, Type rhs) {
+  if (lhs == rhs)
+    return true;
+  RegType resultReg = dyn_cast<RegType>(rhs);
+  RegType sourceReg = dyn_cast<RegType>(lhs);
+  if (!resultReg || !sourceReg)
+    return false;
+  return isUniformIfResultRegClass(resultReg.getRegClass()) &&
+         sourceReg.getRegClass() == resultReg.getRegClass() &&
+         sourceReg.getWidth() == resultReg.getWidth();
+}
+
+static LogicalResult verifyUniformIfYieldSource(UniformIfOp op, Type resultType,
+                                                Value value, StringRef arm) {
+  if (isa<MemTokenType>(resultType)) {
+    if (resultType == value.getType())
+      return success();
+    return op.emitOpError() << arm << " yield type must match result type";
+  }
+
+  RegType resultReg = cast<RegType>(resultType);
+  if (!isUniformIfResultRegClass(resultReg.getRegClass()))
+    return op.emitOpError() << "results must be SGPR, VGPR, or memory tokens";
+
+  RegType sourceReg = dyn_cast<RegType>(value.getType());
+  if (!sourceReg || sourceReg.getRegClass() != resultReg.getRegClass() ||
+      sourceReg.getWidth() != resultReg.getWidth())
+    return op.emitOpError() << arm << " yield type must match result type";
+  return success();
+}
+
+static LogicalResult verifyUniformIfYield(UniformIfOp op, Region &region,
+                                          StringRef arm) {
+  if (region.empty())
+    return success();
+  YieldOp yield = dyn_cast<YieldOp>(region.front().getTerminator());
+  if (!yield)
+    return op.emitOpError() << arm << " region must terminate with yield";
+  if (yield.getValues().size() != op.getNumResults())
+    return op.emitOpError()
+           << arm << " yield operand count must match result count";
+  for (auto [result, value] :
+       llvm::zip_equal(op.getResults(), yield.getValues())) {
+    if (failed(verifyUniformIfYieldSource(op, result.getType(), value, arm)))
+      return failure();
+  }
+  return success();
+}
+
+LogicalResult UniformIfOp::verify() {
+  bool hasElse = !getElseRegion().empty();
+  if (!hasElse && getNumResults() != 0)
+    return emitOpError("results require else region");
+  if (failed(verifyUniformIfYield(*this, getThenRegion(), "then")))
+    return failure();
+  return verifyUniformIfYield(*this, getElseRegion(), "else");
+}
+
+void UniformIfOp::getSuccessorRegions(
+    RegionBranchPoint point, SmallVectorImpl<RegionSuccessor> &regions) {
+  bool hasElse = !getElseRegion().empty();
+  if (point.isParent()) {
+    regions.push_back(RegionSuccessor(&getThenRegion()));
+    if (hasElse)
+      regions.push_back(RegionSuccessor(&getElseRegion()));
+    else
+      regions.push_back(RegionSuccessor::parent());
+    return;
+  }
+  regions.push_back(RegionSuccessor::parent());
+}
+
+OperandRange UniformIfOp::getEntrySuccessorOperands(RegionSuccessor successor) {
+  return OperandRange((*this)->operand_end(), (*this)->operand_end());
+}
+
+ValueRange UniformIfOp::getSuccessorInputs(RegionSuccessor successor) {
+  if (successor.isParent())
+    return getResults();
+  return ValueRange();
+}
+
 MutableOperandRange
 YieldOp::getMutableSuccessorOperands(RegionSuccessor successor) {
   MutableOperandRange values = getValuesMutable();
