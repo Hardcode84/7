@@ -1,7 +1,23 @@
 // RUN: not wave-opt --waveamd-reg-alloc %s 2>&1 | FileCheck %s --check-prefix=ERR
 // RUN: wave-opt --waveamd-reg-alloc='mark-overflow=true' --waveamd-resource-info %s | FileCheck %s --check-prefix=MARK
+// RUN: rm -f %t.yaml
+// RUN: wave-opt --waveamd-reg-alloc='mark-overflow=true' \
+// RUN:   --remarks-filter=waveamdmachine-regalloc --remark-policy=all \
+// RUN:   --remark-format=yaml --remarks-output-file=%t.yaml %s >/dev/null
+// RUN: FileCheck %s --input-file=%t.yaml --check-prefix=REMARK
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx90a"} {
+
+// REMARK: Name:            regalloc-pressure-failure
+// REMARK: Function:        combined_pressure_rejects_neutral_agpr_promotion
+// REMARK: class:           'VGPR/AGPR'
+// REMARK: combined_vgpr_agpr: 'true'
+// REMARK: memory_spill_reject: scratch_spill_not_kernel
+// REMARK: pressure_relief_providers: '{{.*}}provider=bank-promotion, candidates=9{{.*}}provider=lds-spill{{.*}}reject=lds_spill_not_kernel{{.*}}provider=scratch-spill{{.*}}reject=scratch_spill_not_kernel{{.*}}'
+// REMARK: pressure_relief_candidates: '{{.*}}provider=bank-promotion{{.*}}from=VGPR, to=AGPR{{.*}}'
+// REMARK: starts_at_pressure: '1'
+// REMARK: eligible:        '8'
+// REMARK: total:           '9'
 
 // ERR: waveamd-reg-alloc VGPR/AGPR live pressure exceeds target-waves budget
 // ERR-SAME: required_relief=1

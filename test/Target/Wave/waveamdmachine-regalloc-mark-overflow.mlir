@@ -15,6 +15,17 @@
 // CHECK-SAME: waveamdmachine.regalloc_overflowed = 1 : i64
 // CHECK-NOT: waveamdmachine.regalloc_pressure_
 
+// REMARK: Name:            regalloc-interval
+// REMARK: Function:        too_many_vgprs
+// REMARK-DAG: class:           VGPR
+// REMARK-DAG: storage_class:   VGPR
+// REMARK-DAG: width:           '1'
+// REMARK: Name:            regalloc-summary
+// REMARK: Function:        too_many_vgprs
+// REMARK-DAG: flat_ops:        '8'
+// REMARK-DAG: peak_vgpr:       '4'
+// REMARK-DAG: scalar_intervals: '6'
+// REMARK-DAG: tracked_values:  '6'
 // REMARK: Name:            regalloc-pressure-failure
 // REMARK: Function:        too_many_vgprs
 // REMARK: class:           VGPR
