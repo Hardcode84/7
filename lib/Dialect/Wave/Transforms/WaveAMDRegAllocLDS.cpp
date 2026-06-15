@@ -60,6 +60,29 @@ static bool isCheapVGPRExpr(Operation *op) {
       waveamdmachine::VXorB32Op, waveamdmachine::VAndOrB32Op>(op);
 }
 
+class LDSSpillPlanRecord final : public wave::WaveAMDPressureReliefPlan {
+public:
+  LDSSpillPlanRecord(IntervalGroup *group, Value value, LDSSpillPlan plan,
+                     unsigned useCount, unsigned reliefDwords)
+      : plan(plan), group(group), value(value), useCount(useCount),
+        reliefDwords(reliefDwords) {}
+
+  StringRef getProviderName() const override { return "lds-spill"; }
+  unsigned getReliefDwords() const override { return reliefDwords; }
+
+  IntervalGroup *getGroup() const { return group; }
+  LDSSpillPlan getPlan() const { return plan; }
+  unsigned getUseCount() const { return useCount; }
+  Value getValue() const { return value; }
+
+private:
+  LDSSpillPlan plan;
+  IntervalGroup *group = nullptr;
+  Value value;
+  unsigned useCount = 0;
+  unsigned reliefDwords = 0;
+};
+
 class LDSSpillCandidate final : public wave::WaveAMDPressureReliefCandidate {
 public:
   LDSSpillCandidate(IntervalGroup *group, Value value, LDSSpillPlan plan,
@@ -90,14 +113,8 @@ public:
   unsigned getUseCount() const { return useCount; }
   Value getValue() const { return value; }
   std::unique_ptr<wave::WaveAMDPressureReliefPlan> getPlannedSpill() const {
-    PlannedMemorySpill spill;
-    spill.kind = PlannedMemorySpillKind::LDSValue;
-    spill.group = group;
-    spill.value = value;
-    spill.ldsPlan = plan;
-    spill.useCount = useCount;
-    spill.reliefDwords = pressureRelief;
-    return std::make_unique<PlannedMemorySpill>(spill);
+    return std::make_unique<LDSSpillPlanRecord>(group, value, plan, useCount,
+                                                pressureRelief);
   }
 
 protected:
@@ -181,26 +198,25 @@ public:
   }
 
   void applyPlan(const wave::WaveAMDPressureReliefPlan &plan) const override {
-    const PlannedMemorySpill &spill =
-        static_cast<const PlannedMemorySpill &>(plan);
-    if (spill.group) {
-      spill.group->plannedPressureRelief = true;
-      spill.group->assignedBase.reset();
+    const LDSSpillPlanRecord &spill =
+        static_cast<const LDSSpillPlanRecord &>(plan);
+    if (spill.getGroup()) {
+      spill.getGroup()->plannedPressureRelief = true;
+      spill.getGroup()->assignedBase.reset();
     }
-    addPlannedProviderBytes(inventory, getName(), spill.ldsPlan.slotBytes);
+    addPlannedProviderBytes(inventory, getName(), spill.getPlan().slotBytes);
   }
 
   LogicalResult materializePlan(const wave::WaveAMDPressureReliefPlan &plan,
                                 OpBuilder &builder) const override {
-    const PlannedMemorySpill &spill =
-        static_cast<const PlannedMemorySpill &>(plan);
-    assert(spill.kind == PlannedMemorySpillKind::LDSValue &&
-           "expected LDS spill");
-    LDSSpillCandidate candidate(spill.group, spill.value, spill.ldsPlan,
-                                spill.useCount, spill.reliefDwords);
+    const LDSSpillPlanRecord &spill =
+        static_cast<const LDSSpillPlanRecord &>(plan);
+    LDSSpillCandidate candidate(spill.getGroup(), spill.getValue(),
+                                spill.getPlan(), spill.getUseCount(),
+                                spill.getReliefDwords());
     if (failed(materializeValue(candidate, builder)))
       return failure();
-    reserveSlot(spill.ldsPlan, builder);
+    reserveSlot(spill.getPlan(), builder);
     return success();
   }
 

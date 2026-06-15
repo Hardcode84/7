@@ -196,36 +196,6 @@ struct ScratchSpillPlan {
   ScratchSpillPlanStatus status = ScratchSpillPlanStatus::NotKernel;
 };
 
-struct PlannedLoopCarrySpill {
-  waveamdmachine::UniformLoopOp loop;
-  unsigned index = 0;
-};
-
-enum class PlannedMemorySpillKind : uint8_t {
-  LDSValue,
-  ScratchValue,
-  ScratchLoopCarry,
-};
-
-struct PlannedMemorySpill : public wave::WaveAMDPressureReliefPlan {
-  LDSSpillPlan ldsPlan;
-  ScratchSpillPlan scratchPlan;
-  Value value;
-  PlannedLoopCarrySpill loopCarry;
-  IntervalGroup *group = nullptr;
-  unsigned useCount = 0;
-  unsigned reliefDwords = 0;
-  PlannedMemorySpillKind kind = PlannedMemorySpillKind::ScratchValue;
-
-  StringRef getProviderName() const override {
-    if (kind == PlannedMemorySpillKind::LDSValue)
-      return "lds-spill";
-    return "scratch-spill";
-  }
-
-  unsigned getReliefDwords() const override { return reliefDwords; }
-};
-
 struct PromotionScore {
   unsigned liveDwords = 0;
   unsigned bridgeCost = 0;
