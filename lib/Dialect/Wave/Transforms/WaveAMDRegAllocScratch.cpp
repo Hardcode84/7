@@ -78,6 +78,9 @@ public:
         reliefDwords(reliefDwords) {}
 
   unsigned getReliefDwords() const override { return reliefDwords; }
+  wave::WaveAMDPressureReliefProviderKind getProviderKind() const override {
+    return wave::WaveAMDPressureReliefProviderKind::ScratchSpill;
+  }
   IntervalGroup *getGroup() const override { return group; }
   ScratchSpillPlan getPlan() const override { return plan; }
   unsigned getUseCount() const override { return useCount; }
@@ -100,6 +103,9 @@ public:
         reliefDwords(reliefDwords) {}
 
   unsigned getReliefDwords() const override { return reliefDwords; }
+  wave::WaveAMDPressureReliefProviderKind getProviderKind() const override {
+    return wave::WaveAMDPressureReliefProviderKind::ScratchSpill;
+  }
   IntervalGroup *getGroup() const override { return group; }
   ScratchSpillPlan getPlan() const override { return plan; }
   unsigned getUseCount() const override { return useCount; }
@@ -125,24 +131,21 @@ public:
   ScratchSpillCandidate(IntervalGroup *group, Value value,
                         ScratchSpillPlan plan, unsigned useCount,
                         unsigned pressureRelief,
+                        wave::WaveAMDPressureReliefCost cost,
                         StringRef rejectReason = StringRef())
-      : rejectReason(rejectReason.str()), plan(plan), group(group),
+      : rejectReason(rejectReason.str()), plan(plan), cost(cost), group(group),
         value(value), useCount(useCount), pressureRelief(pressureRelief) {}
 
   ScratchSpillCandidate(IntervalGroup *group, LoopCarrySlot slot,
                         ScratchSpillPlan plan, unsigned useCount,
-                        unsigned pressureRelief)
-      : plan(plan), group(group), loopCarry(slot), useCount(useCount),
-        pressureRelief(pressureRelief) {}
+                        unsigned pressureRelief,
+                        wave::WaveAMDPressureReliefCost cost)
+      : plan(plan), cost(cost), group(group), loopCarry(slot),
+        useCount(useCount), pressureRelief(pressureRelief) {}
 
   StringRef getProviderName() const override { return "scratch-spill"; }
 
-  wave::WaveAMDPressureReliefCost getCost() const override {
-    wave::WaveAMDPressureReliefCost cost;
-    cost.materializationOps = 2 + static_cast<int64_t>(useCount);
-    cost.latencyPenalty = static_cast<int64_t>(useCount) * 8;
-    return cost;
-  }
+  wave::WaveAMDPressureReliefCost getCost() const override { return cost; }
 
   unsigned getReliefDwords() const override { return pressureRelief; }
 
@@ -182,6 +185,7 @@ protected:
 private:
   std::string rejectReason;
   ScratchSpillPlan plan;
+  wave::WaveAMDPressureReliefCost cost;
   IntervalGroup *group = nullptr;
   std::optional<LoopCarrySlot> loopCarry;
   Value value;
@@ -198,37 +202,19 @@ public:
         position(position) {}
 
   StringRef getName() const override { return "scratch-spill"; }
+  wave::WaveAMDPressureReliefProviderKind getKind() const override {
+    return wave::WaveAMDPressureReliefProviderKind::ScratchSpill;
+  }
 
   LogicalResult collectCandidates(
       const wave::WaveAMDPressureReliefQuery &query,
       wave::WaveAMDPressureReliefCandidateList &candidates) const override {
     pressureFailure = query.failure;
     sawLoopCarryReject = false;
+    planRejectReason.clear();
     for (IntervalGroup *group : groups)
       collect(group, candidates);
     collect(request, candidates);
-    return success();
-  }
-
-  LogicalResult
-  materialize(const wave::WaveAMDPressureReliefCandidate &candidate,
-              OpBuilder &builder) const override {
-    const ScratchSpillCandidate &spill =
-        static_cast<const ScratchSpillCandidate &>(candidate);
-    if (spill.getLoopCarry()) {
-      std::unique_ptr<wave::WaveAMDPressureReliefPlan> plan =
-          spill.getPlannedSpill();
-      const ScratchPressurePlan &scratchPlan =
-          static_cast<const ScratchPressurePlan &>(*plan);
-      SmallVector<const ScratchPressurePlan *, 1> spills{&scratchPlan};
-      if (failed(materializeLoopCarries(spills, builder)))
-        return failure();
-      reserveSlot(spill.getPlan(), builder);
-      return success();
-    }
-    if (failed(materializeValue(spill.getValue(), spill.getPlan(), builder)))
-      return failure();
-    reserveSlot(spill.getPlan(), builder);
     return success();
   }
 
@@ -321,17 +307,25 @@ public:
     return wave::isBetterWaveAMDPressureReliefCandidate(lhs, rhs);
   }
 
+  std::optional<StringRef> getRejectReason() const override {
+    if (sawLoopCarryReject)
+      return kMemorySpillLoopCarryReject;
+    if (!planRejectReason.empty())
+      return StringRef(planRejectReason);
+    return std::nullopt;
+  }
+
   void clearNoCandidateDiagnostic() const {
     func->removeAttr(kMemorySpillRejectAttr);
     func->removeAttr(kMemorySpillRejectDetailAttr);
   }
 
   void setNoCandidateDiagnostic() const {
-    if (!sawLoopCarryReject)
+    std::optional<StringRef> reason = getRejectReason();
+    if (!reason)
       return;
     Builder builder(func->getContext());
-    func->setAttr(kMemorySpillRejectAttr,
-                  builder.getStringAttr(kMemorySpillLoopCarryReject));
+    func->setAttr(kMemorySpillRejectAttr, builder.getStringAttr(*reason));
   }
 
   void notifyNoCandidate() const override { setNoCandidateDiagnostic(); }
@@ -339,6 +333,13 @@ public:
   void notifyPlanApplied() const override { clearNoCandidateDiagnostic(); }
 
 private:
+  void setPlanRejectReason(ScratchSpillPlanStatus status) const {
+    if (!planRejectReason.empty())
+      return;
+    planRejectReason = "scratch_spill_";
+    planRejectReason += getScratchSpillPlanStatusName(status);
+  }
+
   static bool isEligibleGroup(IntervalGroup *group, unsigned position) {
     return isMemorySpillEligibleGroup(group, position);
   }
@@ -349,6 +350,49 @@ private:
       if (isa<waveamdmachine::UniformLoopOp>(cur))
         ++depth;
     return depth;
+  }
+
+  static unsigned getScratchMemoryOps(ScratchSpillPlan plan, unsigned width) {
+    if (width > 1 && !tupleFitsImmediate(plan.slotBase, width))
+      return width;
+    return 1;
+  }
+
+  static unsigned getScratchMaterializationOps(ScratchSpillPlan plan,
+                                               unsigned width) {
+    if (width > 1 && !tupleFitsImmediate(plan.slotBase, width))
+      return width + 2;
+    return 1;
+  }
+
+  wave::WaveAMDPressureReliefCost
+  getValueSpillCost(Value value, ScratchSpillPlan plan,
+                    ArrayRef<OpOperand *> uses) const {
+    unsigned width = cast<waveamdmachine::RegType>(value.getType()).getWidth();
+    unsigned opCount = getScratchMaterializationOps(plan, width);
+    unsigned memoryOps = getScratchMemoryOps(plan, width);
+    wave::WaveAMDPressureReliefCost cost;
+    cost.materializationOps = static_cast<int64_t>(opCount) * (1 + uses.size());
+    cost.loopWeightedOps =
+        static_cast<int64_t>(opCount) * getLoopDepth(value.getDefiningOp());
+    for (OpOperand *use : uses)
+      cost.loopWeightedOps +=
+          static_cast<int64_t>(opCount) * getLoopDepth(use->getOwner());
+    cost.latencyPenalty = static_cast<int64_t>(memoryOps) * uses.size() * 8;
+    return cost;
+  }
+
+  static wave::WaveAMDPressureReliefCost
+  getLoopCarrySpillCost(LoopCarrySlot slot, ScratchSpillPlan plan,
+                        unsigned width, unsigned useCount) {
+    unsigned opCount = getScratchMaterializationOps(plan, width);
+    unsigned memoryOps = getScratchMemoryOps(plan, width);
+    unsigned loopDepth = getLoopDepth(slot.loop.getOperation());
+    wave::WaveAMDPressureReliefCost cost;
+    cost.materializationOps = static_cast<int64_t>(opCount) * (1 + useCount);
+    cost.loopWeightedOps = static_cast<int64_t>(opCount) * useCount * loopDepth;
+    cost.latencyPenalty = static_cast<int64_t>(memoryOps) * useCount * 8;
+    return cost;
   }
 
   static Operation *getAncestorInBlock(Operation *op, Block *block) {
@@ -450,14 +494,17 @@ private:
     if (!hasSimpleUses(value, uses) || !isValueLiveAt(value, uses))
       return;
     ScratchSpillPlan plan = getPlanForValue(type);
-    if (plan.status != ScratchSpillPlanStatus::Available)
+    if (plan.status != ScratchSpillPlanStatus::Available) {
+      setPlanRejectReason(plan.status);
       return;
+    }
     std::optional<unsigned> pressureRelief =
         getPressureRelief(value, type.getWidth(), uses);
     if (!pressureRelief || *pressureRelief == 0)
       return;
     candidates.push_back(std::make_unique<ScratchSpillCandidate>(
-        group, value, plan, uses.size(), *pressureRelief));
+        group, value, plan, uses.size(), *pressureRelief,
+        getValueSpillCost(value, plan, uses)));
   }
 
   void collect(IntervalGroup *group,
@@ -496,10 +543,14 @@ private:
     if (loopCarryTouchesPressure(*slot))
       return false;
     ScratchSpillPlan plan = getPlanForValue(type);
-    if (plan.status != ScratchSpillPlanStatus::Available)
+    if (plan.status != ScratchSpillPlanStatus::Available) {
+      setPlanRejectReason(plan.status);
       return false;
+    }
+    unsigned useCount = getLoopCarryUseCount(*slot);
     candidates.push_back(std::make_unique<ScratchSpillCandidate>(
-        group, *slot, plan, getLoopCarryUseCount(*slot), type.getWidth()));
+        group, *slot, plan, useCount, type.getWidth(),
+        getLoopCarrySpillCost(*slot, plan, type.getWidth(), useCount)));
     return true;
   }
 
@@ -1168,6 +1219,7 @@ private:
     func->setAttr(kUsesFlatScratchAttr, builder.getBoolAttr(true));
   }
 
+  mutable std::string planRejectReason;
   ArrayRef<IntervalGroup *> groups;
   Inventory &inventory;
   func::FuncOp func;

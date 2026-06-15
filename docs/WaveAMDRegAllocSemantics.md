@@ -213,7 +213,8 @@ reserved prefix size, live dwords, program position, required relief, the
 request interval, active overlaps, and memory-spill rejection counts when
 available. Memory-spill rejection metrics include `memory_spill_reject`
 plus per-reason counts such as `loop_carry`, `starts_at_pressure`, `fixed`,
-and `total`.
+and `total`. Pressure-relief diagnostics also include provider summaries and
+candidate summaries when the allocator tried pressure relief at that point.
 
 Default hard failures also print pressure detail in the error diagnostic.
 

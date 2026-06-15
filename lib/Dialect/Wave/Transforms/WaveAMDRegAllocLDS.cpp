@@ -67,6 +67,10 @@ public:
       : plan(plan), group(group), value(value), useCount(useCount),
         reliefDwords(reliefDwords) {}
 
+  wave::WaveAMDPressureReliefProviderKind getProviderKind() const override {
+    return wave::WaveAMDPressureReliefProviderKind::LDSSpill;
+  }
+
   StringRef getProviderName() const override { return "lds-spill"; }
   unsigned getReliefDwords() const override { return reliefDwords; }
 
@@ -149,6 +153,9 @@ public:
         request(request), position(position) {}
 
   StringRef getName() const override { return "lds-spill"; }
+  wave::WaveAMDPressureReliefProviderKind getKind() const override {
+    return wave::WaveAMDPressureReliefProviderKind::LDSSpill;
+  }
 
   LogicalResult collectCandidates(
       const wave::WaveAMDPressureReliefQuery &query,
@@ -173,17 +180,6 @@ public:
     for (IntervalGroup *group : groups)
       collect(group, plan, candidates);
     collect(request, plan, candidates);
-    return success();
-  }
-
-  LogicalResult
-  materialize(const wave::WaveAMDPressureReliefCandidate &candidate,
-              OpBuilder &builder) const override {
-    const LDSSpillCandidate &spill =
-        static_cast<const LDSSpillCandidate &>(candidate);
-    if (failed(materializeValue(spill, builder)))
-      return failure();
-    reserveSlot(spill.getPlan(), builder);
     return success();
   }
 
@@ -233,21 +229,25 @@ public:
     return wave::isBetterWaveAMDPressureReliefCandidate(lhs, rhs);
   }
 
+  std::optional<StringRef> getRejectReason() const override {
+    if (sawLoopCarryReject)
+      return kMemorySpillLoopCarryReject;
+    if (!planRejectReason.empty())
+      return StringRef(planRejectReason);
+    return std::nullopt;
+  }
+
   void clearNoCandidateDiagnostic() const {
     func->removeAttr(kMemorySpillRejectAttr);
     func->removeAttr(kMemorySpillRejectDetailAttr);
   }
 
   void setNoCandidateDiagnostic() const {
-    Builder builder(func->getContext());
-    if (sawLoopCarryReject) {
-      func->setAttr(kMemorySpillRejectAttr,
-                    builder.getStringAttr(kMemorySpillLoopCarryReject));
+    std::optional<StringRef> reason = getRejectReason();
+    if (!reason)
       return;
-    }
-    if (!planRejectReason.empty())
-      func->setAttr(kMemorySpillRejectAttr,
-                    builder.getStringAttr(planRejectReason));
+    Builder builder(func->getContext());
+    func->setAttr(kMemorySpillRejectAttr, builder.getStringAttr(*reason));
   }
 
   void notifyNoCandidate() const override { setNoCandidateDiagnostic(); }

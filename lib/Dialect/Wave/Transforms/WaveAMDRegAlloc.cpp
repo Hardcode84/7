@@ -22,6 +22,7 @@
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/Support/raw_ostream.h"
 #include <algorithm>
 #include <limits>
 #include <memory>
@@ -105,6 +106,10 @@ static constexpr llvm::StringLiteral kPressureLimitAttr =
     "waveamdmachine.regalloc_debug_pressure_limit";
 static constexpr llvm::StringLiteral kPressureLiveAttr =
     "waveamdmachine.regalloc_debug_pressure_live_dwords";
+static constexpr llvm::StringLiteral kPressureReliefCandidatesAttr =
+    "waveamdmachine.regalloc_debug_pressure_relief_candidates";
+static constexpr llvm::StringLiteral kPressureReliefProvidersAttr =
+    "waveamdmachine.regalloc_debug_pressure_relief_providers";
 static constexpr llvm::StringLiteral kRemarkCategory =
     "waveamdmachine-regalloc";
 static constexpr llvm::StringLiteral kScalarIntervalsAttr =
@@ -1760,6 +1765,66 @@ getPressureReliefCandidate(PressureReliefCandidateRef ref) {
   return *ref.state->candidates[ref.index];
 }
 
+static bool isSelectedPressureReliefCandidate(
+    const PressureReliefProviderState &state, unsigned index,
+    std::optional<PressureReliefCandidateRef> selected) {
+  return selected && selected->state == &state && selected->index == index;
+}
+
+static std::string
+formatPressureReliefProviders(ArrayRef<PressureReliefProviderState> providers) {
+  std::string out;
+  llvm::raw_string_ostream os(out);
+  os << "[";
+  llvm::interleaveComma(
+      providers, os, [&](const PressureReliefProviderState &state) {
+        os << "{provider=" << state.provider->getName()
+           << ", candidates=" << state.candidates.size();
+        if (std::optional<StringRef> reason = state.provider->getRejectReason())
+          os << ", reject=" << *reason;
+        os << "}";
+      });
+  os << "]";
+  return out;
+}
+
+static std::string formatPressureReliefCandidates(
+    ArrayRef<PressureReliefProviderState> providers,
+    std::optional<PressureReliefCandidateRef> selected) {
+  std::string out;
+  llvm::raw_string_ostream os(out);
+  os << "[";
+  bool first = true;
+  for (const PressureReliefProviderState &state : providers) {
+    for (auto [index, candidate] : llvm::enumerate(state.candidates)) {
+      if (!first)
+        os << ", ";
+      first = false;
+      candidate->print(
+          os, isSelectedPressureReliefCandidate(state, index, selected));
+    }
+  }
+  os << "]";
+  return out;
+}
+
+static void setPressureReliefDiagnostics(
+    func::FuncOp func, ArrayRef<PressureReliefProviderState> providers,
+    std::optional<PressureReliefCandidateRef> selected) {
+  Builder builder(func.getContext());
+  func->setAttr(
+      kPressureReliefProvidersAttr,
+      builder.getStringAttr(formatPressureReliefProviders(providers)));
+  func->setAttr(kPressureReliefCandidatesAttr,
+                builder.getStringAttr(
+                    formatPressureReliefCandidates(providers, selected)));
+}
+
+static void clearPressureReliefDiagnostics(func::FuncOp func) {
+  func->removeAttr(kPressureReliefCandidatesAttr);
+  func->removeAttr(kPressureReliefProvidersAttr);
+}
+
 static int64_t
 getPressureReliefCostTotal(wave::WaveAMDPressureReliefCost cost) {
   return cost.materializationOps + cost.loopWeightedOps + cost.latencyPenalty +
@@ -1879,6 +1944,7 @@ applyPressureRelief(func::FuncOp func, Inventory &inventory,
 
   std::optional<PressureReliefCandidateRef> selected =
       selectPressureReliefCandidate(candidates, pressureFailure);
+  setPressureReliefDiagnostics(func, providers, selected);
   if (!selected) {
     notifyNoPressureReliefCandidate(providers);
     if (includeMemorySpill)
@@ -2496,7 +2562,7 @@ static LogicalResult materializePlannedPressureRelief(func::FuncOp func,
     SmallVector<const wave::WaveAMDPressureReliefPlan *, 8> plans;
     for (const std::unique_ptr<wave::WaveAMDPressureReliefPlan> &plan :
          inventory.plannedReliefPlans)
-      if (plan->getProviderName() == provider->getName())
+      if (provider->ownsPlan(*plan))
         plans.push_back(plan.get());
     if (plans.empty())
       continue;
@@ -2687,6 +2753,7 @@ static void clearDiagnostics(func::FuncOp func) {
   func->removeAttr(kPressureClassAttr);
   func->removeAttr(kPressureLimitAttr);
   func->removeAttr(kPressureLiveAttr);
+  clearPressureReliefDiagnostics(func);
   func->removeAttr(kScalarIntervalsAttr);
   func->removeAttr(kTrackedValuesAttr);
   func->removeAttr(kMemorySpillRejectAttr);
@@ -2696,6 +2763,7 @@ static void clearDiagnostics(func::FuncOp func) {
 static void clearTransientRegAllocAttrs(func::FuncOp func) {
   func->removeAttr(kMemorySpillRejectAttr);
   func->removeAttr(kMemorySpillRejectDetailAttr);
+  clearPressureReliefDiagnostics(func);
   func.walk([](Operation *op) { op->removeAttr(kTempAttr); });
 }
 
@@ -2815,6 +2883,13 @@ static void emitPressureFailureRemark(func::FuncOp func,
   if (StringAttr reject =
           func->getAttrOfType<StringAttr>(kMemorySpillRejectAttr))
     emitStringMetric(remark, "memory_spill_reject", reject.getValue());
+  if (StringAttr providers =
+          func->getAttrOfType<StringAttr>(kPressureReliefProvidersAttr))
+    emitStringMetric(remark, "pressure_relief_providers", providers.getValue());
+  if (StringAttr candidates =
+          func->getAttrOfType<StringAttr>(kPressureReliefCandidatesAttr))
+    emitStringMetric(remark, "pressure_relief_candidates",
+                     candidates.getValue());
   emitRejectDetailMetrics(remark, func->getAttrOfType<DictionaryAttr>(
                                       kMemorySpillRejectDetailAttr));
 }
@@ -2862,6 +2937,7 @@ finishSuccessfulAllocation(func::FuncOp func, Inventory &inventory,
 static FailureOr<AllocationAttemptResult>
 runAllocationAttempt(func::FuncOp func, RegisterBudgets budgets,
                      std::optional<PressureFailure> &failure, bool softFail) {
+  clearPressureReliefDiagnostics(func);
   Inventory inventory;
   if (failed(buildInventory(func, inventory)))
     return mlir::failure();
@@ -2993,6 +3069,12 @@ struct WaveAMDRegAllocPass
         diag << "; memory spill rejected candidates: " << reject.getValue();
     }
     appendMemorySpillRejectDetail(diag, detail);
+    if (StringAttr providers =
+            func->getAttrOfType<StringAttr>(kPressureReliefProvidersAttr))
+      diag << "; pressure relief providers=" << providers.getValue();
+    if (StringAttr candidates =
+            func->getAttrOfType<StringAttr>(kPressureReliefCandidatesAttr))
+      diag << "; pressure relief candidates=" << candidates.getValue();
   }
 
   static void emitPressureError(func::FuncOp func,

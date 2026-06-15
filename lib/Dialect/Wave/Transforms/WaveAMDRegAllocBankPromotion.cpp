@@ -99,6 +99,10 @@ public:
       : group(group), reliefDwords(reliefDwords), sourceClass(sourceClass),
         targetClass(targetClass) {}
 
+  wave::WaveAMDPressureReliefProviderKind getProviderKind() const override {
+    return wave::WaveAMDPressureReliefProviderKind::BankPromotion;
+  }
+
   StringRef getProviderName() const override { return "bank-promotion"; }
   unsigned getReliefDwords() const override { return reliefDwords; }
 
@@ -124,6 +128,9 @@ public:
         hooks(hooks), request(request), position(position) {}
 
   StringRef getName() const override { return "bank-promotion"; }
+  wave::WaveAMDPressureReliefProviderKind getKind() const override {
+    return wave::WaveAMDPressureReliefProviderKind::BankPromotion;
+  }
 
   LogicalResult collectCandidates(
       const wave::WaveAMDPressureReliefQuery &query,
@@ -133,17 +140,6 @@ public:
       collect(group, candidates);
     collect(request, candidates);
     return success();
-  }
-
-  LogicalResult
-  materialize(const wave::WaveAMDPressureReliefCandidate &candidate,
-              OpBuilder &builder) const override {
-    std::unique_ptr<wave::WaveAMDPressureReliefPlan> plan =
-        createPlan(candidate);
-    if (!plan)
-      return failure();
-    applyPlan(*plan);
-    return materializePlan(*plan, builder);
   }
 
   std::unique_ptr<wave::WaveAMDPressureReliefPlan> createPlan(

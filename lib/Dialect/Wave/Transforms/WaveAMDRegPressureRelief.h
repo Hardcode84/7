@@ -32,6 +32,12 @@ class Operation;
 
 namespace wave {
 
+enum class WaveAMDPressureReliefProviderKind : uint8_t {
+  BankPromotion,
+  LDSSpill,
+  ScratchSpill,
+};
+
 struct WaveAMDPressureIntervalRef {
   SmallVector<int64_t, 4> resultIndices;
   SmallVector<int64_t, 4> slotOffsets;
@@ -67,22 +73,6 @@ struct WaveAMDPressureReliefQuery {
   const WaveAMDPressureFailure *failure = nullptr;
 };
 
-class WaveAMDPressureReliefBudget {
-public:
-  virtual ~WaveAMDPressureReliefBudget();
-
-  virtual StringRef getName() const = 0;
-  virtual std::optional<int64_t> getLimit() const;
-  virtual std::optional<int64_t> getUsed() const;
-
-  virtual void print(llvm::raw_ostream &os) const;
-  virtual DictionaryAttr getDiagnosticAttr(Builder &builder) const;
-
-protected:
-  virtual void setExtraDiagnosticAttrs(Builder &builder,
-                                       NamedAttrList &attrs) const;
-};
-
 class WaveAMDPressureReliefCandidate {
 public:
   virtual ~WaveAMDPressureReliefCandidate();
@@ -112,6 +102,7 @@ class WaveAMDPressureReliefPlan {
 public:
   virtual ~WaveAMDPressureReliefPlan();
 
+  virtual WaveAMDPressureReliefProviderKind getProviderKind() const = 0;
   virtual StringRef getProviderName() const = 0;
   virtual unsigned getReliefDwords() const = 0;
 };
@@ -124,15 +115,15 @@ public:
   virtual ~WaveAMDPressureReliefProvider();
 
   virtual StringRef getName() const = 0;
+  virtual WaveAMDPressureReliefProviderKind getKind() const = 0;
   virtual LogicalResult
   collectCandidates(const WaveAMDPressureReliefQuery &query,
                     WaveAMDPressureReliefCandidateList &candidates) const = 0;
-  virtual LogicalResult
-  materialize(const WaveAMDPressureReliefCandidate &candidate,
-              OpBuilder &builder) const = 0;
   virtual std::unique_ptr<WaveAMDPressureReliefPlan>
   createPlan(const WaveAMDPressureReliefCandidate &candidate) const;
+  virtual std::optional<StringRef> getRejectReason() const;
   virtual void applyPlan(const WaveAMDPressureReliefPlan &plan) const;
+  virtual bool ownsPlan(const WaveAMDPressureReliefPlan &plan) const;
   virtual LogicalResult materializePlan(const WaveAMDPressureReliefPlan &plan,
                                         OpBuilder &builder) const;
   virtual LogicalResult

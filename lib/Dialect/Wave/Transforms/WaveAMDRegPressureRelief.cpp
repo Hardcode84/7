@@ -17,42 +17,9 @@ using namespace mlir;
 
 namespace mlir::wave {
 
-WaveAMDPressureReliefBudget::~WaveAMDPressureReliefBudget() = default;
 WaveAMDPressureReliefCandidate::~WaveAMDPressureReliefCandidate() = default;
 WaveAMDPressureReliefPlan::~WaveAMDPressureReliefPlan() = default;
 WaveAMDPressureReliefProvider::~WaveAMDPressureReliefProvider() = default;
-
-std::optional<int64_t> WaveAMDPressureReliefBudget::getLimit() const {
-  return std::nullopt;
-}
-
-std::optional<int64_t> WaveAMDPressureReliefBudget::getUsed() const {
-  return std::nullopt;
-}
-
-void WaveAMDPressureReliefBudget::print(llvm::raw_ostream &os) const {
-  os << "{name=" << getName();
-  if (std::optional<int64_t> limit = getLimit())
-    os << ", limit=" << *limit;
-  if (std::optional<int64_t> used = getUsed())
-    os << ", used=" << *used;
-  os << "}";
-}
-
-DictionaryAttr
-WaveAMDPressureReliefBudget::getDiagnosticAttr(Builder &builder) const {
-  NamedAttrList attrs;
-  attrs.set("name", builder.getStringAttr(getName()));
-  if (std::optional<int64_t> limit = getLimit())
-    attrs.set("limit", builder.getI64IntegerAttr(*limit));
-  if (std::optional<int64_t> used = getUsed())
-    attrs.set("used", builder.getI64IntegerAttr(*used));
-  setExtraDiagnosticAttrs(builder, attrs);
-  return builder.getDictionaryAttr(attrs);
-}
-
-void WaveAMDPressureReliefBudget::setExtraDiagnosticAttrs(
-    Builder &builder, NamedAttrList &attrs) const {}
 
 std::optional<StringRef>
 WaveAMDPressureReliefCandidate::getRejectReason() const {
@@ -114,8 +81,18 @@ WaveAMDPressureReliefProvider::createPlan(
   return nullptr;
 }
 
+std::optional<StringRef>
+WaveAMDPressureReliefProvider::getRejectReason() const {
+  return std::nullopt;
+}
+
 void WaveAMDPressureReliefProvider::applyPlan(
     const WaveAMDPressureReliefPlan &) const {}
+
+bool WaveAMDPressureReliefProvider::ownsPlan(
+    const WaveAMDPressureReliefPlan &plan) const {
+  return plan.getProviderKind() == getKind();
+}
 
 LogicalResult WaveAMDPressureReliefProvider::materializePlan(
     const WaveAMDPressureReliefPlan &, OpBuilder &) const {

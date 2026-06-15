@@ -3,7 +3,8 @@
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx900"} {
 
 // CHECK: error: waveamd-reg-alloc ran out of VGPR registers
-// CHECK: memory spill rejected candidates: lds_spill_unsupported_waves_per_workgroup
+// CHECK: memory spill rejected candidates: scratch_spill_unsupported_target
+// CHECK: pressure relief providers={{.*}}provider=lds-spill{{.*}}reject=lds_spill_unsupported_waves_per_workgroup
 func.func @multi_wave_lds_spill_reject()
     attributes {wave.kernel, wave.workgroup_size = array<i32: 128, 1, 1>,
                 wave.waves_per_workgroup = 2 : i64,

@@ -53,34 +53,20 @@ func.func @scratch_spill_wide_tuple_codegen()
   return
 }
 
-// CHECK-LABEL: func.func @scratch_spill_wide_crosses_immediate_limit
+// CHECK-LABEL: func.func @scratch_spill_prefers_scalar_when_wide_crosses_immediate_limit
 // CHECK-SAME: waveamdmachine.private_segment_fixed_size = 4108 : i64
 // CHECK-SAME: waveamdmachine.scratch_spill_bytes = 16 : i64
-// CHECK: %[[PARTS:.*]]:4 = waveamdmachine.tuple_to_elements
-// CHECK: %[[STORE0:.*]] = waveamdmachine.scratch_store_b32 {{.*}}, %[[PARTS]]#0, {{.*}} offset 4092
-// CHECK: %[[IMM4096:.*]] = waveamdmachine.imm 4096
-// CHECK: %[[SADDR4096:.*]] = waveamdmachine.s_mov_b32_value %[[IMM4096]]
-// CHECK: %[[STORE1:.*]] = waveamdmachine.scratch_store_b32 {{.*}}, %[[PARTS]]#1, %[[SADDR4096]] :
-// CHECK: %[[IMM4100:.*]] = waveamdmachine.imm 4100
-// CHECK: %[[SADDR4100:.*]] = waveamdmachine.s_mov_b32_value %[[IMM4100]]
-// CHECK: %[[STORE2:.*]] = waveamdmachine.scratch_store_b32 {{.*}}, %[[PARTS]]#2, %[[SADDR4100]] :
-// CHECK: %[[IMM4104:.*]] = waveamdmachine.imm 4104
-// CHECK: %[[SADDR4104:.*]] = waveamdmachine.s_mov_b32_value %[[IMM4104]]
-// CHECK: %[[STORE3:.*]] = waveamdmachine.scratch_store_b32 {{.*}}, %[[PARTS]]#3, %[[SADDR4104]] :
-// CHECK: %[[JOIN:.*]] = waveamdmachine.token_join %[[STORE0]], %[[STORE1]], %[[STORE2]], %[[STORE3]]
-// CHECK: %[[LOAD0:.*]], %[[LTOK0:.*]] = waveamdmachine.scratch_load_b32 {{.*}} after %[[JOIN]] offset 4092
-// CHECK: %[[LIMM4096:.*]] = waveamdmachine.imm 4096
-// CHECK: %[[LSADDR4096:.*]] = waveamdmachine.s_mov_b32_value %[[LIMM4096]]
-// CHECK: %[[LOAD1:.*]], %[[LTOK1:.*]] = waveamdmachine.scratch_load_b32 {{.*}}, %[[LSADDR4096]] after %[[JOIN]] :
-// CHECK: %[[LIMM4100:.*]] = waveamdmachine.imm 4100
-// CHECK: %[[LSADDR4100:.*]] = waveamdmachine.s_mov_b32_value %[[LIMM4100]]
-// CHECK: %[[LOAD2:.*]], %[[LTOK2:.*]] = waveamdmachine.scratch_load_b32 {{.*}}, %[[LSADDR4100]] after %[[JOIN]] :
-// CHECK: %[[LIMM4104:.*]] = waveamdmachine.imm 4104
-// CHECK: %[[LSADDR4104:.*]] = waveamdmachine.s_mov_b32_value %[[LIMM4104]]
-// CHECK: %[[LOAD3:.*]], %[[LTOK3:.*]] = waveamdmachine.scratch_load_b32 {{.*}}, %[[LSADDR4104]] after %[[JOIN]] :
-// CHECK: waveamdmachine.tuple_from_elements %[[LOAD0]], %[[LOAD1]], %[[LOAD2]], %[[LOAD3]]
-// CHECK: waveamdmachine.token_join %[[LTOK0]], %[[LTOK1]], %[[LTOK2]], %[[LTOK3]]
-func.func @scratch_spill_wide_crosses_immediate_limit()
+// CHECK-NOT: scratch_store_tuple_b32
+// CHECK: waveamdmachine.scratch_store_b32 {{.*}} offset 4092
+// CHECK: waveamdmachine.imm 4096
+// CHECK: waveamdmachine.scratch_store_b32
+// CHECK: waveamdmachine.imm 4100
+// CHECK: waveamdmachine.scratch_store_b32
+// CHECK: waveamdmachine.imm 4104
+// CHECK: waveamdmachine.scratch_store_b32
+// CHECK: waveamdmachine.tuple_to_elements
+// CHECK: waveamdmachine.scratch_load_b32 {{.*}} offset 4092
+func.func @scratch_spill_prefers_scalar_when_wide_crosses_immediate_limit()
     attributes {wave.kernel, waveamdmachine.target_waves = 4 : i64,
                 waveamdmachine.private_segment_fixed_size = 4092 : i64} {
   %zero = waveamdmachine.imm 0 : !waveamdmachine.imm

@@ -8,6 +8,8 @@
 // REMARK: Function:        scalar_vgpr_loop_carry_no_memory_spill
 // REMARK: class:           VGPR
 // REMARK: memory_spill_reject: loop_carry
+// REMARK: pressure_relief_providers: '{{.*}}provider=scratch-spill{{.*}}reject=loop_carry{{.*}}'
+// REMARK: pressure_relief_candidates: '[]'
 // REMARK: loop_carry:      '1'
 // REMARK: total:           '3'
 
