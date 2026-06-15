@@ -279,7 +279,7 @@ public:
   FailureOr<wave::WaveAMDLiveIntervalBuildResult> build(func::FuncOp func) {
     if (func.isExternal())
       return std::move(result);
-    if (failed(walkBlock(func.getBody().front())))
+    if (failed(walkRegion(func.getBody())))
       return failure();
     if (hasOrderOverride && !usedOrderOverride)
       return func.emitError("live interval order override block not visited");
@@ -534,7 +534,7 @@ private:
       return processLoop(loop, pos);
     if (auto execIf = dyn_cast<waveamdmachine::ExecIfOp>(op))
       return processExecIf(execIf, pos);
-    return success();
+    return walkNestedRegions(op);
   }
 
   LogicalResult coalesceTupleElementOps(Operation &op, unsigned pos) {
@@ -617,6 +617,20 @@ private:
       if (failed(processNestedRegions(op, pos)))
         return failure();
     }
+    return success();
+  }
+
+  LogicalResult walkRegion(Region &region) {
+    for (Block &block : region)
+      if (failed(walkBlock(block)))
+        return failure();
+    return success();
+  }
+
+  LogicalResult walkNestedRegions(Operation *op) {
+    for (Region &region : op->getRegions())
+      if (failed(walkRegion(region)))
+        return failure();
     return success();
   }
 

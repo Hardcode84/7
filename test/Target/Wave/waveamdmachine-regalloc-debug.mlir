@@ -5,6 +5,46 @@
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 
+// CHECK-LABEL: func.func @cfg_non_entry_block
+// CHECK: cf.br
+// CHECK: [[LATE:%.*]] = waveamdmachine.v_mov_b32_tuple
+// CHECK-SAME: -> !waveamdmachine.reg<vgpr, 1, 0>
+func.func @cfg_non_entry_block() {
+  cf.br ^later
+^later:
+  %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+  %late = waveamdmachine.v_mov_b32_tuple %zero {registers = 1 : i64}
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
+  return
+}
+
+}
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
+
+// CHECK-LABEL: func.func @generic_region_body
+// CHECK: scf.if
+// CHECK: [[INNER:%.*]] = waveamdmachine.v_mov_b32_tuple
+// CHECK-SAME: -> !waveamdmachine.reg<vgpr, 1, 0>
+func.func @generic_region_body() {
+  %cond = arith.constant true
+  scf.if %cond {
+    %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+    %inner = waveamdmachine.v_mov_b32_tuple %zero {registers = 1 : i64}
+        : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
+    scf.yield
+  }
+  return
+}
+
+}
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
+
 // SGPRPROMOTE-LABEL: func.func @sgpr_promote
 // SGPRPROMOTE: waveamdmachine.v_mov_b32_tuple
 // SGPRPROMOTE: waveamdmachine.v_readfirstlane_b32
@@ -46,6 +86,24 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 func.func @live_in(%arg0: !waveamdmachine.reg<vgpr, 1>) {
   %copy = waveamdmachine.v_mov_b32_tuple %arg0 {registers = 1 : i64}
       : (!waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
+  return
+}
+
+}
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
+
+// CHECK-LABEL: func.func @live_in_tuple_alias
+// CHECK-SAME: ([[ARG0:%.*]]: !waveamdmachine.reg<vgpr, 1>, [[ARG1:%.*]]: !waveamdmachine.reg<vgpr, 1>)
+// CHECK: [[TUPLE:%.*]] = waveamdmachine.tuple_from_elements [[ARG0]], [[ARG1]]
+// CHECK-SAME: -> !waveamdmachine.reg<vgpr, 2, 0>
+func.func @live_in_tuple_alias(%arg0: !waveamdmachine.reg<vgpr, 1>,
+                               %arg1: !waveamdmachine.reg<vgpr, 1>) {
+  %tuple = waveamdmachine.tuple_from_elements %arg0, %arg1
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+      -> !waveamdmachine.reg<vgpr, 2>
   return
 }
 

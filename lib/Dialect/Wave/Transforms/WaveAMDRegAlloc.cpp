@@ -11,6 +11,7 @@
 #include "WaveAMDHardwareResources.h"
 #include "WaveAMDRegAllocInternal.h"
 #include "WaveAMDRegAllocPrep.h"
+#include "WaveAMDRegLiveIntervals.h"
 #include "WaveAMDRegPressureRelief.h"
 #include "WaveAMDRegisterLimits.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -280,16 +281,6 @@ static void setRegClass(Value value, waveamdmachine::RegClass regClass) {
   value.setType(getRegType(value, regClass));
 }
 
-static void flatten(Block &block, Inventory &inventory) {
-  for (Operation &op : block) {
-    inventory.positions[&op] = inventory.ops.size();
-    inventory.ops.push_back(&op);
-    for (Region &region : op.getRegions())
-      for (Block &nested : region)
-        flatten(nested, inventory);
-  }
-}
-
 static std::optional<int64_t> getRegionNumber(Operation *op, Region *region) {
   for (auto [index, candidate] : llvm::enumerate(op->getRegions()))
     if (&candidate == region)
@@ -549,16 +540,6 @@ static LogicalResult validateFunctionRegTypes(func::FuncOp func) {
   return success(!walk.wasInterrupted());
 }
 
-static unsigned getStart(Value value, Inventory &inventory, unsigned fallback) {
-  if (Operation *def = value.getDefiningOp())
-    return inventory.positions.lookup(def);
-  Operation *parent = cast<BlockArgument>(value).getOwner()->getParentOp();
-  if (isa_and_nonnull<func::FuncOp>(parent))
-    return 0;
-  auto it = inventory.positions.find(parent);
-  return it == inventory.positions.end() ? fallback : it->second;
-}
-
 static std::unique_ptr<Interval>
 makeScalarInterval(MLIRContext *ctx, waveamdmachine::RegClass cls,
                    int64_t index, unsigned start, unsigned end) {
@@ -567,67 +548,6 @@ makeScalarInterval(MLIRContext *ctx, waveamdmachine::RegClass cls,
   interval->start = start;
   interval->end = end;
   return interval;
-}
-
-static Interval *ensureInterval(Value value, Inventory &inventory,
-                                unsigned fallback) {
-  if (auto it = inventory.intervalFor.find(value);
-      it != inventory.intervalFor.end())
-    return it->second;
-  std::optional<waveamdmachine::RegType> type = getTrackedType(value);
-  assert(type && "caller checked tracked type");
-
-  unsigned start = getStart(value, inventory, fallback);
-  std::unique_ptr<IntervalGroup> group = std::make_unique<IntervalGroup>();
-  IntervalGroup *groupPtr = group.get();
-  groupPtr->preferredClass = type->getRegClass();
-  groupPtr->storageClass = type->getRegClass();
-  groupPtr->order = inventory.groups.size();
-  inventory.groups.push_back(std::move(group));
-
-  Interval *first = nullptr;
-  for (unsigned offset : llvm::seq<unsigned>(0, type->getWidth())) {
-    std::unique_ptr<Interval> interval = makeScalarInterval(
-        type->getContext(), type->getRegClass(),
-        type->getIndex() < 0 ? -1 : type->getIndex() + offset, start, start);
-    interval->values.insert(value);
-    interval->group = groupPtr;
-    if (auto arg = dyn_cast<BlockArgument>(value))
-      if (isa<func::FuncOp>(arg.getOwner()->getParentOp())) {
-        interval->nonPromotable = true;
-        groupPtr->nonPromotable = true;
-        groupPtr->allocatable = false;
-      }
-    if (Operation *def = value.getDefiningOp();
-        def && def->hasAttr(kTempAttr)) {
-      interval->nonPromotable = true;
-      groupPtr->nonPromotable = true;
-    }
-    Interval *intervalPtr = interval.get();
-    if (!first)
-      first = intervalPtr;
-    groupPtr->intervals.push_back(intervalPtr);
-    inventory.intervals.push_back(std::move(interval));
-  }
-  inventory.intervalFor[value] = first;
-  inventory.scalarIntervals += groupPtr->intervals.size();
-  return first;
-}
-
-static void createInterval(Value value, Inventory &inventory,
-                           unsigned fallback) {
-  if (getTrackedType(value))
-    (void)ensureInterval(value, inventory, fallback);
-}
-
-static void extendInterval(Value value, Inventory &inventory,
-                           unsigned position) {
-  if (!getTrackedType(value))
-    return;
-  (void)ensureInterval(value, inventory, position);
-  for (const std::unique_ptr<Interval> &interval : inventory.intervals)
-    if (interval->values.contains(value))
-      interval->end = std::max(interval->end, position);
 }
 
 static void createReservedGroup(Inventory &inventory, MLIRContext *ctx,
@@ -666,199 +586,173 @@ static void createReservedABIIntervals(func::FuncOp func,
                       wave::getWaveAMDReservedVGPRs(func), end);
 }
 
+static bool isFunctionEntryBlockArgument(Value value) {
+  auto arg = dyn_cast<BlockArgument>(value);
+  return arg && isa<func::FuncOp>(arg.getOwner()->getParentOp());
+}
+
+static bool isRegAllocTempValue(Value value) {
+  Operation *def = value.getDefiningOp();
+  return def && def->hasAttr(kTempAttr);
+}
+
+struct ImportedLane {
+  llvm::SmallDenseSet<Value, 1> values;
+  std::optional<int64_t> fixedIndex;
+  Value fixedValue;
+  unsigned start = std::numeric_limits<unsigned>::max();
+  unsigned end = 0;
+  bool nonPromotable = false;
+  bool touched = false;
+};
+
+static unsigned getDiagnosticPosition(Value value, Inventory &inventory) {
+  if (Operation *def = value.getDefiningOp())
+    return inventory.positions.lookup(def);
+  BlockArgument arg = cast<BlockArgument>(value);
+  Operation *parent = arg.getOwner()->getParentOp();
+  if (isa<func::FuncOp>(parent))
+    return 0;
+  return inventory.positions.lookup(parent);
+}
+
+static Operation *getFixedAliasConflictDiag(Value oldValue, Value newValue,
+                                            func::FuncOp func,
+                                            Inventory &inventory) {
+  if (getDiagnosticPosition(newValue, inventory) >
+      getDiagnosticPosition(oldValue, inventory))
+    return diagOpForValue(newValue, func);
+  return diagOpForValue(oldValue, func);
+}
+
+static LogicalResult recordImportedLaneValue(func::FuncOp func, Value value,
+                                             unsigned valueLane, unsigned start,
+                                             unsigned end, ImportedLane &lane,
+                                             Inventory &inventory) {
+  auto type = cast<waveamdmachine::RegType>(value.getType());
+  if (type.getIndex() >= 0) {
+    int64_t fixedIndex = type.getIndex() + valueLane;
+    if (lane.fixedIndex && *lane.fixedIndex != fixedIndex)
+      return getFixedAliasConflictDiag(lane.fixedValue, value, func, inventory)
+                 ->emitError()
+             << kPassName << " found incompatible fixed alias registers";
+    lane.fixedIndex = fixedIndex;
+    lane.fixedValue = value;
+  }
+  lane.values.insert(value);
+  lane.start = std::min(lane.start, start);
+  lane.end = std::max(lane.end, end);
+  lane.nonPromotable |=
+      isFunctionEntryBlockArgument(value) || isRegAllocTempValue(value);
+  lane.touched = true;
+  return success();
+}
+
+static LogicalResult
+collectImportedLanes(func::FuncOp func, const wave::WaveAMDLiveInterval &source,
+                     SmallVectorImpl<ImportedLane> &lanes,
+                     Inventory &inventory) {
+  for (auto [value, slot, start, end] :
+       llvm::zip(source.values, source.slotOffsets, source.valueStarts,
+                 source.valueEnds)) {
+    auto type = cast<waveamdmachine::RegType>(value.getType());
+    unsigned width = static_cast<unsigned>(type.getWidth());
+    if (slot + width > lanes.size())
+      return diagOpForValue(value, func)->emitError()
+             << kPassName << " live interval alias exceeds register width";
+    for (unsigned valueLane : llvm::seq<unsigned>(0, width)) {
+      if (failed(recordImportedLaneValue(func, value, valueLane, start, end,
+                                         lanes[slot + valueLane], inventory)))
+        return failure();
+    }
+  }
+  return success();
+}
+
+static LogicalResult importLiveInterval(func::FuncOp func,
+                                        const wave::WaveAMDLiveInterval &source,
+                                        Inventory &inventory) {
+  if (source.values.empty())
+    return success();
+  unsigned width = static_cast<unsigned>(source.type.getWidth());
+  SmallVector<ImportedLane, 8> lanes(width);
+  if (failed(collectImportedLanes(func, source, lanes, inventory)))
+    return failure();
+
+  std::unique_ptr<IntervalGroup> group = std::make_unique<IntervalGroup>();
+  IntervalGroup *groupPtr = group.get();
+  groupPtr->preferredClass = source.type.getRegClass();
+  groupPtr->storageClass = source.type.getRegClass();
+  groupPtr->order = inventory.groups.size();
+
+  bool hasLocalValue = false;
+  for (const ImportedLane &lane : lanes) {
+    groupPtr->nonPromotable |= lane.nonPromotable;
+    for (Value value : lane.values)
+      hasLocalValue |= !isFunctionEntryBlockArgument(value);
+  }
+  groupPtr->allocatable = hasLocalValue;
+
+  inventory.groups.push_back(std::move(group));
+  for (unsigned laneIndex : llvm::seq<unsigned>(0, width)) {
+    const ImportedLane &lane = lanes[laneIndex];
+    unsigned start = lane.touched ? lane.start : source.start;
+    unsigned end = lane.touched ? lane.end : source.end;
+    int64_t fixedIndex = lane.fixedIndex.value_or(-1);
+    std::unique_ptr<Interval> interval =
+        makeScalarInterval(source.type.getContext(), source.type.getRegClass(),
+                           fixedIndex, start, end);
+    interval->values = lane.values;
+    interval->group = groupPtr;
+    interval->nonPromotable = lane.nonPromotable;
+    Interval *intervalPtr = interval.get();
+    groupPtr->intervals.push_back(intervalPtr);
+    inventory.intervals.push_back(std::move(interval));
+  }
+
+  for (auto [value, slot] : llvm::zip(source.values, source.slotOffsets))
+    inventory.intervalFor[value] = groupPtr->intervals[slot];
+  inventory.scalarIntervals += groupPtr->intervals.size();
+  return success();
+}
+
+struct ImportRef {
+  const wave::WaveAMDLiveInterval *interval;
+  unsigned classOrder;
+  unsigned intervalOrder;
+};
+
+static void appendImportRefs(ArrayRef<wave::WaveAMDLiveInterval> intervals,
+                             unsigned classOrder,
+                             SmallVectorImpl<ImportRef> &refs) {
+  for (auto [index, interval] : llvm::enumerate(intervals))
+    if (!interval.values.empty())
+      refs.push_back({&interval, classOrder, static_cast<unsigned>(index)});
+}
+
+static LogicalResult importLiveIntervals(func::FuncOp func,
+                                         wave::WaveAMDLiveIntervalSet &source,
+                                         Inventory &inventory) {
+  SmallVector<ImportRef, 32> refs;
+  appendImportRefs(source.sgprs, /*classOrder=*/0, refs);
+  appendImportRefs(source.vgprs, /*classOrder=*/1, refs);
+  appendImportRefs(source.agprs, /*classOrder=*/2, refs);
+  llvm::stable_sort(refs, [](const ImportRef &lhs, const ImportRef &rhs) {
+    return std::tie(lhs.interval->start, lhs.classOrder, lhs.intervalOrder) <
+           std::tie(rhs.interval->start, rhs.classOrder, rhs.intervalOrder);
+  });
+  for (const ImportRef &ref : refs)
+    if (failed(importLiveInterval(func, *ref.interval, inventory)))
+      return failure();
+  return success();
+}
+
 static std::optional<unsigned> getLaneIndex(IntervalGroup *group,
                                             Interval *interval) {
   for (auto [index, lane] : llvm::enumerate(group->intervals))
     if (lane == interval)
       return index;
   return std::nullopt;
-}
-
-static LogicalResult mergeLane(Inventory &inventory, Operation *diagOp,
-                               Interval *dst, Interval *src, bool firstLane) {
-  if (dst == src)
-    return success();
-  if (dst->type.getRegClass() != src->type.getRegClass())
-    return success();
-  if (dst->type.getIndex() >= 0 && src->type.getIndex() >= 0 &&
-      dst->type.getIndex() != src->type.getIndex())
-    return diagOp->emitError(kPassName)
-           << " found incompatible fixed alias registers";
-  for (Value value : src->values) {
-    dst->values.insert(value);
-    if (firstLane && inventory.intervalFor.lookup(value) == src)
-      inventory.intervalFor[value] = dst;
-  }
-  dst->start = std::min(dst->start, src->start);
-  dst->end = std::max(dst->end, src->end);
-  dst->reserved |= src->reserved;
-  dst->nonPromotable |= src->nonPromotable;
-  dst->group->reserved |= src->group->reserved;
-  dst->group->nonPromotable |= src->group->nonPromotable;
-  src->values.clear();
-  src->group = dst->group;
-  return success();
-}
-
-static bool canAliasTypes(waveamdmachine::RegType baseType,
-                          waveamdmachine::RegType valueType, unsigned offset) {
-  if (baseType.getRegClass() != valueType.getRegClass())
-    return false;
-  return offset + valueType.getWidth() <= baseType.getWidth();
-}
-
-static bool isMFMA(Operation *op);
-
-static LogicalResult mergeLaneRange(Inventory &inventory, Operation *diagOp,
-                                    IntervalGroup *base, unsigned baseIndex,
-                                    IntervalGroup *value, unsigned valueIndex,
-                                    unsigned width) {
-  for (unsigned lane : llvm::seq<unsigned>(0, width)) {
-    unsigned dstIndex = baseIndex + lane;
-    unsigned srcIndex = valueIndex + lane;
-    if (dstIndex >= base->intervals.size() ||
-        srcIndex >= value->intervals.size())
-      return success();
-    if (failed(mergeLane(inventory, diagOp, base->intervals[dstIndex],
-                         value->intervals[srcIndex], lane == 0)))
-      return failure();
-  }
-  return success();
-}
-
-static LogicalResult aliasValues(Inventory &inventory, Operation *diagOp,
-                                 Value base, Value value, unsigned offset,
-                                 unsigned fallback) {
-  std::optional<waveamdmachine::RegType> baseType = getTrackedType(base);
-  std::optional<waveamdmachine::RegType> valueType = getTrackedType(value);
-  if (!baseType || !valueType)
-    return success();
-  if (!canAliasTypes(*baseType, *valueType, offset))
-    return success();
-
-  Interval *baseFirst = ensureInterval(base, inventory, fallback);
-  Interval *valueFirst = ensureInterval(value, inventory, fallback);
-  std::optional<unsigned> baseIndex = getLaneIndex(baseFirst->group, baseFirst);
-  std::optional<unsigned> valueIndex =
-      getLaneIndex(valueFirst->group, valueFirst);
-  if (!baseIndex || !valueIndex)
-    return success();
-
-  return mergeLaneRange(inventory, diagOp, baseFirst->group,
-                        *baseIndex + offset, valueFirst->group, *valueIndex,
-                        valueType->getWidth());
-}
-
-static LogicalResult collectTupleAliases(Operation &op, Inventory &inventory,
-                                         unsigned position) {
-  if (auto from = dyn_cast<waveamdmachine::TupleFromElementsOp>(&op)) {
-    Value tuple = from.getTuple();
-    unsigned offset = 0;
-    for (Value element : from.getElements()) {
-      if (failed(aliasValues(inventory, &op, tuple, element, offset, position)))
-        return failure();
-      if (std::optional<waveamdmachine::RegType> type = getTrackedType(element))
-        offset += type->getWidth();
-    }
-    return success();
-  }
-
-  if (auto to = dyn_cast<waveamdmachine::TupleToElementsOp>(&op)) {
-    Value tuple = to.getTuple();
-    unsigned offset = 0;
-    for (Value element : to.getResults()) {
-      if (failed(aliasValues(inventory, &op, tuple, element, offset, position)))
-        return failure();
-      if (std::optional<waveamdmachine::RegType> type = getTrackedType(element))
-        offset += type->getWidth();
-    }
-  }
-  return success();
-}
-
-static LogicalResult collectMFMAAccumulatorAlias(Operation &op,
-                                                 Inventory &inventory,
-                                                 unsigned position) {
-  if (!isMFMA(&op) || op.getNumOperands() <= 2 || op.getNumResults() != 1)
-    return success();
-  Value acc = op.getOperand(2);
-  if (!llvm::hasSingleElement(acc.getUses()))
-    return success();
-  Value result = op.getResult(0);
-  std::optional<waveamdmachine::RegType> accType = getTrackedType(acc);
-  std::optional<waveamdmachine::RegType> resultType = getTrackedType(result);
-  if (!accType || !resultType)
-    return success();
-  if (accType->getRegClass() != resultType->getRegClass() ||
-      accType->getWidth() != resultType->getWidth())
-    return success();
-  return aliasValues(inventory, &op, acc, result, /*offset=*/0, position);
-}
-
-static LogicalResult collectLoopSlotAliases(Inventory &inventory, Operation &op,
-                                            waveamdmachine::UniformLoopOp loop,
-                                            waveamdmachine::ContinueIfOp term,
-                                            Block &body, unsigned index,
-                                            unsigned position) {
-  if (index >= body.getNumArguments() || index >= loop.getNumResults())
-    return success();
-  Value init = loop.getInits()[index];
-  if (failed(aliasValues(inventory, &op, init, body.getArgument(index),
-                         /*offset=*/0, position)))
-    return failure();
-  if (failed(aliasValues(inventory, &op, init, loop.getResult(index),
-                         /*offset=*/0, position)))
-    return failure();
-  if (term && index < term.getCarries().size())
-    return aliasValues(inventory, &op, init, term.getCarries()[index],
-                       /*offset=*/0, position);
-  return success();
-}
-
-static LogicalResult collectLoopAliases(Operation &op, Inventory &inventory,
-                                        unsigned position) {
-  auto loop = dyn_cast<waveamdmachine::UniformLoopOp>(&op);
-  if (!loop || loop.getBody().empty())
-    return success();
-
-  Block &body = loop.getBody().front();
-  auto term = dyn_cast<waveamdmachine::ContinueIfOp>(body.getTerminator());
-  for (unsigned index : llvm::seq<unsigned>(0, loop.getInits().size()))
-    if (failed(collectLoopSlotAliases(inventory, op, loop, term, body, index,
-                                      position)))
-      return failure();
-  return success();
-}
-
-static LogicalResult collectExecIfRegionAliases(Inventory &inventory,
-                                                Operation *diagOp, Value result,
-                                                Region &region, unsigned index,
-                                                unsigned position) {
-  if (region.empty())
-    return success();
-  auto yield =
-      dyn_cast<waveamdmachine::YieldOp>(region.front().getTerminator());
-  if (!yield || index >= yield.getValues().size())
-    return success();
-  return aliasValues(inventory, diagOp, result, yield.getValues()[index],
-                     /*offset=*/0, position);
-}
-
-static LogicalResult collectExecIfAliases(Operation &op, Inventory &inventory,
-                                          unsigned position) {
-  auto execIf = dyn_cast<waveamdmachine::ExecIfOp>(&op);
-  if (!execIf)
-    return success();
-  for (unsigned index : llvm::seq<unsigned>(0, execIf.getNumResults())) {
-    Value result = execIf.getResult(index);
-    if (failed(collectExecIfRegionAliases(
-            inventory, &op, result, execIf.getThenRegion(), index, position)))
-      return failure();
-    if (failed(collectExecIfRegionAliases(
-            inventory, &op, result, execIf.getElseRegion(), index, position)))
-      return failure();
-  }
-  return success();
 }
 
 static unsigned getLiveDwords(ArrayRef<std::unique_ptr<Interval>> intervals,
@@ -895,40 +789,6 @@ static void updatePeaks(Inventory &inventory) {
   inventory.peakSGPR = getPeak(inventory, waveamdmachine::RegClass::SGPR);
   inventory.peakVGPR = getPeak(inventory, waveamdmachine::RegClass::VGPR);
   inventory.peakAGPR = getPeak(inventory, waveamdmachine::RegClass::AGPR);
-}
-
-static bool operationIsInside(Operation *root, Operation *op) {
-  for (Operation *cur = op; cur; cur = cur->getParentOp())
-    if (cur == root)
-      return true;
-  return false;
-}
-
-static bool valueIsDefinedInside(Operation *root, Value value) {
-  if (Operation *def = value.getDefiningOp())
-    return operationIsInside(root, def);
-  Operation *parent = cast<BlockArgument>(value).getOwner()->getParentOp();
-  return operationIsInside(root, parent);
-}
-
-static unsigned getRegionEnd(Operation *root, Inventory &inventory) {
-  unsigned end = inventory.positions.lookup(root);
-  root->walk([&](Operation *op) {
-    if (auto it = inventory.positions.find(op); it != inventory.positions.end())
-      end = std::max(end, it->second);
-  });
-  return end;
-}
-
-static void extendExternalLoopUse(Operation *user, Value operand,
-                                  Inventory &inventory) {
-  for (Operation *cur = user->getParentOp(); cur; cur = cur->getParentOp()) {
-    if (!isa<waveamdmachine::UniformLoopOp>(cur))
-      continue;
-    if (valueIsDefinedInside(cur, operand))
-      continue;
-    extendInterval(operand, inventory, getRegionEnd(cur, inventory));
-  }
 }
 
 static bool isLiveAt(Interval *interval, unsigned position) {
@@ -2391,30 +2251,17 @@ static LogicalResult buildInventory(func::FuncOp func, Inventory &inventory) {
   if (failed(validateFunctionRegTypes(func)))
     return failure();
   inventory.entryRegs = wave::getWaveAMDKernelEntryRegs(func);
-  for (Block &block : func.getBody())
-    flatten(block, inventory);
+  FailureOr<wave::WaveAMDLiveIntervalBuildResult> built =
+      wave::buildAllocatedWaveAMDLiveIntervals(func);
+  if (failed(built))
+    return failure();
+  inventory.ops.append(built->orderedOps);
+  inventory.positions = std::move(built->positions);
   createReservedABIIntervals(func, inventory);
-  for (Operation *op : inventory.ops) {
-    unsigned position = inventory.positions.lookup(op);
-    for (Value result : op->getResults())
-      createInterval(result, inventory, position);
-    for (Value operand : op->getOperands()) {
-      extendInterval(operand, inventory, position);
-      extendExternalLoopUse(op, operand, inventory);
-    }
-    if (failed(collectMFMAAccumulatorAlias(*op, inventory, position)) ||
-        failed(collectTupleAliases(*op, inventory, position)) ||
-        failed(collectLoopAliases(*op, inventory, position)) ||
-        failed(collectExecIfAliases(*op, inventory, position)))
-      return failure();
-  }
+  if (failed(importLiveIntervals(func, built->intervals, inventory)))
+    return failure();
   updatePeaks(inventory);
   return success();
-}
-
-static bool isFunctionEntryBlockArgument(Value value) {
-  auto arg = dyn_cast<BlockArgument>(value);
-  return arg && isa<func::FuncOp>(arg.getOwner()->getParentOp());
 }
 
 static LogicalResult markFixedValueIfNeeded(Value value, bool recordFixedValues,

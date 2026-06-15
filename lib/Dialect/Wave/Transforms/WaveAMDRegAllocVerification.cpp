@@ -121,6 +121,8 @@ static LogicalResult buildPhysicalLiveRange(
                  interval.valueEnds)) {
     auto type = cast<waveamdmachine::RegType>(value.getType());
     int64_t index = type.getIndex();
+    if (index < 0)
+      continue;
     if (index < static_cast<int64_t>(slotOffset))
       return diagOpForValue(value, func)->emitError()
              << consumer << " found register alias below physical zero";
