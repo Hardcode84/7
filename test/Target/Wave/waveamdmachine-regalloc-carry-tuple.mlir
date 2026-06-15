@@ -29,4 +29,36 @@ func.func @carry_tuple(%a: !waveamdmachine.reg<sgpr, 2>, %n: !waveamdmachine.reg
   waveamdmachine.s_endpgm
   return
 }
+
+// CHECK-LABEL: func.func @tuple_element_loop_backedge_value
+// CHECK: [[PARTS:%.*]]:2 = waveamdmachine.tuple_to_elements
+// CHECK-SAME: -> (!waveamdmachine.reg<vgpr, 1, {{[0-9]+}}>, !waveamdmachine.reg<vgpr, 1, [[SLOT:[0-9]+]]>)
+// CHECK: waveamdmachine.uniform_loop {{.*}}carries([[PARTS]]#1 : !waveamdmachine.reg<vgpr, 1, [[SLOT]]>)
+// CHECK: ^bb0([[CUR:%.*]]: !waveamdmachine.reg<vgpr, 1, [[SLOT]]>):
+// CHECK: [[NEXT:%.*]] = waveamdmachine.v_add_u32 [[CUR]], [[CUR]]
+// CHECK-SAME: -> !waveamdmachine.reg<vgpr, 1, [[SLOT]]>
+// CHECK: continue_if {{.*}} carries([[NEXT]] : !waveamdmachine.reg<vgpr, 1, [[SLOT]]>)
+// CHECK: } -> !waveamdmachine.reg<vgpr, 1, [[SLOT]]>
+func.func @tuple_element_loop_backedge_value() {
+  %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+  %one = waveamdmachine.imm 1 : !waveamdmachine.imm
+  %tuple = waveamdmachine.v_mov_b32_tuple %zero {registers = 2 : i64}
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 2>
+  %parts:2 = waveamdmachine.tuple_to_elements %tuple
+      : (!waveamdmachine.reg<vgpr, 2>)
+      -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+  %ec = waveamdmachine.s_cmp_lt_i32 %zero, %one
+      : (!waveamdmachine.imm, !waveamdmachine.imm)
+        -> !waveamdmachine.reg<scc, 1>
+  %r = waveamdmachine.uniform_loop if %ec : !waveamdmachine.reg<scc, 1>
+      carries(%parts#1 : !waveamdmachine.reg<vgpr, 1>) {
+  ^bb0(%cur: !waveamdmachine.reg<vgpr, 1>):
+    %next = waveamdmachine.v_add_u32 %cur, %cur
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+    waveamdmachine.continue_if %ec : !waveamdmachine.reg<scc, 1>
+        carries(%next : !waveamdmachine.reg<vgpr, 1>)
+  } -> !waveamdmachine.reg<vgpr, 1>
+  return
+}
 }

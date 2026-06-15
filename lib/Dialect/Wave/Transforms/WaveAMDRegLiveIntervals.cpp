@@ -407,17 +407,52 @@ private:
       // Pre-pinned inits have no interval; carry/result already share phys.
       if (!table->contains(init))
         continue;
-      if (failed(
-              coalesce(init, body.getArgument(i), pos, result.intervals, loop)))
+      FailureOr<unsigned> initSlot =
+          getIntervalSlotOffset(init, (*bucket)[table->lookup(init)], loop);
+      if (failed(initSlot))
         return failure();
-      if (failed(
-              coalesce(init, loop.getResult(i), pos, result.intervals, loop)))
+      if (failed(coalesce(init, body.getArgument(i), pos, result.intervals,
+                          loop, *initSlot)))
+        return failure();
+      if (failed(coalesce(init, loop.getResult(i), pos, result.intervals, loop,
+                          *initSlot)))
         return failure();
     }
     return success();
   }
 
-  void coalesceLoopBackEdgeCarries(waveamdmachine::UniformLoopOp loop) {
+  LogicalResult mergeLoopBackEdgeInterval(waveamdmachine::UniformLoopOp loop,
+                                          wave::WaveAMDLiveInterval &loopIv,
+                                          wave::WaveAMDLiveInterval &carryIv,
+                                          unsigned initSlot, unsigned carrySlot,
+                                          unsigned loopIndex,
+                                          DenseMap<Value, unsigned> &table) {
+    updateEnvelope(loopIv, carryIv.start, carryIv.end);
+    for (auto [v, off, start, end] :
+         llvm::zip(carryIv.values, carryIv.slotOffsets, carryIv.valueStarts,
+                   carryIv.valueEnds)) {
+      int64_t shifted = static_cast<int64_t>(off) -
+                        static_cast<int64_t>(carrySlot) +
+                        static_cast<int64_t>(initSlot);
+      if (shifted < 0 ||
+          !canAliasInterval(loopIv, cast<waveamdmachine::RegType>(v.getType()),
+                            static_cast<unsigned>(shifted)))
+        return loop.emitError("loop carry alias slot offset mismatch");
+      loopIv.values.push_back(v);
+      loopIv.slotOffsets.push_back(static_cast<unsigned>(shifted));
+      loopIv.valueStarts.push_back(start);
+      loopIv.valueEnds.push_back(end);
+      table[v] = loopIndex;
+    }
+    carryIv.values.clear();
+    carryIv.slotOffsets.clear();
+    carryIv.valueStarts.clear();
+    carryIv.valueEnds.clear();
+    return success();
+  }
+
+  LogicalResult
+  coalesceLoopBackEdgeCarries(waveamdmachine::UniformLoopOp loop) {
     Block &body = loop.getBody().front();
     auto term = cast<waveamdmachine::ContinueIfOp>(body.getTerminator());
     // Back-edge carry is a rename into the init interval.
@@ -431,25 +466,25 @@ private:
       auto carryIt = table->find(carry);
       if (carryIt == table->end() || initIt == table->end())
         continue;
-      if (carryIt->second == initIt->second)
-        continue;
       wave::WaveAMDLiveInterval &loopIv = (*bucket)[initIt->second];
       wave::WaveAMDLiveInterval &carryIv = (*bucket)[carryIt->second];
-      updateEnvelope(loopIv, carryIv.start, carryIv.end);
-      for (auto [v, off, start, end] :
-           llvm::zip(carryIv.values, carryIv.slotOffsets, carryIv.valueStarts,
-                     carryIv.valueEnds)) {
-        loopIv.values.push_back(v);
-        loopIv.slotOffsets.push_back(off);
-        loopIv.valueStarts.push_back(start);
-        loopIv.valueEnds.push_back(end);
-        (*table)[v] = initIt->second;
+      FailureOr<unsigned> initSlot = getIntervalSlotOffset(init, loopIv, loop);
+      if (failed(initSlot))
+        return failure();
+      FailureOr<unsigned> carrySlot =
+          getIntervalSlotOffset(carry, carryIv, loop);
+      if (failed(carrySlot))
+        return failure();
+      if (carryIt->second == initIt->second) {
+        if (*carrySlot != *initSlot)
+          return loop.emitError("loop carry alias slot offset mismatch");
+        continue;
       }
-      carryIv.values.clear();
-      carryIv.slotOffsets.clear();
-      carryIv.valueStarts.clear();
-      carryIv.valueEnds.clear();
+      if (failed(mergeLoopBackEdgeInterval(loop, loopIv, carryIv, *initSlot,
+                                           *carrySlot, initIt->second, *table)))
+        return failure();
     }
+    return success();
   }
 
   void extendCarriesToLoopEnd(waveamdmachine::UniformLoopOp loop,
@@ -477,7 +512,8 @@ private:
     Block &body = loop.getBody().front();
     if (failed(walkBlock(body)))
       return failure();
-    coalesceLoopBackEdgeCarries(loop);
+    if (failed(coalesceLoopBackEdgeCarries(loop)))
+      return failure();
     unsigned loopEnd = cursor - 1;
     extendCarriesToLoopEnd(loop, loopEnd);
     extendExternalLoopUses(loop, loopEnd);
