@@ -50,6 +50,55 @@ func.func @agpr_mfma_chain() attributes {wave.kernel} {
   return
 }
 
+// REGALLOC-LABEL: func.func @mfma_loop_carried_accumulator
+// REGALLOC: %[[INIT:.+]] = waveamdmachine.v_accvgpr_write_b32_tuple
+// REGALLOC-SAME: -> !waveamdmachine.reg<agpr, 4, [[ACC_SLOT:[0-9]+]]>
+// REGALLOC: %[[RESULTS:.+]]:2 = waveamdmachine.uniform_loop
+// REGALLOC-SAME: carries(%{{.*}}, %[[INIT]] : {{.*}}, !waveamdmachine.reg<agpr, 4, [[ACC_SLOT]]>)
+// REGALLOC: ^bb0({{.*}}, %[[ACC_ARG:[A-Za-z0-9_]+]]: !waveamdmachine.reg<agpr, 4, [[ACC_SLOT]]>):
+// REGALLOC-NOT: waveamdmachine.v_mov_b32_tuple
+// REGALLOC: %[[MFMA:.+]] = waveamdmachine.mfma_f32_16x16x32_f16 {{.*}}, {{.*}}, %[[ACC_ARG]]
+// REGALLOC-SAME: -> !waveamdmachine.reg<agpr, 4, [[ACC_SLOT]]>
+// REGALLOC-NOT: waveamdmachine.v_mov_b32_tuple
+// REGALLOC: waveamdmachine.continue_if {{.*}}carries({{.*}}, %[[MFMA]]
+// REGALLOC: waveamdmachine.v_accvgpr_read_b32_tuple %[[RESULTS]]#1
+// REGALLOC-SAME: (!waveamdmachine.reg<agpr, 4, [[ACC_SLOT]]>)
+func.func @mfma_loop_carried_accumulator() {
+  %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+  %one = waveamdmachine.imm 1 : !waveamdmachine.imm
+  %four = waveamdmachine.imm 4 : !waveamdmachine.imm
+  %a = waveamdmachine.uninit : !waveamdmachine.reg<agpr, 4>
+  %b = waveamdmachine.uninit : !waveamdmachine.reg<agpr, 4>
+  %acc_v = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 4>
+  %init = waveamdmachine.v_accvgpr_write_b32_tuple %acc_v
+      : (!waveamdmachine.reg<vgpr, 4>) -> !waveamdmachine.reg<agpr, 4>
+  %iv = waveamdmachine.s_mov_b32_value %zero
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<sgpr, 1>
+  %ec = waveamdmachine.s_cmp_lt_i32 %zero, %four
+      : (!waveamdmachine.imm, !waveamdmachine.imm) -> !waveamdmachine.reg<scc, 1>
+  %results:2 = waveamdmachine.uniform_loop if %ec : !waveamdmachine.reg<scc, 1>
+      carries(%iv, %init : !waveamdmachine.reg<sgpr, 1>,
+              !waveamdmachine.reg<agpr, 4>) {
+  ^bb0(%cur_iv: !waveamdmachine.reg<sgpr, 1>,
+       %acc: !waveamdmachine.reg<agpr, 4>):
+    %mfma = waveamdmachine.mfma_f32_16x16x32_f16 %a, %b, %acc
+        : (!waveamdmachine.reg<agpr, 4>, !waveamdmachine.reg<agpr, 4>,
+           !waveamdmachine.reg<agpr, 4>) -> !waveamdmachine.reg<agpr, 4>
+    %next_iv, %add_scc = waveamdmachine.s_add_i32 %cur_iv, %one
+        : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.imm)
+          -> (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<scc, 1>)
+    %bc = waveamdmachine.s_cmp_lt_i32 %next_iv, %four
+        : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.imm)
+          -> !waveamdmachine.reg<scc, 1>
+    waveamdmachine.continue_if %bc : !waveamdmachine.reg<scc, 1>
+        carries(%next_iv, %mfma : !waveamdmachine.reg<sgpr, 1>,
+                !waveamdmachine.reg<agpr, 4>)
+  } -> !waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<agpr, 4>
+  %read = waveamdmachine.v_accvgpr_read_b32_tuple %results#1
+      : (!waveamdmachine.reg<agpr, 4>) -> !waveamdmachine.reg<vgpr, 4>
+  return
+}
+
 // REGALLOC-LABEL: func.func @shared_mfma_acc
 // REGALLOC: %[[COPY0:[A-Za-z0-9_]+]] = waveamdmachine.v_mov_b32_tuple %[[ACC:[A-Za-z0-9_]+]]
 // REGALLOC: waveamdmachine.mfma_f32_16x16x32_f16 {{.*}}, {{.*}}, %[[COPY0]]
