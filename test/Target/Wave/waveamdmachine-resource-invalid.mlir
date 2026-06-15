@@ -41,6 +41,31 @@ func.func @duplicate_loop_carry_tuple_alias_slot_mismatch() {
 
 // -----
 
+func.func @duplicate_fixed_loop_carry_slots() {
+  %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+  // expected-note @below {{slot 0 phys=[5, 6)}}
+  // expected-note @below {{slot 1 phys=[5, 6)}}
+  %init = waveamdmachine.s_mov_b32_value %zero
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<sgpr, 1, 5>
+  %cond = waveamdmachine.s_cmp_lt_i32 %init, %init
+      : (!waveamdmachine.reg<sgpr, 1, 5>, !waveamdmachine.reg<sgpr, 1, 5>)
+        -> !waveamdmachine.reg<scc, 1>
+  // expected-error @below {{waveamd-resource-info found distinct fixed loop carry slots sharing SGPR register range}}
+  %result:2 = waveamdmachine.uniform_loop if %cond : !waveamdmachine.reg<scc, 1>
+      carries(%init, %init : !waveamdmachine.reg<sgpr, 1, 5>,
+                             !waveamdmachine.reg<sgpr, 1, 5>) {
+  ^bb0(%lhs: !waveamdmachine.reg<sgpr, 1, 5>,
+       %rhs: !waveamdmachine.reg<sgpr, 1, 5>):
+    waveamdmachine.continue_if %cond : !waveamdmachine.reg<scc, 1>
+        carries(%lhs, %rhs : !waveamdmachine.reg<sgpr, 1, 5>,
+                              !waveamdmachine.reg<sgpr, 1, 5>)
+  } -> !waveamdmachine.reg<sgpr, 1, 5>,
+       !waveamdmachine.reg<sgpr, 1, 5>
+  return
+}
+
+// -----
+
 // expected-error @below {{waveamd-resource-info found interfering VGPR register live ranges}}
 func.func @interfering_vgprs() {
   %zero = waveamdmachine.imm 0 : !waveamdmachine.imm

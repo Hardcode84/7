@@ -29,9 +29,27 @@ struct PhysicalLiveRange {
   unsigned physEnd = 0;
 };
 
+struct FixedCarryRange {
+  StringRef regClass;
+  Operation *diagOp = nullptr;
+  unsigned carryIndex = 0;
+  unsigned physStart = 0;
+  unsigned physEnd = 0;
+};
+
 static bool isAllocatedClass(waveamdmachine::RegType type) {
   return wave::isWaveAMDSGPR(type) || wave::isWaveAMDVGPR(type) ||
          wave::isWaveAMDAGPR(type);
+}
+
+static StringRef getRegClassName(waveamdmachine::RegType type) {
+  if (wave::isWaveAMDSGPR(type))
+    return "SGPR";
+  if (wave::isWaveAMDVGPR(type))
+    return "VGPR";
+  if (wave::isWaveAMDAGPR(type))
+    return "AGPR";
+  return "";
 }
 
 static Operation *diagOpForValue(Value value, func::FuncOp func) {
@@ -148,6 +166,136 @@ static bool liveRangesOverlap(const PhysicalLiveRange &lhs,
 static bool physicalRangesOverlap(const PhysicalLiveRange &lhs,
                                   const PhysicalLiveRange &rhs) {
   return lhs.physStart < rhs.physEnd && rhs.physStart < lhs.physEnd;
+}
+
+static bool physicalRangesOverlap(const FixedCarryRange &lhs,
+                                  const FixedCarryRange &rhs) {
+  return lhs.physStart < rhs.physEnd && rhs.physStart < lhs.physEnd;
+}
+
+static std::optional<FixedCarryRange>
+getFixedCarryRange(Value value, func::FuncOp func, unsigned carryIndex) {
+  auto type = dyn_cast<waveamdmachine::RegType>(value.getType());
+  if (!type || !isAllocatedClass(type) || type.getIndex() < 0)
+    return std::nullopt;
+  unsigned index = static_cast<unsigned>(type.getIndex());
+  unsigned width = static_cast<unsigned>(type.getWidth());
+  return FixedCarryRange{getRegClassName(type), diagOpForValue(value, func),
+                         carryIndex, index, index + width};
+}
+
+static LogicalResult
+mergeFixedCarryRange(std::optional<FixedCarryRange> &slotRange,
+                     const FixedCarryRange &range,
+                     waveamdmachine::UniformLoopOp loop, StringRef consumer) {
+  if (!slotRange) {
+    slotRange = range;
+    return success();
+  }
+  if (slotRange->regClass == range.regClass &&
+      slotRange->physStart == range.physStart &&
+      slotRange->physEnd == range.physEnd)
+    return success();
+  return loop.emitError() << consumer
+                          << " found inconsistent fixed loop carry storage";
+}
+
+static LogicalResult
+recordFixedCarryValue(SmallVectorImpl<std::optional<FixedCarryRange>> &ranges,
+                      Value value, func::FuncOp func,
+                      waveamdmachine::UniformLoopOp loop, unsigned carryIndex,
+                      StringRef consumer) {
+  std::optional<FixedCarryRange> range =
+      getFixedCarryRange(value, func, carryIndex);
+  if (!range)
+    return success();
+  return mergeFixedCarryRange(ranges[carryIndex], *range, loop, consumer);
+}
+
+static LogicalResult
+recordFixedCarrySlot(SmallVectorImpl<std::optional<FixedCarryRange>> &ranges,
+                     waveamdmachine::UniformLoopOp loop,
+                     waveamdmachine::ContinueIfOp term, func::FuncOp func,
+                     unsigned carryIndex, StringRef consumer) {
+  Block &body = loop.getBody().front();
+  if (failed(recordFixedCarryValue(ranges, loop.getInits()[carryIndex], func,
+                                   loop, carryIndex, consumer)))
+    return failure();
+  if (failed(recordFixedCarryValue(ranges, body.getArgument(carryIndex), func,
+                                   loop, carryIndex, consumer)))
+    return failure();
+  if (failed(recordFixedCarryValue(ranges, loop.getResult(carryIndex), func,
+                                   loop, carryIndex, consumer)))
+    return failure();
+  return recordFixedCarryValue(ranges, term.getCarries()[carryIndex], func,
+                               loop, carryIndex, consumer);
+}
+
+static LogicalResult
+collectFixedCarryRanges(SmallVectorImpl<std::optional<FixedCarryRange>> &ranges,
+                        waveamdmachine::UniformLoopOp loop, func::FuncOp func,
+                        StringRef consumer) {
+  waveamdmachine::ContinueIfOp term = cast<waveamdmachine::ContinueIfOp>(
+      loop.getBody().front().getTerminator());
+  for (unsigned i : llvm::seq<unsigned>(0, ranges.size())) {
+    if (failed(recordFixedCarrySlot(ranges, loop, term, func, i, consumer)))
+      return failure();
+  }
+  return success();
+}
+
+static LogicalResult
+emitFixedCarryOverlapError(waveamdmachine::UniformLoopOp loop,
+                           const FixedCarryRange &lhs,
+                           const FixedCarryRange &rhs, StringRef consumer) {
+  InFlightDiagnostic diag = loop.emitError()
+                            << consumer
+                            << " found distinct fixed loop carry slots sharing "
+                            << lhs.regClass << " register range";
+  diag.attachNote(lhs.diagOp->getLoc())
+      << "slot " << lhs.carryIndex << " phys=[" << lhs.physStart << ", "
+      << lhs.physEnd << ")";
+  diag.attachNote(rhs.diagOp->getLoc())
+      << "slot " << rhs.carryIndex << " phys=[" << rhs.physStart << ", "
+      << rhs.physEnd << ")";
+  return failure();
+}
+
+static LogicalResult
+verifyNoFixedCarryOverlap(ArrayRef<std::optional<FixedCarryRange>> ranges,
+                          waveamdmachine::UniformLoopOp loop,
+                          StringRef consumer) {
+  for (auto [index, lhs] : llvm::enumerate(ranges)) {
+    if (!lhs)
+      continue;
+    for (const std::optional<FixedCarryRange> &rhs :
+         ranges.drop_front(index + 1)) {
+      if (!rhs || lhs->regClass != rhs->regClass ||
+          !physicalRangesOverlap(*lhs, *rhs))
+        continue;
+      return emitFixedCarryOverlapError(loop, *lhs, *rhs, consumer);
+    }
+  }
+  return success();
+}
+
+static LogicalResult
+verifyFixedLoopCarryStorage(waveamdmachine::UniformLoopOp loop,
+                            func::FuncOp func, StringRef consumer) {
+  SmallVector<std::optional<FixedCarryRange>> ranges(loop.getInits().size());
+  if (failed(collectFixedCarryRanges(ranges, loop, func, consumer)))
+    return failure();
+  return verifyNoFixedCarryOverlap(ranges, loop, consumer);
+}
+
+static LogicalResult verifyFixedLoopCarryStorage(func::FuncOp func,
+                                                 StringRef consumer) {
+  WalkResult walk = func.walk([&](waveamdmachine::UniformLoopOp loop) {
+    return failed(verifyFixedLoopCarryStorage(loop, func, consumer))
+               ? WalkResult::interrupt()
+               : WalkResult::advance();
+  });
+  return success(!walk.wasInterrupted());
 }
 
 static bool
@@ -298,6 +446,8 @@ mlir::wave::verifyWaveAMDRegAllocation(func::FuncOp func, StringRef consumer,
   if (failed(failIfWaveAMDRegAllocOverflowed(func, consumer)))
     return failure();
   if (failed(verifyValuesAllocated(func, consumer, scope)))
+    return failure();
+  if (failed(verifyFixedLoopCarryStorage(func, consumer)))
     return failure();
   FailureOr<WaveAMDLiveIntervalBuildResult> builtIntervals =
       buildAllocatedWaveAMDLiveIntervals(func);
