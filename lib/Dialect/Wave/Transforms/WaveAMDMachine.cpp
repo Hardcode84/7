@@ -1886,12 +1886,32 @@ LogicalResult WaveAMDMachineSelector::selectBinaryShLI64(BinaryOp op) {
   return success();
 }
 
+static std::optional<int64_t> getSignedImmediate(WaveAMDMachineSelector &S,
+                                                 Value value) {
+  if (std::optional<int64_t> imm = S.getImmediateValue(value))
+    return *imm;
+  if (auto mov = value.getDefiningOp<waveamdmachine::SMovB64ImmOp>())
+    return mov.getValue();
+  return std::nullopt;
+}
+
 static std::optional<uint64_t> getWideImmediate(WaveAMDMachineSelector &S,
                                                 Value value) {
-  if (std::optional<int64_t> imm = S.getImmediateValue(value))
+  if (std::optional<int64_t> imm = getSignedImmediate(S, value))
     return static_cast<uint64_t>(*imm);
-  if (auto mov = value.getDefiningOp<waveamdmachine::SMovB64ImmOp>())
-    return static_cast<uint64_t>(mov.getValue());
+  return std::nullopt;
+}
+
+static uint64_t maskToWidth(uint64_t value, unsigned bits) {
+  if (bits >= 64)
+    return value;
+  return value & ((uint64_t{1} << bits) - 1);
+}
+
+static std::optional<uint64_t>
+getUnsignedImmediate(WaveAMDMachineSelector &S, Value value, unsigned bits) {
+  if (std::optional<uint64_t> imm = getWideImmediate(S, value))
+    return maskToWidth(*imm, bits);
   return std::nullopt;
 }
 
@@ -1899,10 +1919,22 @@ static bool isPositivePowerOfTwo(uint64_t value) {
   return value != 0 && (value & (value - 1)) == 0;
 }
 
+static bool isSignedDivRem(BinaryKind kind) {
+  return kind == BinaryKind::DivSI || kind == BinaryKind::RemSI;
+}
+
 static FailureOr<uint64_t> getPowerOfTwoDivisor(WaveAMDMachineSelector &S,
                                                 BinaryOp op) {
   Value rhs = S.expect(op.getRhs(), op);
-  std::optional<uint64_t> divisor = getWideImmediate(S, rhs);
+  if (isSignedDivRem(op.getKind())) {
+    std::optional<int64_t> divisor = getSignedImmediate(S, rhs);
+    if (!divisor || *divisor <= 0 ||
+        !isPositivePowerOfTwo(static_cast<uint64_t>(*divisor)))
+      return op.emitOpError("needs positive power-of-two static divisor");
+    return static_cast<uint64_t>(*divisor);
+  }
+  unsigned bits = S.waveArithElementBits(op.getResult().getType());
+  std::optional<uint64_t> divisor = getUnsignedImmediate(S, rhs, bits);
   if (!divisor || !isPositivePowerOfTwo(*divisor))
     return op.emitOpError("needs power-of-two static divisor");
   return *divisor;
@@ -1923,7 +1955,7 @@ static bool isProvenNonNegative(WaveAMDMachineSelector &S, Value source,
 static LogicalResult requireNonNegativeDividend(WaveAMDMachineSelector &S,
                                                 BinaryOp op) {
   BinaryKind kind = op.getKind();
-  if (kind != BinaryKind::DivSI && kind != BinaryKind::RemSI)
+  if (!isSignedDivRem(kind))
     return success();
   if (isProvenNonNegative(S, op.getLhs(), S.expect(op.getLhs(), op)))
     return success();
@@ -2908,11 +2940,11 @@ LogicalResult WaveAMDMachineSelector::selectArithCmp(arith::CmpIOp op) {
   bool signedCmp = isSignedCmpPredicate(predicate);
   Value lhs = expect(op.getLhs(), op);
   Value rhs = expect(op.getRhs(), op);
-  values[op.getResult()] =
-      bits == 64 ? createScalarI64Cmp(*this, op.getLoc(), *relation, signedCmp,
-                                      lhs, rhs)
-                 : createScalarWordCmp(*this, op.getLoc(), *relation, signedCmp,
-                                       lhs, rhs);
+  Value scc = bits == 64 ? createScalarI64Cmp(*this, op.getLoc(), *relation,
+                                              signedCmp, lhs, rhs)
+                         : createScalarWordCmp(*this, op.getLoc(), *relation,
+                                               signedCmp, lhs, rhs);
+  values[op.getResult()] = materializeSCCBool(*this, op.getLoc(), scc);
   eraseIfTopLevel(op);
   return success();
 }

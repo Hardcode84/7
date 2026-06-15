@@ -69,6 +69,16 @@ func.func @unsupported_signed_dividend(%x: i32) {
 
 // -----
 
+func.func @unsupported_signed_divisor() {
+  %value = arith.constant 16 : i32
+  %neg = arith.constant -2 : i32
+  // expected-error @below {{needs positive power-of-two static divisor}}
+  %bad = wave.binary divsi %value, %neg : i32, i32 -> i32
+  return
+}
+
+// -----
+
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 func.func @unsupported_packed_f16_fmax(%a: !wave.simd<vector<2xf16>, 32>, %b: !wave.simd<vector<2xf16>, 32>) {
   // expected-error @below {{packed f16 fmax lowering is not implemented}}
