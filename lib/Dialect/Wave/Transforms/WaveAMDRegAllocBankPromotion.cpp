@@ -15,6 +15,10 @@ using namespace mlir::wave::regalloc;
 
 namespace {
 
+static unsigned alignDown(unsigned value, unsigned granule) {
+  return (value / granule) * granule;
+}
+
 class BankPromotionCandidate final
     : public wave::WaveAMDPressureReliefCandidate {
 public:
@@ -34,6 +38,30 @@ public:
   }
 
   unsigned getReliefDwords() const override { return score.liveDwords; }
+
+  bool reducesPressureFailure(
+      const wave::WaveAMDPressureFailure &failure) const override {
+    if (!failure.combinedVGPRAGPR)
+      return getReliefDwords() != 0;
+    if (sourceClass != waveamdmachine::RegClass::VGPR ||
+        targetClass != waveamdmachine::RegClass::AGPR)
+      return false;
+    unsigned relief = getReliefDwords();
+    if (relief == 0 || relief > failure.liveDwords)
+      return false;
+    unsigned newAGPRLive = failure.combinedAGPRLiveDwords + relief;
+    unsigned newVGPRLimit = 0;
+    if (newAGPRLive < failure.combinedVGPRFamilyLimit)
+      newVGPRLimit =
+          alignDown(failure.combinedVGPRFamilyLimit - newAGPRLive, 4);
+    unsigned oldOverage = failure.liveDwords > failure.limit
+                              ? failure.liveDwords - failure.limit
+                              : 0;
+    unsigned newVGPRLive = failure.liveDwords - relief;
+    unsigned newOverage =
+        newVGPRLive > newVGPRLimit ? newVGPRLive - newVGPRLimit : 0;
+    return newOverage < oldOverage;
+  }
 
   IntervalGroup *getGroup() const { return group; }
   waveamdmachine::RegClass getSourceClass() const { return sourceClass; }

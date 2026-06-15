@@ -1388,13 +1388,23 @@ buildClassPressureFailure(Inventory &inventory,
   return failure;
 }
 
-static PressureFailure buildCombinedPressureFailure(Inventory &inventory,
-                                                    IntervalGroup *request,
-                                                    unsigned position,
-                                                    unsigned vgprLimit,
-                                                    unsigned vgprLive) {
+static bool contributesToCombinedPressure(IntervalGroup *group,
+                                          unsigned position) {
+  if (!group || group->reserved || !isLiveAt(group, position))
+    return false;
+  return group->storageClass == waveamdmachine::RegClass::VGPR ||
+         group->storageClass == waveamdmachine::RegClass::AGPR;
+}
+
+static PressureFailure
+buildCombinedPressureFailure(Inventory &inventory, IntervalGroup *request,
+                             unsigned position, unsigned totalVGPRLimit,
+                             unsigned agprLive, unsigned vgprLimit,
+                             unsigned vgprLive) {
   PressureFailure failure;
-  failure.regClass = "VGPR";
+  failure.regClass = "VGPR/AGPR";
+  failure.combinedAGPRLiveDwords = agprLive;
+  failure.combinedVGPRFamilyLimit = totalVGPRLimit;
   failure.limit = vgprLimit;
   failure.position = position;
   failure.reserved = inventory.entryRegs.reservedVGPRs;
@@ -1402,10 +1412,16 @@ static PressureFailure buildCombinedPressureFailure(Inventory &inventory,
   failure.combinedVGPRAGPR = true;
   if (request) {
     failure.request = buildPressureIntervalRef(request, inventory);
-    failure.relief = estimateRelief(
-        vgprLive, getGroupLiveDwords(request, position), vgprLimit);
+    failure.relief = vgprLive > vgprLimit ? vgprLive - vgprLimit : 1;
   } else {
     failure.relief = vgprLive > vgprLimit ? vgprLive - vgprLimit : 1;
+  }
+  for (const std::unique_ptr<IntervalGroup> &group : inventory.groups) {
+    if (group.get() == request ||
+        !contributesToCombinedPressure(group.get(), position))
+      continue;
+    failure.overlaps.push_back(
+        buildPressureIntervalRef(group.get(), inventory));
   }
   return failure;
 }
@@ -1782,15 +1798,20 @@ static LogicalResult collectPressureReliefCandidates(
 }
 
 static std::optional<PressureReliefCandidateRef>
-selectPressureReliefCandidate(ArrayRef<PressureReliefCandidateRef> candidates) {
-  if (candidates.empty())
-    return std::nullopt;
-  PressureReliefCandidateRef selected = candidates.front();
-  for (PressureReliefCandidateRef candidate : candidates.drop_front())
-    if (isBetterGlobalPressureReliefCandidate(candidate, selected))
+selectPressureReliefCandidate(ArrayRef<PressureReliefCandidateRef> candidates,
+                              const PressureFailure *failure) {
+  std::optional<PressureReliefCandidateRef> selected;
+  for (PressureReliefCandidateRef candidate : candidates) {
+    const wave::WaveAMDPressureReliefCandidate &relief =
+        getPressureReliefCandidate(candidate);
+    if (!relief.isLegal())
+      continue;
+    if (failure && !relief.reducesPressureFailure(*failure))
+      continue;
+    if (!selected ||
+        isBetterGlobalPressureReliefCandidate(candidate, *selected))
       selected = candidate;
-  if (!getPressureReliefCandidate(selected).isLegal())
-    return std::nullopt;
+  }
   return selected;
 }
 
@@ -1839,7 +1860,7 @@ applyPressureRelief(func::FuncOp func, Inventory &inventory,
     return failure();
 
   std::optional<PressureReliefCandidateRef> selected =
-      selectPressureReliefCandidate(candidates);
+      selectPressureReliefCandidate(candidates, pressureFailure);
   if (!selected) {
     notifyNoPressureReliefCandidate(providers);
     if (includeMemorySpill)
@@ -1866,7 +1887,7 @@ applyCombinedPressureRelief(func::FuncOp func, Inventory &inventory,
                             RegisterBudgets budgets) {
   SmallVector<IntervalGroup *> groups = getAllocGroups(inventory);
   return applyPressureRelief(func, inventory, groups, nullptr, failure.position,
-                             budgets, /*includeBankPromotion=*/false,
+                             budgets, /*includeBankPromotion=*/true,
                              /*includeMemorySpill=*/true, &failure);
 }
 
@@ -2067,6 +2088,7 @@ enforceCombinedVGPRAGPRBudget(Inventory &inventory, RegisterBudgets budgets,
       continue;
     IntervalGroup *request = selectVGPRPressureRequest(inventory, position);
     failureOut = buildCombinedPressureFailure(inventory, request, position,
+                                              *budgets.totalVGPRLimit, agprLive,
                                               vgprLimit, vgprLive);
     return failure();
   }
@@ -2852,12 +2874,17 @@ struct WaveAMDRegAllocPass
   static void emitCombinedPressureError(func::FuncOp func,
                                         const PressureFailure &failure,
                                         RegisterBudgets budgets) {
-    func.emitError()
-        << kPassName
-        << " VGPR/AGPR live pressure exceeds target-waves budget at position "
-        << failure.position << " (limit=" << failure.limit
-        << ", live_dwords=" << failure.liveDwords
-        << ", target_waves=" << budgets.targetWaves << ")";
+    InFlightDiagnostic diag =
+        func.emitError() << kPassName
+                         << " VGPR/AGPR live pressure exceeds "
+                            "target-waves budget at position "
+                         << failure.position << " (limit=" << failure.limit
+                         << ", live_dwords=" << failure.liveDwords
+                         << ", required_relief=" << failure.relief
+                         << ", target_waves=" << budgets.targetWaves << ")";
+    diag << "; request=" << wave::formatWaveAMDPressureInterval(failure.request)
+         << "; overlaps="
+         << wave::formatWaveAMDPressureIntervals(failure.overlaps);
   }
 
   WalkResult handleAllocationFailure(func::FuncOp func, RegisterBudgets budgets,

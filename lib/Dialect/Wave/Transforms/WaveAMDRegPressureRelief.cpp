@@ -63,6 +63,11 @@ bool WaveAMDPressureReliefCandidate::isLegal() const {
   return !getRejectReason();
 }
 
+bool WaveAMDPressureReliefCandidate::reducesPressureFailure(
+    const WaveAMDPressureFailure &) const {
+  return getReliefDwords() != 0;
+}
+
 void WaveAMDPressureReliefCandidate::print(llvm::raw_ostream &os,
                                            bool selected) const {
   os << "{provider=" << getProviderName() << ", relief=" << getReliefDwords()

@@ -52,6 +52,8 @@ struct WaveAMDPressureFailure {
   SmallVector<WaveAMDPressureIntervalRef, 4> overlaps;
   WaveAMDPressureIntervalRef request;
   StringRef regClass;
+  unsigned combinedAGPRLiveDwords = 0;
+  unsigned combinedVGPRFamilyLimit = 0;
   unsigned limit = 0;
   unsigned liveDwords = 0;
   unsigned position = 0;
@@ -89,6 +91,8 @@ public:
   virtual WaveAMDPressureReliefCost getCost() const = 0;
   virtual unsigned getReliefDwords() const = 0;
   virtual std::optional<StringRef> getRejectReason() const;
+  virtual bool
+  reducesPressureFailure(const WaveAMDPressureFailure &failure) const;
 
   bool isLegal() const;
   virtual void print(llvm::raw_ostream &os, bool selected = false) const;
