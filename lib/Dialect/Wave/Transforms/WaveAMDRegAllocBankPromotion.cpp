@@ -140,7 +140,7 @@ public:
     const BankPromotionPlan &promotion =
         static_cast<const BankPromotionPlan &>(plan);
     assert(hooks.materialize && "bank promotion materializer missing");
-    return hooks.materialize(promotion.getGroup(), builder);
+    return hooks.materialize(promotion.getGroup(), inventory, builder);
   }
 
   bool isBetterCandidate(

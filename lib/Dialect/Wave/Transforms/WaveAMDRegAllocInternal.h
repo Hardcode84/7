@@ -244,7 +244,8 @@ struct BankPromotionHooks {
   bool (*canFitPromotionTarget)(
       IntervalGroup *, ArrayRef<IntervalGroup *>, RegisterBudgets,
       const ::mlir::wave::WaveAMDKernelEntryRegs &) = nullptr;
-  LogicalResult (*materialize)(IntervalGroup *, OpBuilder &) = nullptr;
+  LogicalResult (*materialize)(IntervalGroup *, Inventory &,
+                               OpBuilder &) = nullptr;
 };
 
 std::unique_ptr<wave::WaveAMDPressureReliefProvider>

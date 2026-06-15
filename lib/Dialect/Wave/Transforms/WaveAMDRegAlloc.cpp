@@ -281,6 +281,11 @@ static void setRegClass(Value value, waveamdmachine::RegClass regClass) {
   value.setType(getRegType(value, regClass));
 }
 
+static bool hasRegClass(Value value, waveamdmachine::RegClass regClass) {
+  auto type = dyn_cast<waveamdmachine::RegType>(value.getType());
+  return type && type.getRegClass() == regClass;
+}
+
 static std::optional<int64_t> getRegionNumber(Operation *op, Region *region) {
   for (auto [index, candidate] : llvm::enumerate(op->getRegions()))
     if (&candidate == region)
@@ -892,13 +897,15 @@ static bool canConsumeAGPR(OpOperand &use) {
   return false;
 }
 
-static bool hasUnpromotableAGPRUse(IntervalGroup *group) {
+static bool hasTempAGPRWriteUse(IntervalGroup *group) {
   for (Interval *lane : group->intervals) {
     for (Value value : lane->values) {
-      for (OpOperand &use : value.getUses())
-        if (isa<waveamdmachine::VAccvgprWriteB32TupleOp>(use.getOwner()) &&
-            use.getOperandNumber() == 0)
+      for (OpOperand &use : value.getUses()) {
+        auto write =
+            dyn_cast<waveamdmachine::VAccvgprWriteB32TupleOp>(use.getOwner());
+        if (write && use.getOperandNumber() == 0 && isRegAllocTempOp(write))
           return true;
+      }
     }
   }
   return false;
@@ -1123,7 +1130,7 @@ static bool canPromote(IntervalGroup *group, RegisterBudgets budgets) {
     return !groupContainsBlockArgument(group);
   }
   if (*next == waveamdmachine::RegClass::AGPR)
-    return !hasUnpromotableAGPRUse(group);
+    return !hasTempAGPRWriteUse(group);
   return false;
 }
 
@@ -1131,6 +1138,7 @@ static unsigned getLiveDwords(Inventory &inventory, unsigned position,
                               waveamdmachine::RegClass regClass);
 static unsigned getGroupLiveDwords(IntervalGroup *group, unsigned position);
 static LogicalResult materializePromotion(IntervalGroup *group,
+                                          Inventory &inventory,
                                           OpBuilder &builder);
 
 static bool canFitPromotionTarget(IntervalGroup *group,
@@ -1189,6 +1197,26 @@ static bool isTupleAliasOp(Operation *op) {
                          waveamdmachine::TupleFromElementsOp>(op);
 }
 
+static bool canRebankTupleAliasValue(Value value, IntervalGroup *group,
+                                     Inventory &inventory) {
+  if (!isa<waveamdmachine::RegType>(value.getType()))
+    return false;
+  return valueInGroup(value, group, inventory);
+}
+
+static bool canRebankTupleAliasOp(Operation *op, IntervalGroup *group,
+                                  Inventory &inventory) {
+  if (!isTupleAliasOp(op))
+    return false;
+  if (!llvm::all_of(op->getOperands(), [&](Value value) {
+        return canRebankTupleAliasValue(value, group, inventory);
+      }))
+    return false;
+  return llvm::all_of(op->getResults(), [&](Value value) {
+    return canRebankTupleAliasValue(value, group, inventory);
+  });
+}
+
 static bool canConsumeAGPRAfterPromotion(OpOperand &use, IntervalGroup *group,
                                          Inventory &inventory) {
   if (canConsumeAGPR(use))
@@ -1196,7 +1224,7 @@ static bool canConsumeAGPRAfterPromotion(OpOperand &use, IntervalGroup *group,
 
   Operation *user = use.getOwner();
   if (isTupleAliasOp(user))
-    return true;
+    return canRebankTupleAliasOp(user, group, inventory);
 
   if (isMFMA(user) && use.getOperandNumber() == 2 && user->getNumResults() == 1)
     return valueInGroup(user->getResult(0), group, inventory);
@@ -1209,7 +1237,8 @@ static unsigned estimateAGPRBridgeCost(IntervalGroup *group,
   unsigned cost = 0;
   for (Value value : getGroupValues(group)) {
     Operation *def = value.getDefiningOp();
-    if (def && !isTupleAliasOp(def) && !canDefineAGPR(value))
+    if (def && !canDefineAGPR(value) &&
+        !canRebankTupleAliasOp(def, group, inventory))
       cost += getBridgeWeight(value.getDefiningOp());
     for (OpOperand &use : value.getUses()) {
       if (isa<waveamdmachine::VAccvgprWriteB32TupleOp>(use.getOwner()))
@@ -2063,6 +2092,8 @@ static SmallVector<IntervalGroup *> getPromotedGroups(Inventory &inventory) {
 }
 
 static Value materializeAGPRDef(Value value, OpBuilder &builder) {
+  if (hasRegClass(value, waveamdmachine::RegClass::AGPR))
+    return value;
   if (isa<BlockArgument>(value)) {
     setRegClass(value, waveamdmachine::RegClass::AGPR);
     return value;
@@ -2080,6 +2111,51 @@ static Value materializeAGPRDef(Value value, OpBuilder &builder) {
   return write.getResult();
 }
 
+static void rebankTupleAliasResults(Operation *op,
+                                    waveamdmachine::RegClass regClass) {
+  for (Value value : op->getResults())
+    setRegClass(value, regClass);
+}
+
+static bool hasTupleAliasResultClass(Operation *op,
+                                     waveamdmachine::RegClass regClass) {
+  if (!isTupleAliasOp(op))
+    return false;
+  return llvm::all_of(op->getResults(), [&](Value value) {
+    return hasRegClass(value, regClass);
+  });
+}
+
+static void collectTupleAliasesToRebank(IntervalGroup *group,
+                                        Inventory &inventory,
+                                        SmallVectorImpl<Operation *> &aliases) {
+  llvm::SmallDenseSet<Operation *, 8> seen;
+  for (Value value : getGroupValues(group)) {
+    if (Operation *def = value.getDefiningOp())
+      if (canRebankTupleAliasOp(def, group, inventory) &&
+          seen.insert(def).second)
+        aliases.push_back(def);
+    for (OpOperand &use : value.getUses()) {
+      Operation *user = use.getOwner();
+      if (canRebankTupleAliasOp(user, group, inventory) &&
+          seen.insert(user).second)
+        aliases.push_back(user);
+    }
+  }
+}
+
+static void rebankPromotedTupleAliases(IntervalGroup *group,
+                                       Inventory &inventory,
+                                       waveamdmachine::RegClass regClass) {
+  SmallVector<Operation *> aliases;
+  collectTupleAliasesToRebank(group, inventory, aliases);
+  llvm::sort(aliases, [&](Operation *lhs, Operation *rhs) {
+    return inventory.positions.lookup(lhs) < inventory.positions.lookup(rhs);
+  });
+  for (Operation *op : aliases)
+    rebankTupleAliasResults(op, regClass);
+}
+
 static Value getAGPRReplacement(Value value,
                                 DenseMap<Value, Value> &replacements,
                                 OpBuilder &builder) {
@@ -2090,17 +2166,52 @@ static Value getAGPRReplacement(Value value,
   return replacement;
 }
 
+static bool
+foldAGPRWriteIntoReplacement(waveamdmachine::VAccvgprWriteB32TupleOp write,
+                             Value agpr) {
+  if (write.getResult() == agpr)
+    return false;
+  auto writeType = cast<waveamdmachine::RegType>(write.getResult().getType());
+  auto agprType = cast<waveamdmachine::RegType>(agpr.getType());
+  if (writeType.getIndex() >= 0) {
+    if (agprType.getIndex() >= 0 && agprType != writeType)
+      return false;
+    if (agprType.getIndex() < 0)
+      agpr.setType(writeType);
+  }
+  write.getResult().replaceAllUsesWith(agpr);
+  return true;
+}
+
 static void rewritePromotedAGPRUses(Value original, Value agpr,
                                     OpBuilder &builder) {
   SmallVector<OpOperand *> uses;
   for (OpOperand &use : original.getUses())
     uses.push_back(&use);
+  SmallVector<Operation *> deadWrites;
   for (OpOperand *use : uses) {
     if (use->get() != original)
       continue;
     Operation *user = use->getOwner();
-    if (isa<waveamdmachine::VAccvgprWriteB32TupleOp>(user))
+    if (auto write = dyn_cast<waveamdmachine::VAccvgprWriteB32TupleOp>(user)) {
+      if (write.getResult() == agpr)
+        continue;
+      if (foldAGPRWriteIntoReplacement(write, agpr)) {
+        deadWrites.push_back(user);
+        continue;
+      }
+      builder.setInsertionPoint(write);
+      auto read = waveamdmachine::VAccvgprReadB32TupleOp::create(
+          builder, write->getLoc(),
+          getRegType(agpr, waveamdmachine::RegClass::VGPR), agpr);
+      read->setAttr(kTempAttr, builder.getUnitAttr());
+      use->set(read.getResult());
       continue;
+    }
+    if (hasTupleAliasResultClass(user, waveamdmachine::RegClass::AGPR)) {
+      use->set(agpr);
+      continue;
+    }
     if (canConsumeAGPR(*use)) {
       use->set(agpr);
       continue;
@@ -2112,10 +2223,14 @@ static void rewritePromotedAGPRUses(Value original, Value agpr,
     read->setAttr(kTempAttr, builder.getUnitAttr());
     use->set(read.getResult());
   }
+  for (Operation *write : deadWrites)
+    write->erase();
 }
 
 static LogicalResult materializeAGPRPromotion(IntervalGroup *group,
+                                              Inventory &inventory,
                                               OpBuilder &builder) {
+  rebankPromotedTupleAliases(group, inventory, waveamdmachine::RegClass::AGPR);
   DenseMap<Value, Value> replacements;
   SmallVector<Value> values = getGroupValues(group);
   for (Value value : values) {
@@ -2183,13 +2298,14 @@ static LogicalResult materializeSGPRPromotion(IntervalGroup *group,
 }
 
 static LogicalResult materializePromotion(IntervalGroup *group,
+                                          Inventory &inventory,
                                           OpBuilder &builder) {
   if (group->preferredClass == waveamdmachine::RegClass::SGPR &&
       group->storageClass == waveamdmachine::RegClass::VGPR)
     return materializeSGPRPromotion(group, builder);
   if (group->preferredClass == waveamdmachine::RegClass::VGPR &&
       group->storageClass == waveamdmachine::RegClass::AGPR)
-    return materializeAGPRPromotion(group, builder);
+    return materializeAGPRPromotion(group, inventory, builder);
   return mlir::emitError(builder.getUnknownLoc(), kPassName)
          << " unsupported promotion " << getRegClassName(group->preferredClass)
          << " -> " << getRegClassName(group->storageClass);
@@ -2198,7 +2314,7 @@ static LogicalResult materializePromotion(IntervalGroup *group,
 static LogicalResult materializePromotions(Inventory &inventory,
                                            OpBuilder &builder) {
   for (IntervalGroup *group : getPromotedGroups(inventory))
-    if (failed(materializePromotion(group, builder)))
+    if (failed(materializePromotion(group, inventory, builder)))
       return failure();
   return success();
 }
