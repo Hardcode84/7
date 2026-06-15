@@ -43,7 +43,7 @@ set_target_properties(wavefront_lower PROPERTIES
   CXX_STANDARD_REQUIRED ON
 )
 
-add_subdirectory("${CMAKE_SOURCE_DIR}/tools/wavec" "${CMAKE_BINARY_DIR}/tools/wavec")
+add_subdirectory("${PROJECT_SOURCE_DIR}/tools/wavec" "${CMAKE_BINARY_DIR}/tools/wavec")
 
 function(wavec_add_c_test name source)
   add_executable(${name} "${source}")
