@@ -99,15 +99,10 @@
 // PROFILEMXFP4-DMA-OVERLAP: wave.join
 // PROFILEMXFP4-DMA-OVERLAP: scf.for {{%.*}} = {{%.*}} to [[ONE]] step [[ONE]]
 // PROFILEMXFP4-DMA-OVERLAP: waveamd.mma_scale "mfma.scale.f32.16x16x128.f4.f4"
+// PROFILEMXFP4-DMA-OVERLAP: waveamd.dma_load_lds
+// PROFILEMXFP4-DMA-OVERLAP: wave.join
 // PROFILEMXFP4-DMA-OVERLAP: wave.barrier
-// PROFILEMXFP4-DMA-OVERLAP: wave.binary ori
-// PROFILEMXFP4-DMA-OVERLAP: wave.where
-// PROFILEMXFP4-DMA-OVERLAP: waveamd.dma_load_lds
-// PROFILEMXFP4-DMA-OVERLAP: wave.join
-// PROFILEMXFP4-DMA-OVERLAP: wave.binary ori
-// PROFILEMXFP4-DMA-OVERLAP: wave.where
-// PROFILEMXFP4-DMA-OVERLAP: waveamd.dma_load_lds
-// PROFILEMXFP4-DMA-OVERLAP: wave.join
+// PROFILEMXFP4-DMA-OVERLAP: wave.load
 // PROFILEMXFP4-DMA-OVERLAP: waveamd.mma_scale "mfma.scale.f32.16x16x128.f4.f4"
 
 // ASMPIPE-LABEL: wmma_f16_matmul_tiled:

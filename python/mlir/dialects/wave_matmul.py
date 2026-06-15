@@ -2674,6 +2674,7 @@ def _emit_dma_step(
     if state.dma_token is None or state.reuse_token is None:
         raise ValueError("DMA pipeline step requires ready and reuse tokens")
     scale_tokens: list[dsl.Value] = []
+    next_token: dsl.Value | None = None
     new_scale_token: dsl.Value | None = None
     new_next_scale_token: dsl.Value | None = None
     early_dma = cfg.uses_packed_mxfp4 and cfg.wave_k_tiles == 1
@@ -2708,6 +2709,7 @@ def _emit_dma_step(
                 _scale_buffer_offset(bld, cfg, next_scale_step),
                 scale_reuse_token,
                 barrier_after=False,
+                barrier_before=False,
             )
             new_accs = _emit_mxfp4_mma_grid_scale_sets_slice(
                 bld,
@@ -2755,18 +2757,19 @@ def _emit_dma_step(
             scale_tokens=scale_tokens,
             scale_ready_token=state.scale_token,
         )
-    dma_after = state.reuse_token
-    next_token = _join_tokens(
-        bld,
-        _dma_issue(
+    if next_token is None:
+        dma_after = state.reuse_token
+        next_token = _join_tokens(
             bld,
-            a_ptrs,
-            b_ptrs,
-            staging,
-            after=dma_after,
-            lds_offset=next_lds_offset,
-        ),
-    )
+            _dma_issue(
+                bld,
+                a_ptrs,
+                b_ptrs,
+                staging,
+                after=dma_after,
+                lds_offset=next_lds_offset,
+            ),
+        )
     if early_dma and not uses_prefetched_scales:
         new_accs = _emit_mxfp4_mma_state_step(bld, cfg, state, scales)
     new_afs, new_bfs, reuse_token = _dma_drain(
