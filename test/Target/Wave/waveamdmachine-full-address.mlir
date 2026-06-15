@@ -61,6 +61,76 @@ func.func @global_raw_unbounded_offset_addr64(%out: !wave.ptr<#wave.global, i32>
   return
 }
 
+// SELECT-LABEL: func.func @global_floor_addr64
+// SELECT: waveamdmachine.v_lshrrev_b64
+// SELECT: waveamdmachine.global_store_b32_addr64
+// ASM-LABEL: global_floor_addr64:
+// ASM: v_lshrrev_b64
+// ASM: global_store_b32 v[{{[0-9]+}}:{{[0-9]+}}], v{{[0-9]+}}, off
+func.func @global_floor_addr64(%out: !wave.ptr<#wave.global, i32>,
+                               %x_raw: i32)
+    attributes {wave.kernel} {
+  %lane = wave.lane_id : !wave.simd<i32, 32>
+  %x = wave.assume %x_raw as "x" [#wave.pred<"x >= 0">, #wave.pred<"x <= 8">] : i32
+  %off = wave.index_expr <"1073741824*floor(1/2*x) + lid"> ["x", "lid"](%x, %lane)
+      : (i32, !wave.simd<i32, 32>) -> !wave.simd<index, 32>
+  %ptrs = wave.ptr_add %out, %off
+      : !wave.ptr<#wave.global, i32>, !wave.simd<index, 32>
+      -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
+  %tok = wave.store %lane -> %ptrs
+      : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>)
+      -> !wave.mem.token
+  return
+}
+
+// SELECT-LABEL: func.func @global_i64_floor_addr64
+// SELECT: waveamdmachine.arg {index = 1 : i64, pointer = false} : !waveamdmachine.reg<sgpr, 2>
+// SELECT: waveamdmachine.v_lshrrev_b64
+// SELECT: waveamdmachine.global_store_b32_addr64
+// ASM-LABEL: global_i64_floor_addr64:
+// ASM: v_lshrrev_b64
+// ASM: global_store_b32 v[{{[0-9]+}}:{{[0-9]+}}], v{{[0-9]+}}, off
+func.func @global_i64_floor_addr64(%out: !wave.ptr<#wave.global, i32>,
+                                   %x_raw: i64)
+    attributes {wave.kernel} {
+  %lane = wave.lane_id : !wave.simd<i32, 32>
+  %x = wave.assume %x_raw as "x" [#wave.pred<"x >= 0">, #wave.pred<"x <= 8589934590">] : i64
+  %off = wave.index_expr <"floor(1/2*x) + lid"> ["x", "lid"](%x, %lane)
+      : (i64, !wave.simd<i32, 32>) -> !wave.simd<index, 32>
+  %ptrs = wave.ptr_add %out, %off
+      : !wave.ptr<#wave.global, i32>, !wave.simd<index, 32>
+      -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
+  %tok = wave.store %lane -> %ptrs
+      : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>)
+      -> !wave.mem.token
+  return
+}
+
+// SELECT-LABEL: func.func @global_i64_xor_floor_addr64
+// SELECT: waveamdmachine.v_xor_b64
+// SELECT: waveamdmachine.v_lshrrev_b64
+// SELECT: waveamdmachine.global_store_b32_addr64
+// ASM-LABEL: global_i64_xor_floor_addr64:
+// ASM: v_xor_b32
+// ASM: v_xor_b32
+// ASM: v_lshrrev_b64
+// ASM: global_store_b32 v[{{[0-9]+}}:{{[0-9]+}}], v{{[0-9]+}}, off
+func.func @global_i64_xor_floor_addr64(%out: !wave.ptr<#wave.global, i32>,
+                                       %x_raw: i64)
+    attributes {wave.kernel} {
+  %lane = wave.lane_id : !wave.simd<i32, 32>
+  %x = wave.assume %x_raw as "x" [#wave.pred<"x >= 0">, #wave.pred<"x <= 8">] : i64
+  %off = wave.index_expr <"floor(1/2*xor(1, x)) + lid"> ["x", "lid"](%x, %lane)
+      : (i64, !wave.simd<i32, 32>) -> !wave.simd<index, 32>
+  %ptrs = wave.ptr_add %out, %off
+      : !wave.ptr<#wave.global, i32>, !wave.simd<index, 32>
+      -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
+  %tok = wave.store %lane -> %ptrs
+      : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>)
+      -> !wave.mem.token
+  return
+}
+
 // SELECT-LABEL: func.func @global_mixed_index_and_raw_ptr_add
 // SELECT: %[[RAW_ID:.*]] = waveamdmachine.v_workitem_id_x
 // SELECT: %[[RAW:.*]] = waveamdmachine.v_lshlrev_b32 %[[RAW_ID]],

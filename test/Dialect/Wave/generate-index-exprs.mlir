@@ -55,6 +55,112 @@ func.func @unsupported_binary_stays_raw(%out: !wave.ptr<#wave.global, f32>,
 
 // -----
 
+// CHECK-LABEL: func.func @ptr_add_signed_div_nonnegative
+// CHECK-SAME: (%{{.*}}: !wave.ptr<#wave.global, f32>, %[[IDX:.*]]: !wave.simd<i32, 32>)
+func.func @ptr_add_signed_div_nonnegative(%out: !wave.ptr<#wave.global, f32>,
+                                          %idx_raw: !wave.simd<i32, 32>)
+    -> !wave.simd<!wave.ptr<#wave.global, f32>, 32> {
+  %c2 = arith.constant 2 : i32
+  // CHECK: %[[ASSUME:.*]] = wave.assume %[[IDX]]
+  %idx = wave.assume %idx_raw as "x" [#wave.pred<"x >= 0">, #wave.pred<"x <= 31">] : !wave.simd<i32, 32>
+  %s2 = wave.splat %c2 : i32 -> !wave.simd<i32, 32>
+  %half = wave.binary divsi %idx, %s2 : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  // CHECK: [[OFF:%.*]] = wave.index_expr <"floor(1/2*raw0)"> ["raw0"](%[[ASSUME]]) : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
+  // CHECK: wave.ptr_add %{{.*}}, [[OFF]]
+  %ptr = wave.ptr_add %out, %half : !wave.ptr<#wave.global, f32>, !wave.simd<i32, 32> -> !wave.simd<!wave.ptr<#wave.global, f32>, 32>
+  return %ptr : !wave.simd<!wave.ptr<#wave.global, f32>, 32>
+}
+
+// -----
+
+// CHECK-LABEL: func.func @index_expr_signed_div_binding
+// CHECK-SAME: (%[[X:.*]]: index)
+func.func @index_expr_signed_div_binding(%x_raw: index) -> index {
+  %c2 = arith.constant 2 : index
+  // CHECK: %[[ASSUME:.*]] = wave.assume %[[X]]
+  %x = wave.assume %x_raw as "x" [#wave.pred<"x >= 0">, #wave.pred<"x <= 31">] : index
+  %half = wave.binary divsi %x, %c2 : index, index -> index
+  // CHECK: [[IDX:%.*]] = wave.index_expr <"8*floor(1/2*raw0)"> ["raw0"](%[[ASSUME]]) : (index) -> index
+  %idx = wave.index_expr <"8*y"> ["y"](%half) : (index) -> index
+  return %idx : index
+}
+
+// -----
+
+// CHECK-LABEL: func.func @signed_div_unknown_stays_raw
+// CHECK-SAME: (%{{.*}}: !wave.ptr<#wave.global, f32>, %[[IDX:.*]]: !wave.simd<i32, 32>)
+func.func @signed_div_unknown_stays_raw(%out: !wave.ptr<#wave.global, f32>,
+                                        %idx: !wave.simd<i32, 32>)
+    -> !wave.simd<!wave.ptr<#wave.global, f32>, 32> {
+  %c2 = arith.constant 2 : i32
+  %s2 = wave.splat %c2 : i32 -> !wave.simd<i32, 32>
+  // CHECK: [[DIV:%.*]] = wave.binary divsi %[[IDX]]
+  %half = wave.binary divsi %idx, %s2 : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  // CHECK-NOT: wave.index_expr
+  // CHECK: wave.ptr_add %{{.*}}, [[DIV]]
+  %ptr = wave.ptr_add %out, %half : !wave.ptr<#wave.global, f32>, !wave.simd<i32, 32> -> !wave.simd<!wave.ptr<#wave.global, f32>, 32>
+  return %ptr : !wave.simd<!wave.ptr<#wave.global, f32>, 32>
+}
+
+// -----
+
+// CHECK-LABEL: func.func @i64_signed_div_global
+// CHECK-SAME: (%{{.*}}: !wave.ptr<#wave.global, i8>, %[[IDX:.*]]: i64)
+func.func @i64_signed_div_global(%out: !wave.ptr<#wave.global, i8>,
+                                 %idx_raw: i64)
+    -> !wave.ptr<#wave.global, i8> {
+  %c2 = arith.constant 2 : i64
+  // CHECK: %[[ASSUME:.*]] = wave.assume %[[IDX]]
+  %idx = wave.assume %idx_raw as "x" [#wave.pred<"x >= 0">, #wave.pred<"x <= 8589934590">] : i64
+  %half = wave.binary divsi %idx, %c2 : i64, i64 -> i64
+  // CHECK: [[OFF:%.*]] = wave.index_expr <"floor(1/2*raw0)"> ["raw0"](%[[ASSUME]]) : (i64) -> index
+  // CHECK: wave.ptr_add %{{.*}}, [[OFF]]
+  %ptr = wave.ptr_add %out, %half
+      : !wave.ptr<#wave.global, i8>, i64 -> !wave.ptr<#wave.global, i8>
+  return %ptr : !wave.ptr<#wave.global, i8>
+}
+
+// -----
+
+// CHECK-LABEL: func.func @i64_signed_div_xor_global
+// CHECK-SAME: (%{{.*}}: !wave.ptr<#wave.global, i8>, %[[IDX:.*]]: i64)
+func.func @i64_signed_div_xor_global(%out: !wave.ptr<#wave.global, i8>,
+                                     %idx_raw: i64)
+    -> !wave.ptr<#wave.global, i8> {
+  %c1 = arith.constant 1 : i64
+  %c2 = arith.constant 2 : i64
+  // CHECK: %[[ASSUME:.*]] = wave.assume %[[IDX]]
+  %idx = wave.assume %idx_raw as "x" [#wave.pred<"x >= 0">, #wave.pred<"x <= 8">] : i64
+  %xor = wave.binary xori %idx, %c1 : i64, i64 -> i64
+  %half = wave.binary divsi %xor, %c2 : i64, i64 -> i64
+  // CHECK: [[OFF:%.*]] = wave.index_expr <"floor(1/2*xor(1, raw0))"> ["raw0"](%[[ASSUME]]) : (i64) -> index
+  // CHECK: wave.ptr_add %{{.*}}, [[OFF]]
+  %ptr = wave.ptr_add %out, %half
+      : !wave.ptr<#wave.global, i8>, i64 -> !wave.ptr<#wave.global, i8>
+  return %ptr : !wave.ptr<#wave.global, i8>
+}
+
+// -----
+
+// CHECK-LABEL: func.func @i64_signed_div_buffer_stays_raw
+// CHECK-SAME: (%{{.*}}: !wave.ptr<#waveamd.buffer, i8>, %[[IDX:.*]]: i64)
+func.func @i64_signed_div_buffer_stays_raw(%out: !wave.ptr<#waveamd.buffer, i8>,
+                                           %idx_raw: i64)
+    -> !wave.ptr<#waveamd.buffer, i8> {
+  %c2 = arith.constant 2 : i64
+  // CHECK: %[[ASSUME:.*]] = wave.assume %[[IDX]]
+  %idx = wave.assume %idx_raw as "x" [#wave.pred<"x >= 0">, #wave.pred<"x <= 8589934590">] : i64
+  // CHECK: [[DIV:%.*]] = wave.binary divsi %[[ASSUME]]
+  %half = wave.binary divsi %idx, %c2 : i64, i64 -> i64
+  // CHECK-NOT: wave.index_expr
+  // CHECK: wave.ptr_add %{{.*}}, [[DIV]]
+  %ptr = wave.ptr_add %out, %half
+      : !wave.ptr<#waveamd.buffer, i8>, i64 -> !wave.ptr<#waveamd.buffer, i8>
+  return %ptr : !wave.ptr<#waveamd.buffer, i8>
+}
+
+// -----
+
 // CHECK-LABEL: func.func @i32_binary_stays_raw
 // CHECK-SAME: (%{{.*}}: !wave.ptr<#wave.global, f32>, %[[IDX:.*]]: !wave.simd<i32, 32>)
 func.func @i32_binary_stays_raw(%out: !wave.ptr<#wave.global, f32>,

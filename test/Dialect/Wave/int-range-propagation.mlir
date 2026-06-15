@@ -111,6 +111,17 @@ func.func @workgroup_id_bounded() -> i1 {
   return %cmp : i1
 }
 
+// CHECK-LABEL: func.func @read_first_range
+// CHECK-NEXT: %[[T:.*]] = arith.constant true
+// CHECK-NEXT: return %[[T]] : i1
+func.func @read_first_range() -> i1 {
+  %lane = wave.lane_id : !wave.simd<i32, 32>
+  %first = wave.read_first %lane : !wave.simd<i32, 32> -> i32
+  %limit = arith.constant 64 : i32
+  %cmp = arith.cmpi slt, %first, %limit : i32
+  return %cmp : i1
+}
+
 // SIMD chains: the wave-arith ops normalize incoming arg ranges to
 // the result's element bit-width before forwarding to the upstream
 // helpers, so a `wave.lane_id`-seeded `[0, W-1]` range happily flows

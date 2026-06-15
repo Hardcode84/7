@@ -80,13 +80,14 @@ func.func @global_dma_lds_uniform_mul_dest(%in: !wave.ptr<#wave.global, i32>)
 }
 
 // SELECT-LABEL: func.func @global_dma_lds_uniform_dest_add
-// SELECT: [[M0SRC:%[A-Za-z0-9_]+]], %{{[A-Za-z0-9_]+}} = waveamdmachine.s_add_i32
+// SELECT: waveamdmachine.imm 1024
+// SELECT: [[M0SRC:%[A-Za-z0-9_]+]] = waveamdmachine.s_mov_b32_value %{{[A-Za-z0-9_]+}}
 // SELECT-NEXT: [[M0:%[A-Za-z0-9_]+]] = waveamdmachine.s_mov_m0 [[M0SRC]]
 // SELECT: waveamdmachine.global_load_lds_b128
 // SELECT-SAME: !waveamdmachine.m0
 
 // ASM-LABEL: global_dma_lds_uniform_dest_add:
-// ASM: s_add_i32 [[M0SRC:s[0-9]+]],
+// ASM: s_mov_b32 [[M0SRC:s[0-9]+]], 0x400
 // ASM-NEXT: s_mov_b32 m0, [[M0SRC]]
 // ASM: global_load_lds_dwordx4
 func.func @global_dma_lds_uniform_dest_add(%in: !wave.ptr<#wave.global, i32>)

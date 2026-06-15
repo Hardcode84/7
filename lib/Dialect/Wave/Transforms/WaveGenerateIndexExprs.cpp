@@ -8,6 +8,9 @@
 
 #include "mlir/Dialect/Wave/Transforms/Passes.h"
 
+#include "mlir/Analysis/DataFlow/IntegerRangeAnalysis.h"
+#include "mlir/Analysis/DataFlow/Utils.h"
+#include "mlir/Analysis/DataFlowFramework.h"
 #include "mlir/Dialect/Utils/StaticValueUtils.h"
 #include "mlir/Dialect/Wave/IR/Wave.h"
 #include "mlir/IR/PatternMatch.h"
@@ -17,6 +20,7 @@
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/StringMap.h"
 #include "llvm/Support/FormatVariadic.h"
+#include "llvm/Support/MathExtras.h"
 
 #include <cassert>
 #include <limits>
@@ -177,16 +181,115 @@ static bool isIndexValueType(Type type) {
   return false;
 }
 
+static bool isSymbolicValueType(Type type, bool allowI64Integers) {
+  if (type.isIndex())
+    return true;
+  if (auto intType = dyn_cast<IntegerType>(type))
+    return intType.isSignless() &&
+           (intType.getWidth() == 32 ||
+            (allowI64Integers && intType.getWidth() == 64));
+  if (auto simdType = dyn_cast<SimdType>(type)) {
+    Type element = simdType.getElementType();
+    return element.isIndex() || element.isInteger(32);
+  }
+  return false;
+}
+
 static bool isIndexBinaryOp(BinaryOp op) {
   return isIndexValueType(op.getResult().getType()) &&
          isIndexValueType(op.getLhs().getType()) &&
          isIndexValueType(op.getRhs().getType());
 }
 
+static bool isSymbolicBinaryOp(BinaryOp op, bool allowI64Integers) {
+  return isSymbolicValueType(op.getResult().getType(), allowI64Integers) &&
+         isSymbolicValueType(op.getLhs().getType(), allowI64Integers) &&
+         isSymbolicValueType(op.getRhs().getType(), allowI64Integers);
+}
+
+static bool isSymbolicRootBinaryOp(BinaryOp op, bool allowI64Integers) {
+  if (isIndexBinaryOp(op))
+    return true;
+  return op.getKind() == BinaryKind::DivSI &&
+         isSymbolicBinaryOp(op, allowI64Integers);
+}
+
+static std::optional<int64_t> getSplatOrConstantInt(Value value) {
+  if (std::optional<int64_t> constant = getConstantIntValue(value))
+    return constant;
+  if (SplatOp splat = value.getDefiningOp<SplatOp>())
+    return getSplatOrConstantInt(splat.getSource());
+  return std::nullopt;
+}
+
+static bool isFullSignedRange(const ConstantIntRanges &range) {
+  unsigned width = range.smin().getBitWidth();
+  if (width == 0)
+    return true;
+  return range.smin() == APInt::getSignedMinValue(width) &&
+         range.smax() == APInt::getSignedMaxValue(width);
+}
+
+static std::optional<ConstantIntRanges>
+finiteSignedRange(DataFlowSolver &solver, Value value) {
+  const dataflow::IntegerValueRangeLattice *lattice =
+      solver.lookupState<dataflow::IntegerValueRangeLattice>(value);
+  if (!lattice)
+    return std::nullopt;
+  IntegerValueRange ivr = lattice->getValue();
+  if (ivr.isUninitialized())
+    return std::nullopt;
+  ConstantIntRanges range = ivr.getValue();
+  if (isFullSignedRange(range))
+    return std::nullopt;
+  return range;
+}
+
+static bool hasNonNegativeLowerBound(const sym::InferredRange &range) {
+  return range.lower && range.lower->denominator > 0 &&
+         range.lower->numerator >= 0;
+}
+
+static bool isAssumedNonNegative(sym::Store &store, Value value) {
+  while (AssumeOp assume = value.getDefiningOp<AssumeOp>()) {
+    FailureOr<sym::ExprHandle> expr =
+        sym::composeExprSym(store, assume.getName());
+    if (failed(expr))
+      return false;
+    SmallVector<sym::PredHandle, 4> assumptions;
+    for (Attribute attr : assume.getAssumptions())
+      assumptions.push_back(cast<PredAttr>(attr).getValue());
+    std::optional<sym::InferredRange> range =
+        sym::inferRange(store, *expr, assumptions);
+    if (range && hasNonNegativeLowerBound(*range))
+      return true;
+    value = assume.getValue();
+  }
+  return false;
+}
+
+static bool isProvenNonNegative(DataFlowSolver &solver, sym::Store &store,
+                                Value value) {
+  if (SplatOp splat = value.getDefiningOp<SplatOp>())
+    return isProvenNonNegative(solver, store, splat.getSource());
+  if (std::optional<int64_t> constant = getSplatOrConstantInt(value))
+    return *constant >= 0;
+  if (isAssumedNonNegative(store, value))
+    return true;
+  std::optional<ConstantIntRanges> range = finiteSignedRange(solver, value);
+  return range && !range->smin().isNegative();
+}
+
+static bool isPositivePowerOfTwo(int64_t value) {
+  return value > 0 && llvm::isPowerOf2_64(static_cast<uint64_t>(value));
+}
+
 class SymbolicValueBuilder {
 public:
-  explicit SymbolicValueBuilder(WaveDialect &dialect)
-      : store(dialect.getSymbolStore()) {}
+  explicit SymbolicValueBuilder(WaveDialect &dialect, DataFlowSolver &solver,
+                                bool allowI64Integers = false)
+      : solver(solver), store(dialect.getSymbolStore()),
+        allowI64Integers(allowI64Integers) {}
 
   FailureOr<std::optional<SymbolicOffset>> build(Value value) {
     if (!hasSymbolicRoot(value))
@@ -206,9 +309,9 @@ public:
   }
 
 private:
-  static bool hasSymbolicRoot(Value value) {
+  bool hasSymbolicRoot(Value value) {
     if (BinaryOp binary = value.getDefiningOp<BinaryOp>())
-      return isIndexBinaryOp(binary);
+      return isSymbolicRootBinaryOp(binary, allowI64Integers);
     if (SplatOp splat = value.getDefiningOp<SplatOp>())
       return hasSymbolicRoot(splat.getSource());
     return false;
@@ -243,12 +346,14 @@ private:
 
   FailureOr<sym::ExprHandle> buildBinary(BinaryOp op, bool &skip,
                                          unsigned depth) {
-    if (!isIndexBinaryOp(op)) {
+    if (!isSymbolicBinaryOp(op, allowI64Integers)) {
       skip = true;
       return failure();
     }
     if (op.getKind() == BinaryKind::ShLI)
       return buildShift(op, skip, depth);
+    if (op.getKind() == BinaryKind::DivSI)
+      return buildSignedDiv(op, skip, depth);
 
     std::optional<sym::ExprBinaryOp> kind = convertBinaryKind(op.getKind());
     if (!kind) {
@@ -281,7 +386,7 @@ private:
 
   FailureOr<sym::ExprHandle> buildShift(BinaryOp op, bool &skip,
                                         unsigned depth) {
-    std::optional<int64_t> shift = getConstantIntValue(op.getRhs());
+    std::optional<int64_t> shift = getSplatOrConstantInt(op.getRhs());
     if (!shift || *shift < 0 || *shift >= 63) {
       skip = true;
       return failure();
@@ -294,6 +399,27 @@ private:
     if (failed(scale))
       return failure();
     return sym::composeExprBinary(store, *lhs, sym::ExprBinaryOp::Mul, *scale);
+  }
+
+  FailureOr<sym::ExprHandle> buildSignedDiv(BinaryOp op, bool &skip,
+                                            unsigned depth) {
+    std::optional<int64_t> divisor = getSplatOrConstantInt(op.getRhs());
+    if (!divisor || !isPositivePowerOfTwo(*divisor) ||
+        !isProvenNonNegative(solver, store, op.getLhs())) {
+      skip = true;
+      return failure();
+    }
+    FailureOr<sym::ExprHandle> lhs = buildExpr(op.getLhs(), skip, true, depth);
+    if (skip || failed(lhs))
+      return failure();
+    FailureOr<sym::ExprHandle> rhs = sym::composeExprInt(store, *divisor);
+    if (failed(rhs))
+      return failure();
+    FailureOr<sym::ExprHandle> div =
+        sym::composeExprBinary(store, *lhs, sym::ExprBinaryOp::Div, *rhs);
+    if (failed(div))
+      return failure();
+    return sym::composeExprFloor(store, *div);
   }
 
   FailureOr<sym::ExprHandle> bindSymbol(Value value, bool &skip) {
@@ -395,7 +521,9 @@ private:
   SymbolicOffset offset;
   llvm::DenseMap<Value, StringRef> nameByValue;
   llvm::StringMap<Value> bindingByName;
+  DataFlowSolver &solver;
   sym::Store &store;
+  bool allowI64Integers = false;
   unsigned nextRawSymbol = 0;
 };
 
@@ -464,6 +592,11 @@ static bool preservesPtrAddResult(PtrAddOp op, Type offsetType) {
   return result && result.getWidth() == resultWidth;
 }
 
+static bool hasGlobalPointerBase(PtrAddOp op) {
+  std::optional<PtrType> ptr = getWavePointerType(op.getBase().getType());
+  return ptr && isa<GlobalAddressSpaceAttr>(ptr->getAddressSpace());
+}
+
 static Type getIndexExprType(MLIRContext *ctx,
                              ArrayRef<IndexExprBinding> bindings) {
   SmallVector<Value> values;
@@ -480,8 +613,10 @@ static Type getIndexExprType(MLIRContext *ctx, const SymbolicOffset &offset) {
 }
 
 static FailureOr<bool> rewritePtrAdd(PatternRewriter &rewriter, PtrAddOp op,
-                                     WaveDialect &dialect) {
-  SymbolicValueBuilder builder(dialect);
+                                     WaveDialect &dialect,
+                                     DataFlowSolver &solver) {
+  SymbolicValueBuilder builder(dialect, solver,
+                               /*allowI64Integers=*/hasGlobalPointerBase(op));
   FailureOr<std::optional<SymbolicOffset>> offset =
       builder.build(op.getOffset());
   if (failed(offset))
@@ -515,8 +650,9 @@ static void seedBindingNames(IndexExprOp op, BindingState &state) {
 
 static FailureOr<bool> collectGeneratedBindingRewrite(
     IndexExprOp op, WaveDialect &dialect, BindingState &state, StringRef name,
-    Value value, SmallVectorImpl<sym::ExprSubstitution> &substitutions) {
-  SymbolicValueBuilder builder(dialect);
+    Value value, SmallVectorImpl<sym::ExprSubstitution> &substitutions,
+    DataFlowSolver &solver) {
+  SymbolicValueBuilder builder(dialect, solver);
   FailureOr<std::optional<SymbolicOffset>> symbolic = builder.build(value);
   if (failed(symbolic))
     return op.emitError("failed to generate wave.index_expr binding");
@@ -551,7 +687,8 @@ substituteAndSimplifyGenerated(IndexExprOp op, sym::Store &store,
 }
 
 static FailureOr<bool> rewriteIndexExpr(PatternRewriter &rewriter,
-                                        IndexExprOp op, WaveDialect &dialect) {
+                                        IndexExprOp op, WaveDialect &dialect,
+                                        DataFlowSolver &solver) {
   sym::Store &store = dialect.getSymbolStore();
   BindingState state;
   seedBindingNames(op, state);
@@ -561,7 +698,7 @@ static FailureOr<bool> rewriteIndexExpr(PatternRewriter &rewriter,
   for (auto [nameAttr, value] : llvm::zip(op.getNames(), op.getBindings())) {
     StringRef name = cast<StringAttr>(nameAttr).getValue();
     FailureOr<bool> bindingChanged = collectGeneratedBindingRewrite(
-        op, dialect, state, name, value, substitutions);
+        op, dialect, state, name, value, substitutions, solver);
     if (failed(bindingChanged))
       return failure();
     changed |= *bindingChanged;
@@ -588,8 +725,9 @@ static FailureOr<bool> rewriteIndexExpr(PatternRewriter &rewriter,
 }
 
 struct GeneratePtrAddIndexExprPattern : OpRewritePattern<PtrAddOp> {
-  GeneratePtrAddIndexExprPattern(MLIRContext *context, bool &hadFailure)
-      : OpRewritePattern(context), hadFailure(hadFailure) {}
+  GeneratePtrAddIndexExprPattern(MLIRContext *context, bool &hadFailure,
+                                 DataFlowSolver &solver)
+      : OpRewritePattern(context), solver(solver), hadFailure(hadFailure) {}
 
   LogicalResult matchAndRewrite(PtrAddOp op,
                                 PatternRewriter &rewriter) const override {
@@ -600,7 +738,7 @@ struct GeneratePtrAddIndexExprPattern : OpRewritePattern<PtrAddOp> {
       return failure();
     }
 
-    FailureOr<bool> rewritten = rewritePtrAdd(rewriter, op, *dialect);
+    FailureOr<bool> rewritten = rewritePtrAdd(rewriter, op, *dialect, solver);
     if (failed(rewritten)) {
       hadFailure = true;
       return failure();
@@ -608,12 +746,14 @@ struct GeneratePtrAddIndexExprPattern : OpRewritePattern<PtrAddOp> {
     return success(*rewritten);
   }
 
+  DataFlowSolver &solver;
   bool &hadFailure;
 };
 
 struct GenerateIndexExprBindingPattern : OpRewritePattern<IndexExprOp> {
-  GenerateIndexExprBindingPattern(MLIRContext *context, bool &hadFailure)
-      : OpRewritePattern(context), hadFailure(hadFailure) {}
+  GenerateIndexExprBindingPattern(MLIRContext *context, bool &hadFailure,
+                                  DataFlowSolver &solver)
+      : OpRewritePattern(context), solver(solver), hadFailure(hadFailure) {}
 
   LogicalResult matchAndRewrite(IndexExprOp op,
                                 PatternRewriter &rewriter) const override {
@@ -624,7 +764,8 @@ struct GenerateIndexExprBindingPattern : OpRewritePattern<IndexExprOp> {
       return failure();
     }
 
-    FailureOr<bool> rewritten = rewriteIndexExpr(rewriter, op, *dialect);
+    FailureOr<bool> rewritten =
+        rewriteIndexExpr(rewriter, op, *dialect, solver);
     if (failed(rewritten)) {
       hadFailure = true;
       return failure();
@@ -632,6 +773,7 @@ struct GenerateIndexExprBindingPattern : OpRewritePattern<IndexExprOp> {
     return success(*rewritten);
   }
 
+  DataFlowSolver &solver;
   bool &hadFailure;
 };
 
@@ -639,11 +781,21 @@ struct WaveGenerateIndexExprsPass
     : public wave::impl::WaveGenerateIndexExprsBase<
           WaveGenerateIndexExprsPass> {
   void runOnOperation() override {
+    Operation *root = getOperation();
+    DataFlowSolver solver;
+    dataflow::loadBaselineAnalyses(solver);
+    solver.load<dataflow::IntegerRangeAnalysis>();
+    if (failed(solver.initializeAndRun(root))) {
+      root->emitError("IntegerRangeAnalysis failed for wave.index_expr "
+                      "generation pass");
+      return signalPassFailure();
+    }
+
     bool failed = false;
     RewritePatternSet patterns(&getContext());
     patterns
         .add<GenerateIndexExprBindingPattern, GeneratePtrAddIndexExprPattern>(
-            &getContext(), failed);
+            &getContext(), failed, solver);
     if (mlir::failed(
             applyPatternsGreedily(getOperation(), std::move(patterns))) ||
         failed)

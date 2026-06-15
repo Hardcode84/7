@@ -297,6 +297,16 @@ func.func @index_expr_byte_scale_overflow(%out: !wave.ptr<#wave.global, i32>) at
 // -----
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
+func.func @floor_unknown_value(%x: i32) -> index {
+  // expected-error @below {{wave.index_expr floor shift lowering needs nonnegative operand}}
+  %off = wave.index_expr <"floor(1/2*x)"> ["x"](%x) : (i32) -> index
+  return %off : index
+}
+}
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 func.func @floor_dynamic_denominator_buffer(%out: !wave.ptr<#wave.global, i32>,
                                             %u_raw: i32) attributes {wave.kernel} {
   %lane_raw = wave.lane_id : !wave.simd<i32, 32>

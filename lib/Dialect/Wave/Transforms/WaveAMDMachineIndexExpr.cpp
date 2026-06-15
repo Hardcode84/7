@@ -57,16 +57,18 @@ FailureOr<Value> materializeSymbol(WaveAMDMachineSelector &,
 
 FailureOr<Value> materializeAddTerm(WaveAMDMachineSelector &S,
                                     sym::AddTerm addTerm, Operation *user,
-                                    const llvm::StringMap<Value> &subs) {
+                                    const llvm::StringMap<Value> &subs,
+                                    ArrayRef<sym::PredHandle> assumptions) {
   Location loc = user->getLoc();
-  FailureOr<Value> term = materializeIndexExprNode(S, addTerm.term, user, subs);
+  FailureOr<Value> term =
+      materializeIndexExprNode(S, addTerm.term, user, subs, assumptions);
   if (failed(term))
     return failure();
   std::optional<int64_t> tcInt = staticIntLiteral(addTerm.coefficient);
   if (tcInt && *tcInt == 1)
     return *term;
   FailureOr<Value> tcVal =
-      materializeIndexExprNode(S, addTerm.coefficient, user, subs);
+      materializeIndexExprNode(S, addTerm.coefficient, user, subs, assumptions);
   if (failed(tcVal))
     return failure();
   if (S.isUniformValue(*tcVal) && S.isUniformValue(*term))
@@ -78,14 +80,16 @@ FailureOr<Value> materializeAddTerm(WaveAMDMachineSelector &S,
 // when it's 0 and term_coeff[i] when it's 1.
 FailureOr<Value> materializeAdd(WaveAMDMachineSelector &S, sym::ExprHandle expr,
                                 Operation *user,
-                                const llvm::StringMap<Value> &subs) {
+                                const llvm::StringMap<Value> &subs,
+                                ArrayRef<sym::PredHandle> assumptions) {
   Location loc = user->getLoc();
   sym::ExprView view(expr);
   sym::ExprHandle coeff = view.getAddConstant();
   std::optional<int64_t> coeffInt = staticIntLiteral(coeff);
   std::optional<Value> acc;
   if (!coeffInt || *coeffInt != 0) {
-    FailureOr<Value> seed = materializeIndexExprNode(S, coeff, user, subs);
+    FailureOr<Value> seed =
+        materializeIndexExprNode(S, coeff, user, subs, assumptions);
     if (failed(seed))
       return failure();
     acc = *seed;
@@ -93,7 +97,7 @@ FailureOr<Value> materializeAdd(WaveAMDMachineSelector &S, sym::ExprHandle expr,
   uint32_t nterms = view.getAddTermCount();
   for (uint32_t i = 0; i < nterms; ++i) {
     FailureOr<Value> scaled =
-        materializeAddTerm(S, view.getAddTerm(i), user, subs);
+        materializeAddTerm(S, view.getAddTerm(i), user, subs, assumptions);
     if (failed(scaled))
       return failure();
     if (!acc) {
@@ -109,12 +113,14 @@ FailureOr<Value> materializeAdd(WaveAMDMachineSelector &S, sym::ExprHandle expr,
 
 FailureOr<Value> materializeMulFactor(WaveAMDMachineSelector &S,
                                       sym::MulFactor factor, Operation *user,
-                                      const llvm::StringMap<Value> &subs) {
+                                      const llvm::StringMap<Value> &subs,
+                                      ArrayRef<sym::PredHandle> assumptions) {
   int32_t exp = factor.exponent;
   if (exp <= 0)
     return user->emitError(
         "wave.index_expr selection rejects non-positive mul exponent");
-  FailureOr<Value> base = materializeIndexExprNode(S, factor.base, user, subs);
+  FailureOr<Value> base =
+      materializeIndexExprNode(S, factor.base, user, subs, assumptions);
   if (failed(base))
     return failure();
   Value pow = *base;
@@ -126,14 +132,16 @@ FailureOr<Value> materializeMulFactor(WaveAMDMachineSelector &S,
 // MUL = coeff * prod(base[i] ^ exp[i]). Skip the coeff when it's 1.
 FailureOr<Value> materializeMul(WaveAMDMachineSelector &S, sym::ExprHandle expr,
                                 Operation *user,
-                                const llvm::StringMap<Value> &subs) {
+                                const llvm::StringMap<Value> &subs,
+                                ArrayRef<sym::PredHandle> assumptions) {
   Location loc = user->getLoc();
   sym::ExprView view(expr);
   sym::ExprHandle coeff = view.getMulCoefficient();
   std::optional<int64_t> coeffInt = staticIntLiteral(coeff);
   std::optional<Value> acc;
   if (!coeffInt || *coeffInt != 1) {
-    FailureOr<Value> seed = materializeIndexExprNode(S, coeff, user, subs);
+    FailureOr<Value> seed =
+        materializeIndexExprNode(S, coeff, user, subs, assumptions);
     if (failed(seed))
       return failure();
     acc = *seed;
@@ -141,7 +149,7 @@ FailureOr<Value> materializeMul(WaveAMDMachineSelector &S, sym::ExprHandle expr,
   uint32_t nfactors = view.getMulFactorCount();
   for (uint32_t i = 0; i < nfactors; ++i) {
     FailureOr<Value> pow =
-        materializeMulFactor(S, view.getMulFactor(i), user, subs);
+        materializeMulFactor(S, view.getMulFactor(i), user, subs, assumptions);
     if (failed(pow))
       return failure();
     if (!acc) {
@@ -159,7 +167,8 @@ FailureOr<Value> materializeMul(WaveAMDMachineSelector &S, sym::ExprHandle expr,
 // a bitwise AND with `rhs - 1`.
 FailureOr<Value> materializeMod(WaveAMDMachineSelector &S, sym::ExprHandle expr,
                                 Operation *user,
-                                const llvm::StringMap<Value> &subs) {
+                                const llvm::StringMap<Value> &subs,
+                                ArrayRef<sym::PredHandle> assumptions) {
   sym::ExprView view(expr);
   sym::ExprHandle lhs = view.getBinaryLhs();
   sym::ExprHandle rhs = view.getBinaryRhs();
@@ -167,7 +176,8 @@ FailureOr<Value> materializeMod(WaveAMDMachineSelector &S, sym::ExprHandle expr,
   if (!rhsInt || *rhsInt <= 0 || (*rhsInt & (*rhsInt - 1)) != 0)
     return user->emitError(
         "wave.index_expr mod needs a power-of-two integer divisor");
-  FailureOr<Value> lhsValue = materializeIndexExprNode(S, lhs, user, subs);
+  FailureOr<Value> lhsValue =
+      materializeIndexExprNode(S, lhs, user, subs, assumptions);
   if (failed(lhsValue))
     return failure();
   return S.andMask(user->getLoc(), *lhsValue, *rhsInt - 1);
@@ -206,13 +216,14 @@ Value materializeLaneXor(WaveAMDMachineSelector &S, Location loc, Value lhs,
 
 FailureOr<Value> materializeXor(WaveAMDMachineSelector &S, sym::ExprHandle expr,
                                 Operation *user,
-                                const llvm::StringMap<Value> &subs) {
+                                const llvm::StringMap<Value> &subs,
+                                ArrayRef<sym::PredHandle> assumptions) {
   Location loc = user->getLoc();
   sym::ExprView view(expr);
   FailureOr<Value> lhs =
-      materializeIndexExprNode(S, view.getBinaryLhs(), user, subs);
+      materializeIndexExprNode(S, view.getBinaryLhs(), user, subs, assumptions);
   FailureOr<Value> rhs =
-      materializeIndexExprNode(S, view.getBinaryRhs(), user, subs);
+      materializeIndexExprNode(S, view.getBinaryRhs(), user, subs, assumptions);
   if (failed(lhs) || failed(rhs))
     return failure();
   if (std::optional<Value> folded = foldXorImmediates(S, loc, *lhs, *rhs))
@@ -302,10 +313,9 @@ static RationalIndexValue getIntRational(WaveAMDMachineSelector &S,
   return RationalIndexValue{getIntFoldResult(S, value), getIntFoldResult(S, 1)};
 }
 
-static FailureOr<RationalIndexValue>
-materializeRationalIndexExprNode(WaveAMDMachineSelector &S,
-                                 sym::ExprHandle expr, Operation *user,
-                                 const llvm::StringMap<Value> &subs);
+static FailureOr<RationalIndexValue> materializeRationalIndexExprNode(
+    WaveAMDMachineSelector &S, sym::ExprHandle expr, Operation *user,
+    const llvm::StringMap<Value> &subs, ArrayRef<sym::PredHandle> assumptions);
 static LogicalResult requireIntegerRationalOperands(WaveAMDMachineSelector &S,
                                                     RationalIndexValue lhs,
                                                     RationalIndexValue rhs,
@@ -378,20 +388,22 @@ mulRational(WaveAMDMachineSelector &S, Location loc, RationalIndexValue lhs,
 
 static FailureOr<RationalIndexValue>
 materializeRationalAdd(WaveAMDMachineSelector &S, sym::ExprHandle expr,
-                       Operation *user, const llvm::StringMap<Value> &subs) {
+                       Operation *user, const llvm::StringMap<Value> &subs,
+                       ArrayRef<sym::PredHandle> assumptions) {
   Location loc = user->getLoc();
   sym::ExprView view(expr);
-  FailureOr<RationalIndexValue> constant =
-      materializeRationalIndexExprNode(S, view.getAddConstant(), user, subs);
+  FailureOr<RationalIndexValue> constant = materializeRationalIndexExprNode(
+      S, view.getAddConstant(), user, subs, assumptions);
   if (failed(constant))
     return failure();
   RationalIndexValue acc = *constant;
   for (uint32_t i = 0, e = view.getAddTermCount(); i != e; ++i) {
     sym::AddTerm term = view.getAddTerm(i);
     FailureOr<RationalIndexValue> coefficient =
-        materializeRationalIndexExprNode(S, term.coefficient, user, subs);
+        materializeRationalIndexExprNode(S, term.coefficient, user, subs,
+                                         assumptions);
     FailureOr<RationalIndexValue> value =
-        materializeRationalIndexExprNode(S, term.term, user, subs);
+        materializeRationalIndexExprNode(S, term.term, user, subs, assumptions);
     if (failed(coefficient) || failed(value))
       return failure();
     FailureOr<RationalIndexValue> product =
@@ -409,18 +421,19 @@ materializeRationalAdd(WaveAMDMachineSelector &S, sym::ExprHandle expr,
 
 static FailureOr<RationalIndexValue>
 materializeRationalMul(WaveAMDMachineSelector &S, sym::ExprHandle expr,
-                       Operation *user, const llvm::StringMap<Value> &subs) {
+                       Operation *user, const llvm::StringMap<Value> &subs,
+                       ArrayRef<sym::PredHandle> assumptions) {
   Location loc = user->getLoc();
   sym::ExprView view(expr);
-  FailureOr<RationalIndexValue> coefficient =
-      materializeRationalIndexExprNode(S, view.getMulCoefficient(), user, subs);
+  FailureOr<RationalIndexValue> coefficient = materializeRationalIndexExprNode(
+      S, view.getMulCoefficient(), user, subs, assumptions);
   if (failed(coefficient))
     return failure();
   RationalIndexValue acc = *coefficient;
   for (uint32_t i = 0, e = view.getMulFactorCount(); i != e; ++i) {
     sym::MulFactor factor = view.getMulFactor(i);
-    FailureOr<RationalIndexValue> base =
-        materializeRationalIndexExprNode(S, factor.base, user, subs);
+    FailureOr<RationalIndexValue> base = materializeRationalIndexExprNode(
+        S, factor.base, user, subs, assumptions);
     if (failed(base))
       return failure();
     uint32_t exponent =
@@ -445,9 +458,26 @@ materializeRationalMul(WaveAMDMachineSelector &S, sym::ExprHandle expr,
   return acc;
 }
 
-static FailureOr<Value> materializeFloorRational(WaveAMDMachineSelector &S,
-                                                 RationalIndexValue value,
-                                                 Operation *user) {
+static bool hasNonNegativeLowerBound(const sym::InferredRange &range) {
+  return range.lower && range.lower->denominator > 0 &&
+         range.lower->numerator >= 0;
+}
+
+static LogicalResult requireNonNegativeRoundedExpr(
+    WaveAMDMachineSelector &S, sym::ExprHandle sourceExpr, Operation *user,
+    ArrayRef<sym::PredHandle> assumptions, StringRef opName) {
+  std::optional<sym::InferredRange> range =
+      sym::inferRange(S.symbolStore(), sourceExpr, assumptions);
+  if (range && hasNonNegativeLowerBound(*range))
+    return success();
+  return user->emitError("wave.index_expr ")
+         << opName << " shift lowering needs nonnegative operand";
+}
+
+static FailureOr<Value>
+materializeFloorRational(WaveAMDMachineSelector &S, RationalIndexValue value,
+                         sym::ExprHandle sourceExpr, Operation *user,
+                         ArrayRef<sym::PredHandle> assumptions) {
   std::optional<int64_t> staticDen = getStaticInt(S, value.denominator);
   if (!staticDen)
     return user->emitError("wave.index_expr floor needs a static denominator");
@@ -462,12 +492,16 @@ static FailureOr<Value> materializeFloorRational(WaveAMDMachineSelector &S,
     return user->emitError(
                "wave.index_expr floor needs a power-of-two denominator (got ")
            << den << ")";
+  if (failed(requireNonNegativeRoundedExpr(S, sourceExpr, user, assumptions,
+                                           "floor")))
+    return failure();
   return S.shrPow2(user->getLoc(), *numerator, llvm::Log2_64(den));
 }
 
-static FailureOr<Value> materializeCeilRational(WaveAMDMachineSelector &S,
-                                                RationalIndexValue value,
-                                                Operation *user) {
+static FailureOr<Value>
+materializeCeilRational(WaveAMDMachineSelector &S, RationalIndexValue value,
+                        sym::ExprHandle sourceExpr, Operation *user,
+                        ArrayRef<sym::PredHandle> assumptions) {
   std::optional<int64_t> staticDen = getStaticInt(S, value.denominator);
   if (!staticDen)
     return user->emitError("wave.index_expr ceil needs a static denominator");
@@ -482,6 +516,9 @@ static FailureOr<Value> materializeCeilRational(WaveAMDMachineSelector &S,
     return user->emitError(
                "wave.index_expr ceil needs a power-of-two denominator (got ")
            << den << ")";
+  if (failed(requireNonNegativeRoundedExpr(S, sourceExpr, user, assumptions,
+                                           "ceil")))
+    return failure();
   Value bias = createImm(S.builder, user->getLoc(), den - 1);
   Value biased = S.addByteOffsets(user->getLoc(), *numerator, bias);
   return S.shrPow2(user->getLoc(), biased, llvm::Log2_64(den));
@@ -506,14 +543,15 @@ static FailureOr<int64_t> getStaticModDivisor(WaveAMDMachineSelector &S,
 
 static FailureOr<RationalIndexValue>
 materializeRationalMod(WaveAMDMachineSelector &S, sym::ExprHandle expr,
-                       Operation *user, const llvm::StringMap<Value> &subs) {
+                       Operation *user, const llvm::StringMap<Value> &subs,
+                       ArrayRef<sym::PredHandle> assumptions) {
   sym::ExprView view(expr);
-  FailureOr<RationalIndexValue> lhs =
-      materializeRationalIndexExprNode(S, view.getBinaryLhs(), user, subs);
+  FailureOr<RationalIndexValue> lhs = materializeRationalIndexExprNode(
+      S, view.getBinaryLhs(), user, subs, assumptions);
   if (failed(lhs))
     return failure();
-  FailureOr<RationalIndexValue> rhs =
-      materializeRationalIndexExprNode(S, view.getBinaryRhs(), user, subs);
+  FailureOr<RationalIndexValue> rhs = materializeRationalIndexExprNode(
+      S, view.getBinaryRhs(), user, subs, assumptions);
   if (failed(rhs))
     return failure();
   FailureOr<int64_t> divisor = getStaticModDivisor(S, *lhs, *rhs, user);
@@ -529,13 +567,14 @@ materializeRationalMod(WaveAMDMachineSelector &S, sym::ExprHandle expr,
 
 static FailureOr<RationalIndexValue>
 materializeRationalXor(WaveAMDMachineSelector &S, sym::ExprHandle expr,
-                       Operation *user, const llvm::StringMap<Value> &subs) {
+                       Operation *user, const llvm::StringMap<Value> &subs,
+                       ArrayRef<sym::PredHandle> assumptions) {
   Location loc = user->getLoc();
   sym::ExprView view(expr);
-  FailureOr<RationalIndexValue> lhs =
-      materializeRationalIndexExprNode(S, view.getBinaryLhs(), user, subs);
-  FailureOr<RationalIndexValue> rhs =
-      materializeRationalIndexExprNode(S, view.getBinaryRhs(), user, subs);
+  FailureOr<RationalIndexValue> lhs = materializeRationalIndexExprNode(
+      S, view.getBinaryLhs(), user, subs, assumptions);
+  FailureOr<RationalIndexValue> rhs = materializeRationalIndexExprNode(
+      S, view.getBinaryRhs(), user, subs, assumptions);
   if (failed(lhs) || failed(rhs))
     return failure();
   if (failed(requireIntegerRationalOperands(S, *lhs, *rhs, user)))
@@ -609,38 +648,41 @@ materializeRationalPrimitiveIndexExprNode(WaveAMDMachineSelector &S,
 
 static FailureOr<RationalIndexValue> materializeRationalRoundedIndexExprNode(
     WaveAMDMachineSelector &S, sym::ExprHandle expr, Operation *user,
-    const llvm::StringMap<Value> &subs, bool isCeil) {
-  FailureOr<RationalIndexValue> child = materializeRationalIndexExprNode(
-      S, sym::ExprView(expr).getUnaryArg(), user, subs);
+    const llvm::StringMap<Value> &subs, ArrayRef<sym::PredHandle> assumptions,
+    bool isCeil) {
+  sym::ExprHandle childExpr = sym::ExprView(expr).getUnaryArg();
+  FailureOr<RationalIndexValue> child =
+      materializeRationalIndexExprNode(S, childExpr, user, subs, assumptions);
   if (failed(child))
     return failure();
-  FailureOr<Value> value = isCeil ? materializeCeilRational(S, *child, user)
-                                  : materializeFloorRational(S, *child, user);
+  FailureOr<Value> value =
+      isCeil
+          ? materializeCeilRational(S, *child, childExpr, user, assumptions)
+          : materializeFloorRational(S, *child, childExpr, user, assumptions);
   if (failed(value))
     return failure();
   return RationalIndexValue{*value, getIntFoldResult(S, 1)};
 }
 
-static FailureOr<RationalIndexValue>
-materializeRationalCompoundIndexExprNode(WaveAMDMachineSelector &S,
-                                         sym::ExprHandle expr, Operation *user,
-                                         const llvm::StringMap<Value> &subs) {
+static FailureOr<RationalIndexValue> materializeRationalCompoundIndexExprNode(
+    WaveAMDMachineSelector &S, sym::ExprHandle expr, Operation *user,
+    const llvm::StringMap<Value> &subs, ArrayRef<sym::PredHandle> assumptions) {
   sym::ExprView view(expr);
   switch (view.getKind()) {
   case sym::ExprKind::Add:
-    return materializeRationalAdd(S, expr, user, subs);
+    return materializeRationalAdd(S, expr, user, subs, assumptions);
   case sym::ExprKind::Mul:
-    return materializeRationalMul(S, expr, user, subs);
+    return materializeRationalMul(S, expr, user, subs, assumptions);
   case sym::ExprKind::Floor:
-    return materializeRationalRoundedIndexExprNode(S, expr, user, subs,
-                                                   /*isCeil=*/false);
+    return materializeRationalRoundedIndexExprNode(
+        S, expr, user, subs, assumptions, /*isCeil=*/false);
   case sym::ExprKind::Ceil:
-    return materializeRationalRoundedIndexExprNode(S, expr, user, subs,
-                                                   /*isCeil=*/true);
+    return materializeRationalRoundedIndexExprNode(
+        S, expr, user, subs, assumptions, /*isCeil=*/true);
   case sym::ExprKind::Mod:
-    return materializeRationalMod(S, expr, user, subs);
+    return materializeRationalMod(S, expr, user, subs, assumptions);
   case sym::ExprKind::Xor:
-    return materializeRationalXor(S, expr, user, subs);
+    return materializeRationalXor(S, expr, user, subs, assumptions);
   default:
     break;
   }
@@ -649,35 +691,39 @@ materializeRationalCompoundIndexExprNode(WaveAMDMachineSelector &S,
          << static_cast<int>(view.getKind());
 }
 
-static FailureOr<RationalIndexValue>
-materializeRationalIndexExprNode(WaveAMDMachineSelector &S,
-                                 sym::ExprHandle expr, Operation *user,
-                                 const llvm::StringMap<Value> &subs) {
+static FailureOr<RationalIndexValue> materializeRationalIndexExprNode(
+    WaveAMDMachineSelector &S, sym::ExprHandle expr, Operation *user,
+    const llvm::StringMap<Value> &subs, ArrayRef<sym::PredHandle> assumptions) {
   sym::ExprKind kind = sym::ExprView(expr).getKind();
   if (kind == sym::ExprKind::Integer || kind == sym::ExprKind::Rational ||
       kind == sym::ExprKind::Symbol)
     return materializeRationalPrimitiveIndexExprNode(S, expr, user, subs);
-  return materializeRationalCompoundIndexExprNode(S, expr, user, subs);
+  return materializeRationalCompoundIndexExprNode(S, expr, user, subs,
+                                                  assumptions);
 }
 
-static FailureOr<Value> materializeFloor(WaveAMDMachineSelector &S,
-                                         sym::ExprHandle expr, Operation *user,
-                                         const llvm::StringMap<Value> &subs) {
-  FailureOr<RationalIndexValue> value = materializeRationalIndexExprNode(
-      S, sym::ExprView(expr).getUnaryArg(), user, subs);
+static FailureOr<Value>
+materializeFloor(WaveAMDMachineSelector &S, sym::ExprHandle expr,
+                 Operation *user, const llvm::StringMap<Value> &subs,
+                 ArrayRef<sym::PredHandle> assumptions) {
+  sym::ExprHandle childExpr = sym::ExprView(expr).getUnaryArg();
+  FailureOr<RationalIndexValue> value =
+      materializeRationalIndexExprNode(S, childExpr, user, subs, assumptions);
   if (failed(value))
     return failure();
-  return materializeFloorRational(S, *value, user);
+  return materializeFloorRational(S, *value, childExpr, user, assumptions);
 }
 
 static FailureOr<Value> materializeCeil(WaveAMDMachineSelector &S,
                                         sym::ExprHandle expr, Operation *user,
-                                        const llvm::StringMap<Value> &subs) {
-  FailureOr<RationalIndexValue> value = materializeRationalIndexExprNode(
-      S, sym::ExprView(expr).getUnaryArg(), user, subs);
+                                        const llvm::StringMap<Value> &subs,
+                                        ArrayRef<sym::PredHandle> assumptions) {
+  sym::ExprHandle childExpr = sym::ExprView(expr).getUnaryArg();
+  FailureOr<RationalIndexValue> value =
+      materializeRationalIndexExprNode(S, childExpr, user, subs, assumptions);
   if (failed(value))
     return failure();
-  return materializeCeilRational(S, *value, user);
+  return materializeCeilRational(S, *value, childExpr, user, assumptions);
 }
 
 TermKind classifyAdd(WaveAMDMachineSelector &S, sym::ExprHandle expr,
@@ -704,6 +750,75 @@ struct AddressPlanAddend {
   sym::ExprHandle expr;
   TermKind kind = TermKind::Lane;
 };
+
+static bool isWideScalarIntegerValue(Value value) {
+  auto intType = dyn_cast<IntegerType>(value.getType());
+  return intType && intType.isSignless() && intType.getWidth() > 32;
+}
+
+static bool
+exprReferencesWideScalarInteger(sym::ExprHandle expr,
+                                const llvm::StringMap<bool> &wideSymbols);
+
+static bool
+addExprReferencesWideScalarInteger(sym::ExprHandle expr,
+                                   const llvm::StringMap<bool> &wideSymbols) {
+  sym::ExprView view(expr);
+  if (exprReferencesWideScalarInteger(view.getAddConstant(), wideSymbols))
+    return true;
+  for (uint32_t i = 0, e = view.getAddTermCount(); i != e; ++i) {
+    sym::AddTerm term = view.getAddTerm(i);
+    if (exprReferencesWideScalarInteger(term.coefficient, wideSymbols) ||
+        exprReferencesWideScalarInteger(term.term, wideSymbols))
+      return true;
+  }
+  return false;
+}
+
+static bool
+mulExprReferencesWideScalarInteger(sym::ExprHandle expr,
+                                   const llvm::StringMap<bool> &wideSymbols) {
+  sym::ExprView view(expr);
+  if (exprReferencesWideScalarInteger(view.getMulCoefficient(), wideSymbols))
+    return true;
+  for (uint32_t i = 0, e = view.getMulFactorCount(); i != e; ++i)
+    if (exprReferencesWideScalarInteger(view.getMulFactor(i).base, wideSymbols))
+      return true;
+  return false;
+}
+
+static bool
+exprReferencesWideScalarInteger(sym::ExprHandle expr,
+                                const llvm::StringMap<bool> &wideSymbols) {
+  sym::ExprView view(expr);
+  switch (view.getKind()) {
+  case sym::ExprKind::Symbol:
+    return wideSymbols.lookup(view.getSymbolName());
+  case sym::ExprKind::Add:
+    return addExprReferencesWideScalarInteger(expr, wideSymbols);
+  case sym::ExprKind::Mul:
+    return mulExprReferencesWideScalarInteger(expr, wideSymbols);
+  case sym::ExprKind::Floor:
+  case sym::ExprKind::Ceil:
+    return exprReferencesWideScalarInteger(view.getUnaryArg(), wideSymbols);
+  case sym::ExprKind::Mod:
+  case sym::ExprKind::Xor:
+    return exprReferencesWideScalarInteger(view.getBinaryLhs(), wideSymbols) ||
+           exprReferencesWideScalarInteger(view.getBinaryRhs(), wideSymbols);
+  default:
+    return false;
+  }
+}
+
+static bool needsWideAddressMaterializationImpl(sym::ExprHandle expr,
+                                                const AddressPlan &plan) {
+  if (!expr)
+    return false;
+  llvm::StringMap<bool> wideSymbols;
+  for (const PointerOffsetBinding &binding : plan.bindings)
+    wideSymbols[binding.name] = isWideScalarIntegerValue(binding.value);
+  return exprReferencesWideScalarInteger(expr, wideSymbols);
+}
 
 static bool isOneExpr(sym::ExprHandle expr) {
   if (!expr)
@@ -857,6 +972,8 @@ static FailureOr<bool> tryAppendPlanSlot(WaveAMDMachineSelector &S,
                                          sym::ExprHandle &slotExpr) {
   if (!expr)
     return true;
+  if (needsWideAddressMaterialization(expr, plan))
+    return false;
   sym::ExprHandle candidate = slotExpr;
   if (failed(appendPlanExpr(S, expr, plan.assumptions, candidate)))
     return failure();
@@ -910,24 +1027,28 @@ assignPlanAddends(WaveAMDMachineSelector &S,
 
 // ---- public surface (declared in WaveAMDMachineSelector.h) ----------------
 
-static FailureOr<Value>
-materializeCompoundIndexExprNode(WaveAMDMachineSelector &S,
-                                 sym::ExprHandle expr, Operation *user,
-                                 const llvm::StringMap<Value> &subs) {
+bool needsWideAddressMaterialization(sym::ExprHandle expr,
+                                     const AddressPlan &plan) {
+  return needsWideAddressMaterializationImpl(expr, plan);
+}
+
+static FailureOr<Value> materializeCompoundIndexExprNode(
+    WaveAMDMachineSelector &S, sym::ExprHandle expr, Operation *user,
+    const llvm::StringMap<Value> &subs, ArrayRef<sym::PredHandle> assumptions) {
   sym::ExprView view(expr);
   switch (view.getKind()) {
   case sym::ExprKind::Add:
-    return materializeAdd(S, expr, user, subs);
+    return materializeAdd(S, expr, user, subs, assumptions);
   case sym::ExprKind::Mul:
-    return materializeMul(S, expr, user, subs);
+    return materializeMul(S, expr, user, subs, assumptions);
   case sym::ExprKind::Floor:
-    return materializeFloor(S, expr, user, subs);
+    return materializeFloor(S, expr, user, subs, assumptions);
   case sym::ExprKind::Ceil:
-    return materializeCeil(S, expr, user, subs);
+    return materializeCeil(S, expr, user, subs, assumptions);
   case sym::ExprKind::Mod:
-    return materializeMod(S, expr, user, subs);
+    return materializeMod(S, expr, user, subs, assumptions);
   case sym::ExprKind::Xor:
-    return materializeXor(S, expr, user, subs);
+    return materializeXor(S, expr, user, subs, assumptions);
   default:
     break;
   }
@@ -936,9 +1057,10 @@ materializeCompoundIndexExprNode(WaveAMDMachineSelector &S,
          << static_cast<int>(view.getKind());
 }
 
-FailureOr<Value> materializeIndexExprNode(WaveAMDMachineSelector &S,
-                                          sym::ExprHandle expr, Operation *user,
-                                          const llvm::StringMap<Value> &subs) {
+FailureOr<Value>
+materializeIndexExprNode(WaveAMDMachineSelector &S, sym::ExprHandle expr,
+                         Operation *user, const llvm::StringMap<Value> &subs,
+                         ArrayRef<sym::PredHandle> assumptions) {
   sym::ExprView view(expr);
   switch (view.getKind()) {
   case sym::ExprKind::Integer:
@@ -951,7 +1073,7 @@ FailureOr<Value> materializeIndexExprNode(WaveAMDMachineSelector &S,
     return materializeSymbol(S, expr, user, subs);
   }
   default:
-    return materializeCompoundIndexExprNode(S, expr, user, subs);
+    return materializeCompoundIndexExprNode(S, expr, user, subs, assumptions);
   }
   return user->emitError(
              "wave.index_expr selection does not support expression kind ")

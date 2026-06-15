@@ -326,8 +326,8 @@ def Wave_CmpIOp : Wave_Op<"cmpi", [Pure]> {
   let hasVerifier = 1;
 }
 
-def Wave_ReadFirstOp : Wave_Op<"read_first", [
-    NoMemoryEffect]> {
+def Wave_ReadFirstOp : Wave_Op<"read_first", [NoMemoryEffect,
+    DeclareOpInterfaceMethods<InferIntRangeInterface, ["inferResultRanges"]>]> {
   let summary = "broadcast the first active lane's value";
   let description = [{
     Returns the value from the first active lane, broadcast to all active lanes.

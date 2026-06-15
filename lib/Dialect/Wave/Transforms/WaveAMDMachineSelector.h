@@ -135,9 +135,10 @@ class WaveAMDMachineSelector;
 // Index-expression helpers share selector factories, bindings, and symbol
 // store.
 
-FailureOr<Value> materializeIndexExprNode(WaveAMDMachineSelector &S,
-                                          sym::ExprHandle expr, Operation *user,
-                                          const llvm::StringMap<Value> &subs);
+FailureOr<Value>
+materializeIndexExprNode(WaveAMDMachineSelector &S, sym::ExprHandle expr,
+                         Operation *user, const llvm::StringMap<Value> &subs,
+                         ArrayRef<sym::PredHandle> assumptions = {});
 
 FailureOr<PointerOffset> makePointerOffset(WaveAMDMachineSelector &S,
                                            const SymbolicOffset &offset);
@@ -151,6 +152,9 @@ TermKind classifyTerm(WaveAMDMachineSelector &S, sym::ExprHandle expr,
 FailureOr<AddressPlan>
 planAddressFields(WaveAMDMachineSelector &S, const PointerOffset &offset,
                   const mlir::waveamdmachine::AddressFieldSpec &spec);
+
+bool needsWideAddressMaterialization(sym::ExprHandle expr,
+                                     const AddressPlan &plan);
 
 FailureOr<Value> materializePointerOffsetValue(WaveAMDMachineSelector &S,
                                                Operation *user,

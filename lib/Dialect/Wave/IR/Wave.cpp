@@ -979,6 +979,15 @@ void BinaryOp::inferResultRanges(ArrayRef<ConstantIntRanges> argRanges,
                  inferWaveBinaryResultRange(getKind(), ranges, bits));
 }
 
+void ReadFirstOp::inferResultRanges(ArrayRef<ConstantIntRanges> argRanges,
+                                    SetIntRangeFn setResultRange) {
+  Type resultType = getResult().getType();
+  if (!resultType.isIntOrIndex())
+    return;
+  unsigned bits = waveBinaryElementWidth(resultType);
+  setResultRange(getResult(), normalizeWaveArithRange(argRanges.front(), bits));
+}
+
 void AssumeOp::inferResultRangesFromOptional(
     ArrayRef<IntegerValueRange> argRanges, SetIntLatticeFn setResultRange) {
   WaveDialect *dialect = getContext()->getLoadedDialect<WaveDialect>();
