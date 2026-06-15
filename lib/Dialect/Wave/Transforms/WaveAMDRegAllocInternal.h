@@ -112,8 +112,8 @@ inline bool isFixedRegisterGroup(IntervalGroup *group) {
 }
 
 inline bool isMemorySpillVGPRGroup(IntervalGroup *group) {
-  if (!group || group->reserved || group->nonPromotable ||
-      isFixedRegisterGroup(group))
+  if (!group || group->plannedPressureRelief || group->reserved ||
+      group->nonPromotable || isFixedRegisterGroup(group))
     return false;
   return group->storageClass == waveamdmachine::RegClass::VGPR &&
          group->preferredClass == waveamdmachine::RegClass::VGPR;

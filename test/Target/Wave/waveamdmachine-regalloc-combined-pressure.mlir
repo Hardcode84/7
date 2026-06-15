@@ -8,6 +8,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx90a"} {
 // ERR-SAME: request={start=
 // ERR-SAME: overlaps=[{start=
 // ERR-SAME: values=[
+// ERR-SAME: memory spill reject detail: starts_at_pressure=1, eligible=8, total=9
 // MARK-LABEL: func.func @combined_pressure_rejects_neutral_agpr_promotion
 // MARK-SAME: waveamdmachine.regalloc_overflowed = 1 : i64
 // MARK-NOT: waveamdmachine.v_accvgpr_write_b32_tuple

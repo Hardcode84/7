@@ -1,8 +1,23 @@
 // RUN: wave-opt --waveamd-reg-alloc='mark-overflow=true' %s | FileCheck %s
+// RUN: rm -f %t.yaml
+// RUN: wave-opt --waveamd-reg-alloc='mark-overflow=true' \
+// RUN:   --remarks-filter=waveamdmachine-regalloc --remark-policy=all \
+// RUN:   --remark-format=yaml --remarks-output-file=%t.yaml %s >/dev/null
+// RUN: FileCheck %s --input-file=%t.yaml --check-prefix=REMARK
 // RUN: wave-opt --waveamd-reg-alloc='mark-overflow=true vgpr-limit=8 agpr-limit=1' \
 // RUN:   --waveamd-resource-info %s | FileCheck %s --check-prefix=SOLVE
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
+
+// REMARK: Name:            regalloc-pressure-failure
+// REMARK: Function:        combined_pressure_rejects_cheap_expr_spill
+// REMARK: class:           'VGPR/AGPR'
+// REMARK: combined_vgpr_agpr: 'true'
+// REMARK: request:         '{start=
+// REMARK: overlaps:        '[{start=
+// REMARK: starts_at_pressure: '1'
+// REMARK: eligible:        '7'
+// REMARK: total:           '9'
 
 // CHECK-LABEL: func.func @combined_pressure_rejects_cheap_expr_spill
 // CHECK-SAME: waveamdmachine.regalloc_overflowed = 1 : i64

@@ -1316,6 +1316,15 @@ static SmallVector<IntervalGroup *> getAllocGroups(Inventory &inventory) {
   return groups;
 }
 
+static SmallVector<IntervalGroup *> getAllocGroupsExcept(Inventory &inventory,
+                                                         IntervalGroup *skip) {
+  SmallVector<IntervalGroup *> groups;
+  for (IntervalGroup *group : getAllocGroups(inventory))
+    if (group != skip)
+      groups.push_back(group);
+  return groups;
+}
+
 static unsigned getGroupLiveDwords(IntervalGroup *group, unsigned position) {
   unsigned live = 0;
   for (Interval *lane : group->intervals)
@@ -1696,12 +1705,15 @@ static void addRejectCount(Builder &builder, NamedAttrList &attrs,
   attrs.set(name, builder.getI64IntegerAttr(count));
 }
 
+static void clearMemorySpillRejectDiagnostics(func::FuncOp func) {
+  func->removeAttr(kMemorySpillRejectAttr);
+  func->removeAttr(kMemorySpillRejectDetailAttr);
+}
+
 static void setMemorySpillRejectDiagnostics(func::FuncOp func,
                                             ArrayRef<IntervalGroup *> assigned,
                                             IntervalGroup *request,
                                             unsigned position) {
-  if (!request || request->storageClass != waveamdmachine::RegClass::VGPR)
-    return;
   MemorySpillRejectStats stats;
   classifyMemorySpillReject(request, position, stats);
   for (IntervalGroup *group : assigned)
@@ -1829,14 +1841,16 @@ static bool shouldTryMemoryPressureRelief(IntervalGroup *request) {
   return request && request->storageClass == waveamdmachine::RegClass::VGPR;
 }
 
+static IntervalGroup *selectVGPRPressureRequest(Inventory &inventory,
+                                                unsigned position);
+
 static FailureOr<bool>
 applyPressureRelief(func::FuncOp func, Inventory &inventory,
                     ArrayRef<IntervalGroup *> assigned, IntervalGroup *request,
                     unsigned position, RegisterBudgets budgets,
                     bool includeBankPromotion, bool includeMemorySpill,
                     const PressureFailure *pressureFailure = nullptr) {
-  func->removeAttr(kMemorySpillRejectAttr);
-  func->removeAttr(kMemorySpillRejectDetailAttr);
+  clearMemorySpillRejectDiagnostics(func);
 
   SmallVector<PressureReliefProviderState, 3> providers;
   providers.reserve(3);
@@ -1889,10 +1903,36 @@ static FailureOr<bool>
 applyCombinedPressureRelief(func::FuncOp func, Inventory &inventory,
                             const PressureFailure &failure,
                             RegisterBudgets budgets) {
-  SmallVector<IntervalGroup *> groups = getAllocGroups(inventory);
-  return applyPressureRelief(func, inventory, groups, nullptr, failure.position,
-                             budgets, /*includeBankPromotion=*/true,
-                             /*includeMemorySpill=*/true, &failure);
+  unsigned plannedRelief = 0;
+  for (unsigned attempt : llvm::seq<unsigned>(0, inventory.groups.size())) {
+    (void)attempt;
+    IntervalGroup *request =
+        selectVGPRPressureRequest(inventory, failure.position);
+    SmallVector<IntervalGroup *> groups =
+        getAllocGroupsExcept(inventory, request);
+    unsigned planCount = inventory.plannedReliefPlans.size();
+    FailureOr<bool> relieved = applyPressureRelief(
+        func, inventory, groups, request, failure.position, budgets,
+        /*includeBankPromotion=*/true, /*includeMemorySpill=*/true, &failure);
+    if (failed(relieved))
+      return mlir::failure();
+    if (!*relieved) {
+      if (plannedRelief == 0)
+        return false;
+      clearMemorySpillRejectDiagnostics(func);
+      return true;
+    }
+    if (inventory.plannedReliefPlans.size() == planCount)
+      return mlir::failure();
+    for (size_t i :
+         llvm::seq<size_t>(planCount, inventory.plannedReliefPlans.size()))
+      plannedRelief += inventory.plannedReliefPlans[i]->getReliefDwords();
+    if (plannedRelief >= failure.relief) {
+      clearMemorySpillRejectDiagnostics(func);
+      return true;
+    }
+  }
+  return plannedRelief != 0;
 }
 
 static LogicalResult allocateOnce(func::FuncOp func, Inventory &inventory,
@@ -2069,7 +2109,7 @@ static IntervalGroup *selectVGPRPressureRequest(Inventory &inventory,
                                                 unsigned position) {
   for (const std::unique_ptr<IntervalGroup> &group : inventory.groups)
     if (group->storageClass == waveamdmachine::RegClass::VGPR &&
-        !group->reserved && isLiveAt(group.get(), position))
+        !group->reserved && groupLiveAt(group.get(), position))
       return group.get();
   return nullptr;
 }
@@ -2941,6 +2981,20 @@ struct WaveAMDRegAllocPass
     append("total");
   }
 
+  static void appendMemorySpillRejectSummary(func::FuncOp func,
+                                             InFlightDiagnostic &diag) {
+    StringAttr reject = func->getAttrOfType<StringAttr>(kMemorySpillRejectAttr);
+    DictionaryAttr detail =
+        func->getAttrOfType<DictionaryAttr>(kMemorySpillRejectDetailAttr);
+    if (reject) {
+      if (reject.getValue() == kMemorySpillLoopCarryReject)
+        diag << "; memory spill cannot materialize loop-carried values";
+      else
+        diag << "; memory spill rejected candidates: " << reject.getValue();
+    }
+    appendMemorySpillRejectDetail(diag, detail);
+  }
+
   static void emitPressureError(func::FuncOp func,
                                 const PressureFailure &failure) {
     InFlightDiagnostic diag = func.emitError()
@@ -2952,19 +3006,7 @@ struct WaveAMDRegAllocPass
     diag << "; request=" << wave::formatWaveAMDPressureInterval(failure.request)
          << "; overlaps="
          << wave::formatWaveAMDPressureIntervals(failure.overlaps);
-    StringAttr reject = func->getAttrOfType<StringAttr>(kMemorySpillRejectAttr);
-    DictionaryAttr detail =
-        func->getAttrOfType<DictionaryAttr>(kMemorySpillRejectDetailAttr);
-    if (!reject) {
-      appendMemorySpillRejectDetail(diag, detail);
-      clearTransientRegAllocAttrs(func);
-      return;
-    }
-    if (reject.getValue() == kMemorySpillLoopCarryReject)
-      diag << "; memory spill cannot materialize loop-carried values";
-    else
-      diag << "; memory spill rejected candidates: " << reject.getValue();
-    appendMemorySpillRejectDetail(diag, detail);
+    appendMemorySpillRejectSummary(func, diag);
     clearTransientRegAllocAttrs(func);
   }
 
@@ -2982,6 +3024,8 @@ struct WaveAMDRegAllocPass
     diag << "; request=" << wave::formatWaveAMDPressureInterval(failure.request)
          << "; overlaps="
          << wave::formatWaveAMDPressureIntervals(failure.overlaps);
+    appendMemorySpillRejectSummary(func, diag);
+    clearTransientRegAllocAttrs(func);
   }
 
   WalkResult handleAllocationFailure(func::FuncOp func, RegisterBudgets budgets,
