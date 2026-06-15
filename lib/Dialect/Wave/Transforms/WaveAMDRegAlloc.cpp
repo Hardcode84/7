@@ -1140,6 +1140,9 @@ static unsigned getGroupLiveDwords(IntervalGroup *group, unsigned position);
 static LogicalResult materializePromotion(IntervalGroup *group,
                                           Inventory &inventory,
                                           OpBuilder &builder);
+static LogicalResult
+materializePromotionPlans(ArrayRef<BankPromotionStep> steps,
+                          Inventory &inventory, OpBuilder &builder);
 
 static bool canFitPromotionTarget(IntervalGroup *group,
                                   ArrayRef<IntervalGroup *> assigned,
@@ -1295,6 +1298,7 @@ static BankPromotionHooks getBankPromotionHooks() {
   hooks.isLiveAt = static_cast<bool (*)(IntervalGroup *, unsigned)>(&isLiveAt);
   hooks.canPromote = canPromote;
   hooks.canFitPromotionTarget = canFitPromotionTarget;
+  hooks.materializePlans = materializePromotionPlans;
   hooks.materialize = materializePromotion;
   return hooks;
 }
@@ -2301,6 +2305,28 @@ static void rewritePromotedSGPRUses(Value original, Value vgpr,
   }
 }
 
+static void rewritePromotedSGPRToAGPRUses(Value original, Value vgpr,
+                                          Value agpr, OpBuilder &builder) {
+  SmallVector<OpOperand *> uses;
+  for (OpOperand &use : original.getUses())
+    uses.push_back(&use);
+  for (OpOperand *use : uses) {
+    if (use->get() != original || use->getOwner() == vgpr.getDefiningOp())
+      continue;
+    Operation *user = use->getOwner();
+    builder.setInsertionPoint(user);
+    auto read = waveamdmachine::VAccvgprReadB32TupleOp::create(
+        builder, user->getLoc(),
+        getRegType(agpr, waveamdmachine::RegClass::VGPR), agpr);
+    read->setAttr(kTempAttr, builder.getUnitAttr());
+    auto first = waveamdmachine::VReadfirstlaneB32Op::create(
+        builder, user->getLoc(),
+        getRegType(original, waveamdmachine::RegClass::SGPR), read.getResult());
+    first->setAttr(kTempAttr, builder.getUnitAttr());
+    use->set(first.getResult());
+  }
+}
+
 static LogicalResult materializeSGPRPromotion(IntervalGroup *group,
                                               OpBuilder &builder) {
   DenseMap<Value, Value> replacements;
@@ -2319,6 +2345,27 @@ static LogicalResult materializeSGPRPromotion(IntervalGroup *group,
   return success();
 }
 
+static LogicalResult materializeSGPRToAGPRPromotion(IntervalGroup *group,
+                                                    OpBuilder &builder) {
+  DenseMap<Value, Value> vgprReplacements;
+  DenseMap<Value, Value> agprReplacements;
+  SmallVector<Value> values = getGroupValues(group);
+  for (Value value : values) {
+    if (isa<BlockArgument>(value))
+      return mlir::emitError(value.getLoc(), kPassName)
+             << " cannot promote block arguments before bridge insertion";
+    if (cast<waveamdmachine::RegType>(value.getType()).getWidth() != 1)
+      return mlir::emitError(value.getLoc(), kPassName)
+             << " SGPR promotion supports only width-1 values";
+    Value vgpr = getVGPRReplacement(value, vgprReplacements, builder);
+    agprReplacements[value] = materializeAGPRDef(vgpr, builder);
+  }
+  for (Value value : values)
+    rewritePromotedSGPRToAGPRUses(value, vgprReplacements.lookup(value),
+                                  agprReplacements.lookup(value), builder);
+  return success();
+}
+
 static LogicalResult materializePromotion(IntervalGroup *group,
                                           Inventory &inventory,
                                           OpBuilder &builder) {
@@ -2331,6 +2378,56 @@ static LogicalResult materializePromotion(IntervalGroup *group,
   return mlir::emitError(builder.getUnknownLoc(), kPassName)
          << " unsupported promotion " << getRegClassName(group->preferredClass)
          << " -> " << getRegClassName(group->storageClass);
+}
+
+static LogicalResult materializePromotionTarget(IntervalGroup *group,
+                                                waveamdmachine::RegClass source,
+                                                waveamdmachine::RegClass target,
+                                                Inventory &inventory,
+                                                OpBuilder &builder) {
+  if (source == waveamdmachine::RegClass::SGPR &&
+      target == waveamdmachine::RegClass::VGPR)
+    return materializeSGPRPromotion(group, builder);
+  if (source == waveamdmachine::RegClass::VGPR &&
+      target == waveamdmachine::RegClass::AGPR)
+    return materializeAGPRPromotion(group, inventory, builder);
+  if (source == waveamdmachine::RegClass::SGPR &&
+      target == waveamdmachine::RegClass::AGPR)
+    return materializeSGPRToAGPRPromotion(group, builder);
+  return mlir::emitError(builder.getUnknownLoc(), kPassName)
+         << " unsupported promotion " << getRegClassName(source) << " -> "
+         << getRegClassName(target);
+}
+
+static LogicalResult
+materializePromotionPlans(ArrayRef<BankPromotionStep> steps,
+                          Inventory &inventory, OpBuilder &builder) {
+  SmallVector<IntervalGroup *> groups;
+  DenseMap<IntervalGroup *, waveamdmachine::RegClass> initialClasses;
+  DenseMap<IntervalGroup *, waveamdmachine::RegClass> currentClasses;
+  for (BankPromotionStep step : steps) {
+    if (!step.group)
+      return mlir::emitError(builder.getUnknownLoc(), kPassName)
+             << " found empty promotion plan";
+    auto it = currentClasses.find(step.group);
+    if (it == currentClasses.end()) {
+      groups.push_back(step.group);
+      initialClasses[step.group] = step.sourceClass;
+      it = currentClasses.insert({step.group, step.sourceClass}).first;
+    }
+    if (it->second != step.sourceClass)
+      return mlir::emitError(builder.getUnknownLoc(), kPassName)
+             << " found non-contiguous promotion chain";
+    it->second = step.targetClass;
+  }
+  for (IntervalGroup *group : groups) {
+    waveamdmachine::RegClass source = initialClasses.lookup(group);
+    waveamdmachine::RegClass target = currentClasses.lookup(group);
+    if (failed(materializePromotionTarget(group, source, target, inventory,
+                                          builder)))
+      return failure();
+  }
+  return success();
 }
 
 static LogicalResult materializePromotions(Inventory &inventory,

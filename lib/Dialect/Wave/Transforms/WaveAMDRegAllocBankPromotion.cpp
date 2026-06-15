@@ -167,8 +167,26 @@ public:
                                 OpBuilder &builder) const override {
     const BankPromotionPlan &promotion =
         static_cast<const BankPromotionPlan &>(plan);
-    assert(hooks.materialize && "bank promotion materializer missing");
-    return hooks.materialize(promotion.getGroup(), inventory, builder);
+    BankPromotionStep step{promotion.getGroup(), promotion.getSourceClass(),
+                           promotion.getTargetClass()};
+    assert(hooks.materializePlans &&
+           "bank promotion plan materializer missing");
+    return hooks.materializePlans(ArrayRef(step), inventory, builder);
+  }
+
+  LogicalResult
+  materializePlans(ArrayRef<const wave::WaveAMDPressureReliefPlan *> plans,
+                   OpBuilder &builder) const override {
+    SmallVector<BankPromotionStep, 8> steps;
+    for (const wave::WaveAMDPressureReliefPlan *plan : plans) {
+      const BankPromotionPlan &promotion =
+          static_cast<const BankPromotionPlan &>(*plan);
+      steps.push_back({promotion.getGroup(), promotion.getSourceClass(),
+                       promotion.getTargetClass()});
+    }
+    assert(hooks.materializePlans &&
+           "bank promotion plan materializer missing");
+    return hooks.materializePlans(steps, inventory, builder);
   }
 
   bool isBetterCandidate(

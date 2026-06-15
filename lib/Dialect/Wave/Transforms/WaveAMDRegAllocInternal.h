@@ -202,6 +202,12 @@ struct PromotionScore {
   unsigned end = 0;
 };
 
+struct BankPromotionStep {
+  IntervalGroup *group = nullptr;
+  waveamdmachine::RegClass sourceClass;
+  waveamdmachine::RegClass targetClass;
+};
+
 struct BankPromotionHooks {
   StringRef (*getRegClassName)(waveamdmachine::RegClass) = nullptr;
   std::optional<waveamdmachine::RegClass> (*getNextRegClass)(
@@ -214,6 +220,8 @@ struct BankPromotionHooks {
   bool (*canFitPromotionTarget)(
       IntervalGroup *, ArrayRef<IntervalGroup *>, RegisterBudgets,
       const ::mlir::wave::WaveAMDKernelEntryRegs &) = nullptr;
+  LogicalResult (*materializePlans)(ArrayRef<BankPromotionStep>, Inventory &,
+                                    OpBuilder &) = nullptr;
   LogicalResult (*materialize)(IntervalGroup *, Inventory &,
                                OpBuilder &) = nullptr;
 };
