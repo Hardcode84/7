@@ -87,6 +87,10 @@ FailureOr<WaveAMDLiveIntervalBuildResult>
 buildWaveAMDLiveIntervals(func::FuncOp func,
                           WaveAMDLiveIntervalOrderOverride orderOverride);
 
+// Allocated variant keeps fixed-index registers in the pressure model.
+FailureOr<WaveAMDLiveIntervalBuildResult> buildAllocatedWaveAMDLiveIntervals(
+    func::FuncOp func, WaveAMDLiveIntervalOrderOverride orderOverride);
+
 } // namespace wave
 } // namespace mlir
 

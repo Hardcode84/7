@@ -7,6 +7,7 @@
 // RUN: wave-opt %s --waveamd-machine-schedule-report='score-func=candidate_invalid score-region=0 score-order=1,0' 2>&1 | FileCheck %s --check-prefix=INVALID
 // RUN: wave-opt %s --waveamd-machine-schedule-report='score-func=wmma_latency score-region=0 score-order=0,1' 2>&1 | FileCheck %s --check-prefix=WMMA
 // RUN: wave-opt %s --waveamd-machine-schedule-report='score-func=candidate_lower score-region=0 score-order=0,2,1,3 pressure-vgpr-budget=2 pressure-sgpr-budget=0 pressure-critical-vgpr-budget=4 pressure-critical-sgpr-budget=0' 2>&1 | FileCheck %s --check-prefix=BUDGET
+// RUN: wave-opt %s --waveamd-machine-schedule-report='score-func=fixed_pressure score-region=0 score-order=0,1,2 pressure-vgpr-budget=1 pressure-sgpr-budget=0 pressure-target-waves-override=-1' 2>&1 | FileCheck %s --check-prefix=FIXED
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 func.func @candidate_lower(%off: !waveamdmachine.reg<vgpr, 1>,
@@ -62,6 +63,19 @@ func.func @wmma_latency(%a: !waveamdmachine.reg<vgpr, 8>,
          !waveamdmachine.reg<vgpr, 8>) -> !waveamdmachine.reg<vgpr, 8>
   return
 }
+
+func.func @fixed_pressure() {
+  %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+  %fixed = waveamdmachine.v_mov_b32_tuple %zero {registers = 1 : i64}
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1, 7>
+  %tmp = waveamdmachine.v_add_u32 %fixed, %fixed
+      : (!waveamdmachine.reg<vgpr, 1, 7>, !waveamdmachine.reg<vgpr, 1, 7>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %use = waveamdmachine.v_add_u32 %fixed, %tmp
+      : (!waveamdmachine.reg<vgpr, 1, 7>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  return
+}
 }
 
 // LOWER: waveamd-machine-schedule-report score func=candidate_lower region=0 order=original cycles=86 issued_ops=3
@@ -90,3 +104,5 @@ func.func @wmma_latency(%a: !waveamdmachine.reg<vgpr, 8>,
 
 // WMMA: waveamd-machine-schedule-report score func=wmma_latency region=0 order=original cycles=128 issued_ops=2
 // WMMA: waveamd-machine-schedule-report score func=wmma_latency region=0 order=candidate cycles=128 issued_ops=2
+
+// FIXED: waveamd-machine-schedule-report score func=fixed_pressure region=0 order=original cycles=15 issued_ops=3 max_vgpr=3 max_sgpr=0 vgpr_hard_excess=2 sgpr_hard_excess=0

@@ -284,6 +284,10 @@ getMFMAAccumulatorAlias(Operation &op) {
 class LiveIntervalBuilder {
 public:
   LiveIntervalBuilder() = default;
+  LiveIntervalBuilder(wave::WaveAMDLiveIntervalOrderOverride orderOverride,
+                      bool includeAllocated)
+      : orderOverride(orderOverride), includeAllocated(includeAllocated),
+        hasOrderOverride(true) {}
   LiveIntervalBuilder(wave::WaveAMDLiveIntervalOrderOverride orderOverride)
       : orderOverride(orderOverride), hasOrderOverride(true) {}
   explicit LiveIntervalBuilder(bool includeAllocated)
@@ -675,5 +679,14 @@ mlir::wave::buildWaveAMDLiveIntervals(
   if (!orderOverride.block)
     return buildWaveAMDLiveIntervals(func);
   LiveIntervalBuilder builder(orderOverride);
+  return builder.build(func);
+}
+
+FailureOr<wave::WaveAMDLiveIntervalBuildResult>
+mlir::wave::buildAllocatedWaveAMDLiveIntervals(
+    func::FuncOp func, WaveAMDLiveIntervalOrderOverride orderOverride) {
+  if (!orderOverride.block)
+    return buildAllocatedWaveAMDLiveIntervals(func);
+  LiveIntervalBuilder builder(orderOverride, /*includeAllocated=*/true);
   return builder.build(func);
 }

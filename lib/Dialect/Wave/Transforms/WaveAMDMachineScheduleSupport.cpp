@@ -744,7 +744,7 @@ static void collectOverlappingGroups(ArrayRef<WaveAMDLiveInterval> intervals,
 SchedulePressureContext buildSchedulePressureContext(func::FuncOp func) {
   SchedulePressureContext context;
   FailureOr<WaveAMDLiveIntervalBuildResult> builtIntervals =
-      buildWaveAMDLiveIntervals(func);
+      buildAllocatedWaveAMDLiveIntervals(func);
   if (failed(builtIntervals)) {
     context.fallbackReason = "pressure_analysis_failed";
     return context;
@@ -843,7 +843,7 @@ computeRegisterPressureFull(const ScheduleRegion &region,
   orderOverride.block = region.first->getBlock();
   orderOverride.ops = orderedOps;
   FailureOr<WaveAMDLiveIntervalBuildResult> builtIntervals =
-      buildWaveAMDLiveIntervals(region.func, orderOverride);
+      buildAllocatedWaveAMDLiveIntervals(region.func, orderOverride);
   if (failed(builtIntervals))
     return makeUnsupportedRegisterPressureResult("pressure_analysis_failed");
 
