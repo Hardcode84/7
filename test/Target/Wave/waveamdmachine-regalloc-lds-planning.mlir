@@ -9,7 +9,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
   // CHECK: existing_dynamic_bytes: '128'
   // CHECK: existing_fixed_bytes: '1024'
   // CHECK: reserved_spill_bytes: '256'
-  // CHECK: status:          available
+  // CHECK: status:          unsupported_waves_per_workgroup
   // CHECK: value_bytes:     '4'
   // CHECK: slot_base:       '1280'
   // CHECK: slot_bytes:      '512'

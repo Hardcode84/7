@@ -2728,7 +2728,7 @@ static void emitLDSSpillPlanRemark(func::FuncOp func, RegisterBudgets budgets) {
   emitIntegerMetric(remark, "reserved_spill_bytes", plan.reservedSpillBytes);
   emitStringMetric(remark, "status", getLDSSpillPlanStatusName(plan.status));
   emitIntegerMetric(remark, "value_bytes", plan.valueBytes);
-  if (plan.status != LDSSpillPlanStatus::Available)
+  if (plan.wavefrontSize == 0)
     return;
   emitIntegerMetric(remark, "available_bytes", plan.availableBytes);
   emitIntegerMetric(remark, "limit_bytes", plan.limitBytes);

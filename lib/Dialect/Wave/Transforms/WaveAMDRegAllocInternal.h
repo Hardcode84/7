@@ -159,6 +159,8 @@ enum class LDSSpillPlanStatus : uint8_t {
   MissingWorkgroupShape,
   InvalidWorkgroupShape,
   UnsupportedWorkgroupShape,
+  UnsupportedSlotBase,
+  UnsupportedWavesPerWorkgroup,
   InvalidValueBytes,
   InsufficientLDS,
 };

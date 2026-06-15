@@ -155,6 +155,7 @@ public:
       wave::WaveAMDPressureReliefCandidateList &candidates) const override {
     pressureFailure = query.failure;
     sawLoopCarryReject = false;
+    planRejectReason.clear();
     unsigned committedBytes =
         getUnsignedAttr(func, kLDSSpillBytesAttr).value_or(0);
     unsigned fixedLDS = 0;
@@ -164,14 +165,10 @@ public:
         committedBytes + getPlannedProviderBytes(inventory, getName());
     LDSSpillPlan plan = buildLDSSpillPlan(func, budgets, /*valueBytes=*/4,
                                           reservedBytes, fixedLDS, dynamicLDS);
-    if (plan.status != LDSSpillPlanStatus::Available)
+    if (plan.status != LDSSpillPlanStatus::Available) {
+      setPlanRejectReason(plan.status);
       return success();
-    if (plan.wavesPerWorkgroup != 1)
-      return success();
-    if (plan.slotBase > waveamdmachine::instOffsetRange(
-                            waveamdmachine::DsStoreB32Op::getAddressFieldSpec())
-                            .second)
-      return success();
+    }
 
     for (IntervalGroup *group : groups)
       collect(group, plan, candidates);
@@ -242,11 +239,15 @@ public:
   }
 
   void setNoCandidateDiagnostic() const {
-    if (!sawLoopCarryReject)
-      return;
     Builder builder(func->getContext());
-    func->setAttr(kMemorySpillRejectAttr,
-                  builder.getStringAttr(kMemorySpillLoopCarryReject));
+    if (sawLoopCarryReject) {
+      func->setAttr(kMemorySpillRejectAttr,
+                    builder.getStringAttr(kMemorySpillLoopCarryReject));
+      return;
+    }
+    if (!planRejectReason.empty())
+      func->setAttr(kMemorySpillRejectAttr,
+                    builder.getStringAttr(planRejectReason));
   }
 
   void notifyNoCandidate() const override { setNoCandidateDiagnostic(); }
@@ -255,6 +256,11 @@ public:
 
 private:
   static std::optional<unsigned> getUnsignedAttr(Operation *op, StringRef name);
+
+  void setPlanRejectReason(LDSSpillPlanStatus status) const {
+    planRejectReason = "lds_spill_";
+    planRejectReason += getLDSSpillPlanStatusName(status);
+  }
 
   static Value getSimpleValue(IntervalGroup *group) {
     if (!group || group->intervals.size() != 1)
@@ -438,6 +444,7 @@ private:
                   builder.getI64IntegerAttr(reserved + plan.slotBytes));
   }
 
+  mutable std::string planRejectReason;
   func::FuncOp func;
   ArrayRef<IntervalGroup *> groups;
   RegisterBudgets budgets;
@@ -644,14 +651,15 @@ static uint64_t getLDSLimitBytes(RegisterBudgets budgets,
 }
 
 static LDSSpillPlan
-buildAvailablePlan(unsigned fixedBytes, unsigned dynamicBytes,
-                   unsigned reservedBytes, unsigned valueBytes,
-                   const LDSTargetInfo &targetInfo, unsigned wavesPerWorkgroup,
-                   uint64_t limitBytes, uint64_t usedBytes) {
+buildCapacityPlan(LDSSpillPlanStatus status, unsigned fixedBytes,
+                  unsigned dynamicBytes, unsigned reservedBytes,
+                  unsigned valueBytes, const LDSTargetInfo &targetInfo,
+                  unsigned wavesPerWorkgroup, uint64_t limitBytes,
+                  uint64_t usedBytes) {
   uint64_t waveStride =
       static_cast<uint64_t>(targetInfo.wavefrontSize) * valueBytes;
   LDSSpillPlan plan;
-  plan.status = LDSSpillPlanStatus::Available;
+  plan.status = status;
   plan.existingFixedBytes = fixedBytes;
   plan.existingDynamicBytes = dynamicBytes;
   plan.reservedSpillBytes = reservedBytes;
@@ -697,33 +705,41 @@ static LDSSpillPlan buildLDSSpillPlan(func::FuncOp func,
     return reject(LDSSpillPlanStatus::InsufficientLDS, fixedLDS, dynamicLDS,
                   reservedSpillBytes, valueBytes);
 
-  return buildAvailablePlan(fixedLDS, dynamicLDS, reservedSpillBytes,
-                            valueBytes, *targetInfo, wavesPerWorkgroup,
-                            limitBytes, usedBytes);
+  LDSSpillPlanStatus status = LDSSpillPlanStatus::Available;
+  if (wavesPerWorkgroup != 1)
+    status = LDSSpillPlanStatus::UnsupportedWavesPerWorkgroup;
+  else {
+    std::pair<int64_t, int64_t> offsetRange = waveamdmachine::instOffsetRange(
+        waveamdmachine::DsStoreB32Op::getAddressFieldSpec());
+    if (static_cast<uint64_t>(fixedLDS) + reservedSpillBytes >
+        static_cast<uint64_t>(offsetRange.second))
+      status = LDSSpillPlanStatus::UnsupportedSlotBase;
+  }
+
+  return buildCapacityPlan(status, fixedLDS, dynamicLDS, reservedSpillBytes,
+                           valueBytes, *targetInfo, wavesPerWorkgroup,
+                           limitBytes, usedBytes);
 }
 
 } // namespace
 
 StringRef
 mlir::wave::regalloc::getLDSSpillPlanStatusName(LDSSpillPlanStatus status) {
-  switch (status) {
-  case LDSSpillPlanStatus::Available:
-    return "available";
-  case LDSSpillPlanStatus::NotKernel:
-    return "not_kernel";
-  case LDSSpillPlanStatus::MissingTargetWaves:
-    return "missing_target_waves";
-  case LDSSpillPlanStatus::MissingWorkgroupShape:
-    return "missing_workgroup_shape";
-  case LDSSpillPlanStatus::InvalidWorkgroupShape:
-    return "invalid_workgroup_shape";
-  case LDSSpillPlanStatus::UnsupportedWorkgroupShape:
-    return "unsupported_workgroup_shape";
-  case LDSSpillPlanStatus::InvalidValueBytes:
-    return "invalid_value_bytes";
-  case LDSSpillPlanStatus::InsufficientLDS:
-    return "insufficient_lds";
-  }
+  static constexpr std::array<llvm::StringLiteral, 10> names = {
+      "available",
+      "not_kernel",
+      "missing_target_waves",
+      "missing_workgroup_shape",
+      "invalid_workgroup_shape",
+      "unsupported_workgroup_shape",
+      "unsupported_slot_base",
+      "unsupported_waves_per_workgroup",
+      "invalid_value_bytes",
+      "insufficient_lds",
+  };
+  unsigned index = static_cast<unsigned>(status);
+  if (index < names.size())
+    return names[index];
   llvm_unreachable("unknown LDS spill plan status");
 }
 
