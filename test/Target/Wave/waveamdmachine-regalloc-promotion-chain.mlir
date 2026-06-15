@@ -1,4 +1,4 @@
-// RUN: not wave-opt --waveamd-reg-alloc='sgpr-limit=1 vgpr-limit=1 agpr-limit=8' %s 2>&1 | FileCheck %s --implicit-check-not='unsupported promotion SGPR -> AGPR'
+// RUN: not wave-opt --waveamd-reg-alloc='sgpr-limit=2 vgpr-limit=1 agpr-limit=8' %s 2>&1 | FileCheck %s --implicit-check-not='unsupported promotion SGPR -> AGPR'
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 

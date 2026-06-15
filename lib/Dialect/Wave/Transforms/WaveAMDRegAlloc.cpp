@@ -15,6 +15,7 @@
 #include "WaveAMDRegPressureRelief.h"
 #include "WaveAMDRegisterLimits.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/Wave/Transforms/WaveAMDExecIfUtils.h"
 #include "mlir/Dialect/Wave/Transforms/WaveAMDRegAllocVerification.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachine.h"
 #include "mlir/IR/BuiltinOps.h"
@@ -232,6 +233,19 @@ static LogicalResult applyTargetWavesLimits(func::FuncOp func,
   budgets.vgpr = std::min(budgets.vgpr, vgprBudget);
   budgets.sgpr = std::min(budgets.sgpr, sgprBudget);
   budgets.targetWaves = *targetWaves;
+  return success();
+}
+
+static LogicalResult reserveExecIfSaveBudget(func::FuncOp func,
+                                             RegisterBudgets &budgets) {
+  unsigned reserve = wave::getWaveAMDExecIfSaveBudgetReserve(func);
+  if (reserve == 0)
+    return success();
+  if (budgets.sgpr <= reserve)
+    return func.emitError(kPassName)
+           << " exec_if save stack requires " << reserve << " SGPRs but only "
+           << budgets.sgpr << " are available";
+  budgets.sgpr -= reserve;
   return success();
 }
 
@@ -3018,8 +3032,11 @@ struct WaveAMDRegAllocPass
                                                 RegisterBudgets budgets) {
     if (failed(applyTargetWavesLimits(func, budgets)))
       return failure();
-    return applyLimitOverrides(budgets, sgprLimitOverride, vgprLimitOverride,
-                               agprLimitOverride);
+    RegisterBudgets funcBudgets = applyLimitOverrides(
+        budgets, sgprLimitOverride, vgprLimitOverride, agprLimitOverride);
+    if (failed(reserveExecIfSaveBudget(func, funcBudgets)))
+      return failure();
+    return funcBudgets;
   }
 
   LogicalResult prepareFunction(func::FuncOp func) {

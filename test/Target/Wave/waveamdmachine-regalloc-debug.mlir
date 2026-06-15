@@ -1,6 +1,6 @@
 // RUN: wave-opt --waveamd-reg-alloc -split-input-file %s | FileCheck %s
 // RUN: wave-opt --waveamd-reg-alloc='mark-overflow=true vgpr-limit=3' -split-input-file %s | FileCheck %s --check-prefix=PROMOTE
-// RUN: wave-opt --waveamd-reg-alloc='sgpr-limit=1' -split-input-file %s | FileCheck %s --check-prefix=SGPRPROMOTE
+// RUN: wave-opt --waveamd-reg-alloc='sgpr-limit=2' -split-input-file %s | FileCheck %s --check-prefix=SGPRPROMOTE
 // RUN: wave-opt --waveamd-reg-alloc='mark-overflow=true vgpr-limit=3 agpr-limit=0' -split-input-file %s | FileCheck %s --check-prefix=OVERFLOW
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {

@@ -1,9 +1,9 @@
 // RUN: wave-opt --waveamd-to-machine --split-input-file %s | FileCheck %s
 // RUN: wave-opt --waveamd-to-machine --split-input-file %s | wave-opt --split-input-file | FileCheck %s
 // RUN: wave-opt --waveamd-to-machine --waveamd-abi-lowering \
-// RUN:   --waveamd-decompose-mem-tuples --waveamd-linearize-exec-if \
-// RUN:   --waveamd-insert-ticket-waits \
-// RUN:   --waveamd-reg-alloc --waveamd-insert-hazard-waits \
+// RUN:   --waveamd-preserve-hw-regs --waveamd-reg-alloc \
+// RUN:   --waveamd-decompose-mem-tuples --waveamd-insert-ticket-waits \
+// RUN:   --waveamd-insert-hazard-waits \
 // RUN:   --split-input-file %s | FileCheck %s --check-prefix=REGALLOC
 // RUN: wave-translate --wave-to-amdgpu-asm --split-input-file %s | FileCheck %s --check-prefix=ASM
 

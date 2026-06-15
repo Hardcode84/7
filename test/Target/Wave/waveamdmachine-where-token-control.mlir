@@ -1,14 +1,15 @@
-// RUN: wave-opt --waveamd-to-machine --waveamd-abi-lowering --waveamd-insert-ticket-waits --waveamd-linearize-exec-if %s | FileCheck %s --check-prefix=PIPE
+// RUN: wave-opt --waveamd-to-machine --waveamd-abi-lowering --waveamd-insert-ticket-waits %s | FileCheck %s --check-prefix=PIPE
 // RUN: wave-translate --wave-to-amdgpu-asm %s | FileCheck %s --check-prefix=ASM
 // RUN: wave-translate --wave-to-amdgpu-asm %s | llvm-mc -triple=amdgcn-amd-amdhsa -mcpu=gfx1100 -filetype=obj -o /dev/null
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
 // PIPE-LABEL: func.func @masked_load_other_kernel
+// PIPE: waveamdmachine.exec_if
 // PIPE: waveamdmachine.global_load_b32_addr64
 // PIPE: waveamdmachine.s_waitcnt
 // PIPE-NEXT: waveamdmachine.global_store_b32_addr64
-// PIPE: waveamdmachine.label {{".*exec_else.*"}}
+// PIPE: otherwise
 // PIPE: waveamdmachine.v_mov_b32_tuple
 // PIPE: waveamdmachine.global_store_b32_addr64
 // PIPE: waveamdmachine.s_waitcnt_vscnt

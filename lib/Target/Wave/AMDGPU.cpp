@@ -20,6 +20,7 @@
 #include "mlir/Dialect/Wave/IR/WaveAMDABI.h"
 #include "mlir/Dialect/Wave/Transforms/Passes.h"
 #include "mlir/Dialect/Wave/Transforms/WaveAMDEntryRegs.h"
+#include "mlir/Dialect/Wave/Transforms/WaveAMDExecIfUtils.h"
 #include "mlir/Dialect/Wave/Transforms/WaveAMDRegAllocVerification.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachine.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineTarget.h"
@@ -231,9 +232,12 @@ private:
   std::string targetChip = kDefaultTargetChip.str();
   unsigned wavefrontSize = 32;
   unsigned indent = 1;
-  // Per-function counters for structured-control label suffixes.
+  // Per-function structured-control state.
   unsigned loopCounter = 0;
   unsigned ifCounter = 0;
+  unsigned execIfCounter = 0;
+  unsigned execIfSaveBase = 0;
+  unsigned execIfSaveCursor = 0;
   std::string funcLabelPrefix;
 
   LogicalResult initializeMC(Operation *op) {
@@ -787,7 +791,21 @@ private:
 
     loopCounter = 0;
     ifCounter = 0;
+    execIfCounter = 0;
+    execIfSaveCursor = 0;
     funcLabelPrefix = (".L" + Twine(func.getSymName())).str();
+    wave::WaveAMDExecIfSaveStackInfo execIfSaveInfo =
+        wave::getWaveAMDExecIfSaveStackInfo(func);
+    if (execIfSaveInfo.maxDwords != 0 &&
+        !func->hasAttr("waveamdmachine.sgpr_count"))
+      return func.emitError(
+          "wave-to-amdgpu-asm exec_if requires waveamdmachine.sgpr_count");
+    unsigned sgprCount = getIntAttr(func, "waveamdmachine.sgpr_count", 0);
+    execIfSaveBase = wave::getWaveAMDExecIfSaveBase(func, sgprCount);
+    if (execIfSaveInfo.maxDwords != 0 &&
+        execIfSaveBase + execIfSaveInfo.maxDwords > sgprCount)
+      return func.emitError("wave-to-amdgpu-asm sgpr_count does not cover "
+                            "exec_if save stack");
 
     os << "\n\t.globl\t" << func.getSymName() << "\n";
     os << "\t.p2align\t8\n";
@@ -1686,6 +1704,149 @@ private:
     return success();
   }
 
+  llvm::MCOperand getExecSaveOperand(unsigned slot, unsigned width) const {
+    return llvm::MCOperand::createReg(mcSGPRReg(execIfSaveBase + slot, width));
+  }
+
+  LogicalResult emitExecSave(Value condition, llvm::MCOperand save) {
+    unsigned width =
+        cast<waveamdmachine::RegType>(condition.getType()).getWidth();
+    if (width == 2)
+      return emitMC(sAndSaveexecB64(), {save, toMCOperand(condition)});
+    if (isGfx8Or9()) {
+      llvm::MCOperand execLo =
+          llvm::MCOperand::createReg(namedPhysReg("exec_lo"));
+      if (failed(emitMC(sMovB32(), {save, execLo})))
+        return failure();
+      return emitMC(sAndB32(), {execLo, execLo, toMCOperand(condition)});
+    }
+    return emitMC(llvm::AMDGPU::S_AND_SAVEEXEC_B32_gfx11,
+                  {save, toMCOperand(condition)});
+  }
+
+  LogicalResult emitExecElse(Value condition, llvm::MCOperand save) {
+    unsigned width =
+        cast<waveamdmachine::RegType>(condition.getType()).getWidth();
+    if (width == 2)
+      return emitMC(sAndn2B64(),
+                    {llvm::MCOperand::createReg(namedPhysReg("exec")), save,
+                     toMCOperand(condition)});
+    return emitMC(sAndn2B32(),
+                  {llvm::MCOperand::createReg(namedPhysReg("exec_lo")), save,
+                   toMCOperand(condition)});
+  }
+
+  LogicalResult emitExecRestore(unsigned width, llvm::MCOperand save) {
+    if (width == 2)
+      return emitMC(sMovB64(),
+                    {llvm::MCOperand::createReg(namedPhysReg("exec")), save});
+    return emitMC(sMovB32(),
+                  {llvm::MCOperand::createReg(namedPhysReg("exec_lo")), save});
+  }
+
+  static bool isSamePhysicalReg(Value lhs, Value rhs) {
+    waveamdmachine::RegType lhsType =
+        dyn_cast<waveamdmachine::RegType>(lhs.getType());
+    waveamdmachine::RegType rhsType =
+        dyn_cast<waveamdmachine::RegType>(rhs.getType());
+    if (!lhsType || !rhsType)
+      return false;
+    return lhsType.getRegClass() == rhsType.getRegClass() &&
+           lhsType.getWidth() == rhsType.getWidth() &&
+           lhsType.getIndex() == rhsType.getIndex();
+  }
+
+  LogicalResult emitCopy(Value dst, Value src, Operation *op) {
+    if (isa<waveamdmachine::MemTokenType>(dst.getType()))
+      return success();
+    if (src.getDefiningOp<waveamdmachine::UninitOp>())
+      return success();
+    if (isSamePhysicalReg(dst, src))
+      return success();
+
+    waveamdmachine::RegType dstType =
+        dyn_cast<waveamdmachine::RegType>(dst.getType());
+    if (!dstType)
+      return op->emitError("exec_if result copy requires a register result");
+    if (dstType.getRegClass() == waveamdmachine::RegClass::VGPR) {
+      for (unsigned i : llvm::seq<unsigned>(0, dstType.getWidth()))
+        if (failed(emitMC(vMovB32(), {toMCVGPRComponent(dst, i),
+                                      toMCB32Component(src, i)})))
+          return failure();
+      return success();
+    }
+    if (dstType.getRegClass() == waveamdmachine::RegClass::SGPR) {
+      for (unsigned i : llvm::seq<unsigned>(0, dstType.getWidth()))
+        if (failed(emitMC(sMovB32(), {toMCSGPRComponent(dst, i),
+                                      toMCB32Component(src, i)})))
+          return failure();
+      return success();
+    }
+    return op->emitError("exec_if result copy supports only SGPR/VGPR results");
+  }
+
+  LogicalResult emitYieldCopies(waveamdmachine::ExecIfOp execIf,
+                                Region &region) {
+    if (region.empty())
+      return success();
+    waveamdmachine::YieldOp yield =
+        cast<waveamdmachine::YieldOp>(region.front().getTerminator());
+    for (auto [result, value] :
+         llvm::zip_equal(execIf.getResults(), yield.getValues()))
+      if (failed(emitCopy(result, value, yield.getOperation())))
+        return failure();
+    return success();
+  }
+
+  LogicalResult emitExecIfRegion(waveamdmachine::ExecIfOp execIf,
+                                 Region &region) {
+    if (region.empty())
+      return success();
+    waveamdmachine::YieldOp yield =
+        cast<waveamdmachine::YieldOp>(region.front().getTerminator());
+    for (Operation &child : region.front()) {
+      if (&child == yield.getOperation())
+        continue;
+      if (failed(emitOperation(child)))
+        return failure();
+    }
+    return emitYieldCopies(execIf, region);
+  }
+
+  LogicalResult emitExecIf(waveamdmachine::ExecIfOp execIf) {
+    unsigned id = execIfCounter++;
+    Value condition = execIf.getCondition();
+    unsigned width =
+        cast<waveamdmachine::RegType>(condition.getType()).getWidth();
+    unsigned savedCursor = execIfSaveCursor;
+    unsigned saveSlot =
+        wave::alignWaveAMDExecIfSaveSlot(execIfSaveCursor, width);
+    execIfSaveCursor = saveSlot + width;
+
+    std::string endLabel = (funcLabelPrefix + ".exec_endif_" + Twine(id)).str();
+    bool hasElse = !execIf.getElseRegion().empty();
+    std::string elseLabel =
+        hasElse ? (funcLabelPrefix + ".exec_else_" + Twine(id)).str()
+                : endLabel;
+    llvm::MCOperand save = getExecSaveOperand(saveSlot, width);
+    if (failed(emitExecSave(condition, save)) ||
+        failed(emitMC(sCbranchExecz(), {labelOperand(elseLabel)})) ||
+        failed(emitExecIfRegion(execIf, execIf.getThenRegion())))
+      return failure();
+    if (hasElse) {
+      os << elseLabel << ":\n";
+      if (failed(emitExecElse(condition, save)) ||
+          failed(emitMC(sCbranchExecz(), {labelOperand(endLabel)})) ||
+          failed(emitExecIfRegion(execIf, execIf.getElseRegion())))
+        return failure();
+    }
+    os << endLabel << ":\n";
+    if (failed(emitExecRestore(width, save)))
+      return failure();
+    execIfSaveCursor = savedCursor;
+    return success();
+  }
+
   LogicalResult emitOperation(Operation &op) {
     auto operandString = [&](unsigned i) {
       return operandToString(op.getOperand(i));
@@ -2348,6 +2509,8 @@ private:
     if (isa<waveamdmachine::SCBranchScc1Op>(op))
       return emitMC(sCbranchScc1(),
                     {labelOperand(op.getAttrOfType<StringAttr>("label"))});
+    if (auto execIf = dyn_cast<waveamdmachine::ExecIfOp>(op))
+      return emitExecIf(execIf);
     if (auto uniformIf = dyn_cast<waveamdmachine::UniformIfOp>(op))
       return emitUniformIf(uniformIf);
     if (auto loop = dyn_cast<waveamdmachine::UniformLoopOp>(op))

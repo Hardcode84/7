@@ -61,7 +61,7 @@ func.func @wave_where(%limit: i32, %out: !wave.ptr<#wave.global, i32>) -> i32 {
   // CHECK: v_cmp_lt_u32_e64 [[MASK:s[0-9]+]], [[LANE]], [[ARG:s[0-9]+]]
   %active = wave.cmpi ult %lane, %vlimit : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.mask<32>
   // CHECK: s_and_saveexec_b32 [[SAVE:s[0-9]+]], [[MASK]]
-  // CHECK: s_cbranch_execz [[END:.Lwave_wave_where_exec_endif_[0-9]+]]
+  // CHECK: s_cbranch_execz [[END:.Lwave_where.exec_endif_[0-9]+]]
   wave.where %active {
     // CHECK: v_add_nc_u32_e32
     %sum = wave.binary addi %lane, %vlimit : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
@@ -84,7 +84,7 @@ func.func @wave_where_else(%limit: i32, %out: !wave.ptr<#wave.global, i32>) -> i
   // CHECK: v_cmp_lt_u32_e64 [[MASK:s[0-9]+]], [[LANE]], [[ARG:s[0-9]+]]
   %active = wave.cmpi ult %lane, %vlimit : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.mask<32>
   // CHECK: s_and_saveexec_b32 [[SAVE:s[0-9]+]], [[MASK]]
-  // CHECK: s_cbranch_execz [[ELSE:.Lwave_wave_where_else_exec_else_[0-9]+]]
+  // CHECK: s_cbranch_execz [[ELSE:.Lwave_where_else.exec_else_[0-9]+]]
   wave.where %active {
     // CHECK: v_add_nc_u32_e32
     %then = wave.binary addi %lane, %vlimit : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
@@ -100,6 +100,53 @@ func.func @wave_where_else(%limit: i32, %out: !wave.ptr<#wave.global, i32>) -> i
   } : !wave.mask<32>
   // CHECK: s_mov_b32 exec_lo, [[SAVE]]
   %bits = wave.ballot %active : !wave.mask<32> -> i32
+  return %bits : i32
+}
+
+// CHECK-LABEL: wave_nested_where:
+func.func @wave_nested_where(%limit: i32, %alt: i32,
+                             %out: !wave.ptr<#wave.global, i32>) -> i32 {
+  // CHECK: v_mbcnt_lo_u32_b32 [[NEST_LANE:v[0-9]+]], -1, 0
+  %lane = wave.lane_id : !wave.simd<i32, 32>
+  %vlimit = wave.splat %limit : i32 -> !wave.simd<i32, 32>
+  %valt = wave.splat %alt : i32 -> !wave.simd<i32, 32>
+  %ptrs = wave.ptr_add %out, %lane
+      : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 32>
+      -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
+  %outer = wave.cmpi ult %lane, %vlimit
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.mask<32>
+  %inner = wave.cmpi ult %lane, %valt
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.mask<32>
+  // CHECK: s_and_saveexec_b32 [[OUTER_SAVE:s[0-9]+]],
+  // CHECK: s_cbranch_execz [[OUTER_ELSE:.Lwave_nested_where.exec_else_[0-9]+]]
+  wave.where %outer {
+    // CHECK: s_and_saveexec_b32 [[INNER_SAVE:s[0-9]+]],
+    // CHECK: s_cbranch_execz [[INNER_ELSE:.Lwave_nested_where.exec_else_[0-9]+]]
+    wave.where %inner {
+      %t = wave.store %lane -> %ptrs
+          : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>)
+          -> !wave.mem.token
+      wave.yield
+    } otherwise {
+      // CHECK: [[INNER_ELSE]]:
+      // CHECK: s_and_not1_b32 exec_lo, [[INNER_SAVE]]
+      %t = wave.store %valt -> %ptrs
+          : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>)
+          -> !wave.mem.token
+      wave.yield
+    } : !wave.mask<32>
+    // CHECK: s_mov_b32 exec_lo, [[INNER_SAVE]]
+    wave.yield
+  } otherwise {
+    // CHECK: [[OUTER_ELSE]]:
+    // CHECK: s_and_not1_b32 exec_lo, [[OUTER_SAVE]]
+    %t = wave.store %vlimit -> %ptrs
+        : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>)
+        -> !wave.mem.token
+    wave.yield
+  } : !wave.mask<32>
+  // CHECK: s_mov_b32 exec_lo, [[OUTER_SAVE]]
+  %bits = wave.ballot %outer : !wave.mask<32> -> i32
   return %bits : i32
 }
 

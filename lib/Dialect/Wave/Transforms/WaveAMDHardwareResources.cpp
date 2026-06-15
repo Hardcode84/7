@@ -72,6 +72,8 @@ HardwareResourceEffects getHardwareResourceEffects(Operation *op) {
     addUnique(effects.reads, HardwareResourceKind::EXEC);
   if (op->hasTrait<traits::WritesExecOp>())
     addUnique(effects.writes, HardwareResourceKind::EXEC);
+  if (isa<waveamdmachine::ExecIfOp>(op))
+    addUnique(effects.writes, HardwareResourceKind::SCC);
   return effects;
 }
 

@@ -11,6 +11,7 @@
 #include "WaveAMDRegAllocInternal.h"
 #include "WaveAMDRegisterLimits.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/Wave/Transforms/WaveAMDExecIfUtils.h"
 #include "mlir/Dialect/Wave/Transforms/WaveAMDRegAllocVerification.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachine.h"
 #include "mlir/IR/Builders.h"
@@ -212,6 +213,7 @@ struct WaveAMDResourceInfoPass
       unsigned sgprCount = std::max(regs.sgpr, getMinReportedSGPRs(func));
       unsigned vgprCount = std::max(regs.vgpr, getMinReportedVGPRs(func));
       unsigned agprCount = regs.agpr;
+      sgprCount = wave::getWaveAMDExecIfReservedSGPRCount(func, sgprCount);
       func->setAttr("waveamdmachine.sgpr_count",
                     builder.getI64IntegerAttr(sgprCount));
       func->setAttr("waveamdmachine.vgpr_count",

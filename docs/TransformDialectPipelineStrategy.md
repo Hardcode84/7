@@ -29,7 +29,10 @@ thread pool.
 `lib/Target/Wave/pipelines/pipelines.mlir` holds
 `@waveamd_backend` (the full backend: `waveamd-to-machine`,
 `waveamd-abi-lowering`, `waveamd-decompose-mem-tuples`,
-`waveamd-insert-ticket-waits`, `waveamd-reg-alloc`,
+`waveamd-narrow-wide-int`, `waveamd-form-fused-int`,
+`waveamd-clear-regalloc-assignments`, `waveamd-insert-ticket-waits`,
+`waveamd-preserve-hw-regs`, `waveamd-reg-alloc`,
+`waveamd-decompose-mem-tuples`, `waveamd-insert-ticket-waits`,
 `waveamd-insert-hazard-waits`, `waveamd-resource-info`,
 `waveamd-metadata`) and `@compile_kernels` (the backend +
 `wave-compile-kernels`). The default entry is

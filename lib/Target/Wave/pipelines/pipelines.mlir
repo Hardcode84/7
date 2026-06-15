@@ -82,15 +82,13 @@ module attributes {transform.with_named_sequence} {
         : (!transform.any_op) -> !transform.any_op
     %r3 = transform.apply_registered_pass "waveamd-insert-ticket-waits" to %rclr
         : (!transform.any_op) -> !transform.any_op
-    %rlin = transform.apply_registered_pass "waveamd-linearize-exec-if" to %r3
-        : (!transform.any_op) -> !transform.any_op
-    %r4 = transform.apply_registered_pass "waveamd-preserve-hw-regs" to %rlin
+    %r4 = transform.apply_registered_pass "waveamd-preserve-hw-regs" to %r3
         : (!transform.any_op) -> !transform.any_op
     %r5 = transform.apply_registered_pass "waveamd-reg-alloc" to %r4
         : (!transform.any_op) -> !transform.any_op
     %rd = transform.apply_registered_pass "waveamd-decompose-mem-tuples" to %r5
         : (!transform.any_op) -> !transform.any_op
-    // Regalloc can add copies that consume memory results.
+    // Preserve structured exec_if until waits see real control flow.
     %r6 = transform.apply_registered_pass "waveamd-insert-ticket-waits" to %rd
         : (!transform.any_op) -> !transform.any_op
     %r7 = transform.apply_registered_pass "waveamd-insert-hazard-waits" to %r6

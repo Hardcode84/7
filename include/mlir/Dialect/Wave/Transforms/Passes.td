@@ -211,21 +211,6 @@ def WaveAMDTicketWaits
   ];
 }
 
-def WaveAMDLinearizeExecIf
-    : Pass<"waveamd-linearize-exec-if"> {
-  let summary = "Linearize WaveAMDMachine EXEC-masked regions";
-  let description = [{
-    Lowers `waveamdmachine.exec_if` into explicit EXEC save/mask/branch/restore
-    instructions and labels. Runs after ticket waits consume structured token
-    control flow and before regalloc, hazard waits, and ISA emission consume a
-    linear stream.
-  }];
-  let dependentDialects = [
-    "func::FuncDialect",
-    "waveamdmachine::WaveAMDMachineDialect"
-  ];
-}
-
 def WaveAMDPreserveHardwareRegs
     : Pass<"waveamd-preserve-hw-regs"> {
   let summary = "Preserve singleton WaveAMDMachine hardware registers";
