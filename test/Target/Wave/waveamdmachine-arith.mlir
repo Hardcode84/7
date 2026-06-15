@@ -85,6 +85,29 @@ func.func @uniform_i32_signed_div_range(%x: i32) attributes {wave.kernel} {
   return
 }
 
+// SELECT-LABEL: func.func @uniform_i32_signed_div_lower_only_range
+// SELECT: %[[X:.*]] = waveamdmachine.arg
+// SELECT: %[[SHIFT:.*]] = waveamdmachine.imm 5
+// SELECT: waveamdmachine.s_lshr_b32 %[[X]], %[[SHIFT]]
+func.func @uniform_i32_signed_div_lower_only_range(%x: i32) attributes {wave.kernel} {
+  %nonneg = wave.assume %x as "x" [#wave.pred<"x >= 0">] : i32
+  %thirty_two = arith.constant 32 : i32
+  %quot = wave.binary divsi %nonneg, %thirty_two : i32, i32 -> i32
+  return
+}
+
+// SELECT-LABEL: func.func @uniform_i32_signed_div_chained_range
+// SELECT: %[[X:.*]] = waveamdmachine.arg
+// SELECT: %[[SHIFT:.*]] = waveamdmachine.imm 5
+// SELECT: waveamdmachine.s_lshr_b32 %[[X]], %[[SHIFT]]
+func.func @uniform_i32_signed_div_chained_range(%x: i32) attributes {wave.kernel} {
+  %lo = wave.assume %x as "x" [#wave.pred<"x >= 0">] : i32
+  %bounded = wave.assume %lo as "x" [#wave.pred<"-2147483647 + x <= 0">] : i32
+  %thirty_two = arith.constant 32 : i32
+  %quot = wave.binary divsi %bounded, %thirty_two : i32, i32 -> i32
+  return
+}
+
 // SELECT-LABEL: func.func @uniform_i32_unsigned_high_bit_div_rem
 // SELECT: waveamdmachine.imm 31
 // SELECT: waveamdmachine.s_lshr_b32

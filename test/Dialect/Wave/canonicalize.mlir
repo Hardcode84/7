@@ -90,3 +90,13 @@ func.func @index_expr_argless_literal() -> index {
   %off = wave.index_expr <"42"> []() : () -> index
   return %off : index
 }
+
+// CHECK-LABEL: func.func @assume_chain_merge
+// CHECK-SAME: (%[[X:.*]]: i32)
+// CHECK-NEXT: %[[A:.*]] = wave.assume %[[X]] as "y" [#wave.pred<"y >= 0">, #wave.pred<"-10 + y <= 0">] : i32
+// CHECK-NEXT: return %[[A]] : i32
+func.func @assume_chain_merge(%x: i32) -> i32 {
+  %lo = wave.assume %x as "x" [#wave.pred<"x >= 0">] : i32
+  %bounded = wave.assume %lo as "y" [#wave.pred<"y <= 10">] : i32
+  return %bounded : i32
+}

@@ -18,6 +18,37 @@ func.func @addi_propagation(%v: i32) -> i1 {
   return %cmp : i1
 }
 
+// CHECK-LABEL: func.func @one_sided_lower_assume_range
+// CHECK-NEXT: %[[T:.*]] = arith.constant true
+// CHECK-NEXT: return %[[T]] : i1
+func.func @one_sided_lower_assume_range(%v: i32) -> i1 {
+  %a = wave.assume %v as "x" [#wave.pred<"x >= 0">] : i32
+  %zero = arith.constant 0 : i32
+  %cmp = arith.cmpi sge, %a, %zero : i32
+  return %cmp : i1
+}
+
+// CHECK-LABEL: func.func @one_sided_upper_assume_range
+// CHECK-NEXT: %[[T:.*]] = arith.constant true
+// CHECK-NEXT: return %[[T]] : i1
+func.func @one_sided_upper_assume_range(%v: i32) -> i1 {
+  %a = wave.assume %v as "x" [#wave.pred<"x <= 10">] : i32
+  %limit = arith.constant 11 : i32
+  %cmp = arith.cmpi slt, %a, %limit : i32
+  return %cmp : i1
+}
+
+// CHECK-LABEL: func.func @chained_assume_range
+// CHECK-NEXT: %[[T:.*]] = arith.constant true
+// CHECK-NEXT: return %[[T]] : i1
+func.func @chained_assume_range(%v: i32) -> i1 {
+  %lo = wave.assume %v as "x" [#wave.pred<"x >= 0">] : i32
+  %bounded = wave.assume %lo as "x" [#wave.pred<"-2147483647 + x <= 0">] : i32
+  %zero = arith.constant 0 : i32
+  %cmp = arith.cmpi sge, %bounded, %zero : i32
+  return %cmp : i1
+}
+
 // CHECK-LABEL: func.func @muli_propagation
 // CHECK-NEXT: %[[T:.*]] = arith.constant true
 // CHECK-NEXT: return %[[T]] : i1

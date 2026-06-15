@@ -926,16 +926,6 @@ buildIndexExprResultRange(sym::Store &store, sym::ExprHandle expr,
   return ConstantIntRanges::fromSigned(loValue, hiValue);
 }
 
-static std::optional<ConstantIntRanges>
-buildAssumePredicateRange(sym::Store &store, StringRef name, Type resultType,
-                          ArrayAttr attrs) {
-  FailureOr<sym::ExprHandle> expr = sym::composeExprSym(store, name);
-  if (failed(expr))
-    return std::nullopt;
-  SmallVector<sym::PredHandle, 4> assumptions = getPredicateHandles(attrs);
-  return buildIndexExprResultRange(store, *expr, resultType, assumptions);
-}
-
 void mlir::wave::appendAssumePredicates(
     sym::Store &store, Value binding, StringRef name,
     SmallVectorImpl<sym::PredHandle> &assumptions) {
@@ -958,6 +948,40 @@ void mlir::wave::appendAssumePredicates(
     }
     binding = assume.getValue();
   }
+}
+
+static std::optional<ConstantIntRanges>
+buildAssumePredicateRange(sym::Store &store, Value binding, StringRef name,
+                          Type resultType, ArrayAttr attrs) {
+  FailureOr<sym::ExprHandle> expr = sym::composeExprSym(store, name);
+  if (failed(expr))
+    return std::nullopt;
+  SmallVector<sym::PredHandle, 4> assumptions = getPredicateHandles(attrs);
+  appendAssumePredicates(store, binding, name, assumptions);
+  std::optional<sym::InferredRange> range =
+      sym::inferRange(store, *expr, assumptions);
+  if (!range)
+    return std::nullopt;
+
+  unsigned bits = indexValueElementWidth(resultType);
+  if (bits == 0)
+    return std::nullopt;
+
+  APInt loValue = APInt::getSignedMinValue(bits);
+  APInt hiValue = APInt::getSignedMaxValue(bits);
+  if (range->lower) {
+    std::optional<int64_t> lo = floorRational(*range->lower);
+    if (!lo || !fitsSignedWidth(*lo, bits))
+      return std::nullopt;
+    loValue = APInt(bits, *lo, /*isSigned=*/true);
+  }
+  if (range->upper) {
+    std::optional<int64_t> hi = ceilRational(*range->upper);
+    if (!hi || !fitsSignedWidth(*hi, bits))
+      return std::nullopt;
+    hiValue = APInt(bits, *hi, /*isSigned=*/true);
+  }
+  return ConstantIntRanges::fromSigned(loValue, hiValue);
 }
 
 void SplatOp::inferResultRanges(ArrayRef<ConstantIntRanges> argRanges,
@@ -995,9 +1019,9 @@ void AssumeOp::inferResultRangesFromOptional(
     return;
 
   IntegerValueRange incoming = argRanges[0];
-  std::optional<ConstantIntRanges> asserted =
-      buildAssumePredicateRange(dialect->getSymbolStore(), getName(),
-                                getResult().getType(), getAssumptions());
+  std::optional<ConstantIntRanges> asserted = buildAssumePredicateRange(
+      dialect->getSymbolStore(), getValue(), getName(), getResult().getType(),
+      getAssumptions());
   if (!asserted) {
     if (incoming.isUninitialized())
       return;
@@ -1524,6 +1548,50 @@ static void collectLiveIndexExprBindings(
 }
 
 namespace {
+struct MergeChainedAssumeOp : OpRewritePattern<AssumeOp> {
+  using OpRewritePattern::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(AssumeOp op,
+                                PatternRewriter &rewriter) const override {
+    auto source = op.getValue().getDefiningOp<AssumeOp>();
+    if (!source)
+      return failure();
+
+    auto *dialect = op->getContext()->getLoadedDialect<WaveDialect>();
+    if (!dialect)
+      return failure();
+    sym::Store &store = dialect->getSymbolStore();
+
+    FailureOr<sym::ExprHandle> sourceName =
+        sym::composeExprSym(store, source.getName());
+    FailureOr<sym::ExprHandle> targetName =
+        sym::composeExprSym(store, op.getName());
+    if (failed(sourceName) || failed(targetName))
+      return failure();
+
+    std::array<sym::ExprSubstitution, 1> substitutions{
+        sym::ExprSubstitution{*sourceName, *targetName}};
+    SmallVector<Attribute, 4> assumptions;
+    assumptions.reserve(source.getAssumptions().size() +
+                        op.getAssumptions().size());
+    for (Attribute attr : source.getAssumptions()) {
+      FailureOr<sym::PredHandle> pred = sym::substitutePred(
+          store, cast<PredAttr>(attr).getValue(), substitutions);
+      if (failed(pred))
+        return failure();
+      assumptions.push_back(PredAttr::get(op.getContext(), *pred));
+    }
+    for (Attribute attr : op.getAssumptions())
+      assumptions.push_back(attr);
+
+    auto replacement = AssumeOp::create(
+        rewriter, op.getLoc(), op.getResult().getType(), source.getValue(),
+        op.getNameAttr(), rewriter.getArrayAttr(assumptions));
+    rewriter.replaceOp(op, replacement.getResult());
+    return success();
+  }
+};
+
 struct CanonicalizeIndexExprOp : OpRewritePattern<IndexExprOp> {
   using OpRewritePattern::OpRewritePattern;
 
@@ -1581,6 +1649,11 @@ struct CanonicalizeIndexExprOp : OpRewritePattern<IndexExprOp> {
   }
 };
 } // namespace
+
+void AssumeOp::getCanonicalizationPatterns(RewritePatternSet &patterns,
+                                           MLIRContext *context) {
+  patterns.add<MergeChainedAssumeOp>(context);
+}
 
 LogicalResult IndexExprOp::verify() {
   auto emit = [this](const Twine &msg) { return emitOpError(msg); };

@@ -309,6 +309,7 @@ def Wave_AssumeOp : Wave_Op<"assume", [
     $value `as` $name $assumptions attr-dict `:` type($value)
   }];
   let hasVerifier = 1;
+  let hasCanonicalizer = 1;
 }
 
 def Wave_CmpIOp : Wave_Op<"cmpi", [Pure]> {
