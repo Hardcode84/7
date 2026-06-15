@@ -60,6 +60,18 @@ func.func @muli_propagation(%v: i32) -> i1 {
   return %cmp : i1
 }
 
+// CHECK-LABEL: func.func @index_expr_product_bounded_range
+// CHECK-NEXT: %[[T:.*]] = arith.constant true
+// CHECK-NEXT: return %[[T]] : i1
+func.func @index_expr_product_bounded_range(%m: index, %n: index) -> i1 {
+  %a = wave.assume %m as "x" [#wave.pred<"x >= 0">, #wave.pred<"x <= 4000000">] : index
+  %b = wave.assume %n as "x" [#wave.pred<"x >= 0">, #wave.pred<"x <= 4000000">] : index
+  %prod = wave.index_expr <"a*b"> ["a", "b"](%a, %b) : (index, index) -> index
+  %zero = arith.constant 0 : index
+  %cmp = arith.cmpi sge, %prod, %zero : index
+  return %cmp : i1
+}
+
 // CHECK-LABEL: func.func @shli_propagation
 // CHECK-NEXT: %[[T:.*]] = arith.constant true
 // CHECK-NEXT: return %[[T]] : i1

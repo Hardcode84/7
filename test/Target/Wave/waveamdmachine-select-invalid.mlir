@@ -69,6 +69,31 @@ func.func @unsupported_signed_dividend(%x: i32) {
 
 // -----
 
+func.func @unsupported_signed_wrapping_product_dividend(%x: i32, %y: i32) {
+  %a = wave.assume %x as "x" [#wave.pred<"x >= 0">] : i32
+  %b = wave.assume %y as "x" [#wave.pred<"x >= 0">] : i32
+  %prod = wave.binary muli %a, %b : i32, i32 -> i32
+  %thirty_two = arith.constant 32 : i32
+  // expected-error @below {{signed power-of-two div/rem requires nonnegative dividend}}
+  %bad = wave.binary divsi %prod, %thirty_two : i32, i32 -> i32
+  return
+}
+
+// -----
+
+func.func @unsupported_signed_unbounded_index_product_dividend(%x: i32, %y: i32, %z: i32) {
+  %a = wave.assume %x as "x" [#wave.pred<"x >= 0">] : i32
+  %b = wave.assume %y as "x" [#wave.pred<"x >= 0">] : i32
+  %c = wave.assume %z as "x" [#wave.pred<"x >= 0">] : i32
+  %prod = wave.index_expr <"a*b*c"> ["a", "b", "c"](%a, %b, %c) : (i32, i32, i32) -> index
+  %thirty_two = arith.constant 32 : index
+  // expected-error @below {{signed power-of-two div/rem requires nonnegative dividend}}
+  %bad = wave.binary divsi %prod, %thirty_two : index, index -> index
+  return
+}
+
+// -----
+
 func.func @unsupported_signed_divisor() {
   %value = arith.constant 16 : i32
   %neg = arith.constant -2 : i32
@@ -298,7 +323,7 @@ func.func @index_expr_byte_scale_overflow(%out: !wave.ptr<#wave.global, i32>) at
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 func.func @floor_unknown_value(%x: i32) -> index {
-  // expected-error @below {{wave.index_expr floor shift lowering needs nonnegative operand}}
+  // expected-error @below {{index_expr floor shift lowering needs nonnegative operand}}
   %off = wave.index_expr <"floor(1/2*x)"> ["x"](%x) : (i32) -> index
   return %off : index
 }

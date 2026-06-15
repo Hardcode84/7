@@ -108,6 +108,20 @@ func.func @uniform_i32_signed_div_chained_range(%x: i32) attributes {wave.kernel
   return
 }
 
+// SELECT-LABEL: func.func @uniform_index_product_signed_div_bounded_range
+// SELECT-NOT: waveamdmachine.s_mul_i32
+// SELECT: %[[PROD:.*]], %{{.*}} = waveamdmachine.v_mul_u64
+// SELECT: %[[SHIFT:.*]] = waveamdmachine.imm 5
+// SELECT: waveamdmachine.v_lshrrev_b64 %[[SHIFT]], %[[PROD]]
+func.func @uniform_index_product_signed_div_bounded_range(%m: index, %n: index) attributes {wave.kernel} {
+  %a = wave.assume %m as "x" [#wave.pred<"x >= 0">, #wave.pred<"x <= 4000000">] : index
+  %b = wave.assume %n as "x" [#wave.pred<"x >= 0">, #wave.pred<"x <= 4000000">] : index
+  %prod = wave.index_expr <"a*b"> ["a", "b"](%a, %b) : (index, index) -> index
+  %thirty_two = arith.constant 32 : index
+  %quot = wave.binary divsi %prod, %thirty_two : index, index -> index
+  return
+}
+
 // SELECT-LABEL: func.func @uniform_i32_unsigned_high_bit_div_rem
 // SELECT: waveamdmachine.imm 31
 // SELECT: waveamdmachine.s_lshr_b32

@@ -1465,6 +1465,18 @@ FailureOr<Value> materializePointerOffsetValue(WaveAMDMachineSelector &S,
                                   offset.assumptions);
 }
 
+static FailureOr<Value>
+materializePointerOffsetWideValue(WaveAMDMachineSelector &S, Operation *user,
+                                  const PointerOffset &offset) {
+  if (!offset.expr)
+    return createWideImm(S, user->getLoc(), 0);
+  SmallVector<std::pair<std::string, Value>, 4> bindings;
+  for (const PointerOffsetBinding &binding : offset.bindings)
+    bindings.push_back({binding.name, S.expect(binding.value, user)});
+  return materializeWideIndexExprNode(S, offset.expr, user, bindings,
+                                      offset.assumptions);
+}
+
 FailureOr<Value> materializePointerOffsetVGPR(WaveAMDMachineSelector &S,
                                               Operation *user,
                                               const PointerOffset &offset) {
@@ -4099,6 +4111,18 @@ Value WaveAMDMachineSelector::addUniformBytes(Location loc, Value acc,
   return sum.getResult();
 }
 
+static bool isIndexValueType(Type type) {
+  if (auto simd = dyn_cast<SimdType>(type))
+    type = simd.getElementType();
+  return type.isIndex();
+}
+
+static bool needsWideIndexExprValue(WaveAMDMachineSelector &S, IndexExprOp op,
+                                    const PointerOffset &offset) {
+  return offset.expr && isIndexValueType(op.getResult().getType()) &&
+         !S.slotFitsU32(offset.expr, offset.assumptions);
+}
+
 LogicalResult WaveAMDMachineSelector::selectIndexExpr(IndexExprOp op) {
   FailureOr<PointerOffset> pointerOffset = makePointerOffset(*this, op);
   if (failed(pointerOffset))
@@ -4109,7 +4133,9 @@ LogicalResult WaveAMDMachineSelector::selectIndexExpr(IndexExprOp op) {
   indexOffsets[op.getResult()] = *pointerOffset;
   if (needsValue) {
     FailureOr<Value> value =
-        materializePointerOffsetValue(*this, op, *pointerOffset);
+        needsWideIndexExprValue(*this, op, *pointerOffset)
+            ? materializePointerOffsetWideValue(*this, op, *pointerOffset)
+            : materializePointerOffsetValue(*this, op, *pointerOffset);
     if (failed(value))
       return failure();
     values[op.getResult()] = *value;
