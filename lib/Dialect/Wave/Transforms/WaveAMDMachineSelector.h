@@ -272,10 +272,13 @@ public:
   LogicalResult selectBinary(BinaryOp op);
   LogicalResult selectBinaryAddI32(BinaryOp op);
   LogicalResult selectBinaryAddI64(BinaryOp op);
+  LogicalResult selectBinarySubI32(BinaryOp op);
+  LogicalResult selectBinarySubI64(BinaryOp op);
   LogicalResult selectBinaryMulI32(BinaryOp op);
   LogicalResult selectBinaryMulI64(BinaryOp op);
   LogicalResult selectBinaryShLI32(BinaryOp op);
   LogicalResult selectBinaryShLI64(BinaryOp op);
+  LogicalResult selectArithCmp(arith::CmpIOp op);
   LogicalResult selectPack(PackOp op);
   LogicalResult selectExtract(ExtractOp op);
   LogicalResult selectCast(CastOp op);

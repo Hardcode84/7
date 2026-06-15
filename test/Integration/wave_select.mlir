@@ -30,8 +30,9 @@ gpu.module @kernels {
         : !wave.simd<i32, @W@>, !wave.simd<i32, @W@> -> !wave.mask<@W@>
     %lt16 = wave.cmpi ult %lane, %v16
         : !wave.simd<i32, @W@>, !wave.simd<i32, @W@> -> !wave.mask<@W@>
+    %scalar_cmp = arith.cmpi slt, %c100, %c200 : i32
 
-    %hundred = wave.select %flag, %c100, %c999 : i32
+    %hundred = wave.select %scalar_cmp, %c100, %c999 : i32
     %v100 = wave.splat %hundred : i32 -> !wave.simd<i32, @W@>
     %selected_base = wave.select %lt8, %lane, %v100
         : !wave.mask<@W@>, !wave.simd<i32, @W@>
@@ -42,11 +43,19 @@ gpu.module @kernels {
     %selected = wave.binary addi %selected_base, %selected_bias
         : !wave.simd<i32, @W@>, !wave.simd<i32, @W@> -> !wave.simd<i32, @W@>
 
-    %lane_plus8 = wave.binary addi %lane, %v8
+    %lane_plus16_raw = wave.binary addi %lane, %v16
         : !wave.simd<i32, @W@>, !wave.simd<i32, @W@> -> !wave.simd<i32, @W@>
-    %lane_plus16 = wave.binary addi %lane, %v16
+    %lane_plus16_quot = wave.binary divui %lane_plus16_raw, %v8
         : !wave.simd<i32, @W@>, !wave.simd<i32, @W@> -> !wave.simd<i32, @W@>
-    %whole = wave.select %flag, %v200, %lane_plus8
+    %lane_plus16_rem = wave.binary remui %lane_plus16_raw, %v8
+        : !wave.simd<i32, @W@>, !wave.simd<i32, @W@> -> !wave.simd<i32, @W@>
+    %lane_plus16_base = wave.binary muli %lane_plus16_quot, %v8
+        : !wave.simd<i32, @W@>, !wave.simd<i32, @W@> -> !wave.simd<i32, @W@>
+    %lane_plus16 = wave.binary addi %lane_plus16_base, %lane_plus16_rem
+        : !wave.simd<i32, @W@>, !wave.simd<i32, @W@> -> !wave.simd<i32, @W@>
+    %lane_plus8 = wave.binary subi %lane_plus16, %v8
+        : !wave.simd<i32, @W@>, !wave.simd<i32, @W@> -> !wave.simd<i32, @W@>
+    %whole = wave.select %scalar_cmp, %v200, %lane_plus8
         : !wave.simd<i32, @W@>
 
     %ptr_lane = wave.ptr_add %dst, %lane

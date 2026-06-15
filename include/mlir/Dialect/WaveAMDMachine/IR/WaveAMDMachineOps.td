@@ -2393,6 +2393,22 @@ def WaveAMDMachine_VLshlrevB64Op : WaveAMDMachine_Op<"v_lshlrev_b64", [Pure]> {
   let assemblyFormat = "$shift `,` $value attr-dict `:` functional-type(operands, results)";
 }
 
+def WaveAMDMachine_SLshrB64Op : WaveAMDMachine_Op<"s_lshr_b64", [Pure]> {
+  let summary = "scalar 64-bit logical right shift";
+  let arguments = (ins WaveAMDMachine_SGPR2:$value,
+                       WaveAMDMachine_SGPR1OrImm:$shift);
+  let results = (outs WaveAMDMachine_SGPR2:$result, WaveAMDMachine_SCC:$scc);
+  let assemblyFormat = "$value `,` $shift attr-dict `:` functional-type(operands, results)";
+}
+
+def WaveAMDMachine_VLshrrevB64Op : WaveAMDMachine_Op<"v_lshrrev_b64", [Pure]> {
+  let summary = "vector 64-bit logical right shift";
+  let arguments = (ins WaveAMDMachine_Reg1OrImm:$shift,
+                       WaveAMDMachine_VGPR2:$value);
+  let results = (outs WaveAMDMachine_VGPR2:$result);
+  let assemblyFormat = "$shift `,` $value attr-dict `:` functional-type(operands, results)";
+}
+
 // Materializes a 64-bit immediate as a 2-wide SGPR via two
 // `s_mov_b32` instructions for the low and high halves. Used by the
 // selector to lift `arith.constant : i64` into the 2-wide register
@@ -2404,8 +2420,8 @@ def WaveAMDMachine_SMovB64ImmOp : WaveAMDMachine_Op<"s_mov_b64_imm", [Pure]> {
   let assemblyFormat = "$value attr-dict `:` type($result)";
 }
 
-def WaveAMDMachine_SCmpLtI32Op : WaveAMDMachine_Op<"s_cmp_lt_i32", [Pure]> {
-  let summary = "scalar signed less-than compare (sets SCC)";
+class WaveAMDMachine_SCmp<string mnemonic, list<Trait> traits = [Pure]>
+    : WaveAMDMachine_Op<mnemonic, traits> {
   let arguments = (ins
     WaveAMDMachine_SGPR1OrImm:$lhs,
     WaveAMDMachine_SGPR1OrImm:$rhs
@@ -2414,15 +2430,44 @@ def WaveAMDMachine_SCmpLtI32Op : WaveAMDMachine_Op<"s_cmp_lt_i32", [Pure]> {
   let assemblyFormat = "$lhs `,` $rhs attr-dict `:` functional-type(operands, results)";
 }
 
+def WaveAMDMachine_SCmpEqU32Op : WaveAMDMachine_SCmp<"s_cmp_eq_u32"> {
+  let summary = "scalar unsigned equal compare";
+}
 // SCC reload form writes singleton flag state; LICM must keep it local.
-def WaveAMDMachine_SCmpLgU32Op : WaveAMDMachine_Op<"s_cmp_lg_u32"> {
-  let summary = "scalar unsigned not-equal compare (sets SCC)";
-  let arguments = (ins
-    WaveAMDMachine_SGPR1OrImm:$lhs,
-    WaveAMDMachine_SGPR1OrImm:$rhs
-  );
-  let results = (outs WaveAMDMachine_SCC:$result);
-  let assemblyFormat = "$lhs `,` $rhs attr-dict `:` functional-type(operands, results)";
+def WaveAMDMachine_SCmpLgU32Op : WaveAMDMachine_SCmp<"s_cmp_lg_u32", []> {
+  let summary = "scalar unsigned not-equal compare";
+}
+def WaveAMDMachine_SCmpLtU32Op : WaveAMDMachine_SCmp<"s_cmp_lt_u32"> {
+  let summary = "scalar unsigned less-than compare";
+}
+def WaveAMDMachine_SCmpLeU32Op : WaveAMDMachine_SCmp<"s_cmp_le_u32"> {
+  let summary = "scalar unsigned less-or-equal compare";
+}
+def WaveAMDMachine_SCmpGtU32Op : WaveAMDMachine_SCmp<"s_cmp_gt_u32"> {
+  let summary = "scalar unsigned greater-than compare";
+}
+def WaveAMDMachine_SCmpGeU32Op : WaveAMDMachine_SCmp<"s_cmp_ge_u32"> {
+  let summary = "scalar unsigned greater-or-equal compare";
+}
+
+def WaveAMDMachine_SCmpLtI32Op : WaveAMDMachine_SCmp<"s_cmp_lt_i32"> {
+  let summary = "scalar signed less-than compare";
+}
+def WaveAMDMachine_SCmpLeI32Op : WaveAMDMachine_SCmp<"s_cmp_le_i32"> {
+  let summary = "scalar signed less-or-equal compare";
+}
+def WaveAMDMachine_SCmpGtI32Op : WaveAMDMachine_SCmp<"s_cmp_gt_i32"> {
+  let summary = "scalar signed greater-than compare";
+}
+def WaveAMDMachine_SCmpGeI32Op : WaveAMDMachine_SCmp<"s_cmp_ge_i32"> {
+  let summary = "scalar signed greater-or-equal compare";
+}
+
+def WaveAMDMachine_SCmpEqI32Op : WaveAMDMachine_SCmp<"s_cmp_eq_i32"> {
+  let summary = "scalar signed equal compare";
+}
+def WaveAMDMachine_SCmpLgI32Op : WaveAMDMachine_SCmp<"s_cmp_lg_i32"> {
+  let summary = "scalar signed not-equal compare";
 }
 
 def WaveAMDMachine_SCBranchScc0Op : WaveAMDMachine_Op<"s_cbranch_scc0"> {

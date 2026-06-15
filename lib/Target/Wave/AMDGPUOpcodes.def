@@ -13,6 +13,7 @@
   X(sMulI32, S_MUL_I32_vi, S_MUL_I32_gfx11)                                    \
   X(sLshlB32, S_LSHL_B32_vi, S_LSHL_B32_gfx11)                                 \
   X(sLshrB32, S_LSHR_B32_vi, S_LSHR_B32_gfx11)                                 \
+  X(sLshrB64, S_LSHR_B64_vi, S_LSHR_B64_gfx11)                                 \
   X(sAndB32, S_AND_B32_vi, S_AND_B32_gfx11)                                    \
   X(sOrB32, S_OR_B32_vi, S_OR_B32_gfx11)                                       \
   X(sXorB32, S_XOR_B32_vi, S_XOR_B32_gfx11)                                    \
@@ -24,8 +25,18 @@
   X(sAddU32, S_ADD_U32_vi, S_ADD_U32_gfx11)                                    \
   X(sAddcU32, S_ADDC_U32_vi, S_ADDC_U32_gfx11)                                 \
   X(sMulHiU32, S_MUL_HI_U32_vi, S_MUL_HI_U32_gfx11)                            \
+  X(sCmpEqI32, S_CMP_EQ_I32_vi, S_CMP_EQ_I32_gfx11)                            \
+  X(sCmpLgI32, S_CMP_LG_I32_vi, S_CMP_LG_I32_gfx11)                            \
+  X(sCmpGtI32, S_CMP_GT_I32_vi, S_CMP_GT_I32_gfx11)                            \
+  X(sCmpGeI32, S_CMP_GE_I32_vi, S_CMP_GE_I32_gfx11)                            \
   X(sCmpLtI32, S_CMP_LT_I32_vi, S_CMP_LT_I32_gfx11)                            \
+  X(sCmpLeI32, S_CMP_LE_I32_vi, S_CMP_LE_I32_gfx11)                            \
+  X(sCmpEqU32, S_CMP_EQ_U32_vi, S_CMP_EQ_U32_gfx11)                            \
   X(sCmpLgU32, S_CMP_LG_U32_vi, S_CMP_LG_U32_gfx11)                            \
+  X(sCmpGtU32, S_CMP_GT_U32_vi, S_CMP_GT_U32_gfx11)                            \
+  X(sCmpGeU32, S_CMP_GE_U32_vi, S_CMP_GE_U32_gfx11)                            \
+  X(sCmpLtU32, S_CMP_LT_U32_vi, S_CMP_LT_U32_gfx11)                            \
+  X(sCmpLeU32, S_CMP_LE_U32_vi, S_CMP_LE_U32_gfx11)                            \
   X(sCselectB32, S_CSELECT_B32_vi, S_CSELECT_B32_gfx11)                        \
   X(sBranch, S_BRANCH_vi, S_BRANCH_gfx11)                                      \
   X(sCbranchScc0, S_CBRANCH_SCC0_vi, S_CBRANCH_SCC0_gfx11)                     \
@@ -50,6 +61,7 @@
   X(vXorB32, V_XOR_B32_e32_vi, V_XOR_B32_e32_gfx11)                            \
   X(vLshlrevB32, V_LSHLREV_B32_e32_vi, V_LSHLREV_B32_e32_gfx11)                \
   X(vLshrrevB32, V_LSHRREV_B32_e32_vi, V_LSHRREV_B32_e32_gfx11)                \
+  X(vLshrrevB64, V_LSHRREV_B64_vi, V_LSHRREV_B64_e64_gfx11)                    \
   X(vReadfirstlaneB32, V_READFIRSTLANE_B32_vi, V_READFIRSTLANE_B32_gfx11)      \
   X(vMulLoU32, V_MUL_LO_U32_vi, V_MUL_LO_U32_e64_gfx11)                        \
   X(vAdd3U32, V_ADD3_U32_vi, V_ADD3_U32_e64_gfx11)                             \

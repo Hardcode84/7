@@ -89,8 +89,8 @@ SchedClass classifyOp(Operation *op) {
             SSetpcB64Op, SEndpgmOp>(
           [](auto) { return SchedClass::WriteBranch; })
       // 64-bit VALU expansions (charged differently from 32-bit).
-      .Case<VAddU64Op, VAddU64U32Op, VMulU64Op, VXorB64Op, VLshlrevB64Op>(
-          [](auto) { return SchedClass::Write64Bit; })
+      .Case<VAddU64Op, VAddU64U32Op, VMulU64Op, VXorB64Op, VLshlrevB64Op,
+            VLshrrevB64Op>([](auto) { return SchedClass::Write64Bit; })
       .Case<VCvtF16F32Op, VCvtF32F16Op, VCvtPkRtzF16F32Op, VPkAddF16Op,
             VPkMulF16Op, VPkFmaF16Op, VAdd3U32Op, VLshlAddU32Op,
             VAddLshlU32Op, VAndOrB32Op, VOr3B32Op, VXadU32Op, VMadI32I24Op,
@@ -103,10 +103,12 @@ SchedClass classifyOp(Operation *op) {
       // still run on the SALU pipe.
       .Case<SAddI32Op, SAddU64Op, SAddU64U32Op, SAndB32Op, SAndn2ExecB32Op,
             SAndn2ExecB64Op, SAndSaveexecB32Op, SAndSaveexecB64Op,
-            SCmpLgU32Op, SCmpLtI32Op, SCSelectB32Op, SDelayAluOp, SLshlB32Op,
-            SLshlB64Op, SLshrB32Op, SMovB32Op, SMovB32TupleOp,
-            SMovB32ValueOp, SMovB64ImmOp, SMovExecB64Op, SMovExecLoOp, SMovM0Op,
-            SMovVccB32Op, SMulI32Op, SMulU64Op, SNopOp, SOrB32Op,
+            SCmpEqI32Op, SCmpLgI32Op, SCmpGtI32Op, SCmpGeI32Op, SCmpLtI32Op,
+            SCmpLeI32Op, SCmpEqU32Op, SCmpLgU32Op, SCmpGtU32Op, SCmpGeU32Op,
+            SCmpLtU32Op, SCmpLeU32Op, SCSelectB32Op, SDelayAluOp, SLshlB32Op,
+            SLshlB64Op, SLshrB32Op, SLshrB64Op, SMovB32Op, SMovB32TupleOp,
+            SMovB32ValueOp, SMovB64ImmOp, SMovExecB64Op, SMovExecLoOp,
+            SMovM0Op, SMovVccB32Op, SMulI32Op, SMulU64Op, SNopOp, SOrB32Op,
             SReadVccB32Op, SSetprioOp, SGetregShaderCyclesOp, SXorB32Op,
             SXorB64Op>(
           [](auto) { return SchedClass::WriteSALU; })

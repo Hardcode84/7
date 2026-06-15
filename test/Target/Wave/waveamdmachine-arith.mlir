@@ -55,6 +55,47 @@ func.func @uniform_i32_add_lhs_immediate(%out: !wave.ptr<#wave.global, i32>) att
   return
 }
 
+// SELECT-LABEL: func.func @uniform_i32_sub_div_rem
+// SELECT: waveamdmachine.s_xor_b32
+// SELECT: waveamdmachine.s_add_i32
+// SELECT: waveamdmachine.s_lshr_b32
+// SELECT: waveamdmachine.s_and_b32
+func.func @uniform_i32_sub_div_rem(%out: !wave.ptr<#wave.global, i32>) attributes {wave.kernel} {
+  %x = wave.workgroup_id 0
+  %y = wave.workgroup_id 1
+  %two = arith.constant 2 : i32
+  %four = arith.constant 4 : i32
+  %diff = wave.binary subi %x, %y : i32, i32 -> i32
+  %half = wave.binary divui %diff, %two : i32, i32 -> i32
+  %tail = wave.binary remui %diff, %four : i32, i32 -> i32
+  %sum = wave.binary addi %half, %tail : i32, i32 -> i32
+  %off = wave.index_expr <"S"> ["S"] (%sum) : (i32) -> index
+  %ptr = wave.ptr_add %out, %off : !wave.ptr<#wave.global, i32>, index -> !wave.ptr<#wave.global, i32>
+  return
+}
+
+// SELECT-LABEL: func.func @simd_i32_sub_div_rem
+// SELECT: waveamdmachine.v_xor_b32
+// SELECT: waveamdmachine.v_add_u32
+// SELECT: waveamdmachine.v_lshrrev_b32
+// SELECT: waveamdmachine.v_and_b32
+func.func @simd_i32_sub_div_rem(%out: !wave.ptr<#wave.global, i32>) attributes {wave.kernel} {
+  %lane = wave.lane_id : !wave.simd<i32, 32>
+  %two = arith.constant 2 : i32
+  %four = arith.constant 4 : i32
+  %v2 = wave.splat %two : i32 -> !wave.simd<i32, 32>
+  %v4 = wave.splat %four : i32 -> !wave.simd<i32, 32>
+  %diff = wave.binary subi %lane, %v4 : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  %half = wave.binary divui %diff, %v2 : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  %tail = wave.binary remui %diff, %v4 : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  %sum = wave.binary addi %half, %tail : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  %ptrs = wave.ptr_add %out, %sum : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 32> -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
+  %zero = arith.constant 0 : i32
+  %v = wave.splat %zero : i32 -> !wave.simd<i32, 32>
+  %tok = wave.store %v -> %ptrs : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>) -> !wave.mem.token
+  return
+}
+
 // Mixed uniform/SIMD i32 add: SIMD operand routes through v_add_u32
 // with the usual SGPR-in-vsrc0 shuffle.
 // SELECT-LABEL: func.func @mixed_i32_addi
@@ -144,6 +185,52 @@ func.func @simd_i64_shl(%a: !wave.simd<i64, 32>, %b: !wave.simd<i64, 32>) attrib
 func.func @simd_i64_xor(%a: !wave.simd<i64, 32>, %b: !wave.simd<i64, 32>) attributes {wave.kernel} {
   %x = wave.binary xori %a, %b : !wave.simd<i64, 32>, !wave.simd<i64, 32> -> !wave.simd<i64, 32>
   return
+}
+
+// SELECT-LABEL: func.func @uniform_index_sub_div_rem
+// SELECT: waveamdmachine.s_add_u64
+// SELECT: waveamdmachine.s_lshr_b64
+// SELECT: waveamdmachine.s_and_b32
+// SELECT: waveamdmachine.tuple_from_elements
+func.func @uniform_index_sub_div_rem() attributes {wave.kernel} {
+  %a = arith.constant 4096 : index
+  %b = arith.constant 64 : index
+  %two = arith.constant 2 : index
+  %eight = arith.constant 8 : index
+  %diff = wave.binary subi %a, %b : index, index -> index
+  %half = wave.binary divui %diff, %two : index, index -> index
+  %tail = wave.binary remui %diff, %eight : index, index -> index
+  %sum = wave.binary addi %half, %tail : index, index -> index
+  return
+}
+
+// SELECT-LABEL: func.func @simd_i64_div_rem_pow2
+// SELECT: waveamdmachine.v_lshrrev_b64
+// SELECT: waveamdmachine.v_and_b32
+// SELECT: waveamdmachine.tuple_from_elements
+func.func @simd_i64_div_rem_pow2(%a: !wave.simd<i64, 32>) attributes {wave.kernel} {
+  %two = arith.constant 2 : i64
+  %eight = arith.constant 8 : i64
+  %half = wave.binary divui %a, %two : !wave.simd<i64, 32>, i64 -> !wave.simd<i64, 32>
+  %tail = wave.binary remui %a, %eight : !wave.simd<i64, 32>, i64 -> !wave.simd<i64, 32>
+  %sum = wave.binary addi %half, %tail : !wave.simd<i64, 32>, !wave.simd<i64, 32> -> !wave.simd<i64, 32>
+  return
+}
+
+// SELECT-LABEL: func.func @scalar_arith_cmpi_select
+// SELECT: waveamdmachine.s_cmp_lt_i32
+// SELECT-NEXT: waveamdmachine.s_cselect_b32
+// SELECT: waveamdmachine.s_cmp_lt_i32
+// SELECT: waveamdmachine.s_cselect_b32
+func.func @scalar_arith_cmpi_select(%a: i32, %b: i32, %x: index, %y: index) -> i32 {
+  %i32cond = arith.cmpi slt, %a, %b : i32
+  %i32min = wave.select %i32cond, %a, %b : i32
+  %idxcond = arith.cmpi slt, %x, %y : index
+  %c1 = arith.constant 1 : i32
+  %c2 = arith.constant 2 : i32
+  %pick = wave.select %idxcond, %c1, %c2 : i32
+  %sum = wave.binary addi %i32min, %pick : i32, i32 -> i32
+  return %sum : i32
 }
 
 }

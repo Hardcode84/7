@@ -49,11 +49,21 @@ func.func @unsupported_i16_cmpi(%x: !wave.simd<i16, 32>) {
 
 // -----
 
-func.func @unsupported_binary_kind(%x: i32) {
+func.func @unsupported_divisor() {
   %lane = wave.lane_id : !wave.simd<i32, 32>
-  %vx = wave.splat %x : i32 -> !wave.simd<i32, 32>
-  // expected-error @below {{unsupported i32 wave.binary kind subi}}
-  %bad = wave.binary subi %lane, %vx : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  %five = arith.constant 5 : i32
+  %v5 = wave.splat %five : i32 -> !wave.simd<i32, 32>
+  // expected-error @below {{needs power-of-two static divisor}}
+  %bad = wave.binary divui %lane, %v5 : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  return
+}
+
+// -----
+
+func.func @unsupported_signed_dividend(%x: i32) {
+  %two = arith.constant 2 : i32
+  // expected-error @below {{signed power-of-two div/rem requires nonnegative dividend}}
+  %bad = wave.binary divsi %x, %two : i32, i32 -> i32
   return
 }
 

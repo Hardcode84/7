@@ -31,6 +31,7 @@
 #include "mlir/Transforms/Passes.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
+#include "llvm/ADT/TypeSwitch.h"
 #include "llvm/Config/Targets.h"
 #include "llvm/MC/MCAsmInfo.h"
 #include "llvm/MC/MCContext.h"
@@ -330,6 +331,7 @@ private:
   unsigned sMulI32() const { return opcodes.sMulI32; }
   unsigned sLshlB32() const { return opcodes.sLshlB32; }
   unsigned sLshrB32() const { return opcodes.sLshrB32; }
+  unsigned sLshrB64() const { return opcodes.sLshrB64; }
   unsigned sAndB32() const { return opcodes.sAndB32; }
   unsigned sOrB32() const { return opcodes.sOrB32; }
   unsigned sXorB32() const { return opcodes.sXorB32; }
@@ -341,8 +343,18 @@ private:
   unsigned sAddU32() const { return opcodes.sAddU32; }
   unsigned sAddcU32() const { return opcodes.sAddcU32; }
   unsigned sMulHiU32() const { return opcodes.sMulHiU32; }
+  unsigned sCmpEqI32() const { return opcodes.sCmpEqI32; }
+  unsigned sCmpLgI32() const { return opcodes.sCmpLgI32; }
+  unsigned sCmpGtI32() const { return opcodes.sCmpGtI32; }
+  unsigned sCmpGeI32() const { return opcodes.sCmpGeI32; }
   unsigned sCmpLtI32() const { return opcodes.sCmpLtI32; }
+  unsigned sCmpLeI32() const { return opcodes.sCmpLeI32; }
+  unsigned sCmpEqU32() const { return opcodes.sCmpEqU32; }
   unsigned sCmpLgU32() const { return opcodes.sCmpLgU32; }
+  unsigned sCmpGtU32() const { return opcodes.sCmpGtU32; }
+  unsigned sCmpGeU32() const { return opcodes.sCmpGeU32; }
+  unsigned sCmpLtU32() const { return opcodes.sCmpLtU32; }
+  unsigned sCmpLeU32() const { return opcodes.sCmpLeU32; }
   unsigned sCselectB32() const { return opcodes.sCselectB32; }
   unsigned sBranch() const { return opcodes.sBranch; }
   unsigned sCbranchScc0() const { return opcodes.sCbranchScc0; }
@@ -367,6 +379,7 @@ private:
   unsigned vXorB32() const { return opcodes.vXorB32; }
   unsigned vLshlrevB32() const { return opcodes.vLshlrevB32; }
   unsigned vLshrrevB32() const { return opcodes.vLshrrevB32; }
+  unsigned vLshrrevB64() const { return opcodes.vLshrrevB64; }
   unsigned vReadfirstlaneB32() const { return opcodes.vReadfirstlaneB32; }
   unsigned vMulLoU32() const { return opcodes.vMulLoU32; }
   unsigned vAdd3U32() const { return opcodes.vAdd3U32; }
@@ -2218,6 +2231,14 @@ private:
                     {toMCOperand(op.getResult(0)),
                      toMCOperand(op.getOperand(0)),
                      toMCOperand(op.getOperand(1))});
+    if (isa<waveamdmachine::SLshrB64Op>(op))
+      return emitMC(sLshrB64(), {toMCOperand(op.getResult(0)),
+                                 toMCOperand(op.getOperand(0)),
+                                 toMCOperand(op.getOperand(1))});
+    if (isa<waveamdmachine::VLshrrevB64Op>(op))
+      return emitMC(vLshrrevB64(), {toMCOperand(op.getResult(0)),
+                                    toMCOperand(op.getOperand(0)),
+                                    toMCOperand(op.getOperand(1))});
     if (isa<waveamdmachine::SMovB64ImmOp>(op)) {
       // Lift a 64-bit immediate into an SGPR pair: low half then high.
       int64_t value = op.getAttrOfType<IntegerAttr>("value").getInt();
@@ -2233,12 +2254,40 @@ private:
                static_cast<int64_t>(static_cast<uint64_t>(value) >> 32) &
                0xffffffff)});
     }
-    if (isa<waveamdmachine::SCmpLtI32Op>(op))
-      return emitMC(sCmpLtI32(), {toMCOperand(op.getOperand(0)),
-                                  toMCOperand(op.getOperand(1))});
-    if (isa<waveamdmachine::SCmpLgU32Op>(op))
-      return emitMC(sCmpLgU32(), {toMCOperand(op.getOperand(0)),
-                                  toMCOperand(op.getOperand(1))});
+    if (isa<waveamdmachine::SCmpEqI32Op, waveamdmachine::SCmpLgI32Op,
+            waveamdmachine::SCmpGtI32Op, waveamdmachine::SCmpGeI32Op,
+            waveamdmachine::SCmpLtI32Op, waveamdmachine::SCmpLeI32Op,
+            waveamdmachine::SCmpEqU32Op, waveamdmachine::SCmpLgU32Op,
+            waveamdmachine::SCmpGtU32Op, waveamdmachine::SCmpGeU32Op,
+            waveamdmachine::SCmpLtU32Op, waveamdmachine::SCmpLeU32Op>(op)) {
+      unsigned opcode = llvm::TypeSwitch<Operation *, unsigned>(&op)
+                            .Case<waveamdmachine::SCmpEqI32Op>(
+                                [&](auto) { return sCmpEqI32(); })
+                            .Case<waveamdmachine::SCmpLgI32Op>(
+                                [&](auto) { return sCmpLgI32(); })
+                            .Case<waveamdmachine::SCmpGtI32Op>(
+                                [&](auto) { return sCmpGtI32(); })
+                            .Case<waveamdmachine::SCmpGeI32Op>(
+                                [&](auto) { return sCmpGeI32(); })
+                            .Case<waveamdmachine::SCmpLtI32Op>(
+                                [&](auto) { return sCmpLtI32(); })
+                            .Case<waveamdmachine::SCmpLeI32Op>(
+                                [&](auto) { return sCmpLeI32(); })
+                            .Case<waveamdmachine::SCmpEqU32Op>(
+                                [&](auto) { return sCmpEqU32(); })
+                            .Case<waveamdmachine::SCmpLgU32Op>(
+                                [&](auto) { return sCmpLgU32(); })
+                            .Case<waveamdmachine::SCmpGtU32Op>(
+                                [&](auto) { return sCmpGtU32(); })
+                            .Case<waveamdmachine::SCmpGeU32Op>(
+                                [&](auto) { return sCmpGeU32(); })
+                            .Case<waveamdmachine::SCmpLtU32Op>(
+                                [&](auto) { return sCmpLtU32(); })
+                            .Case<waveamdmachine::SCmpLeU32Op>(
+                                [&](auto) { return sCmpLeU32(); });
+      return emitMC(opcode, {toMCOperand(op.getOperand(0)),
+                             toMCOperand(op.getOperand(1))});
+    }
     if (isa<waveamdmachine::SCSelectB32Op>(op))
       return emitMC(sCselectB32(),
                     {toMCOperand(result()), toMCOperand(op.getOperand(1)),

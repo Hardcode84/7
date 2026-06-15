@@ -1479,6 +1479,7 @@ LogicalResult WaveAMDMachineSelector::selectOperation(Operation *op) {
       .Case<FExp2Op>([&](auto o) { return selectFExp2(o); })
       .Case<FRcpOp>([&](auto o) { return selectFRcp(o); })
       .Case<IndexExprOp>([&](auto o) { return selectIndexExpr(o); })
+      .Case<arith::CmpIOp>([&](auto o) { return selectArithCmp(o); })
       .Case<CmpIOp>([&](auto o) { return selectCmp(o); })
       .Case<SelectOp>([&](auto o) { return selectSelect(o); })
       .Case<BallotOp>([&](auto o) { return selectBallot(o); })
@@ -1885,33 +1886,237 @@ LogicalResult WaveAMDMachineSelector::selectBinaryShLI64(BinaryOp op) {
   return success();
 }
 
-static LogicalResult selectBinaryI32(WaveAMDMachineSelector &S, BinaryOp op) {
+static std::optional<uint64_t> getWideImmediate(WaveAMDMachineSelector &S,
+                                                Value value) {
+  if (std::optional<int64_t> imm = S.getImmediateValue(value))
+    return static_cast<uint64_t>(*imm);
+  if (auto mov = value.getDefiningOp<waveamdmachine::SMovB64ImmOp>())
+    return static_cast<uint64_t>(mov.getValue());
+  return std::nullopt;
+}
+
+static bool isPositivePowerOfTwo(uint64_t value) {
+  return value != 0 && (value & (value - 1)) == 0;
+}
+
+static FailureOr<uint64_t> getPowerOfTwoDivisor(WaveAMDMachineSelector &S,
+                                                BinaryOp op) {
+  Value rhs = S.expect(op.getRhs(), op);
+  std::optional<uint64_t> divisor = getWideImmediate(S, rhs);
+  if (!divisor || !isPositivePowerOfTwo(*divisor))
+    return op.emitOpError("needs power-of-two static divisor");
+  return *divisor;
+}
+
+static bool isProvenNonNegative(WaveAMDMachineSelector &S, Value source,
+                                Value selected) {
+  if (std::optional<int64_t> imm = S.getImmediateValue(selected))
+    return *imm >= 0;
+  if (auto mov = selected.getDefiningOp<waveamdmachine::SMovB64ImmOp>())
+    return static_cast<int64_t>(mov.getValue()) >= 0;
+  std::optional<ConstantIntRanges> range = finiteSignedRange(S, source);
+  if (!range)
+    range = finiteSignedRange(S, selected);
+  return range && !range->smin().isNegative();
+}
+
+static LogicalResult requireNonNegativeDividend(WaveAMDMachineSelector &S,
+                                                BinaryOp op) {
   BinaryKind kind = op.getKind();
-  if (kind == BinaryKind::AddI)
-    return S.selectBinaryAddI32(op);
-  if (kind == BinaryKind::MulI)
-    return S.selectBinaryMulI32(op);
-  if (kind == BinaryKind::ShLI)
-    return S.selectBinaryShLI32(op);
-  if (kind == BinaryKind::AndI || kind == BinaryKind::OrI ||
-      kind == BinaryKind::XOrI || kind == BinaryKind::ShRUI) {
-    Value lhs = S.expect(op.getLhs(), op);
-    Value rhs = S.expect(op.getRhs(), op);
-    Type resultType = getRegType(
-        op.getContext(), isBinarySimd(op) ? waveamdmachine::RegClass::VGPR
-                                          : waveamdmachine::RegClass::SGPR);
-    if (!isBinarySimd(op)) {
-      S.values[op.getResult()] = buildScalarBinaryI32(
-          S.builder, op.getLoc(), resultType, kind, lhs, rhs);
-      S.eraseIfTopLevel(op);
-      return success();
-    }
-    prepareVectorBinaryI32Operands(S, op, kind, lhs, rhs);
-    S.values[op.getResult()] = buildVectorBinaryI32(S.builder, op.getLoc(),
+  if (kind != BinaryKind::DivSI && kind != BinaryKind::RemSI)
+    return success();
+  if (isProvenNonNegative(S, op.getLhs(), S.expect(op.getLhs(), op)))
+    return success();
+  return op.emitOpError("signed power-of-two div/rem requires nonnegative "
+                        "dividend");
+}
+
+LogicalResult WaveAMDMachineSelector::selectBinarySubI32(BinaryOp op) {
+  Value lhs = expect(op.getLhs(), op);
+  Value rhs = expect(op.getRhs(), op);
+  Value notRhs;
+  if (!isBinarySimd(op)) {
+    if (std::optional<int64_t> rhsImm = getImmediateValue(rhs))
+      notRhs = createImm(builder, op.getLoc(), ~*rhsImm);
+    else
+      notRhs = buildScalarBinaryI32(
+          builder, op.getLoc(),
+          getRegType(op.getContext(), waveamdmachine::RegClass::SGPR),
+          BinaryKind::XOrI, rhs, createImm(builder, op.getLoc(), -1));
+    Value negRhs = addUniformBytes(op.getLoc(), notRhs,
+                                   createImm(builder, op.getLoc(), 1));
+    values[op.getResult()] = addUniformBytes(op.getLoc(), lhs, negRhs);
+    eraseIfTopLevel(op);
+    return success();
+  }
+  rhs = ensureVGPRForVSrc1(op.getLoc(), rhs);
+  notRhs = buildVectorBinaryI32(
+      builder, op.getLoc(),
+      getRegType(op.getContext(), waveamdmachine::RegClass::VGPR),
+      BinaryKind::XOrI, rhs, createImm(builder, op.getLoc(), -1));
+  Value negRhs =
+      addByteOffsets(op.getLoc(), notRhs, createImm(builder, op.getLoc(), 1));
+  values[op.getResult()] = addByteOffsets(op.getLoc(), lhs, negRhs);
+  eraseIfTopLevel(op);
+  return success();
+}
+
+LogicalResult WaveAMDMachineSelector::selectBinarySubI64(BinaryOp op) {
+  Value lhs = expect(op.getLhs(), op);
+  Value rhs = expect(op.getRhs(), op);
+  Value notRhs =
+      xorWide(*this, op.getLoc(), rhs, createWideImm(*this, op.getLoc(), -1));
+  Value negRhs =
+      addWide(*this, op.getLoc(), notRhs, createWideImm(*this, op.getLoc(), 1));
+  values[op.getResult()] = addWide(*this, op.getLoc(), lhs, negRhs);
+  eraseIfTopLevel(op);
+  return success();
+}
+
+static Value shrWidePow2(WaveAMDMachineSelector &S, Location loc, Value value,
+                         unsigned log2Den) {
+  if (log2Den == 0)
+    return value;
+  if (std::optional<uint64_t> imm = getWideImmediate(S, value))
+    return createWideImm(S, loc, static_cast<int64_t>(*imm >> log2Den));
+  Value shift = createImm(S.builder, loc, log2Den);
+  if (isWideVGPR(value)) {
+    Type resultType =
+        getRegType(S.builder.getContext(), waveamdmachine::RegClass::VGPR, 2);
+    return waveamdmachine::VLshrrevB64Op::create(S.builder, loc, resultType,
+                                                 shift, value);
+  }
+  Type resultType =
+      getRegType(S.builder.getContext(), waveamdmachine::RegClass::SGPR, 2);
+  return waveamdmachine::SLshrB64Op::create(
+             S.builder, loc, resultType, getSCCType(S.builder.getContext()),
+             ensureSGPR2(S, loc, value), S.ensureSGPR1(loc, shift))
+      .getResult();
+}
+
+static Value materializeOneDword(WaveAMDMachineSelector &S, Location loc,
+                                 Value value,
+                                 waveamdmachine::RegClass regClass) {
+  if (regClass == waveamdmachine::RegClass::VGPR)
+    return S.ensureVGPRForVSrc1(loc, value);
+  return S.materializeSGPR1(loc, value);
+}
+
+static Value andWideMask(WaveAMDMachineSelector &S, Location loc, Value value,
+                         uint64_t mask) {
+  if (std::optional<uint64_t> imm = getWideImmediate(S, value))
+    return createWideImm(S, loc, static_cast<int64_t>(*imm & mask));
+
+  bool vgpr = isWideVGPR(value);
+  waveamdmachine::RegClass regClass =
+      vgpr ? waveamdmachine::RegClass::VGPR : waveamdmachine::RegClass::SGPR;
+  Type elementType = getRegType(S.builder.getContext(), regClass, 1);
+  uint32_t loMask = static_cast<uint32_t>(mask);
+  uint32_t hiMask = static_cast<uint32_t>(mask >> 32);
+  Value lo = extractLowDword(S, loc, value);
+  Value hi = extractHighDword(S, loc, value);
+  Value loImm = createImm(S.builder, loc, loMask);
+  Value hiImm = createImm(S.builder, loc, hiMask);
+  if (vgpr) {
+    lo = waveamdmachine::VAndB32Op::create(
+        S.builder, loc, elementType, S.ensureVGPRForVSrc1(loc, lo), loImm);
+    hi = waveamdmachine::VAndB32Op::create(
+        S.builder, loc, elementType, S.ensureVGPRForVSrc1(loc, hi), hiImm);
+  } else {
+    lo = waveamdmachine::SAndB32Op::create(S.builder, loc, elementType,
+                                           getSCCType(S.builder.getContext()),
+                                           S.materializeSGPR1(loc, lo), loImm)
+             .getResult();
+    hi = waveamdmachine::SAndB32Op::create(S.builder, loc, elementType,
+                                           getSCCType(S.builder.getContext()),
+                                           S.materializeSGPR1(loc, hi), hiImm)
+             .getResult();
+  }
+  return tuple2(S, loc, regClass, materializeOneDword(S, loc, lo, regClass),
+                materializeOneDword(S, loc, hi, regClass));
+}
+
+static LogicalResult selectBinaryDivRemI32(WaveAMDMachineSelector &S,
+                                           BinaryOp op) {
+  if (failed(requireNonNegativeDividend(S, op)))
+    return failure();
+  FailureOr<uint64_t> divisor = getPowerOfTwoDivisor(S, op);
+  if (failed(divisor))
+    return failure();
+  Value lhs = S.expect(op.getLhs(), op);
+  unsigned log2Den = llvm::Log2_64(*divisor);
+  BinaryKind kind = op.getKind();
+  S.values[op.getResult()] =
+      kind == BinaryKind::DivUI || kind == BinaryKind::DivSI
+          ? S.shrPow2(op.getLoc(), lhs, log2Den)
+          : S.andMask(op.getLoc(), lhs, static_cast<int64_t>(*divisor - 1));
+  S.eraseIfTopLevel(op);
+  return success();
+}
+
+static LogicalResult selectBinaryDivRemI64(WaveAMDMachineSelector &S,
+                                           BinaryOp op) {
+  if (failed(requireNonNegativeDividend(S, op)))
+    return failure();
+  FailureOr<uint64_t> divisor = getPowerOfTwoDivisor(S, op);
+  if (failed(divisor))
+    return failure();
+  Value lhs = S.expect(op.getLhs(), op);
+  unsigned log2Den = llvm::Log2_64(*divisor);
+  BinaryKind kind = op.getKind();
+  S.values[op.getResult()] =
+      kind == BinaryKind::DivUI || kind == BinaryKind::DivSI
+          ? shrWidePow2(S, op.getLoc(), lhs, log2Den)
+          : andWideMask(S, op.getLoc(), lhs, *divisor - 1);
+  S.eraseIfTopLevel(op);
+  return success();
+}
+
+static bool isDivRem(BinaryKind kind) {
+  return kind == BinaryKind::DivUI || kind == BinaryKind::DivSI ||
+         kind == BinaryKind::RemUI || kind == BinaryKind::RemSI;
+}
+
+static bool isBitwiseOrLogicalShiftI32(BinaryKind kind) {
+  return kind == BinaryKind::AndI || kind == BinaryKind::OrI ||
+         kind == BinaryKind::XOrI || kind == BinaryKind::ShRUI;
+}
+
+static LogicalResult selectBinaryBitwiseOrShiftI32(WaveAMDMachineSelector &S,
+                                                   BinaryOp op) {
+  BinaryKind kind = op.getKind();
+  Value lhs = S.expect(op.getLhs(), op);
+  Value rhs = S.expect(op.getRhs(), op);
+  Type resultType = getRegType(
+      op.getContext(), isBinarySimd(op) ? waveamdmachine::RegClass::VGPR
+                                        : waveamdmachine::RegClass::SGPR);
+  if (!isBinarySimd(op)) {
+    S.values[op.getResult()] = buildScalarBinaryI32(S.builder, op.getLoc(),
                                                     resultType, kind, lhs, rhs);
     S.eraseIfTopLevel(op);
     return success();
   }
+  prepareVectorBinaryI32Operands(S, op, kind, lhs, rhs);
+  S.values[op.getResult()] =
+      buildVectorBinaryI32(S.builder, op.getLoc(), resultType, kind, lhs, rhs);
+  S.eraseIfTopLevel(op);
+  return success();
+}
+
+static LogicalResult selectBinaryI32(WaveAMDMachineSelector &S, BinaryOp op) {
+  BinaryKind kind = op.getKind();
+  if (kind == BinaryKind::AddI)
+    return S.selectBinaryAddI32(op);
+  if (kind == BinaryKind::SubI)
+    return S.selectBinarySubI32(op);
+  if (kind == BinaryKind::MulI)
+    return S.selectBinaryMulI32(op);
+  if (kind == BinaryKind::ShLI)
+    return S.selectBinaryShLI32(op);
+  if (isDivRem(kind))
+    return selectBinaryDivRemI32(S, op);
+  if (isBitwiseOrLogicalShiftI32(kind))
+    return selectBinaryBitwiseOrShiftI32(S, op);
   return op.emitOpError("unsupported i32 wave.binary kind ")
          << stringifyBinaryKind(kind);
 }
@@ -1920,10 +2125,14 @@ static LogicalResult selectBinaryI64(WaveAMDMachineSelector &S, BinaryOp op) {
   BinaryKind kind = op.getKind();
   if (kind == BinaryKind::AddI)
     return S.selectBinaryAddI64(op);
+  if (kind == BinaryKind::SubI)
+    return S.selectBinarySubI64(op);
   if (kind == BinaryKind::MulI)
     return S.selectBinaryMulI64(op);
   if (kind == BinaryKind::ShLI)
     return S.selectBinaryShLI64(op);
+  if (isDivRem(kind))
+    return selectBinaryDivRemI64(S, op);
   if (kind == BinaryKind::XOrI) {
     Value lhs = S.expect(op.getLhs(), op);
     Value rhs = S.expect(op.getRhs(), op);
@@ -2561,6 +2770,153 @@ static Value createI64Cmp(WaveAMDMachineSelector &S, Location loc,
                           rhsDwords);
 }
 
+static Value createScalarUnsignedWordCmp(WaveAMDMachineSelector &S,
+                                         Location loc, CmpRelation relation,
+                                         Type scc, Value lhs, Value rhs) {
+  switch (relation) {
+  case CmpRelation::Eq:
+    return waveamdmachine::SCmpEqU32Op::create(S.builder, loc, scc, lhs, rhs);
+  case CmpRelation::Ne:
+    return waveamdmachine::SCmpLgU32Op::create(S.builder, loc, scc, lhs, rhs);
+  case CmpRelation::Lt:
+    return waveamdmachine::SCmpLtU32Op::create(S.builder, loc, scc, lhs, rhs);
+  case CmpRelation::Le:
+    return waveamdmachine::SCmpLeU32Op::create(S.builder, loc, scc, lhs, rhs);
+  case CmpRelation::Gt:
+    return waveamdmachine::SCmpGtU32Op::create(S.builder, loc, scc, lhs, rhs);
+  case CmpRelation::Ge:
+    return waveamdmachine::SCmpGeU32Op::create(S.builder, loc, scc, lhs, rhs);
+  }
+  llvm_unreachable("handled unsigned scalar compare relation");
+}
+
+static Value createScalarSignedWordRelCmp(WaveAMDMachineSelector &S,
+                                          Location loc, CmpRelation relation,
+                                          Type scc, Value lhs, Value rhs) {
+  switch (relation) {
+  case CmpRelation::Lt:
+    return waveamdmachine::SCmpLtI32Op::create(S.builder, loc, scc, lhs, rhs);
+  case CmpRelation::Le:
+    return waveamdmachine::SCmpLeI32Op::create(S.builder, loc, scc, lhs, rhs);
+  case CmpRelation::Gt:
+    return waveamdmachine::SCmpGtI32Op::create(S.builder, loc, scc, lhs, rhs);
+  case CmpRelation::Ge:
+    return waveamdmachine::SCmpGeI32Op::create(S.builder, loc, scc, lhs, rhs);
+  case CmpRelation::Eq:
+  case CmpRelation::Ne:
+    llvm_unreachable("signed eq/ne uses unsigned compare");
+  }
+  llvm_unreachable("handled signed scalar compare relation");
+}
+
+static bool isEqualityCmp(CmpRelation relation) {
+  return relation == CmpRelation::Eq || relation == CmpRelation::Ne;
+}
+
+static Value createScalarWordCmp(WaveAMDMachineSelector &S, Location loc,
+                                 CmpRelation relation, bool signedCmp,
+                                 Value lhs, Value rhs) {
+  lhs = S.ensureSGPR1(loc, lhs);
+  rhs = S.ensureSGPR1(loc, rhs);
+  if (isImm(lhs) && isImm(rhs))
+    lhs = S.materializeSGPR1(loc, lhs);
+  Type scc = getSCCType(S.builder.getContext());
+  if (signedCmp && !isEqualityCmp(relation))
+    return createScalarSignedWordRelCmp(S, loc, relation, scc, lhs, rhs);
+  return createScalarUnsignedWordCmp(S, loc, relation, scc, lhs, rhs);
+}
+
+static Value materializeSCCBool(WaveAMDMachineSelector &S, Location loc,
+                                Value scc) {
+  Type sgpr1 =
+      getRegType(S.builder.getContext(), waveamdmachine::RegClass::SGPR, 1);
+  Value one = S.materializeSGPR1(loc, createImm(S.builder, loc, 1));
+  Value zero = createImm(S.builder, loc, 0);
+  return waveamdmachine::SCSelectB32Op::create(S.builder, loc, sgpr1, scc, one,
+                                               zero)
+      .getResult();
+}
+
+static Value boolToSCC(WaveAMDMachineSelector &S, Location loc, Value value) {
+  return waveamdmachine::SCmpLgU32Op::create(
+             S.builder, loc, getSCCType(S.builder.getContext()), value,
+             createImm(S.builder, loc, 0))
+      .getResult();
+}
+
+static Value combineScalarBools(WaveAMDMachineSelector &S, Location loc,
+                                Value lhs, Value rhs, MaskCombiner combiner) {
+  Type sgpr1 =
+      getRegType(S.builder.getContext(), waveamdmachine::RegClass::SGPR, 1);
+  Type scc = getSCCType(S.builder.getContext());
+  if (combiner == MaskCombiner::And)
+    return waveamdmachine::SAndB32Op::create(S.builder, loc, sgpr1, scc, lhs,
+                                             rhs)
+        .getResult();
+  return waveamdmachine::SOrB32Op::create(S.builder, loc, sgpr1, scc, lhs, rhs)
+      .getResult();
+}
+
+static Value createScalarI64Cmp(WaveAMDMachineSelector &S, Location loc,
+                                CmpRelation relation, bool signedCmp, Value lhs,
+                                Value rhs) {
+  I64Dwords lhsDwords = splitI64Dwords(S, loc, lhs);
+  I64Dwords rhsDwords = splitI64Dwords(S, loc, rhs);
+  if (relation == CmpRelation::Eq || relation == CmpRelation::Ne) {
+    Value hi =
+        materializeSCCBool(S, loc,
+                           createScalarWordCmp(S, loc, relation, false,
+                                               lhsDwords.hi, rhsDwords.hi));
+    Value lo =
+        materializeSCCBool(S, loc,
+                           createScalarWordCmp(S, loc, relation, false,
+                                               lhsDwords.lo, rhsDwords.lo));
+    MaskCombiner combiner =
+        relation == CmpRelation::Eq ? MaskCombiner::And : MaskCombiner::Or;
+    return boolToSCC(S, loc, combineScalarBools(S, loc, hi, lo, combiner));
+  }
+  Value hiCmp = materializeSCCBool(
+      S, loc,
+      createScalarWordCmp(S, loc, strictHighRelation(relation), signedCmp,
+                          lhsDwords.hi, rhsDwords.hi));
+  Value hiEq =
+      materializeSCCBool(S, loc,
+                         createScalarWordCmp(S, loc, CmpRelation::Eq, false,
+                                             lhsDwords.hi, rhsDwords.hi));
+  Value loCmp = materializeSCCBool(
+      S, loc,
+      createScalarWordCmp(S, loc, relation, false, lhsDwords.lo, rhsDwords.lo));
+  Value tail = combineScalarBools(S, loc, hiEq, loCmp, MaskCombiner::And);
+  return boolToSCC(S, loc,
+                   combineScalarBools(S, loc, hiCmp, tail, MaskCombiner::Or));
+}
+
+LogicalResult WaveAMDMachineSelector::selectArithCmp(arith::CmpIOp op) {
+  Type operandType = op.getLhs().getType();
+  IntegerType integerType = dyn_cast<IntegerType>(operandType);
+  if (!operandType.isIndex() && !integerType)
+    return op.emitError(
+        "WaveAMDMachine backend supports only scalar integer/index arith.cmpi");
+  unsigned bits = operandType.isIndex() ? 64 : integerType.getWidth();
+  if (bits != 32 && bits != 64)
+    return op.emitError(
+        "WaveAMDMachine backend supports only scalar i32/i64/index arith.cmpi");
+  arith::CmpIPredicate predicate = op.getPredicate();
+  std::optional<CmpRelation> relation = getCmpRelation(predicate);
+  if (!relation)
+    return op.emitError("unsupported arith.cmpi predicate");
+  bool signedCmp = isSignedCmpPredicate(predicate);
+  Value lhs = expect(op.getLhs(), op);
+  Value rhs = expect(op.getRhs(), op);
+  values[op.getResult()] =
+      bits == 64 ? createScalarI64Cmp(*this, op.getLoc(), *relation, signedCmp,
+                                      lhs, rhs)
+                 : createScalarWordCmp(*this, op.getLoc(), *relation, signedCmp,
+                                       lhs, rhs);
+  eraseIfTopLevel(op);
+  return success();
+}
+
 LogicalResult WaveAMDMachineSelector::selectCmp(CmpIOp op) {
   auto simdType = cast<SimdType>(op.getLhs().getType());
   IntegerType elementType = dyn_cast<IntegerType>(simdType.getElementType());
@@ -2637,7 +2993,11 @@ static Value gatherSGPRWords(WaveAMDMachineSelector &S, Location loc,
 }
 
 static Value createSCCFromI1(WaveAMDMachineSelector &S, SelectOp op) {
-  Value condition = S.ensureSGPR1(op.getLoc(), S.expect(op.getCondition(), op));
+  Value condition = S.expect(op.getCondition(), op);
+  if (auto rt = dyn_cast<waveamdmachine::RegType>(condition.getType()))
+    if (rt.getRegClass() == waveamdmachine::RegClass::SCC)
+      return condition;
+  condition = S.ensureSGPR1(op.getLoc(), condition);
   return waveamdmachine::SCmpLgU32Op::create(
              S.builder, op.getLoc(), getSCCType(op.getContext()), condition,
              createImm(S.builder, op.getLoc(), 0))
@@ -3253,7 +3613,9 @@ Value WaveAMDMachineSelector::shrPow2(Location loc, Value v, unsigned log2Den) {
     return v;
   Value shiftAmt = createImm(builder, loc, log2Den);
   if (std::optional<int64_t> imm = getImmediateValue(v))
-    return createImm(builder, loc, *imm >> log2Den);
+    return createImm(
+        builder, loc,
+        static_cast<int64_t>(static_cast<uint32_t>(*imm) >> log2Den));
   if (isUniformValue(v))
     return waveamdmachine::SLshrB32Op::create(
                builder, loc,
