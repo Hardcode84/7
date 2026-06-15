@@ -355,6 +355,26 @@ class WaveAMDMachine_TernaryResult<string mnemonic, Type operandType, Type resul
   let assemblyFormat = "$a `,` $b `,` $c attr-dict `:` functional-type(operands, results)";
 }
 
+class WaveAMDMachine_MmaResult<string mnemonic, Type operandType, Type resultType,
+                               list<Trait> traits = []>
+    : WaveAMDMachine_Op<mnemonic,
+                        !listconcat(traits,
+                                    [WaveAMDMachine_MMAOpInterface, Pure])> {
+  let arguments = (ins operandType:$a, operandType:$b, operandType:$acc);
+  let results = (outs resultType:$result);
+  let assemblyFormat = "$a `,` $b `,` $acc attr-dict `:` functional-type(operands, results)";
+}
+
+class WaveAMDMachine_WmmaResult<string mnemonic>
+    : WaveAMDMachine_MmaResult<mnemonic, WaveAMDMachine_VGPR,
+                               WaveAMDMachine_VGPR, [WaveAMDMachine_VALU]>;
+
+class WaveAMDMachine_MfmaResult<string mnemonic>
+    : WaveAMDMachine_MmaResult<mnemonic, WaveAMDMachine_AVGPR,
+                               WaveAMDMachine_AVGPR,
+                               [WaveAMDMachine_VALU, WaveAMDMachine_MFMA,
+                                WaveAMDMachine_ReadsExec]>;
+
 class WaveAMDMachine_TernaryIntResult<string mnemonic>
     : WaveAMDMachine_Op<mnemonic, [WaveAMDMachine_VALU, Pure]> {
   let archPredicate = WaveAMDMachine_Gfx8To13;
@@ -770,58 +790,44 @@ def WaveAMDMachine_VReadfirstlaneB32Op
                               WaveAMDMachine_SGPR1, [WaveAMDMachine_VALU, Pure]>;
 
 def WaveAMDMachine_WmmaI32_16x16x16_IU8Op
-    : WaveAMDMachine_TernaryResult<"wmma_i32_16x16x16_iu8", WaveAMDMachine_VGPR,
-                                WaveAMDMachine_VGPR, [WaveAMDMachine_VALU]> {
+    : WaveAMDMachine_WmmaResult<"wmma_i32_16x16x16_iu8"> {
   let hasVerifier = 1;
   let archPredicate = "isa.Major == 11";
 }
 def WaveAMDMachine_WmmaF32_16x16x16_F16Op
-    : WaveAMDMachine_TernaryResult<"wmma_f32_16x16x16_f16", WaveAMDMachine_VGPR,
-                                WaveAMDMachine_VGPR, [WaveAMDMachine_VALU]> {
+    : WaveAMDMachine_WmmaResult<"wmma_f32_16x16x16_f16"> {
   let hasVerifier = 1;
   let archPredicate = "isa.Major == 11";
 }
 def WaveAMDMachine_WmmaF32_16x16x16_BF16Op
-    : WaveAMDMachine_TernaryResult<"wmma_f32_16x16x16_bf16", WaveAMDMachine_VGPR,
-                                WaveAMDMachine_VGPR, [WaveAMDMachine_VALU]> {
+    : WaveAMDMachine_WmmaResult<"wmma_f32_16x16x16_bf16"> {
   let hasVerifier = 1;
   let archPredicate = "isa.Major == 11";
 }
 def WaveAMDMachine_MfmaF32_16x16x16_F16Op
-    : WaveAMDMachine_TernaryResult<"mfma_f32_16x16x16_f16", WaveAMDMachine_AVGPR,
-                                   WaveAMDMachine_AVGPR,
-                                   [WaveAMDMachine_VALU, WaveAMDMachine_MFMA,
-                                    WaveAMDMachine_ReadsExec]> {
+    : WaveAMDMachine_MfmaResult<"mfma_f32_16x16x16_f16"> {
   let hasVerifier = 1;
   let archPredicate = WaveAMDMachine_Gfx90APlus;
 }
 def WaveAMDMachine_MfmaF32_16x16x16_BF16Op
-    : WaveAMDMachine_TernaryResult<"mfma_f32_16x16x16_bf16", WaveAMDMachine_AVGPR,
-                                   WaveAMDMachine_AVGPR,
-                                   [WaveAMDMachine_VALU, WaveAMDMachine_MFMA,
-                                    WaveAMDMachine_ReadsExec]> {
+    : WaveAMDMachine_MfmaResult<"mfma_f32_16x16x16_bf16"> {
   let hasVerifier = 1;
   let archPredicate = WaveAMDMachine_Gfx940Plus;
 }
 def WaveAMDMachine_MfmaF32_16x16x32_F16Op
-    : WaveAMDMachine_TernaryResult<"mfma_f32_16x16x32_f16", WaveAMDMachine_AVGPR,
-                                   WaveAMDMachine_AVGPR,
-                                   [WaveAMDMachine_VALU, WaveAMDMachine_MFMA,
-                                    WaveAMDMachine_ReadsExec]> {
+    : WaveAMDMachine_MfmaResult<"mfma_f32_16x16x32_f16"> {
   let hasVerifier = 1;
   let archPredicate = WaveAMDMachine_Gfx950;
 }
 def WaveAMDMachine_MfmaF32_16x16x32_BF16Op
-    : WaveAMDMachine_TernaryResult<"mfma_f32_16x16x32_bf16", WaveAMDMachine_AVGPR,
-                                   WaveAMDMachine_AVGPR,
-                                   [WaveAMDMachine_VALU, WaveAMDMachine_MFMA,
-                                    WaveAMDMachine_ReadsExec]> {
+    : WaveAMDMachine_MfmaResult<"mfma_f32_16x16x32_bf16"> {
   let hasVerifier = 1;
   let archPredicate = WaveAMDMachine_Gfx950;
 }
 def WaveAMDMachine_MfmaScaleF32_16x16x128_F4F4Op
     : WaveAMDMachine_Op<"mfma_scale_f32_16x16x128_f4_f4",
                         [WaveAMDMachine_VALU, WaveAMDMachine_MFMA,
+                         WaveAMDMachine_MMAOpInterface,
                          WaveAMDMachine_ReadsExec, Pure]> {
   let arguments = (ins WaveAMDMachine_AVGPR:$a,
                        WaveAMDMachine_AVGPR:$b,

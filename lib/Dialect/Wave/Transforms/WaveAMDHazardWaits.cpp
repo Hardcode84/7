@@ -768,7 +768,11 @@ static void addProducedMfmaPhysicalHazards(Operation *op, HazardState &state,
                         cfg.mfmaResultLatency);
   if (!cfg.mfmaSrcCReadWarLatency)
     return;
-  if (std::optional<RegSpan> span = getAllocatedRegSpan(op->getOperand(2)))
+  waveamdmachine::MMAOpInterface mma =
+      dyn_cast<waveamdmachine::MMAOpInterface>(op);
+  if (!mma)
+    return;
+  if (std::optional<RegSpan> span = getAllocatedRegSpan(mma.getAcc()))
     addPhysicalHazard(state, *span, PhysicalHazardKind::MfmaSrcCRead,
                       cfg.mfmaSrcCReadWarLatency);
 }

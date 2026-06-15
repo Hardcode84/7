@@ -405,92 +405,75 @@ LogicalResult TupleFromElementsOp::verify() {
                              getElements());
 }
 
-LogicalResult WmmaI32_16x16x16_IU8Op::verify() {
-  if (failed(verifyVGPRWidth(*this, getOperand(0), 4, "A operand")) ||
-      failed(verifyVGPRWidth(*this, getOperand(1), 4, "B operand")) ||
-      failed(verifyVGPRWidth(*this, getOperand(2), 8, "accumulator operand")) ||
-      failed(verifyVGPRWidth(*this, getResult(), 8, "result")))
+using VerifyRegWidthFn = LogicalResult (*)(Operation *, Value, int64_t,
+                                           StringRef);
+
+static LogicalResult verifyMMA(MMAOpInterface mma, int64_t abWidth,
+                               int64_t accWidth,
+                               VerifyRegWidthFn verifyRegWidth) {
+  Operation *op = mma.getOperation();
+  if (failed(verifyRegWidth(op, mma.getA(), abWidth, "A operand")) ||
+      failed(verifyRegWidth(op, mma.getB(), abWidth, "B operand")) ||
+      failed(
+          verifyRegWidth(op, mma.getAcc(), accWidth, "accumulator operand")) ||
+      failed(verifyRegWidth(op, mma.getAccResult(), accWidth, "result")))
     return failure();
   return success();
+}
+
+static LogicalResult verifyWMMA(Operation *op, int64_t abWidth) {
+  MMAOpInterface mma = cast<MMAOpInterface>(op);
+  return verifyMMA(mma, abWidth, /*accWidth=*/8, verifyVGPRWidth);
+}
+
+LogicalResult WmmaI32_16x16x16_IU8Op::verify() {
+  return verifyWMMA(*this, /*abWidth=*/4);
 }
 
 LogicalResult WmmaF32_16x16x16_F16Op::verify() {
-  if (failed(verifyVGPRWidth(*this, getOperand(0), 8, "A operand")) ||
-      failed(verifyVGPRWidth(*this, getOperand(1), 8, "B operand")) ||
-      failed(verifyVGPRWidth(*this, getOperand(2), 8, "accumulator operand")) ||
-      failed(verifyVGPRWidth(*this, getResult(), 8, "result")))
-    return failure();
-  return success();
+  return verifyWMMA(*this, /*abWidth=*/8);
 }
 
 LogicalResult WmmaF32_16x16x16_BF16Op::verify() {
-  if (failed(verifyVGPRWidth(*this, getOperand(0), 8, "A operand")) ||
-      failed(verifyVGPRWidth(*this, getOperand(1), 8, "B operand")) ||
-      failed(verifyVGPRWidth(*this, getOperand(2), 8, "accumulator operand")) ||
-      failed(verifyVGPRWidth(*this, getResult(), 8, "result")))
+  return verifyWMMA(*this, /*abWidth=*/8);
+}
+
+static LogicalResult verifyMFMA(Operation *op, int64_t abWidth, bool hasScale) {
+  MMAOpInterface mma = cast<MMAOpInterface>(op);
+  if (failed(verifyMMA(mma, abWidth, /*accWidth=*/4, verifyAVGPRWidth)))
+    return failure();
+  if (failed(verifySameAVGPRClass(op, mma.getAcc(), mma.getAccResult(),
+                                  "accumulator/result")))
+    return failure();
+  if (!hasScale)
+    return success();
+  Value aScale = mma.getAScale();
+  Value bScale = mma.getBScale();
+  assert(aScale && bScale && "scaled MFMA scale operands required");
+  if (failed(verifyVGPRWidth(op, aScale, 1, "A scale operand")) ||
+      failed(verifyVGPRWidth(op, bScale, 1, "B scale operand")))
     return failure();
   return success();
 }
 
 LogicalResult MfmaF32_16x16x16_F16Op::verify() {
-  if (failed(verifyAVGPRWidth(*this, getOperand(0), 2, "A operand")) ||
-      failed(verifyAVGPRWidth(*this, getOperand(1), 2, "B operand")) ||
-      failed(
-          verifyAVGPRWidth(*this, getOperand(2), 4, "accumulator operand")) ||
-      failed(verifyAVGPRWidth(*this, getResult(), 4, "result")) ||
-      failed(verifySameAVGPRClass(*this, getOperand(2), getResult(),
-                                  "accumulator/result")))
-    return failure();
-  return success();
+  return verifyMFMA(*this, /*abWidth=*/2, /*hasScale=*/false);
 }
 
 LogicalResult MfmaF32_16x16x16_BF16Op::verify() {
-  if (failed(verifyAVGPRWidth(*this, getOperand(0), 2, "A operand")) ||
-      failed(verifyAVGPRWidth(*this, getOperand(1), 2, "B operand")) ||
-      failed(
-          verifyAVGPRWidth(*this, getOperand(2), 4, "accumulator operand")) ||
-      failed(verifyAVGPRWidth(*this, getResult(), 4, "result")) ||
-      failed(verifySameAVGPRClass(*this, getOperand(2), getResult(),
-                                  "accumulator/result")))
-    return failure();
-  return success();
+  return verifyMFMA(*this, /*abWidth=*/2, /*hasScale=*/false);
 }
 
 LogicalResult MfmaF32_16x16x32_F16Op::verify() {
-  if (failed(verifyAVGPRWidth(*this, getOperand(0), 4, "A operand")) ||
-      failed(verifyAVGPRWidth(*this, getOperand(1), 4, "B operand")) ||
-      failed(
-          verifyAVGPRWidth(*this, getOperand(2), 4, "accumulator operand")) ||
-      failed(verifyAVGPRWidth(*this, getResult(), 4, "result")) ||
-      failed(verifySameAVGPRClass(*this, getOperand(2), getResult(),
-                                  "accumulator/result")))
-    return failure();
-  return success();
+  return verifyMFMA(*this, /*abWidth=*/4, /*hasScale=*/false);
 }
 
 LogicalResult MfmaF32_16x16x32_BF16Op::verify() {
-  if (failed(verifyAVGPRWidth(*this, getOperand(0), 4, "A operand")) ||
-      failed(verifyAVGPRWidth(*this, getOperand(1), 4, "B operand")) ||
-      failed(
-          verifyAVGPRWidth(*this, getOperand(2), 4, "accumulator operand")) ||
-      failed(verifyAVGPRWidth(*this, getResult(), 4, "result")) ||
-      failed(verifySameAVGPRClass(*this, getOperand(2), getResult(),
-                                  "accumulator/result")))
-    return failure();
-  return success();
+  return verifyMFMA(*this, /*abWidth=*/4, /*hasScale=*/false);
 }
 
 LogicalResult MfmaScaleF32_16x16x128_F4F4Op::verify() {
-  if (failed(verifyAVGPRWidth(*this, getA(), 4, "A operand")) ||
-      failed(verifyAVGPRWidth(*this, getB(), 4, "B operand")) ||
-      failed(verifyAVGPRWidth(*this, getAcc(), 4, "accumulator operand")) ||
-      failed(verifyVGPRWidth(*this, getAScale(), 1, "A scale operand")) ||
-      failed(verifyVGPRWidth(*this, getBScale(), 1, "B scale operand")) ||
-      failed(verifyAVGPRWidth(*this, getResult(), 4, "result")) ||
-      failed(verifySameAVGPRClass(*this, getAcc(), getResult(),
-                                  "accumulator/result")))
-    return failure();
-  return success();
+  return verifyMFMA(*this, /*abWidth=*/4, /*hasScale=*/true);
 }
 
 static LogicalResult verifyUniformLoopTerminator(UniformLoopOp loop,

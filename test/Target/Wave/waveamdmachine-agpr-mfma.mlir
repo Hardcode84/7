@@ -99,6 +99,31 @@ func.func @mfma_loop_carried_accumulator() {
   return
 }
 
+// REGALLOC-LABEL: func.func @scaled_mfma_accumulator_alias
+// REGALLOC: %[[ACC:.+]] = waveamdmachine.v_accvgpr_write_b32_tuple
+// REGALLOC-SAME: -> !waveamdmachine.reg<agpr, 4, [[ACC_SLOT:[0-9]+]]>
+// REGALLOC: %[[RESULT:.+]] = waveamdmachine.mfma_scale_f32_16x16x128_f4_f4 {{.*}}, {{.*}}, %[[ACC]]
+// REGALLOC-SAME: -> !waveamdmachine.reg<agpr, 4, [[ACC_SLOT]]>
+// REGALLOC: waveamdmachine.v_accvgpr_read_b32_tuple %[[RESULT]]
+// REGALLOC-SAME: (!waveamdmachine.reg<agpr, 4, [[ACC_SLOT]]>)
+func.func @scaled_mfma_accumulator_alias() {
+  %a = waveamdmachine.uninit : !waveamdmachine.reg<agpr, 4>
+  %b = waveamdmachine.uninit : !waveamdmachine.reg<agpr, 4>
+  %acc_v = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 4>
+  %scale_a = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1>
+  %scale_b = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1>
+  %acc = waveamdmachine.v_accvgpr_write_b32_tuple %acc_v
+      : (!waveamdmachine.reg<vgpr, 4>) -> !waveamdmachine.reg<agpr, 4>
+  %result = waveamdmachine.mfma_scale_f32_16x16x128_f4_f4
+      %a, %b, %acc, %scale_a, %scale_b
+      : (!waveamdmachine.reg<agpr, 4>, !waveamdmachine.reg<agpr, 4>,
+         !waveamdmachine.reg<agpr, 4>, !waveamdmachine.reg<vgpr, 1>,
+         !waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<agpr, 4>
+  %read = waveamdmachine.v_accvgpr_read_b32_tuple %result
+      : (!waveamdmachine.reg<agpr, 4>) -> !waveamdmachine.reg<vgpr, 4>
+  return
+}
+
 // REGALLOC-LABEL: func.func @shared_mfma_acc
 // REGALLOC: %[[COPY0:[A-Za-z0-9_]+]] = waveamdmachine.v_mov_b32_tuple %[[ACC:[A-Za-z0-9_]+]]
 // REGALLOC: waveamdmachine.mfma_f32_16x16x32_f16 {{.*}}, {{.*}}, %[[COPY0]]

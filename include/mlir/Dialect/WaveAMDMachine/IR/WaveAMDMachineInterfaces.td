@@ -45,4 +45,64 @@ def WaveAMDMachine_WaitcntInfoOpInterface
   ];
 }
 
+def WaveAMDMachine_MMAOpInterface
+    : OpInterface<"MMAOpInterface"> {
+  let cppNamespace = "::mlir::waveamdmachine";
+  let description = [{
+    Structured matrix multiply operand contract.
+  }];
+  let methods = [
+    InterfaceMethod<
+      [{A operand.}],
+      "::mlir::Value",
+      "getA",
+      (ins)
+    >,
+    InterfaceMethod<
+      [{B operand.}],
+      "::mlir::Value",
+      "getB",
+      (ins)
+    >,
+    InterfaceMethod<
+      [{Accumulator operand.}],
+      "::mlir::Value",
+      "getAcc",
+      (ins)
+    >,
+    InterfaceMethod<
+      [{Accumulator result.}],
+      "::mlir::Value",
+      "getAccResult",
+      (ins),
+      [{}],
+      [{ return $_op.getResult(); }]
+    >,
+    InterfaceMethod<
+      [{Optional A scale operand.}],
+      "::mlir::Value",
+      "getAScale",
+      (ins),
+      [{}],
+      [{ return {}; }]
+    >,
+    InterfaceMethod<
+      [{Optional B scale operand.}],
+      "::mlir::Value",
+      "getBScale",
+      (ins),
+      [{}],
+      [{ return {}; }]
+    >,
+    InterfaceMethod<
+      [{Replace accumulator operand.}],
+      "void",
+      "setAcc",
+      (ins "::mlir::Value":$value),
+      [{}],
+      [{ $_op.getAccMutable().assign(value); }]
+    >,
+  ];
+}
+
 #endif // MLIR_DIALECT_WAVEAMDMACHINE_IR_WAVEAMDMACHINEINTERFACES_TD

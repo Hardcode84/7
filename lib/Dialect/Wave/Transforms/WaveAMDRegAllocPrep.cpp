@@ -38,10 +38,6 @@ static bool isAGPR(waveamdmachine::RegType type) {
   return type.getRegClass() == waveamdmachine::RegClass::AGPR;
 }
 
-static bool isMFMA(Operation *op) {
-  return op && op->hasTrait<OpTrait::waveamdmachine::MFMAOp>();
-}
-
 static std::optional<waveamdmachine::RegType> trackedRegType(Value v) {
   if (!isReg(v))
     return std::nullopt;
@@ -111,26 +107,24 @@ static LogicalResult splitDuplicateLoopInits(func::FuncOp func) {
 }
 
 static LogicalResult splitDuplicateMFMAAccumulatorInputs(func::FuncOp func) {
-  SmallVector<Operation *> ops;
-  func.walk([&](Operation *op) {
-    if (isMFMA(op))
+  SmallVector<waveamdmachine::MMAOpInterface> ops;
+  func.walk([&](waveamdmachine::MMAOpInterface op) {
+    if (op.getOperation()->hasTrait<OpTrait::waveamdmachine::MFMAOp>())
       ops.push_back(op);
   });
 
   OpBuilder builder(func.getContext());
-  for (Operation *op : ops) {
-    if (op->getNumOperands() <= 2)
-      continue;
-    Value acc = op->getOperand(2);
+  for (waveamdmachine::MMAOpInterface op : ops) {
+    Value acc = op.getAcc();
     if (!trackedRegType(acc))
       continue;
     if (llvm::hasSingleElement(acc.getUses()))
       continue;
-    builder.setInsertionPoint(op);
-    FailureOr<Value> dup = duplicateRegValue(builder, op->getLoc(), acc);
+    builder.setInsertionPoint(op.getOperation());
+    FailureOr<Value> dup = duplicateRegValue(builder, op.getLoc(), acc);
     if (failed(dup))
       return failure();
-    op->setOperand(2, *dup);
+    op.setAcc(*dup);
   }
   return success();
 }

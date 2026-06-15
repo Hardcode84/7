@@ -251,10 +251,6 @@ static bool valueIsDefinedInside(Operation *root, Value value) {
   return false;
 }
 
-static bool isMFMA(Operation *op) {
-  return op && op->hasTrait<OpTrait::waveamdmachine::MFMAOp>();
-}
-
 struct MFMAAccumulatorAlias {
   Value acc;
   Value result;
@@ -263,12 +259,16 @@ struct MFMAAccumulatorAlias {
 
 static std::optional<MFMAAccumulatorAlias>
 getMFMAAccumulatorAlias(Operation &op) {
-  if (!isMFMA(&op) || op.getNumOperands() <= 2 || op.getNumResults() != 1)
+  if (!op.hasTrait<OpTrait::waveamdmachine::MFMAOp>())
     return std::nullopt;
-  Value acc = op.getOperand(2);
+  waveamdmachine::MMAOpInterface mma =
+      dyn_cast<waveamdmachine::MMAOpInterface>(&op);
+  if (!mma)
+    return std::nullopt;
+  Value acc = mma.getAcc();
   if (!llvm::hasSingleElement(acc.getUses()))
     return std::nullopt;
-  Value resultValue = op.getResult(0);
+  Value resultValue = mma.getAccResult();
   std::optional<waveamdmachine::RegType> rt =
       wave::getTrackedWaveAMDRegType(acc);
   std::optional<waveamdmachine::RegType> resultRt =
