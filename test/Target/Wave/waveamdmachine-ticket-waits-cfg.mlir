@@ -55,6 +55,42 @@ func.func @exec_if_branch_min_vscnt(%cond: !waveamdmachine.reg<sgpr, 1>,
   return
 }
 
+// CHECK-LABEL: func.func @exec_if_condition_smem
+// CHECK: waveamdmachine.s_load_b32
+// CHECK-NEXT: waveamdmachine.s_waitcnt lgkmcnt(0)
+// CHECK-NEXT: waveamdmachine.exec_if
+func.func @exec_if_condition_smem() {
+  %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+  %cond = waveamdmachine.s_load_b32 %zero, "s[0:1]"
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<sgpr, 1>
+  waveamdmachine.exec_if %cond {
+    waveamdmachine.yield
+  } : !waveamdmachine.reg<sgpr, 1>
+  return
+}
+
+// CHECK-LABEL: func.func @exec_if_yield_copy_smem
+// CHECK: waveamdmachine.exec_if
+// CHECK: waveamdmachine.s_load_b32
+// CHECK-NEXT: waveamdmachine.s_waitcnt lgkmcnt(0)
+// CHECK-NEXT: waveamdmachine.yield
+// CHECK: waveamdmachine.v_add_u32
+func.func @exec_if_yield_copy_smem(%cond: !waveamdmachine.reg<sgpr, 1>,
+                                   %x: !waveamdmachine.reg<vgpr, 1>) {
+  %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+  %r = waveamdmachine.exec_if %cond {
+    %value = waveamdmachine.s_load_b32 %zero, "s[0:1]"
+        : (!waveamdmachine.imm) -> !waveamdmachine.reg<sgpr, 1>
+    waveamdmachine.yield %value : !waveamdmachine.reg<sgpr, 1>
+  } otherwise {
+    waveamdmachine.yield %zero : !waveamdmachine.imm
+  } : !waveamdmachine.reg<sgpr, 1> -> !waveamdmachine.reg<vgpr, 1>
+  %sum = waveamdmachine.v_add_u32 %x, %r
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  return
+}
+
 }
 
 // -----

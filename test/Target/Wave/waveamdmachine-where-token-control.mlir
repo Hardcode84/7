@@ -8,7 +8,8 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // PIPE: waveamdmachine.exec_if
 // PIPE: waveamdmachine.global_load_b32_addr64
 // PIPE: waveamdmachine.s_waitcnt
-// PIPE-NEXT: waveamdmachine.global_store_b32_addr64
+// PIPE-NEXT: waveamdmachine.yield
+// PIPE: waveamdmachine.global_store_b32_addr64
 // PIPE: otherwise
 // PIPE: waveamdmachine.v_mov_b32_tuple
 // PIPE: waveamdmachine.global_store_b32_addr64
@@ -17,7 +18,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // ASM-LABEL: masked_load_other_kernel:
 // ASM: global_load_b32
 // ASM: s_waitcnt vmcnt(0)
-// ASM-NEXT: global_store_b32
+// ASM: global_store_b32
 // ASM: s_and_not1_b32 exec_lo
 // ASM: v_mov_b32_e32 {{v[0-9]+}}, 0x40a00000
 // ASM-NEXT: global_store_b32

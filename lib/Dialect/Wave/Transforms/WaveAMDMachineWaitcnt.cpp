@@ -494,8 +494,51 @@ static LogicalResult validateWaveAMDMachineOp(Operation *op) {
   return success();
 }
 
+static void requireValue(WaitRequirement &req, Value value,
+                         const WaitState &state) {
+  for (unsigned ci = 0; ci < kNumCounters; ++ci) {
+    Counter c = static_cast<Counter>(ci);
+    if (const Token *t = lat::find(state.tokens, c, value))
+      req.requireDrain(c, waitPosition(state, *t));
+  }
+}
+
+static void requireExecIfYieldCopies(WaitRequirement &req,
+                                     waveamdmachine::YieldOp yield,
+                                     const WaitState &state) {
+  auto execIf = dyn_cast<waveamdmachine::ExecIfOp>(yield->getParentOp());
+  if (!execIf)
+    return;
+  for (auto [result, value] :
+       llvm::zip_equal(execIf.getResults(), yield.getValues())) {
+    if (isa<waveamdmachine::MemTokenType>(result.getType()))
+      continue;
+    if (value.getDefiningOp<waveamdmachine::UninitOp>())
+      continue;
+    requireValue(req, value, state);
+  }
+}
+
+static WaitRequirement computeControlFlowRequirement(Operation *op,
+                                                     const WaitState &state) {
+  WaitRequirement req;
+  if (auto execIf = dyn_cast<waveamdmachine::ExecIfOp>(op)) {
+    requireValue(req, execIf.getCondition(), state);
+    return req;
+  }
+  if (auto uniformIf = dyn_cast<waveamdmachine::UniformIfOp>(op)) {
+    requireValue(req, uniformIf.getCondition(), state);
+    return req;
+  }
+  if (auto yield = dyn_cast<waveamdmachine::YieldOp>(op))
+    requireExecIfYieldCopies(req, yield, state);
+  return req;
+}
+
 static WaitRequirement computeRequirement(Operation *op,
                                           const WaitState &state) {
+  if (isControlFlowOp(op))
+    return computeControlFlowRequirement(op, state);
   WaitRequirement req;
   // No SSA edge from a store's token to the return path -- force vscnt
   // drain when any VMEM store is still in flight.
@@ -506,13 +549,8 @@ static WaitRequirement computeRequirement(Operation *op,
     }
     return req;
   }
-  for (Value operand : op->getOperands()) {
-    for (unsigned ci = 0; ci < kNumCounters; ++ci) {
-      Counter c = static_cast<Counter>(ci);
-      if (const Token *t = lat::find(state.tokens, c, operand))
-        req.requireDrain(c, waitPosition(state, *t));
-    }
-  }
+  for (Value operand : op->getOperands())
+    requireValue(req, operand, state);
   return req;
 }
 
@@ -569,8 +607,11 @@ static void runTransfer(Operation *op, WaitState &state,
                         const llvm::AMDGPU::IsaVersion &isaVer, EmitFn emit) {
   switch (classifyOp(op)) {
   case OpKind::Skip:
-    if (isWaitcntOp(op))
+    if (isWaitcntOp(op)) {
       observeExistingWaitcnt(op, state, isaVer);
+      return;
+    }
+    applyDrain(op, state, emit);
     return;
   case OpKind::Issuer:
     applyDrain(op, state, emit);
@@ -848,19 +889,20 @@ struct WaveAMDTicketWaitsPass
 
   void rewriteOp(Operation *op, WaitState &local, DataFlowSolver &solver,
                  const llvm::AMDGPU::IsaVersion &isaVer, OpBuilder &builder) {
+    auto emit = [&](Operation *op, const WaitRequirement &req) {
+      if (req.hasWait())
+        emitWaits(builder, op, req);
+    };
     // Control-flow ops: framework hooks computed the post-op state.
     // Refresh `local` so a downstream consumer sees the joined region
     // result. Inner regions are visited separately via collectBlocks.
     if (isControlFlowOp(op)) {
+      runTransfer(op, local, isaVer, emit);
       if (auto *post =
               solver.lookupState<WaitLattice>(solver.getProgramPointAfter(op)))
         local = post->get();
       return;
     }
-    auto emit = [&](Operation *op, const WaitRequirement &req) {
-      if (req.hasWait())
-        emitWaits(builder, op, req);
-    };
     runTransfer(op, local, isaVer, emit);
   }
 
