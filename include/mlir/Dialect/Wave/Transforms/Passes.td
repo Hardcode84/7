@@ -386,9 +386,14 @@ def WaveAMDRegAlloc
     target VGPR-family accounting across VGPRs/AGPRs. `vgpr-limit` /
     `sgpr-limit` / `agpr-limit` can only shrink those caps.
 
-    Register bank pressure is relieved by forced promotion in storage order
-    SGPR -> VGPR -> AGPR. Explicit bridge ops repair producer/consumer bank
-    mismatches.
+    Register pressure relief is provider-based. Bank promotion moves storage
+    in order SGPR -> VGPR -> AGPR and inserts explicit bridge ops for
+    producer/consumer bank mismatches. VGPR memory pressure can also use LDS
+    spills or scratch spills when target, workgroup, and value-shape
+    constraints make the spill legal.
+
+    Regalloc emits optimization remarks under `waveamdmachine-regalloc` for
+    summaries, intervals, LDS and scratch spill plans, and pressure failures.
   }];
   let dependentDialects = [
     "func::FuncDialect",

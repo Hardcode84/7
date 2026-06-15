@@ -218,84 +218,91 @@ candidate summaries when the allocator tried pressure relief at that point.
 
 Default hard failures also print pressure detail in the error diagnostic.
 
-## Rewrite Design
+## Implementation
 
-`waveamd-reg-alloc` uses the component implementation. It preserves the
-observable contract above while making storage constraints explicit.
+`waveamd-reg-alloc` is a `ModuleOp` pass. It walks non-external functions,
+derives target budgets, prepares regalloc IR, verifies singleton-resource
+liveness, then allocates each function independently.
 
-The function pipeline is:
+Each allocation attempt rebuilds current state from IR:
 
-1. `FunctionInventory`: assign stable operation positions and classify
-   register values, singleton resources, entry ops, tuple ops, loops, MFMA
-   ops, fixed physical values, and target scopes.
-2. `SemanticRepair`: insert copies where SSA identity cannot represent
-   required storage, then re-run inventory.
-3. `ConstraintBuilder`: build alias constraints and live slot segments.
-4. `BudgetResolver`: compute class budgets, reserved prefixes,
-   target-waves caps, and VGPR-family accounting.
-5. `PhysicalAllocator`: seed fixed and reserved occupancy, assign virtual
-   storage groups per class, and report pressure failures.
-6. `PromotionMaterializer`: insert SGPR/VGPR/AGPR bridge ops for groups
-   promoted by the allocator, rebuild, and retry.
-7. `Commit`: rewrite result and loop block-argument types with physical
-   indices and write or clear overflow markers.
-8. `PostVerify`: run post-regalloc verification as the final gate.
-
-`SemanticRepair` and `ConstraintBuilder` run to a fixed point.
-Repairable alias conflicts return edit requests; the driver applies them,
-then inventory and constraints rebuild. Non-repairable conflicts are hard
-errors.
+1. `buildAllocatedWaveAMDLiveIntervals` assigns operation positions and
+   builds alias-aware live intervals for tuples, loops, exec-if results, MFMA
+   accumulators, fixed physical values, and target scopes.
+2. `buildInventory` imports those intervals into `Inventory`, creates kernel
+   ABI reserved intervals, and records peak SGPR, VGPR, and AGPR pressure.
+3. `allocateGroups` packs `IntervalGroup`s into SGPR, VGPR, and AGPR physical
+   occupancy while preserving fixed bases, reserved prefixes, and alignment.
+4. Budget enforcement checks class-local limits and the combined VGPR/AGPR
+   target-waves view.
+5. If allocation inserted copies or selected pressure relief, the driver
+   materializes the edits and rebuilds from IR. Retries stop at
+   `kRewriteAttemptLimit`.
+6. A successful final attempt rewrites pass-owned result types with physical
+   indices, emits remarks, clears transient diagnostics, and runs
+   post-regalloc verification in hard-fail mode.
 
 ### Data Model
 
-`RegValue`
-  `Value`, class, width, fixed index if present, defining position, last
-  uses, pass-owned flag, reserved-entry allowance.
+`Inventory`
+  Ordered ops, position map, value-to-interval map, kernel entry registers,
+  interval groups, planned pressure-relief plans, provider byte totals, and
+  peak pressure counters.
 
-`StorageGroup`
-  One allocation unit. Contains class, width, alignment, optional fixed
-  base, values with slot offsets, and per-slot live segments.
+`Interval`
+  Values sharing one live slot, register type, start and end positions,
+  reserved/non-promotable flags, and owning group.
 
-`SlotSegment`
-  Relative dword slot plus half-open position range. Diagnostics convert
-  back to the current inclusive `start` / `end` schema.
+`IntervalGroup`
+  One allocation unit. Contains preferred class, storage class, optional
+  assigned/fixed base, member intervals, order, reserved/non-promotable flags,
+  and pressure-relief state.
 
-`AliasEdge`
-  Weighted relation: `base(lhs) + lhsOffset == base(rhs) + rhsOffset`.
+`RegisterBudgets`
+  Addressable class limits, target-waves SGPR/VGPR caps, combined VGPR-family
+  limit, max waves, and target AGPR accounting mode.
 
-`ClassProblem`
-  Budget, reserved prefix, fixed groups, virtual groups, and physical
-  occupancy for one class.
-
-`PressurePoint`
+`PressureFailure`
   Class, limit, reserved count, position, request interval, live dwords,
-  required relief, and active overlaps.
-
-Use weighted union-find for aliases. Each root stores class, required
-width, fixed base, and member value offsets. Union conflicts are repair
-requests or hard errors, never silent coalesces.
+  required relief, active overlaps, and combined-pressure marker.
 
 ### Liveness Model
 
-Positions use program order with explicit loop body positions. Each
-position has read and write phases. Uses are live through the read phase;
-defs become live at the write phase. Same-op tuple renames, MFMA
-accumulator aliases, and loop carry joins use alias constraints, not
-interference.
+Positions use flattened program order with explicit loop-body positions.
+Tuple renames, MFMA accumulator aliases, loop carries, and exec-if region
+results are coalesced into interval groups when their storage contracts allow
+aliasing. External loop operands are extended across the loop backedge.
 
 Physical occupancy is class-local:
 
-- one occupancy structure per physical dword;
-- reserved prefix tracked as unavailable for ordinary groups;
-- allowed entry groups may occupy exact reserved registers and then insert
-  normal liveness into occupancy;
-- fixed groups inserted before virtual groups;
-- candidate base fits when occupied physical dword live sets are disjoint
-  from the group's live slots.
+- one live-slot set per physical dword;
+- reserved prefixes unavailable to ordinary groups;
+- fixed groups placed before virtual groups;
+- candidate base fits when occupied physical dword live sets do not intersect
+  the group's live slots.
 
 When `target_waves` creates a VGPR-family limit, allocation also tracks a
-VGPR-family pressure view. VGPR candidates cannot consume headroom needed
-by live AGPRs on targets where AGPRs count against VGPRs.
+VGPR-family pressure view. On targets where AGPRs count against VGPRs,
+combined VGPR/AGPR overflow is relieved by memory-spill providers.
+
+### Pressure Relief
+
+Pressure relief uses `WaveAMDPressureReliefProvider` callbacks. The driver
+creates bank-promotion, LDS-spill, and scratch-spill providers for the
+current pressure point, asks each for candidates, selects one candidate, stores
+the plan in `Inventory`, materializes through the owning provider, and retries.
+
+Global candidate ranking is:
+
+1. legal candidate;
+2. lower total cost;
+3. larger pressure relief;
+4. provider-specific candidate tie-breaker;
+5. provider order.
+
+Provider summaries, candidate summaries, and memory-spill rejection counts are
+stored as transient function attrs so hard errors and MLIR remarks report the
+same pressure decision.
 
 ### Verification
 
@@ -311,18 +318,7 @@ Consumer scopes stay unchanged: resource info requires physical results,
 assembly requires all register values, and hazard waits depend on
 physical spans for the operands they inspect.
 
-Rewrite-specific internal verifiers should check:
-
-- alias graph has one class per root;
-- each alias edge has legal provenance: tuple view, loop carry, MFMA
-  accumulator, or fixed constraint after repair;
-- fixed bases agree per root;
-- group width covers every member offset plus width;
-- live slot sets are within group width;
-- reserved and fixed occupancy are inserted before virtual allocation;
-- committed types match planned assignments.
-
-### Rollout Criteria
+### Coverage
 
 The production allocator is covered by:
 
@@ -335,16 +331,10 @@ The production allocator is covered by:
 
 ### Complexity And Performance
 
-Current allocation scans candidate bases and active intervals, then
-compares value subranges pairwise. Worst cases grow with interval count
-times active count times physical-register scan.
-
-The rewrite uses explicit storage groups and physical occupancy. The
-current implementation uses dense bitsets for live slots; that is already
-faster on large observed GEMM cases, but dense memory and retry rebuilds
-remain the primary risks for very large generated kernels. Sparse live
-sets or event-based pressure summaries are the next optimization points
-if compile-time or memory regresses.
+Allocation scans candidate physical bases and intersects live-slot sets.
+Worst cases grow with interval-group count, live-range density, and physical
+register scan length. Dense live-slot sets and retry rebuilds are the main
+compile-time and memory costs for large generated kernels.
 
 Design constraints:
 
