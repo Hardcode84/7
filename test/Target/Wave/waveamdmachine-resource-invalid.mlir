@@ -69,10 +69,10 @@ func.func @duplicate_fixed_loop_carry_slots() {
 // expected-error @below {{waveamd-resource-info found interfering VGPR register live ranges}}
 func.func @interfering_vgprs() {
   %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
-  // expected-note @below {{lhs phys=[0, 1) live=[1, 3)}}
+  // expected-note @below {{lhs phys=[0, 1) live=[1, 3]}}
   %a = waveamdmachine.v_mov_b32_tuple %zero {registers = 1 : i64}
       : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1, 0>
-  // expected-note @below {{rhs phys=[0, 1) live=[2, 4)}}
+  // expected-note @below {{rhs phys=[0, 1) live=[2, 4]}}
   %b = waveamdmachine.v_mov_b32_tuple %zero {registers = 1 : i64}
       : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1, 0>
   %use_a = waveamdmachine.v_mov_b32_tuple %a {registers = 1 : i64}
@@ -88,10 +88,10 @@ func.func @interfering_vgprs() {
 func.func @exec_if_yield_region_interference() {
   %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
   %cond = waveamdmachine.uninit : !waveamdmachine.reg<sgpr, 1, 0>
-  // expected-note @below {{lhs phys=[0, 1) live=[2, 5)}}
+  // expected-note @below {{lhs phys=[0, 1) live=[2, 5]}}
   %a = waveamdmachine.v_mov_b32_tuple %zero {registers = 1 : i64}
       : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1, 0>
-  // expected-note @below {{rhs phys=[0, 1) live=[3, 7)}}
+  // expected-note @below {{rhs phys=[0, 1) live=[3, 7]}}
   %b = waveamdmachine.v_mov_b32_tuple %zero {registers = 1 : i64}
       : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1, 0>
   %r = waveamdmachine.exec_if %cond {
@@ -126,11 +126,11 @@ func.func @exec_if_mixed_merge_sources() {
 // expected-error @below {{waveamd-resource-info found interfering SGPR register live ranges}}
 func.func @exec_if_condition_then_interference() {
   %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
-  // expected-note @below {{lhs phys=[0, 1) live=[1, 4)}}
+  // expected-note @below {{lhs phys=[0, 1) live=[1, 4]}}
   %cond = waveamdmachine.s_mov_b32_value %zero
       : (!waveamdmachine.imm) -> !waveamdmachine.reg<sgpr, 1, 0>
   waveamdmachine.exec_if %cond {
-    // expected-note @below {{rhs phys=[0, 1) live=[3, 3)}}
+    // expected-note @below {{rhs phys=[0, 1) live=[3, 3]}}
     %clobber = waveamdmachine.s_mov_b32_value %zero
         : (!waveamdmachine.imm) -> !waveamdmachine.reg<sgpr, 1, 0>
     waveamdmachine.yield
@@ -146,7 +146,7 @@ func.func @exec_if_condition_then_interference() {
 func.func @exec_if_condition_else_data_interference() {
   %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
   %one = waveamdmachine.imm 1 : !waveamdmachine.imm
-  // expected-note @below {{lhs phys=[0, 1) live=[2, 7)}}
+  // expected-note @below {{lhs phys=[0, 1) live=[2, 7]}}
   %cond = waveamdmachine.s_mov_b32_value %one
       : (!waveamdmachine.imm) -> !waveamdmachine.reg<sgpr, 1, 0>
   %sgpr = waveamdmachine.s_mov_b32_value %one
@@ -154,7 +154,7 @@ func.func @exec_if_condition_else_data_interference() {
   %r = waveamdmachine.exec_if %cond {
     waveamdmachine.yield %sgpr : !waveamdmachine.reg<sgpr, 1, 1>
   } otherwise {
-    // expected-note @below {{rhs phys=[0, 1) live=[6, 6)}}
+    // expected-note @below {{rhs phys=[0, 1) live=[6, 6]}}
     %clobber = waveamdmachine.s_mov_b32_value %zero
         : (!waveamdmachine.imm) -> !waveamdmachine.reg<sgpr, 1, 0>
     waveamdmachine.yield %zero : !waveamdmachine.imm
@@ -167,10 +167,10 @@ func.func @exec_if_condition_else_data_interference() {
 // expected-error @below {{waveamd-resource-info found interfering SGPR register live ranges}}
 func.func @interfering_sgprs() {
   %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
-  // expected-note @below {{lhs phys=[0, 1) live=[1, 3)}}
+  // expected-note @below {{lhs phys=[0, 1) live=[1, 3]}}
   %a = waveamdmachine.s_mov_b32_value %zero
       : (!waveamdmachine.imm) -> !waveamdmachine.reg<sgpr, 1, 0>
-  // expected-note @below {{rhs phys=[0, 1) live=[2, 4)}}
+  // expected-note @below {{rhs phys=[0, 1) live=[2, 4]}}
   %b = waveamdmachine.s_mov_b32_value %zero
       : (!waveamdmachine.imm) -> !waveamdmachine.reg<sgpr, 1, 0>
   %use_a = waveamdmachine.s_mov_b32_value %a
@@ -186,9 +186,9 @@ func.func @interfering_sgprs() {
 func.func @interfering_agprs() {
   %off = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1, 1>
   %base = waveamdmachine.uninit : !waveamdmachine.reg<sgpr, 2, 6>
-  // expected-note @below {{lhs phys=[0, 1) live=[2, 4)}}
+  // expected-note @below {{lhs phys=[0, 1) live=[2, 4]}}
   %a = waveamdmachine.uninit : !waveamdmachine.reg<agpr, 1, 0>
-  // expected-note @below {{rhs phys=[0, 1) live=[3, 5)}}
+  // expected-note @below {{rhs phys=[0, 1) live=[3, 5]}}
   %b = waveamdmachine.uninit : !waveamdmachine.reg<agpr, 1, 0>
   %read_a = waveamdmachine.v_accvgpr_read_b32_tuple %a
       : (!waveamdmachine.reg<agpr, 1, 0>) -> !waveamdmachine.reg<vgpr, 1, 2>

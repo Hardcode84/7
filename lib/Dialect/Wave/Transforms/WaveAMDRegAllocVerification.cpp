@@ -382,15 +382,15 @@ verifyNoRangeInterference(func::FuncOp func, ArrayRef<PhysicalLiveRange> ranges,
           func.emitError() << consumer << " found interfering " << regClass
                            << " register live ranges: lhs phys=["
                            << lhs.physStart << ", " << lhs.physEnd << ") live=["
-                           << lhs.start << ", " << lhs.end << "), rhs phys=["
+                           << lhs.start << ", " << lhs.end << "], rhs phys=["
                            << rhs.physStart << ", " << rhs.physEnd << ") live=["
-                           << rhs.start << ", " << rhs.end << ")";
+                           << rhs.start << ", " << rhs.end << "]";
       diag.attachNote(diagOpForValue(lhs.value, func)->getLoc())
           << "lhs phys=[" << lhs.physStart << ", " << lhs.physEnd << ") live=["
-          << lhs.start << ", " << lhs.end << ")";
+          << lhs.start << ", " << lhs.end << "]";
       diag.attachNote(diagOpForValue(rhs.value, func)->getLoc())
           << "rhs phys=[" << rhs.physStart << ", " << rhs.physEnd << ") live=["
-          << rhs.start << ", " << rhs.end << ")";
+          << rhs.start << ", " << rhs.end << "]";
       return failure();
     }
   }
