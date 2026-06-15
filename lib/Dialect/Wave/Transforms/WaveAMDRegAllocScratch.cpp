@@ -1178,7 +1178,8 @@ private:
 };
 
 static bool supportsScratchSpillTarget(const llvm::AMDGPU::IsaVersion &isa) {
-  return isa.Major == 11 || (isa.Major == 9 && isa.Minor >= 4);
+  return isa.Major == 11 || isa.Major == 12 ||
+         (isa.Major == 9 && isa.Minor >= 4);
 }
 
 static std::optional<unsigned> getUnsignedAttr(Operation *op, StringRef name) {
