@@ -118,13 +118,17 @@ enum class ProgramItemKind : uint8_t {
   Op,
   LoopBegin,
   LoopEnd,
+  Synthetic,
+  Yield,
 };
 
 struct ProgramItem {
   Operation *op = nullptr;
+  Operation *owner = nullptr;
   int64_t tripCount = 0;
   unsigned bodyStart = 0;
   unsigned loop = 0;
+  SchedClass syntheticClass = SchedClass::NoInst;
   ProgramItemKind kind = ProgramItemKind::Op;
 };
 
@@ -146,6 +150,22 @@ static ProgramItem makeLoopEndItem(unsigned loop) {
   ProgramItem item;
   item.loop = loop;
   item.kind = ProgramItemKind::LoopEnd;
+  return item;
+}
+
+static ProgramItem makeSyntheticItem(Operation *op, SchedClass cls) {
+  ProgramItem item;
+  item.op = op;
+  item.syntheticClass = cls;
+  item.kind = ProgramItemKind::Synthetic;
+  return item;
+}
+
+static ProgramItem makeYieldItem(Operation *owner, Operation *yield) {
+  ProgramItem item;
+  item.op = yield;
+  item.owner = owner;
+  item.kind = ProgramItemKind::Yield;
   return item;
 }
 
@@ -194,8 +214,26 @@ static void appendProgramOp(Operation *op, const ArchData &arch,
     program.push_back(makeLoopEndItem(loopIndex));
     return;
   }
+  if (ExecIfOp execIf = dyn_cast<ExecIfOp>(op)) {
+    program.push_back(makeSyntheticItem(op, SchedClass::WriteSALU));
+    program.push_back(makeSyntheticItem(op, SchedClass::WriteBranch));
+    appendProgramBlock(execIf.getThenRegion().front(), arch, config, program);
+    if (!execIf.getElseRegion().empty()) {
+      program.push_back(makeSyntheticItem(op, SchedClass::WriteSALU));
+      program.push_back(makeSyntheticItem(op, SchedClass::WriteBranch));
+      appendProgramBlock(execIf.getElseRegion().front(), arch, config, program);
+    }
+    program.push_back(makeSyntheticItem(op, SchedClass::WriteSALU));
+    return;
+  }
   if (UniformIfOp uniformIf = dyn_cast<UniformIfOp>(op))
     appendSelectedUniformIfRegion(uniformIf, arch, config, program);
+  if (YieldOp yield = dyn_cast<YieldOp>(op)) {
+    if (Operation *parent = yield->getParentOp();
+        isa_and_nonnull<ExecIfOp>(parent))
+      program.push_back(makeYieldItem(parent, op));
+    return;
+  }
   if (isWaveAMDMachineOp(op))
     program.push_back(makeOpItem(op));
 }
@@ -295,6 +333,7 @@ private:
   void schedule(EventSimEvent event);
   void recordNow(EventSimEvent event);
   void advanceControl(WaveState &wave) const;
+  const ProgramItem *currentItem(WaveState &wave) const;
   Operation *currentOp(WaveState &wave) const;
   void pruneCounters(WaveState &wave, int64_t cycle);
   int64_t operandReadyCycle(const WaveState &wave, Operation *op) const;
@@ -303,10 +342,16 @@ private:
   int64_t cuIssueReadyCycle(int64_t cycle, unsigned issues, int period) const;
   void pruneCuIssueCounts(int64_t cycle);
   void consumeCuIssueSlots(int64_t cycle, unsigned issues, int period);
+  int64_t issuedReadyCycle(WaveState &wave, Operation *op, SchedClass cls,
+                           unsigned issues, int64_t cycle);
   int64_t opReadyCycle(WaveState &wave, int64_t cycle);
   int selectReadyWave(int simd, int64_t cycle);
   LogicalResult stepWave(WaveState &wave, int64_t cycle, bool &issued);
   LogicalResult executeNoInst(WaveState &wave, Operation *op, int64_t cycle);
+  LogicalResult executeSynthetic(WaveState &wave, const ProgramItem &item,
+                                 int64_t cycle);
+  LogicalResult executeYield(WaveState &wave, const ProgramItem &item,
+                             int64_t cycle);
   LogicalResult executeWaitcnt(WaveState &wave, Operation *op, int64_t cycle);
   LogicalResult executeIssued(WaveState &wave, Operation *op, int64_t cycle);
   void markIssuedResults(WaveState &wave, Operation *op, FunctionalUnit fu,
@@ -351,6 +396,8 @@ void EventSimulator::advanceControl(WaveState &wave) const {
     const ProgramItem &item = program[wave.pc];
     switch (item.kind) {
     case ProgramItemKind::Op:
+    case ProgramItemKind::Synthetic:
+    case ProgramItemKind::Yield:
       return;
     case ProgramItemKind::LoopBegin:
       wave.loops.push_back({item.tripCount, static_cast<unsigned>(wave.pc)});
@@ -373,18 +420,29 @@ void EventSimulator::advanceControl(WaveState &wave) const {
   }
 }
 
+const ProgramItem *EventSimulator::currentItem(WaveState &wave) const {
+  if (!structuredProgram)
+    return nullptr;
+  advanceControl(wave);
+  if (wave.pc >= program.size())
+    return nullptr;
+  return &program[wave.pc];
+}
+
 Operation *EventSimulator::currentOp(WaveState &wave) const {
   if (!structuredProgram) {
     if (wave.pc >= ops.size())
       return nullptr;
     return ops[wave.pc];
   }
-  advanceControl(wave);
-  if (wave.pc >= program.size())
+  const ProgramItem *item = currentItem(wave);
+  if (!item)
     return nullptr;
-  const ProgramItem &item = program[wave.pc];
-  assert(item.kind == ProgramItemKind::Op && "control item escaped");
-  return item.op;
+  assert((item->kind == ProgramItemKind::Op ||
+          item->kind == ProgramItemKind::Synthetic ||
+          item->kind == ProgramItemKind::Yield) &&
+         "control item escaped");
+  return item->op;
 }
 
 void EventSimulator::processEventsUpTo(int64_t cycle) {
@@ -505,26 +563,41 @@ void EventSimulator::consumeCuIssueSlots(int64_t cycle, unsigned issues,
   }
 }
 
+int64_t EventSimulator::issuedReadyCycle(WaveState &wave, Operation *op,
+                                         SchedClass cls, unsigned issues,
+                                         int64_t cycle) {
+  int64_t ready = operandReadyCycle(wave, op);
+  SimdState &simd = simds[wave.simd];
+  FunctionalUnit fu = funit(arch, cls);
+  ready = std::max(ready, simd.issueReady);
+  ready = std::max(ready, simd.fuReady[static_cast<size_t>(fu)]);
+  int period = getIssuePeriod();
+  return cuIssueReadyCycle(ready, issues, period);
+}
+
 int64_t EventSimulator::opReadyCycle(WaveState &wave, int64_t cycle) {
   if (wave.done)
     return cycle;
   Operation *op = currentOp(wave);
   if (!op)
     return cycle;
+  if (structuredProgram) {
+    const ProgramItem *item = currentItem(wave);
+    assert(item && "currentOp returned op without item");
+    if (item->kind == ProgramItemKind::Yield)
+      return operandReadyCycle(wave, op);
+    if (item->kind == ProgramItemKind::Synthetic)
+      return issuedReadyCycle(wave, op, item->syntheticClass, /*issues=*/1,
+                              cycle);
+  }
   if (isWaitcntOp(op))
     return waitcntReadyCycle(wave, op, cycle);
   int64_t ready = operandReadyCycle(wave, op);
   SchedClass cls = classifyOp(op);
   if (cls == SchedClass::NoInst)
     return ready;
-  SimdState &simd = simds[wave.simd];
-  FunctionalUnit fu = funit(arch, cls);
-  ready = std::max(ready, simd.issueReady);
-  ready = std::max(ready, simd.fuReady[static_cast<size_t>(fu)]);
   unsigned issues = std::max(1u, getIssueCount(op));
-  int period = getIssuePeriod();
-  ready = cuIssueReadyCycle(ready, issues, period);
-  return ready;
+  return issuedReadyCycle(wave, op, cls, issues, cycle);
 }
 
 int EventSimulator::selectReadyWave(int simd, int64_t cycle) {
@@ -559,6 +632,55 @@ LogicalResult EventSimulator::executeNoInst(WaveState &wave, Operation *op,
     schedule({cycle, EventSimEventKind::ValueReady, wave.id, wave.simd, op,
               FunctionalUnit::None, EventSimCounter::None});
   }
+  ++wave.pc;
+  return success();
+}
+
+LogicalResult EventSimulator::executeSynthetic(WaveState &wave,
+                                               const ProgramItem &item,
+                                               int64_t cycle) {
+  Operation *op = item.op;
+  SchedClass cls = item.syntheticClass;
+  if (issuedReadyCycle(wave, op, cls, /*issues=*/1, cycle) > cycle)
+    return failure();
+
+  int period = getIssuePeriod();
+  int dependencyLatency = getConfiguredLatency(arch, cls, config);
+  int64_t nextIssue = cycle + period;
+  int64_t ready = cycle + dependencyLatency;
+  FunctionalUnit fu = funit(arch, cls);
+
+  SimdState &simd = simds[wave.simd];
+  simd.issueReady = nextIssue;
+  simd.fuReady[static_cast<size_t>(fu)] = nextIssue;
+  simd.rrCursor = (wave.id + 1) % static_cast<int>(waves.size());
+  consumeCuIssueSlots(cycle, /*issues=*/1, period);
+
+  ++out.issuedOps;
+  wave.lastReady = std::max(wave.lastReady, ready);
+  recordNow({cycle, EventSimEventKind::OpIssued, wave.id, wave.simd, op, fu,
+             EventSimCounter::None});
+  ++wave.pc;
+  return success();
+}
+
+LogicalResult EventSimulator::executeYield(WaveState &wave,
+                                           const ProgramItem &item,
+                                           int64_t cycle) {
+  auto yield = cast<YieldOp>(item.op);
+  auto execIf = cast<ExecIfOp>(item.owner);
+  int64_t ready = operandReadyCycle(wave, yield.getOperation());
+  if (ready > cycle)
+    return failure();
+
+  for (auto [result, value] :
+       llvm::zip_equal(execIf.getResults(), yield.getValues())) {
+    wave.readyAt[result] = cycle;
+    schedule({cycle, EventSimEventKind::ValueReady, wave.id, wave.simd,
+              yield.getOperation(), FunctionalUnit::None,
+              EventSimCounter::None});
+  }
+  wave.lastReady = std::max(wave.lastReady, cycle);
   ++wave.pc;
   return success();
 }
@@ -658,6 +780,16 @@ LogicalResult EventSimulator::stepWave(WaveState &wave, int64_t cycle,
   Operation *op = currentOp(wave);
   if (!op)
     return success();
+  if (structuredProgram) {
+    const ProgramItem *item = currentItem(wave);
+    assert(item && "currentOp returned op without item");
+    if (item->kind == ProgramItemKind::Synthetic) {
+      issued = true;
+      return executeSynthetic(wave, *item, cycle);
+    }
+    if (item->kind == ProgramItemKind::Yield)
+      return executeYield(wave, *item, cycle);
+  }
   if (isWaitcntOp(op))
     return executeWaitcnt(wave, op, cycle);
   SchedClass cls = classifyOp(op);
