@@ -195,8 +195,8 @@ LogicalResult selectLoad(WaveAMDMachineSelector &S, LoadOp op);
 
 class WaveAMDMachineSelector {
 public:
-  explicit WaveAMDMachineSelector(func::FuncOp func)
-      : func(func), builder(func) {}
+  WaveAMDMachineSelector(func::FuncOp func, DataFlowSolver &rangeSolver)
+      : func(func), builder(func), rangeSolver(rangeSolver) {}
 
   LogicalResult run();
 
@@ -212,6 +212,7 @@ public:
   // for `builder`, the substitution maps, the range solver, etc.
   func::FuncOp func;
   OpBuilder builder;
+  DataFlowSolver &rangeSolver;
   DenseMap<Value, Value> values;
   DenseMap<Value, Value> pointerBases;
   DenseMap<Value, Value> pointerGlobalBases;
@@ -219,7 +220,6 @@ public:
   DenseMap<Value, PointerOffset> indexOffsets;
   DenseMap<Value, bool> pointerBuffers;
   SmallVector<Operation *> opsToErase;
-  DataFlowSolver rangeSolver;
   std::optional<unsigned> targetIsaMajor;
   unsigned nextLabel = 0;
 

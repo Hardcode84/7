@@ -368,12 +368,6 @@ LogicalResult WaveAMDMachineSelector::run() {
   if (failed(validateMachineSelectionTarget(*this)))
     return failure();
 
-  // Range facts become ixsimpl assumptions for address planning.
-  dataflow::loadBaselineAnalyses(rangeSolver);
-  rangeSolver.load<dataflow::IntegerRangeAnalysis>();
-  if (failed(rangeSolver.initializeAndRun(func)))
-    return func.emitError("IntegerRangeAnalysis failed on wave kernel");
-
   Block &block = func.getBody().front();
   builder.setInsertionPointToStart(&block);
   for (auto [index, arg] : llvm::enumerate(func.getArguments()))
@@ -5456,43 +5450,63 @@ static LogicalResult diagnoseWaveAMDMachineBoundary(func::FuncOp func) {
   return success(!foundUnsupported);
 }
 
+static LogicalResult runRangeAnalysis(Operation *root,
+                                      DataFlowSolver &rangeSolver) {
+  dataflow::loadBaselineAnalyses(rangeSolver);
+  rangeSolver.load<dataflow::IntegerRangeAnalysis>();
+  if (failed(rangeSolver.initializeAndRun(root)))
+    return root->emitError("IntegerRangeAnalysis failed for WaveAMDMachine "
+                           "lowering");
+  return success();
+}
+
+static bool reachesWaveDialect(func::FuncOp func) {
+  WalkResult walk = func.walk([&](Operation *op) {
+    if (isa<wave::WaveDialect, waveamd::WaveAMDDialect>(op->getDialect()))
+      return WalkResult::interrupt();
+    return WalkResult::advance();
+  });
+  return walk.wasInterrupted();
+}
+
+static void
+collectMachineSelectionTargets(Operation *root,
+                               SmallVectorImpl<func::FuncOp> &targets) {
+  root->walk([&](func::FuncOp func) {
+    if (func.isExternal())
+      return;
+    if (func->hasAttr(wave::WaveDialect::getKernelAttrName()) ||
+        reachesWaveDialect(func))
+      targets.push_back(func);
+  });
+}
+
+static LogicalResult
+diagnoseMachineSelectionTargets(ArrayRef<func::FuncOp> targets) {
+  bool foundUnsupported = false;
+  for (func::FuncOp func : targets)
+    if (failed(diagnoseWaveAMDMachineBoundary(func)))
+      foundUnsupported = true;
+  return success(!foundUnsupported);
+}
+
 struct ConvertWaveAMDToWaveAMDMachinePass
     : public wave::impl::ConvertWaveAMDToWaveAMDMachineBase<
           ConvertWaveAMDToWaveAMDMachinePass> {
   void runOnOperation() override {
     Operation *root = getOperation();
     SmallVector<func::FuncOp> targets;
-    root->walk([&](func::FuncOp f) {
-      if (f.isExternal())
-        return;
-      // Pull in funcs that either carry the kernel attribute (the
-      // production path -- they live inside `gpu.module`) or contain
-      // wave / waveamd ops at any nesting (the test path -- synthetic
-      // top-level funcs used to pin selector behaviour). Host glue
-      // and runtime helpers fall through untouched.
-      if (f->hasAttr(wave::WaveDialect::getKernelAttrName())) {
-        targets.push_back(f);
-        return;
-      }
-      bool reachesWave = false;
-      f.walk([&](Operation *op) {
-        if (isa<wave::WaveDialect, waveamd::WaveAMDDialect>(op->getDialect())) {
-          reachesWave = true;
-          return WalkResult::interrupt();
-        }
-        return WalkResult::advance();
-      });
-      if (reachesWave)
-        targets.push_back(f);
-    });
-    bool foundUnsupported = false;
-    for (func::FuncOp func : targets)
-      if (failed(diagnoseWaveAMDMachineBoundary(func)))
-        foundUnsupported = true;
-    if (foundUnsupported)
+    collectMachineSelectionTargets(root, targets);
+
+    if (failed(diagnoseMachineSelectionTargets(targets)))
       return signalPassFailure();
+
+    DataFlowSolver rangeSolver;
+    if (failed(runRangeAnalysis(root, rangeSolver)))
+      return signalPassFailure();
+
     for (func::FuncOp func : targets) {
-      if (failed(wave::wmsel::WaveAMDMachineSelector(func).run()))
+      if (failed(wave::wmsel::WaveAMDMachineSelector(func, rangeSolver).run()))
         return signalPassFailure();
     }
   }

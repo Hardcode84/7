@@ -74,6 +74,17 @@ func.func @uniform_i32_sub_div_rem(%out: !wave.ptr<#wave.global, i32>) attribute
   return
 }
 
+// SELECT-LABEL: func.func @uniform_i32_signed_div_range
+// SELECT: %[[X:.*]] = waveamdmachine.arg
+// SELECT: %[[SHIFT:.*]] = waveamdmachine.imm 1
+// SELECT: waveamdmachine.s_lshr_b32 %[[X]], %[[SHIFT]]
+func.func @uniform_i32_signed_div_range(%x: i32) attributes {wave.kernel} {
+  %a = wave.assume %x as "x" [#wave.pred<"x >= 0">, #wave.pred<"x <= 1024">] : i32
+  %two = arith.constant 2 : i32
+  %half = wave.binary divsi %a, %two : i32, i32 -> i32
+  return
+}
+
 // SELECT-LABEL: func.func @uniform_i32_unsigned_high_bit_div_rem
 // SELECT: waveamdmachine.imm 31
 // SELECT: waveamdmachine.s_lshr_b32
