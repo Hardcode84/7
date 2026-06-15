@@ -3,12 +3,20 @@
 // RUN:   --waveamd-resource-info %t/result-use.mlir | FileCheck %s --check-prefix=RESULT
 // RUN: wave-opt --waveamd-reg-alloc='vgpr-limit=16 agpr-limit=0' \
 // RUN:   --waveamd-resource-info %t/preheader-use.mlir | FileCheck %s --check-prefix=PRE
+// RUN: wave-opt --waveamd-reg-alloc='vgpr-limit=16 agpr-limit=0' \
+// RUN:   --waveamd-resource-info %t/body-use.mlir | FileCheck %s --check-prefix=BODY
+// RUN: wave-opt --waveamd-reg-alloc='mark-overflow=true vgpr-limit=16 agpr-limit=0' \
+// RUN:   --waveamd-resource-info %t/updated-backedge.mlir | FileCheck %s --check-prefix=UPDATE
 // RUN: wave-opt --waveamd-reg-alloc='mark-overflow=true vgpr-limit=4 agpr-limit=0' \
 // RUN:   %t/two-carries.mlir | FileCheck %s --check-prefix=TWO
 // RUN: wave-opt --waveamd-reg-alloc='vgpr-limit=16 agpr-limit=0' \
 // RUN:   --waveamd-resource-info %t/nested.mlir | FileCheck %s --check-prefix=NEST
 // RUN: not wave-opt --waveamd-reg-alloc='vgpr-limit=16 agpr-limit=0' \
 // RUN:   %t/bad-init-use.mlir 2>&1 | FileCheck %s --check-prefix=BAD
+// RUN: wave-opt --waveamd-reg-alloc='vgpr-limit=24 agpr-limit=0' \
+// RUN:   --waveamd-resource-info %t/bad-init-use-fallback.mlir | FileCheck %s --check-prefix=FALLBACK
+// RUN: wave-opt --waveamd-reg-alloc='vgpr-limit=8 agpr-limit=0' \
+// RUN:   --waveamd-resource-info %t/immediate-boundary.mlir | FileCheck %s --check-prefix=BOUNDARY
 // RUN: not wave-opt --waveamd-reg-alloc='vgpr-limit=4 agpr-limit=0' \
 // RUN:   %t/scalar-reject.mlir 2>&1 | FileCheck %s --check-prefix=SCALAR
 
@@ -135,6 +143,107 @@ func.func @scratch_loop_carry_preheader_init_use()
 
 }
 
+//--- body-use.mlir
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
+
+// BODY-LABEL: func.func @scratch_loop_carry_body_use
+// BODY-SAME: waveamdmachine.scratch_spill_bytes = 32 : i64
+// BODY: %[[STORE:.*]] = waveamdmachine.scratch_store_tuple_b32
+// BODY: waveamdmachine.uniform_loop {{.*}}carries(%[[STORE]] : !waveamdmachine.mem.token)
+// BODY: ^bb0(%[[TOKEN:.*]]: !waveamdmachine.mem.token):
+// BODY: %[[RELOAD:.*]], %[[NEXT_TOKEN:.*]] = waveamdmachine.scratch_load_tuple_b32 {{.*}} after %[[TOKEN]]
+// BODY: waveamdmachine.tuple_to_elements %[[RELOAD]]
+// BODY: waveamdmachine.continue_if {{.*}}carries(%[[NEXT_TOKEN]] : !waveamdmachine.mem.token)
+func.func @scratch_loop_carry_body_use()
+    attributes {wave.kernel, waveamdmachine.target_waves = 4 : i64} {
+  %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+  %four = waveamdmachine.imm 4 : !waveamdmachine.imm
+  %cond = waveamdmachine.s_cmp_lt_i32 %zero, %four
+      : (!waveamdmachine.imm, !waveamdmachine.imm)
+        -> !waveamdmachine.reg<scc, 1>
+  %acc = waveamdmachine.v_mov_b32_tuple %zero {registers = 8 : i64}
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 8>
+  %loop = waveamdmachine.uniform_loop if %cond : !waveamdmachine.reg<scc, 1>
+      carries(%acc : !waveamdmachine.reg<vgpr, 8>) {
+  ^bb0(%carry: !waveamdmachine.reg<vgpr, 8>):
+    %carry_parts:8 = waveamdmachine.tuple_to_elements %carry
+        : (!waveamdmachine.reg<vgpr, 8>)
+        -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+            !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+            !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+            !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+    %tmp = waveamdmachine.v_mov_b32_tuple %zero {registers = 8 : i64}
+        : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 8>
+    %parts:8 = waveamdmachine.tuple_to_elements %tmp
+        : (!waveamdmachine.reg<vgpr, 8>)
+        -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+            !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+            !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+            !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+    waveamdmachine.continue_if %cond : !waveamdmachine.reg<scc, 1>
+        carries(%carry : !waveamdmachine.reg<vgpr, 8>)
+  } -> !waveamdmachine.reg<vgpr, 8>
+  waveamdmachine.s_endpgm
+  return
+}
+
+}
+
+//--- updated-backedge.mlir
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
+
+// UPDATE-LABEL: func.func @scratch_loop_carry_updated_backedge
+// UPDATE-SAME: waveamdmachine.scratch_spill_bytes = 32 : i64
+// UPDATE: %[[STORE:.*]] = waveamdmachine.scratch_store_tuple_b32
+// UPDATE: waveamdmachine.uniform_loop {{.*}}carries(%[[STORE]] : !waveamdmachine.mem.token)
+// UPDATE: ^bb0(%{{.*}}: !waveamdmachine.mem.token):
+// UPDATE: %{{.*}}, %[[TOKEN:.*]] = waveamdmachine.scratch_load_tuple_b32
+// UPDATE: %[[UPDATED:.*]] = waveamdmachine.tuple_from_elements
+// UPDATE: %[[BACKEDGE:.*]] = waveamdmachine.scratch_store_tuple_b32 {{.*}}, %[[UPDATED]], {{.*}} after %[[TOKEN]]
+// UPDATE: waveamdmachine.continue_if {{.*}}carries(%[[BACKEDGE]] : !waveamdmachine.mem.token)
+func.func @scratch_loop_carry_updated_backedge()
+    attributes {wave.kernel, waveamdmachine.target_waves = 4 : i64} {
+  %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+  %four = waveamdmachine.imm 4 : !waveamdmachine.imm
+  %cond = waveamdmachine.s_cmp_lt_i32 %zero, %four
+      : (!waveamdmachine.imm, !waveamdmachine.imm)
+        -> !waveamdmachine.reg<scc, 1>
+  %acc = waveamdmachine.v_mov_b32_tuple %zero {registers = 8 : i64}
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 8>
+  %loop = waveamdmachine.uniform_loop if %cond : !waveamdmachine.reg<scc, 1>
+      carries(%acc : !waveamdmachine.reg<vgpr, 8>) {
+  ^bb0(%carry: !waveamdmachine.reg<vgpr, 8>):
+    %carry_parts:8 = waveamdmachine.tuple_to_elements %carry
+        : (!waveamdmachine.reg<vgpr, 8>)
+        -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+            !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+            !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+            !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+    %tmp = waveamdmachine.v_mov_b32_tuple %zero {registers = 8 : i64}
+        : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 8>
+    %parts:8 = waveamdmachine.tuple_to_elements %tmp
+        : (!waveamdmachine.reg<vgpr, 8>)
+        -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+            !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+            !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+            !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+    %updated = waveamdmachine.tuple_from_elements
+        %carry_parts#0, %carry_parts#1, %carry_parts#2, %carry_parts#3,
+        %parts#4, %parts#5, %parts#6, %parts#7
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+           !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+           !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+           !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 8>
+    waveamdmachine.continue_if %cond : !waveamdmachine.reg<scc, 1>
+        carries(%updated : !waveamdmachine.reg<vgpr, 8>)
+  } -> !waveamdmachine.reg<vgpr, 8>
+  waveamdmachine.s_endpgm
+  return
+}
+
+}
+
 //--- two-carries.mlir
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
@@ -226,7 +335,9 @@ func.func @scratch_loop_carry_nested()
 //--- bad-init-use.mlir
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
-// BAD: error: waveamd-reg-alloc cannot materialize scratch spill for loop init use outside loop preheader
+// BAD-NOT: cannot materialize scratch spill for loop init use outside loop preheader
+// BAD: error: waveamd-reg-alloc ran out of VGPR registers
+// BAD: memory spill cannot materialize loop-carried values
 func.func @scratch_loop_carry_bad_init_use()
     attributes {wave.kernel, waveamdmachine.target_waves = 4 : i64} {
   %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
@@ -255,6 +366,106 @@ func.func @scratch_loop_carry_bad_init_use()
       -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
           !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
           !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+          !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+  waveamdmachine.s_endpgm
+  return
+}
+
+}
+
+//--- bad-init-use-fallback.mlir
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
+
+// FALLBACK-LABEL: func.func @scratch_loop_carry_bad_init_use_fallback
+// FALLBACK-SAME: waveamdmachine.scratch_spill_bytes = 32 : i64
+// FALLBACK: waveamdmachine.scratch_store_tuple_b32
+// FALLBACK: waveamdmachine.uniform_loop
+// FALLBACK: waveamdmachine.scratch_load_tuple_b32
+func.func @scratch_loop_carry_bad_init_use_fallback()
+    attributes {wave.kernel, waveamdmachine.target_waves = 4 : i64} {
+  %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+  %four = waveamdmachine.imm 4 : !waveamdmachine.imm
+  %cond = waveamdmachine.s_cmp_lt_i32 %zero, %four
+      : (!waveamdmachine.imm, !waveamdmachine.imm)
+        -> !waveamdmachine.reg<scc, 1>
+  %spill = waveamdmachine.v_mov_b32_tuple %zero {registers = 8 : i64}
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 8>
+  %acc = waveamdmachine.v_mov_b32_tuple %zero {registers = 8 : i64}
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 8>
+  %loop = waveamdmachine.uniform_loop if %cond : !waveamdmachine.reg<scc, 1>
+      carries(%acc : !waveamdmachine.reg<vgpr, 8>) {
+  ^bb0(%carry: !waveamdmachine.reg<vgpr, 8>):
+    %tmp = waveamdmachine.v_mov_b32_tuple %zero {registers = 8 : i64}
+        : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 8>
+    %parts:8 = waveamdmachine.tuple_to_elements %tmp
+        : (!waveamdmachine.reg<vgpr, 8>)
+        -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+            !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+            !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+            !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+    waveamdmachine.continue_if %cond : !waveamdmachine.reg<scc, 1>
+        carries(%carry : !waveamdmachine.reg<vgpr, 8>)
+  } -> !waveamdmachine.reg<vgpr, 8>
+  %init_parts:8 = waveamdmachine.tuple_to_elements %acc
+      : (!waveamdmachine.reg<vgpr, 8>)
+      -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+          !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+          !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+          !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+  %spill_parts:8 = waveamdmachine.tuple_to_elements %spill
+      : (!waveamdmachine.reg<vgpr, 8>)
+      -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+          !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+          !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+          !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+  waveamdmachine.s_endpgm
+  return
+}
+
+}
+
+//--- immediate-boundary.mlir
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
+
+// BOUNDARY-LABEL: func.func @scratch_loop_carry_immediate_boundary
+// BOUNDARY-SAME: waveamdmachine.private_segment_fixed_size = 4108 : i64
+// BOUNDARY-SAME: waveamdmachine.scratch_spill_bytes = 16 : i64
+// BOUNDARY-NOT: scratch_store_tuple_b32
+// BOUNDARY: waveamdmachine.scratch_store_b32 {{.*}} offset 4092
+// BOUNDARY: waveamdmachine.imm 4096
+// BOUNDARY: waveamdmachine.scratch_store_b32
+// BOUNDARY: waveamdmachine.imm 4100
+// BOUNDARY: waveamdmachine.scratch_store_b32
+// BOUNDARY: waveamdmachine.imm 4104
+// BOUNDARY: waveamdmachine.scratch_store_b32
+// BOUNDARY: waveamdmachine.uniform_loop
+// BOUNDARY-NOT: scratch_load_tuple_b32
+// BOUNDARY: waveamdmachine.scratch_load_b32 {{.*}} offset 4092
+func.func @scratch_loop_carry_immediate_boundary()
+    attributes {wave.kernel, waveamdmachine.target_waves = 4 : i64,
+                waveamdmachine.private_segment_fixed_size = 4092 : i64} {
+  %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+  %four = waveamdmachine.imm 4 : !waveamdmachine.imm
+  %cond = waveamdmachine.s_cmp_lt_i32 %zero, %four
+      : (!waveamdmachine.imm, !waveamdmachine.imm)
+        -> !waveamdmachine.reg<scc, 1>
+  %acc = waveamdmachine.v_mov_b32_tuple %zero {registers = 4 : i64}
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 4>
+  %loop = waveamdmachine.uniform_loop if %cond : !waveamdmachine.reg<scc, 1>
+      carries(%acc : !waveamdmachine.reg<vgpr, 4>) {
+  ^bb0(%carry: !waveamdmachine.reg<vgpr, 4>):
+    %tmp = waveamdmachine.v_mov_b32_tuple %zero {registers = 4 : i64}
+        : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 4>
+    %parts:4 = waveamdmachine.tuple_to_elements %tmp
+        : (!waveamdmachine.reg<vgpr, 4>)
+        -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+            !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+    waveamdmachine.continue_if %cond : !waveamdmachine.reg<scc, 1>
+        carries(%carry : !waveamdmachine.reg<vgpr, 4>)
+  } -> !waveamdmachine.reg<vgpr, 4>
+  %result_parts:4 = waveamdmachine.tuple_to_elements %loop
+      : (!waveamdmachine.reg<vgpr, 4>)
+      -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
           !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
   waveamdmachine.s_endpgm
   return

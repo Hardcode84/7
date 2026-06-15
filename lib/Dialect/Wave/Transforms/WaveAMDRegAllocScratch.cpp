@@ -418,7 +418,7 @@ private:
     std::optional<LoopCarrySlot> slot = getLoopCarrySlot(group);
     if (!slot)
       return false;
-    if (!canSpillLoopCarryAtPosition(*slot) || !hasLocalLoopCarryUses(*slot)) {
+    if (!canMaterializeLoopCarrySpill(*slot)) {
       sawLoopCarryReject = true;
       return false;
     }
@@ -440,6 +440,11 @@ private:
     candidates.push_back(std::make_unique<ScratchSpillCandidate>(
         group, *slot, plan, getLoopCarryUseCount(*slot), type.getWidth()));
     return true;
+  }
+
+  bool canMaterializeLoopCarrySpill(LoopCarrySlot slot) const {
+    return canSpillLoopCarryAtPosition(slot) && hasLocalLoopCarryUses(slot) &&
+           canRewriteExtraLoopInitUses(slot);
   }
 
   std::optional<LoopCarrySlot> getLoopCarrySlot(IntervalGroup *group) const {
@@ -521,6 +526,23 @@ private:
     if (position > loopPos->second)
       return true;
     return isSplatInit(slot);
+  }
+
+  bool canRewriteExtraLoopInitUse(OpOperand &use, OpOperand *loopUse,
+                                  waveamdmachine::UniformLoopOp loop) const {
+    if (&use == loopUse || isRegAllocTempOp(use.getOwner()))
+      return true;
+    Operation *user = use.getOwner();
+    return user->getBlock() == loop->getBlock() && user->isBeforeInBlock(loop);
+  }
+
+  bool canRewriteExtraLoopInitUses(LoopCarrySlot slot) const {
+    OpOperand *loopUse = &slot.loop.getInitsMutable()[slot.index];
+    Value init = loopUse->get();
+    for (OpOperand &use : init.getUses())
+      if (!canRewriteExtraLoopInitUse(use, loopUse, slot.loop))
+        return false;
+    return true;
   }
 
   bool isSplatInit(LoopCarrySlot slot) const {
@@ -866,7 +888,7 @@ private:
 
     for (OpOperand *use : uses) {
       Operation *user = use->getOwner();
-      if (user->getBlock() != loop->getBlock() || !user->isBeforeInBlock(loop))
+      if (!canRewriteExtraLoopInitUse(*use, loopUse, loop))
         return mlir::emitError(init.getLoc())
                << "waveamd-reg-alloc cannot materialize scratch spill for "
                   "loop init use outside loop preheader";
