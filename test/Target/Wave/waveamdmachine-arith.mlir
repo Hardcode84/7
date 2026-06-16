@@ -108,6 +108,43 @@ func.func @uniform_i32_signed_div_chained_range(%x: i32) attributes {wave.kernel
   return
 }
 
+// SELECT-LABEL: func.func @uniform_i32_signed_div_dynamic_pow2
+// SELECT-DAG: %[[X:.*]] = waveamdmachine.arg
+// SELECT-DAG: %[[D:.*]] = waveamdmachine.arg
+// SELECT: %[[SHIFT:.*]] = waveamdmachine.s_ff1_i32_b32 %[[D]]
+// SELECT: waveamdmachine.s_lshr_b32 %[[X]], %[[SHIFT]]
+func.func @uniform_i32_signed_div_dynamic_pow2(%x: i32, %d: i32) attributes {wave.kernel} {
+  %nonneg = wave.assume %x as "x" [#wave.pred<"x >= 0">] : i32
+  %pow2 = wave.assume %d as "d" [#wave.pred<"d & (d - 1) == 0">, #wave.pred<"d > 0">] : i32
+  %quot = wave.binary divsi %nonneg, %pow2 : i32, i32 -> i32
+  return
+}
+
+// SELECT-LABEL: func.func @simd_i32_signed_div_splat_dynamic_pow2
+// SELECT-DAG: %[[D:.*]] = waveamdmachine.arg
+// SELECT-DAG: %[[LANE:.*]] = waveamdmachine.v_mbcnt_lo
+// SELECT: %[[SHIFT:.*]] = waveamdmachine.s_ff1_i32_b32 %[[D]]
+// SELECT: waveamdmachine.v_lshrrev_b32 %[[LANE]], %[[SHIFT]]
+func.func @simd_i32_signed_div_splat_dynamic_pow2(%d: i32) attributes {wave.kernel} {
+  %lane = wave.lane_id : !wave.simd<i32, 32>
+  %pow2 = wave.assume %d as "d" [#wave.pred<"d & (d - 1) == 0">, #wave.pred<"d > 0">] : i32
+  %splat = wave.splat %pow2 : i32 -> !wave.simd<i32, 32>
+  %quot = wave.binary divsi %lane, %splat : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  return
+}
+
+// SELECT-LABEL: func.func @uniform_i64_signed_div_dynamic_pow2
+// SELECT-DAG: %[[X:.*]] = waveamdmachine.arg
+// SELECT-DAG: %[[D:.*]] = waveamdmachine.arg
+// SELECT: %[[SHIFT:.*]] = waveamdmachine.s_ff1_i32_b64 %[[D]]
+// SELECT: waveamdmachine.s_lshr_b64 %[[X]], %[[SHIFT]]
+func.func @uniform_i64_signed_div_dynamic_pow2(%x: i64, %d: i64) attributes {wave.kernel} {
+  %nonneg = wave.assume %x as "x" [#wave.pred<"x >= 0">] : i64
+  %pow2 = wave.assume %d as "d" [#wave.pred<"d & (d - 1) == 0">, #wave.pred<"d > 0">] : i64
+  %quot = wave.binary divsi %nonneg, %pow2 : i64, i64 -> i64
+  return
+}
+
 // SELECT-LABEL: func.func @uniform_index_product_signed_div_bounded_range
 // SELECT-NOT: waveamdmachine.s_mul_i32
 // SELECT: %[[PROD:.*]], %{{.*}} = waveamdmachine.v_mul_u64

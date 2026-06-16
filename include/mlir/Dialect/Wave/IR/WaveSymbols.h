@@ -289,6 +289,9 @@ mlir::FailureOr<ExprHandle> expandExpr(Store &store, ExprHandle value,
 /// Three-valued result of a predicate entailment query.
 enum class CheckResult { True, False, Unknown };
 
+/// Proven power-of-two fact for an expression under assumptions.
+enum class Pow2Fact { Unknown, OrZero, Positive };
+
 struct RationalEndpoint {
   int64_t numerator = 0;
   int64_t denominator = 1;
@@ -303,6 +306,8 @@ struct InferredRange {
 /// `assumptions`. Returns `Unknown` when inconclusive.
 CheckResult checkPredicate(Store &store, PredHandle predicate,
                            llvm::ArrayRef<PredHandle> assumptions);
+Pow2Fact getPow2Fact(Store &store, ExprHandle expr,
+                     llvm::ArrayRef<PredHandle> assumptions);
 
 /// Build the assumption `name in [lo, hi]`.
 mlir::FailureOr<PredHandle> rangeAssumption(Store &store, llvm::StringRef name,

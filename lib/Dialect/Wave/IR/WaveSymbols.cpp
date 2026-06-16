@@ -860,6 +860,34 @@ mlir::wave::sym::checkPredicate(Store &store, PredHandle predicate,
   return CheckResult::Unknown;
 }
 
+mlir::wave::sym::Pow2Fact
+mlir::wave::sym::getPow2Fact(Store &store, ExprHandle expr,
+                             ArrayRef<PredHandle> assumptions) {
+  if (!expr)
+    return Pow2Fact::Unknown;
+  Session session(store);
+  ixs_node *rawExpr = rawExprNode(expr, /*diagnostic=*/nullptr);
+  if (!rawExpr)
+    return Pow2Fact::Unknown;
+  SmallVector<ixs_node *, 4> rawAssumptions;
+  for (PredHandle assumption : assumptions) {
+    ixs_node *rawAssumption = rawPredNode(assumption, /*diagnostic=*/nullptr);
+    if (!rawAssumption)
+      return Pow2Fact::Unknown;
+    flattenAssumption(rawAssumption, rawAssumptions);
+  }
+  switch (ixs_get_pow2_fact(session.raw(), rawExpr, rawAssumptions.data(),
+                            rawAssumptions.size())) {
+  case IXS_POW2_UNKNOWN:
+    return Pow2Fact::Unknown;
+  case IXS_POW2_OR_ZERO:
+    return Pow2Fact::OrZero;
+  case IXS_POW2_POSITIVE:
+    return Pow2Fact::Positive;
+  }
+  return Pow2Fact::Unknown;
+}
+
 FailureOr<PredHandle>
 mlir::wave::sym::rangeAssumption(Store &store, StringRef name, int64_t lo,
                                  int64_t hi, std::string *diagnostic) {

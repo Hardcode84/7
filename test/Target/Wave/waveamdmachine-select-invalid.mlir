@@ -104,6 +104,16 @@ func.func @unsupported_signed_divisor() {
 
 // -----
 
+func.func @unsupported_signed_dynamic_pow2_or_zero_divisor(%x: i32, %d: i32) {
+  %nonneg = wave.assume %x as "x" [#wave.pred<"x >= 0">] : i32
+  %pow2_or_zero = wave.assume %d as "d" [#wave.pred<"d & (d - 1) == 0">] : i32
+  // expected-error @below {{needs positive power-of-two static divisor}}
+  %bad = wave.binary divsi %nonneg, %pow2_or_zero : i32, i32 -> i32
+  return
+}
+
+// -----
+
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 func.func @unsupported_packed_f16_fmax(%a: !wave.simd<vector<2xf16>, 32>, %b: !wave.simd<vector<2xf16>, 32>) {
   // expected-error @below {{packed f16 fmax lowering is not implemented}}

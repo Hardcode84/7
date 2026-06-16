@@ -58,3 +58,6 @@
 // CHECK: fits-loose: true
 // CHECK: overflows-upper: false
 // CHECK: no-assumptions: false
+// CHECK: pow2-unknown: unknown
+// CHECK: pow2-or-zero: or-zero
+// CHECK: pow2-positive: positive

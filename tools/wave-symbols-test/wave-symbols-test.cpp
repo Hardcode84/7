@@ -56,6 +56,18 @@ const char *predKindName(sym::PredKind kind) {
   return index < names.size() ? names[index] : "invalid";
 }
 
+const char *pow2FactName(sym::Pow2Fact fact) {
+  switch (fact) {
+  case sym::Pow2Fact::Unknown:
+    return "unknown";
+  case sym::Pow2Fact::OrZero:
+    return "or-zero";
+  case sym::Pow2Fact::Positive:
+    return "positive";
+  }
+  llvm_unreachable("unknown pow2 fact");
+}
+
 // Write `<label>: <rendered-expr>` for FileCheck.
 void printRendered(sym::Store &store, llvm::StringRef label,
                    sym::ExprHandle handle) {
@@ -83,6 +95,16 @@ sym::ExprHandle mustBuildSym(sym::Store &store, llvm::StringRef name) {
 sym::ExprHandle mustParseExpr(sym::Store &store, llvm::StringRef text) {
   std::string diagnostic;
   auto handle = sym::parseExpr(store, text, &diagnostic);
+  if (failed(handle)) {
+    llvm::errs() << "failed to parse '" << text << "': " << diagnostic << "\n";
+    std::exit(1);
+  }
+  return *handle;
+}
+
+sym::PredHandle mustParsePred(sym::Store &store, llvm::StringRef text) {
+  std::string diagnostic;
+  auto handle = sym::parsePred(store, text, &diagnostic);
   if (failed(handle)) {
     llvm::errs() << "failed to parse '" << text << "': " << diagnostic << "\n";
     std::exit(1);
@@ -281,6 +303,19 @@ void runRangeQueries(sym::Store &store, sym::ExprHandle x,
   printRange("no-assumptions", store, linear, {}, -1000, 1000);
 }
 
+void runPow2Queries(sym::Store &store, sym::ExprHandle x) {
+  sym::PredHandle pow2OrZero = mustParsePred(store, "x & (x - 1) == 0");
+  sym::PredHandle positive = mustParsePred(store, "x > 0");
+  llvm::SmallVector<sym::PredHandle, 2> assumptions{pow2OrZero};
+  llvm::outs() << "pow2-unknown: "
+               << pow2FactName(sym::getPow2Fact(store, x, {})) << "\n";
+  llvm::outs() << "pow2-or-zero: "
+               << pow2FactName(sym::getPow2Fact(store, x, assumptions)) << "\n";
+  assumptions.push_back(positive);
+  llvm::outs() << "pow2-positive: "
+               << pow2FactName(sym::getPow2Fact(store, x, assumptions)) << "\n";
+}
+
 } // namespace
 
 int main() {
@@ -369,6 +404,7 @@ int main() {
                << "\n";
 
   runRangeQueries(store, x, fourX);
+  runPow2Queries(store, x);
 
   return 0;
 }

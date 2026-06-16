@@ -40,6 +40,25 @@ func.func @scalar_integer_arith_codegen(%out: !wave.ptr<#wave.global, i32>,
   return
 }
 
+// ASM-LABEL: scalar_i32_dynamic_pow2_divsi_codegen:
+// ASM: s_ctz_i32_b32
+// ASM: s_lshr_b32
+// ASM: global_store_b32
+func.func @scalar_i32_dynamic_pow2_divsi_codegen(
+    %out: !wave.ptr<#wave.global, i32>, %x: i32, %d: i32)
+    attributes {wave.kernel} {
+  %nonneg = wave.assume %x as "x" [#wave.pred<"x >= 0">] : i32
+  %pow2 = wave.assume %d as "d" [#wave.pred<"d & (d - 1) == 0">,
+                                  #wave.pred<"d > 0">] : i32
+  %quot = wave.binary divsi %nonneg, %pow2 : i32, i32 -> i32
+  %v = wave.splat %quot : i32 -> !wave.simd<i32, 32>
+  %tok = wave.store %v -> %out
+      : (!wave.simd<i32, 32>, !wave.ptr<#wave.global, i32>)
+      -> !wave.mem.token
+  wave.wait %tok : !wave.mem.token
+  return
+}
+
 // ASM-LABEL: scalar_i64_div_rem_codegen:
 // ASM: s_lshr_b64
 // ASM: s_and_b32
@@ -65,6 +84,31 @@ func.func @scalar_i64_div_rem_codegen(%out: !wave.ptr<#wave.global, i32>,
   %v = wave.splat %bits : i32 -> !wave.simd<i32, 32>
   %tok = wave.store %v -> %ptrs
       : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>)
+      -> !wave.mem.token
+  wave.wait %tok : !wave.mem.token
+  return
+}
+
+// ASM-LABEL: scalar_i64_dynamic_pow2_divsi_codegen:
+// ASM: s_ctz_i32_b64
+// ASM: s_lshr_b64
+// ASM: global_store_b32
+func.func @scalar_i64_dynamic_pow2_divsi_codegen(
+    %out: !wave.ptr<#wave.global, i32>, %x: i64, %d: i64)
+    attributes {wave.kernel} {
+  %nonneg = wave.assume %x as "x" [#wave.pred<"x >= 0">] : i64
+  %pow2 = wave.assume %d as "d" [#wave.pred<"d & (d - 1) == 0">,
+                                  #wave.pred<"d > 0">] : i64
+  %quot = wave.binary divsi %nonneg, %pow2 : i64, i64 -> i64
+  %zero = arith.constant 0 : i64
+  %vquot = wave.splat %quot : i64 -> !wave.simd<i64, 32>
+  %vzero = wave.splat %zero : i64 -> !wave.simd<i64, 32>
+  %mask = wave.cmpi ne %vquot, %vzero
+      : !wave.simd<i64, 32>, !wave.simd<i64, 32> -> !wave.mask<32>
+  %value = wave.ballot %mask : !wave.mask<32> -> i32
+  %v = wave.splat %value : i32 -> !wave.simd<i32, 32>
+  %tok = wave.store %v -> %out
+      : (!wave.simd<i32, 32>, !wave.ptr<#wave.global, i32>)
       -> !wave.mem.token
   wave.wait %tok : !wave.mem.token
   return
