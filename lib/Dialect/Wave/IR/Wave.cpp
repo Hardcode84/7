@@ -871,6 +871,37 @@ inferWaveBinaryResultRange(BinaryKind kind, ArrayRef<ConstantIntRanges> ranges,
   return ConstantIntRanges::maxRange(bits);
 }
 
+LogicalResult URecipOp::verify() {
+  Type sourceType = getSource().getType();
+  Type resultType = getResult().getType();
+  if (sourceType != resultType)
+    return emitOpError("source and result types must match");
+  Type elementType = sourceType;
+  if (auto simd = dyn_cast<SimdType>(sourceType))
+    elementType = simd.getElementType();
+  IntegerType integerType = dyn_cast<IntegerType>(elementType);
+  if (!integerType || integerType.getWidth() != 32)
+    return emitOpError("requires i32 or !wave.simd<i32, W>");
+  return success();
+}
+
+LogicalResult CtzOp::verify() {
+  Type sourceType = getSource().getType();
+  Type resultType = getResult().getType();
+  if (sourceType != resultType)
+    return emitOpError("source and result types must match");
+  Type elementType = sourceType;
+  if (auto simd = dyn_cast<SimdType>(sourceType))
+    elementType = simd.getElementType();
+  if (elementType.isIndex())
+    return success();
+  IntegerType integerType = dyn_cast<IntegerType>(elementType);
+  if (!integerType ||
+      (integerType.getWidth() != 32 && integerType.getWidth() != 64))
+    return emitOpError("requires i32, i64, index, or matching SIMD type");
+  return success();
+}
+
 static bool isFullSignedRange(const ConstantIntRanges &range) {
   unsigned width = range.smin().getBitWidth();
   if (width == 0)

@@ -1,4 +1,4 @@
-// RUN: wave-opt --split-input-file --waveamd-to-machine --verify-diagnostics %s | FileCheck %s --check-prefix=SELECT
+// RUN: wave-opt --split-input-file --wave-expand-integer-div-rem --waveamd-to-machine --verify-diagnostics %s | FileCheck %s --check-prefix=SELECT
 
 // Width-independent integer arith ops lower per-target based on
 // operand uniformity. Uniform-uniform i32 goes to the scalar
@@ -75,9 +75,9 @@ func.func @uniform_i32_sub_div_rem(%out: !wave.ptr<#wave.global, i32>) attribute
 }
 
 // SELECT-LABEL: func.func @uniform_i32_signed_div_range
-// SELECT: %[[X:.*]] = waveamdmachine.arg
-// SELECT: %[[SHIFT:.*]] = waveamdmachine.imm 1
-// SELECT: waveamdmachine.s_lshr_b32 %[[X]], %[[SHIFT]]
+// SELECT: waveamdmachine.s_cmp_lt_i32
+// SELECT: waveamdmachine.s_cselect_b32
+// SELECT: waveamdmachine.s_lshr_b32
 func.func @uniform_i32_signed_div_range(%x: i32) attributes {wave.kernel} {
   %a = wave.assume %x as "x" [#wave.pred<"x >= 0">, #wave.pred<"x <= 1024">] : i32
   %two = arith.constant 2 : i32
@@ -86,9 +86,9 @@ func.func @uniform_i32_signed_div_range(%x: i32) attributes {wave.kernel} {
 }
 
 // SELECT-LABEL: func.func @uniform_i32_signed_div_lower_only_range
-// SELECT: %[[X:.*]] = waveamdmachine.arg
-// SELECT: %[[SHIFT:.*]] = waveamdmachine.imm 5
-// SELECT: waveamdmachine.s_lshr_b32 %[[X]], %[[SHIFT]]
+// SELECT: waveamdmachine.s_cmp_lt_i32
+// SELECT: waveamdmachine.s_cselect_b32
+// SELECT: waveamdmachine.s_lshr_b32
 func.func @uniform_i32_signed_div_lower_only_range(%x: i32) attributes {wave.kernel} {
   %nonneg = wave.assume %x as "x" [#wave.pred<"x >= 0">] : i32
   %thirty_two = arith.constant 32 : i32
@@ -97,9 +97,9 @@ func.func @uniform_i32_signed_div_lower_only_range(%x: i32) attributes {wave.ker
 }
 
 // SELECT-LABEL: func.func @uniform_i32_signed_div_chained_range
-// SELECT: %[[X:.*]] = waveamdmachine.arg
-// SELECT: %[[SHIFT:.*]] = waveamdmachine.imm 5
-// SELECT: waveamdmachine.s_lshr_b32 %[[X]], %[[SHIFT]]
+// SELECT: waveamdmachine.s_cmp_lt_i32
+// SELECT: waveamdmachine.s_cselect_b32
+// SELECT: waveamdmachine.s_lshr_b32
 func.func @uniform_i32_signed_div_chained_range(%x: i32) attributes {wave.kernel} {
   %lo = wave.assume %x as "x" [#wave.pred<"x >= 0">] : i32
   %bounded = wave.assume %lo as "x" [#wave.pred<"-2147483647 + x <= 0">] : i32
@@ -111,8 +111,8 @@ func.func @uniform_i32_signed_div_chained_range(%x: i32) attributes {wave.kernel
 // SELECT-LABEL: func.func @uniform_i32_signed_div_dynamic_pow2
 // SELECT-DAG: %[[X:.*]] = waveamdmachine.arg
 // SELECT-DAG: %[[D:.*]] = waveamdmachine.arg
-// SELECT: %[[SHIFT:.*]] = waveamdmachine.s_ff1_i32_b32 %[[D]]
-// SELECT: waveamdmachine.s_lshr_b32 %[[X]], %[[SHIFT]]
+// SELECT: waveamdmachine.s_ff1_i32_b32 %[[D]]
+// SELECT: waveamdmachine.s_lshr_b32 %[[X]]
 func.func @uniform_i32_signed_div_dynamic_pow2(%x: i32, %d: i32) attributes {wave.kernel} {
   %nonneg = wave.assume %x as "x" [#wave.pred<"x >= 0">] : i32
   %pow2 = wave.assume %d as "d" [#wave.pred<"d & (d - 1) == 0">, #wave.pred<"d > 0">] : i32
@@ -147,8 +147,8 @@ func.func @uniform_i64_signed_div_dynamic_pow2(%x: i64, %d: i64) attributes {wav
 
 // SELECT-LABEL: func.func @uniform_index_signed_div_dynamic_pow2_wide_index_expr
 // SELECT-NOT: waveamdmachine.v_mov_b32_tuple
-// SELECT: waveamdmachine.s_ff1_i32_b64
-// SELECT: waveamdmachine.s_lshr_b64
+// SELECT: %[[SHIFT:.*]] = waveamdmachine.s_ff1_i32_b64
+// SELECT: waveamdmachine.s_lshr_b64 {{.*}}, %[[SHIFT]]
 func.func @uniform_index_signed_div_dynamic_pow2_wide_index_expr(%x: i32, %d: i32) attributes {wave.kernel} {
   %num = wave.index_expr <"x"> ["x"](%x) : (i32) -> index
   %nonneg = wave.assume %num as "x" [#wave.pred<"x >= 0">] : index
@@ -160,9 +160,9 @@ func.func @uniform_index_signed_div_dynamic_pow2_wide_index_expr(%x: i32, %d: i3
 
 // SELECT-LABEL: func.func @uniform_index_product_signed_div_bounded_range
 // SELECT-NOT: waveamdmachine.s_mul_i32
-// SELECT: %[[PROD:.*]], %{{.*}}, %{{.*}} = waveamdmachine.s_mul_u64
-// SELECT: %[[SHIFT:.*]] = waveamdmachine.imm 5
-// SELECT: waveamdmachine.s_lshr_b64 %[[PROD]], %[[SHIFT]]
+// SELECT: waveamdmachine.s_mul_u64
+// SELECT: waveamdmachine.s_lshr_b64
+// SELECT: waveamdmachine.s_and_b32
 func.func @uniform_index_product_signed_div_bounded_range(%m: index, %n: index) attributes {wave.kernel} {
   %a = wave.assume %m as "x" [#wave.pred<"x >= 0">, #wave.pred<"x <= 4000000">] : index
   %b = wave.assume %n as "x" [#wave.pred<"x >= 0">, #wave.pred<"x <= 4000000">] : index

@@ -392,6 +392,7 @@ private:
   unsigned vFfblB32() const { return opcodes.vFfblB32; }
   unsigned vReadfirstlaneB32() const { return opcodes.vReadfirstlaneB32; }
   unsigned vMulLoU32() const { return opcodes.vMulLoU32; }
+  unsigned vMulHiU32() const { return opcodes.vMulHiU32; }
   unsigned vAdd3U32() const { return opcodes.vAdd3U32; }
   unsigned vMadI32I24() const { return opcodes.vMadI32I24; }
   unsigned vMadU32U24() const { return opcodes.vMadU32U24; }
@@ -406,6 +407,9 @@ private:
   unsigned vMaxF32() const { return opcodes.vMaxF32; }
   unsigned vExpF32() const { return opcodes.vExpF32; }
   unsigned vRcpF32() const { return opcodes.vRcpF32; }
+  unsigned vRcpIFlagF32() const { return opcodes.vRcpIFlagF32; }
+  unsigned vCvtF32U32() const { return opcodes.vCvtF32U32; }
+  unsigned vCvtU32F32() const { return opcodes.vCvtU32F32; }
   unsigned vCvtF16F32() const {
     if (isGfx8Or9())
       return llvm::AMDGPU::V_CVT_F16_F32_e64_vi;
@@ -2070,6 +2074,10 @@ private:
       // unconstrained so we emit (vdst, src0, src1) as-is without the
       // VOP2 swap dance.
       return emitVMulLoU32(op, result(), op.getOperand(0), op.getOperand(1));
+    if (isa<waveamdmachine::VMulHiU32Op>(op))
+      return emitMC(vMulHiU32(),
+                    {toMCOperand(result()), toMCOperand(op.getOperand(0)),
+                     toMCOperand(op.getOperand(1))});
     if (isa<waveamdmachine::VFfbhU32Op, waveamdmachine::VFfblB32Op>(op)) {
       unsigned opcode =
           isa<waveamdmachine::VFfbhU32Op>(op) ? vFfbhU32() : vFfblB32();
@@ -2102,9 +2110,17 @@ private:
                     {toMCOperand(result()), toMCOperand(op.getOperand(0)),
                      toMCOperand(op.getOperand(1))});
     }
-    if (isa<waveamdmachine::VExpF32Op, waveamdmachine::VRcpF32Op>(op)) {
+    if (isa<waveamdmachine::VExpF32Op, waveamdmachine::VRcpF32Op,
+            waveamdmachine::VRcpIFlagF32Op>(op)) {
+      unsigned opcode = isa<waveamdmachine::VExpF32Op>(op)   ? vExpF32()
+                        : isa<waveamdmachine::VRcpF32Op>(op) ? vRcpF32()
+                                                             : vRcpIFlagF32();
+      return emitMC(opcode,
+                    {toMCOperand(result()), toMCOperand(op.getOperand(0))});
+    }
+    if (isa<waveamdmachine::VCvtF32U32Op, waveamdmachine::VCvtU32F32Op>(op)) {
       unsigned opcode =
-          isa<waveamdmachine::VExpF32Op>(op) ? vExpF32() : vRcpF32();
+          isa<waveamdmachine::VCvtF32U32Op>(op) ? vCvtF32U32() : vCvtU32F32();
       return emitMC(opcode,
                     {toMCOperand(result()), toMCOperand(op.getOperand(0))});
     }
@@ -2250,6 +2266,10 @@ private:
       return emitMC(sMulI32(), {toMCOperand(op.getResult(0)),
                                 toMCOperand(op.getOperand(0)),
                                 toMCOperand(op.getOperand(1))});
+    if (isa<waveamdmachine::SMulHiU32Op>(op))
+      return emitMC(sMulHiU32(), {toMCOperand(op.getResult(0)),
+                                  toMCOperand(op.getOperand(0)),
+                                  toMCOperand(op.getOperand(1))});
     if (isa<waveamdmachine::SLshlB32Op>(op))
       return emitMC(sLshlB32(), {toMCOperand(op.getResult(0)),
                                  toMCOperand(op.getOperand(0)),

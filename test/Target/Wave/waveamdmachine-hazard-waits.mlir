@@ -174,6 +174,62 @@ func.func @delay_after_uniform_loop_exit_lgkm_wait(
   return
 }
 
+// CHECK-LABEL: func.func @delay_before_new_divrem_valu_ops_after_lgkm_wait
+// CHECK: waveamdmachine.s_waitcnt
+// CHECK-NEXT: waveamdmachine.imm 1
+// CHECK-NEXT: waveamdmachine.s_delay_alu
+// CHECK-NEXT: waveamdmachine.v_mul_hi_u32
+// CHECK: waveamdmachine.s_waitcnt
+// CHECK-NEXT: waveamdmachine.imm 1
+// CHECK-NEXT: waveamdmachine.s_delay_alu
+// CHECK-NEXT: waveamdmachine.v_cvt_f32_u32
+// CHECK: waveamdmachine.s_waitcnt
+// CHECK-NEXT: waveamdmachine.imm 1
+// CHECK-NEXT: waveamdmachine.s_delay_alu
+// CHECK-NEXT: waveamdmachine.v_rcp_iflag_f32
+// CHECK: waveamdmachine.s_waitcnt
+// CHECK-NEXT: waveamdmachine.imm 1
+// CHECK-NEXT: waveamdmachine.s_delay_alu
+// CHECK-NEXT: waveamdmachine.v_cvt_u32_f32
+func.func @delay_before_new_divrem_valu_ops_after_lgkm_wait(
+    %x: !waveamdmachine.reg<vgpr, 1>,
+    %y: !waveamdmachine.reg<sgpr, 1>) {
+  waveamdmachine.s_waitcnt lgkmcnt(0)
+  %hi = waveamdmachine.v_mul_hi_u32 %x, %y
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 1>)
+      -> !waveamdmachine.reg<vgpr, 1>
+  waveamdmachine.s_waitcnt lgkmcnt(0)
+  %fp = waveamdmachine.v_cvt_f32_u32 %hi
+      : (!waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
+  waveamdmachine.s_waitcnt lgkmcnt(0)
+  %rcp = waveamdmachine.v_rcp_iflag_f32 %fp
+      : (!waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
+  waveamdmachine.s_waitcnt lgkmcnt(0)
+  %ui = waveamdmachine.v_cvt_u32_f32 %rcp
+      : (!waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
+  return
+}
+
+// CHECK-LABEL: func.func @scalar_mulhi_keeps_lgkm_valu_delay_armed
+// CHECK: waveamdmachine.s_waitcnt
+// CHECK-NEXT: waveamdmachine.s_mul_hi_u32
+// CHECK-NEXT: waveamdmachine.imm 1
+// CHECK-NEXT: waveamdmachine.s_delay_alu
+// CHECK-NEXT: waveamdmachine.v_mul_hi_u32
+func.func @scalar_mulhi_keeps_lgkm_valu_delay_armed(
+    %x: !waveamdmachine.reg<sgpr, 1>,
+    %y: !waveamdmachine.reg<sgpr, 1>,
+    %v: !waveamdmachine.reg<vgpr, 1>) {
+  waveamdmachine.s_waitcnt lgkmcnt(0)
+  %s = waveamdmachine.s_mul_hi_u32 %x, %y
+      : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<sgpr, 1>)
+      -> !waveamdmachine.reg<sgpr, 1>
+  %hi = waveamdmachine.v_mul_hi_u32 %v, %s
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 1>)
+      -> !waveamdmachine.reg<vgpr, 1>
+  return
+}
+
 }
 
 // -----
@@ -678,6 +734,22 @@ func.func @valu_vgpr_to_readfirstlane_delay(
       : (!waveamdmachine.reg<vgpr, 1, 0>, !waveamdmachine.reg<sgpr, 1, 0>)
       -> !waveamdmachine.reg<vgpr, 1, 8>
   %first = waveamdmachine.v_readfirstlane_b32 %sum
+      : (!waveamdmachine.reg<vgpr, 1, 8>) -> !waveamdmachine.reg<sgpr, 1, 20>
+  return
+}
+
+// CHECK-LABEL: func.func @v_mul_hi_to_readfirstlane_delay
+// CHECK: waveamdmachine.v_mul_hi_u32
+// CHECK-NEXT: waveamdmachine.imm 0
+// CHECK-NEXT: waveamdmachine.s_nop
+// CHECK-NEXT: waveamdmachine.v_readfirstlane_b32
+func.func @v_mul_hi_to_readfirstlane_delay(
+    %x: !waveamdmachine.reg<vgpr, 1, 0>,
+    %s: !waveamdmachine.reg<sgpr, 1, 0>) {
+  %hi = waveamdmachine.v_mul_hi_u32 %x, %s
+      : (!waveamdmachine.reg<vgpr, 1, 0>, !waveamdmachine.reg<sgpr, 1, 0>)
+      -> !waveamdmachine.reg<vgpr, 1, 8>
+  %first = waveamdmachine.v_readfirstlane_b32 %hi
       : (!waveamdmachine.reg<vgpr, 1, 8>) -> !waveamdmachine.reg<sgpr, 1, 20>
   return
 }

@@ -58,7 +58,9 @@ module attributes {transform.with_named_sequence} {
         : (!transform.any_op) -> !transform.any_op
     %roff = transform.apply_registered_pass "canonicalize" to %rlicm
         : (!transform.any_op) -> !transform.any_op
-    %r0 = transform.apply_registered_pass "waveamd-to-machine" to %roff
+    %rdiv = transform.apply_registered_pass "wave-expand-integer-div-rem" to %roff
+        : (!transform.any_op) -> !transform.any_op
+    %r0 = transform.apply_registered_pass "waveamd-to-machine" to %rdiv
         : (!transform.any_op) -> !transform.any_op
     // Fold duplicate imm / v_mov constant materializations selection
     // emits per address add, before reg-alloc.

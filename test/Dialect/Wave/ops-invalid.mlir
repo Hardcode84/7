@@ -304,6 +304,38 @@ func.func @binary_result_type_mismatch(%a: !wave.simd<i32, 32>, %b: !wave.simd<i
 
 // -----
 
+func.func @urecip_type_mismatch(%x: i32) {
+  // expected-error @+1 {{source and result types must match}}
+  %r = wave.urecip %x : i32 -> i64
+  return
+}
+
+// -----
+
+func.func @urecip_bad_type(%x: i64) {
+  // expected-error @+1 {{requires i32 or !wave.simd<i32, W>}}
+  %r = wave.urecip %x : i64 -> i64
+  return
+}
+
+// -----
+
+func.func @ctz_type_mismatch(%x: i32) {
+  // expected-error @+1 {{source and result types must match}}
+  %r = wave.ctz %x : i32 -> i64
+  return
+}
+
+// -----
+
+func.func @ctz_bad_type(%x: f32) {
+  // expected-error @+1 {{requires i32, i64, index, or matching SIMD type}}
+  %r = wave.ctz %x : f32 -> f32
+  return
+}
+
+// -----
+
 func.func @cast_scalar_simd_mismatch(%x: f32) {
   // expected-error @+1 {{source and result must both be scalar or both be SIMD}}
   %r = wave.cast fpconvert %x : f32 -> !wave.simd<f16, 32>

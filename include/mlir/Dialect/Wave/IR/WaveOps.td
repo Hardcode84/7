@@ -169,6 +169,22 @@ def Wave_BinaryOp : Wave_Op<"binary", [Pure,
   let hasVerifier = 1;
 }
 
+def Wave_URecipOp : Wave_Op<"urecip", [Pure]> {
+  let summary = "unsigned i32 reciprocal estimate";
+  let arguments = (ins AnyType:$source);
+  let results = (outs AnyType:$result);
+  let assemblyFormat = "$source attr-dict `:` type($source) `->` type($result)";
+  let hasVerifier = 1;
+}
+
+def Wave_CtzOp : Wave_Op<"ctz", [Pure]> {
+  let summary = "integer count trailing zeros";
+  let arguments = (ins AnyType:$source);
+  let results = (outs AnyType:$result);
+  let assemblyFormat = "$source attr-dict `:` type($source) `->` type($result)";
+  let hasVerifier = 1;
+}
+
 def Wave_CastOp : Wave_Op<"cast", [Pure]> {
   let summary = "numeric conversion over scalar or SIMD values";
   let arguments = (ins Wave_CastKindEnum:$kind,

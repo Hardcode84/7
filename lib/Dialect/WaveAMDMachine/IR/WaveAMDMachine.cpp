@@ -176,6 +176,11 @@ void VMulLoU32Op::inferResultRanges(ArrayRef<ConstantIntRanges> argRanges,
                                   normalizeMachineU32Ranges(argRanges)));
 }
 
+void VMulHiU32Op::inferResultRanges(ArrayRef<ConstantIntRanges>,
+                                    SetIntRangeFn setResultRange) {
+  setResultRange(getResult(), ConstantIntRanges::maxRange(32));
+}
+
 LogicalResult VMovB32TupleOp::verify() {
   auto resultType = cast<RegType>(getResult().getType());
   if (auto registers = (*this)->getAttrOfType<IntegerAttr>("registers")) {

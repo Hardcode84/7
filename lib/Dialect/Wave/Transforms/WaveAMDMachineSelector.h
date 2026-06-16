@@ -285,6 +285,8 @@ public:
   LogicalResult selectWorkitemId(WorkitemIdOp op);
   LogicalResult selectSplat(SplatOp op);
   LogicalResult selectAssume(AssumeOp op);
+  LogicalResult selectURecip(URecipOp op);
+  LogicalResult selectCtz(CtzOp op);
   LogicalResult selectBinary(BinaryOp op);
   LogicalResult selectBinaryAddI32(BinaryOp op);
   LogicalResult selectBinaryAddI64(BinaryOp op);

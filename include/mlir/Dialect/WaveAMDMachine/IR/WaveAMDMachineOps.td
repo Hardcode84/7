@@ -644,6 +644,8 @@ def WaveAMDMachine_VLshrrevB32Op
     : WaveAMDMachine_BinaryU32Result<"v_lshrrev_b32">;
 def WaveAMDMachine_VMulLoU32Op
     : WaveAMDMachine_BinaryU32Result<"v_mul_lo_u32">;
+def WaveAMDMachine_VMulHiU32Op
+    : WaveAMDMachine_BinaryU32Result<"v_mul_hi_u32">;
 def WaveAMDMachine_VFfbhU32Op
     : WaveAMDMachine_UnaryResult<"v_ffbh_u32", WaveAMDMachine_Reg1OrImm,
                                  WaveAMDMachine_VGPR1,
@@ -690,6 +692,18 @@ def WaveAMDMachine_VExpF32Op
                               [WaveAMDMachine_VALU, Pure]>;
 def WaveAMDMachine_VRcpF32Op
     : WaveAMDMachine_UnaryResult<"v_rcp_f32", WaveAMDMachine_VGPR1,
+                              WaveAMDMachine_VGPR1,
+                              [WaveAMDMachine_VALU, Pure]>;
+def WaveAMDMachine_VRcpIFlagF32Op
+    : WaveAMDMachine_UnaryResult<"v_rcp_iflag_f32", WaveAMDMachine_VGPR1,
+                              WaveAMDMachine_VGPR1,
+                              [WaveAMDMachine_VALU, Pure]>;
+def WaveAMDMachine_VCvtF32U32Op
+    : WaveAMDMachine_UnaryResult<"v_cvt_f32_u32", WaveAMDMachine_Reg1OrImm,
+                              WaveAMDMachine_VGPR1,
+                              [WaveAMDMachine_VALU, Pure]>;
+def WaveAMDMachine_VCvtU32F32Op
+    : WaveAMDMachine_UnaryResult<"v_cvt_u32_f32", WaveAMDMachine_VGPR1,
                               WaveAMDMachine_VGPR1,
                               [WaveAMDMachine_VALU, Pure]>;
 def WaveAMDMachine_VCvtF16F32Op
@@ -2279,6 +2293,14 @@ def WaveAMDMachine_SAddI32Op : WaveAMDMachine_Op<"s_add_i32", [Pure]> {
 // or unsigned behaviour will get separate ops later.
 def WaveAMDMachine_SMulI32Op : WaveAMDMachine_Op<"s_mul_i32", [Pure]> {
   let summary = "scalar 32-bit signed multiply (low half)";
+  let arguments = (ins WaveAMDMachine_SGPR1OrImm:$lhs,
+                       WaveAMDMachine_SGPR1OrImm:$rhs);
+  let results = (outs WaveAMDMachine_SGPR1:$result);
+  let assemblyFormat = "$lhs `,` $rhs attr-dict `:` functional-type(operands, results)";
+}
+
+def WaveAMDMachine_SMulHiU32Op : WaveAMDMachine_Op<"s_mul_hi_u32", [Pure]> {
+  let summary = "scalar 32-bit unsigned multiply (high half)";
   let arguments = (ins WaveAMDMachine_SGPR1OrImm:$lhs,
                        WaveAMDMachine_SGPR1OrImm:$rhs);
   let results = (outs WaveAMDMachine_SGPR1:$result);

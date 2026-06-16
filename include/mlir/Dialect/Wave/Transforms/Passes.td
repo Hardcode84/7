@@ -144,6 +144,22 @@ def WaveExtractLoopStrides : Pass<"wave-extract-loop-strides"> {
   ];
 }
 
+def WaveExpandIntegerDivRem : Pass<"wave-expand-integer-div-rem"> {
+  let summary = "Expand Wave integer div/rem into primitive integer ops";
+  let description = [{
+    Rewrites `wave.binary` div/rem operations into Wave integer primitives
+    before machine selection. Constant unsigned divisors use magic-number
+    quotient formation; proven dynamic power-of-two divisors use CTZ plus
+    shifts/masks; dynamic i32 divisors use reciprocal refinement. Signed
+    operations divide magnitudes and repair quotient/remainder signs.
+  }];
+  let dependentDialects = [
+    "arith::ArithDialect",
+    "func::FuncDialect",
+    "wave::WaveDialect"
+  ];
+}
+
 def WaveAMDABILowering
     : Pass<"waveamd-abi-lowering"> {
   let summary = "Lower WaveAMDMachine function arguments to the AMDGPU kernel ABI";

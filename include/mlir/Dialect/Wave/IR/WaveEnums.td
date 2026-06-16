@@ -36,13 +36,14 @@ def Wave_BinaryKindDivUI : I32EnumAttrCase<"DivUI", 9, "divui">;
 def Wave_BinaryKindDivSI : I32EnumAttrCase<"DivSI", 10, "divsi">;
 def Wave_BinaryKindRemUI : I32EnumAttrCase<"RemUI", 11, "remui">;
 def Wave_BinaryKindRemSI : I32EnumAttrCase<"RemSI", 12, "remsi">;
+def Wave_BinaryKindMulHUI : I32EnumAttrCase<"MulHUI", 13, "mulhui">;
 
 def Wave_BinaryKindEnum : I32EnumAttr<"BinaryKind", "Wave binary op kind", [
     Wave_BinaryKindAddI, Wave_BinaryKindSubI, Wave_BinaryKindMulI,
     Wave_BinaryKindShLI, Wave_BinaryKindShRUI, Wave_BinaryKindShRSI,
     Wave_BinaryKindAndI, Wave_BinaryKindOrI, Wave_BinaryKindXOrI,
-    Wave_BinaryKindDivUI, Wave_BinaryKindDivSI, Wave_BinaryKindRemUI,
-    Wave_BinaryKindRemSI]> {
+    Wave_BinaryKindMulHUI, Wave_BinaryKindDivUI, Wave_BinaryKindDivSI,
+    Wave_BinaryKindRemUI, Wave_BinaryKindRemSI]> {
   let cppNamespace = "::mlir::wave";
 }
 

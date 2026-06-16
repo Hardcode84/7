@@ -810,6 +810,12 @@ static Value readFirstLane(WaveAMDMachineSelector &S, Location loc,
       .getTuple();
 }
 
+static Value createWordCmp(WaveAMDMachineSelector &S, Location loc,
+                           CmpRelation relation, bool signedCmp,
+                           Type resultType, Value lhs, Value rhs);
+static Value createVAddU32(WaveAMDMachineSelector &selector, Location loc,
+                           Value lhs, Value rhs);
+
 Value extractLowDword(WaveAMDMachineSelector &S, Location loc, Value v,
                       Value source) {
   if (std::optional<int64_t> imm = S.getImmediateValue(v)) {
@@ -923,6 +929,46 @@ static Value xorWide(WaveAMDMachineSelector &S, Location loc, Value lhs,
              S.builder, loc, resultType, getSCCType(S.builder.getContext()),
              ensureSGPR2(S, loc, lhs), ensureSGPR2(S, loc, rhs))
       .getResult();
+}
+
+static Value createWideBitwiseWord(WaveAMDMachineSelector &S, Location loc,
+                                   BinaryKind kind, Type resultType, Value lhs,
+                                   Value rhs, bool vgpr) {
+  if (vgpr) {
+    lhs = S.ensureVGPRForVSrc1(loc, lhs);
+    rhs = S.ensureVGPRForVSrc1(loc, rhs);
+    if (kind == BinaryKind::AndI)
+      return waveamdmachine::VAndB32Op::create(S.builder, loc, resultType, lhs,
+                                               rhs);
+    return waveamdmachine::VOrB32Op::create(S.builder, loc, resultType, lhs,
+                                            rhs);
+  }
+
+  Type scc = getSCCType(S.builder.getContext());
+  lhs = S.materializeSGPR1(loc, lhs);
+  rhs = S.ensureSGPR1(loc, rhs);
+  if (kind == BinaryKind::AndI)
+    return waveamdmachine::SAndB32Op::create(S.builder, loc, resultType, scc,
+                                             lhs, rhs)
+        .getResult();
+  return waveamdmachine::SOrB32Op::create(S.builder, loc, resultType, scc, lhs,
+                                          rhs)
+      .getResult();
+}
+
+static Value bitwiseWide(WaveAMDMachineSelector &S, Location loc,
+                         BinaryKind kind, Value lhs, Value rhs) {
+  bool vgpr = isVGPR(lhs) || isVGPR(rhs);
+  waveamdmachine::RegClass regClass =
+      vgpr ? waveamdmachine::RegClass::VGPR : waveamdmachine::RegClass::SGPR;
+  Type wordType = getRegType(S.builder.getContext(), regClass, 1);
+  Value lo = createWideBitwiseWord(S, loc, kind, wordType,
+                                   extractLowDword(S, loc, lhs),
+                                   extractLowDword(S, loc, rhs), vgpr);
+  Value hi = createWideBitwiseWord(S, loc, kind, wordType,
+                                   extractHighDword(S, loc, lhs),
+                                   extractHighDword(S, loc, rhs), vgpr);
+  return tuple2(S, loc, regClass, lo, hi);
 }
 
 static Value createWideImm(WaveAMDMachineSelector &S, Location loc,
@@ -1974,6 +2020,8 @@ LogicalResult WaveAMDMachineSelector::selectOperation(Operation *op) {
       .Case<WorkitemIdOp>([&](auto o) { return selectWorkitemId(o); })
       .Case<SplatOp>([&](auto o) { return selectSplat(o); })
       .Case<AssumeOp>([&](auto o) { return selectAssume(o); })
+      .Case<URecipOp>([&](auto o) { return selectURecip(o); })
+      .Case<CtzOp>([&](auto o) { return selectCtz(o); })
       .Case<BinaryOp>([&](auto o) { return selectBinary(o); })
       .Case<PackOp>([&](auto o) { return selectPack(o); })
       .Case<ExtractOp>([&](auto o) { return selectExtract(o); })
@@ -2339,6 +2387,26 @@ LogicalResult WaveAMDMachineSelector::selectBinaryMulI32(BinaryOp op) {
   return success();
 }
 
+static LogicalResult selectBinaryMulHUI32(WaveAMDMachineSelector &S,
+                                          BinaryOp op) {
+  Value lhs = S.expect(op.getLhs(), op);
+  Value rhs = S.expect(op.getRhs(), op);
+  if (!isBinarySimd(op)) {
+    S.values[op.getResult()] = waveamdmachine::SMulHiU32Op::create(
+        S.builder, op.getLoc(),
+        getRegType(op.getContext(), waveamdmachine::RegClass::SGPR), lhs, rhs);
+    S.eraseIfTopLevel(op);
+    return success();
+  }
+  if (!isVGPR(lhs) && !isVGPR(rhs))
+    lhs = S.ensureVGPRForVSrc1(op.getLoc(), lhs);
+  S.values[op.getResult()] = waveamdmachine::VMulHiU32Op::create(
+      S.builder, op.getLoc(),
+      getRegType(op.getContext(), waveamdmachine::RegClass::VGPR), lhs, rhs);
+  S.eraseIfTopLevel(op);
+  return success();
+}
+
 LogicalResult WaveAMDMachineSelector::selectBinaryMulI64(BinaryOp op) {
   Value lhs = expect(op.getLhs(), op);
   Value rhs = expect(op.getRhs(), op);
@@ -2394,201 +2462,6 @@ LogicalResult WaveAMDMachineSelector::selectBinaryShLI64(BinaryOp op) {
   return success();
 }
 
-static std::optional<int64_t> getSignedImmediate(WaveAMDMachineSelector &S,
-                                                 Value value) {
-  if (std::optional<int64_t> imm = S.getImmediateValue(value))
-    return *imm;
-  if (auto mov = value.getDefiningOp<waveamdmachine::SMovB64ImmOp>())
-    return mov.getValue();
-  return std::nullopt;
-}
-
-static std::optional<uint64_t> getWideImmediate(WaveAMDMachineSelector &S,
-                                                Value value) {
-  if (std::optional<int64_t> imm = getSignedImmediate(S, value))
-    return static_cast<uint64_t>(*imm);
-  return std::nullopt;
-}
-
-static uint64_t maskToWidth(uint64_t value, unsigned bits) {
-  if (bits >= 64)
-    return value;
-  return value & ((uint64_t{1} << bits) - 1);
-}
-
-static std::optional<uint64_t>
-getUnsignedImmediate(WaveAMDMachineSelector &S, Value value, unsigned bits) {
-  if (std::optional<uint64_t> imm = getWideImmediate(S, value))
-    return maskToWidth(*imm, bits);
-  return std::nullopt;
-}
-
-static bool isPositivePowerOfTwo(uint64_t value) {
-  return value != 0 && (value & (value - 1)) == 0;
-}
-
-static bool isSignedDivRem(BinaryKind kind) {
-  return kind == BinaryKind::DivSI || kind == BinaryKind::RemSI;
-}
-
-struct DynamicDivisorQuery {
-  SmallVector<sym::PredHandle, 4> assumptions;
-  sym::ExprHandle expr;
-};
-
-class DynamicDivisorQueryBuilder {
-public:
-  explicit DynamicDivisorQueryBuilder(WaveAMDMachineSelector &S) : S(S) {}
-
-  FailureOr<DynamicDivisorQuery> build(Value value) {
-    FailureOr<sym::ExprHandle> expr = buildValueExpr(value);
-    if (failed(expr))
-      return failure();
-    return DynamicDivisorQuery{std::move(assumptions), *expr};
-  }
-
-private:
-  FailureOr<sym::ExprHandle> buildValueExpr(Value value, unsigned depth = 0) {
-    if (depth > 8)
-      return failure();
-    if (std::optional<int64_t> constant = getConstantIntValue(value))
-      return sym::composeExprInt(S.symbolStore(), *constant);
-    if (SplatOp splat = value.getDefiningOp<SplatOp>())
-      return buildValueExpr(splat.getSource(), depth + 1);
-    if (BinaryOp binary = value.getDefiningOp<BinaryOp>())
-      return buildBinaryExpr(binary, depth + 1);
-    return bindSymbol(value);
-  }
-
-  FailureOr<sym::ExprHandle> buildBinaryExpr(BinaryOp op, unsigned depth) {
-    if (op.getKind() == BinaryKind::ShLI)
-      return buildShiftExpr(op, depth);
-    std::optional<sym::ExprBinaryOp> kind = convertBinaryKind(op);
-    if (!kind)
-      return failure();
-    FailureOr<sym::ExprHandle> lhs = buildValueExpr(op.getLhs(), depth);
-    FailureOr<sym::ExprHandle> rhs = buildValueExpr(op.getRhs(), depth);
-    if (failed(lhs) || failed(rhs))
-      return failure();
-    return sym::composeExprBinary(S.symbolStore(), *lhs, *kind, *rhs);
-  }
-
-  FailureOr<sym::ExprHandle> buildShiftExpr(BinaryOp op, unsigned depth) {
-    if (!op.hasNoSignedWrap())
-      return failure();
-    std::optional<int64_t> shift = getConstantIntValue(op.getRhs());
-    if (!shift || *shift < 0 || *shift >= 63)
-      return failure();
-    FailureOr<sym::ExprHandle> lhs = buildValueExpr(op.getLhs(), depth);
-    if (failed(lhs))
-      return failure();
-    FailureOr<sym::ExprHandle> scale =
-        sym::composeExprInt(S.symbolStore(), int64_t{1} << *shift);
-    if (failed(scale))
-      return failure();
-    return sym::composeExprBinary(S.symbolStore(), *lhs, sym::ExprBinaryOp::Mul,
-                                  *scale);
-  }
-
-  std::optional<sym::ExprBinaryOp> convertBinaryKind(BinaryOp op) {
-    switch (op.getKind()) {
-    case BinaryKind::AddI:
-      return op.hasNoSignedWrap()
-                 ? std::optional<sym::ExprBinaryOp>(sym::ExprBinaryOp::Add)
-                 : std::nullopt;
-    case BinaryKind::SubI:
-      return op.hasNoSignedWrap()
-                 ? std::optional<sym::ExprBinaryOp>(sym::ExprBinaryOp::Sub)
-                 : std::nullopt;
-    case BinaryKind::MulI:
-      return op.hasNoSignedWrap()
-                 ? std::optional<sym::ExprBinaryOp>(sym::ExprBinaryOp::Mul)
-                 : std::nullopt;
-    case BinaryKind::XOrI:
-      return sym::ExprBinaryOp::Xor;
-    default:
-      return std::nullopt;
-    }
-  }
-
-  FailureOr<sym::ExprHandle> bindSymbol(Value value) {
-    StringRef stem = "d";
-    if (auto assume = value.getDefiningOp<AssumeOp>())
-      stem = assume.getName();
-    StringRef name =
-        reserveIndexExprBindingName(stem, value, reserved, byValue);
-    FailureOr<sym::ExprHandle> expr =
-        sym::composeExprSym(S.symbolStore(), name);
-    if (failed(expr))
-      return failure();
-    S.appendBindingAssumptions(value, name, assumptions);
-    return *expr;
-  }
-
-  WaveAMDMachineSelector &S;
-  SmallVector<sym::PredHandle, 4> assumptions;
-  llvm::StringMap<Value> reserved;
-  llvm::DenseMap<Value, StringRef> byValue;
-};
-
-static bool isProvenPositivePow2(WaveAMDMachineSelector &S, Value source) {
-  FailureOr<DynamicDivisorQuery> query =
-      DynamicDivisorQueryBuilder(S).build(source);
-  if (failed(query))
-    return false;
-  return sym::getPow2Fact(S.symbolStore(), query->expr, query->assumptions) ==
-         sym::Pow2Fact::Positive;
-}
-
-static std::optional<uint64_t>
-getStaticPowerOfTwoDivisor(WaveAMDMachineSelector &S, BinaryOp op) {
-  Value rhs = S.expect(op.getRhs(), op);
-  if (isSignedDivRem(op.getKind())) {
-    std::optional<int64_t> divisor = getSignedImmediate(S, rhs);
-    if (!divisor || *divisor <= 0 ||
-        !isPositivePowerOfTwo(static_cast<uint64_t>(*divisor)))
-      return std::nullopt;
-    return static_cast<uint64_t>(*divisor);
-  }
-  unsigned bits = S.waveArithElementBits(op.getResult().getType());
-  std::optional<uint64_t> divisor = getUnsignedImmediate(S, rhs, bits);
-  if (!divisor || !isPositivePowerOfTwo(*divisor))
-    return std::nullopt;
-  return *divisor;
-}
-
-static LogicalResult emitPowerOfTwoDivisorError(BinaryOp op) {
-  if (op.getKind() == BinaryKind::DivSI)
-    return op.emitOpError("needs positive power-of-two static divisor or "
-                          "proven positive power-of-two dynamic divisor");
-  if (isSignedDivRem(op.getKind()))
-    return op.emitOpError("needs positive power-of-two static divisor");
-  return op.emitOpError("needs power-of-two static divisor");
-}
-
-static bool isProvenNonNegative(WaveAMDMachineSelector &S, Value source,
-                                Value selected) {
-  if (std::optional<int64_t> imm = S.getImmediateValue(selected))
-    return *imm >= 0;
-  if (auto mov = selected.getDefiningOp<waveamdmachine::SMovB64ImmOp>())
-    return static_cast<int64_t>(mov.getValue()) >= 0;
-  std::optional<ConstantIntRanges> range = S.finiteSignedRange(source);
-  if (!range)
-    range = S.finiteSignedRange(selected);
-  return range && !range->smin().isNegative();
-}
-
-static LogicalResult requireNonNegativeDividend(WaveAMDMachineSelector &S,
-                                                BinaryOp op) {
-  BinaryKind kind = op.getKind();
-  if (!isSignedDivRem(kind))
-    return success();
-  if (isProvenNonNegative(S, op.getLhs(), S.expect(op.getLhs(), op)))
-    return success();
-  return op.emitOpError("signed power-of-two div/rem requires nonnegative "
-                        "dividend");
-}
-
 LogicalResult WaveAMDMachineSelector::selectBinarySubI32(BinaryOp op) {
   Value lhs = expect(op.getLhs(), op);
   Value rhs = expect(op.getRhs(), op);
@@ -2631,172 +2504,16 @@ LogicalResult WaveAMDMachineSelector::selectBinarySubI64(BinaryOp op) {
   return success();
 }
 
-static Value shrWidePow2(WaveAMDMachineSelector &S, Location loc, Value value,
-                         unsigned log2Den) {
-  if (log2Den == 0)
-    return value;
-  if (std::optional<uint64_t> imm = getWideImmediate(S, value))
-    return createWideImm(S, loc, static_cast<int64_t>(*imm >> log2Den));
-  Value shift = createImm(S.builder, loc, log2Den);
-  if (isWideVGPR(value)) {
-    Type resultType =
-        getRegType(S.builder.getContext(), waveamdmachine::RegClass::VGPR, 2);
-    return waveamdmachine::VLshrrevB64Op::create(S.builder, loc, resultType,
-                                                 shift, value);
-  }
-  Type resultType =
-      getRegType(S.builder.getContext(), waveamdmachine::RegClass::SGPR, 2);
-  return waveamdmachine::SLshrB64Op::create(
-             S.builder, loc, resultType, getSCCType(S.builder.getContext()),
-             ensureSGPR2(S, loc, value), S.ensureSGPR1(loc, shift))
-      .getResult();
-}
-
-static Value ctzDynamicI32(WaveAMDMachineSelector &S, Location loc,
-                           Value divisor) {
-  if (S.isUniformValue(divisor))
-    return waveamdmachine::SFf1I32B32Op::create(
-        S.builder, loc,
-        getRegType(S.builder.getContext(), waveamdmachine::RegClass::SGPR),
-        S.materializeSGPR1(loc, divisor));
-  return waveamdmachine::VFfblB32Op::create(
-      S.builder, loc,
-      getRegType(S.builder.getContext(), waveamdmachine::RegClass::VGPR),
-      S.ensureVGPRForVSrc1(loc, divisor));
-}
-
-static Value shrDynamicPow2I32(WaveAMDMachineSelector &S, Location loc,
-                               Value value, Value shift) {
-  if (S.isUniformValue(value) && S.isUniformValue(shift))
-    return waveamdmachine::SLshrB32Op::create(
-               S.builder, loc,
-               getRegType(S.builder.getContext(),
-                          waveamdmachine::RegClass::SGPR),
-               getSCCType(S.builder.getContext()),
-               S.materializeSGPR1(loc, value), S.ensureSGPR1(loc, shift))
-        .getResult();
-  return waveamdmachine::VLshrrevB32Op::create(
-      S.builder, loc,
-      getRegType(S.builder.getContext(), waveamdmachine::RegClass::VGPR),
-      S.ensureVGPRForVSrc1(loc, value), shift);
-}
-
-static Value ctzDynamicI64(WaveAMDMachineSelector &S, Location loc,
-                           Value divisor) {
-  if (isWideVGPR(divisor))
-    return {};
-  return waveamdmachine::SFf1I32B64Op::create(
-      S.builder, loc,
-      getRegType(S.builder.getContext(), waveamdmachine::RegClass::SGPR),
-      ensureSGPR2(S, loc, divisor));
-}
-
-static Value shrDynamicPow2I64(WaveAMDMachineSelector &S, Location loc,
-                               Value value, Value shift) {
-  if (!isWideVGPR(value) && S.isUniformValue(shift))
-    return waveamdmachine::SLshrB64Op::create(
-               S.builder, loc,
-               getRegType(S.builder.getContext(),
-                          waveamdmachine::RegClass::SGPR, 2),
-               getSCCType(S.builder.getContext()), ensureSGPR2(S, loc, value),
-               S.ensureSGPR1(loc, shift))
-        .getResult();
-  return waveamdmachine::VLshrrevB64Op::create(
-      S.builder, loc,
-      getRegType(S.builder.getContext(), waveamdmachine::RegClass::VGPR, 2),
-      shift, ensureVGPR2(S, loc, value));
-}
-
-static Value materializeOneDword(WaveAMDMachineSelector &S, Location loc,
-                                 Value value,
-                                 waveamdmachine::RegClass regClass) {
-  if (regClass == waveamdmachine::RegClass::VGPR)
-    return S.ensureVGPRForVSrc1(loc, value);
-  return S.materializeSGPR1(loc, value);
-}
-
-static Value andWideMask(WaveAMDMachineSelector &S, Location loc, Value value,
-                         uint64_t mask) {
-  if (std::optional<uint64_t> imm = getWideImmediate(S, value))
-    return createWideImm(S, loc, static_cast<int64_t>(*imm & mask));
-
-  bool vgpr = isWideVGPR(value);
-  waveamdmachine::RegClass regClass =
-      vgpr ? waveamdmachine::RegClass::VGPR : waveamdmachine::RegClass::SGPR;
-  Type elementType = getRegType(S.builder.getContext(), regClass, 1);
-  uint32_t loMask = static_cast<uint32_t>(mask);
-  uint32_t hiMask = static_cast<uint32_t>(mask >> 32);
-  Value lo = extractLowDword(S, loc, value);
-  Value hi = extractHighDword(S, loc, value);
-  Value loImm = createImm(S.builder, loc, loMask);
-  Value hiImm = createImm(S.builder, loc, hiMask);
-  if (vgpr) {
-    lo = waveamdmachine::VAndB32Op::create(
-        S.builder, loc, elementType, S.ensureVGPRForVSrc1(loc, lo), loImm);
-    hi = waveamdmachine::VAndB32Op::create(
-        S.builder, loc, elementType, S.ensureVGPRForVSrc1(loc, hi), hiImm);
-  } else {
-    lo = waveamdmachine::SAndB32Op::create(S.builder, loc, elementType,
-                                           getSCCType(S.builder.getContext()),
-                                           S.materializeSGPR1(loc, lo), loImm)
-             .getResult();
-    hi = waveamdmachine::SAndB32Op::create(S.builder, loc, elementType,
-                                           getSCCType(S.builder.getContext()),
-                                           S.materializeSGPR1(loc, hi), hiImm)
-             .getResult();
-  }
-  return tuple2(S, loc, regClass, materializeOneDword(S, loc, lo, regClass),
-                materializeOneDword(S, loc, hi, regClass));
-}
-
-static LogicalResult selectBinaryDivRemI32(WaveAMDMachineSelector &S,
+static LogicalResult selectBinaryDivRemI32(WaveAMDMachineSelector &,
                                            BinaryOp op) {
-  if (failed(requireNonNegativeDividend(S, op)))
-    return failure();
-  Value lhs = S.expect(op.getLhs(), op);
-  BinaryKind kind = op.getKind();
-  if (std::optional<uint64_t> divisor = getStaticPowerOfTwoDivisor(S, op)) {
-    unsigned log2Den = llvm::Log2_64(*divisor);
-    S.values[op.getResult()] =
-        kind == BinaryKind::DivUI || kind == BinaryKind::DivSI
-            ? S.shrPow2(op.getLoc(), lhs, log2Den)
-            : S.andMask(op.getLoc(), lhs, static_cast<int64_t>(*divisor - 1));
-    S.eraseIfTopLevel(op);
-    return success();
-  }
-  if (kind == BinaryKind::DivSI && isProvenPositivePow2(S, op.getRhs())) {
-    Value shift = ctzDynamicI32(S, op.getLoc(), S.expect(op.getRhs(), op));
-    S.values[op.getResult()] = shrDynamicPow2I32(S, op.getLoc(), lhs, shift);
-    S.eraseIfTopLevel(op);
-    return success();
-  }
-  return emitPowerOfTwoDivisorError(op);
+  return op.emitOpError("must be expanded before WaveAMDMachine selection; "
+                        "run --wave-expand-integer-div-rem");
 }
 
-static LogicalResult selectBinaryDivRemI64(WaveAMDMachineSelector &S,
+static LogicalResult selectBinaryDivRemI64(WaveAMDMachineSelector &,
                                            BinaryOp op) {
-  if (failed(requireNonNegativeDividend(S, op)))
-    return failure();
-  Value lhs = S.expect(op.getLhs(), op);
-  BinaryKind kind = op.getKind();
-  if (std::optional<uint64_t> divisor = getStaticPowerOfTwoDivisor(S, op)) {
-    unsigned log2Den = llvm::Log2_64(*divisor);
-    S.values[op.getResult()] =
-        kind == BinaryKind::DivUI || kind == BinaryKind::DivSI
-            ? shrWidePow2(S, op.getLoc(), lhs, log2Den)
-            : andWideMask(S, op.getLoc(), lhs, *divisor - 1);
-    S.eraseIfTopLevel(op);
-    return success();
-  }
-  if (kind == BinaryKind::DivSI && isProvenPositivePow2(S, op.getRhs())) {
-    Value shift = ctzDynamicI64(S, op.getLoc(), S.expect(op.getRhs(), op));
-    if (!shift)
-      return op.emitOpError("i64 dynamic power-of-two divisor must be uniform");
-    S.values[op.getResult()] = shrDynamicPow2I64(S, op.getLoc(), lhs, shift);
-    S.eraseIfTopLevel(op);
-    return success();
-  }
-  return emitPowerOfTwoDivisorError(op);
+  return op.emitOpError("must be expanded before WaveAMDMachine selection; "
+                        "run --wave-expand-integer-div-rem");
 }
 
 static bool isDivRem(BinaryKind kind) {
@@ -2838,6 +2555,8 @@ static LogicalResult selectBinaryI32(WaveAMDMachineSelector &S, BinaryOp op) {
     return S.selectBinarySubI32(op);
   if (kind == BinaryKind::MulI)
     return S.selectBinaryMulI32(op);
+  if (kind == BinaryKind::MulHUI)
+    return selectBinaryMulHUI32(S, op);
   if (kind == BinaryKind::ShLI)
     return S.selectBinaryShLI32(op);
   if (isDivRem(kind))
@@ -2846,6 +2565,31 @@ static LogicalResult selectBinaryI32(WaveAMDMachineSelector &S, BinaryOp op) {
     return selectBinaryBitwiseOrShiftI32(S, op);
   return op.emitOpError("unsupported i32 wave.binary kind ")
          << stringifyBinaryKind(kind);
+}
+
+static LogicalResult selectBinaryShRUI64(WaveAMDMachineSelector &S,
+                                         BinaryOp op) {
+  Value lhs = S.expect(op.getLhs(), op);
+  Value rhs = S.expect(op.getRhs(), op);
+  Value shift = extractLowDword(S, op.getLoc(), rhs, op.getRhs());
+  if (!isBinarySimd(op)) {
+    Type resultType =
+        getRegType(op.getContext(), waveamdmachine::RegClass::SGPR, 2);
+    S.values[op.getResult()] =
+        waveamdmachine::SLshrB64Op::create(
+            S.builder, op.getLoc(), resultType, getSCCType(op.getContext()),
+            ensureSGPR2(S, op.getLoc(), lhs), S.ensureSGPR1(op.getLoc(), shift))
+            .getResult();
+    S.eraseIfTopLevel(op);
+    return success();
+  }
+  Type resultType =
+      getRegType(op.getContext(), waveamdmachine::RegClass::VGPR, 2);
+  S.values[op.getResult()] = waveamdmachine::VLshrrevB64Op::create(
+      S.builder, op.getLoc(), resultType, shift,
+      ensureVGPR2(S, op.getLoc(), lhs));
+  S.eraseIfTopLevel(op);
+  return success();
 }
 
 static LogicalResult selectBinaryI64(WaveAMDMachineSelector &S, BinaryOp op) {
@@ -2858,8 +2602,17 @@ static LogicalResult selectBinaryI64(WaveAMDMachineSelector &S, BinaryOp op) {
     return S.selectBinaryMulI64(op);
   if (kind == BinaryKind::ShLI)
     return S.selectBinaryShLI64(op);
+  if (kind == BinaryKind::ShRUI)
+    return selectBinaryShRUI64(S, op);
   if (isDivRem(kind))
     return selectBinaryDivRemI64(S, op);
+  if (kind == BinaryKind::AndI || kind == BinaryKind::OrI) {
+    Value lhs = S.expect(op.getLhs(), op);
+    Value rhs = S.expect(op.getRhs(), op);
+    S.values[op.getResult()] = bitwiseWide(S, op.getLoc(), kind, lhs, rhs);
+    S.eraseIfTopLevel(op);
+    return success();
+  }
   if (kind == BinaryKind::XOrI) {
     Value lhs = S.expect(op.getLhs(), op);
     Value rhs = S.expect(op.getRhs(), op);
@@ -2986,6 +2739,82 @@ LogicalResult WaveAMDMachineSelector::selectFExp2(FExp2Op op) {
 
 LogicalResult WaveAMDMachineSelector::selectFRcp(FRcpOp op) {
   return selectF32<waveamdmachine::VRcpF32Op>(*this, op, op.getSource());
+}
+
+LogicalResult WaveAMDMachineSelector::selectURecip(URecipOp op) {
+  Value source = expect(op.getSource(), op);
+  Location loc = op.getLoc();
+  Type vgprType = getRegType(op.getContext(), waveamdmachine::RegClass::VGPR);
+  Value vgprSource = ensureVGPRForVSrc1(loc, source);
+  Value fp =
+      waveamdmachine::VCvtF32U32Op::create(builder, loc, vgprType, vgprSource);
+  Value rcp =
+      waveamdmachine::VRcpIFlagF32Op::create(builder, loc, vgprType, fp);
+  Value scale = ensureVGPRForVSrc1(loc, createImm(builder, loc, 0x4f7ffffe));
+  Value scaled =
+      waveamdmachine::VMulF32Op::create(builder, loc, vgprType, scale, rcp);
+  Value estimate =
+      waveamdmachine::VCvtU32F32Op::create(builder, loc, vgprType, scaled);
+  values[op.getResult()] = isa<SimdType>(op.getResult().getType())
+                               ? estimate
+                               : readFirstLane(*this, loc, estimate);
+  eraseIfTopLevel(op);
+  return success();
+}
+
+LogicalResult WaveAMDMachineSelector::selectCtz(CtzOp op) {
+  Value source = expect(op.getSource(), op);
+  Location loc = op.getLoc();
+  unsigned bits = waveArithElementBits(op.getResult().getType());
+  bool simd = isa<SimdType>(op.getResult().getType());
+  if (bits == 32) {
+    if (!simd) {
+      values[op.getResult()] = waveamdmachine::SFf1I32B32Op::create(
+          builder, loc,
+          getRegType(op.getContext(), waveamdmachine::RegClass::SGPR),
+          materializeSGPR1(loc, source));
+      eraseIfTopLevel(op);
+      return success();
+    }
+    values[op.getResult()] = waveamdmachine::VFfblB32Op::create(
+        builder, loc,
+        getRegType(op.getContext(), waveamdmachine::RegClass::VGPR),
+        ensureVGPRForVSrc1(loc, source));
+    eraseIfTopLevel(op);
+    return success();
+  }
+
+  if (!simd) {
+    Value count = waveamdmachine::SFf1I32B64Op::create(
+        builder, loc,
+        getRegType(op.getContext(), waveamdmachine::RegClass::SGPR),
+        ensureSGPR2(*this, loc, source));
+    values[op.getResult()] = ensureSGPR2(*this, loc, count);
+    eraseIfTopLevel(op);
+    return success();
+  }
+
+  Type vgprType = getRegType(op.getContext(), waveamdmachine::RegClass::VGPR);
+  auto simdType = cast<SimdType>(op.getResult().getType());
+  Type maskType = getRegType(op.getContext(), waveamdmachine::RegClass::SGPR,
+                             simdType.getWidth() / 32);
+  Value wide = ensureVGPR2(*this, loc, source);
+  Value lo = extractLowDword(*this, loc, wide, op.getSource());
+  Value hi = extractHighDword(*this, loc, wide);
+  Value loCount = waveamdmachine::VFfblB32Op::create(
+      builder, loc, vgprType, ensureVGPRForVSrc1(loc, lo));
+  Value hiCount = waveamdmachine::VFfblB32Op::create(
+      builder, loc, vgprType, ensureVGPRForVSrc1(loc, hi));
+  Value hiCountPlus32 =
+      createVAddU32(*this, loc, hiCount, createImm(builder, loc, 32));
+  Value lowIsZero = createWordCmp(*this, loc, CmpRelation::Eq,
+                                  /*signedCmp=*/false, maskType, lo,
+                                  createImm(builder, loc, 0));
+  Value count = waveamdmachine::VCndmaskB32TupleOp::create(
+      builder, loc, vgprType, loCount, hiCountPlus32, lowIsZero);
+  values[op.getResult()] = ensureVGPR2(*this, loc, count);
+  eraseIfTopLevel(op);
+  return success();
 }
 
 static FailureOr<MemoryPayloadShape>
