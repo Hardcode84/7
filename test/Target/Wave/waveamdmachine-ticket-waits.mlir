@@ -93,6 +93,22 @@ func.func @mixed_lgkm_events_clamp_zero(%x: !waveamdmachine.reg<vgpr, 1>) {
   return
 }
 
+// CHECK-LABEL: func.func @bit_count_consumes_smem
+// CHECK: waveamdmachine.s_load_b32
+// CHECK-NEXT: waveamdmachine.s_waitcnt lgkmcnt(0)
+// CHECK-NEXT: waveamdmachine.s_flbit_i32_b32
+// CHECK-NEXT: waveamdmachine.v_ffbl_b32
+func.func @bit_count_consumes_smem() {
+  %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+  %loaded = waveamdmachine.s_load_b32 %zero, "s[0:1]"
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<sgpr, 1>
+  %s = waveamdmachine.s_flbit_i32_b32 %loaded
+      : (!waveamdmachine.reg<sgpr, 1>) -> !waveamdmachine.reg<sgpr, 1>
+  %v = waveamdmachine.v_ffbl_b32 %loaded
+      : (!waveamdmachine.reg<sgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
+  return
+}
+
 }
 
 // -----

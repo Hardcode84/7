@@ -644,6 +644,18 @@ def WaveAMDMachine_VLshrrevB32Op
     : WaveAMDMachine_BinaryU32Result<"v_lshrrev_b32">;
 def WaveAMDMachine_VMulLoU32Op
     : WaveAMDMachine_BinaryU32Result<"v_mul_lo_u32">;
+def WaveAMDMachine_VFfbhU32Op
+    : WaveAMDMachine_UnaryResult<"v_ffbh_u32", WaveAMDMachine_Reg1OrImm,
+                                 WaveAMDMachine_VGPR1,
+                                 [WaveAMDMachine_VALU, Pure]> {
+  let summary = "vector 32-bit count leading zeros, -1 on zero";
+}
+def WaveAMDMachine_VFfblB32Op
+    : WaveAMDMachine_UnaryResult<"v_ffbl_b32", WaveAMDMachine_Reg1OrImm,
+                                 WaveAMDMachine_VGPR1,
+                                 [WaveAMDMachine_VALU, Pure]> {
+  let summary = "vector 32-bit count trailing zeros, -1 on zero";
+}
 def WaveAMDMachine_VAdd3U32Op
     : WaveAMDMachine_TernaryIntResult<"v_add3_u32">;
 def WaveAMDMachine_VMadI32I24Op
@@ -2293,6 +2305,20 @@ def WaveAMDMachine_SLshrB32Op : WaveAMDMachine_Op<"s_lshr_b32", [Pure]> {
   let assemblyFormat = "$lhs `,` $rhs attr-dict `:` functional-type(operands, results)";
 }
 
+def WaveAMDMachine_SFlbitI32B32Op
+    : WaveAMDMachine_UnaryResult<"s_flbit_i32_b32",
+                                 WaveAMDMachine_SGPR1OrImm,
+                                 WaveAMDMachine_SGPR1, [Pure]> {
+  let summary = "scalar 32-bit count leading zeros, -1 on zero";
+}
+
+def WaveAMDMachine_SFf1I32B32Op
+    : WaveAMDMachine_UnaryResult<"s_ff1_i32_b32",
+                                 WaveAMDMachine_SGPR1OrImm,
+                                 WaveAMDMachine_SGPR1, [Pure]> {
+  let summary = "scalar 32-bit count trailing zeros, -1 on zero";
+}
+
 def WaveAMDMachine_SAndB32Op : WaveAMDMachine_Op<"s_and_b32", [Pure]> {
   let summary = "scalar 32-bit bitwise AND";
   let arguments = (ins WaveAMDMachine_SGPR1OrImm:$lhs,
@@ -2425,6 +2451,20 @@ def WaveAMDMachine_SLshrB64Op : WaveAMDMachine_Op<"s_lshr_b64", [Pure]> {
                        WaveAMDMachine_SGPR1OrImm:$shift);
   let results = (outs WaveAMDMachine_SGPR2:$result, WaveAMDMachine_SCC:$scc);
   let assemblyFormat = "$value `,` $shift attr-dict `:` functional-type(operands, results)";
+}
+
+def WaveAMDMachine_SFlbitI32B64Op
+    : WaveAMDMachine_UnaryResult<"s_flbit_i32_b64",
+                                 WaveAMDMachine_SGPR2,
+                                 WaveAMDMachine_SGPR1, [Pure]> {
+  let summary = "scalar 64-bit count leading zeros, -1 on zero";
+}
+
+def WaveAMDMachine_SFf1I32B64Op
+    : WaveAMDMachine_UnaryResult<"s_ff1_i32_b64",
+                                 WaveAMDMachine_SGPR2,
+                                 WaveAMDMachine_SGPR1, [Pure]> {
+  let summary = "scalar 64-bit count trailing zeros, -1 on zero";
 }
 
 def WaveAMDMachine_VLshrrevB64Op : WaveAMDMachine_Op<"v_lshrrev_b64", [Pure]> {

@@ -95,7 +95,7 @@ SchedClass classifyOp(Operation *op) {
       .Case<VCvtF16F32Op, VCvtF32F16Op, VCvtPkRtzF16F32Op, VPkAddF16Op,
             VPkMulF16Op, VPkFmaF16Op, VAdd3U32Op, VLshlAddU32Op,
             VAddLshlU32Op, VAndOrB32Op, VOr3B32Op, VXadU32Op, VMadI32I24Op,
-            VMadU32U24Op>(
+            VMadU32U24Op, VFfbhU32Op, VFfblB32Op>(
           [](auto) { return SchedClass::Write32Bit; })
       .Case<VExpF32Op, VRcpF32Op>(
           [](auto) { return SchedClass::WriteTrans32; })
@@ -109,9 +109,10 @@ SchedClass classifyOp(Operation *op) {
             SCmpLtU32Op, SCmpLeU32Op, SCSelectB32Op, SDelayAluOp, SLshlB32Op,
             SLshlB64Op, SLshrB32Op, SLshrB64Op, SMovB32Op, SMovB32TupleOp,
             SMovB32ValueOp, SMovB64ImmOp, SMovExecB64Op, SMovExecLoOp,
-            SMovM0Op, SMovVccB32Op, SMulI32Op, SMulU64Op, SNopOp, SOrB32Op,
-            SReadVccB32Op, SSetprioOp, SGetregShaderCyclesOp, SXorB32Op,
-            SXorB64Op>(
+            SMovM0Op, SMovVccB32Op, SMulI32Op, SMulU64Op, SNopOp,
+            SFf1I32B32Op, SFf1I32B64Op, SFlbitI32B32Op, SFlbitI32B64Op,
+            SOrB32Op, SReadVccB32Op, SSetprioOp, SGetregShaderCyclesOp,
+            SXorB32Op, SXorB64Op>(
           [](auto) { return SchedClass::WriteSALU; })
       .Default(fallbackClassify);
   // clang-format on

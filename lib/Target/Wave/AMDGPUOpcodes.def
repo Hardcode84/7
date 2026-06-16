@@ -14,6 +14,10 @@
   X(sLshlB32, S_LSHL_B32_vi, S_LSHL_B32_gfx11)                                 \
   X(sLshrB32, S_LSHR_B32_vi, S_LSHR_B32_gfx11)                                 \
   X(sLshrB64, S_LSHR_B64_vi, S_LSHR_B64_gfx11)                                 \
+  X(sFf1I32B32, S_FF1_I32_B32_vi, S_FF1_I32_B32_gfx11)                         \
+  X(sFf1I32B64, S_FF1_I32_B64_vi, S_FF1_I32_B64_gfx11)                         \
+  X(sFlbitI32B32, S_FLBIT_I32_B32_vi, S_FLBIT_I32_B32_gfx11)                   \
+  X(sFlbitI32B64, S_FLBIT_I32_B64_vi, S_FLBIT_I32_B64_gfx11)                   \
   X(sAndB32, S_AND_B32_vi, S_AND_B32_gfx11)                                    \
   X(sOrB32, S_OR_B32_vi, S_OR_B32_gfx11)                                       \
   X(sXorB32, S_XOR_B32_vi, S_XOR_B32_gfx11)                                    \
@@ -62,6 +66,8 @@
   X(vLshlrevB32, V_LSHLREV_B32_e32_vi, V_LSHLREV_B32_e32_gfx11)                \
   X(vLshrrevB32, V_LSHRREV_B32_e32_vi, V_LSHRREV_B32_e32_gfx11)                \
   X(vLshrrevB64, V_LSHRREV_B64_vi, V_LSHRREV_B64_e64_gfx11)                    \
+  X(vFfbhU32, V_FFBH_U32_e32_vi, V_CLZ_I32_U32_e32_gfx11)                      \
+  X(vFfblB32, V_FFBL_B32_e32_vi, V_CTZ_I32_B32_e32_gfx11)                      \
   X(vReadfirstlaneB32, V_READFIRSTLANE_B32_vi, V_READFIRSTLANE_B32_gfx11)      \
   X(vMulLoU32, V_MUL_LO_U32_vi, V_MUL_LO_U32_e64_gfx11)                        \
   X(vAdd3U32, V_ADD3_U32_vi, V_ADD3_U32_e64_gfx11)                             \

@@ -336,6 +336,10 @@ private:
   unsigned sLshlB32() const { return opcodes.sLshlB32; }
   unsigned sLshrB32() const { return opcodes.sLshrB32; }
   unsigned sLshrB64() const { return opcodes.sLshrB64; }
+  unsigned sFf1I32B32() const { return opcodes.sFf1I32B32; }
+  unsigned sFf1I32B64() const { return opcodes.sFf1I32B64; }
+  unsigned sFlbitI32B32() const { return opcodes.sFlbitI32B32; }
+  unsigned sFlbitI32B64() const { return opcodes.sFlbitI32B64; }
   unsigned sAndB32() const { return opcodes.sAndB32; }
   unsigned sOrB32() const { return opcodes.sOrB32; }
   unsigned sXorB32() const { return opcodes.sXorB32; }
@@ -384,6 +388,8 @@ private:
   unsigned vLshlrevB32() const { return opcodes.vLshlrevB32; }
   unsigned vLshrrevB32() const { return opcodes.vLshrrevB32; }
   unsigned vLshrrevB64() const { return opcodes.vLshrrevB64; }
+  unsigned vFfbhU32() const { return opcodes.vFfbhU32; }
+  unsigned vFfblB32() const { return opcodes.vFfblB32; }
   unsigned vReadfirstlaneB32() const { return opcodes.vReadfirstlaneB32; }
   unsigned vMulLoU32() const { return opcodes.vMulLoU32; }
   unsigned vAdd3U32() const { return opcodes.vAdd3U32; }
@@ -2064,6 +2070,12 @@ private:
       // unconstrained so we emit (vdst, src0, src1) as-is without the
       // VOP2 swap dance.
       return emitVMulLoU32(op, result(), op.getOperand(0), op.getOperand(1));
+    if (isa<waveamdmachine::VFfbhU32Op, waveamdmachine::VFfblB32Op>(op)) {
+      unsigned opcode =
+          isa<waveamdmachine::VFfbhU32Op>(op) ? vFfbhU32() : vFfblB32();
+      return emitMC(opcode,
+                    {toMCOperand(result()), toMCOperand(op.getOperand(0))});
+    }
     if (isa<waveamdmachine::VMadI32I24Op, waveamdmachine::VMadU32U24Op>(op)) {
       unsigned opcode =
           isa<waveamdmachine::VMadI32I24Op>(op) ? vMadI32I24() : vMadU32U24();
@@ -2246,6 +2258,12 @@ private:
       return emitMC(sLshrB32(), {toMCOperand(op.getResult(0)),
                                  toMCOperand(op.getOperand(0)),
                                  toMCOperand(op.getOperand(1))});
+    if (isa<waveamdmachine::SFlbitI32B32Op, waveamdmachine::SFf1I32B32Op>(op)) {
+      unsigned opcode = isa<waveamdmachine::SFlbitI32B32Op>(op) ? sFlbitI32B32()
+                                                                : sFf1I32B32();
+      return emitMC(opcode, {toMCOperand(op.getResult(0)),
+                             toMCOperand(op.getOperand(0))});
+    }
     if (isa<waveamdmachine::SAndB32Op>(op))
       return emitMC(sAndB32(), {toMCOperand(op.getResult(0)),
                                 toMCOperand(op.getOperand(0)),
@@ -2432,6 +2450,12 @@ private:
       return emitMC(sLshrB64(), {toMCOperand(op.getResult(0)),
                                  toMCOperand(op.getOperand(0)),
                                  toMCOperand(op.getOperand(1))});
+    if (isa<waveamdmachine::SFlbitI32B64Op, waveamdmachine::SFf1I32B64Op>(op)) {
+      unsigned opcode = isa<waveamdmachine::SFlbitI32B64Op>(op) ? sFlbitI32B64()
+                                                                : sFf1I32B64();
+      return emitMC(opcode, {toMCOperand(op.getResult(0)),
+                             toMCOperand(op.getOperand(0))});
+    }
     if (isa<waveamdmachine::VLshrrevB64Op>(op))
       return emitMC(vLshrrevB64(), {toMCOperand(op.getResult(0)),
                                     toMCOperand(op.getOperand(0)),

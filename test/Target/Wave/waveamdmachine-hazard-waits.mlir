@@ -29,6 +29,34 @@ func.func @delay_before_fpconvert_after_lgkm_wait(%x: !waveamdmachine.reg<vgpr, 
   return
 }
 
+// CHECK-LABEL: func.func @delay_before_v_ffbh_after_lgkm_wait
+// CHECK: waveamdmachine.s_waitcnt
+// CHECK-NEXT: waveamdmachine.imm 1
+// CHECK-NEXT: waveamdmachine.s_delay_alu
+// CHECK-NEXT: waveamdmachine.v_ffbh_u32
+func.func @delay_before_v_ffbh_after_lgkm_wait(%x: !waveamdmachine.reg<vgpr, 1>) {
+  waveamdmachine.s_waitcnt lgkmcnt(0)
+  %count = waveamdmachine.v_ffbh_u32 %x
+      : (!waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
+  return
+}
+
+// CHECK-LABEL: func.func @scalar_count_keeps_lgkm_valu_delay_armed
+// CHECK: waveamdmachine.s_waitcnt
+// CHECK-NEXT: waveamdmachine.s_flbit_i32_b32
+// CHECK-NEXT: waveamdmachine.imm 1
+// CHECK-NEXT: waveamdmachine.s_delay_alu
+// CHECK-NEXT: waveamdmachine.v_ffbl_b32
+func.func @scalar_count_keeps_lgkm_valu_delay_armed(
+    %x: !waveamdmachine.reg<sgpr, 1>) {
+  waveamdmachine.s_waitcnt lgkmcnt(0)
+  %s = waveamdmachine.s_flbit_i32_b32 %x
+      : (!waveamdmachine.reg<sgpr, 1>) -> !waveamdmachine.reg<sgpr, 1>
+  %v = waveamdmachine.v_ffbl_b32 %s
+      : (!waveamdmachine.reg<sgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
+  return
+}
+
 // CHECK-LABEL: func.func @no_delay_after_vmcnt_wait
 // CHECK: waveamdmachine.s_waitcnt
 // CHECK-NEXT: waveamdmachine.v_add_u32
