@@ -186,6 +186,6 @@
 
 // ASMPIPE: ds_read_b128
 // ASMPIPE: s_waitcnt lgkmcnt(0)
-// ASMPIPE-NEXT: buffer_load_dwordx4
+// ASMPIPE: buffer_load_dwordx4
 // ASMPIPE: s_waitcnt vmcnt(8)
 // ASMPIPE-NEXT: s_barrier

@@ -4765,6 +4765,19 @@ materializeDmaSourceBuckets(WaveAMDMachineSelector &S, waveamd::DmaLoadLdsOp op,
   FailureOr<AddressPlan> plan = planMemoryAddress(S, op, offset, spec);
   if (failed(plan))
     return failure();
+  if (isBuffer && plan->soffsetExpr) {
+    // Buffer-to-LDS with SGPR soffset takes the slow dynamic-offset path.
+    // Keep soffset inline zero when the whole source address fits vaddr.
+    FailureOr<sym::ExprHandle> voffset = appendAddressExpr(
+        S, plan->voffsetExpr, plan->soffsetExpr, plan->assumptions);
+    if (failed(voffset))
+      return failure();
+    if (!needsWideAddressMaterialization(*voffset, *plan) &&
+        S.slotFitsU32(*voffset, plan->assumptions)) {
+      plan->voffsetExpr = *voffset;
+      plan->soffsetExpr = {};
+    }
+  }
   if (plan->fullAddressRemainderExpr) {
     if (isBuffer)
       return emitBufferAddressFieldError(op.getOperation());
