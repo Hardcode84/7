@@ -15,6 +15,63 @@ func.func @select_uniform(%pred: i1, %a: i32, %b: i32) -> i32 {
   return %r : i32
 }
 
+// SELECT-LABEL: func.func @select_uniform_index_args
+// SELECT: waveamdmachine.tuple_from_elements
+// SELECT: waveamdmachine.tuple_from_elements
+// SELECT: waveamdmachine.s_cselect_b32
+// SELECT: waveamdmachine.s_cselect_b32
+// SELECT: waveamdmachine.tuple_from_elements
+func.func @select_uniform_index_args(%pred: i1, %a: index, %b: index) {
+  %r = wave.select %pred, %a, %b : index
+  return
+}
+
+// SELECT-LABEL: func.func @select_lane_index_read_first_return
+// SELECT: waveamdmachine.v_cndmask_b32_tuple
+// SELECT: waveamdmachine.tuple_to_elements
+// SELECT: waveamdmachine.v_readfirstlane_b32
+// SELECT: waveamdmachine.v_readfirstlane_b32
+// SELECT: waveamdmachine.tuple_from_elements
+// SELECT: waveamdmachine.s_mov_b32 "s0"
+// SELECT: waveamdmachine.s_mov_b32 "s1"
+func.func @select_lane_index_read_first_return(%limit: i32, %a: index,
+                                               %b: index) -> index {
+  %lane = wave.lane_id : !wave.simd<i32, 32>
+  %vlimit = wave.splat %limit : i32 -> !wave.simd<i32, 32>
+  %active = wave.cmpi ult %lane, %vlimit
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.mask<32>
+  %va = wave.splat %a : index -> !wave.simd<index, 32>
+  %vb = wave.splat %b : index -> !wave.simd<index, 32>
+  %r = wave.select %active, %va, %vb
+      : !wave.mask<32>, !wave.simd<index, 32>
+  %first = wave.read_first %r : !wave.simd<index, 32> -> index
+  return %first : index
+}
+
+// SELECT-LABEL: func.func @select_lane_index_constants
+// SELECT: waveamdmachine.tuple_from_elements
+// SELECT: waveamdmachine.tuple_from_elements
+// SELECT: waveamdmachine.v_cndmask_b32_tuple
+// ASM-LABEL: select_lane_index_constants:
+// ASM: v_mov_b32_e32 v{{[0-9]+}}, 2
+// ASM-NEXT: v_mov_b32_e32 v{{[0-9]+}}, 0
+// ASM-NEXT: v_mov_b32_e32 v{{[0-9]+}}, 0
+// ASM-NEXT: v_mov_b32_e32 v{{[0-9]+}}, 1
+func.func @select_lane_index_constants(%limit: i32) -> index {
+  %lane = wave.lane_id : !wave.simd<i32, 32>
+  %vlimit = wave.splat %limit : i32 -> !wave.simd<i32, 32>
+  %active = wave.cmpi ult %lane, %vlimit
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.mask<32>
+  %one = arith.constant 1 : index
+  %two = arith.constant 2 : index
+  %vone = wave.splat %one : index -> !wave.simd<index, 32>
+  %vtwo = wave.splat %two : index -> !wave.simd<index, 32>
+  %r = wave.select %active, %vone, %vtwo
+      : !wave.mask<32>, !wave.simd<index, 32>
+  %first = wave.read_first %r : !wave.simd<index, 32> -> index
+  return %first : index
+}
+
 // SELECT-LABEL: func.func @select_lane
 // SELECT: [[COND:%.*]] = waveamdmachine.v_cmp_lt_u32
 // SELECT: [[SEL:%.*]] = waveamdmachine.v_cndmask_b32_tuple {{.*}}, {{.*}}, [[COND]]

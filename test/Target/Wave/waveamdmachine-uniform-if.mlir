@@ -29,6 +29,43 @@ func.func @uniform_if_scalar(%cond: i1, %x: i32, %y: i32) -> i32 {
   return %r : i32
 }
 
+// SELECT-LABEL: func.func @uniform_if_index_expr_yield
+// SELECT: [[R:%.*]] = waveamdmachine.uniform_if
+// SELECT: waveamdmachine.tuple_from_elements
+// SELECT: waveamdmachine.yield {{.*}} : !waveamdmachine.reg<sgpr, 2>
+// SELECT: otherwise
+// SELECT: waveamdmachine.yield {{.*}} : !waveamdmachine.reg<sgpr, 2>
+func.func @uniform_if_index_expr_yield(%cond: i1, %x: i32) attributes {wave.kernel} {
+  %zero = arith.constant 0 : index
+  %r = scf.if %cond -> (index) {
+    %bounded = wave.assume %x as "x" [#wave.pred<"x >= 0">, #wave.pred<"x <= 1024">] : i32
+    %idx = wave.index_expr <"x + 1"> ["x"](%bounded) : (i32) -> index
+    scf.yield %idx : index
+  } else {
+    scf.yield %zero : index
+  }
+  return
+}
+
+// SELECT-LABEL: func.func @uniform_if_index_expr_return
+// SELECT: [[R:%.*]] = waveamdmachine.uniform_if
+// SELECT: waveamdmachine.yield {{.*}} : !waveamdmachine.reg<sgpr, 2>
+// SELECT: otherwise
+// SELECT: waveamdmachine.yield {{.*}} : !waveamdmachine.reg<sgpr, 2>
+// SELECT: waveamdmachine.s_mov_b32 "s0"
+// SELECT: waveamdmachine.s_mov_b32 "s1"
+func.func @uniform_if_index_expr_return(%cond: i1, %x: i32) -> index {
+  %zero = arith.constant 0 : index
+  %r = scf.if %cond -> (index) {
+    %bounded = wave.assume %x as "x" [#wave.pred<"x >= 0">, #wave.pred<"x <= 1024">] : i32
+    %idx = wave.index_expr <"x + 1"> ["x"](%bounded) : (i32) -> index
+    scf.yield %idx : index
+  } else {
+    scf.yield %zero : index
+  }
+  return %r : index
+}
+
 }
 
 // -----

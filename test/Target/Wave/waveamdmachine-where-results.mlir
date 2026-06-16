@@ -61,9 +61,11 @@ func.func @where_otherwise_yields_value(%limit: i32) -> i32 {
 // SELECT: [[THEN_IMM:%.*]] = waveamdmachine.imm 123456789
 // SELECT: [[ELSE_IMM:%.*]] = waveamdmachine.imm 987654321
 // SELECT: [[MERGED:%.*]] = waveamdmachine.exec_if [[COND]]
-// SELECT: waveamdmachine.yield [[THEN_IMM]]
+// SELECT: [[THEN:%.*]] = waveamdmachine.v_mov_b32_tuple [[THEN_IMM]]
+// SELECT: waveamdmachine.yield [[THEN]]
 // SELECT: otherwise
-// SELECT: waveamdmachine.yield [[ELSE_IMM]]
+// SELECT: [[ELSE:%.*]] = waveamdmachine.v_mov_b32_tuple [[ELSE_IMM]]
+// SELECT: waveamdmachine.yield [[ELSE]]
 // SELECT: waveamdmachine.v_readfirstlane_b32 [[MERGED]]
 // ASM-LABEL: where_otherwise_two_literals:
 // ASM: v_mov_b32_e32
@@ -347,6 +349,64 @@ func.func @where_otherwise_yields_large_pointer_offset(
       -> !wave.mem.token
   wave.wait %tok : !wave.mem.token
   return
+}
+
+// SELECT-LABEL: func.func @where_yields_simd_index
+// SELECT: waveamdmachine.exec_if
+// SELECT: waveamdmachine.yield {{.*}} : !waveamdmachine.reg<vgpr, 2>
+// SELECT: otherwise
+// SELECT: waveamdmachine.yield {{.*}} : !waveamdmachine.reg<vgpr, 2>
+// SELECT: waveamdmachine.v_readfirstlane_b32
+// SELECT: waveamdmachine.v_readfirstlane_b32
+// SELECT: waveamdmachine.s_mov_b32 "s0"
+// SELECT: waveamdmachine.s_mov_b32 "s1"
+func.func @where_yields_simd_index(%limit: i32, %a: index, %b: index) -> index {
+  %lane = wave.lane_id : !wave.simd<i32, 32>
+  %vlimit = wave.splat %limit : i32 -> !wave.simd<i32, 32>
+  %active = wave.cmpi ult %lane, %vlimit
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.mask<32>
+  %va = wave.splat %a : index -> !wave.simd<index, 32>
+  %vb = wave.splat %b : index -> !wave.simd<index, 32>
+  %r = wave.where %active {
+    wave.yield %va : !wave.simd<index, 32>
+  } otherwise {
+    wave.yield %vb : !wave.simd<index, 32>
+  } : !wave.mask<32> -> !wave.simd<index, 32>
+  %first = wave.read_first %r : !wave.simd<index, 32> -> index
+  return %first : index
+}
+
+// SELECT-LABEL: func.func @where_yields_simd_index_constants
+// SELECT: waveamdmachine.exec_if
+// SELECT: waveamdmachine.imm 1
+// SELECT: waveamdmachine.v_mov_b32_tuple
+// SELECT: waveamdmachine.imm 0
+// SELECT: waveamdmachine.v_mov_b32_tuple
+// SELECT: waveamdmachine.tuple_from_elements
+// SELECT: waveamdmachine.yield {{.*}} : !waveamdmachine.reg<vgpr, 2>
+// SELECT: otherwise
+// SELECT: waveamdmachine.imm 2
+// SELECT: waveamdmachine.v_mov_b32_tuple
+// SELECT: waveamdmachine.imm 0
+// SELECT: waveamdmachine.v_mov_b32_tuple
+// SELECT: waveamdmachine.tuple_from_elements
+// SELECT: waveamdmachine.yield {{.*}} : !waveamdmachine.reg<vgpr, 2>
+func.func @where_yields_simd_index_constants(%limit: i32) -> index {
+  %lane = wave.lane_id : !wave.simd<i32, 32>
+  %vlimit = wave.splat %limit : i32 -> !wave.simd<i32, 32>
+  %active = wave.cmpi ult %lane, %vlimit
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.mask<32>
+  %one = arith.constant 1 : index
+  %two = arith.constant 2 : index
+  %vone = wave.splat %one : index -> !wave.simd<index, 32>
+  %vtwo = wave.splat %two : index -> !wave.simd<index, 32>
+  %r = wave.where %active {
+    wave.yield %vone : !wave.simd<index, 32>
+  } otherwise {
+    wave.yield %vtwo : !wave.simd<index, 32>
+  } : !wave.mask<32> -> !wave.simd<index, 32>
+  %first = wave.read_first %r : !wave.simd<index, 32> -> index
+  return %first : index
 }
 
 }

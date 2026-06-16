@@ -13,8 +13,8 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // SELECT: %[[LOWER:.+]] = waveamdmachine.imm 0 : !waveamdmachine.imm
 // SELECT: %[[UPPER:.+]] = waveamdmachine.imm 4 : !waveamdmachine.imm
 // SELECT: %[[STEP:.+]] = waveamdmachine.imm 1 : !waveamdmachine.imm
-// SELECT: %[[EC:.+]] = waveamdmachine.s_cmp_lt_i32 %[[LOWER]], %[[UPPER]]
 // SELECT: %[[INIT:.+]] = waveamdmachine.s_mov_b32_value %[[LOWER]] : (!waveamdmachine.imm) -> !waveamdmachine.reg<sgpr, 1>
+// SELECT: %[[EC:.+]] = waveamdmachine.s_cmp_lt_i32 %[[LOWER]], %[[UPPER]]
 // SELECT: waveamdmachine.uniform_loop if %[[EC]] : !waveamdmachine.reg<scc, 1> carries(%[[INIT]] : !waveamdmachine.reg<sgpr, 1>)
 // SELECT: ^bb0(%[[IV:.+]]: !waveamdmachine.reg<sgpr, 1>):
 // SELECT:   %[[NIV:.+]], %{{.+}} = waveamdmachine.s_add_i32 %[[IV]], %[[STEP]]
@@ -31,8 +31,8 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // REGALLOC:   %[[SUM:.+]], %{{.+}} = waveamdmachine.s_add_i32 %{{.+}}, %{{.+}} : {{.+}} -> (!waveamdmachine.reg<sgpr, 1, [[CARRY]]>, {{.+}})
 
 // ASM-LABEL: loop_pretested:
-// ASM: s_cmp_lt_i32 0, 4
 // ASM: s_mov_b32 s[[CARRY:[0-9]+]], 0
+// ASM: s_cmp_lt_i32 0, 4
 // ASM: s_cbranch_scc0 .Lloop_pretested.loop_exit_0
 // ASM: .Lloop_pretested.loop_head_0:
 // ASM: s_add_i32 s[[CARRY]], s[[CARRY]], 1
@@ -44,6 +44,56 @@ func.func @loop_pretested() attributes {wave.kernel} {
   %hi = arith.constant 4 : i32
   %step = arith.constant 1 : i32
   scf.for %i = %lo to %hi step %step : i32 {
+    scf.yield
+  }
+  return
+}
+
+// Index upper bounds may materialize as SGPR2 values. The IV must widen too.
+// SELECT-LABEL: func.func @loop_index_expr_upper_sgpr2
+// SELECT: %[[HI:.+]] = waveamdmachine.arg {{.*}} : !waveamdmachine.reg<sgpr, 2>
+// SELECT: waveamdmachine.s_cmp_lt_i32
+// SELECT: waveamdmachine.s_cmp_eq_u32
+// SELECT: waveamdmachine.s_cmp_lt_u32
+// SELECT: waveamdmachine.uniform_loop if %{{.+}} : !waveamdmachine.reg<scc, 1> carries(%{{.+}} : !waveamdmachine.reg<sgpr, 2>)
+// SELECT: ^bb0(%[[IV:.+]]: !waveamdmachine.reg<sgpr, 2>):
+// SELECT:   %[[NIV:.+]], %{{.+}} = waveamdmachine.s_add_u64 %[[IV]], {{.*}}
+// SELECT:   waveamdmachine.s_cmp_lt_u32
+func.func @loop_index_expr_upper_sgpr2(%hi_raw: i64) attributes {wave.kernel} {
+  %lo = arith.constant 0 : index
+  %step = arith.constant 1 : index
+  %hi = wave.index_expr <"h"> ["h"](%hi_raw) : (i64) -> index
+  scf.for %i = %lo to %hi step %step {
+    scf.yield
+  }
+  return
+}
+
+// SELECT-LABEL: func.func @loop_index_imm_upper_sgpr2
+// SELECT: waveamdmachine.uniform_loop if %{{.+}} : !waveamdmachine.reg<scc, 1> carries(%{{.+}} : !waveamdmachine.reg<sgpr, 2>)
+// SELECT: ^bb0(%[[IV:.+]]: !waveamdmachine.reg<sgpr, 2>):
+// SELECT:   waveamdmachine.s_add_u64 %[[IV]],
+func.func @loop_index_imm_upper_sgpr2() attributes {wave.kernel} {
+  %lo = arith.constant 0 : index
+  %hi = arith.constant 4294967297 : index
+  %step = arith.constant 1 : index
+  scf.for %i = %lo to %hi step %step {
+    scf.yield
+  }
+  return
+}
+
+// SELECT-LABEL: func.func @loop_index_negative_lower_sgpr2
+// SELECT: waveamdmachine.s_cselect_b32
+// SELECT: waveamdmachine.tuple_from_elements
+// SELECT: waveamdmachine.uniform_loop if %{{.+}} : !waveamdmachine.reg<scc, 1> carries(%{{.+}} : !waveamdmachine.reg<sgpr, 2>)
+// SELECT: ^bb0(%[[IV:.+]]: !waveamdmachine.reg<sgpr, 2>):
+// SELECT:   waveamdmachine.s_add_u64 %[[IV]],
+func.func @loop_index_negative_lower_sgpr2(%lo_raw: i32) attributes {wave.kernel} {
+  %lo = wave.index_expr <"lo"> ["lo"](%lo_raw) : (i32) -> index
+  %hi = arith.constant 4294967297 : index
+  %step = arith.constant 1 : index
+  scf.for %i = %lo to %hi step %step {
     scf.yield
   }
   return

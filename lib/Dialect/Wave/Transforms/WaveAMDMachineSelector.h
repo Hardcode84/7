@@ -45,6 +45,8 @@ namespace mlir::wave::wmsel {
 // anything reaching a `Lane` symbol falls through to `voffset`.
 enum class TermKind { Const = 0, Uniform = 1, Lane = 2 };
 
+enum class CmpRelation { Eq, Ne, Lt, Le, Gt, Ge };
+
 struct PointerOffsetBinding {
   std::string name;
   Value value;
@@ -181,6 +183,15 @@ FailureOr<Value> materializeFullPlanAddress(WaveAMDMachineSelector &S,
                                             Operation *user, Value base,
                                             const AddressPlan &plan);
 
+Value ensureSGPR2(WaveAMDMachineSelector &S, Location loc, Value v);
+
+Value extractLowDword(WaveAMDMachineSelector &S, Location loc, Value v,
+                      Value source = {});
+
+Value createScalarI64Cmp(WaveAMDMachineSelector &S, Location loc,
+                         CmpRelation relation, bool signedCmp, Value lhs,
+                         Value rhs);
+
 // scf.for lowering cluster. Defined in `WaveAMDMachineScfFor.cpp` as free
 // helpers taking the selector by reference, mirroring the IXS-cluster
 // pattern. `selectScfFor` is the entry point dispatched from
@@ -235,6 +246,7 @@ public:
   // ---- codegen helpers ---------------------------------------------------
   bool isBufferPointer(Type type);
   bool isSharedPointer(Type type);
+  std::optional<ConstantIntRanges> finiteSignedRange(Value value);
   unsigned pointerBaseWidth(Type type);
   unsigned nonPointerArgWidth(Type type);
   void materializeArgument(BlockArgument arg, size_t index);

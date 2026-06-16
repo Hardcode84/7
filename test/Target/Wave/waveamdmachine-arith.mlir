@@ -145,11 +145,24 @@ func.func @uniform_i64_signed_div_dynamic_pow2(%x: i64, %d: i64) attributes {wav
   return
 }
 
+// SELECT-LABEL: func.func @uniform_index_signed_div_dynamic_pow2_wide_index_expr
+// SELECT-NOT: waveamdmachine.v_mov_b32_tuple
+// SELECT: waveamdmachine.s_ff1_i32_b64
+// SELECT: waveamdmachine.s_lshr_b64
+func.func @uniform_index_signed_div_dynamic_pow2_wide_index_expr(%x: i32, %d: i32) attributes {wave.kernel} {
+  %num = wave.index_expr <"x"> ["x"](%x) : (i32) -> index
+  %nonneg = wave.assume %num as "x" [#wave.pred<"x >= 0">] : index
+  %divisor = wave.index_expr <"d"> ["d"](%d) : (i32) -> index
+  %pow2 = wave.assume %divisor as "d" [#wave.pred<"d & (d - 1) == 0">, #wave.pred<"d > 0">] : index
+  %quot = wave.binary divsi %nonneg, %pow2 : index, index -> index
+  return
+}
+
 // SELECT-LABEL: func.func @uniform_index_product_signed_div_bounded_range
 // SELECT-NOT: waveamdmachine.s_mul_i32
-// SELECT: %[[PROD:.*]], %{{.*}} = waveamdmachine.v_mul_u64
+// SELECT: %[[PROD:.*]], %{{.*}}, %{{.*}} = waveamdmachine.s_mul_u64
 // SELECT: %[[SHIFT:.*]] = waveamdmachine.imm 5
-// SELECT: waveamdmachine.v_lshrrev_b64 %[[SHIFT]], %[[PROD]]
+// SELECT: waveamdmachine.s_lshr_b64 %[[PROD]], %[[SHIFT]]
 func.func @uniform_index_product_signed_div_bounded_range(%m: index, %n: index) attributes {wave.kernel} {
   %a = wave.assume %m as "x" [#wave.pred<"x >= 0">, #wave.pred<"x <= 4000000">] : index
   %b = wave.assume %n as "x" [#wave.pred<"x >= 0">, #wave.pred<"x <= 4000000">] : index
@@ -157,6 +170,40 @@ func.func @uniform_index_product_signed_div_bounded_range(%m: index, %n: index) 
   %thirty_two = arith.constant 32 : index
   %quot = wave.binary divsi %prod, %thirty_two : index, index -> index
   return
+}
+
+// SELECT-LABEL: func.func @uniform_index_expr_i32_sign_ext
+// SELECT: %[[X:.*]] = waveamdmachine.arg
+// SELECT: %[[NEG:.*]] = waveamdmachine.s_cmp_lt_i32 %[[X]],
+// SELECT: %[[HI:.*]] = waveamdmachine.s_cselect_b32 %[[NEG]],
+// SELECT: waveamdmachine.tuple_from_elements %[[X]], %[[HI]]
+func.func @uniform_index_expr_i32_sign_ext(%x: i32) -> index {
+  %idx = wave.index_expr <"x"> ["x"](%x) : (i32) -> index
+  return %idx : index
+}
+
+// SELECT-LABEL: func.func @uniform_index_expr_i32_nonnegative_zero_ext
+// SELECT-NOT: waveamdmachine.s_cmp_lt_i32
+// SELECT: waveamdmachine.tuple_from_elements
+// SELECT-NOT: waveamdmachine.s_cmp_lt_i32
+func.func @uniform_index_expr_i32_nonnegative_zero_ext(%x: i32) -> index {
+  %nonneg = wave.assume %x as "x" [#wave.pred<"x >= 0">] : i32
+  %idx = wave.index_expr <"x"> ["x"](%nonneg) : (i32) -> index
+  return %idx : index
+}
+
+// SELECT-LABEL: func.func @simd_index_expr_i32_sign_ext_read_first
+// SELECT: waveamdmachine.v_cmp_lt_i32
+// SELECT: waveamdmachine.v_cndmask_b32_tuple
+// SELECT: waveamdmachine.tuple_from_elements
+// SELECT: waveamdmachine.v_readfirstlane_b32
+// SELECT: waveamdmachine.v_readfirstlane_b32
+func.func @simd_index_expr_i32_sign_ext_read_first(%x: !wave.simd<i32, 32>)
+    -> index {
+  %idx = wave.index_expr <"x"> ["x"](%x)
+      : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
+  %first = wave.read_first %idx : !wave.simd<index, 32> -> index
+  return %first : index
 }
 
 // SELECT-LABEL: func.func @uniform_i32_unsigned_high_bit_div_rem

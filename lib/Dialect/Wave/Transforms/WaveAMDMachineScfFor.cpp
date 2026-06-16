@@ -18,6 +18,10 @@
 
 #include "WaveAMDMachineLoopCarryPlan.h"
 
+#include "llvm/Support/CheckedArithmetic.h"
+
+#include <limits>
+
 using namespace mlir;
 using namespace mlir::wave;
 using namespace mlir::waveamd;
@@ -297,16 +301,187 @@ static void collectStridedBaseCarries(WaveAMDMachineSelector &S, Location loc,
     out.push_back(advanceStridedBase(S, loc, group.bodyBase, group));
 }
 
+static bool isWideScalarValue(Value value) {
+  auto regType = dyn_cast<waveamdmachine::RegType>(value.getType());
+  return regType && regType.getWidth() > 1;
+}
+
+static bool needsWideSignedScalarCmp(WaveAMDMachineSelector &S, Value value) {
+  if (isWideScalarValue(value))
+    return true;
+  if (std::optional<int64_t> imm = S.getImmediateValue(value))
+    return !llvm::isInt<32>(*imm);
+  return false;
+}
+
+struct LoopRange64 {
+  int64_t lo = 0;
+  int64_t hi = 0;
+};
+
+static std::optional<LoopRange64> asLoopRange64(ConstantIntRanges range) {
+  unsigned w = range.smin().getBitWidth();
+  if (w == 0 || w > 64)
+    return std::nullopt;
+  return LoopRange64{range.smin().getSExtValue(), range.smax().getSExtValue()};
+}
+
+static std::optional<LoopRange64>
+selectedSignedRange(WaveAMDMachineSelector &S, Value source, Value selected) {
+  if (std::optional<int64_t> imm = S.getImmediateValue(selected))
+    return LoopRange64{*imm, *imm};
+  if (auto mov = selected.getDefiningOp<waveamdmachine::SMovB64ImmOp>()) {
+    int64_t value = mov.getValue();
+    return LoopRange64{value, value};
+  }
+  if (std::optional<ConstantIntRanges> range = S.finiteSignedRange(source))
+    return asLoopRange64(*range);
+  return std::nullopt;
+}
+
+static bool loopIvFitsSignedI32(WaveAMDMachineSelector &S, scf::ForOp op,
+                                Value lower, Value upper, Value step) {
+  std::optional<LoopRange64> lowerRange =
+      selectedSignedRange(S, op.getLowerBound(), lower);
+  std::optional<LoopRange64> upperRange =
+      selectedSignedRange(S, op.getUpperBound(), upper);
+  std::optional<LoopRange64> stepRange =
+      selectedSignedRange(S, op.getStep(), step);
+  if (!lowerRange || !upperRange || !stepRange || stepRange->lo <= 0)
+    return false;
+
+  int64_t i32Min = std::numeric_limits<int32_t>::min();
+  int64_t i32Max = std::numeric_limits<int32_t>::max();
+  if (lowerRange->lo < i32Min || lowerRange->hi > i32Max)
+    return false;
+  std::optional<int64_t> maxNext =
+      llvm::checkedAdd(upperRange->hi, stepRange->hi - 1);
+  return maxNext && *maxNext <= i32Max;
+}
+
+static bool shouldUseWideLoopIv(WaveAMDMachineSelector &S, scf::ForOp op,
+                                Value lower, Value upper, Value step) {
+  bool needsWideCompare = needsWideSignedScalarCmp(S, lower) ||
+                          needsWideSignedScalarCmp(S, upper) ||
+                          needsWideSignedScalarCmp(S, step);
+  return needsWideCompare && !loopIvFitsSignedI32(S, op, lower, upper, step);
+}
+
+static Value narrowLoopValue(WaveAMDMachineSelector &S, Location loc,
+                             Value value) {
+  if (isWideScalarValue(value))
+    return extractLowDword(S, loc, value);
+  return value;
+}
+
+static bool isSGPR1Value(Value value) {
+  auto regType = dyn_cast<waveamdmachine::RegType>(value.getType());
+  return regType && regType.getRegClass() == waveamdmachine::RegClass::SGPR &&
+         regType.getWidth() == 1;
+}
+
+static bool isZeroValue(WaveAMDMachineSelector &S, Value value) {
+  if (std::optional<int64_t> imm = S.getImmediateValue(value))
+    return *imm == 0;
+  if (auto mov = value.getDefiningOp<waveamdmachine::SMovB32ValueOp>())
+    return isZeroValue(S, mov.getSource());
+  return false;
+}
+
+static std::optional<Value> getZeroExtendedLowDword(WaveAMDMachineSelector &S,
+                                                    Value value) {
+  if (isSGPR1Value(value))
+    return value;
+  auto tuple = value.getDefiningOp<waveamdmachine::TupleFromElementsOp>();
+  if (!tuple || tuple.getElements().size() != 2)
+    return std::nullopt;
+  Value lo = tuple.getElements().front();
+  Value hi = tuple.getElements().back();
+  if (isSGPR1Value(lo) && isZeroValue(S, hi))
+    return lo;
+  return std::nullopt;
+}
+
+static Value buildSignedSGPR2(WaveAMDMachineSelector &S, Location loc,
+                              Value value) {
+  Type sgpr1 =
+      getRegType(S.builder.getContext(), waveamdmachine::RegClass::SGPR, 1);
+  Value lo = S.materializeSGPR1(loc, value);
+  Value negative = waveamdmachine::SCmpLtI32Op::create(
+      S.builder, loc, getSCCType(S.builder.getContext()), lo,
+      createImm(S.builder, loc, 0));
+  Value hi = waveamdmachine::SCSelectB32Op::create(
+      S.builder, loc, sgpr1, negative, createImm(S.builder, loc, -1),
+      createImm(S.builder, loc, 0));
+  Type sgpr2 =
+      getRegType(S.builder.getContext(), waveamdmachine::RegClass::SGPR, 2);
+  return waveamdmachine::TupleFromElementsOp::create(S.builder, loc, sgpr2,
+                                                     ValueRange{lo, hi})
+      .getTuple();
+}
+
+static Value signExtendSGPR2(WaveAMDMachineSelector &S, Location loc,
+                             Value value) {
+  if (std::optional<Value> lo = getZeroExtendedLowDword(S, value))
+    return buildSignedSGPR2(S, loc, *lo);
+  if (isWideScalarValue(value))
+    return ensureSGPR2(S, loc, value);
+  if (S.getImmediateValue(value))
+    return ensureSGPR2(S, loc, value);
+  return buildSignedSGPR2(S, loc, value);
+}
+
+static Value createLoopLtCmp(WaveAMDMachineSelector &S, Location loc, Value lhs,
+                             Value rhs) {
+  if (needsWideSignedScalarCmp(S, lhs) || needsWideSignedScalarCmp(S, rhs)) {
+    lhs = signExtendSGPR2(S, loc, lhs);
+    rhs = signExtendSGPR2(S, loc, rhs);
+    return createScalarI64Cmp(S, loc, CmpRelation::Lt, /*signedCmp=*/true, lhs,
+                              rhs);
+  }
+  Type scc = getSCCType(S.builder.getContext());
+  return waveamdmachine::SCmpLtI32Op::create(
+      S.builder, loc, scc, S.ensureSGPR1(loc, lhs), S.ensureSGPR1(loc, rhs));
+}
+
+static Value createLoopIvInit(WaveAMDMachineSelector &S, Location loc,
+                              Value lower, bool wideIv) {
+  return wideIv ? signExtendSGPR2(S, loc, lower)
+                : S.materializeSGPR1(loc, narrowLoopValue(S, loc, lower));
+}
+
+static Value createLoopStep(WaveAMDMachineSelector &S, Location loc, Value step,
+                            bool wideIv) {
+  return wideIv ? signExtendSGPR2(S, loc, step)
+                : S.ensureSGPR1(loc, narrowLoopValue(S, loc, step));
+}
+
+static Value createLoopNextIv(WaveAMDMachineSelector &S, Location loc, Value iv,
+                              Value step, bool wideIv) {
+  if (wideIv)
+    return waveamdmachine::SAddU64Op::create(
+               S.builder, loc,
+               getRegType(S.builder.getContext(),
+                          waveamdmachine::RegClass::SGPR, 2),
+               getSCCType(S.builder.getContext()), iv, step)
+        .getResult();
+  return waveamdmachine::SAddI32Op::create(
+             S.builder, loc,
+             getRegType(S.builder.getContext(), waveamdmachine::RegClass::SGPR),
+             getSCCType(S.builder.getContext()), iv, step)
+      .getResult();
+}
+
 } // namespace
 
-// `wave.nonzero_trip` skips the entry SCC test (post-tested do/while),
-// otherwise an `s_cmp_lt_i32 lower, upper` is materialized immediately
-// before the loop op.
+// Wide bounds force wide IV carry; otherwise IV wraps before wide compare.
 LogicalResult selectScfFor(WaveAMDMachineSelector &S, scf::ForOp op) {
   Location loc = op.getLoc();
-  Value lower = S.ensureSGPR1(loc, S.expect(op.getLowerBound(), op));
-  Value upper = S.ensureSGPR1(loc, S.expect(op.getUpperBound(), op));
-  Value step = S.ensureSGPR1(loc, S.expect(op.getStep(), op));
+  Value lower = S.expect(op.getLowerBound(), op);
+  Value upper = S.expect(op.getUpperBound(), op);
+  Value step = S.expect(op.getStep(), op);
+  bool wideIv = shouldUseWideLoopIv(S, op, lower, upper, step);
+  Value loopStep = createLoopStep(S, loc, step, wideIv);
 
   ScfForCarryPlan carryPlan;
   if (failed(planScfForCarries(S, op, carryPlan)))
@@ -315,18 +490,16 @@ LogicalResult selectScfFor(WaveAMDMachineSelector &S, scf::ForOp op) {
   SmallVector<StridedBaseCarry> &stridedBaseGroups =
       carryPlan.stridedBaseGroups;
 
-  Type scc = getSCCType(S.builder.getContext());
-  Value entryCond;
-  if (!op->hasAttr("wave.nonzero_trip"))
-    entryCond =
-        waveamdmachine::SCmpLtI32Op::create(S.builder, loc, scc, lower, upper);
-
   SmallVector<Value> inits;
-  inits.push_back(S.materializeSGPR1(loc, lower));
+  inits.push_back(createLoopIvInit(S, loc, lower, wideIv));
   for (const CarrySnapshot &snap : snapshots)
     inits.push_back(snap.carry);
   for (const StridedBaseCarry &group : stridedBaseGroups)
     inits.push_back(group.base);
+
+  Value entryCond;
+  if (!op->hasAttr("wave.nonzero_trip"))
+    entryCond = createLoopLtCmp(S, loc, lower, upper);
 
   Operation *loop = buildUniformLoopOp(S, loc, entryCond, inits);
   Block &loopBody = loop->getRegion(0).front();
@@ -339,11 +512,8 @@ LogicalResult selectScfFor(WaveAMDMachineSelector &S, scf::ForOp op) {
   if (failed(selectScfBody(S, op)))
     return failure();
 
-  Type sgpr1 =
-      getRegType(S.builder.getContext(), waveamdmachine::RegClass::SGPR, 1);
-  auto add = waveamdmachine::SAddI32Op::create(S.builder, loc, sgpr1, scc,
-                                               loopBody.getArgument(0), step);
-  Value nextIv = add.getResult();
+  Value nextIv =
+      createLoopNextIv(S, loc, loopBody.getArgument(0), loopStep, wideIv);
 
   SmallVector<Value> carryOperands{nextIv};
   auto yield = cast<scf::YieldOp>(op.getBody()->getTerminator());
@@ -351,8 +521,7 @@ LogicalResult selectScfFor(WaveAMDMachineSelector &S, scf::ForOp op) {
     return failure();
   collectStridedBaseCarries(S, loc, stridedBaseGroups, carryOperands);
 
-  Value backCond =
-      waveamdmachine::SCmpLtI32Op::create(S.builder, loc, scc, nextIv, upper);
+  Value backCond = createLoopLtCmp(S, loc, nextIv, upper);
   waveamdmachine::ContinueIfOp::create(S.builder, loc, backCond, carryOperands);
 
   S.builder.setInsertionPointAfter(loop);

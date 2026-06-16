@@ -396,10 +396,10 @@ struct IntRange64 {
   int64_t hi = 0;
 };
 
-static std::optional<ConstantIntRanges>
-finiteSignedRange(WaveAMDMachineSelector &S, Value binding) {
+std::optional<ConstantIntRanges>
+WaveAMDMachineSelector::finiteSignedRange(Value binding) {
   const dataflow::IntegerValueRangeLattice *lattice =
-      S.rangeSolver.lookupState<dataflow::IntegerValueRangeLattice>(binding);
+      rangeSolver.lookupState<dataflow::IntegerValueRangeLattice>(binding);
   if (!lattice)
     return std::nullopt;
   IntegerValueRange ivr = lattice->getValue();
@@ -434,7 +434,7 @@ static std::optional<IntRange64> scaleRange64(ConstantIntRanges range,
 void WaveAMDMachineSelector::appendBindingAssumptions(
     Value binding, StringRef name,
     SmallVectorImpl<sym::PredHandle> &assumptions, int64_t scale) {
-  std::optional<ConstantIntRanges> range = finiteSignedRange(*this, binding);
+  std::optional<ConstantIntRanges> range = finiteSignedRange(binding);
   if (range) {
     std::optional<IntRange64> scaled = scaleRange64(*range, scale);
     if (scaled) {
@@ -720,7 +720,11 @@ static Value tuple2(WaveAMDMachineSelector &S, Location loc,
       .getTuple();
 }
 
-static Value ensureSGPR2(WaveAMDMachineSelector &S, Location loc, Value v) {
+static Value signExtendSGPR2(WaveAMDMachineSelector &S, Location loc, Value v);
+static Value signExtendVGPR2(WaveAMDMachineSelector &S, Location loc,
+                             Value source, Value selected);
+
+Value ensureSGPR2(WaveAMDMachineSelector &S, Location loc, Value v) {
   if (isSGPR2(v))
     return v;
   if (std::optional<int64_t> imm = S.getImmediateValue(v))
@@ -745,13 +749,69 @@ static Value ensureVGPR2(WaveAMDMachineSelector &S, Location loc, Value v) {
                           waveamdmachine::RegClass::VGPR, 2),
                v)
         .getResult();
+  if (std::optional<int64_t> imm = S.getImmediateValue(v)) {
+    uint64_t value = static_cast<uint64_t>(*imm);
+    Value lo = S.ensureVGPRForVSrc1(
+        loc,
+        createImm(S.builder, loc, static_cast<int64_t>(value & 0xffffffffull)));
+    Value hi = S.ensureVGPRForVSrc1(
+        loc, createImm(S.builder, loc, static_cast<int64_t>(value >> 32)));
+    return tuple2(S, loc, waveamdmachine::RegClass::VGPR, lo, hi);
+  }
   Value lo = S.ensureVGPRForVSrc1(loc, v);
   Value hi = S.ensureVGPRForVSrc1(loc, createImm(S.builder, loc, 0));
   return tuple2(S, loc, waveamdmachine::RegClass::VGPR, lo, hi);
 }
 
-static Value extractLowDword(WaveAMDMachineSelector &S, Location loc, Value v,
-                             Value source = {}) {
+static Value signExtendSGPR2(WaveAMDMachineSelector &S, Location loc, Value v) {
+  if (std::optional<int64_t> imm = S.getImmediateValue(v))
+    return ensureSGPR2(S, loc, v);
+  if (std::optional<Value> lo = zeroExtendedLowDword(S, v))
+    v = *lo;
+  else if (isSGPR2(v))
+    return v;
+  Type sgpr1 =
+      getRegType(S.builder.getContext(), waveamdmachine::RegClass::SGPR, 1);
+  Value lo = S.materializeSGPR1(loc, v);
+  Value negative = waveamdmachine::SCmpLtI32Op::create(
+      S.builder, loc, getSCCType(S.builder.getContext()), lo,
+      createImm(S.builder, loc, 0));
+  Value hi = waveamdmachine::SCSelectB32Op::create(
+      S.builder, loc, sgpr1, negative, createImm(S.builder, loc, -1),
+      createImm(S.builder, loc, 0));
+  return tuple2(S, loc, waveamdmachine::RegClass::SGPR, lo, hi);
+}
+
+static Value readFirstLane(WaveAMDMachineSelector &S, Location loc,
+                           Value value) {
+  waveamdmachine::RegType regType =
+      dyn_cast<waveamdmachine::RegType>(value.getType());
+  if (!regType || regType.getRegClass() != waveamdmachine::RegClass::VGPR)
+    return value;
+  Type sgpr1 =
+      getRegType(S.builder.getContext(), waveamdmachine::RegClass::SGPR, 1);
+  if (regType.getWidth() == 1)
+    return waveamdmachine::VReadfirstlaneB32Op::create(S.builder, loc, sgpr1,
+                                                       value);
+
+  Type vgpr1 =
+      getRegType(S.builder.getContext(), waveamdmachine::RegClass::VGPR, 1);
+  SmallVector<Type, 2> elementTypes(regType.getWidth(), vgpr1);
+  auto split = waveamdmachine::TupleToElementsOp::create(S.builder, loc,
+                                                         elementTypes, value);
+  SmallVector<Value, 2> words;
+  for (Value word : split.getElements())
+    words.push_back(waveamdmachine::VReadfirstlaneB32Op::create(S.builder, loc,
+                                                                sgpr1, word));
+  Type resultType = getRegType(S.builder.getContext(),
+                               waveamdmachine::RegClass::SGPR, words.size());
+  return waveamdmachine::TupleFromElementsOp::create(S.builder, loc, resultType,
+                                                     words)
+      .getTuple();
+}
+
+Value extractLowDword(WaveAMDMachineSelector &S, Location loc, Value v,
+                      Value source) {
   if (std::optional<int64_t> imm = S.getImmediateValue(v)) {
     uint64_t lo = static_cast<uint64_t>(*imm) & 0xffffffffull;
     return createImm(S.builder, loc, static_cast<int64_t>(lo));
@@ -891,10 +951,16 @@ static Value lshrWidePow2(WaveAMDMachineSelector &S, Location loc, Value v,
       .getResult();
 }
 
+struct WideSymbolBinding {
+  std::string name;
+  Value source;
+  Value selected;
+};
+
 static FailureOr<Value> materializeWideIndexExprNode(
     WaveAMDMachineSelector &S, sym::ExprHandle expr, Operation *user,
-    ArrayRef<std::pair<std::string, Value>> bindings,
-    ArrayRef<sym::PredHandle> assumptions, bool symbolsAreUniform = false);
+    ArrayRef<WideSymbolBinding> bindings, ArrayRef<sym::PredHandle> assumptions,
+    bool symbolsAreUniform = false);
 
 struct WideRationalValue {
   Value numerator;
@@ -903,13 +969,14 @@ struct WideRationalValue {
 
 static FailureOr<WideRationalValue> materializeWideRationalIndexExprNode(
     WaveAMDMachineSelector &S, sym::ExprHandle expr, Operation *user,
-    ArrayRef<std::pair<std::string, Value>> bindings,
-    ArrayRef<sym::PredHandle> assumptions, bool symbolsAreUniform = false);
+    ArrayRef<WideSymbolBinding> bindings, ArrayRef<sym::PredHandle> assumptions,
+    bool symbolsAreUniform = false);
 
-static FailureOr<Value> materializeWideAddTerm(
-    WaveAMDMachineSelector &S, sym::AddTerm addTerm, Operation *user,
-    ArrayRef<std::pair<std::string, Value>> bindings,
-    ArrayRef<sym::PredHandle> assumptions, bool symbolsAreUniform) {
+static FailureOr<Value>
+materializeWideAddTerm(WaveAMDMachineSelector &S, sym::AddTerm addTerm,
+                       Operation *user, ArrayRef<WideSymbolBinding> bindings,
+                       ArrayRef<sym::PredHandle> assumptions,
+                       bool symbolsAreUniform) {
   FailureOr<Value> term = materializeWideIndexExprNode(
       S, addTerm.term, user, bindings, assumptions, symbolsAreUniform);
   if (failed(term))
@@ -924,10 +991,11 @@ static FailureOr<Value> materializeWideAddTerm(
   return mulWide(S, user->getLoc(), *coeffValue, *term);
 }
 
-static FailureOr<Value> materializeWideAdd(
-    WaveAMDMachineSelector &S, sym::ExprHandle expr, Operation *user,
-    ArrayRef<std::pair<std::string, Value>> bindings,
-    ArrayRef<sym::PredHandle> assumptions, bool symbolsAreUniform) {
+static FailureOr<Value>
+materializeWideAdd(WaveAMDMachineSelector &S, sym::ExprHandle expr,
+                   Operation *user, ArrayRef<WideSymbolBinding> bindings,
+                   ArrayRef<sym::PredHandle> assumptions,
+                   bool symbolsAreUniform) {
   Location loc = user->getLoc();
   sym::ExprView view(expr);
   std::optional<Value> acc;
@@ -958,10 +1026,11 @@ static FailureOr<Value> materializeWideAdd(
       .getResult();
 }
 
-static FailureOr<Value> materializeWideMulFactor(
-    WaveAMDMachineSelector &S, sym::MulFactor factor, Operation *user,
-    ArrayRef<std::pair<std::string, Value>> bindings,
-    ArrayRef<sym::PredHandle> assumptions, bool symbolsAreUniform) {
+static FailureOr<Value>
+materializeWideMulFactor(WaveAMDMachineSelector &S, sym::MulFactor factor,
+                         Operation *user, ArrayRef<WideSymbolBinding> bindings,
+                         ArrayRef<sym::PredHandle> assumptions,
+                         bool symbolsAreUniform) {
   int32_t exp = factor.exponent;
   if (exp <= 0)
     return user->emitError(
@@ -976,10 +1045,11 @@ static FailureOr<Value> materializeWideMulFactor(
   return pow;
 }
 
-static FailureOr<Value> materializeWideMul(
-    WaveAMDMachineSelector &S, sym::ExprHandle expr, Operation *user,
-    ArrayRef<std::pair<std::string, Value>> bindings,
-    ArrayRef<sym::PredHandle> assumptions, bool symbolsAreUniform) {
+static FailureOr<Value>
+materializeWideMul(WaveAMDMachineSelector &S, sym::ExprHandle expr,
+                   Operation *user, ArrayRef<WideSymbolBinding> bindings,
+                   ArrayRef<sym::PredHandle> assumptions,
+                   bool symbolsAreUniform) {
   Location loc = user->getLoc();
   sym::ExprView view(expr);
   std::optional<Value> acc;
@@ -1011,17 +1081,50 @@ static FailureOr<Value> materializeWideMul(
       .getResult();
 }
 
-static FailureOr<Value> materializeWideSymbol(
-    WaveAMDMachineSelector &S, sym::ExprHandle expr, Operation *user,
-    ArrayRef<std::pair<std::string, Value>> bindings, bool symbolsAreUniform) {
-  StringRef name = sym::ExprView(expr).getSymbolName();
-  for (const auto &binding : bindings) {
-    if (binding.first != name)
-      continue;
+static bool isWideBindingNonNegative(WaveAMDMachineSelector &S,
+                                     const WideSymbolBinding &binding) {
+  if (std::optional<int64_t> imm = S.getImmediateValue(binding.selected))
+    return *imm >= 0;
+  if (auto mov = binding.selected.getDefiningOp<waveamdmachine::SMovB64ImmOp>())
+    return static_cast<int64_t>(mov.getValue()) >= 0;
+  std::optional<ConstantIntRanges> range = S.finiteSignedRange(binding.source);
+  return range && !range->smin().isNegative();
+}
+
+static bool isSignedNarrowBinding(Value source) {
+  Type type = source.getType();
+  if (auto simd = dyn_cast<SimdType>(type))
+    type = simd.getElementType();
+  if (type.isIndex())
+    return true;
+  auto intType = dyn_cast<IntegerType>(type);
+  return intType && intType.isSignless() && intType.getWidth() < 64;
+}
+
+static FailureOr<Value> materializeWideBinding(WaveAMDMachineSelector &S,
+                                               Location loc,
+                                               const WideSymbolBinding &binding,
+                                               bool symbolsAreUniform) {
+  if (!isSignedNarrowBinding(binding.source) ||
+      isWideBindingNonNegative(S, binding)) {
     if (symbolsAreUniform)
-      return ensureSGPR2(S, user->getLoc(), binding.second);
-    return ensureVGPR2(S, user->getLoc(), binding.second);
+      return ensureSGPR2(S, loc, binding.selected);
+    return ensureVGPR2(S, loc, binding.selected);
   }
+  if (symbolsAreUniform)
+    return signExtendSGPR2(S, loc, binding.selected);
+  return signExtendVGPR2(S, loc, binding.source, binding.selected);
+}
+
+static FailureOr<Value>
+materializeWideSymbol(WaveAMDMachineSelector &S, sym::ExprHandle expr,
+                      Operation *user, ArrayRef<WideSymbolBinding> bindings,
+                      bool symbolsAreUniform) {
+  StringRef name = sym::ExprView(expr).getSymbolName();
+  for (const WideSymbolBinding &binding : bindings)
+    if (binding.name == name)
+      return materializeWideBinding(S, user->getLoc(), binding,
+                                    symbolsAreUniform);
   return user->emitError("full-address index_expr leaf '")
          << name << "' has no binding";
 }
@@ -1046,10 +1149,11 @@ static FailureOr<Value> materializeWideRational(WaveAMDMachineSelector &S,
   return createWideImm(S, user->getLoc(), rational->numerator);
 }
 
-static FailureOr<Value> materializeWideXor(
-    WaveAMDMachineSelector &S, sym::ExprHandle expr, Operation *user,
-    ArrayRef<std::pair<std::string, Value>> bindings,
-    ArrayRef<sym::PredHandle> assumptions, bool symbolsAreUniform) {
+static FailureOr<Value>
+materializeWideXor(WaveAMDMachineSelector &S, sym::ExprHandle expr,
+                   Operation *user, ArrayRef<WideSymbolBinding> bindings,
+                   ArrayRef<sym::PredHandle> assumptions,
+                   bool symbolsAreUniform) {
   sym::ExprView view(expr);
   FailureOr<Value> lhs = materializeWideIndexExprNode(
       S, view.getBinaryLhs(), user, bindings, assumptions, symbolsAreUniform);
@@ -1097,8 +1201,8 @@ mulWideRational(WaveAMDMachineSelector &S, Location loc, WideRationalValue lhs,
 
 static FailureOr<WideRationalValue> materializeWideRationalAdd(
     WaveAMDMachineSelector &S, sym::ExprHandle expr, Operation *user,
-    ArrayRef<std::pair<std::string, Value>> bindings,
-    ArrayRef<sym::PredHandle> assumptions, bool symbolsAreUniform) {
+    ArrayRef<WideSymbolBinding> bindings, ArrayRef<sym::PredHandle> assumptions,
+    bool symbolsAreUniform) {
   Location loc = user->getLoc();
   sym::ExprView view(expr);
   FailureOr<WideRationalValue> constant = materializeWideRationalIndexExprNode(
@@ -1131,8 +1235,8 @@ static FailureOr<WideRationalValue> materializeWideRationalAdd(
 
 static FailureOr<WideRationalValue> materializeWideRationalMul(
     WaveAMDMachineSelector &S, sym::ExprHandle expr, Operation *user,
-    ArrayRef<std::pair<std::string, Value>> bindings,
-    ArrayRef<sym::PredHandle> assumptions, bool symbolsAreUniform) {
+    ArrayRef<WideSymbolBinding> bindings, ArrayRef<sym::PredHandle> assumptions,
+    bool symbolsAreUniform) {
   Location loc = user->getLoc();
   sym::ExprView view(expr);
   FailureOr<WideRationalValue> coefficient =
@@ -1170,8 +1274,8 @@ static FailureOr<WideRationalValue> materializeWideRationalMul(
 
 static FailureOr<WideRationalValue> materializeWideIntegerRational(
     WaveAMDMachineSelector &S, sym::ExprHandle expr, Operation *user,
-    ArrayRef<std::pair<std::string, Value>> bindings,
-    ArrayRef<sym::PredHandle> assumptions, bool symbolsAreUniform) {
+    ArrayRef<WideSymbolBinding> bindings, ArrayRef<sym::PredHandle> assumptions,
+    bool symbolsAreUniform) {
   FailureOr<Value> value = materializeWideIndexExprNode(
       S, expr, user, bindings, assumptions, symbolsAreUniform);
   if (failed(value))
@@ -1181,7 +1285,7 @@ static FailureOr<WideRationalValue> materializeWideIntegerRational(
 
 static FailureOr<WideRationalValue> materializeWideRationalPrimitive(
     WaveAMDMachineSelector &S, sym::ExprHandle expr, Operation *user,
-    ArrayRef<std::pair<std::string, Value>> bindings, bool symbolsAreUniform) {
+    ArrayRef<WideSymbolBinding> bindings, bool symbolsAreUniform) {
   sym::ExprView view(expr);
   switch (view.getKind()) {
   case sym::ExprKind::Integer:
@@ -1215,8 +1319,8 @@ static FailureOr<WideRationalValue> materializeWideRationalPrimitive(
 
 static FailureOr<WideRationalValue> materializeWideRationalCompound(
     WaveAMDMachineSelector &S, sym::ExprHandle expr, Operation *user,
-    ArrayRef<std::pair<std::string, Value>> bindings,
-    ArrayRef<sym::PredHandle> assumptions, bool symbolsAreUniform) {
+    ArrayRef<WideSymbolBinding> bindings, ArrayRef<sym::PredHandle> assumptions,
+    bool symbolsAreUniform) {
   sym::ExprView view(expr);
   switch (view.getKind()) {
   case sym::ExprKind::Add:
@@ -1240,8 +1344,8 @@ static FailureOr<WideRationalValue> materializeWideRationalCompound(
 
 static FailureOr<WideRationalValue> materializeWideRationalIndexExprNode(
     WaveAMDMachineSelector &S, sym::ExprHandle expr, Operation *user,
-    ArrayRef<std::pair<std::string, Value>> bindings,
-    ArrayRef<sym::PredHandle> assumptions, bool symbolsAreUniform) {
+    ArrayRef<WideSymbolBinding> bindings, ArrayRef<sym::PredHandle> assumptions,
+    bool symbolsAreUniform) {
   sym::ExprKind kind = sym::ExprView(expr).getKind();
   if (kind == sym::ExprKind::Integer || kind == sym::ExprKind::Rational ||
       kind == sym::ExprKind::Symbol)
@@ -1362,8 +1466,7 @@ static LogicalResult requireWideNonNegativeRoundedExpr(
 
 static FailureOr<Value>
 materializeWideRounded(WaveAMDMachineSelector &S, sym::ExprHandle expr,
-                       Operation *user,
-                       ArrayRef<std::pair<std::string, Value>> bindings,
+                       Operation *user, ArrayRef<WideSymbolBinding> bindings,
                        ArrayRef<sym::PredHandle> assumptions, bool isCeil,
                        bool symbolsAreUniform) {
   sym::ExprHandle childExpr = sym::ExprView(expr).getUnaryArg();
@@ -1392,7 +1495,7 @@ materializeWideRounded(WaveAMDMachineSelector &S, sym::ExprHandle expr,
 
 static FailureOr<Value> materializeWidePrimitiveIndexExprNode(
     WaveAMDMachineSelector &S, sym::ExprHandle expr, Operation *user,
-    ArrayRef<std::pair<std::string, Value>> bindings, bool symbolsAreUniform) {
+    ArrayRef<WideSymbolBinding> bindings, bool symbolsAreUniform) {
   sym::ExprView view(expr);
   switch (view.getKind()) {
   case sym::ExprKind::Integer:
@@ -1413,8 +1516,8 @@ static FailureOr<Value> materializeWidePrimitiveIndexExprNode(
 
 static FailureOr<Value> materializeWideCompoundIndexExprNode(
     WaveAMDMachineSelector &S, sym::ExprHandle expr, Operation *user,
-    ArrayRef<std::pair<std::string, Value>> bindings,
-    ArrayRef<sym::PredHandle> assumptions, bool symbolsAreUniform) {
+    ArrayRef<WideSymbolBinding> bindings, ArrayRef<sym::PredHandle> assumptions,
+    bool symbolsAreUniform) {
   sym::ExprView view(expr);
   switch (view.getKind()) {
   case sym::ExprKind::Add:
@@ -1444,8 +1547,8 @@ static FailureOr<Value> materializeWideCompoundIndexExprNode(
 
 static FailureOr<Value> materializeWideIndexExprNode(
     WaveAMDMachineSelector &S, sym::ExprHandle expr, Operation *user,
-    ArrayRef<std::pair<std::string, Value>> bindings,
-    ArrayRef<sym::PredHandle> assumptions, bool symbolsAreUniform) {
+    ArrayRef<WideSymbolBinding> bindings, ArrayRef<sym::PredHandle> assumptions,
+    bool symbolsAreUniform) {
   sym::ExprKind kind = sym::ExprView(expr).getKind();
   if (kind == sym::ExprKind::Integer || kind == sym::ExprKind::Rational ||
       kind == sym::ExprKind::Symbol)
@@ -1477,9 +1580,10 @@ materializePointerOffsetWideValue(WaveAMDMachineSelector &S, Operation *user,
                                   const PointerOffset &offset) {
   if (!offset.expr)
     return createWideImm(S, user->getLoc(), 0);
-  SmallVector<std::pair<std::string, Value>, 4> bindings;
+  SmallVector<WideSymbolBinding, 4> bindings;
   for (const PointerOffsetBinding &binding : offset.bindings)
-    bindings.push_back({binding.name, S.expect(binding.value, user)});
+    bindings.push_back(
+        {binding.name, binding.value, S.expect(binding.value, user)});
   return materializeWideIndexExprNode(S, offset.expr, user, bindings,
                                       offset.assumptions);
 }
@@ -1488,9 +1592,10 @@ static FailureOr<Value> materializeUniformPointerOffsetWideValue(
     WaveAMDMachineSelector &S, Operation *user, const PointerOffset &offset) {
   if (!offset.expr)
     return createWideImm(S, user->getLoc(), 0);
-  SmallVector<std::pair<std::string, Value>, 4> bindings;
+  SmallVector<WideSymbolBinding, 4> bindings;
   for (const PointerOffsetBinding &binding : offset.bindings)
-    bindings.push_back({binding.name, S.expect(binding.value, user)});
+    bindings.push_back(
+        {binding.name, binding.value, S.expect(binding.value, user)});
   return materializeWideIndexExprNode(S, offset.expr, user, bindings,
                                       offset.assumptions,
                                       /*symbolsAreUniform=*/true);
@@ -1519,7 +1624,7 @@ namespace {
 
 struct AddressPlanBindings {
   llvm::StringMap<Value> narrow;
-  SmallVector<std::pair<std::string, Value>, 4> wide;
+  SmallVector<WideSymbolBinding, 4> wide;
 };
 
 static AddressPlanBindings
@@ -1529,7 +1634,7 @@ materializeAddressPlanBindings(WaveAMDMachineSelector &S, Operation *user,
   for (const PointerOffsetBinding &binding : plan.bindings) {
     Value mapped = S.expect(binding.value, user);
     out.narrow[binding.name] = mapped;
-    out.wide.push_back({binding.name, mapped});
+    out.wide.push_back({binding.name, binding.value, mapped});
   }
   return out;
 }
@@ -1979,7 +2084,7 @@ getRegisterPayloadBits(Type type,
     return *elementBits * vectorType.getNumElements();
   }
   if (type.isIndex())
-    return 32;
+    return 64;
   if (auto intType = dyn_cast<IntegerType>(type)) {
     if (!intType.isSignless())
       return emitError() << "unsupported register payload type " << type;
@@ -2467,9 +2572,9 @@ static bool isProvenNonNegative(WaveAMDMachineSelector &S, Value source,
     return *imm >= 0;
   if (auto mov = selected.getDefiningOp<waveamdmachine::SMovB64ImmOp>())
     return static_cast<int64_t>(mov.getValue()) >= 0;
-  std::optional<ConstantIntRanges> range = finiteSignedRange(S, source);
+  std::optional<ConstantIntRanges> range = S.finiteSignedRange(source);
   if (!range)
-    range = finiteSignedRange(S, selected);
+    range = S.finiteSignedRange(selected);
   return range && !range->smin().isNegative();
 }
 
@@ -3066,8 +3171,6 @@ Value WaveAMDMachineSelector::ensureVGPRForVSrc1(Location loc, Value v) {
       v);
 }
 
-enum class CmpRelation { Eq, Ne, Lt, Le, Gt, Ge };
-
 static bool isSignedCmpPredicate(arith::CmpIPredicate predicate) {
   switch (predicate) {
   case arith::CmpIPredicate::slt:
@@ -3341,6 +3444,35 @@ static Value createWordCmp(WaveAMDMachineSelector &S, Location loc,
   return createVCmp(S.builder, loc, relation, signedCmp, resultType, lhs, rhs);
 }
 
+static Value signExtendVGPR2(WaveAMDMachineSelector &S, Location loc,
+                             Value source, Value selected) {
+  if (!isa<SimdType>(source.getType()))
+    return ensureVGPR2(S, loc, signExtendSGPR2(S, loc, selected));
+  if (std::optional<int64_t> imm = S.getImmediateValue(selected))
+    return ensureVGPR2(S, loc, selected);
+  if (std::optional<Value> lo = zeroExtendedLowDword(S, selected))
+    selected = *lo;
+  else if (isVGPR2(selected))
+    return selected;
+  else if (isSGPR2(selected))
+    return ensureVGPR2(S, loc, selected);
+
+  auto simdType = cast<SimdType>(source.getType());
+  Type maskType =
+      getRegType(S.builder.getContext(), waveamdmachine::RegClass::SGPR,
+                 simdType.getWidth() / 32);
+  Type vgpr1 =
+      getRegType(S.builder.getContext(), waveamdmachine::RegClass::VGPR, 1);
+  Value lo = S.ensureVGPRForVSrc1(loc, selected);
+  Value negative = createWordCmp(S, loc, CmpRelation::Lt, /*signedCmp=*/true,
+                                 maskType, lo, createImm(S.builder, loc, 0));
+  Value hi = waveamdmachine::VCndmaskB32TupleOp::create(
+                 S.builder, loc, vgpr1, createImm(S.builder, loc, 0),
+                 createImm(S.builder, loc, -1), negative)
+                 .getResult();
+  return tuple2(S, loc, waveamdmachine::RegClass::VGPR, lo, hi);
+}
+
 static CmpRelation strictHighRelation(CmpRelation relation) {
   if (relation == CmpRelation::Le)
     return CmpRelation::Lt;
@@ -3481,9 +3613,9 @@ static Value combineScalarBools(WaveAMDMachineSelector &S, Location loc,
       .getResult();
 }
 
-static Value createScalarI64Cmp(WaveAMDMachineSelector &S, Location loc,
-                                CmpRelation relation, bool signedCmp, Value lhs,
-                                Value rhs) {
+Value createScalarI64Cmp(WaveAMDMachineSelector &S, Location loc,
+                         CmpRelation relation, bool signedCmp, Value lhs,
+                         Value rhs) {
   I64Dwords lhsDwords = splitI64Dwords(S, loc, lhs);
   I64Dwords rhsDwords = splitI64Dwords(S, loc, rhs);
   if (relation == CmpRelation::Eq || relation == CmpRelation::Ne) {
@@ -3621,8 +3753,13 @@ splitSGPRWords(WaveAMDMachineSelector &S, Operation *op, Value value,
                unsigned width) {
   if (width == 1)
     return SmallVector<Value, 2>{S.ensureSGPR1(op->getLoc(), value)};
-  if (width == 2 && isMachineImm(value))
-    value = ensureSGPR2(S, op->getLoc(), value);
+  if (width == 2) {
+    auto regType = dyn_cast<waveamdmachine::RegType>(value.getType());
+    if (isMachineImm(value) ||
+        (regType && regType.getRegClass() == waveamdmachine::RegClass::SGPR &&
+         regType.getWidth() == 1))
+      value = ensureSGPR2(S, op->getLoc(), value);
+  }
   auto regType = dyn_cast<waveamdmachine::RegType>(value.getType());
   if (!regType || regType.getRegClass() != waveamdmachine::RegClass::SGPR ||
       regType.getWidth() != width)
@@ -3689,6 +3826,38 @@ static FailureOr<Value> createFullMaskFromSCC(WaveAMDMachineSelector &S,
                             createImm(S.builder, op->getLoc(), 0), width);
 }
 
+static FailureOr<Value> ensureImmLaneSelectVGPR(WaveAMDMachineSelector &S,
+                                                Operation *op, Value value,
+                                                unsigned width,
+                                                Type resultType) {
+  if (!isMachineImm(value))
+    return op->emitError("lane select source must be register or immediate");
+  if (width == 2)
+    return ensureVGPR2(S, op->getLoc(), value);
+  return waveamdmachine::VMovB32TupleOp::create(S.builder, op->getLoc(),
+                                                resultType, value)
+      .getResult();
+}
+
+static FailureOr<Value>
+ensureRegLaneSelectVGPR(WaveAMDMachineSelector &S, Operation *op, Value value,
+                        unsigned width, Type resultType,
+                        waveamdmachine::RegType regType) {
+  if (regType.getRegClass() == waveamdmachine::RegClass::VGPR &&
+      regType.getWidth() == width)
+    return value;
+  if (width == 2 && regType.getWidth() == 1 &&
+      (regType.getRegClass() == waveamdmachine::RegClass::VGPR ||
+       regType.getRegClass() == waveamdmachine::RegClass::SGPR))
+    return ensureVGPR2(S, op->getLoc(), value);
+  if (regType.getRegClass() == waveamdmachine::RegClass::SGPR &&
+      regType.getWidth() == width)
+    return waveamdmachine::VMovB32TupleOp::create(S.builder, op->getLoc(),
+                                                  resultType, value)
+        .getResult();
+  return op->emitError("lane select source width/register class mismatch");
+}
+
 static FailureOr<Value> ensureLaneSelectVGPR(WaveAMDMachineSelector &S,
                                              Operation *op, Value value,
                                              unsigned width) {
@@ -3696,23 +3865,9 @@ static FailureOr<Value> ensureLaneSelectVGPR(WaveAMDMachineSelector &S,
       getRegType(op->getContext(), waveamdmachine::RegClass::VGPR, width);
   waveamdmachine::RegType regType =
       dyn_cast<waveamdmachine::RegType>(value.getType());
-  if (!regType) {
-    if (!isMachineImm(value))
-      return op->emitError("lane select source must be register or immediate");
-    return waveamdmachine::VMovB32TupleOp::create(S.builder, op->getLoc(),
-                                                  resultType, value)
-        .getResult();
-  }
-
-  if (regType.getRegClass() == waveamdmachine::RegClass::VGPR &&
-      regType.getWidth() == width)
-    return value;
-  if (regType.getRegClass() == waveamdmachine::RegClass::SGPR &&
-      regType.getWidth() == width)
-    return waveamdmachine::VMovB32TupleOp::create(S.builder, op->getLoc(),
-                                                  resultType, value)
-        .getResult();
-  return op->emitError("lane select source width/register class mismatch");
+  if (!regType)
+    return ensureImmLaneSelectVGPR(S, op, value, width, resultType);
+  return ensureRegLaneSelectVGPR(S, op, value, width, resultType, regType);
 }
 
 static FailureOr<Value> createLaneSelect(WaveAMDMachineSelector &S,
@@ -3766,9 +3921,10 @@ materializePointerSelectOffsetWideVGPR(WaveAMDMachineSelector &S, SelectOp op,
                                        const PointerOffset &offset) {
   Value value;
   if (offset.expr) {
-    SmallVector<std::pair<std::string, Value>, 4> bindings;
+    SmallVector<WideSymbolBinding, 4> bindings;
     for (const PointerOffsetBinding &binding : offset.bindings)
-      bindings.push_back({binding.name, S.expect(binding.value, op)});
+      bindings.push_back(
+          {binding.name, binding.value, S.expect(binding.value, op)});
     FailureOr<Value> wide = materializeWideIndexExprNode(
         S, offset.expr, op, bindings, offset.assumptions);
     if (failed(wide))
@@ -4102,15 +4258,7 @@ LogicalResult WaveAMDMachineSelector::selectBallot(BallotOp op) {
 
 LogicalResult WaveAMDMachineSelector::selectReadFirst(ReadFirstOp op) {
   Value src = expect(op.getSource(), op);
-  if (auto regType = dyn_cast<waveamdmachine::RegType>(src.getType());
-      regType && regType.getRegClass() == waveamdmachine::RegClass::SGPR) {
-    values[op.getResult()] = src;
-    eraseIfTopLevel(op);
-    return success();
-  }
-  values[op.getResult()] = waveamdmachine::VReadfirstlaneB32Op::create(
-      builder, op.getLoc(),
-      getRegType(op.getContext(), waveamdmachine::RegClass::SGPR), src);
+  values[op.getResult()] = readFirstLane(*this, op.getLoc(), src);
   eraseIfTopLevel(op);
   return success();
 }
@@ -4372,10 +4520,16 @@ LogicalResult WaveAMDMachineSelector::selectIndexExpr(IndexExprOp op) {
                    [](Operation *user) { return !isa<PtrAddOp>(user); });
   indexOffsets[op.getResult()] = *pointerOffset;
   if (needsValue) {
-    FailureOr<Value> value =
-        needsWideIndexExprValue(*this, op, *pointerOffset)
-            ? materializePointerOffsetWideValue(*this, op, *pointerOffset)
-            : materializePointerOffsetValue(*this, op, *pointerOffset);
+    FailureOr<Value> value = failure();
+    if (needsWideIndexExprValue(*this, op, *pointerOffset)) {
+      value =
+          op.getResult().getType().isIndex()
+              ? materializeUniformPointerOffsetWideValue(*this, op,
+                                                         *pointerOffset)
+              : materializePointerOffsetWideValue(*this, op, *pointerOffset);
+    } else {
+      value = materializePointerOffsetValue(*this, op, *pointerOffset);
+    }
     if (failed(value))
       return failure();
     values[op.getResult()] = *value;
@@ -5124,24 +5278,6 @@ static bool isPointerLikeWhereResult(Type type) {
   return false;
 }
 
-static LogicalResult validateWhereMergeSource(WhereOp op, Value value,
-                                              unsigned width, StringRef name) {
-  waveamdmachine::RegType regType =
-      dyn_cast<waveamdmachine::RegType>(value.getType());
-  if (!regType) {
-    if (isa<waveamdmachine::ImmType>(value.getType()) && width == 1)
-      return success();
-    return op.emitError(name) << " yield cannot be merged as a SIMD value";
-  }
-  if (regType.getWidth() != width)
-    return op.emitError(name) << " yield register width " << regType.getWidth()
-                              << " does not match result width " << width;
-  if (regType.getRegClass() != waveamdmachine::RegClass::VGPR &&
-      regType.getRegClass() != waveamdmachine::RegClass::SGPR)
-    return op.emitError(name) << " yield must be VGPR or SGPR";
-  return success();
-}
-
 struct SelectedWhereRegion {
   Region region;
   SmallVector<Value> sourceYields;
@@ -5237,9 +5373,10 @@ materializePointerWhereOffsetWide(WaveAMDMachineSelector &S, WhereOp op,
                                   const PointerOffset &offset) {
   Value value;
   if (offset.expr) {
-    SmallVector<std::pair<std::string, Value>, 4> bindings;
+    SmallVector<WideSymbolBinding, 4> bindings;
     for (const PointerOffsetBinding &binding : offset.bindings)
-      bindings.push_back({binding.name, S.expect(binding.value, op)});
+      bindings.push_back(
+          {binding.name, binding.value, S.expect(binding.value, op)});
     FailureOr<Value> wide = materializeWideIndexExprNode(
         S, offset.expr, op, bindings, offset.assumptions);
     if (failed(wide))
@@ -5400,39 +5537,58 @@ static LogicalResult addPointerResult(WaveAMDMachineSelector &S, WhereOp op,
   return addOtherwisePointerResult(S, op, idx, thenRegion, elseRegion, plan);
 }
 
-static LogicalResult addDataResult(WhereOp op, unsigned idx,
-                                   SelectedWhereRegion &thenRegion,
-                                   SelectedWhereRegion &elseRegion,
-                                   WhereResultPlan &plan) {
-  Value result = op.getResult(idx);
-  Value thenValue = thenRegion.machineYields[idx];
-  if (op.getElseRegion().empty()) {
-    unsigned resultIndex = plan.addResult(thenValue.getType(), thenValue);
-    plan.bindings.push_back({resultIndex, std::nullopt});
-    return success();
-  }
-  Value elseValue = elseRegion.machineYields[idx];
-  Type resultType = result.getType();
+static FailureOr<Value> materializeWhereDataYield(WaveAMDMachineSelector &S,
+                                                  WhereOp op, Value value,
+                                                  Type resultType) {
   if (isa<MemTokenType>(resultType)) {
-    unsigned resultIndex =
-        plan.addResult(getMemTokenType(op.getContext()), thenValue, elseValue);
-    plan.bindings.push_back({resultIndex, std::nullopt});
-    return success();
+    if (isa<waveamdmachine::MemTokenType>(value.getType()))
+      return value;
+    return op.emitError("wave.where token yield type mismatch");
   }
   if (!isa<SimdType>(resultType))
-    return op.emitError(
-        "WaveAMDMachine lowering supports result-bearing wave.where "
-        "with otherwise only for SIMD data, pointers, or memory tokens");
+    return op.emitError("WaveAMDMachine lowering supports result-bearing "
+                        "wave.where only for SIMD data, pointers, or memory "
+                        "tokens");
   FailureOr<unsigned> width =
       getRegisterPayloadWidth(resultType, [&]() { return op.emitError(); });
   if (failed(width))
     return failure();
-  if (failed(validateWhereMergeSource(op, thenValue, *width, "then")) ||
-      failed(validateWhereMergeSource(op, elseValue, *width, "else")))
+  return ensureLaneSelectVGPR(S, op.getOperation(), value, *width);
+}
+
+static FailureOr<Value>
+materializeWhereDataYieldInRegion(WaveAMDMachineSelector &S, WhereOp op,
+                                  SelectedWhereRegion &selected, Value value,
+                                  Type resultType) {
+  auto savedIP = S.builder.saveInsertionPoint();
+  S.builder.setInsertionPointToEnd(&selected.region.front());
+  FailureOr<Value> result = materializeWhereDataYield(S, op, value, resultType);
+  S.builder.restoreInsertionPoint(savedIP);
+  return result;
+}
+
+static LogicalResult addDataResult(WaveAMDMachineSelector &S, WhereOp op,
+                                   unsigned idx,
+                                   SelectedWhereRegion &thenRegion,
+                                   SelectedWhereRegion &elseRegion,
+                                   WhereResultPlan &plan) {
+  Value result = op.getResult(idx);
+  Type resultType = result.getType();
+  FailureOr<Value> thenValue = materializeWhereDataYieldInRegion(
+      S, op, thenRegion, thenRegion.machineYields[idx], resultType);
+  if (failed(thenValue))
     return failure();
-  Type type =
-      getRegType(op.getContext(), waveamdmachine::RegClass::VGPR, *width);
-  unsigned resultIndex = plan.addResult(type, thenValue, elseValue);
+  if (op.getElseRegion().empty()) {
+    unsigned resultIndex = plan.addResult((*thenValue).getType(), *thenValue);
+    plan.bindings.push_back({resultIndex, std::nullopt});
+    return success();
+  }
+  FailureOr<Value> elseValue = materializeWhereDataYieldInRegion(
+      S, op, elseRegion, elseRegion.machineYields[idx], resultType);
+  if (failed(elseValue))
+    return failure();
+  unsigned resultIndex =
+      plan.addResult((*thenValue).getType(), *thenValue, *elseValue);
   plan.bindings.push_back({resultIndex, std::nullopt});
   return success();
 }
@@ -5447,7 +5603,7 @@ static LogicalResult buildWhereResultPlan(WaveAMDMachineSelector &S, WhereOp op,
         return failure();
       continue;
     }
-    if (failed(addDataResult(op, idx, thenRegion, elseRegion, plan)))
+    if (failed(addDataResult(S, op, idx, thenRegion, elseRegion, plan)))
       return failure();
   }
   return success();
@@ -5722,6 +5878,17 @@ static FailureOr<Value> materializeScfIfDataYield(WaveAMDMachineSelector &S,
   return materializeScfIfSGPRYield(S, op, value, regType.getWidth());
 }
 
+static FailureOr<Value>
+materializeScfIfDataYieldInRegion(WaveAMDMachineSelector &S, scf::IfOp op,
+                                  SelectedScfIfRegion &selected, Value value,
+                                  Type resultType) {
+  auto savedIP = S.builder.saveInsertionPoint();
+  S.builder.setInsertionPointToEnd(&selected.region.front());
+  FailureOr<Value> result = materializeScfIfDataYield(S, op, value, resultType);
+  S.builder.restoreInsertionPoint(savedIP);
+  return result;
+}
+
 static LogicalResult addScfIfDataResult(WaveAMDMachineSelector &S, scf::IfOp op,
                                         unsigned idx,
                                         SelectedScfIfRegion &thenRegion,
@@ -5731,10 +5898,10 @@ static LogicalResult addScfIfDataResult(WaveAMDMachineSelector &S, scf::IfOp op,
       getScfIfDataResultType(op, op.getResult(idx).getType());
   if (failed(resultType))
     return failure();
-  FailureOr<Value> thenValue = materializeScfIfDataYield(
-      S, op, thenRegion.machineYields[idx], *resultType);
-  FailureOr<Value> elseValue = materializeScfIfDataYield(
-      S, op, elseRegion.machineYields[idx], *resultType);
+  FailureOr<Value> thenValue = materializeScfIfDataYieldInRegion(
+      S, op, thenRegion, thenRegion.machineYields[idx], *resultType);
+  FailureOr<Value> elseValue = materializeScfIfDataYieldInRegion(
+      S, op, elseRegion, elseRegion.machineYields[idx], *resultType);
   if (failed(thenValue) || failed(elseValue))
     return failure();
   unsigned resultIndex = plan.addResult(*resultType, *thenValue, *elseValue);
@@ -5996,12 +6163,20 @@ LogicalResult WaveAMDMachineSelector::selectReturn(func::ReturnOp op) {
 
   if (op.getNumOperands() == 1) {
     Value ret = expect(op.getOperand(0), op);
-    auto regType = dyn_cast<waveamdmachine::RegType>(ret.getType());
-    if (regType && regType.getRegClass() == waveamdmachine::RegClass::VGPR)
-      ret = waveamdmachine::VReadfirstlaneB32Op::create(
-          builder, op.getLoc(),
-          getRegType(op.getContext(), waveamdmachine::RegClass::SGPR), ret);
-    waveamdmachine::SMovB32Op::create(builder, op.getLoc(), "s0", ret);
+    FailureOr<unsigned> width = getRegisterPayloadWidth(
+        op.getOperand(0).getType(), [&]() { return op.emitError(); });
+    if (failed(width))
+      return failure();
+    ret = readFirstLane(*this, op.getLoc(), ret);
+    if (*width == 2)
+      ret = ensureSGPR2(*this, op.getLoc(), ret);
+    FailureOr<SmallVector<Value, 2>> words =
+        splitSGPRWords(*this, op, ret, *width);
+    if (failed(words))
+      return failure();
+    for (auto [idx, word] : llvm::enumerate(*words))
+      waveamdmachine::SMovB32Op::create(builder, op.getLoc(),
+                                        (Twine("s") + Twine(idx)).str(), word);
   }
   waveamdmachine::SSetpcB64Op::create(builder, op.getLoc());
   op.getOperandsMutable().clear();
