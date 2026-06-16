@@ -158,10 +158,9 @@ def WaveAMDHazardWaits
   let description = [{
     Inserts target hazard mitigation (`s_nop` / `s_delay_alu`) over
     WaveAMDMachine IR. Intended placement is after ABI lowering,
-    ticket-wait insertion, and register allocation: ticket waits
-    materialize the `s_waitcnt` producers this pass reacts to, and
-    regalloc preparation may introduce VALU copies that must also be
-    checked.
+    register allocation, and post-regalloc ticket-wait insertion. Ticket
+    waits materialize the `s_waitcnt` producers this pass reacts to, and
+    regalloc preparation may introduce VALU copies that must also be checked.
   }];
   let dependentDialects = [
     "waveamdmachine::WaveAMDMachineDialect"
@@ -219,8 +218,9 @@ def WaveAMDTicketWaits
   let description = [{
     Tracks async memory operations with per-counter tickets and inserts the
     minimum waitcnt threshold required by SSA uses. This is the waitcnt pass
-    intended for the staged WaveAMDMachine backend; pipeline hazards remain a
-    separate concern.
+    intended for the staged WaveAMDMachine backend; the default pipeline runs
+    it after register allocation and memory-tuple decomposition. Pipeline
+    hazards remain a separate concern.
   }];
   let dependentDialects = [
     "waveamdmachine::WaveAMDMachineDialect"

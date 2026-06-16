@@ -103,7 +103,6 @@ def check_calibration_entry(label: str, module) -> None:
             hazard = finish_passes.index("waveamd-insert-hazard-waits")
         except ValueError as err:
             require(label, False, f"missing finish pass: {err}")
-        require(label, ticket < regalloc < hazard, "finish pass order drifted")
         decompose_after_regalloc = [
             index
             for index, name in enumerate(finish_passes)
@@ -113,6 +112,11 @@ def check_calibration_entry(label: str, module) -> None:
             label,
             bool(decompose_after_regalloc),
             "no post-regalloc tuple decomposition",
+        )
+        require(
+            label,
+            regalloc < decompose_after_regalloc[0] < ticket < hazard,
+            "finish pass order drifted",
         )
     print(f"{label}: ok")
 

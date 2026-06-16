@@ -6,12 +6,12 @@ inserts AMDGPU hazard-mitigation NOPs, and why it's shaped the way it is.
 ## Where the pass sits
 
 The pass runs late in the WaveAMD lowering pipeline, after ABI
-lowering, ticket-wait insertion, and register allocation. Ticket
-waits must run first because this pass reacts to emitted
-`s_waitcnt`s. Register allocation must also run first because its
-preparation step can insert `v_mov_b32_tuple`, a VALU op that itself
-needs the LGKM-wait mitigation if it becomes the first VALU after an
-`s_waitcnt`.
+lowering, register allocation, memory-tuple decomposition, and
+ticket-wait insertion. Ticket waits run after regalloc because
+regalloc preparation can insert `v_mov_b32_tuple`, a VALU op that
+itself needs the LGKM-wait mitigation if it becomes the first VALU
+after an `s_waitcnt`. Hazard mitigation runs after ticket waits
+because it reacts to emitted `s_waitcnt`s.
 
 The pass scans every `waveamdmachine` op for malformed input, runs a
 dense forward dataflow over each function, then rewrites blocks with a

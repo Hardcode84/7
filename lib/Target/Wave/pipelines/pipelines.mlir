@@ -84,9 +84,7 @@ module attributes {transform.with_named_sequence} {
       %root: !transform.any_op {transform.consumed}) -> !transform.any_op {
     %rclr = transform.apply_registered_pass "waveamd-clear-regalloc-assignments" to %root
         : (!transform.any_op) -> !transform.any_op
-    %r3 = transform.apply_registered_pass "waveamd-insert-ticket-waits" to %rclr
-        : (!transform.any_op) -> !transform.any_op
-    %r4 = transform.apply_registered_pass "waveamd-preserve-hw-regs" to %r3
+    %r4 = transform.apply_registered_pass "waveamd-preserve-hw-regs" to %rclr
         : (!transform.any_op) -> !transform.any_op
     %r5 = transform.apply_registered_pass "waveamd-reg-alloc" to %r4
         : (!transform.any_op) -> !transform.any_op

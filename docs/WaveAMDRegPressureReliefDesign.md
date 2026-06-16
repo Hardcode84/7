@@ -289,8 +289,8 @@ memory spills.
 
 After memory spilling:
 
-- ticket waits must run again;
-- hazard waits must run again;
+- spill memory ops must appear before the post-regalloc ticket-wait pass;
+- hazard waits still run after ticket waits;
 - resource info must include spill LDS/private bytes;
 - scheduler should either run after spill insertion or run a small
   post-spill cleanup scheduler for spill load/store windows.
