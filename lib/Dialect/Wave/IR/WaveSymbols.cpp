@@ -33,28 +33,30 @@ static ixs_node *mutableNode(const ixs_node *node) {
 }
 
 static ExprKind getExprKind(ixs_tag tag) {
+  static_assert(IXS_CMP == 12 && IXS_NOT == 15 && IXS_PARSE_ERROR == 17,
+                "update ixs_tag mappings");
   static constexpr std::array<ExprKind, IXS_PARSE_ERROR + 1> kindByTag = {
-      ExprKind::Integer, ExprKind::Rational,   ExprKind::Symbol,
-      ExprKind::Add,     ExprKind::Mul,        ExprKind::Floor,
-      ExprKind::Ceil,    ExprKind::Mod,        ExprKind::Piecewise,
-      ExprKind::Max,     ExprKind::Min,        ExprKind::Xor,
-      ExprKind::Invalid, ExprKind::Invalid,    ExprKind::Invalid,
-      ExprKind::Invalid, ExprKind::Invalid,    ExprKind::Invalid,
-      ExprKind::Error,   ExprKind::ParseError,
+      ExprKind::Integer, ExprKind::Rational, ExprKind::Symbol,
+      ExprKind::Add,     ExprKind::Mul,      ExprKind::Floor,
+      ExprKind::Ceil,    ExprKind::Mod,      ExprKind::Piecewise,
+      ExprKind::Max,     ExprKind::Min,      ExprKind::Xor,
+      ExprKind::Invalid, ExprKind::Invalid,  ExprKind::Invalid,
+      ExprKind::Invalid, ExprKind::Error,    ExprKind::ParseError,
   };
   size_t index = static_cast<size_t>(tag);
   return index < kindByTag.size() ? kindByTag[index] : ExprKind::Invalid;
 }
 
 static PredKind getPredKind(ixs_tag tag) {
+  static_assert(IXS_CMP == 12 && IXS_NOT == 15 && IXS_PARSE_ERROR == 17,
+                "update ixs_tag mappings");
   static constexpr std::array<PredKind, IXS_PARSE_ERROR + 1> kindByTag = {
-      PredKind::Invalid, PredKind::Invalid,    PredKind::Invalid,
-      PredKind::Invalid, PredKind::Invalid,    PredKind::Invalid,
-      PredKind::Invalid, PredKind::Invalid,    PredKind::Invalid,
-      PredKind::Invalid, PredKind::Invalid,    PredKind::Invalid,
-      PredKind::Cmp,     PredKind::And,        PredKind::Or,
-      PredKind::Not,     PredKind::True,       PredKind::False,
-      PredKind::Error,   PredKind::ParseError,
+      PredKind::Invalid, PredKind::Invalid, PredKind::Invalid,
+      PredKind::Invalid, PredKind::Invalid, PredKind::Invalid,
+      PredKind::Invalid, PredKind::Invalid, PredKind::Invalid,
+      PredKind::Invalid, PredKind::Invalid, PredKind::Invalid,
+      PredKind::Cmp,     PredKind::And,     PredKind::Or,
+      PredKind::Not,     PredKind::Error,   PredKind::ParseError,
   };
   size_t index = static_cast<size_t>(tag);
   return index < kindByTag.size() ? kindByTag[index] : PredKind::Invalid;
@@ -350,7 +352,15 @@ bool PredView::isValid() const { return isPred(value); }
 PredKind PredView::getKind() const {
   if (!value)
     return PredKind::Invalid;
-  return getPredKind(ixs_node_tag(mutableNode(value.raw())));
+  ixs_node *node = mutableNode(value.raw());
+  if (ixs_node_tag(node) == IXS_INT) {
+    int64_t constant = ixs_node_int_val(node);
+    if (constant == 0)
+      return PredKind::False;
+    if (constant == 1)
+      return PredKind::True;
+  }
+  return getPredKind(ixs_node_tag(node));
 }
 
 std::optional<PredCmpOp> PredView::getCmpOp() const {
