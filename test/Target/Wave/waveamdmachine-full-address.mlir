@@ -240,6 +240,49 @@ func.func @global_addr64_xor(%out: !wave.ptr<#wave.global, i32>) attributes {wav
   return
 }
 
+// SELECT-LABEL: func.func @global_addr64_mod
+// SELECT: waveamdmachine.v_and_b32
+// SELECT: waveamdmachine.global_store_b32_addr64
+// ASM-LABEL: global_addr64_mod:
+// ASM: v_and_b32
+// ASM: global_store_b32 v[{{[0-9]+}}:{{[0-9]+}}], v{{[0-9]+}}, off
+func.func @global_addr64_mod(%out: !wave.ptr<#wave.global, i32>) attributes {wave.kernel} {
+  %lane = wave.lane_id : !wave.simd<i32, 32>
+  %off = wave.index_expr <"1073741824 + Mod(lid, 16)"> ["lid"] (%lane)
+      : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
+  %ptrs = wave.ptr_add %out, %off
+      : !wave.ptr<#wave.global, i32>, !wave.simd<index, 32>
+      -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
+  %tok = wave.store %lane -> %ptrs
+      : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>)
+      -> !wave.mem.token
+  return
+}
+
+// SELECT-LABEL: func.func @global_addr64_rational_mod_floor
+// SELECT: waveamdmachine.v_and_b32
+// SELECT: waveamdmachine.v_lshrrev_b64
+// SELECT: waveamdmachine.global_store_b32_addr64
+// ASM-LABEL: global_addr64_rational_mod_floor:
+// ASM: v_and_b32
+// ASM: v_lshrrev_b64
+// ASM: global_store_b32 v[{{[0-9]+}}:{{[0-9]+}}], v{{[0-9]+}}, off
+func.func @global_addr64_rational_mod_floor(%out: !wave.ptr<#wave.global, i32>,
+                                            %x_raw: i32) attributes {wave.kernel} {
+  %lane = wave.lane_id : !wave.simd<i32, 32>
+  %x = wave.assume %x_raw as "x" [#wave.pred<"x >= 0">, #wave.pred<"x <= 4095">] : i32
+  %off = wave.index_expr <"1073741824 + floor(1/512*Mod(8*x, 1024)) + lid">
+      ["lid", "x"] (%lane, %x)
+      : (!wave.simd<i32, 32>, i32) -> !wave.simd<index, 32>
+  %ptrs = wave.ptr_add %out, %off
+      : !wave.ptr<#wave.global, i32>, !wave.simd<index, 32>
+      -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
+  %tok = wave.store %lane -> %ptrs
+      : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>)
+      -> !wave.mem.token
+  return
+}
+
 // SELECT-LABEL: func.func @global_load_constant_overflow
 // SELECT: waveamdmachine.global_load_b32_addr64
 // ASM-LABEL: global_load_constant_overflow:

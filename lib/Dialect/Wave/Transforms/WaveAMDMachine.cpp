@@ -997,6 +997,33 @@ static Value lshrWidePow2(WaveAMDMachineSelector &S, Location loc, Value v,
       .getResult();
 }
 
+static Value andWideMask(WaveAMDMachineSelector &S, Location loc, Value v,
+                         int64_t mask) {
+  if (std::optional<int64_t> imm = S.getImmediateValue(v)) {
+    uint64_t value = static_cast<uint64_t>(*imm) & static_cast<uint64_t>(mask);
+    return createWideImm(S, loc, static_cast<int64_t>(value));
+  }
+  if (auto mov = v.getDefiningOp<waveamdmachine::SMovB64ImmOp>()) {
+    uint64_t value =
+        static_cast<uint64_t>(mov.getValue()) & static_cast<uint64_t>(mask);
+    return createWideImm(S, loc, static_cast<int64_t>(value));
+  }
+  bool vgpr = isVGPR(v);
+  waveamdmachine::RegClass regClass =
+      vgpr ? waveamdmachine::RegClass::VGPR : waveamdmachine::RegClass::SGPR;
+  Type wordType = getRegType(S.builder.getContext(), regClass, 1);
+  uint64_t maskBits = static_cast<uint64_t>(mask);
+  Value loMask =
+      createImm(S.builder, loc, static_cast<int64_t>(maskBits & 0xffffffffull));
+  Value hiMask =
+      createImm(S.builder, loc, static_cast<int64_t>(maskBits >> 32));
+  Value lo = createWideBitwiseWord(S, loc, BinaryKind::AndI, wordType,
+                                   extractLowDword(S, loc, v), loMask, vgpr);
+  Value hi = createWideBitwiseWord(S, loc, BinaryKind::AndI, wordType,
+                                   extractHighDword(S, loc, v), hiMask, vgpr);
+  return tuple2(S, loc, regClass, lo, hi);
+}
+
 struct WideSymbolBinding {
   std::string name;
   Value source;
@@ -1184,6 +1211,15 @@ static Value createWideImm(WaveAMDMachineSelector &S, Location loc,
       .getResult();
 }
 
+static std::optional<int64_t> getStaticWideInt(WaveAMDMachineSelector &S,
+                                               Value value) {
+  if (std::optional<int64_t> imm = S.getImmediateValue(value))
+    return imm;
+  if (auto mov = value.getDefiningOp<waveamdmachine::SMovB64ImmOp>())
+    return mov.getValue();
+  return std::nullopt;
+}
+
 static FailureOr<Value> materializeWideRational(WaveAMDMachineSelector &S,
                                                 sym::ExprHandle expr,
                                                 Operation *user) {
@@ -1243,6 +1279,10 @@ mulWideRational(WaveAMDMachineSelector &S, Location loc, WideRationalValue lhs,
     return user->emitError("full-address index_expr denominator overflows i64");
   return WideRationalValue{mulWide(S, loc, lhs.numerator, rhs.numerator),
                            *denominator};
+}
+
+static bool isPositivePowerOfTwo(int64_t value) {
+  return value > 0 && (value & (value - 1)) == 0;
 }
 
 static FailureOr<WideRationalValue> materializeWideRationalAdd(
@@ -1318,6 +1358,40 @@ static FailureOr<WideRationalValue> materializeWideRationalMul(
   return acc;
 }
 
+static FailureOr<int64_t> getStaticWideModDivisor(WaveAMDMachineSelector &S,
+                                                  WideRationalValue lhs,
+                                                  WideRationalValue rhs,
+                                                  Operation *user) {
+  std::optional<int64_t> rhsNum = getStaticWideInt(S, rhs.numerator);
+  if (rhs.denominator != 1 || !rhsNum)
+    return user->emitError(
+        "full-address index_expr mod needs a static integer divisor");
+  std::optional<int64_t> divisor = llvm::checkedMul(lhs.denominator, *rhsNum);
+  if (!divisor || !isPositivePowerOfTwo(*divisor))
+    return user->emitError(
+        "full-address index_expr mod needs a power-of-two integer divisor");
+  return *divisor;
+}
+
+static FailureOr<WideRationalValue> materializeWideRationalMod(
+    WaveAMDMachineSelector &S, sym::ExprHandle expr, Operation *user,
+    ArrayRef<WideSymbolBinding> bindings, ArrayRef<sym::PredHandle> assumptions,
+    bool symbolsAreUniform) {
+  sym::ExprView view(expr);
+  FailureOr<WideRationalValue> lhs = materializeWideRationalIndexExprNode(
+      S, view.getBinaryLhs(), user, bindings, assumptions, symbolsAreUniform);
+  FailureOr<WideRationalValue> rhs = materializeWideRationalIndexExprNode(
+      S, view.getBinaryRhs(), user, bindings, assumptions, symbolsAreUniform);
+  if (failed(lhs) || failed(rhs))
+    return failure();
+  FailureOr<int64_t> divisor = getStaticWideModDivisor(S, *lhs, *rhs, user);
+  if (failed(divisor))
+    return failure();
+  Value numerator =
+      andWideMask(S, user->getLoc(), lhs->numerator, *divisor - 1);
+  return WideRationalValue{numerator, lhs->denominator};
+}
+
 static FailureOr<WideRationalValue> materializeWideIntegerRational(
     WaveAMDMachineSelector &S, sym::ExprHandle expr, Operation *user,
     ArrayRef<WideSymbolBinding> bindings, ArrayRef<sym::PredHandle> assumptions,
@@ -1375,6 +1449,9 @@ static FailureOr<WideRationalValue> materializeWideRationalCompound(
   case sym::ExprKind::Mul:
     return materializeWideRationalMul(S, expr, user, bindings, assumptions,
                                       symbolsAreUniform);
+  case sym::ExprKind::Mod:
+    return materializeWideRationalMod(S, expr, user, bindings, assumptions,
+                                      symbolsAreUniform);
   case sym::ExprKind::Xor:
   case sym::ExprKind::Floor:
   case sym::ExprKind::Ceil:
@@ -1404,6 +1481,15 @@ static FailureOr<WideRationalValue> materializeWideRationalIndexExprNode(
 static bool hasNonNegativeLowerBound(const sym::InferredRange &range) {
   return range.lower && range.lower->denominator > 0 &&
          range.lower->numerator >= 0;
+}
+
+static bool
+hasInferredNonNegativeLowerBound(WaveAMDMachineSelector &S,
+                                 sym::ExprHandle expr,
+                                 ArrayRef<sym::PredHandle> assumptions) {
+  std::optional<sym::InferredRange> range =
+      sym::inferRange(S.symbolStore(), expr, assumptions);
+  return range && hasNonNegativeLowerBound(*range);
 }
 
 static bool hasNonNegativeBoundedRange(WaveAMDMachineSelector &S,
@@ -1468,15 +1554,15 @@ static bool isNonNegativeXorExpr(WaveAMDMachineSelector &S,
          hasNonNegativeBoundedRange(S, view.getBinaryRhs(), assumptions);
 }
 
-static bool
-isProvablyNonNegativeForWideShift(WaveAMDMachineSelector &S,
-                                  sym::ExprHandle expr,
-                                  ArrayRef<sym::PredHandle> assumptions) {
-  std::optional<sym::InferredRange> range =
-      sym::inferRange(S.symbolStore(), expr, assumptions);
-  if (range && hasNonNegativeLowerBound(*range))
-    return true;
+static bool isNonNegativeModExpr(sym::ExprHandle expr) {
+  std::optional<int64_t> divisor =
+      staticIntLiteral(sym::ExprView(expr).getBinaryRhs());
+  return divisor && *divisor > 0;
+}
 
+static bool isProvablyNonNegativeForWideShiftByShape(
+    WaveAMDMachineSelector &S, sym::ExprHandle expr,
+    ArrayRef<sym::PredHandle> assumptions) {
   sym::ExprView view(expr);
   switch (view.getKind()) {
   case sym::ExprKind::Integer:
@@ -1488,6 +1574,8 @@ isProvablyNonNegativeForWideShift(WaveAMDMachineSelector &S,
     return isNonNegativeMulExpr(S, expr, assumptions);
   case sym::ExprKind::Xor:
     return isNonNegativeXorExpr(S, expr, assumptions);
+  case sym::ExprKind::Mod:
+    return isNonNegativeModExpr(expr);
   case sym::ExprKind::Floor:
   case sym::ExprKind::Ceil:
     return isProvablyNonNegativeForWideShift(S, view.getUnaryArg(),
@@ -1497,13 +1585,18 @@ isProvablyNonNegativeForWideShift(WaveAMDMachineSelector &S,
   }
 }
 
+static bool
+isProvablyNonNegativeForWideShift(WaveAMDMachineSelector &S,
+                                  sym::ExprHandle expr,
+                                  ArrayRef<sym::PredHandle> assumptions) {
+  if (hasInferredNonNegativeLowerBound(S, expr, assumptions))
+    return true;
+  return isProvablyNonNegativeForWideShiftByShape(S, expr, assumptions);
+}
+
 static LogicalResult requireWideNonNegativeRoundedExpr(
     WaveAMDMachineSelector &S, sym::ExprHandle sourceExpr, Operation *user,
     ArrayRef<sym::PredHandle> assumptions, StringRef opName) {
-  std::optional<sym::InferredRange> range =
-      sym::inferRange(S.symbolStore(), sourceExpr, assumptions);
-  if (range && hasNonNegativeLowerBound(*range))
-    return success();
   if (isProvablyNonNegativeForWideShift(S, sourceExpr, assumptions))
     return success();
   return user->emitError("full-address index_expr ")
@@ -1537,6 +1630,23 @@ materializeWideRounded(WaveAMDMachineSelector &S, sym::ExprHandle expr,
     numerator = addWide(S, user->getLoc(), numerator,
                         createWideImm(S, user->getLoc(), den - 1));
   return lshrWidePow2(S, user->getLoc(), numerator, llvm::Log2_64(den));
+}
+
+static FailureOr<Value>
+materializeWideMod(WaveAMDMachineSelector &S, sym::ExprHandle expr,
+                   Operation *user, ArrayRef<WideSymbolBinding> bindings,
+                   ArrayRef<sym::PredHandle> assumptions,
+                   bool symbolsAreUniform) {
+  sym::ExprView view(expr);
+  std::optional<int64_t> rhsInt = staticIntLiteral(view.getBinaryRhs());
+  if (!rhsInt || !isPositivePowerOfTwo(*rhsInt))
+    return user->emitError(
+        "full-address index_expr mod needs a power-of-two integer divisor");
+  FailureOr<Value> lhs = materializeWideIndexExprNode(
+      S, view.getBinaryLhs(), user, bindings, assumptions, symbolsAreUniform);
+  if (failed(lhs))
+    return failure();
+  return andWideMask(S, user->getLoc(), *lhs, *rhsInt - 1);
 }
 
 static FailureOr<Value> materializeWidePrimitiveIndexExprNode(
@@ -1582,8 +1692,8 @@ static FailureOr<Value> materializeWideCompoundIndexExprNode(
     return materializeWideRounded(S, expr, user, bindings, assumptions,
                                   /*isCeil=*/true, symbolsAreUniform);
   case sym::ExprKind::Mod:
-    return user->emitError("full-address index_expr supports only add/mul/xor "
-                           "and floor/ceil expressions");
+    return materializeWideMod(S, expr, user, bindings, assumptions,
+                              symbolsAreUniform);
   default:
     break;
   }
