@@ -1,7 +1,7 @@
 // RUN: wave-opt --split-input-file --waveamd-to-machine --verify-diagnostics %s | FileCheck %s --check-prefix=SELECT
 // RUN: wave-opt --split-input-file --waveamd-to-machine %s | wave-opt --split-input-file | FileCheck %s --check-prefix=SELECT
-// RUN: wave-translate --split-input-file --wave-to-amdgpu-asm %s | FileCheck %s --check-prefix=ASM
-// RUN: wave-translate --split-input-file --wave-to-amdgpu-asm %s | llvm-mc -triple=amdgcn-amd-amdhsa -mcpu=gfx950 -filetype=obj -o /dev/null
+// RUN: wave-opt --split-input-file --waveamd-to-machine %s | wave-translate --split-input-file --wave-to-amdgpu-asm - | FileCheck %s --check-prefix=ASM
+// RUN: wave-opt --split-input-file --waveamd-to-machine %s | wave-translate --split-input-file --wave-to-amdgpu-asm - | llvm-mc -triple=amdgcn-amd-amdhsa -mcpu=gfx950 -filetype=obj -o /dev/null
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 

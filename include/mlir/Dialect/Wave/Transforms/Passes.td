@@ -112,6 +112,22 @@ def WaveSimplifyIndexExprs : Pass<"wave-simplify-index-exprs"> {
   ];
 }
 
+def WavePromoteGlobalToBuffer : Pass<"wave-promote-global-to-buffer"> {
+  let summary = "Promote proven-small global Wave memory ops to AMD buffers";
+  let description = [{
+    Inserts `waveamd.make_buffer` for uniform global pointer roots, then
+    rewrites Wave memory operands whose byte offset and access size are proven
+    to fit the buffer descriptor range. Pointers whose offsets are not proven
+    bounded stay global and keep the addr64 fallback available.
+  }];
+  let dependentDialects = [
+    "arith::ArithDialect",
+    "func::FuncDialect",
+    "wave::WaveDialect",
+    "waveamd::WaveAMDDialect"
+  ];
+}
+
 def WaveExtractLoopStrides : Pass<"wave-extract-loop-strides"> {
   let summary = "Expose IV-linear Wave pointer offsets as loop-carried strides";
   let description = [{

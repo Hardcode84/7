@@ -24,7 +24,9 @@ module attributes {transform.with_named_sequence} {
         : (!transform.any_op) -> !transform.any_op
     %rgen0 = transform.apply_registered_pass "wave-generate-index-exprs" to %rnorm
         : (!transform.any_op) -> !transform.any_op
-    %roff0 = transform.apply_registered_pass "wave-combine-pointer-offsets" to %rgen0
+    %rbuf0 = transform.apply_registered_pass "wave-promote-global-to-buffer" to %rgen0
+        : (!transform.any_op) -> !transform.any_op
+    %roff0 = transform.apply_registered_pass "wave-combine-pointer-offsets" to %rbuf0
         : (!transform.any_op) -> !transform.any_op
     %rsimp0 = transform.apply_registered_pass "wave-simplify-index-exprs" to %roff0
         : (!transform.any_op) -> !transform.any_op
@@ -48,7 +50,9 @@ module attributes {transform.with_named_sequence} {
         : (!transform.any_op) -> !transform.any_op
     %rsimp = transform.apply_registered_pass "wave-simplify-index-exprs" to %roff1
         : (!transform.any_op) -> !transform.any_op
-    %rstride = transform.apply_registered_pass "wave-extract-loop-strides" to %rsimp
+    %rbuf = transform.apply_registered_pass "wave-promote-global-to-buffer" to %rsimp
+        : (!transform.any_op) -> !transform.any_op
+    %rstride = transform.apply_registered_pass "wave-extract-loop-strides" to %rbuf
         : (!transform.any_op) -> !transform.any_op
     %rlicm = transform.apply_registered_pass "loop-invariant-code-motion" to %rstride
         : (!transform.any_op) -> !transform.any_op

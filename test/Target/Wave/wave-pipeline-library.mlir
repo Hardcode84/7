@@ -4,6 +4,8 @@
 // PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
 // PIPELINE-NEXT: transform.apply_registered_pass "wave-generate-index-exprs"
 // PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
+// PIPELINE-NEXT: transform.apply_registered_pass "wave-promote-global-to-buffer"
+// PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
 // PIPELINE-NEXT: transform.apply_registered_pass "wave-combine-pointer-offsets"
 // PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
 // PIPELINE-NEXT: transform.apply_registered_pass "wave-simplify-index-exprs"
@@ -27,6 +29,8 @@
 // PIPELINE-NEXT: transform.apply_registered_pass "wave-combine-pointer-offsets"
 // PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
 // PIPELINE-NEXT: transform.apply_registered_pass "wave-simplify-index-exprs"
+// PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
+// PIPELINE-NEXT: transform.apply_registered_pass "wave-promote-global-to-buffer"
 // PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
 // PIPELINE-NEXT: transform.apply_registered_pass "wave-extract-loop-strides"
 // PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op

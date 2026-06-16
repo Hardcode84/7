@@ -5,7 +5,7 @@
 // RUN:   --waveamd-decompose-mem-tuples --waveamd-insert-ticket-waits \
 // RUN:   --waveamd-insert-hazard-waits \
 // RUN:   --split-input-file %s | FileCheck %s --check-prefix=REGALLOC
-// RUN: wave-translate --wave-to-amdgpu-asm --split-input-file %s | FileCheck %s --check-prefix=ASM
+// RUN: wave-opt --waveamd-to-machine --split-input-file %s | wave-translate --wave-to-amdgpu-asm --split-input-file - | FileCheck %s --check-prefix=ASM
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
