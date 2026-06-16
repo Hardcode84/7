@@ -2018,6 +2018,31 @@ FailureOr<Value> materializePointerOffsetCarry(WaveAMDMachineSelector &S,
   return materializeLanePointerOffsetCarry(S, user, offset);
 }
 
+FailureOr<MaterializedLdsAddress>
+materializeLdsAddress(WaveAMDMachineSelector &S, Operation *user, Value base,
+                      const PointerOffset &offset,
+                      const waveamdmachine::AddressFieldSpec &spec) {
+  FailureOr<AddressPlan> plan = planMemoryAddress(S, user, offset, spec);
+  if (failed(plan))
+    return failure();
+  if (plan->fullAddressRemainderExpr) {
+    FailureOr<Value> wideAddr =
+        materializeFullPlanAddress(S, user, base, *plan);
+    if (failed(wideAddr))
+      return failure();
+    Value addr = S.ensureVGPRForVSrc1(
+        user->getLoc(), extractLowDword(S, user->getLoc(), *wideAddr));
+    return MaterializedLdsAddress{addr, 0};
+  }
+  FailureOr<WaveAMDMachineSelector::BucketedOperands> buckets =
+      materializePlanBuckets(S, user, *plan, spec);
+  if (failed(buckets))
+    return failure();
+  Value addr = S.ensureVGPRForVSrc1(
+      user->getLoc(), S.addByteOffsets(user->getLoc(), base, buckets->voffset));
+  return MaterializedLdsAddress{addr, buckets->instOffset};
+}
+
 FailureOr<Value> materializeFullPlanAddress(WaveAMDMachineSelector &S,
                                             Operation *user, Value base,
                                             const AddressPlan &plan) {
@@ -4914,18 +4939,6 @@ LogicalResult WaveAMDMachineSelector::selectMmaScale(waveamd::MmaScaleOp op) {
   return success();
 }
 
-static FailureOr<WaveAMDMachineSelector::BucketedOperands>
-materializeLdsAddress(WaveAMDMachineSelector &S, Operation *op,
-                      const PointerOffset &offset,
-                      waveamdmachine::AddressFieldSpec spec) {
-  FailureOr<AddressPlan> plan = planMemoryAddress(S, op, offset, spec);
-  if (failed(plan))
-    return failure();
-  if (plan->fullAddressRemainderExpr)
-    return op->emitError("LDS memory op offset exceeds address fields");
-  return materializePlanBuckets(S, op, *plan, spec);
-}
-
 static FailureOr<std::pair<Value, PointerOffset>>
 lookupLdsPointer(WaveAMDMachineSelector &S, Value ptr, Operation *op) {
   auto baseIt = S.pointerBases.find(ptr);
@@ -4957,26 +4970,23 @@ static LogicalResult selectDsReadTr(WaveAMDMachineSelector &S, Operation *op,
   waveamdmachine::AddressFieldSpec spec =
       useB8Op ? waveamdmachine::DsReadTrB64B8Op::getAddressFieldSpec()
               : waveamdmachine::DsReadTrB64B4Op::getAddressFieldSpec();
-  FailureOr<WaveAMDMachineSelector::BucketedOperands> buckets =
-      materializeLdsAddress(S, op, ptr->second, spec);
-  if (failed(buckets))
+  FailureOr<MaterializedLdsAddress> address =
+      materializeLdsAddress(S, op, ptr->first, ptr->second, spec);
+  if (failed(address))
     return failure();
-  Value addr = S.ensureVGPRForVSrc1(
-      op->getLoc(),
-      S.addByteOffsets(op->getLoc(), ptr->first, buckets->voffset));
   Type regType =
       getRegType(op->getContext(), waveamdmachine::RegClass::VGPR, 2);
   Type tokenType = getMemTokenType(op->getContext());
   Value dep = dependency ? S.expect(dependency, op) : Value{};
   Operation *load = nullptr;
   if (useB8Op) {
-    load = waveamdmachine::DsReadTrB64B8Op::create(S.builder, op->getLoc(),
-                                                   regType, tokenType, addr,
-                                                   dep, buckets->instOffset);
+    load = waveamdmachine::DsReadTrB64B8Op::create(
+        S.builder, op->getLoc(), regType, tokenType, address->addr, dep,
+        address->instOffset);
   } else {
-    load = waveamdmachine::DsReadTrB64B4Op::create(S.builder, op->getLoc(),
-                                                   regType, tokenType, addr,
-                                                   dep, buckets->instOffset);
+    load = waveamdmachine::DsReadTrB64B4Op::create(
+        S.builder, op->getLoc(), regType, tokenType, address->addr, dep,
+        address->instOffset);
   }
   S.values[valueResult] = load->getResult(0);
   S.values[tokenResult] = load->getResult(1);

@@ -283,6 +283,64 @@ func.func @global_addr64_rational_mod_floor(%out: !wave.ptr<#wave.global, i32>,
   return
 }
 
+// SELECT-LABEL: func.func @shared_rational_mod_floor_full_address
+// SELECT: %[[LID:.*]] = waveamdmachine.v_mbcnt_lo
+// SELECT: waveamdmachine.s_and_b32
+// SELECT: waveamdmachine.s_lshr_b32
+// SELECT: %[[SLOT:.*]] = waveamdmachine.s_mul_i32
+// SELECT: %[[LANE_MOD:.*]] = waveamdmachine.v_and_b32 %[[LID]],
+// SELECT: %[[LANE_OFF:.*]] = waveamdmachine.v_mul_lo_u32 {{.*}}, %[[LANE_MOD]]
+// SELECT: %[[LOAD_ADDR:.*]] = waveamdmachine.v_add_u32 %[[SLOT]], %[[LANE_OFF]]
+// SELECT: waveamdmachine.ds_load_b32 %[[LOAD_ADDR]] :
+// SELECT: %[[STORE_ADDR:.*]] = waveamdmachine.v_add_u32
+// SELECT: waveamdmachine.ds_store_b32 %[[STORE_ADDR]],
+// ASM-LABEL: shared_rational_mod_floor_full_address:
+// ASM: ds_load_b32
+// ASM: ds_store_b32
+func.func @shared_rational_mod_floor_full_address(%x: i32)
+    attributes {wave.kernel, wave.lds_size = 4096 : i64} {
+  %lane = wave.lane_id : !wave.simd<i32, 32>
+  %lds = wave.lds_base : !wave.ptr<#wave.shared, i32>
+  %off = wave.index_expr <"520*floor(1/512*Mod(8*x, 1024)) + 264*Mod(lid, 2)">
+      ["lid", "x"](%lane, %x)
+      : (!wave.simd<i32, 32>, i32) -> !wave.simd<index, 32>
+  %ptrs = wave.ptr_add %lds, %off
+      : !wave.ptr<#wave.shared, i32>, !wave.simd<index, 32>
+      -> !wave.simd<!wave.ptr<#wave.shared, i32>, 32>
+  %value, %load_token = wave.load %ptrs
+      : (!wave.simd<!wave.ptr<#wave.shared, i32>, 32>)
+      -> (!wave.simd<i32, 32>, !wave.mem.token)
+  %store_token = wave.store %value -> %ptrs after %load_token
+      : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.shared, i32>, 32>,
+         !wave.mem.token)
+      -> !wave.mem.token
+  return
+}
+
+// SELECT-LABEL: func.func @shared_wide_mod_floor_full_address
+// SELECT: waveamdmachine.arg {index = 0 : i64, pointer = false} : !waveamdmachine.reg<sgpr, 2>
+// SELECT: waveamdmachine.v_lshrrev_b64
+// SELECT: waveamdmachine.ds_load_u8 %{{.*}}#0 :
+// ASM-LABEL: shared_wide_mod_floor_full_address:
+// ASM: v_lshrrev_b64
+// ASM: ds_load_u8
+func.func @shared_wide_mod_floor_full_address(%x_raw: i64)
+    attributes {wave.kernel, wave.lds_size = 8192 : i64} {
+  %lane = wave.lane_id : !wave.simd<i32, 32>
+  %x = wave.assume %x_raw as "x" [#wave.pred<"x >= 0">] : i64
+  %lds = wave.lds_base : !wave.ptr<#wave.shared, i8>
+  %off = wave.index_expr <"Mod(floor(1/4294967296*x), 4096) + lid">
+      ["lid", "x"](%lane, %x)
+      : (!wave.simd<i32, 32>, i64) -> !wave.simd<index, 32>
+  %ptrs = wave.ptr_add %lds, %off
+      : !wave.ptr<#wave.shared, i8>, !wave.simd<index, 32>
+      -> !wave.simd<!wave.ptr<#wave.shared, i8>, 32>
+  %value, %token = wave.load %ptrs
+      : (!wave.simd<!wave.ptr<#wave.shared, i8>, 32>)
+      -> (!wave.simd<i8, 32>, !wave.mem.token)
+  return
+}
+
 // SELECT-LABEL: func.func @global_load_constant_overflow
 // SELECT: waveamdmachine.global_load_b32_addr64
 // ASM-LABEL: global_load_constant_overflow:

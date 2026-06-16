@@ -179,6 +179,16 @@ planMemoryAddress(WaveAMDMachineSelector &S, Operation *user,
                   const PointerOffset &offset,
                   const mlir::waveamdmachine::AddressFieldSpec &spec);
 
+struct MaterializedLdsAddress {
+  Value addr;
+  int64_t instOffset = 0;
+};
+
+FailureOr<MaterializedLdsAddress>
+materializeLdsAddress(WaveAMDMachineSelector &S, Operation *user, Value base,
+                      const PointerOffset &offset,
+                      const mlir::waveamdmachine::AddressFieldSpec &spec);
+
 FailureOr<Value> materializeFullPlanAddress(WaveAMDMachineSelector &S,
                                             Operation *user, Value base,
                                             const AddressPlan &plan);

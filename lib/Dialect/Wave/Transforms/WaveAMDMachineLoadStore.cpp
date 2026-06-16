@@ -73,26 +73,18 @@ LogicalResult selectSharedStore(WaveAMDMachineSelector &S, StoreOp op,
                                 bool useB16Op) {
   waveamdmachine::AddressFieldSpec spec =
       sharedStoreSpec(registers, useB8Op, useB16Op);
-  FailureOr<AddressPlan> plan = planMemoryAddress(S, op, offset, spec);
-  if (failed(plan))
+  FailureOr<MaterializedLdsAddress> sharedAddr =
+      materializeLdsAddress(S, op.getOperation(), base, offset, spec);
+  if (failed(sharedAddr))
     return failure();
-  if (plan->fullAddressRemainderExpr)
-    return op.emitError("LDS memory op offset exceeds address fields");
-  FailureOr<WaveAMDMachineSelector::BucketedOperands> buckets =
-      materializePlanBuckets(S, op, *plan, spec);
-  if (failed(buckets))
-    return failure();
-  WaveAMDMachineSelector::BucketedOperands b = *buckets;
-  Value addr = S.ensureVGPRForVSrc1(
-      op.getLoc(), S.addByteOffsets(op.getLoc(), base, b.voffset));
   Value value = S.expect(op.getValue(), op);
   if (registers == 1)
     value = S.ensureVGPRForVSrc1(op.getLoc(), value);
   Value dep = op.getDependency() ? S.expect(op.getDependency(), op) : Value{};
   Type tokenType = getMemTokenType(op.getContext());
   Operation *store =
-      buildSharedStore(S, op, tokenType, addr, value, dep, b.instOffset,
-                       registers, useB8Op, useB16Op);
+      buildSharedStore(S, op, tokenType, sharedAddr->addr, value, dep,
+                       sharedAddr->instOffset, registers, useB8Op, useB16Op);
   S.values[op.getToken()] = store->getResult(0);
   S.eraseIfTopLevel(op);
   return success();
@@ -286,24 +278,17 @@ LogicalResult selectSharedLoad(WaveAMDMachineSelector &S, LoadOp op, Value base,
                                bool useB8Op, bool useB16Op) {
   waveamdmachine::AddressFieldSpec spec =
       sharedLoadSpec(registers, useB8Op, useB16Op);
-  FailureOr<AddressPlan> plan = planMemoryAddress(S, op, offset, spec);
-  if (failed(plan))
+  FailureOr<MaterializedLdsAddress> sharedAddr =
+      materializeLdsAddress(S, op.getOperation(), base, offset, spec);
+  if (failed(sharedAddr))
     return failure();
-  if (plan->fullAddressRemainderExpr)
-    return op.emitError("LDS memory op offset exceeds address fields");
-  FailureOr<WaveAMDMachineSelector::BucketedOperands> buckets =
-      materializePlanBuckets(S, op, *plan, spec);
-  if (failed(buckets))
-    return failure();
-  WaveAMDMachineSelector::BucketedOperands b = *buckets;
-  Value addr = S.ensureVGPRForVSrc1(
-      op.getLoc(), S.addByteOffsets(op.getLoc(), base, b.voffset));
   Value dep = op.getDependency() ? S.expect(op.getDependency(), op) : Value{};
   Type resultType =
       getRegType(op.getContext(), waveamdmachine::RegClass::VGPR, registers);
   Type tokenType = getMemTokenType(op.getContext());
-  Operation *load = buildSharedLoad(S, op, resultType, tokenType, addr, dep,
-                                    b.instOffset, registers, useB8Op, useB16Op);
+  Operation *load =
+      buildSharedLoad(S, op, resultType, tokenType, sharedAddr->addr, dep,
+                      sharedAddr->instOffset, registers, useB8Op, useB16Op);
   bindLoadResults(S, op, load);
   return success();
 }
