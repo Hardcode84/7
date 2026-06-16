@@ -3541,14 +3541,41 @@ LogicalResult WaveAMDMachineSelector::selectArithCmp(arith::CmpIOp op) {
   return success();
 }
 
-LogicalResult WaveAMDMachineSelector::selectCmp(CmpIOp op) {
+static unsigned getIndexCmpValueBits(WaveAMDMachineSelector &S, Value value,
+                                     bool signedCmp) {
+  if (auto regType = dyn_cast<waveamdmachine::RegType>(value.getType())) {
+    if (regType.getWidth() <= 1)
+      return 32;
+    return regType.getWidth() * 32;
+  }
+  if (std::optional<int64_t> imm = S.getImmediateValue(value)) {
+    if (signedCmp)
+      return llvm::isInt<32>(*imm) ? 32 : 64;
+    return llvm::isInt<32>(*imm) || llvm::isUInt<32>(*imm) ? 32 : 64;
+  }
+  return 64;
+}
+
+static FailureOr<unsigned> getCmpElementBits(WaveAMDMachineSelector &S,
+                                             CmpIOp op, Value lhs, Value rhs,
+                                             bool signedCmp) {
   auto simdType = cast<SimdType>(op.getLhs().getType());
-  IntegerType elementType = dyn_cast<IntegerType>(simdType.getElementType());
-  if (!elementType ||
-      (elementType.getWidth() != 32 && elementType.getWidth() != 64))
-    return op.emitError(
-        "WaveAMDMachine backend supports only !wave.simd<i32/i64, W> cmpi "
-        "operands");
+  Type elementType = simdType.getElementType();
+  if (elementType.isIndex())
+    return std::max(getIndexCmpValueBits(S, lhs, signedCmp),
+                    getIndexCmpValueBits(S, rhs, signedCmp));
+
+  IntegerType integerType = dyn_cast<IntegerType>(elementType);
+  if (integerType &&
+      (integerType.getWidth() == 32 || integerType.getWidth() == 64))
+    return integerType.getWidth();
+
+  op.emitError("WaveAMDMachine backend supports only "
+               "!wave.simd<i32/i64/index, W> cmpi operands");
+  return failure();
+}
+
+LogicalResult WaveAMDMachineSelector::selectCmp(CmpIOp op) {
   auto maskType = cast<MaskType>(op.getType());
   if (maskType.getWidth() != 32 && maskType.getWidth() != 64)
     return op.emitError(
@@ -3562,11 +3589,15 @@ LogicalResult WaveAMDMachineSelector::selectCmp(CmpIOp op) {
                              maskType.getWidth() / 32);
   Value lhs = expect(op.getLhs(), op);
   Value rhs = expect(op.getRhs(), op);
-  Value result = elementType.getWidth() == 64
-                     ? createI64Cmp(*this, op.getLoc(), *relation, signedCmp,
-                                    sgprType, lhs, rhs)
-                     : createWordCmp(*this, op.getLoc(), *relation, signedCmp,
-                                     sgprType, lhs, rhs);
+  FailureOr<unsigned> bits = getCmpElementBits(*this, op, lhs, rhs, signedCmp);
+  if (failed(bits))
+    return failure();
+  if (*bits != 32 && *bits != 64)
+    return op.emitError("unsupported wave.cmpi operand register width");
+  Value result = *bits == 64 ? createI64Cmp(*this, op.getLoc(), *relation,
+                                            signedCmp, sgprType, lhs, rhs)
+                             : createWordCmp(*this, op.getLoc(), *relation,
+                                             signedCmp, sgprType, lhs, rhs);
   values[op.getResult()] = result;
   eraseIfTopLevel(op);
   return success();

@@ -40,7 +40,7 @@ func.func @unsupported_lane_id_width() {
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 func.func @unsupported_i16_cmpi(%x: !wave.simd<i16, 32>) {
-  // expected-error @below {{WaveAMDMachine backend supports only !wave.simd<i32/i64, W> cmpi operands}}
+  // expected-error @below {{WaveAMDMachine backend supports only !wave.simd<i32/i64/index, W> cmpi operands}}
   %mask = wave.cmpi slt %x, %x
       : !wave.simd<i16, 32>, !wave.simd<i16, 32> -> !wave.mask<32>
   return

@@ -102,6 +102,40 @@ func.func @i64_cmpi_gfx1100_wave64(%lhs: i64, %rhs: i64) {
   return
 }
 
+// CHECK-LABEL: func.func @index_cmpi_gfx1100_wave64
+// CHECK: waveamdmachine.v_cmp_ge_u32
+// CHECK: waveamdmachine.v_cmp_ge_i32
+func.func @index_cmpi_gfx1100_wave64(%lhs: index, %rhs: index) {
+  %vlhs = wave.splat %lhs : index -> !wave.simd<index, 64>
+  %vrhs = wave.splat %rhs : index -> !wave.simd<index, 64>
+  %uge = wave.cmpi uge %vlhs, %vrhs
+      : !wave.simd<index, 64>, !wave.simd<index, 64> -> !wave.mask<64>
+  %sge = wave.cmpi sge %vlhs, %vrhs
+      : !wave.simd<index, 64>, !wave.simd<index, 64> -> !wave.mask<64>
+  return
+}
+
+// CHECK-LABEL: func.func @wide_index_cmpi_gfx1100_wave64
+// CHECK: waveamdmachine.v_add_u64
+// CHECK: waveamdmachine.tuple_to_elements
+// CHECK: waveamdmachine.v_cmp_gt_i32
+// CHECK: waveamdmachine.v_cmp_eq_u32
+// CHECK: waveamdmachine.v_cmp_ge_u32
+// CHECK: waveamdmachine.tuple_to_elements
+// CHECK: waveamdmachine.s_and_b32
+// CHECK: waveamdmachine.s_or_b32
+// CHECK: waveamdmachine.tuple_from_elements
+func.func @wide_index_cmpi_gfx1100_wave64() {
+  %lane = wave.lane_id : !wave.simd<i32, 64>
+  %lhs = wave.index_expr <"4294967296 + lid"> ["lid"](%lane)
+      : (!wave.simd<i32, 64>) -> !wave.simd<index, 64>
+  %zero = arith.constant 0 : index
+  %rhs = wave.splat %zero : index -> !wave.simd<index, 64>
+  %sge = wave.cmpi sge %lhs, %rhs
+      : !wave.simd<index, 64>, !wave.simd<index, 64> -> !wave.mask<64>
+  return
+}
+
 }
 
 // -----
