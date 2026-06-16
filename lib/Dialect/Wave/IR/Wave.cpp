@@ -19,9 +19,12 @@
 #include "mlir/Interfaces/Utils/InferIntRangeCommon.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/Twine.h"
 #include "llvm/ADT/TypeSwitch.h"
+#include "llvm/Support/ErrorHandling.h"
 
 #include <array>
+#include <limits>
 
 using namespace mlir;
 using namespace mlir::wave;
@@ -1510,6 +1513,58 @@ static FailureOr<int64_t> reduceIndexBindingWidth(
 
 Type mlir::wave::getIndexExprResultType(MLIRContext *ctx, ValueRange bindings) {
   return getSymbolicOffsetResultType(ctx, getSymbolicOffsetLaneWidth(bindings));
+}
+
+std::string
+mlir::wave::getFreshIndexExprBindingName(StringRef stem,
+                                         const llvm::StringMap<Value> &reserved,
+                                         StringRef separator) {
+  for (unsigned index :
+       llvm::seq<unsigned>(0, std::numeric_limits<unsigned>::max())) {
+    std::string candidate =
+        (Twine(stem) + Twine(separator) + Twine(index)).str();
+    if (!reserved.contains(candidate))
+      return candidate;
+  }
+  llvm_unreachable("exhausted index_expr binding names");
+}
+
+std::string mlir::wave::getFreshIndexExprBindingName(
+    StringRef stem, const llvm::StringMap<Value> &reserved, unsigned &nextIndex,
+    StringRef separator) {
+  for (; nextIndex != std::numeric_limits<unsigned>::max(); ++nextIndex) {
+    std::string candidate =
+        (Twine(stem) + Twine(separator) + Twine(nextIndex)).str();
+    if (!reserved.contains(candidate)) {
+      ++nextIndex;
+      return candidate;
+    }
+  }
+  llvm_unreachable("exhausted index_expr binding names");
+}
+
+StringRef mlir::wave::reserveIndexExprBindingName(
+    StringRef requested, Value value, llvm::StringMap<Value> &reserved,
+    llvm::DenseMap<Value, StringRef> &byValue, StringRef renameSeparator) {
+  auto valueIt = byValue.find(value);
+  if (valueIt != byValue.end())
+    return valueIt->second;
+
+  auto nameIt = reserved.find(requested);
+  if (nameIt != reserved.end() && nameIt->second != value) {
+    std::string fresh =
+        getFreshIndexExprBindingName(requested, reserved, renameSeparator);
+    auto [it, inserted] = reserved.try_emplace(fresh, value);
+    (void)inserted;
+    byValue[value] = it->getKey();
+    return it->getKey();
+  }
+
+  auto [it, inserted] = reserved.try_emplace(requested, value);
+  if (!inserted)
+    it->second = value;
+  byValue[value] = it->getKey();
+  return it->getKey();
 }
 
 FailureOr<SymbolicOffset>

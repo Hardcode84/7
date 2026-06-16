@@ -19,7 +19,6 @@
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/StringMap.h"
-#include "llvm/Support/FormatVariadic.h"
 #include "llvm/Support/MathExtras.h"
 
 #include <cassert>
@@ -62,38 +61,10 @@ static FailureOr<sym::ExprHandle> symbolExpr(sym::Store &store,
   return sym::composeExprSym(store, name);
 }
 
-static std::string freshBindingName(StringRef stem,
-                                    const llvm::StringMap<Value> &reserved) {
-  for (unsigned index :
-       llvm::seq<unsigned>(0, std::numeric_limits<unsigned>::max())) {
-    std::string candidate = llvm::formatv("{0}_{1}", stem, index).str();
-    if (!reserved.contains(candidate))
-      return candidate;
-  }
-  llvm_unreachable("exhausted symbolic binding names");
-}
-
 static StringRef reserveBindingName(StringRef requested, Value value,
                                     BindingState &state) {
-  auto valueIt = state.byValue.find(value);
-  if (valueIt != state.byValue.end())
-    return valueIt->second;
-
-  StringRef selected = requested;
-  auto nameIt = state.reserved.find(requested);
-  if (nameIt != state.reserved.end() && nameIt->second != value) {
-    std::string fresh = freshBindingName(requested, state.reserved);
-    auto [it, inserted] = state.reserved.try_emplace(fresh, value);
-    (void)inserted;
-    state.byValue[value] = it->getKey();
-    return it->getKey();
-  }
-
-  auto [it, inserted] = state.reserved.try_emplace(selected, value);
-  if (!inserted)
-    it->second = value;
-  state.byValue[value] = it->getKey();
-  return it->getKey();
+  return reserveIndexExprBindingName(requested, value, state.reserved,
+                                     state.byValue);
 }
 
 static LogicalResult appendBinding(BindingState &state, StringRef name,
@@ -530,11 +501,7 @@ private:
   }
 
   std::string freshName(StringRef stem = "raw") {
-    for (;;) {
-      std::string name = llvm::formatv("{0}{1}", stem, nextRawSymbol++).str();
-      if (!bindingByName.contains(name))
-        return name;
-    }
+    return getFreshIndexExprBindingName(stem, bindingByName, nextRawSymbol);
   }
 
   SymbolicOffset offset;

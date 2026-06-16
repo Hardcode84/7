@@ -17,11 +17,8 @@
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/StringMap.h"
-#include "llvm/Support/ErrorHandling.h"
-#include "llvm/Support/FormatVariadic.h"
 
 #include <cassert>
-#include <limits>
 #include <string>
 
 namespace mlir::wave {
@@ -66,17 +63,6 @@ static void appendValues(ArrayRef<IndexExprBinding> bindings,
     values.push_back(binding.value);
 }
 
-static std::string freshBindingName(StringRef stem,
-                                    const llvm::StringMap<Value> &reserved) {
-  for (unsigned index :
-       llvm::seq<unsigned>(0, std::numeric_limits<unsigned>::max())) {
-    std::string candidate = llvm::formatv("{0}_{1}", stem, index).str();
-    if (!reserved.contains(candidate))
-      return candidate;
-  }
-  llvm_unreachable("exhausted symbolic binding names");
-}
-
 static LogicalResult appendBinding(SmallVectorImpl<IndexExprBinding> &bindings,
                                    llvm::StringMap<Value> &emitted,
                                    StringRef name, Value value) {
@@ -92,25 +78,7 @@ static LogicalResult appendBinding(SmallVectorImpl<IndexExprBinding> &bindings,
 static StringRef reserveBindingName(StringRef requested, Value value,
                                     llvm::StringMap<Value> &reserved,
                                     llvm::DenseMap<Value, StringRef> &byValue) {
-  auto valueIt = byValue.find(value);
-  if (valueIt != byValue.end())
-    return valueIt->second;
-
-  StringRef selected = requested;
-  auto nameIt = reserved.find(requested);
-  if (nameIt != reserved.end() && nameIt->second != value) {
-    std::string fresh = freshBindingName(requested, reserved);
-    auto [it, inserted] = reserved.try_emplace(fresh, value);
-    (void)inserted;
-    byValue[value] = it->getKey();
-    return it->getKey();
-  }
-
-  auto [it, inserted] = reserved.try_emplace(selected, value);
-  if (!inserted)
-    it->second = value;
-  byValue[value] = it->getKey();
-  return it->getKey();
+  return reserveIndexExprBindingName(requested, value, reserved, byValue);
 }
 
 static FailureOr<sym::ExprHandle>

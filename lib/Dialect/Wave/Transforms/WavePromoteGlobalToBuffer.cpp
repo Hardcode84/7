@@ -20,6 +20,7 @@
 #include "mlir/IR/PatternMatch.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/StringMap.h"
 #include "llvm/ADT/StringSet.h"
 #include "llvm/Support/CheckedArithmetic.h"
 
@@ -408,11 +409,12 @@ private:
     for (const SymbolicOffsetBinding &binding : symbolic->bindings) {
       if (sym::ExprView(binding.name).getSymbolName().empty())
         return failure();
-      std::string name =
-          (Twine("__wave_buffer_idx_") + Twine(nextSymbol++)).str();
+      std::string name = getFreshIndexExprBindingName(
+          "__wave_buffer_idx_", reservedSymbols, nextSymbol);
       FailureOr<sym::ExprHandle> replacement = sym::composeExprSym(store, name);
       if (failed(replacement))
         return failure();
+      reservedSymbols[name] = binding.value;
       substitutions.push_back({binding.name, *replacement});
       offset.bindings.push_back({name, binding.value});
       appendKnownPredicates(solver, store, binding.value, name,
@@ -442,12 +444,13 @@ private:
   }
 
   FailureOr<ByteOffset> buildRawOffset(Value value, int64_t scale) {
-    std::string name =
-        (Twine("__wave_buffer_ptr_") + Twine(nextSymbol++)).str();
+    std::string name = getFreshIndexExprBindingName(
+        "__wave_buffer_ptr_", reservedSymbols, nextSymbol);
     FailureOr<sym::ExprHandle> expr = sym::composeExprSym(store, name);
     if (failed(expr))
       return failure();
     ByteOffset offset;
+    reservedSymbols[name] = value;
     offset.bindings.push_back({name, value});
     appendKnownPredicates(solver, store, value, name, offset.assumptions);
     FailureOr<sym::ExprHandle> scaled =
@@ -502,6 +505,7 @@ private:
   }
 
   DenseMap<Value, Value> baseBuffers;
+  llvm::StringMap<Value> reservedSymbols;
   func::FuncOp func;
   IRRewriter &rewriter;
   sym::Store &store;

@@ -11,7 +11,6 @@
 #include "mlir/Dialect/Utils/StaticValueUtils.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/StringMap.h"
-#include "llvm/Support/FormatVariadic.h"
 
 #include <algorithm>
 #include <optional>
@@ -217,11 +216,7 @@ private:
   }
 
   std::string freshName(StringRef stem = "raw") {
-    for (;;) {
-      std::string name = llvm::formatv("{0}{1}", stem, nextRawSymbol++).str();
-      if (!bindingByName.contains(name))
-        return name;
-    }
+    return getFreshIndexExprBindingName(stem, bindingByName, nextRawSymbol);
   }
 
   static StringRef symbolName(const SymbolicOffsetBinding &binding) {

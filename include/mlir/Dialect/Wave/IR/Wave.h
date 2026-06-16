@@ -18,10 +18,13 @@
 #include "mlir/Interfaces/ControlFlowInterfaces.h"
 #include "mlir/Interfaces/InferIntRangeInterface.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
+#include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/StringMap.h"
 
 #include <memory>
 #include <optional>
+#include <string>
 
 #include "mlir/Dialect/Wave/IR/WaveOpsDialect.h.inc"
 #include "mlir/Dialect/Wave/IR/WaveOpsEnums.h.inc"
@@ -70,6 +73,17 @@ FailureOr<SymbolicOffsetBindingKind> classifySymbolicOffsetBinding(
 unsigned getSymbolicOffsetLaneWidth(ValueRange bindings);
 Type getSymbolicOffsetResultType(MLIRContext *ctx, unsigned laneWidth);
 Type getIndexExprResultType(MLIRContext *ctx, ValueRange bindings);
+std::string getFreshIndexExprBindingName(StringRef stem,
+                                         const llvm::StringMap<Value> &reserved,
+                                         StringRef separator = "");
+std::string getFreshIndexExprBindingName(StringRef stem,
+                                         const llvm::StringMap<Value> &reserved,
+                                         unsigned &nextIndex,
+                                         StringRef separator = "");
+StringRef reserveIndexExprBindingName(StringRef requested, Value value,
+                                      llvm::StringMap<Value> &reserved,
+                                      llvm::DenseMap<Value, StringRef> &byValue,
+                                      StringRef renameSeparator = "_");
 void appendAssumePredicates(sym::Store &store, Value binding, StringRef name,
                             SmallVectorImpl<sym::PredHandle> &assumptions);
 void appendRangeAndAssumePredicates(
