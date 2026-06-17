@@ -568,6 +568,42 @@ addExprU32UpperBound(WaveAMDMachineSelector &S, sym::ExprHandle expr,
 }
 
 static std::optional<uint64_t>
+positiveAddendsU32UpperBound(WaveAMDMachineSelector &S, sym::ExprHandle expr,
+                             ArrayRef<sym::PredHandle> assumptions) {
+  uint64_t bound = 0;
+  sym::ExprView view(expr);
+  if (std::optional<int64_t> constant =
+          sym::getIntegerLiteralValue(view.getAddConstant())) {
+    if (*constant > 0)
+      bound = static_cast<uint64_t>(*constant);
+  } else {
+    return std::nullopt;
+  }
+  for (uint32_t index = 0, n = view.getAddTermCount(); index < n; ++index) {
+    sym::AddTerm addTerm = view.getAddTerm(index);
+    std::optional<int64_t> coeff =
+        sym::getIntegerLiteralValue(addTerm.coefficient);
+    if (!coeff)
+      return std::nullopt;
+    if (*coeff <= 0)
+      continue;
+    std::optional<uint64_t> term =
+        exprU32UpperBound(S, addTerm.term, assumptions);
+    if (!term)
+      return std::nullopt;
+    std::optional<uint64_t> scaled =
+        checkedMulU32Bound(static_cast<uint64_t>(*coeff), *term);
+    if (!scaled)
+      return std::nullopt;
+    std::optional<uint64_t> next = checkedAddU32Bound(bound, *scaled);
+    if (!next)
+      return std::nullopt;
+    bound = *next;
+  }
+  return bound;
+}
+
+static std::optional<uint64_t>
 mulExprU32UpperBound(WaveAMDMachineSelector &S, sym::ExprHandle expr,
                      ArrayRef<sym::PredHandle> assumptions) {
   sym::ExprView view(expr);
@@ -649,6 +685,17 @@ bool WaveAMDMachineSelector::slotFitsU32(
   return exprFitsU32ByUpperBound(*this, expr, assumptions);
 }
 
+static bool positiveAddendsFitU32(WaveAMDMachineSelector &S,
+                                  sym::ExprHandle expr,
+                                  ArrayRef<sym::PredHandle> assumptions) {
+  if (sym::ExprView(expr).getKind() != sym::ExprKind::Add)
+    return false;
+  if (std::optional<uint64_t> bound =
+          positiveAddendsU32UpperBound(S, expr, assumptions))
+    return *bound <= (uint64_t{1} << 32) - 1;
+  return false;
+}
+
 static std::optional<int64_t> staticIntLiteral(sym::ExprHandle expr) {
   return sym::getIntegerLiteralValue(expr);
 }
@@ -715,8 +762,25 @@ static std::optional<Value> zeroExtendedLowDword(WaveAMDMachineSelector &S,
 static Value tuple2(WaveAMDMachineSelector &S, Location loc,
                     waveamdmachine::RegClass cls, Value lo, Value hi) {
   Type resultType = getRegType(S.builder.getContext(), cls, 2);
-  return waveamdmachine::TupleFromElementsOp::create(S.builder, loc, resultType,
-                                                     ValueRange{lo, hi})
+  auto copyFixed = [&](Value v) {
+    waveamdmachine::RegType rt = dyn_cast<waveamdmachine::RegType>(v.getType());
+    if (!rt || rt.getIndex() < 0 || rt.getWidth() != 1)
+      return v;
+    if (cls == waveamdmachine::RegClass::VGPR)
+      return Value{waveamdmachine::VMovB32TupleOp::create(
+          S.builder, loc,
+          getRegType(S.builder.getContext(), waveamdmachine::RegClass::VGPR),
+          v)};
+    if (cls == waveamdmachine::RegClass::SGPR)
+      return Value{waveamdmachine::SMovB32ValueOp::create(
+          S.builder, loc,
+          getRegType(S.builder.getContext(), waveamdmachine::RegClass::SGPR),
+          v)};
+    return v;
+  };
+  return waveamdmachine::TupleFromElementsOp::create(
+             S.builder, loc, resultType,
+             ValueRange{copyFixed(lo), copyFixed(hi)})
       .getTuple();
 }
 
@@ -2041,6 +2105,51 @@ materializeLdsAddress(WaveAMDMachineSelector &S, Operation *user, Value base,
   Value addr = S.ensureVGPRForVSrc1(
       user->getLoc(), S.addByteOffsets(user->getLoc(), base, buckets->voffset));
   return MaterializedLdsAddress{addr, buckets->instOffset};
+}
+
+static FailureOr<Value>
+materializeUniformFullPlanAddress(WaveAMDMachineSelector &S, Operation *user,
+                                  Value base, const AddressPlan &plan) {
+  AddressPlanBindings bindings = materializeAddressPlanBindings(S, user, plan);
+  FailureOr<sym::ExprHandle> expr = planCompleteAddressExpr(S, plan);
+  if (failed(expr))
+    return failure();
+  Value addr = ensureSGPR2(S, user->getLoc(), base);
+  if (*expr) {
+    FailureOr<Value> offset = materializeWideIndexExprNode(
+        S, *expr, user, bindings.wide, plan.assumptions,
+        /*symbolsAreUniform=*/true);
+    if (failed(offset))
+      return failure();
+    addr = addWide(S, user->getLoc(), addr, *offset);
+  }
+  return addr;
+}
+
+static FailureOr<Value>
+materializeUniformFullAddressLowDword(WaveAMDMachineSelector &S,
+                                      Operation *user, Value base,
+                                      const AddressPlan &plan) {
+  FailureOr<Value> addr =
+      materializeUniformFullPlanAddress(S, user, base, plan);
+  if (failed(addr))
+    return failure();
+  return extractLowDword(S, user->getLoc(), *addr);
+}
+
+static FailureOr<Value>
+materializePlanLowDword(WaveAMDMachineSelector &S, Operation *user,
+                        sym::ExprHandle expr,
+                        const AddressPlanBindings &bindings,
+                        ArrayRef<sym::PredHandle> assumptions, bool useWide) {
+  if (useWide) {
+    FailureOr<Value> wide =
+        materializeWideIndexExprNode(S, expr, user, bindings.wide, assumptions);
+    if (failed(wide))
+      return failure();
+    return extractLowDword(S, user->getLoc(), *wide);
+  }
+  return materializePlanExpr(S, user, expr, bindings, assumptions);
 }
 
 FailureOr<Value> materializeFullPlanAddress(WaveAMDMachineSelector &S,
@@ -5007,6 +5116,11 @@ struct DmaPointers {
   Value dstBase;
 };
 
+struct DmaSourceAddress {
+  WaveAMDMachineSelector::BucketedOperands buckets;
+  Value base;
+};
+
 static FailureOr<DmaPointers> lookupDmaPointers(WaveAMDMachineSelector &S,
                                                 waveamd::DmaLoadLdsOp op) {
   auto srcBaseIt = S.pointerBases.find(op.getSource());
@@ -5036,6 +5150,35 @@ static LogicalResult requireUniformDmaDest(WaveAMDMachineSelector &S,
   return success();
 }
 
+static FailureOr<Value> materializeDmaM0FieldPlan(WaveAMDMachineSelector &S,
+                                                  waveamd::DmaLoadLdsOp op,
+                                                  Value dstBase,
+                                                  const AddressPlan &plan) {
+  AddressPlanBindings bindings = materializeAddressPlanBindings(S, op, plan);
+  Value dstAddr = dstBase;
+  Location loc = op.getLoc();
+  auto appendExpr = [&](sym::ExprHandle expr) -> LogicalResult {
+    if (!expr)
+      return success();
+    FailureOr<Value> value =
+        materializePlanExpr(S, op, expr, bindings, plan.assumptions);
+    if (failed(value))
+      return failure();
+    dstAddr = S.addUniformBytes(loc, dstAddr, S.ensureSGPR1(loc, *value));
+    return success();
+  };
+  if (failed(appendExpr(plan.soffsetExpr)) ||
+      failed(appendExpr(plan.fullAddressRemainderExpr)))
+    return failure();
+  if (plan.instOffset != 0)
+    dstAddr = S.addUniformBytes(loc, dstAddr,
+                                createImm(S.builder, loc, plan.instOffset));
+  Value m0Src = S.materializeSGPR1(op.getLoc(), dstAddr);
+  return Value{waveamdmachine::SMovM0Op::create(
+      S.builder, op.getLoc(), waveamdmachine::M0Type::get(op.getContext()),
+      m0Src)};
+}
+
 static FailureOr<Value> materializeDmaM0(WaveAMDMachineSelector &S,
                                          waveamd::DmaLoadLdsOp op,
                                          Value dstBase,
@@ -5048,69 +5191,112 @@ static FailureOr<Value> materializeDmaM0(WaveAMDMachineSelector &S,
   FailureOr<AddressPlan> plan = planAddressFields(S, dstOffset, spec);
   if (failed(plan))
     return op.emitError("failed to plan DMA LDS destination");
-  AddressPlanBindings bindings = materializeAddressPlanBindings(S, op, *plan);
   if (plan->voffsetExpr)
     return op.emitError("DMA LDS destination must be uniform");
-  Value dstAddr = dstBase;
-  Location loc = op.getLoc();
-  auto appendExpr = [&](sym::ExprHandle expr) -> LogicalResult {
-    if (!expr)
-      return success();
-    FailureOr<Value> value =
-        materializePlanExpr(S, op, expr, bindings, plan->assumptions);
-    if (failed(value))
+  if (plan->fullAddressRemainderExpr) {
+    FailureOr<Value> low =
+        materializeUniformFullAddressLowDword(S, op, dstBase, *plan);
+    if (failed(low))
       return failure();
-    dstAddr = S.addUniformBytes(loc, dstAddr, S.ensureSGPR1(loc, *value));
-    return success();
-  };
-  if (failed(appendExpr(plan->soffsetExpr)) ||
-      failed(appendExpr(plan->fullAddressRemainderExpr)))
-    return failure();
-  if (plan->instOffset != 0)
-    dstAddr = S.addUniformBytes(loc, dstAddr,
-                                createImm(S.builder, loc, plan->instOffset));
-  Value m0Src = S.materializeSGPR1(op.getLoc(), dstAddr);
-  return Value{waveamdmachine::SMovM0Op::create(
-      S.builder, op.getLoc(), waveamdmachine::M0Type::get(op.getContext()),
-      m0Src)};
+    Value m0Src = S.materializeSGPR1(op.getLoc(), *low);
+    return Value{waveamdmachine::SMovM0Op::create(
+        S.builder, op.getLoc(), waveamdmachine::M0Type::get(op.getContext()),
+        m0Src)};
+  }
+  return materializeDmaM0FieldPlan(S, op, dstBase, *plan);
 }
 
 static waveamdmachine::AddressFieldSpec dmaAddressSpec(bool isBuffer,
                                                        int64_t bytes);
 
-static FailureOr<WaveAMDMachineSelector::BucketedOperands>
-materializeDmaSourceBuckets(WaveAMDMachineSelector &S, waveamd::DmaLoadLdsOp op,
-                            const PointerOffset &offset, bool isBuffer) {
+static LogicalResult foldBufferDmaSoffset(WaveAMDMachineSelector &S,
+                                          AddressPlan &plan) {
+  // Buffer DMA dynamic soffset is slow; fold into vaddr when proven safe.
+  FailureOr<sym::ExprHandle> voffset = appendAddressExpr(
+      S, plan.voffsetExpr, plan.soffsetExpr, plan.assumptions);
+  if (failed(voffset))
+    return failure();
+  if (!needsWideAddressMaterialization(*voffset, plan) &&
+      S.slotFitsU32(*voffset, plan.assumptions)) {
+    plan.voffsetExpr = *voffset;
+    plan.soffsetExpr = {};
+  }
+  return success();
+}
+
+static FailureOr<DmaSourceAddress> materializeGlobalDmaUniformSourceAddress(
+    WaveAMDMachineSelector &S, waveamd::DmaLoadLdsOp op, Value base,
+    AddressPlan &plan, const waveamdmachine::AddressFieldSpec &spec) {
+  AddressPlan basePlan = plan;
+  basePlan.voffsetExpr = {};
+  basePlan.soffsetExpr = {};
+  basePlan.instOffset = 0;
+  FailureOr<Value> adjustedBase =
+      materializeUniformFullPlanAddress(S, op, base, basePlan);
+  if (failed(adjustedBase))
+    return failure();
+  plan.fullAddressRemainderExpr = {};
+  FailureOr<WaveAMDMachineSelector::BucketedOperands> buckets =
+      materializePlanBuckets(S, op, plan, spec);
+  if (failed(buckets))
+    return failure();
+  return DmaSourceAddress{*buckets, *adjustedBase};
+}
+
+static FailureOr<DmaSourceAddress>
+materializeGlobalDmaLaneSourceAddress(WaveAMDMachineSelector &S,
+                                      waveamd::DmaLoadLdsOp op, Value base,
+                                      AddressPlan &plan) {
+  FailureOr<sym::ExprHandle> expr = planCompleteAddressExpr(S, plan);
+  if (failed(expr))
+    return failure();
+  bool useWide = needsWideAddressMaterialization(*expr, plan);
+  if (!S.slotFitsU32(*expr, plan.assumptions) &&
+      (useWide || !positiveAddendsFitU32(S, *expr, plan.assumptions)))
+    return op.emitError("global DMA LDS source offset must fit proven "
+                        "unsigned 32-bit voffset field");
+  AddressPlanBindings bindings = materializeAddressPlanBindings(S, op, plan);
+  FailureOr<Value> voffset = materializePlanLowDword(S, op, *expr, bindings,
+                                                     plan.assumptions, useWide);
+  if (failed(voffset))
+    return failure();
+  WaveAMDMachineSelector::BucketedOperands out;
+  out.voffset = S.ensureVGPRForVSrc1(op.getLoc(), *voffset);
+  return DmaSourceAddress{out, base};
+}
+
+static FailureOr<DmaSourceAddress> materializeGlobalDmaFullSourceAddress(
+    WaveAMDMachineSelector &S, waveamd::DmaLoadLdsOp op, Value base,
+    AddressPlan &plan, const waveamdmachine::AddressFieldSpec &spec) {
+  TermKind remainderKind =
+      classifyPlanExpr(S, plan, plan.fullAddressRemainderExpr);
+  if (remainderKind != TermKind::Lane)
+    return materializeGlobalDmaUniformSourceAddress(S, op, base, plan, spec);
+  return materializeGlobalDmaLaneSourceAddress(S, op, base, plan);
+}
+
+static FailureOr<DmaSourceAddress>
+materializeDmaSourceAddress(WaveAMDMachineSelector &S, waveamd::DmaLoadLdsOp op,
+                            Value base, const PointerOffset &offset,
+                            bool isBuffer) {
   waveamdmachine::AddressFieldSpec spec =
       dmaAddressSpec(isBuffer, op.getBytes());
   FailureOr<AddressPlan> plan = planMemoryAddress(S, op, offset, spec);
   if (failed(plan))
     return failure();
-  if (isBuffer && plan->soffsetExpr) {
-    // Buffer-to-LDS with SGPR soffset takes the slow dynamic-offset path.
-    // Keep soffset inline zero when the whole source address fits vaddr.
-    FailureOr<sym::ExprHandle> voffset = appendAddressExpr(
-        S, plan->voffsetExpr, plan->soffsetExpr, plan->assumptions);
-    if (failed(voffset))
+  if (isBuffer && plan->soffsetExpr)
+    if (failed(foldBufferDmaSoffset(S, *plan)))
       return failure();
-    if (!needsWideAddressMaterialization(*voffset, *plan) &&
-        S.slotFitsU32(*voffset, plan->assumptions)) {
-      plan->voffsetExpr = *voffset;
-      plan->soffsetExpr = {};
-    }
-  }
   if (plan->fullAddressRemainderExpr) {
     if (isBuffer)
       return emitBufferAddressFieldError(op.getOperation());
-    FailureOr<sym::ExprHandle> voffset =
-        appendAddressExpr(S, plan->voffsetExpr, plan->fullAddressRemainderExpr,
-                          plan->assumptions);
-    if (failed(voffset))
-      return failure();
-    plan->voffsetExpr = *voffset;
-    plan->fullAddressRemainderExpr = {};
+    return materializeGlobalDmaFullSourceAddress(S, op, base, *plan, spec);
   }
-  return materializePlanBuckets(S, op, *plan, spec);
+  FailureOr<WaveAMDMachineSelector::BucketedOperands> buckets =
+      materializePlanBuckets(S, op, *plan, spec);
+  if (failed(buckets))
+    return failure();
+  return DmaSourceAddress{*buckets, base};
 }
 
 static waveamdmachine::AddressFieldSpec dmaAddressSpec(bool isBuffer,
@@ -5137,11 +5323,11 @@ WaveAMDMachineSelector::selectDmaLoadLds(waveamd::DmaLoadLdsOp op) {
     return failure();
 
   bool isBuffer = pointerBuffers.lookup(op.getSource());
-  FailureOr<BucketedOperands> buckets =
-      materializeDmaSourceBuckets(*this, op, ptrs->srcOffset, isBuffer);
-  if (failed(buckets))
+  FailureOr<DmaSourceAddress> source = materializeDmaSourceAddress(
+      *this, op, ptrs->srcBase, ptrs->srcOffset, isBuffer);
+  if (failed(source))
     return failure();
-  BucketedOperands b = *buckets;
+  BucketedOperands b = source->buckets;
   IntegerAttr instOffsetAttr = builder.getI64IntegerAttr(b.instOffset);
   IntegerAttr auxAttr = op.getAux() != 0 ? op.getAuxAttr() : IntegerAttr{};
   Type tokenType = getMemTokenType(op.getContext());
@@ -5150,20 +5336,20 @@ WaveAMDMachineSelector::selectDmaLoadLds(waveamd::DmaLoadLdsOp op) {
   if (isBuffer) {
     if (op.getBytes() == 16)
       token = waveamdmachine::BufferLoadLdsB128Op::create(
-          builder, op.getLoc(), tokenType, b.voffset, ptrs->srcBase, b.soffset,
+          builder, op.getLoc(), tokenType, b.voffset, source->base, b.soffset,
           *m0, dep, instOffsetAttr, auxAttr);
     else
       token = waveamdmachine::BufferLoadLdsB32Op::create(
-          builder, op.getLoc(), tokenType, b.voffset, ptrs->srcBase, b.soffset,
+          builder, op.getLoc(), tokenType, b.voffset, source->base, b.soffset,
           *m0, dep, instOffsetAttr, auxAttr);
   } else {
     if (op.getBytes() == 16)
       token = waveamdmachine::GlobalLoadLdsB128Op::create(
-          builder, op.getLoc(), tokenType, b.voffset, ptrs->srcBase, *m0, dep,
+          builder, op.getLoc(), tokenType, b.voffset, source->base, *m0, dep,
           instOffsetAttr, auxAttr);
     else
       token = waveamdmachine::GlobalLoadLdsB32Op::create(
-          builder, op.getLoc(), tokenType, b.voffset, ptrs->srcBase, *m0, dep,
+          builder, op.getLoc(), tokenType, b.voffset, source->base, *m0, dep,
           instOffsetAttr, auxAttr);
   }
   values[op.getToken()] = token;

@@ -497,6 +497,29 @@ func.func @buffer_dma_lds_unbounded_source_offset_needs_range(
 
 // -----
 
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
+func.func @global_dma_lds_lane_wide_source_needs_range(
+    %in: !wave.ptr<#wave.global, i32>)
+    attributes {wave.kernel, wave.lds_size = 512 : i64} {
+  %wi_raw = wave.workitem_id 0 : !wave.simd<i32, 64>
+  %wi = wave.assume %wi_raw as "w" [#wave.pred<"w >= 0">, #wave.pred<"w <= 63">] : !wave.simd<i32, 64>
+  %off = wave.index_expr <"4294967296*w"> ["w"](%wi)
+      : (!wave.simd<i32, 64>) -> !wave.simd<index, 64>
+  %src = wave.ptr_add %in, %off
+      : !wave.ptr<#wave.global, i32>, !wave.simd<index, 64>
+      -> !wave.simd<!wave.ptr<#wave.global, i32>, 64>
+  %lds = wave.lds_base : !wave.ptr<#wave.shared, i32>
+  %tok0 = wave.token : !wave.mem.token
+  // expected-error @below {{global DMA LDS source offset must fit proven unsigned 32-bit voffset field}}
+  %tok = waveamd.dma_load_lds %src -> %lds after %tok0 {bytes = 16 : i64}
+      : (!wave.simd<!wave.ptr<#wave.global, i32>, 64>,
+         !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
+  return
+}
+}
+
+// -----
+
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 func.func @buffer_loop_dynamic_carry_needs_bound(%out: !wave.ptr<#wave.global, i32>, %delta: i32) attributes {wave.kernel} {
   %c0 = arith.constant 0 : i32
