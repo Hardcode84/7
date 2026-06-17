@@ -28,6 +28,43 @@ func.func @transpose_load_i8_i4()
   return
 }
 
+// MACHINE-LABEL: func.func @transpose_load_b16_datatypes
+// MACHINE: waveamdmachine.ds_read_tr_b64_b16
+// MACHINE: waveamdmachine.ds_read_tr_b64_b16
+// MACHINE: waveamdmachine.ds_read_tr_b64_b16
+
+// ASM-LABEL: transpose_load_b16_datatypes:
+// ASM: ds_read_b64_tr_b16 {{v\[[0-9]+:[0-9]+\]}}, {{v[0-9]+}}
+// ASM: ds_read_b64_tr_b16 {{v\[[0-9]+:[0-9]+\]}}, {{v[0-9]+}}
+// ASM: ds_read_b64_tr_b16 {{v\[[0-9]+:[0-9]+\]}}, {{v[0-9]+}}
+// ASM: s_endpgm
+func.func @transpose_load_b16_datatypes()
+    attributes {wave.kernel, waveamdmachine.lds_size = 256 : i64} {
+  %lane = wave.lane_id : !wave.simd<i32, 64>
+  %lds_i16 = wave.lds_base : !wave.ptr<#wave.shared, i16>
+  %ptr_i16 = wave.ptr_add %lds_i16, %lane
+      : !wave.ptr<#wave.shared, i16>, !wave.simd<i32, 64>
+      -> !wave.simd<!wave.ptr<#wave.shared, i16>, 64>
+  %i16, %tok_i16 = waveamd.transpose_load %ptr_i16
+      : (!wave.simd<!wave.ptr<#wave.shared, i16>, 64>)
+        -> (!wave.simd<vector<4xi16>, 64>, !wave.mem.token)
+  %lds_f16 = wave.lds_base : !wave.ptr<#wave.shared, f16>
+  %ptr_f16 = wave.ptr_add %lds_f16, %lane
+      : !wave.ptr<#wave.shared, f16>, !wave.simd<i32, 64>
+      -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
+  %f16, %tok_f16 = waveamd.transpose_load %ptr_f16 after %tok_i16
+      : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token)
+        -> (!wave.simd<vector<4xf16>, 64>, !wave.mem.token)
+  %lds_bf16 = wave.lds_base : !wave.ptr<#wave.shared, bf16>
+  %ptr_bf16 = wave.ptr_add %lds_bf16, %lane
+      : !wave.ptr<#wave.shared, bf16>, !wave.simd<i32, 64>
+      -> !wave.simd<!wave.ptr<#wave.shared, bf16>, 64>
+  %bf16, %tok_bf16 = waveamd.transpose_load %ptr_bf16 after %tok_f16
+      : (!wave.simd<!wave.ptr<#wave.shared, bf16>, 64>, !wave.mem.token)
+        -> (!wave.simd<vector<4xbf16>, 64>, !wave.mem.token)
+  return
+}
+
 // MACHINE-LABEL: func.func @transpose_load_opaque_index_expr
 // MACHINE: waveamdmachine.ds_read_tr_b64_b8
 

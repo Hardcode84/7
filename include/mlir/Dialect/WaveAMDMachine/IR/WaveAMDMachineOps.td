@@ -2183,6 +2183,23 @@ def WaveAMDMachine_DsReadTrB64B8Op
   let archPredicate = WaveAMDMachine_Gfx950;
 }
 
+def WaveAMDMachine_DsReadTrB64B16Op
+    : WaveAMDMachine_DsMemoryOp<"ds_read_tr_b64_b16",
+                                [WaveAMDMachine_LDSLoad]>,
+      WaveAMDMachine_LDSInfo<"1"> {
+  let summary = "gfx950 LDS 64-bit transposed read over 16-bit lanes";
+  let arguments = (ins WaveAMDMachine_VGPR1:$addr,
+                       Optional<WaveAMDMachine_MemToken>:$dependency,
+                       DefaultValuedAttr<I64Attr, "0">:$offset);
+  let results = (outs WaveAMDMachine_VGPR2:$result,
+                      Optional<WaveAMDMachine_MemToken>:$token);
+  let assemblyFormat = [{
+    $addr (`after` $dependency^)? (`offset` $offset^)?
+    attr-dict `:` functional-type(operands, results)
+  }];
+  let archPredicate = WaveAMDMachine_Gfx950;
+}
+
 def WaveAMDMachine_DsLoadB96Op
     : WaveAMDMachine_DsMemoryOp<"ds_load_b96", [WaveAMDMachine_LDSLoad]>,
       WaveAMDMachine_LDSInfo<"1"> {

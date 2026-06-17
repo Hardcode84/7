@@ -253,8 +253,37 @@ def test_waveamd_transpose_load():
                 lds, lane, w.simd_ptr_type(w.i8(), w.shared_address_space(), 64)
             )
             f.transpose_load(ptr)
+            lds_i16 = f.lds_base(w.i16())
+            ptr_i16 = f.ptr_add(
+                lds_i16,
+                lane,
+                w.simd_ptr_type(w.i16(), w.shared_address_space(), 64),
+            )
+            f.transpose_load(ptr_i16, w.simd_type(w.vector_type(4, w.i16()), width=64))
+            lds_f16 = f.lds_base(w.f16())
+            ptr_f16 = f.ptr_add(
+                lds_f16,
+                lane,
+                w.simd_ptr_type(w.f16(), w.shared_address_space(), 64),
+            )
+            f.transpose_load(ptr_f16, w.simd_type(w.vector_type(4, w.f16()), width=64))
+            lds_bf16 = f.lds_base(w.bf16())
+            ptr_bf16 = f.ptr_add(
+                lds_bf16,
+                lane,
+                w.simd_ptr_type(w.bf16(), w.shared_address_space(), 64),
+            )
+            f.transpose_load(
+                ptr_bf16, w.simd_type(w.vector_type(4, w.bf16()), width=64)
+            )
         # CHECK: waveamd.transpose_load
         # CHECK-SAME: -> (!wave.simd<vector<8xi8>, 64>, !wave.mem.token)
+        # CHECK: waveamd.transpose_load
+        # CHECK-SAME: -> (!wave.simd<vector<4xi16>, 64>, !wave.mem.token)
+        # CHECK: waveamd.transpose_load
+        # CHECK-SAME: -> (!wave.simd<vector<4xf16>, 64>, !wave.mem.token)
+        # CHECK: waveamd.transpose_load
+        # CHECK-SAME: -> (!wave.simd<vector<4xbf16>, 64>, !wave.mem.token)
         print(m.module)
 
 

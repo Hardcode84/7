@@ -166,6 +166,10 @@ def i8() -> IntegerType:
     return IntegerType.get_signless(8)
 
 
+def i16() -> IntegerType:
+    return IntegerType.get_signless(16)
+
+
 def i32() -> IntegerType:
     return IntegerType.get_signless(32)
 

@@ -667,6 +667,7 @@ private:
   unsigned dsReadB64() const { return opcodes.dsReadB64; }
   unsigned dsReadB64TrB4() const { return opcodes.dsReadB64TrB4; }
   unsigned dsReadB64TrB8() const { return opcodes.dsReadB64TrB8; }
+  unsigned dsReadB64TrB16() const { return opcodes.dsReadB64TrB16; }
   unsigned dsReadB96() const { return opcodes.dsReadB96; }
   unsigned dsReadB128() const { return opcodes.dsReadB128; }
   unsigned dsWriteB8() const { return opcodes.dsWriteB8; }
@@ -2876,6 +2877,11 @@ private:
       if (!waveamdmachine::DsReadTrB64B8Op::isSupportedOnIsa(isaVersion))
         return op.emitError("ds_read_tr_b64_b8 requires gfx950");
       return emitDsLoad(op, dsReadB64TrB8());
+    }
+    if (isa<waveamdmachine::DsReadTrB64B16Op>(op)) {
+      if (!waveamdmachine::DsReadTrB64B16Op::isSupportedOnIsa(isaVersion))
+        return op.emitError("ds_read_tr_b64_b16 requires gfx950");
+      return emitDsLoad(op, dsReadB64TrB16());
     }
     if (isa<waveamdmachine::DsLoadB96Op>(op))
       return emitDsLoad(op, dsReadB96());
