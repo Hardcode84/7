@@ -91,6 +91,27 @@ func.func @no_delay_after_non_draining_lgkm_wait(%x: !waveamdmachine.reg<vgpr, 1
   return
 }
 
+// CHECK-LABEL: func.func @default_lgkm_wait_is_noop
+// CHECK: waveamdmachine.s_waitcnt lgkmcnt(63)
+// CHECK-NOT: waveamdmachine.s_delay_alu
+// CHECK: waveamdmachine.v_add_u32
+func.func @default_lgkm_wait_is_noop(
+    %ec: !waveamdmachine.reg<scc, 1>,
+    %x: !waveamdmachine.reg<vgpr, 1>,
+    %y: !waveamdmachine.reg<sgpr, 1>) {
+  %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+  waveamdmachine.uniform_loop if %ec : !waveamdmachine.reg<scc, 1> {
+    %load = waveamdmachine.s_load_b32 %zero, "s[0:1]"
+        : (!waveamdmachine.imm) -> !waveamdmachine.reg<sgpr, 1>
+    waveamdmachine.continue_if %ec : !waveamdmachine.reg<scc, 1>
+  }
+  waveamdmachine.s_waitcnt lgkmcnt(63)
+  %sum = waveamdmachine.v_add_u32 %x, %y
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 1>)
+      -> !waveamdmachine.reg<vgpr, 1>
+  return
+}
+
 // CFG joins merge armed VALU-after-LGKM state from every predecessor.
 // Textual block order is irrelevant.
 // CHECK-LABEL: func.func @delay_after_lgkm_wait_across_join

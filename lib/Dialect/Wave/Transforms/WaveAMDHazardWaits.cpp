@@ -225,6 +225,7 @@ getValuWriteExecMfmaLatency(const llvm::AMDGPU::IsaVersion &isa) {
 struct HazardConfig {
   bool hasDelayAlu;
   llvm::AMDGPU::IsaVersion isaVersion;
+  unsigned defaultLgkmcnt;
   unsigned valuDep1;
 
   // Wait states between `s_mov_m0` and the next op reading `m0`.
@@ -859,18 +860,25 @@ static void addProducedHazards(Operation *op, HazardState &state,
   addProducedPhysicalHazards(op, state, cfg);
 }
 
-static void addPendingLgkmIssue(Operation *op, HazardState &state) {
+static unsigned getMaxTrackedLgkmPending(const HazardConfig &cfg) {
+  return cfg.defaultLgkmcnt + 1;
+}
+
+static void addPendingLgkmIssue(Operation *op, HazardState &state,
+                                const HazardConfig &cfg) {
   waveamdmachine::WaitcntInfo info = getWaitcntInfo(op);
   if (info.counter != waveamdmachine::WaitcntCounter::Lgkm || !info.issueCount)
     return;
-  constexpr unsigned maxTrackedPending = 4096;
-  state.lgkmPending =
-      std::min(maxTrackedPending, state.lgkmPending + info.issueCount);
+  unsigned maxTrackedPending = getMaxTrackedLgkmPending(cfg);
+  state.lgkmPending = std::min(
+      maxTrackedPending,
+      state.lgkmPending + std::min(info.issueCount, maxTrackedPending));
 }
 
-static void applyLgkmWait(Operation *op, HazardState &state) {
+static void applyLgkmWait(Operation *op, HazardState &state,
+                          const HazardConfig &cfg) {
   std::optional<unsigned> limit = getLgkmWaitLimit(*op);
-  if (!limit)
+  if (!limit || *limit >= cfg.defaultLgkmcnt)
     return;
   bool drained = state.lgkmPending > *limit;
   state.lgkmPending = std::min(state.lgkmPending, *limit);
@@ -889,8 +897,8 @@ static void transferHazards(Operation *op, HazardState &state,
 
   inheritNoInstOperandHazards(op, state);
   addProducedHazards(op, state, cfg);
-  addPendingLgkmIssue(op, state);
-  applyLgkmWait(op, state);
+  addPendingLgkmIssue(op, state, cfg);
+  applyLgkmWait(op, state, cfg);
 }
 
 static unsigned getRequiredSsaWait(Operation *op, const HazardState &state) {
@@ -991,6 +999,8 @@ struct WaveAMDHazardWaitsPass
     HazardConfig cfg{
         llvm::AMDGPU::isGFX11Plus(**sti),
         isaVersion,
+        llvm::AMDGPU::decodeLgkmcnt(
+            isaVersion, llvm::AMDGPU::getWaitcntBitMask(isaVersion)),
         amdgpu_compat::SDelayAlu::encode(
             amdgpu_compat::SDelayAlu::DelayType::VALU, 1),
         /*m0PipelineDelay=*/1,
