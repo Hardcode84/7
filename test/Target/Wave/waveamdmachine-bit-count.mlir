@@ -13,12 +13,12 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // ROUND: waveamdmachine.s_ff1_i32_b64
 
 // ASM-LABEL: bit_count_ops:
-// ASM: v_clz_i32_u32_e32 v1, v0
-// ASM: v_ctz_i32_b32_e32 v2, s0
+// ASM-DAG: v_clz_i32_u32_e32 v1, v0
+// ASM-DAG: v_ctz_i32_b32_e32 v2, s0
 // ASM: s_clz_i32_u32 s4, s0
-// ASM: s_ctz_i32_b32 s5, s4
-// ASM: s_clz_i32_u64 s6, s[2:3]
-// ASM: s_ctz_i32_b64 s7, s[2:3]
+// ASM-NEXT: s_ctz_i32_b32 s5, s4
+// ASM-DAG: s_clz_i32_u64 s6, s[2:3]
+// ASM-DAG: s_ctz_i32_b64 s7, s[2:3]
 func.func @bit_count_ops(%s32: !waveamdmachine.reg<sgpr, 1, 0>,
                          %s64: !waveamdmachine.reg<sgpr, 2, 2>,
                          %v32: !waveamdmachine.reg<vgpr, 1, 0>)

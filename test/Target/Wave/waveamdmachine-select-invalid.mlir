@@ -8,6 +8,18 @@ func.func @unsupported_op(%x: i32, %y: i32) attributes {wave.kernel} {
 
 // -----
 
+func.func @unsupported_raw_arith_addi(%out: !wave.ptr<#wave.global, i32>) attributes {wave.kernel} {
+  %wgid = wave.workgroup_id 0
+  %two = arith.constant 2 : i32
+  // expected-error @below {{unsupported operation in WaveAMDMachine selection}}
+  %sum = arith.addi %wgid, %two : i32
+  %off = wave.index_expr <"S"> ["S"](%sum) : (i32) -> index
+  %ptr = wave.ptr_add %out, %off : !wave.ptr<#wave.global, i32>, index -> !wave.ptr<#wave.global, i32>
+  return
+}
+
+// -----
+
 func.func @residual_wavemeta_op() attributes {wave.kernel} {
   // expected-error @below {{WaveAMDMachine lowering requires wavemeta-specialize; residual wavemeta operation remains}}
   %n = wavemeta.param "n" : index

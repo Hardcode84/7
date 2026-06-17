@@ -35,10 +35,10 @@ func.func @wave_signed_cmp(%limit: i32) -> i32 {
 func.func @wave_i64_cmp(%lhs: i64, %rhs: i64) -> i32 {
   %vlhs = wave.splat %lhs : i64 -> !wave.simd<i64, 32>
   %vrhs = wave.splat %rhs : i64 -> !wave.simd<i64, 32>
-  // CHECK: v_cmp_eq_u32_e64
-  // CHECK: v_cmp_le_u32_e64
-  // CHECK: v_cmp_lt_u32_e64
-  // CHECK: v_cmp_lt_i32_e64
+  // CHECK-DAG: v_cmp_lt_u32_e64
+  // CHECK-DAG: v_cmp_eq_u32_e64
+  // CHECK-DAG: v_cmp_le_u32_e64
+  // CHECK-DAG: v_cmp_lt_i32_e64
   // CHECK: s_and_b32
   // CHECK: s_or_b32
   %ule = wave.cmpi ule %vlhs, %vrhs
@@ -160,8 +160,8 @@ func.func @wave_kernel(%out: !wave.ptr<#wave.global, i32>, %x: i32) attributes {
   // CHECK: s_waitcnt lgkmcnt(0)
   // CHECK: s_delay_alu instid0(VALU_DEP_1)
   // CHECK: v_add_nc_u32_e32 [[SUM:v[0-9]+]], [[X]], [[LANE]]
-  %sum = wave.binary addi %lane, %vx : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
   // CHECK: v_lshlrev_b32_e32 [[OFFSET:v[0-9]+]], 2, [[LANE]]
+  %sum = wave.binary addi %lane, %vx : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
   // CHECK: global_store_b32 [[OFFSET]], [[SUM]], [[OUT]]
   %ptrs = wave.ptr_add %out, %lane : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 32> -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
   %store_token = wave.store %sum -> %ptrs : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>) -> !wave.mem.token

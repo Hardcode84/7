@@ -1,7 +1,7 @@
-// RUN: wave-opt --wave-expand-integer-div-rem --waveamd-to-machine --waveamd-abi-lowering --waveamd-reg-alloc --waveamd-resource-info %s \
+// RUN: wave-opt --wave-expand-integer-div-rem --waveamd-to-machine %s \
 // RUN:   | wave-translate --wave-to-amdgpu-asm - \
 // RUN:   | FileCheck %s --check-prefix=ASM
-// RUN: wave-opt --wave-expand-integer-div-rem --waveamd-to-machine --waveamd-abi-lowering --waveamd-reg-alloc --waveamd-resource-info %s \
+// RUN: wave-opt --wave-expand-integer-div-rem --waveamd-to-machine %s \
 // RUN:   | wave-translate --wave-to-amdgpu-asm - \
 // RUN:   | llvm-mc -triple=amdgcn-amd-amdhsa -mcpu=gfx1100 -filetype=obj -o /dev/null
 

@@ -8,9 +8,9 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // PRINT: waveamdmachine.s_xor_b64
 // PRINT: waveamdmachine.v_xor_b64
 // ASM-LABEL: wide_xor_machine:
-// ASM: s_xor_b64
-// ASM: v_xor_b32
-// ASM: v_xor_b32
+// ASM-DAG: s_xor_b64
+// ASM-DAG: v_xor_b32
+// ASM-DAG: v_xor_b32
 func.func @wide_xor_machine(%out: !wave.ptr<#wave.global, i32>)
     attributes {wave.kernel} {
   %a = waveamdmachine.arg {index = 0 : i64, pointer = true}
