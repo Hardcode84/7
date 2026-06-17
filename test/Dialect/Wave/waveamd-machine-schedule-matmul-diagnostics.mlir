@@ -64,6 +64,35 @@ func.func @issue_window_candidate(%a: !waveamdmachine.reg<vgpr, 4>,
 // -----
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
+func.func @cma_dma_place_candidate(%a: !waveamdmachine.reg<vgpr, 4>,
+                                   %b: !waveamdmachine.reg<vgpr, 4>,
+                                   %acc0: !waveamdmachine.reg<vgpr, 4>,
+                                   %acc1: !waveamdmachine.reg<vgpr, 4>,
+                                   %v: !waveamdmachine.reg<vgpr, 1>,
+                                   %rsrc: !waveamdmachine.reg<sgpr, 4>,
+                                   %m0: !waveamdmachine.m0,
+                                   %tok: !waveamdmachine.mem.token) {
+  %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+  %r0 = waveamdmachine.mfma_f32_16x16x32_f16 %a, %b, %acc0
+      : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
+         !waveamdmachine.reg<vgpr, 4>) -> !waveamdmachine.reg<vgpr, 4>
+  %r1 = waveamdmachine.mfma_f32_16x16x32_f16 %a, %b, %acc1
+      : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
+         !waveamdmachine.reg<vgpr, 4>) -> !waveamdmachine.reg<vgpr, 4>
+  %ld0 = waveamdmachine.buffer_load_lds_b128 %v, %rsrc, %zero, %m0 after %tok
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 4>,
+         !waveamdmachine.imm, !waveamdmachine.m0, !waveamdmachine.mem.token)
+        -> !waveamdmachine.mem.token
+  return
+}
+}
+
+// DIAG: waveamd-machine-schedule-report candidate func=cma_dma_place_candidate region=0 name=cma_dma_place_1 cycles=84 delta=-4
+// DIAG: waveamd-machine-schedule-report selected func=cma_dma_place_candidate region=0 name=critical_path original_cycles=88 selected_cycles=80 delta=-8 action=keep
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 func.func @late_dma_overlap_candidate(%a: !waveamdmachine.reg<vgpr, 4>,
                                       %b: !waveamdmachine.reg<vgpr, 4>,
                                       %acc: !waveamdmachine.reg<vgpr, 4>,

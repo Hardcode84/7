@@ -754,7 +754,8 @@ void addGuidedBeamCandidates(SmallVectorImpl<OrderCandidate> &candidates,
                              const GraphTables &tables,
                              ArrayRef<NodeMetrics> metrics,
                              const ScheduleRegion &region,
-                             const RegisterPressureBudgets &budgets) {
+                             const RegisterPressureBudgets &budgets,
+                             unsigned guideCount) {
   static constexpr StringLiteral kBeamNames[] = {
       "beam_0", "beam_1", "beam_2", "beam_3",
       "beam_4", "beam_5", "beam_6", "beam_7",
@@ -767,10 +768,11 @@ void addGuidedBeamCandidates(SmallVectorImpl<OrderCandidate> &candidates,
   if (isPressureSearchEnabled(budgets))
     pressureModel = buildPressureModel(region);
 
+  guideCount = std::min<unsigned>(guideCount, candidates.size());
   SmallVector<SmallVector<BeamResult, 8>, 8> perGuideResults;
-  perGuideResults.resize(candidates.size());
+  perGuideResults.resize(guideCount);
   MLIRContext *context = region.ops.front()->getContext();
-  parallelFor(context, 0, candidates.size(), [&](size_t index) {
+  parallelFor(context, 0, guideCount, [&](size_t index) {
     perGuideResults[index] =
         runGuidedBeamSearch(context, tables, metrics, candidates[index].order,
                             static_cast<unsigned>(index), pressureModel,
@@ -778,7 +780,7 @@ void addGuidedBeamCandidates(SmallVectorImpl<OrderCandidate> &candidates,
   });
 
   SmallVector<BeamResult, 16> results;
-  for (size_t index : llvm::seq<size_t>(0, candidates.size())) {
+  for (size_t index : llvm::seq<size_t>(0, guideCount)) {
     ArrayRef<BeamResult> guideResults = perGuideResults[index];
     for (const BeamResult &result : guideResults) {
       if (hasCandidateOrder(candidates, result.order) ||

@@ -4,6 +4,7 @@
 # CHECK: matmul_pressure_disabled: ok
 # CHECK: matmul_hard_cap_beam_report: ok
 # CHECK: fa_seq32_d16_u4_beam_report: ok
+# CHECK: cma_dma_beam_cap: ok
 # CHECK: lazy_hard_cap_issue_window_tie: ok
 
 from __future__ import annotations
@@ -134,6 +135,76 @@ def lazy_issue_window_tie_mlir() -> str:
     return "\n".join(lines)
 
 
+def cma_dma_beam_cap_mlir(cma_count: int = 32) -> str:
+    lines = [
+        'module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {',
+        "func.func @cma_dma_beam_cap(",
+        "    %a: !waveamdmachine.reg<vgpr, 4>,",
+        "    %b: !waveamdmachine.reg<vgpr, 4>,",
+    ]
+    for i in range(cma_count):
+        lines.append(f"    %acc{i}: !waveamdmachine.reg<vgpr, 4>,")
+    lines.extend(
+        [
+            "    %v: !waveamdmachine.reg<vgpr, 1>,",
+            "    %rsrc: !waveamdmachine.reg<sgpr, 4>,",
+            "    %m0: !waveamdmachine.m0,",
+            "    %tok: !waveamdmachine.mem.token) {",
+            "  %zero = waveamdmachine.imm 0 : !waveamdmachine.imm",
+        ]
+    )
+    for i in range(cma_count):
+        lines.extend(
+            [
+                f"  %r{i} = waveamdmachine.mfma_f32_16x16x32_f16 %a, %b, %acc{i}",
+                "      : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,",
+                "         !waveamdmachine.reg<vgpr, 4>) -> "
+                "!waveamdmachine.reg<vgpr, 4>",
+            ]
+        )
+    lines.extend(
+        [
+            "  %ld0 = waveamdmachine.buffer_load_lds_b128 %v, %rsrc, %zero, "
+            "%m0 after %tok",
+            "      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 4>,",
+            "         !waveamdmachine.imm, !waveamdmachine.m0, "
+            "!waveamdmachine.mem.token)",
+            "        -> !waveamdmachine.mem.token",
+            "  return",
+            "}",
+            "}",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def check_cma_dma_beam_cap() -> None:
+    text = run_case(
+        "cma_dma_beam_cap",
+        [
+            str(REPO_ROOT / "build/bin/wave-opt"),
+            "-",
+            "--waveamd-machine-schedule-report=print-candidates=1 "
+            "beam-search=1 max-beam-work=1000000",
+        ],
+        input_text=cma_dma_beam_cap_mlir(),
+        timeout=10.0,
+    )
+    cma_candidates = re.findall(
+        r"candidate func=cma_dma_beam_cap region=0 name=cma_dma_place_", text
+    )
+    if len(cma_candidates) != 8:
+        print(
+            f"cma_dma_beam_cap: expected 8 placement candidates, "
+            f"got {len(cma_candidates)}",
+            file=sys.stderr,
+        )
+        print(text[-4000:], file=sys.stderr)
+        raise SystemExit(1)
+    require("cma_dma_beam_cap", text, r"name=beam_0")
+    reject("cma_dma_beam_cap", text, r"reason=max_beam_work")
+
+
 def main() -> int:
     text = run_case(
         "matmul_pressure_disabled",
@@ -203,6 +274,8 @@ def main() -> int:
         r"sim_cycles waves=1 simds=1 start_delay=0: 30216",
     )
     reject("fa_seq32_d16_u4_beam_report", text, r"pressure_fallback")
+
+    check_cma_dma_beam_cap()
 
     text = run_case(
         "lazy_hard_cap_issue_window_tie",

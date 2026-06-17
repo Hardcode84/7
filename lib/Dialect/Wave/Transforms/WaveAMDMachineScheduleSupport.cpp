@@ -1296,15 +1296,21 @@ static bool isValuLikeFU(waveamdmachine::FunctionalUnit fu) {
          fu == waveamdmachine::FunctionalUnit::TRANS;
 }
 
+enum class DfsState : uint8_t {
+  Unseen,
+  Visiting,
+  Done,
+};
+
 static int64_t computeCriticalPath(
     unsigned node, ArrayRef<SmallVector<unsigned, 4>> successors,
     ArrayRef<NodeMetrics> metrics, SmallVectorImpl<int64_t> &memo,
-    SmallVectorImpl<uint8_t> &state) {
-  if (state[node] == 2)
+    SmallVectorImpl<DfsState> &state) {
+  if (state[node] == DfsState::Done)
     return memo[node];
-  if (state[node] == 1)
+  if (state[node] == DfsState::Visiting)
     return metrics[node].latency;
-  state[node] = 1;
+  state[node] = DfsState::Visiting;
   int64_t best = metrics[node].latency;
   for (unsigned succ : successors[node]) {
     int64_t through =
@@ -1312,7 +1318,7 @@ static int64_t computeCriticalPath(
         computeCriticalPath(succ, successors, metrics, memo, state);
     best = std::max(best, through);
   }
-  state[node] = 2;
+  state[node] = DfsState::Done;
   memo[node] = best;
   return best;
 }
@@ -1320,16 +1326,16 @@ static int64_t computeCriticalPath(
 static bool computeReachMemory(unsigned node,
                                ArrayRef<SmallVector<unsigned, 4>> successors,
                                SmallVectorImpl<NodeMetrics> &metrics,
-                               SmallVectorImpl<uint8_t> &state) {
-  if (state[node] == 2)
+                               SmallVectorImpl<DfsState> &state) {
+  if (state[node] == DfsState::Done)
     return metrics[node].reachesMemory;
-  if (state[node] == 1)
+  if (state[node] == DfsState::Visiting)
     return metrics[node].memory;
-  state[node] = 1;
+  state[node] = DfsState::Visiting;
   bool reaches = metrics[node].memory;
   for (unsigned succ : successors[node])
     reaches |= computeReachMemory(succ, successors, metrics, state);
-  state[node] = 2;
+  state[node] = DfsState::Done;
   metrics[node].reachesMemory = reaches;
   return reaches;
 }
@@ -1337,17 +1343,34 @@ static bool computeReachMemory(unsigned node,
 static bool computeReachCmaIssue(unsigned node,
                                  ArrayRef<SmallVector<unsigned, 4>> successors,
                                  SmallVectorImpl<NodeMetrics> &metrics,
-                                 SmallVectorImpl<uint8_t> &state) {
-  if (state[node] == 2)
+                                 SmallVectorImpl<DfsState> &state) {
+  if (state[node] == DfsState::Done)
     return metrics[node].reachesCmaIssue;
-  if (state[node] == 1)
+  if (state[node] == DfsState::Visiting)
     return metrics[node].cmaIssue;
-  state[node] = 1;
+  state[node] = DfsState::Visiting;
   bool reaches = metrics[node].cmaIssue;
   for (unsigned succ : successors[node])
     reaches |= computeReachCmaIssue(succ, successors, metrics, state);
-  state[node] = 2;
+  state[node] = DfsState::Done;
   metrics[node].reachesCmaIssue = reaches;
+  return reaches;
+}
+
+static bool computeReachLdsDma(unsigned node,
+                               ArrayRef<SmallVector<unsigned, 4>> successors,
+                               SmallVectorImpl<NodeMetrics> &metrics,
+                               SmallVectorImpl<DfsState> &state) {
+  if (state[node] == DfsState::Done)
+    return metrics[node].reachesLdsDma;
+  if (state[node] == DfsState::Visiting)
+    return metrics[node].ldsDma;
+  state[node] = DfsState::Visiting;
+  bool reaches = metrics[node].ldsDma;
+  for (unsigned succ : successors[node])
+    reaches |= computeReachLdsDma(succ, successors, metrics, state);
+  state[node] = DfsState::Done;
+  metrics[node].reachesLdsDma = reaches;
   return reaches;
 }
 
@@ -1368,24 +1391,29 @@ computeNodeMetrics(const ScheduleRegion &region, const GraphTables &tables,
     metrics[index].issueSlots = getIssueSlots(cls, issueCount);
     metrics[index].cmaIssue =
         waveamdmachine::getEventSimCmaIssueCount(op, cls, issueCount) > 0;
+    metrics[index].ldsDma = waveamdmachine::isLdsDmaIssuer(op);
     metrics[index].salu =
         metrics[index].fu == waveamdmachine::FunctionalUnit::SALU;
     metrics[index].valu = isValuLikeFU(metrics[index].fu);
   }
 
   SmallVector<int64_t, 16> memo(region.ops.size(), 0);
-  SmallVector<uint8_t, 16> state(region.ops.size(), 0);
+  SmallVector<DfsState, 16> state(region.ops.size(), DfsState::Unseen);
   for (unsigned index = 0; index < region.ops.size(); ++index)
     metrics[index].criticalPath =
         computeCriticalPath(index, tables.successors, metrics, memo, state);
 
-  state.assign(region.ops.size(), 0);
+  state.assign(region.ops.size(), DfsState::Unseen);
   for (unsigned index = 0; index < region.ops.size(); ++index)
     computeReachMemory(index, tables.successors, metrics, state);
 
-  state.assign(region.ops.size(), 0);
+  state.assign(region.ops.size(), DfsState::Unseen);
   for (unsigned index = 0; index < region.ops.size(); ++index)
     computeReachCmaIssue(index, tables.successors, metrics, state);
+
+  state.assign(region.ops.size(), DfsState::Unseen);
+  for (unsigned index = 0; index < region.ops.size(); ++index)
+    computeReachLdsDma(index, tables.successors, metrics, state);
 
   return metrics;
 }
@@ -1559,6 +1587,149 @@ static bool buildIssueWindowOrder(const GraphTables &tables,
   }
 
   return order.size() == pending.size();
+}
+
+struct CmaDmaPlacementWindow {
+  SmallVector<unsigned, 16> insertPositions;
+  SmallVector<unsigned, 16> cmaLeadCounts;
+  unsigned dmaBegin = 0;
+  unsigned dmaEnd = 0;
+};
+
+static constexpr unsigned kMaxCmaDmaPlacementCandidatesPerWindow = 8;
+
+static bool isNonDmaCmaIssue(const NodeMetrics &metrics) {
+  return metrics.cmaIssue && !metrics.ldsDma;
+}
+
+static bool isLdsDmaProducer(const NodeMetrics &metrics) {
+  return metrics.ldsDma || metrics.reachesLdsDma;
+}
+
+static void collectCmaInsertPositions(unsigned runBegin, unsigned runEnd,
+                                      ArrayRef<NodeMetrics> metrics,
+                                      CmaDmaPlacementWindow &window) {
+  unsigned cmaCount = 0;
+  for (unsigned index = runBegin; index < runEnd; ++index) {
+    if (!isNonDmaCmaIssue(metrics[index]))
+      continue;
+    ++cmaCount;
+    if (index + 1 >= runEnd)
+      continue;
+    window.insertPositions.push_back(index + 1);
+    window.cmaLeadCounts.push_back(cmaCount);
+  }
+}
+
+static bool isCmaDmaPlacementStart(ArrayRef<NodeMetrics> metrics,
+                                   unsigned index) {
+  if (index >= metrics.size())
+    return false;
+  if (isNonDmaCmaIssue(metrics[index]))
+    return false;
+  return isLdsDmaProducer(metrics[index]);
+}
+
+struct LdsDmaProducerScan {
+  unsigned lastProducerEnd = 0;
+  bool hasIssuer = false;
+};
+
+static std::optional<LdsDmaProducerScan>
+scanLdsDmaProducerCluster(ArrayRef<NodeMetrics> metrics, unsigned dmaBegin) {
+  LdsDmaProducerScan scan;
+  scan.lastProducerEnd = dmaBegin;
+  bool gapAfterProducer = false;
+  for (unsigned index = dmaBegin; index < metrics.size(); ++index) {
+    if (isNonDmaCmaIssue(metrics[index]))
+      break;
+    if (!isLdsDmaProducer(metrics[index])) {
+      if (scan.lastProducerEnd > dmaBegin)
+        gapAfterProducer = true;
+      continue;
+    }
+    if (gapAfterProducer)
+      return std::nullopt;
+    scan.lastProducerEnd = index + 1;
+    scan.hasIssuer |= metrics[index].ldsDma;
+  }
+  if (!scan.hasIssuer || scan.lastProducerEnd <= dmaBegin)
+    return std::nullopt;
+  return scan;
+}
+
+static std::optional<CmaDmaPlacementWindow>
+findCmaDmaPlacementWindow(ArrayRef<NodeMetrics> metrics, unsigned runBegin,
+                          unsigned runEnd) {
+  unsigned dmaBegin = runEnd;
+  if (!isCmaDmaPlacementStart(metrics, dmaBegin))
+    return std::nullopt;
+  std::optional<LdsDmaProducerScan> scan =
+      scanLdsDmaProducerCluster(metrics, dmaBegin);
+  if (!scan)
+    return std::nullopt;
+
+  CmaDmaPlacementWindow window;
+  collectCmaInsertPositions(runBegin, runEnd, metrics, window);
+  if (window.insertPositions.empty())
+    return std::nullopt;
+  window.dmaBegin = dmaBegin;
+  window.dmaEnd = scan->lastProducerEnd;
+  return window;
+}
+
+static SmallVector<CmaDmaPlacementWindow, 4>
+findCmaDmaPlacementWindows(ArrayRef<NodeMetrics> metrics) {
+  SmallVector<CmaDmaPlacementWindow, 4> windows;
+  for (unsigned index = 0; index < metrics.size();) {
+    if (!isNonDmaCmaIssue(metrics[index])) {
+      ++index;
+      continue;
+    }
+    unsigned runBegin = index;
+    while (index < metrics.size() && isNonDmaCmaIssue(metrics[index]))
+      ++index;
+    unsigned runEnd = index;
+    if (std::optional<CmaDmaPlacementWindow> window =
+            findCmaDmaPlacementWindow(metrics, runBegin, runEnd)) {
+      windows.push_back(*window);
+      index = std::max(index, window->dmaEnd);
+    }
+  }
+  return windows;
+}
+
+static void buildCmaDmaPlacementOrder(const CmaDmaPlacementWindow &window,
+                                      unsigned insertPos, unsigned opCount,
+                                      SmallVectorImpl<unsigned> &order) {
+  for (unsigned i = 0; i < insertPos; ++i)
+    order.push_back(i);
+  for (unsigned i = window.dmaBegin; i < window.dmaEnd; ++i)
+    order.push_back(i);
+  for (unsigned i = insertPos; i < window.dmaBegin; ++i)
+    order.push_back(i);
+  for (unsigned i = window.dmaEnd; i < opCount; ++i)
+    order.push_back(i);
+}
+
+static SmallVector<unsigned, 8>
+sampleCmaDmaPlacementIndices(unsigned candidateCount) {
+  SmallVector<unsigned, 8> indices;
+  if (candidateCount <= kMaxCmaDmaPlacementCandidatesPerWindow) {
+    for (unsigned index : llvm::seq<unsigned>(0, candidateCount))
+      indices.push_back(index);
+    return indices;
+  }
+
+  unsigned last = candidateCount - 1;
+  unsigned denom = kMaxCmaDmaPlacementCandidatesPerWindow - 1;
+  for (unsigned sample :
+       llvm::seq<unsigned>(0, kMaxCmaDmaPlacementCandidatesPerWindow)) {
+    unsigned index = sample * last / denom;
+    if (indices.empty() || indices.back() != index)
+      indices.push_back(index);
+  }
+  return indices;
 }
 
 static constexpr size_t kNumScheduleFUs =
@@ -1911,6 +2082,38 @@ static void addPolicyCandidate(SmallVectorImpl<OrderCandidate> &candidates,
   candidates.push_back(std::move(candidate));
 }
 
+static void
+addCmaDmaPlacementCandidates(SmallVectorImpl<OrderCandidate> &candidates,
+                             ArrayRef<NodeMetrics> metrics) {
+  if (!llvm::any_of(metrics,
+                    [](const NodeMetrics &metrics) { return metrics.ldsDma; }))
+    return;
+
+  for (const CmaDmaPlacementWindow &window :
+       findCmaDmaPlacementWindows(metrics)) {
+    for (unsigned index :
+         sampleCmaDmaPlacementIndices(window.insertPositions.size())) {
+      unsigned insertPos = window.insertPositions[index];
+      OrderCandidate candidate;
+      candidate.name =
+          "cma_dma_place_" + std::to_string(window.cmaLeadCounts[index]);
+      buildCmaDmaPlacementOrder(window, insertPos, metrics.size(),
+                                candidate.order);
+      if (candidate.order.size() != metrics.size())
+        continue;
+      bool duplicate = false;
+      for (const OrderCandidate &existing : candidates) {
+        if (!sameOrder(existing.order, candidate.order))
+          continue;
+        duplicate = true;
+        break;
+      }
+      if (!duplicate)
+        candidates.push_back(std::move(candidate));
+    }
+  }
+}
+
 static void addIssueWindowCandidate(SmallVectorImpl<OrderCandidate> &candidates,
                                     const GraphTables &tables,
                                     ArrayRef<NodeMetrics> metrics) {
@@ -2012,8 +2215,10 @@ buildScheduleCandidates(const ScheduleRegion &region,
   addIssueWindowCandidate(candidates, tables, metrics);
   addLocalIssueCandidate(candidates, region, tables, metrics, arch,
                          modelConfig);
+  unsigned beamGuideCount = candidates.size();
+  addCmaDmaPlacementCandidates(candidates, metrics);
   int64_t estimatedBeamWork =
-      estimateGuidedBeamSearchWork(candidates.size(), region.opCount);
+      estimateGuidedBeamSearchWork(beamGuideCount, region.opCount);
   if (shouldRunBeamSearch(metrics, arch, modelConfig, enableBeamSearch,
                           estimatedBeamWork, limits)) {
     if (exceedsBeamWorkLimit(enableBeamSearch, estimatedBeamWork, limits)) {
@@ -2028,7 +2233,8 @@ buildScheduleCandidates(const ScheduleRegion &region,
       if (enableBeamSearch && limits.emitRemarks)
         emitScheduleBeamWorkRemark(region, estimatedBeamWork, limits);
     } else {
-      addGuidedBeamCandidates(candidates, tables, metrics, region, budgets);
+      addGuidedBeamCandidates(candidates, tables, metrics, region, budgets,
+                              beamGuideCount);
     }
   }
   return candidates;
@@ -2107,13 +2313,22 @@ compareCriticalPressure(const EvaluatedCandidate &candidate,
   return std::nullopt;
 }
 
+static int resourceTiePriority(const EvaluatedCandidate &candidate) {
+  StringRef name(candidate.name);
+  if (name.starts_with("cma_dma_place_"))
+    return 2;
+  if (usesIssueWindowTie(candidate))
+    return 1;
+  return 0;
+}
+
 static std::optional<bool>
-compareIssueWindowTie(const EvaluatedCandidate &candidate,
-                      const EvaluatedCandidate &best) {
-  bool candidateTie = usesIssueWindowTie(candidate);
-  bool bestTie = usesIssueWindowTie(best);
-  if (candidateTie != bestTie)
-    return candidateTie;
+compareResourceTie(const EvaluatedCandidate &candidate,
+                   const EvaluatedCandidate &best) {
+  int candidatePriority = resourceTiePriority(candidate);
+  int bestPriority = resourceTiePriority(best);
+  if (candidatePriority != bestPriority)
+    return candidatePriority > bestPriority;
   return std::nullopt;
 }
 
@@ -2128,7 +2343,7 @@ static bool isBetterScheduleCandidate(const EvaluatedCandidate &candidate,
     return *better;
   if (candidate.metrics.score.cycles != best.metrics.score.cycles)
     return candidate.metrics.score.cycles < best.metrics.score.cycles;
-  if (std::optional<bool> better = compareIssueWindowTie(candidate, best))
+  if (std::optional<bool> better = compareResourceTie(candidate, best))
     return *better;
   return false;
 }
@@ -2183,7 +2398,7 @@ static void selectLazyHardCapCandidate(
       return lhsCandidate.metrics.score.cycles <
              rhsCandidate.metrics.score.cycles;
     if (std::optional<bool> better =
-            compareIssueWindowTie(lhsCandidate, rhsCandidate))
+            compareResourceTie(lhsCandidate, rhsCandidate))
       return *better;
     return lhs < rhs;
   });

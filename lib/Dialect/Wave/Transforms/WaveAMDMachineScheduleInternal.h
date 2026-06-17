@@ -34,6 +34,8 @@ struct NodeMetrics {
   bool reachesMemory = false;
   bool cmaIssue = false;
   bool reachesCmaIssue = false;
+  bool ldsDma = false;
+  bool reachesLdsDma = false;
   bool salu = false;
   bool valu = false;
 };
@@ -64,7 +66,8 @@ void addGuidedBeamCandidates(SmallVectorImpl<OrderCandidate> &candidates,
                              const GraphTables &tables,
                              ArrayRef<NodeMetrics> metrics,
                              const ScheduleRegion &region,
-                             const RegisterPressureBudgets &budgets);
+                             const RegisterPressureBudgets &budgets,
+                             unsigned guideCount);
 
 } // namespace mlir::wave
 
