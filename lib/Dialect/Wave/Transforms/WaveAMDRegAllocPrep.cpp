@@ -251,6 +251,28 @@ static bool isPerfectRoundTrip(waveamdmachine::TupleFromElementsOp op,
   return fromW == srcW;
 }
 
+static bool hasFixedElement(ValueRange elements) {
+  return llvm::any_of(elements, [](Value element) {
+    return cast<waveamdmachine::RegType>(element.getType()).getIndex() >= 0;
+  });
+}
+
+static bool breaksUnfixedRoundTrip(waveamdmachine::TupleFromElementsOp op,
+                                   waveamdmachine::RegType tupleType,
+                                   bool perfectRT) {
+  return perfectRT && tupleType.getIndex() < 0 &&
+         hasFixedElement(op.getElements());
+}
+
+static bool needsTupleElementCopy(Value element, bool slotMismatch, bool reuse,
+                                  bool dragInConflict,
+                                  bool fixedElementInUnfixedTuple,
+                                  bool brokenRoundTripElement) {
+  return slotMismatch || reuse || dragInConflict ||
+         fixedElementInUnfixedTuple || brokenRoundTripElement ||
+         feedsLoopCarry(element);
+}
+
 static LogicalResult
 rewriteFromElementsForSharing(waveamdmachine::TupleFromElementsOp op,
                               OpBuilder &builder,
@@ -263,17 +285,27 @@ rewriteFromElementsForSharing(waveamdmachine::TupleFromElementsOp op,
   newElements.reserve(op.getElements().size());
   bool changed = false;
   unsigned cumOffset = 0;
+  waveamdmachine::RegType tupleType =
+      cast<waveamdmachine::RegType>(op.getTuple().getType());
+  bool copyRoundTripElements = breaksUnfixedRoundTrip(op, tupleType, perfectRT);
   for (Value element : op.getElements()) {
     unsigned slot = cumOffset;
-    unsigned width =
-        cast<waveamdmachine::RegType>(element.getType()).getWidth();
+    waveamdmachine::RegType elementType =
+        cast<waveamdmachine::RegType>(element.getType());
+    unsigned width = elementType.getWidth();
     Value use = element;
     auto anchorIt = anchorSlot.find(element);
     bool slotMismatch =
         anchorIt != anchorSlot.end() && anchorIt->second != slot;
     bool reuse = consumedByFromElements.contains(element);
     bool dragInConflict = !perfectRT && toElementsSource.contains(element);
-    if (slotMismatch || reuse || dragInConflict || feedsLoopCarry(element)) {
+    bool fixedElementInUnfixedTuple =
+        tupleType.getIndex() < 0 && elementType.getIndex() >= 0;
+    bool brokenRoundTripElement =
+        copyRoundTripElements && toElementsSource.contains(element);
+    if (needsTupleElementCopy(element, slotMismatch, reuse, dragInConflict,
+                              fixedElementInUnfixedTuple,
+                              brokenRoundTripElement)) {
       FailureOr<Value> dup = duplicateRegValue(builder, op.getLoc(), element);
       if (failed(dup))
         return failure();

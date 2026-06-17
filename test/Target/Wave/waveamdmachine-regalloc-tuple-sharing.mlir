@@ -3,6 +3,63 @@
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
+// Mixed fixed/unfixed round-trip: copying one element breaks tuple
+// aliasing. Copy the sibling too.
+//
+// CHECK-LABEL: func.func @mixed_fixed_round_trip_copies_all_elements
+// CHECK: %[[SRC:.+]] = waveamdmachine.v_mov_b32_tuple {{.*}} -> !waveamdmachine.reg<vgpr, 2, [[#SRC_BASE:]]>
+// CHECK: %[[E:.+]]:2 = waveamdmachine.tuple_to_elements %[[SRC]]
+// CHECK-SAME: -> (!waveamdmachine.reg<vgpr, 1, 0>
+// CHECK-SAME: !waveamdmachine.reg<vgpr, 1, [[#SRC_BASE+1]]>)
+// CHECK: %[[C0:.+]] = waveamdmachine.v_mov_b32_tuple %[[E]]#0 {registers = 1 : i64} : (!waveamdmachine.reg<vgpr, 1, 0>) -> !waveamdmachine.reg<vgpr, 1, [[#DST_BASE:]]>
+// CHECK: %[[C1:.+]] = waveamdmachine.v_mov_b32_tuple %[[E]]#1 {registers = 1 : i64} : (!waveamdmachine.reg<vgpr, 1, [[#SRC_BASE+1]]>) -> !waveamdmachine.reg<vgpr, 1, [[#DST_BASE+1]]>
+// CHECK: %{{.+}} = waveamdmachine.tuple_from_elements %[[C0]], %[[C1]]
+// CHECK-SAME: -> !waveamdmachine.reg<vgpr, 2, [[#DST_BASE]]>
+func.func @mixed_fixed_round_trip_copies_all_elements() {
+  %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+  %src = waveamdmachine.v_mov_b32_tuple %zero {registers = 2 : i64}
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 2>
+  %e:2 = waveamdmachine.tuple_to_elements %src
+      : (!waveamdmachine.reg<vgpr, 2>) -> (!waveamdmachine.reg<vgpr, 1, 0>,
+                                           !waveamdmachine.reg<vgpr, 1>)
+  %dst = waveamdmachine.tuple_from_elements %e#0, %e#1
+      : (!waveamdmachine.reg<vgpr, 1, 0>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 2>
+  return
+}
+
+}
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
+
+// Fixed element entering a fresh tuple needs a rename; tuple result
+// must not inherit the pinned physical register.
+//
+// CHECK-LABEL: func.func @fixed_element_into_unfixed_tuple_copies
+// CHECK: %[[FIXED:.+]] = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1, 0>
+// CHECK: %[[FREE:.+]] = waveamdmachine.v_mov_b32_tuple {{.*}} -> !waveamdmachine.reg<vgpr, 1, [[#FREE_SLOT:]]>
+// CHECK: %[[COPY:.+]] = waveamdmachine.v_mov_b32_tuple %[[FIXED]] {registers = 1 : i64} : (!waveamdmachine.reg<vgpr, 1, 0>) -> !waveamdmachine.reg<vgpr, 1, [[#FREE_SLOT-1]]>
+// CHECK: %{{.+}} = waveamdmachine.tuple_from_elements %[[COPY]], %[[FREE]]
+// CHECK-SAME: -> !waveamdmachine.reg<vgpr, 2, [[#FREE_SLOT-1]]>
+func.func @fixed_element_into_unfixed_tuple_copies() {
+  %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+  %fixed = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1, 0>
+  %free = waveamdmachine.v_mov_b32_tuple %zero {registers = 1 : i64}
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
+  %tuple = waveamdmachine.tuple_from_elements %fixed, %free
+      : (!waveamdmachine.reg<vgpr, 1, 0>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 2>
+  return
+}
+
+}
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
+
 // Two `tuple_from_elements` ops share %a at slot 0. Without the
 // sharing pre-pass the coalescer would merge t1's interval into t2's
 // via %a, pulling t1's %b/%c/%d into t2 at slots 1/2/3 and silently
