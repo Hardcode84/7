@@ -106,11 +106,9 @@ tools/wave-matmul-calibrate/wave-matmul-calibrate.py \
   --iters=100 --warmup=10 --repeats=3
 ```
 
-Compared with `--no-pressure-aware-schedule`, pressure-aware selection picked
-the same candidate in every region: `critical_path, critical_path, wmma_feed,
-critical_path, critical_path`. Max VGPR was `22, 31, 45, 29, 33`, below the
-hard cap. Final sim cycles matched: `5137` for `(waves=1, simds=1)` and `5137`
-for `(waves=2, simds=2)`.
+Compared with `--no-pressure-aware-schedule`, pressure-aware selection stayed
+within the hard cap. Max VGPR was `22, 31, 45, 29, 33`. Final sim cycles
+matched: `5137` for `(waves=1, simds=1)` and `5137` for `(waves=2, simds=2)`.
 
 | Matmul policy | HW cycles samples | Median cycles | Median us | Check |
 | --- | --- | ---: | ---: | --- |

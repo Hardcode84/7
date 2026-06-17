@@ -1237,16 +1237,22 @@ static bool isMemoryIssuer(Operation *op) {
   return false;
 }
 
-static bool isMatrixOp(Operation *op) {
-  return isa<waveamdmachine::MfmaF32_16x16x16_F16Op,
-             waveamdmachine::MfmaF32_16x16x16_BF16Op,
-             waveamdmachine::MfmaF32_16x16x32_F16Op,
-             waveamdmachine::MfmaF32_16x16x32_BF16Op,
-             waveamdmachine::MfmaF32_32x32x16_F16Op,
-             waveamdmachine::MfmaF32_32x32x16_BF16Op,
-             waveamdmachine::WmmaF32_16x16x16_F16Op,
-             waveamdmachine::WmmaF32_16x16x16_BF16Op,
-             waveamdmachine::WmmaI32_16x16x16_IU8Op>(op);
+static unsigned getIssueCount(Operation *op) {
+  if (auto info = dyn_cast<waveamdmachine::WaitcntInfoOpInterface>(op))
+    return info.getWaitcntInfo().issueCount;
+  return 0;
+}
+
+static unsigned getIssueSlots(waveamdmachine::SchedClass cls,
+                              unsigned issueCount) {
+  if (cls == waveamdmachine::SchedClass::NoInst)
+    return 0;
+  return std::max(1u, issueCount);
+}
+
+static bool isValuLikeFU(waveamdmachine::FunctionalUnit fu) {
+  return fu == waveamdmachine::FunctionalUnit::VALU ||
+         fu == waveamdmachine::FunctionalUnit::TRANS;
 }
 
 static int64_t computeCriticalPath(
@@ -1287,20 +1293,20 @@ static bool computeReachMemory(unsigned node,
   return reaches;
 }
 
-static bool computeReachMatrix(unsigned node,
-                               ArrayRef<SmallVector<unsigned, 4>> successors,
-                               SmallVectorImpl<NodeMetrics> &metrics,
-                               SmallVectorImpl<uint8_t> &state) {
+static bool computeReachCmaIssue(unsigned node,
+                                 ArrayRef<SmallVector<unsigned, 4>> successors,
+                                 SmallVectorImpl<NodeMetrics> &metrics,
+                                 SmallVectorImpl<uint8_t> &state) {
   if (state[node] == 2)
-    return metrics[node].reachesMatrix;
+    return metrics[node].reachesCmaIssue;
   if (state[node] == 1)
-    return metrics[node].matrix;
+    return metrics[node].cmaIssue;
   state[node] = 1;
-  bool reaches = metrics[node].matrix;
+  bool reaches = metrics[node].cmaIssue;
   for (unsigned succ : successors[node])
-    reaches |= computeReachMatrix(succ, successors, metrics, state);
+    reaches |= computeReachCmaIssue(succ, successors, metrics, state);
   state[node] = 2;
-  metrics[node].reachesMatrix = reaches;
+  metrics[node].reachesCmaIssue = reaches;
   return reaches;
 }
 
@@ -1312,11 +1318,18 @@ computeNodeMetrics(const ScheduleRegion &region, const GraphTables &tables,
   for (auto [index, op] : llvm::enumerate(region.ops)) {
     waveamdmachine::SchedClass cls = waveamdmachine::classifyOp(op);
     metrics[index].latency = getModelLatency(arch, cls, modelConfig);
+    metrics[index].fu = waveamdmachine::funit(arch, cls);
     if (waveamdmachine::hasMemoryValueLatency(op))
       metrics[index].latency = waveamdmachine::getMemoryValueLatency(
           arch, op, modelConfig.valueLatencies, modelConfig.calibration);
     metrics[index].memory = isMemoryIssuer(op);
-    metrics[index].matrix = isMatrixOp(op);
+    unsigned issueCount = getIssueCount(op);
+    metrics[index].issueSlots = getIssueSlots(cls, issueCount);
+    metrics[index].cmaIssue =
+        waveamdmachine::getEventSimCmaIssueCount(op, cls, issueCount) > 0;
+    metrics[index].salu =
+        metrics[index].fu == waveamdmachine::FunctionalUnit::SALU;
+    metrics[index].valu = isValuLikeFU(metrics[index].fu);
   }
 
   SmallVector<int64_t, 16> memo(region.ops.size(), 0);
@@ -1331,7 +1344,7 @@ computeNodeMetrics(const ScheduleRegion &region, const GraphTables &tables,
 
   state.assign(region.ops.size(), 0);
   for (unsigned index = 0; index < region.ops.size(); ++index)
-    computeReachMatrix(index, tables.successors, metrics, state);
+    computeReachCmaIssue(index, tables.successors, metrics, state);
 
   return metrics;
 }
@@ -1343,14 +1356,6 @@ int memoryPriority(const NodeMetrics &metrics) {
     return 2;
   if (metrics.latency >= 20)
     return 1;
-  return 0;
-}
-
-int matrixPriority(const NodeMetrics &metrics) {
-  if (metrics.reachesMatrix && !metrics.matrix)
-    return 3;
-  if (metrics.matrix)
-    return 2;
   return 0;
 }
 
@@ -1372,10 +1377,6 @@ static bool isBetterReadyNode(SchedulePolicy policy, unsigned lhs, unsigned rhs,
   case SchedulePolicy::MemoryEarly:
     if (memoryPriority(l) != memoryPriority(r))
       return memoryPriority(l) > memoryPriority(r);
-    return betterByCommon();
-  case SchedulePolicy::MatrixFeed:
-    if (matrixPriority(l) != matrixPriority(r))
-      return matrixPriority(l) > matrixPriority(r);
     return betterByCommon();
   }
   llvm_unreachable("unknown schedule policy");
@@ -1409,6 +1410,116 @@ bool buildListOrder(const GraphTables &tables, ArrayRef<NodeMetrics> metrics,
   return order.size() == pending.size();
 }
 
+struct IssueWindowState {
+  waveamdmachine::FunctionalUnit lastFU = waveamdmachine::FunctionalUnit::None;
+  unsigned issueFillSlots = 0;
+};
+
+static bool fillsIssueWindow(const NodeMetrics &metrics) {
+  return metrics.issueSlots > 0 && !metrics.cmaIssue &&
+         (metrics.memory || metrics.salu || metrics.valu);
+}
+
+static int issueFillWindowScore(const NodeMetrics &metrics,
+                                const IssueWindowState &state) {
+  int score = 0;
+  if (state.issueFillSlots == 0)
+    return score;
+  if (fillsIssueWindow(metrics))
+    score += 220;
+  if (metrics.cmaIssue)
+    score -= 120;
+  return score;
+}
+
+static int cmaReachScore(const NodeMetrics &metrics) {
+  if (metrics.reachesCmaIssue && !metrics.cmaIssue)
+    return 180;
+  if (metrics.cmaIssue)
+    return 120;
+  return 0;
+}
+
+static int memoryReachScore(const NodeMetrics &metrics) {
+  int score = 0;
+  if (metrics.memory)
+    score += 90;
+  if (metrics.reachesMemory)
+    score += 45;
+  return score;
+}
+
+static int fuSwitchScore(const NodeMetrics &metrics,
+                         const IssueWindowState &state) {
+  if (state.lastFU == waveamdmachine::FunctionalUnit::None)
+    return 0;
+  if (metrics.fu != state.lastFU)
+    return 25;
+  return 0;
+}
+
+static int issueWindowScore(const NodeMetrics &metrics,
+                            const IssueWindowState &state) {
+  return issueFillWindowScore(metrics, state) + cmaReachScore(metrics) +
+         memoryReachScore(metrics) + fuSwitchScore(metrics, state) +
+         std::min<int64_t>(metrics.criticalPath, 255);
+}
+
+static bool isBetterIssueReadyNode(unsigned lhs, unsigned rhs,
+                                   ArrayRef<NodeMetrics> metrics,
+                                   const IssueWindowState &state) {
+  int lhsScore = issueWindowScore(metrics[lhs], state);
+  int rhsScore = issueWindowScore(metrics[rhs], state);
+  if (lhsScore != rhsScore)
+    return lhsScore > rhsScore;
+  if (metrics[lhs].latency != metrics[rhs].latency)
+    return metrics[lhs].latency > metrics[rhs].latency;
+  return lhs < rhs;
+}
+
+static void updateIssueWindowState(IssueWindowState &state,
+                                   const NodeMetrics &metrics) {
+  if (metrics.cmaIssue)
+    state.issueFillSlots = 2;
+  else if (metrics.issueSlots >= state.issueFillSlots)
+    state.issueFillSlots = 0;
+  else
+    state.issueFillSlots -= metrics.issueSlots;
+  if (metrics.issueSlots > 0)
+    state.lastFU = metrics.fu;
+}
+
+static bool buildIssueWindowOrder(const GraphTables &tables,
+                                  ArrayRef<NodeMetrics> metrics,
+                                  SmallVectorImpl<unsigned> &order) {
+  SmallVector<unsigned, 16> pending = tables.pendingPreds;
+  SmallVector<unsigned, 16> ready;
+  for (auto [index, count] : llvm::enumerate(pending))
+    if (count == 0)
+      ready.push_back(index);
+
+  IssueWindowState state;
+  while (!ready.empty()) {
+    unsigned bestReady = 0;
+    for (unsigned i = 1; i < ready.size(); ++i)
+      if (isBetterIssueReadyNode(ready[i], ready[bestReady], metrics, state))
+        bestReady = i;
+
+    unsigned node = ready[bestReady];
+    ready.erase(ready.begin() + bestReady);
+    order.push_back(node);
+    updateIssueWindowState(state, metrics[node]);
+    for (unsigned succ : tables.successors[node]) {
+      assert(pending[succ] > 0 && "successor predecessor count underflow");
+      --pending[succ];
+      if (pending[succ] == 0)
+        ready.push_back(succ);
+    }
+  }
+
+  return order.size() == pending.size();
+}
+
 static SmallVector<unsigned, 16>
 getOriginalOrder(const ScheduleRegion &region) {
   SmallVector<unsigned, 16> order;
@@ -1427,8 +1538,25 @@ static void addPolicyCandidate(SmallVectorImpl<OrderCandidate> &candidates,
                                ArrayRef<NodeMetrics> metrics,
                                SchedulePolicy policy) {
   OrderCandidate candidate;
-  candidate.name = name;
+  candidate.name = name.str();
   if (!buildListOrder(tables, metrics, policy, candidate.order))
+    return;
+  for (const OrderCandidate &existing : candidates)
+    if (sameOrder(existing.order, candidate.order))
+      return;
+  candidates.push_back(std::move(candidate));
+}
+
+static void addIssueWindowCandidate(SmallVectorImpl<OrderCandidate> &candidates,
+                                    const GraphTables &tables,
+                                    ArrayRef<NodeMetrics> metrics) {
+  if (!llvm::any_of(
+          metrics, [](const NodeMetrics &metrics) { return metrics.cmaIssue; }))
+    return;
+
+  OrderCandidate candidate;
+  candidate.name = "issue_window";
+  if (!buildIssueWindowOrder(tables, metrics, candidate.order))
     return;
   for (const OrderCandidate &existing : candidates)
     if (sameOrder(existing.order, candidate.order))
@@ -1461,8 +1589,7 @@ buildScheduleCandidates(const ScheduleRegion &region,
                      SchedulePolicy::CriticalPath);
   addPolicyCandidate(candidates, "memory_early", tables, metrics,
                      SchedulePolicy::MemoryEarly);
-  addPolicyCandidate(candidates, "wmma_feed", tables, metrics,
-                     SchedulePolicy::MatrixFeed);
+  addIssueWindowCandidate(candidates, tables, metrics);
   if (enableBeamSearch) {
     int64_t estimatedBeamWork =
         estimateGuidedBeamSearchWork(candidates.size(), region.opCount);
@@ -1524,22 +1651,63 @@ static bool computeCandidatePressure(
   return candidate.metrics.pressure.supported;
 }
 
-static bool isBetterScheduleCandidate(const EvaluatedCandidate &candidate,
-                                      const EvaluatedCandidate &best,
-                                      RegisterPressureBudgets budgets) {
+static bool usesIssueWindowTie(const EvaluatedCandidate &candidate) {
+  static constexpr unsigned kMinIssueWindowTieOps = 128;
+  return candidate.name == "issue_window" &&
+         (candidate.metrics.originalCycleDelta < 0 ||
+          candidate.order.size() >= kMinIssueWindowTieOps);
+}
+
+static std::optional<bool>
+comparePressureViability(const EvaluatedCandidate &candidate,
+                         const EvaluatedCandidate &best,
+                         RegisterPressureBudgets budgets) {
   bool candidateViable = isPressureViable(candidate, budgets);
   bool bestViable = isPressureViable(best, budgets);
   if (candidateViable != bestViable)
     return candidateViable;
   if (!candidateViable)
     return false;
-  if (budgets.selectionEnabled && hasCriticalBudget(budgets)) {
-    int64_t candidateExcess = getCriticalExcess(candidate.metrics.pressure);
-    int64_t bestExcess = getCriticalExcess(best.metrics.pressure);
-    if (candidateExcess != bestExcess)
-      return candidateExcess < bestExcess;
-  }
-  return candidate.metrics.score.cycles < best.metrics.score.cycles;
+  return std::nullopt;
+}
+
+static std::optional<bool>
+compareCriticalPressure(const EvaluatedCandidate &candidate,
+                        const EvaluatedCandidate &best,
+                        RegisterPressureBudgets budgets) {
+  if (!budgets.selectionEnabled || !hasCriticalBudget(budgets))
+    return std::nullopt;
+  int64_t candidateExcess = getCriticalExcess(candidate.metrics.pressure);
+  int64_t bestExcess = getCriticalExcess(best.metrics.pressure);
+  if (candidateExcess != bestExcess)
+    return candidateExcess < bestExcess;
+  return std::nullopt;
+}
+
+static std::optional<bool>
+compareIssueWindowTie(const EvaluatedCandidate &candidate,
+                      const EvaluatedCandidate &best) {
+  bool candidateTie = usesIssueWindowTie(candidate);
+  bool bestTie = usesIssueWindowTie(best);
+  if (candidateTie != bestTie)
+    return candidateTie;
+  return std::nullopt;
+}
+
+static bool isBetterScheduleCandidate(const EvaluatedCandidate &candidate,
+                                      const EvaluatedCandidate &best,
+                                      RegisterPressureBudgets budgets) {
+  if (std::optional<bool> better =
+          comparePressureViability(candidate, best, budgets))
+    return *better;
+  if (std::optional<bool> better =
+          compareCriticalPressure(candidate, best, budgets))
+    return *better;
+  if (candidate.metrics.score.cycles != best.metrics.score.cycles)
+    return candidate.metrics.score.cycles < best.metrics.score.cycles;
+  if (std::optional<bool> better = compareIssueWindowTie(candidate, best))
+    return *better;
+  return false;
 }
 
 static CandidateMetrics evaluateOrderCandidate(
@@ -1586,10 +1754,14 @@ static void selectLazyHardCapCandidate(
     if (candidate.metrics.score.supported)
       indices.push_back(index);
   llvm::stable_sort(indices, [&](unsigned lhs, unsigned rhs) {
-    int64_t lhsCycles = decision.candidates[lhs].metrics.score.cycles;
-    int64_t rhsCycles = decision.candidates[rhs].metrics.score.cycles;
-    if (lhsCycles != rhsCycles)
-      return lhsCycles < rhsCycles;
+    const EvaluatedCandidate &lhsCandidate = decision.candidates[lhs];
+    const EvaluatedCandidate &rhsCandidate = decision.candidates[rhs];
+    if (lhsCandidate.metrics.score.cycles != rhsCandidate.metrics.score.cycles)
+      return lhsCandidate.metrics.score.cycles <
+             rhsCandidate.metrics.score.cycles;
+    if (std::optional<bool> better =
+            compareIssueWindowTie(lhsCandidate, rhsCandidate))
+      return *better;
     return lhs < rhs;
   });
 
@@ -1663,13 +1835,19 @@ static void appendEvaluatedCandidates(
     PressureEvaluation pressureEvaluation,
     std::optional<RegisterPressureResult> safePressureUpperBound,
     const SchedulePressureRegionContext *pressureRegionContext) {
-  for (const OrderCandidate &candidate : candidates)
+  std::optional<int64_t> originalCycles;
+  for (const OrderCandidate &candidate : candidates) {
+    CandidateMetrics metrics = evaluateOrderCandidate(
+        region, graph, candidate, archResolution, modelConfig, budgets,
+        pressureEvaluation, safePressureUpperBound, pressureRegionContext);
+    if (!originalCycles && candidate.name == "original" &&
+        metrics.score.supported)
+      originalCycles = metrics.score.cycles;
+    if (originalCycles && metrics.score.supported)
+      metrics.originalCycleDelta = metrics.score.cycles - *originalCycles;
     decision.candidates.push_back(
-        {candidate.order,
-         evaluateOrderCandidate(region, graph, candidate, archResolution,
-                                modelConfig, budgets, pressureEvaluation,
-                                safePressureUpperBound, pressureRegionContext),
-         candidate.name});
+        {candidate.order, std::move(metrics), candidate.name});
+  }
 }
 
 ScheduleDecision evaluateScheduleCandidates(

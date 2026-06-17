@@ -13,7 +13,10 @@
 
 #include "mlir/Dialect/WaveAMDMachine/CostModel/ArchData.h"
 #include "mlir/Dialect/WaveAMDMachine/CostModel/EventSimulator.h"
+#include "mlir/Dialect/WaveAMDMachine/CostModel/FunctionalUnit.h"
 #include "mlir/Support/LLVM.h"
+
+#include <string>
 
 namespace mlir::wave {
 
@@ -25,21 +28,24 @@ struct GraphTables {
 struct NodeMetrics {
   int64_t criticalPath = 0;
   int latency = 0;
+  waveamdmachine::FunctionalUnit fu = waveamdmachine::FunctionalUnit::None;
+  unsigned issueSlots = 0;
   bool memory = false;
   bool reachesMemory = false;
-  bool matrix = false;
-  bool reachesMatrix = false;
+  bool cmaIssue = false;
+  bool reachesCmaIssue = false;
+  bool salu = false;
+  bool valu = false;
 };
 
 enum class SchedulePolicy {
   CriticalPath,
   MemoryEarly,
-  MatrixFeed,
 };
 
 struct OrderCandidate {
   SmallVector<unsigned, 16> order;
-  StringRef name;
+  std::string name;
 };
 
 GraphTables buildGraphTables(const ScheduleRegion &region,
@@ -49,7 +55,6 @@ computeNodeMetrics(const ScheduleRegion &region, const GraphTables &tables,
                    const waveamdmachine::ArchData &arch,
                    const waveamdmachine::EventSimConfig &modelConfig);
 int memoryPriority(const NodeMetrics &metrics);
-int matrixPriority(const NodeMetrics &metrics);
 bool buildListOrder(const GraphTables &tables, ArrayRef<NodeMetrics> metrics,
                     SchedulePolicy policy, SmallVectorImpl<unsigned> &order);
 bool sameOrder(ArrayRef<unsigned> lhs, ArrayRef<unsigned> rhs);

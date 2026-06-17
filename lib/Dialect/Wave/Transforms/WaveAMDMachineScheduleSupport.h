@@ -22,6 +22,7 @@
 
 #include <cstdint>
 #include <optional>
+#include <string>
 
 namespace mlir::wave {
 
@@ -93,6 +94,7 @@ struct RegisterPressureResult {
 struct CandidateMetrics {
   ScoreResult score;
   RegisterPressureResult pressure;
+  int64_t originalCycleDelta = 0;
 };
 
 enum class PressureEvaluation {
@@ -111,7 +113,7 @@ struct CandidateRequest {
 struct EvaluatedCandidate {
   SmallVector<unsigned, 16> order;
   CandidateMetrics metrics;
-  StringRef name;
+  std::string name;
 };
 
 struct ScheduleDecision {

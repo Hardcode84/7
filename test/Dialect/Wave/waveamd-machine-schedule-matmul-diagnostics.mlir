@@ -35,3 +35,27 @@ func.func @matmul_loop_candidate(%off: !waveamdmachine.reg<vgpr, 1>,
 
 // DIAG: waveamd-machine-schedule-report candidate func=matmul_loop_candidate region=1 name=original cycles=86 delta=0 issued_ops=6 max_vgpr=11 max_sgpr=1 order=0,1,2,3,4,5,6
 // DIAG: waveamd-machine-schedule-report selected func=matmul_loop_candidate region=1 name=original original_cycles=86 selected_cycles=86 delta=0 action=keep order=0,1,2,3,4,5,6
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
+func.func @issue_window_candidate(%a: !waveamdmachine.reg<vgpr, 4>,
+                                  %b: !waveamdmachine.reg<vgpr, 4>,
+                                  %acc0: !waveamdmachine.reg<vgpr, 4>,
+                                  %acc1: !waveamdmachine.reg<vgpr, 4>,
+                                  %s: !waveamdmachine.reg<sgpr, 1>) {
+  %one = waveamdmachine.imm 1 : !waveamdmachine.imm
+  %m0 = waveamdmachine.mfma_f32_16x16x32_f16 %a, %b, %acc0
+      : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
+         !waveamdmachine.reg<vgpr, 4>) -> !waveamdmachine.reg<vgpr, 4>
+  %m1 = waveamdmachine.mfma_f32_16x16x32_f16 %a, %b, %acc1
+      : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
+         !waveamdmachine.reg<vgpr, 4>) -> !waveamdmachine.reg<vgpr, 4>
+  %next:2 = waveamdmachine.s_add_i32 %s, %one
+      : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.imm)
+        -> (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<scc, 1>)
+  return
+}
+}
+
+// DIAG: waveamd-machine-schedule-report candidate func=issue_window_candidate region=0 name=issue_window

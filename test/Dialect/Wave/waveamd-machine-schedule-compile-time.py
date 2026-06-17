@@ -4,6 +4,7 @@
 # CHECK: matmul_pressure_disabled: ok
 # CHECK: matmul_hard_cap_beam_report: ok
 # CHECK: fa_seq32_d16_u4_beam_report: ok
+# CHECK: lazy_hard_cap_issue_window_tie: ok
 
 from __future__ import annotations
 
@@ -36,7 +37,9 @@ def reject(label: str, text: str, pattern: str) -> None:
         raise SystemExit(1)
 
 
-def run_case(label: str, cmd: list[str], timeout: float) -> str:
+def run_case(
+    label: str, cmd: list[str], timeout: float, input_text: str | None = None
+) -> str:
     start = time.monotonic()
     try:
         proc = subprocess.run(
@@ -44,6 +47,7 @@ def run_case(label: str, cmd: list[str], timeout: float) -> str:
             cwd=REPO_ROOT,
             text=True,
             capture_output=True,
+            input=input_text,
             timeout=timeout,
             check=False,
         )
@@ -90,6 +94,46 @@ def fa_base_cmd() -> list[str]:
     ]
 
 
+def lazy_issue_window_tie_mlir() -> str:
+    lines = [
+        'module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {',
+        "func.func @lazy_issue_window_tie(",
+        "    %a: !waveamdmachine.reg<vgpr, 4>,",
+        "    %b: !waveamdmachine.reg<vgpr, 4>,",
+        "    %acc0: !waveamdmachine.reg<vgpr, 4>,",
+        "    %acc1: !waveamdmachine.reg<vgpr, 4>,",
+        "    %s: !waveamdmachine.reg<sgpr, 1>) {",
+        "  %m0 = waveamdmachine.mfma_f32_16x16x32_f16 %a, %b, %acc0",
+        "      : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,",
+        "         !waveamdmachine.reg<vgpr, 4>) -> !waveamdmachine.reg<vgpr, 4>",
+    ]
+    for i in range(128):
+        lines.append(f"  %i{i} = waveamdmachine.imm {i % 17} : !waveamdmachine.imm")
+    lines.extend(
+        [
+            "  %next:2 = waveamdmachine.s_add_i32 %s, %i127",
+            "      : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.imm)",
+            "        -> (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<scc, 1>)",
+            "  %m1 = waveamdmachine.mfma_f32_16x16x32_f16 %a, %b, %acc1",
+            "      : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,",
+            "         !waveamdmachine.reg<vgpr, 4>) -> !waveamdmachine.reg<vgpr, 4>",
+            "  %e0, %e1, %e2, %e3 = waveamdmachine.tuple_to_elements %m1",
+            "      : (!waveamdmachine.reg<vgpr, 4>) -> (",
+            "          !waveamdmachine.reg<vgpr, 1>,",
+            "          !waveamdmachine.reg<vgpr, 1>,",
+            "          !waveamdmachine.reg<vgpr, 1>,",
+            "          !waveamdmachine.reg<vgpr, 1>)",
+            "  %sum = waveamdmachine.v_add_u32 %e0, %e1",
+            "      : (!waveamdmachine.reg<vgpr, 1>,",
+            "         !waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>",
+            "  return",
+            "}",
+            "}",
+        ]
+    )
+    return "\n".join(lines)
+
+
 def main() -> int:
     text = run_case(
         "matmul_pressure_disabled",
@@ -100,7 +144,7 @@ def main() -> int:
     require(
         "matmul_pressure_disabled",
         text,
-        r"sim_cycles waves=2 simds=2 start_delay=0: 10359",
+        r"sim_cycles waves=2 simds=2 start_delay=0: 10283",
     )
     reject("matmul_pressure_disabled", text, r"waveamd-machine-schedule-report")
 
@@ -134,6 +178,12 @@ def main() -> int:
         timeout=20.0,
     )
     require("fa_seq32_d16_u4_beam_report", text, r"name=beam_0")
+    require("fa_seq32_d16_u4_beam_report", text, r"name=issue_window")
+    require(
+        "fa_seq32_d16_u4_beam_report",
+        text,
+        r"selected func=flash_attention_f32 region=0 name=critical_path",
+    )
     require(
         "fa_seq32_d16_u4_beam_report",
         text,
@@ -147,9 +197,33 @@ def main() -> int:
     require(
         "fa_seq32_d16_u4_beam_report",
         text,
-        r"sim_cycles waves=1 simds=1 start_delay=0: 35203",
+        r"sim_cycles waves=1 simds=1 start_delay=0: 29876",
     )
     reject("fa_seq32_d16_u4_beam_report", text, r"pressure_fallback")
+
+    text = run_case(
+        "lazy_hard_cap_issue_window_tie",
+        [
+            str(REPO_ROOT / "build/bin/wave-opt"),
+            "-",
+            "--waveamd-machine-schedule=apply-schedule=1 "
+            "pressure-aware-selection=1 pressure-vgpr-budget=256 "
+            "pressure-target-waves-override=-1",
+        ],
+        input_text=lazy_issue_window_tie_mlir(),
+        timeout=10.0,
+    )
+    require(
+        "lazy_hard_cap_issue_window_tie",
+        text,
+        r"waveamdmachine\.mfma_f32_16x16x32_f16 %arg0, %arg1, %arg3[^\n]*\n"
+        r"\s*%[0-9]+:4 = waveamdmachine\.tuple_to_elements %[0-9]+[^\n]*\n"
+        r"\s*%[0-9]+ = waveamdmachine\.v_add_u32 %[0-9]+#0, %[0-9]+#1[^\n]*\n"
+        r"\s*%[0-9]+ = waveamdmachine\.mfma_f32_16x16x32_f16 "
+        r"%arg0, %arg1, %arg2[^\n]*\n"
+        r"\s*%[0-9]+ = waveamdmachine\.imm 8[^\n]*\n"
+        r"\s*%[A-Za-z0-9_]+, %[A-Za-z0-9_]+ = waveamdmachine\.s_add_i32",
+    )
     return 0
 
 

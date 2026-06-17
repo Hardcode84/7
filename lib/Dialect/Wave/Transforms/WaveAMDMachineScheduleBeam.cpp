@@ -33,7 +33,6 @@ struct BeamSearchConfig {
   int64_t latencyWeight = 100;              // favor latency hiding
   int64_t unlockWeight = 500;               // favor newly-ready successors
   int64_t memoryWeight = 80;                // tie-break toward memory paths
-  int64_t matrixWeight = 80;                // tie-break toward matrix feeders
   int64_t guideDistancePenalty = 10;        // prefer earlier guide nodes
   int64_t hardPressurePenalty = 1000000;    // repair hard-cap excess
   int64_t criticalPressurePenalty = 100000; // repair occupancy excess
@@ -416,8 +415,6 @@ static ReadyChoice scoreReadyChoice(
                         config.unlockWeight;
   int64_t memoryScore =
       static_cast<int64_t>(memoryPriority(metrics[node])) * config.memoryWeight;
-  int64_t matrixScore =
-      static_cast<int64_t>(matrixPriority(metrics[node])) * config.matrixWeight;
   int64_t guideDistancePenalty =
       choice.guidePosition == getUnsetNode()
           ? 0
@@ -428,8 +425,7 @@ static ReadyChoice scoreReadyChoice(
       choice.criticalExcess * config.criticalPressurePenalty +
       choice.peakPressure * config.pressurePeakPenalty;
   choice.score = guideScore + pathScore + latencyScore + unlockScore +
-                 memoryScore + matrixScore - guideDistancePenalty -
-                 pressurePenalty;
+                 memoryScore - guideDistancePenalty - pressurePenalty;
   return choice;
 }
 
@@ -800,7 +796,7 @@ void addGuidedBeamCandidates(SmallVectorImpl<OrderCandidate> &candidates,
     if (emitted >= kDefaultBeamSearchConfig.candidateLimit ||
         emitted >= std::size(kBeamNames))
       break;
-    candidates.push_back({result.order, kBeamNames[emitted]});
+    candidates.push_back({result.order, kBeamNames[emitted].str()});
     ++emitted;
   }
 }
