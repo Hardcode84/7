@@ -8,14 +8,15 @@
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
 // ASM-LABEL: i64_cmpi_codegen:
-// ASM: v_cmp_lt_u32_e64
 // ASM: v_cmp_eq_u32_e64
 // ASM: v_cmp_lt_u32_e64
-// ASM: s_and_b32
-// ASM: s_or_b32
-// ASM: v_cmp_gt_i32_e64
+// ASM: v_cmp_lt_u32_e64
 // ASM: v_cmp_ge_u32_e64
 // ASM: s_and_b32
+// ASM: v_cmp_gt_i32_e64
+// ASM: s_or_b32
+// ASM: s_and_b32
+// ASM: s_or_b32
 // ASM: s_or_b32
 // ASM: global_store_b32
 func.func @i64_cmpi_codegen(%out: !wave.ptr<#wave.global, i32>,
@@ -43,10 +44,12 @@ func.func @i64_cmpi_codegen(%out: !wave.ptr<#wave.global, i32>,
 
 // ASM-LABEL: i64_cmpi_literal_codegen:
 // ASM: s_mov_b32
-// ASM: v_cmp_lt_u32_e64
-// ASM: v_cmp_eq_u32_e64
 // ASM: s_mov_b32
 // ASM: v_cmp_lt_u32_e64
+// ASM: v_cmp_eq_u32_e64
+// ASM: v_cmp_lt_u32_e64
+// ASM: s_and_b32
+// ASM: s_or_b32
 // ASM: global_store_b32
 func.func @i64_cmpi_literal_codegen(%out: !wave.ptr<#wave.global, i32>)
     attributes {wave.kernel} {

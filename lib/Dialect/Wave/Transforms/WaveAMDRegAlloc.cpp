@@ -122,17 +122,14 @@ static constexpr llvm::StringLiteral kFixedBlockArgsAttr =
     "waveamdmachine.regalloc_fixed_block_args";
 static constexpr llvm::StringLiteral kFixedResultsAttr =
     "waveamdmachine.regalloc_fixed_results";
+static constexpr llvm::StringLiteral kAssignmentsAttr =
+    "waveamdmachine.regalloc_assignments";
 static constexpr unsigned kFixedBlockArgRecordSize = 3;
 
 static bool isAllocRegClass(waveamdmachine::RegClass regClass) {
   return regClass == waveamdmachine::RegClass::SGPR ||
          regClass == waveamdmachine::RegClass::VGPR ||
          regClass == waveamdmachine::RegClass::AGPR;
-}
-
-static bool shouldRecordRegAllocAssignments(func::FuncOp func) {
-  return func->hasAttr(kLDSSpillBytesAttr) ||
-         func->hasAttr(kScratchSpillBytesAttr);
 }
 
 static std::optional<waveamdmachine::RegType> getTrackedType(Value value) {
@@ -414,6 +411,13 @@ static LogicalResult markFixedValue(Value value, Builder &builder) {
   return markFixedBlockArgument(cast<BlockArgument>(value), builder);
 }
 
+static bool isAuthoredFixedResult(OpResult result) {
+  Operation *op = result.getOwner();
+  return isa<waveamdmachine::KernargPreloadOp, waveamdmachine::SWorkgroupIdXOp,
+             waveamdmachine::SWorkgroupIdYOp, waveamdmachine::SWorkgroupIdZOp,
+             waveamdmachine::UninitOp, waveamdmachine::VWorkitemIdXOp>(op);
+}
+
 static void clearRegAllocAssignment(Value value) {
   auto type = dyn_cast<waveamdmachine::RegType>(value.getType());
   if (!type || !isAllocRegClass(type.getRegClass()) || type.getIndex() < 0)
@@ -445,6 +449,8 @@ static LogicalResult clearResultAssignments(Operation *op) {
   for (OpResult result : op->getResults()) {
     if (llvm::is_contained(fixedResults,
                            static_cast<int64_t>(result.getResultNumber())))
+      continue;
+    if (isAuthoredFixedResult(result))
       continue;
     clearRegAllocAssignment(result);
   }
@@ -515,17 +521,30 @@ static LogicalResult clearBlockArgumentAssignments(Operation *op) {
   return success();
 }
 
-static LogicalResult clearRegAllocAssignments(ModuleOp root) {
-  WalkResult walk = root->walk([](Operation *op) {
+static bool shouldClearRegAllocAssignments(func::FuncOp func) {
+  return func->hasAttr(kAssignmentsAttr) || func->hasAttr(kLDSSpillBytesAttr) ||
+         func->hasAttr(kScratchSpillBytesAttr);
+}
+
+static LogicalResult clearRegAllocAssignments(func::FuncOp func) {
+  if (!shouldClearRegAllocAssignments(func))
+    return success();
+  WalkResult walk = func.walk([](Operation *op) {
     if (isa<func::FuncOp>(op))
-      return WalkResult::advance();
-    func::FuncOp func = op->getParentOfType<func::FuncOp>();
-    if (!func || !shouldRecordRegAllocAssignments(func))
       return WalkResult::advance();
     if (failed(clearResultAssignments(op)) ||
         failed(clearBlockArgumentAssignments(op)))
       return WalkResult::interrupt();
     return WalkResult::advance();
+  });
+  func->removeAttr(kAssignmentsAttr);
+  return success(!walk.wasInterrupted());
+}
+
+static LogicalResult clearRegAllocAssignments(ModuleOp root) {
+  WalkResult walk = root->walk([](func::FuncOp func) {
+    return failed(clearRegAllocAssignments(func)) ? WalkResult::interrupt()
+                                                  : WalkResult::advance();
   });
   return success(!walk.wasInterrupted());
 }
@@ -2619,24 +2638,23 @@ static LogicalResult buildInventory(func::FuncOp func, Inventory &inventory) {
   return success();
 }
 
-static LogicalResult markFixedValueIfNeeded(Value value, bool recordFixedValues,
-                                            Builder &builder) {
-  if (!recordFixedValues)
-    return success();
+static LogicalResult markFixedValueIfNeeded(Value value, Builder &builder) {
   auto type = cast<waveamdmachine::RegType>(value.getType());
   if (type.getIndex() < 0)
     return success();
+  if (auto result = dyn_cast<OpResult>(value))
+    if (isAuthoredFixedResult(result))
+      return success();
   return markFixedValue(value, builder);
 }
 
 static LogicalResult applyPhysicalAssignments(func::FuncOp func,
                                               Inventory &inventory,
                                               Builder &builder) {
-  bool recordFixedValues = shouldRecordRegAllocAssignments(func);
   for (auto [value, interval] : inventory.intervalFor) {
     if (isFunctionEntryBlockArgument(value))
       continue;
-    if (failed(markFixedValueIfNeeded(value, recordFixedValues, builder)))
+    if (failed(markFixedValueIfNeeded(value, builder)))
       return failure();
     auto type = cast<waveamdmachine::RegType>(value.getType());
     IntervalGroup *group = interval->group;
@@ -2653,6 +2671,7 @@ static LogicalResult applyPhysicalAssignments(func::FuncOp func,
         type.getContext(), type.getRegClass(), type.getWidth(),
         *group->assignedBase + *laneIndex));
   }
+  func->setAttr(kAssignmentsAttr, builder.getUnitAttr());
   return success();
 }
 
@@ -3149,6 +3168,8 @@ struct WaveAMDRegAllocPass
     if (func.isExternal())
       return WalkResult::advance();
     clearDiagnostics(func);
+    if (failed(clearRegAllocAssignments(func)))
+      return WalkResult::interrupt();
 
     FailureOr<RegisterBudgets> funcBudgets = getFunctionBudgets(func, budgets);
     if (failed(funcBudgets) || failed(prepareFunction(func)))
