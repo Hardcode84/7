@@ -53,6 +53,9 @@ template <typename ConcreteType>
 class LDSStoreOp : public TraitBase<ConcreteType, LDSStoreOp> {};
 
 template <typename ConcreteType>
+class LDSDmaOp : public TraitBase<ConcreteType, LDSDmaOp> {};
+
+template <typename ConcreteType>
 class VMEMLoadOp : public TraitBase<ConcreteType, VMEMLoadOp> {};
 
 template <typename ConcreteType>

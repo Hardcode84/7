@@ -30,7 +30,7 @@ static WaitcntInfo getWaitcntInfo(Operation *op) {
   return {};
 }
 
-static bool isLDSIssuer(Operation *op) {
+static bool isLDSCounterIssuer(Operation *op) {
   return getWaitcntInfo(op).event == WaitcntEvent::Lds;
 }
 
@@ -77,6 +77,10 @@ MemoryCounterKind getMemoryCounterKind(Operation *op) {
   return MemoryCounterKind::None;
 }
 
+bool isLdsDmaIssuer(Operation *op) {
+  return op->hasTrait<OpTrait::waveamdmachine::LDSDmaOp>();
+}
+
 int getMemoryCounterLatency(const ArchData &arch, Operation *op,
                             const MemoryCounterLatencies &overrides,
                             const CalibrationData *calibration) {
@@ -86,7 +90,7 @@ int getMemoryCounterLatency(const ArchData &arch, Operation *op,
     return overrideOrDefault(overrides.vmemLoad, defaultLatency);
   if (getWaitcntInfo(op).counter == WaitcntCounter::Vscnt)
     return overrideOrDefault(overrides.vmemStore, defaultLatency);
-  if (isLDSIssuer(op))
+  if (isLDSCounterIssuer(op))
     return overrideOrDefault(overrides.lds, defaultLatency);
   if (isSMEMLoad(op))
     return overrideOrDefault(overrides.smemLoad, defaultLatency);

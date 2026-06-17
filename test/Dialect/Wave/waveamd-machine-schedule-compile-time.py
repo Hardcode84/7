@@ -100,7 +100,7 @@ def main() -> int:
     require(
         "matmul_pressure_disabled",
         text,
-        r"sim_cycles waves=2 simds=2 start_delay=0: 10283",
+        r"sim_cycles waves=2 simds=2 start_delay=0: 10359",
     )
     reject("matmul_pressure_disabled", text, r"waveamd-machine-schedule-report")
 
@@ -147,7 +147,7 @@ def main() -> int:
     require(
         "fa_seq32_d16_u4_beam_report",
         text,
-        r"sim_cycles waves=1 simds=1 start_delay=0: 29876",
+        r"sim_cycles waves=1 simds=1 start_delay=0: 35203",
     )
     reject("fa_seq32_d16_u4_beam_report", text, r"pressure_fallback")
     return 0

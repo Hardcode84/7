@@ -63,7 +63,8 @@ SchedClass classifyOp(Operation *op) {
   // clang-format off
   return llvm::TypeSwitch<Operation *, SchedClass>(op)
       .Case<MfmaF32_16x16x16_F16Op, MfmaF32_16x16x16_BF16Op,
-            MfmaF32_16x16x32_F16Op, MfmaF32_16x16x32_BF16Op>(
+            MfmaF32_16x16x32_F16Op, MfmaF32_16x16x32_BF16Op,
+            MfmaScaleF32_16x16x128_F4F4Op>(
           [](auto) { return SchedClass::Write4PassMAI; })
       .Case<MfmaF32_32x32x16_F16Op, MfmaF32_32x32x16_BF16Op>(
           [](auto) { return SchedClass::Write8PassMAI; })

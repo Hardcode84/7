@@ -122,6 +122,17 @@ static llvm::cl::opt<int>
                     llvm::cl::desc("override LDS-load value-ready latency"),
                     llvm::cl::init(-1));
 
+static llvm::cl::opt<int> ldsDmaIssueInterval(
+    "lds-dma-issue-interval",
+    llvm::cl::desc("override LDS-DMA issue interval; -1 uses issue period"),
+    llvm::cl::init(0));
+
+static llvm::cl::opt<int>
+    cmaIssueInterval("cma-issue-interval",
+                     llvm::cl::desc("override CMA issue interval; -1 uses "
+                                    "issue period"),
+                     llvm::cl::init(0));
+
 static const ArchData *resolveArch(llvm::StringRef name) {
   llvm::StringRef cpu = name;
   if (name.contains("--")) {
@@ -254,7 +265,9 @@ static bool validateLatencyOverrides() {
          isValidLatencyOverride(ldsCounterLatency) &&
          isValidLatencyOverride(vmemValueLatency) &&
          isValidLatencyOverride(smemValueLatency) &&
-         isValidLatencyOverride(ldsValueLatency);
+         isValidLatencyOverride(ldsValueLatency) &&
+         isValidLatencyOverride(ldsDmaIssueInterval) &&
+         isValidLatencyOverride(cmaIssueInterval);
 }
 
 static bool validateWaveSize() {
@@ -308,6 +321,8 @@ static EventSimConfig buildConfig(const CalibrationData *calibration) {
   config.valueLatencies.vmemLoad = vmemValueLatency;
   config.valueLatencies.smemLoad = smemValueLatency;
   config.valueLatencies.lds = ldsValueLatency;
+  config.ldsDmaIssueInterval = ldsDmaIssueInterval;
+  config.cmaIssueInterval = cmaIssueInterval;
   return config;
 }
 
@@ -384,7 +399,7 @@ static int report(ModuleOp mod) {
     return 1;
   }
   if (!validateLatencyOverrides()) {
-    llvm::errs() << "latency overrides must be -1 or non-negative\n";
+    llvm::errs() << "latency/interval overrides must be -1 or non-negative\n";
     return 1;
   }
   if (!validateWaveSize()) {

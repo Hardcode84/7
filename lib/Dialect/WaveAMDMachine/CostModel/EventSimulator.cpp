@@ -31,6 +31,65 @@
 
 namespace mlir::waveamdmachine {
 
+bool isEventSimCmaClass(SchedClass cls) {
+  switch (cls) {
+  case SchedClass::Write2PassMAI:
+  case SchedClass::Write4PassMAI:
+  case SchedClass::Write8PassMAI:
+  case SchedClass::Write16PassMAI:
+  case SchedClass::WriteXDL2PassWMMA:
+  case SchedClass::WriteXDL4PassWMMA:
+  case SchedClass::Write4PassWMMA:
+  case SchedClass::Write8PassWMMA:
+  case SchedClass::Write16PassWMMA:
+    return true;
+  default:
+    return false;
+  }
+}
+
+static unsigned getNativeWaveSize(const ArchData &arch) {
+  return arch.isa.Major >= 10 ? 32 : 64;
+}
+
+int getEventSimIssuePeriod(const ArchData &arch, const EventSimConfig &config) {
+  int period = std::max(1, arch.simdIssuePeriod);
+  unsigned waveSize =
+      config.waveSize > 0 ? config.waveSize : getNativeWaveSize(arch);
+  if (waveSize == 64)
+    period *= std::max(1, arch.wave64IssueMultiplier);
+  return period;
+}
+
+int getEventSimLdsDmaIssueInterval(const ArchData &arch,
+                                   const EventSimConfig &config) {
+  if (config.ldsDmaIssueInterval > 0)
+    return config.ldsDmaIssueInterval;
+  if (config.ldsDmaIssueInterval < 0)
+    return getEventSimIssuePeriod(arch, config);
+  return 0;
+}
+
+int getEventSimCmaIssueInterval(const ArchData &arch,
+                                const EventSimConfig &config) {
+  if (config.cmaIssueInterval > 0)
+    return config.cmaIssueInterval;
+  if (config.cmaIssueInterval < 0)
+    return getEventSimIssuePeriod(arch, config);
+  return 0;
+}
+
+unsigned getEventSimCmaIssueCapacity(const ArchData &arch) {
+  return std::max(1, arch.simdsPerCU);
+}
+
+unsigned getEventSimCmaIssueCount(Operation *op, SchedClass cls,
+                                  unsigned issues) {
+  if (!isLdsDmaIssuer(op) && !isEventSimCmaClass(cls))
+    return 0;
+  return std::max(1u, issues);
+}
+
 namespace {
 
 namespace traits = ::mlir::OpTrait::waveamdmachine;
@@ -263,6 +322,7 @@ struct WaveState {
   SmallVector<LoopFrame, 4> loops;
   DenseMap<Value, int64_t> readyAt;
   std::array<SmallVector<int64_t, 4>, kNumCounters> counters;
+  SmallVector<int64_t, 4> ldsDmaCounters;
   int id = 0;
   int simd = 0;
   size_t pc = 0;
@@ -326,6 +386,8 @@ private:
   std::priority_queue<EventSimEvent, std::vector<EventSimEvent>, EventLater>
       events;
   DenseMap<int64_t, unsigned> cuIssueCounts;
+  DenseMap<int64_t, unsigned> cmaIssueCounts;
+  int64_t ldsDmaReady = 0;
   bool structuredProgram = false;
 
   void initialize();
@@ -338,10 +400,20 @@ private:
   void pruneCounters(WaveState &wave, int64_t cycle);
   int64_t operandReadyCycle(const WaveState &wave, Operation *op) const;
   int64_t waitcntReadyCycle(WaveState &wave, Operation *op, int64_t cycle);
+  int getLdsDmaIssueInterval() const;
+  int getCmaIssueInterval() const;
+  unsigned getCmaIssueCapacity() const;
+  unsigned getCmaIssueCount(Operation *op, SchedClass cls,
+                            unsigned issues) const;
   int getIssuePeriod() const;
   int64_t cuIssueReadyCycle(int64_t cycle, unsigned issues, int period) const;
   void pruneCuIssueCounts(int64_t cycle);
   void consumeCuIssueSlots(int64_t cycle, unsigned issues, int period);
+  int64_t cmaIssueReadyCycle(int64_t cycle, Operation *op, SchedClass cls,
+                             unsigned issues) const;
+  void pruneCmaIssueCounts(int64_t cycle);
+  void consumeCmaIssueSlots(int64_t cycle, Operation *op, SchedClass cls,
+                            unsigned issues);
   int64_t issuedReadyCycle(WaveState &wave, Operation *op, SchedClass cls,
                            unsigned issues, int64_t cycle);
   int64_t opReadyCycle(WaveState &wave, int64_t cycle);
@@ -358,6 +430,7 @@ private:
                          int64_t ready, int64_t nextIssue,
                          int64_t memoryValueReady, bool memoryIssuer,
                          bool hasMemoryValue);
+  int64_t counterTailCycle(const WaveState &wave, int64_t cycle) const;
   void queueMemoryCounterEvents(WaveState &wave, Operation *op,
                                 FunctionalUnit fu, int64_t cycle,
                                 unsigned issues, int period);
@@ -461,6 +534,10 @@ void EventSimulator::pruneCounters(WaveState &wave, int64_t cycle) {
                                [&](int64_t ready) { return ready <= cycle; }),
                 queue.end());
   }
+  wave.ldsDmaCounters.erase(
+      std::remove_if(wave.ldsDmaCounters.begin(), wave.ldsDmaCounters.end(),
+                     [&](int64_t ready) { return ready <= cycle; }),
+      wave.ldsDmaCounters.end());
 }
 
 int64_t EventSimulator::operandReadyCycle(const WaveState &wave,
@@ -510,17 +587,25 @@ int64_t EventSimulator::waitcntReadyCycle(WaveState &wave, Operation *op,
   return cycle;
 }
 
-static unsigned getNativeWaveSize(const ArchData &arch) {
-  return arch.isa.Major >= 10 ? 32 : 64;
+int EventSimulator::getIssuePeriod() const {
+  return getEventSimIssuePeriod(arch, config);
 }
 
-int EventSimulator::getIssuePeriod() const {
-  int period = std::max(1, arch.simdIssuePeriod);
-  unsigned waveSize =
-      config.waveSize > 0 ? config.waveSize : getNativeWaveSize(arch);
-  if (waveSize == 64)
-    period *= std::max(1, arch.wave64IssueMultiplier);
-  return period;
+int EventSimulator::getLdsDmaIssueInterval() const {
+  return getEventSimLdsDmaIssueInterval(arch, config);
+}
+
+int EventSimulator::getCmaIssueInterval() const {
+  return getEventSimCmaIssueInterval(arch, config);
+}
+
+unsigned EventSimulator::getCmaIssueCapacity() const {
+  return getEventSimCmaIssueCapacity(arch);
+}
+
+unsigned EventSimulator::getCmaIssueCount(Operation *op, SchedClass cls,
+                                          unsigned issues) const {
+  return getEventSimCmaIssueCount(op, cls, issues);
 }
 
 static int64_t issueCycle(int64_t start, unsigned issue, int period) {
@@ -563,6 +648,64 @@ void EventSimulator::consumeCuIssueSlots(int64_t cycle, unsigned issues,
   }
 }
 
+int64_t EventSimulator::cmaIssueReadyCycle(int64_t cycle, Operation *op,
+                                           SchedClass cls,
+                                           unsigned issues) const {
+  int interval = getCmaIssueInterval();
+  unsigned cmaIssues = getCmaIssueCount(op, cls, issues);
+  if (interval <= 0 || cmaIssues == 0)
+    return cycle;
+
+  unsigned cap = getCmaIssueCapacity();
+  while (true) {
+    std::optional<int64_t> nextStart;
+    for (unsigned issue : llvm::seq<unsigned>(0, cmaIssues)) {
+      int64_t begin = issueCycle(cycle, issue, interval);
+      for (unsigned offset :
+           llvm::seq<unsigned>(0, static_cast<unsigned>(interval))) {
+        int64_t currentIssueCycle = begin + offset;
+        if (cmaIssueCounts.lookup(currentIssueCycle) < cap)
+          continue;
+        nextStart = currentIssueCycle - static_cast<int64_t>(issue) * interval -
+                    static_cast<int64_t>(offset) + 1;
+        break;
+      }
+      if (nextStart)
+        break;
+    }
+    if (!nextStart)
+      return cycle;
+    cycle = std::max<int64_t>(cycle + 1, *nextStart);
+  }
+}
+
+void EventSimulator::pruneCmaIssueCounts(int64_t cycle) {
+  for (auto &entry : llvm::make_early_inc_range(cmaIssueCounts))
+    if (entry.first < cycle)
+      cmaIssueCounts.erase(entry.first);
+}
+
+void EventSimulator::consumeCmaIssueSlots(int64_t cycle, Operation *op,
+                                          SchedClass cls, unsigned issues) {
+  int interval = getCmaIssueInterval();
+  unsigned cmaIssues = getCmaIssueCount(op, cls, issues);
+  if (interval <= 0 || cmaIssues == 0)
+    return;
+
+  pruneCmaIssueCounts(cycle);
+  unsigned cap = getCmaIssueCapacity();
+  for (unsigned issue : llvm::seq<unsigned>(0, cmaIssues)) {
+    int64_t begin = issueCycle(cycle, issue, interval);
+    for (unsigned offset :
+         llvm::seq<unsigned>(0, static_cast<unsigned>(interval))) {
+      int64_t currentIssueCycle = begin + offset;
+      unsigned &count = cmaIssueCounts[currentIssueCycle];
+      assert(count < cap && "CMA issue cap exceeded");
+      ++count;
+    }
+  }
+}
+
 int64_t EventSimulator::issuedReadyCycle(WaveState &wave, Operation *op,
                                          SchedClass cls, unsigned issues,
                                          int64_t cycle) {
@@ -571,8 +714,19 @@ int64_t EventSimulator::issuedReadyCycle(WaveState &wave, Operation *op,
   FunctionalUnit fu = funit(arch, cls);
   ready = std::max(ready, simd.issueReady);
   ready = std::max(ready, simd.fuReady[static_cast<size_t>(fu)]);
+  if (isLdsDmaIssuer(op)) {
+    int interval = getLdsDmaIssueInterval();
+    if (interval > 0)
+      ready = std::max(ready, ldsDmaReady);
+  }
   int period = getIssuePeriod();
-  return cuIssueReadyCycle(ready, issues, period);
+  while (true) {
+    int64_t cmaReady = cmaIssueReadyCycle(ready, op, cls, issues);
+    int64_t cuReady = cuIssueReadyCycle(cmaReady, issues, period);
+    if (cuReady == cmaReady)
+      return cuReady;
+    ready = cuReady;
+  }
 }
 
 int64_t EventSimulator::opReadyCycle(WaveState &wave, int64_t cycle) {
@@ -722,10 +876,22 @@ void EventSimulator::queueMemoryCounterEvents(WaveState &wave, Operation *op,
   EventSimCounter counter = counterOf(op);
   int counterLatency = getMemoryCounterLatency(
       arch, op, config.counterLatencies, config.calibration);
+  int64_t counterIssue = cycle;
+  int counterIssuePeriod = period;
+  if (isLdsDmaIssuer(op)) {
+    int interval = getLdsDmaIssueInterval();
+    if (interval > 0) {
+      counterIssuePeriod = interval;
+      ldsDmaReady = counterIssue + static_cast<int64_t>(issues) * interval;
+    }
+  }
   SmallVector<int64_t, 4> &queue = wave.counters[counterIndex(counter)];
   for (unsigned i = 0; i < issues; ++i) {
-    int64_t done = cycle + static_cast<int64_t>(i) * period + counterLatency;
+    int64_t done = counterIssue + static_cast<int64_t>(i) * counterIssuePeriod +
+                   counterLatency;
     queue.push_back(done);
+    if (isLdsDmaIssuer(op))
+      wave.ldsDmaCounters.push_back(done);
     schedule({done, EventSimEventKind::CounterDrained, wave.id, wave.simd, op,
               fu, counter});
   }
@@ -754,6 +920,7 @@ LogicalResult EventSimulator::executeIssued(WaveState &wave, Operation *op,
   simd.fuReady[static_cast<size_t>(fu)] = nextIssue;
   simd.rrCursor = (wave.id + 1) % static_cast<int>(waves.size());
   consumeCuIssueSlots(cycle, issues, period);
+  consumeCmaIssueSlots(cycle, op, cls, issues);
 
   ++out.issuedOps;
   recordNow({cycle, EventSimEventKind::OpIssued, wave.id, wave.simd, op, fu,
@@ -799,10 +966,20 @@ LogicalResult EventSimulator::stepWave(WaveState &wave, int64_t cycle,
   return executeIssued(wave, op, cycle);
 }
 
+int64_t EventSimulator::counterTailCycle(const WaveState &wave,
+                                         int64_t cycle) const {
+  int64_t ready = cycle;
+  for (int64_t counterReady : wave.ldsDmaCounters)
+    ready = std::max(ready, counterReady);
+  return ready;
+}
+
 void EventSimulator::queueCompletion(WaveState &wave, int64_t cycle) {
   if (wave.completionQueued)
     return;
   int64_t complete = std::max(cycle, wave.lastReady);
+  if (config.completePendingLdsDmaCounters)
+    complete = counterTailCycle(wave, complete);
   wave.done = true;
   wave.completionQueued = true;
   out.waveCompletedCycles[wave.id] = complete;
@@ -925,8 +1102,11 @@ LogicalResult simulateEventTimeline(ArrayRef<Operation *> ops,
                                     const ArchData &arch,
                                     const EventSimConfig &config,
                                     EventSimResult &out) {
+  SmallVector<ProgramItem> program;
+  for (Operation *op : ops)
+    appendProgramOp(op, arch, config, program);
   out = EventSimResult();
-  EventSimulator simulator(ops, arch, config, out);
+  EventSimulator simulator(program, arch, config, out);
   return simulator.run();
 }
 

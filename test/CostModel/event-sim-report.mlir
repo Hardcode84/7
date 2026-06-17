@@ -20,6 +20,8 @@
 // RUN: wave-sim-report --func=tuple_cu_cap --waves=6 --simds=6 --timeline %s | FileCheck %s --check-prefix=TUPLECU
 // RUN: wave-sim-report --func=vmem_value_ready --timeline %s | FileCheck %s --check-prefix=VMEMVALUE
 // RUN: wave-sim-report --func=uniform_if_report %s | FileCheck %s --check-prefix=UIF
+// RUN: wave-sim-report --func=cma_matrix_cap --arch=gfx950 --waves=5 --simds=5 --cma-issue-interval=-1 --timeline %s | FileCheck %s --check-prefix=CMA
+// RUN: wave-sim-report --func=lds_dma_issue_spacing --arch=gfx950 --lds-dma-issue-interval=8 --timeline %s | FileCheck %s --check-prefix=LDSDMA
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
   func.func @two_dep_salu(%init: !waveamdmachine.reg<sgpr, 1>) {
@@ -201,6 +203,30 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
     } : !waveamdmachine.reg<scc, 1>
     return
   }
+
+  func.func @cma_matrix_cap(%a: !waveamdmachine.reg<vgpr, 4>,
+                            %b: !waveamdmachine.reg<vgpr, 4>,
+                            %acc: !waveamdmachine.reg<vgpr, 4>) {
+    %result = waveamdmachine.mfma_f32_16x16x32_f16 %a, %b, %acc
+        : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
+           !waveamdmachine.reg<vgpr, 4>) -> !waveamdmachine.reg<vgpr, 4>
+    return
+  }
+
+  func.func @lds_dma_issue_spacing(%off: !waveamdmachine.reg<vgpr, 1>,
+                                   %base: !waveamdmachine.reg<sgpr, 2>,
+                                   %m0: !waveamdmachine.m0) {
+    %root = waveamdmachine.token : !waveamdmachine.mem.token
+    %tok0 = waveamdmachine.global_load_lds_b128 %off, %base, %m0 after %root
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 2>,
+           !waveamdmachine.m0, !waveamdmachine.mem.token)
+          -> !waveamdmachine.mem.token
+    %tok1 = waveamdmachine.global_load_lds_b128 %off, %base, %m0 after %root
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 2>,
+           !waveamdmachine.m0, !waveamdmachine.mem.token)
+          -> !waveamdmachine.mem.token
+    return
+  }
 }
 
 // ONE: func: two_dep_salu
@@ -314,3 +340,16 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // UIF: func: uniform_if_report
 // UIF: total_cycles: 4
 // UIF: issued_ops: 2
+
+// CMA: func: cma_matrix_cap
+// CMA: total_cycles: 8
+// CMA: issued_ops: 5
+// CMA: issue cycle=0 wave=0 simd=0 fu=MFMA_XDL op=waveamdmachine.mfma_f32_16x16x32_f16
+// CMA: issue cycle=0 wave=1 simd=1 fu=MFMA_XDL op=waveamdmachine.mfma_f32_16x16x32_f16
+// CMA: issue cycle=0 wave=2 simd=2 fu=MFMA_XDL op=waveamdmachine.mfma_f32_16x16x32_f16
+// CMA: issue cycle=0 wave=3 simd=3 fu=MFMA_XDL op=waveamdmachine.mfma_f32_16x16x32_f16
+// CMA: issue cycle=4 wave=4 simd=4 fu=MFMA_XDL op=waveamdmachine.mfma_f32_16x16x32_f16
+
+// LDSDMA: func: lds_dma_issue_spacing
+// LDSDMA: issue cycle=0 wave=0 simd=0 fu=VMEM op=waveamdmachine.global_load_lds_b128
+// LDSDMA: issue cycle=8 wave=0 simd=0 fu=VMEM op=waveamdmachine.global_load_lds_b128

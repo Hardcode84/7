@@ -118,6 +118,7 @@ def WaveAMDMachine_VALU : NativeOpTrait<"waveamdmachine::VALUOp">;
 def WaveAMDMachine_SMEMLoad : NativeOpTrait<"waveamdmachine::SMEMLoadOp">;
 def WaveAMDMachine_LDSLoad : NativeOpTrait<"waveamdmachine::LDSLoadOp">;
 def WaveAMDMachine_LDSStore : NativeOpTrait<"waveamdmachine::LDSStoreOp">;
+def WaveAMDMachine_LDSDma : NativeOpTrait<"waveamdmachine::LDSDmaOp">;
 def WaveAMDMachine_VMEMLoad : NativeOpTrait<"waveamdmachine::VMEMLoadOp">;
 def WaveAMDMachine_VMEMStore : NativeOpTrait<"waveamdmachine::VMEMStoreOp">;
 def WaveAMDMachine_TupleMemory : NativeOpTrait<"waveamdmachine::TupleMemoryOp">;
@@ -1317,7 +1318,7 @@ def WaveAMDMachine_GlobalLoadTupleB32Op
 // only). The `inst_offset` attribute remains for IR shape uniformity
 // but always emits as 0; address planning sinks constants into `voffset`.
 def WaveAMDMachine_GlobalLoadLdsB32Op
-    : WaveAMDMachine_GlobalMemoryOp<"global_load_lds_b32", [WaveAMDMachine_VMEMLoad, MemoryEffects<[MemRead, MemWrite]>]>,
+    : WaveAMDMachine_GlobalMemoryOp<"global_load_lds_b32", [WaveAMDMachine_VMEMLoad, WaveAMDMachine_LDSDma, MemoryEffects<[MemRead, MemWrite]>]>,
       WaveAMDMachine_VMEMLoadInfo {
   let summary = "global-to-LDS 32-bit DMA load";
   let description = [{
@@ -1345,7 +1346,7 @@ def WaveAMDMachine_GlobalLoadLdsB32Op
 }
 
 def WaveAMDMachine_GlobalLoadLdsB128Op
-    : WaveAMDMachine_GlobalMemoryOp<"global_load_lds_b128", [WaveAMDMachine_VMEMLoad, MemoryEffects<[MemRead, MemWrite]>]>,
+    : WaveAMDMachine_GlobalMemoryOp<"global_load_lds_b128", [WaveAMDMachine_VMEMLoad, WaveAMDMachine_LDSDma, MemoryEffects<[MemRead, MemWrite]>]>,
       WaveAMDMachine_VMEMLoadInfo {
   let summary = "global-to-LDS 128-bit DMA load";
   let description = [{
@@ -1787,7 +1788,7 @@ def WaveAMDMachine_BufferLoadTupleB32Op
 // Buffer LDS DMA ops have no inst-offset slot. Constants route to
 // `soffset`, but nonzero immediates must materialize through SGPR.
 def WaveAMDMachine_BufferLoadLdsB32Op
-    : WaveAMDMachine_BufferMemoryOp<"buffer_load_lds_b32", [WaveAMDMachine_VMEMLoad, MemoryEffects<[MemRead, MemWrite]>]>,
+    : WaveAMDMachine_BufferMemoryOp<"buffer_load_lds_b32", [WaveAMDMachine_VMEMLoad, WaveAMDMachine_LDSDma, MemoryEffects<[MemRead, MemWrite]>]>,
       WaveAMDMachine_VMEMLoadInfo {
   let summary = "buffer-to-LDS 32-bit DMA load";
   let description = [{
@@ -1817,7 +1818,7 @@ def WaveAMDMachine_BufferLoadLdsB32Op
 }
 
 def WaveAMDMachine_BufferLoadLdsB128Op
-    : WaveAMDMachine_BufferMemoryOp<"buffer_load_lds_b128", [WaveAMDMachine_VMEMLoad, MemoryEffects<[MemRead, MemWrite]>]>,
+    : WaveAMDMachine_BufferMemoryOp<"buffer_load_lds_b128", [WaveAMDMachine_VMEMLoad, WaveAMDMachine_LDSDma, MemoryEffects<[MemRead, MemWrite]>]>,
       WaveAMDMachine_VMEMLoadInfo {
   let summary = "buffer-to-LDS 128-bit DMA load";
   let description = [{

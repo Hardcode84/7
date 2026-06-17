@@ -42,6 +42,8 @@ struct MemoryValueLatencies {
 
 MemoryCounterKind getMemoryCounterKind(Operation *op);
 
+bool isLdsDmaIssuer(Operation *op);
+
 int getMemoryCounterLatency(const ArchData &arch, Operation *op,
                             const MemoryCounterLatencies &overrides = {},
                             const CalibrationData *calibration = nullptr);

@@ -35,6 +35,9 @@ struct EventSimConfig {
   int64_t tripCountOverride = -1;
   const CalibrationData *calibration = nullptr;
   bool recordTimeline = false;
+  bool completePendingLdsDmaCounters = false;
+  int ldsDmaIssueInterval = 0;
+  int cmaIssueInterval = 0;
   MemoryCounterLatencies counterLatencies;
   MemoryValueLatencies valueLatencies;
 };
@@ -69,6 +72,21 @@ struct EventSimResult {
   SmallVector<int64_t> waveCompletedCycles;
   SmallVector<EventSimEvent> events;
 };
+
+bool isEventSimCmaClass(SchedClass cls);
+
+int getEventSimIssuePeriod(const ArchData &arch, const EventSimConfig &config);
+
+int getEventSimLdsDmaIssueInterval(const ArchData &arch,
+                                   const EventSimConfig &config);
+
+int getEventSimCmaIssueInterval(const ArchData &arch,
+                                const EventSimConfig &config);
+
+unsigned getEventSimCmaIssueCapacity(const ArchData &arch);
+
+unsigned getEventSimCmaIssueCount(Operation *op, SchedClass cls,
+                                  unsigned issues);
 
 LogicalResult simulateEventTimeline(func::FuncOp func, const ArchData &arch,
                                     const EventSimConfig &config,
