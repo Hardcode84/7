@@ -9,7 +9,7 @@ func.func @bad_fill_source(%x: i16) {
 // -----
 
 func.func @bad_fill_shape(%x: i32) {
-  // expected-error @below {{only 16x16 fragments are supported for now}}
+  // expected-error @below {{only 16x16 and wave64 32x32 fragments are supported}}
   %a = waveamd.fragment_fill %x : i32 -> !waveamd.fragment<0, i8, 8, 16, 32, 4>
   return
 }

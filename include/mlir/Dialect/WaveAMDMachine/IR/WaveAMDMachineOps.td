@@ -850,6 +850,16 @@ def WaveAMDMachine_MfmaF32_16x16x32_BF16Op
   let hasVerifier = 1;
   let archPredicate = WaveAMDMachine_Gfx950;
 }
+def WaveAMDMachine_MfmaF32_32x32x16_F16Op
+    : WaveAMDMachine_MfmaResult<"mfma_f32_32x32x16_f16"> {
+  let hasVerifier = 1;
+  let archPredicate = WaveAMDMachine_Gfx950;
+}
+def WaveAMDMachine_MfmaF32_32x32x16_BF16Op
+    : WaveAMDMachine_MfmaResult<"mfma_f32_32x32x16_bf16"> {
+  let hasVerifier = 1;
+  let archPredicate = WaveAMDMachine_Gfx950;
+}
 def WaveAMDMachine_MfmaScaleF32_16x16x128_F4F4Op
     : WaveAMDMachine_Op<"mfma_scale_f32_16x16x128_f4_f4",
                         [WaveAMDMachine_VALU, WaveAMDMachine_MFMA,

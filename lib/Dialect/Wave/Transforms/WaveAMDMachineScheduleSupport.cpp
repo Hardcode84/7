@@ -1242,6 +1242,8 @@ static bool isMatrixOp(Operation *op) {
              waveamdmachine::MfmaF32_16x16x16_BF16Op,
              waveamdmachine::MfmaF32_16x16x32_F16Op,
              waveamdmachine::MfmaF32_16x16x32_BF16Op,
+             waveamdmachine::MfmaF32_32x32x16_F16Op,
+             waveamdmachine::MfmaF32_32x32x16_BF16Op,
              waveamdmachine::WmmaF32_16x16x16_F16Op,
              waveamdmachine::WmmaF32_16x16x16_BF16Op,
              waveamdmachine::WmmaI32_16x16x16_IU8Op>(op);

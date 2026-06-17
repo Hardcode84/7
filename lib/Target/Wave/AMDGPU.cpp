@@ -174,6 +174,13 @@ static_assert(
     llvm::AMDGPU::VGPR1_VGPR2_VGPR3_VGPR4_VGPR5_VGPR6_VGPR7_VGPR8 ==
         llvm::AMDGPU::VGPR0_VGPR1_VGPR2_VGPR3_VGPR4_VGPR5_VGPR6_VGPR7 + 1,
     "VGPR octuple enum layout must be contiguous");
+static_assert(
+    llvm::AMDGPU::
+            VGPR1_VGPR2_VGPR3_VGPR4_VGPR5_VGPR6_VGPR7_VGPR8_VGPR9_VGPR10_VGPR11_VGPR12_VGPR13_VGPR14_VGPR15_VGPR16 ==
+        llvm::AMDGPU::
+                VGPR0_VGPR1_VGPR2_VGPR3_VGPR4_VGPR5_VGPR6_VGPR7_VGPR8_VGPR9_VGPR10_VGPR11_VGPR12_VGPR13_VGPR14_VGPR15 +
+            1,
+    "VGPR 16-tuple enum layout must be contiguous");
 static_assert(llvm::AMDGPU::AGPR1 == llvm::AMDGPU::AGPR0 + 1,
               "AGPR enum layout must be contiguous");
 static_assert(llvm::AMDGPU::AGPR1_AGPR2 == llvm::AMDGPU::AGPR0_AGPR1 + 1,
@@ -188,6 +195,13 @@ static_assert(
     llvm::AMDGPU::AGPR1_AGPR2_AGPR3_AGPR4_AGPR5_AGPR6_AGPR7_AGPR8 ==
         llvm::AMDGPU::AGPR0_AGPR1_AGPR2_AGPR3_AGPR4_AGPR5_AGPR6_AGPR7 + 1,
     "AGPR octuple enum layout must be contiguous");
+static_assert(
+    llvm::AMDGPU::
+            AGPR1_AGPR2_AGPR3_AGPR4_AGPR5_AGPR6_AGPR7_AGPR8_AGPR9_AGPR10_AGPR11_AGPR12_AGPR13_AGPR14_AGPR15_AGPR16 ==
+        llvm::AMDGPU::
+                AGPR0_AGPR1_AGPR2_AGPR3_AGPR4_AGPR5_AGPR6_AGPR7_AGPR8_AGPR9_AGPR10_AGPR11_AGPR12_AGPR13_AGPR14_AGPR15 +
+            1,
+    "AGPR 16-tuple enum layout must be contiguous");
 
 class WaveAMDGPUEmitter {
 public:
@@ -481,6 +495,14 @@ private:
   unsigned mfmaF32_16x16x32BF16(bool agprCD) const {
     return agprCD ? llvm::AMDGPU::V_MFMA_F32_16X16X32_BF16_gfx940_acd
                   : llvm::AMDGPU::V_MFMA_F32_16X16X32_BF16_gfx940_vcd;
+  }
+  unsigned mfmaF32_32x32x16F16(bool agprCD) const {
+    return agprCD ? llvm::AMDGPU::V_MFMA_F32_32X32X16_F16_gfx940_acd
+                  : llvm::AMDGPU::V_MFMA_F32_32X32X16_F16_gfx940_vcd;
+  }
+  unsigned mfmaF32_32x32x16BF16(bool agprCD) const {
+    return agprCD ? llvm::AMDGPU::V_MFMA_F32_32X32X16_BF16_gfx940_acd
+                  : llvm::AMDGPU::V_MFMA_F32_32X32X16_BF16_gfx940_vcd;
   }
   unsigned mfmaScaleF32_16x16x128F4F4(bool agprCD) const {
     return agprCD ? llvm::AMDGPU::
@@ -1273,6 +1295,10 @@ private:
     case 8:
       return llvm::AMDGPU::VGPR0_VGPR1_VGPR2_VGPR3_VGPR4_VGPR5_VGPR6_VGPR7 +
              phys;
+    case 16:
+      return llvm::AMDGPU::
+                 VGPR0_VGPR1_VGPR2_VGPR3_VGPR4_VGPR5_VGPR6_VGPR7_VGPR8_VGPR9_VGPR10_VGPR11_VGPR12_VGPR13_VGPR14_VGPR15 +
+             phys;
     default:
       llvm_unreachable("unsupported VGPR tuple width");
     }
@@ -1290,6 +1316,10 @@ private:
       return llvm::AMDGPU::AGPR0_AGPR1_AGPR2_AGPR3 + phys;
     case 8:
       return llvm::AMDGPU::AGPR0_AGPR1_AGPR2_AGPR3_AGPR4_AGPR5_AGPR6_AGPR7 +
+             phys;
+    case 16:
+      return llvm::AMDGPU::
+                 AGPR0_AGPR1_AGPR2_AGPR3_AGPR4_AGPR5_AGPR6_AGPR7_AGPR8_AGPR9_AGPR10_AGPR11_AGPR12_AGPR13_AGPR14_AGPR15 +
              phys;
     default:
       llvm_unreachable("unsupported AGPR tuple width");
@@ -2007,6 +2037,26 @@ private:
         return op.emitError("mfma.f32.16x16x32.bf16 requires gfx950");
       return emitMC(
           mfmaF32_16x16x32BF16(isAGPRType(result().getType())),
+          {toMCOperand(result()), toMCOperand(op.getOperand(0)),
+           toMCOperand(op.getOperand(1)), toMCOperand(op.getOperand(2)),
+           llvm::MCOperand::createImm(0), llvm::MCOperand::createImm(0),
+           llvm::MCOperand::createImm(0)});
+    }
+    if (isa<waveamdmachine::MfmaF32_32x32x16_F16Op>(op)) {
+      if (!isGfx950(isaVersion))
+        return op.emitError("mfma.f32.32x32x16.f16 requires gfx950");
+      return emitMC(
+          mfmaF32_32x32x16F16(isAGPRType(result().getType())),
+          {toMCOperand(result()), toMCOperand(op.getOperand(0)),
+           toMCOperand(op.getOperand(1)), toMCOperand(op.getOperand(2)),
+           llvm::MCOperand::createImm(0), llvm::MCOperand::createImm(0),
+           llvm::MCOperand::createImm(0)});
+    }
+    if (isa<waveamdmachine::MfmaF32_32x32x16_BF16Op>(op)) {
+      if (!isGfx950(isaVersion))
+        return op.emitError("mfma.f32.32x32x16.bf16 requires gfx950");
+      return emitMC(
+          mfmaF32_32x32x16BF16(isAGPRType(result().getType())),
           {toMCOperand(result()), toMCOperand(op.getOperand(0)),
            toMCOperand(op.getOperand(1)), toMCOperand(op.getOperand(2)),
            llvm::MCOperand::createImm(0), llvm::MCOperand::createImm(0),

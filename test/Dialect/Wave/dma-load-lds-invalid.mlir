@@ -140,7 +140,7 @@ func.func @fragment_fill_bad_ab_layout(%s: i32) {
 // -----
 
 func.func @fragment_fill_bad_acc_layout(%s: i32) {
-  // expected-error @below {{accumulator fragments must be 32-bit fragments with 4 or 8 registers}}
+  // expected-error @below {{accumulator fragments must be 32-bit fragments with 4, 8, or 16 registers}}
   %f = waveamd.fragment_fill %s : i32 -> !waveamd.fragment<2, f16, 16, 16, 32, 4>
   return
 }

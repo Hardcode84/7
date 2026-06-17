@@ -14,6 +14,7 @@
 // RUN: wave-sim-report --func=trip_loop --trip-count=3 %s | FileCheck %s --check-prefix=TRIP
 // RUN: wave-sim-report --func=trip_loop --trip-count=10000 %s | FileCheck %s --check-prefix=TRIPBIG
 // RUN: wave-sim-report --func=wmma_latency --op-latencies %s | FileCheck %s --check-prefix=WMMA
+// RUN: wave-sim-report --func=mfma_32x32_latency --op-latencies %s | FileCheck %s --check-prefix=MFMA32
 // RUN: wave-sim-report --func=two_independent_valu --wave-size=64 --timeline %s | FileCheck %s --check-prefix=W64
 // RUN: wave-sim-report --func=one_salu --waves=8 --simds=8 %s | FileCheck %s --check-prefix=CUCAP
 // RUN: wave-sim-report --func=tuple_cu_cap --waves=6 --simds=6 --timeline %s | FileCheck %s --check-prefix=TUPLECU
@@ -144,6 +145,15 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
     return
   }
 
+  func.func @mfma_32x32_latency(%a: !waveamdmachine.reg<vgpr, 4>,
+                                %b: !waveamdmachine.reg<vgpr, 4>,
+                                %acc: !waveamdmachine.reg<vgpr, 16>) {
+    %result = waveamdmachine.mfma_f32_32x32x16_f16 %a, %b, %acc
+        : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
+           !waveamdmachine.reg<vgpr, 16>) -> !waveamdmachine.reg<vgpr, 16>
+    return
+  }
+
   func.func @two_independent_valu(%a: !waveamdmachine.reg<vgpr, 1>,
                                   %b: !waveamdmachine.reg<vgpr, 1>,
                                   %c: !waveamdmachine.reg<vgpr, 1>,
@@ -270,6 +280,9 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
 // WMMA: op_latencies:
 // WMMA: op=waveamdmachine.wmma_f32_16x16x16_f16 class=Write16PassWMMA fu=VALU latency=64
+
+// MFMA32: op_latencies:
+// MFMA32: op=waveamdmachine.mfma_f32_32x32x16_f16 class=Write8PassMAI fu=MFMA_XDL latency=8
 
 // W64: func: two_independent_valu
 // W64: wave_size: 64

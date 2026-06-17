@@ -42,6 +42,7 @@
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/MathExtras.h"
 #include "llvm/TargetParser/TargetParser.h"
+#include <array>
 #include <limits>
 #include <numeric>
 #include <optional>
@@ -131,6 +132,8 @@ enum class MmaKind {
   MfmaF32_16x16x16_BF16,
   MfmaF32_16x16x32_F16,
   MfmaF32_16x16x32_BF16,
+  MfmaF32_32x32x16_F16,
+  MfmaF32_32x32x16_BF16,
   MfmaScaleF32_16x16x128_F4F4,
   Unsupported,
 };
@@ -144,54 +147,83 @@ static MmaKind parseMmaKind(StringRef kind) {
       .Case("mfma.f32.16x16x16.bf16", MmaKind::MfmaF32_16x16x16_BF16)
       .Case("mfma.f32.16x16x32.f16", MmaKind::MfmaF32_16x16x32_F16)
       .Case("mfma.f32.16x16x32.bf16", MmaKind::MfmaF32_16x16x32_BF16)
+      .Case("mfma.f32.32x32x16.f16", MmaKind::MfmaF32_32x32x16_F16)
+      .Case("mfma.f32.32x32x16.bf16", MmaKind::MfmaF32_32x32x16_BF16)
       .Case("mfma.scale.f32.16x16x128.f4.f4",
             MmaKind::MfmaScaleF32_16x16x128_F4F4)
       .Default(MmaKind::Unsupported);
 }
 
+using MmaSupportFn = bool (*)(const llvm::AMDGPU::IsaVersion &);
+using MmaCreateFn = Value (*)(OpBuilder &, Location, Type, Value, Value, Value);
+
+template <typename Op>
+static bool isMmaOpSupportedOnIsa(const llvm::AMDGPU::IsaVersion &isa) {
+  return Op::isSupportedOnIsa(isa);
+}
+
+template <typename Op>
+static Value createMmaMachineOp(OpBuilder &builder, Location loc,
+                                Type resultType, Value a, Value b, Value acc) {
+  return Op::create(builder, loc, resultType, a, b, acc).getResult();
+}
+
+struct MmaKindInfo {
+  MmaKind kind;
+  MmaSupportFn isSupported;
+  MmaCreateFn create;
+  const char *requirement;
+};
+
+static constexpr std::array<MmaKindInfo, 10> kMmaKindInfos = {{
+    {MmaKind::WmmaI32_16x16x16_IU8,
+     isMmaOpSupportedOnIsa<waveamdmachine::WmmaI32_16x16x16_IU8Op>,
+     createMmaMachineOp<waveamdmachine::WmmaI32_16x16x16_IU8Op>, "gfx11"},
+    {MmaKind::WmmaF32_16x16x16_F16,
+     isMmaOpSupportedOnIsa<waveamdmachine::WmmaF32_16x16x16_F16Op>,
+     createMmaMachineOp<waveamdmachine::WmmaF32_16x16x16_F16Op>, "gfx11"},
+    {MmaKind::WmmaF32_16x16x16_BF16,
+     isMmaOpSupportedOnIsa<waveamdmachine::WmmaF32_16x16x16_BF16Op>,
+     createMmaMachineOp<waveamdmachine::WmmaF32_16x16x16_BF16Op>, "gfx11"},
+    {MmaKind::MfmaF32_16x16x16_F16,
+     isMmaOpSupportedOnIsa<waveamdmachine::MfmaF32_16x16x16_F16Op>,
+     createMmaMachineOp<waveamdmachine::MfmaF32_16x16x16_F16Op>, "gfx90a+"},
+    {MmaKind::MfmaF32_16x16x16_BF16,
+     isMmaOpSupportedOnIsa<waveamdmachine::MfmaF32_16x16x16_BF16Op>,
+     createMmaMachineOp<waveamdmachine::MfmaF32_16x16x16_BF16Op>, "gfx940+"},
+    {MmaKind::MfmaF32_16x16x32_F16,
+     isMmaOpSupportedOnIsa<waveamdmachine::MfmaF32_16x16x32_F16Op>,
+     createMmaMachineOp<waveamdmachine::MfmaF32_16x16x32_F16Op>, "gfx950"},
+    {MmaKind::MfmaF32_16x16x32_BF16,
+     isMmaOpSupportedOnIsa<waveamdmachine::MfmaF32_16x16x32_BF16Op>,
+     createMmaMachineOp<waveamdmachine::MfmaF32_16x16x32_BF16Op>, "gfx950"},
+    {MmaKind::MfmaF32_32x32x16_F16,
+     isMmaOpSupportedOnIsa<waveamdmachine::MfmaF32_32x32x16_F16Op>,
+     createMmaMachineOp<waveamdmachine::MfmaF32_32x32x16_F16Op>, "gfx950"},
+    {MmaKind::MfmaF32_32x32x16_BF16,
+     isMmaOpSupportedOnIsa<waveamdmachine::MfmaF32_32x32x16_BF16Op>,
+     createMmaMachineOp<waveamdmachine::MfmaF32_32x32x16_BF16Op>, "gfx950"},
+    {MmaKind::MfmaScaleF32_16x16x128_F4F4,
+     isMmaOpSupportedOnIsa<waveamdmachine::MfmaScaleF32_16x16x128_F4F4Op>,
+     nullptr, "gfx950"},
+}};
+
+static const MmaKindInfo *lookupMmaKindInfo(MmaKind kind) {
+  for (const MmaKindInfo &info : kMmaKindInfos)
+    if (info.kind == kind)
+      return &info;
+  return nullptr;
+}
+
 static bool isMmaTargetSupported(MmaKind kind,
                                  const llvm::AMDGPU::IsaVersion &isa) {
-  switch (kind) {
-  case MmaKind::WmmaI32_16x16x16_IU8:
-    return waveamdmachine::WmmaI32_16x16x16_IU8Op::isSupportedOnIsa(isa);
-  case MmaKind::WmmaF32_16x16x16_F16:
-    return waveamdmachine::WmmaF32_16x16x16_F16Op::isSupportedOnIsa(isa);
-  case MmaKind::WmmaF32_16x16x16_BF16:
-    return waveamdmachine::WmmaF32_16x16x16_BF16Op::isSupportedOnIsa(isa);
-  case MmaKind::MfmaF32_16x16x16_F16:
-    return waveamdmachine::MfmaF32_16x16x16_F16Op::isSupportedOnIsa(isa);
-  case MmaKind::MfmaF32_16x16x16_BF16:
-    return waveamdmachine::MfmaF32_16x16x16_BF16Op::isSupportedOnIsa(isa);
-  case MmaKind::MfmaF32_16x16x32_F16:
-    return waveamdmachine::MfmaF32_16x16x32_F16Op::isSupportedOnIsa(isa);
-  case MmaKind::MfmaF32_16x16x32_BF16:
-    return waveamdmachine::MfmaF32_16x16x32_BF16Op::isSupportedOnIsa(isa);
-  case MmaKind::MfmaScaleF32_16x16x128_F4F4:
-    return waveamdmachine::MfmaScaleF32_16x16x128_F4F4Op::isSupportedOnIsa(isa);
-  case MmaKind::Unsupported:
-    return true;
-  }
-  llvm_unreachable("unknown MMA kind");
+  const MmaKindInfo *info = lookupMmaKindInfo(kind);
+  return !info || info->isSupported(isa);
 }
 
 static StringRef mmaTargetRequirement(MmaKind kind) {
-  switch (kind) {
-  case MmaKind::WmmaI32_16x16x16_IU8:
-  case MmaKind::WmmaF32_16x16x16_F16:
-  case MmaKind::WmmaF32_16x16x16_BF16:
-    return "gfx11";
-  case MmaKind::MfmaF32_16x16x16_F16:
-    return "gfx90a+";
-  case MmaKind::MfmaF32_16x16x16_BF16:
-    return "gfx940+";
-  case MmaKind::MfmaF32_16x16x32_F16:
-  case MmaKind::MfmaF32_16x16x32_BF16:
-  case MmaKind::MfmaScaleF32_16x16x128_F4F4:
-    return "gfx950";
-  case MmaKind::Unsupported:
-    return "";
-  }
-  llvm_unreachable("unknown MMA kind");
+  const MmaKindInfo *info = lookupMmaKindInfo(kind);
+  return info ? info->requirement : "";
 }
 
 static LogicalResult requireMmaTarget(Operation *op, StringRef kindName,
@@ -205,40 +237,10 @@ static LogicalResult requireMmaTarget(Operation *op, StringRef kindName,
 
 static Value createMachineMma(MmaKind kind, OpBuilder &builder, Location loc,
                               Type resultType, Value a, Value b, Value acc) {
-  switch (kind) {
-  case MmaKind::WmmaI32_16x16x16_IU8:
-    return waveamdmachine::WmmaI32_16x16x16_IU8Op::create(builder, loc,
-                                                          resultType, a, b, acc)
-        .getResult();
-  case MmaKind::WmmaF32_16x16x16_F16:
-    return waveamdmachine::WmmaF32_16x16x16_F16Op::create(builder, loc,
-                                                          resultType, a, b, acc)
-        .getResult();
-  case MmaKind::WmmaF32_16x16x16_BF16:
-    return waveamdmachine::WmmaF32_16x16x16_BF16Op::create(
-               builder, loc, resultType, a, b, acc)
-        .getResult();
-  case MmaKind::MfmaF32_16x16x16_F16:
-    return waveamdmachine::MfmaF32_16x16x16_F16Op::create(builder, loc,
-                                                          resultType, a, b, acc)
-        .getResult();
-  case MmaKind::MfmaF32_16x16x16_BF16:
-    return waveamdmachine::MfmaF32_16x16x16_BF16Op::create(
-               builder, loc, resultType, a, b, acc)
-        .getResult();
-  case MmaKind::MfmaF32_16x16x32_F16:
-    return waveamdmachine::MfmaF32_16x16x32_F16Op::create(builder, loc,
-                                                          resultType, a, b, acc)
-        .getResult();
-  case MmaKind::MfmaF32_16x16x32_BF16:
-    return waveamdmachine::MfmaF32_16x16x32_BF16Op::create(
-               builder, loc, resultType, a, b, acc)
-        .getResult();
-  case MmaKind::MfmaScaleF32_16x16x128_F4F4:
-  case MmaKind::Unsupported:
+  const MmaKindInfo *info = lookupMmaKindInfo(kind);
+  if (!info || !info->create)
     return {};
-  }
-  llvm_unreachable("unknown MMA kind");
+  return info->create(builder, loc, resultType, a, b, acc);
 }
 
 static LogicalResult noteWaveWidth(Operation *diagOp,

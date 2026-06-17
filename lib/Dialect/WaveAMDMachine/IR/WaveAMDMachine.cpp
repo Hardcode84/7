@@ -529,9 +529,10 @@ LogicalResult WmmaF32_16x16x16_BF16Op::verify() {
   return verifyWMMA(*this, /*abWidth=*/8);
 }
 
-static LogicalResult verifyMFMA(Operation *op, int64_t abWidth, bool hasScale) {
+static LogicalResult verifyMFMA(Operation *op, int64_t abWidth,
+                                int64_t accWidth, bool hasScale) {
   MMAOpInterface mma = cast<MMAOpInterface>(op);
-  if (failed(verifyMMA(mma, abWidth, /*accWidth=*/4, verifyAVGPRWidth)))
+  if (failed(verifyMMA(mma, abWidth, accWidth, verifyAVGPRWidth)))
     return failure();
   if (failed(verifySameAVGPRClass(op, mma.getAcc(), mma.getAccResult(),
                                   "accumulator/result")))
@@ -548,23 +549,37 @@ static LogicalResult verifyMFMA(Operation *op, int64_t abWidth, bool hasScale) {
 }
 
 LogicalResult MfmaF32_16x16x16_F16Op::verify() {
-  return verifyMFMA(*this, /*abWidth=*/2, /*hasScale=*/false);
+  return verifyMFMA(*this, /*abWidth=*/2, /*accWidth=*/4,
+                    /*hasScale=*/false);
 }
 
 LogicalResult MfmaF32_16x16x16_BF16Op::verify() {
-  return verifyMFMA(*this, /*abWidth=*/2, /*hasScale=*/false);
+  return verifyMFMA(*this, /*abWidth=*/2, /*accWidth=*/4,
+                    /*hasScale=*/false);
 }
 
 LogicalResult MfmaF32_16x16x32_F16Op::verify() {
-  return verifyMFMA(*this, /*abWidth=*/4, /*hasScale=*/false);
+  return verifyMFMA(*this, /*abWidth=*/4, /*accWidth=*/4,
+                    /*hasScale=*/false);
 }
 
 LogicalResult MfmaF32_16x16x32_BF16Op::verify() {
-  return verifyMFMA(*this, /*abWidth=*/4, /*hasScale=*/false);
+  return verifyMFMA(*this, /*abWidth=*/4, /*accWidth=*/4,
+                    /*hasScale=*/false);
+}
+
+LogicalResult MfmaF32_32x32x16_F16Op::verify() {
+  return verifyMFMA(*this, /*abWidth=*/4, /*accWidth=*/16,
+                    /*hasScale=*/false);
+}
+
+LogicalResult MfmaF32_32x32x16_BF16Op::verify() {
+  return verifyMFMA(*this, /*abWidth=*/4, /*accWidth=*/16,
+                    /*hasScale=*/false);
 }
 
 LogicalResult MfmaScaleF32_16x16x128_F4F4Op::verify() {
-  return verifyMFMA(*this, /*abWidth=*/4, /*hasScale=*/true);
+  return verifyMFMA(*this, /*abWidth=*/4, /*accWidth=*/4, /*hasScale=*/true);
 }
 
 static LogicalResult verifyUniformLoopTerminator(UniformLoopOp loop,
