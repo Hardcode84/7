@@ -6,6 +6,9 @@
 // RUN: %python %S/../../examples/wave/flash_attention.py --chip=%chip \
 // RUN:   --block-m=16 --block-n=16 --seq-n=32 --head-dim=32 --seed=11 --compare-cpu \
 // RUN:   | FileCheck %s
+// RUN: %python %S/../../examples/wave/flash_attention.py --chip=%chip \
+// RUN:   --block-m=16 --block-n=16 --seq-n=32 --head-dim=32 --print-flops \
+// RUN:   | FileCheck %s --check-prefix=FLOPS
 // RUN: %python %S/../../tools/wave-fa-calibrate/wave-fa-calibrate.py --chip=%chip \
 // RUN:   --block-m=16 --block-n=16 --seq-n=16 --head-dim=32 --seed=11 \
 // RUN:   --variants=scheduled --skip-hw | FileCheck %s --check-prefix=SCHEDULED
@@ -17,5 +20,7 @@
 // RUN:   2>&1 | FileCheck %s --check-prefix=MFMA-PARTIAL
 //
 // CHECK: CPU comparison passed
+// FLOPS: matmul_equiv_flops: 65536
+// SCHEDULED: matmul_equiv_flops:
 // SCHEDULED: variant: scheduled
 // MFMA-PARTIAL: --block-n must be 16 for gfx950 MFMA

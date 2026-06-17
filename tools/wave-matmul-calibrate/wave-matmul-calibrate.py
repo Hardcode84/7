@@ -687,7 +687,11 @@ def run_hw(
         str(args.iters),
         "--warmup",
         str(args.warmup),
+        "--seed",
+        str(getattr(args, "seed", 0)),
     ]
+    if getattr(args, "all_ones", False):
+        cmd.append("--all-ones")
     if args.no_check:
         cmd.append("--no-check")
     cmd += [str(hsaco), KERNEL_NAME]
@@ -821,6 +825,12 @@ def build_argparser() -> argparse.ArgumentParser:
     ap.add_argument("--cta-group-m", type=int, default=1)
     ap.add_argument("--iters", type=int, default=1000)
     ap.add_argument("--warmup", type=int, default=10)
+    ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument(
+        "--all-ones",
+        action="store_true",
+        help="fill A/B with ones and MXFP4 scales with 1 for debug runs",
+    )
     ap.add_argument(
         "--repeats",
         type=int,
@@ -928,7 +938,9 @@ def main() -> int:
             f"wave_m_tiles={args.wave_m_tiles} wave_n_tiles={args.wave_n_tiles} "
             f"wave_k_tiles={args.wave_k_tiles} "
             f"target_waves={effective_target_waves(args)} "
-            f"input_type={args.input_type} output_type={args.output_type}\n"
+            f"input_type={args.input_type} output_type={args.output_type} "
+            f"seed={args.seed} input_mode="
+            f"{'all-ones' if args.all_ones else 'random'}\n"
             f"cta_swizzle_xcds={args.cta_swizzle_xcds} "
             f"cta_group_m={args.cta_group_m}\n"
             f"kernel_arg_trip_count: {compute_kernel_arg_trip_count(args)}\n"

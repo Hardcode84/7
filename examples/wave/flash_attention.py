@@ -26,6 +26,13 @@ def _select_matrix_intrinsic(chip: str, requested: str) -> str:
     return "mfma_gfx950" if chip.startswith("gfx950") else "wmma"
 
 
+def flash_attention_f32_flops(
+    block_m: int, block_n: int, head_dim: int, seq_n: int | None = None
+) -> int:
+    seq_len = block_n if seq_n is None else seq_n
+    return 4 * block_m * seq_len * head_dim
+
+
 def _parser_error_if(
     parser: argparse.ArgumentParser, condition: bool, message: str
 ) -> None:
@@ -134,6 +141,11 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         default=0,
         help="unroll K/V tile loop by this factor; 0 keeps the plain scf.for",
     )
+    parser.add_argument(
+        "--print-flops",
+        action="store_true",
+        help="print matmul-equivalent forward FLOPs and exit",
+    )
     add_execution_args(parser, default_atol=3.0e-3, default_rtol=3.0e-3)
     args = parser.parse_args(argv)
     _validate_args(parser, args)
@@ -153,6 +165,12 @@ def _dump_asm(module_text: str, args: argparse.Namespace) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(sys.argv[1:] if argv is None else argv)
+    if args.print_flops:
+        flops = flash_attention_f32_flops(
+            args.block_m, args.block_n, args.head_dim, args.seq_n
+        )
+        sys.stdout.write(f"matmul_equiv_flops: {flops}\n")
+        return 0
     ensure_package_on_path("mlir.dialects.wave_attention")
     from mlir.dialects.wave_attention import (
         build_flash_attention_f32_module,

@@ -25,6 +25,7 @@ KERNEL_NAME = "flash_attention_f32"
 sys.path.insert(0, str(REPO_ROOT / "examples/wave"))
 
 from common import extract_kernel_op  # noqa: E402
+from flash_attention import flash_attention_f32_flops  # noqa: E402
 
 
 @dataclass(frozen=True)
@@ -509,6 +510,10 @@ def run_variant(
     return VariantResult(variant.name, sim_cycles, hw_cycles, hw_us, hw_check)
 
 
+def matmul_equiv_tflops(flops: int, micros: float) -> float:
+    return flops / micros * 1.0e-6
+
+
 def print_result(result: VariantResult, args: argparse.Namespace) -> None:
     print(f"variant: {result.name}")
     print(
@@ -516,12 +521,19 @@ def print_result(result: VariantResult, args: argparse.Namespace) -> None:
         f"start_delay={args.sim_start_delay}: {result.sim_cycles}"
     )
     if result.hw_cycles_samples and result.hw_us_samples:
+        flops = flash_attention_f32_flops(
+            args.block_m, args.block_n, args.head_dim, args.seq_n
+        )
         if len(result.hw_cycles_samples) > 1:
             cycles = ",".join(str(x) for x in result.hw_cycles_samples)
             micros = ",".join(f"{x:.3f}" for x in result.hw_us_samples)
             print(f"  hw_cycles_wallclock_samples: {cycles}")
             print(f"  hw_per_launch_us_samples: {micros}")
         print(f"  hw_per_launch_us: {result.hw_us:.3f}")
+        print(
+            "  hw_matmul_equiv_tflops: "
+            f"{matmul_equiv_tflops(flops, result.hw_us):.6f}"
+        )
         print(f"  hw_cycles_wallclock: {result.hw_cycles}")
     if result.hw_check is not None:
         print(f"  hw_output_check: {result.hw_check}")
@@ -710,6 +722,10 @@ def main() -> int:
             f"waves_per_workgroup={threads_per_workgroup(chip) // 32} "
             f"target_waves={args.target_waves}"
         )
+        flops = flash_attention_f32_flops(
+            args.block_m, args.block_n, args.head_dim, args.seq_n
+        )
+        print(f"matmul_equiv_flops: {flops}")
         results: list[VariantResult] = []
         for variant in args.variants:
             result = run_variant(variant, args, source, runner, tmp)

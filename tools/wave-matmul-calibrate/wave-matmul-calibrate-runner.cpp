@@ -40,7 +40,9 @@ struct Args {
   int iters = 1000;
   int warmupIters = 10;
   int dynamicLdsBytes = 0;
+  int seed = 0;
   bool checkOutput = true;
+  bool allOnes = false;
 };
 
 [[noreturn]] static void die(const char *msg) {
@@ -67,7 +69,9 @@ static void usage() {
       "  --dynamic-lds N        dynamic LDS bytes (default 0)\n"
       "  --iters N              launch iterations (default 1000)\n"
       "  --warmup N             warmup launches (default 10)\n"
-      "  --no-check             skip all-ones output check\n");
+      "  --seed N               deterministic input seed (default 0)\n"
+      "  --all-ones             fill A/B with ones and MXFP4 scales with 1\n"
+      "  --no-check             skip random-output check\n");
 }
 
 static int parseInt(const char *s) {
@@ -126,6 +130,7 @@ static void setCType(Args &a, const char *v) {
 }
 static void setIters(Args &a, const char *v) { a.iters = parseInt(v); }
 static void setWarmup(Args &a, const char *v) { a.warmupIters = parseInt(v); }
+static void setSeed(Args &a, const char *v) { a.seed = parseInt(v); }
 static void setDynamicLds(Args &a, const char *v) {
   a.dynamicLdsBytes = parseInt(v);
 }
@@ -145,6 +150,7 @@ static constexpr FlagHandler kFlags[] = {
     {"--dynamic-lds", setDynamicLds},
     {"--iters", setIters},
     {"--warmup", setWarmup},
+    {"--seed", setSeed},
 };
 
 static bool tryFlag(const char *arg, const char *val, Args &a) {
@@ -182,6 +188,10 @@ static int handleOneArg(int argc, char **argv, int i, Args &a,
   }
   if (std::strcmp(arg, "--no-check") == 0) {
     a.checkOutput = false;
+    return i + 1;
+  }
+  if (std::strcmp(arg, "--all-ones") == 0) {
+    a.allOnes = true;
     return i + 1;
   }
   if (isFlag(arg)) {
@@ -269,26 +279,129 @@ static float halfToFloat(uint16_t h) {
   return out;
 }
 
+static uint16_t floatToHalfBits(float value) {
+  _Float16 half = static_cast<_Float16>(value);
+  uint16_t bits = 0;
+  std::memcpy(&bits, &half, sizeof(bits));
+  return bits;
+}
+
+static uint16_t floatToBF16Bits(float value) {
+  uint32_t bits = 0;
+  std::memcpy(&bits, &value, sizeof(bits));
+  uint32_t rounded = bits + 0x7fffu + ((bits >> 16) & 1u);
+  return static_cast<uint16_t>(rounded >> 16);
+}
+
+static float bf16ToFloat(uint16_t h) {
+  uint32_t bits = static_cast<uint32_t>(h) << 16;
+  float out;
+  std::memcpy(&out, &bits, sizeof(out));
+  return out;
+}
+
+static uint32_t randState(int seed, int stream) {
+  return static_cast<uint32_t>(seed) ^
+         (static_cast<uint32_t>(stream + 1) * 0x9E3779B9u);
+}
+
+static uint32_t nextRand(uint32_t &state) {
+  state = 1664525u * state + 1013904223u;
+  return state;
+}
+
+static float randomInputValue(uint32_t &state) {
+  int bucket = static_cast<int>((nextRand(state) >> 24) % 17u);
+  return static_cast<float>((bucket - 8) * 0.25f);
+}
+
+static uint8_t randomMXFP4Code(uint32_t &state) {
+  return ((nextRand(state) >> 31) & 1u) ? 0x2 : 0x4;
+}
+
+static float mxfp4CodeToFloat(uint8_t code) {
+  if (code == 0x2)
+    return 1.0f;
+  if (code == 0x4)
+    return 2.0f;
+  die("unsupported random MXFP4 code");
+}
+
+static float e8m0ToFloat(uint8_t raw) {
+  return static_cast<float>(std::ldexp(1.0, static_cast<int>(raw) - 127));
+}
+
+struct HostInputs;
+
+static float computeExpectedElement(const HostInputs &inputs, const Args &a,
+                                    int m, int n);
+
+static double roundExpectedOutput(double value, CType type) {
+  if (type == CType::F16)
+    return halfToFloat(floatToHalfBits(static_cast<float>(value)));
+  return value;
+}
+
+static double computeExpectedOutputSlot(const HostInputs &inputs, const Args &a,
+                                        int index) {
+  int tilesPerWave = a.waveMTiles * a.waveNTiles;
+  int wavesPerWorkgroup = a.bm * a.bn;
+  int ctaElems = wavesPerWorkgroup * tilesPerWave * 256;
+  int nBlocks = divExact(a.n, 16 * a.bn * a.waveNTiles, "bad N blocking");
+  int cta = index / ctaElems;
+  int ctaRem = index % ctaElems;
+  int wgM = cta / nBlocks;
+  int wgN = cta % nBlocks;
+  int waveElems = tilesPerWave * 256;
+  int waveId = ctaRem / waveElems;
+  int waveRem = ctaRem % waveElems;
+  int tileId = waveRem / 256;
+  int slot = waveRem % 256;
+  int mWave = waveId / a.bn;
+  int nWave = waveId % a.bn;
+  int mTile =
+      wgM * a.bm * a.waveMTiles + mWave * a.waveMTiles + tileId / a.waveNTiles;
+  int nTile =
+      wgN * a.bn * a.waveNTiles + nWave * a.waveNTiles + tileId % a.waveNTiles;
+  int m = mTile * 16 + slot / 16;
+  int n = nTile * 16 + slot % 16;
+  return roundExpectedOutput(computeExpectedElement(inputs, a, m, n), a.cType);
+}
+
 template <typename ReadFn>
-static void validateOutput(int elements, int k, ReadFn readValue) {
+static void validateOutput(int elements, const Args &a,
+                           const HostInputs &inputs, ReadFn readValue) {
+  if (elements % 256 != 0)
+    die("output check expects 16x16 tile-packed output");
   double worst = 0.0;
-  int worstIdx = -1;
-  double expected = static_cast<double>(k);
-  for (int i = 0; i < elements; ++i) {
-    double got = static_cast<double>(readValue(i));
-    double diff = std::fabs(got - expected);
-    if (diff > worst) {
-      worst = diff;
-      worstIdx = i;
+  int worstIdx = 0;
+  for (int tileBase = 0; tileBase < elements; tileBase += 256) {
+    std::vector<double> actual(256);
+    std::vector<double> expected(256);
+    for (int slot = 0; slot < 256; ++slot) {
+      int index = tileBase + slot;
+      actual[slot] = static_cast<double>(readValue(index));
+      expected[slot] = computeExpectedOutputSlot(inputs, a, index);
     }
-  }
-  if (worst > 1.0e-3) {
-    std::fprintf(stderr,
-                 "output_check: failed index=%d expected=%.6f got=%.6f "
-                 "abs_diff=%.6f\n",
-                 worstIdx, expected, static_cast<double>(readValue(worstIdx)),
-                 worst);
-    std::exit(1);
+    std::sort(actual.begin(), actual.end());
+    std::sort(expected.begin(), expected.end());
+    for (int slot = 0; slot < 256; ++slot) {
+      double got = actual[slot];
+      double exp = expected[slot];
+      double diff = std::fabs(got - exp);
+      if (diff > worst) {
+        worst = diff;
+        worstIdx = tileBase + slot;
+      }
+      double limit = 1.0e-2 + 1.0e-3 * std::fabs(exp);
+      if (diff > limit) {
+        std::fprintf(stderr,
+                     "output_check: failed tile=%d slot=%d expected=%.6f "
+                     "got=%.6f abs_diff=%.6f tolerance=%.6f\n",
+                     tileBase / 256, slot, exp, got, diff, limit);
+        std::exit(1);
+      }
+    }
   }
   std::printf("output_check: passed max_abs_diff=%.6f index=%d\n", worst,
               worstIdx);
@@ -332,24 +445,114 @@ static int mmaKTile(const Args &a) {
   return 16;
 }
 
-static std::vector<uint8_t> makeInputBytes(int rows, int k, InputType type) {
+static std::vector<uint8_t> makeInputBytes(int rows, int k, InputType type,
+                                           int seed, int stream, bool allOnes) {
   size_t elements = static_cast<size_t>(rows) * k;
   if (isMXFP4(type)) {
     if (elements % 2 != 0)
       die("MXFP4 input element count must be even");
-    return std::vector<uint8_t>(elements / 2, 0x22);
+    if (allOnes)
+      return std::vector<uint8_t>(elements / 2, 0x22);
+    std::vector<uint8_t> bytes(elements / 2);
+    uint32_t state = randState(seed, stream);
+    for (size_t i = 0; i < elements; i += 2) {
+      uint8_t low = randomMXFP4Code(state);
+      uint8_t high = randomMXFP4Code(state);
+      bytes[i / 2] = static_cast<uint8_t>(low | (high << 4));
+    }
+    return bytes;
   }
 
-  uint16_t bits = oneBits(type);
-  std::vector<uint8_t> bytes(elements * sizeof(bits));
-  for (size_t i = 0; i < elements; ++i)
+  std::vector<uint8_t> bytes(elements * sizeof(uint16_t));
+  if (allOnes) {
+    uint16_t bits = oneBits(type);
+    for (size_t i = 0; i < elements; ++i)
+      std::memcpy(bytes.data() + i * sizeof(bits), &bits, sizeof(bits));
+    return bytes;
+  }
+
+  uint32_t state = randState(seed, stream);
+  for (size_t i = 0; i < elements; ++i) {
+    float value = randomInputValue(state);
+    uint16_t bits = type == InputType::BF16 ? floatToBF16Bits(value)
+                                            : floatToHalfBits(value);
     std::memcpy(bytes.data() + i * sizeof(bits), &bits, sizeof(bits));
+  }
   return bytes;
 }
 
-static std::vector<uint8_t> makeMXFP4ScaleBytes(int rows, int k) {
+static std::vector<uint8_t> makeMXFP4ScaleBytes(int rows, int k, int seed,
+                                                int stream, bool allOnes) {
   int groups = divExact(k, 32, "bad MXFP4 scale groups");
-  return std::vector<uint8_t>(static_cast<size_t>(rows) * groups, 0x7f);
+  std::vector<uint8_t> bytes(static_cast<size_t>(rows) * groups);
+  if (allOnes) {
+    std::fill(bytes.begin(), bytes.end(), 0x7f);
+    return bytes;
+  }
+  uint32_t state = randState(seed, stream);
+  for (uint8_t &value : bytes)
+    value = static_cast<uint8_t>(124 + ((nextRand(state) >> 29) & 3u));
+  return bytes;
+}
+
+struct HostInputs {
+  std::vector<uint8_t> a;
+  std::vector<uint8_t> b;
+  std::vector<uint8_t> aScale;
+  std::vector<uint8_t> bScale;
+};
+
+static HostInputs makeHostInputs(const Args &a) {
+  HostInputs inputs;
+  inputs.a = makeInputBytes(a.m, a.k, a.inputType, a.seed, 0, a.allOnes);
+  inputs.b = makeInputBytes(a.n, a.k, a.inputType, a.seed, 1, a.allOnes);
+  if (isMXFP4(a.inputType)) {
+    inputs.aScale = makeMXFP4ScaleBytes(a.m, a.k, a.seed, 2, a.allOnes);
+    inputs.bScale = makeMXFP4ScaleBytes(a.n, a.k, a.seed, 3, a.allOnes);
+  }
+  return inputs;
+}
+
+static uint16_t readU16(const std::vector<uint8_t> &bytes, size_t element) {
+  uint16_t value = 0;
+  std::memcpy(&value, bytes.data() + element * sizeof(value), sizeof(value));
+  return value;
+}
+
+static float readDenseInput(const std::vector<uint8_t> &bytes, size_t element,
+                            InputType type) {
+  uint16_t raw = readU16(bytes, element);
+  return type == InputType::BF16 ? bf16ToFloat(raw) : halfToFloat(raw);
+}
+
+static float readMXFP4Input(const std::vector<uint8_t> &bytes, size_t element) {
+  uint8_t packed = bytes[element / 2];
+  uint8_t code = element % 2 == 0 ? (packed & 0xf) : (packed >> 4);
+  return mxfp4CodeToFloat(code);
+}
+
+static float readInputElement(const HostInputs &inputs, const Args &a, bool isA,
+                              int row, int kIndex) {
+  int rows = isA ? a.m : a.n;
+  const std::vector<uint8_t> &bytes = isA ? inputs.a : inputs.b;
+  size_t element = static_cast<size_t>(row) * a.k + kIndex;
+  if (!isMXFP4(a.inputType))
+    return readDenseInput(bytes, element, a.inputType);
+
+  const std::vector<uint8_t> &scales = isA ? inputs.aScale : inputs.bScale;
+  uint8_t scale = scales[static_cast<size_t>(kIndex / 32) * rows + row];
+  return readMXFP4Input(bytes, element) * e8m0ToFloat(scale);
+}
+
+static float computeExpectedElement(const HostInputs &inputs, const Args &a,
+                                    int m, int n) {
+  float acc = 0.0f;
+  for (int k = 0; k < a.k; ++k) {
+    float lhs = readInputElement(inputs, a, true, m, k);
+    float rhs = readInputElement(inputs, a, false, n, k);
+    acc += lhs * rhs;
+  }
+  return acc;
 }
 
 struct DeviceBuffers {
@@ -362,41 +565,33 @@ struct DeviceBuffers {
   size_t cBytes = 0;
 };
 
-static DeviceBuffers prepareDeviceBuffers(const Args &a) {
-  std::vector<uint8_t> hostA = makeInputBytes(a.m, a.k, a.inputType);
-  std::vector<uint8_t> hostB = makeInputBytes(a.n, a.k, a.inputType);
-  std::vector<uint8_t> hostAScale;
-  std::vector<uint8_t> hostBScale;
-  if (isMXFP4(a.inputType)) {
-    hostAScale = makeMXFP4ScaleBytes(a.m, a.k);
-    hostBScale = makeMXFP4ScaleBytes(a.n, a.k);
-  }
-
+static DeviceBuffers prepareDeviceBuffers(const Args &a,
+                                          const HostInputs &inputs) {
   DeviceBuffers b;
   b.cElements = a.m * a.n;
   b.cBytes = static_cast<size_t>(b.cElements) *
              (a.cType == CType::F16 ? sizeof(uint16_t) : sizeof(float));
-  checkHip(hipMalloc(&b.deviceA, hostA.size()), "hipMalloc A");
-  checkHip(hipMalloc(&b.deviceB, hostB.size()), "hipMalloc B");
+  checkHip(hipMalloc(&b.deviceA, inputs.a.size()), "hipMalloc A");
+  checkHip(hipMalloc(&b.deviceB, inputs.b.size()), "hipMalloc B");
   if (isMXFP4(a.inputType)) {
-    checkHip(hipMalloc(&b.deviceAScale, hostAScale.size()),
+    checkHip(hipMalloc(&b.deviceAScale, inputs.aScale.size()),
              "hipMalloc A scale");
-    checkHip(hipMalloc(&b.deviceBScale, hostBScale.size()),
+    checkHip(hipMalloc(&b.deviceBScale, inputs.bScale.size()),
              "hipMalloc B scale");
   }
   checkHip(hipMalloc(&b.deviceC, b.cBytes), "hipMalloc C");
-  checkHip(
-      hipMemcpy(b.deviceA, hostA.data(), hostA.size(), hipMemcpyHostToDevice),
-      "hipMemcpy A");
-  checkHip(
-      hipMemcpy(b.deviceB, hostB.data(), hostB.size(), hipMemcpyHostToDevice),
-      "hipMemcpy B");
+  checkHip(hipMemcpy(b.deviceA, inputs.a.data(), inputs.a.size(),
+                     hipMemcpyHostToDevice),
+           "hipMemcpy A");
+  checkHip(hipMemcpy(b.deviceB, inputs.b.data(), inputs.b.size(),
+                     hipMemcpyHostToDevice),
+           "hipMemcpy B");
   if (isMXFP4(a.inputType)) {
-    checkHip(hipMemcpy(b.deviceAScale, hostAScale.data(), hostAScale.size(),
-                       hipMemcpyHostToDevice),
+    checkHip(hipMemcpy(b.deviceAScale, inputs.aScale.data(),
+                       inputs.aScale.size(), hipMemcpyHostToDevice),
              "hipMemcpy A scale");
-    checkHip(hipMemcpy(b.deviceBScale, hostBScale.data(), hostBScale.size(),
-                       hipMemcpyHostToDevice),
+    checkHip(hipMemcpy(b.deviceBScale, inputs.bScale.data(),
+                       inputs.bScale.size(), hipMemcpyHostToDevice),
              "hipMemcpy B scale");
   }
   checkHip(hipMemset(b.deviceC, 0, b.cBytes), "hipMemset C");
@@ -414,21 +609,21 @@ static void freeDeviceBuffers(DeviceBuffers &b) {
 }
 
 static void copyAndCheckOutput(void *deviceC, size_t cBytes, int cElements,
-                               const Args &a) {
+                               const Args &a, const HostInputs &inputs) {
   if (!a.checkOutput)
     return;
   if (a.cType == CType::F16) {
     std::vector<uint16_t> hostC(cElements);
     checkHip(hipMemcpy(hostC.data(), deviceC, cBytes, hipMemcpyDeviceToHost),
              "hipMemcpy C");
-    validateOutput(cElements, a.k,
+    validateOutput(cElements, a, inputs,
                    [&](int i) { return halfToFloat(hostC[i]); });
     return;
   }
   std::vector<float> hostC(cElements);
   checkHip(hipMemcpy(hostC.data(), deviceC, cBytes, hipMemcpyDeviceToHost),
            "hipMemcpy C");
-  validateOutput(cElements, a.k, [&](int i) { return hostC[i]; });
+  validateOutput(cElements, a, inputs, [&](int i) { return hostC[i]; });
 }
 
 } // namespace
@@ -453,7 +648,8 @@ int main(int argc, char **argv) {
   checkHip(hipModuleLoad(&mod, a.hsaco), "hipModuleLoad");
   checkHip(hipModuleGetFunction(&kfn, mod, a.kernel), "hipModuleGetFunction");
 
-  DeviceBuffers buffers = prepareDeviceBuffers(a);
+  HostInputs inputs = makeHostInputs(a);
+  DeviceBuffers buffers = prepareDeviceBuffers(a, inputs);
   std::array<void *, 4> kernelArgs = {&buffers.deviceA, &buffers.deviceB,
                                       &buffers.deviceC, &tripCount};
   std::array<void *, 6> mxfp4KernelArgs = {
@@ -491,10 +687,10 @@ int main(int argc, char **argv) {
   std::printf("kernel: %s\n", a.kernel);
   std::printf("shape: m=%d n=%d k=%d bm=%d bn=%d wave_m_tiles=%d "
               "wave_n_tiles=%d wave_k_tiles=%d wave_size=%d input_type=%s "
-              "c_type=%s\n",
+              "c_type=%s input_mode=%s\n",
               a.m, a.n, a.k, a.bm, a.bn, a.waveMTiles, a.waveNTiles,
               a.waveKTiles, a.waveSize, getInputTypeName(a.inputType),
-              getCTypeName(a.cType));
+              getCTypeName(a.cType), a.allOnes ? "all-ones" : "random");
   std::printf("grid: %d,%d,1 block: %d,1,1 waves_per_workgroup=%d\n", blocksX,
               blocksY, blockThreads, a.bm * a.bn);
   std::printf("loop_trip_count: %d\n", tripCount);
@@ -502,7 +698,8 @@ int main(int argc, char **argv) {
   std::printf("total_ms: %.3f\n", elapsedMs);
   std::printf("per_launch_us: %.3f\n", perLaunchUs);
   std::printf("per_launch_cycles_wallclock: %.0f\n", perLaunchCycles);
-  copyAndCheckOutput(buffers.deviceC, buffers.cBytes, buffers.cElements, a);
+  copyAndCheckOutput(buffers.deviceC, buffers.cBytes, buffers.cElements, a,
+                     inputs);
   freeDeviceBuffers(buffers);
   return 0;
 }
