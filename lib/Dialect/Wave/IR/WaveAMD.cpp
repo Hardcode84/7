@@ -158,6 +158,10 @@ static bool isWmma16x16x16(FragmentType type) {
   return type.getRows() == 16 && type.getColumns() == 16 &&
          type.getWaveSize() == 32;
 }
+static bool isMfma16x16x16(FragmentType type) {
+  return type.getRows() == 16 && type.getColumns() == 16 &&
+         (type.getWaveSize() == 32 || type.getWaveSize() == 64);
+}
 static bool isMfmaGfx95016x16x32(FragmentType type) {
   return type.getRows() == 16 && type.getColumns() == 16 &&
          type.getWaveSize() == 64;
@@ -188,15 +192,15 @@ static bool matchF32Acc(FragmentType type) {
 }
 static bool matchMfmaF16AB(FragmentType type, int64_t role) {
   return type.getRole() == role && type.getElementType().isF16() &&
-         type.getRegisters() == 2 && isWmma16x16x16(type);
+         type.getRegisters() == 2 && isMfma16x16x16(type);
 }
 static bool matchMfmaBF16AB(FragmentType type, int64_t role) {
   return type.getRole() == role && type.getElementType().isBF16() &&
-         type.getRegisters() == 2 && isWmma16x16x16(type);
+         type.getRegisters() == 2 && isMfma16x16x16(type);
 }
 static bool matchMfmaF32Acc(FragmentType type) {
   return type.getRole() == 2 && type.getElementType().isF32() &&
-         type.getRegisters() == 4 && isWmma16x16x16(type);
+         type.getRegisters() == 4 && isMfma16x16x16(type);
 }
 static bool matchMfmaGfx950F16AB(FragmentType type, int64_t role) {
   return type.getRole() == role && type.getElementType().isF16() &&
@@ -253,11 +257,11 @@ static constexpr WmmaShape kWmmaShapes[] = {
      "must be a 16x16 bf16 wave32 fragment with 8 registers",
      "accumulator must be a 16x16 f32 wave32 fragment with 8 registers"},
     {"mfma.f32.16x16x16.f16", matchMfmaF16AB, matchMfmaF32Acc,
-     "must be a 16x16 f16 wave32 fragment with 2 registers",
-     "accumulator must be a 16x16 f32 wave32 fragment with 4 registers"},
+     "must be a 16x16 f16 wave32/wave64 fragment with 2 registers",
+     "accumulator must be a 16x16 f32 wave32/wave64 fragment with 4 registers"},
     {"mfma.f32.16x16x16.bf16", matchMfmaBF16AB, matchMfmaF32Acc,
-     "must be a 16x16 bf16 wave32 fragment with 2 registers",
-     "accumulator must be a 16x16 f32 wave32 fragment with 4 registers"},
+     "must be a 16x16 bf16 wave32/wave64 fragment with 2 registers",
+     "accumulator must be a 16x16 f32 wave32/wave64 fragment with 4 registers"},
     {"mfma.f32.16x16x32.f16", matchMfmaGfx950F16AB, matchMfmaGfx950F32Acc,
      "must be a 16x16 f16 wave64 fragment with 4 registers",
      "accumulator must be a 16x16 f32 wave64 fragment with 4 registers"},
@@ -273,6 +277,13 @@ static constexpr WmmaShape kWmmaShapes[] = {
      "must be a 32x32 bf16 wave64 fragment with 4 registers",
      "accumulator must be a 32x32 f32 wave64 fragment with 16 registers"},
 };
+
+static bool haveSameWaveSize(FragmentType aType, FragmentType bType,
+                             FragmentType accType, FragmentType resultType) {
+  int64_t waveSize = aType.getWaveSize();
+  return bType.getWaveSize() == waveSize && accType.getWaveSize() == waveSize &&
+         resultType.getWaveSize() == waveSize;
+}
 } // namespace
 
 LogicalResult MmaOp::verify() {
@@ -296,6 +307,8 @@ LogicalResult MmaOp::verify() {
     return emitOpError("B operand ") << shape->abError;
   if (!shape->matchAcc(accType))
     return emitOpError(shape->accError);
+  if (!haveSameWaveSize(aType, bType, accType, resultType))
+    return emitOpError("operand/result fragment wave sizes must match");
   if (resultType != accType)
     return emitOpError("result type must match accumulator type");
   return success();

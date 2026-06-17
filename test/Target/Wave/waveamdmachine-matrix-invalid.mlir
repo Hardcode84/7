@@ -124,6 +124,17 @@ func.func @bad_mma_b_role(%x: i32) {
 
 // -----
 
+func.func @bad_mfma_mixed_wave_sizes(%x: i32) {
+  %a = waveamd.fragment_fill %x : i32 -> !waveamd.fragment<0, f16, 16, 16, 32, 2>
+  %b = waveamd.fragment_fill %x : i32 -> !waveamd.fragment<1, f16, 16, 16, 64, 2>
+  %acc = waveamd.fragment_fill %x : i32 -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
+  // expected-error @below {{operand/result fragment wave sizes must match}}
+  %result = waveamd.mma "mfma.f32.16x16x16.f16" %a, %b, %acc : !waveamd.fragment<0, f16, 16, 16, 32, 2>, !waveamd.fragment<1, f16, 16, 16, 64, 2>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
+  return
+}
+
+// -----
+
 func.func @fragment_pack_bad_width(%v: !wave.simd<vector<8xi32>, 64>) {
   // expected-error @below {{operand SIMD width must match fragment wave size}}
   %frag = waveamd.fragment_pack %v : !wave.simd<vector<8xi32>, 64> -> !waveamd.fragment<2, f32, 16, 16, 32, 8>
