@@ -188,17 +188,19 @@ def main() -> int:
     require(
         "fa_seq32_d16_u4_beam_report",
         text,
-        r"selected func=flash_attention_f32 region=1 name=critical_path",
+        r"skipped func=flash_attention_f32 region=1 reason=max_region_ops "
+        r"ops=671 limit=512",
     )
     require(
         "fa_seq32_d16_u4_beam_report",
         text,
-        r"selected func=flash_attention_f32 region=4 name=critical_path",
+        r"skipped func=flash_attention_f32 region=4 reason=max_region_ops "
+        r"ops=704 limit=512",
     )
     require(
         "fa_seq32_d16_u4_beam_report",
         text,
-        r"sim_cycles waves=1 simds=1 start_delay=0: 25394",
+        r"sim_cycles waves=1 simds=1 start_delay=0: 30216",
     )
     reject("fa_seq32_d16_u4_beam_report", text, r"pressure_fallback")
 

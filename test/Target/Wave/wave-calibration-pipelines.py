@@ -13,6 +13,7 @@
 # CHECK: matmul_mxfp4_4wave_profile: ok
 # CHECK: matmul_dynamic_lds_forwarding: ok
 # CHECK: matmul_dma_sim_trip_count: ok
+# CHECK: calibration_scheduler_region_cap: ok
 # CHECK: matmul_pingpong_removed: ok
 
 from __future__ import annotations
@@ -651,6 +652,41 @@ def check_matmul_dma_sim_trip_count(matmul) -> None:
     print("matmul_dma_sim_trip_count: ok")
 
 
+def check_calibration_scheduler_region_cap(matmul, fa) -> None:
+    matmul_args = matmul.parse_args(["--chip=gfx950", "--skip-hw"])
+    matmul_variant = matmul.VARIANTS["scheduled"]
+    matmul_pass = matmul.schedule_pass_options(matmul_variant, matmul_args)
+    matmul_report = matmul.schedule_report_options(matmul_variant, matmul_args)
+    require(
+        "calibration_scheduler_region_cap",
+        matmul_pass["max-region-ops"] == 512,
+        "matmul apply pipeline missing scheduler region cap",
+    )
+    require(
+        "calibration_scheduler_region_cap",
+        matmul_report == {},
+        "matmul report should stay empty without report flags",
+    )
+
+    fa_args = fa.build_argparser().parse_args(
+        ["--chip=gfx950", "--print-candidates", "--skip-hw"]
+    )
+    fa_variant = fa.VARIANTS["scheduled"]
+    fa_pass = fa.schedule_pass_options(fa_variant, fa_args)
+    fa_report = fa.schedule_report_options(fa_variant, fa_args)
+    require(
+        "calibration_scheduler_region_cap",
+        fa_pass["max-region-ops"] == 512,
+        "FA apply pipeline missing scheduler region cap",
+    )
+    require(
+        "calibration_scheduler_region_cap",
+        fa_report["max-region-ops"] == 512,
+        "FA report pipeline missing scheduler region cap",
+    )
+    print("calibration_scheduler_region_cap: ok")
+
+
 def main() -> int:
     matmul = load_module(
         "wave_matmul_calibrate",
@@ -672,6 +708,7 @@ def main() -> int:
     check_matmul_mxfp4_4wave_profile(matmul)
     check_matmul_dynamic_lds_forwarding(matmul)
     check_matmul_dma_sim_trip_count(matmul)
+    check_calibration_scheduler_region_cap(matmul, fa)
     try:
         matmul.parse_variants("pingpong")
     except argparse.ArgumentTypeError:

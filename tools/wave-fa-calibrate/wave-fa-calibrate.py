@@ -83,6 +83,7 @@ def add_pressure_budget_options(
 def add_common_scheduler_options(
     options: dict[str, bool | int | str], args: argparse.Namespace
 ) -> None:
+    options["max-region-ops"] = 512
     if args.beam_search:
         options["beam-search"] = True
     if not args.no_pressure_aware_schedule:
