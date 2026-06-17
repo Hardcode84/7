@@ -27,6 +27,7 @@
 #include "llvm/TargetParser/TargetParser.h"
 
 #include <algorithm>
+#include <array>
 #include <limits>
 #include <optional>
 
@@ -476,6 +477,9 @@ configureScheduleModel(Operation *op, int modelWaves, int modelSimds,
   modelConfig.valueLatencies.vmemLoad = modelVmemValueLatency;
   modelConfig.valueLatencies.smemLoad = modelSmemValueLatency;
   modelConfig.valueLatencies.lds = modelLdsValueLatency;
+  modelConfig.completePendingLdsDmaCounters = true;
+  modelConfig.ldsDmaIssueInterval = -1;
+  modelConfig.cmaIssueInterval = -1;
   return success();
 }
 
@@ -1221,6 +1225,8 @@ GraphTables buildGraphTables(const ScheduleRegion &region,
   for (const ScheduleEdge &edge : graph.edges) {
     if (edge.recurrence)
       continue;
+    if (llvm::is_contained(tables.successors[edge.src], edge.dst))
+      continue;
     tables.successors[edge.src].push_back(edge.dst);
     ++tables.pendingPreds[edge.dst];
   }
@@ -1520,6 +1526,329 @@ static bool buildIssueWindowOrder(const GraphTables &tables,
   return order.size() == pending.size();
 }
 
+static constexpr size_t kNumScheduleFUs =
+    static_cast<size_t>(waveamdmachine::FunctionalUnit::NumFunctionalUnits);
+
+struct LocalIssueState {
+  DenseMap<Value, int64_t> readyAt;
+  DenseMap<int64_t, unsigned> cuIssueCounts;
+  DenseMap<int64_t, unsigned> cmaIssueCounts;
+  std::array<int64_t, kNumScheduleFUs> fuReady = {};
+  int64_t issueReady = 0;
+  int64_t ldsDmaReady = 0;
+};
+
+struct LocalIssuePreview {
+  waveamdmachine::SchedClass cls = waveamdmachine::SchedClass::NoInst;
+  waveamdmachine::FunctionalUnit fu = waveamdmachine::FunctionalUnit::None;
+  int64_t operandReady = 0;
+  int64_t issueCycle = 0;
+  int64_t nextIssue = 0;
+  int64_t readyCycle = 0;
+  int64_t memoryValueReady = 0;
+  unsigned issues = 0;
+  bool memoryIssuer = false;
+  bool hasMemoryValue = false;
+};
+
+struct LocalIssueChoice {
+  LocalIssuePreview preview;
+  unsigned unlocked = 0;
+  unsigned node = 0;
+};
+
+static int getIssuePeriod(const waveamdmachine::ArchData &arch,
+                          const waveamdmachine::EventSimConfig &config) {
+  return waveamdmachine::getEventSimIssuePeriod(arch, config);
+}
+
+static int
+getLdsDmaIssueInterval(const waveamdmachine::ArchData &arch,
+                       const waveamdmachine::EventSimConfig &config) {
+  return waveamdmachine::getEventSimLdsDmaIssueInterval(arch, config);
+}
+
+static int getCmaIssueInterval(const waveamdmachine::ArchData &arch,
+                               const waveamdmachine::EventSimConfig &config) {
+  return waveamdmachine::getEventSimCmaIssueInterval(arch, config);
+}
+
+static unsigned getCmaIssueCount(Operation *op, waveamdmachine::SchedClass cls,
+                                 unsigned issues) {
+  return waveamdmachine::getEventSimCmaIssueCount(op, cls, issues);
+}
+
+static int64_t issueCycleAt(int64_t start, unsigned issue, int period) {
+  return start + static_cast<int64_t>(issue) * period;
+}
+
+static int64_t cuIssueReadyCycle(const LocalIssueState &state,
+                                 const waveamdmachine::ArchData &arch,
+                                 int64_t cycle, unsigned issues, int period) {
+  unsigned cap = static_cast<unsigned>(arch.issuesPerCUPerCycle);
+  while (true) {
+    std::optional<int64_t> nextStart;
+    for (unsigned issue : llvm::seq<unsigned>(0, issues)) {
+      int64_t current = issueCycleAt(cycle, issue, period);
+      if (state.cuIssueCounts.lookup(current) < cap)
+        continue;
+      nextStart = current - static_cast<int64_t>(issue) * period + 1;
+      break;
+    }
+    if (!nextStart)
+      return cycle;
+    cycle = std::max<int64_t>(cycle + 1, *nextStart);
+  }
+}
+
+static int64_t cmaIssueReadyCycle(const LocalIssueState &state,
+                                  const waveamdmachine::ArchData &arch,
+                                  const waveamdmachine::EventSimConfig &config,
+                                  int64_t cycle, Operation *op,
+                                  waveamdmachine::SchedClass cls,
+                                  unsigned issues) {
+  int interval = getCmaIssueInterval(arch, config);
+  unsigned cmaIssues = getCmaIssueCount(op, cls, issues);
+  if (interval <= 0 || cmaIssues == 0)
+    return cycle;
+
+  unsigned cap = waveamdmachine::getEventSimCmaIssueCapacity(arch);
+  while (true) {
+    std::optional<int64_t> nextStart;
+    for (unsigned issue : llvm::seq<unsigned>(0, cmaIssues)) {
+      int64_t begin = issueCycleAt(cycle, issue, interval);
+      for (unsigned offset :
+           llvm::seq<unsigned>(0, static_cast<unsigned>(interval))) {
+        int64_t current = begin + offset;
+        if (state.cmaIssueCounts.lookup(current) < cap)
+          continue;
+        nextStart = current - static_cast<int64_t>(issue) * interval -
+                    static_cast<int64_t>(offset) + 1;
+        break;
+      }
+      if (nextStart)
+        break;
+    }
+    if (!nextStart)
+      return cycle;
+    cycle = std::max<int64_t>(cycle + 1, *nextStart);
+  }
+}
+
+static void consumeCuIssueSlots(LocalIssueState &state,
+                                const waveamdmachine::ArchData &arch,
+                                int64_t cycle, unsigned issues, int period) {
+  for (unsigned issue : llvm::seq<unsigned>(0, issues)) {
+    int64_t current = issueCycleAt(cycle, issue, period);
+    unsigned &count = state.cuIssueCounts[current];
+    assert(count < static_cast<unsigned>(arch.issuesPerCUPerCycle) &&
+           "CU issue cap exceeded");
+    ++count;
+  }
+}
+
+static void consumeCmaIssueSlots(LocalIssueState &state,
+                                 const waveamdmachine::ArchData &arch,
+                                 const waveamdmachine::EventSimConfig &config,
+                                 int64_t cycle, Operation *op,
+                                 waveamdmachine::SchedClass cls,
+                                 unsigned issues) {
+  int interval = getCmaIssueInterval(arch, config);
+  unsigned cmaIssues = getCmaIssueCount(op, cls, issues);
+  if (interval <= 0 || cmaIssues == 0)
+    return;
+
+  unsigned cap = waveamdmachine::getEventSimCmaIssueCapacity(arch);
+  for (unsigned issue : llvm::seq<unsigned>(0, cmaIssues)) {
+    int64_t begin = issueCycleAt(cycle, issue, interval);
+    for (unsigned offset :
+         llvm::seq<unsigned>(0, static_cast<unsigned>(interval))) {
+      int64_t current = begin + offset;
+      unsigned &count = state.cmaIssueCounts[current];
+      assert(count < cap && "CMA issue cap exceeded");
+      ++count;
+    }
+  }
+}
+
+static int64_t operandReadyCycle(const LocalIssueState &state, Operation *op) {
+  int64_t ready = 0;
+  for (Value operand : op->getOperands()) {
+    DenseMap<Value, int64_t>::const_iterator it = state.readyAt.find(operand);
+    if (it != state.readyAt.end())
+      ready = std::max(ready, it->second);
+  }
+  return ready;
+}
+
+static LocalIssuePreview
+previewLocalIssue(const LocalIssueState &state, Operation *op,
+                  const waveamdmachine::ArchData &arch,
+                  const waveamdmachine::EventSimConfig &config) {
+  LocalIssuePreview preview;
+  preview.operandReady = operandReadyCycle(state, op);
+  preview.cls = waveamdmachine::classifyOp(op);
+  if (preview.cls == waveamdmachine::SchedClass::NoInst) {
+    preview.issueCycle = preview.operandReady;
+    preview.nextIssue = preview.operandReady;
+    preview.readyCycle = preview.operandReady;
+    preview.memoryValueReady = preview.operandReady;
+    return preview;
+  }
+
+  preview.fu = waveamdmachine::funit(arch, preview.cls);
+  preview.issues = std::max(1u, getIssueCount(op));
+  preview.memoryIssuer = isMemoryIssuer(op);
+  preview.hasMemoryValue = waveamdmachine::hasMemoryValueLatency(op);
+  int period = getIssuePeriod(arch, config);
+  int latency = getModelLatency(arch, preview.cls, config);
+  int64_t ready = std::max(preview.operandReady, state.issueReady);
+  ready = std::max(ready, state.fuReady[static_cast<size_t>(preview.fu)]);
+  if (waveamdmachine::isLdsDmaIssuer(op)) {
+    int interval = getLdsDmaIssueInterval(arch, config);
+    if (interval > 0)
+      ready = std::max(ready, state.ldsDmaReady);
+  }
+
+  while (true) {
+    int64_t cmaReady = cmaIssueReadyCycle(state, arch, config, ready, op,
+                                          preview.cls, preview.issues);
+    int64_t cuReady =
+        cuIssueReadyCycle(state, arch, cmaReady, preview.issues, period);
+    if (cuReady == cmaReady) {
+      preview.issueCycle = cuReady;
+      break;
+    }
+    ready = cuReady;
+  }
+
+  int64_t lastIssue =
+      preview.issueCycle + static_cast<int64_t>(preview.issues - 1) * period;
+  preview.nextIssue =
+      preview.issueCycle + static_cast<int64_t>(preview.issues) * period;
+  preview.readyCycle = lastIssue + latency;
+  preview.memoryValueReady =
+      preview.hasMemoryValue
+          ? lastIssue + waveamdmachine::getMemoryValueLatency(
+                            arch, op, config.valueLatencies, config.calibration)
+          : preview.readyCycle;
+  return preview;
+}
+
+static void applyLocalIssue(LocalIssueState &state, Operation *op,
+                            const LocalIssuePreview &preview,
+                            const waveamdmachine::ArchData &arch,
+                            const waveamdmachine::EventSimConfig &config) {
+  if (preview.cls == waveamdmachine::SchedClass::NoInst) {
+    for (Value result : op->getResults())
+      state.readyAt[result] = preview.readyCycle;
+    return;
+  }
+
+  int period = getIssuePeriod(arch, config);
+  state.issueReady = preview.nextIssue;
+  state.fuReady[static_cast<size_t>(preview.fu)] = preview.nextIssue;
+  consumeCuIssueSlots(state, arch, preview.issueCycle, preview.issues, period);
+  consumeCmaIssueSlots(state, arch, config, preview.issueCycle, op, preview.cls,
+                       preview.issues);
+  if (waveamdmachine::isLdsDmaIssuer(op)) {
+    int interval = getLdsDmaIssueInterval(arch, config);
+    if (interval > 0)
+      state.ldsDmaReady =
+          preview.issueCycle + static_cast<int64_t>(preview.issues) * interval;
+  }
+
+  for (Value result : op->getResults()) {
+    int64_t resultReady = preview.readyCycle;
+    if (preview.memoryIssuer && isMemToken(result))
+      resultReady = preview.nextIssue;
+    else if (preview.hasMemoryValue)
+      resultReady = preview.memoryValueReady;
+    state.readyAt[result] = resultReady;
+  }
+}
+
+static unsigned countUnlockedSuccessors(unsigned node,
+                                        const GraphTables &tables,
+                                        ArrayRef<unsigned> pending) {
+  unsigned unlocked = 0;
+  for (unsigned succ : tables.successors[node])
+    if (pending[succ] == 1)
+      ++unlocked;
+  return unlocked;
+}
+
+static LocalIssueChoice
+makeLocalIssueChoice(unsigned node, const GraphTables &tables,
+                     ArrayRef<unsigned> pending, const LocalIssueState &state,
+                     const ScheduleRegion &region,
+                     const waveamdmachine::ArchData &arch,
+                     const waveamdmachine::EventSimConfig &modelConfig) {
+  LocalIssueChoice choice;
+  choice.node = node;
+  choice.unlocked = countUnlockedSuccessors(node, tables, pending);
+  choice.preview =
+      previewLocalIssue(state, region.ops[node], arch, modelConfig);
+  return choice;
+}
+
+static bool isBetterLocalIssueChoice(const LocalIssueChoice &lhs,
+                                     const LocalIssueChoice &rhs,
+                                     ArrayRef<NodeMetrics> metrics) {
+  if (lhs.preview.issueCycle != rhs.preview.issueCycle)
+    return lhs.preview.issueCycle < rhs.preview.issueCycle;
+  if (metrics[lhs.node].criticalPath != metrics[rhs.node].criticalPath)
+    return metrics[lhs.node].criticalPath > metrics[rhs.node].criticalPath;
+  if (metrics[lhs.node].latency != metrics[rhs.node].latency)
+    return metrics[lhs.node].latency > metrics[rhs.node].latency;
+  if (lhs.unlocked != rhs.unlocked)
+    return lhs.unlocked > rhs.unlocked;
+  if (lhs.preview.readyCycle != rhs.preview.readyCycle)
+    return lhs.preview.readyCycle < rhs.preview.readyCycle;
+  return lhs.node < rhs.node;
+}
+
+static bool
+buildLocalIssueOrder(const ScheduleRegion &region, const GraphTables &tables,
+                     ArrayRef<NodeMetrics> metrics,
+                     const waveamdmachine::ArchData &arch,
+                     const waveamdmachine::EventSimConfig &modelConfig,
+                     SmallVectorImpl<unsigned> &order) {
+  SmallVector<unsigned, 16> pending = tables.pendingPreds;
+  SmallVector<unsigned, 16> ready;
+  for (auto [index, count] : llvm::enumerate(pending))
+    if (count == 0)
+      ready.push_back(index);
+
+  LocalIssueState state;
+  while (!ready.empty()) {
+    unsigned bestReady = 0;
+    LocalIssueChoice best = makeLocalIssueChoice(
+        ready.front(), tables, pending, state, region, arch, modelConfig);
+    for (unsigned i = 1; i < ready.size(); ++i) {
+      LocalIssueChoice choice = makeLocalIssueChoice(
+          ready[i], tables, pending, state, region, arch, modelConfig);
+      if (isBetterLocalIssueChoice(choice, best, metrics)) {
+        bestReady = i;
+        best = choice;
+      }
+    }
+
+    unsigned node = ready[bestReady];
+    ready.erase(ready.begin() + bestReady);
+    order.push_back(node);
+    applyLocalIssue(state, region.ops[node], best.preview, arch, modelConfig);
+    for (unsigned succ : tables.successors[node]) {
+      assert(pending[succ] > 0 && "successor predecessor count underflow");
+      --pending[succ];
+      if (pending[succ] == 0)
+        ready.push_back(succ);
+    }
+  }
+
+  return order.size() == pending.size();
+}
+
 static SmallVector<unsigned, 16>
 getOriginalOrder(const ScheduleRegion &region) {
   SmallVector<unsigned, 16> order;
@@ -1564,9 +1893,65 @@ static void addIssueWindowCandidate(SmallVectorImpl<OrderCandidate> &candidates,
   candidates.push_back(std::move(candidate));
 }
 
+static void
+addLocalIssueCandidate(SmallVectorImpl<OrderCandidate> &candidates,
+                       const ScheduleRegion &region, const GraphTables &tables,
+                       ArrayRef<NodeMetrics> metrics,
+                       const waveamdmachine::ArchData &arch,
+                       const waveamdmachine::EventSimConfig &modelConfig) {
+  if (!llvm::any_of(
+          metrics, [](const NodeMetrics &metrics) { return metrics.cmaIssue; }))
+    return;
+
+  OrderCandidate candidate;
+  candidate.name = "local_issue";
+  if (!buildLocalIssueOrder(region, tables, metrics, arch, modelConfig,
+                            candidate.order))
+    return;
+  for (const OrderCandidate &existing : candidates)
+    if (sameOrder(existing.order, candidate.order))
+      return;
+  candidates.push_back(std::move(candidate));
+}
+
 bool isPressureSearchEnabled(const RegisterPressureBudgets &budgets) {
   return budgets.selectionEnabled &&
          (hasHardBudget(budgets) || hasCriticalBudget(budgets));
+}
+
+static bool
+hasCmaIssueContention(ArrayRef<NodeMetrics> metrics,
+                      const waveamdmachine::ArchData &arch,
+                      const waveamdmachine::EventSimConfig &modelConfig) {
+  if (waveamdmachine::getEventSimCmaIssueInterval(arch, modelConfig) <= 0)
+    return false;
+  return llvm::count_if(metrics, [](const NodeMetrics &metrics) {
+           return metrics.cmaIssue;
+         }) > 1;
+}
+
+static constexpr int64_t kAutomaticBeamWorkLimit = 1000000;
+
+static bool shouldRunBeamSearch(
+    ArrayRef<NodeMetrics> metrics, const waveamdmachine::ArchData &arch,
+    const waveamdmachine::EventSimConfig &modelConfig, bool enableBeamSearch,
+    int64_t estimatedWork, ScheduleSearchLimits limits) {
+  if (enableBeamSearch)
+    return true;
+  if (!hasCmaIssueContention(metrics, arch, modelConfig))
+    return false;
+  int64_t limit =
+      limits.maxBeamWork >= 0 ? limits.maxBeamWork : kAutomaticBeamWorkLimit;
+  return estimatedWork <= limit;
+}
+
+static bool exceedsBeamWorkLimit(bool enableBeamSearch, int64_t estimatedWork,
+                                 ScheduleSearchLimits limits) {
+  if (limits.maxBeamWork >= 0)
+    return estimatedWork > limits.maxBeamWork;
+  if (!enableBeamSearch)
+    return estimatedWork > kAutomaticBeamWorkLimit;
+  return false;
 }
 
 static SmallVector<OrderCandidate, 4>
@@ -1590,11 +1975,14 @@ buildScheduleCandidates(const ScheduleRegion &region,
   addPolicyCandidate(candidates, "memory_early", tables, metrics,
                      SchedulePolicy::MemoryEarly);
   addIssueWindowCandidate(candidates, tables, metrics);
-  if (enableBeamSearch) {
-    int64_t estimatedBeamWork =
-        estimateGuidedBeamSearchWork(candidates.size(), region.opCount);
-    if (limits.maxBeamWork >= 0 && estimatedBeamWork > limits.maxBeamWork) {
-      if (limits.emitDiagnostics) {
+  addLocalIssueCandidate(candidates, region, tables, metrics, arch,
+                         modelConfig);
+  int64_t estimatedBeamWork =
+      estimateGuidedBeamSearchWork(candidates.size(), region.opCount);
+  if (shouldRunBeamSearch(metrics, arch, modelConfig, enableBeamSearch,
+                          estimatedBeamWork, limits)) {
+    if (exceedsBeamWorkLimit(enableBeamSearch, estimatedBeamWork, limits)) {
+      if (enableBeamSearch && limits.emitDiagnostics) {
         func::FuncOp func = region.func;
         llvm::errs() << kDiagPrefix << " skipped func=" << func.getSymName()
                      << " region=" << region.regionOrdinal
@@ -1602,7 +1990,7 @@ buildScheduleCandidates(const ScheduleRegion &region,
                      << " estimated_work=" << estimatedBeamWork
                      << " limit=" << limits.maxBeamWork << "\n";
       }
-      if (limits.emitRemarks)
+      if (enableBeamSearch && limits.emitRemarks)
         emitScheduleBeamWorkRemark(region, estimatedBeamWork, limits);
     } else {
       addGuidedBeamCandidates(candidates, tables, metrics, region, budgets);

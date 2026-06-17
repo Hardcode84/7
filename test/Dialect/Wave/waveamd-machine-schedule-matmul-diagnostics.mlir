@@ -1,4 +1,4 @@
-// RUN: wave-opt %s --waveamd-machine-schedule-report='print-candidates=1' 2>&1 | FileCheck %s --check-prefix=DIAG
+// RUN: wave-opt %s --split-input-file --waveamd-machine-schedule-report='print-candidates=1' 2>&1 | FileCheck %s --check-prefix=DIAG
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 func.func @matmul_loop_candidate(%off: !waveamdmachine.reg<vgpr, 1>,
@@ -34,7 +34,8 @@ func.func @matmul_loop_candidate(%off: !waveamdmachine.reg<vgpr, 1>,
 }
 
 // DIAG: waveamd-machine-schedule-report candidate func=matmul_loop_candidate region=1 name=original cycles=86 delta=0 issued_ops=6 max_vgpr=11 max_sgpr=1 order=0,1,2,3,4,5,6
-// DIAG: waveamd-machine-schedule-report selected func=matmul_loop_candidate region=1 name=original original_cycles=86 selected_cycles=86 delta=0 action=keep order=0,1,2,3,4,5,6
+// DIAG: waveamd-machine-schedule-report candidate func=matmul_loop_candidate region=1 name=local_issue cycles=85 delta=-1
+// DIAG: waveamd-machine-schedule-report selected func=matmul_loop_candidate region=1 name=critical_path original_cycles=86 selected_cycles=85 delta=-1 action=keep
 
 // -----
 
@@ -59,3 +60,106 @@ func.func @issue_window_candidate(%a: !waveamdmachine.reg<vgpr, 4>,
 }
 
 // DIAG: waveamd-machine-schedule-report candidate func=issue_window_candidate region=0 name=issue_window
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
+func.func @late_dma_overlap_candidate(%a: !waveamdmachine.reg<vgpr, 4>,
+                                      %b: !waveamdmachine.reg<vgpr, 4>,
+                                      %acc: !waveamdmachine.reg<vgpr, 4>,
+                                      %s: !waveamdmachine.reg<sgpr, 1>,
+                                      %v: !waveamdmachine.reg<vgpr, 1>,
+                                      %rsrc: !waveamdmachine.reg<sgpr, 4>,
+                                      %tok: !waveamdmachine.mem.token) {
+  %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+  %r0 = waveamdmachine.mfma_f32_16x16x32_f16 %a, %b, %acc
+      : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
+         !waveamdmachine.reg<vgpr, 4>) -> !waveamdmachine.reg<vgpr, 4>
+  %r1 = waveamdmachine.mfma_f32_16x16x32_f16 %a, %b, %acc
+      : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
+         !waveamdmachine.reg<vgpr, 4>) -> !waveamdmachine.reg<vgpr, 4>
+  %r2 = waveamdmachine.mfma_f32_16x16x32_f16 %a, %b, %acc
+      : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
+         !waveamdmachine.reg<vgpr, 4>) -> !waveamdmachine.reg<vgpr, 4>
+  %r3 = waveamdmachine.mfma_f32_16x16x32_f16 %a, %b, %acc
+      : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
+         !waveamdmachine.reg<vgpr, 4>) -> !waveamdmachine.reg<vgpr, 4>
+  %r4 = waveamdmachine.mfma_f32_16x16x32_f16 %a, %b, %acc
+      : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
+         !waveamdmachine.reg<vgpr, 4>) -> !waveamdmachine.reg<vgpr, 4>
+  %r5 = waveamdmachine.mfma_f32_16x16x32_f16 %a, %b, %acc
+      : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
+         !waveamdmachine.reg<vgpr, 4>) -> !waveamdmachine.reg<vgpr, 4>
+  %r6 = waveamdmachine.mfma_f32_16x16x32_f16 %a, %b, %acc
+      : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
+         !waveamdmachine.reg<vgpr, 4>) -> !waveamdmachine.reg<vgpr, 4>
+  %r7 = waveamdmachine.mfma_f32_16x16x32_f16 %a, %b, %acc
+      : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
+         !waveamdmachine.reg<vgpr, 4>) -> !waveamdmachine.reg<vgpr, 4>
+  %r8 = waveamdmachine.mfma_f32_16x16x32_f16 %a, %b, %acc
+      : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
+         !waveamdmachine.reg<vgpr, 4>) -> !waveamdmachine.reg<vgpr, 4>
+  %r9 = waveamdmachine.mfma_f32_16x16x32_f16 %a, %b, %acc
+      : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
+         !waveamdmachine.reg<vgpr, 4>) -> !waveamdmachine.reg<vgpr, 4>
+  %r10 = waveamdmachine.mfma_f32_16x16x32_f16 %a, %b, %acc
+      : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
+         !waveamdmachine.reg<vgpr, 4>) -> !waveamdmachine.reg<vgpr, 4>
+  %r11 = waveamdmachine.mfma_f32_16x16x32_f16 %a, %b, %acc
+      : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
+         !waveamdmachine.reg<vgpr, 4>) -> !waveamdmachine.reg<vgpr, 4>
+  %r12 = waveamdmachine.mfma_f32_16x16x32_f16 %a, %b, %acc
+      : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
+         !waveamdmachine.reg<vgpr, 4>) -> !waveamdmachine.reg<vgpr, 4>
+  %r13 = waveamdmachine.mfma_f32_16x16x32_f16 %a, %b, %acc
+      : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
+         !waveamdmachine.reg<vgpr, 4>) -> !waveamdmachine.reg<vgpr, 4>
+  %r14 = waveamdmachine.mfma_f32_16x16x32_f16 %a, %b, %acc
+      : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
+         !waveamdmachine.reg<vgpr, 4>) -> !waveamdmachine.reg<vgpr, 4>
+  %r15 = waveamdmachine.mfma_f32_16x16x32_f16 %a, %b, %acc
+      : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
+         !waveamdmachine.reg<vgpr, 4>) -> !waveamdmachine.reg<vgpr, 4>
+  %s0, %scc0 = waveamdmachine.s_and_b32 %s, %zero
+      : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.imm)
+        -> (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<scc, 1>)
+  %s1, %scc1 = waveamdmachine.s_lshl_b32 %s0, %zero
+      : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.imm)
+        -> (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<scc, 1>)
+  %m0 = waveamdmachine.s_mov_m0 %s1 : (!waveamdmachine.reg<sgpr, 1>)
+        -> !waveamdmachine.m0
+  %v0 = waveamdmachine.v_add_u32 %s1, %v
+      : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %v1 = waveamdmachine.v_add3_u32 %v0, %v, %v
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+         !waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
+  %ld0 = waveamdmachine.buffer_load_lds_b128 %v1, %rsrc, %zero, %m0 after %tok
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 4>,
+         !waveamdmachine.imm, !waveamdmachine.m0, !waveamdmachine.mem.token)
+        -> !waveamdmachine.mem.token
+  %s2, %scc2 = waveamdmachine.s_add_i32 %s1, %zero
+      : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.imm)
+        -> (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<scc, 1>)
+  %m1 = waveamdmachine.s_mov_m0 %s2 : (!waveamdmachine.reg<sgpr, 1>)
+        -> !waveamdmachine.m0
+  %v2 = waveamdmachine.v_add_u32 %s2, %v
+      : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %v3 = waveamdmachine.v_add3_u32 %v2, %v, %v
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+         !waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
+  %ld1 = waveamdmachine.buffer_load_lds_b128 %v3, %rsrc, %zero, %m1 after %tok
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 4>,
+         !waveamdmachine.imm, !waveamdmachine.m0, !waveamdmachine.mem.token)
+        -> !waveamdmachine.mem.token
+  %joined = waveamdmachine.token_join %ld0, %ld1
+      : (!waveamdmachine.mem.token, !waveamdmachine.mem.token)
+        -> !waveamdmachine.mem.token
+  return
+}
+}
+
+// DIAG-NOT: name=lds_dma_place
+// DIAG: waveamd-machine-schedule-report candidate func=late_dma_overlap_candidate region=0 name=local_issue cycles=172 delta=-76
+// DIAG: waveamd-machine-schedule-report selected func=late_dma_overlap_candidate region=0 name=issue_window original_cycles=248 selected_cycles=172 delta=-76 action=keep
