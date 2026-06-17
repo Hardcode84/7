@@ -16,6 +16,7 @@
 #include "mlir/Dialect/Wave/Transforms/Passes.h"
 
 #include "Utils/AMDGPUBaseInfo.h"
+#include "WaveAMDHardwareResources.h"
 #include "mlir/Analysis/DataFlow/DenseAnalysis.h"
 #include "mlir/Analysis/DataFlow/Utils.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -25,6 +26,7 @@
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/Interfaces/ControlFlowInterfaces.h"
+#include "mlir/Interfaces/SideEffectInterfaces.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/MC/MCSubtargetInfo.h"
@@ -1119,6 +1121,252 @@ private:
       rewriteBlock(block, solver, cfg, sti, builder);
   }
 
+  struct LgkmValuGap {
+    Operation *target = nullptr;
+    unsigned missingSlots = 0;
+  };
+
+  static std::optional<unsigned>
+  getLgkmWaitFillSlots(waveamdmachine::SWaitcntOp wait,
+                       const HazardConfig &cfg) {
+    std::optional<unsigned> lgkm = getLgkmWaitLimit(*wait);
+    if (!lgkm || *lgkm >= cfg.defaultLgkmcnt)
+      return std::nullopt;
+    return 1;
+  }
+
+  static bool isWaveAMDMachineOp(Operation *op) {
+    return op->getName().getDialectNamespace() ==
+           waveamdmachine::WaveAMDMachineDialect::getDialectNamespace();
+  }
+
+  static bool isKnownMemoryOp(Operation *op) {
+    return getWaitcntInfo(op).isIssuer();
+  }
+
+  static bool isLgkmFillerSearchBoundary(Operation *op) {
+    if (!isWaveAMDMachineOp(op))
+      return true;
+    if (op->hasTrait<OpTrait::IsTerminator>() || op->getNumRegions() != 0)
+      return true;
+    if (isControlFlowOp(op))
+      return true;
+    if (op->hasTrait<OpTrait::waveamdmachine::WaitcntOp>())
+      return true;
+    if (isa<waveamdmachine::LabelOp, waveamdmachine::SBarrierOp,
+            waveamdmachine::SSetprioOp, waveamdmachine::WaitOp,
+            waveamdmachine::SMovM0Op, waveamdmachine::SNopOp,
+            waveamdmachine::SDelayAluOp, waveamdmachine::SAndSaveexecB32Op,
+            waveamdmachine::SAndn2ExecB32Op, waveamdmachine::SAndSaveexecB64Op,
+            waveamdmachine::SAndn2ExecB64Op, waveamdmachine::SMovExecLoOp,
+            waveamdmachine::SMovExecB64Op, waveamdmachine::SEndpgmOp,
+            waveamdmachine::SSetpcB64Op>(op))
+      return true;
+    return isKnownMemoryOp(op);
+  }
+
+  static bool canFillLgkmValuSlot(Operation *op) {
+    if (emitsNoMachineInst(*op))
+      return false;
+    return isa<waveamdmachine::SNopOp>(op) ||
+           (isPure(op) && !op->hasTrait<OpTrait::waveamdmachine::VALUOp>());
+  }
+
+  static bool hasResource(ArrayRef<wave::HardwareResourceKind> resources,
+                          wave::HardwareResourceKind resource) {
+    return llvm::is_contained(resources, resource);
+  }
+
+  static bool resourceEffectsConflict(Operation *candidate,
+                                      Operation *crossed) {
+    wave::HardwareResourceEffects candidateEffects =
+        wave::getHardwareResourceEffects(candidate);
+    wave::HardwareResourceEffects crossedEffects =
+        wave::getHardwareResourceEffects(crossed);
+    for (wave::HardwareResourceKind resource : candidateEffects.reads)
+      if (hasResource(crossedEffects.writes, resource))
+        return true;
+    for (wave::HardwareResourceKind resource : candidateEffects.writes)
+      if (hasResource(crossedEffects.reads, resource) ||
+          hasResource(crossedEffects.writes, resource))
+        return true;
+    return false;
+  }
+
+  static void collectAllocatedRegSpans(ValueRange values,
+                                       SmallVectorImpl<RegSpan> &spans) {
+    for (Value value : values)
+      if (std::optional<RegSpan> span = getAllocatedRegSpan(value))
+        spans.push_back(*span);
+  }
+
+  static bool physicalRegsConflict(Operation *candidate, Operation *crossed) {
+    SmallVector<RegSpan, 4> candidateOperands;
+    SmallVector<RegSpan, 4> candidateResults;
+    SmallVector<RegSpan, 4> crossedOperands;
+    SmallVector<RegSpan, 4> crossedResults;
+    collectAllocatedRegSpans(candidate->getOperands(), candidateOperands);
+    collectAllocatedRegSpans(candidate->getResults(), candidateResults);
+    collectAllocatedRegSpans(crossed->getOperands(), crossedOperands);
+    collectAllocatedRegSpans(crossed->getResults(), crossedResults);
+
+    for (RegSpan candidateResult : candidateResults) {
+      for (RegSpan crossedOperand : crossedOperands)
+        if (overlaps(candidateResult, crossedOperand))
+          return true;
+      for (RegSpan crossedResult : crossedResults)
+        if (overlaps(candidateResult, crossedResult))
+          return true;
+    }
+    for (RegSpan candidateOperand : candidateOperands)
+      for (RegSpan crossedResult : crossedResults)
+        if (overlaps(candidateOperand, crossedResult))
+          return true;
+    return false;
+  }
+
+  static bool operandsAvailableBefore(Operation *candidate,
+                                      Operation *insertBefore) {
+    for (Value operand : candidate->getOperands()) {
+      Operation *def = operand.getDefiningOp();
+      if (!def || def->getBlock() != candidate->getBlock())
+        continue;
+      if (!def->isBeforeInBlock(insertBefore))
+        return false;
+    }
+    return true;
+  }
+
+  static bool usesKnownMemoryResult(Operation *op) {
+    for (Value operand : op->getOperands()) {
+      Operation *def = operand.getDefiningOp();
+      if (def && isKnownMemoryOp(def))
+        return true;
+    }
+    return false;
+  }
+
+  static bool canMoveAsLgkmValuFiller(Operation *op) {
+    if (isa<waveamdmachine::SNopOp>(op))
+      return false;
+    return canFillLgkmValuSlot(op) && !usesKnownMemoryResult(op);
+  }
+
+  static std::optional<LgkmValuGap>
+  findLgkmValuGap(waveamdmachine::SWaitcntOp wait, const HazardConfig &cfg) {
+    std::optional<unsigned> pending = getLgkmWaitFillSlots(wait, cfg);
+    if (!pending)
+      return std::nullopt;
+
+    unsigned issued = 0;
+    for (Operation *op = wait->getNextNode(); op; op = op->getNextNode()) {
+      if (isLgkmFillerSearchBoundary(op))
+        break;
+      if (op->hasTrait<OpTrait::waveamdmachine::VALUOp>()) {
+        if (issued >= *pending)
+          return std::nullopt;
+        return LgkmValuGap{op, *pending - issued};
+      }
+      if (!emitsNoMachineInst(*op) && ++issued >= *pending)
+        return std::nullopt;
+    }
+    return std::nullopt;
+  }
+
+  static bool canMoveBefore(Operation *candidate, Operation *insertBefore) {
+    if (candidate->getBlock() != insertBefore->getBlock())
+      return false;
+    if (!operandsAvailableBefore(candidate, insertBefore))
+      return false;
+
+    for (Operation *crossed = insertBefore; crossed != candidate;
+         crossed = crossed->getNextNode()) {
+      if (resourceEffectsConflict(candidate, crossed))
+        return false;
+      if (physicalRegsConflict(candidate, crossed))
+        return false;
+    }
+    return true;
+  }
+
+  static Operation *findMovableLgkmFiller(Operation *target) {
+    for (Operation *candidate = target->getNextNode(); candidate;
+         candidate = candidate->getNextNode()) {
+      if (isLgkmFillerSearchBoundary(candidate))
+        break;
+      if (!canMoveAsLgkmValuFiller(candidate))
+        continue;
+      if (canMoveBefore(candidate, target))
+        return candidate;
+    }
+    return nullptr;
+  }
+
+  static void fillOneLgkmValuGap(waveamdmachine::SWaitcntOp wait,
+                                 const HazardConfig &cfg) {
+    std::optional<LgkmValuGap> gap = findLgkmValuGap(wait, cfg);
+    if (!gap)
+      return;
+    for (unsigned i = 0; i < gap->missingSlots; ++i) {
+      Operation *filler = findMovableLgkmFiller(gap->target);
+      if (!filler)
+        return;
+      filler->moveBefore(gap->target);
+    }
+  }
+
+  static void fillLgkmValuGaps(func::FuncOp func, const HazardConfig &cfg) {
+    SmallVector<waveamdmachine::SWaitcntOp> waits;
+    func.walk([&](waveamdmachine::SWaitcntOp wait) { waits.push_back(wait); });
+    for (waveamdmachine::SWaitcntOp wait : waits)
+      fillOneLgkmValuGap(wait, cfg);
+  }
+
+  static bool isSingleMemTokenBarrier(waveamdmachine::SBarrierOp barrier) {
+    return barrier->getNumOperands() == 1 && barrier->getNumResults() == 1 &&
+           isa<waveamdmachine::MemTokenType>(
+               barrier->getOperand(0).getType()) &&
+           isa<waveamdmachine::MemTokenType>(barrier->getResult(0).getType());
+  }
+
+  static bool isDefaultVmcntOnlyWait(Operation *op, const HazardConfig &cfg) {
+    waveamdmachine::SWaitcntOp wait =
+        dyn_cast_or_null<waveamdmachine::SWaitcntOp>(op);
+    if (!wait || wait.getLgkmcnt() || wait.getExpcnt())
+      return false;
+    std::optional<uint32_t> vm = wait.getVmcnt();
+    return vm && *vm >= llvm::AMDGPU::getVmcntBitMask(cfg.isaVersion);
+  }
+
+  static bool contractTokenOnlyBarrierDrain(waveamdmachine::SBarrierOp barrier,
+                                            const HazardConfig &cfg) {
+    if (!barrier->getParentOfType<waveamdmachine::UniformLoopOp>())
+      return false;
+    if (!isSingleMemTokenBarrier(barrier))
+      return false;
+    Operation *wait = barrier->getPrevNode();
+    if (!isDefaultVmcntOnlyWait(wait, cfg))
+      return false;
+
+    barrier->getResult(0).replaceAllUsesWith(barrier->getOperand(0));
+    barrier->erase();
+    wait->erase();
+    return true;
+  }
+
+  static bool contractTokenOnlyBarrierDrains(func::FuncOp func,
+                                             const HazardConfig &cfg) {
+    SmallVector<waveamdmachine::SBarrierOp> barriers;
+    func.walk([&](waveamdmachine::SBarrierOp barrier) {
+      barriers.push_back(barrier);
+    });
+
+    bool changed = false;
+    for (waveamdmachine::SBarrierOp barrier : barriers)
+      changed |= contractTokenOnlyBarrierDrain(barrier, cfg);
+    return changed;
+  }
+
   LogicalResult processFunction(func::FuncOp func, OpBuilder &builder,
                                 const HazardConfig &cfg,
                                 const llvm::MCSubtargetInfo &sti) {
@@ -1127,6 +1375,9 @@ private:
       return failure();
     if (failed(validateInput(func)))
       return failure();
+
+    (void)contractTokenOnlyBarrierDrains(func, cfg);
+    fillLgkmValuGaps(func, cfg);
 
     DataFlowSolver solver;
     loadBaselineAnalyses(solver);
