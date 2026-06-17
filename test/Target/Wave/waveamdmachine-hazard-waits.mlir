@@ -416,6 +416,32 @@ func.func @single_token_loop_barrier_drain_contracted(
   return
 }
 
+// CHECK-LABEL: func.func @single_token_loop_barrier_partial_vmcnt_kept
+// CHECK: waveamdmachine.s_waitcnt vmcnt(32)
+// CHECK-NEXT: %[[BARRIER:.*]] = waveamdmachine.s_barrier
+// CHECK-SAME: -> !waveamdmachine.mem.token
+// CHECK: waveamdmachine.buffer_load_b32 {{.*}} after %[[BARRIER]]
+func.func @single_token_loop_barrier_partial_vmcnt_kept(
+    %off: !waveamdmachine.reg<vgpr, 1>,
+    %base: !waveamdmachine.reg<sgpr, 4>,
+    %zero: !waveamdmachine.reg<sgpr, 1>,
+    %dep: !waveamdmachine.mem.token,
+    %ec: !waveamdmachine.reg<scc, 1>) {
+  %result = waveamdmachine.uniform_loop carries(%dep : !waveamdmachine.mem.token) {
+  ^bb0(%tok: !waveamdmachine.mem.token):
+    waveamdmachine.s_waitcnt vmcnt(32)
+    %barrier = waveamdmachine.s_barrier %tok
+        : (!waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+    %loaded, %next = waveamdmachine.buffer_load_b32 %off, %base, %zero after %barrier
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 4>,
+           !waveamdmachine.reg<sgpr, 1>, !waveamdmachine.mem.token)
+        -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+    waveamdmachine.continue_if %ec : !waveamdmachine.reg<scc, 1> carries(%next : !waveamdmachine.mem.token)
+  } -> !waveamdmachine.mem.token
+  waveamdmachine.wait %result : (!waveamdmachine.mem.token) -> ()
+  return
+}
+
 // CHECK-LABEL: func.func @single_token_loop_barrier_real_vmcnt_drain_kept
 // CHECK: waveamdmachine.s_waitcnt vmcnt(0)
 // CHECK-NEXT: %[[BARRIER:.*]] = waveamdmachine.s_barrier
