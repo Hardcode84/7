@@ -6,8 +6,8 @@
 //
 //===----------------------------------------------------------------------===//
 //
-// Driver runs after regalloc. Dense forward dataflow tracks the LGKM
-// pending bit and SSA-value hazards through CFG and region edges.
+// Driver runs after regalloc. Dense forward dataflow tracks LGKM
+// pending counts and SSA-value hazards through CFG and region edges.
 // Regalloc can insert VALU copies, so production pipelines run this
 // pass after allocation.
 //
@@ -225,7 +225,6 @@ getValuWriteExecMfmaLatency(const llvm::AMDGPU::IsaVersion &isa) {
 struct HazardConfig {
   bool hasDelayAlu;
   llvm::AMDGPU::IsaVersion isaVersion;
-  unsigned defaultLgkmcnt;
   unsigned valuDep1;
 
   // Wait states between `s_mov_m0` and the next op reading `m0`.
@@ -267,16 +266,14 @@ static void insertValuMitigation(Operation &op, OpBuilder &b,
   insertNoops(b, op.getLoc(), /*count=*/1, sti);
 }
 
-// Only explicit lgkmcnt waits affect LGKM hazard state.
-static std::optional<bool> recomputePendingLgkm(Operation &op,
-                                                const HazardConfig &cfg) {
+static std::optional<unsigned> getLgkmWaitLimit(Operation &op) {
   auto wait = dyn_cast<waveamdmachine::SWaitcntOp>(op);
   if (!wait)
     return std::nullopt;
   std::optional<uint32_t> lg = wait.getLgkmcnt();
   if (!lg)
     return std::nullopt;
-  return cfg.hasDelayAlu ? *lg != cfg.defaultLgkmcnt : true;
+  return *lg;
 }
 
 static bool isControlFlowOp(Operation *op) {
@@ -331,7 +328,8 @@ struct PhysicalHazard {
 };
 
 struct HazardState {
-  bool lgkmPending = false;
+  unsigned lgkmToValu = 0;
+  unsigned lgkmPending = 0;
   DenseMap<Value, ValueHazards> values;
   SmallVector<PhysicalHazard, 16> physical;
   unsigned valuWriteVcc = 0;
@@ -358,10 +356,8 @@ struct HazardState {
 
   bool joinWith(const HazardState &rhs) {
     bool changed = false;
-    if (rhs.lgkmPending && !lgkmPending) {
-      lgkmPending = true;
-      changed = true;
-    }
+    changed |= joinMax(lgkmToValu, rhs.lgkmToValu);
+    changed |= joinMax(lgkmPending, rhs.lgkmPending);
     for (auto [value, hazards] : rhs.values) {
       if (hazards.empty())
         continue;
@@ -393,15 +389,16 @@ public:
   }
 
   ChangeResult reset() {
-    bool changed = state.lgkmPending || !state.values.empty() ||
-                   !state.physical.empty() || state.valuWriteVcc ||
-                   state.execToMfma;
+    bool changed = state.lgkmToValu || state.lgkmPending ||
+                   !state.values.empty() || !state.physical.empty() ||
+                   state.valuWriteVcc || state.execToMfma;
     state = HazardState();
     return changed ? ChangeResult::Change : ChangeResult::NoChange;
   }
 
   void print(raw_ostream &os) const override {
-    os << "lgkm=" << state.lgkmPending << " values=" << state.values.size()
+    os << "lgkm=" << state.lgkmToValu << " pending=" << state.lgkmPending
+       << " values=" << state.values.size()
        << " physical=" << state.physical.size() << " vcc=" << state.valuWriteVcc
        << " exec=" << state.execToMfma;
   }
@@ -482,7 +479,10 @@ static void advancePhysicalHazards(HazardState &state, unsigned count = 1) {
   state.execToMfma = state.execToMfma > count ? state.execToMfma - count : 0;
 }
 
-static void advanceHazards(HazardState &state, unsigned count = 1) {
+static void advanceHazards(HazardState &state, unsigned count = 1,
+                           bool advanceLgkm = true) {
+  if (advanceLgkm)
+    state.lgkmToValu = state.lgkmToValu > count ? state.lgkmToValu - count : 0;
   advanceValueHazards(state, count);
   advancePhysicalHazards(state, count);
 }
@@ -859,27 +859,38 @@ static void addProducedHazards(Operation *op, HazardState &state,
   addProducedPhysicalHazards(op, state, cfg);
 }
 
+static void addPendingLgkmIssue(Operation *op, HazardState &state) {
+  waveamdmachine::WaitcntInfo info = getWaitcntInfo(op);
+  if (info.counter != waveamdmachine::WaitcntCounter::Lgkm || !info.issueCount)
+    return;
+  constexpr unsigned maxTrackedPending = 4096;
+  state.lgkmPending =
+      std::min(maxTrackedPending, state.lgkmPending + info.issueCount);
+}
+
+static void applyLgkmWait(Operation *op, HazardState &state) {
+  std::optional<unsigned> limit = getLgkmWaitLimit(*op);
+  if (!limit)
+    return;
+  bool drained = state.lgkmPending > *limit;
+  state.lgkmPending = std::min(state.lgkmPending, *limit);
+  if (drained)
+    state.lgkmToValu = std::max(state.lgkmToValu, 1u);
+}
+
 static void transferHazards(Operation *op, HazardState &state,
                             const HazardConfig &cfg) {
   bool controlFlow = isControlFlowOp(op);
-  if (!controlFlow && state.lgkmPending &&
-      op->hasTrait<OpTrait::waveamdmachine::VALUOp>())
-    state.lgkmPending = false;
-
   if (!emitsNoMachineInst(*op))
-    advanceHazards(state);
+    advanceHazards(state, /*count=*/1, /*advanceLgkm=*/!controlFlow);
 
   if (controlFlow)
     return;
 
   inheritNoInstOperandHazards(op, state);
   addProducedHazards(op, state, cfg);
-
-  if (isa<waveamdmachine::SWaitcntOp>(op)) {
-    std::optional<bool> next = recomputePendingLgkm(*op, cfg);
-    if (next)
-      state.lgkmPending = *next;
-  }
+  addPendingLgkmIssue(op, state);
+  applyLgkmWait(op, state);
 }
 
 static unsigned getRequiredSsaWait(Operation *op, const HazardState &state) {
@@ -898,7 +909,7 @@ static unsigned getRequiredSsaWait(Operation *op, const HazardState &state) {
 }
 
 static bool needsValuMitigation(Operation *op, const HazardState &state) {
-  return state.lgkmPending && op->hasTrait<OpTrait::waveamdmachine::VALUOp>();
+  return state.lgkmToValu && op->hasTrait<OpTrait::waveamdmachine::VALUOp>();
 }
 
 class HazardAnalysis : public DenseForwardDataFlowAnalysis<HazardLattice> {
@@ -958,7 +969,7 @@ public:
                                             HazardLattice *after) override {
     HazardState next = before.get();
     if (!regionFrom && !emitsNoMachineInst(*branch))
-      advanceHazards(next);
+      advanceHazards(next, /*count=*/1, /*advanceLgkm=*/false);
     propagateRegionOperands(branch, regionFrom, regionTo, next);
     propagateIfChanged(after, after->joinWith(next));
   }
@@ -980,7 +991,6 @@ struct WaveAMDHazardWaitsPass
     HazardConfig cfg{
         llvm::AMDGPU::isGFX11Plus(**sti),
         isaVersion,
-        /*defaultLgkmcnt=*/0,
         amdgpu_compat::SDelayAlu::encode(
             amdgpu_compat::SDelayAlu::DelayType::VALU, 1),
         /*m0PipelineDelay=*/1,
@@ -996,8 +1006,6 @@ struct WaveAMDHazardWaitsPass
         /*valuWriteSGPRVmemReadLatency=*/getValuWriteSGPRVmemReadLatency(),
         /*valuWriteExecMfmaLatency=*/getValuWriteExecMfmaLatency(isaVersion),
     };
-    cfg.defaultLgkmcnt = llvm::AMDGPU::decodeLgkmcnt(
-        cfg.isaVersion, llvm::AMDGPU::getWaitcntBitMask(cfg.isaVersion));
     SmallVector<func::FuncOp> kernels;
     root->walk([&](func::FuncOp f) {
       if (!f.isExternal())
@@ -1068,7 +1076,6 @@ private:
     if (needsValuMitigation(op, local)) {
       insertValuMitigation(*op, builder, cfg, sti);
       advanceHazards(local);
-      local.lgkmPending = false;
     }
 
     transferHazards(op, local, cfg);

@@ -4,8 +4,9 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
 // Regalloc preparation splits duplicate VGPR loop inits with a
 // `v_mov_b32_tuple`. Hazard insertion must run after that split so
-// the new VALU copy gets the LGKM-wait mitigation.
+// the new VALU copy gets the drained-LGKM mitigation.
 // CHECK-LABEL: func.func @regalloc_inserted_valu_copy_after_wait
+// CHECK: waveamdmachine.s_load_b32
 // CHECK: waveamdmachine.s_waitcnt
 // CHECK-NEXT: waveamdmachine.imm 1
 // CHECK-NEXT: waveamdmachine.s_delay_alu
@@ -22,6 +23,8 @@ func.func @regalloc_inserted_valu_copy_after_wait() attributes {wave.kernel} {
   %ec = waveamdmachine.s_cmp_lt_i32 %zero, %four
       : (!waveamdmachine.imm, !waveamdmachine.imm)
         -> !waveamdmachine.reg<scc, 1>
+  %pending = waveamdmachine.s_load_b32 %zero, "s[0:1]"
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<sgpr, 1>
   waveamdmachine.s_waitcnt lgkmcnt(0)
   %results:3 = waveamdmachine.uniform_loop if %ec : !waveamdmachine.reg<scc, 1>
       carries(%iv, %init, %init :
