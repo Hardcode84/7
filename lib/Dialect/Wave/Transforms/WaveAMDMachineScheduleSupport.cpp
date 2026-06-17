@@ -453,12 +453,12 @@ configureScheduleModel(Operation *op, int modelWaves, int modelSimds,
                        int modelStartDelay, int modelVmemValueLatency,
                        int modelSmemValueLatency, int modelLdsValueLatency,
                        waveamdmachine::EventSimConfig &modelConfig) {
-  if (modelWaves <= 0) {
-    op->emitError() << "model-waves must be positive";
+  if (modelWaves < 0) {
+    op->emitError() << "model-waves must be non-negative";
     return failure();
   }
-  if (modelSimds <= 0) {
-    op->emitError() << "model-simds must be positive";
+  if (modelSimds < 0) {
+    op->emitError() << "model-simds must be non-negative";
     return failure();
   }
   if (modelStartDelay < 0) {
@@ -572,6 +572,41 @@ resolveScheduleTargetWaves(Operation *op, ArchResolution archResolution,
   }
   return validateTargetWaves(op, archResolution, intAttr.getInt(),
                              kTargetWavesAttr, /*allowZero=*/false);
+}
+
+LogicalResult
+finalizeScheduleModel(Operation *op, ArchResolution archResolution,
+                      waveamdmachine::EventSimConfig &modelConfig) {
+  if (modelConfig.waves > 0 && modelConfig.simds > 0)
+    return success();
+
+  int simds = modelConfig.simds;
+  if (simds == 0)
+    simds = archResolution.arch ? archResolution.arch->simdsPerCU : 1;
+
+  int waves = modelConfig.waves;
+  if (waves == 0) {
+    Attribute attr = findTargetWavesAttr(op);
+    if (attr && archResolution.arch) {
+      auto intAttr = dyn_cast<IntegerAttr>(attr);
+      if (!intAttr) {
+        op->emitError() << kTargetWavesAttr << " must be an integer attribute";
+        return failure();
+      }
+      FailureOr<int> targetWaves =
+          validateTargetWaves(op, archResolution, intAttr.getInt(),
+                              kTargetWavesAttr, /*allowZero=*/false);
+      if (failed(targetWaves))
+        return failure();
+      waves = *targetWaves * simds;
+    } else {
+      waves = 1;
+    }
+  }
+
+  modelConfig.waves = waves;
+  modelConfig.simds = simds;
+  return success();
 }
 
 static bool hasPressureOverride(int pressureVgprBudget, int pressureSgprBudget,

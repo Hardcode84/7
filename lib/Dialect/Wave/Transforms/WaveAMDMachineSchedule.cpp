@@ -74,6 +74,9 @@ struct WaveAMDMachineSchedulePass
       if (failed(
               validateScheduleCalibration(func, archResolution, modelConfig)))
         return WalkResult::interrupt();
+      waveamdmachine::EventSimConfig funcModelConfig = modelConfig;
+      if (failed(finalizeScheduleModel(func, archResolution, funcModelConfig)))
+        return WalkResult::interrupt();
       RegisterPressureBudgets pressureBudgets;
       if (failed(configureSchedulePressureBudgets(
               func, archResolution, pressureAwareSelection, pressureVgprBudget,
@@ -81,7 +84,7 @@ struct WaveAMDMachineSchedulePass
               pressureCriticalSgprBudget, pressureTargetWavesOverride,
               pressureBudgets)))
         return WalkResult::interrupt();
-      if (failed(processFunction(func, archResolution, modelConfig,
+      if (failed(processFunction(func, archResolution, funcModelConfig,
                                  pressureBudgets, searchLimits)))
         return WalkResult::interrupt();
       return WalkResult::advance();

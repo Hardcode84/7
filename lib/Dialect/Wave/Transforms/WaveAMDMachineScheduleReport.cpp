@@ -85,25 +85,8 @@ struct WaveAMDMachineScheduleReportPass
                                       /*emitDiagnostics=*/true,
                                       /*emitRemarks=*/false};
     WalkResult walkResult = root->walk([&](func::FuncOp func) {
-      ArchResolution archResolution = resolveArch(func);
-      if (failed(
-              validateScheduleCalibration(func, archResolution, modelConfig)))
-        return WalkResult::interrupt();
-      RegisterPressureBudgets pressureBudgets;
-      if (controls.prepareForPressure &&
-          failed(configureSchedulePressureBudgets(
-              func, archResolution, pressureAwareSelection, pressureVgprBudget,
-              pressureSgprBudget, pressureCriticalVgprBudget,
-              pressureCriticalSgprBudget, pressureTargetWavesOverride,
-              pressureBudgets)))
-        return WalkResult::interrupt();
-      if (failed(processFunction(func, archResolution, modelConfig,
-                                 pressureBudgets, controls.candidate,
-                                 scoreFuncName, controls.emitScores,
-                                 controls.emitCandidates, controls.emitClasses,
-                                 controls.prepareForPressure, searchLimits)))
-        return WalkResult::interrupt();
-      return WalkResult::advance();
+      return processWalkFunction(func, controls, modelConfig, scoreFuncName,
+                                 searchLimits);
     });
     if (walkResult.wasInterrupted())
       return signalPassFailure();
@@ -128,6 +111,34 @@ struct WaveAMDMachineScheduleReportPass
     return configureScheduleModel(root, modelWaves, modelSimds, modelStartDelay,
                                   modelVmemValueLatency, modelSmemValueLatency,
                                   modelLdsValueLatency, modelConfig);
+  }
+
+  WalkResult
+  processWalkFunction(func::FuncOp func, const ReportControls &controls,
+                      const waveamdmachine::EventSimConfig &modelConfig,
+                      StringRef scoreFuncName,
+                      ScheduleSearchLimits searchLimits) {
+    ArchResolution archResolution = resolveArch(func);
+    if (failed(validateScheduleCalibration(func, archResolution, modelConfig)))
+      return WalkResult::interrupt();
+    waveamdmachine::EventSimConfig funcModelConfig = modelConfig;
+    if (failed(finalizeScheduleModel(func, archResolution, funcModelConfig)))
+      return WalkResult::interrupt();
+    RegisterPressureBudgets pressureBudgets;
+    if (controls.prepareForPressure &&
+        failed(configureSchedulePressureBudgets(
+            func, archResolution, pressureAwareSelection, pressureVgprBudget,
+            pressureSgprBudget, pressureCriticalVgprBudget,
+            pressureCriticalSgprBudget, pressureTargetWavesOverride,
+            pressureBudgets)))
+      return WalkResult::interrupt();
+    if (failed(processFunction(func, archResolution, funcModelConfig,
+                               pressureBudgets, controls.candidate,
+                               scoreFuncName, controls.emitScores,
+                               controls.emitCandidates, controls.emitClasses,
+                               controls.prepareForPressure, searchLimits)))
+      return WalkResult::interrupt();
+    return WalkResult::advance();
   }
 
   LogicalResult

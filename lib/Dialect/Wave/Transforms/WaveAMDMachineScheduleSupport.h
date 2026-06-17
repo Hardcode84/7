@@ -161,6 +161,9 @@ configureScheduleModel(Operation *op, int modelWaves, int modelSimds,
                        int modelStartDelay, int modelVmemValueLatency,
                        int modelSmemValueLatency, int modelLdsValueLatency,
                        waveamdmachine::EventSimConfig &modelConfig);
+LogicalResult
+finalizeScheduleModel(Operation *op, ArchResolution archResolution,
+                      waveamdmachine::EventSimConfig &modelConfig);
 LogicalResult loadScheduleCalibration(
     Operation *op, StringRef calibrationFile,
     std::optional<waveamdmachine::CalibrationData> &calibration);
