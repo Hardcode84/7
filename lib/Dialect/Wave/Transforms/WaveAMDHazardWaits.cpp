@@ -621,6 +621,8 @@ getStoreWriteDataHazard(Operation *op,
                         const llvm::AMDGPU::IsaVersion &isaVersion) {
   if (!llvm::isa<
           waveamdmachine::GlobalStoreB96Op, waveamdmachine::GlobalStoreB128Op,
+          waveamdmachine::GlobalStoreB96Addr64Op,
+          waveamdmachine::GlobalStoreB128Addr64Op,
           waveamdmachine::BufferStoreB96Op, waveamdmachine::BufferStoreB128Op>(
           op))
     return std::nullopt;

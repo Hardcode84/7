@@ -116,6 +116,34 @@ static Operation *buildOneGlobalOrBufferStore(WaveAMDMachineSelector &S,
       S.builder, op.getLoc(), tokenType, voffset, value, base, dep, instOffset);
 }
 
+static Operation *buildFullAddressStore(WaveAMDMachineSelector &S, StoreOp op,
+                                        Type tokenType, Value addr, Value value,
+                                        Value dep, unsigned registers,
+                                        bool useB8Op, bool useB16Op) {
+  if (useB8Op)
+    return waveamdmachine::GlobalStoreB8Addr64Op::create(
+        S.builder, op.getLoc(), tokenType, addr, value, dep, 0);
+  if (useB16Op)
+    return waveamdmachine::GlobalStoreB16Addr64Op::create(
+        S.builder, op.getLoc(), tokenType, addr, value, dep, 0);
+  switch (registers) {
+  case 1:
+    return waveamdmachine::GlobalStoreB32Addr64Op::create(
+        S.builder, op.getLoc(), tokenType, addr, value, dep, 0);
+  case 2:
+    return waveamdmachine::GlobalStoreB64Addr64Op::create(
+        S.builder, op.getLoc(), tokenType, addr, value, dep, 0);
+  case 3:
+    return waveamdmachine::GlobalStoreB96Addr64Op::create(
+        S.builder, op.getLoc(), tokenType, addr, value, dep, 0);
+  case 4:
+    return waveamdmachine::GlobalStoreB128Addr64Op::create(
+        S.builder, op.getLoc(), tokenType, addr, value, dep, 0);
+  default:
+    return nullptr;
+  }
+}
+
 static LogicalResult selectFullAddressStore(WaveAMDMachineSelector &S,
                                             StoreOp op, Value globalBase,
                                             const AddressPlan &plan,
@@ -130,17 +158,8 @@ static LogicalResult selectFullAddressStore(WaveAMDMachineSelector &S,
   Value dep = op.getDependency() ? S.expect(op.getDependency(), op) : Value{};
   Type tokenType = getMemTokenType(op.getContext());
   SmallVector<Value> tokens;
-  if (useB8Op) {
-    Operation *store = waveamdmachine::GlobalStoreB8Addr64Op::create(
-        S.builder, op.getLoc(), tokenType, *addr, value, dep, 0);
-    tokens.push_back(store->getResult(0));
-  } else if (useB16Op) {
-    Operation *store = waveamdmachine::GlobalStoreB16Addr64Op::create(
-        S.builder, op.getLoc(), tokenType, *addr, value, dep, 0);
-    tokens.push_back(store->getResult(0));
-  } else if (registers == 1) {
-    Operation *store = waveamdmachine::GlobalStoreB32Addr64Op::create(
-        S.builder, op.getLoc(), tokenType, *addr, value, dep, 0);
+  if (Operation *store = buildFullAddressStore(
+          S, op, tokenType, *addr, value, dep, registers, useB8Op, useB16Op)) {
     tokens.push_back(store->getResult(0));
   } else {
     Type vgpr1 = getRegType(op.getContext(), waveamdmachine::RegClass::VGPR, 1);

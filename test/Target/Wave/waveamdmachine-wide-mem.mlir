@@ -63,6 +63,35 @@ func.func @wide_global_stores(%arg0: !wave.ptr<#wave.global, i32>) attributes {w
   return
 }
 
+// CHECK-LABEL: func.func @addr64_wide_global_stores
+// CHECK: waveamdmachine.global_store_b64_addr64
+// CHECK: waveamdmachine.global_store_b96_addr64
+// CHECK: waveamdmachine.global_store_b128_addr64
+
+// ASM11-LABEL: addr64_wide_global_stores:
+// ASM11: global_store_b64 {{v\[[0-9]+:[0-9]+\]}}, {{v\[[0-9]+:[0-9]+\]}}
+// ASM11: global_store_b96 {{v\[[0-9]+:[0-9]+\]}}, {{v\[[0-9]+:[0-9]+\]}}, off offset:8
+// ASM11: global_store_b128 {{v\[[0-9]+:[0-9]+\]}}, {{v\[[0-9]+:[0-9]+\]}}, off offset:16
+// ASM11: s_endpgm
+func.func @addr64_wide_global_stores(%addr: !waveamdmachine.reg<vgpr, 2, 0>,
+                                     %v2: !waveamdmachine.reg<vgpr, 2, 2>,
+                                     %v3: !waveamdmachine.reg<vgpr, 3, 4>,
+                                     %v4: !waveamdmachine.reg<vgpr, 4, 8>) {
+  %t1 = waveamdmachine.global_store_b64_addr64 %addr, %v2
+      : (!waveamdmachine.reg<vgpr, 2, 0>, !waveamdmachine.reg<vgpr, 2, 2>)
+        -> !waveamdmachine.mem.token
+  %t2 = waveamdmachine.global_store_b96_addr64 %addr, %v3 after %t1 offset 8
+      : (!waveamdmachine.reg<vgpr, 2, 0>,
+         !waveamdmachine.reg<vgpr, 3, 4>, !waveamdmachine.mem.token)
+        -> !waveamdmachine.mem.token
+  %t3 = waveamdmachine.global_store_b128_addr64 %addr, %v4 after %t2 offset 16
+      : (!waveamdmachine.reg<vgpr, 2, 0>,
+         !waveamdmachine.reg<vgpr, 4, 8>, !waveamdmachine.mem.token)
+        -> !waveamdmachine.mem.token
+  waveamdmachine.s_endpgm
+  return
+}
+
 // CHECK-LABEL: func.func @wide_buffer_traffic
 // CHECK: waveamdmachine.buffer_load_b128
 // CHECK: waveamdmachine.buffer_store_b128

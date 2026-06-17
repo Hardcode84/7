@@ -653,6 +653,11 @@ private:
   unsigned globalStoreB64() const { return opcodes.globalStoreB64; }
   unsigned globalStoreB96() const { return opcodes.globalStoreB96; }
   unsigned globalStoreB128() const { return opcodes.globalStoreB128; }
+  unsigned globalStoreB64Addr64() const { return opcodes.globalStoreB64Addr64; }
+  unsigned globalStoreB96Addr64() const { return opcodes.globalStoreB96Addr64; }
+  unsigned globalStoreB128Addr64() const {
+    return opcodes.globalStoreB128Addr64;
+  }
   unsigned bufferLoadB64() const { return opcodes.bufferLoadB64; }
   unsigned bufferLoadB96() const { return opcodes.bufferLoadB96; }
   unsigned bufferLoadB128() const { return opcodes.bufferLoadB128; }
@@ -2716,6 +2721,12 @@ private:
       return emitGlobalAddrStore(op, globalStoreB16Addr64());
     if (isa<waveamdmachine::GlobalStoreB32Addr64Op>(op))
       return emitGlobalAddrStore(op, globalStoreB32Addr64());
+    if (isa<waveamdmachine::GlobalStoreB64Addr64Op>(op))
+      return emitGlobalAddrStore(op, globalStoreB64Addr64());
+    if (isa<waveamdmachine::GlobalStoreB96Addr64Op>(op))
+      return emitGlobalAddrStore(op, globalStoreB96Addr64());
+    if (isa<waveamdmachine::GlobalStoreB128Addr64Op>(op))
+      return emitGlobalAddrStore(op, globalStoreB128Addr64());
     if (isa<waveamdmachine::GlobalStoreB8Op>(op))
       return emitGlobalStore(op, globalStoreB8());
     if (isa<waveamdmachine::GlobalStoreB16Op>(op))
