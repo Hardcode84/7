@@ -59,4 +59,38 @@ func.func @fused_int_ops(%a: !waveamdmachine.reg<vgpr, 1, 0>,
   return %first : !waveamdmachine.reg<sgpr, 1, 0>
 }
 
+// ASM-LABEL: fused_int_wide_sources:
+// ASM-NOT: v[0:1]
+// ASM: v_mul_lo_u32 v3, v0, 7
+// ASM-NOT: v[0:1]
+// ASM: v_lshlrev_b32_e32 v4, 1, v0
+// ASM-NOT: v[0:1]
+// ASM: v_lshl_add_u32 v5, v0, 1, v2
+func.func @fused_int_wide_sources(%wide: !waveamdmachine.reg<vgpr, 2, 0>,
+                                  %b: !waveamdmachine.reg<vgpr, 1, 2>)
+    -> !waveamdmachine.reg<sgpr, 1, 0> {
+  %one = waveamdmachine.imm 1 : !waveamdmachine.imm
+  %seven = waveamdmachine.imm 7 : !waveamdmachine.imm
+  %mul = waveamdmachine.v_mul_lo_u32 %wide, %seven
+      : (!waveamdmachine.reg<vgpr, 2, 0>, !waveamdmachine.imm)
+        -> !waveamdmachine.reg<vgpr, 1, 3>
+  %shift = waveamdmachine.v_lshlrev_b32 %wide, %one
+      : (!waveamdmachine.reg<vgpr, 2, 0>, !waveamdmachine.imm)
+        -> !waveamdmachine.reg<vgpr, 1, 4>
+  %lshadd = waveamdmachine.v_lshl_add_u32 %wide, %one, %b
+      : (!waveamdmachine.reg<vgpr, 2, 0>, !waveamdmachine.imm,
+         !waveamdmachine.reg<vgpr, 1, 2>)
+        -> !waveamdmachine.reg<vgpr, 1, 5>
+  %sum0 = waveamdmachine.v_add_u32 %mul, %shift
+      : (!waveamdmachine.reg<vgpr, 1, 3>, !waveamdmachine.reg<vgpr, 1, 4>)
+        -> !waveamdmachine.reg<vgpr, 1, 6>
+  %sum1 = waveamdmachine.v_add_u32 %sum0, %lshadd
+      : (!waveamdmachine.reg<vgpr, 1, 6>, !waveamdmachine.reg<vgpr, 1, 5>)
+        -> !waveamdmachine.reg<vgpr, 1, 7>
+  %first = waveamdmachine.v_readfirstlane_b32 %sum1
+      : (!waveamdmachine.reg<vgpr, 1, 7>) -> !waveamdmachine.reg<sgpr, 1, 0>
+  waveamdmachine.s_endpgm
+  return %first : !waveamdmachine.reg<sgpr, 1, 0>
+}
+
 }

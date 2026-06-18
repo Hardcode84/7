@@ -142,6 +142,39 @@ func.func @global_dma_lds_wide_uniform_dest_m0(
   return
 }
 
+// SELECT-LABEL: func.func @global_dma_lds_i64_fit_dest_m0
+// SELECT: %[[X:.*]] = waveamdmachine.arg {index = 1 : i64, pointer = false} : !waveamdmachine.reg<sgpr, 2>
+// SELECT: %[[FOUR:.*]] = waveamdmachine.s_mov_b64_imm 4
+// SELECT: %[[SCALED:.*]], %{{.*}}, %{{.*}} = waveamdmachine.s_mul_u64 %[[FOUR]], %[[X]]
+// SELECT: %[[LOW:.*]]:2 = waveamdmachine.tuple_to_elements %[[SCALED]]
+// SELECT: waveamdmachine.s_mov_m0 %[[LOW]]#0
+// SELECT: waveamdmachine.global_load_lds_b128
+// SELECT-SAME: !waveamdmachine.m0
+
+// ASM-LABEL: global_dma_lds_i64_fit_dest_m0:
+// ASM: s_mul_i32
+// ASM: s_mov_b32 m0,
+// ASM: global_load_lds_dwordx4
+func.func @global_dma_lds_i64_fit_dest_m0(
+    %in: !wave.ptr<#wave.global, i32>, %x_raw: i64)
+    attributes {wave.kernel, wave.lds_size = 512 : i64} {
+  %wi_raw = wave.workitem_id 0 : !wave.simd<i32, 64>
+  %wi = wave.assume %wi_raw as "w" [#wave.pred<"w >= 0">, #wave.pred<"w <= 63">] : !wave.simd<i32, 64>
+  %src = wave.ptr_add %in, %wi
+      : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 64>
+      -> !wave.simd<!wave.ptr<#wave.global, i32>, 64>
+  %x = wave.assume %x_raw as "x" [#wave.pred<"x >= 0">, #wave.pred<"x <= 127">] : i64
+  %off = wave.index_expr <"x"> ["x"](%x) : (i64) -> index
+  %lds = wave.lds_base : !wave.ptr<#wave.shared, i32>
+  %dst = wave.ptr_add %lds, %off
+      : !wave.ptr<#wave.shared, i32>, index -> !wave.ptr<#wave.shared, i32>
+  %tok0 = wave.token : !wave.mem.token
+  %tok = waveamd.dma_load_lds %src -> %dst after %tok0 {bytes = 16 : i64}
+      : (!wave.simd<!wave.ptr<#wave.global, i32>, 64>,
+         !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
+  return
+}
+
 // SELECT-LABEL: func.func @global_dma_lds_uniform_dest_split_remainder_m0
 // SELECT-DAG: waveamdmachine.arg {index = 1 : i64, pointer = false} : !waveamdmachine.reg<sgpr, 2>
 // SELECT-DAG: waveamdmachine.arg {index = 2 : i64, pointer = false} : !waveamdmachine.reg<sgpr, 2>
@@ -178,14 +211,13 @@ func.func @global_dma_lds_uniform_dest_split_remainder_m0(
 
 // SELECT-LABEL: func.func @global_dma_lds_wide_source_base_adjust
 // SELECT: waveamdmachine.arg {index = 1 : i64, pointer = false} : !waveamdmachine.reg<sgpr, 2>
-// SELECT: waveamdmachine.s_lshr_b64
-// SELECT: %[[BASE:[^,]+]], %{{.*}} = waveamdmachine.s_add_u64
-// SELECT: %[[VOFF:[^,]+]] = waveamdmachine.v_lshlrev_b32
-// SELECT: waveamdmachine.global_load_lds_b128 %[[VOFF]], %[[BASE]],
+// SELECT: waveamdmachine.v_lshrrev_b64
+// SELECT: %[[VOFF:.*]]:2 = waveamdmachine.tuple_to_elements
+// SELECT: waveamdmachine.global_load_lds_b128 %[[VOFF]]#0,
 // SELECT-SAME: !waveamdmachine.m0
 
 // ASM-LABEL: global_dma_lds_wide_source_base_adjust:
-// ASM: s_lshr_b64
+// ASM: v_lshrrev_b64
 // ASM: global_load_lds_dwordx4
 func.func @global_dma_lds_wide_source_base_adjust(
     %in: !wave.ptr<#wave.global, i32>, %x_raw: i64)
@@ -341,6 +373,36 @@ func.func @buffer_dma_lds_source_const_soffset(
   %tok0 = wave.token : !wave.mem.token
   %tok = waveamd.dma_load_lds %src -> %lds after %tok0 {bytes = 16 : i64}
       : (!wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>,
+         !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
+  return
+}
+
+// SELECT-LABEL: func.func @buffer_dma_lds_composed_source_assumption
+// SELECT: waveamdmachine.v_mul_u64
+// SELECT: waveamdmachine.buffer_load_lds_b128
+// SELECT-SAME: !waveamdmachine.m0
+
+// ASM-LABEL: buffer_dma_lds_composed_source_assumption:
+// ASM: buffer_load_dwordx4 {{v[0-9]+}}, s[{{[0-9]+}}:{{[0-9]+}}], 0 offen lds
+func.func @buffer_dma_lds_composed_source_assumption(
+    %in: !wave.ptr<#wave.global, i8>, %u_raw: i64)
+    attributes {wave.kernel, wave.lds_size = 512 : i64} {
+  %range = arith.constant 4096 : i32
+  %buffer = waveamd.make_buffer %in, %range
+      : !wave.ptr<#wave.global, i8>, i32 -> !wave.ptr<#waveamd.buffer, i8>
+  %u = wave.assume %u_raw as "u" [#wave.pred<"u >= 0">] : i64
+  %wi_raw = wave.workitem_id 0 : !wave.simd<i32, 64>
+  %wi = wave.assume %wi_raw as "w" [#wave.pred<"w >= 0">, #wave.pred<"w <= 63">] : !wave.simd<i32, 64>
+  %off = wave.index_expr <"128 + 64*u + w">
+      assuming [#wave.pred<"128 + 64*u + w >= 0 & -2147483647 + 128 + 64*u + w <= 0">]
+      ["u", "w"](%u, %wi) : (i64, !wave.simd<i32, 64>) -> !wave.simd<index, 64>
+  %src = wave.ptr_add %buffer, %off
+      : !wave.ptr<#waveamd.buffer, i8>, !wave.simd<index, 64>
+      -> !wave.simd<!wave.ptr<#waveamd.buffer, i8>, 64>
+  %lds = wave.lds_base : !wave.ptr<#wave.shared, i32>
+  %tok0 = wave.token : !wave.mem.token
+  %tok = waveamd.dma_load_lds %src -> %lds after %tok0 {bytes = 16 : i64}
+      : (!wave.simd<!wave.ptr<#waveamd.buffer, i8>, 64>,
          !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
   return
 }

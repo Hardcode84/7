@@ -181,7 +181,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // CHECK: wave.store {{%.*}} -> {{%.*}} : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>)
 // MACHINE-LABEL: func.func @skip_i64_index_binding
 // MACHINE-NOT: waveamdmachine.make_buffer_rsrc
-// MACHINE: waveamdmachine.global_store_b32_addr64
+// MACHINE: waveamdmachine.global_store_b32 %{{.*}}, %{{.*}}, %{{.*}} :
 func.func @skip_i64_index_binding(
     %out: !wave.ptr<#wave.global, i32>,
     %x_raw: i64) attributes {wave.kernel} {

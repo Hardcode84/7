@@ -674,9 +674,136 @@ exprU32UpperBound(WaveAMDMachineSelector &S, sym::ExprHandle expr,
   return std::nullopt;
 }
 
+struct I64RangeBounds {
+  std::optional<int64_t> lower;
+  std::optional<int64_t> upper;
+};
+
+static sym::ExprHandle canonicalAddressExpr(WaveAMDMachineSelector &S,
+                                            sym::ExprHandle value) {
+  FailureOr<sym::ExprHandle> expanded = sym::expandExpr(S.symbolStore(), value);
+  if (succeeded(expanded))
+    value = *expanded;
+  FailureOr<sym::ExprHandle> simplified =
+      sym::simplifyExpr(S.symbolStore(), value);
+  return succeeded(simplified) ? *simplified : value;
+}
+
+static std::optional<int64_t> offsetFromTarget(WaveAMDMachineSelector &S,
+                                               sym::ExprHandle target,
+                                               sym::ExprHandle lhs,
+                                               sym::ExprHandle rhs) {
+  FailureOr<sym::ExprHandle> negRhs = sym::composeExprNeg(S.symbolStore(), rhs);
+  if (failed(negRhs))
+    return std::nullopt;
+  FailureOr<sym::ExprHandle> diff = sym::composeExprBinary(
+      S.symbolStore(), lhs, sym::ExprBinaryOp::Add, *negRhs);
+  if (failed(diff))
+    return std::nullopt;
+  FailureOr<sym::ExprHandle> negTarget =
+      sym::composeExprNeg(S.symbolStore(), target);
+  if (failed(negTarget))
+    return std::nullopt;
+  FailureOr<sym::ExprHandle> delta =
+      sym::composeExprBinary(S.symbolStore(), canonicalAddressExpr(S, *diff),
+                             sym::ExprBinaryOp::Add, *negTarget);
+  if (failed(delta))
+    return std::nullopt;
+  return sym::getIntegerLiteralValue(canonicalAddressExpr(S, *delta));
+}
+
+static void tightenLower(I64RangeBounds &bounds, int64_t bound) {
+  bounds.lower = bounds.lower ? std::max(*bounds.lower, bound) : bound;
+}
+
+static void tightenUpper(I64RangeBounds &bounds, int64_t bound) {
+  bounds.upper = bounds.upper ? std::min(*bounds.upper, bound) : bound;
+}
+
+static void applyCmpBound(sym::PredCmpOp op, int64_t bound,
+                          I64RangeBounds &bounds) {
+  switch (op) {
+  case sym::PredCmpOp::Le:
+    tightenUpper(bounds, bound);
+    break;
+  case sym::PredCmpOp::Lt:
+    if (std::optional<int64_t> strict = llvm::checkedSub(bound, int64_t{1}))
+      tightenUpper(bounds, *strict);
+    break;
+  case sym::PredCmpOp::Ge:
+    tightenLower(bounds, bound);
+    break;
+  case sym::PredCmpOp::Gt:
+    if (std::optional<int64_t> strict = llvm::checkedAdd(bound, int64_t{1}))
+      tightenLower(bounds, *strict);
+    break;
+  case sym::PredCmpOp::Eq:
+    tightenLower(bounds, bound);
+    tightenUpper(bounds, bound);
+    break;
+  case sym::PredCmpOp::Ne:
+    break;
+  }
+}
+
+static void collectTargetRange(WaveAMDMachineSelector &S,
+                               sym::ExprHandle target, sym::PredHandle pred,
+                               I64RangeBounds &bounds) {
+  sym::PredView view(pred);
+  if (view.getKind() == sym::PredKind::And) {
+    for (uint32_t i = 0, e = view.getLogicArgCount(); i != e; ++i)
+      collectTargetRange(S, target, view.getLogicArg(i), bounds);
+    return;
+  }
+  if (view.getKind() != sym::PredKind::Cmp)
+    return;
+  std::optional<sym::PredCmpOp> op = view.getCmpOp();
+  std::optional<int64_t> offset =
+      offsetFromTarget(S, target, view.getCmpLhs(), view.getCmpRhs());
+  if (!op || !offset)
+    return;
+  std::optional<int64_t> bound = llvm::checkedSub(int64_t{0}, *offset);
+  if (bound)
+    applyCmpBound(*op, *bound, bounds);
+}
+
+static bool provenRangeFitsU32(WaveAMDMachineSelector &S, sym::ExprHandle expr,
+                               ArrayRef<sym::PredHandle> assumptions) {
+  I64RangeBounds bounds;
+  sym::ExprHandle target = canonicalAddressExpr(S, expr);
+  for (sym::PredHandle pred : assumptions)
+    collectTargetRange(S, target, pred, bounds);
+  constexpr int64_t u32Max = (int64_t{1} << 32) - 1;
+  return bounds.lower && bounds.upper && *bounds.lower >= 0 &&
+         *bounds.upper <= u32Max;
+}
+
+static bool explicitPredicatesProveU32(WaveAMDMachineSelector &S,
+                                       sym::ExprHandle expr,
+                                       ArrayRef<sym::PredHandle> assumptions) {
+  FailureOr<sym::ExprHandle> zero = sym::composeExprInt(S.symbolStore(), 0);
+  FailureOr<sym::ExprHandle> u32MaxExpr =
+      sym::composeExprInt(S.symbolStore(), (int64_t{1} << 32) - 1);
+  if (failed(zero) || failed(u32MaxExpr))
+    return false;
+  FailureOr<sym::PredHandle> nonNegative =
+      sym::composePredCmp(S.symbolStore(), expr, sym::PredCmpOp::Ge, *zero);
+  FailureOr<sym::PredHandle> inUpper = sym::composePredCmp(
+      S.symbolStore(), expr, sym::PredCmpOp::Le, *u32MaxExpr);
+  return succeeded(nonNegative) && succeeded(inUpper) &&
+         sym::checkPredicate(S.symbolStore(), *nonNegative, assumptions) ==
+             sym::CheckResult::True &&
+         sym::checkPredicate(S.symbolStore(), *inUpper, assumptions) ==
+             sym::CheckResult::True;
+}
+
 static bool exprFitsU32ByUpperBound(WaveAMDMachineSelector &S,
                                     sym::ExprHandle expr,
                                     ArrayRef<sym::PredHandle> assumptions) {
+  if (provenRangeFitsU32(S, expr, assumptions))
+    return true;
+  if (explicitPredicatesProveU32(S, expr, assumptions))
+    return true;
   if (std::optional<uint64_t> bound = exprU32UpperBound(S, expr, assumptions))
     return *bound <= (uint64_t{1} << 32) - 1;
   return false;
@@ -1888,16 +2015,16 @@ static TermKind classifyPlanExpr(WaveAMDMachineSelector &S,
 
 static FailureOr<bool> tryAppendRemainderToSlot(WaveAMDMachineSelector &S,
                                                 AddressPlan &plan,
-                                                sym::ExprHandle &slot) {
+                                                sym::ExprHandle &slot,
+                                                bool &slotNeedsWide) {
   FailureOr<sym::ExprHandle> joined = appendAddressExpr(
       S, slot, plan.fullAddressRemainderExpr, plan.assumptions);
   if (failed(joined))
     return failure();
-  if (needsWideAddressMaterialization(*joined, plan))
-    return false;
   if (!S.slotFitsU32(*joined, plan.assumptions))
     return false;
   slot = *joined;
+  slotNeedsWide = needsWideAddressMaterialization(*joined, plan);
   plan.fullAddressRemainderExpr = {};
   return true;
 }
@@ -1910,15 +2037,15 @@ demotePlanRemainderToFields(WaveAMDMachineSelector &S, AddressPlan &plan,
   TermKind remainderKind =
       classifyPlanExpr(S, plan, plan.fullAddressRemainderExpr);
   if (spec.hasSoffset && remainderKind != TermKind::Lane) {
-    FailureOr<bool> tookSoffset =
-        tryAppendRemainderToSlot(S, plan, plan.soffsetExpr);
+    FailureOr<bool> tookSoffset = tryAppendRemainderToSlot(
+        S, plan, plan.soffsetExpr, plan.soffsetNeedsWide);
     if (failed(tookSoffset))
       return failure();
     if (*tookSoffset)
       return success();
   }
-  FailureOr<bool> tookVoffset =
-      tryAppendRemainderToSlot(S, plan, plan.voffsetExpr);
+  FailureOr<bool> tookVoffset = tryAppendRemainderToSlot(
+      S, plan, plan.voffsetExpr, plan.voffsetNeedsWide);
   return failed(tookVoffset) ? failure() : success();
 }
 
@@ -1976,6 +2103,11 @@ planMemoryAddress(WaveAMDMachineSelector &S, Operation *user,
   return *plan;
 }
 
+static FailureOr<Value> materializePlanLowDword(
+    WaveAMDMachineSelector &S, Operation *user, sym::ExprHandle expr,
+    const AddressPlanBindings &bindings, ArrayRef<sym::PredHandle> assumptions,
+    bool useWide, bool symbolsAreUniform = false);
+
 FailureOr<WaveAMDMachineSelector::BucketedOperands>
 materializePlanBuckets(WaveAMDMachineSelector &S, Operation *user,
                        const AddressPlan &plan,
@@ -1984,8 +2116,9 @@ materializePlanBuckets(WaveAMDMachineSelector &S, Operation *user,
   WaveAMDMachineSelector::BucketedOperands out;
   Value vraw;
   if (plan.voffsetExpr) {
-    FailureOr<Value> voffset = materializePlanExpr(S, user, plan.voffsetExpr,
-                                                   bindings, plan.assumptions);
+    FailureOr<Value> voffset =
+        materializePlanLowDword(S, user, plan.voffsetExpr, bindings,
+                                plan.assumptions, plan.voffsetNeedsWide);
     if (failed(voffset))
       return failure();
     vraw = *voffset;
@@ -1995,8 +2128,10 @@ materializePlanBuckets(WaveAMDMachineSelector &S, Operation *user,
   out.voffset = S.ensureVGPRForVSrc1(user->getLoc(), vraw);
   if (spec.hasSoffset) {
     if (plan.soffsetExpr) {
-      FailureOr<Value> soffset = materializePlanExpr(
-          S, user, plan.soffsetExpr, bindings, plan.assumptions);
+      FailureOr<Value> soffset =
+          materializePlanLowDword(S, user, plan.soffsetExpr, bindings,
+                                  plan.assumptions, plan.soffsetNeedsWide,
+                                  /*symbolsAreUniform=*/true);
       if (failed(soffset))
         return failure();
       out.soffset = S.ensureSGPR1(user->getLoc(), *soffset);
@@ -2043,8 +2178,9 @@ materializeLanePointerOffsetCarry(WaveAMDMachineSelector &S, Operation *user,
   Location loc = user->getLoc();
   Value carry;
   if (plan->voffsetExpr) {
-    FailureOr<Value> voffset = materializePlanExpr(S, user, plan->voffsetExpr,
-                                                   bindings, plan->assumptions);
+    FailureOr<Value> voffset =
+        materializePlanLowDword(S, user, plan->voffsetExpr, bindings,
+                                plan->assumptions, plan->voffsetNeedsWide);
     if (failed(voffset))
       return failure();
     carry = *voffset;
@@ -2057,8 +2193,10 @@ materializeLanePointerOffsetCarry(WaveAMDMachineSelector &S, Operation *user,
       carry = S.addByteOffsets(loc, carry, value);
   };
   if (plan->soffsetExpr) {
-    FailureOr<Value> soffset = materializePlanExpr(S, user, plan->soffsetExpr,
-                                                   bindings, plan->assumptions);
+    FailureOr<Value> soffset =
+        materializePlanLowDword(S, user, plan->soffsetExpr, bindings,
+                                plan->assumptions, plan->soffsetNeedsWide,
+                                /*symbolsAreUniform=*/true);
     if (failed(soffset))
       return failure();
     append(S.ensureSGPR1(loc, *soffset));
@@ -2066,8 +2204,14 @@ materializeLanePointerOffsetCarry(WaveAMDMachineSelector &S, Operation *user,
   if (plan->instOffset != 0)
     append(createImm(S.builder, loc, plan->instOffset));
   if (plan->fullAddressRemainderExpr) {
-    FailureOr<Value> remainder = materializePlanExpr(
-        S, user, plan->fullAddressRemainderExpr, bindings, plan->assumptions);
+    bool useWide =
+        needsWideAddressMaterialization(plan->fullAddressRemainderExpr, *plan);
+    bool isUniform =
+        classifyPlanExpr(S, *plan, plan->fullAddressRemainderExpr) !=
+        TermKind::Lane;
+    FailureOr<Value> remainder = materializePlanLowDword(
+        S, user, plan->fullAddressRemainderExpr, bindings, plan->assumptions,
+        useWide, isUniform);
     if (failed(remainder))
       return failure();
     append(*remainder);
@@ -2139,14 +2283,13 @@ materializeUniformFullAddressLowDword(WaveAMDMachineSelector &S,
   return extractLowDword(S, user->getLoc(), *addr);
 }
 
-static FailureOr<Value>
-materializePlanLowDword(WaveAMDMachineSelector &S, Operation *user,
-                        sym::ExprHandle expr,
-                        const AddressPlanBindings &bindings,
-                        ArrayRef<sym::PredHandle> assumptions, bool useWide) {
+static FailureOr<Value> materializePlanLowDword(
+    WaveAMDMachineSelector &S, Operation *user, sym::ExprHandle expr,
+    const AddressPlanBindings &bindings, ArrayRef<sym::PredHandle> assumptions,
+    bool useWide, bool symbolsAreUniform) {
   if (useWide) {
-    FailureOr<Value> wide =
-        materializeWideIndexExprNode(S, expr, user, bindings.wide, assumptions);
+    FailureOr<Value> wide = materializeWideIndexExprNode(
+        S, expr, user, bindings.wide, assumptions, symbolsAreUniform);
     if (failed(wide))
       return failure();
     return extractLowDword(S, user->getLoc(), *wide);
@@ -5265,18 +5408,21 @@ static FailureOr<Value> materializeDmaM0FieldPlan(WaveAMDMachineSelector &S,
   AddressPlanBindings bindings = materializeAddressPlanBindings(S, op, plan);
   Value dstAddr = dstBase;
   Location loc = op.getLoc();
-  auto appendExpr = [&](sym::ExprHandle expr) -> LogicalResult {
+  auto appendExpr = [&](sym::ExprHandle expr, bool useWide) -> LogicalResult {
     if (!expr)
       return success();
-    FailureOr<Value> value =
-        materializePlanExpr(S, op, expr, bindings, plan.assumptions);
+    FailureOr<Value> value = materializePlanLowDword(
+        S, op, expr, bindings, plan.assumptions, useWide,
+        /*symbolsAreUniform=*/true);
     if (failed(value))
       return failure();
     dstAddr = S.addUniformBytes(loc, dstAddr, S.ensureSGPR1(loc, *value));
     return success();
   };
-  if (failed(appendExpr(plan.soffsetExpr)) ||
-      failed(appendExpr(plan.fullAddressRemainderExpr)))
+  bool remainderNeedsWide =
+      needsWideAddressMaterialization(plan.fullAddressRemainderExpr, plan);
+  if (failed(appendExpr(plan.soffsetExpr, plan.soffsetNeedsWide)) ||
+      failed(appendExpr(plan.fullAddressRemainderExpr, remainderNeedsWide)))
     return failure();
   if (plan.instOffset != 0)
     dstAddr = S.addUniformBytes(loc, dstAddr,
@@ -5317,17 +5463,23 @@ static FailureOr<Value> materializeDmaM0(WaveAMDMachineSelector &S,
 static waveamdmachine::AddressFieldSpec dmaAddressSpec(bool isBuffer,
                                                        int64_t bytes);
 
-static LogicalResult foldBufferDmaSoffset(WaveAMDMachineSelector &S,
-                                          AddressPlan &plan) {
+static LogicalResult foldBufferDmaAddressFields(WaveAMDMachineSelector &S,
+                                                AddressPlan &plan) {
   // Buffer DMA dynamic soffset is slow; fold into vaddr when proven safe.
   FailureOr<sym::ExprHandle> voffset = appendAddressExpr(
       S, plan.voffsetExpr, plan.soffsetExpr, plan.assumptions);
   if (failed(voffset))
     return failure();
-  if (!needsWideAddressMaterialization(*voffset, plan) &&
-      S.slotFitsU32(*voffset, plan.assumptions)) {
+  voffset = appendAddressExpr(S, *voffset, plan.fullAddressRemainderExpr,
+                              plan.assumptions);
+  if (failed(voffset))
+    return failure();
+  if (S.slotFitsU32(*voffset, plan.assumptions)) {
     plan.voffsetExpr = *voffset;
+    plan.voffsetNeedsWide = needsWideAddressMaterialization(*voffset, plan);
     plan.soffsetExpr = {};
+    plan.soffsetNeedsWide = false;
+    plan.fullAddressRemainderExpr = {};
   }
   return success();
 }
@@ -5338,6 +5490,8 @@ static FailureOr<DmaSourceAddress> materializeGlobalDmaUniformSourceAddress(
   AddressPlan basePlan = plan;
   basePlan.voffsetExpr = {};
   basePlan.soffsetExpr = {};
+  basePlan.voffsetNeedsWide = false;
+  basePlan.soffsetNeedsWide = false;
   basePlan.instOffset = 0;
   FailureOr<Value> adjustedBase =
       materializeUniformFullPlanAddress(S, op, base, basePlan);
@@ -5392,8 +5546,8 @@ materializeDmaSourceAddress(WaveAMDMachineSelector &S, waveamd::DmaLoadLdsOp op,
   FailureOr<AddressPlan> plan = planMemoryAddress(S, op, offset, spec);
   if (failed(plan))
     return failure();
-  if (isBuffer && plan->soffsetExpr)
-    if (failed(foldBufferDmaSoffset(S, *plan)))
+  if (isBuffer && (plan->soffsetExpr || plan->fullAddressRemainderExpr))
+    if (failed(foldBufferDmaAddressFields(S, *plan)))
       return failure();
   if (plan->fullAddressRemainderExpr) {
     if (isBuffer)

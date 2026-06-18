@@ -69,6 +69,8 @@ struct AddressPlan {
   sym::ExprHandle soffsetExpr;
   sym::ExprHandle fullAddressRemainderExpr;
   int64_t instOffset = 0;
+  bool voffsetNeedsWide = false;
+  bool soffsetNeedsWide = false;
 };
 
 // Small free helpers used by every selection TU.

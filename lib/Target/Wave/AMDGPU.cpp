@@ -1381,6 +1381,8 @@ private:
     llvm_unreachable("expected GPR tuple component");
   }
 
+  llvm::MCOperand toMCB32(Value value) { return toMCB32Component(value, 0); }
+
   llvm::MCOperand toMCOperand(Value value) {
     if (Operation *def = value.getDefiningOp())
       if (isa<waveamdmachine::ImmOp>(def))
@@ -1453,15 +1455,15 @@ private:
   }
 
   LogicalResult emitTernaryInt(unsigned opcode, Operation &op) {
-    return emitMC(
-        opcode, {toMCOperand(op.getResult(0)), toMCOperand(op.getOperand(0)),
-                 toMCOperand(op.getOperand(1)), toMCOperand(op.getOperand(2))});
+    return emitMC(opcode,
+                  {toMCOperand(op.getResult(0)), toMCB32(op.getOperand(0)),
+                   toMCB32(op.getOperand(1)), toMCB32(op.getOperand(2))});
   }
 
   LogicalResult emitTernaryIntClamp(unsigned opcode, Operation &op) {
     return emitMC(opcode,
-                  {toMCOperand(op.getResult(0)), toMCOperand(op.getOperand(0)),
-                   toMCOperand(op.getOperand(1)), toMCOperand(op.getOperand(2)),
+                  {toMCOperand(op.getResult(0)), toMCB32(op.getOperand(0)),
+                   toMCB32(op.getOperand(1)), toMCB32(op.getOperand(2)),
                    llvm::MCOperand::createImm(0)});
   }
 
@@ -1668,15 +1670,13 @@ private:
       if (lhsImm || rhsImm) {
         Value immValue = lhsImm ? lhs : rhs;
         Value regValue = lhsImm ? rhs : lhs;
-        if (failed(
-                emitMC(vMovB32(), {toMCOperand(dst), toMCOperand(immValue)})))
+        if (failed(emitMC(vMovB32(), {toMCOperand(dst), toMCB32(immValue)})))
           return failure();
-        return emitMC(vMulLoU32(), {toMCOperand(dst), toMCOperand(dst),
-                                    toMCOperand(regValue)});
+        return emitMC(vMulLoU32(),
+                      {toMCOperand(dst), toMCOperand(dst), toMCB32(regValue)});
       }
     }
-    return emitMC(vMulLoU32(),
-                  {toMCOperand(dst), toMCOperand(lhs), toMCOperand(rhs)});
+    return emitMC(vMulLoU32(), {toMCOperand(dst), toMCB32(lhs), toMCB32(rhs)});
   }
 
   bool isSGPR(Value value) const {
@@ -2091,16 +2091,14 @@ private:
       Value rhs = op.getOperand(1);
       if (isSGPR(rhs))
         std::swap(lhs, rhs);
-      return emitVAddU32(toMCOperand(result()), toMCOperand(lhs),
-                         toMCOperand(rhs), op);
+      return emitVAddU32(toMCOperand(result()), toMCB32(lhs), toMCB32(rhs), op);
     }
     if (isa<waveamdmachine::VAddU32VccOp>(op)) {
       Value lhs = op.getOperand(0);
       Value rhs = op.getOperand(1);
       if (isSGPR(rhs))
         std::swap(lhs, rhs);
-      return emitVAddU32Vcc(toMCOperand(result()), toMCOperand(lhs),
-                            toMCOperand(rhs));
+      return emitVAddU32Vcc(toMCOperand(result()), toMCB32(lhs), toMCB32(rhs));
     }
     if (isa<waveamdmachine::VAndB32Op, waveamdmachine::VOrB32Op,
             waveamdmachine::VXorB32Op>(op)) {
@@ -2114,17 +2112,17 @@ private:
       unsigned opcode = isa<waveamdmachine::VAndB32Op>(op)  ? vAndB32()
                         : isa<waveamdmachine::VOrB32Op>(op) ? vOrB32()
                                                             : vXorB32();
-      return emitMC(
-          opcode, {toMCOperand(result()), toMCOperand(lhs), toMCOperand(rhs)});
+      return emitMC(opcode,
+                    {toMCOperand(result()), toMCB32(lhs), toMCB32(rhs)});
     }
     if (isa<waveamdmachine::VLshlrevB32Op>(op))
       return emitMC(vLshlrevB32(),
-                    {toMCOperand(result()), toMCOperand(op.getOperand(1)),
-                     toMCOperand(op.getOperand(0))});
+                    {toMCOperand(result()), toMCB32(op.getOperand(1)),
+                     toMCB32(op.getOperand(0))});
     if (isa<waveamdmachine::VLshrrevB32Op>(op))
       return emitMC(vLshrrevB32(),
-                    {toMCOperand(result()), toMCOperand(op.getOperand(1)),
-                     toMCOperand(op.getOperand(0))});
+                    {toMCOperand(result()), toMCB32(op.getOperand(1)),
+                     toMCB32(op.getOperand(0))});
     if (isa<waveamdmachine::VMulLoU32Op>(op))
       // v_mul_lo_u32 is VOP3-only on RDNA3; operand placement is
       // unconstrained so we emit (vdst, src0, src1) as-is without the
@@ -2132,13 +2130,12 @@ private:
       return emitVMulLoU32(op, result(), op.getOperand(0), op.getOperand(1));
     if (isa<waveamdmachine::VMulHiU32Op>(op))
       return emitMC(vMulHiU32(),
-                    {toMCOperand(result()), toMCOperand(op.getOperand(0)),
-                     toMCOperand(op.getOperand(1))});
+                    {toMCOperand(result()), toMCB32(op.getOperand(0)),
+                     toMCB32(op.getOperand(1))});
     if (isa<waveamdmachine::VFfbhU32Op, waveamdmachine::VFfblB32Op>(op)) {
       unsigned opcode =
           isa<waveamdmachine::VFfbhU32Op>(op) ? vFfbhU32() : vFfblB32();
-      return emitMC(opcode,
-                    {toMCOperand(result()), toMCOperand(op.getOperand(0))});
+      return emitMC(opcode, {toMCOperand(result()), toMCB32(op.getOperand(0))});
     }
     if (isa<waveamdmachine::VMadI32I24Op, waveamdmachine::VMadU32U24Op>(op)) {
       unsigned opcode =
@@ -2234,8 +2231,8 @@ private:
                                                                 : vCmpxGeI32();
       llvm::MCOperand exec = llvm::MCOperand::createReg(
           namedPhysReg(wavefrontSize == 32 ? "exec_lo" : "exec"));
-      return emitMC(opcode, {exec, toMCOperand(op.getOperand(0)),
-                             toMCOperand(op.getOperand(1))});
+      return emitMC(
+          opcode, {exec, toMCB32(op.getOperand(0)), toMCB32(op.getOperand(1))});
     }
     if (isa<waveamdmachine::VCmpEqU32Op, waveamdmachine::VCmpEqU32VccOp,
             waveamdmachine::VCmpNeU32Op, waveamdmachine::VCmpNeU32VccOp,
@@ -2280,8 +2277,8 @@ private:
           writesVcc ? llvm::MCOperand::createReg(
                           namedPhysReg(wavefrontSize == 32 ? "vcc_lo" : "vcc"))
                     : toMCOperand(result());
-      if (failed(emitMC(opcode, {dst, toMCOperand(op.getOperand(0)),
-                                 toMCOperand(op.getOperand(1))})))
+      if (failed(emitMC(opcode, {dst, toMCB32(op.getOperand(0)),
+                                 toMCB32(op.getOperand(1))})))
         return failure();
       if (!writesVcc)
         return success();

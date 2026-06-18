@@ -16,6 +16,7 @@
 #include "mlir/Dialect/SCF/Transforms/Patterns.h"
 #include "mlir/Dialect/Wave/IR/Wave.h"
 #include "mlir/Dialect/Wave/IR/WaveAMD.h"
+#include "mlir/Dialect/Wave/IR/WaveSymbols.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Interfaces/FunctionInterfaces.h"
@@ -96,6 +97,80 @@ getPointerElementBytes(Type type,
   return *bits / 8;
 }
 
+static std::optional<int64_t> ceilRational(sym::RationalEndpoint value) {
+  if (value.denominator <= 0)
+    return std::nullopt;
+  int64_t quotient = value.numerator / value.denominator;
+  int64_t remainder = value.numerator % value.denominator;
+  if (remainder != 0 && value.numerator > 0)
+    ++quotient;
+  return quotient;
+}
+
+static std::optional<int64_t> floorRational(sym::RationalEndpoint value) {
+  if (value.denominator <= 0)
+    return std::nullopt;
+  int64_t quotient = value.numerator / value.denominator;
+  int64_t remainder = value.numerator % value.denominator;
+  if (remainder != 0 && value.numerator < 0)
+    --quotient;
+  return quotient;
+}
+
+static std::optional<std::pair<int64_t, int64_t>>
+inferIntegerRangeBounds(sym::Store &store, sym::ExprHandle expr,
+                        ArrayRef<sym::PredHandle> assumptions) {
+  std::optional<sym::InferredRange> range =
+      sym::inferRange(store, expr, assumptions);
+  if (!range || !range->lower || !range->upper)
+    return std::nullopt;
+  std::optional<int64_t> lo = ceilRational(*range->lower);
+  std::optional<int64_t> hi = floorRational(*range->upper);
+  if (!lo || !hi || *lo > *hi)
+    return std::nullopt;
+  return std::make_pair(*lo, *hi);
+}
+
+static std::optional<std::pair<int64_t, int64_t>>
+scaleIntegerRange(int64_t lo, int64_t hi, int64_t scale) {
+  std::optional<int64_t> scaledLo =
+      llvm::checkedMul(scale > 0 ? lo : hi, scale);
+  std::optional<int64_t> scaledHi =
+      llvm::checkedMul(scale > 0 ? hi : lo, scale);
+  if (!scaledLo || !scaledHi)
+    return std::nullopt;
+  return std::make_pair(*scaledLo, *scaledHi);
+}
+
+static std::optional<std::pair<int64_t, int64_t>>
+inferScaledIntegerRange(sym::Store &store, sym::ExprHandle expr,
+                        ArrayRef<sym::PredHandle> assumptions, int64_t scale) {
+  if (scale == 0)
+    return std::make_pair(int64_t{0}, int64_t{0});
+  std::optional<std::pair<int64_t, int64_t>> range =
+      inferIntegerRangeBounds(store, expr, assumptions);
+  if (!range)
+    return std::nullopt;
+  return scaleIntegerRange(range->first, range->second, scale);
+}
+
+static FailureOr<sym::PredHandle> composeRangePredicate(sym::Store &store,
+                                                        sym::ExprHandle expr,
+                                                        int64_t lo,
+                                                        int64_t hi) {
+  FailureOr<sym::ExprHandle> lower = sym::composeExprInt(store, lo);
+  FailureOr<sym::ExprHandle> upper = sym::composeExprInt(store, hi);
+  if (failed(lower) || failed(upper))
+    return failure();
+  FailureOr<sym::PredHandle> ge =
+      sym::composePredCmp(store, expr, sym::PredCmpOp::Ge, *lower);
+  FailureOr<sym::PredHandle> le =
+      sym::composePredCmp(store, expr, sym::PredCmpOp::Le, *upper);
+  if (failed(ge) || failed(le))
+    return failure();
+  return sym::composePredAnd(store, *ge, *le);
+}
+
 static FailureOr<Value> scaleOffset(Operation *diagOp, Location loc,
                                     Value offset, int64_t scale,
                                     PatternRewriter &rewriter) {
@@ -119,6 +194,17 @@ static FailureOr<Value> scaleOffset(Operation *diagOp, Location loc,
   StringRef name = "orig";
   SmallVector<sym::PredHandle> assumptions;
   appendAssumePredicates(dialect->getSymbolStore(), offset, name, assumptions);
+  std::optional<std::pair<int64_t, int64_t>> scaledRange =
+      inferScaledIntegerRange(dialect->getSymbolStore(), *orig, assumptions,
+                              scale);
+  if (scaledRange) {
+    FailureOr<sym::PredHandle> pred =
+        composeRangePredicate(dialect->getSymbolStore(), *expr,
+                              scaledRange->first, scaledRange->second);
+    if (failed(pred))
+      return diagOp->emitError("failed to compose scaled offset range");
+    assumptions.push_back(*pred);
+  }
   Type resultType =
       getIndexExprResultType(offset.getContext(), ValueRange{offset});
   return IndexExprOp::create(

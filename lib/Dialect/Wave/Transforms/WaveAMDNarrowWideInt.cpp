@@ -19,6 +19,7 @@
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 
 #include <cstdint>
+#include <type_traits>
 
 namespace mlir::wave {
 #define GEN_PASS_DEF_WAVEAMDNARROWWIDEINT
@@ -129,9 +130,16 @@ struct NarrowAddPattern : public OpRewritePattern<OldOp> {
         matchU32Addend(rewriter, op.getLoc(), solver, offset);
     if (failed(narrowOffset))
       return failure();
+    Value offsetValue = *narrowOffset;
+    if constexpr (std::is_same_v<NewOp, VAddU64U32Op>) {
+      if (isImm(offsetValue))
+        offsetValue = VMovB32TupleOp::create(
+            rewriter, op.getLoc(),
+            getRegType(op.getContext(), RegClass::VGPR, 1), offsetValue);
+    }
     NewOp narrow =
         NewOp::create(rewriter, op.getLoc(), op.getResult().getType(),
-                      op->getResult(1).getType(), base, *narrowOffset);
+                      op->getResult(1).getType(), base, offsetValue);
     narrow->setAttrs(op->getAttrs());
     Operation *offsetProducer = offset.getDefiningOp();
     rewriter.replaceOp(op, narrow->getResults());

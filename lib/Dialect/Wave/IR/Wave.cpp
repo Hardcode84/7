@@ -1729,6 +1729,45 @@ static LogicalResult collectConstantIndexExprSubstitutions(
   return success();
 }
 
+static sym::ExprHandle expandIndexExprPredicateExpr(sym::Store &store,
+                                                    sym::ExprHandle expr) {
+  FailureOr<sym::ExprHandle> expanded = sym::expandExpr(store, expr);
+  return succeeded(expanded) ? *expanded : expr;
+}
+
+static FailureOr<sym::PredHandle>
+expandIndexExprPredicate(sym::Store &store, sym::PredHandle pred) {
+  sym::PredView view(pred);
+  if (view.getKind() == sym::PredKind::Cmp) {
+    std::optional<sym::PredCmpOp> op = view.getCmpOp();
+    if (!op)
+      return pred;
+    return sym::composePredCmp(
+        store, expandIndexExprPredicateExpr(store, view.getCmpLhs()), *op,
+        expandIndexExprPredicateExpr(store, view.getCmpRhs()));
+  }
+  if (view.getKind() != sym::PredKind::And &&
+      view.getKind() != sym::PredKind::Or)
+    return pred;
+
+  FailureOr<sym::PredHandle> current =
+      expandIndexExprPredicate(store, view.getLogicArg(0));
+  if (failed(current))
+    return failure();
+  for (uint32_t i = 1, e = view.getLogicArgCount(); i != e; ++i) {
+    FailureOr<sym::PredHandle> next =
+        expandIndexExprPredicate(store, view.getLogicArg(i));
+    if (failed(next))
+      return failure();
+    current = view.getKind() == sym::PredKind::And
+                  ? sym::composePredAnd(store, *current, *next)
+                  : sym::composePredOr(store, *current, *next);
+    if (failed(current))
+      return failure();
+  }
+  return current;
+}
+
 FailureOr<SmallVector<sym::PredHandle>>
 mlir::wave::substituteIndexExprPredicates(
     sym::Store &store, ArrayRef<sym::PredHandle> assumptions,
@@ -1743,7 +1782,12 @@ mlir::wave::substituteIndexExprPredicates(
         sym::substitutePred(store, pred, substitutions);
     if (failed(result))
       return failure();
-    substituted.push_back(*result);
+    FailureOr<sym::PredHandle> expanded =
+        expandIndexExprPredicate(store, *result);
+    if (failed(expanded))
+      return failure();
+    FailureOr<sym::PredHandle> simplified = sym::simplifyPred(store, *expanded);
+    substituted.push_back(succeeded(simplified) ? *simplified : *expanded);
   }
   return substituted;
 }

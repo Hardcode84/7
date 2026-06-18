@@ -969,29 +969,29 @@ takeInstOffsetAddends(WaveAMDMachineSelector &S,
 static FailureOr<bool> tryAppendPlanSlot(WaveAMDMachineSelector &S,
                                          sym::ExprHandle expr,
                                          AddressPlan &plan,
-                                         sym::ExprHandle &slotExpr) {
+                                         sym::ExprHandle &slotExpr,
+                                         bool &slotNeedsWide) {
   if (!expr)
     return true;
-  if (needsWideAddressMaterialization(expr, plan))
-    return false;
   sym::ExprHandle candidate = slotExpr;
   if (failed(appendPlanExpr(S, expr, plan.assumptions, candidate)))
     return failure();
   if (!S.slotFitsU32(candidate, plan.assumptions))
     return false;
+  slotNeedsWide = needsWideAddressMaterialization(candidate, plan);
   slotExpr = candidate;
   return true;
 }
 
-static LogicalResult packPlanSlotAddends(WaveAMDMachineSelector &S,
-                                         TermKind kind,
-                                         ArrayRef<AddressPlanAddend> addends,
-                                         AddressPlan &plan,
-                                         sym::ExprHandle &slotExpr) {
+static LogicalResult
+packPlanSlotAddends(WaveAMDMachineSelector &S, TermKind kind,
+                    ArrayRef<AddressPlanAddend> addends, AddressPlan &plan,
+                    sym::ExprHandle &slotExpr, bool &slotNeedsWide) {
   for (const AddressPlanAddend &addend : addends) {
     if (addend.kind != kind)
       continue;
-    FailureOr<bool> took = tryAppendPlanSlot(S, addend.expr, plan, slotExpr);
+    FailureOr<bool> took =
+        tryAppendPlanSlot(S, addend.expr, plan, slotExpr, slotNeedsWide);
     if (failed(took))
       return failure();
     if (!*took && failed(appendPlanRemainder(S, addend.expr, plan)))
@@ -1019,7 +1019,7 @@ assignPlanAddends(WaveAMDMachineSelector &S,
     return failure();
   if (spec.hasSoffset)
     return packPlanSlotAddends(S, TermKind::Uniform, addends, plan,
-                               plan.soffsetExpr);
+                               plan.soffsetExpr, plan.soffsetNeedsWide);
   return appendPlanAddendsRemainder(S, TermKind::Uniform, addends, plan);
 }
 
@@ -1146,7 +1146,7 @@ planAddressFields(WaveAMDMachineSelector &S, const PointerOffset &offset,
   if (failed(assignPlanAddends(S, spec, addends, plan)))
     return failure();
   if (failed(packPlanSlotAddends(S, TermKind::Lane, addends, plan,
-                                 plan.voffsetExpr)))
+                                 plan.voffsetExpr, plan.voffsetNeedsWide)))
     return failure();
   return plan;
 }
