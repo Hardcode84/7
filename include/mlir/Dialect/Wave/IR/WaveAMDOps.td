@@ -46,9 +46,8 @@ def WaveAMD_FragmentPackOp : WaveAMD_Op<"fragment_pack", [Pure]> {
   let summary = "bind per-lane register groups into a wave-cooperative fragment";
   let description = [{
     Bitcast-style assembly of a `!waveamd.fragment<role, T, M, N, W, R>`
-    from a `!wave.simd<vector<R x i32>, W>` whose per-lane vector holds
-    the `R` 32-bit registers of the destination fragment in canonical
-    WMMA order.
+    from a `!wave.simd<vector<N x E>, W>` whose per-lane vector holds
+    `R * 32` bits of destination fragment payload in canonical WMMA order.
 
     The op is a zero-cost rename at the WaveAMDMachine level: the input and
     output share the same physical `R`-wide VGPR tuple. It exists so the
@@ -59,7 +58,7 @@ def WaveAMD_FragmentPackOp : WaveAMD_Op<"fragment_pack", [Pure]> {
     Verifier constraints:
 
     * The SIMD width must match the fragment wave size.
-    * The per-lane vector must hold exactly `R` 32-bit elements.
+    * The per-lane vector payload must be exactly `R` 32-bit registers wide.
   }];
 
   let arguments = (ins Wave_Simd:$registers);

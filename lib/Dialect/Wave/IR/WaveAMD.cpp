@@ -114,13 +114,18 @@ LogicalResult FragmentPackOp::verify() {
   if (!vectorType || vectorType.getRank() != 1)
     return emitOpError("operand SIMD element type must be a 1-D vector");
   Type vectorElement = vectorType.getElementType();
-  if (!vectorElement.isIntOrFloat() ||
-      vectorElement.getIntOrFloatBitWidth() != 32)
-    return emitOpError("operand vector element type must be 32 bits wide");
-  if (vectorType.getNumElements() != fragmentType.getRegisters())
-    return emitOpError("operand vector element count (")
-           << vectorType.getNumElements() << ") must match fragment register "
-           << "count (" << fragmentType.getRegisters() << ")";
+  if (!vectorElement.isIntOrFloat())
+    return emitOpError("operand vector element type must be int or float");
+  unsigned elementBits = vectorElement.getIntOrFloatBitWidth();
+  if (elementBits < 4 || elementBits > 32 || 32 % elementBits != 0)
+    return emitOpError(
+        "operand vector element bit width must be 4, 8, 16, or 32");
+  int64_t payloadBits = vectorType.getNumElements() * elementBits;
+  int64_t expectedBits = fragmentType.getRegisters() * 32;
+  if (payloadBits != expectedBits)
+    return emitOpError("operand vector payload bit width (")
+           << payloadBits << ") must match fragment register payload bit width "
+           << "(" << expectedBits << ")";
   return success();
 }
 

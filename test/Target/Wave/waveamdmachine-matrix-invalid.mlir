@@ -151,16 +151,32 @@ func.func @fragment_pack_not_vector(%v: !wave.simd<i32, 32>) {
 
 // -----
 
-func.func @fragment_pack_bad_vector_element(%v: !wave.simd<vector<16xf16>, 32>) {
-  // expected-error @below {{operand vector element type must be 32 bits wide}}
-  %frag = waveamd.fragment_pack %v : !wave.simd<vector<16xf16>, 32> -> !waveamd.fragment<2, f32, 16, 16, 32, 8>
+func.func @fragment_pack_bad_vector_element_type(%v: !wave.simd<vector<8xindex>, 32>) {
+  // expected-error @below {{operand vector element type must be int or float}}
+  %frag = waveamd.fragment_pack %v : !wave.simd<vector<8xindex>, 32> -> !waveamd.fragment<2, f32, 16, 16, 32, 8>
+  return
+}
+
+// -----
+
+func.func @fragment_pack_bad_vector_payload(%v: !wave.simd<vector<15xf16>, 32>) {
+  // expected-error @below {{operand vector payload bit width (240) must match fragment register payload bit width (256)}}
+  %frag = waveamd.fragment_pack %v : !wave.simd<vector<15xf16>, 32> -> !waveamd.fragment<2, f32, 16, 16, 32, 8>
+  return
+}
+
+// -----
+
+func.func @fragment_pack_bad_vector_element_width(%v: !wave.simd<vector<8xi24>, 32>) {
+  // expected-error @below {{operand vector element bit width must be 4, 8, 16, or 32}}
+  %frag = waveamd.fragment_pack %v : !wave.simd<vector<8xi24>, 32> -> !waveamd.fragment<2, f32, 16, 16, 32, 6>
   return
 }
 
 // -----
 
 func.func @fragment_pack_register_mismatch(%v: !wave.simd<vector<4xi32>, 32>) {
-  // expected-error @below {{operand vector element count (4) must match fragment register count (8)}}
+  // expected-error @below {{operand vector payload bit width (128) must match fragment register payload bit width (256)}}
   %frag = waveamd.fragment_pack %v : !wave.simd<vector<4xi32>, 32> -> !waveamd.fragment<2, f32, 16, 16, 32, 8>
   return
 }
