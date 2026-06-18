@@ -85,6 +85,17 @@ Same rule covers docstrings, commit bodies, and PR descriptions. Wit is welcome,
   known input. Goldens are conformance tests, not templates. Unsupported
   features return clear errors; no fabricated ops or canned output.
 
+## Perf golden ASM
+
+- Use one `test/PerfGolden/test_*.py` per kernel. Keep frozen Wave MLIR
+  and checked-in `.s` goldens under `test/PerfGolden/Inputs/`.
+- Lit must pass configured tools, e.g. `--wave-translate wave-translate`.
+  Never hard-code `build/bin` or `${repo}/build` in perf golden tests.
+- ASM drift is a review stop, not a failure proof. Benchmark old and new
+  assembly on the same hardware before updating a golden.
+- New generated golden file types need REUSE coverage. Python helpers must
+  pass Black and Ruff before commit.
+
 ## Language and MLIR Guidelines
 
 ### Python

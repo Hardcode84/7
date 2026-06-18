@@ -129,6 +129,18 @@ Integration tests under `test/Integration/` need a real AMDGPU device
 and `mlir-runner` with the ROCm runtime; the rest of the lit suite is
 host-only.
 
+Perf-sensitive assembly goldens live under `test/PerfGolden/`. Each
+kernel has a small `test_*.py` script, frozen Wave MLIR input, and
+checked-in `.s` golden. Lit passes the configured `wave-translate`
+binary, so these tests validate the current build instead of a
+source-tree `build/` directory. On ASM drift, rerun hardware perf for
+the old and new assembly before updating the golden.
+
+```bash
+build/bin/llvm-lit -sv build/test --filter='PerfGolden'
+WAVE_TRANSLATE=$PWD/build/bin/wave-translate python -m pytest -q test/PerfGolden
+```
+
 ## License
 
 Apache-2.0 with LLVM exception. See `LICENSE.TXT`.
