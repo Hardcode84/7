@@ -62,6 +62,17 @@ func.func @pack_extract_swapped_stays(%v: vector<2xf16>) -> vector<2xf16> {
   return %p : vector<2xf16>
 }
 
+// CHECK-LABEL: func.func @read_first_splat
+// CHECK-SAME: (%[[VALUE:.*]]: i32)
+// CHECK-NOT: wave.splat
+// CHECK-NOT: wave.read_first
+// CHECK: return %[[VALUE]] : i32
+func.func @read_first_splat(%value: i32) -> i32 {
+  %splat = wave.splat %value : i32 -> !wave.simd<i32, 32>
+  %first = wave.read_first %splat : !wave.simd<i32, 32> -> i32
+  return %first : i32
+}
+
 // CHECK-LABEL: func.func @index_expr_substitute_const
 // CHECK-SAME: (%[[LANE:.*]]: !wave.simd<i32, 32>)
 // CHECK: %[[OFF:.*]] = wave.index_expr <"4 + 2*lid"> ["lid"](%[[LANE]]) : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>

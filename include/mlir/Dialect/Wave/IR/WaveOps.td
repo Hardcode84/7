@@ -360,6 +360,7 @@ def Wave_ReadFirstOp : Wave_Op<"read_first", [NoMemoryEffect,
   let results = (outs AnyType:$result);
   let assemblyFormat = "$source attr-dict `:` qualified(type($source)) `->` type($result)";
   let hasVerifier = 1;
+  let hasFolder = 1;
 }
 
 def Wave_TokenOp : Wave_Op<"token", [Pure]> {

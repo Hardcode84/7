@@ -1171,6 +1171,12 @@ void ReadFirstOp::inferResultRanges(ArrayRef<ConstantIntRanges> argRanges,
   setResultRange(getResult(), normalizeWaveArithRange(argRanges.front(), bits));
 }
 
+OpFoldResult ReadFirstOp::fold(FoldAdaptor) {
+  if (SplatOp splat = getSource().getDefiningOp<SplatOp>())
+    return splat.getSource();
+  return {};
+}
+
 void AssumeOp::inferResultRangesFromOptional(
     ArrayRef<IntegerValueRange> argRanges, SetIntLatticeFn setResultRange) {
   WaveDialect *dialect = getContext()->getLoadedDialect<WaveDialect>();
