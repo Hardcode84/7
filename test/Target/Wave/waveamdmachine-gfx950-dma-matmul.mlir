@@ -127,8 +127,26 @@
 // MXFP4-PERF-ASM-NEXT: s_nop 0
 // MXFP4-PERF-ASM-NEXT: v_mfma_scale_f32_16x16x128_f8f6f4
 // MXFP4-PERF-ASM: s_waitcnt lgkmcnt(1)
-// MXFP4-PERF-ASM-NEXT: s_mul_i32
+// MXFP4-PERF-ASM-NEXT: s_mul_i32 s{{[0-9]+}}, [[LOOP_STEP:s[0-9]+]], 2
 // MXFP4-PERF-ASM-NEXT: v_mfma_scale_f32_16x16x128_f8f6f4
+// MXFP4-PERF-ASM-DAG: s_lshr_b32 s{{[0-9]+}}, s{{[0-9]+}}, 7
+// MXFP4-PERF-ASM-DAG: s_lshr_b32 s{{[0-9]+}}, s{{[0-9]+}}, 7
+// MXFP4-PERF-ASM-DAG: v_lshlrev_b32_e32 v{{[0-9]+}}, 12, v{{[0-9]+}}
+// MXFP4-PERF-ASM-DAG: v_lshlrev_b32_e32 v{{[0-9]+}}, 12, v{{[0-9]+}}
+// MXFP4-PERF-ASM-DAG: v_lshlrev_b32_e32 v{{[0-9]+}}, 12, v{{[0-9]+}}
+// MXFP4-PERF-ASM-DAG: v_lshlrev_b32_e32 v{{[0-9]+}}, 12, v{{[0-9]+}}
+// MXFP4-PERF-ASM-DAG: s_and_b32 s{{[0-9]+}}, [[LOOP_STEP]], 1
+// MXFP4-PERF-ASM-DAG: s_and_b32 s{{[0-9]+}}, [[LOOP_STEP]], 1
+// MXFP4-PERF-ASM-DAG: s_and_b32 s{{[0-9]+}}, [[LOOP_STEP]], 1
+// MXFP4-PERF-ASM-DAG: s_and_b32 s{{[0-9]+}}, [[LOOP_STEP]], 1
+// MXFP4-PERF-ASM-DAG: s_and_b32 s{{[0-9]+}}, [[LOOP_STEP]], 1
+// MXFP4-PERF-ASM-DAG: s_lshl_b32 s{{[0-9]+}}, s{{[0-9]+}}, 13
+// MXFP4-PERF-ASM-DAG: s_lshl_b32 s{{[0-9]+}}, s{{[0-9]+}}, 13
+// MXFP4-PERF-ASM-DAG: s_lshl_b32 s{{[0-9]+}}, s{{[0-9]+}}, 13
+// MXFP4-PERF-ASM-DAG: s_lshl_b32 s{{[0-9]+}}, s{{[0-9]+}}, 13
+// MXFP4-PERF-ASM-DAG: s_lshl_b32 s{{[0-9]+}}, s{{[0-9]+}}, 16
+// MXFP4-PERF-ASM-DAG: s_lshl_b32 s{{[0-9]+}}, s{{[0-9]+}}, 16
+// MXFP4-PERF-ASM: .Lwmma_f16_matmul_tiled.loop_exit_0:
 
 // ASMPIPE-LABEL: wmma_f16_matmul_tiled:
 // ASMPIPE: s_waitcnt vmcnt(8)
