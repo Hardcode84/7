@@ -30,7 +30,7 @@ func.func @generate_divsi_after_normalize(%out: !wave.ptr<#wave.global, f32>,
   %s2 = wave.splat %c2 : i32 -> !wave.simd<i32, 32>
   %half = wave.binary divsi %idx, %s2
       : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
-  // CHECK: wave.index_expr <"4*floor(1/2*raw0)"> ["raw0"](%[[ASSUME]]) : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
+  // CHECK: wave.index_expr <"4*floor(1/2*raw0)"> assuming [#wave.pred<"raw0 >= 0">, #wave.pred<"-31 + raw0 <= 0">] ["raw0"](%[[ASSUME]]) : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
   %ptr = wave.ptr_add %out, %half
       : !wave.ptr<#wave.global, f32>, !wave.simd<i32, 32>
       -> !wave.simd<!wave.ptr<#wave.global, f32>, 32>

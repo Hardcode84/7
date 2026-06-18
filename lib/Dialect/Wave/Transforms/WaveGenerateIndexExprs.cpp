@@ -45,6 +45,7 @@ struct IndexExprBinding {
 
 struct BindingState {
   SmallVector<IndexExprBinding> bindings;
+  SmallVector<sym::PredHandle> assumptions;
   llvm::DenseMap<Value, StringRef> byValue;
   llvm::StringMap<Value> reserved;
   llvm::StringMap<Value> emitted;
@@ -95,6 +96,16 @@ remapSymbolicOffset(sym::Store &store, const SymbolicOffset &offset,
     if (failed(target) || failed(replacement))
       return failure();
     substitutions.push_back({*target, *replacement});
+  }
+
+  if (substitutions.empty())
+    llvm::append_range(state.assumptions, offset.assumptions);
+  else {
+    FailureOr<SmallVector<sym::PredHandle>> assumptions =
+        substituteIndexExprPredicates(store, offset.assumptions, substitutions);
+    if (failed(assumptions))
+      return failure();
+    llvm::append_range(state.assumptions, *assumptions);
   }
 
   if (substitutions.empty())
@@ -291,7 +302,10 @@ public:
       return std::optional<SymbolicOffset>{};
     if (failed(expr))
       return failure();
-    FailureOr<sym::ExprHandle> simplified = sym::simplifyExpr(store, *expr);
+    FailureOr<sym::ExprHandle> simplified =
+        offset.assumptions.empty()
+            ? sym::simplifyExpr(store, *expr)
+            : sym::simplifyExpr(store, *expr, offset.assumptions);
     if (failed(simplified))
       return failure();
     offset.expr = *simplified;
@@ -436,6 +450,12 @@ private:
     (void)inserted;
     nameByValue[value] = it->getKey();
     offset.bindings.push_back({*expr, value, *kind});
+    if (std::optional<ConstantIntRanges> range =
+            finiteSignedRange(solver, value))
+      appendRangeAndAssumePredicates(store, value, it->getKey(), *range,
+                                     offset.assumptions);
+    else
+      appendAssumePredicates(store, value, it->getKey(), offset.assumptions);
     return *expr;
   }
 
@@ -495,8 +515,16 @@ private:
       substitutions.push_back({binding.name, *replacement});
     }
 
-    if (substitutions.empty())
+    if (substitutions.empty()) {
+      llvm::append_range(offset.assumptions, symbolic.assumptions);
       return symbolic.expr;
+    }
+    FailureOr<SmallVector<sym::PredHandle>> assumptions =
+        substituteIndexExprPredicates(store, symbolic.assumptions,
+                                      substitutions);
+    if (failed(assumptions))
+      return failure();
+    llvm::append_range(offset.assumptions, *assumptions);
     return sym::substituteExpr(store, symbolic.expr, substitutions);
   }
 
@@ -520,20 +548,27 @@ static IndexExprOp createIndexExpr(OpBuilder &builder, Location loc,
       collectLiveBindings(offset.expr, offset.bindings);
   SmallVector<StringRef> nameRefs;
   SmallVector<Value> values;
+  llvm::DenseSet<StringRef> liveSymbols;
   for (const SymbolicOffsetBinding &binding : liveBindings) {
-    nameRefs.push_back(symbolName(binding));
+    StringRef name = symbolName(binding);
+    nameRefs.push_back(name);
+    liveSymbols.insert(name);
     values.push_back(binding.value);
   }
+  SmallVector<sym::PredHandle> assumptions =
+      filterIndexExprPredicatesBySymbols(offset.assumptions, liveSymbols);
 
   Type resultType = getIndexExprResultType(ctx, values);
   return IndexExprOp::create(builder, loc, resultType,
                              ExprAttr::get(ctx, offset.expr),
+                             getIndexExprPredArrayAttr(ctx, assumptions),
                              builder.getStrArrayAttr(nameRefs), values);
 }
 
 static IndexExprOp createIndexExpr(OpBuilder &builder, Location loc,
                                    MLIRContext *ctx, sym::ExprHandle expr,
-                                   ArrayRef<IndexExprBinding> bindings) {
+                                   ArrayRef<IndexExprBinding> bindings,
+                                   ArrayRef<sym::PredHandle> assumptions) {
   SmallVector<StringRef> nameRefs;
   SmallVector<Value> values;
   appendNameRefs(bindings, nameRefs);
@@ -541,6 +576,7 @@ static IndexExprOp createIndexExpr(OpBuilder &builder, Location loc,
 
   Type resultType = getIndexExprResultType(ctx, values);
   return IndexExprOp::create(builder, loc, resultType, ExprAttr::get(ctx, expr),
+                             getIndexExprPredArrayAttr(ctx, assumptions),
                              builder.getStrArrayAttr(nameRefs), values);
 }
 
@@ -660,13 +696,15 @@ static FailureOr<bool> collectGeneratedBindingRewrite(
 
 static FailureOr<sym::ExprHandle>
 substituteAndSimplifyGenerated(IndexExprOp op, sym::Store &store,
-                               ArrayRef<sym::ExprSubstitution> substitutions) {
+                               ArrayRef<sym::ExprSubstitution> substitutions,
+                               ArrayRef<sym::PredHandle> assumptions) {
   FailureOr<sym::ExprHandle> substituted =
       sym::substituteExpr(store, op.getExpr().getValue(), substitutions);
   if (failed(substituted))
     return op.emitError("failed to substitute generated wave.index_expr");
   FailureOr<sym::ExprHandle> simplified =
-      sym::simplifyExpr(store, *substituted);
+      assumptions.empty() ? sym::simplifyExpr(store, *substituted)
+                          : sym::simplifyExpr(store, *substituted, assumptions);
   if (failed(simplified))
     return op.emitError("failed to simplify generated wave.index_expr");
   return *simplified;
@@ -678,11 +716,13 @@ static FailureOr<bool> rewriteIndexExpr(PatternRewriter &rewriter,
   sym::Store &store = dialect.getSymbolStore();
   BindingState state;
   seedBindingNames(op, state);
+  appendIndexExprPredicates(op, state.assumptions);
 
   SmallVector<sym::ExprSubstitution> substitutions;
   bool changed = false;
   for (auto [nameAttr, value] : llvm::zip(op.getNames(), op.getBindings())) {
     StringRef name = cast<StringAttr>(nameAttr).getValue();
+    appendAssumePredicates(store, value, name, state.assumptions);
     FailureOr<bool> bindingChanged = collectGeneratedBindingRewrite(
         op, dialect, state, name, value, substitutions, solver);
     if (failed(bindingChanged))
@@ -693,19 +733,29 @@ static FailureOr<bool> rewriteIndexExpr(PatternRewriter &rewriter,
   if (!changed)
     return false;
 
+  FailureOr<SmallVector<sym::PredHandle>> assumptions =
+      substituteIndexExprPredicates(store, state.assumptions, substitutions);
+  if (failed(assumptions))
+    return failure();
   FailureOr<sym::ExprHandle> simplified =
-      substituteAndSimplifyGenerated(op, store, substitutions);
+      substituteAndSimplifyGenerated(op, store, substitutions, *assumptions);
   if (failed(simplified))
     return failure();
   SmallVector<IndexExprBinding> liveBindings =
       collectLiveBindings(*simplified, state.bindings);
+  llvm::DenseSet<StringRef> liveSymbols;
+  for (const IndexExprBinding &binding : liveBindings)
+    liveSymbols.insert(binding.name);
+  SmallVector<sym::PredHandle> liveAssumptions =
+      filterIndexExprPredicatesBySymbols(*assumptions, liveSymbols);
   if (getIndexExprType(op.getContext(), liveBindings) !=
       op.getResult().getType())
     return false;
 
   rewriter.setInsertionPoint(op);
-  IndexExprOp replacement = createIndexExpr(
-      rewriter, op.getLoc(), op.getContext(), *simplified, liveBindings);
+  IndexExprOp replacement =
+      createIndexExpr(rewriter, op.getLoc(), op.getContext(), *simplified,
+                      liveBindings, liveAssumptions);
   rewriter.replaceOp(op, replacement.getResult());
   return true;
 }

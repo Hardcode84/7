@@ -232,6 +232,14 @@ func.func @index_expr_stray_binding(%lane: !wave.simd<i32, 32>, %k: i32) {
 
 // -----
 
+func.func @index_expr_assumption_undeclared_symbol(%lane: !wave.simd<i32, 32>) {
+  // expected-error @+1 {{assumption #0 references undeclared symbol `x`}}
+  %v = wave.index_expr #wave.expr<"lid"> assuming [#wave.pred<"x >= 0">] ["lid"] (%lane) : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
+  return
+}
+
+// -----
+
 func.func @index_expr_duplicate_name(%lane: !wave.simd<i32, 32>) {
   // expected-error @+1 {{duplicate binding name 'lid'}}
   %v = wave.index_expr #wave.expr<"lid"> ["lid", "lid"] (%lane, %lane) : (!wave.simd<i32, 32>, !wave.simd<i32, 32>) -> !wave.simd<index, 32>

@@ -934,15 +934,42 @@ buildIndexExprRangeAssumption(sym::Store &store, StringRef name,
   return *assumption;
 }
 
+static bool isCmpAndTree(sym::PredHandle pred) {
+  sym::PredView view(pred);
+  if (!view.isValid())
+    return false;
+  if (view.getKind() == sym::PredKind::Cmp)
+    return true;
+  if (view.getKind() != sym::PredKind::And)
+    return false;
+  for (uint32_t i : llvm::seq<uint32_t>(0, view.getLogicArgCount()))
+    if (!isCmpAndTree(view.getLogicArg(i)))
+      return false;
+  return true;
+}
+
+static bool isPredicateImplied(sym::Store &store, sym::PredHandle pred,
+                               ArrayRef<sym::PredHandle> assumptions) {
+  sym::PredView view(pred);
+  if (view.getKind() == sym::PredKind::And) {
+    for (uint32_t i : llvm::seq<uint32_t>(0, view.getLogicArgCount()))
+      if (!isPredicateImplied(store, view.getLogicArg(i), assumptions))
+        return false;
+    return true;
+  }
+  return sym::checkPredicate(store, pred, assumptions) ==
+         sym::CheckResult::True;
+}
+
 void mlir::wave::appendRangeAndAssumePredicates(
     sym::Store &store, Value binding, StringRef name,
     const ConstantIntRanges &range,
     SmallVectorImpl<sym::PredHandle> &assumptions) {
+  appendAssumePredicates(store, binding, name, assumptions);
   std::optional<sym::PredHandle> assumption =
       buildIndexExprRangeAssumption(store, name, range);
-  if (assumption)
+  if (assumption && !isPredicateImplied(store, *assumption, assumptions))
     assumptions.push_back(*assumption);
-  appendAssumePredicates(store, binding, name, assumptions);
 }
 
 static SmallVector<sym::PredHandle, 4> getPredicateHandles(ArrayAttr attrs) {
@@ -951,6 +978,59 @@ static SmallVector<sym::PredHandle, 4> getPredicateHandles(ArrayAttr attrs) {
   for (Attribute attr : attrs)
     handles.push_back(cast<PredAttr>(attr).getValue());
   return handles;
+}
+
+static void appendUniquePredicate(SmallVectorImpl<sym::PredHandle> &predicates,
+                                  sym::PredHandle pred) {
+  if (!llvm::is_contained(predicates, pred))
+    predicates.push_back(pred);
+}
+
+static bool isAlwaysTruePredicate(sym::PredHandle pred) {
+  return sym::PredView(pred).getKind() == sym::PredKind::True;
+}
+
+void mlir::wave::appendIndexExprPredicates(
+    IndexExprOp op, SmallVectorImpl<sym::PredHandle> &assumptions) {
+  for (sym::PredHandle pred : getPredicateHandles(op.getAssumptionsAttr()))
+    appendUniquePredicate(assumptions, pred);
+}
+
+ArrayAttr
+mlir::wave::getIndexExprPredArrayAttr(MLIRContext *ctx,
+                                      ArrayRef<sym::PredHandle> assumptions) {
+  SmallVector<sym::PredHandle, 4> unique;
+  for (sym::PredHandle pred : assumptions)
+    if (!isAlwaysTruePredicate(pred))
+      appendUniquePredicate(unique, pred);
+
+  SmallVector<Attribute, 4> attrs;
+  attrs.reserve(unique.size());
+  for (sym::PredHandle pred : unique)
+    attrs.push_back(PredAttr::get(ctx, pred));
+  return ArrayAttr::get(ctx, attrs);
+}
+
+static bool
+predicateSymbolsContained(sym::PredHandle pred,
+                          const llvm::DenseSet<StringRef> &symbols) {
+  bool contained = true;
+  sym::walkSymbolNames(pred, [&](StringRef name) {
+    if (!symbols.count(name))
+      contained = false;
+  });
+  return contained;
+}
+
+SmallVector<sym::PredHandle> mlir::wave::filterIndexExprPredicatesBySymbols(
+    ArrayRef<sym::PredHandle> assumptions,
+    const llvm::DenseSet<StringRef> &symbols) {
+  SmallVector<sym::PredHandle> filtered;
+  for (sym::PredHandle pred : assumptions)
+    if (!isAlwaysTruePredicate(pred) &&
+        predicateSymbolsContained(pred, symbols))
+      appendUniquePredicate(filtered, pred);
+  return filtered;
 }
 
 static std::optional<int64_t> floorRational(sym::RationalEndpoint value) {
@@ -1123,6 +1203,7 @@ void IndexExprOp::inferResultRanges(ArrayRef<ConstantIntRanges> argRanges,
   sym::Store &store = dialect->getSymbolStore();
 
   SmallVector<sym::PredHandle, 4> assumptions;
+  appendIndexExprPredicates(*this, assumptions);
   for (auto [nameAttr, binding, range] :
        llvm::zip(getNames(), getBindings(), argRanges)) {
     StringRef name = cast<StringAttr>(nameAttr).getValue();
@@ -1133,20 +1214,6 @@ void IndexExprOp::inferResultRanges(ArrayRef<ConstantIntRanges> argRanges,
   if (!range)
     return;
   setResultRange(getResult(), *range);
-}
-
-static bool isCmpAndTree(sym::PredHandle pred) {
-  sym::PredView view(pred);
-  if (!view.isValid())
-    return false;
-  if (view.getKind() == sym::PredKind::Cmp)
-    return true;
-  if (view.getKind() != sym::PredKind::And)
-    return false;
-  for (uint32_t i : llvm::seq<uint32_t>(0, view.getLogicArgCount()))
-    if (!isCmpAndTree(view.getLogicArg(i)))
-      return false;
-  return true;
 }
 
 LogicalResult AssumeOp::verify() {
@@ -1610,6 +1677,7 @@ mlir::wave::getIndexExprSymbolicOffset(IndexExprOp op) {
   SymbolicOffset offset;
   offset.expr = op.getExpr().getValue();
   offset.laneWidth = getSymbolicOffsetLaneWidth(op.getBindings());
+  appendIndexExprPredicates(op, offset.assumptions);
   for (auto [nameAttr, binding] : llvm::zip(op.getNames(), op.getBindings())) {
     StringRef name = cast<StringAttr>(nameAttr).getValue();
     FailureOr<sym::ExprHandle> sym = sym::composeExprSym(store, name);
@@ -1661,10 +1729,58 @@ static LogicalResult collectConstantIndexExprSubstitutions(
   return success();
 }
 
+FailureOr<SmallVector<sym::PredHandle>>
+mlir::wave::substituteIndexExprPredicates(
+    sym::Store &store, ArrayRef<sym::PredHandle> assumptions,
+    ArrayRef<sym::ExprSubstitution> substitutions) {
+  SmallVector<sym::PredHandle> substituted;
+  for (sym::PredHandle pred : assumptions) {
+    if (substitutions.empty()) {
+      substituted.push_back(pred);
+      continue;
+    }
+    FailureOr<sym::PredHandle> result =
+        sym::substitutePred(store, pred, substitutions);
+    if (failed(result))
+      return failure();
+    substituted.push_back(*result);
+  }
+  return substituted;
+}
+
 static void collectIndexExprFreeSymbols(sym::ExprHandle expr,
                                         llvm::DenseSet<StringRef> &symbols) {
   sym::walkSymbolNames(expr, [&](StringRef name) { symbols.insert(name); });
 }
+
+static Value preserveIndexExprResultType(OpBuilder &builder, Location loc,
+                                         Type targetType, Value value) {
+  if (value.getType() == targetType)
+    return value;
+  auto targetSimd = dyn_cast<SimdType>(targetType);
+  if (!targetSimd || value.getType() != targetSimd.getElementType())
+    return {};
+  return SplatOp::create(builder, loc, targetType, value);
+}
+
+static bool canPreserveIndexExprResultType(Type resultType, Type targetType) {
+  if (resultType == targetType)
+    return true;
+  auto targetSimd = dyn_cast<SimdType>(targetType);
+  return targetSimd && resultType == targetSimd.getElementType();
+}
+
+struct CanonicalIndexExprSimplification {
+  SmallVector<sym::PredHandle> assumptions;
+  sym::ExprHandle expr;
+};
+
+struct CanonicalIndexExprReplacement {
+  SmallVector<StringRef> names;
+  SmallVector<Value> bindings;
+  SmallVector<sym::PredHandle> assumptions;
+  Type resultType;
+};
 
 static void collectLiveIndexExprBindings(
     IndexExprOp op, const llvm::DenseSet<StringRef> &freeSymbols,
@@ -1676,6 +1792,63 @@ static void collectLiveIndexExprBindings(
     names.push_back(name);
     bindings.push_back(binding);
   }
+}
+
+static LogicalResult materializeLiteralIndexExpr(IndexExprOp op,
+                                                 PatternRewriter &rewriter) {
+  if (!op.getBindings().empty() || !op.getResult().getType().isIndex())
+    return failure();
+  std::optional<int64_t> value =
+      sym::getIntegerLiteralValue(op.getExpr().getValue());
+  if (!value)
+    return failure();
+  Value constant =
+      arith::ConstantIndexOp::create(rewriter, op.getLoc(), *value);
+  rewriter.replaceOp(op, constant);
+  return success();
+}
+
+static FailureOr<CanonicalIndexExprSimplification>
+substituteAndSimplifyIndexExpr(IndexExprOp op, sym::Store &store) {
+  SmallVector<sym::ExprSubstitution, 4> substitutions;
+  if (failed(collectConstantIndexExprSubstitutions(op, store, substitutions)))
+    return failure();
+
+  SmallVector<sym::PredHandle, 4> assumptions;
+  appendIndexExprPredicates(op, assumptions);
+  FailureOr<SmallVector<sym::PredHandle>> substitutedAssumptions =
+      substituteIndexExprPredicates(store, assumptions, substitutions);
+  if (failed(substitutedAssumptions))
+    return failure();
+
+  FailureOr<sym::ExprHandle> substituted =
+      sym::substituteExpr(store, op.getExpr().getValue(), substitutions);
+  if (failed(substituted))
+    return failure();
+  FailureOr<sym::ExprHandle> simplified =
+      substitutedAssumptions->empty()
+          ? sym::simplifyExpr(store, *substituted)
+          : sym::simplifyExpr(store, *substituted, *substitutedAssumptions);
+  if (failed(simplified))
+    return failure();
+
+  return CanonicalIndexExprSimplification{std::move(*substitutedAssumptions),
+                                          *simplified};
+}
+
+static CanonicalIndexExprReplacement buildCanonicalIndexExprReplacement(
+    IndexExprOp op, const CanonicalIndexExprSimplification &simplification) {
+  llvm::DenseSet<StringRef> freeSymbols;
+  collectIndexExprFreeSymbols(simplification.expr, freeSymbols);
+
+  CanonicalIndexExprReplacement replacement;
+  replacement.assumptions = filterIndexExprPredicatesBySymbols(
+      simplification.assumptions, freeSymbols);
+  collectLiveIndexExprBindings(op, freeSymbols, replacement.names,
+                               replacement.bindings);
+  replacement.resultType =
+      getIndexExprResultType(op.getContext(), replacement.bindings);
+  return replacement;
 }
 
 namespace {
@@ -1728,54 +1901,37 @@ struct CanonicalizeIndexExprOp : OpRewritePattern<IndexExprOp> {
 
   LogicalResult matchAndRewrite(IndexExprOp op,
                                 PatternRewriter &rewriter) const override {
-    if (op.getBindings().empty() && op.getResult().getType().isIndex()) {
-      std::optional<int64_t> value =
-          sym::getIntegerLiteralValue(op.getExpr().getValue());
-      if (value) {
-        Value constant =
-            arith::ConstantIndexOp::create(rewriter, op.getLoc(), *value);
-        rewriter.replaceOp(op, constant);
-        return success();
-      }
-    }
+    if (succeeded(materializeLiteralIndexExpr(op, rewriter)))
+      return success();
 
     auto *dialect = op->getContext()->getLoadedDialect<WaveDialect>();
     if (!dialect)
       return failure();
-    sym::Store &store = dialect->getSymbolStore();
-
-    SmallVector<sym::ExprSubstitution, 4> substitutions;
-    if (failed(collectConstantIndexExprSubstitutions(op, store, substitutions)))
-      return failure();
-
-    FailureOr<sym::ExprHandle> substituted =
-        sym::substituteExpr(store, op.getExpr().getValue(), substitutions);
-    if (failed(substituted))
-      return failure();
-    FailureOr<sym::ExprHandle> simplified =
-        sym::simplifyExpr(store, *substituted);
+    FailureOr<CanonicalIndexExprSimplification> simplified =
+        substituteAndSimplifyIndexExpr(op, dialect->getSymbolStore());
     if (failed(simplified))
       return failure();
 
-    llvm::DenseSet<StringRef> freeSymbols;
-    collectIndexExprFreeSymbols(*simplified, freeSymbols);
-
-    SmallVector<StringRef> names;
-    SmallVector<Value> bindings;
-    collectLiveIndexExprBindings(op, freeSymbols, names, bindings);
-
-    bool exprChanged = !(*simplified == op.getExpr().getValue());
-    bool bindingsChanged = bindings.size() != op.getBindings().size();
+    CanonicalIndexExprReplacement replacement =
+        buildCanonicalIndexExprReplacement(op, *simplified);
+    bool exprChanged = !(simplified->expr == op.getExpr().getValue());
+    bool bindingsChanged =
+        replacement.bindings.size() != op.getBindings().size();
     if (!exprChanged && !bindingsChanged)
       return failure();
 
-    Type resultType = getIndexExprResultType(op.getContext(), bindings);
+    if (!canPreserveIndexExprResultType(replacement.resultType,
+                                        op.getResult().getType()))
+      return failure();
 
-    auto replacement =
-        IndexExprOp::create(rewriter, op.getLoc(), resultType,
-                            ExprAttr::get(op.getContext(), *simplified),
-                            rewriter.getStrArrayAttr(names), bindings);
-    rewriter.replaceOp(op, replacement.getResult());
+    auto newOp = IndexExprOp::create(
+        rewriter, op.getLoc(), replacement.resultType,
+        ExprAttr::get(op.getContext(), simplified->expr),
+        getIndexExprPredArrayAttr(op.getContext(), replacement.assumptions),
+        rewriter.getStrArrayAttr(replacement.names), replacement.bindings);
+    Value result = preserveIndexExprResultType(
+        rewriter, op.getLoc(), op.getResult().getType(), newOp.getResult());
+    rewriter.replaceOp(op, result);
     return success();
   }
 };
@@ -1803,6 +1959,18 @@ LogicalResult IndexExprOp::verify() {
   llvm::DenseSet<StringRef> bindingNames;
   if (failed(verifyIndexExprNames(names, freeSymbols, bindingNames, emit)))
     return failure();
+
+  for (auto [index, attr] : llvm::enumerate(getAssumptionsAttr())) {
+    sym::PredHandle pred = cast<PredAttr>(attr).getValue();
+    std::optional<StringRef> badName;
+    sym::walkSymbolNames(pred, [&](StringRef name) {
+      if (!bindingNames.count(name) && !badName)
+        badName = name;
+    });
+    if (badName)
+      return emit("assumption #")
+             << index << " references undeclared symbol `" << *badName << "`";
+  }
 
   auto laneWidth = reduceIndexBindingWidth(bindings, emit);
   if (failed(laneWidth))

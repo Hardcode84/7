@@ -117,11 +117,15 @@ static FailureOr<Value> scaleOffset(Operation *diagOp, Location loc,
     return diagOp->emitError("failed to compose pointer offset scale");
 
   StringRef name = "orig";
+  SmallVector<sym::PredHandle> assumptions;
+  appendAssumePredicates(dialect->getSymbolStore(), offset, name, assumptions);
   Type resultType =
       getIndexExprResultType(offset.getContext(), ValueRange{offset});
-  return IndexExprOp::create(rewriter, loc, resultType,
-                             ExprAttr::get(offset.getContext(), *expr),
-                             rewriter.getStrArrayAttr(name), offset)
+  return IndexExprOp::create(
+             rewriter, loc, resultType,
+             ExprAttr::get(offset.getContext(), *expr),
+             getIndexExprPredArrayAttr(offset.getContext(), assumptions),
+             rewriter.getStrArrayAttr(name), offset)
       .getResult();
 }
 

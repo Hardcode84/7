@@ -31,7 +31,7 @@ func.func @scale_constant(%p: !wave.ptr<#wave.global, f16>)
 // COMPOSE-LABEL: func.func @scale_index_expr
 // COMPOSE-SAME: ([[P:%.*]]: !wave.ptr<#wave.global>, [[K:%.*]]: index)
 // COMPOSE: [[LANE:%.*]] = wave.lane_id : !wave.simd<i32, 32>
-// COMPOSE: [[SCALED:%.*]] = wave.index_expr <"2*k + 2*lane"> ["k", "lane"]([[K]], [[LANE]]) : (index, !wave.simd<i32, 32>) -> !wave.simd<index, 32>
+// COMPOSE: [[SCALED:%.*]] = wave.index_expr <"2*k + 2*lane"> assuming [#wave.pred<"lane >= 0 & -31 + lane <= 0">] ["k", "lane"]([[K]], [[LANE]]) : (index, !wave.simd<i32, 32>) -> !wave.simd<index, 32>
 // COMPOSE: wave.ptr_add [[P]], [[SCALED]] : !wave.ptr<#wave.global>, !wave.simd<index, 32> -> !wave.simd<!wave.ptr<#wave.global>, 32>
 func.func @scale_index_expr(%p: !wave.ptr<#wave.global, f16>, %k: index)
     -> !wave.simd<!wave.ptr<#wave.global, f16>, 32> attributes {wave.kernel} {

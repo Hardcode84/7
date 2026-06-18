@@ -45,7 +45,10 @@ public:
         return failure();
       expr = *zero;
     }
-    FailureOr<sym::ExprHandle> simplified = sym::simplifyExpr(store, expr);
+    FailureOr<sym::ExprHandle> simplified =
+        offset.assumptions.empty()
+            ? sym::simplifyExpr(store, expr)
+            : sym::simplifyExpr(store, expr, offset.assumptions);
     if (failed(simplified))
       return failure();
     offset.expr = *simplified;
@@ -88,7 +91,12 @@ private:
       offset.laneWidth = std::max(offset.laneWidth, symbolic.laneWidth);
       substitutions.push_back({binding.name, *replacement});
     }
-    llvm::append_range(offset.assumptions, symbolic.assumptions);
+    FailureOr<SmallVector<sym::PredHandle>> assumptions =
+        substituteIndexExprPredicates(store, symbolic.assumptions,
+                                      substitutions);
+    if (failed(assumptions))
+      return failure();
+    llvm::append_range(offset.assumptions, *assumptions);
 
     sym::ExprHandle expr = symbolic.expr;
     if (!substitutions.empty()) {

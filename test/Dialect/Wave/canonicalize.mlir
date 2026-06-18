@@ -100,3 +100,15 @@ func.func @assume_chain_merge(%x: i32) -> i32 {
   %bounded = wave.assume %lo as "y" [#wave.pred<"y <= 10">] : i32
   return %bounded : i32
 }
+
+// CHECK-LABEL: func.func @index_expr_scalarizes_to_splat
+// CHECK-SAME: (%[[LANE:.*]]: !wave.simd<i32, 32>)
+// CHECK: %[[ZERO:.*]] = arith.constant 0 : index
+// CHECK: %[[SPLAT:.*]] = wave.splat %[[ZERO]] : index -> !wave.simd<index, 32>
+// CHECK: return %[[SPLAT]] : !wave.simd<index, 32>
+func.func @index_expr_scalarizes_to_splat(%lane: !wave.simd<i32, 32>)
+    -> !wave.simd<index, 32> {
+  %off = wave.index_expr <"floor(1/32*lid)"> assuming [#wave.pred<"lid >= 0 & -31 + lid <= 0">] ["lid"](%lane)
+      : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
+  return %off : !wave.simd<index, 32>
+}

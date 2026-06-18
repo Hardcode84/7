@@ -42,9 +42,8 @@ static std::optional<int64_t> getSExtI64(const APInt &value) {
   return value.getSExtValue();
 }
 
-static std::optional<sym::PredHandle>
-buildRangeAssumption(DataFlowSolver &solver, sym::Store &store, Value binding,
-                     StringRef name) {
+static std::optional<ConstantIntRanges> getFiniteRange(DataFlowSolver &solver,
+                                                       Value binding) {
   const dataflow::IntegerValueRangeLattice *lattice =
       solver.lookupState<dataflow::IntegerValueRangeLattice>(binding);
   if (!lattice)
@@ -56,30 +55,35 @@ buildRangeAssumption(DataFlowSolver &solver, sym::Store &store, Value binding,
   ConstantIntRanges range = ivr.getValue();
   if (isFullSignedRange(range))
     return std::nullopt;
-  std::optional<int64_t> lo = getSExtI64(range.smin());
-  std::optional<int64_t> hi = getSExtI64(range.smax());
-  if (!lo || !hi)
+  if (!getSExtI64(range.smin()) || !getSExtI64(range.smax()))
     return std::nullopt;
-
-  FailureOr<sym::PredHandle> assumption =
-      sym::rangeAssumption(store, name, *lo, *hi);
-  if (failed(assumption))
-    return std::nullopt;
-  return *assumption;
+  return range;
 }
 
 static SmallVector<sym::PredHandle>
 collectIndexExprAssumptions(IndexExprOp op, DataFlowSolver &solver,
                             sym::Store &store) {
   SmallVector<sym::PredHandle> assumptions;
+  appendIndexExprPredicates(op, assumptions);
   for (auto [nameAttr, binding] : llvm::zip(op.getNames(), op.getBindings())) {
     StringRef name = cast<StringAttr>(nameAttr).getValue();
-    if (std::optional<sym::PredHandle> assumption =
-            buildRangeAssumption(solver, store, binding, name))
-      assumptions.push_back(*assumption);
-    appendAssumePredicates(store, binding, name, assumptions);
+    if (std::optional<ConstantIntRanges> range =
+            getFiniteRange(solver, binding))
+      appendRangeAndAssumePredicates(store, binding, name, *range, assumptions);
+    else
+      appendAssumePredicates(store, binding, name, assumptions);
   }
   return assumptions;
+}
+
+static bool samePredicates(ArrayAttr attrs,
+                           ArrayRef<sym::PredHandle> assumptions) {
+  if (attrs.size() != assumptions.size())
+    return false;
+  for (auto [attr, pred] : llvm::zip(attrs, assumptions))
+    if (!(cast<PredAttr>(attr).getValue() == pred))
+      return false;
+  return true;
 }
 
 static void collectFreeSymbols(sym::ExprHandle expr,
@@ -102,13 +106,24 @@ static void collectLiveBindings(IndexExprOp op,
 
 static bool rewriteIndexExpr(IRRewriter &rewriter, IndexExprOp op,
                              sym::ExprHandle expr, ArrayRef<StringRef> names,
-                             ValueRange bindings) {
+                             ValueRange bindings,
+                             ArrayRef<sym::PredHandle> assumptions) {
   Type resultType = getIndexExprResultType(op.getContext(), bindings);
+  Type targetType = op.getResult().getType();
+  auto targetSimd = dyn_cast<SimdType>(targetType);
+  bool needsSplat = targetSimd && resultType == targetSimd.getElementType();
+  if (resultType != targetType && !needsSplat)
+    return false;
+
   rewriter.setInsertionPoint(op);
   auto replacement = IndexExprOp::create(
       rewriter, op.getLoc(), resultType, ExprAttr::get(op.getContext(), expr),
+      getIndexExprPredArrayAttr(op.getContext(), assumptions),
       rewriter.getStrArrayAttr(names), bindings);
-  rewriter.replaceOp(op, replacement.getResult());
+  Value result = replacement.getResult();
+  if (needsSplat)
+    result = SplatOp::create(rewriter, op.getLoc(), targetType, result);
+  rewriter.replaceOp(op, result);
   return true;
 }
 
@@ -136,6 +151,8 @@ static FailureOr<bool> simplifyIndexExpr(IRRewriter &rewriter, IndexExprOp op,
 
   llvm::DenseSet<StringRef> freeSymbols;
   collectFreeSymbols(*simplified, freeSymbols);
+  SmallVector<sym::PredHandle> liveAssumptions =
+      filterIndexExprPredicatesBySymbols(assumptions, freeSymbols);
 
   SmallVector<StringRef> names;
   SmallVector<Value> bindings;
@@ -143,10 +160,13 @@ static FailureOr<bool> simplifyIndexExpr(IRRewriter &rewriter, IndexExprOp op,
 
   bool exprChanged = !(*simplified == op.getExpr().getValue());
   bool bindingsChanged = bindings.size() != op.getBindings().size();
-  if (!exprChanged && !bindingsChanged)
+  bool assumptionsChanged =
+      !samePredicates(op.getAssumptionsAttr(), liveAssumptions);
+  if (!exprChanged && !bindingsChanged && !assumptionsChanged)
     return false;
 
-  return rewriteIndexExpr(rewriter, op, *simplified, names, bindings);
+  return rewriteIndexExpr(rewriter, op, *simplified, names, bindings,
+                          liveAssumptions);
 }
 
 struct WaveSimplifyIndexExprsPass

@@ -171,8 +171,8 @@ func.func @nested_cross_iv(%a: !wave.ptr<#wave.global, f16>, %n: i32,
 // CHECK-LABEL: func.func @simd_stride_scalar_base
 // CHECK: %[[WI:.*]] = wave.workitem_id 0
 // CHECK: %[[ZERO:.*]] = wave.index_expr <"0"> []() : () -> index
-// CHECK: %[[SCALAR_PTR:.*]] = wave.ptr_add %{{.*}}, %[[ZERO]]
-// CHECK: %[[BASE_PTR:.*]] = wave.splat %[[SCALAR_PTR]]
+// CHECK: %[[ZERO_SIMD:.*]] = wave.splat %[[ZERO]] : index -> !wave.simd<index, 32>
+// CHECK: %[[BASE_PTR:.*]] = wave.ptr_add %{{.*}}, %[[ZERO_SIMD]]
 // CHECK: %[[STRIDE:.*]] = wave.index_expr <"16*wi"> ["wi"](%[[WI]]) : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
 // CHECK: scf.for %[[I:.*]] = {{.*}} iter_args(%[[PTR:.*]] = %[[BASE_PTR]])
 // CHECK: %[[NEXT:.*]] = wave.ptr_add %[[PTR]], %[[STRIDE]]

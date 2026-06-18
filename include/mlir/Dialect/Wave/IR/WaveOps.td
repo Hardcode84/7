@@ -451,11 +451,12 @@ def Wave_IndexExprOp : Wave_Op<"index_expr", [Pure,
   }];
 
   let arguments = (ins Wave_ExprAttr:$expr,
+                       DefaultValuedAttr<Wave_PredArrayAttr, "{}">:$assumptions,
                        StrArrayAttr:$names,
                        Variadic<AnyType>:$bindings);
   let results = (outs Wave_IndexValue:$result);
   let assemblyFormat = [{
-    $expr $names `(` $bindings `)` attr-dict
+    $expr (`assuming` $assumptions^)? $names `(` $bindings `)` attr-dict
     `:` functional-type($bindings, $result)
   }];
   let hasVerifier = 1;

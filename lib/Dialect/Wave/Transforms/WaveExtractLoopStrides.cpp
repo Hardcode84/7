@@ -38,6 +38,7 @@ struct NamedBinding {
 
 struct BoundExpr {
   sym::ExprHandle expr;
+  SmallVector<sym::PredHandle> assumptions;
   SmallVector<std::string> names;
   SmallVector<Value> bindings;
 };
@@ -122,12 +123,15 @@ static void collectOriginalBindings(IndexExprOp op, StringRef ivName,
 
 static FailureOr<BoundExpr> bindLiveExpr(IndexExprOp op, sym::ExprHandle expr,
                                          StringRef ivName,
+                                         ArrayRef<sym::PredHandle> assumptions,
                                          ArrayRef<NamedBinding> extraBindings) {
   if (hasSymbol(expr, ivName))
     return failure();
 
   llvm::DenseSet<StringRef> freeSymbols;
   collectFreeSymbols(expr, freeSymbols);
+  SmallVector<sym::PredHandle> liveAssumptions =
+      filterIndexExprPredicatesBySymbols(assumptions, freeSymbols);
 
   SmallVector<NamedBinding> available;
   collectOriginalBindings(op, ivName, available);
@@ -147,15 +151,19 @@ static FailureOr<BoundExpr> bindLiveExpr(IndexExprOp op, sym::ExprHandle expr,
       return failure();
 
   out.expr = expr;
+  out.assumptions = std::move(liveAssumptions);
   return out;
 }
 
-static FailureOr<sym::ExprHandle> simplifyExpanded(sym::Store &store,
-                                                   sym::ExprHandle expr) {
+static FailureOr<sym::ExprHandle>
+simplifyExpanded(sym::Store &store, sym::ExprHandle expr,
+                 ArrayRef<sym::PredHandle> assumptions) {
   FailureOr<sym::ExprHandle> expanded = sym::expandExpr(store, expr);
   if (failed(expanded))
     return failure();
-  return sym::simplifyExpr(store, *expanded);
+  if (assumptions.empty())
+    return sym::simplifyExpr(store, *expanded);
+  return sym::simplifyExpr(store, *expanded, assumptions);
 }
 
 static FailureOr<BoundExpr> buildBaseExpr(IndexExprOp op, StringRef ivName,
@@ -174,10 +182,17 @@ static FailureOr<BoundExpr> buildBaseExpr(IndexExprOp op, StringRef ivName,
       sym::substituteExpr(store, op.getExpr().getValue(), {{*iv, *lower}});
   if (failed(substituted))
     return failure();
-  FailureOr<sym::ExprHandle> simplified = simplifyExpanded(store, *substituted);
+  SmallVector<sym::PredHandle> assumptions;
+  appendIndexExprPredicates(op, assumptions);
+  FailureOr<SmallVector<sym::PredHandle>> substitutedAssumptions =
+      substituteIndexExprPredicates(store, assumptions, {{*iv, *lower}});
+  if (failed(substitutedAssumptions))
+    return failure();
+  FailureOr<sym::ExprHandle> simplified =
+      simplifyExpanded(store, *substituted, *substitutedAssumptions);
   if (failed(simplified))
     return failure();
-  return bindLiveExpr(op, *simplified, ivName, extra);
+  return bindLiveExpr(op, *simplified, ivName, *substitutedAssumptions, extra);
 }
 
 static FailureOr<BoundExpr> buildStrideExpr(IndexExprOp op, StringRef ivName,
@@ -206,12 +221,15 @@ static FailureOr<BoundExpr> buildStrideExpr(IndexExprOp op, StringRef ivName,
       store, *next, sym::ExprBinaryOp::Sub, op.getExpr().getValue());
   if (failed(diff))
     return failure();
-  FailureOr<sym::ExprHandle> simplified = simplifyExpanded(store, *diff);
+  SmallVector<sym::PredHandle> assumptions;
+  appendIndexExprPredicates(op, assumptions);
+  FailureOr<sym::ExprHandle> simplified =
+      simplifyExpanded(store, *diff, assumptions);
   if (failed(simplified))
     return failure();
   if (sym::getIntegerLiteralValue(*simplified) == int64_t{0})
     return failure();
-  return bindLiveExpr(op, *simplified, ivName, extra);
+  return bindLiveExpr(op, *simplified, ivName, assumptions, extra);
 }
 
 static std::optional<std::string> findIVBinding(IndexExprOp op, Value iv) {
@@ -309,6 +327,19 @@ static bool isScalarOffset(Type type) {
   return false;
 }
 
+static bool needsSimdOffset(Type resultType, Type baseType, Type offsetType) {
+  return isa<SimdType>(resultType) && isa<PtrType>(baseType) &&
+         isScalarOffset(offsetType);
+}
+
+static Type getSimdOffsetType(Type resultType, Type offsetType) {
+  if (!offsetType.isIndex() && !offsetType.isInteger(32))
+    return {};
+  auto resultSimd = cast<SimdType>(resultType);
+  return SimdType::get(resultType.getContext(), offsetType,
+                       resultSimd.getWidth());
+}
+
 static IndexExprOp createIndexExpr(IRRewriter &rewriter, Location loc,
                                    MLIRContext *ctx, const BoundExpr &expr,
                                    IRMapping *map = nullptr) {
@@ -320,24 +351,28 @@ static IndexExprOp createIndexExpr(IRRewriter &rewriter, Location loc,
     bindings.push_back(map ? map->lookupOrDefault(binding) : binding);
   Type type = getIndexExprResultType(ctx, bindings);
   return IndexExprOp::create(rewriter, loc, type, ExprAttr::get(ctx, expr.expr),
+                             getIndexExprPredArrayAttr(ctx, expr.assumptions),
                              rewriter.getStrArrayAttr(nameRefs), bindings);
 }
 
-static Value createPtrAdd(IRRewriter &rewriter, Location loc, Type resultType,
-                          Value base, Value offset) {
-  if (isa<SimdType>(resultType) && isa<PtrType>(base.getType()) &&
-      isScalarOffset(offset.getType())) {
-    PtrAddOp scalarPtr =
-        PtrAddOp::create(rewriter, loc, base.getType(), base, offset);
-    return SplatOp::create(rewriter, loc, resultType, scalarPtr.getResult());
+static FailureOr<Value> createPtrAdd(IRRewriter &rewriter, Location loc,
+                                     Type resultType, Value base,
+                                     Value offset) {
+  if (needsSimdOffset(resultType, base.getType(), offset.getType())) {
+    Type offsetType = getSimdOffsetType(resultType, offset.getType());
+    if (!offsetType)
+      return failure();
+    Value simdOffset = SplatOp::create(rewriter, loc, offsetType, offset);
+    return PtrAddOp::create(rewriter, loc, resultType, base, simdOffset)
+        .getResult();
   }
   return PtrAddOp::create(rewriter, loc, resultType, base, offset).getResult();
 }
 
-static void cloneBodyWithCarriedPointer(IRRewriter &rewriter, scf::ForOp src,
-                                        scf::ForOp dst,
-                                        LoopStrideCandidate candidate,
-                                        Value strideValue) {
+static LogicalResult cloneBodyWithCarriedPointer(IRRewriter &rewriter,
+                                                 scf::ForOp src, scf::ForOp dst,
+                                                 LoopStrideCandidate candidate,
+                                                 Value strideValue) {
   Block &srcBody = *src.getBody();
   Block &dstBody = *dst.getBody();
   Value ptrCarry = dstBody.getArgument(srcBody.getNumArguments());
@@ -362,10 +397,14 @@ static void cloneBodyWithCarriedPointer(IRRewriter &rewriter, scf::ForOp src,
   for (Value value : srcYield.getOperands())
     yielded.push_back(map.lookupOrDefault(value));
 
-  yielded.push_back(createPtrAdd(rewriter, candidate.ptrAdd.getLoc(),
-                                 candidate.ptrAdd.getType(), ptrCarry,
-                                 map.lookupOrDefault(strideValue)));
+  FailureOr<Value> nextPtr = createPtrAdd(rewriter, candidate.ptrAdd.getLoc(),
+                                          candidate.ptrAdd.getType(), ptrCarry,
+                                          map.lookupOrDefault(strideValue));
+  if (failed(nextPtr))
+    return failure();
+  yielded.push_back(*nextPtr);
   scf::YieldOp::create(rewriter, srcYield.getLoc(), yielded);
+  return success();
 }
 
 static void copyLoopAttrs(scf::ForOp src, scf::ForOp dst) {
@@ -373,30 +412,34 @@ static void copyLoopAttrs(scf::ForOp src, scf::ForOp dst) {
     dst->setAttr(attr.getName(), attr.getValue());
 }
 
-static void rewriteLoop(IRRewriter &rewriter, scf::ForOp loop,
-                        LoopStrideCandidate candidate) {
+static LogicalResult rewriteLoop(IRRewriter &rewriter, scf::ForOp loop,
+                                 LoopStrideCandidate candidate) {
   Location loc = loop.getLoc();
   rewriter.setInsertionPoint(loop);
   IndexExprOp base = createIndexExpr(rewriter, candidate.indexExpr.getLoc(),
                                      loop->getContext(), candidate.base);
-  Value basePtr = createPtrAdd(rewriter, candidate.ptrAdd.getLoc(),
-                               candidate.ptrAdd.getType(),
-                               candidate.ptrAdd.getBase(), base.getResult());
+  FailureOr<Value> basePtr = createPtrAdd(
+      rewriter, candidate.ptrAdd.getLoc(), candidate.ptrAdd.getType(),
+      candidate.ptrAdd.getBase(), base.getResult());
+  if (failed(basePtr))
+    return failure();
   IndexExprOp stride = createIndexExpr(rewriter, candidate.ptrAdd.getLoc(),
                                        loop->getContext(), candidate.stride);
 
   SmallVector<Value> initArgs(loop.getInitArgs().begin(),
                               loop.getInitArgs().end());
-  initArgs.push_back(basePtr);
+  initArgs.push_back(*basePtr);
   scf::ForOp newLoop =
       scf::ForOp::create(rewriter, loc, loop.getLowerBound(),
                          loop.getUpperBound(), loop.getStep(), initArgs);
   copyLoopAttrs(loop, newLoop);
-  cloneBodyWithCarriedPointer(rewriter, loop, newLoop, candidate,
-                              stride.getResult());
+  if (failed(cloneBodyWithCarriedPointer(rewriter, loop, newLoop, candidate,
+                                         stride.getResult())))
+    return failure();
 
   rewriter.replaceOp(loop,
                      newLoop.getResults().take_front(loop.getNumResults()));
+  return success();
 }
 
 static FailureOr<bool> rewriteOneLoop(IRRewriter &rewriter, scf::ForOp loop,
@@ -407,7 +450,8 @@ static FailureOr<bool> rewriteOneLoop(IRRewriter &rewriter, scf::ForOp loop,
     return failure();
   if (!*candidate)
     return false;
-  rewriteLoop(rewriter, loop, **candidate);
+  if (failed(rewriteLoop(rewriter, loop, **candidate)))
+    return failure();
   return true;
 }
 

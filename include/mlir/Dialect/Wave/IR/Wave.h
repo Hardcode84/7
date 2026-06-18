@@ -19,6 +19,7 @@
 #include "mlir/Interfaces/InferIntRangeInterface.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringMap.h"
 
@@ -90,6 +91,17 @@ void appendRangeAndAssumePredicates(
     sym::Store &store, Value binding, StringRef name,
     const ConstantIntRanges &range,
     SmallVectorImpl<sym::PredHandle> &assumptions);
+void appendIndexExprPredicates(IndexExprOp op,
+                               SmallVectorImpl<sym::PredHandle> &assumptions);
+ArrayAttr getIndexExprPredArrayAttr(MLIRContext *ctx,
+                                    ArrayRef<sym::PredHandle> assumptions);
+FailureOr<SmallVector<sym::PredHandle>>
+substituteIndexExprPredicates(sym::Store &store,
+                              ArrayRef<sym::PredHandle> assumptions,
+                              ArrayRef<sym::ExprSubstitution> substitutions);
+SmallVector<sym::PredHandle>
+filterIndexExprPredicatesBySymbols(ArrayRef<sym::PredHandle> assumptions,
+                                   const llvm::DenseSet<StringRef> &symbols);
 FailureOr<SymbolicOffset> getIndexExprSymbolicOffset(IndexExprOp op);
 FailureOr<MemoryPayloadShape> getMemoryPayloadShape(
     Type elementType,

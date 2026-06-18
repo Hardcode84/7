@@ -180,6 +180,55 @@ func.func @merge_nested_index_expr(%out: !wave.ptr<#wave.global, i32>,
 
 // -----
 
+// CHECK-LABEL: func.func @merge_nested_index_expr_through_assume
+func.func @merge_nested_index_expr_through_assume(%out: !wave.ptr<#wave.global, i32>,
+                                                  %lane: !wave.simd<i32, 32>) attributes {wave.kernel} {
+  %inner = wave.index_expr <"lid"> ["lid"](%lane)
+      : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
+  %bounded = wave.assume %inner as "x" [#wave.pred<"x >= 0">]
+      : !wave.simd<index, 32>
+  %outer = wave.index_expr <"4*x"> ["x"](%bounded)
+      : (!wave.simd<index, 32>) -> !wave.simd<index, 32>
+  // CHECK-NOT: wave.assume
+  // CHECK: %[[OFF:.*]] = wave.index_expr <"4*lid"> assuming [#wave.pred<"lid >= 0">] ["lid"](%arg1) : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
+  // CHECK: wave.ptr_add %arg0, %[[OFF]]
+  %ptrs = wave.ptr_add %out, %outer
+      : !wave.ptr<#wave.global, i32>, !wave.simd<index, 32>
+      -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
+  %value, %token = wave.load %ptrs
+      : (!wave.simd<!wave.ptr<#wave.global, i32>, 32>)
+      -> (!wave.simd<i32, 32>, !wave.mem.token)
+  return
+}
+
+// -----
+
+// CHECK-LABEL: func.func @merge_nested_index_expr_through_assume_chain
+// CHECK-SAME: (%[[OUT:.*]]: !wave.ptr<#wave.global, i32>, %[[LANE:.*]]: !wave.simd<i32, 32>)
+func.func @merge_nested_index_expr_through_assume_chain(%out: !wave.ptr<#wave.global, i32>,
+                                                        %lane: !wave.simd<i32, 32>) attributes {wave.kernel} {
+  %inner = wave.index_expr <"lid"> ["lid"](%lane)
+      : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
+  %bounded = wave.assume %inner as "x" [#wave.pred<"x >= 0">]
+      : !wave.simd<index, 32>
+  %bounded2 = wave.assume %bounded as "y" [#wave.pred<"y <= 31">]
+      : !wave.simd<index, 32>
+  %outer = wave.index_expr <"2*x"> ["x"](%bounded2)
+      : (!wave.simd<index, 32>) -> !wave.simd<index, 32>
+  // CHECK-NOT: wave.assume
+  // CHECK: %[[OFF:.*]] = wave.index_expr <"2*lid"> assuming {{.*}} ["lid"](%[[LANE]]) : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
+  // CHECK: wave.ptr_add %[[OUT]], %[[OFF]]
+  %ptrs = wave.ptr_add %out, %outer
+      : !wave.ptr<#wave.global, i32>, !wave.simd<index, 32>
+      -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
+  %value, %token = wave.load %ptrs
+      : (!wave.simd<!wave.ptr<#wave.global, i32>, 32>)
+      -> (!wave.simd<i32, 32>, !wave.mem.token)
+  return
+}
+
+// -----
+
 // CHECK-LABEL: func.func @merge_nested_index_expr_collision
 func.func @merge_nested_index_expr_collision(%out: !wave.ptr<#wave.global, i32>,
                                              %a: !wave.simd<i32, 32>,
@@ -219,4 +268,28 @@ func.func @merge_nested_index_expr_reuse_binding(%out: !wave.ptr<#wave.global, i
       : (!wave.simd<!wave.ptr<#wave.global, i32>, 32>)
       -> (!wave.simd<i32, 32>, !wave.mem.token)
   return
+}
+
+// -----
+
+// CHECK-LABEL: func.func @ptr_add_scalarized_offset_is_splatted
+// CHECK-SAME: (%[[OUT:.*]]: !wave.ptr<#wave.global, i32>, %[[LANE:.*]]: !wave.simd<i32, 32>)
+// CHECK: %[[OFF:.*]] = wave.index_expr <"4"> []() : () -> index
+// CHECK: %[[VOFF:.*]] = wave.splat %[[OFF]] : index -> !wave.simd<index, 32>
+// CHECK: %[[PTR:.*]] = wave.ptr_add %[[OUT]], %[[VOFF]] : !wave.ptr<#wave.global, i32>, !wave.simd<index, 32> -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
+// CHECK: return %[[PTR]] : !wave.simd<!wave.ptr<#wave.global, i32>, 32>
+func.func @ptr_add_scalarized_offset_is_splatted(
+    %out: !wave.ptr<#wave.global, i32>,
+    %lane: !wave.simd<i32, 32>)
+    -> !wave.simd<!wave.ptr<#wave.global, i32>, 32> attributes {wave.kernel} {
+  %off = wave.index_expr <"floor(1/32*lid)"> assuming [#wave.pred<"lid >= 0 & -31 + lid <= 0">] ["lid"](%lane)
+      : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
+  %base = wave.ptr_add %out, %off
+      : !wave.ptr<#wave.global, i32>, !wave.simd<index, 32>
+      -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
+  %c4 = arith.constant 4 : index
+  %ptr = wave.ptr_add %base, %c4
+      : !wave.simd<!wave.ptr<#wave.global, i32>, 32>, index
+      -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
+  return %ptr : !wave.simd<!wave.ptr<#wave.global, i32>, 32>
 }
