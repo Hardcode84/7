@@ -147,3 +147,56 @@ func.func @bounded_dynamic_signed_index_uses_i32(%x: index, %d: index)
   %r = wave.binary remsi %bx, %bd : index, index -> index
   return %q, %r : index, index
 }
+
+// -----
+
+// CHECK-LABEL: func.func @bounded_dynamic_simd_i64_rem_uses_i32
+// CHECK-SAME: ([[X:%.*]]: !wave.simd<i64, 32>, [[D:%.*]]: !wave.simd<i64, 32>)
+// CHECK: [[BX:%.*]] = wave.assume [[X]]
+// CHECK: [[BD:%.*]] = wave.assume [[D]]
+// CHECK: [[X32:%.*]] = wave.cast intconvert [[BX]] : !wave.simd<i64, 32> -> !wave.simd<i32, 32>
+// CHECK: [[D32:%.*]] = wave.cast intconvert [[BD]] : !wave.simd<i64, 32> -> !wave.simd<i32, 32>
+// CHECK: [[RCP:%.*]] = wave.urecip [[D32]]
+// CHECK: wave.binary mulhui [[RCP]]
+// CHECK: wave.binary mulhui [[X32]]
+// CHECK: wave.cast intconvert {{.*}} policy {extension = #wave.cast_extension<zero>} : !wave.simd<i32, 32> -> !wave.simd<i64, 32>
+// CHECK-NOT: remui
+func.func @bounded_dynamic_simd_i64_rem_uses_i32(
+    %x: !wave.simd<i64, 32>, %d: !wave.simd<i64, 32>)
+    -> !wave.simd<i64, 32> {
+  %bx = wave.assume %x as "x" [#wave.pred<"x >= 0">,
+                                #wave.pred<"x <= 1024">]
+      : !wave.simd<i64, 32>
+  %bd = wave.assume %d as "d" [#wave.pred<"d >= 1">,
+                                #wave.pred<"d <= 1024">]
+      : !wave.simd<i64, 32>
+  %r = wave.binary remui %bx, %bd
+      : !wave.simd<i64, 32>, !wave.simd<i64, 32> -> !wave.simd<i64, 32>
+  return %r : !wave.simd<i64, 32>
+}
+
+// -----
+
+// CHECK-LABEL: func.func @bounded_dynamic_simd_index_rem_uses_i32
+// CHECK-SAME: ([[X:%.*]]: !wave.simd<index, 32>, [[D:%.*]]: !wave.simd<index, 32>)
+// CHECK: [[BX:%.*]] = wave.assume [[X]]
+// CHECK: [[BD:%.*]] = wave.assume [[D]]
+// CHECK: [[X32:%.*]] = wave.cast intconvert [[BX]] : !wave.simd<index, 32> -> !wave.simd<i32, 32>
+// CHECK: [[D32:%.*]] = wave.cast intconvert [[BD]] : !wave.simd<index, 32> -> !wave.simd<i32, 32>
+// CHECK: wave.urecip [[D32]]
+// CHECK: wave.cast intconvert {{.*}} policy {extension = #wave.cast_extension<zero>} : !wave.simd<i32, 32> -> !wave.simd<index, 32>
+// CHECK-NOT: remui
+func.func @bounded_dynamic_simd_index_rem_uses_i32(
+    %x: !wave.simd<index, 32>, %d: !wave.simd<index, 32>)
+    -> !wave.simd<index, 32> {
+  %bx = wave.assume %x as "x" [#wave.pred<"x >= 0">,
+                                #wave.pred<"x <= 1024">]
+      : !wave.simd<index, 32>
+  %bd = wave.assume %d as "d" [#wave.pred<"d >= 1">,
+                                #wave.pred<"d <= 1024">]
+      : !wave.simd<index, 32>
+  %r = wave.binary remui %bx, %bd
+      : !wave.simd<index, 32>, !wave.simd<index, 32>
+      -> !wave.simd<index, 32>
+  return %r : !wave.simd<index, 32>
+}

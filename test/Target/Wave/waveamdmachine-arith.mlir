@@ -187,6 +187,26 @@ func.func @uniform_index_dynamic_div_bounded_i32_path(%x: index, %d: index)
   return
 }
 
+// SELECT-LABEL: func.func @simd_i64_dynamic_rem_bounded_i32_path
+// SELECT-NOT: waveamdmachine.v_lshrrev_b64
+// SELECT: waveamdmachine.v_rcp_iflag_f32
+// SELECT: waveamdmachine.v_mul_hi_u32
+// SELECT: waveamdmachine.tuple_from_elements
+// SELECT-NOT: waveamdmachine.v_lshrrev_b64
+func.func @simd_i64_dynamic_rem_bounded_i32_path(
+    %x: !wave.simd<i64, 32>, %d: !wave.simd<i64, 32>)
+    attributes {wave.kernel} {
+  %bx = wave.assume %x as "x" [#wave.pred<"x >= 0">,
+                                #wave.pred<"x <= 1024">]
+      : !wave.simd<i64, 32>
+  %bd = wave.assume %d as "d" [#wave.pred<"d >= 1">,
+                                #wave.pred<"d <= 1024">]
+      : !wave.simd<i64, 32>
+  %rem = wave.binary remui %bx, %bd
+      : !wave.simd<i64, 32>, !wave.simd<i64, 32> -> !wave.simd<i64, 32>
+  return
+}
+
 // SELECT-LABEL: func.func @uniform_index_expr_i32_sign_ext
 // SELECT: %[[X:.*]] = waveamdmachine.arg
 // SELECT: %[[NEG:.*]] = waveamdmachine.s_cmp_lt_i32 %[[X]],

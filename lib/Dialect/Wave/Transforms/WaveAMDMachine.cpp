@@ -3169,27 +3169,45 @@ static std::optional<CastExtension> getIntConvertExtension(CastOp op) {
   return cast<CastExtensionPolicyAttr>(attr).getValue();
 }
 
-static LogicalResult selectScalarIndexIntConvert(WaveAMDMachineSelector &S,
-                                                 CastOp op) {
+static Type castElementType(Type type) {
+  if (auto simd = dyn_cast<SimdType>(type))
+    return simd.getElementType();
+  return type;
+}
+
+static bool hasI32Element(Type type) {
+  return castElementType(type).isInteger(32);
+}
+
+static bool has64BitIntElement(Type type) {
+  Type elementType = castElementType(type);
+  return elementType.isIndex() || elementType.isInteger(64);
+}
+
+static LogicalResult selectI32I64IntConvert(WaveAMDMachineSelector &S,
+                                            CastOp op) {
   Type sourceType = op.getSource().getType();
   Type resultType = op.getResult().getType();
   Value source = S.expect(op.getSource(), op);
-  if (sourceType.isIndex() && resultType.isInteger(32)) {
+  if (has64BitIntElement(sourceType) && hasI32Element(resultType)) {
     S.values[op.getResult()] =
         extractLowDword(S, op.getLoc(), source, op.getSource());
     S.eraseIfTopLevel(op);
     return success();
   }
-  if (sourceType.isInteger(32) && resultType.isIndex()) {
+  if (hasI32Element(sourceType) && has64BitIntElement(resultType)) {
     if (getIntConvertExtension(op) != CastExtension::Zero)
       return op.emitError(
-          "WaveAMDMachine i32 to index intconvert requires zero extension");
-    S.values[op.getResult()] = source;
+          "WaveAMDMachine i32 to 64-bit intconvert requires zero extension");
+    S.values[op.getResult()] = isa<SimdType>(resultType)
+                                   ? ensureVGPR2(S, op.getLoc(), source)
+                                   : source;
     S.eraseIfTopLevel(op);
     return success();
   }
   return op.emitError(
-      "WaveAMDMachine intconvert lowering supports only scalar index <-> i32");
+      "WaveAMDMachine intconvert lowering supports only i32 <-> 64-bit "
+      "integer/index casts");
 }
 
 static LogicalResult selectPackedF32ToF16Cast(WaveAMDMachineSelector &S,
@@ -3248,7 +3266,7 @@ static LogicalResult selectScalarFpConvert(WaveAMDMachineSelector &S, CastOp op,
 
 LogicalResult WaveAMDMachineSelector::selectCast(CastOp op) {
   if (op.getKind() == CastKind::IntConvert)
-    return selectScalarIndexIntConvert(*this, op);
+    return selectI32I64IntConvert(*this, op);
   if (op.getKind() != CastKind::FpConvert)
     return op.emitError(
         "WaveAMDMachine backend only supports fpconvert and scalar "

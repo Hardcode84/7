@@ -49,14 +49,24 @@ static bool isSignedDivRem(BinaryKind kind) {
   return kind == BinaryKind::DivSI || kind == BinaryKind::RemSI;
 }
 
-static bool isIndexDivRemType(Type type) { return type.isIndex(); }
-
 static constexpr int64_t signedI32Max = 2147483647;
 
 static Type scalarElementType(Type type) {
   if (auto simd = dyn_cast<SimdType>(type))
     return simd.getElementType();
   return type;
+}
+
+static Type i32Like(OpBuilder &builder, Type type) {
+  Type i32 = builder.getI32Type();
+  if (auto simd = dyn_cast<SimdType>(type))
+    return SimdType::get(type.getContext(), i32, simd.getWidth());
+  return i32;
+}
+
+static bool canNarrowDivRemTypeToI32(Type type) {
+  Type elementType = scalarElementType(type);
+  return elementType.isIndex() || elementType.isInteger(64);
 }
 
 static unsigned elementBits(Type type) {
@@ -651,10 +661,10 @@ static DivRemValues createSignedDivRem(OpBuilder &builder, Location loc,
 
 static Value createNonNegativeI32View(OpBuilder &builder, Location loc,
                                       Value value) {
-  Type i32 = builder.getI32Type();
+  Type i32 = i32Like(builder, value.getType());
   if (std::optional<APInt> constant =
           getConstantAPInt(value, elementBits(value.getType())))
-    return createScalarConstant(builder, loc, i32, constant->getZExtValue());
+    return createConstantLike(builder, loc, i32, constant->getZExtValue());
   return CastOp::create(builder, loc, i32, CastKind::IntConvert, value,
                         DictionaryAttr())
       .getResult();
@@ -670,14 +680,14 @@ static std::optional<Value> tryExpandIndexDivRemAsI32(IRRewriter &rewriter,
                                                       BinaryOp op,
                                                       DataFlowSolver &solver,
                                                       sym::Store &store) {
-  if (!isIndexDivRemType(op.getResult().getType()))
+  if (!canNarrowDivRemTypeToI32(op.getResult().getType()))
     return std::nullopt;
   if (!isProvenSignedI32RangeWithLowerBound(solver, store, op.getLhs(), 0) ||
       !isProvenSignedI32RangeWithLowerBound(solver, store, op.getRhs(), 1))
     return std::nullopt;
 
   Location loc = op.getLoc();
-  Type i32 = rewriter.getI32Type();
+  Type i32 = i32Like(rewriter, op.getResult().getType());
   BinaryKind kind = op.getKind();
   Value lhs = createNonNegativeI32View(rewriter, loc, op.getLhs());
   Value rhs = createNonNegativeI32View(rewriter, loc, op.getRhs());
