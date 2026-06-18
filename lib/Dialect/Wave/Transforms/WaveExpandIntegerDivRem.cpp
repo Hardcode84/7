@@ -49,6 +49,10 @@ static bool isSignedDivRem(BinaryKind kind) {
   return kind == BinaryKind::DivSI || kind == BinaryKind::RemSI;
 }
 
+static bool isIndexDivRemType(Type type) { return type.isIndex(); }
+
+static constexpr int64_t signedI32Max = 2147483647;
+
 static Type scalarElementType(Type type) {
   if (auto simd = dyn_cast<SimdType>(type))
     return simd.getElementType();
@@ -352,6 +356,14 @@ static bool isFullSignedRange(const ConstantIntRanges &range) {
          range.smax() == APInt::getSignedMaxValue(width);
 }
 
+static bool isSignedI32RangeWithLowerBound(const ConstantIntRanges &range,
+                                           int64_t lower) {
+  unsigned width = range.smin().getBitWidth();
+  APInt lowerBound(width, lower, /*isSigned=*/true);
+  APInt upperBound = APInt::getSignedMaxValue(32).sextOrTrunc(width);
+  return range.smin().sge(lowerBound) && range.smax().sle(upperBound);
+}
+
 static std::optional<ConstantIntRanges>
 finiteSignedRange(DataFlowSolver &solver, Value value) {
   const dataflow::IntegerValueRangeLattice *lattice =
@@ -508,6 +520,34 @@ private:
   llvm::DenseMap<Value, StringRef> byValue;
 };
 
+static bool isConstantInSignedI32RangeWithLowerBound(const APInt &constant,
+                                                     int64_t lower) {
+  unsigned bits = constant.getBitWidth();
+  APInt lowerBound(bits, lower, /*isSigned=*/true);
+  APInt upperBound = APInt::getSignedMaxValue(32).sextOrTrunc(bits);
+  return constant.sge(lowerBound) && constant.sle(upperBound);
+}
+
+static bool isProvenSignedI32RangeWithLowerBound(DataFlowSolver &solver,
+                                                 sym::Store &store, Value value,
+                                                 int64_t lower) {
+  if (SplatOp splat = value.getDefiningOp<SplatOp>())
+    return isProvenSignedI32RangeWithLowerBound(solver, store,
+                                                splat.getSource(), lower);
+  if (std::optional<APInt> constant =
+          getConstantAPInt(value, elementBits(value.getType())))
+    return isConstantInSignedI32RangeWithLowerBound(*constant, lower);
+  if (std::optional<ConstantIntRanges> range = finiteSignedRange(solver, value))
+    if (isSignedI32RangeWithLowerBound(*range, lower))
+      return true;
+
+  FailureOr<DynamicDivisorQuery> query =
+      DynamicDivisorQueryBuilder(store).build(value);
+  return succeeded(query) &&
+         sym::provablyInRange(store, query->expr, query->assumptions, lower,
+                              signedI32Max);
+}
+
 static bool isProvenPositivePow2(sym::Store &store, Value source) {
   FailureOr<DynamicDivisorQuery> query =
       DynamicDivisorQueryBuilder(store).build(source);
@@ -519,13 +559,14 @@ static bool isProvenPositivePow2(sym::Store &store, Value source) {
 
 static std::optional<Value>
 tryCreateDynamicPow2Value(OpBuilder &builder, Location loc, Type type,
-                          BinaryKind kind, Value lhs, Value rhs,
-                          DataFlowSolver &solver, sym::Store &store) {
-  if (getConstantAPInt(rhs, elementBits(type)))
+                          BinaryKind kind, Value lhs, Value rhs, Value lhsProof,
+                          Value rhsProof, DataFlowSolver &solver,
+                          sym::Store &store) {
+  if (getConstantAPInt(rhsProof, elementBits(type)))
     return std::nullopt;
-  if (!isProvenPositivePow2(store, rhs))
+  if (!isProvenPositivePow2(store, rhsProof))
     return std::nullopt;
-  if (isSignedDivRem(kind) && !isProvenNonNegative(solver, store, lhs))
+  if (isSignedDivRem(kind) && !isProvenNonNegative(solver, store, lhsProof))
     return std::nullopt;
 
   if (kind == BinaryKind::DivUI || kind == BinaryKind::DivSI) {
@@ -539,6 +580,14 @@ tryCreateDynamicPow2Value(OpBuilder &builder, Location loc, Type type,
   Value mask = createSub(builder, loc, type, rhs,
                          createConstantLike(builder, loc, type, 1));
   return createAnd(builder, loc, type, lhs, mask);
+}
+
+static std::optional<Value>
+tryCreateDynamicPow2Value(OpBuilder &builder, Location loc, Type type,
+                          BinaryKind kind, Value lhs, Value rhs,
+                          DataFlowSolver &solver, sym::Store &store) {
+  return tryCreateDynamicPow2Value(builder, loc, type, kind, lhs, rhs, lhs, rhs,
+                                   solver, store);
 }
 
 static DivRemValues createUnsignedDivRem(OpBuilder &builder, Location loc,
@@ -600,11 +649,67 @@ static DivRemValues createSignedDivRem(OpBuilder &builder, Location loc,
   return DivRemValues{quotient, remainder};
 }
 
+static Value createNonNegativeI32View(OpBuilder &builder, Location loc,
+                                      Value value) {
+  Type i32 = builder.getI32Type();
+  if (std::optional<APInt> constant =
+          getConstantAPInt(value, elementBits(value.getType())))
+    return createScalarConstant(builder, loc, i32, constant->getZExtValue());
+  return CastOp::create(builder, loc, i32, CastKind::IntConvert, value,
+                        DictionaryAttr())
+      .getResult();
+}
+
+static DictionaryAttr createZeroExtendPolicy(OpBuilder &builder) {
+  MLIRContext *context = builder.getContext();
+  return builder.getDictionaryAttr(builder.getNamedAttr(
+      "extension", CastExtensionPolicyAttr::get(context, CastExtension::Zero)));
+}
+
+static std::optional<Value> tryExpandIndexDivRemAsI32(IRRewriter &rewriter,
+                                                      BinaryOp op,
+                                                      DataFlowSolver &solver,
+                                                      sym::Store &store) {
+  if (!isIndexDivRemType(op.getResult().getType()))
+    return std::nullopt;
+  if (!isProvenSignedI32RangeWithLowerBound(solver, store, op.getLhs(), 0) ||
+      !isProvenSignedI32RangeWithLowerBound(solver, store, op.getRhs(), 1))
+    return std::nullopt;
+
+  Location loc = op.getLoc();
+  Type i32 = rewriter.getI32Type();
+  BinaryKind kind = op.getKind();
+  Value lhs = createNonNegativeI32View(rewriter, loc, op.getLhs());
+  Value rhs = createNonNegativeI32View(rewriter, loc, op.getRhs());
+
+  Value narrow;
+  if (std::optional<Value> pow2 =
+          tryCreateDynamicPow2Value(rewriter, loc, i32, kind, lhs, rhs,
+                                    op.getLhs(), op.getRhs(), solver, store)) {
+    narrow = *pow2;
+  } else {
+    DivRemValues result =
+        isSignedDivRem(kind)
+            ? createSignedDivRem(rewriter, loc, i32, lhs, rhs)
+            : createUnsignedDivRem(rewriter, loc, i32, lhs, rhs);
+    narrow = (kind == BinaryKind::DivUI || kind == BinaryKind::DivSI)
+                 ? result.quotient
+                 : result.remainder;
+  }
+  return CastOp::create(rewriter, loc, op.getResult().getType(),
+                        CastKind::IntConvert, narrow,
+                        createZeroExtendPolicy(rewriter))
+      .getResult();
+}
+
 static Value expandDivRem(IRRewriter &rewriter, BinaryOp op,
                           DataFlowSolver &solver, sym::Store &store) {
   Type type = op.getResult().getType();
   Location loc = op.getLoc();
   BinaryKind kind = op.getKind();
+  if (std::optional<Value> narrow =
+          tryExpandIndexDivRemAsI32(rewriter, op, solver, store))
+    return *narrow;
   if (std::optional<Value> pow2 = tryCreateDynamicPow2Value(
           rewriter, loc, type, kind, op.getLhs(), op.getRhs(), solver, store))
     return *pow2;

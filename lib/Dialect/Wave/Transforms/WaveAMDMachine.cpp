@@ -3159,6 +3159,39 @@ static CastRounding getFpConvertRounding(CastOp op) {
   return cast<CastRoundingPolicyAttr>(attr).getValue();
 }
 
+static std::optional<CastExtension> getIntConvertExtension(CastOp op) {
+  std::optional<DictionaryAttr> policy = op.getPolicy();
+  if (!policy)
+    return std::nullopt;
+  Attribute attr = policy->get("extension");
+  if (!attr)
+    return std::nullopt;
+  return cast<CastExtensionPolicyAttr>(attr).getValue();
+}
+
+static LogicalResult selectScalarIndexIntConvert(WaveAMDMachineSelector &S,
+                                                 CastOp op) {
+  Type sourceType = op.getSource().getType();
+  Type resultType = op.getResult().getType();
+  Value source = S.expect(op.getSource(), op);
+  if (sourceType.isIndex() && resultType.isInteger(32)) {
+    S.values[op.getResult()] =
+        extractLowDword(S, op.getLoc(), source, op.getSource());
+    S.eraseIfTopLevel(op);
+    return success();
+  }
+  if (sourceType.isInteger(32) && resultType.isIndex()) {
+    if (getIntConvertExtension(op) != CastExtension::Zero)
+      return op.emitError(
+          "WaveAMDMachine i32 to index intconvert requires zero extension");
+    S.values[op.getResult()] = source;
+    S.eraseIfTopLevel(op);
+    return success();
+  }
+  return op.emitError(
+      "WaveAMDMachine intconvert lowering supports only scalar index <-> i32");
+}
+
 static LogicalResult selectPackedF32ToF16Cast(WaveAMDMachineSelector &S,
                                               CastOp op,
                                               CastRounding rounding) {
@@ -3214,9 +3247,12 @@ static LogicalResult selectScalarFpConvert(WaveAMDMachineSelector &S, CastOp op,
 }
 
 LogicalResult WaveAMDMachineSelector::selectCast(CastOp op) {
+  if (op.getKind() == CastKind::IntConvert)
+    return selectScalarIndexIntConvert(*this, op);
   if (op.getKind() != CastKind::FpConvert)
     return op.emitError(
-        "WaveAMDMachine backend only supports fpconvert wave.cast");
+        "WaveAMDMachine backend only supports fpconvert and scalar "
+        "index/i32 intconvert wave.cast");
   SimdType sourceType = dyn_cast<SimdType>(op.getSource().getType());
   SimdType resultType = dyn_cast<SimdType>(op.getResult().getType());
   if (!sourceType || !resultType)

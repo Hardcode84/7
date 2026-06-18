@@ -98,3 +98,52 @@ func.func @dynamic_index(%x: index, %d: index) -> index {
   %q = wave.binary divui %x, %d : index, index -> index
   return %q : index
 }
+
+// -----
+
+// CHECK-LABEL: func.func @bounded_dynamic_index_uses_i32
+// CHECK-SAME: ([[X:%.*]]: index, [[D:%.*]]: index)
+// CHECK: [[BX:%.*]] = wave.assume [[X]]
+// CHECK: [[BD:%.*]] = wave.assume [[D]]
+// CHECK: [[X32:%.*]] = wave.cast intconvert [[BX]] : index -> i32
+// CHECK: [[D32:%.*]] = wave.cast intconvert [[BD]] : index -> i32
+// CHECK: [[RCP:%.*]] = wave.urecip [[D32]]
+// CHECK: wave.binary mulhui [[RCP]]
+// CHECK: wave.binary mulhui [[X32]]
+// CHECK: wave.cast intconvert {{.*}} policy {extension = #wave.cast_extension<zero>} : i32 -> index
+// CHECK-NOT: divui
+// CHECK-NOT: remui
+func.func @bounded_dynamic_index_uses_i32(%x: index, %d: index)
+    -> (index, index) {
+  %bx = wave.assume %x as "x" [#wave.pred<"x >= 0">,
+                                #wave.pred<"x <= 1024">] : index
+  %bd = wave.assume %d as "d" [#wave.pred<"d >= 1">,
+                                #wave.pred<"d <= 1024">] : index
+  %q = wave.binary divui %bx, %bd : index, index -> index
+  %r = wave.binary remui %bx, %bd : index, index -> index
+  return %q, %r : index, index
+}
+
+// -----
+
+// CHECK-LABEL: func.func @bounded_dynamic_signed_index_uses_i32
+// CHECK-SAME: ([[X:%.*]]: index, [[D:%.*]]: index)
+// CHECK: [[BX:%.*]] = wave.assume [[X]]
+// CHECK: [[BD:%.*]] = wave.assume [[D]]
+// CHECK: [[X32:%.*]] = wave.cast intconvert [[BX]] : index -> i32
+// CHECK: [[D32:%.*]] = wave.cast intconvert [[BD]] : index -> i32
+// CHECK: wave.urecip {{.*}} : i32 -> i32
+// CHECK: wave.binary mulhui {{.*}} : i32, i32 -> i32
+// CHECK: wave.cast intconvert {{.*}} policy {extension = #wave.cast_extension<zero>} : i32 -> index
+// CHECK-NOT: divsi
+// CHECK-NOT: remsi
+func.func @bounded_dynamic_signed_index_uses_i32(%x: index, %d: index)
+    -> (index, index) {
+  %bx = wave.assume %x as "x" [#wave.pred<"x >= 0">,
+                                #wave.pred<"x <= 1024">] : index
+  %bd = wave.assume %d as "d" [#wave.pred<"d >= 1">,
+                                #wave.pred<"d <= 1024">] : index
+  %q = wave.binary divsi %bx, %bd : index, index -> index
+  %r = wave.binary remsi %bx, %bd : index, index -> index
+  return %q, %r : index, index
+}

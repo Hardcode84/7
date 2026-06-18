@@ -373,6 +373,8 @@ static FailureOr<WaveCastShape> classifyWaveCastType(
     return WaveCastShape{WaveCastElementKind::Int, integerType.getWidth(),
                          simdWidth, vectorLength};
   }
+  if (elementType.isIndex())
+    return WaveCastShape{WaveCastElementKind::Int, 64, simdWidth, vectorLength};
   if (isa<FloatType>(elementType))
     return WaveCastShape{WaveCastElementKind::Float,
                          elementType.getIntOrFloatBitWidth(), simdWidth,

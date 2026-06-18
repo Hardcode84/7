@@ -172,6 +172,21 @@ func.func @uniform_index_product_signed_div_bounded_range(%m: index, %n: index) 
   return
 }
 
+// SELECT-LABEL: func.func @uniform_index_dynamic_div_bounded_i32_path
+// SELECT-NOT: waveamdmachine.s_mul_u64
+// SELECT: waveamdmachine.v_rcp_iflag_f32
+// SELECT: waveamdmachine.s_mul_hi_u32
+// SELECT-NOT: waveamdmachine.s_mul_u64
+func.func @uniform_index_dynamic_div_bounded_i32_path(%x: index, %d: index)
+    attributes {wave.kernel} {
+  %bx = wave.assume %x as "x" [#wave.pred<"x >= 0">,
+                                #wave.pred<"x <= 1024">] : index
+  %bd = wave.assume %d as "d" [#wave.pred<"d >= 1">,
+                                #wave.pred<"d <= 1024">] : index
+  %quot = wave.binary divui %bx, %bd : index, index -> index
+  return
+}
+
 // SELECT-LABEL: func.func @uniform_index_expr_i32_sign_ext
 // SELECT: %[[X:.*]] = waveamdmachine.arg
 // SELECT: %[[NEG:.*]] = waveamdmachine.s_cmp_lt_i32 %[[X]],
