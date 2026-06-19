@@ -128,11 +128,10 @@
 // MXFP4-PERF-ASM-NOT: s_waitcnt vmcnt
 // MXFP4-PERF-ASM: ds_read_b64_tr_b8
 // MXFP4-PERF-ASM: s_waitcnt lgkmcnt(4)
-// MXFP4-PERF-ASM-NEXT: s_nop 0
 // MXFP4-PERF-ASM-NEXT: v_mfma_scale_f32_16x16x128_f8f6f4
 // MXFP4-PERF-ASM: s_waitcnt lgkmcnt(1)
-// MXFP4-PERF-ASM-NEXT: s_mul_i32 s{{[0-9]+}}, [[LOOP_STEP:s[0-9]+]], 2
 // MXFP4-PERF-ASM-NEXT: v_mfma_scale_f32_16x16x128_f8f6f4
+// MXFP4-PERF-ASM: s_mul_i32 s{{[0-9]+}}, [[LOOP_STEP:s[0-9]+]], 2
 // MXFP4-PERF-ASM-DAG: s_lshr_b32 s{{[0-9]+}}, s{{[0-9]+}}, 7
 // MXFP4-PERF-ASM-DAG: s_lshr_b32 s{{[0-9]+}}, s{{[0-9]+}}, 7
 // MXFP4-PERF-ASM-DAG: s_and_b32 s{{[0-9]+}}, [[LOOP_STEP]], 1

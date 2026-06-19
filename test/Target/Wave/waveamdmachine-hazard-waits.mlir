@@ -303,6 +303,27 @@ func.func @scalar_mulhi_fills_lgkm_valu_delay_slot(
   return
 }
 
+// CHECK-LABEL: func.func @fill_lgkm_valu_gap_with_scalar
+// CHECK: waveamdmachine.s_waitcnt lgkmcnt(4)
+// CHECK-NEXT: waveamdmachine.s_mul_i32
+// CHECK-NEXT: waveamdmachine.mfma_f32_16x16x32_f16
+// CHECK-NOT: waveamdmachine.s_nop
+func.func @fill_lgkm_valu_gap_with_scalar(
+    %a: !waveamdmachine.reg<vgpr, 4, 0>,
+    %b: !waveamdmachine.reg<vgpr, 4, 4>,
+    %acc: !waveamdmachine.reg<vgpr, 4, 8>,
+    %x: !waveamdmachine.reg<sgpr, 1, 10>) {
+  %scale = waveamdmachine.imm 128 : !waveamdmachine.imm
+  waveamdmachine.s_waitcnt lgkmcnt(4)
+  %r = waveamdmachine.mfma_f32_16x16x32_f16 %a, %b, %acc
+      : (!waveamdmachine.reg<vgpr, 4, 0>, !waveamdmachine.reg<vgpr, 4, 4>,
+         !waveamdmachine.reg<vgpr, 4, 8>) -> !waveamdmachine.reg<vgpr, 4, 12>
+  %mul = waveamdmachine.s_mul_i32 %x, %scale
+      : (!waveamdmachine.reg<sgpr, 1, 10>, !waveamdmachine.imm)
+      -> !waveamdmachine.reg<sgpr, 1, 11>
+  return
+}
+
 }
 
 // -----
@@ -386,6 +407,22 @@ func.func @m0_delay_after_waitcnt(
       : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 2>,
          !waveamdmachine.m0, !waveamdmachine.mem.token)
       -> !waveamdmachine.mem.token
+  return
+}
+
+// CHECK-LABEL: func.func @cdna4_no_valu_delay_after_lgkm_wait
+// CHECK: waveamdmachine.s_waitcnt lgkmcnt(0)
+// CHECK-NEXT: waveamdmachine.v_add_u32
+func.func @cdna4_no_valu_delay_after_lgkm_wait(
+    %x: !waveamdmachine.reg<vgpr, 1>,
+    %y: !waveamdmachine.reg<sgpr, 1>) {
+  %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+  %load = waveamdmachine.s_load_b32 %zero, "s[0:1]"
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<sgpr, 1>
+  waveamdmachine.s_waitcnt lgkmcnt(0)
+  %sum = waveamdmachine.v_add_u32 %x, %y
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 1>)
+      -> !waveamdmachine.reg<vgpr, 1>
   return
 }
 
@@ -518,12 +555,12 @@ func.func @multi_token_loop_barrier_drain_kept(
   return
 }
 
-// CHECK-LABEL: func.func @fill_lgkm_valu_gap_with_scalar
+// CHECK-LABEL: func.func @cdna4_no_lgkm_valu_gap_filler_motion
 // CHECK: waveamdmachine.s_waitcnt lgkmcnt(4)
-// CHECK-NEXT: waveamdmachine.s_mul_i32
 // CHECK-NEXT: waveamdmachine.mfma_f32_16x16x32_f16
+// CHECK-NEXT: waveamdmachine.s_mul_i32
 // CHECK-NOT: waveamdmachine.s_nop
-func.func @fill_lgkm_valu_gap_with_scalar(
+func.func @cdna4_no_lgkm_valu_gap_filler_motion(
     %a: !waveamdmachine.reg<vgpr, 4, 0>,
     %b: !waveamdmachine.reg<vgpr, 4, 4>,
     %acc: !waveamdmachine.reg<vgpr, 4, 8>,

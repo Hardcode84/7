@@ -147,16 +147,12 @@ wmma_f16_matmul_tiled:
 		s_cbranch_scc0 .Lwmma_f16_matmul_tiled.loop_exit_0
 .Lwmma_f16_matmul_tiled.loop_head_0:
 		s_waitcnt lgkmcnt(3)
-		s_nop 0
 		v_mfma_f32_16x16x32_f16 v[8:11], v[16:19], v[32:35], v[8:11]
 		s_waitcnt lgkmcnt(2)
-		s_nop 0
 		v_mfma_f32_16x16x32_f16 v[52:55], v[16:19], v[36:39], v[52:55]
 		s_waitcnt lgkmcnt(1)
-		s_nop 0
 		v_mfma_f32_16x16x32_f16 v[56:59], v[16:19], v[40:43], v[56:59]
 		s_waitcnt lgkmcnt(0)
-		s_lshl_b32 s18, s17, 6
 		v_mfma_f32_16x16x32_f16 v[60:63], v[16:19], v[44:47], v[60:63]
 		v_mfma_f32_16x16x32_f16 v[64:67], v[20:23], v[32:35], v[64:67]
 		v_mfma_f32_16x16x32_f16 v[68:71], v[20:23], v[36:39], v[68:71]
@@ -170,6 +166,7 @@ wmma_f16_matmul_tiled:
 		v_mfma_f32_16x16x32_f16 v[100:103], v[28:31], v[36:39], v[100:103]
 		v_mfma_f32_16x16x32_f16 v[104:107], v[28:31], v[40:43], v[104:107]
 		v_mfma_f32_16x16x32_f16 v[108:111], v[28:31], v[44:47], v[108:111]
+		s_lshl_b32 s18, s17, 6
 		s_add_i32 s19, s17, 2
 		s_add_i32 s17, s17, 1
 		s_waitcnt vmcnt(0)
@@ -202,16 +199,12 @@ wmma_f16_matmul_tiled:
 		s_cbranch_scc1 .Lwmma_f16_matmul_tiled.loop_head_0
 .Lwmma_f16_matmul_tiled.loop_exit_0:
 		s_waitcnt lgkmcnt(3)
-		s_nop 0
 		v_mfma_f32_16x16x32_f16 v[8:11], v[16:19], v[32:35], v[8:11]
 		s_waitcnt lgkmcnt(2)
-		s_nop 0
 		v_mfma_f32_16x16x32_f16 v[52:55], v[16:19], v[36:39], v[52:55]
 		s_waitcnt lgkmcnt(1)
-		s_nop 0
 		v_mfma_f32_16x16x32_f16 v[56:59], v[16:19], v[40:43], v[56:59]
 		s_waitcnt lgkmcnt(0)
-		s_nop 0
 		v_mfma_f32_16x16x32_f16 v[60:63], v[16:19], v[44:47], v[60:63]
 		v_mfma_f32_16x16x32_f16 v[64:67], v[20:23], v[32:35], v[64:67]
 		v_mfma_f32_16x16x32_f16 v[68:71], v[20:23], v[36:39], v[68:71]
@@ -236,22 +229,18 @@ wmma_f16_matmul_tiled:
 		ds_read_b128 v[36:39], v14 offset:51200
 		ds_read_b128 v[40:43], v14 offset:52224
 		s_waitcnt lgkmcnt(3)
-		s_nop 0
 		v_mfma_f32_16x16x32_f16 v[8:11], v[16:19], v[4:7], v[8:11]
 		v_lshlrev_b32_e32 v3, 3, v2
 		s_waitcnt lgkmcnt(2)
-		s_nop 0
 		v_mfma_f32_16x16x32_f16 v[52:55], v[16:19], v[32:35], v[52:55]
-		s_nop 4
+		s_nop 5
 		v_cvt_f16_f32_e64 v2, v9
 		v_cvt_f16_f32_e64 v9, v11
 		s_waitcnt lgkmcnt(1)
-		s_nop 0
 		v_mfma_f32_16x16x32_f16 v[56:59], v[16:19], v[36:39], v[56:59]
 		v_cvt_f16_f32_e64 v11, v8
 		v_cvt_f16_f32_e64 v8, v10
 		s_waitcnt lgkmcnt(0)
-		s_nop 0
 		v_mfma_f32_16x16x32_f16 v[60:63], v[16:19], v[40:43], v[60:63]
 		v_cvt_f16_f32_e64 v10, v53
 		v_cvt_f16_f32_e64 v12, v55

@@ -226,6 +226,7 @@ getValuWriteExecMfmaLatency(const llvm::AMDGPU::IsaVersion &isa) {
 
 struct HazardConfig {
   bool hasDelayAlu;
+  bool lgkmWaitNeedsValuGap;
   llvm::AMDGPU::IsaVersion isaVersion;
   unsigned defaultLgkmcnt;
   unsigned valuDep1;
@@ -886,7 +887,7 @@ static void applyLgkmWait(Operation *op, HazardState &state,
     return;
   bool drained = state.lgkmPending > *limit;
   state.lgkmPending = std::min(state.lgkmPending, *limit);
-  if (drained)
+  if (drained && cfg.lgkmWaitNeedsValuGap)
     state.lgkmToValu = std::max(state.lgkmToValu, 1u);
 }
 
@@ -1001,10 +1002,13 @@ struct WaveAMDHazardWaitsPass
     llvm::AMDGPU::IsaVersion isaVersion =
         llvm::AMDGPU::getIsaVersion((*sti)->getCPU());
     HazardConfig cfg{
-        llvm::AMDGPU::isGFX11Plus(**sti),
-        isaVersion,
+        /*hasDelayAlu=*/llvm::AMDGPU::isGFX11Plus(**sti),
+        /*lgkmWaitNeedsValuGap=*/!isCDNA4Family(isaVersion),
+        /*isaVersion=*/isaVersion,
+        /*defaultLgkmcnt=*/
         llvm::AMDGPU::decodeLgkmcnt(
             isaVersion, llvm::AMDGPU::getWaitcntBitMask(isaVersion)),
+        /*valuDep1=*/
         amdgpu_compat::SDelayAlu::encode(
             amdgpu_compat::SDelayAlu::DelayType::VALU, 1),
         /*m0PipelineDelay=*/1,
@@ -1129,6 +1133,8 @@ private:
   static std::optional<unsigned>
   getLgkmWaitFillSlots(waveamdmachine::SWaitcntOp wait,
                        const HazardConfig &cfg) {
+    if (!cfg.lgkmWaitNeedsValuGap)
+      return std::nullopt;
     std::optional<unsigned> lgkm = getLgkmWaitLimit(*wait);
     if (!lgkm || *lgkm >= cfg.defaultLgkmcnt)
       return std::nullopt;

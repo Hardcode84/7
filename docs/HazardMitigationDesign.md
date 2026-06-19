@@ -18,11 +18,11 @@ dense forward dataflow over each function, then rewrites blocks with a
 mutable local copy of the incoming state. The lattice carries the
 LGKM pending bit plus active SSA-value hazards.
 
-Three hazards are modeled today:
+Three hazard classes are modeled today:
 
 | Hazard | Producer | Consumer | Gap |
 |---|---|---|---|
-| VALU after LGKM-clearing wait | `s_waitcnt` with non-default lgkm | any `VALUOp`-trait op | 1 cycle (`s_delay_alu` on gfx11+, `s_nop 0` elsewhere) |
+| VALU after LGKM-clearing wait | `s_waitcnt` with non-default lgkm | any `VALUOp`-trait op | 1 cycle on non-CDNA4 targets (`s_delay_alu` on gfx11+, `s_nop 0` elsewhere) |
 | M0 read after `s_mov_m0` | `s_mov_m0` | any op with a `!m0`-typed operand | 1 instruction |
 | VMEM store after 4-pass MFMA | any `MFMAOp`-trait op | any `VMEMStoreOp`-trait op consuming the MFMA result | 7 instructions on CDNA3, 8 on CDNA4 and other targets |
 
@@ -30,12 +30,12 @@ Three hazards are modeled today:
 
 `HazardState` has two parts:
 
-- `lgkmPending`: set by an `s_waitcnt` with non-default lgkm, cleared
-  by the first later `VALUOp`.
+- `lgkmPending` / `lgkmToValu`: lgkm issuers increment pending count;
+  draining waits arm the VALU gap only on targets that need it.
 - `DenseMap<Value, ValueHazards>`: active hazards carried by SSA
   value. Today `ValueHazards` has `m0` and `mfmaStore` countdowns.
 
-Joins OR the LGKM bit and take max countdown per `(Value, hazard)`.
+Joins take max LGKM state and max countdown per `(Value, hazard)`.
 Each counted instruction decrements all active SSA countdowns. Producer
 ops seed result hazards: `s_mov_m0` seeds `m0 = 1`, and MFMA ops seed
 `mfmaStore = 7/8`. No-machine-inst forwarding ops conservatively copy
@@ -43,8 +43,9 @@ operand hazards to results.
 
 Constants for the gaps live in `HazardConfig` (`m0PipelineDelay = 1`,
 `mfmaResultLatency = 7/8` for CDNA3/CDNA4 4-pass MFMA store use).
-`valuDep1` is the `s_delay_alu` encoding for "wait one VALU cycle",
-computed once at pass start.
+CDNA4 disables the LGKM-to-VALU gap; LLVM and CDNA4 docs have no
+matching post-`s_waitcnt` VALU hazard. `valuDep1` is the `s_delay_alu`
+encoding for "wait one VALU cycle", computed once at pass start.
 
 ## Trait-based classification
 
