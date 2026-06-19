@@ -235,7 +235,7 @@ def build_example_args(args: argparse.Namespace, chip: str) -> list[str]:
 
 def generate_kernel_module(args: argparse.Namespace, chip: str) -> str:
     env = os.environ.copy()
-    package_path = REPO_ROOT / "build/python_packages/wave_mlir"
+    package_path = args.build_dir / "python_packages/wave_mlir"
     env["PYTHONPATH"] = (
         str(package_path)
         if not env.get("PYTHONPATH")
@@ -452,25 +452,36 @@ def lower_machine(
     return out
 
 
-def lower_hsaco(
+def lower_asm(
     build_dir: Path, source: Path, pipeline: Path, tmp: Path, name: str
 ) -> Path:
     variant_tmp = tmp / name
     variant_tmp.mkdir(parents=True, exist_ok=True)
     wave_translate = build_dir / "bin/wave-translate"
-    llvm_mc = build_dir / "llvm-install/bin/llvm-mc"
-    ld_lld = build_dir / "llvm-install/bin/ld.lld"
-    for tool in (wave_translate, llvm_mc, ld_lld):
-        if not tool.exists():
-            sys.exit(f"required tool missing: {tool}")
+    if not wave_translate.exists():
+        sys.exit(f"required tool missing: {wave_translate}")
     env = os.environ.copy()
     env["WAVE_PIPELINES_DIR"] = str(pipeline.parent)
     asm = variant_tmp / f"{name}.s"
-    obj = variant_tmp / f"{name}.o"
-    hsaco = variant_tmp / f"{name}.hsaco"
     asm.write_text(
         run([str(wave_translate), "--wave-to-amdgpu-asm", str(source)], env=env)
     )
+    return asm
+
+
+def lower_hsaco(
+    build_dir: Path, source: Path, pipeline: Path, tmp: Path, name: str
+) -> Path:
+    variant_tmp = tmp / name
+    variant_tmp.mkdir(parents=True, exist_ok=True)
+    llvm_mc = build_dir / "llvm-install/bin/llvm-mc"
+    ld_lld = build_dir / "llvm-install/bin/ld.lld"
+    for tool in (llvm_mc, ld_lld):
+        if not tool.exists():
+            sys.exit(f"required tool missing: {tool}")
+    asm = lower_asm(build_dir, source, pipeline, tmp, name)
+    obj = variant_tmp / f"{name}.o"
+    hsaco = variant_tmp / f"{name}.hsaco"
     run(
         [
             str(llvm_mc),
@@ -720,9 +731,19 @@ def run_variant(
     source: Path,
     runner: Path | None,
     tmp: Path,
+    emit_asm: Path | None = None,
 ) -> VariantResult:
     pipeline = write_pipeline(tmp, variant, args)
+    if runner is None and emit_asm is not None:
+        asm = lower_asm(args.build_dir, source, pipeline, tmp, variant.name)
+        emit_asm.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(asm, emit_asm)
+        return VariantResult(variant.name, {}, [], [], None)
     machine = lower_machine(args.build_dir, source, pipeline, tmp, variant.name)
+    if emit_asm is not None:
+        asm = lower_asm(args.build_dir, source, pipeline, tmp, variant.name)
+        emit_asm.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(asm, emit_asm)
     sim_cycles = run_sim_reports(args.build_dir, machine, args)
     if runner is None:
         return VariantResult(variant.name, sim_cycles, [], [], None)
@@ -855,6 +876,7 @@ def build_argparser() -> argparse.ArgumentParser:
     ap.add_argument("--calibration-file", type=Path, default=None)
     ap.add_argument("--skip-hw", action="store_true")
     ap.add_argument("--no-check", action="store_true")
+    ap.add_argument("--emit-asm", type=Path)
     ap.add_argument("--keep-tmp", action="store_true")
     ap.add_argument(
         "--build-dir",
@@ -916,6 +938,8 @@ def validate_args(args: argparse.Namespace) -> None:
         sys.exit("--cta-group-m must be >= 1")
     if args.calibration_file is not None and not args.calibration_file.exists():
         sys.exit(f"--calibration-file does not exist: {args.calibration_file}")
+    if getattr(args, "emit_asm", None) is not None and len(args.variants) != 1:
+        sys.exit("--emit-asm requires exactly one --variants entry")
     validate_mxfp4_args(args)
     validate_pressure_budget_args(args)
 
@@ -948,7 +972,14 @@ def main() -> int:
         )
         results: list[VariantResult] = []
         for variant in variants:
-            result = run_variant(variant, args, source, runner, tmp)
+            result = run_variant(
+                variant,
+                args,
+                source,
+                runner,
+                tmp,
+                emit_asm=args.emit_asm,
+            )
             print_result(result)
             results.append(result)
         print_delta(results)

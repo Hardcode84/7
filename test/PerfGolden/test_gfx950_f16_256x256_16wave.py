@@ -2,7 +2,7 @@
 #
 # RUN: %PYTHON %s --build-dir %wave_obj_root --generated-out %t.s | FileCheck %s
 
-# CHECK: perf-golden: gfx950-mxfp4-256x256-8wave: asm matches golden
+# CHECK: perf-golden: gfx950-f16-256x256-16wave: asm matches golden
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-NAME = "gfx950-mxfp4-256x256-8wave"
+NAME = "gfx950-f16-256x256-16wave"
 HERE = Path(__file__).resolve().parent
 REPO_ROOT = HERE.parents[1]
 CALIBRATOR = REPO_ROOT / "tools/wave-matmul-calibrate/wave-matmul-calibrate.py"
@@ -99,7 +99,7 @@ def check_asm(
         raise SystemExit(1)
 
 
-def test_gfx950_mxfp4_256x256_8wave() -> None:
+def test_gfx950_f16_256x256_16wave() -> None:
     check_asm(REPO_ROOT / "build")
 
 

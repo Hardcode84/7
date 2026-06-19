@@ -40,6 +40,7 @@ config.substitutions.append(("%PATH%", config.environment["PATH"]))
 config.substitutions.append(("%shlibext", config.llvm_shlib_ext))
 config.substitutions.append(("%python", f'"{sys.executable}"'))
 config.substitutions.append(("%PYTHON", f'"{sys.executable}"'))
+config.substitutions.append(("%wave_obj_root", config.wave_mlir_obj_root))
 if sys.platform.startswith("linux"):
     config.available_features.add("linux")
 

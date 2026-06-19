@@ -88,17 +88,31 @@ Same rule covers docstrings, commit bodies, and PR descriptions. Wit is welcome,
 ## Perf golden ASM
 
 - Use one `test/PerfGolden/test_*.py` per kernel. Keep frozen Wave MLIR
-  and checked-in `.s` goldens under `test/PerfGolden/Inputs/`.
-- Lit must pass configured tools, e.g. `--wave-translate wave-translate`.
-  Never hard-code `build/bin` or `${repo}/build` in perf golden tests.
+  or deterministic generator args, plus checked-in `.s` goldens under
+  `test/PerfGolden/Inputs/`.
+- Lit must pass configured tools and build roots, e.g. `%wave_obj_root`
+  or `--wave-translate wave-translate`. Never hard-code `build/bin` or
+  `${repo}/build` in perf golden tests.
 - Run goldens when ASM can drift: `build/bin/llvm-lit -sv build/test
   --filter='PerfGolden'`. For helper-level repro, use
-  `WAVE_TRANSLATE=$PWD/build/bin/wave-translate python -m pytest -q
-  test/PerfGolden`.
+  `python -m pytest -q test/PerfGolden`.
 - ASM drift is a review stop, not a failure proof. Benchmark old and new
   assembly on the same hardware before updating a golden.
 - New generated golden file types need REUSE coverage. Python helpers must
   pass Black and Ruff before commit.
+
+## Local Performance Repro
+
+- Before GEMM perf calibration, especially after branch switch or rebase,
+  rebuild every tool in the calibration path:
+
+```bash
+cmake --build build --target wave-opt wave-translate WavePythonModules -j $(nproc)
+```
+
+- `wave-matmul-calibrate` invokes `build/bin/wave-translate`; rebuilding only
+  `wave-opt` can leave stale HSACO/ISA generation and invalidate TFLOP
+  comparisons.
 
 ## Language and MLIR Guidelines
 
