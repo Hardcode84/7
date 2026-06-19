@@ -1776,11 +1776,7 @@ def _append_mxfp4_scale_dma(
 ) -> None:
     source = bld.ptr_add(global_base, global_off)
     after = plan.dep if plan.dep is not None else bld.token()
-    tokens.append(
-        bld.dma_load_lds(
-            source, lds_off, after=after, bytes=16, zero_fill_inactive=True
-        )
-    )
+    tokens.append(bld.dma_load_lds(source, lds_off, after=after, bytes=16))
 
 
 def _stage_mxfp4_a_scale_dma(
