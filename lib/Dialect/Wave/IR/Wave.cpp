@@ -10,14 +10,20 @@
 
 #include "mlir/Conversion/ConvertToLLVM/ToLLVMInterface.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/CommonFolders.h"
 #include "mlir/Dialect/GPU/IR/GPUDialect.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/Utils/StaticValueUtils.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/DialectImplementation.h"
+#include "mlir/IR/Matchers.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Interfaces/Utils/InferIntRangeCommon.h"
+#include "llvm/ADT/APFloat.h"
+#include "llvm/ADT/APInt.h"
+#include "llvm/ADT/APSInt.h"
 #include "llvm/ADT/DenseSet.h"
+#include "llvm/ADT/FloatingPointMode.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/Twine.h"
 #include "llvm/ADT/TypeSwitch.h"
@@ -25,6 +31,7 @@
 
 #include <array>
 #include <limits>
+#include <utility>
 
 using namespace mlir;
 using namespace mlir::wave;
@@ -49,6 +56,11 @@ void WaveDialect::initialize() {
   // here keeps the dialect honest if anyone reaches for it before the
   // extension has run.
   declarePromisedInterface<ConvertToLLVMPatternInterface, WaveDialect>();
+}
+
+Operation *WaveDialect::materializeConstant(OpBuilder &builder, Attribute value,
+                                            Type type, Location loc) {
+  return arith::ConstantOp::materialize(builder, value, type, loc);
 }
 
 sym::Store &WaveDialect::getSymbolStore() {
@@ -233,6 +245,371 @@ static bool supportsWaveBinaryOverflowFlags(BinaryKind kind) {
   default:
     return false;
   }
+}
+
+static bool canFoldWaveAttrResult(Type type) { return !isa<SimdType>(type); }
+
+static OpFoldResult foldToResultValue(Value value, Type resultType) {
+  if (value && value.getType() == resultType)
+    return value;
+  return {};
+}
+
+static Attribute getZeroFoldAttr(MLIRContext *context, Type type) {
+  if (!canFoldWaveAttrResult(type))
+    return {};
+  return Builder(context).getZeroAttr(type);
+}
+
+static bool isAllOnes(Attribute attr) {
+  APInt value;
+  return matchPattern(attr, m_ConstantInt(&value)) && value.isAllOnes();
+}
+
+template <typename CalculationT>
+static Attribute constFoldWaveIntegerBinary(ArrayRef<Attribute> operands,
+                                            Type resultType,
+                                            CalculationT &&calculate) {
+  return constFoldBinaryOp<IntegerAttr>(operands, resultType,
+                                        std::forward<CalculationT>(calculate));
+}
+
+template <typename SourceAttr, typename ResultAttr, typename CalculationT>
+static Attribute constFoldWaveCast(ArrayRef<Attribute> operands,
+                                   Type resultType, CalculationT &&calculate) {
+  return constFoldCastOp<SourceAttr, ResultAttr, typename SourceAttr::ValueType,
+                         typename ResultAttr::ValueType, void>(
+      operands, resultType, std::forward<CalculationT>(calculate));
+}
+
+static Attribute foldWaveShiftConstants(ArrayRef<Attribute> operands,
+                                        Type resultType,
+                                        function_ref<APInt(APInt, APInt)> fn) {
+  bool bounded = true;
+  Attribute result =
+      constFoldWaveIntegerBinary(operands, resultType, [&](APInt a, APInt b) {
+        bounded &= b.ult(b.getBitWidth());
+        return fn(std::move(a), std::move(b));
+      });
+  return bounded ? result : Attribute();
+}
+
+static Attribute foldWaveAddSubMulConstants(BinaryOp op,
+                                            ArrayRef<Attribute> operands) {
+  switch (op.getKind()) {
+  case BinaryKind::AddI:
+    return constFoldWaveIntegerBinary(
+        operands, op.getType(),
+        [](APInt a, const APInt &b) { return std::move(a) + b; });
+  case BinaryKind::SubI:
+    return constFoldWaveIntegerBinary(
+        operands, op.getType(),
+        [](APInt a, const APInt &b) { return std::move(a) - b; });
+  case BinaryKind::MulI:
+    return constFoldWaveIntegerBinary(
+        operands, op.getType(),
+        [](const APInt &a, const APInt &b) { return a * b; });
+  default:
+    return {};
+  }
+}
+
+static Attribute foldWaveShiftConstants(BinaryOp op,
+                                        ArrayRef<Attribute> operands) {
+  switch (op.getKind()) {
+  case BinaryKind::ShLI:
+    return foldWaveShiftConstants(operands, op.getType(),
+                                  [](APInt a, APInt b) { return a.shl(b); });
+  case BinaryKind::ShRUI:
+    return foldWaveShiftConstants(operands, op.getType(),
+                                  [](APInt a, APInt b) { return a.lshr(b); });
+  case BinaryKind::ShRSI:
+    return foldWaveShiftConstants(operands, op.getType(),
+                                  [](APInt a, APInt b) { return a.ashr(b); });
+  default:
+    return {};
+  }
+}
+
+static Attribute foldWaveBitwiseConstants(BinaryOp op,
+                                          ArrayRef<Attribute> operands) {
+  switch (op.getKind()) {
+  case BinaryKind::AndI:
+    return constFoldWaveIntegerBinary(
+        operands, op.getType(),
+        [](APInt a, const APInt &b) { return std::move(a) & b; });
+  case BinaryKind::OrI:
+    return constFoldWaveIntegerBinary(
+        operands, op.getType(),
+        [](APInt a, const APInt &b) { return std::move(a) | b; });
+  case BinaryKind::XOrI:
+    return constFoldWaveIntegerBinary(
+        operands, op.getType(),
+        [](APInt a, const APInt &b) { return std::move(a) ^ b; });
+  default:
+    return {};
+  }
+}
+
+static Attribute foldWaveDivUIConstants(Type type,
+                                        ArrayRef<Attribute> operands) {
+  bool div0 = false;
+  Attribute result =
+      constFoldWaveIntegerBinary(operands, type, [&](APInt a, const APInt &b) {
+        if (div0 || b.isZero()) {
+          div0 = true;
+          return a;
+        }
+        return a.udiv(b);
+      });
+  return div0 ? Attribute() : result;
+}
+
+static Attribute foldWaveDivSIConstants(Type type,
+                                        ArrayRef<Attribute> operands) {
+  bool overflowOrDiv0 = false;
+  Attribute result =
+      constFoldWaveIntegerBinary(operands, type, [&](APInt a, const APInt &b) {
+        if (overflowOrDiv0 || b.isZero()) {
+          overflowOrDiv0 = true;
+          return a;
+        }
+        return a.sdiv_ov(b, overflowOrDiv0);
+      });
+  return overflowOrDiv0 ? Attribute() : result;
+}
+
+static Attribute foldWaveRemUIConstants(Type type,
+                                        ArrayRef<Attribute> operands) {
+  bool div0 = false;
+  Attribute result =
+      constFoldWaveIntegerBinary(operands, type, [&](APInt a, const APInt &b) {
+        if (div0 || b.isZero()) {
+          div0 = true;
+          return a;
+        }
+        return a.urem(b);
+      });
+  return div0 ? Attribute() : result;
+}
+
+static Attribute foldWaveRemSIConstants(Type type,
+                                        ArrayRef<Attribute> operands) {
+  bool div0 = false;
+  Attribute result =
+      constFoldWaveIntegerBinary(operands, type, [&](APInt a, const APInt &b) {
+        if (div0 || b.isZero()) {
+          div0 = true;
+          return a;
+        }
+        return a.srem(b);
+      });
+  return div0 ? Attribute() : result;
+}
+
+static Attribute foldWaveDivRemConstants(BinaryOp op,
+                                         ArrayRef<Attribute> operands) {
+  switch (op.getKind()) {
+  case BinaryKind::DivUI:
+    return foldWaveDivUIConstants(op.getType(), operands);
+  case BinaryKind::DivSI:
+    return foldWaveDivSIConstants(op.getType(), operands);
+  case BinaryKind::RemUI:
+    return foldWaveRemUIConstants(op.getType(), operands);
+  case BinaryKind::RemSI:
+    return foldWaveRemSIConstants(op.getType(), operands);
+  default:
+    return {};
+  }
+}
+
+static Attribute foldWaveMulHUIConstants(BinaryOp op,
+                                         ArrayRef<Attribute> operands) {
+  if (op.getKind() == BinaryKind::MulHUI)
+    return constFoldWaveIntegerBinary(operands, op.getType(),
+                                      llvm::APIntOps::mulhu);
+  return {};
+}
+
+static Attribute foldWaveBinaryConstants(BinaryOp op,
+                                         ArrayRef<Attribute> operands) {
+  if (!canFoldWaveAttrResult(op.getType()))
+    return {};
+  if (Attribute result = foldWaveAddSubMulConstants(op, operands))
+    return result;
+  if (Attribute result = foldWaveShiftConstants(op, operands))
+    return result;
+  if (Attribute result = foldWaveBitwiseConstants(op, operands))
+    return result;
+  if (Attribute result = foldWaveDivRemConstants(op, operands))
+    return result;
+  return foldWaveMulHUIConstants(op, operands);
+}
+
+static OpFoldResult foldWaveAddIdentity(BinaryOp op,
+                                        BinaryOp::FoldAdaptor adaptor,
+                                        Type resultType) {
+  if (op.getKind() != BinaryKind::AddI)
+    return {};
+  if (matchPattern(adaptor.getRhs(), m_Zero()))
+    return foldToResultValue(op.getLhs(), resultType);
+  if (matchPattern(adaptor.getLhs(), m_Zero()))
+    return foldToResultValue(op.getRhs(), resultType);
+  return {};
+}
+
+static OpFoldResult foldWaveSubIdentity(BinaryOp op,
+                                        BinaryOp::FoldAdaptor adaptor,
+                                        Type resultType, Attribute zero) {
+  if (op.getKind() != BinaryKind::SubI)
+    return {};
+  if (op.getLhs() == op.getRhs() && zero)
+    return zero;
+  if (matchPattern(adaptor.getRhs(), m_Zero()))
+    return foldToResultValue(op.getLhs(), resultType);
+  return {};
+}
+
+static OpFoldResult foldWaveAddSubIdentity(BinaryOp op,
+                                           BinaryOp::FoldAdaptor adaptor,
+                                           Type resultType, Attribute zero) {
+  if (OpFoldResult result = foldWaveAddIdentity(op, adaptor, resultType))
+    return result;
+  return foldWaveSubIdentity(op, adaptor, resultType, zero);
+}
+
+static OpFoldResult foldWaveAndIdentity(BinaryOp op,
+                                        BinaryOp::FoldAdaptor adaptor,
+                                        Type resultType) {
+  if (op.getKind() != BinaryKind::AndI)
+    return {};
+  if (matchPattern(adaptor.getRhs(), m_Zero()))
+    return foldToResultValue(op.getRhs(), resultType);
+  if (matchPattern(adaptor.getLhs(), m_Zero()))
+    return foldToResultValue(op.getLhs(), resultType);
+  if (isAllOnes(adaptor.getRhs()))
+    return foldToResultValue(op.getLhs(), resultType);
+  if (isAllOnes(adaptor.getLhs()))
+    return foldToResultValue(op.getRhs(), resultType);
+  return {};
+}
+
+static OpFoldResult foldWaveOrIdentity(BinaryOp op,
+                                       BinaryOp::FoldAdaptor adaptor,
+                                       Type resultType) {
+  if (op.getKind() != BinaryKind::OrI)
+    return {};
+  if (matchPattern(adaptor.getRhs(), m_Zero()))
+    return foldToResultValue(op.getLhs(), resultType);
+  if (matchPattern(adaptor.getLhs(), m_Zero()))
+    return foldToResultValue(op.getRhs(), resultType);
+  if (isAllOnes(adaptor.getRhs()))
+    return foldToResultValue(op.getRhs(), resultType);
+  if (isAllOnes(adaptor.getLhs()))
+    return foldToResultValue(op.getLhs(), resultType);
+  return {};
+}
+
+static OpFoldResult foldWaveMulIdentity(BinaryOp op,
+                                        BinaryOp::FoldAdaptor adaptor,
+                                        Type resultType) {
+  if (op.getKind() != BinaryKind::MulI)
+    return {};
+  if (matchPattern(adaptor.getRhs(), m_Zero()))
+    return foldToResultValue(op.getRhs(), resultType);
+  if (matchPattern(adaptor.getLhs(), m_Zero()))
+    return foldToResultValue(op.getLhs(), resultType);
+  if (matchPattern(adaptor.getRhs(), m_One()))
+    return foldToResultValue(op.getLhs(), resultType);
+  if (matchPattern(adaptor.getLhs(), m_One()))
+    return foldToResultValue(op.getRhs(), resultType);
+  return {};
+}
+
+static OpFoldResult foldWaveShiftIdentity(BinaryOp op,
+                                          BinaryOp::FoldAdaptor adaptor,
+                                          Type resultType) {
+  switch (op.getKind()) {
+  case BinaryKind::ShLI:
+  case BinaryKind::ShRUI:
+  case BinaryKind::ShRSI:
+    if (matchPattern(adaptor.getRhs(), m_Zero()))
+      return foldToResultValue(op.getLhs(), resultType);
+    return {};
+  default:
+    return {};
+  }
+}
+
+static OpFoldResult foldWaveAndOrIdentity(BinaryOp op,
+                                          BinaryOp::FoldAdaptor adaptor,
+                                          Type resultType) {
+  if (OpFoldResult result = foldWaveAndIdentity(op, adaptor, resultType))
+    return result;
+  return foldWaveOrIdentity(op, adaptor, resultType);
+}
+
+static OpFoldResult foldWaveXOrIdentity(BinaryOp op,
+                                        BinaryOp::FoldAdaptor adaptor,
+                                        Type resultType, Attribute zero) {
+  if (op.getKind() != BinaryKind::XOrI)
+    return {};
+  if (op.getLhs() == op.getRhs() && zero)
+    return zero;
+  if (matchPattern(adaptor.getRhs(), m_Zero()))
+    return foldToResultValue(op.getLhs(), resultType);
+  if (matchPattern(adaptor.getLhs(), m_Zero()))
+    return foldToResultValue(op.getRhs(), resultType);
+  return {};
+}
+
+static OpFoldResult foldWaveDivRemIdentity(BinaryOp op,
+                                           BinaryOp::FoldAdaptor adaptor,
+                                           Type resultType, Attribute zero) {
+  switch (op.getKind()) {
+  case BinaryKind::DivUI:
+  case BinaryKind::DivSI:
+    if (matchPattern(adaptor.getRhs(), m_One()))
+      return foldToResultValue(op.getLhs(), resultType);
+    return {};
+  case BinaryKind::RemUI:
+  case BinaryKind::RemSI:
+    if (matchPattern(adaptor.getRhs(), m_One()) && zero)
+      return zero;
+    return {};
+  default:
+    return {};
+  }
+}
+
+static OpFoldResult foldWaveBinaryIdentity(BinaryOp op,
+                                           BinaryOp::FoldAdaptor adaptor,
+                                           Type resultType, Attribute zero) {
+  if (OpFoldResult result =
+          foldWaveAddSubIdentity(op, adaptor, resultType, zero))
+    return result;
+  if (OpFoldResult result = foldWaveMulIdentity(op, adaptor, resultType))
+    return result;
+  if (OpFoldResult result = foldWaveShiftIdentity(op, adaptor, resultType))
+    return result;
+  if (OpFoldResult result = foldWaveAndOrIdentity(op, adaptor, resultType))
+    return result;
+  if (OpFoldResult result = foldWaveXOrIdentity(op, adaptor, resultType, zero))
+    return result;
+  return foldWaveDivRemIdentity(op, adaptor, resultType, zero);
+}
+
+OpFoldResult BinaryOp::fold(FoldAdaptor adaptor) {
+  Type resultType = getType();
+  Attribute zero = getZeroFoldAttr(getContext(), resultType);
+
+  if (OpFoldResult result =
+          foldWaveBinaryIdentity(*this, adaptor, resultType, zero))
+    return result;
+
+  if (Attribute folded = foldWaveBinaryConstants(*this, adaptor.getOperands()))
+    return folded;
+  return {};
 }
 
 LogicalResult BinaryOp::verify() {
@@ -502,6 +879,131 @@ static LogicalResult verifyWaveCastPolicy(CastOp op, WaveCastShape source,
   if (failed(verifyWaveCastSignednessPolicy(op, policy)))
     return failure();
   return verifyWaveCastExtensionPolicy(op, source, result, policy);
+}
+
+static Type getWaveCastElementType(Type type) {
+  if (SimdType simdType = dyn_cast<SimdType>(type))
+    type = simdType.getElementType();
+  if (VectorType vectorType = dyn_cast<VectorType>(type))
+    type = vectorType.getElementType();
+  return type;
+}
+
+static unsigned getWaveCastIntegerBits(Type type) {
+  Type elementType = getWaveCastElementType(type);
+  if (elementType.isIndex())
+    return 64;
+  return cast<IntegerType>(elementType).getWidth();
+}
+
+static llvm::RoundingMode getWaveCastRounding(WaveCastPolicy policy) {
+  if (!policy.rounding)
+    return llvm::APFloat::rmNearestTiesToEven;
+  switch (policy.rounding.getValue()) {
+  case CastRounding::RNE:
+    return llvm::APFloat::rmNearestTiesToEven;
+  case CastRounding::RTZ:
+    return llvm::APFloat::rmTowardZero;
+  case CastRounding::RTP:
+    return llvm::APFloat::rmTowardPositive;
+  case CastRounding::RTN:
+    return llvm::APFloat::rmTowardNegative;
+  }
+  llvm_unreachable("unknown wave cast rounding mode");
+}
+
+static Attribute foldWaveIntConvert(CastOp op, WaveCastPolicy policy,
+                                    ArrayRef<Attribute> operands) {
+  unsigned sourceBits = getWaveCastIntegerBits(op.getSource().getType());
+  unsigned resultBits = getWaveCastIntegerBits(op.getType());
+  CastExtension extension = CastExtension::Sign;
+  if (policy.extension)
+    extension = policy.extension.getValue();
+  return constFoldWaveCast<IntegerAttr, IntegerAttr>(
+      operands, op.getType(),
+      [sourceBits, resultBits, extension](const APInt &value,
+                                          bool &castStatus) {
+        if (resultBits > sourceBits) {
+          if (extension == CastExtension::Zero)
+            return value.zext(resultBits);
+          return value.sext(resultBits);
+        }
+        if (resultBits < value.getBitWidth())
+          return value.trunc(resultBits);
+        return value;
+      });
+}
+
+static Attribute foldWaveFpConvert(CastOp op, WaveCastPolicy policy,
+                                   ArrayRef<Attribute> operands) {
+  FloatType resultType = cast<FloatType>(getWaveCastElementType(op.getType()));
+  const llvm::fltSemantics &semantics = resultType.getFloatSemantics();
+  llvm::RoundingMode rounding = getWaveCastRounding(policy);
+  return constFoldWaveCast<FloatAttr, FloatAttr>(
+      operands, op.getType(),
+      [&semantics, rounding](APFloat value, bool &castStatus) {
+        bool losesInfo = false;
+        APFloat::opStatus status =
+            value.convert(semantics, rounding, &losesInfo);
+        castStatus = status != APFloat::opInvalidOp;
+        return value;
+      });
+}
+
+static Attribute foldWaveIntToFp(CastOp op, WaveCastPolicy policy,
+                                 ArrayRef<Attribute> operands) {
+  FloatType resultType = cast<FloatType>(getWaveCastElementType(op.getType()));
+  unsigned resultWidth = resultType.getWidth();
+  const llvm::fltSemantics &semantics = resultType.getFloatSemantics();
+  bool isSigned = policy.signedness.getValue() == CastSignedness::Signed;
+  llvm::RoundingMode rounding = getWaveCastRounding(policy);
+  return constFoldWaveCast<IntegerAttr, FloatAttr>(
+      operands, op.getType(),
+      [&semantics, resultWidth, isSigned, rounding](const APInt &value,
+                                                    bool &castStatus) {
+        APFloat result(semantics, APInt::getZero(resultWidth));
+        result.convertFromAPInt(value, isSigned, rounding);
+        return result;
+      });
+}
+
+static Attribute foldWaveFpToInt(CastOp op, WaveCastPolicy policy,
+                                 ArrayRef<Attribute> operands) {
+  unsigned resultBits = getWaveCastIntegerBits(op.getType());
+  bool isUnsigned = policy.signedness.getValue() == CastSignedness::Unsigned;
+  return constFoldWaveCast<FloatAttr, IntegerAttr>(
+      operands, op.getType(),
+      [resultBits, isUnsigned](const APFloat &value, bool &castStatus) {
+        bool ignored;
+        APSInt result(resultBits, isUnsigned);
+        castStatus =
+            APFloat::opInvalidOp !=
+            value.convertToInteger(result, APFloat::rmTowardZero, &ignored);
+        return result;
+      });
+}
+
+OpFoldResult CastOp::fold(FoldAdaptor adaptor) {
+  if (getSource().getType() == getType())
+    return getSource();
+  if (!canFoldWaveAttrResult(getType()))
+    return {};
+
+  FailureOr<WaveCastPolicy> policy = getWaveCastPolicy(*this);
+  if (failed(policy))
+    return {};
+
+  switch (getKind()) {
+  case CastKind::FpConvert:
+    return foldWaveFpConvert(*this, *policy, adaptor.getOperands());
+  case CastKind::IntConvert:
+    return foldWaveIntConvert(*this, *policy, adaptor.getOperands());
+  case CastKind::IntToFp:
+    return foldWaveIntToFp(*this, *policy, adaptor.getOperands());
+  case CastKind::FpToInt:
+    return foldWaveFpToInt(*this, *policy, adaptor.getOperands());
+  }
+  return {};
 }
 
 LogicalResult CastOp::verify() {
@@ -1384,6 +1886,38 @@ LogicalResult CmpIOp::verify() {
   if (lhsType.getWidth() != resultType.getWidth())
     return emitOpError("result mask width must match operand SIMD width");
   return success();
+}
+
+static std::optional<bool> foldWaveCmpIToBool(CmpIOp cmp) {
+  if (cmp.getLhs() == cmp.getRhs())
+    return arith::applyCmpPredicate(cmp.getPredicate(), APInt(1, 0),
+                                    APInt(1, 0));
+
+  SplatOp lhsSplat = cmp.getLhs().getDefiningOp<SplatOp>();
+  SplatOp rhsSplat = cmp.getRhs().getDefiningOp<SplatOp>();
+  if (!lhsSplat || !rhsSplat)
+    return std::nullopt;
+
+  APInt lhs;
+  APInt rhs;
+  if (!matchPattern(lhsSplat.getSource(), m_ConstantInt(&lhs)) ||
+      !matchPattern(rhsSplat.getSource(), m_ConstantInt(&rhs)))
+    return std::nullopt;
+  return arith::applyCmpPredicate(cmp.getPredicate(), lhs, rhs);
+}
+
+OpFoldResult BallotOp::fold(FoldAdaptor) {
+  CmpIOp cmp = getMask().getDefiningOp<CmpIOp>();
+  if (!cmp)
+    return {};
+
+  std::optional<bool> result = foldWaveCmpIToBool(cmp);
+  if (!result)
+    return {};
+
+  unsigned bits = cast<IntegerType>(getType()).getWidth();
+  APInt value = *result ? APInt::getAllOnes(bits) : APInt::getZero(bits);
+  return IntegerAttr::get(getType(), value);
 }
 
 LogicalResult BallotOp::verify() {

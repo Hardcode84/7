@@ -131,6 +131,7 @@ def Wave_BallotOp : Wave_Op<"ballot", [NoMemoryEffect]> {
   let arguments = (ins Wave_Mask:$mask);
   let results = (outs AnySignlessInteger:$result);
   let assemblyFormat = "$mask attr-dict `:` qualified(type($mask)) `->` type($result)";
+  let hasFolder = 1;
   let hasVerifier = 1;
 }
 
@@ -166,6 +167,7 @@ def Wave_BinaryOp : Wave_Op<"binary", [Pure,
                          "::mlir::arith::IntegerOverflowFlags::none">:$overflowFlags);
   let results = (outs AnyType:$result);
   let assemblyFormat = "$kind $lhs `,` $rhs (`overflow` `` $overflowFlags^)? attr-dict `:` qualified(type($lhs)) `,` qualified(type($rhs)) `->` qualified(type($result))";
+  let hasFolder = 1;
   let hasVerifier = 1;
 }
 
@@ -192,6 +194,7 @@ def Wave_CastOp : Wave_Op<"cast", [Pure]> {
                        OptionalAttr<DictionaryAttr>:$policy);
   let results = (outs AnyType:$result);
   let assemblyFormat = "$kind $source (`policy` $policy^)? attr-dict `:` type($source) `->` type($result)";
+  let hasFolder = 1;
   let hasVerifier = 1;
 }
 

@@ -73,6 +73,73 @@ func.func @read_first_splat(%value: i32) -> i32 {
   return %first : i32
 }
 
+// CHECK-LABEL: func.func @binary_scalar_constant_fold
+// CHECK-NOT: wave.binary
+// CHECK-DAG: %[[C7:.*]] = arith.constant 7 : i32
+// CHECK-DAG: %[[C28:.*]] = arith.constant 28 : i32
+// CHECK-DAG: %[[C3:.*]] = arith.constant 3 : index
+// CHECK: return %[[C7]], %[[C28]], %[[C3]] : i32, i32, index
+func.func @binary_scalar_constant_fold() -> (i32, i32, index) {
+  %c3 = arith.constant 3 : i32
+  %c4 = arith.constant 4 : i32
+  %c2 = arith.constant 2 : i32
+  %sum = wave.binary addi %c3, %c4 : i32, i32 -> i32
+  %shift = wave.binary shli %sum, %c2 : i32, i32 -> i32
+  %i10 = arith.constant 10 : index
+  %i7 = arith.constant 7 : index
+  %diff = wave.binary subi %i10, %i7 : index, index -> index
+  return %sum, %shift, %diff : i32, i32, index
+}
+
+// CHECK-LABEL: func.func @binary_simd_identity_fold
+// CHECK-SAME: (%[[V:.*]]: !wave.simd<i32, 32>)
+// CHECK-NOT: wave.binary
+// CHECK: return %[[V]], %[[V]], %[[V]] : !wave.simd<i32, 32>, !wave.simd<i32, 32>, !wave.simd<i32, 32>
+func.func @binary_simd_identity_fold(%v: !wave.simd<i32, 32>)
+    -> (!wave.simd<i32, 32>, !wave.simd<i32, 32>, !wave.simd<i32, 32>) {
+  %zero = arith.constant 0 : i32
+  %one = arith.constant 1 : i32
+  %all = arith.constant -1 : i32
+  %sum = wave.binary addi %v, %zero : !wave.simd<i32, 32>, i32 -> !wave.simd<i32, 32>
+  %prod = wave.binary muli %one, %v : i32, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  %and = wave.binary andi %v, %all : !wave.simd<i32, 32>, i32 -> !wave.simd<i32, 32>
+  return %sum, %prod, %and : !wave.simd<i32, 32>, !wave.simd<i32, 32>, !wave.simd<i32, 32>
+}
+
+// CHECK-LABEL: func.func @cast_scalar_constant_fold
+// CHECK-NOT: wave.cast
+// CHECK-DAG: %[[C255_I64:.*]] = arith.constant 255 : i64
+// CHECK-DAG: %[[C255_I16:.*]] = arith.constant 255 : i16
+// CHECK-DAG: %[[C42:.*]] = arith.constant 42 : i32
+// CHECK: return %[[C255_I64]], %[[C255_I16]], %[[C42]] : i64, i16, i32
+func.func @cast_scalar_constant_fold() -> (i64, i16, i32) {
+  %c255 = arith.constant 255 : i32
+  %wide = wave.cast intconvert %c255 policy {extension = #wave.cast_extension<zero>} : i32 -> i64
+  %narrow = wave.cast intconvert %wide : i64 -> i16
+  %f42 = arith.constant 4.200000e+01 : f32
+  %i42 = wave.cast fp_to_int %f42 policy {signedness = #wave.cast_signedness<signed>} : f32 -> i32
+  return %wide, %narrow, %i42 : i64, i16, i32
+}
+
+// CHECK-LABEL: func.func @ballot_cmpi_constant_fold
+// CHECK-NOT: wave.cmpi
+// CHECK-NOT: wave.ballot
+// CHECK-DAG: %[[ALL:.*]] = arith.constant -1 : i32
+// CHECK-DAG: %[[ZERO:.*]] = arith.constant 0 : i64
+// CHECK: return %[[ALL]], %[[ZERO]] : i32, i64
+func.func @ballot_cmpi_constant_fold() -> (i32, i64) {
+  %c1 = arith.constant 1 : i32
+  %c2 = arith.constant 2 : i32
+  %v1 = wave.splat %c1 : i32 -> !wave.simd<i32, 32>
+  %v2 = wave.splat %c2 : i32 -> !wave.simd<i32, 32>
+  %true_mask = wave.cmpi ult %v1, %v2 : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.mask<32>
+  %all = wave.ballot %true_mask : !wave.mask<32> -> i32
+  %v64 = wave.splat %c1 : i32 -> !wave.simd<i32, 64>
+  %false_mask = wave.cmpi ne %v64, %v64 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.mask<64>
+  %zero = wave.ballot %false_mask : !wave.mask<64> -> i64
+  return %all, %zero : i32, i64
+}
+
 // CHECK-LABEL: func.func @index_expr_substitute_const
 // CHECK-SAME: (%[[LANE:.*]]: !wave.simd<i32, 32>)
 // CHECK: %[[OFF:.*]] = wave.index_expr <"4 + 2*lid"> ["lid"](%[[LANE]]) : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
