@@ -191,6 +191,25 @@ LogicalResult VMovB32TupleOp::verify() {
   return success();
 }
 
+static LogicalResult verifyAllocatedPairAlignment(Operation *op, RegType type,
+                                                  StringRef name) {
+  if (type.getIndex() >= 0 && type.getIndex() % 2 != 0)
+    return op->emitOpError() << name << " must be 64-bit aligned";
+  return success();
+}
+
+LogicalResult VMovB64TupleOp::verify() {
+  auto resultType = cast<RegType>(getResult().getType());
+  if (failed(verifyAllocatedPairAlignment(*this, resultType, "result")))
+    return failure();
+  auto sourceType = dyn_cast<RegType>(getSource().getType());
+  if (!sourceType)
+    return success();
+  if (sourceType.getWidth() != 2)
+    return emitOpError("register source must be two dwords");
+  return verifyAllocatedPairAlignment(*this, sourceType, "source");
+}
+
 static bool isExecIfMergeRegClass(RegClass regClass) {
   return regClass == RegClass::VGPR || regClass == RegClass::SGPR;
 }

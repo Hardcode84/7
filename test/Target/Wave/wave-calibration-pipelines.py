@@ -102,6 +102,7 @@ def check_calibration_entry(label: str, module) -> None:
             ticket = finish_passes.index("waveamd-insert-ticket-waits")
             regalloc = finish_passes.index("waveamd-reg-alloc")
             hazard = finish_passes.index("waveamd-insert-hazard-waits")
+            pack_zero = finish_passes.index("waveamd-pack-vgpr-zero-moves")
         except ValueError as err:
             require(label, False, f"missing finish pass: {err}")
         decompose_after_regalloc = [
@@ -116,7 +117,7 @@ def check_calibration_entry(label: str, module) -> None:
         )
         require(
             label,
-            regalloc < decompose_after_regalloc[0] < ticket < hazard,
+            regalloc < decompose_after_regalloc[0] < pack_zero < ticket < hazard,
             "finish pass order drifted",
         )
     print(f"{label}: ok")

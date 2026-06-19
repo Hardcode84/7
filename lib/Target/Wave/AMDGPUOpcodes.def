@@ -59,6 +59,7 @@
   X(vMbcntLo, V_MBCNT_LO_U32_B32_e64_vi, V_MBCNT_LO_U32_B32_e64_gfx11)         \
   X(vMbcntHi, V_MBCNT_HI_U32_B32_e64_vi, V_MBCNT_HI_U32_B32_e64_gfx11)         \
   X(vMovB32, V_MOV_B32_e32_vi, V_MOV_B32_e32_gfx11)                            \
+  X(vMovB64, V_MOV_B64_e32_vi, V_MOV_B64_e32_vi)                                \
   X(vCndmaskB32, V_CNDMASK_B32_e64_vi, V_CNDMASK_B32_e64_gfx11)                \
   X(vAndB32, V_AND_B32_e32_vi, V_AND_B32_e32_gfx11)                            \
   X(vOrB32, V_OR_B32_e32_vi, V_OR_B32_e32_gfx11)                               \

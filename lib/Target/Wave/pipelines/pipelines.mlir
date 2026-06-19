@@ -92,8 +92,10 @@ module attributes {transform.with_named_sequence} {
         : (!transform.any_op) -> !transform.any_op
     %rd = transform.apply_registered_pass "waveamd-decompose-mem-tuples" to %r5
         : (!transform.any_op) -> !transform.any_op
+    %rpz = transform.apply_registered_pass "waveamd-pack-vgpr-zero-moves" to %rd
+        : (!transform.any_op) -> !transform.any_op
     // Preserve structured exec_if until waits see real control flow.
-    %r6 = transform.apply_registered_pass "waveamd-insert-ticket-waits" to %rd
+    %r6 = transform.apply_registered_pass "waveamd-insert-ticket-waits" to %rpz
         : (!transform.any_op) -> !transform.any_op
     %r7 = transform.apply_registered_pass "waveamd-insert-hazard-waits" to %r6
         : (!transform.any_op) -> !transform.any_op

@@ -395,6 +395,7 @@ private:
   unsigned vMbcntLo() const { return opcodes.vMbcntLo; }
   unsigned vMbcntHi() const { return opcodes.vMbcntHi; }
   unsigned vMovB32() const { return opcodes.vMovB32; }
+  unsigned vMovB64() const { return opcodes.vMovB64; }
   unsigned vCndmaskB32() const { return opcodes.vCndmaskB32; }
   unsigned vAndB32() const { return opcodes.vAndB32; }
   unsigned vOrB32() const { return opcodes.vOrB32; }
@@ -1932,6 +1933,12 @@ private:
           return failure();
       }
       return success();
+    }
+    if (isa<waveamdmachine::VMovB64TupleOp>(op)) {
+      if (!waveamdmachine::VMovB64TupleOp::isSupportedOnIsa(isaVersion))
+        return op.emitError("v_mov_b64_tuple unsupported on target");
+      return emitMC(vMovB64(),
+                    {toMCOperand(result()), toMCOperand(op.getOperand(0))});
     }
     if (isa<waveamdmachine::VCndmaskB32TupleOp>(op)) {
       waveamdmachine::RegType regType =

@@ -27,6 +27,10 @@ defvar WaveAMDMachine_Gfx940Plus =
     "(isa.Minor == 5 && isa.Stepping == 0))";
 defvar WaveAMDMachine_Gfx950 =
     "isa.Major == 9 && isa.Minor == 5 && isa.Stepping == 0";
+defvar WaveAMDMachine_VMovB64Target =
+    "(isa.Major == 9 && ((isa.Minor == 4 && isa.Stepping == 2) || " #
+    "(isa.Minor == 5 && isa.Stepping == 0))) || " #
+    "(isa.Major == 12 && isa.Minor == 5)";
 defvar WaveAMDMachine_FlatScratchTarget =
     "isa.Major == 11 || (isa.Major == 9 && isa.Minor >= 4)";
 defvar WaveAMDMachine_AGPRTarget =
@@ -554,6 +558,14 @@ def WaveAMDMachine_VWorkitemIdXOp
 def WaveAMDMachine_VMovB32TupleOp
     : WaveAMDMachine_UnaryResult<"v_mov_b32_tuple", WaveAMDMachine_RegOrImm,
                               WaveAMDMachine_VGPR, [WaveAMDMachine_VALU, Pure]> {
+  let hasVerifier = 1;
+}
+
+def WaveAMDMachine_VMovB64TupleOp
+    : WaveAMDMachine_UnaryResult<"v_mov_b64_tuple", WaveAMDMachine_RegOrImm,
+                              WaveAMDMachine_VGPR2,
+                              [WaveAMDMachine_VALU, Pure]> {
+  let archPredicate = WaveAMDMachine_VMovB64Target;
   let hasVerifier = 1;
 }
 

@@ -78,10 +78,8 @@ wmma_f16_matmul_tiled:
 		s_mov_b32 m0, s17
 		s_nop 0
 		buffer_load_dwordx4 v7, s[24:27], 0 offen lds
-		v_mov_b32_e32 v8, 0
-		v_mov_b32_e32 v9, 0
-		v_mov_b32_e32 v10, 0
-		v_mov_b32_e32 v11, 0
+		v_mov_b64_e32 v[8:9], 0
+		v_mov_b64_e32 v[10:11], 0
 		s_mov_b32 s28, s22
 		s_mov_b32 s29, s23
 		s_mov_b32 s30, 0x20000
@@ -109,66 +107,36 @@ wmma_f16_matmul_tiled:
 		ds_read_b128 v[36:39], v15 offset:17408
 		ds_read_b128 v[40:43], v15 offset:18432
 		ds_read_b128 v[44:47], v15 offset:19456
-		v_mov_b32_e32 v48, 0
-		v_mov_b32_e32 v49, 0
-		v_mov_b32_e32 v50, 0
-		v_mov_b32_e32 v51, 0
-		v_mov_b32_e32 v52, 0
-		v_mov_b32_e32 v53, 0
-		v_mov_b32_e32 v54, 0
-		v_mov_b32_e32 v55, 0
-		v_mov_b32_e32 v56, 0
-		v_mov_b32_e32 v57, 0
-		v_mov_b32_e32 v58, 0
-		v_mov_b32_e32 v59, 0
-		v_mov_b32_e32 v60, 0
-		v_mov_b32_e32 v61, 0
-		v_mov_b32_e32 v62, 0
-		v_mov_b32_e32 v63, 0
-		v_mov_b32_e32 v64, 0
-		v_mov_b32_e32 v65, 0
-		v_mov_b32_e32 v66, 0
-		v_mov_b32_e32 v67, 0
-		v_mov_b32_e32 v68, 0
-		v_mov_b32_e32 v69, 0
-		v_mov_b32_e32 v70, 0
-		v_mov_b32_e32 v71, 0
-		v_mov_b32_e32 v72, 0
-		v_mov_b32_e32 v73, 0
-		v_mov_b32_e32 v74, 0
-		v_mov_b32_e32 v75, 0
-		v_mov_b32_e32 v76, 0
-		v_mov_b32_e32 v77, 0
-		v_mov_b32_e32 v78, 0
-		v_mov_b32_e32 v79, 0
-		v_mov_b32_e32 v80, 0
-		v_mov_b32_e32 v81, 0
-		v_mov_b32_e32 v82, 0
-		v_mov_b32_e32 v83, 0
-		v_mov_b32_e32 v84, 0
-		v_mov_b32_e32 v85, 0
-		v_mov_b32_e32 v86, 0
-		v_mov_b32_e32 v87, 0
-		v_mov_b32_e32 v88, 0
-		v_mov_b32_e32 v89, 0
-		v_mov_b32_e32 v90, 0
-		v_mov_b32_e32 v91, 0
-		v_mov_b32_e32 v92, 0
-		v_mov_b32_e32 v93, 0
-		v_mov_b32_e32 v94, 0
-		v_mov_b32_e32 v95, 0
-		v_mov_b32_e32 v96, 0
-		v_mov_b32_e32 v97, 0
-		v_mov_b32_e32 v98, 0
-		v_mov_b32_e32 v99, 0
-		v_mov_b32_e32 v100, 0
-		v_mov_b32_e32 v101, 0
-		v_mov_b32_e32 v102, 0
-		v_mov_b32_e32 v103, 0
-		v_mov_b32_e32 v104, 0
-		v_mov_b32_e32 v105, 0
-		v_mov_b32_e32 v106, 0
-		v_mov_b32_e32 v107, 0
+		v_mov_b64_e32 v[48:49], 0
+		v_mov_b64_e32 v[50:51], 0
+		v_mov_b64_e32 v[52:53], 0
+		v_mov_b64_e32 v[54:55], 0
+		v_mov_b64_e32 v[56:57], 0
+		v_mov_b64_e32 v[58:59], 0
+		v_mov_b64_e32 v[60:61], 0
+		v_mov_b64_e32 v[62:63], 0
+		v_mov_b64_e32 v[64:65], 0
+		v_mov_b64_e32 v[66:67], 0
+		v_mov_b64_e32 v[68:69], 0
+		v_mov_b64_e32 v[70:71], 0
+		v_mov_b64_e32 v[72:73], 0
+		v_mov_b64_e32 v[74:75], 0
+		v_mov_b64_e32 v[76:77], 0
+		v_mov_b64_e32 v[78:79], 0
+		v_mov_b64_e32 v[80:81], 0
+		v_mov_b64_e32 v[82:83], 0
+		v_mov_b64_e32 v[84:85], 0
+		v_mov_b64_e32 v[86:87], 0
+		v_mov_b64_e32 v[88:89], 0
+		v_mov_b64_e32 v[90:91], 0
+		v_mov_b64_e32 v[92:93], 0
+		v_mov_b64_e32 v[94:95], 0
+		v_mov_b64_e32 v[96:97], 0
+		v_mov_b64_e32 v[98:99], 0
+		v_mov_b64_e32 v[100:101], 0
+		v_mov_b64_e32 v[102:103], 0
+		v_mov_b64_e32 v[104:105], 0
+		v_mov_b64_e32 v[106:107], 0
 		s_mov_b32 s17, 0
 		s_cmp_lt_i32 0, 0xfe
 		s_cbranch_scc0 .Lwmma_f16_matmul_tiled.loop_exit_0
