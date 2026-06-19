@@ -31,8 +31,8 @@ thread pool.
 `waveamd-abi-lowering`, `waveamd-decompose-mem-tuples`,
 `waveamd-narrow-wide-int`, `waveamd-form-fused-int`,
 `waveamd-clear-regalloc-assignments`, `waveamd-preserve-hw-regs`,
-`waveamd-reg-alloc`, `waveamd-decompose-mem-tuples`,
-`waveamd-insert-ticket-waits`,
+`canonicalize`, `cse`, `waveamd-reg-alloc`,
+`waveamd-decompose-mem-tuples`, `waveamd-insert-ticket-waits`,
 `waveamd-insert-hazard-waits`, `waveamd-resource-info`,
 `waveamd-metadata`) and `@compile_kernels` (the backend +
 `wave-compile-kernels`). The default entry is

@@ -98,7 +98,11 @@ module attributes {transform.with_named_sequence} {
         : (!transform.any_op) -> !transform.any_op
     %r4 = transform.apply_registered_pass "waveamd-preserve-hw-regs" to %rclr
         : (!transform.any_op) -> !transform.any_op
-    %r5 = transform.apply_registered_pass "waveamd-reg-alloc" to %r4
+    %rc = transform.apply_registered_pass "canonicalize" to %r4
+        : (!transform.any_op) -> !transform.any_op
+    %rcs = transform.apply_registered_pass "cse" to %rc
+        : (!transform.any_op) -> !transform.any_op
+    %r5 = transform.apply_registered_pass "waveamd-reg-alloc" to %rcs
         : (!transform.any_op) -> !transform.any_op
     %rd = transform.apply_registered_pass "waveamd-decompose-mem-tuples" to %r5
         : (!transform.any_op) -> !transform.any_op

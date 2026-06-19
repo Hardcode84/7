@@ -126,8 +126,16 @@ def check_calibration_entry(label: str, module) -> None:
             regalloc = finish_passes.index("waveamd-reg-alloc")
             hazard = finish_passes.index("waveamd-insert-hazard-waits")
             pack_zero = finish_passes.index("waveamd-pack-vgpr-zero-moves")
+            preserve = finish_passes.index("waveamd-preserve-hw-regs")
+            pre_regalloc_canon = finish_passes.index("canonicalize", preserve)
+            pre_regalloc_cse = finish_passes.index("cse", pre_regalloc_canon)
         except ValueError as err:
             require(label, False, f"missing finish pass: {err}")
+        require(
+            label,
+            preserve < pre_regalloc_canon < pre_regalloc_cse < regalloc,
+            "pre-regalloc cleanup pass order drifted",
+        )
         decompose_after_regalloc = [
             index
             for index, name in enumerate(finish_passes)

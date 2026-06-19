@@ -588,6 +588,7 @@ wmma_f16_matmul_tiled:
 		v_add_u32_e32 v7, 0x20000, v19
 		v_lshlrev_b32_e32 v17, 3, v2
 		v_lshlrev_b32_e32 v2, 10, v9
+		s_cmp_lt_i32 0, 30
 		v_mov_b64_e32 v[116:117], 0
 		v_mov_b64_e32 v[118:119], 0
 		v_mov_b64_e32 v[120:121], 0
@@ -650,7 +651,6 @@ wmma_f16_matmul_tiled:
 		v_mov_b64_e32 v[234:235], 0
 		v_mov_b64_e32 v[236:237], 0
 		v_mov_b64_e32 v[238:239], 0
-		s_cmp_lt_i32 0, 30
 		s_cbranch_scc0 .Lwmma_f16_matmul_tiled.loop_exit_0
 .Lwmma_f16_matmul_tiled.loop_head_0:
 		s_add_i32 s50, s35, 2
