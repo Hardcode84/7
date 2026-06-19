@@ -69,21 +69,116 @@ func.func @keep_yielded_value(%cond: !waveamdmachine.reg<sgpr, 1>,
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 
-// CHECK-LABEL: func.func @keep_scc_writer(
+// CHECK-LABEL: func.func @hoist_dead_scc_writer(
 // CHECK: [[ONE:%.*]] = waveamdmachine.imm 1
-// CHECK-NEXT: waveamdmachine.exec_if [[COND:%.*]] {
-// CHECK-NEXT: [[SUM:%.*]], [[SCC:%.*]] = waveamdmachine.s_add_i32 [[X:%.*]], [[ONE]]
+// CHECK-NEXT: [[SUM:%.*]], %{{.*}} = waveamdmachine.s_add_i32 [[X:%.*]], [[ONE]]
 // CHECK-NEXT: [[VALUE:%.*]] = waveamdmachine.v_mov_b32_tuple [[SUM]]
+// CHECK-NEXT: waveamdmachine.exec_if [[COND:%.*]] {
+// CHECK-NOT: waveamdmachine.s_add_i32
+// CHECK-NOT: waveamdmachine.v_mov_b32_tuple
 // CHECK-NEXT: waveamdmachine.ds_store_b32 [[ADDR:%.*]], [[VALUE]]
-func.func @keep_scc_writer(%cond: !waveamdmachine.reg<sgpr, 1>,
-                           %x: !waveamdmachine.reg<sgpr, 1>,
-                           %addr: !waveamdmachine.reg<vgpr, 1>) {
+func.func @hoist_dead_scc_writer(%cond: !waveamdmachine.reg<sgpr, 1>,
+                                 %x: !waveamdmachine.reg<sgpr, 1>,
+                                 %addr: !waveamdmachine.reg<vgpr, 1>) {
   %one = waveamdmachine.imm 1 : !waveamdmachine.imm
   waveamdmachine.exec_if %cond {
     %sum, %scc = waveamdmachine.s_add_i32 %x, %one
         : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.imm)
         -> (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<scc, 1>)
     %value = waveamdmachine.v_mov_b32_tuple %sum {registers = 1 : i64}
+        : (!waveamdmachine.reg<sgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
+    %store = waveamdmachine.ds_store_b32 %addr, %value
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.mem.token
+    waveamdmachine.yield
+  } : !waveamdmachine.reg<sgpr, 1>
+  return
+}
+
+}
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
+
+// CHECK-LABEL: func.func @keep_live_scc_writer(
+// CHECK: [[ONE:%.*]] = waveamdmachine.imm 1
+// CHECK-NEXT: waveamdmachine.exec_if [[COND:%.*]] {
+// CHECK-NEXT: [[SUM:%.*]], [[SCC:%.*]] = waveamdmachine.s_add_i32 [[X:%.*]], [[ONE]]
+// CHECK-NEXT: [[CHOSEN:%.*]] = waveamdmachine.s_cselect_b32 [[SCC]], [[SUM]], [[X]]
+// CHECK-NEXT: [[VALUE:%.*]] = waveamdmachine.v_mov_b32_tuple [[CHOSEN]]
+// CHECK-NEXT: waveamdmachine.ds_store_b32 [[ADDR:%.*]], [[VALUE]]
+func.func @keep_live_scc_writer(%cond: !waveamdmachine.reg<sgpr, 1>,
+                                %x: !waveamdmachine.reg<sgpr, 1>,
+                                %addr: !waveamdmachine.reg<vgpr, 1>) {
+  %one = waveamdmachine.imm 1 : !waveamdmachine.imm
+  waveamdmachine.exec_if %cond {
+    %sum, %scc = waveamdmachine.s_add_i32 %x, %one
+        : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.imm)
+        -> (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<scc, 1>)
+    %chosen = waveamdmachine.s_cselect_b32 %scc, %sum, %x
+        : (!waveamdmachine.reg<scc, 1>, !waveamdmachine.reg<sgpr, 1>,
+           !waveamdmachine.reg<sgpr, 1>) -> !waveamdmachine.reg<sgpr, 1>
+    %value = waveamdmachine.v_mov_b32_tuple %chosen {registers = 1 : i64}
+        : (!waveamdmachine.reg<sgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
+    %store = waveamdmachine.ds_store_b32 %addr, %value
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.mem.token
+    waveamdmachine.yield
+  } : !waveamdmachine.reg<sgpr, 1>
+  return
+}
+
+}
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
+
+// CHECK-LABEL: func.func @hoist_dead_vcc_writer(
+// CHECK: [[SUM:%.*]], %{{.*}} = waveamdmachine.v_add_u32_vcc [[X:%.*]], [[Y:%.*]]
+// CHECK-NEXT: waveamdmachine.exec_if [[COND:%.*]] {
+// CHECK-NOT: waveamdmachine.v_add_u32_vcc
+// CHECK-NEXT: waveamdmachine.ds_store_b32 [[ADDR:%.*]], [[SUM]]
+func.func @hoist_dead_vcc_writer(%cond: !waveamdmachine.reg<sgpr, 1>,
+                                 %x: !waveamdmachine.reg<vgpr, 1>,
+                                 %y: !waveamdmachine.reg<vgpr, 1>,
+                                 %addr: !waveamdmachine.reg<vgpr, 1>) {
+  waveamdmachine.exec_if %cond {
+    %sum, %vcc = waveamdmachine.v_add_u32_vcc %x, %y
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vcc, 1>)
+    %store = waveamdmachine.ds_store_b32 %addr, %sum
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.mem.token
+    waveamdmachine.yield
+  } : !waveamdmachine.reg<sgpr, 1>
+  return
+}
+
+}
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
+
+// CHECK-LABEL: func.func @keep_live_vcc_writer(
+// CHECK-NEXT: waveamdmachine.exec_if [[COND:%.*]] {
+// CHECK-NEXT: [[SUM:%.*]], [[VCC:%.*]] = waveamdmachine.v_add_u32_vcc [[X:%.*]], [[Y:%.*]]
+// CHECK-NEXT: [[SAVED:%.*]] = waveamdmachine.s_read_vcc_b32 [[VCC]]
+// CHECK-NEXT: [[VALUE:%.*]] = waveamdmachine.v_mov_b32_tuple [[SAVED]]
+// CHECK-NEXT: waveamdmachine.ds_store_b32 [[ADDR:%.*]], [[VALUE]]
+func.func @keep_live_vcc_writer(%cond: !waveamdmachine.reg<sgpr, 1>,
+                                %x: !waveamdmachine.reg<vgpr, 1>,
+                                %y: !waveamdmachine.reg<vgpr, 1>,
+                                %addr: !waveamdmachine.reg<vgpr, 1>) {
+  waveamdmachine.exec_if %cond {
+    %sum, %vcc = waveamdmachine.v_add_u32_vcc %x, %y
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vcc, 1>)
+    %saved = waveamdmachine.s_read_vcc_b32 %vcc
+        : (!waveamdmachine.reg<vcc, 1>) -> !waveamdmachine.reg<sgpr, 1>
+    %value = waveamdmachine.v_mov_b32_tuple %saved {registers = 1 : i64}
         : (!waveamdmachine.reg<sgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
     %store = waveamdmachine.ds_store_b32 %addr, %value
         : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)

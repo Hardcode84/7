@@ -44,6 +44,9 @@ template <typename ConcreteType>
 class VALUOp : public TraitBase<ConcreteType, VALUOp> {};
 
 template <typename ConcreteType>
+class SALUOp : public TraitBase<ConcreteType, SALUOp> {};
+
+template <typename ConcreteType>
 class SMEMLoadOp : public TraitBase<ConcreteType, SMEMLoadOp> {};
 
 template <typename ConcreteType>

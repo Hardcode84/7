@@ -44,11 +44,6 @@ static bool isWaveAMDMachineOp(Operation *op) {
          WaveAMDMachineDialect::getDialectNamespace();
 }
 
-static bool touchesHardwareResource(Operation *op) {
-  HardwareResourceEffects effects = getHardwareResourceEffects(op);
-  return !effects.reads.empty() || !effects.writes.empty();
-}
-
 static bool hasOnlyLocalNonYieldUsers(Operation *root, Operation *op) {
   bool sawUse = false;
   for (OpResult result : op->getResults()) {
@@ -73,15 +68,45 @@ static bool hasHoistableShape(Operation *op) {
 }
 
 static bool isHoistableKind(Operation *op) {
-  if (!isa<ImmOp>(op) && !op->hasTrait<traits::VALUOp>())
+  if (!isa<ImmOp>(op) && !op->hasTrait<traits::VALUOp>() &&
+      !op->hasTrait<traits::SALUOp>())
     return false;
   return true;
+}
+
+static bool isFlagResource(HardwareResourceKind kind) {
+  return kind == HardwareResourceKind::SCC || kind == HardwareResourceKind::VCC;
+}
+
+static bool touchesOnlyUnusedFlags(Operation *op,
+                                   const HardwareResourceEffects &effects) {
+  if (!effects.reads.empty())
+    return false;
+  if (!llvm::all_of(effects.writes, [](HardwareResourceKind kind) {
+        return isFlagResource(kind);
+      }))
+    return false;
+
+  bool sawFlagResult = false;
+  for (OpResult result : op->getResults()) {
+    std::optional<HardwareResourceKind> kind =
+        getHardwareResourceForValue(result);
+    if (!kind)
+      continue;
+    if (!isFlagResource(*kind) || !result.use_empty())
+      return false;
+    sawFlagResult = true;
+  }
+  return sawFlagResult;
 }
 
 static bool hasHoistableSemantics(Operation *op) {
   if (!isMemoryEffectFree(op) || !isSpeculatable(op))
     return false;
-  return !touchesHardwareResource(op);
+  HardwareResourceEffects effects = getHardwareResourceEffects(op);
+  if (effects.reads.empty() && effects.writes.empty())
+    return true;
+  return touchesOnlyUnusedFlags(op, effects);
 }
 
 static bool operandsAvailableBefore(Operation *root, Operation *op) {

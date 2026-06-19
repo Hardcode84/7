@@ -230,10 +230,10 @@ def WaveAMDMachineCleanup
     : Pass<"waveamd-machine-cleanup"> {
   let summary = "Hoist redundant WaveAMDMachine prep before scheduling";
   let description = [{
-    Hoists speculatable, memory-effect-free WaveAMDMachine VALU ops and
-    immediates out of structured EXEC regions when operands are available
-    before the region and non-yield users remain inside it. Ops touching SCC,
-    VCC, EXEC, or M0 stay in place.
+    Hoists speculatable, memory-effect-free WaveAMDMachine prep ops out of
+    structured EXEC regions when operands are available before the region and
+    non-yield users remain inside it. EXEC, M0, and live SCC/VCC users stay in
+    place.
   }];
   let dependentDialects = [
     "func::FuncDialect",

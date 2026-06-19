@@ -119,6 +119,7 @@ class WaveAMDMachine_LDSTupleStoreInfo
                                  WaveAMDMachine_ValueRegChunkCount>;
 
 def WaveAMDMachine_VALU : NativeOpTrait<"waveamdmachine::VALUOp">;
+def WaveAMDMachine_SALU : NativeOpTrait<"waveamdmachine::SALUOp">;
 def WaveAMDMachine_SMEMLoad : NativeOpTrait<"waveamdmachine::SMEMLoadOp">;
 def WaveAMDMachine_LDSLoad : NativeOpTrait<"waveamdmachine::LDSLoadOp">;
 def WaveAMDMachine_LDSStore : NativeOpTrait<"waveamdmachine::LDSStoreOp">;
@@ -893,12 +894,14 @@ def WaveAMDMachine_MfmaScaleF32_16x16x128_F4F4Op
 }
 
 def WaveAMDMachine_SMovB32Op : WaveAMDMachine_UnaryNoResult<"s_mov_b32",
-                                                       WaveAMDMachine_RegOrImm> {
+                                                       WaveAMDMachine_RegOrImm,
+                                                       [WaveAMDMachine_SALU]> {
   let arguments = (ins StrAttr:$dst, WaveAMDMachine_RegOrImm:$source);
   let assemblyFormat = "$dst `,` $source attr-dict `:` functional-type(operands, results)";
 }
 
-def WaveAMDMachine_SCSelectB32Op : WaveAMDMachine_Op<"s_cselect_b32", [Pure]> {
+def WaveAMDMachine_SCSelectB32Op
+    : WaveAMDMachine_Op<"s_cselect_b32", [WaveAMDMachine_SALU, Pure]> {
   let summary = "select scalar value using SCC";
   let arguments = (ins WaveAMDMachine_SCC:$cond,
                        WaveAMDMachine_SGPR1OrImm:$true_value,
@@ -907,7 +910,8 @@ def WaveAMDMachine_SCSelectB32Op : WaveAMDMachine_Op<"s_cselect_b32", [Pure]> {
   let assemblyFormat = "$cond `,` $true_value `,` $false_value attr-dict `:` functional-type(operands, results)";
 }
 
-def WaveAMDMachine_SReadVccB32Op : WaveAMDMachine_Op<"s_read_vcc_b32", [Pure]> {
+def WaveAMDMachine_SReadVccB32Op
+    : WaveAMDMachine_Op<"s_read_vcc_b32", [WaveAMDMachine_SALU, Pure]> {
   let summary = "copy VCC low bits into SGPR";
   let arguments = (ins WaveAMDMachine_VCC:$source);
   let results = (outs WaveAMDMachine_SGPR1:$result);
@@ -917,13 +921,14 @@ def WaveAMDMachine_SReadVccB32Op : WaveAMDMachine_Op<"s_read_vcc_b32", [Pure]> {
 // VCC reload writes singleton flag state; LICM must keep it local.
 def WaveAMDMachine_SMovVccB32Op
     : WaveAMDMachine_UnaryResult<"s_mov_vcc_b32", WaveAMDMachine_SGPR1,
-                                 WaveAMDMachine_VCC>;
+                                 WaveAMDMachine_VCC, [WaveAMDMachine_SALU]>;
 
 // Value-producing scalar move: materialises an SGPR1 holding the
 // given Imm or copies an existing SGPR1/RegOrImm into a fresh
 // allocator-assigned SGPR. Used by the selector to lift loop-IV
 // initialisers out of `waveamdmachine.imm` into a real carry register.
-def WaveAMDMachine_SMovB32ValueOp : WaveAMDMachine_Op<"s_mov_b32_value", [Pure]> {
+def WaveAMDMachine_SMovB32ValueOp
+    : WaveAMDMachine_Op<"s_mov_b32_value", [WaveAMDMachine_SALU, Pure]> {
   let summary = "scalar 32-bit move producing an SGPR value";
   let arguments = (ins WaveAMDMachine_RegOrImm:$source);
   let results = (outs WaveAMDMachine_SGPR1:$result);
@@ -935,7 +940,8 @@ def WaveAMDMachine_SMovB32ValueOp : WaveAMDMachine_Op<"s_mov_b32_value", [Pure]>
 // SGPR tuple (per-component copy) or a scalar value (broadcast).
 def WaveAMDMachine_SMovB32TupleOp
     : WaveAMDMachine_UnaryResult<"s_mov_b32_tuple", WaveAMDMachine_RegOrImm,
-                              WaveAMDMachine_SGPR, [Pure]> {
+                              WaveAMDMachine_SGPR,
+                              [WaveAMDMachine_SALU, Pure]> {
   let hasVerifier = 1;
 }
 def WaveAMDMachine_SLoadB32Op : WaveAMDMachine_UnaryResult<"s_load_b32",
@@ -971,7 +977,8 @@ def WaveAMDMachine_SLoadB128Op : WaveAMDMachine_UnaryResult<"s_load_b128",
 // has `s_get_shader_cycles_u64`; those need their own ops.
 def WaveAMDMachine_SGetregShaderCyclesOp
     : WaveAMDMachine_ZeroOperandResult<"s_getreg_shader_cycles",
-                                       WaveAMDMachine_SGPR1> {
+                                       WaveAMDMachine_SGPR1,
+                                       [WaveAMDMachine_SALU]> {
   let archPredicate = "isa.Major == 11";
   let summary = "read HW_REG_SHADER_CYCLES via s_getreg_b32 (RDNA3)";
 }
@@ -995,19 +1002,24 @@ def WaveAMDMachine_SWaitcntVscntOp
   let arguments = (ins I32Attr:$vscnt);
   let assemblyFormat = "`vscnt` `(` $vscnt `)` attr-dict";
 }
-def WaveAMDMachine_SNopOp : WaveAMDMachine_UnaryNoResult<"s_nop", WaveAMDMachine_Imm>;
+def WaveAMDMachine_SNopOp
+    : WaveAMDMachine_UnaryNoResult<"s_nop", WaveAMDMachine_Imm,
+                                   [WaveAMDMachine_SALU]>;
 // Set wave issue priority (0..3). Free, dynamic nudge for the HW
 // issue arbiter -- prefer this over cycle counting when biasing
 // multi-wave co-execution (e.g. ping-pong phase entry: the wave
 // group that should issue MFMAs bumps prio while the other group
 // is loading). Available on every arch the project supports.
 def WaveAMDMachine_SSetprioOp : WaveAMDMachine_UnaryNoResult<"s_setprio",
-                                                             WaveAMDMachine_Imm>;
+                                                             WaveAMDMachine_Imm,
+                                                             [WaveAMDMachine_SALU]>;
 def WaveAMDMachine_SDelayAluOp : WaveAMDMachine_UnaryNoResult<"s_delay_alu",
-                                                         WaveAMDMachine_Imm>;
+                                                         WaveAMDMachine_Imm,
+                                                         [WaveAMDMachine_SALU]>;
 def WaveAMDMachine_SAndSaveexecB32Op
     : WaveAMDMachine_Op<"s_and_saveexec_b32",
-                        [WaveAMDMachine_ReadsExec,
+                        [WaveAMDMachine_SALU,
+                         WaveAMDMachine_ReadsExec,
                          WaveAMDMachine_WritesExec]> {
   let summary = "save EXEC, mask EXEC, and set SCC";
   let arguments = (ins WaveAMDMachine_SGPR1:$mask);
@@ -1019,7 +1031,8 @@ def WaveAMDMachine_SAndSaveexecB32Op
 }
 def WaveAMDMachine_SAndSaveexecB64Op
     : WaveAMDMachine_Op<"s_and_saveexec_b64",
-                        [WaveAMDMachine_ReadsExec,
+                        [WaveAMDMachine_SALU,
+                         WaveAMDMachine_ReadsExec,
                          WaveAMDMachine_WritesExec]> {
   let summary = "save EXEC, mask EXEC, and set SCC";
   let arguments = (ins WaveAMDMachine_SGPR2:$mask);
@@ -1030,14 +1043,18 @@ def WaveAMDMachine_SAndSaveexecB64Op
   let assemblyFormat = "$mask attr-dict `:` functional-type(operands, results)";
 }
 def WaveAMDMachine_SAndn2ExecB32Op
-    : WaveAMDMachine_Op<"s_andn2_exec_b32", [WaveAMDMachine_WritesExec]> {
+    : WaveAMDMachine_Op<"s_andn2_exec_b32",
+                        [WaveAMDMachine_SALU,
+                         WaveAMDMachine_WritesExec]> {
   let summary = "set EXEC to lhs & ~rhs and set SCC";
   let arguments = (ins WaveAMDMachine_SGPR1:$lhs, WaveAMDMachine_SGPR1:$rhs);
   let results = (outs WaveAMDMachine_SCC:$scc);
   let assemblyFormat = "$lhs `,` $rhs attr-dict `:` functional-type(operands, results)";
 }
 def WaveAMDMachine_SAndn2ExecB64Op
-    : WaveAMDMachine_Op<"s_andn2_exec_b64", [WaveAMDMachine_WritesExec]> {
+    : WaveAMDMachine_Op<"s_andn2_exec_b64",
+                        [WaveAMDMachine_SALU,
+                         WaveAMDMachine_WritesExec]> {
   let summary = "set EXEC to lhs & ~rhs and set SCC";
   let arguments = (ins WaveAMDMachine_SGPR2:$lhs, WaveAMDMachine_SGPR2:$rhs);
   let results = (outs WaveAMDMachine_SCC:$scc);
@@ -1050,12 +1067,15 @@ def WaveAMDMachine_SCBranchExeczOp
 }
 def WaveAMDMachine_SMovExecLoOp : WaveAMDMachine_UnaryNoResult<"s_mov_exec_lo",
                                                           WaveAMDMachine_SGPR1,
-                                                          [WaveAMDMachine_WritesExec]>;
+                                                          [WaveAMDMachine_SALU,
+                                                           WaveAMDMachine_WritesExec]>;
 def WaveAMDMachine_SMovExecB64Op : WaveAMDMachine_UnaryNoResult<"s_mov_exec_b64",
                                                           WaveAMDMachine_SGPR2,
-                                                          [WaveAMDMachine_WritesExec]>;
+                                                          [WaveAMDMachine_SALU,
+                                                           WaveAMDMachine_WritesExec]>;
 def WaveAMDMachine_SMovM0Op
-    : WaveAMDMachine_UnaryResult<"s_mov_m0", WaveAMDMachine_SGPR1, WaveAMDMachine_M0>;
+    : WaveAMDMachine_UnaryResult<"s_mov_m0", WaveAMDMachine_SGPR1,
+                                 WaveAMDMachine_M0, [WaveAMDMachine_SALU]>;
 def WaveAMDMachine_SEndpgmOp : WaveAMDMachine_ZeroResult<"s_endpgm">;
 def WaveAMDMachine_SSetpcB64Op : WaveAMDMachine_ZeroResult<"s_setpc_b64">;
 
@@ -2381,7 +2401,8 @@ def WaveAMDMachine_SBarrierOp : WaveAMDMachine_Op<"s_barrier"> {
 // carry-out so that any IR consumer of SCC (e.g. an immediately
 // following s_cmp / continue_if) cannot accidentally be reordered
 // across this op without the dependence being visible.
-def WaveAMDMachine_SAddI32Op : WaveAMDMachine_Op<"s_add_i32", [Pure]> {
+def WaveAMDMachine_SAddI32Op
+    : WaveAMDMachine_Op<"s_add_i32", [WaveAMDMachine_SALU, Pure]> {
   let summary = "scalar 32-bit add (sets SCC)";
   let arguments = (ins
     WaveAMDMachine_SGPR1:$lhs,
@@ -2394,7 +2415,8 @@ def WaveAMDMachine_SAddI32Op : WaveAMDMachine_Op<"s_add_i32", [Pure]> {
 // Signed scalar 32-bit multiply. AMDGPU `s_mul_i32` does not set SCC, so
 // there's no carry-out result to model; callers that need the high half
 // or unsigned behaviour will get separate ops later.
-def WaveAMDMachine_SMulI32Op : WaveAMDMachine_Op<"s_mul_i32", [Pure]> {
+def WaveAMDMachine_SMulI32Op
+    : WaveAMDMachine_Op<"s_mul_i32", [WaveAMDMachine_SALU, Pure]> {
   let summary = "scalar 32-bit signed multiply (low half)";
   let arguments = (ins WaveAMDMachine_SGPR1OrImm:$lhs,
                        WaveAMDMachine_SGPR1OrImm:$rhs);
@@ -2402,7 +2424,8 @@ def WaveAMDMachine_SMulI32Op : WaveAMDMachine_Op<"s_mul_i32", [Pure]> {
   let assemblyFormat = "$lhs `,` $rhs attr-dict `:` functional-type(operands, results)";
 }
 
-def WaveAMDMachine_SMulHiU32Op : WaveAMDMachine_Op<"s_mul_hi_u32", [Pure]> {
+def WaveAMDMachine_SMulHiU32Op
+    : WaveAMDMachine_Op<"s_mul_hi_u32", [WaveAMDMachine_SALU, Pure]> {
   let summary = "scalar 32-bit unsigned multiply (high half)";
   let arguments = (ins WaveAMDMachine_SGPR1OrImm:$lhs,
                        WaveAMDMachine_SGPR1OrImm:$rhs);
@@ -2414,7 +2437,8 @@ def WaveAMDMachine_SMulHiU32Op : WaveAMDMachine_Op<"s_mul_hi_u32", [Pure]> {
 // offset-math path that uses this op throws the SCC away; model it as
 // SCC-clobbering rather than SCC-producing so consumers can't reach for
 // it accidentally.
-def WaveAMDMachine_SLshlB32Op : WaveAMDMachine_Op<"s_lshl_b32", [Pure]> {
+def WaveAMDMachine_SLshlB32Op
+    : WaveAMDMachine_Op<"s_lshl_b32", [WaveAMDMachine_SALU, Pure]> {
   let summary = "scalar 32-bit logical left shift";
   let arguments = (ins WaveAMDMachine_SGPR1OrImm:$lhs,
                        WaveAMDMachine_SGPR1OrImm:$rhs);
@@ -2422,7 +2446,8 @@ def WaveAMDMachine_SLshlB32Op : WaveAMDMachine_Op<"s_lshl_b32", [Pure]> {
   let assemblyFormat = "$lhs `,` $rhs attr-dict `:` functional-type(operands, results)";
 }
 
-def WaveAMDMachine_SLshrB32Op : WaveAMDMachine_Op<"s_lshr_b32", [Pure]> {
+def WaveAMDMachine_SLshrB32Op
+    : WaveAMDMachine_Op<"s_lshr_b32", [WaveAMDMachine_SALU, Pure]> {
   let summary = "scalar 32-bit logical right shift";
   let arguments = (ins WaveAMDMachine_SGPR1OrImm:$lhs,
                        WaveAMDMachine_SGPR1OrImm:$rhs);
@@ -2433,18 +2458,21 @@ def WaveAMDMachine_SLshrB32Op : WaveAMDMachine_Op<"s_lshr_b32", [Pure]> {
 def WaveAMDMachine_SFlbitI32B32Op
     : WaveAMDMachine_UnaryResult<"s_flbit_i32_b32",
                                  WaveAMDMachine_SGPR1OrImm,
-                                 WaveAMDMachine_SGPR1, [Pure]> {
+                                 WaveAMDMachine_SGPR1,
+                                 [WaveAMDMachine_SALU, Pure]> {
   let summary = "scalar 32-bit count leading zeros, -1 on zero";
 }
 
 def WaveAMDMachine_SFf1I32B32Op
     : WaveAMDMachine_UnaryResult<"s_ff1_i32_b32",
                                  WaveAMDMachine_SGPR1OrImm,
-                                 WaveAMDMachine_SGPR1, [Pure]> {
+                                 WaveAMDMachine_SGPR1,
+                                 [WaveAMDMachine_SALU, Pure]> {
   let summary = "scalar 32-bit count trailing zeros, -1 on zero";
 }
 
-def WaveAMDMachine_SAndB32Op : WaveAMDMachine_Op<"s_and_b32", [Pure]> {
+def WaveAMDMachine_SAndB32Op
+    : WaveAMDMachine_Op<"s_and_b32", [WaveAMDMachine_SALU, Pure]> {
   let summary = "scalar 32-bit bitwise AND";
   let arguments = (ins WaveAMDMachine_SGPR1OrImm:$lhs,
                        WaveAMDMachine_SGPR1OrImm:$rhs);
@@ -2452,7 +2480,8 @@ def WaveAMDMachine_SAndB32Op : WaveAMDMachine_Op<"s_and_b32", [Pure]> {
   let assemblyFormat = "$lhs `,` $rhs attr-dict `:` functional-type(operands, results)";
 }
 
-def WaveAMDMachine_SOrB32Op : WaveAMDMachine_Op<"s_or_b32", [Pure]> {
+def WaveAMDMachine_SOrB32Op
+    : WaveAMDMachine_Op<"s_or_b32", [WaveAMDMachine_SALU, Pure]> {
   let summary = "scalar 32-bit bitwise OR";
   let arguments = (ins WaveAMDMachine_SGPR1OrImm:$lhs,
                        WaveAMDMachine_SGPR1OrImm:$rhs);
@@ -2460,7 +2489,8 @@ def WaveAMDMachine_SOrB32Op : WaveAMDMachine_Op<"s_or_b32", [Pure]> {
   let assemblyFormat = "$lhs `,` $rhs attr-dict `:` functional-type(operands, results)";
 }
 
-def WaveAMDMachine_SXorB32Op : WaveAMDMachine_Op<"s_xor_b32", [Pure]> {
+def WaveAMDMachine_SXorB32Op
+    : WaveAMDMachine_Op<"s_xor_b32", [WaveAMDMachine_SALU, Pure]> {
   let summary = "scalar 32-bit bitwise XOR";
   let arguments = (ins WaveAMDMachine_SGPR1OrImm:$lhs,
                        WaveAMDMachine_SGPR1OrImm:$rhs);
@@ -2468,7 +2498,8 @@ def WaveAMDMachine_SXorB32Op : WaveAMDMachine_Op<"s_xor_b32", [Pure]> {
   let assemblyFormat = "$lhs `,` $rhs attr-dict `:` functional-type(operands, results)";
 }
 
-def WaveAMDMachine_SXorB64Op : WaveAMDMachine_Op<"s_xor_b64", [Pure]> {
+def WaveAMDMachine_SXorB64Op
+    : WaveAMDMachine_Op<"s_xor_b64", [WaveAMDMachine_SALU, Pure]> {
   let summary = "scalar 64-bit bitwise XOR";
   let arguments = (ins WaveAMDMachine_SGPR2:$lhs, WaveAMDMachine_SGPR2:$rhs);
   let results = (outs WaveAMDMachine_SGPR2:$result, WaveAMDMachine_SCC:$scc);
@@ -2478,7 +2509,8 @@ def WaveAMDMachine_SXorB64Op : WaveAMDMachine_Op<"s_xor_b64", [Pure]> {
 // 64-bit scalar add. The asm printer expands this into the carry-chain
 // pair `s_add_u32` (low) + `s_addc_u32` (high). The intermediate SCC is
 // consumed by the second instruction and discarded after.
-def WaveAMDMachine_SAddU64Op : WaveAMDMachine_Op<"s_add_u64", [Pure]> {
+def WaveAMDMachine_SAddU64Op
+    : WaveAMDMachine_Op<"s_add_u64", [WaveAMDMachine_SALU, Pure]> {
   let summary = "scalar 64-bit unsigned add";
   let arguments = (ins WaveAMDMachine_SGPR2:$lhs, WaveAMDMachine_SGPR2:$rhs);
   let results = (outs WaveAMDMachine_SGPR2:$result, WaveAMDMachine_SCC:$scc);
@@ -2489,7 +2521,8 @@ def WaveAMDMachine_SAddU64Op : WaveAMDMachine_Op<"s_add_u64", [Pure]> {
 // (low) + `s_addc_u32 hi, hi, 0` (high) -- the high addend is an
 // immediate, so unlike a full `s_add_u64` it needs no second register
 // pair and no `tuple_from_elements` to widen the offset.
-def WaveAMDMachine_SAddU64U32Op : WaveAMDMachine_Op<"s_add_u64_u32", [Pure]> {
+def WaveAMDMachine_SAddU64U32Op
+    : WaveAMDMachine_Op<"s_add_u64_u32", [WaveAMDMachine_SALU, Pure]> {
   let summary = "scalar 64-bit base + zero-extended 32-bit offset";
   let arguments = (ins
     WaveAMDMachine_SGPR2:$base,
@@ -2524,7 +2557,8 @@ def WaveAMDMachine_VAddU64U32Op : WaveAMDMachine_Op<"v_add_u64_u32", [Pure]> {
 // (a_lo*b_hi and a_hi*b_lo). `$scratch` is a real allocated register
 // that's dead after the op; the regalloc just sees one extra short-
 // lived live range per op.
-def WaveAMDMachine_SMulU64Op : WaveAMDMachine_Op<"s_mul_u64", [Pure]> {
+def WaveAMDMachine_SMulU64Op
+    : WaveAMDMachine_Op<"s_mul_u64", [WaveAMDMachine_SALU, Pure]> {
   let summary = "scalar 64-bit unsigned multiply (low half)";
   let arguments = (ins WaveAMDMachine_SGPR2:$lhs, WaveAMDMachine_SGPR2:$rhs);
   let results = (outs
@@ -2554,7 +2588,8 @@ def WaveAMDMachine_VXorB64Op
 }
 
 // Hardware shift count is 32-bit; Wave-level i64 shifts split before this.
-def WaveAMDMachine_SLshlB64Op : WaveAMDMachine_Op<"s_lshl_b64", [Pure]> {
+def WaveAMDMachine_SLshlB64Op
+    : WaveAMDMachine_Op<"s_lshl_b64", [WaveAMDMachine_SALU, Pure]> {
   let summary = "scalar 64-bit logical left shift (sets SCC)";
   let arguments = (ins WaveAMDMachine_SGPR2:$lhs,
                        WaveAMDMachine_SGPR1OrImm:$shift);
@@ -2570,7 +2605,8 @@ def WaveAMDMachine_VLshlrevB64Op : WaveAMDMachine_Op<"v_lshlrev_b64", [Pure]> {
   let assemblyFormat = "$shift `,` $value attr-dict `:` functional-type(operands, results)";
 }
 
-def WaveAMDMachine_SLshrB64Op : WaveAMDMachine_Op<"s_lshr_b64", [Pure]> {
+def WaveAMDMachine_SLshrB64Op
+    : WaveAMDMachine_Op<"s_lshr_b64", [WaveAMDMachine_SALU, Pure]> {
   let summary = "scalar 64-bit logical right shift";
   let arguments = (ins WaveAMDMachine_SGPR2:$value,
                        WaveAMDMachine_SGPR1OrImm:$shift);
@@ -2581,14 +2617,16 @@ def WaveAMDMachine_SLshrB64Op : WaveAMDMachine_Op<"s_lshr_b64", [Pure]> {
 def WaveAMDMachine_SFlbitI32B64Op
     : WaveAMDMachine_UnaryResult<"s_flbit_i32_b64",
                                  WaveAMDMachine_SGPR2,
-                                 WaveAMDMachine_SGPR1, [Pure]> {
+                                 WaveAMDMachine_SGPR1,
+                                 [WaveAMDMachine_SALU, Pure]> {
   let summary = "scalar 64-bit count leading zeros, -1 on zero";
 }
 
 def WaveAMDMachine_SFf1I32B64Op
     : WaveAMDMachine_UnaryResult<"s_ff1_i32_b64",
                                  WaveAMDMachine_SGPR2,
-                                 WaveAMDMachine_SGPR1, [Pure]> {
+                                 WaveAMDMachine_SGPR1,
+                                 [WaveAMDMachine_SALU, Pure]> {
   let summary = "scalar 64-bit count trailing zeros, -1 on zero";
 }
 
@@ -2604,7 +2642,8 @@ def WaveAMDMachine_VLshrrevB64Op : WaveAMDMachine_Op<"v_lshrrev_b64", [Pure]> {
 // `s_mov_b32` instructions for the low and high halves. Used by the
 // selector to lift `arith.constant : i64` into the 2-wide register
 // world the i64 ops consume.
-def WaveAMDMachine_SMovB64ImmOp : WaveAMDMachine_Op<"s_mov_b64_imm", [Pure]> {
+def WaveAMDMachine_SMovB64ImmOp
+    : WaveAMDMachine_Op<"s_mov_b64_imm", [WaveAMDMachine_SALU, Pure]> {
   let summary = "materialize a 64-bit immediate into an SGPR pair";
   let arguments = (ins I64Attr:$value);
   let results = (outs WaveAMDMachine_SGPR2:$result);
@@ -2612,7 +2651,8 @@ def WaveAMDMachine_SMovB64ImmOp : WaveAMDMachine_Op<"s_mov_b64_imm", [Pure]> {
 }
 
 class WaveAMDMachine_SCmp<string mnemonic, list<Trait> traits = [Pure]>
-    : WaveAMDMachine_Op<mnemonic, traits> {
+    : WaveAMDMachine_Op<mnemonic,
+                        !listconcat(traits, [WaveAMDMachine_SALU])> {
   let arguments = (ins
     WaveAMDMachine_SGPR1OrImm:$lhs,
     WaveAMDMachine_SGPR1OrImm:$rhs
