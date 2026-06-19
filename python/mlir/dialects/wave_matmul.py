@@ -1191,18 +1191,36 @@ def _dma_drain(
     *,
     lds_offset: int | dsl.Value = 0,
 ) -> tuple[tuple[dsl.Value, ...], tuple[dsl.Value, ...], dsl.Value]:
-    barrier_tok = bld.barrier(dma_token)
+    return _dma_read_ready(
+        bld,
+        bld.barrier(dma_token),
+        a_type,
+        b_type,
+        staging,
+        lds_offset=lds_offset,
+    )
+
+
+def _dma_read_ready(
+    bld: dsl.FunctionBuilder,
+    ready_token: dsl.Value,
+    a_type: dsl.Type,
+    b_type: dsl.Type,
+    staging: _LdsStaging,
+    *,
+    lds_offset: int | dsl.Value = 0,
+) -> tuple[tuple[dsl.Value, ...], tuple[dsl.Value, ...], dsl.Value]:
     a_frags: list[dsl.Value] = []
     b_frags: list[dsl.Value] = []
     load_tokens: list[dsl.Value] = []
     a_read_ptrs = _offset_ptrs(bld, staging.a_dma_read_ptrs, lds_offset)
     b_read_ptrs = _offset_ptrs(bld, staging.b_dma_read_ptrs, lds_offset)
     for lds_ptr in a_read_ptrs:
-        regs, tok = bld.load(lds_ptr, staging.reg_simd_type, after=barrier_tok)
+        regs, tok = bld.load(lds_ptr, staging.reg_simd_type, after=ready_token)
         load_tokens.append(tok)
         a_frags.append(bld.fragment_pack(regs, a_type))
     for lds_ptr in b_read_ptrs:
-        regs, tok = bld.load(lds_ptr, staging.reg_simd_type, after=barrier_tok)
+        regs, tok = bld.load(lds_ptr, staging.reg_simd_type, after=ready_token)
         load_tokens.append(tok)
         b_frags.append(bld.fragment_pack(regs, b_type))
     return tuple(a_frags), tuple(b_frags), _join_tokens(bld, load_tokens)
@@ -2677,6 +2695,14 @@ def _emit_dma_step(
     next_token: dsl.Value | None = None
     new_scale_token: dsl.Value | None = None
     new_next_scale_token: dsl.Value | None = None
+    ready_token: dsl.Value | None = None
+
+    def get_ready_token() -> dsl.Value:
+        nonlocal ready_token
+        if ready_token is None:
+            ready_token = bld.barrier(state.dma_token, state.reuse_token)
+        return ready_token
+
     early_dma = cfg.uses_packed_mxfp4 and cfg.wave_k_tiles == 1
     uses_prefetched_scales = cfg.uses_packed_mxfp4 and state.scale_token is not None
     if uses_prefetched_scales:
@@ -2736,7 +2762,7 @@ def _emit_dma_step(
             )
     elif early_dma:
         scales = _stage_read_mxfp4_scales(
-            bld, cfg, coords, scale_step, current_lds_offset, state.reuse_token
+            bld, cfg, coords, scale_step, current_lds_offset, get_ready_token()
         )
         scale_tokens.append(scales.token)
     else:
@@ -2753,12 +2779,12 @@ def _emit_dma_step(
                 if state.scale_token is not None
                 else current_lds_offset
             ),
-            scale_after=state.reuse_token,
+            scale_after=get_ready_token() if cfg.uses_packed_mxfp4 else None,
             scale_tokens=scale_tokens,
             scale_ready_token=state.scale_token,
         )
     if next_token is None:
-        dma_after = state.reuse_token
+        dma_after = get_ready_token()
         next_token = _join_tokens(
             bld,
             _dma_issue(
@@ -2772,9 +2798,9 @@ def _emit_dma_step(
         )
     if early_dma and not uses_prefetched_scales:
         new_accs = _emit_mxfp4_mma_state_step(bld, cfg, state, scales)
-    new_afs, new_bfs, reuse_token = _dma_drain(
+    new_afs, new_bfs, reuse_token = _dma_read_ready(
         bld,
-        state.dma_token,
+        get_ready_token(),
         types.a,
         types.b,
         staging,

@@ -139,6 +139,12 @@ if _hip_runtime:
     config.substitutions.append(("%rocm_lib", str(_rocm_lib)))
     config.substitutions.append(("%hip_runtime_lib", str(_hip_runtime_lib)))
 
+_hipcc = (
+    config.environment.get("HIPCC") or shutil.which("hipcc") or "/opt/rocm/bin/hipcc"
+)
+if Path(_hipcc).exists() or shutil.which(_hipcc):
+    config.available_features.add("host-has-hipcc")
+
 # Compilation pipeline library (transform.named_sequence file) staged
 # next to the binary at build time; tests reach it via %wave_pipelines.
 _wave_pipelines = (
