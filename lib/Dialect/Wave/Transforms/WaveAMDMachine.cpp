@@ -530,6 +530,7 @@ static FailureOr<Value> scaleSOffset(WaveAMDMachineSelector &S, Location loc,
   }
   Type sgprType =
       getRegType(S.builder.getContext(), waveamdmachine::RegClass::SGPR);
+  value = S.ensureSGPR1(loc, value);
   if ((size & (size - 1)) == 0)
     return waveamdmachine::SLshlB32Op::create(
                S.builder, loc, sgprType, getSCCType(S.builder.getContext()),
@@ -3206,6 +3207,8 @@ LogicalResult WaveAMDMachineSelector::selectBinaryMulI32(BinaryOp op) {
   Value lhs = expect(op.getLhs(), op);
   Value rhs = expect(op.getRhs(), op);
   if (!isBinarySimd(op)) {
+    lhs = ensureSGPR1(op.getLoc(), lhs);
+    rhs = ensureSGPR1(op.getLoc(), rhs);
     values[op.getResult()] = waveamdmachine::SMulI32Op::create(
         builder, op.getLoc(),
         getRegType(op.getContext(), waveamdmachine::RegClass::SGPR), lhs, rhs);
@@ -3225,6 +3228,8 @@ static LogicalResult selectBinaryMulHUI32(WaveAMDMachineSelector &S,
   Value lhs = S.expect(op.getLhs(), op);
   Value rhs = S.expect(op.getRhs(), op);
   if (!isBinarySimd(op)) {
+    lhs = S.ensureSGPR1(op.getLoc(), lhs);
+    rhs = S.ensureSGPR1(op.getLoc(), rhs);
     S.values[op.getResult()] = waveamdmachine::SMulHiU32Op::create(
         S.builder, op.getLoc(),
         getRegType(op.getContext(), waveamdmachine::RegClass::SGPR), lhs, rhs);
@@ -3252,6 +3257,8 @@ LogicalResult WaveAMDMachineSelector::selectBinaryShLI32(BinaryOp op) {
   Value lhs = expect(op.getLhs(), op);
   Value rhs = expect(op.getRhs(), op);
   if (!isBinarySimd(op)) {
+    lhs = ensureSGPR1(op.getLoc(), lhs);
+    rhs = ensureSGPR1(op.getLoc(), rhs);
     values[op.getResult()] =
         waveamdmachine::SLshlB32Op::create(
             builder, op.getLoc(),
@@ -3300,6 +3307,8 @@ LogicalResult WaveAMDMachineSelector::selectBinarySubI32(BinaryOp op) {
   Value rhs = expect(op.getRhs(), op);
   Value notRhs;
   if (!isBinarySimd(op)) {
+    lhs = ensureSGPR1(op.getLoc(), lhs);
+    rhs = ensureSGPR1(op.getLoc(), rhs);
     if (std::optional<int64_t> rhsImm = getImmediateValue(rhs))
       notRhs = createImm(builder, op.getLoc(), ~*rhsImm);
     else
@@ -3368,6 +3377,8 @@ static LogicalResult selectBinaryBitwiseOrShiftI32(WaveAMDMachineSelector &S,
       op.getContext(), isBinarySimd(op) ? waveamdmachine::RegClass::VGPR
                                         : waveamdmachine::RegClass::SGPR);
   if (!isBinarySimd(op)) {
+    lhs = S.ensureSGPR1(op.getLoc(), lhs);
+    rhs = S.ensureSGPR1(op.getLoc(), rhs);
     S.values[op.getResult()] = buildScalarBinaryI32(S.builder, op.getLoc(),
                                                     resultType, kind, lhs, rhs);
     S.eraseIfTopLevel(op);
@@ -5430,6 +5441,8 @@ Value WaveAMDMachineSelector::addUniformBytes(Location loc, Value acc,
     acc = materializeSGPR1(loc, acc);
   else if (isImm(acc))
     std::swap(acc, add);
+  acc = ensureSGPR1(loc, acc);
+  add = ensureSGPR1(loc, add);
   auto sum = waveamdmachine::SAddI32Op::create(
       builder, loc,
       getRegType(builder.getContext(), waveamdmachine::RegClass::SGPR),
