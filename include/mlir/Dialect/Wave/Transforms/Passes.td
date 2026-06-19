@@ -468,7 +468,9 @@ def WaveAMDRegAlloc
     Option<"sgprLimitOverride", "sgpr-limit", "int", /*default=*/"-1",
            "Cap SGPRs below the subtarget default; -1 means no cap.">,
     Option<"agprLimitOverride", "agpr-limit", "int", /*default=*/"-1",
-           "Cap AGPRs below the subtarget default; -1 means no cap.">
+           "Cap AGPRs below the subtarget default; -1 means no cap.">,
+    Option<"debugProbes", "debug-probes", "bool", /*default=*/"false",
+           "Attach allocation probe counters to functions.">
   ];
 }
 

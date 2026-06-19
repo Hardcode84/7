@@ -66,6 +66,13 @@ struct IntervalGroup {
   bool plannedPressureRelief = false;
 };
 
+struct AllocationProbeStats {
+  int64_t findFreeBaseCalls = 0;
+  int64_t baseFitsCalls = 0;
+  int64_t assignedLaneQueries = 0;
+  int64_t assignedLaneChecks = 0;
+};
+
 struct Inventory {
   SmallVector<Operation *> ops;
   DenseMap<Operation *, unsigned> positions;
@@ -75,6 +82,7 @@ struct Inventory {
   SmallVector<std::unique_ptr<IntervalGroup>> groups;
   wave::WaveAMDPressureReliefPlanList plannedReliefPlans;
   DenseMap<StringRef, unsigned> plannedProviderBytes;
+  AllocationProbeStats probeStats;
   unsigned peakSGPR = 0;
   unsigned peakVGPR = 0;
   unsigned peakAGPR = 0;

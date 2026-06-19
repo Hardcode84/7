@@ -117,6 +117,14 @@ static constexpr llvm::StringLiteral kScalarIntervalsAttr =
     "waveamdmachine.regalloc_debug_scalar_intervals";
 static constexpr llvm::StringLiteral kTrackedValuesAttr =
     "waveamdmachine.regalloc_debug_tracked_values";
+static constexpr llvm::StringLiteral kProbeAssignedLaneChecksAttr =
+    "waveamdmachine.regalloc_debug_probe_assigned_lane_checks";
+static constexpr llvm::StringLiteral kProbeAssignedLaneQueriesAttr =
+    "waveamdmachine.regalloc_debug_probe_assigned_lane_queries";
+static constexpr llvm::StringLiteral kProbeBaseFitsAttr =
+    "waveamdmachine.regalloc_debug_probe_base_fits";
+static constexpr llvm::StringLiteral kProbeFindFreeBaseAttr =
+    "waveamdmachine.regalloc_debug_probe_find_free_base";
 static constexpr llvm::StringLiteral kTempAttr = kRegAllocTempAttr;
 static constexpr llvm::StringLiteral kFixedBlockArgsAttr =
     "waveamdmachine.regalloc_fixed_block_args";
@@ -820,11 +828,36 @@ static unsigned getLiveDwords(Inventory &inventory, unsigned position,
   return getLiveDwords(inventory.intervals, position, regClass);
 }
 
+static bool countsForPeak(const Interval &interval,
+                          waveamdmachine::RegClass regClass) {
+  if (interval.group->plannedPressureRelief)
+    return false;
+  if (interval.values.empty() && !interval.reserved)
+    return false;
+  return interval.group->storageClass == regClass;
+}
+
 static unsigned getPeak(Inventory &inventory,
                         waveamdmachine::RegClass regClass) {
+  if (inventory.ops.empty())
+    return 0;
+  SmallVector<int64_t, 0> delta(inventory.ops.size() + 1, 0);
+  for (const std::unique_ptr<Interval> &interval : inventory.intervals) {
+    if (!countsForPeak(*interval, regClass))
+      continue;
+    if (interval->start >= inventory.ops.size())
+      continue;
+    unsigned end = std::min<unsigned>(interval->end, inventory.ops.size() - 1);
+    ++delta[interval->start];
+    --delta[end + 1];
+  }
+
+  int64_t live = 0;
   unsigned peak = 0;
-  for (unsigned position : llvm::seq<unsigned>(0, inventory.ops.size()))
-    peak = std::max(peak, getLiveDwords(inventory, position, regClass));
+  for (unsigned position : llvm::seq<unsigned>(0, inventory.ops.size())) {
+    live += delta[position];
+    peak = std::max<unsigned>(peak, live);
+  }
   return peak;
 }
 
@@ -1090,37 +1123,184 @@ static bool laneBlocksPhys(Interval *lane, Interval *otherLane, unsigned phys,
   return intervalsOverlap(lane, otherLane);
 }
 
-static bool laneConflictsWithGroup(Interval *lane, unsigned phys,
-                                   IntervalGroup *other,
-                                   const wave::WaveAMDKernelEntryRegs &regs) {
-  for (auto [otherLaneIndex, otherLane] : llvm::enumerate(other->intervals)) {
-    if (*other->assignedBase + otherLaneIndex != phys)
-      continue;
-    if (laneBlocksPhys(lane, otherLane, phys, regs))
-      return true;
+struct AssignedLaneRef {
+  IntervalGroup *group = nullptr;
+  Interval *lane = nullptr;
+  unsigned phys = 0;
+  unsigned start = 0;
+  unsigned end = 0;
+};
+
+struct AssignedLaneBucket {
+  SmallVector<AssignedLaneRef, 4> lanes;
+  SmallVector<unsigned, 4> prefixMaxEnds;
+
+  void add(AssignedLaneRef ref) {
+    auto it = std::lower_bound(lanes.begin(), lanes.end(), ref.start,
+                               [](const AssignedLaneRef &lhs, unsigned start) {
+                                 return lhs.start < start;
+                               });
+    size_t index = it - lanes.begin();
+    lanes.insert(it, ref);
+    prefixMaxEnds.insert(prefixMaxEnds.begin() + index, ref.end);
+
+    unsigned maxEnd = index == 0 ? 0 : prefixMaxEnds[index - 1];
+    for (size_t i : llvm::seq<size_t>(index, lanes.size())) {
+      maxEnd = std::max(maxEnd, lanes[i].end);
+      prefixMaxEnds[i] = maxEnd;
+    }
   }
-  return false;
+
+  std::pair<size_t, size_t> getCandidateRange(Interval *lane) const {
+    auto lastIt =
+        std::upper_bound(lanes.begin(), lanes.end(), lane->end,
+                         [](unsigned end, const AssignedLaneRef &ref) {
+                           return end < ref.start;
+                         });
+    size_t last = lastIt - lanes.begin();
+    auto firstIt = std::lower_bound(prefixMaxEnds.begin(),
+                                    prefixMaxEnds.begin() + last, lane->start);
+    return {static_cast<size_t>(firstIt - prefixMaxEnds.begin()), last};
+  }
+};
+
+struct AssignedRegisterClassIndex {
+  SmallVector<AssignedLaneBucket, 0> buckets;
+
+  AssignedLaneBucket &get(unsigned phys) {
+    if (phys >= buckets.size())
+      buckets.resize(phys + 1);
+    return buckets[phys];
+  }
+
+  const AssignedLaneBucket *lookup(unsigned phys) const {
+    if (phys >= buckets.size())
+      return nullptr;
+    return &buckets[phys];
+  }
+};
+
+struct AssignedRegisterIndex {
+  AssignedRegisterClassIndex sgpr;
+  AssignedRegisterClassIndex vgpr;
+  AssignedRegisterClassIndex agpr;
+  AllocationProbeStats *stats = nullptr;
+};
+
+static AssignedRegisterClassIndex *
+getAssignedClassIndex(AssignedRegisterIndex &index,
+                      waveamdmachine::RegClass regClass) {
+  if (regClass == waveamdmachine::RegClass::SGPR)
+    return &index.sgpr;
+  if (regClass == waveamdmachine::RegClass::VGPR)
+    return &index.vgpr;
+  if (regClass == waveamdmachine::RegClass::AGPR)
+    return &index.agpr;
+  return nullptr;
+}
+
+static const AssignedRegisterClassIndex *
+getAssignedClassIndex(const AssignedRegisterIndex &index,
+                      waveamdmachine::RegClass regClass) {
+  if (regClass == waveamdmachine::RegClass::SGPR)
+    return &index.sgpr;
+  if (regClass == waveamdmachine::RegClass::VGPR)
+    return &index.vgpr;
+  if (regClass == waveamdmachine::RegClass::AGPR)
+    return &index.agpr;
+  return nullptr;
+}
+
+static bool hasAssignedLanePayload(Interval *lane) {
+  return !lane->values.empty() || lane->reserved;
+}
+
+static void addAssignedLane(AssignedRegisterIndex &index, IntervalGroup *group,
+                            unsigned laneIndex) {
+  if (!group->assignedBase)
+    return;
+  Interval *lane = group->intervals[laneIndex];
+  if (!hasAssignedLanePayload(lane))
+    return;
+  AssignedRegisterClassIndex *classIndex =
+      getAssignedClassIndex(index, group->storageClass);
+  if (!classIndex)
+    return;
+  unsigned phys = *group->assignedBase + laneIndex;
+  classIndex->get(phys).add({group, lane, phys, lane->start, lane->end});
+}
+
+static void addAssignedGroup(AssignedRegisterIndex &index,
+                             IntervalGroup *group) {
+  if (!group || !group->assignedBase)
+    return;
+  for (unsigned laneIndex : llvm::seq<unsigned>(0, group->intervals.size()))
+    addAssignedLane(index, group, laneIndex);
+}
+
+static AssignedRegisterIndex
+buildAssignedRegisterIndex(ArrayRef<IntervalGroup *> assigned,
+                           AllocationProbeStats *stats) {
+  AssignedRegisterIndex index;
+  index.stats = stats;
+  for (IntervalGroup *group : assigned)
+    addAssignedGroup(index, group);
+  return index;
+}
+
+static void recordAssignedLaneCheck(const AssignedRegisterIndex &index) {
+  if (index.stats)
+    ++index.stats->assignedLaneChecks;
+}
+
+static bool laneConflictsWithGroup(Interval *lane, unsigned phys,
+                                   const AssignedLaneRef &other,
+                                   const wave::WaveAMDKernelEntryRegs &regs,
+                                   const AssignedRegisterIndex &index) {
+  recordAssignedLaneCheck(index);
+  if (other.group == lane->group || other.phys != phys)
+    return false;
+  return laneBlocksPhys(lane, other.lane, phys, regs);
+}
+
+static void recordAssignedLaneQuery(const AssignedRegisterIndex &index) {
+  if (index.stats)
+    ++index.stats->assignedLaneQueries;
 }
 
 static bool
 laneConflictsWithAssigned(Interval *lane, unsigned phys, IntervalGroup *group,
-                          ArrayRef<IntervalGroup *> assigned,
+                          const AssignedRegisterIndex &assigned,
                           const wave::WaveAMDKernelEntryRegs &regs) {
-  for (IntervalGroup *other : assigned) {
-    if (other == group || other->storageClass != group->storageClass ||
-        !other->assignedBase)
-      continue;
-    if (laneConflictsWithGroup(lane, phys, other, regs))
+  recordAssignedLaneQuery(assigned);
+  const AssignedRegisterClassIndex *classIndex =
+      getAssignedClassIndex(assigned, group->storageClass);
+  if (!classIndex)
+    return false;
+  const AssignedLaneBucket *bucket = classIndex->lookup(phys);
+  if (!bucket)
+    return false;
+
+  auto [first, last] = bucket->getCandidateRange(lane);
+  for (size_t i : llvm::seq<size_t>(first, last)) {
+    const AssignedLaneRef &other = bucket->lanes[i];
+    if (laneConflictsWithGroup(lane, phys, other, regs, assigned))
       return true;
   }
   return false;
 }
 
+static void recordBaseFits(const AssignedRegisterIndex &index) {
+  if (index.stats)
+    ++index.stats->baseFitsCalls;
+}
+
 static bool baseFits(IntervalGroup *group, unsigned base,
-                     ArrayRef<IntervalGroup *> assigned,
+                     const AssignedRegisterIndex &assigned,
                      const wave::WaveAMDKernelEntryRegs &regs) {
+  recordBaseFits(assigned);
   for (auto [laneIndex, lane] : llvm::enumerate(group->intervals)) {
-    if (lane->values.empty() && !lane->reserved)
+    if (!hasAssignedLanePayload(lane))
       continue;
     if (laneConflictsWithAssigned(lane, base + laneIndex, group, assigned,
                                   regs))
@@ -1129,10 +1309,16 @@ static bool baseFits(IntervalGroup *group, unsigned base,
   return true;
 }
 
+static void recordFindFreeBase(AssignedRegisterIndex &index) {
+  if (index.stats)
+    ++index.stats->findFreeBaseCalls;
+}
+
 static std::optional<unsigned>
 findFreeBase(IntervalGroup *group, RegisterBudgets budgets,
-             ArrayRef<IntervalGroup *> assigned,
+             AssignedRegisterIndex &assigned,
              const wave::WaveAMDKernelEntryRegs &regs) {
+  recordFindFreeBase(assigned);
   unsigned width = group->intervals.size();
   unsigned budget = getBudget(budgets, group->storageClass);
   if (width == 0 || width > budget)
@@ -1142,6 +1328,15 @@ findFreeBase(IntervalGroup *group, RegisterBudgets budgets,
     if (baseFits(group, base, assigned, regs))
       return base;
   return std::nullopt;
+}
+
+static std::optional<unsigned>
+findFreeBase(IntervalGroup *group, RegisterBudgets budgets,
+             ArrayRef<IntervalGroup *> assigned,
+             const wave::WaveAMDKernelEntryRegs &regs,
+             AllocationProbeStats *stats = nullptr) {
+  AssignedRegisterIndex index = buildAssignedRegisterIndex(assigned, stats);
+  return findFreeBase(group, budgets, index, regs);
 }
 
 static bool groupContainsBlockArgument(IntervalGroup *group) {
@@ -1499,7 +1694,8 @@ static LogicalResult validateReservedLimits(func::FuncOp func,
 
 static LogicalResult
 validateFixedGroup(func::FuncOp func, IntervalGroup *group,
-                   RegisterBudgets budgets, ArrayRef<IntervalGroup *> assigned,
+                   RegisterBudgets budgets,
+                   const AssignedRegisterIndex &assigned,
                    const wave::WaveAMDKernelEntryRegs &regs) {
   std::optional<unsigned> fixedBase = getFixedBase(group);
   if (!fixedBase)
@@ -1526,13 +1722,15 @@ static LogicalResult
 assignFixedGroups(func::FuncOp func, ArrayRef<IntervalGroup *> groups,
                   RegisterBudgets budgets,
                   SmallVectorImpl<IntervalGroup *> &assigned,
+                  AssignedRegisterIndex &assignedIndex,
                   const wave::WaveAMDKernelEntryRegs &regs) {
   for (IntervalGroup *group : groups) {
     if (!hasFixedRegister(group))
       continue;
-    if (failed(validateFixedGroup(func, group, budgets, assigned, regs)))
+    if (failed(validateFixedGroup(func, group, budgets, assignedIndex, regs)))
       return failure();
     assigned.push_back(group);
+    addAssignedGroup(assignedIndex, group);
   }
   return success();
 }
@@ -2040,16 +2238,19 @@ static LogicalResult allocateOnce(func::FuncOp func, Inventory &inventory,
                                   PressureFailure &pressureFailure,
                                   bool &promoted, bool &rewroteIR) {
   SmallVector<IntervalGroup *> assigned;
-  if (failed(assignFixedGroups(func, groups, budgets, assigned,
+  AssignedRegisterIndex assignedIndex;
+  assignedIndex.stats = &inventory.probeStats;
+  if (failed(assignFixedGroups(func, groups, budgets, assigned, assignedIndex,
                                inventory.entryRegs)))
     return failure();
   for (IntervalGroup *group : groups) {
     if (hasFixedRegister(group))
       continue;
     if (std::optional<unsigned> base =
-            findFreeBase(group, budgets, assigned, inventory.entryRegs)) {
+            findFreeBase(group, budgets, assignedIndex, inventory.entryRegs)) {
       group->assignedBase = *base;
       assigned.push_back(group);
+      addAssignedGroup(assignedIndex, group);
       continue;
     }
 
@@ -2789,6 +2990,10 @@ static void clearDiagnostics(func::FuncOp func) {
   clearPressureReliefDiagnostics(func);
   func->removeAttr(kScalarIntervalsAttr);
   func->removeAttr(kTrackedValuesAttr);
+  func->removeAttr(kProbeAssignedLaneChecksAttr);
+  func->removeAttr(kProbeAssignedLaneQueriesAttr);
+  func->removeAttr(kProbeBaseFitsAttr);
+  func->removeAttr(kProbeFindFreeBaseAttr);
   func->removeAttr(kMemorySpillRejectAttr);
   func->removeAttr(kMemorySpillRejectDetailAttr);
 }
@@ -2876,6 +3081,14 @@ static void emitRegAllocRemarks(func::FuncOp func, Inventory &inventory,
     emitIntegerMetric(remark, "scalar_intervals",
                       getActiveScalarIntervalCount(inventory));
     emitIntegerMetric(remark, "tracked_values", inventory.intervalFor.size());
+    emitIntegerMetric(remark, "probe_find_free_base",
+                      inventory.probeStats.findFreeBaseCalls);
+    emitIntegerMetric(remark, "probe_base_fits",
+                      inventory.probeStats.baseFitsCalls);
+    emitIntegerMetric(remark, "probe_assigned_lane_queries",
+                      inventory.probeStats.assignedLaneQueries);
+    emitIntegerMetric(remark, "probe_assigned_lane_checks",
+                      inventory.probeStats.assignedLaneChecks);
   }
   emitIntervalRemarks(func, inventory);
   emitLDSSpillPlanRemark(func, budgets);
@@ -2927,6 +3140,19 @@ static void emitPressureFailureRemark(func::FuncOp func,
                                       kMemorySpillRejectDetailAttr));
 }
 
+static void setProbeAttrs(func::FuncOp func,
+                          const AllocationProbeStats &stats) {
+  Builder builder(func.getContext());
+  func->setAttr(kProbeAssignedLaneChecksAttr,
+                builder.getI64IntegerAttr(stats.assignedLaneChecks));
+  func->setAttr(kProbeAssignedLaneQueriesAttr,
+                builder.getI64IntegerAttr(stats.assignedLaneQueries));
+  func->setAttr(kProbeBaseFitsAttr,
+                builder.getI64IntegerAttr(stats.baseFitsCalls));
+  func->setAttr(kProbeFindFreeBaseAttr,
+                builder.getI64IntegerAttr(stats.findFreeBaseCalls));
+}
+
 static void setOverflowAttrs(func::FuncOp func,
                              const PressureFailure &failure) {
   Builder builder(func.getContext());
@@ -2952,7 +3178,7 @@ static FailureOr<bool> enforceBudgetsOrApplyRelief(
 
 static FailureOr<AllocationAttemptResult>
 finishSuccessfulAllocation(func::FuncOp func, Inventory &inventory,
-                           RegisterBudgets budgets) {
+                           RegisterBudgets budgets, bool debugProbes) {
   OpBuilder builder(func.getContext());
   if (hasPendingRelief(inventory)) {
     if (failed(materializePendingRelief(func, inventory, budgets, builder)))
@@ -2961,6 +3187,8 @@ finishSuccessfulAllocation(func::FuncOp func, Inventory &inventory,
   }
   if (failed(applyPhysicalAssignments(func, inventory, builder)))
     return mlir::failure();
+  if (debugProbes)
+    setProbeAttrs(func, inventory.probeStats);
   updatePeaks(inventory);
   emitRegAllocRemarks(func, inventory, budgets);
   clearTransientRegAllocAttrs(func);
@@ -2969,7 +3197,8 @@ finishSuccessfulAllocation(func::FuncOp func, Inventory &inventory,
 
 static FailureOr<AllocationAttemptResult>
 runAllocationAttempt(func::FuncOp func, RegisterBudgets budgets,
-                     std::optional<PressureFailure> &failure, bool softFail) {
+                     std::optional<PressureFailure> &failure, bool softFail,
+                     bool debugProbes) {
   clearPressureReliefDiagnostics(func);
   Inventory inventory;
   if (failed(buildInventory(func, inventory)))
@@ -2992,23 +3221,25 @@ runAllocationAttempt(func::FuncOp func, RegisterBudgets budgets,
       allocated = mlir::failure();
   }
   if (failed(allocated)) {
+    if (debugProbes)
+      setProbeAttrs(func, inventory.probeStats);
     emitRegAllocRemarks(func, inventory, budgets);
     return mlir::failure();
   }
 
-  return finishSuccessfulAllocation(func, inventory, budgets);
+  return finishSuccessfulAllocation(func, inventory, budgets, debugProbes);
 }
 
 static LogicalResult buildAndAllocate(func::FuncOp func,
                                       RegisterBudgets budgets,
                                       std::optional<PressureFailure> &failure,
-                                      bool softFail) {
+                                      bool softFail, bool debugProbes) {
   if (failed(validateReservedLimits(func, budgets)))
     return mlir::failure();
   for (unsigned attempt : llvm::seq<unsigned>(0, kRewriteAttemptLimit)) {
     (void)attempt;
     FailureOr<AllocationAttemptResult> result =
-        runAllocationAttempt(func, budgets, failure, softFail);
+        runAllocationAttempt(func, budgets, failure, softFail, debugProbes);
     if (failed(result))
       return mlir::failure();
     if (*result == AllocationAttemptResult::Retry)
@@ -3177,7 +3408,7 @@ struct WaveAMDRegAllocPass
 
     std::optional<PressureFailure> allocFailure;
     if (failed(buildAndAllocate(func, *funcBudgets, allocFailure,
-                                /*softFail=*/markOverflow))) {
+                                /*softFail=*/markOverflow, debugProbes))) {
       if (!allocFailure)
         return WalkResult::interrupt();
       return handleAllocationFailure(func, *funcBudgets, *allocFailure,
