@@ -17,6 +17,7 @@
 #include "llvm/Support/CheckedArithmetic.h"
 #include "llvm/Support/MathExtras.h"
 
+#include <limits>
 #include <numeric>
 #include <optional>
 
@@ -53,6 +54,212 @@ FailureOr<Value> materializeSymbol(WaveAMDMachineSelector &,
     return user->emitError("wave.index_expr leaf '")
            << name << "' has no binding";
   return it->second;
+}
+
+static TermKind materializationKind(WaveAMDMachineSelector &S,
+                                    sym::ExprHandle expr,
+                                    const llvm::StringMap<Value> &subs);
+
+static unsigned materializationLoopDepth(sym::ExprHandle expr, Operation *user,
+                                         const llvm::StringMap<Value> &subs);
+
+static bool isHoistScope(Operation *op) { return isa<LoopLikeOpInterface>(op); }
+
+static Operation *scopeOp(Value value) {
+  if (Operation *def = value.getDefiningOp())
+    return def;
+  return cast<BlockArgument>(value).getOwner()->getParentOp();
+}
+
+static unsigned valueLoopDepth(Value value, Operation *) {
+  Operation *scope = scopeOp(value);
+  if (!scope)
+    return 0;
+  unsigned depth = 0;
+  for (Operation *cur = scope; cur; cur = cur->getParentOp())
+    if (isHoistScope(cur))
+      ++depth;
+  return depth;
+}
+
+static TermKind symbolMaterializationKind(WaveAMDMachineSelector &S,
+                                          sym::ExprHandle expr,
+                                          const llvm::StringMap<Value> &subs) {
+  auto it = subs.find(sym::ExprView(expr).getSymbolName());
+  if (it == subs.end())
+    return TermKind::Lane;
+  return S.isUniformValue(it->second) ? TermKind::Uniform : TermKind::Lane;
+}
+
+static TermKind addMaterializationKind(WaveAMDMachineSelector &S,
+                                       sym::ExprHandle expr,
+                                       const llvm::StringMap<Value> &subs) {
+  sym::ExprView view(expr);
+  TermKind kind = materializationKind(S, view.getAddConstant(), subs);
+  for (uint32_t i = 0, e = view.getAddTermCount(); i != e; ++i) {
+    sym::AddTerm term = view.getAddTerm(i);
+    kind = std::max(kind, materializationKind(S, term.coefficient, subs));
+    kind = std::max(kind, materializationKind(S, term.term, subs));
+  }
+  return kind;
+}
+
+static TermKind mulMaterializationKind(WaveAMDMachineSelector &S,
+                                       sym::ExprHandle expr,
+                                       const llvm::StringMap<Value> &subs) {
+  sym::ExprView view(expr);
+  TermKind kind = materializationKind(S, view.getMulCoefficient(), subs);
+  for (uint32_t i = 0, e = view.getMulFactorCount(); i != e; ++i)
+    kind =
+        std::max(kind, materializationKind(S, view.getMulFactor(i).base, subs));
+  return kind;
+}
+
+static TermKind materializationKind(WaveAMDMachineSelector &S,
+                                    sym::ExprHandle expr,
+                                    const llvm::StringMap<Value> &subs) {
+  sym::ExprView view(expr);
+  switch (view.getKind()) {
+  case sym::ExprKind::Integer:
+  case sym::ExprKind::Rational:
+    return TermKind::Const;
+  case sym::ExprKind::Symbol:
+    return symbolMaterializationKind(S, expr, subs);
+  case sym::ExprKind::Add:
+    return addMaterializationKind(S, expr, subs);
+  case sym::ExprKind::Mul:
+    return mulMaterializationKind(S, expr, subs);
+  case sym::ExprKind::Floor:
+  case sym::ExprKind::Ceil:
+    return materializationKind(S, view.getUnaryArg(), subs);
+  case sym::ExprKind::Mod:
+  case sym::ExprKind::Xor:
+    return std::max(materializationKind(S, view.getBinaryLhs(), subs),
+                    materializationKind(S, view.getBinaryRhs(), subs));
+  default:
+    return TermKind::Lane;
+  }
+}
+
+static unsigned
+symbolMaterializationLoopDepth(sym::ExprHandle expr, Operation *user,
+                               const llvm::StringMap<Value> &subs) {
+  auto it = subs.find(sym::ExprView(expr).getSymbolName());
+  if (it == subs.end())
+    return std::numeric_limits<unsigned>::max();
+  return valueLoopDepth(it->second, user);
+}
+
+static unsigned
+addMaterializationLoopDepth(sym::ExprHandle expr, Operation *user,
+                            const llvm::StringMap<Value> &subs) {
+  sym::ExprView view(expr);
+  unsigned depth = materializationLoopDepth(view.getAddConstant(), user, subs);
+  for (uint32_t i = 0, e = view.getAddTermCount(); i != e; ++i) {
+    sym::AddTerm term = view.getAddTerm(i);
+    depth =
+        std::max(depth, materializationLoopDepth(term.coefficient, user, subs));
+    depth = std::max(depth, materializationLoopDepth(term.term, user, subs));
+  }
+  return depth;
+}
+
+static unsigned
+mulMaterializationLoopDepth(sym::ExprHandle expr, Operation *user,
+                            const llvm::StringMap<Value> &subs) {
+  sym::ExprView view(expr);
+  unsigned depth =
+      materializationLoopDepth(view.getMulCoefficient(), user, subs);
+  for (uint32_t i = 0, e = view.getMulFactorCount(); i != e; ++i)
+    depth = std::max(
+        depth, materializationLoopDepth(view.getMulFactor(i).base, user, subs));
+  return depth;
+}
+
+static unsigned materializationLoopDepth(sym::ExprHandle expr, Operation *user,
+                                         const llvm::StringMap<Value> &subs) {
+  sym::ExprView view(expr);
+  switch (view.getKind()) {
+  case sym::ExprKind::Integer:
+  case sym::ExprKind::Rational:
+    return 0;
+  case sym::ExprKind::Symbol:
+    return symbolMaterializationLoopDepth(expr, user, subs);
+  case sym::ExprKind::Add:
+    return addMaterializationLoopDepth(expr, user, subs);
+  case sym::ExprKind::Mul:
+    return mulMaterializationLoopDepth(expr, user, subs);
+  case sym::ExprKind::Floor:
+  case sym::ExprKind::Ceil:
+    return materializationLoopDepth(view.getUnaryArg(), user, subs);
+  case sym::ExprKind::Mod:
+  case sym::ExprKind::Xor:
+    return std::max(materializationLoopDepth(view.getBinaryLhs(), user, subs),
+                    materializationLoopDepth(view.getBinaryRhs(), user, subs));
+  default:
+    return std::numeric_limits<unsigned>::max();
+  }
+}
+
+struct OrderedAddTerm {
+  sym::AddTerm term;
+  TermKind kind = TermKind::Lane;
+  unsigned loopDepth = 0;
+};
+
+struct OrderedMulFactor {
+  sym::MulFactor factor;
+  TermKind kind = TermKind::Lane;
+  unsigned loopDepth = 0;
+};
+
+static bool orderedBefore(TermKind lhsKind, unsigned lhsDepth, TermKind rhsKind,
+                          unsigned rhsDepth) {
+  if (lhsKind != rhsKind)
+    return lhsKind < rhsKind;
+  if (lhsDepth != rhsDepth)
+    return lhsDepth < rhsDepth;
+  return false;
+}
+
+static SmallVector<OrderedAddTerm, 8>
+collectOrderedAddTerms(WaveAMDMachineSelector &S, sym::ExprHandle expr,
+                       Operation *user, const llvm::StringMap<Value> &subs) {
+  sym::ExprView view(expr);
+  SmallVector<OrderedAddTerm, 8> terms;
+  terms.reserve(view.getAddTermCount());
+  for (uint32_t i = 0; i < view.getAddTermCount(); ++i) {
+    sym::AddTerm term = view.getAddTerm(i);
+    TermKind kind = std::max(materializationKind(S, term.coefficient, subs),
+                             materializationKind(S, term.term, subs));
+    unsigned depth =
+        std::max(materializationLoopDepth(term.coefficient, user, subs),
+                 materializationLoopDepth(term.term, user, subs));
+    terms.push_back({term, kind, depth});
+  }
+  llvm::stable_sort(
+      terms, [](const OrderedAddTerm &lhs, const OrderedAddTerm &rhs) {
+        return orderedBefore(lhs.kind, lhs.loopDepth, rhs.kind, rhs.loopDepth);
+      });
+  return terms;
+}
+
+static SmallVector<OrderedMulFactor, 8>
+collectOrderedMulFactors(WaveAMDMachineSelector &S, sym::ExprHandle expr,
+                         Operation *user, const llvm::StringMap<Value> &subs) {
+  sym::ExprView view(expr);
+  SmallVector<OrderedMulFactor, 8> factors;
+  factors.reserve(view.getMulFactorCount());
+  for (uint32_t i = 0; i < view.getMulFactorCount(); ++i) {
+    sym::MulFactor factor = view.getMulFactor(i);
+    factors.push_back({factor, materializationKind(S, factor.base, subs),
+                       materializationLoopDepth(factor.base, user, subs)});
+  }
+  llvm::stable_sort(
+      factors, [](const OrderedMulFactor &lhs, const OrderedMulFactor &rhs) {
+        return orderedBefore(lhs.kind, lhs.loopDepth, rhs.kind, rhs.loopDepth);
+      });
+  return factors;
 }
 
 FailureOr<Value> materializeAddTerm(WaveAMDMachineSelector &S,
@@ -94,10 +301,11 @@ FailureOr<Value> materializeAdd(WaveAMDMachineSelector &S, sym::ExprHandle expr,
       return failure();
     acc = *seed;
   }
-  uint32_t nterms = view.getAddTermCount();
-  for (uint32_t i = 0; i < nterms; ++i) {
+  SmallVector<OrderedAddTerm, 8> terms =
+      collectOrderedAddTerms(S, expr, user, subs);
+  for (const OrderedAddTerm &ordered : terms) {
     FailureOr<Value> scaled =
-        materializeAddTerm(S, view.getAddTerm(i), user, subs, assumptions);
+        materializeAddTerm(S, ordered.term, user, subs, assumptions);
     if (failed(scaled))
       return failure();
     if (!acc) {
@@ -146,10 +354,11 @@ FailureOr<Value> materializeMul(WaveAMDMachineSelector &S, sym::ExprHandle expr,
       return failure();
     acc = *seed;
   }
-  uint32_t nfactors = view.getMulFactorCount();
-  for (uint32_t i = 0; i < nfactors; ++i) {
+  SmallVector<OrderedMulFactor, 8> factors =
+      collectOrderedMulFactors(S, expr, user, subs);
+  for (const OrderedMulFactor &ordered : factors) {
     FailureOr<Value> pow =
-        materializeMulFactor(S, view.getMulFactor(i), user, subs, assumptions);
+        materializeMulFactor(S, ordered.factor, user, subs, assumptions);
     if (failed(pow))
       return failure();
     if (!acc) {

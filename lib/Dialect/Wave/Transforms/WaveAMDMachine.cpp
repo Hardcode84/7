@@ -1223,6 +1223,232 @@ struct WideSymbolBinding {
   Value selected;
 };
 
+static TermKind wideMaterializationKind(sym::ExprHandle expr,
+                                        ArrayRef<WideSymbolBinding> bindings,
+                                        bool symbolsAreUniform);
+
+static unsigned
+wideMaterializationLoopDepth(sym::ExprHandle expr, Operation *user,
+                             ArrayRef<WideSymbolBinding> bindings);
+
+static bool isHoistScope(Operation *op) { return isa<LoopLikeOpInterface>(op); }
+
+static Operation *scopeOp(Value value) {
+  if (Operation *def = value.getDefiningOp())
+    return def;
+  return cast<BlockArgument>(value).getOwner()->getParentOp();
+}
+
+static unsigned valueLoopDepth(Value value, Operation *) {
+  Operation *scope = scopeOp(value);
+  if (!scope)
+    return 0;
+  unsigned depth = 0;
+  for (Operation *cur = scope; cur; cur = cur->getParentOp())
+    if (isHoistScope(cur))
+      ++depth;
+  return depth;
+}
+
+static TermKind
+wideSymbolMaterializationKind(sym::ExprHandle expr,
+                              ArrayRef<WideSymbolBinding> bindings,
+                              bool symbolsAreUniform) {
+  StringRef name = sym::ExprView(expr).getSymbolName();
+  for (const WideSymbolBinding &binding : bindings)
+    if (binding.name == name)
+      return symbolsAreUniform ? TermKind::Uniform : TermKind::Lane;
+  return TermKind::Lane;
+}
+
+static TermKind wideAddMaterializationKind(sym::ExprHandle expr,
+                                           ArrayRef<WideSymbolBinding> bindings,
+                                           bool symbolsAreUniform) {
+  sym::ExprView view(expr);
+  TermKind kind = wideMaterializationKind(view.getAddConstant(), bindings,
+                                          symbolsAreUniform);
+  for (uint32_t i : llvm::seq<uint32_t>(0, view.getAddTermCount())) {
+    sym::AddTerm term = view.getAddTerm(i);
+    kind = std::max(kind, wideMaterializationKind(term.coefficient, bindings,
+                                                  symbolsAreUniform));
+    kind = std::max(
+        kind, wideMaterializationKind(term.term, bindings, symbolsAreUniform));
+  }
+  return kind;
+}
+
+static TermKind wideMulMaterializationKind(sym::ExprHandle expr,
+                                           ArrayRef<WideSymbolBinding> bindings,
+                                           bool symbolsAreUniform) {
+  sym::ExprView view(expr);
+  TermKind kind = wideMaterializationKind(view.getMulCoefficient(), bindings,
+                                          symbolsAreUniform);
+  for (uint32_t i : llvm::seq<uint32_t>(0, view.getMulFactorCount()))
+    kind = std::max(kind, wideMaterializationKind(view.getMulFactor(i).base,
+                                                  bindings, symbolsAreUniform));
+  return kind;
+}
+
+static TermKind wideMaterializationKind(sym::ExprHandle expr,
+                                        ArrayRef<WideSymbolBinding> bindings,
+                                        bool symbolsAreUniform) {
+  sym::ExprView view(expr);
+  switch (view.getKind()) {
+  case sym::ExprKind::Integer:
+  case sym::ExprKind::Rational:
+    return TermKind::Const;
+  case sym::ExprKind::Symbol:
+    return wideSymbolMaterializationKind(expr, bindings, symbolsAreUniform);
+  case sym::ExprKind::Add:
+    return wideAddMaterializationKind(expr, bindings, symbolsAreUniform);
+  case sym::ExprKind::Mul:
+    return wideMulMaterializationKind(expr, bindings, symbolsAreUniform);
+  case sym::ExprKind::Floor:
+  case sym::ExprKind::Ceil:
+    return wideMaterializationKind(view.getUnaryArg(), bindings,
+                                   symbolsAreUniform);
+  case sym::ExprKind::Mod:
+  case sym::ExprKind::Xor:
+    return std::max(wideMaterializationKind(view.getBinaryLhs(), bindings,
+                                            symbolsAreUniform),
+                    wideMaterializationKind(view.getBinaryRhs(), bindings,
+                                            symbolsAreUniform));
+  default:
+    return TermKind::Lane;
+  }
+}
+
+static unsigned
+wideSymbolMaterializationLoopDepth(sym::ExprHandle expr, Operation *user,
+                                   ArrayRef<WideSymbolBinding> bindings) {
+  StringRef name = sym::ExprView(expr).getSymbolName();
+  for (const WideSymbolBinding &binding : bindings)
+    if (binding.name == name)
+      return valueLoopDepth(binding.selected, user);
+  return std::numeric_limits<unsigned>::max();
+}
+
+static unsigned
+wideAddMaterializationLoopDepth(sym::ExprHandle expr, Operation *user,
+                                ArrayRef<WideSymbolBinding> bindings) {
+  sym::ExprView view(expr);
+  unsigned depth =
+      wideMaterializationLoopDepth(view.getAddConstant(), user, bindings);
+  for (uint32_t i : llvm::seq<uint32_t>(0, view.getAddTermCount())) {
+    sym::AddTerm term = view.getAddTerm(i);
+    depth = std::max(
+        depth, wideMaterializationLoopDepth(term.coefficient, user, bindings));
+    depth = std::max(depth,
+                     wideMaterializationLoopDepth(term.term, user, bindings));
+  }
+  return depth;
+}
+
+static unsigned
+wideMulMaterializationLoopDepth(sym::ExprHandle expr, Operation *user,
+                                ArrayRef<WideSymbolBinding> bindings) {
+  sym::ExprView view(expr);
+  unsigned depth =
+      wideMaterializationLoopDepth(view.getMulCoefficient(), user, bindings);
+  for (uint32_t i : llvm::seq<uint32_t>(0, view.getMulFactorCount()))
+    depth = std::max(depth, wideMaterializationLoopDepth(
+                                view.getMulFactor(i).base, user, bindings));
+  return depth;
+}
+
+static unsigned
+wideMaterializationLoopDepth(sym::ExprHandle expr, Operation *user,
+                             ArrayRef<WideSymbolBinding> bindings) {
+  sym::ExprView view(expr);
+  switch (view.getKind()) {
+  case sym::ExprKind::Integer:
+  case sym::ExprKind::Rational:
+    return 0;
+  case sym::ExprKind::Symbol:
+    return wideSymbolMaterializationLoopDepth(expr, user, bindings);
+  case sym::ExprKind::Add:
+    return wideAddMaterializationLoopDepth(expr, user, bindings);
+  case sym::ExprKind::Mul:
+    return wideMulMaterializationLoopDepth(expr, user, bindings);
+  case sym::ExprKind::Floor:
+  case sym::ExprKind::Ceil:
+    return wideMaterializationLoopDepth(view.getUnaryArg(), user, bindings);
+  case sym::ExprKind::Mod:
+  case sym::ExprKind::Xor:
+    return std::max(
+        wideMaterializationLoopDepth(view.getBinaryLhs(), user, bindings),
+        wideMaterializationLoopDepth(view.getBinaryRhs(), user, bindings));
+  default:
+    return std::numeric_limits<unsigned>::max();
+  }
+}
+
+struct OrderedWideAddTerm {
+  sym::AddTerm term;
+  TermKind kind = TermKind::Lane;
+  unsigned loopDepth = 0;
+};
+
+struct OrderedWideMulFactor {
+  sym::MulFactor factor;
+  TermKind kind = TermKind::Lane;
+  unsigned loopDepth = 0;
+};
+
+static bool orderedBefore(TermKind lhsKind, unsigned lhsDepth, TermKind rhsKind,
+                          unsigned rhsDepth) {
+  if (lhsKind != rhsKind)
+    return lhsKind < rhsKind;
+  if (lhsDepth != rhsDepth)
+    return lhsDepth < rhsDepth;
+  return false;
+}
+
+static SmallVector<OrderedWideAddTerm, 8>
+collectOrderedWideAddTerms(sym::ExprHandle expr, Operation *user,
+                           ArrayRef<WideSymbolBinding> bindings,
+                           bool symbolsAreUniform) {
+  sym::ExprView view(expr);
+  SmallVector<OrderedWideAddTerm, 8> terms;
+  terms.reserve(view.getAddTermCount());
+  for (uint32_t i : llvm::seq<uint32_t>(0, view.getAddTermCount())) {
+    sym::AddTerm term = view.getAddTerm(i);
+    TermKind kind = std::max(
+        wideMaterializationKind(term.coefficient, bindings, symbolsAreUniform),
+        wideMaterializationKind(term.term, bindings, symbolsAreUniform));
+    unsigned depth =
+        std::max(wideMaterializationLoopDepth(term.coefficient, user, bindings),
+                 wideMaterializationLoopDepth(term.term, user, bindings));
+    terms.push_back({term, kind, depth});
+  }
+  llvm::stable_sort(
+      terms, [](const OrderedWideAddTerm &lhs, const OrderedWideAddTerm &rhs) {
+        return orderedBefore(lhs.kind, lhs.loopDepth, rhs.kind, rhs.loopDepth);
+      });
+  return terms;
+}
+
+static SmallVector<OrderedWideMulFactor, 8>
+collectOrderedWideMulFactors(sym::ExprHandle expr, Operation *user,
+                             ArrayRef<WideSymbolBinding> bindings,
+                             bool symbolsAreUniform) {
+  sym::ExprView view(expr);
+  SmallVector<OrderedWideMulFactor, 8> factors;
+  factors.reserve(view.getMulFactorCount());
+  for (uint32_t i : llvm::seq<uint32_t>(0, view.getMulFactorCount())) {
+    sym::MulFactor factor = view.getMulFactor(i);
+    factors.push_back(
+        {factor,
+         wideMaterializationKind(factor.base, bindings, symbolsAreUniform),
+         wideMaterializationLoopDepth(factor.base, user, bindings)});
+  }
+  llvm::stable_sort(factors, [](const OrderedWideMulFactor &lhs,
+                                const OrderedWideMulFactor &rhs) {
+    return orderedBefore(lhs.kind, lhs.loopDepth, rhs.kind, rhs.loopDepth);
+  });
+  return factors;
+}
+
 static FailureOr<Value> materializeWideIndexExprNode(
     WaveAMDMachineSelector &S, sym::ExprHandle expr, Operation *user,
     ArrayRef<WideSymbolBinding> bindings, ArrayRef<sym::PredHandle> assumptions,
@@ -1274,10 +1500,11 @@ materializeWideAdd(WaveAMDMachineSelector &S, sym::ExprHandle expr,
       return failure();
     acc = *seed;
   }
-  uint32_t n = view.getAddTermCount();
-  for (uint32_t i = 0; i < n; ++i) {
+  SmallVector<OrderedWideAddTerm, 8> terms =
+      collectOrderedWideAddTerms(expr, user, bindings, symbolsAreUniform);
+  for (const OrderedWideAddTerm &ordered : terms) {
     FailureOr<Value> term = materializeWideAddTerm(
-        S, view.getAddTerm(i), user, bindings, assumptions, symbolsAreUniform);
+        S, ordered.term, user, bindings, assumptions, symbolsAreUniform);
     if (failed(term))
       return failure();
     acc = acc ? addWide(S, loc, *acc, *term) : std::optional<Value>{*term};
@@ -1328,11 +1555,11 @@ materializeWideMul(WaveAMDMachineSelector &S, sym::ExprHandle expr,
       return failure();
     acc = *seed;
   }
-  uint32_t n = view.getMulFactorCount();
-  for (uint32_t i = 0; i < n; ++i) {
-    FailureOr<Value> factor =
-        materializeWideMulFactor(S, view.getMulFactor(i), user, bindings,
-                                 assumptions, symbolsAreUniform);
+  SmallVector<OrderedWideMulFactor, 8> factors =
+      collectOrderedWideMulFactors(expr, user, bindings, symbolsAreUniform);
+  for (const OrderedWideMulFactor &ordered : factors) {
+    FailureOr<Value> factor = materializeWideMulFactor(
+        S, ordered.factor, user, bindings, assumptions, symbolsAreUniform);
     if (failed(factor))
       return failure();
     acc = acc ? mulWide(S, loc, *acc, *factor) : std::optional<Value>{*factor};

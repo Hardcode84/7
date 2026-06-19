@@ -18,9 +18,9 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // CHECK-LABEL: func.func @mixed_offset
 // CHECK: %[[LANE:.*]] = waveamdmachine.v_mbcnt_lo
 // CHECK: %[[WGID:.*]] = waveamdmachine.s_workgroup_id_y
-// CHECK: %[[VSCALE:.*]] = waveamdmachine.v_lshlrev_b32 %[[LANE]],
 // CHECK: %[[SSCALE:[^,]+]], %{{.*}} = waveamdmachine.s_lshl_b32 %[[WGID]],
-// CHECK: %[[ADDR:.*]] = waveamdmachine.v_add_u32 %[[VSCALE]], %[[SSCALE]]
+// CHECK: %[[VSCALE:.*]] = waveamdmachine.v_lshlrev_b32 %[[LANE]],
+// CHECK: %[[ADDR:.*]] = waveamdmachine.v_add_u32 %[[SSCALE]], %[[VSCALE]]
 // CHECK: waveamdmachine.global_store_b32 %[[ADDR]], {{.*}} offset 64
 func.func @mixed_offset(%out: !wave.ptr<#wave.global, i32>, %x: i32) attributes {wave.kernel} {
   %lane = wave.lane_id : !wave.simd<i32, 32>
@@ -351,9 +351,9 @@ func.func @xor_uniform_buffer_soffset(%out: !wave.ptr<#wave.global, i32>, %u_raw
 // CHECK-DAG: %[[U:.*]] = waveamdmachine.arg {index = 1 : i64, pointer = false}
 // CHECK-DAG: %[[V:.*]] = waveamdmachine.arg {index = 2 : i64, pointer = false}
 // CHECK-DAG: %[[LANE:.*]] = waveamdmachine.v_mbcnt_lo
-// CHECK: %[[VBYTE:.*]] = waveamdmachine.v_lshlrev_b32 %[[LANE]],
 // CHECK: %[[VSCALE:[^,]+]], %{{.*}} = waveamdmachine.s_lshl_b32 %[[V]],
-// CHECK: %[[VOFFSET:.*]] = waveamdmachine.v_add_u32 %[[VBYTE]], %[[VSCALE]]
+// CHECK: %[[VBYTE:.*]] = waveamdmachine.v_lshlrev_b32 %[[LANE]],
+// CHECK: %[[VOFFSET:.*]] = waveamdmachine.v_add_u32 %[[VSCALE]], %[[VBYTE]]
 // CHECK: %[[USCALE:[^,]+]], %{{.*}} = waveamdmachine.s_lshl_b32 %[[U]],
 // CHECK: waveamdmachine.buffer_store_b32 %[[VOFFSET]], {{.*}}, {{.*}}, %[[USCALE]]
 func.func @buffer_subset_packs_uniform_slots(%out: !wave.ptr<#wave.global, i32>,
@@ -374,6 +374,38 @@ func.func @buffer_subset_packs_uniform_slots(%out: !wave.ptr<#wave.global, i32>,
   %tok = wave.store %vx -> %ptrs
       : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 32>)
       -> !wave.mem.token
+  return
+}
+
+// CHECK-LABEL: func.func @uniform_depth_order
+// CHECK-DAG: %[[OUTER:.*]] = waveamdmachine.arg {index = 1 : i64, pointer = false}
+// CHECK: %[[LOOP:.*]] = waveamdmachine.uniform_loop
+// CHECK: ^bb0(%[[IV:.*]]: !waveamdmachine.reg<sgpr, 1>):
+// CHECK: %[[VBYTE:.*]] = waveamdmachine.v_lshlrev_b32
+// CHECK: %[[OUTER_BYTE:[^,]+]], %{{.*}} = waveamdmachine.s_lshl_b32 %[[OUTER]],
+// CHECK: %[[IV_BYTE:[^,]+]], %{{.*}} = waveamdmachine.s_lshl_b32 %[[IV]],
+// CHECK: %[[SOFFSET:[^,]+]], %{{.*}} = waveamdmachine.s_add_i32 %[[OUTER_BYTE]], %[[IV_BYTE]]
+// CHECK: waveamdmachine.buffer_store_b32 %[[VBYTE]], {{.*}}, {{.*}}, %[[SOFFSET]]
+func.func @uniform_depth_order(%out: !wave.ptr<#wave.global, i32>,
+                               %outer_raw: i32, %n: i32) attributes {wave.kernel} {
+  %c0 = arith.constant 0 : i32
+  %c1 = arith.constant 1 : i32
+  %lane = wave.lane_id : !wave.simd<i32, 32>
+  %outer = wave.assume %outer_raw as "x" [#wave.pred<"x >= 0">, #wave.pred<"x <= 1023">] : i32
+  %range = arith.constant 4096 : i32
+  %buf = waveamd.make_buffer %out, %range
+      : !wave.ptr<#wave.global, i32>, i32 -> !wave.ptr<#waveamd.buffer, i32>
+  scf.for %i = %c0 to %n step %c1 : i32 {
+    %iv = wave.assume %i as "x" [#wave.pred<"x >= 0">, #wave.pred<"x <= 1023">] : i32
+    %off = wave.index_expr <"lid + iv + outer"> ["iv", "lid", "outer"](%iv, %lane, %outer)
+        : (i32, !wave.simd<i32, 32>, i32) -> !wave.simd<index, 32>
+    %ptrs = wave.ptr_add %buf, %off
+        : !wave.ptr<#waveamd.buffer, i32>, !wave.simd<index, 32>
+        -> !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 32>
+    %tok = wave.store %lane -> %ptrs
+        : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 32>)
+        -> !wave.mem.token
+  }
   return
 }
 
