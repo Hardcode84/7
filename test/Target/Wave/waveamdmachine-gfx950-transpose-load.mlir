@@ -135,6 +135,28 @@ func.func @transpose_load_offsets()
   return
 }
 
+// MACHINE-LABEL: func.func @transpose_load_large_const_offset
+// MACHINE: waveamdmachine.ds_read_tr_b64_b8 {{.*}} offset 2048
+
+// ASM-LABEL: transpose_load_large_const_offset:
+// ASM-NOT: 0x20800
+// ASM: ds_read_b64_tr_b8 {{v\[[0-9]+:[0-9]+\]}}, {{v[0-9]+}} offset:2048
+// ASM: s_endpgm
+func.func @transpose_load_large_const_offset()
+    attributes {wave.kernel, waveamdmachine.lds_size = 262144 : i64} {
+  %lds = wave.lds_base : !wave.ptr<#wave.shared>
+  %lane = wave.lane_id : !wave.simd<i32, 64>
+  %off = wave.index_expr <"133120 + lid"> ["lid"](%lane)
+      : (!wave.simd<i32, 64>) -> !wave.simd<index, 64>
+  %ptr = wave.ptr_add %lds, %off
+      : !wave.ptr<#wave.shared>, !wave.simd<index, 64>
+      -> !wave.simd<!wave.ptr<#wave.shared>, 64>
+  %v, %tok = waveamd.transpose_load %ptr
+      : (!wave.simd<!wave.ptr<#wave.shared>, 64>)
+        -> (!wave.simd<vector<8xi8>, 64>, !wave.mem.token)
+  return
+}
+
 // MACHINE-LABEL: func.func @transpose_load_opaque_index_expr
 // MACHINE: waveamdmachine.ds_read_tr_b64_b8
 

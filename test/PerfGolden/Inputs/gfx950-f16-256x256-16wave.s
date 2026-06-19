@@ -319,19 +319,12 @@ wmma_f16_matmul_tiled:
 		v_cvt_f16_f32_e64 v25, v75
 		s_mov_b32 s12, 0x1000
 		v_cvt_f16_f32_e64 v26, v77
-		s_mov_b32 s13, 0x1200
 		v_cvt_f16_f32_e64 v27, v79
-		s_mov_b32 s14, 0x1400
 		v_cvt_f16_f32_e64 v32, v81
-		s_mov_b32 s15, 0x1600
 		v_cvt_f16_f32_e64 v33, v83
-		s_mov_b32 s16, 0x1800
 		v_cvt_f16_f32_e64 v34, v85
-		s_mov_b32 s17, 0x1a00
 		v_cvt_f16_f32_e64 v35, v87
-		s_mov_b32 s18, 0x1c00
 		v_cvt_f16_f32_e64 v36, v89
-		s_mov_b32 s19, 0x1e00
 		v_cvt_f16_f32_e64 v37, v91
 		v_cvt_f16_f32_e64 v38, v93
 		v_cvt_f16_f32_e64 v39, v95
@@ -485,25 +478,25 @@ wmma_f16_matmul_tiled:
 		buffer_store_dwordx2 v[2:3], v8, s[28:31], s12 offen
 		v_or_b32_e32 v2, v26, v27
 		v_or_b32_e32 v3, v55, v54
-		buffer_store_dwordx2 v[2:3], v8, s[28:31], s13 offen
+		buffer_store_dwordx2 v[2:3], v8, s[28:31], s12 offen offset:512
 		v_or_b32_e32 v2, v32, v33
 		v_or_b32_e32 v3, v57, v56
-		buffer_store_dwordx2 v[2:3], v8, s[28:31], s14 offen
+		buffer_store_dwordx2 v[2:3], v8, s[28:31], s12 offen offset:1024
 		v_or_b32_e32 v2, v34, v35
 		v_or_b32_e32 v3, v59, v58
-		buffer_store_dwordx2 v[2:3], v8, s[28:31], s15 offen
+		buffer_store_dwordx2 v[2:3], v8, s[28:31], s12 offen offset:1536
 		v_or_b32_e32 v2, v36, v37
 		v_or_b32_e32 v3, v61, v60
-		buffer_store_dwordx2 v[2:3], v8, s[28:31], s16 offen
+		buffer_store_dwordx2 v[2:3], v8, s[28:31], s12 offen offset:2048
 		v_or_b32_e32 v2, v38, v39
 		v_or_b32_e32 v3, v63, v62
-		buffer_store_dwordx2 v[2:3], v8, s[28:31], s17 offen
+		buffer_store_dwordx2 v[2:3], v8, s[28:31], s12 offen offset:2560
 		v_or_b32_e32 v2, v40, v41
 		v_or_b32_e32 v3, v65, v64
-		buffer_store_dwordx2 v[2:3], v8, s[28:31], s18 offen
+		buffer_store_dwordx2 v[2:3], v8, s[28:31], s12 offen offset:3072
 		v_or_b32_e32 v2, v42, v43
 		v_or_b32_e32 v3, v67, v66
-		buffer_store_dwordx2 v[2:3], v8, s[28:31], s19 offen
+		buffer_store_dwordx2 v[2:3], v8, s[28:31], s12 offen offset:3584
 		s_waitcnt vmcnt(0)
 		s_endpgm
 	.size	wmma_f16_matmul_tiled, .-wmma_f16_matmul_tiled

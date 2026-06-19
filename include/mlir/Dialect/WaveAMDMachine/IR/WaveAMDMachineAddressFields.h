@@ -25,6 +25,7 @@ struct AddressFieldSpec {
   bool instOffsetSigned = false;
   bool hasSoffset = false;
   SOffsetImmPolicy soffsetImmPolicy = SOffsetImmPolicy::AnyImm;
+  unsigned instOffsetHeadroom = 0;
 };
 
 /// Closed interval `[lo, hi]` for the spec's inst-offset slot, or

@@ -1,5 +1,6 @@
 // RUN: wave-opt --waveamd-to-machine %s | FileCheck %s
 // RUN: wave-opt --waveamd-to-machine %s | wave-opt | FileCheck %s
+// RUN: wave-opt --waveamd-to-machine %s | wave-opt --waveamd-decompose-mem-tuples | FileCheck %s --check-prefix=DECOMP
 
 // `wave.index_expr` stays symbolic through `wave.ptr_add`; memory
 // lowering expands the byte expression, picks V / S / inst-offset
@@ -138,6 +139,29 @@ func.func @buffer_buckets(%out: !wave.ptr<#wave.global, i32>, %x: i32) attribute
   %off = wave.index_expr <"lid + wgid_x + wgid_y + K"> ["K", "lid", "wgid_x", "wgid_y"] (%k, %lane, %wgid_x, %wgid_y) : (i32, !wave.simd<i32, 32>, i32, i32) -> !wave.simd<index, 32>
   %ptrs = wave.ptr_add %buf, %off : !wave.ptr<#waveamd.buffer, i32>, !wave.simd<index, 32> -> !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 32>
   %tok = wave.store %sum -> %ptrs : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 32>) -> !wave.mem.token
+  return
+}
+
+// CHECK-LABEL: func.func @buffer_tuple_large_const_reserves_chunk_headroom
+// CHECK-NOT: offset 4092
+// CHECK: waveamdmachine.buffer_load_tuple_b32
+// CHECK-NOT: offset 4092
+// CHECK: return
+// DECOMP-LABEL: func.func @buffer_tuple_large_const_reserves_chunk_headroom
+// DECOMP-NOT: offset 4108
+// DECOMP: waveamdmachine.buffer_load_b128
+// DECOMP-NOT: offset 4108
+// DECOMP: waveamdmachine.buffer_load_b128 {{.*}} offset 16
+// DECOMP-NOT: offset 4108
+// DECOMP: return
+func.func @buffer_tuple_large_const_reserves_chunk_headroom(%in: !wave.ptr<#wave.global, i32>) attributes {wave.kernel} {
+  %size = arith.constant 32768 : i32
+  %buffer = waveamd.make_buffer %in, %size : !wave.ptr<#wave.global, i32>, i32 -> !wave.ptr<#waveamd.buffer, i32>
+  %lane = wave.lane_id : !wave.simd<i32, 32>
+  %k = arith.constant 2047 : i32
+  %off = wave.index_expr <"K + lid"> ["K", "lid"](%k, %lane) : (i32, !wave.simd<i32, 32>) -> !wave.simd<index, 32>
+  %ptr = wave.ptr_add %buffer, %off : !wave.ptr<#waveamd.buffer, i32>, !wave.simd<index, 32> -> !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 32>
+  %value, %token = wave.load %ptr : (!wave.simd<!wave.ptr<#waveamd.buffer, i32>, 32>) -> (!wave.simd<vector<8xi32>, 32>, !wave.mem.token)
   return
 }
 

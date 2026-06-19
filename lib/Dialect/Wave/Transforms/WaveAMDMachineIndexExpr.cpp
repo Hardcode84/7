@@ -837,7 +837,91 @@ static bool isZeroExpr(sym::ExprHandle expr) {
 static bool instOffsetFits(int64_t value,
                            const waveamdmachine::AddressFieldSpec &spec) {
   std::pair<int64_t, int64_t> range = waveamdmachine::instOffsetRange(spec);
+  int64_t headroom = static_cast<int64_t>(spec.instOffsetHeadroom);
+  std::optional<int64_t> high = llvm::checkedSub(range.second, headroom);
+  if (!high || *high < range.first)
+    return false;
+  range.second = *high;
   return value >= range.first && value <= range.second;
+}
+
+static int64_t floorMod(int64_t value, int64_t modulus) {
+  int64_t rem = value % modulus;
+  return rem < 0 ? rem + modulus : rem;
+}
+
+static std::optional<std::pair<int64_t, int64_t>>
+usableInstOffsetRange(const waveamdmachine::AddressFieldSpec &spec) {
+  std::pair<int64_t, int64_t> range = waveamdmachine::instOffsetRange(spec);
+  int64_t headroom = static_cast<int64_t>(spec.instOffsetHeadroom);
+  std::optional<int64_t> high = llvm::checkedSub(range.second, headroom);
+  if (!high || *high < range.first)
+    return std::nullopt;
+  return std::make_pair(range.first, *high);
+}
+
+static bool containsInt(std::pair<int64_t, int64_t> range, int64_t value) {
+  return value >= range.first && value <= range.second;
+}
+
+static std::optional<int64_t>
+wrapInstOffset(int64_t total, std::pair<int64_t, int64_t> fullRange,
+               std::pair<int64_t, int64_t> usableRange, unsigned bits) {
+  int64_t quantum = int64_t{1} << bits;
+  std::optional<int64_t> shifted = llvm::checkedSub(total, fullRange.first);
+  if (!shifted)
+    return std::nullopt;
+  int64_t instOffset = fullRange.first + floorMod(*shifted, quantum);
+  if (containsInt(usableRange, instOffset))
+    return instOffset;
+  int64_t alternate = instOffset - quantum;
+  if (containsInt(usableRange, alternate))
+    return alternate;
+  return std::nullopt;
+}
+
+static bool
+canSplitInstOffsetConstant(int64_t total,
+                           const waveamdmachine::AddressFieldSpec &spec) {
+  if (spec.instOffsetBits == 0 || spec.instOffsetBits >= 62)
+    return false;
+  return spec.instOffsetSigned || total >= 0;
+}
+
+static bool splitLeavesConstantUntaken(std::optional<int64_t> remainder,
+                                       int64_t instOffset, int64_t current,
+                                       int64_t addend) {
+  if (!remainder)
+    return true;
+  return instOffset == current && *remainder == addend;
+}
+
+static std::optional<std::pair<int64_t, int64_t>>
+splitInstOffsetConstant(int64_t current, int64_t addend,
+                        const waveamdmachine::AddressFieldSpec &spec) {
+  std::optional<int64_t> total = llvm::checkedAdd(current, addend);
+  if (!total)
+    return std::nullopt;
+  if (!canSplitInstOffsetConstant(*total, spec))
+    return std::nullopt;
+  std::optional<std::pair<int64_t, int64_t>> usableRange =
+      usableInstOffsetRange(spec);
+  if (!usableRange)
+    return std::nullopt;
+  if (containsInt(*usableRange, *total))
+    return std::make_pair(*total, int64_t{0});
+  if (!spec.instOffsetSigned && *total < 0)
+    return std::nullopt;
+
+  std::pair<int64_t, int64_t> fullRange = waveamdmachine::instOffsetRange(spec);
+  std::optional<int64_t> instOffset =
+      wrapInstOffset(*total, fullRange, *usableRange, spec.instOffsetBits);
+  if (!instOffset)
+    return std::nullopt;
+  std::optional<int64_t> remainder = llvm::checkedSub(*total, *instOffset);
+  if (splitLeavesConstantUntaken(remainder, *instOffset, current, addend))
+    return std::nullopt;
+  return std::make_pair(*instOffset, *remainder);
 }
 
 static FailureOr<sym::ExprHandle>
@@ -946,6 +1030,37 @@ static LogicalResult appendPlanRemainder(WaveAMDMachineSelector &S,
                         plan.fullAddressRemainderExpr);
 }
 
+static LogicalResult appendPlanIntRemainder(WaveAMDMachineSelector &S,
+                                            int64_t value, AddressPlan &plan) {
+  FailureOr<sym::ExprHandle> remainder =
+      sym::composeExprInt(S.symbolStore(), value);
+  if (failed(remainder))
+    return failure();
+  return appendPlanRemainder(S, *remainder, plan);
+}
+
+static FailureOr<bool>
+takeInstOffsetConstAddend(WaveAMDMachineSelector &S,
+                          const waveamdmachine::AddressFieldSpec &spec,
+                          int64_t value, AddressPlan &plan) {
+  std::optional<int64_t> next = llvm::checkedAdd(plan.instOffset, value);
+  if (next && instOffsetFits(*next, spec)) {
+    plan.instOffset = *next;
+    return true;
+  }
+
+  std::optional<std::pair<int64_t, int64_t>> split =
+      splitInstOffsetConstant(plan.instOffset, value, spec);
+  if (!split)
+    return false;
+  plan.instOffset = split->first;
+  if (split->second == 0)
+    return true;
+  if (failed(appendPlanIntRemainder(S, split->second, plan)))
+    return failure();
+  return true;
+}
+
 static LogicalResult
 takeInstOffsetAddends(WaveAMDMachineSelector &S,
                       const waveamdmachine::AddressFieldSpec &spec,
@@ -954,11 +1069,12 @@ takeInstOffsetAddends(WaveAMDMachineSelector &S,
     if (addend.kind != TermKind::Const)
       continue;
     std::optional<int64_t> value = sym::getIntegerLiteralValue(addend.expr);
-    std::optional<int64_t> next =
-        value ? llvm::checkedAdd(plan.instOffset, *value) : std::nullopt;
-    if (next && instOffsetFits(*next, spec)) {
-      plan.instOffset = *next;
-      continue;
+    if (value) {
+      FailureOr<bool> took = takeInstOffsetConstAddend(S, spec, *value, plan);
+      if (failed(took))
+        return failure();
+      if (*took)
+        continue;
     }
     if (failed(appendPlanRemainder(S, addend.expr, plan)))
       return failure();

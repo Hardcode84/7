@@ -39,6 +39,14 @@ void bindLoadResults(WaveAMDMachineSelector &S, LoadOp op, Operation *load) {
 }
 
 static waveamdmachine::AddressFieldSpec
+reserveTupleOffsetHeadroom(waveamdmachine::AddressFieldSpec spec,
+                           unsigned registers) {
+  if (registers > 1)
+    spec.instOffsetHeadroom = (registers - 1) * 4;
+  return spec;
+}
+
+static waveamdmachine::AddressFieldSpec
 sharedStoreSpec(unsigned registers, bool useB8Op, bool useB16Op) {
   if (useB8Op)
     return waveamdmachine::DsStoreB8Op::getAddressFieldSpec();
@@ -46,7 +54,8 @@ sharedStoreSpec(unsigned registers, bool useB8Op, bool useB16Op) {
     return waveamdmachine::DsStoreB16Op::getAddressFieldSpec();
   if (registers == 1)
     return waveamdmachine::DsStoreB32Op::getAddressFieldSpec();
-  return waveamdmachine::DsStoreTupleB32Op::getAddressFieldSpec();
+  return reserveTupleOffsetHeadroom(
+      waveamdmachine::DsStoreTupleB32Op::getAddressFieldSpec(), registers);
 }
 
 static Operation *buildSharedStore(WaveAMDMachineSelector &S, StoreOp op,
@@ -257,6 +266,13 @@ LogicalResult selectGlobalOrBufferStore(WaveAMDMachineSelector &S, StoreOp op,
       : useB16Op
           ? (isBuffer ? waveamdmachine::BufferStoreB16Op::getAddressFieldSpec()
                       : waveamdmachine::GlobalStoreB16Op::getAddressFieldSpec())
+      : registers > 1
+          ? reserveTupleOffsetHeadroom(
+                isBuffer ? waveamdmachine::BufferStoreTupleB32Op::
+                               getAddressFieldSpec()
+                         : waveamdmachine::GlobalStoreTupleB32Op::
+                               getAddressFieldSpec(),
+                registers)
           : (isBuffer
                  ? waveamdmachine::BufferStoreB32Op::getAddressFieldSpec()
                  : waveamdmachine::GlobalStoreB32Op::getAddressFieldSpec());
@@ -272,7 +288,8 @@ sharedLoadSpec(unsigned registers, bool useB8Op, bool useB16Op) {
     return waveamdmachine::DsLoadB16Op::getAddressFieldSpec();
   if (registers == 1)
     return waveamdmachine::DsLoadB32Op::getAddressFieldSpec();
-  return waveamdmachine::DsLoadTupleB32Op::getAddressFieldSpec();
+  return reserveTupleOffsetHeadroom(
+      waveamdmachine::DsLoadTupleB32Op::getAddressFieldSpec(), registers);
 }
 
 static Operation *buildSharedLoad(WaveAMDMachineSelector &S, LoadOp op,
@@ -320,7 +337,8 @@ bufferLoadSpec(bool useB8Op, bool useB16Op, unsigned registers) {
     return waveamdmachine::BufferLoadB16Op::getAddressFieldSpec();
   if (registers == 1)
     return waveamdmachine::BufferLoadB32Op::getAddressFieldSpec();
-  return waveamdmachine::BufferLoadTupleB32Op::getAddressFieldSpec();
+  return reserveTupleOffsetHeadroom(
+      waveamdmachine::BufferLoadTupleB32Op::getAddressFieldSpec(), registers);
 }
 
 static waveamdmachine::AddressFieldSpec
@@ -331,7 +349,8 @@ globalLoadSpec(bool useB8Op, bool useB16Op, unsigned registers) {
     return waveamdmachine::GlobalLoadB16Op::getAddressFieldSpec();
   if (registers == 1)
     return waveamdmachine::GlobalLoadB32Op::getAddressFieldSpec();
-  return waveamdmachine::GlobalLoadTupleB32Op::getAddressFieldSpec();
+  return reserveTupleOffsetHeadroom(
+      waveamdmachine::GlobalLoadTupleB32Op::getAddressFieldSpec(), registers);
 }
 
 static Operation *buildBufferLoad(WaveAMDMachineSelector &S, LoadOp op,
