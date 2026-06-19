@@ -531,9 +531,9 @@ static std::optional<StrideBytes> stridedCarryBytes(WaveAMDMachineSelector &S,
   return stride;
 }
 
-static bool canUseStridedCarry(scf::ForOp op, unsigned idx, bool isBuffer,
+static bool canUseStridedCarry(scf::ForOp op, unsigned idx, bool strideInOffset,
                                const StrideBytes &stride) {
-  if (!isBuffer)
+  if (!strideInOffset)
     return true;
   if (!isImmediateStride(stride))
     return false;
@@ -573,11 +573,9 @@ getStridedBaseGroup(WaveAMDMachineSelector &S, scf::ForOp op,
 
 static StrideBytes selectStridedCarry(WaveAMDMachineSelector &S, scf::ForOp op,
                                       unsigned idx, Value initArg,
-                                      bool isBuffer) {
-  if (S.isSharedPointer(initArg.getType()))
-    return {};
+                                      bool strideInOffset) {
   std::optional<StrideBytes> stride = stridedCarryBytes(S, op, idx);
-  if (!stride || !canUseStridedCarry(op, idx, isBuffer, *stride))
+  if (!stride || !canUseStridedCarry(op, idx, strideInOffset, *stride))
     return {};
   return std::move(*stride);
 }
@@ -586,7 +584,7 @@ static LogicalResult
 attachStridedBaseGroup(WaveAMDMachineSelector &S, scf::ForOp op,
                        SmallVectorImpl<StridedBaseCarry> &groups,
                        CarrySnapshot &snap) {
-  if (!hasStride(snap.stride) || snap.isBuffer)
+  if (!hasStride(snap.stride) || snap.strideInOffset)
     return success();
   FailureOr<int64_t> group =
       getStridedBaseGroup(S, op, groups, snap.base, snap.stride);
@@ -608,7 +606,8 @@ snapshotPointerScfCarry(WaveAMDMachineSelector &S, scf::ForOp op,
         "scf.for pointer iter arg has no WaveAMDMachine sidecar");
   TermKind initKind = classifyPointerOffset(S, offsetIt->second);
   bool isBuffer = S.pointerBuffers.lookup(initArg);
-  StrideBytes stride = selectStridedCarry(S, op, idx, initArg, isBuffer);
+  bool strideInOffset = isBuffer || S.isSharedPointer(initArg.getType());
+  StrideBytes stride = selectStridedCarry(S, op, idx, initArg, strideInOffset);
   TermKind yieldKind = hasStride(stride)
                            ? initKind
                            : classifyPointerYield(S, yield.getOperand(idx),
@@ -627,6 +626,7 @@ snapshotPointerScfCarry(WaveAMDMachineSelector &S, scf::ForOp op,
   snap.stride = std::move(stride);
   snap.offsetKind = carryKind;
   snap.isBuffer = isBuffer;
+  snap.strideInOffset = strideInOffset;
   if (failed(attachStridedBaseGroup(S, op, groups, snap)))
     return failure();
   snap.bodyOffsetName = makeLoopSymbol(S, "ptr_body");
@@ -643,8 +643,7 @@ snapshotScfCarries(WaveAMDMachineSelector &S, scf::ForOp op,
   out.reserve(op.getInitArgs().size());
   auto yield = cast<scf::YieldOp>(op.getBody()->getTerminator());
   for (auto [idx, initArg] : llvm::enumerate(op.getInitArgs())) {
-    if (auto simd = dyn_cast<SimdType>(initArg.getType());
-        simd && isa<PtrType>(simd.getElementType())) {
+    if (getWavePointerType(initArg.getType())) {
       CarrySnapshot snap;
       if (failed(snapshotPointerScfCarry(
               S, op, yield, static_cast<unsigned>(idx), initArg, groups, snap)))

@@ -86,7 +86,7 @@
 // F16-PERF-ASM-LABEL: wmma_f16_matmul_tiled:
 // F16-PERF-ASM: .Lwmma_f16_matmul_tiled.loop_head_0:
 // F16-PERF-ASM: s_waitcnt lgkmcnt(0)
-// F16-PERF-ASM-NEXT: buffer_load_dwordx4 {{.*}} lds
+// F16-PERF-ASM: buffer_load_dwordx4 {{.*}} lds
 // F16-PERF-ASM: buffer_load_dwordx4 {{.*}} lds
 // F16-PERF-ASM-NEXT: v_mfma_f32_16x16x32_f16
 // F16-PERF-ASM: ds_read_b128

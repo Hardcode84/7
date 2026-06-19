@@ -48,6 +48,7 @@ struct CarrySnapshot {
   Kind kind;
   TermKind offsetKind = TermKind::Lane;
   bool isBuffer = false;
+  bool strideInOffset = false;
 };
 
 struct ScfForCarryPlan {

@@ -215,7 +215,7 @@ def main() -> int:
     require(
         "matmul_pressure_disabled",
         text,
-        r"sim_cycles waves=2 simds=2 start_delay=0: 9934",
+        r"sim_cycles waves=2 simds=2 start_delay=0: 9922",
     )
     reject("matmul_pressure_disabled", text, r"waveamd-machine-schedule-report")
 

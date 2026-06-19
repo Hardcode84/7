@@ -19,6 +19,7 @@
 #include "WaveAMDMachineLoopCarryPlan.h"
 
 #include "llvm/Support/CheckedArithmetic.h"
+#include "llvm/Support/MathExtras.h"
 
 #include <limits>
 
@@ -212,7 +213,7 @@ static Value resultPointerBase(Operation *loop,
                                ArrayRef<CarrySnapshot> snapshots,
                                ArrayRef<StridedBaseCarry> groups,
                                const CarrySnapshot &snap) {
-  if (!hasStride(snap.stride) || snap.isBuffer)
+  if (!hasStride(snap.stride) || snap.strideInOffset)
     return snap.base;
   assert(snap.stridedBaseGroup != noStridedBaseGroup &&
          "global strided carry must have base group");
@@ -230,7 +231,7 @@ static void bindPointerLoopResult(WaveAMDMachineSelector &S, Value scfResult,
                                   const CarrySnapshot &snap) {
   Value base = resultPointerBase(loop, snapshots, groups, snap);
   S.pointerBases[scfResult] = base;
-  if (hasStride(snap.stride) && !snap.isBuffer)
+  if (hasStride(snap.stride) && !snap.strideInOffset)
     S.pointerGlobalBases[scfResult] = base;
   else if (snap.globalBase)
     S.pointerGlobalBases[scfResult] = snap.globalBase;
@@ -262,6 +263,38 @@ static void bindLoopResults(WaveAMDMachineSelector &S, scf::ForOp op,
   }
 }
 
+static bool isWideScalarValue(Value value) {
+  auto regType = dyn_cast<waveamdmachine::RegType>(value.getType());
+  return regType && regType.getWidth() > 1;
+}
+
+static Value multiplyOffsetStride(WaveAMDMachineSelector &S, Location loc,
+                                  Value value, int64_t stride) {
+  assert(stride > 0 && "offset stride must be positive");
+  if (stride == 1)
+    return value;
+  Value strideValue = createImm(S.builder, loc, stride);
+  if (!isWideScalarValue(value))
+    return S.mulUniformValues(loc, value, strideValue);
+
+  Type resultType =
+      getRegType(S.builder.getContext(), waveamdmachine::RegClass::SGPR, 2);
+  if (llvm::isPowerOf2_64(static_cast<uint64_t>(stride)))
+    return waveamdmachine::SLshlB64Op::create(
+               S.builder, loc, resultType, getSCCType(S.builder.getContext()),
+               ensureSGPR2(S, loc, value),
+               createImm(S.builder, loc, llvm::Log2_64(stride)))
+        .getResult();
+
+  Type scratchType =
+      getRegType(S.builder.getContext(), waveamdmachine::RegClass::SGPR, 1);
+  return waveamdmachine::SMulU64Op::create(
+             S.builder, loc, resultType, scratchType,
+             getSCCType(S.builder.getContext()), ensureSGPR2(S, loc, value),
+             ensureSGPR2(S, loc, strideValue))
+      .getResult();
+}
+
 static void rebindStridedPointerCarries(WaveAMDMachineSelector &S,
                                         scf::ForOp op, Block &loopBody,
                                         ArrayRef<CarrySnapshot> snapshots,
@@ -272,11 +305,10 @@ static void rebindStridedPointerCarries(WaveAMDMachineSelector &S,
       continue;
     Value scfArg = op.getRegionIterArgs()[idx];
     Value iv = loopBody.getArgument(0);
-    if (snap.isBuffer) {
+    if (snap.strideInOffset) {
       assert(isImmediateStride(snap.stride) &&
-             "buffer strided carry must use immediate stride");
-      Value strideValue = S.mulUniformValues(
-          loc, iv, createImm(S.builder, loc, snap.stride.imm));
+             "offset-strided carry must use immediate stride");
+      Value strideValue = multiplyOffsetStride(S, loc, iv, snap.stride.imm);
       if (auto symIt = S.pointerIndexOffsets.find(scfArg);
           symIt != S.pointerIndexOffsets.end())
         if (failed(addSymbolicStride(S, symIt->second, strideValue,
@@ -299,11 +331,6 @@ static void collectStridedBaseCarries(WaveAMDMachineSelector &S, Location loc,
                                       SmallVectorImpl<Value> &out) {
   for (const StridedBaseCarry &group : groups)
     out.push_back(advanceStridedBase(S, loc, group.bodyBase, group));
-}
-
-static bool isWideScalarValue(Value value) {
-  auto regType = dyn_cast<waveamdmachine::RegType>(value.getType());
-  return regType && regType.getWidth() > 1;
 }
 
 static bool needsWideSignedScalarCmp(WaveAMDMachineSelector &S, Value value) {
