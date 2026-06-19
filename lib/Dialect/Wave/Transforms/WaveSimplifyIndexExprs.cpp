@@ -14,6 +14,7 @@
 #include "mlir/Dialect/Wave/IR/Wave.h"
 #include "mlir/Dialect/Wave/IR/WaveSymbols.h"
 #include "mlir/IR/PatternMatch.h"
+#include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
 
 #include <optional>
@@ -139,11 +140,8 @@ expandAndSimplify(sym::Store &store, sym::ExprHandle expr,
 }
 
 static FailureOr<bool> simplifyIndexExpr(IRRewriter &rewriter, IndexExprOp op,
-                                         DataFlowSolver &solver,
+                                         ArrayRef<sym::PredHandle> assumptions,
                                          sym::Store &store) {
-  SmallVector<sym::PredHandle> assumptions =
-      collectIndexExprAssumptions(op, solver, store);
-
   FailureOr<sym::ExprHandle> simplified =
       expandAndSimplify(store, op.getExpr().getValue(), assumptions);
   if (failed(simplified))
@@ -192,10 +190,17 @@ struct WaveSimplifyIndexExprsPass
     SmallVector<IndexExprOp> ops;
     root->walk([&](IndexExprOp op) { ops.push_back(op); });
 
+    llvm::DenseMap<Operation *, SmallVector<sym::PredHandle>> assumptionsByOp;
+    for (IndexExprOp op : ops)
+      assumptionsByOp[op.getOperation()] =
+          collectIndexExprAssumptions(op, solver, dialect->getSymbolStore());
+
     IRRewriter rewriter(root->getContext());
     for (IndexExprOp op : ops) {
-      FailureOr<bool> changed =
-          simplifyIndexExpr(rewriter, op, solver, dialect->getSymbolStore());
+      auto it = assumptionsByOp.find(op.getOperation());
+      assert(it != assumptionsByOp.end() && "missing precomputed assumptions");
+      FailureOr<bool> changed = simplifyIndexExpr(rewriter, op, it->second,
+                                                  dialect->getSymbolStore());
       if (failed(changed))
         return signalPassFailure();
     }
