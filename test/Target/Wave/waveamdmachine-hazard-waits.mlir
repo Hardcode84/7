@@ -392,8 +392,9 @@ func.func @m0_delay_after_waitcnt(
 // CHECK-LABEL: func.func @single_token_loop_barrier_drain_contracted
 // CHECK: ^bb0(%[[TOK:.*]]: !waveamdmachine.mem.token):
 // CHECK-NOT: waveamdmachine.s_waitcnt vmcnt(63)
-// CHECK-NOT: waveamdmachine.s_barrier
-// CHECK: %{{.*}}, %[[NEXT:.*]] = waveamdmachine.buffer_load_b32 {{.*}} after %[[TOK]]
+// CHECK: %[[BARRIER:.*]] = waveamdmachine.s_barrier %[[TOK]]
+// CHECK-SAME: -> !waveamdmachine.mem.token
+// CHECK: %{{.*}}, %[[NEXT:.*]] = waveamdmachine.buffer_load_b32 {{.*}} after %[[BARRIER]]
 // CHECK: waveamdmachine.continue_if {{.*}} carries(%[[NEXT]] : !waveamdmachine.mem.token)
 func.func @single_token_loop_barrier_drain_contracted(
     %off: !waveamdmachine.reg<vgpr, 1>,
@@ -468,14 +469,12 @@ func.func @single_token_loop_barrier_real_vmcnt_drain_kept(
   return
 }
 
-// CHECK-LABEL: func.func @contracted_barrier_does_not_satisfy_m0_delay
+// CHECK-LABEL: func.func @kept_barrier_satisfies_m0_delay
 // CHECK: waveamdmachine.s_mov_m0
-// CHECK-NOT: waveamdmachine.s_waitcnt vmcnt(63)
-// CHECK-NOT: waveamdmachine.s_barrier
-// CHECK: waveamdmachine.imm 0
-// CHECK-NEXT: waveamdmachine.s_nop
-// CHECK-NEXT: waveamdmachine.global_load_lds_b128
-func.func @contracted_barrier_does_not_satisfy_m0_delay(
+// CHECK-NEXT: %[[BARRIER:.*]] = waveamdmachine.s_barrier
+// CHECK-SAME: -> !waveamdmachine.mem.token
+// CHECK: waveamdmachine.global_load_lds_b128 {{.*}} after %[[BARRIER]]
+func.func @kept_barrier_satisfies_m0_delay(
     %off: !waveamdmachine.reg<vgpr, 1>,
     %base: !waveamdmachine.reg<sgpr, 2>,
     %dst: !waveamdmachine.reg<sgpr, 1>,

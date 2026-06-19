@@ -1348,8 +1348,6 @@ private:
     if (!isDefaultVmcntOnlyWait(wait, cfg))
       return false;
 
-    barrier->getResult(0).replaceAllUsesWith(barrier->getOperand(0));
-    barrier->erase();
     wait->erase();
     return true;
   }
