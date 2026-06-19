@@ -91,6 +91,10 @@ Same rule covers docstrings, commit bodies, and PR descriptions. Wit is welcome,
   and checked-in `.s` goldens under `test/PerfGolden/Inputs/`.
 - Lit must pass configured tools, e.g. `--wave-translate wave-translate`.
   Never hard-code `build/bin` or `${repo}/build` in perf golden tests.
+- Run goldens when ASM can drift: `build/bin/llvm-lit -sv build/test
+  --filter='PerfGolden'`. For helper-level repro, use
+  `WAVE_TRANSLATE=$PWD/build/bin/wave-translate python -m pytest -q
+  test/PerfGolden`.
 - ASM drift is a review stop, not a failure proof. Benchmark old and new
   assembly on the same hardware before updating a golden.
 - New generated golden file types need REUSE coverage. Python helpers must
@@ -144,5 +148,7 @@ Same rule covers docstrings, commit bodies, and PR descriptions. Wit is welcome,
   `cmake --build build --target check-wave-mlir -j $(nproc)`,
   `cmake --build build --target check-wavec -j $(nproc)`, and
   `build/bin/llvm-lit -sv build/test --filter='Integration'`.
+- If generated ASM can drift, also run perf goldens:
+  `build/bin/llvm-lit -sv build/test --filter='PerfGolden'`.
 - Small, focused commits. One logical change per commit. If you're wondering whether to split — split.
 - Commit messages should be descriptive, or at least funny. Not both is acceptable. Neither is not.
