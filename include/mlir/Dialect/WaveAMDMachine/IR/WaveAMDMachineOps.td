@@ -741,7 +741,7 @@ def WaveAMDMachine_VCvtPkF16F32Op
                                WaveAMDMachine_VGPR1,
                                [WaveAMDMachine_VALU]> {
   let archPredicate =
-      "isa.Major == 9 && isa.Minor == 5 && isa.Stepping == 0";
+      "::mlir::waveamdmachine::supportsCvtPkF16F32Inst(isa)";
 }
 def WaveAMDMachine_VPkAddF16Op
     : WaveAMDMachine_PackedBinaryResult<"v_pk_add_f16">;

@@ -83,6 +83,19 @@ bool mlir::waveamdmachine::supportsAGPRs(const llvm::AMDGPU::IsaVersion &isa) {
           isa.Minor == 4 || (isa.Minor == 5 && isa.Stepping == 0));
 }
 
+static bool isGfx950(const llvm::AMDGPU::IsaVersion &isa) {
+  return isa.Major == 9 && isa.Minor == 5 && isa.Stepping == 0;
+}
+
+static bool isGfx125x(const llvm::AMDGPU::IsaVersion &isa) {
+  return isa.Major == 12 && isa.Minor == 5;
+}
+
+bool mlir::waveamdmachine::supportsCvtPkF16F32Inst(
+    const llvm::AMDGPU::IsaVersion &isa) {
+  return isGfx950(isa) || isGfx125x(isa) || isa.Major == 13;
+}
+
 std::optional<unsigned>
 mlir::waveamdmachine::getAMDGPUDefaultWavefrontSize(StringRef chip) {
   llvm::AMDGPU::IsaVersion isa = llvm::AMDGPU::getIsaVersion(chip);

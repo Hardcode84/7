@@ -43,6 +43,8 @@ getAMDGPUTargetIsaVersion(Operation *op, llvm::StringRef consumer);
 
 bool supportsAGPRs(const llvm::AMDGPU::IsaVersion &isa);
 
+bool supportsCvtPkF16F32Inst(const llvm::AMDGPU::IsaVersion &isa);
+
 std::optional<unsigned> getAMDGPUDefaultWavefrontSize(llvm::StringRef chip);
 
 FailureOr<unsigned> getAMDGPUDefaultWavefrontSize(Operation *op,
