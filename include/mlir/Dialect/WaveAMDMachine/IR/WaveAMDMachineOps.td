@@ -1890,7 +1890,9 @@ def WaveAMDMachine_BufferLoadLdsB32Op
     ::mlir::waveamdmachine::AddressFieldSpec $cppClass::getAddressFieldSpec() {
       return {/*instOffsetBits=*/0, /*instOffsetSigned=*/false,
               /*hasSoffset=*/true,
-              ::mlir::waveamdmachine::SOffsetImmPolicy::ZeroImmOnly};
+              ::mlir::waveamdmachine::SOffsetImmPolicy::ZeroImmOnly,
+              /*instOffsetHeadroom=*/0,
+              ::mlir::waveamdmachine::VOffsetAddOrder::LaneFirst};
     }
   }];
 }
@@ -1918,7 +1920,9 @@ def WaveAMDMachine_BufferLoadLdsB128Op
     ::mlir::waveamdmachine::AddressFieldSpec $cppClass::getAddressFieldSpec() {
       return {/*instOffsetBits=*/0, /*instOffsetSigned=*/false,
               /*hasSoffset=*/true,
-              ::mlir::waveamdmachine::SOffsetImmPolicy::ZeroImmOnly};
+              ::mlir::waveamdmachine::SOffsetImmPolicy::ZeroImmOnly,
+              /*instOffsetHeadroom=*/0,
+              ::mlir::waveamdmachine::VOffsetAddOrder::LaneFirst};
     }
   }];
 }

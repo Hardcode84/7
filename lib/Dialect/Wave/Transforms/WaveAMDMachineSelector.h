@@ -44,6 +44,7 @@ namespace mlir::wave::wmsel {
 // through `Const` / `Uniform` paths can land in `instOffset` / `soffset`;
 // anything reaching a `Lane` symbol falls through to `voffset`.
 enum class TermKind { Const = 0, Uniform = 1, Lane = 2 };
+enum class IndexExprAddOrder { UniformFirst, LaneFirst };
 
 enum class CmpRelation { Eq, Ne, Lt, Le, Gt, Ge };
 
@@ -139,10 +140,11 @@ class WaveAMDMachineSelector;
 // Index-expression helpers share selector factories, bindings, and symbol
 // store.
 
-FailureOr<Value>
-materializeIndexExprNode(WaveAMDMachineSelector &S, sym::ExprHandle expr,
-                         Operation *user, const llvm::StringMap<Value> &subs,
-                         ArrayRef<sym::PredHandle> assumptions = {});
+FailureOr<Value> materializeIndexExprNode(
+    WaveAMDMachineSelector &S, sym::ExprHandle expr, Operation *user,
+    const llvm::StringMap<Value> &subs,
+    ArrayRef<sym::PredHandle> assumptions = {},
+    IndexExprAddOrder addOrder = IndexExprAddOrder::UniformFirst);
 
 FailureOr<PointerOffset> makePointerOffset(WaveAMDMachineSelector &S,
                                            const SymbolicOffset &offset);

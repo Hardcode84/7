@@ -319,7 +319,7 @@ func.func @buffer_dma_lds_b128(%in: !wave.ptr<#wave.global, i32>)
 // SELECT-DAG: %[[U:.*]] = waveamdmachine.arg {index = 1 : i64, pointer = false}
 // SELECT-DAG: %[[WI:.*]] = waveamdmachine.v_workitem_id_x
 // SELECT-DAG: %[[SOFFSET:[^,]+]], %{{.*}} = waveamdmachine.s_lshl_b32 %[[U]],
-// SELECT: %[[VOFFSET:.*]] = waveamdmachine.v_lshlrev_b32 %[[WI]],
+// SELECT-DAG: %[[VOFFSET:.*]] = waveamdmachine.v_lshlrev_b32 %[[WI]],
 // SELECT: %[[ADDR:.*]] = waveamdmachine.v_add_u32 %[[SOFFSET]], %[[VOFFSET]]
 // SELECT: waveamdmachine.buffer_load_lds_b128 %[[ADDR]], {{.*}}, %{{.*}},
 
@@ -336,6 +336,52 @@ func.func @buffer_dma_lds_bounded_source_soffset(
   %wi = wave.assume %wi_raw as "x" [#wave.pred<"x >= 0">, #wave.pred<"x <= 63">] : !wave.simd<i32, 64>
   %off = wave.index_expr <"wi + 16*u"> ["wi", "u"](%wi, %u)
       : (!wave.simd<i32, 64>, i32) -> !wave.simd<index, 64>
+  %src = wave.ptr_add %buffer, %off
+      : !wave.ptr<#waveamd.buffer, i32>, !wave.simd<index, 64>
+      -> !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>
+  %lds = wave.lds_base : !wave.ptr<#wave.shared, i32>
+  %tok0 = wave.token : !wave.mem.token
+  %tok = waveamd.dma_load_lds %src -> %lds after %tok0 {bytes = 16 : i64}
+      : (!wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>,
+         !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
+  return
+}
+
+// SELECT-LABEL: func.func @buffer_dma_lds_lane_terms_before_uniform
+// SELECT-DAG: %[[U:.*]] = waveamdmachine.arg {index = 1 : i64, pointer = false}
+// SELECT-DAG: %[[USCALED:.*]], %{{.*}} = waveamdmachine.s_lshl_b32 %[[U]],
+// SELECT-DAG: %[[X4:.*]] = waveamdmachine.v_lshlrev_b32
+// SELECT-DAG: %[[Y4:.*]] = waveamdmachine.v_lshlrev_b32
+// SELECT-DAG: %[[Z4:.*]] = waveamdmachine.v_lshlrev_b32
+// SELECT-DAG: %[[XY:.*]] = waveamdmachine.v_add_u32 %[[X4]], %[[Y4]]
+// SELECT-DAG: %[[XYZ:.*]] = waveamdmachine.v_add_u32 %[[XY]], %[[Z4]]
+// SELECT: %[[ADDR:.*]] = waveamdmachine.v_add_u32 %[[USCALED]], %[[XYZ]]
+// SELECT: waveamdmachine.buffer_load_lds_b128 %[[ADDR]], {{.*}}, %{{.*}},
+
+// ASM-LABEL: buffer_dma_lds_lane_terms_before_uniform:
+// ASM: buffer_load_dwordx4 {{.*}}, 0 offen lds
+func.func @buffer_dma_lds_lane_terms_before_uniform(
+    %in: !wave.ptr<#wave.global, i32>, %u_raw: i32)
+    attributes {wave.kernel, wave.lds_size = 512 : i64} {
+  %range = arith.constant 8192 : i32
+  %buffer = waveamd.make_buffer %in, %range
+      : !wave.ptr<#wave.global, i32>, i32 -> !wave.ptr<#waveamd.buffer, i32>
+  %u = wave.assume %u_raw as "u" [#wave.pred<"u >= 0">, #wave.pred<"u <= 1023">] : i32
+  %x_raw = wave.lane_id : !wave.simd<i32, 64>
+  %x = wave.assume %x_raw as "x" [#wave.pred<"x >= 0">, #wave.pred<"x <= 63">] : !wave.simd<i32, 64>
+  %c1 = arith.constant 1 : i32
+  %c2 = arith.constant 2 : i32
+  %v1 = wave.splat %c1 : i32 -> !wave.simd<i32, 64>
+  %v2 = wave.splat %c2 : i32 -> !wave.simd<i32, 64>
+  %y_raw = wave.binary addi %x, %v1
+      : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+  %y = wave.assume %y_raw as "y" [#wave.pred<"y >= 0">, #wave.pred<"y <= 64">] : !wave.simd<i32, 64>
+  %z_raw = wave.binary addi %x, %v2
+      : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+  %z = wave.assume %z_raw as "z" [#wave.pred<"z >= 0">, #wave.pred<"z <= 65">] : !wave.simd<i32, 64>
+  %off = wave.index_expr <"x + y + z + 16*u"> ["u", "x", "y", "z"](%u, %x, %y, %z)
+      : (i32, !wave.simd<i32, 64>, !wave.simd<i32, 64>, !wave.simd<i32, 64>)
+      -> !wave.simd<index, 64>
   %src = wave.ptr_add %buffer, %off
       : !wave.ptr<#waveamd.buffer, i32>, !wave.simd<index, 64>
       -> !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>

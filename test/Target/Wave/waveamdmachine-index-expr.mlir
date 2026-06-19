@@ -283,7 +283,7 @@ func.func @floor_fractional_add_global(%out: !wave.ptr<#wave.global, i32>, %x: i
 // CHECK-LABEL: func.func @ceil_nested_floor_global
 // CHECK: %[[LANE:.*]] = waveamdmachine.v_mbcnt_lo
 // CHECK: %[[INNER:.*]] = waveamdmachine.v_lshrrev_b32 %[[LANE]],
-// CHECK: %[[BIASED:.*]] = waveamdmachine.v_add_u32 %[[INNER]],
+// CHECK: %[[BIASED:.*]] = waveamdmachine.v_add_u32 {{.*}}%[[INNER]]
 // CHECK: %[[CEIL:.*]] = waveamdmachine.v_lshrrev_b32 %[[BIASED]],
 // CHECK: %[[BYTE:.*]] = waveamdmachine.v_lshlrev_b32 %[[CEIL]],
 // CHECK: waveamdmachine.global_store_b32 %[[BYTE]],
