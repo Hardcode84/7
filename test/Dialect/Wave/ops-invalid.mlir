@@ -1,5 +1,21 @@
 // RUN: wave-opt --split-input-file --verify-diagnostics %s
 
+func.func @bad_simd_constant_type() {
+  // expected-error @+1 {{value type must match the result payload type}}
+  %c = wave.constant 1 : i64 -> !wave.simd<i32, 32>
+  return
+}
+
+// -----
+
+func.func @bad_mask_constant_type() {
+  // expected-error @+1 {{value type must match the result payload type}}
+  %m = wave.constant 1 : i32 -> !wave.mask<32>
+  return
+}
+
+// -----
+
 func.func @bad_workgroup_axis() -> i32 {
   // expected-error @+1 {{axis must be 0 (x), 1 (y), or 2 (z)}}
   %x = wave.workgroup_id 3

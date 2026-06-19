@@ -1,6 +1,17 @@
 // RUN: wave-opt %s | FileCheck %s
 // RUN: wave-opt %s | wave-opt | FileCheck %s
 
+// CHECK-LABEL: func.func @wave_constants
+func.func @wave_constants() -> (i32, !wave.simd<i32, 32>, !wave.mask<32>) {
+  // CHECK: wave.constant 5 : i32
+  %scalar = wave.constant 5 : i32
+  // CHECK: wave.constant 7 : i32 -> !wave.simd<i32, 32>
+  %simd = wave.constant 7 : i32 -> !wave.simd<i32, 32>
+  // CHECK: wave.constant true -> !wave.mask<32>
+  %mask = wave.constant true -> !wave.mask<32>
+  return %scalar, %simd, %mask : i32, !wave.simd<i32, 32>, !wave.mask<32>
+}
+
 // CHECK-LABEL: func.func @wave_ops
 func.func @wave_ops(%pred: i1, %value: i32, %out: !wave.ptr<#wave.global, i32>) -> i32 {
   // CHECK: wave.lane_id : !wave.simd<i32, 32>

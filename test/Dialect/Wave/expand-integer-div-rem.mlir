@@ -69,10 +69,9 @@ func.func @signed_dynamic_pow2_i64(%x: i64, %d: i64) -> i64 {
 // -----
 
 // CHECK-LABEL: func.func @unsigned_dynamic_pow2_rem_simd
-// CHECK-DAG: [[ONE_SCALAR:%.*]] = arith.constant 1
+// CHECK-DAG: [[ONE:%.*]] = wave.constant 1 : i32 -> !wave.simd<i32, 32>
 // CHECK: [[POW2:%.*]] = wave.assume
 // CHECK: [[POW2_SPLAT:%.*]] = wave.splat [[POW2]]
-// CHECK: [[ONE:%.*]] = wave.splat [[ONE_SCALAR]]
 // CHECK: [[MASK:%.*]] = wave.binary subi [[POW2_SPLAT]], [[ONE]]
 // CHECK: wave.binary andi {{.*}}, [[MASK]]
 // CHECK-NOT: remui

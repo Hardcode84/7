@@ -75,9 +75,9 @@ func.func @read_first_splat(%value: i32) -> i32 {
 
 // CHECK-LABEL: func.func @binary_scalar_constant_fold
 // CHECK-NOT: wave.binary
-// CHECK-DAG: %[[C7:.*]] = arith.constant 7 : i32
-// CHECK-DAG: %[[C28:.*]] = arith.constant 28 : i32
-// CHECK-DAG: %[[C3:.*]] = arith.constant 3 : index
+// CHECK-DAG: %[[C7:.*]] = wave.constant 7 : i32
+// CHECK-DAG: %[[C28:.*]] = wave.constant 28 : i32
+// CHECK-DAG: %[[C3:.*]] = wave.constant 3 : index
 // CHECK: return %[[C7]], %[[C28]], %[[C3]] : i32, i32, index
 func.func @binary_scalar_constant_fold() -> (i32, i32, index) {
   %c3 = arith.constant 3 : i32
@@ -106,11 +106,25 @@ func.func @binary_simd_identity_fold(%v: !wave.simd<i32, 32>)
   return %sum, %prod, %and : !wave.simd<i32, 32>, !wave.simd<i32, 32>, !wave.simd<i32, 32>
 }
 
+// CHECK-LABEL: func.func @binary_simd_constant_fold
+// CHECK-NOT: wave.splat
+// CHECK-NOT: wave.binary
+// CHECK: %[[C7:.*]] = wave.constant 7 : i32 -> !wave.simd<i32, 32>
+// CHECK: return %[[C7]] : !wave.simd<i32, 32>
+func.func @binary_simd_constant_fold() -> !wave.simd<i32, 32> {
+  %c3 = arith.constant 3 : i32
+  %c4 = arith.constant 4 : i32
+  %v3 = wave.splat %c3 : i32 -> !wave.simd<i32, 32>
+  %v4 = wave.splat %c4 : i32 -> !wave.simd<i32, 32>
+  %sum = wave.binary addi %v3, %v4 : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  return %sum : !wave.simd<i32, 32>
+}
+
 // CHECK-LABEL: func.func @cast_scalar_constant_fold
 // CHECK-NOT: wave.cast
-// CHECK-DAG: %[[C255_I64:.*]] = arith.constant 255 : i64
-// CHECK-DAG: %[[C255_I16:.*]] = arith.constant 255 : i16
-// CHECK-DAG: %[[C42:.*]] = arith.constant 42 : i32
+// CHECK-DAG: %[[C255_I64:.*]] = wave.constant 255 : i64
+// CHECK-DAG: %[[C255_I16:.*]] = wave.constant 255 : i16
+// CHECK-DAG: %[[C42:.*]] = wave.constant 42 : i32
 // CHECK: return %[[C255_I64]], %[[C255_I16]], %[[C42]] : i64, i16, i32
 func.func @cast_scalar_constant_fold() -> (i64, i16, i32) {
   %c255 = arith.constant 255 : i32
@@ -121,11 +135,23 @@ func.func @cast_scalar_constant_fold() -> (i64, i16, i32) {
   return %wide, %narrow, %i42 : i64, i16, i32
 }
 
+// CHECK-LABEL: func.func @cast_simd_constant_fold
+// CHECK-NOT: wave.splat
+// CHECK-NOT: wave.cast
+// CHECK: %[[C255:.*]] = wave.constant 255 : i64 -> !wave.simd<i64, 32>
+// CHECK: return %[[C255]] : !wave.simd<i64, 32>
+func.func @cast_simd_constant_fold() -> !wave.simd<i64, 32> {
+  %c255 = arith.constant 255 : i32
+  %v255 = wave.splat %c255 : i32 -> !wave.simd<i32, 32>
+  %wide = wave.cast intconvert %v255 policy {extension = #wave.cast_extension<zero>} : !wave.simd<i32, 32> -> !wave.simd<i64, 32>
+  return %wide : !wave.simd<i64, 32>
+}
+
 // CHECK-LABEL: func.func @ballot_cmpi_constant_fold
 // CHECK-NOT: wave.cmpi
 // CHECK-NOT: wave.ballot
-// CHECK-DAG: %[[ALL:.*]] = arith.constant -1 : i32
-// CHECK-DAG: %[[ZERO:.*]] = arith.constant 0 : i64
+// CHECK-DAG: %[[ALL:.*]] = wave.constant -1 : i32
+// CHECK-DAG: %[[ZERO:.*]] = wave.constant 0 : i64
 // CHECK: return %[[ALL]], %[[ZERO]] : i32, i64
 func.func @ballot_cmpi_constant_fold() -> (i32, i64) {
   %c1 = arith.constant 1 : i32
@@ -138,6 +164,20 @@ func.func @ballot_cmpi_constant_fold() -> (i32, i64) {
   %false_mask = wave.cmpi ne %v64, %v64 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.mask<64>
   %zero = wave.ballot %false_mask : !wave.mask<64> -> i64
   return %all, %zero : i32, i64
+}
+
+// CHECK-LABEL: func.func @cmpi_mask_constant_fold
+// CHECK-NOT: wave.splat
+// CHECK-NOT: wave.cmpi
+// CHECK: %[[MASK:.*]] = wave.constant true -> !wave.mask<32>
+// CHECK: return %[[MASK]] : !wave.mask<32>
+func.func @cmpi_mask_constant_fold() -> !wave.mask<32> {
+  %c1 = arith.constant 1 : i32
+  %c2 = arith.constant 2 : i32
+  %v1 = wave.splat %c1 : i32 -> !wave.simd<i32, 32>
+  %v2 = wave.splat %c2 : i32 -> !wave.simd<i32, 32>
+  %mask = wave.cmpi ult %v1, %v2 : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.mask<32>
+  return %mask : !wave.mask<32>
 }
 
 // CHECK-LABEL: func.func @index_expr_substitute_const
@@ -181,9 +221,8 @@ func.func @assume_chain_merge(%x: i32) -> i32 {
 
 // CHECK-LABEL: func.func @index_expr_scalarizes_to_splat
 // CHECK-SAME: (%[[LANE:.*]]: !wave.simd<i32, 32>)
-// CHECK: %[[ZERO:.*]] = arith.constant 0 : index
-// CHECK: %[[SPLAT:.*]] = wave.splat %[[ZERO]] : index -> !wave.simd<index, 32>
-// CHECK: return %[[SPLAT]] : !wave.simd<index, 32>
+// CHECK: %[[ZERO:.*]] = wave.constant 0 : index -> !wave.simd<index, 32>
+// CHECK: return %[[ZERO]] : !wave.simd<index, 32>
 func.func @index_expr_scalarizes_to_splat(%lane: !wave.simd<i32, 32>)
     -> !wave.simd<index, 32> {
   %off = wave.index_expr <"floor(1/32*lid)"> assuming [#wave.pred<"lid >= 0 & -31 + lid <= 0">] ["lid"](%lane)

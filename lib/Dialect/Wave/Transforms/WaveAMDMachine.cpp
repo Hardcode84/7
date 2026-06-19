@@ -2402,6 +2402,7 @@ LogicalResult WaveAMDMachineSelector::selectOperation(Operation *op) {
   return llvm::TypeSwitch<Operation *, LogicalResult>(op)
       .Case<arith::ConstantIntOp>([&](auto o) { return selectConstant(o); })
       .Case<arith::ConstantOp>([&](auto o) { return selectConstant(o); })
+      .Case<ConstantOp>([&](auto o) { return selectConstant(o); })
       .Case<ub::PoisonOp>([&](auto o) { return selectPoison(o); })
       .Case<LaneIdOp>([&](auto o) { return selectLaneId(o); })
       .Case<ReadCyclesOp>([&](auto o) { return selectReadCycles(o); })
@@ -2467,8 +2468,6 @@ LogicalResult WaveAMDMachineSelector::selectOperation(Operation *op) {
 LogicalResult WaveAMDMachineSelector::selectConstant(arith::ConstantIntOp op) {
   unsigned bits = op.getType().getIntOrFloatBitWidth();
   if (bits == 64) {
-    // i64 constants land in an SGPR pair; the asm printer expands
-    // them into two `s_mov_b32` instructions for the halves.
     auto mov = waveamdmachine::SMovB64ImmOp::create(
         builder, op.getLoc(),
         getRegType(op.getContext(), waveamdmachine::RegClass::SGPR, /*w=*/2),
@@ -2504,6 +2503,73 @@ LogicalResult WaveAMDMachineSelector::selectConstant(arith::ConstantOp op) {
       builder, op.getLoc(), attr.getValue().bitcastToAPInt().getZExtValue());
   eraseIfTopLevel(op);
   return success();
+}
+
+static LogicalResult selectWaveMaskConstant(WaveAMDMachineSelector &S,
+                                            ConstantOp op, MaskType maskType) {
+  IntegerAttr attr = dyn_cast<IntegerAttr>(op.getValue());
+  if (!attr || cast<IntegerType>(attr.getType()).getWidth() != 1)
+    return op.emitError("mask constant must use an i1 integer attribute");
+  int64_t mask = attr.getValue().isZero() ? 0 : -1;
+  S.values[op.getResult()] = maskType.getWidth() == 64
+                                 ? createWideImm(S, op.getLoc(), mask)
+                                 : createImm(S.builder, op.getLoc(), mask);
+  S.eraseIfTopLevel(op);
+  return success();
+}
+
+static Type getWaveMachineConstantPayloadType(Type type) {
+  if (SimdType simdType = dyn_cast<SimdType>(type))
+    return simdType.getElementType();
+  return type;
+}
+
+static LogicalResult selectWaveIntegerConstant(WaveAMDMachineSelector &S,
+                                               ConstantOp op, Type type,
+                                               IntegerAttr attr) {
+  if (!attr.getValue().isSignedIntN(64))
+    return op.emitError("integer constant must fit signed 64-bit");
+  int64_t raw = attr.getValue().getSExtValue();
+  if (type.isIndex()) {
+    S.values[op.getResult()] = createImm(S.builder, op.getLoc(), raw);
+    S.eraseIfTopLevel(op);
+    return success();
+  }
+  IntegerType intType = dyn_cast<IntegerType>(type);
+  if (!intType)
+    return op.emitError("unsupported integer constant result type");
+  S.values[op.getResult()] = intType.getWidth() == 64
+                                 ? createWideImm(S, op.getLoc(), raw)
+                                 : createImm(S.builder, op.getLoc(), raw);
+  S.eraseIfTopLevel(op);
+  return success();
+}
+
+static LogicalResult selectWaveFloatConstant(WaveAMDMachineSelector &S,
+                                             ConstantOp op, Type type,
+                                             FloatAttr attr) {
+  FloatType floatType = dyn_cast<FloatType>(type);
+  if (!floatType)
+    return op.emitError("unsupported floating constant result type");
+  unsigned bits = floatType.getWidth();
+  if (bits != 16 && bits != 32)
+    return op.emitError("floating constant must be 16 or 32 bits wide");
+  S.values[op.getResult()] = createImm(
+      S.builder, op.getLoc(), attr.getValue().bitcastToAPInt().getZExtValue());
+  S.eraseIfTopLevel(op);
+  return success();
+}
+
+LogicalResult WaveAMDMachineSelector::selectConstant(ConstantOp op) {
+  if (MaskType maskType = dyn_cast<MaskType>(op.getType()))
+    return selectWaveMaskConstant(*this, op, maskType);
+
+  Type type = getWaveMachineConstantPayloadType(op.getType());
+  if (IntegerAttr attr = dyn_cast<IntegerAttr>(op.getValue()))
+    return selectWaveIntegerConstant(*this, op, type, attr);
+  if (FloatAttr attr = dyn_cast<FloatAttr>(op.getValue()))
+    return selectWaveFloatConstant(*this, op, type, attr);
+  return op.emitError("unsupported wave.constant attribute");
 }
 
 static FailureOr<unsigned>

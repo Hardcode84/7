@@ -16,6 +16,7 @@ include "mlir/Dialect/Wave/IR/WaveTypes.td"
 
 include "mlir/Dialect/Arith/IR/ArithBase.td"
 include "mlir/Dialect/Arith/IR/ArithOpsInterfaces.td"
+include "mlir/IR/BuiltinAttributeInterfaces.td"
 include "mlir/IR/OpBase.td"
 include "mlir/Interfaces/ControlFlowInterfaces.td"
 include "mlir/Interfaces/InferIntRangeInterface.td"
@@ -23,6 +24,22 @@ include "mlir/Interfaces/SideEffectInterfaces.td"
 
 class Wave_Op<string mnemonic, list<Trait> traits = []> :
     Op<Wave_Dialect, mnemonic, traits>;
+
+def Wave_ConstantOp : Wave_Op<"constant", [
+    ConstantLike, Pure,
+    DeclareOpInterfaceMethods<InferIntRangeInterface, ["inferResultRanges"]>]> {
+  let summary = "Wave scalar, SIMD, or mask constant";
+  let arguments = (ins TypedAttrInterface:$value);
+  let results = (outs AnyType:$result);
+  let hasCustomAssemblyFormat = 1;
+  let hasFolder = 1;
+  let hasVerifier = 1;
+  let extraClassDeclaration = [{
+    static bool isBuildableWith(Attribute value, Type type);
+    static ConstantOp materialize(OpBuilder &builder, Attribute value,
+                                  Type type, Location loc);
+  }];
+}
 
 def Wave_YieldOp : Wave_Op<"yield", [Pure, ReturnLike, Terminator,
                                      ParentOneOf<["WhereOp"]>]> {
@@ -146,6 +163,7 @@ def Wave_SplatOp : Wave_Op<"splat", [Pure,
   let arguments = (ins AnyType:$source);
   let results = (outs Wave_Simd:$result);
   let assemblyFormat = "$source attr-dict `:` type($source) `->` qualified(type($result))";
+  let hasFolder = 1;
   let hasVerifier = 1;
 }
 
@@ -348,6 +366,7 @@ def Wave_CmpIOp : Wave_Op<"cmpi", [Pure]> {
                        Wave_Simd:$rhs);
   let results = (outs Wave_Mask:$result);
   let assemblyFormat = "$predicate $lhs `,` $rhs attr-dict `:` qualified(type($lhs)) `,` qualified(type($rhs)) `->` qualified(type($result))";
+  let hasFolder = 1;
   let hasVerifier = 1;
 }
 

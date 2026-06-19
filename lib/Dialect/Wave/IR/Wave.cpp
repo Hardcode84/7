@@ -58,9 +58,17 @@ void WaveDialect::initialize() {
   declarePromisedInterface<ConvertToLLVMPatternInterface, WaveDialect>();
 }
 
+static Type getWaveConstantValueType(Type type) {
+  if (SimdType simd = dyn_cast<SimdType>(type))
+    return simd.getElementType();
+  if (isa<MaskType>(type))
+    return IntegerType::get(type.getContext(), 1);
+  return type;
+}
+
 Operation *WaveDialect::materializeConstant(OpBuilder &builder, Attribute value,
                                             Type type, Location loc) {
-  return arith::ConstantOp::materialize(builder, value, type, loc);
+  return ConstantOp::materialize(builder, value, type, loc);
 }
 
 sym::Store &WaveDialect::getSymbolStore() {
@@ -71,6 +79,73 @@ sym::Store &WaveDialect::getSymbolStore() {
 const sym::Store &WaveDialect::getSymbolStore() const {
   assert(symbolStore && "wave symbolic store must be initialized");
   return *symbolStore;
+}
+
+ParseResult ConstantOp::parse(OpAsmParser &parser, OperationState &result) {
+  Attribute value;
+  Type resultType;
+  if (parser.parseAttribute(value, getValueAttrName(result.name),
+                            result.attributes) ||
+      parser.parseOptionalAttrDict(result.attributes))
+    return failure();
+
+  if (succeeded(parser.parseOptionalArrow())) {
+    if (parser.parseType(resultType))
+      return failure();
+  } else {
+    auto typed = dyn_cast<TypedAttr>(value);
+    if (!typed)
+      return parser.emitError(parser.getNameLoc(),
+                              "constant value must be a typed attribute");
+    resultType = typed.getType();
+  }
+
+  result.addTypes(resultType);
+  return success();
+}
+
+void ConstantOp::print(OpAsmPrinter &p) {
+  p << ' ';
+  p.printAttribute(getValue());
+  p.printOptionalAttrDict((*this)->getAttrs(), {getValueAttrName()});
+  if (cast<TypedAttr>(getValue()).getType() != getType())
+    p << " -> " << getType();
+}
+
+bool ConstantOp::isBuildableWith(Attribute value, Type type) {
+  TypedAttr typed = dyn_cast_if_present<TypedAttr>(value);
+  return typed && typed.getType() == getWaveConstantValueType(type);
+}
+
+ConstantOp ConstantOp::materialize(OpBuilder &builder, Attribute value,
+                                   Type type, Location loc) {
+  TypedAttr typed = dyn_cast_if_present<TypedAttr>(value);
+  if (!typed || !isBuildableWith(typed, type))
+    return nullptr;
+  return ConstantOp::create(builder, loc, type, typed);
+}
+
+OpFoldResult ConstantOp::fold(FoldAdaptor) { return getValue(); }
+
+void ConstantOp::inferResultRanges(ArrayRef<ConstantIntRanges>,
+                                   SetIntRangeFn setResultRange) {
+  IntegerAttr attr = dyn_cast<IntegerAttr>(getValue());
+  if (!attr)
+    return;
+  Type valueType = getWaveConstantValueType(getType());
+  if (!valueType.isIntOrIndex())
+    return;
+  unsigned bits = ConstantIntRanges::getStorageBitwidth(valueType);
+  if (bits == 0)
+    return;
+  APInt value = attr.getValue().sextOrTrunc(bits);
+  setResultRange(getResult(), ConstantIntRanges::constant(value));
+}
+
+LogicalResult ConstantOp::verify() {
+  if (isBuildableWith(getValue(), getType()))
+    return success();
+  return emitOpError("value type must match the result payload type");
 }
 
 LogicalResult ExprAttr::verify(function_ref<InFlightDiagnostic()> emitError,
@@ -187,6 +262,12 @@ LogicalResult SplatOp::verify() {
   return success();
 }
 
+OpFoldResult SplatOp::fold(FoldAdaptor adaptor) {
+  if (Attribute source = adaptor.getSource())
+    return source;
+  return {};
+}
+
 namespace {
 struct WaveBinaryOperandShape {
   Type elementType;
@@ -247,8 +328,6 @@ static bool supportsWaveBinaryOverflowFlags(BinaryKind kind) {
   }
 }
 
-static bool canFoldWaveAttrResult(Type type) { return !isa<SimdType>(type); }
-
 static OpFoldResult foldToResultValue(Value value, Type resultType) {
   if (value && value.getType() == resultType)
     return value;
@@ -256,9 +335,7 @@ static OpFoldResult foldToResultValue(Value value, Type resultType) {
 }
 
 static Attribute getZeroFoldAttr(MLIRContext *context, Type type) {
-  if (!canFoldWaveAttrResult(type))
-    return {};
-  return Builder(context).getZeroAttr(type);
+  return Builder(context).getZeroAttr(getWaveConstantValueType(type));
 }
 
 static bool isAllOnes(Attribute attr) {
@@ -270,7 +347,8 @@ template <typename CalculationT>
 static Attribute constFoldWaveIntegerBinary(ArrayRef<Attribute> operands,
                                             Type resultType,
                                             CalculationT &&calculate) {
-  return constFoldBinaryOp<IntegerAttr>(operands, resultType,
+  return constFoldBinaryOp<IntegerAttr>(operands,
+                                        getWaveConstantValueType(resultType),
                                         std::forward<CalculationT>(calculate));
 }
 
@@ -279,7 +357,8 @@ static Attribute constFoldWaveCast(ArrayRef<Attribute> operands,
                                    Type resultType, CalculationT &&calculate) {
   return constFoldCastOp<SourceAttr, ResultAttr, typename SourceAttr::ValueType,
                          typename ResultAttr::ValueType, void>(
-      operands, resultType, std::forward<CalculationT>(calculate));
+      operands, getWaveConstantValueType(resultType),
+      std::forward<CalculationT>(calculate));
 }
 
 static Attribute foldWaveShiftConstants(ArrayRef<Attribute> operands,
@@ -433,8 +512,6 @@ static Attribute foldWaveMulHUIConstants(BinaryOp op,
 
 static Attribute foldWaveBinaryConstants(BinaryOp op,
                                          ArrayRef<Attribute> operands) {
-  if (!canFoldWaveAttrResult(op.getType()))
-    return {};
   if (Attribute result = foldWaveAddSubMulConstants(op, operands))
     return result;
   if (Attribute result = foldWaveShiftConstants(op, operands))
@@ -986,8 +1063,6 @@ static Attribute foldWaveFpToInt(CastOp op, WaveCastPolicy policy,
 OpFoldResult CastOp::fold(FoldAdaptor adaptor) {
   if (getSource().getType() == getType())
     return getSource();
-  if (!canFoldWaveAttrResult(getType()))
-    return {};
 
   FailureOr<WaveCastPolicy> policy = getWaveCastPolicy(*this);
   if (failed(policy))
@@ -1802,7 +1877,9 @@ void ReadFirstOp::inferResultRanges(ArrayRef<ConstantIntRanges> argRanges,
   setResultRange(getResult(), normalizeWaveArithRange(argRanges.front(), bits));
 }
 
-OpFoldResult ReadFirstOp::fold(FoldAdaptor) {
+OpFoldResult ReadFirstOp::fold(FoldAdaptor adaptor) {
+  if (Attribute source = adaptor.getSource())
+    return source;
   if (SplatOp splat = getSource().getDefiningOp<SplatOp>())
     return splat.getSource();
   return {};
@@ -1888,6 +1965,29 @@ LogicalResult CmpIOp::verify() {
   return success();
 }
 
+static std::optional<bool> foldWaveCmpIAttrs(arith::CmpIPredicate predicate,
+                                             Attribute lhsAttr,
+                                             Attribute rhsAttr) {
+  APInt lhs;
+  APInt rhs;
+  if (!matchPattern(lhsAttr, m_ConstantInt(&lhs)) ||
+      !matchPattern(rhsAttr, m_ConstantInt(&rhs)))
+    return std::nullopt;
+  return arith::applyCmpPredicate(predicate, lhs, rhs);
+}
+
+OpFoldResult CmpIOp::fold(FoldAdaptor adaptor) {
+  std::optional<bool> result;
+  if (getLhs() == getRhs())
+    result = arith::applyCmpPredicate(getPredicate(), APInt(1, 0), APInt(1, 0));
+  else
+    result =
+        foldWaveCmpIAttrs(getPredicate(), adaptor.getLhs(), adaptor.getRhs());
+  if (!result)
+    return {};
+  return Builder(getContext()).getBoolAttr(*result);
+}
+
 static std::optional<bool> foldWaveCmpIToBool(CmpIOp cmp) {
   if (cmp.getLhs() == cmp.getRhs())
     return arith::applyCmpPredicate(cmp.getPredicate(), APInt(1, 0),
@@ -1906,7 +2006,20 @@ static std::optional<bool> foldWaveCmpIToBool(CmpIOp cmp) {
   return arith::applyCmpPredicate(cmp.getPredicate(), lhs, rhs);
 }
 
-OpFoldResult BallotOp::fold(FoldAdaptor) {
+static std::optional<bool> foldWaveMaskAttrToBool(Attribute attr) {
+  APInt value;
+  if (!matchPattern(attr, m_ConstantInt(&value)) || value.getBitWidth() != 1)
+    return std::nullopt;
+  return !value.isZero();
+}
+
+OpFoldResult BallotOp::fold(FoldAdaptor adaptor) {
+  if (std::optional<bool> mask = foldWaveMaskAttrToBool(adaptor.getMask())) {
+    unsigned bits = cast<IntegerType>(getType()).getWidth();
+    APInt value = *mask ? APInt::getAllOnes(bits) : APInt::getZero(bits);
+    return IntegerAttr::get(getType(), value);
+  }
+
   CmpIOp cmp = getMask().getDefiningOp<CmpIOp>();
   if (!cmp)
     return {};
