@@ -5256,7 +5256,7 @@ lookupLdsPointer(WaveAMDMachineSelector &S, Value ptr, Operation *op) {
   return std::make_pair(baseIt->second, offsetIt->second);
 }
 
-enum class DsReadTrKind { B4, B8, B16 };
+enum class DsReadTrKind { B4, B6, B8, B16 };
 
 static bool isDsReadTrB16Element(Type elementType) {
   return elementType.isInteger(16) || elementType.isF16() ||
@@ -5266,11 +5266,13 @@ static bool isDsReadTrB16Element(Type elementType) {
 static FailureOr<DsReadTrKind> getDsReadTrKind(Operation *op,
                                                VectorType vectorType) {
   Type elementType = vectorType.getElementType();
-  if (elementType.isInteger(4))
+  if (elementType.isInteger(4) && vectorType.getNumElements() == 16)
     return DsReadTrKind::B4;
-  if (elementType.isInteger(8))
+  if (elementType.isInteger(8) && vectorType.getNumElements() == 8)
     return DsReadTrKind::B8;
-  if (isDsReadTrB16Element(elementType))
+  if (elementType.isInteger(32) && vectorType.getNumElements() == 3)
+    return DsReadTrKind::B6;
+  if (isDsReadTrB16Element(elementType) && vectorType.getNumElements() == 4)
     return DsReadTrKind::B16;
   return op->emitError("unsupported transpose load result type");
 }
@@ -5280,6 +5282,8 @@ static bool isDsReadTrSupportedOnIsa(DsReadTrKind kind,
   switch (kind) {
   case DsReadTrKind::B4:
     return waveamdmachine::DsReadTrB64B4Op::isSupportedOnIsa(isa);
+  case DsReadTrKind::B6:
+    return waveamdmachine::DsReadTrB96B6Op::isSupportedOnIsa(isa);
   case DsReadTrKind::B8:
     return waveamdmachine::DsReadTrB64B8Op::isSupportedOnIsa(isa);
   case DsReadTrKind::B16:
@@ -5293,6 +5297,8 @@ getDsReadTrAddressFieldSpec(DsReadTrKind kind) {
   switch (kind) {
   case DsReadTrKind::B4:
     return waveamdmachine::DsReadTrB64B4Op::getAddressFieldSpec();
+  case DsReadTrKind::B6:
+    return waveamdmachine::DsReadTrB96B6Op::getAddressFieldSpec();
   case DsReadTrKind::B8:
     return waveamdmachine::DsReadTrB64B8Op::getAddressFieldSpec();
   case DsReadTrKind::B16:
@@ -5309,6 +5315,9 @@ static Operation *createDsReadTr(WaveAMDMachineSelector &S, Operation *op,
   case DsReadTrKind::B4:
     return waveamdmachine::DsReadTrB64B4Op::create(
         S.builder, op->getLoc(), regType, tokenType, addr, dep, offset);
+  case DsReadTrKind::B6:
+    return waveamdmachine::DsReadTrB96B6Op::create(
+        S.builder, op->getLoc(), regType, tokenType, addr, dep, offset);
   case DsReadTrKind::B8:
     return waveamdmachine::DsReadTrB64B8Op::create(
         S.builder, op->getLoc(), regType, tokenType, addr, dep, offset);
@@ -5317,6 +5326,12 @@ static Operation *createDsReadTr(WaveAMDMachineSelector &S, Operation *op,
         S.builder, op->getLoc(), regType, tokenType, addr, dep, offset);
   }
   llvm_unreachable("unknown transpose load kind");
+}
+
+static unsigned getDsReadTrRegisterWidth(DsReadTrKind kind) {
+  if (kind == DsReadTrKind::B6)
+    return 3;
+  return 2;
 }
 
 static LogicalResult selectDsReadTr(WaveAMDMachineSelector &S, Operation *op,
@@ -5342,8 +5357,8 @@ static LogicalResult selectDsReadTr(WaveAMDMachineSelector &S, Operation *op,
       materializeLdsAddress(S, op, ptr->first, ptr->second, spec);
   if (failed(address))
     return failure();
-  Type regType =
-      getRegType(op->getContext(), waveamdmachine::RegClass::VGPR, 2);
+  Type regType = getRegType(op->getContext(), waveamdmachine::RegClass::VGPR,
+                            getDsReadTrRegisterWidth(*kind));
   Type tokenType = getMemTokenType(op->getContext());
   Value dep = dependency ? S.expect(dependency, op) : Value{};
   Operation *load = createDsReadTr(S, op, *kind, regType, tokenType,

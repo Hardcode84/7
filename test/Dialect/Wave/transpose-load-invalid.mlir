@@ -60,6 +60,26 @@ func.func @transpose_load_bad_b16_count(%p: !wave.ptr<#wave.shared, f16>) {
 
 // -----
 
+func.func @transpose_load_bad_i32_count(%p: !wave.ptr<#wave.shared, i32>) {
+  // expected-error @+1 {{i32 transpose load result must have 3 elements}}
+  %v, %tok = waveamd.transpose_load %p
+      : (!wave.ptr<#wave.shared, i32>)
+        -> (!wave.simd<vector<2xi32>, 64>, !wave.mem.token)
+  return
+}
+
+// -----
+
+func.func @transpose_load_bad_i32_ptr_element(%p: !wave.ptr<#wave.shared, i8>) {
+  // expected-error @+1 {{source pointer element type must be i32 for i32 transpose load}}
+  %v, %tok = waveamd.transpose_load %p
+      : (!wave.ptr<#wave.shared, i8>)
+        -> (!wave.simd<vector<3xi32>, 64>, !wave.mem.token)
+  return
+}
+
+// -----
+
 func.func @transpose_load_bad_b16_ptr_element(%p: !wave.ptr<#wave.shared, i8>) {
   // expected-error @+1 {{source pointer element type must be i16, f16, or bf16 for 16-bit transpose load}}
   %v, %tok = waveamd.transpose_load %p
@@ -71,7 +91,7 @@ func.func @transpose_load_bad_b16_ptr_element(%p: !wave.ptr<#wave.shared, i8>) {
 // -----
 
 func.func @transpose_load_bad_element(%p: !wave.ptr<#wave.shared, i8>) {
-  // expected-error @+1 {{transpose load result element type must be i4, i8, i16, f16, or bf16}}
+  // expected-error @+1 {{transpose load result element type must be i4, i8, i16, i32, f16, or bf16}}
   %v, %tok = waveamd.transpose_load %p
       : (!wave.ptr<#wave.shared, i8>)
         -> (!wave.simd<vector<4xf32>, 64>, !wave.mem.token)

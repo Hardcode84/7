@@ -394,7 +394,7 @@ struct SharedPointerInfo {
   std::optional<int64_t> simdWidth;
 };
 
-enum class TransposeLoadKind { B4, B8, B16 };
+enum class TransposeLoadKind { B4, B6, B8, B16 };
 
 static FailureOr<SharedPointerInfo>
 getSharedPointerInfo(Operation *op, Value value, StringRef name) {
@@ -417,6 +417,26 @@ static bool isTransposeLoadB16Element(Type elementType) {
          elementType.isBF16();
 }
 
+static std::optional<FailureOr<TransposeLoadKind>>
+verifyIntegerTransposeLoadResult(Operation *op, unsigned width, int64_t count) {
+  if (width == 4) {
+    if (count == 16)
+      return TransposeLoadKind::B4;
+    return op->emitOpError("i4 transpose load result must have 16 elements");
+  }
+  if (width == 8) {
+    if (count == 8)
+      return TransposeLoadKind::B8;
+    return op->emitOpError("i8 transpose load result must have 8 elements");
+  }
+  if (width == 32) {
+    if (count == 3)
+      return TransposeLoadKind::B6;
+    return op->emitOpError("i32 transpose load result must have 3 elements");
+  }
+  return std::nullopt;
+}
+
 static FailureOr<TransposeLoadKind> verifyTransposeLoadResult(Operation *op,
                                                               Value value) {
   auto simdType = cast<wave::SimdType>(value.getType());
@@ -426,23 +446,19 @@ static FailureOr<TransposeLoadKind> verifyTransposeLoadResult(Operation *op,
   if (!vecType || vecType.getRank() != 1)
     return op->emitOpError("result SIMD element type must be a 1-D vector");
   Type elementType = vecType.getElementType();
-  if (elementType.isInteger(4)) {
-    if (vecType.getNumElements() == 16)
-      return TransposeLoadKind::B4;
-    return op->emitOpError("i4 transpose load result must have 16 elements");
-  }
-  if (elementType.isInteger(8)) {
-    if (vecType.getNumElements() == 8)
-      return TransposeLoadKind::B8;
-    return op->emitOpError("i8 transpose load result must have 8 elements");
-  }
+  if (auto intType = dyn_cast<IntegerType>(elementType))
+    if (std::optional<FailureOr<TransposeLoadKind>> kind =
+            verifyIntegerTransposeLoadResult(op, intType.getWidth(),
+                                             vecType.getNumElements()))
+      return *kind;
   if (isTransposeLoadB16Element(elementType)) {
     if (vecType.getNumElements() == 4)
       return TransposeLoadKind::B16;
     return op->emitOpError("16-bit transpose load result must have 4 elements");
   }
   return op->emitOpError(
-      "transpose load result element type must be i4, i8, i16, f16, or bf16");
+      "transpose load result element type must be i4, i8, i16, i32, f16, or "
+      "bf16");
 }
 
 static LogicalResult verifyTransposeLoadSourceElement(Operation *op,
@@ -455,6 +471,12 @@ static LogicalResult verifyTransposeLoadSourceElement(Operation *op,
       return success();
     return op->emitOpError(
         "source pointer element type must be i8 for i4/i8 transpose load");
+  }
+  if (kind == TransposeLoadKind::B6) {
+    if (elementType.isInteger(32))
+      return success();
+    return op->emitOpError(
+        "source pointer element type must be i32 for i32 transpose load");
   }
   if (isTransposeLoadB16Element(elementType))
     return success();

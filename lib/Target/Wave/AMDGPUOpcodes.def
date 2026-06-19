@@ -150,6 +150,7 @@
     BUFFER_STORE_DWORDX4_OFFEN_gfx11)                                          \
   X(dsReadB64, DS_READ_B64_vi_gfx9, DS_READ_B64_gfx11)                         \
   X(dsReadB64TrB4, DS_READ_B64_TR_B4_vi, DS_READ_B64_TR_B4)                    \
+  X(dsReadB96TrB6, DS_READ_B96_TR_B6_vi, DS_READ_B96_TR_B6)                    \
   X(dsReadB64TrB8, DS_READ_B64_TR_B8_vi, DS_READ_B64_TR_B8)                    \
   X(dsReadB64TrB16, DS_READ_B64_TR_B16_vi, DS_READ_B64_TR_B16)                 \
   X(dsReadB96, DS_READ_B96_vi_gfx9, DS_READ_B96_gfx11)                         \
