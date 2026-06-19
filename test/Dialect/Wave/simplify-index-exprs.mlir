@@ -75,3 +75,35 @@ func.func @scalarized_simd_result_is_splatted(%lane: !wave.simd<i32, 32>)
       : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
   return %off : !wave.simd<index, 32>
 }
+
+// -----
+
+// CHECK-LABEL: func.func @producer_range_proves_bound_symbol
+// CHECK: %[[LANE:.*]] = wave.lane_id : !wave.simd<i32, 64>
+// CHECK: %[[DIM0:.*]] = wave.index_expr <"floor(1/2*lane)"> assuming [#wave.pred<"lane >= 0 & -63 + lane <= 0">] ["lane"](%[[LANE]]) : (!wave.simd<i32, 64>) -> !wave.simd<index, 64>
+// CHECK: %[[OFF:.*]] = wave.index_expr <"floor(1/4*dim0)"> assuming [#wave.pred<"dim0 >= 0 & -31 + dim0 <= 0">] ["dim0"](%[[DIM0]]) : (!wave.simd<index, 64>) -> !wave.simd<index, 64>
+// CHECK: return %[[OFF]] : !wave.simd<index, 64>
+func.func @producer_range_proves_bound_symbol() -> !wave.simd<index, 64> {
+  %lane = wave.lane_id : !wave.simd<i32, 64>
+  %dim0 = wave.index_expr <"floor(1/2*lane)"> assuming [#wave.pred<"lane >= 0 & -63 + lane <= 0">] ["lane"](%lane)
+      : (!wave.simd<i32, 64>) -> !wave.simd<index, 64>
+  %off = wave.index_expr <"floor(1/4*dim0)"> ["dim0"](%dim0)
+      : (!wave.simd<index, 64>) -> !wave.simd<index, 64>
+  return %off : !wave.simd<index, 64>
+}
+
+// -----
+
+// CHECK-LABEL: func.func @producer_range_drops_stale_lower_assumption
+// CHECK-NOT: -272 + dim0
+// CHECK: %[[OFF:.*]] = wave.index_expr <"floor(1/4*dim0)"> assuming [#wave.pred<"-2281701631 + dim0 <= 0">, #wave.pred<"dim0 >= 0 & -31 + dim0 <= 0">]
+// CHECK-NOT: -272 + dim0
+// CHECK: return %[[OFF]] : !wave.simd<index, 64>
+func.func @producer_range_drops_stale_lower_assumption(%lane: !wave.simd<i32, 64>)
+    -> !wave.simd<index, 64> {
+  %dim0 = wave.index_expr <"floor(1/2*lane)"> assuming [#wave.pred<"lane >= 0 & -63 + lane <= 0">] ["lane"](%lane)
+      : (!wave.simd<i32, 64>) -> !wave.simd<index, 64>
+  %off = wave.index_expr <"floor(1/4*dim0)"> assuming [#wave.pred<"-272 + dim0 >= 0 & -2281701631 + dim0 <= 0">] ["dim0"](%dim0)
+      : (!wave.simd<index, 64>) -> !wave.simd<index, 64>
+  return %off : !wave.simd<index, 64>
+}

@@ -961,6 +961,25 @@ static bool isPredicateImplied(sym::Store &store, sym::PredHandle pred,
          sym::CheckResult::True;
 }
 
+static bool isPredicateContradicted(sym::Store &store, sym::PredHandle pred,
+                                    ArrayRef<sym::PredHandle> assumptions) {
+  sym::PredView view(pred);
+  if (view.getKind() == sym::PredKind::And) {
+    for (uint32_t i : llvm::seq<uint32_t>(0, view.getLogicArgCount()))
+      if (isPredicateContradicted(store, view.getLogicArg(i), assumptions))
+        return true;
+    return false;
+  }
+  if (view.getKind() == sym::PredKind::Or) {
+    for (uint32_t i : llvm::seq<uint32_t>(0, view.getLogicArgCount()))
+      if (!isPredicateContradicted(store, view.getLogicArg(i), assumptions))
+        return false;
+    return true;
+  }
+  return sym::checkPredicate(store, pred, assumptions) ==
+         sym::CheckResult::False;
+}
+
 void mlir::wave::appendRangeAndAssumePredicates(
     sym::Store &store, Value binding, StringRef name,
     const ConstantIntRanges &range,
@@ -1085,6 +1104,115 @@ buildIndexExprResultRange(sym::Store &store, sym::ExprHandle expr,
   return ConstantIntRanges::fromSigned(loValue, hiValue);
 }
 
+static Value stripIndexExprRangeWrappers(Value value) {
+  while (auto splat = value.getDefiningOp<SplatOp>())
+    value = splat.getSource();
+  return value;
+}
+
+static std::optional<ConstantIntRanges>
+buildIndexExprProducerRange(sym::Store &store, Value value) {
+  value = stripIndexExprRangeWrappers(value);
+  IndexExprOp producer = value.getDefiningOp<IndexExprOp>();
+  if (!producer)
+    return std::nullopt;
+
+  SmallVector<sym::PredHandle, 4> assumptions;
+  appendIndexExprPredicates(producer, assumptions);
+  for (auto [nameAttr, binding] :
+       llvm::zip(producer.getNames(), producer.getBindings())) {
+    StringRef name = cast<StringAttr>(nameAttr).getValue();
+    appendAssumePredicates(store, binding, name, assumptions);
+  }
+  return buildIndexExprResultRange(store, producer.getExpr().getValue(),
+                                   producer.getResult().getType(), assumptions);
+}
+
+static FailureOr<sym::PredHandle>
+composeLogicPredicate(sym::Store &store, sym::PredKind kind,
+                      ArrayRef<sym::PredHandle> predicates) {
+  assert(!predicates.empty() && "expected at least one predicate");
+  sym::PredHandle current = predicates.front();
+  for (sym::PredHandle pred : predicates.drop_front()) {
+    FailureOr<sym::PredHandle> next =
+        kind == sym::PredKind::And ? sym::composePredAnd(store, current, pred)
+                                   : sym::composePredOr(store, current, pred);
+    if (failed(next))
+      return failure();
+    current = *next;
+  }
+  return current;
+}
+
+static std::optional<sym::PredHandle>
+removeContradictedPredicateParts(sym::Store &store, sym::PredHandle pred,
+                                 ArrayRef<sym::PredHandle> assumptions) {
+  sym::PredView view(pred);
+  if (view.getKind() != sym::PredKind::And &&
+      view.getKind() != sym::PredKind::Or) {
+    if (isPredicateContradicted(store, pred, assumptions))
+      return std::nullopt;
+    return pred;
+  }
+
+  SmallVector<sym::PredHandle, 4> kept;
+  bool changed = false;
+  for (uint32_t i : llvm::seq<uint32_t>(0, view.getLogicArgCount())) {
+    sym::PredHandle arg = view.getLogicArg(i);
+    std::optional<sym::PredHandle> keptArg =
+        removeContradictedPredicateParts(store, arg, assumptions);
+    if (!keptArg) {
+      changed = true;
+      continue;
+    }
+    changed |= !(*keptArg == arg);
+    kept.push_back(*keptArg);
+  }
+  if (kept.empty())
+    return std::nullopt;
+  if (!changed)
+    return pred;
+  FailureOr<sym::PredHandle> rebuilt =
+      composeLogicPredicate(store, view.getKind(), kept);
+  if (failed(rebuilt))
+    return std::nullopt;
+  return *rebuilt;
+}
+
+static void
+dropPredicatesContradictedBy(sym::Store &store, sym::PredHandle trusted,
+                             SmallVectorImpl<sym::PredHandle> &assumptions) {
+  std::array<sym::PredHandle, 1> trustedAssumptions{trusted};
+  SmallVector<sym::PredHandle, 4> filtered;
+  for (sym::PredHandle pred : assumptions) {
+    if (pred == trusted) {
+      appendUniquePredicate(filtered, pred);
+      continue;
+    }
+    std::optional<sym::PredHandle> kept =
+        removeContradictedPredicateParts(store, pred, trustedAssumptions);
+    if (kept)
+      appendUniquePredicate(filtered, *kept);
+  }
+  assumptions.assign(filtered.begin(), filtered.end());
+}
+
+static void appendIndexExprProducerRangePredicate(
+    sym::Store &store, Value binding, StringRef name,
+    SmallVectorImpl<sym::PredHandle> &assumptions) {
+  std::optional<ConstantIntRanges> range =
+      buildIndexExprProducerRange(store, binding);
+  if (!range)
+    return;
+  std::optional<sym::PredHandle> assumption =
+      buildIndexExprRangeAssumption(store, name, *range);
+  if (!assumption)
+    return;
+  dropPredicatesContradictedBy(store, *assumption, assumptions);
+  if (!isPredicateImplied(store, *assumption, assumptions))
+    appendUniquePredicate(assumptions, *assumption);
+}
+
 void mlir::wave::appendAssumePredicates(
     sym::Store &store, Value binding, StringRef name,
     SmallVectorImpl<sym::PredHandle> &assumptions) {
@@ -1103,10 +1231,11 @@ void mlir::wave::appendAssumePredicates(
       FailureOr<sym::PredHandle> pred = sym::substitutePred(
           store, cast<PredAttr>(attr).getValue(), substitutions);
       if (succeeded(pred))
-        assumptions.push_back(*pred);
+        appendUniquePredicate(assumptions, *pred);
     }
     binding = assume.getValue();
   }
+  appendIndexExprProducerRangePredicate(store, binding, name, assumptions);
 }
 
 static std::optional<ConstantIntRanges>
@@ -1696,6 +1825,7 @@ mlir::wave::getIndexExprSymbolicOffset(IndexExprOp op) {
     if (failed(kind))
       return failure();
     offset.bindings.push_back({*sym, binding, *kind});
+    appendAssumePredicates(store, binding, name, offset.assumptions);
   }
   return offset;
 }

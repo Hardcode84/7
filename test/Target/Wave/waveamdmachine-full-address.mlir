@@ -375,6 +375,29 @@ func.func @shared_wide_mod_floor_full_address(%x_raw: i64)
   return
 }
 
+// SELECT-LABEL: func.func @shared_nested_index_expr_producer_range
+// SELECT: waveamdmachine.v_lshrrev_b32
+// SELECT: waveamdmachine.v_lshrrev_b32
+// SELECT: waveamdmachine.ds_load_b32
+// ASM-LABEL: shared_nested_index_expr_producer_range:
+// ASM: ds_load_b32
+func.func @shared_nested_index_expr_producer_range()
+    attributes {wave.kernel, wave.lds_size = 4096 : i64} {
+  %lane = wave.lane_id : !wave.simd<i32, 32>
+  %lds = wave.lds_base : !wave.ptr<#wave.shared, i32>
+  %dim0 = wave.index_expr <"floor(1/2*lane)"> assuming [#wave.pred<"lane >= 0 & -31 + lane <= 0">] ["lane"](%lane)
+      : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
+  %off = wave.index_expr <"floor(1/4*dim0)"> assuming [#wave.pred<"-272 + dim0 >= 0 & -2281701631 + dim0 <= 0">] ["dim0"](%dim0)
+      : (!wave.simd<index, 32>) -> !wave.simd<index, 32>
+  %ptrs = wave.ptr_add %lds, %off
+      : !wave.ptr<#wave.shared, i32>, !wave.simd<index, 32>
+      -> !wave.simd<!wave.ptr<#wave.shared, i32>, 32>
+  %value, %token = wave.load %ptrs
+      : (!wave.simd<!wave.ptr<#wave.shared, i32>, 32>)
+      -> (!wave.simd<i32, 32>, !wave.mem.token)
+  return
+}
+
 // SELECT-LABEL: func.func @global_load_constant_overflow
 // SELECT: waveamdmachine.global_load_b32_addr64
 // ASM-LABEL: global_load_constant_overflow:
