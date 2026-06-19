@@ -1174,10 +1174,14 @@ def _dma_issue(
     a_lds_ptrs = _offset_ptrs(bld, staging.a_dma_lds_ptrs, lds_offset)
     b_lds_ptrs = _offset_ptrs(bld, staging.b_dma_lds_ptrs, lds_offset)
     for ptr, lds_ptr in zip(a_ptrs, a_lds_ptrs, strict=True):
-        tok = bld.dma_load_lds(ptr, lds_ptr, after=dep, bytes=16)
+        tok = bld.dma_load_lds(
+            ptr, lds_ptr, after=dep, bytes=16, zero_fill_inactive=True
+        )
         dma_tokens.append(tok)
     for ptr, lds_ptr in zip(b_ptrs, b_lds_ptrs, strict=True):
-        tok = bld.dma_load_lds(ptr, lds_ptr, after=dep, bytes=16)
+        tok = bld.dma_load_lds(
+            ptr, lds_ptr, after=dep, bytes=16, zero_fill_inactive=True
+        )
         dma_tokens.append(tok)
     return dma_tokens
 
@@ -1772,7 +1776,11 @@ def _append_mxfp4_scale_dma(
 ) -> None:
     source = bld.ptr_add(global_base, global_off)
     after = plan.dep if plan.dep is not None else bld.token()
-    tokens.append(bld.dma_load_lds(source, lds_off, after=after, bytes=16))
+    tokens.append(
+        bld.dma_load_lds(
+            source, lds_off, after=after, bytes=16, zero_fill_inactive=True
+        )
+    )
 
 
 def _stage_mxfp4_a_scale_dma(

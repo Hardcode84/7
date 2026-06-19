@@ -130,7 +130,8 @@ def WaveAMD_DmaLoadLdsOp : WaveAMD_Op<"dma_load_lds", [MemoryEffects<[MemRead, M
                        Wave_Ptr:$dest,
                        Wave_MemToken:$dependency,
                        I64Attr:$bytes,
-                       DefaultValuedAttr<I64Attr, "0">:$aux);
+                       DefaultValuedAttr<I64Attr, "0">:$aux,
+                       OptionalAttr<UnitAttr>:$zero_fill_inactive);
   let results = (outs Wave_MemToken:$token);
   let assemblyFormat = [{
     $source `->` $dest `after` $dependency

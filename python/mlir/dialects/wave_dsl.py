@@ -967,10 +967,18 @@ class FunctionBuilder:
         after: Value,
         bytes: int = 4,
         aux: int = 0,
+        zero_fill_inactive: bool = False,
     ) -> Value:
-        return waveamd.DmaLoadLdsOp(
-            mem_token_type(), source, dest, after, bytes=bytes, aux=aux
-        ).token
+        op = waveamd.DmaLoadLdsOp(
+            mem_token_type(),
+            source,
+            dest,
+            after,
+            bytes=bytes,
+            aux=aux,
+            zero_fill_inactive=zero_fill_inactive,
+        )
+        return op.token
 
     def transpose_load(
         self,

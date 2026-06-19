@@ -128,6 +128,22 @@ def WavePromoteGlobalToBuffer : Pass<"wave-promote-global-to-buffer"> {
   ];
 }
 
+def WaveAMDDmaZeroFill : Pass<"waveamd-dma-zero-fill"> {
+  let summary = "Flatten zero-fillable predicated buffer DMA-to-LDS ops";
+  let description = [{
+    Rewrites `wave.where` regions whose side effects are only opt-in
+    `waveamd.dma_load_lds` ops into straight-line DMA. Inactive lanes route
+    through a same-buffer out-of-bounds source offset, relying on buffer OOB
+    zero-fill instead of EXEC masking. Regions with non-DMA side effects or
+    non-buffer DMA sources are left untouched.
+  }];
+  let dependentDialects = [
+    "func::FuncDialect",
+    "wave::WaveDialect",
+    "waveamd::WaveAMDDialect"
+  ];
+}
+
 def WaveExtractLoopStrides : Pass<"wave-extract-loop-strides"> {
   let summary = "Expose IV-linear Wave pointer offsets as loop-carried strides";
   let description = [{

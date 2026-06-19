@@ -54,7 +54,9 @@ module attributes {transform.with_named_sequence} {
         : (!transform.any_op) -> !transform.any_op
     %rstride = transform.apply_registered_pass "wave-extract-loop-strides" to %rbuf
         : (!transform.any_op) -> !transform.any_op
-    %rlicm = transform.apply_registered_pass "loop-invariant-code-motion" to %rstride
+    %rzf = transform.apply_registered_pass "waveamd-dma-zero-fill" to %rstride
+        : (!transform.any_op) -> !transform.any_op
+    %rlicm = transform.apply_registered_pass "loop-invariant-code-motion" to %rzf
         : (!transform.any_op) -> !transform.any_op
     %roff = transform.apply_registered_pass "canonicalize" to %rlicm
         : (!transform.any_op) -> !transform.any_op

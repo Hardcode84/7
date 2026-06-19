@@ -20,10 +20,8 @@
 #include "mlir/Pass/Pass.h"
 
 namespace mlir::wave {
-// Forward declaration to keep the heavyweight `WaveCompileKernels`
-// machinery out of WaveCAPI's link closure. Python-side callers only
-// need `wavemeta-specialize`; the other wave passes ride in via
-// `wave-opt` which links its own pass registry.
+// Python registers the small pass set used by in-process pipeline entrypoints.
+std::unique_ptr<::mlir::Pass> createWaveAMDDmaZeroFill();
 std::unique_ptr<::mlir::Pass> createWaveMetaSpecialize();
 } // namespace mlir::wave
 #include "llvm/ADT/StringRef.h"
@@ -41,6 +39,9 @@ MLIR_DEFINE_CAPI_DIALECT_REGISTRATION(WaveMeta, wavemeta,
 void mlirRegisterWavePasses(void) {
   ::mlir::registerPass([]() -> std::unique_ptr<::mlir::Pass> {
     return mlir::wave::createWaveMetaSpecialize();
+  });
+  ::mlir::registerPass([]() -> std::unique_ptr<::mlir::Pass> {
+    return mlir::wave::createWaveAMDDmaZeroFill();
   });
 }
 
