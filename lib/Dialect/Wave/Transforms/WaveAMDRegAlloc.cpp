@@ -806,26 +806,33 @@ static std::optional<unsigned> getLaneIndex(IntervalGroup *group,
   return std::nullopt;
 }
 
-static unsigned getLiveDwords(ArrayRef<std::unique_ptr<Interval>> intervals,
-                              unsigned position,
-                              waveamdmachine::RegClass regClass) {
-  unsigned live = 0;
+static SmallVector<unsigned, 0>
+getLiveDwordsByPosition(ArrayRef<std::unique_ptr<Interval>> intervals,
+                        unsigned positionCount,
+                        waveamdmachine::RegClass regClass) {
+  SmallVector<int64_t, 0> delta(positionCount + 1, 0);
   for (const std::unique_ptr<Interval> &interval : intervals) {
     if (interval->group->plannedPressureRelief)
       continue;
     if (interval->values.empty() && !interval->reserved)
       continue;
-    if (interval->group->storageClass != regClass ||
-        position < interval->start || interval->end < position)
+    if (interval->group->storageClass != regClass)
       continue;
-    ++live;
+    if (interval->start >= positionCount)
+      continue;
+    unsigned end = std::min<unsigned>(interval->end, positionCount - 1);
+    ++delta[interval->start];
+    --delta[end + 1];
   }
-  return live;
-}
 
-static unsigned getLiveDwords(Inventory &inventory, unsigned position,
-                              waveamdmachine::RegClass regClass) {
-  return getLiveDwords(inventory.intervals, position, regClass);
+  SmallVector<unsigned, 0> liveByPosition;
+  liveByPosition.reserve(positionCount);
+  int64_t live = 0;
+  for (unsigned position : llvm::seq<unsigned>(0, positionCount)) {
+    live += delta[position];
+    liveByPosition.push_back(static_cast<unsigned>(live));
+  }
+  return liveByPosition;
 }
 
 static bool countsForPeak(const Interval &interval,
@@ -1367,8 +1374,6 @@ static bool canPromote(IntervalGroup *group, RegisterBudgets budgets) {
   return false;
 }
 
-static unsigned getLiveDwords(Inventory &inventory, unsigned position,
-                              waveamdmachine::RegClass regClass);
 static unsigned getGroupLiveDwords(IntervalGroup *group, unsigned position);
 static LogicalResult materializePromotion(IntervalGroup *group,
                                           Inventory &inventory,
@@ -2420,14 +2425,16 @@ enforceCombinedVGPRAGPRBudget(Inventory &inventory, RegisterBudgets budgets,
   if (!budgets.totalVGPRLimit || !budgets.agprCountsAgainstVGPRs)
     return success();
   unsigned positionCount = std::max<unsigned>(1, inventory.ops.size());
+  SmallVector<unsigned, 0> agprLiveByPosition = getLiveDwordsByPosition(
+      inventory.intervals, positionCount, waveamdmachine::RegClass::AGPR);
+  SmallVector<unsigned, 0> vgprLiveByPosition = getLiveDwordsByPosition(
+      inventory.intervals, positionCount, waveamdmachine::RegClass::VGPR);
   for (unsigned position : llvm::seq<unsigned>(0, positionCount)) {
-    unsigned agprLive =
-        getLiveDwords(inventory, position, waveamdmachine::RegClass::AGPR);
+    unsigned agprLive = agprLiveByPosition[position];
     unsigned vgprLimit = 0;
     if (agprLive < *budgets.totalVGPRLimit)
       vgprLimit = alignDown(*budgets.totalVGPRLimit - agprLive, 4);
-    unsigned vgprLive =
-        getLiveDwords(inventory, position, waveamdmachine::RegClass::VGPR);
+    unsigned vgprLive = vgprLiveByPosition[position];
     if (vgprLive <= vgprLimit)
       continue;
     IntervalGroup *request = selectVGPRPressureRequest(inventory, position);
