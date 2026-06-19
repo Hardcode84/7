@@ -50,16 +50,58 @@ func.func @formed_f16_add(%a0: !wave.simd<f16, 32>,
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 
-// CHECK-LABEL: func.func @gfx9_f16_math_keeps_scalar_cvt
-// CHECK-NOT: waveamdmachine.v_cvt_pk_rtz_f16_f32
-// CHECK: waveamdmachine.v_cvt_f16_f32
-// CHECK: waveamdmachine.v_pk_add_f16
-// CHECK-NOT: waveamdmachine.v_cvt_pk_rtz_f16_f32
+// CHECK-LABEL: func.func @gfx950_rne_cast_pair_reused_by_pack
+// CHECK: waveamdmachine.v_cvt_pk_f16_f32
+// CHECK-NOT: waveamdmachine.v_cvt_f16_f32
+// CHECK-NOT: waveamdmachine.v_lshrrev_b32
 // CHECK: return
-func.func @gfx9_f16_math_keeps_scalar_cvt(%a0: !wave.simd<f32, 64>,
-                                          %a1: !wave.simd<f32, 64>,
-                                          %b0: !wave.simd<f32, 64>,
-                                          %b1: !wave.simd<f32, 64>) -> f32 {
+func.func @gfx950_rne_cast_pair_reused_by_pack(%a: !wave.simd<f32, 64>,
+                                               %b: !wave.simd<f32, 64>)
+    -> !wave.simd<vector<2xf16>, 64> {
+  %x = wave.cast fpconvert %a
+      : !wave.simd<f32, 64> -> !wave.simd<f16, 64>
+  %y = wave.cast fpconvert %b
+      : !wave.simd<f32, 64> -> !wave.simd<f16, 64>
+  %packed = wave.pack %x, %y
+      : !wave.simd<f16, 64>, !wave.simd<f16, 64>
+      -> !wave.simd<vector<2xf16>, 64>
+  return %packed : !wave.simd<vector<2xf16>, 64>
+}
+
+// CHECK-LABEL: func.func @gfx950_rne_cast_quad_reused_by_pack
+// CHECK-COUNT-2: waveamdmachine.v_cvt_pk_f16_f32
+// CHECK-NOT: waveamdmachine.v_cvt_f16_f32
+// CHECK-NOT: waveamdmachine.v_lshrrev_b32
+// CHECK-NOT: waveamdmachine.v_lshlrev_b32
+// CHECK-NOT: waveamdmachine.v_or_b32
+// CHECK: return
+func.func @gfx950_rne_cast_quad_reused_by_pack(
+    %a: !wave.simd<f32, 64>, %b: !wave.simd<f32, 64>,
+    %c: !wave.simd<f32, 64>, %d: !wave.simd<f32, 64>)
+    -> !wave.simd<vector<4xf16>, 64> {
+  %x = wave.cast fpconvert %a
+      : !wave.simd<f32, 64> -> !wave.simd<f16, 64>
+  %y = wave.cast fpconvert %b
+      : !wave.simd<f32, 64> -> !wave.simd<f16, 64>
+  %z = wave.cast fpconvert %c
+      : !wave.simd<f32, 64> -> !wave.simd<f16, 64>
+  %w = wave.cast fpconvert %d
+      : !wave.simd<f32, 64> -> !wave.simd<f16, 64>
+  %packed = wave.pack %x, %y, %z, %w
+      : !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>,
+        !wave.simd<f16, 64> -> !wave.simd<vector<4xf16>, 64>
+  return %packed : !wave.simd<vector<4xf16>, 64>
+}
+
+// CHECK-LABEL: func.func @gfx950_f16_math_forms_rne_cvt
+// CHECK-COUNT-2: waveamdmachine.v_cvt_pk_f16_f32
+// CHECK: waveamdmachine.v_pk_add_f16
+// CHECK: waveamdmachine.v_cvt_f32_f16
+// CHECK: return
+func.func @gfx950_f16_math_forms_rne_cvt(%a0: !wave.simd<f32, 64>,
+                                         %a1: !wave.simd<f32, 64>,
+                                         %b0: !wave.simd<f32, 64>,
+                                         %b1: !wave.simd<f32, 64>) -> f32 {
   %x0 = wave.cast fpconvert %a0
       : !wave.simd<f32, 64> -> !wave.simd<f16, 64>
   %x1 = wave.cast fpconvert %a1

@@ -18,6 +18,7 @@
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallPtrSet.h"
+#include "llvm/Support/MathExtras.h"
 
 #include <optional>
 
@@ -46,7 +47,8 @@ struct PackedPair {
 
 struct PackedMathCapabilities {
   bool packedF16Math = true;
-  bool packedF32ToF16 = true;
+  bool packedF32ToF16Rtz = true;
+  bool packedF32ToF16Rne = false;
 };
 
 static bool isScalarSimdF16(Type type) {
@@ -59,11 +61,26 @@ static bool isScalarSimdF32(Type type) {
   return simd && simd.getElementType().isF32();
 }
 
-static Type getPackedSimdType(Type scalarSimdType) {
+static Type getPackedSimdType(Type scalarSimdType, int64_t elements = 2) {
   SimdType simd = cast<SimdType>(scalarSimdType);
-  VectorType vectorType = VectorType::get({2}, simd.getElementType());
+  VectorType vectorType = VectorType::get({elements}, simd.getElementType());
   return SimdType::get(scalarSimdType.getContext(), vectorType,
                        simd.getWidth());
+}
+
+static std::optional<int64_t> getPackedF16SimdElements(Type type) {
+  SimdType simd = dyn_cast<SimdType>(type);
+  if (!simd)
+    return std::nullopt;
+  VectorType vectorType = dyn_cast<VectorType>(simd.getElementType());
+  if (!vectorType || vectorType.getRank() != 1 || vectorType.isScalable())
+    return std::nullopt;
+  if (!vectorType.getElementType().isF16())
+    return std::nullopt;
+  int64_t elements = vectorType.getNumElements();
+  if (!llvm::isPowerOf2_64(elements))
+    return std::nullopt;
+  return elements;
 }
 
 static bool isF32ToF16Cast(CastOp op) {
@@ -72,14 +89,14 @@ static bool isF32ToF16Cast(CastOp op) {
          isScalarSimdF16(op.getResult().getType());
 }
 
-static bool hasRtzRounding(CastOp op) {
+static CastRounding getFpConvertRounding(CastOp op) {
   std::optional<DictionaryAttr> policy = op.getPolicy();
   if (!policy)
-    return false;
+    return CastRounding::RNE;
   Attribute attr = policy->get("rounding");
   if (!attr)
-    return false;
-  return cast<CastRoundingPolicyAttr>(attr).getValue() == CastRounding::RTZ;
+    return CastRounding::RNE;
+  return cast<CastRoundingPolicyAttr>(attr).getValue();
 }
 
 static std::optional<PairKind> getFloatMathKind(Operation *op) {
@@ -108,8 +125,14 @@ static bool isCandidateSupported(Operation *op,
   std::optional<PairKind> kind = getCandidateKind(op);
   if (!kind)
     return false;
-  if (*kind == PairKind::Cast)
-    return capabilities.packedF32ToF16 && hasRtzRounding(cast<CastOp>(op));
+  if (*kind == PairKind::Cast) {
+    CastRounding rounding = getFpConvertRounding(cast<CastOp>(op));
+    if (rounding == CastRounding::RTZ)
+      return capabilities.packedF32ToF16Rtz;
+    if (rounding == CastRounding::RNE)
+      return capabilities.packedF32ToF16Rne;
+    return false;
+  }
   return capabilities.packedF16Math;
 }
 
@@ -186,8 +209,10 @@ getPackedMathCapabilities(Operation *op) {
       waveamdmachine::VPkAddF16Op::isSupportedOnIsa(*isa) &&
       waveamdmachine::VPkMulF16Op::isSupportedOnIsa(*isa) &&
       waveamdmachine::VPkFmaF16Op::isSupportedOnIsa(*isa);
-  capabilities.packedF32ToF16 =
+  capabilities.packedF32ToF16Rtz =
       waveamdmachine::VCvtPkRtzF16F32Op::isSupportedOnIsa(*isa);
+  capabilities.packedF32ToF16Rne =
+      waveamdmachine::VCvtPkF16F32Op::isSupportedOnIsa(*isa);
   return capabilities;
 }
 
@@ -197,6 +222,8 @@ public:
       : builder(func.getContext()), capabilities(capabilities) {}
 
   bool runOnBlock(Block &block) {
+    formPackedCastPackUsers(block);
+
     SmallVector<Operation *, 16> candidates;
     for (Operation &op : block)
       if (isCandidateSupported(&op, capabilities))
@@ -359,6 +386,92 @@ private:
            def->isBeforeInBlock(user);
   }
 
+  std::optional<SmallVector<CastOp, 8>> getPackCastInputs(PackOp pack) {
+    std::optional<int64_t> elements =
+        getPackedF16SimdElements(pack.getResult().getType());
+    if (!elements || *elements != static_cast<int64_t>(pack.getInputs().size()))
+      return std::nullopt;
+
+    SmallVector<CastOp, 8> casts;
+    casts.reserve(pack.getInputs().size());
+    for (Value input : pack.getInputs()) {
+      CastOp castOp = input.getDefiningOp<CastOp>();
+      if (!castOp || castOp->getBlock() != pack->getBlock())
+        return std::nullopt;
+      if (!isCandidateSupported(castOp, capabilities))
+        return std::nullopt;
+      if (!casts.empty() && !compatibleCastPair(casts.front(), castOp))
+        return std::nullopt;
+      casts.push_back(castOp);
+    }
+    return casts;
+  }
+
+  void replacePackedCastPack(PackOp pack, ArrayRef<CastOp> casts) {
+    SmallVector<Value, 8> sources;
+    sources.reserve(casts.size());
+    for (CastOp castOp : casts)
+      sources.push_back(castOp.getSource());
+
+    builder.setInsertionPoint(pack);
+    CastOp firstCast = casts.front();
+    Type sourceType =
+        getPackedSimdType(firstCast.getSource().getType(), casts.size());
+    Value sourcePack =
+        PackOp::create(builder, pack.getLoc(), sourceType, sources).getResult();
+    Value packed =
+        CastOp::create(builder, pack.getLoc(), pack.getResult().getType(),
+                       CastKind::FpConvert, sourcePack,
+                       firstCast.getPolicyAttr())
+            .getResult();
+    pack.getResult().replaceAllUsesWith(packed);
+    pack.erase();
+
+    SmallPtrSet<Operation *, 8> seen;
+    for (CastOp castOp : casts)
+      if (seen.insert(castOp).second && castOp->use_empty())
+        castOp.erase();
+    changed = true;
+  }
+
+  void formPackedCastPackUsers(Block &block) {
+    SmallVector<std::pair<PackOp, SmallVector<CastOp, 8>>, 8> rewrites;
+    for (Operation &op : block) {
+      PackOp pack = dyn_cast<PackOp>(&op);
+      if (!pack)
+        continue;
+      std::optional<SmallVector<CastOp, 8>> casts = getPackCastInputs(pack);
+      if (casts)
+        rewrites.push_back({pack, std::move(*casts)});
+    }
+
+    for (auto &[pack, casts] : rewrites)
+      replacePackedCastPack(pack, casts);
+  }
+
+  void replacePackedRebuildUsers(PackedPair pair) {
+    SmallVector<PackOp, 4> packUsers;
+    for (OpOperand &use : pair.lo.getUses()) {
+      PackOp pack = dyn_cast<PackOp>(use.getOwner());
+      if (!pack || use.getOperandNumber() != 0)
+        continue;
+      if (pack.getInputs().size() != 2 || pack.getInputs()[1] != pair.hi)
+        continue;
+      if (pack.getResult().getType() != pair.packed.getType())
+        continue;
+      if (!canUsePackedValueBefore(pair.packed, pack))
+        continue;
+      packUsers.push_back(pack);
+    }
+
+    for (PackOp pack : packUsers) {
+      pack.getResult().replaceAllUsesWith(pair.packed);
+      vectorizedOps.insert(pack);
+      eraseOps.push_back(pack);
+      changed = true;
+    }
+  }
+
   void replaceLaneUses(Value scalar, Value packed, unsigned lane) {
     for (OpOperand &use : llvm::make_early_inc_range(scalar.getUses())) {
       Operation *owner = use.getOwner();
@@ -376,6 +489,8 @@ private:
   }
 
   void replaceScalarUsers() {
+    for (PackedPair pair : packedPairs)
+      replacePackedRebuildUsers(pair);
     for (PackedPair pair : packedPairs) {
       replaceLaneUses(pair.lo, pair.packed, 0);
       replaceLaneUses(pair.hi, pair.packed, 1);

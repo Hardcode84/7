@@ -1343,4 +1343,22 @@ func.func @m0_delay_inside_uniform_loop_no_dup(
   return
 }
 
+// CHECK-LABEL: func.func @gfx950_packed_cvt_to_readfirstlane_delay
+// CHECK-NEXT: waveamdmachine.v_cvt_pk_f16_f32
+// CHECK-NEXT: waveamdmachine.imm
+// CHECK-NEXT: waveamdmachine.s_nop
+// CHECK-NEXT: waveamdmachine.v_readfirstlane_b32
+func.func @gfx950_packed_cvt_to_readfirstlane_delay(
+    %x: !waveamdmachine.reg<vgpr, 1, 0>,
+    %y: !waveamdmachine.reg<vgpr, 1, 1>) {
+  %h = waveamdmachine.v_cvt_pk_f16_f32 %x, %y
+      : (!waveamdmachine.reg<vgpr, 1, 0>,
+         !waveamdmachine.reg<vgpr, 1, 1>)
+      -> !waveamdmachine.reg<vgpr, 1, 8>
+  %first = waveamdmachine.v_readfirstlane_b32 %h
+      : (!waveamdmachine.reg<vgpr, 1, 8>)
+      -> !waveamdmachine.reg<sgpr, 1, 20>
+  return
+}
+
 }

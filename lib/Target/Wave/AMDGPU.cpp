@@ -436,13 +436,17 @@ private:
     return gfx11Opcode(llvm::AMDGPU::V_CVT_F32_F16V_CVT_F32_F16_t16_e64_gfx11);
   }
   bool usesTrue16Cvt() const { return isGfx11(); }
-  bool supportsCvtPkRtzF16F32() const { return isGfx11(); }
+  bool supportsCvtPkRtzF16F32() const { return isGfx8Or9() || isGfx11(); }
+  bool supportsCvtPkF16F32() const { return isGfx950(isaVersion); }
   bool supportsPackedF16() const {
     return isaVersion.Major == 9 || isaVersion.Major == 11;
   }
   unsigned vCvtPkRtzF16F32() const {
+    if (isGfx8Or9())
+      return llvm::AMDGPU::V_CVT_PKRTZ_F16_F32_e64_vi;
     return gfx11Opcode(llvm::AMDGPU::V_CVT_PK_RTZ_F16_F32_e32_gfx11);
   }
+  unsigned vCvtPkF16F32() const { return llvm::AMDGPU::V_CVT_PK_F16_F32_gfx9; }
   unsigned vPkAddF16() const {
     if (isGfx8Or9())
       return llvm::AMDGPU::V_PK_ADD_F16_vi;
@@ -1456,6 +1460,14 @@ private:
          llvm::MCOperand::createImm(0), llvm::MCOperand::createImm(0)});
   }
 
+  LogicalResult emitPackedCvtVOP3(unsigned opcode, Operation &op) {
+    return emitMC(opcode,
+                  {toMCOperand(op.getResult(0)), llvm::MCOperand::createImm(0),
+                   toMCOperand(op.getOperand(0)), llvm::MCOperand::createImm(0),
+                   toMCOperand(op.getOperand(1)), llvm::MCOperand::createImm(0),
+                   llvm::MCOperand::createImm(0)});
+  }
+
   LogicalResult emitTernaryInt(unsigned opcode, Operation &op) {
     return emitMC(opcode,
                   {toMCOperand(op.getResult(0)), toMCB32(op.getOperand(0)),
@@ -2205,10 +2217,17 @@ private:
     }
     if (isa<waveamdmachine::VCvtPkRtzF16F32Op>(op)) {
       if (!supportsCvtPkRtzF16F32())
-        return op.emitError("v_cvt_pk_rtz_f16_f32 requires gfx11");
+        return op.emitError("v_cvt_pk_rtz_f16_f32 requires gfx8/gfx9/gfx11");
+      if (isGfx8Or9())
+        return emitPackedCvtVOP3(vCvtPkRtzF16F32(), op);
       return emitMC(vCvtPkRtzF16F32(),
                     {toMCOperand(result()), toMCOperand(op.getOperand(0)),
                      toMCOperand(op.getOperand(1))});
+    }
+    if (isa<waveamdmachine::VCvtPkF16F32Op>(op)) {
+      if (!supportsCvtPkF16F32())
+        return op.emitError("v_cvt_pk_f16_f32 requires gfx950");
+      return emitPackedCvtVOP3(vCvtPkF16F32(), op);
     }
     if (isa<waveamdmachine::VPkAddF16Op, waveamdmachine::VPkMulF16Op>(op)) {
       if (!supportsPackedF16())

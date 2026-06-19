@@ -138,8 +138,8 @@ func.func @unsupported_packed_f16_fmax(%a: !wave.simd<vector<2xf16>, 32>, %b: !w
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 func.func @unsupported_packed_f32_to_f16_rounding(%x: !wave.simd<vector<2xf32>, 32>) {
-  // expected-error @below {{packed f32 to f16 lowering supports only rtz rounding}}
-  %h = wave.cast fpconvert %x policy {rounding = #wave.cast_rounding<rne>} : !wave.simd<vector<2xf32>, 32> -> !wave.simd<vector<2xf16>, 32>
+  // expected-error @below {{packed f32 to f16 lowering supports only rne or rtz rounding}}
+  %h = wave.cast fpconvert %x policy {rounding = #wave.cast_rounding<rtp>} : !wave.simd<vector<2xf32>, 32> -> !wave.simd<vector<2xf16>, 32>
   return
 }
 }
@@ -157,9 +157,9 @@ func.func @unsupported_packed_f16_target(%a: !wave.simd<vector<2xf16>, 64>, %b: 
 // -----
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
-func.func @unsupported_packed_f32_to_f16_target(%x: !wave.simd<vector<2xf32>, 64>) {
-  // expected-error @below {{packed f32 to f16 lowering requires gfx11}}
-  %h = wave.cast fpconvert %x policy {rounding = #wave.cast_rounding<rtz>} : !wave.simd<vector<2xf32>, 64> -> !wave.simd<vector<2xf16>, 64>
+func.func @unsupported_packed_f32_to_f16_vector_length(%x: !wave.simd<vector<3xf32>, 64>) {
+  // expected-error @below {{packed f32 to f16 lowering requires matching !wave.simd<vector<2^nxf32>, W> to !wave.simd<vector<2^nxf16>, W>}}
+  %h = wave.cast fpconvert %x policy {rounding = #wave.cast_rounding<rtz>} : !wave.simd<vector<3xf32>, 64> -> !wave.simd<vector<3xf16>, 64>
   return
 }
 }

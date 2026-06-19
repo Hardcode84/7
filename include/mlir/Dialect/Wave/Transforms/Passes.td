@@ -33,9 +33,9 @@ def WaveFormPackedMath : Pass<"wave-form-packed-math"> {
   let summary = "Form packed Wave math ops from scalar lane pairs";
   let description = [{
     Function-local SLP-style formation for adjacent scalar Wave SIMD values.
-    The first version pairs only same-block f32->f16 casts and scalar f16
-    fadd/fmul/fma trees, then materializes wave.pack leaves and wave.extract
-    scalar users around packed vector<2xf16> operations.
+    Pairs same-block supported f32->f16 casts and scalar f16 fadd/fmul/fma
+    trees, then materializes wave.pack leaves and wave.extract scalar users
+    around packed vector<2xf16> operations.
   }];
   let dependentDialects = [
     "func::FuncDialect",

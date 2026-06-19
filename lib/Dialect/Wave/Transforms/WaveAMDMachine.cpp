@@ -71,31 +71,50 @@ static unsigned bitWidth(Type type) {
   return 32;
 }
 
-static bool isVector2F16(Type type) {
-  auto vecTy = dyn_cast<VectorType>(type);
-  return vecTy && vecTy.getRank() == 1 && vecTy.getNumElements() == 2 &&
-         vecTy.getElementType().isF16();
-}
-
-static bool isVector2F32(Type type) {
-  auto vecTy = dyn_cast<VectorType>(type);
-  return vecTy && vecTy.getRank() == 1 && vecTy.getNumElements() == 2 &&
-         vecTy.getElementType().isF32();
-}
-
 static bool isSimdF32(Type type) {
-  auto simdType = dyn_cast<SimdType>(type);
+  SimdType simdType = dyn_cast<SimdType>(type);
   return simdType && simdType.getElementType().isF32();
 }
 
-static bool isSimdPackedF16(Type type) {
-  auto simdType = dyn_cast<SimdType>(type);
-  return simdType && isVector2F16(simdType.getElementType());
+static std::optional<unsigned> getPow2VectorLength(Type type,
+                                                   Type elementType) {
+  VectorType vectorType = dyn_cast<VectorType>(type);
+  if (!vectorType || vectorType.getRank() != 1 || vectorType.isScalable() ||
+      vectorType.getElementType() != elementType)
+    return std::nullopt;
+  int64_t length = vectorType.getNumElements();
+  if (length <= 0 || !llvm::isPowerOf2_64(static_cast<uint64_t>(length)))
+    return std::nullopt;
+  return static_cast<unsigned>(length);
 }
 
-static bool isSimdPackedF32(Type type) {
-  auto simdType = dyn_cast<SimdType>(type);
-  return simdType && isVector2F32(simdType.getElementType());
+static std::optional<unsigned> getSimdPow2VectorLength(Type type,
+                                                       Type elementType) {
+  SimdType simdType = dyn_cast<SimdType>(type);
+  if (!simdType)
+    return std::nullopt;
+  return getPow2VectorLength(simdType.getElementType(), elementType);
+}
+
+static bool isSimdVectorElement(Type type, Type elementType) {
+  SimdType simdType = dyn_cast<SimdType>(type);
+  if (!simdType)
+    return false;
+  VectorType vectorType = dyn_cast<VectorType>(simdType.getElementType());
+  return vectorType && vectorType.getRank() == 1 && !vectorType.isScalable() &&
+         vectorType.getElementType() == elementType;
+}
+
+static std::optional<unsigned> getSimdPackedF16Length(Type type) {
+  return getSimdPow2VectorLength(type, Float16Type::get(type.getContext()));
+}
+
+static std::optional<unsigned> getSimdPackedF32Length(Type type) {
+  return getSimdPow2VectorLength(type, Float32Type::get(type.getContext()));
+}
+
+static bool isSimdPackedF16(Type type) {
+  return getSimdPackedF16Length(type).has_value();
 }
 
 static FailureOr<llvm::AMDGPU::IsaVersion>
@@ -114,14 +133,23 @@ static LogicalResult requirePackedF16Target(Operation *op, StringRef kind) {
   return success();
 }
 
-static LogicalResult requirePackedCvtTarget(CastOp op) {
+static LogicalResult requirePackedRtzCvtTarget(CastOp op) {
   FailureOr<llvm::AMDGPU::IsaVersion> isa =
       getTargetIsaVersion(op, "packed f32 to f16 lowering");
   if (failed(isa))
     return failure();
   if (!waveamdmachine::VCvtPkRtzF16F32Op::isSupportedOnIsa(*isa))
-    return op.emitError("packed f32 to f16 lowering requires gfx11");
+    return op.emitError(
+        "packed rtz f32 to f16 lowering requires gfx8/gfx9/gfx11");
   return success();
+}
+
+static FailureOr<bool> supportsPackedRneCvtTarget(CastOp op) {
+  FailureOr<llvm::AMDGPU::IsaVersion> isa =
+      getTargetIsaVersion(op, "packed f32 to f16 lowering");
+  if (failed(isa))
+    return failure();
+  return waveamdmachine::VCvtPkF16F32Op::isSupportedOnIsa(*isa);
 }
 
 enum class MmaKind {
@@ -3458,20 +3486,91 @@ static LogicalResult selectF32(WaveAMDMachineSelector &S, WaveOp op,
   return success();
 }
 
+static FailureOr<SmallVector<Value>>
+splitVGPRMaterializedWords(WaveAMDMachineSelector &S, Operation *op,
+                           Value value, unsigned words, StringRef name) {
+  waveamdmachine::RegType regType =
+      dyn_cast<waveamdmachine::RegType>(value.getType());
+  if (isa<waveamdmachine::ImmType>(value.getType())) {
+    if (words != 1)
+      return op->emitError(name)
+             << " must lower to " << words << " dword machine value";
+    return SmallVector<Value>{S.ensureVGPRForVSrc1(op->getLoc(), value)};
+  }
+  if (!regType || regType.getWidth() != words)
+    return op->emitError(name)
+           << " must lower to " << words << " dword machine value";
+
+  SmallVector<Value> rawWords;
+  if (words == 1) {
+    rawWords.push_back(value);
+  } else {
+    Type elementType =
+        getRegType(S.builder.getContext(), regType.getRegClass());
+    SmallVector<Type> elementTypes(words, elementType);
+    waveamdmachine::TupleToElementsOp split =
+        waveamdmachine::TupleToElementsOp::create(S.builder, op->getLoc(),
+                                                  elementTypes, value);
+    rawWords.append(split.getElements().begin(), split.getElements().end());
+  }
+
+  SmallVector<Value> vgprWords;
+  vgprWords.reserve(rawWords.size());
+  for (Value word : rawWords)
+    vgprWords.push_back(S.ensureVGPRForVSrc1(op->getLoc(), word));
+  return vgprWords;
+}
+
+static Value joinVGPRWords(WaveAMDMachineSelector &S, Location loc,
+                           ArrayRef<Value> words) {
+  assert(!words.empty() && "expected at least one VGPR word");
+  if (words.size() == 1)
+    return words.front();
+  Type resultType = getRegType(S.builder.getContext(),
+                               waveamdmachine::RegClass::VGPR, words.size());
+  return waveamdmachine::TupleFromElementsOp::create(S.builder, loc, resultType,
+                                                     words)
+      .getTuple();
+}
+
+static unsigned getPackedF16WordCount(unsigned vectorLength) {
+  return (vectorLength + 1) / 2;
+}
+
 template <typename MachineOp, typename WaveOp>
 static LogicalResult selectPackedF16Binary(WaveAMDMachineSelector &S, WaveOp op,
                                            StringRef kind, Value lhs,
                                            Value rhs) {
   if (failed(requirePackedF16Target(op.getOperation(), kind)))
     return failure();
-  auto toVGPR = [&](Value operand) {
-    return S.ensureVGPRForVSrc1(op.getLoc(), S.expect(operand, op));
-  };
-  auto selected = MachineOp::create(
-      S.builder, op.getLoc(),
-      getRegType(S.builder.getContext(), waveamdmachine::RegClass::VGPR),
-      toVGPR(lhs), toVGPR(rhs), false, 0, 3);
-  S.values[op.getResult()] = selected.getResult();
+
+  std::optional<unsigned> vectorLength =
+      getSimdPackedF16Length(op.getResult().getType());
+  if (!vectorLength)
+    return op.emitError("packed f16 ")
+           << kind << " lowering requires !wave.simd<vector<2^nxf16>, W>";
+  unsigned words = getPackedF16WordCount(*vectorLength);
+  FailureOr<SmallVector<Value>> lhsWords = splitVGPRMaterializedWords(
+      S, op.getOperation(), S.expect(lhs, op), words, "lhs");
+  if (failed(lhsWords))
+    return failure();
+  FailureOr<SmallVector<Value>> rhsWords = splitVGPRMaterializedWords(
+      S, op.getOperation(), S.expect(rhs, op), words, "rhs");
+  if (failed(rhsWords))
+    return failure();
+
+  Type vgprType =
+      getRegType(S.builder.getContext(), waveamdmachine::RegClass::VGPR);
+  SmallVector<Value> resultWords;
+  resultWords.reserve(words);
+  for (unsigned index : llvm::seq<unsigned>(0, words)) {
+    Value selected =
+        MachineOp::create(S.builder, op.getLoc(), vgprType, (*lhsWords)[index],
+                          (*rhsWords)[index], false, 0, 3)
+            .getResult();
+    resultWords.push_back(selected);
+  }
+  S.values[op.getResult()] = joinVGPRWords(S, op.getLoc(), resultWords);
   S.eraseIfTopLevel(op);
   return success();
 }
@@ -3482,14 +3581,38 @@ static LogicalResult selectPackedF16Ternary(WaveAMDMachineSelector &S,
                                             Value b, Value c) {
   if (failed(requirePackedF16Target(op.getOperation(), kind)))
     return failure();
-  auto toVGPR = [&](Value operand) {
-    return S.ensureVGPRForVSrc1(op.getLoc(), S.expect(operand, op));
-  };
-  auto selected = MachineOp::create(
-      S.builder, op.getLoc(),
-      getRegType(S.builder.getContext(), waveamdmachine::RegClass::VGPR),
-      toVGPR(a), toVGPR(b), toVGPR(c), false, 0, 7);
-  S.values[op.getResult()] = selected.getResult();
+
+  std::optional<unsigned> vectorLength =
+      getSimdPackedF16Length(op.getResult().getType());
+  if (!vectorLength)
+    return op.emitError("packed f16 ")
+           << kind << " lowering requires !wave.simd<vector<2^nxf16>, W>";
+  unsigned words = getPackedF16WordCount(*vectorLength);
+  FailureOr<SmallVector<Value>> aWords = splitVGPRMaterializedWords(
+      S, op.getOperation(), S.expect(a, op), words, "lhs");
+  if (failed(aWords))
+    return failure();
+  FailureOr<SmallVector<Value>> bWords = splitVGPRMaterializedWords(
+      S, op.getOperation(), S.expect(b, op), words, "rhs");
+  if (failed(bWords))
+    return failure();
+  FailureOr<SmallVector<Value>> cWords = splitVGPRMaterializedWords(
+      S, op.getOperation(), S.expect(c, op), words, "acc");
+  if (failed(cWords))
+    return failure();
+
+  Type vgprType =
+      getRegType(S.builder.getContext(), waveamdmachine::RegClass::VGPR);
+  SmallVector<Value> resultWords;
+  resultWords.reserve(words);
+  for (unsigned index : llvm::seq<unsigned>(0, words)) {
+    Value selected =
+        MachineOp::create(S.builder, op.getLoc(), vgprType, (*aWords)[index],
+                          (*bWords)[index], (*cWords)[index], false, 0, 7)
+            .getResult();
+    resultWords.push_back(selected);
+  }
+  S.values[op.getResult()] = joinVGPRWords(S, op.getLoc(), resultWords);
   S.eraseIfTopLevel(op);
   return success();
 }
@@ -3505,7 +3628,7 @@ static LogicalResult selectFloatBinary(WaveAMDMachineSelector &S, WaveOp op,
                                                   op.getRhs());
   return op.emitError("WaveAMDMachine ")
          << kind << " lowering supports only !wave.simd<f32, W> or "
-         << "!wave.simd<vector<2xf16>, W>";
+         << "!wave.simd<vector<2^nxf16>, W>";
 }
 
 LogicalResult WaveAMDMachineSelector::selectFAdd(FAddOp op) {
@@ -3533,7 +3656,7 @@ LogicalResult WaveAMDMachineSelector::selectFMax(FMaxOp op) {
 LogicalResult WaveAMDMachineSelector::selectFma(FmaOp op) {
   if (!isSimdPackedF16(op.getResult().getType()))
     return op.emitError("WaveAMDMachine fma lowering supports only "
-                        "!wave.simd<vector<2xf16>, W>");
+                        "!wave.simd<vector<2^nxf16>, W>");
   return selectPackedF16Ternary<waveamdmachine::VPkFmaF16Op>(
       *this, op, "fma", op.getLhs(), op.getRhs(), op.getAcc());
 }
@@ -3769,28 +3892,147 @@ static LogicalResult selectI32I64IntConvert(WaveAMDMachineSelector &S,
       "integer/index casts");
 }
 
+static FailureOr<unsigned> getPackedF32ToF16VectorLength(CastOp op) {
+  std::optional<unsigned> sourceLength =
+      getSimdPackedF32Length(op.getSource().getType());
+  std::optional<unsigned> resultLength =
+      getSimdPackedF16Length(op.getResult().getType());
+  if (!sourceLength || !resultLength || *sourceLength != *resultLength)
+    return op.emitError("packed f32 to f16 lowering requires matching "
+                        "!wave.simd<vector<2^nxf32>, W> to "
+                        "!wave.simd<vector<2^nxf16>, W>");
+  return *sourceLength;
+}
+
+static FailureOr<unsigned> getPackedF16ToF32VectorLength(CastOp op) {
+  std::optional<unsigned> sourceLength =
+      getSimdPackedF16Length(op.getSource().getType());
+  std::optional<unsigned> resultLength =
+      getSimdPackedF32Length(op.getResult().getType());
+  if (!sourceLength || !resultLength || *sourceLength != *resultLength)
+    return op.emitError("packed f16 to f32 lowering requires matching "
+                        "!wave.simd<vector<2^nxf16>, W> to "
+                        "!wave.simd<vector<2^nxf32>, W>");
+  return *sourceLength;
+}
+
+static Value createUninitVGPR1(WaveAMDMachineSelector &S, Location loc) {
+  return materializeUninitGPR(S.builder, loc, waveamdmachine::RegClass::VGPR,
+                              1);
+}
+
+template <typename CvtOp>
+static Value emitPackedF32ToF16Cvt(WaveAMDMachineSelector &S, Location loc,
+                                   ArrayRef<Value> sourceWords,
+                                   unsigned vectorLength) {
+  Type vgprType =
+      getRegType(S.builder.getContext(), waveamdmachine::RegClass::VGPR);
+  SmallVector<Value> resultWords;
+  resultWords.reserve(getPackedF16WordCount(vectorLength));
+  for (unsigned index = 0; index < vectorLength; index += 2) {
+    Value hi = index + 1 < vectorLength ? sourceWords[index + 1]
+                                        : createUninitVGPR1(S, loc);
+    Value word = CvtOp::create(S.builder, loc, vgprType, sourceWords[index], hi)
+                     .getResult();
+    resultWords.push_back(word);
+  }
+  return joinVGPRWords(S, loc, resultWords);
+}
+
+static Value emitScalarF32ToF16Pack(WaveAMDMachineSelector &S, Location loc,
+                                    ArrayRef<Value> sourceWords,
+                                    unsigned vectorLength) {
+  Type vgprType =
+      getRegType(S.builder.getContext(), waveamdmachine::RegClass::VGPR);
+  SmallVector<Value> resultWords;
+  resultWords.reserve(getPackedF16WordCount(vectorLength));
+  for (unsigned index = 0; index < vectorLength; index += 2) {
+    Value lo = waveamdmachine::VCvtF16F32Op::create(S.builder, loc, vgprType,
+                                                    sourceWords[index]);
+    lo = maskLowBits(S, loc, lo, 16);
+    if (index + 1 == vectorLength) {
+      resultWords.push_back(lo);
+      continue;
+    }
+    Value hi = waveamdmachine::VCvtF16F32Op::create(S.builder, loc, vgprType,
+                                                    sourceWords[index + 1]);
+    hi = maskLowBits(S, loc, hi, 16);
+    hi = waveamdmachine::VLshlrevB32Op::create(S.builder, loc, vgprType, hi,
+                                               createImm(S.builder, loc, 16));
+    resultWords.push_back(
+        waveamdmachine::VOrB32Op::create(S.builder, loc, vgprType, lo, hi));
+  }
+  return joinVGPRWords(S, loc, resultWords);
+}
+
 static LogicalResult selectPackedF32ToF16Cast(WaveAMDMachineSelector &S,
                                               CastOp op,
                                               CastRounding rounding) {
-  if (rounding != CastRounding::RTZ)
+  if (rounding != CastRounding::RNE && rounding != CastRounding::RTZ)
     return op.emitError(
-        "packed f32 to f16 lowering supports only rtz rounding");
-  if (failed(requirePackedCvtTarget(op)))
+        "packed f32 to f16 lowering supports only rne or rtz rounding");
+
+  FailureOr<unsigned> vectorLength = getPackedF32ToF16VectorLength(op);
+  if (failed(vectorLength))
     return failure();
-  Value source = S.expect(op.getSource(), op);
-  auto sourceReg = dyn_cast<waveamdmachine::RegType>(source.getType());
-  if (!sourceReg || sourceReg.getRegClass() != waveamdmachine::RegClass::VGPR ||
-      sourceReg.getWidth() != 2)
-    return op.emitError("packed f32 source must lower to a VGPR pair");
-  Type vgprType = getRegType(op.getContext(), waveamdmachine::RegClass::VGPR);
-  SmallVector<Type, 2> elementTypes = {vgprType, vgprType};
-  auto split = waveamdmachine::TupleToElementsOp::create(S.builder, op.getLoc(),
-                                                         elementTypes, source);
-  SmallVector<Value, 2> elements(split.getElements().begin(),
-                                 split.getElements().end());
-  auto cvt = waveamdmachine::VCvtPkRtzF16F32Op::create(
-      S.builder, op.getLoc(), vgprType, elements[0], elements[1]);
-  S.values[op.getResult()] = cvt.getResult();
+  FailureOr<SmallVector<Value>> sourceWords = splitVGPRMaterializedWords(
+      S, op.getOperation(), S.expect(op.getSource(), op), *vectorLength,
+      "source");
+  if (failed(sourceWords))
+    return failure();
+
+  if (rounding == CastRounding::RTZ) {
+    if (failed(requirePackedRtzCvtTarget(op)))
+      return failure();
+    S.values[op.getResult()] =
+        emitPackedF32ToF16Cvt<waveamdmachine::VCvtPkRtzF16F32Op>(
+            S, op.getLoc(), *sourceWords, *vectorLength);
+  } else {
+    FailureOr<bool> usePacked = supportsPackedRneCvtTarget(op);
+    if (failed(usePacked))
+      return failure();
+    S.values[op.getResult()] =
+        *usePacked ? emitPackedF32ToF16Cvt<waveamdmachine::VCvtPkF16F32Op>(
+                         S, op.getLoc(), *sourceWords, *vectorLength)
+                   : emitScalarF32ToF16Pack(S, op.getLoc(), *sourceWords,
+                                            *vectorLength);
+  }
+  S.eraseIfTopLevel(op);
+  return success();
+}
+
+static LogicalResult selectPackedF16ToF32Cast(WaveAMDMachineSelector &S,
+                                              CastOp op,
+                                              CastRounding rounding) {
+  if (rounding != CastRounding::RNE)
+    return op.emitError(
+        "packed f16 to f32 lowering supports only rne rounding");
+
+  FailureOr<unsigned> vectorLength = getPackedF16ToF32VectorLength(op);
+  if (failed(vectorLength))
+    return failure();
+  unsigned sourceWordCount = getPackedF16WordCount(*vectorLength);
+  FailureOr<SmallVector<Value>> sourceWords = splitVGPRMaterializedWords(
+      S, op.getOperation(), S.expect(op.getSource(), op), sourceWordCount,
+      "source");
+  if (failed(sourceWords))
+    return failure();
+
+  Type vgprType =
+      getRegType(S.builder.getContext(), waveamdmachine::RegClass::VGPR);
+  SmallVector<Value> resultWords;
+  resultWords.reserve(*vectorLength);
+  for (unsigned index : llvm::seq<unsigned>(0, *vectorLength)) {
+    Value lane = (*sourceWords)[index / 2];
+    if (index % 2)
+      lane = waveamdmachine::VLshrrevB32Op::create(
+          S.builder, op.getLoc(), vgprType, lane,
+          createImm(S.builder, op.getLoc(), 16));
+    lane = maskLowBits(S, op.getLoc(), lane, 16);
+    resultWords.push_back(waveamdmachine::VCvtF32F16Op::create(
+        S.builder, op.getLoc(), vgprType, lane));
+  }
+  S.values[op.getResult()] = joinVGPRWords(S, op.getLoc(), resultWords);
   S.eraseIfTopLevel(op);
   return success();
 }
@@ -3820,7 +4062,7 @@ static LogicalResult selectScalarFpConvert(WaveAMDMachineSelector &S, CastOp op,
   }
   return op.emitError(
       "WaveAMDMachine fpconvert lowering supports only f32/f16 SIMD or "
-      "vector<2xf32> to vector<2xf16> SIMD");
+      "vector<2^nxf32> to vector<2^nxf16> SIMD");
 }
 
 LogicalResult WaveAMDMachineSelector::selectCast(CastOp op) {
@@ -3837,10 +4079,15 @@ LogicalResult WaveAMDMachineSelector::selectCast(CastOp op) {
   Type sourceElement = sourceType.getElementType();
   Type resultElement = resultType.getElementType();
   CastRounding rounding = getFpConvertRounding(op);
+  Type f16Type = Float16Type::get(op.getContext());
+  Type f32Type = Float32Type::get(op.getContext());
 
-  if (isSimdPackedF32(op.getSource().getType()) &&
-      isSimdPackedF16(op.getResult().getType()))
+  if (isSimdVectorElement(op.getSource().getType(), f32Type) &&
+      isSimdVectorElement(op.getResult().getType(), f16Type))
     return selectPackedF32ToF16Cast(*this, op, rounding);
+  if (isSimdVectorElement(op.getSource().getType(), f16Type) &&
+      isSimdVectorElement(op.getResult().getType(), f32Type))
+    return selectPackedF16ToF32Cast(*this, op, rounding);
   return selectScalarFpConvert(*this, op, sourceElement, resultElement,
                                rounding);
 }

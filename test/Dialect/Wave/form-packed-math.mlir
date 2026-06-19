@@ -164,6 +164,59 @@ func.func @pack_extract_only_stays(%v: !wave.simd<vector<2xf16>, 32>)
 
 // -----
 
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
+
+// CHECK-LABEL: func.func @gfx950_rne_cast_pair_reused_by_pack
+// CHECK-SAME: ([[A:%.*]]: !wave.simd<f32, 64>, [[B:%.*]]: !wave.simd<f32, 64>)
+// CHECK: [[SRC:%.*]] = wave.pack [[A]], [[B]]
+// CHECK-SAME: -> !wave.simd<vector<2xf32>, 64>
+// CHECK: [[PACKED:%.*]] = wave.cast fpconvert [[SRC]]
+// CHECK-SAME: -> !wave.simd<vector<2xf16>, 64>
+// CHECK-NOT: wave.extract [[PACKED]]
+// CHECK: return [[PACKED]]
+func.func @gfx950_rne_cast_pair_reused_by_pack(%a: !wave.simd<f32, 64>,
+                                               %b: !wave.simd<f32, 64>)
+    -> !wave.simd<vector<2xf16>, 64> {
+  %x = wave.cast fpconvert %a
+      : !wave.simd<f32, 64> -> !wave.simd<f16, 64>
+  %y = wave.cast fpconvert %b
+      : !wave.simd<f32, 64> -> !wave.simd<f16, 64>
+  %packed = wave.pack %x, %y
+      : !wave.simd<f16, 64>, !wave.simd<f16, 64>
+      -> !wave.simd<vector<2xf16>, 64>
+  return %packed : !wave.simd<vector<2xf16>, 64>
+}
+
+// CHECK-LABEL: func.func @gfx950_rne_cast_quad_reused_by_pack
+// CHECK-SAME: ([[A:%.*]]: !wave.simd<f32, 64>, [[B:%.*]]: !wave.simd<f32, 64>, [[C:%.*]]: !wave.simd<f32, 64>, [[D:%.*]]: !wave.simd<f32, 64>)
+// CHECK: [[SRC:%.*]] = wave.pack [[A]], [[B]], [[C]], [[D]]
+// CHECK-SAME: -> !wave.simd<vector<4xf32>, 64>
+// CHECK: [[PACKED:%.*]] = wave.cast fpconvert [[SRC]]
+// CHECK-SAME: -> !wave.simd<vector<4xf16>, 64>
+// CHECK-NOT: wave.extract [[PACKED]]
+// CHECK: return [[PACKED]]
+func.func @gfx950_rne_cast_quad_reused_by_pack(
+    %a: !wave.simd<f32, 64>, %b: !wave.simd<f32, 64>,
+    %c: !wave.simd<f32, 64>, %d: !wave.simd<f32, 64>)
+    -> !wave.simd<vector<4xf16>, 64> {
+  %x = wave.cast fpconvert %a
+      : !wave.simd<f32, 64> -> !wave.simd<f16, 64>
+  %y = wave.cast fpconvert %b
+      : !wave.simd<f32, 64> -> !wave.simd<f16, 64>
+  %z = wave.cast fpconvert %c
+      : !wave.simd<f32, 64> -> !wave.simd<f16, 64>
+  %w = wave.cast fpconvert %d
+      : !wave.simd<f32, 64> -> !wave.simd<f16, 64>
+  %packed = wave.pack %x, %y, %z, %w
+      : !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>,
+        !wave.simd<f16, 64> -> !wave.simd<vector<4xf16>, 64>
+  return %packed : !wave.simd<vector<4xf16>, 64>
+}
+
+}
+
+// -----
+
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx803"} {
 
 // CHECK-LABEL: func.func @gfx8_f16_math_stays_scalar

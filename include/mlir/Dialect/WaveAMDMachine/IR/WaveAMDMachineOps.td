@@ -733,7 +733,15 @@ def WaveAMDMachine_VCvtPkRtzF16F32Op
                                WaveAMDMachine_VGPR1,
                                WaveAMDMachine_VGPR1,
                                [WaveAMDMachine_VALU]> {
-  let archPredicate = "isa.Major == 11";
+  let archPredicate = "isa.Major == 8 || isa.Major == 9 || isa.Major == 11";
+}
+def WaveAMDMachine_VCvtPkF16F32Op
+    : WaveAMDMachine_BinaryResult<"v_cvt_pk_f16_f32",
+                               WaveAMDMachine_VGPR1,
+                               WaveAMDMachine_VGPR1,
+                               [WaveAMDMachine_VALU]> {
+  let archPredicate =
+      "isa.Major == 9 && isa.Minor == 5 && isa.Stepping == 0";
 }
 def WaveAMDMachine_VPkAddF16Op
     : WaveAMDMachine_PackedBinaryResult<"v_pk_add_f16">;

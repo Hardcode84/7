@@ -28,6 +28,7 @@
 #include "llvm/ADT/Twine.h"
 #include "llvm/ADT/TypeSwitch.h"
 #include "llvm/Support/ErrorHandling.h"
+#include "llvm/Support/MathExtras.h"
 
 #include <array>
 #include <limits>
@@ -1237,8 +1238,8 @@ OpFoldResult ExtractOp::fold(FoldAdaptor) {
 
 static bool isWavePackedF16Type(Type type) {
   VectorType vectorType = dyn_cast<VectorType>(type);
-  return vectorType && vectorType.getRank() == 1 &&
-         vectorType.getNumElements() == 2 &&
+  return vectorType && vectorType.getRank() == 1 && !vectorType.isScalable() &&
+         llvm::isPowerOf2_64(vectorType.getNumElements()) &&
          vectorType.getElementType().isF16();
 }
 
@@ -1254,9 +1255,9 @@ static bool isAllowedWaveFloatElement(Type elementType, bool allowScalarF16,
 static const char *getWaveFloatElementError(bool allowScalarF16,
                                             bool allowPackedF16) {
   if (allowScalarF16 && allowPackedF16)
-    return "SIMD element type must be f32, f16, or vector<2xf16>";
+    return "SIMD element type must be f32, f16, or vector<2^nxf16>";
   if (allowPackedF16)
-    return "SIMD element type must be f32 or vector<2xf16>";
+    return "SIMD element type must be f32 or vector<2^nxf16>";
   return "SIMD element type must be f32";
 }
 
