@@ -226,6 +226,21 @@ def WaveAMDFormFusedInt
   ];
 }
 
+def WaveAMDMachineCleanup
+    : Pass<"waveamd-machine-cleanup"> {
+  let summary = "Hoist redundant WaveAMDMachine prep before scheduling";
+  let description = [{
+    Hoists speculatable, memory-effect-free WaveAMDMachine VALU ops and
+    immediates out of structured EXEC regions when operands are available
+    before the region and non-yield users remain inside it. Ops touching SCC,
+    VCC, EXEC, or M0 stay in place.
+  }];
+  let dependentDialects = [
+    "func::FuncDialect",
+    "waveamdmachine::WaveAMDMachineDialect"
+  ];
+}
+
 def WaveAMDNarrowWideInt
     : Pass<"waveamd-narrow-wide-int"> {
   let summary = "Narrow proven 32-bit addends in wide WaveAMDMachine ops";

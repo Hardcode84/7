@@ -826,7 +826,8 @@ def WaveAMDMachine_VCmpxGeI32Op
     : WaveAMDMachine_VCmpx<"v_cmpx_ge_i32">;
 def WaveAMDMachine_VReadfirstlaneB32Op
     : WaveAMDMachine_UnaryResult<"v_readfirstlane_b32", WaveAMDMachine_VGPR1,
-                              WaveAMDMachine_SGPR1, [WaveAMDMachine_VALU, Pure]>;
+                              WaveAMDMachine_SGPR1,
+                              [WaveAMDMachine_VALU, WaveAMDMachine_ReadsExec]>;
 
 def WaveAMDMachine_WmmaI32_16x16x16_IU8Op
     : WaveAMDMachine_WmmaResult<"wmma_i32_16x16x16_iu8"> {

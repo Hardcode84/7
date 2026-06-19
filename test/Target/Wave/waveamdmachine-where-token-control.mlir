@@ -18,10 +18,10 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // ASM-LABEL: masked_load_other_kernel:
 // ASM: global_load_b32
 // ASM: s_waitcnt vmcnt(0)
+// ASM: v_mov_b32_e32 [[FIVE:v[0-9]+]], 0x40a00000
 // ASM: global_store_b32
 // ASM: s_and_not1_b32 exec_lo
-// ASM: v_mov_b32_e32 {{v[0-9]+}}, 0x40a00000
-// ASM-NEXT: global_store_b32
+// ASM: global_store_b32 {{.*}}, [[FIVE]], off
 // ASM: s_waitcnt_vscnt null, 0x0
 // ASM-NEXT: s_endpgm
 func.func @masked_load_other_kernel(

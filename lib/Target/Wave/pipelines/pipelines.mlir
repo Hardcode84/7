@@ -79,7 +79,17 @@ module attributes {transform.with_named_sequence} {
         : (!transform.any_op) -> !transform.any_op
     %rfi = transform.apply_registered_pass "waveamd-form-fused-int" to %rnwi
         : (!transform.any_op) -> !transform.any_op
-    transform.yield %rfi : !transform.any_op
+    %rcl = transform.apply_registered_pass "waveamd-machine-cleanup" to %rfi
+        : (!transform.any_op) -> !transform.any_op
+    %rfc = transform.apply_registered_pass "canonicalize" to %rcl
+        : (!transform.any_op) -> !transform.any_op
+    %rfcs = transform.apply_registered_pass "cse" to %rfc
+        : (!transform.any_op) -> !transform.any_op
+    %rfl = transform.apply_registered_pass "loop-invariant-code-motion" to %rfcs
+        : (!transform.any_op) -> !transform.any_op
+    %rflc = transform.apply_registered_pass "cse" to %rfl
+        : (!transform.any_op) -> !transform.any_op
+    transform.yield %rflc : !transform.any_op
   }
 
   transform.named_sequence @waveamd_backend_finish(

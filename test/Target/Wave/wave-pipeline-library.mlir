@@ -41,6 +41,18 @@
 // PIPELINE-NEXT: transform.apply_registered_pass "wave-expand-integer-div-rem"
 // PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
 // PIPELINE-NEXT: transform.apply_registered_pass "waveamd-to-machine"
+// PIPELINE: transform.apply_registered_pass "waveamd-form-fused-int"
+// PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
+// PIPELINE-NEXT: transform.apply_registered_pass "waveamd-machine-cleanup"
+// PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
+// PIPELINE-NEXT: transform.apply_registered_pass "canonicalize"
+// PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
+// PIPELINE-NEXT: transform.apply_registered_pass "cse"
+// PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
+// PIPELINE-NEXT: transform.apply_registered_pass "loop-invariant-code-motion"
+// PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
+// PIPELINE-NEXT: transform.apply_registered_pass "cse"
+// PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
 // PIPELINE: transform.apply_registered_pass "waveamd-clear-regalloc-assignments"
 // PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
 // PIPELINE-NEXT: transform.apply_registered_pass "waveamd-preserve-hw-regs"

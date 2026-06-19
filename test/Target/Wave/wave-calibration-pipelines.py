@@ -84,8 +84,10 @@ def check_calibration_entry(label: str, module) -> None:
     with ir.Context():
         parsed = ir.Module.parse(text)
         entry = find_named_sequence(ir, parsed, "__transform_main")
+        lower = find_named_sequence(ir, parsed, "waveamd_backend_lower")
         finish = find_named_sequence(ir, parsed, "waveamd_backend_finish")
         require(label, entry is not None, "missing __transform_main")
+        require(label, lower is not None, "missing backend lower")
         require(label, finish is not None, "missing backend finish")
         includes = included_sequences(ir, entry)
         require(label, "waveamd_backend_lower" in includes, "no lower include")
@@ -97,6 +99,27 @@ def check_calibration_entry(label: str, module) -> None:
             "waveamd-insert-hazard-waits" not in entry_passes,
             "entry spells hazard waits",
         )
+        lower_passes = applied_passes(ir, lower)
+        try:
+            fused = lower_passes.index("waveamd-form-fused-int")
+            cleanup = lower_passes.index("waveamd-machine-cleanup")
+            cleanup_canon = lower_passes.index("canonicalize", cleanup)
+            cleanup_cse = lower_passes.index("cse", cleanup_canon)
+            cleanup_licm = lower_passes.index("loop-invariant-code-motion", cleanup_cse)
+            cleanup_final_cse = lower_passes.index("cse", cleanup_licm)
+        except ValueError as err:
+            require(label, False, f"missing lower pass: {err}")
+        require(
+            label,
+            fused
+            < cleanup
+            < cleanup_canon
+            < cleanup_cse
+            < cleanup_licm
+            < cleanup_final_cse,
+            "cleanup pass order drifted",
+        )
+
         finish_passes = applied_passes(ir, finish)
         try:
             ticket = finish_passes.index("waveamd-insert-ticket-waits")
