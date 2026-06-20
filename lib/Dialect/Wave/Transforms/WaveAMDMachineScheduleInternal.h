@@ -29,7 +29,9 @@ struct NodeMetrics {
   int64_t criticalPath = 0;
   int latency = 0;
   waveamdmachine::FunctionalUnit fu = waveamdmachine::FunctionalUnit::None;
+  unsigned issueCount = 0;
   unsigned issueSlots = 0;
+  unsigned cmaIssueCount = 0;
   bool memory = false;
   bool reachesMemory = false;
   bool cmaIssue = false;
