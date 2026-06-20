@@ -92,6 +92,21 @@ static LogicalResult verifyAVGPRWidth(Operation *op, Value value, int64_t width,
   return success();
 }
 
+static LogicalResult verifyImmediateOrVGPRWidth(Operation *op, Value value,
+                                                int64_t width, StringRef name) {
+  if (isa<ImmType>(value.getType()))
+    return success();
+  return verifyVGPRWidth(op, value, width, name);
+}
+
+static LogicalResult verifyImmediateOrAVGPRWidth(Operation *op, Value value,
+                                                 int64_t width,
+                                                 StringRef name) {
+  if (isa<ImmType>(value.getType()))
+    return success();
+  return verifyAVGPRWidth(op, value, width, name);
+}
+
 static LogicalResult verifySameAVGPRClass(Operation *op, Value lhs, Value rhs,
                                           StringRef name) {
   auto lhsType = cast<RegType>(lhs.getType());
@@ -520,12 +535,13 @@ using VerifyRegWidthFn = LogicalResult (*)(Operation *, Value, int64_t,
 
 static LogicalResult verifyMMA(MMAOpInterface mma, int64_t abWidth,
                                int64_t accWidth,
-                               VerifyRegWidthFn verifyRegWidth) {
+                               VerifyRegWidthFn verifyRegWidth,
+                               VerifyRegWidthFn verifyAccWidth) {
   Operation *op = mma.getOperation();
   if (failed(verifyRegWidth(op, mma.getA(), abWidth, "A operand")) ||
       failed(verifyRegWidth(op, mma.getB(), abWidth, "B operand")) ||
       failed(
-          verifyRegWidth(op, mma.getAcc(), accWidth, "accumulator operand")) ||
+          verifyAccWidth(op, mma.getAcc(), accWidth, "accumulator operand")) ||
       failed(verifyRegWidth(op, mma.getAccResult(), accWidth, "result")))
     return failure();
   return success();
@@ -533,7 +549,8 @@ static LogicalResult verifyMMA(MMAOpInterface mma, int64_t abWidth,
 
 static LogicalResult verifyWMMA(Operation *op, int64_t abWidth) {
   MMAOpInterface mma = cast<MMAOpInterface>(op);
-  return verifyMMA(mma, abWidth, /*accWidth=*/8, verifyVGPRWidth);
+  return verifyMMA(mma, abWidth, /*accWidth=*/8, verifyVGPRWidth,
+                   verifyImmediateOrVGPRWidth);
 }
 
 LogicalResult WmmaI32_16x16x16_IU8Op::verify() {
@@ -551,9 +568,13 @@ LogicalResult WmmaF32_16x16x16_BF16Op::verify() {
 static LogicalResult verifyMFMA(Operation *op, int64_t abWidth,
                                 int64_t accWidth, bool hasScale) {
   MMAOpInterface mma = cast<MMAOpInterface>(op);
-  if (failed(verifyMMA(mma, abWidth, accWidth, verifyAVGPRWidth)))
+  VerifyRegWidthFn verifyAccWidth =
+      hasScale ? verifyAVGPRWidth : verifyImmediateOrAVGPRWidth;
+  if (failed(
+          verifyMMA(mma, abWidth, accWidth, verifyAVGPRWidth, verifyAccWidth)))
     return failure();
-  if (failed(verifySameAVGPRClass(op, mma.getAcc(), mma.getAccResult(),
+  if (!isa<ImmType>(mma.getAcc().getType()) &&
+      failed(verifySameAVGPRClass(op, mma.getAcc(), mma.getAccResult(),
                                   "accumulator/result")))
     return failure();
   if (!hasScale)

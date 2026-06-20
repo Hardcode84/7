@@ -8,13 +8,13 @@
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 
 // SELECT-LABEL: func.func @mfma_gfx950_f16xf32_kernel
-// SELECT: waveamdmachine.mfma_f32_16x16x32_f16{{.*}} : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>) -> !waveamdmachine.reg<vgpr, 4>
+// SELECT: waveamdmachine.mfma_f32_16x16x32_f16{{.*}} : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>, !waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 4>
 
 // PIPELINE-LABEL: func.func @mfma_gfx950_f16xf32_kernel
 // PIPELINE: waveamdmachine.mfma_f32_16x16x32_f16{{.*}} -> !waveamdmachine.reg<vgpr, 4,
 
 // ASM-LABEL: mfma_gfx950_f16xf32_kernel:
-// ASM: v_mfma_f32_16x16x32_f16 [[DST:v\[[0-9]+:[0-9]+\]]], [[A:v\[[0-9]+:[0-9]+\]]], [[B:v\[[0-9]+:[0-9]+\]]], [[C:v\[[0-9]+:[0-9]+\]]]
+// ASM: v_mfma_f32_16x16x32_f16 [[DST:v\[[0-9]+:[0-9]+\]]], [[A:v\[[0-9]+:[0-9]+\]]], [[B:v\[[0-9]+:[0-9]+\]]], 0
 func.func @mfma_gfx950_f16xf32_kernel(%out: !wave.ptr<#wave.global, i32>)
     attributes {wave.kernel} {
   %zero = arith.constant 0 : i32
@@ -51,13 +51,13 @@ func.func @mfma_gfx950_f16xf32_kernel(%out: !wave.ptr<#wave.global, i32>)
 }
 
 // SELECT-LABEL: func.func @mfma_gfx950_f16_32x32x16_kernel
-// SELECT: waveamdmachine.mfma_f32_32x32x16_f16{{.*}} : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 16>) -> !waveamdmachine.reg<vgpr, 16>
+// SELECT: waveamdmachine.mfma_f32_32x32x16_f16{{.*}} : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>, !waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 16>
 
 // PIPELINE-LABEL: func.func @mfma_gfx950_f16_32x32x16_kernel
 // PIPELINE: waveamdmachine.mfma_f32_32x32x16_f16{{.*}} -> !waveamdmachine.reg<vgpr, 16,
 
 // ASM-LABEL: mfma_gfx950_f16_32x32x16_kernel:
-// ASM: v_mfma_f32_32x32x16_f16 [[DST:v\[[0-9]+:[0-9]+\]]], [[A:v\[[0-9]+:[0-9]+\]]], [[B:v\[[0-9]+:[0-9]+\]]], [[C:v\[[0-9]+:[0-9]+\]]]
+// ASM: v_mfma_f32_32x32x16_f16 [[DST:v\[[0-9]+:[0-9]+\]]], [[A:v\[[0-9]+:[0-9]+\]]], [[B:v\[[0-9]+:[0-9]+\]]], 0
 func.func @mfma_gfx950_f16_32x32x16_kernel(
     %out: !wave.ptr<#wave.global, i32>) attributes {wave.kernel} {
   %zero = arith.constant 0 : i32
@@ -189,13 +189,13 @@ func.func @mfma_gfx950_mxfp4_transposed_scale_kernel(%out: !wave.ptr<#wave.globa
 }
 
 // SELECT-LABEL: func.func @mfma_gfx950_bf16xf32_kernel
-// SELECT: waveamdmachine.mfma_f32_16x16x32_bf16{{.*}} : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>) -> !waveamdmachine.reg<vgpr, 4>
+// SELECT: waveamdmachine.mfma_f32_16x16x32_bf16{{.*}} : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>, !waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 4>
 
 // PIPELINE-LABEL: func.func @mfma_gfx950_bf16xf32_kernel
 // PIPELINE: waveamdmachine.mfma_f32_16x16x32_bf16{{.*}} -> !waveamdmachine.reg<vgpr, 4,
 
 // ASM-LABEL: mfma_gfx950_bf16xf32_kernel:
-// ASM: v_mfma_f32_16x16x32_bf16 [[DST:v\[[0-9]+:[0-9]+\]]], [[A:v\[[0-9]+:[0-9]+\]]], [[B:v\[[0-9]+:[0-9]+\]]], [[C:v\[[0-9]+:[0-9]+\]]]
+// ASM: v_mfma_f32_16x16x32_bf16 [[DST:v\[[0-9]+:[0-9]+\]]], [[A:v\[[0-9]+:[0-9]+\]]], [[B:v\[[0-9]+:[0-9]+\]]], 0
 func.func @mfma_gfx950_bf16xf32_kernel(%out: !wave.ptr<#wave.global, i32>)
     attributes {wave.kernel} {
   %zero = arith.constant 0 : i32
@@ -232,13 +232,13 @@ func.func @mfma_gfx950_bf16xf32_kernel(%out: !wave.ptr<#wave.global, i32>)
 }
 
 // SELECT-LABEL: func.func @mfma_gfx950_bf16_32x32x16_kernel
-// SELECT: waveamdmachine.mfma_f32_32x32x16_bf16{{.*}} : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 16>) -> !waveamdmachine.reg<vgpr, 16>
+// SELECT: waveamdmachine.mfma_f32_32x32x16_bf16{{.*}} : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>, !waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 16>
 
 // PIPELINE-LABEL: func.func @mfma_gfx950_bf16_32x32x16_kernel
 // PIPELINE: waveamdmachine.mfma_f32_32x32x16_bf16{{.*}} -> !waveamdmachine.reg<vgpr, 16,
 
 // ASM-LABEL: mfma_gfx950_bf16_32x32x16_kernel:
-// ASM: v_mfma_f32_32x32x16_bf16 [[DST:v\[[0-9]+:[0-9]+\]]], [[A:v\[[0-9]+:[0-9]+\]]], [[B:v\[[0-9]+:[0-9]+\]]], [[C:v\[[0-9]+:[0-9]+\]]]
+// ASM: v_mfma_f32_32x32x16_bf16 [[DST:v\[[0-9]+:[0-9]+\]]], [[A:v\[[0-9]+:[0-9]+\]]], [[B:v\[[0-9]+:[0-9]+\]]], 0
 func.func @mfma_gfx950_bf16_32x32x16_kernel(
     %out: !wave.ptr<#wave.global, i32>) attributes {wave.kernel} {
   %zero = arith.constant 0 : i32

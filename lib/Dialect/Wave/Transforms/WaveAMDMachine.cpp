@@ -33,6 +33,7 @@
 #include "mlir/Interfaces/InferIntRangeInterface.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringMap.h"
 #include "llvm/ADT/StringSwitch.h"
@@ -271,6 +272,18 @@ static Value createMachineMma(MmaKind kind, OpBuilder &builder, Location loc,
   return info->create(builder, loc, resultType, a, b, acc);
 }
 
+static Value foldZeroMmaAccumulator(Value selectedAcc,
+                                    SmallVectorImpl<Operation *> &foldedFills) {
+  auto fill = selectedAcc.getDefiningOp<waveamdmachine::VMovB32TupleOp>();
+  if (!fill)
+    return selectedAcc;
+  auto imm = fill.getSource().getDefiningOp<waveamdmachine::ImmOp>();
+  if (!imm || imm.getValue() != 0)
+    return selectedAcc;
+  foldedFills.push_back(fill);
+  return fill.getSource();
+}
+
 static LogicalResult noteWaveWidth(Operation *diagOp,
                                    std::optional<unsigned> &required,
                                    unsigned width) {
@@ -394,6 +407,18 @@ validateMachineSelectionTarget(WaveAMDMachineSelector &selector) {
   return success();
 }
 
+static void eraseDeadFoldedMmaAccumulatorFills(ArrayRef<Operation *> fills) {
+  SmallPtrSet<Operation *, 8> seen;
+  SmallVector<Operation *> deadOps;
+  for (Operation *fill : fills) {
+    if (!seen.insert(fill).second || !fill->use_empty())
+      continue;
+    deadOps.push_back(fill);
+  }
+  for (Operation *op : llvm::reverse(deadOps))
+    op->erase();
+}
+
 LogicalResult WaveAMDMachineSelector::run() {
   if (failed(validateMachineSelectionTarget(*this)))
     return failure();
@@ -414,6 +439,8 @@ LogicalResult WaveAMDMachineSelector::run() {
 
   for (Operation *op : llvm::reverse(opsToErase))
     op->erase();
+
+  eraseDeadFoldedMmaAccumulatorFills(foldedMmaAccumulatorFills);
 
   auto oldType = func.getFunctionType();
   func.setType(
@@ -6161,7 +6188,8 @@ LogicalResult WaveAMDMachineSelector::selectMma(waveamd::MmaOp op) {
                               resultType.getRegisters());
   Value a = expect(op.getA(), op);
   Value b = expect(op.getB(), op);
-  Value acc = expect(op.getAcc(), op);
+  Value acc = foldZeroMmaAccumulator(expect(op.getAcc(), op),
+                                     foldedMmaAccumulatorFills);
   Value result =
       createMachineMma(mmaKind, builder, op.getLoc(), vgprTuple, a, b, acc);
   if (!result)

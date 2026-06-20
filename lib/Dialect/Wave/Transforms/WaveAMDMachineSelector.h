@@ -245,6 +245,7 @@ public:
   DenseMap<Value, PointerOffset> indexOffsets;
   DenseMap<Value, bool> pointerBuffers;
   SmallVector<Operation *> opsToErase;
+  SmallVector<Operation *> foldedMmaAccumulatorFills;
   std::optional<unsigned> targetIsaMajor;
   unsigned nextLabel = 0;
 

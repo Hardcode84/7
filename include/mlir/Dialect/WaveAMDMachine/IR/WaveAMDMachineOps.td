@@ -199,6 +199,19 @@ def WaveAMDMachine_AVGPR
                  "::llvm::cast<::mlir::waveamdmachine::RegType>($_self).getRegClass() == ::mlir::waveamdmachine::RegClass::AGPR)">,
            "WaveAMDMachine VGPR or AGPR register">;
 
+def WaveAMDMachine_VGPROrImm
+    : Type<CPred<"(::llvm::isa<::mlir::waveamdmachine::RegType>($_self) && "
+                 "::llvm::cast<::mlir::waveamdmachine::RegType>($_self).getRegClass() == ::mlir::waveamdmachine::RegClass::VGPR) || "
+                 "::llvm::isa<::mlir::waveamdmachine::ImmType>($_self)">,
+           "WaveAMDMachine VGPR register or immediate">;
+
+def WaveAMDMachine_AVGPROrImm
+    : Type<CPred<"(::llvm::isa<::mlir::waveamdmachine::RegType>($_self) && "
+                 "(::llvm::cast<::mlir::waveamdmachine::RegType>($_self).getRegClass() == ::mlir::waveamdmachine::RegClass::VGPR || "
+                 "::llvm::cast<::mlir::waveamdmachine::RegType>($_self).getRegClass() == ::mlir::waveamdmachine::RegClass::AGPR)) || "
+                 "::llvm::isa<::mlir::waveamdmachine::ImmType>($_self)">,
+           "WaveAMDMachine VGPR/AGPR register or immediate">;
+
 // SCC is the status condition code: a 1-bit hardware register implicitly
 // written by scalar ALU ops (s_cmp_*, s_add_i32 carry-out, ...) and read
 // by s_cbranch_scc0/1. There is exactly one physical SCC, so the
@@ -361,22 +374,24 @@ class WaveAMDMachine_TernaryResult<string mnemonic, Type operandType, Type resul
   let assemblyFormat = "$a `,` $b `,` $c attr-dict `:` functional-type(operands, results)";
 }
 
-class WaveAMDMachine_MmaResult<string mnemonic, Type operandType, Type resultType,
-                               list<Trait> traits = []>
+class WaveAMDMachine_MmaResult<string mnemonic, Type operandType, Type accType,
+                               Type resultType, list<Trait> traits = []>
     : WaveAMDMachine_Op<mnemonic,
                         !listconcat(traits,
                                     [WaveAMDMachine_MMAOpInterface, Pure])> {
-  let arguments = (ins operandType:$a, operandType:$b, operandType:$acc);
+  let arguments = (ins operandType:$a, operandType:$b, accType:$acc);
   let results = (outs resultType:$result);
   let assemblyFormat = "$a `,` $b `,` $acc attr-dict `:` functional-type(operands, results)";
 }
 
 class WaveAMDMachine_WmmaResult<string mnemonic>
     : WaveAMDMachine_MmaResult<mnemonic, WaveAMDMachine_VGPR,
+                               WaveAMDMachine_VGPROrImm,
                                WaveAMDMachine_VGPR, [WaveAMDMachine_VALU]>;
 
 class WaveAMDMachine_MfmaResult<string mnemonic>
     : WaveAMDMachine_MmaResult<mnemonic, WaveAMDMachine_AVGPR,
+                               WaveAMDMachine_AVGPROrImm,
                                WaveAMDMachine_AVGPR,
                                [WaveAMDMachine_VALU, WaveAMDMachine_MFMA,
                                 WaveAMDMachine_ReadsExec]>;

@@ -56,4 +56,21 @@ func.func @fold_fixed_write_bridge() attributes {wave.kernel} {
   return
 }
 
+// CHECK-LABEL: func.func @mfma_zero_literal_acc_no_bridge
+// CHECK-NOT: waveamdmachine.v_accvgpr
+// CHECK: %[[ZERO:.*]] = waveamdmachine.imm 0
+// CHECK: waveamdmachine.mfma_f32_16x16x32_f16 {{.*}}, {{.*}}, %[[ZERO]]
+// CHECK-SAME: !waveamdmachine.imm) -> !waveamdmachine.reg<agpr, 4,
+// CHECK: waveamdmachine.s_endpgm
+func.func @mfma_zero_literal_acc_no_bridge() attributes {wave.kernel} {
+  %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+  %a = waveamdmachine.uninit : !waveamdmachine.reg<agpr, 4>
+  %b = waveamdmachine.uninit : !waveamdmachine.reg<agpr, 4>
+  %mfma = waveamdmachine.mfma_f32_16x16x32_f16 %a, %b, %zero
+      : (!waveamdmachine.reg<agpr, 4>, !waveamdmachine.reg<agpr, 4>,
+         !waveamdmachine.imm) -> !waveamdmachine.reg<agpr, 4>
+  waveamdmachine.s_endpgm
+  return
+}
+
 }
