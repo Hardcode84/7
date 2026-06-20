@@ -51,8 +51,9 @@ func.func @i8_pair_uses_b16(%in: !wave.ptr<#wave.global, i8>,
 
 // CHECK-LABEL: func.func @i8_quad_pack_extract_uses_b32
 // CHECK: waveamdmachine.global_load_b32
-// CHECK: waveamdmachine.v_lshrrev_b32
-// CHECK: waveamdmachine.v_lshlrev_b32
+// CHECK-NOT: waveamdmachine.v_lshrrev_b32
+// CHECK-NOT: waveamdmachine.v_lshlrev_b32
+// CHECK-NOT: waveamdmachine.v_or_b32
 // CHECK: waveamdmachine.global_store_b32
 func.func @i8_quad_pack_extract_uses_b32(%in: !wave.ptr<#wave.global, i8>,
                                          %out: !wave.ptr<#wave.global, i8>)

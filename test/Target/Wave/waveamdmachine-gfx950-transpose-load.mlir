@@ -65,6 +65,62 @@ func.func @transpose_load_b16_datatypes()
   return
 }
 
+// MACHINE-LABEL: func.func @transpose_load_b16_pack_words
+// MACHINE: waveamdmachine.ds_read_tr_b64_b16
+// MACHINE: waveamdmachine.ds_read_tr_b64_b16
+// MACHINE-NOT: waveamdmachine.v_and_b32
+// MACHINE-NOT: waveamdmachine.v_lshrrev_b32
+// MACHINE-NOT: waveamdmachine.v_or_b32
+// MACHINE: waveamdmachine.global_store_tuple_b32
+func.func @transpose_load_b16_pack_words(%out: !wave.ptr<#wave.global, f16>)
+    attributes {wave.kernel, waveamdmachine.lds_size = 256 : i64} {
+  %lane = wave.lane_id : !wave.simd<i32, 64>
+  %lds = wave.lds_base : !wave.ptr<#wave.shared, f16>
+  %ptr0 = wave.ptr_add %lds, %lane
+      : !wave.ptr<#wave.shared, f16>, !wave.simd<i32, 64>
+      -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
+  %lo, %tok0 = waveamd.transpose_load %ptr0
+      : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>)
+        -> (!wave.simd<vector<4xf16>, 64>, !wave.mem.token)
+  %c4 = arith.constant 4 : i32
+  %step = wave.splat %c4 : i32 -> !wave.simd<i32, 64>
+  %ptr1 = wave.ptr_add %ptr0, %step
+      : !wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.simd<i32, 64>
+      -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
+  %hi, %tok1 = waveamd.transpose_load %ptr1 after %tok0
+      : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token)
+        -> (!wave.simd<vector<4xf16>, 64>, !wave.mem.token)
+  %e0 = wave.extract %lo[0]
+      : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+  %e1 = wave.extract %lo[1]
+      : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+  %e2 = wave.extract %lo[2]
+      : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+  %e3 = wave.extract %lo[3]
+      : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+  %e4 = wave.extract %hi[0]
+      : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+  %e5 = wave.extract %hi[1]
+      : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+  %e6 = wave.extract %hi[2]
+      : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+  %e7 = wave.extract %hi[3]
+      : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+  %packed = wave.pack %e0, %e1, %e2, %e3, %e4, %e5, %e6, %e7
+      : !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>,
+        !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>,
+        !wave.simd<f16, 64>, !wave.simd<f16, 64>
+        -> !wave.simd<vector<8xf16>, 64>
+  %out_ptr = wave.ptr_add %out, %lane
+      : !wave.ptr<#wave.global, f16>, !wave.simd<i32, 64>
+      -> !wave.simd<!wave.ptr<#wave.global, f16>, 64>
+  %store = wave.store %packed -> %out_ptr after %tok1
+      : (!wave.simd<vector<8xf16>, 64>,
+         !wave.simd<!wave.ptr<#wave.global, f16>, 64>, !wave.mem.token)
+      -> !wave.mem.token
+  return
+}
+
 // MACHINE-LABEL: func.func @transpose_load_b96_b6
 // MACHINE: waveamdmachine.ds_read_tr_b96_b6
 

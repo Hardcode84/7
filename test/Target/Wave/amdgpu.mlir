@@ -232,6 +232,7 @@ func.func @wave_lds_tuple_echo(%in: !wave.ptr<#wave.global, i32>,
   // CHECK: s_waitcnt lgkmcnt(0)
   // CHECK: s_barrier
   %barrier_token = wave.barrier %store_token : (!wave.mem.token) -> !wave.mem.token
+  // CHECK-NOT: v_add_co
   // CHECK: ds_load_b128 {{v\[[0-9]+:[0-9]+\]}}, {{v[0-9]+}}
   // CHECK: ds_load_b128 {{v\[[0-9]+:[0-9]+\]}}, {{v[0-9]+}} offset:16
   %loaded:2 = wave.load %lds_ptrs after %barrier_token : (!wave.simd<!wave.ptr<#wave.shared, i32>, 32>, !wave.mem.token) -> (!wave.simd<vector<8xi32>, 32>, !wave.mem.token)

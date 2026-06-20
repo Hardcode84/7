@@ -167,6 +167,90 @@ func.func @select_mask_lane(%limit: i32) -> i32 {
   return %bits : i32
 }
 
+// SELECT-LABEL: func.func @select_mask_and_false
+// SELECT: waveamdmachine.s_and_b32
+// SELECT-NOT: waveamdmachine.s_xor_b32
+// ASM-LABEL: select_mask_and_false:
+// ASM: s_and_b32
+// ASM-NOT: s_xor_b32
+func.func @select_mask_and_false(%limit: i32, %other: i32) -> i32 {
+  %lane = wave.lane_id : !wave.simd<i32, 32>
+  %vlimit = wave.splat %limit : i32 -> !wave.simd<i32, 32>
+  %vother = wave.splat %other : i32 -> !wave.simd<i32, 32>
+  %m0 = wave.cmpi ult %lane, %vlimit
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.mask<32>
+  %m1 = wave.cmpi ult %lane, %vother
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.mask<32>
+  %false = wave.constant false -> !wave.mask<32>
+  %r = wave.select %m0, %m1, %false : !wave.mask<32>, !wave.mask<32>
+  %bits = wave.ballot %r : !wave.mask<32> -> i32
+  return %bits : i32
+}
+
+// SELECT-LABEL: func.func @select_mask_or_true
+// SELECT: waveamdmachine.s_or_b32
+// SELECT-NOT: waveamdmachine.s_xor_b32
+// ASM-LABEL: select_mask_or_true:
+// ASM: s_or_b32
+// ASM-NOT: s_xor_b32
+func.func @select_mask_or_true(%limit: i32, %other: i32) -> i32 {
+  %lane = wave.lane_id : !wave.simd<i32, 32>
+  %vlimit = wave.splat %limit : i32 -> !wave.simd<i32, 32>
+  %vother = wave.splat %other : i32 -> !wave.simd<i32, 32>
+  %m0 = wave.cmpi ult %lane, %vlimit
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.mask<32>
+  %m1 = wave.cmpi ult %lane, %vother
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.mask<32>
+  %true = wave.constant true -> !wave.mask<32>
+  %r = wave.select %m0, %true, %m1 : !wave.mask<32>, !wave.mask<32>
+  %bits = wave.ballot %r : !wave.mask<32> -> i32
+  return %bits : i32
+}
+
+// SELECT-LABEL: func.func @select_mask_false_false_constants
+// SELECT-NOT: waveamdmachine.s_and_b32
+// SELECT-NOT: waveamdmachine.s_or_b32
+// SELECT-NOT: waveamdmachine.s_xor_b32
+// SELECT: return
+// ASM-LABEL: select_mask_false_false_constants:
+// ASM-NOT: s_and_b32
+// ASM-NOT: s_or_b32
+// ASM-NOT: s_xor_b32
+// ASM: s_setpc_b64
+func.func @select_mask_false_false_constants(%limit: i32) -> i32 {
+  %lane = wave.lane_id : !wave.simd<i32, 32>
+  %vlimit = wave.splat %limit : i32 -> !wave.simd<i32, 32>
+  %m0 = wave.cmpi ult %lane, %vlimit
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.mask<32>
+  %false0 = wave.constant false -> !wave.mask<32>
+  %false1 = wave.constant false -> !wave.mask<32>
+  %r = wave.select %m0, %false0, %false1 : !wave.mask<32>, !wave.mask<32>
+  %bits = wave.ballot %r : !wave.mask<32> -> i32
+  return %bits : i32
+}
+
+// SELECT-LABEL: func.func @select_mask_true_true_constants
+// SELECT-NOT: waveamdmachine.s_and_b32
+// SELECT-NOT: waveamdmachine.s_or_b32
+// SELECT-NOT: waveamdmachine.s_xor_b32
+// SELECT: return
+// ASM-LABEL: select_mask_true_true_constants:
+// ASM-NOT: s_and_b32
+// ASM-NOT: s_or_b32
+// ASM-NOT: s_xor_b32
+// ASM: s_setpc_b64
+func.func @select_mask_true_true_constants(%limit: i32) -> i32 {
+  %lane = wave.lane_id : !wave.simd<i32, 32>
+  %vlimit = wave.splat %limit : i32 -> !wave.simd<i32, 32>
+  %m0 = wave.cmpi ult %lane, %vlimit
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.mask<32>
+  %true0 = wave.constant true -> !wave.mask<32>
+  %true1 = wave.constant true -> !wave.mask<32>
+  %r = wave.select %m0, %true0, %true1 : !wave.mask<32>, !wave.mask<32>
+  %bits = wave.ballot %r : !wave.mask<32> -> i32
+  return %bits : i32
+}
+
 // SELECT-LABEL: func.func @select_lane_pointer
 // SELECT: waveamdmachine.v_cndmask_b32_tuple
 // SELECT: waveamdmachine.global_store_b32

@@ -2607,6 +2607,26 @@ FailureOr<Value> materializePointerOffsetCarry(WaveAMDMachineSelector &S,
   return materializeLanePointerOffsetCarry(S, user, offset);
 }
 
+static FailureOr<Value>
+materializeFullAddressLowDword(WaveAMDMachineSelector &S, Operation *user,
+                               Value base, const AddressPlan &plan) {
+  AddressPlanBindings bindings = materializeAddressPlanBindings(S, user, plan);
+  FailureOr<sym::ExprHandle> expr = planCompleteAddressExpr(S, plan);
+  if (failed(expr))
+    return failure();
+  Value addr = extractLowDword(S, user->getLoc(), base);
+  if (*expr) {
+    bool useWide = needsWideAddressMaterialization(*expr, plan);
+    bool isUniform = classifyPlanExpr(S, plan, *expr) != TermKind::Lane;
+    FailureOr<Value> offset = materializePlanLowDword(
+        S, user, *expr, bindings, plan.assumptions, useWide, isUniform);
+    if (failed(offset))
+      return failure();
+    addr = S.addByteOffsets(user->getLoc(), addr, *offset);
+  }
+  return addr;
+}
+
 FailureOr<MaterializedLdsAddress>
 materializeLdsAddress(WaveAMDMachineSelector &S, Operation *user, Value base,
                       const PointerOffset &offset,
@@ -2615,20 +2635,21 @@ materializeLdsAddress(WaveAMDMachineSelector &S, Operation *user, Value base,
   if (failed(plan))
     return failure();
   if (plan->fullAddressRemainderExpr) {
-    FailureOr<Value> wideAddr =
-        materializeFullPlanAddress(S, user, base, *plan);
-    if (failed(wideAddr))
+    FailureOr<Value> lowAddr =
+        materializeFullAddressLowDword(S, user, base, *plan);
+    if (failed(lowAddr))
       return failure();
-    Value addr = S.ensureVGPRForVSrc1(
-        user->getLoc(), extractLowDword(S, user->getLoc(), *wideAddr));
+    Value addr = S.ensureVGPRForVSrc1(user->getLoc(), *lowAddr);
     return MaterializedLdsAddress{addr, 0};
   }
   FailureOr<WaveAMDMachineSelector::BucketedOperands> buckets =
       materializePlanBuckets(S, user, *plan, spec);
   if (failed(buckets))
     return failure();
-  Value addr = S.ensureVGPRForVSrc1(
-      user->getLoc(), S.addByteOffsets(user->getLoc(), base, buckets->voffset));
+  Value lowAddress = buckets->voffset;
+  if (!isLocalZero(S, base))
+    lowAddress = S.addByteOffsets(user->getLoc(), base, buckets->voffset);
+  Value addr = S.ensureVGPRForVSrc1(user->getLoc(), lowAddress);
   return MaterializedLdsAddress{addr, buckets->instOffset};
 }
 
@@ -3767,6 +3788,48 @@ getSimdVectorPayloadShape(Operation *op, Type type, StringRef kind) {
       [&](const Twine &msg) { return op->emitError(msg); });
 }
 
+static std::optional<VectorType> getSimdVectorTypeNoDiag(Type type) {
+  auto simdType = dyn_cast<SimdType>(type);
+  if (!simdType)
+    return std::nullopt;
+  auto vecType = dyn_cast<VectorType>(simdType.getElementType());
+  if (!vecType || vecType.getRank() != 1)
+    return std::nullopt;
+  return vecType;
+}
+
+static bool isMemoryPayloadElementBits(unsigned bits) {
+  return bits == 4 || bits == 8 || bits == 16 || bits == 32;
+}
+
+static std::optional<unsigned> getVectorPayloadBits(VectorType vecType,
+                                                    unsigned elementBits) {
+  uint64_t payloadBits = vecType.getNumElements() * elementBits;
+  if (payloadBits != 16 && payloadBits % 32 != 0)
+    return std::nullopt;
+  return static_cast<unsigned>(payloadBits);
+}
+
+static std::optional<MemoryPayloadShape>
+getSimdVectorPayloadShapeNoDiag(Type type) {
+  std::optional<VectorType> vecType = getSimdVectorTypeNoDiag(type);
+  if (!vecType)
+    return std::nullopt;
+  Type elementType = vecType->getElementType();
+  if (!elementType.isIntOrFloat())
+    return std::nullopt;
+  unsigned elementBits = elementType.getIntOrFloatBitWidth();
+  if (!isMemoryPayloadElementBits(elementBits))
+    return std::nullopt;
+  std::optional<unsigned> payloadBits =
+      getVectorPayloadBits(*vecType, elementBits);
+  if (!payloadBits)
+    return std::nullopt;
+  return MemoryPayloadShape{elementBits, *payloadBits,
+                            *payloadBits <= 32 ? 1 : *payloadBits / 32,
+                            *payloadBits == 8, *payloadBits == 16};
+}
+
 static Value maskLowBits(WaveAMDMachineSelector &S, Location loc, Value value,
                          unsigned bits) {
   if (bits == 32)
@@ -3778,6 +3841,116 @@ static Value maskLowBits(WaveAMDMachineSelector &S, Location loc, Value value,
                                            mask);
 }
 
+struct WordAlignedExtractPackWord {
+  Value source;
+  unsigned sourceWordIndex;
+  unsigned sourceRegisters;
+};
+
+static std::optional<SmallVector<WordAlignedExtractPackWord>>
+matchWordAlignedExtractPack(PackOp op);
+
+static bool isExtractFrom(Value value, Value source, unsigned index) {
+  ExtractOp extract = value.getDefiningOp<ExtractOp>();
+  return extract && extract.getSource() == source &&
+         extract.getIndex() == index;
+}
+
+static bool hasSequentialExtracts(ValueRange inputs, unsigned inputIndex,
+                                  unsigned elementsPerWord, Value source,
+                                  unsigned firstSourceElement) {
+  for (unsigned element = 1; element < elementsPerWord; ++element)
+    if (!isExtractFrom(inputs[inputIndex + element], source,
+                       firstSourceElement + element))
+      return false;
+  return true;
+}
+
+static std::optional<WordAlignedExtractPackWord>
+matchWordAlignedExtractPackWord(PackOp op, const MemoryPayloadShape &shape,
+                                unsigned wordIndex, unsigned elementsPerWord) {
+  unsigned inputIndex = wordIndex * elementsPerWord;
+  ExtractOp firstExtract =
+      op.getInputs()[inputIndex].getDefiningOp<ExtractOp>();
+  if (!firstExtract)
+    return std::nullopt;
+
+  Value source = firstExtract.getSource();
+  std::optional<MemoryPayloadShape> sourceShape =
+      getSimdVectorPayloadShapeNoDiag(source.getType());
+  if (!sourceShape || sourceShape->elementBits != shape.elementBits)
+    return std::nullopt;
+
+  unsigned firstSourceElement = firstExtract.getIndex();
+  if (firstSourceElement % elementsPerWord != 0)
+    return std::nullopt;
+  unsigned sourceWordIndex = firstSourceElement / elementsPerWord;
+  if (sourceWordIndex >= sourceShape->registers)
+    return std::nullopt;
+  if (!hasSequentialExtracts(op.getInputs(), inputIndex, elementsPerWord,
+                             source, firstSourceElement))
+    return std::nullopt;
+  return WordAlignedExtractPackWord{source, sourceWordIndex,
+                                    sourceShape->registers};
+}
+
+static std::optional<SmallVector<WordAlignedExtractPackWord>>
+matchWordAlignedExtractPack(PackOp op) {
+  std::optional<MemoryPayloadShape> shape =
+      getSimdVectorPayloadShapeNoDiag(op.getResult().getType());
+  if (!shape || shape->elementBits == 0 || 32 % shape->elementBits != 0)
+    return std::nullopt;
+  unsigned elementsPerWord = 32 / shape->elementBits;
+  if (op.getInputs().size() != shape->registers * elementsPerWord)
+    return std::nullopt;
+
+  SmallVector<WordAlignedExtractPackWord> words;
+  words.reserve(shape->registers);
+  for (unsigned wordIndex = 0; wordIndex < shape->registers; ++wordIndex) {
+    std::optional<WordAlignedExtractPackWord> word =
+        matchWordAlignedExtractPackWord(op, *shape, wordIndex, elementsPerWord);
+    if (!word)
+      return std::nullopt;
+    words.push_back(*word);
+  }
+  return words;
+}
+
+static bool isUsedOnlyByWordAlignedExtractPacks(ExtractOp op) {
+  for (Operation *user : op.getResult().getUsers()) {
+    PackOp pack = dyn_cast<PackOp>(user);
+    if (!pack || !matchWordAlignedExtractPack(pack))
+      return false;
+  }
+  return true;
+}
+
+static FailureOr<std::optional<SmallVector<Value>>>
+trySelectWordAlignedExtractPack(WaveAMDMachineSelector &S, PackOp op,
+                                const MemoryPayloadShape &) {
+  std::optional<SmallVector<WordAlignedExtractPackWord>> matched =
+      matchWordAlignedExtractPack(op);
+  if (!matched)
+    return std::optional<SmallVector<Value>>();
+
+  SmallVector<Value> words;
+  words.reserve(matched->size());
+  DenseMap<Value, SmallVector<Value>> sourceWordCache;
+  for (WordAlignedExtractPackWord word : *matched) {
+    auto [it, inserted] = sourceWordCache.try_emplace(word.source);
+    if (inserted) {
+      FailureOr<SmallVector<Value>> sourceWords = splitVGPRMaterializedWords(
+          S, op, S.expect(word.source, op), word.sourceRegisters,
+          "pack extract source");
+      if (failed(sourceWords))
+        return failure();
+      it->second = std::move(*sourceWords);
+    }
+    words.push_back(it->second[word.sourceWordIndex]);
+  }
+  return std::optional<SmallVector<Value>>(std::move(words));
+}
+
 LogicalResult WaveAMDMachineSelector::selectPack(PackOp op) {
   FailureOr<MemoryPayloadShape> shape =
       getSimdVectorPayloadShape(op, op.getResult().getType(), "pack");
@@ -3785,6 +3958,16 @@ LogicalResult WaveAMDMachineSelector::selectPack(PackOp op) {
     return failure();
 
   Location loc = op.getLoc();
+  FailureOr<std::optional<SmallVector<Value>>> directWords =
+      trySelectWordAlignedExtractPack(*this, op, *shape);
+  if (failed(directWords))
+    return failure();
+  if (*directWords) {
+    values[op.getResult()] = joinVGPRWords(*this, loc, **directWords);
+    eraseIfTopLevel(op);
+    return success();
+  }
+
   Type vgprType = getRegType(op.getContext(), waveamdmachine::RegClass::VGPR);
   SmallVector<Value> words(shape->registers);
   for (auto [index, input] : llvm::enumerate(op.getInputs())) {
@@ -3817,6 +4000,11 @@ LogicalResult WaveAMDMachineSelector::selectPack(PackOp op) {
 }
 
 LogicalResult WaveAMDMachineSelector::selectExtract(ExtractOp op) {
+  if (isUsedOnlyByWordAlignedExtractPacks(op)) {
+    eraseIfTopLevel(op);
+    return success();
+  }
+
   FailureOr<MemoryPayloadShape> shape =
       getSimdVectorPayloadShape(op, op.getSource().getType(), "extract");
   if (failed(shape))
@@ -4304,14 +4492,28 @@ static I64Dwords splitI64Dwords(WaveAMDMachineSelector &S, Location loc,
   return {extractLowDword(S, loc, value), extractHighDword(S, loc, value)};
 }
 
-static SmallVector<Value, 2> splitMaskWords(WaveAMDMachineSelector &S,
-                                            Location loc, Value mask) {
-  waveamdmachine::RegType regType =
-      cast<waveamdmachine::RegType>(mask.getType());
+static SmallVector<Value, 2> splitStaticMaskWords(WaveAMDMachineSelector &S,
+                                                  Location loc, int64_t bits,
+                                                  unsigned width) {
+  assert((width == 1 || width == 2) && "immediate mask width required");
+  SmallVector<Value, 2> words;
+  uint64_t raw = static_cast<uint64_t>(bits);
+  words.push_back(
+      createImm(S.builder, loc, static_cast<int64_t>(raw & 0xffffffffull)));
+  if (width == 2)
+    words.push_back(createImm(S.builder, loc, static_cast<int64_t>(raw >> 32)));
+  return words;
+}
+
+static SmallVector<Value, 2>
+splitRegisterMaskWords(WaveAMDMachineSelector &S, Location loc, Value mask,
+                       waveamdmachine::RegType regType, unsigned width) {
   assert(regType.getRegClass() == waveamdmachine::RegClass::SGPR &&
          "compare mask must be SGPR");
   assert((regType.getWidth() == 1 || regType.getWidth() == 2) &&
          "compare mask must be SGPR1/2");
+  assert((width == 0 || width == regType.getWidth()) &&
+         "mask word count mismatch");
   if (regType.getWidth() == 1)
     return {mask};
   Type sgpr1 =
@@ -4322,6 +4524,16 @@ static SmallVector<Value, 2> splitMaskWords(WaveAMDMachineSelector &S,
   SmallVector<Value, 2> words;
   llvm::append_range(words, split.getElements());
   return words;
+}
+
+static SmallVector<Value, 2> splitMaskWords(WaveAMDMachineSelector &S,
+                                            Location loc, Value mask,
+                                            unsigned width = 0) {
+  if (auto regType = dyn_cast<waveamdmachine::RegType>(mask.getType()))
+    return splitRegisterMaskWords(S, loc, mask, regType, width);
+  std::optional<int64_t> bits = getStaticWideInt(S, mask);
+  assert(bits && "mask must be a register or static value");
+  return splitStaticMaskWords(S, loc, *bits, width);
 }
 
 static Value gatherMaskWords(WaveAMDMachineSelector &S, Location loc,
@@ -4338,9 +4550,10 @@ static Value gatherMaskWords(WaveAMDMachineSelector &S, Location loc,
 enum class MaskCombiner { And, Or };
 
 static Value combineMasks(WaveAMDMachineSelector &S, Location loc, Value lhs,
-                          Value rhs, MaskCombiner combiner) {
-  SmallVector<Value, 2> lhsWords = splitMaskWords(S, loc, lhs);
-  SmallVector<Value, 2> rhsWords = splitMaskWords(S, loc, rhs);
+                          Value rhs, MaskCombiner combiner,
+                          unsigned width = 0) {
+  SmallVector<Value, 2> lhsWords = splitMaskWords(S, loc, lhs, width);
+  SmallVector<Value, 2> rhsWords = splitMaskWords(S, loc, rhs, width);
   assert(lhsWords.size() == rhsWords.size() && "mask word counts must match");
   Type sgpr1 =
       getRegType(S.builder.getContext(), waveamdmachine::RegClass::SGPR, 1);
@@ -4361,13 +4574,13 @@ static Value combineMasks(WaveAMDMachineSelector &S, Location loc, Value lhs,
 }
 
 static Value andMasks(WaveAMDMachineSelector &S, Location loc, Value lhs,
-                      Value rhs) {
-  return combineMasks(S, loc, lhs, rhs, MaskCombiner::And);
+                      Value rhs, unsigned width = 0) {
+  return combineMasks(S, loc, lhs, rhs, MaskCombiner::And, width);
 }
 
 static Value orMasks(WaveAMDMachineSelector &S, Location loc, Value lhs,
-                     Value rhs) {
-  return combineMasks(S, loc, lhs, rhs, MaskCombiner::Or);
+                     Value rhs, unsigned width = 0) {
+  return combineMasks(S, loc, lhs, rhs, MaskCombiner::Or, width);
 }
 
 static Value createWordCmp(WaveAMDMachineSelector &S, Location loc,
@@ -4832,9 +5045,80 @@ static FailureOr<Value> createLaneSelect(WaveAMDMachineSelector &S,
       .getResult();
 }
 
+static std::optional<int64_t> getStaticMaskBits(WaveAMDMachineSelector &S,
+                                                Value value) {
+  if (std::optional<int64_t> imm = S.getImmediateValue(value))
+    return imm;
+  if (auto mov = value.getDefiningOp<waveamdmachine::SMovB64ImmOp>())
+    return mov.getValue();
+  return std::nullopt;
+}
+
+static bool isZeroMaskBits(WaveAMDMachineSelector &S, Value value,
+                           unsigned width) {
+  std::optional<int64_t> bits = getStaticMaskBits(S, value);
+  if (!bits)
+    return false;
+  return width == 1 ? static_cast<uint32_t>(*bits) == 0
+                    : static_cast<uint64_t>(*bits) == 0;
+}
+
+static bool isAllOnesMaskBits(WaveAMDMachineSelector &S, Value value,
+                              unsigned width) {
+  std::optional<int64_t> bits = getStaticMaskBits(S, value);
+  if (!bits)
+    return false;
+  return width == 1 ? static_cast<uint32_t>(*bits) == ~uint32_t{0}
+                    : static_cast<uint64_t>(*bits) == ~uint64_t{0};
+}
+
+static std::optional<Value>
+foldMaskSelectCondition(WaveAMDMachineSelector &S, Value condition,
+                        Value trueValue, Value falseValue, unsigned width) {
+  if (isZeroMaskBits(S, condition, width))
+    return falseValue;
+  if (isAllOnesMaskBits(S, condition, width))
+    return trueValue;
+  return std::nullopt;
+}
+
+static Value createMaskSelectWithFalseZero(WaveAMDMachineSelector &S,
+                                           Location loc, Value condition,
+                                           Value trueValue, Value falseValue,
+                                           unsigned width) {
+  if (isZeroMaskBits(S, trueValue, width))
+    return falseValue;
+  if (trueValue == condition || isAllOnesMaskBits(S, trueValue, width))
+    return condition;
+  return andMasks(S, loc, condition, trueValue, width);
+}
+
+static Value createMaskSelectWithTrueOnes(WaveAMDMachineSelector &S,
+                                          Location loc, Value condition,
+                                          Value trueValue, Value falseValue,
+                                          unsigned width) {
+  if (isAllOnesMaskBits(S, falseValue, width))
+    return trueValue;
+  if (falseValue == condition)
+    return condition;
+  return orMasks(S, loc, condition, falseValue, width);
+}
+
 static FailureOr<Value> createMaskSelect(WaveAMDMachineSelector &S, SelectOp op,
                                          Value condition, Value trueValue,
                                          Value falseValue, unsigned width) {
+  if (trueValue == falseValue)
+    return trueValue;
+  if (std::optional<Value> folded =
+          foldMaskSelectCondition(S, condition, trueValue, falseValue, width))
+    return *folded;
+  if (isZeroMaskBits(S, falseValue, width))
+    return createMaskSelectWithFalseZero(S, op.getLoc(), condition, trueValue,
+                                         falseValue, width);
+  if (isAllOnesMaskBits(S, trueValue, width))
+    return createMaskSelectWithTrueOnes(S, op.getLoc(), condition, trueValue,
+                                        falseValue, width);
+
   FailureOr<SmallVector<Value, 2>> condWords =
       splitSGPRWords(S, op, condition, width);
   FailureOr<SmallVector<Value, 2>> trueWords =
