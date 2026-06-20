@@ -2611,18 +2611,28 @@ static FailureOr<Value>
 materializeFullAddressLowDword(WaveAMDMachineSelector &S, Operation *user,
                                Value base, const AddressPlan &plan) {
   AddressPlanBindings bindings = materializeAddressPlanBindings(S, user, plan);
-  FailureOr<sym::ExprHandle> expr = planCompleteAddressExpr(S, plan);
-  if (failed(expr))
-    return failure();
   Value addr = extractLowDword(S, user->getLoc(), base);
-  if (*expr) {
-    bool useWide = needsWideAddressMaterialization(*expr, plan);
-    bool isUniform = classifyPlanExpr(S, plan, *expr) != TermKind::Lane;
+
+  auto appendExpr = [&](sym::ExprHandle expr, bool useWide) -> LogicalResult {
+    if (!expr)
+      return success();
+    bool isUniform = classifyPlanExpr(S, plan, expr) != TermKind::Lane;
     FailureOr<Value> offset = materializePlanLowDword(
-        S, user, *expr, bindings, plan.assumptions, useWide, isUniform);
+        S, user, expr, bindings, plan.assumptions, useWide, isUniform);
     if (failed(offset))
       return failure();
     addr = S.addByteOffsets(user->getLoc(), addr, *offset);
+    return success();
+  };
+
+  if (failed(appendExpr(plan.voffsetExpr, plan.voffsetNeedsWide)) ||
+      failed(appendExpr(plan.soffsetExpr, plan.soffsetNeedsWide)))
+    return failure();
+  if (plan.fullAddressRemainderExpr) {
+    bool useWide =
+        needsWideAddressMaterialization(plan.fullAddressRemainderExpr, plan);
+    if (failed(appendExpr(plan.fullAddressRemainderExpr, useWide)))
+      return failure();
   }
   return addr;
 }
@@ -2640,7 +2650,7 @@ materializeLdsAddress(WaveAMDMachineSelector &S, Operation *user, Value base,
     if (failed(lowAddr))
       return failure();
     Value addr = S.ensureVGPRForVSrc1(user->getLoc(), *lowAddr);
-    return MaterializedLdsAddress{addr, 0};
+    return MaterializedLdsAddress{addr, plan->instOffset};
   }
   FailureOr<WaveAMDMachineSelector::BucketedOperands> buckets =
       materializePlanBuckets(S, user, *plan, spec);

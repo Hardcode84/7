@@ -325,17 +325,17 @@ func.func @global_addr64_rational_mod_floor(%out: !wave.ptr<#wave.global, i32>,
 // SELECT: %[[LANE_MOD:.*]] = waveamdmachine.v_and_b32 %[[LID]],
 // SELECT: %[[LANE_OFF:.*]] = waveamdmachine.v_mul_lo_u32 {{.*}}, %[[LANE_MOD]]
 // SELECT: %[[LOAD_ADDR:.*]] = waveamdmachine.v_add_u32 %[[SLOT]], %[[LANE_OFF]]
-// SELECT: waveamdmachine.ds_load_b32 %[[LOAD_ADDR]] :
+// SELECT: waveamdmachine.ds_load_b32 %[[LOAD_ADDR]] offset 12 :
 // SELECT: %[[STORE_ADDR:.*]] = waveamdmachine.v_add_u32
-// SELECT: waveamdmachine.ds_store_b32 %[[STORE_ADDR]],
+// SELECT: waveamdmachine.ds_store_b32 %[[STORE_ADDR]], {{.*}} offset 12 :
 // ASM-LABEL: shared_rational_mod_floor_full_address:
-// ASM: ds_load_b32
-// ASM: ds_store_b32
+// ASM: ds_load_b32 {{.*}} offset:12
+// ASM: ds_store_b32 {{.*}} offset:12
 func.func @shared_rational_mod_floor_full_address(%x: i32)
     attributes {wave.kernel, wave.lds_size = 4096 : i64} {
   %lane = wave.lane_id : !wave.simd<i32, 32>
   %lds = wave.lds_base : !wave.ptr<#wave.shared, i32>
-  %off = wave.index_expr <"520*floor(1/512*Mod(8*x, 1024)) + 264*Mod(lid, 2)">
+  %off = wave.index_expr <"3 + 520*floor(1/512*Mod(8*x, 1024)) + 264*Mod(lid, 2)">
       ["lid", "x"](%lane, %x)
       : (!wave.simd<i32, 32>, i32) -> !wave.simd<index, 32>
   %ptrs = wave.ptr_add %lds, %off
