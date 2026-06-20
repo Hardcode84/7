@@ -70,6 +70,10 @@ static bool hasUnknownMemoryEffects(Operation *op) {
   return !effects.empty();
 }
 
+static bool isInstructionOp(Operation *op) {
+  return waveamdmachine::classifyOp(op) != waveamdmachine::SchedClass::NoInst;
+}
+
 static bool isHardBoundary(Operation *op) {
   if (!isWaveAMDMachineOp(op))
     return true;
@@ -144,6 +148,8 @@ private:
     region.first = ops.front();
     region.last = ops.back();
     region.opCount = static_cast<unsigned>(ops.size());
+    region.instructionOpCount =
+        llvm::count_if(ops, [](Operation *op) { return isInstructionOp(op); });
     region.ops.append(ops.begin(), ops.end());
     regions.push_back(std::move(region));
     ops.clear();
@@ -202,6 +208,7 @@ void printRegion(ScheduleRegion region) {
                << " block=" << region.blockOrdinal
                << " region=" << region.regionOrdinal
                << " ops=" << region.opCount
+               << " instruction_ops=" << region.instructionOpCount
                << " first=" << region.first->getName().getStringRef()
                << " last=" << region.last->getName().getStringRef() << "\n";
 }
@@ -216,15 +223,18 @@ void printScheduleRegionLimitSkip(ScheduleRegion region,
                                   ScheduleSearchLimits limits) {
   llvm::errs() << kDiagPrefix << " skipped func=" << region.func.getSymName()
                << " region=" << region.regionOrdinal << " reason=max_region_ops"
-               << " ops=" << region.opCount << " limit=" << limits.maxRegionOps
-               << "\n";
+               << " ops=" << region.opCount
+               << " instruction_ops=" << region.instructionOpCount
+               << " limit=" << limits.maxRegionOps << "\n";
 }
 
 void emitScheduleRegionLimitRemark(ScheduleRegion region,
                                    ScheduleSearchLimits limits) {
   region.first->emitRemark()
       << "skipped WaveAMDMachine scheduling region: reason=max_region_ops"
-      << " ops=" << region.opCount << " limit=" << limits.maxRegionOps;
+      << " ops=" << region.opCount
+      << " instruction_ops=" << region.instructionOpCount
+      << " limit=" << limits.maxRegionOps;
 }
 
 void emitScheduleBeamWorkRemark(ScheduleRegion region, int64_t estimatedWork,

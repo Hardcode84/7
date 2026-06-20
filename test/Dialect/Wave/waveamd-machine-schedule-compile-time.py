@@ -260,13 +260,13 @@ def main() -> int:
         "fa_seq32_d16_u4_beam_report",
         text,
         r"skipped func=flash_attention_f32 region=1 reason=max_region_ops "
-        r"ops=671 limit=512",
+        r"ops=671 instruction_ops=668 limit=512",
     )
     require(
         "fa_seq32_d16_u4_beam_report",
         text,
         r"skipped func=flash_attention_f32 region=4 reason=max_region_ops "
-        r"ops=704 limit=512",
+        r"ops=704 instruction_ops=704 limit=512",
     )
     require(
         "fa_seq32_d16_u4_beam_report",

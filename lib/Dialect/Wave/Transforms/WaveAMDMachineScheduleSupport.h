@@ -34,6 +34,7 @@ struct ScheduleRegion {
   unsigned blockOrdinal = 0;
   unsigned regionOrdinal = 0;
   unsigned opCount = 0;
+  unsigned instructionOpCount = 0;
 };
 
 enum class EdgeKind {
