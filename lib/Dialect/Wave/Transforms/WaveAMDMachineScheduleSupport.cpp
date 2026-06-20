@@ -2678,13 +2678,18 @@ static bool isCmaDmaPlacementName(StringRef name) {
   return name.starts_with("cma_dma_place_");
 }
 
+static bool isBarrierPipelineName(StringRef name) {
+  return name.starts_with("barrier_pipeline_");
+}
+
 static bool isCmaDmaPlacementCandidate(const EvaluatedCandidate &candidate) {
   return isCmaDmaPlacementName(candidate.name);
 }
 
 static bool
 isCounterBurstPlacementCandidate(const EvaluatedCandidate &candidate) {
-  return isCmaDmaPlacementCandidate(candidate);
+  return isCmaDmaPlacementCandidate(candidate) ||
+         isBarrierPipelineName(candidate.name);
 }
 
 static bool comparableOverflowCandidate(const EvaluatedCandidate &candidate,
@@ -2702,10 +2707,10 @@ compareEqualOverflow(const EvaluatedCandidate &candidate,
   int64_t bestHard = getHardExcess(best.metrics.pressure);
   if (candidateHard != bestHard)
     return candidateHard < bestHard;
-  int64_t candidateExcess = getCriticalExcess(candidate.metrics.pressure);
-  int64_t bestExcess = getCriticalExcess(best.metrics.pressure);
-  if (candidateExcess != bestExcess)
-    return candidateExcess < bestExcess;
+  int64_t candidateCritical = getCriticalExcess(candidate.metrics.pressure);
+  int64_t bestCritical = getCriticalExcess(best.metrics.pressure);
+  if (candidateCritical != bestCritical)
+    return candidateCritical < bestCritical;
   return std::nullopt;
 }
 
@@ -2726,6 +2731,8 @@ static int resourceTiePriority(const EvaluatedCandidate &candidate) {
   StringRef name(candidate.name);
   if (isCmaDmaPlacementName(name))
     return 2;
+  if (isBarrierPipelineName(name))
+    return 1;
   if (usesIssueWindowTie(candidate))
     return 1;
   return 0;
@@ -3051,6 +3058,39 @@ ScheduleDecision evaluateScheduleCandidates(
   SmallVector<OrderCandidate, 4> candidates =
       buildScheduleCandidates(region, graph, *archResolution.arch, modelConfig,
                               candidateBudgets, enableBeamSearch, limits);
+  appendEvaluatedCandidates(decision, candidates, region, graph, archResolution,
+                            modelConfig, budgets, pressureEvaluation,
+                            safePressureUpperBound, pressureContextForRegion);
+  selectScheduleCandidate(decision, region, graph, budgets, pressureEvaluation,
+                          pressureContextForRegion);
+  return decision;
+}
+
+ScheduleDecision evaluateScheduleOrderCandidates(
+    const ScheduleRegion &region, const DependenceGraph &graph,
+    ArrayRef<OrderCandidate> candidates, ArchResolution archResolution,
+    const waveamdmachine::EventSimConfig &modelConfig,
+    const RegisterPressureBudgets &budgets,
+    PressureEvaluation pressureEvaluation, bool allowPressureUpperBound,
+    const SchedulePressureContext *pressureContext) {
+  ScheduleDecision decision;
+  if (!archResolution.arch) {
+    decision.candidates.push_back(
+        {getOriginalOrder(region),
+         makeUnsupportedCandidateMetrics(archResolution.fallbackReason),
+         "original"});
+    return decision;
+  }
+
+  std::optional<SchedulePressureContext> ownedPressureContext;
+  std::optional<SchedulePressureRegionContext> pressureRegionContext;
+  const SchedulePressureRegionContext *pressureContextForRegion =
+      preparePressureRegionContext(region, pressureEvaluation, pressureContext,
+                                   ownedPressureContext, pressureRegionContext);
+
+  std::optional<RegisterPressureResult> safePressureUpperBound =
+      tryGetSafePressureUpperBound(allowPressureUpperBound, budgets,
+                                   pressureContextForRegion);
   appendEvaluatedCandidates(decision, candidates, region, graph, archResolution,
                             modelConfig, budgets, pressureEvaluation,
                             safePressureUpperBound, pressureContextForRegion);

@@ -84,6 +84,10 @@ Same rule covers docstrings, commit bodies, and PR descriptions. Wit is welcome,
 - **No shortcuts, never overfit.** Implement the general mechanism, not a
   known input. Goldens are conformance tests, not templates. Unsupported
   features return clear errors; no fabricated ops or canned output.
+- **Wave memory ordering is explicit.** Legality is SSA dominance plus
+  explicit token edges. Do not add implicit alias analysis, barrier inference,
+  or loop-carried memory dependencies to any transform. If ordering matters,
+  encode it in IR.
 
 ## Perf golden ASM
 

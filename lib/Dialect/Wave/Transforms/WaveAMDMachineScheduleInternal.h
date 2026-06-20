@@ -70,6 +70,13 @@ void addGuidedBeamCandidates(SmallVectorImpl<OrderCandidate> &candidates,
                              const ScheduleRegion &region,
                              const RegisterPressureBudgets &budgets,
                              unsigned guideCount);
+ScheduleDecision evaluateScheduleOrderCandidates(
+    const ScheduleRegion &region, const DependenceGraph &graph,
+    ArrayRef<OrderCandidate> candidates, ArchResolution archResolution,
+    const waveamdmachine::EventSimConfig &modelConfig,
+    const RegisterPressureBudgets &budgets,
+    PressureEvaluation pressureEvaluation, bool allowPressureUpperBound,
+    const SchedulePressureContext *pressureContext);
 
 } // namespace mlir::wave
 

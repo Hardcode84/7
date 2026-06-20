@@ -323,6 +323,8 @@ def WaveAMDMachineSchedule
   let options = [
     Option<"applySchedule", "apply-schedule", "bool", /*default=*/"false",
            "Apply the best non-worse model-scored local schedule.">,
+    Option<"barrieredLdsDmaHoist", "barriered-lds-dma-hoist", "bool", /*default=*/"true",
+           "Enable barrier-centered MFMA/memory pipeline candidates; set false only for debug comparisons.">,
     Option<"beamSearch", "beam-search", "bool", /*default=*/"false",
            "Enable guided beam-search scheduler candidates.">,
     Option<"maxRegionOps", "max-region-ops", "int", /*default=*/"-1",
