@@ -257,6 +257,77 @@ static bool hasFixedElement(ValueRange elements) {
   });
 }
 
+static std::optional<unsigned>
+slotInTupleElements(waveamdmachine::TupleFromElementsOp op, Value needle) {
+  unsigned cumOffset = 0;
+  for (Value element : op.getElements()) {
+    if (element == needle)
+      return cumOffset;
+    cumOffset += cast<waveamdmachine::RegType>(element.getType()).getWidth();
+  }
+  return std::nullopt;
+}
+
+static bool hasSingleUseBy(Value value, Operation *user) {
+  return llvm::hasSingleElement(value.getUses()) &&
+         value.use_begin()->getOwner() == user;
+}
+
+static bool
+splitElementFitsConsumer(waveamdmachine::TupleFromElementsOp consumer,
+                         Value splitElement, Value sourceTuple,
+                         unsigned slotDelta,
+                         const ToElementsSourceMap &toElementsSource) {
+  auto splitIt = toElementsSource.find(splitElement);
+  if (splitIt == toElementsSource.end())
+    return false;
+  if (splitIt->second.first != sourceTuple)
+    return false;
+  if (!hasSingleUseBy(splitElement, consumer.getOperation()))
+    return false;
+  std::optional<unsigned> slot = slotInTupleElements(consumer, splitElement);
+  if (!slot)
+    return false;
+  return *slot == splitIt->second.second + slotDelta;
+}
+
+static bool
+canReanchorSingleUseSplitElement(waveamdmachine::TupleFromElementsOp consumer,
+                                 Value element, unsigned consumerSlot,
+                                 const ToElementsSourceMap &toElementsSource) {
+  auto sourceIt = toElementsSource.find(element);
+  if (sourceIt == toElementsSource.end())
+    return false;
+  Value sourceTuple = sourceIt->second.first;
+  unsigned sourceSlot = sourceIt->second.second;
+  auto split = element.getDefiningOp<waveamdmachine::TupleToElementsOp>();
+  if (!split || split.getTuple() != sourceTuple)
+    return false;
+  if (!hasSingleUseBy(sourceTuple, split.getOperation()))
+    return false;
+  if (consumerSlot < sourceSlot)
+    return false;
+  unsigned slotDelta = consumerSlot - sourceSlot;
+  for (Value splitElement : split.getElements())
+    if (!splitElementFitsConsumer(consumer, splitElement, sourceTuple,
+                                  slotDelta, toElementsSource))
+      return false;
+  return true;
+}
+
+static bool hasSlotMismatch(DenseMap<Value, unsigned> &anchorSlot,
+                            Value element, unsigned slot) {
+  auto anchorIt = anchorSlot.find(element);
+  return anchorIt != anchorSlot.end() && anchorIt->second != slot;
+}
+
+static bool hasDragInConflict(bool perfectRT, Value element,
+                              const ToElementsSourceMap &toElementsSource,
+                              bool singleUseSplitConcat) {
+  return !perfectRT && toElementsSource.contains(element) &&
+         !singleUseSplitConcat;
+}
+
 static bool breaksUnfixedRoundTrip(waveamdmachine::TupleFromElementsOp op,
                                    waveamdmachine::RegType tupleType,
                                    bool perfectRT) {
@@ -294,11 +365,13 @@ rewriteFromElementsForSharing(waveamdmachine::TupleFromElementsOp op,
         cast<waveamdmachine::RegType>(element.getType());
     unsigned width = elementType.getWidth();
     Value use = element;
-    auto anchorIt = anchorSlot.find(element);
+    bool singleUseSplitConcat =
+        canReanchorSingleUseSplitElement(op, element, slot, toElementsSource);
     bool slotMismatch =
-        anchorIt != anchorSlot.end() && anchorIt->second != slot;
+        hasSlotMismatch(anchorSlot, element, slot) && !singleUseSplitConcat;
     bool reuse = consumedByFromElements.contains(element);
-    bool dragInConflict = !perfectRT && toElementsSource.contains(element);
+    bool dragInConflict = hasDragInConflict(
+        perfectRT, element, toElementsSource, singleUseSplitConcat);
     bool fixedElementInUnfixedTuple =
         tupleType.getIndex() < 0 && elementType.getIndex() >= 0;
     bool brokenRoundTripElement =

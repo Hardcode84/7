@@ -3,6 +3,45 @@
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
+// Complete single-use split-concat: no sibling value remains outside the new
+// tuple, so source chunks may alias the wider destination tuple.
+//
+// CHECK-LABEL: func.func @single_use_split_concat_no_copies
+// CHECK: %[[A:.+]] = waveamdmachine.v_mov_b32_tuple {{.*}} -> !waveamdmachine.reg<vgpr, 2, 0>
+// CHECK: %[[EA:.+]]:2 = waveamdmachine.tuple_to_elements %[[A]]
+// CHECK-SAME: -> (!waveamdmachine.reg<vgpr, 1, 0>, !waveamdmachine.reg<vgpr, 1, 1>)
+// CHECK: %[[B:.+]] = waveamdmachine.v_mov_b32_tuple {{.*}} -> !waveamdmachine.reg<vgpr, 2, 2>
+// CHECK: %[[EB:.+]]:2 = waveamdmachine.tuple_to_elements %[[B]]
+// CHECK-SAME: -> (!waveamdmachine.reg<vgpr, 1, 2>, !waveamdmachine.reg<vgpr, 1, 3>)
+// CHECK-NOT: waveamdmachine.v_mov_b32_tuple %[[EA]]
+// CHECK-NOT: waveamdmachine.v_mov_b32_tuple %[[EB]]
+// CHECK: %{{.+}} = waveamdmachine.tuple_from_elements %[[EA]]#0, %[[EA]]#1, %[[EB]]#0, %[[EB]]#1
+// CHECK-SAME: -> !waveamdmachine.reg<vgpr, 4, 0>
+func.func @single_use_split_concat_no_copies() {
+  %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+  %a = waveamdmachine.v_mov_b32_tuple %zero {registers = 2 : i64}
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 2>
+  %ea:2 = waveamdmachine.tuple_to_elements %a
+      : (!waveamdmachine.reg<vgpr, 2>)
+        -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+  %b = waveamdmachine.v_mov_b32_tuple %zero {registers = 2 : i64}
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 2>
+  %eb:2 = waveamdmachine.tuple_to_elements %b
+      : (!waveamdmachine.reg<vgpr, 2>)
+        -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+  %t = waveamdmachine.tuple_from_elements %ea#0, %ea#1, %eb#0, %eb#1
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+         !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 4>
+  return
+}
+
+}
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
+
 // Intermediate from_elements that mixes a to_elements result with
 // fresh operands. Without the drag-in guard the coalescer would
 // merge the source tuple into the new from_elements via %e#0,
