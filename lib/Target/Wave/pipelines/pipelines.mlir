@@ -81,7 +81,9 @@ module attributes {transform.with_named_sequence} {
         : (!transform.any_op) -> !transform.any_op
     %rfi = transform.apply_registered_pass "waveamd-form-fused-int" to %rnwi
         : (!transform.any_op) -> !transform.any_op
-    %rcl = transform.apply_registered_pass "waveamd-machine-cleanup" to %rfi
+    %rclane = transform.apply_registered_pass "waveamd-cross-lane-peepholes" to %rfi
+        : (!transform.any_op) -> !transform.any_op
+    %rcl = transform.apply_registered_pass "waveamd-machine-cleanup" to %rclane
         : (!transform.any_op) -> !transform.any_op
     %rfc = transform.apply_registered_pass "canonicalize" to %rcl
         : (!transform.any_op) -> !transform.any_op

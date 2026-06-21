@@ -104,6 +104,7 @@ def check_calibration_entry(label: str, module) -> None:
         lower_passes = applied_passes(ir, lower)
         try:
             fused = lower_passes.index("waveamd-form-fused-int")
+            cross_lane = lower_passes.index("waveamd-cross-lane-peepholes")
             cleanup = lower_passes.index("waveamd-machine-cleanup")
             cleanup_canon = lower_passes.index("canonicalize", cleanup)
             cleanup_cse = lower_passes.index("cse", cleanup_canon)
@@ -114,6 +115,7 @@ def check_calibration_entry(label: str, module) -> None:
         require(
             label,
             fused
+            < cross_lane
             < cleanup
             < cleanup_canon
             < cleanup_cse

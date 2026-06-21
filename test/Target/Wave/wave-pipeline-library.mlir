@@ -45,6 +45,8 @@
 // PIPELINE-NEXT: transform.apply_registered_pass "waveamd-to-machine"
 // PIPELINE: transform.apply_registered_pass "waveamd-form-fused-int"
 // PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
+// PIPELINE-NEXT: transform.apply_registered_pass "waveamd-cross-lane-peepholes"
+// PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
 // PIPELINE-NEXT: transform.apply_registered_pass "waveamd-machine-cleanup"
 // PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
 // PIPELINE-NEXT: transform.apply_registered_pass "canonicalize"

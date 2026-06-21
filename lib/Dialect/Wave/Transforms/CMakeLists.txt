@@ -1,5 +1,6 @@
 add_mlir_dialect_library(MLIRWaveTransforms
   WaveAMDABILowering.cpp
+  WaveAMDCrossLanePeepholes.cpp
   WaveAMDDecomposeMemTuples.cpp
   WaveAMDDmaZeroFill.cpp
   WaveAMDElideSCCBoolRoundtrip.cpp

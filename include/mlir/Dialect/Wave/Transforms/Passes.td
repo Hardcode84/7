@@ -242,6 +242,20 @@ def WaveAMDFormFusedInt
   ];
 }
 
+def WaveAMDCrossLanePeepholes
+    : Pass<"waveamd-cross-lane-peepholes"> {
+  let summary = "Form cheaper WaveAMDMachine cross-lane ops";
+  let description = [{
+    Function-local peepholes over selected WaveAMDMachine cross-lane ops.
+    Rewrites recognized dynamic lane-address arithmetic into cheaper
+    target-supported lane movement instructions while preserving waitcnt class.
+  }];
+  let dependentDialects = [
+    "func::FuncDialect",
+    "waveamdmachine::WaveAMDMachineDialect"
+  ];
+}
+
 def WaveAMDElideSCCBoolRoundtrip
     : Pass<"waveamd-elide-scc-bool-roundtrip"> {
   let summary = "Elide redundant SCC to bool to SCC roundtrips";
