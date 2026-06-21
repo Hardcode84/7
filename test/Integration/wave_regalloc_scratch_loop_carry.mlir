@@ -12,11 +12,11 @@
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
 // ASM-LABEL: scratch_loop_carry_backend_finish:
-// ASM: scratch_store_b32 off, v8, s5
-// ASM: scratch_store_b32 off, v15, s5 offset:28
-// ASM: scratch_load_b32 v8, off, s5
+// ASM: scratch_store_b32 off, v8, s2
+// ASM: scratch_store_b32 off, v15, s2 offset:28
+// ASM: scratch_load_b32 v8, off, s2
 // ASM: s_waitcnt vmcnt(0)
-// ASM: global_store_b32 {{v[0-9]+}}, v8, s[6:7]
+// ASM: global_store_b32 {{v[0-9]+}}, v8, s[0:1]
 // ASM: .amdhsa_private_segment_fixed_size 32
 func.func @scratch_loop_carry_backend_finish()
     attributes {wave.kernel, waveamdmachine.target_waves = 4 : i64} {

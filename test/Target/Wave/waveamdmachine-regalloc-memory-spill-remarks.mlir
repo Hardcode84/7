@@ -11,7 +11,7 @@
 // REMARK: pressure_relief_providers: '{{.*}}provider=scratch-spill{{.*}}reject=loop_carry{{.*}}'
 // REMARK: pressure_relief_candidates: '[]'
 // REMARK: loop_carry:      '1'
-// REMARK: total:           '3'
+// REMARK: total:           '2'
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 

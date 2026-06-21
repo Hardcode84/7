@@ -9,9 +9,9 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 // REGALLOC-NOT: waveamdmachine.tuple_to_elements %[[ARG]]
 // REGALLOC: waveamdmachine.v_mov_b32_tuple %[[ARG]] : (!waveamdmachine.reg<sgpr, 2, 2>) -> !waveamdmachine.reg<vgpr, 2,
 // ASM-LABEL: preloaded_sgpr2_to_vgpr2:
-// ASM: v_mov_b32_e32 v2, s2
-// ASM-NEXT: v_mov_b32_e32 v3, s3
-// ASM: global_store_dword v[2:3],
+// ASM: v_mov_b32_e32 v0, s2
+// ASM-NEXT: v_mov_b32_e32 v1, s3
+// ASM: global_store_dword v[0:1],
 func.func @preloaded_sgpr2_to_vgpr2(%out: !wave.ptr<#wave.global, i32>)
     attributes {wave.kernel, waveamdmachine.kernarg_preload_length = 2 : i64} {
   %arg = waveamdmachine.kernarg_preload {dword_offset = 0 : i64}

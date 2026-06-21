@@ -202,15 +202,13 @@ func.func @long_blocker_no_monotonic_cursor() {
 // -----
 
 // =============================================================
-// 8. SGPR kernel entry reserves five registers (s0..s4). The
-// first allocatable SGPR is s5, not s0. Mirrors the v0 reservation
-// on the VGPR side but with a wider prefix.
+// 8. Unused SGPR kernel entry registers can be clobbered immediately.
 // =============================================================
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
-// CHECK-LABEL: func.func @sgpr_kernel_reserves_first_five
-// CHECK: %{{.+}} = waveamdmachine.s_mov_b32_tuple {{.*}} : (!waveamdmachine.imm) -> !waveamdmachine.reg<sgpr, 1, 5>
-func.func @sgpr_kernel_reserves_first_five() attributes {wave.kernel} {
+// CHECK-LABEL: func.func @unused_sgpr_kernel_entry_regs_reused
+// CHECK: %{{.+}} = waveamdmachine.s_mov_b32_tuple {{.*}} : (!waveamdmachine.imm) -> !waveamdmachine.reg<sgpr, 1, 0>
+func.func @unused_sgpr_kernel_entry_regs_reused() attributes {wave.kernel} {
   %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
   %s = waveamdmachine.s_mov_b32_tuple %zero {registers = 1 : i64} : (!waveamdmachine.imm) -> !waveamdmachine.reg<sgpr, 1>
   return
@@ -221,14 +219,14 @@ func.func @sgpr_kernel_reserves_first_five() attributes {wave.kernel} {
 // -----
 
 // =============================================================
-// 8b. Kernarg preload dwords extend the user-SGPR prefix. Two
-// preloaded dwords shift first allocatable SGPR from s5 to s7.
+// 8b. A preload request only reserves dwords materialized by
+// kernarg_preload ops.
 // =============================================================
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
-// CHECK-LABEL: func.func @kernarg_preload_reserves_extra_user_sgprs
-// CHECK: %{{.+}} = waveamdmachine.s_mov_b32_tuple {{.*}} : (!waveamdmachine.imm) -> !waveamdmachine.reg<sgpr, 1, 7>
-func.func @kernarg_preload_reserves_extra_user_sgprs()
+// CHECK-LABEL: func.func @unused_kernarg_preload_request_reuses_s0
+// CHECK: %{{.+}} = waveamdmachine.s_mov_b32_tuple {{.*}} : (!waveamdmachine.imm) -> !waveamdmachine.reg<sgpr, 1, 0>
+func.func @unused_kernarg_preload_request_reuses_s0()
     attributes {wave.kernel, waveamdmachine.kernarg_preload_length = 2 : i64} {
   %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
   %s = waveamdmachine.s_mov_b32_tuple %zero {registers = 1 : i64} : (!waveamdmachine.imm) -> !waveamdmachine.reg<sgpr, 1>
@@ -240,16 +238,14 @@ func.func @kernarg_preload_reserves_extra_user_sgprs()
 // -----
 
 // =============================================================
-// 9. SGPR and VGPR are allocated independently. A width-3 VGPR
-// going to v4 (post-v0 reservation, 4-aligned) and a width-2 SGPR
-// going to s6 (first 2-aligned slot after the 5-SGPR reservation)
-// must not influence each other.
+// 9. SGPR and VGPR are allocated independently. With no entry-reg
+// users, both classes can start at zero.
 // =============================================================
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
 // CHECK-LABEL: func.func @sgpr_vgpr_classes_isolated
-// CHECK: %{{.+}} = waveamdmachine.s_mov_b32_tuple {{.*}} : (!waveamdmachine.imm) -> !waveamdmachine.reg<sgpr, 2, 6>
-// CHECK: %{{.+}} = waveamdmachine.v_mov_b32_tuple {{.*}} {registers = 3 : i64} : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 3, 4>
+// CHECK: %{{.+}} = waveamdmachine.s_mov_b32_tuple {{.*}} : (!waveamdmachine.imm) -> !waveamdmachine.reg<sgpr, 2, 0>
+// CHECK: %{{.+}} = waveamdmachine.v_mov_b32_tuple {{.*}} {registers = 3 : i64} : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 3, 0>
 func.func @sgpr_vgpr_classes_isolated() attributes {wave.kernel} {
   %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
   %s = waveamdmachine.s_mov_b32_tuple %zero {registers = 2 : i64} : (!waveamdmachine.imm) -> !waveamdmachine.reg<sgpr, 2>
@@ -262,22 +258,80 @@ func.func @sgpr_vgpr_classes_isolated() attributes {wave.kernel} {
 // -----
 
 // =============================================================
-// 10. Reserved prefix is permanent. Even after every real
-// allocation dies, the reserved slots stay blocked: a late width-1
-// reuses v1, never v0.
+// 10. v0 is reserved until the workitem-id value's last use, then
+// released for ordinary values.
 // =============================================================
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
-// CHECK-LABEL: func.func @reserved_v0_persists_past_expiry
+// CHECK-LABEL: func.func @workitem_v0_released_after_last_use
+// CHECK: %{{.+}} = waveamdmachine.v_workitem_id_x : !waveamdmachine.reg<vgpr, 1, 0>
 // CHECK: %{{.+}} = waveamdmachine.v_mov_b32_tuple {{.*}} : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1, 1>
-// CHECK: %{{.+}} = waveamdmachine.v_mov_b32_tuple {{.*}} : (!waveamdmachine.reg<vgpr, 1, 1>) -> !waveamdmachine.reg<vgpr, 1, 2>
-// CHECK: %{{.+}} = waveamdmachine.v_mov_b32_tuple {{.*}} : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1, 1>
-func.func @reserved_v0_persists_past_expiry() attributes {wave.kernel} {
+// CHECK: %{{.+}} = waveamdmachine.v_mov_b32_tuple {{.*}} : (!waveamdmachine.reg<vgpr, 1, 0>) -> !waveamdmachine.reg<vgpr, 1, 1>
+// CHECK: %{{.+}} = waveamdmachine.v_mov_b32_tuple {{.*}} : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1, 0>
+func.func @workitem_v0_released_after_last_use() attributes {wave.kernel} {
   %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+  %wi = waveamdmachine.v_workitem_id_x : !waveamdmachine.reg<vgpr, 1, 0>
   %a = waveamdmachine.v_mov_b32_tuple %zero {registers = 1 : i64} : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
-  %ka = waveamdmachine.v_mov_b32_tuple %a   {registers = 1 : i64} : (!waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
-  // %a is dead now. A late width-1 must NOT land at v0.
+  %kwi = waveamdmachine.v_mov_b32_tuple %wi {registers = 1 : i64} : (!waveamdmachine.reg<vgpr, 1, 0>) -> !waveamdmachine.reg<vgpr, 1>
   %late = waveamdmachine.v_mov_b32_tuple %zero {registers = 1 : i64} : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
+  return
+}
+
+}
+
+// -----
+
+// =============================================================
+// 10b. Implicit s_load kernarg-base use keeps s0:s1 reserved until
+// that load, then releases them.
+// =============================================================
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
+
+// CHECK-LABEL: func.func @sload_base_released_after_last_use
+// CHECK: %{{.+}} = waveamdmachine.s_mov_b32_tuple {{.*}} : (!waveamdmachine.imm) -> !waveamdmachine.reg<sgpr, 1, 2>
+// CHECK: %{{.+}} = waveamdmachine.s_load_b32 {{.*}}, "s[0:1]" : (!waveamdmachine.imm) -> !waveamdmachine.reg<sgpr, 1, 2>
+// CHECK: %{{.+}} = waveamdmachine.s_mov_b32_tuple {{.*}} : (!waveamdmachine.imm) -> !waveamdmachine.reg<sgpr, 1, 0>
+func.func @sload_base_released_after_last_use() attributes {wave.kernel} {
+  %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+  %early = waveamdmachine.s_mov_b32_tuple %zero {registers = 1 : i64} : (!waveamdmachine.imm) -> !waveamdmachine.reg<sgpr, 1>
+  %load = waveamdmachine.s_load_b32 %zero, "s[0:1]" : (!waveamdmachine.imm) -> !waveamdmachine.reg<sgpr, 1>
+  %late = waveamdmachine.s_mov_b32_tuple %zero {registers = 1 : i64} : (!waveamdmachine.imm) -> !waveamdmachine.reg<sgpr, 1>
+  return
+}
+
+}
+
+// -----
+
+// =============================================================
+// 10c. Implicit s_load kernarg-base use inside a loop keeps s0:s1
+// reserved through the loop backedge, then releases them after exit.
+// =============================================================
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
+
+// CHECK-LABEL: func.func @sload_base_reserved_through_loop_backedge
+// CHECK: waveamdmachine.uniform_loop
+// CHECK: %{{.+}} = waveamdmachine.s_load_b32 {{.*}}, "s[0:1]" : (!waveamdmachine.imm) -> !waveamdmachine.reg<sgpr, 1, 2>
+// CHECK: %{{.+}} = waveamdmachine.s_mov_b32_tuple {{.*}} : (!waveamdmachine.imm) -> !waveamdmachine.reg<sgpr, 1, 3>
+// CHECK: waveamdmachine.continue_if
+// CHECK: %{{.+}} = waveamdmachine.s_mov_b32_tuple {{.*}} : (!waveamdmachine.imm) -> !waveamdmachine.reg<sgpr, 1, 0>
+func.func @sload_base_reserved_through_loop_backedge() attributes {wave.kernel} {
+  %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+  %four = waveamdmachine.imm 4 : !waveamdmachine.imm
+  %cond = waveamdmachine.s_cmp_lt_i32 %zero, %four
+      : (!waveamdmachine.imm, !waveamdmachine.imm)
+        -> !waveamdmachine.reg<scc, 1>
+  waveamdmachine.uniform_loop if %cond : !waveamdmachine.reg<scc, 1> {
+    %load = waveamdmachine.s_load_b32 %zero, "s[0:1]"
+        : (!waveamdmachine.imm) -> !waveamdmachine.reg<sgpr, 1>
+    %late = waveamdmachine.s_mov_b32_tuple %zero {registers = 1 : i64}
+        : (!waveamdmachine.imm) -> !waveamdmachine.reg<sgpr, 1>
+    %keep = waveamdmachine.s_mov_b32_tuple %load {registers = 1 : i64}
+        : (!waveamdmachine.reg<sgpr, 1>) -> !waveamdmachine.reg<sgpr, 1>
+    waveamdmachine.continue_if %cond : !waveamdmachine.reg<scc, 1>
+  }
+  %after = waveamdmachine.s_mov_b32_tuple %zero {registers = 1 : i64}
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<sgpr, 1>
   return
 }
 

@@ -15,7 +15,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 // ASM: .amdhsa_kernel agpr_kernel
 // ASM: .amdhsa_next_free_vgpr 5
 // ASM: .amdhsa_accum_offset 4
-// ASM: .set .Lagpr_kernel.num_vgpr, 3
+// ASM: .set .Lagpr_kernel.num_vgpr, 2
 // ASM: .set .Lagpr_kernel.num_agpr, 1
 // ASM: .vgpr_count:     5
 // ASM: .agpr_count:     1

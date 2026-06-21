@@ -14,7 +14,9 @@
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachine.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/StringRef.h"
+#include <algorithm>
 #include <optional>
+#include <tuple>
 
 using namespace mlir;
 
@@ -33,6 +35,13 @@ struct FixedCarryRange {
   StringRef regClass;
   Operation *diagOp = nullptr;
   unsigned carryIndex = 0;
+  unsigned physStart = 0;
+  unsigned physEnd = 0;
+};
+
+struct ReservedLiveRange {
+  unsigned start = 0;
+  unsigned end = 0;
   unsigned physStart = 0;
   unsigned physEnd = 0;
 };
@@ -165,6 +174,16 @@ static bool liveRangesOverlap(const PhysicalLiveRange &lhs,
 
 static bool physicalRangesOverlap(const PhysicalLiveRange &lhs,
                                   const PhysicalLiveRange &rhs) {
+  return lhs.physStart < rhs.physEnd && rhs.physStart < lhs.physEnd;
+}
+
+static bool liveRangesOverlap(const PhysicalLiveRange &lhs,
+                              const ReservedLiveRange &rhs) {
+  return lhs.start <= rhs.end && rhs.start <= lhs.end;
+}
+
+static bool physicalRangesOverlap(const PhysicalLiveRange &lhs,
+                                  const ReservedLiveRange &rhs) {
   return lhs.physStart < rhs.physEnd && rhs.physStart < lhs.physEnd;
 }
 
@@ -338,27 +357,147 @@ static bool isAllowedReservedValue(Value value,
   return isAllowedEntryRegValue(def, index, regs);
 }
 
-static LogicalResult
-verifyNotInReservedRange(func::FuncOp func, const PhysicalLiveRange &range,
-                         StringRef consumer, StringRef regClass,
-                         unsigned reserved,
-                         const wave::WaveAMDKernelEntryRegs &regs) {
+static void noteReservedSpan(SmallVectorImpl<ReservedLiveRange> &ranges,
+                             unsigned begin, unsigned width, unsigned end,
+                             unsigned reserved) {
+  for (unsigned phys : llvm::seq<unsigned>(begin, begin + width)) {
+    if (phys >= reserved)
+      continue;
+    ranges.push_back(ReservedLiveRange{/*start=*/0, end, phys, phys + 1});
+  }
+}
+
+static std::optional<std::pair<unsigned, unsigned>>
+parseSGPRSpan(StringRef text) {
+  text = text.trim();
+  if (!text.consume_front("s"))
+    return std::nullopt;
+  if (text.consume_front("[")) {
+    StringRef beginText;
+    StringRef endText;
+    std::tie(beginText, text) = text.split(':');
+    std::tie(endText, text) = text.split(']');
+    if (beginText.empty() || endText.empty() || !text.empty())
+      return std::nullopt;
+    unsigned begin = 0;
+    unsigned end = 0;
+    if (beginText.getAsInteger(10, begin) || endText.getAsInteger(10, end) ||
+        end < begin)
+      return std::nullopt;
+    return std::make_pair(begin, end - begin + 1);
+  }
+  unsigned reg = 0;
+  if (text.getAsInteger(10, reg))
+    return std::nullopt;
+  return std::make_pair(reg, 1);
+}
+
+static std::optional<StringRef> getSLoadBase(Operation *op) {
+  if (auto load = dyn_cast<waveamdmachine::SLoadB32Op>(op))
+    return load.getBase();
+  if (auto load = dyn_cast<waveamdmachine::SLoadB64Op>(op))
+    return load.getBase();
+  if (auto load = dyn_cast<waveamdmachine::SLoadB128Op>(op))
+    return load.getBase();
+  return std::nullopt;
+}
+
+static unsigned
+getOperationEnd(Operation *op, const DenseMap<Operation *, unsigned> &positions,
+                DenseMap<Operation *, unsigned> &endCache) {
+  auto cached = endCache.find(op);
+  if (cached != endCache.end())
+    return cached->second;
+  unsigned end = positions.lookup(op);
+  op->walk([&](Operation *nested) {
+    auto it = positions.find(nested);
+    if (it != positions.end())
+      end = std::max(end, it->second);
+  });
+  endCache[op] = end;
+  return end;
+}
+
+static unsigned
+getImplicitABIUseEnd(Operation *op,
+                     const DenseMap<Operation *, unsigned> &positions,
+                     DenseMap<Operation *, unsigned> &endCache) {
+  unsigned end = positions.lookup(op);
+  for (Operation *parent = op->getParentOp(); parent;
+       parent = parent->getParentOp())
+    if (isa<waveamdmachine::UniformLoopOp>(parent))
+      end = std::max(end, getOperationEnd(parent, positions, endCache));
+  return end;
+}
+
+static void collectImplicitReservedSGPRRanges(
+    ArrayRef<Operation *> orderedOps,
+    const DenseMap<Operation *, unsigned> &positions,
+    const wave::WaveAMDKernelEntryRegs &regs,
+    SmallVectorImpl<ReservedLiveRange> &ranges) {
+  DenseMap<Operation *, unsigned> endCache;
+  for (Operation *op : orderedOps) {
+    std::optional<StringRef> base = getSLoadBase(op);
+    bool isPreload = isa<waveamdmachine::KernargPreloadOp>(op);
+    if (!base && !isPreload)
+      continue;
+    unsigned end = getImplicitABIUseEnd(op, positions, endCache);
+    if (base) {
+      if (std::optional<std::pair<unsigned, unsigned>> span =
+              parseSGPRSpan(*base))
+        noteReservedSpan(ranges, span->first, span->second, end,
+                         regs.reservedSGPRs);
+    }
+    if (isPreload)
+      noteReservedSpan(ranges, regs.kernargSegmentPtrSGPR,
+                       regs.kernargSegmentPtrWidth, end, regs.reservedSGPRs);
+  }
+}
+
+static void collectReservedRanges(
+    ArrayRef<PhysicalLiveRange> liveRanges, ArrayRef<Operation *> orderedOps,
+    const DenseMap<Operation *, unsigned> &positions, StringRef regClass,
+    unsigned reserved, const wave::WaveAMDKernelEntryRegs &regs,
+    SmallVectorImpl<ReservedLiveRange> &ranges) {
+  if (regClass == "SGPR")
+    collectImplicitReservedSGPRRanges(orderedOps, positions, regs, ranges);
+  for (const PhysicalLiveRange &range : liveRanges) {
+    if (!isAllowedReservedValue(range.value, regs))
+      continue;
+    noteReservedSpan(ranges, range.physStart, range.physEnd - range.physStart,
+                     range.end, reserved);
+  }
+}
+
+static LogicalResult verifyNotInReservedRange(
+    func::FuncOp func, const PhysicalLiveRange &range, StringRef consumer,
+    StringRef regClass, ArrayRef<ReservedLiveRange> reservedRanges,
+    unsigned reserved, const wave::WaveAMDKernelEntryRegs &regs) {
   if (reserved == 0 || range.physStart >= reserved)
     return success();
   if (isAllowedReservedValue(range.value, regs))
     return success();
-  return diagOpForValue(range.value, func)->emitError()
-         << consumer << " found " << regClass
-         << " value allocated in reserved kernel ABI registers";
+  for (const ReservedLiveRange &reservedRange : reservedRanges)
+    if (liveRangesOverlap(range, reservedRange) &&
+        physicalRangesOverlap(range, reservedRange))
+      return diagOpForValue(range.value, func)->emitError()
+             << consumer << " found " << regClass
+             << " value allocated in reserved kernel ABI registers";
+  return success();
 }
 
 static LogicalResult
 verifyReservedRanges(func::FuncOp func, ArrayRef<PhysicalLiveRange> ranges,
+                     ArrayRef<Operation *> orderedOps,
+                     const DenseMap<Operation *, unsigned> &positions,
                      StringRef consumer, StringRef regClass, unsigned reserved,
                      const wave::WaveAMDKernelEntryRegs &regs) {
+  SmallVector<ReservedLiveRange> reservedRanges;
+  collectReservedRanges(ranges, orderedOps, positions, regClass, reserved, regs,
+                        reservedRanges);
   for (const PhysicalLiveRange &range : ranges)
     if (failed(verifyNotInReservedRange(func, range, consumer, regClass,
-                                        reserved, regs)))
+                                        reservedRanges, reserved, regs)))
       return failure();
   return success();
 }
@@ -400,6 +539,8 @@ verifyNoRangeInterference(func::FuncOp func, ArrayRef<PhysicalLiveRange> ranges,
 static LogicalResult
 verifyNoInterference(func::FuncOp func,
                      ArrayRef<wave::WaveAMDLiveInterval> intervals,
+                     ArrayRef<Operation *> orderedOps,
+                     const DenseMap<Operation *, unsigned> &positions,
                      StringRef consumer, StringRef regClass, unsigned reserved,
                      const wave::WaveAMDKernelEntryRegs &regs) {
   SmallVector<PhysicalLiveRange> ranges;
@@ -410,8 +551,8 @@ verifyNoInterference(func::FuncOp func,
                                       consumer)))
       return failure();
   }
-  if (failed(verifyReservedRanges(func, ranges, consumer, regClass, reserved,
-                                  regs)))
+  if (failed(verifyReservedRanges(func, ranges, orderedOps, positions, consumer,
+                                  regClass, reserved, regs)))
     return failure();
   return verifyNoRangeInterference(func, ranges, consumer, regClass);
 }
@@ -455,13 +596,19 @@ mlir::wave::verifyWaveAMDRegAllocation(func::FuncOp func, StringRef consumer,
     return failure();
   wave::WaveAMDKernelEntryRegs regs = wave::getWaveAMDKernelEntryRegs(func);
   if (failed(verifyNoInterference(func, builtIntervals->intervals.sgprs,
-                                  consumer, "SGPR", regs.reservedSGPRs, regs)))
+                                  builtIntervals->orderedOps,
+                                  builtIntervals->positions, consumer, "SGPR",
+                                  regs.reservedSGPRs, regs)))
     return failure();
   if (failed(verifyNoInterference(func, builtIntervals->intervals.vgprs,
-                                  consumer, "VGPR", regs.reservedVGPRs, regs)))
+                                  builtIntervals->orderedOps,
+                                  builtIntervals->positions, consumer, "VGPR",
+                                  regs.reservedVGPRs, regs)))
     return failure();
-  return verifyNoInterference(func, builtIntervals->intervals.agprs, consumer,
-                              "AGPR", /*reserved=*/0, regs);
+  return verifyNoInterference(func, builtIntervals->intervals.agprs,
+                              builtIntervals->orderedOps,
+                              builtIntervals->positions, consumer, "AGPR",
+                              /*reserved=*/0, regs);
 }
 
 LogicalResult mlir::wave::verifyWaveAMDRegAllocations(

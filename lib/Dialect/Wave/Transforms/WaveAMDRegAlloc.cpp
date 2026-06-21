@@ -601,9 +601,194 @@ makeScalarInterval(MLIRContext *ctx, waveamdmachine::RegClass cls,
   return interval;
 }
 
+using ReservedLaneUses = SmallVector<std::optional<unsigned>, 8>;
+
+static void noteReservedLaneUse(ReservedLaneUses &lastUses, unsigned lane,
+                                unsigned position) {
+  if (lane >= lastUses.size())
+    return;
+  std::optional<unsigned> &lastUse = lastUses[lane];
+  lastUse = lastUse ? std::max(*lastUse, position) : position;
+}
+
+static void noteReservedSpanUse(ReservedLaneUses &lastUses, unsigned begin,
+                                unsigned width, unsigned position) {
+  for (unsigned lane : llvm::seq<unsigned>(begin, begin + width))
+    noteReservedLaneUse(lastUses, lane, position);
+}
+
+static std::optional<std::pair<unsigned, unsigned>>
+parseSGPRSpan(StringRef text) {
+  text = text.trim();
+  if (!text.consume_front("s"))
+    return std::nullopt;
+  if (text.consume_front("[")) {
+    StringRef beginText;
+    StringRef endText;
+    std::tie(beginText, text) = text.split(':');
+    std::tie(endText, text) = text.split(']');
+    if (beginText.empty() || endText.empty() || !text.empty())
+      return std::nullopt;
+    unsigned begin = 0;
+    unsigned end = 0;
+    if (beginText.getAsInteger(10, begin) || endText.getAsInteger(10, end) ||
+        end < begin)
+      return std::nullopt;
+    return std::make_pair(begin, end - begin + 1);
+  }
+  unsigned reg = 0;
+  if (text.getAsInteger(10, reg))
+    return std::nullopt;
+  return std::make_pair(reg, 1);
+}
+
+static std::optional<StringRef> getSLoadBase(Operation *op) {
+  if (auto load = dyn_cast<waveamdmachine::SLoadB32Op>(op))
+    return load.getBase();
+  if (auto load = dyn_cast<waveamdmachine::SLoadB64Op>(op))
+    return load.getBase();
+  if (auto load = dyn_cast<waveamdmachine::SLoadB128Op>(op))
+    return load.getBase();
+  return std::nullopt;
+}
+
+static unsigned
+getOperationEnd(Operation *op, const DenseMap<Operation *, unsigned> &positions,
+                DenseMap<Operation *, unsigned> &endCache) {
+  auto cached = endCache.find(op);
+  if (cached != endCache.end())
+    return cached->second;
+  unsigned end = positions.lookup(op);
+  op->walk([&](Operation *nested) {
+    auto it = positions.find(nested);
+    if (it != positions.end())
+      end = std::max(end, it->second);
+  });
+  endCache[op] = end;
+  return end;
+}
+
+static unsigned
+getImplicitABIUseEnd(Operation *op,
+                     const DenseMap<Operation *, unsigned> &positions,
+                     DenseMap<Operation *, unsigned> &endCache) {
+  unsigned end = positions.lookup(op);
+  for (Operation *parent = op->getParentOp(); parent;
+       parent = parent->getParentOp())
+    if (isa<waveamdmachine::UniformLoopOp>(parent))
+      end = std::max(end, getOperationEnd(parent, positions, endCache));
+  return end;
+}
+
+static void noteImplicitSGPRABIUse(
+    Operation *op, const DenseMap<Operation *, unsigned> &positions,
+    DenseMap<Operation *, unsigned> &endCache,
+    const wave::WaveAMDKernelEntryRegs &regs, ReservedLaneUses &sgprLastUses) {
+  std::optional<StringRef> base = getSLoadBase(op);
+  bool isPreload = isa<waveamdmachine::KernargPreloadOp>(op);
+  if (!base && !isPreload)
+    return;
+  unsigned end = getImplicitABIUseEnd(op, positions, endCache);
+  if (base) {
+    if (std::optional<std::pair<unsigned, unsigned>> span =
+            parseSGPRSpan(*base))
+      noteReservedSpanUse(sgprLastUses, span->first, span->second, end);
+  }
+  if (isPreload)
+    noteReservedSpanUse(sgprLastUses, regs.kernargSegmentPtrSGPR,
+                        regs.kernargSegmentPtrWidth, end);
+}
+
+static std::optional<unsigned>
+getKernargPreloadBase(waveamdmachine::KernargPreloadOp op,
+                      waveamdmachine::RegType type,
+                      const wave::WaveAMDKernelEntryRegs &regs) {
+  if (type.getRegClass() != waveamdmachine::RegClass::SGPR)
+    return std::nullopt;
+  uint64_t dwordOffset = op.getDwordOffset();
+  if (dwordOffset < regs.kernargPreloadOffsetDwords)
+    return std::nullopt;
+  uint64_t preloadOffset = dwordOffset - regs.kernargPreloadOffsetDwords;
+  if (preloadOffset + static_cast<uint64_t>(type.getWidth()) >
+      regs.kernargPreloadDwords)
+    return std::nullopt;
+  return regs.kernargSegmentPtrWidth + static_cast<unsigned>(preloadOffset);
+}
+
+static std::optional<unsigned>
+getEntryRegFixedBase(Value value, const wave::WaveAMDKernelEntryRegs &regs) {
+  Operation *def = value.getDefiningOp();
+  if (!def)
+    return std::nullopt;
+  auto type = cast<waveamdmachine::RegType>(value.getType());
+  if (type.getRegClass() == waveamdmachine::RegClass::VGPR &&
+      isa<waveamdmachine::VWorkitemIdXOp>(def))
+    return regs.workitemIdXVGPR;
+  if (type.getRegClass() == waveamdmachine::RegClass::SGPR) {
+    if (isa<waveamdmachine::SWorkgroupIdXOp>(def))
+      return regs.workgroupIdSGPR(0);
+    if (isa<waveamdmachine::SWorkgroupIdYOp>(def))
+      return regs.workgroupIdSGPR(1);
+    if (isa<waveamdmachine::SWorkgroupIdZOp>(def))
+      return regs.workgroupIdSGPR(2);
+    if (auto preload = dyn_cast<waveamdmachine::KernargPreloadOp>(def))
+      return getKernargPreloadBase(preload, type, regs);
+  }
+  return std::nullopt;
+}
+
+static LogicalResult
+validateEntryRegFixedBase(func::FuncOp func, Value value,
+                          const wave::WaveAMDKernelEntryRegs &regs) {
+  std::optional<unsigned> abiBase = getEntryRegFixedBase(value, regs);
+  if (!abiBase)
+    return success();
+  auto type = cast<waveamdmachine::RegType>(value.getType());
+  if (type.getIndex() < 0 || static_cast<unsigned>(type.getIndex()) == *abiBase)
+    return success();
+  return diagOpForValue(value, func)->emitError()
+         << kPassName << " found " << getRegClassName(type.getRegClass())
+         << " value allocated in reserved kernel ABI registers";
+}
+
+static void noteEntryRegInterval(const wave::WaveAMDLiveInterval &interval,
+                                 const wave::WaveAMDKernelEntryRegs &regs,
+                                 ReservedLaneUses &sgprLastUses,
+                                 ReservedLaneUses &vgprLastUses) {
+  for (auto [value, slot, start, end] :
+       llvm::zip(interval.values, interval.slotOffsets, interval.valueStarts,
+                 interval.valueEnds)) {
+    (void)slot;
+    (void)start;
+    auto type = cast<waveamdmachine::RegType>(value.getType());
+    std::optional<unsigned> abiBase = getEntryRegFixedBase(value, regs);
+    if (!abiBase)
+      continue;
+    unsigned width = static_cast<unsigned>(type.getWidth());
+    if (type.getRegClass() == waveamdmachine::RegClass::SGPR)
+      noteReservedSpanUse(sgprLastUses, *abiBase, width, end);
+    else if (type.getRegClass() == waveamdmachine::RegClass::VGPR)
+      noteReservedSpanUse(vgprLastUses, *abiBase, width, end);
+  }
+}
+
+static void noteEntryRegIntervals(const wave::WaveAMDLiveIntervalSet &intervals,
+                                  const wave::WaveAMDKernelEntryRegs &regs,
+                                  ReservedLaneUses &sgprLastUses,
+                                  ReservedLaneUses &vgprLastUses) {
+  for (const wave::WaveAMDLiveInterval &interval : intervals.sgprs)
+    noteEntryRegInterval(interval, regs, sgprLastUses, vgprLastUses);
+  for (const wave::WaveAMDLiveInterval &interval : intervals.vgprs)
+    noteEntryRegInterval(interval, regs, sgprLastUses, vgprLastUses);
+}
+
 static void createReservedGroup(Inventory &inventory, MLIRContext *ctx,
                                 waveamdmachine::RegClass regClass,
-                                unsigned width, unsigned end) {
+                                ArrayRef<std::optional<unsigned>> lastUses) {
+  unsigned width = 0;
+  for (auto [lane, lastUse] : llvm::enumerate(lastUses))
+    if (lastUse)
+      width = lane + 1;
   if (width == 0)
     return;
   std::unique_ptr<IntervalGroup> group = std::make_unique<IntervalGroup>();
@@ -617,24 +802,34 @@ static void createReservedGroup(Inventory &inventory, MLIRContext *ctx,
   inventory.groups.push_back(std::move(group));
 
   for (unsigned offset : llvm::seq<unsigned>(0, width)) {
-    std::unique_ptr<Interval> interval =
-        makeScalarInterval(ctx, regClass, offset, /*start=*/0, end);
+    std::unique_ptr<Interval> interval = makeScalarInterval(
+        ctx, regClass, offset, /*start=*/0, lastUses[offset].value_or(0));
     interval->group = groupPtr;
-    interval->reserved = true;
-    interval->nonPromotable = true;
+    if (lastUses[offset]) {
+      interval->reserved = true;
+      interval->nonPromotable = true;
+    }
     groupPtr->intervals.push_back(interval.get());
     inventory.intervals.push_back(std::move(interval));
   }
 }
 
-static void createReservedABIIntervals(func::FuncOp func,
-                                       Inventory &inventory) {
-  unsigned end = inventory.ops.empty() ? 0 : inventory.ops.size() - 1;
+static void
+createReservedABIIntervals(func::FuncOp func, Inventory &inventory,
+                           const wave::WaveAMDLiveIntervalSet &intervals) {
+  const wave::WaveAMDKernelEntryRegs &regs = inventory.entryRegs;
+  ReservedLaneUses sgprLastUses(regs.reservedSGPRs);
+  ReservedLaneUses vgprLastUses(regs.reservedVGPRs);
+  DenseMap<Operation *, unsigned> endCache;
+  for (Operation *op : inventory.ops)
+    noteImplicitSGPRABIUse(op, inventory.positions, endCache, regs,
+                           sgprLastUses);
+  noteEntryRegIntervals(intervals, regs, sgprLastUses, vgprLastUses);
   MLIRContext *ctx = func.getContext();
   createReservedGroup(inventory, ctx, waveamdmachine::RegClass::SGPR,
-                      wave::getWaveAMDReservedSGPRs(func), end);
+                      sgprLastUses);
   createReservedGroup(inventory, ctx, waveamdmachine::RegClass::VGPR,
-                      wave::getWaveAMDReservedVGPRs(func), end);
+                      vgprLastUses);
 }
 
 static bool isFunctionEntryBlockArgument(Value value) {
@@ -681,6 +876,8 @@ static LogicalResult recordImportedLaneValue(func::FuncOp func, Value value,
                                              unsigned end, ImportedLane &lane,
                                              Inventory &inventory) {
   auto type = cast<waveamdmachine::RegType>(value.getType());
+  if (failed(validateEntryRegFixedBase(func, value, inventory.entryRegs)))
+    return failure();
   if (type.getIndex() >= 0) {
     int64_t fixedIndex = type.getIndex() + valueLane;
     if (lane.fixedIndex && *lane.fixedIndex != fixedIndex)
@@ -1059,50 +1256,6 @@ static unsigned getReservedPrefix(waveamdmachine::RegClass regClass,
   if (regClass == waveamdmachine::RegClass::VGPR)
     return regs.reservedVGPRs;
   return 0;
-}
-
-static bool isAllowedReservedValue(Value value, unsigned index,
-                                   const wave::WaveAMDKernelEntryRegs &regs) {
-  Operation *def = value.getDefiningOp();
-  if (!def)
-    return false;
-  auto type = cast<waveamdmachine::RegType>(value.getType());
-  if (type.getRegClass() == waveamdmachine::RegClass::VGPR)
-    return isAllowedReservedVGPRValue(def, type, index, regs);
-  return isAllowedReservedSGPRValue(def, type, index, regs);
-}
-
-static LogicalResult
-validateReservedRange(func::FuncOp func, Value value,
-                      waveamdmachine::RegClass regClass, unsigned assignedIndex,
-                      unsigned reserved,
-                      const wave::WaveAMDKernelEntryRegs &regs) {
-  if (reserved == 0 || assignedIndex >= reserved)
-    return success();
-  if (isAllowedReservedValue(value, assignedIndex, regs))
-    return success();
-  return diagOpForValue(value, func)->emitError()
-         << kPassName << " found " << getRegClassName(regClass)
-         << " value allocated in reserved kernel ABI registers";
-}
-
-static LogicalResult
-validateReservedRanges(func::FuncOp func, IntervalGroup *group, unsigned base,
-                       const wave::WaveAMDKernelEntryRegs &regs) {
-  if (group->reserved)
-    return success();
-  unsigned reserved = getReservedPrefix(group->storageClass, regs);
-  llvm::SmallDenseSet<Value, 8> seen;
-  for (auto [laneIndex, lane] : llvm::enumerate(group->intervals)) {
-    for (Value value : lane->values) {
-      if (!seen.insert(value).second)
-        continue;
-      if (failed(validateReservedRange(func, value, group->storageClass,
-                                       base + laneIndex, reserved, regs)))
-        return failure();
-    }
-  }
-  return success();
 }
 
 static bool canOverlapReservedLane(Interval *lane, unsigned phys,
@@ -1571,8 +1724,37 @@ static unsigned getGroupLiveDwords(IntervalGroup *group, unsigned position) {
   return live;
 }
 
-static bool isReservedFixedGroup(IntervalGroup *group, unsigned reserved) {
-  return group->fixedBase && *group->fixedBase < reserved;
+static unsigned getReservedLiveDwords(Inventory &inventory,
+                                      waveamdmachine::RegClass regClass,
+                                      unsigned position) {
+  unsigned live = 0;
+  for (const std::unique_ptr<IntervalGroup> &ownedGroup : inventory.groups) {
+    IntervalGroup *group = ownedGroup.get();
+    if (!group->reserved || group->storageClass != regClass)
+      continue;
+    for (Interval *lane : group->intervals)
+      if (lane->reserved && isLiveAt(lane, position))
+        ++live;
+  }
+  return live;
+}
+
+static bool isAllowedEntryRegGroup(IntervalGroup *group,
+                                   const wave::WaveAMDKernelEntryRegs &regs) {
+  if (!group->assignedBase)
+    return false;
+  bool hasEntryValue = false;
+  for (auto [laneIndex, lane] : llvm::enumerate(group->intervals)) {
+    unsigned phys = *group->assignedBase + laneIndex;
+    if (phys >= getReservedPrefix(group->storageClass, regs))
+      continue;
+    if (lane->values.empty())
+      continue;
+    if (!canOverlapReservedLane(lane, phys, regs))
+      return false;
+    hasEntryValue = true;
+  }
+  return hasEntryValue;
 }
 
 static int64_t getValuePosition(Value value, Inventory &inventory,
@@ -1622,14 +1804,14 @@ buildClassPressureFailure(Inventory &inventory,
   failure.regClass = getRegClassName(regClass);
   failure.limit = limit;
   failure.position = position;
-  failure.reserved = getReservedPrefix(regClass, inventory.entryRegs);
+  failure.reserved = getReservedLiveDwords(inventory, regClass, position);
   failure.liveDwords = failure.reserved;
   failure.request = buildPressureIntervalRef(request, inventory);
   for (IntervalGroup *group : assigned) {
     if (group == request || group->storageClass != regClass ||
         !isLiveAt(group, position))
       continue;
-    if (group->reserved || isReservedFixedGroup(group, failure.reserved))
+    if (group->reserved || isAllowedEntryRegGroup(group, inventory.entryRegs))
       continue;
     failure.liveDwords += getGroupLiveDwords(group, position);
     failure.overlaps.push_back(buildPressureIntervalRef(group, inventory));
@@ -1713,8 +1895,6 @@ validateFixedGroup(func::FuncOp func, IntervalGroup *group,
            << " register range exceeds addressable namespace (end="
            << (*fixedBase + group->intervals.size())
            << ", limit=" << getAddressable(budgets, group->storageClass) << ")";
-  if (failed(validateReservedRanges(func, group, *fixedBase, regs)))
-    return failure();
   if (!baseFits(group, *fixedBase, assigned, regs))
     return func.emitError(kPassName)
            << " found interfering fixed "
@@ -2844,7 +3024,7 @@ static LogicalResult buildInventory(func::FuncOp func, Inventory &inventory) {
     return failure();
   inventory.ops.append(built->orderedOps);
   inventory.positions = std::move(built->positions);
-  createReservedABIIntervals(func, inventory);
+  createReservedABIIntervals(func, inventory, built->intervals);
   if (failed(importLiveIntervals(func, built->intervals, inventory)))
     return failure();
   updatePeaks(inventory);

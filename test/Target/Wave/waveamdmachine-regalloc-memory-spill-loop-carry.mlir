@@ -1,23 +1,23 @@
 // RUN: rm -rf %t && split-file %s %t
-// RUN: wave-opt --waveamd-reg-alloc='vgpr-limit=16 agpr-limit=0' \
+// RUN: wave-opt --waveamd-reg-alloc='vgpr-limit=15 agpr-limit=0' \
 // RUN:   --waveamd-resource-info %t/result-use.mlir | FileCheck %s --check-prefix=RESULT
-// RUN: wave-opt --waveamd-reg-alloc='vgpr-limit=16 agpr-limit=0' \
+// RUN: wave-opt --waveamd-reg-alloc='vgpr-limit=15 agpr-limit=0' \
 // RUN:   --waveamd-resource-info %t/preheader-use.mlir | FileCheck %s --check-prefix=PRE
-// RUN: wave-opt --waveamd-reg-alloc='vgpr-limit=16 agpr-limit=0' \
+// RUN: wave-opt --waveamd-reg-alloc='vgpr-limit=15 agpr-limit=0' \
 // RUN:   --waveamd-resource-info %t/body-use.mlir | FileCheck %s --check-prefix=BODY
-// RUN: wave-opt --waveamd-reg-alloc='mark-overflow=true vgpr-limit=16 agpr-limit=0' \
+// RUN: wave-opt --waveamd-reg-alloc='mark-overflow=true vgpr-limit=15 agpr-limit=0' \
 // RUN:   --waveamd-resource-info %t/updated-backedge.mlir | FileCheck %s --check-prefix=UPDATE
 // RUN: wave-opt --waveamd-reg-alloc='mark-overflow=true vgpr-limit=4 agpr-limit=0' \
 // RUN:   %t/two-carries.mlir | FileCheck %s --check-prefix=TWO
-// RUN: wave-opt --waveamd-reg-alloc='vgpr-limit=16 agpr-limit=0' \
+// RUN: wave-opt --waveamd-reg-alloc='vgpr-limit=15 agpr-limit=0' \
 // RUN:   --waveamd-resource-info %t/nested.mlir | FileCheck %s --check-prefix=NEST
-// RUN: wave-opt --waveamd-reg-alloc='vgpr-limit=16 agpr-limit=0' \
+// RUN: wave-opt --waveamd-reg-alloc='vgpr-limit=15 agpr-limit=0' \
 // RUN:   --waveamd-resource-info %t/nested-preheader-use.mlir | FileCheck %s --check-prefix=NESTPRE
-// RUN: not wave-opt --waveamd-reg-alloc='vgpr-limit=16 agpr-limit=0' \
+// RUN: not wave-opt --waveamd-reg-alloc='vgpr-limit=15 agpr-limit=0' \
 // RUN:   %t/bad-init-use.mlir 2>&1 | FileCheck %s --check-prefix=BAD
-// RUN: wave-opt --waveamd-reg-alloc='vgpr-limit=24 agpr-limit=0' \
+// RUN: wave-opt --waveamd-reg-alloc='vgpr-limit=23 agpr-limit=0' \
 // RUN:   --waveamd-resource-info %t/bad-init-use-fallback.mlir | FileCheck %s --check-prefix=FALLBACK
-// RUN: wave-opt --waveamd-reg-alloc='vgpr-limit=8 agpr-limit=0' \
+// RUN: wave-opt --waveamd-reg-alloc='vgpr-limit=7 agpr-limit=0' \
 // RUN:   --waveamd-resource-info %t/immediate-boundary.mlir | FileCheck %s --check-prefix=BOUNDARY
 // RUN: not wave-opt --waveamd-reg-alloc='vgpr-limit=4 agpr-limit=0' \
 // RUN:   %t/scalar-reject.mlir 2>&1 | FileCheck %s --check-prefix=SCALAR
@@ -250,10 +250,10 @@ func.func @scratch_loop_carry_updated_backedge()
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
 // TWO-LABEL: func.func @scratch_loop_carry_two_carries
-// TWO-SAME: waveamdmachine.scratch_spill_bytes = 32 : i64
+// TWO-SAME: waveamdmachine.scratch_spill_bytes = 16 : i64
 // TWO: waveamdmachine.scratch_store_tuple_b32
-// TWO: waveamdmachine.scratch_store_tuple_b32 {{.*}} offset 16
-// TWO: waveamdmachine.uniform_loop {{.*}}carries(%{{.*}}, %{{.*}} : !waveamdmachine.mem.token, !waveamdmachine.mem.token)
+// TWO-NOT: waveamdmachine.scratch_store_tuple_b32 {{.*}} offset 16
+// TWO: waveamdmachine.uniform_loop {{.*}}carries(%{{.*}}, %{{.*}} : !waveamdmachine.reg<vgpr, 4, 0>, !waveamdmachine.mem.token)
 func.func @scratch_loop_carry_two_carries()
     attributes {wave.kernel, waveamdmachine.target_waves = 4 : i64} {
   %zero = waveamdmachine.imm 0 : !waveamdmachine.imm

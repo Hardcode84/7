@@ -313,10 +313,10 @@ func.func @wave_two_tuple_loads_overlap(%a_in: !wave.ptr<#wave.global, i32>,
   %slot_b_off = wave.binary addi %lane, %c256v : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
   %slot_b = wave.ptr_add %lds, %slot_b_off : !wave.ptr<#wave.shared, i32>, !wave.simd<i32, 32> -> !wave.simd<!wave.ptr<#wave.shared, i32>, 32>
   // CHECK: s_waitcnt lgkmcnt(0)
-  // CHECK-NEXT: global_load_b128 {{v\[[0-9]+:[0-9]+\], v[0-9]+, s\[6:7\]$}}
-  // CHECK-NEXT: global_load_b128 {{.*}} s[6:7] offset
-  // CHECK-NEXT: global_load_b128 {{v\[[0-9]+:[0-9]+\], v[0-9]+, s\[8:9\]$}}
-  // CHECK-NEXT: global_load_b128 {{.*}} s[8:9] offset
+  // CHECK-NEXT: global_load_b128 {{v\[[0-9]+:[0-9]+\], v[0-9]+, s\[2:3\]$}}
+  // CHECK-NEXT: global_load_b128 {{.*}} s[2:3] offset
+  // CHECK-NEXT: global_load_b128 {{v\[[0-9]+:[0-9]+\], v[0-9]+, s\[4:5\]$}}
+  // CHECK-NEXT: global_load_b128 {{.*}} s[4:5] offset
   // CHECK-NOT: ds_store_b128
   // CHECK: s_waitcnt vmcnt(2)
   %a_regs, %a_tok = wave.load %ap : (!wave.simd<!wave.ptr<#wave.global, i32>, 32>) -> (!wave.simd<vector<8xi32>, 32>, !wave.mem.token)

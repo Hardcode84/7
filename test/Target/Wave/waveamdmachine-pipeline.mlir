@@ -49,13 +49,13 @@ func.func @where_test(%limit: i32) -> i32 {
 // HAZARD: waveamdmachine.s_delay_alu
 // HAZARD: waveamdmachine.v_add_u32
 // REGALLOC-LABEL: func.func @kernel_test
-// REGALLOC: waveamdmachine.s_load_b64 {{.*}}, "s[0:1]" : (!waveamdmachine.imm) -> !waveamdmachine.reg<sgpr, 2, 6>
-// REGALLOC: waveamdmachine.s_load_b32 {{.*}}, "s[0:1]" : (!waveamdmachine.imm) -> !waveamdmachine.reg<sgpr, 1, 5>
-// REGALLOC: waveamdmachine.v_mbcnt_lo : !waveamdmachine.reg<vgpr, 1, 1>
-// REGALLOC: waveamdmachine.v_add_u32{{.*}} -> !waveamdmachine.reg<vgpr, 1, 2>
+// REGALLOC: waveamdmachine.s_load_b64 {{.*}}, "s[0:1]" : (!waveamdmachine.imm) -> !waveamdmachine.reg<sgpr, 2, 2>
+// REGALLOC: waveamdmachine.s_load_b32 {{.*}}, "s[0:1]" : (!waveamdmachine.imm) -> !waveamdmachine.reg<sgpr, 1, 4>
+// REGALLOC: waveamdmachine.v_mbcnt_lo : !waveamdmachine.reg<vgpr, 1, 0>
+// REGALLOC: waveamdmachine.v_add_u32{{.*}} -> !waveamdmachine.reg<vgpr, 1, 1>
 // RESOURCE-LABEL: func.func @kernel_test
-// RESOURCE-SAME: waveamdmachine.sgpr_count = 8 : i64
-// RESOURCE-SAME: waveamdmachine.vgpr_count = 4 : i64
+// RESOURCE-SAME: waveamdmachine.sgpr_count = 6 : i64
+// RESOURCE-SAME: waveamdmachine.vgpr_count = 3 : i64
 // METADATA: module attributes {{{.*}}waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"{{.*}}}
 // METADATA-LABEL: func.func @kernel_test
 // METADATA-SAME: waveamdmachine.metadata
