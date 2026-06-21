@@ -174,8 +174,8 @@ The dialect should contain operations for:
 - **Implemented:** standard MLIR `scf.for` for uniform loops.
 - **Implemented:** integer/floating arithmetic, compare, numeric cast,
   pack/extract, select-like lowering through `where`, and range assertion.
-- **Implemented:** `ballot`, `read_first`, and scalar-to-wave `splat`.
-- **Dialect-only:** dynamic `shuffle` cross-lane gather.
+- **Implemented:** `ballot`, `read_first`, dynamic `shuffle`, and
+  scalar-to-wave `splat`.
 - **Implemented:** tokenized `load`, `store`, `barrier`, `ptr_add`,
   `index_expr`, and LDS-base ops.
 - **Implemented in WaveAMD:** buffer pointers, fragment pack/unpack/fill,
@@ -664,9 +664,9 @@ Masks
   `first_lane`, and `last_lane`.
 
 Cross-lane movement
-  **Implemented:** `read_first` and scalar-to-wave `splat` / broadcast.
-  **Dialect-only:** dynamic `shuffle` gather. **Proposed:** `read_lane`,
-  `write_lane`, `permute`, and DPP-style operations.
+  **Implemented:** `read_first`, dynamic `shuffle` gather, and scalar-to-wave
+  `splat` / broadcast. **Proposed:** `read_lane`, `write_lane`, `permute`,
+  and DPP-style operations.
 
 Reductions and scans
   **Proposed:** `reduce_add`, `reduce_min`, `reduce_max`, `reduce_and`,
@@ -1184,8 +1184,8 @@ Required operations:
 - **Implemented:** elementwise arithmetic and compares.
 - **Implemented:** masked assignment through `where`.
 - **Implemented:** `ballot`.
-- **Implemented:** `read_first` and broadcast through `splat`.
-- **Dialect-only:** dynamic `shuffle`.
+- **Implemented:** `read_first`, dynamic `shuffle`, and broadcast through
+  `splat`.
 - **Implemented:** masked global/LDS load/store and explicit token operations
   (`token`, `after`, `join`, `wait`).
 - **Proposed:** `any`, `all`, `popcount`, and simple reductions.

@@ -2878,6 +2878,7 @@ LogicalResult WaveAMDMachineSelector::selectOperation(Operation *op) {
       .Case<SelectOp>([&](auto o) { return selectSelect(o); })
       .Case<BallotOp>([&](auto o) { return selectBallot(o); })
       .Case<ReadFirstOp>([&](auto o) { return selectReadFirst(o); })
+      .Case<ShuffleOp>([&](auto o) { return selectShuffle(o); })
       .Case<PtrCastOp>([&](auto o) { return selectPtrCast(o); })
       .Case<PtrAddOp>([&](auto o) { return selectPtrAdd(o); })
       .Case<waveamd::MakeBufferOp>([&](auto o) { return selectMakeBuffer(o); })
@@ -5763,6 +5764,53 @@ LogicalResult WaveAMDMachineSelector::selectBallot(BallotOp op) {
 LogicalResult WaveAMDMachineSelector::selectReadFirst(ReadFirstOp op) {
   Value src = expect(op.getSource(), op);
   values[op.getResult()] = readFirstLane(*this, op.getLoc(), src);
+  eraseIfTopLevel(op);
+  return success();
+}
+
+static FailureOr<Value> materializeShuffleByteAddress(WaveAMDMachineSelector &S,
+                                                      ShuffleOp op,
+                                                      Value sourceLane) {
+  Location loc = op.getLoc();
+  Value lane = extractLowDword(S, loc, sourceLane, op.getSourceLane());
+  if (std::optional<int64_t> imm = S.getImmediateValue(lane)) {
+    std::optional<int64_t> byteOffset = llvm::checkedMul(*imm, int64_t{4});
+    if (!byteOffset)
+      return op.emitError("shuffle source lane byte address overflows i64");
+    return S.ensureVGPRForVSrc1(loc, createImm(S.builder, loc, *byteOffset));
+  }
+  lane = S.ensureVGPRForVSrc1(loc, lane);
+  return waveamdmachine::VLshlrevB32Op::create(
+             S.builder, loc,
+             getRegType(S.builder.getContext(), waveamdmachine::RegClass::VGPR),
+             lane, createImm(S.builder, loc, 2))
+      .getResult();
+}
+
+LogicalResult WaveAMDMachineSelector::selectShuffle(ShuffleOp op) {
+  FailureOr<unsigned> words = getRegisterPayloadWidth(
+      op.getResult().getType(), [&]() { return op.emitError(); });
+  if (failed(words))
+    return failure();
+
+  FailureOr<SmallVector<Value>> sourceWords = splitVGPRMaterializedWords(
+      *this, op.getOperation(), expect(op.getSource(), op), *words,
+      "shuffle source");
+  if (failed(sourceWords))
+    return failure();
+
+  Value sourceLane = expect(op.getSourceLane(), op);
+  FailureOr<Value> addr = materializeShuffleByteAddress(*this, op, sourceLane);
+  if (failed(addr))
+    return failure();
+
+  Type vgprType = getRegType(op.getContext(), waveamdmachine::RegClass::VGPR);
+  SmallVector<Value> resultWords;
+  resultWords.reserve(sourceWords->size());
+  for (Value word : *sourceWords)
+    resultWords.push_back(waveamdmachine::DsBpermuteB32Op::create(
+        builder, op.getLoc(), vgprType, *addr, word));
+  values[op.getResult()] = joinVGPRWords(*this, op.getLoc(), resultWords);
   eraseIfTopLevel(op);
   return success();
 }
