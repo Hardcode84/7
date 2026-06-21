@@ -78,6 +78,34 @@ func.func @simd_i32_uniform_splats_scalarize(%x: i32, %y: i32)
   return
 }
 
+// SELECT-LABEL: func.func @simd_i32_valu_operand_shapes
+// SELECT-DAG: %[[ARG:.*]] = waveamdmachine.arg
+// SELECT-DAG: %[[LANE:.*]] = waveamdmachine.v_mbcnt_lo
+// SELECT-DAG: %[[C3:.*]] = waveamdmachine.imm 3
+// SELECT: waveamdmachine.v_add_u32 %[[C3]], %[[LANE]]
+// SELECT: waveamdmachine.v_xor_b32 %[[C3]], %[[LANE]]
+// SELECT: %[[C3V:.*]] = waveamdmachine.v_mov_b32_tuple %[[C3]]
+// SELECT: waveamdmachine.v_lshlrev_b32 %[[C3V]], %[[LANE]]
+// SELECT: waveamdmachine.v_mul_lo_u32 %[[ARG]], %[[LANE]]
+// SELECT: waveamdmachine.v_cmp_lt_u32 %[[ARG]], %[[LANE]]
+func.func @simd_i32_valu_operand_shapes(%x: i32) attributes {wave.kernel} {
+  %lane = wave.lane_id : !wave.simd<i32, 32>
+  %c3 = arith.constant 3 : i32
+  %vc3 = wave.splat %c3 : i32 -> !wave.simd<i32, 32>
+  %vx = wave.splat %x : i32 -> !wave.simd<i32, 32>
+  %add = wave.binary addi %vc3, %lane
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  %xor = wave.binary xori %lane, %vc3
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  %shl = wave.binary shli %vc3, %lane
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  %mul = wave.binary muli %vx, %lane
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  %cmp = wave.cmpi ult %vx, %lane
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.mask<32>
+  return
+}
+
 // SELECT-LABEL: func.func @uniform_i32_add_immediates
 // SELECT: waveamdmachine.imm 3
 // SELECT-NOT: waveamdmachine.s_add_i32

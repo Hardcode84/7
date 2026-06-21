@@ -3236,17 +3236,54 @@ static Value subUniformI32(WaveAMDMachineSelector &S, Location loc, Value lhs,
   return S.addUniformBytes(loc, lhs, negRhs);
 }
 
-static void prepareVectorBinaryI32Operands(WaveAMDMachineSelector &S,
-                                           BinaryOp op, BinaryKind kind,
-                                           Value &lhs, Value &rhs) {
-  if (kind == BinaryKind::ShRUI) {
-    lhs = S.ensureVGPRForVSrc1(op.getLoc(), lhs);
+enum class VALUOperandShape { AnyVGPR, VOP2Commutative, ValueVGPR };
+
+static TermKind valuOperandKind(Value value) {
+  if (isImm(value))
+    return TermKind::Const;
+  waveamdmachine::RegType regType =
+      dyn_cast<waveamdmachine::RegType>(value.getType());
+  if (regType && regType.getRegClass() == waveamdmachine::RegClass::SGPR)
+    return TermKind::Uniform;
+  return TermKind::Lane;
+}
+
+static bool prefersMaterializingLhs(Value lhs, Value rhs, Operation *user) {
+  TermKind lhsKind = valuOperandKind(lhs);
+  TermKind rhsKind = valuOperandKind(rhs);
+  unsigned lhsDepth = valueLoopDepth(lhs, user);
+  unsigned rhsDepth = valueLoopDepth(rhs, user);
+  if (orderedBefore(lhsKind, lhsDepth, rhsKind, rhsDepth,
+                    IndexExprAddOrder::UniformFirst))
+    return true;
+  if (orderedBefore(rhsKind, rhsDepth, lhsKind, lhsDepth,
+                    IndexExprAddOrder::UniformFirst))
+    return false;
+  return true;
+}
+
+static void materializeHoistableOperandAsVGPR(WaveAMDMachineSelector &S,
+                                              Location loc, Operation *user,
+                                              Value &lhs, Value &rhs) {
+  if (prefersMaterializingLhs(lhs, rhs, user))
+    lhs = S.ensureVGPRForVSrc1(loc, lhs);
+  else
+    rhs = S.ensureVGPRForVSrc1(loc, rhs);
+}
+
+static void shapeVALUOperands(WaveAMDMachineSelector &S, Location loc,
+                              Operation *user, VALUOperandShape shape,
+                              Value &lhs, Value &rhs) {
+  if (shape == VALUOperandShape::ValueVGPR) {
+    lhs = S.ensureVGPRForVSrc1(loc, lhs);
     return;
   }
-  if (isImm(rhs))
-    rhs = S.ensureVGPRForVSrc1(op.getLoc(), rhs);
+
   if (!isVGPR(lhs) && !isVGPR(rhs))
-    lhs = S.ensureVGPRForVSrc1(op.getLoc(), lhs);
+    materializeHoistableOperandAsVGPR(S, loc, user, lhs, rhs);
+
+  if (shape == VALUOperandShape::VOP2Commutative)
+    waveamdmachine::putVGPROperandLast(lhs, rhs);
 }
 
 // Element bit-width of an iN/index or !wave.simd<iN/index, W> type.
@@ -3296,8 +3333,8 @@ LogicalResult WaveAMDMachineSelector::selectBinaryMulI32(BinaryOp op) {
     eraseIfTopLevel(op);
     return success();
   }
-  if (!isVGPR(lhs) && !isVGPR(rhs))
-    lhs = ensureVGPRForVSrc1(op.getLoc(), lhs);
+  shapeVALUOperands(*this, op.getLoc(), op, VALUOperandShape::AnyVGPR, lhs,
+                    rhs);
   values[op.getResult()] = waveamdmachine::VMulLoU32Op::create(
       builder, op.getLoc(),
       getRegType(op.getContext(), waveamdmachine::RegClass::VGPR), lhs, rhs);
@@ -3325,8 +3362,7 @@ static LogicalResult selectBinaryMulHUI32(WaveAMDMachineSelector &S,
     S.eraseIfTopLevel(op);
     return success();
   }
-  if (!isVGPR(lhs) && !isVGPR(rhs))
-    lhs = S.ensureVGPRForVSrc1(op.getLoc(), lhs);
+  shapeVALUOperands(S, op.getLoc(), op, VALUOperandShape::AnyVGPR, lhs, rhs);
   S.values[op.getResult()] = waveamdmachine::VMulHiU32Op::create(
       S.builder, op.getLoc(),
       getRegType(op.getContext(), waveamdmachine::RegClass::VGPR), lhs, rhs);
@@ -3367,7 +3403,8 @@ LogicalResult WaveAMDMachineSelector::selectBinaryShLI32(BinaryOp op) {
     eraseIfTopLevel(op);
     return success();
   }
-  lhs = ensureVGPRForVSrc1(op.getLoc(), lhs);
+  shapeVALUOperands(*this, op.getLoc(), op, VALUOperandShape::ValueVGPR, lhs,
+                    rhs);
   values[op.getResult()] = waveamdmachine::VLshlrevB32Op::create(
       builder, op.getLoc(),
       getRegType(op.getContext(), waveamdmachine::RegClass::VGPR), lhs, rhs);
@@ -3504,7 +3541,10 @@ static LogicalResult selectBinaryBitwiseOrShiftI32(WaveAMDMachineSelector &S,
     S.eraseIfTopLevel(op);
     return success();
   }
-  prepareVectorBinaryI32Operands(S, op, kind, lhs, rhs);
+  VALUOperandShape shape = kind == BinaryKind::ShRUI
+                               ? VALUOperandShape::ValueVGPR
+                               : VALUOperandShape::VOP2Commutative;
+  shapeVALUOperands(S, op.getLoc(), op, shape, lhs, rhs);
   S.values[op.getResult()] =
       buildVectorBinaryI32(S.builder, op.getLoc(), resultType, kind, lhs, rhs);
   S.eraseIfTopLevel(op);
@@ -4706,16 +4746,16 @@ static Value createWordCmp(WaveAMDMachineSelector &S, Location loc,
       lhs = S.materializeSGPR1(loc, lhs);
     if (isa<waveamdmachine::ImmType>(rhs.getType()))
       rhs = S.materializeSGPR1(loc, rhs);
-    if (!isVGPR(lhs) && !isVGPR(rhs))
-      lhs = S.ensureVGPRForVSrc1(loc, lhs);
+    shapeVALUOperands(S, loc, /*user=*/nullptr, VALUOperandShape::AnyVGPR, lhs,
+                      rhs);
     return createVCmpVcc(S.builder, loc, relation, signedCmp, resultType,
                          getVCCType(S.builder.getContext()), lhs, rhs);
   }
   if (isa<waveamdmachine::ImmType>(lhs.getType()) &&
       isa<waveamdmachine::ImmType>(rhs.getType()))
     lhs = S.materializeSGPR1(loc, lhs);
-  if (!isVGPR(lhs) && !isVGPR(rhs))
-    lhs = S.ensureVGPRForVSrc1(loc, lhs);
+  shapeVALUOperands(S, loc, /*user=*/nullptr, VALUOperandShape::AnyVGPR, lhs,
+                    rhs);
   return createVCmp(S.builder, loc, relation, signedCmp, resultType, lhs, rhs);
 }
 
@@ -5689,16 +5729,6 @@ static Value createVAddU32(WaveAMDMachineSelector &selector, Location loc,
                                            rhs);
 }
 
-static void legalizeVAddU32Operands(WaveAMDMachineSelector &S, Location loc,
-                                    Value &lhs, Value &rhs) {
-  if (!isVGPR(rhs) && isVGPR(lhs))
-    std::swap(lhs, rhs);
-  if (isImm(rhs))
-    rhs = S.ensureVGPRForVSrc1(loc, rhs);
-  if (!isVGPR(lhs) && !isVGPR(rhs))
-    lhs = S.ensureVGPRForVSrc1(loc, lhs);
-}
-
 Value WaveAMDMachineSelector::addByteOffsets(Location loc, Value lhs,
                                              Value rhs) {
   std::optional<int64_t> lhsImm = getImmediateValue(lhs);
@@ -5710,7 +5740,8 @@ Value WaveAMDMachineSelector::addByteOffsets(Location loc, Value lhs,
   if (rhsImm && *rhsImm == 0)
     return lhs;
   // VOP2 vsrc1 must be VGPR. Put SGPR/literal in vsrc0 when possible.
-  legalizeVAddU32Operands(*this, loc, lhs, rhs);
+  shapeVALUOperands(*this, loc, /*user=*/nullptr,
+                    VALUOperandShape::VOP2Commutative, lhs, rhs);
   return createVAddU32(*this, loc, lhs, rhs);
 }
 
@@ -5733,11 +5764,13 @@ static Value tryMulIndexPow2(WaveAMDMachineSelector &S, Location loc, Value lhs,
   Value value = lhsImm ? rhs : lhs;
   if (S.isUniformValue(value))
     return S.mulUniformValues(loc, lhs, rhs);
+  Value shift = createImm(S.builder, loc, llvm::Log2_64(*pow2));
+  shapeVALUOperands(S, loc, /*user=*/nullptr, VALUOperandShape::ValueVGPR,
+                    value, shift);
   return waveamdmachine::VLshlrevB32Op::create(
              S.builder, loc,
              getRegType(S.builder.getContext(), waveamdmachine::RegClass::VGPR),
-             S.ensureVGPRForVSrc1(loc, value),
-             createImm(S.builder, loc, llvm::Log2_64(*pow2)))
+             value, shift)
       .getResult();
 }
 
@@ -5763,8 +5796,8 @@ Value WaveAMDMachineSelector::mulIndexValues(Location loc, Value lhs,
     return mulUniformValues(loc, lhs, rhs);
   if (Value shifted = tryMulIndexPow2(*this, loc, lhs, rhs, lhsImm, rhsImm))
     return shifted;
-  if (!isVGPR(lhs) && !isVGPR(rhs))
-    lhs = ensureVGPRForVSrc1(loc, lhs);
+  shapeVALUOperands(*this, loc, /*user=*/nullptr, VALUOperandShape::AnyVGPR,
+                    lhs, rhs);
   return waveamdmachine::VMulLoU32Op::create(
       builder, loc,
       getRegType(builder.getContext(), waveamdmachine::RegClass::VGPR), lhs,
