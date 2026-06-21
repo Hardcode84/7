@@ -783,6 +783,14 @@ private:
         [](Value lhs, Value rhs) { return isSamePhysicalReg(lhs, rhs); });
   }
 
+  LogicalResult requireOperandLegality(Operation &op,
+                                       StringRef mnemonic) const {
+    auto legality = cast<waveamdmachine::OperandLegalityOpInterface>(op);
+    return waveamdmachine::requireOperandLegality(
+        &op, mnemonic, legality.getOperandLegality(), isaVersion, targetChip,
+        [](Value lhs, Value rhs) { return isSamePhysicalReg(lhs, rhs); });
+  }
+
   void emitLine(StringRef line) {
     for (unsigned i = 0; i < indent; ++i)
       os << '\t';
@@ -1484,9 +1492,7 @@ private:
   }
 
   LogicalResult emitTernaryInt(unsigned opcode, Operation &op) {
-    if (failed(requireConstantBus(
-            op, op.getName().stripDialect(),
-            {op.getOperand(0), op.getOperand(1), op.getOperand(2)})))
+    if (failed(requireOperandLegality(op, op.getName().stripDialect())))
       return failure();
     return emitMC(opcode,
                   {toMCOperand(op.getResult(0)), toMCB32(op.getOperand(0)),
@@ -1494,9 +1500,7 @@ private:
   }
 
   LogicalResult emitTernaryIntClamp(unsigned opcode, Operation &op) {
-    if (failed(requireConstantBus(
-            op, op.getName().stripDialect(),
-            {op.getOperand(0), op.getOperand(1), op.getOperand(2)})))
+    if (failed(requireOperandLegality(op, op.getName().stripDialect())))
       return failure();
     return emitMC(opcode,
                   {toMCOperand(op.getResult(0)), toMCB32(op.getOperand(0)),
@@ -2148,8 +2152,7 @@ private:
     if (isa<waveamdmachine::VAddU32Op>(op)) {
       Value lhs = op.getOperand(0);
       Value rhs = op.getOperand(1);
-      if (failed(waveamdmachine::requireAnyVGPROperand(&op, "v_add_u32", lhs,
-                                                       rhs)))
+      if (failed(requireOperandLegality(op, "v_add_u32")))
         return failure();
       waveamdmachine::putVGPROperandLast(lhs, rhs);
       return emitVAddU32(toMCOperand(result()), toMCB32(lhs), toMCB32(rhs), op);
@@ -2157,8 +2160,7 @@ private:
     if (isa<waveamdmachine::VAddU32VccOp>(op)) {
       Value lhs = op.getOperand(0);
       Value rhs = op.getOperand(1);
-      if (failed(waveamdmachine::requireAnyVGPROperand(&op, "v_add_u32_vcc",
-                                                       lhs, rhs)))
+      if (failed(requireOperandLegality(op, "v_add_u32_vcc")))
         return failure();
       waveamdmachine::putVGPROperandLast(lhs, rhs);
       return emitVAddU32Vcc(toMCOperand(result()), toMCB32(lhs), toMCB32(rhs));
@@ -2167,8 +2169,7 @@ private:
             waveamdmachine::VXorB32Op>(op)) {
       Value lhs = op.getOperand(0);
       Value rhs = op.getOperand(1);
-      if (failed(waveamdmachine::requireAnyVGPROperand(
-              &op, op.getName().stripDialect(), lhs, rhs)))
+      if (failed(requireOperandLegality(op, op.getName().stripDialect())))
         return failure();
       waveamdmachine::putVGPROperandLast(lhs, rhs);
       unsigned opcode = isa<waveamdmachine::VAndB32Op>(op)  ? vAndB32()
@@ -2178,16 +2179,14 @@ private:
                     {toMCOperand(result()), toMCB32(lhs), toMCB32(rhs)});
     }
     if (isa<waveamdmachine::VLshlrevB32Op>(op)) {
-      if (failed(waveamdmachine::requireVGPRValueOperand(&op, "v_lshlrev_b32",
-                                                         op.getOperand(0))))
+      if (failed(requireOperandLegality(op, "v_lshlrev_b32")))
         return failure();
       return emitMC(vLshlrevB32(),
                     {toMCOperand(result()), toMCB32(op.getOperand(1)),
                      toMCB32(op.getOperand(0))});
     }
     if (isa<waveamdmachine::VLshrrevB32Op>(op)) {
-      if (failed(waveamdmachine::requireVGPRValueOperand(&op, "v_lshrrev_b32",
-                                                         op.getOperand(0))))
+      if (failed(requireOperandLegality(op, "v_lshrrev_b32")))
         return failure();
       return emitMC(vLshrrevB32(),
                     {toMCOperand(result()), toMCB32(op.getOperand(1)),
@@ -2303,8 +2302,7 @@ private:
                                                                 : vCmpxGeI32();
       llvm::MCOperand exec = llvm::MCOperand::createReg(
           namedPhysReg(wavefrontSize == 32 ? "exec_lo" : "exec"));
-      if (failed(requireConstantBus(op, op.getName().stripDialect(),
-                                    {op.getOperand(0), op.getOperand(1)})))
+      if (failed(requireOperandLegality(op, op.getName().stripDialect())))
         return failure();
       return emitMC(
           opcode, {exec, toMCB32(op.getOperand(0)), toMCB32(op.getOperand(1))});
@@ -2352,8 +2350,7 @@ private:
           writesVcc ? llvm::MCOperand::createReg(
                           namedPhysReg(wavefrontSize == 32 ? "vcc_lo" : "vcc"))
                     : toMCOperand(result());
-      if (failed(requireConstantBus(op, op.getName().stripDialect(),
-                                    {op.getOperand(0), op.getOperand(1)})))
+      if (failed(requireOperandLegality(op, op.getName().stripDialect())))
         return failure();
       if (failed(emitMC(opcode, {dst, toMCB32(op.getOperand(0)),
                                  toMCB32(op.getOperand(1))})))

@@ -45,6 +45,22 @@ def WaveAMDMachine_WaitcntInfoOpInterface
   ];
 }
 
+def WaveAMDMachine_OperandLegalityOpInterface
+    : OpInterface<"OperandLegalityOpInterface"> {
+  let cppNamespace = "::mlir::waveamdmachine";
+  let description = [{
+    Machine operand legality metadata for target emission and verification.
+  }];
+  let methods = [
+    InterfaceMethod<
+      [{Operand legality metadata for this op.}],
+      "::mlir::waveamdmachine::OperandLegalitySpec",
+      "getOperandLegality",
+      (ins)
+    >,
+  ];
+}
+
 def WaveAMDMachine_M0WriteHazardOpInterface
     : OpInterface<"M0WriteHazardOpInterface"> {
   let cppNamespace = "::mlir::waveamdmachine";

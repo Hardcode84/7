@@ -23,6 +23,12 @@ namespace mlir::waveamdmachine {
 
 using SamePhysicalRegFn = llvm::function_ref<bool(Value, Value)>;
 
+struct OperandLegalitySpec {
+  uint32_t constantBusMask = 0;
+  uint32_t anyVGPRMask = 0;
+  uint32_t vgprValueMask = 0;
+};
+
 bool isSGPRValue(Value value);
 bool isVGPRValue(Value value);
 bool isMachineImm(Value value);
@@ -47,6 +53,11 @@ LogicalResult requireConstantBus(Operation *op, StringRef mnemonic,
                                  const llvm::AMDGPU::IsaVersion &isa,
                                  StringRef targetChip,
                                  SamePhysicalRegFn samePhysicalReg);
+LogicalResult requireOperandLegality(Operation *op, StringRef mnemonic,
+                                     OperandLegalitySpec spec,
+                                     const llvm::AMDGPU::IsaVersion &isa,
+                                     StringRef targetChip,
+                                     SamePhysicalRegFn samePhysicalReg);
 
 bool hasAnyVGPROperand(Value lhs, Value rhs);
 void putVGPROperandLast(Value &lhs, Value &rhs);

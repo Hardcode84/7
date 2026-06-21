@@ -117,6 +117,16 @@ static bool hasMultipleNonInlineLiterals(ArrayRef<Value> operands) {
   return false;
 }
 
+static SmallVector<Value, 4> collectMaskedOperands(Operation *op,
+                                                   uint32_t mask) {
+  SmallVector<Value, 4> operands;
+  unsigned count = std::min<unsigned>(op->getNumOperands(), 32);
+  for (unsigned i = 0; i < count; ++i)
+    if (mask & (uint32_t{1} << i))
+      operands.push_back(op->getOperand(i));
+  return operands;
+}
+
 bool mlir::waveamdmachine::fitsConstantBus(ArrayRef<Value> operands,
                                            const llvm::AMDGPU::IsaVersion &isa,
                                            SamePhysicalRegFn samePhysicalReg) {
@@ -155,6 +165,31 @@ LogicalResult mlir::waveamdmachine::requireConstantBus(
            << " cannot use multiple non-inline literals";
   if (!fitsConstantBus(operands, isa, samePhysicalReg))
     return op->emitError(mnemonic) << " exceeds constant bus limit";
+  return success();
+}
+
+LogicalResult mlir::waveamdmachine::requireOperandLegality(
+    Operation *op, StringRef mnemonic, OperandLegalitySpec spec,
+    const llvm::AMDGPU::IsaVersion &isa, StringRef targetChip,
+    SamePhysicalRegFn samePhysicalReg) {
+  if (spec.anyVGPRMask) {
+    SmallVector<Value, 4> operands =
+        collectMaskedOperands(op, spec.anyVGPRMask);
+    if (!llvm::any_of(operands, isVGPRValue))
+      return op->emitError(mnemonic) << " needs a VGPR operand";
+  }
+  unsigned count = std::min<unsigned>(op->getNumOperands(), 32);
+  for (unsigned i = 0; i < count; ++i)
+    if ((spec.vgprValueMask & (uint32_t{1} << i)) &&
+        !isVGPRValue(op->getOperand(i)))
+      return op->emitError(mnemonic) << " needs value operand in VGPR";
+  if (spec.constantBusMask) {
+    SmallVector<Value, 4> operands =
+        collectMaskedOperands(op, spec.constantBusMask);
+    if (failed(requireConstantBus(op, mnemonic, operands, isa, targetChip,
+                                  samePhysicalReg)))
+      return failure();
+  }
   return success();
 }
 
