@@ -23,6 +23,7 @@ EXAMPLE = REPO_ROOT / "examples/wave/wmma_matmul_tiled.py"
 RUNNER_SRC = REPO_ROOT / "tools/wave-matmul-calibrate/wave-matmul-calibrate-runner.cpp"
 KERNEL_NAME = "wmma_f16_matmul_tiled"
 STATIC_LDS_LIMIT = 64 * 1024
+DEFAULT_SIM_TRIP_COUNT = 32
 
 
 @dataclass(frozen=True)
@@ -552,6 +553,14 @@ def compute_sim_loop_trip_count(args: argparse.Namespace) -> int:
     return max(virtual_k_steps - 1, 0)
 
 
+def compute_report_trip_count(args: argparse.Namespace) -> int:
+    natural = compute_sim_loop_trip_count(args)
+    override = getattr(args, "sim_trip_count", DEFAULT_SIM_TRIP_COUNT)
+    if override < 0:
+        return natural
+    return min(natural, override)
+
+
 def compute_loop_trip_count(args: argparse.Namespace) -> int:
     return compute_sim_loop_trip_count(args)
 
@@ -622,7 +631,7 @@ def run_sim_reports(
     build_dir: Path, machine_mlir: Path, args: argparse.Namespace
 ) -> dict[tuple[int, int, int], int]:
     wave_sim = build_dir / "bin/wave-sim-report"
-    trip_count = compute_sim_loop_trip_count(args)
+    trip_count = compute_report_trip_count(args)
     out: dict[tuple[int, int, int], int] = {}
     for waves, simds, delay in sim_report_specs(args):
         text = run(
@@ -872,6 +881,12 @@ def build_argparser() -> argparse.ArgumentParser:
     ap.add_argument("--print-candidates", action="store_true")
     ap.add_argument("--print-score", action="store_true")
     ap.add_argument("--print-regions", action="store_true")
+    ap.add_argument(
+        "--sim-trip-count",
+        type=int,
+        default=DEFAULT_SIM_TRIP_COUNT,
+        help="wave-sim-report loop trips; -1 uses the full kernel trip count",
+    )
     ap.add_argument("--beam-search", action="store_true")
     ap.add_argument("--no-pressure-aware-schedule", action="store_true")
     ap.add_argument("--pressure-vgpr-budget", type=int, default=-1)
@@ -944,6 +959,8 @@ def validate_args(args: argparse.Namespace) -> None:
         sys.exit("--cta-swizzle-xcds must be >= 1")
     if args.cta_group_m < 1:
         sys.exit("--cta-group-m must be >= 1")
+    if getattr(args, "sim_trip_count", DEFAULT_SIM_TRIP_COUNT) < -1:
+        sys.exit("--sim-trip-count must be >= -1")
     if args.calibration_file is not None and not args.calibration_file.exists():
         sys.exit(f"--calibration-file does not exist: {args.calibration_file}")
     if getattr(args, "emit_asm", None) is not None and len(args.variants) != 1:
@@ -977,7 +994,8 @@ def main() -> int:
             f"cta_swizzle_xcds={args.cta_swizzle_xcds} "
             f"cta_group_m={args.cta_group_m}\n"
             f"kernel_arg_trip_count: {compute_kernel_arg_trip_count(args)}\n"
-            f"sim_loop_trip_count: {compute_sim_loop_trip_count(args)}"
+            f"sim_loop_trip_count: {compute_sim_loop_trip_count(args)}\n"
+            f"sim_report_trip_count: {compute_report_trip_count(args)}"
         )
         results: list[VariantResult] = []
         for variant in variants:

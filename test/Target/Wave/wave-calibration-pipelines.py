@@ -677,6 +677,37 @@ def check_matmul_dma_sim_trip_count(matmul) -> None:
         "DMA sim trip count should be V - 2",
     )
 
+    large = argparse.Namespace(
+        k=32768,
+        wave_k_tiles=1,
+        use_dma_lds=True,
+        matrix_intrinsic="mfma_gfx950",
+        chip="gfx950",
+        input_type="f16",
+    )
+    require(
+        "matmul_dma_sim_trip_count",
+        matmul.compute_sim_loop_trip_count(large) == 1022,
+        "large natural sim trip count should stay exact",
+    )
+    require(
+        "matmul_dma_sim_trip_count",
+        matmul.compute_report_trip_count(large) == matmul.DEFAULT_SIM_TRIP_COUNT,
+        "default report trip count should be capped",
+    )
+    large.sim_trip_count = 7
+    require(
+        "matmul_dma_sim_trip_count",
+        matmul.compute_report_trip_count(large) == 7,
+        "explicit report trip count should override default cap",
+    )
+    large.sim_trip_count = -1
+    require(
+        "matmul_dma_sim_trip_count",
+        matmul.compute_report_trip_count(large) == 1022,
+        "negative report trip count should request full natural count",
+    )
+
     gfx950 = argparse.Namespace(
         k=64,
         wave_k_tiles=1,
