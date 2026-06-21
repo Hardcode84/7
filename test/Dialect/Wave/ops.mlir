@@ -38,6 +38,10 @@ func.func @wave_ops(%pred: i1, %value: i32, %out: !wave.ptr<#wave.global, i32>) 
   %bits = wave.ballot %mask : !wave.mask<32> -> i32
   // CHECK: wave.read_first {{.*}} : !wave.simd<i32, 32> -> i32
   %first = wave.read_first %sum : !wave.simd<i32, 32> -> i32
+  // CHECK: wave.shuffle {{.*}} from {{.*}} : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  %shuffle = wave.shuffle %sum from %lane : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  // CHECK: wave.shuffle {{.*}} from {{.*}} : !wave.simd<i32, 32>, i32 -> !wave.simd<i32, 32>
+  %scalar_shuffle = wave.shuffle %sum from %value : !wave.simd<i32, 32>, i32 -> !wave.simd<i32, 32>
   // CHECK: wave.select {{.*}} : i32
   %selected = wave.select %pred, %value, %first : i32
   // CHECK: wave.select {{.*}} : !wave.simd<i32, 32>
@@ -70,6 +74,17 @@ func.func @wave_ops(%pred: i1, %value: i32, %out: !wave.ptr<#wave.global, i32>) 
   %where_store = wave.store %where_sum -> %out after %where_tok : (!wave.simd<i32, 32>, !wave.ptr<#wave.global, i32>, !wave.mem.token) -> !wave.mem.token
 
   func.return %first : i32
+}
+
+// CHECK-LABEL: func.func @shuffle_index_lanes
+func.func @shuffle_index_lanes(%value: !wave.simd<f32, 64>,
+                               %lane: !wave.simd<index, 64>,
+                               %index: index) {
+  // CHECK: wave.shuffle {{.*}} from {{.*}} : !wave.simd<f32, 64>, !wave.simd<index, 64> -> !wave.simd<f32, 64>
+  %simd = wave.shuffle %value from %lane : !wave.simd<f32, 64>, !wave.simd<index, 64> -> !wave.simd<f32, 64>
+  // CHECK: wave.shuffle {{.*}} from {{.*}} : !wave.simd<f32, 64>, index -> !wave.simd<f32, 64>
+  %scalar = wave.shuffle %value from %index : !wave.simd<f32, 64>, index -> !wave.simd<f32, 64>
+  return
 }
 
 // CHECK-LABEL: func.func @wave_vector_memory_payloads

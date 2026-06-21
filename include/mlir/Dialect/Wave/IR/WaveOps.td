@@ -385,6 +385,30 @@ def Wave_ReadFirstOp : Wave_Op<"read_first", [NoMemoryEffect,
   let hasFolder = 1;
 }
 
+def Wave_ShuffleOp : Wave_Op<"shuffle", [NoMemoryEffect]> {
+  let summary = "read values from indexed source lanes";
+  let description = [{
+    Gather-shaped cross-lane movement. For each active destination lane `d`,
+    reads the source lane selected by `$source_lane[d]` from `$source`.
+    Results for inactive destination lanes are unspecified. If the selected
+    source lane is inactive or out of range, the active result lane is
+    unspecified.
+
+    `$source_lane` may be scalar `i32` / `index` or
+    `!wave.simd<i32/index, W>`. Static lane-map attributes are out of scope for
+    v1.
+  }];
+
+  let arguments = (ins Wave_Simd:$source, AnyType:$source_lane);
+  let results = (outs Wave_Simd:$result);
+  let assemblyFormat = [{
+    $source `from` $source_lane attr-dict `:`
+    qualified(type($source)) `,` type($source_lane) `->`
+    qualified(type($result))
+  }];
+  let hasVerifier = 1;
+}
+
 def Wave_TokenOp : Wave_Op<"token", [Pure]> {
   let summary = "create an empty memory dependency token";
   let results = (outs Wave_MemToken:$result);

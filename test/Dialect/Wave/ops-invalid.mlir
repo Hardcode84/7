@@ -734,6 +734,42 @@ func.func @read_first_element_mismatch(%v: !wave.simd<i32, 32>) {
 
 // -----
 
+func.func @shuffle_result_type_mismatch(%v: !wave.simd<i32, 32>,
+                                        %lane: !wave.simd<i32, 32>) {
+  // expected-error @+1 {{source and result SIMD types must match}}
+  %r = wave.shuffle %v from %lane : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 64>
+  return
+}
+
+// -----
+
+func.func @shuffle_lane_width_mismatch(%v: !wave.simd<i32, 32>,
+                                       %lane: !wave.simd<i32, 64>) {
+  // expected-error @+1 {{source lane SIMD width must match source SIMD width}}
+  %r = wave.shuffle %v from %lane : !wave.simd<i32, 32>, !wave.simd<i32, 64> -> !wave.simd<i32, 32>
+  return
+}
+
+// -----
+
+func.func @shuffle_bad_scalar_lane_type(%v: !wave.simd<i32, 32>,
+                                        %lane: i64) {
+  // expected-error @+1 {{source lane scalar type must be index or signless i32}}
+  %r = wave.shuffle %v from %lane : !wave.simd<i32, 32>, i64 -> !wave.simd<i32, 32>
+  return
+}
+
+// -----
+
+func.func @shuffle_bad_simd_lane_type(%v: !wave.simd<i32, 32>,
+                                      %lane: !wave.simd<f32, 32>) {
+  // expected-error @+1 {{source lane SIMD element type must be index or signless i32}}
+  %r = wave.shuffle %v from %lane : !wave.simd<i32, 32>, !wave.simd<f32, 32> -> !wave.simd<i32, 32>
+  return
+}
+
+// -----
+
 func.func @splat_element_mismatch(%v: i32) {
   // expected-error @+1 {{source type must match SIMD element type}}
   %s = wave.splat %v : i32 -> !wave.simd<i64, 32>

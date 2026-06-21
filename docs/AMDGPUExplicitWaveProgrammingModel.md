@@ -175,6 +175,7 @@ The dialect should contain operations for:
 - **Implemented:** integer/floating arithmetic, compare, numeric cast,
   pack/extract, select-like lowering through `where`, and range assertion.
 - **Implemented:** `ballot`, `read_first`, and scalar-to-wave `splat`.
+- **Dialect-only:** dynamic `shuffle` cross-lane gather.
 - **Implemented:** tokenized `load`, `store`, `barrier`, `ptr_add`,
   `index_expr`, and LDS-base ops.
 - **Implemented in WaveAMD:** buffer pointers, fragment pack/unpack/fill,
@@ -577,6 +578,15 @@ Inactive lanes
   operation with explicit inactive-lane semantics, such as `select`, `merge`,
   or `set_inactive`.
 
+Dynamic shuffle
+  `shuffle(source, source_lane)` is gather-shaped. For each active destination
+  lane `d`, `result[d] = source[source_lane[d]]`. Inactive destination lanes
+  are unspecified. Selecting an inactive or out-of-range source lane produces
+  an unspecified result for that destination lane. `source_lane` is scalar or
+  lane-varying `i32` / `index`; static lane-map attributes are out of scope for
+  v1. The semantics match target-indexed lane reads without exposing target
+  spellings in the Wave dialect.
+
 ## Control Flow
 
 The model should prefer structured masked control flow over branch syntax that
@@ -655,8 +665,8 @@ Masks
 
 Cross-lane movement
   **Implemented:** `read_first` and scalar-to-wave `splat` / broadcast.
-  **Proposed:** `read_lane`, `write_lane`, `shuffle`, `permute`, and
-  DPP-style operations.
+  **Dialect-only:** dynamic `shuffle` gather. **Proposed:** `read_lane`,
+  `write_lane`, `permute`, and DPP-style operations.
 
 Reductions and scans
   **Proposed:** `reduce_add`, `reduce_min`, `reduce_max`, `reduce_and`,
@@ -1175,6 +1185,7 @@ Required operations:
 - **Implemented:** masked assignment through `where`.
 - **Implemented:** `ballot`.
 - **Implemented:** `read_first` and broadcast through `splat`.
+- **Dialect-only:** dynamic `shuffle`.
 - **Implemented:** masked global/LDS load/store and explicit token operations
   (`token`, `after`, `join`, `wait`).
 - **Proposed:** `any`, `all`, `popcount`, and simple reductions.

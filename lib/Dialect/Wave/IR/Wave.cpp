@@ -2050,6 +2050,35 @@ LogicalResult ReadFirstOp::verify() {
   return success();
 }
 
+static bool isShuffleLaneType(Type type) {
+  if (type.isIndex())
+    return true;
+  IntegerType integerType = dyn_cast<IntegerType>(type);
+  return integerType && integerType.isSignless() &&
+         integerType.getWidth() == 32;
+}
+
+LogicalResult ShuffleOp::verify() {
+  SimdType sourceType = cast<SimdType>(getSource().getType());
+  SimdType resultType = cast<SimdType>(getResult().getType());
+  if (sourceType != resultType)
+    return emitOpError("source and result SIMD types must match");
+
+  Type sourceLaneType = getSourceLane().getType();
+  if (SimdType laneSimdType = dyn_cast<SimdType>(sourceLaneType)) {
+    if (laneSimdType.getWidth() != sourceType.getWidth())
+      return emitOpError("source lane SIMD width must match source SIMD width");
+    if (!isShuffleLaneType(laneSimdType.getElementType()))
+      return emitOpError(
+          "source lane SIMD element type must be index or signless i32");
+    return success();
+  }
+
+  if (!isShuffleLaneType(sourceLaneType))
+    return emitOpError("source lane scalar type must be index or signless i32");
+  return success();
+}
+
 LogicalResult WorkgroupIdOp::verify() {
   if (getAxis() > 2)
     return emitOpError("axis must be 0 (x), 1 (y), or 2 (z)");
