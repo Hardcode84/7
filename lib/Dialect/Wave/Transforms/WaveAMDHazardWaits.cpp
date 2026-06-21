@@ -21,6 +21,7 @@
 #include "mlir/Analysis/DataFlow/Utils.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Wave/Transforms/WaveAMDRegAllocVerification.h"
+#include "mlir/Dialect/WaveAMDMachine/CostModel/OpClassifier.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachine.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineTarget.h"
 #include "mlir/IR/Builders.h"
@@ -177,34 +178,6 @@ static bool isCDNA4Family(const llvm::AMDGPU::IsaVersion &isa) {
   return isa.Major == 9 && isa.Minor == 5;
 }
 
-static unsigned getMfmaStoreLatency(const llvm::AMDGPU::IsaVersion &isa) {
-  if (isCDNA3Family(isa))
-    return 7;
-  if (isCDNA4Family(isa))
-    return 8;
-  return 8;
-}
-
-static unsigned getMfmaSrcABLatency(const llvm::AMDGPU::IsaVersion &isa) {
-  if (isCDNA3Family(isa))
-    return 7;
-  if (isCDNA4Family(isa))
-    return 8;
-  return 8;
-}
-
-static unsigned getMfmaSrcCOverlapLatency(const llvm::AMDGPU::IsaVersion &isa) {
-  if (isCDNA3Family(isa))
-    return 5;
-  if (isCDNA4Family(isa))
-    return 6;
-  return 6;
-}
-
-static unsigned getMfmaSrcCReadWarLatency(const llvm::AMDGPU::IsaVersion &isa) {
-  return isCDNA3Family(isa) || isCDNA4Family(isa) ? 3 : 0;
-}
-
 static unsigned getValuWriteVGPRMfmaLatency() { return 2; }
 
 static unsigned
@@ -236,12 +209,6 @@ struct HazardConfig {
   // GCNHazardRecognizer.cpp's setreg / m0-write hazard checks.
   unsigned m0PipelineDelay;
 
-  // 4-pass XDL write -> VMEM/VALU: CDNA3 Table 37 = 7, CDNA4 Table 38 = 8.
-  unsigned mfmaResultLatency;
-  // Mirrors LLVM AMDGPU GCNHazardRecognizer CDNA post-RA waits.
-  unsigned mfmaSrcABLatency;
-  unsigned mfmaSrcCOverlapLatency;
-  unsigned mfmaSrcCReadWarLatency;
   unsigned valuWriteVGPRMfmaLatency;
   unsigned valuWriteVGPRReadlaneLatency;
   unsigned valuWriteSGPRValuReadLatency;
@@ -329,6 +296,7 @@ struct PhysicalHazard {
   PhysicalHazardKind kind;
   unsigned limit = 0;
   unsigned remaining = 0;
+  unsigned mfmaPasses = 0;
 };
 
 struct HazardState {
@@ -352,6 +320,7 @@ struct HazardState {
         continue;
       bool changed = joinMax(existing.limit, hazard.limit);
       changed |= joinMax(existing.remaining, hazard.remaining);
+      changed |= joinMax(existing.mfmaPasses, hazard.mfmaPasses);
       return changed;
     }
     physical.push_back(hazard);
@@ -465,6 +434,7 @@ static void mergePhysicalHazard(HazardState &state, PhysicalHazard hazard) {
       continue;
     existing.limit = std::max(existing.limit, hazard.limit);
     existing.remaining = std::max(existing.remaining, hazard.remaining);
+    existing.mfmaPasses = std::max(existing.mfmaPasses, hazard.mfmaPasses);
     return;
   }
   state.physical.push_back(hazard);
@@ -565,6 +535,59 @@ static bool isMFMA(Operation *op) {
   return op->hasTrait<OpTrait::waveamdmachine::MFMAOp>();
 }
 
+static unsigned getMfmaPassCount(Operation *op) {
+  switch (waveamdmachine::classifyOp(op)) {
+  case waveamdmachine::SchedClass::Write2PassMAI:
+    return 2;
+  case waveamdmachine::SchedClass::Write4PassMAI:
+    return 4;
+  case waveamdmachine::SchedClass::Write8PassMAI:
+    return 8;
+  case waveamdmachine::SchedClass::Write16PassMAI:
+    return 16;
+  default:
+    op->emitError("MFMA op lacks MAI schedule class");
+    llvm::report_fatal_error("MFMA op lacks MAI schedule class");
+  }
+}
+
+static unsigned getHazardMfmaPassCount(const PhysicalHazard &hazard) {
+  assert(hazard.mfmaPasses && "MFMA hazard must carry pass count");
+  return hazard.mfmaPasses;
+}
+
+static unsigned getXdlResultLatency(unsigned passes, const HazardConfig &cfg) {
+  if (isCDNA3Family(cfg.isaVersion))
+    return passes + 3;
+  if (isCDNA4Family(cfg.isaVersion))
+    return passes + 3 + (passes != 2);
+  return 8;
+}
+
+static unsigned getXdlSrcCOverlapLatency(unsigned passes,
+                                         const HazardConfig &cfg) {
+  if (isCDNA3Family(cfg.isaVersion))
+    return passes + 1;
+  if (isCDNA4Family(cfg.isaVersion))
+    return passes + 2;
+  return 6;
+}
+
+static unsigned getXdlSrcCExactLatency(unsigned passes,
+                                       const HazardConfig &cfg) {
+  if ((isCDNA3Family(cfg.isaVersion) || isCDNA4Family(cfg.isaVersion)) &&
+      passes == 2)
+    return 2;
+  return 0;
+}
+
+static unsigned getXdlSrcCReadWarLatency(unsigned passes,
+                                         const HazardConfig &cfg) {
+  if (!isCDNA3Family(cfg.isaVersion) && !isCDNA4Family(cfg.isaVersion))
+    return 0;
+  return passes == 2 ? 1 : passes - 1;
+}
+
 static bool isLegacyVALU(Operation *op) {
   return op->hasTrait<OpTrait::waveamdmachine::VALUOp>() && !isMFMA(op);
 }
@@ -653,11 +676,12 @@ static unsigned getMfmaUseWait(unsigned operandIndex, RegSpan use,
     return waitForHazardAge(hazard, cfg.valuWriteVGPRMfmaLatency);
   if (hazard.kind != PhysicalHazardKind::MfmaWrite)
     return 0;
+  unsigned passes = getHazardMfmaPassCount(hazard);
   if (operandIndex != 2)
-    return waitForHazardAge(hazard, cfg.mfmaSrcABLatency);
+    return waitForHazardAge(hazard, getXdlResultLatency(passes, cfg));
   if (use == hazard.span)
-    return 0;
-  return waitForHazardAge(hazard, cfg.mfmaSrcCOverlapLatency);
+    return waitForHazardAge(hazard, getXdlSrcCExactLatency(passes, cfg));
+  return waitForHazardAge(hazard, getXdlSrcCOverlapLatency(passes, cfg));
 }
 
 static unsigned getNonMfmaUseWait(Operation *op, RegSpan use,
@@ -665,7 +689,8 @@ static unsigned getNonMfmaUseWait(Operation *op, RegSpan use,
                                   const HazardConfig &cfg) {
   if (hazard.kind == PhysicalHazardKind::MfmaWrite &&
       isMfmaResultHazardConsumer(op))
-    return waitForHazardAge(hazard, cfg.mfmaResultLatency);
+    return waitForHazardAge(
+        hazard, getXdlResultLatency(getHazardMfmaPassCount(hazard), cfg));
 
   if (hazard.kind == PhysicalHazardKind::ValuWriteVGPR &&
       isa<waveamdmachine::VReadfirstlaneB32Op>(op))
@@ -699,10 +724,12 @@ static unsigned getPhysicalDefWait(Operation *op, RegSpan def,
 
   if (hazard.kind == PhysicalHazardKind::MfmaWrite &&
       isMfmaResultHazardConsumer(op))
-    return waitForHazardAge(hazard, cfg.mfmaResultLatency);
+    return waitForHazardAge(
+        hazard, getXdlResultLatency(getHazardMfmaPassCount(hazard), cfg));
 
   if (hazard.kind == PhysicalHazardKind::MfmaSrcCRead && isLegacyVALU(op))
-    return waitForHazardAge(hazard, cfg.mfmaSrcCReadWarLatency);
+    return waitForHazardAge(
+        hazard, getXdlSrcCReadWarLatency(getHazardMfmaPassCount(hazard), cfg));
 
   if (hazard.kind == PhysicalHazardKind::StoreWriteData &&
       op->hasTrait<OpTrait::waveamdmachine::VALUOp>() && isVGPRSpan(def))
@@ -771,19 +798,26 @@ static void addPhysicalHazard(HazardState &state, RegSpan span,
 
 static void addProducedMfmaPhysicalHazards(Operation *op, HazardState &state,
                                            const HazardConfig &cfg) {
+  unsigned passes = getMfmaPassCount(op);
+  unsigned resultLatency = getXdlResultLatency(passes, cfg);
   for (Value result : op->getResults())
-    if (std::optional<RegSpan> span = getAllocatedRegSpan(result))
-      addPhysicalHazard(state, *span, PhysicalHazardKind::MfmaWrite,
-                        cfg.mfmaResultLatency);
-  if (!cfg.mfmaSrcCReadWarLatency)
+    if (std::optional<RegSpan> span = getAllocatedRegSpan(result)) {
+      PhysicalHazard hazard{*span, PhysicalHazardKind::MfmaWrite, resultLatency,
+                            resultLatency, passes};
+      mergePhysicalHazard(state, hazard);
+    }
+  unsigned srcCReadWarLatency = getXdlSrcCReadWarLatency(passes, cfg);
+  if (!srcCReadWarLatency)
     return;
   waveamdmachine::MMAOpInterface mma =
       dyn_cast<waveamdmachine::MMAOpInterface>(op);
   if (!mma)
     return;
-  if (std::optional<RegSpan> span = getAllocatedRegSpan(mma.getAcc()))
-    addPhysicalHazard(state, *span, PhysicalHazardKind::MfmaSrcCRead,
-                      cfg.mfmaSrcCReadWarLatency);
+  if (std::optional<RegSpan> span = getAllocatedRegSpan(mma.getAcc())) {
+    PhysicalHazard hazard{*span, PhysicalHazardKind::MfmaSrcCRead,
+                          srcCReadWarLatency, srcCReadWarLatency, passes};
+    mergePhysicalHazard(state, hazard);
+  }
 }
 
 static void addProducedValuRegHazard(Value result, HazardState &state,
@@ -858,10 +892,11 @@ static void addProducedHazards(Operation *op, HazardState &state,
                       {/*m0=*/cfg.m0PipelineDelay,
                        /*mfmaStore=*/0});
   if (op->hasTrait<OpTrait::waveamdmachine::MFMAOp>()) {
+    unsigned resultLatency = getXdlResultLatency(getMfmaPassCount(op), cfg);
     for (Value result : op->getResults())
       mergeValueHazards(state, result,
                         {/*m0=*/0,
-                         /*mfmaStore=*/cfg.mfmaResultLatency});
+                         /*mfmaStore=*/resultLatency});
   }
   addProducedPhysicalHazards(op, state, cfg);
 }
@@ -1013,10 +1048,6 @@ struct WaveAMDHazardWaitsPass
         amdgpu_compat::SDelayAlu::encode(
             amdgpu_compat::SDelayAlu::DelayType::VALU, 1),
         /*m0PipelineDelay=*/1,
-        /*mfmaResultLatency=*/getMfmaStoreLatency(isaVersion),
-        /*mfmaSrcABLatency=*/getMfmaSrcABLatency(isaVersion),
-        /*mfmaSrcCOverlapLatency=*/getMfmaSrcCOverlapLatency(isaVersion),
-        /*mfmaSrcCReadWarLatency=*/getMfmaSrcCReadWarLatency(isaVersion),
         /*valuWriteVGPRMfmaLatency=*/getValuWriteVGPRMfmaLatency(),
         /*valuWriteVGPRReadlaneLatency=*/
         getValuWriteVGPRReadlaneLatency(isaVersion),
