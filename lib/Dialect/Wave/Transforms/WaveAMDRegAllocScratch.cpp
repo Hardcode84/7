@@ -12,7 +12,6 @@
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineTarget.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinAttributes.h"
-#include "mlir/IR/IRMapping.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/TargetParser/TargetParser.h"
 
@@ -28,16 +27,6 @@ static constexpr llvm::StringLiteral kWavePrivateSegmentFixedSizeAttr =
 static constexpr llvm::StringLiteral kUsesFlatScratchAttr =
     "waveamdmachine.uses_flat_scratch";
 static constexpr unsigned kScratchImmediateOffsetMax = 4095;
-
-static unsigned alignDown(unsigned value, unsigned granule) {
-  return (value / granule) * granule;
-}
-
-static unsigned getOverage(unsigned liveDwords, unsigned limit) {
-  if (liveDwords <= limit)
-    return 0;
-  return liveDwords - limit;
-}
 
 static std::optional<unsigned> getUnsignedAttr(Operation *op, StringRef name);
 static unsigned getPrivateSegmentBytes(func::FuncOp func,
@@ -98,15 +87,8 @@ static bool isScratchSpillEligibleGroup(IntervalGroup *group,
   return isTempGroup(group);
 }
 
-struct ScratchLoadResult {
-  Value value;
-  Value token;
-};
-
-struct LoopCarrySlot {
-  waveamdmachine::UniformLoopOp loop;
-  unsigned index = 0;
-};
+using ScratchLoadResult = MemorySpillLoadResult;
+using LoopCarrySlot = MemorySpillLoopCarrySlot;
 
 struct ScratchValueSlot {
   Value value;
@@ -264,27 +246,7 @@ public:
 
   bool reducesPressureFailure(
       const wave::WaveAMDPressureFailure &failure) const override {
-    if (!failure.combinedVGPRAGPR)
-      return pressureRelief != 0;
-    if (!group || pressureRelief == 0)
-      return false;
-
-    unsigned oldOverage = getOverage(failure.liveDwords, failure.limit);
-    if (group->storageClass == waveamdmachine::RegClass::VGPR) {
-      if (pressureRelief > failure.liveDwords)
-        return false;
-      return getOverage(failure.liveDwords - pressureRelief, failure.limit) <
-             oldOverage;
-    }
-    if (group->storageClass != waveamdmachine::RegClass::AGPR ||
-        pressureRelief > failure.combinedAGPRLiveDwords)
-      return false;
-    unsigned newAGPRLive = failure.combinedAGPRLiveDwords - pressureRelief;
-    unsigned newVGPRLimit = 0;
-    if (newAGPRLive < failure.combinedVGPRFamilyLimit)
-      newVGPRLimit =
-          alignDown(failure.combinedVGPRFamilyLimit - newAGPRLive, 4);
-    return getOverage(failure.liveDwords, newVGPRLimit) < oldOverage;
+    return memorySpillReducesPressureFailure(failure, group, pressureRelief);
   }
 
   std::optional<StringRef> getRejectReason() const override {
@@ -553,86 +515,16 @@ private:
     return cost;
   }
 
-  static Operation *getAncestorInBlock(Operation *op, Block *block) {
-    for (Operation *cur = op; cur; cur = cur->getParentOp())
-      if (cur->getBlock() == block)
-        return cur;
-    return nullptr;
-  }
-
-  static bool useIsDominatedByDef(Operation *def, Operation *user) {
-    if (user->getBlock() == def->getBlock())
-      return true;
-    Operation *ancestor = getAncestorInBlock(user, def->getBlock());
-    return ancestor && def->isBeforeInBlock(ancestor);
-  }
-
-  bool hasSimpleVGPRUses(Value value,
-                         SmallVectorImpl<OpOperand *> &uses) const {
-    Operation *def = value.getDefiningOp();
-    if (!def || isMemoryIssuerOp(def))
-      return false;
-    for (OpOperand &use : value.getUses()) {
-      if (isRegAllocTempOp(use.getOwner()))
-        continue;
-      if (isLoopCarryUseOp(use.getOwner())) {
-        sawLoopCarryReject = true;
-        return false;
-      }
-      if (!useIsDominatedByDef(def, use.getOwner()))
-        return false;
-      uses.push_back(&use);
-    }
-    return !uses.empty();
-  }
-
-  bool hasSimpleAGPRUses(Value value,
-                         SmallVectorImpl<OpOperand *> &uses) const {
-    Operation *def = value.getDefiningOp();
-    if (!def || isMemoryIssuerOp(def))
-      return false;
-    for (OpOperand &use : value.getUses()) {
-      if (!useIsDominatedByDef(def, use.getOwner()))
-        return false;
-      if (isa<waveamdmachine::VAccvgprReadB32TupleOp>(use.getOwner())) {
-        uses.push_back(&use);
-        continue;
-      }
-      if (isRegAllocTempOp(use.getOwner()))
-        continue;
-      return false;
-    }
-    return !uses.empty();
-  }
-
   bool hasSimpleUses(Value value, SmallVectorImpl<OpOperand *> &uses) const {
-    waveamdmachine::RegType type =
-        cast<waveamdmachine::RegType>(value.getType());
-    if (type.getRegClass() == waveamdmachine::RegClass::AGPR)
-      return hasSimpleAGPRUses(value, uses);
-    return hasSimpleVGPRUses(value, uses);
+    return collectSimpleMemorySpillUses(value, uses, sawLoopCarryReject);
   }
 
   bool isValueLiveAt(Value value, ArrayRef<OpOperand *> uses) const {
-    Operation *def = value.getDefiningOp();
-    if (!def)
-      return false;
-    unsigned start = inventory.positions.lookup(def);
-    if (start >= position)
-      return false;
-    unsigned end = start;
-    for (OpOperand *use : uses)
-      end = std::max(end, inventory.positions.lookup(use->getOwner()));
-    return position <= end;
+    return isValueLiveAtPressure(value, uses, inventory, position);
   }
 
   bool valueCoversWholeGroup(IntervalGroup *group, Value value) const {
-    auto type = dyn_cast<waveamdmachine::RegType>(value.getType());
-    if (!type ||
-        static_cast<unsigned>(type.getWidth()) != group->intervals.size())
-      return false;
-    Interval *first = inventory.intervalFor.lookup(value);
-    return first && first->group == group && first == group->intervals.front();
+    return mlir::wave::regalloc::valueCoversWholeGroup(group, value, inventory);
   }
 
   ScratchSpillPlan getPlanForBytes(unsigned valueBytes,
@@ -655,23 +547,10 @@ private:
     return pressureFailure && pressureFailure->combinedVGPRAGPR;
   }
 
-  bool hasUseAtPressure(ArrayRef<OpOperand *> uses) const {
-    for (OpOperand *use : uses)
-      if (inventory.positions.lookup(use->getOwner()) ==
-          pressureFailure->position)
-        return true;
-    return false;
-  }
-
   std::optional<unsigned> getPressureRelief(Value value, unsigned width,
                                             ArrayRef<OpOperand *> uses) const {
-    if (!isCombinedPressure())
-      return width;
-    if (isCheapVGPRExpr(value.getDefiningOp()))
-      return 0;
-    if (hasUseAtPressure(uses))
-      return 0;
-    return width;
+    return getMemorySpillPressureRelief(value, width, uses, inventory,
+                                        pressureFailure);
   }
 
   void
@@ -700,18 +579,11 @@ private:
   }
 
   unsigned getLiveLaneCount(IntervalGroup *group) const {
-    unsigned count = 0;
-    for (Interval *lane : group->intervals)
-      if (isLiveAt(lane, position))
-        ++count;
-    return count;
+    return mlir::wave::regalloc::getLiveLaneCount(group, position);
   }
 
   bool liveLanesStartBeforePressure(IntervalGroup *group) const {
-    for (Interval *lane : group->intervals)
-      if (isLiveAt(lane, position) && lane->start >= position)
-        return false;
-    return true;
+    return mlir::wave::regalloc::liveLanesStartBeforePressure(group, position);
   }
 
   FailureOr<ScratchValueSlot>
@@ -780,10 +652,11 @@ private:
   bool
   collectLoopCarry(IntervalGroup *group,
                    wave::WaveAMDPressureReliefCandidateList &candidates) const {
-    std::optional<LoopCarrySlot> slot = getLoopCarrySlot(group);
+    std::optional<LoopCarrySlot> slot =
+        mlir::wave::regalloc::getLoopCarrySlot(group, inventory);
     if (!slot)
       return false;
-    if (!canMaterializeLoopCarrySpill(*slot)) {
+    if (!canMaterializeLoopCarrySpill(*slot, inventory, position)) {
       sawLoopCarryReject = true;
       return false;
     }
@@ -797,163 +670,22 @@ private:
       sawLoopCarryReject = true;
       return false;
     }
-    if (loopCarryTouchesPressure(*slot))
+    if (loopCarryTouchesPressure(*slot, inventory, position))
       return false;
     ScratchSpillPlan plan = getPlanForValue(type);
     if (plan.status != ScratchSpillPlanStatus::Available) {
       setPlanRejectReason(plan.status);
       return false;
     }
-    unsigned useCount = getLoopCarryUseCount(*slot);
+    unsigned useCount = mlir::wave::regalloc::getLoopCarryUseCount(*slot);
     candidates.push_back(std::make_unique<ScratchSpillCandidate>(
         group, *slot, plan, useCount, type.getWidth(),
         getLoopCarrySpillCost(*slot, plan, type.getWidth(), useCount)));
     return true;
   }
 
-  bool canMaterializeLoopCarrySpill(LoopCarrySlot slot) const {
-    return canSpillLoopCarryAtPosition(slot) && hasLocalLoopCarryUses(slot) &&
-           canRewriteExtraLoopInitUses(slot);
-  }
-
-  std::optional<LoopCarrySlot> getLoopCarrySlot(IntervalGroup *group) const {
-    std::optional<LoopCarrySlot> slot;
-    for (Value value : getGroupValues(group))
-      if (failed(mergeLoopCarrySlot(value, slot)))
-        return std::nullopt;
-    return slot;
-  }
-
   SmallVector<Value> getGroupValues(IntervalGroup *group) const {
-    SmallVector<Value> values;
-    llvm::SmallDenseSet<Value, 8> seen;
-    for (Interval *lane : group->intervals)
-      for (Value value : lane->values)
-        if (seen.insert(value).second)
-          values.push_back(value);
-    llvm::stable_sort(values, [&](Value lhs, Value rhs) {
-      return getValueOrder(lhs) < getValueOrder(rhs);
-    });
-    return values;
-  }
-
-  int64_t getValueOrder(Value value) const {
-    int64_t resultIndex = -1;
-    if (OpResult result = dyn_cast<OpResult>(value)) {
-      resultIndex = result.getResultNumber();
-      return inventory.positions.lookup(result.getOwner()) * 1024 + resultIndex;
-    }
-    BlockArgument arg = cast<BlockArgument>(value);
-    resultIndex = arg.getArgNumber();
-    Operation *parent = arg.getOwner()->getParentOp();
-    if (isa_and_nonnull<func::FuncOp>(parent))
-      return resultIndex;
-    return inventory.positions.lookup(parent) * 1024 + resultIndex;
-  }
-
-  LogicalResult mergeLoopCarrySlot(Value value,
-                                   std::optional<LoopCarrySlot> &slot) const {
-    if (std::optional<LoopCarrySlot> valueSlot = getValueLoopCarrySlot(value))
-      return mergeLoopCarrySlot(*valueSlot, slot);
-    return success();
-  }
-
-  LogicalResult mergeLoopCarrySlot(LoopCarrySlot next,
-                                   std::optional<LoopCarrySlot> &slot) const {
-    if (!slot) {
-      slot = next;
-      return success();
-    }
-    if (slot->loop == next.loop && slot->index == next.index)
-      return success();
-    return failure();
-  }
-
-  std::optional<LoopCarrySlot> getValueLoopCarrySlot(Value value) const {
-    if (BlockArgument arg = dyn_cast<BlockArgument>(value))
-      if (waveamdmachine::UniformLoopOp loop =
-              dyn_cast<waveamdmachine::UniformLoopOp>(
-                  arg.getOwner()->getParentOp()))
-        return LoopCarrySlot{loop, arg.getArgNumber()};
-    if (waveamdmachine::UniformLoopOp loop =
-            value.getDefiningOp<waveamdmachine::UniformLoopOp>())
-      return LoopCarrySlot{loop, cast<OpResult>(value).getResultNumber()};
-    for (OpOperand &use : value.getUses()) {
-      Operation *owner = use.getOwner();
-      if (waveamdmachine::UniformLoopOp loop =
-              dyn_cast<waveamdmachine::UniformLoopOp>(owner))
-        for (auto [index, init] : llvm::enumerate(loop.getInits()))
-          if (init == value)
-            return LoopCarrySlot{loop, static_cast<unsigned>(index)};
-      if (waveamdmachine::ContinueIfOp term =
-              dyn_cast<waveamdmachine::ContinueIfOp>(owner))
-        if (use.getOperandNumber() != 0)
-          return LoopCarrySlot{
-              term->getParentOfType<waveamdmachine::UniformLoopOp>(),
-              use.getOperandNumber() - 1};
-    }
-    return std::nullopt;
-  }
-
-  bool hasLocalLoopCarryUses(LoopCarrySlot slot) const {
-    Block &body = slot.loop.getBody().front();
-    BlockArgument arg = body.getArgument(slot.index);
-    for (OpOperand &use : arg.getUses())
-      if (!getAncestorInBlock(use.getOwner(), &body))
-        return false;
-    return true;
-  }
-
-  bool canSpillLoopCarryAtPosition(LoopCarrySlot slot) const {
-    DenseMap<Operation *, unsigned>::iterator loopPos =
-        inventory.positions.find(slot.loop);
-    if (loopPos == inventory.positions.end())
-      return false;
-    if (position > loopPos->second)
-      return true;
-    return isSplatInit(slot);
-  }
-
-  bool canRewriteExtraLoopInitUse(OpOperand &use, OpOperand *loopUse,
-                                  waveamdmachine::UniformLoopOp loop) const {
-    if (&use == loopUse || isRegAllocTempOp(use.getOwner()))
-      return true;
-    Operation *user = use.getOwner();
-    return user->getBlock() == loop->getBlock() && user->isBeforeInBlock(loop);
-  }
-
-  bool canRewriteExtraLoopInitUses(LoopCarrySlot slot) const {
-    OpOperand *loopUse = &slot.loop.getInitsMutable()[slot.index];
-    Value init = loopUse->get();
-    for (OpOperand &use : init.getUses())
-      if (!canRewriteExtraLoopInitUse(use, loopUse, slot.loop))
-        return false;
-    return true;
-  }
-
-  bool isSplatInit(LoopCarrySlot slot) const {
-    waveamdmachine::VMovB32TupleOp splat =
-        slot.loop.getInits()[slot.index]
-            .getDefiningOp<waveamdmachine::VMovB32TupleOp>();
-    return splat && splat.getSource().getDefiningOp<waveamdmachine::ImmOp>();
-  }
-
-  bool loopCarryTouchesPressure(LoopCarrySlot slot) const {
-    Block &body = slot.loop.getBody().front();
-    BlockArgument arg = body.getArgument(slot.index);
-    for (OpOperand &use : arg.getUses())
-      if (inventory.positions.lookup(use.getOwner()) == position)
-        return true;
-    Operation *term = body.getTerminator();
-    return term && inventory.positions.lookup(term) == position;
-  }
-
-  unsigned getLoopCarryUseCount(LoopCarrySlot slot) const {
-    Block &body = slot.loop.getBody().front();
-    BlockArgument arg = body.getArgument(slot.index);
-    unsigned count = llvm::range_size(arg.getUses());
-    count += llvm::range_size(slot.loop.getResult(slot.index).getUses());
-    return count + 1;
+    return getMemorySpillGroupValues(group, inventory);
   }
 
   Value createImm(OpBuilder &builder, Location loc, int64_t value) const {
@@ -1231,295 +963,27 @@ private:
     return {load.getResult(), load.getToken()};
   }
 
-  static bool isSpilledIndex(ArrayRef<const ScratchPressurePlan *> spills,
-                             unsigned index) {
-    return llvm::any_of(spills, [&](const ScratchPressurePlan *spill) {
-      return getPlanLoopCarrySlot(*spill).index == index;
-    });
-  }
-
-  static std::optional<unsigned>
-  getSpillOrdinal(ArrayRef<const ScratchPressurePlan *> spills,
-                  unsigned index) {
-    for (auto [ordinal, spill] : llvm::enumerate(spills))
-      if (getPlanLoopCarrySlot(*spill).index == index)
-        return ordinal;
-    return std::nullopt;
-  }
-
   LogicalResult
   materializeLoopCarryPlans(ArrayRef<const ScratchPressurePlan *> spills,
                             OpBuilder &builder) const {
-    if (failed(materializeLoopCarries(spills, builder)))
-      return failure();
-    for (const ScratchPressurePlan *spill : spills)
-      reserveSlot(spill->getPlan(), builder);
-    return success();
-  }
-
-  LogicalResult
-  materializeLoopCarries(ArrayRef<const ScratchPressurePlan *> input,
-                         OpBuilder &builder) const {
-    if (input.empty())
-      return success();
-    SmallVector<const ScratchPressurePlan *, 4> spills(input.begin(),
-                                                       input.end());
-    llvm::stable_sort(spills, [](const ScratchPressurePlan *lhs,
-                                 const ScratchPressurePlan *rhs) {
-      return getPlanLoopCarrySlot(*lhs).index <
-             getPlanLoopCarrySlot(*rhs).index;
-    });
-
-    waveamdmachine::UniformLoopOp loop =
-        getPlanLoopCarrySlot(*spills.front()).loop;
-    for (const ScratchPressurePlan *spill : spills)
-      assert(getPlanLoopCarrySlot(*spill).loop == loop &&
-             "expected one loop carry group");
-
-    SmallVector<Value, 4> initTokens;
-    for (const ScratchPressurePlan *spill : spills) {
-      LoopCarrySlot slot = getPlanLoopCarrySlot(*spill);
-      Value init = loop.getInits()[slot.index];
-      setInsertionPointForInitStore(init, loop, builder);
-      initTokens.push_back(storeSpillValue(init, Value{}, spill->getPlan(),
-                                           builder, loop.getLoc()));
-    }
-    for (auto [index, spill] : llvm::enumerate(spills))
-      if (failed(rewriteExtraLoopInitUses(*spill, initTokens[index], builder)))
-        return failure();
-
-    waveamdmachine::UniformLoopOp newLoop =
-        cloneLoopWithoutCarries(loop, spills, initTokens, builder);
-    replaceLoopResults(loop, newLoop, spills, builder);
-    loop.erase();
-    return success();
-  }
-
-  void setInsertionPointForInitStore(Value init,
-                                     waveamdmachine::UniformLoopOp loop,
-                                     OpBuilder &builder) const {
-    Operation *def = init.getDefiningOp();
-    if (!def || def->getBlock() != loop->getBlock() ||
-        !def->isBeforeInBlock(loop)) {
-      builder.setInsertionPoint(loop);
-      return;
-    }
-    builder.setInsertionPointAfter(def);
-  }
-
-  LogicalResult rewriteExtraLoopInitUses(const ScratchPressurePlan &spill,
-                                         Value initToken,
-                                         OpBuilder &builder) const {
-    LoopCarrySlot slot = getPlanLoopCarrySlot(spill);
-    waveamdmachine::UniformLoopOp loop = slot.loop;
-    OpOperand *loopUse = &loop.getInitsMutable()[slot.index];
-    Value init = loopUse->get();
-    SmallVector<OpOperand *> uses;
-    for (OpOperand &use : init.getUses()) {
-      if (&use == loopUse || isRegAllocTempOp(use.getOwner()))
-        continue;
-      uses.push_back(&use);
-    }
-
-    for (OpOperand *use : uses) {
-      Operation *user = use->getOwner();
-      if (!canRewriteExtraLoopInitUse(*use, loopUse, loop))
-        return mlir::emitError(init.getLoc())
-               << "waveamd-reg-alloc cannot materialize scratch spill for "
-                  "loop init use outside loop preheader";
-      builder.setInsertionPoint(user);
-      ScratchLoadResult load = loadSpillValue(
-          init.getType(), initToken, spill.getPlan(), builder, user->getLoc());
-      use->set(load.value);
-    }
-    return success();
-  }
-
-  waveamdmachine::UniformLoopOp
-  cloneLoopWithoutCarries(waveamdmachine::UniformLoopOp loop,
-                          ArrayRef<const ScratchPressurePlan *> spills,
-                          ArrayRef<Value> initTokens,
-                          OpBuilder &builder) const {
-    Type tokenType = waveamdmachine::MemTokenType::get(builder.getContext());
-    SmallVector<Type> resultTypes;
-    SmallVector<Value> inits;
-    for (unsigned index : llvm::seq<unsigned>(0, loop.getInits().size())) {
-      if (isSpilledIndex(spills, index))
-        continue;
-      resultTypes.push_back(loop.getResult(index).getType());
-      inits.push_back(loop.getInits()[index]);
-    }
-    for (Value initToken : initTokens) {
-      resultTypes.push_back(tokenType);
-      inits.push_back(initToken);
-    }
-
-    builder.setInsertionPoint(loop);
-    waveamdmachine::UniformLoopOp newLoop =
-        waveamdmachine::UniformLoopOp::create(
-            builder, loop.getLoc(), resultTypes, loop.getEntryCond(), inits);
-    cloneLoopBody(loop, newLoop, spills, builder);
-    return newLoop;
-  }
-
-  void cloneLoopBody(waveamdmachine::UniformLoopOp oldLoop,
-                     waveamdmachine::UniformLoopOp newLoop,
-                     ArrayRef<const ScratchPressurePlan *> spills,
-                     OpBuilder &builder) const {
-    Block &oldBody = oldLoop.getBody().front();
-    Block *newBody = new Block;
-    newLoop.getBody().push_back(newBody);
-    for (Value init : newLoop.getInits())
-      newBody->addArgument(init.getType(), oldLoop.getLoc());
-
-    IRMapping mapper;
-    unsigned newArgIndex = 0;
-    for (unsigned index : llvm::seq<unsigned>(0, oldLoop.getInits().size())) {
-      if (isSpilledIndex(spills, index))
-        continue;
-      mapper.map(oldBody.getArgument(index),
-                 newBody->getArgument(newArgIndex++));
-    }
-    SmallVector<Value, 4> tokens;
-    for ([[maybe_unused]] const ScratchPressurePlan *spill : spills)
-      tokens.push_back(newBody->getArgument(newArgIndex++));
-    cloneLoopBodyOps(oldLoop, newBody, spills, tokens, mapper, builder);
-  }
-
-  void cloneLoopBodyOps(waveamdmachine::UniformLoopOp oldLoop, Block *newBody,
-                        ArrayRef<const ScratchPressurePlan *> spills,
-                        SmallVectorImpl<Value> &tokens, IRMapping &mapper,
-                        OpBuilder &builder) const {
-    Block &oldBody = oldLoop.getBody().front();
-    builder.setInsertionPointToEnd(newBody);
-    for (Operation &op : oldBody.without_terminator()) {
-      for (const ScratchPressurePlan *spill : spills) {
-        BlockArgument oldArg =
-            oldBody.getArgument(getPlanLoopCarrySlot(*spill).index);
-        if (!opUsesValue(&op, oldArg))
-          continue;
-        (void)getMappedValue(oldLoop, oldArg, spills, tokens, mapper, builder,
-                             op.getLoc());
-      }
-      builder.clone(op, mapper);
-    }
-    cloneLoopTerminator(oldLoop, spills, tokens, mapper, builder);
-  }
-
-  static bool opUsesValue(Operation *op, Value value) {
-    bool found = false;
-    op->walk([&](Operation *nested) {
-      if (found)
-        return WalkResult::interrupt();
-      if (llvm::any_of(nested->getOperands(),
-                       [&](Value operand) { return operand == value; })) {
-        found = true;
-        return WalkResult::interrupt();
-      }
-      return WalkResult::advance();
-    });
-    return found;
-  }
-
-  std::optional<unsigned>
-  getSpillOrdinalForValue(waveamdmachine::UniformLoopOp loop, Value value,
-                          ArrayRef<const ScratchPressurePlan *> spills) const {
-    BlockArgument arg = dyn_cast<BlockArgument>(value);
-    if (!arg || arg.getOwner() != &loop.getBody().front())
-      return std::nullopt;
-    return getSpillOrdinal(spills, arg.getArgNumber());
-  }
-
-  Value getMappedValue(waveamdmachine::UniformLoopOp loop, Value value,
-                       ArrayRef<const ScratchPressurePlan *> spills,
-                       SmallVectorImpl<Value> &tokens, IRMapping &mapper,
-                       OpBuilder &builder, Location loc) const {
-    if (Value mapped = mapper.lookupOrNull(value))
-      return mapped;
-    std::optional<unsigned> ordinal =
-        getSpillOrdinalForValue(loop, value, spills);
-    if (!ordinal)
-      return mapper.lookupOrDefault(value);
-    const ScratchPressurePlan &spill = *spills[*ordinal];
-    ScratchLoadResult load = loadSpillValue(value.getType(), tokens[*ordinal],
-                                            spill.getPlan(), builder, loc);
-    tokens[*ordinal] = load.token;
-    mapper.map(value, load.value);
-    return load.value;
-  }
-
-  bool
-  needsTerminatorPreload(waveamdmachine::UniformLoopOp loop,
-                         unsigned carryIndex, Value carry,
-                         ArrayRef<const ScratchPressurePlan *> spills) const {
-    std::optional<unsigned> source =
-        getSpillOrdinalForValue(loop, carry, spills);
-    if (!source)
-      return false;
-    std::optional<unsigned> dest = getSpillOrdinal(spills, carryIndex);
-    if (!dest || *dest != *source)
-      return true;
-    BlockArgument arg = cast<BlockArgument>(carry);
-    return arg.getArgNumber() != carryIndex;
-  }
-
-  void cloneLoopTerminator(waveamdmachine::UniformLoopOp loop,
-                           ArrayRef<const ScratchPressurePlan *> spills,
-                           SmallVectorImpl<Value> &tokens, IRMapping &mapper,
-                           OpBuilder &builder) const {
-    waveamdmachine::ContinueIfOp oldTerm = cast<waveamdmachine::ContinueIfOp>(
-        loop.getBody().front().getTerminator());
-    for (auto [index, carry] : llvm::enumerate(oldTerm.getCarries()))
-      if (needsTerminatorPreload(loop, index, carry, spills))
-        (void)getMappedValue(loop, carry, spills, tokens, mapper, builder,
-                             oldTerm.getLoc());
-
-    SmallVector<Value> carries;
-    for (unsigned index : llvm::seq<unsigned>(0, oldTerm.getCarries().size())) {
-      Value carry = oldTerm.getCarries()[index];
-      std::optional<unsigned> spillIndex = getSpillOrdinal(spills, index);
-      if (spillIndex) {
-        const ScratchPressurePlan &spill = *spills[*spillIndex];
-        BlockArgument oldArg = loop.getBody().front().getArgument(
-            getPlanLoopCarrySlot(spill).index);
-        if (carry != oldArg)
-          tokens[*spillIndex] = storeSpillValue(
-              getMappedValue(loop, carry, spills, tokens, mapper, builder,
-                             oldTerm.getLoc()),
-              tokens[*spillIndex], spill.getPlan(), builder, oldTerm.getLoc());
-        continue;
-      }
-      carries.push_back(getMappedValue(loop, carry, spills, tokens, mapper,
-                                       builder, oldTerm.getLoc()));
-    }
-    carries.append(tokens.begin(), tokens.end());
-    waveamdmachine::ContinueIfOp::create(
-        builder, oldTerm.getLoc(), mapper.lookupOrDefault(oldTerm.getCond()),
-        carries);
-  }
-
-  void replaceLoopResults(waveamdmachine::UniformLoopOp oldLoop,
-                          waveamdmachine::UniformLoopOp newLoop,
-                          ArrayRef<const ScratchPressurePlan *> spills,
-                          OpBuilder &builder) const {
-    builder.setInsertionPointAfter(newLoop);
-    unsigned newResultIndex = 0;
-    for (unsigned index : llvm::seq<unsigned>(0, oldLoop.getResults().size())) {
-      if (isSpilledIndex(spills, index))
-        continue;
-      oldLoop.getResult(index).replaceAllUsesWith(
-          newLoop.getResult(newResultIndex++));
-    }
-    for (const ScratchPressurePlan *spill : spills) {
-      Value token = newLoop.getResult(newResultIndex++);
-      unsigned oldIndex = getPlanLoopCarrySlot(*spill).index;
-      if (oldLoop.getResult(oldIndex).use_empty())
-        continue;
-      ScratchLoadResult load =
-          loadSpillValue(oldLoop.getResult(oldIndex).getType(), token,
-                         spill->getPlan(), builder, oldLoop.getLoc());
-      oldLoop.getResult(oldIndex).replaceAllUsesWith(load.value);
-    }
+    auto getSlot = [](const ScratchPressurePlan &spill) {
+      return getPlanLoopCarrySlot(spill);
+    };
+    auto storeValue = [&](Value value, Value token,
+                          const ScratchPressurePlan &spill, OpBuilder &builder,
+                          Location loc) {
+      return storeSpillValue(value, token, spill.getPlan(), builder, loc);
+    };
+    auto loadValue = [&](Type type, Value token,
+                         const ScratchPressurePlan &spill, OpBuilder &builder,
+                         Location loc) {
+      return loadSpillValue(type, token, spill.getPlan(), builder, loc);
+    };
+    auto reserve = [&](const ScratchPressurePlan &spill, OpBuilder &builder) {
+      reserveSlot(spill.getPlan(), builder);
+    };
+    return materializeMemorySpillLoopCarryPlans<ScratchPressurePlan>(
+        spills, builder, getName(), getSlot, storeValue, loadValue, reserve);
   }
 
   void reserveSlot(const ScratchSpillPlan &plan, OpBuilder &builder) const {

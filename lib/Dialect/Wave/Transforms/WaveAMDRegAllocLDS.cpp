@@ -13,6 +13,7 @@
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineTarget.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinAttributes.h"
+#include "llvm/ADT/STLExtras.h"
 #include "llvm/MC/MCSubtargetInfo.h"
 #include "llvm/MC/TargetRegistry.h"
 #include "llvm/Support/MathExtras.h"
@@ -67,14 +68,18 @@ static bool isLiveAt(Interval *interval, unsigned position) {
          position <= interval->end;
 }
 
-static bool isScalarTempGroup(IntervalGroup *group) {
-  if (!group || group->intervals.size() != 1)
+static bool isTempGroup(IntervalGroup *group) {
+  if (!group)
     return false;
-  Interval *interval = group->intervals.front();
-  if (interval->values.size() != 1)
-    return false;
-  Value value = *interval->values.begin();
-  return isRegAllocTempOp(value.getDefiningOp());
+  bool sawValue = false;
+  for (Interval *interval : group->intervals) {
+    for (Value value : interval->values) {
+      sawValue = true;
+      if (!isRegAllocTempOp(value.getDefiningOp()))
+        return false;
+    }
+  }
+  return sawValue;
 }
 
 static bool isLDSSpillRegClass(waveamdmachine::RegClass regClass) {
@@ -82,77 +87,213 @@ static bool isLDSSpillRegClass(waveamdmachine::RegClass regClass) {
          regClass == waveamdmachine::RegClass::AGPR;
 }
 
-static bool isOpenSingleLaneSpillGroup(IntervalGroup *group) {
+static bool isOpenSpillGroup(IntervalGroup *group) {
   if (!group || group->plannedPressureRelief || group->reserved ||
       isFixedRegisterGroup(group))
     return false;
-  return group->intervals.size() == 1;
+  return !group->intervals.empty();
 }
 
 static bool hasLDSSpillRegClass(IntervalGroup *group) {
-  return isLDSSpillRegClass(group->storageClass) &&
-         group->preferredClass == group->storageClass;
+  return isLDSSpillRegClass(group->storageClass);
 }
 
-static bool isLDSSpillEligibleScalarGroup(IntervalGroup *group,
-                                          unsigned position) {
-  if (!isOpenSingleLaneSpillGroup(group) || !hasLDSSpillRegClass(group))
+static bool isLDSSpillCandidateGroup(IntervalGroup *group, unsigned position) {
+  if (!isOpenSpillGroup(group) || !hasLDSSpillRegClass(group))
     return false;
-  Interval *interval = group->intervals.front();
-  if (!isLiveAt(interval, position))
+  if (group->storageClass == waveamdmachine::RegClass::AGPR &&
+      !isTempGroup(group))
     return false;
-  if (!group->nonPromotable && !interval->nonPromotable)
+  if (!llvm::any_of(group->intervals,
+                    [&](Interval *lane) { return isLiveAt(lane, position); }))
+    return false;
+  return true;
+}
+
+static bool isLDSSpillEligibleGroup(IntervalGroup *group, unsigned position) {
+  if (!isLDSSpillCandidateGroup(group, position))
+    return false;
+  if (!group->nonPromotable &&
+      llvm::all_of(group->intervals,
+                   [](Interval *lane) { return !lane->nonPromotable; }))
     return true;
-  return isScalarTempGroup(group);
+  return isTempGroup(group);
 }
 
-class LDSSpillPlanRecord final : public wave::WaveAMDPressureReliefPlan {
+struct LDSValueSlot {
+  Value value;
+  SmallVector<LDSSpillPlan, 4> plans;
+  wave::WaveAMDPressureReliefCost cost;
+  unsigned useCount = 0;
+};
+
+using LDSLoadResult = MemorySpillLoadResult;
+using LoopCarrySlot = MemorySpillLoopCarrySlot;
+
+static unsigned getTotalUseCount(ArrayRef<LDSValueSlot> slots) {
+  unsigned total = 0;
+  for (const LDSValueSlot &slot : slots)
+    total += slot.useCount;
+  return total;
+}
+
+static unsigned getTotalSlotBytes(ArrayRef<LDSSpillPlan> plans) {
+  unsigned total = 0;
+  for (LDSSpillPlan plan : plans)
+    total += plan.slotBytes;
+  return total;
+}
+
+static unsigned getTotalSlotBytes(ArrayRef<LDSValueSlot> slots) {
+  unsigned total = 0;
+  for (const LDSValueSlot &slot : slots)
+    total += getTotalSlotBytes(slot.plans);
+  return total;
+}
+
+static wave::WaveAMDPressureReliefCost
+getTotalCost(ArrayRef<LDSValueSlot> slots) {
+  wave::WaveAMDPressureReliefCost total;
+  for (const LDSValueSlot &slot : slots) {
+    total.materializationOps += slot.cost.materializationOps;
+    total.loopWeightedOps += slot.cost.loopWeightedOps;
+    total.latencyPenalty += slot.cost.latencyPenalty;
+    total.instabilityPenalty += slot.cost.instabilityPenalty;
+  }
+  return total;
+}
+
+class LDSPressurePlan : public wave::WaveAMDPressureReliefPlan {
 public:
-  LDSSpillPlanRecord(IntervalGroup *group, Value value, LDSSpillPlan plan,
-                     unsigned useCount, unsigned reliefDwords)
-      : plan(plan), group(group), value(value), useCount(useCount),
-        reliefDwords(reliefDwords) {}
+  StringRef getProviderName() const override { return "lds-spill"; }
+
+  virtual IntervalGroup *getGroup() const = 0;
+  virtual LDSSpillPlan getPlan() const = 0;
+  virtual unsigned getUseCount() const = 0;
+  virtual Value getValue() const { return {}; }
+  virtual ArrayRef<LDSValueSlot> getValueSlots() const { return {}; }
+  virtual unsigned getReservedBytes() const {
+    return getTotalSlotBytes(getValueSlots());
+  }
+  virtual std::optional<LoopCarrySlot> getLoopCarry() const {
+    return std::nullopt;
+  }
+};
+
+class LDSValuePressurePlan final : public LDSPressurePlan {
+public:
+  LDSValuePressurePlan(IntervalGroup *group, ArrayRef<LDSValueSlot> valueSlots,
+                       unsigned reliefDwords)
+      : valueSlots(valueSlots), group(group), reliefDwords(reliefDwords) {}
 
   wave::WaveAMDPressureReliefProviderKind getProviderKind() const override {
     return wave::WaveAMDPressureReliefProviderKind::LDSSpill;
   }
-
-  StringRef getProviderName() const override { return "lds-spill"; }
   unsigned getReliefDwords() const override { return reliefDwords; }
 
-  IntervalGroup *getGroup() const { return group; }
-  LDSSpillPlan getPlan() const { return plan; }
-  unsigned getUseCount() const { return useCount; }
-  Value getValue() const { return value; }
+  IntervalGroup *getGroup() const override { return group; }
+  LDSSpillPlan getPlan() const override {
+    assert(!valueSlots.empty() && !valueSlots.front().plans.empty() &&
+           "LDS value plan needs a slot");
+    return valueSlots.front().plans.front();
+  }
+  unsigned getUseCount() const override { return getTotalUseCount(valueSlots); }
+  Value getValue() const override {
+    return valueSlots.size() == 1 ? valueSlots.front().value : Value{};
+  }
+  ArrayRef<LDSValueSlot> getValueSlots() const override { return valueSlots; }
+  unsigned getReservedBytes() const override {
+    return getTotalSlotBytes(valueSlots);
+  }
 
 private:
-  LDSSpillPlan plan;
+  SmallVector<LDSValueSlot, 4> valueSlots;
   IntervalGroup *group = nullptr;
-  Value value;
+  unsigned reliefDwords = 0;
+};
+
+class LDSLoopCarryPressurePlan final : public LDSPressurePlan {
+public:
+  LDSLoopCarryPressurePlan(IntervalGroup *group, LoopCarrySlot loopCarry,
+                           LDSValueSlot valueSlot, unsigned useCount,
+                           unsigned reliefDwords)
+      : valueSlot(std::move(valueSlot)), loopCarry(loopCarry), group(group),
+        useCount(useCount), reliefDwords(reliefDwords) {}
+
+  wave::WaveAMDPressureReliefProviderKind getProviderKind() const override {
+    return wave::WaveAMDPressureReliefProviderKind::LDSSpill;
+  }
+  unsigned getReliefDwords() const override { return reliefDwords; }
+
+  IntervalGroup *getGroup() const override { return group; }
+  LDSSpillPlan getPlan() const override {
+    assert(!valueSlot.plans.empty() && "LDS loop-carry plan needs a slot");
+    return valueSlot.plans.front();
+  }
+  unsigned getUseCount() const override { return useCount; }
+  ArrayRef<LDSValueSlot> getValueSlots() const override { return valueSlot; }
+  unsigned getReservedBytes() const override {
+    return getTotalSlotBytes(valueSlot.plans);
+  }
+  std::optional<LoopCarrySlot> getLoopCarry() const override {
+    return loopCarry;
+  }
+
+private:
+  LDSValueSlot valueSlot;
+  LoopCarrySlot loopCarry;
+  IntervalGroup *group = nullptr;
   unsigned useCount = 0;
   unsigned reliefDwords = 0;
 };
 
+static LoopCarrySlot getPlanLoopCarrySlot(const LDSPressurePlan &spill) {
+  std::optional<LoopCarrySlot> slot = spill.getLoopCarry();
+  assert(slot && "expected loop-carry LDS spill");
+  return *slot;
+}
+
+static const LDSValueSlot &getPlanValueSlot(const LDSPressurePlan &spill) {
+  assert(!spill.getValueSlots().empty() && "expected LDS value slot");
+  return spill.getValueSlots().front();
+}
+
 class LDSSpillCandidate final : public wave::WaveAMDPressureReliefCandidate {
 public:
-  LDSSpillCandidate(IntervalGroup *group, Value value, LDSSpillPlan plan,
-                    unsigned useCount, unsigned pressureRelief,
+  LDSSpillCandidate(IntervalGroup *group, LDSValueSlot valueSlot,
+                    unsigned pressureRelief,
+                    wave::WaveAMDPressureReliefCost cost,
                     StringRef rejectReason = StringRef())
-      : group(group), value(value), rejectReason(rejectReason.str()),
-        plan(plan), useCount(useCount), pressureRelief(pressureRelief) {}
+      : rejectReason(rejectReason.str()), cost(cost), group(group),
+        pressureRelief(pressureRelief) {
+    valueSlots.push_back(std::move(valueSlot));
+  }
+
+  LDSSpillCandidate(IntervalGroup *group, ArrayRef<LDSValueSlot> valueSlots,
+                    unsigned pressureRelief,
+                    wave::WaveAMDPressureReliefCost cost)
+      : valueSlots(valueSlots), cost(cost), group(group),
+        pressureRelief(pressureRelief) {}
+
+  LDSSpillCandidate(IntervalGroup *group, LoopCarrySlot loopCarry,
+                    LDSValueSlot valueSlot, unsigned useCount,
+                    unsigned pressureRelief,
+                    wave::WaveAMDPressureReliefCost cost)
+      : cost(cost), group(group), loopCarry(loopCarry), useCount(useCount),
+        pressureRelief(pressureRelief) {
+    valueSlots.push_back(std::move(valueSlot));
+  }
 
   StringRef getProviderName() const override { return "lds-spill"; }
 
-  wave::WaveAMDPressureReliefCost getCost() const override {
-    wave::WaveAMDPressureReliefCost cost;
-    unsigned addressOps = getAddressOpsPerAccess(plan);
-    cost.materializationOps =
-        1 + addressOps + static_cast<int64_t>(useCount) * (1 + addressOps);
-    cost.latencyPenalty = static_cast<int64_t>(useCount) * 2;
-    return cost;
-  }
+  wave::WaveAMDPressureReliefCost getCost() const override { return cost; }
 
   unsigned getReliefDwords() const override { return pressureRelief; }
+
+  bool reducesPressureFailure(
+      const wave::WaveAMDPressureFailure &failure) const override {
+    return memorySpillReducesPressureFailure(failure, group, pressureRelief);
+  }
 
   std::optional<StringRef> getRejectReason() const override {
     if (rejectReason.empty())
@@ -161,33 +302,57 @@ public:
   }
 
   IntervalGroup *getGroup() const { return group; }
-  LDSSpillPlan getPlan() const { return plan; }
-  unsigned getUseCount() const { return useCount; }
-  Value getValue() const { return value; }
+  LDSSpillPlan getPlan() const {
+    assert(!valueSlots.empty() && !valueSlots.front().plans.empty() &&
+           "LDS candidate needs a slot");
+    return valueSlots.front().plans.front();
+  }
+  unsigned getUseCount() const {
+    if (loopCarry)
+      return useCount;
+    return getTotalUseCount(valueSlots);
+  }
+  Value getValue() const {
+    if (loopCarry || valueSlots.size() != 1)
+      return {};
+    return valueSlots.front().value;
+  }
+  ArrayRef<LDSValueSlot> getValueSlots() const { return valueSlots; }
+  std::optional<LoopCarrySlot> getLoopCarry() const { return loopCarry; }
   std::unique_ptr<wave::WaveAMDPressureReliefPlan> getPlannedSpill() const {
-    return std::make_unique<LDSSpillPlanRecord>(group, value, plan, useCount,
-                                                pressureRelief);
+    if (loopCarry) {
+      assert(valueSlots.size() == 1 && "loop-carry LDS uses one value slot");
+      return std::make_unique<LDSLoopCarryPressurePlan>(
+          group, *loopCarry, valueSlots.front(), useCount, pressureRelief);
+    }
+    return std::make_unique<LDSValuePressurePlan>(group, valueSlots,
+                                                  pressureRelief);
   }
 
 protected:
   void printExtra(llvm::raw_ostream &os) const override {
-    os << ", slot_base=" << plan.slotBase << ", slot_bytes=" << plan.slotBytes
-       << ", uses=" << useCount;
+    LDSSpillPlan firstPlan = getPlan();
+    os << ", slot_base=" << firstPlan.slotBase
+       << ", slot_bytes=" << getTotalSlotBytes(valueSlots)
+       << ", uses=" << getUseCount();
   }
 
   void setExtraDiagnosticAttrs(Builder &builder,
                                NamedAttrList &attrs) const override {
-    attrs.set("slot_base", builder.getI64IntegerAttr(plan.slotBase));
-    attrs.set("slot_bytes", builder.getI64IntegerAttr(plan.slotBytes));
+    LDSSpillPlan firstPlan = getPlan();
+    attrs.set("slot_base", builder.getI64IntegerAttr(firstPlan.slotBase));
+    attrs.set("slot_bytes",
+              builder.getI64IntegerAttr(getTotalSlotBytes(valueSlots)));
     attrs.set("pressure_relief", builder.getI64IntegerAttr(pressureRelief));
-    attrs.set("uses", builder.getI64IntegerAttr(useCount));
+    attrs.set("uses", builder.getI64IntegerAttr(getUseCount()));
   }
 
 private:
-  IntervalGroup *group = nullptr;
-  Value value;
   std::string rejectReason;
-  LDSSpillPlan plan;
+  SmallVector<LDSValueSlot, 4> valueSlots;
+  wave::WaveAMDPressureReliefCost cost;
+  IntervalGroup *group = nullptr;
+  std::optional<LoopCarrySlot> loopCarry;
   unsigned useCount = 0;
   unsigned pressureRelief = 0;
 };
@@ -211,23 +376,9 @@ public:
     pressureFailure = query.failure;
     sawLoopCarryReject = false;
     planRejectReason.clear();
-    unsigned committedBytes =
-        getUnsignedAttr(func, kLDSSpillBytesAttr).value_or(0);
-    unsigned fixedLDS = 0;
-    unsigned dynamicLDS = 0;
-    getExistingLDSBytes(func, fixedLDS, dynamicLDS, committedBytes);
-    unsigned reservedBytes =
-        committedBytes + getPlannedProviderBytes(inventory, getName());
-    LDSSpillPlan plan = buildLDSSpillPlan(func, budgets, /*valueBytes=*/4,
-                                          reservedBytes, fixedLDS, dynamicLDS);
-    if (plan.status != LDSSpillPlanStatus::Available) {
-      setPlanRejectReason(plan.status);
-      return success();
-    }
-
     for (IntervalGroup *group : groups)
-      collect(group, plan, candidates);
-    collect(request, plan, candidates);
+      collect(group, candidates);
+    collect(request, candidates);
     return success();
   }
 
@@ -239,25 +390,64 @@ public:
   }
 
   void applyPlan(const wave::WaveAMDPressureReliefPlan &plan) const override {
-    const LDSSpillPlanRecord &spill =
-        static_cast<const LDSSpillPlanRecord &>(plan);
+    const LDSPressurePlan &spill = static_cast<const LDSPressurePlan &>(plan);
     if (spill.getGroup()) {
       spill.getGroup()->plannedPressureRelief = true;
       spill.getGroup()->assignedBase.reset();
     }
-    addPlannedProviderBytes(inventory, getName(), spill.getPlan().slotBytes);
+    addPlannedProviderBytes(inventory, getName(), spill.getReservedBytes());
   }
 
   LogicalResult materializePlan(const wave::WaveAMDPressureReliefPlan &plan,
                                 OpBuilder &builder) const override {
-    const LDSSpillPlanRecord &spill =
-        static_cast<const LDSSpillPlanRecord &>(plan);
-    LDSSpillCandidate candidate(spill.getGroup(), spill.getValue(),
-                                spill.getPlan(), spill.getUseCount(),
-                                spill.getReliefDwords());
-    if (failed(materializeValue(candidate, builder)))
-      return failure();
-    reserveSlot(spill.getPlan(), builder);
+    const LDSPressurePlan &spill = static_cast<const LDSPressurePlan &>(plan);
+    if (spill.getLoopCarry()) {
+      SmallVector<const LDSPressurePlan *, 1> spills{&spill};
+      return materializeLoopCarryPlans(spills, builder);
+    }
+    assert(!spill.getValueSlots().empty() && "expected LDS value spill");
+    for (const LDSValueSlot &slot : spill.getValueSlots())
+      if (failed(materializeValue(slot.value, slot.plans, builder)))
+        return failure();
+    for (const LDSValueSlot &slot : spill.getValueSlots())
+      reserveSlots(slot.plans, builder);
+    return success();
+  }
+
+  LogicalResult
+  materializePlans(ArrayRef<const wave::WaveAMDPressureReliefPlan *> plans,
+                   OpBuilder &builder) const override {
+    SmallVector<SmallVector<const LDSPressurePlan *, 2>, 8> loopCarryGroups;
+    for (const wave::WaveAMDPressureReliefPlan *plan : plans) {
+      const LDSPressurePlan &spill =
+          static_cast<const LDSPressurePlan &>(*plan);
+      std::optional<LoopCarrySlot> slot = spill.getLoopCarry();
+      if (!slot) {
+        if (failed(materializePlan(*plan, builder)))
+          return failure();
+        continue;
+      }
+      Operation *loop = slot->loop.getOperation();
+      auto it = llvm::find_if(loopCarryGroups, [&](const auto &group) {
+        LoopCarrySlot groupSlot = getPlanLoopCarrySlot(*group.front());
+        return groupSlot.loop.getOperation() == loop;
+      });
+      if (it == loopCarryGroups.end())
+        loopCarryGroups.push_back({&spill});
+      else
+        it->push_back(&spill);
+    }
+    llvm::stable_sort(loopCarryGroups, [](const auto &lhs, const auto &rhs) {
+      waveamdmachine::UniformLoopOp lhsLoop =
+          getPlanLoopCarrySlot(*lhs.front()).loop;
+      waveamdmachine::UniformLoopOp rhsLoop =
+          getPlanLoopCarrySlot(*rhs.front()).loop;
+      return getLoopDepth(lhsLoop.getOperation()) >
+             getLoopDepth(rhsLoop.getOperation());
+    });
+    for (ArrayRef<const LDSPressurePlan *> group : loopCarryGroups)
+      if (failed(materializeLoopCarryPlans(group, builder)))
+        return failure();
     return success();
   }
 
@@ -270,6 +460,8 @@ public:
         static_cast<const LDSSpillCandidate &>(lhs);
     const LDSSpillCandidate &rhsSpill =
         static_cast<const LDSSpillCandidate &>(rhs);
+    if (lhs.getReliefDwords() != rhs.getReliefDwords())
+      return lhs.getReliefDwords() > rhs.getReliefDwords();
     if (lhsSpill.getGroup()->intervals.front()->end !=
         rhsSpill.getGroup()->intervals.front()->end)
       return lhsSpill.getGroup()->intervals.front()->end >
@@ -310,112 +502,237 @@ private:
     planRejectReason += getLDSSpillPlanStatusName(status);
   }
 
-  static Value getSimpleValue(IntervalGroup *group) {
-    if (!group || group->intervals.size() != 1)
-      return {};
-    Interval *interval = group->intervals.front();
-    if (interval->values.size() != 1)
-      return {};
-    return *interval->values.begin();
+  static bool isEligibleGroup(IntervalGroup *group, unsigned position) {
+    return isLDSSpillEligibleGroup(group, position);
   }
 
-  static bool isEligibleScalarGroup(IntervalGroup *group, unsigned position) {
-    return isLDSSpillEligibleScalarGroup(group, position);
+  static bool isCandidateGroup(IntervalGroup *group, unsigned position) {
+    return isLDSSpillCandidateGroup(group, position);
   }
 
-  bool hasSimpleVGPRUses(Value value,
-                         SmallVectorImpl<OpOperand *> &uses) const {
-    Operation *def = value.getDefiningOp();
-    if (!def || isMemoryIssuerOp(def))
-      return false;
-    Block *block = def->getBlock();
-    for (OpOperand &use : value.getUses()) {
-      if (isRegAllocTempOp(use.getOwner()))
-        continue;
-      if (isLoopCarryUseOp(use.getOwner())) {
-        sawLoopCarryReject = true;
-        return false;
-      }
-      if (use.getOwner()->getBlock() != block)
-        return false;
-      uses.push_back(&use);
-    }
-    return !uses.empty();
+  static unsigned getLDSMaterializationOps(ArrayRef<LDSSpillPlan> plans) {
+    unsigned total = 0;
+    for (LDSSpillPlan plan : plans)
+      total += 1 + getAddressOpsPerAccess(plan);
+    return total;
   }
 
-  bool hasSimpleAGPRUses(Value value,
-                         SmallVectorImpl<OpOperand *> &uses) const {
-    Operation *def = value.getDefiningOp();
-    if (!def || isMemoryIssuerOp(def))
-      return false;
-    Block *block = def->getBlock();
-    for (OpOperand &use : value.getUses()) {
-      if (use.getOwner()->getBlock() != block)
-        return false;
-      if (isa<waveamdmachine::VAccvgprReadB32TupleOp>(use.getOwner())) {
-        uses.push_back(&use);
-        continue;
-      }
-      if (isRegAllocTempOp(use.getOwner()))
-        continue;
-      return false;
-    }
-    return !uses.empty();
+  static wave::WaveAMDPressureReliefCost
+  getLoopCarrySpillCost(LoopCarrySlot slot, ArrayRef<LDSSpillPlan> plans,
+                        unsigned useCount) {
+    unsigned opCount = getLDSMaterializationOps(plans);
+    unsigned loopDepth = getLoopDepth(slot.loop.getOperation());
+    wave::WaveAMDPressureReliefCost cost;
+    cost.materializationOps = static_cast<int64_t>(opCount) * (1 + useCount);
+    cost.loopWeightedOps = static_cast<int64_t>(opCount) * useCount * loopDepth;
+    cost.latencyPenalty = static_cast<int64_t>(plans.size()) * useCount * 2;
+    return cost;
+  }
+
+  wave::WaveAMDPressureReliefCost
+  getValueSpillCost(Value value, ArrayRef<LDSSpillPlan> plans,
+                    ArrayRef<OpOperand *> uses) const {
+    unsigned opCount = getLDSMaterializationOps(plans);
+    wave::WaveAMDPressureReliefCost cost;
+    cost.materializationOps = static_cast<int64_t>(opCount) * (1 + uses.size());
+    cost.loopWeightedOps =
+        static_cast<int64_t>(opCount) * getLoopDepth(value.getDefiningOp());
+    for (OpOperand *use : uses)
+      cost.loopWeightedOps +=
+          static_cast<int64_t>(opCount) * getLoopDepth(use->getOwner());
+    cost.latencyPenalty = static_cast<int64_t>(plans.size()) * uses.size() * 2;
+    return cost;
   }
 
   bool hasSimpleUses(Value value, SmallVectorImpl<OpOperand *> &uses) const {
-    waveamdmachine::RegType type =
-        cast<waveamdmachine::RegType>(value.getType());
-    if (type.getRegClass() == waveamdmachine::RegClass::AGPR)
-      return hasSimpleAGPRUses(value, uses);
-    return hasSimpleVGPRUses(value, uses);
+    return collectSimpleMemorySpillUses(value, uses, sawLoopCarryReject);
   }
 
-  void collect(IntervalGroup *group, LDSSpillPlan plan,
-               wave::WaveAMDPressureReliefCandidateList &candidates) const {
-    if (!isEligibleScalarGroup(group, position))
-      return;
-    Value value = getSimpleValue(group);
-    if (!value)
-      return;
-    waveamdmachine::RegType type =
-        cast<waveamdmachine::RegType>(value.getType());
-    if (!isLDSSpillRegClass(type.getRegClass()) || type.getWidth() != 1)
-      return;
-    SmallVector<OpOperand *> uses;
-    if (!hasSimpleUses(value, uses))
-      return;
-    std::optional<unsigned> pressureRelief =
-        getPressureRelief(value, group, uses);
-    if (!pressureRelief || *pressureRelief == 0)
-      return;
-    candidates.push_back(std::make_unique<LDSSpillCandidate>(
-        group, value, plan, uses.size(), *pressureRelief));
+  bool isValueLiveAt(Value value, ArrayRef<OpOperand *> uses) const {
+    return isValueLiveAtPressure(value, uses, inventory, position);
   }
 
   bool isCombinedPressure() const {
     return pressureFailure && pressureFailure->combinedVGPRAGPR;
   }
 
-  bool hasUseAtPressure(ArrayRef<OpOperand *> uses) const {
-    for (OpOperand *use : uses)
-      if (inventory.positions.lookup(use->getOwner()) ==
-          pressureFailure->position)
-        return true;
-    return false;
+  std::optional<unsigned> getPressureRelief(Value value, unsigned width,
+                                            ArrayRef<OpOperand *> uses) const {
+    return getMemorySpillPressureRelief(value, width, uses, inventory,
+                                        pressureFailure);
   }
 
-  std::optional<unsigned> getPressureRelief(Value value, IntervalGroup *group,
-                                            ArrayRef<OpOperand *> uses) const {
-    if (!isCombinedPressure())
-      return 1;
-    if (isCheapVGPRExpr(value.getDefiningOp()))
-      return 0;
-    if (group->intervals.front()->start >= pressureFailure->position)
-      return 0;
-    if (hasUseAtPressure(uses))
-      return 0;
-    return 1;
+  bool valueCoversWholeGroup(IntervalGroup *group, Value value) const {
+    return mlir::wave::regalloc::valueCoversWholeGroup(group, value, inventory);
+  }
+
+  LDSSpillPlan getPlanForBytes(unsigned valueBytes,
+                               unsigned extraReservedBytes = 0) const {
+    unsigned committedBytes =
+        getUnsignedAttr(func, kLDSSpillBytesAttr).value_or(0);
+    unsigned fixedLDS = 0;
+    unsigned dynamicLDS = 0;
+    getExistingLDSBytes(func, fixedLDS, dynamicLDS, committedBytes);
+    unsigned reservedBytes = committedBytes +
+                             getPlannedProviderBytes(inventory, getName()) +
+                             extraReservedBytes;
+    return buildLDSSpillPlan(func, budgets, valueBytes, reservedBytes, fixedLDS,
+                             dynamicLDS);
+  }
+
+  std::optional<SmallVector<LDSSpillPlan, 4>>
+  getPlansForValue(waveamdmachine::RegType type,
+                   unsigned extraReservedBytes = 0) const {
+    if (type.getWidth() == 0)
+      return std::nullopt;
+    SmallVector<LDSSpillPlan, 4> plans;
+    plans.reserve(type.getWidth());
+    unsigned reserved = extraReservedBytes;
+    for ([[maybe_unused]] unsigned index :
+         llvm::seq<unsigned>(0, type.getWidth())) {
+      LDSSpillPlan plan = getPlanForBytes(/*valueBytes=*/4, reserved);
+      if (plan.status != LDSSpillPlanStatus::Available) {
+        setPlanRejectReason(plan.status);
+        return std::nullopt;
+      }
+      reserved += plan.slotBytes;
+      plans.push_back(plan);
+    }
+    return plans;
+  }
+
+  FailureOr<LDSValueSlot> getGroupValueSlot(Value value,
+                                            unsigned extraReservedBytes) const {
+    auto type = dyn_cast<waveamdmachine::RegType>(value.getType());
+    if (!type || !isLDSSpillRegClass(type.getRegClass()) ||
+        type.getWidth() == 0)
+      return failure();
+    if (isCombinedPressure() && isCheapVGPRExpr(value.getDefiningOp()))
+      return failure();
+    SmallVector<OpOperand *> uses;
+    if (!hasSimpleUses(value, uses) || !isValueLiveAt(value, uses))
+      return failure();
+    std::optional<SmallVector<LDSSpillPlan, 4>> plans =
+        getPlansForValue(type, extraReservedBytes);
+    if (!plans)
+      return failure();
+    return LDSValueSlot{value, *plans, getValueSpillCost(value, *plans, uses),
+                        static_cast<unsigned>(uses.size())};
+  }
+
+  void
+  collectValue(IntervalGroup *group, Value value,
+               wave::WaveAMDPressureReliefCandidateList &candidates) const {
+    waveamdmachine::RegType type =
+        cast<waveamdmachine::RegType>(value.getType());
+    if (!isLDSSpillRegClass(type.getRegClass()) || type.getWidth() == 0 ||
+        !valueCoversWholeGroup(group, value))
+      return;
+    SmallVector<OpOperand *> uses;
+    if (!hasSimpleUses(value, uses) || !isValueLiveAt(value, uses))
+      return;
+    std::optional<SmallVector<LDSSpillPlan, 4>> plans = getPlansForValue(type);
+    if (!plans)
+      return;
+    std::optional<unsigned> pressureRelief =
+        getPressureRelief(value, type.getWidth(), uses);
+    if (!pressureRelief || *pressureRelief == 0)
+      return;
+    wave::WaveAMDPressureReliefCost cost =
+        getValueSpillCost(value, *plans, uses);
+    LDSValueSlot slot{value, *plans, cost, static_cast<unsigned>(uses.size())};
+    candidates.push_back(std::make_unique<LDSSpillCandidate>(
+        group, std::move(slot), *pressureRelief, cost));
+  }
+
+  unsigned getLiveLaneCount(IntervalGroup *group) const {
+    return mlir::wave::regalloc::getLiveLaneCount(group, position);
+  }
+
+  bool liveLanesStartBeforePressure(IntervalGroup *group) const {
+    return mlir::wave::regalloc::liveLanesStartBeforePressure(group, position);
+  }
+
+  void collectGroupValue(
+      IntervalGroup *group,
+      wave::WaveAMDPressureReliefCandidateList &candidates) const {
+    if (!isCombinedPressure() || group->intervals.size() <= 1 ||
+        !liveLanesStartBeforePressure(group))
+      return;
+    unsigned relief = getLiveLaneCount(group);
+    if (relief == 0)
+      return;
+
+    SmallVector<LDSValueSlot, 8> slots;
+    unsigned extraReservedBytes = 0;
+    for (Value value : getGroupValues(group)) {
+      FailureOr<LDSValueSlot> slot =
+          getGroupValueSlot(value, extraReservedBytes);
+      if (failed(slot))
+        continue;
+      extraReservedBytes += getTotalSlotBytes(slot->plans);
+      slots.push_back(*slot);
+    }
+    if (slots.empty())
+      return;
+    candidates.push_back(std::make_unique<LDSSpillCandidate>(
+        group, slots, relief, getTotalCost(slots)));
+  }
+
+  void collect(IntervalGroup *group,
+               wave::WaveAMDPressureReliefCandidateList &candidates) const {
+    if (!isCandidateGroup(group, position))
+      return;
+    if (isEligibleGroup(group, position)) {
+      if (collectLoopCarry(group, candidates))
+        return;
+      llvm::SmallDenseSet<Value, 8> seen;
+      for (Interval *lane : group->intervals)
+        for (Value value : lane->values)
+          if (seen.insert(value).second)
+            collectValue(group, value, candidates);
+    }
+    collectGroupValue(group, candidates);
+  }
+
+  bool
+  collectLoopCarry(IntervalGroup *group,
+                   wave::WaveAMDPressureReliefCandidateList &candidates) const {
+    std::optional<LoopCarrySlot> loopCarry =
+        mlir::wave::regalloc::getLoopCarrySlot(group, inventory);
+    if (!loopCarry)
+      return false;
+    if (!canMaterializeLoopCarrySpill(*loopCarry, inventory, position)) {
+      sawLoopCarryReject = true;
+      return false;
+    }
+    Value init = loopCarry->loop.getInits()[loopCarry->index];
+    waveamdmachine::RegType type =
+        dyn_cast<waveamdmachine::RegType>(init.getType());
+    if (!type || type.getRegClass() != waveamdmachine::RegClass::VGPR ||
+        !valueCoversWholeGroup(group, init))
+      return false;
+    if (type.getWidth() <= 1) {
+      sawLoopCarryReject = true;
+      return false;
+    }
+    if (loopCarryTouchesPressure(*loopCarry, inventory, position))
+      return false;
+    std::optional<SmallVector<LDSSpillPlan, 4>> plans = getPlansForValue(type);
+    if (!plans)
+      return false;
+    unsigned useCount = mlir::wave::regalloc::getLoopCarryUseCount(*loopCarry);
+    wave::WaveAMDPressureReliefCost cost =
+        getLoopCarrySpillCost(*loopCarry, *plans, useCount);
+    LDSValueSlot valueSlot{init, *plans, cost, useCount};
+    candidates.push_back(std::make_unique<LDSSpillCandidate>(
+        group, *loopCarry, std::move(valueSlot), useCount, type.getWidth(),
+        cost));
+    return true;
+  }
+
+  SmallVector<Value> getGroupValues(IntervalGroup *group) const {
+    return getMemorySpillGroupValues(group, inventory);
   }
 
   Value createImm(OpBuilder &builder, Location loc, int64_t value) const {
@@ -454,40 +771,6 @@ private:
     return {fullAddr.getResult(), 0};
   }
 
-  Value materializeStoreValue(Value value, OpBuilder &builder) const {
-    waveamdmachine::RegType type =
-        cast<waveamdmachine::RegType>(value.getType());
-    if (type.getRegClass() != waveamdmachine::RegClass::AGPR)
-      return value;
-    Location loc = value.getLoc();
-    waveamdmachine::VAccvgprReadB32TupleOp read =
-        waveamdmachine::VAccvgprReadB32TupleOp::create(
-            builder, loc,
-            waveamdmachine::RegType::get(builder.getContext(),
-                                         waveamdmachine::RegClass::VGPR,
-                                         /*width=*/1, /*index=*/-1),
-            value);
-    read->setAttr(kRegAllocTempAttr, builder.getUnitAttr());
-    return read.getResult();
-  }
-
-  LogicalResult replaceUseWithLoad(Value value, OpOperand *use,
-                                   Value loaded) const {
-    waveamdmachine::RegType type =
-        cast<waveamdmachine::RegType>(value.getType());
-    if (type.getRegClass() != waveamdmachine::RegClass::AGPR) {
-      use->set(loaded);
-      return success();
-    }
-    waveamdmachine::VAccvgprReadB32TupleOp read =
-        dyn_cast<waveamdmachine::VAccvgprReadB32TupleOp>(use->getOwner());
-    if (!read)
-      return failure();
-    read.getResult().replaceAllUsesWith(loaded);
-    read.erase();
-    return success();
-  }
-
   Value findWorkitemId(OpBuilder &builder) const {
     Block *block = builder.getInsertionBlock();
     if (!block)
@@ -522,54 +805,203 @@ private:
     return {};
   }
 
-  LogicalResult materializeValue(const LDSSpillCandidate &spill,
+  Type getLoadType(Value value) const {
+    waveamdmachine::RegType type =
+        cast<waveamdmachine::RegType>(value.getType());
+    if (type.getRegClass() != waveamdmachine::RegClass::AGPR)
+      return value.getType();
+    return waveamdmachine::RegType::get(value.getContext(),
+                                        waveamdmachine::RegClass::VGPR,
+                                        type.getWidth(), /*index=*/-1);
+  }
+
+  Value materializeStoreValue(Value value, OpBuilder &builder) const {
+    waveamdmachine::RegType type =
+        cast<waveamdmachine::RegType>(value.getType());
+    if (type.getRegClass() != waveamdmachine::RegClass::AGPR)
+      return value;
+    waveamdmachine::VAccvgprReadB32TupleOp read =
+        waveamdmachine::VAccvgprReadB32TupleOp::create(
+            builder, value.getLoc(), getLoadType(value), value);
+    read->setAttr(kRegAllocTempAttr, builder.getUnitAttr());
+    return read.getResult();
+  }
+
+  LogicalResult replaceUseWithLoad(Value value, OpOperand *use,
+                                   Value loaded) const {
+    waveamdmachine::RegType type =
+        cast<waveamdmachine::RegType>(value.getType());
+    if (type.getRegClass() != waveamdmachine::RegClass::AGPR) {
+      use->set(loaded);
+      return success();
+    }
+    waveamdmachine::VAccvgprReadB32TupleOp read =
+        dyn_cast<waveamdmachine::VAccvgprReadB32TupleOp>(use->getOwner());
+    if (!read)
+      return failure();
+    read.getResult().replaceAllUsesWith(loaded);
+    read.erase();
+    return success();
+  }
+
+  SmallVector<Type> getScalarRegTypes(Type tupleType) const {
+    waveamdmachine::RegType regType = cast<waveamdmachine::RegType>(tupleType);
+    Type laneType = waveamdmachine::RegType::get(
+        tupleType.getContext(), regType.getRegClass(), /*width=*/1,
+        /*index=*/-1);
+    return SmallVector<Type>(regType.getWidth(), laneType);
+  }
+
+  SmallVector<Value> splitValue(Value value, OpBuilder &builder,
+                                Location loc) const {
+    SmallVector<Type> elementTypes = getScalarRegTypes(value.getType());
+    waveamdmachine::TupleToElementsOp split =
+        waveamdmachine::TupleToElementsOp::create(builder, loc, elementTypes,
+                                                  value);
+    split->setAttr(kRegAllocTempAttr, builder.getUnitAttr());
+    return SmallVector<Value>(split.getElements().begin(),
+                              split.getElements().end());
+  }
+
+  Value joinValue(Type type, ArrayRef<Value> elements, OpBuilder &builder,
+                  Location loc) const {
+    waveamdmachine::TupleFromElementsOp joined =
+        waveamdmachine::TupleFromElementsOp::create(builder, loc, type,
+                                                    elements);
+    joined->setAttr(kRegAllocTempAttr, builder.getUnitAttr());
+    return joined.getTuple();
+  }
+
+  Value joinTokens(Type tokenType, ArrayRef<Value> tokens, OpBuilder &builder,
+                   Location loc) const {
+    if (tokens.size() == 1)
+      return tokens.front();
+    waveamdmachine::TokenJoinOp join =
+        waveamdmachine::TokenJoinOp::create(builder, loc, tokenType, tokens);
+    join->setAttr(kRegAllocTempAttr, builder.getUnitAttr());
+    return join.getResult();
+  }
+
+  Value storeScalarValue(Value value, Value token, LDSSpillPlan plan,
+                         OpBuilder &builder, Location loc) const {
+    Type tokenType = waveamdmachine::MemTokenType::get(builder.getContext());
+    std::pair<Value, int64_t> addr = materializeAddress(builder, loc, plan);
+    waveamdmachine::DsStoreB32Op store = waveamdmachine::DsStoreB32Op::create(
+        builder, loc, tokenType, addr.first, value, token, addr.second);
+    store->setAttr(kRegAllocTempAttr, builder.getUnitAttr());
+    return store.getToken();
+  }
+
+  LDSLoadResult loadScalarValue(Type type, Value token, LDSSpillPlan plan,
+                                OpBuilder &builder, Location loc) const {
+    Type tokenType = waveamdmachine::MemTokenType::get(builder.getContext());
+    std::pair<Value, int64_t> addr = materializeAddress(builder, loc, plan);
+    waveamdmachine::DsLoadB32Op load = waveamdmachine::DsLoadB32Op::create(
+        builder, loc, type, tokenType, addr.first, token, addr.second);
+    load->setAttr(kRegAllocTempAttr, builder.getUnitAttr());
+    return {load.getResult(), load.getToken()};
+  }
+
+  Value storeSpillValue(Value value, Value token, ArrayRef<LDSSpillPlan> plans,
+                        OpBuilder &builder, Location loc) const {
+    unsigned width = cast<waveamdmachine::RegType>(value.getType()).getWidth();
+    assert(width == plans.size() && "LDS plans must match value width");
+    if (width == 1)
+      return storeScalarValue(value, token, plans.front(), builder, loc);
+
+    Type tokenType = waveamdmachine::MemTokenType::get(builder.getContext());
+    SmallVector<Value> elements = splitValue(value, builder, loc);
+    SmallVector<Value> tokens;
+    tokens.reserve(elements.size());
+    for (auto [index, element] : llvm::enumerate(elements))
+      tokens.push_back(
+          storeScalarValue(element, token, plans[index], builder, loc));
+    return joinTokens(tokenType, tokens, builder, loc);
+  }
+
+  LDSLoadResult loadSpillValue(Type type, Value token,
+                               ArrayRef<LDSSpillPlan> plans, OpBuilder &builder,
+                               Location loc) const {
+    unsigned width = cast<waveamdmachine::RegType>(type).getWidth();
+    assert(width == plans.size() && "LDS plans must match value width");
+    if (width == 1)
+      return loadScalarValue(type, token, plans.front(), builder, loc);
+
+    Type tokenType = waveamdmachine::MemTokenType::get(builder.getContext());
+    SmallVector<Type> elementTypes = getScalarRegTypes(type);
+    SmallVector<Value> elements;
+    SmallVector<Value> tokens;
+    elements.reserve(elementTypes.size());
+    tokens.reserve(elementTypes.size());
+    for (auto [index, elementType] : llvm::enumerate(elementTypes)) {
+      LDSLoadResult load =
+          loadScalarValue(elementType, token, plans[index], builder, loc);
+      elements.push_back(load.value);
+      tokens.push_back(load.token);
+    }
+    return {joinValue(type, elements, builder, loc),
+            joinTokens(tokenType, tokens, builder, loc)};
+  }
+
+  LogicalResult materializeValue(Value value, ArrayRef<LDSSpillPlan> plans,
                                  OpBuilder &builder) const {
-    Value value = spill.getValue();
     Operation *def = value.getDefiningOp();
     SmallVector<OpOperand *> uses;
     if (!hasSimpleUses(value, uses))
       return mlir::emitError(value.getLoc())
              << "waveamd-reg-alloc cannot materialize LDS spill for value";
 
-    LDSSpillPlan plan = spill.getPlan();
-    waveamdmachine::RegType valueType =
-        cast<waveamdmachine::RegType>(value.getType());
-    Type loadType = value.getType();
-    if (valueType.getRegClass() == waveamdmachine::RegClass::AGPR)
-      loadType = waveamdmachine::RegType::get(builder.getContext(),
-                                              waveamdmachine::RegClass::VGPR,
-                                              /*width=*/1, /*index=*/-1);
-    Type tokenType = waveamdmachine::MemTokenType::get(builder.getContext());
     builder.setInsertionPointAfter(def);
     Value storeValue = materializeStoreValue(value, builder);
-    std::pair<Value, int64_t> storeAddr =
-        materializeAddress(builder, def->getLoc(), plan);
-    waveamdmachine::DsStoreB32Op store = waveamdmachine::DsStoreB32Op::create(
-        builder, def->getLoc(), tokenType, storeAddr.first, storeValue, Value{},
-        storeAddr.second);
-    store->setAttr(kRegAllocTempAttr, builder.getUnitAttr());
+    Value storeToken =
+        storeSpillValue(storeValue, Value{}, plans, builder, def->getLoc());
 
     for (OpOperand *use : uses) {
       if (use->get() != value)
         continue;
       Operation *user = use->getOwner();
       builder.setInsertionPoint(user);
-      std::pair<Value, int64_t> loadAddr =
-          materializeAddress(builder, user->getLoc(), plan);
-      waveamdmachine::DsLoadB32Op load = waveamdmachine::DsLoadB32Op::create(
-          builder, user->getLoc(), loadType, tokenType, loadAddr.first,
-          store.getToken(), loadAddr.second);
-      load->setAttr(kRegAllocTempAttr, builder.getUnitAttr());
-      if (failed(replaceUseWithLoad(value, use, load.getResult())))
+      LDSLoadResult load = loadSpillValue(getLoadType(value), storeToken, plans,
+                                          builder, user->getLoc());
+      if (failed(replaceUseWithLoad(value, use, load.value)))
         return failure();
     }
     return success();
   }
 
-  void reserveSlot(const LDSSpillPlan &plan, OpBuilder &builder) const {
+  LogicalResult
+  materializeLoopCarryPlans(ArrayRef<const LDSPressurePlan *> input,
+                            OpBuilder &builder) const {
+    auto getSlot = [](const LDSPressurePlan &spill) {
+      return getPlanLoopCarrySlot(spill);
+    };
+    auto storeValue = [&](Value value, Value token,
+                          const LDSPressurePlan &spill, OpBuilder &builder,
+                          Location loc) {
+      return storeSpillValue(value, token, getPlanValueSlot(spill).plans,
+                             builder, loc);
+    };
+    auto loadValue = [&](Type type, Value token, const LDSPressurePlan &spill,
+                         OpBuilder &builder, Location loc) {
+      return loadSpillValue(type, token, getPlanValueSlot(spill).plans, builder,
+                            loc);
+    };
+    auto reserve = [&](const LDSPressurePlan &spill, OpBuilder &builder) {
+      reserveSlots(getPlanValueSlot(spill).plans, builder);
+    };
+    return materializeMemorySpillLoopCarryPlans<LDSPressurePlan>(
+        input, builder, getName(), getSlot, storeValue, loadValue, reserve);
+  }
+
+  void reserveSlot(LDSSpillPlan plan, OpBuilder &builder) const {
     unsigned reserved = getUnsignedAttr(func, kLDSSpillBytesAttr).value_or(0);
     func->setAttr(kLDSSpillBytesAttr,
                   builder.getI64IntegerAttr(reserved + plan.slotBytes));
+  }
+
+  void reserveSlots(ArrayRef<LDSSpillPlan> plans, OpBuilder &builder) const {
+    for (LDSSpillPlan plan : plans)
+      reserveSlot(plan, builder);
   }
 
   mutable std::string planRejectReason;

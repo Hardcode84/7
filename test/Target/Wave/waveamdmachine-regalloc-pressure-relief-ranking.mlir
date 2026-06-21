@@ -42,10 +42,9 @@ func.func @global_rank_scratch_before_expensive_agpr()
 // CHECK-LABEL: func.func @global_rank_lds_before_scratch
 // CHECK-SAME: waveamdmachine.agpr_count = 2 : i64
 // CHECK-SAME: waveamdmachine.lds_spill_bytes = 512 : i64
-// CHECK-SAME: waveamdmachine.scratch_spill_bytes = 4 : i64
-// CHECK: waveamdmachine.scratch_store_b32
-// CHECK: waveamdmachine.v_accvgpr_write_b32_tuple
 // CHECK: waveamdmachine.ds_store_b32
+// CHECK-NOT: waveamdmachine.scratch_store_b32
+// CHECK: waveamdmachine.v_accvgpr_write_b32_tuple
 func.func @global_rank_lds_before_scratch()
     attributes {wave.kernel, wave.workgroup_size = array<i32: 64, 1, 1>,
                 waveamdmachine.target_waves = 4 : i64} {
