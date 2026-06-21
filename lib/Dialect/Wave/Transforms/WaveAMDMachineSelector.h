@@ -27,6 +27,7 @@
 #include "mlir/Dialect/Wave/IR/WaveAMD.h"
 #include "mlir/Dialect/Wave/IR/WaveSymbols.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachine.h"
+#include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineInstrInfo.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "llvm/ADT/DenseMap.h"
@@ -120,14 +121,9 @@ inline bool isWaveAMDMachineOp(Operation *op) {
          mlir::waveamdmachine::WaveAMDMachineDialect::getDialectNamespace();
 }
 
-inline bool isVGPR(Value v) {
-  auto rt = dyn_cast<mlir::waveamdmachine::RegType>(v.getType());
-  return rt && rt.getRegClass() == mlir::waveamdmachine::RegClass::VGPR;
-}
+inline bool isVGPR(Value v) { return mlir::waveamdmachine::isVGPRValue(v); }
 
-inline bool isImm(Value v) {
-  return v.getDefiningOp<mlir::waveamdmachine::ImmOp>() != nullptr;
-}
+inline bool isImm(Value v) { return mlir::waveamdmachine::isMachineImm(v); }
 
 inline Value createImm(OpBuilder &builder, Location loc, int64_t value) {
   return mlir::waveamdmachine::ImmOp::create(builder, loc,

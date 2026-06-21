@@ -23,6 +23,7 @@
 #include "mlir/Dialect/Wave/Transforms/WaveAMDExecIfUtils.h"
 #include "mlir/Dialect/Wave/Transforms/WaveAMDRegAllocVerification.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachine.h"
+#include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineInstrInfo.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineTarget.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
@@ -54,7 +55,6 @@
 #include "llvm/TargetParser/Triple.h"
 #include <algorithm>
 #include <cassert>
-#include <limits>
 
 LLD_HAS_DRIVER(elf)
 
@@ -776,100 +776,11 @@ private:
     return std::nullopt;
   }
 
-  unsigned getConstantBusLimit() const {
-    return isaVersion.Major >= 10 ? 2 : 1;
-  }
-
-  bool isSGPR(Value value) const {
-    auto regType = dyn_cast<waveamdmachine::RegType>(value.getType());
-    return regType && regType.getRegClass() == waveamdmachine::RegClass::SGPR;
-  }
-
-  bool isInlineImm(Value value) const {
-    auto imm = value.getDefiningOp<waveamdmachine::ImmOp>();
-    if (!imm)
-      return false;
-    int64_t immValue = imm.getValue();
-    if (immValue < std::numeric_limits<int32_t>::min() ||
-        immValue > std::numeric_limits<uint32_t>::max())
-      return false;
-    return llvm::AMDGPU::isInlinableLiteral32(static_cast<int32_t>(immValue),
-                                              /*HasInv2Pi=*/false);
-  }
-
-  bool usesConstantBus(Value value) const {
-    if (isSGPR(value))
-      return true;
-    return isa<waveamdmachine::ImmType>(value.getType()) && !isInlineImm(value);
-  }
-
-  std::optional<int64_t> getNonInlineLiteral(Value value) const {
-    auto imm = value.getDefiningOp<waveamdmachine::ImmOp>();
-    if (!imm || isInlineImm(value))
-      return std::nullopt;
-    return imm.getValue();
-  }
-
-  bool sameConstantBusUse(Value lhs, Value rhs) const {
-    if (isSGPR(lhs) && isSGPR(rhs))
-      return lhs == rhs || isSamePhysicalReg(lhs, rhs);
-    std::optional<int64_t> lhsLiteral = getNonInlineLiteral(lhs);
-    std::optional<int64_t> rhsLiteral = getNonInlineLiteral(rhs);
-    return lhsLiteral && rhsLiteral && *lhsLiteral == *rhsLiteral;
-  }
-
-  bool hasPreGfx10UnsupportedLiteral(ArrayRef<Value> operands) const {
-    if (!isGfx8Or9())
-      return false;
-    for (Value operand : operands)
-      if (getNonInlineLiteral(operand))
-        return true;
-    return false;
-  }
-
-  bool hasMultipleNonInlineLiterals(ArrayRef<Value> operands) const {
-    std::optional<int64_t> first;
-    for (Value operand : operands) {
-      std::optional<int64_t> literal = getNonInlineLiteral(operand);
-      if (!literal)
-        continue;
-      if (!first) {
-        first = literal;
-        continue;
-      }
-      if (*literal != *first)
-        return true;
-    }
-    return false;
-  }
-
-  bool fitsConstantBus(ArrayRef<Value> operands) const {
-    SmallVector<Value, 4> uniqueUses;
-    for (Value operand : operands) {
-      if (!usesConstantBus(operand))
-        continue;
-      if (llvm::any_of(uniqueUses, [&](Value unique) {
-            return sameConstantBusUse(operand, unique);
-          }))
-        continue;
-      uniqueUses.push_back(operand);
-      if (uniqueUses.size() > getConstantBusLimit())
-        return false;
-    }
-    return true;
-  }
-
   LogicalResult requireConstantBus(Operation &op, StringRef mnemonic,
                                    ArrayRef<Value> operands) const {
-    if (hasPreGfx10UnsupportedLiteral(operands))
-      return op.emitError(mnemonic)
-             << " cannot use non-inline literal on " << targetChip;
-    if (hasMultipleNonInlineLiterals(operands))
-      return op.emitError(mnemonic)
-             << " cannot use multiple non-inline literals";
-    if (!fitsConstantBus(operands))
-      return op.emitError(mnemonic) << " exceeds constant bus limit";
-    return success();
+    return waveamdmachine::requireConstantBus(
+        &op, mnemonic, operands, isaVersion, targetChip,
+        [](Value lhs, Value rhs) { return isSamePhysicalReg(lhs, rhs); });
   }
 
   void emitLine(StringRef line) {
@@ -1831,11 +1742,6 @@ private:
     return emitMC(vMulHiU32(), {toMCOperand(dst), toMCB32(lhs), toMCB32(rhs)});
   }
 
-  bool isVGPR(Value value) const {
-    auto regType = dyn_cast<waveamdmachine::RegType>(value.getType());
-    return regType && regType.getRegClass() == waveamdmachine::RegClass::VGPR;
-  }
-
   LogicalResult emitUniformLoop(waveamdmachine::UniformLoopOp loop) {
     unsigned id = loopCounter++;
     std::string headLabel = (funcLabelPrefix + ".loop_head_" + Twine(id)).str();
@@ -2242,30 +2148,29 @@ private:
     if (isa<waveamdmachine::VAddU32Op>(op)) {
       Value lhs = op.getOperand(0);
       Value rhs = op.getOperand(1);
-      if (!isVGPR(rhs) && !isVGPR(lhs))
-        return op.emitError("v_add_u32 needs a VGPR operand");
-      if (!isVGPR(rhs))
-        std::swap(lhs, rhs);
+      if (failed(waveamdmachine::requireAnyVGPROperand(&op, "v_add_u32", lhs,
+                                                       rhs)))
+        return failure();
+      waveamdmachine::putVGPROperandLast(lhs, rhs);
       return emitVAddU32(toMCOperand(result()), toMCB32(lhs), toMCB32(rhs), op);
     }
     if (isa<waveamdmachine::VAddU32VccOp>(op)) {
       Value lhs = op.getOperand(0);
       Value rhs = op.getOperand(1);
-      if (!isVGPR(rhs) && !isVGPR(lhs))
-        return op.emitError("v_add_u32_vcc needs a VGPR operand");
-      if (!isVGPR(rhs))
-        std::swap(lhs, rhs);
+      if (failed(waveamdmachine::requireAnyVGPROperand(&op, "v_add_u32_vcc",
+                                                       lhs, rhs)))
+        return failure();
+      waveamdmachine::putVGPROperandLast(lhs, rhs);
       return emitVAddU32Vcc(toMCOperand(result()), toMCB32(lhs), toMCB32(rhs));
     }
     if (isa<waveamdmachine::VAndB32Op, waveamdmachine::VOrB32Op,
             waveamdmachine::VXorB32Op>(op)) {
       Value lhs = op.getOperand(0);
       Value rhs = op.getOperand(1);
-      if (!isVGPR(rhs) && !isVGPR(lhs))
-        return op.emitError(op.getName().stripDialect())
-               << " needs a VGPR operand";
-      if (!isVGPR(rhs))
-        std::swap(lhs, rhs);
+      if (failed(waveamdmachine::requireAnyVGPROperand(
+              &op, op.getName().stripDialect(), lhs, rhs)))
+        return failure();
+      waveamdmachine::putVGPROperandLast(lhs, rhs);
       unsigned opcode = isa<waveamdmachine::VAndB32Op>(op)  ? vAndB32()
                         : isa<waveamdmachine::VOrB32Op>(op) ? vOrB32()
                                                             : vXorB32();
@@ -2273,15 +2178,17 @@ private:
                     {toMCOperand(result()), toMCB32(lhs), toMCB32(rhs)});
     }
     if (isa<waveamdmachine::VLshlrevB32Op>(op)) {
-      if (!isVGPR(op.getOperand(0)))
-        return op.emitError("v_lshlrev_b32 needs value operand in VGPR");
+      if (failed(waveamdmachine::requireVGPRValueOperand(&op, "v_lshlrev_b32",
+                                                         op.getOperand(0))))
+        return failure();
       return emitMC(vLshlrevB32(),
                     {toMCOperand(result()), toMCB32(op.getOperand(1)),
                      toMCB32(op.getOperand(0))});
     }
     if (isa<waveamdmachine::VLshrrevB32Op>(op)) {
-      if (!isVGPR(op.getOperand(0)))
-        return op.emitError("v_lshrrev_b32 needs value operand in VGPR");
+      if (failed(waveamdmachine::requireVGPRValueOperand(&op, "v_lshrrev_b32",
+                                                         op.getOperand(0))))
+        return failure();
       return emitMC(vLshrrevB32(),
                     {toMCOperand(result()), toMCB32(op.getOperand(1)),
                      toMCB32(op.getOperand(0))});

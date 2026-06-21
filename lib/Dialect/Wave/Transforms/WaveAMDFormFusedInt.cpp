@@ -8,12 +8,12 @@
 
 #include "mlir/Dialect/Wave/Transforms/Passes.h"
 
-#include "Utils/AMDGPUBaseInfo.h"
 #include "mlir/Analysis/DataFlow/IntegerRangeAnalysis.h"
 #include "mlir/Analysis/DataFlow/Utils.h"
 #include "mlir/Analysis/DataFlowFramework.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachine.h"
+#include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineInstrInfo.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineTarget.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
@@ -21,7 +21,6 @@
 
 #include <array>
 #include <cstdint>
-#include <limits>
 
 namespace mlir::wave {
 #define GEN_PASS_DEF_WAVEAMDFORMFUSEDINT
@@ -35,62 +34,11 @@ using namespace mlir::waveamdmachine;
 
 namespace {
 
-static unsigned getConstantBusLimit(const llvm::AMDGPU::IsaVersion &isa) {
-  return isa.Major >= 10 ? 2 : 1;
-}
-
-static bool isSGPR(Value value) {
-  RegType regType = dyn_cast<RegType>(value.getType());
-  return regType && regType.getRegClass() == RegClass::SGPR;
-}
-
-static bool isInlineImm(Value value) {
-  ImmOp imm = value.getDefiningOp<ImmOp>();
-  if (!imm)
-    return false;
-
-  int64_t immValue = imm.getValue();
-  if (immValue < std::numeric_limits<int32_t>::min() ||
-      immValue > std::numeric_limits<uint32_t>::max())
-    return false;
-  return llvm::AMDGPU::isInlinableLiteral32(static_cast<int32_t>(immValue),
-                                            /*HasInv2Pi=*/false);
-}
-
-static bool usesConstantBus(Value value) {
-  if (isSGPR(value))
-    return true;
-  return isa<ImmType>(value.getType()) && !isInlineImm(value);
-}
-
-static bool hasUnsupportedLiteral(ArrayRef<Value> operands,
-                                  const llvm::AMDGPU::IsaVersion &isa) {
-  if (isa.Major >= 10)
-    return false;
-  for (Value operand : operands)
-    if (llvm::isa<ImmType>(operand.getType()) && !isInlineImm(operand))
-      return true;
-  return false;
-}
-
-static bool fitsConstantBus(ArrayRef<Value> operands,
-                            const llvm::AMDGPU::IsaVersion &isa) {
-  unsigned uses = 0;
-  unsigned limit = getConstantBusLimit(isa);
-  for (Value operand : operands) {
-    if (!usesConstantBus(operand))
-      continue;
-    if (++uses > limit)
-      return false;
-  }
-  return true;
-}
-
 template <typename OpTy>
 static bool canCreateTernary(ArrayRef<Value> operands,
                              const llvm::AMDGPU::IsaVersion &isa) {
-  return OpTy::isSupportedOnIsa(isa) && !hasUnsupportedLiteral(operands, isa) &&
-         fitsConstantBus(operands, isa);
+  return OpTy::isSupportedOnIsa(isa) &&
+         canUseConstantBus(operands, isa, [](Value, Value) { return false; });
 }
 
 template <typename InnerOp>

@@ -325,6 +325,21 @@ func.func @constant_bus_reject(%s0: !waveamdmachine.reg<sgpr, 1>,
   return %out : !waveamdmachine.reg<vgpr, 1>
 }
 
+// CHECK-LABEL: func.func @constant_bus_same_sgpr
+// CHECK-NOT: waveamdmachine.v_add_u32
+// CHECK: waveamdmachine.v_add3_u32
+func.func @constant_bus_same_sgpr(%s: !waveamdmachine.reg<sgpr, 1>,
+                                  %v: !waveamdmachine.reg<vgpr, 1>)
+    -> !waveamdmachine.reg<vgpr, 1> {
+  %sum = waveamdmachine.v_add_u32 %s, %v
+      : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+  %out = waveamdmachine.v_add_u32 %sum, %s
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+  return %out : !waveamdmachine.reg<vgpr, 1>
+}
+
 // CHECK-LABEL: func.func @gfx9_literal_reject
 // CHECK-NOT: waveamdmachine.v_lshl_add_u32
 // CHECK: [[SHIFTED:%.*]] = waveamdmachine.v_lshlrev_b32
