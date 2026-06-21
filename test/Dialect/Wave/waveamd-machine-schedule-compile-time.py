@@ -205,6 +205,42 @@ def check_cma_dma_beam_cap() -> None:
     reject("cma_dma_beam_cap", text, r"reason=max_beam_work")
 
 
+def check_lazy_hard_cap_issue_window_tie() -> None:
+    text = run_case(
+        "lazy_hard_cap_issue_window_tie",
+        [
+            str(REPO_ROOT / "build/bin/wave-opt"),
+            "-",
+            "--waveamd-machine-schedule-report=print-candidates=1 "
+            "pressure-aware-selection=1 pressure-vgpr-budget=256 "
+            "pressure-target-waves-override=-1",
+            "--waveamd-machine-schedule=apply-schedule=1 "
+            "pressure-aware-selection=1 pressure-vgpr-budget=256 "
+            "pressure-target-waves-override=-1",
+        ],
+        input_text=lazy_issue_window_tie_mlir(),
+        timeout=10.0,
+    )
+    require(
+        "lazy_hard_cap_issue_window_tie",
+        text,
+        r"waveamdmachine\.mfma_f32_16x16x32_f16 %arg0, %arg1, %arg3[^\n]*\n"
+        r"\s*%[0-9]+ = waveamdmachine\.mfma_f32_16x16x32_f16 "
+        r"%arg0, %arg1, %arg2[^\n]*\n"
+        r"\s*%[0-9]+:4 = waveamdmachine\.tuple_to_elements %[0-9]+[^\n]*\n"
+        r"\s*%[0-9]+ = waveamdmachine\.v_add_u32 %[0-9]+#0, %[0-9]+#1[^\n]*\n"
+        r"\s*%[0-9]+ = waveamdmachine\.imm 8[^\n]*\n"
+        r"\s*%[A-Za-z0-9_]+, %[A-Za-z0-9_]+ = waveamdmachine\.s_add_i32",
+    )
+    require(
+        "lazy_hard_cap_issue_window_tie",
+        text,
+        r"waveamd-machine-schedule-report candidate "
+        r"func=lazy_issue_window_tie region=0 name=[^\n]*"
+        r"hazard_wait_cycles=[1-9][0-9]*",
+    )
+
+
 def main() -> int:
     text = run_case(
         "matmul_pressure_disabled",
@@ -276,30 +312,7 @@ def main() -> int:
     reject("fa_seq32_d16_u4_beam_report", text, r"pressure_fallback")
 
     check_cma_dma_beam_cap()
-
-    text = run_case(
-        "lazy_hard_cap_issue_window_tie",
-        [
-            str(REPO_ROOT / "build/bin/wave-opt"),
-            "-",
-            "--waveamd-machine-schedule=apply-schedule=1 "
-            "pressure-aware-selection=1 pressure-vgpr-budget=256 "
-            "pressure-target-waves-override=-1",
-        ],
-        input_text=lazy_issue_window_tie_mlir(),
-        timeout=10.0,
-    )
-    require(
-        "lazy_hard_cap_issue_window_tie",
-        text,
-        r"waveamdmachine\.mfma_f32_16x16x32_f16 %arg0, %arg1, %arg3[^\n]*\n"
-        r"\s*%[0-9]+:4 = waveamdmachine\.tuple_to_elements %[0-9]+[^\n]*\n"
-        r"\s*%[0-9]+ = waveamdmachine\.v_add_u32 %[0-9]+#0, %[0-9]+#1[^\n]*\n"
-        r"\s*%[0-9]+ = waveamdmachine\.mfma_f32_16x16x32_f16 "
-        r"%arg0, %arg1, %arg2[^\n]*\n"
-        r"\s*%[0-9]+ = waveamdmachine\.imm 8[^\n]*\n"
-        r"\s*%[A-Za-z0-9_]+, %[A-Za-z0-9_]+ = waveamdmachine\.s_add_i32",
-    )
+    check_lazy_hard_cap_issue_window_tie()
     return 0
 
 

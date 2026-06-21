@@ -419,6 +419,158 @@ static CandidateMetrics makeUnsupportedCandidateMetrics(StringRef reason) {
   return metrics;
 }
 
+struct ScheduleHazardState {
+  DenseMap<Value, unsigned> mfmaResults;
+};
+
+struct ScheduleHazardConfig {
+  llvm::AMDGPU::IsaVersion isaVersion;
+};
+
+static bool isCDNA3Family(const llvm::AMDGPU::IsaVersion &isa) {
+  return isa.Major == 9 && isa.Minor == 4;
+}
+
+static bool isCDNA4Family(const llvm::AMDGPU::IsaVersion &isa) {
+  return isa.Major == 9 && isa.Minor == 5;
+}
+
+static ScheduleHazardConfig
+makeScheduleHazardConfig(const waveamdmachine::ArchData &arch) {
+  return {/*isaVersion=*/arch.isa};
+}
+
+static void advanceValueHazards(ScheduleHazardState &state,
+                                unsigned count = 1) {
+  if (count == 0)
+    return;
+  SmallVector<Value, 8> expired;
+  for (auto &entry : state.mfmaResults) {
+    entry.second = entry.second > count ? entry.second - count : 0;
+    if (entry.second == 0)
+      expired.push_back(entry.first);
+  }
+  for (Value value : expired)
+    state.mfmaResults.erase(value);
+}
+
+static void advanceScheduleHazards(ScheduleHazardState &state,
+                                   unsigned count = 1) {
+  advanceValueHazards(state, count);
+}
+
+static void mergeMfmaResultHazard(ScheduleHazardState &state, Value value,
+                                  unsigned remaining) {
+  if (remaining == 0)
+    return;
+  unsigned &existing = state.mfmaResults[value];
+  existing = std::max(existing, remaining);
+}
+
+static void inheritNoInstValueHazards(Operation *op,
+                                      ScheduleHazardState &state) {
+  if (isInstructionOp(op) || op->getNumResults() == 0)
+    return;
+  unsigned wait = 0;
+  for (Value operand : op->getOperands())
+    wait = std::max(wait, state.mfmaResults.lookup(operand));
+  for (Value result : op->getResults())
+    mergeMfmaResultHazard(state, result, wait);
+}
+
+static bool isMFMA(Operation *op) { return op->hasTrait<traits::MFMAOp>(); }
+
+static unsigned getMfmaPassCount(Operation *op) {
+  switch (waveamdmachine::classifyOp(op)) {
+  case waveamdmachine::SchedClass::Write2PassMAI:
+    return 2;
+  case waveamdmachine::SchedClass::Write4PassMAI:
+    return 4;
+  case waveamdmachine::SchedClass::Write8PassMAI:
+    return 8;
+  case waveamdmachine::SchedClass::Write16PassMAI:
+    return 16;
+  default:
+    op->emitError("MFMA op lacks MAI schedule class");
+    llvm::report_fatal_error("MFMA op lacks MAI schedule class");
+  }
+}
+
+static unsigned getXdlResultLatency(unsigned passes,
+                                    const ScheduleHazardConfig &cfg) {
+  if (isCDNA3Family(cfg.isaVersion))
+    return passes + 3;
+  if (isCDNA4Family(cfg.isaVersion))
+    return passes + 3 + (passes != 2);
+  return 8;
+}
+
+static bool isLegacyVALU(Operation *op) {
+  return op->hasTrait<traits::VALUOp>() && !isMFMA(op);
+}
+
+static bool isVMEM(Operation *op) {
+  return op->hasTrait<traits::VMEMLoadOp>() ||
+         op->hasTrait<traits::VMEMStoreOp>();
+}
+
+static waveamdmachine::WaitcntInfo getWaitcntInfo(Operation *op) {
+  if (waveamdmachine::WaitcntInfoOpInterface info =
+          dyn_cast<waveamdmachine::WaitcntInfoOpInterface>(op))
+    return info.getWaitcntInfo();
+  return {};
+}
+
+static bool issuesLdsWaitcnt(Operation *op) {
+  return getWaitcntInfo(op).event == waveamdmachine::WaitcntEvent::Lds;
+}
+
+static bool isMfmaResultHazardConsumer(Operation *op) {
+  return isVMEM(op) || issuesLdsWaitcnt(op) || isLegacyVALU(op);
+}
+
+static unsigned getRequiredValueWait(Operation *op,
+                                     const ScheduleHazardState &state) {
+  if (!isMfmaResultHazardConsumer(op))
+    return 0;
+  unsigned wait = 0;
+  for (Value operand : op->getOperands())
+    wait = std::max(wait, state.mfmaResults.lookup(operand));
+  return wait;
+}
+
+static void addProducedMfmaValueHazards(Operation *op,
+                                        ScheduleHazardState &state,
+                                        const ScheduleHazardConfig &cfg) {
+  if (!isMFMA(op))
+    return;
+  unsigned resultLatency = getXdlResultLatency(getMfmaPassCount(op), cfg);
+  for (Value result : op->getResults())
+    mergeMfmaResultHazard(state, result, resultLatency);
+}
+
+static void transferScheduleHazards(Operation *op, ScheduleHazardState &state,
+                                    const ScheduleHazardConfig &cfg) {
+  if (isInstructionOp(op))
+    advanceScheduleHazards(state);
+  inheritNoInstValueHazards(op, state);
+  addProducedMfmaValueHazards(op, state, cfg);
+}
+
+static int64_t estimateHazardWaitCycles(ArrayRef<Operation *> ops,
+                                        const waveamdmachine::ArchData &arch) {
+  ScheduleHazardConfig cfg = makeScheduleHazardConfig(arch);
+  ScheduleHazardState state;
+  int64_t cycles = 0;
+  for (Operation *op : ops) {
+    unsigned wait = getRequiredValueWait(op, state);
+    cycles += wait;
+    advanceScheduleHazards(state, wait);
+    transferScheduleHazards(op, state, cfg);
+  }
+  return cycles;
+}
+
 static ScoreResult scoreOps(ArrayRef<Operation *> ops,
                             ArchResolution archResolution,
                             const waveamdmachine::EventSimConfig &config) {
@@ -1113,9 +1265,12 @@ CandidateMetrics evaluateOps(const ScheduleRegion &region,
                              PressureEvaluation pressureEvaluation) {
   CandidateMetrics metrics;
   metrics.score = scoreOps(ops, archResolution, modelConfig);
-  if (archResolution.arch)
+  if (archResolution.arch) {
     metrics.counterBurstCycles =
         computeCounterBurstCycles(ops, *archResolution.arch, modelConfig);
+    metrics.hazardWaitCycles =
+        estimateHazardWaitCycles(ops, *archResolution.arch);
+  }
   if (pressureEvaluation == PressureEvaluation::Eager)
     metrics.pressure =
         computeRegisterPressure(region, ops, budgets, /*context=*/nullptr);
@@ -1187,6 +1342,8 @@ static void printScoreLine(ScheduleRegion region, StringRef orderName,
   if (metrics.score.supported) {
     llvm::errs() << " cycles=" << metrics.score.cycles
                  << " issued_ops=" << metrics.score.issuedOps;
+    if (metrics.hazardWaitCycles != 0)
+      llvm::errs() << " hazard_wait_cycles=" << metrics.hazardWaitCycles;
     printPressure(llvm::errs(), metrics.pressure, budgets);
   } else {
     llvm::errs() << " fallback=original reason="
@@ -2076,6 +2233,7 @@ struct LocalIssueState {
   DenseMap<Value, int64_t> readyAt;
   DenseMap<int64_t, unsigned> cuIssueCounts;
   DenseMap<int64_t, unsigned> cmaIssueCounts;
+  ScheduleHazardState hazardState;
   std::array<int64_t, kNumScheduleFUs> fuReady = {};
   int64_t issueReady = 0;
   int64_t ldsDmaReady = 0;
@@ -2090,6 +2248,7 @@ struct LocalIssuePreview {
   int64_t readyCycle = 0;
   int64_t memoryValueReady = 0;
   unsigned issues = 0;
+  unsigned hazardWait = 0;
   bool memoryIssuer = false;
   bool hasMemoryValue = false;
 };
@@ -2230,6 +2389,7 @@ previewLocalIssue(const LocalIssueState &state, Operation *op,
                   const waveamdmachine::EventSimConfig &config) {
   LocalIssuePreview preview;
   preview.operandReady = operandReadyCycle(state, op);
+  preview.hazardWait = getRequiredValueWait(op, state.hazardState);
   preview.cls = waveamdmachine::classifyOp(op);
   if (preview.cls == waveamdmachine::SchedClass::NoInst) {
     preview.issueCycle = preview.operandReady;
@@ -2285,6 +2445,8 @@ static void applyLocalIssue(LocalIssueState &state, Operation *op,
   if (preview.cls == waveamdmachine::SchedClass::NoInst) {
     for (Value result : op->getResults())
       state.readyAt[result] = preview.readyCycle;
+    ScheduleHazardConfig hazardConfig = makeScheduleHazardConfig(arch);
+    transferScheduleHazards(op, state.hazardState, hazardConfig);
     return;
   }
 
@@ -2309,6 +2471,9 @@ static void applyLocalIssue(LocalIssueState &state, Operation *op,
       resultReady = preview.memoryValueReady;
     state.readyAt[result] = resultReady;
   }
+
+  ScheduleHazardConfig hazardConfig = makeScheduleHazardConfig(arch);
+  transferScheduleHazards(op, state.hazardState, hazardConfig);
 }
 
 static unsigned countUnlockedSuccessors(unsigned node,
@@ -2340,6 +2505,8 @@ static bool isBetterLocalIssueChoice(const LocalIssueChoice &lhs,
                                      ArrayRef<NodeMetrics> metrics) {
   if (lhs.preview.issueCycle != rhs.preview.issueCycle)
     return lhs.preview.issueCycle < rhs.preview.issueCycle;
+  if (lhs.preview.hazardWait != rhs.preview.hazardWait)
+    return lhs.preview.hazardWait < rhs.preview.hazardWait;
   if (metrics[lhs.node].criticalPath != metrics[rhs.node].criticalPath)
     return metrics[lhs.node].criticalPath > metrics[rhs.node].criticalPath;
   if (metrics[lhs.node].latency != metrics[rhs.node].latency)
@@ -2754,9 +2921,11 @@ static bool usesCounterBurstSelection(const EvaluatedCandidate &candidate) {
 }
 
 static int64_t adjustedScheduleCycles(const EvaluatedCandidate &candidate) {
+  int64_t cycles =
+      candidate.metrics.score.cycles + candidate.metrics.hazardWaitCycles;
   if (!usesCounterBurstSelection(candidate))
-    return candidate.metrics.score.cycles;
-  return candidate.metrics.score.cycles + candidate.metrics.counterBurstCycles;
+    return cycles;
+  return cycles + candidate.metrics.counterBurstCycles;
 }
 
 static bool counterBurstEligible(const EvaluatedCandidate &candidate,
@@ -2768,10 +2937,12 @@ static bool counterBurstEligible(const EvaluatedCandidate &candidate,
     return true;
   int64_t neutralMinGain =
       std::max<int64_t>(1, original.metrics.counterBurstCycles / 8);
+  int64_t adjustedCycleDelta =
+      adjustedScheduleCycles(candidate) - adjustedScheduleCycles(original);
   return isCounterBurstPlacementCandidate(candidate) &&
          candidate.metrics.counterBurstCycles ==
              original.metrics.counterBurstCycles &&
-         candidate.metrics.originalCycleDelta <= -neutralMinGain;
+         adjustedCycleDelta <= -neutralMinGain;
 }
 
 static bool
@@ -2844,9 +3015,12 @@ static CandidateMetrics evaluateOrderCandidate(
       skipExactPressure ? PressureEvaluation::None : pressureEvaluation;
   CandidateMetrics metrics;
   metrics.score = scoreOps(ops, archResolution, modelConfig);
-  if (archResolution.arch)
+  if (archResolution.arch) {
     metrics.counterBurstCycles =
         computeCounterBurstCycles(ops, *archResolution.arch, modelConfig);
+    metrics.hazardWaitCycles =
+        estimateHazardWaitCycles(ops, *archResolution.arch);
+  }
   if (initialPressure == PressureEvaluation::Eager)
     metrics.pressure = computeRegisterPressure(region, ops, budgets, context);
   if (safePressureUpperBound && metrics.score.supported)
@@ -3125,6 +3299,9 @@ void printCandidateDiagnostics(ScheduleRegion region,
       if (candidate.metrics.counterBurstCycles != 0)
         llvm::errs() << " counter_burst_cycles="
                      << candidate.metrics.counterBurstCycles;
+      if (candidate.metrics.hazardWaitCycles != 0)
+        llvm::errs() << " hazard_wait_cycles="
+                     << candidate.metrics.hazardWaitCycles;
       printPressure(llvm::errs(), candidate.metrics.pressure, budgets);
     } else {
       llvm::errs() << " fallback=original reason="
@@ -3151,6 +3328,9 @@ void printScheduleDecision(ScheduleRegion region,
     if (selected.metrics.counterBurstCycles != 0)
       llvm::errs() << " selected_counter_burst_cycles="
                    << selected.metrics.counterBurstCycles;
+    if (selected.metrics.hazardWaitCycles != 0)
+      llvm::errs() << " selected_hazard_wait_cycles="
+                   << selected.metrics.hazardWaitCycles;
   } else {
     llvm::errs() << " fallback=original reason="
                  << selected.metrics.score.fallbackReason;

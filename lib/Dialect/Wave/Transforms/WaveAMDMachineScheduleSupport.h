@@ -97,6 +97,7 @@ struct CandidateMetrics {
   RegisterPressureResult pressure;
   int64_t originalCycleDelta = 0;
   int64_t counterBurstCycles = 0;
+  int64_t hazardWaitCycles = 0;
   uint64_t orderDisplacement = 0;
 };
 
