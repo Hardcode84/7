@@ -498,6 +498,20 @@ def WaveAMDResourceInfo
   ];
 }
 
+def WaveAMDVerifyMachineOperands
+    : Pass<"waveamd-verify-machine-operands", "ModuleOp"> {
+  let summary = "Verify target-specific WaveAMDMachine operand legality";
+  let description = [{
+    Checks final WaveAMDMachine operand forms before metadata and assembly
+    emission. The pass uses the same instruction-info helpers as the AMDGPU
+    target emitter for constant-bus use, literal placement, and VGPR operand
+    requirements.
+  }];
+  let dependentDialects = [
+    "waveamdmachine::WaveAMDMachineDialect"
+  ];
+}
+
 def WaveAMDMetadata
     : Pass<"waveamd-metadata"> {
   let summary = "Attach AMDGPU metadata information to WaveAMDMachine IR";

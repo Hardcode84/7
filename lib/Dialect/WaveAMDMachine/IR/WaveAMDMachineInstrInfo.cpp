@@ -54,6 +54,16 @@ std::optional<int64_t> mlir::waveamdmachine::getMachineImmValue(Value value) {
   return imm.getValue();
 }
 
+bool mlir::waveamdmachine::isSamePhysicalReg(Value lhs, Value rhs) {
+  RegType lhsType = dyn_cast<RegType>(lhs.getType());
+  RegType rhsType = dyn_cast<RegType>(rhs.getType());
+  if (!lhsType || !rhsType)
+    return false;
+  return lhsType.getRegClass() == rhsType.getRegClass() &&
+         lhsType.getWidth() == rhsType.getWidth() &&
+         lhsType.getIndex() == rhsType.getIndex();
+}
+
 bool mlir::waveamdmachine::isInlineImm32(Value value) {
   std::optional<int64_t> imm = getMachineImmValue(value);
   if (!imm)
@@ -191,6 +201,24 @@ LogicalResult mlir::waveamdmachine::requireOperandLegality(
       return failure();
   }
   return success();
+}
+
+LogicalResult mlir::waveamdmachine::requireVMulU32OperandLegality(
+    Operation *op, StringRef mnemonic, const llvm::AMDGPU::IsaVersion &isa,
+    StringRef targetChip, SamePhysicalRegFn samePhysicalReg) {
+  Value lhs = op->getOperand(0);
+  Value rhs = op->getOperand(1);
+  if ((isa.Major == 8 || isa.Major == 9) && isMachineImm(lhs) &&
+      isMachineImm(rhs))
+    return op->emitError(mnemonic) << " cannot materialize two immediates";
+  if ((isa.Major == 8 || isa.Major == 9) &&
+      (isMachineImm(lhs) || isMachineImm(rhs))) {
+    Value regValue = isMachineImm(lhs) ? rhs : lhs;
+    return requireConstantBus(op, mnemonic, {op->getResult(0), regValue}, isa,
+                              targetChip, samePhysicalReg);
+  }
+  return requireConstantBus(op, mnemonic, {lhs, rhs}, isa, targetChip,
+                            samePhysicalReg);
 }
 
 bool mlir::waveamdmachine::hasAnyVGPROperand(Value lhs, Value rhs) {

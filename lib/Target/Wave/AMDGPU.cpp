@@ -780,7 +780,9 @@ private:
                                    ArrayRef<Value> operands) const {
     return waveamdmachine::requireConstantBus(
         &op, mnemonic, operands, isaVersion, targetChip,
-        [](Value lhs, Value rhs) { return isSamePhysicalReg(lhs, rhs); });
+        [](Value lhs, Value rhs) {
+          return waveamdmachine::isSamePhysicalReg(lhs, rhs);
+        });
   }
 
   LogicalResult requireOperandLegality(Operation &op,
@@ -788,7 +790,9 @@ private:
     auto legality = cast<waveamdmachine::OperandLegalityOpInterface>(op);
     return waveamdmachine::requireOperandLegality(
         &op, mnemonic, legality.getOperandLegality(), isaVersion, targetChip,
-        [](Value lhs, Value rhs) { return isSamePhysicalReg(lhs, rhs); });
+        [](Value lhs, Value rhs) {
+          return waveamdmachine::isSamePhysicalReg(lhs, rhs);
+        });
   }
 
   void emitLine(StringRef line) {
@@ -1703,46 +1707,46 @@ private:
   }
 
   LogicalResult emitVMulLoU32(Operation &op, Value dst, Value lhs, Value rhs) {
+    if (failed(waveamdmachine::requireVMulU32OperandLegality(
+            &op, "v_mul_lo_u32", isaVersion, targetChip,
+            [](Value lhs, Value rhs) {
+              return waveamdmachine::isSamePhysicalReg(lhs, rhs);
+            })))
+      return failure();
     if (isGfx8Or9()) {
       std::optional<unsigned> lhsImm = getImmediate(lhs);
       std::optional<unsigned> rhsImm = getImmediate(rhs);
-      if (lhsImm && rhsImm)
-        return op.emitError("v_mul_lo_u32 cannot materialize two immediates");
       if (lhsImm || rhsImm) {
         Value immValue = lhsImm ? lhs : rhs;
         Value regValue = lhsImm ? rhs : lhs;
         if (failed(emitMC(vMovB32(), {toMCOperand(dst), toMCB32(immValue)})))
-          return failure();
-        if (failed(requireConstantBus(op, "v_mul_lo_u32", {dst, regValue})))
           return failure();
         return emitMC(vMulLoU32(),
                       {toMCOperand(dst), toMCOperand(dst), toMCB32(regValue)});
       }
     }
-    if (failed(requireConstantBus(op, "v_mul_lo_u32", {lhs, rhs})))
-      return failure();
     return emitMC(vMulLoU32(), {toMCOperand(dst), toMCB32(lhs), toMCB32(rhs)});
   }
 
   LogicalResult emitVMulHiU32(Operation &op, Value dst, Value lhs, Value rhs) {
+    if (failed(waveamdmachine::requireVMulU32OperandLegality(
+            &op, "v_mul_hi_u32", isaVersion, targetChip,
+            [](Value lhs, Value rhs) {
+              return waveamdmachine::isSamePhysicalReg(lhs, rhs);
+            })))
+      return failure();
     if (isGfx8Or9()) {
       std::optional<unsigned> lhsImm = getImmediate(lhs);
       std::optional<unsigned> rhsImm = getImmediate(rhs);
-      if (lhsImm && rhsImm)
-        return op.emitError("v_mul_hi_u32 cannot materialize two immediates");
       if (lhsImm || rhsImm) {
         Value immValue = lhsImm ? lhs : rhs;
         Value regValue = lhsImm ? rhs : lhs;
         if (failed(emitMC(vMovB32(), {toMCOperand(dst), toMCB32(immValue)})))
           return failure();
-        if (failed(requireConstantBus(op, "v_mul_hi_u32", {dst, regValue})))
-          return failure();
         return emitMC(vMulHiU32(),
                       {toMCOperand(dst), toMCOperand(dst), toMCB32(regValue)});
       }
     }
-    if (failed(requireConstantBus(op, "v_mul_hi_u32", {lhs, rhs})))
-      return failure();
     return emitMC(vMulHiU32(), {toMCOperand(dst), toMCB32(lhs), toMCB32(rhs)});
   }
 
@@ -1847,24 +1851,12 @@ private:
                   {llvm::MCOperand::createReg(namedPhysReg("exec_lo")), save});
   }
 
-  static bool isSamePhysicalReg(Value lhs, Value rhs) {
-    waveamdmachine::RegType lhsType =
-        dyn_cast<waveamdmachine::RegType>(lhs.getType());
-    waveamdmachine::RegType rhsType =
-        dyn_cast<waveamdmachine::RegType>(rhs.getType());
-    if (!lhsType || !rhsType)
-      return false;
-    return lhsType.getRegClass() == rhsType.getRegClass() &&
-           lhsType.getWidth() == rhsType.getWidth() &&
-           lhsType.getIndex() == rhsType.getIndex();
-  }
-
   LogicalResult emitCopy(Value dst, Value src, Operation *op) {
     if (isa<waveamdmachine::MemTokenType>(dst.getType()))
       return success();
     if (src.getDefiningOp<waveamdmachine::UninitOp>())
       return success();
-    if (isSamePhysicalReg(dst, src))
+    if (waveamdmachine::isSamePhysicalReg(dst, src))
       return success();
 
     waveamdmachine::RegType dstType =

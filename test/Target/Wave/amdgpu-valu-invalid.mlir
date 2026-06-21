@@ -1,4 +1,4 @@
-// RUN: wave-translate --wave-to-amdgpu-asm --verify-diagnostics --split-input-file %s
+// RUN: env WAVE_PIPELINES_DIR=%S/Inputs/emit-only-pipeline wave-translate --wave-to-amdgpu-asm --verify-diagnostics --split-input-file %s
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 

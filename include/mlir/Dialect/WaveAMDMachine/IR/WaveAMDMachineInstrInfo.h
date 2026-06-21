@@ -33,6 +33,7 @@ bool isSGPRValue(Value value);
 bool isVGPRValue(Value value);
 bool isMachineImm(Value value);
 std::optional<int64_t> getMachineImmValue(Value value);
+bool isSamePhysicalReg(Value lhs, Value rhs);
 
 bool isInlineImm32(Value value);
 bool usesConstantBus(Value value);
@@ -58,6 +59,10 @@ LogicalResult requireOperandLegality(Operation *op, StringRef mnemonic,
                                      const llvm::AMDGPU::IsaVersion &isa,
                                      StringRef targetChip,
                                      SamePhysicalRegFn samePhysicalReg);
+LogicalResult requireVMulU32OperandLegality(Operation *op, StringRef mnemonic,
+                                            const llvm::AMDGPU::IsaVersion &isa,
+                                            StringRef targetChip,
+                                            SamePhysicalRegFn samePhysicalReg);
 
 bool hasAnyVGPROperand(Value lhs, Value rhs);
 void putVGPROperandLast(Value &lhs, Value &rhs);

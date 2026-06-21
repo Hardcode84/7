@@ -72,3 +72,8 @@
 // PIPELINE-NEXT: // Preserve structured exec_if until waits see real control flow.
 // PIPELINE-NEXT: transform.apply_registered_pass "waveamd-insert-ticket-waits"
 // PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
+// PIPELINE: transform.apply_registered_pass "waveamd-resource-info"
+// PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
+// PIPELINE-NEXT: transform.apply_registered_pass "waveamd-verify-machine-operands"
+// PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
+// PIPELINE-NEXT: transform.apply_registered_pass "waveamd-metadata"

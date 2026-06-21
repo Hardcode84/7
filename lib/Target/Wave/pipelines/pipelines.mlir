@@ -117,7 +117,9 @@ module attributes {transform.with_named_sequence} {
         : (!transform.any_op) -> !transform.any_op
     %r8 = transform.apply_registered_pass "waveamd-resource-info" to %r7
         : (!transform.any_op) -> !transform.any_op
-    %r9 = transform.apply_registered_pass "waveamd-metadata" to %r8
+    %rv = transform.apply_registered_pass "waveamd-verify-machine-operands" to %r8
+        : (!transform.any_op) -> !transform.any_op
+    %r9 = transform.apply_registered_pass "waveamd-metadata" to %rv
         : (!transform.any_op) -> !transform.any_op
     transform.yield %r9 : !transform.any_op
   }

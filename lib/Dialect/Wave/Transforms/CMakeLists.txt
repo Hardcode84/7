@@ -31,6 +31,7 @@ add_mlir_dialect_library(MLIRWaveTransforms
   WaveAMDRegLiveIntervals.cpp
   WaveAMDRegPressureRelief.cpp
   WaveAMDResourceInfo.cpp
+  WaveAMDVerifyMachineOperands.cpp
   WaveAttachGPUBinary.cpp
   WaveCoalesceMemory.cpp
   WaveCombinePointerOffsets.cpp
