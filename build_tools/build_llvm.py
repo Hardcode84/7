@@ -7,6 +7,8 @@
 By default, shallow-clones llvm/llvm-project at the commit pinned in
 ``llvm-commit.txt`` into ``build/_deps/llvm-project`` and installs MLIR
 into ``build/llvm-install``. CMake picks up that install automatically.
+Configured wave-mlir build trees are reconfigured and cleaned after the
+install changes so stale objects cannot survive an LLVM ABI change.
 
 Environment overrides
 ---------------------
@@ -35,6 +37,7 @@ COMMIT_FILE = REPO_ROOT / "llvm-commit.txt"
 DEFAULT_SOURCE_DIR = REPO_ROOT / "build" / "_deps" / "llvm-project"
 DEFAULT_BUILD_DIR = REPO_ROOT / "build" / "llvm-build"
 DEFAULT_INSTALL_DIR = REPO_ROOT / "build" / "llvm-install"
+DEFAULT_WAVE_BUILD_DIR = REPO_ROOT / "build"
 STAMP_FILE = ".wave-mlir-commit"
 
 
@@ -56,6 +59,18 @@ def run(cmd: list[str], cwd: Path | None = None) -> None:
     suffix = f"  (cwd={cwd})" if cwd else ""
     print(f"+ {pretty}{suffix}", flush=True)
     subprocess.run(cmd, cwd=cwd, check=True)
+
+
+def read_cmake_cache_value(cache: Path, key: str) -> str | None:
+    if not cache.is_file():
+        return None
+    prefix = f"{key}:"
+    for raw in cache.read_text().splitlines():
+        if not raw.startswith(prefix):
+            continue
+        _, value = raw.split("=", 1)
+        return value
+    return None
 
 
 def fetch_source(source_dir: Path, commit: str) -> None:
@@ -172,6 +187,46 @@ def configure_and_build(
     run(build_cmd)
 
 
+def refresh_wave_build(
+    wave_build_dir: Path,
+    source_dir: Path,
+    llvm_build_dir: Path,
+    install_dir: Path,
+) -> None:
+    if wave_build_dir == llvm_build_dir:
+        print(f"Wave build dir equals LLVM build dir; skipping {wave_build_dir}")
+        return
+
+    cache = wave_build_dir / "CMakeCache.txt"
+    if not cache.is_file():
+        print(f"Wave build tree not configured at {wave_build_dir}; skipping clean.")
+        return
+
+    cached_install = read_cmake_cache_value(cache, "LLVM_INSTALL_DIR")
+    if cached_install:
+        cached_install_dir = Path(cached_install).resolve()
+        if cached_install_dir != install_dir:
+            print(
+                f"Wave build at {wave_build_dir} uses LLVM_INSTALL_DIR="
+                f"{cached_install_dir}; installed {install_dir}, skipping clean.",
+            )
+            return
+
+    run(
+        [
+            "cmake",
+            "-S",
+            str(REPO_ROOT),
+            "-B",
+            str(wave_build_dir),
+            f"-DLLVM_INSTALL_DIR={install_dir}",
+            f"-DWAVE_LLVM_PROJECT_SRC_DIR={source_dir}",
+            f"-DWAVE_LLVM_PROJECT_BUILD_DIR={llvm_build_dir}",
+        ],
+    )
+    run(["cmake", "--build", str(wave_build_dir), "--target", "clean"])
+
+
 def parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Fetch and build LLVM/MLIR for wave-mlir.",
@@ -179,6 +234,12 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--source-dir", type=Path, default=DEFAULT_SOURCE_DIR)
     parser.add_argument("--build-dir", type=Path, default=DEFAULT_BUILD_DIR)
     parser.add_argument("--install-dir", type=Path, default=DEFAULT_INSTALL_DIR)
+    parser.add_argument(
+        "--wave-build-dir",
+        type=Path,
+        default=DEFAULT_WAVE_BUILD_DIR,
+        help="Configured wave-mlir build tree to refresh after LLVM install.",
+    )
     parser.add_argument("--build-type", default="Release")
     parser.add_argument("--jobs", "-j", type=int, default=None)
     parser.add_argument(
@@ -191,6 +252,11 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
         "--force",
         action="store_true",
         help="Rebuild even if the install matches the pinned commit.",
+    )
+    parser.add_argument(
+        "--no-refresh-wave-build",
+        action="store_true",
+        help="Do not reconfigure and clean the wave-mlir build after LLVM install.",
     )
     return parser.parse_args(argv)
 
@@ -217,9 +283,10 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     source_dir = resolve_source(args.source_dir.resolve(), commit)
+    llvm_build_dir = args.build_dir.resolve()
     configure_and_build(
         source_dir=source_dir,
-        build_dir=args.build_dir.resolve(),
+        build_dir=llvm_build_dir,
         install_dir=install_dir,
         build_type=args.build_type,
         jobs=args.jobs,
@@ -227,6 +294,13 @@ def main(argv: list[str] | None = None) -> int:
     )
     (install_dir / STAMP_FILE).write_text(commit + "\n")
     print(f"\nLLVM/MLIR installed at {install_dir} (commit {commit[:12]})")
+    if not args.no_refresh_wave_build:
+        refresh_wave_build(
+            wave_build_dir=args.wave_build_dir.resolve(),
+            source_dir=source_dir,
+            llvm_build_dir=llvm_build_dir,
+            install_dir=install_dir,
+        )
     return 0
 
 

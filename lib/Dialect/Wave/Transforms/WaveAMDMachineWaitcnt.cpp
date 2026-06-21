@@ -717,7 +717,7 @@ public:
     WaitState next = before.get();
     RegionSuccessor successor =
         regionTo ? RegionSuccessor(&branch->getRegion(*regionTo))
-                 : RegionSuccessor::parent();
+                 : RegionSuccessor(branch.getOperation());
 
     SmallVector<Value> sources;
     if (regionFrom) {

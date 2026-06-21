@@ -314,7 +314,7 @@ void ExecIfOp::getSuccessorRegions(RegionBranchPoint point,
     if (hasElse)
       regions.push_back(RegionSuccessor(&getElseRegion()));
     else if (getNumResults() == 0)
-      regions.push_back(RegionSuccessor::parent());
+      regions.push_back(RegionSuccessor(getOperation()));
     return;
   }
 
@@ -323,7 +323,7 @@ void ExecIfOp::getSuccessorRegions(RegionBranchPoint point,
   Region *source = term->getParentRegion();
   if (source == &getThenRegion() && hasElse)
     regions.push_back(RegionSuccessor(&getElseRegion()));
-  regions.push_back(RegionSuccessor::parent());
+  regions.push_back(RegionSuccessor(getOperation()));
 }
 
 OperandRange ExecIfOp::getEntrySuccessorOperands(RegionSuccessor successor) {
@@ -331,7 +331,7 @@ OperandRange ExecIfOp::getEntrySuccessorOperands(RegionSuccessor successor) {
 }
 
 ValueRange ExecIfOp::getSuccessorInputs(RegionSuccessor successor) {
-  if (successor.isParent())
+  if (successor.isOperation())
     return getResults();
   return ValueRange();
 }
@@ -418,10 +418,10 @@ void UniformIfOp::getSuccessorRegions(
     if (hasElse)
       regions.push_back(RegionSuccessor(&getElseRegion()));
     else
-      regions.push_back(RegionSuccessor::parent());
+      regions.push_back(RegionSuccessor(getOperation()));
     return;
   }
-  regions.push_back(RegionSuccessor::parent());
+  regions.push_back(RegionSuccessor(getOperation()));
 }
 
 OperandRange UniformIfOp::getEntrySuccessorOperands(RegionSuccessor successor) {
@@ -429,7 +429,7 @@ OperandRange UniformIfOp::getEntrySuccessorOperands(RegionSuccessor successor) {
 }
 
 ValueRange UniformIfOp::getSuccessorInputs(RegionSuccessor successor) {
-  if (successor.isParent())
+  if (successor.isOperation())
     return getResults();
   return ValueRange();
 }
@@ -437,7 +437,7 @@ ValueRange UniformIfOp::getSuccessorInputs(RegionSuccessor successor) {
 MutableOperandRange
 YieldOp::getMutableSuccessorOperands(RegionSuccessor successor) {
   MutableOperandRange values = getValuesMutable();
-  if (successor.isParent())
+  if (successor.isOperation())
     return values;
   return values.slice(0, 0);
 }
@@ -672,11 +672,11 @@ void UniformLoopOp::getSuccessorRegions(
   if (point.isParent()) {
     regions.push_back(RegionSuccessor(&getBody()));
     if (getEntryCond())
-      regions.push_back(RegionSuccessor::parent());
+      regions.push_back(RegionSuccessor(getOperation()));
     return;
   }
   regions.push_back(RegionSuccessor(&getBody()));
-  regions.push_back(RegionSuccessor::parent());
+  regions.push_back(RegionSuccessor(getOperation()));
 }
 
 OperandRange
@@ -685,7 +685,7 @@ UniformLoopOp::getEntrySuccessorOperands(RegionSuccessor successor) {
 }
 
 ValueRange UniformLoopOp::getSuccessorInputs(RegionSuccessor successor) {
-  if (successor.isParent())
+  if (successor.isOperation())
     return getResults();
   return getBody().getArguments();
 }

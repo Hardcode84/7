@@ -514,11 +514,11 @@ static std::optional<LDSTargetInfo> getLDSTargetInfo(func::FuncOp func) {
     return std::nullopt;
 
   LDSTargetInfo info;
-  info.localMemorySize = llvm::AMDGPU::IsaInfo::getLocalMemorySize(sti->get());
+  info.localMemorySize = llvm::AMDGPU::IsaInfo::getLocalMemorySize(**sti);
   info.addressableLocalMemorySize =
-      llvm::AMDGPU::IsaInfo::getAddressableLocalMemorySize(sti->get());
+      llvm::AMDGPU::IsaInfo::getAddressableLocalMemorySize(**sti);
   info.wavefrontSize = *wavefrontSize;
-  info.eusPerCU = llvm::AMDGPU::IsaInfo::getEUsPerCU(sti->get());
+  info.eusPerCU = llvm::AMDGPU::IsaInfo::getEUsPerCU(**sti);
   return info;
 }
 

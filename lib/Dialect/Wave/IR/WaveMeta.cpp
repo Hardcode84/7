@@ -125,7 +125,7 @@ LogicalResult StaticForOp::verify() {
 void StaticForOp::getSuccessorRegions(
     RegionBranchPoint point, SmallVectorImpl<RegionSuccessor> &regions) {
   regions.push_back(RegionSuccessor(&getBody()));
-  regions.push_back(RegionSuccessor::parent());
+  regions.push_back(RegionSuccessor(getOperation()));
 }
 
 OperandRange StaticForOp::getEntrySuccessorOperands(RegionSuccessor successor) {
@@ -133,7 +133,7 @@ OperandRange StaticForOp::getEntrySuccessorOperands(RegionSuccessor successor) {
 }
 
 ValueRange StaticForOp::getSuccessorInputs(RegionSuccessor successor) {
-  if (successor.isParent())
+  if (successor.isOperation())
     return getResults();
   // Body block args excluding the induction var.
   return getBody().front().getArguments().drop_front();
@@ -151,7 +151,7 @@ LogicalResult UnrolledForOp::verify() {
 void UnrolledForOp::getSuccessorRegions(
     RegionBranchPoint point, SmallVectorImpl<RegionSuccessor> &regions) {
   regions.push_back(RegionSuccessor(&getBody()));
-  regions.push_back(RegionSuccessor::parent());
+  regions.push_back(RegionSuccessor(getOperation()));
 }
 
 OperandRange
@@ -160,7 +160,7 @@ UnrolledForOp::getEntrySuccessorOperands(RegionSuccessor successor) {
 }
 
 ValueRange UnrolledForOp::getSuccessorInputs(RegionSuccessor successor) {
-  if (successor.isParent())
+  if (successor.isOperation())
     return getResults();
   return getBody().front().getArguments().drop_front();
 }
@@ -203,14 +203,14 @@ void StaticIfOp::getSuccessorRegions(
     if (!getElseRegion().empty())
       regions.push_back(RegionSuccessor(&getElseRegion()));
     else
-      regions.push_back(RegionSuccessor::parent());
+      regions.push_back(RegionSuccessor(getOperation()));
     return;
   }
-  regions.push_back(RegionSuccessor::parent());
+  regions.push_back(RegionSuccessor(getOperation()));
 }
 
 ValueRange StaticIfOp::getSuccessorInputs(RegionSuccessor successor) {
-  return successor.isParent() ? ValueRange(getResults()) : ValueRange();
+  return successor.isOperation() ? ValueRange(getResults()) : ValueRange();
 }
 
 void StaticIfOp::getRegionInvocationBounds(

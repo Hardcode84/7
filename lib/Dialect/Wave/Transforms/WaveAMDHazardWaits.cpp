@@ -426,11 +426,14 @@ static ValueHazards lookupValueHazards(const HazardState &state, Value value) {
 static void advanceValueHazards(HazardState &state, unsigned count = 1) {
   if (count == 0)
     return;
-  for (auto &entry : llvm::make_early_inc_range(state.values)) {
+  SmallVector<Value> expired;
+  for (auto &entry : state.values) {
     entry.second.advance(count);
     if (entry.second.empty())
-      state.values.erase(entry.first);
+      expired.push_back(entry.first);
   }
+  for (Value value : expired)
+    state.values.erase(value);
 }
 
 static std::optional<RegSpan> getAllocatedRegSpan(Value value) {
@@ -535,7 +538,7 @@ static void propagateRegionOperands(RegionBranchOpInterface branch,
                                     HazardState &state) {
   RegionSuccessor successor =
       regionTo ? RegionSuccessor(&branch->getRegion(*regionTo))
-               : RegionSuccessor::parent();
+               : RegionSuccessor(branch.getOperation());
 
   SmallVector<Value> sources;
   if (regionFrom) {

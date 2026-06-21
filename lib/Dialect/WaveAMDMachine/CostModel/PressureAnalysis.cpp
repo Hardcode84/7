@@ -34,6 +34,8 @@ namespace {
 // backedges through only the hot component.
 class PressureLattice : public mlir::dataflow::AbstractDenseLattice {
 public:
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(PressureLattice)
+
   using AbstractDenseLattice::AbstractDenseLattice;
 
   MachineState cold;
@@ -92,6 +94,8 @@ static ChangeResult applyTransferTo(MachineState &state, Operation *op,
 class PressureAnalysis
     : public mlir::dataflow::DenseForwardDataFlowAnalysis<PressureLattice> {
 public:
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(PressureAnalysis)
+
   PressureAnalysis(DataFlowSolver &solver, const ArchData &arch)
       : DenseForwardDataFlowAnalysis(solver), arch(arch) {}
 

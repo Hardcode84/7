@@ -631,9 +631,12 @@ int64_t EventSimulator::cuIssueReadyCycle(int64_t cycle, unsigned issues,
 }
 
 void EventSimulator::pruneCuIssueCounts(int64_t cycle) {
-  for (auto &entry : llvm::make_early_inc_range(cuIssueCounts))
+  SmallVector<int64_t, 4> expired;
+  for (auto &entry : cuIssueCounts)
     if (entry.first < cycle)
-      cuIssueCounts.erase(entry.first);
+      expired.push_back(entry.first);
+  for (int64_t key : expired)
+    cuIssueCounts.erase(key);
 }
 
 void EventSimulator::consumeCuIssueSlots(int64_t cycle, unsigned issues,
@@ -680,9 +683,12 @@ int64_t EventSimulator::cmaIssueReadyCycle(int64_t cycle, Operation *op,
 }
 
 void EventSimulator::pruneCmaIssueCounts(int64_t cycle) {
-  for (auto &entry : llvm::make_early_inc_range(cmaIssueCounts))
+  SmallVector<int64_t, 4> expired;
+  for (auto &entry : cmaIssueCounts)
     if (entry.first < cycle)
-      cmaIssueCounts.erase(entry.first);
+      expired.push_back(entry.first);
+  for (int64_t key : expired)
+    cmaIssueCounts.erase(key);
 }
 
 void EventSimulator::consumeCmaIssueSlots(int64_t cycle, Operation *op,

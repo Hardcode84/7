@@ -236,27 +236,26 @@ FailureOr<WaveAMDRegisterLimits> getWaveAMDRegisterLimits(Operation *op) {
 
   WaveAMDRegisterLimits limits;
   limits.addressableSGPRs =
-      llvm::AMDGPU::IsaInfo::getAddressableNumSGPRs(sti->get());
+      llvm::AMDGPU::IsaInfo::getAddressableNumSGPRs(**sti);
   limits.addressableVGPRs =
       std::min(llvm::AMDGPU::IsaInfo::getAddressableNumVGPRs(
-                   sti->get(), /*DynamicVGPRBlockSize=*/0),
+                   **sti, /*DynamicVGPRBlockSize=*/0),
                kTextAsmVGPRLimit);
   limits.addressableAGPRs = getAddressableAGPRs(**sti);
-  limits.sgprAllocGranule =
-      llvm::AMDGPU::IsaInfo::getSGPRAllocGranule(sti->get());
+  limits.sgprAllocGranule = llvm::AMDGPU::IsaInfo::getSGPRAllocGranule(**sti);
   limits.vgprAllocGranule = llvm::AMDGPU::IsaInfo::getVGPRAllocGranule(
-      sti->get(), /*DynamicVGPRBlockSize=*/0);
+      **sti, /*DynamicVGPRBlockSize=*/0);
   limits.agprAllocGranule = limits.vgprAllocGranule;
-  limits.maxWavesPerEU = llvm::AMDGPU::IsaInfo::getMaxWavesPerEU(sti->get());
+  limits.maxWavesPerEU = llvm::AMDGPU::IsaInfo::getMaxWavesPerEU(**sti);
   limits.agprCountsAgainstVGPRs = llvm::AMDGPU::isGFX90A(**sti);
   limits.maxSGPRsForWaves.assign(limits.maxWavesPerEU + 1, 0);
   limits.maxVGPRsForWaves.assign(limits.maxWavesPerEU + 1, 0);
   for (unsigned waves = 1; waves <= limits.maxWavesPerEU; ++waves) {
     limits.maxSGPRsForWaves[waves] =
-        llvm::AMDGPU::IsaInfo::getMaxNumSGPRs(sti->get(), waves,
+        llvm::AMDGPU::IsaInfo::getMaxNumSGPRs(**sti, waves,
                                               /*Addressable=*/true);
     limits.maxVGPRsForWaves[waves] = llvm::AMDGPU::IsaInfo::getMaxNumVGPRs(
-        sti->get(), waves, /*DynamicVGPRBlockSize=*/0);
+        **sti, waves, /*DynamicVGPRBlockSize=*/0);
   }
   return limits;
 }

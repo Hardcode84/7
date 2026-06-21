@@ -8,7 +8,7 @@ from lit.llvm import llvm_config
 from lit.llvm.subst import ToolSubst
 
 config.name = "wave-mlir"
-config.test_format = lit.formats.ShTest(not llvm_config.use_lit_shell)
+config.test_format = lit.formats.ShTest(False)
 config.suffixes = [".mlir", ".py"]
 
 # Exclude lit's own config files (they share the `.py` suffix); also drop

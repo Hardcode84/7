@@ -369,7 +369,9 @@ struct WaveNormalizePointerOffsetsPass
     scf::populateSCFStructuralTypeConversionsAndLegality(converter, patterns,
                                                          target);
 
-    return applyPartialConversion(func, target, std::move(patterns));
+    ConversionConfig config;
+    config.allowPatternRollback = false;
+    return applyPartialConversion(func, target, std::move(patterns), config);
   }
 };
 

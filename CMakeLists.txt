@@ -50,6 +50,21 @@ message(STATUS "Using LLVMConfig.cmake in: ${LLVM_DIR}")
 message(STATUS "Using MLIRConfig.cmake in: ${MLIR_DIR}")
 message(STATUS "Using ClangConfig.cmake in: ${Clang_DIR}")
 
+set(WAVE_LLVM_INSTALL_STAMP "${LLVM_INSTALL_DIR}/.wave-mlir-commit")
+if(EXISTS "${WAVE_LLVM_INSTALL_STAMP}")
+  set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+               "${WAVE_LLVM_INSTALL_STAMP}")
+  file(READ "${WAVE_LLVM_INSTALL_STAMP}" WAVE_LLVM_INSTALL_COMMIT)
+  string(STRIP "${WAVE_LLVM_INSTALL_COMMIT}" WAVE_LLVM_INSTALL_COMMIT)
+else()
+  set(WAVE_LLVM_INSTALL_COMMIT "external")
+endif()
+if(WAVE_LLVM_INSTALL_COMMIT STREQUAL "")
+  set(WAVE_LLVM_INSTALL_COMMIT "unknown")
+endif()
+message(STATUS "Using LLVM install stamp: ${WAVE_LLVM_INSTALL_COMMIT}")
+add_compile_definitions(WAVE_LLVM_INSTALL_COMMIT="${WAVE_LLVM_INSTALL_COMMIT}")
+
 list(APPEND CMAKE_MODULE_PATH "${MLIR_CMAKE_DIR}")
 list(APPEND CMAKE_MODULE_PATH "${LLVM_CMAKE_DIR}")
 

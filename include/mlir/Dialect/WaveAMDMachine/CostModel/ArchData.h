@@ -16,7 +16,7 @@
 #define MLIR_DIALECT_WAVEAMDMACHINE_COSTMODEL_ARCHDATA_H
 
 #include "llvm/ADT/StringRef.h"
-#include "llvm/TargetParser/TargetParser.h"
+#include "llvm/TargetParser/AMDGPUTargetParser.h"
 
 namespace mlir::waveamdmachine {
 
