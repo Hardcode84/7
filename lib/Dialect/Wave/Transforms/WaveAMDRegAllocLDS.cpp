@@ -51,6 +51,17 @@ static LDSSpillPlan buildLDSSpillPlan(func::FuncOp func,
                                       unsigned reservedSpillBytes,
                                       unsigned fixedLDS, unsigned dynamicLDS);
 
+static bool canFoldSlotBaseIntoDSOffset(unsigned slotBase) {
+  std::pair<int64_t, int64_t> range = waveamdmachine::instOffsetRange(
+      waveamdmachine::DsStoreB32Op::getAddressFieldSpec());
+  return slotBase >= static_cast<uint64_t>(range.first) &&
+         slotBase <= static_cast<uint64_t>(range.second);
+}
+
+static unsigned getAddressOpsPerAccess(const LDSSpillPlan &plan) {
+  return canFoldSlotBaseIntoDSOffset(plan.slotBase) ? 1 : 2;
+}
+
 static bool isCheapVGPRExpr(Operation *op) {
   return isa_and_nonnull<
       waveamdmachine::VWorkitemIdXOp, waveamdmachine::VMovB32TupleOp,
@@ -58,6 +69,50 @@ static bool isCheapVGPRExpr(Operation *op) {
       waveamdmachine::VLshlAddU32Op, waveamdmachine::VAddU32Op,
       waveamdmachine::VAdd3U32Op, waveamdmachine::VAndB32Op,
       waveamdmachine::VXorB32Op, waveamdmachine::VAndOrB32Op>(op);
+}
+
+static bool isLiveAt(Interval *interval, unsigned position) {
+  return !interval->values.empty() && interval->start <= position &&
+         position <= interval->end;
+}
+
+static bool isScalarTempGroup(IntervalGroup *group) {
+  if (!group || group->intervals.size() != 1)
+    return false;
+  Interval *interval = group->intervals.front();
+  if (interval->values.size() != 1)
+    return false;
+  Value value = *interval->values.begin();
+  return isRegAllocTempOp(value.getDefiningOp());
+}
+
+static bool isLDSSpillRegClass(waveamdmachine::RegClass regClass) {
+  return regClass == waveamdmachine::RegClass::VGPR ||
+         regClass == waveamdmachine::RegClass::AGPR;
+}
+
+static bool isOpenSingleLaneSpillGroup(IntervalGroup *group) {
+  if (!group || group->plannedPressureRelief || group->reserved ||
+      isFixedRegisterGroup(group))
+    return false;
+  return group->intervals.size() == 1;
+}
+
+static bool hasLDSSpillRegClass(IntervalGroup *group) {
+  return isLDSSpillRegClass(group->storageClass) &&
+         group->preferredClass == group->storageClass;
+}
+
+static bool isLDSSpillEligibleScalarGroup(IntervalGroup *group,
+                                          unsigned position) {
+  if (!isOpenSingleLaneSpillGroup(group) || !hasLDSSpillRegClass(group))
+    return false;
+  Interval *interval = group->intervals.front();
+  if (!isLiveAt(interval, position))
+    return false;
+  if (!group->nonPromotable && !interval->nonPromotable)
+    return true;
+  return isScalarTempGroup(group);
 }
 
 class LDSSpillPlanRecord final : public wave::WaveAMDPressureReliefPlan {
@@ -99,7 +154,9 @@ public:
 
   wave::WaveAMDPressureReliefCost getCost() const override {
     wave::WaveAMDPressureReliefCost cost;
-    cost.materializationOps = 2 + static_cast<int64_t>(useCount) * 2;
+    unsigned addressOps = getAddressOpsPerAccess(plan);
+    cost.materializationOps =
+        1 + addressOps + static_cast<int64_t>(useCount) * (1 + addressOps);
     cost.latencyPenalty = static_cast<int64_t>(useCount) * 2;
     return cost;
   }
@@ -272,15 +329,13 @@ private:
   }
 
   static bool isEligibleScalarGroup(IntervalGroup *group, unsigned position) {
-    if (!isMemorySpillEligibleGroup(group, position) ||
-        group->intervals.size() != 1)
-      return false;
-    return true;
+    return isLDSSpillEligibleScalarGroup(group, position);
   }
 
-  bool hasSimpleUses(Value value, SmallVectorImpl<OpOperand *> &uses) const {
+  bool hasSimpleVGPRUses(Value value,
+                         SmallVectorImpl<OpOperand *> &uses) const {
     Operation *def = value.getDefiningOp();
-    if (!def || isRegAllocTempOp(def) || isMemoryIssuerOp(def))
+    if (!def || isMemoryIssuerOp(def))
       return false;
     Block *block = def->getBlock();
     for (OpOperand &use : value.getUses()) {
@@ -297,6 +352,34 @@ private:
     return !uses.empty();
   }
 
+  bool hasSimpleAGPRUses(Value value,
+                         SmallVectorImpl<OpOperand *> &uses) const {
+    Operation *def = value.getDefiningOp();
+    if (!def || isMemoryIssuerOp(def))
+      return false;
+    Block *block = def->getBlock();
+    for (OpOperand &use : value.getUses()) {
+      if (use.getOwner()->getBlock() != block)
+        return false;
+      if (isa<waveamdmachine::VAccvgprReadB32TupleOp>(use.getOwner())) {
+        uses.push_back(&use);
+        continue;
+      }
+      if (isRegAllocTempOp(use.getOwner()))
+        continue;
+      return false;
+    }
+    return !uses.empty();
+  }
+
+  bool hasSimpleUses(Value value, SmallVectorImpl<OpOperand *> &uses) const {
+    waveamdmachine::RegType type =
+        cast<waveamdmachine::RegType>(value.getType());
+    if (type.getRegClass() == waveamdmachine::RegClass::AGPR)
+      return hasSimpleAGPRUses(value, uses);
+    return hasSimpleVGPRUses(value, uses);
+  }
+
   void collect(IntervalGroup *group, LDSSpillPlan plan,
                wave::WaveAMDPressureReliefCandidateList &candidates) const {
     if (!isEligibleScalarGroup(group, position))
@@ -306,7 +389,7 @@ private:
       return;
     waveamdmachine::RegType type =
         cast<waveamdmachine::RegType>(value.getType());
-    if (type.getWidth() != 1)
+    if (!isLDSSpillRegClass(type.getRegClass()) || type.getWidth() != 1)
       return;
     SmallVector<OpOperand *> uses;
     if (!hasSimpleUses(value, uses))
@@ -350,8 +433,8 @@ private:
         static_cast<uint64_t>(value));
   }
 
-  Value materializeAddress(OpBuilder &builder, Location loc,
-                           const LDSSpillPlan &plan) const {
+  std::pair<Value, int64_t> materializeAddress(OpBuilder &builder, Location loc,
+                                               const LDSSpillPlan &plan) const {
     MLIRContext *ctx = builder.getContext();
     Value workitem = findWorkitemId(builder);
     if (!workitem) {
@@ -368,7 +451,50 @@ private:
                                      /*width=*/1, /*index=*/-1),
         workitem, createImm(builder, loc, llvm::Log2_32(plan.valueBytes)));
     addr->setAttr(kRegAllocTempAttr, builder.getUnitAttr());
-    return addr.getResult();
+    if (canFoldSlotBaseIntoDSOffset(plan.slotBase))
+      return {addr.getResult(), static_cast<int64_t>(plan.slotBase)};
+
+    waveamdmachine::VAddU32Op fullAddr = waveamdmachine::VAddU32Op::create(
+        builder, loc,
+        waveamdmachine::RegType::get(ctx, waveamdmachine::RegClass::VGPR,
+                                     /*width=*/1, /*index=*/-1),
+        addr.getResult(), createImm(builder, loc, plan.slotBase));
+    fullAddr->setAttr(kRegAllocTempAttr, builder.getUnitAttr());
+    return {fullAddr.getResult(), 0};
+  }
+
+  Value materializeStoreValue(Value value, OpBuilder &builder) const {
+    waveamdmachine::RegType type =
+        cast<waveamdmachine::RegType>(value.getType());
+    if (type.getRegClass() != waveamdmachine::RegClass::AGPR)
+      return value;
+    Location loc = value.getLoc();
+    waveamdmachine::VAccvgprReadB32TupleOp read =
+        waveamdmachine::VAccvgprReadB32TupleOp::create(
+            builder, loc,
+            waveamdmachine::RegType::get(builder.getContext(),
+                                         waveamdmachine::RegClass::VGPR,
+                                         /*width=*/1, /*index=*/-1),
+            value);
+    read->setAttr(kRegAllocTempAttr, builder.getUnitAttr());
+    return read.getResult();
+  }
+
+  LogicalResult replaceUseWithLoad(Value value, OpOperand *use,
+                                   Value loaded) const {
+    waveamdmachine::RegType type =
+        cast<waveamdmachine::RegType>(value.getType());
+    if (type.getRegClass() != waveamdmachine::RegClass::AGPR) {
+      use->set(loaded);
+      return success();
+    }
+    waveamdmachine::VAccvgprReadB32TupleOp read =
+        dyn_cast<waveamdmachine::VAccvgprReadB32TupleOp>(use->getOwner());
+    if (!read)
+      return failure();
+    read.getResult().replaceAllUsesWith(loaded);
+    read.erase();
+    return success();
   }
 
   Value findWorkitemId(OpBuilder &builder) const {
@@ -415,12 +541,21 @@ private:
              << "waveamd-reg-alloc cannot materialize LDS spill for value";
 
     LDSSpillPlan plan = spill.getPlan();
+    waveamdmachine::RegType valueType =
+        cast<waveamdmachine::RegType>(value.getType());
+    Type loadType = value.getType();
+    if (valueType.getRegClass() == waveamdmachine::RegClass::AGPR)
+      loadType = waveamdmachine::RegType::get(builder.getContext(),
+                                              waveamdmachine::RegClass::VGPR,
+                                              /*width=*/1, /*index=*/-1);
     Type tokenType = waveamdmachine::MemTokenType::get(builder.getContext());
     builder.setInsertionPointAfter(def);
-    Value storeAddr = materializeAddress(builder, def->getLoc(), plan);
+    Value storeValue = materializeStoreValue(value, builder);
+    std::pair<Value, int64_t> storeAddr =
+        materializeAddress(builder, def->getLoc(), plan);
     waveamdmachine::DsStoreB32Op store = waveamdmachine::DsStoreB32Op::create(
-        builder, def->getLoc(), tokenType, storeAddr, value, Value{},
-        static_cast<int64_t>(plan.slotBase));
+        builder, def->getLoc(), tokenType, storeAddr.first, storeValue, Value{},
+        storeAddr.second);
     store->setAttr(kRegAllocTempAttr, builder.getUnitAttr());
 
     for (OpOperand *use : uses) {
@@ -428,12 +563,14 @@ private:
         continue;
       Operation *user = use->getOwner();
       builder.setInsertionPoint(user);
-      Value loadAddr = materializeAddress(builder, user->getLoc(), plan);
+      std::pair<Value, int64_t> loadAddr =
+          materializeAddress(builder, user->getLoc(), plan);
       waveamdmachine::DsLoadB32Op load = waveamdmachine::DsLoadB32Op::create(
-          builder, user->getLoc(), value.getType(), tokenType, loadAddr,
-          store.getToken(), static_cast<int64_t>(plan.slotBase));
+          builder, user->getLoc(), loadType, tokenType, loadAddr.first,
+          store.getToken(), loadAddr.second);
       load->setAttr(kRegAllocTempAttr, builder.getUnitAttr());
-      use->set(load.getResult());
+      if (failed(replaceUseWithLoad(value, use, load.getResult())))
+        return failure();
     }
     return success();
   }
@@ -707,20 +844,9 @@ static LDSSpillPlan buildLDSSpillPlan(func::FuncOp func,
     return reject(LDSSpillPlanStatus::InsufficientLDS, fixedLDS, dynamicLDS,
                   reservedSpillBytes, valueBytes);
 
-  LDSSpillPlanStatus status = LDSSpillPlanStatus::Available;
-  if (wavesPerWorkgroup != 1)
-    status = LDSSpillPlanStatus::UnsupportedWavesPerWorkgroup;
-  else {
-    std::pair<int64_t, int64_t> offsetRange = waveamdmachine::instOffsetRange(
-        waveamdmachine::DsStoreB32Op::getAddressFieldSpec());
-    if (static_cast<uint64_t>(fixedLDS) + reservedSpillBytes >
-        static_cast<uint64_t>(offsetRange.second))
-      status = LDSSpillPlanStatus::UnsupportedSlotBase;
-  }
-
-  return buildCapacityPlan(status, fixedLDS, dynamicLDS, reservedSpillBytes,
-                           valueBytes, *targetInfo, wavesPerWorkgroup,
-                           limitBytes, usedBytes);
+  return buildCapacityPlan(LDSSpillPlanStatus::Available, fixedLDS, dynamicLDS,
+                           reservedSpillBytes, valueBytes, *targetInfo,
+                           wavesPerWorkgroup, limitBytes, usedBytes);
 }
 
 } // namespace
