@@ -87,6 +87,13 @@
 
 // F16-PERF-ASM-LABEL: wmma_f16_matmul_tiled:
 // F16-PERF-ASM: .Lwmma_f16_matmul_tiled.loop_head_0:
+// F16-PERF-ASM-NOT: s_lshl_b32 {{s[0-9]+}}, {{s[0-9]+}}, 0
+// F16-PERF-ASM-NOT: s_and_b32 {{s[0-9]+}}, {{s[0-9]+}}, 3
+// F16-PERF-ASM-NOT: s_lshl_b32 {{s[0-9]+}}, {{s[0-9]+}}, 15
+// F16-PERF-ASM: s_mov_b32 m0, s{{[0-9]+}}
+// F16-PERF-ASM: buffer_load_dwordx4 {{.*}} lds
+// F16-PERF-ASM: s_mov_b32 m0, s{{[0-9]+}}
+// F16-PERF-ASM: buffer_load_dwordx4 {{.*}} lds
 // F16-PERF-ASM: v_mfma_f32_16x16x32_f16
 // F16-PERF-ASM: s_waitcnt vmcnt(0)
 // F16-PERF-ASM-NEXT: s_barrier

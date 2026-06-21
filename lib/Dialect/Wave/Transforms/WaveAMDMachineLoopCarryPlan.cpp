@@ -636,6 +636,52 @@ snapshotPointerScfCarry(WaveAMDMachineSelector &S, scf::ForOp op,
                                op.getRegionIterArgs()[idx], snap);
 }
 
+static std::optional<bool> indexOffsetCarryFitsU32(WaveAMDMachineSelector &S,
+                                                   Value source) {
+  auto it = S.indexOffsets.find(source);
+  PointerOffset offset;
+  if (it != S.indexOffsets.end()) {
+    offset = it->second;
+  } else if (IndexExprOp indexExpr = source.getDefiningOp<IndexExprOp>()) {
+    FailureOr<PointerOffset> built = makePointerOffset(S, indexExpr);
+    if (failed(built))
+      return std::nullopt;
+    offset = std::move(*built);
+  } else {
+    return std::nullopt;
+  }
+  return !offset.expr || S.slotFitsU32(offset.expr, offset.assumptions);
+}
+
+static bool needsWideImmediateCarry(WaveAMDMachineSelector &S, Value initArg,
+                                    Value yielded) {
+  Type type = initArg.getType();
+  if (type.isIndex()) {
+    if (std::optional<bool> fits = indexOffsetCarryFitsU32(S, initArg))
+      return !*fits;
+    if (std::optional<bool> fits = indexOffsetCarryFitsU32(S, yielded))
+      return !*fits;
+    return true;
+  }
+  if (IntegerType intType = dyn_cast<IntegerType>(type))
+    return intType.getWidth() > 32;
+  if (FloatType floatType = dyn_cast<FloatType>(type))
+    return floatType.getWidth() > 32;
+  if (waveamdmachine::RegType regType = dyn_cast<waveamdmachine::RegType>(type))
+    return regType.getWidth() > 1;
+  return false;
+}
+
+static Value materializeWMCarryInit(WaveAMDMachineSelector &S, scf::ForOp op,
+                                    Value initArg, Value yielded) {
+  Value carry = S.expect(initArg, op);
+  if (!isa<waveamdmachine::ImmType>(carry.getType()))
+    return carry;
+  if (needsWideImmediateCarry(S, initArg, yielded))
+    return ensureSGPR2(S, op.getLoc(), carry);
+  return S.materializeSGPR1(op.getLoc(), carry);
+}
+
 static LogicalResult
 snapshotScfCarries(WaveAMDMachineSelector &S, scf::ForOp op,
                    SmallVectorImpl<CarrySnapshot> &out,
@@ -653,7 +699,7 @@ snapshotScfCarries(WaveAMDMachineSelector &S, scf::ForOp op,
     }
     CarrySnapshot snap;
     snap.kind = CarrySnapshot::Kind::WMValue;
-    snap.carry = S.expect(initArg, op);
+    snap.carry = materializeWMCarryInit(S, op, initArg, yield.getOperand(idx));
     out.push_back(std::move(snap));
   }
   return success();

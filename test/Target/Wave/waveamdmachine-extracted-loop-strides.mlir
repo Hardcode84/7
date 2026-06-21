@@ -1,5 +1,35 @@
 // RUN: wave-opt --wave-extract-loop-strides --canonicalize --cse --waveamd-to-machine --canonicalize --cse %s | FileCheck %s
 
+// CHECK-LABEL: func.func @cyclic_scalar_offset_carry_constant_init
+// CHECK: %[[INIT_IMM:.*]] = waveamdmachine.imm 16384
+// CHECK: %[[INIT:.*]] = waveamdmachine.s_mov_b32_value %[[INIT_IMM]]
+// CHECK: waveamdmachine.uniform_loop
+// CHECK-SAME: carries(%{{.*}}, %[[INIT]] : !waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<sgpr, 1>)
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
+func.func @cyclic_scalar_offset_carry_constant_init(
+    %a: !wave.ptr<#wave.global, i32>)
+    attributes {wave.kernel} {
+  %c0 = arith.constant 0 : i32
+  %c1 = arith.constant 1 : i32
+  %c2 = arith.constant 2 : i32
+  %c8 = arith.constant 8 : i32
+  scf.for %i = %c0 to %c8 step %c1 : i32 {
+    %next = wave.binary addi %i, %c2 : i32, i32 -> i32
+    %off = wave.index_expr <"8192*Mod(i, 4)"> ["i"](%next)
+        : (i32) -> index
+    %p = wave.ptr_add %a, %off
+        : !wave.ptr<#wave.global, i32>, index -> !wave.ptr<#wave.global, i32>
+    %v, %t = wave.load %p
+        : (!wave.ptr<#wave.global, i32>)
+        -> (!wave.simd<i32, 32>, !wave.mem.token)
+    wave.store %v -> %p after %t
+        : (!wave.simd<i32, 32>, !wave.ptr<#wave.global, i32>,
+           !wave.mem.token) -> !wave.mem.token
+  }
+  return
+}
+}
+
 // CHECK-LABEL: func.func @extracted_strided_kloop
 // CHECK: %[[LOOP:.*]]:3 = waveamdmachine.uniform_loop
 // CHECK: ^bb0(%{{.*}}: !waveamdmachine.reg<sgpr, 1>, %[[VOFF:.*]]: !waveamdmachine.reg<vgpr, 1>, %[[BASE:.*]]: !waveamdmachine.reg<sgpr, 2>):

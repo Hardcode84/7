@@ -64,6 +64,34 @@ struct LoopStrideCandidate {
   BoundExpr stride;
 };
 
+struct CyclicOffsetPattern {
+  int64_t scale = 1;
+  int64_t modulus = 0;
+};
+
+struct CyclicOffsetLoopMatch {
+  ExpandedIndexExpr expanded;
+  std::string ivName;
+  CyclicOffsetPattern pattern;
+};
+
+struct CyclicOffsetCarryShape {
+  int64_t increment = 0;
+  int64_t ring = 0;
+};
+
+struct LoopCyclicOffsetCandidate {
+  IndexExprOp indexExpr;
+  SmallVector<Operation *> deadProducers;
+  BoundExpr base;
+  int64_t increment = 0;
+  int64_t ring = 0;
+};
+
+static IndexExprOp createIndexExpr(IRRewriter &rewriter, Location loc,
+                                   MLIRContext *ctx, const BoundExpr &expr,
+                                   IRMapping *map);
+
 static bool isDefinedInside(Operation *scope, Value value) {
   if (Operation *def = value.getDefiningOp())
     return scope->isAncestor(def);
@@ -574,6 +602,218 @@ static FailureOr<BoundExpr> buildStrideExpr(const ExpandedIndexExpr &expanded,
                       extra);
 }
 
+static bool isPowerOfTwo(int64_t value) {
+  return value > 0 && (value & (value - 1)) == 0;
+}
+
+static std::optional<int64_t> matchIVPlusConstant(sym::ExprHandle expr,
+                                                  StringRef ivName) {
+  sym::ExprView view(expr);
+  if (view.getKind() == sym::ExprKind::Symbol && view.getSymbolName() == ivName)
+    return 0;
+
+  if (view.getKind() != sym::ExprKind::Add || view.getAddTermCount() != 1)
+    return std::nullopt;
+
+  std::optional<int64_t> constant =
+      sym::getIntegerLiteralValue(view.getAddConstant());
+  if (!constant)
+    return std::nullopt;
+
+  sym::AddTerm term = view.getAddTerm(0);
+  std::optional<int64_t> coefficient =
+      sym::getIntegerLiteralValue(term.coefficient);
+  if (!coefficient || *coefficient != 1)
+    return std::nullopt;
+
+  sym::ExprView termView(term.term);
+  if (termView.getKind() != sym::ExprKind::Symbol ||
+      termView.getSymbolName() != ivName)
+    return std::nullopt;
+  return *constant;
+}
+
+static std::optional<CyclicOffsetPattern>
+matchScaledModOfIV(sym::ExprHandle modExpr, int64_t scale, StringRef ivName) {
+  if (scale <= 0)
+    return std::nullopt;
+  sym::ExprView view(modExpr);
+  if (view.getKind() != sym::ExprKind::Mod)
+    return std::nullopt;
+  if (!matchIVPlusConstant(view.getBinaryLhs(), ivName))
+    return std::nullopt;
+
+  std::optional<int64_t> modulus =
+      sym::getIntegerLiteralValue(view.getBinaryRhs());
+  if (!modulus || *modulus <= 1)
+    return std::nullopt;
+  if (__int128(scale) * *modulus > std::numeric_limits<int64_t>::max())
+    return std::nullopt;
+
+  CyclicOffsetPattern pattern;
+  pattern.scale = scale;
+  pattern.modulus = *modulus;
+  return pattern;
+}
+
+static FailureOr<sym::ExprHandle>
+scaleExpr(sym::Store &store, sym::ExprHandle expr, int64_t scale) {
+  if (scale == 1)
+    return expr;
+  FailureOr<sym::ExprHandle> coeff = sym::composeExprInt(store, scale);
+  if (failed(coeff))
+    return failure();
+  return sym::composeExprBinary(store, *coeff, sym::ExprBinaryOp::Mul, expr);
+}
+
+static FailureOr<bool>
+baseFitsCyclicUpdate(sym::Store &store, sym::ExprHandle expr,
+                     sym::ExprHandle cyclicTerm, int64_t scale,
+                     StringRef ivName, ArrayRef<sym::PredHandle> assumptions) {
+  FailureOr<sym::ExprHandle> diff =
+      sym::composeExprBinary(store, expr, sym::ExprBinaryOp::Sub, cyclicTerm);
+  if (failed(diff))
+    return failure();
+  FailureOr<sym::ExprHandle> base = simplifyExpanded(store, *diff, assumptions);
+  if (failed(base))
+    return failure();
+  if (hasSymbol(*base, ivName))
+    return false;
+  if (sym::getIntegerLiteralValue(*base) == int64_t{0})
+    return true;
+
+  llvm::DenseSet<StringRef> freeSymbols;
+  collectFreeSymbols(*base, freeSymbols);
+  SmallVector<sym::PredHandle> liveAssumptions =
+      filterIndexExprPredicatesBySymbols(assumptions, freeSymbols);
+  return sym::inferNonNegativeUpperBound(store, *base, liveAssumptions,
+                                         scale - 1)
+      .has_value();
+}
+
+static FailureOr<std::optional<CyclicOffsetPattern>>
+acceptCyclicTerm(sym::Store &store, sym::ExprHandle expr,
+                 sym::ExprHandle cyclicTerm,
+                 std::optional<CyclicOffsetPattern> pattern, StringRef ivName,
+                 ArrayRef<sym::PredHandle> assumptions) {
+  if (!pattern)
+    return std::optional<CyclicOffsetPattern>{};
+  FailureOr<bool> baseOk = baseFitsCyclicUpdate(
+      store, expr, cyclicTerm, pattern->scale, ivName, assumptions);
+  if (failed(baseOk))
+    return failure();
+  if (!*baseOk)
+    return std::optional<CyclicOffsetPattern>{};
+  return pattern;
+}
+
+static FailureOr<std::optional<CyclicOffsetPattern>>
+matchModCyclicOffsetPattern(sym::Store &store, sym::ExprHandle expr,
+                            StringRef ivName,
+                            ArrayRef<sym::PredHandle> assumptions) {
+  return acceptCyclicTerm(store, expr, expr,
+                          matchScaledModOfIV(expr, /*scale=*/1, ivName), ivName,
+                          assumptions);
+}
+
+static FailureOr<std::optional<CyclicOffsetPattern>>
+matchMulCyclicOffsetPattern(sym::Store &store, sym::ExprHandle expr,
+                            StringRef ivName,
+                            ArrayRef<sym::PredHandle> assumptions) {
+  sym::ExprView view(expr);
+  std::optional<int64_t> coefficient =
+      sym::getIntegerLiteralValue(view.getMulCoefficient());
+  if (!coefficient || view.getMulFactorCount() != 1)
+    return std::optional<CyclicOffsetPattern>{};
+
+  sym::MulFactor factor = view.getMulFactor(0);
+  if (factor.exponent != 1)
+    return std::optional<CyclicOffsetPattern>{};
+  return acceptCyclicTerm(store, expr, expr,
+                          matchScaledModOfIV(factor.base, *coefficient, ivName),
+                          ivName, assumptions);
+}
+
+static FailureOr<std::optional<CyclicOffsetPattern>>
+matchAddCyclicOffsetTerm(sym::Store &store, sym::ExprHandle expr,
+                         sym::AddTerm term, StringRef ivName,
+                         ArrayRef<sym::PredHandle> assumptions) {
+  std::optional<int64_t> coefficient =
+      sym::getIntegerLiteralValue(term.coefficient);
+  if (!coefficient)
+    return std::optional<CyclicOffsetPattern>{};
+  std::optional<CyclicOffsetPattern> pattern =
+      matchScaledModOfIV(term.term, *coefficient, ivName);
+  if (!pattern)
+    return std::optional<CyclicOffsetPattern>{};
+  FailureOr<sym::ExprHandle> cyclicTerm =
+      scaleExpr(store, term.term, pattern->scale);
+  if (failed(cyclicTerm))
+    return failure();
+  return acceptCyclicTerm(store, expr, *cyclicTerm, pattern, ivName,
+                          assumptions);
+}
+
+static FailureOr<std::optional<CyclicOffsetPattern>>
+matchAddCyclicOffsetPattern(sym::Store &store, sym::ExprHandle expr,
+                            StringRef ivName,
+                            ArrayRef<sym::PredHandle> assumptions) {
+  sym::ExprView view(expr);
+  for (uint32_t i : llvm::seq<uint32_t>(0, view.getAddTermCount())) {
+    FailureOr<std::optional<CyclicOffsetPattern>> pattern =
+        matchAddCyclicOffsetTerm(store, expr, view.getAddTerm(i), ivName,
+                                 assumptions);
+    if (failed(pattern))
+      return failure();
+    if (*pattern)
+      return *pattern;
+  }
+  return std::optional<CyclicOffsetPattern>{};
+}
+
+static FailureOr<std::optional<CyclicOffsetPattern>>
+matchCyclicOffsetPattern(sym::Store &store, sym::ExprHandle expr,
+                         StringRef ivName,
+                         ArrayRef<sym::PredHandle> assumptions) {
+  sym::ExprView view(expr);
+  if (view.getKind() == sym::ExprKind::Mod)
+    return matchModCyclicOffsetPattern(store, expr, ivName, assumptions);
+  if (view.getKind() == sym::ExprKind::Mul)
+    return matchMulCyclicOffsetPattern(store, expr, ivName, assumptions);
+  if (view.getKind() == sym::ExprKind::Add)
+    return matchAddCyclicOffsetPattern(store, expr, ivName, assumptions);
+  return std::optional<CyclicOffsetPattern>{};
+}
+
+static FailureOr<Value>
+createCyclicOffsetUpdate(IRRewriter &rewriter, Location loc, MLIRContext *ctx,
+                         sym::Store &store, Value current, int64_t increment,
+                         int64_t ring) {
+  FailureOr<sym::ExprHandle> offset = sym::composeExprSym(store, "offset");
+  FailureOr<sym::ExprHandle> step = sym::composeExprInt(store, increment);
+  FailureOr<sym::ExprHandle> ringExpr = sym::composeExprInt(store, ring);
+  if (failed(offset) || failed(step) || failed(ringExpr))
+    return failure();
+
+  FailureOr<sym::ExprHandle> sum =
+      sym::composeExprBinary(store, *offset, sym::ExprBinaryOp::Add, *step);
+  if (failed(sum))
+    return failure();
+  FailureOr<sym::ExprHandle> wrapped =
+      sym::composeExprBinary(store, *sum, sym::ExprBinaryOp::Mod, *ringExpr);
+  if (failed(wrapped))
+    return failure();
+  FailureOr<sym::ExprHandle> simplified = simplifyExpanded(store, *wrapped, {});
+  if (failed(simplified))
+    return failure();
+
+  BoundExpr update;
+  update.expr = *simplified;
+  update.names.push_back("offset");
+  update.bindings.push_back(current);
+  return createIndexExpr(rewriter, loc, ctx, update, nullptr).getResult();
+}
+
 static std::optional<std::string> findIVBinding(const ExpandedIndexExpr &expr,
                                                 Value iv) {
   for (auto [name, binding] : llvm::zip(expr.names, expr.bindings))
@@ -683,6 +923,100 @@ static LogicalResult buildCandidate(scf::ForOp loop, PtrAddOp ptrAdd,
   return success();
 }
 
+static bool canRewriteCyclicOffsetInLoop(scf::ForOp loop,
+                                         IndexExprOp indexExpr) {
+  if (!isImmediateBodyOp(loop, indexExpr))
+    return false;
+  if (indexExpr->use_empty())
+    return false;
+  return indexExpr.getResult().getType().isIndex();
+}
+
+static FailureOr<std::optional<CyclicOffsetLoopMatch>>
+matchCyclicOffsetInLoop(scf::ForOp loop, IndexExprOp indexExpr,
+                        sym::Store &store, DataFlowSolver &solver) {
+  FailureOr<ExpandedIndexExpr> expanded =
+      expandIndexExpr(indexExpr, loop, store, solver);
+  if (failed(expanded))
+    return failure();
+  std::optional<std::string> ivName =
+      findIVBinding(*expanded, loop.getInductionVar());
+  if (!ivName)
+    return std::optional<CyclicOffsetLoopMatch>{};
+  if (hasLoopLocalNonIVBinding(loop, *expanded))
+    return std::optional<CyclicOffsetLoopMatch>{};
+
+  FailureOr<std::optional<CyclicOffsetPattern>> pattern =
+      matchCyclicOffsetPattern(store, expanded->expr, *ivName,
+                               expanded->assumptions);
+  if (failed(pattern))
+    return failure();
+  if (!*pattern)
+    return std::optional<CyclicOffsetLoopMatch>{};
+
+  CyclicOffsetLoopMatch match;
+  match.expanded = std::move(*expanded);
+  match.ivName = std::move(*ivName);
+  match.pattern = **pattern;
+  return std::optional<CyclicOffsetLoopMatch>(std::move(match));
+}
+
+static std::optional<CyclicOffsetCarryShape>
+computeCyclicOffsetCarryShape(scf::ForOp loop, CyclicOffsetPattern pattern) {
+  std::optional<int64_t> step = getConstantIntValue(loop.getStep());
+  if (!step || *step <= 0)
+    return std::nullopt;
+  __int128 increment = __int128(pattern.scale) * *step;
+  __int128 ring = __int128(pattern.scale) * pattern.modulus;
+  if (increment <= 0 || increment > std::numeric_limits<int64_t>::max() ||
+      ring > std::numeric_limits<int64_t>::max())
+    return std::nullopt;
+
+  CyclicOffsetCarryShape shape;
+  shape.increment = static_cast<int64_t>(increment);
+  shape.ring = static_cast<int64_t>(ring);
+  if (!isPowerOfTwo(shape.ring))
+    return std::nullopt;
+  return shape;
+}
+
+static LogicalResult
+buildCyclicOffsetCandidate(scf::ForOp loop, IndexExprOp indexExpr,
+                           sym::Store &store, DataFlowSolver &solver,
+                           LoopCyclicOffsetCandidate &candidate,
+                           bool &matched) {
+  matched = false;
+  if (!canRewriteCyclicOffsetInLoop(loop, indexExpr))
+    return success();
+
+  FailureOr<std::optional<CyclicOffsetLoopMatch>> match =
+      matchCyclicOffsetInLoop(loop, indexExpr, store, solver);
+  if (failed(match))
+    return failure();
+  if (!*match)
+    return success();
+
+  CyclicOffsetLoopMatch &cyclic = **match;
+  std::optional<CyclicOffsetCarryShape> shape =
+      computeCyclicOffsetCarryShape(loop, cyclic.pattern);
+  if (!shape)
+    return success();
+
+  FailureOr<BoundExpr> base =
+      buildBaseExpr(cyclic.expanded, cyclic.ivName, loop, store);
+  if (failed(base))
+    return success();
+
+  candidate.indexExpr = indexExpr;
+  collectDeadProducers(loop, indexExpr, cyclic.expanded.producers,
+                       candidate.deadProducers);
+  candidate.base = std::move(*base);
+  candidate.increment = shape->increment;
+  candidate.ring = shape->ring;
+  matched = true;
+  return success();
+}
+
 static FailureOr<std::optional<LoopStrideCandidate>>
 findCandidate(scf::ForOp loop, sym::Store &store, DataFlowSolver &solver) {
   for (Operation &op : loop.getBody()->without_terminator()) {
@@ -697,6 +1031,24 @@ findCandidate(scf::ForOp loop, sym::Store &store, DataFlowSolver &solver) {
       return std::optional<LoopStrideCandidate>(std::move(candidate));
   }
   return std::optional<LoopStrideCandidate>{};
+}
+
+static FailureOr<std::optional<LoopCyclicOffsetCandidate>>
+findCyclicOffsetCandidate(scf::ForOp loop, sym::Store &store,
+                          DataFlowSolver &solver) {
+  for (Operation &op : loop.getBody()->without_terminator()) {
+    IndexExprOp indexExpr = dyn_cast<IndexExprOp>(&op);
+    if (!indexExpr)
+      continue;
+    LoopCyclicOffsetCandidate candidate;
+    bool matched = false;
+    if (failed(buildCyclicOffsetCandidate(loop, indexExpr, store, solver,
+                                          candidate, matched)))
+      return failure();
+    if (matched)
+      return std::optional<LoopCyclicOffsetCandidate>(std::move(candidate));
+  }
+  return std::optional<LoopCyclicOffsetCandidate>{};
 }
 
 static bool isScalarOffset(Type type) {
@@ -789,6 +1141,44 @@ static LogicalResult cloneBodyWithCarriedPointer(IRRewriter &rewriter,
   return success();
 }
 
+static LogicalResult cloneBodyWithCarriedCyclicOffset(
+    IRRewriter &rewriter, scf::ForOp src, scf::ForOp dst,
+    LoopCyclicOffsetCandidate candidate, sym::Store &store) {
+  Block &srcBody = *src.getBody();
+  Block &dstBody = *dst.getBody();
+  Value offsetCarry = dstBody.getArgument(srcBody.getNumArguments());
+
+  IRMapping map;
+  map.map(srcBody.getArgument(0), dstBody.getArgument(0));
+  for (auto [oldArg, newArg] :
+       llvm::zip(src.getRegionIterArgs(), dst.getRegionIterArgs().drop_back()))
+    map.map(oldArg, newArg);
+  map.map(candidate.indexExpr.getResult(), offsetCarry);
+
+  rewriter.setInsertionPointToStart(&dstBody);
+  for (Operation &op : srcBody.without_terminator()) {
+    if (&op == candidate.indexExpr.getOperation())
+      continue;
+    if (llvm::is_contained(candidate.deadProducers, &op))
+      continue;
+    rewriter.clone(op, map);
+  }
+
+  SmallVector<Value> yielded;
+  scf::YieldOp srcYield = cast<scf::YieldOp>(srcBody.getTerminator());
+  for (Value value : srcYield.getOperands())
+    yielded.push_back(map.lookupOrDefault(value));
+
+  FailureOr<Value> nextOffset = createCyclicOffsetUpdate(
+      rewriter, candidate.indexExpr.getLoc(), src->getContext(), store,
+      offsetCarry, candidate.increment, candidate.ring);
+  if (failed(nextOffset))
+    return failure();
+  yielded.push_back(*nextOffset);
+  scf::YieldOp::create(rewriter, srcYield.getLoc(), yielded);
+  return success();
+}
+
 static void copyLoopAttrs(scf::ForOp src, scf::ForOp dst) {
   for (NamedAttribute attr : src->getAttrs())
     dst->setAttr(attr.getName(), attr.getValue());
@@ -824,6 +1214,30 @@ static LogicalResult rewriteLoop(IRRewriter &rewriter, scf::ForOp loop,
   return success();
 }
 
+static LogicalResult rewriteLoop(IRRewriter &rewriter, scf::ForOp loop,
+                                 LoopCyclicOffsetCandidate candidate,
+                                 sym::Store &store) {
+  Location loc = loop.getLoc();
+  rewriter.setInsertionPoint(loop);
+  IndexExprOp base = createIndexExpr(rewriter, candidate.indexExpr.getLoc(),
+                                     loop->getContext(), candidate.base);
+
+  SmallVector<Value> initArgs(loop.getInitArgs().begin(),
+                              loop.getInitArgs().end());
+  initArgs.push_back(base.getResult());
+  scf::ForOp newLoop =
+      scf::ForOp::create(rewriter, loc, loop.getLowerBound(),
+                         loop.getUpperBound(), loop.getStep(), initArgs);
+  copyLoopAttrs(loop, newLoop);
+  if (failed(cloneBodyWithCarriedCyclicOffset(rewriter, loop, newLoop,
+                                              candidate, store)))
+    return failure();
+
+  rewriter.replaceOp(loop,
+                     newLoop.getResults().take_front(loop.getNumResults()));
+  return success();
+}
+
 static FailureOr<bool> rewriteOneLoop(IRRewriter &rewriter, scf::ForOp loop,
                                       sym::Store &store,
                                       DataFlowSolver &solver) {
@@ -834,6 +1248,21 @@ static FailureOr<bool> rewriteOneLoop(IRRewriter &rewriter, scf::ForOp loop,
   if (!*candidate)
     return false;
   if (failed(rewriteLoop(rewriter, loop, **candidate)))
+    return failure();
+  return true;
+}
+
+static FailureOr<bool> rewriteOneCyclicOffset(IRRewriter &rewriter,
+                                              scf::ForOp loop,
+                                              sym::Store &store,
+                                              DataFlowSolver &solver) {
+  FailureOr<std::optional<LoopCyclicOffsetCandidate>> candidate =
+      findCyclicOffsetCandidate(loop, store, solver);
+  if (failed(candidate))
+    return failure();
+  if (!*candidate)
+    return false;
+  if (failed(rewriteLoop(rewriter, loop, **candidate, store)))
     return failure();
   return true;
 }
@@ -864,6 +1293,9 @@ struct WaveExtractLoopStridesPass
       WalkResult result = root->walk([&](scf::ForOp loop) {
         FailureOr<bool> rewritten =
             rewriteOneLoop(rewriter, loop, dialect->getSymbolStore(), solver);
+        if (succeeded(rewritten) && !*rewritten)
+          rewritten = rewriteOneCyclicOffset(rewriter, loop,
+                                             dialect->getSymbolStore(), solver);
         if (failed(rewritten)) {
           signalPassFailure();
           return WalkResult::interrupt();

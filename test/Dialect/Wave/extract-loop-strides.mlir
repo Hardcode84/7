@@ -224,6 +224,74 @@ func.func @extract_shared_pointer_carry(%lds: !wave.ptr<#wave.shared, i8>,
 
 // -----
 
+// CHECK-LABEL: func.func @extract_cyclic_offset_carry
+// CHECK: %[[BASE_B:.*]] = wave.ptr_add %arg0, %{{.*}} : !wave.ptr<#wave.global, i32>, i32 -> !wave.ptr<#wave.global, i32>
+// CHECK: %[[INIT:.*]] = wave.index_expr <"16384"> []() : () -> index
+// CHECK: scf.for %[[IV:.*]] = {{.*}} iter_args(%[[OFF:.*]] = %[[INIT]])
+// CHECK-NOT: wave.index_expr <"8192*Mod
+// CHECK: wave.ptr_add %arg0, %[[OFF]]
+// CHECK: wave.ptr_add %[[BASE_B]], %[[OFF]]
+// CHECK: %[[NEXT:.*]] = wave.index_expr <"Mod(8192 + offset, 32768)"> ["offset"](%[[OFF]]) : (index) -> index
+// CHECK: scf.yield %[[NEXT]]
+func.func @extract_cyclic_offset_carry(%a: !wave.ptr<#wave.global, i32>)
+    attributes {wave.kernel} {
+  %c0 = arith.constant 0 : i32
+  %c1 = arith.constant 1 : i32
+  %c2 = arith.constant 2 : i32
+  %c8 = arith.constant 8 : i32
+  %c4096 = arith.constant 4096 : i32
+  %b = wave.ptr_add %a, %c4096
+      : !wave.ptr<#wave.global, i32>, i32 -> !wave.ptr<#wave.global, i32>
+  scf.for %i = %c0 to %c8 step %c1 : i32 {
+    %next = wave.binary addi %i, %c2 : i32, i32 -> i32
+    %off = wave.index_expr <"8192*Mod(i, 4)"> ["i"](%next)
+        : (i32) -> index
+    %ap = wave.ptr_add %a, %off
+        : !wave.ptr<#wave.global, i32>, index -> !wave.ptr<#wave.global, i32>
+    %bp = wave.ptr_add %b, %off
+        : !wave.ptr<#wave.global, i32>, index -> !wave.ptr<#wave.global, i32>
+    %av, %at = wave.load %ap
+        : (!wave.ptr<#wave.global, i32>) -> (!wave.simd<i32, 32>, !wave.mem.token)
+    %bv, %bt = wave.load %bp
+        : (!wave.ptr<#wave.global, i32>) -> (!wave.simd<i32, 32>, !wave.mem.token)
+  }
+  return
+}
+
+// -----
+
+// CHECK-LABEL: func.func @extract_cyclic_offset_with_invariant_base
+// CHECK: %[[W:.*]] = wave.assume
+// CHECK: %[[INIT:.*]] = wave.index_expr <"65536 + 1024*w"> {{.*}}["w"](%[[W]]) : (i32) -> index
+// CHECK: scf.for %[[IV:.*]] = {{.*}} iter_args(%[[OFF:.*]] = %[[INIT]])
+// CHECK-NOT: wave.index_expr <"1024*w + 32768*Mod
+// CHECK: wave.ptr_add %arg0, %[[OFF]]
+// CHECK: %[[NEXT:.*]] = wave.index_expr <"Mod(32768 + offset, 131072)"> ["offset"](%[[OFF]]) : (index) -> index
+// CHECK: scf.yield %[[NEXT]]
+func.func @extract_cyclic_offset_with_invariant_base(
+    %a: !wave.ptr<#wave.global, i32>, %wave_raw: i32)
+    attributes {wave.kernel} {
+  %c0 = arith.constant 0 : i32
+  %c1 = arith.constant 1 : i32
+  %c2 = arith.constant 2 : i32
+  %c8 = arith.constant 8 : i32
+  %wave = wave.assume %wave_raw as "w"
+      [#wave.pred<"w >= 0">, #wave.pred<"w <= 15">] : i32
+  scf.for %i = %c0 to %c8 step %c1 : i32 {
+    %next = wave.binary addi %i, %c2 : i32, i32 -> i32
+    %off = wave.index_expr <"1024*w + 32768*Mod(i, 4)">
+        assuming [#wave.pred<"w >= 0">, #wave.pred<"w <= 15">]
+        ["w", "i"](%wave, %next) : (i32, i32) -> index
+    %p = wave.ptr_add %a, %off
+        : !wave.ptr<#wave.global, i32>, index -> !wave.ptr<#wave.global, i32>
+    %v, %t = wave.load %p
+        : (!wave.ptr<#wave.global, i32>) -> (!wave.simd<i32, 32>, !wave.mem.token)
+  }
+  return
+}
+
+// -----
+
 // CHECK-LABEL: func.func @reject_nonlinear
 // CHECK: scf.for
 // CHECK-NOT: iter_args

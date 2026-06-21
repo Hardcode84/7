@@ -523,6 +523,8 @@ static FailureOr<Value> scaleVOffset(WaveAMDMachineSelector &S, Location loc,
                                      Value value, unsigned size) {
   if (!value)
     return Value{};
+  if (size == 1)
+    return extractLowDword(S, loc, value);
   std::optional<int64_t> imm = S.getImmediateValue(value);
   if (imm) {
     std::optional<int64_t> scaled =
@@ -549,6 +551,8 @@ static FailureOr<Value> scaleSOffset(WaveAMDMachineSelector &S, Location loc,
                                      Value value, unsigned size) {
   if (!value)
     return Value{};
+  if (size == 1)
+    return extractLowDword(S, loc, value);
   std::optional<int64_t> imm = S.getImmediateValue(value);
   if (imm) {
     std::optional<int64_t> scaled =
