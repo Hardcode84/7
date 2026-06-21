@@ -332,6 +332,7 @@ public:
 protected:
   void printExtra(llvm::raw_ostream &os) const override {
     LDSSpillPlan firstPlan = getPlan();
+    os << ", reg_class=" << getRegClassName(group->storageClass);
     os << ", slot_base=" << firstPlan.slotBase
        << ", slot_bytes=" << getTotalSlotBytes(valueSlots)
        << ", uses=" << getUseCount();
@@ -340,6 +341,8 @@ protected:
   void setExtraDiagnosticAttrs(Builder &builder,
                                NamedAttrList &attrs) const override {
     LDSSpillPlan firstPlan = getPlan();
+    attrs.set("reg_class",
+              builder.getStringAttr(getRegClassName(group->storageClass)));
     attrs.set("slot_base", builder.getI64IntegerAttr(firstPlan.slotBase));
     attrs.set("slot_bytes",
               builder.getI64IntegerAttr(getTotalSlotBytes(valueSlots)));

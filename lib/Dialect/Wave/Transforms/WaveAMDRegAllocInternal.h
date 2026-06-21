@@ -48,6 +48,16 @@ inline constexpr llvm::StringLiteral kMemorySpillLoopCarryReject = "loop_carry";
 
 struct IntervalGroup;
 
+inline StringRef getRegClassName(waveamdmachine::RegClass regClass) {
+  if (regClass == waveamdmachine::RegClass::SGPR)
+    return "SGPR";
+  if (regClass == waveamdmachine::RegClass::VGPR)
+    return "VGPR";
+  if (regClass == waveamdmachine::RegClass::AGPR)
+    return "AGPR";
+  return "";
+}
+
 struct Interval {
   llvm::SmallDenseSet<Value, 1> values;
   IntervalGroup *group = nullptr;

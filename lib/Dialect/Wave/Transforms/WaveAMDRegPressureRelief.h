@@ -86,9 +86,11 @@ public:
   reducesPressureFailure(const WaveAMDPressureFailure &failure) const;
 
   bool isLegal() const;
-  virtual void print(llvm::raw_ostream &os, bool selected = false) const;
-  virtual DictionaryAttr getDiagnosticAttr(Builder &builder,
-                                           bool selected = false) const;
+  virtual void print(llvm::raw_ostream &os, bool selected = false,
+                     const WaveAMDPressureFailure *failure = nullptr) const;
+  virtual DictionaryAttr
+  getDiagnosticAttr(Builder &builder, bool selected = false,
+                    const WaveAMDPressureFailure *failure = nullptr) const;
 
 protected:
   virtual void printExtra(llvm::raw_ostream &os) const;
@@ -148,10 +150,12 @@ formatWaveAMDPressureIntervals(ArrayRef<WaveAMDPressureIntervalRef> intervals);
 std::string
 formatWaveAMDPressureReliefCost(const WaveAMDPressureReliefCost &cost);
 std::string formatWaveAMDPressureReliefCandidate(
-    const WaveAMDPressureReliefCandidate &candidate, bool selected = false);
+    const WaveAMDPressureReliefCandidate &candidate, bool selected = false,
+    const WaveAMDPressureFailure *failure = nullptr);
 std::string formatWaveAMDPressureReliefCandidates(
     ArrayRef<std::unique_ptr<WaveAMDPressureReliefCandidate>> candidates,
-    std::optional<unsigned> selected = std::nullopt);
+    std::optional<unsigned> selected = std::nullopt,
+    const WaveAMDPressureFailure *failure = nullptr);
 DictionaryAttr
 getWaveAMDPressureIntervalAttr(Builder &builder,
                                const WaveAMDPressureIntervalRef &interval);
@@ -160,7 +164,8 @@ ArrayAttr getWaveAMDPressureIntervalArrayAttr(
 ArrayAttr getWaveAMDPressureReliefCandidateArrayAttr(
     Builder &builder,
     ArrayRef<std::unique_ptr<WaveAMDPressureReliefCandidate>> candidates,
-    std::optional<unsigned> selected = std::nullopt);
+    std::optional<unsigned> selected = std::nullopt,
+    const WaveAMDPressureFailure *failure = nullptr);
 
 } // namespace wave
 } // namespace mlir

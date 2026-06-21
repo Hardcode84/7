@@ -2206,7 +2206,8 @@ formatPressureReliefProviders(ArrayRef<PressureReliefProviderState> providers) {
 
 static std::string formatPressureReliefCandidates(
     ArrayRef<PressureReliefProviderState> providers,
-    std::optional<PressureReliefCandidateRef> selected) {
+    std::optional<PressureReliefCandidateRef> selected,
+    const PressureFailure *failure) {
   std::string out;
   llvm::raw_string_ostream os(out);
   os << "[";
@@ -2217,23 +2218,26 @@ static std::string formatPressureReliefCandidates(
         os << ", ";
       first = false;
       candidate->print(
-          os, isSelectedPressureReliefCandidate(state, index, selected));
+          os, isSelectedPressureReliefCandidate(state, index, selected),
+          failure);
     }
   }
   os << "]";
   return out;
 }
 
-static void setPressureReliefDiagnostics(
-    func::FuncOp func, ArrayRef<PressureReliefProviderState> providers,
-    std::optional<PressureReliefCandidateRef> selected) {
+static void
+setPressureReliefDiagnostics(func::FuncOp func,
+                             ArrayRef<PressureReliefProviderState> providers,
+                             std::optional<PressureReliefCandidateRef> selected,
+                             const PressureFailure *failure) {
   Builder builder(func.getContext());
   func->setAttr(
       kPressureReliefProvidersAttr,
       builder.getStringAttr(formatPressureReliefProviders(providers)));
   func->setAttr(kPressureReliefCandidatesAttr,
-                builder.getStringAttr(
-                    formatPressureReliefCandidates(providers, selected)));
+                builder.getStringAttr(formatPressureReliefCandidates(
+                    providers, selected, failure)));
 }
 
 static void clearPressureReliefDiagnostics(func::FuncOp func) {
@@ -2363,7 +2367,7 @@ applyPressureRelief(func::FuncOp func, Inventory &inventory,
 
   std::optional<PressureReliefCandidateRef> selected =
       selectPressureReliefCandidate(candidates, pressureFailure);
-  setPressureReliefDiagnostics(func, providers, selected);
+  setPressureReliefDiagnostics(func, providers, selected, pressureFailure);
   if (!selected) {
     notifyNoPressureReliefCandidate(providers);
     if (includeMemorySpill)

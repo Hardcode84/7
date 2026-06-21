@@ -35,21 +35,25 @@ bool WaveAMDPressureReliefCandidate::reducesPressureFailure(
   return getReliefDwords() != 0;
 }
 
-void WaveAMDPressureReliefCandidate::print(llvm::raw_ostream &os,
-                                           bool selected) const {
+void WaveAMDPressureReliefCandidate::print(
+    llvm::raw_ostream &os, bool selected,
+    const WaveAMDPressureFailure *failure) const {
   os << "{provider=" << getProviderName() << ", relief=" << getReliefDwords()
      << ", cost=" << formatWaveAMDPressureReliefCost(getCost());
   if (std::optional<StringRef> reason = getRejectReason())
     os << ", reject=" << *reason;
+  if (failure)
+    os << ", reduces_failure="
+       << (reducesPressureFailure(*failure) ? "true" : "false");
   printExtra(os);
   if (selected)
     os << ", selected";
   os << "}";
 }
 
-DictionaryAttr
-WaveAMDPressureReliefCandidate::getDiagnosticAttr(Builder &builder,
-                                                  bool selected) const {
+DictionaryAttr WaveAMDPressureReliefCandidate::getDiagnosticAttr(
+    Builder &builder, bool selected,
+    const WaveAMDPressureFailure *failure) const {
   NamedAttrList attrs;
   attrs.set("cost",
             builder.getStringAttr(formatWaveAMDPressureReliefCost(getCost())));
@@ -57,6 +61,9 @@ WaveAMDPressureReliefCandidate::getDiagnosticAttr(Builder &builder,
   attrs.set("provider", builder.getStringAttr(getProviderName()));
   if (std::optional<StringRef> reason = getRejectReason())
     attrs.set("reject_reason", builder.getStringAttr(*reason));
+  if (failure)
+    attrs.set("reduces_failure",
+              builder.getBoolAttr(reducesPressureFailure(*failure)));
   attrs.set("relief_dwords", builder.getI64IntegerAttr(getReliefDwords()));
   if (selected)
     attrs.set("selected", builder.getBoolAttr(true));
@@ -174,23 +181,24 @@ formatWaveAMDPressureReliefCost(const WaveAMDPressureReliefCost &cost) {
 }
 
 std::string formatWaveAMDPressureReliefCandidate(
-    const WaveAMDPressureReliefCandidate &candidate, bool selected) {
+    const WaveAMDPressureReliefCandidate &candidate, bool selected,
+    const WaveAMDPressureFailure *failure) {
   std::string out;
   llvm::raw_string_ostream os(out);
-  candidate.print(os, selected);
+  candidate.print(os, selected, failure);
   return out;
 }
 
 std::string formatWaveAMDPressureReliefCandidates(
     ArrayRef<std::unique_ptr<WaveAMDPressureReliefCandidate>> candidates,
-    std::optional<unsigned> selected) {
+    std::optional<unsigned> selected, const WaveAMDPressureFailure *failure) {
   std::string out;
   llvm::raw_string_ostream os(out);
   os << "[";
   llvm::interleaveComma(
       llvm::seq<size_t>(0, candidates.size()), os, [&](size_t index) {
         os << formatWaveAMDPressureReliefCandidate(
-            *candidates[index], selected && *selected == index);
+            *candidates[index], selected && *selected == index, failure);
       });
   os << "]";
   return out;
@@ -223,11 +231,11 @@ ArrayAttr getWaveAMDPressureIntervalArrayAttr(
 ArrayAttr getWaveAMDPressureReliefCandidateArrayAttr(
     Builder &builder,
     ArrayRef<std::unique_ptr<WaveAMDPressureReliefCandidate>> candidates,
-    std::optional<unsigned> selected) {
+    std::optional<unsigned> selected, const WaveAMDPressureFailure *failure) {
   SmallVector<Attribute> attrs;
   for (auto [index, candidate] : llvm::enumerate(candidates))
-    attrs.push_back(
-        candidate->getDiagnosticAttr(builder, selected && *selected == index));
+    attrs.push_back(candidate->getDiagnosticAttr(
+        builder, selected && *selected == index, failure));
   return builder.getArrayAttr(attrs);
 }
 

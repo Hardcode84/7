@@ -20,6 +20,14 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 // REMARK: starts_at_pressure: '1'
 // REMARK: total:           '1'
 
+// REMARK: Name:            regalloc-pressure-failure
+// REMARK: Function:        combined_pressure_reports_nonreducing_agpr_spill
+// REMARK: required_relief: '1'
+// REMARK: combined_vgpr_agpr: 'true'
+// REMARK: pressure_relief_providers: '{{.*}}provider=scratch-spill, candidates=1{{.*}}'
+// REMARK: pressure_relief_candidates: '{{.*}}provider=scratch-spill{{.*}}reduces_failure=false{{.*}}reg_class=AGPR{{.*}}'
+// REMARK: temp:            '9'
+
 // CHECK-LABEL: func.func @combined_pressure_rejects_cheap_expr_spill
 // CHECK-SAME: waveamdmachine.regalloc_overflowed = 1 : i64
 // CHECK-NOT: waveamdmachine.lds_spill_bytes
@@ -389,6 +397,192 @@ func.func @combined_pressure_spills_agpr_temp()
       : (!waveamdmachine.reg<agpr, 4>, !waveamdmachine.reg<agpr, 4>,
          !waveamdmachine.reg<vgpr, 4>) -> !waveamdmachine.reg<vgpr, 4>
   %mfma4 = waveamdmachine.mfma_f32_16x16x32_f16 %ag8, %ag9, %mfma3
+      : (!waveamdmachine.reg<agpr, 4>, !waveamdmachine.reg<agpr, 4>,
+         !waveamdmachine.reg<vgpr, 4>) -> !waveamdmachine.reg<vgpr, 4>
+  waveamdmachine.s_endpgm
+  return
+}
+
+func.func @combined_pressure_reports_nonreducing_agpr_spill()
+    attributes {wave.kernel, waveamdmachine.target_waves = 8 : i64} {
+  %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+  %ag0 = waveamdmachine.uninit : !waveamdmachine.reg<agpr, 4>
+  %ag1 = waveamdmachine.uninit : !waveamdmachine.reg<agpr, 4>
+  %ag2 = waveamdmachine.uninit : !waveamdmachine.reg<agpr, 4>
+  %ag3 = waveamdmachine.uninit : !waveamdmachine.reg<agpr, 4>
+  %ag4 = waveamdmachine.uninit : !waveamdmachine.reg<agpr, 4>
+  %ag5 = waveamdmachine.uninit : !waveamdmachine.reg<agpr, 4>
+  %ag6 = waveamdmachine.uninit : !waveamdmachine.reg<agpr, 4>
+  %ag7 = waveamdmachine.uninit : !waveamdmachine.reg<agpr, 4>
+  %ag8 = waveamdmachine.uninit : !waveamdmachine.reg<agpr, 4>
+  %ag9 = waveamdmachine.uninit : !waveamdmachine.reg<agpr, 4>
+  %ag10 = waveamdmachine.uninit : !waveamdmachine.reg<agpr, 4>
+  %ag11 = waveamdmachine.uninit : !waveamdmachine.reg<agpr, 4>
+  %ag12 = waveamdmachine.uninit : !waveamdmachine.reg<agpr, 4>
+  %ag_tail = waveamdmachine.uninit : !waveamdmachine.reg<agpr, 3>
+  %src = waveamdmachine.v_mov_b32_tuple %zero
+      {registers = 1 : i64, waveamdmachine.regalloc_debug_temp}
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
+  %ag_spill = waveamdmachine.v_accvgpr_write_b32_tuple %src
+      {waveamdmachine.regalloc_debug_temp}
+      : (!waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<agpr, 1>
+  %v0 = waveamdmachine.v_mov_b32_tuple %zero
+      {registers = 1 : i64, waveamdmachine.regalloc_debug_temp}
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
+  %v1 = waveamdmachine.v_mov_b32_tuple %zero
+      {registers = 1 : i64, waveamdmachine.regalloc_debug_temp}
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
+  %v2 = waveamdmachine.v_mov_b32_tuple %zero
+      {registers = 1 : i64, waveamdmachine.regalloc_debug_temp}
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
+  %v3 = waveamdmachine.v_mov_b32_tuple %zero
+      {registers = 1 : i64, waveamdmachine.regalloc_debug_temp}
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
+  %v4 = waveamdmachine.v_mov_b32_tuple %zero
+      {registers = 1 : i64, waveamdmachine.regalloc_debug_temp}
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
+  %v5 = waveamdmachine.v_mov_b32_tuple %zero
+      {registers = 1 : i64, waveamdmachine.regalloc_debug_temp}
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
+  %v6 = waveamdmachine.v_mov_b32_tuple %zero
+      {registers = 1 : i64, waveamdmachine.regalloc_debug_temp}
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
+  %v7 = waveamdmachine.v_mov_b32_tuple %zero
+      {registers = 1 : i64, waveamdmachine.regalloc_debug_temp}
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
+  %v8 = waveamdmachine.v_mov_b32_tuple %zero
+      {registers = 1 : i64, waveamdmachine.regalloc_debug_temp}
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
+  %v9 = waveamdmachine.v_mov_b32_tuple %zero
+      {registers = 1 : i64, waveamdmachine.regalloc_debug_temp}
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
+  %v10 = waveamdmachine.v_mov_b32_tuple %zero
+      {registers = 1 : i64, waveamdmachine.regalloc_debug_temp}
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
+  %v11 = waveamdmachine.v_mov_b32_tuple %zero
+      {registers = 1 : i64, waveamdmachine.regalloc_debug_temp}
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
+  %v12 = waveamdmachine.v_mov_b32_tuple %zero
+      {registers = 1 : i64, waveamdmachine.regalloc_debug_temp}
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
+  %v13 = waveamdmachine.v_mov_b32_tuple %zero
+      {registers = 1 : i64, waveamdmachine.regalloc_debug_temp}
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
+  %v14 = waveamdmachine.v_mov_b32_tuple %zero
+      {registers = 1 : i64, waveamdmachine.regalloc_debug_temp}
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
+  %v15 = waveamdmachine.v_mov_b32_tuple %zero
+      {registers = 1 : i64, waveamdmachine.regalloc_debug_temp}
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
+  %v16 = waveamdmachine.v_mov_b32_tuple %zero
+      {registers = 1 : i64, waveamdmachine.regalloc_debug_temp}
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
+  %v17 = waveamdmachine.v_mov_b32_tuple %zero
+      {registers = 1 : i64, waveamdmachine.regalloc_debug_temp}
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
+  %v18 = waveamdmachine.v_mov_b32_tuple %zero
+      {registers = 1 : i64, waveamdmachine.regalloc_debug_temp}
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
+  %v19 = waveamdmachine.v_mov_b32_tuple %zero
+      {registers = 1 : i64, waveamdmachine.regalloc_debug_temp}
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
+  %v20 = waveamdmachine.v_mov_b32_tuple %zero
+      {registers = 1 : i64, waveamdmachine.regalloc_debug_temp}
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
+  %v21 = waveamdmachine.v_mov_b32_tuple %zero
+      {registers = 1 : i64, waveamdmachine.regalloc_debug_temp}
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
+  %v22 = waveamdmachine.v_mov_b32_tuple %zero
+      {registers = 1 : i64, waveamdmachine.regalloc_debug_temp}
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
+  %v23 = waveamdmachine.v_mov_b32_tuple %zero
+      {registers = 1 : i64, waveamdmachine.regalloc_debug_temp}
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
+  %v24 = waveamdmachine.v_mov_b32_tuple %zero
+      {registers = 1 : i64, waveamdmachine.regalloc_debug_temp}
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
+  %read = waveamdmachine.v_accvgpr_read_b32_tuple %ag_spill
+      : (!waveamdmachine.reg<agpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
+  %sum0 = waveamdmachine.v_add_u32 %v0, %v1
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %sum1 = waveamdmachine.v_add_u32 %v2, %v3
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %sum2 = waveamdmachine.v_add_u32 %v4, %v5
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %sum3 = waveamdmachine.v_add_u32 %v6, %v7
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %sum4 = waveamdmachine.v_add_u32 %v8, %v9
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %sum5 = waveamdmachine.v_add_u32 %v10, %v11
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %sum6 = waveamdmachine.v_add_u32 %v12, %v13
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %sum7 = waveamdmachine.v_add_u32 %v14, %v15
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %sum8 = waveamdmachine.v_add_u32 %v16, %v17
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %sum9 = waveamdmachine.v_add_u32 %v18, %v19
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %sum10 = waveamdmachine.v_add_u32 %v20, %v21
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %sum11 = waveamdmachine.v_add_u32 %v22, %v23
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %use = waveamdmachine.v_add_u32 %v24, %read
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %tail_read = waveamdmachine.v_accvgpr_read_b32_tuple %ag_tail
+      : (!waveamdmachine.reg<agpr, 3>) -> !waveamdmachine.reg<vgpr, 3>
+  %acc0 = waveamdmachine.v_mov_b32_tuple %zero {registers = 4 : i64}
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 4>
+  %mfma0 = waveamdmachine.mfma_f32_16x16x32_f16 %ag0, %ag1, %acc0
+      : (!waveamdmachine.reg<agpr, 4>, !waveamdmachine.reg<agpr, 4>,
+         !waveamdmachine.reg<vgpr, 4>) -> !waveamdmachine.reg<vgpr, 4>
+  %mfma1 = waveamdmachine.mfma_f32_16x16x32_f16 %ag1, %ag2, %mfma0
+      : (!waveamdmachine.reg<agpr, 4>, !waveamdmachine.reg<agpr, 4>,
+         !waveamdmachine.reg<vgpr, 4>) -> !waveamdmachine.reg<vgpr, 4>
+  %mfma2 = waveamdmachine.mfma_f32_16x16x32_f16 %ag2, %ag3, %mfma1
+      : (!waveamdmachine.reg<agpr, 4>, !waveamdmachine.reg<agpr, 4>,
+         !waveamdmachine.reg<vgpr, 4>) -> !waveamdmachine.reg<vgpr, 4>
+  %mfma3 = waveamdmachine.mfma_f32_16x16x32_f16 %ag3, %ag4, %mfma2
+      : (!waveamdmachine.reg<agpr, 4>, !waveamdmachine.reg<agpr, 4>,
+         !waveamdmachine.reg<vgpr, 4>) -> !waveamdmachine.reg<vgpr, 4>
+  %mfma4 = waveamdmachine.mfma_f32_16x16x32_f16 %ag4, %ag5, %mfma3
+      : (!waveamdmachine.reg<agpr, 4>, !waveamdmachine.reg<agpr, 4>,
+         !waveamdmachine.reg<vgpr, 4>) -> !waveamdmachine.reg<vgpr, 4>
+  %mfma5 = waveamdmachine.mfma_f32_16x16x32_f16 %ag5, %ag6, %mfma4
+      : (!waveamdmachine.reg<agpr, 4>, !waveamdmachine.reg<agpr, 4>,
+         !waveamdmachine.reg<vgpr, 4>) -> !waveamdmachine.reg<vgpr, 4>
+  %mfma6 = waveamdmachine.mfma_f32_16x16x32_f16 %ag6, %ag7, %mfma5
+      : (!waveamdmachine.reg<agpr, 4>, !waveamdmachine.reg<agpr, 4>,
+         !waveamdmachine.reg<vgpr, 4>) -> !waveamdmachine.reg<vgpr, 4>
+  %mfma7 = waveamdmachine.mfma_f32_16x16x32_f16 %ag7, %ag8, %mfma6
+      : (!waveamdmachine.reg<agpr, 4>, !waveamdmachine.reg<agpr, 4>,
+         !waveamdmachine.reg<vgpr, 4>) -> !waveamdmachine.reg<vgpr, 4>
+  %mfma8 = waveamdmachine.mfma_f32_16x16x32_f16 %ag8, %ag9, %mfma7
+      : (!waveamdmachine.reg<agpr, 4>, !waveamdmachine.reg<agpr, 4>,
+         !waveamdmachine.reg<vgpr, 4>) -> !waveamdmachine.reg<vgpr, 4>
+  %mfma9 = waveamdmachine.mfma_f32_16x16x32_f16 %ag9, %ag10, %mfma8
+      : (!waveamdmachine.reg<agpr, 4>, !waveamdmachine.reg<agpr, 4>,
+         !waveamdmachine.reg<vgpr, 4>) -> !waveamdmachine.reg<vgpr, 4>
+  %mfma10 = waveamdmachine.mfma_f32_16x16x32_f16 %ag10, %ag11, %mfma9
+      : (!waveamdmachine.reg<agpr, 4>, !waveamdmachine.reg<agpr, 4>,
+         !waveamdmachine.reg<vgpr, 4>) -> !waveamdmachine.reg<vgpr, 4>
+  %mfma11 = waveamdmachine.mfma_f32_16x16x32_f16 %ag11, %ag12, %mfma10
+      : (!waveamdmachine.reg<agpr, 4>, !waveamdmachine.reg<agpr, 4>,
+         !waveamdmachine.reg<vgpr, 4>) -> !waveamdmachine.reg<vgpr, 4>
+  %mfma12 = waveamdmachine.mfma_f32_16x16x32_f16 %ag12, %ag0, %mfma11
       : (!waveamdmachine.reg<agpr, 4>, !waveamdmachine.reg<agpr, 4>,
          !waveamdmachine.reg<vgpr, 4>) -> !waveamdmachine.reg<vgpr, 4>
   waveamdmachine.s_endpgm
