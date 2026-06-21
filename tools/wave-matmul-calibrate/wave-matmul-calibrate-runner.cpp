@@ -22,6 +22,7 @@ namespace {
 
 enum class CType { F32, F16 };
 enum class InputType { F16, BF16, MXFP4 };
+enum class ScaleLayout { Canonical, TensileLite };
 
 struct Args {
   const char *hsaco = nullptr;
@@ -43,6 +44,7 @@ struct Args {
   int seed = 0;
   bool checkOutput = true;
   bool allOnes = false;
+  ScaleLayout scaleLayout = ScaleLayout::Canonical;
 };
 
 [[noreturn]] static void die(const char *msg) {
@@ -70,6 +72,7 @@ static void usage() {
       "  --iters N              launch iterations (default 1000)\n"
       "  --warmup N             warmup launches (default 10)\n"
       "  --seed N               deterministic input seed (default 0)\n"
+      "  --scale-layout canonical|tensilelite  MXFP4 scale upload layout\n"
       "  --all-ones             fill A/B with ones and MXFP4 scales with 1\n"
       "  --no-check             skip random-output check\n");
 }
@@ -128,6 +131,17 @@ static void setCType(Args &a, const char *v) {
   }
   die("bad --c-type; expected f32 or f16");
 }
+static void setScaleLayout(Args &a, const char *v) {
+  if (std::strcmp(v, "canonical") == 0) {
+    a.scaleLayout = ScaleLayout::Canonical;
+    return;
+  }
+  if (std::strcmp(v, "tensilelite") == 0) {
+    a.scaleLayout = ScaleLayout::TensileLite;
+    return;
+  }
+  die("bad --scale-layout; expected canonical or tensilelite");
+}
 static void setIters(Args &a, const char *v) { a.iters = parseInt(v); }
 static void setWarmup(Args &a, const char *v) { a.warmupIters = parseInt(v); }
 static void setSeed(Args &a, const char *v) { a.seed = parseInt(v); }
@@ -147,6 +161,7 @@ static constexpr FlagHandler kFlags[] = {
     {"--wave-size", setWaveSize},
     {"--input-type", setInputType},
     {"--c-type", setCType},
+    {"--scale-layout", setScaleLayout},
     {"--dynamic-lds", setDynamicLds},
     {"--iters", setIters},
     {"--warmup", setWarmup},
@@ -224,6 +239,9 @@ static void validateArgs(const Args &a) {
     die("dynamic LDS bytes must be non-negative");
   if (a.inputType == InputType::MXFP4 && a.waveSize != 64)
     die("MXFP4 calibration expects wave-size 64");
+  if (a.scaleLayout == ScaleLayout::TensileLite &&
+      a.inputType != InputType::MXFP4)
+    die("tensilelite scale layout requires MXFP4 input");
 }
 
 static Args parseArgs(int argc, char **argv) {
@@ -423,6 +441,10 @@ static const char *getInputTypeName(InputType type) {
   die("unknown input type");
 }
 
+static const char *getScaleLayoutName(ScaleLayout layout) {
+  return layout == ScaleLayout::TensileLite ? "tensilelite" : "canonical";
+}
+
 static uint16_t oneBits(InputType type) {
   switch (type) {
   case InputType::F16:
@@ -495,11 +517,136 @@ static std::vector<uint8_t> makeMXFP4ScaleBytes(int rows, int k, int seed,
   return bytes;
 }
 
+struct TensileLiteScaleLayout {
+  int mBlocks;
+  int nBlocks;
+  int virtualKSteps;
+  int blockWaves;
+  int waveTiles;
+  int rows;
+  int kScaleGroupsPerStep;
+  int groupsPerPartition;
+  int partitionBytes;
+  int ctaBytes;
+  bool isA;
+};
+
+static TensileLiteScaleLayout makeTensileLiteScaleLayout(const Args &a,
+                                                         bool isA) {
+  if (a.waveKTiles % 2 || a.waveMTiles % 2 || a.waveNTiles % 2)
+    die("tensilelite scale layout needs even wave tile counts");
+
+  TensileLiteScaleLayout layout;
+  layout.mBlocks = divExact(a.m, 16 * a.bm * a.waveMTiles, "bad M blocking");
+  layout.nBlocks = divExact(a.n, 16 * a.bn * a.waveNTiles, "bad N blocking");
+  layout.virtualKSteps =
+      divExact(a.k, mmaKTile(a) * a.waveKTiles, "bad K blocking");
+  layout.blockWaves = isA ? a.bm : a.bn;
+  layout.waveTiles = isA ? a.waveMTiles : a.waveNTiles;
+  layout.rows = isA ? a.m : a.n;
+  layout.kScaleGroupsPerStep = a.waveKTiles / 2;
+  layout.groupsPerPartition =
+      (layout.waveTiles / 2) * layout.kScaleGroupsPerStep;
+  layout.partitionBytes = layout.groupsPerPartition * 256;
+  layout.ctaBytes =
+      layout.blockWaves * layout.partitionBytes * layout.virtualKSteps;
+  layout.isA = isA;
+  return layout;
+}
+
+static int tensileLiteAxisBase(const Args &a,
+                               const TensileLiteScaleLayout &layout, int wgM,
+                               int wgN) {
+  if (layout.isA)
+    return wgM * a.bm * a.waveMTiles;
+  return wgN * a.bn * a.waveNTiles;
+}
+
+static size_t tensileLiteScaleDst(const TensileLiteScaleLayout &layout, int cta,
+                                  int step, int wave, int group, int lane,
+                                  int selector) {
+  return static_cast<size_t>(cta) * layout.ctaBytes +
+         step * layout.blockWaves * layout.partitionBytes +
+         wave * layout.partitionBytes + group * 256 + lane * 4 + selector;
+}
+
+static void fillTensileLiteScaleLane(std::vector<uint8_t> &out,
+                                     const std::vector<uint8_t> &canonical,
+                                     const Args &a,
+                                     const TensileLiteScaleLayout &layout,
+                                     int axisTileBase, int cta, int step,
+                                     int wave, int axisGroup, int kGroup,
+                                     int group, int lane) {
+  int laneMN = lane & 15;
+  int laneScaleK = lane / 16;
+  for (int kSel = 0; kSel < 2; ++kSel) {
+    for (int axisSel = 0; axisSel < 2; ++axisSel) {
+      int axisTile =
+          axisTileBase + wave * layout.waveTiles + axisGroup * 2 + axisSel;
+      int rawK = step * a.waveKTiles + kGroup * 2 + kSel;
+      int scaleK = rawK * 4 + laneScaleK;
+      size_t src =
+          static_cast<size_t>(scaleK) * layout.rows + axisTile * 16 + laneMN;
+      int selector = axisSel + 2 * kSel;
+      size_t dst =
+          tensileLiteScaleDst(layout, cta, step, wave, group, lane, selector);
+      out[dst] = canonical[src];
+    }
+  }
+}
+
+static void fillTensileLiteScaleGroup(
+    std::vector<uint8_t> &out, const std::vector<uint8_t> &canonical,
+    const Args &a, const TensileLiteScaleLayout &layout, int axisTileBase,
+    int cta, int step, int wave, int axisGroup, int kGroup, int group) {
+  for (int lane = 0; lane < 64; ++lane) {
+    fillTensileLiteScaleLane(out, canonical, a, layout, axisTileBase, cta, step,
+                             wave, axisGroup, kGroup, group, lane);
+  }
+}
+
+static void fillTensileLiteScaleStep(std::vector<uint8_t> &out,
+                                     const std::vector<uint8_t> &canonical,
+                                     const Args &a,
+                                     const TensileLiteScaleLayout &layout,
+                                     int wgM, int wgN, int cta, int step) {
+  int axisTileBase = tensileLiteAxisBase(a, layout, wgM, wgN);
+  for (int wave = 0; wave < layout.blockWaves; ++wave) {
+    for (int axisGroup = 0; axisGroup < layout.waveTiles / 2; ++axisGroup) {
+      for (int kGroup = 0; kGroup < layout.kScaleGroupsPerStep; ++kGroup) {
+        int group = axisGroup * layout.kScaleGroupsPerStep + kGroup;
+        fillTensileLiteScaleGroup(out, canonical, a, layout, axisTileBase, cta,
+                                  step, wave, axisGroup, kGroup, group);
+      }
+    }
+  }
+}
+
+static std::vector<uint8_t>
+makeTensileLiteScaleBytes(const std::vector<uint8_t> &canonical, const Args &a,
+                          bool isA) {
+  TensileLiteScaleLayout layout = makeTensileLiteScaleLayout(a, isA);
+  std::vector<uint8_t> out(static_cast<size_t>(layout.mBlocks) *
+                           layout.nBlocks * layout.ctaBytes);
+
+  for (int wgM = 0; wgM < layout.mBlocks; ++wgM) {
+    for (int wgN = 0; wgN < layout.nBlocks; ++wgN) {
+      int cta = wgM * layout.nBlocks + wgN;
+      for (int step = 0; step < layout.virtualKSteps; ++step)
+        fillTensileLiteScaleStep(out, canonical, a, layout, wgM, wgN, cta,
+                                 step);
+    }
+  }
+  return out;
+}
+
 struct HostInputs {
   std::vector<uint8_t> a;
   std::vector<uint8_t> b;
   std::vector<uint8_t> aScale;
   std::vector<uint8_t> bScale;
+  std::vector<uint8_t> aKernelScale;
+  std::vector<uint8_t> bKernelScale;
 };
 
 static HostInputs makeHostInputs(const Args &a) {
@@ -509,6 +656,13 @@ static HostInputs makeHostInputs(const Args &a) {
   if (isMXFP4(a.inputType)) {
     inputs.aScale = makeMXFP4ScaleBytes(a.m, a.k, a.seed, 2, a.allOnes);
     inputs.bScale = makeMXFP4ScaleBytes(a.n, a.k, a.seed, 3, a.allOnes);
+    if (a.scaleLayout == ScaleLayout::TensileLite) {
+      inputs.aKernelScale = makeTensileLiteScaleBytes(inputs.aScale, a, true);
+      inputs.bKernelScale = makeTensileLiteScaleBytes(inputs.bScale, a, false);
+    } else {
+      inputs.aKernelScale = inputs.aScale;
+      inputs.bKernelScale = inputs.bScale;
+    }
   }
   return inputs;
 }
@@ -574,9 +728,9 @@ static DeviceBuffers prepareDeviceBuffers(const Args &a,
   checkHip(hipMalloc(&b.deviceA, inputs.a.size()), "hipMalloc A");
   checkHip(hipMalloc(&b.deviceB, inputs.b.size()), "hipMalloc B");
   if (isMXFP4(a.inputType)) {
-    checkHip(hipMalloc(&b.deviceAScale, inputs.aScale.size()),
+    checkHip(hipMalloc(&b.deviceAScale, inputs.aKernelScale.size()),
              "hipMalloc A scale");
-    checkHip(hipMalloc(&b.deviceBScale, inputs.bScale.size()),
+    checkHip(hipMalloc(&b.deviceBScale, inputs.bKernelScale.size()),
              "hipMalloc B scale");
   }
   checkHip(hipMalloc(&b.deviceC, b.cBytes), "hipMalloc C");
@@ -587,11 +741,11 @@ static DeviceBuffers prepareDeviceBuffers(const Args &a,
                      hipMemcpyHostToDevice),
            "hipMemcpy B");
   if (isMXFP4(a.inputType)) {
-    checkHip(hipMemcpy(b.deviceAScale, inputs.aScale.data(),
-                       inputs.aScale.size(), hipMemcpyHostToDevice),
+    checkHip(hipMemcpy(b.deviceAScale, inputs.aKernelScale.data(),
+                       inputs.aKernelScale.size(), hipMemcpyHostToDevice),
              "hipMemcpy A scale");
-    checkHip(hipMemcpy(b.deviceBScale, inputs.bScale.data(),
-                       inputs.bScale.size(), hipMemcpyHostToDevice),
+    checkHip(hipMemcpy(b.deviceBScale, inputs.bKernelScale.data(),
+                       inputs.bKernelScale.size(), hipMemcpyHostToDevice),
              "hipMemcpy B scale");
   }
   checkHip(hipMemset(b.deviceC, 0, b.cBytes), "hipMemset C");
@@ -687,10 +841,11 @@ int main(int argc, char **argv) {
   std::printf("kernel: %s\n", a.kernel);
   std::printf("shape: m=%d n=%d k=%d bm=%d bn=%d wave_m_tiles=%d "
               "wave_n_tiles=%d wave_k_tiles=%d wave_size=%d input_type=%s "
-              "c_type=%s input_mode=%s\n",
+              "c_type=%s scale_layout=%s input_mode=%s\n",
               a.m, a.n, a.k, a.bm, a.bn, a.waveMTiles, a.waveNTiles,
               a.waveKTiles, a.waveSize, getInputTypeName(a.inputType),
-              getCTypeName(a.cType), a.allOnes ? "all-ones" : "random");
+              getCTypeName(a.cType), getScaleLayoutName(a.scaleLayout),
+              a.allOnes ? "all-ones" : "random");
   std::printf("grid: %d,%d,1 block: %d,1,1 waves_per_workgroup=%d\n", blocksX,
               blocksY, blockThreads, a.bm * a.bn);
   std::printf("loop_trip_count: %d\n", tripCount);

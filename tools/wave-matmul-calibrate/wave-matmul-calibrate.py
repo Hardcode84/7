@@ -20,6 +20,7 @@ from statistics import median
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_BUILD = REPO_ROOT / "build"
 EXAMPLE = REPO_ROOT / "examples/wave/wmma_matmul_tiled.py"
+TENSILELITE_EXAMPLE = REPO_ROOT / "examples/wave/tensilelite_mxfp4_subtile.py"
 RUNNER_SRC = REPO_ROOT / "tools/wave-matmul-calibrate/wave-matmul-calibrate-runner.cpp"
 KERNEL_NAME = "wmma_f16_matmul_tiled"
 STATIC_LDS_LIMIT = 64 * 1024
@@ -198,7 +199,44 @@ def resolve_chip(args: argparse.Namespace) -> str:
     return chip
 
 
-def build_example_args(args: argparse.Namespace, chip: str) -> list[str]:
+def selected_example(args: argparse.Namespace) -> str:
+    return getattr(args, "example", "matmul")
+
+
+def selected_scale_input(args: argparse.Namespace) -> str:
+    return getattr(args, "scale_input", "canonical")
+
+
+def append_option_if(cmd: list[str], enabled: bool, option: str) -> None:
+    if enabled:
+        cmd.append(option)
+
+
+def append_target_waves(cmd: list[str], args: argparse.Namespace) -> None:
+    target_waves = effective_target_waves(args)
+    append_option_if(cmd, target_waves != 0, f"--target-waves={target_waves}")
+
+
+def build_tensilelite_example_args(args: argparse.Namespace, chip: str) -> list[str]:
+    cmd = [
+        sys.executable,
+        str(TENSILELITE_EXAMPLE),
+        f"--chip={chip}",
+        f"--m={args.m}",
+        f"--n={args.n}",
+        f"--k={args.k}",
+        f"--bm={args.bm}",
+        f"--bn={args.bn}",
+        f"--wave-m-tiles={args.wave_m_tiles}",
+        f"--wave-n-tiles={args.wave_n_tiles}",
+        f"--wave-k-tiles={args.wave_k_tiles}",
+        f"--scale-input={selected_scale_input(args)}",
+    ]
+    append_target_waves(cmd, args)
+    return cmd
+
+
+def build_matmul_example_args(args: argparse.Namespace, chip: str) -> list[str]:
     cmd = [
         sys.executable,
         str(EXAMPLE),
@@ -213,29 +251,37 @@ def build_example_args(args: argparse.Namespace, chip: str) -> list[str]:
         f"--wave-k-tiles={args.wave_k_tiles}",
         "--kernel-only",
     ]
-    if args.use_buffer:
-        cmd.append("--use-buffer")
-    if args.use_dma_lds:
-        cmd.append("--use-dma-lds")
-    if args.matrix_intrinsic != "auto":
-        cmd.append(f"--matrix-intrinsic={args.matrix_intrinsic}")
-    if args.input_type != "f16":
-        cmd.append(f"--input-type={args.input_type}")
-    if args.output_type != "f32":
-        cmd.append(f"--output-type={args.output_type}")
+    append_option_if(cmd, args.use_buffer, "--use-buffer")
+    append_option_if(cmd, args.use_dma_lds, "--use-dma-lds")
+    append_option_if(
+        cmd,
+        args.matrix_intrinsic != "auto",
+        f"--matrix-intrinsic={args.matrix_intrinsic}",
+    )
+    append_option_if(cmd, args.input_type != "f16", f"--input-type={args.input_type}")
+    append_option_if(
+        cmd, args.output_type != "f32", f"--output-type={args.output_type}"
+    )
     mxfp4_scale_path = getattr(args, "mxfp4_scale_path", "dma")
-    if mxfp4_scale_path != "dma":
-        cmd.append(f"--mxfp4-scale-path={mxfp4_scale_path}")
+    append_option_if(
+        cmd,
+        mxfp4_scale_path != "dma",
+        f"--mxfp4-scale-path={mxfp4_scale_path}",
+    )
     cta_swizzle_xcds = getattr(args, "cta_swizzle_xcds", 1)
     cta_group_m = getattr(args, "cta_group_m", 1)
-    if cta_swizzle_xcds != 1:
-        cmd.append(f"--cta-swizzle-xcds={cta_swizzle_xcds}")
-    if cta_group_m != 1:
-        cmd.append(f"--cta-group-m={cta_group_m}")
-    target_waves = effective_target_waves(args)
-    if target_waves:
-        cmd.append(f"--target-waves={target_waves}")
+    append_option_if(
+        cmd, cta_swizzle_xcds != 1, f"--cta-swizzle-xcds={cta_swizzle_xcds}"
+    )
+    append_option_if(cmd, cta_group_m != 1, f"--cta-group-m={cta_group_m}")
+    append_target_waves(cmd, args)
     return cmd
+
+
+def build_example_args(args: argparse.Namespace, chip: str) -> list[str]:
+    if selected_example(args) == "tensilelite-subtile":
+        return build_tensilelite_example_args(args, chip)
+    return build_matmul_example_args(args, chip)
 
 
 def generate_kernel_module(args: argparse.Namespace, chip: str) -> str:
@@ -247,10 +293,17 @@ def generate_kernel_module(args: argparse.Namespace, chip: str) -> str:
         else str(package_path) + os.pathsep + env["PYTHONPATH"]
     )
     module_text = run(build_example_args(args, chip), env=env)
-    match = re.search(r"(func\.func @wmma\w+.*?\n    \})", module_text, re.S)
+    pretty = rf"(func\.func @{KERNEL_NAME}\w*.*?\n    \}})"
+    generic = (
+        rf'(\s+"func\.func"\(\).*?sym_name = "{KERNEL_NAME}".*?'
+        r"\n\s+\}\) \{gpu\.kernel[^\n]*\} : \(\) -> \(\))"
+    )
+    match = re.search(pretty, module_text, re.S) or re.search(
+        generic, module_text, re.S
+    )
     if not match:
         sys.exit("could not isolate matmul kernel from generated module")
-    kernel = match.group(1).replace("\n    ", "\n  ")
+    kernel = re.sub(r"^    ", "  ", match.group(1).lstrip(), flags=re.M)
     target = f"amdgcn-amd-amdhsa--{chip}"
     return (
         f'module attributes {{waveamdmachine.target = "{target}"}} '
@@ -548,6 +601,11 @@ def compute_kernel_arg_trip_count(args: argparse.Namespace) -> int:
 
 def compute_sim_loop_trip_count(args: argparse.Namespace) -> int:
     virtual_k_steps = compute_virtual_k_steps(args)
+    if (
+        selected_example(args) == "tensilelite-subtile"
+        and selected_scale_input(args) == "tensilelite"
+    ):
+        return max((virtual_k_steps - 2) // 2, 0)
     if args.use_dma_lds:
         return max(virtual_k_steps - 2, 0)
     return max(virtual_k_steps - 1, 0)
@@ -595,6 +653,14 @@ def mxfp4_scale_tiles_per_wave(tile_count: int) -> int:
 
 
 def mxfp4_scale_lds_bytes(args: argparse.Namespace) -> int:
+    if selected_example(args) == "tensilelite-subtile":
+        k_groups = args.wave_k_tiles // 2
+        scale_tiles = (
+            args.bm * (args.wave_m_tiles // 2) * k_groups
+            + args.bn * (args.wave_n_tiles // 2) * k_groups
+        )
+        return 2 * scale_tiles * 256
+
     scale_tiles = args.bm * mxfp4_scale_tiles_per_wave(
         args.wave_m_tiles
     ) + args.bn * mxfp4_scale_tiles_per_wave(args.wave_n_tiles)
@@ -604,6 +670,8 @@ def mxfp4_scale_lds_bytes(args: argparse.Namespace) -> int:
 
 
 def dma_buffer_count(args: argparse.Namespace) -> int:
+    if selected_example(args) == "tensilelite-subtile":
+        return 2
     if not getattr(args, "use_dma_lds", False) or compute_virtual_k_steps(args) <= 1:
         return 1
     if (
@@ -615,6 +683,13 @@ def dma_buffer_count(args: argparse.Namespace) -> int:
 
 
 def compute_lds_bytes(args: argparse.Namespace) -> int:
+    if selected_example(args) == "tensilelite-subtile":
+        slots = args.wave_k_tiles * (
+            args.bm * args.wave_m_tiles + args.bn * args.wave_n_tiles
+        )
+        data_lds = 2 * slots * lds_dwords_per_frag(args) * 4
+        return data_lds + mxfp4_scale_lds_bytes(args)
+
     if getattr(args, "use_dma_lds", False):
         slots = args.wave_k_tiles * (
             args.bm * args.wave_m_tiles + args.bn * args.wave_n_tiles
@@ -725,6 +800,8 @@ def run_hw(
         "--seed",
         str(getattr(args, "seed", 0)),
     ]
+    if selected_scale_input(args) == "tensilelite":
+        cmd.extend(["--scale-layout", "tensilelite"])
     if getattr(args, "all_ones", False):
         cmd.append("--all-ones")
     if args.no_check:
@@ -834,9 +911,14 @@ def parse_variants(text: str) -> list[Variant]:
     return variants
 
 
-def build_argparser() -> argparse.ArgumentParser:
-    ap = argparse.ArgumentParser(description=__doc__)
+def add_kernel_shape_args(ap: argparse.ArgumentParser) -> None:
     ap.add_argument("--chip", default="", help="gfx target; default from rocminfo")
+    ap.add_argument(
+        "--example",
+        choices=("matmul", "tensilelite-subtile"),
+        default="matmul",
+        help="kernel generator to benchmark",
+    )
     ap.add_argument(
         "--kernel-profile",
         choices=("manual", *KERNEL_PROFILES),
@@ -867,8 +949,17 @@ def build_argparser() -> argparse.ArgumentParser:
     ap.add_argument("--output-type", choices=("f32", "f16"), default="f32")
     ap.add_argument("--input-type", choices=("f16", "bf16", "mxfp4"), default="f16")
     ap.add_argument("--mxfp4-scale-path", choices=("dma", "regs"), default="dma")
+    ap.add_argument(
+        "--scale-input",
+        choices=("canonical", "tensilelite"),
+        default="canonical",
+        help="scale buffer contract for --example=tensilelite-subtile",
+    )
     ap.add_argument("--cta-swizzle-xcds", type=int, default=1)
     ap.add_argument("--cta-group-m", type=int, default=1)
+
+
+def add_runtime_args(ap: argparse.ArgumentParser) -> None:
     ap.add_argument("--iters", type=int, default=1000)
     ap.add_argument("--warmup", type=int, default=10)
     ap.add_argument("--seed", type=int, default=0)
@@ -898,6 +989,9 @@ def build_argparser() -> argparse.ArgumentParser:
         default=DEFAULT_SIM_TRIP_COUNT,
         help="wave-sim-report loop trips; -1 uses the full kernel trip count",
     )
+
+
+def add_scheduler_args(ap: argparse.ArgumentParser) -> None:
     ap.add_argument("--beam-search", action="store_true")
     ap.add_argument("--no-pressure-aware-schedule", action="store_true")
     ap.add_argument("--pressure-vgpr-budget", type=int, default=-1)
@@ -905,6 +999,9 @@ def build_argparser() -> argparse.ArgumentParser:
     ap.add_argument("--pressure-critical-vgpr-budget", type=int, default=-1)
     ap.add_argument("--pressure-critical-sgpr-budget", type=int, default=-1)
     ap.add_argument("--calibration-file", type=Path, default=None)
+
+
+def add_tool_args(ap: argparse.ArgumentParser) -> None:
     ap.add_argument("--skip-hw", action="store_true")
     ap.add_argument("--no-check", action="store_true")
     ap.add_argument("--emit-asm", type=Path)
@@ -922,6 +1019,14 @@ def build_argparser() -> argparse.ArgumentParser:
         "--rocm-lib",
         default=os.environ.get("ROCM_LIB", "/opt/rocm/lib"),
     )
+
+
+def build_argparser() -> argparse.ArgumentParser:
+    ap = argparse.ArgumentParser(description=__doc__)
+    add_kernel_shape_args(ap)
+    add_runtime_args(ap)
+    add_scheduler_args(ap)
+    add_tool_args(ap)
     return ap
 
 
@@ -961,6 +1066,50 @@ def validate_pressure_budget_args(args: argparse.Namespace) -> None:
             sys.exit(f"--{name.replace('_', '-')} must be >= -1")
 
 
+def _require_arg(condition: bool, message: str) -> None:
+    if not condition:
+        sys.exit(message)
+
+
+def _has_valid_tensilelite_virtual_k(args: argparse.Namespace) -> bool:
+    virtual_k_steps = compute_virtual_k_steps(args)
+    return virtual_k_steps <= 1 or virtual_k_steps % 2 == 0
+
+
+def _validate_tensilelite_example_args(args: argparse.Namespace) -> None:
+    _require_arg(
+        args.input_type == "mxfp4",
+        "--example=tensilelite-subtile requires --input-type=mxfp4",
+    )
+    _require_arg(
+        args.output_type == "f16",
+        "--example=tensilelite-subtile requires --output-type=f16",
+    )
+    _require_arg(
+        args.wave_k_tiles % 2 == 0,
+        "--example=tensilelite-subtile requires even --wave-k-tiles",
+    )
+    _require_arg(
+        args.wave_m_tiles % 2 == 0 and args.wave_n_tiles % 2 == 0,
+        "--example=tensilelite-subtile requires even wave tile counts",
+    )
+    if selected_scale_input(args) == "tensilelite":
+        _require_arg(
+            _has_valid_tensilelite_virtual_k(args),
+            "--scale-input=tensilelite requires even virtual K steps",
+        )
+
+
+def validate_example_args(args: argparse.Namespace) -> None:
+    if selected_example(args) == "matmul":
+        _require_arg(
+            selected_scale_input(args) == "canonical",
+            "--scale-input=tensilelite requires --example=tensilelite-subtile",
+        )
+        return
+    _validate_tensilelite_example_args(args)
+
+
 def validate_args(args: argparse.Namespace) -> None:
     if args.repeats <= 0:
         sys.exit("--repeats must be positive")
@@ -976,6 +1125,7 @@ def validate_args(args: argparse.Namespace) -> None:
         sys.exit(f"--calibration-file does not exist: {args.calibration_file}")
     if getattr(args, "emit_asm", None) is not None and len(args.variants) != 1:
         sys.exit("--emit-asm requires exactly one --variants entry")
+    validate_example_args(args)
     validate_mxfp4_args(args)
     validate_pressure_budget_args(args)
 
@@ -1000,6 +1150,8 @@ def main() -> int:
             f"target_waves={effective_target_waves(args)} "
             f"input_type={args.input_type} output_type={args.output_type} "
             f"mxfp4_scale_path={args.mxfp4_scale_path} "
+            f"example={selected_example(args)} "
+            f"scale_input={selected_scale_input(args)} "
             f"seed={args.seed} input_mode="
             f"{'all-ones' if args.all_ones else 'random'}\n"
             f"cta_swizzle_xcds={args.cta_swizzle_xcds} "
