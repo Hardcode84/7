@@ -154,6 +154,11 @@ static Value createShrU(OpBuilder &builder, Location loc, Type type, Value lhs,
   return createBinary(builder, loc, type, BinaryKind::ShRUI, lhs, rhs);
 }
 
+static Value createShrS(OpBuilder &builder, Location loc, Type type, Value lhs,
+                        Value rhs) {
+  return createBinary(builder, loc, type, BinaryKind::ShRSI, lhs, rhs);
+}
+
 static Value createAnd(OpBuilder &builder, Location loc, Type type, Value lhs,
                        Value rhs) {
   return createBinary(builder, loc, type, BinaryKind::AndI, lhs, rhs);
@@ -389,12 +394,13 @@ finiteSignedRange(DataFlowSolver &solver, Value value) {
   return range;
 }
 
-static bool hasNonNegativeLowerBound(const sym::InferredRange &range) {
+static bool hasLowerBoundAtLeast(const sym::InferredRange &range,
+                                 int64_t lower) {
   return range.lower && range.lower->denominator > 0 &&
-         range.lower->numerator >= 0;
+         range.lower->numerator >= lower * range.lower->denominator;
 }
 
-static bool isAssumedNonNegative(sym::Store &store, Value value) {
+static bool isAssumedAtLeast(sym::Store &store, Value value, int64_t lower) {
   while (AssumeOp assume = value.getDefiningOp<AssumeOp>()) {
     FailureOr<sym::ExprHandle> expr =
         sym::composeExprSym(store, assume.getName());
@@ -407,27 +413,60 @@ static bool isAssumedNonNegative(sym::Store &store, Value value) {
                            assumptions);
     std::optional<sym::InferredRange> range =
         sym::inferRange(store, *expr, assumptions);
-    if (range && hasNonNegativeLowerBound(*range))
+    if (range && hasLowerBoundAtLeast(*range, lower))
       return true;
     value = assume.getValue();
   }
   return false;
 }
 
-static bool isProvenNonNegative(DataFlowSolver &solver, sym::Store &store,
-                                Value value) {
+static bool isIndexExprProvenAtLeast(sym::Store &store, Value value,
+                                     int64_t lower) {
+  IndexExprOp index = value.getDefiningOp<IndexExprOp>();
+  if (!index)
+    return false;
+
+  SmallVector<sym::PredHandle, 4> assumptions;
+  appendIndexExprPredicates(index, assumptions);
+  for (auto [nameAttr, binding] :
+       llvm::zip(index.getNames(), index.getBindings())) {
+    StringRef name = cast<StringAttr>(nameAttr).getValue();
+    appendAssumePredicates(store, binding, name, assumptions);
+  }
+  std::optional<sym::InferredRange> range =
+      sym::inferRange(store, index.getExpr().getValue(), assumptions);
+  return range && hasLowerBoundAtLeast(*range, lower);
+}
+
+static bool isProvenSignedLowerBound(DataFlowSolver &solver, sym::Store &store,
+                                     Value value, int64_t lower) {
   if (SplatOp splat = value.getDefiningOp<SplatOp>())
-    return isProvenNonNegative(solver, store, splat.getSource());
-  if (value.getDefiningOp<LaneIdOp>() || value.getDefiningOp<WorkgroupIdOp>() ||
-      value.getDefiningOp<WorkitemIdOp>())
+    return isProvenSignedLowerBound(solver, store, splat.getSource(), lower);
+  if (lower <= 0 && (value.getDefiningOp<LaneIdOp>() ||
+                     value.getDefiningOp<WorkgroupIdOp>() ||
+                     value.getDefiningOp<WorkitemIdOp>()))
     return true;
   if (std::optional<APInt> constant =
           getConstantAPInt(value, elementBits(value.getType())))
-    return constant->isNonNegative();
-  if (isAssumedNonNegative(store, value))
+    return constant->sge(APInt(constant->getBitWidth(), lower,
+                               /*isSigned=*/true));
+  if (isAssumedAtLeast(store, value, lower))
+    return true;
+  if (isIndexExprProvenAtLeast(store, value, lower))
     return true;
   std::optional<ConstantIntRanges> range = finiteSignedRange(solver, value);
-  return range && !range->smin().isNegative();
+  return range && range->smin().sge(APInt(range->smin().getBitWidth(), lower,
+                                          /*isSigned=*/true));
+}
+
+static bool isProvenNonNegative(DataFlowSolver &solver, sym::Store &store,
+                                Value value) {
+  return isProvenSignedLowerBound(solver, store, value, 0);
+}
+
+static bool isProvenPositive(DataFlowSolver &solver, sym::Store &store,
+                             Value value) {
+  return isProvenSignedLowerBound(solver, store, value, 1);
 }
 
 struct DynamicDivisorQuery {
@@ -621,6 +660,36 @@ static APInt signedAbs(APInt value) {
   return value;
 }
 
+static std::optional<Value>
+tryCreateSignedPositivePow2Value(OpBuilder &builder, Location loc, Type type,
+                                 BinaryKind kind, Value lhs, APInt rhsConst) {
+  if (rhsConst.isNegative() || rhsConst.isZero())
+    return std::nullopt;
+  uint64_t divisor = rhsConst.getZExtValue();
+  if (!llvm::isPowerOf2_64(divisor))
+    return std::nullopt;
+
+  Value zero = createConstantLike(builder, loc, type, 0);
+  if (divisor == 1)
+    return kind == BinaryKind::DivSI ? asType(builder, loc, lhs, type) : zero;
+
+  Value lhsNeg =
+      createCompare(builder, loc, arith::CmpIPredicate::slt, lhs, zero, type);
+  Value bias =
+      createSelect(builder, loc, type, lhsNeg,
+                   createConstantLike(builder, loc, type, divisor - 1), zero);
+  unsigned shift = llvm::Log2_64(divisor);
+  Value adjusted = createAdd(builder, loc, type, lhs, bias);
+  Value quotient = createShrS(builder, loc, type, adjusted,
+                              createShiftAmount(builder, loc, type, shift));
+  if (kind == BinaryKind::DivSI)
+    return quotient;
+
+  Value scaled = createShl(builder, loc, type, quotient,
+                           createShiftAmount(builder, loc, type, shift));
+  return createSub(builder, loc, type, lhs, scaled);
+}
+
 static DivRemValues createSignedDivRem(OpBuilder &builder, Location loc,
                                        Type type, Value lhs, Value rhs) {
   lhs = asType(builder, loc, lhs, type);
@@ -698,10 +767,7 @@ static std::optional<Value> tryExpandIndexDivRemAsI32(IRRewriter &rewriter,
                                     op.getLhs(), op.getRhs(), solver, store)) {
     narrow = *pow2;
   } else {
-    DivRemValues result =
-        isSignedDivRem(kind)
-            ? createSignedDivRem(rewriter, loc, i32, lhs, rhs)
-            : createUnsignedDivRem(rewriter, loc, i32, lhs, rhs);
+    DivRemValues result = createUnsignedDivRem(rewriter, loc, i32, lhs, rhs);
     narrow = (kind == BinaryKind::DivUI || kind == BinaryKind::DivSI)
                  ? result.quotient
                  : result.remainder;
@@ -710,6 +776,35 @@ static std::optional<Value> tryExpandIndexDivRemAsI32(IRRewriter &rewriter,
                         CastKind::IntConvert, narrow,
                         createZeroExtendPolicy(rewriter))
       .getResult();
+}
+
+static std::optional<Value>
+tryCreateSignedAsUnsignedValue(IRRewriter &rewriter, BinaryOp op,
+                               DataFlowSolver &solver, sym::Store &store) {
+  BinaryKind kind = op.getKind();
+  if (!isSignedDivRem(kind) ||
+      !isProvenNonNegative(solver, store, op.getLhs()) ||
+      !isProvenPositive(solver, store, op.getRhs()))
+    return std::nullopt;
+
+  DivRemValues result =
+      createUnsignedDivRem(rewriter, op.getLoc(), op.getResult().getType(),
+                           op.getLhs(), op.getRhs());
+  return kind == BinaryKind::DivSI ? result.quotient : result.remainder;
+}
+
+static std::optional<Value> tryCreateSignedConstPow2Value(IRRewriter &rewriter,
+                                                          BinaryOp op) {
+  BinaryKind kind = op.getKind();
+  if (!isSignedDivRem(kind))
+    return std::nullopt;
+  Type type = op.getResult().getType();
+  std::optional<APInt> rhsConst =
+      getConstantAPInt(op.getRhs(), elementBits(type));
+  if (!rhsConst)
+    return std::nullopt;
+  return tryCreateSignedPositivePow2Value(rewriter, op.getLoc(), type, kind,
+                                          op.getLhs(), *rhsConst);
 }
 
 static Value expandDivRem(IRRewriter &rewriter, BinaryOp op,
@@ -723,6 +818,12 @@ static Value expandDivRem(IRRewriter &rewriter, BinaryOp op,
   if (std::optional<Value> pow2 = tryCreateDynamicPow2Value(
           rewriter, loc, type, kind, op.getLhs(), op.getRhs(), solver, store))
     return *pow2;
+  if (std::optional<Value> signedAsUnsigned =
+          tryCreateSignedAsUnsignedValue(rewriter, op, solver, store))
+    return *signedAsUnsigned;
+  if (std::optional<Value> signedPow2 =
+          tryCreateSignedConstPow2Value(rewriter, op))
+    return *signedPow2;
   DivRemValues result =
       isSignedDivRem(kind)
           ? createSignedDivRem(rewriter, loc, type, op.getLhs(), op.getRhs())

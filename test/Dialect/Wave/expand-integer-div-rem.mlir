@@ -50,6 +50,87 @@ func.func @signed_simd_i32(%x: !wave.simd<i32, 32>, %d: i32)
 
 // -----
 
+// CHECK-LABEL: func.func @signed_dynamic_i32_nonnegative_positive
+// CHECK-SAME: ([[X:%.*]]: i32, [[D:%.*]]: i32)
+// CHECK: [[NONNEG:%.*]] = wave.assume [[X]]
+// CHECK: [[POS:%.*]] = wave.assume [[D]]
+// CHECK-NOT: arith.cmpi slt
+// CHECK: [[RCP:%.*]] = wave.urecip [[POS]]
+// CHECK: wave.binary mulhui [[NONNEG]]
+// CHECK-NOT: divsi
+func.func @signed_dynamic_i32_nonnegative_positive(%x: i32, %d: i32)
+    -> i32 {
+  %nonneg = wave.assume %x as "x" [#wave.pred<"x >= 0">] : i32
+  %pos = wave.assume %d as "d" [#wave.pred<"d >= 1">] : i32
+  %q = wave.binary divsi %nonneg, %pos : i32, i32 -> i32
+  return %q : i32
+}
+
+// -----
+
+// CHECK-LABEL: func.func @signed_const_pow2_i32_nonnegative
+// CHECK-SAME: ([[X:%.*]]: i32)
+// CHECK: [[NONNEG:%.*]] = wave.assume [[X]]
+// CHECK-NOT: arith.cmpi slt
+// CHECK: wave.binary shrui [[NONNEG]]
+// CHECK-NOT: wave.binary shrsi
+// CHECK-NOT: divsi
+func.func @signed_const_pow2_i32_nonnegative(%x: i32) -> i32 {
+  %nonneg = wave.assume %x as "x" [#wave.pred<"x >= 0">] : i32
+  %c32 = arith.constant 32 : i32
+  %q = wave.binary divsi %nonneg, %c32 : i32, i32 -> i32
+  return %q : i32
+}
+
+// -----
+
+// CHECK-LABEL: func.func @signed_const_pow2_i32
+// CHECK-SAME: ([[X:%.*]]: i32)
+// CHECK: arith.cmpi slt, [[X]]
+// CHECK: wave.select
+// CHECK: wave.binary addi [[X]]
+// CHECK: wave.binary shrsi
+// CHECK-NOT: wave.binary shrui
+// CHECK-NOT: divsi
+func.func @signed_const_pow2_i32(%x: i32) -> i32 {
+  %c32 = arith.constant 32 : i32
+  %q = wave.binary divsi %x, %c32 : i32, i32 -> i32
+  return %q : i32
+}
+
+// -----
+
+// CHECK-LABEL: func.func @signed_const_one_simd_result_preserves_type
+// CHECK-SAME: ([[X:%.*]]: i32)
+// CHECK: [[SPLAT:%.*]] = wave.splat [[X]] : i32 -> !wave.simd<i32, 32>
+// CHECK: return [[SPLAT]] : !wave.simd<i32, 32>
+// CHECK-NOT: divsi
+func.func @signed_const_one_simd_result_preserves_type(%x: i32)
+    -> !wave.simd<i32, 32> {
+  %one = arith.constant 1 : i32
+  %ones = wave.splat %one : i32 -> !wave.simd<i32, 32>
+  %q = wave.binary divsi %x, %ones
+      : i32, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  return %q : !wave.simd<i32, 32>
+}
+
+// -----
+
+// CHECK-LABEL: func.func @signed_const_pow2_i32_rem
+// CHECK-SAME: ([[X:%.*]]: i32)
+// CHECK: arith.cmpi slt, [[X]]
+// CHECK: wave.binary shrsi
+// CHECK: wave.binary shli
+// CHECK: wave.binary subi [[X]]
+// CHECK-NOT: remsi
+func.func @signed_const_pow2_i32_rem(%x: i32) -> i32 {
+  %c32 = arith.constant 32 : i32
+  %r = wave.binary remsi %x, %c32 : i32, i32 -> i32
+  return %r : i32
+}
+
+// -----
+
 // CHECK-LABEL: func.func @signed_dynamic_pow2_i64
 // CHECK-SAME: ([[X:%.*]]: i64, [[D:%.*]]: i64)
 // CHECK: [[NONNEG:%.*]] = wave.assume [[X]]

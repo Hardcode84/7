@@ -705,6 +705,9 @@ def WaveAMDMachine_VLshlrevB32Op
 def WaveAMDMachine_VLshrrevB32Op
     : WaveAMDMachine_BinaryU32Result<"v_lshrrev_b32">,
       WaveAMDMachine_VOP2ValueVGPRLegality;
+def WaveAMDMachine_VAshrrevI32Op
+    : WaveAMDMachine_BinaryU32Result<"v_ashrrev_i32">,
+      WaveAMDMachine_VOP2ValueVGPRLegality;
 def WaveAMDMachine_VMulLoU32Op
     : WaveAMDMachine_BinaryU32Result<"v_mul_lo_u32">;
 def WaveAMDMachine_VMulHiU32Op
@@ -2565,6 +2568,15 @@ def WaveAMDMachine_SLshrB32Op
   let assemblyFormat = "$lhs `,` $rhs attr-dict `:` functional-type(operands, results)";
 }
 
+def WaveAMDMachine_SAshrI32Op
+    : WaveAMDMachine_Op<"s_ashr_i32", [WaveAMDMachine_SALU, Pure]> {
+  let summary = "scalar 32-bit arithmetic right shift";
+  let arguments = (ins WaveAMDMachine_SGPR1OrImm:$lhs,
+                       WaveAMDMachine_SGPR1OrImm:$rhs);
+  let results = (outs WaveAMDMachine_SGPR1:$result, WaveAMDMachine_SCC:$scc);
+  let assemblyFormat = "$lhs `,` $rhs attr-dict `:` functional-type(operands, results)";
+}
+
 def WaveAMDMachine_SFlbitI32B32Op
     : WaveAMDMachine_UnaryResult<"s_flbit_i32_b32",
                                  WaveAMDMachine_SGPR1OrImm,
@@ -2724,6 +2736,15 @@ def WaveAMDMachine_SLshrB64Op
   let assemblyFormat = "$value `,` $shift attr-dict `:` functional-type(operands, results)";
 }
 
+def WaveAMDMachine_SAshrI64Op
+    : WaveAMDMachine_Op<"s_ashr_i64", [WaveAMDMachine_SALU, Pure]> {
+  let summary = "scalar 64-bit arithmetic right shift";
+  let arguments = (ins WaveAMDMachine_SGPR2:$value,
+                       WaveAMDMachine_SGPR1OrImm:$shift);
+  let results = (outs WaveAMDMachine_SGPR2:$result, WaveAMDMachine_SCC:$scc);
+  let assemblyFormat = "$value `,` $shift attr-dict `:` functional-type(operands, results)";
+}
+
 def WaveAMDMachine_SFlbitI32B64Op
     : WaveAMDMachine_UnaryResult<"s_flbit_i32_b64",
                                  WaveAMDMachine_SGPR2,
@@ -2742,6 +2763,14 @@ def WaveAMDMachine_SFf1I32B64Op
 
 def WaveAMDMachine_VLshrrevB64Op : WaveAMDMachine_Op<"v_lshrrev_b64", [Pure]> {
   let summary = "vector 64-bit logical right shift";
+  let arguments = (ins WaveAMDMachine_Reg1OrImm:$shift,
+                       WaveAMDMachine_VGPR2:$value);
+  let results = (outs WaveAMDMachine_VGPR2:$result);
+  let assemblyFormat = "$shift `,` $value attr-dict `:` functional-type(operands, results)";
+}
+
+def WaveAMDMachine_VAshrrevI64Op : WaveAMDMachine_Op<"v_ashrrev_i64", [Pure]> {
+  let summary = "vector 64-bit arithmetic right shift";
   let arguments = (ins WaveAMDMachine_Reg1OrImm:$shift,
                        WaveAMDMachine_VGPR2:$value);
   let results = (outs WaveAMDMachine_VGPR2:$result);

@@ -3194,6 +3194,9 @@ static Value buildVectorBinaryI32(OpBuilder &builder, Location loc,
   if (kind == BinaryKind::ShRUI)
     return waveamdmachine::VLshrrevB32Op::create(builder, loc, resultType, lhs,
                                                  rhs);
+  if (kind == BinaryKind::ShRSI)
+    return waveamdmachine::VAshrrevI32Op::create(builder, loc, resultType, lhs,
+                                                 rhs);
   return Value{};
 }
 
@@ -3215,6 +3218,10 @@ static Value buildScalarBinaryI32(OpBuilder &builder, Location loc,
         .getResult();
   if (kind == BinaryKind::ShRUI)
     return waveamdmachine::SLshrB32Op::create(builder, loc, resultType, scc,
+                                              lhs, rhs)
+        .getResult();
+  if (kind == BinaryKind::ShRSI)
+    return waveamdmachine::SAshrI32Op::create(builder, loc, resultType, scc,
                                               lhs, rhs)
         .getResult();
   return Value{};
@@ -3514,7 +3521,8 @@ static bool isDivRem(BinaryKind kind) {
 
 static bool isBitwiseOrLogicalShiftI32(BinaryKind kind) {
   return kind == BinaryKind::AndI || kind == BinaryKind::OrI ||
-         kind == BinaryKind::XOrI || kind == BinaryKind::ShRUI;
+         kind == BinaryKind::XOrI || kind == BinaryKind::ShRUI ||
+         kind == BinaryKind::ShRSI;
 }
 
 static LogicalResult selectBinaryBitwiseOrShiftI32(WaveAMDMachineSelector &S,
@@ -3541,9 +3549,10 @@ static LogicalResult selectBinaryBitwiseOrShiftI32(WaveAMDMachineSelector &S,
     S.eraseIfTopLevel(op);
     return success();
   }
-  VALUOperandShape shape = kind == BinaryKind::ShRUI
-                               ? VALUOperandShape::ValueVGPR
-                               : VALUOperandShape::VOP2Commutative;
+  VALUOperandShape shape =
+      (kind == BinaryKind::ShRUI || kind == BinaryKind::ShRSI)
+          ? VALUOperandShape::ValueVGPR
+          : VALUOperandShape::VOP2Commutative;
   shapeVALUOperands(S, op.getLoc(), op, shape, lhs, rhs);
   S.values[op.getResult()] =
       buildVectorBinaryI32(S.builder, op.getLoc(), resultType, kind, lhs, rhs);
@@ -3607,6 +3616,74 @@ static LogicalResult selectBinaryShRUI64(WaveAMDMachineSelector &S,
   return success();
 }
 
+static LogicalResult selectBinaryShRSI64(WaveAMDMachineSelector &S,
+                                         BinaryOp op) {
+  Value lhs = S.expect(op.getLhs(), op);
+  Value rhs = S.expect(op.getRhs(), op);
+  Value shift = extractLowDword(S, op.getLoc(), rhs, op.getRhs());
+  if (!isBinarySimd(op)) {
+    Type resultType =
+        getRegType(op.getContext(), waveamdmachine::RegClass::SGPR, 2);
+    S.values[op.getResult()] =
+        waveamdmachine::SAshrI64Op::create(
+            S.builder, op.getLoc(), resultType, getSCCType(op.getContext()),
+            ensureSGPR2(S, op.getLoc(), lhs), S.ensureSGPR1(op.getLoc(), shift))
+            .getResult();
+    S.eraseIfTopLevel(op);
+    return success();
+  }
+  if (isUniformPayloadValue(lhs, 2) && S.isUniformValue(shift)) {
+    Type resultType =
+        getRegType(op.getContext(), waveamdmachine::RegClass::SGPR, 2);
+    S.values[op.getResult()] =
+        waveamdmachine::SAshrI64Op::create(
+            S.builder, op.getLoc(), resultType, getSCCType(op.getContext()),
+            ensureSGPR2(S, op.getLoc(), lhs), S.ensureSGPR1(op.getLoc(), shift))
+            .getResult();
+    S.eraseIfTopLevel(op);
+    return success();
+  }
+  Type resultType =
+      getRegType(op.getContext(), waveamdmachine::RegClass::VGPR, 2);
+  S.values[op.getResult()] = waveamdmachine::VAshrrevI64Op::create(
+      S.builder, op.getLoc(), resultType, shift,
+      ensureVGPR2(S, op.getLoc(), lhs));
+  S.eraseIfTopLevel(op);
+  return success();
+}
+
+static LogicalResult selectBinaryBitwiseI64(WaveAMDMachineSelector &S,
+                                            BinaryOp op) {
+  BinaryKind kind = op.getKind();
+  Value lhs = S.expect(op.getLhs(), op);
+  Value rhs = S.expect(op.getRhs(), op);
+  S.values[op.getResult()] = kind == BinaryKind::XOrI
+                                 ? xorWide(S, op.getLoc(), lhs, rhs)
+                                 : bitwiseWide(S, op.getLoc(), kind, lhs, rhs);
+  S.eraseIfTopLevel(op);
+  return success();
+}
+
+static bool isShiftI64(BinaryKind kind) {
+  return kind == BinaryKind::ShLI || kind == BinaryKind::ShRUI ||
+         kind == BinaryKind::ShRSI;
+}
+
+static LogicalResult selectBinaryShiftI64(WaveAMDMachineSelector &S,
+                                          BinaryOp op) {
+  BinaryKind kind = op.getKind();
+  if (kind == BinaryKind::ShLI)
+    return S.selectBinaryShLI64(op);
+  if (kind == BinaryKind::ShRUI)
+    return selectBinaryShRUI64(S, op);
+  return selectBinaryShRSI64(S, op);
+}
+
+static bool isBitwiseI64(BinaryKind kind) {
+  return kind == BinaryKind::AndI || kind == BinaryKind::OrI ||
+         kind == BinaryKind::XOrI;
+}
+
 static LogicalResult selectBinaryI64(WaveAMDMachineSelector &S, BinaryOp op) {
   BinaryKind kind = op.getKind();
   if (kind == BinaryKind::AddI)
@@ -3615,26 +3692,12 @@ static LogicalResult selectBinaryI64(WaveAMDMachineSelector &S, BinaryOp op) {
     return S.selectBinarySubI64(op);
   if (kind == BinaryKind::MulI)
     return S.selectBinaryMulI64(op);
-  if (kind == BinaryKind::ShLI)
-    return S.selectBinaryShLI64(op);
-  if (kind == BinaryKind::ShRUI)
-    return selectBinaryShRUI64(S, op);
+  if (isShiftI64(kind))
+    return selectBinaryShiftI64(S, op);
   if (isDivRem(kind))
     return selectBinaryDivRemI64(S, op);
-  if (kind == BinaryKind::AndI || kind == BinaryKind::OrI) {
-    Value lhs = S.expect(op.getLhs(), op);
-    Value rhs = S.expect(op.getRhs(), op);
-    S.values[op.getResult()] = bitwiseWide(S, op.getLoc(), kind, lhs, rhs);
-    S.eraseIfTopLevel(op);
-    return success();
-  }
-  if (kind == BinaryKind::XOrI) {
-    Value lhs = S.expect(op.getLhs(), op);
-    Value rhs = S.expect(op.getRhs(), op);
-    S.values[op.getResult()] = xorWide(S, op.getLoc(), lhs, rhs);
-    S.eraseIfTopLevel(op);
-    return success();
-  }
+  if (isBitwiseI64(kind))
+    return selectBinaryBitwiseI64(S, op);
   return op.emitOpError("unsupported i64 wave.binary kind ")
          << stringifyBinaryKind(kind);
 }

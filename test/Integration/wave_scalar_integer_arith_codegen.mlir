@@ -59,6 +59,25 @@ func.func @scalar_i32_dynamic_pow2_divsi_codegen(
   return
 }
 
+// ASM-LABEL: scalar_i32_const_pow2_divsi_codegen:
+// ASM: s_cmp_lt_i32
+// ASM: s_cselect_b32
+// ASM: s_add_i32
+// ASM: s_ashr_i32
+// ASM: global_store_b32
+func.func @scalar_i32_const_pow2_divsi_codegen(
+    %out: !wave.ptr<#wave.global, i32>, %x: i32)
+    attributes {wave.kernel} {
+  %thirty_two = arith.constant 32 : i32
+  %quot = wave.binary divsi %x, %thirty_two : i32, i32 -> i32
+  %v = wave.splat %quot : i32 -> !wave.simd<i32, 32>
+  %tok = wave.store %v -> %out
+      : (!wave.simd<i32, 32>, !wave.ptr<#wave.global, i32>)
+      -> !wave.mem.token
+  wave.wait %tok : !wave.mem.token
+  return
+}
+
 // ASM-LABEL: scalar_i64_div_rem_codegen:
 // ASM: s_lshr_b64
 // ASM: s_and_b32

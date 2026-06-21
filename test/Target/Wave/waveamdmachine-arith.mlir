@@ -151,9 +151,11 @@ func.func @uniform_i32_sub_div_rem(%out: !wave.ptr<#wave.global, i32>) attribute
 }
 
 // SELECT-LABEL: func.func @uniform_i32_signed_div_range
-// SELECT: waveamdmachine.s_cmp_lt_i32
-// SELECT: waveamdmachine.s_cselect_b32
+// SELECT-NOT: waveamdmachine.s_cmp_lt_i32
+// SELECT-NOT: waveamdmachine.s_cselect_b32
 // SELECT: waveamdmachine.s_lshr_b32
+// SELECT-NOT: waveamdmachine.s_cmp_lt_i32
+// SELECT-NOT: waveamdmachine.s_cselect_b32
 func.func @uniform_i32_signed_div_range(%x: i32) attributes {wave.kernel} {
   %a = wave.assume %x as "x" [#wave.pred<"x >= 0">, #wave.pred<"x <= 1024">] : i32
   %two = arith.constant 2 : i32
@@ -162,9 +164,11 @@ func.func @uniform_i32_signed_div_range(%x: i32) attributes {wave.kernel} {
 }
 
 // SELECT-LABEL: func.func @uniform_i32_signed_div_lower_only_range
-// SELECT: waveamdmachine.s_cmp_lt_i32
-// SELECT: waveamdmachine.s_cselect_b32
+// SELECT-NOT: waveamdmachine.s_cmp_lt_i32
+// SELECT-NOT: waveamdmachine.s_cselect_b32
 // SELECT: waveamdmachine.s_lshr_b32
+// SELECT-NOT: waveamdmachine.s_cmp_lt_i32
+// SELECT-NOT: waveamdmachine.s_cselect_b32
 func.func @uniform_i32_signed_div_lower_only_range(%x: i32) attributes {wave.kernel} {
   %nonneg = wave.assume %x as "x" [#wave.pred<"x >= 0">] : i32
   %thirty_two = arith.constant 32 : i32
@@ -172,10 +176,24 @@ func.func @uniform_i32_signed_div_lower_only_range(%x: i32) attributes {wave.ker
   return
 }
 
-// SELECT-LABEL: func.func @uniform_i32_signed_div_chained_range
+// SELECT-LABEL: func.func @uniform_i32_signed_div_const_pow2_no_proof
 // SELECT: waveamdmachine.s_cmp_lt_i32
 // SELECT: waveamdmachine.s_cselect_b32
+// SELECT: waveamdmachine.s_add_i32
+// SELECT: waveamdmachine.s_ashr_i32
+// SELECT-NOT: waveamdmachine.s_lshr_b32
+func.func @uniform_i32_signed_div_const_pow2_no_proof(%x: i32) attributes {wave.kernel} {
+  %thirty_two = arith.constant 32 : i32
+  %quot = wave.binary divsi %x, %thirty_two : i32, i32 -> i32
+  return
+}
+
+// SELECT-LABEL: func.func @uniform_i32_signed_div_chained_range
+// SELECT-NOT: waveamdmachine.s_cmp_lt_i32
+// SELECT-NOT: waveamdmachine.s_cselect_b32
 // SELECT: waveamdmachine.s_lshr_b32
+// SELECT-NOT: waveamdmachine.s_cmp_lt_i32
+// SELECT-NOT: waveamdmachine.s_cselect_b32
 func.func @uniform_i32_signed_div_chained_range(%x: i32) attributes {wave.kernel} {
   %lo = wave.assume %x as "x" [#wave.pred<"x >= 0">] : i32
   %bounded = wave.assume %lo as "x" [#wave.pred<"-2147483647 + x <= 0">] : i32

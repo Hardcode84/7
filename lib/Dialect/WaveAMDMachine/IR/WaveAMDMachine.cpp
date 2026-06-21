@@ -185,6 +185,12 @@ void VLshrrevB32Op::inferResultRanges(ArrayRef<ConstantIntRanges> argRanges,
                                   normalizeMachineU32Ranges(argRanges)));
 }
 
+void VAshrrevI32Op::inferResultRanges(ArrayRef<ConstantIntRanges> argRanges,
+                                      SetIntRangeFn setResultRange) {
+  setResultRange(getResult(), mlir::intrange::inferShrS(
+                                  normalizeMachineU32Ranges(argRanges)));
+}
+
 void VMulLoU32Op::inferResultRanges(ArrayRef<ConstantIntRanges> argRanges,
                                     SetIntRangeFn setResultRange) {
   setResultRange(getResult(), mlir::intrange::inferMul(

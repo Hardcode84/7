@@ -13,7 +13,9 @@
   X(sMulI32, S_MUL_I32_vi, S_MUL_I32_gfx11)                                    \
   X(sLshlB32, S_LSHL_B32_vi, S_LSHL_B32_gfx11)                                 \
   X(sLshrB32, S_LSHR_B32_vi, S_LSHR_B32_gfx11)                                 \
+  X(sAshrI32, S_ASHR_I32_vi, S_ASHR_I32_gfx11)                                 \
   X(sLshrB64, S_LSHR_B64_vi, S_LSHR_B64_gfx11)                                 \
+  X(sAshrI64, S_ASHR_I64_vi, S_ASHR_I64_gfx11)                                 \
   X(sFf1I32B32, S_FF1_I32_B32_vi, S_FF1_I32_B32_gfx11)                         \
   X(sFf1I32B64, S_FF1_I32_B64_vi, S_FF1_I32_B64_gfx11)                         \
   X(sFlbitI32B32, S_FLBIT_I32_B32_vi, S_FLBIT_I32_B32_gfx11)                   \
@@ -66,7 +68,9 @@
   X(vXorB32, V_XOR_B32_e32_vi, V_XOR_B32_e32_gfx11)                            \
   X(vLshlrevB32, V_LSHLREV_B32_e32_vi, V_LSHLREV_B32_e32_gfx11)                \
   X(vLshrrevB32, V_LSHRREV_B32_e32_vi, V_LSHRREV_B32_e32_gfx11)                \
+  X(vAshrrevI32, V_ASHRREV_I32_e32_vi, V_ASHRREV_I32_e32_gfx11)                \
   X(vLshrrevB64, V_LSHRREV_B64_vi, V_LSHRREV_B64_e64_gfx11)                    \
+  X(vAshrrevI64, V_ASHRREV_I64_vi, V_ASHRREV_I64_e64_gfx11)                    \
   X(vFfbhU32, V_FFBH_U32_e32_vi, V_CLZ_I32_U32_e32_gfx11)                      \
   X(vFfblB32, V_FFBL_B32_e32_vi, V_CTZ_I32_B32_e32_gfx11)                      \
   X(vReadfirstlaneB32, V_READFIRSTLANE_B32_vi, V_READFIRSTLANE_B32_gfx11)      \
