@@ -63,6 +63,12 @@ static TermKind materializationKind(WaveAMDMachineSelector &S,
 static unsigned materializationLoopDepth(sym::ExprHandle expr, Operation *user,
                                          const llvm::StringMap<Value> &subs);
 
+static bool canMaterializeIntegerRationalExpr(sym::ExprHandle expr);
+
+static FailureOr<Value> materializeIntegerRationalExpr(
+    WaveAMDMachineSelector &S, sym::ExprHandle expr, Operation *user,
+    const llvm::StringMap<Value> &subs, ArrayRef<sym::PredHandle> assumptions);
+
 static bool isHoistScope(Operation *op) { return isa<LoopLikeOpInterface>(op); }
 
 static Operation *scopeOp(Value value) {
@@ -416,6 +422,8 @@ FailureOr<Value> materializeAdd(WaveAMDMachineSelector &S, sym::ExprHandle expr,
                                 const llvm::StringMap<Value> &subs,
                                 ArrayRef<sym::PredHandle> assumptions,
                                 IndexExprAddOrder addOrder) {
+  if (canMaterializeIntegerRationalExpr(expr))
+    return materializeIntegerRationalExpr(S, expr, user, subs, assumptions);
   if (addOrder == IndexExprAddOrder::LaneFirst)
     return materializeAddLaneFirst(S, expr, user, subs, assumptions);
   return materializeAddUniformFirst(S, expr, user, subs, assumptions);
@@ -440,39 +448,63 @@ FailureOr<Value> materializeMulFactor(WaveAMDMachineSelector &S,
   return pow;
 }
 
+static LogicalResult materializeMulSeed(WaveAMDMachineSelector &S,
+                                        sym::ExprHandle coeff, Operation *user,
+                                        const llvm::StringMap<Value> &subs,
+                                        ArrayRef<sym::PredHandle> assumptions,
+                                        IndexExprAddOrder addOrder,
+                                        std::optional<Value> &acc) {
+  std::optional<int64_t> coeffInt = staticIntLiteral(coeff);
+  if (coeffInt && *coeffInt == 1)
+    return success();
+  FailureOr<Value> seed =
+      materializeIndexExprNode(S, coeff, user, subs, assumptions, addOrder);
+  if (failed(seed))
+    return failure();
+  acc = *seed;
+  return success();
+}
+
+static Value combineMulValues(WaveAMDMachineSelector &S, Location loc,
+                              Value lhs, Value rhs) {
+  if (S.isUniformValue(lhs) && S.isUniformValue(rhs))
+    return S.mulUniformValues(loc, lhs, rhs);
+  return S.mulIndexValues(loc, lhs, rhs);
+}
+
+static LogicalResult
+appendMulFactor(WaveAMDMachineSelector &S, const OrderedMulFactor &ordered,
+                Operation *user, const llvm::StringMap<Value> &subs,
+                ArrayRef<sym::PredHandle> assumptions,
+                IndexExprAddOrder addOrder, std::optional<Value> &acc) {
+  FailureOr<Value> pow = materializeMulFactor(S, ordered.factor, user, subs,
+                                              assumptions, addOrder);
+  if (failed(pow))
+    return failure();
+  acc = acc ? combineMulValues(S, user->getLoc(), *acc, *pow) : *pow;
+  return success();
+}
+
 // MUL = coeff * prod(base[i] ^ exp[i]). Skip the coeff when it's 1.
 FailureOr<Value> materializeMul(WaveAMDMachineSelector &S, sym::ExprHandle expr,
                                 Operation *user,
                                 const llvm::StringMap<Value> &subs,
                                 ArrayRef<sym::PredHandle> assumptions,
                                 IndexExprAddOrder addOrder) {
+  if (canMaterializeIntegerRationalExpr(expr))
+    return materializeIntegerRationalExpr(S, expr, user, subs, assumptions);
   Location loc = user->getLoc();
   sym::ExprView view(expr);
-  sym::ExprHandle coeff = view.getMulCoefficient();
-  std::optional<int64_t> coeffInt = staticIntLiteral(coeff);
   std::optional<Value> acc;
-  if (!coeffInt || *coeffInt != 1) {
-    FailureOr<Value> seed =
-        materializeIndexExprNode(S, coeff, user, subs, assumptions, addOrder);
-    if (failed(seed))
-      return failure();
-    acc = *seed;
-  }
+  if (failed(materializeMulSeed(S, view.getMulCoefficient(), user, subs,
+                                assumptions, addOrder, acc)))
+    return failure();
   SmallVector<OrderedMulFactor, 8> factors =
       collectOrderedMulFactors(S, expr, user, subs);
-  for (const OrderedMulFactor &ordered : factors) {
-    FailureOr<Value> pow = materializeMulFactor(S, ordered.factor, user, subs,
-                                                assumptions, addOrder);
-    if (failed(pow))
+  for (const OrderedMulFactor &ordered : factors)
+    if (failed(appendMulFactor(S, ordered, user, subs, assumptions, addOrder,
+                               acc)))
       return failure();
-    if (!acc) {
-      acc = *pow;
-    } else if (S.isUniformValue(*acc) && S.isUniformValue(*pow)) {
-      acc = S.mulUniformValues(loc, *acc, *pow);
-    } else {
-      acc = S.mulIndexValues(loc, *acc, *pow);
-    }
-  }
   return acc ? *acc : createImm(S.builder, loc, 1);
 }
 
@@ -561,6 +593,160 @@ struct BinaryValues {
 static std::optional<int64_t> checkedLCM(int64_t lhs, int64_t rhs) {
   int64_t gcd = std::gcd(lhs, rhs);
   return llvm::checkedMul(lhs / gcd, rhs);
+}
+
+static bool isPositivePowerOfTwo(int64_t value) {
+  return value > 0 && (value & (value - 1)) == 0;
+}
+
+static unsigned cappedPow2Divisibility(int64_t value) {
+  if (value == 0)
+    return 62;
+  uint64_t magnitude = value < 0 ? uint64_t{0} - static_cast<uint64_t>(value)
+                                 : static_cast<uint64_t>(value);
+  return std::min<unsigned>(llvm::countr_zero(magnitude), 62);
+}
+
+static std::optional<RationalPow2Shape>
+inferRationalPow2ShapeImpl(sym::ExprHandle expr);
+
+static std::optional<RationalPow2Shape>
+mulRationalPow2Shape(RationalPow2Shape lhs, RationalPow2Shape rhs) {
+  std::optional<int64_t> denominator =
+      llvm::checkedMul(lhs.denominator, rhs.denominator);
+  if (!denominator)
+    return std::nullopt;
+  return RationalPow2Shape{
+      *denominator,
+      std::min(lhs.numeratorPow2Divisibility + rhs.numeratorPow2Divisibility,
+               62u)};
+}
+
+static std::optional<RationalPow2Shape>
+addRationalPow2Shape(RationalPow2Shape lhs, RationalPow2Shape rhs) {
+  std::optional<int64_t> denominator =
+      checkedLCM(lhs.denominator, rhs.denominator);
+  if (!denominator)
+    return std::nullopt;
+  int64_t lhsScale = *denominator / lhs.denominator;
+  int64_t rhsScale = *denominator / rhs.denominator;
+  unsigned lhsDiv = std::min(
+      lhs.numeratorPow2Divisibility + cappedPow2Divisibility(lhsScale), 62u);
+  unsigned rhsDiv = std::min(
+      rhs.numeratorPow2Divisibility + cappedPow2Divisibility(rhsScale), 62u);
+  return RationalPow2Shape{*denominator, std::min(lhsDiv, rhsDiv)};
+}
+
+static std::optional<RationalPow2Shape>
+inferAddRationalPow2Shape(sym::ExprView view) {
+  std::optional<RationalPow2Shape> acc =
+      inferRationalPow2ShapeImpl(view.getAddConstant());
+  if (!acc)
+    return std::nullopt;
+  for (uint32_t i : llvm::seq<uint32_t>(0, view.getAddTermCount())) {
+    sym::AddTerm term = view.getAddTerm(i);
+    std::optional<RationalPow2Shape> coefficient =
+        inferRationalPow2ShapeImpl(term.coefficient);
+    std::optional<RationalPow2Shape> value =
+        inferRationalPow2ShapeImpl(term.term);
+    if (!coefficient || !value)
+      return std::nullopt;
+    std::optional<RationalPow2Shape> product =
+        mulRationalPow2Shape(*coefficient, *value);
+    if (!product)
+      return std::nullopt;
+    acc = addRationalPow2Shape(*acc, *product);
+    if (!acc)
+      return std::nullopt;
+  }
+  return acc;
+}
+
+static std::optional<RationalPow2Shape>
+inferMulRationalPow2Shape(sym::ExprView view) {
+  std::optional<RationalPow2Shape> acc =
+      inferRationalPow2ShapeImpl(view.getMulCoefficient());
+  if (!acc)
+    return std::nullopt;
+  for (uint32_t i : llvm::seq<uint32_t>(0, view.getMulFactorCount())) {
+    sym::MulFactor factor = view.getMulFactor(i);
+    if (factor.exponent <= 0)
+      return std::nullopt;
+    std::optional<RationalPow2Shape> base =
+        inferRationalPow2ShapeImpl(factor.base);
+    if (!base)
+      return std::nullopt;
+    for ([[maybe_unused]] int32_t e : llvm::seq<int32_t>(0, factor.exponent)) {
+      acc = mulRationalPow2Shape(*acc, *base);
+      if (!acc)
+        return std::nullopt;
+    }
+  }
+  return acc;
+}
+
+static std::optional<RationalPow2Shape>
+inferModRationalPow2Shape(sym::ExprView view) {
+  std::optional<RationalPow2Shape> lhs =
+      inferRationalPow2ShapeImpl(view.getBinaryLhs());
+  std::optional<int64_t> rhs = staticIntLiteral(view.getBinaryRhs());
+  if (!lhs || !rhs)
+    return std::nullopt;
+  std::optional<int64_t> divisor = llvm::checkedMul(lhs->denominator, *rhs);
+  if (!divisor || !isPositivePowerOfTwo(*divisor))
+    return std::nullopt;
+  return RationalPow2Shape{lhs->denominator,
+                           std::min(lhs->numeratorPow2Divisibility,
+                                    cappedPow2Divisibility(*divisor))};
+}
+
+static std::optional<RationalPow2Shape>
+inferLeafOrOpaqueRationalPow2Shape(sym::ExprView view) {
+  switch (view.getKind()) {
+  case sym::ExprKind::Integer:
+    if (std::optional<int64_t> value = view.getInt())
+      return RationalPow2Shape{1, cappedPow2Divisibility(*value)};
+    return std::nullopt;
+  case sym::ExprKind::Rational: {
+    std::optional<sym::RationalLiteral> rational = view.getRational();
+    if (!rational || rational->denominator <= 0)
+      return std::nullopt;
+    return RationalPow2Shape{rational->denominator,
+                             cappedPow2Divisibility(rational->numerator)};
+  }
+  case sym::ExprKind::Symbol:
+  case sym::ExprKind::Floor:
+  case sym::ExprKind::Ceil:
+  case sym::ExprKind::Xor:
+    return RationalPow2Shape{1, 0};
+  default:
+    return std::nullopt;
+  }
+}
+
+static std::optional<RationalPow2Shape>
+inferRationalPow2ShapeImpl(sym::ExprHandle expr) {
+  sym::ExprView view(expr);
+  if (std::optional<RationalPow2Shape> shape =
+          inferLeafOrOpaqueRationalPow2Shape(view))
+    return shape;
+  switch (view.getKind()) {
+  case sym::ExprKind::Add:
+    return inferAddRationalPow2Shape(view);
+  case sym::ExprKind::Mul:
+    return inferMulRationalPow2Shape(view);
+  case sym::ExprKind::Mod:
+    return inferModRationalPow2Shape(view);
+  default:
+    return std::nullopt;
+  }
+}
+
+static bool canMaterializeIntegerRationalExpr(sym::ExprHandle expr) {
+  std::optional<RationalPow2Shape> shape = inferRationalPow2Shape(expr);
+  if (!shape || shape->denominator == 1)
+    return false;
+  return isIntegerValuedRationalPow2Expr(expr, shape->denominator);
 }
 
 static OpFoldResult getIntFoldResult(WaveAMDMachineSelector &S, int64_t value) {
@@ -778,12 +964,96 @@ static bool hasNonNegativeLowerBound(const sym::InferredRange &range) {
          range.lower->numerator >= 0;
 }
 
+static bool isNonNegativeLiteral(sym::ExprHandle expr) {
+  sym::ExprView view(expr);
+  if (std::optional<int64_t> value = view.getInt())
+    return *value >= 0;
+  if (std::optional<sym::RationalLiteral> rational = view.getRational())
+    return rational->denominator > 0 && rational->numerator >= 0;
+  return false;
+}
+
+static bool isProvablyNonNegativeByShape(WaveAMDMachineSelector &S,
+                                         sym::ExprHandle expr,
+                                         ArrayRef<sym::PredHandle> assumptions);
+
+static bool
+hasInferredNonNegativeLowerBound(WaveAMDMachineSelector &S,
+                                 sym::ExprHandle expr,
+                                 ArrayRef<sym::PredHandle> assumptions) {
+  std::optional<sym::InferredRange> range =
+      sym::inferRange(S.symbolStore(), expr, assumptions);
+  return range && hasNonNegativeLowerBound(*range);
+}
+
+static bool isNonNegativeAddExpr(WaveAMDMachineSelector &S,
+                                 sym::ExprHandle expr,
+                                 ArrayRef<sym::PredHandle> assumptions) {
+  sym::ExprView view(expr);
+  if (!isProvablyNonNegativeByShape(S, view.getAddConstant(), assumptions))
+    return false;
+  for (uint32_t i : llvm::seq<uint32_t>(0, view.getAddTermCount())) {
+    sym::AddTerm term = view.getAddTerm(i);
+    if (!isProvablyNonNegativeByShape(S, term.coefficient, assumptions) ||
+        !isProvablyNonNegativeByShape(S, term.term, assumptions))
+      return false;
+  }
+  return true;
+}
+
+static bool isNonNegativeMulExpr(WaveAMDMachineSelector &S,
+                                 sym::ExprHandle expr,
+                                 ArrayRef<sym::PredHandle> assumptions) {
+  sym::ExprView view(expr);
+  if (!isProvablyNonNegativeByShape(S, view.getMulCoefficient(), assumptions))
+    return false;
+  for (uint32_t i : llvm::seq<uint32_t>(0, view.getMulFactorCount())) {
+    sym::MulFactor factor = view.getMulFactor(i);
+    if (factor.exponent <= 0 ||
+        !isProvablyNonNegativeByShape(S, factor.base, assumptions))
+      return false;
+  }
+  return true;
+}
+
+static bool isNonNegativeModExpr(sym::ExprHandle expr) {
+  std::optional<int64_t> divisor =
+      staticIntLiteral(sym::ExprView(expr).getBinaryRhs());
+  return divisor && *divisor > 0;
+}
+
+static bool
+isProvablyNonNegativeByShape(WaveAMDMachineSelector &S, sym::ExprHandle expr,
+                             ArrayRef<sym::PredHandle> assumptions) {
+  if (hasInferredNonNegativeLowerBound(S, expr, assumptions))
+    return true;
+  sym::ExprView view(expr);
+  switch (view.getKind()) {
+  case sym::ExprKind::Integer:
+  case sym::ExprKind::Rational:
+    return isNonNegativeLiteral(expr);
+  case sym::ExprKind::Add:
+    return isNonNegativeAddExpr(S, expr, assumptions);
+  case sym::ExprKind::Mul:
+    return isNonNegativeMulExpr(S, expr, assumptions);
+  case sym::ExprKind::Mod:
+    return isNonNegativeModExpr(expr);
+  case sym::ExprKind::Floor:
+  case sym::ExprKind::Ceil:
+    return isProvablyNonNegativeByShape(S, view.getUnaryArg(), assumptions);
+  default:
+    return false;
+  }
+}
+
 static LogicalResult requireNonNegativeRoundedExpr(
     WaveAMDMachineSelector &S, sym::ExprHandle sourceExpr, Operation *user,
     ArrayRef<sym::PredHandle> assumptions, StringRef opName) {
   std::optional<sym::InferredRange> range =
       sym::inferRange(S.symbolStore(), sourceExpr, assumptions);
   if (range && hasNonNegativeLowerBound(*range))
+    return success();
+  if (isProvablyNonNegativeByShape(S, sourceExpr, assumptions))
     return success();
   return user->emitError("wave.index_expr ")
          << opName << " shift lowering needs nonnegative operand";
@@ -839,6 +1109,32 @@ materializeCeilRational(WaveAMDMachineSelector &S, RationalIndexValue value,
                      ? S.addUniformBytes(user->getLoc(), *numerator, bias)
                      : S.addByteOffsets(user->getLoc(), *numerator, bias);
   return S.shrPow2(user->getLoc(), biased, llvm::Log2_64(den));
+}
+
+static FailureOr<Value> materializeIntegerRationalExpr(
+    WaveAMDMachineSelector &S, sym::ExprHandle expr, Operation *user,
+    const llvm::StringMap<Value> &subs, ArrayRef<sym::PredHandle> assumptions) {
+  FailureOr<RationalIndexValue> value =
+      materializeRationalIndexExprNode(S, expr, user, subs, assumptions);
+  if (failed(value))
+    return failure();
+  std::optional<int64_t> staticDen = getStaticInt(S, value->denominator);
+  if (!staticDen)
+    return user->emitError("wave.index_expr needs a static denominator");
+  int64_t den = *staticDen;
+  FailureOr<Value> numerator =
+      materializeValue(S, user->getLoc(), value->numerator, user);
+  if (failed(numerator))
+    return failure();
+  if (den == 1)
+    return *numerator;
+  if (!canMaterializeIntegerRationalExpr(expr))
+    return user->emitError(
+        "wave.index_expr selection rejects non-integer rational");
+  if (failed(requireNonNegativeRoundedExpr(S, expr, user, assumptions,
+                                           "rational")))
+    return failure();
+  return S.shrPow2(user->getLoc(), *numerator, llvm::Log2_64(den));
 }
 
 static FailureOr<int64_t> getStaticModDivisor(WaveAMDMachineSelector &S,
@@ -1461,6 +1757,21 @@ assignPlanAddends(WaveAMDMachineSelector &S,
 } // namespace
 
 // ---- public surface (declared in WaveAMDMachineSelector.h) ----------------
+
+std::optional<RationalPow2Shape> inferRationalPow2Shape(sym::ExprHandle expr) {
+  return inferRationalPow2ShapeImpl(expr);
+}
+
+bool isIntegerValuedRationalPow2Expr(sym::ExprHandle expr,
+                                     int64_t denominator) {
+  if (denominator == 1)
+    return true;
+  if (!isPositivePowerOfTwo(denominator))
+    return false;
+  std::optional<RationalPow2Shape> shape = inferRationalPow2Shape(expr);
+  return shape && shape->denominator == denominator &&
+         shape->numeratorPow2Divisibility >= llvm::Log2_64(denominator);
+}
 
 bool needsWideAddressMaterialization(sym::ExprHandle expr,
                                      const AddressPlan &plan) {

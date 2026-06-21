@@ -142,6 +142,15 @@ FailureOr<Value> materializeIndexExprNode(
     ArrayRef<sym::PredHandle> assumptions = {},
     IndexExprAddOrder addOrder = IndexExprAddOrder::UniformFirst);
 
+struct RationalPow2Shape {
+  int64_t denominator = 1;
+  unsigned numeratorPow2Divisibility = 0;
+};
+
+std::optional<RationalPow2Shape> inferRationalPow2Shape(sym::ExprHandle expr);
+
+bool isIntegerValuedRationalPow2Expr(sym::ExprHandle expr, int64_t denominator);
+
 FailureOr<PointerOffset> makePointerOffset(WaveAMDMachineSelector &S,
                                            const SymbolicOffset &offset);
 

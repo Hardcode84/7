@@ -2229,18 +2229,24 @@ static FailureOr<Value>
 materializeWideMod(WaveAMDMachineSelector &S, sym::ExprHandle expr,
                    Operation *user, ArrayRef<WideSymbolBinding> bindings,
                    ArrayRef<sym::PredHandle> assumptions,
-                   bool symbolsAreUniform, IndexExprAddOrder addOrder) {
+                   bool symbolsAreUniform, IndexExprAddOrder) {
   sym::ExprView view(expr);
-  std::optional<int64_t> rhsInt = staticIntLiteral(view.getBinaryRhs());
-  if (!rhsInt || !isPositivePowerOfTwo(*rhsInt))
-    return user->emitError(
-        "full-address index_expr mod needs a power-of-two integer divisor");
-  FailureOr<Value> lhs =
-      materializeWideIndexExprNode(S, view.getBinaryLhs(), user, bindings,
-                                   assumptions, symbolsAreUniform, addOrder);
-  if (failed(lhs))
+  FailureOr<WideRationalValue> lhs = materializeWideRationalIndexExprNode(
+      S, view.getBinaryLhs(), user, bindings, assumptions, symbolsAreUniform);
+  FailureOr<WideRationalValue> rhs = materializeWideRationalIndexExprNode(
+      S, view.getBinaryRhs(), user, bindings, assumptions, symbolsAreUniform);
+  if (failed(lhs) || failed(rhs))
     return failure();
-  return andWideMask(S, user->getLoc(), *lhs, *rhsInt - 1);
+  FailureOr<int64_t> divisor = getStaticWideModDivisor(S, *lhs, *rhs, user);
+  if (failed(divisor))
+    return failure();
+  if (!isIntegerValuedRationalPow2Expr(view.getBinaryLhs(), lhs->denominator))
+    return user->emitError(
+        "full-address index_expr mod needs an integer-valued lhs");
+  Value numerator =
+      andWideMask(S, user->getLoc(), lhs->numerator, *divisor - 1);
+  return lshrWidePow2(S, user->getLoc(), numerator,
+                      llvm::Log2_64(lhs->denominator));
 }
 
 static FailureOr<Value> materializeWidePrimitiveIndexExprNode(
@@ -6621,6 +6627,11 @@ struct DmaSourceAddress {
   Value base;
 };
 
+struct DmaFallbackLoad {
+  SmallVector<Value, 4> values;
+  Value token;
+};
+
 static FailureOr<DmaPointers> lookupDmaPointers(WaveAMDMachineSelector &S,
                                                 waveamd::DmaLoadLdsOp op) {
   auto srcBaseIt = S.pointerBases.find(op.getSource());
@@ -6648,6 +6659,96 @@ static LogicalResult requireUniformDmaDest(WaveAMDMachineSelector &S,
   if (kind == TermKind::Lane)
     return op.emitError("DMA LDS destination must be uniform");
   return success();
+}
+
+static waveamdmachine::AddressFieldSpec
+dmaFallbackStoreSpec(waveamd::DmaLoadLdsOp op) {
+  if (op.getBytes() == 4)
+    return waveamdmachine::DsStoreB32Op::getAddressFieldSpec();
+  waveamdmachine::AddressFieldSpec spec =
+      waveamdmachine::DsStoreTupleB32Op::getAddressFieldSpec();
+  spec.instOffsetHeadroom = static_cast<unsigned>(op.getBytes() - 4);
+  return spec;
+}
+
+static FailureOr<MaterializedLdsAddress>
+materializeDmaFallbackLdsAddress(WaveAMDMachineSelector &S,
+                                 waveamd::DmaLoadLdsOp op, Value dstBase,
+                                 const PointerOffset &dstOffset) {
+  if (failed(requireUniformDmaDest(S, op, dstOffset)))
+    return failure();
+  FailureOr<MaterializedLdsAddress> address = materializeLdsAddress(
+      S, op.getOperation(), dstBase, dstOffset, dmaFallbackStoreSpec(op));
+  if (failed(address))
+    return failure();
+  auto simdType = dyn_cast<SimdType>(op.getSource().getType());
+  if (!simdType || (simdType.getWidth() != 32 && simdType.getWidth() != 64))
+    return op.emitError(
+        "addr64 DMA LDS fallback expects 32/64-wide SIMD source");
+  Type vgprType =
+      getRegType(S.builder.getContext(), waveamdmachine::RegClass::VGPR);
+  Value lane =
+      waveamdmachine::VMbcntLoOp::create(S.builder, op.getLoc(), vgprType);
+  if (simdType.getWidth() == 64)
+    lane = waveamdmachine::VMbcntHiOp::create(S.builder, op.getLoc(), vgprType,
+                                              lane);
+  FailureOr<Value> laneBytes =
+      scaleVOffset(S, op.getLoc(), lane, static_cast<unsigned>(op.getBytes()));
+  if (failed(laneBytes))
+    return failure();
+  address->addr = S.addByteOffsets(op.getLoc(), address->addr, *laneBytes);
+  return *address;
+}
+
+static FailureOr<DmaFallbackLoad>
+materializeDmaFallbackGlobalLoads(WaveAMDMachineSelector &S,
+                                  waveamd::DmaLoadLdsOp op, Value srcBase,
+                                  const AddressPlan &srcPlan) {
+  FailureOr<Value> addr =
+      materializeFullPlanAddress(S, op.getOperation(), srcBase, srcPlan);
+  if (failed(addr))
+    return failure();
+  Value dep = S.expect(op.getDependency(), op);
+  Type tokenType = getMemTokenType(op.getContext());
+  Type vgpr1 = getRegType(op.getContext(), waveamdmachine::RegClass::VGPR, 1);
+  DmaFallbackLoad out;
+  SmallVector<Value, 4> tokens;
+  unsigned dwords = static_cast<unsigned>(op.getBytes() / 4);
+  for (unsigned idx : llvm::seq<unsigned>(0, dwords)) {
+    Operation *load = waveamdmachine::GlobalLoadB32Addr64Op::create(
+        S.builder, op.getLoc(), vgpr1, tokenType, *addr, dep,
+        static_cast<int64_t>(idx) * 4);
+    out.values.push_back(load->getResult(0));
+    tokens.push_back(load->getResult(1));
+  }
+  out.token = tokens.size() == 1
+                  ? tokens.front()
+                  : waveamdmachine::TokenJoinOp::create(S.builder, op.getLoc(),
+                                                        tokenType, tokens)
+                        .getResult();
+  return out;
+}
+
+static FailureOr<Value> materializeDmaFallbackLdsStore(
+    WaveAMDMachineSelector &S, waveamd::DmaLoadLdsOp op,
+    const MaterializedLdsAddress &dst, ArrayRef<Value> values, Value dep) {
+  Type tokenType = getMemTokenType(op.getContext());
+  if (values.size() == 1) {
+    Value value = S.ensureVGPRForVSrc1(op.getLoc(), values.front());
+    return waveamdmachine::DsStoreB32Op::create(S.builder, op.getLoc(),
+                                                tokenType, dst.addr, value, dep,
+                                                dst.instOffset)
+        .getResult(0);
+  }
+  Type tupleType = getRegType(op.getContext(), waveamdmachine::RegClass::VGPR,
+                              values.size());
+  Value tuple = waveamdmachine::TupleFromElementsOp::create(
+                    S.builder, op.getLoc(), tupleType, values)
+                    .getTuple();
+  return waveamdmachine::DsStoreTupleB32Op::create(S.builder, op.getLoc(),
+                                                   tokenType, dst.addr, tuple,
+                                                   dep, dst.instOffset)
+      .getResult(0);
 }
 
 static FailureOr<Value> materializeDmaM0FieldPlan(WaveAMDMachineSelector &S,
@@ -6713,6 +6814,22 @@ static waveamdmachine::AddressFieldSpec dmaAddressSpec(bool isBuffer,
                                                        int64_t bytes);
 
 static LogicalResult foldBufferDmaAddressFields(WaveAMDMachineSelector &S,
+                                                AddressPlan &plan);
+
+static FailureOr<AddressPlan>
+planDmaSourceAddress(WaveAMDMachineSelector &S, waveamd::DmaLoadLdsOp op,
+                     const PointerOffset &offset, bool isBuffer,
+                     const waveamdmachine::AddressFieldSpec &spec) {
+  FailureOr<AddressPlan> plan = planMemoryAddress(S, op, offset, spec);
+  if (failed(plan))
+    return failure();
+  if (isBuffer && (plan->soffsetExpr || plan->fullAddressRemainderExpr))
+    if (failed(foldBufferDmaAddressFields(S, *plan)))
+      return failure();
+  return *plan;
+}
+
+static LogicalResult foldBufferDmaAddressFields(WaveAMDMachineSelector &S,
                                                 AddressPlan &plan) {
   // Buffer DMA dynamic soffset is slow; fold into vaddr when proven safe.
   FailureOr<sym::ExprHandle> voffset = appendAddressExpr(
@@ -6776,6 +6893,62 @@ materializeGlobalDmaLaneSourceAddress(WaveAMDMachineSelector &S,
   return DmaSourceAddress{out, base};
 }
 
+static FailureOr<bool> needsGlobalDmaAddr64Fallback(WaveAMDMachineSelector &S,
+                                                    waveamd::DmaLoadLdsOp op,
+                                                    const AddressPlan &plan) {
+  if (!plan.fullAddressRemainderExpr)
+    return false;
+  if (classifyPlanExpr(S, plan, plan.fullAddressRemainderExpr) !=
+      TermKind::Lane)
+    return false;
+  FailureOr<sym::ExprHandle> expr = planCompleteAddressExpr(S, plan);
+  if (failed(expr))
+    return failure();
+  bool useWide = needsWideAddressMaterialization(*expr, plan);
+  return !S.slotFitsU32(*expr, plan.assumptions) &&
+         (useWide || !positiveAddendsFitU32(S, *expr, plan.assumptions));
+}
+
+static LogicalResult selectDmaLoadLdsAddr64Fallback(
+    WaveAMDMachineSelector &S, waveamd::DmaLoadLdsOp op, Value srcBase,
+    Value dstBase, const AddressPlan &srcPlan, const PointerOffset &dstOffset) {
+  FailureOr<MaterializedLdsAddress> dst =
+      materializeDmaFallbackLdsAddress(S, op, dstBase, dstOffset);
+  if (failed(dst))
+    return failure();
+  FailureOr<DmaFallbackLoad> load =
+      materializeDmaFallbackGlobalLoads(S, op, srcBase, srcPlan);
+  if (failed(load))
+    return failure();
+  FailureOr<Value> token =
+      materializeDmaFallbackLdsStore(S, op, *dst, load->values, load->token);
+  if (failed(token))
+    return failure();
+  S.values[op.getToken()] = *token;
+  S.eraseIfTopLevel(op);
+  return success();
+}
+
+static FailureOr<bool> selectDmaLoadLdsAddr64FallbackIfNeeded(
+    WaveAMDMachineSelector &S, waveamd::DmaLoadLdsOp op,
+    const DmaPointers &ptrs, const AddressPlan &srcPlan, bool isBuffer) {
+  if (isBuffer)
+    return false;
+  FailureOr<bool> useFallback = needsGlobalDmaAddr64Fallback(S, op, srcPlan);
+  if (failed(useFallback))
+    return failure();
+  if (!*useFallback)
+    return false;
+  if (op.getAux() != 0) {
+    op.emitError("addr64 DMA LDS fallback does not support nonzero aux");
+    return failure();
+  }
+  if (failed(selectDmaLoadLdsAddr64Fallback(S, op, ptrs.srcBase, ptrs.dstBase,
+                                            srcPlan, ptrs.dstOffset)))
+    return failure();
+  return true;
+}
+
 static FailureOr<DmaSourceAddress> materializeGlobalDmaFullSourceAddress(
     WaveAMDMachineSelector &S, waveamd::DmaLoadLdsOp op, Value base,
     AddressPlan &plan, const waveamdmachine::AddressFieldSpec &spec) {
@@ -6788,23 +6961,15 @@ static FailureOr<DmaSourceAddress> materializeGlobalDmaFullSourceAddress(
 
 static FailureOr<DmaSourceAddress>
 materializeDmaSourceAddress(WaveAMDMachineSelector &S, waveamd::DmaLoadLdsOp op,
-                            Value base, const PointerOffset &offset,
-                            bool isBuffer) {
-  waveamdmachine::AddressFieldSpec spec =
-      dmaAddressSpec(isBuffer, op.getBytes());
-  FailureOr<AddressPlan> plan = planMemoryAddress(S, op, offset, spec);
-  if (failed(plan))
-    return failure();
-  if (isBuffer && (plan->soffsetExpr || plan->fullAddressRemainderExpr))
-    if (failed(foldBufferDmaAddressFields(S, *plan)))
-      return failure();
-  if (plan->fullAddressRemainderExpr) {
+                            Value base, AddressPlan &plan, bool isBuffer,
+                            const waveamdmachine::AddressFieldSpec &spec) {
+  if (plan.fullAddressRemainderExpr) {
     if (isBuffer)
       return emitBufferAddressFieldError(op.getOperation());
-    return materializeGlobalDmaFullSourceAddress(S, op, base, *plan, spec);
+    return materializeGlobalDmaFullSourceAddress(S, op, base, plan, spec);
   }
   FailureOr<WaveAMDMachineSelector::BucketedOperands> buckets =
-      materializePlanBuckets(S, op, *plan, spec);
+      materializePlanBuckets(S, op, plan, spec);
   if (failed(buckets))
     return failure();
   return DmaSourceAddress{*buckets, base};
@@ -6821,6 +6986,51 @@ static waveamdmachine::AddressFieldSpec dmaAddressSpec(bool isBuffer,
              : waveamdmachine::GlobalLoadLdsB32Op::getAddressFieldSpec();
 }
 
+static Value createBufferDmaLoadLdsMachineOp(WaveAMDMachineSelector &S,
+                                             waveamd::DmaLoadLdsOp op,
+                                             const DmaSourceAddress &source,
+                                             Value m0) {
+  WaveAMDMachineSelector::BucketedOperands b = source.buckets;
+  IntegerAttr instOffsetAttr = S.builder.getI64IntegerAttr(b.instOffset);
+  IntegerAttr auxAttr = op.getAux() != 0 ? op.getAuxAttr() : IntegerAttr{};
+  Type tokenType = getMemTokenType(op.getContext());
+  Value dep = S.expect(op.getDependency(), op);
+  if (op.getBytes() == 16)
+    return waveamdmachine::BufferLoadLdsB128Op::create(
+        S.builder, op.getLoc(), tokenType, b.voffset, source.base, b.soffset,
+        m0, dep, instOffsetAttr, auxAttr);
+  return waveamdmachine::BufferLoadLdsB32Op::create(
+      S.builder, op.getLoc(), tokenType, b.voffset, source.base, b.soffset, m0,
+      dep, instOffsetAttr, auxAttr);
+}
+
+static Value createGlobalDmaLoadLdsMachineOp(WaveAMDMachineSelector &S,
+                                             waveamd::DmaLoadLdsOp op,
+                                             const DmaSourceAddress &source,
+                                             Value m0) {
+  WaveAMDMachineSelector::BucketedOperands b = source.buckets;
+  IntegerAttr instOffsetAttr = S.builder.getI64IntegerAttr(b.instOffset);
+  IntegerAttr auxAttr = op.getAux() != 0 ? op.getAuxAttr() : IntegerAttr{};
+  Type tokenType = getMemTokenType(op.getContext());
+  Value dep = S.expect(op.getDependency(), op);
+  if (op.getBytes() == 16)
+    return waveamdmachine::GlobalLoadLdsB128Op::create(
+        S.builder, op.getLoc(), tokenType, b.voffset, source.base, m0, dep,
+        instOffsetAttr, auxAttr);
+  return waveamdmachine::GlobalLoadLdsB32Op::create(
+      S.builder, op.getLoc(), tokenType, b.voffset, source.base, m0, dep,
+      instOffsetAttr, auxAttr);
+}
+
+static Value createDmaLoadLdsMachineOp(WaveAMDMachineSelector &S,
+                                       waveamd::DmaLoadLdsOp op,
+                                       const DmaSourceAddress &source, Value m0,
+                                       bool isBuffer) {
+  if (isBuffer)
+    return createBufferDmaLoadLdsMachineOp(S, op, source, m0);
+  return createGlobalDmaLoadLdsMachineOp(S, op, source, m0);
+}
+
 LogicalResult
 WaveAMDMachineSelector::selectDmaLoadLds(waveamd::DmaLoadLdsOp op) {
   if (op.getBytes() != 4 && op.getBytes() != 16)
@@ -6828,41 +7038,28 @@ WaveAMDMachineSelector::selectDmaLoadLds(waveamd::DmaLoadLdsOp op) {
   FailureOr<DmaPointers> ptrs = lookupDmaPointers(*this, op);
   if (failed(ptrs))
     return failure();
+  bool isBuffer = pointerBuffers.lookup(op.getSource());
+  waveamdmachine::AddressFieldSpec spec =
+      dmaAddressSpec(isBuffer, op.getBytes());
+  FailureOr<AddressPlan> sourcePlan =
+      planDmaSourceAddress(*this, op, ptrs->srcOffset, isBuffer, spec);
+  if (failed(sourcePlan))
+    return failure();
+  FailureOr<bool> selectedFallback = selectDmaLoadLdsAddr64FallbackIfNeeded(
+      *this, op, *ptrs, *sourcePlan, isBuffer);
+  if (failed(selectedFallback))
+    return failure();
+  if (*selectedFallback)
+    return success();
   FailureOr<Value> m0 =
       materializeDmaM0(*this, op, ptrs->dstBase, ptrs->dstOffset);
   if (failed(m0))
     return failure();
-
-  bool isBuffer = pointerBuffers.lookup(op.getSource());
   FailureOr<DmaSourceAddress> source = materializeDmaSourceAddress(
-      *this, op, ptrs->srcBase, ptrs->srcOffset, isBuffer);
+      *this, op, ptrs->srcBase, *sourcePlan, isBuffer, spec);
   if (failed(source))
     return failure();
-  BucketedOperands b = source->buckets;
-  IntegerAttr instOffsetAttr = builder.getI64IntegerAttr(b.instOffset);
-  IntegerAttr auxAttr = op.getAux() != 0 ? op.getAuxAttr() : IntegerAttr{};
-  Type tokenType = getMemTokenType(op.getContext());
-  Value dep = expect(op.getDependency(), op);
-  Value token;
-  if (isBuffer) {
-    if (op.getBytes() == 16)
-      token = waveamdmachine::BufferLoadLdsB128Op::create(
-          builder, op.getLoc(), tokenType, b.voffset, source->base, b.soffset,
-          *m0, dep, instOffsetAttr, auxAttr);
-    else
-      token = waveamdmachine::BufferLoadLdsB32Op::create(
-          builder, op.getLoc(), tokenType, b.voffset, source->base, b.soffset,
-          *m0, dep, instOffsetAttr, auxAttr);
-  } else {
-    if (op.getBytes() == 16)
-      token = waveamdmachine::GlobalLoadLdsB128Op::create(
-          builder, op.getLoc(), tokenType, b.voffset, source->base, *m0, dep,
-          instOffsetAttr, auxAttr);
-    else
-      token = waveamdmachine::GlobalLoadLdsB32Op::create(
-          builder, op.getLoc(), tokenType, b.voffset, source->base, *m0, dep,
-          instOffsetAttr, auxAttr);
-  }
+  Value token = createDmaLoadLdsMachineOp(*this, op, *source, *m0, isBuffer);
   values[op.getToken()] = token;
   eraseIfTopLevel(op);
   return success();

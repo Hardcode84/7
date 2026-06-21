@@ -238,6 +238,33 @@ func.func @global_dma_lds_wide_source_base_adjust(
   return
 }
 
+// SELECT-LABEL: func.func @global_dma_lds_addr64_fallback
+// SELECT-NOT: waveamdmachine.global_load_lds_b128
+// SELECT: waveamdmachine.v_mbcnt_lo
+// SELECT: waveamdmachine.v_mbcnt_hi
+// SELECT: waveamdmachine.global_load_b32_addr64
+// SELECT: waveamdmachine.global_load_b32_addr64
+// SELECT: waveamdmachine.global_load_b32_addr64
+// SELECT: waveamdmachine.global_load_b32_addr64
+// SELECT: waveamdmachine.ds_store_tuple_b32
+func.func @global_dma_lds_addr64_fallback(
+    %in: !wave.ptr<#wave.global, i32>)
+    attributes {wave.kernel, wave.lds_size = 512 : i64} {
+  %wi_raw = wave.workitem_id 0 : !wave.simd<i32, 64>
+  %wi = wave.assume %wi_raw as "w" [#wave.pred<"w >= 0">, #wave.pred<"w <= 63">] : !wave.simd<i32, 64>
+  %off = wave.index_expr <"4294967296*w"> ["w"](%wi)
+      : (!wave.simd<i32, 64>) -> !wave.simd<index, 64>
+  %src = wave.ptr_add %in, %off
+      : !wave.ptr<#wave.global, i32>, !wave.simd<index, 64>
+      -> !wave.simd<!wave.ptr<#wave.global, i32>, 64>
+  %lds = wave.lds_base : !wave.ptr<#wave.shared, i32>
+  %tok0 = wave.token : !wave.mem.token
+  %tok = waveamd.dma_load_lds %src -> %lds after %tok0 {bytes = 16 : i64}
+      : (!wave.simd<!wave.ptr<#wave.global, i32>, 64>,
+         !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
+  return
+}
+
 // SELECT-LABEL: func.func @global_dma_lds_source_const_offset
 // SELECT: waveamdmachine.global_load_lds_b128
 // SELECT-SAME: after %{{[A-Za-z0-9_]+}} :
