@@ -44,9 +44,13 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
   }
 
   // CHECK: Name:            regalloc-lds-plan
-  // CHECK: Function:        lds_plan_missing_target_waves
-  // CHECK: status:          missing_target_waves
-  func.func @lds_plan_missing_target_waves() attributes {
+  // CHECK: Function:        lds_plan_no_target_waves
+  // CHECK: status:          available
+  // CHECK: available_bytes: '163840'
+  // CHECK: limit_bytes:     '163840'
+  // CHECK: slot_base:       '0'
+  // CHECK: slot_bytes:      '256'
+  func.func @lds_plan_no_target_waves() attributes {
     wave.kernel,
     wave.workgroup_size = array<i32: 64, 1, 1>
   } {

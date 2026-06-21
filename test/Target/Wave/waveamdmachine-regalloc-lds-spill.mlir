@@ -3,7 +3,7 @@
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 
-// CHECK-LABEL: func.func @lds_spill_codegen
+// CHECK-LABEL: func.func @lds_spill_no_target_waves
 // CHECK-SAME: waveamdmachine.agpr_count = 0 : i64
 // CHECK-SAME: waveamdmachine.lds_size = 768 : i64
 // CHECK-SAME: waveamdmachine.lds_spill_bytes = 768 : i64
@@ -19,13 +19,12 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 // CHECK: waveamdmachine.ds_load_b32 {{.*}} after %[[STORE2]] offset 256
 // CHECK: waveamdmachine.ds_load_b32 {{.*}} after %[[STORE0]]
 
-// WAIT-LABEL: func.func @lds_spill_codegen
+// WAIT-LABEL: func.func @lds_spill_no_target_waves
 // WAIT: waveamdmachine.ds_load_b32 {{.*}} after
 // WAIT: waveamdmachine.s_waitcnt lgkmcnt({{[0-9]+}})
 // WAIT: waveamdmachine.s_waitcnt_vscnt vscnt(0)
-func.func @lds_spill_codegen()
-    attributes {wave.kernel, wave.workgroup_size = array<i32: 64, 1, 1>,
-                waveamdmachine.target_waves = 4 : i64} {
+func.func @lds_spill_no_target_waves()
+    attributes {wave.kernel, wave.workgroup_size = array<i32: 64, 1, 1>} {
   %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
   %base = waveamdmachine.uninit : !waveamdmachine.reg<sgpr, 2>
   %off = waveamdmachine.v_workitem_id_x : !waveamdmachine.reg<vgpr, 1, 0>

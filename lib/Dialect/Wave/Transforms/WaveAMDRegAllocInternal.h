@@ -163,7 +163,6 @@ struct RegisterBudgets {
 enum class LDSSpillPlanStatus : uint8_t {
   Available,
   NotKernel,
-  MissingTargetWaves,
   MissingWorkgroupShape,
   InvalidWorkgroupShape,
   UnsupportedWorkgroupShape,

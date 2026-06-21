@@ -589,17 +589,13 @@ static LDSSpillPlan reject(LDSSpillPlanStatus status, unsigned fixedBytes,
 }
 
 static std::optional<LDSSpillPlan>
-getBasicReject(func::FuncOp func, RegisterBudgets budgets, unsigned fixedBytes,
-               unsigned dynamicBytes, unsigned reservedBytes,
-               unsigned valueBytes) {
+getBasicReject(func::FuncOp func, unsigned fixedBytes, unsigned dynamicBytes,
+               unsigned reservedBytes, unsigned valueBytes) {
   if (!func->hasAttr(wave::WaveDialect::getKernelAttrName()))
     return reject(LDSSpillPlanStatus::NotKernel, fixedBytes, dynamicBytes,
                   reservedBytes, valueBytes);
   if (valueBytes == 0)
     return reject(LDSSpillPlanStatus::InvalidValueBytes, fixedBytes,
-                  dynamicBytes, reservedBytes, valueBytes);
-  if (budgets.targetWaves == 0)
-    return reject(LDSSpillPlanStatus::MissingTargetWaves, fixedBytes,
                   dynamicBytes, reservedBytes, valueBytes);
   return std::nullopt;
 }
@@ -641,6 +637,12 @@ getWorkgroupReject(func::FuncOp func, const LDSTargetInfo &targetInfo,
 static uint64_t getLDSLimitBytes(RegisterBudgets budgets,
                                  const LDSTargetInfo &targetInfo,
                                  unsigned wavesPerWorkgroup) {
+  if (budgets.targetWaves == 0) {
+    if (targetInfo.addressableLocalMemorySize == 0)
+      return targetInfo.localMemorySize;
+    return std::min<uint64_t>(targetInfo.localMemorySize,
+                              targetInfo.addressableLocalMemorySize);
+  }
   uint64_t workgroupsPerCU = std::max<uint64_t>(
       1, (static_cast<uint64_t>(budgets.targetWaves) * targetInfo.eusPerCU) /
              wavesPerWorkgroup);
@@ -680,7 +682,7 @@ static LDSSpillPlan buildLDSSpillPlan(func::FuncOp func,
                                       unsigned reservedSpillBytes,
                                       unsigned fixedLDS, unsigned dynamicLDS) {
   if (std::optional<LDSSpillPlan> plan = getBasicReject(
-          func, budgets, fixedLDS, dynamicLDS, reservedSpillBytes, valueBytes))
+          func, fixedLDS, dynamicLDS, reservedSpillBytes, valueBytes))
     return *plan;
 
   std::optional<LDSTargetInfo> targetInfo = getLDSTargetInfo(func);
@@ -725,10 +727,9 @@ static LDSSpillPlan buildLDSSpillPlan(func::FuncOp func,
 
 StringRef
 mlir::wave::regalloc::getLDSSpillPlanStatusName(LDSSpillPlanStatus status) {
-  static constexpr std::array<llvm::StringLiteral, 10> names = {
+  static constexpr std::array<llvm::StringLiteral, 9> names = {
       "available",
       "not_kernel",
-      "missing_target_waves",
       "missing_workgroup_shape",
       "invalid_workgroup_shape",
       "unsupported_workgroup_shape",
