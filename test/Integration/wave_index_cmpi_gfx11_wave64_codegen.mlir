@@ -9,7 +9,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100",
                    waveamdmachine.wavefront_size = 64 : i64} {
 
 // ASM-LABEL: index_cmpi_gfx11_wave64_codegen:
-// ASM: v_cmp_ge_i32_e64
+// ASM: s_cmp_ge_i32
 // ASM: s_and_saveexec_b64
 // ASM: global_store_b32
 // ASM: .amdhsa_kernel index_cmpi_gfx11_wave64_codegen

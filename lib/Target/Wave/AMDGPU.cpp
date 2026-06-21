@@ -776,6 +776,102 @@ private:
     return std::nullopt;
   }
 
+  unsigned getConstantBusLimit() const {
+    return isaVersion.Major >= 10 ? 2 : 1;
+  }
+
+  bool isSGPR(Value value) const {
+    auto regType = dyn_cast<waveamdmachine::RegType>(value.getType());
+    return regType && regType.getRegClass() == waveamdmachine::RegClass::SGPR;
+  }
+
+  bool isInlineImm(Value value) const {
+    auto imm = value.getDefiningOp<waveamdmachine::ImmOp>();
+    if (!imm)
+      return false;
+    int64_t immValue = imm.getValue();
+    if (immValue < std::numeric_limits<int32_t>::min() ||
+        immValue > std::numeric_limits<uint32_t>::max())
+      return false;
+    return llvm::AMDGPU::isInlinableLiteral32(static_cast<int32_t>(immValue),
+                                              /*HasInv2Pi=*/false);
+  }
+
+  bool usesConstantBus(Value value) const {
+    if (isSGPR(value))
+      return true;
+    return isa<waveamdmachine::ImmType>(value.getType()) && !isInlineImm(value);
+  }
+
+  std::optional<int64_t> getNonInlineLiteral(Value value) const {
+    auto imm = value.getDefiningOp<waveamdmachine::ImmOp>();
+    if (!imm || isInlineImm(value))
+      return std::nullopt;
+    return imm.getValue();
+  }
+
+  bool sameConstantBusUse(Value lhs, Value rhs) const {
+    if (isSGPR(lhs) && isSGPR(rhs))
+      return lhs == rhs || isSamePhysicalReg(lhs, rhs);
+    std::optional<int64_t> lhsLiteral = getNonInlineLiteral(lhs);
+    std::optional<int64_t> rhsLiteral = getNonInlineLiteral(rhs);
+    return lhsLiteral && rhsLiteral && *lhsLiteral == *rhsLiteral;
+  }
+
+  bool hasPreGfx10UnsupportedLiteral(ArrayRef<Value> operands) const {
+    if (!isGfx8Or9())
+      return false;
+    for (Value operand : operands)
+      if (getNonInlineLiteral(operand))
+        return true;
+    return false;
+  }
+
+  bool hasMultipleNonInlineLiterals(ArrayRef<Value> operands) const {
+    std::optional<int64_t> first;
+    for (Value operand : operands) {
+      std::optional<int64_t> literal = getNonInlineLiteral(operand);
+      if (!literal)
+        continue;
+      if (!first) {
+        first = literal;
+        continue;
+      }
+      if (*literal != *first)
+        return true;
+    }
+    return false;
+  }
+
+  bool fitsConstantBus(ArrayRef<Value> operands) const {
+    SmallVector<Value, 4> uniqueUses;
+    for (Value operand : operands) {
+      if (!usesConstantBus(operand))
+        continue;
+      if (llvm::any_of(uniqueUses, [&](Value unique) {
+            return sameConstantBusUse(operand, unique);
+          }))
+        continue;
+      uniqueUses.push_back(operand);
+      if (uniqueUses.size() > getConstantBusLimit())
+        return false;
+    }
+    return true;
+  }
+
+  LogicalResult requireConstantBus(Operation &op, StringRef mnemonic,
+                                   ArrayRef<Value> operands) const {
+    if (hasPreGfx10UnsupportedLiteral(operands))
+      return op.emitError(mnemonic)
+             << " cannot use non-inline literal on " << targetChip;
+    if (hasMultipleNonInlineLiterals(operands))
+      return op.emitError(mnemonic)
+             << " cannot use multiple non-inline literals";
+    if (!fitsConstantBus(operands))
+      return op.emitError(mnemonic) << " exceeds constant bus limit";
+    return success();
+  }
+
   void emitLine(StringRef line) {
     for (unsigned i = 0; i < indent; ++i)
       os << '\t';
@@ -1477,12 +1573,20 @@ private:
   }
 
   LogicalResult emitTernaryInt(unsigned opcode, Operation &op) {
+    if (failed(requireConstantBus(
+            op, op.getName().stripDialect(),
+            {op.getOperand(0), op.getOperand(1), op.getOperand(2)})))
+      return failure();
     return emitMC(opcode,
                   {toMCOperand(op.getResult(0)), toMCB32(op.getOperand(0)),
                    toMCB32(op.getOperand(1)), toMCB32(op.getOperand(2))});
   }
 
   LogicalResult emitTernaryIntClamp(unsigned opcode, Operation &op) {
+    if (failed(requireConstantBus(
+            op, op.getName().stripDialect(),
+            {op.getOperand(0), op.getOperand(1), op.getOperand(2)})))
+      return failure();
     return emitMC(opcode,
                   {toMCOperand(op.getResult(0)), toMCB32(op.getOperand(0)),
                    toMCB32(op.getOperand(1)), toMCB32(op.getOperand(2)),
@@ -1694,10 +1798,14 @@ private:
         Value regValue = lhsImm ? rhs : lhs;
         if (failed(emitMC(vMovB32(), {toMCOperand(dst), toMCB32(immValue)})))
           return failure();
+        if (failed(requireConstantBus(op, "v_mul_lo_u32", {dst, regValue})))
+          return failure();
         return emitMC(vMulLoU32(),
                       {toMCOperand(dst), toMCOperand(dst), toMCB32(regValue)});
       }
     }
+    if (failed(requireConstantBus(op, "v_mul_lo_u32", {lhs, rhs})))
+      return failure();
     return emitMC(vMulLoU32(), {toMCOperand(dst), toMCB32(lhs), toMCB32(rhs)});
   }
 
@@ -1712,10 +1820,14 @@ private:
         Value regValue = lhsImm ? rhs : lhs;
         if (failed(emitMC(vMovB32(), {toMCOperand(dst), toMCB32(immValue)})))
           return failure();
+        if (failed(requireConstantBus(op, "v_mul_hi_u32", {dst, regValue})))
+          return failure();
         return emitMC(vMulHiU32(),
                       {toMCOperand(dst), toMCOperand(dst), toMCB32(regValue)});
       }
     }
+    if (failed(requireConstantBus(op, "v_mul_hi_u32", {lhs, rhs})))
+      return failure();
     return emitMC(vMulHiU32(), {toMCOperand(dst), toMCB32(lhs), toMCB32(rhs)});
   }
 
@@ -2149,9 +2261,9 @@ private:
             waveamdmachine::VXorB32Op>(op)) {
       Value lhs = op.getOperand(0);
       Value rhs = op.getOperand(1);
-      // VOP2 e32: src1 must be a VGPR. Both SGPR and imm RHS need to
-      // swap into src0; if both sides are non-VGPR we'd need a VOP3 form.
-      // Wave selection emits these with a VGPR on one side.
+      if (!isVGPR(rhs) && !isVGPR(lhs))
+        return op.emitError(op.getName().stripDialect())
+               << " needs a VGPR operand";
       if (!isVGPR(rhs))
         std::swap(lhs, rhs);
       unsigned opcode = isa<waveamdmachine::VAndB32Op>(op)  ? vAndB32()
@@ -2160,14 +2272,20 @@ private:
       return emitMC(opcode,
                     {toMCOperand(result()), toMCB32(lhs), toMCB32(rhs)});
     }
-    if (isa<waveamdmachine::VLshlrevB32Op>(op))
+    if (isa<waveamdmachine::VLshlrevB32Op>(op)) {
+      if (!isVGPR(op.getOperand(0)))
+        return op.emitError("v_lshlrev_b32 needs value operand in VGPR");
       return emitMC(vLshlrevB32(),
                     {toMCOperand(result()), toMCB32(op.getOperand(1)),
                      toMCB32(op.getOperand(0))});
-    if (isa<waveamdmachine::VLshrrevB32Op>(op))
+    }
+    if (isa<waveamdmachine::VLshrrevB32Op>(op)) {
+      if (!isVGPR(op.getOperand(0)))
+        return op.emitError("v_lshrrev_b32 needs value operand in VGPR");
       return emitMC(vLshrrevB32(),
                     {toMCOperand(result()), toMCB32(op.getOperand(1)),
                      toMCB32(op.getOperand(0))});
+    }
     if (isa<waveamdmachine::VMulLoU32Op>(op))
       return emitVMulLoU32(op, result(), op.getOperand(0), op.getOperand(1));
     if (isa<waveamdmachine::VMulHiU32Op>(op))
@@ -2278,6 +2396,9 @@ private:
                                                                 : vCmpxGeI32();
       llvm::MCOperand exec = llvm::MCOperand::createReg(
           namedPhysReg(wavefrontSize == 32 ? "exec_lo" : "exec"));
+      if (failed(requireConstantBus(op, op.getName().stripDialect(),
+                                    {op.getOperand(0), op.getOperand(1)})))
+        return failure();
       return emitMC(
           opcode, {exec, toMCB32(op.getOperand(0)), toMCB32(op.getOperand(1))});
     }
@@ -2324,6 +2445,9 @@ private:
           writesVcc ? llvm::MCOperand::createReg(
                           namedPhysReg(wavefrontSize == 32 ? "vcc_lo" : "vcc"))
                     : toMCOperand(result());
+      if (failed(requireConstantBus(op, op.getName().stripDialect(),
+                                    {op.getOperand(0), op.getOperand(1)})))
+        return failure();
       if (failed(emitMC(opcode, {dst, toMCB32(op.getOperand(0)),
                                  toMCB32(op.getOperand(1))})))
         return failure();

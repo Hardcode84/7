@@ -26,6 +26,16 @@ func.func @cast_f32_zero_to_f16_wave32() attributes {wave.kernel} {
   return
 }
 
+// SELECT-LABEL: func.func @cast_uniform_splat_i32_to_i64
+// SELECT: waveamdmachine.tuple_from_elements
+// SELECT-NOT: waveamdmachine.v_mov_b32_tuple
+// SELECT: return
+func.func @cast_uniform_splat_i32_to_i64(%x: i32) attributes {wave.kernel} {
+  %vx = wave.splat %x : i32 -> !wave.simd<i32, 32>
+  %wide = wave.cast intconvert %vx policy {extension = #wave.cast_extension<zero>} : !wave.simd<i32, 32> -> !wave.simd<i64, 32>
+  return
+}
+
 }
 
 // -----

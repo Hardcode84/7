@@ -533,11 +533,13 @@ static FailureOr<Value> scaleVOffset(WaveAMDMachineSelector &S, Location loc,
   }
   Type vgprType =
       getRegType(S.builder.getContext(), waveamdmachine::RegClass::VGPR);
-  if ((size & (size - 1)) == 0)
+  if ((size & (size - 1)) == 0) {
+    value = S.ensureVGPRForVSrc1(loc, value);
     return waveamdmachine::VLshlrevB32Op::create(
                S.builder, loc, vgprType, value,
                createImm(S.builder, loc, llvm::Log2_32(size)))
         .getResult();
+  }
   return waveamdmachine::VMulLoU32Op::create(S.builder, loc, vgprType, value,
                                              createImm(S.builder, loc, size))
       .getResult();
@@ -3368,18 +3370,39 @@ LogicalResult WaveAMDMachineSelector::selectBinaryShLI32(BinaryOp op) {
   lhs = ensureVGPRForVSrc1(op.getLoc(), lhs);
   values[op.getResult()] = waveamdmachine::VLshlrevB32Op::create(
       builder, op.getLoc(),
-      getRegType(op.getContext(), waveamdmachine::RegClass::VGPR), rhs, lhs);
+      getRegType(op.getContext(), waveamdmachine::RegClass::VGPR), lhs, rhs);
   eraseIfTopLevel(op);
   return success();
+}
+
+static bool isUniformPayloadValue(Value value, unsigned width) {
+  if (isImm(value))
+    return true;
+  auto regType = dyn_cast<waveamdmachine::RegType>(value.getType());
+  if (!regType || regType.getRegClass() != waveamdmachine::RegClass::SGPR)
+    return false;
+  return regType.getWidth() == width || (width == 2 && regType.getWidth() == 1);
 }
 
 LogicalResult WaveAMDMachineSelector::selectBinaryShLI64(BinaryOp op) {
   Value lhs = expect(op.getLhs(), op);
   Value rhs = expect(op.getRhs(), op);
+  Value shift = extractLowDword(*this, op.getLoc(), rhs, op.getRhs());
   if (!isBinarySimd(op)) {
     Type resultType =
         getRegType(op.getContext(), waveamdmachine::RegClass::SGPR, 2);
-    Value shift = extractLowDword(*this, op.getLoc(), rhs, op.getRhs());
+    values[op.getResult()] =
+        waveamdmachine::SLshlB64Op::create(builder, op.getLoc(), resultType,
+                                           getSCCType(op.getContext()),
+                                           ensureSGPR2(*this, op.getLoc(), lhs),
+                                           ensureSGPR1(op.getLoc(), shift))
+            .getResult();
+    eraseIfTopLevel(op);
+    return success();
+  }
+  if (isUniformPayloadValue(lhs, 2) && isUniformValue(shift)) {
+    Type resultType =
+        getRegType(op.getContext(), waveamdmachine::RegClass::SGPR, 2);
     values[op.getResult()] =
         waveamdmachine::SLshlB64Op::create(builder, op.getLoc(), resultType,
                                            getSCCType(op.getContext()),
@@ -3391,7 +3414,6 @@ LogicalResult WaveAMDMachineSelector::selectBinaryShLI64(BinaryOp op) {
   }
   Type resultType =
       getRegType(op.getContext(), waveamdmachine::RegClass::VGPR, 2);
-  Value shift = extractLowDword(*this, op.getLoc(), rhs, op.getRhs());
   values[op.getResult()] = waveamdmachine::VLshlrevB64Op::create(
       builder, op.getLoc(), resultType, shift,
       ensureVGPR2(*this, op.getLoc(), lhs));
@@ -3515,6 +3537,17 @@ static LogicalResult selectBinaryShRUI64(WaveAMDMachineSelector &S,
   Value rhs = S.expect(op.getRhs(), op);
   Value shift = extractLowDword(S, op.getLoc(), rhs, op.getRhs());
   if (!isBinarySimd(op)) {
+    Type resultType =
+        getRegType(op.getContext(), waveamdmachine::RegClass::SGPR, 2);
+    S.values[op.getResult()] =
+        waveamdmachine::SLshrB64Op::create(
+            S.builder, op.getLoc(), resultType, getSCCType(op.getContext()),
+            ensureSGPR2(S, op.getLoc(), lhs), S.ensureSGPR1(op.getLoc(), shift))
+            .getResult();
+    S.eraseIfTopLevel(op);
+    return success();
+  }
+  if (isUniformPayloadValue(lhs, 2) && S.isUniformValue(shift)) {
     Type resultType =
         getRegType(op.getContext(), waveamdmachine::RegClass::SGPR, 2);
     S.values[op.getResult()] =
@@ -3914,6 +3947,7 @@ static Value maskLowBits(WaveAMDMachineSelector &S, Location loc, Value value,
   Type vgprType =
       getRegType(S.builder.getContext(), waveamdmachine::RegClass::VGPR);
   Value mask = createImm(S.builder, loc, (int64_t{1} << bits) - 1);
+  value = S.ensureVGPRForVSrc1(loc, value);
   return waveamdmachine::VAndB32Op::create(S.builder, loc, vgprType, value,
                                            mask);
 }
@@ -4099,9 +4133,11 @@ LogicalResult WaveAMDMachineSelector::selectExtract(ExtractOp op) {
                                                            elementTypes, word);
     word = split.getElements()[wordIndex];
   }
-  if (wordShift)
+  if (wordShift) {
+    word = ensureVGPRForVSrc1(loc, word);
     word = waveamdmachine::VLshrrevB32Op::create(
         builder, loc, vgprType, word, createImm(builder, loc, wordShift));
+  }
   values[op.getResult()] = maskLowBits(*this, loc, word, shape->elementBits);
   eraseIfTopLevel(op);
   return success();
@@ -4157,9 +4193,10 @@ static LogicalResult selectI32I64IntConvert(WaveAMDMachineSelector &S,
     if (getIntConvertExtension(op) != CastExtension::Zero)
       return op.emitError(
           "WaveAMDMachine i32 to 64-bit intconvert requires zero extension");
-    S.values[op.getResult()] = isa<SimdType>(resultType)
-                                   ? ensureVGPR2(S, op.getLoc(), source)
-                                   : source;
+    if (isa<SimdType>(resultType) && !S.isUniformValue(source))
+      S.values[op.getResult()] = ensureVGPR2(S, op.getLoc(), source);
+    else
+      S.values[op.getResult()] = ensureSGPR2(S, op.getLoc(), source);
     S.eraseIfTopLevel(op);
     return success();
   }
@@ -4677,6 +4714,8 @@ static Value createWordCmp(WaveAMDMachineSelector &S, Location loc,
   if (isa<waveamdmachine::ImmType>(lhs.getType()) &&
       isa<waveamdmachine::ImmType>(rhs.getType()))
     lhs = S.materializeSGPR1(loc, lhs);
+  if (!isVGPR(lhs) && !isVGPR(rhs))
+    lhs = S.ensureVGPRForVSrc1(loc, lhs);
   return createVCmp(S.builder, loc, relation, signedCmp, resultType, lhs, rhs);
 }
 
@@ -4943,6 +4982,24 @@ static FailureOr<unsigned> getCmpElementBits(WaveAMDMachineSelector &S,
   return failure();
 }
 
+static FailureOr<Value> createFullMaskFromSCC(WaveAMDMachineSelector &S,
+                                              Operation *op, Value scc,
+                                              unsigned width);
+
+static bool hasUniformCmpPayload(Value lhs, Value rhs, unsigned bits) {
+  unsigned valueWidth = bits / 32;
+  return isUniformPayloadValue(lhs, valueWidth) &&
+         isUniformPayloadValue(rhs, valueWidth);
+}
+
+static Value createScalarCmpSCC(WaveAMDMachineSelector &S, CmpIOp op,
+                                CmpRelation relation, bool signedCmp, Value lhs,
+                                Value rhs, unsigned bits) {
+  if (bits == 64)
+    return createScalarI64Cmp(S, op.getLoc(), relation, signedCmp, lhs, rhs);
+  return createScalarWordCmp(S, op.getLoc(), relation, signedCmp, lhs, rhs);
+}
+
 LogicalResult WaveAMDMachineSelector::selectCmp(CmpIOp op) {
   auto maskType = cast<MaskType>(op.getType());
   if (maskType.getWidth() != 32 && maskType.getWidth() != 64)
@@ -4962,6 +5019,17 @@ LogicalResult WaveAMDMachineSelector::selectCmp(CmpIOp op) {
     return failure();
   if (*bits != 32 && *bits != 64)
     return op.emitError("unsupported wave.cmpi operand register width");
+  if (hasUniformCmpPayload(lhs, rhs, *bits)) {
+    Value scc =
+        createScalarCmpSCC(*this, op, *relation, signedCmp, lhs, rhs, *bits);
+    FailureOr<Value> result =
+        createFullMaskFromSCC(*this, op, scc, maskType.getWidth() / 32);
+    if (failed(result))
+      return failure();
+    values[op.getResult()] = *result;
+    eraseIfTopLevel(op);
+    return success();
+  }
   Value result = *bits == 64 ? createI64Cmp(*this, op.getLoc(), *relation,
                                             signedCmp, sgprType, lhs, rhs)
                              : createWordCmp(*this, op.getLoc(), *relation,
@@ -5492,6 +5560,40 @@ static LogicalResult selectMaskValue(WaveAMDMachineSelector &S, SelectOp op,
   return success();
 }
 
+static LogicalResult
+selectScalarConditionRegisterValue(WaveAMDMachineSelector &S, SelectOp op,
+                                   Value trueValue, Value falseValue,
+                                   Type resultType, unsigned width) {
+  Value scc = createSCCFromI1(S, op);
+  if (isUniformPayloadValue(trueValue, width) &&
+      isUniformPayloadValue(falseValue, width)) {
+    FailureOr<Value> selected =
+        createScalarSelect(S, op, scc, trueValue, falseValue, width);
+    if (failed(selected))
+      return failure();
+    S.values[op.getResult()] = *selected;
+    return success();
+  }
+  if (isa<SimdType>(resultType)) {
+    unsigned maskWidth = cast<SimdType>(resultType).getWidth() / 32;
+    FailureOr<Value> condition = createFullMaskFromSCC(S, op, scc, maskWidth);
+    if (failed(condition))
+      return failure();
+    FailureOr<Value> selected =
+        createLaneSelect(S, op, *condition, trueValue, falseValue, width);
+    if (failed(selected))
+      return failure();
+    S.values[op.getResult()] = *selected;
+    return success();
+  }
+  FailureOr<Value> selected =
+      createScalarSelect(S, op, scc, trueValue, falseValue, width);
+  if (failed(selected))
+    return failure();
+  S.values[op.getResult()] = *selected;
+  return success();
+}
+
 static LogicalResult selectRegisterValue(WaveAMDMachineSelector &S, SelectOp op,
                                          bool maskCondition, Value trueValue,
                                          Value falseValue, Type resultType) {
@@ -5507,26 +5609,8 @@ static LogicalResult selectRegisterValue(WaveAMDMachineSelector &S, SelectOp op,
     S.values[op.getResult()] = *selected;
     return success();
   }
-
-  Value scc = createSCCFromI1(S, op);
-  if (isa<SimdType>(resultType)) {
-    unsigned maskWidth = cast<SimdType>(resultType).getWidth() / 32;
-    FailureOr<Value> condition = createFullMaskFromSCC(S, op, scc, maskWidth);
-    if (failed(condition))
-      return failure();
-    FailureOr<Value> selected =
-        createLaneSelect(S, op, *condition, trueValue, falseValue, *width);
-    if (failed(selected))
-      return failure();
-    S.values[op.getResult()] = *selected;
-  } else {
-    FailureOr<Value> selected =
-        createScalarSelect(S, op, scc, trueValue, falseValue, *width);
-    if (failed(selected))
-      return failure();
-    S.values[op.getResult()] = *selected;
-  }
-  return success();
+  return selectScalarConditionRegisterValue(S, op, trueValue, falseValue,
+                                            resultType, *width);
 }
 
 LogicalResult WaveAMDMachineSelector::selectSelect(SelectOp op) {

@@ -62,7 +62,9 @@ func.func @scalar_i32_dynamic_pow2_divsi_codegen(
 // ASM-LABEL: scalar_i64_div_rem_codegen:
 // ASM: s_lshr_b64
 // ASM: s_and_b32
-// ASM: v_cmp
+// ASM: s_cmp_lt_u32
+// ASM: s_cmp_eq_u32
+// ASM: s_cmp_lt_u32
 // ASM: s_or_b32
 // ASM: global_store_b32
 func.func @scalar_i64_div_rem_codegen(%out: !wave.ptr<#wave.global, i32>,

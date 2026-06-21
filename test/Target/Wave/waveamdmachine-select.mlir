@@ -148,6 +148,39 @@ func.func @select_whole_simd(%pred: i1, %a: !wave.simd<i32, 32>,
   return %first : i32
 }
 
+// SELECT-LABEL: func.func @select_whole_simd_uniform_splats
+// SELECT: waveamdmachine.s_cselect_b32
+// SELECT-NOT: waveamdmachine.v_cndmask_b32_tuple
+// SELECT-NOT: waveamdmachine.v_readfirstlane_b32
+// SELECT: return
+// ASM-LABEL: select_whole_simd_uniform_splats:
+// ASM: s_cselect_b32
+// ASM-NOT: v_cndmask_b32
+// ASM: s_setpc_b64
+func.func @select_whole_simd_uniform_splats(%pred: i1, %a: i32,
+                                            %b: i32) -> i32 {
+  %va = wave.splat %a : i32 -> !wave.simd<i32, 32>
+  %vb = wave.splat %b : i32 -> !wave.simd<i32, 32>
+  %r = wave.select %pred, %va, %vb : !wave.simd<i32, 32>
+  %first = wave.read_first %r : !wave.simd<i32, 32> -> i32
+  return %first : i32
+}
+
+// SELECT-LABEL: func.func @select_whole_simd_i64_uniform_splats
+// SELECT: waveamdmachine.s_cselect_b32
+// SELECT: waveamdmachine.s_cselect_b32
+// SELECT-NOT: waveamdmachine.v_cndmask_b32_tuple
+// SELECT-NOT: waveamdmachine.v_readfirstlane_b32
+// SELECT: return
+func.func @select_whole_simd_i64_uniform_splats(%pred: i1, %a: i64,
+                                                %b: i64) -> i64 {
+  %va = wave.splat %a : i64 -> !wave.simd<i64, 32>
+  %vb = wave.splat %b : i64 -> !wave.simd<i64, 32>
+  %r = wave.select %pred, %va, %vb : !wave.simd<i64, 32>
+  %first = wave.read_first %r : !wave.simd<i64, 32> -> i64
+  return %first : i64
+}
+
 // SELECT-LABEL: func.func @select_mask_lane
 // SELECT: waveamdmachine.s_xor_b32
 // SELECT: waveamdmachine.s_and_b32
