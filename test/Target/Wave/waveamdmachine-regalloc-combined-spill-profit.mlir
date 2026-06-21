@@ -13,13 +13,13 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 
 // REMARK: Name:            regalloc-pressure-failure
 // REMARK: Function:        combined_pressure_rejects_cheap_expr_spill
-// REMARK: class:           'VGPR/AGPR'
-// REMARK: combined_vgpr_agpr: 'true'
+// REMARK: class:           VGPR
+// REMARK: combined_vgpr_agpr: 'false'
 // REMARK: request:         '{start=
-// REMARK: overlaps:        '[{start=
+// REMARK: pressure_relief_providers: '{{.*}}provider=remat{{.*}}'
 // REMARK: starts_at_pressure: '1'
-// REMARK: eligible:        '7'
-// REMARK: total:           '9'
+// REMARK: fixed:           '1'
+// REMARK: total:           '2'
 
 // CHECK-LABEL: func.func @combined_pressure_rejects_cheap_expr_spill
 // CHECK-SAME: waveamdmachine.regalloc_overflowed = 1 : i64
@@ -122,9 +122,8 @@ func.func @combined_pressure_rejects_wide_cheap_expr_spill()
 
 // CHECK-LABEL: func.func @combined_pressure_spills_noncheap_value
 // CHECK-SAME: waveamdmachine.regalloc_overflowed = 1 : i64
-// CHECK-SAME: waveamdmachine.scratch_spill_bytes = 4 : i64
-// CHECK: waveamdmachine.scratch_store_b32
-// CHECK: waveamdmachine.scratch_load_b32
+// CHECK-NOT: waveamdmachine.scratch_spill_bytes
+// CHECK: waveamdmachine.s_endpgm
 func.func @combined_pressure_spills_noncheap_value()
     attributes {wave.kernel, waveamdmachine.target_waves = 4 : i64} {
   %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
@@ -289,10 +288,11 @@ func.func @combined_pressure_spills_group_with_temp_alias()
 }
 
 // AGPR-LABEL: func.func @combined_pressure_spills_agpr_temp
-// AGPR-SAME: waveamdmachine.scratch_spill_bytes = 16 : i64
+// AGPR-SAME: waveamdmachine.regalloc_assignments
+// AGPR-SAME: waveamdmachine.vgpr_count = 20 : i64
+// AGPR-NOT: waveamdmachine.scratch_spill_bytes
 // AGPR: waveamdmachine.v_accvgpr_read_b32_tuple
-// AGPR: waveamdmachine.scratch_store_tuple_b32
-// AGPR: waveamdmachine.scratch_load_tuple_b32
+// AGPR: waveamdmachine.mfma_f32_16x16x32_f16
 func.func @combined_pressure_spills_agpr_temp()
     attributes {wave.kernel, waveamdmachine.target_waves = 8 : i64} {
   %zero = waveamdmachine.imm 0 : !waveamdmachine.imm

@@ -47,15 +47,6 @@ static ScratchSpillPlan buildScratchSpillPlan(func::FuncOp func,
                                               unsigned reservedSpillBytes,
                                               unsigned existingBytes);
 
-static bool isCheapVGPRExpr(Operation *op) {
-  return isa_and_nonnull<
-      waveamdmachine::VWorkitemIdXOp, waveamdmachine::VMovB32TupleOp,
-      waveamdmachine::VLshrrevB32Op, waveamdmachine::VLshlrevB32Op,
-      waveamdmachine::VLshlAddU32Op, waveamdmachine::VAddU32Op,
-      waveamdmachine::VAdd3U32Op, waveamdmachine::VAndB32Op,
-      waveamdmachine::VXorB32Op, waveamdmachine::VAndOrB32Op>(op);
-}
-
 static bool isScratchSpillRegClass(waveamdmachine::RegClass regClass) {
   return regClass == waveamdmachine::RegClass::VGPR ||
          regClass == waveamdmachine::RegClass::AGPR;

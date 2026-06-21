@@ -2153,14 +2153,17 @@ applyPressureRelief(func::FuncOp func, Inventory &inventory,
                     const PressureFailure *pressureFailure = nullptr) {
   clearMemorySpillRejectDiagnostics(func);
 
-  SmallVector<PressureReliefProviderState, 3> providers;
-  providers.reserve(3);
+  SmallVector<PressureReliefProviderState, 4> providers;
+  providers.reserve(4);
   if (includeBankPromotion)
     addPressureReliefProvider(
         providers,
         createBankPromotionProvider(assigned, request, position, budgets,
                                     inventory, getBankPromotionHooks()));
   if (includeMemorySpill) {
+    addPressureReliefProvider(
+        providers,
+        createRematerializeProvider(assigned, request, position, inventory));
     addPressureReliefProvider(
         providers, createLDSSpillProvider(func, assigned, request, position,
                                           budgets, inventory));
@@ -2794,6 +2797,8 @@ static LogicalResult materializePlannedPressureRelief(func::FuncOp func,
   providers.push_back(createBankPromotionProvider({}, nullptr, /*position=*/0,
                                                   budgets, inventory,
                                                   getBankPromotionHooks()));
+  providers.push_back(
+      createRematerializeProvider({}, nullptr, /*position=*/0, inventory));
   providers.push_back(createLDSSpillProvider(func, {}, nullptr, /*position=*/0,
                                              budgets, inventory));
   providers.push_back(createScratchSpillProvider(func, {}, nullptr,

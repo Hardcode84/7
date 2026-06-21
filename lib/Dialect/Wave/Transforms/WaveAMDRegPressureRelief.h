@@ -34,6 +34,7 @@ namespace wave {
 
 enum class WaveAMDPressureReliefProviderKind : uint8_t {
   BankPromotion,
+  Rematerialize,
   LDSSpill,
   ScratchSpill,
 };

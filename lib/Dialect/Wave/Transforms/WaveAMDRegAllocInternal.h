@@ -106,6 +106,15 @@ inline bool isLoopCarryUseOp(Operation *op) {
   return isa<waveamdmachine::UniformLoopOp, waveamdmachine::ContinueIfOp>(op);
 }
 
+inline bool isCheapVGPRExpr(Operation *op) {
+  return isa_and_nonnull<
+      waveamdmachine::VWorkitemIdXOp, waveamdmachine::VMovB32TupleOp,
+      waveamdmachine::VLshrrevB32Op, waveamdmachine::VLshlrevB32Op,
+      waveamdmachine::VLshlAddU32Op, waveamdmachine::VAddU32Op,
+      waveamdmachine::VAdd3U32Op, waveamdmachine::VAndB32Op,
+      waveamdmachine::VXorB32Op, waveamdmachine::VAndOrB32Op>(op);
+}
+
 inline bool isFixedRegisterGroup(IntervalGroup *group) {
   if (!group)
     return false;
@@ -240,6 +249,10 @@ createBankPromotionProvider(ArrayRef<IntervalGroup *> groups,
                             IntervalGroup *request, unsigned position,
                             RegisterBudgets budgets, Inventory &inventory,
                             const BankPromotionHooks &hooks);
+std::unique_ptr<wave::WaveAMDPressureReliefProvider>
+createRematerializeProvider(ArrayRef<IntervalGroup *> groups,
+                            IntervalGroup *request, unsigned position,
+                            Inventory &inventory);
 std::unique_ptr<wave::WaveAMDPressureReliefProvider>
 createLDSSpillProvider(func::FuncOp func, ArrayRef<IntervalGroup *> groups,
                        IntervalGroup *request, unsigned position,

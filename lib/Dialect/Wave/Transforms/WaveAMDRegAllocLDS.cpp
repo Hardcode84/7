@@ -62,15 +62,6 @@ static unsigned getAddressOpsPerAccess(const LDSSpillPlan &plan) {
   return canFoldSlotBaseIntoDSOffset(plan.slotBase) ? 1 : 2;
 }
 
-static bool isCheapVGPRExpr(Operation *op) {
-  return isa_and_nonnull<
-      waveamdmachine::VWorkitemIdXOp, waveamdmachine::VMovB32TupleOp,
-      waveamdmachine::VLshrrevB32Op, waveamdmachine::VLshlrevB32Op,
-      waveamdmachine::VLshlAddU32Op, waveamdmachine::VAddU32Op,
-      waveamdmachine::VAdd3U32Op, waveamdmachine::VAndB32Op,
-      waveamdmachine::VXorB32Op, waveamdmachine::VAndOrB32Op>(op);
-}
-
 static bool isLiveAt(Interval *interval, unsigned position) {
   return !interval->values.empty() && interval->start <= position &&
          position <= interval->end;

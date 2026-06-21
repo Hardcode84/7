@@ -1,35 +1,21 @@
-// RUN: not wave-opt --waveamd-reg-alloc %s 2>&1 | FileCheck %s --check-prefix=ERR
+// RUN: wave-opt --waveamd-reg-alloc --waveamd-resource-info %s | FileCheck %s
 // RUN: wave-opt --waveamd-reg-alloc='mark-overflow=true' --waveamd-resource-info %s | FileCheck %s --check-prefix=MARK
-// RUN: rm -f %t.yaml
-// RUN: wave-opt --waveamd-reg-alloc='mark-overflow=true' \
-// RUN:   --remarks-filter=waveamdmachine-regalloc --remark-policy=all \
-// RUN:   --remark-format=yaml --remarks-output-file=%t.yaml %s >/dev/null
-// RUN: FileCheck %s --input-file=%t.yaml --check-prefix=REMARK
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx90a"} {
 
-// REMARK: Name:            regalloc-pressure-failure
-// REMARK: Function:        combined_pressure_rejects_neutral_agpr_promotion
-// REMARK: class:           'VGPR/AGPR'
-// REMARK: combined_vgpr_agpr: 'true'
-// REMARK: memory_spill_reject: scratch_spill_not_kernel
-// REMARK: pressure_relief_providers: '{{.*}}provider=bank-promotion, candidates=9{{.*}}provider=lds-spill{{.*}}reject=lds_spill_not_kernel{{.*}}provider=scratch-spill{{.*}}reject=scratch_spill_not_kernel{{.*}}'
-// REMARK: pressure_relief_candidates: '{{.*}}provider=bank-promotion{{.*}}from=VGPR, to=AGPR{{.*}}'
-// REMARK: starts_at_pressure: '1'
-// REMARK: eligible:        '8'
-// REMARK: total:           '9'
-
-// ERR: waveamd-reg-alloc VGPR/AGPR live pressure exceeds target-waves budget
-// ERR-SAME: required_relief=1
-// ERR-SAME: request={start=
-// ERR-SAME: overlaps=[{start=
-// ERR-SAME: values=[
-// ERR-SAME: memory spill reject detail: starts_at_pressure=1, eligible=8, total=9
-// MARK-LABEL: func.func @combined_pressure_rejects_neutral_agpr_promotion
-// MARK-SAME: waveamdmachine.regalloc_overflowed = 1 : i64
+// CHECK-LABEL: func.func @combined_pressure_remats_neutral_agpr_promotion
+// CHECK-SAME: waveamdmachine.regalloc_assignments
+// CHECK-SAME: waveamdmachine.vgpr_count = 8 : i64
+// CHECK-NOT: waveamdmachine.regalloc_overflowed
+// CHECK-NOT: waveamdmachine.v_accvgpr_write_b32_tuple
+// CHECK: waveamdmachine.s_endpgm
+// MARK-LABEL: func.func @combined_pressure_remats_neutral_agpr_promotion
+// MARK-SAME: waveamdmachine.regalloc_assignments
+// MARK-SAME: waveamdmachine.vgpr_count = 8 : i64
+// MARK-NOT: waveamdmachine.regalloc_overflowed = 1 : i64
 // MARK-NOT: waveamdmachine.v_accvgpr_write_b32_tuple
 // MARK: waveamdmachine.s_endpgm
-func.func @combined_pressure_rejects_neutral_agpr_promotion()
+func.func @combined_pressure_remats_neutral_agpr_promotion()
     attributes {waveamdmachine.target_waves = 4 : i64} {
   %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
   %ag = waveamdmachine.uninit : !waveamdmachine.reg<agpr, 120>
@@ -81,12 +67,16 @@ func.func @combined_pressure_rejects_neutral_agpr_promotion()
 // MARK-NOT: waveamdmachine.regalloc_overflowed
 // MARK: waveamdmachine.v_accvgpr_write_b32_tuple
 // MARK: waveamdmachine.s_endpgm
+// CHECK-LABEL: func.func @combined_pressure_allows_aligned_agpr_promotion
+// CHECK-SAME: waveamdmachine.vgpr_count = 4 : i64
+// CHECK-NOT: waveamdmachine.regalloc_overflowed
+// CHECK: waveamdmachine.v_accvgpr_write_b32_tuple
+// CHECK: waveamdmachine.s_endpgm
 func.func @combined_pressure_allows_aligned_agpr_promotion()
     attributes {waveamdmachine.target_waves = 4 : i64} {
   %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
   %ag = waveamdmachine.uninit : !waveamdmachine.reg<agpr, 121>
-  %p = waveamdmachine.v_mov_b32_tuple %zero {registers = 1 : i64}
-      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
+  %p = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1>
   %v0 = waveamdmachine.v_mov_b32_tuple %zero {registers = 1 : i64}
       : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
   %v1 = waveamdmachine.v_mov_b32_tuple %zero {registers = 1 : i64}
