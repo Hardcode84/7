@@ -91,7 +91,9 @@ module attributes {transform.with_named_sequence} {
         : (!transform.any_op) -> !transform.any_op
     %rflc = transform.apply_registered_pass "cse" to %rfl
         : (!transform.any_op) -> !transform.any_op
-    transform.yield %rflc : !transform.any_op
+    %rscc = transform.apply_registered_pass "waveamd-elide-scc-bool-roundtrip" to %rflc
+        : (!transform.any_op) -> !transform.any_op
+    transform.yield %rscc : !transform.any_op
   }
 
   transform.named_sequence @waveamd_backend_finish(

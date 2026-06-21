@@ -55,6 +55,8 @@
 // PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
 // PIPELINE-NEXT: transform.apply_registered_pass "cse"
 // PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
+// PIPELINE-NEXT: transform.apply_registered_pass "waveamd-elide-scc-bool-roundtrip"
+// PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
 // PIPELINE: transform.apply_registered_pass "waveamd-clear-regalloc-assignments"
 // PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
 // PIPELINE-NEXT: transform.apply_registered_pass "waveamd-preserve-hw-regs"

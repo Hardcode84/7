@@ -242,6 +242,20 @@ def WaveAMDFormFusedInt
   ];
 }
 
+def WaveAMDElideSCCBoolRoundtrip
+    : Pass<"waveamd-elide-scc-bool-roundtrip"> {
+  let summary = "Elide redundant SCC to bool to SCC roundtrips";
+  let description = [{
+    Rewrites `s_cmp_lg_u32(s_cselect_b32(scc, 1, 0), 0)` back to the
+    original SCC. Intended placement is before `waveamd-preserve-hw-regs`,
+    which will reinsert save/reload code only where a real SCC clobber exists.
+  }];
+  let dependentDialects = [
+    "func::FuncDialect",
+    "waveamdmachine::WaveAMDMachineDialect"
+  ];
+}
+
 def WaveAMDMachineCleanup
     : Pass<"waveamd-machine-cleanup"> {
   let summary = "Hoist redundant WaveAMDMachine prep before scheduling";
