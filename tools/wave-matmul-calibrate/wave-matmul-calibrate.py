@@ -603,13 +603,24 @@ def mxfp4_scale_lds_bytes(args: argparse.Namespace) -> int:
     return scale_tiles * 512
 
 
+def dma_buffer_count(args: argparse.Namespace) -> int:
+    if not getattr(args, "use_dma_lds", False) or compute_virtual_k_steps(args) <= 1:
+        return 1
+    if (
+        getattr(args, "input_type", "f16") != "mxfp4"
+        and compute_virtual_k_steps(args) > 2
+    ):
+        return 4
+    return 2
+
+
 def compute_lds_bytes(args: argparse.Namespace) -> int:
     if getattr(args, "use_dma_lds", False):
         slots = args.wave_k_tiles * (
             args.bm * args.wave_m_tiles + args.bn * args.wave_n_tiles
         )
         one_buffer = slots * lds_dwords_per_frag(args) * 4
-        data_lds = one_buffer * (2 if compute_virtual_k_steps(args) > 1 else 1)
+        data_lds = one_buffer * dma_buffer_count(args)
         if getattr(args, "input_type", "f16") != "mxfp4":
             return data_lds
         return data_lds + mxfp4_scale_lds_bytes(args)

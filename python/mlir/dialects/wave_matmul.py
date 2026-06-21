@@ -268,7 +268,7 @@ class _MatmulConfig:
                 * self.mma.lds_dwords_per_frag
                 * 4
             )
-            return one_buffer * (2 if self.virtual_k_steps > 1 else 1)
+            return one_buffer * _dma_buffer_count(self)
         return (
             self.wave_k_tiles
             * (self.wave_m_tiles + self.wave_n_tiles)
@@ -907,6 +907,14 @@ def _dma_cta_buffer_dwords(cfg: _MatmulConfig) -> int:
     return (geom.a_total_slots + geom.b_total_slots) * geom.dwords_per_slot
 
 
+def _dma_buffer_count(cfg: _MatmulConfig) -> int:
+    if not cfg.use_dma_lds or cfg.virtual_k_steps <= 1:
+        return 1
+    if not cfg.uses_packed_mxfp4 and cfg.virtual_k_steps > 2:
+        return 4
+    return 2
+
+
 def _dma_slot_expr(
     cfg: _MatmulConfig, slot_per_wave: int, wave: int | dsl.Expr
 ) -> int | dsl.Expr:
@@ -1418,10 +1426,11 @@ def _dma_buffer_offset(
     bld: dsl.FunctionBuilder, cfg: _MatmulConfig, step: dsl.Value | int
 ) -> dsl.Value | int:
     buffer_dwords = _dma_cta_buffer_dwords(cfg)
+    buffer_count = _dma_buffer_count(cfg)
     if isinstance(step, int):
-        return (step & 1) * buffer_dwords
+        return (step % buffer_count) * buffer_dwords
     i = dsl.sym("i")
-    return bld.index_expr(dsl.mod(i, 2) * buffer_dwords, bindings={i: step})
+    return bld.index_expr(dsl.mod(i, buffer_count) * buffer_dwords, bindings={i: step})
 
 
 def _load_ptrs_for_step(
@@ -3516,8 +3525,8 @@ def _use_mxfp4_shared_scale_barrier(cfg: _MatmulConfig) -> bool:
     return regional and batched_regs
 
 
-def _use_mxfp4_reuse_data_dma_issue(cfg: _MatmulConfig) -> bool:
-    return cfg.use_dma_lds and cfg.uses_packed_mxfp4 and cfg.virtual_k_steps > 2
+def _use_reuse_data_dma_issue(cfg: _MatmulConfig) -> bool:
+    return cfg.use_dma_lds and cfg.virtual_k_steps > 2
 
 
 def _emit_dma_step(
@@ -3559,9 +3568,7 @@ def _emit_dma_step(
 
     def dma_after_token() -> dsl.Value:
         return (
-            state.reuse_token
-            if _use_mxfp4_reuse_data_dma_issue(cfg)
-            else get_ready_token()
+            state.reuse_token if _use_reuse_data_dma_issue(cfg) else get_ready_token()
         )
 
     def issue_next_dma() -> dsl.Value:
@@ -3831,6 +3838,8 @@ def _emit_dma_step(
         )
         scale_tokens.append(scales.token)
     else:
+        if _use_reuse_data_dma_issue(cfg):
+            issue_next_dma()
         new_accs = _emit_mma_grid(
             bld,
             cfg,

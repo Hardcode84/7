@@ -13,6 +13,7 @@
 # CHECK: matmul_profile_cli_override: ok
 # CHECK: matmul_mxfp4_4wave_profile: ok
 # CHECK: matmul_dynamic_lds_forwarding: ok
+# CHECK: matmul_f16_dma_buffer_count: ok
 # CHECK: matmul_dma_sim_trip_count: ok
 # CHECK: calibration_scheduler_region_cap: ok
 # CHECK: matmul_pingpong_removed: ok
@@ -652,6 +653,42 @@ def check_matmul_dynamic_lds_forwarding(matmul) -> None:
     print("matmul_dynamic_lds_forwarding: ok")
 
 
+def check_matmul_f16_dma_buffer_count(matmul) -> None:
+    args = argparse.Namespace(
+        m=4096,
+        n=4096,
+        k=8192,
+        bm=4,
+        bn=4,
+        wave_m_tiles=4,
+        wave_n_tiles=4,
+        wave_k_tiles=1,
+        use_buffer=True,
+        use_dma_lds=True,
+        matrix_intrinsic="mfma_gfx950",
+        chip="gfx950",
+        input_type="f16",
+        output_type="f16",
+        cta_swizzle_xcds=8,
+        cta_group_m=4,
+        target_waves=0,
+        iters=1,
+        warmup=0,
+        no_check=True,
+    )
+    require(
+        "matmul_f16_dma_buffer_count",
+        matmul.dma_buffer_count(args) == 4,
+        "f16 DMA profile should use four data buffers",
+    )
+    require(
+        "matmul_f16_dma_buffer_count",
+        matmul.compute_dynamic_lds_bytes(args) == 131072,
+        "bad f16 DMA LDS byte accounting",
+    )
+    print("matmul_f16_dma_buffer_count: ok")
+
+
 def check_matmul_dma_sim_trip_count(matmul) -> None:
     base = argparse.Namespace(k=64, wave_k_tiles=2, use_dma_lds=False)
     require(
@@ -807,6 +844,7 @@ def main() -> int:
     check_matmul_profile_cli_override(matmul)
     check_matmul_mxfp4_4wave_profile(matmul)
     check_matmul_dynamic_lds_forwarding(matmul)
+    check_matmul_f16_dma_buffer_count(matmul)
     check_matmul_dma_sim_trip_count(matmul)
     check_calibration_scheduler_region_cap(matmul, fa)
     try:
