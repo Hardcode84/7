@@ -121,10 +121,16 @@
 // PROFILEMXFP4-DMA-OVERLAP: wave.where
 // PROFILEMXFP4-DMA-OVERLAP: waveamd.dma_load_lds
 // PROFILEMXFP4-DMA-OVERLAP: wave.join
+// PROFILEMXFP4-DMA-OVERLAP: otherwise
+// PROFILEMXFP4-DMA-OVERLAP: wave.token
+// PROFILEMXFP4-DMA-OVERLAP: wave.yield
 // PROFILEMXFP4-DMA-OVERLAP: wave.binary ori
 // PROFILEMXFP4-DMA-OVERLAP: wave.where
 // PROFILEMXFP4-DMA-OVERLAP: waveamd.dma_load_lds
 // PROFILEMXFP4-DMA-OVERLAP: wave.join
+// PROFILEMXFP4-DMA-OVERLAP: otherwise
+// PROFILEMXFP4-DMA-OVERLAP: wave.token
+// PROFILEMXFP4-DMA-OVERLAP: wave.yield
 // PROFILEMXFP4-DMA-OVERLAP: scf.for {{%.*}} = {{%.*}} to [[ONE]] step [[ONE]]
 // PROFILEMXFP4-DMA-OVERLAP: waveamd.mma_scale "mfma.scale.f32.16x16x128.f4.f4"
 // PROFILEMXFP4-DMA-OVERLAP: waveamd.dma_load_lds
@@ -137,7 +143,7 @@
 // MXFP4-PERF-ASM-DAG: v_lshlrev_b32_e32 v{{[0-9]+}}, 12, v{{[0-9]+}}
 // MXFP4-PERF-ASM-DAG: v_lshlrev_b32_e32 v{{[0-9]+}}, 12, v{{[0-9]+}}
 // MXFP4-PERF-ASM: .Lwmma_f16_matmul_tiled.loop_head_0:
-// MXFP4-PERF-ASM: s_waitcnt vmcnt(32)
+// MXFP4-PERF-ASM: s_waitcnt vmcnt(8)
 // MXFP4-PERF-ASM-NEXT: s_barrier
 // MXFP4-PERF-ASM: s_add_i32 [[DMA_STEP:s[0-9]+]], [[LOOP_STEP:s[0-9]+]], 2
 // MXFP4-PERF-ASM: s_mul_i32 s{{[0-9]+}}, [[DMA_STEP]], 0x80

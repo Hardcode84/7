@@ -2194,6 +2194,8 @@ def _stage_mxfp4_scale_tiles_dma_after_dep(
         a_tokens: list[dsl.Value] = []
         _stage_mxfp4_a_scale_dma(bld, cfg, coords, layout, plan, a_tokens)
         bld.yield_([_join_tokens(bld, a_tokens)])
+        with active_a.otherwise():
+            bld.yield_([bld.token()])
     with bld.where(
         _mxfp4_b_scale_dma_mask(bld, cfg, coords),
         [dsl.mem_token_type()],
@@ -2201,6 +2203,8 @@ def _stage_mxfp4_scale_tiles_dma_after_dep(
         b_tokens: list[dsl.Value] = []
         _stage_mxfp4_b_scale_dma(bld, cfg, coords, layout, plan, b_tokens)
         bld.yield_([_join_tokens(bld, b_tokens)])
+        with active_b.otherwise():
+            bld.yield_([bld.token()])
     return bld.join(active_a.results[0], active_b.results[0])
 
 
@@ -3729,7 +3733,6 @@ def _emit_dma_step(
                         _scale_buffer_offset(bld, cfg, next_scale_step),
                         right_scale_token,
                         barrier_after=False,
-                        barrier_before=False,
                     )
                 new_accs = _emit_mxfp4_mma_grid_scale_sets_slice(
                     bld,
