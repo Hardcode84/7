@@ -15,8 +15,10 @@
 // RUN:   | FileCheck %s --check-prefix=PROFILE256
 // RUN: %python %S/../../../examples/wave/wmma_matmul_tiled.py --chip=gfx950 --kernel-profile=gfx950-f16-256x256-16wave --m=4096 --n=4096 --k=8192 --kernel-only --dump-asm 2>/dev/null \
 // RUN:   | FileCheck %s --check-prefix=F16-PERF-ASM
-// RUN: %python %S/../../../examples/wave/wmma_matmul_tiled.py --chip=gfx950 --kernel-profile=gfx950-mxfp4-256x256-4wave --m=1024 --n=1024 --k=128 --kernel-only 2>/dev/null \
+// RUN: %python %S/../../../examples/wave/wmma_matmul_tiled.py --chip=gfx950 --kernel-profile=gfx950-mxfp4-256x256-4wave --m=1024 --n=1024 --k=256 --kernel-only 2>/dev/null \
 // RUN:   | FileCheck %s --check-prefix=PROFILEMXFP4-4W
+// RUN: %python %S/../../../examples/wave/wmma_matmul_tiled.py --chip=gfx950 --kernel-profile=gfx950-mxfp4-256x256-4wave --m=1024 --n=1024 --k=1024 --kernel-only --dump-asm 2>/dev/null \
+// RUN:   | FileCheck %s --check-prefix=MXFP4-4W-SCALE-ASM
 // RUN: %python %S/../../../examples/wave/wmma_matmul_tiled.py --chip=gfx950 --kernel-profile=gfx950-mxfp4-256x256-8wave --m=1024 --n=1024 --k=768 --kernel-only 2>/dev/null \
 // RUN:   | FileCheck %s --check-prefix=PROFILEMXFP4-DMA-OVERLAP
 // RUN: %python %S/../../../examples/wave/wmma_matmul_tiled.py --chip=gfx950 --kernel-profile=gfx950-mxfp4-256x256-8wave --m=4096 --n=4096 --k=32768 --kernel-only --dump-asm 2>/dev/null \
@@ -91,11 +93,26 @@
 // F16-PERF-ASM: ds_read_b128
 
 // PROFILEMXFP4-4W-LABEL: func.func @wmma_f16_matmul_tiled
-// PROFILEMXFP4-4W-SAME: wave.lds_size = 40960
+// PROFILEMXFP4-4W-SAME: wave.dynamic_lds_size = 81920
 // PROFILEMXFP4-4W-SAME: waveamdmachine.target_waves = 1
 // PROFILEMXFP4-4W: waveamd.make_buffer
 // PROFILEMXFP4-4W: waveamd.dma_load_lds
 // PROFILEMXFP4-4W: waveamd.mma_scale "mfma.scale.f32.16x16x128.f4.f4"
+
+// MXFP4-4W-SCALE-ASM-LABEL: wmma_f16_matmul_tiled:
+// MXFP4-4W-SCALE-ASM: .Lwmma_f16_matmul_tiled.loop_head_0:
+// MXFP4-4W-SCALE-ASM: s_waitcnt lgkmcnt(0)
+// MXFP4-4W-SCALE-ASM-NEXT: s_barrier
+// MXFP4-4W-SCALE-ASM: ds_read_b64_tr_b8
+// MXFP4-4W-SCALE-ASM-NOT: s_barrier
+// MXFP4-4W-SCALE-ASM: ds_read_b64_tr_b8 {{.*}} offset:2560
+// MXFP4-4W-SCALE-ASM: ds_read_b64_tr_b8 {{.*}} offset:6656
+// MXFP4-4W-SCALE-ASM: s_waitcnt lgkmcnt(0)
+// MXFP4-4W-SCALE-ASM-NEXT: s_barrier
+// MXFP4-4W-SCALE-ASM: s_waitcnt vmcnt(24)
+// MXFP4-4W-SCALE-ASM-NEXT: s_barrier
+// MXFP4-4W-SCALE-ASM: ds_read_b128
+// MXFP4-4W-SCALE-ASM: s_cbranch_scc1 .Lwmma_f16_matmul_tiled.loop_head_0
 
 // PROFILEMXFP4-DMA-OVERLAP-LABEL: func.func @wmma_f16_matmul_tiled
 // PROFILEMXFP4-DMA-OVERLAP-SAME: wave.workgroup_size = array<i32: 512, 1, 1>

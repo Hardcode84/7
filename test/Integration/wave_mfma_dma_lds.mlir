@@ -20,7 +20,7 @@
 // RUN:   | FileCheck %s --check-prefix=DMA-MXFP4-K2
 // RUN: %python %S/../../examples/wave/wmma_matmul_tiled.py --chip=%chip --kernel-profile=gfx950-mxfp4-256x256-8wave --m=1024 --n=512 --k=256 --kernel-only \
 // RUN:   | FileCheck %s --check-prefix=PROFILE-MXFP4
-// RUN: %python %S/../../examples/wave/wmma_matmul_tiled.py --chip=%chip --kernel-profile=gfx950-mxfp4-256x256-4wave --m=1024 --n=512 --k=128 --kernel-only \
+// RUN: %python %S/../../examples/wave/wmma_matmul_tiled.py --chip=%chip --kernel-profile=gfx950-mxfp4-256x256-4wave --m=1024 --n=512 --k=256 --kernel-only \
 // RUN:   | FileCheck %s --check-prefix=PROFILE-MXFP4-4W
 //
 // DMA: CPU comparison passed

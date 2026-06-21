@@ -106,13 +106,14 @@ KERNEL_PROFILES: dict[str, dict[str, ProfileValue]] = {
         "bn": 2,
         "wave_m_tiles": 8,
         "wave_n_tiles": 8,
-        "wave_k_tiles": 1,
+        "wave_k_tiles": 2,
         "target_waves": 1,
         "use_buffer": True,
         "use_dma_lds": True,
         "matrix_intrinsic": "mfma_gfx950",
         "input_type": "mxfp4",
         "output_type": "f16",
+        "mxfp4_scale_path": "regs",
         "cta_swizzle_xcds": 8,
         "cta_group_m": 4,
     },
@@ -221,6 +222,9 @@ def build_example_args(args: argparse.Namespace, chip: str) -> list[str]:
         cmd.append(f"--input-type={args.input_type}")
     if args.output_type != "f32":
         cmd.append(f"--output-type={args.output_type}")
+    mxfp4_scale_path = getattr(args, "mxfp4_scale_path", "dma")
+    if mxfp4_scale_path != "dma":
+        cmd.append(f"--mxfp4-scale-path={mxfp4_scale_path}")
     cta_swizzle_xcds = getattr(args, "cta_swizzle_xcds", 1)
     cta_group_m = getattr(args, "cta_group_m", 1)
     if cta_swizzle_xcds != 1:
@@ -842,6 +846,7 @@ def build_argparser() -> argparse.ArgumentParser:
     )
     ap.add_argument("--output-type", choices=("f32", "f16"), default="f32")
     ap.add_argument("--input-type", choices=("f16", "bf16", "mxfp4"), default="f16")
+    ap.add_argument("--mxfp4-scale-path", choices=("dma", "regs"), default="dma")
     ap.add_argument("--cta-swizzle-xcds", type=int, default=1)
     ap.add_argument("--cta-group-m", type=int, default=1)
     ap.add_argument("--iters", type=int, default=1000)
@@ -914,11 +919,14 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 
 
 def validate_mxfp4_args(args: argparse.Namespace) -> None:
+    mxfp4_scale_path = getattr(args, "mxfp4_scale_path", "dma")
     if args.input_type == "mxfp4":
         if args.chip != "gfx950":
             sys.exit("--input-type=mxfp4 requires gfx950")
         if selected_matrix_intrinsic(args) != "mfma_gfx950":
             sys.exit("--input-type=mxfp4 requires gfx950 MFMA")
+    elif mxfp4_scale_path != "dma":
+        sys.exit("--mxfp4-scale-path=regs requires --input-type=mxfp4")
 
 
 def validate_pressure_budget_args(args: argparse.Namespace) -> None:
@@ -963,6 +971,7 @@ def main() -> int:
             f"wave_k_tiles={args.wave_k_tiles} "
             f"target_waves={effective_target_waves(args)} "
             f"input_type={args.input_type} output_type={args.output_type} "
+            f"mxfp4_scale_path={args.mxfp4_scale_path} "
             f"seed={args.seed} input_mode="
             f"{'all-ones' if args.all_ones else 'random'}\n"
             f"cta_swizzle_xcds={args.cta_swizzle_xcds} "

@@ -99,13 +99,14 @@ _GFX950_MXFP4_256X256_4WAVE: dict[str, _ProfileValue] = {
     "bn": 2,
     "wave_m_tiles": 8,
     "wave_n_tiles": 8,
-    "wave_k_tiles": 1,
+    "wave_k_tiles": 2,
     "target_waves": 1,
     "use_buffer": True,
     "use_dma_lds": True,
     "matrix_intrinsic": "mfma_gfx950",
     "input_type": "mxfp4",
     "output_type": "f16",
+    "mxfp4_scale_path": "regs",
     "cta_swizzle_xcds": 8,
     "cta_group_m": 4,
 }
@@ -236,6 +237,12 @@ def _add_codegen_args(parser: argparse.ArgumentParser) -> None:
         help="output element type for C",
     )
     parser.add_argument(
+        "--mxfp4-scale-path",
+        choices=("dma", "regs"),
+        default="dma",
+        help="MXFP4 scale staging path when A/B use LDS DMA",
+    )
+    parser.add_argument(
         "--kernel-only",
         action="store_true",
         help="emit only the GPU kernel module, skipping host setup",
@@ -261,6 +268,8 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     args = parser.parse_args(argv)
     if args.target_waves < 0:
         parser.error("--target-waves must be non-negative")
+    if args.mxfp4_scale_path != "dma" and args.input_type != "mxfp4":
+        parser.error("--mxfp4-scale-path=regs requires --input-type=mxfp4")
     if args.kernel_only and (args.run or args.compare_cpu):
         parser.error("--kernel-only cannot be used with --run/--compare-cpu")
     return args
@@ -353,6 +362,7 @@ def main(argv: list[str] | None = None) -> int:
         matrix_intrinsic=matrix_intrinsic,
         input_type=args.input_type,
         output_type=args.output_type,
+        mxfp4_scale_path=args.mxfp4_scale_path,
         random_data=random_data,
         random_seed=args.seed,
         cta_swizzle_xcds=args.cta_swizzle_xcds,

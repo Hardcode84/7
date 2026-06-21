@@ -8,6 +8,7 @@
 # CHECK: matmul_bf16_forwarding: ok
 # CHECK: matmul_mxfp4_forwarding_and_trip_count: ok
 # CHECK: matmul_mxfp4_dma_forwarding: ok
+# CHECK: matmul_mxfp4_scale_regs_forwarding: ok
 # CHECK: matmul_mxfp4_profile_kernel_only_target_waves: ok
 # CHECK: matmul_profile_cli_override: ok
 # CHECK: matmul_mxfp4_4wave_profile: ok
@@ -314,6 +315,7 @@ def make_mxfp4_args() -> argparse.Namespace:
         chip="gfx950",
         input_type="mxfp4",
         output_type="f32",
+        mxfp4_scale_path="dma",
         cta_swizzle_xcds=1,
         cta_group_m=1,
         target_waves=0,
@@ -451,6 +453,30 @@ def check_matmul_mxfp4_dma_forwarding(matmul) -> None:
     print("matmul_mxfp4_dma_forwarding: ok")
 
 
+def check_matmul_mxfp4_scale_regs_forwarding(matmul) -> None:
+    args = make_mxfp4_args()
+    args.use_dma_lds = True
+    args.mxfp4_scale_path = "regs"
+    matmul.validate_args(
+        argparse.Namespace(
+            **vars(args),
+            repeats=1,
+            calibration_file=None,
+            pressure_vgpr_budget=-1,
+            pressure_sgpr_budget=-1,
+            pressure_critical_vgpr_budget=-1,
+            pressure_critical_sgpr_budget=-1,
+        )
+    )
+    example_cmd = matmul.build_example_args(args, "gfx950")
+    require(
+        "matmul_mxfp4_scale_regs_forwarding",
+        "--mxfp4-scale-path=regs" in example_cmd,
+        "example command missing MXFP4 scale regs flag",
+    )
+    print("matmul_mxfp4_scale_regs_forwarding: ok")
+
+
 def check_matmul_mxfp4_profile_kernel_only_target_waves(matmul) -> None:
     args = matmul.parse_args(
         [
@@ -524,7 +550,7 @@ def check_matmul_mxfp4_4wave_profile(matmul) -> None:
             "--kernel-profile=gfx950-mxfp4-256x256-4wave",
             "--m=256",
             "--n=256",
-            "--k=128",
+            "--k=256",
             "--skip-hw",
         ]
     )
@@ -540,8 +566,18 @@ def check_matmul_mxfp4_4wave_profile(matmul) -> None:
     )
     require(
         "matmul_mxfp4_4wave_profile",
+        args.wave_k_tiles == 2,
+        "bad 4-wave K tile shape",
+    )
+    require(
+        "matmul_mxfp4_4wave_profile",
         args.input_type == "mxfp4" and args.output_type == "f16",
         "bad 4-wave dtypes",
+    )
+    require(
+        "matmul_mxfp4_4wave_profile",
+        args.mxfp4_scale_path == "regs",
+        "bad 4-wave scale path",
     )
     require(
         "matmul_mxfp4_4wave_profile",
@@ -550,7 +586,7 @@ def check_matmul_mxfp4_4wave_profile(matmul) -> None:
     )
     require(
         "matmul_mxfp4_4wave_profile",
-        matmul.compute_lds_bytes(args) == 40960,
+        matmul.compute_lds_bytes(args) == 81920,
         "bad 4-wave LDS byte accounting",
     )
     print("matmul_mxfp4_4wave_profile: ok")
@@ -735,6 +771,7 @@ def main() -> int:
     check_matmul_bf16_forwarding(matmul)
     check_matmul_mxfp4_forwarding_and_trip_count(matmul)
     check_matmul_mxfp4_dma_forwarding(matmul)
+    check_matmul_mxfp4_scale_regs_forwarding(matmul)
     check_matmul_mxfp4_profile_kernel_only_target_waves(matmul)
     check_matmul_profile_cli_override(matmul)
     check_matmul_mxfp4_4wave_profile(matmul)

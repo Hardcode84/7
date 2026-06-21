@@ -91,6 +91,26 @@ func.func @exec_if_yield_copy_smem(%cond: !waveamdmachine.reg<sgpr, 1>,
   return
 }
 
+// CHECK-LABEL: func.func @exec_if_yield_same_reg_smem
+// CHECK: [[RESULT:%.*]] = waveamdmachine.exec_if
+// CHECK: [[VALUE:%.*]] = waveamdmachine.s_load_b32
+// CHECK-NEXT: waveamdmachine.yield [[VALUE]]
+// CHECK: waveamdmachine.s_waitcnt lgkmcnt(0)
+// CHECK-NEXT: waveamdmachine.s_add_i32 [[RESULT]]
+func.func @exec_if_yield_same_reg_smem(%cond: !waveamdmachine.reg<sgpr, 1>,
+                                       %x: !waveamdmachine.reg<sgpr, 1>) {
+  %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+  %r = waveamdmachine.exec_if %cond {
+    %value = waveamdmachine.s_load_b32 %zero, "s[0:1]"
+        : (!waveamdmachine.imm) -> !waveamdmachine.reg<sgpr, 1, 8>
+    waveamdmachine.yield %value : !waveamdmachine.reg<sgpr, 1, 8>
+  } : !waveamdmachine.reg<sgpr, 1> -> !waveamdmachine.reg<sgpr, 1, 8>
+  %sum, %scc = waveamdmachine.s_add_i32 %r, %x
+      : (!waveamdmachine.reg<sgpr, 1, 8>, !waveamdmachine.reg<sgpr, 1>)
+        -> (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<scc, 1>)
+  return
+}
+
 }
 
 // -----

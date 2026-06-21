@@ -174,6 +174,7 @@ static_cfg = wm._make_matmul_config(
     matrix_intrinsic="wmma",
     input_type="f16",
     output_type="f32",
+    mxfp4_scale_path="dma",
     random_data=False,
     random_seed=0,
     cta_swizzle_xcds=1,

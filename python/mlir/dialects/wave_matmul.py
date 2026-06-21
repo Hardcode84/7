@@ -134,10 +134,12 @@ class _MatmulConfig:
     matrix_intrinsic: str = "wmma"
     input_type: str = "f16"
     output_type: str = "f32"
+    mxfp4_scale_path: str = "dma"
     random_data: bool = False
     random_seed: int = 0
     cta_swizzle_xcds: int = 1
     cta_group_m: int = 1
+    target_waves: int | None = None
 
     def __post_init__(self) -> None:
         _validate_positive_shape(self)
@@ -301,6 +303,7 @@ def _validate_positive_shape(cfg: _MatmulConfig) -> None:
     _validate_wave_tile_counts(cfg)
     _validate_choice("output_type", cfg.output_type, ("f32", "f16"))
     _validate_choice("input_type", cfg.input_type, ("f16", "bf16", "mxfp4"))
+    _validate_choice("mxfp4_scale_path", cfg.mxfp4_scale_path, ("dma", "regs"))
 
 
 def _validate_cta_remap_params(cfg: _MatmulConfig) -> None:
@@ -1186,6 +1189,62 @@ def _dma_issue(
     return dma_tokens
 
 
+def _dma_b_wave_n_slice_indices(
+    cfg: _MatmulConfig, n_begin: int, n_end: int
+) -> tuple[int, ...] | None:
+    geom = _dma_cta_geometry(cfg)
+    indices: list[int] = []
+    for slot_per_wave in range(geom.b_slots_per_wave):
+        in_slice: list[bool] = []
+        for wave_id in range(cfg.waves_per_workgroup):
+            slot = slot_per_wave * cfg.waves_per_workgroup + wave_id
+            n_tile = slot % geom.block_n_tiles
+            j = n_tile % cfg.wave_n_tiles
+            in_slice.append(n_begin <= j < n_end)
+        if any(in_slice):
+            if not all(in_slice):
+                return None
+            indices.append(slot_per_wave)
+    return tuple(indices)
+
+
+def _select_values(
+    values: tuple[dsl.Value, ...], indices: tuple[int, ...]
+) -> tuple[dsl.Value, ...]:
+    return tuple(values[i] for i in indices)
+
+
+def _dma_issue_parts(
+    bld: dsl.FunctionBuilder,
+    a_ptrs: tuple[dsl.Value, ...],
+    b_ptrs: tuple[dsl.Value, ...],
+    staging: _LdsStaging,
+    *,
+    after: dsl.Value | None,
+    lds_offset: int | dsl.Value,
+    include_a: bool,
+    b_indices: tuple[int, ...],
+) -> list[dsl.Value]:
+    dep = after if after is not None else bld.token()
+    dma_tokens: list[dsl.Value] = []
+    if include_a:
+        a_lds_ptrs = _offset_ptrs(bld, staging.a_dma_lds_ptrs, lds_offset)
+        for ptr, lds_ptr in zip(a_ptrs, a_lds_ptrs, strict=True):
+            dma_tokens.append(
+                bld.dma_load_lds(
+                    ptr, lds_ptr, after=dep, bytes=16, zero_fill_inactive=True
+                )
+            )
+    b_lds_ptrs = _offset_ptrs(
+        bld, _select_values(staging.b_dma_lds_ptrs, b_indices), lds_offset
+    )
+    for ptr, lds_ptr in zip(_select_values(b_ptrs, b_indices), b_lds_ptrs, strict=True):
+        dma_tokens.append(
+            bld.dma_load_lds(ptr, lds_ptr, after=dep, bytes=16, zero_fill_inactive=True)
+        )
+    return dma_tokens
+
+
 def _dma_drain(
     bld: dsl.FunctionBuilder,
     dma_token: dsl.Value,
@@ -1412,6 +1471,23 @@ class _Mxfp4ScaleSet:
 
 
 @dataclass(frozen=True)
+class _DeferredScaleStore:
+    raw: dsl.Value
+    dest: dsl.Value
+    dep: dsl.Value | None
+
+
+@dataclass(frozen=True)
+class _DeferredScaleRegBatch:
+    a_mask: dsl.Value
+    b_mask: dsl.Value
+    a_loaded: tuple[tuple[dsl.Value, dsl.Value, dsl.Value], ...]
+    b_loaded: tuple[tuple[dsl.Value, dsl.Value, dsl.Value], ...]
+    dep: dsl.Value | None
+    barrier_after: bool
+
+
+@dataclass(frozen=True)
 class _Mxfp4ScaleDmaPlan:
     bindings: dict[dsl.Expr, dsl.Value]
     first_bindings: dict[dsl.Expr, dsl.Value]
@@ -1503,6 +1579,10 @@ def _add_lds_dword_offset(
     return bld.index_expr(base_sym + offset, bindings={base_sym: base})
 
 
+def _use_mxfp4_scale_dma(cfg: _MatmulConfig) -> bool:
+    return cfg.use_dma_lds and cfg.mxfp4_scale_path == "dma"
+
+
 def _stage_mxfp4_scale_tiles_after_dep(
     bld: dsl.FunctionBuilder,
     cfg: _MatmulConfig,
@@ -1515,82 +1595,575 @@ def _stage_mxfp4_scale_tiles_after_dep(
     if coords.a_scale_base is None or coords.b_scale_base is None:
         raise ValueError("MXFP4 scale buffers are required")
     layout = _mxfp4_scale_layout(cfg, coords, step)
-    if cfg.use_dma_lds:
+    if _use_mxfp4_scale_dma(cfg):
         return layout, _stage_mxfp4_scale_tiles_dma_after_dep(
             bld, cfg, coords, layout, step, lds_offset=lds_offset, dep=dep
         )
-    scale_tile_rows = 16
-    store_type = dsl.simd_type(
-        dsl.vector_type(scale_tile_rows, dsl.i8()), width=cfg.mma.wave_size
+    if cfg.use_dma_lds and _use_cta_owned_mxfp4_scale_dma(cfg):
+        return layout, _stage_mxfp4_scale_tiles_regs_cta_after_dep(
+            bld, cfg, coords, layout, step, lds_offset=lds_offset, dep=dep
+        )
+    return layout, _stage_mxfp4_scale_tiles_wave_regs_after_dep(
+        bld, cfg, coords, layout, lds_offset=lds_offset, dep=dep
     )
-    load_type = store_type
+
+
+def _stage_mxfp4_scale_tiles_wave_regs_after_dep(
+    bld: dsl.FunctionBuilder,
+    cfg: _MatmulConfig,
+    coords: _TileCoords,
+    layout: _Mxfp4ScaleLayout,
+    *,
+    lds_offset: dsl.Value | int,
+    dep: dsl.Value | None,
+) -> dsl.Value:
+    row_sliced = _use_mxfp4_scale_reg_dword_staging(cfg)
+    packed_dword = _use_mxfp4_scale_reg_packed_dword_staging(cfg)
+    load_width = 4 if row_sliced else 16
+    load_type = dsl.simd_type(
+        dsl.vector_type(load_width, dsl.i8()), width=cfg.mma.wave_size
+    )
     lds = _scale_lds_base(bld, cfg, lds_offset)
+    lane_mask = 0 if packed_dword else (12 if row_sliced else 15)
     lane_mod16 = bld.binary(
         dsl.BinaryKind.AndI,
         coords.wi,
-        bld.splat(bld.constant(dsl.i32(), 15), width=cfg.mma.wave_size),
+        bld.splat(bld.constant(dsl.i32(), lane_mask), width=cfg.mma.wave_size),
     )
     zero = bld.splat(bld.constant(dsl.i32(), 0), width=cfg.mma.wave_size)
-    lane0_per_scale_group = bld.cmpi("eq", lane_mod16, zero)
+    lane_group_mask = bld.cmpi("eq", lane_mod16, zero)
 
-    def store_scale(
-        global_base: dsl.Value,
-        global_off: dsl.Value,
-        lds_off: dsl.Value,
-    ) -> None:
-        raw, load_token = bld.load(bld.ptr_add(global_base, global_off), load_type)
-        store_dep = load_token if dep is None else bld.join(dep, load_token)
-        tokens.append(bld.store(raw, bld.ptr_add(lds, lds_off), after=store_dep))
-
-    with bld.where(lane0_per_scale_group, [dsl.mem_token_type()]) as active:
+    with bld.where(lane_group_mask, [dsl.mem_token_type()]) as active:
         tokens: list[dsl.Value] = []
-        a_pack = cfg.wave_m_tiles % _MXFP4_SCALE_PACK == 0
-        a_tiles_per_wave = _mxfp4_scale_tiles_per_wave(cfg.wave_m_tiles)
-        for i in range(cfg.wave_m_tiles):
-            scale_tile = (
-                layout.m_wave * a_tiles_per_wave + i // _MXFP4_SCALE_PACK
-                if a_pack
-                else layout.m_wave * cfg.wave_m_tiles + i
-            )
-            scale_idx = i % _MXFP4_SCALE_PACK if a_pack else 0
+        _stage_mxfp4_a_scale_regs(
+            bld,
+            cfg,
+            coords,
+            layout,
+            load_type,
+            lds,
+            dep,
+            tokens,
+            row_sliced,
+            packed_dword,
+        )
+        _stage_mxfp4_b_scale_regs(
+            bld,
+            cfg,
+            coords,
+            layout,
+            load_type,
+            lds,
+            dep,
+            tokens,
+            row_sliced,
+            packed_dword,
+        )
+        bld.yield_([_join_tokens(bld, tokens)])
+
+    return active.results[0]
+
+
+def _flush_mxfp4_scale_reg_stores(
+    bld: dsl.FunctionBuilder,
+    loaded: list[tuple[dsl.Value, dsl.Value, dsl.Value]],
+    dep: dsl.Value | None,
+    tokens: list[dsl.Value],
+) -> None:
+    if not loaded:
+        return
+    store_dep = _join_tokens(bld, [tok for _, _, tok in loaded])
+    if dep is not None:
+        store_dep = bld.join(dep, store_dep)
+    tokens.append(
+        _join_tokens(
+            bld, [bld.store(raw, dest, after=store_dep) for raw, dest, _ in loaded]
+        )
+    )
+    loaded.clear()
+
+
+def _append_mxfp4_scale_reg_load(
+    bld: dsl.FunctionBuilder,
+    load_type: dsl.Type,
+    loaded: list[tuple[dsl.Value, dsl.Value, dsl.Value]],
+    global_base: dsl.Value,
+    global_off: dsl.Value,
+    lds_base: dsl.Value,
+    lds_off: dsl.Value,
+) -> None:
+    raw, load_token = bld.load(bld.ptr_add(global_base, global_off), load_type)
+    loaded.append((raw, bld.ptr_add(lds_base, lds_off), load_token))
+
+
+def _stage_mxfp4_scale_tiles_regs_cta_after_dep(
+    bld: dsl.FunctionBuilder,
+    cfg: _MatmulConfig,
+    coords: _TileCoords,
+    layout: _Mxfp4ScaleLayout,
+    step: dsl.Value | int,
+    *,
+    lds_offset: dsl.Value | int,
+    dep: dsl.Value | None,
+) -> dsl.Value:
+    row_sliced = _use_mxfp4_scale_reg_dword_staging(cfg)
+    packed_dword = _use_mxfp4_scale_reg_packed_dword_staging(cfg)
+    load_width = 4 if row_sliced else 16
+    load_type = dsl.simd_type(
+        dsl.vector_type(load_width, dsl.i8()), width=cfg.mma.wave_size
+    )
+    lds = _scale_lds_base(bld, cfg, lds_offset)
+    with bld.where(
+        _mxfp4_a_scale_regs_cta_mask(bld, cfg, coords),
+        [dsl.mem_token_type()],
+    ) as active_a:
+        a_tokens: list[dsl.Value] = []
+        _stage_mxfp4_a_scale_regs(
+            bld,
+            cfg,
+            coords,
+            layout,
+            load_type,
+            lds,
+            dep,
+            a_tokens,
+            row_sliced,
+            packed_dword,
+        )
+        bld.yield_([_join_tokens(bld, a_tokens)])
+        with active_a.otherwise():
+            bld.yield_([bld.token()])
+    with bld.where(
+        _mxfp4_b_scale_regs_cta_mask(bld, cfg, coords),
+        [dsl.mem_token_type()],
+    ) as active_b:
+        b_tokens: list[dsl.Value] = []
+        _stage_mxfp4_b_scale_regs(
+            bld,
+            cfg,
+            coords,
+            layout,
+            load_type,
+            lds,
+            dep,
+            b_tokens,
+            row_sliced,
+            packed_dword,
+        )
+        bld.yield_([_join_tokens(bld, b_tokens)])
+        with active_b.otherwise():
+            bld.yield_([bld.token()])
+    return bld.join(active_a.results[0], active_b.results[0])
+
+
+def _stage_mxfp4_a_scale_regs(
+    bld: dsl.FunctionBuilder,
+    cfg: _MatmulConfig,
+    coords: _TileCoords,
+    layout: _Mxfp4ScaleLayout,
+    load_type: dsl.Type,
+    lds: dsl.Value,
+    dep: dsl.Value | None,
+    tokens: list[dsl.Value],
+    row_sliced: bool,
+    packed_dword: bool,
+    loaded: list[tuple[dsl.Value, dsl.Value, dsl.Value]] | None = None,
+) -> None:
+    local_loaded: list[tuple[dsl.Value, dsl.Value, dsl.Value]] = (
+        [] if loaded is None else loaded
+    )
+    a_pack = cfg.wave_m_tiles % _MXFP4_SCALE_PACK == 0
+    a_tiles_per_wave = _mxfp4_scale_tiles_per_wave(cfg.wave_m_tiles)
+    if packed_dword:
+        for packed_idx in range(a_tiles_per_wave):
+            scale_tile = layout.m_wave * a_tiles_per_wave + packed_idx
             m_tile = (
                 layout.wg_m * (cfg.BM * cfg.wave_m_tiles)
                 + layout.m_wave * cfg.wave_m_tiles
-                + i
+                + packed_idx * _MXFP4_SCALE_PACK
             )
             m = m_tile * 16
-            a_off = bld.index_expr(layout.scale_k * cfg.M + m, bindings=layout.bindings)
+            row_quad = layout.lane_mod16 * 4
+            a_off = bld.index_expr(
+                layout.scale_k * cfg.M + m + row_quad, bindings=layout.bindings
+            )
             lds_off = bld.index_expr(
-                scale_tile * 512 + layout.lane_scale_group * 128 + scale_idx * 16,
+                scale_tile * 512 + layout.lane_scale_group * 128 + row_quad,
                 bindings=layout.bindings,
             )
-            store_scale(coords.a_scale_base, a_off, lds_off)
-
-        b_pack = cfg.wave_n_tiles % _MXFP4_SCALE_PACK == 0
-        b_tiles_per_wave = _mxfp4_scale_tiles_per_wave(cfg.wave_n_tiles)
-        b_scale_base = cfg.BM * a_tiles_per_wave
-        for j in range(cfg.wave_n_tiles):
-            scale_tile = (
-                b_scale_base + layout.n_wave * b_tiles_per_wave + j // _MXFP4_SCALE_PACK
-                if b_pack
-                else b_scale_base + layout.n_wave * cfg.wave_n_tiles + j
+            _append_mxfp4_scale_reg_load(
+                bld,
+                load_type,
+                local_loaded,
+                coords.a_scale_base,
+                a_off,
+                lds,
+                lds_off,
             )
-            scale_idx = j % _MXFP4_SCALE_PACK if b_pack else 0
+        if loaded is None:
+            _flush_mxfp4_scale_reg_stores(bld, local_loaded, dep, tokens)
+        return
+
+    for i in range(cfg.wave_m_tiles):
+        scale_tile = (
+            layout.m_wave * a_tiles_per_wave + i // _MXFP4_SCALE_PACK
+            if a_pack
+            else layout.m_wave * cfg.wave_m_tiles + i
+        )
+        scale_idx = i % _MXFP4_SCALE_PACK if a_pack else 0
+        m_tile = (
+            layout.wg_m * (cfg.BM * cfg.wave_m_tiles)
+            + layout.m_wave * cfg.wave_m_tiles
+            + i
+        )
+        m = m_tile * 16
+        row_quad = layout.lane_mod16 * 4 if row_sliced else 0
+        a_off = bld.index_expr(
+            layout.scale_k * cfg.M + m + row_quad, bindings=layout.bindings
+        )
+        lds_off = bld.index_expr(
+            scale_tile * 512
+            + layout.lane_scale_group * 128
+            + scale_idx * 16
+            + row_quad,
+            bindings=layout.bindings,
+        )
+        _append_mxfp4_scale_reg_load(
+            bld, load_type, local_loaded, coords.a_scale_base, a_off, lds, lds_off
+        )
+    if loaded is None:
+        _flush_mxfp4_scale_reg_stores(bld, local_loaded, dep, tokens)
+
+
+def _stage_mxfp4_b_scale_regs(
+    bld: dsl.FunctionBuilder,
+    cfg: _MatmulConfig,
+    coords: _TileCoords,
+    layout: _Mxfp4ScaleLayout,
+    load_type: dsl.Type,
+    lds: dsl.Value,
+    dep: dsl.Value | None,
+    tokens: list[dsl.Value],
+    row_sliced: bool,
+    packed_dword: bool,
+    loaded: list[tuple[dsl.Value, dsl.Value, dsl.Value]] | None = None,
+) -> None:
+    local_loaded: list[tuple[dsl.Value, dsl.Value, dsl.Value]] = (
+        [] if loaded is None else loaded
+    )
+    b_pack = cfg.wave_n_tiles % _MXFP4_SCALE_PACK == 0
+    a_tiles_per_wave = _mxfp4_scale_tiles_per_wave(cfg.wave_m_tiles)
+    b_tiles_per_wave = _mxfp4_scale_tiles_per_wave(cfg.wave_n_tiles)
+    b_scale_base = cfg.BM * a_tiles_per_wave
+    if packed_dword:
+        for packed_idx in range(b_tiles_per_wave):
+            scale_tile = b_scale_base + layout.n_wave * b_tiles_per_wave + packed_idx
             n_tile = (
                 layout.wg_n * (cfg.BN * cfg.wave_n_tiles)
                 + layout.n_wave * cfg.wave_n_tiles
-                + j
+                + packed_idx * _MXFP4_SCALE_PACK
             )
             n = n_tile * 16
-            b_off = bld.index_expr(layout.scale_k * cfg.N + n, bindings=layout.bindings)
+            row_quad = layout.lane_mod16 * 4
+            b_off = bld.index_expr(
+                layout.scale_k * cfg.N + n + row_quad, bindings=layout.bindings
+            )
             lds_off = bld.index_expr(
-                scale_tile * 512 + layout.lane_scale_group * 128 + scale_idx * 16,
+                scale_tile * 512 + layout.lane_scale_group * 128 + row_quad,
                 bindings=layout.bindings,
             )
-            store_scale(coords.b_scale_base, b_off, lds_off)
-        bld.yield_([_join_tokens(bld, tokens)])
+            _append_mxfp4_scale_reg_load(
+                bld,
+                load_type,
+                local_loaded,
+                coords.b_scale_base,
+                b_off,
+                lds,
+                lds_off,
+            )
+        if loaded is None:
+            _flush_mxfp4_scale_reg_stores(bld, local_loaded, dep, tokens)
+        return
 
-    return layout, active.results[0]
+    for j in range(cfg.wave_n_tiles):
+        scale_tile = (
+            b_scale_base + layout.n_wave * b_tiles_per_wave + j // _MXFP4_SCALE_PACK
+            if b_pack
+            else b_scale_base + layout.n_wave * cfg.wave_n_tiles + j
+        )
+        scale_idx = j % _MXFP4_SCALE_PACK if b_pack else 0
+        n_tile = (
+            layout.wg_n * (cfg.BN * cfg.wave_n_tiles)
+            + layout.n_wave * cfg.wave_n_tiles
+            + j
+        )
+        n = n_tile * 16
+        row_quad = layout.lane_mod16 * 4 if row_sliced else 0
+        b_off = bld.index_expr(
+            layout.scale_k * cfg.N + n + row_quad, bindings=layout.bindings
+        )
+        lds_off = bld.index_expr(
+            scale_tile * 512
+            + layout.lane_scale_group * 128
+            + scale_idx * 16
+            + row_quad,
+            bindings=layout.bindings,
+        )
+        _append_mxfp4_scale_reg_load(
+            bld, load_type, local_loaded, coords.b_scale_base, b_off, lds, lds_off
+        )
+    if loaded is None:
+        _flush_mxfp4_scale_reg_stores(bld, local_loaded, dep, tokens)
+
+
+def _use_batched_mxfp4_scale_regs_cta(cfg: _MatmulConfig) -> bool:
+    return (
+        cfg.use_dma_lds
+        and _use_cta_owned_mxfp4_scale_dma(cfg)
+        and _use_mxfp4_scale_reg_packed_dword_staging(cfg)
+        and cfg.wave_k_tiles > 1
+    )
+
+
+def _flatten_scale_reg_loads(
+    loaded: list[tuple[dsl.Value, dsl.Value, dsl.Value]],
+) -> list[dsl.Value]:
+    return [value for triple in loaded for value in triple]
+
+
+def _scale_reg_loads_from_results(
+    results: tuple[dsl.Value, ...],
+) -> tuple[tuple[dsl.Value, dsl.Value, dsl.Value], ...]:
+    if len(results) % 3 != 0:
+        raise ValueError("scale-reg load tuple must be raw/dest/token triples")
+    return tuple(
+        (results[i], results[i + 1], results[i + 2]) for i in range(0, len(results), 3)
+    )
+
+
+def _defer_mxfp4_scale_batch_regs_cta_after_dep(
+    bld: dsl.FunctionBuilder,
+    cfg: _MatmulConfig,
+    coords: _TileCoords,
+    scale_step: dsl.Value | int,
+    scale_lds_offset: dsl.Value | int,
+    *,
+    dep: dsl.Value | None,
+    barrier_after: bool,
+) -> tuple[list[tuple[_Mxfp4ScaleLayout, dsl.Value | int]], _DeferredScaleRegBatch]:
+    if not _use_batched_mxfp4_scale_regs_cta(cfg):
+        raise ValueError("deferred scale-reg batch requires packed CTA regs staging")
+    load_type = dsl.simd_type(dsl.vector_type(4, dsl.i8()), width=cfg.mma.wave_size)
+    stride = _mxfp4_scale_lds_stride_dwords(cfg)
+    staged: list[tuple[_Mxfp4ScaleLayout, dsl.Value | int]] = []
+    for k in range(cfg.wave_k_tiles):
+        raw_step = _mxfp4_raw_k_step(bld, cfg, scale_step, k)
+        offset = _add_lds_dword_offset(bld, scale_lds_offset, k * stride)
+        staged.append((_mxfp4_scale_layout(cfg, coords, raw_step), offset))
+
+    a_tiles_per_wave = _mxfp4_scale_tiles_per_wave(cfg.wave_m_tiles)
+    lds_simd_type = dsl.simd_type(
+        _scale_lds_base(bld, cfg, scale_lds_offset).type, cfg.mma.wave_size
+    )
+    load_entry_types = (
+        load_type,
+        lds_simd_type,
+        dsl.mem_token_type(),
+    )
+    a_result_types = [
+        item
+        for _ in range(cfg.wave_k_tiles * a_tiles_per_wave)
+        for item in load_entry_types
+    ]
+    a_mask = _mxfp4_a_scale_regs_cta_mask(bld, cfg, coords)
+    with bld.where(a_mask, a_result_types) as active_a:
+        a_loaded: list[tuple[dsl.Value, dsl.Value, dsl.Value]] = []
+        for layout, offset in staged:
+            _stage_mxfp4_a_scale_regs(
+                bld,
+                cfg,
+                coords,
+                layout,
+                load_type,
+                _scale_lds_base(bld, cfg, offset),
+                dep,
+                [],
+                row_sliced=True,
+                packed_dword=True,
+                loaded=a_loaded,
+            )
+        bld.yield_(_flatten_scale_reg_loads(a_loaded))
+
+    b_tiles_per_wave = _mxfp4_scale_tiles_per_wave(cfg.wave_n_tiles)
+    b_result_types = [
+        item
+        for _ in range(cfg.wave_k_tiles * b_tiles_per_wave)
+        for item in load_entry_types
+    ]
+    b_mask = _mxfp4_b_scale_regs_cta_mask(bld, cfg, coords)
+    with bld.where(b_mask, b_result_types) as active_b:
+        b_loaded: list[tuple[dsl.Value, dsl.Value, dsl.Value]] = []
+        for layout, offset in staged:
+            _stage_mxfp4_b_scale_regs(
+                bld,
+                cfg,
+                coords,
+                layout,
+                load_type,
+                _scale_lds_base(bld, cfg, offset),
+                dep,
+                [],
+                row_sliced=True,
+                packed_dword=True,
+                loaded=b_loaded,
+            )
+        bld.yield_(_flatten_scale_reg_loads(b_loaded))
+
+    return staged, _DeferredScaleRegBatch(
+        a_mask=a_mask,
+        b_mask=b_mask,
+        a_loaded=_scale_reg_loads_from_results(tuple(active_a.results)),
+        b_loaded=_scale_reg_loads_from_results(tuple(active_b.results)),
+        dep=dep,
+        barrier_after=barrier_after,
+    )
+
+
+def _flush_deferred_mxfp4_scale_reg_batch(
+    bld: dsl.FunctionBuilder, batch: _DeferredScaleRegBatch
+) -> dsl.Value:
+    with bld.where(batch.a_mask, [dsl.mem_token_type()]) as active_a:
+        a_tokens: list[dsl.Value] = []
+        _flush_mxfp4_scale_reg_stores(bld, list(batch.a_loaded), batch.dep, a_tokens)
+        bld.yield_([_join_tokens(bld, a_tokens)])
+        with active_a.otherwise():
+            bld.yield_([bld.token()])
+    with bld.where(batch.b_mask, [dsl.mem_token_type()]) as active_b:
+        b_tokens: list[dsl.Value] = []
+        _flush_mxfp4_scale_reg_stores(bld, list(batch.b_loaded), batch.dep, b_tokens)
+        bld.yield_([_join_tokens(bld, b_tokens)])
+        with active_b.otherwise():
+            bld.yield_([bld.token()])
+    token = bld.join(active_a.results[0], active_b.results[0])
+    return bld.barrier(token) if batch.barrier_after else token
+
+
+def _stage_mxfp4_scale_batch_regs_cta_after_dep(
+    bld: dsl.FunctionBuilder,
+    cfg: _MatmulConfig,
+    coords: _TileCoords,
+    scale_step: dsl.Value | int,
+    scale_lds_offset: dsl.Value | int,
+    *,
+    dep: dsl.Value | None,
+    barrier_after: bool,
+) -> tuple[list[tuple[_Mxfp4ScaleLayout, dsl.Value | int]], dsl.Value]:
+    row_sliced = _use_mxfp4_scale_reg_dword_staging(cfg)
+    packed_dword = _use_mxfp4_scale_reg_packed_dword_staging(cfg)
+    load_width = 4 if row_sliced else 16
+    load_type = dsl.simd_type(
+        dsl.vector_type(load_width, dsl.i8()), width=cfg.mma.wave_size
+    )
+    stride = _mxfp4_scale_lds_stride_dwords(cfg)
+    staged: list[tuple[_Mxfp4ScaleLayout, dsl.Value | int]] = []
+    for k in range(cfg.wave_k_tiles):
+        raw_step = _mxfp4_raw_k_step(bld, cfg, scale_step, k)
+        offset = _add_lds_dword_offset(bld, scale_lds_offset, k * stride)
+        staged.append((_mxfp4_scale_layout(cfg, coords, raw_step), offset))
+    with bld.where(
+        _mxfp4_a_scale_regs_cta_mask(bld, cfg, coords),
+        [dsl.mem_token_type()],
+    ) as active_a:
+        a_tokens: list[dsl.Value] = []
+        a_loaded: list[tuple[dsl.Value, dsl.Value, dsl.Value]] = []
+        for layout, offset in staged:
+            _stage_mxfp4_a_scale_regs(
+                bld,
+                cfg,
+                coords,
+                layout,
+                load_type,
+                _scale_lds_base(bld, cfg, offset),
+                dep,
+                a_tokens,
+                row_sliced,
+                packed_dword,
+                loaded=a_loaded,
+            )
+        _flush_mxfp4_scale_reg_stores(bld, a_loaded, dep, a_tokens)
+        bld.yield_([_join_tokens(bld, a_tokens)])
+        with active_a.otherwise():
+            bld.yield_([bld.token()])
+    with bld.where(
+        _mxfp4_b_scale_regs_cta_mask(bld, cfg, coords),
+        [dsl.mem_token_type()],
+    ) as active_b:
+        b_tokens: list[dsl.Value] = []
+        b_loaded: list[tuple[dsl.Value, dsl.Value, dsl.Value]] = []
+        for layout, offset in staged:
+            _stage_mxfp4_b_scale_regs(
+                bld,
+                cfg,
+                coords,
+                layout,
+                load_type,
+                _scale_lds_base(bld, cfg, offset),
+                dep,
+                b_tokens,
+                row_sliced,
+                packed_dword,
+                loaded=b_loaded,
+            )
+        _flush_mxfp4_scale_reg_stores(bld, b_loaded, dep, b_tokens)
+        bld.yield_([_join_tokens(bld, b_tokens)])
+        with active_b.otherwise():
+            bld.yield_([bld.token()])
+    token = bld.join(active_a.results[0], active_b.results[0])
+    return staged, bld.barrier(token) if barrier_after else token
+
+
+def _use_mxfp4_delayed_b_scale_lw(cfg: _MatmulConfig) -> bool:
+    return (
+        _use_mxfp4_regional_scale_read_step(cfg)
+        and _use_mxfp4_scale_reg_packed_dword_staging(cfg)
+        and cfg.BM == 1
+        and cfg.wave_k_tiles == 1
+        and _mxfp4_scale_tiles_per_wave(cfg.wave_n_tiles) == 1
+    )
+
+
+def _stage_mxfp4_b_scale_reg_load_deferred(
+    bld: dsl.FunctionBuilder,
+    cfg: _MatmulConfig,
+    coords: _TileCoords,
+    layout: _Mxfp4ScaleLayout,
+    load_type: dsl.Type,
+    lds: dsl.Value,
+) -> tuple[dsl.Value, dsl.Value]:
+    a_tiles_per_wave = _mxfp4_scale_tiles_per_wave(cfg.wave_m_tiles)
+    b_scale_base = cfg.BM * a_tiles_per_wave
+    scale_tile = b_scale_base + layout.n_wave
+    n_tile = (
+        layout.wg_n * (cfg.BN * cfg.wave_n_tiles) + layout.n_wave * cfg.wave_n_tiles
+    )
+    row_quad = layout.lane_mod16 * 4
+    global_off = bld.index_expr(
+        layout.scale_k * cfg.N + n_tile * 16 + row_quad,
+        bindings=layout.bindings,
+    )
+    lds_off = bld.index_expr(
+        scale_tile * 512 + layout.lane_scale_group * 128 + row_quad,
+        bindings=layout.bindings,
+    )
+    raw, _ = bld.load(bld.ptr_add(coords.b_scale_base, global_off), load_type)
+    return raw, bld.ptr_add(lds, lds_off)
+
+
+def _flush_deferred_mxfp4_scale_store(
+    bld: dsl.FunctionBuilder,
+    store: _DeferredScaleStore,
+) -> dsl.Value:
+    return bld.store(store.raw, store.dest, after=store.dep)
 
 
 def _stage_mxfp4_scale_tiles_dma_after_dep(
@@ -1633,6 +2206,18 @@ def _stage_mxfp4_scale_tiles_dma_after_dep(
 
 def _use_cta_owned_mxfp4_scale_dma(cfg: _MatmulConfig) -> bool:
     return cfg.virtual_k_steps > 1
+
+
+def _use_mxfp4_scale_reg_dword_staging(cfg: _MatmulConfig) -> bool:
+    return cfg.mxfp4_scale_path == "regs" and cfg.target_waves == 1
+
+
+def _use_mxfp4_scale_reg_packed_dword_staging(cfg: _MatmulConfig) -> bool:
+    return (
+        _use_mxfp4_scale_reg_dword_staging(cfg)
+        and cfg.wave_m_tiles % _MXFP4_SCALE_PACK == 0
+        and cfg.wave_n_tiles % _MXFP4_SCALE_PACK == 0
+    )
 
 
 def _mxfp4_scale_dma_wave_id(
@@ -1710,6 +2295,54 @@ def _mxfp4_b_scale_dma_mask(
         bld.splat(bld.constant(dsl.i32(), cfg.log2_BN), width=cfg.mma.wave_size),
     )
     return _mxfp4_scale_dma_mask_for_owner(bld, cfg, coords, owner_value)
+
+
+def _mxfp4_a_scale_regs_cta_mask(
+    bld: dsl.FunctionBuilder,
+    cfg: _MatmulConfig,
+    coords: _TileCoords,
+) -> dsl.Value:
+    wave_id = _mxfp4_scale_dma_wave_id(bld, cfg, coords)
+    owner_value = bld.binary(
+        dsl.BinaryKind.AndI,
+        wave_id,
+        bld.splat(bld.constant(dsl.i32(), cfg.BN - 1), width=cfg.mma.wave_size),
+    )
+    return _mxfp4_scale_regs_cta_mask_for_owner(bld, cfg, coords, owner_value)
+
+
+def _mxfp4_b_scale_regs_cta_mask(
+    bld: dsl.FunctionBuilder,
+    cfg: _MatmulConfig,
+    coords: _TileCoords,
+) -> dsl.Value:
+    wave_id = _mxfp4_scale_dma_wave_id(bld, cfg, coords)
+    owner_value = bld.binary(
+        dsl.BinaryKind.ShRUI,
+        wave_id,
+        bld.splat(bld.constant(dsl.i32(), cfg.log2_BN), width=cfg.mma.wave_size),
+    )
+    return _mxfp4_scale_regs_cta_mask_for_owner(bld, cfg, coords, owner_value)
+
+
+def _mxfp4_scale_regs_cta_mask_for_owner(
+    bld: dsl.FunctionBuilder,
+    cfg: _MatmulConfig,
+    coords: _TileCoords,
+    owner_value: dsl.Value,
+) -> dsl.Value:
+    if _use_mxfp4_scale_reg_packed_dword_staging(cfg):
+        lane_mask = 0
+    else:
+        lane_mask = 12 if _use_mxfp4_scale_reg_dword_staging(cfg) else 15
+    lane_mod16 = bld.binary(
+        dsl.BinaryKind.AndI,
+        coords.wi,
+        bld.splat(bld.constant(dsl.i32(), lane_mask), width=cfg.mma.wave_size),
+    )
+    active_value = bld.binary(dsl.BinaryKind.OrI, lane_mod16, owner_value)
+    zero = bld.splat(bld.constant(dsl.i32(), 0), width=cfg.mma.wave_size)
+    return bld.cmpi("eq", active_value, zero)
 
 
 def _mxfp4_scale_dma_mask_for_owner(
@@ -1920,6 +2553,47 @@ def _read_mxfp4_scale_set(
     return scales, scale_idxs, tokens
 
 
+def _read_mxfp4_b_scale_set_slice(
+    bld: dsl.FunctionBuilder,
+    cfg: _MatmulConfig,
+    layout: _Mxfp4ScaleLayout,
+    base_tile: int | dsl.Expr,
+    n_begin: int,
+    n_end: int,
+    ready_token: dsl.Value,
+    lds_offset: dsl.Value | int,
+) -> tuple[list[dsl.Value], list[int], list[dsl.Value]]:
+    pack = cfg.wave_n_tiles % _MXFP4_SCALE_PACK == 0
+    if pack:
+        packed_begin = n_begin // _MXFP4_SCALE_PACK
+        packed_end = (n_end + _MXFP4_SCALE_PACK - 1) // _MXFP4_SCALE_PACK
+    else:
+        packed_begin = n_begin
+        packed_end = n_end
+    packed_scales: dict[int, dsl.Value] = {}
+    tokens: list[dsl.Value] = []
+    for packed_idx in range(packed_begin, packed_end):
+        scale, token = _read_mxfp4_scale_tile(
+            bld,
+            cfg,
+            layout,
+            base_tile + packed_idx,
+            ready_token,
+            lds_offset=lds_offset,
+        )
+        packed_scales[packed_idx] = scale
+        tokens.append(token)
+
+    first_scale = packed_scales[packed_begin]
+    scales = [first_scale for _ in range(cfg.wave_n_tiles)]
+    scale_idxs = [0 for _ in range(cfg.wave_n_tiles)]
+    for j in range(n_begin, n_end):
+        packed_idx = j // _MXFP4_SCALE_PACK if pack else j
+        scales[j] = packed_scales[packed_idx]
+        scale_idxs[j] = j % _MXFP4_SCALE_PACK if pack else 0
+    return scales, scale_idxs, tokens
+
+
 def _stage_read_mxfp4_scales(
     bld: dsl.FunctionBuilder,
     cfg: _MatmulConfig,
@@ -1938,6 +2612,45 @@ def _stage_read_mxfp4_scales(
     )
     return _read_mxfp4_scales_from_layout(
         bld, cfg, layout, scale_lds_offset, scale_token
+    )
+
+
+def _read_mxfp4_scales_from_layout_slice(
+    bld: dsl.FunctionBuilder,
+    cfg: _MatmulConfig,
+    layout: _Mxfp4ScaleLayout,
+    scale_lds_offset: dsl.Value | int,
+    scale_token: dsl.Value,
+    n_begin: int,
+    n_end: int,
+) -> _Mxfp4ScaleSet:
+    a_tiles_per_wave = _mxfp4_scale_tiles_per_wave(cfg.wave_m_tiles)
+    b_tiles_per_wave = _mxfp4_scale_tiles_per_wave(cfg.wave_n_tiles)
+    a_scales, a_scale_idxs, a_tokens = _read_mxfp4_scale_set(
+        bld,
+        cfg,
+        layout,
+        layout.m_wave * a_tiles_per_wave,
+        cfg.wave_m_tiles,
+        scale_token,
+        scale_lds_offset,
+    )
+    b_scales, b_scale_idxs, b_tokens = _read_mxfp4_b_scale_set_slice(
+        bld,
+        cfg,
+        layout,
+        cfg.BM * a_tiles_per_wave + layout.n_wave * b_tiles_per_wave,
+        n_begin,
+        n_end,
+        scale_token,
+        scale_lds_offset,
+    )
+    return _Mxfp4ScaleSet(
+        a_scales=a_scales,
+        a_scale_idxs=a_scale_idxs,
+        b_scales=b_scales,
+        b_scale_idxs=b_scale_idxs,
+        token=_join_tokens(bld, [*a_tokens, *b_tokens]),
     )
 
 
@@ -1994,6 +2707,16 @@ def _stage_mxfp4_scale_batch(
         dep = bld.barrier(scale_after)
     else:
         dep = scale_after
+    if _use_batched_mxfp4_scale_regs_cta(cfg):
+        return _stage_mxfp4_scale_batch_regs_cta_after_dep(
+            bld,
+            cfg,
+            coords,
+            scale_step,
+            scale_lds_offset,
+            dep=dep,
+            barrier_after=barrier_after,
+        )
     stride = _mxfp4_scale_lds_stride_dwords(cfg)
     staged: list[tuple[_Mxfp4ScaleLayout, dsl.Value | int]] = []
     tokens: list[dsl.Value] = []
@@ -2007,6 +2730,51 @@ def _stage_mxfp4_scale_batch(
         tokens.append(token)
     token = _join_tokens(bld, tokens)
     return staged, bld.barrier(token) if barrier_after else token
+
+
+def _stage_mxfp4_scale_batch_delayed_b_lw(
+    bld: dsl.FunctionBuilder,
+    cfg: _MatmulConfig,
+    coords: _TileCoords,
+    scale_step: dsl.Value | int,
+    scale_lds_offset: dsl.Value | int,
+    scale_after: dsl.Value,
+) -> tuple[dsl.Value, _DeferredScaleStore]:
+    if not _use_mxfp4_delayed_b_scale_lw(cfg):
+        raise ValueError("delayed B-scale LW requires packed k1 regs scale staging")
+    dep = bld.barrier(scale_after)
+    raw_step = _mxfp4_raw_k_step(bld, cfg, scale_step, 0)
+    layout = _mxfp4_scale_layout(cfg, coords, raw_step)
+    lds = _scale_lds_base(bld, cfg, scale_lds_offset)
+    load_type = dsl.simd_type(dsl.vector_type(4, dsl.i8()), width=cfg.mma.wave_size)
+    with bld.where(
+        _mxfp4_a_scale_regs_cta_mask(bld, cfg, coords),
+        [dsl.mem_token_type()],
+    ) as active_a:
+        a_tokens: list[dsl.Value] = []
+        _stage_mxfp4_a_scale_regs(
+            bld,
+            cfg,
+            coords,
+            layout,
+            load_type,
+            lds,
+            dep,
+            a_tokens,
+            row_sliced=True,
+            packed_dword=True,
+        )
+        bld.yield_([_join_tokens(bld, a_tokens)])
+        with active_a.otherwise():
+            bld.yield_([bld.token()])
+    raw, dest = _stage_mxfp4_b_scale_reg_load_deferred(
+        bld, cfg, coords, layout, load_type, lds
+    )
+    return active_a.results[0], _DeferredScaleStore(
+        raw=raw,
+        dest=dest,
+        dep=dep,
+    )
 
 
 def _read_mxfp4_scale_batch(
@@ -2033,6 +2801,61 @@ def _read_mxfp4_scale_batch(
     return scales, _join_tokens(bld, tokens)
 
 
+def _read_mxfp4_scale_batch_region(
+    bld: dsl.FunctionBuilder,
+    cfg: _MatmulConfig,
+    coords: _TileCoords,
+    scale_step: dsl.Value | int,
+    scale_lds_offset: dsl.Value | int,
+    ready_token: dsl.Value,
+    n_begin: int,
+    n_end: int,
+    *,
+    include_a: bool,
+    a_scale_sets: list[tuple[int, _Mxfp4ScaleSet]] | None = None,
+    barrier_before_read: bool = True,
+) -> tuple[list[tuple[int, _Mxfp4ScaleSet]], dsl.Value]:
+    if barrier_before_read:
+        ready_token = bld.barrier(ready_token)
+    stride = _mxfp4_scale_lds_stride_dwords(cfg)
+    scale_sets: list[tuple[int, _Mxfp4ScaleSet]] = []
+    tokens: list[dsl.Value] = []
+    for k in range(cfg.wave_k_tiles):
+        raw_step = _mxfp4_raw_k_step(bld, cfg, scale_step, k)
+        offset = _add_lds_dword_offset(bld, scale_lds_offset, k * stride)
+        layout = _mxfp4_scale_layout(cfg, coords, raw_step)
+        if include_a:
+            scale_set = _read_mxfp4_scales_from_layout_slice(
+                bld, cfg, layout, offset, ready_token, n_begin, n_end
+            )
+        else:
+            if a_scale_sets is None:
+                raise ValueError("right MXFP4 scale region needs A scales")
+            a_scale_set = a_scale_sets[k][1]
+            a_tiles_per_wave = _mxfp4_scale_tiles_per_wave(cfg.wave_m_tiles)
+            b_tiles_per_wave = _mxfp4_scale_tiles_per_wave(cfg.wave_n_tiles)
+            b_scales, b_scale_idxs, b_tokens = _read_mxfp4_b_scale_set_slice(
+                bld,
+                cfg,
+                layout,
+                cfg.BM * a_tiles_per_wave + layout.n_wave * b_tiles_per_wave,
+                n_begin,
+                n_end,
+                ready_token,
+                offset,
+            )
+            scale_set = _Mxfp4ScaleSet(
+                a_scales=a_scale_set.a_scales,
+                a_scale_idxs=a_scale_set.a_scale_idxs,
+                b_scales=b_scales,
+                b_scale_idxs=b_scale_idxs,
+                token=_join_tokens(bld, b_tokens),
+            )
+        scale_sets.append((k, scale_set))
+        tokens.append(scale_set.token)
+    return scale_sets, _join_tokens(bld, tokens)
+
+
 def _mxfp4_raw_k_step(
     bld: dsl.FunctionBuilder, cfg: _MatmulConfig, step: dsl.Value | int, k: int
 ) -> dsl.Value | int:
@@ -2046,7 +2869,7 @@ def _mxfp4_raw_k_step(
     return bld.assume_range(scaled, k, cfg.k_steps - 1)
 
 
-def _initial_scale_tokens(
+def _initial_scale_state(
     bld: dsl.FunctionBuilder, cfg: _MatmulConfig, coords: _TileCoords
 ) -> tuple[dsl.Value | None, dsl.Value | None]:
     if not cfg.uses_packed_mxfp4:
@@ -2085,7 +2908,7 @@ def _initial_dma_load_state(
     virtual_k_stride: dsl.Value,
 ) -> _InitialLoadState:
     dma_tokens = _dma_issue(bld, a0, b0, staging, lds_offset=0)
-    scale_token, next_scale_token = _initial_scale_tokens(bld, cfg, coords)
+    scale_token, next_scale_token = _initial_scale_state(bld, cfg, coords)
     ready_token = None
     if cfg.virtual_k_steps > 1:
         a1 = _advance_ptrs(bld, a0, virtual_k_stride)
@@ -2401,6 +3224,8 @@ def _emit_mxfp4_mma_grid_scale_sets_slice(
     scale_sets: list[tuple[int, _Mxfp4ScaleSet]],
     n_begin: int,
     n_end: int,
+    m_begin: int = 0,
+    m_end: int | None = None,
 ) -> tuple[dsl.Value, ...]:
     a_outer_type = PTupleType(afs[0].type)
     b_outer_type = PTupleType(bfs[0].type)
@@ -2424,6 +3249,8 @@ def _emit_mxfp4_mma_grid_scale_sets_slice(
             scales,
             n_begin,
             n_end,
+            m_begin,
+            m_end,
         )
     return tuple(new_accs)
 
@@ -2442,14 +3269,18 @@ def _emit_mxfp4_mma_grid_step(
     scales: _Mxfp4ScaleSet,
     n_begin: int = 0,
     n_end: int | None = None,
+    m_begin: int = 0,
+    m_end: int | None = None,
 ) -> None:
     if n_end is None:
         n_end = cfg.wave_n_tiles
+    if m_end is None:
+        m_end = cfg.wave_m_tiles
     index = IndexType.get()
     k_c = bld.constant(index, k)
     a_row = wavemeta.TupleGetOp(a_row_type, afs, k_c).result
     b_row = wavemeta.TupleGetOp(b_row_type, bfs, k_c).result
-    for i in range(cfg.wave_m_tiles):
+    for i in range(m_begin, m_end):
         i_c = bld.constant(index, i)
         af = wavemeta.TupleGetOp(af_type, a_row, i_c).result
         for j in range(n_begin, n_end):
@@ -2671,6 +3502,20 @@ def _use_mxfp4_regional_dma_step(cfg: _MatmulConfig) -> bool:
     )
 
 
+def _use_mxfp4_regional_scale_read_step(cfg: _MatmulConfig) -> bool:
+    return _use_mxfp4_regional_dma_step(cfg) and cfg.mxfp4_scale_path == "regs"
+
+
+def _use_mxfp4_shared_scale_barrier(cfg: _MatmulConfig) -> bool:
+    regional = _use_mxfp4_regional_scale_read_step(cfg)
+    batched_regs = _use_batched_mxfp4_scale_regs_cta(cfg)
+    return regional and batched_regs
+
+
+def _use_mxfp4_reuse_data_dma_issue(cfg: _MatmulConfig) -> bool:
+    return cfg.use_dma_lds and cfg.uses_packed_mxfp4 and cfg.virtual_k_steps > 2
+
+
 def _emit_dma_step(
     bld: dsl.FunctionBuilder,
     cfg: _MatmulConfig,
@@ -2697,6 +3542,7 @@ def _emit_dma_step(
         raise ValueError("DMA pipeline step requires ready and reuse tokens")
     scale_tokens: list[dsl.Value] = []
     next_token: dsl.Value | None = None
+    next_split_tokens: list[dsl.Value] = []
     new_scale_token: dsl.Value | None = None
     new_next_scale_token: dsl.Value | None = None
     ready_token: dsl.Value | None = None
@@ -2707,18 +3553,66 @@ def _emit_dma_step(
             ready_token = bld.barrier(state.dma_token, state.reuse_token)
         return ready_token
 
+    def dma_after_token() -> dsl.Value:
+        return (
+            state.reuse_token
+            if _use_mxfp4_reuse_data_dma_issue(cfg)
+            else get_ready_token()
+        )
+
+    def issue_next_dma() -> dsl.Value:
+        nonlocal next_token
+        if next_token is None:
+            next_token = _join_tokens(
+                bld,
+                _dma_issue(
+                    bld,
+                    a_ptrs,
+                    b_ptrs,
+                    staging,
+                    after=dma_after_token(),
+                    lds_offset=next_lds_offset,
+                ),
+            )
+        return next_token
+
+    def can_split_next_dma(n_mid: int) -> bool:
+        return (
+            _dma_b_wave_n_slice_indices(cfg, 0, n_mid) is not None
+            and _dma_b_wave_n_slice_indices(cfg, n_mid, cfg.wave_n_tiles) is not None
+        )
+
+    def issue_next_dma_slice(n_begin: int, n_end: int, *, include_a: bool) -> dsl.Value:
+        if next_token is not None:
+            return next_token
+        b_indices = _dma_b_wave_n_slice_indices(cfg, n_begin, n_end)
+        if b_indices is None:
+            return issue_next_dma()
+        token = _join_tokens(
+            bld,
+            _dma_issue_parts(
+                bld,
+                a_ptrs,
+                b_ptrs,
+                staging,
+                after=dma_after_token(),
+                lds_offset=next_lds_offset,
+                include_a=include_a,
+                b_indices=b_indices,
+            ),
+        )
+        next_split_tokens.append(token)
+        return token
+
+    def finish_next_dma() -> dsl.Value:
+        nonlocal next_token
+        if next_token is None and next_split_tokens:
+            next_token = _join_tokens(bld, next_split_tokens)
+        return issue_next_dma() if next_token is None else next_token
+
     early_dma = cfg.uses_packed_mxfp4 and cfg.wave_k_tiles == 1
     uses_prefetched_scales = cfg.uses_packed_mxfp4 and state.scale_token is not None
     if uses_prefetched_scales:
-        scale_sets, scale_reuse_token = _read_mxfp4_scale_batch(
-            bld,
-            cfg,
-            coords,
-            scale_step,
-            _scale_buffer_offset(bld, cfg, scale_step),
-            state.scale_token,
-        )
-        scale_tokens.append(scale_reuse_token)
         if state.next_scale_token is None:
             raise ValueError("DMA MXFP4 loop requires next prefetched scales")
         next_scale_step = bld.addi(scale_step, bld.constant(dsl.i32(), 2))
@@ -2726,44 +3620,208 @@ def _emit_dma_step(
             next_scale_step, 2, max(cfg.virtual_k_steps - 1, 2)
         )
         new_scale_token = state.next_scale_token
-        if _use_mxfp4_regional_dma_step(cfg):
+        if _use_mxfp4_regional_scale_read_step(cfg):
             n_mid = cfg.wave_n_tiles // 2
-            left_accs = _emit_mxfp4_mma_grid_scale_sets_slice(
-                bld, cfg, state.afs, state.bfs, state.accs, scale_sets, 0, n_mid
-            )
-            _, new_next_scale_token = _stage_mxfp4_scale_batch(
+            scale_offset = _scale_buffer_offset(bld, cfg, scale_step)
+            scale_ready_token = state.scale_token
+            barrier_before_scale_read = True
+            if _use_mxfp4_shared_scale_barrier(cfg):
+                scale_ready_token = bld.barrier(state.scale_token)
+                barrier_before_scale_read = False
+            left_scale_sets, left_scale_token = _read_mxfp4_scale_batch_region(
                 bld,
                 cfg,
                 coords,
-                next_scale_step,
-                _scale_buffer_offset(bld, cfg, next_scale_step),
-                scale_reuse_token,
-                barrier_after=False,
-                barrier_before=False,
+                scale_step,
+                scale_offset,
+                scale_ready_token,
+                0,
+                n_mid,
+                include_a=True,
+                barrier_before_read=barrier_before_scale_read,
             )
-            new_accs = _emit_mxfp4_mma_grid_scale_sets_slice(
+            scale_tokens.append(left_scale_token)
+            left_accs = _emit_mxfp4_mma_grid_scale_sets_slice(
                 bld,
                 cfg,
                 state.afs,
                 state.bfs,
-                left_accs,
-                scale_sets,
+                state.accs,
+                left_scale_sets,
+                0,
                 n_mid,
-                cfg.wave_n_tiles,
             )
-        else:
-            _, new_next_scale_token = _stage_mxfp4_scale_batch(
+            right_scale_sets, right_scale_token = _read_mxfp4_scale_batch_region(
                 bld,
                 cfg,
                 coords,
-                next_scale_step,
-                _scale_buffer_offset(bld, cfg, next_scale_step),
-                scale_reuse_token,
-                barrier_after=False,
+                scale_step,
+                scale_offset,
+                scale_ready_token,
+                n_mid,
+                cfg.wave_n_tiles,
+                include_a=False,
+                a_scale_sets=left_scale_sets,
+                barrier_before_read=barrier_before_scale_read,
             )
-            new_accs = _emit_mxfp4_mma_grid_scale_sets(
-                bld, cfg, state.afs, state.bfs, state.accs, scale_sets
+            scale_tokens.append(right_scale_token)
+            if _use_mxfp4_delayed_b_scale_lw(cfg):
+                next_a_scale_token, delayed_b_scale = (
+                    _stage_mxfp4_scale_batch_delayed_b_lw(
+                        bld,
+                        cfg,
+                        coords,
+                        next_scale_step,
+                        _scale_buffer_offset(bld, cfg, next_scale_step),
+                        right_scale_token,
+                    )
+                )
+                right_head = _emit_mxfp4_mma_grid_scale_sets_slice(
+                    bld,
+                    cfg,
+                    state.afs,
+                    state.bfs,
+                    left_accs,
+                    right_scale_sets,
+                    n_mid,
+                    cfg.wave_n_tiles,
+                    m_end=2,
+                )
+                next_b_scale_token = _flush_deferred_mxfp4_scale_store(
+                    bld, delayed_b_scale
+                )
+                new_next_scale_token = bld.join(next_a_scale_token, next_b_scale_token)
+                new_accs = _emit_mxfp4_mma_grid_scale_sets_slice(
+                    bld,
+                    cfg,
+                    state.afs,
+                    state.bfs,
+                    right_head,
+                    right_scale_sets,
+                    n_mid,
+                    cfg.wave_n_tiles,
+                    m_begin=2,
+                )
+            else:
+                read_deferred_scales: _DeferredScaleRegBatch | None = None
+                if _use_batched_mxfp4_scale_regs_cta(cfg):
+                    _, read_deferred_scales = (
+                        _defer_mxfp4_scale_batch_regs_cta_after_dep(
+                            bld,
+                            cfg,
+                            coords,
+                            next_scale_step,
+                            _scale_buffer_offset(bld, cfg, next_scale_step),
+                            dep=bld.barrier(right_scale_token),
+                            barrier_after=False,
+                        )
+                    )
+                    if can_split_next_dma(n_mid):
+                        issue_next_dma_slice(0, n_mid, include_a=True)
+                    else:
+                        issue_next_dma()
+                else:
+                    _, new_next_scale_token = _stage_mxfp4_scale_batch(
+                        bld,
+                        cfg,
+                        coords,
+                        next_scale_step,
+                        _scale_buffer_offset(bld, cfg, next_scale_step),
+                        right_scale_token,
+                        barrier_after=False,
+                        barrier_before=False,
+                    )
+                new_accs = _emit_mxfp4_mma_grid_scale_sets_slice(
+                    bld,
+                    cfg,
+                    state.afs,
+                    state.bfs,
+                    left_accs,
+                    right_scale_sets,
+                    n_mid,
+                    cfg.wave_n_tiles,
+                )
+                if read_deferred_scales is not None:
+                    new_next_scale_token = _flush_deferred_mxfp4_scale_reg_batch(
+                        bld, read_deferred_scales
+                    )
+                    if can_split_next_dma(n_mid):
+                        issue_next_dma_slice(n_mid, cfg.wave_n_tiles, include_a=False)
+            if new_next_scale_token is None:
+                raise ValueError("MXFP4 next scale token was not produced")
+        else:
+            scale_sets, scale_reuse_token = _read_mxfp4_scale_batch(
+                bld,
+                cfg,
+                coords,
+                scale_step,
+                _scale_buffer_offset(bld, cfg, scale_step),
+                state.scale_token,
             )
+            scale_tokens.append(scale_reuse_token)
+            if _use_mxfp4_regional_dma_step(cfg):
+                n_mid = cfg.wave_n_tiles // 2
+                left_accs = _emit_mxfp4_mma_grid_scale_sets_slice(
+                    bld, cfg, state.afs, state.bfs, state.accs, scale_sets, 0, n_mid
+                )
+                reuse_deferred_scales: _DeferredScaleRegBatch | None = None
+                if _use_batched_mxfp4_scale_regs_cta(cfg):
+                    _, reuse_deferred_scales = (
+                        _defer_mxfp4_scale_batch_regs_cta_after_dep(
+                            bld,
+                            cfg,
+                            coords,
+                            next_scale_step,
+                            _scale_buffer_offset(bld, cfg, next_scale_step),
+                            dep=bld.barrier(scale_reuse_token),
+                            barrier_after=False,
+                        )
+                    )
+                    if can_split_next_dma(n_mid):
+                        issue_next_dma_slice(0, n_mid, include_a=True)
+                    else:
+                        issue_next_dma()
+                else:
+                    _, new_next_scale_token = _stage_mxfp4_scale_batch(
+                        bld,
+                        cfg,
+                        coords,
+                        next_scale_step,
+                        _scale_buffer_offset(bld, cfg, next_scale_step),
+                        scale_reuse_token,
+                        barrier_after=False,
+                    )
+                new_accs = _emit_mxfp4_mma_grid_scale_sets_slice(
+                    bld,
+                    cfg,
+                    state.afs,
+                    state.bfs,
+                    left_accs,
+                    scale_sets,
+                    n_mid,
+                    cfg.wave_n_tiles,
+                )
+                if reuse_deferred_scales is not None:
+                    new_next_scale_token = _flush_deferred_mxfp4_scale_reg_batch(
+                        bld, reuse_deferred_scales
+                    )
+                    if can_split_next_dma(n_mid):
+                        issue_next_dma_slice(n_mid, cfg.wave_n_tiles, include_a=False)
+                if new_next_scale_token is None:
+                    raise ValueError("MXFP4 next scale token was not produced")
+            else:
+                _, new_next_scale_token = _stage_mxfp4_scale_batch(
+                    bld,
+                    cfg,
+                    coords,
+                    next_scale_step,
+                    _scale_buffer_offset(bld, cfg, next_scale_step),
+                    scale_reuse_token,
+                    barrier_after=False,
+                )
+                new_accs = _emit_mxfp4_mma_grid_scale_sets(
+                    bld, cfg, state.afs, state.bfs, state.accs, scale_sets
+                )
     elif early_dma:
         scales = _stage_read_mxfp4_scales(
             bld, cfg, coords, scale_step, current_lds_offset, get_ready_token()
@@ -2788,18 +3846,7 @@ def _emit_dma_step(
             scale_ready_token=state.scale_token,
         )
     if next_token is None:
-        dma_after = get_ready_token()
-        next_token = _join_tokens(
-            bld,
-            _dma_issue(
-                bld,
-                a_ptrs,
-                b_ptrs,
-                staging,
-                after=dma_after,
-                lds_offset=next_lds_offset,
-            ),
-        )
+        finish_next_dma()
     if early_dma and not uses_prefetched_scales:
         new_accs = _emit_mxfp4_mma_state_step(bld, cfg, state, scales)
     new_afs, new_bfs, reuse_token = _dma_read_ready(
@@ -2950,6 +3997,7 @@ def _store_final_mxfp4_tiles_split(
     scale_sets, scale_token = _read_mxfp4_scale_batch(
         bld, cfg, coords, scale_step, scale_lds_offset, state.scale_token
     )
+    right_scale_sets = scale_sets
     n_mid = cfg.wave_n_tiles // 2
     left_accs = _emit_mxfp4_mma_grid_scale_sets_slice(
         bld, cfg, state.afs, state.bfs, state.accs, scale_sets, 0, n_mid
@@ -2966,7 +4014,7 @@ def _store_final_mxfp4_tiles_split(
         state.afs,
         state.bfs,
         state.accs,
-        scale_sets,
+        right_scale_sets,
         n_mid,
         cfg.wave_n_tiles,
     )
@@ -3026,13 +4074,21 @@ def _store_acc_tiles_lds_coalesced(
             )
     ready = bld.barrier(_join_tokens(bld, lds_tokens))
 
-    lane32 = bld.binary(
+    lane_id = bld.binary(
         dsl.BinaryKind.AndI,
         coords.wi,
-        bld.splat(bld.constant(dsl.i32(), 32), width=cfg.mma.wave_size),
+        bld.splat(
+            bld.constant(dsl.i32(), cfg.mma.wave_size - 1),
+            width=cfg.mma.wave_size,
+        ),
     )
     active = bld.cmpi(
-        "eq", lane32, bld.splat(bld.constant(dsl.i32(), 0), width=cfg.mma.wave_size)
+        "ult",
+        lane_id,
+        bld.splat(
+            bld.constant(dsl.i32(), cfg.mma.wave_size // 2),
+            width=cfg.mma.wave_size,
+        ),
     )
     load_type = dsl.simd_type(
         dsl.vector_type(2 * cfg.mma.acc_registers, dsl.f16()),
@@ -3481,10 +4537,12 @@ def _make_matmul_config(
     matrix_intrinsic: str,
     input_type: str,
     output_type: str,
+    mxfp4_scale_path: str,
     random_data: bool,
     random_seed: int,
     cta_swizzle_xcds: int,
     cta_group_m: int,
+    target_waves: int | None = None,
 ) -> _MatmulConfig:
     return _MatmulConfig(
         M=M,
@@ -3500,10 +4558,12 @@ def _make_matmul_config(
         matrix_intrinsic=matrix_intrinsic,
         input_type=input_type,
         output_type=output_type,
+        mxfp4_scale_path=mxfp4_scale_path,
         random_data=random_data,
         random_seed=random_seed,
         cta_swizzle_xcds=cta_swizzle_xcds,
         cta_group_m=cta_group_m,
+        target_waves=target_waves,
     )
 
 
@@ -3572,6 +4632,7 @@ def build_wmma_f16_matmul_module(
     matrix_intrinsic: str = "wmma",
     input_type: str = "f16",
     output_type: str = "f32",
+    mxfp4_scale_path: str = "dma",
     random_data: bool = False,
     random_seed: int = 0,
     cta_swizzle_xcds: int = 1,
@@ -3595,10 +4656,12 @@ def build_wmma_f16_matmul_module(
         matrix_intrinsic=matrix_intrinsic,
         input_type=input_type,
         output_type=output_type,
+        mxfp4_scale_path=mxfp4_scale_path,
         random_data=random_data,
         random_seed=random_seed,
         cta_swizzle_xcds=cta_swizzle_xcds,
         cta_group_m=cta_group_m,
+        target_waves=target_waves,
     )
     bld = dsl.ModuleBuilder()
     with bld:

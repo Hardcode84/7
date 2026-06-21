@@ -503,6 +503,18 @@ static void requireValue(WaitRequirement &req, Value value,
   }
 }
 
+static bool hasSameAllocatedReg(Value lhs, Value rhs) {
+  waveamdmachine::RegType lhsType =
+      dyn_cast<waveamdmachine::RegType>(lhs.getType());
+  waveamdmachine::RegType rhsType =
+      dyn_cast<waveamdmachine::RegType>(rhs.getType());
+  if (!lhsType || !rhsType)
+    return false;
+  return lhsType.getRegClass() == rhsType.getRegClass() &&
+         lhsType.getWidth() == rhsType.getWidth() && lhsType.getIndex() >= 0 &&
+         lhsType.getIndex() == rhsType.getIndex();
+}
+
 static void requireExecIfYieldCopies(WaitRequirement &req,
                                      waveamdmachine::YieldOp yield,
                                      const WaitState &state) {
@@ -514,6 +526,8 @@ static void requireExecIfYieldCopies(WaitRequirement &req,
     if (isa<waveamdmachine::MemTokenType>(result.getType()))
       continue;
     if (value.getDefiningOp<waveamdmachine::UninitOp>())
+      continue;
+    if (hasSameAllocatedReg(result, value))
       continue;
     requireValue(req, value, state);
   }
