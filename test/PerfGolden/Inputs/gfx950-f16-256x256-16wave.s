@@ -59,22 +59,17 @@ wmma_f16_matmul_tiled:
 		s_add_i32 s19, s20, s18
 		v_add_u32_e32 v3, s19, v4
 		buffer_load_dwordx4 v3, s[12:15], 0 offen lds
-		s_add_i32 s19, s16, 0x4000
-		s_lshl_b32 s21, s17, 22
-		v_add_u32_e32 v5, s21, v4
-		s_mov_b32 m0, s19
-		s_nop 0
+		s_add_i32 m0, s16, 0x4000
+		s_lshl_b32 s19, s17, 22
+		v_add_u32_e32 v5, s19, v4
 		buffer_load_dwordx4 v5, s[24:27], 0 offen lds
-		s_add_i32 s17, s16, 0x8000
-		s_mov_b32 m0, s17
+		s_add_i32 m0, s16, 0x8000
 		s_add_i32 s17, s20, 64
-		s_add_i32 s19, s17, s18
-		v_add_u32_e32 v6, s19, v4
+		s_add_i32 s20, s17, s18
+		v_add_u32_e32 v6, s20, v4
 		buffer_load_dwordx4 v6, s[12:15], 0 offen lds
-		s_add_i32 s17, s16, 0xc000
-		s_add_i32 s18, s21, 64
-		v_add_u32_e32 v6, s18, v4
-		s_mov_b32 m0, s17
+		v_add3_u32 v6, s19, 64, v4
+		s_add_i32 m0, s16, 0xc000
 		s_nop 0
 		buffer_load_dwordx4 v6, s[24:27], 0 offen lds
 		v_mov_b64_e32 v[8:9], 0
@@ -173,8 +168,7 @@ wmma_f16_matmul_tiled:
 		s_mov_b32 m0, s20
 		s_nop 0
 		buffer_load_dwordx4 v15, s[12:15], s18 offen lds
-		s_add_i32 s19, s20, 0x4000
-		s_mov_b32 m0, s19
+		s_add_i32 m0, s20, 0x4000
 		s_nop 0
 		buffer_load_dwordx4 v3, s[24:27], s18 offen lds
 		s_and_b32 s18, s17, 1

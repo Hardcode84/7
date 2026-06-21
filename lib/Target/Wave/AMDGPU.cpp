@@ -2350,6 +2350,10 @@ private:
       return emitMC(sAddI32(), {toMCOperand(op.getResult(0)),
                                 toMCOperand(op.getOperand(0)),
                                 toMCOperand(op.getOperand(1))});
+    if (isa<waveamdmachine::SAddM0I32Op>(op))
+      return emitMC(sAddI32(), {llvm::MCOperand::createReg(namedPhysReg("m0")),
+                                toMCOperand(op.getOperand(0)),
+                                toMCOperand(op.getOperand(1))});
     if (isa<waveamdmachine::SMulI32Op>(op))
       return emitMC(sMulI32(), {toMCOperand(op.getResult(0)),
                                 toMCOperand(op.getOperand(0)),

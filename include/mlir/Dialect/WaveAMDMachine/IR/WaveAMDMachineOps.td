@@ -1098,7 +1098,17 @@ def WaveAMDMachine_SMovExecB64Op : WaveAMDMachine_UnaryNoResult<"s_mov_exec_b64"
                                                            WaveAMDMachine_WritesExec]>;
 def WaveAMDMachine_SMovM0Op
     : WaveAMDMachine_UnaryResult<"s_mov_m0", WaveAMDMachine_SGPR1,
-                                 WaveAMDMachine_M0, [WaveAMDMachine_SALU]>;
+                                 WaveAMDMachine_M0, [
+                                   WaveAMDMachine_SALU,
+                                   DeclareOpInterfaceMethods<
+                                     WaveAMDMachine_M0WriteHazardOpInterface>
+                                 ]> {
+  let extraClassDefinition = [{
+    ::mlir::Value $cppClass::getM0HazardValue() {
+      return getResult();
+    }
+  }];
+}
 def WaveAMDMachine_SEndpgmOp : WaveAMDMachine_ZeroResult<"s_endpgm">;
 def WaveAMDMachine_SSetpcB64Op : WaveAMDMachine_ZeroResult<"s_setpc_b64">;
 
@@ -2437,6 +2447,25 @@ def WaveAMDMachine_SAddI32Op
   );
   let results = (outs WaveAMDMachine_SGPR1:$result, WaveAMDMachine_SCC:$scc);
   let assemblyFormat = "$lhs `,` $rhs attr-dict `:` functional-type(operands, results)";
+}
+
+def WaveAMDMachine_SAddM0I32Op
+    : WaveAMDMachine_Op<"s_add_m0_i32", [
+        WaveAMDMachine_SALU,
+        DeclareOpInterfaceMethods<WaveAMDMachine_M0WriteHazardOpInterface>
+      ]> {
+  let summary = "scalar 32-bit add into M0 (sets SCC)";
+  let arguments = (ins
+    WaveAMDMachine_SGPR1:$lhs,
+    WaveAMDMachine_SGPR1OrImm:$rhs
+  );
+  let results = (outs WaveAMDMachine_M0:$m0, WaveAMDMachine_SCC:$scc);
+  let assemblyFormat = "$lhs `,` $rhs attr-dict `:` functional-type(operands, results)";
+  let extraClassDefinition = [{
+    ::mlir::Value $cppClass::getM0HazardValue() {
+      return getM0();
+    }
+  }];
 }
 
 // Signed scalar 32-bit multiply. AMDGPU `s_mul_i32` does not set SCC, so

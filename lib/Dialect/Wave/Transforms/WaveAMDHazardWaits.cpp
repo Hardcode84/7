@@ -850,12 +850,10 @@ static void addProducedPhysicalHazards(Operation *op, HazardState &state,
 
 static void addProducedHazards(Operation *op, HazardState &state,
                                const HazardConfig &cfg) {
-  if (isa<waveamdmachine::SMovM0Op>(op)) {
-    for (Value result : op->getResults())
-      mergeValueHazards(state, result,
-                        {/*m0=*/cfg.m0PipelineDelay,
-                         /*mfmaStore=*/0});
-  }
+  if (auto m0Writer = dyn_cast<waveamdmachine::M0WriteHazardOpInterface>(op))
+    mergeValueHazards(state, m0Writer.getM0HazardValue(),
+                      {/*m0=*/cfg.m0PipelineDelay,
+                       /*mfmaStore=*/0});
   if (op->hasTrait<OpTrait::waveamdmachine::MFMAOp>()) {
     for (Value result : op->getResults())
       mergeValueHazards(state, result,
@@ -1161,12 +1159,13 @@ private:
       return true;
     if (isa<waveamdmachine::LabelOp, waveamdmachine::SBarrierOp,
             waveamdmachine::SSetprioOp, waveamdmachine::WaitOp,
-            waveamdmachine::SMovM0Op, waveamdmachine::SNopOp,
-            waveamdmachine::SDelayAluOp, waveamdmachine::SAndSaveexecB32Op,
-            waveamdmachine::SAndn2ExecB32Op, waveamdmachine::SAndSaveexecB64Op,
-            waveamdmachine::SAndn2ExecB64Op, waveamdmachine::SMovExecLoOp,
-            waveamdmachine::SMovExecB64Op, waveamdmachine::SEndpgmOp,
-            waveamdmachine::SSetpcB64Op>(op))
+            waveamdmachine::SNopOp, waveamdmachine::SDelayAluOp,
+            waveamdmachine::SAndSaveexecB32Op, waveamdmachine::SAndn2ExecB32Op,
+            waveamdmachine::SAndSaveexecB64Op, waveamdmachine::SAndn2ExecB64Op,
+            waveamdmachine::SMovExecLoOp, waveamdmachine::SMovExecB64Op,
+            waveamdmachine::SEndpgmOp, waveamdmachine::SSetpcB64Op>(op))
+      return true;
+    if (isa<waveamdmachine::M0WriteHazardOpInterface>(op))
       return true;
     return isKnownMemoryOp(op);
   }

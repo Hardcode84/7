@@ -59,6 +59,19 @@ func.func @fused_int_ops(%a: !waveamdmachine.reg<vgpr, 1, 0>,
   return %first : !waveamdmachine.reg<sgpr, 1, 0>
 }
 
+// ROUND-LABEL: func.func @s_add_m0_i32
+// ROUND: waveamdmachine.s_add_m0_i32
+// ASM-LABEL: s_add_m0_i32:
+// ASM: s_add_i32 m0, s0, 0x10000
+func.func @s_add_m0_i32(%base: !waveamdmachine.reg<sgpr, 1, 0>) {
+  %literal = waveamdmachine.imm 65536 : !waveamdmachine.imm
+  %m0, %scc = waveamdmachine.s_add_m0_i32 %base, %literal
+      : (!waveamdmachine.reg<sgpr, 1, 0>, !waveamdmachine.imm)
+          -> (!waveamdmachine.m0, !waveamdmachine.reg<scc, 1>)
+  waveamdmachine.s_endpgm
+  return
+}
+
 // ASM-LABEL: fused_int_wide_sources:
 // ASM-NOT: v[0:1]
 // ASM: v_mul_lo_u32 v3, v0, 7

@@ -389,6 +389,27 @@ func.func @m0_delay_before_lds_dma(
   return
 }
 
+// CHECK-LABEL: func.func @m0_add_delay_before_lds_dma
+// CHECK: waveamdmachine.s_add_m0_i32
+// CHECK-NEXT: waveamdmachine.imm 0
+// CHECK-NEXT: waveamdmachine.s_nop
+// CHECK-NEXT: waveamdmachine.global_load_lds_b128
+func.func @m0_add_delay_before_lds_dma(
+    %off: !waveamdmachine.reg<vgpr, 1>,
+    %base: !waveamdmachine.reg<sgpr, 2>,
+    %dst: !waveamdmachine.reg<sgpr, 1>,
+    %dep: !waveamdmachine.mem.token) {
+  %one = waveamdmachine.imm 1 : !waveamdmachine.imm
+  %m0, %scc = waveamdmachine.s_add_m0_i32 %dst, %one
+      : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.imm)
+          -> (!waveamdmachine.m0, !waveamdmachine.reg<scc, 1>)
+  %tok = waveamdmachine.global_load_lds_b128 %off, %base, %m0 after %dep
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 2>,
+         !waveamdmachine.m0, !waveamdmachine.mem.token)
+      -> !waveamdmachine.mem.token
+  return
+}
+
 // CHECK-LABEL: func.func @m0_delay_after_waitcnt
 // CHECK: waveamdmachine.s_mov_m0
 // CHECK-NEXT: waveamdmachine.s_waitcnt lgkmcnt(0)

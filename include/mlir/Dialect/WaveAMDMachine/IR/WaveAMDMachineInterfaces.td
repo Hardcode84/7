@@ -45,6 +45,22 @@ def WaveAMDMachine_WaitcntInfoOpInterface
   ];
 }
 
+def WaveAMDMachine_M0WriteHazardOpInterface
+    : OpInterface<"M0WriteHazardOpInterface"> {
+  let cppNamespace = "::mlir::waveamdmachine";
+  let description = [{
+    M0 write that needs the hardware M0 pipeline gap before an LDS DMA consumer.
+  }];
+  let methods = [
+    InterfaceMethod<
+      [{M0 value carrying the write hazard.}],
+      "::mlir::Value",
+      "getM0HazardValue",
+      (ins)
+    >,
+  ];
+}
+
 def WaveAMDMachine_MMAOpInterface
     : OpInterface<"MMAOpInterface"> {
   let cppNamespace = "::mlir::waveamdmachine";

@@ -105,6 +105,43 @@ static InnerOp matchSingleUseProducer(Value value, Operation *consumer) {
   return inner;
 }
 
+static SAddI32Op matchDeadSCCSAddProducer(Value value, Operation *consumer) {
+  SAddI32Op inner = value.getDefiningOp<SAddI32Op>();
+  if (!inner)
+    return SAddI32Op();
+  if (inner->getBlock() != consumer->getBlock())
+    return SAddI32Op();
+  if (!inner.getResult().hasOneUse())
+    return SAddI32Op();
+  if (!inner.getScc().use_empty())
+    return SAddI32Op();
+  return inner;
+}
+
+static bool writesM0(Operation *op) {
+  return llvm::any_of(op->getResults(), [](Value result) {
+    return isa<M0Type>(result.getType());
+  });
+}
+
+static bool hasSingleM0UseBeforeClobber(SMovM0Op op) {
+  if (!op.getResult().hasOneUse())
+    return false;
+
+  Operation *user = *op.getResult().user_begin();
+  if (user->getBlock() != op->getBlock())
+    return false;
+
+  for (Operation *cur = op->getNextNode(); cur && cur != user;
+       cur = cur->getNextNode()) {
+    if (cur->getNumRegions() != 0)
+      return false;
+    if (writesM0(cur))
+      return false;
+  }
+  return true;
+}
+
 static std::optional<ConstantIntRanges>
 normalizeU32Range(const ConstantIntRanges &range) {
   unsigned bits = range.umin().getBitWidth();
@@ -185,6 +222,25 @@ static LogicalResult tryFuseNestedBinary(PatternRewriter &rewriter, OldOp oldOp,
   return failure();
 }
 
+static LogicalResult tryFuseScalarAdd(PatternRewriter &rewriter, VAddU32Op op,
+                                      const llvm::AMDGPU::IsaVersion &isa) {
+  if (SAddI32Op inner = matchDeadSCCSAddProducer(op.getLhs(), op)) {
+    if (succeeded(tryReplaceTernary<VAdd3U32Op>(rewriter, op, inner,
+                                                inner.getLhs(), inner.getRhs(),
+                                                op.getRhs(), isa)))
+      return success();
+  }
+
+  if (SAddI32Op inner = matchDeadSCCSAddProducer(op.getRhs(), op)) {
+    if (succeeded(tryReplaceTernary<VAdd3U32Op>(rewriter, op, inner,
+                                                inner.getLhs(), inner.getRhs(),
+                                                op.getLhs(), isa)))
+      return success();
+  }
+
+  return failure();
+}
+
 class DataFlowListener : public RewriterBase::Listener {
 public:
   DataFlowListener(DataFlowSolver &solver) : solver(solver) {}
@@ -247,6 +303,8 @@ struct AddFusionPattern : public OpRewritePattern<VAddU32Op> {
     if (succeeded(
             tryFuseNestedBinary<VAddU32Op, VAdd3U32Op>(rewriter, op, isa)))
       return success();
+    if (succeeded(tryFuseScalarAdd(rewriter, op, isa)))
+      return success();
     if (succeeded(tryFuseNestedBinary<VXorB32Op, VXadU32Op>(rewriter, op, isa)))
       return success();
 
@@ -254,6 +312,25 @@ struct AddFusionPattern : public OpRewritePattern<VAddU32Op> {
   }
 
   llvm::AMDGPU::IsaVersion isa;
+};
+
+struct M0AddFusionPattern : public OpRewritePattern<SMovM0Op> {
+  M0AddFusionPattern(MLIRContext *context)
+      : OpRewritePattern<SMovM0Op>(context) {}
+
+  LogicalResult matchAndRewrite(SMovM0Op op,
+                                PatternRewriter &rewriter) const override {
+    SAddI32Op inner = matchDeadSCCSAddProducer(op.getSource(), op);
+    if (!inner || !hasSingleM0UseBeforeClobber(op))
+      return failure();
+
+    SAddM0I32Op fused = SAddM0I32Op::create(
+        rewriter, op.getLoc(), op.getResult().getType(),
+        inner.getScc().getType(), inner.getLhs(), inner.getRhs());
+    rewriter.replaceOp(op, fused.getM0());
+    rewriter.eraseOp(inner);
+    return success();
+  }
 };
 
 struct LshlFusionPattern : public OpRewritePattern<VLshlrevB32Op> {
@@ -293,7 +370,7 @@ struct OrFusionPattern : public OpRewritePattern<VOrB32Op> {
 static bool hasFusedIntCandidate(func::FuncOp func) {
   bool found = false;
   WalkResult result = func.walk([&](Operation *op) {
-    if (!isa<VAddU32Op, VLshlrevB32Op, VOrB32Op>(op))
+    if (!isa<VAddU32Op, VLshlrevB32Op, VOrB32Op, SMovM0Op>(op))
       return WalkResult::advance();
     found = true;
     return WalkResult::interrupt();
@@ -318,6 +395,7 @@ static LogicalResult runOnFunc(func::FuncOp func) {
     return func.emitError("IntegerRangeAnalysis failed for fused-int pass");
 
   patterns.add<Mad24FusionPattern>(func.getContext(), *isa, solver);
+  patterns.add<M0AddFusionPattern>(func.getContext());
   patterns.add<AddFusionPattern, LshlFusionPattern, OrFusionPattern>(
       func.getContext(), *isa);
   DataFlowListener listener(solver);

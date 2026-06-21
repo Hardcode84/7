@@ -105,8 +105,9 @@ SchedClass classifyOp(Operation *op) {
       // Scalar ALU pipe: arithmetic, shifts, compares, moves, exec
       // manipulation, nop, delay_alu. Scalar 64-bit add/mul/shl
       // still run on the SALU pipe.
-      .Case<SAddI32Op, SAddU64Op, SAddU64U32Op, SAndB32Op, SAndn2ExecB32Op,
-            SAndn2ExecB64Op, SAndSaveexecB32Op, SAndSaveexecB64Op,
+      .Case<SAddI32Op, SAddM0I32Op, SAddU64Op, SAddU64U32Op, SAndB32Op,
+            SAndn2ExecB32Op, SAndn2ExecB64Op, SAndSaveexecB32Op,
+            SAndSaveexecB64Op,
             SCmpEqI32Op, SCmpLgI32Op, SCmpGtI32Op, SCmpGeI32Op, SCmpLtI32Op,
             SCmpLeI32Op, SCmpEqU32Op, SCmpLgU32Op, SCmpGtU32Op, SCmpGeU32Op,
             SCmpLtU32Op, SCmpLeU32Op, SCSelectB32Op, SDelayAluOp, SLshlB32Op,
