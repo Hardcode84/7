@@ -30,6 +30,54 @@ func.func @uniform_i32_arith(%out: !wave.ptr<#wave.global, i32>) attributes {wav
   return
 }
 
+// SELECT-LABEL: func.func @simd_i32_muli_uniform_splats
+// SELECT: waveamdmachine.s_mul_i32
+// SELECT-NOT: waveamdmachine.v_mul_lo_u32
+func.func @simd_i32_muli_uniform_splats(%x: i32, %y: i32)
+    attributes {wave.kernel} {
+  %vx = wave.splat %x : i32 -> !wave.simd<i32, 32>
+  %vy = wave.splat %y : i32 -> !wave.simd<i32, 32>
+  %prod = wave.binary muli %vx, %vy
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  return
+}
+
+// SELECT-LABEL: func.func @simd_i32_uniform_splats_scalarize
+// SELECT-NOT: waveamdmachine.v_add_u32
+// SELECT: waveamdmachine.s_add_i32
+// SELECT-NOT: waveamdmachine.v_mul_hi_u32
+// SELECT: waveamdmachine.s_mul_hi_u32
+// SELECT-NOT: waveamdmachine.v_lshlrev_b32
+// SELECT: waveamdmachine.s_lshl_b32
+// SELECT-NOT: waveamdmachine.v_lshrrev_b32
+// SELECT: waveamdmachine.s_lshr_b32
+// SELECT-NOT: waveamdmachine.v_and_b32
+// SELECT: waveamdmachine.s_and_b32
+// SELECT-NOT: waveamdmachine.v_or_b32
+// SELECT: waveamdmachine.s_or_b32
+// SELECT-NOT: waveamdmachine.v_xor_b32
+// SELECT: waveamdmachine.s_xor_b32
+func.func @simd_i32_uniform_splats_scalarize(%x: i32, %y: i32)
+    attributes {wave.kernel} {
+  %vx = wave.splat %x : i32 -> !wave.simd<i32, 32>
+  %vy = wave.splat %y : i32 -> !wave.simd<i32, 32>
+  %sum = wave.binary addi %vx, %vy
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  %hi = wave.binary mulhui %vx, %vy
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  %shl = wave.binary shli %vx, %vy
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  %shr = wave.binary shrui %vx, %vy
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  %and = wave.binary andi %vx, %vy
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  %or = wave.binary ori %vx, %vy
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  %xor = wave.binary xori %vx, %vy
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  return
+}
+
 // SELECT-LABEL: func.func @uniform_i32_add_immediates
 // SELECT: waveamdmachine.imm 3
 // SELECT-NOT: waveamdmachine.s_add_i32
@@ -224,6 +272,29 @@ func.func @uniform_index_expr_i32_sign_ext(%x: i32) -> index {
 func.func @uniform_index_expr_i32_nonnegative_zero_ext(%x: i32) -> index {
   %nonneg = wave.assume %x as "x" [#wave.pred<"x >= 0">] : i32
   %idx = wave.index_expr <"x"> ["x"](%nonneg) : (i32) -> index
+  return %idx : index
+}
+
+// SELECT-LABEL: func.func @uniform_index_expr_square_stays_sgpr
+// SELECT-NOT: waveamdmachine.v_mul_lo_u32
+// SELECT: waveamdmachine.s_mul_i32
+// SELECT-NOT: waveamdmachine.v_mul_lo_u32
+func.func @uniform_index_expr_square_stays_sgpr(%x: i32) -> index {
+  %bounded = wave.assume %x as "x" [#wave.pred<"x >= 0">,
+                                     #wave.pred<"x <= 1024">] : i32
+  %idx = wave.index_expr <"x*x"> ["x"](%bounded) : (i32) -> index
+  return %idx : index
+}
+
+// SELECT-LABEL: func.func @uniform_index_expr_ceil_stays_sgpr
+// SELECT-NOT: waveamdmachine.v_add_u32
+// SELECT: waveamdmachine.s_add_i32
+// SELECT: waveamdmachine.s_lshr_b32
+// SELECT-NOT: waveamdmachine.v_add_u32
+func.func @uniform_index_expr_ceil_stays_sgpr(%x: i32) -> index {
+  %nonneg = wave.assume %x as "x" [#wave.pred<"x >= 0">] : i32
+  %idx = wave.index_expr <"ceiling(1/2*x)"> ["x"](%nonneg)
+      : (i32) -> index
   return %idx : index
 }
 

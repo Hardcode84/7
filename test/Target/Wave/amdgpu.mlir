@@ -172,8 +172,8 @@ func.func @wave_kernel(%out: !wave.ptr<#wave.global, i32>, %x: i32) attributes {
 // CHECK: .amdhsa_kernel wave_kernel
 
 // `wave.binary shrui` lowers to v_lshrrev_b32 (VOP2; shift goes in
-// src0, value in vsrc1 -- mirroring shli). `wave.binary muli` lowers
-// to v_mul_lo_u32 (VOP3, no operand-placement constraints).
+// src0, value in vsrc1 -- mirroring shli). Lane-dependent `muli`
+// lowers to v_mul_lo_u32.
 // CHECK-LABEL: wave_shri_muli:
 func.func @wave_shri_muli(%x: i32) -> i32 {
   // CHECK: v_mbcnt_lo_u32_b32 [[LANE:v[0-9]+]], -1, 0
@@ -184,6 +184,19 @@ func.func @wave_shri_muli(%x: i32) -> i32 {
   // CHECK: v_mul_lo_u32 [[MULLED:v[0-9]+]], [[SHIFTED]],
   %mulled = wave.binary muli %shifted, %vx : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
   %first = wave.read_first %mulled : !wave.simd<i32, 32> -> i32
+  return %first : i32
+}
+
+// CHECK-LABEL: wave_splat_muli_uniform:
+func.func @wave_splat_muli_uniform(%x: i32, %y: i32) -> i32 {
+  %vx = wave.splat %x : i32 -> !wave.simd<i32, 32>
+  %vy = wave.splat %y : i32 -> !wave.simd<i32, 32>
+  // CHECK: s_mul_i32 [[PROD:s[0-9]+]], {{s[0-9]+}}, {{s[0-9]+}}
+  // CHECK-NOT: v_mul_lo_u32
+  %prod = wave.binary muli %vx, %vy
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  %first = wave.read_first %prod : !wave.simd<i32, 32> -> i32
+  // CHECK: s_setpc_b64
   return %first : i32
 }
 

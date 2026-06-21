@@ -3218,6 +3218,22 @@ static Value buildScalarBinaryI32(OpBuilder &builder, Location loc,
   return Value{};
 }
 
+static Value subUniformI32(WaveAMDMachineSelector &S, Location loc, Value lhs,
+                           Value rhs) {
+  Value notRhs;
+  lhs = S.ensureSGPR1(loc, lhs);
+  rhs = S.ensureSGPR1(loc, rhs);
+  if (std::optional<int64_t> rhsImm = S.getImmediateValue(rhs))
+    notRhs = createImm(S.builder, loc, ~*rhsImm);
+  else
+    notRhs = buildScalarBinaryI32(
+        S.builder, loc,
+        getRegType(S.builder.getContext(), waveamdmachine::RegClass::SGPR),
+        BinaryKind::XOrI, rhs, createImm(S.builder, loc, -1));
+  Value negRhs = S.addUniformBytes(loc, notRhs, createImm(S.builder, loc, 1));
+  return S.addUniformBytes(loc, lhs, negRhs);
+}
+
 static void prepareVectorBinaryI32Operands(WaveAMDMachineSelector &S,
                                            BinaryOp op, BinaryKind kind,
                                            Value &lhs, Value &rhs) {
@@ -3243,7 +3259,7 @@ unsigned WaveAMDMachineSelector::waveArithElementBits(Type type) {
 LogicalResult WaveAMDMachineSelector::selectBinaryAddI32(BinaryOp op) {
   Value lhs = expect(op.getLhs(), op);
   Value rhs = expect(op.getRhs(), op);
-  if (!isBinarySimd(op)) {
+  if (!isBinarySimd(op) || (isUniformValue(lhs) && isUniformValue(rhs))) {
     values[op.getResult()] = addUniformBytes(op.getLoc(), lhs, rhs);
     eraseIfTopLevel(op);
     return success();
@@ -3273,7 +3289,13 @@ LogicalResult WaveAMDMachineSelector::selectBinaryMulI32(BinaryOp op) {
     eraseIfTopLevel(op);
     return success();
   }
-  // v_mul_lo_u32 is VOP3, operand placement is unconstrained.
+  if (isUniformValue(lhs) && isUniformValue(rhs)) {
+    values[op.getResult()] = mulUniformValues(op.getLoc(), lhs, rhs);
+    eraseIfTopLevel(op);
+    return success();
+  }
+  if (!isVGPR(lhs) && !isVGPR(rhs))
+    lhs = ensureVGPRForVSrc1(op.getLoc(), lhs);
   values[op.getResult()] = waveamdmachine::VMulLoU32Op::create(
       builder, op.getLoc(),
       getRegType(op.getContext(), waveamdmachine::RegClass::VGPR), lhs, rhs);
@@ -3288,6 +3310,13 @@ static LogicalResult selectBinaryMulHUI32(WaveAMDMachineSelector &S,
   if (!isBinarySimd(op)) {
     lhs = S.ensureSGPR1(op.getLoc(), lhs);
     rhs = S.ensureSGPR1(op.getLoc(), rhs);
+    S.values[op.getResult()] = waveamdmachine::SMulHiU32Op::create(
+        S.builder, op.getLoc(),
+        getRegType(op.getContext(), waveamdmachine::RegClass::SGPR), lhs, rhs);
+    S.eraseIfTopLevel(op);
+    return success();
+  }
+  if (S.isUniformValue(lhs) && S.isUniformValue(rhs)) {
     S.values[op.getResult()] = waveamdmachine::SMulHiU32Op::create(
         S.builder, op.getLoc(),
         getRegType(op.getContext(), waveamdmachine::RegClass::SGPR), lhs, rhs);
@@ -3317,6 +3346,16 @@ LogicalResult WaveAMDMachineSelector::selectBinaryShLI32(BinaryOp op) {
   if (!isBinarySimd(op)) {
     lhs = ensureSGPR1(op.getLoc(), lhs);
     rhs = ensureSGPR1(op.getLoc(), rhs);
+    values[op.getResult()] =
+        waveamdmachine::SLshlB32Op::create(
+            builder, op.getLoc(),
+            getRegType(op.getContext(), waveamdmachine::RegClass::SGPR),
+            getSCCType(op.getContext()), lhs, rhs)
+            .getResult();
+    eraseIfTopLevel(op);
+    return success();
+  }
+  if (isUniformValue(lhs) && isUniformValue(rhs)) {
     values[op.getResult()] =
         waveamdmachine::SLshlB32Op::create(
             builder, op.getLoc(),
@@ -3363,25 +3402,18 @@ LogicalResult WaveAMDMachineSelector::selectBinaryShLI64(BinaryOp op) {
 LogicalResult WaveAMDMachineSelector::selectBinarySubI32(BinaryOp op) {
   Value lhs = expect(op.getLhs(), op);
   Value rhs = expect(op.getRhs(), op);
-  Value notRhs;
   if (!isBinarySimd(op)) {
-    lhs = ensureSGPR1(op.getLoc(), lhs);
-    rhs = ensureSGPR1(op.getLoc(), rhs);
-    if (std::optional<int64_t> rhsImm = getImmediateValue(rhs))
-      notRhs = createImm(builder, op.getLoc(), ~*rhsImm);
-    else
-      notRhs = buildScalarBinaryI32(
-          builder, op.getLoc(),
-          getRegType(op.getContext(), waveamdmachine::RegClass::SGPR),
-          BinaryKind::XOrI, rhs, createImm(builder, op.getLoc(), -1));
-    Value negRhs = addUniformBytes(op.getLoc(), notRhs,
-                                   createImm(builder, op.getLoc(), 1));
-    values[op.getResult()] = addUniformBytes(op.getLoc(), lhs, negRhs);
+    values[op.getResult()] = subUniformI32(*this, op.getLoc(), lhs, rhs);
+    eraseIfTopLevel(op);
+    return success();
+  }
+  if (isUniformValue(lhs) && isUniformValue(rhs)) {
+    values[op.getResult()] = subUniformI32(*this, op.getLoc(), lhs, rhs);
     eraseIfTopLevel(op);
     return success();
   }
   rhs = ensureVGPRForVSrc1(op.getLoc(), rhs);
-  notRhs = buildVectorBinaryI32(
+  Value notRhs = buildVectorBinaryI32(
       builder, op.getLoc(),
       getRegType(op.getContext(), waveamdmachine::RegClass::VGPR),
       BinaryKind::XOrI, rhs, createImm(builder, op.getLoc(), -1));
@@ -3439,6 +3471,14 @@ static LogicalResult selectBinaryBitwiseOrShiftI32(WaveAMDMachineSelector &S,
     rhs = S.ensureSGPR1(op.getLoc(), rhs);
     S.values[op.getResult()] = buildScalarBinaryI32(S.builder, op.getLoc(),
                                                     resultType, kind, lhs, rhs);
+    S.eraseIfTopLevel(op);
+    return success();
+  }
+  if (S.isUniformValue(lhs) && S.isUniformValue(rhs)) {
+    Type scalarType =
+        getRegType(op.getContext(), waveamdmachine::RegClass::SGPR);
+    S.values[op.getResult()] = buildScalarBinaryI32(S.builder, op.getLoc(),
+                                                    scalarType, kind, lhs, rhs);
     S.eraseIfTopLevel(op);
     return success();
   }
@@ -5617,21 +5657,30 @@ static Value tryMulIndexPow2(WaveAMDMachineSelector &S, Location loc, Value lhs,
       .getResult();
 }
 
-Value WaveAMDMachineSelector::mulIndexValues(Location loc, Value lhs,
-                                             Value rhs) {
-  std::optional<int64_t> lhsImm = getImmediateValue(lhs);
-  std::optional<int64_t> rhsImm = getImmediateValue(rhs);
-  if (auto folded = foldImmMul(loc, lhsImm, rhsImm))
+static Value foldIndexMul(WaveAMDMachineSelector &S, Location loc, Value lhs,
+                          Value rhs, std::optional<int64_t> lhsImm,
+                          std::optional<int64_t> rhsImm) {
+  if (std::optional<Value> folded = S.foldImmMul(loc, lhsImm, rhsImm))
     return *folded;
   if (lhsImm && *lhsImm == 1)
     return rhs;
   if (rhsImm && *rhsImm == 1)
     return lhs;
+  return {};
+}
+
+Value WaveAMDMachineSelector::mulIndexValues(Location loc, Value lhs,
+                                             Value rhs) {
+  std::optional<int64_t> lhsImm = getImmediateValue(lhs);
+  std::optional<int64_t> rhsImm = getImmediateValue(rhs);
+  if (Value folded = foldIndexMul(*this, loc, lhs, rhs, lhsImm, rhsImm))
+    return folded;
+  if (isUniformValue(lhs) && isUniformValue(rhs))
+    return mulUniformValues(loc, lhs, rhs);
   if (Value shifted = tryMulIndexPow2(*this, loc, lhs, rhs, lhsImm, rhsImm))
     return shifted;
-  if (isImm(lhs) && isImm(rhs))
-    rhs = ensureVGPRForVSrc1(loc, rhs);
-  // v_mul_lo_u32 is VOP3, so SGPR/literal in either slot is legal.
+  if (!isVGPR(lhs) && !isVGPR(rhs))
+    lhs = ensureVGPRForVSrc1(loc, lhs);
   return waveamdmachine::VMulLoU32Op::create(
       builder, loc,
       getRegType(builder.getContext(), waveamdmachine::RegClass::VGPR), lhs,

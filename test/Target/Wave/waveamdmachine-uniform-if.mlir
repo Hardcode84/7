@@ -75,7 +75,8 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // SELECT-LABEL: func.func @uniform_if_simd
 // SELECT: [[COND:%.*]] = waveamdmachine.s_cmp_lg_u32
 // SELECT: [[R:%.*]] = waveamdmachine.uniform_if [[COND]]
-// SELECT: waveamdmachine.v_add_u32
+// SELECT: waveamdmachine.s_add_i32
+// SELECT: waveamdmachine.v_mov_b32_tuple
 // SELECT: waveamdmachine.yield {{.*}} : !waveamdmachine.reg<vgpr, 1>
 // SELECT: otherwise
 // SELECT: waveamdmachine.yield {{.*}} : !waveamdmachine.reg<vgpr, 1>
@@ -83,7 +84,8 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // ASM-LABEL: uniform_if_simd:
 // ASM-NOT: s_and_saveexec
 // ASM: s_cbranch_scc0 .Luniform_if_simd.if_else_0
-// ASM: v_add
+// ASM: s_add_i32
+// ASM: v_mov_b32
 // ASM: s_branch .Luniform_if_simd.if_end_0
 // ASM: .Luniform_if_simd.if_else_0:
 // ASM: .Luniform_if_simd.if_end_0:

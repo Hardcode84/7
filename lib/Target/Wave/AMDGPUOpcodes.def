@@ -71,7 +71,7 @@
   X(vFfblB32, V_FFBL_B32_e32_vi, V_CTZ_I32_B32_e32_gfx11)                      \
   X(vReadfirstlaneB32, V_READFIRSTLANE_B32_vi, V_READFIRSTLANE_B32_gfx11)      \
   X(vMulLoU32, V_MUL_LO_U32_vi, V_MUL_LO_U32_e64_gfx11)                        \
-  X(vMulHiU32, V_MUL_HI_U32_e64, V_MUL_HI_U32_e64_gfx11)                       \
+  X(vMulHiU32, V_MUL_HI_U32_vi, V_MUL_HI_U32_e64_gfx11)                        \
   X(vAdd3U32, V_ADD3_U32_vi, V_ADD3_U32_e64_gfx11)                             \
   X(vMadI32I24, V_MAD_I32_I24_vi, V_MAD_I32_I24_e64_gfx11)                     \
   X(vMadU32U24, V_MAD_U32_U24_vi, V_MAD_U32_U24_e64_gfx11)                     \

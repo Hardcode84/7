@@ -1701,9 +1701,22 @@ private:
     return emitMC(vMulLoU32(), {toMCOperand(dst), toMCB32(lhs), toMCB32(rhs)});
   }
 
-  bool isSGPR(Value value) const {
-    auto regType = dyn_cast<waveamdmachine::RegType>(value.getType());
-    return regType && regType.getRegClass() == waveamdmachine::RegClass::SGPR;
+  LogicalResult emitVMulHiU32(Operation &op, Value dst, Value lhs, Value rhs) {
+    if (isGfx8Or9()) {
+      std::optional<unsigned> lhsImm = getImmediate(lhs);
+      std::optional<unsigned> rhsImm = getImmediate(rhs);
+      if (lhsImm && rhsImm)
+        return op.emitError("v_mul_hi_u32 cannot materialize two immediates");
+      if (lhsImm || rhsImm) {
+        Value immValue = lhsImm ? lhs : rhs;
+        Value regValue = lhsImm ? rhs : lhs;
+        if (failed(emitMC(vMovB32(), {toMCOperand(dst), toMCB32(immValue)})))
+          return failure();
+        return emitMC(vMulHiU32(),
+                      {toMCOperand(dst), toMCOperand(dst), toMCB32(regValue)});
+      }
+    }
+    return emitMC(vMulHiU32(), {toMCOperand(dst), toMCB32(lhs), toMCB32(rhs)});
   }
 
   bool isVGPR(Value value) const {
@@ -2117,14 +2130,18 @@ private:
     if (isa<waveamdmachine::VAddU32Op>(op)) {
       Value lhs = op.getOperand(0);
       Value rhs = op.getOperand(1);
-      if (isSGPR(rhs))
+      if (!isVGPR(rhs) && !isVGPR(lhs))
+        return op.emitError("v_add_u32 needs a VGPR operand");
+      if (!isVGPR(rhs))
         std::swap(lhs, rhs);
       return emitVAddU32(toMCOperand(result()), toMCB32(lhs), toMCB32(rhs), op);
     }
     if (isa<waveamdmachine::VAddU32VccOp>(op)) {
       Value lhs = op.getOperand(0);
       Value rhs = op.getOperand(1);
-      if (isSGPR(rhs))
+      if (!isVGPR(rhs) && !isVGPR(lhs))
+        return op.emitError("v_add_u32_vcc needs a VGPR operand");
+      if (!isVGPR(rhs))
         std::swap(lhs, rhs);
       return emitVAddU32Vcc(toMCOperand(result()), toMCB32(lhs), toMCB32(rhs));
     }
@@ -2152,14 +2169,9 @@ private:
                     {toMCOperand(result()), toMCB32(op.getOperand(1)),
                      toMCB32(op.getOperand(0))});
     if (isa<waveamdmachine::VMulLoU32Op>(op))
-      // v_mul_lo_u32 is VOP3-only on RDNA3; operand placement is
-      // unconstrained so we emit (vdst, src0, src1) as-is without the
-      // VOP2 swap dance.
       return emitVMulLoU32(op, result(), op.getOperand(0), op.getOperand(1));
     if (isa<waveamdmachine::VMulHiU32Op>(op))
-      return emitMC(vMulHiU32(),
-                    {toMCOperand(result()), toMCB32(op.getOperand(0)),
-                     toMCB32(op.getOperand(1))});
+      return emitVMulHiU32(op, result(), op.getOperand(0), op.getOperand(1));
     if (isa<waveamdmachine::VFfbhU32Op, waveamdmachine::VFfblB32Op>(op)) {
       unsigned opcode =
           isa<waveamdmachine::VFfbhU32Op>(op) ? vFfbhU32() : vFfblB32();

@@ -835,7 +835,9 @@ materializeCeilRational(WaveAMDMachineSelector &S, RationalIndexValue value,
                                            "ceil")))
     return failure();
   Value bias = createImm(S.builder, user->getLoc(), den - 1);
-  Value biased = S.addByteOffsets(user->getLoc(), *numerator, bias);
+  Value biased = S.isUniformValue(*numerator)
+                     ? S.addUniformBytes(user->getLoc(), *numerator, bias)
+                     : S.addByteOffsets(user->getLoc(), *numerator, bias);
   return S.shrPow2(user->getLoc(), biased, llvm::Log2_64(den));
 }
 
