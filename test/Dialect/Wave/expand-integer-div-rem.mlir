@@ -149,6 +149,27 @@ func.func @signed_dynamic_pow2_i64(%x: i64, %d: i64) -> i64 {
 
 // -----
 
+// CHECK-LABEL: func.func @signed_dynamic_pow2_scalar_lhs_simd_rhs
+// CHECK-SAME: ([[X:%.*]]: i32, [[D:%.*]]: i32)
+// CHECK: [[NONNEG:%.*]] = wave.assume [[X]]
+// CHECK: [[POW2:%.*]] = wave.assume [[D]]
+// CHECK: [[LHS:%.*]] = wave.splat [[NONNEG]] : i32 -> !wave.simd<i32, 32>
+// CHECK: [[SHIFT:%.*]] = wave.ctz [[POW2]] : i32 -> i32
+// CHECK: wave.binary shrui [[LHS]], [[SHIFT]]
+// CHECK-NOT: divsi
+func.func @signed_dynamic_pow2_scalar_lhs_simd_rhs(%x: i32, %d: i32)
+    -> !wave.simd<i32, 32> {
+  %nonneg = wave.assume %x as "x" [#wave.pred<"x >= 0">] : i32
+  %pow2 = wave.assume %d as "d" [#wave.pred<"d & (d - 1) == 0">,
+                                  #wave.pred<"d > 0">] : i32
+  %splat = wave.splat %pow2 : i32 -> !wave.simd<i32, 32>
+  %q = wave.binary divsi %nonneg, %splat
+      : i32, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  return %q : !wave.simd<i32, 32>
+}
+
+// -----
+
 // CHECK-LABEL: func.func @unsigned_dynamic_pow2_rem_simd
 // CHECK-DAG: [[ONE:%.*]] = wave.constant 1 : i32 -> !wave.simd<i32, 32>
 // CHECK: [[POW2:%.*]] = wave.assume

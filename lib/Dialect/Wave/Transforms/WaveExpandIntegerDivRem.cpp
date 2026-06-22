@@ -619,6 +619,7 @@ tryCreateDynamicPow2Value(OpBuilder &builder, Location loc, Type type,
     return std::nullopt;
 
   if (kind == BinaryKind::DivUI || kind == BinaryKind::DivSI) {
+    lhs = asType(builder, loc, lhs, type);
     Value shiftSource = rhs;
     if (SplatOp splat = rhs.getDefiningOp<SplatOp>())
       shiftSource = splat.getSource();
