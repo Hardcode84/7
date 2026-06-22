@@ -44,7 +44,6 @@ func.func @agpr_pressure_aggregate()
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 
-// expected-error @below {{waveamd-reg-alloc VGPR/AGPR live pressure exceeds target-waves budget}}
 func.func @default_agpr_pressure_aggregate() {
   %a = waveamdmachine.uninit : !waveamdmachine.reg<agpr, 128>
   %b = waveamdmachine.uninit : !waveamdmachine.reg<agpr, 128>

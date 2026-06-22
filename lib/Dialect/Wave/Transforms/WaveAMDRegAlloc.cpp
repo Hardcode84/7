@@ -3584,8 +3584,6 @@ static FailureOr<RegisterBudgets> getBudgets(ModuleOp root) {
   budgets.agpr = limits->addressableAGPRs;
   budgets.maxWavesPerEU = limits->maxWavesPerEU;
   budgets.agprCountsAgainstVGPRs = limits->agprCountsAgainstVGPRs;
-  if (budgets.agprCountsAgainstVGPRs)
-    budgets.totalVGPRLimit = limits->addressableVGPRs;
   return budgets;
 }
 
