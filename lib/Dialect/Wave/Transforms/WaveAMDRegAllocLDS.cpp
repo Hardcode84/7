@@ -290,9 +290,12 @@ public:
 
   unsigned getReliefDwords() const override { return pressureRelief; }
 
-  bool reducesPressureFailure(
+  wave::WaveAMDPressureReliefEffect getPressureEffect(
       const wave::WaveAMDPressureFailure &failure) const override {
-    return memorySpillReducesPressureFailure(failure, group, pressureRelief);
+    if (failure.combinedVGPRAGPR && group &&
+        group->storageClass == waveamdmachine::RegClass::AGPR)
+      return {};
+    return getMemorySpillPressureEffect(group, pressureRelief);
   }
 
   std::optional<StringRef> getRejectReason() const override {

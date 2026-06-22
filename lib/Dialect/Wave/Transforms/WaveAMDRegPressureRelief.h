@@ -55,6 +55,11 @@ struct WaveAMDPressureReliefCost {
   int64_t instabilityPenalty = 0;
 };
 
+struct WaveAMDPressureReliefEffect {
+  int64_t vgprLiveDelta = 0;
+  int64_t agprLiveDelta = 0;
+};
+
 struct WaveAMDPressureFailure {
   SmallVector<WaveAMDPressureIntervalRef, 4> overlaps;
   WaveAMDPressureIntervalRef request;
@@ -82,6 +87,8 @@ public:
   virtual WaveAMDPressureReliefCost getCost() const = 0;
   virtual unsigned getReliefDwords() const = 0;
   virtual std::optional<StringRef> getRejectReason() const;
+  virtual WaveAMDPressureReliefEffect
+  getPressureEffect(const WaveAMDPressureFailure &failure) const;
   virtual bool
   reducesPressureFailure(const WaveAMDPressureFailure &failure) const;
 
@@ -143,6 +150,20 @@ public:
 bool isBetterWaveAMDPressureReliefCandidate(
     const WaveAMDPressureReliefCandidate &lhs,
     const WaveAMDPressureReliefCandidate &rhs);
+WaveAMDPressureReliefEffect
+combineWaveAMDPressureReliefEffects(WaveAMDPressureReliefEffect lhs,
+                                    WaveAMDPressureReliefEffect rhs);
+bool waveAMDPressureReliefEffectProgressesFailure(
+    const WaveAMDPressureFailure &failure,
+    WaveAMDPressureReliefEffect currentEffect,
+    WaveAMDPressureReliefEffect candidateEffect);
+bool isBetterWaveAMDPressureReliefEffect(const WaveAMDPressureFailure &failure,
+                                         WaveAMDPressureReliefEffect lhs,
+                                         WaveAMDPressureReliefEffect rhs);
+bool waveAMDPressureReliefEffectReducesFailure(
+    const WaveAMDPressureFailure &failure, WaveAMDPressureReliefEffect effect);
+bool waveAMDPressureReliefEffectSolvesFailure(
+    const WaveAMDPressureFailure &failure, WaveAMDPressureReliefEffect effect);
 std::string
 formatWaveAMDPressureInterval(const WaveAMDPressureIntervalRef &interval);
 std::string

@@ -244,9 +244,9 @@ public:
 
   unsigned getReliefDwords() const override { return pressureRelief; }
 
-  bool reducesPressureFailure(
-      const wave::WaveAMDPressureFailure &failure) const override {
-    return memorySpillReducesPressureFailure(failure, group, pressureRelief);
+  wave::WaveAMDPressureReliefEffect
+  getPressureEffect(const wave::WaveAMDPressureFailure &) const override {
+    return getMemorySpillPressureEffect(group, pressureRelief);
   }
 
   std::optional<StringRef> getRejectReason() const override {

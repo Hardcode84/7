@@ -148,30 +148,15 @@ inline unsigned alignDownTo(unsigned value, unsigned granule) {
   return (value / granule) * granule;
 }
 
-inline bool
-memorySpillReducesPressureFailure(const wave::WaveAMDPressureFailure &failure,
-                                  IntervalGroup *group, unsigned reliefDwords) {
-  if (!failure.combinedVGPRAGPR)
-    return reliefDwords != 0;
+inline wave::WaveAMDPressureReliefEffect
+getMemorySpillPressureEffect(IntervalGroup *group, unsigned reliefDwords) {
   if (!group || reliefDwords == 0)
-    return false;
-
-  unsigned oldOverage = getPressureOverage(failure.liveDwords, failure.limit);
-  if (group->storageClass == waveamdmachine::RegClass::VGPR) {
-    if (reliefDwords > failure.liveDwords)
-      return false;
-    return getPressureOverage(failure.liveDwords - reliefDwords,
-                              failure.limit) < oldOverage;
-  }
-  if (group->storageClass != waveamdmachine::RegClass::AGPR ||
-      reliefDwords > failure.combinedAGPRLiveDwords)
-    return false;
-  unsigned newAGPRLive = failure.combinedAGPRLiveDwords - reliefDwords;
-  unsigned newVGPRLimit = 0;
-  if (newAGPRLive < failure.combinedVGPRFamilyLimit)
-    newVGPRLimit =
-        alignDownTo(failure.combinedVGPRFamilyLimit - newAGPRLive, 4);
-  return getPressureOverage(failure.liveDwords, newVGPRLimit) < oldOverage;
+    return {};
+  if (group->storageClass == waveamdmachine::RegClass::VGPR)
+    return {-static_cast<int64_t>(reliefDwords), 0};
+  if (group->storageClass == waveamdmachine::RegClass::AGPR)
+    return {0, -static_cast<int64_t>(reliefDwords)};
+  return {};
 }
 
 inline bool isCheapVGPRExpr(Operation *op);

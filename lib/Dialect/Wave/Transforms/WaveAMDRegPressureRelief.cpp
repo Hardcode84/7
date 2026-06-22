@@ -12,6 +12,7 @@
 #include "mlir/IR/BuiltinAttributes.h"
 #include "llvm/Support/raw_ostream.h"
 #include <algorithm>
+#include <limits>
 
 using namespace mlir;
 
@@ -30,9 +31,71 @@ bool WaveAMDPressureReliefCandidate::isLegal() const {
   return !getRejectReason();
 }
 
-bool WaveAMDPressureReliefCandidate::reducesPressureFailure(
+WaveAMDPressureReliefEffect WaveAMDPressureReliefCandidate::getPressureEffect(
     const WaveAMDPressureFailure &) const {
-  return getReliefDwords() != 0;
+  return {-static_cast<int64_t>(getReliefDwords()), 0};
+}
+
+static bool hasPressureEffect(WaveAMDPressureReliefEffect effect) {
+  return effect.vgprLiveDelta != 0 || effect.agprLiveDelta != 0;
+}
+
+static unsigned applyLiveDelta(unsigned value, int64_t delta) {
+  if (delta < 0) {
+    uint64_t magnitude = static_cast<uint64_t>(-delta);
+    if (magnitude >= value)
+      return 0;
+    return value - static_cast<unsigned>(magnitude);
+  }
+  uint64_t widened = static_cast<uint64_t>(value) + delta;
+  return widened > std::numeric_limits<unsigned>::max()
+             ? std::numeric_limits<unsigned>::max()
+             : static_cast<unsigned>(widened);
+}
+
+static unsigned getPressureOverage(unsigned liveDwords, unsigned limit) {
+  if (liveDwords <= limit)
+    return 0;
+  return liveDwords - limit;
+}
+
+static unsigned alignDownTo(unsigned value, unsigned granule) {
+  return (value / granule) * granule;
+}
+
+struct CombinedPressureProgress {
+  unsigned overage = 0;
+  unsigned granuleDebt = 0;
+};
+
+static CombinedPressureProgress
+getCombinedPressureProgress(const WaveAMDPressureFailure &failure,
+                            WaveAMDPressureReliefEffect effect) {
+  unsigned agprLive =
+      applyLiveDelta(failure.combinedAGPRLiveDwords, effect.agprLiveDelta);
+  unsigned vgprLive = applyLiveDelta(failure.liveDwords, effect.vgprLiveDelta);
+  unsigned rawVGPRLimit = 0;
+  if (agprLive < failure.combinedVGPRFamilyLimit)
+    rawVGPRLimit = failure.combinedVGPRFamilyLimit - agprLive;
+  unsigned alignedVGPRLimit = alignDownTo(rawVGPRLimit, 4);
+  unsigned overage = getPressureOverage(vgprLive, alignedVGPRLimit);
+  if (overage == 0)
+    return {0, 0};
+  unsigned hiddenCapacity = rawVGPRLimit - alignedVGPRLimit;
+  return {overage, 4 - hiddenCapacity};
+}
+
+static bool isBetterCombinedPressureProgress(CombinedPressureProgress lhs,
+                                             CombinedPressureProgress rhs) {
+  if (lhs.overage != rhs.overage)
+    return lhs.overage < rhs.overage;
+  return lhs.granuleDebt < rhs.granuleDebt;
+}
+
+bool WaveAMDPressureReliefCandidate::reducesPressureFailure(
+    const WaveAMDPressureFailure &failure) const {
+  return waveAMDPressureReliefEffectReducesFailure(failure,
+                                                   getPressureEffect(failure));
 }
 
 void WaveAMDPressureReliefCandidate::print(
@@ -139,6 +202,63 @@ bool isBetterWaveAMDPressureReliefCandidate(
     return lhs.getReliefDwords() > rhs.getReliefDwords();
 
   return lhs.getProviderName() < rhs.getProviderName();
+}
+
+WaveAMDPressureReliefEffect
+combineWaveAMDPressureReliefEffects(WaveAMDPressureReliefEffect lhs,
+                                    WaveAMDPressureReliefEffect rhs) {
+  lhs.vgprLiveDelta += rhs.vgprLiveDelta;
+  lhs.agprLiveDelta += rhs.agprLiveDelta;
+  return lhs;
+}
+
+bool waveAMDPressureReliefEffectProgressesFailure(
+    const WaveAMDPressureFailure &failure,
+    WaveAMDPressureReliefEffect currentEffect,
+    WaveAMDPressureReliefEffect candidateEffect) {
+  if (!hasPressureEffect(candidateEffect))
+    return false;
+  if (!failure.combinedVGPRAGPR)
+    return waveAMDPressureReliefEffectReducesFailure(failure, candidateEffect);
+  CombinedPressureProgress current =
+      getCombinedPressureProgress(failure, currentEffect);
+  CombinedPressureProgress next = getCombinedPressureProgress(
+      failure,
+      combineWaveAMDPressureReliefEffects(currentEffect, candidateEffect));
+  return isBetterCombinedPressureProgress(next, current);
+}
+
+bool isBetterWaveAMDPressureReliefEffect(const WaveAMDPressureFailure &failure,
+                                         WaveAMDPressureReliefEffect lhs,
+                                         WaveAMDPressureReliefEffect rhs) {
+  if (!failure.combinedVGPRAGPR) {
+    bool lhsProgress = waveAMDPressureReliefEffectReducesFailure(failure, lhs);
+    bool rhsProgress = waveAMDPressureReliefEffectReducesFailure(failure, rhs);
+    return lhsProgress && !rhsProgress;
+  }
+  return isBetterCombinedPressureProgress(
+      getCombinedPressureProgress(failure, lhs),
+      getCombinedPressureProgress(failure, rhs));
+}
+
+bool waveAMDPressureReliefEffectReducesFailure(
+    const WaveAMDPressureFailure &failure, WaveAMDPressureReliefEffect effect) {
+  if (!hasPressureEffect(effect))
+    return false;
+  if (!failure.combinedVGPRAGPR)
+    return true;
+  CombinedPressureProgress oldProgress =
+      getCombinedPressureProgress(failure, WaveAMDPressureReliefEffect{});
+  CombinedPressureProgress newProgress =
+      getCombinedPressureProgress(failure, effect);
+  return newProgress.overage < oldProgress.overage;
+}
+
+bool waveAMDPressureReliefEffectSolvesFailure(
+    const WaveAMDPressureFailure &failure, WaveAMDPressureReliefEffect effect) {
+  if (!failure.combinedVGPRAGPR)
+    return waveAMDPressureReliefEffectReducesFailure(failure, effect);
+  return getCombinedPressureProgress(failure, effect).overage == 0;
 }
 
 std::string

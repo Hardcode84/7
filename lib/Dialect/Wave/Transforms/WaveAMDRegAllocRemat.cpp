@@ -22,12 +22,6 @@ using namespace mlir::wave::regalloc;
 
 namespace {
 
-static unsigned getOverage(unsigned liveDwords, unsigned limit) {
-  if (liveDwords <= limit)
-    return 0;
-  return liveDwords - limit;
-}
-
 static bool isLiveAt(Interval *interval, unsigned position) {
   return !interval->values.empty() && interval->start <= position &&
          position <= interval->end;
@@ -114,17 +108,6 @@ public:
   StringRef getProviderName() const override { return "remat"; }
   wave::WaveAMDPressureReliefCost getCost() const override { return cost; }
   unsigned getReliefDwords() const override { return reliefDwords; }
-
-  bool reducesPressureFailure(
-      const wave::WaveAMDPressureFailure &failure) const override {
-    if (!failure.combinedVGPRAGPR)
-      return false;
-    if (reliefDwords == 0 || reliefDwords > failure.liveDwords)
-      return false;
-    unsigned oldOverage = getOverage(failure.liveDwords, failure.limit);
-    return getOverage(failure.liveDwords - reliefDwords, failure.limit) <
-           oldOverage;
-  }
 
   IntervalGroup *getGroup() const { return group; }
   unsigned getUseCount() const { return useCount; }
