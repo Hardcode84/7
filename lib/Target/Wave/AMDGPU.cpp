@@ -55,6 +55,7 @@
 #include "llvm/TargetParser/Triple.h"
 #include <algorithm>
 #include <cassert>
+#include <limits>
 
 LLD_HAS_DRIVER(elf)
 
@@ -68,6 +69,8 @@ static constexpr llvm::StringLiteral kPrivateSegmentFixedSizeAttr =
     "waveamdmachine.private_segment_fixed_size";
 static constexpr llvm::StringLiteral kUsesFlatScratchAttr =
     "waveamdmachine.uses_flat_scratch";
+// Text ISA names only v0..v255/a0..a255.
+static constexpr unsigned kTextAsmVectorRegisterLimit = 256;
 
 static bool isSupportedBackendIsa(const llvm::AMDGPU::IsaVersion &isa) {
   return isa.Major == 8 || isa.Major == 9 || isa.Major == 11;
@@ -120,8 +123,14 @@ struct KernelInfo {
   unsigned sgprCount = 0;
   unsigned vgprCount = 0;
   unsigned agprCount = 0;
+  unsigned maxFlatWorkgroupSize = 1024;
   unsigned fixedLdsSize = 0;
   unsigned privateSegmentFixedSize = 0;
+};
+
+struct KernelRegisterUsage {
+  unsigned vgprCount = 0;
+  unsigned agprCount = 0;
 };
 
 #include "AMDGPUOpcodes.def"
@@ -913,9 +922,13 @@ private:
       info.name = func.getSymName().str();
       info.kernargSize = getKernelArgSize(func);
       info.sgprCount = getIntAttr(func, "waveamdmachine.sgpr_count", 6);
-      unsigned archVGPRCount = getIntAttr(func, "waveamdmachine.vgpr_count", 1);
-      info.agprCount = getIntAttr(func, "waveamdmachine.agpr_count", 0);
-      info.vgprCount = getTotalVGPRCount(archVGPRCount, info.agprCount);
+      KernelRegisterUsage regUsage = getKernelRegisterUsage(func);
+      info.agprCount = regUsage.agprCount;
+      info.vgprCount = getTotalVGPRCount(regUsage.vgprCount, info.agprCount);
+      FailureOr<unsigned> maxFlatWorkgroupSize = getMaxFlatWorkgroupSize(func);
+      if (failed(maxFlatWorkgroupSize))
+        return failure();
+      info.maxFlatWorkgroupSize = *maxFlatWorkgroupSize;
       FailureOr<unsigned> fixedLdsSize = getFixedLDSSize(func);
       if (failed(fixedLdsSize))
         return failure();
@@ -949,6 +962,84 @@ private:
   static bool isAGPRType(Type type) {
     auto regType = dyn_cast<waveamdmachine::RegType>(type);
     return regType && regType.getRegClass() == waveamdmachine::RegClass::AGPR;
+  }
+
+  static bool isVCCType(Type type) {
+    auto regType = dyn_cast<waveamdmachine::RegType>(type);
+    return regType && regType.getRegClass() == waveamdmachine::RegClass::VCC;
+  }
+
+  FailureOr<unsigned> getMaxFlatWorkgroupSize(func::FuncOp func) const {
+    Operation *op = func.getOperation();
+    for (StringRef name : {"wave.workgroup_size", "gpu.known_block_size"}) {
+      DenseI32ArrayAttr attr = op->getAttrOfType<DenseI32ArrayAttr>(name);
+      if (!attr)
+        continue;
+      if (attr.empty() || attr.size() > 3)
+        return func.emitError(name) << " must contain one to three dimensions";
+
+      uint64_t product = 1;
+      for (int32_t dim : attr.asArrayRef()) {
+        if (dim <= 0)
+          return func.emitError(name) << " dimensions must be positive";
+        product *= static_cast<uint32_t>(dim);
+        if (product > std::numeric_limits<unsigned>::max())
+          return func.emitError(name) << " flat size must fit u32";
+      }
+      return static_cast<unsigned>(product);
+    }
+    return 1024;
+  }
+
+  bool usesVCC(func::FuncOp func) const {
+    bool found = false;
+    func.walk([&](Operation *op) {
+      for (Value value :
+           llvm::concat<Value>(op->getOperands(), op->getResults())) {
+        if (isVCCType(value.getType())) {
+          found = true;
+          return WalkResult::interrupt();
+        }
+      }
+      for (Region &region : op->getRegions())
+        for (Block &block : region)
+          for (BlockArgument arg : block.getArguments())
+            if (isVCCType(arg.getType())) {
+              found = true;
+              return WalkResult::interrupt();
+            }
+      return WalkResult::advance();
+    });
+    return found;
+  }
+
+  static void noteRegisterUsage(Value value, KernelRegisterUsage &usage) {
+    auto regType = dyn_cast<waveamdmachine::RegType>(value.getType());
+    if (!regType || regType.getIndex() < 0)
+      return;
+
+    unsigned end =
+        static_cast<unsigned>(regType.getIndex()) + regType.getWidth();
+    if (regType.getRegClass() == waveamdmachine::RegClass::VGPR)
+      usage.vgprCount = std::max(usage.vgprCount, end);
+    if (regType.getRegClass() == waveamdmachine::RegClass::AGPR)
+      usage.agprCount = std::max(usage.agprCount, end);
+  }
+
+  KernelRegisterUsage getKernelRegisterUsage(func::FuncOp func) const {
+    KernelRegisterUsage usage;
+    func.walk([&](Operation *op) {
+      for (Value value :
+           llvm::concat<Value>(op->getOperands(), op->getResults()))
+        noteRegisterUsage(value, usage);
+      for (Region &region : op->getRegions())
+        for (Block &block : region)
+          for (BlockArgument arg : block.getArguments())
+            noteRegisterUsage(arg, usage);
+      return WalkResult::advance();
+    });
+    usage.vgprCount = std::max(usage.vgprCount, 1u);
+    return usage;
   }
 
   LogicalResult verifyAGPRTargetSupport(ModuleOp module) const {
@@ -986,6 +1077,31 @@ private:
     if (isGfx90APlus() && agprCount != 0)
       return alignUp(archVGPRCount, 4) + agprCount;
     return std::max(archVGPRCount, agprCount);
+  }
+
+  unsigned getAddressableVGPRCount() const {
+    return std::min(llvm::AMDGPU::IsaInfo::getAddressableNumArchVGPRs(*sti),
+                    kTextAsmVectorRegisterLimit);
+  }
+
+  unsigned getAddressableAGPRCount() const {
+    return hasAGPRs() ? kTextAsmVectorRegisterLimit : 0;
+  }
+
+  LogicalResult verifyKernelRegisterAddressability(
+      func::FuncOp func, const KernelRegisterUsage &regUsage) const {
+    unsigned addressableVGPRCount = getAddressableVGPRCount();
+    if (regUsage.vgprCount > addressableVGPRCount)
+      return func.emitError("wave-to-amdgpu-asm VGPR allocation requires ")
+             << regUsage.vgprCount << " addressable VGPRs, but target supports "
+             << addressableVGPRCount;
+
+    unsigned addressableAGPRCount = getAddressableAGPRCount();
+    if (regUsage.agprCount > addressableAGPRCount)
+      return func.emitError("wave-to-amdgpu-asm AGPR allocation requires ")
+             << regUsage.agprCount << " addressable AGPRs, but target supports "
+             << addressableAGPRCount;
+    return success();
   }
 
   LogicalResult
@@ -1065,9 +1181,13 @@ private:
   LogicalResult emitKernelDescriptor(func::FuncOp func) {
     unsigned kernargSize = getKernelArgSize(func);
     unsigned sgprCount = getIntAttr(func, "waveamdmachine.sgpr_count", 6);
-    unsigned vgprCount = getIntAttr(func, "waveamdmachine.vgpr_count", 1);
-    unsigned agprCount = getIntAttr(func, "waveamdmachine.agpr_count", 0);
+    KernelRegisterUsage regUsage = getKernelRegisterUsage(func);
+    unsigned vgprCount = regUsage.vgprCount;
+    unsigned agprCount = regUsage.agprCount;
     unsigned totalVGPRCount = getTotalVGPRCount(vgprCount, agprCount);
+    if (failed(verifyKernelRegisterAddressability(func, regUsage)))
+      return failure();
+    bool reserveVCC = usesVCC(func);
     FailureOr<unsigned> fixedLdsSize = getFixedLDSSize(func);
     if (failed(fixedLdsSize))
       return failure();
@@ -1126,7 +1246,7 @@ private:
       unsigned accumOffset = alignUp(std::max(vgprCount, 1u), 4);
       os << "\t\t.amdhsa_accum_offset " << accumOffset << "\n";
     }
-    os << "\t\t.amdhsa_reserve_vcc 0\n";
+    os << "\t\t.amdhsa_reserve_vcc " << (reserveVCC ? 1 : 0) << "\n";
     os << "\t\t.amdhsa_float_round_mode_32 0\n";
     os << "\t\t.amdhsa_float_round_mode_16_64 0\n";
     os << "\t\t.amdhsa_float_denorm_mode_32 3\n";
@@ -1152,7 +1272,8 @@ private:
     os << "\t.set .L" << func.getSymName() << ".num_named_barrier, 0\n";
     os << "\t.set .L" << func.getSymName() << ".private_seg_size, "
        << *privateSegmentFixedSize << "\n";
-    os << "\t.set .L" << func.getSymName() << ".uses_vcc, 0\n";
+    os << "\t.set .L" << func.getSymName() << ".uses_vcc, "
+       << (reserveVCC ? 1 : 0) << "\n";
     os << "\t.set .L" << func.getSymName() << ".uses_flat_scratch, "
        << (usesFlatScratch ? 1 : 0) << "\n";
     os << "\t.set .L" << func.getSymName() << ".has_dyn_sized_stack, 0\n";
@@ -1195,7 +1316,8 @@ private:
       os << "    .group_segment_fixed_size: " << kernel.fixedLdsSize << "\n";
       os << "    .kernarg_segment_align: 8\n";
       os << "    .kernarg_segment_size: " << kernel.kernargSize << "\n";
-      os << "    .max_flat_workgroup_size: 1024\n";
+      os << "    .max_flat_workgroup_size: " << kernel.maxFlatWorkgroupSize
+         << "\n";
       os << "    .name:           " << kernel.name << "\n";
       os << "    .private_segment_fixed_size: "
          << kernel.privateSegmentFixedSize << "\n";

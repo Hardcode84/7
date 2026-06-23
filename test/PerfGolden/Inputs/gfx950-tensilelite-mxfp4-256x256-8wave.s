@@ -2223,7 +2223,7 @@ wmma_f16_matmul_tiled:
 		.amdhsa_next_free_vgpr 264
 		.amdhsa_next_free_sgpr 49
 		.amdhsa_accum_offset 168
-		.amdhsa_reserve_vcc 0
+		.amdhsa_reserve_vcc 1
 		.amdhsa_float_round_mode_32 0
 		.amdhsa_float_round_mode_16_64 0
 		.amdhsa_float_denorm_mode_32 3
@@ -2238,7 +2238,7 @@ wmma_f16_matmul_tiled:
 	.set .Lwmma_f16_matmul_tiled.numbered_sgpr, 49
 	.set .Lwmma_f16_matmul_tiled.num_named_barrier, 0
 	.set .Lwmma_f16_matmul_tiled.private_seg_size, 628
-	.set .Lwmma_f16_matmul_tiled.uses_vcc, 0
+	.set .Lwmma_f16_matmul_tiled.uses_vcc, 1
 	.set .Lwmma_f16_matmul_tiled.uses_flat_scratch, 1
 	.set .Lwmma_f16_matmul_tiled.has_dyn_sized_stack, 0
 	.set .Lwmma_f16_matmul_tiled.has_recursion, 0
@@ -2279,7 +2279,7 @@ amdhsa.kernels:
     .group_segment_fixed_size: 16384
     .kernarg_segment_align: 8
     .kernarg_segment_size: 48
-    .max_flat_workgroup_size: 1024
+    .max_flat_workgroup_size: 512
     .name:           wmma_f16_matmul_tiled
     .private_segment_fixed_size: 628
     .sgpr_count:     49
