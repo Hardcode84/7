@@ -16,13 +16,15 @@ because it reacts to emitted `s_waitcnt`s.
 The pass scans every `waveamdmachine` op for malformed input, runs a
 dense forward dataflow over each function, then rewrites blocks with a
 mutable local copy of the incoming state. The lattice carries the
-LGKM pending bit plus active SSA-value hazards.
+LGKM pending bit, active SSA-value hazards, and physical-register
+hazard windows.
 
-Three hazard classes are modeled today:
+Primary hazard classes modeled today:
 
 | Hazard | Producer | Consumer | Gap |
 |---|---|---|---|
 | VALU after LGKM-clearing wait | `s_waitcnt` with non-default lgkm | any `VALUOp`-trait op | 1 cycle on non-CDNA4 targets (`s_delay_alu` on gfx11+, `s_nop 0` elsewhere) |
+| TRANS forwarding on gfx940-family | `WriteTrans32` VALU op | non-TRANS `VALUOp`-trait op reading the TRANS result | 1 instruction |
 | M0 read after `s_mov_m0` | `s_mov_m0` | any op with a `!m0`-typed operand | 1 instruction |
 | VMEM store after 4-pass MFMA | any `MFMAOp`-trait op | any `VMEMStoreOp`-trait op consuming the MFMA result | 7 instructions on CDNA3, 8 on CDNA4 and other targets |
 
@@ -34,6 +36,8 @@ Three hazard classes are modeled today:
   draining waits arm the VALU gap only on targets that need it.
 - `DenseMap<Value, ValueHazards>`: active hazards carried by SSA
   value. Today `ValueHazards` has `m0` and `mfmaStore` countdowns.
+- `SmallVector<PhysicalHazard>`: post-regalloc hazards keyed by
+  physical register span.
 
 Joins take max LGKM state and max countdown per `(Value, hazard)`.
 Each counted instruction decrements all active SSA countdowns. Producer
@@ -46,6 +50,7 @@ Constants for the gaps live in `HazardConfig` (`m0PipelineDelay = 1`,
 CDNA4 disables the LGKM-to-VALU gap; LLVM and CDNA4 docs have no
 matching post-`s_waitcnt` VALU hazard. `valuDep1` is the `s_delay_alu`
 encoding for "wait one VALU cycle", computed once at pass start.
+The gfx940-family TRANS forwarding gap is one wait state.
 
 ## Trait-based classification
 
@@ -86,7 +91,7 @@ the solver's post-op lattice; nested regions are rewritten from their
 own block-entry states.
 
 At a consumer, the rewrite inserts the maximum needed `s_nop` count
-across active SSA hazards on the operands, advances the local state by
+across active SSA and physical hazards, advances the local state by
 that count, then applies the VALU-after-LGKM mitigation if needed.
 
 ## Cross-references
@@ -127,6 +132,7 @@ positive waits ever show up in real kernels.
   C++ trait class templates.
 - `test/Target/Wave/waveamdmachine-hazard-waits.mlir` -- lit tests
   covering: same-block VALU-LGKM (gfx11 + gfx10); same-block M0;
+  TRANS forwarding on gfx942/gfx950;
   saturation; pseudo-op interleave; chained `s_mov_m0`; cross-block
   via `cf.cond_br` / `cf.br`; CFG join/sibling VALU-LGKM state;
   VALU-LGKM through `uniform_loop` entry/exit state;

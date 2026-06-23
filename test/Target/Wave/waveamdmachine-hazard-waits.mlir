@@ -467,6 +467,38 @@ func.func @cdna4_no_valu_delay_after_lgkm_wait(
   return
 }
 
+// CHECK-LABEL: func.func @cdna4_trans_result_valu_forwarding_nop
+// CHECK: waveamdmachine.v_exp_f32
+// CHECK-NEXT: waveamdmachine.imm 0
+// CHECK-NEXT: waveamdmachine.s_nop
+// CHECK-NEXT: waveamdmachine.v_add_f32
+func.func @cdna4_trans_result_valu_forwarding_nop(
+    %x: !waveamdmachine.reg<vgpr, 1, 0>,
+    %y: !waveamdmachine.reg<vgpr, 1, 1>) {
+  %exp = waveamdmachine.v_exp_f32 %x
+      : (!waveamdmachine.reg<vgpr, 1, 0>)
+      -> !waveamdmachine.reg<vgpr, 1, 2>
+  %sum = waveamdmachine.v_add_f32 %exp, %y
+      : (!waveamdmachine.reg<vgpr, 1, 2>,
+         !waveamdmachine.reg<vgpr, 1, 1>)
+      -> !waveamdmachine.reg<vgpr, 1, 3>
+  return
+}
+
+// CHECK-LABEL: func.func @cdna4_trans_result_trans_read_no_nop
+// CHECK: waveamdmachine.v_exp_f32
+// CHECK-NEXT: waveamdmachine.v_rcp_f32
+func.func @cdna4_trans_result_trans_read_no_nop(
+    %x: !waveamdmachine.reg<vgpr, 1, 0>) {
+  %exp = waveamdmachine.v_exp_f32 %x
+      : (!waveamdmachine.reg<vgpr, 1, 0>)
+      -> !waveamdmachine.reg<vgpr, 1, 1>
+  %rcp = waveamdmachine.v_rcp_f32 %exp
+      : (!waveamdmachine.reg<vgpr, 1, 1>)
+      -> !waveamdmachine.reg<vgpr, 1, 2>
+  return
+}
+
 // CHECK-LABEL: func.func @single_token_loop_barrier_drain_contracted
 // CHECK: ^bb0(%[[TOK:.*]]: !waveamdmachine.mem.token):
 // CHECK-NOT: waveamdmachine.s_waitcnt vmcnt(63)
@@ -622,6 +654,24 @@ func.func @cdna4_no_lgkm_valu_gap_filler_motion(
 // -----
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx942"} {
+
+// CHECK-LABEL: func.func @cdna3_trans_result_valu_forwarding_nop
+// CHECK: waveamdmachine.v_exp_f32
+// CHECK-NEXT: waveamdmachine.imm 0
+// CHECK-NEXT: waveamdmachine.s_nop
+// CHECK-NEXT: waveamdmachine.v_add_f32
+func.func @cdna3_trans_result_valu_forwarding_nop(
+    %x: !waveamdmachine.reg<vgpr, 1, 0>,
+    %y: !waveamdmachine.reg<vgpr, 1, 1>) {
+  %exp = waveamdmachine.v_exp_f32 %x
+      : (!waveamdmachine.reg<vgpr, 1, 0>)
+      -> !waveamdmachine.reg<vgpr, 1, 2>
+  %sum = waveamdmachine.v_add_f32 %exp, %y
+      : (!waveamdmachine.reg<vgpr, 1, 2>,
+         !waveamdmachine.reg<vgpr, 1, 1>)
+      -> !waveamdmachine.reg<vgpr, 1, 3>
+  return
+}
 
 // CHECK-LABEL: func.func @cdna3_mfma_result_store_delay
 // CHECK: waveamdmachine.mfma_f32_16x16x16_f16

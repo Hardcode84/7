@@ -200,6 +200,7 @@ getValuWriteExecMfmaLatency(const llvm::AMDGPU::IsaVersion &isa) {
 struct HazardConfig {
   bool hasDelayAlu;
   bool lgkmWaitNeedsValuGap;
+  bool hasTransForwardingHazard;
   llvm::AMDGPU::IsaVersion isaVersion;
   unsigned defaultLgkmcnt;
   unsigned valuDep1;
@@ -214,6 +215,7 @@ struct HazardConfig {
   unsigned valuWriteSGPRValuReadLatency;
   unsigned valuWriteSGPRVmemReadLatency;
   unsigned valuWriteExecMfmaLatency;
+  unsigned transForwardingWaitStates;
 };
 
 // Insert `count` `s_nop`s right before `op`.
@@ -286,6 +288,7 @@ struct RegSpan {
 enum class PhysicalHazardKind : uint8_t {
   MfmaWrite,
   MfmaSrcCRead,
+  TransWriteVGPR,
   ValuWriteVGPR,
   ValuWriteSGPR,
   StoreWriteData,
@@ -592,6 +595,13 @@ static bool isLegacyVALU(Operation *op) {
   return op->hasTrait<OpTrait::waveamdmachine::VALUOp>() && !isMFMA(op);
 }
 
+static bool isTransOp(Operation *op) {
+  if (!isLegacyVALU(op))
+    return false;
+  return waveamdmachine::classifyOp(op) ==
+         waveamdmachine::SchedClass::WriteTrans32;
+}
+
 static bool isVMEM(Operation *op) {
   return op->hasTrait<OpTrait::waveamdmachine::VMEMLoadOp>() ||
          op->hasTrait<OpTrait::waveamdmachine::VMEMStoreOp>();
@@ -684,6 +694,28 @@ static unsigned getMfmaUseWait(unsigned operandIndex, RegSpan use,
   return waitForHazardAge(hazard, getXdlSrcCOverlapLatency(passes, cfg));
 }
 
+static unsigned getTransForwardingUseWait(Operation *op, RegSpan use,
+                                          const PhysicalHazard &hazard,
+                                          const HazardConfig &cfg) {
+  if (hazard.kind != PhysicalHazardKind::TransWriteVGPR)
+    return 0;
+  if (!isVGPRSpan(use) || !isLegacyVALU(op) || isTransOp(op))
+    return 0;
+  return waitForHazardAge(hazard, cfg.transForwardingWaitStates);
+}
+
+static unsigned getValuWriteSGPRUseWait(Operation *op, RegSpan use,
+                                        const PhysicalHazard &hazard,
+                                        const HazardConfig &cfg) {
+  if (hazard.kind != PhysicalHazardKind::ValuWriteSGPR || !isSGPRSpan(use))
+    return 0;
+  if (isVMEM(op))
+    return waitForHazardAge(hazard, cfg.valuWriteSGPRVmemReadLatency);
+  if (isLegacyVALU(op))
+    return waitForHazardAge(hazard, cfg.valuWriteSGPRValuReadLatency);
+  return 0;
+}
+
 static unsigned getNonMfmaUseWait(Operation *op, RegSpan use,
                                   const PhysicalHazard &hazard,
                                   const HazardConfig &cfg) {
@@ -696,14 +728,10 @@ static unsigned getNonMfmaUseWait(Operation *op, RegSpan use,
       isa<waveamdmachine::VReadfirstlaneB32Op>(op))
     return waitForHazardAge(hazard, cfg.valuWriteVGPRReadlaneLatency);
 
-  if (hazard.kind == PhysicalHazardKind::ValuWriteSGPR && isSGPRSpan(use)) {
-    if (isVMEM(op))
-      return waitForHazardAge(hazard, cfg.valuWriteSGPRVmemReadLatency);
-    if (isLegacyVALU(op))
-      return waitForHazardAge(hazard, cfg.valuWriteSGPRValuReadLatency);
-  }
+  if (unsigned wait = getTransForwardingUseWait(op, use, hazard, cfg))
+    return wait;
 
-  return 0;
+  return getValuWriteSGPRUseWait(op, use, hazard, cfg);
 }
 
 static unsigned getPhysicalUseWait(Operation *op, unsigned operandIndex,
@@ -841,6 +869,17 @@ static void addProducedValuRegHazard(Value result, HazardState &state,
                       getSGPRWriteHazardLimit(cfg));
 }
 
+static void addProducedTransRegHazard(Value result, HazardState &state,
+                                      const HazardConfig &cfg) {
+  if (!cfg.hasTransForwardingHazard)
+    return;
+  std::optional<RegSpan> span = getAllocatedRegSpan(result);
+  if (!span || !isVGPRSpan(*span))
+    return;
+  addPhysicalHazard(state, *span, PhysicalHazardKind::TransWriteVGPR,
+                    cfg.transForwardingWaitStates);
+}
+
 static bool isCopiedVccCompareSGPRResult(Operation *op, unsigned resultIndex) {
   if (resultIndex != 0)
     return false;
@@ -859,6 +898,8 @@ static void addProducedValuPhysicalHazards(Operation *op, HazardState &state,
   for (auto [resultIndex, result] : llvm::enumerate(op->getResults())) {
     if (isCopiedVccCompareSGPRResult(op, resultIndex))
       continue;
+    if (isTransOp(op))
+      addProducedTransRegHazard(result, state, cfg);
     addProducedValuRegHazard(result, state, cfg);
   }
 }
@@ -1040,6 +1081,8 @@ struct WaveAMDHazardWaitsPass
     HazardConfig cfg{
         /*hasDelayAlu=*/llvm::AMDGPU::isGFX11Plus(**sti),
         /*lgkmWaitNeedsValuGap=*/!isCDNA4Family(isaVersion),
+        /*hasTransForwardingHazard=*/
+        isCDNA3Family(isaVersion) || isCDNA4Family(isaVersion),
         /*isaVersion=*/isaVersion,
         /*defaultLgkmcnt=*/
         llvm::AMDGPU::decodeLgkmcnt(
@@ -1055,6 +1098,7 @@ struct WaveAMDHazardWaitsPass
         getValuWriteSGPRValuReadLatency(isaVersion),
         /*valuWriteSGPRVmemReadLatency=*/getValuWriteSGPRVmemReadLatency(),
         /*valuWriteExecMfmaLatency=*/getValuWriteExecMfmaLatency(isaVersion),
+        /*transForwardingWaitStates=*/1,
     };
     SmallVector<func::FuncOp> kernels;
     root->walk([&](func::FuncOp f) {
