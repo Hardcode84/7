@@ -11,6 +11,7 @@
 #include "mlir/Conversion/ConvertToLLVM/ToLLVMInterface.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/CommonFolders.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/GPU/IR/GPUDialect.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/Utils/StaticValueUtils.h"
@@ -2094,11 +2095,10 @@ LogicalResult WorkitemIdOp::verify() {
   return success();
 }
 
-// Seed `IntRangeAnalysis` from the wave-axis id ops. We don't know
-// grid / block dims at this layer, so all upper bounds default to
-// INT32_MAX; the producer wraps with `wave.assume` when a tighter
-// bound is needed. lane_id is the exception -- the SIMD wave
-// width gives us a tight `[0, W-1]` per lane.
+// Seed `IntRangeAnalysis` from the wave-axis id ops. Workgroup id bounds
+// default to INT32_MAX because grid size is launch-provided. Workitem id can
+// use the kernel's known workgroup size when present; otherwise it also falls
+// back to INT32_MAX. lane_id is the tight `[0, W-1]` per-wave lane id.
 
 void LaneIdOp::inferResultRanges(ArrayRef<ConstantIntRanges>,
                                  SetIntRangeFn setRange) {
@@ -2116,12 +2116,32 @@ void WorkgroupIdOp::inferResultRanges(ArrayRef<ConstantIntRanges>,
   setRange(getResult(), ConstantIntRanges::fromSigned(lo, hi));
 }
 
+static std::optional<int32_t> getKnownWorkgroupDim(Operation *op,
+                                                   unsigned axis) {
+  func::FuncOp func = op->getParentOfType<func::FuncOp>();
+  if (!func || axis > 2)
+    return std::nullopt;
+
+  for (StringRef name : {"wave.workgroup_size", "gpu.known_block_size"}) {
+    DenseI32ArrayAttr attr = func->getAttrOfType<DenseI32ArrayAttr>(name);
+    if (!attr)
+      continue;
+    int32_t dim = axis < attr.size() ? attr.asArrayRef()[axis] : 1;
+    if (dim > 0)
+      return dim;
+  }
+  return std::nullopt;
+}
+
 void WorkitemIdOp::inferResultRanges(ArrayRef<ConstantIntRanges>,
                                      SetIntRangeFn setRange) {
   auto simdTy = cast<SimdType>(getResult().getType());
   unsigned bits = simdTy.getElementType().getIntOrFloatBitWidth();
   APInt lo(bits, 0, /*isSigned=*/true);
-  APInt hi = APInt::getSignedMaxValue(bits);
+  int64_t upper = std::numeric_limits<int32_t>::max();
+  if (std::optional<int32_t> dim = getKnownWorkgroupDim(getOperation(), getAxis()))
+    upper = int64_t{*dim - 1};
+  APInt hi(bits, upper, /*isSigned=*/true);
   setRange(getResult(), ConstantIntRanges::fromSigned(lo, hi));
 }
 

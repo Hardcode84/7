@@ -199,6 +199,73 @@ func.func @unflagged_index_binary_stays_raw(%out: !wave.ptr<#wave.global, f32>,
 
 // -----
 
+// CHECK-LABEL: func.func @range_proven_i32_binary
+// CHECK-SAME: (%{{.*}}: !wave.ptr<#wave.global, f32>, %[[IDX:.*]]: !wave.simd<i32, 32>)
+func.func @range_proven_i32_binary(%out: !wave.ptr<#wave.global, f32>,
+                                   %idx_raw: !wave.simd<i32, 32>)
+    -> !wave.simd<!wave.ptr<#wave.global, f32>, 32> {
+  %c4 = arith.constant 4 : i32
+  %c8 = arith.constant 8 : i32
+  // CHECK: %[[ASSUME:.*]] = wave.assume %[[IDX]]
+  %idx = wave.assume %idx_raw as "x" [#wave.pred<"x >= 0">, #wave.pred<"x <= 31">] : !wave.simd<i32, 32>
+  %s4 = wave.splat %c4 : i32 -> !wave.simd<i32, 32>
+  %s8 = wave.splat %c8 : i32 -> !wave.simd<i32, 32>
+  %scaled = wave.binary muli %idx, %s8
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  %sum = wave.binary addi %scaled, %s4
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  // CHECK: [[OFF:%.*]] = wave.index_expr <"4 + 8*raw0"> assuming [#wave.pred<"raw0 >= 0">, #wave.pred<"-31 + raw0 <= 0">] ["raw0"](%[[ASSUME]]) : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
+  // CHECK: wave.ptr_add %{{.*}}, [[OFF]]
+  %ptr = wave.ptr_add %out, %sum
+      : !wave.ptr<#wave.global, f32>, !wave.simd<i32, 32>
+      -> !wave.simd<!wave.ptr<#wave.global, f32>, 32>
+  return %ptr : !wave.simd<!wave.ptr<#wave.global, f32>, 32>
+}
+
+// -----
+
+// CHECK-LABEL: func.func @ptr_add_unsigned_shift_right_nonnegative
+// CHECK-SAME: (%{{.*}}: !wave.ptr<#wave.global, f32>, %[[IDX:.*]]: !wave.simd<i32, 32>)
+func.func @ptr_add_unsigned_shift_right_nonnegative(
+    %out: !wave.ptr<#wave.global, f32>, %idx_raw: !wave.simd<i32, 32>)
+    -> !wave.simd<!wave.ptr<#wave.global, f32>, 32> {
+  %c1 = arith.constant 1 : i32
+  // CHECK: %[[ASSUME:.*]] = wave.assume %[[IDX]]
+  %idx = wave.assume %idx_raw as "x" [#wave.pred<"x >= 0">, #wave.pred<"x <= 31">] : !wave.simd<i32, 32>
+  %s1 = wave.splat %c1 : i32 -> !wave.simd<i32, 32>
+  %half = wave.binary shrui %idx, %s1
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  // CHECK: [[OFF:%.*]] = wave.index_expr <"floor(1/2*raw0)"> assuming [#wave.pred<"raw0 >= 0">, #wave.pred<"-31 + raw0 <= 0">] ["raw0"](%[[ASSUME]]) : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
+  // CHECK: wave.ptr_add %{{.*}}, [[OFF]]
+  %ptr = wave.ptr_add %out, %half
+      : !wave.ptr<#wave.global, f32>, !wave.simd<i32, 32>
+      -> !wave.simd<!wave.ptr<#wave.global, f32>, 32>
+  return %ptr : !wave.simd<!wave.ptr<#wave.global, f32>, 32>
+}
+
+// -----
+
+// CHECK-LABEL: func.func @ptr_add_power_of_two_mask_nonnegative
+// CHECK-SAME: (%{{.*}}: !wave.ptr<#wave.global, f32>, %[[IDX:.*]]: !wave.simd<i32, 32>)
+func.func @ptr_add_power_of_two_mask_nonnegative(
+    %out: !wave.ptr<#wave.global, f32>, %idx_raw: !wave.simd<i32, 32>)
+    -> !wave.simd<!wave.ptr<#wave.global, f32>, 32> {
+  %c15 = arith.constant 15 : i32
+  // CHECK: %[[ASSUME:.*]] = wave.assume %[[IDX]]
+  %idx = wave.assume %idx_raw as "x" [#wave.pred<"x >= 0">, #wave.pred<"x <= 31">] : !wave.simd<i32, 32>
+  %s15 = wave.splat %c15 : i32 -> !wave.simd<i32, 32>
+  %masked = wave.binary andi %idx, %s15
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  // CHECK: [[OFF:%.*]] = wave.index_expr <"Mod(raw0, 16)"> assuming [#wave.pred<"raw0 >= 0">, #wave.pred<"-31 + raw0 <= 0">] ["raw0"](%[[ASSUME]]) : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
+  // CHECK: wave.ptr_add %{{.*}}, [[OFF]]
+  %ptr = wave.ptr_add %out, %masked
+      : !wave.ptr<#wave.global, f32>, !wave.simd<i32, 32>
+      -> !wave.simd<!wave.ptr<#wave.global, f32>, 32>
+  return %ptr : !wave.simd<!wave.ptr<#wave.global, f32>, 32>
+}
+
+// -----
+
 // CHECK-LABEL: func.func @dead_scalar_binding_dropped
 func.func @dead_scalar_binding_dropped(%out: !wave.ptr<#wave.global, f32>,
                                        %base: index) -> !wave.ptr<#wave.global, f32> {
