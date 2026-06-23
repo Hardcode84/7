@@ -291,6 +291,19 @@ private:
     return true;
   }
 
+  bool operandsAvailableAtUses(Value value, ArrayRef<OpOperand *> uses) const {
+    Operation *def = value.getDefiningOp();
+    if (!def)
+      return false;
+    for (OpOperand *use : uses) {
+      unsigned userPosition = inventory.positions.lookup(use->getOwner());
+      for (Value operand : def->getOperands())
+        if (needsOperandRemat(operand, userPosition))
+          return false;
+    }
+    return true;
+  }
+
   unsigned getRematOpCountAt(Value value, Operation *user,
                              DenseSet<Value> &materialized) const {
     if (!materialized.insert(value).second)
@@ -334,8 +347,12 @@ private:
     unsigned liveLanes = getLiveLaneCount(group);
     if (!valueStartsBeforePressure(value))
       return 0;
-    if (hasUseNearPressure(uses))
-      return 0;
+    if (hasUseNearPressure(uses)) {
+      if (!pressureFailure->placementFailure)
+        return 0;
+      if (!operandsAvailableAtUses(value, uses))
+        return 0;
+    }
     return liveLanes;
   }
 

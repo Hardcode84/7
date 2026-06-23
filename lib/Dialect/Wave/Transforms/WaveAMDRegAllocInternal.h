@@ -834,6 +834,7 @@ struct RegisterBudgets {
   unsigned maxWavesPerEU = 0;
   unsigned targetWaves = 0;
   bool agprCountsAgainstVGPRs = false;
+  bool combinedPlacementVGPRLimit = false;
 };
 
 enum class LDSSpillPlanStatus : uint8_t {

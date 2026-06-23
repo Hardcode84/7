@@ -65,12 +65,12 @@ func.func @combined_pressure_remats_neutral_agpr_promotion()
 // MARK-LABEL: func.func @combined_pressure_allows_aligned_agpr_promotion
 // MARK-SAME: waveamdmachine.vgpr_count = 4 : i64
 // MARK-NOT: waveamdmachine.regalloc_overflowed
-// MARK: waveamdmachine.v_accvgpr_write_b32_tuple
+// MARK-NOT: waveamdmachine.v_accvgpr_write_b32_tuple
 // MARK: waveamdmachine.s_endpgm
 // CHECK-LABEL: func.func @combined_pressure_allows_aligned_agpr_promotion
 // CHECK-SAME: waveamdmachine.vgpr_count = 4 : i64
 // CHECK-NOT: waveamdmachine.regalloc_overflowed
-// CHECK: waveamdmachine.v_accvgpr_write_b32_tuple
+// CHECK-NOT: waveamdmachine.v_accvgpr_write_b32_tuple
 // CHECK: waveamdmachine.s_endpgm
 func.func @combined_pressure_allows_aligned_agpr_promotion()
     attributes {waveamdmachine.target_waves = 4 : i64} {

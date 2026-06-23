@@ -13,7 +13,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 
 // REMARK: Name:            regalloc-pressure-failure
 // REMARK: Function:        combined_pressure_rejects_cheap_expr_spill
-// REMARK: class:           VGPR
+// REMARK: class:           'VGPR/AGPR'
 // REMARK: combined_vgpr_agpr: 'true'
 // REMARK: request:         '{start=
 // REMARK: pressure_relief_providers: '{{.*}}provider=remat{{.*}}'
@@ -21,12 +21,21 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 // REMARK: total:           '1'
 
 // REMARK: Name:            regalloc-pressure-failure
-// REMARK: Function:        combined_pressure_reports_nonreducing_agpr_spill
+// REMARK: Function:        placement_rejects_sgpr_to_vgpr_promotion
+// REMARK: class:           'VGPR/AGPR'
+// REMARK: required_relief: '4'
+// REMARK: combined_vgpr_agpr: 'true'
+// REMARK: pressure_relief_providers: '{{.*}}provider=bank-promotion, candidates=1{{.*}}'
+// REMARK: pressure_relief_candidates: '[{provider=bank-promotion, relief=1, cost={ops=0, loop_ops=2, latency=0, instability=0}, reduces_failure=false, from=SGPR, to=VGPR, end=4}]'
+
+// REMARK: Name:            regalloc-pressure-failure
+// REMARK: Function:        combined_pressure_reports_temp_only_spill_reject
 // REMARK: required_relief: '1'
 // REMARK: combined_vgpr_agpr: 'true'
-// REMARK: pressure_relief_providers: '{{.*}}provider=scratch-spill, candidates=1{{.*}}'
-// REMARK: pressure_relief_candidates: '{{.*}}provider=scratch-spill{{.*}}reduces_failure=false{{.*}}reg_class=AGPR{{.*}}'
+// REMARK: pressure_relief_providers: '{{.*}}provider=scratch-spill, candidates=0{{.*}}'
+// REMARK: pressure_relief_candidates: '[]'
 // REMARK: temp:            '9'
+// REMARK: total:           '9'
 
 // CHECK-LABEL: func.func @combined_pressure_rejects_cheap_expr_spill
 // CHECK-SAME: waveamdmachine.regalloc_overflowed = 1 : i64
@@ -73,6 +82,28 @@ func.func @combined_pressure_rejects_cheap_expr_spill()
   %u4 = waveamdmachine.v_add_u32 %u0, %v8
       : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
         -> !waveamdmachine.reg<vgpr, 1>
+  waveamdmachine.s_endpgm
+  return
+}
+
+// CHECK-LABEL: func.func @placement_rejects_sgpr_to_vgpr_promotion
+// CHECK-SAME: waveamdmachine.regalloc_overflowed = 1 : i64
+// CHECK: waveamdmachine.s_endpgm
+func.func @placement_rejects_sgpr_to_vgpr_promotion()
+    attributes {wave.kernel, waveamdmachine.target_waves = 4 : i64} {
+  %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+  %ag = waveamdmachine.uninit : !waveamdmachine.reg<agpr, 124>
+  %s = waveamdmachine.s_mov_b32_value %zero
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<sgpr, 1>
+  %v = waveamdmachine.v_mov_b32_tuple %zero {registers = 8 : i64}
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 8>
+  %s_use = waveamdmachine.s_mov_b32_value %s
+      : (!waveamdmachine.reg<sgpr, 1>) -> !waveamdmachine.reg<sgpr, 1>
+  %parts:2 = waveamdmachine.tuple_to_elements %v
+      : (!waveamdmachine.reg<vgpr, 8>)
+      -> (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>)
+  %read = waveamdmachine.v_accvgpr_read_b32_tuple %ag
+      : (!waveamdmachine.reg<agpr, 124>) -> !waveamdmachine.reg<vgpr, 124>
   waveamdmachine.s_endpgm
   return
 }
@@ -403,7 +434,7 @@ func.func @combined_pressure_spills_agpr_temp()
   return
 }
 
-func.func @combined_pressure_reports_nonreducing_agpr_spill()
+func.func @combined_pressure_reports_temp_only_spill_reject()
     attributes {wave.kernel, waveamdmachine.target_waves = 8 : i64} {
   %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
   %ag0 = waveamdmachine.uninit : !waveamdmachine.reg<agpr, 4>

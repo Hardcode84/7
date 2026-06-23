@@ -292,6 +292,8 @@ public:
 
   wave::WaveAMDPressureReliefEffect getPressureEffect(
       const wave::WaveAMDPressureFailure &failure) const override {
+    if (failure.placementFailure)
+      return {};
     if (failure.combinedVGPRAGPR && group &&
         group->storageClass == waveamdmachine::RegClass::AGPR)
       return {};

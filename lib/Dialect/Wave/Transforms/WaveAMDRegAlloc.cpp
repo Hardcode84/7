@@ -1258,6 +1258,62 @@ static unsigned getReservedPrefix(waveamdmachine::RegClass regClass,
   return 0;
 }
 
+static void updatePlacementFootprint(unsigned &footprint, unsigned base,
+                                     IntervalGroup *group) {
+  footprint = std::max(footprint,
+                       base + static_cast<unsigned>(group->intervals.size()));
+}
+
+static unsigned getFixedPlacementFootprint(Inventory &inventory,
+                                           waveamdmachine::RegClass regClass) {
+  unsigned footprint = getReservedPrefix(regClass, inventory.entryRegs);
+  for (const std::unique_ptr<IntervalGroup> &group : inventory.groups) {
+    if (group->storageClass != regClass || !hasLiveLanes(group.get()))
+      continue;
+    if (std::optional<unsigned> fixedBase = getFixedBase(group.get()))
+      updatePlacementFootprint(footprint, *fixedBase, group.get());
+  }
+  return footprint;
+}
+
+static unsigned
+getAssignedPlacementFootprint(ArrayRef<IntervalGroup *> groups,
+                              waveamdmachine::RegClass regClass,
+                              const wave::WaveAMDKernelEntryRegs &regs) {
+  unsigned footprint = getReservedPrefix(regClass, regs);
+  for (IntervalGroup *group : groups)
+    if (group->storageClass == regClass && group->assignedBase)
+      updatePlacementFootprint(footprint, *group->assignedBase, group);
+  return footprint;
+}
+
+static unsigned getInitialCombinedPlacementAGPRFootprint(Inventory &inventory) {
+  return std::max(
+      inventory.peakAGPR,
+      getFixedPlacementFootprint(inventory, waveamdmachine::RegClass::AGPR));
+}
+
+static RegisterBudgets applyCombinedPlacementLimits(RegisterBudgets budgets,
+                                                    unsigned agprFootprint) {
+  if (!budgets.totalVGPRLimit || !budgets.agprCountsAgainstVGPRs)
+    return budgets;
+
+  unsigned vgprBudget = 0;
+  if (agprFootprint < *budgets.totalVGPRLimit)
+    vgprBudget = alignDownTo(*budgets.totalVGPRLimit - agprFootprint, 4);
+  if (vgprBudget < budgets.vgpr) {
+    budgets.vgpr = vgprBudget;
+    budgets.combinedPlacementVGPRLimit = true;
+  }
+  return budgets;
+}
+
+static RegisterBudgets applyCombinedPlacementLimits(RegisterBudgets budgets,
+                                                    Inventory &inventory) {
+  return applyCombinedPlacementLimits(
+      budgets, getInitialCombinedPlacementAGPRFootprint(inventory));
+}
+
 static bool canOverlapReservedLane(Interval *lane, unsigned phys,
                                    const wave::WaveAMDKernelEntryRegs &regs) {
   return !lane->values.empty() && llvm::all_of(lane->values, [&](Value value) {
@@ -1507,23 +1563,38 @@ static bool groupContainsBlockArgument(IntervalGroup *group) {
   return false;
 }
 
+static bool groupHasNonPromotableLane(IntervalGroup *group) {
+  for (Interval *lane : group->intervals)
+    if (lane->nonPromotable)
+      return true;
+  return false;
+}
+
+static bool canPromoteToVGPR(IntervalGroup *group) {
+  if (group->intervals.size() != 1)
+    return false;
+  return !groupContainsBlockArgument(group);
+}
+
+static bool canPromoteToAGPR(IntervalGroup *group, RegisterBudgets budgets) {
+  if (budgets.agprCountsAgainstVGPRs && budgets.combinedPlacementVGPRLimit)
+    return false;
+  return !hasTempAGPRWriteUse(group);
+}
+
 static bool canPromote(IntervalGroup *group, RegisterBudgets budgets) {
   if (group->nonPromotable || hasFixedRegister(group))
     return false;
-  for (Interval *lane : group->intervals)
-    if (lane->nonPromotable)
-      return false;
+  if (groupHasNonPromotableLane(group))
+    return false;
   std::optional<waveamdmachine::RegClass> next =
       getNextRegClass(group->storageClass);
   if (!next || getBudget(budgets, *next) < group->intervals.size())
     return false;
-  if (*next == waveamdmachine::RegClass::VGPR) {
-    if (group->intervals.size() != 1)
-      return false;
-    return !groupContainsBlockArgument(group);
-  }
+  if (*next == waveamdmachine::RegClass::VGPR)
+    return canPromoteToVGPR(group);
   if (*next == waveamdmachine::RegClass::AGPR)
-    return !hasTempAGPRWriteUse(group);
+    return canPromoteToAGPR(group, budgets);
   return false;
 }
 
@@ -1856,6 +1927,31 @@ buildCombinedPressureFailure(Inventory &inventory, IntervalGroup *request,
     failure.overlaps.push_back(
         buildPressureIntervalRef(group.get(), inventory));
   }
+  return failure;
+}
+
+static std::optional<PressureFailure> buildCombinedPlacementFailure(
+    Inventory &inventory, ArrayRef<IntervalGroup *> assigned,
+    IntervalGroup *request, unsigned position, RegisterBudgets budgets) {
+  if (!budgets.totalVGPRLimit || !budgets.agprCountsAgainstVGPRs ||
+      !budgets.combinedPlacementVGPRLimit ||
+      request->storageClass != waveamdmachine::RegClass::VGPR)
+    return std::nullopt;
+
+  unsigned vgprLimit = getBudget(budgets, waveamdmachine::RegClass::VGPR);
+  if (vgprLimit >= *budgets.totalVGPRLimit)
+    return std::nullopt;
+
+  PressureFailure classFailure = buildClassPressureFailure(
+      inventory, assigned, request, position, request->storageClass, vgprLimit);
+  unsigned vgprLiveWithRequest =
+      classFailure.liveDwords + getGroupLiveDwords(request, position);
+  unsigned agprFootprint = getAssignedPlacementFootprint(
+      assigned, waveamdmachine::RegClass::AGPR, inventory.entryRegs);
+  PressureFailure failure = buildCombinedPressureFailure(
+      inventory, request, position, *budgets.totalVGPRLimit, agprFootprint,
+      vgprLimit, vgprLiveWithRequest);
+  failure.placementFailure = true;
   return failure;
 }
 
@@ -2378,6 +2474,13 @@ static bool canReachCombinedPressureSolution(
   }
 }
 
+static bool
+placementReliefEffectCanHelp(wave::WaveAMDPressureReliefEffect effect) {
+  if (effect.vgprLiveDelta > 0 && effect.agprLiveDelta >= 0)
+    return false;
+  return effect.vgprLiveDelta < 0 || effect.agprLiveDelta < 0;
+}
+
 static bool isSelectablePressureReliefCandidate(
     PressureReliefCandidateRef ref, ArrayRef<PressureReliefCandidateRef> refs,
     const PressureFailure *failure,
@@ -2390,6 +2493,8 @@ static bool isSelectablePressureReliefCandidate(
     return true;
   wave::WaveAMDPressureReliefEffect effect =
       candidate.getPressureEffect(*failure);
+  if (failure->placementFailure)
+    return placementReliefEffectCanHelp(effect);
   if (!wave::waveAMDPressureReliefEffectProgressesFailure(
           *failure, currentEffect, effect))
     return false;
@@ -2557,8 +2662,12 @@ static LogicalResult allocateOnce(func::FuncOp func, Inventory &inventory,
   for (IntervalGroup *group : groups) {
     if (hasFixedRegister(group))
       continue;
-    if (std::optional<unsigned> base =
-            findFreeBase(group, budgets, assignedIndex, inventory.entryRegs)) {
+    RegisterBudgets placementBudgets = applyCombinedPlacementLimits(
+        budgets,
+        getAssignedPlacementFootprint(assigned, waveamdmachine::RegClass::AGPR,
+                                      inventory.entryRegs));
+    if (std::optional<unsigned> base = findFreeBase(
+            group, placementBudgets, assignedIndex, inventory.entryRegs)) {
       group->assignedBase = *base;
       assigned.push_back(group);
       addAssignedGroup(assignedIndex, group);
@@ -2567,16 +2676,23 @@ static LogicalResult allocateOnce(func::FuncOp func, Inventory &inventory,
 
     unsigned position = getGroupStart(group);
     unsigned plannedBefore = inventory.plannedReliefPlans.size();
+    std::optional<PressureFailure> placementFailure =
+        buildCombinedPlacementFailure(inventory, assigned, group, position,
+                                      placementBudgets);
     FailureOr<bool> relieved = applyPressureRelief(
-        func, inventory, assigned, group, position, budgets,
+        func, inventory, assigned, group, position, placementBudgets,
         /*includeBankPromotion=*/true,
-        /*includeMemorySpill=*/shouldTryMemoryPressureRelief(group));
+        /*includeMemorySpill=*/shouldTryMemoryPressureRelief(group),
+        placementFailure ? &*placementFailure : nullptr);
     if (failed(relieved))
       return failure();
     if (!*relieved) {
-      pressureFailure = buildClassPressureFailure(
-          inventory, assigned, group, position, group->storageClass,
-          getBudget(budgets, group->storageClass));
+      if (placementFailure)
+        pressureFailure = *placementFailure;
+      else
+        pressureFailure = buildClassPressureFailure(
+            inventory, assigned, group, position, group->storageClass,
+            getBudget(placementBudgets, group->storageClass));
       return mlir::failure();
     }
     if (inventory.plannedReliefPlans.size() != plannedBefore)
@@ -2678,6 +2794,35 @@ static LogicalResult reportBudgetOverflow(func::FuncOp func, StringRef name,
 }
 
 static LogicalResult
+reportCombinedAllocatedOverflow(func::FuncOp func, Inventory &inventory,
+                                unsigned vgprCount, unsigned agprCount,
+                                RegisterBudgets budgets, bool markOverflow,
+                                PressureFailure &pressureFailure) {
+  if (!budgets.totalVGPRLimit || !budgets.agprCountsAgainstVGPRs)
+    return success();
+
+  unsigned vgprLimit = 0;
+  if (agprCount < *budgets.totalVGPRLimit)
+    vgprLimit = alignDownTo(*budgets.totalVGPRLimit - agprCount, 4);
+  if (vgprCount <= vgprLimit)
+    return success();
+
+  pressureFailure = buildCombinedPressureFailure(
+      inventory, /*request=*/nullptr, /*position=*/0, *budgets.totalVGPRLimit,
+      agprCount, vgprLimit, vgprCount);
+  pressureFailure.placementFailure = true;
+  pressureFailure.relief = vgprCount - vgprLimit;
+  if (markOverflow)
+    return mlir::failure();
+  return func.emitError()
+         << kPassName
+         << " VGPR/AGPR count exceeds target-waves budget (vgpr_count="
+         << vgprCount << ", agpr_count=" << agprCount
+         << ", vgpr_limit=" << vgprLimit
+         << ", target_waves=" << budgets.targetWaves << ")";
+}
+
+static LogicalResult
 enforceAllocatedRegisterBudgets(func::FuncOp func, Inventory &inventory,
                                 RegisterBudgets budgets, bool markOverflow,
                                 std::optional<PressureFailure> &failureOut) {
@@ -2693,16 +2838,23 @@ enforceAllocatedRegisterBudgets(func::FuncOp func, Inventory &inventory,
   }
   unsigned vgprCount =
       getAllocatedCount(inventory, waveamdmachine::RegClass::VGPR);
-  if (failed(reportBudgetOverflow(func, "VGPR", vgprCount, budgets.vgpr,
+  unsigned agprCount =
+      getAllocatedCount(inventory, waveamdmachine::RegClass::AGPR);
+  if (failed(reportBudgetOverflow(func, "AGPR", agprCount, budgets.agpr,
                                   budgets.targetWaves, markOverflow,
                                   pressureFailure))) {
     if (markOverflow)
       failureOut = pressureFailure;
     return mlir::failure();
   }
-  unsigned agprCount =
-      getAllocatedCount(inventory, waveamdmachine::RegClass::AGPR);
-  if (failed(reportBudgetOverflow(func, "AGPR", agprCount, budgets.agpr,
+  if (failed(reportCombinedAllocatedOverflow(func, inventory, vgprCount,
+                                             agprCount, budgets, markOverflow,
+                                             pressureFailure))) {
+    if (markOverflow)
+      failureOut = pressureFailure;
+    return mlir::failure();
+  }
+  if (failed(reportBudgetOverflow(func, "VGPR", vgprCount, budgets.vgpr,
                                   budgets.targetWaves, markOverflow,
                                   pressureFailure))) {
     if (markOverflow)
@@ -3518,18 +3670,21 @@ runAllocationAttempt(func::FuncOp func, RegisterBudgets budgets,
   Inventory inventory;
   if (failed(buildInventory(func, inventory)))
     return mlir::failure();
-  if (failed(validateAGPRSupport(func, budgets, inventory)))
+  updatePeaks(inventory);
+  RegisterBudgets allocationBudgets =
+      applyCombinedPlacementLimits(budgets, inventory);
+  if (failed(validateAGPRSupport(func, allocationBudgets, inventory)))
     return mlir::failure();
 
   bool rewroteIR = false;
   LogicalResult allocated =
-      allocateGroups(func, inventory, budgets, failure, rewroteIR);
+      allocateGroups(func, inventory, allocationBudgets, failure, rewroteIR);
   updatePeaks(inventory);
   if (succeeded(allocated) && rewroteIR)
     return AllocationAttemptResult::Retry;
   if (succeeded(allocated)) {
     FailureOr<bool> budgetSatisfied = enforceBudgetsOrApplyRelief(
-        func, inventory, budgets, failure, softFail);
+        func, inventory, allocationBudgets, failure, softFail);
     if (failed(budgetSatisfied))
       return mlir::failure();
     if (!*budgetSatisfied)
@@ -3538,11 +3693,12 @@ runAllocationAttempt(func::FuncOp func, RegisterBudgets budgets,
   if (failed(allocated)) {
     if (debugProbes)
       setProbeAttrs(func, inventory.probeStats);
-    emitRegAllocRemarks(func, inventory, budgets);
+    emitRegAllocRemarks(func, inventory, allocationBudgets);
     return mlir::failure();
   }
 
-  return finishSuccessfulAllocation(func, inventory, budgets, debugProbes);
+  return finishSuccessfulAllocation(func, inventory, allocationBudgets,
+                                    debugProbes);
 }
 
 static LogicalResult buildAndAllocate(func::FuncOp func,
@@ -3553,6 +3709,7 @@ static LogicalResult buildAndAllocate(func::FuncOp func,
     return mlir::failure();
   for (unsigned attempt : llvm::seq<unsigned>(0, kRewriteAttemptLimit)) {
     (void)attempt;
+    failure.reset();
     FailureOr<AllocationAttemptResult> result =
         runAllocationAttempt(func, budgets, failure, softFail, debugProbes);
     if (failed(result))

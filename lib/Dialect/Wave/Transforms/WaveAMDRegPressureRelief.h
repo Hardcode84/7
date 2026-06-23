@@ -72,6 +72,7 @@ struct WaveAMDPressureFailure {
   unsigned relief = 0;
   unsigned reserved = 0;
   bool combinedVGPRAGPR = false;
+  bool placementFailure = false;
 };
 
 struct WaveAMDPressureReliefQuery {
