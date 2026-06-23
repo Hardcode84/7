@@ -296,7 +296,7 @@ def main() -> int:
         "fa_seq32_d16_u4_beam_report",
         text,
         r"skipped func=flash_attention_f32 region=1 reason=max_region_ops "
-        r"ops=671 instruction_ops=668 limit=512",
+        r"ops=670 instruction_ops=667 limit=512",
     )
     require(
         "fa_seq32_d16_u4_beam_report",
@@ -307,7 +307,7 @@ def main() -> int:
     require(
         "fa_seq32_d16_u4_beam_report",
         text,
-        r"sim_cycles waves=1 simds=1 start_delay=0: 30216",
+        r"sim_cycles waves=1 simds=1 start_delay=0: 30211",
     )
     reject("fa_seq32_d16_u4_beam_report", text, r"pressure_fallback")
 

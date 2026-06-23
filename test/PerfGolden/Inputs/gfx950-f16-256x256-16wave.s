@@ -140,7 +140,6 @@ wmma_f16_matmul_tiled:
 		s_cbranch_scc0 .Lwmma_f16_matmul_tiled.loop_exit_0
 .Lwmma_f16_matmul_tiled.loop_head_0:
 		s_lshl_b32 s3, s2, 6
-		s_add_i32 s2, s2, 1
 		s_mov_b32 m0, s0
 		s_waitcnt lgkmcnt(0)
 		s_nop 0
@@ -166,6 +165,7 @@ wmma_f16_matmul_tiled:
 		v_mfma_f32_16x16x32_f16 v[104:107], v[28:31], v[44:47], v[104:107]
 		s_waitcnt vmcnt(2)
 		s_barrier
+		s_add_i32 s2, s2, 1
 		s_and_b32 s3, s2, 3
 		s_lshl_b32 s8, s3, 15
 		v_add_u32_e32 v5, s8, v6

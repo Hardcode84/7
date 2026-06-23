@@ -640,14 +640,13 @@ wmma_f16_matmul_tiled:
 		s_barrier
 		s_add_i32 s0, s15, 2
 		s_mul_i32 s3, s0, 0x80
-		s_add_i32 s4, s15, 1
-		s_and_b32 s12, s15, 1
-		s_lshl_b32 s13, s12, 13
-		s_add_i32 s12, s13, 0x20000
-		v_add3_u32 v15, s12, v14, v6
+		s_and_b32 s4, s15, 1
+		s_lshl_b32 s12, s4, 13
+		s_add_i32 s4, s12, 0x20000
+		v_add3_u32 v15, s4, v14, v6
 		ds_read_b64_tr_b8 v[236:237], v15
 		ds_read_b64_tr_b8 v[238:239], v15 offset:4096
-		v_add3_u32 v15, s12, v6, v2
+		v_add3_u32 v15, s4, v6, v2
 		ds_read_b64_tr_b8 v[240:241], v15 offset:2048
 		ds_read_b64_tr_b8 v[242:243], v15 offset:2560
 		ds_read_b64_tr_b8 v[244:245], v15 offset:6144
@@ -686,31 +685,31 @@ wmma_f16_matmul_tiled:
 		v_mfma_scale_f32_16x16x128_f8f6f4 v[208:211], v[44:47], v[84:87], v[208:211], v238, v244 op_sel:[1,1,0] op_sel_hi:[1,0,0] cbsz:4 blgp:4
 		v_mfma_scale_f32_16x16x128_f8f6f4 v[212:215], v[44:47], v[88:91], v[212:215], v238, v244 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4
 		v_mfma_scale_f32_16x16x128_f8f6f4 v[216:219], v[44:47], v[92:95], v[216:219], v238, v244 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4
-		s_mul_i32 s12, s0, 2
-		s_and_b32 s13, s0, 1
-		s_lshl_b32 s0, s13, 13
-		s_add_i32 s13, s2, s0
-		s_lshl_b32 s40, s12, 14
-		s_add_i32 s54, s1, s40
-		v_add_u32_e32 v15, s54, v3
-		s_add_i32 s54, s5, s40
-		v_add_u32_e32 v237, s54, v3
-		s_add_i32 s54, s14, s40
-		v_add_u32_e32 v239, s54, v3
-		s_add_i32 s54, s41, s40
-		v_add_u32_e32 v240, s54, v3
+		s_mul_i32 s4, s0, 2
+		s_and_b32 s12, s0, 1
+		s_lshl_b32 s0, s12, 13
+		s_add_i32 s12, s2, s0
+		s_lshl_b32 s13, s4, 14
+		s_add_i32 s40, s1, s13
+		v_add_u32_e32 v15, s40, v3
+		s_add_i32 s40, s5, s13
+		v_add_u32_e32 v237, s40, v3
+		s_add_i32 s40, s14, s13
+		v_add_u32_e32 v239, s40, v3
+		s_add_i32 s40, s41, s13
+		v_add_u32_e32 v240, s40, v3
 		s_and_saveexec_b64 s[64:65], s[42:43]
 		s_cbranch_execz .Lwmma_f16_matmul_tiled.exec_else_8
-		s_add_i32 m0, s13, 0x20000
+		s_add_i32 m0, s12, 0x20000
 		s_nop 0
 		buffer_load_dwordx4 v15, s[48:51], 0 offen lds
-		s_add_i32 m0, s13, 0x20010
+		s_add_i32 m0, s12, 0x20010
 		s_nop 0
 		buffer_load_dwordx4 v237, s[48:51], 0 offen lds
-		s_add_i32 m0, s13, 0x20020
+		s_add_i32 m0, s12, 0x20020
 		s_nop 0
 		buffer_load_dwordx4 v239, s[48:51], 0 offen lds
-		s_add_i32 m0, s13, 0x20030
+		s_add_i32 m0, s12, 0x20030
 		s_nop 0
 		buffer_load_dwordx4 v240, s[48:51], 0 offen lds
 .Lwmma_f16_matmul_tiled.exec_else_8:
@@ -718,47 +717,47 @@ wmma_f16_matmul_tiled:
 		s_cbranch_execz .Lwmma_f16_matmul_tiled.exec_endif_8
 .Lwmma_f16_matmul_tiled.exec_endif_8:
 		s_mov_b64 exec, s[64:65]
-		s_add_i32 s54, s6, s0
-		s_add_i32 s0, s39, s40
+		s_add_i32 s40, s6, s0
+		s_add_i32 s0, s39, s13
 		v_add_u32_e32 v15, s0, v3
-		s_add_i32 s0, s56, s40
+		s_add_i32 s0, s56, s13
 		v_add_u32_e32 v237, s0, v3
-		s_add_i32 s0, s57, s40
+		s_add_i32 s0, s57, s13
 		v_add_u32_e32 v239, s0, v3
-		s_add_i32 s0, s58, s40
+		s_add_i32 s0, s58, s13
 		v_add_u32_e32 v240, s0, v3
-		s_add_i32 s0, s59, s40
+		s_add_i32 s0, s59, s13
 		v_add_u32_e32 v241, s0, v3
-		s_add_i32 s0, s60, s40
+		s_add_i32 s0, s60, s13
 		v_add_u32_e32 v244, s0, v3
-		s_add_i32 s0, s61, s40
+		s_add_i32 s0, s61, s13
 		v_add_u32_e32 v245, s0, v3
-		s_add_i32 s0, s62, s40
+		s_add_i32 s0, s62, s13
 		v_add_u32_e32 v248, s0, v3
 		s_and_saveexec_b64 s[64:65], s[52:53]
 		s_cbranch_execz .Lwmma_f16_matmul_tiled.exec_else_9
-		s_add_i32 m0, s54, 0x20800
+		s_add_i32 m0, s40, 0x20800
 		s_nop 0
 		buffer_load_dwordx4 v15, s[44:47], 0 offen lds
-		s_add_i32 m0, s54, 0x20810
+		s_add_i32 m0, s40, 0x20810
 		s_nop 0
 		buffer_load_dwordx4 v237, s[44:47], 0 offen lds
-		s_add_i32 m0, s54, 0x20820
+		s_add_i32 m0, s40, 0x20820
 		s_nop 0
 		buffer_load_dwordx4 v239, s[44:47], 0 offen lds
-		s_add_i32 m0, s54, 0x20830
+		s_add_i32 m0, s40, 0x20830
 		s_nop 0
 		buffer_load_dwordx4 v240, s[44:47], 0 offen lds
-		s_add_i32 m0, s54, 0x20a00
+		s_add_i32 m0, s40, 0x20a00
 		s_nop 0
 		buffer_load_dwordx4 v241, s[44:47], 0 offen lds
-		s_add_i32 m0, s54, 0x20a10
+		s_add_i32 m0, s40, 0x20a10
 		s_nop 0
 		buffer_load_dwordx4 v244, s[44:47], 0 offen lds
-		s_add_i32 m0, s54, 0x20a20
+		s_add_i32 m0, s40, 0x20a20
 		s_nop 0
 		buffer_load_dwordx4 v245, s[44:47], 0 offen lds
-		s_add_i32 m0, s54, 0x20a30
+		s_add_i32 m0, s40, 0x20a30
 		s_nop 0
 		buffer_load_dwordx4 v248, s[44:47], 0 offen lds
 .Lwmma_f16_matmul_tiled.exec_else_9:
@@ -766,28 +765,28 @@ wmma_f16_matmul_tiled:
 		s_cbranch_execz .Lwmma_f16_matmul_tiled.exec_endif_9
 .Lwmma_f16_matmul_tiled.exec_endif_9:
 		s_mov_b64 exec, s[64:65]
-		s_add_i32 s0, s12, 1
-		s_lshl_b32 s12, s0, 14
-		s_add_i32 s0, s1, s12
+		s_add_i32 s0, s4, 1
+		s_lshl_b32 s4, s0, 14
+		s_add_i32 s0, s1, s4
 		v_add_u32_e32 v15, s0, v3
-		s_add_i32 s0, s5, s12
+		s_add_i32 s0, s5, s4
 		v_add_u32_e32 v237, s0, v3
-		s_add_i32 s0, s14, s12
+		s_add_i32 s0, s14, s4
 		v_add_u32_e32 v239, s0, v3
-		s_add_i32 s0, s41, s12
+		s_add_i32 s0, s41, s4
 		v_add_u32_e32 v240, s0, v3
 		s_and_saveexec_b64 s[64:65], s[42:43]
 		s_cbranch_execz .Lwmma_f16_matmul_tiled.exec_else_10
-		s_add_i32 m0, s13, 0x21000
+		s_add_i32 m0, s12, 0x21000
 		s_nop 0
 		buffer_load_dwordx4 v15, s[48:51], 0 offen lds
-		s_add_i32 m0, s13, 0x21010
+		s_add_i32 m0, s12, 0x21010
 		s_nop 0
 		buffer_load_dwordx4 v237, s[48:51], 0 offen lds
-		s_add_i32 m0, s13, 0x21020
+		s_add_i32 m0, s12, 0x21020
 		s_nop 0
 		buffer_load_dwordx4 v239, s[48:51], 0 offen lds
-		s_add_i32 m0, s13, 0x21030
+		s_add_i32 m0, s12, 0x21030
 		s_nop 0
 		buffer_load_dwordx4 v240, s[48:51], 0 offen lds
 .Lwmma_f16_matmul_tiled.exec_else_10:
@@ -795,46 +794,46 @@ wmma_f16_matmul_tiled:
 		s_cbranch_execz .Lwmma_f16_matmul_tiled.exec_endif_10
 .Lwmma_f16_matmul_tiled.exec_endif_10:
 		s_mov_b64 exec, s[64:65]
-		s_add_i32 s0, s39, s12
+		s_add_i32 s0, s39, s4
 		v_add_u32_e32 v15, s0, v3
-		s_add_i32 s0, s56, s12
+		s_add_i32 s0, s56, s4
 		v_add_u32_e32 v237, s0, v3
-		s_add_i32 s0, s57, s12
+		s_add_i32 s0, s57, s4
 		v_add_u32_e32 v239, s0, v3
-		s_add_i32 s0, s58, s12
+		s_add_i32 s0, s58, s4
 		v_add_u32_e32 v240, s0, v3
-		s_add_i32 s0, s59, s12
+		s_add_i32 s0, s59, s4
 		v_add_u32_e32 v241, s0, v3
-		s_add_i32 s0, s60, s12
+		s_add_i32 s0, s60, s4
 		v_add_u32_e32 v244, s0, v3
-		s_add_i32 s0, s61, s12
+		s_add_i32 s0, s61, s4
 		v_add_u32_e32 v245, s0, v3
-		s_add_i32 s0, s62, s12
+		s_add_i32 s0, s62, s4
 		v_add_u32_e32 v248, s0, v3
 		s_and_saveexec_b64 s[64:65], s[52:53]
 		s_cbranch_execz .Lwmma_f16_matmul_tiled.exec_else_11
-		s_add_i32 m0, s54, 0x21800
+		s_add_i32 m0, s40, 0x21800
 		s_nop 0
 		buffer_load_dwordx4 v15, s[44:47], 0 offen lds
-		s_add_i32 m0, s54, 0x21810
+		s_add_i32 m0, s40, 0x21810
 		s_nop 0
 		buffer_load_dwordx4 v237, s[44:47], 0 offen lds
-		s_add_i32 m0, s54, 0x21820
+		s_add_i32 m0, s40, 0x21820
 		s_nop 0
 		buffer_load_dwordx4 v239, s[44:47], 0 offen lds
-		s_add_i32 m0, s54, 0x21830
+		s_add_i32 m0, s40, 0x21830
 		s_nop 0
 		buffer_load_dwordx4 v240, s[44:47], 0 offen lds
-		s_add_i32 m0, s54, 0x21a00
+		s_add_i32 m0, s40, 0x21a00
 		s_nop 0
 		buffer_load_dwordx4 v241, s[44:47], 0 offen lds
-		s_add_i32 m0, s54, 0x21a10
+		s_add_i32 m0, s40, 0x21a10
 		s_nop 0
 		buffer_load_dwordx4 v244, s[44:47], 0 offen lds
-		s_add_i32 m0, s54, 0x21a20
+		s_add_i32 m0, s40, 0x21a20
 		s_nop 0
 		buffer_load_dwordx4 v245, s[44:47], 0 offen lds
-		s_add_i32 m0, s54, 0x21a30
+		s_add_i32 m0, s40, 0x21a30
 		s_nop 0
 		buffer_load_dwordx4 v248, s[44:47], 0 offen lds
 .Lwmma_f16_matmul_tiled.exec_else_11:
@@ -908,7 +907,8 @@ wmma_f16_matmul_tiled:
 		v_mfma_scale_f32_16x16x128_f8f6f4 v[232:235], v[44:47], v[108:111], v[232:235], v238, v246 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4
 		s_waitcnt vmcnt(8)
 		s_barrier
-		s_and_b32 s0, s4, 1
+		s_add_i32 s15, s15, 1
+		s_and_b32 s0, s15, 1
 		s_lshl_b32 s3, s0, 16
 		v_add_u32_e32 v15, s3, v12
 		v_add3_u32 v236, v15, v13, v4
@@ -954,8 +954,7 @@ wmma_f16_matmul_tiled:
 		s_and_b32 s35, s0, 0x1ffff
 		s_add_i32 s0, s37, 0x10000
 		s_and_b32 s37, s0, 0x1ffff
-		s_cmp_lt_i32 s4, 30
-		s_mov_b32 s15, s4
+		s_cmp_lt_i32 s15, 30
 		s_cbranch_scc1 .Lwmma_f16_matmul_tiled.loop_head_0
 .Lwmma_f16_matmul_tiled.loop_exit_0:
 		s_waitcnt vmcnt(8)

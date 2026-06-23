@@ -488,6 +488,18 @@ static std::optional<IntRange64> scaleRange64(ConstantIntRanges range,
   return IntRange64{*lo, *hi};
 }
 
+static std::optional<IntRange64> scaleRange64(IntRange64 range, int64_t scale) {
+  if (scale == 0)
+    return IntRange64{0, 0};
+  std::optional<int64_t> lo = llvm::checkedMul(range.lo, scale);
+  std::optional<int64_t> hi = llvm::checkedMul(range.hi, scale);
+  if (!lo || !hi)
+    return std::nullopt;
+  if (scale < 0)
+    std::swap(lo, hi);
+  return IntRange64{*lo, *hi};
+}
+
 void WaveAMDMachineSelector::appendBindingAssumptions(
     Value binding, StringRef name,
     SmallVectorImpl<sym::PredHandle> &assumptions, int64_t scale) {
@@ -6214,9 +6226,65 @@ static FailureOr<PointerOffset> mergePointerOffsets(WaveAMDMachineSelector &S,
   return out;
 }
 
+static std::optional<int64_t> floorRational(sym::RationalEndpoint value) {
+  if (value.denominator <= 0)
+    return std::nullopt;
+  int64_t quotient = value.numerator / value.denominator;
+  int64_t remainder = value.numerator % value.denominator;
+  if (remainder != 0 && value.numerator < 0)
+    --quotient;
+  return quotient;
+}
+
+static std::optional<int64_t> ceilRational(sym::RationalEndpoint value) {
+  if (value.denominator <= 0)
+    return std::nullopt;
+  int64_t quotient = value.numerator / value.denominator;
+  int64_t remainder = value.numerator % value.denominator;
+  if (remainder != 0 && value.numerator > 0)
+    ++quotient;
+  return quotient;
+}
+
+static std::optional<IntRange64>
+inferPointerOffsetRange(WaveAMDMachineSelector &S,
+                        const PointerOffset &offset) {
+  if (!offset.expr)
+    return IntRange64{0, 0};
+  std::optional<sym::InferredRange> range =
+      sym::inferRange(S.symbolStore(), offset.expr, offset.assumptions);
+  if (!range || !range->lower || !range->upper)
+    return std::nullopt;
+  std::optional<int64_t> lo = floorRational(*range->lower);
+  std::optional<int64_t> hi = ceilRational(*range->upper);
+  if (!lo || !hi)
+    return std::nullopt;
+  return IntRange64{*lo, *hi};
+}
+
+static LogicalResult appendScaledPointerOffsetRange(
+    WaveAMDMachineSelector &S, const PointerOffset &source, StringRef name,
+    int64_t scale, SmallVectorImpl<sym::PredHandle> &assumptions) {
+  std::optional<IntRange64> range = inferPointerOffsetRange(S, source);
+  if (!range)
+    return success();
+  std::optional<IntRange64> scaled = scaleRange64(*range, scale);
+  if (!scaled)
+    return success();
+  FailureOr<sym::PredHandle> handle =
+      sym::rangeAssumption(S.symbolStore(), name, scaled->lo, scaled->hi);
+  if (failed(handle))
+    return failure();
+  assumptions.push_back(*handle);
+  return success();
+}
+
 static FailureOr<PointerOffset>
-planRawPtrAddByteOffset(WaveAMDMachineSelector &S, PtrAddOp op, unsigned size) {
-  Value source = op.getOffset();
+planRawPtrAddByteOffset(WaveAMDMachineSelector &S, PtrAddOp op, unsigned size,
+                        Value source = {},
+                        const PointerOffset *sourceOffset = nullptr) {
+  if (!source)
+    source = op.getOffset();
   Value raw = S.expect(source, op);
   TermKind kind =
       isLaneVaryingType(source.getType()) ? TermKind::Lane : TermKind::Uniform;
@@ -6238,7 +6306,84 @@ planRawPtrAddByteOffset(WaveAMDMachineSelector &S, PtrAddOp op, unsigned size) {
   offset.expr = *expr;
   offset.bindings.push_back({name, *scaled, kind});
   S.appendBindingAssumptions(source, name, offset.assumptions, size);
+  if (sourceOffset && failed(appendScaledPointerOffsetRange(
+                          S, *sourceOffset, name, size, offset.assumptions)))
+    return failure();
   return offset;
+}
+
+static bool isSignlessI32StorageType(Type type) {
+  if (auto simd = dyn_cast<SimdType>(type))
+    type = simd.getElementType();
+  auto intType = dyn_cast<IntegerType>(type);
+  return intType && intType.isSignless() && intType.getWidth() == 32;
+}
+
+static bool isIdentityI32Offset(const PointerOffset &offset, Value &source) {
+  if (!offset.expr || offset.bindings.size() != 1)
+    return false;
+  const PointerOffsetBinding &binding = offset.bindings.front();
+  sym::ExprView view(offset.expr);
+  if (view.getKind() != sym::ExprKind::Symbol ||
+      view.getSymbolName() != binding.name)
+    return false;
+  if (!isSignlessI32StorageType(binding.value.getType()))
+    return false;
+  source = binding.value;
+  return true;
+}
+
+static bool hasGlobalPointerBase(PtrAddOp op) {
+  std::optional<PtrType> ptr = getWavePointerType(op.getBase().getType());
+  return ptr && isa<GlobalAddressSpaceAttr>(ptr->getAddressSpace());
+}
+
+static FailureOr<PointerOffset>
+mergePtrAddOffsetOrError(WaveAMDMachineSelector &S, PtrAddOp op,
+                         const PointerOffset &base, const PointerOffset &add) {
+  FailureOr<PointerOffset> merged = mergePointerOffsets(S, base, add);
+  if (failed(merged))
+    op.emitError("failed to merge pointer offset symbols");
+  return merged;
+}
+
+static FailureOr<std::optional<PointerOffset>>
+planIdentityI32PtrAddOffset(WaveAMDMachineSelector &S, PtrAddOp op,
+                            unsigned size, const PointerOffset &base,
+                            const PointerOffset &offset) {
+  Value rawSource;
+  if (hasGlobalPointerBase(op) || !isIdentityI32Offset(offset, rawSource))
+    return std::optional<PointerOffset>{};
+  FailureOr<PointerOffset> scaled =
+      planRawPtrAddByteOffset(S, op, size, rawSource, &offset);
+  if (failed(scaled))
+    return failure();
+  FailureOr<PointerOffset> merged =
+      mergePtrAddOffsetOrError(S, op, base, *scaled);
+  if (failed(merged))
+    return failure();
+  return std::optional<PointerOffset>{std::move(*merged)};
+}
+
+static FailureOr<PointerOffset>
+planRawMergedPtrAddOffset(WaveAMDMachineSelector &S, PtrAddOp op, unsigned size,
+                          const PointerOffset &base) {
+  FailureOr<PointerOffset> scaled = planRawPtrAddByteOffset(S, op, size);
+  if (failed(scaled))
+    return failure();
+  return mergePtrAddOffsetOrError(S, op, base, *scaled);
+}
+
+static FailureOr<PointerOffset>
+scaleAndMergePtrAddOffset(WaveAMDMachineSelector &S, PtrAddOp op, unsigned size,
+                          const PointerOffset &base,
+                          const PointerOffset &offset) {
+  FailureOr<PointerOffset> scaled = scalePointerOffset(S, offset, size);
+  if (failed(scaled)) {
+    op.emitError("pointer offset byte scale overflows i64");
+    return failure();
+  }
+  return mergePtrAddOffsetOrError(S, op, base, *scaled);
 }
 
 static FailureOr<PointerOffset> planPtrAddOffset(WaveAMDMachineSelector &S,
@@ -6248,10 +6393,17 @@ static FailureOr<PointerOffset> planPtrAddOffset(WaveAMDMachineSelector &S,
     op.emitError("WaveAMDMachine backend expects selected pointer offset");
     return failure();
   }
-  PointerOffset offset;
   if (auto offsetIt = S.indexOffsets.find(op.getOffset());
       offsetIt != S.indexOffsets.end()) {
-    offset = offsetIt->second;
+    FailureOr<std::optional<PointerOffset>> identity =
+        planIdentityI32PtrAddOffset(S, op, size, baseIt->second,
+                                    offsetIt->second);
+    if (failed(identity))
+      return failure();
+    if (*identity)
+      return std::move(**identity);
+    return scaleAndMergePtrAddOffset(S, op, size, baseIt->second,
+                                     offsetIt->second);
   } else if (std::optional<int64_t> raw = getConstantIntValue(op.getOffset())) {
     FailureOr<sym::ExprHandle> expr =
         sym::composeExprInt(S.symbolStore(), *raw);
@@ -6259,27 +6411,11 @@ static FailureOr<PointerOffset> planPtrAddOffset(WaveAMDMachineSelector &S,
       op.emitError("failed to compose raw pointer offset");
       return failure();
     }
+    PointerOffset offset;
     offset.expr = *expr;
-  } else {
-    FailureOr<PointerOffset> scaled = planRawPtrAddByteOffset(S, op, size);
-    if (failed(scaled))
-      return failure();
-    FailureOr<PointerOffset> merged =
-        mergePointerOffsets(S, baseIt->second, *scaled);
-    if (failed(merged))
-      op.emitError("failed to merge pointer offset symbols");
-    return merged;
+    return scaleAndMergePtrAddOffset(S, op, size, baseIt->second, offset);
   }
-  FailureOr<PointerOffset> scaled = scalePointerOffset(S, offset, size);
-  if (failed(scaled)) {
-    op.emitError("pointer offset byte scale overflows i64");
-    return failure();
-  }
-  FailureOr<PointerOffset> merged =
-      mergePointerOffsets(S, baseIt->second, *scaled);
-  if (failed(merged))
-    op.emitError("failed to merge pointer offset symbols");
-  return merged;
+  return planRawMergedPtrAddOffset(S, op, size, baseIt->second);
 }
 
 struct PtrAddBase {

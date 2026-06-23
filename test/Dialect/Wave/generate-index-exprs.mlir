@@ -266,6 +266,69 @@ func.func @ptr_add_power_of_two_mask_nonnegative(
 
 // -----
 
+// CHECK-LABEL: func.func @shared_i32_mask_offset_synthesizes
+// CHECK-SAME: (%{{.*}}: !wave.ptr<#wave.shared, f32>, %[[IDX:.*]]: !wave.simd<i32, 32>)
+func.func @shared_i32_mask_offset_synthesizes(
+    %out: !wave.ptr<#wave.shared, f32>, %idx_raw: !wave.simd<i32, 32>)
+    -> !wave.simd<!wave.ptr<#wave.shared, f32>, 32> {
+  %c15 = arith.constant 15 : i32
+  // CHECK: [[ASSUME:%.*]] = wave.assume %[[IDX]]
+  %idx = wave.assume %idx_raw as "x" [#wave.pred<"x >= 0">, #wave.pred<"x <= 31">] : !wave.simd<i32, 32>
+  %s15 = wave.splat %c15 : i32 -> !wave.simd<i32, 32>
+  // CHECK: [[MASK:%.*]] = wave.binary andi
+  %masked = wave.binary andi %idx, %s15
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  // CHECK: [[OFF:%.*]] = wave.index_expr <"raw0"> assuming [#wave.pred<"raw0 >= 0 & -15 + raw0 <= 0">] ["raw0"]([[MASK]]) : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
+  // CHECK: wave.ptr_add %{{.*}}, [[OFF]]
+  %ptr = wave.ptr_add %out, %masked
+      : !wave.ptr<#wave.shared, f32>, !wave.simd<i32, 32>
+      -> !wave.simd<!wave.ptr<#wave.shared, f32>, 32>
+  return %ptr : !wave.simd<!wave.ptr<#wave.shared, f32>, 32>
+}
+
+// -----
+
+// CHECK-LABEL: func.func @shared_i32_xor_offset_keeps_storage_range
+// CHECK-SAME: (%{{.*}}: !wave.ptr<#wave.shared, f32>, %[[IDX:.*]]: !wave.simd<i32, 32>)
+func.func @shared_i32_xor_offset_keeps_storage_range(
+    %out: !wave.ptr<#wave.shared, f32>, %idx: !wave.simd<i32, 32>)
+    -> !wave.simd<!wave.ptr<#wave.shared, f32>, 32> {
+  %c1 = arith.constant 1 : i32
+  %s1 = wave.splat %c1 : i32 -> !wave.simd<i32, 32>
+  // CHECK: [[XOR:%.*]] = wave.binary xori
+  %offset = wave.binary xori %idx, %s1
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  // CHECK: [[OFF:%.*]] = wave.index_expr <"raw0"> assuming [#wave.pred<"2147483648 + raw0 >= 0 & -2147483647 + raw0 <= 0">] ["raw0"]([[XOR]]) : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
+  // CHECK: wave.ptr_add %{{.*}}, [[OFF]]
+  %ptr = wave.ptr_add %out, %offset
+      : !wave.ptr<#wave.shared, f32>, !wave.simd<i32, 32>
+      -> !wave.simd<!wave.ptr<#wave.shared, f32>, 32>
+  return %ptr : !wave.simd<!wave.ptr<#wave.shared, f32>, 32>
+}
+
+// -----
+
+// CHECK-LABEL: func.func @multi_use_binding_stays_bound
+// CHECK-SAME: (%{{.*}}: !wave.simd<i32, 32>)
+func.func @multi_use_binding_stays_bound(%idx_raw: !wave.simd<i32, 32>)
+    -> (!wave.simd<index, 32>, !wave.simd<index, 32>) {
+  %c1 = arith.constant 1 : i32
+  %idx = wave.assume %idx_raw as "x" [#wave.pred<"x >= 0">, #wave.pred<"x <= 31">] : !wave.simd<i32, 32>
+  %s1 = wave.splat %c1 : i32 -> !wave.simd<i32, 32>
+  // CHECK: [[SUM:%.*]] = wave.binary addi
+  %sum = wave.binary addi %idx, %s1
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  // CHECK: wave.index_expr <"2*x"> ["x"]([[SUM]])
+  %a = wave.index_expr <"2*x"> ["x"](%sum)
+      : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
+  // CHECK: wave.index_expr <"3*y"> ["y"]([[SUM]])
+  %b = wave.index_expr <"3*y"> ["y"](%sum)
+      : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
+  return %a, %b : !wave.simd<index, 32>, !wave.simd<index, 32>
+}
+
+// -----
+
 // CHECK-LABEL: func.func @dead_scalar_binding_dropped
 func.func @dead_scalar_binding_dropped(%out: !wave.ptr<#wave.global, f32>,
                                        %base: index) -> !wave.ptr<#wave.global, f32> {

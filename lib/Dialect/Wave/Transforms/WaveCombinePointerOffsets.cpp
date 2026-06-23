@@ -19,6 +19,7 @@
 #include "llvm/ADT/StringMap.h"
 
 #include <cassert>
+#include <optional>
 #include <string>
 
 namespace mlir::wave {
@@ -388,6 +389,38 @@ static SmallVector<PtrAddOp> collectPtrAddChain(PtrAddOp op) {
   return chain;
 }
 
+static bool hasGlobalPointerBase(PtrAddOp op) {
+  std::optional<PtrType> ptr = getWavePointerType(op.getBase().getType());
+  return ptr && isa<GlobalAddressSpaceAttr>(ptr->getAddressSpace());
+}
+
+static bool isSignlessI32StorageType(Type type) {
+  if (auto simd = dyn_cast<SimdType>(type))
+    type = simd.getElementType();
+  auto intType = dyn_cast<IntegerType>(type);
+  return intType && intType.isSignless() && intType.getWidth() == 32;
+}
+
+static bool isIdentityI32IndexExpr(IndexExprOp op) {
+  if (op.getBindings().size() != 1)
+    return false;
+  sym::ExprView expr(op.getExpr().getValue());
+  if (expr.getKind() != sym::ExprKind::Symbol)
+    return false;
+  StringRef name = cast<StringAttr>(op.getNames()[0]).getValue();
+  return expr.getSymbolName() == name &&
+         isSignlessI32StorageType(op.getBindings()[0].getType());
+}
+
+static bool hasNonGlobalIdentityI32Offset(ArrayRef<PtrAddOp> chain) {
+  for (PtrAddOp add : chain)
+    if (!hasGlobalPointerBase(add))
+      if (IndexExprOp index = add.getOffset().getDefiningOp<IndexExprOp>())
+        if (isIdentityI32IndexExpr(index))
+          return true;
+  return false;
+}
+
 static FailureOr<Value> createPtrAdd(IRRewriter &rewriter, Location loc,
                                      Type resultType, Value base,
                                      Value offset) {
@@ -447,6 +480,8 @@ static FailureOr<bool> rewritePtrAddChain(IRRewriter &rewriter, PtrAddOp op,
 static FailureOr<bool> combinePtrAdd(IRRewriter &rewriter, PtrAddOp op) {
   SmallVector<PtrAddOp> chain = collectPtrAddChain(op);
   if (chain.size() < 2)
+    return false;
+  if (hasNonGlobalIdentityI32Offset(chain))
     return false;
 
   WaveDialect *dialect = op->getContext()->getLoadedDialect<WaveDialect>();

@@ -13,6 +13,7 @@
 #include "mlir/Analysis/DataFlowFramework.h"
 #include "mlir/Dialect/Utils/StaticValueUtils.h"
 #include "mlir/Dialect/Wave/IR/Wave.h"
+#include "mlir/Dialect/Wave/IR/WaveAMD.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 #include "llvm/ADT/DenseMap.h"
@@ -171,6 +172,45 @@ static bool isSymbolicValueType(Type type, bool allowI64Integers) {
   return false;
 }
 
+static bool isSignlessI32StorageType(Type type) {
+  if (auto simd = dyn_cast<SimdType>(type))
+    type = simd.getElementType();
+  auto intType = dyn_cast<IntegerType>(type);
+  return intType && intType.isSignless() && intType.getWidth() == 32;
+}
+
+static bool isPredicateImplied(sym::Store &store, sym::PredHandle pred,
+                               ArrayRef<sym::PredHandle> assumptions) {
+  sym::PredView view(pred);
+  if (view.getKind() == sym::PredKind::And) {
+    for (uint32_t i : llvm::seq<uint32_t>(0, view.getLogicArgCount()))
+      if (!isPredicateImplied(store, view.getLogicArg(i), assumptions))
+        return false;
+    return true;
+  }
+  return sym::checkPredicate(store, pred, assumptions) ==
+         sym::CheckResult::True;
+}
+
+static LogicalResult
+appendSignedRangeAssumption(sym::Store &store, StringRef name, int64_t lo,
+                            int64_t hi,
+                            SmallVectorImpl<sym::PredHandle> &assumptions) {
+  FailureOr<sym::PredHandle> range = sym::rangeAssumption(store, name, lo, hi);
+  if (failed(range))
+    return failure();
+  if (!isPredicateImplied(store, *range, assumptions))
+    assumptions.push_back(*range);
+  return success();
+}
+
+static LogicalResult appendSignedI32StorageRangeAssumption(
+    sym::Store &store, StringRef name,
+    SmallVectorImpl<sym::PredHandle> &assumptions) {
+  return appendSignedRangeAssumption(store, name, -(int64_t{1} << 31),
+                                     (int64_t{1} << 31) - 1, assumptions);
+}
+
 static bool isSymbolicBinaryOp(BinaryOp op, bool allowI64Integers) {
   return isSymbolicValueType(op.getResult().getType(), allowI64Integers) &&
          isSymbolicValueType(op.getLhs().getType(), allowI64Integers) &&
@@ -243,6 +283,10 @@ static std::optional<int64_t> getSExtI64(const APInt &value) {
 
 using SignedI64Range = std::pair<int64_t, int64_t>;
 
+static SignedI64Range signedI32StorageRange() {
+  return SignedI64Range{-(int64_t{1} << 31), (int64_t{1} << 31) - 1};
+}
+
 static std::optional<std::pair<int64_t, int64_t>>
 finiteSignedI64Range(DataFlowSolver &solver, Value value) {
   std::optional<ConstantIntRanges> range = finiteSignedRange(solver, value);
@@ -290,6 +334,20 @@ finiteAssumeSignedI64Range(sym::Store &store, AssumeOp assume) {
 
   std::optional<sym::InferredRange> range =
       sym::inferRange(store, *expr, assumptions);
+  if (!range || !range->lower || !range->upper)
+    return std::nullopt;
+  std::optional<int64_t> lo = floorRational(*range->lower);
+  std::optional<int64_t> hi = ceilRational(*range->upper);
+  if (!lo || !hi)
+    return std::nullopt;
+  return SignedI64Range{*lo, *hi};
+}
+
+static std::optional<SignedI64Range>
+inferSignedI64Range(sym::Store &store, sym::ExprHandle expr,
+                    ArrayRef<sym::PredHandle> assumptions) {
+  std::optional<sym::InferredRange> range =
+      sym::inferRange(store, expr, assumptions);
   if (!range || !range->lower || !range->upper)
     return std::nullopt;
   std::optional<int64_t> lo = floorRational(*range->lower);
@@ -363,6 +421,18 @@ shlRange(BinaryOp op, std::pair<int64_t, int64_t> lhs) {
 }
 
 static std::optional<std::pair<__int128, __int128>>
+xorRange(std::pair<int64_t, int64_t> lhs, std::pair<int64_t, int64_t> rhs) {
+  if (lhs.first < 0 || rhs.first < 0)
+    return std::nullopt;
+  uint64_t maxOperand = std::max(static_cast<uint64_t>(lhs.second),
+                                 static_cast<uint64_t>(rhs.second));
+  if (maxOperand == 0)
+    return std::pair<__int128, __int128>{0, 0};
+  unsigned bits = llvm::Log2_64(maxOperand) + 1;
+  return std::pair<__int128, __int128>{0, (__int128{1} << bits) - 1};
+}
+
+static std::optional<std::pair<__int128, __int128>>
 resultRange(BinaryOp op, std::pair<int64_t, int64_t> lhs,
             std::pair<int64_t, int64_t> rhs) {
   switch (op.getKind()) {
@@ -385,6 +455,80 @@ narrowRange(std::pair<__int128, __int128> range, unsigned bits) {
     return std::nullopt;
   return SignedI64Range{static_cast<int64_t>(range.first),
                         static_cast<int64_t>(range.second)};
+}
+
+static std::optional<SignedI64Range> computeNoWrapRange(BinaryOp binary,
+                                                        SignedI64Range lhs,
+                                                        SignedI64Range rhs,
+                                                        unsigned bits) {
+  std::optional<std::pair<__int128, __int128>> range =
+      resultRange(binary, lhs, rhs);
+  if (!range)
+    return std::nullopt;
+  return narrowRange(*range, bits);
+}
+
+static std::optional<SignedI64Range>
+computeXorRange(SignedI64Range lhs, SignedI64Range rhs, unsigned bits) {
+  std::optional<std::pair<__int128, __int128>> range = xorRange(lhs, rhs);
+  if (!range)
+    return std::nullopt;
+  return narrowRange(*range, bits);
+}
+
+static std::optional<SignedI64Range> computeDivSIRange(BinaryOp binary,
+                                                       SignedI64Range lhs) {
+  std::optional<int64_t> divisor = getSplatOrConstantInt(binary.getRhs());
+  if (!divisor || !isPositivePowerOfTwo(*divisor) || lhs.first < 0)
+    return std::nullopt;
+  return SignedI64Range{lhs.first / *divisor, lhs.second / *divisor};
+}
+
+static std::optional<SignedI64Range> computeShruiRange(BinaryOp binary,
+                                                       SignedI64Range lhs) {
+  std::optional<int64_t> shift = getSplatOrConstantInt(binary.getRhs());
+  if (!shift || *shift < 0 || *shift >= 63 || lhs.first < 0)
+    return std::nullopt;
+  int64_t divisor = int64_t{1} << *shift;
+  return SignedI64Range{lhs.first / divisor, lhs.second / divisor};
+}
+
+static std::optional<SignedI64Range>
+computeAndIRange(BinaryOp binary, SignedI64Range lhs, SignedI64Range rhs) {
+  std::optional<int64_t> mask = getSplatOrConstantInt(binary.getRhs());
+  std::optional<SignedI64Range> maskedRange = lhs;
+  if (!mask) {
+    mask = getSplatOrConstantInt(binary.getLhs());
+    maskedRange = rhs;
+  }
+  std::optional<int64_t> modulus =
+      mask ? getPowerOfTwoMaskModulus(*mask) : std::nullopt;
+  if (!modulus || !maskedRange || maskedRange->first < 0)
+    return std::nullopt;
+  return SignedI64Range{0, std::min(maskedRange->second, *modulus - 1)};
+}
+
+static std::optional<SignedI64Range>
+computeBinarySignedI64Range(BinaryOp binary, SignedI64Range lhs,
+                            SignedI64Range rhs, unsigned bits,
+                            DataFlowSolver &solver, Value value) {
+  if (isNoSignedWrapSymbolicArithmetic(binary.getKind()))
+    return computeNoWrapRange(binary, lhs, rhs, bits);
+
+  switch (binary.getKind()) {
+  case BinaryKind::XOrI:
+    if (std::optional<SignedI64Range> range = computeXorRange(lhs, rhs, bits))
+      return range;
+    return finiteSignedI64Range(solver, value);
+  case BinaryKind::DivSI:
+    return computeDivSIRange(binary, lhs);
+  case BinaryKind::ShRUI:
+    return computeShruiRange(binary, lhs);
+  case BinaryKind::AndI:
+    return computeAndIRange(binary, lhs, rhs);
+  default:
+    return finiteSignedI64Range(solver, value);
+  }
 }
 
 static std::optional<SignedI64Range>
@@ -412,45 +556,7 @@ computeSignedI64Range(Value value, DataFlowSolver &solver, sym::Store &store,
         computeSignedI64Range(binary.getRhs(), solver, store, depth + 1);
     if (!lhs || !rhs)
       return finiteSignedI64Range(solver, value);
-
-    if (isNoSignedWrapSymbolicArithmetic(binary.getKind())) {
-      std::optional<std::pair<__int128, __int128>> range =
-          resultRange(binary, *lhs, *rhs);
-      if (!range)
-        return std::nullopt;
-      return narrowRange(*range, bits);
-    }
-
-    if (binary.getKind() == BinaryKind::DivSI) {
-      std::optional<int64_t> divisor = getSplatOrConstantInt(binary.getRhs());
-      if (!divisor || !isPositivePowerOfTwo(*divisor) || lhs->first < 0)
-        return std::nullopt;
-      return SignedI64Range{lhs->first / *divisor, lhs->second / *divisor};
-    }
-
-    if (binary.getKind() == BinaryKind::ShRUI) {
-      std::optional<int64_t> shift = getSplatOrConstantInt(binary.getRhs());
-      if (!shift || *shift < 0 || *shift >= 63 || lhs->first < 0)
-        return std::nullopt;
-      int64_t divisor = int64_t{1} << *shift;
-      return SignedI64Range{lhs->first / divisor, lhs->second / divisor};
-    }
-
-    if (binary.getKind() == BinaryKind::AndI) {
-      std::optional<int64_t> mask = getSplatOrConstantInt(binary.getRhs());
-      std::optional<SignedI64Range> maskedRange = lhs;
-      if (!mask) {
-        mask = getSplatOrConstantInt(binary.getLhs());
-        maskedRange = rhs;
-      }
-      std::optional<int64_t> modulus =
-          mask ? getPowerOfTwoMaskModulus(*mask) : std::nullopt;
-      if (!modulus || !maskedRange || maskedRange->first < 0)
-        return std::nullopt;
-      return SignedI64Range{0, std::min(maskedRange->second, *modulus - 1)};
-    }
-
-    return finiteSignedI64Range(solver, value);
+    return computeBinarySignedI64Range(binary, *lhs, *rhs, bits, solver, value);
   }
 
   return finiteSignedI64Range(solver, value);
@@ -478,7 +584,8 @@ static bool rangeProvesNoSignedOverflow(BinaryOp op, DataFlowSolver &solver,
 }
 
 static bool canBuildSymbolicBinaryOp(BinaryOp op, bool allowI64Integers,
-                                     DataFlowSolver &solver, sym::Store &store) {
+                                     DataFlowSolver &solver,
+                                     sym::Store &store) {
   if (!isSymbolicBinaryOp(op, allowI64Integers))
     return false;
   if (isNoSignedWrapSymbolicArithmetic(op.getKind()))
@@ -502,16 +609,29 @@ static bool isSymbolicRootBinaryOp(BinaryOp op, bool allowI64Integers,
 class SymbolicValueBuilder {
 public:
   explicit SymbolicValueBuilder(WaveDialect &dialect, DataFlowSolver &solver,
-                                bool allowI64Integers = false)
-      : solver(solver), store(dialect.getSymbolStore()),
-        allowI64Integers(allowI64Integers) {}
+                                bool allowI64Integers = false,
+                                bool assumeI32StorageRange = false,
+                                bool bindI32Root = false,
+                                bool requireI32RootRange = false)
+      : dialect(dialect), solver(solver), store(dialect.getSymbolStore()),
+        allowI64Integers(allowI64Integers),
+        assumeI32StorageRange(assumeI32StorageRange), bindI32Root(bindI32Root),
+        requireI32RootRange(requireI32RootRange) {}
 
   FailureOr<std::optional<SymbolicOffset>> build(Value value) {
     if (!hasSymbolicRoot(value))
       return std::optional<SymbolicOffset>{};
 
     bool skip = false;
-    FailureOr<sym::ExprHandle> expr = buildExpr(value, skip, false);
+    FailureOr<sym::ExprHandle> expr = failure();
+    if (bindI32Root && isSignlessI32StorageType(value.getType())) {
+      std::optional<SignedI64Range> rootRange = inferI32RootRange(value);
+      expr = rootRange || !requireI32RootRange
+                 ? bindSymbol(value, skip, rootRange)
+                 : buildExpr(value, skip, false);
+    } else {
+      expr = buildExpr(value, skip, false);
+    }
     if (skip)
       return std::optional<SymbolicOffset>{};
     if (failed(expr))
@@ -547,51 +667,60 @@ private:
       return sym::composeExprInt(store, *constant);
     if (IndexExprOp indexExpr = value.getDefiningOp<IndexExprOp>())
       return buildIndexExpr(indexExpr);
-    if (AssumeOp assume = value.getDefiningOp<AssumeOp>()) {
-      if (hasSymbolicRoot(assume.getValue())) {
-        bool childSkip = false;
-        FailureOr<sym::ExprHandle> expr =
-            buildExpr(assume.getValue(), childSkip, allowLeaf, depth + 1);
-        if (!childSkip && failed(expr))
-          return failure();
-        if (childSkip) {
-          if (allowLeaf)
-            return bindSymbol(value, skip);
-          skip = true;
-          return failure();
-        }
-        if (failed(appendAssumePredicatesForExpr(assume, *expr))) {
-          skip = true;
-          return failure();
-        }
-        return *expr;
-      }
-    }
-    if (SplatOp splat = value.getDefiningOp<SplatOp>()) {
-      bool childSkip = false;
-      FailureOr<sym::ExprHandle> expr =
-          buildExpr(splat.getSource(), childSkip, allowLeaf, depth + 1);
-      if (!childSkip)
-        return expr;
-      if (allowLeaf)
-        return bindSymbol(splat.getSource(), skip);
-      skip = true;
-      return failure();
-    }
-    if (BinaryOp binary = value.getDefiningOp<BinaryOp>()) {
-      bool childSkip = false;
-      FailureOr<sym::ExprHandle> expr = buildBinary(binary, childSkip, depth + 1);
-      if (!childSkip)
-        return expr;
-      if (allowLeaf)
-        return bindSymbol(value, skip);
-      skip = true;
-      return failure();
-    }
+    if (AssumeOp assume = value.getDefiningOp<AssumeOp>())
+      return buildAssumeExpr(value, assume, skip, allowLeaf, depth);
+    if (SplatOp splat = value.getDefiningOp<SplatOp>())
+      return buildSplatExpr(splat, skip, allowLeaf, depth);
+    if (BinaryOp binary = value.getDefiningOp<BinaryOp>())
+      return buildBinaryExpr(value, binary, skip, allowLeaf, depth);
+    return bindOrSkip(value, skip, allowLeaf);
+  }
+
+  FailureOr<sym::ExprHandle> bindOrSkip(Value value, bool &skip,
+                                        bool allowLeaf) {
     if (allowLeaf)
       return bindSymbol(value, skip);
     skip = true;
     return failure();
+  }
+
+  FailureOr<sym::ExprHandle> buildAssumeExpr(Value value, AssumeOp assume,
+                                             bool &skip, bool allowLeaf,
+                                             unsigned depth) {
+    if (!hasSymbolicRoot(assume.getValue()))
+      return bindOrSkip(value, skip, allowLeaf);
+    bool childSkip = false;
+    FailureOr<sym::ExprHandle> expr =
+        buildExpr(assume.getValue(), childSkip, allowLeaf, depth + 1);
+    if (!childSkip && failed(expr))
+      return failure();
+    if (childSkip)
+      return bindOrSkip(value, skip, allowLeaf);
+    if (failed(appendAssumePredicatesForExpr(assume, *expr))) {
+      skip = true;
+      return failure();
+    }
+    return *expr;
+  }
+
+  FailureOr<sym::ExprHandle> buildSplatExpr(SplatOp splat, bool &skip,
+                                            bool allowLeaf, unsigned depth) {
+    bool childSkip = false;
+    FailureOr<sym::ExprHandle> expr =
+        buildExpr(splat.getSource(), childSkip, allowLeaf, depth + 1);
+    if (!childSkip)
+      return expr;
+    return bindOrSkip(splat.getSource(), skip, allowLeaf);
+  }
+
+  FailureOr<sym::ExprHandle> buildBinaryExpr(Value value, BinaryOp binary,
+                                             bool &skip, bool allowLeaf,
+                                             unsigned depth) {
+    bool childSkip = false;
+    FailureOr<sym::ExprHandle> expr = buildBinary(binary, childSkip, depth + 1);
+    if (!childSkip)
+      return expr;
+    return bindOrSkip(value, skip, allowLeaf);
   }
 
   FailureOr<sym::ExprHandle> buildIndexExpr(IndexExprOp op) {
@@ -607,15 +736,22 @@ private:
       skip = true;
       return failure();
     }
-    if (op.getKind() == BinaryKind::ShLI)
+    switch (op.getKind()) {
+    case BinaryKind::ShLI:
       return buildShift(op, skip, depth);
-    if (op.getKind() == BinaryKind::DivSI)
+    case BinaryKind::DivSI:
       return buildSignedDiv(op, skip, depth);
-    if (op.getKind() == BinaryKind::ShRUI)
+    case BinaryKind::ShRUI:
       return buildUnsignedShiftRight(op, skip, depth);
-    if (op.getKind() == BinaryKind::AndI)
+    case BinaryKind::AndI:
       return buildPowerOfTwoMask(op, skip, depth);
+    default:
+      return buildPlainBinary(op, skip, depth);
+    }
+  }
 
+  FailureOr<sym::ExprHandle> buildPlainBinary(BinaryOp op, bool &skip,
+                                              unsigned depth) {
     std::optional<sym::ExprBinaryOp> kind = convertBinaryKind(op.getKind());
     if (!kind) {
       skip = true;
@@ -667,8 +803,8 @@ private:
     std::optional<int64_t> shift = getSplatOrConstantInt(op.getRhs());
     std::optional<SignedI64Range> lhsRange =
         computeSignedI64Range(op.getLhs(), solver, store);
-    if (!shift || *shift < 0 || *shift >= 63 ||
-        !lhsRange || lhsRange->first < 0) {
+    if (!shift || *shift < 0 || *shift >= 63 || !lhsRange ||
+        lhsRange->first < 0) {
       skip = true;
       return failure();
     }
@@ -691,8 +827,8 @@ private:
     std::optional<int64_t> divisor = getSplatOrConstantInt(op.getRhs());
     std::optional<SignedI64Range> lhsRange =
         computeSignedI64Range(op.getLhs(), solver, store);
-    if (!divisor || !isPositivePowerOfTwo(*divisor) ||
-        !lhsRange || lhsRange->first < 0) {
+    if (!divisor || !isPositivePowerOfTwo(*divisor) || !lhsRange ||
+        lhsRange->first < 0) {
       skip = true;
       return failure();
     }
@@ -756,6 +892,12 @@ private:
   }
 
   FailureOr<sym::ExprHandle> bindSymbol(Value value, bool &skip) {
+    return bindSymbol(value, skip, std::nullopt);
+  }
+
+  FailureOr<sym::ExprHandle>
+  bindSymbol(Value value, bool &skip,
+             std::optional<SignedI64Range> derivedRange) {
     std::optional<SymbolicOffsetBindingKind> kind =
         classifyBindingType(value.getType());
     if (!kind) {
@@ -779,13 +921,46 @@ private:
     (void)inserted;
     nameByValue[value] = it->getKey();
     offset.bindings.push_back({*expr, value, *kind});
+    if (failed(appendSymbolAssumptions(value, it->getKey(), derivedRange)))
+      return failure();
+    return *expr;
+  }
+
+  LogicalResult
+  appendSymbolAssumptions(Value value, StringRef name,
+                          std::optional<SignedI64Range> derivedRange) {
     if (std::optional<ConstantIntRanges> range =
             finiteSignedRange(solver, value))
-      appendRangeAndAssumePredicates(store, value, it->getKey(), *range,
+      appendRangeAndAssumePredicates(store, value, name, *range,
                                      offset.assumptions);
-    else
-      appendAssumePredicates(store, value, it->getKey(), offset.assumptions);
-    return *expr;
+    else {
+      appendAssumePredicates(store, value, name, offset.assumptions);
+    }
+    if (derivedRange) {
+      if (failed(appendSignedRangeAssumption(store, name, derivedRange->first,
+                                             derivedRange->second,
+                                             offset.assumptions)))
+        return failure();
+    } else if (assumeI32StorageRange &&
+               isSignlessI32StorageType(value.getType())) {
+      if (failed(appendSignedI32StorageRangeAssumption(store, name,
+                                                       offset.assumptions)))
+        return failure();
+    }
+    return success();
+  }
+
+  std::optional<SignedI64Range> inferI32RootRange(Value value) {
+    if (std::optional<SignedI64Range> range =
+            computeSignedI64Range(value, solver, store))
+      return intersectRange(range, signedI32StorageRange());
+    SymbolicValueBuilder expanded(dialect, solver, allowI64Integers);
+    FailureOr<std::optional<SymbolicOffset>> symbolic = expanded.build(value);
+    if (failed(symbolic) || !*symbolic || !(*symbolic)->expr)
+      return std::nullopt;
+    return intersectRange(
+        inferSignedI64Range(store, (*symbolic)->expr, (*symbolic)->assumptions),
+        signedI32StorageRange());
   }
 
   static std::optional<SymbolicOffsetBindingKind>
@@ -864,9 +1039,13 @@ private:
   SymbolicOffset offset;
   llvm::DenseMap<Value, StringRef> nameByValue;
   llvm::StringMap<Value> bindingByName;
+  WaveDialect &dialect;
   DataFlowSolver &solver;
   sym::Store &store;
   bool allowI64Integers = false;
+  bool assumeI32StorageRange = false;
+  bool bindI32Root = false;
+  bool requireI32RootRange = false;
   unsigned nextRawSymbol = 0;
 };
 
@@ -948,6 +1127,19 @@ static bool hasGlobalPointerBase(PtrAddOp op) {
   return ptr && isa<GlobalAddressSpaceAttr>(ptr->getAddressSpace());
 }
 
+static bool hasBufferPointerBase(PtrAddOp op) {
+  std::optional<PtrType> ptr = getWavePointerType(op.getBase().getType());
+  return ptr && isa<waveamd::BufferAddressSpaceAttr>(ptr->getAddressSpace());
+}
+
+static bool feedsNonGlobalPtrAdd(IndexExprOp op) {
+  for (Operation *user : op.getResult().getUsers())
+    if (auto ptrAdd = dyn_cast<PtrAddOp>(user))
+      if (ptrAdd.getOffset() == op.getResult() && !hasGlobalPointerBase(ptrAdd))
+        return true;
+  return false;
+}
+
 static Type getIndexExprType(MLIRContext *ctx,
                              ArrayRef<IndexExprBinding> bindings) {
   SmallVector<Value> values;
@@ -966,8 +1158,12 @@ static Type getIndexExprType(MLIRContext *ctx, const SymbolicOffset &offset) {
 static FailureOr<bool> rewritePtrAdd(PatternRewriter &rewriter, PtrAddOp op,
                                      WaveDialect &dialect,
                                      DataFlowSolver &solver) {
+  bool bufferBase = hasBufferPointerBase(op);
   SymbolicValueBuilder builder(dialect, solver,
-                               /*allowI64Integers=*/hasGlobalPointerBase(op));
+                               /*allowI64Integers=*/hasGlobalPointerBase(op),
+                               /*assumeI32StorageRange=*/true,
+                               /*bindI32Root=*/!hasGlobalPointerBase(op),
+                               /*requireI32RootRange=*/bufferBase);
   FailureOr<std::optional<SymbolicOffset>> offset =
       builder.build(op.getOffset());
   if (failed(offset))
@@ -999,19 +1195,33 @@ static void seedBindingNames(IndexExprOp op, BindingState &state) {
   }
 }
 
+static bool shouldPreserveGeneratedBinding(Value value,
+                                           bool preserveI32Binding) {
+  if (preserveI32Binding && isSignlessI32StorageType(value.getType()))
+    return true;
+  return !value.hasOneUse() && !getSplatOrConstantInt(value);
+}
+
+static FailureOr<bool> preserveGeneratedBinding(BindingState &state,
+                                                StringRef name, Value value) {
+  if (failed(appendBinding(state, name, value)))
+    return failure();
+  return false;
+}
+
 static FailureOr<bool> collectGeneratedBindingRewrite(
     IndexExprOp op, WaveDialect &dialect, BindingState &state, StringRef name,
     Value value, SmallVectorImpl<sym::ExprSubstitution> &substitutions,
-    DataFlowSolver &solver) {
+    DataFlowSolver &solver, bool preserveI32Binding = false) {
+  if (shouldPreserveGeneratedBinding(value, preserveI32Binding))
+    return preserveGeneratedBinding(state, name, value);
+
   SymbolicValueBuilder builder(dialect, solver);
   FailureOr<std::optional<SymbolicOffset>> symbolic = builder.build(value);
   if (failed(symbolic))
     return op.emitError("failed to generate wave.index_expr binding");
-  if (!*symbolic) {
-    if (failed(appendBinding(state, name, value)))
-      return failure();
-    return false;
-  }
+  if (!*symbolic)
+    return preserveGeneratedBinding(state, name, value);
 
   sym::Store &store = dialect.getSymbolStore();
   FailureOr<sym::ExprHandle> target = symbolExpr(store, name);
@@ -1049,11 +1259,13 @@ static FailureOr<bool> rewriteIndexExpr(PatternRewriter &rewriter,
 
   SmallVector<sym::ExprSubstitution> substitutions;
   bool changed = false;
+  bool preserveI32Bindings = feedsNonGlobalPtrAdd(op);
   for (auto [nameAttr, value] : llvm::zip(op.getNames(), op.getBindings())) {
     StringRef name = cast<StringAttr>(nameAttr).getValue();
     appendAssumePredicates(store, value, name, state.assumptions);
     FailureOr<bool> bindingChanged = collectGeneratedBindingRewrite(
-        op, dialect, state, name, value, substitutions, solver);
+        op, dialect, state, name, value, substitutions, solver,
+        preserveI32Bindings);
     if (failed(bindingChanged))
       return failure();
     changed |= *bindingChanged;
