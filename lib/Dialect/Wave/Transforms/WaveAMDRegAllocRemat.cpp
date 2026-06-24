@@ -264,6 +264,8 @@ public:
   }
 
 private:
+  enum class RematOperandPlan { UseOriginal, Rematerialize, Invalid };
+
   bool hasSimpleUses(Value value, SmallVectorImpl<OpOperand *> &uses) const {
     Operation *def = value.getDefiningOp();
     if (!def || isMemoryIssuerOp(def) || def->getNumResults() == 0)
@@ -299,6 +301,23 @@ private:
     return interval && isLiveAt(interval, position);
   }
 
+  bool hasNonTempUseAtOrAfter(Value value, unsigned position,
+                              Operation *excludedUser) const {
+    for (OpOperand &use : value.getUses()) {
+      Operation *user = use.getOwner();
+      if (user == excludedUser)
+        continue;
+      if (isRegAllocTempOp(user))
+        continue;
+      if (isCheapVGPRPressureReliefExpr(user))
+        continue;
+      auto it = inventory.positions.find(user);
+      if (it != inventory.positions.end() && it->second >= position)
+        return true;
+    }
+    return false;
+  }
+
   Operation *getDominatingCheapDef(Value value, Operation *user,
                                    bool materializing = false) const {
     Operation *def = value.getDefiningOp();
@@ -314,20 +333,50 @@ private:
   }
 
   bool leafLiveAtConsumer(Value value, Operation *consumer,
+                          Operation *parentDef,
                           bool materializing = false) const {
     if (!isTrackedRegValue(value))
       return true;
-    return isValueLiveAt(value, inventory.positions.lookup(consumer),
-                         materializing);
+    if (isFixedRegValue(value, materializing))
+      return true;
+    auto it = inventory.positions.find(consumer);
+    if (it == inventory.positions.end())
+      return false;
+    return isValueLiveAt(value, it->second, materializing) &&
+           hasNonTempUseAtOrAfter(value, it->second, parentDef);
+  }
+
+  RematOperandPlan getOperandPlanAt(Value value, Operation *user,
+                                    DenseSet<Value> &visiting,
+                                    Operation *parentDef = nullptr,
+                                    bool materializing = false) const {
+    if (leafLiveAtConsumer(value, user, parentDef, materializing))
+      return RematOperandPlan::UseOriginal;
+    if (canRematerializeTreeAt(value, user, visiting, materializing))
+      return RematOperandPlan::Rematerialize;
+    return RematOperandPlan::Invalid;
+  }
+
+  RematOperandPlan getOperandPlanAt(Value value, Operation *user,
+                                    bool materializing = false) const {
+    DenseSet<Value> visiting;
+    return getOperandPlanAt(value, user, visiting, nullptr, materializing);
+  }
+
+  RematOperandPlan getOperandPlanAt(Value value, Operation *user,
+                                    Operation *parentDef,
+                                    bool materializing = false) const {
+    DenseSet<Value> visiting;
+    return getOperandPlanAt(value, user, visiting, parentDef, materializing);
   }
 
   bool canRematerializeOperandsAt(Operation *def, Operation *user,
                                   DenseSet<Value> &visiting,
                                   bool materializing = false) const {
     for (Value operand : def->getOperands()) {
-      if (canRematerializeTreeAt(operand, user, visiting, materializing))
-        continue;
-      if (!leafLiveAtConsumer(operand, user, materializing))
+      RematOperandPlan plan =
+          getOperandPlanAt(operand, user, visiting, def, materializing);
+      if (plan == RematOperandPlan::Invalid)
         return false;
     }
     return true;
@@ -369,9 +418,14 @@ private:
     Operation *def = getDominatingCheapDef(value, user);
     if (!def)
       return;
-    for (Value operand : def->getOperands())
-      if (canRematerializeTreeAt(operand, user))
+    for (Value operand : def->getOperands()) {
+      RematOperandPlan plan = getOperandPlanAt(operand, user, def);
+      if (plan == RematOperandPlan::Rematerialize)
         collectTreeTempIntervalsAt(operand, user, materialized, intervals);
+      else
+        assert(plan != RematOperandPlan::Invalid &&
+               "temp interval collection requires a legal remat tree");
+    }
     unsigned position = inventory.positions.lookup(user);
     for (Value result : def->getResults()) {
       auto type = dyn_cast<waveamdmachine::RegType>(result.getType());
@@ -394,10 +448,12 @@ private:
     assert(def && "remat candidate must have defining op");
     unsigned count = 1;
     for (Value operand : def->getOperands()) {
-      if (canRematerializeTreeAt(operand, user))
+      RematOperandPlan plan = getOperandPlanAt(operand, user, def);
+      if (plan == RematOperandPlan::Rematerialize)
         count += getRematOpCountAt(operand, user, materialized);
-      else if (leafLiveAtConsumer(operand, user))
-        continue;
+      else
+        assert(plan != RematOperandPlan::Invalid &&
+               "op count requested for illegal remat tree");
     }
     return count;
   }
@@ -424,12 +480,12 @@ private:
     wave::WaveAMDPressureReliefCost cost;
     if (!isMemorySpillSuppressedVGPRExpr(value.getDefiningOp()))
       cost.instabilityPenalty = kFallbackRootPenalty;
-    cost.loopWeightedOps = getLoopDepth(value.getDefiningOp());
     for (OpOperand *use : uses) {
       DenseSet<Value> materialized;
-      cost.materializationOps +=
+      unsigned opCount =
           getRematOpCountAt(value, use->getOwner(), materialized);
-      cost.loopWeightedOps += getLoopDepth(use->getOwner());
+      cost.materializationOps += opCount;
+      cost.loopWeightedOps += opCount * getLoopDepth(use->getOwner());
     }
     return cost;
   }
@@ -487,13 +543,21 @@ private:
                    IRMapping &mapper) const {
     for (Value operand : def->getOperands()) {
       Value replacement = operand;
-      if (canRematerializeTreeAt(operand, user, /*materializing=*/true)) {
+      RematOperandPlan operandPlan =
+          getOperandPlanAt(operand, user, def, /*materializing=*/true);
+      if (operandPlan == RematOperandPlan::Invalid &&
+          getOperandPlanAt(operand, user, def) == RematOperandPlan::UseOriginal)
+        operandPlan = RematOperandPlan::UseOriginal;
+      if (operandPlan == RematOperandPlan::Rematerialize) {
         FailureOr<Value> rematOperand =
             materializeTreeAt(operand, user, plan, context, builder, cache);
         if (failed(rematOperand))
           return failure();
         replacement = *rematOperand;
       }
+      if (operandPlan == RematOperandPlan::Invalid)
+        return mlir::emitError(operand.getLoc())
+               << "waveamd-reg-alloc cannot rematerialize operand tree";
       mapper.map(operand, replacement);
     }
     return success();
