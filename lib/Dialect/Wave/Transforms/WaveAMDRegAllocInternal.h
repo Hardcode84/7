@@ -214,22 +214,79 @@ inline unsigned getLoopDepth(Operation *op) {
   return depth;
 }
 
+inline Operation *getMemorySpillValueAnchorOp(Value value) {
+  if (Operation *def = value.getDefiningOp())
+    return def;
+  auto arg = dyn_cast<BlockArgument>(value);
+  if (!arg)
+    return nullptr;
+  return arg.getOwner()->getParentOp();
+}
+
+inline Operation *getMemorySpillValueDiagOp(Value value) {
+  return getMemorySpillValueAnchorOp(value);
+}
+
+inline std::optional<unsigned>
+getMemorySpillOpPosition(Operation *op, const Inventory &inventory) {
+  if (!op)
+    return std::nullopt;
+  DenseMap<Operation *, unsigned>::const_iterator it =
+      inventory.positions.find(op);
+  if (it == inventory.positions.end())
+    return std::nullopt;
+  return it->second;
+}
+
+inline std::optional<unsigned>
+getMemorySpillValuePositionIfKnown(Value value, const Inventory &inventory) {
+  if (Operation *def = value.getDefiningOp())
+    return getMemorySpillOpPosition(def, inventory);
+  auto arg = dyn_cast<BlockArgument>(value);
+  if (!arg)
+    return std::nullopt;
+  Operation *parent = arg.getOwner()->getParentOp();
+  if (isa_and_nonnull<func::FuncOp>(parent))
+    return 0;
+  return getMemorySpillOpPosition(parent, inventory);
+}
+
+inline bool hasMemorySpillStoreAnchor(Value value, const Inventory &inventory) {
+  waveamdmachine::RegType type = cast<waveamdmachine::RegType>(value.getType());
+  if (Operation *def = value.getDefiningOp()) {
+    if (!getMemorySpillOpPosition(def, inventory))
+      return false;
+    if (type.getRegClass() == waveamdmachine::RegClass::AGPR)
+      return !isMemoryIssuerOp(def);
+    return !isMemoryIssuerOp(def) || getMemoryIssuerToken(def);
+  }
+
+  auto arg = dyn_cast<BlockArgument>(value);
+  if (!arg)
+    return false;
+  Operation *parent = arg.getOwner()->getParentOp();
+  if (!parent || isa<func::FuncOp>(parent))
+    return false;
+  return getMemorySpillOpPosition(parent, inventory).has_value();
+}
+
+inline bool hasNonTempUse(Value value) {
+  for (OpOperand &use : value.getUses())
+    if (!isRegAllocTempOp(use.getOwner()))
+      return true;
+  return false;
+}
+
 inline bool
-collectSimpleMemorySpillVGPRUses(Value value,
+collectSimpleMemorySpillVGPRUses(Value value, const Inventory &inventory,
                                  SmallVectorImpl<OpOperand *> &uses) {
-  Operation *def = value.getDefiningOp();
-  if (!def)
-    return false;
-  if (isMemoryIssuerOp(def) && !getMemoryIssuerToken(def))
-    return false;
-  if (def->getNumRegions() != 0)
+  if (!hasMemorySpillStoreAnchor(value, inventory))
     return false;
   for (OpOperand &use : value.getUses()) {
-    if (isRegAllocTempOp(use.getOwner()))
+    Operation *user = use.getOwner();
+    if (isRegAllocTempOp(user))
       continue;
-    if (use.getOwner()->getNumRegions() != 0)
-      return false;
-    if (!useIsDominatedByDef(def, use.getOwner()))
+    if (!getMemorySpillOpPosition(user, inventory))
       return false;
     uses.push_back(&use);
   }
@@ -237,31 +294,30 @@ collectSimpleMemorySpillVGPRUses(Value value,
 }
 
 inline bool
-collectSimpleMemorySpillAGPRUses(Value value,
+collectSimpleMemorySpillAGPRUses(Value value, const Inventory &inventory,
                                  SmallVectorImpl<OpOperand *> &uses) {
-  Operation *def = value.getDefiningOp();
-  if (!def || isMemoryIssuerOp(def))
+  if (!hasMemorySpillStoreAnchor(value, inventory))
     return false;
   for (OpOperand &use : value.getUses()) {
-    if (!useIsDominatedByDef(def, use.getOwner()))
+    Operation *user = use.getOwner();
+    if (isRegAllocTempOp(user))
+      continue;
+    if (!isa<waveamdmachine::VAccvgprReadB32TupleOp>(user))
       return false;
-    if (isa<waveamdmachine::VAccvgprReadB32TupleOp>(use.getOwner())) {
-      uses.push_back(&use);
-      continue;
-    }
-    if (isRegAllocTempOp(use.getOwner()))
-      continue;
-    return false;
+    if (!getMemorySpillOpPosition(user, inventory))
+      return false;
+    uses.push_back(&use);
   }
   return !uses.empty();
 }
 
 inline bool collectSimpleMemorySpillUses(Value value,
+                                         const Inventory &inventory,
                                          SmallVectorImpl<OpOperand *> &uses) {
   waveamdmachine::RegType type = cast<waveamdmachine::RegType>(value.getType());
   if (type.getRegClass() == waveamdmachine::RegClass::AGPR)
-    return collectSimpleMemorySpillAGPRUses(value, uses);
-  return collectSimpleMemorySpillVGPRUses(value, uses);
+    return collectSimpleMemorySpillAGPRUses(value, inventory, uses);
+  return collectSimpleMemorySpillVGPRUses(value, inventory, uses);
 }
 
 inline bool hasOnlyRegAllocTempUses(Value value) {
@@ -273,15 +329,21 @@ inline bool hasOnlyRegAllocTempUses(Value value) {
 inline bool isValueLiveAtPressure(Value value, ArrayRef<OpOperand *> uses,
                                   const Inventory &inventory,
                                   unsigned position) {
-  Operation *def = value.getDefiningOp();
-  if (!def)
+  std::optional<unsigned> valuePosition =
+      getMemorySpillValuePositionIfKnown(value, inventory);
+  if (!valuePosition)
     return false;
-  unsigned start = inventory.positions.lookup(def);
+  unsigned start = *valuePosition;
   if (start > position)
     return false;
   unsigned end = start;
-  for (OpOperand *use : uses)
-    end = std::max(end, inventory.positions.lookup(use->getOwner()));
+  for (OpOperand *use : uses) {
+    std::optional<unsigned> usePosition =
+        getMemorySpillOpPosition(use->getOwner(), inventory);
+    if (!usePosition)
+      return false;
+    end = std::max(end, *usePosition);
+  }
   return position <= end;
 }
 
@@ -298,9 +360,12 @@ inline bool valueCoversWholeGroup(IntervalGroup *group, Value value,
 inline bool hasMemorySpillUseAtPressure(ArrayRef<OpOperand *> uses,
                                         const Inventory &inventory,
                                         unsigned position) {
-  for (OpOperand *use : uses)
-    if (inventory.positions.lookup(use->getOwner()) == position)
+  for (OpOperand *use : uses) {
+    std::optional<unsigned> usePosition =
+        getMemorySpillOpPosition(use->getOwner(), inventory);
+    if (usePosition && *usePosition == position)
       return true;
+  }
   return false;
 }
 
@@ -338,14 +403,18 @@ inline int64_t getMemorySpillValueOrder(Value value,
   int64_t resultIndex = -1;
   if (OpResult result = dyn_cast<OpResult>(value)) {
     resultIndex = result.getResultNumber();
-    return inventory.positions.lookup(result.getOwner()) * 1024 + resultIndex;
+    std::optional<unsigned> position =
+        getMemorySpillOpPosition(result.getOwner(), inventory);
+    return static_cast<int64_t>(position.value_or(0)) * 2048 + resultIndex;
   }
   BlockArgument arg = cast<BlockArgument>(value);
   resultIndex = arg.getArgNumber();
   Operation *parent = arg.getOwner()->getParentOp();
   if (isa_and_nonnull<func::FuncOp>(parent))
     return resultIndex;
-  return inventory.positions.lookup(parent) * 1024 + resultIndex;
+  std::optional<unsigned> position =
+      getMemorySpillOpPosition(parent, inventory);
+  return static_cast<int64_t>(position.value_or(0)) * 2048 + 1024 + resultIndex;
 }
 
 inline SmallVector<Value>
@@ -386,13 +455,10 @@ getMemorySpillTotalCost(const SlotsT &slots) {
 
 inline unsigned getMemorySpillValuePosition(Value value,
                                             const Inventory &inventory) {
-  if (Operation *def = value.getDefiningOp())
-    return inventory.positions.lookup(def);
-  BlockArgument arg = cast<BlockArgument>(value);
-  Operation *parent = arg.getOwner()->getParentOp();
-  if (isa<func::FuncOp>(parent))
-    return 0;
-  return inventory.positions.lookup(parent);
+  std::optional<unsigned> position =
+      getMemorySpillValuePositionIfKnown(value, inventory);
+  assert(position && "spill value must have a known position");
+  return *position;
 }
 
 inline waveamdmachine::RegClass getMemorySpillLoadRegClass(Value value) {
@@ -613,6 +679,8 @@ static void collectMemorySpillValueTempIntervals(
     CollectAddressTempsFn collectAddressTemps) {
   if (!value)
     return;
+  SmallVector<OpOperand *> uses;
+  (void)collectSimpleMemorySpillUses(value, inventory, uses);
   waveamdmachine::RegType type = cast<waveamdmachine::RegType>(value.getType());
   unsigned valueWidth = static_cast<unsigned>(type.getWidth());
   unsigned defPosition = getMemorySpillValuePosition(value, inventory);
@@ -626,11 +694,15 @@ static void collectMemorySpillValueTempIntervals(
   collectAddressTemps(intervals, defPosition, valueWidth);
 
   waveamdmachine::RegClass loadClass = getMemorySpillLoadRegClass(value);
-  for (OpOperand &use : value.getUses()) {
-    unsigned usePosition = inventory.positions.lookup(use.getOwner());
+  for (OpOperand *use : uses) {
+    std::optional<unsigned> position =
+        getMemorySpillOpPosition(use->getOwner(), inventory);
+    if (!position)
+      continue;
+    unsigned usePosition = *position;
     unsigned loadEnd = usePosition;
     if (auto split =
-            dyn_cast<waveamdmachine::TupleToElementsOp>(use.getOwner())) {
+            dyn_cast<waveamdmachine::TupleToElementsOp>(use->getOwner())) {
       for (Value element : split.getElements()) {
         Interval *interval = inventory.intervalFor.lookup(element);
         if (interval)
@@ -661,14 +733,14 @@ inline SmallVector<Type> getMemorySpillScalarRegTypes(Type tupleType);
 inline FailureOr<Value> materializeMemorySpillStoreValue(
     Value value, const wave::WaveAMDPressureReliefPlan &plan,
     wave::WaveAMDPressureReliefMaterializationContext &context,
-    OpBuilder &builder) {
+    OpBuilder &builder, Operation *diagOp) {
   waveamdmachine::RegType type = cast<waveamdmachine::RegType>(value.getType());
   if (type.getRegClass() != waveamdmachine::RegClass::AGPR)
     return value;
-  Operation *def = value.getDefiningOp();
   FailureOr<waveamdmachine::RegType> readType =
-      consumePressureReliefTempRegType(
-          plan, context, waveamdmachine::RegClass::VGPR, type.getWidth(), def);
+      consumePressureReliefTempRegType(plan, context,
+                                       waveamdmachine::RegClass::VGPR,
+                                       type.getWidth(), diagOp);
   if (failed(readType))
     return failure();
   waveamdmachine::VAccvgprReadB32TupleOp read =
@@ -676,6 +748,16 @@ inline FailureOr<Value> materializeMemorySpillStoreValue(
                                                      *readType, value);
   read->setAttr(kRegAllocTempAttr, builder.getUnitAttr());
   return read.getResult();
+}
+
+inline void setInsertionPointForMemorySpillStore(Value value,
+                                                 OpBuilder &builder) {
+  if (Operation *def = value.getDefiningOp()) {
+    builder.setInsertionPointAfter(def);
+    return;
+  }
+  BlockArgument arg = cast<BlockArgument>(value);
+  builder.setInsertionPointToStart(arg.getOwner());
 }
 
 inline LogicalResult
@@ -888,7 +970,6 @@ inline bool isMemorySpillEligibleGroup(IntervalGroup *group,
 }
 
 struct MemorySpillRejectStats {
-  unsigned crossBlock = 0;
   unsigned eligible = 0;
   unsigned fixed = 0;
   unsigned memoryIssuer = 0;
@@ -899,7 +980,6 @@ struct MemorySpillRejectStats {
 };
 
 enum class MemorySpillRejectKind : uint8_t {
-  CrossBlock,
   Eligible,
   Fixed,
   MemoryIssuer,
@@ -939,27 +1019,6 @@ inline bool groupHasMemoryIssuerValue(IntervalGroup *group) {
   return false;
 }
 
-inline bool groupHasCrossBlockUse(IntervalGroup *group) {
-  if (!group)
-    return false;
-  for (Interval *lane : group->intervals) {
-    for (Value value : lane->values) {
-      Operation *def = value.getDefiningOp();
-      if (!def)
-        continue;
-      Block *block = def->getBlock();
-      for (OpOperand &use : value.getUses()) {
-        Operation *user = use.getOwner();
-        if (isRegAllocTempOp(user))
-          continue;
-        if (user->getBlock() != block)
-          return true;
-      }
-    }
-  }
-  return false;
-}
-
 inline bool groupHasNonTempUse(IntervalGroup *group) {
   if (!group)
     return false;
@@ -968,23 +1027,6 @@ inline bool groupHasNonTempUse(IntervalGroup *group) {
       for (OpOperand &use : value.getUses())
         if (!isRegAllocTempOp(use.getOwner()))
           return true;
-  return false;
-}
-
-inline bool groupHasRegionBoundary(IntervalGroup *group) {
-  if (!group)
-    return false;
-  for (Interval *lane : group->intervals) {
-    for (Value value : lane->values) {
-      Operation *def = value.getDefiningOp();
-      if (def && def->getNumRegions() != 0)
-        return true;
-      for (OpOperand &use : value.getUses())
-        if (!isRegAllocTempOp(use.getOwner()) &&
-            use.getOwner()->getNumRegions() != 0)
-          return true;
-    }
-  }
   return false;
 }
 
@@ -1002,10 +1044,6 @@ inline MemorySpillRejectKind getMemorySpillUseRejectKind(IntervalGroup *group,
          "caller handles non-live spill lanes");
   if (groupHasMemoryIssuerValue(group))
     return MemorySpillRejectKind::MemoryIssuer;
-  if (groupHasCrossBlockUse(group))
-    return MemorySpillRejectKind::CrossBlock;
-  if (groupHasRegionBoundary(group))
-    return MemorySpillRejectKind::NonPromotable;
   if (!groupHasNonTempUse(group))
     return MemorySpillRejectKind::NoUse;
   return MemorySpillRejectKind::Eligible;
@@ -1025,9 +1063,6 @@ inline MemorySpillRejectKind getMemorySpillRejectKind(IntervalGroup *group,
 inline void incrementMemorySpillReject(MemorySpillRejectStats &stats,
                                        MemorySpillRejectKind kind) {
   switch (kind) {
-  case MemorySpillRejectKind::CrossBlock:
-    ++stats.crossBlock;
-    break;
   case MemorySpillRejectKind::Eligible:
     ++stats.eligible;
     break;
@@ -1083,7 +1118,6 @@ inline void setMemorySpillRejectDiagnostics(func::FuncOp func,
   Builder builder(func.getContext());
   NamedAttrList attrs;
   attrs.set("total", builder.getI64IntegerAttr(stats.total));
-  addMemorySpillRejectCount(builder, attrs, "cross_block", stats.crossBlock);
   addMemorySpillRejectCount(builder, attrs, "eligible", stats.eligible);
   addMemorySpillRejectCount(builder, attrs, "fixed", stats.fixed);
   addMemorySpillRejectCount(builder, attrs, "memory_issuer",

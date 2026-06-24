@@ -1,21 +1,20 @@
-// RUN: not wave-opt --waveamd-reg-alloc='vgpr-limit=16 agpr-limit=0' \
-// RUN:   --waveamd-decompose-mem-tuples --waveamd-insert-ticket-waits \
-// RUN:   --waveamd-insert-hazard-waits --waveamd-resource-info %s 2>&1 \
-// RUN:   | FileCheck %s --check-prefix=ERR
+// RUN: wave-opt --waveamd-reg-alloc='mark-overflow=true vgpr-limit=16 agpr-limit=0' \
+// RUN:   --waveamd-resource-info %s | FileCheck %s
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
-// ERR: waveamd-reg-alloc ran out of VGPR registers
-// ERR: memory spill rejected candidates: lds_spill_missing_workgroup_shape
-// ERR: pressure relief candidates=[]
-
-// ASM-LABEL: scratch_loop_carry_backend_finish:
-// ASM: scratch_store_b32 off, v8, s2
-// ASM: scratch_store_b32 off, v15, s2 offset:28
-// ASM: scratch_load_b32 v8, off, s2
-// ASM: s_waitcnt vmcnt(0)
-// ASM: global_store_b32 {{v[0-9]+}}, v8, s[0:1]
-// ASM: .amdhsa_private_segment_fixed_size 32
+// CHECK-LABEL: func.func @scratch_loop_carry_backend_finish
+// CHECK-SAME: waveamdmachine.regalloc_overflowed = 1 : i64
+// CHECK-SAME: waveamdmachine.scratch_spill_bytes = 132 : i64
+// CHECK: %[[INIT_STORE:.+]] = waveamdmachine.scratch_store_tuple_b32 {{.*}} offset 32
+// CHECK: %[[INIT_LOAD:.+]], {{.*}} = waveamdmachine.scratch_load_tuple_b32 {{.*}} after %[[INIT_STORE]] offset 32
+// CHECK: waveamdmachine.uniform_loop {{.*}} carries(%[[INIT_LOAD]] : !waveamdmachine.reg<vgpr, 8>)
+// CHECK: ^bb0(%[[CARRY:.+]]: !waveamdmachine.reg<vgpr, 8>):
+// CHECK: %[[CARRY_STORE:.+]] = waveamdmachine.scratch_store_tuple_b32 {{.*}}, %[[CARRY]], {{.*}} offset 96
+// CHECK: %[[CARRY_LOAD:.+]], {{.*}} = waveamdmachine.scratch_load_tuple_b32 {{.*}} after %[[CARRY_STORE]] offset 96
+// CHECK: waveamdmachine.continue_if {{.*}} carries(%[[CARRY_LOAD]] : !waveamdmachine.reg<vgpr, 8>)
+// CHECK: waveamdmachine.scratch_store_b32 {{.*}} offset 128
+// CHECK: waveamdmachine.global_store_b32
 func.func @scratch_loop_carry_backend_finish()
     attributes {wave.kernel, waveamdmachine.target_waves = 4 : i64} {
   %zero = waveamdmachine.imm 0 : !waveamdmachine.imm

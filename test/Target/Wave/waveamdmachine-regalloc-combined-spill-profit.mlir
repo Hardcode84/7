@@ -108,7 +108,11 @@ func.func @placement_rejects_sgpr_to_vgpr_promotion()
 
 // CHECK-LABEL: func.func @combined_pressure_rejects_wide_cheap_expr_spill
 // CHECK-SAME: waveamdmachine.regalloc_overflowed = 1 : i64
-// CHECK-NOT: waveamdmachine.scratch_spill_bytes
+// CHECK-SAME: waveamdmachine.scratch_spill_bytes = 12 : i64
+// CHECK: waveamdmachine.scratch_store_tuple_b32
+// CHECK: waveamdmachine.scratch_load_tuple_b32
+// CHECK: waveamdmachine.scratch_store_b32 {{.*}} offset 8
+// CHECK: waveamdmachine.scratch_load_b32 {{.*}} offset 8
 // CHECK: waveamdmachine.s_endpgm
 func.func @combined_pressure_rejects_wide_cheap_expr_spill()
     attributes {wave.kernel, waveamdmachine.target_waves = 4 : i64} {

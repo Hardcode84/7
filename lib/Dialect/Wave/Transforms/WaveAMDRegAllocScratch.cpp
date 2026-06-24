@@ -391,8 +391,8 @@ private:
     unsigned memoryOps = getScratchMemoryOps(plan, width);
     wave::WaveAMDPressureReliefCost cost;
     cost.materializationOps = static_cast<int64_t>(opCount) * (1 + uses.size());
-    cost.loopWeightedOps =
-        static_cast<int64_t>(opCount) * getLoopDepth(value.getDefiningOp());
+    cost.loopWeightedOps = static_cast<int64_t>(opCount) *
+                           getLoopDepth(getMemorySpillValueAnchorOp(value));
     for (OpOperand *use : uses)
       cost.loopWeightedOps +=
           static_cast<int64_t>(opCount) * getLoopDepth(use->getOwner());
@@ -401,7 +401,7 @@ private:
   }
 
   bool hasSimpleUses(Value value, SmallVectorImpl<OpOperand *> &uses) const {
-    return collectSimpleMemorySpillUses(value, uses);
+    return collectSimpleMemorySpillUses(value, inventory, uses);
   }
 
   ScratchSpillPlan getPlanForBytes(unsigned valueBytes,
@@ -457,6 +457,8 @@ private:
     SmallVector<ScratchValueSlot, 8> slots;
     unsigned extraReservedBytes = 0;
     for (Value value : getGroupValues(group)) {
+      if (!hasNonTempUse(value))
+        continue;
       FailureOr<ScratchValueSlot> slot =
           getGroupValueSlot(value, extraReservedBytes);
       if (failed(slot))
@@ -545,24 +547,29 @@ private:
       const wave::WaveAMDPressureReliefPlan &reliefPlan,
       wave::WaveAMDPressureReliefMaterializationContext &context,
       OpBuilder &builder) const {
-    Operation *def = value.getDefiningOp();
-    builder.setInsertionPointAfter(def);
+    Operation *diagOp = getMemorySpillValueDiagOp(value);
+    if (!diagOp)
+      return mlir::emitError(value.getLoc())
+             << "waveamd-reg-alloc cannot materialize scratch spill for value";
+    setInsertionPointForMemorySpillStore(value, builder);
     waveamdmachine::RegType valueType =
         cast<waveamdmachine::RegType>(value.getType());
     FailureOr<wave::WaveAMDPressureReliefTempAssignment> valueAssignment =
         context.consumeTempAssignment(reliefPlan, valueType.getRegClass(),
-                                      valueType.getWidth(), def);
+                                      valueType.getWidth(), diagOp);
     if (failed(valueAssignment))
       return failure();
     assignValueToTempAssignment(value, *valueAssignment);
     assignTupleFromElementsBridgeValues(value, *valueAssignment, inventory);
-    FailureOr<Value> storeValue =
-        materializeMemorySpillStoreValue(value, reliefPlan, context, builder);
+    FailureOr<Value> storeValue = materializeMemorySpillStoreValue(
+        value, reliefPlan, context, builder, diagOp);
     if (failed(storeValue))
       return failure();
-    Value storeDependency = getMemoryIssuerToken(def);
+    Value storeDependency;
+    if (Operation *def = value.getDefiningOp())
+      storeDependency = getMemoryIssuerToken(def);
     return storeSpillValue(*storeValue, storeDependency, spillPlan, reliefPlan,
-                           context, builder, def->getLoc());
+                           context, builder, value.getLoc(), diagOp);
   }
 
   LogicalResult replaceValueUsesWithLoads(
@@ -617,17 +624,17 @@ private:
   storeSpillValue(Value value, Value token, ScratchSpillPlan plan,
                   const wave::WaveAMDPressureReliefPlan &reliefPlan,
                   wave::WaveAMDPressureReliefMaterializationContext &context,
-                  OpBuilder &builder, Location loc) const {
+                  OpBuilder &builder, Location loc, Operation *diagOp) const {
     unsigned width = cast<waveamdmachine::RegType>(value.getType()).getWidth();
     recordVGPRSpillSave(width, builder);
     if (width > 1 && tupleFitsImmediate(plan.slotBase, width))
       return storeTupleValue(value, token, plan, reliefPlan, context, builder,
-                             loc);
+                             loc, diagOp);
     if (width > 1)
       return storeScalarizedValue(value, token, plan, reliefPlan, context,
-                                  builder, loc);
+                                  builder, loc, diagOp);
     return storeScalarValue(value, token, plan, reliefPlan, context, builder,
-                            loc);
+                            loc, diagOp);
   }
 
   FailureOr<ScratchLoadResult>
@@ -645,35 +652,35 @@ private:
       return failure();
     if (width > 1 && tupleFitsImmediate(plan.slotBase, width))
       return loadTupleValue(*assignedType, token, plan, reliefPlan, context,
-                            builder, loc);
+                            builder, loc, diagOp);
     if (width > 1)
       return loadScalarizedValue(*assignedType, token, plan, reliefPlan,
-                                 context, builder, loc);
+                                 context, builder, loc, diagOp);
     return loadScalarValue(*assignedType, token, plan, reliefPlan, context,
-                           builder, loc);
+                           builder, loc, diagOp);
   }
 
   FailureOr<Value>
   storeScalarValue(Value value, Value token, ScratchSpillPlan plan,
                    const wave::WaveAMDPressureReliefPlan &reliefPlan,
                    wave::WaveAMDPressureReliefMaterializationContext &context,
-                   OpBuilder &builder, Location loc) const {
+                   OpBuilder &builder, Location loc, Operation *diagOp) const {
     return storeScalarValue(value, token, plan.slotBase, reliefPlan, context,
-                            builder, loc);
+                            builder, loc, diagOp);
   }
 
   FailureOr<Value>
   storeScalarValue(Value value, Value token, unsigned byteOffset,
                    const wave::WaveAMDPressureReliefPlan &reliefPlan,
                    wave::WaveAMDPressureReliefMaterializationContext &context,
-                   OpBuilder &builder, Location loc) const {
+                   OpBuilder &builder, Location loc, Operation *diagOp) const {
     Type tokenType = waveamdmachine::MemTokenType::get(builder.getContext());
     Value storeVaddr;
     Value storeSaddr;
     int64_t storeOffset = 0;
     if (failed(materializeAddress(builder, loc, byteOffset, storeVaddr,
                                   storeSaddr, storeOffset, reliefPlan, context,
-                                  value.getDefiningOp())))
+                                  diagOp)))
       return failure();
     waveamdmachine::ScratchStoreB32Op store =
         waveamdmachine::ScratchStoreB32Op::create(builder, loc, tokenType,
@@ -687,23 +694,23 @@ private:
   loadScalarValue(Type type, Value token, ScratchSpillPlan plan,
                   const wave::WaveAMDPressureReliefPlan &reliefPlan,
                   wave::WaveAMDPressureReliefMaterializationContext &context,
-                  OpBuilder &builder, Location loc) const {
+                  OpBuilder &builder, Location loc, Operation *diagOp) const {
     return loadScalarValue(type, token, plan.slotBase, reliefPlan, context,
-                           builder, loc);
+                           builder, loc, diagOp);
   }
 
   FailureOr<ScratchLoadResult>
   loadScalarValue(Type type, Value token, unsigned byteOffset,
                   const wave::WaveAMDPressureReliefPlan &reliefPlan,
                   wave::WaveAMDPressureReliefMaterializationContext &context,
-                  OpBuilder &builder, Location loc) const {
+                  OpBuilder &builder, Location loc, Operation *diagOp) const {
     Type tokenType = waveamdmachine::MemTokenType::get(builder.getContext());
     Value loadVaddr;
     Value loadSaddr;
     int64_t loadOffset = 0;
     if (failed(materializeAddress(builder, loc, byteOffset, loadVaddr,
                                   loadSaddr, loadOffset, reliefPlan, context,
-                                  token.getDefiningOp())))
+                                  diagOp)))
       return failure();
     waveamdmachine::ScratchLoadB32Op load =
         waveamdmachine::ScratchLoadB32Op::create(builder, loc, type, tokenType,
@@ -717,7 +724,7 @@ private:
       Value value, Value token, ScratchSpillPlan plan,
       const wave::WaveAMDPressureReliefPlan &reliefPlan,
       wave::WaveAMDPressureReliefMaterializationContext &context,
-      OpBuilder &builder, Location loc) const {
+      OpBuilder &builder, Location loc, Operation *diagOp) const {
     Type tokenType = waveamdmachine::MemTokenType::get(builder.getContext());
     SmallVector<Value> elements = splitMemorySpillValue(value, builder, loc);
     SmallVector<Value> tokens;
@@ -725,7 +732,7 @@ private:
     for (auto [index, element] : llvm::enumerate(elements)) {
       FailureOr<Value> stored = storeScalarValue(
           element, token, plan.slotBase + static_cast<unsigned>(index) * 4,
-          reliefPlan, context, builder, loc);
+          reliefPlan, context, builder, loc, diagOp);
       if (failed(stored))
         return failure();
       tokens.push_back(*stored);
@@ -737,7 +744,7 @@ private:
       Type type, Value token, ScratchSpillPlan plan,
       const wave::WaveAMDPressureReliefPlan &reliefPlan,
       wave::WaveAMDPressureReliefMaterializationContext &context,
-      OpBuilder &builder, Location loc) const {
+      OpBuilder &builder, Location loc, Operation *diagOp) const {
     Type tokenType = waveamdmachine::MemTokenType::get(builder.getContext());
     SmallVector<Type> elementTypes = getMemorySpillScalarRegTypes(type);
     SmallVector<Value> elements;
@@ -747,7 +754,7 @@ private:
     for (auto [index, elementType] : llvm::enumerate(elementTypes)) {
       FailureOr<ScratchLoadResult> load = loadScalarValue(
           elementType, token, plan.slotBase + static_cast<unsigned>(index) * 4,
-          reliefPlan, context, builder, loc);
+          reliefPlan, context, builder, loc, diagOp);
       if (failed(load))
         return failure();
       elements.push_back(load->value);
@@ -762,14 +769,14 @@ private:
   storeTupleValue(Value value, Value token, ScratchSpillPlan plan,
                   const wave::WaveAMDPressureReliefPlan &reliefPlan,
                   wave::WaveAMDPressureReliefMaterializationContext &context,
-                  OpBuilder &builder, Location loc) const {
+                  OpBuilder &builder, Location loc, Operation *diagOp) const {
     Type tokenType = waveamdmachine::MemTokenType::get(builder.getContext());
     Value storeVaddr;
     Value storeSaddr;
     int64_t storeOffset = 0;
     if (failed(materializeAddress(builder, loc, plan.slotBase, storeVaddr,
                                   storeSaddr, storeOffset, reliefPlan, context,
-                                  value.getDefiningOp())))
+                                  diagOp)))
       return failure();
     waveamdmachine::ScratchStoreTupleB32Op store =
         waveamdmachine::ScratchStoreTupleB32Op::create(
@@ -783,14 +790,14 @@ private:
   loadTupleValue(Type type, Value token, ScratchSpillPlan plan,
                  const wave::WaveAMDPressureReliefPlan &reliefPlan,
                  wave::WaveAMDPressureReliefMaterializationContext &context,
-                 OpBuilder &builder, Location loc) const {
+                 OpBuilder &builder, Location loc, Operation *diagOp) const {
     Type tokenType = waveamdmachine::MemTokenType::get(builder.getContext());
     Value loadVaddr;
     Value loadSaddr;
     int64_t loadOffset = 0;
     if (failed(materializeAddress(builder, loc, plan.slotBase, loadVaddr,
                                   loadSaddr, loadOffset, reliefPlan, context,
-                                  token.getDefiningOp())))
+                                  diagOp)))
       return failure();
     waveamdmachine::ScratchLoadTupleB32Op load =
         waveamdmachine::ScratchLoadTupleB32Op::create(

@@ -456,11 +456,6 @@ wmma_f16_matmul_tiled:
 		v_addc_co_u32_e64 v107, vcc, v93, v103, vcc
 		v_accvgpr_write_b32 a2, v106
 		v_accvgpr_write_b32 a3, v107
-		v_accvgpr_read_b32 v92, a2
-		v_accvgpr_read_b32 v93, a3
-		s_mov_b32 s60, 0
-		scratch_store_dword off, v92, s60 offset:552
-		scratch_store_dword off, v93, s60 offset:556
 		s_mov_b32 s60, 0x80
 		s_mov_b32 s61, 0
 		v_mov_b32_e32 v92, s60
@@ -1309,11 +1304,8 @@ wmma_f16_matmul_tiled:
 		v_add_u32_e32 v89, v89, v3
 		v_mul_lo_u32 v3, v87, v8
 		v_add_u32_e32 v89, v89, v3
-		s_mov_b32 s60, 0
-		s_waitcnt vmcnt(50)
-		scratch_load_dword v86, off, s60 offset:552
-		scratch_load_dword v87, off, s60 offset:556
-		s_waitcnt vmcnt(0)
+		v_accvgpr_read_b32 v86, a2
+		v_accvgpr_read_b32 v87, a3
 		v_add_co_u32_e64 v90, vcc, v86, v88
 		v_addc_co_u32_e64 v91, vcc, v87, v89, vcc
 		v_lshlrev_b32_e32 v3, 2, v0
@@ -1587,15 +1579,15 @@ wmma_f16_matmul_tiled:
 		ds_read_b128 v[96:99], v87 offset:5120
 		s_mov_b32 s60, 0
 		s_waitcnt lgkmcnt(0)
-		scratch_store_dword off, v96, s60 offset:560
-		scratch_store_dword off, v97, s60 offset:564
-		scratch_store_dword off, v98, s60 offset:568
-		scratch_store_dword off, v99, s60 offset:572
+		scratch_store_dword off, v96, s60 offset:552
+		scratch_store_dword off, v97, s60 offset:556
+		scratch_store_dword off, v98, s60 offset:560
+		scratch_store_dword off, v99, s60 offset:564
 		s_mov_b32 s60, 0
-		scratch_store_dword off, v96, s60 offset:576
-		scratch_store_dword off, v97, s60 offset:580
-		scratch_store_dword off, v98, s60 offset:584
-		scratch_store_dword off, v99, s60 offset:588
+		scratch_store_dword off, v96, s60 offset:568
+		scratch_store_dword off, v97, s60 offset:572
+		scratch_store_dword off, v98, s60 offset:576
+		scratch_store_dword off, v99, s60 offset:580
 		v_mfma_scale_f32_16x16x128_f8f6f4 a[160:163], v[36:39], v[48:51], a[160:163], v15, v14 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4
 		ds_read_b128 v[96:99], v87 offset:6144
 		s_mov_b32 s60, 0
@@ -2005,8 +1997,6 @@ wmma_f16_matmul_tiled:
 		s_waitcnt vmcnt(0)
 		v_add_co_u32_e64 v198, vcc, v88, v122
 		v_addc_co_u32_e64 v199, vcc, v89, v123, vcc
-		v_accvgpr_write_b32 a2, v198
-		v_accvgpr_write_b32 a3, v199
 		v_mfma_scale_f32_16x16x128_f8f6f4 v[4:7], v[96:99], v[132:135], v[4:7], v3, v9 op_sel_hi:[0,0,0] cbsz:4 blgp:4
 		ds_read_b128 v[200:203], v82 offset:16384
 		v_mfma_scale_f32_16x16x128_f8f6f4 a[4:7], v[96:99], v[136:139], a[4:7], v3, v9 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4
@@ -2109,8 +2099,8 @@ wmma_f16_matmul_tiled:
 		buffer_load_dwordx4 v164, s[4:7], 0 offen lds
 		v_mfma_scale_f32_16x16x128_f8f6f4 a[132:135], v[112:115], v[136:139], a[132:135], v86, v9 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4
 		s_add_i32 m0, s9, 0x20000
-		v_accvgpr_read_b32 v82, a2
-		buffer_load_dwordx4 v82, s[24:27], 0 offen lds
+		s_nop 0
+		buffer_load_dwordx4 v198, s[24:27], 0 offen lds
 		v_mfma_scale_f32_16x16x128_f8f6f4 a[136:139], v[112:115], v[140:143], a[136:139], v86, v90 op_sel_hi:[0,0,0] cbsz:4 blgp:4
 		v_mfma_scale_f32_16x16x128_f8f6f4 a[140:143], v[112:115], v[144:147], a[140:143], v86, v90 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4
 		v_mfma_scale_f32_16x16x128_f8f6f4 a[144:147], v[112:115], v[148:151], a[144:147], v86, v120 op_sel_hi:[0,0,0] cbsz:4 blgp:4
@@ -2217,10 +2207,10 @@ wmma_f16_matmul_tiled:
 		v_mov_b32_e32 v35, v95
 		s_mov_b32 s60, 0
 		s_nop 1
-		scratch_load_dword v88, off, s60 offset:576
-		scratch_load_dword v89, off, s60 offset:580
-		scratch_load_dword v90, off, s60 offset:584
-		scratch_load_dword v91, off, s60 offset:588
+		scratch_load_dword v88, off, s60 offset:568
+		scratch_load_dword v89, off, s60 offset:572
+		scratch_load_dword v90, off, s60 offset:576
+		scratch_load_dword v91, off, s60 offset:580
 		s_waitcnt vmcnt(0)
 		v_mov_b32_e32 v36, v88
 		v_mov_b32_e32 v37, v89
@@ -3202,7 +3192,7 @@ wmma_f16_matmul_tiled:
 	.p2align	6, 0x0
 	.amdhsa_kernel wmma_f16_matmul_tiled
 		.amdhsa_group_segment_fixed_size 24576
-		.amdhsa_private_segment_fixed_size 592
+		.amdhsa_private_segment_fixed_size 584
 		.amdhsa_kernarg_size 48
 		.amdhsa_user_sgpr_count 13
 		.amdhsa_user_sgpr_kernarg_segment_ptr 1
@@ -3231,7 +3221,7 @@ wmma_f16_matmul_tiled:
 	.set .Lwmma_f16_matmul_tiled.num_agpr, 256
 	.set .Lwmma_f16_matmul_tiled.numbered_sgpr, 62
 	.set .Lwmma_f16_matmul_tiled.num_named_barrier, 0
-	.set .Lwmma_f16_matmul_tiled.private_seg_size, 592
+	.set .Lwmma_f16_matmul_tiled.private_seg_size, 584
 	.set .Lwmma_f16_matmul_tiled.uses_vcc, 1
 	.set .Lwmma_f16_matmul_tiled.uses_flat_scratch, 1
 	.set .Lwmma_f16_matmul_tiled.has_dyn_sized_stack, 0
@@ -3275,14 +3265,14 @@ amdhsa.kernels:
     .kernarg_segment_size: 48
     .max_flat_workgroup_size: 256
     .name:           wmma_f16_matmul_tiled
-    .private_segment_fixed_size: 592
+    .private_segment_fixed_size: 584
     .sgpr_count:     62
     .sgpr_spill_count: 0
     .symbol:         wmma_f16_matmul_tiled.kd
     .uses_dynamic_stack: false
     .vgpr_count:     512
     .agpr_count:     256
-    .vgpr_spill_count: 148
+    .vgpr_spill_count: 146
     .wavefront_size: 64
     .workgroup_processor_mode: 1
 amdhsa.target:   amdgcn-amd-amdhsa--gfx950

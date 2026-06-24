@@ -434,8 +434,8 @@ private:
     unsigned opCount = getLDSMaterializationOps(plans);
     wave::WaveAMDPressureReliefCost cost;
     cost.materializationOps = static_cast<int64_t>(opCount) * (1 + uses.size());
-    cost.loopWeightedOps =
-        static_cast<int64_t>(opCount) * getLoopDepth(value.getDefiningOp());
+    cost.loopWeightedOps = static_cast<int64_t>(opCount) *
+                           getLoopDepth(getMemorySpillValueAnchorOp(value));
     for (OpOperand *use : uses)
       cost.loopWeightedOps +=
           static_cast<int64_t>(opCount) * getLoopDepth(use->getOwner());
@@ -444,7 +444,7 @@ private:
   }
 
   bool hasSimpleUses(Value value, SmallVectorImpl<OpOperand *> &uses) const {
-    return collectSimpleMemorySpillUses(value, uses);
+    return collectSimpleMemorySpillUses(value, inventory, uses);
   }
 
   LDSSpillPlan getPlanForBytes(unsigned valueBytes,
@@ -517,6 +517,8 @@ private:
     SmallVector<LDSValueSlot, 8> slots;
     unsigned extraReservedBytes = 0;
     for (Value value : getGroupValues(group)) {
+      if (!hasNonTempUse(value))
+        continue;
       FailureOr<LDSValueSlot> slot =
           getGroupValueSlot(value, extraReservedBytes);
       if (failed(slot))
@@ -686,10 +688,9 @@ private:
   storeSpillValue(Value value, Value token, ArrayRef<LDSSpillPlan> plans,
                   const wave::WaveAMDPressureReliefPlan &reliefPlan,
                   wave::WaveAMDPressureReliefMaterializationContext &context,
-                  OpBuilder &builder, Location loc) const {
+                  OpBuilder &builder, Location loc, Operation *diagOp) const {
     unsigned width = cast<waveamdmachine::RegType>(value.getType()).getWidth();
     assert(width == plans.size() && "LDS plans must match value width");
-    Operation *diagOp = value.getDefiningOp();
     if (width == 1)
       return storeScalarValue(value, token, plans.front(), reliefPlan, context,
                               builder, loc, diagOp);
@@ -753,24 +754,29 @@ private:
       const wave::WaveAMDPressureReliefPlan &plan,
       wave::WaveAMDPressureReliefMaterializationContext &context,
       OpBuilder &builder) const {
-    Operation *def = value.getDefiningOp();
-    builder.setInsertionPointAfter(def);
+    Operation *diagOp = getMemorySpillValueDiagOp(value);
+    if (!diagOp)
+      return mlir::emitError(value.getLoc())
+             << "waveamd-reg-alloc cannot materialize LDS spill for value";
+    setInsertionPointForMemorySpillStore(value, builder);
     waveamdmachine::RegType valueType =
         cast<waveamdmachine::RegType>(value.getType());
     FailureOr<wave::WaveAMDPressureReliefTempAssignment> valueAssignment =
         context.consumeTempAssignment(plan, valueType.getRegClass(),
-                                      valueType.getWidth(), def);
+                                      valueType.getWidth(), diagOp);
     if (failed(valueAssignment))
       return failure();
     assignValueToTempAssignment(value, *valueAssignment);
     assignTupleFromElementsBridgeValues(value, *valueAssignment, inventory);
     FailureOr<Value> storeValue =
-        materializeMemorySpillStoreValue(value, plan, context, builder);
+        materializeMemorySpillStoreValue(value, plan, context, builder, diagOp);
     if (failed(storeValue))
       return failure();
-    Value storeDependency = getMemoryIssuerToken(def);
+    Value storeDependency;
+    if (Operation *def = value.getDefiningOp())
+      storeDependency = getMemoryIssuerToken(def);
     return storeSpillValue(*storeValue, storeDependency, plans, plan, context,
-                           builder, def->getLoc());
+                           builder, value.getLoc(), diagOp);
   }
 
   LogicalResult replaceValueUsesWithLoads(

@@ -5,19 +5,21 @@
 // RUN: FileCheck %s --input-file=%t.yaml --check-prefix=REMARK
 
 // REMARK-NOT: Name:            regalloc-pressure-failure
-// REMARK: Name:            regalloc-scratch-plan
+// REMARK: Name:            regalloc-lds-plan
 // REMARK: Function:        scalar_vgpr_loop_carry_no_memory_spill
 // REMARK: reserved_spill_bytes: '0'
+// REMARK: status:          missing_workgroup_shape
+// REMARK: value_bytes:     '4'
+// REMARK: Name:            regalloc-scratch-plan
+// REMARK: Function:        scalar_vgpr_loop_carry_no_memory_spill
+// REMARK: reserved_spill_bytes: '28'
 // REMARK: status:          available
 // REMARK: uses_flat_scratch: 'true'
-// REMARK: slot_base:       '0'
+// REMARK: value_bytes:     '4'
+// REMARK: slot_base:       '28'
+// REMARK: slot_bytes:      '4'
 // REMARK: Name:            regalloc-summary
-// REMARK: Name:            regalloc-pressure-failure
-// REMARK: Function:        scalar_vgpr_loop_carry_no_memory_spill
-// REMARK: pressure_relief_providers: '{{.*}}provider=scratch-spill, candidates=0{{.*}}'
-// REMARK: non_promotable:  '1'
-// REMARK: eligible:        '1'
-// REMARK: total:           '2'
+// REMARK-NOT: Name:            regalloc-pressure-failure
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
