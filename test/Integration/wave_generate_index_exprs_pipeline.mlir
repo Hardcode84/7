@@ -99,17 +99,17 @@ func.func @rewrite_assumed_offset_after_normalize(
     %out: !wave.ptr<#wave.global, f16>, %idx_raw: !wave.simd<i32, 32>)
     attributes {wave.kernel} {
   %c0 = arith.constant 0.000000e+00 : f16
-  %c1 = arith.constant 1 : i32
+  %c2 = arith.constant 2 : i32
   %c4 = arith.constant 4 : i32
-  %c63 = arith.constant 63 : i32
+  %c64 = arith.constant 64 : i32
   // CHECK: %[[ASSUME:.*]] = wave.assume %[[IDX]]
   %idx = wave.assume %idx_raw as "x" [#wave.pred<"x >= 0">, #wave.pred<"x <= 31">] : !wave.simd<i32, 32>
-  %s1 = wave.splat %c1 : i32 -> !wave.simd<i32, 32>
+  %s2 = wave.splat %c2 : i32 -> !wave.simd<i32, 32>
   %s4 = wave.splat %c4 : i32 -> !wave.simd<i32, 32>
-  %s63 = wave.splat %c63 : i32 -> !wave.simd<i32, 32>
-  %hi = wave.binary shrui %idx, %s1
+  %s64 = wave.splat %c64 : i32 -> !wave.simd<i32, 32>
+  %hi = wave.binary divui %idx, %s2
       : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
-  %lo = wave.binary andi %idx, %s63
+  %lo = wave.binary remui %idx, %s64
       : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
   %scaled_hi = wave.binary muli %hi, %s4 overflow<nsw>
       : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
@@ -134,17 +134,17 @@ func.func @rewrite_assumed_buffer_offset_after_normalize(
     %out: !wave.ptr<#waveamd.buffer, f16>, %idx_raw: !wave.simd<i32, 32>)
     -> !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 32>
     attributes {wave.kernel} {
-  %c1 = arith.constant 1 : i32
+  %c2 = arith.constant 2 : i32
   %c4 = arith.constant 4 : i32
-  %c63 = arith.constant 63 : i32
+  %c64 = arith.constant 64 : i32
   // CHECK: %[[BUFFER_ASSUME:.*]] = wave.assume %[[IDX]]
   %idx = wave.assume %idx_raw as "x" [#wave.pred<"x >= 0">, #wave.pred<"x <= 31">] : !wave.simd<i32, 32>
-  %s1 = wave.splat %c1 : i32 -> !wave.simd<i32, 32>
+  %s2 = wave.splat %c2 : i32 -> !wave.simd<i32, 32>
   %s4 = wave.splat %c4 : i32 -> !wave.simd<i32, 32>
-  %s63 = wave.splat %c63 : i32 -> !wave.simd<i32, 32>
-  %hi = wave.binary shrui %idx, %s1
+  %s64 = wave.splat %c64 : i32 -> !wave.simd<i32, 32>
+  %hi = wave.binary divui %idx, %s2
       : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
-  %lo = wave.binary andi %idx, %s63
+  %lo = wave.binary remui %idx, %s64
       : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
   %scaled_hi = wave.binary muli %hi, %s4 overflow<nsw>
       : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
@@ -168,29 +168,29 @@ func.func @rewrite_cmp_operands_after_index_generation(
     %limit_raw: i32) -> !wave.mask<32>
     attributes {wave.kernel} {
   %c0 = arith.constant 0.000000e+00 : f16
-  %c1 = arith.constant 1 : i32
+  %c2 = arith.constant 2 : i32
   %c4 = arith.constant 4 : i32
-  %c63 = arith.constant 63 : i32
+  %c64 = arith.constant 64 : i32
   // CHECK: %[[IDX:.*]] = wave.assume %[[IDX_RAW]]
   %idx = wave.assume %idx_raw as "x"
       [#wave.pred<"x >= 0">, #wave.pred<"x <= 31">]
       : !wave.simd<i32, 32>
   // CHECK: %[[LIMIT:.*]] = wave.assume %[[LIMIT_RAW]]
   %limit = wave.assume %limit_raw as "x" [#wave.pred<"x >= 0">] : i32
-  %s1 = wave.splat %c1 : i32 -> !wave.simd<i32, 32>
+  %s2 = wave.splat %c2 : i32 -> !wave.simd<i32, 32>
   %s4 = wave.splat %c4 : i32 -> !wave.simd<i32, 32>
-  %s63 = wave.splat %c63 : i32 -> !wave.simd<i32, 32>
+  %s64 = wave.splat %c64 : i32 -> !wave.simd<i32, 32>
   %slimit = wave.splat %limit : i32 -> !wave.simd<i32, 32>
-  %hi = wave.binary shrui %idx, %s1
+  %hi = wave.binary divui %idx, %s2
       : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
-  %lo = wave.binary andi %idx, %s63
+  %lo = wave.binary remui %idx, %s64
       : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
   %scaled_hi = wave.binary muli %hi, %s4 overflow<nsw>
       : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
   %offset = wave.binary addi %lo, %scaled_hi overflow<nsw>
       : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
-  // CHECK-NOT: wave.binary andi
-  // CHECK-NOT: wave.binary shrui
+  // CHECK-NOT: wave.binary divui
+  // CHECK-NOT: wave.binary remui
   // CHECK: wave.index_expr <"2*raw0 + 8*floor(1/2*raw0)"> {{.*}} ["raw0"](%[[IDX]]) : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
   %ptr = wave.ptr_add %out, %offset
       : !wave.ptr<#wave.global, f16>, !wave.simd<i32, 32>

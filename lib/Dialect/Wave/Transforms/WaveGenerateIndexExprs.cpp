@@ -517,6 +517,20 @@ static std::optional<SignedI64Range> computeDivSIRange(BinaryOp binary,
   return SignedI64Range{lhs.first / *divisor, lhs.second / *divisor};
 }
 
+static std::optional<SignedI64Range> computeDivUIRange(SignedI64Range lhs,
+                                                       SignedI64Range rhs) {
+  if (lhs.first < 0 || rhs.first <= 0)
+    return std::nullopt;
+  return SignedI64Range{lhs.first / rhs.second, lhs.second / rhs.first};
+}
+
+static std::optional<SignedI64Range> computeRemUIRange(SignedI64Range lhs,
+                                                       SignedI64Range rhs) {
+  if (lhs.first < 0 || rhs.first <= 0)
+    return std::nullopt;
+  return SignedI64Range{0, std::min(lhs.second, rhs.second - 1)};
+}
+
 static std::optional<SignedI64Range> computeShruiRange(BinaryOp binary,
                                                        SignedI64Range lhs) {
   std::optional<int64_t> shift = getSplatOrConstantInt(binary.getRhs());
@@ -555,6 +569,10 @@ computeBinarySignedI64Range(BinaryOp binary, SignedI64Range lhs,
     return finiteSignedI64Range(solver, value);
   case BinaryKind::DivSI:
     return computeDivSIRange(binary, lhs);
+  case BinaryKind::DivUI:
+    return computeDivUIRange(lhs, rhs);
+  case BinaryKind::RemUI:
+    return computeRemUIRange(lhs, rhs);
   case BinaryKind::ShRUI:
     return computeShruiRange(binary, lhs);
   case BinaryKind::AndI:
@@ -639,6 +657,8 @@ static bool canBuildSymbolicBinaryOp(BinaryOp op, bool allowI64Integers,
   switch (op.getKind()) {
   case BinaryKind::XOrI:
   case BinaryKind::DivSI:
+  case BinaryKind::DivUI:
+  case BinaryKind::RemUI:
   case BinaryKind::ShRUI:
   case BinaryKind::AndI:
     return true;
@@ -807,6 +827,10 @@ private:
       return buildShift(op, skip, depth);
     case BinaryKind::DivSI:
       return buildSignedDiv(op, skip, depth);
+    case BinaryKind::DivUI:
+      return buildUnsignedDiv(op, skip, depth);
+    case BinaryKind::RemUI:
+      return buildUnsignedRem(op, skip, depth);
     case BinaryKind::ShRUI:
       return buildUnsignedShiftRight(op, skip, depth);
     case BinaryKind::AndI:
@@ -886,6 +910,56 @@ private:
     if (failed(div))
       return failure();
     return sym::composeExprFloor(store, *div);
+  }
+
+  bool hasUnsignedDivRemDomain(BinaryOp op) {
+    std::optional<SignedI64Range> lhsRange =
+        computeSignedI64Range(op.getLhs(), solver, store);
+    std::optional<SignedI64Range> rhsRange =
+        computeSignedI64Range(op.getRhs(), solver, store);
+    return lhsRange && rhsRange && lhsRange->first >= 0 && rhsRange->first > 0;
+  }
+
+  FailureOr<std::pair<sym::ExprHandle, sym::ExprHandle>>
+  buildBinaryOperands(BinaryOp op, bool &skip, unsigned depth) {
+    FailureOr<sym::ExprHandle> lhs = buildExpr(op.getLhs(), skip, true, depth);
+    if (skip || failed(lhs))
+      return failure();
+    FailureOr<sym::ExprHandle> rhs = buildExpr(op.getRhs(), skip, true, depth);
+    if (skip || failed(rhs))
+      return failure();
+    return std::pair<sym::ExprHandle, sym::ExprHandle>{*lhs, *rhs};
+  }
+
+  FailureOr<sym::ExprHandle> buildUnsignedDiv(BinaryOp op, bool &skip,
+                                              unsigned depth) {
+    if (!hasUnsignedDivRemDomain(op)) {
+      skip = true;
+      return failure();
+    }
+    FailureOr<std::pair<sym::ExprHandle, sym::ExprHandle>> operands =
+        buildBinaryOperands(op, skip, depth);
+    if (failed(operands))
+      return failure();
+    FailureOr<sym::ExprHandle> div = sym::composeExprBinary(
+        store, operands->first, sym::ExprBinaryOp::Div, operands->second);
+    if (failed(div))
+      return failure();
+    return sym::composeExprFloor(store, *div);
+  }
+
+  FailureOr<sym::ExprHandle> buildUnsignedRem(BinaryOp op, bool &skip,
+                                              unsigned depth) {
+    if (!hasUnsignedDivRemDomain(op)) {
+      skip = true;
+      return failure();
+    }
+    FailureOr<std::pair<sym::ExprHandle, sym::ExprHandle>> operands =
+        buildBinaryOperands(op, skip, depth);
+    if (failed(operands))
+      return failure();
+    return sym::composeExprBinary(store, operands->first,
+                                  sym::ExprBinaryOp::Mod, operands->second);
   }
 
   FailureOr<sym::ExprHandle> buildSignedDiv(BinaryOp op, bool &skip,
