@@ -354,6 +354,76 @@ func.func @ptr_add_select_offset(
 
 // -----
 
+// CHECK-LABEL: func.func @ptr_add_assumed_select_offset
+// CHECK-SAME: (%{{.*}}: !wave.ptr<#wave.global, f32>, %[[IDX:.*]]: !wave.simd<i32, 32>, %[[LIMIT:.*]]: !wave.simd<i32, 32>)
+func.func @ptr_add_assumed_select_offset(
+    %out: !wave.ptr<#wave.global, f32>, %idx_raw: !wave.simd<i32, 32>,
+    %limit_raw: !wave.simd<i32, 32>)
+    -> !wave.simd<!wave.ptr<#wave.global, f32>, 32> {
+  // CHECK: [[IDX_ASSUME:%.*]] = wave.assume %[[IDX]]
+  %idx = wave.assume %idx_raw as "x" [#wave.pred<"x >= 0">, #wave.pred<"x <= 31">] : !wave.simd<i32, 32>
+  // CHECK: [[LIMIT_ASSUME:%.*]] = wave.assume %[[LIMIT]]
+  %limit = wave.assume %limit_raw as "y" [#wave.pred<"y >= 0">, #wave.pred<"y <= 31">] : !wave.simd<i32, 32>
+  %mask = wave.cmpi ult %idx, %limit
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.mask<32>
+  %selected_raw = wave.select %mask, %idx, %limit
+      : !wave.mask<32>, !wave.simd<i32, 32>
+  %selected = wave.assume %selected_raw as "z" [#wave.pred<"z >= 0">, #wave.pred<"z <= 31">] : !wave.simd<i32, 32>
+  // CHECK: [[OFF:%.*]] = wave.index_expr <"Piecewise(
+  // CHECK-SAME: raw0
+  // CHECK-SAME: raw1
+  // CHECK-SAME: assuming {{.*}} ["raw0", "raw1"]([[IDX_ASSUME]], [[LIMIT_ASSUME]]) : (!wave.simd<i32, 32>, !wave.simd<i32, 32>) -> !wave.simd<index, 32>
+  // CHECK: wave.ptr_add %{{.*}}, [[OFF]]
+  %ptr = wave.ptr_add %out, %selected
+      : !wave.ptr<#wave.global, f32>, !wave.simd<i32, 32>
+      -> !wave.simd<!wave.ptr<#wave.global, f32>, 32>
+  return %ptr : !wave.simd<!wave.ptr<#wave.global, f32>, 32>
+}
+
+// -----
+
+// CHECK-LABEL: func.func @index_expr_assumed_select_binding_expands
+// CHECK-SAME: (%[[IDX:.*]]: !wave.simd<i32, 32>, %[[LIMIT:.*]]: !wave.simd<i32, 32>)
+func.func @index_expr_assumed_select_binding_expands(
+    %idx_raw: !wave.simd<i32, 32>, %limit_raw: !wave.simd<i32, 32>)
+    -> !wave.simd<index, 32> {
+  // CHECK: [[IDX_ASSUME:%.*]] = wave.assume %[[IDX]]
+  %idx = wave.assume %idx_raw as "x" [#wave.pred<"x >= 0">, #wave.pred<"x <= 31">] : !wave.simd<i32, 32>
+  // CHECK: [[LIMIT_ASSUME:%.*]] = wave.assume %[[LIMIT]]
+  %limit = wave.assume %limit_raw as "y" [#wave.pred<"y >= 0">, #wave.pred<"y <= 31">] : !wave.simd<i32, 32>
+  %mask = wave.cmpi ult %idx, %limit
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.mask<32>
+  %selected_raw = wave.select %mask, %idx, %limit
+      : !wave.mask<32>, !wave.simd<i32, 32>
+  %selected = wave.assume %selected_raw as "z" [#wave.pred<"z >= 0">, #wave.pred<"z <= 31">] : !wave.simd<i32, 32>
+  // CHECK-NOT: wave.select
+  // CHECK: [[OUT:%.*]] = wave.index_expr <"2*Piecewise(
+  // CHECK-SAME: raw0
+  // CHECK-SAME: raw1
+  // CHECK-SAME: assuming {{.*}} ["raw0", "raw1"]([[IDX_ASSUME]], [[LIMIT_ASSUME]]) : (!wave.simd<i32, 32>, !wave.simd<i32, 32>) -> !wave.simd<index, 32>
+  %out = wave.index_expr <"2*z"> ["z"](%selected)
+      : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
+  return %out : !wave.simd<index, 32>
+}
+
+// -----
+
+// CHECK-LABEL: func.func @assumed_existing_index_expr_binding_expands
+// CHECK-SAME: (%[[LANE:.*]]: !wave.simd<i32, 32>)
+func.func @assumed_existing_index_expr_binding_expands(
+    %lane: !wave.simd<i32, 32>) -> !wave.simd<index, 32> {
+  %inner = wave.index_expr <"1 + lid"> ["lid"](%lane)
+      : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
+  %bounded = wave.assume %inner as "x" [#wave.pred<"x >= 0">]
+      : !wave.simd<index, 32>
+  // CHECK: [[OUT:%.*]] = wave.index_expr <"2*(1 + lid)"> assuming [#wave.pred<"1 + lid >= 0">] ["lid"](%[[LANE]]) : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
+  %outer = wave.index_expr <"2*x"> ["x"](%bounded)
+      : (!wave.simd<index, 32>) -> !wave.simd<index, 32>
+  return %outer : !wave.simd<index, 32>
+}
+
+// -----
+
 // CHECK-LABEL: func.func @multi_use_binding_expands
 // CHECK-SAME: (%{{.*}}: !wave.simd<i32, 32>)
 func.func @multi_use_binding_expands(%idx_raw: !wave.simd<i32, 32>)

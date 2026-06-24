@@ -768,11 +768,13 @@ public:
                                 bool allowI64Integers = false,
                                 bool assumeI32StorageRange = false,
                                 bool bindI32Root = false,
-                                bool requireI32RootRange = false)
+                                bool requireI32RootRange = false,
+                                bool expandIndexExprRoot = false)
       : dialect(dialect), solver(solver), store(dialect.getSymbolStore()),
         allowI64Integers(allowI64Integers),
         assumeI32StorageRange(assumeI32StorageRange), bindI32Root(bindI32Root),
-        requireI32RootRange(requireI32RootRange) {}
+        requireI32RootRange(requireI32RootRange),
+        expandIndexExprRoot(expandIndexExprRoot) {}
 
   FailureOr<std::optional<SymbolicOffset>> build(Value value) {
     return build(value, /*allowRootLeaf=*/false);
@@ -824,6 +826,8 @@ private:
   }
 
   bool hasSymbolicRoot(Value value) {
+    if (value.getDefiningOp<IndexExprOp>())
+      return expandIndexExprRoot;
     if (AssumeOp assume = value.getDefiningOp<AssumeOp>())
       return hasSymbolicRoot(assume.getValue());
     if (BinaryOp binary = value.getDefiningOp<BinaryOp>())
@@ -1404,6 +1408,7 @@ private:
   bool assumeI32StorageRange = false;
   bool bindI32Root = false;
   bool requireI32RootRange = false;
+  bool expandIndexExprRoot = false;
   unsigned nextRawSymbol = 0;
 };
 
@@ -1743,7 +1748,8 @@ static FailureOr<bool> collectGeneratedBindingRewrite(
                                /*allowI64Integers=*/false,
                                /*assumeI32StorageRange=*/true,
                                /*bindI32Root=*/false,
-                               /*requireI32RootRange=*/false);
+                               /*requireI32RootRange=*/false,
+                               /*expandIndexExprRoot=*/true);
   FailureOr<std::optional<SymbolicOffset>> symbolic = builder.build(value);
   if (failed(symbolic))
     return op.emitError("failed to generate wave.index_expr binding");
