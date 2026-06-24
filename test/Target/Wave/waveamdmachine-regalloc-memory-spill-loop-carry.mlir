@@ -27,6 +27,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
 // RESULT-LABEL: func.func @scratch_loop_carry_result_use
 // RESULT-SAME: waveamdmachine.scratch_spill_bytes = 32 : i64
+// RESULT-SAME: waveamdmachine.vgpr_spill_count = 8 : i64
 // RESULT: %[[STORE:.*]] = waveamdmachine.scratch_store_tuple_b32
 // RESULT: %[[LOOP:.*]] = waveamdmachine.uniform_loop {{.*}}carries(%[[STORE]] : !waveamdmachine.mem.token)
 // RESULT: %[[LOAD:.*]], {{.*}} = waveamdmachine.scratch_load_tuple_b32 {{.*}} after %[[LOOP]]
@@ -196,6 +197,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
 // UPDATE-LABEL: func.func @scratch_loop_carry_updated_backedge
 // UPDATE-SAME: waveamdmachine.scratch_spill_bytes = 32 : i64
+// UPDATE-SAME: waveamdmachine.vgpr_spill_count = 16 : i64
 // UPDATE: %[[STORE:.*]] = waveamdmachine.scratch_store_tuple_b32
 // UPDATE: waveamdmachine.uniform_loop {{.*}}carries(%[[STORE]] : !waveamdmachine.mem.token)
 // UPDATE: ^bb0(%{{.*}}: !waveamdmachine.mem.token):

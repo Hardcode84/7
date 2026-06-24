@@ -3401,7 +3401,7 @@ amdhsa.kernels:
     .uses_dynamic_stack: false
     .vgpr_count:     512
     .agpr_count:     256
-    .vgpr_spill_count: 0
+    .vgpr_spill_count: 92
     .wavefront_size: 64
     .workgroup_processor_mode: 1
 amdhsa.target:   amdgcn-amd-amdhsa--gfx950

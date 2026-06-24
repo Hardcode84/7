@@ -838,6 +838,7 @@ private:
   Value storeSpillValue(Value value, Value token, ScratchSpillPlan plan,
                         OpBuilder &builder, Location loc) const {
     unsigned width = cast<waveamdmachine::RegType>(value.getType()).getWidth();
+    recordVGPRSpillSave(width, builder);
     if (width > 1 && tupleFitsImmediate(plan.slotBase, width))
       return storeTupleValue(value, token, plan, builder, loc);
     if (width > 1)
@@ -990,6 +991,7 @@ private:
   }
 
   void reserveSlot(const ScratchSpillPlan &plan, OpBuilder &builder) const {
+    assert(plan.slotBytes % 4 == 0 && "scratch spill slots are dwords");
     unsigned reserved =
         getUnsignedAttr(func, kScratchSpillBytesAttr).value_or(0);
     unsigned existingPrivate = getPrivateSegmentBytes(func, reserved);
@@ -999,6 +1001,13 @@ private:
     func->setAttr(kPrivateSegmentFixedSizeAttr,
                   builder.getI64IntegerAttr(existingPrivate + newReserved));
     func->setAttr(kUsesFlatScratchAttr, builder.getBoolAttr(true));
+  }
+
+  void recordVGPRSpillSave(unsigned dwords, OpBuilder &builder) const {
+    unsigned spilledVGPRs =
+        getUnsignedAttr(func, kVGPRSpillCountAttr).value_or(0);
+    func->setAttr(kVGPRSpillCountAttr,
+                  builder.getI64IntegerAttr(spilledVGPRs + dwords));
   }
 
   mutable std::string planRejectReason;

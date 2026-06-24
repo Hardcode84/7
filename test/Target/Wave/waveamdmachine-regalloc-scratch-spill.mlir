@@ -9,6 +9,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // CHECK-SAME: waveamdmachine.scratch_spill_bytes = 8 : i64
 // CHECK-SAME: waveamdmachine.uses_flat_scratch = true
 // CHECK-SAME: waveamdmachine.vgpr_count = 4 : i64
+// CHECK-SAME: waveamdmachine.vgpr_spill_count = 2 : i64
 // CHECK: %[[SADDR:.+]] = waveamdmachine.s_mov_b32_value
 // CHECK: %[[STORE0:.+]] = waveamdmachine.scratch_store_b32 {{.*}}, {{.*}}, %[[SADDR]]
 // CHECK: %[[STORE1:.+]] = waveamdmachine.scratch_store_b32 {{.*}}, {{.*}}, {{.*}} offset 4

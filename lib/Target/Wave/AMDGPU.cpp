@@ -69,6 +69,10 @@ static constexpr llvm::StringLiteral kPrivateSegmentFixedSizeAttr =
     "waveamdmachine.private_segment_fixed_size";
 static constexpr llvm::StringLiteral kUsesFlatScratchAttr =
     "waveamdmachine.uses_flat_scratch";
+static constexpr llvm::StringLiteral kSGPRSpillCountAttr =
+    "waveamdmachine.sgpr_spill_count";
+static constexpr llvm::StringLiteral kVGPRSpillCountAttr =
+    "waveamdmachine.vgpr_spill_count";
 // Text ISA names only v0..v255/a0..a255.
 static constexpr unsigned kTextAsmVectorRegisterLimit = 256;
 
@@ -123,6 +127,8 @@ struct KernelInfo {
   unsigned sgprCount = 0;
   unsigned vgprCount = 0;
   unsigned agprCount = 0;
+  unsigned sgprSpillCount = 0;
+  unsigned vgprSpillCount = 0;
   unsigned maxFlatWorkgroupSize = 1024;
   unsigned fixedLdsSize = 0;
   unsigned privateSegmentFixedSize = 0;
@@ -925,6 +931,8 @@ private:
       KernelRegisterUsage regUsage = getKernelRegisterUsage(func);
       info.agprCount = regUsage.agprCount;
       info.vgprCount = getTotalVGPRCount(regUsage.vgprCount, info.agprCount);
+      info.sgprSpillCount = getIntAttr(func, kSGPRSpillCountAttr, 0);
+      info.vgprSpillCount = getIntAttr(func, kVGPRSpillCountAttr, 0);
       FailureOr<unsigned> maxFlatWorkgroupSize = getMaxFlatWorkgroupSize(func);
       if (failed(maxFlatWorkgroupSize))
         return failure();
@@ -1322,13 +1330,13 @@ private:
       os << "    .private_segment_fixed_size: "
          << kernel.privateSegmentFixedSize << "\n";
       os << "    .sgpr_count:     " << kernel.sgprCount << "\n";
-      os << "    .sgpr_spill_count: 0\n";
+      os << "    .sgpr_spill_count: " << kernel.sgprSpillCount << "\n";
       os << "    .symbol:         " << kernel.name << ".kd\n";
       os << "    .uses_dynamic_stack: false\n";
       os << "    .vgpr_count:     " << kernel.vgprCount << "\n";
       if (hasAGPRs())
         os << "    .agpr_count:     " << kernel.agprCount << "\n";
-      os << "    .vgpr_spill_count: 0\n";
+      os << "    .vgpr_spill_count: " << kernel.vgprSpillCount << "\n";
       os << "    .wavefront_size: " << wavefrontSize << "\n";
       os << "    .workgroup_processor_mode: 1\n";
     }
