@@ -48,18 +48,23 @@ def build_module() -> str:
             f"%ag_spill{index} : (!waveamdmachine.reg<agpr, 1>) -> "
             "!waveamdmachine.reg<vgpr, 1>"
         )
+        lines.append(
+            f"  %spill{index} = waveamdmachine.v_or_b32 %read{index}, %v{index} "
+            ": (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>) "
+            "-> !waveamdmachine.reg<vgpr, 1>"
+        )
     lines.append(
-        "  %use0 = waveamdmachine.v_add_u32 %read0, %read1 "
+        "  %use0 = waveamdmachine.v_add_u32 %spill0, %spill1 "
         ": (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>) "
         "-> !waveamdmachine.reg<vgpr, 1>"
     )
     lines.append(
-        "  %use1 = waveamdmachine.v_add_u32 %use0, %read2 "
+        "  %use1 = waveamdmachine.v_add_u32 %use0, %spill2 "
         ": (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>) "
         "-> !waveamdmachine.reg<vgpr, 1>"
     )
     lines.append(
-        "  %use2 = waveamdmachine.v_add_u32 %use1, %read3 "
+        "  %use2 = waveamdmachine.v_add_u32 %use1, %spill3 "
         ": (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>) "
         "-> !waveamdmachine.reg<vgpr, 1>"
     )
@@ -120,13 +125,13 @@ def main() -> int:
         fail(result.stderr or result.stdout)
     if "waveamdmachine.regalloc_overflowed = 1" not in result.stdout:
         fail("expected descriptor-budget overflow after exhausting scratch relief")
-    if "waveamdmachine.scratch_spill_bytes = 12 : i64" not in result.stdout:
+    if "waveamdmachine.scratch_spill_bytes = 16 : i64" not in result.stdout:
         fail("expected bundled one-dword scratch spills")
     if "waveamdmachine.lds_spill_bytes" in result.stdout:
         fail("descriptor placement relief should not select LDS spill")
-    if result.stdout.count("waveamdmachine.scratch_store_b32") < 3:
+    if result.stdout.count("waveamdmachine.scratch_store_b32") < 4:
         fail("expected scratch stores for bundled spills")
-    if result.stdout.count("waveamdmachine.scratch_load_b32") < 3:
+    if result.stdout.count("waveamdmachine.scratch_load_b32") < 4:
         fail("expected scratch reloads for bundled spills")
     return 0
 

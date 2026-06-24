@@ -801,7 +801,9 @@ inline bool isCheapVGPRPressureReliefExpr(Operation *op) {
       waveamdmachine::VLshrrevB32Op, waveamdmachine::VLshlrevB32Op,
       waveamdmachine::VLshlAddU32Op, waveamdmachine::VAddU32Op,
       waveamdmachine::VAdd3U32Op, waveamdmachine::VAndB32Op,
-      waveamdmachine::VXorB32Op, waveamdmachine::VAndOrB32Op>(op);
+      waveamdmachine::VXorB32Op, waveamdmachine::VAndOrB32Op,
+      waveamdmachine::VAccvgprReadB32TupleOp,
+      waveamdmachine::VAccvgprWriteB32TupleOp>(op);
 }
 
 inline bool isUnassignedVGPR(Value value) {
