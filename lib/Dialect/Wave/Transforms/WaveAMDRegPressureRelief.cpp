@@ -20,6 +20,8 @@ namespace mlir::wave {
 
 WaveAMDPressureReliefCandidate::~WaveAMDPressureReliefCandidate() = default;
 WaveAMDPressureReliefPlan::~WaveAMDPressureReliefPlan() = default;
+WaveAMDPressureReliefMaterializationContext::
+    ~WaveAMDPressureReliefMaterializationContext() = default;
 WaveAMDPressureReliefProvider::~WaveAMDPressureReliefProvider() = default;
 
 std::optional<StringRef>
@@ -159,24 +161,34 @@ WaveAMDPressureReliefProvider::getRejectReason() const {
 void WaveAMDPressureReliefProvider::applyPlan(
     const WaveAMDPressureReliefPlan &) const {}
 
+void WaveAMDPressureReliefProvider::collectPlanTempIntervals(
+    const WaveAMDPressureReliefPlan &,
+    SmallVectorImpl<WaveAMDPressureReliefTempInterval> &) const {}
+
 bool WaveAMDPressureReliefProvider::ownsPlan(
     const WaveAMDPressureReliefPlan &plan) const {
   return plan.getProviderKind() == getKind();
 }
 
 LogicalResult WaveAMDPressureReliefProvider::materializePlan(
-    const WaveAMDPressureReliefPlan &, OpBuilder &) const {
+    const WaveAMDPressureReliefPlan &,
+    WaveAMDPressureReliefMaterializationContext &, OpBuilder &) const {
   return failure();
 }
 
 LogicalResult WaveAMDPressureReliefProvider::materializePlans(
     ArrayRef<const WaveAMDPressureReliefPlan *> plans,
+    WaveAMDPressureReliefMaterializationContext &context,
     OpBuilder &builder) const {
   for (const WaveAMDPressureReliefPlan *plan : plans)
-    if (failed(materializePlan(*plan, builder)))
+    if (failed(materializePlan(*plan, context, builder)))
       return failure();
   return success();
 }
+
+void WaveAMDPressureReliefProvider::emitRemarks() const {}
+
+void WaveAMDPressureReliefProvider::notifyAttemptStarted() const {}
 
 void WaveAMDPressureReliefProvider::notifyNoCandidate() const {}
 

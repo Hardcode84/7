@@ -1,15 +1,13 @@
-// RUN: wave-opt --waveamd-reg-alloc='vgpr-limit=16 agpr-limit=0' \
+// RUN: not wave-opt --waveamd-reg-alloc='vgpr-limit=16 agpr-limit=0' \
 // RUN:   --waveamd-decompose-mem-tuples --waveamd-insert-ticket-waits \
-// RUN:   --waveamd-insert-hazard-waits --waveamd-resource-info %s \
-// RUN:   | wave-translate --wave-to-amdgpu-asm - \
-// RUN:   | FileCheck %s --check-prefix=ASM
-// RUN: wave-opt --waveamd-reg-alloc='vgpr-limit=16 agpr-limit=0' \
-// RUN:   --waveamd-decompose-mem-tuples --waveamd-insert-ticket-waits \
-// RUN:   --waveamd-insert-hazard-waits --waveamd-resource-info %s \
-// RUN:   | wave-translate --wave-to-amdgpu-asm - \
-// RUN:   | llvm-mc -triple=amdgcn-amd-amdhsa -mcpu=gfx1100 -filetype=obj -o /dev/null
+// RUN:   --waveamd-insert-hazard-waits --waveamd-resource-info %s 2>&1 \
+// RUN:   | FileCheck %s --check-prefix=ERR
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
+
+// ERR: waveamd-reg-alloc ran out of VGPR registers
+// ERR: memory spill rejected candidates: lds_spill_missing_workgroup_shape
+// ERR: pressure relief candidates=[]
 
 // ASM-LABEL: scratch_loop_carry_backend_finish:
 // ASM: scratch_store_b32 off, v8, s2

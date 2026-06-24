@@ -1,23 +1,17 @@
-// RUN: wave-opt --waveamd-reg-alloc='vgpr-limit=4 agpr-limit=0' --waveamd-resource-info %s | FileCheck %s
-// RUN: wave-opt --waveamd-reg-alloc='vgpr-limit=4 agpr-limit=0' --waveamd-resource-info --waveamd-insert-ticket-waits %s | FileCheck %s --check-prefix=WAIT
+// RUN: wave-opt --waveamd-reg-alloc='vgpr-limit=5 agpr-limit=0' --waveamd-resource-info %s | FileCheck %s
+// RUN: wave-opt --waveamd-reg-alloc='vgpr-limit=5 agpr-limit=0' --waveamd-resource-info --waveamd-insert-ticket-waits %s | FileCheck %s --check-prefix=WAIT
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 
 // CHECK-LABEL: func.func @lds_spill_no_target_waves
 // CHECK-SAME: waveamdmachine.agpr_count = 0 : i64
-// CHECK-SAME: waveamdmachine.lds_size = 768 : i64
-// CHECK-SAME: waveamdmachine.lds_spill_bytes = 768 : i64
-// CHECK-SAME: waveamdmachine.vgpr_count = 4 : i64
+// CHECK-SAME: waveamdmachine.lds_size = 256 : i64
+// CHECK-SAME: waveamdmachine.lds_spill_bytes = 256 : i64
+// CHECK-SAME: waveamdmachine.vgpr_count = 5 : i64
 // CHECK: %[[LANE:.+]] = waveamdmachine.v_workitem_id_x
-// CHECK: %[[ADDR0:.+]] = waveamdmachine.v_lshlrev_b32 %[[LANE]]
-// CHECK: %[[STORE0:.+]] = waveamdmachine.ds_store_b32 %[[ADDR0]],
-// CHECK: %[[ADDR1:.+]] = waveamdmachine.v_lshlrev_b32 %[[LANE]]
-// CHECK: %[[STORE1:.+]] = waveamdmachine.ds_store_b32 %[[ADDR1]], {{.*}} offset 512
-// CHECK: %[[ADDR2:.+]] = waveamdmachine.v_lshlrev_b32 %[[LANE]]
-// CHECK: %[[STORE2:.+]] = waveamdmachine.ds_store_b32 %[[ADDR2]], {{.*}} offset 256
-// CHECK: waveamdmachine.ds_load_b32 {{.*}} after %[[STORE1]] offset 512
-// CHECK: waveamdmachine.ds_load_b32 {{.*}} after %[[STORE2]] offset 256
-// CHECK: waveamdmachine.ds_load_b32 {{.*}} after %[[STORE0]]
+// CHECK: %[[ADDR:.+]] = waveamdmachine.v_lshlrev_b32 %[[LANE]]
+// CHECK: %[[STORE:.+]] = waveamdmachine.ds_store_b32 %[[ADDR]],
+// CHECK: waveamdmachine.ds_load_b32 {{.*}} after %[[STORE]]
 
 // WAIT-LABEL: func.func @lds_spill_no_target_waves
 // WAIT: waveamdmachine.ds_load_b32 {{.*}} after
@@ -53,11 +47,11 @@ func.func @lds_spill_no_target_waves()
 }
 
 // CHECK-LABEL: func.func @many_lds_spills
-// CHECK-SAME: waveamdmachine.lds_size = 2304 : i64
-// CHECK-SAME: waveamdmachine.lds_spill_bytes = 2304 : i64
-// CHECK-SAME: waveamdmachine.vgpr_count = 4 : i64
+// CHECK-SAME: waveamdmachine.lds_size = 2048 : i64
+// CHECK-SAME: waveamdmachine.lds_spill_bytes = 2048 : i64
+// CHECK-SAME: waveamdmachine.vgpr_count = 5 : i64
 // CHECK: waveamdmachine.ds_store_b32
-// CHECK: offset 2048
+// CHECK: offset 1792
 // CHECK: waveamdmachine.ds_load_b32
 func.func @many_lds_spills()
     attributes {wave.kernel, wave.workgroup_size = array<i32: 64, 1, 1>,

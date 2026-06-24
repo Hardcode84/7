@@ -9,6 +9,7 @@
 #ifndef MLIR_DIALECT_WAVE_TRANSFORMS_WAVEAMDREGPRESSURERELIEF_H
 #define MLIR_DIALECT_WAVE_TRANSFORMS_WAVEAMDREGPRESSURERELIEF_H
 
+#include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachine.h"
 #include "mlir/Support/LLVM.h"
 #include "mlir/Support/LogicalResult.h"
 #include "llvm/ADT/SmallVector.h"
@@ -58,6 +59,20 @@ struct WaveAMDPressureReliefCost {
 struct WaveAMDPressureReliefEffect {
   int64_t vgprLiveDelta = 0;
   int64_t agprLiveDelta = 0;
+};
+
+struct WaveAMDPressureReliefTempInterval {
+  std::optional<unsigned> fixedBase;
+  waveamdmachine::RegClass regClass;
+  unsigned start = 0;
+  unsigned end = 0;
+  unsigned width = 0;
+};
+
+struct WaveAMDPressureReliefTempAssignment {
+  waveamdmachine::RegClass regClass;
+  unsigned width = 0;
+  int64_t base = -1;
 };
 
 struct WaveAMDPressureFailure {
@@ -121,6 +136,16 @@ public:
 using WaveAMDPressureReliefPlanList =
     SmallVector<std::unique_ptr<WaveAMDPressureReliefPlan>, 8>;
 
+class WaveAMDPressureReliefMaterializationContext {
+public:
+  virtual ~WaveAMDPressureReliefMaterializationContext();
+
+  virtual FailureOr<WaveAMDPressureReliefTempAssignment>
+  consumeTempAssignment(const WaveAMDPressureReliefPlan &plan,
+                        waveamdmachine::RegClass regClass, unsigned width,
+                        Operation *diagOp) = 0;
+};
+
 class WaveAMDPressureReliefProvider {
 public:
   virtual ~WaveAMDPressureReliefProvider();
@@ -134,12 +159,20 @@ public:
   createPlan(const WaveAMDPressureReliefCandidate &candidate) const;
   virtual std::optional<StringRef> getRejectReason() const;
   virtual void applyPlan(const WaveAMDPressureReliefPlan &plan) const;
+  virtual void collectPlanTempIntervals(
+      const WaveAMDPressureReliefPlan &plan,
+      SmallVectorImpl<WaveAMDPressureReliefTempInterval> &intervals) const;
   virtual bool ownsPlan(const WaveAMDPressureReliefPlan &plan) const;
-  virtual LogicalResult materializePlan(const WaveAMDPressureReliefPlan &plan,
-                                        OpBuilder &builder) const;
+  virtual LogicalResult
+  materializePlan(const WaveAMDPressureReliefPlan &plan,
+                  WaveAMDPressureReliefMaterializationContext &context,
+                  OpBuilder &builder) const;
   virtual LogicalResult
   materializePlans(ArrayRef<const WaveAMDPressureReliefPlan *> plans,
+                   WaveAMDPressureReliefMaterializationContext &context,
                    OpBuilder &builder) const;
+  virtual void emitRemarks() const;
+  virtual void notifyAttemptStarted() const;
   virtual void notifyNoCandidate() const;
   virtual void notifyPlanApplied() const;
 

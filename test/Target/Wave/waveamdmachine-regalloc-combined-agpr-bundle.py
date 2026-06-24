@@ -123,16 +123,16 @@ def main() -> int:
     )
     if result.returncode != 0:
         fail(result.stderr or result.stdout)
-    if "waveamdmachine.regalloc_overflowed = 1" not in result.stdout:
-        fail("expected descriptor-budget overflow after exhausting scratch relief")
-    if "waveamdmachine.scratch_spill_bytes = 16 : i64" not in result.stdout:
-        fail("expected bundled one-dword scratch spills")
-    if "waveamdmachine.lds_spill_bytes" in result.stdout:
-        fail("descriptor placement relief should not select LDS spill")
-    if result.stdout.count("waveamdmachine.scratch_store_b32") < 4:
-        fail("expected scratch stores for bundled spills")
-    if result.stdout.count("waveamdmachine.scratch_load_b32") < 4:
-        fail("expected scratch reloads for bundled spills")
+    if "waveamdmachine.regalloc_overflowed = 1" in result.stdout:
+        fail("LDS relief should avoid descriptor-budget overflow")
+    if "waveamdmachine.scratch_spill_bytes" in result.stdout:
+        fail("LDS relief should not reach scratch spill")
+    if "waveamdmachine.lds_spill_bytes" not in result.stdout:
+        fail("expected bundled LDS spill")
+    if "waveamdmachine.scratch_store_b32" in result.stdout:
+        fail("LDS relief should not materialize scratch stores")
+    if "waveamdmachine.ds_store_b32" not in result.stdout:
+        fail("expected LDS stores")
     return 0
 
 

@@ -17,6 +17,7 @@
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/IRMapping.h"
 #include "mlir/IR/Operation.h"
+#include "mlir/IR/Remarks.h"
 #include "mlir/IR/Value.h"
 #include "mlir/Support/LLVM.h"
 #include "mlir/Support/LogicalResult.h"
@@ -48,7 +49,8 @@ inline constexpr llvm::StringLiteral kMemorySpillRejectAttr =
     "waveamdmachine.regalloc_debug_memory_spill_reject";
 inline constexpr llvm::StringLiteral kMemorySpillRejectDetailAttr =
     "waveamdmachine.regalloc_debug_memory_spill_reject_detail";
-inline constexpr llvm::StringLiteral kMemorySpillLoopCarryReject = "loop_carry";
+inline constexpr llvm::StringLiteral kRegAllocRemarkCategory =
+    "waveamdmachine-regalloc";
 
 struct IntervalGroup;
 
@@ -62,6 +64,25 @@ inline StringRef getRegClassName(waveamdmachine::RegClass regClass) {
   return "";
 }
 
+inline remark::RemarkOpts getWaveAMDRegAllocRemarkOpts(func::FuncOp func,
+                                                       StringRef name) {
+  return remark::RemarkOpts::name(name)
+      .category(kRegAllocRemarkCategory)
+      .function(func.getSymName());
+}
+
+inline void emitRegAllocIntegerMetric(remark::detail::InFlightRemark &remark,
+                                      StringRef name, int64_t value) {
+  if (remark)
+    remark << mlir::remark::metric(name, value);
+}
+
+inline void emitRegAllocStringMetric(remark::detail::InFlightRemark &remark,
+                                     StringRef name, StringRef value) {
+  if (remark)
+    remark << mlir::remark::detail::Remark::Arg(name, value);
+}
+
 struct Interval {
   llvm::SmallDenseSet<Value, 1> values;
   IntervalGroup *group = nullptr;
@@ -70,6 +91,7 @@ struct Interval {
   unsigned end = 0;
   bool reserved = false;
   bool nonPromotable = false;
+  bool plannedTemp = false;
 };
 
 struct IntervalGroup {
@@ -83,6 +105,12 @@ struct IntervalGroup {
   bool nonPromotable = false;
   bool allocatable = true;
   bool plannedPressureRelief = false;
+};
+
+struct PlannedPressureReliefTempInterval {
+  const wave::WaveAMDPressureReliefPlan *plan = nullptr;
+  wave::WaveAMDPressureReliefTempInterval interval;
+  IntervalGroup *group = nullptr;
 };
 
 struct AllocationProbeStats {
@@ -100,6 +128,7 @@ struct Inventory {
   SmallVector<std::unique_ptr<Interval>> intervals;
   SmallVector<std::unique_ptr<IntervalGroup>> groups;
   wave::WaveAMDPressureReliefPlanList plannedReliefPlans;
+  SmallVector<PlannedPressureReliefTempInterval, 16> plannedReliefTemps;
   DenseMap<StringRef, unsigned> plannedProviderBytes;
   AllocationProbeStats probeStats;
   unsigned peakSGPR = 0;
@@ -124,8 +153,13 @@ inline bool isMemoryIssuerOp(Operation *op) {
   return info && info.getWaitcntInfo().isIssuer();
 }
 
-inline bool isLoopCarryUseOp(Operation *op) {
-  return isa<waveamdmachine::UniformLoopOp, waveamdmachine::ContinueIfOp>(op);
+inline Value getMemoryIssuerToken(Operation *op) {
+  if (!isMemoryIssuerOp(op))
+    return {};
+  for (Value result : op->getResults())
+    if (isa<waveamdmachine::MemTokenType>(result.getType()))
+      return result;
+  return {};
 }
 
 inline Operation *getAncestorInBlock(Operation *op, Block *block) {
@@ -163,7 +197,6 @@ getMemorySpillPressureEffect(IntervalGroup *group, unsigned reliefDwords) {
   return {};
 }
 
-inline bool isCheapVGPRExpr(Operation *op);
 inline bool isCheapVGPRPressureReliefExpr(Operation *op);
 inline bool isCheapVGPRPressureReliefRootExpr(Operation *op);
 inline bool isMemorySpillSuppressedVGPRExpr(Operation *op);
@@ -171,11 +204,6 @@ inline bool isMemorySpillSuppressedVGPRExpr(Operation *op);
 struct MemorySpillLoadResult {
   Value value;
   Value token;
-};
-
-struct MemorySpillLoopCarrySlot {
-  waveamdmachine::UniformLoopOp loop;
-  unsigned index = 0;
 };
 
 inline unsigned getLoopDepth(Operation *op) {
@@ -186,19 +214,21 @@ inline unsigned getLoopDepth(Operation *op) {
   return depth;
 }
 
-inline bool collectSimpleMemorySpillVGPRUses(Value value,
-                                             SmallVectorImpl<OpOperand *> &uses,
-                                             bool &sawLoopCarryReject) {
+inline bool
+collectSimpleMemorySpillVGPRUses(Value value,
+                                 SmallVectorImpl<OpOperand *> &uses) {
   Operation *def = value.getDefiningOp();
-  if (!def || isMemoryIssuerOp(def))
+  if (!def)
+    return false;
+  if (isMemoryIssuerOp(def) && !getMemoryIssuerToken(def))
+    return false;
+  if (def->getNumRegions() != 0)
     return false;
   for (OpOperand &use : value.getUses()) {
     if (isRegAllocTempOp(use.getOwner()))
       continue;
-    if (isLoopCarryUseOp(use.getOwner())) {
-      sawLoopCarryReject = true;
+    if (use.getOwner()->getNumRegions() != 0)
       return false;
-    }
     if (!useIsDominatedByDef(def, use.getOwner()))
       return false;
     uses.push_back(&use);
@@ -227,12 +257,17 @@ collectSimpleMemorySpillAGPRUses(Value value,
 }
 
 inline bool collectSimpleMemorySpillUses(Value value,
-                                         SmallVectorImpl<OpOperand *> &uses,
-                                         bool &sawLoopCarryReject) {
+                                         SmallVectorImpl<OpOperand *> &uses) {
   waveamdmachine::RegType type = cast<waveamdmachine::RegType>(value.getType());
   if (type.getRegClass() == waveamdmachine::RegClass::AGPR)
     return collectSimpleMemorySpillAGPRUses(value, uses);
-  return collectSimpleMemorySpillVGPRUses(value, uses, sawLoopCarryReject);
+  return collectSimpleMemorySpillVGPRUses(value, uses);
+}
+
+inline bool hasOnlyRegAllocTempUses(Value value) {
+  return llvm::all_of(value.getUses(), [](OpOperand &use) {
+    return isRegAllocTempOp(use.getOwner());
+  });
 }
 
 inline bool isValueLiveAtPressure(Value value, ArrayRef<OpOperand *> uses,
@@ -242,7 +277,7 @@ inline bool isValueLiveAtPressure(Value value, ArrayRef<OpOperand *> uses,
   if (!def)
     return false;
   unsigned start = inventory.positions.lookup(def);
-  if (start >= position)
+  if (start > position)
     return false;
   unsigned end = start;
   for (OpOperand *use : uses)
@@ -290,13 +325,12 @@ inline unsigned getLiveLaneCount(IntervalGroup *group, unsigned position) {
   return count;
 }
 
-inline bool liveLanesStartBeforePressure(IntervalGroup *group,
-                                         unsigned position) {
+inline bool hasLiveLaneAtPressure(IntervalGroup *group, unsigned position) {
   for (Interval *lane : group->intervals)
     if (!lane->values.empty() && lane->start <= position &&
-        position <= lane->end && lane->start >= position)
-      return false;
-  return true;
+        position <= lane->end)
+      return true;
+  return false;
 }
 
 inline int64_t getMemorySpillValueOrder(Value value,
@@ -329,472 +363,419 @@ getMemorySpillGroupValues(IntervalGroup *group, const Inventory &inventory) {
   return values;
 }
 
-inline LogicalResult
-mergeLoopCarrySlot(MemorySpillLoopCarrySlot next,
-                   std::optional<MemorySpillLoopCarrySlot> &slot) {
-  if (!slot) {
-    slot = next;
-    return success();
-  }
-  if (slot->loop == next.loop && slot->index == next.index)
-    return success();
-  return failure();
+template <typename SlotsT>
+static unsigned getMemorySpillTotalUseCount(const SlotsT &slots) {
+  unsigned total = 0;
+  for (const typename SlotsT::value_type &slot : slots)
+    total += slot.useCount;
+  return total;
 }
 
-inline std::optional<MemorySpillLoopCarrySlot>
-getValueLoopCarrySlot(Value value) {
-  if (BlockArgument arg = dyn_cast<BlockArgument>(value))
-    if (waveamdmachine::UniformLoopOp loop =
-            dyn_cast<waveamdmachine::UniformLoopOp>(
-                arg.getOwner()->getParentOp()))
-      return MemorySpillLoopCarrySlot{loop, arg.getArgNumber()};
-  if (waveamdmachine::UniformLoopOp loop =
-          value.getDefiningOp<waveamdmachine::UniformLoopOp>())
-    return MemorySpillLoopCarrySlot{loop,
-                                    cast<OpResult>(value).getResultNumber()};
+template <typename SlotsT>
+static wave::WaveAMDPressureReliefCost
+getMemorySpillTotalCost(const SlotsT &slots) {
+  wave::WaveAMDPressureReliefCost total;
+  for (const typename SlotsT::value_type &slot : slots) {
+    total.materializationOps += slot.cost.materializationOps;
+    total.loopWeightedOps += slot.cost.loopWeightedOps;
+    total.latencyPenalty += slot.cost.latencyPenalty;
+    total.instabilityPenalty += slot.cost.instabilityPenalty;
+  }
+  return total;
+}
+
+inline unsigned getMemorySpillValuePosition(Value value,
+                                            const Inventory &inventory) {
+  if (Operation *def = value.getDefiningOp())
+    return inventory.positions.lookup(def);
+  BlockArgument arg = cast<BlockArgument>(value);
+  Operation *parent = arg.getOwner()->getParentOp();
+  if (isa<func::FuncOp>(parent))
+    return 0;
+  return inventory.positions.lookup(parent);
+}
+
+inline waveamdmachine::RegClass getMemorySpillLoadRegClass(Value value) {
+  waveamdmachine::RegType type = cast<waveamdmachine::RegType>(value.getType());
+  if (type.getRegClass() == waveamdmachine::RegClass::AGPR)
+    return waveamdmachine::RegClass::VGPR;
+  return type.getRegClass();
+}
+
+inline waveamdmachine::RegType getTempAssignmentRegType(
+    const wave::WaveAMDPressureReliefTempAssignment &assignment,
+    MLIRContext *ctx) {
+  return waveamdmachine::RegType::get(ctx, assignment.regClass,
+                                      assignment.width, assignment.base);
+}
+
+inline SmallVector<Type> getTempAssignmentScalarRegTypes(
+    const wave::WaveAMDPressureReliefTempAssignment &assignment,
+    MLIRContext *ctx) {
+  SmallVector<Type> types;
+  types.reserve(assignment.width);
+  for (unsigned lane : llvm::seq<unsigned>(0, assignment.width))
+    types.push_back(waveamdmachine::RegType::get(
+        ctx, assignment.regClass, /*width=*/1, assignment.base + lane));
+  return types;
+}
+
+inline FailureOr<waveamdmachine::RegType> consumePressureReliefTempRegType(
+    const wave::WaveAMDPressureReliefPlan &plan,
+    wave::WaveAMDPressureReliefMaterializationContext &context,
+    waveamdmachine::RegClass regClass, unsigned width, Operation *diagOp) {
+  FailureOr<wave::WaveAMDPressureReliefTempAssignment> assignment =
+      context.consumeTempAssignment(plan, regClass, width, diagOp);
+  if (failed(assignment))
+    return failure();
+  return getTempAssignmentRegType(*assignment, diagOp->getContext());
+}
+
+inline void assignValueToTempAssignment(
+    Value value, const wave::WaveAMDPressureReliefTempAssignment &assignment) {
+  value.setType(getTempAssignmentRegType(assignment, value.getContext()));
+}
+
+inline bool valuesShareIntervalGroup(Value lhs, Value rhs,
+                                     const Inventory &inventory) {
+  Interval *lhsInterval = inventory.intervalFor.lookup(lhs);
+  Interval *rhsInterval = inventory.intervalFor.lookup(rhs);
+  return lhsInterval && rhsInterval && lhsInterval->group == rhsInterval->group;
+}
+
+inline bool setRegTypeIfUnallocated(Value value,
+                                    waveamdmachine::RegClass regClass,
+                                    unsigned width, int64_t index) {
+  auto type = dyn_cast<waveamdmachine::RegType>(value.getType());
+  if (!type || type.getRegClass() != regClass ||
+      static_cast<unsigned>(type.getWidth()) != width || type.getIndex() >= 0)
+    return false;
+  value.setType(
+      waveamdmachine::RegType::get(value.getContext(), regClass, width, index));
+  return true;
+}
+
+template <typename ElementsT>
+static bool
+propagateTupleAliasTypesFromTuple(Value tuple, ElementsT elements,
+                                  waveamdmachine::RegType tupleType) {
+  bool changed = false;
+  unsigned offset = 0;
+  for (Value element : elements) {
+    auto elementType = dyn_cast<waveamdmachine::RegType>(element.getType());
+    if (!elementType || elementType.getRegClass() != tupleType.getRegClass())
+      return changed;
+    unsigned width = static_cast<unsigned>(elementType.getWidth());
+    changed |= setRegTypeIfUnallocated(element, tupleType.getRegClass(), width,
+                                       tupleType.getIndex() + offset);
+    offset += width;
+  }
+  return changed;
+}
+
+template <typename ElementsT>
+static std::optional<int64_t> getTupleAliasBaseFromElements(
+    ElementsT elements, waveamdmachine::RegType tupleType, unsigned &width) {
+  std::optional<int64_t> base;
+  width = 0;
+  for (Value element : elements) {
+    auto elementType = dyn_cast<waveamdmachine::RegType>(element.getType());
+    if (!elementType || elementType.getRegClass() != tupleType.getRegClass() ||
+        elementType.getIndex() < 0)
+      return std::nullopt;
+    int64_t candidate = elementType.getIndex() - static_cast<int64_t>(width);
+    if (base && *base != candidate)
+      return std::nullopt;
+    base = candidate;
+    width += static_cast<unsigned>(elementType.getWidth());
+  }
+  return base;
+}
+
+template <typename ElementsT>
+static bool propagateTupleAliasTypes(Value tuple, ElementsT elements) {
+  auto tupleType = dyn_cast<waveamdmachine::RegType>(tuple.getType());
+  if (!tupleType)
+    return false;
+  if (tupleType.getIndex() >= 0)
+    return propagateTupleAliasTypesFromTuple(tuple, elements, tupleType);
+
+  unsigned width = 0;
+  std::optional<int64_t> base =
+      getTupleAliasBaseFromElements(elements, tupleType, width);
+  if (!base || width != static_cast<unsigned>(tupleType.getWidth()))
+    return false;
+  return setRegTypeIfUnallocated(tuple, tupleType.getRegClass(), width, *base);
+}
+
+inline bool isInternalTupleFromElementsUse(
+    OpOperand *use, const llvm::SmallDenseSet<Value, 8> &plannedValues) {
+  auto fromElements =
+      dyn_cast<waveamdmachine::TupleFromElementsOp>(use->getOwner());
+  return fromElements && plannedValues.contains(fromElements.getTuple());
+}
+
+inline bool propagateTupleAliasesForValue(Value value) {
+  Operation *def = value.getDefiningOp();
+  if (!def)
+    return false;
+  if (auto fromElements = dyn_cast<waveamdmachine::TupleFromElementsOp>(def))
+    return propagateTupleAliasTypes(fromElements.getTuple(),
+                                    fromElements.getElements());
+  if (auto toElements = dyn_cast<waveamdmachine::TupleToElementsOp>(def))
+    return propagateTupleAliasTypes(toElements.getTuple(),
+                                    toElements.getElements());
+  return false;
+}
+
+inline void propagateMemorySpillGroupTupleAliases(IntervalGroup *group,
+                                                  const Inventory &inventory) {
+  if (!group)
+    return;
+  SmallVector<Value> values = getMemorySpillGroupValues(group, inventory);
+  for ([[maybe_unused]] unsigned iteration :
+       llvm::seq<unsigned>(0, values.size() + 1)) {
+    bool changed = false;
+    for (Value value : values)
+      changed |= propagateTupleAliasesForValue(value);
+    if (!changed)
+      return;
+  }
+}
+
+inline void assignTupleFromElementsBridgeValues(
+    Value value, const wave::WaveAMDPressureReliefTempAssignment &assignment,
+    const Inventory &inventory) {
+  Operation *def = value.getDefiningOp();
+  auto fromElements =
+      dyn_cast_or_null<waveamdmachine::TupleFromElementsOp>(def);
+  if (!fromElements)
+    return;
+
+  unsigned offset = 0;
+  for (Value element : fromElements.getElements()) {
+    auto elementType = dyn_cast<waveamdmachine::RegType>(element.getType());
+    if (!elementType || elementType.getRegClass() != assignment.regClass ||
+        !valuesShareIntervalGroup(value, element, inventory))
+      return;
+    unsigned width = static_cast<unsigned>(elementType.getWidth());
+    element.setType(waveamdmachine::RegType::get(value.getContext(),
+                                                 assignment.regClass, width,
+                                                 assignment.base + offset));
+    offset += width;
+  }
+}
+
+inline void appendMemorySpillPointTemp(
+    SmallVectorImpl<wave::WaveAMDPressureReliefTempInterval> &intervals,
+    waveamdmachine::RegClass regClass, unsigned position, unsigned width) {
+  wave::WaveAMDPressureReliefTempInterval interval;
+  interval.regClass = regClass;
+  interval.start = position;
+  interval.end = position;
+  interval.width = width;
+  intervals.push_back(interval);
+}
+
+inline void appendMemorySpillTemp(
+    SmallVectorImpl<wave::WaveAMDPressureReliefTempInterval> &intervals,
+    waveamdmachine::RegClass regClass, unsigned start, unsigned end,
+    unsigned width) {
+  wave::WaveAMDPressureReliefTempInterval interval;
+  interval.regClass = regClass;
+  interval.start = start;
+  interval.end = end;
+  interval.width = width;
+  intervals.push_back(interval);
+}
+
+inline unsigned getTupleFromElementsBridgeStart(Value value,
+                                                const Inventory &inventory,
+                                                unsigned defPosition) {
+  Operation *def = value.getDefiningOp();
+  auto fromElements =
+      dyn_cast_or_null<waveamdmachine::TupleFromElementsOp>(def);
+  if (!fromElements)
+    return defPosition;
+  unsigned start = defPosition;
+  for (Value element : fromElements.getElements()) {
+    if (!valuesShareIntervalGroup(value, element, inventory))
+      return defPosition;
+    start = std::min(start, getMemorySpillValuePosition(element, inventory));
+  }
+  return start;
+}
+
+template <typename CollectAddressTempsFn>
+static void collectMemorySpillValueTempIntervals(
+    const Inventory &inventory, Value value,
+    SmallVectorImpl<wave::WaveAMDPressureReliefTempInterval> &intervals,
+    CollectAddressTempsFn collectAddressTemps) {
+  if (!value)
+    return;
+  waveamdmachine::RegType type = cast<waveamdmachine::RegType>(value.getType());
+  unsigned valueWidth = static_cast<unsigned>(type.getWidth());
+  unsigned defPosition = getMemorySpillValuePosition(value, inventory);
+  unsigned bridgeStart =
+      getTupleFromElementsBridgeStart(value, inventory, defPosition);
+  appendMemorySpillTemp(intervals, type.getRegClass(), bridgeStart, defPosition,
+                        valueWidth);
+  if (type.getRegClass() == waveamdmachine::RegClass::AGPR)
+    appendMemorySpillPointTemp(intervals, waveamdmachine::RegClass::VGPR,
+                               defPosition, valueWidth);
+  collectAddressTemps(intervals, defPosition, valueWidth);
+
+  waveamdmachine::RegClass loadClass = getMemorySpillLoadRegClass(value);
   for (OpOperand &use : value.getUses()) {
-    Operation *owner = use.getOwner();
-    if (waveamdmachine::UniformLoopOp loop =
-            dyn_cast<waveamdmachine::UniformLoopOp>(owner))
-      for (auto [index, init] : llvm::enumerate(loop.getInits()))
-        if (init == value)
-          return MemorySpillLoopCarrySlot{loop, static_cast<unsigned>(index)};
-    if (waveamdmachine::ContinueIfOp term =
-            dyn_cast<waveamdmachine::ContinueIfOp>(owner))
-      if (use.getOperandNumber() != 0)
-        return MemorySpillLoopCarrySlot{
-            term->getParentOfType<waveamdmachine::UniformLoopOp>(),
-            use.getOperandNumber() - 1};
+    unsigned usePosition = inventory.positions.lookup(use.getOwner());
+    unsigned loadEnd = usePosition;
+    if (auto split =
+            dyn_cast<waveamdmachine::TupleToElementsOp>(use.getOwner())) {
+      for (Value element : split.getElements()) {
+        Interval *interval = inventory.intervalFor.lookup(element);
+        if (interval)
+          loadEnd = std::max(loadEnd, interval->end);
+      }
+    }
+    wave::WaveAMDPressureReliefTempInterval loadTemp;
+    loadTemp.regClass = loadClass;
+    loadTemp.start = usePosition;
+    loadTemp.end = loadEnd;
+    loadTemp.width = valueWidth;
+    intervals.push_back(loadTemp);
+    collectAddressTemps(intervals, usePosition, valueWidth);
   }
-  return std::nullopt;
+}
+
+inline Type getMemorySpillLoadType(Value value) {
+  waveamdmachine::RegType type = cast<waveamdmachine::RegType>(value.getType());
+  if (type.getRegClass() != waveamdmachine::RegClass::AGPR)
+    return value.getType();
+  return waveamdmachine::RegType::get(value.getContext(),
+                                      waveamdmachine::RegClass::VGPR,
+                                      type.getWidth(), /*index=*/-1);
+}
+
+inline SmallVector<Type> getMemorySpillScalarRegTypes(Type tupleType);
+
+inline FailureOr<Value> materializeMemorySpillStoreValue(
+    Value value, const wave::WaveAMDPressureReliefPlan &plan,
+    wave::WaveAMDPressureReliefMaterializationContext &context,
+    OpBuilder &builder) {
+  waveamdmachine::RegType type = cast<waveamdmachine::RegType>(value.getType());
+  if (type.getRegClass() != waveamdmachine::RegClass::AGPR)
+    return value;
+  Operation *def = value.getDefiningOp();
+  FailureOr<waveamdmachine::RegType> readType =
+      consumePressureReliefTempRegType(
+          plan, context, waveamdmachine::RegClass::VGPR, type.getWidth(), def);
+  if (failed(readType))
+    return failure();
+  waveamdmachine::VAccvgprReadB32TupleOp read =
+      waveamdmachine::VAccvgprReadB32TupleOp::create(builder, value.getLoc(),
+                                                     *readType, value);
+  read->setAttr(kRegAllocTempAttr, builder.getUnitAttr());
+  return read.getResult();
 }
 
 inline LogicalResult
-mergeLoopCarrySlot(Value value, std::optional<MemorySpillLoopCarrySlot> &slot) {
-  if (std::optional<MemorySpillLoopCarrySlot> valueSlot =
-          getValueLoopCarrySlot(value))
-    return mergeLoopCarrySlot(*valueSlot, slot);
+retypeLoadedMemorySpillSplit(waveamdmachine::TupleToElementsOp split,
+                             waveamdmachine::RegType loadedType) {
+  SmallVector<Type> elementTypes;
+  elementTypes.reserve(split.getElements().size());
+  unsigned offset = 0;
+  for (Value element : split.getElements()) {
+    auto elementType = dyn_cast<waveamdmachine::RegType>(element.getType());
+    if (!elementType || elementType.getRegClass() != loadedType.getRegClass())
+      return split.emitError()
+             << "waveamd-reg-alloc cannot replace mismatched split spill";
+    unsigned width = static_cast<unsigned>(elementType.getWidth());
+    if (offset + width > static_cast<unsigned>(loadedType.getWidth()))
+      return split.emitError()
+             << "waveamd-reg-alloc cannot replace mismatched split spill";
+    int64_t index = -1;
+    if (loadedType.getIndex() >= 0)
+      index = loadedType.getIndex() + offset;
+    elementTypes.push_back(waveamdmachine::RegType::get(
+        loadedType.getContext(), loadedType.getRegClass(), width, index));
+    offset += width;
+  }
+  if (offset != static_cast<unsigned>(loadedType.getWidth()))
+    return split.emitError()
+           << "waveamd-reg-alloc cannot replace mismatched split spill";
+  for (auto [element, elementType] :
+       llvm::zip(split.getElements(), elementTypes))
+    element.setType(elementType);
   return success();
 }
 
-inline std::optional<MemorySpillLoopCarrySlot>
-getLoopCarrySlot(IntervalGroup *group, const Inventory &inventory) {
-  std::optional<MemorySpillLoopCarrySlot> slot;
-  for (Value value : getMemorySpillGroupValues(group, inventory))
-    if (failed(mergeLoopCarrySlot(value, slot)))
-      return std::nullopt;
-  return slot;
-}
-
-inline bool hasLocalLoopCarryUses(MemorySpillLoopCarrySlot slot) {
-  Block &body = slot.loop.getBody().front();
-  BlockArgument arg = body.getArgument(slot.index);
-  for (OpOperand &use : arg.getUses())
-    if (!getAncestorInBlock(use.getOwner(), &body))
-      return false;
-  return true;
-}
-
-inline bool isSplatInit(MemorySpillLoopCarrySlot slot) {
-  waveamdmachine::VMovB32TupleOp splat =
-      slot.loop.getInits()[slot.index]
-          .getDefiningOp<waveamdmachine::VMovB32TupleOp>();
-  return splat && splat.getSource().getDefiningOp<waveamdmachine::ImmOp>();
-}
-
-inline bool canSpillLoopCarryAtPosition(MemorySpillLoopCarrySlot slot,
-                                        const Inventory &inventory,
-                                        unsigned position) {
-  DenseMap<Operation *, unsigned>::const_iterator loopPos =
-      inventory.positions.find(slot.loop);
-  if (loopPos == inventory.positions.end())
-    return false;
-  if (position > loopPos->second)
-    return true;
-  return isSplatInit(slot);
-}
-
-inline bool canRewriteExtraLoopInitUse(OpOperand &use, OpOperand *loopUse,
-                                       waveamdmachine::UniformLoopOp loop) {
-  if (&use == loopUse || isRegAllocTempOp(use.getOwner()))
-    return true;
-  Operation *user = use.getOwner();
-  return user->getBlock() == loop->getBlock() && user->isBeforeInBlock(loop);
-}
-
-inline bool canRewriteExtraLoopInitUses(MemorySpillLoopCarrySlot slot) {
-  OpOperand *loopUse = &slot.loop.getInitsMutable()[slot.index];
-  Value init = loopUse->get();
-  for (OpOperand &use : init.getUses())
-    if (!canRewriteExtraLoopInitUse(use, loopUse, slot.loop))
-      return false;
-  return true;
-}
-
-inline bool loopCarryTouchesPressure(MemorySpillLoopCarrySlot slot,
-                                     const Inventory &inventory,
-                                     unsigned position) {
-  Block &body = slot.loop.getBody().front();
-  BlockArgument arg = body.getArgument(slot.index);
-  for (OpOperand &use : arg.getUses())
-    if (inventory.positions.lookup(use.getOwner()) == position)
-      return true;
-  Operation *term = body.getTerminator();
-  return term && inventory.positions.lookup(term) == position;
-}
-
-inline unsigned getLoopCarryUseCount(MemorySpillLoopCarrySlot slot) {
-  Block &body = slot.loop.getBody().front();
-  BlockArgument arg = body.getArgument(slot.index);
-  unsigned count = llvm::range_size(arg.getUses());
-  count += llvm::range_size(slot.loop.getResult(slot.index).getUses());
-  return count + 1;
-}
-
-inline bool canMaterializeLoopCarrySpill(MemorySpillLoopCarrySlot slot,
-                                         const Inventory &inventory,
-                                         unsigned position) {
-  return canSpillLoopCarryAtPosition(slot, inventory, position) &&
-         hasLocalLoopCarryUses(slot) && canRewriteExtraLoopInitUses(slot);
-}
-
-template <typename SpillPlanT, typename GetSlotFn, typename StoreValueFn,
-          typename LoadValueFn, typename CopyInitFn, typename ReserveFn>
-struct MemorySpillLoopCarryMaterializer {
-  ArrayRef<const SpillPlanT *> input;
-  OpBuilder &builder;
-  StringRef provider;
-  GetSlotFn getSlot;
-  StoreValueFn storeValue;
-  LoadValueFn loadValue;
-  CopyInitFn copyInitValue;
-  ReserveFn reservePlan;
-
-  bool isSpilledIndex(ArrayRef<const SpillPlanT *> spills,
-                      unsigned index) const {
-    return llvm::any_of(spills, [&](const SpillPlanT *spill) {
-      return getSlot(*spill).index == index;
-    });
-  }
-
-  std::optional<unsigned> getSpillOrdinal(ArrayRef<const SpillPlanT *> spills,
-                                          unsigned index) const {
-    for (auto [ordinal, spill] : llvm::enumerate(spills))
-      if (getSlot(*spill).index == index)
-        return ordinal;
-    return std::nullopt;
-  }
-
-  LogicalResult run() const {
-    if (failed(materializeCarries()))
-      return failure();
-    for (const SpillPlanT *spill : input)
-      reservePlan(*spill, builder);
-    return success();
-  }
-
-  LogicalResult materializeCarries() const {
-    if (input.empty())
-      return success();
-    SmallVector<const SpillPlanT *, 4> spills(input.begin(), input.end());
-    llvm::stable_sort(spills,
-                      [&](const SpillPlanT *lhs, const SpillPlanT *rhs) {
-                        return getSlot(*lhs).index < getSlot(*rhs).index;
-                      });
-
-    waveamdmachine::UniformLoopOp loop = getSlot(*spills.front()).loop;
-    for (const SpillPlanT *spill : spills)
-      assert(getSlot(*spill).loop == loop && "expected one loop carry group");
-
-    SmallVector<Value, 4> initTokens;
-    for (const SpillPlanT *spill : spills) {
-      MemorySpillLoopCarrySlot slot = getSlot(*spill);
-      Value init = loop.getInits()[slot.index];
-      OpOperand *loopUse = &loop.getInitsMutable()[slot.index];
-      setInsertionPointForInitStore(init, loopUse, loop);
-      initTokens.push_back(
-          storeValue(init, Value{}, *spill, builder, loop.getLoc()));
-    }
-    for (auto [index, spill] : llvm::enumerate(spills))
-      if (failed(rewriteExtraLoopInitUses(*spill, initTokens[index])))
+inline LogicalResult replaceMemorySpillUseWithLoad(
+    Value value, OpOperand *use, Value loaded,
+    const wave::WaveAMDPressureReliefPlan &plan,
+    wave::WaveAMDPressureReliefMaterializationContext &context) {
+  waveamdmachine::RegType type = cast<waveamdmachine::RegType>(value.getType());
+  if (type.getRegClass() != waveamdmachine::RegClass::AGPR) {
+    if (auto split =
+            dyn_cast<waveamdmachine::TupleToElementsOp>(use->getOwner())) {
+      waveamdmachine::RegType loadedType =
+          cast<waveamdmachine::RegType>(loaded.getType());
+      if (failed(retypeLoadedMemorySpillSplit(split, loadedType)))
         return failure();
-
-    waveamdmachine::UniformLoopOp newLoop =
-        cloneLoopWithoutCarries(loop, spills, initTokens);
-    replaceLoopResults(loop, newLoop, spills);
-    loop.erase();
+    }
+    use->set(loaded);
     return success();
   }
-
-  Operation *
-  getFirstLoopPreheaderUse(Value init, OpOperand *loopUse,
-                           waveamdmachine::UniformLoopOp loop) const {
-    Operation *first = nullptr;
-    for (OpOperand &use : init.getUses()) {
-      Operation *user = use.getOwner();
-      if (&use == loopUse || isRegAllocTempOp(user))
-        continue;
-      if (!canRewriteExtraLoopInitUse(use, loopUse, loop))
-        continue;
-      if (user->getBlock() != loop->getBlock() || !user->isBeforeInBlock(loop))
-        continue;
-      if (!first || user->isBeforeInBlock(first))
-        first = user;
-    }
-    return first;
-  }
-
-  void setInsertionPointForInitStore(Value init, OpOperand *loopUse,
-                                     waveamdmachine::UniformLoopOp loop) const {
-    Operation *def = init.getDefiningOp();
-    Operation *firstPreheaderUse =
-        getFirstLoopPreheaderUse(init, loopUse, loop);
-    if (firstPreheaderUse && (!def || def->getBlock() != loop->getBlock() ||
-                              def->isBeforeInBlock(firstPreheaderUse))) {
-      builder.setInsertionPoint(firstPreheaderUse);
-      return;
-    }
-    if (!def || def->getBlock() != loop->getBlock() ||
-        !def->isBeforeInBlock(loop)) {
-      builder.setInsertionPoint(loop);
-      return;
-    }
-    builder.setInsertionPointAfter(def);
-  }
-
-  LogicalResult rewriteExtraLoopInitUses(const SpillPlanT &spill,
-                                         Value initToken) const {
-    MemorySpillLoopCarrySlot slot = getSlot(spill);
-    waveamdmachine::UniformLoopOp loop = slot.loop;
-    OpOperand *loopUse = &loop.getInitsMutable()[slot.index];
-    Value init = loopUse->get();
-    SmallVector<OpOperand *> uses;
-    for (OpOperand &use : init.getUses()) {
-      if (&use == loopUse || isRegAllocTempOp(use.getOwner()))
-        continue;
-      uses.push_back(&use);
-    }
-
-    for (OpOperand *use : uses) {
-      Operation *user = use->getOwner();
-      if (!canRewriteExtraLoopInitUse(*use, loopUse, loop))
-        return mlir::emitError(init.getLoc())
-               << "waveamd-reg-alloc cannot materialize " << provider
-               << " spill for loop init use outside loop preheader";
-      builder.setInsertionPoint(user);
-      MemorySpillLoadResult load =
-          copyInitValue(init, initToken, spill, builder, user->getLoc());
-      use->set(load.value);
-    }
-    return success();
-  }
-
-  waveamdmachine::UniformLoopOp
-  cloneLoopWithoutCarries(waveamdmachine::UniformLoopOp loop,
-                          ArrayRef<const SpillPlanT *> spills,
-                          ArrayRef<Value> initTokens) const {
-    Type tokenType = waveamdmachine::MemTokenType::get(builder.getContext());
-    SmallVector<Type> resultTypes;
-    SmallVector<Value> inits;
-    for (unsigned index : llvm::seq<unsigned>(0, loop.getInits().size())) {
-      if (isSpilledIndex(spills, index))
-        continue;
-      resultTypes.push_back(loop.getResult(index).getType());
-      inits.push_back(loop.getInits()[index]);
-    }
-    for (Value initToken : initTokens) {
-      resultTypes.push_back(tokenType);
-      inits.push_back(initToken);
-    }
-
-    builder.setInsertionPoint(loop);
-    waveamdmachine::UniformLoopOp newLoop =
-        waveamdmachine::UniformLoopOp::create(
-            builder, loop.getLoc(), resultTypes, loop.getEntryCond(), inits);
-    cloneLoopBody(loop, newLoop, spills);
-    return newLoop;
-  }
-
-  void cloneLoopBody(waveamdmachine::UniformLoopOp oldLoop,
-                     waveamdmachine::UniformLoopOp newLoop,
-                     ArrayRef<const SpillPlanT *> spills) const {
-    Block &oldBody = oldLoop.getBody().front();
-    Block *newBody = new Block;
-    newLoop.getBody().push_back(newBody);
-    for (Value init : newLoop.getInits())
-      newBody->addArgument(init.getType(), oldLoop.getLoc());
-
-    IRMapping mapper;
-    unsigned newArgIndex = 0;
-    for (unsigned index : llvm::seq<unsigned>(0, oldLoop.getInits().size())) {
-      if (isSpilledIndex(spills, index))
-        continue;
-      mapper.map(oldBody.getArgument(index),
-                 newBody->getArgument(newArgIndex++));
-    }
-    SmallVector<Value, 4> tokens;
-    for ([[maybe_unused]] const SpillPlanT *spill : spills)
-      tokens.push_back(newBody->getArgument(newArgIndex++));
-    cloneLoopBodyOps(oldLoop, newBody, spills, tokens, mapper);
-  }
-
-  void cloneLoopBodyOps(waveamdmachine::UniformLoopOp oldLoop, Block *newBody,
-                        ArrayRef<const SpillPlanT *> spills,
-                        SmallVectorImpl<Value> &tokens,
-                        IRMapping &mapper) const {
-    Block &oldBody = oldLoop.getBody().front();
-    builder.setInsertionPointToEnd(newBody);
-    for (Operation &op : oldBody.without_terminator()) {
-      for (const SpillPlanT *spill : spills) {
-        BlockArgument oldArg = oldBody.getArgument(getSlot(*spill).index);
-        if (!opUsesValue(&op, oldArg))
-          continue;
-        (void)getMappedValue(oldLoop, oldArg, spills, tokens, mapper,
-                             op.getLoc());
-      }
-      builder.clone(op, mapper);
-    }
-    cloneLoopTerminator(oldLoop, spills, tokens, mapper);
-  }
-
-  static bool opUsesValue(Operation *op, Value value) {
-    bool found = false;
-    op->walk([&](Operation *nested) {
-      if (found)
-        return WalkResult::interrupt();
-      if (llvm::any_of(nested->getOperands(),
-                       [&](Value operand) { return operand == value; })) {
-        found = true;
-        return WalkResult::interrupt();
-      }
-      return WalkResult::advance();
-    });
-    return found;
-  }
-
-  std::optional<unsigned>
-  getSpillOrdinalForValue(waveamdmachine::UniformLoopOp loop, Value value,
-                          ArrayRef<const SpillPlanT *> spills) const {
-    BlockArgument arg = dyn_cast<BlockArgument>(value);
-    if (!arg || arg.getOwner() != &loop.getBody().front())
-      return std::nullopt;
-    return getSpillOrdinal(spills, arg.getArgNumber());
-  }
-
-  Value getMappedValue(waveamdmachine::UniformLoopOp loop, Value value,
-                       ArrayRef<const SpillPlanT *> spills,
-                       SmallVectorImpl<Value> &tokens, IRMapping &mapper,
-                       Location loc) const {
-    if (Value mapped = mapper.lookupOrNull(value))
-      return mapped;
-    std::optional<unsigned> ordinal =
-        getSpillOrdinalForValue(loop, value, spills);
-    if (!ordinal)
-      return mapper.lookupOrDefault(value);
-    const SpillPlanT &spill = *spills[*ordinal];
-    MemorySpillLoadResult load =
-        loadValue(value.getType(), tokens[*ordinal], spill, builder, loc);
-    tokens[*ordinal] = load.token;
-    mapper.map(value, load.value);
-    return load.value;
-  }
-
-  bool needsTerminatorPreload(waveamdmachine::UniformLoopOp loop,
-                              unsigned carryIndex, Value carry,
-                              ArrayRef<const SpillPlanT *> spills) const {
-    std::optional<unsigned> source =
-        getSpillOrdinalForValue(loop, carry, spills);
-    if (!source)
-      return false;
-    std::optional<unsigned> dest = getSpillOrdinal(spills, carryIndex);
-    if (!dest || *dest != *source)
-      return true;
-    BlockArgument arg = cast<BlockArgument>(carry);
-    return arg.getArgNumber() != carryIndex;
-  }
-
-  void cloneLoopTerminator(waveamdmachine::UniformLoopOp loop,
-                           ArrayRef<const SpillPlanT *> spills,
-                           SmallVectorImpl<Value> &tokens,
-                           IRMapping &mapper) const {
-    waveamdmachine::ContinueIfOp oldTerm = cast<waveamdmachine::ContinueIfOp>(
-        loop.getBody().front().getTerminator());
-    for (auto [index, carry] : llvm::enumerate(oldTerm.getCarries()))
-      if (needsTerminatorPreload(loop, index, carry, spills))
-        (void)getMappedValue(loop, carry, spills, tokens, mapper,
-                             oldTerm.getLoc());
-
-    SmallVector<Value> carries;
-    for (unsigned index : llvm::seq<unsigned>(0, oldTerm.getCarries().size())) {
-      Value carry = oldTerm.getCarries()[index];
-      std::optional<unsigned> spillIndex = getSpillOrdinal(spills, index);
-      if (spillIndex) {
-        const SpillPlanT &spill = *spills[*spillIndex];
-        BlockArgument oldArg =
-            loop.getBody().front().getArgument(getSlot(spill).index);
-        if (carry != oldArg)
-          tokens[*spillIndex] =
-              storeValue(getMappedValue(loop, carry, spills, tokens, mapper,
-                                        oldTerm.getLoc()),
-                         tokens[*spillIndex], spill, builder, oldTerm.getLoc());
-        continue;
-      }
-      carries.push_back(getMappedValue(loop, carry, spills, tokens, mapper,
-                                       oldTerm.getLoc()));
-    }
-    carries.append(tokens.begin(), tokens.end());
-    waveamdmachine::ContinueIfOp::create(
-        builder, oldTerm.getLoc(), mapper.lookupOrDefault(oldTerm.getCond()),
-        carries);
-  }
-
-  void replaceLoopResults(waveamdmachine::UniformLoopOp oldLoop,
-                          waveamdmachine::UniformLoopOp newLoop,
-                          ArrayRef<const SpillPlanT *> spills) const {
-    builder.setInsertionPointAfter(newLoop);
-    unsigned newResultIndex = 0;
-    for (unsigned index : llvm::seq<unsigned>(0, oldLoop.getResults().size())) {
-      if (isSpilledIndex(spills, index))
-        continue;
-      oldLoop.getResult(index).replaceAllUsesWith(
-          newLoop.getResult(newResultIndex++));
-    }
-    for (const SpillPlanT *spill : spills) {
-      Value token = newLoop.getResult(newResultIndex++);
-      unsigned oldIndex = getSlot(*spill).index;
-      if (oldLoop.getResult(oldIndex).use_empty())
-        continue;
-      MemorySpillLoadResult load =
-          loadValue(oldLoop.getResult(oldIndex).getType(), token, *spill,
-                    builder, oldLoop.getLoc());
-      oldLoop.getResult(oldIndex).replaceAllUsesWith(load.value);
-    }
-  }
-};
-
-template <typename SpillPlanT, typename GetSlotFn, typename StoreValueFn,
-          typename LoadValueFn, typename CopyInitFn, typename ReserveFn>
-LogicalResult materializeMemorySpillLoopCarryPlans(
-    ArrayRef<const SpillPlanT *> input, OpBuilder &builder, StringRef provider,
-    GetSlotFn getSlot, StoreValueFn storeValue, LoadValueFn loadValue,
-    CopyInitFn copyInitValue, ReserveFn reservePlan) {
-  return MemorySpillLoopCarryMaterializer<SpillPlanT, GetSlotFn, StoreValueFn,
-                                          LoadValueFn, CopyInitFn, ReserveFn>{
-      input,      builder,   provider,      getSlot,
-      storeValue, loadValue, copyInitValue, reservePlan}
-      .run();
+  waveamdmachine::VAccvgprReadB32TupleOp read =
+      dyn_cast<waveamdmachine::VAccvgprReadB32TupleOp>(use->getOwner());
+  if (!read)
+    return failure();
+  read.getResult().replaceAllUsesWith(loaded);
+  read.erase();
+  return success();
 }
 
-inline bool isCheapVGPRExpr(Operation *op) {
-  return isa_and_nonnull<
-      waveamdmachine::VWorkitemIdXOp, waveamdmachine::VMovB32TupleOp,
-      waveamdmachine::TupleFromElementsOp, waveamdmachine::VLshrrevB32Op,
-      waveamdmachine::VLshlrevB32Op, waveamdmachine::VLshlAddU32Op,
-      waveamdmachine::VAddU32Op, waveamdmachine::VAdd3U32Op,
-      waveamdmachine::VAndB32Op, waveamdmachine::VMulLoU32Op,
-      waveamdmachine::VAddLshlU32Op, waveamdmachine::VOrB32Op,
-      waveamdmachine::VXorB32Op, waveamdmachine::VAndOrB32Op,
-      waveamdmachine::VOr3B32Op>(op);
+inline SmallVector<Type> getMemorySpillScalarRegTypes(Type tupleType) {
+  waveamdmachine::RegType regType = cast<waveamdmachine::RegType>(tupleType);
+  SmallVector<Type> types;
+  types.reserve(regType.getWidth());
+  for (unsigned lane : llvm::seq<unsigned>(0, regType.getWidth())) {
+    int64_t index = -1;
+    if (regType.getIndex() >= 0)
+      index = regType.getIndex() + lane;
+    types.push_back(waveamdmachine::RegType::get(
+        tupleType.getContext(), regType.getRegClass(), /*width=*/1, index));
+  }
+  return types;
+}
+
+inline SmallVector<Value> splitMemorySpillValue(Value value, OpBuilder &builder,
+                                                Location loc) {
+  SmallVector<Type> elementTypes =
+      getMemorySpillScalarRegTypes(value.getType());
+  waveamdmachine::TupleToElementsOp split =
+      waveamdmachine::TupleToElementsOp::create(builder, loc, elementTypes,
+                                                value);
+  split->setAttr(kRegAllocTempAttr, builder.getUnitAttr());
+  return SmallVector<Value>(split.getElements().begin(),
+                            split.getElements().end());
+}
+
+inline Value joinMemorySpillValue(Type type, ArrayRef<Value> elements,
+                                  OpBuilder &builder, Location loc) {
+  waveamdmachine::TupleFromElementsOp joined =
+      waveamdmachine::TupleFromElementsOp::create(builder, loc, type, elements);
+  joined->setAttr(kRegAllocTempAttr, builder.getUnitAttr());
+  return joined.getTuple();
+}
+
+inline Value joinMemorySpillTokens(Type tokenType, ArrayRef<Value> tokens,
+                                   OpBuilder &builder, Location loc) {
+  if (tokens.size() == 1)
+    return tokens.front();
+  waveamdmachine::TokenJoinOp join =
+      waveamdmachine::TokenJoinOp::create(builder, loc, tokenType, tokens);
+  join->setAttr(kRegAllocTempAttr, builder.getUnitAttr());
+  return join.getResult();
 }
 
 inline bool isMemorySpillSuppressedVGPRExpr(Operation *op) {
@@ -818,95 +799,6 @@ inline bool isCheapVGPRPressureReliefRootExpr(Operation *op) {
   return isMemorySpillSuppressedVGPRExpr(op) ||
          isa_and_nonnull<waveamdmachine::VMulU64Op, waveamdmachine::VAddU64Op>(
              op);
-}
-
-inline bool isUnassignedVGPR(Value value) {
-  auto type = dyn_cast<waveamdmachine::RegType>(value.getType());
-  if (!type)
-    return false;
-  if (type.getRegClass() != waveamdmachine::RegClass::VGPR)
-    return false;
-  return type.getIndex() < 0;
-}
-
-inline bool isRematerializableMemorySpillInitDef(Operation *def) {
-  if (!def)
-    return false;
-  if (def->getNumResults() != 1)
-    return false;
-  if (isMemoryIssuerOp(def))
-    return false;
-  return isCheapVGPRExpr(def);
-}
-
-inline bool isRematerializableMemorySpillInitTree(Value value,
-                                                  DenseSet<Value> &visiting);
-
-inline bool
-isRematerializableMemorySpillInitOperand(Value operand,
-                                         DenseSet<Value> &visiting) {
-  auto type = dyn_cast<waveamdmachine::RegType>(operand.getType());
-  if (!type)
-    return true;
-  if (type.getRegClass() != waveamdmachine::RegClass::VGPR)
-    return false;
-  if (type.getIndex() >= 0)
-    return false;
-  return isRematerializableMemorySpillInitTree(operand, visiting);
-}
-
-inline bool isRematerializableMemorySpillInitTree(Value value,
-                                                  DenseSet<Value> &visiting) {
-  if (!isUnassignedVGPR(value))
-    return false;
-  Operation *def = value.getDefiningOp();
-  if (!isRematerializableMemorySpillInitDef(def))
-    return false;
-  if (!visiting.insert(value).second)
-    return false;
-
-  for (Value operand : def->getOperands()) {
-    if (!isRematerializableMemorySpillInitOperand(operand, visiting)) {
-      visiting.erase(value);
-      return false;
-    }
-  }
-  visiting.erase(value);
-  return true;
-}
-
-inline bool isRematerializableMemorySpillInitTree(Value value) {
-  DenseSet<Value> visiting;
-  return isRematerializableMemorySpillInitTree(value, visiting);
-}
-
-inline FailureOr<Value>
-materializeMemorySpillInitTree(Value value, OpBuilder &builder,
-                               DenseMap<Value, Value> &cache) {
-  if (Value cached = cache.lookup(value))
-    return cached;
-  Operation *def = value.getDefiningOp();
-  if (!def)
-    return failure();
-
-  IRMapping mapper;
-  for (Value operand : def->getOperands()) {
-    Value replacement = operand;
-    if (isa<waveamdmachine::RegType>(operand.getType())) {
-      FailureOr<Value> rematOperand =
-          materializeMemorySpillInitTree(operand, builder, cache);
-      if (failed(rematOperand))
-        return failure();
-      replacement = *rematOperand;
-    }
-    mapper.map(operand, replacement);
-  }
-
-  Operation *clone = builder.clone(*def, mapper);
-  clone->setAttr(kRegAllocTempAttr, builder.getUnitAttr());
-  Value replacement = clone->getResult(0);
-  cache[value] = replacement;
-  return replacement;
 }
 
 inline bool isFixedRegisterGroup(IntervalGroup *group) {
@@ -939,10 +831,268 @@ inline bool hasLiveMemorySpillLane(IntervalGroup *group, unsigned position) {
   });
 }
 
+inline bool memorySpillLaneLiveAt(Interval *interval, unsigned position) {
+  return !interval->values.empty() && interval->start <= position &&
+         position <= interval->end;
+}
+
+inline bool isMemorySpillProviderRegClass(waveamdmachine::RegClass regClass) {
+  return regClass == waveamdmachine::RegClass::VGPR ||
+         regClass == waveamdmachine::RegClass::AGPR;
+}
+
+inline bool isMemorySpillTempGroup(IntervalGroup *group) {
+  if (!group)
+    return false;
+  bool sawValue = false;
+  for (Interval *interval : group->intervals) {
+    for (Value value : interval->values) {
+      sawValue = true;
+      if (!isRegAllocTempOp(value.getDefiningOp()))
+        return false;
+    }
+  }
+  return sawValue;
+}
+
+inline bool isMemorySpillProviderCandidateGroup(IntervalGroup *group,
+                                                unsigned position) {
+  if (!group || group->plannedPressureRelief || group->reserved ||
+      isFixedRegisterGroup(group))
+    return false;
+  if (!isMemorySpillProviderRegClass(group->storageClass))
+    return false;
+  if (group->storageClass == waveamdmachine::RegClass::AGPR &&
+      !isMemorySpillTempGroup(group))
+    return false;
+  return llvm::any_of(group->intervals, [&](Interval *lane) {
+    return memorySpillLaneLiveAt(lane, position);
+  });
+}
+
+inline bool isMemorySpillProviderEligibleGroup(IntervalGroup *group,
+                                               unsigned position) {
+  if (!isMemorySpillProviderCandidateGroup(group, position))
+    return false;
+  if (!group->nonPromotable &&
+      llvm::all_of(group->intervals,
+                   [](Interval *lane) { return !lane->nonPromotable; }))
+    return true;
+  return isMemorySpillTempGroup(group);
+}
+
 inline bool isMemorySpillEligibleGroup(IntervalGroup *group,
                                        unsigned position) {
   return isMemorySpillVGPRGroup(group) &&
          hasLiveMemorySpillLane(group, position);
+}
+
+struct MemorySpillRejectStats {
+  unsigned crossBlock = 0;
+  unsigned eligible = 0;
+  unsigned fixed = 0;
+  unsigned memoryIssuer = 0;
+  unsigned noUse = 0;
+  unsigned nonPromotable = 0;
+  unsigned temp = 0;
+  unsigned total = 0;
+};
+
+enum class MemorySpillRejectKind : uint8_t {
+  CrossBlock,
+  Eligible,
+  Fixed,
+  MemoryIssuer,
+  NoUse,
+  NonPromotable,
+  Temp,
+};
+
+inline bool memorySpillRejectGroupLiveAt(IntervalGroup *group,
+                                         unsigned position) {
+  if (!group || group->plannedPressureRelief)
+    return false;
+  for (Interval *lane : group->intervals)
+    if (lane->start <= position && position <= lane->end)
+      return true;
+  return false;
+}
+
+inline bool groupHasTempValue(IntervalGroup *group) {
+  if (!group)
+    return false;
+  for (Interval *lane : group->intervals)
+    for (Value value : lane->values)
+      if (Operation *def = value.getDefiningOp())
+        if (isRegAllocTempOp(def))
+          return true;
+  return false;
+}
+
+inline bool groupHasMemoryIssuerValue(IntervalGroup *group) {
+  if (!group)
+    return false;
+  for (Interval *lane : group->intervals)
+    for (Value value : lane->values)
+      if (isMemoryIssuerOp(value.getDefiningOp()))
+        return true;
+  return false;
+}
+
+inline bool groupHasCrossBlockUse(IntervalGroup *group) {
+  if (!group)
+    return false;
+  for (Interval *lane : group->intervals) {
+    for (Value value : lane->values) {
+      Operation *def = value.getDefiningOp();
+      if (!def)
+        continue;
+      Block *block = def->getBlock();
+      for (OpOperand &use : value.getUses()) {
+        Operation *user = use.getOwner();
+        if (isRegAllocTempOp(user))
+          continue;
+        if (user->getBlock() != block)
+          return true;
+      }
+    }
+  }
+  return false;
+}
+
+inline bool groupHasNonTempUse(IntervalGroup *group) {
+  if (!group)
+    return false;
+  for (Interval *lane : group->intervals)
+    for (Value value : lane->values)
+      for (OpOperand &use : value.getUses())
+        if (!isRegAllocTempOp(use.getOwner()))
+          return true;
+  return false;
+}
+
+inline bool groupHasRegionBoundary(IntervalGroup *group) {
+  if (!group)
+    return false;
+  for (Interval *lane : group->intervals) {
+    for (Value value : lane->values) {
+      Operation *def = value.getDefiningOp();
+      if (def && def->getNumRegions() != 0)
+        return true;
+      for (OpOperand &use : value.getUses())
+        if (!isRegAllocTempOp(use.getOwner()) &&
+            use.getOwner()->getNumRegions() != 0)
+          return true;
+    }
+  }
+  return false;
+}
+
+inline bool shouldInspectMemorySpillReject(IntervalGroup *group,
+                                           unsigned position) {
+  if (!memorySpillRejectGroupLiveAt(group, position))
+    return false;
+  return group->storageClass == waveamdmachine::RegClass::VGPR &&
+         group->preferredClass == waveamdmachine::RegClass::VGPR;
+}
+
+inline MemorySpillRejectKind getMemorySpillUseRejectKind(IntervalGroup *group,
+                                                         unsigned position) {
+  assert(hasLiveMemorySpillLane(group, position) &&
+         "caller handles non-live spill lanes");
+  if (groupHasMemoryIssuerValue(group))
+    return MemorySpillRejectKind::MemoryIssuer;
+  if (groupHasCrossBlockUse(group))
+    return MemorySpillRejectKind::CrossBlock;
+  if (groupHasRegionBoundary(group))
+    return MemorySpillRejectKind::NonPromotable;
+  if (!groupHasNonTempUse(group))
+    return MemorySpillRejectKind::NoUse;
+  return MemorySpillRejectKind::Eligible;
+}
+
+inline MemorySpillRejectKind getMemorySpillRejectKind(IntervalGroup *group,
+                                                      unsigned position) {
+  if (group->reserved || isFixedRegisterGroup(group))
+    return MemorySpillRejectKind::Fixed;
+  if (groupHasTempValue(group))
+    return MemorySpillRejectKind::Temp;
+  if (group->nonPromotable || !hasLiveMemorySpillLane(group, position))
+    return MemorySpillRejectKind::NonPromotable;
+  return getMemorySpillUseRejectKind(group, position);
+}
+
+inline void incrementMemorySpillReject(MemorySpillRejectStats &stats,
+                                       MemorySpillRejectKind kind) {
+  switch (kind) {
+  case MemorySpillRejectKind::CrossBlock:
+    ++stats.crossBlock;
+    break;
+  case MemorySpillRejectKind::Eligible:
+    ++stats.eligible;
+    break;
+  case MemorySpillRejectKind::Fixed:
+    ++stats.fixed;
+    break;
+  case MemorySpillRejectKind::MemoryIssuer:
+    ++stats.memoryIssuer;
+    break;
+  case MemorySpillRejectKind::NoUse:
+    ++stats.noUse;
+    break;
+  case MemorySpillRejectKind::NonPromotable:
+    ++stats.nonPromotable;
+    break;
+  case MemorySpillRejectKind::Temp:
+    ++stats.temp;
+    break;
+  }
+}
+
+inline void classifyMemorySpillReject(IntervalGroup *group, unsigned position,
+                                      MemorySpillRejectStats &stats) {
+  if (!shouldInspectMemorySpillReject(group, position))
+    return;
+  ++stats.total;
+  incrementMemorySpillReject(stats, getMemorySpillRejectKind(group, position));
+}
+
+inline void addMemorySpillRejectCount(Builder &builder, NamedAttrList &attrs,
+                                      StringRef name, unsigned count) {
+  if (count == 0)
+    return;
+  attrs.set(name, builder.getI64IntegerAttr(count));
+}
+
+inline void clearMemorySpillRejectDiagnostics(func::FuncOp func) {
+  func->removeAttr(kMemorySpillRejectAttr);
+  func->removeAttr(kMemorySpillRejectDetailAttr);
+}
+
+inline void setMemorySpillRejectDiagnostics(func::FuncOp func,
+                                            ArrayRef<IntervalGroup *> groups,
+                                            IntervalGroup *request,
+                                            unsigned position) {
+  MemorySpillRejectStats stats;
+  classifyMemorySpillReject(request, position, stats);
+  for (IntervalGroup *group : groups)
+    classifyMemorySpillReject(group, position, stats);
+  if (stats.total == 0)
+    return;
+
+  Builder builder(func.getContext());
+  NamedAttrList attrs;
+  attrs.set("total", builder.getI64IntegerAttr(stats.total));
+  addMemorySpillRejectCount(builder, attrs, "cross_block", stats.crossBlock);
+  addMemorySpillRejectCount(builder, attrs, "eligible", stats.eligible);
+  addMemorySpillRejectCount(builder, attrs, "fixed", stats.fixed);
+  addMemorySpillRejectCount(builder, attrs, "memory_issuer",
+                            stats.memoryIssuer);
+  addMemorySpillRejectCount(builder, attrs, "no_use", stats.noUse);
+  addMemorySpillRejectCount(builder, attrs, "non_promotable",
+                            stats.nonPromotable);
+  addMemorySpillRejectCount(builder, attrs, "temp", stats.temp);
+  func->setAttr(kMemorySpillRejectDetailAttr, builder.getDictionaryAttr(attrs));
 }
 
 struct RegisterBudgets {
@@ -1006,41 +1156,10 @@ struct ScratchSpillPlan {
   ScratchSpillPlanStatus status = ScratchSpillPlanStatus::NotKernel;
 };
 
-struct PromotionScore {
-  unsigned liveDwords = 0;
-  unsigned bridgeCost = 0;
-  unsigned end = 0;
-};
-
-struct BankPromotionStep {
-  IntervalGroup *group = nullptr;
-  waveamdmachine::RegClass sourceClass;
-  waveamdmachine::RegClass targetClass;
-};
-
-struct BankPromotionHooks {
-  StringRef (*getRegClassName)(waveamdmachine::RegClass) = nullptr;
-  std::optional<waveamdmachine::RegClass> (*getNextRegClass)(
-      waveamdmachine::RegClass) = nullptr;
-  PromotionScore (*getPromotionScore)(IntervalGroup *, unsigned,
-                                      Inventory &) = nullptr;
-  bool (*isBetterPromotionScore)(PromotionScore, PromotionScore) = nullptr;
-  bool (*isLiveAt)(IntervalGroup *, unsigned) = nullptr;
-  bool (*canPromote)(IntervalGroup *, RegisterBudgets) = nullptr;
-  bool (*canFitPromotionTarget)(
-      IntervalGroup *, ArrayRef<IntervalGroup *>, RegisterBudgets,
-      const ::mlir::wave::WaveAMDKernelEntryRegs &) = nullptr;
-  LogicalResult (*materializePlans)(ArrayRef<BankPromotionStep>, Inventory &,
-                                    OpBuilder &) = nullptr;
-  LogicalResult (*materialize)(IntervalGroup *, Inventory &,
-                               OpBuilder &) = nullptr;
-};
-
 std::unique_ptr<wave::WaveAMDPressureReliefProvider>
 createBankPromotionProvider(ArrayRef<IntervalGroup *> groups,
                             IntervalGroup *request, unsigned position,
-                            RegisterBudgets budgets, Inventory &inventory,
-                            const BankPromotionHooks &hooks);
+                            RegisterBudgets budgets, Inventory &inventory);
 std::unique_ptr<wave::WaveAMDPressureReliefProvider>
 createRematerializeProvider(ArrayRef<IntervalGroup *> groups,
                             IntervalGroup *request, unsigned position,

@@ -6,9 +6,10 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // CHECK-SAME: waveamdmachine.private_segment_fixed_size = 16 : i64
 // CHECK-SAME: waveamdmachine.scratch_spill_bytes = 16 : i64
 // CHECK-SAME: waveamdmachine.uses_flat_scratch = true
-// CHECK: %[[STORE:.*]] = waveamdmachine.scratch_store_tuple_b32
-// CHECK: %[[LOAD:.*]], {{.*}} = waveamdmachine.scratch_load_tuple_b32 {{.*}} after %[[STORE]]
-// CHECK: waveamdmachine.tuple_to_elements %[[LOAD]]
+// CHECK-NOT: scratch_store_tuple_b32
+// CHECK: waveamdmachine.scratch_store_b32
+// CHECK: waveamdmachine.scratch_load_b32
+// CHECK: waveamdmachine.tuple_to_elements
 func.func @scratch_spill_wide_tuple_codegen()
     attributes {wave.kernel, waveamdmachine.target_waves = 4 : i64} {
   %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
@@ -60,9 +61,9 @@ func.func @scratch_spill_wide_tuple_codegen()
 // CHECK: waveamdmachine.scratch_store_b32 {{.*}} offset 4092
 // CHECK: waveamdmachine.imm 4096
 // CHECK: waveamdmachine.scratch_store_b32
-// CHECK: waveamdmachine.imm 4100
-// CHECK: waveamdmachine.scratch_store_b32
 // CHECK: waveamdmachine.imm 4104
+// CHECK: waveamdmachine.scratch_store_b32
+// CHECK: waveamdmachine.imm 4100
 // CHECK: waveamdmachine.scratch_store_b32
 // CHECK: waveamdmachine.tuple_to_elements
 // CHECK: waveamdmachine.scratch_load_b32 {{.*}} offset 4092

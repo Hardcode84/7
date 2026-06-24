@@ -44,6 +44,7 @@ AGPR -> Remat -> LDS -> Scratch
 ## Candidate Contract
 
 - Candidate alias set must intersect the allocation failure point.
+- The live range that failed allocation is eligible for relief.
 - Candidate cost is common:
   - required bridge count;
   - bridge loop-depth penalty;
@@ -66,9 +67,11 @@ AGPR -> Remat -> LDS -> Scratch
 ### Remat
 
 - Candidate is an alias set whose value can be rebuilt from cheap ops.
-- Rebuild expression tree backward until every leaf is live at `P`.
+- Rebuild expression tree backward per consumer.
+- Every non-rematerialized tracked leaf must be live at every consumer where
+  the root is rematerialized.
 - Tree materialization is delayed. Selection records root, leaves, and bridges.
-- Inputs unavailable at `P` make candidate illegal.
+- Inputs unavailable at any remat consumer make candidate illegal.
 
 ### LDS
 

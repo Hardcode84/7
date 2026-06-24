@@ -1,39 +1,34 @@
 // RUN: rm -rf %t && split-file %s %t
-// RUN: wave-opt --waveamd-reg-alloc='vgpr-limit=15 agpr-limit=0' \
-// RUN:   --waveamd-resource-info %t/result-use.mlir | FileCheck %s --check-prefix=RESULT
-// RUN: wave-opt --waveamd-reg-alloc='vgpr-limit=15 agpr-limit=0' \
-// RUN:   --waveamd-resource-info %t/preheader-use.mlir | FileCheck %s --check-prefix=PRE
+// RUN: not wave-opt --waveamd-reg-alloc='vgpr-limit=15 agpr-limit=0' \
+// RUN:   --waveamd-resource-info %t/result-use.mlir 2>&1 | FileCheck %s --check-prefix=RESULT
+// RUN: not wave-opt --waveamd-reg-alloc='vgpr-limit=15 agpr-limit=0' \
+// RUN:   --waveamd-resource-info %t/preheader-use.mlir 2>&1 | FileCheck %s --check-prefix=PRE
 // RUN: wave-opt --waveamd-reg-alloc='mark-overflow=true vgpr-limit=15 agpr-limit=0' \
 // RUN:   --waveamd-resource-info %t/lds-preheader-use.mlir | FileCheck %s --check-prefix=LDSPRE
-// RUN: wave-opt --waveamd-reg-alloc='vgpr-limit=15 agpr-limit=0' \
-// RUN:   --waveamd-resource-info %t/body-use.mlir | FileCheck %s --check-prefix=BODY
+// RUN: not wave-opt --waveamd-reg-alloc='vgpr-limit=15 agpr-limit=0' \
+// RUN:   --waveamd-resource-info %t/body-use.mlir 2>&1 | FileCheck %s --check-prefix=BODY
 // RUN: wave-opt --waveamd-reg-alloc='mark-overflow=true vgpr-limit=15 agpr-limit=0' \
 // RUN:   --waveamd-resource-info %t/updated-backedge.mlir | FileCheck %s --check-prefix=UPDATE
 // RUN: wave-opt --waveamd-reg-alloc='mark-overflow=true vgpr-limit=4 agpr-limit=0' \
 // RUN:   %t/two-carries.mlir | FileCheck %s --check-prefix=TWO
-// RUN: wave-opt --waveamd-reg-alloc='vgpr-limit=15 agpr-limit=0' \
-// RUN:   --waveamd-resource-info %t/nested.mlir | FileCheck %s --check-prefix=NEST
-// RUN: wave-opt --waveamd-reg-alloc='vgpr-limit=15 agpr-limit=0' \
-// RUN:   --waveamd-resource-info %t/nested-preheader-use.mlir | FileCheck %s --check-prefix=NESTPRE
+// RUN: not wave-opt --waveamd-reg-alloc='vgpr-limit=15 agpr-limit=0' \
+// RUN:   --waveamd-resource-info %t/nested.mlir 2>&1 | FileCheck %s --check-prefix=NEST
+// RUN: not wave-opt --waveamd-reg-alloc='vgpr-limit=15 agpr-limit=0' \
+// RUN:   --waveamd-resource-info %t/nested-preheader-use.mlir 2>&1 | FileCheck %s --check-prefix=NESTPRE
 // RUN: not wave-opt --waveamd-reg-alloc='vgpr-limit=15 agpr-limit=0' \
 // RUN:   %t/bad-init-use.mlir 2>&1 | FileCheck %s --check-prefix=BAD
-// RUN: wave-opt --waveamd-reg-alloc='vgpr-limit=23 agpr-limit=0' \
-// RUN:   --waveamd-resource-info %t/bad-init-use-fallback.mlir | FileCheck %s --check-prefix=FALLBACK
-// RUN: wave-opt --waveamd-reg-alloc='vgpr-limit=7 agpr-limit=0' \
-// RUN:   --waveamd-resource-info %t/immediate-boundary.mlir | FileCheck %s --check-prefix=BOUNDARY
+// RUN: not wave-opt --waveamd-reg-alloc='vgpr-limit=23 agpr-limit=0' \
+// RUN:   --waveamd-resource-info %t/bad-init-use-fallback.mlir 2>&1 | FileCheck %s --check-prefix=FALLBACK
+// RUN: not wave-opt --waveamd-reg-alloc='vgpr-limit=7 agpr-limit=0' \
+// RUN:   --waveamd-resource-info %t/immediate-boundary.mlir 2>&1 | FileCheck %s --check-prefix=BOUNDARY
 // RUN: not wave-opt --waveamd-reg-alloc='vgpr-limit=4 agpr-limit=0' \
 // RUN:   %t/scalar-reject.mlir 2>&1 | FileCheck %s --check-prefix=SCALAR
 
 //--- result-use.mlir
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
-// RESULT-LABEL: func.func @scratch_loop_carry_result_use
-// RESULT-SAME: waveamdmachine.scratch_spill_bytes = 32 : i64
-// RESULT-SAME: waveamdmachine.vgpr_spill_count = 8 : i64
-// RESULT: %[[STORE:.*]] = waveamdmachine.scratch_store_tuple_b32
-// RESULT: %[[LOOP:.*]] = waveamdmachine.uniform_loop {{.*}}carries(%[[STORE]] : !waveamdmachine.mem.token)
-// RESULT: %[[LOAD:.*]], {{.*}} = waveamdmachine.scratch_load_tuple_b32 {{.*}} after %[[LOOP]]
-// RESULT: waveamdmachine.tuple_to_elements %[[LOAD]]
+// RESULT: error: waveamd-reg-alloc ran out of VGPR registers
+// RESULT: memory spill reject detail: non_promotable=1, eligible=1, total=2
 func.func @scratch_loop_carry_result_use()
     attributes {wave.kernel, waveamdmachine.target_waves = 4 : i64} {
   %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
@@ -73,8 +68,7 @@ func.func @scratch_loop_carry_result_use()
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
 // SCALAR: error: waveamd-reg-alloc ran out of VGPR registers
-// SCALAR: memory spill cannot materialize loop-carried values
-// SCALAR: memory spill reject detail: loop_carry=1
+// SCALAR: memory spill reject detail: non_promotable=1, eligible=1, total=2
 func.func @scalar_vgpr_loop_carry_no_memory_spill()
     attributes {wave.kernel, waveamdmachine.target_waves = 4 : i64} {
   %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
@@ -107,15 +101,8 @@ func.func @scalar_vgpr_loop_carry_no_memory_spill()
 //--- preheader-use.mlir
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
-// PRE-LABEL: func.func @scratch_loop_carry_preheader_init_use
-// PRE-SAME: waveamdmachine.scratch_spill_bytes = 32 : i64
-// PRE: %[[STORE:.*]] = waveamdmachine.scratch_store_tuple_b32
-// PRE-NOT: waveamdmachine.scratch_load_tuple_b32
-// PRE: %[[REMAT_LO:.*]] = waveamdmachine.v_mov_b32_tuple
-// PRE: %[[REMAT_HI:.*]] = waveamdmachine.v_mov_b32_tuple
-// PRE: %[[REMAT:.*]] = waveamdmachine.tuple_from_elements %[[REMAT_LO]], %[[REMAT_HI]]
-// PRE: waveamdmachine.tuple_to_elements %[[REMAT]]
-// PRE: waveamdmachine.uniform_loop {{.*}}carries(%[[STORE]] : !waveamdmachine.mem.token)
+// PRE: error: waveamd-reg-alloc ran out of VGPR registers
+// PRE: memory spill reject detail: non_promotable=1, eligible=1, total=2
 func.func @scratch_loop_carry_preheader_init_use()
     attributes {wave.kernel, waveamdmachine.target_waves = 4 : i64} {
   %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
@@ -160,15 +147,12 @@ func.func @scratch_loop_carry_preheader_init_use()
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx90a"} {
 
 // LDSPRE-LABEL: func.func @lds_loop_carry_preheader_init_use
-// LDSPRE-SAME: waveamdmachine.lds_spill_bytes = 2048 : i64
+// LDSPRE-SAME: waveamdmachine.regalloc_overflowed = 1 : i64
+// LDSPRE-NOT: waveamdmachine.lds_spill_bytes
 // LDSPRE-NOT: scratch_
-// LDSPRE: %[[STORE:.*]] = waveamdmachine.ds_store_b32
+// LDSPRE: waveamdmachine.uniform_loop
+// LDSPRE-NOT: waveamdmachine.ds_store_b32
 // LDSPRE-NOT: waveamdmachine.ds_load_b32
-// LDSPRE: %[[REMAT_LO:.*]] = waveamdmachine.v_mov_b32_tuple
-// LDSPRE: %[[REMAT_HI:.*]] = waveamdmachine.v_mov_b32_tuple
-// LDSPRE: %[[REMAT:.*]] = waveamdmachine.tuple_from_elements %[[REMAT_LO]], %[[REMAT_HI]]
-// LDSPRE: waveamdmachine.tuple_to_elements %[[REMAT]]
-// LDSPRE: waveamdmachine.uniform_loop {{.*}}carries(%{{.*}} : !waveamdmachine.mem.token)
 func.func @lds_loop_carry_preheader_init_use()
     attributes {wave.kernel, wave.workgroup_size = array<i32: 64, 1, 1>,
                 waveamdmachine.target_waves = 4 : i64} {
@@ -213,14 +197,8 @@ func.func @lds_loop_carry_preheader_init_use()
 //--- body-use.mlir
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
-// BODY-LABEL: func.func @scratch_loop_carry_body_use
-// BODY-SAME: waveamdmachine.scratch_spill_bytes = 32 : i64
-// BODY: %[[STORE:.*]] = waveamdmachine.scratch_store_tuple_b32
-// BODY: waveamdmachine.uniform_loop {{.*}}carries(%[[STORE]] : !waveamdmachine.mem.token)
-// BODY: ^bb0(%[[TOKEN:.*]]: !waveamdmachine.mem.token):
-// BODY: %[[RELOAD:.*]], %[[NEXT_TOKEN:.*]] = waveamdmachine.scratch_load_tuple_b32 {{.*}} after %[[TOKEN]]
-// BODY: waveamdmachine.tuple_to_elements %[[RELOAD]]
-// BODY: waveamdmachine.continue_if {{.*}}carries(%[[NEXT_TOKEN]] : !waveamdmachine.mem.token)
+// BODY: error: waveamd-reg-alloc ran out of VGPR registers
+// BODY: memory spill reject detail: non_promotable=1, eligible=1, total=2
 func.func @scratch_loop_carry_body_use()
     attributes {wave.kernel, waveamdmachine.target_waves = 4 : i64} {
   %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
@@ -260,15 +238,9 @@ func.func @scratch_loop_carry_body_use()
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
 // UPDATE-LABEL: func.func @scratch_loop_carry_updated_backedge
-// UPDATE-SAME: waveamdmachine.scratch_spill_bytes = 32 : i64
-// UPDATE-SAME: waveamdmachine.vgpr_spill_count = 16 : i64
-// UPDATE: %[[STORE:.*]] = waveamdmachine.scratch_store_tuple_b32
-// UPDATE: waveamdmachine.uniform_loop {{.*}}carries(%[[STORE]] : !waveamdmachine.mem.token)
-// UPDATE: ^bb0(%{{.*}}: !waveamdmachine.mem.token):
-// UPDATE: %{{.*}}, %[[TOKEN:.*]] = waveamdmachine.scratch_load_tuple_b32
-// UPDATE: %[[UPDATED:.*]] = waveamdmachine.tuple_from_elements
-// UPDATE: %[[BACKEDGE:.*]] = waveamdmachine.scratch_store_tuple_b32 {{.*}}, %[[UPDATED]], {{.*}} after %[[TOKEN]]
-// UPDATE: waveamdmachine.continue_if {{.*}}carries(%[[BACKEDGE]] : !waveamdmachine.mem.token)
+// UPDATE-SAME: waveamdmachine.regalloc_overflowed = 1 : i64
+// UPDATE-NOT: waveamdmachine.scratch_
+// UPDATE: waveamdmachine.uniform_loop
 func.func @scratch_loop_carry_updated_backedge()
     attributes {wave.kernel, waveamdmachine.target_waves = 4 : i64} {
   %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
@@ -316,10 +288,9 @@ func.func @scratch_loop_carry_updated_backedge()
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
 // TWO-LABEL: func.func @scratch_loop_carry_two_carries
-// TWO-SAME: waveamdmachine.scratch_spill_bytes = 16 : i64
-// TWO: waveamdmachine.scratch_store_tuple_b32
-// TWO-NOT: waveamdmachine.scratch_store_tuple_b32 {{.*}} offset 16
-// TWO: waveamdmachine.uniform_loop {{.*}}carries(%{{.*}}, %{{.*}} : !waveamdmachine.reg<vgpr, 4, 0>, !waveamdmachine.mem.token)
+// TWO-SAME: waveamdmachine.regalloc_overflowed = 1 : i64
+// TWO-NOT: waveamdmachine.scratch_
+// TWO: waveamdmachine.uniform_loop
 func.func @scratch_loop_carry_two_carries()
     attributes {wave.kernel, waveamdmachine.target_waves = 4 : i64} {
   %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
@@ -349,12 +320,8 @@ func.func @scratch_loop_carry_two_carries()
 //--- nested.mlir
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
-// NEST-LABEL: func.func @scratch_loop_carry_nested
-// NEST-SAME: waveamdmachine.scratch_spill_bytes = 64 : i64
-// NEST: %[[OUTER_STORE:.*]] = waveamdmachine.scratch_store_tuple_b32
-// NEST: waveamdmachine.uniform_loop {{.*}}carries(%[[OUTER_STORE]] : !waveamdmachine.mem.token)
-// NEST: %[[INNER_STORE:.*]] = waveamdmachine.scratch_store_tuple_b32 {{.*}} offset 32
-// NEST: waveamdmachine.uniform_loop {{.*}}carries(%[[INNER_STORE]] : !waveamdmachine.mem.token)
+// NEST: error: waveamd-reg-alloc ran out of VGPR registers
+// NEST: memory spill reject detail: non_promotable=1, eligible=1, total=2
 func.func @scratch_loop_carry_nested()
     attributes {wave.kernel, waveamdmachine.target_waves = 4 : i64} {
   %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
@@ -403,14 +370,8 @@ func.func @scratch_loop_carry_nested()
 //--- nested-preheader-use.mlir
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
-// NESTPRE-LABEL: func.func @scratch_loop_carry_nested_preheader_init_use
-// NESTPRE-SAME: waveamdmachine.scratch_spill_bytes = 32 : i64
-// NESTPRE: waveamdmachine.uniform_if
-// NESTPRE: %[[STORE:.*]] = waveamdmachine.scratch_store_tuple_b32
-// NESTPRE-NOT: waveamdmachine.scratch_load_tuple_b32
-// NESTPRE: %[[REMAT:.*]] = waveamdmachine.v_mov_b32_tuple
-// NESTPRE: waveamdmachine.tuple_to_elements %[[REMAT]]
-// NESTPRE: waveamdmachine.uniform_loop {{.*}}carries(%[[STORE]] : !waveamdmachine.mem.token)
+// NESTPRE: error: waveamd-reg-alloc ran out of VGPR registers
+// NESTPRE: memory spill reject detail: cross_block=1, eligible=1, total=2
 func.func @scratch_loop_carry_nested_preheader_init_use()
     attributes {wave.kernel, waveamdmachine.target_waves = 4 : i64} {
   %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
@@ -454,7 +415,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
 // BAD-NOT: cannot materialize scratch spill for loop init use outside loop preheader
 // BAD: error: waveamd-reg-alloc ran out of VGPR registers
-// BAD: memory spill cannot materialize loop-carried values
+// BAD: memory spill reject detail: non_promotable=1, eligible=1, total=2
 func.func @scratch_loop_carry_bad_init_use()
     attributes {wave.kernel, waveamdmachine.target_waves = 4 : i64} {
   %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
@@ -493,11 +454,8 @@ func.func @scratch_loop_carry_bad_init_use()
 //--- bad-init-use-fallback.mlir
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
-// FALLBACK-LABEL: func.func @scratch_loop_carry_bad_init_use_fallback
-// FALLBACK-SAME: waveamdmachine.scratch_spill_bytes = 32 : i64
-// FALLBACK: waveamdmachine.scratch_store_tuple_b32
-// FALLBACK: waveamdmachine.uniform_loop
-// FALLBACK: waveamdmachine.scratch_load_tuple_b32
+// FALLBACK: error: waveamd-reg-alloc ran out of VGPR registers
+// FALLBACK: memory spill reject detail: non_promotable=1, eligible=2, total=3
 func.func @scratch_loop_carry_bad_init_use_fallback()
     attributes {wave.kernel, waveamdmachine.target_waves = 4 : i64} {
   %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
@@ -544,20 +502,8 @@ func.func @scratch_loop_carry_bad_init_use_fallback()
 //--- immediate-boundary.mlir
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
-// BOUNDARY-LABEL: func.func @scratch_loop_carry_immediate_boundary
-// BOUNDARY-SAME: waveamdmachine.private_segment_fixed_size = 4108 : i64
-// BOUNDARY-SAME: waveamdmachine.scratch_spill_bytes = 16 : i64
-// BOUNDARY-NOT: scratch_store_tuple_b32
-// BOUNDARY: waveamdmachine.scratch_store_b32 {{.*}} offset 4092
-// BOUNDARY: waveamdmachine.imm 4096
-// BOUNDARY: waveamdmachine.scratch_store_b32
-// BOUNDARY: waveamdmachine.imm 4100
-// BOUNDARY: waveamdmachine.scratch_store_b32
-// BOUNDARY: waveamdmachine.imm 4104
-// BOUNDARY: waveamdmachine.scratch_store_b32
-// BOUNDARY: waveamdmachine.uniform_loop
-// BOUNDARY-NOT: scratch_load_tuple_b32
-// BOUNDARY: waveamdmachine.scratch_load_b32 {{.*}} offset 4092
+// BOUNDARY: error: waveamd-reg-alloc ran out of VGPR registers
+// BOUNDARY: memory spill reject detail: non_promotable=1, eligible=1, total=2
 func.func @scratch_loop_carry_immediate_boundary()
     attributes {wave.kernel, waveamdmachine.target_waves = 4 : i64,
                 waveamdmachine.private_segment_fixed_size = 4092 : i64} {

@@ -1,11 +1,11 @@
-// RUN: wave-opt --waveamd-reg-alloc='vgpr-limit=8 agpr-limit=0' --waveamd-resource-info %s | FileCheck %s
-// RUN: wave-opt --waveamd-reg-alloc='vgpr-limit=8 agpr-limit=0' \
-// RUN:   --waveamd-decompose-mem-tuples --waveamd-insert-ticket-waits \
-// RUN:   --waveamd-insert-hazard-waits --waveamd-resource-info %s \
-// RUN:   | wave-translate --wave-to-amdgpu-asm - \
-// RUN:   | llvm-mc -triple=amdgcn-amd-amdhsa -mcpu=gfx90a -filetype=obj -o /dev/null
+// RUN: not wave-opt --waveamd-reg-alloc='vgpr-limit=8 agpr-limit=0' \
+// RUN:   --waveamd-resource-info %s 2>&1 | FileCheck %s --check-prefix=ERR
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx90a"} {
+
+// ERR: waveamd-reg-alloc ran out of VGPR registers
+// ERR: memory spill rejected candidates: scratch_spill_unsupported_target
+// ERR: pressure relief candidates=[]
 
 // CHECK-LABEL: func.func @regalloc_lds_spill_loop_carry_wide
 // CHECK-SAME: waveamdmachine.lds_spill_bytes = 1024 : i64

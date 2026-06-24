@@ -14,7 +14,7 @@
 // REMARK: Function:        sgpr_promotes_then_vgpr_overflows
 // REMARK: class:           VGPR
 // REMARK: limit:           '2'
-// REMARK: position:        '5'
+// REMARK: position:        '6'
 // REMARK: required_relief: '1'
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {

@@ -89,6 +89,34 @@ Same rule covers docstrings, commit bodies, and PR descriptions. Wit is welcome,
   or loop-carried memory dependencies to any transform. If ordering matters,
   encode it in IR.
 
+## Wave AMD Regalloc
+
+- Pressure relief for `WaveAMDRegAlloc*` follows
+  `lib/Dialect/Wave/Transforms/AGENTS.md`.
+- Keep alias-set construction and linear scan. On allocation failure, ask
+  providers for one relief plan, add required non-spillable temp ranges, and
+  rerun scan.
+- Provider order is strict: `AGPR -> Remat -> LDS -> Scratch`. First provider
+  with any legal candidate wins; later providers are not queried for cheaper
+  relief.
+- Always spill/remat the whole alias set. Failed live range is eligible.
+  A legal plan is accepted even when it does not solve pressure alone.
+- Candidate alias set must intersect the allocation failure point. Relief size
+  is not a filter; use bridge count, loop-depth penalty, and stable tie-breaks.
+- Bridge temps are normal intervals except `nonPromotable`/non-spillable.
+- Base regalloc talks only through the common provider interface. No
+  provider-specific logic in `WaveAMDRegAlloc.cpp`. Each provider
+  implementation lives in its own file.
+- Providers own legality, capacity, bridge counting, bridge temp ranges, and
+  materialization. Bridge loop depth is cost, not legality.
+- AGPR MFMA accumulator chains need no bridges when banks already match.
+- Remat rebuilds cheap expression trees only when all non-rematerialized leaves
+  are live at every consumer needing the rebuilt value.
+- LDS and Scratch share spill logic. LDS is occupancy/budget-limited; Scratch
+  is unlimited and last by provider order.
+- Materialization waits until allocation planning is done. Do not rebuild alias
+  sets from scratch after each plan.
+
 ## Perf golden ASM
 
 - Use one `test/PerfGolden/test_*.py` per kernel. Keep frozen Wave MLIR

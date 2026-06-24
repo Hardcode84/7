@@ -254,22 +254,6 @@ static LogicalResult reserveExecIfSaveBudget(func::FuncOp func,
   return success();
 }
 
-static std::optional<waveamdmachine::RegClass>
-getNextRegClass(waveamdmachine::RegClass regClass) {
-  if (regClass == waveamdmachine::RegClass::SGPR)
-    return waveamdmachine::RegClass::VGPR;
-  if (regClass == waveamdmachine::RegClass::VGPR)
-    return waveamdmachine::RegClass::AGPR;
-  return std::nullopt;
-}
-
-static waveamdmachine::RegType getRegType(Value value,
-                                          waveamdmachine::RegClass regClass) {
-  auto type = cast<waveamdmachine::RegType>(value.getType());
-  return waveamdmachine::RegType::get(type.getContext(), regClass,
-                                      type.getWidth(), /*index=*/-1);
-}
-
 static Operation *diagOpForValue(Value value, func::FuncOp func) {
   if (Operation *def = value.getDefiningOp())
     return def;
@@ -299,15 +283,6 @@ static LogicalResult validateTrackedType(Value value, func::FuncOp func) {
                              "fixed register index")))
     return failure();
   return success();
-}
-
-static void setRegClass(Value value, waveamdmachine::RegClass regClass) {
-  value.setType(getRegType(value, regClass));
-}
-
-static bool hasRegClass(Value value, waveamdmachine::RegClass regClass) {
-  auto type = dyn_cast<waveamdmachine::RegType>(value.getType());
-  return type && type.getRegClass() == regClass;
 }
 
 static std::optional<int64_t> getRegionNumber(Operation *op, Region *region) {
@@ -599,6 +574,51 @@ makeScalarInterval(MLIRContext *ctx, waveamdmachine::RegClass cls,
   interval->start = start;
   interval->end = end;
   return interval;
+}
+
+static IntervalGroup *
+addPlannedTempInterval(Inventory &inventory,
+                       wave::WaveAMDPressureReliefTempInterval temp,
+                       MLIRContext *ctx) {
+  if (temp.width == 0)
+    return nullptr;
+  std::unique_ptr<IntervalGroup> group = std::make_unique<IntervalGroup>();
+  IntervalGroup *groupPtr = group.get();
+  groupPtr->preferredClass = temp.regClass;
+  groupPtr->storageClass = temp.regClass;
+  groupPtr->order = inventory.groups.size();
+  groupPtr->nonPromotable = true;
+  groupPtr->fixedBase = temp.fixedBase;
+  inventory.groups.push_back(std::move(group));
+
+  for (unsigned offset : llvm::seq<unsigned>(0, temp.width)) {
+    int64_t index = -1;
+    if (temp.fixedBase)
+      index = *temp.fixedBase + offset;
+    std::unique_ptr<Interval> interval = makeScalarInterval(
+        ctx, temp.regClass, index, temp.start, std::max(temp.start, temp.end));
+    interval->group = groupPtr;
+    interval->nonPromotable = true;
+    interval->plannedTemp = true;
+    groupPtr->intervals.push_back(interval.get());
+    inventory.intervals.push_back(std::move(interval));
+  }
+  return groupPtr;
+}
+
+static void
+addPlannedTempIntervals(Inventory &inventory, MLIRContext *ctx,
+                        const wave::WaveAMDPressureReliefProvider &provider,
+                        const wave::WaveAMDPressureReliefPlan &plan) {
+  SmallVector<wave::WaveAMDPressureReliefTempInterval, 4> temps;
+  provider.collectPlanTempIntervals(plan, temps);
+  for (wave::WaveAMDPressureReliefTempInterval temp : temps) {
+    IntervalGroup *group = addPlannedTempInterval(inventory, temp, ctx);
+    if (!group)
+      continue;
+    if (!temp.fixedBase)
+      inventory.plannedReliefTemps.push_back({&plan, temp, group});
+  }
 }
 
 using ReservedLaneUses = SmallVector<std::optional<unsigned>, 8>;
@@ -995,6 +1015,26 @@ static LogicalResult importLiveIntervals(func::FuncOp func,
   return success();
 }
 
+static bool hasIntervalPayload(const Interval &interval) {
+  return !interval.values.empty() || interval.reserved || interval.plannedTemp;
+}
+
+static bool hasIntervalPayload(const Interval *interval) {
+  return interval && hasIntervalPayload(*interval);
+}
+
+static bool isFixedPlannedTemp(const Interval &interval) {
+  return interval.plannedTemp && interval.type.getIndex() >= 0;
+}
+
+static bool isFixedPlannedTemp(const Interval *interval) {
+  return interval && isFixedPlannedTemp(*interval);
+}
+
+static bool countsForLivePressure(const Interval *interval) {
+  return hasIntervalPayload(interval) && !isFixedPlannedTemp(interval);
+}
+
 static std::optional<unsigned> getLaneIndex(IntervalGroup *group,
                                             Interval *interval) {
   for (auto [index, lane] : llvm::enumerate(group->intervals))
@@ -1011,7 +1051,7 @@ getLiveDwordsByPosition(ArrayRef<std::unique_ptr<Interval>> intervals,
   for (const std::unique_ptr<Interval> &interval : intervals) {
     if (interval->group->plannedPressureRelief)
       continue;
-    if (interval->values.empty() && !interval->reserved)
+    if (!countsForLivePressure(interval.get()))
       continue;
     if (interval->group->storageClass != regClass)
       continue;
@@ -1036,7 +1076,7 @@ static bool countsForPeak(const Interval &interval,
                           waveamdmachine::RegClass regClass) {
   if (interval.group->plannedPressureRelief)
     return false;
-  if (interval.values.empty() && !interval.reserved)
+  if (!countsForLivePressure(&interval))
     return false;
   return interval.group->storageClass == regClass;
 }
@@ -1074,8 +1114,8 @@ static void updatePeaks(Inventory &inventory) {
 static bool isLiveAt(Interval *interval, unsigned position) {
   if (interval->group->plannedPressureRelief)
     return false;
-  return (!interval->values.empty() || interval->reserved) &&
-         interval->start <= position && position <= interval->end;
+  return hasIntervalPayload(interval) && interval->start <= position &&
+         position <= interval->end;
 }
 
 static bool isLiveAt(IntervalGroup *group, unsigned position) {
@@ -1086,7 +1126,7 @@ static bool isLiveAt(IntervalGroup *group, unsigned position) {
 static unsigned getGroupStart(IntervalGroup *group) {
   unsigned start = std::numeric_limits<unsigned>::max();
   for (Interval *lane : group->intervals)
-    if (!lane->values.empty() || lane->reserved)
+    if (hasIntervalPayload(lane))
       start = std::min(start, lane->start);
   return start;
 }
@@ -1094,7 +1134,7 @@ static unsigned getGroupStart(IntervalGroup *group) {
 static unsigned getGroupEnd(IntervalGroup *group) {
   unsigned end = 0;
   for (Interval *lane : group->intervals)
-    if (!lane->values.empty() || lane->reserved)
+    if (hasIntervalPayload(lane))
       end = std::max(end, lane->end);
   return end;
 }
@@ -1108,9 +1148,8 @@ static int64_t getResultIndex(Value value) {
 static bool hasLiveLanes(IntervalGroup *group) {
   if (group->plannedPressureRelief)
     return false;
-  return llvm::any_of(group->intervals, [](Interval *lane) {
-    return !lane->values.empty() || lane->reserved;
-  });
+  return llvm::any_of(group->intervals,
+                      [](Interval *lane) { return hasIntervalPayload(lane); });
 }
 
 static std::optional<unsigned> getFixedBase(IntervalGroup *group) {
@@ -1136,54 +1175,6 @@ static std::optional<unsigned> getFixedBase(IntervalGroup *group) {
 
 static bool hasFixedRegister(IntervalGroup *group) {
   return isFixedRegisterGroup(group);
-}
-
-static bool isMFMA(Operation *op) {
-  return op && op->hasTrait<OpTrait::waveamdmachine::MFMAOp>();
-}
-
-static bool canDefineAGPR(Value value) {
-  if (isa<BlockArgument>(value))
-    return true;
-  Operation *def = value.getDefiningOp();
-  if (!def)
-    return false;
-  return isa<waveamdmachine::UninitOp, waveamdmachine::UniformLoopOp>(def) ||
-         isMFMA(def);
-}
-
-static bool canConsumeAGPR(OpOperand &use) {
-  Operation *user = use.getOwner();
-  if (isMFMA(user)) {
-    if (use.getOperandNumber() < 2)
-      return true;
-    if (use.getOperandNumber() == 2 && user->getNumResults() == 1) {
-      auto resultType =
-          dyn_cast<waveamdmachine::RegType>(user->getResult(0).getType());
-      return resultType &&
-             resultType.getRegClass() == waveamdmachine::RegClass::AGPR;
-    }
-    return false;
-  }
-  if (isa<waveamdmachine::UniformLoopOp, waveamdmachine::ContinueIfOp>(user))
-    return true;
-  if (isa<waveamdmachine::VAccvgprReadB32TupleOp>(user))
-    return use.getOperandNumber() == 0;
-  return false;
-}
-
-static bool hasTempAGPRWriteUse(IntervalGroup *group) {
-  for (Interval *lane : group->intervals) {
-    for (Value value : lane->values) {
-      for (OpOperand &use : value.getUses()) {
-        auto write =
-            dyn_cast<waveamdmachine::VAccvgprWriteB32TupleOp>(use.getOwner());
-        if (write && use.getOperandNumber() == 0 && isRegAllocTempOp(write))
-          return true;
-      }
-    }
-  }
-  return false;
 }
 
 static bool intervalsOverlap(Interval *lhs, Interval *rhs) {
@@ -1321,8 +1312,27 @@ static bool canOverlapReservedLane(Interval *lane, unsigned phys,
   });
 }
 
+static bool
+canOverlapFixedPlannedTemp(Interval *lane, Interval *otherLane, unsigned phys,
+                           const wave::WaveAMDKernelEntryRegs &regs) {
+  if (!lane->plannedTemp)
+    return false;
+  if (lane->type.getIndex() < 0 || lane->type.getIndex() != phys)
+    return false;
+  if (canOverlapReservedLane(otherLane, phys, regs))
+    return true;
+  if (otherLane->reserved)
+    return true;
+  if (!otherLane->plannedTemp)
+    return false;
+  return lane->type.getIndex() == otherLane->type.getIndex();
+}
+
 static bool lanesCanOverlap(Interval *lane, Interval *otherLane, unsigned phys,
                             const wave::WaveAMDKernelEntryRegs &regs) {
+  if (canOverlapFixedPlannedTemp(lane, otherLane, phys, regs) ||
+      canOverlapFixedPlannedTemp(otherLane, lane, phys, regs))
+    return true;
   if (lane->reserved && canOverlapReservedLane(otherLane, phys, regs))
     return true;
   if (otherLane->reserved && canOverlapReservedLane(lane, phys, regs))
@@ -1332,7 +1342,7 @@ static bool lanesCanOverlap(Interval *lane, Interval *otherLane, unsigned phys,
 
 static bool laneBlocksPhys(Interval *lane, Interval *otherLane, unsigned phys,
                            const wave::WaveAMDKernelEntryRegs &regs) {
-  if (otherLane->values.empty() && !otherLane->reserved)
+  if (!hasIntervalPayload(otherLane))
     return false;
   if (lanesCanOverlap(lane, otherLane, phys, regs))
     return false;
@@ -1428,7 +1438,7 @@ getAssignedClassIndex(const AssignedRegisterIndex &index,
 }
 
 static bool hasAssignedLanePayload(Interval *lane) {
-  return !lane->values.empty() || lane->reserved;
+  return hasIntervalPayload(lane);
 }
 
 static void addAssignedLane(AssignedRegisterIndex &index, IntervalGroup *group,
@@ -1452,16 +1462,6 @@ static void addAssignedGroup(AssignedRegisterIndex &index,
     return;
   for (unsigned laneIndex : llvm::seq<unsigned>(0, group->intervals.size()))
     addAssignedLane(index, group, laneIndex);
-}
-
-static AssignedRegisterIndex
-buildAssignedRegisterIndex(ArrayRef<IntervalGroup *> assigned,
-                           AllocationProbeStats *stats) {
-  AssignedRegisterIndex index;
-  index.stats = stats;
-  for (IntervalGroup *group : assigned)
-    addAssignedGroup(index, group);
-  return index;
 }
 
 static void recordAssignedLaneCheck(const AssignedRegisterIndex &index) {
@@ -1546,225 +1546,6 @@ findFreeBase(IntervalGroup *group, RegisterBudgets budgets,
   return std::nullopt;
 }
 
-static std::optional<unsigned>
-findFreeBase(IntervalGroup *group, RegisterBudgets budgets,
-             ArrayRef<IntervalGroup *> assigned,
-             const wave::WaveAMDKernelEntryRegs &regs,
-             AllocationProbeStats *stats = nullptr) {
-  AssignedRegisterIndex index = buildAssignedRegisterIndex(assigned, stats);
-  return findFreeBase(group, budgets, index, regs);
-}
-
-static bool groupContainsBlockArgument(IntervalGroup *group) {
-  for (Interval *lane : group->intervals)
-    for (Value value : lane->values)
-      if (isa<BlockArgument>(value))
-        return true;
-  return false;
-}
-
-static bool groupHasNonPromotableLane(IntervalGroup *group) {
-  for (Interval *lane : group->intervals)
-    if (lane->nonPromotable)
-      return true;
-  return false;
-}
-
-static bool canPromoteToVGPR(IntervalGroup *group) {
-  if (group->intervals.size() != 1)
-    return false;
-  return !groupContainsBlockArgument(group);
-}
-
-static bool canPromoteToAGPR(IntervalGroup *group, RegisterBudgets budgets) {
-  if (budgets.agprCountsAgainstVGPRs && budgets.combinedPlacementVGPRLimit)
-    return false;
-  return !hasTempAGPRWriteUse(group);
-}
-
-static bool canPromote(IntervalGroup *group, RegisterBudgets budgets) {
-  if (group->nonPromotable || hasFixedRegister(group))
-    return false;
-  if (groupHasNonPromotableLane(group))
-    return false;
-  std::optional<waveamdmachine::RegClass> next =
-      getNextRegClass(group->storageClass);
-  if (!next || getBudget(budgets, *next) < group->intervals.size())
-    return false;
-  if (*next == waveamdmachine::RegClass::VGPR)
-    return canPromoteToVGPR(group);
-  if (*next == waveamdmachine::RegClass::AGPR)
-    return canPromoteToAGPR(group, budgets);
-  return false;
-}
-
-static unsigned getGroupLiveDwords(IntervalGroup *group, unsigned position);
-static LogicalResult materializePromotion(IntervalGroup *group,
-                                          Inventory &inventory,
-                                          OpBuilder &builder);
-static LogicalResult
-materializePromotionPlans(ArrayRef<BankPromotionStep> steps,
-                          Inventory &inventory, OpBuilder &builder);
-
-static bool canFitPromotionTarget(IntervalGroup *group,
-                                  ArrayRef<IntervalGroup *> assigned,
-                                  RegisterBudgets budgets,
-                                  const wave::WaveAMDKernelEntryRegs &regs) {
-  std::optional<waveamdmachine::RegClass> next =
-      getNextRegClass(group->storageClass);
-  if (!next)
-    return false;
-  waveamdmachine::RegClass original = group->storageClass;
-  std::optional<unsigned> originalBase = group->assignedBase;
-  group->storageClass = *next;
-  group->assignedBase.reset();
-  bool fits = findFreeBase(group, budgets, assigned, regs).has_value();
-  group->storageClass = original;
-  group->assignedBase = originalBase;
-  return fits;
-}
-
-static SmallVector<Value> getGroupValues(IntervalGroup *group) {
-  llvm::SmallDenseSet<Value, 8> seen;
-  SmallVector<Value> values;
-  for (Interval *lane : group->intervals) {
-    for (Value value : lane->values) {
-      if (seen.insert(value).second)
-        values.push_back(value);
-    }
-  }
-  return values;
-}
-
-static bool valueInGroup(Value value, IntervalGroup *group,
-                         Inventory &inventory) {
-  Interval *interval = inventory.intervalFor.lookup(value);
-  return interval && interval->group == group;
-}
-
-static unsigned getUniformLoopDepth(Operation *op) {
-  unsigned depth = 0;
-  for (Operation *cur = op; cur; cur = cur->getParentOp())
-    if (isa<waveamdmachine::UniformLoopOp>(cur))
-      ++depth;
-  return depth;
-}
-
-static unsigned getBridgeWeight(Operation *op) {
-  unsigned depth = getUniformLoopDepth(op);
-  if (depth == 0)
-    return 1;
-  return 1u << std::min<unsigned>(depth * 4, 20);
-}
-
-static bool isTupleAliasOp(Operation *op) {
-  return isa_and_nonnull<waveamdmachine::TupleToElementsOp,
-                         waveamdmachine::TupleFromElementsOp>(op);
-}
-
-static bool canRebankTupleAliasValue(Value value, IntervalGroup *group,
-                                     Inventory &inventory) {
-  if (!isa<waveamdmachine::RegType>(value.getType()))
-    return false;
-  return valueInGroup(value, group, inventory);
-}
-
-static bool canRebankTupleAliasOp(Operation *op, IntervalGroup *group,
-                                  Inventory &inventory) {
-  if (!isTupleAliasOp(op))
-    return false;
-  if (!llvm::all_of(op->getOperands(), [&](Value value) {
-        return canRebankTupleAliasValue(value, group, inventory);
-      }))
-    return false;
-  return llvm::all_of(op->getResults(), [&](Value value) {
-    return canRebankTupleAliasValue(value, group, inventory);
-  });
-}
-
-static bool canConsumeAGPRAfterPromotion(OpOperand &use, IntervalGroup *group,
-                                         Inventory &inventory) {
-  if (canConsumeAGPR(use))
-    return true;
-
-  Operation *user = use.getOwner();
-  if (isTupleAliasOp(user))
-    return canRebankTupleAliasOp(user, group, inventory);
-
-  if (isMFMA(user) && use.getOperandNumber() == 2 && user->getNumResults() == 1)
-    return valueInGroup(user->getResult(0), group, inventory);
-
-  return false;
-}
-
-static unsigned estimateAGPRBridgeCost(IntervalGroup *group,
-                                       Inventory &inventory) {
-  unsigned cost = 0;
-  for (Value value : getGroupValues(group)) {
-    Operation *def = value.getDefiningOp();
-    if (def && !canDefineAGPR(value) &&
-        !canRebankTupleAliasOp(def, group, inventory))
-      cost += getBridgeWeight(value.getDefiningOp());
-    for (OpOperand &use : value.getUses()) {
-      if (isa<waveamdmachine::VAccvgprWriteB32TupleOp>(use.getOwner()))
-        continue;
-      if (!canConsumeAGPRAfterPromotion(use, group, inventory))
-        cost += getBridgeWeight(use.getOwner());
-    }
-  }
-  return cost;
-}
-
-static unsigned estimateSGPRBridgeCost(IntervalGroup *group) {
-  unsigned cost = 0;
-  for (Value value : getGroupValues(group)) {
-    ++cost;
-    cost += llvm::range_size(value.getUses());
-  }
-  return cost;
-}
-
-static unsigned estimatePromotionBridgeCost(IntervalGroup *group,
-                                            Inventory &inventory) {
-  std::optional<waveamdmachine::RegClass> next =
-      getNextRegClass(group->storageClass);
-  if (!next)
-    return std::numeric_limits<unsigned>::max();
-  if (*next == waveamdmachine::RegClass::AGPR)
-    return estimateAGPRBridgeCost(group, inventory);
-  if (*next == waveamdmachine::RegClass::VGPR)
-    return estimateSGPRBridgeCost(group);
-  return std::numeric_limits<unsigned>::max();
-}
-
-static PromotionScore getPromotionScore(IntervalGroup *group, unsigned position,
-                                        Inventory &inventory) {
-  return {getGroupLiveDwords(group, position),
-          estimatePromotionBridgeCost(group, inventory), getGroupEnd(group)};
-}
-
-static bool isBetterPromotionScore(PromotionScore lhs, PromotionScore rhs) {
-  if (lhs.bridgeCost != rhs.bridgeCost)
-    return lhs.bridgeCost < rhs.bridgeCost;
-  if (lhs.liveDwords != rhs.liveDwords)
-    return lhs.liveDwords > rhs.liveDwords;
-  return lhs.end > rhs.end;
-}
-
-static BankPromotionHooks getBankPromotionHooks() {
-  BankPromotionHooks hooks;
-  hooks.getRegClassName = getRegClassName;
-  hooks.getNextRegClass = getNextRegClass;
-  hooks.getPromotionScore = getPromotionScore;
-  hooks.isBetterPromotionScore = isBetterPromotionScore;
-  hooks.isLiveAt = static_cast<bool (*)(IntervalGroup *, unsigned)>(&isLiveAt);
-  hooks.canPromote = canPromote;
-  hooks.canFitPromotionTarget = canFitPromotionTarget;
-  hooks.materializePlans = materializePromotionPlans;
-  hooks.materialize = materializePromotion;
-  return hooks;
-}
-
 static SmallVector<IntervalGroup *> getAllocGroups(Inventory &inventory) {
   SmallVector<IntervalGroup *> groups;
   for (const std::unique_ptr<IntervalGroup> &group : inventory.groups)
@@ -1790,7 +1571,7 @@ static SmallVector<IntervalGroup *> getAllocGroupsExcept(Inventory &inventory,
 static unsigned getGroupLiveDwords(IntervalGroup *group, unsigned position) {
   unsigned live = 0;
   for (Interval *lane : group->intervals)
-    if (isLiveAt(lane, position))
+    if (isLiveAt(lane, position) && countsForLivePressure(lane))
       ++live;
   return live;
 }
@@ -2016,8 +1797,6 @@ assignFixedGroups(func::FuncOp func, ArrayRef<IntervalGroup *> groups,
   return success();
 }
 
-static bool isLoopCarryUse(Operation *op) { return isLoopCarryUseOp(op); }
-
 static bool groupLiveAt(IntervalGroup *group, unsigned position) {
   if (!group || group->plannedPressureRelief)
     return false;
@@ -2025,235 +1804,6 @@ static bool groupLiveAt(IntervalGroup *group, unsigned position) {
     if (lane->start <= position && position <= lane->end)
       return true;
   return false;
-}
-
-static bool groupHasLoopCarryUse(IntervalGroup *group) {
-  if (!group)
-    return false;
-  for (Interval *lane : group->intervals)
-    for (Value value : lane->values)
-      for (OpOperand &use : value.getUses())
-        if (isLoopCarryUse(use.getOwner()))
-          return true;
-  return false;
-}
-
-static bool groupHasTempValue(IntervalGroup *group) {
-  if (!group)
-    return false;
-  for (Interval *lane : group->intervals)
-    for (Value value : lane->values)
-      if (Operation *def = value.getDefiningOp())
-        if (isRegAllocTempOp(def))
-          return true;
-  return false;
-}
-
-static bool groupHasMemoryIssuerValue(IntervalGroup *group) {
-  if (!group)
-    return false;
-  for (Interval *lane : group->intervals)
-    for (Value value : lane->values) {
-      Operation *def = value.getDefiningOp();
-      if (!def)
-        continue;
-      if (isMemoryIssuerOp(def))
-        return true;
-    }
-  return false;
-}
-
-static bool groupHasCrossBlockUse(IntervalGroup *group) {
-  if (!group)
-    return false;
-  for (Interval *lane : group->intervals) {
-    for (Value value : lane->values) {
-      Operation *def = value.getDefiningOp();
-      if (!def)
-        continue;
-      Block *block = def->getBlock();
-      for (OpOperand &use : value.getUses()) {
-        if (isRegAllocTempOp(use.getOwner()) || isLoopCarryUse(use.getOwner()))
-          continue;
-        if (use.getOwner()->getBlock() != block)
-          return true;
-      }
-    }
-  }
-  return false;
-}
-
-static bool groupHasNonTempUse(IntervalGroup *group) {
-  if (!group)
-    return false;
-  for (Interval *lane : group->intervals)
-    for (Value value : lane->values)
-      for (OpOperand &use : value.getUses())
-        if (!isRegAllocTempOp(use.getOwner()))
-          return true;
-  return false;
-}
-
-static bool hasLivePromotableLane(IntervalGroup *group, unsigned position) {
-  return llvm::any_of(group->intervals, [&](Interval *lane) {
-    return !lane->nonPromotable && lane->start <= position &&
-           position <= lane->end;
-  });
-}
-
-static bool hasLivePromotableLaneBefore(IntervalGroup *group,
-                                        unsigned position) {
-  return llvm::any_of(group->intervals, [&](Interval *lane) {
-    return !lane->nonPromotable && lane->start < position &&
-           position <= lane->end;
-  });
-}
-
-struct MemorySpillRejectStats {
-  unsigned crossBlock = 0;
-  unsigned eligible = 0;
-  unsigned fixed = 0;
-  unsigned loopCarry = 0;
-  unsigned memoryIssuer = 0;
-  unsigned noUse = 0;
-  unsigned nonPromotable = 0;
-  unsigned startsAtPressure = 0;
-  unsigned temp = 0;
-  unsigned total = 0;
-};
-
-enum class MemorySpillRejectKind : uint8_t {
-  CrossBlock,
-  Eligible,
-  Fixed,
-  LoopCarry,
-  MemoryIssuer,
-  NoUse,
-  NonPromotable,
-  StartsAtPressure,
-  Temp,
-};
-
-static bool shouldInspectMemorySpillReject(IntervalGroup *group,
-                                           unsigned position) {
-  if (!group || !groupLiveAt(group, position))
-    return false;
-  if (group->storageClass != waveamdmachine::RegClass::VGPR ||
-      group->preferredClass != waveamdmachine::RegClass::VGPR)
-    return false;
-  return true;
-}
-
-static bool groupIsNonPromotableAt(IntervalGroup *group, unsigned position) {
-  return group->nonPromotable || !hasLivePromotableLane(group, position);
-}
-
-static MemorySpillRejectKind getMemorySpillUseRejectKind(IntervalGroup *group,
-                                                         unsigned position) {
-  if (!hasLivePromotableLaneBefore(group, position))
-    return MemorySpillRejectKind::StartsAtPressure;
-  if (groupHasMemoryIssuerValue(group))
-    return MemorySpillRejectKind::MemoryIssuer;
-  if (groupHasCrossBlockUse(group))
-    return MemorySpillRejectKind::CrossBlock;
-  if (!groupHasNonTempUse(group))
-    return MemorySpillRejectKind::NoUse;
-  return MemorySpillRejectKind::Eligible;
-}
-
-static MemorySpillRejectKind getMemorySpillRejectKind(IntervalGroup *group,
-                                                      unsigned position) {
-  if (group->reserved || hasFixedRegister(group))
-    return MemorySpillRejectKind::Fixed;
-  if (groupHasLoopCarryUse(group))
-    return MemorySpillRejectKind::LoopCarry;
-  if (groupHasTempValue(group))
-    return MemorySpillRejectKind::Temp;
-  if (groupIsNonPromotableAt(group, position))
-    return MemorySpillRejectKind::NonPromotable;
-  return getMemorySpillUseRejectKind(group, position);
-}
-
-static void incrementMemorySpillReject(MemorySpillRejectStats &stats,
-                                       MemorySpillRejectKind kind) {
-  switch (kind) {
-  case MemorySpillRejectKind::CrossBlock:
-    ++stats.crossBlock;
-    break;
-  case MemorySpillRejectKind::Eligible:
-    ++stats.eligible;
-    break;
-  case MemorySpillRejectKind::Fixed:
-    ++stats.fixed;
-    break;
-  case MemorySpillRejectKind::LoopCarry:
-    ++stats.loopCarry;
-    break;
-  case MemorySpillRejectKind::MemoryIssuer:
-    ++stats.memoryIssuer;
-    break;
-  case MemorySpillRejectKind::NoUse:
-    ++stats.noUse;
-    break;
-  case MemorySpillRejectKind::NonPromotable:
-    ++stats.nonPromotable;
-    break;
-  case MemorySpillRejectKind::StartsAtPressure:
-    ++stats.startsAtPressure;
-    break;
-  case MemorySpillRejectKind::Temp:
-    ++stats.temp;
-    break;
-  }
-}
-
-static void classifyMemorySpillReject(IntervalGroup *group, unsigned position,
-                                      MemorySpillRejectStats &stats) {
-  if (!shouldInspectMemorySpillReject(group, position))
-    return;
-  ++stats.total;
-  incrementMemorySpillReject(stats, getMemorySpillRejectKind(group, position));
-}
-
-static void addRejectCount(Builder &builder, NamedAttrList &attrs,
-                           StringRef name, unsigned count) {
-  if (count == 0)
-    return;
-  attrs.set(name, builder.getI64IntegerAttr(count));
-}
-
-static void clearMemorySpillRejectDiagnostics(func::FuncOp func) {
-  func->removeAttr(kMemorySpillRejectAttr);
-  func->removeAttr(kMemorySpillRejectDetailAttr);
-}
-
-static void setMemorySpillRejectDiagnostics(func::FuncOp func,
-                                            ArrayRef<IntervalGroup *> assigned,
-                                            IntervalGroup *request,
-                                            unsigned position) {
-  MemorySpillRejectStats stats;
-  classifyMemorySpillReject(request, position, stats);
-  for (IntervalGroup *group : assigned)
-    classifyMemorySpillReject(group, position, stats);
-  if (stats.total == 0)
-    return;
-
-  Builder builder(func.getContext());
-  NamedAttrList attrs;
-  attrs.set("total", builder.getI64IntegerAttr(stats.total));
-  addRejectCount(builder, attrs, "cross_block", stats.crossBlock);
-  addRejectCount(builder, attrs, "eligible", stats.eligible);
-  addRejectCount(builder, attrs, "fixed", stats.fixed);
-  addRejectCount(builder, attrs, "loop_carry", stats.loopCarry);
-  addRejectCount(builder, attrs, "memory_issuer", stats.memoryIssuer);
-  addRejectCount(builder, attrs, "no_use", stats.noUse);
-  addRejectCount(builder, attrs, "non_promotable", stats.nonPromotable);
-  addRejectCount(builder, attrs, "starts_at_pressure", stats.startsAtPressure);
-  addRejectCount(builder, attrs, "temp", stats.temp);
-  func->setAttr(kMemorySpillRejectDetailAttr, builder.getDictionaryAttr(attrs));
-  if (stats.loopCarry != 0)
-    func->setAttr(kMemorySpillRejectAttr,
-                  builder.getStringAttr(kMemorySpillLoopCarryReject));
 }
 
 struct PressureReliefProviderState {
@@ -2341,54 +1891,18 @@ static void clearPressureReliefDiagnostics(func::FuncOp func) {
   func->removeAttr(kPressureReliefProvidersAttr);
 }
 
-static int64_t
-getPressureReliefCostTotal(wave::WaveAMDPressureReliefCost cost) {
-  return cost.materializationOps + cost.loopWeightedOps + cost.latencyPenalty +
-         cost.instabilityPenalty;
-}
-
-static bool isBetterGlobalPressureReliefCandidate(
-    PressureReliefCandidateRef lhsRef, PressureReliefCandidateRef rhsRef,
-    const PressureFailure *failure,
-    wave::WaveAMDPressureReliefEffect currentEffect) {
+static bool
+isBetterProviderPressureReliefCandidate(PressureReliefCandidateRef lhsRef,
+                                        PressureReliefCandidateRef rhsRef) {
+  assert(lhsRef.state == rhsRef.state &&
+         "provider order selects before candidate cost");
   const wave::WaveAMDPressureReliefCandidate &lhs =
       getPressureReliefCandidate(lhsRef);
   const wave::WaveAMDPressureReliefCandidate &rhs =
       getPressureReliefCandidate(rhsRef);
   if (lhs.isLegal() != rhs.isLegal())
     return lhs.isLegal();
-
-  if (failure) {
-    wave::WaveAMDPressureReliefEffect lhsEffect =
-        wave::combineWaveAMDPressureReliefEffects(
-            currentEffect, lhs.getPressureEffect(*failure));
-    wave::WaveAMDPressureReliefEffect rhsEffect =
-        wave::combineWaveAMDPressureReliefEffects(
-            currentEffect, rhs.getPressureEffect(*failure));
-    if (wave::isBetterWaveAMDPressureReliefEffect(*failure, lhsEffect,
-                                                  rhsEffect))
-      return true;
-    if (wave::isBetterWaveAMDPressureReliefEffect(*failure, rhsEffect,
-                                                  lhsEffect))
-      return false;
-  }
-
-  int64_t lhsCost = getPressureReliefCostTotal(lhs.getCost());
-  int64_t rhsCost = getPressureReliefCostTotal(rhs.getCost());
-  if (lhsCost != rhsCost)
-    return lhsCost < rhsCost;
-
-  if (lhs.getReliefDwords() != rhs.getReliefDwords())
-    return lhs.getReliefDwords() > rhs.getReliefDwords();
-
-  if (lhsRef.state == rhsRef.state &&
-      lhsRef.state->provider->isBetterCandidate(lhs, rhs))
-    return true;
-
-  if (lhsRef.state->order != rhsRef.state->order)
-    return lhsRef.state->order < rhsRef.state->order;
-
-  return false;
+  return lhsRef.state->provider->isBetterCandidate(lhs, rhs);
 }
 
 static void addPressureReliefProvider(
@@ -2397,126 +1911,34 @@ static void addPressureReliefProvider(
   providers.emplace_back(std::move(provider), providers.size());
 }
 
-static LogicalResult collectPressureReliefCandidates(
-    MutableArrayRef<PressureReliefProviderState> providers,
-    const wave::WaveAMDPressureReliefQuery &query,
-    SmallVectorImpl<PressureReliefCandidateRef> &candidateRefs) {
-  for (PressureReliefProviderState &state : providers) {
-    if (failed(state.provider->collectCandidates(query, state.candidates)))
-      return failure();
-    for (size_t index : llvm::seq(state.candidates.size()))
-      candidateRefs.push_back({&state, static_cast<unsigned>(index)});
-  }
-  return success();
-}
-
 static std::optional<PressureReliefCandidateRef>
-selectPressureReliefCandidate(ArrayRef<PressureReliefCandidateRef> candidates,
-                              const PressureFailure *failure,
-                              wave::WaveAMDPressureReliefEffect currentEffect);
-
-static std::optional<size_t> selectNextCombinedPressureCandidate(
-    ArrayRef<PressureReliefCandidateRef> refs, ArrayRef<bool> used,
-    const PressureFailure &failure,
-    wave::WaveAMDPressureReliefEffect currentEffect,
-    wave::WaveAMDPressureReliefEffect &selectedEffect) {
-  std::optional<size_t> selected;
-  for (auto [index, ref] : llvm::enumerate(refs)) {
-    if (used[index])
-      continue;
-    const wave::WaveAMDPressureReliefCandidate &candidate =
-        getPressureReliefCandidate(ref);
-    if (!candidate.isLegal())
-      continue;
-    wave::WaveAMDPressureReliefEffect candidateEffect =
-        candidate.getPressureEffect(failure);
-    if (!wave::waveAMDPressureReliefEffectProgressesFailure(
-            failure, currentEffect, candidateEffect))
-      continue;
-    wave::WaveAMDPressureReliefEffect nextEffect =
-        wave::combineWaveAMDPressureReliefEffects(currentEffect,
-                                                  candidateEffect);
-    if (!selected || wave::isBetterWaveAMDPressureReliefEffect(
-                         failure, nextEffect, selectedEffect)) {
-      selected = index;
-      selectedEffect = nextEffect;
-    }
-  }
-  return selected;
-}
-
-static bool canReachCombinedPressureSolution(
-    PressureReliefCandidateRef first, ArrayRef<PressureReliefCandidateRef> refs,
-    const PressureFailure &failure,
-    wave::WaveAMDPressureReliefEffect currentEffect) {
-  wave::WaveAMDPressureReliefEffect effect =
-      wave::combineWaveAMDPressureReliefEffects(
-          currentEffect,
-          getPressureReliefCandidate(first).getPressureEffect(failure));
-  if (wave::waveAMDPressureReliefEffectSolvesFailure(failure, effect))
-    return true;
-
-  SmallVector<bool, 16> used(refs.size(), false);
-  for (auto [index, ref] : llvm::enumerate(refs))
-    if (ref.state == first.state && ref.index == first.index)
-      used[index] = true;
-
-  while (true) {
-    wave::WaveAMDPressureReliefEffect selectedEffect;
-    std::optional<size_t> selected = selectNextCombinedPressureCandidate(
-        refs, used, failure, effect, selectedEffect);
-    if (!selected)
-      return false;
-    used[*selected] = true;
-    effect = selectedEffect;
-    if (wave::waveAMDPressureReliefEffectSolvesFailure(failure, effect))
-      return true;
-  }
-}
-
-static bool
-placementReliefEffectCanHelp(wave::WaveAMDPressureReliefEffect effect) {
-  if (effect.vgprLiveDelta > 0 && effect.agprLiveDelta >= 0)
-    return false;
-  return effect.vgprLiveDelta < 0 || effect.agprLiveDelta < 0;
-}
-
-static bool isSelectablePressureReliefCandidate(
-    PressureReliefCandidateRef ref, ArrayRef<PressureReliefCandidateRef> refs,
-    const PressureFailure *failure,
-    wave::WaveAMDPressureReliefEffect currentEffect) {
-  const wave::WaveAMDPressureReliefCandidate &candidate =
-      getPressureReliefCandidate(ref);
-  if (!candidate.isLegal())
-    return false;
-  if (!failure)
-    return true;
-  wave::WaveAMDPressureReliefEffect effect =
-      candidate.getPressureEffect(*failure);
-  if (failure->placementFailure)
-    return placementReliefEffectCanHelp(effect);
-  if (!wave::waveAMDPressureReliefEffectProgressesFailure(
-          *failure, currentEffect, effect))
-    return false;
-  if (!failure->combinedVGPRAGPR)
-    return true;
-  return canReachCombinedPressureSolution(ref, refs, *failure, currentEffect);
-}
-
-static std::optional<PressureReliefCandidateRef>
-selectPressureReliefCandidate(ArrayRef<PressureReliefCandidateRef> candidates,
-                              const PressureFailure *failure,
-                              wave::WaveAMDPressureReliefEffect currentEffect) {
+selectProviderPressureReliefCandidate(PressureReliefProviderState &state) {
   std::optional<PressureReliefCandidateRef> selected;
-  for (PressureReliefCandidateRef candidate : candidates) {
-    if (!isSelectablePressureReliefCandidate(candidate, candidates, failure,
-                                             currentEffect))
+  for (size_t index : llvm::seq(state.candidates.size())) {
+    PressureReliefCandidateRef candidate{&state, static_cast<unsigned>(index)};
+    if (!getPressureReliefCandidate(candidate).isLegal())
       continue;
-    if (!selected || isBetterGlobalPressureReliefCandidate(
-                         candidate, *selected, failure, currentEffect))
+    if (!selected ||
+        isBetterProviderPressureReliefCandidate(candidate, *selected))
       selected = candidate;
   }
   return selected;
+}
+
+static LogicalResult collectPressureReliefCandidates(
+    SmallVectorImpl<PressureReliefProviderState> &providers,
+    const wave::WaveAMDPressureReliefQuery &query,
+    std::optional<PressureReliefCandidateRef> &selected) {
+  for (auto [index, state] : llvm::enumerate(providers)) {
+    if (failed(state.provider->collectCandidates(query, state.candidates)))
+      return failure();
+    selected = selectProviderPressureReliefCandidate(state);
+    if (selected) {
+      providers.truncate(index + 1);
+      return success();
+    }
+  }
+  return success();
 }
 
 static void notifyNoPressureReliefCandidate(
@@ -2525,8 +1947,10 @@ static void notifyNoPressureReliefCandidate(
     state.provider->notifyNoCandidate();
 }
 
-static bool shouldTryMemoryPressureRelief(IntervalGroup *request) {
-  return request && request->storageClass == waveamdmachine::RegClass::VGPR;
+static void notifyPressureReliefAttemptStarted(
+    MutableArrayRef<PressureReliefProviderState> providers) {
+  for (PressureReliefProviderState &state : providers)
+    state.provider->notifyAttemptStarted();
 }
 
 static IntervalGroup *selectVGPRPressureRequest(Inventory &inventory,
@@ -2535,16 +1959,10 @@ static IntervalGroup *selectVGPRPressureRequest(Inventory &inventory,
 static void addPressureReliefProviders(
     SmallVectorImpl<PressureReliefProviderState> &providers, func::FuncOp func,
     Inventory &inventory, ArrayRef<IntervalGroup *> assigned,
-    IntervalGroup *request, unsigned position, RegisterBudgets budgets,
-    bool includeBankPromotion, bool includeMemorySpill) {
-  if (includeBankPromotion)
-    addPressureReliefProvider(
-        providers,
-        createBankPromotionProvider(assigned, request, position, budgets,
-                                    inventory, getBankPromotionHooks()));
-  if (!includeMemorySpill)
-    return;
-
+    IntervalGroup *request, unsigned position, RegisterBudgets budgets) {
+  addPressureReliefProvider(
+      providers, createBankPromotionProvider(assigned, request, position,
+                                             budgets, inventory));
   addPressureReliefProvider(
       providers,
       createRematerializeProvider(assigned, request, position, inventory));
@@ -2556,53 +1974,41 @@ static void addPressureReliefProviders(
       createScratchSpillProvider(func, assigned, request, position, inventory));
 }
 
-static FailureOr<bool> applyPressureRelief(
-    func::FuncOp func, Inventory &inventory, ArrayRef<IntervalGroup *> assigned,
-    IntervalGroup *request, unsigned position, RegisterBudgets budgets,
-    bool includeBankPromotion, bool includeMemorySpill,
-    const PressureFailure *pressureFailure = nullptr,
-    const wave::WaveAMDPressureReliefEffect *currentEffect = nullptr,
-    wave::WaveAMDPressureReliefEffect *selectedEffect = nullptr) {
-  clearMemorySpillRejectDiagnostics(func);
-
+static FailureOr<bool>
+applyPressureRelief(func::FuncOp func, Inventory &inventory,
+                    ArrayRef<IntervalGroup *> assigned, IntervalGroup *request,
+                    unsigned position, RegisterBudgets budgets,
+                    const PressureFailure *pressureFailure = nullptr) {
   SmallVector<PressureReliefProviderState, 4> providers;
   providers.reserve(4);
   addPressureReliefProviders(providers, func, inventory, assigned, request,
-                             position, budgets, includeBankPromotion,
-                             includeMemorySpill);
+                             position, budgets);
   if (providers.empty())
     return false;
+  notifyPressureReliefAttemptStarted(providers);
 
   wave::WaveAMDPressureReliefQuery query;
   query.scope = func;
   query.failure = pressureFailure;
-  SmallVector<PressureReliefCandidateRef, 8> candidates;
-  if (failed(collectPressureReliefCandidates(providers, query, candidates)))
+  std::optional<PressureReliefCandidateRef> selected;
+  if (failed(collectPressureReliefCandidates(providers, query, selected)))
     return failure();
 
-  wave::WaveAMDPressureReliefEffect baseEffect;
-  if (currentEffect)
-    baseEffect = *currentEffect;
-  std::optional<PressureReliefCandidateRef> selected =
-      selectPressureReliefCandidate(candidates, pressureFailure, baseEffect);
   setPressureReliefDiagnostics(func, providers, selected, pressureFailure);
   if (!selected) {
     notifyNoPressureReliefCandidate(providers);
-    if (includeMemorySpill)
-      setMemorySpillRejectDiagnostics(func, assigned, request, position);
     return false;
   }
 
   PressureReliefProviderState &state = *selected->state;
   const wave::WaveAMDPressureReliefCandidate &candidate =
       getPressureReliefCandidate(*selected);
-  if (selectedEffect && pressureFailure)
-    *selectedEffect = candidate.getPressureEffect(*pressureFailure);
   std::unique_ptr<wave::WaveAMDPressureReliefPlan> plan =
       state.provider->createPlan(candidate);
   if (!plan)
     return failure();
   state.provider->applyPlan(*plan);
+  addPlannedTempIntervals(inventory, func.getContext(), *state.provider, *plan);
   state.provider->notifyPlanApplied();
   recordPlannedPressureRelief(inventory, std::move(plan));
   return true;
@@ -2612,40 +2018,12 @@ static FailureOr<bool>
 applyCombinedPressureRelief(func::FuncOp func, Inventory &inventory,
                             const PressureFailure &failure,
                             RegisterBudgets budgets) {
-  wave::WaveAMDPressureReliefEffect plannedEffect;
-  bool plannedAny = false;
-  for (unsigned attempt : llvm::seq<unsigned>(0, inventory.groups.size())) {
-    (void)attempt;
-    IntervalGroup *request =
-        selectVGPRPressureRequest(inventory, failure.position);
-    SmallVector<IntervalGroup *> groups =
-        getAllocGroupsExcept(inventory, request);
-    unsigned planCount = inventory.plannedReliefPlans.size();
-    wave::WaveAMDPressureReliefEffect selectedEffect;
-    FailureOr<bool> relieved = applyPressureRelief(
-        func, inventory, groups, request, failure.position, budgets,
-        /*includeBankPromotion=*/true, /*includeMemorySpill=*/true, &failure,
-        &plannedEffect, &selectedEffect);
-    if (failed(relieved))
-      return mlir::failure();
-    if (!*relieved) {
-      if (!plannedAny)
-        return false;
-      clearMemorySpillRejectDiagnostics(func);
-      return true;
-    }
-    if (inventory.plannedReliefPlans.size() == planCount)
-      return mlir::failure();
-    plannedAny = true;
-    plannedEffect = wave::combineWaveAMDPressureReliefEffects(plannedEffect,
-                                                              selectedEffect);
-    if (wave::waveAMDPressureReliefEffectSolvesFailure(failure,
-                                                       plannedEffect)) {
-      clearMemorySpillRejectDiagnostics(func);
-      return true;
-    }
-  }
-  return plannedAny;
+  IntervalGroup *request =
+      selectVGPRPressureRequest(inventory, failure.position);
+  SmallVector<IntervalGroup *> groups =
+      getAllocGroupsExcept(inventory, request);
+  return applyPressureRelief(func, inventory, groups, request, failure.position,
+                             budgets, &failure);
 }
 
 static LogicalResult allocateOnce(func::FuncOp func, Inventory &inventory,
@@ -2681,8 +2059,6 @@ static LogicalResult allocateOnce(func::FuncOp func, Inventory &inventory,
                                       placementBudgets);
     FailureOr<bool> relieved = applyPressureRelief(
         func, inventory, assigned, group, position, placementBudgets,
-        /*includeBankPromotion=*/true,
-        /*includeMemorySpill=*/shouldTryMemoryPressureRelief(group),
         placementFailure ? &*placementFailure : nullptr);
     if (failed(relieved))
       return failure();
@@ -2913,345 +2289,96 @@ static LogicalResult enforceBudgets(func::FuncOp func, Inventory &inventory,
                                          failure);
 }
 
-static SmallVector<IntervalGroup *> getPromotedGroups(Inventory &inventory) {
-  SmallVector<IntervalGroup *> groups;
-  for (const std::unique_ptr<IntervalGroup> &group : inventory.groups)
-    if (hasLiveLanes(group.get()) &&
-        group->storageClass != group->preferredClass)
-      groups.push_back(group.get());
-  return groups;
-}
-
-static Value materializeAGPRDef(Value value, OpBuilder &builder) {
-  if (hasRegClass(value, waveamdmachine::RegClass::AGPR))
-    return value;
-  if (isa<BlockArgument>(value)) {
-    setRegClass(value, waveamdmachine::RegClass::AGPR);
-    return value;
+class PlannedReliefMaterializationContext final
+    : public wave::WaveAMDPressureReliefMaterializationContext {
+public:
+  explicit PlannedReliefMaterializationContext(Inventory &inventory)
+      : inventory(inventory) {
+    for (const PlannedPressureReliefTempInterval &temp :
+         inventory.plannedReliefTemps)
+      tempsByPlan[temp.plan].push_back(&temp);
   }
-  Operation *def = value.getDefiningOp();
-  if (canDefineAGPR(value)) {
-    setRegClass(value, waveamdmachine::RegClass::AGPR);
-    return value;
-  }
-  builder.setInsertionPointAfter(def);
-  auto write = waveamdmachine::VAccvgprWriteB32TupleOp::create(
-      builder, def->getLoc(), getRegType(value, waveamdmachine::RegClass::AGPR),
-      value);
-  write->setAttr(kTempAttr, builder.getUnitAttr());
-  return write.getResult();
-}
 
-static void rebankTupleAliasResults(Operation *op,
-                                    waveamdmachine::RegClass regClass) {
-  for (Value value : op->getResults())
-    setRegClass(value, regClass);
-}
-
-static bool hasTupleAliasResultClass(Operation *op,
-                                     waveamdmachine::RegClass regClass) {
-  if (!isTupleAliasOp(op))
-    return false;
-  return llvm::all_of(op->getResults(), [&](Value value) {
-    return hasRegClass(value, regClass);
-  });
-}
-
-static void collectTupleAliasesToRebank(IntervalGroup *group,
-                                        Inventory &inventory,
-                                        SmallVectorImpl<Operation *> &aliases) {
-  llvm::SmallDenseSet<Operation *, 8> seen;
-  for (Value value : getGroupValues(group)) {
-    if (Operation *def = value.getDefiningOp())
-      if (canRebankTupleAliasOp(def, group, inventory) &&
-          seen.insert(def).second)
-        aliases.push_back(def);
-    for (OpOperand &use : value.getUses()) {
-      Operation *user = use.getOwner();
-      if (canRebankTupleAliasOp(user, group, inventory) &&
-          seen.insert(user).second)
-        aliases.push_back(user);
+  FailureOr<wave::WaveAMDPressureReliefTempAssignment>
+  consumeTempAssignment(const wave::WaveAMDPressureReliefPlan &plan,
+                        waveamdmachine::RegClass regClass, unsigned width,
+                        Operation *diagOp) override {
+    const PlannedPressureReliefTempInterval *temp =
+        findMatchingTemp(plan, regClass, width, diagOp);
+    if (!temp) {
+      if (allTempsConsumed(plan))
+        return diagOp->emitError(kPassName)
+               << " materialized more pressure-relief temps than planned";
+      return diagOp->emitError(kPassName)
+             << " materialized pressure-relief temp does not match plan";
     }
+    consumedTemps.insert(temp);
+    IntervalGroup *group = temp->group;
+    if (!group || !group->assignedBase)
+      return wave::WaveAMDPressureReliefTempAssignment{regClass, width, -1};
+    return wave::WaveAMDPressureReliefTempAssignment{regClass, width,
+                                                     *group->assignedBase};
   }
-}
 
-static void rebankPromotedTupleAliases(IntervalGroup *group,
-                                       Inventory &inventory,
-                                       waveamdmachine::RegClass regClass) {
-  SmallVector<Operation *> aliases;
-  collectTupleAliasesToRebank(group, inventory, aliases);
-  llvm::sort(aliases, [&](Operation *lhs, Operation *rhs) {
-    return inventory.positions.lookup(lhs) < inventory.positions.lookup(rhs);
-  });
-  for (Operation *op : aliases)
-    rebankTupleAliasResults(op, regClass);
-}
-
-static Value getAGPRReplacement(Value value,
-                                DenseMap<Value, Value> &replacements,
-                                OpBuilder &builder) {
-  if (Value existing = replacements.lookup(value))
-    return existing;
-  Value replacement = materializeAGPRDef(value, builder);
-  replacements[value] = replacement;
-  return replacement;
-}
-
-static bool
-foldAGPRWriteIntoReplacement(waveamdmachine::VAccvgprWriteB32TupleOp write,
-                             Value agpr) {
-  if (write.getResult() == agpr)
-    return false;
-  auto writeType = cast<waveamdmachine::RegType>(write.getResult().getType());
-  auto agprType = cast<waveamdmachine::RegType>(agpr.getType());
-  if (writeType.getIndex() >= 0) {
-    if (agprType.getIndex() >= 0 && agprType != writeType)
-      return false;
-    if (agprType.getIndex() < 0)
-      agpr.setType(writeType);
+private:
+  bool matchesPosition(const wave::WaveAMDPressureReliefTempInterval &temp,
+                       Operation *diagOp) const {
+    DenseMap<Operation *, unsigned>::const_iterator it =
+        inventory.positions.find(diagOp);
+    if (it == inventory.positions.end())
+      return true;
+    return temp.start <= it->second && it->second <= temp.end;
   }
-  write.getResult().replaceAllUsesWith(agpr);
-  return true;
-}
 
-static void rewritePromotedAGPRUses(Value original, Value agpr,
-                                    OpBuilder &builder) {
-  SmallVector<OpOperand *> uses;
-  for (OpOperand &use : original.getUses())
-    uses.push_back(&use);
-  SmallVector<Operation *> deadWrites;
-  for (OpOperand *use : uses) {
-    if (use->get() != original)
-      continue;
-    Operation *user = use->getOwner();
-    if (auto write = dyn_cast<waveamdmachine::VAccvgprWriteB32TupleOp>(user)) {
-      if (write.getResult() == agpr)
+  bool matches(const PlannedPressureReliefTempInterval &temp,
+               waveamdmachine::RegClass regClass, unsigned width,
+               Operation *diagOp) const {
+    return temp.interval.regClass == regClass && temp.interval.width == width &&
+           matchesPosition(temp.interval, diagOp);
+  }
+
+  const PlannedPressureReliefTempInterval *
+  findMatchingTemp(const wave::WaveAMDPressureReliefPlan &plan,
+                   waveamdmachine::RegClass regClass, unsigned width,
+                   Operation *diagOp) const {
+    auto it = tempsByPlan.find(&plan);
+    if (it == tempsByPlan.end())
+      return nullptr;
+    for (const PlannedPressureReliefTempInterval *temp : it->second) {
+      if (consumedTemps.contains(temp))
         continue;
-      if (foldAGPRWriteIntoReplacement(write, agpr)) {
-        deadWrites.push_back(user);
-        continue;
-      }
-      builder.setInsertionPoint(write);
-      auto read = waveamdmachine::VAccvgprReadB32TupleOp::create(
-          builder, write->getLoc(),
-          getRegType(agpr, waveamdmachine::RegClass::VGPR), agpr);
-      read->setAttr(kTempAttr, builder.getUnitAttr());
-      use->set(read.getResult());
-      continue;
+      if (matches(*temp, regClass, width, diagOp))
+        return temp;
     }
-    if (hasTupleAliasResultClass(user, waveamdmachine::RegClass::AGPR)) {
-      use->set(agpr);
-      continue;
-    }
-    if (canConsumeAGPR(*use)) {
-      use->set(agpr);
-      continue;
-    }
-    builder.setInsertionPoint(user);
-    auto read = waveamdmachine::VAccvgprReadB32TupleOp::create(
-        builder, user->getLoc(),
-        getRegType(agpr, waveamdmachine::RegClass::VGPR), agpr);
-    read->setAttr(kTempAttr, builder.getUnitAttr());
-    use->set(read.getResult());
+    return nullptr;
   }
-  for (Operation *write : deadWrites)
-    write->erase();
-}
 
-static LogicalResult materializeAGPRPromotion(IntervalGroup *group,
-                                              Inventory &inventory,
-                                              OpBuilder &builder) {
-  rebankPromotedTupleAliases(group, inventory, waveamdmachine::RegClass::AGPR);
-  DenseMap<Value, Value> replacements;
-  SmallVector<Value> values = getGroupValues(group);
-  for (Value value : values) {
-    (void)getAGPRReplacement(value, replacements, builder);
+  bool allTempsConsumed(const wave::WaveAMDPressureReliefPlan &plan) const {
+    auto it = tempsByPlan.find(&plan);
+    if (it == tempsByPlan.end())
+      return true;
+    for (const PlannedPressureReliefTempInterval *temp : it->second)
+      if (!consumedTemps.contains(temp))
+        return false;
+    return true;
   }
-  for (Value value : values)
-    rewritePromotedAGPRUses(value, replacements.lookup(value), builder);
-  return success();
-}
 
-static Value materializeVGPRDef(Value value, OpBuilder &builder) {
-  Operation *def = value.getDefiningOp();
-  builder.setInsertionPointAfter(def);
-  auto mov = waveamdmachine::VMovB32TupleOp::create(
-      builder, def->getLoc(), getRegType(value, waveamdmachine::RegClass::VGPR),
-      value);
-  mov->setAttr("registers", builder.getI64IntegerAttr(1));
-  mov->setAttr(kTempAttr, builder.getUnitAttr());
-  return mov.getResult();
-}
-
-static Value getVGPRReplacement(Value value,
-                                DenseMap<Value, Value> &replacements,
-                                OpBuilder &builder) {
-  if (Value existing = replacements.lookup(value))
-    return existing;
-  Value replacement = materializeVGPRDef(value, builder);
-  replacements[value] = replacement;
-  return replacement;
-}
-
-static void rewritePromotedSGPRUses(Value original, Value vgpr,
-                                    OpBuilder &builder) {
-  SmallVector<OpOperand *> uses;
-  for (OpOperand &use : original.getUses())
-    uses.push_back(&use);
-  for (OpOperand *use : uses) {
-    if (use->get() != original || use->getOwner() == vgpr.getDefiningOp())
-      continue;
-    builder.setInsertionPoint(use->getOwner());
-    auto read = waveamdmachine::VReadfirstlaneB32Op::create(
-        builder, use->getOwner()->getLoc(),
-        getRegType(original, waveamdmachine::RegClass::SGPR), vgpr);
-    read->setAttr(kTempAttr, builder.getUnitAttr());
-    use->set(read.getResult());
-  }
-}
-
-static void rewritePromotedSGPRToAGPRUses(Value original, Value vgpr,
-                                          Value agpr, OpBuilder &builder) {
-  SmallVector<OpOperand *> uses;
-  for (OpOperand &use : original.getUses())
-    uses.push_back(&use);
-  for (OpOperand *use : uses) {
-    if (use->get() != original || use->getOwner() == vgpr.getDefiningOp())
-      continue;
-    Operation *user = use->getOwner();
-    builder.setInsertionPoint(user);
-    auto read = waveamdmachine::VAccvgprReadB32TupleOp::create(
-        builder, user->getLoc(),
-        getRegType(agpr, waveamdmachine::RegClass::VGPR), agpr);
-    read->setAttr(kTempAttr, builder.getUnitAttr());
-    auto first = waveamdmachine::VReadfirstlaneB32Op::create(
-        builder, user->getLoc(),
-        getRegType(original, waveamdmachine::RegClass::SGPR), read.getResult());
-    first->setAttr(kTempAttr, builder.getUnitAttr());
-    use->set(first.getResult());
-  }
-}
-
-static LogicalResult materializeSGPRPromotion(IntervalGroup *group,
-                                              OpBuilder &builder) {
-  DenseMap<Value, Value> replacements;
-  SmallVector<Value> values = getGroupValues(group);
-  for (Value value : values) {
-    if (isa<BlockArgument>(value))
-      return mlir::emitError(value.getLoc(), kPassName)
-             << " cannot promote block arguments before bridge insertion";
-    if (cast<waveamdmachine::RegType>(value.getType()).getWidth() != 1)
-      return mlir::emitError(value.getLoc(), kPassName)
-             << " SGPR promotion supports only width-1 values";
-    (void)getVGPRReplacement(value, replacements, builder);
-  }
-  for (Value value : values)
-    rewritePromotedSGPRUses(value, replacements.lookup(value), builder);
-  return success();
-}
-
-static LogicalResult materializeSGPRToAGPRPromotion(IntervalGroup *group,
-                                                    OpBuilder &builder) {
-  DenseMap<Value, Value> vgprReplacements;
-  DenseMap<Value, Value> agprReplacements;
-  SmallVector<Value> values = getGroupValues(group);
-  for (Value value : values) {
-    if (isa<BlockArgument>(value))
-      return mlir::emitError(value.getLoc(), kPassName)
-             << " cannot promote block arguments before bridge insertion";
-    if (cast<waveamdmachine::RegType>(value.getType()).getWidth() != 1)
-      return mlir::emitError(value.getLoc(), kPassName)
-             << " SGPR promotion supports only width-1 values";
-    Value vgpr = getVGPRReplacement(value, vgprReplacements, builder);
-    agprReplacements[value] = materializeAGPRDef(vgpr, builder);
-  }
-  for (Value value : values)
-    rewritePromotedSGPRToAGPRUses(value, vgprReplacements.lookup(value),
-                                  agprReplacements.lookup(value), builder);
-  return success();
-}
-
-static LogicalResult materializePromotion(IntervalGroup *group,
-                                          Inventory &inventory,
-                                          OpBuilder &builder) {
-  if (group->preferredClass == waveamdmachine::RegClass::SGPR &&
-      group->storageClass == waveamdmachine::RegClass::VGPR)
-    return materializeSGPRPromotion(group, builder);
-  if (group->preferredClass == waveamdmachine::RegClass::VGPR &&
-      group->storageClass == waveamdmachine::RegClass::AGPR)
-    return materializeAGPRPromotion(group, inventory, builder);
-  return mlir::emitError(builder.getUnknownLoc(), kPassName)
-         << " unsupported promotion " << getRegClassName(group->preferredClass)
-         << " -> " << getRegClassName(group->storageClass);
-}
-
-static LogicalResult materializePromotionTarget(IntervalGroup *group,
-                                                waveamdmachine::RegClass source,
-                                                waveamdmachine::RegClass target,
-                                                Inventory &inventory,
-                                                OpBuilder &builder) {
-  if (source == waveamdmachine::RegClass::SGPR &&
-      target == waveamdmachine::RegClass::VGPR)
-    return materializeSGPRPromotion(group, builder);
-  if (source == waveamdmachine::RegClass::VGPR &&
-      target == waveamdmachine::RegClass::AGPR)
-    return materializeAGPRPromotion(group, inventory, builder);
-  if (source == waveamdmachine::RegClass::SGPR &&
-      target == waveamdmachine::RegClass::AGPR)
-    return materializeSGPRToAGPRPromotion(group, builder);
-  return mlir::emitError(builder.getUnknownLoc(), kPassName)
-         << " unsupported promotion " << getRegClassName(source) << " -> "
-         << getRegClassName(target);
-}
-
-static LogicalResult
-materializePromotionPlans(ArrayRef<BankPromotionStep> steps,
-                          Inventory &inventory, OpBuilder &builder) {
-  SmallVector<IntervalGroup *> groups;
-  DenseMap<IntervalGroup *, waveamdmachine::RegClass> initialClasses;
-  DenseMap<IntervalGroup *, waveamdmachine::RegClass> currentClasses;
-  for (BankPromotionStep step : steps) {
-    if (!step.group)
-      return mlir::emitError(builder.getUnknownLoc(), kPassName)
-             << " found empty promotion plan";
-    auto it = currentClasses.find(step.group);
-    if (it == currentClasses.end()) {
-      groups.push_back(step.group);
-      initialClasses[step.group] = step.sourceClass;
-      it = currentClasses.insert({step.group, step.sourceClass}).first;
-    }
-    if (it->second != step.sourceClass)
-      return mlir::emitError(builder.getUnknownLoc(), kPassName)
-             << " found non-contiguous promotion chain";
-    it->second = step.targetClass;
-  }
-  for (IntervalGroup *group : groups) {
-    waveamdmachine::RegClass source = initialClasses.lookup(group);
-    waveamdmachine::RegClass target = currentClasses.lookup(group);
-    if (failed(materializePromotionTarget(group, source, target, inventory,
-                                          builder)))
-      return failure();
-  }
-  return success();
-}
-
-static LogicalResult materializePromotions(Inventory &inventory,
-                                           OpBuilder &builder) {
-  for (IntervalGroup *group : getPromotedGroups(inventory))
-    if (failed(materializePromotion(group, inventory, builder)))
-      return failure();
-  return success();
-}
+  DenseMap<const wave::WaveAMDPressureReliefPlan *,
+           SmallVector<const PlannedPressureReliefTempInterval *, 4>>
+      tempsByPlan;
+  DenseSet<const PlannedPressureReliefTempInterval *> consumedTemps;
+  Inventory &inventory;
+};
 
 static LogicalResult materializePlannedPressureRelief(func::FuncOp func,
                                                       Inventory &inventory,
                                                       RegisterBudgets budgets,
                                                       OpBuilder &builder) {
+  PlannedReliefMaterializationContext context(inventory);
   SmallVector<std::unique_ptr<wave::WaveAMDPressureReliefProvider>, 4>
       providers;
   providers.push_back(createBankPromotionProvider({}, nullptr, /*position=*/0,
-                                                  budgets, inventory,
-                                                  getBankPromotionHooks()));
+                                                  budgets, inventory));
   providers.push_back(
       createRematerializeProvider({}, nullptr, /*position=*/0, inventory));
   providers.push_back(createLDSSpillProvider(func, {}, nullptr, /*position=*/0,
@@ -3267,7 +2394,7 @@ static LogicalResult materializePlannedPressureRelief(func::FuncOp func,
         plans.push_back(plan.get());
     if (plans.empty())
       continue;
-    if (failed(provider->materializePlans(plans, builder)))
+    if (failed(provider->materializePlans(plans, context, builder)))
       return failure();
   }
   return success();
@@ -3279,14 +2406,11 @@ static LogicalResult materializePendingRelief(func::FuncOp func,
                                               OpBuilder &builder) {
   if (!inventory.plannedReliefPlans.empty())
     return materializePlannedPressureRelief(func, inventory, budgets, builder);
-  if (!getPromotedGroups(inventory).empty())
-    return materializePromotions(inventory, builder);
   return success();
 }
 
 static bool hasPendingRelief(Inventory &inventory) {
-  return !inventory.plannedReliefPlans.empty() ||
-         !getPromotedGroups(inventory).empty();
+  return !inventory.plannedReliefPlans.empty();
 }
 
 static LogicalResult buildInventory(func::FuncOp func, Inventory &inventory) {
@@ -3368,7 +2492,7 @@ static Value selectRepresentative(const Interval &interval,
 
 static unsigned getActiveScalarIntervalCount(Inventory &inventory) {
   return llvm::count_if(inventory.intervals, [](const auto &interval) {
-    return !interval->values.empty() || interval->reserved;
+    return hasIntervalPayload(interval.get());
   });
 }
 
@@ -3393,7 +2517,7 @@ static void emitStringMetric(remark::detail::InFlightRemark &remark,
 
 static void emitIntervalRemark(func::FuncOp func, Inventory &inventory,
                                Interval *interval) {
-  if (interval->values.empty() && !interval->reserved)
+  if (!hasIntervalPayload(interval))
     return;
   auto remark = mlir::remark::analysis(
       func.getLoc(), getRegAllocRemarkOpts(func, "regalloc-interval"));
@@ -3472,68 +2596,14 @@ static void clearTransientRegAllocAttrs(func::FuncOp func) {
   func.walk([](Operation *op) { op->removeAttr(kTempAttr); });
 }
 
-static std::optional<unsigned> getUnsignedFuncAttr(func::FuncOp func,
-                                                   StringRef name) {
-  IntegerAttr attr = func->getAttrOfType<IntegerAttr>(name);
-  if (!attr)
-    return std::nullopt;
-  int64_t value = attr.getInt();
-  if (value < 0 ||
-      static_cast<uint64_t>(value) > std::numeric_limits<unsigned>::max())
-    return std::nullopt;
-  return static_cast<unsigned>(value);
-}
-
-static void emitLDSSpillPlanRemark(func::FuncOp func, RegisterBudgets budgets) {
-  unsigned reservedBytes =
-      getUnsignedFuncAttr(func, kLDSSpillBytesAttr).value_or(0);
-  LDSSpillPlan plan =
-      planLDSSpillSlot(func, budgets, /*valueBytes=*/4, reservedBytes);
-  if (plan.status == LDSSpillPlanStatus::NotKernel)
-    return;
-  auto remark = mlir::remark::analysis(
-      func.getLoc(), getRegAllocRemarkOpts(func, "regalloc-lds-plan"));
-  if (!remark)
-    return;
-  emitIntegerMetric(remark, "existing_dynamic_bytes",
-                    plan.existingDynamicBytes);
-  emitIntegerMetric(remark, "existing_fixed_bytes", plan.existingFixedBytes);
-  emitIntegerMetric(remark, "reserved_spill_bytes", plan.reservedSpillBytes);
-  emitStringMetric(remark, "status", getLDSSpillPlanStatusName(plan.status));
-  emitIntegerMetric(remark, "value_bytes", plan.valueBytes);
-  if (plan.wavefrontSize == 0)
-    return;
-  emitIntegerMetric(remark, "available_bytes", plan.availableBytes);
-  emitIntegerMetric(remark, "limit_bytes", plan.limitBytes);
-  emitIntegerMetric(remark, "slot_base", plan.slotBase);
-  emitIntegerMetric(remark, "slot_bytes", plan.slotBytes);
-  emitIntegerMetric(remark, "wave_stride", plan.waveStride);
-  emitIntegerMetric(remark, "wavefront_size", plan.wavefrontSize);
-  emitIntegerMetric(remark, "waves_per_workgroup", plan.wavesPerWorkgroup);
-}
-
-static void emitScratchSpillPlanRemark(func::FuncOp func) {
-  unsigned reservedBytes =
-      getUnsignedFuncAttr(func, kScratchSpillBytesAttr).value_or(0);
-  ScratchSpillPlan plan =
-      planScratchSpillSlot(func, /*valueBytes=*/4, reservedBytes);
-  if (plan.status == ScratchSpillPlanStatus::NotKernel)
-    return;
-  auto remark = mlir::remark::analysis(
-      func.getLoc(), getRegAllocRemarkOpts(func, "regalloc-scratch-plan"));
-  if (!remark)
-    return;
-  emitIntegerMetric(remark, "existing_private_bytes",
-                    plan.existingPrivateBytes);
-  emitIntegerMetric(remark, "reserved_spill_bytes", plan.reservedSpillBytes);
-  emitStringMetric(remark, "status",
-                   getScratchSpillPlanStatusName(plan.status));
-  remark << mlir::remark::metric("uses_flat_scratch", plan.usesFlatScratch);
-  emitIntegerMetric(remark, "value_bytes", plan.valueBytes);
-  if (plan.status != ScratchSpillPlanStatus::Available)
-    return;
-  emitIntegerMetric(remark, "slot_base", plan.slotBase);
-  emitIntegerMetric(remark, "slot_bytes", plan.slotBytes);
+static void emitPressureReliefProviderRemarks(func::FuncOp func,
+                                              Inventory &inventory,
+                                              RegisterBudgets budgets) {
+  SmallVector<PressureReliefProviderState, 4> providers;
+  addPressureReliefProviders(providers, func, inventory, {}, nullptr,
+                             /*position=*/0, budgets);
+  for (const PressureReliefProviderState &state : providers)
+    state.provider->emitRemarks();
 }
 
 static void emitRegAllocRemarks(func::FuncOp func, Inventory &inventory,
@@ -3558,17 +2628,16 @@ static void emitRegAllocRemarks(func::FuncOp func, Inventory &inventory,
                       inventory.probeStats.assignedLaneChecks);
   }
   emitIntervalRemarks(func, inventory);
-  emitLDSSpillPlanRemark(func, budgets);
-  emitScratchSpillPlanRemark(func);
+  emitPressureReliefProviderRemarks(func, inventory, budgets);
 }
 
 static void emitRejectDetailMetrics(remark::detail::InFlightRemark &remark,
                                     DictionaryAttr detail) {
   if (!remark || !detail)
     return;
-  for (StringRef name : {"loop_carry", "temp", "starts_at_pressure",
-                         "non_promotable", "memory_issuer", "cross_block",
-                         "fixed", "no_use", "eligible", "total"}) {
+  for (StringRef name :
+       {"temp", "non_promotable", "memory_issuer", "cross_block", "fixed",
+        "no_use", "eligible", "total"}) {
     IntegerAttr attr = detail.getAs<IntegerAttr>(name);
     if (attr)
       emitIntegerMetric(remark, name, attr.getInt());
@@ -3628,6 +2697,7 @@ static void setOverflowAttrs(func::FuncOp func,
 }
 
 enum class AllocationAttemptResult { Done, Retry };
+enum class AllocationLoopResult { Allocated, Failed, Retry };
 
 static FailureOr<bool> enforceBudgetsOrApplyRelief(
     func::FuncOp func, Inventory &inventory, RegisterBudgets budgets,
@@ -3644,22 +2714,71 @@ static FailureOr<bool> enforceBudgetsOrApplyRelief(
 }
 
 static FailureOr<AllocationAttemptResult>
+retryAfterPendingRelief(func::FuncOp func, Inventory &inventory,
+                        RegisterBudgets budgets, OpBuilder &builder) {
+  if (failed(materializePendingRelief(func, inventory, budgets, builder)))
+    return mlir::failure();
+  if (failed(clearRegAllocAssignments(func)))
+    return mlir::failure();
+  return AllocationAttemptResult::Retry;
+}
+
+static FailureOr<AllocationAttemptResult>
 finishSuccessfulAllocation(func::FuncOp func, Inventory &inventory,
                            RegisterBudgets budgets, bool debugProbes) {
   OpBuilder builder(func.getContext());
-  if (hasPendingRelief(inventory)) {
-    if (failed(materializePendingRelief(func, inventory, budgets, builder)))
-      return mlir::failure();
-    return AllocationAttemptResult::Retry;
-  }
   if (failed(applyPhysicalAssignments(func, inventory, builder)))
     return mlir::failure();
+  if (hasPendingRelief(inventory))
+    return retryAfterPendingRelief(func, inventory, budgets, builder);
   if (debugProbes)
     setProbeAttrs(func, inventory.probeStats);
   updatePeaks(inventory);
   emitRegAllocRemarks(func, inventory, budgets);
   clearTransientRegAllocAttrs(func);
   return AllocationAttemptResult::Done;
+}
+
+static FailureOr<AllocationLoopResult> allocateWithBudgetRelief(
+    func::FuncOp func, Inventory &inventory, RegisterBudgets budgets,
+    std::optional<PressureFailure> &failure, bool softFail) {
+  LogicalResult allocated = success();
+  unsigned maxBudgetReliefAttempts = inventory.groups.size() * 2 + 1;
+  for ([[maybe_unused]] unsigned attempt :
+       llvm::seq<unsigned>(0, maxBudgetReliefAttempts)) {
+    bool rewroteIR = false;
+    allocated = allocateGroups(func, inventory, budgets, failure, rewroteIR);
+    updatePeaks(inventory);
+    if (succeeded(allocated) && rewroteIR)
+      return AllocationLoopResult::Retry;
+    if (failed(allocated))
+      break;
+    unsigned plannedBefore = inventory.plannedReliefPlans.size();
+    FailureOr<bool> budgetSatisfied = enforceBudgetsOrApplyRelief(
+        func, inventory, budgets, failure, softFail);
+    if (failed(budgetSatisfied))
+      return mlir::failure();
+    if (!*budgetSatisfied)
+      return AllocationLoopResult::Failed;
+    if (inventory.plannedReliefPlans.size() == plannedBefore)
+      break;
+  }
+  if (failed(allocated))
+    return AllocationLoopResult::Failed;
+  return AllocationLoopResult::Allocated;
+}
+
+static FailureOr<AllocationAttemptResult>
+finishFailedAllocation(func::FuncOp func, Inventory &inventory,
+                       RegisterBudgets budgets, bool debugProbes) {
+  if (hasPendingRelief(inventory)) {
+    OpBuilder builder(func.getContext());
+    return retryAfterPendingRelief(func, inventory, budgets, builder);
+  }
+  if (debugProbes)
+    setProbeAttrs(func, inventory.probeStats);
+  emitRegAllocRemarks(func, inventory, budgets);
+  return mlir::failure();
 }
 
 static FailureOr<AllocationAttemptResult>
@@ -3676,26 +2795,15 @@ runAllocationAttempt(func::FuncOp func, RegisterBudgets budgets,
   if (failed(validateAGPRSupport(func, allocationBudgets, inventory)))
     return mlir::failure();
 
-  bool rewroteIR = false;
-  LogicalResult allocated =
-      allocateGroups(func, inventory, allocationBudgets, failure, rewroteIR);
-  updatePeaks(inventory);
-  if (succeeded(allocated) && rewroteIR)
-    return AllocationAttemptResult::Retry;
-  if (succeeded(allocated)) {
-    FailureOr<bool> budgetSatisfied = enforceBudgetsOrApplyRelief(
-        func, inventory, allocationBudgets, failure, softFail);
-    if (failed(budgetSatisfied))
-      return mlir::failure();
-    if (!*budgetSatisfied)
-      allocated = mlir::failure();
-  }
-  if (failed(allocated)) {
-    if (debugProbes)
-      setProbeAttrs(func, inventory.probeStats);
-    emitRegAllocRemarks(func, inventory, allocationBudgets);
+  FailureOr<AllocationLoopResult> allocation = allocateWithBudgetRelief(
+      func, inventory, allocationBudgets, failure, softFail);
+  if (failed(allocation))
     return mlir::failure();
-  }
+  if (*allocation == AllocationLoopResult::Retry)
+    return AllocationAttemptResult::Retry;
+  if (*allocation == AllocationLoopResult::Failed)
+    return finishFailedAllocation(func, inventory, allocationBudgets,
+                                  debugProbes);
 
   return finishSuccessfulAllocation(func, inventory, allocationBudgets,
                                     debugProbes);
@@ -3782,9 +2890,7 @@ struct WaveAMDRegAllocPass
       }
       diag << name << "=" << attr.getInt();
     };
-    append("loop_carry");
     append("temp");
-    append("starts_at_pressure");
     append("non_promotable");
     append("memory_issuer");
     append("cross_block");
@@ -3799,12 +2905,8 @@ struct WaveAMDRegAllocPass
     StringAttr reject = func->getAttrOfType<StringAttr>(kMemorySpillRejectAttr);
     DictionaryAttr detail =
         func->getAttrOfType<DictionaryAttr>(kMemorySpillRejectDetailAttr);
-    if (reject) {
-      if (reject.getValue() == kMemorySpillLoopCarryReject)
-        diag << "; memory spill cannot materialize loop-carried values";
-      else
-        diag << "; memory spill rejected candidates: " << reject.getValue();
-    }
+    if (reject)
+      diag << "; memory spill rejected candidates: " << reject.getValue();
     appendMemorySpillRejectDetail(diag, detail);
     if (StringAttr providers =
             func->getAttrOfType<StringAttr>(kPressureReliefProvidersAttr))

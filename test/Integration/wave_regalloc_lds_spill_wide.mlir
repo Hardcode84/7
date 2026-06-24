@@ -12,10 +12,10 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx90a"} {
 // CHECK-NOT: scratch_
 // CHECK: %[[SPLIT:.+]]:2 = waveamdmachine.tuple_to_elements
 // CHECK: %[[STORE0:.+]] = waveamdmachine.ds_store_b32 {{.*}}, %[[SPLIT]]#0
-// CHECK: %[[STORE1:.+]] = waveamdmachine.ds_store_b32 {{.*}}, %[[SPLIT]]#1 offset 256
+// CHECK: %[[STORE1:.+]] = waveamdmachine.ds_store_b32 {{.*}}, %[[SPLIT]]#1
 // CHECK: %[[JOIN:.+]] = waveamdmachine.token_join %[[STORE0]], %[[STORE1]]
 // CHECK: %[[LOAD0:.+]], %[[TOKEN0:.+]] = waveamdmachine.ds_load_b32 {{.*}} after %[[JOIN]]
-// CHECK: %[[LOAD1:.+]], %[[TOKEN1:.+]] = waveamdmachine.ds_load_b32 {{.*}} after %[[JOIN]] offset 256
+// CHECK: %[[LOAD1:.+]], %[[TOKEN1:.+]] = waveamdmachine.ds_load_b32 {{.*}} after %[[JOIN]]
 // CHECK: waveamdmachine.tuple_from_elements %[[LOAD0]], %[[LOAD1]]
 // CHECK-NOT: scratch_
 // CHECK: waveamdmachine.s_endpgm

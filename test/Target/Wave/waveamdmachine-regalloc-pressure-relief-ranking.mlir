@@ -2,12 +2,12 @@
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 
-// CHECK-LABEL: func.func @global_rank_scratch_before_expensive_agpr
-// CHECK-SAME: waveamdmachine.agpr_count = 2 : i64
-// CHECK-SAME: waveamdmachine.scratch_spill_bytes = 8 : i64
-// CHECK: waveamdmachine.scratch_store_b32
+// CHECK-LABEL: func.func @ordered_agpr_before_scratch
+// CHECK-SAME: waveamdmachine.agpr_count = 3 : i64
+// CHECK-NOT: waveamdmachine.scratch_spill_bytes
+// CHECK-NOT: waveamdmachine.lds_spill_bytes
 // CHECK: waveamdmachine.v_accvgpr_write_b32_tuple
-func.func @global_rank_scratch_before_expensive_agpr()
+func.func @ordered_agpr_before_scratch()
     attributes {wave.kernel, waveamdmachine.target_waves = 4 : i64} {
   %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
   %one = waveamdmachine.imm 1 : !waveamdmachine.imm
@@ -39,13 +39,13 @@ func.func @global_rank_scratch_before_expensive_agpr()
   return
 }
 
-// CHECK-LABEL: func.func @global_rank_lds_before_scratch
-// CHECK-SAME: waveamdmachine.agpr_count = 2 : i64
-// CHECK-SAME: waveamdmachine.lds_spill_bytes = 512 : i64
-// CHECK: waveamdmachine.ds_store_b32
+// CHECK-LABEL: func.func @ordered_agpr_before_lds
+// CHECK-SAME: waveamdmachine.agpr_count = 3 : i64
+// CHECK-NOT: waveamdmachine.lds_spill_bytes
 // CHECK-NOT: waveamdmachine.scratch_store_b32
+// CHECK-NOT: waveamdmachine.ds_store_b32
 // CHECK: waveamdmachine.v_accvgpr_write_b32_tuple
-func.func @global_rank_lds_before_scratch()
+func.func @ordered_agpr_before_lds()
     attributes {wave.kernel, wave.workgroup_size = array<i32: 64, 1, 1>,
                 waveamdmachine.target_waves = 4 : i64} {
   %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
@@ -78,11 +78,11 @@ func.func @global_rank_lds_before_scratch()
   return
 }
 
-// CHECK-LABEL: func.func @global_rank_agpr_when_memory_spill_ineligible
+// CHECK-LABEL: func.func @ordered_agpr_when_memory_spill_ineligible
 // CHECK-SAME: waveamdmachine.agpr_count = 3 : i64
 // CHECK-SAME: waveamdmachine.vgpr_count = 4 : i64
 // CHECK: waveamdmachine.v_accvgpr_write_b32_tuple
-func.func @global_rank_agpr_when_memory_spill_ineligible()
+func.func @ordered_agpr_when_memory_spill_ineligible()
     attributes {waveamdmachine.target_waves = 4 : i64} {
   %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
   %one = waveamdmachine.imm 1 : !waveamdmachine.imm

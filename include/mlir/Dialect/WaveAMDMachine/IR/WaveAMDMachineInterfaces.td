@@ -91,16 +91,40 @@ def WaveAMDMachine_MMAOpInterface
       (ins)
     >,
     InterfaceMethod<
+      [{A operand handle.}],
+      "::mlir::OpOperand &",
+      "getAMutable",
+      (ins),
+      [{}],
+      [{ return $_op.getAMutable(); }]
+    >,
+    InterfaceMethod<
       [{B operand.}],
       "::mlir::Value",
       "getB",
       (ins)
     >,
     InterfaceMethod<
+      [{B operand handle.}],
+      "::mlir::OpOperand &",
+      "getBMutable",
+      (ins),
+      [{}],
+      [{ return $_op.getBMutable(); }]
+    >,
+    InterfaceMethod<
       [{Accumulator operand.}],
       "::mlir::Value",
       "getAcc",
       (ins)
+    >,
+    InterfaceMethod<
+      [{Accumulator operand handle.}],
+      "::mlir::OpOperand &",
+      "getAccMutable",
+      (ins),
+      [{}],
+      [{ return $_op.getAccMutable(); }]
     >,
     InterfaceMethod<
       [{Accumulator result.}],
