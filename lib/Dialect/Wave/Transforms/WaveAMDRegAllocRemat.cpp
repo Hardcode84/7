@@ -22,6 +22,8 @@ using namespace mlir::wave::regalloc;
 
 namespace {
 
+static constexpr int64_t kFallbackRootPenalty = 1000000000;
+
 static bool isLiveAt(Interval *interval, unsigned position) {
   return !interval->values.empty() && interval->start <= position &&
          position <= interval->end;
@@ -74,7 +76,10 @@ static SmallVector<Value> getGroupValues(IntervalGroup *group,
 }
 
 static void eraseDeadRematTree(Operation *op) {
-  if (!op || op->getNumResults() != 1 || !op->getResult(0).use_empty())
+  if (!op || op->getNumResults() == 0)
+    return;
+  if (!std::all_of(op->result_begin(), op->result_end(),
+                   [](Value result) { return result.use_empty(); }))
     return;
   if (isRegAllocTempOp(op) || isMemoryIssuerOp(op) ||
       !isCheapVGPRPressureReliefExpr(op))
@@ -223,7 +228,7 @@ private:
 
   bool hasSimpleUses(Value value, SmallVectorImpl<OpOperand *> &uses) const {
     Operation *def = value.getDefiningOp();
-    if (!def || isMemoryIssuerOp(def) || def->getNumResults() != 1)
+    if (!def || isMemoryIssuerOp(def) || def->getNumResults() == 0)
       return false;
     for (OpOperand &use : value.getUses()) {
       Operation *user = use.getOwner();
@@ -257,7 +262,7 @@ private:
 
   Operation *getDominatingCheapDef(Value value, Operation *user) const {
     Operation *def = value.getDefiningOp();
-    if (!def || def->getNumResults() != 1)
+    if (!def || def->getNumResults() == 0)
       return nullptr;
     if (isFixedRegValue(value))
       return nullptr;
@@ -378,6 +383,8 @@ private:
   wave::WaveAMDPressureReliefCost
   getRematCost(Value value, ArrayRef<OpOperand *> uses) const {
     wave::WaveAMDPressureReliefCost cost;
+    if (!isMemorySpillSuppressedVGPRExpr(value.getDefiningOp()))
+      cost.instabilityPenalty = kFallbackRootPenalty;
     cost.loopWeightedOps = getLoopDepth(value.getDefiningOp());
     for (OpOperand *use : uses) {
       DenseSet<Value> materialized;
@@ -395,7 +402,7 @@ private:
       return false;
     if (type.getWidth() == 0 || !def)
       return false;
-    if (isRegAllocTempOp(def) || !isCheapVGPRPressureReliefExpr(def))
+    if (isRegAllocTempOp(def) || !isCheapVGPRPressureReliefRootExpr(def))
       return false;
     return valueCoversWholeGroup(group, value);
   }
@@ -452,14 +459,17 @@ private:
     builder.setInsertionPoint(user);
     Operation *clone = builder.clone(*def, mapper);
     clone->setAttr(kRegAllocTempAttr, builder.getUnitAttr());
-    Value replacement = clone->getResult(0);
+    OpResult original = cast<OpResult>(value);
+    for (OpResult result : def->getOpResults())
+      cache[result] = clone->getResult(result.getResultNumber());
+    Value replacement = clone->getResult(original.getResultNumber());
     cache[value] = replacement;
     return replacement;
   }
 
   LogicalResult materializeValue(Value value, OpBuilder &builder) const {
     Operation *def = value.getDefiningOp();
-    if (!def || def->getNumResults() != 1)
+    if (!def || def->getNumResults() == 0)
       return mlir::emitError(value.getLoc())
              << "waveamd-reg-alloc cannot rematerialize value";
     SmallVector<OpOperand *> uses;

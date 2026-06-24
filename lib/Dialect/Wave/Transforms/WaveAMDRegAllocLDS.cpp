@@ -616,7 +616,7 @@ private:
         type.getWidth() == 0)
       return failure();
     if (isCombinedPressure() &&
-        isCheapVGPRPressureReliefExpr(value.getDefiningOp()))
+        isMemorySpillSuppressedVGPRExpr(value.getDefiningOp()))
       return failure();
     SmallVector<OpOperand *> uses;
     if (!hasSimpleUses(value, uses) || !isValueLiveAt(value, uses))

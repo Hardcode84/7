@@ -165,6 +165,8 @@ getMemorySpillPressureEffect(IntervalGroup *group, unsigned reliefDwords) {
 
 inline bool isCheapVGPRExpr(Operation *op);
 inline bool isCheapVGPRPressureReliefExpr(Operation *op);
+inline bool isCheapVGPRPressureReliefRootExpr(Operation *op);
+inline bool isMemorySpillSuppressedVGPRExpr(Operation *op);
 
 struct MemorySpillLoadResult {
   Value value;
@@ -272,7 +274,7 @@ inline std::optional<unsigned> getMemorySpillPressureRelief(
     const Inventory &inventory, const PressureFailure *pressureFailure) {
   if (!pressureFailure || !pressureFailure->combinedVGPRAGPR)
     return width;
-  if (isCheapVGPRPressureReliefExpr(value.getDefiningOp()))
+  if (isMemorySpillSuppressedVGPRExpr(value.getDefiningOp()))
     return 0;
   if (hasMemorySpillUseAtPressure(uses, inventory, pressureFailure->position))
     return 0;
@@ -795,7 +797,7 @@ inline bool isCheapVGPRExpr(Operation *op) {
       waveamdmachine::VOr3B32Op>(op);
 }
 
-inline bool isCheapVGPRPressureReliefExpr(Operation *op) {
+inline bool isMemorySpillSuppressedVGPRExpr(Operation *op) {
   return isa_and_nonnull<
       waveamdmachine::VWorkitemIdXOp, waveamdmachine::VMovB32TupleOp,
       waveamdmachine::VLshrrevB32Op, waveamdmachine::VLshlrevB32Op,
@@ -805,6 +807,17 @@ inline bool isCheapVGPRPressureReliefExpr(Operation *op) {
       waveamdmachine::VXorB32Op, waveamdmachine::VAndOrB32Op,
       waveamdmachine::VAccvgprReadB32TupleOp,
       waveamdmachine::VAccvgprWriteB32TupleOp>(op);
+}
+
+inline bool isCheapVGPRPressureReliefExpr(Operation *op) {
+  return isCheapVGPRPressureReliefRootExpr(op) ||
+         isa_and_nonnull<waveamdmachine::TupleFromElementsOp>(op);
+}
+
+inline bool isCheapVGPRPressureReliefRootExpr(Operation *op) {
+  return isMemorySpillSuppressedVGPRExpr(op) ||
+         isa_and_nonnull<waveamdmachine::VMulU64Op, waveamdmachine::VAddU64Op>(
+             op);
 }
 
 inline bool isUnassignedVGPR(Value value) {
