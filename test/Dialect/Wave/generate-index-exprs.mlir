@@ -266,6 +266,27 @@ func.func @ptr_add_power_of_two_mask_nonnegative(
 
 // -----
 
+// CHECK-LABEL: func.func @workitem_id_without_known_size_uses_range_fallback
+// CHECK-SAME: (%{{.*}}: !wave.ptr<#wave.global, f32>)
+func.func @workitem_id_without_known_size_uses_range_fallback(
+    %out: !wave.ptr<#wave.global, f32>)
+    -> !wave.simd<!wave.ptr<#wave.global, f32>, 64> {
+  %c1 = arith.constant 1 : i32
+  // CHECK: [[WI:%.*]] = wave.workitem_id
+  %wi = wave.workitem_id 0 : !wave.simd<i32, 64>
+  %s1 = wave.splat %c1 : i32 -> !wave.simd<i32, 64>
+  %half = wave.binary shrui %wi, %s1
+      : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+  // CHECK: [[OFF:%.*]] = wave.index_expr <"floor(1/2*raw0)"> assuming [#wave.pred<"raw0 >= 0 & -2147483647 + raw0 <= 0">] ["raw0"]([[WI]]) : (!wave.simd<i32, 64>) -> !wave.simd<index, 64>
+  // CHECK: wave.ptr_add %{{.*}}, [[OFF]]
+  %ptr = wave.ptr_add %out, %half
+      : !wave.ptr<#wave.global, f32>, !wave.simd<i32, 64>
+      -> !wave.simd<!wave.ptr<#wave.global, f32>, 64>
+  return %ptr : !wave.simd<!wave.ptr<#wave.global, f32>, 64>
+}
+
+// -----
+
 // CHECK-LABEL: func.func @shared_i32_mask_offset_synthesizes
 // CHECK-SAME: (%{{.*}}: !wave.ptr<#wave.shared, f32>, %[[IDX:.*]]: !wave.simd<i32, 32>)
 func.func @shared_i32_mask_offset_synthesizes(
@@ -306,20 +327,21 @@ func.func @shared_i32_xor_offset_keeps_storage_range(
 
 // -----
 
-// CHECK-LABEL: func.func @multi_use_binding_stays_bound
+// CHECK-LABEL: func.func @multi_use_binding_expands
 // CHECK-SAME: (%{{.*}}: !wave.simd<i32, 32>)
-func.func @multi_use_binding_stays_bound(%idx_raw: !wave.simd<i32, 32>)
+func.func @multi_use_binding_expands(%idx_raw: !wave.simd<i32, 32>)
     -> (!wave.simd<index, 32>, !wave.simd<index, 32>) {
   %c1 = arith.constant 1 : i32
+  // CHECK: [[ASSUME:%.*]] = wave.assume
   %idx = wave.assume %idx_raw as "x" [#wave.pred<"x >= 0">, #wave.pred<"x <= 31">] : !wave.simd<i32, 32>
   %s1 = wave.splat %c1 : i32 -> !wave.simd<i32, 32>
-  // CHECK: [[SUM:%.*]] = wave.binary addi
   %sum = wave.binary addi %idx, %s1
       : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
-  // CHECK: wave.index_expr <"2*x"> ["x"]([[SUM]])
+  // CHECK-NOT: wave.binary addi
+  // CHECK: wave.index_expr <"2*(1 + raw0)"> assuming [#wave.pred<"raw0 >= 0">, #wave.pred<"-31 + raw0 <= 0">] ["raw0"]([[ASSUME]])
   %a = wave.index_expr <"2*x"> ["x"](%sum)
       : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
-  // CHECK: wave.index_expr <"3*y"> ["y"]([[SUM]])
+  // CHECK: wave.index_expr <"3*(1 + raw0)"> assuming [#wave.pred<"raw0 >= 0">, #wave.pred<"-31 + raw0 <= 0">] ["raw0"]([[ASSUME]])
   %b = wave.index_expr <"3*y"> ["y"](%sum)
       : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
   return %a, %b : !wave.simd<index, 32>, !wave.simd<index, 32>

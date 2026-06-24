@@ -1,6 +1,6 @@
 // RUN: wave-opt --split-input-file --wave-normalize-pointer-offsets \
 // RUN:   --wave-generate-index-exprs --wave-combine-pointer-offsets \
-// RUN:   --wave-simplify-index-exprs %s | FileCheck %s
+// RUN:   --wave-simplify-index-exprs --canonicalize %s | FileCheck %s
 
 // CHECK-LABEL: func.func @generate_after_normalize
 // CHECK-SAME: (%{{.*}}: !wave.ptr<#wave.global>, %[[IDX:.*]]: !wave.simd<index, 32>)
@@ -111,9 +111,9 @@ func.func @rewrite_assumed_offset_after_normalize(
       : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
   %lo = wave.binary andi %idx, %s63
       : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
-  %scaled_hi = wave.binary muli %hi, %s4
+  %scaled_hi = wave.binary muli %hi, %s4 overflow<nsw>
       : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
-  %offset = wave.binary addi %lo, %scaled_hi
+  %offset = wave.binary addi %lo, %scaled_hi overflow<nsw>
       : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
   %orig = wave.assume %offset as "orig" [#wave.pred<"orig >= 0">, #wave.pred<"orig <= 94">] : !wave.simd<i32, 32>
   // CHECK: wave.index_expr <"2*raw0 + 8*floor(1/2*raw0)"> {{.*}} ["raw0"](%[[ASSUME]]) : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
@@ -146,9 +146,9 @@ func.func @rewrite_assumed_buffer_offset_after_normalize(
       : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
   %lo = wave.binary andi %idx, %s63
       : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
-  %scaled_hi = wave.binary muli %hi, %s4
+  %scaled_hi = wave.binary muli %hi, %s4 overflow<nsw>
       : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
-  %offset = wave.binary addi %lo, %scaled_hi
+  %offset = wave.binary addi %lo, %scaled_hi overflow<nsw>
       : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
   %orig = wave.assume %offset as "orig" [#wave.pred<"orig >= 0">, #wave.pred<"orig <= 94">] : !wave.simd<i32, 32>
   // CHECK: wave.index_expr <"2*raw0 + 8*floor(1/2*raw0)"> {{.*}} ["raw0"](%[[BUFFER_ASSUME]]) : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
@@ -157,4 +157,83 @@ func.func @rewrite_assumed_buffer_offset_after_normalize(
       : !wave.ptr<#waveamd.buffer, f16>, !wave.simd<i32, 32>
       -> !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 32>
   return %ptr : !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 32>
+}
+
+// -----
+
+// CHECK-LABEL: func.func @rewrite_cmp_operands_after_index_generation
+// CHECK-SAME: (%{{.*}}: !wave.ptr<#wave.global>, %[[IDX_RAW:.*]]: !wave.simd<i32, 32>, %[[LIMIT_RAW:.*]]: i32)
+func.func @rewrite_cmp_operands_after_index_generation(
+    %out: !wave.ptr<#wave.global, f16>, %idx_raw: !wave.simd<i32, 32>,
+    %limit_raw: i32) -> !wave.mask<32>
+    attributes {wave.kernel} {
+  %c0 = arith.constant 0.000000e+00 : f16
+  %c1 = arith.constant 1 : i32
+  %c4 = arith.constant 4 : i32
+  %c63 = arith.constant 63 : i32
+  // CHECK: %[[IDX:.*]] = wave.assume %[[IDX_RAW]]
+  %idx = wave.assume %idx_raw as "x"
+      [#wave.pred<"x >= 0">, #wave.pred<"x <= 31">]
+      : !wave.simd<i32, 32>
+  // CHECK: %[[LIMIT:.*]] = wave.assume %[[LIMIT_RAW]]
+  %limit = wave.assume %limit_raw as "x" [#wave.pred<"x >= 0">] : i32
+  %s1 = wave.splat %c1 : i32 -> !wave.simd<i32, 32>
+  %s4 = wave.splat %c4 : i32 -> !wave.simd<i32, 32>
+  %s63 = wave.splat %c63 : i32 -> !wave.simd<i32, 32>
+  %slimit = wave.splat %limit : i32 -> !wave.simd<i32, 32>
+  %hi = wave.binary shrui %idx, %s1
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  %lo = wave.binary andi %idx, %s63
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  %scaled_hi = wave.binary muli %hi, %s4 overflow<nsw>
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  %offset = wave.binary addi %lo, %scaled_hi overflow<nsw>
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  // CHECK-NOT: wave.binary andi
+  // CHECK-NOT: wave.binary shrui
+  // CHECK: wave.index_expr <"2*raw0 + 8*floor(1/2*raw0)"> {{.*}} ["raw0"](%[[IDX]]) : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
+  %ptr = wave.ptr_add %out, %offset
+      : !wave.ptr<#wave.global, f16>, !wave.simd<i32, 32>
+      -> !wave.simd<!wave.ptr<#wave.global, f16>, 32>
+  %val = wave.splat %c0 : f16 -> !wave.simd<f16, 32>
+  %token = wave.store %val -> %ptr
+      : (!wave.simd<f16, 32>, !wave.simd<!wave.ptr<#wave.global, f16>, 32>)
+      -> !wave.mem.token
+  // CHECK: %[[CMP_LHS:.*]] = wave.index_expr <"raw0 + 4*floor(1/2*raw0)"> {{.*}} ["raw0"](%[[IDX]]) : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
+  // CHECK: %[[CMP_RHS_INDEX:.*]] = wave.index_expr <"raw0"> {{.*}} ["raw0"](%[[LIMIT]]) : (i32) -> index
+  // CHECK: %[[CMP_RHS:.*]] = wave.splat %[[CMP_RHS_INDEX]] : index -> !wave.simd<index, 32>
+  // CHECK: %[[MASK:.*]] = wave.cmpi slt %[[CMP_LHS]], %[[CMP_RHS]] : !wave.simd<index, 32>, !wave.simd<index, 32> -> !wave.mask<32>
+  %mask = wave.cmpi slt %offset, %slimit
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.mask<32>
+  // CHECK: return %[[MASK]] : !wave.mask<32>
+  return %mask : !wave.mask<32>
+}
+
+// -----
+
+// CHECK-LABEL: func.func @rewrite_integerized_mask_and
+// CHECK-SAME: (%[[A:.*]]: !wave.simd<i32, 32>, %[[B:.*]]: !wave.simd<i32, 32>, %[[C:.*]]: !wave.simd<i32, 32>)
+func.func @rewrite_integerized_mask_and(
+    %a: !wave.simd<i32, 32>, %b: !wave.simd<i32, 32>,
+    %c: !wave.simd<i32, 32>) -> !wave.mask<32>
+    attributes {wave.kernel} {
+  %zero = wave.constant 0 : i32 -> !wave.simd<i32, 32>
+  %one = wave.constant 1 : i32 -> !wave.simd<i32, 32>
+  // CHECK: %[[FALSE:.*]] = wave.constant false -> !wave.mask<32>
+  // CHECK: %[[M0:.*]] = wave.cmpi slt %[[A]], %[[B]]
+  %m0 = wave.cmpi slt %a, %b
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.mask<32>
+  // CHECK: %[[M1:.*]] = wave.cmpi slt %[[B]], %[[C]]
+  %m1 = wave.cmpi slt %b, %c
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.mask<32>
+  %i0 = wave.select %m0, %one, %zero : !wave.mask<32>, !wave.simd<i32, 32>
+  %i1 = wave.select %m1, %one, %zero : !wave.mask<32>, !wave.simd<i32, 32>
+  %and = wave.binary andi %i0, %i1
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  // CHECK-NOT: wave.binary andi
+  // CHECK: %[[MASK:.*]] = wave.select %[[M0]], %[[M1]], %[[FALSE]] : !wave.mask<32>, !wave.mask<32>
+  %mask = wave.cmpi ne %and, %zero
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.mask<32>
+  // CHECK: return %[[MASK]] : !wave.mask<32>
+  return %mask : !wave.mask<32>
 }

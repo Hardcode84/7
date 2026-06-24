@@ -11,6 +11,7 @@
 #include "mlir/Analysis/DataFlow/IntegerRangeAnalysis.h"
 #include "mlir/Analysis/DataFlow/Utils.h"
 #include "mlir/Analysis/DataFlowFramework.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Utils/StaticValueUtils.h"
 #include "mlir/Dialect/Wave/IR/Wave.h"
 #include "mlir/Dialect/Wave/IR/WaveAMD.h"
@@ -232,6 +233,13 @@ static bool isNoSignedWrapSymbolicArithmetic(BinaryKind kind) {
 static std::optional<int64_t> getSplatOrConstantInt(Value value) {
   if (std::optional<int64_t> constant = getConstantIntValue(value))
     return constant;
+  if (ConstantOp constant = value.getDefiningOp<ConstantOp>()) {
+    if (auto attr = dyn_cast<IntegerAttr>(constant.getValue())) {
+      APInt intValue = attr.getValue();
+      if (intValue.isSignedIntN(64))
+        return intValue.getSExtValue();
+    }
+  }
   if (SplatOp splat = value.getDefiningOp<SplatOp>())
     return getSplatOrConstantInt(splat.getSource());
   return std::nullopt;
@@ -297,6 +305,31 @@ finiteSignedI64Range(DataFlowSolver &solver, Value value) {
   if (!lo || !hi)
     return std::nullopt;
   return std::pair<int64_t, int64_t>{*lo, *hi};
+}
+
+static std::optional<int64_t> getKnownWorkgroupDim(Operation *op,
+                                                   unsigned axis) {
+  func::FuncOp func = op->getParentOfType<func::FuncOp>();
+  if (!func || axis > 2)
+    return std::nullopt;
+
+  for (StringRef name : {"wave.workgroup_size", "gpu.known_block_size"}) {
+    DenseI32ArrayAttr attr = func->getAttrOfType<DenseI32ArrayAttr>(name);
+    if (!attr)
+      continue;
+    int64_t dim = axis < attr.size() ? attr.asArrayRef()[axis] : 1;
+    if (dim > 0)
+      return dim;
+  }
+  return std::nullopt;
+}
+
+static std::optional<SignedI64Range> workitemIdRange(WorkitemIdOp op) {
+  std::optional<int64_t> dim =
+      getKnownWorkgroupDim(op.getOperation(), op.getAxis());
+  if (!dim)
+    return std::nullopt;
+  return SignedI64Range{0, *dim - 1};
 }
 
 static std::optional<int64_t> floorRational(sym::RationalEndpoint value) {
@@ -533,11 +566,35 @@ computeBinarySignedI64Range(BinaryOp binary, SignedI64Range lhs,
 
 static std::optional<SignedI64Range>
 computeSignedI64Range(Value value, DataFlowSolver &solver, sym::Store &store,
+                      unsigned depth);
+
+static std::optional<SignedI64Range>
+computeBinaryValueSignedI64Range(BinaryOp binary, DataFlowSolver &solver,
+                                 sym::Store &store, unsigned depth) {
+  unsigned bits = elementStorageBitWidth(binary.getResult().getType());
+  if (bits == 0 || bits > 64)
+    return std::nullopt;
+
+  std::optional<SignedI64Range> lhs =
+      computeSignedI64Range(binary.getLhs(), solver, store, depth + 1);
+  std::optional<SignedI64Range> rhs =
+      computeSignedI64Range(binary.getRhs(), solver, store, depth + 1);
+  if (!lhs || !rhs)
+    return finiteSignedI64Range(solver, binary.getResult());
+  return computeBinarySignedI64Range(binary, *lhs, *rhs, bits, solver,
+                                     binary.getResult());
+}
+
+static std::optional<SignedI64Range>
+computeSignedI64Range(Value value, DataFlowSolver &solver, sym::Store &store,
                       unsigned depth = 0) {
   if (depth > kMaxSymbolicValueDepth)
     return std::nullopt;
   if (std::optional<int64_t> constant = getSplatOrConstantInt(value))
     return SignedI64Range{*constant, *constant};
+  if (WorkitemIdOp workitem = value.getDefiningOp<WorkitemIdOp>())
+    if (std::optional<SignedI64Range> range = workitemIdRange(workitem))
+      return range;
   if (AssumeOp assume = value.getDefiningOp<AssumeOp>())
     return intersectRange(
         computeSignedI64Range(assume.getValue(), solver, store, depth + 1),
@@ -545,19 +602,8 @@ computeSignedI64Range(Value value, DataFlowSolver &solver, sym::Store &store,
   if (SplatOp splat = value.getDefiningOp<SplatOp>())
     return computeSignedI64Range(splat.getSource(), solver, store, depth + 1);
 
-  if (BinaryOp binary = value.getDefiningOp<BinaryOp>()) {
-    unsigned bits = elementStorageBitWidth(binary.getResult().getType());
-    if (bits == 0 || bits > 64)
-      return std::nullopt;
-
-    std::optional<SignedI64Range> lhs =
-        computeSignedI64Range(binary.getLhs(), solver, store, depth + 1);
-    std::optional<SignedI64Range> rhs =
-        computeSignedI64Range(binary.getRhs(), solver, store, depth + 1);
-    if (!lhs || !rhs)
-      return finiteSignedI64Range(solver, value);
-    return computeBinarySignedI64Range(binary, *lhs, *rhs, bits, solver, value);
-  }
+  if (BinaryOp binary = value.getDefiningOp<BinaryOp>())
+    return computeBinaryValueSignedI64Range(binary, solver, store, depth);
 
   return finiteSignedI64Range(solver, value);
 }
@@ -619,34 +665,54 @@ public:
         requireI32RootRange(requireI32RootRange) {}
 
   FailureOr<std::optional<SymbolicOffset>> build(Value value) {
-    if (!hasSymbolicRoot(value))
+    return build(value, /*allowRootLeaf=*/false);
+  }
+
+  FailureOr<std::optional<SymbolicOffset>> buildAllowingRootLeaf(Value value) {
+    return build(value, /*allowRootLeaf=*/true);
+  }
+
+  bool canExpand(Value value) { return hasSymbolicRoot(value); }
+
+private:
+  FailureOr<std::optional<SymbolicOffset>> build(Value value,
+                                                 bool allowRootLeaf) {
+    bool hasRoot = hasSymbolicRoot(value);
+    if (!hasRoot && !allowRootLeaf)
       return std::optional<SymbolicOffset>{};
 
     bool skip = false;
-    FailureOr<sym::ExprHandle> expr = failure();
-    if (bindI32Root && isSignlessI32StorageType(value.getType())) {
-      std::optional<SignedI64Range> rootRange = inferI32RootRange(value);
-      expr = rootRange || !requireI32RootRange
-                 ? bindSymbol(value, skip, rootRange)
-                 : buildExpr(value, skip, false);
-    } else {
-      expr = buildExpr(value, skip, false);
-    }
+    FailureOr<sym::ExprHandle> expr =
+        buildRootExpr(value, hasRoot, allowRootLeaf, skip);
     if (skip)
       return std::optional<SymbolicOffset>{};
     if (failed(expr))
       return failure();
-    FailureOr<sym::ExprHandle> simplified =
-        offset.assumptions.empty()
-            ? sym::simplifyExpr(store, *expr)
-            : sym::simplifyExpr(store, *expr, offset.assumptions);
+    FailureOr<sym::ExprHandle> simplified = simplifyBuiltExpr(*expr);
     if (failed(simplified))
       return failure();
     offset.expr = *simplified;
     return std::optional<SymbolicOffset>{std::move(offset)};
   }
 
-private:
+  FailureOr<sym::ExprHandle> buildRootExpr(Value value, bool hasRoot,
+                                           bool allowRootLeaf, bool &skip) {
+    bool allowLeaf = allowRootLeaf && !hasRoot;
+    if (!bindI32Root || !isSignlessI32StorageType(value.getType()))
+      return buildExpr(value, skip, allowLeaf);
+
+    std::optional<SignedI64Range> rootRange = inferI32RootRange(value);
+    if (rootRange || !requireI32RootRange)
+      return bindSymbol(value, skip, rootRange);
+    return buildExpr(value, skip, false);
+  }
+
+  FailureOr<sym::ExprHandle> simplifyBuiltExpr(sym::ExprHandle expr) {
+    if (offset.assumptions.empty())
+      return sym::simplifyExpr(store, expr);
+    return sym::simplifyExpr(store, expr, offset.assumptions);
+  }
+
   bool hasSymbolicRoot(Value value) {
     if (AssumeOp assume = value.getDefiningOp<AssumeOp>())
       return hasSymbolicRoot(assume.getValue());
@@ -980,45 +1046,81 @@ private:
     return std::nullopt;
   }
 
-  FailureOr<sym::ExprHandle> appendOffset(const SymbolicOffset &symbolic) {
-    SmallVector<sym::ExprSubstitution> substitutions;
-    for (const SymbolicOffsetBinding &binding : symbolic.bindings) {
-      StringRef name = symbolName(binding);
-      auto valueIt = nameByValue.find(binding.value);
-      if (valueIt != nameByValue.end()) {
-        FailureOr<sym::ExprHandle> replacement =
-            sym::composeExprSym(store, valueIt->second);
-        if (failed(replacement))
-          return failure();
-        substitutions.push_back({binding.name, *replacement});
-        continue;
-      }
-      auto existing = bindingByName.find(name);
-      if (existing == bindingByName.end()) {
-        auto [it, inserted] = bindingByName.try_emplace(name, binding.value);
-        (void)inserted;
-        nameByValue[binding.value] = it->getKey();
-        offset.bindings.push_back(binding);
-        offset.laneWidth = std::max(offset.laneWidth, symbolic.laneWidth);
-        continue;
-      }
-      if (existing->second == binding.value)
-        continue;
+  LogicalResult appendSymbolSubstitution(
+      sym::ExprHandle source, StringRef replacementName,
+      SmallVectorImpl<sym::ExprSubstitution> &substitutions) {
+    FailureOr<sym::ExprHandle> replacement =
+        sym::composeExprSym(store, replacementName);
+    if (failed(replacement))
+      return failure();
+    substitutions.push_back({source, *replacement});
+    return success();
+  }
 
-      std::string fresh = freshName(name);
-      auto [freshIt, inserted] =
-          bindingByName.try_emplace(fresh, binding.value);
-      (void)inserted;
-      nameByValue[binding.value] = freshIt->getKey();
-      FailureOr<sym::ExprHandle> replacement =
-          sym::composeExprSym(store, freshIt->getKey());
-      if (failed(replacement))
-        return failure();
-      offset.bindings.push_back({*replacement, binding.value, binding.kind});
-      offset.laneWidth = std::max(offset.laneWidth, symbolic.laneWidth);
-      substitutions.push_back({binding.name, *replacement});
+  void appendNewOffsetBinding(const SymbolicOffsetBinding &binding,
+                              const SymbolicOffset &symbolic) {
+    StringRef name = symbolName(binding);
+    auto [it, inserted] = bindingByName.try_emplace(name, binding.value);
+    (void)inserted;
+    nameByValue[binding.value] = it->getKey();
+    offset.bindings.push_back(binding);
+    offset.laneWidth = std::max(offset.laneWidth, symbolic.laneWidth);
+  }
+
+  LogicalResult appendFreshOffsetBinding(
+      const SymbolicOffsetBinding &binding, const SymbolicOffset &symbolic,
+      SmallVectorImpl<sym::ExprSubstitution> &substitutions) {
+    std::string fresh = freshName(symbolName(binding));
+    auto [freshIt, inserted] = bindingByName.try_emplace(fresh, binding.value);
+    (void)inserted;
+    nameByValue[binding.value] = freshIt->getKey();
+    FailureOr<sym::ExprHandle> replacement =
+        sym::composeExprSym(store, freshIt->getKey());
+    if (failed(replacement))
+      return failure();
+    offset.bindings.push_back({*replacement, binding.value, binding.kind});
+    offset.laneWidth = std::max(offset.laneWidth, symbolic.laneWidth);
+    substitutions.push_back({binding.name, *replacement});
+    return success();
+  }
+
+  LogicalResult appendNamedOffsetBinding(
+      const SymbolicOffsetBinding &binding, const SymbolicOffset &symbolic,
+      SmallVectorImpl<sym::ExprSubstitution> &substitutions) {
+    StringRef name = symbolName(binding);
+    auto valueIt = nameByValue.find(binding.value);
+    if (valueIt != nameByValue.end())
+      return appendSymbolSubstitution(binding.name, valueIt->second,
+                                      substitutions);
+
+    auto existing = bindingByName.find(name);
+    if (existing == bindingByName.end()) {
+      appendNewOffsetBinding(binding, symbolic);
+      return success();
     }
+    if (existing->second == binding.value)
+      return success();
+    return appendFreshOffsetBinding(binding, symbolic, substitutions);
+  }
 
+  LogicalResult
+  appendOffsetBinding(const SymbolicOffsetBinding &binding,
+                      const SymbolicOffset &symbolic,
+                      SmallVectorImpl<sym::ExprSubstitution> &substitutions) {
+    FailureOr<std::optional<sym::ExprHandle>> expanded =
+        buildGeneratedBindingExpr(binding.value);
+    if (failed(expanded))
+      return failure();
+    if (*expanded) {
+      substitutions.push_back({binding.name, **expanded});
+      return success();
+    }
+    return appendNamedOffsetBinding(binding, symbolic, substitutions);
+  }
+
+  FailureOr<sym::ExprHandle>
+  appendOffsetExpr(const SymbolicOffset &symbolic,
+                   ArrayRef<sym::ExprSubstitution> substitutions) {
     if (substitutions.empty()) {
       llvm::append_range(offset.assumptions, symbolic.assumptions);
       return symbolic.expr;
@@ -1030,6 +1132,28 @@ private:
       return failure();
     llvm::append_range(offset.assumptions, *assumptions);
     return sym::substituteExpr(store, symbolic.expr, substitutions);
+  }
+
+  FailureOr<sym::ExprHandle> appendOffset(const SymbolicOffset &symbolic) {
+    SmallVector<sym::ExprSubstitution> substitutions;
+    for (const SymbolicOffsetBinding &binding : symbolic.bindings)
+      if (failed(appendOffsetBinding(binding, symbolic, substitutions)))
+        return failure();
+    return appendOffsetExpr(symbolic, substitutions);
+  }
+
+  FailureOr<std::optional<sym::ExprHandle>>
+  buildGeneratedBindingExpr(Value value) {
+    if (!hasSymbolicRoot(value))
+      return std::optional<sym::ExprHandle>{};
+    bool skip = false;
+    FailureOr<sym::ExprHandle> expr =
+        buildExpr(value, skip, /*allowLeaf=*/true);
+    if (skip)
+      return std::optional<sym::ExprHandle>{};
+    if (failed(expr))
+      return failure();
+    return std::optional<sym::ExprHandle>{*expr};
   }
 
   std::string freshName(StringRef stem = "raw") {
@@ -1142,14 +1266,38 @@ static Type getIndexExprType(MLIRContext *ctx, const SymbolicOffset &offset) {
   return getIndexExprResultType(ctx, values);
 }
 
+static SymbolicValueBuilder
+createGeneratedIndexExprBuilder(WaveDialect &dialect, DataFlowSolver &solver,
+                                bool allowI64Integers = false) {
+  return SymbolicValueBuilder(dialect, solver, allowI64Integers,
+                              /*assumeI32StorageRange=*/true,
+                              /*bindI32Root=*/false,
+                              /*requireI32RootRange=*/false);
+}
+
+static FailureOr<std::optional<SymbolicOffset>>
+buildGeneratedIndexExprValue(WaveDialect &dialect, DataFlowSolver &solver,
+                             Value value, bool allowRootLeaf,
+                             bool allowI64Integers = false) {
+  SymbolicValueBuilder builder =
+      createGeneratedIndexExprBuilder(dialect, solver, allowI64Integers);
+  return allowRootLeaf ? builder.buildAllowingRootLeaf(value)
+                       : builder.build(value);
+}
+
+static bool hasGeneratedIndexExprRoot(WaveDialect &dialect,
+                                      DataFlowSolver &solver, Value value,
+                                      bool allowI64Integers = false) {
+  SymbolicValueBuilder builder =
+      createGeneratedIndexExprBuilder(dialect, solver, allowI64Integers);
+  return builder.canExpand(value);
+}
+
 static FailureOr<bool> rewritePtrAdd(PatternRewriter &rewriter, PtrAddOp op,
                                      WaveDialect &dialect,
                                      DataFlowSolver &solver) {
-  SymbolicValueBuilder builder(dialect, solver,
-                               /*allowI64Integers=*/hasGlobalPointerBase(op),
-                               /*assumeI32StorageRange=*/true,
-                               /*bindI32Root=*/false,
-                               /*requireI32RootRange=*/false);
+  SymbolicValueBuilder builder = createGeneratedIndexExprBuilder(
+      dialect, solver, hasGlobalPointerBase(op));
   FailureOr<std::optional<SymbolicOffset>> offset =
       builder.build(op.getOffset());
   if (failed(offset))
@@ -1169,6 +1317,161 @@ static FailureOr<bool> rewritePtrAdd(PatternRewriter &rewriter, PtrAddOp op,
   return true;
 }
 
+static Value materializeCmpIndexOperand(PatternRewriter &rewriter, Location loc,
+                                        MLIRContext *ctx,
+                                        const SymbolicOffset &offset,
+                                        int64_t laneWidth) {
+  IndexExprOp index = createIndexExpr(rewriter, loc, ctx, offset);
+  Value value = index.getResult();
+
+  if (auto simdType = dyn_cast<SimdType>(value.getType())) {
+    if (!simdType.getElementType().isIndex() ||
+        simdType.getWidth() != laneWidth)
+      return {};
+    return value;
+  }
+
+  if (!value.getType().isIndex())
+    return {};
+
+  Type simdIndexType = SimdType::get(ctx, value.getType(), laneWidth);
+  return SplatOp::create(rewriter, loc, simdIndexType, value).getResult();
+}
+
+struct CmpIndexOperandOffsets {
+  SymbolicOffset lhs;
+  SymbolicOffset rhs;
+};
+
+struct CmpIndexOperands {
+  Value lhs;
+  Value rhs;
+};
+
+static SimdType getCmpIndexOperandType(CmpIOp op) {
+  auto lhsType = dyn_cast<SimdType>(op.getLhs().getType());
+  auto rhsType = dyn_cast<SimdType>(op.getRhs().getType());
+  if (!lhsType || lhsType != rhsType || lhsType.getElementType().isIndex())
+    return {};
+  return lhsType;
+}
+
+static FailureOr<std::optional<CmpIndexOperandOffsets>>
+buildCmpIndexOperandOffsets(CmpIOp op, WaveDialect &dialect,
+                            DataFlowSolver &solver) {
+  bool lhsHasRoot = hasGeneratedIndexExprRoot(dialect, solver, op.getLhs());
+  bool rhsHasRoot = hasGeneratedIndexExprRoot(dialect, solver, op.getRhs());
+  if (!lhsHasRoot && !rhsHasRoot)
+    return std::optional<CmpIndexOperandOffsets>{};
+
+  FailureOr<std::optional<SymbolicOffset>> lhs =
+      buildGeneratedIndexExprValue(dialect, solver, op.getLhs(),
+                                   /*allowRootLeaf=*/!lhsHasRoot);
+  FailureOr<std::optional<SymbolicOffset>> rhs =
+      buildGeneratedIndexExprValue(dialect, solver, op.getRhs(),
+                                   /*allowRootLeaf=*/!rhsHasRoot);
+  if (failed(lhs) || failed(rhs)) {
+    op.emitError("failed to generate wave.index_expr cmp operand");
+    return failure();
+  }
+  if (!*lhs || !*rhs)
+    return std::optional<CmpIndexOperandOffsets>{};
+  return std::optional<CmpIndexOperandOffsets>{
+      CmpIndexOperandOffsets{**lhs, **rhs}};
+}
+
+static std::optional<CmpIndexOperands>
+materializeCmpIndexOperands(PatternRewriter &rewriter, CmpIOp op,
+                            const CmpIndexOperandOffsets &offsets,
+                            SimdType operandType) {
+  rewriter.setInsertionPoint(op);
+  Value newLhs =
+      materializeCmpIndexOperand(rewriter, op.getLoc(), op.getContext(),
+                                 offsets.lhs, operandType.getWidth());
+  Value newRhs =
+      materializeCmpIndexOperand(rewriter, op.getLoc(), op.getContext(),
+                                 offsets.rhs, operandType.getWidth());
+  if (!newLhs || !newRhs || newLhs.getType() != newRhs.getType())
+    return std::nullopt;
+  return CmpIndexOperands{newLhs, newRhs};
+}
+
+struct IntegerizedMask {
+  Value mask;
+  int64_t trueBits = 0;
+};
+
+static std::optional<IntegerizedMask> matchIntegerizedMask(Value value) {
+  SelectOp select = value.getDefiningOp<SelectOp>();
+  if (!select || !isa<MaskType>(select.getCondition().getType()))
+    return std::nullopt;
+
+  std::optional<int64_t> trueValue =
+      getSplatOrConstantInt(select.getTrueValue());
+  std::optional<int64_t> falseValue =
+      getSplatOrConstantInt(select.getFalseValue());
+  if (!trueValue || !falseValue || *trueValue == 0 || *falseValue != 0)
+    return std::nullopt;
+  return IntegerizedMask{select.getCondition(), *trueValue};
+}
+
+static FailureOr<bool> rewriteIntegerizedMaskAndCmp(PatternRewriter &rewriter,
+                                                    CmpIOp op) {
+  if (op.getPredicate() != arith::CmpIPredicate::ne)
+    return false;
+
+  Value andValue;
+  if (getSplatOrConstantInt(op.getRhs()) == int64_t{0})
+    andValue = op.getLhs();
+  else if (getSplatOrConstantInt(op.getLhs()) == int64_t{0})
+    andValue = op.getRhs();
+  else
+    return false;
+
+  BinaryOp andOp = andValue.getDefiningOp<BinaryOp>();
+  if (!andOp || andOp.getKind() != BinaryKind::AndI)
+    return false;
+
+  std::optional<IntegerizedMask> lhs = matchIntegerizedMask(andOp.getLhs());
+  std::optional<IntegerizedMask> rhs = matchIntegerizedMask(andOp.getRhs());
+  if (!lhs || !rhs || (lhs->trueBits & rhs->trueBits) == 0)
+    return false;
+
+  rewriter.setInsertionPoint(op);
+  Value falseMask = ConstantOp::create(rewriter, op.getLoc(), op.getType(),
+                                       rewriter.getBoolAttr(false));
+  Value combined = SelectOp::create(rewriter, op.getLoc(), op.getType(),
+                                    lhs->mask, rhs->mask, falseMask);
+  rewriter.replaceOp(op, combined);
+  return true;
+}
+
+static FailureOr<bool> rewriteCmp(PatternRewriter &rewriter, CmpIOp op,
+                                  WaveDialect &dialect,
+                                  DataFlowSolver &solver) {
+  SimdType operandType = getCmpIndexOperandType(op);
+  if (!operandType)
+    return false;
+
+  FailureOr<std::optional<CmpIndexOperandOffsets>> offsets =
+      buildCmpIndexOperandOffsets(op, dialect, solver);
+  if (failed(offsets))
+    return failure();
+  if (!*offsets)
+    return false;
+
+  std::optional<CmpIndexOperands> operands =
+      materializeCmpIndexOperands(rewriter, op, **offsets, operandType);
+  if (!operands)
+    return false;
+
+  CmpIOp replacement =
+      CmpIOp::create(rewriter, op.getLoc(), op.getType(), op.getPredicate(),
+                     operands->lhs, operands->rhs);
+  rewriter.replaceOp(op, replacement.getResult());
+  return true;
+}
+
 static void seedBindingNames(IndexExprOp op, BindingState &state) {
   for (auto [nameAttr, value] : llvm::zip(op.getNames(), op.getBindings())) {
     StringRef name = cast<StringAttr>(nameAttr).getValue();
@@ -1185,7 +1488,7 @@ static bool shouldPreserveGeneratedBinding(Value value,
                                            bool preserveI32Binding) {
   if (preserveI32Binding && isSignlessI32StorageType(value.getType()))
     return true;
-  return !value.hasOneUse() && !getSplatOrConstantInt(value);
+  return false;
 }
 
 static FailureOr<bool> preserveGeneratedBinding(BindingState &state,
@@ -1202,7 +1505,11 @@ static FailureOr<bool> collectGeneratedBindingRewrite(
   if (shouldPreserveGeneratedBinding(value, preserveI32Binding))
     return preserveGeneratedBinding(state, name, value);
 
-  SymbolicValueBuilder builder(dialect, solver);
+  SymbolicValueBuilder builder(dialect, solver,
+                               /*allowI64Integers=*/false,
+                               /*assumeI32StorageRange=*/true,
+                               /*bindI32Root=*/false,
+                               /*requireI32RootRange=*/false);
   FailureOr<std::optional<SymbolicOffset>> symbolic = builder.build(value);
   if (failed(symbolic))
     return op.emitError("failed to generate wave.index_expr binding");
@@ -1338,6 +1645,40 @@ struct GenerateIndexExprBindingPattern : OpRewritePattern<IndexExprOp> {
   bool &hadFailure;
 };
 
+struct GenerateCmpIndexExprPattern : OpRewritePattern<CmpIOp> {
+  GenerateCmpIndexExprPattern(MLIRContext *context, bool &hadFailure,
+                              DataFlowSolver &solver)
+      : OpRewritePattern(context), solver(solver), hadFailure(hadFailure) {}
+
+  LogicalResult matchAndRewrite(CmpIOp op,
+                                PatternRewriter &rewriter) const override {
+    WaveDialect *dialect = op->getContext()->getLoadedDialect<WaveDialect>();
+    if (!dialect) {
+      op.emitError("Wave dialect is not loaded");
+      hadFailure = true;
+      return failure();
+    }
+
+    FailureOr<bool> maskRewrite = rewriteIntegerizedMaskAndCmp(rewriter, op);
+    if (failed(maskRewrite)) {
+      hadFailure = true;
+      return failure();
+    }
+    if (*maskRewrite)
+      return success();
+
+    FailureOr<bool> rewritten = rewriteCmp(rewriter, op, *dialect, solver);
+    if (failed(rewritten)) {
+      hadFailure = true;
+      return failure();
+    }
+    return success(*rewritten);
+  }
+
+  DataFlowSolver &solver;
+  bool &hadFailure;
+};
+
 struct WaveGenerateIndexExprsPass
     : public wave::impl::WaveGenerateIndexExprsBase<
           WaveGenerateIndexExprsPass> {
@@ -1354,9 +1695,8 @@ struct WaveGenerateIndexExprsPass
 
     bool failed = false;
     RewritePatternSet patterns(&getContext());
-    patterns
-        .add<GenerateIndexExprBindingPattern, GeneratePtrAddIndexExprPattern>(
-            &getContext(), failed, solver);
+    patterns.add<GenerateCmpIndexExprPattern, GenerateIndexExprBindingPattern,
+                 GeneratePtrAddIndexExprPattern>(&getContext(), failed, solver);
     if (mlir::failed(
             applyPatternsGreedily(getOperation(), std::move(patterns))) ||
         failed)
