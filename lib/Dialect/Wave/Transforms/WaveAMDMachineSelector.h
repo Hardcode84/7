@@ -210,6 +210,15 @@ Value extractLowDword(WaveAMDMachineSelector &S, Location loc, Value v,
 Value createScalarI64Cmp(WaveAMDMachineSelector &S, Location loc,
                          CmpRelation relation, bool signedCmp, Value lhs,
                          Value rhs);
+Value createWordCmp(WaveAMDMachineSelector &S, Location loc,
+                    CmpRelation relation, bool signedCmp, Type resultType,
+                    Value lhs, Value rhs);
+Value createI64Cmp(WaveAMDMachineSelector &S, Location loc,
+                   CmpRelation relation, bool signedCmp, Type resultType,
+                   Value lhs, Value rhs);
+FailureOr<Value> createLaneSelect(WaveAMDMachineSelector &S, Operation *op,
+                                  Value condition, Value trueValue,
+                                  Value falseValue, unsigned width);
 
 // scf.for lowering cluster. Defined in `WaveAMDMachineScfFor.cpp` as free
 // helpers taking the selector by reference, mirroring the IXS-cluster

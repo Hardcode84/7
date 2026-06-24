@@ -123,6 +123,11 @@ struct MulFactor {
   int32_t exponent = 0;
 };
 
+struct PiecewiseCase {
+  ExprHandle value;
+  PredHandle condition;
+};
+
 struct ExprSubstitution {
   ExprHandle target;
   ExprHandle replacement;
@@ -151,6 +156,8 @@ public:
   ExprHandle getUnaryArg() const;
   ExprHandle getBinaryLhs() const;
   ExprHandle getBinaryRhs() const;
+  uint32_t getPiecewiseCaseCount() const;
+  PiecewiseCase getPiecewiseCase(uint32_t index) const;
 
 private:
   ExprHandle value;
@@ -252,6 +259,13 @@ mlir::FailureOr<ExprHandle> composeExprSym(Store &store, llvm::StringRef name,
                                            std::string *diagnostic = nullptr);
 mlir::FailureOr<ExprHandle> composeExprInt(Store &store, int64_t value,
                                            std::string *diagnostic = nullptr);
+mlir::FailureOr<ExprHandle>
+composeExprPiecewise(Store &store, llvm::ArrayRef<PiecewiseCase> cases,
+                     std::string *diagnostic = nullptr);
+mlir::FailureOr<PredHandle> composePredTrue(Store &store,
+                                            std::string *diagnostic = nullptr);
+mlir::FailureOr<PredHandle> composePredFalse(Store &store,
+                                             std::string *diagnostic = nullptr);
 mlir::FailureOr<PredHandle> composePredCmp(Store &store, ExprHandle lhs,
                                            PredCmpOp op, ExprHandle rhs,
                                            std::string *diagnostic = nullptr);

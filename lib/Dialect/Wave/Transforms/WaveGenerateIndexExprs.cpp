@@ -604,6 +604,19 @@ computeBinaryValueSignedI64Range(BinaryOp binary, DataFlowSolver &solver,
 }
 
 static std::optional<SignedI64Range>
+computeSelectValueSignedI64Range(SelectOp select, DataFlowSolver &solver,
+                                 sym::Store &store, unsigned depth) {
+  std::optional<SignedI64Range> trueRange =
+      computeSignedI64Range(select.getTrueValue(), solver, store, depth + 1);
+  std::optional<SignedI64Range> falseRange =
+      computeSignedI64Range(select.getFalseValue(), solver, store, depth + 1);
+  if (!trueRange || !falseRange)
+    return finiteSignedI64Range(solver, select.getResult());
+  return SignedI64Range{std::min(trueRange->first, falseRange->first),
+                        std::max(trueRange->second, falseRange->second)};
+}
+
+static std::optional<SignedI64Range>
 computeSignedI64Range(Value value, DataFlowSolver &solver, sym::Store &store,
                       unsigned depth = 0) {
   if (depth > kMaxSymbolicValueDepth)
@@ -622,6 +635,8 @@ computeSignedI64Range(Value value, DataFlowSolver &solver, sym::Store &store,
 
   if (BinaryOp binary = value.getDefiningOp<BinaryOp>())
     return computeBinaryValueSignedI64Range(binary, solver, store, depth);
+  if (SelectOp select = value.getDefiningOp<SelectOp>())
+    return computeSelectValueSignedI64Range(select, solver, store, depth);
 
   return finiteSignedI64Range(solver, value);
 }
@@ -670,6 +685,81 @@ static bool canBuildSymbolicBinaryOp(BinaryOp op, bool allowI64Integers,
 static bool isSymbolicRootBinaryOp(BinaryOp op, bool allowI64Integers,
                                    DataFlowSolver &solver, sym::Store &store) {
   return canBuildSymbolicBinaryOp(op, allowI64Integers, solver, store);
+}
+
+static std::optional<sym::PredCmpOp>
+convertSignedCmpPredicate(arith::CmpIPredicate predicate) {
+  switch (predicate) {
+  case arith::CmpIPredicate::eq:
+    return sym::PredCmpOp::Eq;
+  case arith::CmpIPredicate::ne:
+    return sym::PredCmpOp::Ne;
+  case arith::CmpIPredicate::slt:
+    return sym::PredCmpOp::Lt;
+  case arith::CmpIPredicate::sle:
+    return sym::PredCmpOp::Le;
+  case arith::CmpIPredicate::sgt:
+    return sym::PredCmpOp::Gt;
+  case arith::CmpIPredicate::sge:
+    return sym::PredCmpOp::Ge;
+  default:
+    return std::nullopt;
+  }
+}
+
+static std::optional<sym::PredCmpOp>
+convertUnsignedCmpPredicate(arith::CmpIPredicate predicate) {
+  switch (predicate) {
+  case arith::CmpIPredicate::ult:
+    return sym::PredCmpOp::Lt;
+  case arith::CmpIPredicate::ule:
+    return sym::PredCmpOp::Le;
+  case arith::CmpIPredicate::ugt:
+    return sym::PredCmpOp::Gt;
+  case arith::CmpIPredicate::uge:
+    return sym::PredCmpOp::Ge;
+  default:
+    return std::nullopt;
+  }
+}
+
+static bool hasUnsignedCmpDomain(CmpIOp op, DataFlowSolver &solver,
+                                 sym::Store &store) {
+  std::optional<SignedI64Range> lhs =
+      computeSignedI64Range(op.getLhs(), solver, store);
+  std::optional<SignedI64Range> rhs =
+      computeSignedI64Range(op.getRhs(), solver, store);
+  return lhs && rhs && lhs->first >= 0 && rhs->first >= 0;
+}
+
+static std::optional<sym::PredCmpOp>
+convertCmpPredicate(CmpIOp op, DataFlowSolver &solver, sym::Store &store) {
+  arith::CmpIPredicate predicate = op.getPredicate();
+  if (std::optional<sym::PredCmpOp> converted =
+          convertSignedCmpPredicate(predicate))
+    return converted;
+  if (!hasUnsignedCmpDomain(op, solver, store))
+    return std::nullopt;
+  return convertUnsignedCmpPredicate(predicate);
+}
+
+static bool canBuildSymbolicCmp(CmpIOp op, bool allowI64Integers,
+                                DataFlowSolver &solver, sym::Store &store) {
+  return isSymbolicValueType(op.getLhs().getType(), allowI64Integers) &&
+         isSymbolicValueType(op.getRhs().getType(), allowI64Integers) &&
+         convertCmpPredicate(op, solver, store).has_value();
+}
+
+static bool isSymbolicSelectOp(SelectOp op, bool allowI64Integers,
+                               DataFlowSolver &solver, sym::Store &store) {
+  if (!isSymbolicValueType(op.getType(), allowI64Integers) ||
+      !isSymbolicValueType(op.getTrueValue().getType(), allowI64Integers) ||
+      !isSymbolicValueType(op.getFalseValue().getType(), allowI64Integers))
+    return false;
+  if (!isa<MaskType>(op.getCondition().getType()))
+    return false;
+  CmpIOp cmp = op.getCondition().getDefiningOp<CmpIOp>();
+  return cmp && canBuildSymbolicCmp(cmp, allowI64Integers, solver, store);
 }
 
 class SymbolicValueBuilder {
@@ -738,6 +828,8 @@ private:
       return hasSymbolicRoot(assume.getValue());
     if (BinaryOp binary = value.getDefiningOp<BinaryOp>())
       return isSymbolicRootBinaryOp(binary, allowI64Integers, solver, store);
+    if (SelectOp select = value.getDefiningOp<SelectOp>())
+      return isSymbolicSelectOp(select, allowI64Integers, solver, store);
     if (SplatOp splat = value.getDefiningOp<SplatOp>())
       return hasSymbolicRoot(splat.getSource());
     return false;
@@ -759,6 +851,8 @@ private:
       return buildSplatExpr(splat, skip, allowLeaf, depth);
     if (BinaryOp binary = value.getDefiningOp<BinaryOp>())
       return buildBinaryExpr(value, binary, skip, allowLeaf, depth);
+    if (SelectOp select = value.getDefiningOp<SelectOp>())
+      return buildSelectExpr(value, select, skip, allowLeaf, depth);
     return bindOrSkip(value, skip, allowLeaf);
   }
 
@@ -809,6 +903,16 @@ private:
     return bindOrSkip(value, skip, allowLeaf);
   }
 
+  FailureOr<sym::ExprHandle> buildSelectExpr(Value value, SelectOp select,
+                                             bool &skip, bool allowLeaf,
+                                             unsigned depth) {
+    bool childSkip = false;
+    FailureOr<sym::ExprHandle> expr = buildSelect(select, childSkip, depth + 1);
+    if (!childSkip)
+      return expr;
+    return bindOrSkip(value, skip, allowLeaf);
+  }
+
   FailureOr<sym::ExprHandle> buildIndexExpr(IndexExprOp op) {
     FailureOr<SymbolicOffset> symbolic = getIndexExprSymbolicOffset(op);
     if (failed(symbolic))
@@ -838,6 +942,62 @@ private:
     default:
       return buildPlainBinary(op, skip, depth);
     }
+  }
+
+  FailureOr<sym::ExprHandle> buildSelect(SelectOp op, bool &skip,
+                                         unsigned depth) {
+    if (!isSymbolicSelectOp(op, allowI64Integers, solver, store)) {
+      skip = true;
+      return failure();
+    }
+
+    FailureOr<sym::PredHandle> condition =
+        buildSelectCondition(op, skip, depth);
+    if (skip || failed(condition))
+      return failure();
+    FailureOr<sym::ExprHandle> trueValue =
+        buildExpr(op.getTrueValue(), skip, true, depth);
+    if (skip || failed(trueValue))
+      return failure();
+    FailureOr<sym::ExprHandle> falseValue =
+        buildExpr(op.getFalseValue(), skip, true, depth);
+    if (skip || failed(falseValue))
+      return failure();
+    FailureOr<sym::PredHandle> defaultCondition = sym::composePredTrue(store);
+    if (failed(defaultCondition))
+      return failure();
+    std::array<sym::PiecewiseCase, 2> cases{
+        sym::PiecewiseCase{*trueValue, *condition},
+        sym::PiecewiseCase{*falseValue, *defaultCondition}};
+    return sym::composeExprPiecewise(store, cases);
+  }
+
+  FailureOr<sym::PredHandle> buildSelectCondition(SelectOp op, bool &skip,
+                                                  unsigned depth) {
+    CmpIOp cmp = op.getCondition().getDefiningOp<CmpIOp>();
+    if (!cmp) {
+      skip = true;
+      return failure();
+    }
+    return buildCmpPredicate(cmp, skip, depth);
+  }
+
+  FailureOr<sym::PredHandle> buildCmpPredicate(CmpIOp op, bool &skip,
+                                               unsigned depth) {
+    std::optional<sym::PredCmpOp> predicate =
+        convertCmpPredicate(op, solver, store);
+    if (!predicate) {
+      skip = true;
+      return failure();
+    }
+
+    FailureOr<sym::ExprHandle> lhs = buildExpr(op.getLhs(), skip, true, depth);
+    if (skip || failed(lhs))
+      return failure();
+    FailureOr<sym::ExprHandle> rhs = buildExpr(op.getRhs(), skip, true, depth);
+    if (skip || failed(rhs))
+      return failure();
+    return sym::composePredCmp(store, *lhs, *predicate, *rhs);
   }
 
   FailureOr<sym::ExprHandle> buildPlainBinary(BinaryOp op, bool &skip,

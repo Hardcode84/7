@@ -121,16 +121,51 @@ static TermKind mulMaterializationKind(WaveAMDMachineSelector &S,
   return kind;
 }
 
-static TermKind materializationKind(WaveAMDMachineSelector &S,
-                                    sym::ExprHandle expr,
-                                    const llvm::StringMap<Value> &subs) {
-  sym::ExprView view(expr);
+static TermKind
+predicateMaterializationKind(WaveAMDMachineSelector &S, sym::PredHandle pred,
+                             const llvm::StringMap<Value> &subs) {
+  sym::PredView view(pred);
   switch (view.getKind()) {
-  case sym::ExprKind::Integer:
-  case sym::ExprKind::Rational:
+  case sym::PredKind::True:
+  case sym::PredKind::False:
     return TermKind::Const;
-  case sym::ExprKind::Symbol:
-    return symbolMaterializationKind(S, expr, subs);
+  case sym::PredKind::Cmp:
+    return std::max(materializationKind(S, view.getCmpLhs(), subs),
+                    materializationKind(S, view.getCmpRhs(), subs));
+  case sym::PredKind::And:
+  case sym::PredKind::Or: {
+    TermKind kind = TermKind::Const;
+    for (uint32_t i = 0, e = view.getLogicArgCount(); i != e; ++i)
+      kind = std::max(
+          kind, predicateMaterializationKind(S, view.getLogicArg(i), subs));
+    return kind;
+  }
+  case sym::PredKind::Not:
+    return predicateMaterializationKind(S, view.getUnaryArg(), subs);
+  default:
+    return TermKind::Lane;
+  }
+}
+
+static TermKind
+piecewiseMaterializationKind(WaveAMDMachineSelector &S, sym::ExprHandle expr,
+                             const llvm::StringMap<Value> &subs) {
+  sym::ExprView view(expr);
+  TermKind kind = TermKind::Const;
+  for (uint32_t i = 0, e = view.getPiecewiseCaseCount(); i != e; ++i) {
+    sym::PiecewiseCase piece = view.getPiecewiseCase(i);
+    kind = std::max(kind, materializationKind(S, piece.value, subs));
+    kind =
+        std::max(kind, predicateMaterializationKind(S, piece.condition, subs));
+  }
+  return kind;
+}
+
+static TermKind compoundMaterializationKind(WaveAMDMachineSelector &S,
+                                            sym::ExprHandle expr,
+                                            const llvm::StringMap<Value> &subs,
+                                            sym::ExprView view) {
+  switch (view.getKind()) {
   case sym::ExprKind::Add:
     return addMaterializationKind(S, expr, subs);
   case sym::ExprKind::Mul:
@@ -142,8 +177,25 @@ static TermKind materializationKind(WaveAMDMachineSelector &S,
   case sym::ExprKind::Xor:
     return std::max(materializationKind(S, view.getBinaryLhs(), subs),
                     materializationKind(S, view.getBinaryRhs(), subs));
+  case sym::ExprKind::Piecewise:
+    return piecewiseMaterializationKind(S, expr, subs);
   default:
     return TermKind::Lane;
+  }
+}
+
+static TermKind materializationKind(WaveAMDMachineSelector &S,
+                                    sym::ExprHandle expr,
+                                    const llvm::StringMap<Value> &subs) {
+  sym::ExprView view(expr);
+  switch (view.getKind()) {
+  case sym::ExprKind::Integer:
+  case sym::ExprKind::Rational:
+    return TermKind::Const;
+  case sym::ExprKind::Symbol:
+    return symbolMaterializationKind(S, expr, subs);
+  default:
+    return compoundMaterializationKind(S, expr, subs, view);
   }
 }
 
@@ -182,15 +234,51 @@ mulMaterializationLoopDepth(sym::ExprHandle expr, Operation *user,
   return depth;
 }
 
-static unsigned materializationLoopDepth(sym::ExprHandle expr, Operation *user,
-                                         const llvm::StringMap<Value> &subs) {
-  sym::ExprView view(expr);
+static unsigned
+predicateMaterializationLoopDepth(sym::PredHandle pred, Operation *user,
+                                  const llvm::StringMap<Value> &subs) {
+  sym::PredView view(pred);
   switch (view.getKind()) {
-  case sym::ExprKind::Integer:
-  case sym::ExprKind::Rational:
+  case sym::PredKind::True:
+  case sym::PredKind::False:
     return 0;
-  case sym::ExprKind::Symbol:
-    return symbolMaterializationLoopDepth(expr, user, subs);
+  case sym::PredKind::Cmp:
+    return std::max(materializationLoopDepth(view.getCmpLhs(), user, subs),
+                    materializationLoopDepth(view.getCmpRhs(), user, subs));
+  case sym::PredKind::And:
+  case sym::PredKind::Or: {
+    unsigned depth = 0;
+    for (uint32_t i = 0, e = view.getLogicArgCount(); i != e; ++i)
+      depth = std::max(depth, predicateMaterializationLoopDepth(
+                                  view.getLogicArg(i), user, subs));
+    return depth;
+  }
+  case sym::PredKind::Not:
+    return predicateMaterializationLoopDepth(view.getUnaryArg(), user, subs);
+  default:
+    return std::numeric_limits<unsigned>::max();
+  }
+}
+
+static unsigned
+piecewiseMaterializationLoopDepth(sym::ExprHandle expr, Operation *user,
+                                  const llvm::StringMap<Value> &subs) {
+  sym::ExprView view(expr);
+  unsigned depth = 0;
+  for (uint32_t i = 0, e = view.getPiecewiseCaseCount(); i != e; ++i) {
+    sym::PiecewiseCase piece = view.getPiecewiseCase(i);
+    depth = std::max(depth, materializationLoopDepth(piece.value, user, subs));
+    depth = std::max(
+        depth, predicateMaterializationLoopDepth(piece.condition, user, subs));
+  }
+  return depth;
+}
+
+static unsigned
+compoundMaterializationLoopDepth(sym::ExprHandle expr, Operation *user,
+                                 const llvm::StringMap<Value> &subs,
+                                 sym::ExprView view) {
+  switch (view.getKind()) {
   case sym::ExprKind::Add:
     return addMaterializationLoopDepth(expr, user, subs);
   case sym::ExprKind::Mul:
@@ -202,8 +290,24 @@ static unsigned materializationLoopDepth(sym::ExprHandle expr, Operation *user,
   case sym::ExprKind::Xor:
     return std::max(materializationLoopDepth(view.getBinaryLhs(), user, subs),
                     materializationLoopDepth(view.getBinaryRhs(), user, subs));
+  case sym::ExprKind::Piecewise:
+    return piecewiseMaterializationLoopDepth(expr, user, subs);
   default:
     return std::numeric_limits<unsigned>::max();
+  }
+}
+
+static unsigned materializationLoopDepth(sym::ExprHandle expr, Operation *user,
+                                         const llvm::StringMap<Value> &subs) {
+  sym::ExprView view(expr);
+  switch (view.getKind()) {
+  case sym::ExprKind::Integer:
+  case sym::ExprKind::Rational:
+    return 0;
+  case sym::ExprKind::Symbol:
+    return symbolMaterializationLoopDepth(expr, user, subs);
+  default:
+    return compoundMaterializationLoopDepth(expr, user, subs, view);
   }
 }
 
@@ -578,6 +682,164 @@ FailureOr<Value> materializeXor(WaveAMDMachineSelector &S, sym::ExprHandle expr,
   if (S.isUniformValue(*lhs) && S.isUniformValue(*rhs))
     return materializeUniformXor(S, loc, *lhs, *rhs);
   return materializeLaneXor(S, loc, *lhs, *rhs);
+}
+
+static std::optional<CmpRelation> convertPredCmpOp(sym::PredCmpOp op) {
+  switch (op) {
+  case sym::PredCmpOp::Eq:
+    return CmpRelation::Eq;
+  case sym::PredCmpOp::Ne:
+    return CmpRelation::Ne;
+  case sym::PredCmpOp::Lt:
+    return CmpRelation::Lt;
+  case sym::PredCmpOp::Le:
+    return CmpRelation::Le;
+  case sym::PredCmpOp::Gt:
+    return CmpRelation::Gt;
+  case sym::PredCmpOp::Ge:
+    return CmpRelation::Ge;
+  }
+  llvm_unreachable("handled predicate compare op");
+}
+
+static bool isSignedPredicateCmp(CmpRelation relation) {
+  return relation != CmpRelation::Eq && relation != CmpRelation::Ne;
+}
+
+static unsigned getCmpValueBits(WaveAMDMachineSelector &S, Value value,
+                                bool signedCmp) {
+  if (auto regType = dyn_cast<waveamdmachine::RegType>(value.getType())) {
+    if (regType.getWidth() <= 1)
+      return 32;
+    return regType.getWidth() * 32;
+  }
+  if (std::optional<int64_t> imm = S.getImmediateValue(value)) {
+    if (signedCmp)
+      return llvm::isInt<32>(*imm) ? 32 : 64;
+    return llvm::isInt<32>(*imm) || llvm::isUInt<32>(*imm) ? 32 : 64;
+  }
+  return 64;
+}
+
+static std::optional<unsigned> getMaskWordWidth(Type type) {
+  if (auto simd = dyn_cast<SimdType>(type))
+    return simd.getWidth() / 32;
+  if (auto mask = dyn_cast<MaskType>(type))
+    return mask.getWidth() / 32;
+  return std::nullopt;
+}
+
+static FailureOr<unsigned> inferUserMaskWordWidth(Operation *user) {
+  for (Type type : user->getResultTypes())
+    if (std::optional<unsigned> width = getMaskWordWidth(type))
+      return *width;
+  for (Value operand : user->getOperands())
+    if (std::optional<unsigned> width = getMaskWordWidth(operand.getType()))
+      return *width;
+  return user->emitError("wave.index_expr piecewise needs a SIMD user");
+}
+
+static FailureOr<Value>
+materializePredicateCmpMask(WaveAMDMachineSelector &S, sym::PredHandle pred,
+                            Operation *user, const llvm::StringMap<Value> &subs,
+                            ArrayRef<sym::PredHandle> assumptions,
+                            IndexExprAddOrder addOrder, unsigned maskWords) {
+  sym::PredView view(pred);
+  std::optional<sym::PredCmpOp> cmp = view.getCmpOp();
+  std::optional<CmpRelation> relation =
+      cmp ? convertPredCmpOp(*cmp) : std::optional<CmpRelation>{};
+  if (!relation)
+    return user->emitError("wave.index_expr piecewise needs cmp predicate");
+  bool signedCmp = isSignedPredicateCmp(*relation);
+
+  FailureOr<Value> lhs = materializeIndexExprNode(S, view.getCmpLhs(), user,
+                                                  subs, assumptions, addOrder);
+  FailureOr<Value> rhs = materializeIndexExprNode(S, view.getCmpRhs(), user,
+                                                  subs, assumptions, addOrder);
+  if (failed(lhs) || failed(rhs))
+    return failure();
+
+  unsigned bits = std::max(getCmpValueBits(S, *lhs, signedCmp),
+                           getCmpValueBits(S, *rhs, signedCmp));
+  Type maskType = getRegType(S.builder.getContext(),
+                             waveamdmachine::RegClass::SGPR, maskWords);
+  if (bits == 64)
+    return createI64Cmp(S, user->getLoc(), *relation, signedCmp, maskType, *lhs,
+                        *rhs);
+  if (bits == 32)
+    return createWordCmp(S, user->getLoc(), *relation, signedCmp, maskType,
+                         *lhs, *rhs);
+  return user->emitError("wave.index_expr piecewise cmp width unsupported");
+}
+
+static FailureOr<unsigned> getMaterializedWordWidth(Operation *user,
+                                                    Value value) {
+  if (isImm(value))
+    return 1;
+  if (auto regType = dyn_cast<waveamdmachine::RegType>(value.getType()))
+    return regType.getWidth();
+  return user->emitError(
+      "wave.index_expr piecewise branch is not materialized");
+}
+
+static LogicalResult materializePiecewiseCase(
+    WaveAMDMachineSelector &S, sym::PiecewiseCase piece, Operation *user,
+    const llvm::StringMap<Value> &subs, ArrayRef<sym::PredHandle> assumptions,
+    IndexExprAddOrder addOrder, unsigned maskWords, Value &acc) {
+  sym::PredKind predKind = sym::PredView(piece.condition).getKind();
+  if (predKind == sym::PredKind::False)
+    return success();
+
+  FailureOr<Value> trueValue = materializeIndexExprNode(
+      S, piece.value, user, subs, assumptions, addOrder);
+  if (failed(trueValue))
+    return failure();
+  if (predKind == sym::PredKind::True) {
+    acc = *trueValue;
+    return success();
+  }
+
+  FailureOr<Value> condition = materializePredicateCmpMask(
+      S, piece.condition, user, subs, assumptions, addOrder, maskWords);
+  FailureOr<unsigned> trueWidth = getMaterializedWordWidth(user, *trueValue);
+  FailureOr<unsigned> falseWidth = getMaterializedWordWidth(user, acc);
+  if (failed(condition) || failed(trueWidth) || failed(falseWidth))
+    return failure();
+  FailureOr<Value> selected = createLaneSelect(
+      S, user, *condition, *trueValue, acc, std::max(*trueWidth, *falseWidth));
+  if (failed(selected))
+    return failure();
+  acc = *selected;
+  return success();
+}
+
+static FailureOr<Value>
+materializePiecewise(WaveAMDMachineSelector &S, sym::ExprHandle expr,
+                     Operation *user, const llvm::StringMap<Value> &subs,
+                     ArrayRef<sym::PredHandle> assumptions,
+                     IndexExprAddOrder addOrder) {
+  sym::ExprView view(expr);
+  uint32_t count = view.getPiecewiseCaseCount();
+  if (count == 0)
+    return user->emitError("wave.index_expr piecewise has no cases");
+  FailureOr<unsigned> maskWords = inferUserMaskWordWidth(user);
+  if (failed(maskWords))
+    return failure();
+
+  sym::PiecewiseCase last = view.getPiecewiseCase(count - 1);
+  FailureOr<Value> seed = materializeIndexExprNode(S, last.value, user, subs,
+                                                   assumptions, addOrder);
+  if (failed(seed))
+    return failure();
+  Value acc = *seed;
+
+  for (uint32_t i = count - 1; i > 0; --i) {
+    sym::PiecewiseCase piece = view.getPiecewiseCase(i - 1);
+    if (failed(materializePiecewiseCase(S, piece, user, subs, assumptions,
+                                        addOrder, *maskWords, acc)))
+      return failure();
+  }
+  return acc;
 }
 
 struct RationalIndexValue {
@@ -1796,6 +2058,8 @@ static FailureOr<Value> materializeCompoundIndexExprNode(
     return materializeMod(S, expr, user, subs, assumptions, addOrder);
   case sym::ExprKind::Xor:
     return materializeXor(S, expr, user, subs, assumptions, addOrder);
+  case sym::ExprKind::Piecewise:
+    return materializePiecewise(S, expr, user, subs, assumptions, addOrder);
   default:
     break;
   }
@@ -1830,6 +2094,32 @@ FailureOr<Value> materializeIndexExprNode(WaveAMDMachineSelector &S,
 }
 
 static TermKind
+classifyPredicateTerm(WaveAMDMachineSelector &S, sym::PredHandle pred,
+                      const llvm::StringMap<TermKind> &symKinds) {
+  sym::PredView view(pred);
+  switch (view.getKind()) {
+  case sym::PredKind::True:
+  case sym::PredKind::False:
+    return TermKind::Const;
+  case sym::PredKind::Cmp:
+    return std::max(classifyTerm(S, view.getCmpLhs(), symKinds),
+                    classifyTerm(S, view.getCmpRhs(), symKinds));
+  case sym::PredKind::And:
+  case sym::PredKind::Or: {
+    TermKind kind = TermKind::Const;
+    for (uint32_t i = 0, e = view.getLogicArgCount(); i != e; ++i)
+      kind = std::max(kind,
+                      classifyPredicateTerm(S, view.getLogicArg(i), symKinds));
+    return kind;
+  }
+  case sym::PredKind::Not:
+    return classifyPredicateTerm(S, view.getUnaryArg(), symKinds);
+  default:
+    return TermKind::Lane;
+  }
+}
+
+static TermKind
 classifyCompoundTerm(WaveAMDMachineSelector &S, sym::ExprHandle expr,
                      const llvm::StringMap<TermKind> &symKinds) {
   sym::ExprView view(expr);
@@ -1845,6 +2135,16 @@ classifyCompoundTerm(WaveAMDMachineSelector &S, sym::ExprHandle expr,
   case sym::ExprKind::Xor:
     return std::max(classifyTerm(S, view.getBinaryLhs(), symKinds),
                     classifyTerm(S, view.getBinaryRhs(), symKinds));
+  case sym::ExprKind::Piecewise: {
+    TermKind kind = TermKind::Const;
+    for (uint32_t i = 0, e = view.getPiecewiseCaseCount(); i != e; ++i) {
+      sym::PiecewiseCase piece = view.getPiecewiseCase(i);
+      kind = std::max(kind, classifyTerm(S, piece.value, symKinds));
+      kind =
+          std::max(kind, classifyPredicateTerm(S, piece.condition, symKinds));
+    }
+    return kind;
+  }
   default:
     return TermKind::Lane;
   }

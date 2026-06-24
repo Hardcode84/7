@@ -327,6 +327,33 @@ func.func @shared_i32_xor_offset_keeps_storage_range(
 
 // -----
 
+// CHECK-LABEL: func.func @ptr_add_select_offset
+// CHECK-SAME: (%{{.*}}: !wave.ptr<#wave.global, f32>, %[[IDX:.*]]: !wave.simd<i32, 32>, %[[LIMIT:.*]]: !wave.simd<i32, 32>)
+func.func @ptr_add_select_offset(
+    %out: !wave.ptr<#wave.global, f32>, %idx_raw: !wave.simd<i32, 32>,
+    %limit_raw: !wave.simd<i32, 32>)
+    -> !wave.simd<!wave.ptr<#wave.global, f32>, 32> {
+  // CHECK: [[IDX_ASSUME:%.*]] = wave.assume %[[IDX]]
+  %idx = wave.assume %idx_raw as "x" [#wave.pred<"x >= 0">, #wave.pred<"x <= 31">] : !wave.simd<i32, 32>
+  // CHECK: [[LIMIT_ASSUME:%.*]] = wave.assume %[[LIMIT]]
+  %limit = wave.assume %limit_raw as "y" [#wave.pred<"y >= 0">, #wave.pred<"y <= 31">] : !wave.simd<i32, 32>
+  %mask = wave.cmpi slt %idx, %limit
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.mask<32>
+  %selected = wave.select %mask, %idx, %limit
+      : !wave.mask<32>, !wave.simd<i32, 32>
+  // CHECK: [[OFF:%.*]] = wave.index_expr <"Piecewise(
+  // CHECK-SAME: raw0
+  // CHECK-SAME: raw1
+  // CHECK-SAME: assuming [#wave.pred<"raw0 >= 0">, #wave.pred<"-31 + raw0 <= 0">, #wave.pred<"raw1 >= 0">, #wave.pred<"-31 + raw1 <= 0">] ["raw0", "raw1"]([[IDX_ASSUME]], [[LIMIT_ASSUME]]) : (!wave.simd<i32, 32>, !wave.simd<i32, 32>) -> !wave.simd<index, 32>
+  // CHECK: wave.ptr_add %{{.*}}, [[OFF]]
+  %ptr = wave.ptr_add %out, %selected
+      : !wave.ptr<#wave.global, f32>, !wave.simd<i32, 32>
+      -> !wave.simd<!wave.ptr<#wave.global, f32>, 32>
+  return %ptr : !wave.simd<!wave.ptr<#wave.global, f32>, 32>
+}
+
+// -----
+
 // CHECK-LABEL: func.func @multi_use_binding_expands
 // CHECK-SAME: (%{{.*}}: !wave.simd<i32, 32>)
 func.func @multi_use_binding_expands(%idx_raw: !wave.simd<i32, 32>)

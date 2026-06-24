@@ -723,6 +723,21 @@ xorExprU32UpperBound(WaveAMDMachineSelector &S, sym::ExprHandle expr,
 }
 
 static std::optional<uint64_t>
+piecewiseExprU32UpperBound(WaveAMDMachineSelector &S, sym::ExprHandle expr,
+                           ArrayRef<sym::PredHandle> assumptions) {
+  sym::ExprView view(expr);
+  std::optional<uint64_t> maxBound;
+  for (uint32_t i = 0, e = view.getPiecewiseCaseCount(); i != e; ++i) {
+    std::optional<uint64_t> bound =
+        exprU32UpperBound(S, view.getPiecewiseCase(i).value, assumptions);
+    if (!bound)
+      return std::nullopt;
+    maxBound = maxBound ? std::max(*maxBound, *bound) : *bound;
+  }
+  return maxBound;
+}
+
+static std::optional<uint64_t>
 exprU32UpperBound(WaveAMDMachineSelector &S, sym::ExprHandle expr,
                   ArrayRef<sym::PredHandle> assumptions) {
   constexpr uint64_t u32Max = (uint64_t{1} << 32) - 1;
@@ -742,6 +757,8 @@ exprU32UpperBound(WaveAMDMachineSelector &S, sym::ExprHandle expr,
     return mulExprU32UpperBound(S, expr, assumptions);
   case sym::ExprKind::Xor:
     return xorExprU32UpperBound(S, expr, assumptions);
+  case sym::ExprKind::Piecewise:
+    return piecewiseExprU32UpperBound(S, expr, assumptions);
   default:
     break;
   }
@@ -1077,9 +1094,9 @@ static Value readFirstLane(WaveAMDMachineSelector &S, Location loc,
       .getTuple();
 }
 
-static Value createWordCmp(WaveAMDMachineSelector &S, Location loc,
-                           CmpRelation relation, bool signedCmp,
-                           Type resultType, Value lhs, Value rhs);
+Value createWordCmp(WaveAMDMachineSelector &S, Location loc,
+                    CmpRelation relation, bool signedCmp, Type resultType,
+                    Value lhs, Value rhs);
 static Value createVAddU32(WaveAMDMachineSelector &selector, Location loc,
                            Value lhs, Value rhs);
 
@@ -4823,9 +4840,9 @@ static Value orMasks(WaveAMDMachineSelector &S, Location loc, Value lhs,
   return combineMasks(S, loc, lhs, rhs, MaskCombiner::Or, width);
 }
 
-static Value createWordCmp(WaveAMDMachineSelector &S, Location loc,
-                           CmpRelation relation, bool signedCmp,
-                           Type resultType, Value lhs, Value rhs) {
+Value createWordCmp(WaveAMDMachineSelector &S, Location loc,
+                    CmpRelation relation, bool signedCmp, Type resultType,
+                    Value lhs, Value rhs) {
   bool legacyVcc = usesLegacyVCmpVcc(S);
   if (legacyVcc) {
     if (isa<waveamdmachine::ImmType>(lhs.getType()))
@@ -4912,9 +4929,9 @@ static Value createI64RelMask(WaveAMDMachineSelector &S, Location loc,
   return orMasks(S, loc, hiCmp, andMasks(S, loc, hiEq, loCmp));
 }
 
-static Value createI64Cmp(WaveAMDMachineSelector &S, Location loc,
-                          CmpRelation relation, bool signedCmp, Type resultType,
-                          Value lhs, Value rhs) {
+Value createI64Cmp(WaveAMDMachineSelector &S, Location loc,
+                   CmpRelation relation, bool signedCmp, Type resultType,
+                   Value lhs, Value rhs) {
   I64Dwords lhsDwords = splitI64Dwords(S, loc, lhs);
   I64Dwords rhsDwords = splitI64Dwords(S, loc, rhs);
   if (relation == CmpRelation::Eq)
@@ -5300,10 +5317,9 @@ static FailureOr<Value> ensureLaneSelectVGPR(WaveAMDMachineSelector &S,
   return ensureRegLaneSelectVGPR(S, op, value, width, resultType, regType);
 }
 
-static FailureOr<Value> createLaneSelect(WaveAMDMachineSelector &S,
-                                         Operation *op, Value condition,
-                                         Value trueValue, Value falseValue,
-                                         unsigned width) {
+FailureOr<Value> createLaneSelect(WaveAMDMachineSelector &S, Operation *op,
+                                  Value condition, Value trueValue,
+                                  Value falseValue, unsigned width) {
   FailureOr<Value> falseVGPR = ensureLaneSelectVGPR(S, op, falseValue, width);
   FailureOr<Value> trueVGPR = ensureLaneSelectVGPR(S, op, trueValue, width);
   if (failed(falseVGPR) || failed(trueVGPR))

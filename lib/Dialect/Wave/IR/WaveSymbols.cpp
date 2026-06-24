@@ -347,6 +347,22 @@ ExprHandle ExprView::getBinaryRhs() const {
   return ExprHandle(ixs_node_binary_rhs(mutableNode(value.raw())));
 }
 
+uint32_t ExprView::getPiecewiseCaseCount() const {
+  if (getKind() != ExprKind::Piecewise)
+    return 0;
+  return ixs_node_pw_ncases(mutableNode(value.raw()));
+}
+
+PiecewiseCase ExprView::getPiecewiseCase(uint32_t index) const {
+  if (getKind() != ExprKind::Piecewise)
+    return {};
+  ixs_node *node = mutableNode(value.raw());
+  if (index >= ixs_node_pw_ncases(node))
+    return {};
+  return PiecewiseCase{ExprHandle(ixs_node_pw_value(node, index)),
+                       PredHandle(ixs_node_pw_cond(node, index))};
+}
+
 bool PredView::isValid() const { return isPred(value); }
 
 PredKind PredView::getKind() const {
@@ -608,6 +624,47 @@ FailureOr<ExprHandle> mlir::wave::sym::composeExprInt(Store &store,
   ixs_node *node = ixs_int(session.raw(), value);
   return finishExpr(session.raw(), node, diagnostic,
                     "failed to construct wave.expr integer literal");
+}
+
+FailureOr<ExprHandle> mlir::wave::sym::composeExprPiecewise(
+    Store &store, ArrayRef<PiecewiseCase> cases, std::string *diagnostic) {
+  if (cases.empty()) {
+    setDiagnostic(diagnostic, "wave.expr piecewise needs at least one case");
+    return failure();
+  }
+
+  Session session(store);
+  SmallVector<ixs_node *, 4> values;
+  SmallVector<ixs_node *, 4> conditions;
+  values.reserve(cases.size());
+  conditions.reserve(cases.size());
+  for (PiecewiseCase piece : cases) {
+    ixs_node *value = rawExprNode(piece.value, diagnostic);
+    ixs_node *condition = rawPredNode(piece.condition, diagnostic);
+    if (!value || !condition)
+      return failure();
+    values.push_back(value);
+    conditions.push_back(condition);
+  }
+  uint32_t count = static_cast<uint32_t>(values.size());
+  return finishExpr(
+      session.raw(),
+      ixs_pw(session.raw(), count, values.data(), conditions.data()),
+      diagnostic, "failed to compose wave.expr piecewise");
+}
+
+FailureOr<PredHandle>
+mlir::wave::sym::composePredTrue(Store &store, std::string *diagnostic) {
+  Session session(store);
+  return finishPred(session.raw(), ixs_true(session.raw()), diagnostic,
+                    "failed to compose wave.pred true");
+}
+
+FailureOr<PredHandle>
+mlir::wave::sym::composePredFalse(Store &store, std::string *diagnostic) {
+  Session session(store);
+  return finishPred(session.raw(), ixs_false(session.raw()), diagnostic,
+                    "failed to compose wave.pred false");
 }
 
 FailureOr<PredHandle> mlir::wave::sym::composePredCmp(Store &store,
