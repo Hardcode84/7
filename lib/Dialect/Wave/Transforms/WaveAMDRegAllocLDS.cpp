@@ -615,7 +615,8 @@ private:
     if (!type || !isLDSSpillRegClass(type.getRegClass()) ||
         type.getWidth() == 0)
       return failure();
-    if (isCombinedPressure() && isCheapVGPRExpr(value.getDefiningOp()))
+    if (isCombinedPressure() &&
+        isCheapVGPRPressureReliefExpr(value.getDefiningOp()))
       return failure();
     SmallVector<OpOperand *> uses;
     if (!hasSimpleUses(value, uses) || !isValueLiveAt(value, uses))
@@ -977,6 +978,20 @@ private:
     return success();
   }
 
+  LDSLoadResult copyLoopInitValue(Value init, Value token,
+                                  const LDSPressurePlan &spill,
+                                  OpBuilder &builder, Location loc) const {
+    if (isRematerializableMemorySpillInitTree(init)) {
+      DenseMap<Value, Value> cache;
+      FailureOr<Value> replacement =
+          materializeMemorySpillInitTree(init, builder, cache);
+      if (succeeded(replacement))
+        return {*replacement, token};
+    }
+    return loadSpillValue(init.getType(), token, getPlanValueSlot(spill).plans,
+                          builder, loc);
+  }
+
   LogicalResult
   materializeLoopCarryPlans(ArrayRef<const LDSPressurePlan *> input,
                             OpBuilder &builder) const {
@@ -994,11 +1009,17 @@ private:
       return loadSpillValue(type, token, getPlanValueSlot(spill).plans, builder,
                             loc);
     };
+    auto copyInitValue = [&](Value init, Value token,
+                             const LDSPressurePlan &spill, OpBuilder &builder,
+                             Location loc) {
+      return copyLoopInitValue(init, token, spill, builder, loc);
+    };
     auto reserve = [&](const LDSPressurePlan &spill, OpBuilder &builder) {
       reserveSlots(getPlanValueSlot(spill).plans, builder);
     };
     return materializeMemorySpillLoopCarryPlans<LDSPressurePlan>(
-        input, builder, getName(), getSlot, storeValue, loadValue, reserve);
+        input, builder, getName(), getSlot, storeValue, loadValue,
+        copyInitValue, reserve);
   }
 
   void reserveSlot(LDSSpillPlan plan, OpBuilder &builder) const {

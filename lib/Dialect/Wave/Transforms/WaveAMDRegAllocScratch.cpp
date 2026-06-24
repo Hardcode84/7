@@ -595,7 +595,8 @@ private:
     if (!type || !isScratchSpillRegClass(type.getRegClass()) ||
         type.getWidth() == 0)
       return failure();
-    if (isCombinedPressure() && isCheapVGPRExpr(value.getDefiningOp()))
+    if (isCombinedPressure() &&
+        isCheapVGPRPressureReliefExpr(value.getDefiningOp()))
       return failure();
     SmallVector<OpOperand *> uses;
     if (!hasSimpleUses(value, uses) || !isValueLiveAt(value, uses))
@@ -967,6 +968,19 @@ private:
     return {load.getResult(), load.getToken()};
   }
 
+  ScratchLoadResult copyLoopInitValue(Value init, Value token,
+                                      const ScratchPressurePlan &spill,
+                                      OpBuilder &builder, Location loc) const {
+    if (isRematerializableMemorySpillInitTree(init)) {
+      DenseMap<Value, Value> cache;
+      FailureOr<Value> replacement =
+          materializeMemorySpillInitTree(init, builder, cache);
+      if (succeeded(replacement))
+        return {*replacement, token};
+    }
+    return loadSpillValue(init.getType(), token, spill.getPlan(), builder, loc);
+  }
+
   LogicalResult
   materializeLoopCarryPlans(ArrayRef<const ScratchPressurePlan *> spills,
                             OpBuilder &builder) const {
@@ -983,11 +997,17 @@ private:
                          Location loc) {
       return loadSpillValue(type, token, spill.getPlan(), builder, loc);
     };
+    auto copyInitValue = [&](Value init, Value token,
+                             const ScratchPressurePlan &spill,
+                             OpBuilder &builder, Location loc) {
+      return copyLoopInitValue(init, token, spill, builder, loc);
+    };
     auto reserve = [&](const ScratchPressurePlan &spill, OpBuilder &builder) {
       reserveSlot(spill.getPlan(), builder);
     };
     return materializeMemorySpillLoopCarryPlans<ScratchPressurePlan>(
-        spills, builder, getName(), getSlot, storeValue, loadValue, reserve);
+        spills, builder, getName(), getSlot, storeValue, loadValue,
+        copyInitValue, reserve);
   }
 
   void reserveSlot(const ScratchSpillPlan &plan, OpBuilder &builder) const {

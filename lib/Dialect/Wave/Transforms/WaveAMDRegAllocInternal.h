@@ -164,6 +164,7 @@ getMemorySpillPressureEffect(IntervalGroup *group, unsigned reliefDwords) {
 }
 
 inline bool isCheapVGPRExpr(Operation *op);
+inline bool isCheapVGPRPressureReliefExpr(Operation *op);
 
 struct MemorySpillLoadResult {
   Value value;
@@ -271,7 +272,7 @@ inline std::optional<unsigned> getMemorySpillPressureRelief(
     const Inventory &inventory, const PressureFailure *pressureFailure) {
   if (!pressureFailure || !pressureFailure->combinedVGPRAGPR)
     return width;
-  if (isCheapVGPRExpr(value.getDefiningOp()))
+  if (isCheapVGPRPressureReliefExpr(value.getDefiningOp()))
     return 0;
   if (hasMemorySpillUseAtPressure(uses, inventory, pressureFailure->position))
     return 0;
@@ -456,7 +457,7 @@ inline bool canMaterializeLoopCarrySpill(MemorySpillLoopCarrySlot slot,
 }
 
 template <typename SpillPlanT, typename GetSlotFn, typename StoreValueFn,
-          typename LoadValueFn, typename ReserveFn>
+          typename LoadValueFn, typename CopyInitFn, typename ReserveFn>
 struct MemorySpillLoopCarryMaterializer {
   ArrayRef<const SpillPlanT *> input;
   OpBuilder &builder;
@@ -464,6 +465,7 @@ struct MemorySpillLoopCarryMaterializer {
   GetSlotFn getSlot;
   StoreValueFn storeValue;
   LoadValueFn loadValue;
+  CopyInitFn copyInitValue;
   ReserveFn reservePlan;
 
   bool isSpilledIndex(ArrayRef<const SpillPlanT *> spills,
@@ -579,7 +581,7 @@ struct MemorySpillLoopCarryMaterializer {
                << " spill for loop init use outside loop preheader";
       builder.setInsertionPoint(user);
       MemorySpillLoadResult load =
-          loadValue(init.getType(), initToken, spill, builder, user->getLoc());
+          copyInitValue(init, initToken, spill, builder, user->getLoc());
       use->set(load.value);
     }
     return success();
@@ -769,24 +771,126 @@ struct MemorySpillLoopCarryMaterializer {
 };
 
 template <typename SpillPlanT, typename GetSlotFn, typename StoreValueFn,
-          typename LoadValueFn, typename ReserveFn>
+          typename LoadValueFn, typename CopyInitFn, typename ReserveFn>
 LogicalResult materializeMemorySpillLoopCarryPlans(
     ArrayRef<const SpillPlanT *> input, OpBuilder &builder, StringRef provider,
     GetSlotFn getSlot, StoreValueFn storeValue, LoadValueFn loadValue,
-    ReserveFn reservePlan) {
+    CopyInitFn copyInitValue, ReserveFn reservePlan) {
   return MemorySpillLoopCarryMaterializer<SpillPlanT, GetSlotFn, StoreValueFn,
-                                          LoadValueFn, ReserveFn>{
-      input, builder, provider, getSlot, storeValue, loadValue, reservePlan}
+                                          LoadValueFn, CopyInitFn, ReserveFn>{
+      input,      builder,   provider,      getSlot,
+      storeValue, loadValue, copyInitValue, reservePlan}
       .run();
 }
 
 inline bool isCheapVGPRExpr(Operation *op) {
   return isa_and_nonnull<
       waveamdmachine::VWorkitemIdXOp, waveamdmachine::VMovB32TupleOp,
+      waveamdmachine::TupleFromElementsOp, waveamdmachine::VLshrrevB32Op,
+      waveamdmachine::VLshlrevB32Op, waveamdmachine::VLshlAddU32Op,
+      waveamdmachine::VAddU32Op, waveamdmachine::VAdd3U32Op,
+      waveamdmachine::VAndB32Op, waveamdmachine::VMulLoU32Op,
+      waveamdmachine::VAddLshlU32Op, waveamdmachine::VOrB32Op,
+      waveamdmachine::VXorB32Op, waveamdmachine::VAndOrB32Op,
+      waveamdmachine::VOr3B32Op>(op);
+}
+
+inline bool isCheapVGPRPressureReliefExpr(Operation *op) {
+  return isa_and_nonnull<
+      waveamdmachine::VWorkitemIdXOp, waveamdmachine::VMovB32TupleOp,
       waveamdmachine::VLshrrevB32Op, waveamdmachine::VLshlrevB32Op,
       waveamdmachine::VLshlAddU32Op, waveamdmachine::VAddU32Op,
       waveamdmachine::VAdd3U32Op, waveamdmachine::VAndB32Op,
       waveamdmachine::VXorB32Op, waveamdmachine::VAndOrB32Op>(op);
+}
+
+inline bool isUnassignedVGPR(Value value) {
+  auto type = dyn_cast<waveamdmachine::RegType>(value.getType());
+  if (!type)
+    return false;
+  if (type.getRegClass() != waveamdmachine::RegClass::VGPR)
+    return false;
+  return type.getIndex() < 0;
+}
+
+inline bool isRematerializableMemorySpillInitDef(Operation *def) {
+  if (!def)
+    return false;
+  if (def->getNumResults() != 1)
+    return false;
+  if (isMemoryIssuerOp(def))
+    return false;
+  return isCheapVGPRExpr(def);
+}
+
+inline bool isRematerializableMemorySpillInitTree(Value value,
+                                                  DenseSet<Value> &visiting);
+
+inline bool
+isRematerializableMemorySpillInitOperand(Value operand,
+                                         DenseSet<Value> &visiting) {
+  auto type = dyn_cast<waveamdmachine::RegType>(operand.getType());
+  if (!type)
+    return true;
+  if (type.getRegClass() != waveamdmachine::RegClass::VGPR)
+    return false;
+  if (type.getIndex() >= 0)
+    return false;
+  return isRematerializableMemorySpillInitTree(operand, visiting);
+}
+
+inline bool isRematerializableMemorySpillInitTree(Value value,
+                                                  DenseSet<Value> &visiting) {
+  if (!isUnassignedVGPR(value))
+    return false;
+  Operation *def = value.getDefiningOp();
+  if (!isRematerializableMemorySpillInitDef(def))
+    return false;
+  if (!visiting.insert(value).second)
+    return false;
+
+  for (Value operand : def->getOperands()) {
+    if (!isRematerializableMemorySpillInitOperand(operand, visiting)) {
+      visiting.erase(value);
+      return false;
+    }
+  }
+  visiting.erase(value);
+  return true;
+}
+
+inline bool isRematerializableMemorySpillInitTree(Value value) {
+  DenseSet<Value> visiting;
+  return isRematerializableMemorySpillInitTree(value, visiting);
+}
+
+inline FailureOr<Value>
+materializeMemorySpillInitTree(Value value, OpBuilder &builder,
+                               DenseMap<Value, Value> &cache) {
+  if (Value cached = cache.lookup(value))
+    return cached;
+  Operation *def = value.getDefiningOp();
+  if (!def)
+    return failure();
+
+  IRMapping mapper;
+  for (Value operand : def->getOperands()) {
+    Value replacement = operand;
+    if (isa<waveamdmachine::RegType>(operand.getType())) {
+      FailureOr<Value> rematOperand =
+          materializeMemorySpillInitTree(operand, builder, cache);
+      if (failed(rematOperand))
+        return failure();
+      replacement = *rematOperand;
+    }
+    mapper.map(operand, replacement);
+  }
+
+  Operation *clone = builder.clone(*def, mapper);
+  clone->setAttr(kRegAllocTempAttr, builder.getUnitAttr());
+  Value replacement = clone->getResult(0);
+  cache[value] = replacement;
+  return replacement;
 }
 
 inline bool isFixedRegisterGroup(IntervalGroup *group) {

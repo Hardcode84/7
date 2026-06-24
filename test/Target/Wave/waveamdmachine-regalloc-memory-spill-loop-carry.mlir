@@ -3,6 +3,8 @@
 // RUN:   --waveamd-resource-info %t/result-use.mlir | FileCheck %s --check-prefix=RESULT
 // RUN: wave-opt --waveamd-reg-alloc='vgpr-limit=15 agpr-limit=0' \
 // RUN:   --waveamd-resource-info %t/preheader-use.mlir | FileCheck %s --check-prefix=PRE
+// RUN: wave-opt --waveamd-reg-alloc='mark-overflow=true vgpr-limit=15 agpr-limit=0' \
+// RUN:   --waveamd-resource-info %t/lds-preheader-use.mlir | FileCheck %s --check-prefix=LDSPRE
 // RUN: wave-opt --waveamd-reg-alloc='vgpr-limit=15 agpr-limit=0' \
 // RUN:   --waveamd-resource-info %t/body-use.mlir | FileCheck %s --check-prefix=BODY
 // RUN: wave-opt --waveamd-reg-alloc='mark-overflow=true vgpr-limit=15 agpr-limit=0' \
@@ -108,8 +110,11 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // PRE-LABEL: func.func @scratch_loop_carry_preheader_init_use
 // PRE-SAME: waveamdmachine.scratch_spill_bytes = 32 : i64
 // PRE: %[[STORE:.*]] = waveamdmachine.scratch_store_tuple_b32
-// PRE: %[[PRELOAD:.*]], {{.*}} = waveamdmachine.scratch_load_tuple_b32 {{.*}} after %[[STORE]]
-// PRE: waveamdmachine.tuple_to_elements %[[PRELOAD]]
+// PRE-NOT: waveamdmachine.scratch_load_tuple_b32
+// PRE: %[[REMAT_LO:.*]] = waveamdmachine.v_mov_b32_tuple
+// PRE: %[[REMAT_HI:.*]] = waveamdmachine.v_mov_b32_tuple
+// PRE: %[[REMAT:.*]] = waveamdmachine.tuple_from_elements %[[REMAT_LO]], %[[REMAT_HI]]
+// PRE: waveamdmachine.tuple_to_elements %[[REMAT]]
 // PRE: waveamdmachine.uniform_loop {{.*}}carries(%[[STORE]] : !waveamdmachine.mem.token)
 func.func @scratch_loop_carry_preheader_init_use()
     attributes {wave.kernel, waveamdmachine.target_waves = 4 : i64} {
@@ -118,8 +123,67 @@ func.func @scratch_loop_carry_preheader_init_use()
   %cond = waveamdmachine.s_cmp_lt_i32 %zero, %four
       : (!waveamdmachine.imm, !waveamdmachine.imm)
         -> !waveamdmachine.reg<scc, 1>
-  %acc = waveamdmachine.v_mov_b32_tuple %zero {registers = 8 : i64}
-      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 8>
+  %acc_lo = waveamdmachine.v_mov_b32_tuple %zero {registers = 4 : i64}
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 4>
+  %acc_hi = waveamdmachine.v_mov_b32_tuple %zero {registers = 4 : i64}
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 4>
+  %acc = waveamdmachine.tuple_from_elements %acc_lo, %acc_hi
+      : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>)
+        -> !waveamdmachine.reg<vgpr, 8>
+  %init_parts:8 = waveamdmachine.tuple_to_elements %acc
+      : (!waveamdmachine.reg<vgpr, 8>)
+      -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+          !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+          !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+          !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+  %loop = waveamdmachine.uniform_loop if %cond : !waveamdmachine.reg<scc, 1>
+      carries(%acc : !waveamdmachine.reg<vgpr, 8>) {
+  ^bb0(%carry: !waveamdmachine.reg<vgpr, 8>):
+    %tmp = waveamdmachine.v_mov_b32_tuple %zero {registers = 8 : i64}
+        : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 8>
+    %parts:8 = waveamdmachine.tuple_to_elements %tmp
+        : (!waveamdmachine.reg<vgpr, 8>)
+        -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+            !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+            !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+            !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+    waveamdmachine.continue_if %cond : !waveamdmachine.reg<scc, 1>
+        carries(%carry : !waveamdmachine.reg<vgpr, 8>)
+  } -> !waveamdmachine.reg<vgpr, 8>
+  waveamdmachine.s_endpgm
+  return
+}
+
+}
+
+//--- lds-preheader-use.mlir
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx90a"} {
+
+// LDSPRE-LABEL: func.func @lds_loop_carry_preheader_init_use
+// LDSPRE-SAME: waveamdmachine.lds_spill_bytes = 2048 : i64
+// LDSPRE-NOT: scratch_
+// LDSPRE: %[[STORE:.*]] = waveamdmachine.ds_store_b32
+// LDSPRE-NOT: waveamdmachine.ds_load_b32
+// LDSPRE: %[[REMAT_LO:.*]] = waveamdmachine.v_mov_b32_tuple
+// LDSPRE: %[[REMAT_HI:.*]] = waveamdmachine.v_mov_b32_tuple
+// LDSPRE: %[[REMAT:.*]] = waveamdmachine.tuple_from_elements %[[REMAT_LO]], %[[REMAT_HI]]
+// LDSPRE: waveamdmachine.tuple_to_elements %[[REMAT]]
+// LDSPRE: waveamdmachine.uniform_loop {{.*}}carries(%{{.*}} : !waveamdmachine.mem.token)
+func.func @lds_loop_carry_preheader_init_use()
+    attributes {wave.kernel, wave.workgroup_size = array<i32: 64, 1, 1>,
+                waveamdmachine.target_waves = 4 : i64} {
+  %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+  %four = waveamdmachine.imm 4 : !waveamdmachine.imm
+  %cond = waveamdmachine.s_cmp_lt_i32 %zero, %four
+      : (!waveamdmachine.imm, !waveamdmachine.imm)
+        -> !waveamdmachine.reg<scc, 1>
+  %acc_lo = waveamdmachine.v_mov_b32_tuple %zero {registers = 4 : i64}
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 4>
+  %acc_hi = waveamdmachine.v_mov_b32_tuple %zero {registers = 4 : i64}
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 4>
+  %acc = waveamdmachine.tuple_from_elements %acc_lo, %acc_hi
+      : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>)
+        -> !waveamdmachine.reg<vgpr, 8>
   %init_parts:8 = waveamdmachine.tuple_to_elements %acc
       : (!waveamdmachine.reg<vgpr, 8>)
       -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
@@ -343,8 +407,9 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // NESTPRE-SAME: waveamdmachine.scratch_spill_bytes = 32 : i64
 // NESTPRE: waveamdmachine.uniform_if
 // NESTPRE: %[[STORE:.*]] = waveamdmachine.scratch_store_tuple_b32
-// NESTPRE: %[[PRELOAD:.*]], {{.*}} = waveamdmachine.scratch_load_tuple_b32 {{.*}} after %[[STORE]]
-// NESTPRE: waveamdmachine.tuple_to_elements %[[PRELOAD]]
+// NESTPRE-NOT: waveamdmachine.scratch_load_tuple_b32
+// NESTPRE: %[[REMAT:.*]] = waveamdmachine.v_mov_b32_tuple
+// NESTPRE: waveamdmachine.tuple_to_elements %[[REMAT]]
 // NESTPRE: waveamdmachine.uniform_loop {{.*}}carries(%[[STORE]] : !waveamdmachine.mem.token)
 func.func @scratch_loop_carry_nested_preheader_init_use()
     attributes {wave.kernel, waveamdmachine.target_waves = 4 : i64} {

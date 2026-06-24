@@ -213,12 +213,13 @@ private:
     Operation *def = value.getDefiningOp();
     if (!def || isMemoryIssuerOp(def) || def->getNumResults() != 1)
       return false;
-    Block *block = def->getBlock();
     for (OpOperand &use : value.getUses()) {
       Operation *user = use.getOwner();
+      if (isRegAllocTempOp(user))
+        continue;
       if (isLoopCarryUseOp(user))
         return false;
-      if (user->getBlock() != block)
+      if (!useIsDominatedByDef(def, user))
         return false;
       uses.push_back(&use);
     }
@@ -242,15 +243,17 @@ private:
     return interval && isLiveAt(interval, position);
   }
 
-  Operation *getLocalCheapDef(Value value, Operation *user) const {
+  Operation *getDominatingCheapDef(Value value, Operation *user) const {
     Operation *def = value.getDefiningOp();
     if (!def || def->getNumResults() != 1)
       return nullptr;
-    if (def->getBlock() != user->getBlock())
+    if (isFixedRegValue(value))
+      return nullptr;
+    if (!useIsDominatedByDef(def, user))
       return nullptr;
     if (isRegAllocTempOp(def) || isMemoryIssuerOp(def))
       return nullptr;
-    return isCheapVGPRExpr(def) ? def : nullptr;
+    return isCheapVGPRPressureReliefExpr(def) ? def : nullptr;
   }
 
   bool needsOperandRemat(Value operand, unsigned userPosition) const {
@@ -260,16 +263,18 @@ private:
   bool canRematerializeOperandsAt(Operation *def, Operation *user,
                                   DenseSet<Value> &visiting) const {
     unsigned userPosition = inventory.positions.lookup(user);
-    for (Value operand : def->getOperands())
-      if (needsOperandRemat(operand, userPosition) &&
-          !canRematerializeTreeAt(operand, user, visiting))
+    for (Value operand : def->getOperands()) {
+      if (canRematerializeTreeAt(operand, user, visiting))
+        continue;
+      if (needsOperandRemat(operand, userPosition))
         return false;
+    }
     return true;
   }
 
   bool canRematerializeTreeAt(Value value, Operation *user,
                               DenseSet<Value> &visiting) const {
-    Operation *def = getLocalCheapDef(value, user);
+    Operation *def = getDominatingCheapDef(value, user);
     if (!def)
       return false;
     if (!visiting.insert(value).second)
@@ -313,9 +318,11 @@ private:
     unsigned count = 1;
     unsigned userPosition = inventory.positions.lookup(user);
     for (Value operand : def->getOperands()) {
-      if (!isTrackedRegValue(operand) || isValueLiveAt(operand, userPosition))
+      if (canRematerializeTreeAt(operand, user))
+        count += getRematOpCountAt(operand, user, materialized);
+      else if (!isTrackedRegValue(operand) ||
+               isValueLiveAt(operand, userPosition))
         continue;
-      count += getRematOpCountAt(operand, user, materialized);
     }
     return count;
   }
@@ -376,7 +383,7 @@ private:
       return false;
     if (type.getWidth() == 0 || !def)
       return false;
-    if (isRegAllocTempOp(def) || !isCheapVGPRExpr(def))
+    if (isRegAllocTempOp(def) || !isCheapVGPRPressureReliefExpr(def))
       return false;
     return valueCoversWholeGroup(group, value);
   }
@@ -412,16 +419,15 @@ private:
                                      DenseMap<Value, Value> &cache) const {
     if (Value cached = cache.lookup(value))
       return cached;
-    Operation *def = value.getDefiningOp();
-    if (!def || !canRematerializeTreeAt(value, user))
+    Operation *def = getDominatingCheapDef(value, user);
+    if (!def)
       return mlir::emitError(value.getLoc())
              << "waveamd-reg-alloc cannot rematerialize value tree";
 
     IRMapping mapper;
-    unsigned userPosition = inventory.positions.lookup(user);
     for (Value operand : def->getOperands()) {
       Value replacement = operand;
-      if (isTrackedRegValue(operand) && !isValueLiveAt(operand, userPosition)) {
+      if (canRematerializeTreeAt(operand, user)) {
         FailureOr<Value> rematOperand =
             materializeTreeAt(operand, user, builder, cache);
         if (failed(rematOperand))
@@ -448,10 +454,6 @@ private:
     if (!hasSimpleUses(value, uses))
       return mlir::emitError(value.getLoc())
              << "waveamd-reg-alloc cannot rematerialize value uses";
-    if (!canRematerializeAtUses(value, uses))
-      return mlir::emitError(value.getLoc())
-             << "waveamd-reg-alloc cannot rematerialize value tree";
-
     llvm::stable_sort(uses, [&](OpOperand *lhs, OpOperand *rhs) {
       return inventory.positions.lookup(lhs->getOwner()) <
              inventory.positions.lookup(rhs->getOwner());
