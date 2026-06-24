@@ -3195,9 +3195,7 @@ static LogicalResult runWaveAMDMachinePipeline(ModuleOp module,
   // discoverable even when this code path runs outside `wave-opt`
   // (e.g. via `wave-translate`).
   wave::registerWavePasses();
-  // The backend pipeline runs canonicalize + cse after selection to
-  // fold duplicate const materializations; register them for this
-  // path too (outside wave-opt's registerAllPasses).
+  // Backend transform runs canonicalize + cse around selection too.
   registerCanonicalizerPass();
   registerCSEPass();
   registerLoopInvariantCodeMotionPass();
