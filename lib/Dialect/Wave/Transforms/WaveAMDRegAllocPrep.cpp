@@ -47,6 +47,24 @@ static std::optional<waveamdmachine::RegType> trackedRegType(Value v) {
   return rt;
 }
 
+static std::optional<waveamdmachine::RegType> copyableRegType(Value v) {
+  std::optional<waveamdmachine::RegType> rt = trackedRegType(v);
+  if (!rt || isAGPR(*rt))
+    return std::nullopt;
+  return rt;
+}
+
+static bool hasCloneableAGPRDef(Value v) {
+  if (!isReg(v))
+    return false;
+  auto rt = cast<waveamdmachine::RegType>(v.getType());
+  if (!isAGPR(rt))
+    return false;
+  Operation *def = v.getDefiningOp();
+  return isa_and_nonnull<waveamdmachine::UninitOp,
+                         waveamdmachine::VAccvgprWriteB32TupleOp>(def);
+}
+
 static FailureOr<Value> duplicateRegValue(OpBuilder &builder, Location loc,
                                           Value v) {
   auto rt = cast<waveamdmachine::RegType>(v.getType());
@@ -58,6 +76,11 @@ static FailureOr<Value> duplicateRegValue(OpBuilder &builder, Location loc,
       clone->getResult(0).setType(resultType);
       return clone->getResult(0);
     }
+  if (isAGPR(rt) && hasCloneableAGPRDef(v)) {
+    Operation *clone = builder.clone(*v.getDefiningOp());
+    clone->getResult(0).setType(resultType);
+    return clone->getResult(0);
+  }
   if (isVGPR(rt)) {
     auto copy =
         waveamdmachine::VMovB32TupleOp::create(builder, loc, resultType, v);
@@ -116,7 +139,7 @@ static LogicalResult splitDuplicateMFMAAccumulatorInputs(func::FuncOp func) {
   OpBuilder builder(func.getContext());
   for (waveamdmachine::MMAOpInterface op : ops) {
     Value acc = op.getAcc();
-    if (!trackedRegType(acc))
+    if (!copyableRegType(acc))
       continue;
     if (llvm::hasSingleElement(acc.getUses()))
       continue;
