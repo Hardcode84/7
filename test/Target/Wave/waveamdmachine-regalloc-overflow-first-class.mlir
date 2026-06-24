@@ -27,12 +27,9 @@ func.func @sgpr_promotes_then_vgpr_overflows() {
       : (!waveamdmachine.imm) -> !waveamdmachine.reg<sgpr, 1>
   %s2 = waveamdmachine.s_mov_b32_value %zero
       : (!waveamdmachine.imm) -> !waveamdmachine.reg<sgpr, 1>
-  %v0 = waveamdmachine.v_mov_b32_tuple %zero {registers = 1 : i64}
-      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
-  %v1 = waveamdmachine.v_mov_b32_tuple %zero {registers = 1 : i64}
-      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
-  %v2 = waveamdmachine.v_mov_b32_tuple %zero {registers = 1 : i64}
-      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
+  %v0 = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1>
+  %v1 = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1>
+  %v2 = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1>
   %use_s0 = waveamdmachine.s_mov_b32_value %s0
       : (!waveamdmachine.reg<sgpr, 1>) -> !waveamdmachine.reg<sgpr, 1>
   %use_s1 = waveamdmachine.s_mov_b32_value %s1

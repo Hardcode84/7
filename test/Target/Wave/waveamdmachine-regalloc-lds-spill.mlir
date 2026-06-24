@@ -22,14 +22,10 @@ func.func @lds_spill_no_target_waves()
   %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
   %base = waveamdmachine.uninit : !waveamdmachine.reg<sgpr, 2>
   %off = waveamdmachine.v_workitem_id_x : !waveamdmachine.reg<vgpr, 1, 0>
-  %a = waveamdmachine.v_mov_b32_tuple %zero {registers = 1 : i64}
-      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
-  %b = waveamdmachine.v_mov_b32_tuple %zero {registers = 1 : i64}
-      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
-  %c = waveamdmachine.v_mov_b32_tuple %zero {registers = 1 : i64}
-      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
-  %d = waveamdmachine.v_mov_b32_tuple %zero {registers = 1 : i64}
-      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
+  %a = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1>
+  %b = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1>
+  %c = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1>
+  %d = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1>
   %kill0 = waveamdmachine.v_add_u32 %b, %c
       : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
         -> !waveamdmachine.reg<vgpr, 1>
@@ -59,26 +55,16 @@ func.func @many_lds_spills()
   %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
   %base = waveamdmachine.uninit : !waveamdmachine.reg<sgpr, 2>
   %off = waveamdmachine.v_workitem_id_x : !waveamdmachine.reg<vgpr, 1, 0>
-  %v0 = waveamdmachine.v_mov_b32_tuple %zero {registers = 1 : i64}
-      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
-  %v1 = waveamdmachine.v_mov_b32_tuple %zero {registers = 1 : i64}
-      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
-  %v2 = waveamdmachine.v_mov_b32_tuple %zero {registers = 1 : i64}
-      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
-  %v3 = waveamdmachine.v_mov_b32_tuple %zero {registers = 1 : i64}
-      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
-  %v4 = waveamdmachine.v_mov_b32_tuple %zero {registers = 1 : i64}
-      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
-  %v5 = waveamdmachine.v_mov_b32_tuple %zero {registers = 1 : i64}
-      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
-  %v6 = waveamdmachine.v_mov_b32_tuple %zero {registers = 1 : i64}
-      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
-  %v7 = waveamdmachine.v_mov_b32_tuple %zero {registers = 1 : i64}
-      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
-  %v8 = waveamdmachine.v_mov_b32_tuple %zero {registers = 1 : i64}
-      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
-  %v9 = waveamdmachine.v_mov_b32_tuple %zero {registers = 1 : i64}
-      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
+  %v0 = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1>
+  %v1 = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1>
+  %v2 = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1>
+  %v3 = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1>
+  %v4 = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1>
+  %v5 = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1>
+  %v6 = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1>
+  %v7 = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1>
+  %v8 = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1>
+  %v9 = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1>
   %s0 = waveamdmachine.v_add_u32 %v0, %v1
       : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
         -> !waveamdmachine.reg<vgpr, 1>
@@ -129,14 +115,10 @@ func.func @lds_spill_reuses_parent_workitem()
   %ec = waveamdmachine.s_cmp_lt_i32 %zero, %one
       : (!waveamdmachine.imm, !waveamdmachine.imm) -> !waveamdmachine.reg<scc, 1>
   waveamdmachine.uniform_loop if %ec : !waveamdmachine.reg<scc, 1> {
-    %a = waveamdmachine.v_mov_b32_tuple %zero {registers = 1 : i64}
-        : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
-    %b = waveamdmachine.v_mov_b32_tuple %zero {registers = 1 : i64}
-        : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
-    %c = waveamdmachine.v_mov_b32_tuple %zero {registers = 1 : i64}
-        : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
-    %d = waveamdmachine.v_mov_b32_tuple %zero {registers = 1 : i64}
-        : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
+    %a = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1>
+    %b = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1>
+    %c = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1>
+    %d = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1>
     %kill0 = waveamdmachine.v_add_u32 %b, %c
         : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
           -> !waveamdmachine.reg<vgpr, 1>

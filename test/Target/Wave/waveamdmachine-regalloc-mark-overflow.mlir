@@ -51,12 +51,9 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
 func.func @too_many_vgprs() {
   %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
-  %v0 = waveamdmachine.v_mov_b32_tuple %zero {registers = 1 : i64}
-      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
-  %v1 = waveamdmachine.v_mov_b32_tuple %zero {registers = 1 : i64}
-      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
-  %v2 = waveamdmachine.v_mov_b32_tuple %zero {registers = 1 : i64}
-      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
+  %v0 = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1>
+  %v1 = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1>
+  %v2 = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1>
   %use0 = waveamdmachine.v_mov_b32_tuple %v0 {registers = 1 : i64}
       : (!waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
   %use1 = waveamdmachine.v_mov_b32_tuple %v1 {registers = 1 : i64}

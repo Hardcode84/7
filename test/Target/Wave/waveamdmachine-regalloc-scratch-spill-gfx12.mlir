@@ -16,14 +16,10 @@ func.func @scratch_spill_gfx1200()
   %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
   %base = waveamdmachine.uninit : !waveamdmachine.reg<sgpr, 2>
   %off = waveamdmachine.v_workitem_id_x : !waveamdmachine.reg<vgpr, 1, 0>
-  %a = waveamdmachine.v_mov_b32_tuple %zero {registers = 1 : i64}
-      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
-  %b = waveamdmachine.v_mov_b32_tuple %zero {registers = 1 : i64}
-      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
-  %c = waveamdmachine.v_mov_b32_tuple %zero {registers = 1 : i64}
-      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
-  %d = waveamdmachine.v_mov_b32_tuple %zero {registers = 1 : i64}
-      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
+  %a = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1>
+  %b = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1>
+  %c = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1>
+  %d = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1>
   %kill0 = waveamdmachine.v_add_u32 %b, %c
       : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
         -> !waveamdmachine.reg<vgpr, 1>

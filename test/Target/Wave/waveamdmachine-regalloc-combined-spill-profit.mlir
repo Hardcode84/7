@@ -217,20 +217,13 @@ func.func @combined_pressure_spill_solves_noncheap_value()
   %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
   %ag = waveamdmachine.uninit : !waveamdmachine.reg<agpr, 1>
   %spill = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1>
-  %v0 = waveamdmachine.v_mov_b32_tuple %zero {registers = 1 : i64}
-      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
-  %v1 = waveamdmachine.v_mov_b32_tuple %zero {registers = 1 : i64}
-      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
-  %v2 = waveamdmachine.v_mov_b32_tuple %zero {registers = 1 : i64}
-      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
-  %v3 = waveamdmachine.v_mov_b32_tuple %zero {registers = 1 : i64}
-      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
-  %v4 = waveamdmachine.v_mov_b32_tuple %zero {registers = 1 : i64}
-      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
-  %v5 = waveamdmachine.v_mov_b32_tuple %zero {registers = 1 : i64}
-      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
-  %v6 = waveamdmachine.v_mov_b32_tuple %zero {registers = 1 : i64}
-      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
+  %v0 = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1>
+  %v1 = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1>
+  %v2 = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1>
+  %v3 = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1>
+  %v4 = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1>
+  %v5 = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1>
+  %v6 = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1>
   %u0 = waveamdmachine.v_add_u32 %v0, %v1
       : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
         -> !waveamdmachine.reg<vgpr, 1>
@@ -274,14 +267,10 @@ func.func @combined_pressure_spills_group_with_temp_alias()
   %b = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1>
   %c = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1>
   %d = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1>
-  %v0 = waveamdmachine.v_mov_b32_tuple %zero {registers = 1 : i64}
-      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
-  %v1 = waveamdmachine.v_mov_b32_tuple %zero {registers = 1 : i64}
-      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
-  %v2 = waveamdmachine.v_mov_b32_tuple %zero {registers = 1 : i64}
-      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
-  %v3 = waveamdmachine.v_mov_b32_tuple %zero {registers = 1 : i64}
-      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
+  %v0 = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1>
+  %v1 = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1>
+  %v2 = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1>
+  %v3 = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1>
   %wide = waveamdmachine.tuple_from_elements %a, %b, %c, %d
       : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
          !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)

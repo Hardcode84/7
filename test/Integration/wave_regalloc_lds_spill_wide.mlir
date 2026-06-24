@@ -25,10 +25,8 @@ func.func @regalloc_lds_spill_wide_tuple()
   %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
   %base = waveamdmachine.uninit : !waveamdmachine.reg<sgpr, 2>
   %off = waveamdmachine.v_workitem_id_x : !waveamdmachine.reg<vgpr, 1, 0>
-  %wide0 = waveamdmachine.v_mov_b32_tuple %zero {registers = 2 : i64}
-      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 2>
-  %wide1 = waveamdmachine.v_mov_b32_tuple %zero {registers = 2 : i64}
-      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 2>
+  %wide0 = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 2>
+  %wide1 = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 2>
   %token0 = waveamdmachine.global_store_tuple_b32 %off, %wide0, %base
       : (!waveamdmachine.reg<vgpr, 1, 0>, !waveamdmachine.reg<vgpr, 2>,
          !waveamdmachine.reg<sgpr, 2>) -> !waveamdmachine.mem.token

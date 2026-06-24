@@ -17,18 +17,12 @@ func.func @regalloc_scratch_spill_wide_tuple()
   %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
   %base = waveamdmachine.uninit : !waveamdmachine.reg<sgpr, 2>
   %off = waveamdmachine.v_workitem_id_x : !waveamdmachine.reg<vgpr, 1, 0>
-  %wide = waveamdmachine.v_mov_b32_tuple %zero {registers = 4 : i64}
-      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 4>
-  %b = waveamdmachine.v_mov_b32_tuple %zero {registers = 1 : i64}
-      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
-  %c = waveamdmachine.v_mov_b32_tuple %zero {registers = 1 : i64}
-      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
-  %d = waveamdmachine.v_mov_b32_tuple %zero {registers = 1 : i64}
-      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
-  %e = waveamdmachine.v_mov_b32_tuple %zero {registers = 1 : i64}
-      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
-  %f = waveamdmachine.v_mov_b32_tuple %zero {registers = 1 : i64}
-      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
+  %wide = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 4>
+  %b = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1>
+  %c = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1>
+  %d = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1>
+  %e = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1>
+  %f = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1>
   %tmp0 = waveamdmachine.v_add_u32 %c, %d
       : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
         -> !waveamdmachine.reg<vgpr, 1>

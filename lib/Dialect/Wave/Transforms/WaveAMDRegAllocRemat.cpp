@@ -191,9 +191,7 @@ public:
   LogicalResult collectCandidates(
       const wave::WaveAMDPressureReliefQuery &query,
       wave::WaveAMDPressureReliefCandidateList &candidates) const override {
-    pressureFailure = query.failure;
-    if (!isCombinedPressure())
-      return success();
+    (void)query;
     for (IntervalGroup *group : groups)
       collect(group, candidates);
     collect(request, candidates);
@@ -266,10 +264,6 @@ public:
   }
 
 private:
-  bool isCombinedPressure() const {
-    return pressureFailure && pressureFailure->combinedVGPRAGPR;
-  }
-
   bool hasSimpleUses(Value value, SmallVectorImpl<OpOperand *> &uses) const {
     Operation *def = value.getDefiningOp();
     if (!def || isMemoryIssuerOp(def) || def->getNumResults() == 0)
@@ -596,7 +590,6 @@ private:
   Inventory &inventory;
   IntervalGroup *request = nullptr;
   unsigned position = 0;
-  mutable const PressureFailure *pressureFailure = nullptr;
 };
 
 } // namespace

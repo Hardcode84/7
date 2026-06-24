@@ -9,12 +9,9 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // CHECK: waveamdmachine.scratch_store_b32 {{.*}}%[[REQ]]
 func.func @request_at_pressure_spills() attributes {wave.kernel} {
   %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
-  %a = waveamdmachine.v_mov_b32_tuple %zero {registers = 1 : i64}
-      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
-  %b = waveamdmachine.v_mov_b32_tuple %zero {registers = 1 : i64}
-      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
-  %c = waveamdmachine.v_mov_b32_tuple %zero {registers = 1 : i64}
-      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
+  %a = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1>
+  %b = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1>
+  %c = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1>
   %spill = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1>
   %sum = waveamdmachine.v_add_u32 %a, %b
       : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
