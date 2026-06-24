@@ -111,7 +111,6 @@ wmma_f16_matmul_tiled:
 		buffer_load_dwordx4 v16, s[0:3], 0 offen lds
 		s_lshl_b32 s35, s14, 16
 		s_add_i32 s36, s9, s35
-		v_lshrrev_b32_e32 v1, 7, v0
 		v_and_b32_e32 v1, 63, v0
 		v_lshrrev_b32_e32 v9, 7, v0
 		v_lshlrev_b32_e32 v10, 9, v9

@@ -73,6 +73,18 @@ static SmallVector<Value> getGroupValues(IntervalGroup *group,
   return values;
 }
 
+static void eraseDeadRematTree(Operation *op) {
+  if (!op || op->getNumResults() != 1 || !op->getResult(0).use_empty())
+    return;
+  if (isRegAllocTempOp(op) || isMemoryIssuerOp(op) ||
+      !isCheapVGPRPressureReliefExpr(op))
+    return;
+  SmallVector<Value> operands(op->getOperands());
+  op->erase();
+  for (Value operand : operands)
+    eraseDeadRematTree(operand.getDefiningOp());
+}
+
 class RematPlan final : public wave::WaveAMDPressureReliefPlan {
 public:
   RematPlan(IntervalGroup *group, Value value, unsigned useCount,
@@ -470,8 +482,7 @@ private:
         return failure();
       use->set(*replacement);
     }
-    if (def->use_empty())
-      def->erase();
+    eraseDeadRematTree(def);
     return success();
   }
 
