@@ -1127,19 +1127,6 @@ static bool hasGlobalPointerBase(PtrAddOp op) {
   return ptr && isa<GlobalAddressSpaceAttr>(ptr->getAddressSpace());
 }
 
-static bool hasBufferPointerBase(PtrAddOp op) {
-  std::optional<PtrType> ptr = getWavePointerType(op.getBase().getType());
-  return ptr && isa<waveamd::BufferAddressSpaceAttr>(ptr->getAddressSpace());
-}
-
-static bool feedsNonGlobalPtrAdd(IndexExprOp op) {
-  for (Operation *user : op.getResult().getUsers())
-    if (auto ptrAdd = dyn_cast<PtrAddOp>(user))
-      if (ptrAdd.getOffset() == op.getResult() && !hasGlobalPointerBase(ptrAdd))
-        return true;
-  return false;
-}
-
 static Type getIndexExprType(MLIRContext *ctx,
                              ArrayRef<IndexExprBinding> bindings) {
   SmallVector<Value> values;
@@ -1158,12 +1145,11 @@ static Type getIndexExprType(MLIRContext *ctx, const SymbolicOffset &offset) {
 static FailureOr<bool> rewritePtrAdd(PatternRewriter &rewriter, PtrAddOp op,
                                      WaveDialect &dialect,
                                      DataFlowSolver &solver) {
-  bool bufferBase = hasBufferPointerBase(op);
   SymbolicValueBuilder builder(dialect, solver,
                                /*allowI64Integers=*/hasGlobalPointerBase(op),
                                /*assumeI32StorageRange=*/true,
-                               /*bindI32Root=*/!hasGlobalPointerBase(op),
-                               /*requireI32RootRange=*/bufferBase);
+                               /*bindI32Root=*/false,
+                               /*requireI32RootRange=*/false);
   FailureOr<std::optional<SymbolicOffset>> offset =
       builder.build(op.getOffset());
   if (failed(offset))
@@ -1259,13 +1245,11 @@ static FailureOr<bool> rewriteIndexExpr(PatternRewriter &rewriter,
 
   SmallVector<sym::ExprSubstitution> substitutions;
   bool changed = false;
-  bool preserveI32Bindings = feedsNonGlobalPtrAdd(op);
   for (auto [nameAttr, value] : llvm::zip(op.getNames(), op.getBindings())) {
     StringRef name = cast<StringAttr>(nameAttr).getValue();
     appendAssumePredicates(store, value, name, state.assumptions);
     FailureOr<bool> bindingChanged = collectGeneratedBindingRewrite(
-        op, dialect, state, name, value, substitutions, solver,
-        preserveI32Bindings);
+        op, dialect, state, name, value, substitutions, solver);
     if (failed(bindingChanged))
       return failure();
     changed |= *bindingChanged;

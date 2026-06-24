@@ -275,10 +275,9 @@ func.func @shared_i32_mask_offset_synthesizes(
   // CHECK: [[ASSUME:%.*]] = wave.assume %[[IDX]]
   %idx = wave.assume %idx_raw as "x" [#wave.pred<"x >= 0">, #wave.pred<"x <= 31">] : !wave.simd<i32, 32>
   %s15 = wave.splat %c15 : i32 -> !wave.simd<i32, 32>
-  // CHECK: [[MASK:%.*]] = wave.binary andi
   %masked = wave.binary andi %idx, %s15
       : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
-  // CHECK: [[OFF:%.*]] = wave.index_expr <"raw0"> assuming [#wave.pred<"raw0 >= 0 & -15 + raw0 <= 0">] ["raw0"]([[MASK]]) : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
+  // CHECK: [[OFF:%.*]] = wave.index_expr <"Mod(raw0, 16)"> assuming [#wave.pred<"raw0 >= 0">, #wave.pred<"-31 + raw0 <= 0">] ["raw0"]([[ASSUME]]) : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
   // CHECK: wave.ptr_add %{{.*}}, [[OFF]]
   %ptr = wave.ptr_add %out, %masked
       : !wave.ptr<#wave.shared, f32>, !wave.simd<i32, 32>
@@ -295,10 +294,9 @@ func.func @shared_i32_xor_offset_keeps_storage_range(
     -> !wave.simd<!wave.ptr<#wave.shared, f32>, 32> {
   %c1 = arith.constant 1 : i32
   %s1 = wave.splat %c1 : i32 -> !wave.simd<i32, 32>
-  // CHECK: [[XOR:%.*]] = wave.binary xori
   %offset = wave.binary xori %idx, %s1
       : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
-  // CHECK: [[OFF:%.*]] = wave.index_expr <"raw0"> assuming [#wave.pred<"2147483648 + raw0 >= 0 & -2147483647 + raw0 <= 0">] ["raw0"]([[XOR]]) : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
+  // CHECK: [[OFF:%.*]] = wave.index_expr <"xor(1, raw0)"> assuming [#wave.pred<"2147483648 + raw0 >= 0 & -2147483647 + raw0 <= 0">] ["raw0"](%[[IDX]]) : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
   // CHECK: wave.ptr_add %{{.*}}, [[OFF]]
   %ptr = wave.ptr_add %out, %offset
       : !wave.ptr<#wave.shared, f32>, !wave.simd<i32, 32>

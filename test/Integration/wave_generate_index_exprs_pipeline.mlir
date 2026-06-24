@@ -127,3 +127,34 @@ func.func @rewrite_assumed_offset_after_normalize(
       -> !wave.mem.token
   return
 }
+
+// CHECK-LABEL: func.func @rewrite_assumed_buffer_offset_after_normalize
+// CHECK-SAME: (%{{.*}}: !wave.ptr<#waveamd.buffer>, %[[IDX:.*]]: !wave.simd<i32, 32>)
+func.func @rewrite_assumed_buffer_offset_after_normalize(
+    %out: !wave.ptr<#waveamd.buffer, f16>, %idx_raw: !wave.simd<i32, 32>)
+    -> !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 32>
+    attributes {wave.kernel} {
+  %c1 = arith.constant 1 : i32
+  %c4 = arith.constant 4 : i32
+  %c63 = arith.constant 63 : i32
+  // CHECK: %[[BUFFER_ASSUME:.*]] = wave.assume %[[IDX]]
+  %idx = wave.assume %idx_raw as "x" [#wave.pred<"x >= 0">, #wave.pred<"x <= 31">] : !wave.simd<i32, 32>
+  %s1 = wave.splat %c1 : i32 -> !wave.simd<i32, 32>
+  %s4 = wave.splat %c4 : i32 -> !wave.simd<i32, 32>
+  %s63 = wave.splat %c63 : i32 -> !wave.simd<i32, 32>
+  %hi = wave.binary shrui %idx, %s1
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  %lo = wave.binary andi %idx, %s63
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  %scaled_hi = wave.binary muli %hi, %s4
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  %offset = wave.binary addi %lo, %scaled_hi
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  %orig = wave.assume %offset as "orig" [#wave.pred<"orig >= 0">, #wave.pred<"orig <= 94">] : !wave.simd<i32, 32>
+  // CHECK: wave.index_expr <"2*raw0 + 8*floor(1/2*raw0)"> {{.*}} ["raw0"](%[[BUFFER_ASSUME]]) : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
+  // CHECK-NOT: 2*orig
+  %ptr = wave.ptr_add %out, %orig
+      : !wave.ptr<#waveamd.buffer, f16>, !wave.simd<i32, 32>
+      -> !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 32>
+  return %ptr : !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 32>
+}

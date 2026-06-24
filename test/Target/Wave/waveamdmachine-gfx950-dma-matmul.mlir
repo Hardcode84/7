@@ -152,8 +152,8 @@
 // MXFP4-PERF-ASM: .Lwmma_f16_matmul_tiled.loop_head_0:
 // MXFP4-PERF-ASM: s_waitcnt vmcnt(8)
 // MXFP4-PERF-ASM-NEXT: s_barrier
-// MXFP4-PERF-ASM: s_add_i32 [[DMA_STEP:s[0-9]+]], [[LOOP_STEP:s[0-9]+]], 2
-// MXFP4-PERF-ASM: s_mul_i32 s{{[0-9]+}}, [[DMA_STEP]], 0x80
+// MXFP4-PERF-ASM: s_lshl_b32 s{{[0-9]+}}, [[LOOP_STEP:s[0-9]+]], 7
+// MXFP4-PERF-ASM: s_add_i32 [[DMA_STEP:s[0-9]+]], [[LOOP_STEP]], 2
 // MXFP4-PERF-ASM-NOT: s_waitcnt vmcnt
 // MXFP4-PERF-ASM-NOT: s_and_saveexec
 // MXFP4-PERF-ASM-NOT: s_cbranch_execz
