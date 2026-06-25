@@ -11,7 +11,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
   // CHECK: reserved_spill_bytes: '256'
   // CHECK: status:          available
   // CHECK: value_bytes:     '4'
-  // CHECK: slot_base:       '1280'
+  // CHECK: slot_base:       '1408'
   // CHECK: slot_bytes:      '512'
   // CHECK: wave_stride:     '256'
   // CHECK: wavefront_size:  '64'
@@ -33,6 +33,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
   // CHECK: existing_dynamic_bytes: '128'
   // CHECK: existing_fixed_bytes: '1024'
   // CHECK: status:          available
+  // CHECK: slot_base:       '1152'
   func.func @lds_plan_machine_lds() attributes {
     wave.kernel,
     wave.workgroup_size = array<i32: 64, 1, 1>,
