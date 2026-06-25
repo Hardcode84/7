@@ -229,6 +229,57 @@ func.func @too_many_vgprs() {
 
 // -----
 
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
+
+func.func @duplicate_noncloneable_agpr_loop_init() {
+  %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+  %one = waveamdmachine.imm 1 : !waveamdmachine.imm
+  %four = waveamdmachine.imm 4 : !waveamdmachine.imm
+  %a = waveamdmachine.uninit : !waveamdmachine.reg<agpr, 4>
+  %b = waveamdmachine.uninit : !waveamdmachine.reg<agpr, 4>
+  %acc = waveamdmachine.uninit : !waveamdmachine.reg<agpr, 4>
+  %init = waveamdmachine.mfma_f32_16x16x32_f16 %a, %b, %acc
+      : (!waveamdmachine.reg<agpr, 4>, !waveamdmachine.reg<agpr, 4>,
+         !waveamdmachine.reg<agpr, 4>) -> !waveamdmachine.reg<agpr, 4>
+  %iv = waveamdmachine.s_mov_b32_value %zero
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<sgpr, 1>
+  %ec = waveamdmachine.s_cmp_lt_i32 %zero, %four
+      : (!waveamdmachine.imm, !waveamdmachine.imm) -> !waveamdmachine.reg<scc, 1>
+  // expected-error @below {{waveamd-reg-alloc cannot duplicate AGPR value before register allocation}}
+  %results:3 = waveamdmachine.uniform_loop if %ec : !waveamdmachine.reg<scc, 1>
+      carries(%iv, %init, %init : !waveamdmachine.reg<sgpr, 1>,
+              !waveamdmachine.reg<agpr, 4>, !waveamdmachine.reg<agpr, 4>) {
+  ^bb0(%cur_iv: !waveamdmachine.reg<sgpr, 1>,
+       %acc0: !waveamdmachine.reg<agpr, 4>,
+       %acc1: !waveamdmachine.reg<agpr, 4>):
+    %a0 = waveamdmachine.uninit : !waveamdmachine.reg<agpr, 4>
+    %b0 = waveamdmachine.uninit : !waveamdmachine.reg<agpr, 4>
+    %a1 = waveamdmachine.uninit : !waveamdmachine.reg<agpr, 4>
+    %b1 = waveamdmachine.uninit : !waveamdmachine.reg<agpr, 4>
+    %next0 = waveamdmachine.mfma_f32_16x16x32_f16 %a0, %b0, %acc0
+        : (!waveamdmachine.reg<agpr, 4>, !waveamdmachine.reg<agpr, 4>,
+           !waveamdmachine.reg<agpr, 4>) -> !waveamdmachine.reg<agpr, 4>
+    %next1 = waveamdmachine.mfma_f32_16x16x32_f16 %a1, %b1, %acc1
+        : (!waveamdmachine.reg<agpr, 4>, !waveamdmachine.reg<agpr, 4>,
+           !waveamdmachine.reg<agpr, 4>) -> !waveamdmachine.reg<agpr, 4>
+    %next_iv, %add_scc = waveamdmachine.s_add_i32 %cur_iv, %one
+        : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.imm)
+          -> (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<scc, 1>)
+    %bc = waveamdmachine.s_cmp_lt_i32 %next_iv, %four
+        : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.imm)
+          -> !waveamdmachine.reg<scc, 1>
+    waveamdmachine.continue_if %bc : !waveamdmachine.reg<scc, 1>
+        carries(%next_iv, %next0, %next1 : !waveamdmachine.reg<sgpr, 1>,
+                !waveamdmachine.reg<agpr, 4>, !waveamdmachine.reg<agpr, 4>)
+  } -> !waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<agpr, 4>,
+       !waveamdmachine.reg<agpr, 4>
+  return
+}
+
+}
+
+// -----
+
 // expected-error @below {{waveamd-reg-alloc requires a waveamdmachine.target attribute}}
 module {
   func.func @missing_target() {

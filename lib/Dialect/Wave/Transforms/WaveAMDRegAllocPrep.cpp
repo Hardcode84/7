@@ -93,16 +93,9 @@ static FailureOr<Value> duplicateRegValue(OpBuilder &builder, Location loc,
     copy->setAttr("registers", builder.getI64IntegerAttr(rt.getWidth()));
     return copy.getResult();
   }
-  if (isAGPR(rt)) {
-    auto vgprType = waveamdmachine::RegType::get(
-        rt.getContext(), waveamdmachine::RegClass::VGPR, rt.getWidth(),
-        /*index=*/-1);
-    auto read = waveamdmachine::VAccvgprReadB32TupleOp::create(builder, loc,
-                                                               vgprType, v);
-    auto write = waveamdmachine::VAccvgprWriteB32TupleOp::create(
-        builder, loc, resultType, read.getResult());
-    return write.getResult();
-  }
+  if (isAGPR(rt))
+    return emitError(loc) << "waveamd-reg-alloc cannot duplicate AGPR value "
+                             "before register allocation";
   return emitError(loc, "duplicateRegValue: unsupported register class/width");
 }
 
