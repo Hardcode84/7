@@ -198,6 +198,17 @@ getMemorySpillPressureEffect(IntervalGroup *group, unsigned reliefDwords) {
   return effect;
 }
 
+inline wave::WaveAMDPressureReliefEffect
+getMemorySpillPressureEffect(IntervalGroup *group, unsigned reliefDwords,
+                             const PressureFailure &failure) {
+  if (failure.placementFailure)
+    return {};
+  if (failure.combinedVGPRAGPR && group &&
+      group->storageClass == waveamdmachine::RegClass::AGPR)
+    return {};
+  return getMemorySpillPressureEffect(group, reliefDwords);
+}
+
 inline bool isCheapVGPRPressureReliefExpr(Operation *op);
 inline bool isCheapVGPRPressureReliefRootExpr(Operation *op);
 inline bool isMemorySpillSuppressedVGPRExpr(Operation *op);
@@ -413,6 +424,13 @@ getMemorySpillGroupValues(IntervalGroup *group, const Inventory &inventory) {
   return values;
 }
 
+template <typename SlotPlanT> struct MemorySpillValueSlot {
+  Value value;
+  SlotPlanT plan;
+  wave::WaveAMDPressureReliefCost cost;
+  unsigned useCount = 0;
+};
+
 template <typename SlotsT>
 static unsigned getMemorySpillTotalUseCount(const SlotsT &slots) {
   unsigned total = 0;
@@ -432,6 +450,163 @@ getMemorySpillTotalCost(const SlotsT &slots) {
     total.instabilityPenalty += slot.cost.instabilityPenalty;
   }
   return total;
+}
+
+template <typename Traits>
+class MemorySpillPressurePlan final : public wave::WaveAMDPressureReliefPlan {
+public:
+  using Slot = MemorySpillValueSlot<typename Traits::SlotPlan>;
+
+  MemorySpillPressurePlan(IntervalGroup *group, ArrayRef<Slot> valueSlots,
+                          unsigned reliefDwords)
+      : valueSlots(valueSlots), group(group), reliefDwords(reliefDwords) {}
+
+  StringRef getProviderName() const override {
+    return Traits::getProviderName();
+  }
+
+  wave::WaveAMDPressureReliefProviderKind getProviderKind() const override {
+    return Traits::providerKind;
+  }
+
+  unsigned getReliefDwords() const override { return reliefDwords; }
+
+  IntervalGroup *getGroup() const { return group; }
+  typename Traits::SlotPlan getPlan() const {
+    assert(!valueSlots.empty() && "memory spill plan needs a slot");
+    return valueSlots.front().plan;
+  }
+  unsigned getUseCount() const {
+    return getMemorySpillTotalUseCount(valueSlots);
+  }
+  Value getValue() const {
+    return valueSlots.size() == 1 ? valueSlots.front().value : Value{};
+  }
+  ArrayRef<Slot> getValueSlots() const { return valueSlots; }
+  unsigned getReservedBytes() const {
+    return Traits::getTotalSlotBytes(valueSlots);
+  }
+
+private:
+  SmallVector<Slot, 4> valueSlots;
+  IntervalGroup *group = nullptr;
+  unsigned reliefDwords = 0;
+};
+
+template <typename Traits>
+class MemorySpillCandidate final : public wave::WaveAMDPressureReliefCandidate {
+public:
+  using Slot = MemorySpillValueSlot<typename Traits::SlotPlan>;
+  using Plan = MemorySpillPressurePlan<Traits>;
+
+  MemorySpillCandidate(IntervalGroup *group, ArrayRef<Slot> valueSlots,
+                       unsigned pressureRelief,
+                       wave::WaveAMDPressureReliefCost cost)
+      : valueSlots(valueSlots), cost(cost), group(group),
+        pressureRelief(pressureRelief) {}
+
+  StringRef getProviderName() const override {
+    return Traits::getProviderName();
+  }
+
+  wave::WaveAMDPressureReliefCost getCost() const override { return cost; }
+
+  unsigned getReliefDwords() const override { return pressureRelief; }
+
+  wave::WaveAMDPressureReliefEffect getPressureEffect(
+      const wave::WaveAMDPressureFailure &failure) const override {
+    return getMemorySpillPressureEffect(group, pressureRelief, failure);
+  }
+
+  IntervalGroup *getGroup() const { return group; }
+  typename Traits::SlotPlan getPlan() const {
+    assert(!valueSlots.empty() && "memory spill candidate needs a slot");
+    return valueSlots.front().plan;
+  }
+  unsigned getUseCount() const {
+    return getMemorySpillTotalUseCount(valueSlots);
+  }
+  Value getValue() const {
+    return valueSlots.size() == 1 ? valueSlots.front().value : Value{};
+  }
+  ArrayRef<Slot> getValueSlots() const { return valueSlots; }
+  std::unique_ptr<wave::WaveAMDPressureReliefPlan> getPlannedSpill() const {
+    return std::make_unique<Plan>(group, valueSlots, pressureRelief);
+  }
+
+protected:
+  void printExtra(llvm::raw_ostream &os) const override {
+    typename Traits::SlotPlan firstPlan = getPlan();
+    os << ", reg_class=" << getRegClassName(group->storageClass);
+    os << ", slot_base=" << Traits::getSlotBase(firstPlan)
+       << ", slot_bytes=" << Traits::getTotalSlotBytes(valueSlots)
+       << ", uses=" << getUseCount();
+  }
+
+  void setExtraDiagnosticAttrs(Builder &builder,
+                               NamedAttrList &attrs) const override {
+    typename Traits::SlotPlan firstPlan = getPlan();
+    attrs.set("reg_class",
+              builder.getStringAttr(getRegClassName(group->storageClass)));
+    attrs.set("slot_base",
+              builder.getI64IntegerAttr(Traits::getSlotBase(firstPlan)));
+    attrs.set("slot_bytes",
+              builder.getI64IntegerAttr(Traits::getTotalSlotBytes(valueSlots)));
+    attrs.set("pressure_relief", builder.getI64IntegerAttr(pressureRelief));
+    attrs.set("uses", builder.getI64IntegerAttr(getUseCount()));
+  }
+
+private:
+  SmallVector<Slot, 4> valueSlots;
+  wave::WaveAMDPressureReliefCost cost;
+  IntervalGroup *group = nullptr;
+  unsigned pressureRelief = 0;
+};
+
+template <typename CandidateT>
+static bool
+isBetterMemorySpillCandidate(const wave::WaveAMDPressureReliefCandidate &lhs,
+                             const wave::WaveAMDPressureReliefCandidate &rhs) {
+  if (lhs.isLegal() != rhs.isLegal())
+    return lhs.isLegal();
+  const CandidateT &lhsSpill = static_cast<const CandidateT &>(lhs);
+  const CandidateT &rhsSpill = static_cast<const CandidateT &>(rhs);
+  if (wave::isBetterWaveAMDPressureReliefCandidate(lhs, rhs))
+    return true;
+  if (wave::isBetterWaveAMDPressureReliefCandidate(rhs, lhs))
+    return false;
+  if (lhsSpill.getGroup()->intervals.front()->end !=
+      rhsSpill.getGroup()->intervals.front()->end)
+    return lhsSpill.getGroup()->intervals.front()->end >
+           rhsSpill.getGroup()->intervals.front()->end;
+  return false;
+}
+
+template <typename Traits, typename GetValueSlotFn>
+static void collectWholeAliasSetMemorySpillCandidate(
+    IntervalGroup *group, unsigned position, const Inventory &inventory,
+    wave::WaveAMDPressureReliefCandidateList &candidates,
+    GetValueSlotFn getValueSlot) {
+  if (!hasLiveLaneAtPressure(group, position))
+    return;
+  unsigned relief = getLiveLaneCount(group, position);
+
+  using Slot = MemorySpillValueSlot<typename Traits::SlotPlan>;
+  SmallVector<Slot, 8> slots;
+  unsigned extraReservedBytes = 0;
+  for (Value value : getMemorySpillGroupValues(group, inventory)) {
+    if (!hasNonTempUse(value))
+      continue;
+    FailureOr<Slot> slot = getValueSlot(value, extraReservedBytes);
+    if (failed(slot))
+      return;
+    extraReservedBytes += Traits::getSlotBytes(slot->plan);
+    slots.push_back(*slot);
+  }
+  if (slots.empty())
+    return;
+  candidates.push_back(std::make_unique<MemorySpillCandidate<Traits>>(
+      group, slots, relief, getMemorySpillTotalCost(slots)));
 }
 
 inline unsigned getMemorySpillValuePosition(Value value,
@@ -689,6 +864,19 @@ static void collectMemorySpillValueTempIntervals(
   }
 }
 
+template <typename SlotT, typename CollectAddressTempsFn>
+static void collectMemorySpillSlotTempIntervals(
+    const Inventory &inventory, const SlotT &slot,
+    SmallVectorImpl<wave::WaveAMDPressureReliefTempInterval> &intervals,
+    CollectAddressTempsFn collectAddressTemps) {
+  collectMemorySpillValueTempIntervals(
+      inventory, slot.value, intervals,
+      [&](SmallVectorImpl<wave::WaveAMDPressureReliefTempInterval> &intervals,
+          unsigned position, unsigned valueWidth) {
+        collectAddressTemps(intervals, position, slot.plan, valueWidth);
+      });
+}
+
 inline Type getMemorySpillLoadType(Value value) { return value.getType(); }
 
 inline SmallVector<Type> getMemorySpillScalarRegTypes(Type tupleType);
@@ -753,6 +941,111 @@ inline LogicalResult replaceMemorySpillUseWithLoad(
       return failure();
   }
   use->set(loaded);
+  return success();
+}
+
+template <typename SlotPlanT, typename StoreSpillValueFn>
+static FailureOr<Value> materializeMemorySpillValueStoreToken(
+    const Inventory &inventory, Value value, const SlotPlanT &slotPlan,
+    const wave::WaveAMDPressureReliefPlan &reliefPlan,
+    wave::WaveAMDPressureReliefMaterializationContext &context,
+    OpBuilder &builder, StringRef providerName,
+    StoreSpillValueFn storeSpillValue) {
+  Operation *diagOp = getMemorySpillValueDiagOp(value);
+  if (!diagOp)
+    return mlir::emitError(value.getLoc())
+           << "waveamd-reg-alloc cannot materialize " << providerName
+           << " for value";
+  setInsertionPointForMemorySpillStore(value, builder);
+  waveamdmachine::RegType valueType =
+      cast<waveamdmachine::RegType>(value.getType());
+  FailureOr<wave::WaveAMDPressureReliefTempAssignment> valueAssignment =
+      context.consumeTempAssignment(reliefPlan, valueType.getRegClass(),
+                                    valueType.getWidth(), diagOp);
+  if (failed(valueAssignment))
+    return failure();
+  assignValueToTempAssignment(value, *valueAssignment);
+  assignTupleFromElementsBridgeValues(value, *valueAssignment, inventory);
+  FailureOr<Value> storeValue = materializeMemorySpillStoreValue(
+      value, reliefPlan, context, builder, diagOp);
+  if (failed(storeValue))
+    return failure();
+  Value storeDependency;
+  if (Operation *def = value.getDefiningOp())
+    storeDependency = getMemoryIssuerToken(def);
+  return storeSpillValue(*storeValue, storeDependency, slotPlan, reliefPlan,
+                         context, builder, value.getLoc(), diagOp);
+}
+
+template <typename SlotPlanT, typename LoadSpillValueFn>
+static LogicalResult replaceMemorySpillValueUsesWithLoads(
+    Value value, Value storeToken, const SlotPlanT &slotPlan,
+    ArrayRef<OpOperand *> uses,
+    const wave::WaveAMDPressureReliefPlan &reliefPlan,
+    wave::WaveAMDPressureReliefMaterializationContext &context,
+    OpBuilder &builder, const llvm::SmallDenseSet<Value, 8> &plannedValues,
+    LoadSpillValueFn loadSpillValue) {
+  for (OpOperand *use : uses) {
+    if (use->get() != value)
+      continue;
+    if (isInternalTupleFromElementsUse(use, plannedValues))
+      continue;
+    Operation *user = use->getOwner();
+    builder.setInsertionPoint(user);
+    FailureOr<MemorySpillLoadResult> load =
+        loadSpillValue(getMemorySpillLoadType(value), storeToken, slotPlan,
+                       reliefPlan, context, builder, user->getLoc(), user);
+    if (failed(load))
+      return failure();
+    if (failed(replaceMemorySpillUseWithLoad(value, use, load->value,
+                                             reliefPlan, context)))
+      return failure();
+  }
+  return success();
+}
+
+template <typename SlotPlanT, typename StoreSpillValueFn,
+          typename LoadSpillValueFn>
+static LogicalResult materializeMemorySpillValue(
+    const Inventory &inventory, Value value, const SlotPlanT &slotPlan,
+    const wave::WaveAMDPressureReliefPlan &reliefPlan,
+    wave::WaveAMDPressureReliefMaterializationContext &context,
+    OpBuilder &builder, StringRef providerName,
+    const llvm::SmallDenseSet<Value, 8> &plannedValues,
+    StoreSpillValueFn storeSpillValue, LoadSpillValueFn loadSpillValue) {
+  SmallVector<OpOperand *> uses;
+  if (!collectSimpleMemorySpillUses(value, inventory, uses)) {
+    if (hasOnlyRegAllocTempUses(value))
+      return success();
+    return mlir::emitError(value.getLoc())
+           << "waveamd-reg-alloc cannot materialize " << providerName
+           << " for value";
+  }
+
+  FailureOr<Value> storeToken = materializeMemorySpillValueStoreToken(
+      inventory, value, slotPlan, reliefPlan, context, builder, providerName,
+      storeSpillValue);
+  if (failed(storeToken))
+    return failure();
+  return replaceMemorySpillValueUsesWithLoads(
+      value, *storeToken, slotPlan, uses, reliefPlan, context, builder,
+      plannedValues, loadSpillValue);
+}
+
+template <typename PlanT, typename MaterializeSlotFn, typename ReserveSlotFn>
+static LogicalResult materializeWholeAliasSetMemorySpillPlan(
+    const Inventory &inventory, const PlanT &spill, OpBuilder &builder,
+    MaterializeSlotFn materializeSlot, ReserveSlotFn reserveSlot) {
+  assert(!spill.getValueSlots().empty() && "expected memory spill value slot");
+  llvm::SmallDenseSet<Value, 8> plannedValues;
+  for (const typename PlanT::Slot &slot : spill.getValueSlots())
+    plannedValues.insert(slot.value);
+  for (const typename PlanT::Slot &slot : spill.getValueSlots())
+    if (failed(materializeSlot(slot, plannedValues)))
+      return failure();
+  propagateMemorySpillGroupTupleAliases(spill.getGroup(), inventory);
+  for (const typename PlanT::Slot &slot : spill.getValueSlots())
+    reserveSlot(slot);
   return success();
 }
 

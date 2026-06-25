@@ -38,157 +38,31 @@ static ScratchSpillPlan buildScratchSpillPlan(func::FuncOp func,
 
 using ScratchLoadResult = MemorySpillLoadResult;
 
-struct ScratchValueSlot {
-  Value value;
-  ScratchSpillPlan plan;
-  wave::WaveAMDPressureReliefCost cost;
-  unsigned useCount = 0;
+struct ScratchMemorySpillTraits {
+  using SlotPlan = ScratchSpillPlan;
+
+  static constexpr wave::WaveAMDPressureReliefProviderKind providerKind =
+      wave::WaveAMDPressureReliefProviderKind::ScratchSpill;
+
+  static StringRef getProviderName() { return "scratch-spill"; }
+
+  static unsigned getSlotBase(ScratchSpillPlan plan) { return plan.slotBase; }
+
+  static unsigned getSlotBytes(ScratchSpillPlan plan) { return plan.slotBytes; }
+
+  static unsigned
+  getTotalSlotBytes(ArrayRef<MemorySpillValueSlot<SlotPlan>> slots) {
+    unsigned total = 0;
+    for (const MemorySpillValueSlot<SlotPlan> &slot : slots)
+      total += getSlotBytes(slot.plan);
+    return total;
+  }
 };
 
-static unsigned getTotalSlotBytes(ArrayRef<ScratchValueSlot> slots) {
-  unsigned total = 0;
-  for (const ScratchValueSlot &slot : slots)
-    total += slot.plan.slotBytes;
-  return total;
-}
-
-class ScratchPressurePlan : public wave::WaveAMDPressureReliefPlan {
-public:
-  StringRef getProviderName() const override { return "scratch-spill"; }
-
-  virtual IntervalGroup *getGroup() const = 0;
-  virtual ScratchSpillPlan getPlan() const = 0;
-  virtual unsigned getUseCount() const = 0;
-  virtual Value getValue() const { return {}; }
-  virtual ArrayRef<ScratchValueSlot> getValueSlots() const { return {}; }
-  virtual unsigned getReservedBytes() const { return getPlan().slotBytes; }
-};
-
-class ScratchValuePressurePlan final : public ScratchPressurePlan {
-public:
-  ScratchValuePressurePlan(IntervalGroup *group, Value value,
-                           ScratchSpillPlan plan, unsigned useCount,
-                           unsigned reliefDwords)
-      : group(group), reliefDwords(reliefDwords) {
-    valueSlots.push_back({value, plan, {}, useCount});
-  }
-
-  ScratchValuePressurePlan(IntervalGroup *group,
-                           ArrayRef<ScratchValueSlot> valueSlots,
-                           unsigned reliefDwords)
-      : valueSlots(valueSlots), group(group), reliefDwords(reliefDwords) {}
-
-  unsigned getReliefDwords() const override { return reliefDwords; }
-  wave::WaveAMDPressureReliefProviderKind getProviderKind() const override {
-    return wave::WaveAMDPressureReliefProviderKind::ScratchSpill;
-  }
-  IntervalGroup *getGroup() const override { return group; }
-  ScratchSpillPlan getPlan() const override {
-    assert(!valueSlots.empty() && "scratch value plan needs a slot");
-    return valueSlots.front().plan;
-  }
-  unsigned getUseCount() const override {
-    return getMemorySpillTotalUseCount(valueSlots);
-  }
-  Value getValue() const override {
-    return valueSlots.size() == 1 ? valueSlots.front().value : Value{};
-  }
-  ArrayRef<ScratchValueSlot> getValueSlots() const override {
-    return valueSlots;
-  }
-  unsigned getReservedBytes() const override {
-    return getTotalSlotBytes(valueSlots);
-  }
-
-private:
-  SmallVector<ScratchValueSlot, 4> valueSlots;
-  IntervalGroup *group = nullptr;
-  unsigned reliefDwords = 0;
-};
-
-class ScratchSpillCandidate final
-    : public wave::WaveAMDPressureReliefCandidate {
-public:
-  ScratchSpillCandidate(IntervalGroup *group, Value value,
-                        ScratchSpillPlan plan, unsigned useCount,
-                        unsigned pressureRelief,
-                        wave::WaveAMDPressureReliefCost cost,
-                        StringRef rejectReason = StringRef())
-      : rejectReason(rejectReason.str()), cost(cost), group(group),
-        pressureRelief(pressureRelief) {
-    valueSlots.push_back({value, plan, cost, useCount});
-  }
-
-  ScratchSpillCandidate(IntervalGroup *group,
-                        ArrayRef<ScratchValueSlot> valueSlots,
-                        unsigned pressureRelief,
-                        wave::WaveAMDPressureReliefCost cost)
-      : valueSlots(valueSlots), cost(cost), group(group),
-        pressureRelief(pressureRelief) {}
-
-  StringRef getProviderName() const override { return "scratch-spill"; }
-
-  wave::WaveAMDPressureReliefCost getCost() const override { return cost; }
-
-  unsigned getReliefDwords() const override { return pressureRelief; }
-
-  wave::WaveAMDPressureReliefEffect
-  getPressureEffect(const wave::WaveAMDPressureFailure &) const override {
-    return getMemorySpillPressureEffect(group, pressureRelief);
-  }
-
-  std::optional<StringRef> getRejectReason() const override {
-    if (rejectReason.empty())
-      return std::nullopt;
-    return StringRef(rejectReason);
-  }
-
-  IntervalGroup *getGroup() const { return group; }
-  ScratchSpillPlan getPlan() const {
-    assert(!valueSlots.empty() && "scratch candidate needs a slot");
-    return valueSlots.front().plan;
-  }
-  unsigned getUseCount() const {
-    return getMemorySpillTotalUseCount(valueSlots);
-  }
-  Value getValue() const {
-    if (valueSlots.size() != 1)
-      return {};
-    return valueSlots.front().value;
-  }
-  std::unique_ptr<wave::WaveAMDPressureReliefPlan> getPlannedSpill() const {
-    return std::make_unique<ScratchValuePressurePlan>(group, valueSlots,
-                                                      pressureRelief);
-  }
-
-protected:
-  void printExtra(llvm::raw_ostream &os) const override {
-    ScratchSpillPlan firstPlan = getPlan();
-    os << ", reg_class=" << getRegClassName(group->storageClass);
-    os << ", slot_base=" << firstPlan.slotBase
-       << ", slot_bytes=" << getTotalSlotBytes(valueSlots)
-       << ", uses=" << getUseCount();
-  }
-
-  void setExtraDiagnosticAttrs(Builder &builder,
-                               NamedAttrList &attrs) const override {
-    ScratchSpillPlan firstPlan = getPlan();
-    attrs.set("reg_class",
-              builder.getStringAttr(getRegClassName(group->storageClass)));
-    attrs.set("slot_base", builder.getI64IntegerAttr(firstPlan.slotBase));
-    attrs.set("slot_bytes",
-              builder.getI64IntegerAttr(getTotalSlotBytes(valueSlots)));
-    attrs.set("pressure_relief", builder.getI64IntegerAttr(pressureRelief));
-    attrs.set("uses", builder.getI64IntegerAttr(getUseCount()));
-  }
-
-private:
-  std::string rejectReason;
-  SmallVector<ScratchValueSlot, 4> valueSlots;
-  wave::WaveAMDPressureReliefCost cost;
-  IntervalGroup *group = nullptr;
-  unsigned pressureRelief = 0;
-};
+using ScratchValueSlot =
+    MemorySpillValueSlot<ScratchMemorySpillTraits::SlotPlan>;
+using ScratchPressurePlan = MemorySpillPressurePlan<ScratchMemorySpillTraits>;
+using ScratchSpillCandidate = MemorySpillCandidate<ScratchMemorySpillTraits>;
 
 class ScratchSpillProvider final : public wave::WaveAMDPressureReliefProvider {
 public:
@@ -238,7 +112,13 @@ public:
     const ScratchPressurePlan &spill =
         static_cast<const ScratchPressurePlan &>(plan);
     for (const ScratchValueSlot &slot : spill.getValueSlots())
-      collectValueTempIntervals(slot, intervals);
+      collectMemorySpillSlotTempIntervals(
+          inventory, slot, intervals,
+          [&](SmallVectorImpl<wave::WaveAMDPressureReliefTempInterval>
+                  &intervals,
+              unsigned position, ScratchSpillPlan plan, unsigned valueWidth) {
+            collectAddressTemps(intervals, position, plan, valueWidth);
+          });
   }
 
   LogicalResult
@@ -247,18 +127,30 @@ public:
                   OpBuilder &builder) const override {
     const ScratchPressurePlan &spill =
         static_cast<const ScratchPressurePlan &>(plan);
-    assert(!spill.getValueSlots().empty() && "expected scratch value spill");
-    llvm::SmallDenseSet<Value, 8> plannedValues;
-    for (const ScratchValueSlot &slot : spill.getValueSlots())
-      plannedValues.insert(slot.value);
-    for (const ScratchValueSlot &slot : spill.getValueSlots())
-      if (failed(materializeValue(slot.value, slot.plan, plan, context, builder,
-                                  plannedValues)))
-        return failure();
-    propagateMemorySpillGroupTupleAliases(spill.getGroup(), inventory);
-    for (const ScratchValueSlot &slot : spill.getValueSlots())
-      reserveSlot(slot.plan, builder);
-    return success();
+    return materializeWholeAliasSetMemorySpillPlan(
+        inventory, spill, builder,
+        [&](const ScratchValueSlot &slot,
+            const llvm::SmallDenseSet<Value, 8> &plannedValues) {
+          return materializeMemorySpillValue(
+              inventory, slot.value, slot.plan, plan, context, builder,
+              getName(), plannedValues,
+              [&](Value value, Value token, const ScratchSpillPlan &slotPlan,
+                  const wave::WaveAMDPressureReliefPlan &reliefPlan,
+                  wave::WaveAMDPressureReliefMaterializationContext &context,
+                  OpBuilder &builder, Location loc, Operation *diagOp) {
+                return storeSpillValue(value, token, slotPlan, reliefPlan,
+                                       context, builder, loc, diagOp);
+              },
+              [&](Type type, Value token, const ScratchSpillPlan &slotPlan,
+                  const wave::WaveAMDPressureReliefPlan &reliefPlan,
+                  wave::WaveAMDPressureReliefMaterializationContext &context,
+                  OpBuilder &builder, Location loc,
+                  Operation *diagOp) -> FailureOr<MemorySpillLoadResult> {
+                return loadSpillValue(type, token, slotPlan, reliefPlan,
+                                      context, builder, loc, diagOp);
+              });
+        },
+        [&](const ScratchValueSlot &slot) { reserveSlot(slot.plan, builder); });
   }
 
   void emitRemarks() const override {
@@ -291,21 +183,7 @@ public:
   bool isBetterCandidate(
       const wave::WaveAMDPressureReliefCandidate &lhs,
       const wave::WaveAMDPressureReliefCandidate &rhs) const override {
-    if (lhs.isLegal() != rhs.isLegal())
-      return lhs.isLegal();
-    const ScratchSpillCandidate &lhsSpill =
-        static_cast<const ScratchSpillCandidate &>(lhs);
-    const ScratchSpillCandidate &rhsSpill =
-        static_cast<const ScratchSpillCandidate &>(rhs);
-    if (wave::isBetterWaveAMDPressureReliefCandidate(lhs, rhs))
-      return true;
-    if (wave::isBetterWaveAMDPressureReliefCandidate(rhs, lhs))
-      return false;
-    if (lhsSpill.getGroup()->intervals.front()->end !=
-        rhsSpill.getGroup()->intervals.front()->end)
-      return lhsSpill.getGroup()->intervals.front()->end >
-             rhsSpill.getGroup()->intervals.front()->end;
-    return false;
+    return isBetterMemorySpillCandidate<ScratchSpillCandidate>(lhs, rhs);
   }
 
   std::optional<StringRef> getRejectReason() const override {
@@ -341,18 +219,6 @@ private:
          llvm::seq<unsigned>(0, getScratchMemoryOps(plan, valueWidth)))
       appendMemorySpillPointTemp(intervals, waveamdmachine::RegClass::SGPR,
                                  position, /*width=*/1);
-  }
-
-  void collectValueTempIntervals(
-      const ScratchValueSlot &slot,
-      SmallVectorImpl<wave::WaveAMDPressureReliefTempInterval> &intervals)
-      const {
-    collectMemorySpillValueTempIntervals(
-        inventory, slot.value, intervals,
-        [&](SmallVectorImpl<wave::WaveAMDPressureReliefTempInterval> &intervals,
-            unsigned position, unsigned valueWidth) {
-          collectAddressTemps(intervals, position, slot.plan, valueWidth);
-        });
   }
 
   void setPlanRejectReason(ScratchSpillPlanStatus status) const {
@@ -400,10 +266,6 @@ private:
     return cost;
   }
 
-  bool hasSimpleUses(Value value, SmallVectorImpl<OpOperand *> &uses) const {
-    return collectSimpleMemorySpillUses(value, inventory, uses);
-  }
-
   ScratchSpillPlan getPlanForBytes(unsigned valueBytes,
                                    unsigned extraReservedBytes = 0) const {
     unsigned committedBytes =
@@ -420,14 +282,6 @@ private:
     return getPlanForBytes(type.getWidth() * 4);
   }
 
-  unsigned getLiveLaneCount(IntervalGroup *group) const {
-    return mlir::wave::regalloc::getLiveLaneCount(group, position);
-  }
-
-  bool hasLiveLaneAtPressure(IntervalGroup *group) const {
-    return mlir::wave::regalloc::hasLiveLaneAtPressure(group, position);
-  }
-
   FailureOr<ScratchValueSlot>
   getGroupValueSlot(Value value, unsigned extraReservedBytes) const {
     auto type = dyn_cast<waveamdmachine::RegType>(value.getType());
@@ -435,7 +289,7 @@ private:
         type.getWidth() == 0)
       return failure();
     SmallVector<OpOperand *> uses;
-    if (!hasSimpleUses(value, uses))
+    if (!collectSimpleMemorySpillUses(value, inventory, uses))
       return failure();
     ScratchSpillPlan plan =
         getPlanForBytes(type.getWidth() * 4, extraReservedBytes);
@@ -450,26 +304,11 @@ private:
   void collectGroupValue(
       IntervalGroup *group,
       wave::WaveAMDPressureReliefCandidateList &candidates) const {
-    if (!hasLiveLaneAtPressure(group))
-      return;
-    unsigned relief = getLiveLaneCount(group);
-
-    SmallVector<ScratchValueSlot, 8> slots;
-    unsigned extraReservedBytes = 0;
-    for (Value value : getGroupValues(group)) {
-      if (!hasNonTempUse(value))
-        continue;
-      FailureOr<ScratchValueSlot> slot =
-          getGroupValueSlot(value, extraReservedBytes);
-      if (failed(slot))
-        return;
-      extraReservedBytes += slot->plan.slotBytes;
-      slots.push_back(*slot);
-    }
-    if (slots.empty())
-      return;
-    candidates.push_back(std::make_unique<ScratchSpillCandidate>(
-        group, slots, relief, getMemorySpillTotalCost(slots)));
+    collectWholeAliasSetMemorySpillCandidate<ScratchMemorySpillTraits>(
+        group, position, inventory, candidates,
+        [&](Value value, unsigned extraReservedBytes) {
+          return getGroupValueSlot(value, extraReservedBytes);
+        });
   }
 
   void collect(IntervalGroup *group,
@@ -479,10 +318,6 @@ private:
     if (!isEligibleGroup(group, position))
       return;
     collectGroupValue(group, candidates);
-  }
-
-  SmallVector<Value> getGroupValues(IntervalGroup *group) const {
-    return getMemorySpillGroupValues(group, inventory);
   }
 
   Value createImm(OpBuilder &builder, Location loc, int64_t value) const {
@@ -540,84 +375,6 @@ private:
     uint64_t lastOffset =
         static_cast<uint64_t>(slotBase) + static_cast<uint64_t>(width - 1) * 4;
     return lastOffset <= kScratchImmediateOffsetMax;
-  }
-
-  FailureOr<Value> materializeValueStoreToken(
-      Value value, ScratchSpillPlan spillPlan,
-      const wave::WaveAMDPressureReliefPlan &reliefPlan,
-      wave::WaveAMDPressureReliefMaterializationContext &context,
-      OpBuilder &builder) const {
-    Operation *diagOp = getMemorySpillValueDiagOp(value);
-    if (!diagOp)
-      return mlir::emitError(value.getLoc())
-             << "waveamd-reg-alloc cannot materialize scratch spill for value";
-    setInsertionPointForMemorySpillStore(value, builder);
-    waveamdmachine::RegType valueType =
-        cast<waveamdmachine::RegType>(value.getType());
-    FailureOr<wave::WaveAMDPressureReliefTempAssignment> valueAssignment =
-        context.consumeTempAssignment(reliefPlan, valueType.getRegClass(),
-                                      valueType.getWidth(), diagOp);
-    if (failed(valueAssignment))
-      return failure();
-    assignValueToTempAssignment(value, *valueAssignment);
-    assignTupleFromElementsBridgeValues(value, *valueAssignment, inventory);
-    FailureOr<Value> storeValue = materializeMemorySpillStoreValue(
-        value, reliefPlan, context, builder, diagOp);
-    if (failed(storeValue))
-      return failure();
-    Value storeDependency;
-    if (Operation *def = value.getDefiningOp())
-      storeDependency = getMemoryIssuerToken(def);
-    return storeSpillValue(*storeValue, storeDependency, spillPlan, reliefPlan,
-                           context, builder, value.getLoc(), diagOp);
-  }
-
-  LogicalResult replaceValueUsesWithLoads(
-      Value value, Value storeToken, ScratchSpillPlan spillPlan,
-      ArrayRef<OpOperand *> uses,
-      const wave::WaveAMDPressureReliefPlan &reliefPlan,
-      wave::WaveAMDPressureReliefMaterializationContext &context,
-      OpBuilder &builder,
-      const llvm::SmallDenseSet<Value, 8> &plannedValues) const {
-    for (OpOperand *use : uses) {
-      if (use->get() != value)
-        continue;
-      if (isInternalTupleFromElementsUse(use, plannedValues))
-        continue;
-      Operation *user = use->getOwner();
-      builder.setInsertionPoint(user);
-      FailureOr<ScratchLoadResult> load =
-          loadSpillValue(getMemorySpillLoadType(value), storeToken, spillPlan,
-                         reliefPlan, context, builder, user->getLoc(), user);
-      if (failed(load))
-        return failure();
-      if (failed(replaceMemorySpillUseWithLoad(value, use, load->value,
-                                               reliefPlan, context)))
-        return failure();
-    }
-    return success();
-  }
-
-  LogicalResult
-  materializeValue(Value value, ScratchSpillPlan plan,
-                   const wave::WaveAMDPressureReliefPlan &reliefPlan,
-                   wave::WaveAMDPressureReliefMaterializationContext &context,
-                   OpBuilder &builder,
-                   const llvm::SmallDenseSet<Value, 8> &plannedValues) const {
-    SmallVector<OpOperand *> uses;
-    if (!hasSimpleUses(value, uses)) {
-      if (hasOnlyRegAllocTempUses(value))
-        return success();
-      return mlir::emitError(value.getLoc())
-             << "waveamd-reg-alloc cannot materialize scratch spill for value";
-    }
-
-    FailureOr<Value> storeToken =
-        materializeValueStoreToken(value, plan, reliefPlan, context, builder);
-    if (failed(storeToken))
-      return failure();
-    return replaceValueUsesWithLoads(value, *storeToken, plan, uses, reliefPlan,
-                                     context, builder, plannedValues);
   }
 
   FailureOr<Value>
