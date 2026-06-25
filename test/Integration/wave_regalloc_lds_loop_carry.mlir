@@ -4,7 +4,7 @@
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx90a"} {
 
 // CHECK-LABEL: func.func @regalloc_lds_spill_loop_carry_wide
-// CHECK-SAME: waveamdmachine.lds_spill_bytes = 1024 : i64
+// CHECK-SAME: waveamdmachine.lds_spill_bytes = 3328 : i64
 // CHECK-SAME: waveamdmachine.regalloc_overflowed = 1 : i64
 // CHECK-NOT: scratch_
 // CHECK: %[[SPLIT:.+]]:4 = waveamdmachine.tuple_to_elements

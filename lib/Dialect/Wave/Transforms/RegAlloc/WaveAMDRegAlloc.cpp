@@ -1864,6 +1864,9 @@ static bool isSelectedPressureReliefCandidate(
   return selected && selected->state == &state && selected->index == index;
 }
 
+static FailureOr<bool> pressureReliefCandidateProgressesFailure(
+    PressureReliefCandidateRef ref, const PressureFailure *pressureFailure);
+
 static std::string
 formatPressureReliefProviders(ArrayRef<PressureReliefProviderState> providers) {
   std::string out;
@@ -1882,32 +1885,39 @@ formatPressureReliefProviders(ArrayRef<PressureReliefProviderState> providers) {
 }
 
 static std::string formatPressureReliefCandidates(
-    ArrayRef<PressureReliefProviderState> providers,
+    MutableArrayRef<PressureReliefProviderState> providers,
     std::optional<PressureReliefCandidateRef> selected,
     const PressureFailure *failure) {
   std::string out;
   llvm::raw_string_ostream os(out);
   os << "[";
   bool first = true;
-  for (const PressureReliefProviderState &state : providers) {
+  for (PressureReliefProviderState &state : providers) {
     for (auto [index, candidate] : llvm::enumerate(state.candidates)) {
       if (!first)
         os << ", ";
       first = false;
+      std::optional<bool> netReducesFailure;
+      if (failure && candidate->isLegal()) {
+        PressureReliefCandidateRef ref{&state, static_cast<unsigned>(index)};
+        FailureOr<bool> progresses =
+            pressureReliefCandidateProgressesFailure(ref, failure);
+        if (succeeded(progresses))
+          netReducesFailure = *progresses;
+      }
       candidate->print(
           os, isSelectedPressureReliefCandidate(state, index, selected),
-          failure);
+          failure, netReducesFailure);
     }
   }
   os << "]";
   return out;
 }
 
-static void
-setPressureReliefDiagnostics(func::FuncOp func,
-                             ArrayRef<PressureReliefProviderState> providers,
-                             std::optional<PressureReliefCandidateRef> selected,
-                             const PressureFailure *failure) {
+static void setPressureReliefDiagnostics(
+    func::FuncOp func, MutableArrayRef<PressureReliefProviderState> providers,
+    std::optional<PressureReliefCandidateRef> selected,
+    const PressureFailure *failure) {
   Builder builder(func.getContext());
   func->setAttr(
       kPressureReliefProvidersAttr,
@@ -1918,7 +1928,7 @@ setPressureReliefDiagnostics(func::FuncOp func,
 }
 
 static void emitPressureReliefSelectionRemark(
-    func::FuncOp func, ArrayRef<PressureReliefProviderState> providers,
+    func::FuncOp func, MutableArrayRef<PressureReliefProviderState> providers,
     PressureReliefCandidateRef selected, const PressureFailure *failure) {
   auto remark = mlir::remark::analysis(
       func.getLoc(),
@@ -1962,24 +1972,87 @@ isBetterProviderPressureReliefCandidate(PressureReliefCandidateRef lhsRef,
   return lhsRef.state->provider->isBetterCandidate(lhs, rhs);
 }
 
+static wave::WaveAMDPressureReliefEffect getPressureReliefTempEffect(
+    ArrayRef<wave::WaveAMDPressureReliefTempInterval> intervals,
+    const PressureFailure &failure) {
+  wave::WaveAMDPressureReliefEffect effect;
+  for (const wave::WaveAMDPressureReliefTempInterval &interval : intervals) {
+    if (interval.fixedBase)
+      continue;
+    if (failure.position < interval.start || failure.position > interval.end)
+      continue;
+    if (interval.regClass == waveamdmachine::RegClass::SGPR)
+      effect.sgprLiveDelta += interval.width;
+    if (interval.regClass == waveamdmachine::RegClass::VGPR)
+      effect.vgprLiveDelta += interval.width;
+    if (interval.regClass == waveamdmachine::RegClass::AGPR)
+      effect.agprLiveDelta += interval.width;
+  }
+  return effect;
+}
+
+static FailureOr<wave::WaveAMDPressureReliefEffect>
+getNetPressureReliefEffect(PressureReliefCandidateRef ref,
+                           const PressureFailure &pressureFailure) {
+  const wave::WaveAMDPressureReliefCandidate &candidate =
+      getPressureReliefCandidate(ref);
+  std::unique_ptr<wave::WaveAMDPressureReliefPlan> plan =
+      ref.state->provider->createPlan(candidate);
+  if (!plan)
+    return failure();
+
+  SmallVector<wave::WaveAMDPressureReliefTempInterval, 8> intervals;
+  ref.state->provider->collectPlanTempIntervals(*plan, intervals);
+  return wave::combineWaveAMDPressureReliefEffects(
+      candidate.getPressureEffect(pressureFailure),
+      getPressureReliefTempEffect(intervals, pressureFailure));
+}
+
+static FailureOr<bool> pressureReliefCandidateProgressesFailure(
+    PressureReliefCandidateRef ref, const PressureFailure *pressureFailure) {
+  if (!pressureFailure)
+    return true;
+  if (pressureFailure->placementFailure)
+    return true;
+  FailureOr<wave::WaveAMDPressureReliefEffect> effect =
+      getNetPressureReliefEffect(ref, *pressureFailure);
+  if (failed(effect))
+    return failure();
+  return wave::waveAMDPressureReliefEffectProgressesFailure(
+      *pressureFailure, wave::WaveAMDPressureReliefEffect{}, *effect);
+}
+
 static void addPressureReliefProvider(
     SmallVectorImpl<PressureReliefProviderState> &providers,
     std::unique_ptr<wave::WaveAMDPressureReliefProvider> provider) {
   providers.emplace_back(std::move(provider), providers.size());
 }
 
-static std::optional<PressureReliefCandidateRef>
-selectProviderPressureReliefCandidate(PressureReliefProviderState &state) {
+struct PressureReliefProviderSelection {
   std::optional<PressureReliefCandidateRef> selected;
+  bool hasLegalCandidate = false;
+};
+
+static FailureOr<PressureReliefProviderSelection>
+selectProviderPressureReliefCandidate(PressureReliefProviderState &state,
+                                      const PressureFailure *pressureFailure) {
+  PressureReliefProviderSelection selection;
   for (size_t index : llvm::seq(state.candidates.size())) {
     PressureReliefCandidateRef candidate{&state, static_cast<unsigned>(index)};
     if (!getPressureReliefCandidate(candidate).isLegal())
       continue;
-    if (!selected ||
-        isBetterProviderPressureReliefCandidate(candidate, *selected))
-      selected = candidate;
+    selection.hasLegalCandidate = true;
+    FailureOr<bool> progresses =
+        pressureReliefCandidateProgressesFailure(candidate, pressureFailure);
+    if (failed(progresses))
+      return failure();
+    if (!*progresses)
+      continue;
+    if (!selection.selected ||
+        isBetterProviderPressureReliefCandidate(candidate, *selection.selected))
+      selection.selected = candidate;
   }
-  return selected;
+  return selection;
 }
 
 static LogicalResult collectPressureReliefCandidates(
@@ -1989,8 +2062,12 @@ static LogicalResult collectPressureReliefCandidates(
   for (auto [index, state] : llvm::enumerate(providers)) {
     if (failed(state.provider->collectCandidates(query, state.candidates)))
       return failure();
-    selected = selectProviderPressureReliefCandidate(state);
-    if (selected) {
+    FailureOr<PressureReliefProviderSelection> providerSelection =
+        selectProviderPressureReliefCandidate(state, query.failure);
+    if (failed(providerSelection))
+      return failure();
+    selected = providerSelection->selected;
+    if (providerSelection->hasLegalCandidate) {
       providers.truncate(index + 1);
       return success();
     }

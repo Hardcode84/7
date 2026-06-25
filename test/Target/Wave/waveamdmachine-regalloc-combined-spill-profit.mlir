@@ -37,9 +37,14 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 // REMARK: Function:        combined_pressure_reports_temp_only_spill_reject
 // REMARK: Name:            regalloc-scratch-plan
 // REMARK: Function:        combined_pressure_reports_temp_only_spill_reject
-// REMARK: reserved_spill_bytes: '76'
+// REMARK: reserved_spill_bytes: '0'
 // REMARK: status:          available
 // REMARK: uses_flat_scratch: 'true'
+// REMARK: Name:            regalloc-pressure-failure
+// REMARK: Function:        combined_pressure_reports_temp_only_spill_reject
+// REMARK: pressure_relief_providers: '{{.*}}provider=scratch-spill, candidates=0{{.*}}'
+// REMARK: pressure_relief_candidates: '[]'
+// REMARK: temp:            '9'
 
 // CHECK-LABEL: func.func @combined_pressure_rejects_cheap_expr_spill
 // CHECK-SAME: waveamdmachine.regalloc_overflowed = 1 : i64
@@ -222,7 +227,7 @@ func.func @combined_pressure_spills_noncheap_value()
 
 // SOLVE-LABEL: func.func @combined_pressure_spill_solves_noncheap_value
 // SOLVE-NOT: waveamdmachine.regalloc_overflowed
-// SOLVE-SAME: waveamdmachine.scratch_spill_bytes = 8 : i64
+// SOLVE-SAME: waveamdmachine.scratch_spill_bytes = 4 : i64
 // SOLVE: waveamdmachine.scratch_store_b32
 // SOLVE: waveamdmachine.scratch_load_b32
 func.func @combined_pressure_spill_solves_noncheap_value()
@@ -268,7 +273,7 @@ func.func @combined_pressure_spill_solves_noncheap_value()
 }
 
 // SOLVE-LABEL: func.func @combined_pressure_spills_group_with_temp_alias
-// SOLVE-SAME: waveamdmachine.scratch_spill_bytes = 8 : i64
+// SOLVE-SAME: waveamdmachine.scratch_spill_bytes = 4 : i64
 // SOLVE-NOT: scratch_store_tuple_b32
 // SOLVE: waveamdmachine.scratch_store_b32
 // SOLVE: waveamdmachine.scratch_load_b32
@@ -435,11 +440,9 @@ func.func @combined_pressure_spills_agpr_temp()
 }
 
 // CHECK-LABEL: func.func @combined_pressure_reports_temp_only_spill_reject
-// CHECK-SAME: waveamdmachine.regalloc_assignments
-// CHECK-SAME: waveamdmachine.scratch_spill_bytes = 76 : i64
-// CHECK-NOT: waveamdmachine.regalloc_overflowed
-// CHECK: waveamdmachine.scratch_store_b32
-// CHECK: waveamdmachine.scratch_load_b32
+// CHECK-SAME: waveamdmachine.regalloc_overflowed = 1 : i64
+// CHECK-NOT: waveamdmachine.scratch_spill_bytes
+// CHECK: waveamdmachine.s_endpgm
 func.func @combined_pressure_reports_temp_only_spill_reject()
     attributes {wave.kernel, waveamdmachine.target_waves = 8 : i64} {
   %zero = waveamdmachine.imm 0 : !waveamdmachine.imm

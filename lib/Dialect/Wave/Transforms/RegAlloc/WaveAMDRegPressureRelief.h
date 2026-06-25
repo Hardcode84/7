@@ -127,8 +127,10 @@ public:
   reducesPressureFailure(const WaveAMDPressureFailure &failure) const;
 
   bool isLegal() const;
-  virtual void print(llvm::raw_ostream &os, bool selected = false,
-                     const WaveAMDPressureFailure *failure = nullptr) const;
+  virtual void
+  print(llvm::raw_ostream &os, bool selected = false,
+        const WaveAMDPressureFailure *failure = nullptr,
+        std::optional<bool> netReducesFailure = std::nullopt) const;
   virtual DictionaryAttr
   getDiagnosticAttr(Builder &builder, bool selected = false,
                     const WaveAMDPressureFailure *failure = nullptr) const;

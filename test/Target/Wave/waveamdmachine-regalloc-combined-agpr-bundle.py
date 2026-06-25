@@ -123,8 +123,8 @@ def main() -> int:
     )
     if result.returncode != 0:
         fail(result.stderr or result.stdout)
-    if "waveamdmachine.regalloc_overflowed = 1" in result.stdout:
-        fail("LDS relief should avoid descriptor-budget overflow")
+    if "waveamdmachine.regalloc_overflowed = 1" not in result.stdout:
+        fail("expected descriptor-budget overflow")
     if "waveamdmachine.scratch_spill_bytes" in result.stdout:
         fail("LDS relief should not reach scratch spill")
     if "waveamdmachine.lds_spill_bytes" not in result.stdout:

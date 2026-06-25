@@ -104,8 +104,8 @@ bool WaveAMDPressureReliefCandidate::reducesPressureFailure(
 }
 
 void WaveAMDPressureReliefCandidate::print(
-    llvm::raw_ostream &os, bool selected,
-    const WaveAMDPressureFailure *failure) const {
+    llvm::raw_ostream &os, bool selected, const WaveAMDPressureFailure *failure,
+    std::optional<bool> netReducesFailure) const {
   os << "{provider=" << getProviderName() << ", relief=" << getReliefDwords()
      << ", cost=" << formatWaveAMDPressureReliefCost(getCost());
   if (std::optional<StringRef> reason = getRejectReason())
@@ -113,6 +113,8 @@ void WaveAMDPressureReliefCandidate::print(
   if (failure)
     os << ", reduces_failure="
        << (reducesPressureFailure(*failure) ? "true" : "false");
+  if (netReducesFailure)
+    os << ", net_reduces_failure=" << (*netReducesFailure ? "true" : "false");
   printExtra(os);
   if (selected)
     os << ", selected";

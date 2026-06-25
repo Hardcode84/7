@@ -55,9 +55,9 @@ func.func @scratch_spill_wide_tuple_codegen()
 // CHECK: waveamdmachine.scratch_store_b32 {{.*}} offset 4092
 // CHECK: waveamdmachine.imm 4096
 // CHECK: waveamdmachine.scratch_store_b32
-// CHECK: waveamdmachine.imm 4104
-// CHECK: waveamdmachine.scratch_store_b32
 // CHECK: waveamdmachine.imm 4100
+// CHECK: waveamdmachine.scratch_store_b32
+// CHECK: waveamdmachine.imm 4104
 // CHECK: waveamdmachine.scratch_store_b32
 // CHECK: waveamdmachine.tuple_to_elements
 // CHECK: waveamdmachine.scratch_load_b32 {{.*}} offset 4092

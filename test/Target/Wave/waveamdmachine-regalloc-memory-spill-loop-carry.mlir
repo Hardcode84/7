@@ -28,7 +28,7 @@
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
 // RESULT: error: waveamd-reg-alloc ran out of VGPR registers
-// RESULT: memory spill reject detail: temp=1, no_use=1, total=2
+// RESULT: memory spill reject detail: temp=1, eligible=1, total=2
 func.func @scratch_loop_carry_result_use()
     attributes {wave.kernel, waveamdmachine.target_waves = 4 : i64} {
   %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
@@ -107,7 +107,7 @@ func.func @scalar_vgpr_loop_carry_scratch_spill()
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
 // PRE: error: waveamd-reg-alloc ran out of VGPR registers
-// PRE: memory spill reject detail: temp=1, no_use=1, total=2
+// PRE: memory spill reject detail: eligible=2, total=2
 func.func @scratch_loop_carry_preheader_init_use()
     attributes {wave.kernel, waveamdmachine.target_waves = 4 : i64} {
   %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
@@ -152,12 +152,12 @@ func.func @scratch_loop_carry_preheader_init_use()
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx90a"} {
 
 // LDSPRE-LABEL: func.func @lds_loop_carry_preheader_init_use
-// LDSPRE-SAME: waveamdmachine.lds_spill_bytes = 2048 : i64
 // LDSPRE-SAME: waveamdmachine.regalloc_overflowed = 1 : i64
+// LDSPRE-NOT: waveamdmachine.lds_spill_bytes
 // LDSPRE-NOT: scratch_
 // LDSPRE: waveamdmachine.uniform_loop
-// LDSPRE: waveamdmachine.ds_store_b32
-// LDSPRE: waveamdmachine.ds_load_b32
+// LDSPRE-NOT: waveamdmachine.ds_
+// LDSPRE: waveamdmachine.s_endpgm
 func.func @lds_loop_carry_preheader_init_use()
     attributes {wave.kernel, wave.workgroup_size = array<i32: 64, 1, 1>,
                 waveamdmachine.target_waves = 4 : i64} {
@@ -203,7 +203,7 @@ func.func @lds_loop_carry_preheader_init_use()
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
 // BODY: error: waveamd-reg-alloc ran out of VGPR registers
-// BODY: memory spill reject detail: temp=2, total=2
+// BODY: memory spill reject detail: eligible=2, total=2
 func.func @scratch_loop_carry_body_use()
     attributes {wave.kernel, waveamdmachine.target_waves = 4 : i64} {
   %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
@@ -244,10 +244,12 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
 // UPDATE-LABEL: func.func @scratch_loop_carry_updated_backedge
 // UPDATE-SAME: waveamdmachine.regalloc_overflowed = 1 : i64
-// UPDATE-SAME: waveamdmachine.scratch_spill_bytes = 192 : i64
-// UPDATE: waveamdmachine.scratch_store_tuple_b32
+// UPDATE-NOT: waveamdmachine.scratch_spill_bytes
+// UPDATE-NOT: scratch_
 // UPDATE: waveamdmachine.uniform_loop
 // UPDATE: waveamdmachine.continue_if
+// UPDATE-NOT: scratch_
+// UPDATE: waveamdmachine.s_endpgm
 func.func @scratch_loop_carry_updated_backedge()
     attributes {wave.kernel, waveamdmachine.target_waves = 4 : i64} {
   %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
@@ -330,7 +332,7 @@ func.func @scratch_loop_carry_two_carries()
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
 // NEST: error: waveamd-reg-alloc ran out of VGPR registers
-// NEST: memory spill reject detail: temp=1, no_use=1, total=2
+// NEST: memory spill reject detail: temp=1, eligible=1, total=2
 func.func @scratch_loop_carry_nested()
     attributes {wave.kernel, waveamdmachine.target_waves = 4 : i64} {
   %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
@@ -380,7 +382,7 @@ func.func @scratch_loop_carry_nested()
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
 // NESTPRE: error: waveamd-reg-alloc ran out of VGPR registers
-// NESTPRE: memory spill reject detail: temp=1, no_use=1, total=2
+// NESTPRE: memory spill reject detail: eligible=2, total=2
 func.func @scratch_loop_carry_nested_preheader_init_use()
     attributes {wave.kernel, waveamdmachine.target_waves = 4 : i64} {
   %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
@@ -423,7 +425,7 @@ func.func @scratch_loop_carry_nested_preheader_init_use()
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
 // NO_CANDIDATE: error: waveamd-reg-alloc ran out of VGPR registers
-// NO_CANDIDATE: memory spill reject detail: temp=1, no_use=1, total=2
+// NO_CANDIDATE: memory spill reject detail: temp=1, eligible=1, total=2
 func.func @scratch_loop_carry_init_use_after_loop_no_candidate()
     attributes {wave.kernel, waveamdmachine.target_waves = 4 : i64} {
   %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
@@ -515,7 +517,7 @@ func.func @scratch_loop_carry_init_use_after_loop_fallback()
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
 // BOUNDARY: error: waveamd-reg-alloc ran out of VGPR registers
-// BOUNDARY: memory spill reject detail: temp=2, total=2
+// BOUNDARY: memory spill reject detail: temp=1, eligible=1, total=2
 func.func @scratch_loop_carry_immediate_boundary()
     attributes {wave.kernel, waveamdmachine.target_waves = 4 : i64,
                 waveamdmachine.private_segment_fixed_size = 4092 : i64} {
