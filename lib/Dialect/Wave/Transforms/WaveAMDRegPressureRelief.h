@@ -76,8 +76,25 @@ struct WaveAMDPressureReliefTempAssignment {
   int64_t base = -1;
 };
 
+struct WaveAMDPressureReliefDiagnosticMetric {
+  std::string name;
+  int64_t value = 0;
+};
+
+struct WaveAMDPressureReliefDiagnosticStringMetric {
+  std::string name;
+  std::string value;
+};
+
+struct WaveAMDPressureReliefProviderDiagnostic {
+  SmallVector<WaveAMDPressureReliefDiagnosticMetric, 8> integerMetrics;
+  SmallVector<WaveAMDPressureReliefDiagnosticStringMetric, 2> stringMetrics;
+  std::string message;
+};
+
 struct WaveAMDPressureFailure {
   SmallVector<WaveAMDPressureIntervalRef, 4> overlaps;
+  SmallVector<WaveAMDPressureReliefProviderDiagnostic, 4> providerDiagnostics;
   WaveAMDPressureIntervalRef request;
   StringRef regClass;
   unsigned combinedAGPRLiveDwords = 0;
@@ -159,6 +176,9 @@ public:
   virtual std::unique_ptr<WaveAMDPressureReliefPlan>
   createPlan(const WaveAMDPressureReliefCandidate &candidate) const;
   virtual std::optional<StringRef> getRejectReason() const;
+  virtual void collectFailureDiagnostics(
+      SmallVectorImpl<WaveAMDPressureReliefProviderDiagnostic> &diagnostics)
+      const;
   virtual void applyPlan(const WaveAMDPressureReliefPlan &plan) const;
   virtual void collectPlanTempIntervals(
       const WaveAMDPressureReliefPlan &plan,

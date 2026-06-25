@@ -161,6 +161,9 @@ WaveAMDPressureReliefProvider::getRejectReason() const {
   return std::nullopt;
 }
 
+void WaveAMDPressureReliefProvider::collectFailureDiagnostics(
+    SmallVectorImpl<WaveAMDPressureReliefProviderDiagnostic> &) const {}
+
 void WaveAMDPressureReliefProvider::applyPlan(
     const WaveAMDPressureReliefPlan &) const {}
 

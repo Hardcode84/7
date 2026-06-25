@@ -192,23 +192,11 @@ public:
     return std::nullopt;
   }
 
-  void setNoCandidateDiagnostic() const {
-    setMemorySpillRejectDiagnostics(func, groups, request, position);
-    std::optional<StringRef> reason = getRejectReason();
-    if (!reason)
-      return;
-    Builder builder(func->getContext());
-    func->setAttr(kMemorySpillRejectAttr, builder.getStringAttr(*reason));
-  }
-
-  void notifyAttemptStarted() const override {
-    clearMemorySpillRejectDiagnostics(func);
-  }
-
-  void notifyNoCandidate() const override { setNoCandidateDiagnostic(); }
-
-  void notifyPlanApplied() const override {
-    clearMemorySpillRejectDiagnostics(func);
+  void collectFailureDiagnostics(
+      SmallVectorImpl<wave::WaveAMDPressureReliefProviderDiagnostic>
+          &diagnostics) const override {
+    collectMemorySpillRejectDiagnostics(diagnostics, groups, request, position,
+                                        getRejectReason());
   }
 
 private:

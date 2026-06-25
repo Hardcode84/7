@@ -30,6 +30,8 @@
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <string>
+#include <utility>
 
 namespace mlir::wave::regalloc {
 
@@ -45,10 +47,6 @@ inline constexpr llvm::StringLiteral kSGPRSpillCountAttr =
     "waveamdmachine.sgpr_spill_count";
 inline constexpr llvm::StringLiteral kVGPRSpillCountAttr =
     "waveamdmachine.vgpr_spill_count";
-inline constexpr llvm::StringLiteral kMemorySpillRejectAttr =
-    "waveamdmachine.regalloc_debug_memory_spill_reject";
-inline constexpr llvm::StringLiteral kMemorySpillRejectDetailAttr =
-    "waveamdmachine.regalloc_debug_memory_spill_reject_detail";
 inline constexpr llvm::StringLiteral kRegAllocRemarkCategory =
     "waveamdmachine-regalloc";
 
@@ -1321,41 +1319,93 @@ inline void classifyMemorySpillReject(IntervalGroup *group, unsigned position,
   incrementMemorySpillReject(stats, getMemorySpillRejectKind(group, position));
 }
 
-inline void addMemorySpillRejectCount(Builder &builder, NamedAttrList &attrs,
-                                      StringRef name, unsigned count) {
-  if (count == 0)
-    return;
-  attrs.set(name, builder.getI64IntegerAttr(count));
-}
-
-inline void clearMemorySpillRejectDiagnostics(func::FuncOp func) {
-  func->removeAttr(kMemorySpillRejectAttr);
-  func->removeAttr(kMemorySpillRejectDetailAttr);
-}
-
-inline void setMemorySpillRejectDiagnostics(func::FuncOp func,
-                                            ArrayRef<IntervalGroup *> groups,
-                                            IntervalGroup *request,
-                                            unsigned position) {
+inline MemorySpillRejectStats
+getMemorySpillRejectStats(ArrayRef<IntervalGroup *> groups,
+                          IntervalGroup *request, unsigned position) {
   MemorySpillRejectStats stats;
   classifyMemorySpillReject(request, position, stats);
   for (IntervalGroup *group : groups)
     classifyMemorySpillReject(group, position, stats);
+  return stats;
+}
+
+inline void addMemorySpillRejectMetric(
+    wave::WaveAMDPressureReliefProviderDiagnostic &diagnostic, StringRef name,
+    unsigned count) {
+  if (count == 0)
+    return;
+  diagnostic.integerMetrics.push_back(
+      {name.str(), static_cast<int64_t>(count)});
+}
+
+inline void appendMemorySpillRejectDetailField(std::string &message,
+                                               bool &first, StringRef name,
+                                               unsigned count) {
+  if (count == 0)
+    return;
+  if (first) {
+    message = "memory spill reject detail: ";
+    first = false;
+  } else {
+    message += ", ";
+  }
+  message += name.str();
+  message += "=";
+  message += std::to_string(count);
+}
+
+inline void addMemorySpillRejectDetailDiagnostic(
+    SmallVectorImpl<wave::WaveAMDPressureReliefProviderDiagnostic> &diagnostics,
+    const MemorySpillRejectStats &stats) {
   if (stats.total == 0)
     return;
 
-  Builder builder(func.getContext());
-  NamedAttrList attrs;
-  attrs.set("total", builder.getI64IntegerAttr(stats.total));
-  addMemorySpillRejectCount(builder, attrs, "eligible", stats.eligible);
-  addMemorySpillRejectCount(builder, attrs, "fixed", stats.fixed);
-  addMemorySpillRejectCount(builder, attrs, "memory_issuer",
-                            stats.memoryIssuer);
-  addMemorySpillRejectCount(builder, attrs, "no_use", stats.noUse);
-  addMemorySpillRejectCount(builder, attrs, "non_promotable",
-                            stats.nonPromotable);
-  addMemorySpillRejectCount(builder, attrs, "temp", stats.temp);
-  func->setAttr(kMemorySpillRejectDetailAttr, builder.getDictionaryAttr(attrs));
+  wave::WaveAMDPressureReliefProviderDiagnostic diagnostic;
+  addMemorySpillRejectMetric(diagnostic, "temp", stats.temp);
+  addMemorySpillRejectMetric(diagnostic, "non_promotable", stats.nonPromotable);
+  addMemorySpillRejectMetric(diagnostic, "memory_issuer", stats.memoryIssuer);
+  addMemorySpillRejectMetric(diagnostic, "fixed", stats.fixed);
+  addMemorySpillRejectMetric(diagnostic, "no_use", stats.noUse);
+  addMemorySpillRejectMetric(diagnostic, "eligible", stats.eligible);
+  addMemorySpillRejectMetric(diagnostic, "total", stats.total);
+
+  bool first = true;
+  appendMemorySpillRejectDetailField(diagnostic.message, first, "temp",
+                                     stats.temp);
+  appendMemorySpillRejectDetailField(diagnostic.message, first,
+                                     "non_promotable", stats.nonPromotable);
+  appendMemorySpillRejectDetailField(diagnostic.message, first, "memory_issuer",
+                                     stats.memoryIssuer);
+  appendMemorySpillRejectDetailField(diagnostic.message, first, "fixed",
+                                     stats.fixed);
+  appendMemorySpillRejectDetailField(diagnostic.message, first, "no_use",
+                                     stats.noUse);
+  appendMemorySpillRejectDetailField(diagnostic.message, first, "eligible",
+                                     stats.eligible);
+  appendMemorySpillRejectDetailField(diagnostic.message, first, "total",
+                                     stats.total);
+  diagnostics.push_back(std::move(diagnostic));
+}
+
+inline void addMemorySpillRejectReasonDiagnostic(
+    SmallVectorImpl<wave::WaveAMDPressureReliefProviderDiagnostic> &diagnostics,
+    std::optional<StringRef> reason) {
+  if (!reason)
+    return;
+  wave::WaveAMDPressureReliefProviderDiagnostic diagnostic;
+  diagnostic.message = "memory spill rejected candidates: ";
+  diagnostic.message += reason->str();
+  diagnostic.stringMetrics.push_back({"memory_spill_reject", reason->str()});
+  diagnostics.push_back(std::move(diagnostic));
+}
+
+inline void collectMemorySpillRejectDiagnostics(
+    SmallVectorImpl<wave::WaveAMDPressureReliefProviderDiagnostic> &diagnostics,
+    ArrayRef<IntervalGroup *> groups, IntervalGroup *request, unsigned position,
+    std::optional<StringRef> reason) {
+  addMemorySpillRejectReasonDiagnostic(diagnostics, reason);
+  addMemorySpillRejectDetailDiagnostic(
+      diagnostics, getMemorySpillRejectStats(groups, request, position));
 }
 
 struct RegisterBudgets {

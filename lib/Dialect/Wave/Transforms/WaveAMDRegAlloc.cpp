@@ -1973,6 +1973,24 @@ static void notifyNoPressureReliefCandidate(
     state.provider->notifyNoCandidate();
 }
 
+static void collectPressureReliefFailureDiagnostics(
+    ArrayRef<PressureReliefProviderState> providers,
+    SmallVectorImpl<wave::WaveAMDPressureReliefProviderDiagnostic>
+        &diagnostics) {
+  SmallVector<wave::WaveAMDPressureReliefProviderDiagnostic, 4>
+      providerDiagnostics;
+  for (const PressureReliefProviderState &state : providers) {
+    providerDiagnostics.clear();
+    state.provider->collectFailureDiagnostics(providerDiagnostics);
+    if (providerDiagnostics.empty())
+      continue;
+    diagnostics.clear();
+    for (const wave::WaveAMDPressureReliefProviderDiagnostic &diagnostic :
+         providerDiagnostics)
+      diagnostics.push_back(diagnostic);
+  }
+}
+
 static void notifyPressureReliefAttemptStarted(
     MutableArrayRef<PressureReliefProviderState> providers) {
   for (PressureReliefProviderState &state : providers)
@@ -2004,13 +2022,15 @@ static FailureOr<bool>
 applyPressureRelief(func::FuncOp func, Inventory &inventory,
                     ArrayRef<IntervalGroup *> assigned, IntervalGroup *request,
                     unsigned position, RegisterBudgets budgets,
-                    const PressureFailure *pressureFailure = nullptr) {
+                    PressureFailure *pressureFailure = nullptr) {
   SmallVector<PressureReliefProviderState, 4> providers;
   providers.reserve(4);
   addPressureReliefProviders(providers, func, inventory, assigned, request,
                              position, budgets);
   if (providers.empty())
     return false;
+  if (pressureFailure)
+    pressureFailure->providerDiagnostics.clear();
   notifyPressureReliefAttemptStarted(providers);
 
   wave::WaveAMDPressureReliefQuery query;
@@ -2026,6 +2046,9 @@ applyPressureRelief(func::FuncOp func, Inventory &inventory,
                                       pressureFailure);
   if (!selected) {
     notifyNoPressureReliefCandidate(providers);
+    if (pressureFailure)
+      collectPressureReliefFailureDiagnostics(
+          providers, pressureFailure->providerDiagnostics);
     return false;
   }
 
@@ -2043,10 +2066,10 @@ applyPressureRelief(func::FuncOp func, Inventory &inventory,
   return true;
 }
 
-static FailureOr<bool>
-applyCombinedPressureRelief(func::FuncOp func, Inventory &inventory,
-                            const PressureFailure &failure,
-                            RegisterBudgets budgets) {
+static FailureOr<bool> applyCombinedPressureRelief(func::FuncOp func,
+                                                   Inventory &inventory,
+                                                   PressureFailure &failure,
+                                                   RegisterBudgets budgets) {
   IntervalGroup *request =
       selectVGPRPressureRequest(inventory, failure.position);
   SmallVector<IntervalGroup *> groups =
@@ -2091,7 +2114,7 @@ static LogicalResult allocateOnce(func::FuncOp func, Inventory &inventory,
       classFailure = buildClassPressureFailure(
           inventory, assigned, group, position, group->storageClass,
           getBudget(placementBudgets, group->storageClass));
-    const PressureFailure *queryFailure =
+    PressureFailure *queryFailure =
         placementFailure ? &*placementFailure : &classFailure;
     FailureOr<bool> relieved =
         applyPressureRelief(func, inventory, assigned, group, position,
@@ -2616,13 +2639,9 @@ static void clearDiagnostics(func::FuncOp func) {
   func->removeAttr(kProbeAssignedLaneQueriesAttr);
   func->removeAttr(kProbeBaseFitsAttr);
   func->removeAttr(kProbeFindFreeBaseAttr);
-  func->removeAttr(kMemorySpillRejectAttr);
-  func->removeAttr(kMemorySpillRejectDetailAttr);
 }
 
 static void clearTransientRegAllocAttrs(func::FuncOp func) {
-  func->removeAttr(kMemorySpillRejectAttr);
-  func->removeAttr(kMemorySpillRejectDetailAttr);
   clearPressureReliefDiagnostics(func);
   func.walk([](Operation *op) { op->removeAttr(kTempAttr); });
 }
@@ -2662,16 +2681,19 @@ static void emitRegAllocRemarks(func::FuncOp func, Inventory &inventory,
   emitPressureReliefProviderRemarks(func, inventory, budgets);
 }
 
-static void emitRejectDetailMetrics(remark::detail::InFlightRemark &remark,
-                                    DictionaryAttr detail) {
-  if (!remark || !detail)
+static void emitProviderDiagnosticMetrics(
+    remark::detail::InFlightRemark &remark,
+    ArrayRef<wave::WaveAMDPressureReliefProviderDiagnostic> diagnostics) {
+  if (!remark)
     return;
-  for (StringRef name :
-       {"temp", "non_promotable", "memory_issuer", "cross_block", "fixed",
-        "no_use", "eligible", "total"}) {
-    IntegerAttr attr = detail.getAs<IntegerAttr>(name);
-    if (attr)
-      emitIntegerMetric(remark, name, attr.getInt());
+  for (const wave::WaveAMDPressureReliefProviderDiagnostic &diagnostic :
+       diagnostics) {
+    for (const wave::WaveAMDPressureReliefDiagnosticStringMetric &metric :
+         diagnostic.stringMetrics)
+      emitStringMetric(remark, metric.name, metric.value);
+    for (const wave::WaveAMDPressureReliefDiagnosticMetric &metric :
+         diagnostic.integerMetrics)
+      emitIntegerMetric(remark, metric.name, metric.value);
   }
 }
 
@@ -2693,9 +2715,6 @@ static void emitPressureFailureRemark(func::FuncOp func,
                    wave::formatWaveAMDPressureInterval(failure.request));
   emitStringMetric(remark, "overlaps",
                    wave::formatWaveAMDPressureIntervals(failure.overlaps));
-  if (StringAttr reject =
-          func->getAttrOfType<StringAttr>(kMemorySpillRejectAttr))
-    emitStringMetric(remark, "memory_spill_reject", reject.getValue());
   if (StringAttr providers =
           func->getAttrOfType<StringAttr>(kPressureReliefProvidersAttr))
     emitStringMetric(remark, "pressure_relief_providers", providers.getValue());
@@ -2703,8 +2722,7 @@ static void emitPressureFailureRemark(func::FuncOp func,
           func->getAttrOfType<StringAttr>(kPressureReliefCandidatesAttr))
     emitStringMetric(remark, "pressure_relief_candidates",
                      candidates.getValue());
-  emitRejectDetailMetrics(remark, func->getAttrOfType<DictionaryAttr>(
-                                      kMemorySpillRejectDetailAttr));
+  emitProviderDiagnosticMetrics(remark, failure.providerDiagnostics);
 }
 
 static void setProbeAttrs(func::FuncOp func,
@@ -2904,41 +2922,18 @@ struct WaveAMDRegAllocPass
     return wave::verifyNoHardwareResourceLiveRangeOverlap(func, kPassName);
   }
 
-  static void appendMemorySpillRejectDetail(InFlightDiagnostic &diag,
-                                            DictionaryAttr detail) {
-    if (!detail)
-      return;
-    bool first = true;
-    auto append = [&](StringRef name) {
-      IntegerAttr attr = detail.getAs<IntegerAttr>(name);
-      if (!attr)
-        return;
-      if (first) {
-        diag << "; memory spill reject detail: ";
-        first = false;
-      } else {
-        diag << ", ";
-      }
-      diag << name << "=" << attr.getInt();
-    };
-    append("temp");
-    append("non_promotable");
-    append("memory_issuer");
-    append("cross_block");
-    append("fixed");
-    append("no_use");
-    append("eligible");
-    append("total");
+  static void appendProviderFailureDiagnostics(InFlightDiagnostic &diag,
+                                               const PressureFailure &failure) {
+    for (const wave::WaveAMDPressureReliefProviderDiagnostic &diagnostic :
+         failure.providerDiagnostics)
+      if (!diagnostic.message.empty())
+        diag << "; " << diagnostic.message;
   }
 
-  static void appendMemorySpillRejectSummary(func::FuncOp func,
-                                             InFlightDiagnostic &diag) {
-    StringAttr reject = func->getAttrOfType<StringAttr>(kMemorySpillRejectAttr);
-    DictionaryAttr detail =
-        func->getAttrOfType<DictionaryAttr>(kMemorySpillRejectDetailAttr);
-    if (reject)
-      diag << "; memory spill rejected candidates: " << reject.getValue();
-    appendMemorySpillRejectDetail(diag, detail);
+  static void appendPressureReliefSummary(func::FuncOp func,
+                                          const PressureFailure &failure,
+                                          InFlightDiagnostic &diag) {
+    appendProviderFailureDiagnostics(diag, failure);
     if (StringAttr providers =
             func->getAttrOfType<StringAttr>(kPressureReliefProvidersAttr))
       diag << "; pressure relief providers=" << providers.getValue();
@@ -2958,7 +2953,7 @@ struct WaveAMDRegAllocPass
     diag << "; request=" << wave::formatWaveAMDPressureInterval(failure.request)
          << "; overlaps="
          << wave::formatWaveAMDPressureIntervals(failure.overlaps);
-    appendMemorySpillRejectSummary(func, diag);
+    appendPressureReliefSummary(func, failure, diag);
     clearTransientRegAllocAttrs(func);
   }
 
@@ -2976,7 +2971,7 @@ struct WaveAMDRegAllocPass
     diag << "; request=" << wave::formatWaveAMDPressureInterval(failure.request)
          << "; overlaps="
          << wave::formatWaveAMDPressureIntervals(failure.overlaps);
-    appendMemorySpillRejectSummary(func, diag);
+    appendPressureReliefSummary(func, failure, diag);
     clearTransientRegAllocAttrs(func);
   }
 
