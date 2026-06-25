@@ -8,8 +8,8 @@
 
 #include "mlir/Dialect/Wave/Transforms/Passes.h"
 
+#include "RegAlloc/WaveAMDRegAllocPrep.h"
 #include "WaveAMDMachineScheduleSupport.h"
-#include "WaveAMDRegAllocPrep.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/WaveAMDMachine/CostModel/EventSimulator.h"
 #include "mlir/IR/BuiltinOps.h"

@@ -8,7 +8,7 @@
 
 #include "WaveAMDMachineScheduleInternal.h"
 
-#include "WaveAMDRegLiveIntervals.h"
+#include "RegAlloc/WaveAMDRegLiveIntervals.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachine.h"
 #include "mlir/IR/Threading.h"
 #include "llvm/ADT/BitVector.h"

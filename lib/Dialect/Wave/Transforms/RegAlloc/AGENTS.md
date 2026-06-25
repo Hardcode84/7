@@ -1,6 +1,6 @@
 # WaveAMD Regalloc Pressure Relief
 
-Scope: `WaveAMDRegAlloc*` and `WaveAMDRegPressureRelief*` in this directory.
+Scope: WaveAMD regalloc implementation files in this directory.
 
 ## Target Model
 

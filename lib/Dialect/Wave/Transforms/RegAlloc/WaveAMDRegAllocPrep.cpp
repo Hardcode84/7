@@ -8,7 +8,7 @@
 
 #include "WaveAMDRegAllocPrep.h"
 
-#include "WaveAMDHardwareResources.h"
+#include "../WaveAMDHardwareResources.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachine.h"
 #include "mlir/IR/Builders.h"

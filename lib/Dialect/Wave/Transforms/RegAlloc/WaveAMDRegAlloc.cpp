@@ -8,7 +8,7 @@
 
 #include "mlir/Dialect/Wave/Transforms/Passes.h"
 
-#include "WaveAMDHardwareResources.h"
+#include "../WaveAMDHardwareResources.h"
 #include "WaveAMDRegAllocInternal.h"
 #include "WaveAMDRegAllocPrep.h"
 #include "WaveAMDRegLiveIntervals.h"

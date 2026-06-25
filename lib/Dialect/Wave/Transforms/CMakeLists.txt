@@ -1,4 +1,15 @@
 add_mlir_dialect_library(MLIRWaveTransforms
+  RegAlloc/WaveAMDRegAlloc.cpp
+  RegAlloc/WaveAMDRegAllocBankPromotion.cpp
+  RegAlloc/WaveAMDRegAllocLDS.cpp
+  RegAlloc/WaveAMDRegAllocPrep.cpp
+  RegAlloc/WaveAMDRegAllocRemat.cpp
+  RegAlloc/WaveAMDRegAllocScratch.cpp
+  RegAlloc/WaveAMDRegAllocVerification.cpp
+  RegAlloc/WaveAMDRegisterLimits.cpp
+  RegAlloc/WaveAMDRegLiveIntervals.cpp
+  RegAlloc/WaveAMDRegPressureRelief.cpp
+  RegAlloc/WaveAMDResourceInfo.cpp
   WaveAMDABILowering.cpp
   WaveAMDCrossLanePeepholes.cpp
   WaveAMDDecomposeMemTuples.cpp
@@ -23,17 +34,6 @@ add_mlir_dialect_library(MLIRWaveTransforms
   WaveAMDNarrowWideInt.cpp
   WaveAMDPackVGPRZeroMoves.cpp
   WaveAMDPreserveHardwareRegs.cpp
-  WaveAMDRegAlloc.cpp
-  WaveAMDRegAllocBankPromotion.cpp
-  WaveAMDRegAllocLDS.cpp
-  WaveAMDRegAllocPrep.cpp
-  WaveAMDRegAllocRemat.cpp
-  WaveAMDRegAllocScratch.cpp
-  WaveAMDRegAllocVerification.cpp
-  WaveAMDRegisterLimits.cpp
-  WaveAMDRegLiveIntervals.cpp
-  WaveAMDRegPressureRelief.cpp
-  WaveAMDResourceInfo.cpp
   WaveAMDVerifyMachineOperands.cpp
   WaveAttachGPUBinary.cpp
   WaveCoalesceMemory.cpp

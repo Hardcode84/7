@@ -8,10 +8,10 @@
 
 #include "WaveAMDMachineScheduleSupport.h"
 
+#include "RegAlloc/WaveAMDRegLiveIntervals.h"
+#include "RegAlloc/WaveAMDRegisterLimits.h"
 #include "WaveAMDHardwareResources.h"
 #include "WaveAMDMachineScheduleInternal.h"
-#include "WaveAMDRegLiveIntervals.h"
-#include "WaveAMDRegisterLimits.h"
 #include "mlir/Dialect/WaveAMDMachine/CostModel/FunctionalUnit.h"
 #include "mlir/Dialect/WaveAMDMachine/CostModel/LatencyTable.h"
 #include "mlir/Dialect/WaveAMDMachine/CostModel/MemoryCounterTiming.h"

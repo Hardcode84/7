@@ -9,7 +9,7 @@
 #ifndef DIALECT_WAVE_TRANSFORMS_WAVEAMDMACHINESCHEDULESUPPORT_H
 #define DIALECT_WAVE_TRANSFORMS_WAVEAMDMACHINESCHEDULESUPPORT_H
 
-#include "WaveAMDRegLiveIntervals.h"
+#include "RegAlloc/WaveAMDRegLiveIntervals.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/WaveAMDMachine/CostModel/ArchData.h"
 #include "mlir/Dialect/WaveAMDMachine/CostModel/CalibrationData.h"
