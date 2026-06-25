@@ -252,12 +252,9 @@ getMemorySpillValuePositionIfKnown(Value value, const Inventory &inventory) {
 }
 
 inline bool hasMemorySpillStoreAnchor(Value value, const Inventory &inventory) {
-  waveamdmachine::RegType type = cast<waveamdmachine::RegType>(value.getType());
   if (Operation *def = value.getDefiningOp()) {
     if (!getMemorySpillOpPosition(def, inventory))
       return false;
-    if (type.getRegClass() == waveamdmachine::RegClass::AGPR)
-      return !isMemoryIssuerOp(def);
     return !isMemoryIssuerOp(def) || getMemoryIssuerToken(def);
   }
 
@@ -293,30 +290,13 @@ collectSimpleMemorySpillVGPRUses(Value value, const Inventory &inventory,
   return !uses.empty();
 }
 
-inline bool
-collectSimpleMemorySpillAGPRUses(Value value, const Inventory &inventory,
-                                 SmallVectorImpl<OpOperand *> &uses) {
-  if (!hasMemorySpillStoreAnchor(value, inventory))
-    return false;
-  for (OpOperand &use : value.getUses()) {
-    Operation *user = use.getOwner();
-    if (isRegAllocTempOp(user))
-      continue;
-    if (!isa<waveamdmachine::VAccvgprReadB32TupleOp>(user))
-      return false;
-    if (!getMemorySpillOpPosition(user, inventory))
-      return false;
-    uses.push_back(&use);
-  }
-  return !uses.empty();
-}
-
 inline bool collectSimpleMemorySpillUses(Value value,
                                          const Inventory &inventory,
                                          SmallVectorImpl<OpOperand *> &uses) {
-  waveamdmachine::RegType type = cast<waveamdmachine::RegType>(value.getType());
-  if (type.getRegClass() == waveamdmachine::RegClass::AGPR)
-    return collectSimpleMemorySpillAGPRUses(value, inventory, uses);
+  waveamdmachine::RegType type =
+      dyn_cast<waveamdmachine::RegType>(value.getType());
+  if (!type || type.getRegClass() != waveamdmachine::RegClass::VGPR)
+    return false;
   return collectSimpleMemorySpillVGPRUses(value, inventory, uses);
 }
 
@@ -459,13 +439,6 @@ inline unsigned getMemorySpillValuePosition(Value value,
       getMemorySpillValuePositionIfKnown(value, inventory);
   assert(position && "spill value must have a known position");
   return *position;
-}
-
-inline waveamdmachine::RegClass getMemorySpillLoadRegClass(Value value) {
-  waveamdmachine::RegType type = cast<waveamdmachine::RegType>(value.getType());
-  if (type.getRegClass() == waveamdmachine::RegClass::AGPR)
-    return waveamdmachine::RegClass::VGPR;
-  return type.getRegClass();
 }
 
 inline waveamdmachine::RegType getTempAssignmentRegType(
@@ -688,12 +661,8 @@ static void collectMemorySpillValueTempIntervals(
       getTupleFromElementsBridgeStart(value, inventory, defPosition);
   appendMemorySpillTemp(intervals, type.getRegClass(), bridgeStart, defPosition,
                         valueWidth);
-  if (type.getRegClass() == waveamdmachine::RegClass::AGPR)
-    appendMemorySpillPointTemp(intervals, waveamdmachine::RegClass::VGPR,
-                               defPosition, valueWidth);
   collectAddressTemps(intervals, defPosition, valueWidth);
 
-  waveamdmachine::RegClass loadClass = getMemorySpillLoadRegClass(value);
   for (OpOperand *use : uses) {
     std::optional<unsigned> position =
         getMemorySpillOpPosition(use->getOwner(), inventory);
@@ -710,7 +679,7 @@ static void collectMemorySpillValueTempIntervals(
       }
     }
     wave::WaveAMDPressureReliefTempInterval loadTemp;
-    loadTemp.regClass = loadClass;
+    loadTemp.regClass = type.getRegClass();
     loadTemp.start = usePosition;
     loadTemp.end = loadEnd;
     loadTemp.width = valueWidth;
@@ -719,35 +688,15 @@ static void collectMemorySpillValueTempIntervals(
   }
 }
 
-inline Type getMemorySpillLoadType(Value value) {
-  waveamdmachine::RegType type = cast<waveamdmachine::RegType>(value.getType());
-  if (type.getRegClass() != waveamdmachine::RegClass::AGPR)
-    return value.getType();
-  return waveamdmachine::RegType::get(value.getContext(),
-                                      waveamdmachine::RegClass::VGPR,
-                                      type.getWidth(), /*index=*/-1);
-}
+inline Type getMemorySpillLoadType(Value value) { return value.getType(); }
 
 inline SmallVector<Type> getMemorySpillScalarRegTypes(Type tupleType);
 
 inline FailureOr<Value> materializeMemorySpillStoreValue(
-    Value value, const wave::WaveAMDPressureReliefPlan &plan,
-    wave::WaveAMDPressureReliefMaterializationContext &context,
-    OpBuilder &builder, Operation *diagOp) {
-  waveamdmachine::RegType type = cast<waveamdmachine::RegType>(value.getType());
-  if (type.getRegClass() != waveamdmachine::RegClass::AGPR)
-    return value;
-  FailureOr<waveamdmachine::RegType> readType =
-      consumePressureReliefTempRegType(plan, context,
-                                       waveamdmachine::RegClass::VGPR,
-                                       type.getWidth(), diagOp);
-  if (failed(readType))
-    return failure();
-  waveamdmachine::VAccvgprReadB32TupleOp read =
-      waveamdmachine::VAccvgprReadB32TupleOp::create(builder, value.getLoc(),
-                                                     *readType, value);
-  read->setAttr(kRegAllocTempAttr, builder.getUnitAttr());
-  return read.getResult();
+    Value value, const wave::WaveAMDPressureReliefPlan &,
+    wave::WaveAMDPressureReliefMaterializationContext &, OpBuilder &,
+    Operation *) {
+  return value;
 }
 
 inline void setInsertionPointForMemorySpillStore(Value value,
@@ -792,27 +741,17 @@ retypeLoadedMemorySpillSplit(waveamdmachine::TupleToElementsOp split,
 }
 
 inline LogicalResult replaceMemorySpillUseWithLoad(
-    Value value, OpOperand *use, Value loaded,
-    const wave::WaveAMDPressureReliefPlan &plan,
-    wave::WaveAMDPressureReliefMaterializationContext &context) {
-  waveamdmachine::RegType type = cast<waveamdmachine::RegType>(value.getType());
-  if (type.getRegClass() != waveamdmachine::RegClass::AGPR) {
-    if (auto split =
-            dyn_cast<waveamdmachine::TupleToElementsOp>(use->getOwner())) {
-      waveamdmachine::RegType loadedType =
-          cast<waveamdmachine::RegType>(loaded.getType());
-      if (failed(retypeLoadedMemorySpillSplit(split, loadedType)))
-        return failure();
-    }
-    use->set(loaded);
-    return success();
+    Value, OpOperand *use, Value loaded,
+    const wave::WaveAMDPressureReliefPlan &,
+    wave::WaveAMDPressureReliefMaterializationContext &) {
+  if (auto split =
+          dyn_cast<waveamdmachine::TupleToElementsOp>(use->getOwner())) {
+    waveamdmachine::RegType loadedType =
+        cast<waveamdmachine::RegType>(loaded.getType());
+    if (failed(retypeLoadedMemorySpillSplit(split, loadedType)))
+      return failure();
   }
-  waveamdmachine::VAccvgprReadB32TupleOp read =
-      dyn_cast<waveamdmachine::VAccvgprReadB32TupleOp>(use->getOwner());
-  if (!read)
-    return failure();
-  read.getResult().replaceAllUsesWith(loaded);
-  read.erase();
+  use->set(loaded);
   return success();
 }
 
@@ -919,8 +858,7 @@ inline bool memorySpillLaneLiveAt(Interval *interval, unsigned position) {
 }
 
 inline bool isMemorySpillProviderRegClass(waveamdmachine::RegClass regClass) {
-  return regClass == waveamdmachine::RegClass::VGPR ||
-         regClass == waveamdmachine::RegClass::AGPR;
+  return regClass == waveamdmachine::RegClass::VGPR;
 }
 
 inline bool isMemorySpillTempGroup(IntervalGroup *group) {
@@ -943,9 +881,6 @@ inline bool isMemorySpillProviderCandidateGroup(IntervalGroup *group,
       isFixedRegisterGroup(group))
     return false;
   if (!isMemorySpillProviderRegClass(group->storageClass))
-    return false;
-  if (group->storageClass == waveamdmachine::RegClass::AGPR &&
-      !isMemorySpillTempGroup(group))
     return false;
   return llvm::any_of(group->intervals, [&](Interval *lane) {
     return memorySpillLaneLiveAt(lane, position);
