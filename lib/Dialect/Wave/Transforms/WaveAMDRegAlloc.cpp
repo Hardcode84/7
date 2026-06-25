@@ -236,6 +236,8 @@ static LogicalResult applyTargetWavesLimits(func::FuncOp func,
 
   budgets.totalVGPRLimit = vgprBudget;
   budgets.vgpr = std::min(budgets.vgpr, vgprBudget);
+  // AGPR uses the VGPR wave budget; GFX90A+ also checks combined usage.
+  budgets.agpr = std::min(budgets.agpr, vgprBudget);
   budgets.sgpr = std::min(budgets.sgpr, sgprBudget);
   budgets.targetWaves = *targetWaves;
   return success();

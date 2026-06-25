@@ -124,3 +124,19 @@ func.func @target_waves_pinned_sgpr()
 
 // MARK-LABEL: func.func @target_waves_pinned_sgpr
 // MARK-SAME: waveamdmachine.regalloc_overflowed = 1 : i64
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx908"} {
+
+// expected-error @below {{waveamd-reg-alloc AGPR count exceeds register budget}}
+func.func @target_waves_pinned_agpr()
+    attributes {wave.kernel, waveamdmachine.target_waves = 8 : i64} {
+  %pinned = waveamdmachine.uninit : !waveamdmachine.reg<agpr, 1, 100>
+  return
+}
+
+}
+
+// MARK-LABEL: func.func @target_waves_pinned_agpr
+// MARK-SAME: waveamdmachine.regalloc_overflowed = 1 : i64
