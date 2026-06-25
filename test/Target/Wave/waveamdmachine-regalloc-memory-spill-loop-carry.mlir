@@ -16,13 +16,13 @@
 // RUN: not wave-opt --waveamd-reg-alloc='vgpr-limit=15 agpr-limit=0' \
 // RUN:   --waveamd-resource-info %t/nested-preheader-use.mlir 2>&1 | FileCheck %s --check-prefix=NESTPRE
 // RUN: not wave-opt --waveamd-reg-alloc='vgpr-limit=15 agpr-limit=0' \
-// RUN:   %t/bad-init-use.mlir 2>&1 | FileCheck %s --check-prefix=BAD
+// RUN:   %t/init-use-after-loop-no-candidate.mlir 2>&1 | FileCheck %s --check-prefix=NO_CANDIDATE
 // RUN: wave-opt --waveamd-reg-alloc='vgpr-limit=23 agpr-limit=0' \
-// RUN:   --waveamd-resource-info %t/bad-init-use-fallback.mlir | FileCheck %s --check-prefix=FALLBACK
+// RUN:   --waveamd-resource-info %t/init-use-after-loop-fallback.mlir | FileCheck %s --check-prefix=FALLBACK
 // RUN: not wave-opt --waveamd-reg-alloc='vgpr-limit=7 agpr-limit=0' \
 // RUN:   --waveamd-resource-info %t/immediate-boundary.mlir 2>&1 | FileCheck %s --check-prefix=BOUNDARY
 // RUN: wave-opt --waveamd-reg-alloc='vgpr-limit=4 agpr-limit=0' \
-// RUN:   --waveamd-resource-info %t/scalar-reject.mlir | FileCheck %s --check-prefix=SCALAR
+// RUN:   --waveamd-resource-info %t/scalar-spill.mlir | FileCheck %s --check-prefix=SCALAR_SPILL
 
 //--- result-use.mlir
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
@@ -64,17 +64,17 @@ func.func @scratch_loop_carry_result_use()
 
 }
 
-//--- scalar-reject.mlir
+//--- scalar-spill.mlir
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
-// SCALAR-LABEL: func.func @scalar_vgpr_loop_carry_no_memory_spill
-// SCALAR-SAME: waveamdmachine.regalloc_assignments
-// SCALAR-SAME: waveamdmachine.scratch_spill_bytes = 28 : i64
-// SCALAR: waveamdmachine.scratch_store_b32
-// SCALAR: waveamdmachine.uniform_loop
-// SCALAR: waveamdmachine.scratch_load_b32
-// SCALAR: waveamdmachine.continue_if
-func.func @scalar_vgpr_loop_carry_no_memory_spill()
+// SCALAR_SPILL-LABEL: func.func @scalar_vgpr_loop_carry_scratch_spill
+// SCALAR_SPILL-SAME: waveamdmachine.regalloc_assignments
+// SCALAR_SPILL-SAME: waveamdmachine.scratch_spill_bytes = 28 : i64
+// SCALAR_SPILL: waveamdmachine.scratch_store_b32
+// SCALAR_SPILL: waveamdmachine.uniform_loop
+// SCALAR_SPILL: waveamdmachine.scratch_load_b32
+// SCALAR_SPILL: waveamdmachine.continue_if
+func.func @scalar_vgpr_loop_carry_scratch_spill()
     attributes {wave.kernel, waveamdmachine.target_waves = 4 : i64} {
   %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
   %four = waveamdmachine.imm 4 : !waveamdmachine.imm
@@ -419,13 +419,12 @@ func.func @scratch_loop_carry_nested_preheader_init_use()
 
 }
 
-//--- bad-init-use.mlir
+//--- init-use-after-loop-no-candidate.mlir
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
-// BAD-NOT: cannot materialize scratch spill for loop init use outside loop preheader
-// BAD: error: waveamd-reg-alloc ran out of VGPR registers
-// BAD: memory spill reject detail: temp=1, no_use=1, total=2
-func.func @scratch_loop_carry_bad_init_use()
+// NO_CANDIDATE: error: waveamd-reg-alloc ran out of VGPR registers
+// NO_CANDIDATE: memory spill reject detail: temp=1, no_use=1, total=2
+func.func @scratch_loop_carry_init_use_after_loop_no_candidate()
     attributes {wave.kernel, waveamdmachine.target_waves = 4 : i64} {
   %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
   %four = waveamdmachine.imm 4 : !waveamdmachine.imm
@@ -460,16 +459,16 @@ func.func @scratch_loop_carry_bad_init_use()
 
 }
 
-//--- bad-init-use-fallback.mlir
+//--- init-use-after-loop-fallback.mlir
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
-// FALLBACK-LABEL: func.func @scratch_loop_carry_bad_init_use_fallback
+// FALLBACK-LABEL: func.func @scratch_loop_carry_init_use_after_loop_fallback
 // FALLBACK-SAME: waveamdmachine.regalloc_assignments
 // FALLBACK-SAME: waveamdmachine.scratch_spill_bytes = 32 : i64
 // FALLBACK: waveamdmachine.scratch_store_tuple_b32
 // FALLBACK: waveamdmachine.uniform_loop
 // FALLBACK: waveamdmachine.scratch_load_tuple_b32
-func.func @scratch_loop_carry_bad_init_use_fallback()
+func.func @scratch_loop_carry_init_use_after_loop_fallback()
     attributes {wave.kernel, waveamdmachine.target_waves = 4 : i64} {
   %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
   %four = waveamdmachine.imm 4 : !waveamdmachine.imm
