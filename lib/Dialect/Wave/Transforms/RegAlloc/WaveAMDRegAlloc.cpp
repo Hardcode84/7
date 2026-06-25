@@ -1430,6 +1430,8 @@ struct AssignedRegisterClassIndex {
   const AssignedLaneBucket *lookup(unsigned phys) const {
     if (phys >= buckets.size())
       return nullptr;
+    if (buckets[phys].lanes.empty())
+      return nullptr;
     return &buckets[phys];
   }
 };
@@ -1543,7 +1545,8 @@ static bool baseFits(IntervalGroup *group, unsigned base,
                      const AssignedRegisterIndex &assigned,
                      const wave::WaveAMDKernelEntryRegs &regs) {
   recordBaseFits(assigned);
-  for (auto [laneIndex, lane] : llvm::enumerate(group->intervals)) {
+  for (unsigned laneIndex : llvm::seq<unsigned>(0, group->intervals.size())) {
+    Interval *lane = group->intervals[laneIndex];
     if (!hasAssignedLanePayload(lane))
       continue;
     if (laneConflictsWithAssigned(lane, base + laneIndex, group, assigned,

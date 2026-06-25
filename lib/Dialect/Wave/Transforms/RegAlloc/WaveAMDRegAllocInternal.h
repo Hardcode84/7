@@ -1129,20 +1129,6 @@ inline bool isMemorySpillProviderRegClass(waveamdmachine::RegClass regClass) {
   return regClass == waveamdmachine::RegClass::VGPR;
 }
 
-inline bool isMemorySpillTempGroup(IntervalGroup *group) {
-  if (!group)
-    return false;
-  bool sawValue = false;
-  for (Interval *interval : group->intervals) {
-    for (Value value : interval->values) {
-      sawValue = true;
-      if (!isRegAllocTempOp(value.getDefiningOp()))
-        return false;
-    }
-  }
-  return sawValue;
-}
-
 inline bool isMemorySpillProviderCandidateGroup(IntervalGroup *group,
                                                 unsigned position) {
   if (!group || group->plannedPressureRelief || group->reserved ||
@@ -1163,7 +1149,7 @@ inline bool isMemorySpillProviderEligibleGroup(IntervalGroup *group,
       llvm::all_of(group->intervals,
                    [](Interval *lane) { return !lane->nonPromotable; }))
     return true;
-  return isMemorySpillTempGroup(group);
+  return false;
 }
 
 inline bool isMemorySpillEligibleGroup(IntervalGroup *group,

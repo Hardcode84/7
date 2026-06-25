@@ -264,6 +264,8 @@ struct AssignedRegisterClassIndex {
   const AssignedLaneBucket *lookup(unsigned phys) const {
     if (phys >= buckets.size())
       return nullptr;
+    if (buckets[phys].lanes.empty())
+      return nullptr;
     return &buckets[phys];
   }
 };
@@ -365,7 +367,8 @@ laneConflictsWithAssigned(Interval *lane, unsigned phys, IntervalGroup *group,
 static bool baseFits(IntervalGroup *group, unsigned base,
                      const AssignedRegisterIndex &assigned,
                      const wave::WaveAMDKernelEntryRegs &regs) {
-  for (auto [laneIndex, lane] : llvm::enumerate(group->intervals)) {
+  for (unsigned laneIndex : llvm::seq<unsigned>(0, group->intervals.size())) {
+    Interval *lane = group->intervals[laneIndex];
     if (!hasAssignedLanePayload(lane))
       continue;
     if (laneConflictsWithAssigned(lane, base + laneIndex, group, assigned,
@@ -377,16 +380,15 @@ static bool baseFits(IntervalGroup *group, unsigned base,
 
 static std::optional<unsigned>
 findFreeBase(IntervalGroup *group, RegisterBudgets budgets,
-             ArrayRef<IntervalGroup *> assigned,
+             const AssignedRegisterIndex &assigned,
              const wave::WaveAMDKernelEntryRegs &regs) {
-  AssignedRegisterIndex index = buildAssignedRegisterIndex(assigned);
   unsigned width = group->intervals.size();
   unsigned budget = getBudget(budgets, group->storageClass);
   if (width == 0 || width > budget)
     return std::nullopt;
   unsigned align = std::max<unsigned>(1, llvm::PowerOf2Ceil(width));
   for (unsigned base = 0; base <= budget - width; base += align)
-    if (baseFits(group, base, index, regs))
+    if (baseFits(group, base, assigned, regs))
       return base;
   return std::nullopt;
 }
@@ -536,7 +538,7 @@ static bool canPromote(IntervalGroup *group, RegisterBudgets budgets) {
 }
 
 static bool canFitPromotionTarget(IntervalGroup *group,
-                                  ArrayRef<IntervalGroup *> assigned,
+                                  const AssignedRegisterIndex &assigned,
                                   RegisterBudgets budgets,
                                   const wave::WaveAMDKernelEntryRegs &regs) {
   std::optional<waveamdmachine::RegClass> next =
@@ -1362,9 +1364,10 @@ public:
   LogicalResult collectCandidates(
       const wave::WaveAMDPressureReliefQuery &query,
       wave::WaveAMDPressureReliefCandidateList &candidates) const override {
+    AssignedRegisterIndex assigned = buildAssignedRegisterIndex(groups);
     for (IntervalGroup *group : groups)
-      collect(group, candidates, query.failure);
-    collect(request, candidates, query.failure);
+      collect(group, candidates, query.failure, assigned);
+    collect(request, candidates, query.failure, assigned);
     return success();
   }
 
@@ -1623,44 +1626,50 @@ private:
 
   void collect(IntervalGroup *group,
                wave::WaveAMDPressureReliefCandidateList &candidates,
-               const wave::WaveAMDPressureFailure *failure) const {
+               const wave::WaveAMDPressureFailure *failure,
+               const AssignedRegisterIndex &assigned) const {
     if (!group || !isLiveAt(group, position) || !canPromote(group, budgets))
       return;
     std::optional<waveamdmachine::RegClass> target =
         getNextRegClass(group->storageClass);
     assert(target && "canPromote checked promotion target");
-    bool targetFits = canFitPromotionTarget(group, groups, budgets, regs);
+    bool targetFits = canFitPromotionTarget(group, assigned, budgets, regs);
     std::unique_ptr<BankPromotionCandidate> candidate =
         std::make_unique<BankPromotionCandidate>(
             group, group->storageClass, *target,
             getPromotionScore(group, position, inventory));
-    if (!targetFits || !shouldKeepCandidate(*candidate, failure))
+    if (!targetFits || !shouldKeepCandidate(*candidate, failure, assigned))
       return;
     candidates.push_back(std::move(candidate));
   }
 
   bool shouldKeepCandidate(const BankPromotionCandidate &candidate,
-                           const wave::WaveAMDPressureFailure *failure) const {
+                           const wave::WaveAMDPressureFailure *failure,
+                           const AssignedRegisterIndex &assigned) const {
     if (!failure)
       return true;
     if (candidate.reducesPressureFailure(*failure))
       return true;
-    return hasBlockedDirectReliefPromotion(candidate.getSourceClass(),
-                                           *failure);
+    return hasBlockedDirectReliefPromotion(candidate.getSourceClass(), *failure,
+                                           assigned);
   }
 
-  bool hasBlockedDirectReliefPromotion(
-      waveamdmachine::RegClass targetClass,
-      const wave::WaveAMDPressureFailure &failure) const {
+  bool
+  hasBlockedDirectReliefPromotion(waveamdmachine::RegClass targetClass,
+                                  const wave::WaveAMDPressureFailure &failure,
+                                  const AssignedRegisterIndex &assigned) const {
     for (IntervalGroup *group : groups)
-      if (isBlockedDirectReliefPromotion(group, targetClass, failure))
+      if (isBlockedDirectReliefPromotion(group, targetClass, failure, assigned))
         return true;
-    return isBlockedDirectReliefPromotion(request, targetClass, failure);
+    return isBlockedDirectReliefPromotion(request, targetClass, failure,
+                                          assigned);
   }
 
-  bool isBlockedDirectReliefPromotion(
-      IntervalGroup *group, waveamdmachine::RegClass targetClass,
-      const wave::WaveAMDPressureFailure &failure) const {
+  bool
+  isBlockedDirectReliefPromotion(IntervalGroup *group,
+                                 waveamdmachine::RegClass targetClass,
+                                 const wave::WaveAMDPressureFailure &failure,
+                                 const AssignedRegisterIndex &assigned) const {
     if (!group || !isLiveAt(group, position) || !canPromote(group, budgets))
       return false;
     std::optional<waveamdmachine::RegClass> directTarget =
@@ -1672,7 +1681,7 @@ private:
         group, group->storageClass, *directTarget,
         getPromotionScore(group, position, inventory));
     return candidate.reducesPressureFailure(failure) &&
-           !canFitPromotionTarget(group, groups, budgets, regs);
+           !canFitPromotionTarget(group, assigned, budgets, regs);
   }
 
   ArrayRef<IntervalGroup *> groups;
