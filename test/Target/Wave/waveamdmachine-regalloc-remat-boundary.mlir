@@ -66,6 +66,46 @@ func.func @combined_pressure_remat_reuses_live_intermediate()
   return
 }
 
+// CHECK-LABEL: func.func @combined_pressure_remat_tuple_keeps_template_operands
+// CHECK-SAME: waveamdmachine.regalloc_assignments
+// CHECK: [[RT_ZERO:%.*]] = waveamdmachine.imm 0
+// CHECK: waveamdmachine.uninit
+// CHECK: [[RT_V0:%.*]] = waveamdmachine.v_mov_b32_tuple [[RT_ZERO]]
+// CHECK-NEXT: [[RT_V1:%.*]] = waveamdmachine.v_mov_b32_tuple [[RT_ZERO]]
+// CHECK-NEXT: waveamdmachine.v_add_u32 [[RT_V0]], [[RT_V1]]
+// CHECK-NEXT: [[RT_LO:%.*]] = waveamdmachine.v_mov_b32_tuple [[RT_ZERO]]
+// CHECK-NEXT: [[RT_HI:%.*]] = waveamdmachine.v_mov_b32_tuple [[RT_ZERO]]
+// CHECK-NEXT: [[RT_TUPLE:%.*]] = waveamdmachine.tuple_from_elements [[RT_LO]], [[RT_HI]]
+// CHECK-NEXT: waveamdmachine.v_accvgpr_write_b32_tuple [[RT_TUPLE]]
+func.func @combined_pressure_remat_tuple_keeps_template_operands()
+    attributes {waveamdmachine.target_waves = 4 : i64} {
+  %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+  %ag = waveamdmachine.uninit : !waveamdmachine.reg<agpr, 112>
+  %lo = waveamdmachine.v_mov_b32_tuple %zero {registers = 4 : i64}
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 4>
+  %hi = waveamdmachine.v_mov_b32_tuple %zero {registers = 4 : i64}
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 4>
+  %tuple = waveamdmachine.tuple_from_elements %lo, %hi
+      : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>)
+        -> !waveamdmachine.reg<vgpr, 8>
+  %v0 = waveamdmachine.v_mov_b32_tuple %zero {registers = 1 : i64}
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
+  %v1 = waveamdmachine.v_mov_b32_tuple %zero {registers = 1 : i64}
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
+  %u0 = waveamdmachine.v_add_u32 %v0, %v1
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %acc = waveamdmachine.v_accvgpr_write_b32_tuple %tuple
+      : (!waveamdmachine.reg<vgpr, 8>) -> !waveamdmachine.reg<agpr, 8>
+  %read = waveamdmachine.v_accvgpr_read_b32_tuple %acc
+      : (!waveamdmachine.reg<agpr, 8>) -> !waveamdmachine.reg<vgpr, 8>
+  %parts:2 = waveamdmachine.tuple_to_elements %ag
+      : (!waveamdmachine.reg<agpr, 112>)
+      -> (!waveamdmachine.reg<agpr, 56>, !waveamdmachine.reg<agpr, 56>)
+  waveamdmachine.s_endpgm
+  return
+}
+
 // CHECK-LABEL: func.func @combined_pressure_loop_weight_prefers_outer_use
 // CHECK-SAME: waveamdmachine.regalloc_assignments
 // CHECK: [[ZERO:%.*]] = waveamdmachine.imm 0
@@ -154,6 +194,108 @@ func.func @combined_pressure_loop_weight_prefers_outer_use()
   %parts:2 = waveamdmachine.tuple_to_elements %ag
       : (!waveamdmachine.reg<agpr, 120>)
       -> (!waveamdmachine.reg<agpr, 60>, !waveamdmachine.reg<agpr, 60>)
+  waveamdmachine.s_endpgm
+  return
+}
+
+// CHECK-LABEL: func.func @loop_init_recursive_remat
+// CHECK-SAME: waveamdmachine.regalloc_assignments
+// CHECK: [[LIR_ZERO:%.*]] = waveamdmachine.imm 0
+// CHECK: [[LIR_ONE:%.*]] = waveamdmachine.imm 1
+// CHECK: [[LIR_SEVEN:%.*]] = waveamdmachine.imm 7
+// CHECK: [[LIR_GAP0:%.*]] = waveamdmachine.uninit
+// CHECK: [[LIR_GAP1:%.*]] = waveamdmachine.uninit
+// CHECK: [[LIR_GAP:%.*]] = waveamdmachine.v_add_u32 [[LIR_GAP0]], [[LIR_GAP1]]
+// CHECK-NEXT: [[LIR_LANE:%.*]] = waveamdmachine.v_mov_b32_tuple [[LIR_ZERO]]
+// CHECK-NEXT: [[LIR_MUL:%.*]] = waveamdmachine.v_mul_lo_u32 [[LIR_LANE]], [[LIR_SEVEN]]
+// CHECK-NEXT: [[LIR_ADDR:%.*]] = waveamdmachine.v_lshlrev_b32 [[LIR_MUL]], [[LIR_ONE]]
+// CHECK-NEXT: waveamdmachine.uniform_loop {{.*}} carries([[LIR_ADDR]]
+func.func @loop_init_recursive_remat()
+    attributes {wave.kernel, waveamdmachine.target_waves = 4 : i64} {
+  %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+  %one = waveamdmachine.imm 1 : !waveamdmachine.imm
+  %seven = waveamdmachine.imm 7 : !waveamdmachine.imm
+  %cond = waveamdmachine.s_cmp_lt_i32 %zero, %one
+      : (!waveamdmachine.imm, !waveamdmachine.imm)
+        -> !waveamdmachine.reg<scc, 1>
+  %lane = waveamdmachine.v_mov_b32_tuple %zero {registers = 1 : i64}
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
+  %mul = waveamdmachine.v_mul_lo_u32 %lane, %seven
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.imm)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %addr = waveamdmachine.v_lshlrev_b32 %mul, %one
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.imm)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %addr_pre = waveamdmachine.v_readfirstlane_b32 %addr
+      : (!waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<sgpr, 1>
+  %gap0 = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1>
+  %gap1 = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1>
+  %gap2 = waveamdmachine.v_add_u32 %gap0, %gap1
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %loop = waveamdmachine.uniform_loop if %cond : !waveamdmachine.reg<scc, 1>
+      carries(%addr : !waveamdmachine.reg<vgpr, 1>) {
+  ^bb0(%carry: !waveamdmachine.reg<vgpr, 1>):
+    %next = waveamdmachine.v_add_u32 %carry, %gap2
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+    waveamdmachine.continue_if %cond : !waveamdmachine.reg<scc, 1>
+        carries(%next : !waveamdmachine.reg<vgpr, 1>)
+  } -> !waveamdmachine.reg<vgpr, 1>
+  %use = waveamdmachine.v_readfirstlane_b32 %loop
+      : (!waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<sgpr, 1>
+  waveamdmachine.s_endpgm
+  return
+}
+
+// CHECK-LABEL: func.func @duplicate_nonadjacent_loop_init_remat
+// CHECK-SAME: waveamdmachine.regalloc_assignments
+// CHECK: [[DN_ZERO:%.*]] = waveamdmachine.imm 0
+// CHECK: [[DN_ONE:%.*]] = waveamdmachine.imm 1
+// CHECK: [[DN_ORIG_LANE:%.*]] = waveamdmachine.v_mov_b32_tuple [[DN_ZERO]]
+// CHECK-NEXT: [[DN_ORIG_ADDR:%.*]] = waveamdmachine.v_add_u32 [[DN_ORIG_LANE]], [[DN_ONE]]
+// CHECK-NEXT: waveamdmachine.v_readfirstlane_b32 [[DN_ORIG_ADDR]]
+// CHECK-NEXT: [[DN_GAP:%.*]] = waveamdmachine.v_mov_b32_tuple [[DN_ZERO]]
+// CHECK-NEXT: [[DN_LANE0:%.*]] = waveamdmachine.v_mov_b32_tuple [[DN_ZERO]]
+// CHECK-NEXT: [[DN_ADDR0:%.*]] = waveamdmachine.v_add_u32 [[DN_LANE0]], [[DN_ONE]]
+// CHECK-NEXT: [[DN_LANE1:%.*]] = waveamdmachine.v_mov_b32_tuple [[DN_ZERO]]
+// CHECK-NEXT: [[DN_ADDR1:%.*]] = waveamdmachine.v_add_u32 [[DN_LANE1]], [[DN_ONE]]
+// CHECK-NEXT: waveamdmachine.uniform_loop {{.*}} carries([[DN_ADDR0]], [[DN_ADDR1]]
+func.func @duplicate_nonadjacent_loop_init_remat()
+    attributes {wave.kernel, waveamdmachine.target_waves = 4 : i64} {
+  %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+  %one = waveamdmachine.imm 1 : !waveamdmachine.imm
+  %cond = waveamdmachine.s_cmp_lt_i32 %zero, %one
+      : (!waveamdmachine.imm, !waveamdmachine.imm)
+        -> !waveamdmachine.reg<scc, 1>
+  %lane = waveamdmachine.v_mov_b32_tuple %zero {registers = 1 : i64}
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
+  %addr = waveamdmachine.v_add_u32 %lane, %one
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.imm)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %addr_pre = waveamdmachine.v_readfirstlane_b32 %addr
+      : (!waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<sgpr, 1>
+  %gap = waveamdmachine.v_mov_b32_tuple %zero {registers = 1 : i64}
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
+  %loop:2 = waveamdmachine.uniform_loop if %cond
+      : !waveamdmachine.reg<scc, 1>
+      carries(%addr, %addr :
+              !waveamdmachine.reg<vgpr, 1>,
+              !waveamdmachine.reg<vgpr, 1>) {
+  ^bb0(%carry0: !waveamdmachine.reg<vgpr, 1>,
+       %carry1: !waveamdmachine.reg<vgpr, 1>):
+    %next0 = waveamdmachine.v_add_u32 %carry0, %gap
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+    waveamdmachine.continue_if %cond : !waveamdmachine.reg<scc, 1>
+        carries(%next0, %carry1 :
+                !waveamdmachine.reg<vgpr, 1>,
+                !waveamdmachine.reg<vgpr, 1>)
+  } -> !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>
+  %use0 = waveamdmachine.v_readfirstlane_b32 %loop#0
+      : (!waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<sgpr, 1>
+  %use1 = waveamdmachine.v_readfirstlane_b32 %loop#1
+      : (!waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<sgpr, 1>
   waveamdmachine.s_endpgm
   return
 }

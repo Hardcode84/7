@@ -92,19 +92,31 @@ static SmallVector<Value> getGroupValues(IntervalGroup *group,
   return values;
 }
 
-static void eraseDeadRematTree(Operation *op) {
-  if (!op || op->getNumResults() == 0)
-    return;
-  if (!std::all_of(op->result_begin(), op->result_end(),
-                   [](Value result) { return result.use_empty(); }))
-    return;
-  if (isRegAllocTempOp(op) || isMemoryIssuerOp(op) ||
-      !isCheapVGPRPressureReliefExpr(op))
-    return;
-  SmallVector<Value> operands(op->getOperands());
-  op->erase();
-  for (Value operand : operands)
-    eraseDeadRematTree(operand.getDefiningOp());
+static bool allResultsDead(Operation *op) {
+  return llvm::all_of(op->getResults(),
+                      [](Value result) { return result.use_empty(); });
+}
+
+static bool isDeadRematOp(Operation *op) {
+  return op && op->getNumResults() != 0 && allResultsDead(op) &&
+         !isRegAllocTempOp(op) && !isMemoryIssuerOp(op) &&
+         isCheapVGPRPressureReliefExpr(op);
+}
+
+static void eraseDeadRematTrees(ArrayRef<Operation *> roots) {
+  SmallVector<Operation *> worklist(roots);
+  DenseSet<Operation *> erased;
+  while (!worklist.empty()) {
+    Operation *op = worklist.pop_back_val();
+    if (!op || erased.contains(op) || !isDeadRematOp(op))
+      continue;
+    SmallVector<Value> operands(op->getOperands());
+    erased.insert(op);
+    op->erase();
+    for (Value operand : operands)
+      if (Operation *def = operand.getDefiningOp())
+        worklist.push_back(def);
+  }
 }
 
 struct RematValueSlot {
@@ -239,9 +251,16 @@ public:
                   wave::WaveAMDPressureReliefMaterializationContext &context,
                   OpBuilder &builder) const override {
     const RematPlan &remat = static_cast<const RematPlan &>(plan);
+    llvm::SmallDenseSet<Value, 8> plannedValues = getPlannedValues(remat);
+    SmallVector<Operation *> cleanupRoots;
     for (const RematValueSlot &slot : remat.getValueSlots())
-      if (failed(materializeValue(slot.value, plan, context, builder)))
+      if (Operation *def = slot.value.getDefiningOp())
+        cleanupRoots.push_back(def);
+    for (const RematValueSlot &slot : remat.getValueSlots())
+      if (failed(materializeValue(slot.value, plan, context, builder,
+                                  plannedValues)))
         return failure();
+    eraseDeadRematTrees(cleanupRoots);
     return success();
   }
 
@@ -265,6 +284,13 @@ public:
 
 private:
   enum class RematOperandPlan { UseOriginal, Rematerialize, Invalid };
+
+  llvm::SmallDenseSet<Value, 8> getPlannedValues(const RematPlan &remat) const {
+    llvm::SmallDenseSet<Value, 8> plannedValues;
+    for (const RematValueSlot &slot : remat.getValueSlots())
+      plannedValues.insert(slot.value);
+    return plannedValues;
+  }
 
   bool hasSimpleUses(Value value, SmallVectorImpl<OpOperand *> &uses) const {
     Operation *def = value.getDefiningOp();
@@ -458,13 +484,9 @@ private:
     return count;
   }
 
-  bool valueCoversWholeGroup(IntervalGroup *group, Value value) const {
-    auto type = dyn_cast<waveamdmachine::RegType>(value.getType());
-    if (!type ||
-        static_cast<unsigned>(type.getWidth()) != group->intervals.size())
-      return false;
+  bool valueBelongsToGroup(IntervalGroup *group, Value value) const {
     Interval *first = inventory.intervalFor.lookup(value);
-    return first && first->group == group && first == group->intervals.front();
+    return first && first->group == group;
   }
 
   unsigned getLiveLaneCount(IntervalGroup *group) const {
@@ -490,21 +512,21 @@ private:
     return cost;
   }
 
-  bool isCandidateRoot(IntervalGroup *group, Value value) const {
+  bool isCandidateSlotValue(IntervalGroup *group, Value value) const {
     auto type = dyn_cast<waveamdmachine::RegType>(value.getType());
     Operation *def = value.getDefiningOp();
     if (!type || type.getRegClass() != waveamdmachine::RegClass::VGPR)
       return false;
     if (type.getWidth() == 0 || !def)
       return false;
-    if (isRegAllocTempOp(def) || !isCheapVGPRPressureReliefRootExpr(def))
+    if (isRegAllocTempOp(def) || !isCheapVGPRPressureReliefExpr(def))
       return false;
-    return valueCoversWholeGroup(group, value);
+    return valueBelongsToGroup(group, value);
   }
 
   FailureOr<RematValueSlot> getGroupValueSlot(IntervalGroup *group,
                                               Value value) const {
-    if (!isCandidateRoot(group, value))
+    if (!isCandidateSlotValue(group, value))
       return failure();
     SmallVector<OpOperand *> uses;
     if (!hasSimpleUses(value, uses))
@@ -621,7 +643,8 @@ private:
   LogicalResult
   materializeValue(Value value, const wave::WaveAMDPressureReliefPlan &plan,
                    wave::WaveAMDPressureReliefMaterializationContext &context,
-                   OpBuilder &builder) const {
+                   OpBuilder &builder,
+                   const llvm::SmallDenseSet<Value, 8> &plannedValues) const {
     Operation *def = value.getDefiningOp();
     if (!def || def->getNumResults() == 0)
       return mlir::emitError(value.getLoc())
@@ -639,6 +662,8 @@ private:
     for (OpOperand *use : uses) {
       if (use->get() != value)
         continue;
+      if (isInternalTupleFromElementsUse(use, plannedValues))
+        continue;
       Operation *user = use->getOwner();
       FailureOr<Value> replacement = materializeTreeAt(
           value, user, plan, context, builder, rematForUser[user]);
@@ -646,7 +671,6 @@ private:
         return failure();
       use->set(*replacement);
     }
-    eraseDeadRematTree(def);
     return success();
   }
 

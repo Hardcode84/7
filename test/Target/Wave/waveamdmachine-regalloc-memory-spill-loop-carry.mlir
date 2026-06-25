@@ -1,8 +1,8 @@
 // RUN: rm -rf %t && split-file %s %t
 // RUN: wave-opt --waveamd-reg-alloc='vgpr-limit=15 agpr-limit=0' \
 // RUN:   --waveamd-resource-info %t/result-use.mlir | FileCheck %s --check-prefix=RESULT
-// RUN: not wave-opt --waveamd-reg-alloc='vgpr-limit=15 agpr-limit=0' \
-// RUN:   --waveamd-resource-info %t/preheader-use.mlir 2>&1 | FileCheck %s --check-prefix=PRE
+// RUN: wave-opt --waveamd-reg-alloc='vgpr-limit=15 agpr-limit=0' \
+// RUN:   --waveamd-resource-info %t/preheader-use.mlir | FileCheck %s --check-prefix=PRE
 // RUN: wave-opt --waveamd-reg-alloc='mark-overflow=true vgpr-limit=15 agpr-limit=0' \
 // RUN:   --waveamd-resource-info %t/lds-preheader-use.mlir | FileCheck %s --check-prefix=LDSPRE
 // RUN: not wave-opt --waveamd-reg-alloc='vgpr-limit=15 agpr-limit=0' \
@@ -15,8 +15,8 @@
 // RUN:   --waveamd-resource-info %t/mixed-providers.mlir | FileCheck %s --check-prefix=MIXED
 // RUN: wave-opt --waveamd-reg-alloc='vgpr-limit=15 agpr-limit=0' \
 // RUN:   --waveamd-resource-info %t/nested.mlir | FileCheck %s --check-prefix=NEST
-// RUN: not wave-opt --waveamd-reg-alloc='vgpr-limit=15 agpr-limit=0' \
-// RUN:   --waveamd-resource-info %t/nested-preheader-use.mlir 2>&1 | FileCheck %s --check-prefix=NESTPRE
+// RUN: wave-opt --waveamd-reg-alloc='vgpr-limit=15 agpr-limit=0' \
+// RUN:   --waveamd-resource-info %t/nested-preheader-use.mlir | FileCheck %s --check-prefix=NESTPRE
 // RUN: not wave-opt --waveamd-reg-alloc='vgpr-limit=15 agpr-limit=0' \
 // RUN:   %t/init-use-after-loop-no-candidate.mlir 2>&1 | FileCheck %s --check-prefix=NO_CANDIDATE
 // RUN: wave-opt --waveamd-reg-alloc='vgpr-limit=23 agpr-limit=0' \
@@ -112,8 +112,16 @@ func.func @scalar_vgpr_loop_carry_scratch_spill()
 //--- preheader-use.mlir
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
-// PRE: error: waveamd-reg-alloc ran out of VGPR registers
-// PRE: memory spill reject detail: eligible=2, total=2
+// PRE-LABEL: func.func @scratch_loop_carry_preheader_init_use
+// PRE-SAME: waveamdmachine.regalloc_assignments
+// PRE-SAME: waveamdmachine.scratch_spill_bytes = 32 : i64
+// PRE: %[[ORIG:.+]] = waveamdmachine.tuple_from_elements
+// PRE: waveamdmachine.tuple_to_elements %[[ORIG]]
+// PRE: %[[REMAT_LO:.+]] = waveamdmachine.v_mov_b32_tuple
+// PRE: %[[REMAT_HI:.+]] = waveamdmachine.v_mov_b32_tuple
+// PRE: %[[REMAT:.+]] = waveamdmachine.tuple_from_elements %[[REMAT_LO]], %[[REMAT_HI]]
+// PRE: %[[STORE:.+]] = waveamdmachine.scratch_store_tuple_b32 {{.*}}, %[[REMAT]]
+// PRE: waveamdmachine.uniform_loop {{.*}} carries(%[[STORE]] : !waveamdmachine.mem.token)
 func.func @scratch_loop_carry_preheader_init_use()
     attributes {wave.kernel, waveamdmachine.target_waves = 4 : i64} {
   %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
@@ -439,8 +447,14 @@ func.func @scratch_loop_carry_nested()
 //--- nested-preheader-use.mlir
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
-// NESTPRE: error: waveamd-reg-alloc ran out of VGPR registers
-// NESTPRE: memory spill reject detail: eligible=2, total=2
+// NESTPRE-LABEL: func.func @scratch_loop_carry_nested_preheader_init_use
+// NESTPRE-SAME: waveamdmachine.regalloc_assignments
+// NESTPRE-SAME: waveamdmachine.scratch_spill_bytes = 32 : i64
+// NESTPRE: waveamdmachine.uniform_if
+// NESTPRE: waveamdmachine.tuple_to_elements
+// NESTPRE: %[[REMAT:.+]] = waveamdmachine.v_mov_b32_tuple
+// NESTPRE: %[[STORE:.+]] = waveamdmachine.scratch_store_tuple_b32 {{.*}}, %[[REMAT]]
+// NESTPRE: waveamdmachine.uniform_loop {{.*}} carries(%[[STORE]] : !waveamdmachine.mem.token)
 func.func @scratch_loop_carry_nested_preheader_init_use()
     attributes {wave.kernel, waveamdmachine.target_waves = 4 : i64} {
   %zero = waveamdmachine.imm 0 : !waveamdmachine.imm

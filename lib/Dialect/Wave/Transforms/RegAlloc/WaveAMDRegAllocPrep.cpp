@@ -9,9 +9,11 @@
 #include "WaveAMDRegAllocPrep.h"
 
 #include "../WaveAMDHardwareResources.h"
+#include "WaveAMDRegAllocInternal.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachine.h"
 #include "mlir/IR/Builders.h"
+#include "mlir/IR/IRMapping.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
@@ -54,6 +56,128 @@ static std::optional<waveamdmachine::RegType> copyableRegType(Value v) {
   return rt;
 }
 
+static waveamdmachine::RegType
+getUnassignedRegType(waveamdmachine::RegType type) {
+  return waveamdmachine::RegType::get(type.getContext(), type.getRegClass(),
+                                      type.getWidth(), /*index=*/-1);
+}
+
+static bool allResultsDead(Operation *op) {
+  return llvm::all_of(op->getResults(),
+                      [](Value result) { return result.use_empty(); });
+}
+
+static bool isDeadCheapRegOp(Operation *op) {
+  return op && op->getNumResults() != 0 && allResultsDead(op) &&
+         wave::regalloc::isCheapVGPRPressureReliefExpr(op);
+}
+
+static void eraseDeadCheapRegOps(ArrayRef<Operation *> roots) {
+  SmallVector<Operation *> worklist(roots);
+  DenseSet<Operation *> erased;
+  while (!worklist.empty()) {
+    Operation *op = worklist.pop_back_val();
+    if (!op || erased.contains(op) || !isDeadCheapRegOp(op))
+      continue;
+    SmallVector<Value> operands(op->getOperands());
+    erased.insert(op);
+    op->erase();
+    for (Value operand : operands)
+      if (Operation *def = operand.getDefiningOp())
+        worklist.push_back(def);
+  }
+}
+
+static bool canRematerializeDuplicateRegValue(Value v,
+                                              DenseSet<Value> &visiting);
+
+static bool canUseOriginalDuplicateOperand(Value operand) {
+  if (!isReg(operand))
+    return true;
+  std::optional<waveamdmachine::RegType> rt = trackedRegType(operand);
+  if (!rt)
+    return true;
+  return isSGPR(*rt);
+}
+
+static bool canRematerializeDuplicateOperand(Value operand,
+                                             DenseSet<Value> &visiting) {
+  if (canUseOriginalDuplicateOperand(operand))
+    return true;
+  std::optional<waveamdmachine::RegType> rt = trackedRegType(operand);
+  if (!rt || !isVGPR(*rt))
+    return false;
+  return canRematerializeDuplicateRegValue(operand, visiting);
+}
+
+static bool canRematerializeDuplicateRegValue(Value v,
+                                              DenseSet<Value> &visiting) {
+  std::optional<waveamdmachine::RegType> rt = trackedRegType(v);
+  if (!rt || !isVGPR(*rt))
+    return false;
+  Operation *def = v.getDefiningOp();
+  if (!def || !wave::regalloc::isCheapVGPRPressureReliefExpr(def))
+    return false;
+  if (isa<waveamdmachine::VWorkitemIdXOp>(def))
+    return false;
+  if (!visiting.insert(v).second)
+    return false;
+  bool canRemat = llvm::all_of(def->getOperands(), [&](Value operand) {
+    return canRematerializeDuplicateOperand(operand, visiting);
+  });
+  visiting.erase(v);
+  return canRemat;
+}
+
+static FailureOr<Value>
+rematerializeDuplicateRegValue(OpBuilder &builder, Location loc, Value v,
+                               DenseMap<Value, Value> &cache);
+
+static FailureOr<Value>
+mapRematerializedOperand(OpBuilder &builder, Location loc, Value operand,
+                         DenseMap<Value, Value> &cache) {
+  if (canUseOriginalDuplicateOperand(operand))
+    return operand;
+  DenseSet<Value> visiting;
+  if (!canRematerializeDuplicateRegValue(operand, visiting))
+    return emitError(loc) << "waveamd-reg-alloc cannot rematerialize operand "
+                             "while duplicating register value";
+  return rematerializeDuplicateRegValue(builder, loc, operand, cache);
+}
+
+static FailureOr<Value>
+rematerializeDuplicateRegValue(OpBuilder &builder, Location loc, Value v,
+                               DenseMap<Value, Value> &cache) {
+  if (Value cached = cache.lookup(v))
+    return cached;
+  Operation *def = v.getDefiningOp();
+  if (!def)
+    return emitError(loc) << "waveamd-reg-alloc cannot rematerialize block "
+                             "argument while duplicating register value";
+
+  IRMapping mapper;
+  for (Value operand : def->getOperands()) {
+    FailureOr<Value> replacement =
+        mapRematerializedOperand(builder, loc, operand, cache);
+    if (failed(replacement))
+      return failure();
+    mapper.map(operand, *replacement);
+  }
+
+  Operation *clone = builder.clone(*def, mapper);
+  for (OpResult result : clone->getResults()) {
+    auto resultType = dyn_cast<waveamdmachine::RegType>(result.getType());
+    if (!resultType)
+      continue;
+    result.setType(getUnassignedRegType(resultType));
+  }
+
+  for (auto [original, cloned] :
+       llvm::zip(def->getResults(), clone->getResults()))
+    cache[original] = cloned;
+  return clone->getResult(cast<OpResult>(v).getResultNumber());
+}
+
 static bool hasCloneableAGPRDef(Value v) {
   if (!isReg(v))
     return false;
@@ -65,38 +189,107 @@ static bool hasCloneableAGPRDef(Value v) {
                          waveamdmachine::VAccvgprWriteB32TupleOp>(def);
 }
 
+static FailureOr<Value>
+cloneImmediateTupleMove(OpBuilder &builder, Value v,
+                        waveamdmachine::RegType resultType) {
+  auto mov = v.getDefiningOp<waveamdmachine::VMovB32TupleOp>();
+  if (!mov || !mov.getSource().getDefiningOp<waveamdmachine::ImmOp>())
+    return failure();
+  Operation *clone = builder.clone(*mov);
+  clone->getResult(0).setType(resultType);
+  return clone->getResult(0);
+}
+
+static FailureOr<Value> cloneAGPRDuplicate(OpBuilder &builder, Value v,
+                                           waveamdmachine::RegType resultType) {
+  if (!hasCloneableAGPRDef(v))
+    return failure();
+  Operation *clone = builder.clone(*v.getDefiningOp());
+  clone->getResult(0).setType(resultType);
+  return clone->getResult(0);
+}
+
+static Value copyVGPRDuplicate(OpBuilder &builder, Location loc, Value v,
+                               waveamdmachine::RegType resultType,
+                               waveamdmachine::RegType sourceType) {
+  auto copy =
+      waveamdmachine::VMovB32TupleOp::create(builder, loc, resultType, v);
+  copy->setAttr("registers", builder.getI64IntegerAttr(sourceType.getWidth()));
+  return copy.getResult();
+}
+
+static Value copySGPRDuplicate(OpBuilder &builder, Location loc, Value v,
+                               waveamdmachine::RegType resultType,
+                               waveamdmachine::RegType sourceType) {
+  auto copy =
+      waveamdmachine::SMovB32TupleOp::create(builder, loc, resultType, v);
+  copy->setAttr("registers", builder.getI64IntegerAttr(sourceType.getWidth()));
+  return copy.getResult();
+}
+
 static FailureOr<Value> duplicateRegValue(OpBuilder &builder, Location loc,
-                                          Value v) {
+                                          Value v,
+                                          bool rematerializeVGPR = false) {
   auto rt = cast<waveamdmachine::RegType>(v.getType());
-  waveamdmachine::RegType resultType = waveamdmachine::RegType::get(
-      rt.getContext(), rt.getRegClass(), rt.getWidth(), /*index=*/-1);
-  if (auto mov = v.getDefiningOp<waveamdmachine::VMovB32TupleOp>())
-    if (mov.getSource().getDefiningOp<waveamdmachine::ImmOp>()) {
-      Operation *clone = builder.clone(*mov);
-      clone->getResult(0).setType(resultType);
-      return clone->getResult(0);
+  waveamdmachine::RegType resultType = getUnassignedRegType(rt);
+  if (rematerializeVGPR && isVGPR(rt)) {
+    DenseSet<Value> visiting;
+    if (canRematerializeDuplicateRegValue(v, visiting)) {
+      DenseMap<Value, Value> cache;
+      return rematerializeDuplicateRegValue(builder, loc, v, cache);
     }
-  if (isAGPR(rt) && hasCloneableAGPRDef(v)) {
-    Operation *clone = builder.clone(*v.getDefiningOp());
-    clone->getResult(0).setType(resultType);
-    return clone->getResult(0);
   }
-  if (isVGPR(rt)) {
-    auto copy =
-        waveamdmachine::VMovB32TupleOp::create(builder, loc, resultType, v);
-    copy->setAttr("registers", builder.getI64IntegerAttr(rt.getWidth()));
-    return copy.getResult();
-  }
-  if (isSGPR(rt)) {
-    auto copy =
-        waveamdmachine::SMovB32TupleOp::create(builder, loc, resultType, v);
-    copy->setAttr("registers", builder.getI64IntegerAttr(rt.getWidth()));
-    return copy.getResult();
-  }
-  if (isAGPR(rt))
+
+  FailureOr<Value> immClone = cloneImmediateTupleMove(builder, v, resultType);
+  if (succeeded(immClone))
+    return *immClone;
+
+  if (isAGPR(rt)) {
+    FailureOr<Value> agprClone = cloneAGPRDuplicate(builder, v, resultType);
+    if (succeeded(agprClone))
+      return *agprClone;
     return emitError(loc) << "waveamd-reg-alloc cannot duplicate AGPR value "
                              "before register allocation";
+  }
+
+  if (isVGPR(rt))
+    return copyVGPRDuplicate(builder, loc, v, resultType, rt);
+  if (isSGPR(rt))
+    return copySGPRDuplicate(builder, loc, v, resultType, rt);
   return emitError(loc, "duplicateRegValue: unsupported register class/width");
+}
+
+static Operation *ancestorInBlock(Operation *op, Block *block) {
+  while (op && op->getBlock() != block)
+    op = op->getParentOp();
+  return op;
+}
+
+static bool hasUseBeforeLoop(Value value, waveamdmachine::UniformLoopOp loop) {
+  Block *block = loop->getBlock();
+  for (OpOperand &use : value.getUses()) {
+    Operation *user = use.getOwner();
+    if (user == loop.getOperation())
+      continue;
+    Operation *top = ancestorInBlock(user, block);
+    if (!top || top == loop.getOperation())
+      continue;
+    if (top->isBeforeInBlock(loop.getOperation()))
+      return true;
+  }
+  return false;
+}
+
+static bool shouldRematerializeLoopInit(Value init,
+                                        waveamdmachine::UniformLoopOp loop) {
+  DenseSet<Value> visiting;
+  if (!canRematerializeDuplicateRegValue(init, visiting))
+    return false;
+  Operation *def = init.getDefiningOp();
+  if (def && def->getBlock() == loop->getBlock() &&
+      def->getNextNode() == loop.getOperation())
+    return false;
+  return hasUseBeforeLoop(init, loop);
 }
 
 static LogicalResult splitDuplicateLoopInits(func::FuncOp func) {
@@ -111,12 +304,17 @@ static LogicalResult splitDuplicateLoopInits(func::FuncOp func) {
         seen.insert(init);
         continue;
       }
-      if (seen.insert(init).second)
+      bool repeatedInit = !seen.insert(init).second;
+      bool rematInit = shouldRematerializeLoopInit(init, loop);
+      if (!repeatedInit && !rematInit)
         continue;
-      FailureOr<Value> dup = duplicateRegValue(builder, loop.getLoc(), init);
+      Operation *def = init.getDefiningOp();
+      FailureOr<Value> dup =
+          duplicateRegValue(builder, loop.getLoc(), init, rematInit);
       if (failed(dup))
         return failure();
       loop.getInitsMutable()[i].assign(*dup);
+      eraseDeadCheapRegOps({def});
     }
   }
   return success();
