@@ -15,8 +15,8 @@ AGPR -> Remat -> LDS -> Scratch
 ```
 
 - Query one provider class at a time. If a provider has any legal candidate,
-  choose within that provider and stop. Do not inspect later providers for a
-  cheaper plan.
+  choose a candidate from that provider and stop. Do not inspect later
+  providers for a cheaper plan.
 - Always relieve the entire alias set. No partial-lane, partial-value,
   loop-carry, or provider-specific alias splitting.
 - Accept a legal plan even when it cannot relieve enough pressure by itself.
@@ -35,7 +35,8 @@ AGPR -> Remat -> LDS -> Scratch
 - Base regalloc may:
   - build the failure query at position `P`;
   - iterate providers in fixed order;
-  - select the cheapest candidate from the first provider with legal candidates;
+  - select the cheapest failure-progressing candidate from the first provider
+    with legal candidates;
   - record the chosen plan;
   - insert non-spillable temp live ranges required by planned bridges;
   - restart linear scan.
@@ -45,6 +46,8 @@ AGPR -> Remat -> LDS -> Scratch
 
 - Candidate alias set must intersect the allocation failure point.
 - The live range that failed allocation is eligible for relief.
+- Selection may reject a structurally legal candidate whose planned temps erase
+  its current-failure pressure effect.
 - Candidate cost is common:
   - required bridge count;
   - bridge loop-depth penalty;
@@ -66,12 +69,56 @@ AGPR -> Remat -> LDS -> Scratch
 
 ### Remat
 
-- Candidate is an alias set whose value can be rebuilt from cheap ops.
-- Rebuild expression tree backward per consumer.
-- Every non-rematerialized tracked leaf must be live at every consumer where
-  the root is rematerialized.
-- Tree materialization is delayed. Selection records root, leaves, and bridges.
-- Inputs unavailable at any remat consumer make candidate illegal.
+- Candidate is an alias set whose value can be rebuilt from a cheap pure DAG.
+- Plan is scoped to allocation failure position `P`.
+- Cut original ranges at `P`. Rebuild once at the first external consumer after
+  `P`; later dominated consumers use the rebuilt value.
+- Rebuilt ranges can become later remat candidates if scan fails after the
+  rebuild point.
+- Leaves need not already be live at the rebuild point. Extending cheaper leaves
+  across `P` is legal when net pressure at `P` decreases.
+- Tree materialization is delayed. Selection records root DAG, rebuild point,
+  post-cut uses, leaf pressure deltas, and bridges.
+
+## CSE and Remat Contract
+
+- Machine CSE before regalloc may merge duplicate pure layout/address math
+  across a hot loop. Do not fight this by disabling CSE or marking cheap
+  machine math impure.
+- Remat owns splitting those CSE-created live ranges when they create pressure:
+  a cheap pure value defined before a hot loop, unused inside the loop, and
+  used after the loop must be disposable by rebuilding once at the first
+  pressure-relevant post-loop consumer.
+- This covers cheap WaveAMDMachine layout/address expressions already admitted
+  by remat legality, including shifts, and/xor-style masks, `v_mov_b32_tuple`,
+  simple add trees, tuple joins, and equivalent pure selector output.
+- Legality walks the full value DAG at the rebuild point. Each leaf must be one
+  of:
+  - an anchored hardware/source value modeled available there;
+  - an immediate, scalar, or kernarg value available there;
+  - a tracked value whose interval can be extended across `P` with modeled
+    pressure cost;
+  - another cheap pure op that can be recursively cloned there.
+- Candidate progresses when pressure removed at `P` exceeds pressure added at
+  `P` by leaf extensions, rebuilt ranges, and bridge temps.
+- Fixed hardware inputs such as `v_workitem_id_x`, workgroup id, and fixed
+  kernarg preload sources are anchored values, not free remat ops. Reuse them
+  only when availability and pressure are modeled at the rebuild point; otherwise
+  reject the candidate.
+- Allocation metadata is not fixed-source provenance. Do not treat a value as
+  remat-safe just because it already carries an allocated register index.
+- Materialization must rebuild once at the rebuild point and must not mutate
+  clone templates for later planned slots. Compute planned-value and protected
+  template sets first, skip internal planned template uses, rewrite selected
+  post-cut uses, then erase dead original cheap trees after all clones are
+  emitted.
+- Diagnostics for missed remat opportunities should expose root op, def
+  position, failure position, rebuild point, first post-cut use, relief dwords,
+  added pressure, reject reason, and whether the candidate crosses a loop unused.
+- Validation should include a small lit test and a loop-spanning CSE case:
+  pre-regalloc may contain VGPR address values crossing a hot loop, but
+  post-regalloc should not leave VGPR/AGPR values defined before the loop,
+  unused inside it, and only used after it.
 
 ### LDS
 
