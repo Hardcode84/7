@@ -1100,7 +1100,8 @@ static LogicalResult materializeSGPRPromotion(
   for (Value value : values) {
     if (isa<BlockArgument>(value))
       return mlir::emitError(value.getLoc(), kPassName)
-             << " cannot promote block arguments before bridge insertion";
+             << " bank-promotion materialization does not support block "
+                "arguments";
     if (cast<waveamdmachine::RegType>(value.getType()).getWidth() != 1)
       return mlir::emitError(value.getLoc(), kPassName)
              << " SGPR promotion supports only width-1 values";
@@ -1130,7 +1131,8 @@ static LogicalResult materializeSGPRToAGPRPromotion(
   for (Value value : values) {
     if (isa<BlockArgument>(value))
       return mlir::emitError(value.getLoc(), kPassName)
-             << " cannot promote block arguments before bridge insertion";
+             << " bank-promotion materialization does not support block "
+                "arguments";
     if (cast<waveamdmachine::RegType>(value.getType()).getWidth() != 1)
       return mlir::emitError(value.getLoc(), kPassName)
              << " SGPR promotion supports only width-1 values";
