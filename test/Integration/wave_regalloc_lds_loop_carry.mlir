@@ -4,8 +4,8 @@
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx90a"} {
 
 // CHECK-LABEL: func.func @regalloc_lds_spill_loop_carry_wide
-// CHECK-SAME: waveamdmachine.lds_spill_bytes = 3328 : i64
-// CHECK-SAME: waveamdmachine.regalloc_overflowed = 1 : i64
+// CHECK-SAME: waveamdmachine.lds_spill_bytes = 1024 : i64
+// CHECK-SAME: waveamdmachine.regalloc_assignments
 // CHECK-NOT: scratch_
 // CHECK: %[[SPLIT:.+]]:4 = waveamdmachine.tuple_to_elements
 // CHECK: %[[STORE0:.+]] = waveamdmachine.ds_store_b32 {{.*}}, %[[SPLIT]]#0
@@ -13,7 +13,8 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx90a"} {
 // CHECK: %[[STORE2:.+]] = waveamdmachine.ds_store_b32 {{.*}}, %[[SPLIT]]#2 offset 512
 // CHECK: %[[STORE3:.+]] = waveamdmachine.ds_store_b32 {{.*}}, %[[SPLIT]]#3 offset 768
 // CHECK: %[[JOIN:.+]] = waveamdmachine.token_join %[[STORE0]], %[[STORE1]], %[[STORE2]], %[[STORE3]]
-// CHECK: waveamdmachine.ds_load_b32 {{.*}} after %[[JOIN]]
+// CHECK: waveamdmachine.uniform_loop {{.*}} carries(%[[JOIN]] : !waveamdmachine.mem.token)
+// CHECK: waveamdmachine.ds_load_b32
 // CHECK: waveamdmachine.tuple_from_elements
 // CHECK-NOT: scratch_
 // CHECK: waveamdmachine.s_endpgm

@@ -4,16 +4,13 @@
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
 // CHECK-LABEL: func.func @scratch_loop_carry_backend_finish
-// CHECK-SAME: waveamdmachine.regalloc_overflowed = 1 : i64
-// CHECK-SAME: waveamdmachine.scratch_spill_bytes = 100 : i64
+// CHECK-SAME: waveamdmachine.regalloc_assignments
+// CHECK-SAME: waveamdmachine.scratch_spill_bytes = 32 : i64
 // CHECK: %[[INIT_STORE:.+]] = waveamdmachine.scratch_store_tuple_b32
-// CHECK: %[[INIT_LOAD:.+]], {{.*}} = waveamdmachine.scratch_load_tuple_b32 {{.*}} after %[[INIT_STORE]]
-// CHECK: waveamdmachine.uniform_loop {{.*}} carries(%[[INIT_LOAD]] : !waveamdmachine.reg<vgpr, 8>)
-// CHECK: ^bb0(%[[CARRY:.+]]: !waveamdmachine.reg<vgpr, 8>):
-// CHECK: %[[CARRY_STORE:.+]] = waveamdmachine.scratch_store_tuple_b32 {{.*}}, %[[CARRY]], {{.*}} offset 64
-// CHECK: %[[CARRY_LOAD:.+]], {{.*}} = waveamdmachine.scratch_load_tuple_b32 {{.*}} after %[[CARRY_STORE]] offset 64
-// CHECK: waveamdmachine.continue_if {{.*}} carries(%[[CARRY_LOAD]] : !waveamdmachine.reg<vgpr, 8>)
-// CHECK: waveamdmachine.scratch_store_b32 {{.*}} offset 96
+// CHECK: %[[LOOP:.+]] = waveamdmachine.uniform_loop {{.*}} carries(%[[INIT_STORE]] : !waveamdmachine.mem.token)
+// CHECK: ^bb0(%[[TOKEN:.+]]: !waveamdmachine.mem.token):
+// CHECK: waveamdmachine.continue_if {{.*}} carries(%[[TOKEN]] : !waveamdmachine.mem.token)
+// CHECK: waveamdmachine.scratch_load_tuple_b32 {{.*}} after %[[LOOP]]
 // CHECK: waveamdmachine.global_store_b32
 func.func @scratch_loop_carry_backend_finish()
     attributes {wave.kernel, waveamdmachine.target_waves = 4 : i64} {
