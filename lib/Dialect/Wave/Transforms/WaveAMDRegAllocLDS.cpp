@@ -788,9 +788,11 @@ static uint64_t getLDSLimitBytes(RegisterBudgets budgets,
     return std::min<uint64_t>(targetInfo.localMemorySize,
                               targetInfo.addressableLocalMemorySize);
   }
+  uint64_t requiredWavesPerCU =
+      static_cast<uint64_t>(budgets.targetWaves) * targetInfo.eusPerCU;
   uint64_t workgroupsPerCU = std::max<uint64_t>(
-      1, (static_cast<uint64_t>(budgets.targetWaves) * targetInfo.eusPerCU) /
-             wavesPerWorkgroup);
+      1, llvm::divideCeil(requiredWavesPerCU,
+                          static_cast<uint64_t>(wavesPerWorkgroup)));
   uint64_t limitBytes = targetInfo.localMemorySize / workgroupsPerCU;
   if (targetInfo.addressableLocalMemorySize == 0)
     return limitBytes;

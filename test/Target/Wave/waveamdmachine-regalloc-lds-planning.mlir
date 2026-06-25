@@ -58,6 +58,20 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
   }
 
   // CHECK: Name:            regalloc-lds-plan
+  // CHECK: Function:        lds_plan_ceil_workgroups_per_cu
+  // CHECK: status:          available
+  // CHECK: available_bytes: '23405'
+  // CHECK: limit_bytes:     '23405'
+  // CHECK: waves_per_workgroup: '3'
+  func.func @lds_plan_ceil_workgroups_per_cu() attributes {
+    wave.kernel,
+    wave.workgroup_size = array<i32: 192, 1, 1>,
+    waveamdmachine.target_waves = 5 : i64
+  } {
+    return
+  }
+
+  // CHECK: Name:            regalloc-lds-plan
   // CHECK: Function:        lds_plan_missing_workgroup_shape
   // CHECK: status:          missing_workgroup_shape
   func.func @lds_plan_missing_workgroup_shape() attributes {
