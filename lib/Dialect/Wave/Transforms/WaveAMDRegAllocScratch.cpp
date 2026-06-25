@@ -7,6 +7,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "WaveAMDRegAllocInternal.h"
+#include "WaveAMDRegAllocMemorySpillDiagnostics.h"
 
 #include "mlir/Dialect/Wave/IR/Wave.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineTarget.h"
