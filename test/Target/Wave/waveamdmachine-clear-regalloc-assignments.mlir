@@ -20,6 +20,42 @@ func.func @clear_stale_assignments()
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
+// CHECK-LABEL: func.func @clear_lds_spill_state
+// CHECK-SAME: waveamdmachine.lds_spill_bytes = 4 : i64
+func.func @clear_lds_spill_state()
+    attributes {waveamdmachine.lds_spill_bytes = 4 : i64} {
+  %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+  // CHECK: [[VALUE:%.*]] = waveamdmachine.v_mov_b32_tuple
+  // CHECK-SAME: -> !waveamdmachine.reg<vgpr, 1>
+  %value = waveamdmachine.v_mov_b32_tuple %zero {registers = 1 : i64}
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1, 7>
+  return
+}
+
+}
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
+
+// CHECK-LABEL: func.func @clear_scratch_spill_state
+// CHECK-SAME: waveamdmachine.scratch_spill_bytes = 4 : i64
+func.func @clear_scratch_spill_state()
+    attributes {waveamdmachine.scratch_spill_bytes = 4 : i64} {
+  %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+  // CHECK: [[VALUE:%.*]] = waveamdmachine.v_mov_b32_tuple
+  // CHECK-SAME: -> !waveamdmachine.reg<vgpr, 1>
+  %value = waveamdmachine.v_mov_b32_tuple %zero {registers = 1 : i64}
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1, 7>
+  return
+}
+
+}
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
+
 // CHECK-LABEL: func.func @preserve_abi_entries
 func.func @preserve_abi_entries()
     attributes {wave.kernel, waveamdmachine.kernarg_preload_length = 2 : i64} {

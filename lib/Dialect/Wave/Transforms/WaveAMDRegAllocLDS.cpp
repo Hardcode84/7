@@ -115,6 +115,10 @@ public:
     return wave::WaveAMDPressureReliefProviderKind::LDSSpill;
   }
 
+  bool hasRegAllocState() const override {
+    return func->hasAttr(kLDSSpillBytesAttr);
+  }
+
   LogicalResult collectCandidates(
       const wave::WaveAMDPressureReliefQuery &query,
       wave::WaveAMDPressureReliefCandidateList &candidates) const override {

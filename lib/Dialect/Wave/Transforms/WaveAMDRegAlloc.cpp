@@ -87,10 +87,6 @@ static constexpr llvm::StringLiteral kFlatOpsAttr =
     "waveamdmachine.regalloc_debug_flat_ops";
 static constexpr llvm::StringLiteral kIntervalsAttr =
     "waveamdmachine.regalloc_debug_intervals";
-static constexpr llvm::StringLiteral kLDSSpillPlanAttr =
-    "waveamdmachine.regalloc_debug_lds_spill_plan";
-static constexpr llvm::StringLiteral kScratchSpillPlanAttr =
-    "waveamdmachine.regalloc_debug_scratch_spill_plan";
 static constexpr llvm::StringLiteral kOverflowCountAttr =
     "waveamdmachine.regalloc_debug_overflowed_count";
 static constexpr llvm::StringLiteral kOverflowedAttr =
@@ -254,6 +250,24 @@ static LogicalResult reserveExecIfSaveBudget(func::FuncOp func,
            << budgets.sgpr << " are available";
   budgets.sgpr -= reserve;
   return success();
+}
+
+static SmallVector<std::unique_ptr<wave::WaveAMDPressureReliefProvider>, 4>
+createPressureReliefProviders(func::FuncOp func, Inventory &inventory,
+                              ArrayRef<IntervalGroup *> assigned,
+                              IntervalGroup *request, unsigned position,
+                              RegisterBudgets budgets) {
+  SmallVector<std::unique_ptr<wave::WaveAMDPressureReliefProvider>, 4>
+      providers;
+  providers.push_back(createBankPromotionProvider(assigned, request, position,
+                                                  budgets, inventory));
+  providers.push_back(
+      createRematerializeProvider(assigned, request, position, inventory));
+  providers.push_back(createLDSSpillProvider(func, assigned, request, position,
+                                             budgets, inventory));
+  providers.push_back(
+      createScratchSpillProvider(func, assigned, request, position, inventory));
+  return providers;
 }
 
 static Operation *diagOpForValue(Value value, func::FuncOp func) {
@@ -506,9 +520,21 @@ static LogicalResult clearBlockArgumentAssignments(Operation *op) {
   return success();
 }
 
+static bool hasProviderRegAllocState(func::FuncOp func) {
+  Inventory inventory;
+  RegisterBudgets budgets;
+  SmallVector<std::unique_ptr<wave::WaveAMDPressureReliefProvider>, 4>
+      providers = createPressureReliefProviders(func, inventory, {}, nullptr,
+                                                /*position=*/0, budgets);
+  for (const std::unique_ptr<wave::WaveAMDPressureReliefProvider> &provider :
+       providers)
+    if (provider->hasRegAllocState())
+      return true;
+  return false;
+}
+
 static bool shouldClearRegAllocAssignments(func::FuncOp func) {
-  return func->hasAttr(kAssignmentsAttr) || func->hasAttr(kLDSSpillBytesAttr) ||
-         func->hasAttr(kScratchSpillBytesAttr);
+  return func->hasAttr(kAssignmentsAttr) || hasProviderRegAllocState(func);
 }
 
 static LogicalResult clearRegAllocAssignments(func::FuncOp func) {
@@ -2006,18 +2032,11 @@ static void addPressureReliefProviders(
     SmallVectorImpl<PressureReliefProviderState> &providers, func::FuncOp func,
     Inventory &inventory, ArrayRef<IntervalGroup *> assigned,
     IntervalGroup *request, unsigned position, RegisterBudgets budgets) {
-  addPressureReliefProvider(
-      providers, createBankPromotionProvider(assigned, request, position,
-                                             budgets, inventory));
-  addPressureReliefProvider(
-      providers,
-      createRematerializeProvider(assigned, request, position, inventory));
-  addPressureReliefProvider(
-      providers, createLDSSpillProvider(func, assigned, request, position,
-                                        budgets, inventory));
-  addPressureReliefProvider(
-      providers,
-      createScratchSpillProvider(func, assigned, request, position, inventory));
+  SmallVector<std::unique_ptr<wave::WaveAMDPressureReliefProvider>, 4> created =
+      createPressureReliefProviders(func, inventory, assigned, request,
+                                    position, budgets);
+  for (std::unique_ptr<wave::WaveAMDPressureReliefProvider> &provider : created)
+    addPressureReliefProvider(providers, std::move(provider));
 }
 
 static FailureOr<bool>
@@ -2432,15 +2451,8 @@ static LogicalResult materializePlannedPressureRelief(func::FuncOp func,
                                                       OpBuilder &builder) {
   PlannedReliefMaterializationContext context(inventory);
   SmallVector<std::unique_ptr<wave::WaveAMDPressureReliefProvider>, 4>
-      providers;
-  providers.push_back(createBankPromotionProvider({}, nullptr, /*position=*/0,
-                                                  budgets, inventory));
-  providers.push_back(
-      createRematerializeProvider({}, nullptr, /*position=*/0, inventory));
-  providers.push_back(createLDSSpillProvider(func, {}, nullptr, /*position=*/0,
-                                             budgets, inventory));
-  providers.push_back(createScratchSpillProvider(func, {}, nullptr,
-                                                 /*position=*/0, inventory));
+      providers = createPressureReliefProviders(func, inventory, {}, nullptr,
+                                                /*position=*/0, budgets);
   for (const std::unique_ptr<wave::WaveAMDPressureReliefProvider> &provider :
        providers) {
     SmallVector<const wave::WaveAMDPressureReliefPlan *, 8> plans;
@@ -2625,8 +2637,6 @@ static void clearDiagnostics(func::FuncOp func) {
   func->removeAttr(kLegacyPressureReservedAttr);
   func->removeAttr(kFlatOpsAttr);
   func->removeAttr(kIntervalsAttr);
-  func->removeAttr(kLDSSpillPlanAttr);
-  func->removeAttr(kScratchSpillPlanAttr);
   func->removeAttr(kOverflowedAttr);
   func->removeAttr(kPeakAGPRAttr);
   func->removeAttr(kPeakSGPRAttr);

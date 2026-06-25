@@ -77,6 +77,10 @@ public:
     return wave::WaveAMDPressureReliefProviderKind::ScratchSpill;
   }
 
+  bool hasRegAllocState() const override {
+    return func->hasAttr(kScratchSpillBytesAttr);
+  }
+
   LogicalResult collectCandidates(
       const wave::WaveAMDPressureReliefQuery &query,
       wave::WaveAMDPressureReliefCandidateList &candidates) const override {

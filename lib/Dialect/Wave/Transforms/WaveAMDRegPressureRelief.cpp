@@ -192,6 +192,8 @@ LogicalResult WaveAMDPressureReliefProvider::materializePlans(
   return success();
 }
 
+bool WaveAMDPressureReliefProvider::hasRegAllocState() const { return false; }
+
 void WaveAMDPressureReliefProvider::emitRemarks() const {}
 
 void WaveAMDPressureReliefProvider::notifyAttemptStarted() const {}

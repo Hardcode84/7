@@ -192,6 +192,7 @@ public:
   materializePlans(ArrayRef<const WaveAMDPressureReliefPlan *> plans,
                    WaveAMDPressureReliefMaterializationContext &context,
                    OpBuilder &builder) const;
+  virtual bool hasRegAllocState() const;
   virtual void emitRemarks() const;
   virtual void notifyAttemptStarted() const;
   virtual void notifyNoCandidate() const;
