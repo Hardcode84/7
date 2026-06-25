@@ -1276,10 +1276,14 @@ public:
   getPressureEffect(const wave::WaveAMDPressureFailure &) const override {
     int64_t relief = static_cast<int64_t>(getReliefDwords());
     wave::WaveAMDPressureReliefEffect effect;
+    if (sourceClass == waveamdmachine::RegClass::SGPR)
+      effect.sgprLiveDelta -= relief;
     if (sourceClass == waveamdmachine::RegClass::VGPR)
       effect.vgprLiveDelta -= relief;
     if (sourceClass == waveamdmachine::RegClass::AGPR)
       effect.agprLiveDelta -= relief;
+    if (targetClass == waveamdmachine::RegClass::SGPR)
+      effect.sgprLiveDelta += relief;
     if (targetClass == waveamdmachine::RegClass::VGPR)
       effect.vgprLiveDelta += relief;
     if (targetClass == waveamdmachine::RegClass::AGPR)
@@ -1356,10 +1360,9 @@ public:
   LogicalResult collectCandidates(
       const wave::WaveAMDPressureReliefQuery &query,
       wave::WaveAMDPressureReliefCandidateList &candidates) const override {
-    (void)query;
     for (IntervalGroup *group : groups)
-      collect(group, candidates);
-    collect(request, candidates);
+      collect(group, candidates, query.failure);
+    collect(request, candidates, query.failure);
     return success();
   }
 
@@ -1617,17 +1620,57 @@ private:
   }
 
   void collect(IntervalGroup *group,
-               wave::WaveAMDPressureReliefCandidateList &candidates) const {
+               wave::WaveAMDPressureReliefCandidateList &candidates,
+               const wave::WaveAMDPressureFailure *failure) const {
     if (!group || !isLiveAt(group, position) || !canPromote(group, budgets))
-      return;
-    if (!canFitPromotionTarget(group, groups, budgets, regs))
       return;
     std::optional<waveamdmachine::RegClass> target =
         getNextRegClass(group->storageClass);
     assert(target && "canPromote checked promotion target");
-    candidates.push_back(std::make_unique<BankPromotionCandidate>(
-        group, group->storageClass, *target,
-        getPromotionScore(group, position, inventory)));
+    bool targetFits = canFitPromotionTarget(group, groups, budgets, regs);
+    std::unique_ptr<BankPromotionCandidate> candidate =
+        std::make_unique<BankPromotionCandidate>(
+            group, group->storageClass, *target,
+            getPromotionScore(group, position, inventory));
+    if (!targetFits || !shouldKeepCandidate(*candidate, failure))
+      return;
+    candidates.push_back(std::move(candidate));
+  }
+
+  bool shouldKeepCandidate(const BankPromotionCandidate &candidate,
+                           const wave::WaveAMDPressureFailure *failure) const {
+    if (!failure)
+      return true;
+    if (candidate.reducesPressureFailure(*failure))
+      return true;
+    return hasBlockedDirectReliefPromotion(candidate.getSourceClass(),
+                                           *failure);
+  }
+
+  bool hasBlockedDirectReliefPromotion(
+      waveamdmachine::RegClass targetClass,
+      const wave::WaveAMDPressureFailure &failure) const {
+    for (IntervalGroup *group : groups)
+      if (isBlockedDirectReliefPromotion(group, targetClass, failure))
+        return true;
+    return isBlockedDirectReliefPromotion(request, targetClass, failure);
+  }
+
+  bool isBlockedDirectReliefPromotion(
+      IntervalGroup *group, waveamdmachine::RegClass targetClass,
+      const wave::WaveAMDPressureFailure &failure) const {
+    if (!group || !isLiveAt(group, position) || !canPromote(group, budgets))
+      return false;
+    std::optional<waveamdmachine::RegClass> directTarget =
+        getNextRegClass(group->storageClass);
+    assert(directTarget && "canPromote checked promotion target");
+    if (*directTarget != targetClass)
+      return false;
+    BankPromotionCandidate candidate(
+        group, group->storageClass, *directTarget,
+        getPromotionScore(group, position, inventory));
+    return candidate.reducesPressureFailure(failure) &&
+           !canFitPromotionTarget(group, groups, budgets, regs);
   }
 
   ArrayRef<IntervalGroup *> groups;

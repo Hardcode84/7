@@ -57,6 +57,7 @@ struct WaveAMDPressureReliefCost {
 };
 
 struct WaveAMDPressureReliefEffect {
+  int64_t sgprLiveDelta = 0;
   int64_t vgprLiveDelta = 0;
   int64_t agprLiveDelta = 0;
 };

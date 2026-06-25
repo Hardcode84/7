@@ -20,10 +20,16 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 // REMARK: no_use:         '1'
 // REMARK: total:           '1'
 
+// REMARK: Name:            regalloc-scratch-plan
+// REMARK: Function:        placement_rejects_sgpr_to_vgpr_promotion
+// REMARK: reserved_spill_bytes: '32'
+// REMARK: status:          available
+// REMARK: uses_flat_scratch: 'true'
+
 // REMARK: Name:            regalloc-pressure-failure
 // REMARK: Function:        placement_rejects_sgpr_to_vgpr_promotion
 // REMARK: class:           'VGPR/AGPR'
-// REMARK: required_relief: '5'
+// REMARK: required_relief: '4'
 // REMARK: combined_vgpr_agpr: 'true'
 // REMARK: pressure_relief_providers: '{{.*}}provider=bank-promotion, candidates=0{{.*}}'
 // REMARK: pressure_relief_candidates: '[]'
@@ -86,6 +92,9 @@ func.func @combined_pressure_rejects_cheap_expr_spill()
 
 // CHECK-LABEL: func.func @placement_rejects_sgpr_to_vgpr_promotion
 // CHECK-SAME: waveamdmachine.regalloc_overflowed = 1 : i64
+// CHECK-SAME: waveamdmachine.scratch_spill_bytes = 32 : i64
+// CHECK: waveamdmachine.scratch_store_tuple_b32
+// CHECK: waveamdmachine.scratch_load_tuple_b32
 // CHECK: waveamdmachine.s_endpgm
 func.func @placement_rejects_sgpr_to_vgpr_promotion()
     attributes {wave.kernel, waveamdmachine.target_waves = 4 : i64} {

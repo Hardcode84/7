@@ -2057,18 +2057,20 @@ static LogicalResult allocateOnce(func::FuncOp func, Inventory &inventory,
     std::optional<PressureFailure> placementFailure =
         buildCombinedPlacementFailure(inventory, assigned, group, position,
                                       placementBudgets);
-    FailureOr<bool> relieved = applyPressureRelief(
-        func, inventory, assigned, group, position, placementBudgets,
-        placementFailure ? &*placementFailure : nullptr);
+    PressureFailure classFailure;
+    if (!placementFailure)
+      classFailure = buildClassPressureFailure(
+          inventory, assigned, group, position, group->storageClass,
+          getBudget(placementBudgets, group->storageClass));
+    const PressureFailure *queryFailure =
+        placementFailure ? &*placementFailure : &classFailure;
+    FailureOr<bool> relieved =
+        applyPressureRelief(func, inventory, assigned, group, position,
+                            placementBudgets, queryFailure);
     if (failed(relieved))
       return failure();
     if (!*relieved) {
-      if (placementFailure)
-        pressureFailure = *placementFailure;
-      else
-        pressureFailure = buildClassPressureFailure(
-            inventory, assigned, group, position, group->storageClass,
-            getBudget(placementBudgets, group->storageClass));
+      pressureFailure = *queryFailure;
       return mlir::failure();
     }
     if (inventory.plannedReliefPlans.size() != plannedBefore)

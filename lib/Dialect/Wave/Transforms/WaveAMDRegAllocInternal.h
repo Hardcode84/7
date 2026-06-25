@@ -190,11 +190,12 @@ inline wave::WaveAMDPressureReliefEffect
 getMemorySpillPressureEffect(IntervalGroup *group, unsigned reliefDwords) {
   if (!group || reliefDwords == 0)
     return {};
+  wave::WaveAMDPressureReliefEffect effect;
   if (group->storageClass == waveamdmachine::RegClass::VGPR)
-    return {-static_cast<int64_t>(reliefDwords), 0};
+    effect.vgprLiveDelta = -static_cast<int64_t>(reliefDwords);
   if (group->storageClass == waveamdmachine::RegClass::AGPR)
-    return {0, -static_cast<int64_t>(reliefDwords)};
-  return {};
+    effect.agprLiveDelta = -static_cast<int64_t>(reliefDwords);
+  return effect;
 }
 
 inline bool isCheapVGPRPressureReliefExpr(Operation *op);

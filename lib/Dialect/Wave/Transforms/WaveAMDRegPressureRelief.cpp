@@ -35,11 +35,14 @@ bool WaveAMDPressureReliefCandidate::isLegal() const {
 
 WaveAMDPressureReliefEffect WaveAMDPressureReliefCandidate::getPressureEffect(
     const WaveAMDPressureFailure &) const {
-  return {-static_cast<int64_t>(getReliefDwords()), 0};
+  WaveAMDPressureReliefEffect effect;
+  effect.vgprLiveDelta = -static_cast<int64_t>(getReliefDwords());
+  return effect;
 }
 
 static bool hasPressureEffect(WaveAMDPressureReliefEffect effect) {
-  return effect.vgprLiveDelta != 0 || effect.agprLiveDelta != 0;
+  return effect.sgprLiveDelta != 0 || effect.vgprLiveDelta != 0 ||
+         effect.agprLiveDelta != 0;
 }
 
 static unsigned applyLiveDelta(unsigned value, int64_t delta) {
@@ -219,6 +222,7 @@ bool isBetterWaveAMDPressureReliefCandidate(
 WaveAMDPressureReliefEffect
 combineWaveAMDPressureReliefEffects(WaveAMDPressureReliefEffect lhs,
                                     WaveAMDPressureReliefEffect rhs) {
+  lhs.sgprLiveDelta += rhs.sgprLiveDelta;
   lhs.vgprLiveDelta += rhs.vgprLiveDelta;
   lhs.agprLiveDelta += rhs.agprLiveDelta;
   return lhs;
@@ -257,8 +261,15 @@ bool waveAMDPressureReliefEffectReducesFailure(
     const WaveAMDPressureFailure &failure, WaveAMDPressureReliefEffect effect) {
   if (!hasPressureEffect(effect))
     return false;
-  if (!failure.combinedVGPRAGPR)
-    return true;
+  if (!failure.combinedVGPRAGPR) {
+    if (failure.regClass == "SGPR")
+      return effect.sgprLiveDelta < 0;
+    if (failure.regClass == "VGPR")
+      return effect.vgprLiveDelta < 0;
+    if (failure.regClass == "AGPR")
+      return effect.agprLiveDelta < 0;
+    return false;
+  }
   CombinedPressureProgress oldProgress =
       getCombinedPressureProgress(failure, WaveAMDPressureReliefEffect{});
   CombinedPressureProgress newProgress =
