@@ -347,30 +347,6 @@ inline bool valueCoversWholeGroup(IntervalGroup *group, Value value,
   return first && first->group == group && first == group->intervals.front();
 }
 
-inline bool hasMemorySpillUseAtPressure(ArrayRef<OpOperand *> uses,
-                                        const Inventory &inventory,
-                                        unsigned position) {
-  for (OpOperand *use : uses) {
-    std::optional<unsigned> usePosition =
-        getMemorySpillOpPosition(use->getOwner(), inventory);
-    if (usePosition && *usePosition == position)
-      return true;
-  }
-  return false;
-}
-
-inline std::optional<unsigned> getMemorySpillPressureRelief(
-    Value value, unsigned width, ArrayRef<OpOperand *> uses,
-    const Inventory &inventory, const PressureFailure *pressureFailure) {
-  if (!pressureFailure || !pressureFailure->combinedVGPRAGPR)
-    return width;
-  if (isMemorySpillSuppressedVGPRExpr(value.getDefiningOp()))
-    return 0;
-  if (hasMemorySpillUseAtPressure(uses, inventory, pressureFailure->position))
-    return 0;
-  return width;
-}
-
 inline unsigned getLiveLaneCount(IntervalGroup *group, unsigned position) {
   unsigned count = 0;
   for (Interval *lane : group->intervals)
