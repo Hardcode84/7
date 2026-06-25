@@ -1886,6 +1886,32 @@ setPressureReliefDiagnostics(func::FuncOp func,
                     providers, selected, failure)));
 }
 
+static void emitPressureReliefSelectionRemark(
+    func::FuncOp func, ArrayRef<PressureReliefProviderState> providers,
+    PressureReliefCandidateRef selected, const PressureFailure *failure) {
+  auto remark = mlir::remark::analysis(
+      func.getLoc(),
+      mlir::remark::RemarkOpts::name("regalloc-pressure-relief-selection")
+          .category(kRemarkCategory)
+          .function(func.getSymName()));
+  if (!remark)
+    return;
+
+  const wave::WaveAMDPressureReliefCandidate &candidate =
+      getPressureReliefCandidate(selected);
+  remark << mlir::remark::detail::Remark::Arg("provider",
+                                              candidate.getProviderName());
+  remark << mlir::remark::metric("candidate_index", selected.index);
+  if (failure) {
+    remark << mlir::remark::detail::Remark::Arg("class", failure->regClass);
+    remark << mlir::remark::metric("position", failure->position);
+    remark << mlir::remark::metric("required_relief", failure->relief);
+  }
+  remark << mlir::remark::detail::Remark::Arg(
+      "pressure_relief_candidates",
+      formatPressureReliefCandidates(providers, selected, failure));
+}
+
 static void clearPressureReliefDiagnostics(func::FuncOp func) {
   func->removeAttr(kPressureReliefCandidatesAttr);
   func->removeAttr(kPressureReliefProvidersAttr);
@@ -1995,6 +2021,9 @@ applyPressureRelief(func::FuncOp func, Inventory &inventory,
     return failure();
 
   setPressureReliefDiagnostics(func, providers, selected, pressureFailure);
+  if (selected)
+    emitPressureReliefSelectionRemark(func, providers, *selected,
+                                      pressureFailure);
   if (!selected) {
     notifyNoPressureReliefCandidate(providers);
     return false;

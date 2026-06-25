@@ -197,9 +197,8 @@ void WaveAMDPressureReliefProvider::notifyNoCandidate() const {}
 
 void WaveAMDPressureReliefProvider::notifyPlanApplied() const {}
 
-static int64_t getTotalCost(WaveAMDPressureReliefCost cost) {
-  return cost.materializationOps + cost.loopWeightedOps + cost.latencyPenalty +
-         cost.instabilityPenalty;
+static int64_t getPrimaryCost(WaveAMDPressureReliefCost cost) {
+  return cost.materializationOps + cost.loopWeightedOps;
 }
 
 bool isBetterWaveAMDPressureReliefCandidate(
@@ -208,10 +207,18 @@ bool isBetterWaveAMDPressureReliefCandidate(
   if (lhs.isLegal() != rhs.isLegal())
     return lhs.isLegal();
 
-  int64_t lhsCost = getTotalCost(lhs.getCost());
-  int64_t rhsCost = getTotalCost(rhs.getCost());
-  if (lhsCost != rhsCost)
-    return lhsCost < rhsCost;
+  WaveAMDPressureReliefCost lhsCost = lhs.getCost();
+  WaveAMDPressureReliefCost rhsCost = rhs.getCost();
+  int64_t lhsPrimaryCost = getPrimaryCost(lhsCost);
+  int64_t rhsPrimaryCost = getPrimaryCost(rhsCost);
+  if (lhsPrimaryCost != rhsPrimaryCost)
+    return lhsPrimaryCost < rhsPrimaryCost;
+
+  if (lhsCost.instabilityPenalty != rhsCost.instabilityPenalty)
+    return lhsCost.instabilityPenalty < rhsCost.instabilityPenalty;
+
+  if (lhsCost.latencyPenalty != rhsCost.latencyPenalty)
+    return lhsCost.latencyPenalty < rhsCost.latencyPenalty;
 
   if (lhs.getReliefDwords() != rhs.getReliefDwords())
     return lhs.getReliefDwords() > rhs.getReliefDwords();
