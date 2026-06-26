@@ -16,6 +16,7 @@
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/Support/MathExtras.h"
 #include <limits>
 #include <optional>
 
@@ -596,6 +597,11 @@ static bool isVGPRFamilyClass(waveamdmachine::RegClass regClass) {
          regClass == waveamdmachine::RegClass::AGPR;
 }
 
+static unsigned getCombinedVGPRFamilyPressure(unsigned agprFootprint,
+                                              unsigned vgprFootprint) {
+  return agprFootprint + llvm::alignTo(vgprFootprint, 4);
+}
+
 static void collectRegAllocValues(Region &region,
                                   SmallVectorImpl<Value> &values) {
   for (Block &block : region) {
@@ -651,6 +657,12 @@ public:
     }
     if (failed(scan()))
       return failure();
+    if (scanFailure) {
+      func->removeAttr(wave::getRegAllocTransformAssignmentsAttrName());
+      setState(buildFailureState());
+      return success();
+    }
+    checkCombinedFootprintFailure();
     if (scanFailure) {
       func->removeAttr(wave::getRegAllocTransformAssignmentsAttrName());
       setState(buildFailureState());
@@ -751,8 +763,6 @@ private:
   LogicalResult allocateSet(const wave::RegAllocTransformAliasSet &set) {
     wave::RegAllocTransformBudget budget =
         wave::getRegAllocTransformBudget(func, set.regClass);
-    if (checkCombinedPressureFailure(set))
-      return success();
     if (set.fixedBase)
       return allocateFixedSet(set, budget);
     std::optional<unsigned> base = findFreeBase(set, budget.limit);
@@ -760,6 +770,8 @@ private:
       recordPressureFailure(set, budget);
       return success();
     }
+    if (checkCombinedPressureFailure(set, *base))
+      return success();
     addAssignment(set, *base);
     return success();
   }
@@ -771,6 +783,8 @@ private:
       recordPressureFailure(set, budget);
       return success();
     }
+    if (checkCombinedPressureFailure(set, *set.fixedBase))
+      return success();
     addAssignment(set, *set.fixedBase);
     return success();
   }
@@ -794,18 +808,61 @@ private:
         });
   }
 
-  bool
-  checkCombinedPressureFailure(const wave::RegAllocTransformAliasSet &set) {
+  static void addFamilyFootprint(waveamdmachine::RegClass regClass,
+                                 unsigned base, unsigned width,
+                                 unsigned &agprFootprint,
+                                 unsigned &vgprFootprint) {
+    if (regClass == waveamdmachine::RegClass::AGPR)
+      agprFootprint = std::max(agprFootprint, base + width);
+    if (regClass == waveamdmachine::RegClass::VGPR)
+      vgprFootprint = std::max(vgprFootprint, base + width);
+  }
+
+  bool checkCombinedPressureFailure(const wave::RegAllocTransformAliasSet &set,
+                                    unsigned base) {
     if (!vgprFamilyBudget || !isVGPRFamilyClass(set.regClass))
       return false;
-    unsigned pressure = set.width;
+    unsigned agprFootprint = 0;
+    unsigned vgprFootprint = 0;
     for (const wave::RegAllocTransformAssignment &assigned : active)
       if (isVGPRFamilyClass(assigned.regClass))
-        pressure += assigned.width;
+        addFamilyFootprint(assigned.regClass, assigned.base, assigned.width,
+                           agprFootprint, vgprFootprint);
+    addFamilyFootprint(set.regClass, base, set.width, agprFootprint,
+                       vgprFootprint);
+    unsigned pressure =
+        getCombinedVGPRFamilyPressure(agprFootprint, vgprFootprint);
     if (pressure <= vgprFamilyBudget->limit)
       return false;
-    recordCombinedPressureFailure(set, pressure);
+    recordCombinedPressureFailure(set, pressure, active);
     return true;
+  }
+
+  void checkCombinedFootprintFailure() {
+    if (!vgprFamilyBudget)
+      return;
+    unsigned agprFootprint = 0;
+    unsigned vgprFootprint = 0;
+    for (const wave::RegAllocTransformAssignment &assigned : assignments) {
+      if (!isVGPRFamilyClass(assigned.regClass))
+        continue;
+      addFamilyFootprint(assigned.regClass, assigned.base, assigned.width,
+                         agprFootprint, vgprFootprint);
+      unsigned pressure =
+          getCombinedVGPRFamilyPressure(agprFootprint, vgprFootprint);
+      if (pressure <= vgprFamilyBudget->limit)
+        continue;
+      SmallVector<wave::RegAllocTransformAssignment> priorAssignments;
+      for (const wave::RegAllocTransformAssignment &other : assignments) {
+        if (&other == &assigned)
+          break;
+        if (isVGPRFamilyClass(other.regClass))
+          priorAssignments.push_back(other);
+      }
+      recordCombinedPressureFailure(assigned, pressure, priorAssignments,
+                                    "allocated-footprint");
+      return;
+    }
   }
 
   void addAssignment(const wave::RegAllocTransformAliasSet &set,
@@ -841,19 +898,40 @@ private:
     scanFailure = std::move(failed);
   }
 
-  void recordCombinedPressureFailure(const wave::RegAllocTransformAliasSet &set,
-                                     unsigned pressure) {
+  void recordCombinedPressureFailure(
+      const wave::RegAllocTransformAliasSet &set, unsigned pressure,
+      ArrayRef<wave::RegAllocTransformAssignment> overlaps,
+      StringRef reason = "pressure") {
     RegAllocScanFailure failed;
     failed.regClass = set.regClass;
     failed.className = "vgpr_agpr";
-    failed.reason = "pressure";
+    failed.reason = reason;
     failed.budgetMode = vgprFamilyBudget->mode;
     failed.set = set.id;
     failed.position = set.start;
     failed.pressure = pressure;
     failed.limit = vgprFamilyBudget->limit;
     failed.request = set.width;
-    for (const wave::RegAllocTransformAssignment &assigned : active)
+    for (const wave::RegAllocTransformAssignment &assigned : overlaps)
+      if (isVGPRFamilyClass(assigned.regClass))
+        failed.overlaps.push_back(assigned);
+    scanFailure = std::move(failed);
+  }
+
+  void recordCombinedPressureFailure(
+      const wave::RegAllocTransformAssignment &assignment, unsigned pressure,
+      ArrayRef<wave::RegAllocTransformAssignment> overlaps, StringRef reason) {
+    RegAllocScanFailure failed;
+    failed.regClass = assignment.regClass;
+    failed.className = "vgpr_agpr";
+    failed.reason = reason;
+    failed.budgetMode = vgprFamilyBudget->mode;
+    failed.set = assignment.set;
+    failed.position = assignment.start;
+    failed.pressure = pressure;
+    failed.limit = vgprFamilyBudget->limit;
+    failed.request = assignment.width;
+    for (const wave::RegAllocTransformAssignment &assigned : overlaps)
       if (isVGPRFamilyClass(assigned.regClass))
         failed.overlaps.push_back(assigned);
     scanFailure = std::move(failed);
