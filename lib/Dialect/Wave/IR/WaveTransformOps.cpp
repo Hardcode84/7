@@ -74,6 +74,13 @@ namespace {
 static constexpr StringLiteral kRegAllocTransformStateAttr =
     "waveamdmachine.regalloc_transform_state";
 
+static DiagnosedSilenceableFailure
+runNamedSequence(transform::TransformOpInterface caller,
+                 transform::NamedSequenceOp callee,
+                 MutableArrayRef<SmallVector<transform::MappedValue>> bindings,
+                 transform::TransformState &state,
+                 SmallVectorImpl<SmallVector<transform::MappedValue>> &out);
+
 static StringRef getRegClassName(waveamdmachine::RegClass regClass) {
   switch (regClass) {
   case waveamdmachine::RegClass::SGPR:
@@ -535,12 +542,12 @@ static void clearRegAllocTransformState(Operation *target) {
 }
 
 static DiagnosedSilenceableFailure
-emitRegAllocTransformStateFailure(wave::TransformRegAllocLoopOp op) {
+emitRegAllocTransformStateFailure(wave::TransformRegAllocBuildAliasStateOp op) {
   return op.emitDefiniteFailure() << "failed to build regalloc alias state";
 }
 
 static DiagnosedSilenceableFailure
-stampRegAllocTransformState(wave::TransformRegAllocLoopOp op,
+stampRegAllocTransformState(wave::TransformRegAllocBuildAliasStateOp op,
                             transform::TransformState &state,
                             SmallVectorImpl<Operation *> &targets) {
   Builder builder(op.getContext());
@@ -553,12 +560,85 @@ stampRegAllocTransformState(wave::TransformRegAllocLoopOp op,
   return DiagnosedSilenceableFailure::success();
 }
 
+static DiagnosedSilenceableFailure
+collectHandleResults(wave::TransformRegAllocLoopOp op,
+                     ArrayRef<transform::MappedValue> mappings,
+                     SmallVectorImpl<Operation *> &result) {
+  result.reserve(mappings.size());
+  for (transform::MappedValue mapping : mappings) {
+    Operation *payload = mapping.dyn_cast<Operation *>();
+    if (!payload)
+      return op.emitDefiniteFailure()
+             << "regalloc loop body must yield an operation handle";
+    result.push_back(payload);
+  }
+  return DiagnosedSilenceableFailure::success();
+}
+
+static DiagnosedSilenceableFailure
+runRegAllocLoopBody(wave::TransformRegAllocLoopOp op,
+                    transform::TransformResults &results,
+                    transform::TransformState &state) {
+  transform::NamedSequenceOp body =
+      SymbolTable::lookupNearestSymbolFrom<transform::NamedSequenceOp>(
+          op.getOperation(), op.getBodyAttr());
+  if (!body)
+    return op.emitDefiniteFailure()
+           << "body symbol `" << op.getBody()
+           << "` does not resolve to a transform.named_sequence";
+
+  SmallVector<transform::MappedValue> targetMapping;
+  for (Operation *target : state.getPayloadOps(op.getTarget()))
+    targetMapping.push_back(target);
+  SmallVector<SmallVector<transform::MappedValue>> bindings;
+  bindings.push_back(std::move(targetMapping));
+  SmallVector<SmallVector<transform::MappedValue>> out;
+  DiagnosedSilenceableFailure status =
+      runNamedSequence(op, body, bindings, state, out);
+  if (!status.succeeded())
+    return status;
+  if (out.size() != 1)
+    return op.emitDefiniteFailure()
+           << "regalloc loop body must yield one operation handle";
+  SmallVector<Operation *> yielded;
+  DiagnosedSilenceableFailure collectStatus =
+      collectHandleResults(op, out[0], yielded);
+  if (!collectStatus.succeeded())
+    return collectStatus;
+  results.set(cast<OpResult>(op.getResult()), yielded);
+  return DiagnosedSilenceableFailure::success();
+}
+
 } // namespace
+
+LogicalResult wave::TransformRegAllocLoopOp::verifySymbolUses(
+    SymbolTableCollection &symbolTable) {
+  transform::NamedSequenceOp body =
+      symbolTable.lookupNearestSymbolFrom<transform::NamedSequenceOp>(
+          getOperation(), getBodyAttr());
+  if (!body)
+    return emitOpError() << "body symbol `" << getBody()
+                         << "` does not resolve to a transform.named_sequence";
+  return success();
+}
 
 DiagnosedSilenceableFailure
 wave::TransformRegAllocLoopOp::apply(transform::TransformRewriter &rewriter,
                                      transform::TransformResults &results,
                                      transform::TransformState &state) {
+  return runRegAllocLoopBody(*this, results, state);
+}
+
+void wave::TransformRegAllocLoopOp::getEffects(
+    SmallVectorImpl<MemoryEffects::EffectInstance> &effects) {
+  transform::consumesHandle(getTargetMutable(), effects);
+  transform::producesHandle(getOperation()->getOpResults(), effects);
+  transform::modifiesPayload(effects);
+}
+
+DiagnosedSilenceableFailure wave::TransformRegAllocBuildAliasStateOp::apply(
+    transform::TransformRewriter &rewriter,
+    transform::TransformResults &results, transform::TransformState &state) {
   SmallVector<Operation *> targets;
   DiagnosedSilenceableFailure status =
       stampRegAllocTransformState(*this, state, targets);
@@ -568,7 +648,7 @@ wave::TransformRegAllocLoopOp::apply(transform::TransformRewriter &rewriter,
   return DiagnosedSilenceableFailure::success();
 }
 
-void wave::TransformRegAllocLoopOp::getEffects(
+void wave::TransformRegAllocBuildAliasStateOp::getEffects(
     SmallVectorImpl<MemoryEffects::EffectInstance> &effects) {
   transform::consumesHandle(getTargetMutable(), effects);
   transform::producesHandle(getOperation()->getOpResults(), effects);

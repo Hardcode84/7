@@ -85,4 +85,8 @@
 // PIPELINE-NEXT: transform.apply_registered_pass "waveamd-metadata"
 // PIPELINE: transform.named_sequence @waveamd_regalloc_transform_loop
 // PIPELINE: wave.transform.regalloc_loop from
+// PIPELINE-NEXT: body = @waveamd_regalloc_transform_iteration
+// PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
+// PIPELINE: transform.named_sequence @waveamd_regalloc_transform_iteration
+// PIPELINE: wave.transform.regalloc_build_alias_state from
 // PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op

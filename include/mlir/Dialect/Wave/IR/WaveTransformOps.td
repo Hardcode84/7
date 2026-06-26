@@ -129,11 +129,32 @@ def Wave_TransformBindParamOp
 def Wave_TransformRegAllocLoopOp
     : Op<Wave_Dialect, "transform.regalloc_loop", [
         DeclareOpInterfaceMethods<MemoryEffectsOpInterface>,
-        DeclareOpInterfaceMethods<TransformOpInterface>]> {
-  let summary = "Build WaveAMD regalloc transform-loop alias state";
+        DeclareOpInterfaceMethods<TransformOpInterface>,
+        DeclareOpInterfaceMethods<SymbolUserOpInterface>]> {
+  let summary = "Run the WaveAMD regalloc transform-loop body";
   let description = [{
-    Rebuilds function-level regalloc alias state and returns the same payload
-    handle. Later transform-loop stages consume the state attribute.
+    Invokes `$body` with `$target` as its payload handle and returns the
+    yielded payload handle. The body is the allocator iteration sequence:
+    alias-state build, linear scan, and pressure-relief transforms.
+  }];
+  let arguments = (ins TransformHandleTypeInterface:$target,
+                       SymbolRefAttr:$body);
+  let results = (outs TransformHandleTypeInterface:$result);
+  let assemblyFormat = [{
+    `from` $target `body` `=` $body attr-dict
+        `:` functional-type($target, $result)
+  }];
+}
+
+def Wave_TransformRegAllocBuildAliasStateOp
+    : Op<Wave_Dialect, "transform.regalloc_build_alias_state", [
+        DeclareOpInterfaceMethods<MemoryEffectsOpInterface>,
+        DeclareOpInterfaceMethods<TransformOpInterface>]> {
+  let summary = "Build WaveAMD regalloc alias state";
+  let description = [{
+    Rebuilds function-level regalloc alias state from current payload IR and
+    returns the same payload handle. Later allocator transforms consume the
+    state attribute.
   }];
   let arguments = (ins TransformHandleTypeInterface:$target);
   let results = (outs TransformHandleTypeInterface:$result);

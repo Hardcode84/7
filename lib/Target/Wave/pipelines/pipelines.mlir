@@ -133,6 +133,14 @@ module attributes {transform.with_named_sequence} {
   transform.named_sequence @waveamd_regalloc_transform_loop(
       %root: !transform.any_op {transform.consumed}) -> !transform.any_op {
     %r0 = wave.transform.regalloc_loop from %root
+        body = @waveamd_regalloc_transform_iteration
+        : (!transform.any_op) -> !transform.any_op
+    transform.yield %r0 : !transform.any_op
+  }
+
+  transform.named_sequence @waveamd_regalloc_transform_iteration(
+      %root: !transform.any_op {transform.consumed}) -> !transform.any_op {
+    %r0 = wave.transform.regalloc_build_alias_state from %root
         : (!transform.any_op) -> !transform.any_op
     transform.yield %r0 : !transform.any_op
   }
