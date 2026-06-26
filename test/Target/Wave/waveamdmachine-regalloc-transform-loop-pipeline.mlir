@@ -48,7 +48,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
   // CHECK-LABEL: func.func @regalloc_transform_loop_shared_mfma_acc
   // CHECK-SAME: waveamdmachine.regalloc_transform_state =
-  // CHECK-SAME: debug = {alias_edges = 0 : i64, alias_sets = 7 : i64, ops = 3 : i64, values = 7 : i64}
+  // CHECK-SAME: debug = {alias_edges = 1 : i64, alias_sets = 6 : i64, ops = 3 : i64, values = 7 : i64}
   // CHECK-SAME: name = "waveamdmachine.mfma_f32_16x16x32_f16"
   // CHECK-SAME: stage = "linear-scan-success"
   func.func @regalloc_transform_loop_shared_mfma_acc(
@@ -61,6 +61,26 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
         : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
            !waveamdmachine.reg<vgpr, 4>) -> !waveamdmachine.reg<vgpr, 4>
     %mfma1 = waveamdmachine.mfma_f32_16x16x32_f16 %a1, %b1, %acc
+        : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
+           !waveamdmachine.reg<vgpr, 4>) -> !waveamdmachine.reg<vgpr, 4>
+    return
+  }
+
+  // CHECK-LABEL: func.func @regalloc_transform_loop_last_use_mfma_acc
+  // CHECK-SAME: waveamdmachine.regalloc_assignments
+  // CHECK-SAME: waveamdmachine.regalloc_transform_state =
+  // CHECK-SAME: debug = {alias_edges = 5 : i64, alias_sets = 3 : i64, ops = 3 : i64, values = 8 : i64}
+  // CHECK-SAME: stage = "linear-scan-success"
+  func.func @regalloc_transform_loop_last_use_mfma_acc(
+      %a: !waveamdmachine.reg<vgpr, 4>,
+      %b: !waveamdmachine.reg<vgpr, 4>,
+      %acc: !waveamdmachine.reg<vgpr, 4>)
+      attributes {waveamdmachine.vgpr_count_max = 12 : i64} {
+    %parts:4 = waveamdmachine.tuple_to_elements %acc
+        : (!waveamdmachine.reg<vgpr, 4>)
+        -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+            !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+    %mfma = waveamdmachine.mfma_f32_16x16x32_f16 %a, %b, %acc
         : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
            !waveamdmachine.reg<vgpr, 4>) -> !waveamdmachine.reg<vgpr, 4>
     return

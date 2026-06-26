@@ -156,11 +156,21 @@ private:
       collect(fromElements.getTuple(), fromElements.getElements());
   }
 
+  bool hasUseAfter(Operation *op, Value value) {
+    unsigned position = positions.lookup(op);
+    for (OpOperand &use : value.getUses()) {
+      auto it = positions.find(use.getOwner());
+      if (it == positions.end() || it->second > position)
+        return true;
+    }
+    return false;
+  }
+
   void collectMMAAliases(Operation *op) {
     auto mma = dyn_cast<waveamdmachine::MMAOpInterface>(op);
     if (!mma || !op->hasTrait<OpTrait::waveamdmachine::MFMAOp>())
       return;
-    if (!llvm::hasSingleElement(mma.getAcc().getUses()))
+    if (hasUseAfter(op, mma.getAcc()))
       return;
     addAliasEdge(mma.getAcc(), mma.getAccResult(), 0);
   }
