@@ -395,13 +395,12 @@ def import_mlir_bindings(build_dir: Path):
     sys.path.insert(0, str(package_path))
     try:
         from mlir import ir
-        from mlir._mlir_libs._waveDialectsNanobind import register_dialects
-        from mlir.dialects import transform
+        from mlir.dialects import transform, wave
     except ModuleNotFoundError as err:
         raise SystemExit(
             f"MLIR Python bindings missing under {package_path}: {err}"
         ) from err
-    return ir, transform, register_dialects
+    return ir, transform, wave.register_dialects
 
 
 def erase_default_entry(ir, module) -> None:
