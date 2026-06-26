@@ -78,6 +78,36 @@ getRegAllocTransformRegClassAttr(DictionaryAttr dict, Operation *diagOp) {
   return *regClass;
 }
 
+static FailureOr<SmallVector<int64_t>>
+parseI64ArrayAttr(DictionaryAttr dict, StringRef name, Operation *diagOp) {
+  ArrayAttr array = dict.getAs<ArrayAttr>(name);
+  if (!array)
+    return diagOp->emitError("regalloc state missing array `") << name << "`";
+  SmallVector<int64_t> values;
+  values.reserve(array.size());
+  for (Attribute attr : array) {
+    IntegerAttr intAttr = dyn_cast<IntegerAttr>(attr);
+    if (!intAttr)
+      return diagOp->emitError("regalloc state array `")
+             << name << "` has non-integer element";
+    values.push_back(intAttr.getInt());
+  }
+  return values;
+}
+
+static FailureOr<RegAllocTransformValueKind> parseValueKind(DictionaryAttr dict,
+                                                            Operation *diagOp) {
+  StringAttr attr = dict.getAs<StringAttr>("kind");
+  if (!attr)
+    return diagOp->emitError("regalloc state missing string `kind`");
+  if (attr.getValue() == "block_arg")
+    return RegAllocTransformValueKind::BlockArgument;
+  if (attr.getValue() == "op_result")
+    return RegAllocTransformValueKind::OpResult;
+  return diagOp->emitError("regalloc state has unknown value kind `")
+         << attr.getValue() << "`";
+}
+
 static LogicalResult parseFixedIndex(DictionaryAttr dict, Operation *diagOp,
                                      RegAllocTransformValue &value) {
   auto fixed = dict.getAs<IntegerAttr>("fixed");
@@ -91,11 +121,21 @@ static LogicalResult parseFixedIndex(DictionaryAttr dict, Operation *diagOp,
   return success();
 }
 
-static FailureOr<RegAllocTransformValue> parseValue(DictionaryAttr dict,
-                                                    Operation *diagOp) {
-  FailureOr<waveamdmachine::RegClass> regClass =
-      getRegAllocTransformRegClassAttr(dict, diagOp);
+struct ParsedRegAllocValueUnsignedAttrs {
+  unsigned id = 0;
+  unsigned number = 0;
+  unsigned set = 0;
+  unsigned start = 0;
+  unsigned end = 0;
+  unsigned width = 0;
+  unsigned offset = 0;
+};
+
+static FailureOr<ParsedRegAllocValueUnsignedAttrs>
+parseValueUnsignedAttrs(DictionaryAttr dict, Operation *diagOp) {
   FailureOr<unsigned> id = getRegAllocTransformUnsignedAttr(dict, "id", diagOp);
+  FailureOr<unsigned> number =
+      getRegAllocTransformUnsignedAttr(dict, "number", diagOp);
   FailureOr<unsigned> set =
       getRegAllocTransformUnsignedAttr(dict, "set", diagOp);
   FailureOr<unsigned> start =
@@ -106,11 +146,38 @@ static FailureOr<RegAllocTransformValue> parseValue(DictionaryAttr dict,
       getRegAllocTransformUnsignedAttr(dict, "width", diagOp);
   FailureOr<unsigned> offset =
       getRegAllocTransformUnsignedAttr(dict, "offset", diagOp);
-  if (failed(regClass) || failed(id) || failed(set) || failed(start) ||
+  if (failed(id) || failed(number) || failed(set) || failed(start) ||
       failed(end) || failed(width) || failed(offset))
     return failure();
-  RegAllocTransformValue value{*regClass, std::nullopt, *id,    *set,
-                               *start,    *end,         *width, *offset};
+  return ParsedRegAllocValueUnsignedAttrs{*id,  *number, *set,   *start,
+                                          *end, *width,  *offset};
+}
+
+static FailureOr<RegAllocTransformValue> parseValue(DictionaryAttr dict,
+                                                    Operation *diagOp) {
+  FailureOr<waveamdmachine::RegClass> regClass =
+      getRegAllocTransformRegClassAttr(dict, diagOp);
+  FailureOr<RegAllocTransformValueKind> kind = parseValueKind(dict, diagOp);
+  FailureOr<SmallVector<int64_t>> path =
+      parseI64ArrayAttr(dict, "path", diagOp);
+  FailureOr<ParsedRegAllocValueUnsignedAttrs> unsignedAttrs =
+      parseValueUnsignedAttrs(dict, diagOp);
+  if (failed(regClass) || failed(kind) || failed(path) || failed(unsignedAttrs))
+    return failure();
+  if (path->empty())
+    return diagOp->emitError("regalloc state value has empty path");
+
+  RegAllocTransformValue value;
+  value.path = std::move(*path);
+  value.regClass = *regClass;
+  value.kind = *kind;
+  value.id = unsignedAttrs->id;
+  value.set = unsignedAttrs->set;
+  value.start = unsignedAttrs->start;
+  value.end = unsignedAttrs->end;
+  value.width = unsignedAttrs->width;
+  value.offset = unsignedAttrs->offset;
+  value.number = unsignedAttrs->number;
   if (failed(parseFixedIndex(dict, diagOp, value)))
     return failure();
   return value;
@@ -130,7 +197,9 @@ parseRegAllocTransformValues(DictionaryAttr state, Operation *diagOp) {
     FailureOr<RegAllocTransformValue> value = parseValue(dict, diagOp);
     if (failed(value))
       return failure();
-    values.push_back(*value);
+    if (value->id != values.size())
+      return diagOp->emitError("regalloc state value id does not match order");
+    values.push_back(std::move(*value));
   }
   return values;
 }

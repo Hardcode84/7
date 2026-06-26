@@ -607,20 +607,140 @@ static unsigned getCombinedVGPRFamilyPressure(unsigned agprFootprint,
   return agprFootprint + llvm::alignTo(vgprFootprint, 4);
 }
 
-static void collectRegAllocValues(Region &region,
-                                  SmallVectorImpl<Value> &values) {
+template <typename T>
+static FailureOr<T> failRegAllocStateIdentity(Operation *diagOp) {
+  diagOp->emitError("regalloc state value identity no longer matches IR");
+  return failure();
+}
+
+static Block *getBlockAt(Region &region, int64_t index) {
+  if (index < 0)
+    return nullptr;
+  uint64_t cursor = 0;
+  uint64_t target = static_cast<uint64_t>(index);
   for (Block &block : region) {
-    for (BlockArgument arg : block.getArguments())
-      if (wave::getRegAllocTransformTrackedRegType(arg))
-        values.push_back(arg);
-    for (Operation &op : block) {
-      for (OpResult result : op.getResults())
-        if (wave::getRegAllocTransformTrackedRegType(result))
-          values.push_back(result);
-      for (Region &nested : op.getRegions())
-        collectRegAllocValues(nested, values);
-    }
+    if (cursor == target)
+      return &block;
+    ++cursor;
   }
+  return nullptr;
+}
+
+static Operation *getOpAt(Block &block, int64_t index) {
+  if (index < 0)
+    return nullptr;
+  uint64_t cursor = 0;
+  uint64_t target = static_cast<uint64_t>(index);
+  for (Operation &op : block) {
+    if (cursor == target)
+      return &op;
+    ++cursor;
+  }
+  return nullptr;
+}
+
+struct RegAllocBlockPathStep {
+  Block *block = nullptr;
+  Region *nextRegion = nullptr;
+  bool complete = false;
+};
+
+static FailureOr<RegAllocBlockPathStep>
+resolveRegAllocBlockPathStep(Region &region, ArrayRef<int64_t> path,
+                             unsigned &cursor, Operation *diagOp) {
+  Block *block = getBlockAt(region, path[cursor++]);
+  if (!block)
+    return failRegAllocStateIdentity<RegAllocBlockPathStep>(diagOp);
+  if (cursor == path.size())
+    return RegAllocBlockPathStep{block, nullptr, true};
+  if (cursor + 1 >= path.size())
+    return failRegAllocStateIdentity<RegAllocBlockPathStep>(diagOp);
+
+  Operation *op = getOpAt(*block, path[cursor++]);
+  if (!op)
+    return failRegAllocStateIdentity<RegAllocBlockPathStep>(diagOp);
+
+  int64_t regionIndex = path[cursor++];
+  if (regionIndex < 0 ||
+      static_cast<uint64_t>(regionIndex) >= op->getNumRegions())
+    return failRegAllocStateIdentity<RegAllocBlockPathStep>(diagOp);
+  return RegAllocBlockPathStep{
+      block, &op->getRegion(static_cast<unsigned>(regionIndex)), false};
+}
+
+static FailureOr<Block *> resolveRegAllocBlockPath(Region &root,
+                                                   ArrayRef<int64_t> path,
+                                                   Operation *diagOp) {
+  if (path.size() < 2 || path.front() != 0)
+    return failRegAllocStateIdentity<Block *>(diagOp);
+
+  Region *region = &root;
+  unsigned cursor = 1;
+  while (cursor < path.size()) {
+    FailureOr<RegAllocBlockPathStep> step =
+        resolveRegAllocBlockPathStep(*region, path, cursor, diagOp);
+    if (failed(step))
+      return failure();
+    if (step->complete)
+      return step->block;
+    region = step->nextRegion;
+  }
+  return failRegAllocStateIdentity<Block *>(diagOp);
+}
+
+static LogicalResult
+checkResolvedRegAllocValue(Value resolved,
+                           const wave::RegAllocTransformValue &value,
+                           Operation *diagOp) {
+  std::optional<waveamdmachine::RegType> type =
+      wave::getRegAllocTransformTrackedRegType(resolved);
+  if (!type || type->getRegClass() != value.regClass ||
+      static_cast<unsigned>(type->getWidth()) != value.width) {
+    diagOp->emitError("regalloc state value identity no longer matches IR");
+    return failure();
+  }
+  int64_t index = type->getIndex();
+  if ((value.fixed &&
+       (index < 0 || *value.fixed != static_cast<unsigned>(index))) ||
+      (!value.fixed && index >= 0)) {
+    diagOp->emitError("regalloc state value identity no longer matches IR");
+    return failure();
+  }
+  return success();
+}
+
+static FailureOr<Value>
+resolveRegAllocStateValue(func::FuncOp func,
+                          const wave::RegAllocTransformValue &value) {
+  Operation *diagOp = func.getOperation();
+  if (value.kind == wave::RegAllocTransformValueKind::BlockArgument) {
+    FailureOr<Block *> block =
+        resolveRegAllocBlockPath(func.getBody(), value.path, diagOp);
+    if (failed(block))
+      return failure();
+    if (value.number >= (*block)->getNumArguments())
+      return failRegAllocStateIdentity<Value>(diagOp);
+    Value resolved = (*block)->getArgument(value.number);
+    if (failed(checkResolvedRegAllocValue(resolved, value, diagOp)))
+      return failure();
+    return resolved;
+  }
+
+  if (value.path.size() < 3)
+    return failRegAllocStateIdentity<Value>(diagOp);
+  ArrayRef<int64_t> blockPath = ArrayRef<int64_t>(value.path).drop_back();
+  FailureOr<Block *> block =
+      resolveRegAllocBlockPath(func.getBody(), blockPath, diagOp);
+  if (failed(block))
+    return failure();
+  Block *resolvedBlock = *block;
+  Operation *op = getOpAt(*resolvedBlock, value.path.back());
+  if (!op || value.number >= op->getNumResults())
+    return failRegAllocStateIdentity<Value>(diagOp);
+  Value resolved = op->getResult(value.number);
+  if (failed(checkResolvedRegAllocValue(resolved, value, diagOp)))
+    return failure();
+  return resolved;
 }
 
 static LogicalResult refreshFuncTypeFromBody(func::FuncOp func) {
@@ -999,20 +1119,18 @@ private:
   }
 
   LogicalResult applyAssignments() {
-    SmallVector<Value> payloadValues;
-    collectRegAllocValues(func.getBody(), payloadValues);
-    if (payloadValues.size() != values.size())
-      return func.emitError("regalloc state value count no longer matches IR");
     DenseMap<unsigned, const wave::RegAllocTransformAssignment *> bySet;
     for (const wave::RegAllocTransformAssignment &assignment : assignments)
       bySet[assignment.set] = &assignment;
     for (const wave::RegAllocTransformValue &value : values) {
+      FailureOr<Value> payloadValue = resolveRegAllocStateValue(func, value);
+      if (failed(payloadValue))
+        return failure();
       const wave::RegAllocTransformAssignment *assignment =
           bySet.lookup(value.set);
       if (!assignment)
         return func.emitError("regalloc assignment map is incomplete");
-      setValueType(payloadValues[value.id], value,
-                   assignment->base + value.offset);
+      setValueType(*payloadValue, value, assignment->base + value.offset);
     }
     return refreshFuncTypeFromBody(func);
   }

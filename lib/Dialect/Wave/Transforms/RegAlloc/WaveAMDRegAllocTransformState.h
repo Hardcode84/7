@@ -24,11 +24,15 @@ StringRef getRegAllocTransformAssignmentsAttrName();
 
 enum class RegAllocTransformLoopDecision { Done, Restart, Stalled };
 
+enum class RegAllocTransformValueKind { BlockArgument, OpResult };
+
 std::optional<waveamdmachine::RegType>
 getRegAllocTransformTrackedRegType(Value value);
 
 struct RegAllocTransformValue {
+  SmallVector<int64_t> path;
   waveamdmachine::RegClass regClass;
+  RegAllocTransformValueKind kind = RegAllocTransformValueKind::OpResult;
   std::optional<unsigned> fixed;
   unsigned id = 0;
   unsigned set = 0;
@@ -36,6 +40,7 @@ struct RegAllocTransformValue {
   unsigned end = 0;
   unsigned width = 0;
   unsigned offset = 0;
+  unsigned number = 0;
 };
 
 struct RegAllocTransformAliasMember {
