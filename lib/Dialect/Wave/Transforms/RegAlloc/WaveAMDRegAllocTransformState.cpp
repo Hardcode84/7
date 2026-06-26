@@ -8,8 +8,10 @@
 
 #include "WaveAMDRegAllocTransformState.h"
 
+#include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineTarget.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/Support/MathExtras.h"
 #include <limits>
 
 using namespace mlir;
@@ -22,6 +24,7 @@ static constexpr StringLiteral kRegAllocAssignmentsAttr =
     "waveamdmachine.regalloc_assignments";
 static constexpr StringLiteral kRegAllocStageSuccess = "linear-scan-success";
 static constexpr StringLiteral kRegAllocStageFailure = "linear-scan-failure";
+static constexpr StringLiteral kTargetWavesAttr = "waveamdmachine.target_waves";
 
 StringRef getRegAllocTransformStateAttrName() {
   return kRegAllocTransformStateAttr;
@@ -303,6 +306,50 @@ static std::optional<unsigned> getUnsignedIntegerAttr(Operation *op,
   return static_cast<unsigned>(value);
 }
 
+static Attribute findAncestorAttr(Operation *op, StringRef name) {
+  for (Operation *cur = op; cur; cur = cur->getParentOp())
+    if (Attribute attr = cur->getAttr(name))
+      return attr;
+  return {};
+}
+
+static bool hasCombinedVGPRFamilyPressure(const llvm::AMDGPU::IsaVersion &isa) {
+  return isa.Major == 9 &&
+         ((isa.Minor == 0 && isa.Stepping == 10) || isa.Minor == 4 ||
+          (isa.Minor == 5 && isa.Stepping == 0));
+}
+
+static unsigned getMaxWavesPerEU(const llvm::AMDGPU::IsaVersion &isa) {
+  if (hasCombinedVGPRFamilyPressure(isa))
+    return 8;
+  if (isa.Major < 10)
+    return 10;
+  return isa.Major == 10 && isa.Minor < 3 ? 20 : 16;
+}
+
+static unsigned getCombinedVGPRFamilyBudget(unsigned targetWaves) {
+  return llvm::alignDown(512 / targetWaves, 8);
+}
+
+static FailureOr<std::optional<unsigned>>
+getTargetWaves(func::FuncOp func, unsigned maxWavesPerEU) {
+  Attribute attr = findAncestorAttr(func, kTargetWavesAttr);
+  if (!attr)
+    return std::optional<unsigned>();
+  auto intAttr = dyn_cast<IntegerAttr>(attr);
+  if (!intAttr)
+    return func.emitError("regalloc transform ")
+           << kTargetWavesAttr << " must be an integer attribute";
+  int64_t value = intAttr.getInt();
+  if (value <= 0)
+    return func.emitError("regalloc transform ")
+           << kTargetWavesAttr << " must be positive";
+  if (static_cast<uint64_t>(value) > maxWavesPerEU)
+    return func.emitError("regalloc transform ")
+           << kTargetWavesAttr << " exceeds target wave capacity";
+  return std::optional<unsigned>(static_cast<unsigned>(value));
+}
+
 RegAllocTransformBudget
 getRegAllocTransformBudget(func::FuncOp func,
                            waveamdmachine::RegClass regClass) {
@@ -314,6 +361,29 @@ getRegAllocTransformBudget(func::FuncOp func,
   if (std::optional<unsigned> limit = getUnsignedIntegerAttr(parent, attrName))
     return {*limit, "module_attr"};
   return {getDefaultRegClassLimit(regClass), "default"};
+}
+
+FailureOr<std::optional<RegAllocTransformBudget>>
+getRegAllocTransformVGPRFamilyBudget(func::FuncOp func) {
+  if (!findAncestorAttr(func, kTargetWavesAttr))
+    return std::optional<RegAllocTransformBudget>();
+  FailureOr<llvm::AMDGPU::IsaVersion> isa =
+      waveamdmachine::getAMDGPUTargetIsaVersion(
+          func, "regalloc transform target_waves budget");
+  if (failed(isa))
+    return failure();
+  FailureOr<std::optional<unsigned>> targetWaves =
+      getTargetWaves(func, getMaxWavesPerEU(*isa));
+  if (failed(targetWaves))
+    return failure();
+  if (!*targetWaves || !hasCombinedVGPRFamilyPressure(*isa))
+    return std::optional<RegAllocTransformBudget>();
+  unsigned limit = getCombinedVGPRFamilyBudget(**targetWaves);
+  if (limit == 0)
+    return func.emitError("regalloc transform ")
+           << kTargetWavesAttr << " has no VGPR-family budget for this target";
+  return std::optional<RegAllocTransformBudget>(
+      RegAllocTransformBudget{limit, "target_waves_combined_vgpr_agpr"});
 }
 
 void clearRegAllocTransformState(Operation *target) {

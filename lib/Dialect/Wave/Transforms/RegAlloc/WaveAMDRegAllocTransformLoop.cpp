@@ -573,6 +573,7 @@ private:
 struct RegAllocScanFailure {
   SmallVector<wave::RegAllocTransformAssignment> overlaps;
   waveamdmachine::RegClass regClass;
+  StringRef className;
   StringRef reason = "pressure";
   StringRef budgetMode = "default";
   unsigned set = 0;
@@ -588,6 +589,11 @@ assignedRangesOverlap(const wave::RegAllocTransformAssignment &assignment,
   unsigned end = base + width;
   unsigned assignedEnd = assignment.base + assignment.width;
   return base < assignedEnd && assignment.base < end;
+}
+
+static bool isVGPRFamilyClass(waveamdmachine::RegClass regClass) {
+  return regClass == waveamdmachine::RegClass::VGPR ||
+         regClass == waveamdmachine::RegClass::AGPR;
 }
 
 static void collectRegAllocValues(Region &region,
@@ -677,6 +683,11 @@ private:
     if (failed(parsedSets))
       return failure();
     sets = std::move(*parsedSets);
+    FailureOr<std::optional<wave::RegAllocTransformBudget>> familyBudget =
+        wave::getRegAllocTransformVGPRFamilyBudget(func);
+    if (failed(familyBudget))
+      return failure();
+    vgprFamilyBudget = *familyBudget;
     return computeFixedBases();
   }
 
@@ -740,6 +751,8 @@ private:
   LogicalResult allocateSet(const wave::RegAllocTransformAliasSet &set) {
     wave::RegAllocTransformBudget budget =
         wave::getRegAllocTransformBudget(func, set.regClass);
+    if (checkCombinedPressureFailure(set))
+      return success();
     if (set.fixedBase)
       return allocateFixedSet(set, budget);
     std::optional<unsigned> base = findFreeBase(set, budget.limit);
@@ -781,6 +794,20 @@ private:
         });
   }
 
+  bool
+  checkCombinedPressureFailure(const wave::RegAllocTransformAliasSet &set) {
+    if (!vgprFamilyBudget || !isVGPRFamilyClass(set.regClass))
+      return false;
+    unsigned pressure = set.width;
+    for (const wave::RegAllocTransformAssignment &assigned : active)
+      if (isVGPRFamilyClass(assigned.regClass))
+        pressure += assigned.width;
+    if (pressure <= vgprFamilyBudget->limit)
+      return false;
+    recordCombinedPressureFailure(set, pressure);
+    return true;
+  }
+
   void addAssignment(const wave::RegAllocTransformAliasSet &set,
                      unsigned base) {
     wave::RegAllocTransformAssignment assigned{
@@ -810,6 +837,24 @@ private:
     failed.request = set.width;
     for (const wave::RegAllocTransformAssignment &assigned : active)
       if (assigned.regClass == set.regClass)
+        failed.overlaps.push_back(assigned);
+    scanFailure = std::move(failed);
+  }
+
+  void recordCombinedPressureFailure(const wave::RegAllocTransformAliasSet &set,
+                                     unsigned pressure) {
+    RegAllocScanFailure failed;
+    failed.regClass = set.regClass;
+    failed.className = "vgpr_agpr";
+    failed.reason = "pressure";
+    failed.budgetMode = vgprFamilyBudget->mode;
+    failed.set = set.id;
+    failed.position = set.start;
+    failed.pressure = pressure;
+    failed.limit = vgprFamilyBudget->limit;
+    failed.request = set.width;
+    for (const wave::RegAllocTransformAssignment &assigned : active)
+      if (isVGPRFamilyClass(assigned.regClass))
         failed.overlaps.push_back(assigned);
     scanFailure = std::move(failed);
   }
@@ -855,9 +900,12 @@ private:
     SmallVector<NamedAttribute> attrs;
     attrs.emplace_back(builder.getStringAttr("budget_mode"),
                        builder.getStringAttr(scanFailure->budgetMode));
-    attrs.emplace_back(builder.getStringAttr("class"),
-                       builder.getStringAttr(waveamdmachine::stringifyRegClass(
-                           scanFailure->regClass)));
+    attrs.emplace_back(
+        builder.getStringAttr("class"),
+        builder.getStringAttr(
+            scanFailure->className.empty()
+                ? waveamdmachine::stringifyRegClass(scanFailure->regClass)
+                : scanFailure->className));
     attrs.emplace_back(builder.getStringAttr("diagnostics"),
                        buildFailureDiagnostics());
     attrs.emplace_back(builder.getStringAttr("limit"),
@@ -931,6 +979,7 @@ private:
   SmallVector<wave::RegAllocTransformAliasSet> sets;
   SmallVector<wave::RegAllocTransformAssignment> active;
   SmallVector<wave::RegAllocTransformAssignment> assignments;
+  std::optional<wave::RegAllocTransformBudget> vgprFamilyBudget;
   std::optional<RegAllocScanFailure> scanFailure;
   DictionaryAttr state;
   func::FuncOp func;

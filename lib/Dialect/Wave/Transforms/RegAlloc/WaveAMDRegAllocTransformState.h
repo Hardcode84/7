@@ -99,6 +99,9 @@ RegAllocTransformBudget
 getRegAllocTransformBudget(func::FuncOp func,
                            waveamdmachine::RegClass regClass);
 
+FailureOr<std::optional<RegAllocTransformBudget>>
+getRegAllocTransformVGPRFamilyBudget(func::FuncOp func);
+
 void clearRegAllocTransformState(Operation *target);
 
 FailureOr<RegAllocTransformLoopDecision>
