@@ -81,22 +81,6 @@ runNamedSequence(transform::TransformOpInterface caller,
                  transform::TransformState &state,
                  SmallVectorImpl<SmallVector<transform::MappedValue>> &out);
 
-static StringRef getRegClassName(waveamdmachine::RegClass regClass) {
-  switch (regClass) {
-  case waveamdmachine::RegClass::SGPR:
-    return "sgpr";
-  case waveamdmachine::RegClass::VGPR:
-    return "vgpr";
-  case waveamdmachine::RegClass::AGPR:
-    return "agpr";
-  case waveamdmachine::RegClass::SCC:
-    return "scc";
-  case waveamdmachine::RegClass::VCC:
-    return "vcc";
-  }
-  llvm_unreachable("unknown register class");
-}
-
 static std::optional<waveamdmachine::RegType> getTrackedRegType(Value value) {
   auto type = dyn_cast<waveamdmachine::RegType>(value.getType());
   if (!type)
@@ -410,9 +394,9 @@ private:
 
   DictionaryAttr buildValueAttr(const RegAllocAliasValue &record) {
     SmallVector<NamedAttribute> attrs;
-    attrs.emplace_back(
-        builder.getStringAttr("class"),
-        builder.getStringAttr(getRegClassName(record.type.getRegClass())));
+    attrs.emplace_back(builder.getStringAttr("class"),
+                       builder.getStringAttr(waveamdmachine::stringifyRegClass(
+                           record.type.getRegClass())));
     attrs.emplace_back(builder.getStringAttr("end"), getI64(record.end));
     if (record.type.getIndex() >= 0)
       attrs.emplace_back(builder.getStringAttr("fixed"),
@@ -454,7 +438,7 @@ private:
     }
     SmallVector<NamedAttribute> attrs;
     attrs.emplace_back(builder.getStringAttr("class"),
-                       builder.getStringAttr(getRegClassName(
+                       builder.getStringAttr(waveamdmachine::stringifyRegClass(
                            values[set.members.front()].type.getRegClass())));
     attrs.emplace_back(builder.getStringAttr("id"), getI64(set.id));
     attrs.emplace_back(builder.getStringAttr("members"),
