@@ -160,6 +160,8 @@ private:
     auto mma = dyn_cast<waveamdmachine::MMAOpInterface>(op);
     if (!mma || !op->hasTrait<OpTrait::waveamdmachine::MFMAOp>())
       return;
+    if (!llvm::hasSingleElement(mma.getAcc().getUses()))
+      return;
     addAliasEdge(mma.getAcc(), mma.getAccResult(), 0);
   }
 
