@@ -75,11 +75,11 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
 // SCALAR_SPILL-LABEL: func.func @scalar_vgpr_loop_carry_scratch_spill
 // SCALAR_SPILL-SAME: waveamdmachine.regalloc_assignments
-// SCALAR_SPILL-SAME: waveamdmachine.scratch_spill_bytes = 20 : i64
-// SCALAR_SPILL: waveamdmachine.scratch_store_b32
+// SCALAR_SPILL-NOT: waveamdmachine.scratch_spill_bytes
+// SCALAR_SPILL: [[ZERO:%.*]] = waveamdmachine.imm 0
 // SCALAR_SPILL: waveamdmachine.uniform_loop
 // SCALAR_SPILL: waveamdmachine.continue_if
-// SCALAR_SPILL: waveamdmachine.scratch_load_b32
+// SCALAR_SPILL: waveamdmachine.v_mov_b32_tuple [[ZERO]]
 func.func @scalar_vgpr_loop_carry_scratch_spill()
     attributes {wave.kernel, waveamdmachine.target_waves = 4 : i64} {
   %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
@@ -538,10 +538,11 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
 // FALLBACK-LABEL: func.func @scratch_loop_carry_init_use_after_loop_fallback
 // FALLBACK-SAME: waveamdmachine.regalloc_assignments
-// FALLBACK-SAME: waveamdmachine.scratch_spill_bytes = 32 : i64
-// FALLBACK: waveamdmachine.scratch_store_tuple_b32
+// FALLBACK-NOT: waveamdmachine.scratch_spill_bytes
+// FALLBACK: [[ZERO:%.*]] = waveamdmachine.imm 0
 // FALLBACK: waveamdmachine.uniform_loop
-// FALLBACK: waveamdmachine.scratch_load_tuple_b32
+// FALLBACK: [[REBUILT:%.*]] = waveamdmachine.v_mov_b32_tuple [[ZERO]]
+// FALLBACK: waveamdmachine.tuple_to_elements [[REBUILT]]
 func.func @scratch_loop_carry_init_use_after_loop_fallback()
     attributes {wave.kernel, waveamdmachine.target_waves = 4 : i64} {
   %zero = waveamdmachine.imm 0 : !waveamdmachine.imm

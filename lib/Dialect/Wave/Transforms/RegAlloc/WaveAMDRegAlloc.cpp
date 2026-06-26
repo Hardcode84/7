@@ -537,8 +537,9 @@ static bool shouldClearRegAllocAssignments(func::FuncOp func) {
   return func->hasAttr(kAssignmentsAttr) || hasProviderRegAllocState(func);
 }
 
-static LogicalResult clearRegAllocAssignments(func::FuncOp func) {
-  if (!shouldClearRegAllocAssignments(func))
+static LogicalResult clearRegAllocAssignments(func::FuncOp func,
+                                              bool force = false) {
+  if (!force && !shouldClearRegAllocAssignments(func))
     return success();
   WalkResult walk = func.walk([](Operation *op) {
     if (isa<func::FuncOp>(op))
@@ -628,9 +629,14 @@ addPlannedTempInterval(Inventory &inventory,
     interval->group = groupPtr;
     interval->nonPromotable = true;
     interval->plannedTemp = true;
+    interval->rematerializableTemp = static_cast<bool>(temp.value);
+    if (temp.value)
+      interval->values.insert(temp.value);
     groupPtr->intervals.push_back(interval.get());
     inventory.intervals.push_back(std::move(interval));
   }
+  if (temp.value)
+    inventory.intervalFor[temp.value] = groupPtr->intervals.front();
   return groupPtr;
 }
 
@@ -2092,7 +2098,6 @@ static void collectPressureReliefFailureDiagnostics(
     state.provider->collectFailureDiagnostics(providerDiagnostics);
     if (providerDiagnostics.empty())
       continue;
-    diagnostics.clear();
     for (const wave::WaveAMDPressureReliefProviderDiagnostic &diagnostic :
          providerDiagnostics)
       diagnostics.push_back(diagnostic);
@@ -2461,11 +2466,31 @@ public:
     const PlannedPressureReliefTempInterval *temp =
         findMatchingTemp(plan, regClass, width, diagOp);
     if (!temp) {
+      if (plan.allowsUnplannedTempAssignment(diagOp))
+        return wave::WaveAMDPressureReliefTempAssignment{regClass, width, -1};
       if (allTempsConsumed(plan))
         return diagOp->emitError(kPassName)
                << " materialized more pressure-relief temps than planned";
-      return diagOp->emitError(kPassName)
-             << " materialized pressure-relief temp does not match plan";
+      InFlightDiagnostic diag =
+          diagOp->emitError(kPassName)
+          << " materialized pressure-relief temp does not match plan"
+          << " (class=" << getRegClassName(regClass) << ", width=" << width;
+      DenseMap<Operation *, unsigned>::const_iterator pos =
+          inventory.positions.find(diagOp);
+      if (pos != inventory.positions.end())
+        diag << ", position=" << pos->second;
+      diag << ")";
+      if (auto it = tempsByPlan.find(&plan); it != tempsByPlan.end()) {
+        diag << "; planned=[";
+        llvm::interleaveComma(it->second, diag, [&](const auto *planned) {
+          diag << "{class=" << getRegClassName(planned->interval.regClass)
+               << ", width=" << planned->interval.width
+               << ", start=" << planned->interval.start
+               << ", end=" << planned->interval.end << "}";
+        });
+        diag << "]";
+      }
+      return diag;
     }
     consumedTemps.insert(temp);
     IntervalGroup *group = temp->group;
@@ -2735,7 +2760,10 @@ static void clearDiagnostics(func::FuncOp func) {
 
 static void clearTransientRegAllocAttrs(func::FuncOp func) {
   clearPressureReliefDiagnostics(func);
-  func.walk([](Operation *op) { op->removeAttr(kTempAttr); });
+  func.walk([](Operation *op) {
+    op->removeAttr(kTempAttr);
+    op->removeAttr(kRegAllocRematTempAttr);
+  });
 }
 
 static void emitPressureReliefProviderRemarks(func::FuncOp func,
@@ -2859,7 +2887,7 @@ retryAfterPendingRelief(func::FuncOp func, Inventory &inventory,
                         RegisterBudgets budgets, OpBuilder &builder) {
   if (failed(materializePendingRelief(func, inventory, budgets, builder)))
     return mlir::failure();
-  if (failed(clearRegAllocAssignments(func)))
+  if (failed(clearRegAllocAssignments(func, /*force=*/true)))
     return mlir::failure();
   return AllocationAttemptResult::Retry;
 }

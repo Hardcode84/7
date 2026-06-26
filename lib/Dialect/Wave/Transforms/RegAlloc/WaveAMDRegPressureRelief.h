@@ -10,6 +10,7 @@
 #define MLIR_DIALECT_WAVE_TRANSFORMS_WAVEAMDREGPRESSURERELIEF_H
 
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachine.h"
+#include "mlir/IR/Value.h"
 #include "mlir/Support/LLVM.h"
 #include "mlir/Support/LogicalResult.h"
 #include "llvm/ADT/SmallVector.h"
@@ -64,6 +65,7 @@ struct WaveAMDPressureReliefEffect {
 
 struct WaveAMDPressureReliefTempInterval {
   std::optional<unsigned> fixedBase;
+  Value value;
   waveamdmachine::RegClass regClass;
   unsigned start = 0;
   unsigned end = 0;
@@ -151,6 +153,7 @@ public:
   virtual WaveAMDPressureReliefProviderKind getProviderKind() const = 0;
   virtual StringRef getProviderName() const = 0;
   virtual unsigned getReliefDwords() const = 0;
+  virtual bool allowsUnplannedTempAssignment(Operation *diagOp) const;
 };
 
 using WaveAMDPressureReliefPlanList =

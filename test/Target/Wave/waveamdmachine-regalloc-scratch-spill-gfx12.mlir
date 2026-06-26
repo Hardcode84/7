@@ -3,8 +3,8 @@
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1200"} {
 
 // CHECK-LABEL: func.func @scratch_spill_gfx1200
-// CHECK-SAME: waveamdmachine.private_segment_fixed_size = 8 : i64
-// CHECK-SAME: waveamdmachine.scratch_spill_bytes = 8 : i64
+// CHECK-SAME: waveamdmachine.private_segment_fixed_size = 16 : i64
+// CHECK-SAME: waveamdmachine.scratch_spill_bytes = 16 : i64
 // CHECK-SAME: waveamdmachine.uses_flat_scratch = true
 // CHECK: %[[SADDR:.*]] = waveamdmachine.s_mov_b32_value
 // CHECK: %[[STORE0:.*]] = waveamdmachine.scratch_store_b32 {{.*}}, {{.*}}, %[[SADDR]]

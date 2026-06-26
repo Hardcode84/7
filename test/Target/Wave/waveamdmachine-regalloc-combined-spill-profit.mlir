@@ -227,7 +227,7 @@ func.func @combined_pressure_spills_noncheap_value()
 
 // SOLVE-LABEL: func.func @combined_pressure_spill_solves_noncheap_value
 // SOLVE-NOT: waveamdmachine.regalloc_overflowed
-// SOLVE-SAME: waveamdmachine.scratch_spill_bytes = 4 : i64
+// SOLVE-SAME: waveamdmachine.scratch_spill_bytes = 28 : i64
 // SOLVE: waveamdmachine.scratch_store_b32
 // SOLVE: waveamdmachine.scratch_load_b32
 func.func @combined_pressure_spill_solves_noncheap_value()
@@ -273,7 +273,7 @@ func.func @combined_pressure_spill_solves_noncheap_value()
 }
 
 // SOLVE-LABEL: func.func @combined_pressure_spills_group_with_temp_alias
-// SOLVE-SAME: waveamdmachine.scratch_spill_bytes = 4 : i64
+// SOLVE-SAME: waveamdmachine.scratch_spill_bytes = 16 : i64
 // SOLVE-NOT: scratch_store_tuple_b32
 // SOLVE: waveamdmachine.scratch_store_b32
 // SOLVE: waveamdmachine.scratch_load_b32

@@ -3,9 +3,9 @@
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 
 // CHECK-LABEL: func.func @multi_wave_lds_spill
-// CHECK-SAME: waveamdmachine.lds_size = 512 : i64
-// CHECK-SAME: waveamdmachine.lds_spill_bytes = 512 : i64
-// CHECK-SAME: waveamdmachine.vgpr_count = 5 : i64
+// CHECK-SAME: waveamdmachine.lds_size = 2048 : i64
+// CHECK-SAME: waveamdmachine.lds_spill_bytes = 2048 : i64
+// CHECK-SAME: waveamdmachine.vgpr_count = 4 : i64
 // CHECK: %[[WI:.+]] = waveamdmachine.v_workitem_id_x
 // CHECK: %[[ADDR:.+]] = waveamdmachine.v_lshlrev_b32 %[[WI]]
 // CHECK: %[[STORE:.+]] = waveamdmachine.ds_store_b32 %[[ADDR]]

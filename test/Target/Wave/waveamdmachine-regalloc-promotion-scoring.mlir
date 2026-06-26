@@ -1,6 +1,15 @@
 // RUN: wave-opt --waveamd-reg-alloc='vgpr-limit=8 agpr-limit=256' --waveamd-resource-info %s | FileCheck %s
+// RUN: rm -f %t.yaml
+// RUN: wave-opt --waveamd-reg-alloc='vgpr-limit=8 agpr-limit=256' \
+// RUN:   --remarks-filter=waveamdmachine-regalloc --remark-policy=all \
+// RUN:   --remark-format=yaml --remarks-output-file=%t.yaml %s >/dev/null
+// RUN: FileCheck %s --input-file=%t.yaml --check-prefix=REMARK
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
+
+// REMARK: Function:        prefer_accumulator_over_loop_load
+// REMARK: provider:        bank-promotion
+// REMARK: pressure_relief_candidates: '{{.*}}cost={ops=0, loop_ops=16, latency=0, instability=0}{{.*}}bridges=1, loop_cost=16{{.*}}cost={ops=0, loop_ops=0, latency=0, instability=0}{{.*}}selected{{.*}}'
 
 // CHECK-LABEL: func.func @prefer_accumulator_over_loop_load
 // CHECK-SAME: waveamdmachine.agpr_count = 4 : i64

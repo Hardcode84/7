@@ -23,8 +23,32 @@ static constexpr llvm::StringLiteral kFixedResultsAttr =
 
 struct PromotionScore {
   unsigned liveDwords = 0;
-  unsigned bridgeCost = 0;
+  int64_t bridgeCost = 0;
+  int64_t bridgeCount = 0;
+  int64_t loopBridgeCost = 0;
   unsigned end = 0;
+};
+
+struct PromotionBridgeCost {
+  int64_t cost = 0;
+  int64_t count = 0;
+  int64_t loopCost = 0;
+
+  void add(Operation *op) {
+    ++count;
+    int64_t scale = getLoopCostScale(op);
+    if (scale == 1)
+      ++cost;
+    else
+      loopCost += scale;
+  }
+
+  PromotionBridgeCost &operator+=(PromotionBridgeCost rhs) {
+    cost += rhs.cost;
+    count += rhs.count;
+    loopCost += rhs.loopCost;
+    return *this;
+  }
 };
 
 struct BankPromotionStep {
@@ -561,13 +585,6 @@ static bool valueInGroup(Value value, IntervalGroup *group,
   return interval && interval->group == group;
 }
 
-static unsigned getBridgeWeight(Operation *op) {
-  unsigned depth = getLoopDepth(op);
-  if (depth == 0)
-    return 1;
-  return 1u << std::min<unsigned>(depth * 4, 20);
-}
-
 static bool isTupleAliasOp(Operation *op) {
   return isa_and_nonnull<waveamdmachine::TupleToElementsOp,
                          waveamdmachine::TupleFromElementsOp>(op);
@@ -609,55 +626,70 @@ static bool canConsumeAGPRAfterPromotion(OpOperand &use, IntervalGroup *group,
   return false;
 }
 
-static unsigned estimateAGPRBridgeCost(IntervalGroup *group,
-                                       Inventory &inventory) {
-  unsigned cost = 0;
+static PromotionBridgeCost estimateAGPRBridgeCost(IntervalGroup *group,
+                                                  Inventory &inventory) {
+  PromotionBridgeCost cost;
   for (Value value : getGroupValues(group)) {
     Operation *def = value.getDefiningOp();
     if (def && !canDefineAGPR(value) &&
         !canRebankTupleAliasOp(def, group, inventory))
-      cost += getBridgeWeight(def);
+      cost.add(def);
     for (OpOperand &use : value.getUses()) {
       if (isa<waveamdmachine::VAccvgprWriteB32TupleOp>(use.getOwner()))
         continue;
       if (!canConsumeAGPRAfterPromotion(use, group, inventory))
-        cost += getBridgeWeight(use.getOwner());
+        cost.add(use.getOwner());
     }
   }
   return cost;
 }
 
-static unsigned estimateSGPRBridgeCost(IntervalGroup *group) {
-  unsigned cost = 0;
+static PromotionBridgeCost estimateSGPRBridgeCost(IntervalGroup *group) {
+  PromotionBridgeCost cost;
   for (Value value : getGroupValues(group)) {
-    ++cost;
-    cost += llvm::range_size(value.getUses());
+    cost.add(getMemorySpillValueAnchorOp(value));
+    for (OpOperand &use : value.getUses())
+      cost.add(use.getOwner());
   }
   return cost;
 }
 
-static unsigned estimatePromotionBridgeCost(IntervalGroup *group,
-                                            Inventory &inventory) {
+static PromotionBridgeCost estimatePromotionBridgeCost(IntervalGroup *group,
+                                                       Inventory &inventory) {
   std::optional<waveamdmachine::RegClass> next =
       getNextRegClass(group->storageClass);
   if (!next)
-    return std::numeric_limits<unsigned>::max();
+    return {std::numeric_limits<int64_t>::max(), 0};
   if (*next == waveamdmachine::RegClass::AGPR)
     return estimateAGPRBridgeCost(group, inventory);
   if (*next == waveamdmachine::RegClass::VGPR)
     return estimateSGPRBridgeCost(group);
-  return std::numeric_limits<unsigned>::max();
+  return {std::numeric_limits<int64_t>::max(), 0};
+}
+
+static int64_t getPromotionPrimaryCost(PromotionScore score) {
+  return score.bridgeCost + score.loopBridgeCost;
 }
 
 static PromotionScore getPromotionScore(IntervalGroup *group, unsigned position,
                                         Inventory &inventory) {
-  return {getGroupLiveDwords(group, position),
-          estimatePromotionBridgeCost(group, inventory), getGroupEnd(group)};
+  PromotionBridgeCost bridgeCost =
+      estimatePromotionBridgeCost(group, inventory);
+  return {getGroupLiveDwords(group, position), bridgeCost.cost,
+          bridgeCost.count, bridgeCost.loopCost, getGroupEnd(group)};
 }
 
 static bool isBetterPromotionScore(PromotionScore lhs, PromotionScore rhs) {
+  int64_t lhsCost = getPromotionPrimaryCost(lhs);
+  int64_t rhsCost = getPromotionPrimaryCost(rhs);
+  if (lhsCost != rhsCost)
+    return lhsCost < rhsCost;
   if (lhs.bridgeCost != rhs.bridgeCost)
     return lhs.bridgeCost < rhs.bridgeCost;
+  if (lhs.bridgeCount != rhs.bridgeCount)
+    return lhs.bridgeCount < rhs.bridgeCount;
+  if (lhs.loopBridgeCost != rhs.loopBridgeCost)
+    return lhs.loopBridgeCost < rhs.loopBridgeCost;
   if (lhs.liveDwords != rhs.liveDwords)
     return lhs.liveDwords > rhs.liveDwords;
   return lhs.end > rhs.end;
@@ -1270,7 +1302,8 @@ public:
 
   wave::WaveAMDPressureReliefCost getCost() const override {
     wave::WaveAMDPressureReliefCost cost;
-    cost.loopWeightedOps = score.bridgeCost;
+    cost.materializationOps = score.bridgeCost;
+    cost.loopWeightedOps = score.loopBridgeCost;
     return cost;
   }
 
@@ -1303,12 +1336,18 @@ public:
 protected:
   void printExtra(llvm::raw_ostream &os) const override {
     os << ", from=" << getRegClassName(sourceClass)
-       << ", to=" << getRegClassName(targetClass) << ", end=" << score.end;
+       << ", to=" << getRegClassName(targetClass)
+       << ", bridges=" << score.bridgeCount
+       << ", loop_cost=" << score.loopBridgeCost << ", end=" << score.end;
   }
 
   void setExtraDiagnosticAttrs(Builder &builder,
                                NamedAttrList &attrs) const override {
-    attrs.set("bridge_cost", builder.getI64IntegerAttr(score.bridgeCost));
+    attrs.set("bridge_cost",
+              builder.getI64IntegerAttr(getPromotionPrimaryCost(score)));
+    attrs.set("bridge_count", builder.getI64IntegerAttr(score.bridgeCount));
+    attrs.set("bridge_loop_cost",
+              builder.getI64IntegerAttr(score.loopBridgeCost));
     attrs.set("end", builder.getI64IntegerAttr(score.end));
     attrs.set("from", builder.getStringAttr(getRegClassName(sourceClass)));
     attrs.set("to", builder.getStringAttr(getRegClassName(targetClass)));

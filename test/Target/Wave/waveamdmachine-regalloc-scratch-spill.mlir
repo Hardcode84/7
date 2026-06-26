@@ -5,11 +5,11 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
 // CHECK-LABEL: func.func @scratch_spill_codegen
 // CHECK-SAME: waveamdmachine.agpr_count = 0 : i64
-// CHECK-SAME: waveamdmachine.private_segment_fixed_size = 8 : i64
-// CHECK-SAME: waveamdmachine.scratch_spill_bytes = 8 : i64
+// CHECK-SAME: waveamdmachine.private_segment_fixed_size = 16 : i64
+// CHECK-SAME: waveamdmachine.scratch_spill_bytes = 16 : i64
 // CHECK-SAME: waveamdmachine.uses_flat_scratch = true
 // CHECK-SAME: waveamdmachine.vgpr_count = 4 : i64
-// CHECK-SAME: waveamdmachine.vgpr_spill_count = 2 : i64
+// CHECK-SAME: waveamdmachine.vgpr_spill_count = 4 : i64
 // CHECK: %[[SADDR:.+]] = waveamdmachine.s_mov_b32_value
 // CHECK: %[[STORE0:.+]] = waveamdmachine.scratch_store_b32 {{.*}}, {{.*}}, %[[SADDR]]
 // CHECK: %[[STORE1:.+]] = waveamdmachine.scratch_store_b32 {{.*}}, {{.*}}, {{.*}} offset 4
@@ -46,8 +46,8 @@ func.func @scratch_spill_codegen()
 }
 
 // CHECK-LABEL: func.func @scratch_spill_existing_machine_private
-// CHECK-SAME: waveamdmachine.private_segment_fixed_size = 24 : i64
-// CHECK-SAME: waveamdmachine.scratch_spill_bytes = 8 : i64
+// CHECK-SAME: waveamdmachine.private_segment_fixed_size = 32 : i64
+// CHECK-SAME: waveamdmachine.scratch_spill_bytes = 16 : i64
 // CHECK: waveamdmachine.scratch_store_b32 {{.*}} offset 16
 // CHECK: waveamdmachine.scratch_store_b32 {{.*}} offset 20
 func.func @scratch_spill_existing_machine_private()

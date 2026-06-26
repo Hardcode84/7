@@ -6,8 +6,8 @@
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
 // CHECK-LABEL: func.func @regalloc_scratch_spill_wide_tuple
-// CHECK-SAME: waveamdmachine.private_segment_fixed_size = 16 : i64
-// CHECK-SAME: waveamdmachine.scratch_spill_bytes = 16 : i64
+// CHECK-SAME: waveamdmachine.private_segment_fixed_size = 20 : i64
+// CHECK-SAME: waveamdmachine.scratch_spill_bytes = 20 : i64
 // CHECK-SAME: waveamdmachine.uses_flat_scratch = true
 // CHECK: waveamdmachine.scratch_store_b32
 // CHECK: waveamdmachine.scratch_store_b32

@@ -99,7 +99,7 @@ print(module)
 # With the builder packing A/B frags into nested parametric ptuple
 # iter-args (`ptuple<ptuple<af, M>, "wave_k_tiles">`), the K-loop
 # iter-arg width scales with the bound `wave_k_tiles`. On gfx1100
-# (256 VGPRs / wave): K = 4 gives best non-overflowing allocation.
+# (256 VGPRs / wave): K = 8 gives best non-overflowing allocation.
 # CHECK-LABEL: module
-# CHECK-SAME: waveamdmachine.vgpr_count_max = 224 : i64
-# CHECK-SAME: wavemeta.params = {wave_k_tiles = 4 : index
+# CHECK-SAME: waveamdmachine.vgpr_count_max = 240 : i64
+# CHECK-SAME: wavemeta.params = {wave_k_tiles = 8 : index

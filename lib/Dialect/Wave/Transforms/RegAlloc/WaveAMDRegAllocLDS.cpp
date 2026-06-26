@@ -164,7 +164,7 @@ public:
              "loop-carry LDS spill needs a value slot");
       const LDSValueSlot &slot = spill.getValueSlots().front();
       collectMemorySpillLoopCarryTempIntervals(
-          inventory, *loopCarry, slot.value, intervals,
+          inventory, *loopCarry, slot.value, slot.type, intervals,
           [&](SmallVectorImpl<wave::WaveAMDPressureReliefTempInterval>
                   &intervals,
               unsigned position, unsigned valueWidth) {
@@ -197,8 +197,8 @@ public:
         [&](const LDSValueSlot &slot,
             const llvm::SmallDenseSet<Value, 8> &plannedValues) {
           return materializeMemorySpillValue(
-              inventory, slot.value, slot.plan, plan, context, builder,
-              getName(), plannedValues,
+              inventory, slot.value, slot.type, slot.plan, plan, context,
+              builder, getName(), plannedValues,
               [&](Value value, Value token, ArrayRef<LDSSpillPlan> slotPlan,
                   const wave::WaveAMDPressureReliefPlan &reliefPlan,
                   wave::WaveAMDPressureReliefMaterializationContext &context,
@@ -342,11 +342,12 @@ private:
   getLoopCarrySpillCost(LoopCarrySlot slot, ArrayRef<LDSSpillPlan> plans,
                         unsigned useCount) {
     unsigned opCount = getLDSMaterializationOps(plans);
-    unsigned loopDepth = getLoopDepth(slot.loop);
     wave::WaveAMDPressureReliefCost cost;
-    cost.materializationOps = static_cast<int64_t>(opCount) * (1 + useCount);
-    cost.loopWeightedOps = static_cast<int64_t>(opCount) * useCount * loopDepth;
-    cost.latencyPenalty = static_cast<int64_t>(plans.size()) * useCount * 2;
+    cost.materializationOps = opCount;
+    addLoopScaledCost(cost, slot.loop,
+                      static_cast<int64_t>(opCount) * useCount);
+    addLoopScaledLatency(cost, slot.loop,
+                         static_cast<int64_t>(plans.size()) * useCount * 2);
     return cost;
   }
 
@@ -355,13 +356,12 @@ private:
                     ArrayRef<OpOperand *> uses) const {
     unsigned opCount = getLDSMaterializationOps(plans);
     wave::WaveAMDPressureReliefCost cost;
-    cost.materializationOps = static_cast<int64_t>(opCount) * (1 + uses.size());
-    cost.loopWeightedOps = static_cast<int64_t>(opCount) *
-                           getLoopDepth(getMemorySpillValueAnchorOp(value));
-    for (OpOperand *use : uses)
-      cost.loopWeightedOps +=
-          static_cast<int64_t>(opCount) * getLoopDepth(use->getOwner());
-    cost.latencyPenalty = static_cast<int64_t>(plans.size()) * uses.size() * 2;
+    addLoopScaledCost(cost, getMemorySpillValueAnchorOp(value), opCount);
+    for (OpOperand *use : uses) {
+      addLoopScaledCost(cost, use->getOwner(), opCount);
+      addLoopScaledLatency(cost, use->getOwner(),
+                           static_cast<int64_t>(plans.size()) * 2);
+    }
     return cost;
   }
 
@@ -413,17 +413,34 @@ private:
         getPlansForValue(type, extraReservedBytes);
     if (!plans)
       return failure();
-    return LDSValueSlot{value, *plans, getValueSpillCost(value, *plans, uses),
+    return LDSValueSlot{value, type, *plans,
+                        getValueSpillCost(value, *plans, uses),
                         static_cast<unsigned>(uses.size())};
+  }
+
+  FailureOr<LDSValueSlot> getLoopCarryValueSlot(LoopCarrySlot loopCarry,
+                                                Value init,
+                                                waveamdmachine::RegType type,
+                                                unsigned useCount) const {
+    std::optional<SmallVector<LDSSpillPlan, 4>> plans = getPlansForValue(type);
+    if (!plans)
+      return failure();
+    wave::WaveAMDPressureReliefCost cost =
+        getLoopCarrySpillCost(loopCarry, *plans, useCount);
+    return LDSValueSlot{init, type, *plans, cost, useCount};
   }
 
   void collectGroupValue(
       IntervalGroup *group,
       wave::WaveAMDPressureReliefCandidateList &candidates) const {
-    collectWholeAliasSetMemorySpillCandidate<LDSMemorySpillTraits>(
+    collectMemorySpillCandidate<LDSMemorySpillTraits>(
         group, position, inventory, candidates,
         [&](Value value, unsigned extraReservedBytes) {
           return getGroupValueSlot(value, extraReservedBytes);
+        },
+        [&](LoopCarrySlot loopCarry, Value init, waveamdmachine::RegType type,
+            unsigned useCount) {
+          return getLoopCarryValueSlot(loopCarry, init, type, useCount);
         });
   }
 
@@ -433,37 +450,7 @@ private:
       return;
     if (!isEligibleGroup(group, position))
       return;
-    if (collectLoopCarry(group, candidates))
-      return;
     collectGroupValue(group, candidates);
-  }
-
-  bool
-  collectLoopCarry(IntervalGroup *group,
-                   wave::WaveAMDPressureReliefCandidateList &candidates) const {
-    std::optional<LoopCarrySlot> loopCarry =
-        mlir::wave::regalloc::getLoopCarrySlot(group, inventory);
-    if (!loopCarry)
-      return false;
-    if (!canMaterializeLoopCarrySpill(*loopCarry, inventory, position))
-      return false;
-    Value init = loopCarry->loop.getInits()[loopCarry->index];
-    auto type = dyn_cast<waveamdmachine::RegType>(init.getType());
-    if (!type || !isMemorySpillProviderRegClass(type.getRegClass()) ||
-        type.getWidth() == 0 || !valueCoversWholeGroup(group, init, inventory))
-      return false;
-    if (loopCarryTouchesPressure(*loopCarry, inventory, position))
-      return false;
-    std::optional<SmallVector<LDSSpillPlan, 4>> plans = getPlansForValue(type);
-    if (!plans)
-      return false;
-    unsigned useCount = mlir::wave::regalloc::getLoopCarryUseCount(*loopCarry);
-    wave::WaveAMDPressureReliefCost cost =
-        getLoopCarrySpillCost(*loopCarry, *plans, useCount);
-    LDSValueSlot slot{init, *plans, cost, useCount};
-    candidates.push_back(std::make_unique<LDSSpillCandidate>(
-        group, *loopCarry, std::move(slot), useCount, type.getWidth(), cost));
-    return true;
   }
 
   Value createImm(OpBuilder &builder, Location loc, int64_t value) const {
@@ -685,8 +672,9 @@ private:
     auto prepareStoreValue = [&](Value value, const LDSPressurePlan &spill,
                                  OpBuilder &builder,
                                  Operation *diagOp) -> FailureOr<Value> {
-      return materializeMemorySpillStoreInput(inventory, value, spill, context,
-                                              builder, diagOp);
+      waveamdmachine::RegType type = spill.getValueSlots().front().type;
+      return materializeMemorySpillStoreInput(inventory, value, type, spill,
+                                              context, builder, diagOp);
     };
     auto storeValue = [&](Value value, Value token,
                           const LDSPressurePlan &spill, OpBuilder &builder,
@@ -705,8 +693,9 @@ private:
         [&](Value init, Value token, const LDSPressurePlan &spill,
             OpBuilder &builder, Location loc,
             Operation *diagOp) -> FailureOr<MemorySpillLoadResult> {
-      return loadSpillValue(init.getType(), token, spill.getPlan(), spill,
-                            context, builder, loc, diagOp);
+      Type type = spill.getValueSlots().front().type;
+      return loadSpillValue(type, token, spill.getPlan(), spill, context,
+                            builder, loc, diagOp);
     };
     auto reserve = [&](const LDSPressurePlan &spill, OpBuilder &builder) {
       reserveSlots(spill.getPlan(), builder);

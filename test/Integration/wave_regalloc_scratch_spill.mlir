@@ -9,18 +9,18 @@
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
 // CHECK-LABEL: func.func @regalloc_scratch_spill
-// CHECK-SAME: waveamdmachine.private_segment_fixed_size = 8 : i64
-// CHECK-SAME: waveamdmachine.scratch_spill_bytes = 8 : i64
+// CHECK-SAME: waveamdmachine.private_segment_fixed_size = 16 : i64
+// CHECK-SAME: waveamdmachine.scratch_spill_bytes = 16 : i64
 // CHECK-SAME: waveamdmachine.uses_flat_scratch = true
-// CHECK-SAME: waveamdmachine.vgpr_spill_count = 2 : i64
+// CHECK-SAME: waveamdmachine.vgpr_spill_count = 4 : i64
 // CHECK: waveamdmachine.scratch_store_b32
 // CHECK: waveamdmachine.scratch_load_b32
 // ASM-LABEL: .amdhsa_kernel regalloc_scratch_spill
-// ASM: .amdhsa_private_segment_fixed_size 8
+// ASM: .amdhsa_private_segment_fixed_size 16
 // ASM-LABEL: amdhsa.kernels:
 // ASM: .name:           regalloc_scratch_spill
 // ASM: .sgpr_spill_count: 0
-// ASM: .vgpr_spill_count: 2
+// ASM: .vgpr_spill_count: 4
 func.func @regalloc_scratch_spill()
     attributes {wave.kernel, waveamdmachine.target_waves = 4 : i64} {
   %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
