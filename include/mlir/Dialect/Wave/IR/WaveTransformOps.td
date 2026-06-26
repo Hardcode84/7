@@ -130,10 +130,10 @@ def Wave_TransformRegAllocLoopOp
     : Op<Wave_Dialect, "transform.regalloc_loop", [
         DeclareOpInterfaceMethods<MemoryEffectsOpInterface>,
         DeclareOpInterfaceMethods<TransformOpInterface>]> {
-  let summary = "Run the WaveAMD regalloc transform-loop scaffold";
+  let summary = "Build WaveAMD regalloc transform-loop alias state";
   let description = [{
-    Stamps function-level regalloc transform state and returns the same payload
-    handle. Pipeline-fed MWE for allocator-loop entry.
+    Rebuilds function-level regalloc alias state and returns the same payload
+    handle. Later transform-loop stages consume the state attribute.
   }];
   let arguments = (ins TransformHandleTypeInterface:$target);
   let results = (outs TransformHandleTypeInterface:$result);
