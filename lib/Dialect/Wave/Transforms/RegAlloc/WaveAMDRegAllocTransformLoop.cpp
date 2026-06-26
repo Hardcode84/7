@@ -13,6 +13,7 @@
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachine.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
 #include <limits>
 #include <optional>
@@ -186,21 +187,28 @@ private:
       addAliasEdge(result, yielded, 0);
   }
 
+  void collectLoopCarryAliases(waveamdmachine::UniformLoopOp loop) {
+    if (loop.getBody().empty())
+      return;
+    Block &body = loop.getBody().front();
+    DenseSet<Value> seenInits;
+    for (auto [init, arg, result] : llvm::zip_equal(
+             loop.getInits(), body.getArguments(), loop.getResults())) {
+      addAliasEdge(arg, result, 0);
+      if (seenInits.insert(init).second)
+        addAliasEdge(init, arg, 0);
+    }
+    auto cont = dyn_cast<waveamdmachine::ContinueIfOp>(body.getTerminator());
+    if (!cont)
+      return;
+    for (auto [arg, carry] :
+         llvm::zip_equal(body.getArguments(), cont.getCarries()))
+      addAliasEdge(arg, carry, 0);
+  }
+
   void collectRegionAliases(Operation *op) {
     if (auto loop = dyn_cast<waveamdmachine::UniformLoopOp>(op)) {
-      if (!loop.getBody().empty()) {
-        Block &body = loop.getBody().front();
-        for (auto [init, arg, result] : llvm::zip_equal(
-                 loop.getInits(), body.getArguments(), loop.getResults())) {
-          addAliasEdge(init, arg, 0);
-          addAliasEdge(init, result, 0);
-        }
-        if (auto cont =
-                dyn_cast<waveamdmachine::ContinueIfOp>(body.getTerminator()))
-          for (auto [init, carry] :
-               llvm::zip_equal(loop.getInits(), cont.getCarries()))
-            addAliasEdge(init, carry, 0);
-      }
+      collectLoopCarryAliases(loop);
       return;
     }
     if (auto uniformIf = dyn_cast<waveamdmachine::UniformIfOp>(op)) {
