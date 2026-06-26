@@ -818,9 +818,9 @@ struct RematReliefCandidate {
   int64_t cost = 0;
 };
 
-struct LDSReliefSlot {
+template <typename PlanT> struct MemoryReliefSlot {
   SmallVector<OpOperand *> uses;
-  SmallVector<wave::regalloc::LDSSpillPlan, 4> plans;
+  PlanT plan;
   Value value;
   waveamdmachine::RegType type;
   const wave::RegAllocTransformValue *stateValue = nullptr;
@@ -828,15 +828,15 @@ struct LDSReliefSlot {
   unsigned useCount = 0;
 };
 
-struct LDSReliefCandidate {
-  SmallVector<LDSReliefSlot, 4> slots;
+template <typename SlotT> struct MemoryReliefCandidate {
+  SmallVector<SlotT, 4> slots;
   const wave::RegAllocTransformAliasSet *set = nullptr;
   int64_t cost = 0;
   unsigned reservedBytes = 0;
 };
 
-struct LDSStoredSlot {
-  const LDSReliefSlot *slot = nullptr;
+template <typename SlotT> struct MemoryStoredSlot {
+  const SlotT *slot = nullptr;
   Value token;
 };
 
@@ -846,6 +846,17 @@ struct LDSReliefPlanningState {
   unsigned fixedLDS = 0;
   unsigned dynamicLDS = 0;
 };
+
+struct ScratchReliefPlanningState {
+  unsigned committedBytes = 0;
+  unsigned existingPrivateBytes = 0;
+};
+
+using LDSReliefPlan = SmallVector<wave::regalloc::LDSSpillPlan, 4>;
+using LDSReliefSlot = MemoryReliefSlot<LDSReliefPlan>;
+using LDSReliefCandidate = MemoryReliefCandidate<LDSReliefSlot>;
+using ScratchReliefSlot = MemoryReliefSlot<wave::regalloc::ScratchSpillPlan>;
+using ScratchReliefCandidate = MemoryReliefCandidate<ScratchReliefSlot>;
 
 static FailureOr<SmallVector<ResolvedRegAllocValue>>
 resolveRegAllocStateValues(func::FuncOp func,
@@ -1789,10 +1800,9 @@ isInternalPlannedTupleFromElementsUse(OpOperand *use,
   return fromElements && plannedValues.contains(fromElements.getTuple());
 }
 
-static FailureOr<SmallVector<OpOperand *>>
-collectLDSReliefUses(Value value, const RegAllocTransformFailure &failureRecord,
-                     const RematReliefContext &context,
-                     const DenseSet<Value> &plannedValues) {
+static FailureOr<SmallVector<OpOperand *>> collectMemoryReliefUses(
+    Value value, const RegAllocTransformFailure &failureRecord,
+    const RematReliefContext &context, const DenseSet<Value> &plannedValues) {
   SmallVector<OpOperand *> uses;
   for (OpOperand &use : value.getUses()) {
     Operation *user = use.getOwner();
@@ -1870,25 +1880,25 @@ getLDSTransformBudgets(func::FuncOp func) {
 }
 
 static bool
-isLDSReliefCandidateSet(const wave::RegAllocTransformAliasSet &set,
-                        ArrayRef<wave::RegAllocTransformValue> values,
-                        unsigned position) {
+isMemoryReliefCandidateSet(const wave::RegAllocTransformAliasSet &set,
+                           ArrayRef<wave::RegAllocTransformValue> values,
+                           unsigned position) {
   return set.regClass == waveamdmachine::RegClass::VGPR &&
          set.start < position && position < set.end &&
          !hasFixedRegAllocValue(set, values);
 }
 
 static bool
-isLDSValueLiveAcrossFailure(const wave::RegAllocTransformValue &stateValue,
-                            unsigned position) {
+isMemoryValueLiveAcrossFailure(const wave::RegAllocTransformValue &stateValue,
+                               unsigned position) {
   return stateValue.start < position && position < stateValue.end;
 }
 
-static void addPlannedLDSValues(ArrayRef<ResolvedRegAllocValue> values,
-                                unsigned position,
-                                DenseSet<Value> &plannedValues) {
+static void addPlannedMemoryReliefValues(ArrayRef<ResolvedRegAllocValue> values,
+                                         unsigned position,
+                                         DenseSet<Value> &plannedValues) {
   for (ResolvedRegAllocValue resolved : values)
-    if (isLDSValueLiveAcrossFailure(*resolved.second, position))
+    if (isMemoryValueLiveAcrossFailure(*resolved.second, position))
       plannedValues.insert(resolved.first);
 }
 
@@ -1974,106 +1984,116 @@ static int64_t getLDSReliefCost(Value value,
   return cost + uses.size();
 }
 
-static FailureOr<std::optional<LDSReliefSlot>> buildLDSReliefSlot(
-    func::FuncOp func, Value value,
-    const wave::RegAllocTransformValue &stateValue,
-    const RegAllocTransformFailure &failureRecord,
-    const RematReliefContext &context, const LDSReliefPlanningState &planning,
-    const DenseSet<Value> &plannedValues, unsigned extraReservedBytes) {
-  if (!isLDSValueLiveAcrossFailure(stateValue, failureRecord.position) ||
+template <typename Traits>
+static FailureOr<std::optional<typename Traits::Slot>>
+buildMemoryReliefSlot(func::FuncOp func, Value value,
+                      const wave::RegAllocTransformValue &stateValue,
+                      const RegAllocTransformFailure &failureRecord,
+                      const RematReliefContext &context,
+                      const typename Traits::PlanningState &planning,
+                      const DenseSet<Value> &plannedValues,
+                      unsigned extraReservedBytes) {
+  if (!isMemoryValueLiveAcrossFailure(stateValue, failureRecord.position) ||
       stateValue.fixed || isRegAllocTransformTempValue(value))
-    return std::optional<LDSReliefSlot>();
+    return std::optional<typename Traits::Slot>();
   auto type = dyn_cast<waveamdmachine::RegType>(value.getType());
   if (!type || type.getRegClass() != waveamdmachine::RegClass::VGPR ||
       type.getWidth() == 0)
-    return std::optional<LDSReliefSlot>();
+    return std::optional<typename Traits::Slot>();
   FailureOr<SmallVector<OpOperand *>> uses =
-      collectLDSReliefUses(value, failureRecord, context, plannedValues);
+      collectMemoryReliefUses(value, failureRecord, context, plannedValues);
   if (failed(uses))
     return failure();
   if (uses->empty())
-    return std::optional<LDSReliefSlot>();
-  std::optional<SmallVector<wave::regalloc::LDSSpillPlan, 4>> plans =
-      getLDSPlansForValue(func, planning, type, extraReservedBytes);
-  if (!plans)
-    return std::optional<LDSReliefSlot>();
-  LDSReliefSlot slot;
+    return std::optional<typename Traits::Slot>();
+  std::optional<typename Traits::Plan> plan =
+      Traits::getPlanForValue(func, planning, type, extraReservedBytes);
+  if (!plan)
+    return std::optional<typename Traits::Slot>();
+  typename Traits::Slot slot;
   slot.uses = std::move(*uses);
-  slot.plans = std::move(*plans);
+  slot.plan = std::move(*plan);
   slot.value = value;
   slot.type = type;
   slot.stateValue = &stateValue;
   slot.useCount = slot.uses.size();
-  slot.cost = getLDSReliefCost(value, slot.plans, slot.uses);
-  return std::optional<LDSReliefSlot>(std::move(slot));
+  slot.cost = Traits::getCost(value, slot.plan, type, slot.uses);
+  return std::optional<typename Traits::Slot>(std::move(slot));
 }
 
-static FailureOr<bool> addLDSReliefSlot(
-    func::FuncOp func, ResolvedRegAllocValue resolved,
-    const RegAllocTransformFailure &failureRecord,
-    const RematReliefContext &context, const LDSReliefPlanningState &planning,
-    const DenseSet<Value> &plannedValues, LDSReliefCandidate &candidate) {
+template <typename Traits>
+static FailureOr<bool>
+addMemoryReliefSlot(func::FuncOp func, ResolvedRegAllocValue resolved,
+                    const RegAllocTransformFailure &failureRecord,
+                    const RematReliefContext &context,
+                    const typename Traits::PlanningState &planning,
+                    const DenseSet<Value> &plannedValues,
+                    typename Traits::Candidate &candidate) {
   const wave::RegAllocTransformValue &stateValue = *resolved.second;
-  if (!isLDSValueLiveAcrossFailure(stateValue, failureRecord.position))
+  if (!isMemoryValueLiveAcrossFailure(stateValue, failureRecord.position))
     return true;
-  FailureOr<std::optional<LDSReliefSlot>> slot = buildLDSReliefSlot(
-      func, resolved.first, stateValue, failureRecord, context, planning,
-      plannedValues, candidate.reservedBytes);
+  FailureOr<std::optional<typename Traits::Slot>> slot =
+      buildMemoryReliefSlot<Traits>(func, resolved.first, stateValue,
+                                    failureRecord, context, planning,
+                                    plannedValues, candidate.reservedBytes);
   if (failed(slot))
     return failure();
   if (!*slot)
     return false;
   candidate.cost += (*slot)->cost;
-  candidate.reservedBytes += getLDSSlotBytes((*slot)->plans);
+  candidate.reservedBytes += Traits::getSlotBytes((*slot)->plan);
   candidate.slots.push_back(std::move(**slot));
   return true;
 }
 
-static void sortLDSReliefSlots(MutableArrayRef<LDSReliefSlot> slots) {
-  llvm::stable_sort(slots,
-                    [](const LDSReliefSlot &lhs, const LDSReliefSlot &rhs) {
-                      return lhs.stateValue->id < rhs.stateValue->id;
-                    });
+template <typename SlotT>
+static void sortMemoryReliefSlots(SmallVectorImpl<SlotT> &slots) {
+  llvm::stable_sort(slots, [](const SlotT &lhs, const SlotT &rhs) {
+    return lhs.stateValue->id < rhs.stateValue->id;
+  });
 }
 
-static FailureOr<std::optional<LDSReliefCandidate>>
-buildLDSReliefCandidate(func::FuncOp func, unsigned setId,
-                        const RegAllocTransformFailure &failureRecord,
-                        ArrayRef<wave::RegAllocTransformAliasSet> sets,
-                        ArrayRef<wave::RegAllocTransformValue> values,
-                        const RematReliefContext &context,
-                        const LDSReliefPlanningState &planning) {
+template <typename Traits>
+static FailureOr<std::optional<typename Traits::Candidate>>
+buildMemoryReliefCandidate(func::FuncOp func, unsigned setId,
+                           const RegAllocTransformFailure &failureRecord,
+                           ArrayRef<wave::RegAllocTransformAliasSet> sets,
+                           ArrayRef<wave::RegAllocTransformValue> values,
+                           const RematReliefContext &context,
+                           const typename Traits::PlanningState &planning) {
   const wave::RegAllocTransformAliasSet *set =
       findRegAllocTransformSet(sets, setId);
-  if (!set || !isLDSReliefCandidateSet(*set, values, failureRecord.position))
-    return std::optional<LDSReliefCandidate>();
+  if (!set || !isMemoryReliefCandidateSet(*set, values, failureRecord.position))
+    return std::optional<typename Traits::Candidate>();
   FailureOr<SmallVector<ResolvedRegAllocValue>> resolvedValues =
       resolveSetValues(func, *set, values);
   if (failed(resolvedValues))
     return failure();
 
   DenseSet<Value> plannedValues;
-  addPlannedLDSValues(*resolvedValues, failureRecord.position, plannedValues);
-  LDSReliefCandidate candidate;
+  addPlannedMemoryReliefValues(*resolvedValues, failureRecord.position,
+                               plannedValues);
+  typename Traits::Candidate candidate;
   candidate.set = set;
   for (ResolvedRegAllocValue resolved : *resolvedValues) {
     FailureOr<bool> added =
-        addLDSReliefSlot(func, resolved, failureRecord, context, planning,
-                         plannedValues, candidate);
+        addMemoryReliefSlot<Traits>(func, resolved, failureRecord, context,
+                                    planning, plannedValues, candidate);
     if (failed(added))
       return failure();
     if (!*added)
-      return std::optional<LDSReliefCandidate>();
+      return std::optional<typename Traits::Candidate>();
   }
   if (candidate.slots.empty())
-    return std::optional<LDSReliefCandidate>();
-  sortLDSReliefSlots(candidate.slots);
-  return std::optional<LDSReliefCandidate>(std::move(candidate));
+    return std::optional<typename Traits::Candidate>();
+  sortMemoryReliefSlots(candidate.slots);
+  return std::optional<typename Traits::Candidate>(std::move(candidate));
 }
 
+template <typename CandidateT>
 static bool
-isBetterLDSReliefCandidate(const LDSReliefCandidate &candidate,
-                           const std::optional<LDSReliefCandidate> &best) {
+isBetterMemoryReliefCandidate(const CandidateT &candidate,
+                              const std::optional<CandidateT> &best) {
   if (!best)
     return true;
   if (candidate.cost != best->cost)
@@ -2081,25 +2101,51 @@ isBetterLDSReliefCandidate(const LDSReliefCandidate &candidate,
   return candidate.set->id < best->set->id;
 }
 
-static FailureOr<std::optional<LDSReliefCandidate>> selectLDSReliefCandidate(
-    func::FuncOp func, const RegAllocTransformFailure &failureRecord,
-    ArrayRef<wave::RegAllocTransformAliasSet> sets,
-    ArrayRef<wave::RegAllocTransformValue> values,
-    const RematReliefContext &context, const LDSReliefPlanningState &planning) {
-  std::optional<LDSReliefCandidate> best;
+template <typename Traits>
+static FailureOr<std::optional<typename Traits::Candidate>>
+selectMemoryReliefCandidate(func::FuncOp func,
+                            const RegAllocTransformFailure &failureRecord,
+                            ArrayRef<wave::RegAllocTransformAliasSet> sets,
+                            ArrayRef<wave::RegAllocTransformValue> values,
+                            const RematReliefContext &context,
+                            const typename Traits::PlanningState &planning) {
+  std::optional<typename Traits::Candidate> best;
   for (unsigned setId : collectVGPRReliefCandidateIds(failureRecord)) {
-    FailureOr<std::optional<LDSReliefCandidate>> candidate =
-        buildLDSReliefCandidate(func, setId, failureRecord, sets, values,
-                                context, planning);
+    FailureOr<std::optional<typename Traits::Candidate>> candidate =
+        buildMemoryReliefCandidate<Traits>(func, setId, failureRecord, sets,
+                                           values, context, planning);
     if (failed(candidate))
       return failure();
     if (!*candidate)
       continue;
-    if (isBetterLDSReliefCandidate(**candidate, best))
+    if (isBetterMemoryReliefCandidate(**candidate, best))
       best = std::move(**candidate);
   }
   return best;
 }
+
+struct LDSMemoryReliefTraits {
+  using Plan = LDSReliefPlan;
+  using Slot = LDSReliefSlot;
+  using Candidate = LDSReliefCandidate;
+  using PlanningState = LDSReliefPlanningState;
+
+  static std::optional<Plan> getPlanForValue(func::FuncOp func,
+                                             const PlanningState &planning,
+                                             waveamdmachine::RegType type,
+                                             unsigned extraReservedBytes) {
+    return getLDSPlansForValue(func, planning, type, extraReservedBytes);
+  }
+
+  static unsigned getSlotBytes(const Plan &plan) {
+    return getLDSSlotBytes(plan);
+  }
+
+  static int64_t getCost(Value value, const Plan &plan, waveamdmachine::RegType,
+                         ArrayRef<OpOperand *> uses) {
+    return getLDSReliefCost(value, plan, uses);
+  }
+};
 
 static Value createLDSImm(OpBuilder &builder, Location loc, int64_t value) {
   return waveamdmachine::ImmOp::create(
@@ -2240,7 +2286,7 @@ static FailureOr<Value> storeLDSValue(OpBuilder &builder,
   unsigned width = slot.type.getWidth();
   if (width == 1)
     return storeLDSScalarValue(builder, slot.value.getLoc(), slot.value, token,
-                               slot.plans.front());
+                               slot.plan.front());
 
   SmallVector<Value> elements = wave::regalloc::splitMemorySpillValue(
       slot.value, builder, slot.value.getLoc());
@@ -2248,7 +2294,7 @@ static FailureOr<Value> storeLDSValue(OpBuilder &builder,
   tokens.reserve(elements.size());
   for (auto [index, element] : llvm::enumerate(elements)) {
     FailureOr<Value> stored = storeLDSScalarValue(
-        builder, slot.value.getLoc(), element, token, slot.plans[index]);
+        builder, slot.value.getLoc(), element, token, slot.plan[index]);
     if (failed(stored))
       return failure();
     tokens.push_back(*stored);
@@ -2300,26 +2346,12 @@ loadLDSValue(OpBuilder &builder, Location loc, Type type, Value token,
       wave::regalloc::joinMemorySpillTokens(tokenType, tokens, builder, loc)};
 }
 
-static Value getLDSStoreDependency(Value value) {
-  Operation *def = value.getDefiningOp();
-  if (!def)
-    return {};
-  return wave::regalloc::getMemoryIssuerToken(def);
-}
-
-static FailureOr<LDSStoredSlot> materializeLDSStore(OpBuilder &builder,
-                                                    const LDSReliefSlot &slot) {
-  FailureOr<Value> token =
-      storeLDSValue(builder, slot, getLDSStoreDependency(slot.value));
-  if (failed(token))
-    return failure();
-  return LDSStoredSlot{&slot, *token};
-}
-
+template <typename SlotT, typename LoadFn>
 static LogicalResult
-replaceLDSReliefUses(OpBuilder &builder, const LDSStoredSlot &stored,
-                     const DenseSet<Value> &plannedValues) {
-  const LDSReliefSlot &slot = *stored.slot;
+replaceMemoryReliefUses(OpBuilder &builder,
+                        const MemoryStoredSlot<SlotT> &stored,
+                        const DenseSet<Value> &plannedValues, LoadFn loadFn) {
+  const SlotT &slot = *stored.slot;
   for (OpOperand *use : slot.uses) {
     if (use->get() != slot.value)
       continue;
@@ -2327,12 +2359,38 @@ replaceLDSReliefUses(OpBuilder &builder, const LDSStoredSlot &stored,
       continue;
     Operation *user = use->getOwner();
     builder.setInsertionPoint(user);
-    FailureOr<wave::regalloc::MemorySpillLoadResult> loaded = loadLDSValue(
-        builder, user->getLoc(), slot.type, stored.token, slot.plans);
+    FailureOr<wave::regalloc::MemorySpillLoadResult> loaded =
+        loadFn(user->getLoc(), slot.type, stored.token, slot.plan);
     if (failed(loaded))
       return failure();
     use->set(loaded->value);
   }
+  return success();
+}
+
+template <typename SlotT, typename CandidateT, typename StoreFn,
+          typename LoadFn, typename ReserveFn>
+static LogicalResult
+materializeMemoryRelief(OpBuilder &builder, const CandidateT &candidate,
+                        StoreFn storeFn, LoadFn loadFn, ReserveFn reserveFn) {
+  DenseSet<Value> plannedValues;
+  for (const SlotT &slot : candidate.slots)
+    plannedValues.insert(slot.value);
+
+  SmallVector<MemoryStoredSlot<SlotT>> storedSlots;
+  storedSlots.reserve(candidate.slots.size());
+  for (const SlotT &slot : candidate.slots) {
+    Value token =
+        wave::regalloc::getMemoryIssuerToken(slot.value.getDefiningOp());
+    FailureOr<Value> stored = storeFn(slot, token);
+    if (failed(stored))
+      return failure();
+    storedSlots.push_back({&slot, *stored});
+  }
+  for (const MemoryStoredSlot<SlotT> &stored : storedSlots)
+    if (failed(replaceMemoryReliefUses(builder, stored, plannedValues, loadFn)))
+      return failure();
+  reserveFn(candidate.reservedBytes);
   return success();
 }
 
@@ -2345,23 +2403,325 @@ static void reserveLDSSpillBytes(func::FuncOp func, OpBuilder &builder,
 
 static LogicalResult materializeLDSRelief(OpBuilder &builder, func::FuncOp func,
                                           const LDSReliefCandidate &candidate) {
-  DenseSet<Value> plannedValues;
-  for (const LDSReliefSlot &slot : candidate.slots)
-    plannedValues.insert(slot.value);
+  auto store = [&](const LDSReliefSlot &slot, Value token) {
+    return storeLDSValue(builder, slot, token);
+  };
+  auto load = [&](Location loc, Type type, Value token,
+                  const LDSReliefPlan &plan)
+      -> FailureOr<wave::regalloc::MemorySpillLoadResult> {
+    return loadLDSValue(builder, loc, type, token, plan);
+  };
+  auto reserve = [&](unsigned bytes) {
+    reserveLDSSpillBytes(func, builder, bytes);
+  };
+  return materializeMemoryRelief<LDSReliefSlot>(builder, candidate, store, load,
+                                                reserve);
+}
 
-  SmallVector<LDSStoredSlot> storedSlots;
-  storedSlots.reserve(candidate.slots.size());
-  for (const LDSReliefSlot &slot : candidate.slots) {
-    FailureOr<LDSStoredSlot> stored = materializeLDSStore(builder, slot);
+static unsigned getCommittedScratchSpillBytes(func::FuncOp func) {
+  return getUnsignedIntegerAttr(func.getOperation(),
+                                wave::regalloc::kScratchSpillBytesAttr)
+      .value_or(0);
+}
+
+static ScratchReliefPlanningState
+getScratchReliefPlanningState(func::FuncOp func) {
+  ScratchReliefPlanningState state;
+  state.committedBytes = getCommittedScratchSpillBytes(func);
+  state.existingPrivateBytes = wave::regalloc::getExistingPrivateSegmentBytes(
+      func, state.committedBytes);
+  return state;
+}
+
+static std::optional<wave::regalloc::ScratchSpillPlan> getScratchPlanForValue(
+    func::FuncOp func, const ScratchReliefPlanningState &planning,
+    waveamdmachine::RegType type, unsigned extraReservedBytes) {
+  if (type.getWidth() == 0)
+    return std::nullopt;
+  unsigned reserved = planning.committedBytes + extraReservedBytes;
+  wave::regalloc::ScratchSpillPlan plan = wave::regalloc::planScratchSpillSlot(
+      func, type.getWidth() * 4, reserved, planning.existingPrivateBytes);
+  if (plan.status != wave::regalloc::ScratchSpillPlanStatus::Available)
+    return std::nullopt;
+  return plan;
+}
+
+static constexpr unsigned kScratchTransformImmediateOffsetMax = 4095;
+
+static bool scratchTupleFitsImmediate(unsigned slotBase, unsigned width) {
+  if (width == 0)
+    return false;
+  uint64_t lastOffset =
+      static_cast<uint64_t>(slotBase) + static_cast<uint64_t>(width - 1) * 4;
+  return lastOffset <= kScratchTransformImmediateOffsetMax;
+}
+
+static unsigned getScratchMemoryOps(wave::regalloc::ScratchSpillPlan plan,
+                                    unsigned width) {
+  if (width > 1 && !scratchTupleFitsImmediate(plan.slotBase, width))
+    return width;
+  return 1;
+}
+
+static unsigned getScratchAccessOpCount(wave::regalloc::ScratchSpillPlan plan,
+                                        unsigned width) {
+  return getScratchMemoryOps(plan, width) * 2;
+}
+
+static int64_t getScratchReliefCost(Value value,
+                                    wave::regalloc::ScratchSpillPlan plan,
+                                    waveamdmachine::RegType type,
+                                    ArrayRef<OpOperand *> uses) {
+  unsigned accessOps = getScratchAccessOpCount(plan, type.getWidth());
+  int64_t cost =
+      accessOps * getRematReliefLoopCostScale(getValueAnchorOp(value));
+  for (OpOperand *use : uses)
+    cost += accessOps * getRematReliefLoopCostScale(use->getOwner());
+  return cost + uses.size();
+}
+
+struct ScratchMemoryReliefTraits {
+  using Plan = wave::regalloc::ScratchSpillPlan;
+  using Slot = ScratchReliefSlot;
+  using Candidate = ScratchReliefCandidate;
+  using PlanningState = ScratchReliefPlanningState;
+
+  static std::optional<Plan> getPlanForValue(func::FuncOp func,
+                                             const PlanningState &planning,
+                                             waveamdmachine::RegType type,
+                                             unsigned extraReservedBytes) {
+    return getScratchPlanForValue(func, planning, type, extraReservedBytes);
+  }
+
+  static unsigned getSlotBytes(Plan plan) { return plan.slotBytes; }
+
+  static int64_t getCost(Value value, Plan plan, waveamdmachine::RegType type,
+                         ArrayRef<OpOperand *> uses) {
+    return getScratchReliefCost(value, plan, type, uses);
+  }
+};
+
+static Value createScratchImm(OpBuilder &builder, Location loc, int64_t value) {
+  return waveamdmachine::ImmOp::create(
+      builder, loc, waveamdmachine::ImmType::get(builder.getContext()),
+      static_cast<uint64_t>(value));
+}
+
+static waveamdmachine::RegType getVirtualSGPR1(MLIRContext *ctx) {
+  return waveamdmachine::RegType::get(ctx, waveamdmachine::RegClass::SGPR,
+                                      /*width=*/1, /*index=*/-1);
+}
+
+static Value materializeScratchSAddress(OpBuilder &builder, Location loc,
+                                        unsigned offset) {
+  waveamdmachine::SMovB32ValueOp addr = waveamdmachine::SMovB32ValueOp::create(
+      builder, loc, getVirtualSGPR1(builder.getContext()),
+      createScratchImm(builder, loc, offset));
+  addr->setAttr(wave::regalloc::kRegAllocTempAttr, builder.getUnitAttr());
+  return addr.getResult();
+}
+
+static void materializeScratchAddress(OpBuilder &builder, Location loc,
+                                      unsigned byteOffset, Value &vaddr,
+                                      Value &saddr, int64_t &instOffset) {
+  vaddr = createScratchImm(builder, loc, 0);
+  if (byteOffset <= kScratchTransformImmediateOffsetMax) {
+    saddr = materializeScratchSAddress(builder, loc, 0);
+    instOffset = byteOffset;
+    return;
+  }
+  saddr = materializeScratchSAddress(builder, loc, byteOffset);
+  instOffset = 0;
+}
+
+static FailureOr<Value>
+storeScratchScalarValue(OpBuilder &builder, Location loc, Value value,
+                        Value token, wave::regalloc::ScratchSpillPlan plan) {
+  Type tokenType = waveamdmachine::MemTokenType::get(builder.getContext());
+  Value storeVaddr;
+  Value storeSaddr;
+  int64_t storeOffset = 0;
+  materializeScratchAddress(builder, loc, plan.slotBase, storeVaddr, storeSaddr,
+                            storeOffset);
+  waveamdmachine::ScratchStoreB32Op store =
+      waveamdmachine::ScratchStoreB32Op::create(builder, loc, tokenType,
+                                                storeVaddr, value, storeSaddr,
+                                                token, storeOffset);
+  store->setAttr(wave::regalloc::kRegAllocTempAttr, builder.getUnitAttr());
+  return store.getToken();
+}
+
+static FailureOr<Value> storeScratchScalarValue(OpBuilder &builder,
+                                                Location loc, Value value,
+                                                Value token,
+                                                unsigned byteOffset) {
+  wave::regalloc::ScratchSpillPlan plan;
+  plan.slotBase = byteOffset;
+  return storeScratchScalarValue(builder, loc, value, token, plan);
+}
+
+static FailureOr<Value>
+storeScratchTupleValue(OpBuilder &builder, Location loc, Value value,
+                       Value token, wave::regalloc::ScratchSpillPlan plan) {
+  Type tokenType = waveamdmachine::MemTokenType::get(builder.getContext());
+  Value storeVaddr;
+  Value storeSaddr;
+  int64_t storeOffset = 0;
+  materializeScratchAddress(builder, loc, plan.slotBase, storeVaddr, storeSaddr,
+                            storeOffset);
+  waveamdmachine::ScratchStoreTupleB32Op store =
+      waveamdmachine::ScratchStoreTupleB32Op::create(
+          builder, loc, tokenType, storeVaddr, value, storeSaddr, token,
+          storeOffset);
+  store->setAttr(wave::regalloc::kRegAllocTempAttr, builder.getUnitAttr());
+  return store.getToken();
+}
+
+static void recordScratchVGPRSpillSave(func::FuncOp func, OpBuilder &builder,
+                                       unsigned dwords) {
+  unsigned spilledVGPRs =
+      getUnsignedIntegerAttr(func.getOperation(),
+                             wave::regalloc::kVGPRSpillCountAttr)
+          .value_or(0);
+  func->setAttr(wave::regalloc::kVGPRSpillCountAttr,
+                builder.getI64IntegerAttr(spilledVGPRs + dwords));
+}
+
+static FailureOr<Value> storeScratchValue(OpBuilder &builder, func::FuncOp func,
+                                          const ScratchReliefSlot &slot,
+                                          Value token) {
+  wave::regalloc::setInsertionPointForMemorySpillStore(slot.value, builder);
+  unsigned width = slot.type.getWidth();
+  recordScratchVGPRSpillSave(func, builder, width);
+  if (width == 1)
+    return storeScratchScalarValue(builder, slot.value.getLoc(), slot.value,
+                                   token, slot.plan);
+  if (scratchTupleFitsImmediate(slot.plan.slotBase, width))
+    return storeScratchTupleValue(builder, slot.value.getLoc(), slot.value,
+                                  token, slot.plan);
+
+  SmallVector<Value> elements = wave::regalloc::splitMemorySpillValue(
+      slot.value, builder, slot.value.getLoc());
+  SmallVector<Value> tokens;
+  tokens.reserve(elements.size());
+  for (auto [index, element] : llvm::enumerate(elements)) {
+    FailureOr<Value> stored = storeScratchScalarValue(
+        builder, slot.value.getLoc(), element, token,
+        slot.plan.slotBase + static_cast<unsigned>(index) * 4);
     if (failed(stored))
       return failure();
-    storedSlots.push_back(*stored);
+    tokens.push_back(*stored);
   }
-  for (const LDSStoredSlot &stored : storedSlots)
-    if (failed(replaceLDSReliefUses(builder, stored, plannedValues)))
+  Type tokenType = waveamdmachine::MemTokenType::get(builder.getContext());
+  return wave::regalloc::joinMemorySpillTokens(tokenType, tokens, builder,
+                                               slot.value.getLoc());
+}
+
+static FailureOr<wave::regalloc::MemorySpillLoadResult>
+loadScratchScalarValue(OpBuilder &builder, Location loc, Type type, Value token,
+                       wave::regalloc::ScratchSpillPlan plan) {
+  Type tokenType = waveamdmachine::MemTokenType::get(builder.getContext());
+  Value loadVaddr;
+  Value loadSaddr;
+  int64_t loadOffset = 0;
+  materializeScratchAddress(builder, loc, plan.slotBase, loadVaddr, loadSaddr,
+                            loadOffset);
+  waveamdmachine::ScratchLoadB32Op load =
+      waveamdmachine::ScratchLoadB32Op::create(builder, loc, type, tokenType,
+                                               loadVaddr, loadSaddr, token,
+                                               loadOffset);
+  load->setAttr(wave::regalloc::kRegAllocTempAttr, builder.getUnitAttr());
+  return wave::regalloc::MemorySpillLoadResult{load.getResult(),
+                                               load.getToken()};
+}
+
+static FailureOr<wave::regalloc::MemorySpillLoadResult>
+loadScratchScalarValue(OpBuilder &builder, Location loc, Type type, Value token,
+                       unsigned byteOffset) {
+  wave::regalloc::ScratchSpillPlan plan;
+  plan.slotBase = byteOffset;
+  return loadScratchScalarValue(builder, loc, type, token, plan);
+}
+
+static FailureOr<wave::regalloc::MemorySpillLoadResult>
+loadScratchTupleValue(OpBuilder &builder, Location loc, Type type, Value token,
+                      wave::regalloc::ScratchSpillPlan plan) {
+  Type tokenType = waveamdmachine::MemTokenType::get(builder.getContext());
+  Value loadVaddr;
+  Value loadSaddr;
+  int64_t loadOffset = 0;
+  materializeScratchAddress(builder, loc, plan.slotBase, loadVaddr, loadSaddr,
+                            loadOffset);
+  waveamdmachine::ScratchLoadTupleB32Op load =
+      waveamdmachine::ScratchLoadTupleB32Op::create(
+          builder, loc, type, tokenType, loadVaddr, loadSaddr, token,
+          loadOffset);
+  load->setAttr(wave::regalloc::kRegAllocTempAttr, builder.getUnitAttr());
+  return wave::regalloc::MemorySpillLoadResult{load.getResult(),
+                                               load.getToken()};
+}
+
+static FailureOr<wave::regalloc::MemorySpillLoadResult>
+loadScratchValue(OpBuilder &builder, Location loc, Type type, Value token,
+                 wave::regalloc::ScratchSpillPlan plan) {
+  unsigned width = cast<waveamdmachine::RegType>(type).getWidth();
+  if (width == 1)
+    return loadScratchScalarValue(builder, loc, type, token, plan);
+  if (scratchTupleFitsImmediate(plan.slotBase, width))
+    return loadScratchTupleValue(builder, loc, type, token, plan);
+
+  SmallVector<Type> elementTypes =
+      wave::regalloc::getMemorySpillScalarRegTypes(type);
+  SmallVector<Value> elements;
+  SmallVector<Value> tokens;
+  elements.reserve(elementTypes.size());
+  tokens.reserve(elementTypes.size());
+  for (auto [index, elementType] : llvm::enumerate(elementTypes)) {
+    FailureOr<wave::regalloc::MemorySpillLoadResult> load =
+        loadScratchScalarValue(builder, loc, elementType, token,
+                               plan.slotBase +
+                                   static_cast<unsigned>(index) * 4);
+    if (failed(load))
       return failure();
-  reserveLDSSpillBytes(func, builder, candidate.reservedBytes);
-  return success();
+    elements.push_back(load->value);
+    tokens.push_back(load->token);
+  }
+  Type tokenType = waveamdmachine::MemTokenType::get(builder.getContext());
+  return wave::regalloc::MemorySpillLoadResult{
+      wave::regalloc::joinMemorySpillValue(type, elements, builder, loc),
+      wave::regalloc::joinMemorySpillTokens(tokenType, tokens, builder, loc)};
+}
+
+static void reserveScratchSpillBytes(func::FuncOp func, OpBuilder &builder,
+                                     unsigned bytes) {
+  unsigned reserved = getCommittedScratchSpillBytes(func);
+  unsigned existingPrivate =
+      wave::regalloc::getExistingPrivateSegmentBytes(func, reserved);
+  unsigned newReserved = reserved + bytes;
+  func->setAttr(wave::regalloc::kScratchSpillBytesAttr,
+                builder.getI64IntegerAttr(newReserved));
+  func->setAttr(wave::regalloc::kPrivateSegmentFixedSizeAttr,
+                builder.getI64IntegerAttr(existingPrivate + newReserved));
+  func->setAttr(wave::regalloc::kUsesFlatScratchAttr,
+                builder.getBoolAttr(true));
+}
+
+static LogicalResult
+materializeScratchRelief(OpBuilder &builder, func::FuncOp func,
+                         const ScratchReliefCandidate &candidate) {
+  auto store = [&](const ScratchReliefSlot &slot, Value token) {
+    return storeScratchValue(builder, func, slot, token);
+  };
+  auto load = [&](Location loc, Type type, Value token,
+                  wave::regalloc::ScratchSpillPlan plan)
+      -> FailureOr<wave::regalloc::MemorySpillLoadResult> {
+    return loadScratchValue(builder, loc, type, token, plan);
+  };
+  auto reserve = [&](unsigned bytes) {
+    reserveScratchSpillBytes(func, builder, bytes);
+  };
+  return materializeMemoryRelief<ScratchReliefSlot>(builder, candidate, store,
+                                                    load, reserve);
 }
 
 static LogicalResult refreshFuncTypeFromBody(func::FuncOp func) {
@@ -3005,9 +3365,11 @@ static LogicalResult runRegAllocRematRelief(func::FuncOp func) {
   return success();
 }
 
-static FailureOr<std::optional<LDSReliefCandidate>>
-selectLDSReliefCandidateFromState(
-    func::FuncOp func, const RegAllocTransformFailure &failureRecord) {
+template <typename Traits>
+static FailureOr<std::optional<typename Traits::Candidate>>
+selectMemoryReliefCandidateFromState(
+    func::FuncOp func, const RegAllocTransformFailure &failureRecord,
+    const typename Traits::PlanningState &planning) {
   DictionaryAttr state = func->getAttrOfType<DictionaryAttr>(
       wave::getRegAllocTransformStateAttrName());
   FailureOr<SmallVector<wave::RegAllocTransformValue>> values =
@@ -3023,15 +3385,10 @@ selectLDSReliefCandidateFromState(
       resolveRegAllocStateValues(func, *values);
   if (failed(resolvedValues))
     return failure();
-  FailureOr<wave::regalloc::RegisterBudgets> budgets =
-      getLDSTransformBudgets(func);
-  if (failed(budgets))
-    return failure();
 
   RematReliefContext context = buildRematReliefContext(func, *resolvedValues);
-  LDSReliefPlanningState planning = getLDSReliefPlanningState(func, *budgets);
-  return selectLDSReliefCandidate(func, failureRecord, *sets, *values, context,
-                                  planning);
+  return selectMemoryReliefCandidate<Traits>(func, failureRecord, *sets,
+                                             *values, context, planning);
 }
 
 static LogicalResult runRegAllocLDSRelief(func::FuncOp func) {
@@ -3044,8 +3401,14 @@ static LogicalResult runRegAllocLDSRelief(func::FuncOp func) {
   if (!isAGPRRelievableFailure(**failureRecord))
     return success();
 
+  FailureOr<wave::regalloc::RegisterBudgets> budgets =
+      getLDSTransformBudgets(func);
+  if (failed(budgets))
+    return failure();
+  LDSReliefPlanningState planning = getLDSReliefPlanningState(func, *budgets);
   FailureOr<std::optional<LDSReliefCandidate>> candidate =
-      selectLDSReliefCandidateFromState(func, **failureRecord);
+      selectMemoryReliefCandidateFromState<LDSMemoryReliefTraits>(
+          func, **failureRecord, planning);
   if (failed(candidate))
     return failure();
   if (!*candidate)
@@ -3053,6 +3416,33 @@ static LogicalResult runRegAllocLDSRelief(func::FuncOp func) {
 
   OpBuilder builder(func.getContext());
   if (failed(materializeLDSRelief(builder, func, **candidate)))
+    return failure();
+  func->removeAttr(wave::getRegAllocTransformAssignmentsAttrName());
+  func->removeAttr(wave::getRegAllocTransformStateAttrName());
+  return success();
+}
+
+static LogicalResult runRegAllocScratchRelief(func::FuncOp func) {
+  FailureOr<std::optional<RegAllocTransformFailure>> failureRecord =
+      parseRegAllocTransformFailure(func);
+  if (failed(failureRecord))
+    return failure();
+  if (!*failureRecord)
+    return success();
+  if (!isAGPRRelievableFailure(**failureRecord))
+    return success();
+
+  ScratchReliefPlanningState planning = getScratchReliefPlanningState(func);
+  FailureOr<std::optional<ScratchReliefCandidate>> candidate =
+      selectMemoryReliefCandidateFromState<ScratchMemoryReliefTraits>(
+          func, **failureRecord, planning);
+  if (failed(candidate))
+    return failure();
+  if (!*candidate)
+    return success();
+
+  OpBuilder builder(func.getContext());
+  if (failed(materializeScratchRelief(builder, func, **candidate)))
     return failure();
   func->removeAttr(wave::getRegAllocTransformAssignmentsAttrName());
   func->removeAttr(wave::getRegAllocTransformStateAttrName());
@@ -3115,6 +3505,17 @@ LogicalResult wave::runRegAllocTransformLDSRelief(Operation *target,
   WalkResult walk = target->walk([&](func::FuncOp func) {
     return failed(runRegAllocLDSRelief(func)) ? WalkResult::interrupt()
                                               : WalkResult::advance();
+  });
+  return failure(walk.wasInterrupted());
+}
+
+LogicalResult wave::runRegAllocTransformScratchRelief(Operation *target,
+                                                      Builder &builder) {
+  if (func::FuncOp func = dyn_cast<func::FuncOp>(target))
+    return runRegAllocScratchRelief(func);
+  WalkResult walk = target->walk([&](func::FuncOp func) {
+    return failed(runRegAllocScratchRelief(func)) ? WalkResult::interrupt()
+                                                  : WalkResult::advance();
   });
   return failure(walk.wasInterrupted());
 }

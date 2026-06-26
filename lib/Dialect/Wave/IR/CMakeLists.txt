@@ -5,6 +5,7 @@ add_mlir_dialect_library(MLIRWaveDialect
   WaveSymbols.cpp
   WaveTransformOps.cpp
   ../Transforms/RegAlloc/WaveAMDRegAllocLDSPlanning.cpp
+  ../Transforms/RegAlloc/WaveAMDRegAllocScratchPlanning.cpp
   ../Transforms/RegAlloc/WaveAMDRegAllocTransformLoop.cpp
   ../Transforms/RegAlloc/WaveAMDRegAllocTransformState.cpp
 

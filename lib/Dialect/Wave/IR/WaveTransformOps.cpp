@@ -331,6 +331,27 @@ void wave::TransformRegAllocLDSReliefOp::getEffects(
   transform::modifiesPayload(effects);
 }
 
+DiagnosedSilenceableFailure wave::TransformRegAllocScratchReliefOp::apply(
+    transform::TransformRewriter &rewriter,
+    transform::TransformResults &results, transform::TransformState &state) {
+  SmallVector<Operation *> targets;
+  Builder builder(getContext());
+  for (Operation *target : state.getPayloadOps(getTarget())) {
+    targets.push_back(target);
+    if (failed(wave::runRegAllocTransformScratchRelief(target, builder)))
+      return emitDefiniteFailure() << "failed to run regalloc scratch relief";
+  }
+  results.set(cast<OpResult>(getResult()), targets);
+  return DiagnosedSilenceableFailure::success();
+}
+
+void wave::TransformRegAllocScratchReliefOp::getEffects(
+    SmallVectorImpl<MemoryEffects::EffectInstance> &effects) {
+  transform::consumesHandle(getTargetMutable(), effects);
+  transform::producesHandle(getOperation()->getOpResults(), effects);
+  transform::modifiesPayload(effects);
+}
+
 //===----------------------------------------------------------------------===//
 // wave.transform.estimate_cycles + wave.transform.pressure_report
 //===----------------------------------------------------------------------===//

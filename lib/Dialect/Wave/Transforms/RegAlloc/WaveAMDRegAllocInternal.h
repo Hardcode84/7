@@ -45,6 +45,8 @@ inline constexpr llvm::StringLiteral kPrivateSegmentFixedSizeAttr =
     "waveamdmachine.private_segment_fixed_size";
 inline constexpr llvm::StringLiteral kScratchSpillBytesAttr =
     "waveamdmachine.scratch_spill_bytes";
+inline constexpr llvm::StringLiteral kUsesFlatScratchAttr =
+    "waveamdmachine.uses_flat_scratch";
 inline constexpr llvm::StringLiteral kSGPRSpillCountAttr =
     "waveamdmachine.sgpr_spill_count";
 inline constexpr llvm::StringLiteral kVGPRSpillCountAttr =
@@ -2222,8 +2224,13 @@ LDSSpillPlan planLDSSpillSlot(func::FuncOp func, RegisterBudgets budgets,
                               unsigned valueBytes, unsigned reservedSpillBytes,
                               unsigned fixedLDS, unsigned dynamicLDS);
 StringRef getScratchSpillPlanStatusName(ScratchSpillPlanStatus status);
+unsigned getExistingPrivateSegmentBytes(func::FuncOp func,
+                                        unsigned reservedSpillBytes);
 ScratchSpillPlan planScratchSpillSlot(func::FuncOp func, unsigned valueBytes,
                                       unsigned reservedSpillBytes = 0);
+ScratchSpillPlan planScratchSpillSlot(func::FuncOp func, unsigned valueBytes,
+                                      unsigned reservedSpillBytes,
+                                      unsigned existingPrivateBytes);
 
 } // namespace mlir::wave::regalloc
 

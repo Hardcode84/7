@@ -150,7 +150,9 @@ module attributes {transform.with_named_sequence} {
         : (!transform.any_op) -> !transform.any_op
     %r4 = wave.transform.regalloc_lds_relief from %r3
         : (!transform.any_op) -> !transform.any_op
-    transform.yield %r4 : !transform.any_op
+    %r5 = wave.transform.regalloc_scratch_relief from %r4
+        : (!transform.any_op) -> !transform.any_op
+    transform.yield %r5 : !transform.any_op
   }
 
   transform.named_sequence @waveamd_backend_unscheduled(

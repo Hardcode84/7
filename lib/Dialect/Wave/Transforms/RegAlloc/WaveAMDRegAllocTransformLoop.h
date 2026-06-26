@@ -30,6 +30,9 @@ LogicalResult runRegAllocTransformRematRelief(Operation *target,
 LogicalResult runRegAllocTransformLDSRelief(Operation *target,
                                             Builder &builder);
 
+LogicalResult runRegAllocTransformScratchRelief(Operation *target,
+                                                Builder &builder);
+
 } // namespace mlir::wave
 
 #endif // MLIR_DIALECT_WAVE_TRANSFORMS_WAVEAMDREGALLOCTRANSFORMLOOP_H
