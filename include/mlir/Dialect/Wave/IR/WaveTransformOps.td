@@ -182,6 +182,25 @@ def Wave_TransformRegAllocLinearScanOp
   }];
 }
 
+def Wave_TransformRegAllocAGPRReliefOp
+    : Op<Wave_Dialect, "transform.regalloc_agpr_relief", [
+        DeclareOpInterfaceMethods<MemoryEffectsOpInterface>,
+        DeclareOpInterfaceMethods<TransformOpInterface>]> {
+  let summary = "Rewrite one VGPR pressure candidate through AGPR storage";
+  let description = [{
+    Consumes a linear-scan failure state. If the failure is VGPR-family
+    pressure and an overlapping VGPR alias set can fit in AGPR capacity, inserts
+    immediate write/read bridges around that alias set and clears regalloc state
+    so the outer regalloc loop restarts. If no candidate is legal, leaves the
+    failure state unchanged.
+  }];
+  let arguments = (ins TransformHandleTypeInterface:$target);
+  let results = (outs TransformHandleTypeInterface:$result);
+  let assemblyFormat = [{
+    `from` $target attr-dict `:` functional-type($target, $result)
+  }];
+}
+
 // Runs dense-dataflow PressureAnalysis on each payload op
 // (func.func or builtin.module) and yields totalCycles as a
 // `!transform.param<i64>`. The arch is read from the enclosing

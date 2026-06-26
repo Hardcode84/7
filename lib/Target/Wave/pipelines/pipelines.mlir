@@ -144,7 +144,9 @@ module attributes {transform.with_named_sequence} {
         : (!transform.any_op) -> !transform.any_op
     %r1 = wave.transform.regalloc_linear_scan from %r0
         : (!transform.any_op) -> !transform.any_op
-    transform.yield %r1 : !transform.any_op
+    %r2 = wave.transform.regalloc_agpr_relief from %r1
+        : (!transform.any_op) -> !transform.any_op
+    transform.yield %r2 : !transform.any_op
   }
 
   transform.named_sequence @waveamd_backend_unscheduled(

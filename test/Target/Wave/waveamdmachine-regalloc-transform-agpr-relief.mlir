@@ -1,0 +1,79 @@
+// RUN: wave-opt %s --pass-pipeline='builtin.module(transform-interpreter{entry-point=agpr_relief})' | FileCheck %s
+
+module attributes {transform.with_named_sequence} {
+  transform.named_sequence @match_func(
+      %root: !transform.any_op {transform.readonly}) -> !transform.any_op {
+    transform.match.operation_name %root ["func.func"] : !transform.any_op
+    transform.yield %root : !transform.any_op
+  }
+
+  transform.named_sequence @agpr_relief(
+      %root: !transform.any_op {transform.readonly}) {
+    %func = transform.collect_matching @match_func in %root
+        : (!transform.any_op) -> !transform.any_op
+    %r0 = wave.transform.regalloc_build_alias_state from %func
+        : (!transform.any_op) -> !transform.any_op
+    %r1 = wave.transform.regalloc_linear_scan from %r0
+        : (!transform.any_op) -> !transform.any_op
+    %r2 = wave.transform.regalloc_agpr_relief from %r1
+        : (!transform.any_op) -> !transform.any_op
+    transform.yield
+  }
+
+  module @payload_module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
+    // CHECK-LABEL: func.func @agpr_relief_promotes_overlap(
+    // CHECK-SAME: [[LONG:%[^:]+]]: !waveamdmachine.reg<vgpr, 1>
+    // CHECK-NOT: waveamdmachine.regalloc_transform_state
+    // CHECK: [[AG:%.*]] = waveamdmachine.v_accvgpr_write_b32_tuple [[LONG]]
+    // CHECK: [[READ:%.*]] = waveamdmachine.v_accvgpr_read_b32_tuple [[AG]]
+    // CHECK: return [[READ]]
+    func.func @agpr_relief_promotes_overlap(
+        %long: !waveamdmachine.reg<vgpr, 1>,
+        %hot: !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+        attributes {waveamdmachine.vgpr_count_max = 1 : i64,
+                    waveamdmachine.agpr_count_max = 4 : i64} {
+      %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+      %one = waveamdmachine.imm 1 : !waveamdmachine.imm
+      %base = waveamdmachine.uninit : !waveamdmachine.reg<sgpr, 2>
+      %cond = waveamdmachine.s_cmp_lt_i32 %zero, %one
+          : (!waveamdmachine.imm, !waveamdmachine.imm)
+            -> !waveamdmachine.reg<scc, 1>
+      waveamdmachine.uniform_loop if %cond : !waveamdmachine.reg<scc, 1> {
+        %token = waveamdmachine.global_store_b32 %hot, %zero, %base
+            : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.imm,
+               !waveamdmachine.reg<sgpr, 2>) -> !waveamdmachine.mem.token
+        waveamdmachine.continue_if %cond : !waveamdmachine.reg<scc, 1>
+      }
+      return %long : !waveamdmachine.reg<vgpr, 1>
+    }
+
+    // CHECK-LABEL: func.func @agpr_relief_respects_capacity(
+    // CHECK-NOT: waveamdmachine.v_accvgpr_write_b32_tuple
+    // CHECK-SAME: waveamdmachine.regalloc_transform_state =
+    // CHECK-SAME: stage = "linear-scan-failure"
+    func.func @agpr_relief_respects_capacity(
+        %a: !waveamdmachine.reg<vgpr, 1>,
+        %b: !waveamdmachine.reg<vgpr, 1>)
+        -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        attributes {waveamdmachine.vgpr_count_max = 1 : i64,
+                    waveamdmachine.agpr_count_max = 0 : i64} {
+      return %a, %b
+          : !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>
+    }
+
+    // CHECK-LABEL: func.func @agpr_failure_not_demoted(
+    // CHECK-NOT: waveamdmachine.v_accvgpr_read_b32_tuple
+    // CHECK-SAME: waveamdmachine.regalloc_transform_state =
+    // CHECK-SAME: class = "agpr"
+    // CHECK-SAME: stage = "linear-scan-failure"
+    func.func @agpr_failure_not_demoted(
+        %a: !waveamdmachine.reg<agpr, 1>,
+        %b: !waveamdmachine.reg<agpr, 1>)
+        -> (!waveamdmachine.reg<agpr, 1>, !waveamdmachine.reg<agpr, 1>)
+        attributes {waveamdmachine.agpr_count_max = 1 : i64} {
+      return %a, %b
+          : !waveamdmachine.reg<agpr, 1>, !waveamdmachine.reg<agpr, 1>
+    }
+  }
+}

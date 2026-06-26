@@ -767,6 +767,33 @@ struct PendingRegAllocAssignment {
   Type assignedType;
 };
 
+struct RegAllocTransformFailure {
+  SmallVector<wave::RegAllocTransformAssignment> overlaps;
+  StringRef className;
+  StringRef reason;
+  unsigned set = 0;
+  unsigned position = 0;
+};
+
+struct RegAllocFailureKind {
+  StringRef className;
+  StringRef reason;
+};
+
+struct AGPRReliefCandidate {
+  SmallVector<ResolvedRegAllocValue> values;
+  const wave::RegAllocTransformAliasSet *set = nullptr;
+  int64_t bridgeCost = 0;
+};
+
+struct AGPRReliefInterval {
+  std::optional<unsigned> fixedBase;
+  unsigned id = 0;
+  unsigned start = 0;
+  unsigned end = 0;
+  unsigned width = 0;
+};
+
 static FailureOr<SmallVector<ResolvedRegAllocValue>>
 resolveRegAllocStateValues(func::FuncOp func,
                            ArrayRef<wave::RegAllocTransformValue> values) {
@@ -790,6 +817,433 @@ resolveRegAllocStateValues(func::FuncOp func,
     resolvedValues.push_back({*payloadValue, &value});
   }
   return resolvedValues;
+}
+
+static FailureOr<wave::RegAllocTransformAssignment>
+parseRegAllocTransformAssignment(DictionaryAttr dict, Operation *diagOp) {
+  FailureOr<waveamdmachine::RegClass> regClass =
+      wave::getRegAllocTransformRegClassAttr(dict, diagOp);
+  FailureOr<unsigned> set =
+      wave::getRegAllocTransformUnsignedAttr(dict, "set", diagOp);
+  FailureOr<unsigned> base =
+      wave::getRegAllocTransformUnsignedAttr(dict, "base", diagOp);
+  FailureOr<unsigned> width =
+      wave::getRegAllocTransformUnsignedAttr(dict, "width", diagOp);
+  FailureOr<unsigned> start =
+      wave::getRegAllocTransformUnsignedAttr(dict, "start", diagOp);
+  FailureOr<unsigned> end =
+      wave::getRegAllocTransformUnsignedAttr(dict, "end", diagOp);
+  if (failed(regClass) || failed(set) || failed(base) || failed(width) ||
+      failed(start) || failed(end))
+    return failure();
+  return wave::RegAllocTransformAssignment{*regClass, *set,   *base,
+                                           *width,    *start, *end};
+}
+
+static LogicalResult parseRegAllocFailureOverlaps(
+    DictionaryAttr failureAttr, Operation *diagOp,
+    SmallVectorImpl<wave::RegAllocTransformAssignment> &overlaps) {
+  ArrayAttr overlapAttrs = failureAttr.getAs<ArrayAttr>("overlaps");
+  if (!overlapAttrs)
+    return diagOp->emitError("regalloc failure state missing `overlaps`");
+  for (Attribute attr : overlapAttrs) {
+    auto dict = dyn_cast<DictionaryAttr>(attr);
+    if (!dict)
+      return diagOp->emitError("regalloc failure overlap is not a dictionary");
+    FailureOr<wave::RegAllocTransformAssignment> overlap =
+        parseRegAllocTransformAssignment(dict, diagOp);
+    if (failed(overlap))
+      return failure();
+    overlaps.push_back(*overlap);
+  }
+  return success();
+}
+
+static bool isAGPRRelievableFailureClass(StringRef className) {
+  return className == "vgpr" || className == "vgpr_agpr";
+}
+
+static bool isAGPRRelievableFailureReason(StringRef reason) {
+  return reason == "pressure" || reason == "allocated-footprint";
+}
+
+static FailureOr<std::optional<DictionaryAttr>>
+getLinearScanFailureAttr(func::FuncOp func) {
+  DictionaryAttr state = func->getAttrOfType<DictionaryAttr>(
+      wave::getRegAllocTransformStateAttrName());
+  if (!state)
+    return std::optional<DictionaryAttr>();
+  StringAttr stage = state.getAs<StringAttr>("stage");
+  if (!stage)
+    return func.emitError("regalloc transform state missing `stage`");
+  if (stage.getValue() != "linear-scan-failure")
+    return std::optional<DictionaryAttr>();
+
+  DictionaryAttr failureAttr = state.getAs<DictionaryAttr>("failure");
+  if (!failureAttr)
+    return func.emitError("regalloc transform state missing `failure`");
+  return std::optional<DictionaryAttr>(failureAttr);
+}
+
+static FailureOr<std::optional<RegAllocFailureKind>>
+parseAGPRRelievableFailureKind(DictionaryAttr failureAttr, Operation *diagOp) {
+  StringAttr className = failureAttr.getAs<StringAttr>("class");
+  StringAttr reason = failureAttr.getAs<StringAttr>("reason");
+  if (!className || !reason)
+    return diagOp->emitError("regalloc failure state missing string field");
+  if (!isAGPRRelievableFailureClass(className.getValue()) ||
+      !isAGPRRelievableFailureReason(reason.getValue()))
+    return std::optional<RegAllocFailureKind>();
+  return std::optional<RegAllocFailureKind>(
+      {className.getValue(), reason.getValue()});
+}
+
+static FailureOr<RegAllocTransformFailure>
+parseAGPRRelievableFailure(DictionaryAttr failureAttr, RegAllocFailureKind kind,
+                           func::FuncOp func) {
+  FailureOr<unsigned> set =
+      wave::getRegAllocTransformUnsignedAttr(failureAttr, "set", func);
+  FailureOr<unsigned> position =
+      wave::getRegAllocTransformUnsignedAttr(failureAttr, "position", func);
+  if (failed(set) || failed(position))
+    return failure();
+
+  RegAllocTransformFailure parsed;
+  parsed.className = kind.className;
+  parsed.reason = kind.reason;
+  parsed.set = *set;
+  parsed.position = *position;
+  if (failed(parseRegAllocFailureOverlaps(failureAttr, func, parsed.overlaps)))
+    return failure();
+  return parsed;
+}
+
+static FailureOr<std::optional<RegAllocTransformFailure>>
+parseRegAllocTransformFailure(func::FuncOp func) {
+  FailureOr<std::optional<DictionaryAttr>> failureAttr =
+      getLinearScanFailureAttr(func);
+  if (failed(failureAttr))
+    return failure();
+  if (!*failureAttr)
+    return std::optional<RegAllocTransformFailure>();
+
+  FailureOr<std::optional<RegAllocFailureKind>> kind =
+      parseAGPRRelievableFailureKind(**failureAttr, func);
+  if (failed(kind))
+    return failure();
+  if (!*kind)
+    return std::optional<RegAllocTransformFailure>();
+
+  FailureOr<RegAllocTransformFailure> parsed =
+      parseAGPRRelievableFailure(**failureAttr, **kind, func);
+  if (failed(parsed))
+    return failure();
+  return std::optional<RegAllocTransformFailure>(std::move(*parsed));
+}
+
+static std::optional<unsigned>
+getRegAllocTransformFixedBase(const wave::RegAllocTransformAliasSet &set,
+                              ArrayRef<wave::RegAllocTransformValue> values) {
+  std::optional<unsigned> fixedBase;
+  for (unsigned valueId : set.members) {
+    const wave::RegAllocTransformValue &value = values[valueId];
+    if (!value.fixed)
+      continue;
+    if (*value.fixed < value.offset)
+      return std::nullopt;
+    unsigned base = *value.fixed - value.offset;
+    if (fixedBase && *fixedBase != base)
+      return std::nullopt;
+    fixedBase = base;
+  }
+  return fixedBase;
+}
+
+static std::optional<unsigned>
+findFreeAGPRBase(const AGPRReliefInterval &interval,
+                 ArrayRef<wave::RegAllocTransformAssignment> active,
+                 unsigned limit) {
+  if (interval.width > limit)
+    return std::nullopt;
+  for (unsigned base = 0; base <= limit - interval.width; ++base) {
+    bool blocked = llvm::any_of(
+        active, [&](const wave::RegAllocTransformAssignment &assigned) {
+          return assignedRangesOverlap(assigned, base, interval.width);
+        });
+    if (!blocked)
+      return base;
+  }
+  return std::nullopt;
+}
+
+static bool
+canAllocateAGPRReliefIntervals(ArrayRef<AGPRReliefInterval> intervals,
+                               unsigned candidateId, unsigned limit) {
+  SmallVector<wave::RegAllocTransformAssignment> active;
+  bool allocatedCandidate = false;
+  for (const AGPRReliefInterval &interval : intervals) {
+    llvm::erase_if(active,
+                   [&](const wave::RegAllocTransformAssignment &assigned) {
+                     return assigned.end < interval.start;
+                   });
+    if (interval.fixedBase) {
+      if (*interval.fixedBase + interval.width > limit)
+        return false;
+      if (llvm::any_of(active,
+                       [&](const wave::RegAllocTransformAssignment &assigned) {
+                         return assignedRangesOverlap(
+                             assigned, *interval.fixedBase, interval.width);
+                       }))
+        return false;
+      active.push_back({waveamdmachine::RegClass::AGPR, interval.id,
+                        *interval.fixedBase, interval.width, interval.start,
+                        interval.end});
+      allocatedCandidate |= interval.id == candidateId;
+      continue;
+    }
+    std::optional<unsigned> base = findFreeAGPRBase(interval, active, limit);
+    if (!base)
+      return false;
+    active.push_back({waveamdmachine::RegClass::AGPR, interval.id, *base,
+                      interval.width, interval.start, interval.end});
+    allocatedCandidate |= interval.id == candidateId;
+  }
+  return allocatedCandidate;
+}
+
+static bool lessAGPRReliefInterval(const AGPRReliefInterval &lhs,
+                                   const AGPRReliefInterval &rhs) {
+  return std::tie(lhs.start, lhs.id) < std::tie(rhs.start, rhs.id);
+}
+
+static bool
+canAllocateAGPRReliefCandidate(func::FuncOp func,
+                               const wave::RegAllocTransformAliasSet &candidate,
+                               ArrayRef<wave::RegAllocTransformAliasSet> sets,
+                               ArrayRef<wave::RegAllocTransformValue> values) {
+  wave::RegAllocTransformBudget budget =
+      wave::getRegAllocTransformBudget(func, waveamdmachine::RegClass::AGPR);
+  SmallVector<AGPRReliefInterval> intervals;
+  for (const wave::RegAllocTransformAliasSet &set : sets) {
+    if (set.regClass != waveamdmachine::RegClass::AGPR)
+      continue;
+    intervals.push_back({getRegAllocTransformFixedBase(set, values), set.id,
+                         set.start, set.end, set.width});
+  }
+  intervals.push_back({std::nullopt, candidate.id, candidate.start,
+                       candidate.end, candidate.width});
+  llvm::stable_sort(intervals, lessAGPRReliefInterval);
+  return canAllocateAGPRReliefIntervals(intervals, candidate.id, budget.limit);
+}
+
+static const wave::RegAllocTransformAliasSet *
+findRegAllocTransformSet(ArrayRef<wave::RegAllocTransformAliasSet> sets,
+                         unsigned id) {
+  for (const wave::RegAllocTransformAliasSet &set : sets)
+    if (set.id == id)
+      return &set;
+  return nullptr;
+}
+
+static bool setIntersectsPosition(const wave::RegAllocTransformAliasSet &set,
+                                  unsigned position) {
+  return set.start <= position && position <= set.end;
+}
+
+static bool
+hasFixedRegAllocValue(const wave::RegAllocTransformAliasSet &set,
+                      ArrayRef<wave::RegAllocTransformValue> values) {
+  return llvm::any_of(set.members, [&](unsigned valueId) {
+    return values[valueId].fixed.has_value();
+  });
+}
+
+static bool isRegAllocTransformBridgeValue(Value value) {
+  Operation *def = value.getDefiningOp();
+  return isa_and_nonnull<waveamdmachine::VAccvgprReadB32TupleOp,
+                         waveamdmachine::VAccvgprWriteB32TupleOp>(def);
+}
+
+static bool hasRegAllocTransformBridgeUse(Value value) {
+  return llvm::any_of(value.getUses(), [](OpOperand &use) {
+    return isa<waveamdmachine::VAccvgprReadB32TupleOp,
+               waveamdmachine::VAccvgprWriteB32TupleOp>(use.getOwner());
+  });
+}
+
+static bool isRegAllocTransformBridgeRelated(Value value) {
+  return isRegAllocTransformBridgeValue(value) ||
+         hasRegAllocTransformBridgeUse(value);
+}
+
+static bool
+isAGPRReliefEligibleSet(const wave::RegAllocTransformAliasSet &set,
+                        ArrayRef<wave::RegAllocTransformValue> values,
+                        ArrayRef<ResolvedRegAllocValue> resolvedValues,
+                        unsigned position) {
+  if (set.regClass != waveamdmachine::RegClass::VGPR ||
+      !setIntersectsPosition(set, position) ||
+      hasFixedRegAllocValue(set, values))
+    return false;
+  return llvm::none_of(resolvedValues, [](ResolvedRegAllocValue resolved) {
+    return isRegAllocTransformBridgeRelated(resolved.first);
+  });
+}
+
+static int64_t getAGPRReliefLoopCostScale(Operation *op) {
+  unsigned depth = 0;
+  for (Operation *cur = op; cur; cur = cur->getParentOp())
+    if (isa<waveamdmachine::UniformLoopOp>(cur))
+      ++depth;
+  if (depth == 0)
+    return 1;
+  return int64_t{1} << std::min<unsigned>(depth * 4, 20);
+}
+
+static int64_t getAGPRReliefBridgeCost(ArrayRef<ResolvedRegAllocValue> values) {
+  int64_t cost = 0;
+  for (const ResolvedRegAllocValue &value : values) {
+    ++cost;
+    for (OpOperand &use : value.first.getUses())
+      cost += getAGPRReliefLoopCostScale(use.getOwner());
+  }
+  return cost;
+}
+
+static void addAGPRReliefCandidateId(unsigned id,
+                                     SmallVectorImpl<unsigned> &ids,
+                                     DenseSet<unsigned> &seen) {
+  if (!seen.insert(id).second)
+    return;
+  ids.push_back(id);
+}
+
+static SmallVector<unsigned>
+collectAGPRReliefCandidateIds(const RegAllocTransformFailure &failure) {
+  SmallVector<unsigned> ids;
+  DenseSet<unsigned> seen;
+  addAGPRReliefCandidateId(failure.set, ids, seen);
+  for (const wave::RegAllocTransformAssignment &overlap : failure.overlaps)
+    if (overlap.regClass == waveamdmachine::RegClass::VGPR)
+      addAGPRReliefCandidateId(overlap.set, ids, seen);
+  return ids;
+}
+
+static FailureOr<SmallVector<ResolvedRegAllocValue>>
+resolveSetValues(func::FuncOp func, const wave::RegAllocTransformAliasSet &set,
+                 ArrayRef<wave::RegAllocTransformValue> values) {
+  SmallVector<ResolvedRegAllocValue> resolvedValues;
+  resolvedValues.reserve(set.members.size());
+  for (unsigned valueId : set.members) {
+    const wave::RegAllocTransformValue &value = values[valueId];
+    FailureOr<Value> payloadValue = resolveRegAllocStateValue(func, value);
+    if (failed(payloadValue))
+      return failure();
+    resolvedValues.push_back({*payloadValue, &value});
+  }
+  return resolvedValues;
+}
+
+static FailureOr<std::optional<AGPRReliefCandidate>>
+buildAGPRReliefCandidate(func::FuncOp func, unsigned setId,
+                         const RegAllocTransformFailure &failureRecord,
+                         ArrayRef<wave::RegAllocTransformAliasSet> sets,
+                         ArrayRef<wave::RegAllocTransformValue> values) {
+  const wave::RegAllocTransformAliasSet *set =
+      findRegAllocTransformSet(sets, setId);
+  if (!set)
+    return std::optional<AGPRReliefCandidate>();
+  FailureOr<SmallVector<ResolvedRegAllocValue>> resolvedValues =
+      resolveSetValues(func, *set, values);
+  if (failed(resolvedValues))
+    return failure();
+  if (!isAGPRReliefEligibleSet(*set, values, *resolvedValues,
+                               failureRecord.position))
+    return std::optional<AGPRReliefCandidate>();
+  if (!canAllocateAGPRReliefCandidate(func, *set, sets, values))
+    return std::optional<AGPRReliefCandidate>();
+
+  AGPRReliefCandidate candidate;
+  candidate.set = set;
+  candidate.values = std::move(*resolvedValues);
+  candidate.bridgeCost = getAGPRReliefBridgeCost(candidate.values);
+  return std::optional<AGPRReliefCandidate>(std::move(candidate));
+}
+
+static FailureOr<std::optional<AGPRReliefCandidate>>
+selectAGPRReliefCandidate(func::FuncOp func,
+                          const RegAllocTransformFailure &failureRecord,
+                          ArrayRef<wave::RegAllocTransformAliasSet> sets,
+                          ArrayRef<wave::RegAllocTransformValue> values) {
+  std::optional<AGPRReliefCandidate> best;
+  for (unsigned setId : collectAGPRReliefCandidateIds(failureRecord)) {
+    FailureOr<std::optional<AGPRReliefCandidate>> candidate =
+        buildAGPRReliefCandidate(func, setId, failureRecord, sets, values);
+    if (failed(candidate))
+      return failure();
+    if (!*candidate)
+      continue;
+    if (!best || (*candidate)->bridgeCost < best->bridgeCost ||
+        ((*candidate)->bridgeCost == best->bridgeCost &&
+         (*candidate)->set->id < best->set->id))
+      best = std::move(**candidate);
+  }
+  return best;
+}
+
+static waveamdmachine::RegType
+getRegAllocTransformClassType(Value value, waveamdmachine::RegClass regClass) {
+  auto type = cast<waveamdmachine::RegType>(value.getType());
+  return waveamdmachine::RegType::get(type.getContext(), regClass,
+                                      type.getWidth(), /*index=*/-1);
+}
+
+static void setInsertionPointAfterValue(OpBuilder &builder, Value value) {
+  if (Operation *def = value.getDefiningOp()) {
+    builder.setInsertionPointAfter(def);
+    return;
+  }
+  Block *block = cast<BlockArgument>(value).getOwner();
+  builder.setInsertionPointToStart(block);
+}
+
+static waveamdmachine::VAccvgprWriteB32TupleOp
+createAGPRReliefWrite(OpBuilder &builder, Value value) {
+  setInsertionPointAfterValue(builder, value);
+  auto agprType =
+      getRegAllocTransformClassType(value, waveamdmachine::RegClass::AGPR);
+  auto write = waveamdmachine::VAccvgprWriteB32TupleOp::create(
+      builder, value.getLoc(), agprType, value);
+  write->setAttr("waveamdmachine.regalloc_debug_temp", builder.getUnitAttr());
+  return write;
+}
+
+static Value createAGPRReliefRead(OpBuilder &builder, Value agpr,
+                                  OpOperand &use) {
+  builder.setInsertionPoint(use.getOwner());
+  auto vgprType =
+      getRegAllocTransformClassType(use.get(), waveamdmachine::RegClass::VGPR);
+  auto read = waveamdmachine::VAccvgprReadB32TupleOp::create(
+      builder, use.getOwner()->getLoc(), vgprType, agpr);
+  read->setAttr("waveamdmachine.regalloc_debug_temp", builder.getUnitAttr());
+  return read.getResult();
+}
+
+static void materializeAGPRReliefValue(OpBuilder &builder, Value value) {
+  waveamdmachine::VAccvgprWriteB32TupleOp write =
+      createAGPRReliefWrite(builder, value);
+  SmallVector<OpOperand *> uses;
+  for (OpOperand &use : value.getUses())
+    if (use.getOwner() != write.getOperation())
+      uses.push_back(&use);
+  for (OpOperand *use : uses)
+    use->set(createAGPRReliefRead(builder, write.getResult(), *use));
+}
+
+static void materializeAGPRRelief(OpBuilder &builder,
+                                  const AGPRReliefCandidate &candidate) {
+  for (const ResolvedRegAllocValue &value : candidate.values)
+    materializeAGPRReliefValue(builder, value.first);
 }
 
 static LogicalResult refreshFuncTypeFromBody(func::FuncOp func) {
@@ -1346,6 +1800,48 @@ static LogicalResult runRegAllocLinearScan(func::FuncOp func,
   return scanner.run();
 }
 
+static LogicalResult runRegAllocAGPRRelief(func::FuncOp func) {
+  FailureOr<std::optional<RegAllocTransformFailure>> failureRecord =
+      parseRegAllocTransformFailure(func);
+  if (failed(failureRecord))
+    return failure();
+  if (!*failureRecord)
+    return success();
+
+  FailureOr<llvm::AMDGPU::IsaVersion> isa =
+      waveamdmachine::getAMDGPUTargetIsaVersion(
+          func, "regalloc transform AGPR relief");
+  if (failed(isa))
+    return failure();
+  if (!waveamdmachine::supportsAGPRs(*isa))
+    return success();
+
+  DictionaryAttr state = func->getAttrOfType<DictionaryAttr>(
+      wave::getRegAllocTransformStateAttrName());
+  FailureOr<SmallVector<wave::RegAllocTransformValue>> values =
+      wave::parseRegAllocTransformValues(state, func.getOperation());
+  if (failed(values))
+    return failure();
+  FailureOr<SmallVector<wave::RegAllocTransformAliasSet>> sets =
+      wave::parseRegAllocTransformAliasSets(state, *values,
+                                            func.getOperation());
+  if (failed(sets))
+    return failure();
+
+  FailureOr<std::optional<AGPRReliefCandidate>> candidate =
+      selectAGPRReliefCandidate(func, **failureRecord, *sets, *values);
+  if (failed(candidate))
+    return failure();
+  if (!*candidate)
+    return success();
+
+  OpBuilder builder(func.getContext());
+  materializeAGPRRelief(builder, **candidate);
+  func->removeAttr(wave::getRegAllocTransformAssignmentsAttrName());
+  func->removeAttr(wave::getRegAllocTransformStateAttrName());
+  return success();
+}
+
 } // namespace
 
 LogicalResult wave::buildRegAllocTransformAliasState(Operation *target,
@@ -1369,6 +1865,17 @@ LogicalResult wave::runRegAllocTransformLinearScan(Operation *target,
     return failed(runRegAllocLinearScan(func, builder))
                ? WalkResult::interrupt()
                : WalkResult::advance();
+  });
+  return failure(walk.wasInterrupted());
+}
+
+LogicalResult wave::runRegAllocTransformAGPRRelief(Operation *target,
+                                                   Builder &builder) {
+  if (func::FuncOp func = dyn_cast<func::FuncOp>(target))
+    return runRegAllocAGPRRelief(func);
+  WalkResult walk = target->walk([&](func::FuncOp func) {
+    return failed(runRegAllocAGPRRelief(func)) ? WalkResult::interrupt()
+                                               : WalkResult::advance();
   });
   return failure(walk.wasInterrupted());
 }

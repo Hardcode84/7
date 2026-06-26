@@ -92,3 +92,5 @@
 // PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
 // PIPELINE-NEXT: wave.transform.regalloc_linear_scan from
 // PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
+// PIPELINE-NEXT: wave.transform.regalloc_agpr_relief from
+// PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
