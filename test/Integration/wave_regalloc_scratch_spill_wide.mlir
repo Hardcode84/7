@@ -6,12 +6,13 @@
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
 // CHECK-LABEL: func.func @regalloc_scratch_spill_wide_tuple
-// CHECK-SAME: waveamdmachine.private_segment_fixed_size = 20 : i64
-// CHECK-SAME: waveamdmachine.scratch_spill_bytes = 20 : i64
+// CHECK-SAME: waveamdmachine.private_segment_fixed_size = 36 : i64
+// CHECK-SAME: waveamdmachine.scratch_spill_bytes = 36 : i64
 // CHECK-SAME: waveamdmachine.uses_flat_scratch = true
-// CHECK: waveamdmachine.scratch_store_b32
+// CHECK: waveamdmachine.scratch_store_tuple_b32
 // CHECK: waveamdmachine.scratch_store_b32
 // CHECK: waveamdmachine.scratch_load_b32
+// CHECK: waveamdmachine.scratch_load_tuple_b32
 func.func @regalloc_scratch_spill_wide_tuple()
     attributes {wave.kernel, waveamdmachine.target_waves = 4 : i64} {
   %zero = waveamdmachine.imm 0 : !waveamdmachine.imm

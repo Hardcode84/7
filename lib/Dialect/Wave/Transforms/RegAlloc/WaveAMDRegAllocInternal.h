@@ -135,6 +135,7 @@ struct Inventory {
   SmallVector<std::unique_ptr<IntervalGroup>> groups;
   wave::WaveAMDPressureReliefPlanList plannedReliefPlans;
   SmallVector<PlannedPressureReliefTempInterval, 16> plannedReliefTemps;
+  SmallVector<PlannedPressureReliefTempInterval, 16> plannedReliefFixedTemps;
   DenseMap<StringRef, unsigned> plannedProviderBytes;
   DenseMap<Operation *, LoopCarryLoopRemap> loopCarryRemaps;
   AllocationProbeStats probeStats;
@@ -677,9 +678,6 @@ public:
   }
 
   unsigned getReliefDwords() const override { return reliefDwords; }
-  bool allowsUnplannedTempAssignment(Operation *diagOp) const override {
-    return isRegAllocRematTempOp(diagOp);
-  }
 
   IntervalGroup *getGroup() const { return group; }
   typename Traits::SlotPlan getPlan() const {
@@ -1139,6 +1137,13 @@ static void collectMemorySpillValueTempIntervals(
     intervals.push_back(loadTemp);
     collectAddressTemps(intervals, usePosition, valueWidth);
   }
+  SmallVector<wave::WaveAMDPressureReliefGeneratedUse, 4> generatedUses;
+  for (const std::unique_ptr<wave::WaveAMDPressureReliefPlan> &plan :
+       inventory.plannedReliefPlans)
+    plan->collectGeneratedUses(value, generatedUses);
+  for (wave::WaveAMDPressureReliefGeneratedUse use : generatedUses)
+    collectMemorySpillLoadTempIntervals(type, use.position, use.position,
+                                        intervals, collectAddressTemps);
 }
 
 template <typename SlotT, typename CollectAddressTempsFn>

@@ -78,6 +78,11 @@ struct WaveAMDPressureReliefTempAssignment {
   int64_t base = -1;
 };
 
+struct WaveAMDPressureReliefGeneratedUse {
+  Operation *anchor = nullptr;
+  unsigned position = 0;
+};
+
 struct WaveAMDPressureReliefDiagnosticMetric {
   std::string name;
   int64_t value = 0;
@@ -153,7 +158,9 @@ public:
   virtual WaveAMDPressureReliefProviderKind getProviderKind() const = 0;
   virtual StringRef getProviderName() const = 0;
   virtual unsigned getReliefDwords() const = 0;
-  virtual bool allowsUnplannedTempAssignment(Operation *diagOp) const;
+  virtual void collectGeneratedUses(
+      Value value,
+      SmallVectorImpl<WaveAMDPressureReliefGeneratedUse> &uses) const;
 };
 
 using WaveAMDPressureReliefPlanList =

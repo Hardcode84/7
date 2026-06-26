@@ -640,19 +640,107 @@ addPlannedTempInterval(Inventory &inventory,
   return groupPtr;
 }
 
-static void
-addPlannedTempIntervals(Inventory &inventory, MLIRContext *ctx,
-                        const wave::WaveAMDPressureReliefProvider &provider,
-                        const wave::WaveAMDPressureReliefPlan &plan) {
-  SmallVector<wave::WaveAMDPressureReliefTempInterval, 4> temps;
-  provider.collectPlanTempIntervals(plan, temps);
-  for (wave::WaveAMDPressureReliefTempInterval temp : temps) {
-    IntervalGroup *group = addPlannedTempInterval(inventory, temp, ctx);
-    if (!group)
+static bool
+samePlannedTempInterval(const wave::WaveAMDPressureReliefTempInterval &lhs,
+                        const wave::WaveAMDPressureReliefTempInterval &rhs) {
+  return lhs.fixedBase == rhs.fixedBase && lhs.value == rhs.value &&
+         lhs.regClass == rhs.regClass && lhs.start == rhs.start &&
+         lhs.end == rhs.end && lhs.width == rhs.width;
+}
+
+static unsigned countPlannedTempIntervals(
+    ArrayRef<PlannedPressureReliefTempInterval> temps,
+    const wave::WaveAMDPressureReliefPlan &plan,
+    const wave::WaveAMDPressureReliefTempInterval &interval) {
+  unsigned count = 0;
+  for (const PlannedPressureReliefTempInterval &temp : temps)
+    if (temp.plan == &plan && samePlannedTempInterval(temp.interval, interval))
+      ++count;
+  return count;
+}
+
+static unsigned countPlannedTempIntervals(
+    const Inventory &inventory, const wave::WaveAMDPressureReliefPlan &plan,
+    const wave::WaveAMDPressureReliefTempInterval &interval) {
+  if (interval.fixedBase)
+    return countPlannedTempIntervals(inventory.plannedReliefFixedTemps, plan,
+                                     interval);
+  return countPlannedTempIntervals(inventory.plannedReliefTemps, plan,
+                                   interval);
+}
+
+struct PlannedTempIntervalCount {
+  wave::WaveAMDPressureReliefTempInterval interval;
+  unsigned count = 0;
+};
+
+static SmallVector<PlannedTempIntervalCount, 8> getPlannedTempIntervalCounts(
+    ArrayRef<wave::WaveAMDPressureReliefTempInterval> intervals) {
+  SmallVector<PlannedTempIntervalCount, 8> counts;
+  for (wave::WaveAMDPressureReliefTempInterval interval : intervals) {
+    auto it = llvm::find_if(counts, [&](const PlannedTempIntervalCount &count) {
+      return samePlannedTempInterval(count.interval, interval);
+    });
+    if (it != counts.end()) {
+      ++it->count;
       continue;
-    if (!temp.fixedBase)
-      inventory.plannedReliefTemps.push_back({&plan, temp, group});
+    }
+    counts.push_back({interval, 1});
   }
+  return counts;
+}
+
+static void recordPlannedTempInterval(
+    Inventory &inventory, const wave::WaveAMDPressureReliefPlan &plan,
+    wave::WaveAMDPressureReliefTempInterval temp, IntervalGroup *group) {
+  PlannedPressureReliefTempInterval record{&plan, temp, group};
+  if (temp.fixedBase)
+    inventory.plannedReliefFixedTemps.push_back(record);
+  else
+    inventory.plannedReliefTemps.push_back(record);
+}
+
+static void addMissingPlannedTempIntervals(
+    Inventory &inventory, MLIRContext *ctx,
+    const wave::WaveAMDPressureReliefPlan &plan,
+    ArrayRef<wave::WaveAMDPressureReliefTempInterval> intervals) {
+  for (const PlannedTempIntervalCount &count :
+       getPlannedTempIntervalCounts(intervals)) {
+    unsigned existing =
+        countPlannedTempIntervals(inventory, plan, count.interval);
+    if (existing >= count.count)
+      continue;
+    for ([[maybe_unused]] unsigned index : llvm::seq(existing, count.count)) {
+      IntervalGroup *group =
+          addPlannedTempInterval(inventory, count.interval, ctx);
+      if (!group)
+        continue;
+      recordPlannedTempInterval(inventory, plan, count.interval, group);
+    }
+  }
+}
+
+static void addMissingPlannedTempIntervals(
+    Inventory &inventory, MLIRContext *ctx,
+    const wave::WaveAMDPressureReliefProvider &provider,
+    const wave::WaveAMDPressureReliefPlan &plan) {
+  SmallVector<wave::WaveAMDPressureReliefTempInterval, 8> intervals;
+  provider.collectPlanTempIntervals(plan, intervals);
+  addMissingPlannedTempIntervals(inventory, ctx, plan, intervals);
+}
+
+static void refreshPlannedTempIntervals(func::FuncOp func, Inventory &inventory,
+                                        RegisterBudgets budgets) {
+  SmallVector<std::unique_ptr<wave::WaveAMDPressureReliefProvider>, 4>
+      providers = createPressureReliefProviders(func, inventory, {}, nullptr,
+                                                /*position=*/0, budgets);
+  for (const std::unique_ptr<wave::WaveAMDPressureReliefProvider> &provider :
+       providers)
+    for (const std::unique_ptr<wave::WaveAMDPressureReliefPlan> &plan :
+         inventory.plannedReliefPlans)
+      if (provider->ownsPlan(*plan))
+        addMissingPlannedTempIntervals(inventory, func.getContext(), *provider,
+                                       *plan);
 }
 
 using ReservedLaneUses = SmallVector<std::optional<unsigned>, 8>;
@@ -2166,9 +2254,9 @@ applyPressureRelief(func::FuncOp func, Inventory &inventory,
   if (!plan)
     return failure();
   state.provider->applyPlan(*plan);
-  addPlannedTempIntervals(inventory, func.getContext(), *state.provider, *plan);
-  state.provider->notifyPlanApplied();
   recordPlannedPressureRelief(inventory, std::move(plan));
+  refreshPlannedTempIntervals(func, inventory, budgets);
+  state.provider->notifyPlanApplied();
   return true;
 }
 
@@ -2466,8 +2554,6 @@ public:
     const PlannedPressureReliefTempInterval *temp =
         findMatchingTemp(plan, regClass, width, diagOp);
     if (!temp) {
-      if (plan.allowsUnplannedTempAssignment(diagOp))
-        return wave::WaveAMDPressureReliefTempAssignment{regClass, width, -1};
       if (allTempsConsumed(plan))
         return diagOp->emitError(kPassName)
                << " materialized more pressure-relief temps than planned";

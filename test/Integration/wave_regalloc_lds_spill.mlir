@@ -3,8 +3,8 @@
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 
 // CHECK-LABEL: func.func @regalloc_lds_spill
-// CHECK-SAME: waveamdmachine.lds_size = 1024 : i64
-// CHECK-SAME: waveamdmachine.lds_spill_bytes = 1024 : i64
+// CHECK-SAME: waveamdmachine.lds_size = 768 : i64
+// CHECK-SAME: waveamdmachine.lds_spill_bytes = 768 : i64
 // CHECK: waveamdmachine.ds_store_b32
 // CHECK: waveamdmachine.ds_load_b32
 func.func @regalloc_lds_spill()

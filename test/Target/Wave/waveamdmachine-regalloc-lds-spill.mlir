@@ -5,9 +5,9 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 
 // CHECK-LABEL: func.func @lds_spill_no_target_waves
 // CHECK-SAME: waveamdmachine.agpr_count = 0 : i64
-// CHECK-SAME: waveamdmachine.lds_size = 1024 : i64
-// CHECK-SAME: waveamdmachine.lds_spill_bytes = 1024 : i64
-// CHECK-SAME: waveamdmachine.vgpr_count = 4 : i64
+// CHECK-SAME: waveamdmachine.lds_size = 256 : i64
+// CHECK-SAME: waveamdmachine.lds_spill_bytes = 256 : i64
+// CHECK-SAME: waveamdmachine.vgpr_count = 5 : i64
 // CHECK: %[[LANE:.+]] = waveamdmachine.v_workitem_id_x
 // CHECK: %[[ADDR:.+]] = waveamdmachine.v_lshlrev_b32 %[[LANE]]
 // CHECK: %[[STORE:.+]] = waveamdmachine.ds_store_b32 %[[ADDR]],
@@ -45,8 +45,8 @@ func.func @lds_spill_no_target_waves()
 // CHECK-LABEL: func.func @lds_spill_after_dynamic_lds
 // CHECK-SAME: wave.dynamic_lds_size = 1024 : i64
 // CHECK-SAME: waveamdmachine.dynamic_lds_size = 1024 : i64
-// CHECK-SAME: waveamdmachine.lds_size = 2048 : i64
-// CHECK-SAME: waveamdmachine.lds_spill_bytes = 1024 : i64
+// CHECK-SAME: waveamdmachine.lds_size = 1280 : i64
+// CHECK-SAME: waveamdmachine.lds_spill_bytes = 256 : i64
 // CHECK: %[[LANE:.+]] = waveamdmachine.v_workitem_id_x
 // CHECK: %[[ADDR:.+]] = waveamdmachine.v_lshlrev_b32 %[[LANE]]
 // CHECK: %[[STORE:.+]] = waveamdmachine.ds_store_b32 %[[ADDR]],
@@ -80,9 +80,9 @@ func.func @lds_spill_after_dynamic_lds()
 }
 
 // CHECK-LABEL: func.func @many_lds_spills
-// CHECK-SAME: waveamdmachine.lds_size = 2560 : i64
-// CHECK-SAME: waveamdmachine.lds_spill_bytes = 2560 : i64
-// CHECK-SAME: waveamdmachine.vgpr_count = 4 : i64
+// CHECK-SAME: waveamdmachine.lds_size = 2048 : i64
+// CHECK-SAME: waveamdmachine.lds_spill_bytes = 2048 : i64
+// CHECK-SAME: waveamdmachine.vgpr_count = 5 : i64
 // CHECK: waveamdmachine.ds_store_b32
 // CHECK: offset 1792
 // CHECK: waveamdmachine.ds_load_b32

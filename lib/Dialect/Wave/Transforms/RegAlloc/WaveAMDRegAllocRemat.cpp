@@ -133,10 +133,29 @@ static void eraseDeadRematTrees(ArrayRef<Operation *> roots) {
 struct RematValueSlot {
   Value value;
   SmallVector<OpOperand *, 4> postCutUses;
+  SmallVector<Value, 4> originalLeaves;
   wave::WaveAMDPressureReliefCost cost;
+  Operation *rebuildOp = nullptr;
   unsigned rebuildPosition = 0;
   unsigned endPosition = 0;
   unsigned useCount = 0;
+  unsigned generatedUseCount = 0;
+};
+
+struct RematPostCutUse {
+  OpOperand *operand = nullptr;
+  Operation *anchor = nullptr;
+  unsigned position = 0;
+};
+
+struct RematPostCutUseSet {
+  SmallVector<OpOperand *, 4> operands;
+  SmallVector<Operation *, 4> generatedUsers;
+  Operation *rebuildOp = nullptr;
+  unsigned rebuildPosition = 0;
+
+  bool empty() const { return operands.empty() && generatedUsers.empty(); }
+  unsigned size() const { return operands.size() + generatedUsers.size(); }
 };
 
 struct RematLeafExtension {
@@ -163,6 +182,14 @@ struct RematRejectDiagnostic {
   bool crossesLoopUnused = false;
 };
 
+struct MaterializedRematReplacement {
+  const wave::WaveAMDPressureReliefPlan *plan = nullptr;
+  Value original;
+  Value replacement;
+  unsigned startPosition = 0;
+  unsigned endPosition = 0;
+};
+
 class RematPlan final : public wave::WaveAMDPressureReliefPlan {
 public:
   RematPlan(IntervalGroup *group, ArrayRef<RematValueSlot> valueSlots,
@@ -180,6 +207,15 @@ public:
 
   StringRef getProviderName() const override { return "remat"; }
   unsigned getReliefDwords() const override { return reliefDwords; }
+  void
+  collectGeneratedUses(Value value,
+                       SmallVectorImpl<wave::WaveAMDPressureReliefGeneratedUse>
+                           &uses) const override {
+    for (const RematValueSlot &slot : valueSlots)
+      for (Value leaf : slot.originalLeaves)
+        if (leaf == value)
+          uses.push_back({slot.rebuildOp, slot.rebuildPosition});
+  }
 
   IntervalGroup *getGroup() const { return group; }
   unsigned getUseCount() const {
@@ -242,6 +278,7 @@ public:
 protected:
   void printExtra(llvm::raw_ostream &os) const override {
     os << ", uses=" << getUseCount();
+    os << ", generated_uses=" << getGeneratedUseCount();
     os << ", rebuild_pos=" << getFirstRebuildPosition();
     os << ", added_pressure={sgpr=" << leafPressureEffect.sgprLiveDelta
        << ",vgpr=" << leafPressureEffect.vgprLiveDelta
@@ -252,6 +289,8 @@ protected:
                                NamedAttrList &attrs) const override {
     attrs.set("pressure_relief", builder.getI64IntegerAttr(reliefDwords));
     attrs.set("uses", builder.getI64IntegerAttr(getUseCount()));
+    attrs.set("generated_uses",
+              builder.getI64IntegerAttr(getGeneratedUseCount()));
     attrs.set("rebuild_position",
               builder.getI64IntegerAttr(getFirstRebuildPosition()));
     attrs.set("added_sgpr_pressure",
@@ -269,6 +308,13 @@ private:
       first =
           first ? std::min(first, slot.rebuildPosition) : slot.rebuildPosition;
     return first;
+  }
+
+  unsigned getGeneratedUseCount() const {
+    unsigned count = 0;
+    for (const RematValueSlot &slot : valueSlots)
+      count += slot.generatedUseCount;
+    return count;
   }
 
   SmallVector<RematValueSlot, 4> valueSlots;
@@ -326,13 +372,11 @@ public:
       SmallVectorImpl<wave::WaveAMDPressureReliefTempInterval> &intervals)
       const override {
     const RematPlan &remat = static_cast<const RematPlan &>(plan);
-    llvm::SmallDenseSet<Value, 8> plannedValues = getPlannedValues(remat);
     for (const RematValueSlot &slot : remat.getValueSlots()) {
-      Operation *rebuildOp = slot.postCutUses.front()->getOwner();
       DenseSet<Value> materialized;
-      collectTreeTempIntervalsAt(slot.value, rebuildOp, slot.endPosition,
-                                 plannedValues, remat.getPlannedTypes(),
-                                 materialized, intervals);
+      collectTreeTempIntervalsAt(slot.value, slot.rebuildOp, slot.endPosition,
+                                 remat.getPlannedTypes(), materialized,
+                                 intervals);
     }
   }
 
@@ -343,13 +387,17 @@ public:
     const RematPlan &remat = static_cast<const RematPlan &>(plan);
     llvm::SmallDenseSet<Value, 8> plannedValues = getPlannedValues(remat);
     llvm::SmallDenseSet<Value, 8> leafValues = getLeafValues(remat);
+    llvm::SmallDenseSet<Operation *, 8> protectedTemplateOps =
+        getProtectedTemplateOps(remat);
     SmallVector<Operation *> cleanupRoots;
     for (Value value : remat.getPlannedValues())
       if (Operation *def = value.getDefiningOp())
         cleanupRoots.push_back(def);
+    SmallVector<MaterializedRematReplacement, 8> replacements;
     for (const RematValueSlot &slot : remat.getValueSlots())
       if (failed(materializeValue(slot, plan, context, builder, plannedValues,
-                                  leafValues)))
+                                  leafValues, replacements,
+                                  protectedTemplateOps)))
         return failure();
     eraseDeadRematTrees(cleanupRoots);
     return success();
@@ -360,19 +408,23 @@ public:
                    wave::WaveAMDPressureReliefMaterializationContext &context,
                    OpBuilder &builder) const override {
     SmallVector<Operation *> cleanupRoots;
+    llvm::SmallDenseSet<Operation *, 8> protectedTemplateOps =
+        getProtectedTemplateOps(plans);
     for (const wave::WaveAMDPressureReliefPlan *plan : plans) {
       const RematPlan &remat = static_cast<const RematPlan &>(*plan);
       for (Value value : remat.getPlannedValues())
         if (Operation *def = value.getDefiningOp())
           cleanupRoots.push_back(def);
     }
+    SmallVector<MaterializedRematReplacement, 8> replacements;
     for (const wave::WaveAMDPressureReliefPlan *plan : llvm::reverse(plans)) {
       const RematPlan &remat = static_cast<const RematPlan &>(*plan);
       llvm::SmallDenseSet<Value, 8> plannedValues = getPlannedValues(remat);
       llvm::SmallDenseSet<Value, 8> leafValues = getLeafValues(remat);
       for (const RematValueSlot &slot : remat.getValueSlots())
         if (failed(materializeValue(slot, *plan, context, builder,
-                                    plannedValues, leafValues)))
+                                    plannedValues, leafValues, replacements,
+                                    protectedTemplateOps)))
           return failure();
     }
     eraseDeadRematTrees(cleanupRoots);
@@ -467,6 +519,32 @@ private:
     for (Value value : values)
       plannedValues.insert(value);
     return plannedValues;
+  }
+
+  llvm::SmallDenseSet<Operation *, 8>
+  getProtectedTemplateOps(ArrayRef<Value> plannedValues) const {
+    llvm::SmallDenseSet<Operation *, 8> protectedOps;
+    for (Value value : plannedValues) {
+      Operation *def = value.getDefiningOp();
+      if (def && isCheapVGPRPressureReliefExpr(def))
+        protectedOps.insert(def);
+    }
+    return protectedOps;
+  }
+
+  llvm::SmallDenseSet<Operation *, 8>
+  getProtectedTemplateOps(const RematPlan &remat) const {
+    return getProtectedTemplateOps(remat.getPlannedValues());
+  }
+
+  llvm::SmallDenseSet<Operation *, 8> getProtectedTemplateOps(
+      ArrayRef<const wave::WaveAMDPressureReliefPlan *> plans) const {
+    SmallVector<Value, 16> plannedValues;
+    for (const wave::WaveAMDPressureReliefPlan *plan : plans) {
+      const RematPlan &remat = static_cast<const RematPlan &>(*plan);
+      llvm::append_range(plannedValues, remat.getPlannedValues());
+    }
+    return getProtectedTemplateOps(plannedValues);
   }
 
   std::optional<waveamdmachine::RegType>
@@ -621,6 +699,64 @@ private:
     return isRegAllocGeneratedOp(def) && !plannedValues.contains(value);
   }
 
+  std::optional<unsigned>
+  getCurrentPlannedTempEnd(const PlannedPressureReliefTempInterval &temp,
+                           Value value) const {
+    if (!temp.group)
+      return std::nullopt;
+    std::optional<unsigned> end;
+    for (Interval *lane : temp.group->intervals) {
+      if (!lane->values.contains(value))
+        continue;
+      if (lane->start != temp.interval.start)
+        continue;
+      end = end ? std::min(*end, lane->end) : lane->end;
+    }
+    return end;
+  }
+
+  std::optional<unsigned> getCurrentReplacementEnd(
+      const MaterializedRematReplacement &replacement) const {
+    bool matchedPlanTemp = false;
+    std::optional<unsigned> end;
+    for (const PlannedPressureReliefTempInterval &temp :
+         inventory.plannedReliefTemps) {
+      if (temp.plan != replacement.plan ||
+          temp.interval.value != replacement.original ||
+          temp.interval.start != replacement.startPosition)
+        continue;
+      matchedPlanTemp = true;
+      std::optional<unsigned> currentEnd =
+          getCurrentPlannedTempEnd(temp, replacement.original);
+      if (currentEnd)
+        end = end ? std::min(*end, *currentEnd) : *currentEnd;
+    }
+    if (matchedPlanTemp)
+      return end;
+    return replacement.endPosition;
+  }
+
+  Value lookupMaterializedReplacementAt(
+      Value value, Operation *user,
+      ArrayRef<MaterializedRematReplacement> replacements) const {
+    DenseMap<Operation *, unsigned>::const_iterator it =
+        inventory.positions.find(user);
+    if (it == inventory.positions.end())
+      return {};
+    unsigned position = it->second;
+    for (MaterializedRematReplacement replacement :
+         llvm::reverse(replacements)) {
+      std::optional<unsigned> endPosition =
+          getCurrentReplacementEnd(replacement);
+      if (!endPosition)
+        continue;
+      if (replacement.original == value &&
+          replacement.startPosition <= position && position <= *endPosition)
+        return replacement.replacement;
+    }
+    return {};
+  }
+
   bool
   tryRematerializeOperandAt(Value value, Operation *user,
                             DenseSet<Value> &visiting,
@@ -721,9 +857,50 @@ private:
                                   extensions, materializing);
   }
 
+  LogicalResult
+  collectOriginalLeavesAt(Value value, Operation *user,
+                          DenseSet<Value> &visiting,
+                          const llvm::SmallDenseSet<Value, 8> &plannedValues,
+                          SmallVectorImpl<Value> &leaves) const {
+    Operation *def = getDominatingCheapDef(value, user, /*materializing=*/true);
+    if (!def)
+      return failure();
+    if (!visiting.insert(value).second)
+      return failure();
+    for (Value operand : def->getOperands()) {
+      SmallVector<RematLeafExtension, 4> extensions;
+      RematOperandPlan plan =
+          getOperandPlanAt(operand, user, visiting, plannedValues, extensions,
+                           /*materializing=*/true);
+      if (plan == RematOperandPlan::Invalid) {
+        visiting.erase(value);
+        return failure();
+      }
+      if (plan == RematOperandPlan::UseOriginal) {
+        leaves.push_back(operand);
+        continue;
+      }
+      if (failed(collectOriginalLeavesAt(operand, user, visiting, plannedValues,
+                                         leaves))) {
+        visiting.erase(value);
+        return failure();
+      }
+    }
+    visiting.erase(value);
+    return success();
+  }
+
+  LogicalResult
+  collectOriginalLeavesAt(Value value, Operation *user,
+                          const llvm::SmallDenseSet<Value, 8> &plannedValues,
+                          SmallVectorImpl<Value> &leaves) const {
+    DenseSet<Value> visiting;
+    return collectOriginalLeavesAt(value, user, visiting, plannedValues,
+                                   leaves);
+  }
+
   void collectTreeTempIntervalsAt(
       Value value, Operation *user, unsigned endPosition,
-      const llvm::SmallDenseSet<Value, 8> &plannedValues,
       ArrayRef<RematPlannedType> plannedTypes, DenseSet<Value> &materialized,
       SmallVectorImpl<wave::WaveAMDPressureReliefTempInterval> &intervals)
       const {
@@ -733,17 +910,10 @@ private:
     if (!def)
       return;
     for (Value operand : def->getOperands()) {
-      SmallVector<RematLeafExtension, 4> extensions;
-      RematOperandPlan plan =
-          getOperandPlanAt(operand, user, plannedValues, extensions,
-                           /*materializing=*/true);
-      if (plan == RematOperandPlan::Rematerialize)
-        collectTreeTempIntervalsAt(
-            operand, user, inventory.positions.lookup(user), plannedValues,
-            plannedTypes, materialized, intervals);
-      else
-        assert(plan != RematOperandPlan::Invalid &&
-               "temp interval collection requires a legal remat tree");
+      if (getPlannedType(operand, plannedTypes))
+        collectTreeTempIntervalsAt(operand, user,
+                                   inventory.positions.lookup(user),
+                                   plannedTypes, materialized, intervals);
     }
     unsigned position = inventory.positions.lookup(user);
     for (Value result : def->getResults()) {
@@ -855,6 +1025,12 @@ private:
     return first;
   }
 
+  Operation *getFirstPostCutUser(const RematPostCutUseSet &uses) const {
+    if (uses.rebuildOp)
+      return uses.rebuildOp;
+    return getFirstPostCutUser(uses.operands);
+  }
+
   bool valueUsedInside(Value value, Operation *scope) const {
     for (OpOperand &use : value.getUses())
       if (scope->isAncestor(use.getOwner()))
@@ -898,11 +1074,13 @@ private:
 
   void recordReject(IntervalGroup *group, Value value, StringRef reason,
                     ArrayRef<OpOperand *> uses = {},
-                    ArrayRef<RematLeafExtension> extensions = {}) const {
+                    ArrayRef<RematLeafExtension> extensions = {},
+                    Operation *firstPostCutUser = nullptr) const {
     if (rejectDiagnostic)
       return;
     Operation *def = value.getDefiningOp();
-    Operation *firstPostCutUser = getFirstPostCutUser(uses);
+    if (!firstPostCutUser)
+      firstPostCutUser = getFirstPostCutUser(uses);
     wave::WaveAMDPressureReliefEffect effect =
         getLeafPressureEffect(mergeLeafExtensions(extensions));
     RematRejectDiagnostic diagnostic;
@@ -919,6 +1097,13 @@ private:
     diagnostic.addedAGPRPressure = effect.agprLiveDelta;
     diagnostic.crossesLoopUnused = crossesUnusedLoop(value, firstPostCutUser);
     rejectDiagnostic = std::move(diagnostic);
+  }
+
+  void recordReject(IntervalGroup *group, Value value, StringRef reason,
+                    const RematPostCutUseSet &uses,
+                    ArrayRef<RematLeafExtension> extensions = {}) const {
+    recordReject(group, value, reason, uses.operands, extensions,
+                 getFirstPostCutUser(uses));
   }
 
   void applyLeafExtension(RematLeafExtension extension) const {
@@ -1036,21 +1221,51 @@ private:
     return ancestor && anchor->isBeforeInBlock(ancestor);
   }
 
-  FailureOr<SmallVector<OpOperand *, 4>>
-  getPostCutUses(ArrayRef<OpOperand *> uses) const {
-    SmallVector<OpOperand *, 4> postCutUses;
-    Operation *rebuildOp = nullptr;
-    for (OpOperand *use : uses) {
-      unsigned usePosition = inventory.positions.lookup(use->getOwner());
-      if (usePosition == position)
-        return failure();
-      if (usePosition < position)
+  void
+  collectGeneratedPostCutUses(Value value,
+                              SmallVectorImpl<RematPostCutUse> &uses) const {
+    SmallVector<wave::WaveAMDPressureReliefGeneratedUse, 4> generatedUses;
+    for (const std::unique_ptr<wave::WaveAMDPressureReliefPlan> &plan :
+         inventory.plannedReliefPlans)
+      plan->collectGeneratedUses(value, generatedUses);
+    for (wave::WaveAMDPressureReliefGeneratedUse use : generatedUses) {
+      if (!use.anchor)
         continue;
-      if (!rebuildOp)
-        rebuildOp = use->getOwner();
-      if (!insertionPointDominates(rebuildOp, use->getOwner()))
+      if (!inventory.positions.count(use.anchor))
+        continue;
+      uses.push_back({nullptr, use.anchor, use.position});
+    }
+  }
+
+  FailureOr<RematPostCutUseSet>
+  getPostCutUses(Value value, ArrayRef<OpOperand *> uses) const {
+    SmallVector<RematPostCutUse, 8> candidates;
+    for (OpOperand *use : uses) {
+      Operation *owner = use->getOwner();
+      candidates.push_back({use, owner, inventory.positions.lookup(owner)});
+    }
+    collectGeneratedPostCutUses(value, candidates);
+    llvm::stable_sort(
+        candidates, [](const RematPostCutUse &lhs, const RematPostCutUse &rhs) {
+          return lhs.position < rhs.position;
+        });
+
+    RematPostCutUseSet postCutUses;
+    for (RematPostCutUse use : candidates) {
+      if (use.position == position)
         return failure();
-      postCutUses.push_back(use);
+      if (use.position < position)
+        continue;
+      if (!postCutUses.rebuildOp) {
+        postCutUses.rebuildOp = use.anchor;
+        postCutUses.rebuildPosition = use.position;
+      }
+      if (!insertionPointDominates(postCutUses.rebuildOp, use.anchor))
+        return failure();
+      if (use.operand)
+        postCutUses.operands.push_back(use.operand);
+      else
+        postCutUses.generatedUsers.push_back(use.anchor);
     }
     return postCutUses;
   }
@@ -1063,12 +1278,12 @@ private:
     return start;
   }
 
-  bool repeatsExistingRematPlacement(IntervalGroup *group, Value value,
-                                     ArrayRef<OpOperand *> postCutUses) const {
+  bool
+  repeatsExistingRematPlacement(IntervalGroup *group, Value value,
+                                const RematPostCutUseSet &postCutUses) const {
     if (postCutUses.empty())
       return false;
-    unsigned rebuildPosition =
-        inventory.positions.lookup(postCutUses.front()->getOwner());
+    unsigned rebuildPosition = postCutUses.rebuildPosition;
     Interval *interval = inventory.intervalFor.lookup(value);
     if (isRematerializablePlannedTempGroup(group, position) &&
         ((interval && interval->group == group) ||
@@ -1118,7 +1333,7 @@ private:
       recordReject(group, value, "external_uses_unavailable");
       return failure();
     }
-    FailureOr<SmallVector<OpOperand *, 4>> postCutUses = getPostCutUses(uses);
+    FailureOr<RematPostCutUseSet> postCutUses = getPostCutUses(value, uses);
     if (failed(postCutUses)) {
       recordReject(group, value, "post_cut_uses_invalid", uses);
       return failure();
@@ -1133,27 +1348,38 @@ private:
       recordReject(group, value, "not_cheap_vgpr_root", *postCutUses);
       return failure();
     }
-    Operation *rebuildOp = postCutUses->front()->getOwner();
+    Operation *rebuildOp = postCutUses->rebuildOp;
     if (!canRematerializeTreeAt(value, rebuildOp, plannedValues, leafExtensions,
                                 /*materializing=*/true)) {
       recordReject(group, value, "dag_not_rematerializable", *postCutUses,
                    leafExtensions);
       return failure();
     }
-    unsigned rebuildPosition = inventory.positions.lookup(rebuildOp);
-    unsigned endPosition = rebuildPosition;
-    for (OpOperand *use : *postCutUses) {
+    SmallVector<Value, 4> originalLeaves;
+    if (failed(collectOriginalLeavesAt(value, rebuildOp, plannedValues,
+                                       originalLeaves))) {
+      recordReject(group, value, "dag_not_rematerializable", *postCutUses,
+                   leafExtensions);
+      return failure();
+    }
+    unsigned endPosition = postCutUses->rebuildPosition;
+    for (OpOperand *use : postCutUses->operands) {
       unsigned usePosition = inventory.positions.lookup(use->getOwner());
       endPosition = std::max(
           endPosition, getMemorySpillUseEnd(*use, inventory, usePosition));
     }
+    for (Operation *user : postCutUses->generatedUsers)
+      endPosition = std::max(endPosition, inventory.positions.lookup(user));
     RematValueSlot slot;
     slot.value = value;
-    slot.postCutUses = *postCutUses;
+    slot.postCutUses = postCutUses->operands;
+    slot.originalLeaves = std::move(originalLeaves);
     slot.cost = getRematCost(value, rebuildOp, plannedValues, leafExtensions);
-    slot.rebuildPosition = rebuildPosition;
+    slot.rebuildOp = rebuildOp;
+    slot.rebuildPosition = postCutUses->rebuildPosition;
     slot.endPosition = endPosition;
-    slot.useCount = static_cast<unsigned>(postCutUses->size());
+    slot.useCount = postCutUses->size();
+    slot.generatedUseCount = postCutUses->generatedUsers.size();
     return std::optional<RematValueSlot>{slot};
   }
 
@@ -1192,8 +1418,7 @@ private:
     SmallVector<RematPlannedType, 8> plannedTypes;
     DenseSet<Value> materialized;
     for (const RematValueSlot &slot : valueSlots) {
-      Operation *rebuildOp = slot.postCutUses.front()->getOwner();
-      collectTreePlannedTypesAt(slot.value, rebuildOp, plannedValues,
+      collectTreePlannedTypesAt(slot.value, slot.rebuildOp, plannedValues,
                                 materialized, plannedTypes);
     }
     candidates.push_back(std::make_unique<RematCandidate>(
@@ -1210,10 +1435,14 @@ private:
                    IRMapping &mapper,
                    const llvm::SmallDenseSet<Value, 8> &plannedValues,
                    const llvm::SmallDenseSet<Value, 8> &leafValues,
+                   ArrayRef<MaterializedRematReplacement> replacements,
                    ArrayRef<RematPlannedType> plannedTypes) const {
     for (Value operand : def->getOperands()) {
       Value replacement = operand;
       if (leafValues.contains(operand)) {
+        if (Value rematReplacement =
+                lookupMaterializedReplacementAt(operand, user, replacements))
+          replacement = rematReplacement;
         mapper.map(operand, replacement);
         continue;
       }
@@ -1226,9 +1455,9 @@ private:
                << "waveamd-reg-alloc cannot rematerialize operand tree for "
                << operand;
       if (operandPlan == RematOperandPlan::Rematerialize) {
-        FailureOr<Value> rematOperand =
-            materializeTreeAt(operand, user, plan, context, builder, cache,
-                              plannedValues, leafValues, plannedTypes);
+        FailureOr<Value> rematOperand = materializeTreeAt(
+            operand, user, plan, context, builder, cache, plannedValues,
+            leafValues, replacements, plannedTypes);
         if (failed(rematOperand))
           return failure();
         replacement = *rematOperand;
@@ -1281,6 +1510,7 @@ private:
                     OpBuilder &builder, DenseMap<Value, Value> &cache,
                     const llvm::SmallDenseSet<Value, 8> &plannedValues,
                     const llvm::SmallDenseSet<Value, 8> &leafValues,
+                    ArrayRef<MaterializedRematReplacement> replacements,
                     ArrayRef<RematPlannedType> plannedTypes) const {
     if (Value cached = cache.lookup(value))
       return cached;
@@ -1291,7 +1521,7 @@ private:
 
     IRMapping mapper;
     if (failed(mapRematOperands(def, user, plan, context, builder, cache,
-                                mapper, plannedValues, leafValues,
+                                mapper, plannedValues, leafValues, replacements,
                                 plannedTypes)))
       return failure();
 
@@ -1309,27 +1539,32 @@ private:
       const RematValueSlot &slot, const wave::WaveAMDPressureReliefPlan &plan,
       wave::WaveAMDPressureReliefMaterializationContext &context,
       OpBuilder &builder, const llvm::SmallDenseSet<Value, 8> &plannedValues,
-      const llvm::SmallDenseSet<Value, 8> &leafValues) const {
+      const llvm::SmallDenseSet<Value, 8> &leafValues,
+      SmallVectorImpl<MaterializedRematReplacement> &replacements,
+      const llvm::SmallDenseSet<Operation *, 8> &protectedTemplateOps) const {
     Value value = slot.value;
     Operation *def = value.getDefiningOp();
     if (!def || def->getNumResults() == 0)
       return mlir::emitError(value.getLoc())
              << "waveamd-reg-alloc cannot rematerialize value";
-    if (slot.postCutUses.empty())
+    if (!slot.rebuildOp)
       return mlir::emitError(value.getLoc())
              << "waveamd-reg-alloc cannot rematerialize without post-cut uses";
 
-    Operation *rebuildOp = slot.postCutUses.front()->getOwner();
     DenseMap<Value, Value> cache;
     const RematPlan &remat = static_cast<const RematPlan &>(plan);
-    FailureOr<Value> replacement =
-        materializeTreeAt(value, rebuildOp, plan, context, builder, cache,
-                          plannedValues, leafValues, remat.getPlannedTypes());
+    FailureOr<Value> replacement = materializeTreeAt(
+        value, slot.rebuildOp, plan, context, builder, cache, plannedValues,
+        leafValues, replacements, remat.getPlannedTypes());
     if (failed(replacement))
       return failure();
+    replacements.push_back(
+        {&plan, value, *replacement, slot.rebuildPosition, slot.endPosition});
 
     for (OpOperand *use : slot.postCutUses) {
       if (use->get() != value)
+        continue;
+      if (protectedTemplateOps.contains(use->getOwner()))
         continue;
       use->set(*replacement);
     }

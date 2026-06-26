@@ -3,12 +3,13 @@
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
 // CHECK-LABEL: func.func @scratch_spill_wide_tuple_codegen
-// CHECK-SAME: waveamdmachine.private_segment_fixed_size = 20 : i64
-// CHECK-SAME: waveamdmachine.scratch_spill_bytes = 20 : i64
+// CHECK-SAME: waveamdmachine.private_segment_fixed_size = 36 : i64
+// CHECK-SAME: waveamdmachine.scratch_spill_bytes = 36 : i64
 // CHECK-SAME: waveamdmachine.uses_flat_scratch = true
-// CHECK-NOT: scratch_store_tuple_b32
+// CHECK: waveamdmachine.scratch_store_tuple_b32
 // CHECK: waveamdmachine.scratch_store_b32
 // CHECK: waveamdmachine.scratch_load_b32
+// CHECK: waveamdmachine.scratch_load_tuple_b32
 // CHECK: waveamdmachine.tuple_to_elements
 func.func @scratch_spill_wide_tuple_codegen()
     attributes {wave.kernel, waveamdmachine.target_waves = 4 : i64} {
@@ -49,8 +50,8 @@ func.func @scratch_spill_wide_tuple_codegen()
 }
 
 // CHECK-LABEL: func.func @scratch_spill_prefers_scalar_when_wide_crosses_immediate_limit
-// CHECK-SAME: waveamdmachine.private_segment_fixed_size = 4112 : i64
-// CHECK-SAME: waveamdmachine.scratch_spill_bytes = 20 : i64
+// CHECK-SAME: waveamdmachine.private_segment_fixed_size = 4128 : i64
+// CHECK-SAME: waveamdmachine.scratch_spill_bytes = 36 : i64
 // CHECK-NOT: scratch_store_tuple_b32
 // CHECK: waveamdmachine.scratch_store_b32 {{.*}} offset 4092
 // CHECK: waveamdmachine.imm 4100
@@ -61,7 +62,6 @@ func.func @scratch_spill_wide_tuple_codegen()
 // CHECK: waveamdmachine.scratch_store_b32
 // CHECK: waveamdmachine.imm 4108
 // CHECK: waveamdmachine.scratch_store_b32
-// CHECK: waveamdmachine.tuple_to_elements
 // CHECK: waveamdmachine.scratch_load_b32 {{.*}} offset 4092
 func.func @scratch_spill_prefers_scalar_when_wide_crosses_immediate_limit()
     attributes {wave.kernel, waveamdmachine.target_waves = 4 : i64,

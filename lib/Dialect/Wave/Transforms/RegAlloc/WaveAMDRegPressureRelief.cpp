@@ -146,10 +146,8 @@ void WaveAMDPressureReliefCandidate::printExtra(llvm::raw_ostream &os) const {}
 void WaveAMDPressureReliefCandidate::setExtraDiagnosticAttrs(
     Builder &builder, NamedAttrList &attrs) const {}
 
-bool WaveAMDPressureReliefPlan::allowsUnplannedTempAssignment(
-    Operation *diagOp) const {
-  return false;
-}
+void WaveAMDPressureReliefPlan::collectGeneratedUses(
+    Value, SmallVectorImpl<WaveAMDPressureReliefGeneratedUse> &) const {}
 
 bool WaveAMDPressureReliefProvider::isBetterCandidate(
     const WaveAMDPressureReliefCandidate &lhs,
