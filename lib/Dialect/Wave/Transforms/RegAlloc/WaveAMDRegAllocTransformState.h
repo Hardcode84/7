@@ -22,6 +22,8 @@ namespace mlir::wave {
 StringRef getRegAllocTransformStateAttrName();
 StringRef getRegAllocTransformAssignmentsAttrName();
 
+enum class RegAllocTransformLoopDecision { Done, Restart, Stalled };
+
 std::optional<waveamdmachine::RegType>
 getRegAllocTransformTrackedRegType(Value value);
 
@@ -96,6 +98,13 @@ DictionaryAttr buildRegAllocTransformAssignmentAttr(
 RegAllocTransformBudget
 getRegAllocTransformBudget(func::FuncOp func,
                            waveamdmachine::RegClass regClass);
+
+FailureOr<RegAllocTransformLoopDecision>
+getRegAllocTransformLoopDecision(Operation *target);
+
+LogicalResult setRegAllocTransformLoopIteration(Operation *target,
+                                                Builder &builder,
+                                                int64_t iteration);
 
 } // namespace mlir::wave
 

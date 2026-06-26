@@ -20,6 +20,8 @@ static constexpr StringLiteral kRegAllocTransformStateAttr =
     "waveamdmachine.regalloc_transform_state";
 static constexpr StringLiteral kRegAllocAssignmentsAttr =
     "waveamdmachine.regalloc_assignments";
+static constexpr StringLiteral kRegAllocStageSuccess = "linear-scan-success";
+static constexpr StringLiteral kRegAllocStageFailure = "linear-scan-failure";
 
 StringRef getRegAllocTransformStateAttrName() {
   return kRegAllocTransformStateAttr;
@@ -312,6 +314,99 @@ getRegAllocTransformBudget(func::FuncOp func,
   if (std::optional<unsigned> limit = getUnsignedIntegerAttr(parent, attrName))
     return {*limit, "module_attr"};
   return {getDefaultRegClassLimit(regClass), "default"};
+}
+
+static FailureOr<RegAllocTransformLoopDecision>
+getFuncRegAllocTransformLoopDecision(func::FuncOp func) {
+  DictionaryAttr state =
+      func->getAttrOfType<DictionaryAttr>(kRegAllocTransformStateAttr);
+  if (!state)
+    return RegAllocTransformLoopDecision::Restart;
+  auto stage = state.getAs<StringAttr>("stage");
+  if (!stage)
+    return func.emitError("regalloc transform state missing `stage`");
+  if (stage.getValue() == kRegAllocStageSuccess)
+    return RegAllocTransformLoopDecision::Done;
+  if (stage.getValue() == kRegAllocStageFailure)
+    return RegAllocTransformLoopDecision::Stalled;
+  return func.emitError("regalloc transform loop body left unexpected stage `")
+         << stage.getValue() << "`";
+}
+
+static void
+combineRegAllocTransformLoopDecision(RegAllocTransformLoopDecision next,
+                                     RegAllocTransformLoopDecision &combined) {
+  if (next == RegAllocTransformLoopDecision::Restart ||
+      combined == RegAllocTransformLoopDecision::Restart) {
+    combined = RegAllocTransformLoopDecision::Restart;
+    return;
+  }
+  if (next == RegAllocTransformLoopDecision::Stalled ||
+      combined == RegAllocTransformLoopDecision::Stalled) {
+    combined = RegAllocTransformLoopDecision::Stalled;
+    return;
+  }
+  combined = RegAllocTransformLoopDecision::Done;
+}
+
+FailureOr<RegAllocTransformLoopDecision>
+getRegAllocTransformLoopDecision(Operation *target) {
+  RegAllocTransformLoopDecision combined = RegAllocTransformLoopDecision::Done;
+  if (auto func = dyn_cast<func::FuncOp>(target))
+    return getFuncRegAllocTransformLoopDecision(func);
+  WalkResult walk = target->walk([&](func::FuncOp func) {
+    FailureOr<RegAllocTransformLoopDecision> decision =
+        getFuncRegAllocTransformLoopDecision(func);
+    if (failed(decision))
+      return WalkResult::interrupt();
+    combineRegAllocTransformLoopDecision(*decision, combined);
+    return WalkResult::advance();
+  });
+  if (walk.wasInterrupted())
+    return failure();
+  return combined;
+}
+
+static DictionaryAttr rewriteRegAllocTransformStateAttr(Builder &builder,
+                                                        DictionaryAttr state,
+                                                        NamedAttribute update) {
+  SmallVector<NamedAttribute> attrs;
+  for (NamedAttribute attr : state) {
+    if (attr.getName() == update.getName())
+      continue;
+    attrs.push_back(attr);
+  }
+  attrs.push_back(update);
+  return builder.getDictionaryAttr(attrs);
+}
+
+static LogicalResult setFuncRegAllocTransformLoopIteration(func::FuncOp func,
+                                                           Builder &builder,
+                                                           int64_t iteration) {
+  DictionaryAttr state =
+      func->getAttrOfType<DictionaryAttr>(kRegAllocTransformStateAttr);
+  if (!state)
+    return success();
+  func->setAttr(kRegAllocTransformStateAttr,
+                rewriteRegAllocTransformStateAttr(
+                    builder, state,
+                    builder.getNamedAttr(
+                        "iteration", builder.getI64IntegerAttr(iteration))));
+  return success();
+}
+
+LogicalResult setRegAllocTransformLoopIteration(Operation *target,
+                                                Builder &builder,
+                                                int64_t iteration) {
+  if (auto func = dyn_cast<func::FuncOp>(target))
+    return setFuncRegAllocTransformLoopIteration(func, builder, iteration);
+  WalkResult walk = target->walk([&](func::FuncOp func) {
+    return failed(
+               setFuncRegAllocTransformLoopIteration(func, builder, iteration))
+               ? WalkResult::interrupt()
+               : WalkResult::advance();
+  });
+  return failure(walk.wasInterrupted());
 }
 
 } // namespace mlir::wave

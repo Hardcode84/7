@@ -9,6 +9,7 @@
 #include "mlir/Dialect/Wave/IR/Wave.h"
 
 #include "../Transforms/RegAlloc/WaveAMDRegAllocTransformLoop.h"
+#include "../Transforms/RegAlloc/WaveAMDRegAllocTransformState.h"
 #include "mlir/Dialect/Wave/IR/WaveMeta.h"
 #include "mlir/Dialect/WaveAMDMachine/CostModel/ArchData.h"
 #include "mlir/Dialect/WaveAMDMachine/CostModel/FunctionalUnit.h"
@@ -94,6 +95,61 @@ collectHandleResults(wave::TransformRegAllocLoopOp op,
   return DiagnosedSilenceableFailure::success();
 }
 
+static SmallVector<transform::MappedValue>
+buildHandleMapping(ArrayRef<Operation *> targets) {
+  SmallVector<transform::MappedValue> mapping;
+  mapping.reserve(targets.size());
+  for (Operation *target : targets)
+    mapping.push_back(target);
+  return mapping;
+}
+
+static DiagnosedSilenceableFailure runRegAllocLoopIteration(
+    wave::TransformRegAllocLoopOp op, transform::NamedSequenceOp body,
+    ArrayRef<Operation *> current, transform::TransformState &state,
+    SmallVectorImpl<Operation *> &yielded) {
+  SmallVector<transform::MappedValue> targetMapping =
+      buildHandleMapping(current);
+  SmallVector<SmallVector<transform::MappedValue>> bindings;
+  bindings.push_back(std::move(targetMapping));
+  SmallVector<SmallVector<transform::MappedValue>> out;
+  DiagnosedSilenceableFailure status =
+      runNamedSequence(op, body, bindings, state, out);
+  if (!status.succeeded())
+    return status;
+  if (out.size() != 1)
+    return op.emitDefiniteFailure()
+           << "regalloc loop body must yield one operation handle";
+  return collectHandleResults(op, out[0], yielded);
+}
+
+static LogicalResult stampRegAllocLoopIteration(ArrayRef<Operation *> targets,
+                                                Builder &builder,
+                                                int64_t iteration) {
+  for (Operation *target : targets)
+    if (failed(wave::setRegAllocTransformLoopIteration(target, builder,
+                                                       iteration)))
+      return failure();
+  return success();
+}
+
+static FailureOr<wave::RegAllocTransformLoopDecision>
+classifyRegAllocLoopTargets(ArrayRef<Operation *> targets) {
+  wave::RegAllocTransformLoopDecision decision =
+      wave::RegAllocTransformLoopDecision::Done;
+  for (Operation *target : targets) {
+    FailureOr<wave::RegAllocTransformLoopDecision> targetDecision =
+        wave::getRegAllocTransformLoopDecision(target);
+    if (failed(targetDecision))
+      return failure();
+    if (*targetDecision == wave::RegAllocTransformLoopDecision::Restart)
+      return wave::RegAllocTransformLoopDecision::Restart;
+    if (*targetDecision == wave::RegAllocTransformLoopDecision::Stalled)
+      decision = wave::RegAllocTransformLoopDecision::Stalled;
+  }
+  return decision;
+}
+
 static DiagnosedSilenceableFailure
 runRegAllocLoopBody(wave::TransformRegAllocLoopOp op,
                     transform::TransformResults &results,
@@ -106,26 +162,37 @@ runRegAllocLoopBody(wave::TransformRegAllocLoopOp op,
            << "body symbol `" << op.getBody()
            << "` does not resolve to a transform.named_sequence";
 
-  SmallVector<transform::MappedValue> targetMapping;
+  SmallVector<Operation *> current;
   for (Operation *target : state.getPayloadOps(op.getTarget()))
-    targetMapping.push_back(target);
-  SmallVector<SmallVector<transform::MappedValue>> bindings;
-  bindings.push_back(std::move(targetMapping));
-  SmallVector<SmallVector<transform::MappedValue>> out;
-  DiagnosedSilenceableFailure status =
-      runNamedSequence(op, body, bindings, state, out);
-  if (!status.succeeded())
-    return status;
-  if (out.size() != 1)
-    return op.emitDefiniteFailure()
-           << "regalloc loop body must yield one operation handle";
-  SmallVector<Operation *> yielded;
-  DiagnosedSilenceableFailure collectStatus =
-      collectHandleResults(op, out[0], yielded);
-  if (!collectStatus.succeeded())
-    return collectStatus;
-  results.set(cast<OpResult>(op.getResult()), yielded);
-  return DiagnosedSilenceableFailure::success();
+    current.push_back(target);
+
+  Builder builder(op.getContext());
+  int64_t maxIterations = op.getMaxIterations();
+  for (int64_t iteration = 0; iteration < maxIterations; ++iteration) {
+    SmallVector<Operation *> yielded;
+    DiagnosedSilenceableFailure status =
+        runRegAllocLoopIteration(op, body, current, state, yielded);
+    if (!status.succeeded())
+      return status;
+    if (failed(stampRegAllocLoopIteration(yielded, builder, iteration)))
+      return op.emitDefiniteFailure()
+             << "failed to stamp regalloc loop iteration";
+
+    FailureOr<wave::RegAllocTransformLoopDecision> decision =
+        classifyRegAllocLoopTargets(yielded);
+    if (failed(decision))
+      return op.emitDefiniteFailure()
+             << "failed to read regalloc transform loop state";
+
+    if (*decision != wave::RegAllocTransformLoopDecision::Restart) {
+      results.set(cast<OpResult>(op.getResult()), yielded);
+      return DiagnosedSilenceableFailure::success();
+    }
+    current = std::move(yielded);
+  }
+  return op.emitDefiniteFailure()
+         << "regalloc transform loop exceeded max_iterations = "
+         << maxIterations;
 }
 
 } // namespace
@@ -138,6 +205,8 @@ LogicalResult wave::TransformRegAllocLoopOp::verifySymbolUses(
   if (!body)
     return emitOpError() << "body symbol `" << getBody()
                          << "` does not resolve to a transform.named_sequence";
+  if (getMaxIterations() <= 0)
+    return emitOpError() << "requires positive max_iterations";
   return success();
 }
 

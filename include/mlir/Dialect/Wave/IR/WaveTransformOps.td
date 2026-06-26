@@ -138,7 +138,8 @@ def Wave_TransformRegAllocLoopOp
     alias-state build, linear scan, and pressure-relief transforms.
   }];
   let arguments = (ins TransformHandleTypeInterface:$target,
-                       SymbolRefAttr:$body);
+                       SymbolRefAttr:$body,
+                       DefaultValuedAttr<I64Attr, "512">:$max_iterations);
   let results = (outs TransformHandleTypeInterface:$result);
   let assemblyFormat = [{
     `from` $target `body` `=` $body attr-dict
