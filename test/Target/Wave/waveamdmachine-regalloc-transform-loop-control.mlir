@@ -45,7 +45,8 @@ module attributes {transform.with_named_sequence} {
     // CHECK-SAME: waveamdmachine.regalloc_assignments
     // CHECK-SAME: iteration = 1 : i64
     // CHECK-SAME: stage = "linear-scan-success"
-    func.func @payload(%arg0: !waveamdmachine.reg<vgpr, 1>) {
+    func.func @payload(%arg0: !waveamdmachine.reg<vgpr, 1>)
+        attributes {waveamdmachine.regalloc_transform_state = {stage = "linear-scan-success"}} {
       return
     }
   }

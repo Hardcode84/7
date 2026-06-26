@@ -316,6 +316,15 @@ getRegAllocTransformBudget(func::FuncOp func,
   return {getDefaultRegClassLimit(regClass), "default"};
 }
 
+void clearRegAllocTransformState(Operation *target) {
+  if (auto func = dyn_cast<func::FuncOp>(target)) {
+    func->removeAttr(kRegAllocTransformStateAttr);
+    return;
+  }
+  target->walk(
+      [](func::FuncOp func) { func->removeAttr(kRegAllocTransformStateAttr); });
+}
+
 static FailureOr<RegAllocTransformLoopDecision>
 getFuncRegAllocTransformLoopDecision(func::FuncOp func) {
   DictionaryAttr state =

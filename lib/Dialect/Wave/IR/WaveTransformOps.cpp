@@ -108,6 +108,8 @@ static DiagnosedSilenceableFailure runRegAllocLoopIteration(
     wave::TransformRegAllocLoopOp op, transform::NamedSequenceOp body,
     ArrayRef<Operation *> current, transform::TransformState &state,
     SmallVectorImpl<Operation *> &yielded) {
+  for (Operation *target : current)
+    wave::clearRegAllocTransformState(target);
   SmallVector<transform::MappedValue> targetMapping =
       buildHandleMapping(current);
   SmallVector<SmallVector<transform::MappedValue>> bindings;

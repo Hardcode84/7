@@ -781,16 +781,6 @@ static LogicalResult setRegAllocTransformState(func::FuncOp func,
   return success();
 }
 
-static void clearRegAllocTransformState(Operation *target) {
-  if (func::FuncOp func = dyn_cast<func::FuncOp>(target)) {
-    func->removeAttr(wave::getRegAllocTransformStateAttrName());
-    return;
-  }
-  target->walk([](func::FuncOp func) {
-    func->removeAttr(wave::getRegAllocTransformStateAttrName());
-  });
-}
-
 static LogicalResult runRegAllocLinearScan(func::FuncOp func,
                                            Builder &builder) {
   RegAllocLinearScanner scanner(func, builder);
