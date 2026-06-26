@@ -1,146 +1,152 @@
-# WaveAMD Regalloc Pressure Relief
+# WaveAMD Regalloc Transform Loop
 
 Scope: WaveAMD regalloc implementation files in this directory.
 
 ## Target Model
 
-- Keep current alias-set construction model.
-- Keep linear scan as allocator driver.
-- On failure to allocate current interval at position `P`, ask pressure-relief
-  providers for one plan, record it, add planned temp ranges, rerun linear scan.
-- Provider order is strict:
+- Regalloc is an inspectable IR transform loop, not one allocator with deferred
+  side plans.
+- Each iteration rebuilds regalloc state from current IR, runs linear scan, then
+  either commits physical registers or applies one pressure-relief rewrite.
+- Driver order is fixed:
+
+```text
+build-alias-state -> linear-scan -> AGPR -> Remat -> LDS -> Scratch
+```
+
+- Relief order is strict:
 
 ```text
 AGPR -> Remat -> LDS -> Scratch
 ```
 
-- Query one provider class at a time. If a provider has any legal candidate,
-  choose a candidate from that provider and stop. Do not inspect later
-  providers for a cheaper plan.
-- Always relieve the entire alias set. No partial-lane, partial-value,
-  loop-carry, or provider-specific alias splitting.
-- Accept a legal plan even when it cannot relieve enough pressure by itself.
-  Rerun scan and let the next failure pick the next plan.
-- Do not rebuild alias sets after each plan. Add planned temp ranges and bridge
-  constraints incrementally.
-- Do not materialize operations during selection or allocation. Plans
-  materialize after allocation planning.
+- First relief transform that rewrites IR wins. Restart from alias-state build.
+- No hidden C++ state may survive an IR rewrite. Recompute, or store enough
+  inspectable state in IR.
+- Physical assignment is final-only: write indices into
+  `!waveamdmachine.reg<class, width, index>` after linear scan succeeds.
+- Failed scans write a precise failure record, not partial physical assignment.
 
-## Core Allocator Boundary
+## IR State
 
-- Base regalloc knows only the common provider interface.
-- No provider-specific conditionals in base regalloc.
-- One provider implementation per file. Shared helpers are provider-neutral;
-  selection/materialization code stays out of `WaveAMDRegAlloc.cpp`.
-- Base regalloc may:
-  - build the failure query at position `P`;
-  - iterate providers in fixed order;
-  - select the cheapest failure-progressing candidate from the first provider
-    with legal candidates;
-  - record the chosen plan;
-  - insert non-spillable temp live ranges required by planned bridges;
-  - restart linear scan.
-- Providers own legality, capacity checks, bridge counting, and materialization.
+- Alias sets, interval data, allocation failure, and debug scan state live in a
+  function-level regalloc state attribute.
+- Do not attach alias metadata to arbitrary `Value`s. Op results share defining
+  op storage; block arguments have no generic per-arg attr channel.
+- State references values by stable per-epoch IDs:
+  - op result: operation path plus result number;
+  - block argument: region path, block number, argument number.
+- State is ephemeral. Every IR rewrite clears it; the next iteration rebuilds it
+  with a new epoch.
+- Keep the default encoding compact. Debug modes may print dictionaries or
+  named records for FileCheck.
+- Marker ops must not consume tracked values only to name them. Such operands are
+  real uses and corrupt liveness.
 
-## Candidate Contract
+## Alias Builder
 
-- Candidate alias set must intersect the allocation failure point.
-- The live range that failed allocation is eligible for relief.
-- Selection may reject a structurally legal candidate whose planned temps erase
-  its current-failure pressure effect.
-- Candidate cost is common:
-  - required bridge count;
-  - bridge loop-depth penalty;
+- Builder must be `O(Nops + Nuses)` for one function.
+- Assign operation positions and value IDs in deterministic IR order.
+- Create one interval node per tracked register value.
+- Extend interval end on each real operand use.
+- Collect alias edges from op/interface semantics, then flatten them into alias
+  sets once.
+- Alias edges carry dword offsets. Tuple elements, loop carries, branch yields,
+  and MFMA accumulator/result aliases must preserve offsets.
+- Prefer op interfaces for alias semantics. Hard-coded op checks are local
+  fallback, not the long-term model.
+- Loop handling must stay linear: summarize external loop uses while walking the
+  loop body, extend each affected interval once at loop exit.
+- Spillable/non-spillable is derived from producer/consumer op semantics each
+  build. Do not keep sticky side bits across IR rewrites.
+
+## Linear Scan
+
+- Linear scan consumes alias state only.
+- Success produces a complete assignment map for every allocatable alias set.
+- Failure produces one failure record:
+  - failed alias set;
+  - failure position;
+  - register class or combined VGPR/AGPR mode;
+  - live pressure and limit;
+  - overlapping alias sets at the point;
+  - deterministic scan diagnostics.
+- Linear scan does not choose AGPR/remat/LDS/scratch. It reports pressure
+  failure; ordered transforms decide whether they can rewrite IR.
+- Linear scan does not materialize spill, remat, or bridge ops.
+
+## Relief Transforms
+
+- Each relief transform reads current IR plus the latest failure record.
+- A transform either rewrites IR immediately or declines.
+- Relief size is not a filter. A rewrite need not solve the whole failure alone.
+  Restart the loop and let the next scan find the next failure.
+- Candidate cost ranks choices inside one transform only:
+  - bridge count;
+  - loop-scaled bridge cost;
+  - latency/instability penalties when local and deterministic;
   - stable tie-breakers.
-- Loops affect bridge cost, not legality.
-- Relief size is not a filter. Use it only for diagnostics or final
-  tie-breaks inside equal-cost candidates.
-- Bridge temps are normal intervals except `nonPromotable`/non-spillable.
-
-## Providers
+- No global ranking across relief transforms.
 
 ### AGPR
 
-- Moves VGPR-family pressure into AGPR storage.
-- MFMA accumulator chains need no bridges when alias/interface banks already
-  match.
-- Non-MFMA uses require explicit bridge temps.
-- Capacity is target occupancy and target AGPR availability.
+- Moves eligible VGPR-family pressure into AGPR storage.
+- AGPR is pressure relief. Do not demote AGPR back to VGPR as a spill strategy.
+- MFMA accumulator/interface-compatible aliases need no bridges.
+- Non-AGPR producers or consumers require explicit bridge ops.
+- Capacity is target occupancy plus target AGPR availability.
 
 ### Remat
 
-- Candidate is an alias set whose value can be rebuilt from a cheap pure DAG.
-- Plan is scoped to allocation failure position `P`.
-- Cut original ranges at `P`. Rebuild once at the first external consumer after
-  `P`; later dominated consumers use the rebuilt value.
-- Rebuilt ranges can become later remat candidates if scan fails after the
-  rebuild point.
-- Leaves need not already be live at the rebuild point. Extending cheaper leaves
-  across `P` is legal when net pressure at `P` decreases.
-- Tree materialization is delayed. Selection records root DAG, rebuild point,
-  post-cut uses, leaf pressure deltas, and bridges.
-
-## CSE and Remat Contract
-
-- Machine CSE before regalloc may merge duplicate pure layout/address math
-  across a hot loop. Do not fight this by disabling CSE or marking cheap
-  machine math impure.
-- Remat owns splitting those CSE-created live ranges when they create pressure:
-  a cheap pure value defined before a hot loop, unused inside the loop, and
-  used after the loop must be disposable by rebuilding once at the first
-  pressure-relevant post-loop consumer.
-- This covers cheap WaveAMDMachine layout/address expressions already admitted
-  by remat legality, including shifts, and/xor-style masks, `v_mov_b32_tuple`,
-  simple add trees, tuple joins, and equivalent pure selector output.
-- Legality walks the full value DAG at the rebuild point. Each leaf must be one
-  of:
-  - an anchored hardware/source value modeled available there;
-  - an immediate, scalar, or kernarg value available there;
-  - a tracked value whose interval can be extended across `P` with modeled
-    pressure cost;
-  - another cheap pure op that can be recursively cloned there.
-- Candidate progresses when pressure removed at `P` exceeds pressure added at
-  `P` by leaf extensions, rebuilt ranges, and bridge temps.
+- Remat is reverse CSE for cheap pure WaveAMDMachine DAGs.
+- Candidate is the alias set named by the failure, or an overlapping alias set
+  live at the failure point.
+- Find a cheap pure expression DAG rooted at the candidate value.
+- Cut the long live range by cloning once at the first consumer after the failure
+  point. Later dominated consumers use the rebuilt value.
+- Rebuilt values are normal IR and can be remat candidates in later iterations.
+- Leaves need not all be live at the rebuild point. Extending cheaper leaves
+  across the failure point is legal when rebuilt IR lowers pressure there.
 - Fixed hardware inputs such as `v_workitem_id_x`, workgroup id, and fixed
-  kernarg preload sources are anchored values, not free remat ops. Reuse them
-  only when availability and pressure are modeled at the rebuild point; otherwise
-  reject the candidate.
-- Allocation metadata is not fixed-source provenance. Do not treat a value as
-  remat-safe just because it already carries an allocated register index.
-- Materialization must rebuild once at the rebuild point and must not mutate
-  clone templates for later planned slots. Compute planned-value and protected
-  template sets first, skip internal planned template uses, rewrite selected
-  post-cut uses, then erase dead original cheap trees after all clones are
-  emitted.
-- Diagnostics for missed remat opportunities should expose root op, def
-  position, failure position, rebuild point, first post-cut use, relief dwords,
-  added pressure, reject reason, and whether the candidate crosses a loop unused.
-- Validation should include a small lit test and a loop-spanning CSE case:
-  pre-regalloc may contain VGPR address values crossing a hot loop, but
-  post-regalloc should not leave VGPR/AGPR values defined before the loop,
-  unused inside it, and only used after it.
+  kernarg preload sources are anchored values. Reuse only when availability and
+  pressure are modeled.
+- Allocation metadata is not fixed-source provenance.
+- Machine CSE may merge pure layout/address math across loops. Remat owns
+  undoing those long ranges when they create pressure.
 
 ### LDS
 
-- Uses the shared memory-spill provider logic.
+- Uses shared memory-spill rewrite logic.
 - Spills whole alias sets.
-- Capacity is target occupancy plus LDS budget. Do not restrict to one wave.
-- No loop special cases. Loop placement is bridge cost.
+- Inserts real LDS stores/reloads and explicit memory-token edges immediately.
+- Capacity is target occupancy plus LDS budget. Dynamic kernel LDS use must
+  reserve space before spill capacity is computed.
+- No loop-specific allocator path. Loops affect bridge/store/reload cost.
 
 ### Scratch
 
-- Uses the same shared memory-spill logic as LDS.
+- Uses the same memory-spill rewrite logic as LDS.
 - Spills whole alias sets.
-- Unlimited capacity. Last resort by provider order.
-- No loop special cases. Loop placement is bridge cost.
+- Inserts real scratch stores/reloads and explicit memory-token edges
+  immediately.
+- Unlimited capacity. Last resort by order.
+- No loop-specific allocator path. Loops affect bridge/store/reload cost.
+
+## Final Result
+
+- No virtual SGPR/VGPR/AGPR values remain in allocation scope.
+- All allocated register values carry physical indices in their reg types.
+- Spill, remat, AGPR bridge, and memory-token ops are ordinary IR.
+- Kernel metadata comes from final IR, not stale allocator state.
+- Verification must not require hidden allocator objects.
 
 ## Forbidden Shapes
 
-- Ranking all provider candidates globally.
-- Skipping a provider that still has legal candidates.
-- Refusing a legal plan because it does not solve pressure alone.
-- Rebuilding alias sets from scratch after each plan.
-- Materializing remat/spill/bridge ops during candidate selection.
-- Special-casing loop carries, loop bodies, LDS, scratch, or remat in base
-  regalloc.
-- Spilling less than the full alias set.
+- Deferred pressure-relief plans materialized after later scans.
+- Preserving alias sets across IR rewrites.
+- Partial physical assignment on failed scan.
+- Ranking AGPR/remat/LDS/scratch candidates globally.
+- Skipping an earlier relief transform because a later one looks cheaper.
+- Provider-specific logic in linear scan.
+- Marker operands that create fake liveness.
+- String-round-tripping regalloc state that already has structural form.
