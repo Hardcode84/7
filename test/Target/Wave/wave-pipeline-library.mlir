@@ -90,3 +90,5 @@
 // PIPELINE: transform.named_sequence @waveamd_regalloc_transform_iteration
 // PIPELINE: wave.transform.regalloc_build_alias_state from
 // PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
+// PIPELINE-NEXT: wave.transform.regalloc_linear_scan from
+// PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op

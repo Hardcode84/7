@@ -142,7 +142,9 @@ module attributes {transform.with_named_sequence} {
       %root: !transform.any_op {transform.consumed}) -> !transform.any_op {
     %r0 = wave.transform.regalloc_build_alias_state from %root
         : (!transform.any_op) -> !transform.any_op
-    transform.yield %r0 : !transform.any_op
+    %r1 = wave.transform.regalloc_linear_scan from %r0
+        : (!transform.any_op) -> !transform.any_op
+    transform.yield %r1 : !transform.any_op
   }
 
   transform.named_sequence @waveamd_backend_unscheduled(

@@ -2,9 +2,12 @@
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
   // CHECK-LABEL: func.func @regalloc_transform_loop_mwe
+  // CHECK-SAME: !waveamdmachine.reg<vgpr, 1, 0>
+  // CHECK-SAME: waveamdmachine.regalloc_assignments
   // CHECK-SAME: waveamdmachine.regalloc_transform_state =
+  // CHECK-SAME: assignments = [{base = 0 : i64, class = "vgpr"
   // CHECK-SAME: debug = {alias_edges = 0 : i64, alias_sets = 1 : i64, ops = 1 : i64, values = 1 : i64}
-  // CHECK-SAME: stage = "alias-state"
+  // CHECK-SAME: stage = "linear-scan-success"
   // CHECK-SAME: values = [{class = "vgpr"
   func.func @regalloc_transform_loop_mwe(
       %arg0: !waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1> {
@@ -12,10 +15,19 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
   }
 
   // CHECK-LABEL: func.func @regalloc_transform_loop_aliases
+  // CHECK-SAME: !waveamdmachine.reg<vgpr, 2, 0>
+  // CHECK-SAME: !waveamdmachine.reg<vgpr, 4, 2>
+  // CHECK-SAME: !waveamdmachine.reg<vgpr, 4, 6>
+  // CHECK-SAME: !waveamdmachine.reg<vgpr, 4, 10>
+  // CHECK-SAME: waveamdmachine.regalloc_assignments
   // CHECK-SAME: waveamdmachine.regalloc_transform_state =
+  // CHECK-SAME: assignments = [{base = 0 : i64, class = "vgpr"
+  // CHECK-SAME: {base = 2 : i64, class = "vgpr"
+  // CHECK-SAME: {base = 6 : i64, class = "vgpr"
+  // CHECK-SAME: {base = 10 : i64, class = "vgpr"
   // CHECK-SAME: debug = {alias_edges = 5 : i64, alias_sets = 4 : i64, ops = 4 : i64, values = 8 : i64}
   // CHECK-SAME: name = "waveamdmachine.mfma_f32_16x16x32_f16"
-  // CHECK-SAME: stage = "alias-state"
+  // CHECK-SAME: stage = "linear-scan-success"
   // CHECK-SAME: offset = 1 : i64
   func.func @regalloc_transform_loop_aliases(
       %wide: !waveamdmachine.reg<vgpr, 2>,
@@ -32,5 +44,26 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
         : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
            !waveamdmachine.reg<vgpr, 4>) -> !waveamdmachine.reg<vgpr, 4>
     return
+  }
+
+  // CHECK-LABEL: func.func @regalloc_transform_loop_failure
+  // CHECK-NOT: waveamdmachine.regalloc_assignments
+  // CHECK-SAME: waveamdmachine.regalloc_transform_state =
+  // CHECK-SAME: assignments = []
+  // CHECK-SAME: failure = {budget_mode = "func_attr", class = "vgpr"
+  // CHECK-SAME: limit = 1 : i64
+  // CHECK-SAME: overlaps = [{base = 0 : i64, class = "vgpr"
+  // CHECK-SAME: position = 0 : i64
+  // CHECK-SAME: pressure = 2 : i64
+  // CHECK-SAME: reason = "pressure"
+  // CHECK-SAME: request = 1 : i64
+  // CHECK-SAME: set = 1 : i64
+  // CHECK-SAME: stage = "linear-scan-failure"
+  func.func @regalloc_transform_loop_failure(
+      %a: !waveamdmachine.reg<vgpr, 1>,
+      %b: !waveamdmachine.reg<vgpr, 1>)
+      -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+      attributes {waveamdmachine.vgpr_count_max = 1 : i64} {
+    return %a, %b : !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>
   }
 }

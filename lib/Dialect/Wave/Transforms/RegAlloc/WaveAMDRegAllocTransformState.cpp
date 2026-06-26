@@ -1,0 +1,317 @@
+//===- WaveAMDRegAllocTransformState.cpp - Regalloc loop state ------------===//
+//
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+//
+//===----------------------------------------------------------------------===//
+
+#include "WaveAMDRegAllocTransformState.h"
+
+#include "mlir/IR/BuiltinOps.h"
+#include "llvm/ADT/STLExtras.h"
+#include <limits>
+
+using namespace mlir;
+
+namespace mlir::wave {
+
+static constexpr StringLiteral kRegAllocTransformStateAttr =
+    "waveamdmachine.regalloc_transform_state";
+static constexpr StringLiteral kRegAllocAssignmentsAttr =
+    "waveamdmachine.regalloc_assignments";
+
+StringRef getRegAllocTransformStateAttrName() {
+  return kRegAllocTransformStateAttr;
+}
+
+StringRef getRegAllocTransformAssignmentsAttrName() {
+  return kRegAllocAssignmentsAttr;
+}
+
+std::optional<waveamdmachine::RegType>
+getRegAllocTransformTrackedRegType(Value value) {
+  auto type = dyn_cast<waveamdmachine::RegType>(value.getType());
+  if (!type)
+    return std::nullopt;
+  switch (type.getRegClass()) {
+  case waveamdmachine::RegClass::SGPR:
+  case waveamdmachine::RegClass::VGPR:
+  case waveamdmachine::RegClass::AGPR:
+    return type;
+  case waveamdmachine::RegClass::SCC:
+  case waveamdmachine::RegClass::VCC:
+    return std::nullopt;
+  }
+  llvm_unreachable("unknown register class");
+}
+
+FailureOr<unsigned> getRegAllocTransformUnsignedAttr(DictionaryAttr dict,
+                                                     StringRef name,
+                                                     Operation *diagOp) {
+  auto attr = dict.getAs<IntegerAttr>(name);
+  if (!attr)
+    return diagOp->emitError("regalloc state missing integer `") << name << "`";
+  int64_t value = attr.getInt();
+  if (value < 0 ||
+      static_cast<uint64_t>(value) > std::numeric_limits<unsigned>::max())
+    return diagOp->emitError("regalloc state integer `")
+           << name << "` exceeds supported range";
+  return static_cast<unsigned>(value);
+}
+
+FailureOr<waveamdmachine::RegClass>
+getRegAllocTransformRegClassAttr(DictionaryAttr dict, Operation *diagOp) {
+  auto attr = dict.getAs<StringAttr>("class");
+  if (!attr)
+    return diagOp->emitError("regalloc state missing string `class`");
+  std::optional<waveamdmachine::RegClass> regClass =
+      waveamdmachine::symbolizeRegClass(attr.getValue());
+  if (!regClass)
+    return diagOp->emitError("regalloc state has unknown register class `")
+           << attr.getValue() << "`";
+  return *regClass;
+}
+
+static LogicalResult parseFixedIndex(DictionaryAttr dict, Operation *diagOp,
+                                     RegAllocTransformValue &value) {
+  auto fixed = dict.getAs<IntegerAttr>("fixed");
+  if (!fixed)
+    return success();
+  int64_t raw = fixed.getInt();
+  if (raw < 0 ||
+      static_cast<uint64_t>(raw) > std::numeric_limits<unsigned>::max())
+    return diagOp->emitError("regalloc state fixed index exceeds range");
+  value.fixed = static_cast<unsigned>(raw);
+  return success();
+}
+
+static FailureOr<RegAllocTransformValue> parseValue(DictionaryAttr dict,
+                                                    Operation *diagOp) {
+  FailureOr<waveamdmachine::RegClass> regClass =
+      getRegAllocTransformRegClassAttr(dict, diagOp);
+  FailureOr<unsigned> id = getRegAllocTransformUnsignedAttr(dict, "id", diagOp);
+  FailureOr<unsigned> set =
+      getRegAllocTransformUnsignedAttr(dict, "set", diagOp);
+  FailureOr<unsigned> start =
+      getRegAllocTransformUnsignedAttr(dict, "start", diagOp);
+  FailureOr<unsigned> end =
+      getRegAllocTransformUnsignedAttr(dict, "end", diagOp);
+  FailureOr<unsigned> width =
+      getRegAllocTransformUnsignedAttr(dict, "width", diagOp);
+  FailureOr<unsigned> offset =
+      getRegAllocTransformUnsignedAttr(dict, "offset", diagOp);
+  if (failed(regClass) || failed(id) || failed(set) || failed(start) ||
+      failed(end) || failed(width) || failed(offset))
+    return failure();
+  RegAllocTransformValue value{*regClass, std::nullopt, *id,    *set,
+                               *start,    *end,         *width, *offset};
+  if (failed(parseFixedIndex(dict, diagOp, value)))
+    return failure();
+  return value;
+}
+
+FailureOr<SmallVector<RegAllocTransformValue>>
+parseRegAllocTransformValues(DictionaryAttr state, Operation *diagOp) {
+  auto valueAttrs = state.getAs<ArrayAttr>("values");
+  if (!valueAttrs)
+    return diagOp->emitError("regalloc state missing `values`");
+  SmallVector<RegAllocTransformValue> values;
+  values.reserve(valueAttrs.size());
+  for (Attribute attr : valueAttrs) {
+    auto dict = dyn_cast<DictionaryAttr>(attr);
+    if (!dict)
+      return diagOp->emitError("regalloc state has non-dictionary value");
+    FailureOr<RegAllocTransformValue> value = parseValue(dict, diagOp);
+    if (failed(value))
+      return failure();
+    values.push_back(*value);
+  }
+  return values;
+}
+
+static LogicalResult parseAliasMembers(DictionaryAttr dict,
+                                       ArrayRef<RegAllocTransformValue> values,
+                                       Operation *diagOp,
+                                       RegAllocTransformAliasSet &set) {
+  auto memberAttrs = dict.getAs<ArrayAttr>("members");
+  if (!memberAttrs)
+    return diagOp->emitError("regalloc state alias set missing `members`");
+  set.start = std::numeric_limits<unsigned>::max();
+  for (Attribute attr : memberAttrs) {
+    auto member = dyn_cast<DictionaryAttr>(attr);
+    if (!member)
+      return diagOp->emitError("regalloc state has non-dictionary member");
+    FailureOr<unsigned> valueId =
+        getRegAllocTransformUnsignedAttr(member, "value", diagOp);
+    if (failed(valueId) || *valueId >= values.size())
+      return diagOp->emitError("regalloc state member value id is invalid");
+    const RegAllocTransformValue &value = values[*valueId];
+    set.members.push_back(*valueId);
+    set.start = std::min(set.start, value.start);
+    set.end = std::max(set.end, value.end);
+  }
+  if (set.members.empty())
+    return diagOp->emitError("regalloc state has empty alias set");
+  return success();
+}
+
+static FailureOr<RegAllocTransformAliasSet>
+parseAliasSet(DictionaryAttr dict, ArrayRef<RegAllocTransformValue> values,
+              Operation *diagOp) {
+  FailureOr<waveamdmachine::RegClass> regClass =
+      getRegAllocTransformRegClassAttr(dict, diagOp);
+  FailureOr<unsigned> id = getRegAllocTransformUnsignedAttr(dict, "id", diagOp);
+  FailureOr<unsigned> width =
+      getRegAllocTransformUnsignedAttr(dict, "width", diagOp);
+  if (failed(regClass) || failed(id) || failed(width))
+    return failure();
+  RegAllocTransformAliasSet set;
+  set.regClass = *regClass;
+  set.id = *id;
+  set.width = *width;
+  if (failed(parseAliasMembers(dict, values, diagOp, set)))
+    return failure();
+  return set;
+}
+
+FailureOr<SmallVector<RegAllocTransformAliasSet>>
+parseRegAllocTransformAliasSets(DictionaryAttr state,
+                                ArrayRef<RegAllocTransformValue> values,
+                                Operation *diagOp) {
+  auto setAttrs = state.getAs<ArrayAttr>("alias_sets");
+  if (!setAttrs)
+    return diagOp->emitError("regalloc state missing `alias_sets`");
+  SmallVector<RegAllocTransformAliasSet> sets;
+  sets.reserve(setAttrs.size());
+  for (Attribute attr : setAttrs) {
+    auto dict = dyn_cast<DictionaryAttr>(attr);
+    if (!dict)
+      return diagOp->emitError("regalloc state has non-dictionary alias set");
+    FailureOr<RegAllocTransformAliasSet> set =
+        parseAliasSet(dict, values, diagOp);
+    if (failed(set))
+      return failure();
+    sets.push_back(std::move(*set));
+  }
+  llvm::stable_sort(sets, [](const RegAllocTransformAliasSet &lhs,
+                             const RegAllocTransformAliasSet &rhs) {
+    return std::tie(lhs.start, lhs.id) < std::tie(rhs.start, rhs.id);
+  });
+  return sets;
+}
+
+static Attribute getI64(Builder &builder, int64_t value) {
+  return builder.getI64IntegerAttr(value);
+}
+
+DictionaryAttr buildRegAllocTransformAliasMemberAttr(
+    Builder &builder, const RegAllocTransformAliasMember &member) {
+  SmallVector<NamedAttribute> attrs;
+  attrs.emplace_back(builder.getStringAttr("end"), getI64(builder, member.end));
+  attrs.emplace_back(builder.getStringAttr("offset"),
+                     getI64(builder, member.offset));
+  attrs.emplace_back(builder.getStringAttr("start"),
+                     getI64(builder, member.start));
+  attrs.emplace_back(builder.getStringAttr("value"),
+                     getI64(builder, member.value));
+  attrs.emplace_back(builder.getStringAttr("width"),
+                     getI64(builder, member.width));
+  return builder.getDictionaryAttr(attrs);
+}
+
+DictionaryAttr buildRegAllocTransformAliasSetAttr(
+    Builder &builder, waveamdmachine::RegClass regClass, unsigned id,
+    ArrayRef<RegAllocTransformAliasMember> members, unsigned width) {
+  SmallVector<Attribute> memberAttrs;
+  for (const RegAllocTransformAliasMember &member : members)
+    memberAttrs.push_back(
+        buildRegAllocTransformAliasMemberAttr(builder, member));
+  SmallVector<NamedAttribute> attrs;
+  attrs.emplace_back(
+      builder.getStringAttr("class"),
+      builder.getStringAttr(waveamdmachine::stringifyRegClass(regClass)));
+  attrs.emplace_back(builder.getStringAttr("id"), getI64(builder, id));
+  attrs.emplace_back(builder.getStringAttr("members"),
+                     builder.getArrayAttr(memberAttrs));
+  attrs.emplace_back(builder.getStringAttr("width"), getI64(builder, width));
+  return builder.getDictionaryAttr(attrs);
+}
+
+DictionaryAttr buildRegAllocTransformAssignmentAttr(
+    Builder &builder, const RegAllocTransformAssignment &assignment) {
+  SmallVector<NamedAttribute> attrs;
+  attrs.emplace_back(builder.getStringAttr("base"),
+                     getI64(builder, assignment.base));
+  attrs.emplace_back(builder.getStringAttr("class"),
+                     builder.getStringAttr(waveamdmachine::stringifyRegClass(
+                         assignment.regClass)));
+  attrs.emplace_back(builder.getStringAttr("end"),
+                     getI64(builder, assignment.end));
+  attrs.emplace_back(builder.getStringAttr("set"),
+                     getI64(builder, assignment.set));
+  attrs.emplace_back(builder.getStringAttr("start"),
+                     getI64(builder, assignment.start));
+  attrs.emplace_back(builder.getStringAttr("width"),
+                     getI64(builder, assignment.width));
+  return builder.getDictionaryAttr(attrs);
+}
+
+static StringRef getRegClassBudgetAttr(waveamdmachine::RegClass regClass) {
+  switch (regClass) {
+  case waveamdmachine::RegClass::SGPR:
+    return "waveamdmachine.sgpr_count_max";
+  case waveamdmachine::RegClass::VGPR:
+    return "waveamdmachine.vgpr_count_max";
+  case waveamdmachine::RegClass::AGPR:
+    return "waveamdmachine.agpr_count_max";
+  case waveamdmachine::RegClass::SCC:
+  case waveamdmachine::RegClass::VCC:
+    return "";
+  }
+  llvm_unreachable("unknown register class");
+}
+
+static unsigned getDefaultRegClassLimit(waveamdmachine::RegClass regClass) {
+  switch (regClass) {
+  case waveamdmachine::RegClass::SGPR:
+    return 128;
+  case waveamdmachine::RegClass::VGPR:
+  case waveamdmachine::RegClass::AGPR:
+    return 256;
+  case waveamdmachine::RegClass::SCC:
+  case waveamdmachine::RegClass::VCC:
+    return 0;
+  }
+  llvm_unreachable("unknown register class");
+}
+
+static std::optional<unsigned> getUnsignedIntegerAttr(Operation *op,
+                                                      StringRef name) {
+  if (!op)
+    return std::nullopt;
+  auto attr = op->getAttrOfType<IntegerAttr>(name);
+  if (!attr)
+    return std::nullopt;
+  int64_t value = attr.getInt();
+  if (value <= 0)
+    return 0;
+  if (value > std::numeric_limits<unsigned>::max())
+    return std::numeric_limits<unsigned>::max();
+  return static_cast<unsigned>(value);
+}
+
+RegAllocTransformBudget
+getRegAllocTransformBudget(func::FuncOp func,
+                           waveamdmachine::RegClass regClass) {
+  StringRef attrName = getRegClassBudgetAttr(regClass);
+  if (std::optional<unsigned> limit =
+          getUnsignedIntegerAttr(func.getOperation(), attrName))
+    return {*limit, "func_attr"};
+  Operation *parent = func->getParentOp();
+  if (std::optional<unsigned> limit = getUnsignedIntegerAttr(parent, attrName))
+    return {*limit, "module_attr"};
+  return {getDefaultRegClassLimit(regClass), "default"};
+}
+
+} // namespace mlir::wave

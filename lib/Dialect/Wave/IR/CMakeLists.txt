@@ -4,6 +4,8 @@ add_mlir_dialect_library(MLIRWaveDialect
   WaveMemoryAddress.cpp
   WaveSymbols.cpp
   WaveTransformOps.cpp
+  ../Transforms/RegAlloc/WaveAMDRegAllocTransformLoop.cpp
+  ../Transforms/RegAlloc/WaveAMDRegAllocTransformState.cpp
 
   ADDITIONAL_HEADER_DIRS
   ${MLIR_MAIN_INCLUDE_DIR}/mlir/Dialect/Wave

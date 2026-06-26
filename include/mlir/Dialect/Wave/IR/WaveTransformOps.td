@@ -163,6 +163,24 @@ def Wave_TransformRegAllocBuildAliasStateOp
   }];
 }
 
+def Wave_TransformRegAllocLinearScanOp
+    : Op<Wave_Dialect, "transform.regalloc_linear_scan", [
+        DeclareOpInterfaceMethods<MemoryEffectsOpInterface>,
+        DeclareOpInterfaceMethods<TransformOpInterface>]> {
+  let summary = "Run WaveAMD regalloc linear scan";
+  let description = [{
+    Consumes the function-level regalloc alias state, runs deterministic linear
+    scan, and writes either a complete assignment map or one failure record back
+    into the state attribute. Successful scans apply final physical register
+    indices to payload IR. Failed scans leave payload value types unchanged.
+  }];
+  let arguments = (ins TransformHandleTypeInterface:$target);
+  let results = (outs TransformHandleTypeInterface:$result);
+  let assemblyFormat = [{
+    `from` $target attr-dict `:` functional-type($target, $result)
+  }];
+}
+
 // Runs dense-dataflow PressureAnalysis on each payload op
 // (func.func or builtin.module) and yields totalCycles as a
 // `!transform.param<i64>`. The arch is read from the enclosing
