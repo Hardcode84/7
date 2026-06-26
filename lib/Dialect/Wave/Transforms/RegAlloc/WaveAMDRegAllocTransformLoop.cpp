@@ -592,6 +592,11 @@ assignedRangesOverlap(const wave::RegAllocTransformAssignment &assignment,
   return base < assignedEnd && assignment.base < end;
 }
 
+static bool liveRangesOverlap(unsigned lhsStart, unsigned lhsEnd,
+                              unsigned rhsStart, unsigned rhsEnd) {
+  return lhsStart <= rhsEnd && rhsStart <= lhsEnd;
+}
+
 static bool isVGPRFamilyClass(waveamdmachine::RegClass regClass) {
   return regClass == waveamdmachine::RegClass::VGPR ||
          regClass == waveamdmachine::RegClass::AGPR;
@@ -700,7 +705,10 @@ private:
     if (failed(familyBudget))
       return failure();
     vgprFamilyBudget = *familyBudget;
-    return computeFixedBases();
+    if (failed(computeFixedBases()))
+      return failure();
+    collectFixedReservations();
+    return success();
   }
 
   LogicalResult computeFixedBases() {
@@ -723,6 +731,18 @@ private:
       set.fixedBase = base;
     }
     return success();
+  }
+
+  void collectFixedReservations() {
+    for (const wave::RegAllocTransformAliasSet &set : sets) {
+      if (!set.fixedBase)
+        continue;
+      wave::RegAllocTransformBudget budget =
+          wave::getRegAllocTransformBudget(func, set.regClass);
+      if (*set.fixedBase + set.width <= budget.limit)
+        fixedReservations.push_back({set.regClass, set.id, *set.fixedBase,
+                                     set.width, set.start, set.end});
+    }
   }
 
   LogicalResult recordFixedFailure(const wave::RegAllocTransformAliasSet &set,
@@ -794,7 +814,8 @@ private:
     if (set.width > limit)
       return std::nullopt;
     for (unsigned base = 0; base <= limit - set.width; ++base)
-      if (!conflictsWithActive(set, base))
+      if (!conflictsWithActive(set, base) &&
+          !conflictsWithFixedReservation(set, base))
         return base;
     return std::nullopt;
   }
@@ -806,6 +827,18 @@ private:
           return assigned.regClass == set.regClass &&
                  assignedRangesOverlap(assigned, base, set.width);
         });
+  }
+
+  bool conflictsWithFixedReservation(const wave::RegAllocTransformAliasSet &set,
+                                     unsigned base) {
+    return llvm::any_of(fixedReservations,
+                        [&](const wave::RegAllocTransformAssignment &reserved) {
+                          return reserved.regClass == set.regClass &&
+                                 liveRangesOverlap(reserved.start, reserved.end,
+                                                   set.start, set.end) &&
+                                 assignedRangesOverlap(reserved, base,
+                                                       set.width);
+                        });
   }
 
   static void addFamilyFootprint(waveamdmachine::RegClass regClass,
@@ -1055,6 +1088,7 @@ private:
 
   SmallVector<wave::RegAllocTransformValue> values;
   SmallVector<wave::RegAllocTransformAliasSet> sets;
+  SmallVector<wave::RegAllocTransformAssignment> fixedReservations;
   SmallVector<wave::RegAllocTransformAssignment> active;
   SmallVector<wave::RegAllocTransformAssignment> assignments;
   std::optional<wave::RegAllocTransformBudget> vgprFamilyBudget;
