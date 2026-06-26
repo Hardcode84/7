@@ -24,6 +24,9 @@ LogicalResult runRegAllocTransformLinearScan(Operation *target,
 LogicalResult runRegAllocTransformAGPRRelief(Operation *target,
                                              Builder &builder);
 
+LogicalResult runRegAllocTransformRematRelief(Operation *target,
+                                              Builder &builder);
+
 } // namespace mlir::wave
 
 #endif // MLIR_DIALECT_WAVE_TRANSFORMS_WAVEAMDREGALLOCTRANSFORMLOOP_H

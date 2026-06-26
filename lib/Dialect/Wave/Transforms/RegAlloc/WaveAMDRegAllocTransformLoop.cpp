@@ -13,6 +13,7 @@
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachine.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinTypes.h"
+#include "mlir/IR/IRMapping.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
@@ -794,6 +795,22 @@ struct AGPRReliefInterval {
   unsigned width = 0;
 };
 
+struct RematReliefContext {
+  DenseMap<Operation *, unsigned> positions;
+  DenseMap<Value, const wave::RegAllocTransformValue *> values;
+};
+
+struct RematReliefCandidate {
+  SmallVector<OpOperand *> uses;
+  Value value;
+  Operation *rebuildOp = nullptr;
+  const wave::RegAllocTransformAliasSet *set = nullptr;
+  const wave::RegAllocTransformValue *stateValue = nullptr;
+  int64_t cost = 0;
+  unsigned opCount = 0;
+  unsigned rebuildPosition = 0;
+};
+
 static FailureOr<SmallVector<ResolvedRegAllocValue>>
 resolveRegAllocStateValues(func::FuncOp func,
                            ArrayRef<wave::RegAllocTransformValue> values) {
@@ -867,6 +884,11 @@ static bool isAGPRRelievableFailureReason(StringRef reason) {
   return reason == "pressure" || reason == "allocated-footprint";
 }
 
+static bool isAGPRRelievableFailure(const RegAllocTransformFailure &failure) {
+  return isAGPRRelievableFailureClass(failure.className) &&
+         isAGPRRelievableFailureReason(failure.reason);
+}
+
 static FailureOr<std::optional<DictionaryAttr>>
 getLinearScanFailureAttr(func::FuncOp func) {
   DictionaryAttr state = func->getAttrOfType<DictionaryAttr>(
@@ -885,22 +907,18 @@ getLinearScanFailureAttr(func::FuncOp func) {
   return std::optional<DictionaryAttr>(failureAttr);
 }
 
-static FailureOr<std::optional<RegAllocFailureKind>>
-parseAGPRRelievableFailureKind(DictionaryAttr failureAttr, Operation *diagOp) {
+static FailureOr<RegAllocFailureKind>
+parseRegAllocFailureKind(DictionaryAttr failureAttr, Operation *diagOp) {
   StringAttr className = failureAttr.getAs<StringAttr>("class");
   StringAttr reason = failureAttr.getAs<StringAttr>("reason");
   if (!className || !reason)
     return diagOp->emitError("regalloc failure state missing string field");
-  if (!isAGPRRelievableFailureClass(className.getValue()) ||
-      !isAGPRRelievableFailureReason(reason.getValue()))
-    return std::optional<RegAllocFailureKind>();
-  return std::optional<RegAllocFailureKind>(
-      {className.getValue(), reason.getValue()});
+  return RegAllocFailureKind{className.getValue(), reason.getValue()};
 }
 
 static FailureOr<RegAllocTransformFailure>
-parseAGPRRelievableFailure(DictionaryAttr failureAttr, RegAllocFailureKind kind,
-                           func::FuncOp func) {
+parseRegAllocFailure(DictionaryAttr failureAttr, RegAllocFailureKind kind,
+                     func::FuncOp func) {
   FailureOr<unsigned> set =
       wave::getRegAllocTransformUnsignedAttr(failureAttr, "set", func);
   FailureOr<unsigned> position =
@@ -927,15 +945,13 @@ parseRegAllocTransformFailure(func::FuncOp func) {
   if (!*failureAttr)
     return std::optional<RegAllocTransformFailure>();
 
-  FailureOr<std::optional<RegAllocFailureKind>> kind =
-      parseAGPRRelievableFailureKind(**failureAttr, func);
+  FailureOr<RegAllocFailureKind> kind =
+      parseRegAllocFailureKind(**failureAttr, func);
   if (failed(kind))
     return failure();
-  if (!*kind)
-    return std::optional<RegAllocTransformFailure>();
 
   FailureOr<RegAllocTransformFailure> parsed =
-      parseAGPRRelievableFailure(**failureAttr, **kind, func);
+      parseRegAllocFailure(**failureAttr, *kind, func);
   if (failed(parsed))
     return failure();
   return std::optional<RegAllocTransformFailure>(std::move(*parsed));
@@ -1122,7 +1138,7 @@ static int64_t getAGPRReliefBridgeCost(ArrayRef<ResolvedRegAllocValue> values) {
   return cost;
 }
 
-static void addAGPRReliefCandidateId(unsigned id,
+static void addVGPRReliefCandidateId(unsigned id,
                                      SmallVectorImpl<unsigned> &ids,
                                      DenseSet<unsigned> &seen) {
   if (!seen.insert(id).second)
@@ -1131,13 +1147,13 @@ static void addAGPRReliefCandidateId(unsigned id,
 }
 
 static SmallVector<unsigned>
-collectAGPRReliefCandidateIds(const RegAllocTransformFailure &failure) {
+collectVGPRReliefCandidateIds(const RegAllocTransformFailure &failure) {
   SmallVector<unsigned> ids;
   DenseSet<unsigned> seen;
-  addAGPRReliefCandidateId(failure.set, ids, seen);
+  addVGPRReliefCandidateId(failure.set, ids, seen);
   for (const wave::RegAllocTransformAssignment &overlap : failure.overlaps)
     if (overlap.regClass == waveamdmachine::RegClass::VGPR)
-      addAGPRReliefCandidateId(overlap.set, ids, seen);
+      addVGPRReliefCandidateId(overlap.set, ids, seen);
   return ids;
 }
 
@@ -1188,7 +1204,7 @@ selectAGPRReliefCandidate(func::FuncOp func,
                           ArrayRef<wave::RegAllocTransformAliasSet> sets,
                           ArrayRef<wave::RegAllocTransformValue> values) {
   std::optional<AGPRReliefCandidate> best;
-  for (unsigned setId : collectAGPRReliefCandidateIds(failureRecord)) {
+  for (unsigned setId : collectVGPRReliefCandidateIds(failureRecord)) {
     FailureOr<std::optional<AGPRReliefCandidate>> candidate =
         buildAGPRReliefCandidate(func, setId, failureRecord, sets, values);
     if (failed(candidate))
@@ -1256,6 +1272,384 @@ static void materializeAGPRRelief(OpBuilder &builder,
                                   const AGPRReliefCandidate &candidate) {
   for (const ResolvedRegAllocValue &value : candidate.values)
     materializeAGPRReliefValue(builder, value.first);
+}
+
+static bool isRematRelievableFailureClass(StringRef className) {
+  return className == "vgpr" || className == "vgpr_agpr";
+}
+
+static bool isRematRelievableFailureReason(StringRef reason) {
+  return reason == "pressure" || reason == "allocated-footprint";
+}
+
+static bool isRematRelievableFailure(const RegAllocTransformFailure &failure) {
+  return isRematRelievableFailureClass(failure.className) &&
+         isRematRelievableFailureReason(failure.reason);
+}
+
+static void collectRegAllocOpPositions(Region &region,
+                                       DenseMap<Operation *, unsigned> &ops) {
+  for (Block &block : region) {
+    for (Operation &op : block) {
+      ops[&op] = ops.size();
+      for (Region &nested : op.getRegions())
+        collectRegAllocOpPositions(nested, ops);
+    }
+  }
+}
+
+static RematReliefContext
+buildRematReliefContext(func::FuncOp func,
+                        ArrayRef<ResolvedRegAllocValue> values) {
+  RematReliefContext context;
+  collectRegAllocOpPositions(func.getBody(), context.positions);
+  for (ResolvedRegAllocValue value : values)
+    context.values[value.first] = value.second;
+  return context;
+}
+
+static Operation *getAncestorInBlock(Operation *op, Block *block) {
+  for (Operation *cur = op; cur; cur = cur->getParentOp())
+    if (cur->getBlock() == block)
+      return cur;
+  return nullptr;
+}
+
+static bool useIsDominatedByDef(Operation *def, Operation *user) {
+  if (user->getBlock() == def->getBlock())
+    return true;
+  Operation *ancestor = getAncestorInBlock(user, def->getBlock());
+  return ancestor && def->isBeforeInBlock(ancestor);
+}
+
+static bool insertionBeforeDominatesUse(Operation *anchor, Operation *user) {
+  if (anchor == user)
+    return true;
+  if (anchor->getBlock() == user->getBlock())
+    return anchor->isBeforeInBlock(user);
+  Operation *ancestor = getAncestorInBlock(user, anchor->getBlock());
+  return ancestor && (ancestor == anchor || anchor->isBeforeInBlock(ancestor));
+}
+
+static bool valueIsAvailableAt(Value value, Operation *user) {
+  if (Operation *def = value.getDefiningOp())
+    return useIsDominatedByDef(def, user);
+  auto arg = dyn_cast<BlockArgument>(value);
+  if (!arg)
+    return false;
+  Operation *parent = arg.getOwner()->getParentOp();
+  if (isa_and_nonnull<func::FuncOp>(parent))
+    return true;
+  return getAncestorInBlock(user, arg.getOwner()) != nullptr;
+}
+
+static bool isTrackedRegValue(Value value) {
+  return wave::getRegAllocTransformTrackedRegType(value).has_value();
+}
+
+static bool isAnchoredRematSource(Value value) {
+  Operation *def = value.getDefiningOp();
+  return isa_and_nonnull<
+      waveamdmachine::KernargPreloadOp, waveamdmachine::SWorkgroupIdXOp,
+      waveamdmachine::SWorkgroupIdYOp, waveamdmachine::SWorkgroupIdZOp,
+      waveamdmachine::VWorkitemIdXOp>(def);
+}
+
+static bool isCheapRematRoot(Operation *op) {
+  return isa_and_nonnull<
+      waveamdmachine::UninitOp, waveamdmachine::VMovB32TupleOp,
+      waveamdmachine::VLshrrevB32Op, waveamdmachine::VLshlrevB32Op,
+      waveamdmachine::VLshlAddU32Op, waveamdmachine::VAddU32Op,
+      waveamdmachine::VAdd3U32Op, waveamdmachine::VAndB32Op,
+      waveamdmachine::VMulLoU32Op, waveamdmachine::VAddLshlU32Op,
+      waveamdmachine::VXorB32Op, waveamdmachine::VAndOrB32Op,
+      waveamdmachine::TupleFromElementsOp>(op);
+}
+
+static bool isRematRootValue(Value value) {
+  Operation *def = value.getDefiningOp();
+  auto type = dyn_cast<waveamdmachine::RegType>(value.getType());
+  return def && type && type.getIndex() < 0 && !isAnchoredRematSource(value) &&
+         isCheapRematRoot(def) && !isRegAllocTransformBridgeRelated(value);
+}
+
+static std::optional<unsigned>
+getRematOpPosition(Operation *op, const RematReliefContext &context) {
+  auto it = context.positions.find(op);
+  if (it == context.positions.end())
+    return std::nullopt;
+  return it->second;
+}
+
+static bool isStateValueLiveAt(Value value, unsigned position,
+                               const RematReliefContext &context) {
+  auto it = context.values.find(value);
+  if (it == context.values.end())
+    return false;
+  const wave::RegAllocTransformValue &stateValue = *it->second;
+  return stateValue.start <= position && position <= stateValue.end;
+}
+
+static bool canUseOriginalRematLeaf(Value value, Operation *user,
+                                    const RematReliefContext &context) {
+  if (!valueIsAvailableAt(value, user))
+    return false;
+  if (!isTrackedRegValue(value))
+    return true;
+  std::optional<unsigned> position = getRematOpPosition(user, context);
+  return position && isStateValueLiveAt(value, *position, context);
+}
+
+static bool canRematerializeValueAt(Value value, Operation *user,
+                                    const RematReliefContext &context,
+                                    DenseSet<Value> &visiting);
+
+static bool canRematerializeOperandAt(Value operand, Operation *user,
+                                      const RematReliefContext &context,
+                                      DenseSet<Value> &visiting) {
+  if (canUseOriginalRematLeaf(operand, user, context))
+    return true;
+  if (!isTrackedRegValue(operand) || isAnchoredRematSource(operand))
+    return false;
+  return canRematerializeValueAt(operand, user, context, visiting);
+}
+
+static bool canRematerializeValueAt(Value value, Operation *user,
+                                    const RematReliefContext &context,
+                                    DenseSet<Value> &visiting) {
+  Operation *def = value.getDefiningOp();
+  if (!isRematRootValue(value) || !valueIsAvailableAt(value, user))
+    return false;
+  if (!visiting.insert(value).second)
+    return false;
+  bool ok = llvm::all_of(def->getOperands(), [&](Value operand) {
+    return canRematerializeOperandAt(operand, user, context, visiting);
+  });
+  visiting.erase(value);
+  return ok;
+}
+
+static bool canRematerializeValueAt(Value value, Operation *user,
+                                    const RematReliefContext &context) {
+  DenseSet<Value> visiting;
+  return canRematerializeValueAt(value, user, context, visiting);
+}
+
+static unsigned getRematOpCountAt(Value value, Operation *user,
+                                  const RematReliefContext &context,
+                                  DenseSet<Value> &counted) {
+  if (!counted.insert(value).second)
+    return 0;
+  unsigned count = 1;
+  Operation *def = value.getDefiningOp();
+  for (Value operand : def->getOperands()) {
+    if (canUseOriginalRematLeaf(operand, user, context))
+      continue;
+    count += getRematOpCountAt(operand, user, context, counted);
+  }
+  return count;
+}
+
+static unsigned getRematOpCountAt(Value value, Operation *user,
+                                  const RematReliefContext &context) {
+  DenseSet<Value> counted;
+  return getRematOpCountAt(value, user, context, counted);
+}
+
+static int64_t getRematReliefLoopCostScale(Operation *op) {
+  unsigned depth = 0;
+  for (Operation *cur = op; cur; cur = cur->getParentOp())
+    if (isa<waveamdmachine::UniformLoopOp>(cur))
+      ++depth;
+  if (depth == 0)
+    return 1;
+  return int64_t{1} << std::min<unsigned>(depth * 4, 20);
+}
+
+static FailureOr<SmallVector<OpOperand *>>
+collectRematPostFailureUses(Value value,
+                            const RegAllocTransformFailure &failureRecord,
+                            const RematReliefContext &context) {
+  SmallVector<OpOperand *> uses;
+  for (OpOperand &use : value.getUses()) {
+    std::optional<unsigned> position =
+        getRematOpPosition(use.getOwner(), context);
+    if (!position)
+      return failure();
+    if (*position > failureRecord.position)
+      uses.push_back(&use);
+  }
+  llvm::stable_sort(uses, [&](OpOperand *lhs, OpOperand *rhs) {
+    return context.positions.lookup(lhs->getOwner()) <
+           context.positions.lookup(rhs->getOwner());
+  });
+  if (uses.empty())
+    return uses;
+  Operation *anchor = uses.front()->getOwner();
+  if (llvm::all_of(uses, [&](OpOperand *use) {
+        return insertionBeforeDominatesUse(anchor, use->getOwner());
+      }))
+    return uses;
+  uses.clear();
+  return uses;
+}
+
+static bool isRematCandidateSet(const wave::RegAllocTransformAliasSet &set,
+                                ArrayRef<wave::RegAllocTransformValue> values,
+                                unsigned position) {
+  return set.regClass == waveamdmachine::RegClass::VGPR &&
+         set.start < position && position < set.end &&
+         !hasFixedRegAllocValue(set, values);
+}
+
+static FailureOr<std::optional<RematReliefCandidate>>
+buildRematReliefValueCandidate(Value value,
+                               const wave::RegAllocTransformValue &stateValue,
+                               const wave::RegAllocTransformAliasSet &set,
+                               const RegAllocTransformFailure &failureRecord,
+                               const RematReliefContext &context) {
+  if (stateValue.start >= failureRecord.position ||
+      failureRecord.position >= stateValue.end || stateValue.fixed ||
+      !isRematRootValue(value))
+    return std::optional<RematReliefCandidate>();
+  FailureOr<SmallVector<OpOperand *>> uses =
+      collectRematPostFailureUses(value, failureRecord, context);
+  if (failed(uses))
+    return failure();
+  if (uses->empty())
+    return std::optional<RematReliefCandidate>();
+  Operation *rebuildOp = uses->front()->getOwner();
+  if (!canRematerializeValueAt(value, rebuildOp, context))
+    return std::optional<RematReliefCandidate>();
+  unsigned opCount = getRematOpCountAt(value, rebuildOp, context);
+  int64_t cost =
+      opCount * getRematReliefLoopCostScale(rebuildOp) + uses->size();
+  RematReliefCandidate candidate;
+  candidate.uses = std::move(*uses);
+  candidate.value = value;
+  candidate.rebuildOp = rebuildOp;
+  candidate.set = &set;
+  candidate.stateValue = &stateValue;
+  candidate.cost = cost;
+  candidate.opCount = opCount;
+  candidate.rebuildPosition = context.positions.lookup(rebuildOp);
+  return std::optional<RematReliefCandidate>(std::move(candidate));
+}
+
+static bool
+isBetterRematValueCandidate(const RematReliefCandidate &candidate,
+                            const std::optional<RematReliefCandidate> &best) {
+  if (!best)
+    return true;
+  if (candidate.cost != best->cost)
+    return candidate.cost < best->cost;
+  return candidate.stateValue->id < best->stateValue->id;
+}
+
+static FailureOr<std::optional<RematReliefCandidate>>
+buildRematReliefCandidate(func::FuncOp func, unsigned setId,
+                          const RegAllocTransformFailure &failureRecord,
+                          ArrayRef<wave::RegAllocTransformAliasSet> sets,
+                          ArrayRef<wave::RegAllocTransformValue> values,
+                          const RematReliefContext &context) {
+  const wave::RegAllocTransformAliasSet *set =
+      findRegAllocTransformSet(sets, setId);
+  if (!set || !isRematCandidateSet(*set, values, failureRecord.position))
+    return std::optional<RematReliefCandidate>();
+  std::optional<RematReliefCandidate> best;
+  for (unsigned valueId : set->members) {
+    const wave::RegAllocTransformValue &stateValue = values[valueId];
+    FailureOr<Value> value = resolveRegAllocStateValue(func, stateValue);
+    if (failed(value))
+      return failure();
+    FailureOr<std::optional<RematReliefCandidate>> candidate =
+        buildRematReliefValueCandidate(*value, stateValue, *set, failureRecord,
+                                       context);
+    if (failed(candidate))
+      return failure();
+    if (!*candidate)
+      continue;
+    if (isBetterRematValueCandidate(**candidate, best))
+      best = std::move(**candidate);
+  }
+  return best;
+}
+
+static bool
+isBetterRematSetCandidate(const RematReliefCandidate &candidate,
+                          const std::optional<RematReliefCandidate> &best) {
+  if (!best)
+    return true;
+  if (candidate.cost != best->cost)
+    return candidate.cost < best->cost;
+  return candidate.set->id < best->set->id;
+}
+
+static FailureOr<std::optional<RematReliefCandidate>>
+selectRematReliefCandidate(func::FuncOp func,
+                           const RegAllocTransformFailure &failureRecord,
+                           ArrayRef<wave::RegAllocTransformAliasSet> sets,
+                           ArrayRef<wave::RegAllocTransformValue> values,
+                           const RematReliefContext &context) {
+  std::optional<RematReliefCandidate> best;
+  for (unsigned setId : collectVGPRReliefCandidateIds(failureRecord)) {
+    FailureOr<std::optional<RematReliefCandidate>> candidate =
+        buildRematReliefCandidate(func, setId, failureRecord, sets, values,
+                                  context);
+    if (failed(candidate))
+      return failure();
+    if (!*candidate)
+      continue;
+    if (isBetterRematSetCandidate(**candidate, best))
+      best = std::move(**candidate);
+  }
+  return best;
+}
+
+static FailureOr<Value>
+materializeRematValueAt(OpBuilder &builder, Value value, Operation *user,
+                        const RematReliefContext &context,
+                        DenseMap<Value, Value> &cache) {
+  auto cached = cache.find(value);
+  if (cached != cache.end())
+    return cached->second;
+  Operation *def = value.getDefiningOp();
+  if (!def || !isRematRootValue(value))
+    return failure();
+
+  IRMapping mapping;
+  for (Value operand : def->getOperands()) {
+    Value mapped = operand;
+    if (!canUseOriginalRematLeaf(operand, user, context)) {
+      FailureOr<Value> rematOperand =
+          materializeRematValueAt(builder, operand, user, context, cache);
+      if (failed(rematOperand))
+        return failure();
+      mapped = *rematOperand;
+    }
+    mapping.map(operand, mapped);
+  }
+
+  Operation *clone = builder.clone(*def, mapping);
+  clone->setAttr("waveamdmachine.regalloc_remat_temp", builder.getUnitAttr());
+  Value result = clone->getResult(cast<OpResult>(value).getResultNumber());
+  cache[value] = result;
+  return result;
+}
+
+static LogicalResult
+materializeRematRelief(OpBuilder &builder,
+                       const RematReliefCandidate &candidate,
+                       const RematReliefContext &context) {
+  builder.setInsertionPoint(candidate.rebuildOp);
+  DenseMap<Value, Value> cache;
+  FailureOr<Value> rebuilt = materializeRematValueAt(
+      builder, candidate.value, candidate.rebuildOp, context, cache);
+  if (failed(rebuilt))
+    return failure();
+  for (OpOperand *use : candidate.uses)
+    use->set(*rebuilt);
+  return success();
 }
 
 static LogicalResult refreshFuncTypeFromBody(func::FuncOp func) {
@@ -1819,6 +2213,8 @@ static LogicalResult runRegAllocAGPRRelief(func::FuncOp func) {
     return failure();
   if (!*failureRecord)
     return success();
+  if (!isAGPRRelievableFailure(**failureRecord))
+    return success();
 
   FailureOr<llvm::AMDGPU::IsaVersion> isa =
       waveamdmachine::getAMDGPUTargetIsaVersion(
@@ -1849,6 +2245,49 @@ static LogicalResult runRegAllocAGPRRelief(func::FuncOp func) {
 
   OpBuilder builder(func.getContext());
   materializeAGPRRelief(builder, **candidate);
+  func->removeAttr(wave::getRegAllocTransformAssignmentsAttrName());
+  func->removeAttr(wave::getRegAllocTransformStateAttrName());
+  return success();
+}
+
+static LogicalResult runRegAllocRematRelief(func::FuncOp func) {
+  FailureOr<std::optional<RegAllocTransformFailure>> failureRecord =
+      parseRegAllocTransformFailure(func);
+  if (failed(failureRecord))
+    return failure();
+  if (!*failureRecord)
+    return success();
+  if (!isRematRelievableFailure(**failureRecord))
+    return success();
+
+  DictionaryAttr state = func->getAttrOfType<DictionaryAttr>(
+      wave::getRegAllocTransformStateAttrName());
+  FailureOr<SmallVector<wave::RegAllocTransformValue>> values =
+      wave::parseRegAllocTransformValues(state, func.getOperation());
+  if (failed(values))
+    return failure();
+  FailureOr<SmallVector<wave::RegAllocTransformAliasSet>> sets =
+      wave::parseRegAllocTransformAliasSets(state, *values,
+                                            func.getOperation());
+  if (failed(sets))
+    return failure();
+  FailureOr<SmallVector<ResolvedRegAllocValue>> resolvedValues =
+      resolveRegAllocStateValues(func, *values);
+  if (failed(resolvedValues))
+    return failure();
+
+  RematReliefContext context = buildRematReliefContext(func, *resolvedValues);
+  FailureOr<std::optional<RematReliefCandidate>> candidate =
+      selectRematReliefCandidate(func, **failureRecord, *sets, *values,
+                                 context);
+  if (failed(candidate))
+    return failure();
+  if (!*candidate)
+    return success();
+
+  OpBuilder builder(func.getContext());
+  if (failed(materializeRematRelief(builder, **candidate, context)))
+    return failure();
   func->removeAttr(wave::getRegAllocTransformAssignmentsAttrName());
   func->removeAttr(wave::getRegAllocTransformStateAttrName());
   return success();
@@ -1888,6 +2327,17 @@ LogicalResult wave::runRegAllocTransformAGPRRelief(Operation *target,
   WalkResult walk = target->walk([&](func::FuncOp func) {
     return failed(runRegAllocAGPRRelief(func)) ? WalkResult::interrupt()
                                                : WalkResult::advance();
+  });
+  return failure(walk.wasInterrupted());
+}
+
+LogicalResult wave::runRegAllocTransformRematRelief(Operation *target,
+                                                    Builder &builder) {
+  if (func::FuncOp func = dyn_cast<func::FuncOp>(target))
+    return runRegAllocRematRelief(func);
+  WalkResult walk = target->walk([&](func::FuncOp func) {
+    return failed(runRegAllocRematRelief(func)) ? WalkResult::interrupt()
+                                                : WalkResult::advance();
   });
   return failure(walk.wasInterrupted());
 }

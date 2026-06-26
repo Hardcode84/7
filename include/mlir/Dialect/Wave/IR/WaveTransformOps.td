@@ -201,6 +201,25 @@ def Wave_TransformRegAllocAGPRReliefOp
   }];
 }
 
+def Wave_TransformRegAllocRematReliefOp
+    : Op<Wave_Dialect, "transform.regalloc_remat_relief", [
+        DeclareOpInterfaceMethods<MemoryEffectsOpInterface>,
+        DeclareOpInterfaceMethods<TransformOpInterface>]> {
+  let summary = "Rewrite one pressure candidate by rematerializing it";
+  let description = [{
+    Consumes a linear-scan failure state. If an overlapping VGPR alias set is
+    rooted in a cheap pure WaveAMDMachine DAG, clones that DAG once at the first
+    dominated consumer after the failure point, rewrites later dominated uses to
+    the rebuilt value, and clears regalloc state so the outer regalloc loop
+    restarts. If no candidate is legal, leaves the failure state unchanged.
+  }];
+  let arguments = (ins TransformHandleTypeInterface:$target);
+  let results = (outs TransformHandleTypeInterface:$result);
+  let assemblyFormat = [{
+    `from` $target attr-dict `:` functional-type($target, $result)
+  }];
+}
+
 // Runs dense-dataflow PressureAnalysis on each payload op
 // (func.func or builtin.module) and yields totalCycles as a
 // `!transform.param<i64>`. The arch is read from the enclosing
