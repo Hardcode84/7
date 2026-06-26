@@ -36,5 +36,42 @@ module attributes {transform.with_named_sequence} {
       return %live, %fixed
           : !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1, 0>
     }
+
+    // CHECK-LABEL: func.func @fixed_reservation_failure(
+    // CHECK-NOT: waveamdmachine.regalloc_assignments
+    // CHECK-SAME: assignments = []
+    // CHECK-SAME: failure = {budget_mode = "func_attr", class = "vgpr"
+    // CHECK-SAME: limit = 1 : i64
+    // CHECK-SAME: overlaps = [{base = 0 : i64, class = "vgpr", end = 2 : i64, set = 1 : i64, start = 1 : i64
+    // CHECK-SAME: pressure = 2 : i64
+    // CHECK-SAME: reason = "pressure"
+    // CHECK-SAME: request = 1 : i64
+    // CHECK-SAME: stage = "linear-scan-failure"
+    func.func @fixed_reservation_failure(
+        %live: !waveamdmachine.reg<vgpr, 1>)
+        -> (!waveamdmachine.reg<vgpr, 1>,
+            !waveamdmachine.reg<vgpr, 1, 0>)
+        attributes {waveamdmachine.vgpr_count_max = 1 : i64} {
+      %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+      %fixed = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1, 0>
+      return %live, %fixed
+          : !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1, 0>
+    }
+
+    // CHECK-LABEL: func.func @nonfixed_reuses_expired_fixed
+    // CHECK-SAME: waveamdmachine.regalloc_assignments
+    // CHECK-SAME: stage = "linear-scan-success"
+    // CHECK: [[FIXED:%.*]] = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1, 0>
+    // CHECK: waveamdmachine.v_mov_b32_tuple [[FIXED]] {registers = 1 : i64} : (!waveamdmachine.reg<vgpr, 1, 0>) -> !waveamdmachine.reg<vgpr, 1, 1>
+    // CHECK: [[FRESH:%.*]] = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1, 0>
+    // CHECK: return [[FRESH]]
+    func.func @nonfixed_reuses_expired_fixed()
+        -> !waveamdmachine.reg<vgpr, 1> {
+      %fixed = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1, 0>
+      %copy = waveamdmachine.v_mov_b32_tuple %fixed {registers = 1 : i64}
+          : (!waveamdmachine.reg<vgpr, 1, 0>) -> !waveamdmachine.reg<vgpr, 1>
+      %fresh = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1>
+      return %fresh : !waveamdmachine.reg<vgpr, 1>
+    }
   }
 }

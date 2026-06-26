@@ -787,7 +787,7 @@ private:
       return allocateFixedSet(set, budget);
     std::optional<unsigned> base = findFreeBase(set, budget.limit);
     if (!base) {
-      recordPressureFailure(set, budget);
+      recordPressureFailure(set, budget, getFixedReservationOverlaps(set));
       return success();
     }
     if (checkCombinedPressureFailure(set, *base))
@@ -839,6 +839,27 @@ private:
                                  assignedRangesOverlap(reserved, base,
                                                        set.width);
                         });
+  }
+
+  bool hasActiveAssignment(unsigned setId) {
+    return llvm::any_of(
+        active, [setId](const wave::RegAllocTransformAssignment &assigned) {
+          return assigned.set == setId;
+        });
+  }
+
+  SmallVector<wave::RegAllocTransformAssignment>
+  getFixedReservationOverlaps(const wave::RegAllocTransformAliasSet &set) {
+    SmallVector<wave::RegAllocTransformAssignment> overlaps;
+    for (const wave::RegAllocTransformAssignment &reserved :
+         fixedReservations) {
+      if (reserved.set == set.id || reserved.regClass != set.regClass ||
+          hasActiveAssignment(reserved.set))
+        continue;
+      if (liveRangesOverlap(reserved.start, reserved.end, set.start, set.end))
+        overlaps.push_back(reserved);
+    }
+    return overlaps;
   }
 
   static void addFamilyFootprint(waveamdmachine::RegClass regClass,
@@ -906,28 +927,35 @@ private:
     active.push_back(assigned);
   }
 
-  unsigned getPressureAtFailure(const wave::RegAllocTransformAliasSet &set) {
+  unsigned getPressureAtFailure(
+      const wave::RegAllocTransformAliasSet &set,
+      ArrayRef<wave::RegAllocTransformAssignment> fixedOverlaps) {
     unsigned pressure = set.width;
     for (const wave::RegAllocTransformAssignment &assigned : active)
       if (assigned.regClass == set.regClass)
         pressure += assigned.width;
+    for (const wave::RegAllocTransformAssignment &reserved : fixedOverlaps)
+      pressure += reserved.width;
     return pressure;
   }
 
-  void recordPressureFailure(const wave::RegAllocTransformAliasSet &set,
-                             wave::RegAllocTransformBudget budget) {
+  void recordPressureFailure(
+      const wave::RegAllocTransformAliasSet &set,
+      wave::RegAllocTransformBudget budget,
+      ArrayRef<wave::RegAllocTransformAssignment> fixedOverlaps = {}) {
     RegAllocScanFailure failed;
     failed.regClass = set.regClass;
     failed.reason = "pressure";
     failed.budgetMode = budget.mode;
     failed.set = set.id;
     failed.position = set.start;
-    failed.pressure = getPressureAtFailure(set);
+    failed.pressure = getPressureAtFailure(set, fixedOverlaps);
     failed.limit = budget.limit;
     failed.request = set.width;
     for (const wave::RegAllocTransformAssignment &assigned : active)
       if (assigned.regClass == set.regClass)
         failed.overlaps.push_back(assigned);
+    failed.overlaps.append(fixedOverlaps.begin(), fixedOverlaps.end());
     scanFailure = std::move(failed);
   }
 
