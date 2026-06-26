@@ -92,5 +92,36 @@ module attributes {transform.with_named_sequence} {
       } -> !waveamdmachine.reg<vgpr, 1>
       return
     }
+
+    // CHECK-LABEL: func.func @loop_invariant_mfma_acc_alias_state(
+    // CHECK-SAME: waveamdmachine.regalloc_transform_state =
+    // CHECK-SAME: debug = {alias_edges = 3 : i64, alias_sets = 5 : i64, ops = 5 : i64, values = 8 : i64}
+    // CHECK: waveamdmachine.mfma_f32_16x16x32_f16
+    // SCAN-LABEL: func.func @loop_invariant_mfma_acc_alias_state(
+    // SCAN-SAME: [[ACC:%[^:]+]]: !waveamdmachine.reg<vgpr, 4, [[ACC_BASE:[0-9]+]]>
+    // SCAN-SAME: waveamdmachine.regalloc_assignments
+    // SCAN-SAME: stage = "linear-scan-success"
+    // SCAN: waveamdmachine.mfma_f32_16x16x32_f16
+    // SCAN-SAME: [[ACC]]
+    func.func @loop_invariant_mfma_acc_alias_state(
+        %a: !waveamdmachine.reg<vgpr, 4>,
+        %b: !waveamdmachine.reg<vgpr, 4>,
+        %acc: !waveamdmachine.reg<vgpr, 4>,
+        %carry: !waveamdmachine.reg<vgpr, 4>,
+        %cond: !waveamdmachine.reg<scc, 1>) {
+      %loop = waveamdmachine.uniform_loop if %cond
+          : !waveamdmachine.reg<scc, 1>
+          carries(%carry : !waveamdmachine.reg<vgpr, 4>) {
+      ^bb0(%iter: !waveamdmachine.reg<vgpr, 4>):
+        %mfma = waveamdmachine.mfma_f32_16x16x32_f16 %a, %b, %acc
+            : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
+               !waveamdmachine.reg<vgpr, 4>) -> !waveamdmachine.reg<vgpr, 4>
+        %next = waveamdmachine.v_mov_b32_tuple %iter {registers = 4 : i64}
+            : (!waveamdmachine.reg<vgpr, 4>) -> !waveamdmachine.reg<vgpr, 4>
+        waveamdmachine.continue_if %cond : !waveamdmachine.reg<scc, 1>
+            carries(%next : !waveamdmachine.reg<vgpr, 4>)
+      } -> !waveamdmachine.reg<vgpr, 4>
+      return
+    }
   }
 }

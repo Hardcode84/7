@@ -252,7 +252,8 @@ private:
       auto loop = dyn_cast<waveamdmachine::UniformLoopOp>(scope);
       if (!loop || isValueDefinedInside(scope, operand))
         continue;
-      externalLoopUses[scope].insert(operand);
+      unsigned &end = externalLoopUseEnds[operand];
+      end = std::max(end, getLoopExitPosition(loop));
     }
   }
 
@@ -267,12 +268,8 @@ private:
   }
 
   void extendExternalLoopUses() {
-    for (auto &entry : externalLoopUses) {
-      auto loop = cast<waveamdmachine::UniformLoopOp>(entry.first);
-      unsigned exit = getLoopExitPosition(loop);
-      for (Value value : entry.second)
-        extendValue(value, exit);
-    }
+    for (auto [value, end] : externalLoopUseEnds)
+      extendValue(value, end);
   }
 
   void addAliasEdge(Value lhs, Value rhs, int64_t delta) {
@@ -300,6 +297,10 @@ private:
 
   bool hasUseAfter(Operation *op, Value value) {
     unsigned position = positions.lookup(op);
+    auto externalIt = externalLoopUseEnds.find(value);
+    if (externalIt != externalLoopUseEnds.end() &&
+        externalIt->second > position)
+      return true;
     for (OpOperand &use : value.getUses()) {
       auto it = positions.find(use.getOwner());
       if (it == positions.end() || it->second > position)
@@ -562,7 +563,7 @@ private:
   SmallVector<RegAllocAliasValue> values;
   SmallVector<RegAllocAliasEdge> edges;
   SmallVector<RegAllocAliasSet> aliasSets;
-  DenseMap<Operation *, DenseSet<Value>> externalLoopUses;
+  DenseMap<Value, unsigned> externalLoopUseEnds;
   DenseMap<Operation *, unsigned> positions;
   DenseMap<Value, unsigned> valueIds;
   func::FuncOp func;
