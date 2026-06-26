@@ -743,6 +743,50 @@ resolveRegAllocStateValue(func::FuncOp func,
   return resolved;
 }
 
+static void collectRegAllocValues(Region &region,
+                                  SmallVectorImpl<Value> &values) {
+  for (Block &block : region) {
+    for (BlockArgument arg : block.getArguments())
+      if (wave::getRegAllocTransformTrackedRegType(arg))
+        values.push_back(arg);
+    for (Operation &op : block) {
+      for (OpResult result : op.getResults())
+        if (wave::getRegAllocTransformTrackedRegType(result))
+          values.push_back(result);
+      for (Region &nested : op.getRegions())
+        collectRegAllocValues(nested, values);
+    }
+  }
+}
+
+using ResolvedRegAllocValue =
+    std::pair<Value, const wave::RegAllocTransformValue *>;
+
+static FailureOr<SmallVector<ResolvedRegAllocValue>>
+resolveRegAllocStateValues(func::FuncOp func,
+                           ArrayRef<wave::RegAllocTransformValue> values) {
+  SmallVector<Value> payloadValues;
+  collectRegAllocValues(func.getBody(), payloadValues);
+  if (payloadValues.size() != values.size())
+    return func.emitError("regalloc state value count no longer matches IR");
+
+  DenseSet<Value> unmatched(payloadValues.begin(), payloadValues.end());
+  SmallVector<ResolvedRegAllocValue> resolvedValues;
+  resolvedValues.reserve(values.size());
+  for (const wave::RegAllocTransformValue &value : values) {
+    FailureOr<Value> payloadValue = resolveRegAllocStateValue(func, value);
+    if (failed(payloadValue))
+      return failure();
+    auto unmatchedIt = unmatched.find(*payloadValue);
+    if (unmatchedIt == unmatched.end())
+      return failRegAllocStateIdentity<SmallVector<ResolvedRegAllocValue>>(
+          func.getOperation());
+    unmatched.erase(unmatchedIt);
+    resolvedValues.push_back({*payloadValue, &value});
+  }
+  return resolvedValues;
+}
+
 static LogicalResult refreshFuncTypeFromBody(func::FuncOp func) {
   SmallVector<Type> inputs(func.getBody().front().getArgumentTypes());
   SmallVector<Type> outputs;
@@ -1119,18 +1163,20 @@ private:
   }
 
   LogicalResult applyAssignments() {
+    FailureOr<SmallVector<ResolvedRegAllocValue>> resolvedValues =
+        resolveRegAllocStateValues(func, values);
+    if (failed(resolvedValues))
+      return failure();
+
     DenseMap<unsigned, const wave::RegAllocTransformAssignment *> bySet;
     for (const wave::RegAllocTransformAssignment &assignment : assignments)
       bySet[assignment.set] = &assignment;
-    for (const wave::RegAllocTransformValue &value : values) {
-      FailureOr<Value> payloadValue = resolveRegAllocStateValue(func, value);
-      if (failed(payloadValue))
-        return failure();
+    for (auto [payloadValue, value] : *resolvedValues) {
       const wave::RegAllocTransformAssignment *assignment =
-          bySet.lookup(value.set);
+          bySet.lookup(value->set);
       if (!assignment)
         return func.emitError("regalloc assignment map is incomplete");
-      setValueType(*payloadValue, value, assignment->base + value.offset);
+      setValueType(payloadValue, *value, assignment->base + value->offset);
     }
     return refreshFuncTypeFromBody(func);
   }
