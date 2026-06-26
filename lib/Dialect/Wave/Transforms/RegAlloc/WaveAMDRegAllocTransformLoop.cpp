@@ -762,6 +762,11 @@ static void collectRegAllocValues(Region &region,
 using ResolvedRegAllocValue =
     std::pair<Value, const wave::RegAllocTransformValue *>;
 
+struct PendingRegAllocAssignment {
+  Value payloadValue;
+  Type assignedType;
+};
+
 static FailureOr<SmallVector<ResolvedRegAllocValue>>
 resolveRegAllocStateValues(func::FuncOp func,
                            ArrayRef<wave::RegAllocTransformValue> values) {
@@ -1168,24 +1173,57 @@ private:
     if (failed(resolvedValues))
       return failure();
 
+    FailureOr<SmallVector<PendingRegAllocAssignment>> pendingAssignments =
+        buildPendingAssignments(*resolvedValues);
+    if (failed(pendingAssignments))
+      return failure();
+
+    return commitAssignments(*pendingAssignments);
+  }
+
+  FailureOr<SmallVector<PendingRegAllocAssignment>>
+  buildPendingAssignments(ArrayRef<ResolvedRegAllocValue> resolvedValues) {
     DenseMap<unsigned, const wave::RegAllocTransformAssignment *> bySet;
     for (const wave::RegAllocTransformAssignment &assignment : assignments)
       bySet[assignment.set] = &assignment;
-    for (auto [payloadValue, value] : *resolvedValues) {
+
+    SmallVector<PendingRegAllocAssignment> pendingAssignments;
+    pendingAssignments.reserve(resolvedValues.size());
+    for (auto [payloadValue, value] : resolvedValues) {
       const wave::RegAllocTransformAssignment *assignment =
           bySet.lookup(value->set);
       if (!assignment)
         return func.emitError("regalloc assignment map is incomplete");
-      setValueType(payloadValue, *value, assignment->base + value->offset);
+      pendingAssignments.push_back(
+          {payloadValue,
+           getAssignedValueType(payloadValue, *value,
+                                assignment->base + value->offset)});
     }
-    return refreshFuncTypeFromBody(func);
+    return pendingAssignments;
   }
 
-  void setValueType(Value payloadValue,
-                    const wave::RegAllocTransformValue &value, unsigned index) {
+  LogicalResult
+  commitAssignments(ArrayRef<PendingRegAllocAssignment> pendingAssignments) {
+    SmallVector<std::pair<Value, Type>> oldTypes;
+    oldTypes.reserve(pendingAssignments.size());
+    for (const PendingRegAllocAssignment &pending : pendingAssignments) {
+      Value payloadValue = pending.payloadValue;
+      oldTypes.push_back({payloadValue, payloadValue.getType()});
+      payloadValue.setType(pending.assignedType);
+    }
+    if (succeeded(refreshFuncTypeFromBody(func)))
+      return success();
+    for (auto [payloadValue, oldType] : llvm::reverse(oldTypes))
+      payloadValue.setType(oldType);
+    return failure();
+  }
+
+  Type getAssignedValueType(Value payloadValue,
+                            const wave::RegAllocTransformValue &value,
+                            unsigned index) {
     auto type = cast<waveamdmachine::RegType>(payloadValue.getType());
-    payloadValue.setType(waveamdmachine::RegType::get(
-        type.getContext(), value.regClass, value.width, index));
+    return waveamdmachine::RegType::get(type.getContext(), value.regClass,
+                                        value.width, index);
   }
 
   Attribute getI64(int64_t value) { return builder.getI64IntegerAttr(value); }
