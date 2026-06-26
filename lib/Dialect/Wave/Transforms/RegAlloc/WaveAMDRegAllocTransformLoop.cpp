@@ -840,6 +840,13 @@ struct LDSStoredSlot {
   Value token;
 };
 
+struct LDSReliefPlanningState {
+  wave::regalloc::RegisterBudgets budgets;
+  unsigned committedBytes = 0;
+  unsigned fixedLDS = 0;
+  unsigned dynamicLDS = 0;
+};
+
 static FailureOr<SmallVector<ResolvedRegAllocValue>>
 resolveRegAllocStateValues(func::FuncOp func,
                            ArrayRef<wave::RegAllocTransformValue> values) {
@@ -1891,18 +1898,30 @@ static unsigned getCommittedLDSSpillBytes(func::FuncOp func) {
       .value_or(0);
 }
 
+static LDSReliefPlanningState
+getLDSReliefPlanningState(func::FuncOp func,
+                          wave::regalloc::RegisterBudgets budgets) {
+  LDSReliefPlanningState state;
+  state.budgets = budgets;
+  state.committedBytes = getCommittedLDSSpillBytes(func);
+  wave::regalloc::getExistingLDSBytes(func, state.fixedLDS, state.dynamicLDS,
+                                      state.committedBytes);
+  return state;
+}
+
 static std::optional<SmallVector<wave::regalloc::LDSSpillPlan, 4>>
-getLDSPlansForValue(func::FuncOp func, wave::regalloc::RegisterBudgets budgets,
+getLDSPlansForValue(func::FuncOp func, const LDSReliefPlanningState &planning,
                     waveamdmachine::RegType type, unsigned extraReservedBytes) {
   if (type.getWidth() == 0)
     return std::nullopt;
   SmallVector<wave::regalloc::LDSSpillPlan, 4> plans;
   plans.reserve(type.getWidth());
-  unsigned reserved = getCommittedLDSSpillBytes(func) + extraReservedBytes;
+  unsigned reserved = planning.committedBytes + extraReservedBytes;
   for ([[maybe_unused]] unsigned index :
        llvm::seq<unsigned>(0, type.getWidth())) {
     wave::regalloc::LDSSpillPlan plan = wave::regalloc::planLDSSpillSlot(
-        func, budgets, /*valueBytes=*/4, reserved);
+        func, planning.budgets, /*valueBytes=*/4, reserved, planning.fixedLDS,
+        planning.dynamicLDS);
     if (plan.status != wave::regalloc::LDSSpillPlanStatus::Available)
       return std::nullopt;
     reserved += plan.slotBytes;
@@ -1959,7 +1978,7 @@ static FailureOr<std::optional<LDSReliefSlot>> buildLDSReliefSlot(
     func::FuncOp func, Value value,
     const wave::RegAllocTransformValue &stateValue,
     const RegAllocTransformFailure &failureRecord,
-    const RematReliefContext &context, wave::regalloc::RegisterBudgets budgets,
+    const RematReliefContext &context, const LDSReliefPlanningState &planning,
     const DenseSet<Value> &plannedValues, unsigned extraReservedBytes) {
   if (!isLDSValueLiveAcrossFailure(stateValue, failureRecord.position) ||
       stateValue.fixed || isRegAllocTransformTempValue(value))
@@ -1975,7 +1994,7 @@ static FailureOr<std::optional<LDSReliefSlot>> buildLDSReliefSlot(
   if (uses->empty())
     return std::optional<LDSReliefSlot>();
   std::optional<SmallVector<wave::regalloc::LDSSpillPlan, 4>> plans =
-      getLDSPlansForValue(func, budgets, type, extraReservedBytes);
+      getLDSPlansForValue(func, planning, type, extraReservedBytes);
   if (!plans)
     return std::optional<LDSReliefSlot>();
   LDSReliefSlot slot;
@@ -1992,13 +2011,13 @@ static FailureOr<std::optional<LDSReliefSlot>> buildLDSReliefSlot(
 static FailureOr<bool> addLDSReliefSlot(
     func::FuncOp func, ResolvedRegAllocValue resolved,
     const RegAllocTransformFailure &failureRecord,
-    const RematReliefContext &context, wave::regalloc::RegisterBudgets budgets,
+    const RematReliefContext &context, const LDSReliefPlanningState &planning,
     const DenseSet<Value> &plannedValues, LDSReliefCandidate &candidate) {
   const wave::RegAllocTransformValue &stateValue = *resolved.second;
   if (!isLDSValueLiveAcrossFailure(stateValue, failureRecord.position))
     return true;
   FailureOr<std::optional<LDSReliefSlot>> slot = buildLDSReliefSlot(
-      func, resolved.first, stateValue, failureRecord, context, budgets,
+      func, resolved.first, stateValue, failureRecord, context, planning,
       plannedValues, candidate.reservedBytes);
   if (failed(slot))
     return failure();
@@ -2023,7 +2042,7 @@ buildLDSReliefCandidate(func::FuncOp func, unsigned setId,
                         ArrayRef<wave::RegAllocTransformAliasSet> sets,
                         ArrayRef<wave::RegAllocTransformValue> values,
                         const RematReliefContext &context,
-                        wave::regalloc::RegisterBudgets budgets) {
+                        const LDSReliefPlanningState &planning) {
   const wave::RegAllocTransformAliasSet *set =
       findRegAllocTransformSet(sets, setId);
   if (!set || !isLDSReliefCandidateSet(*set, values, failureRecord.position))
@@ -2039,7 +2058,7 @@ buildLDSReliefCandidate(func::FuncOp func, unsigned setId,
   candidate.set = set;
   for (ResolvedRegAllocValue resolved : *resolvedValues) {
     FailureOr<bool> added =
-        addLDSReliefSlot(func, resolved, failureRecord, context, budgets,
+        addLDSReliefSlot(func, resolved, failureRecord, context, planning,
                          plannedValues, candidate);
     if (failed(added))
       return failure();
@@ -2062,18 +2081,16 @@ isBetterLDSReliefCandidate(const LDSReliefCandidate &candidate,
   return candidate.set->id < best->set->id;
 }
 
-static FailureOr<std::optional<LDSReliefCandidate>>
-selectLDSReliefCandidate(func::FuncOp func,
-                         const RegAllocTransformFailure &failureRecord,
-                         ArrayRef<wave::RegAllocTransformAliasSet> sets,
-                         ArrayRef<wave::RegAllocTransformValue> values,
-                         const RematReliefContext &context,
-                         wave::regalloc::RegisterBudgets budgets) {
+static FailureOr<std::optional<LDSReliefCandidate>> selectLDSReliefCandidate(
+    func::FuncOp func, const RegAllocTransformFailure &failureRecord,
+    ArrayRef<wave::RegAllocTransformAliasSet> sets,
+    ArrayRef<wave::RegAllocTransformValue> values,
+    const RematReliefContext &context, const LDSReliefPlanningState &planning) {
   std::optional<LDSReliefCandidate> best;
   for (unsigned setId : collectVGPRReliefCandidateIds(failureRecord)) {
     FailureOr<std::optional<LDSReliefCandidate>> candidate =
         buildLDSReliefCandidate(func, setId, failureRecord, sets, values,
-                                context, budgets);
+                                context, planning);
     if (failed(candidate))
       return failure();
     if (!*candidate)
@@ -3012,8 +3029,9 @@ selectLDSReliefCandidateFromState(
     return failure();
 
   RematReliefContext context = buildRematReliefContext(func, *resolvedValues);
+  LDSReliefPlanningState planning = getLDSReliefPlanningState(func, *budgets);
   return selectLDSReliefCandidate(func, failureRecord, *sets, *values, context,
-                                  *budgets);
+                                  planning);
 }
 
 static LogicalResult runRegAllocLDSRelief(func::FuncOp func) {
