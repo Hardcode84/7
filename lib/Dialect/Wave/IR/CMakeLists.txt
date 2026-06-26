@@ -4,6 +4,7 @@ add_mlir_dialect_library(MLIRWaveDialect
   WaveMemoryAddress.cpp
   WaveSymbols.cpp
   WaveTransformOps.cpp
+  ../Transforms/RegAlloc/WaveAMDRegAllocLDSPlanning.cpp
   ../Transforms/RegAlloc/WaveAMDRegAllocTransformLoop.cpp
   ../Transforms/RegAlloc/WaveAMDRegAllocTransformState.cpp
 
@@ -15,6 +16,13 @@ add_mlir_dialect_library(MLIRWaveDialect
   MLIRWaveEnumsIncGen
   MLIRWaveOpsIncGen
   MLIRWaveTransformOpsIncGen
+
+  LINK_COMPONENTS
+
+  AMDGPUDesc
+  AMDGPUInfo
+  AMDGPUUtils
+  TargetParser
 
   LINK_LIBS PUBLIC
   MLIRArithDialect
@@ -29,6 +37,12 @@ add_mlir_dialect_library(MLIRWaveDialect
   MLIRTransformDialectInterfaces
   MLIRWaveAMDMachineCostModel
   WaveIXSimpl
+  )
+
+target_include_directories(obj.MLIRWaveDialect
+  PRIVATE
+  ${LLVM_MAIN_SRC_DIR}/lib/Target/AMDGPU
+  ${LLVM_BINARY_DIR}/lib/Target/AMDGPU
   )
 
 add_mlir_dialect_library(MLIRWaveAMDDialect

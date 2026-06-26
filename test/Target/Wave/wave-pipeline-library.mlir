@@ -96,3 +96,5 @@
 // PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
 // PIPELINE-NEXT: wave.transform.regalloc_remat_relief from
 // PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
+// PIPELINE-NEXT: wave.transform.regalloc_lds_relief from
+// PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op

@@ -8,6 +8,7 @@
 
 #include "WaveAMDRegAllocTransformLoop.h"
 
+#include "WaveAMDRegAllocInternal.h"
 #include "WaveAMDRegAllocTransformState.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachine.h"
@@ -815,6 +816,28 @@ struct RematReliefCandidate {
   SmallVector<Value> rematValues;
   const wave::RegAllocTransformAliasSet *set = nullptr;
   int64_t cost = 0;
+};
+
+struct LDSReliefSlot {
+  SmallVector<OpOperand *> uses;
+  SmallVector<wave::regalloc::LDSSpillPlan, 4> plans;
+  Value value;
+  waveamdmachine::RegType type;
+  const wave::RegAllocTransformValue *stateValue = nullptr;
+  int64_t cost = 0;
+  unsigned useCount = 0;
+};
+
+struct LDSReliefCandidate {
+  SmallVector<LDSReliefSlot, 4> slots;
+  const wave::RegAllocTransformAliasSet *set = nullptr;
+  int64_t cost = 0;
+  unsigned reservedBytes = 0;
+};
+
+struct LDSStoredSlot {
+  const LDSReliefSlot *slot = nullptr;
+  Value token;
 };
 
 static FailureOr<SmallVector<ResolvedRegAllocValue>>
@@ -1738,6 +1761,592 @@ materializeRematRelief(OpBuilder &builder,
   return success();
 }
 
+static bool isRegAllocTransformTempOp(Operation *op) {
+  return op && op->hasAttr(wave::regalloc::kRegAllocTempAttr);
+}
+
+static bool isRegAllocTransformTempValue(Value value) {
+  return isRegAllocTransformTempOp(value.getDefiningOp());
+}
+
+static bool isStructuralLoopCarryUse(Operation *op) {
+  return isa_and_nonnull<waveamdmachine::UniformLoopOp,
+                         waveamdmachine::ContinueIfOp>(op);
+}
+
+static bool
+isInternalPlannedTupleFromElementsUse(OpOperand *use,
+                                      const DenseSet<Value> &plannedValues) {
+  auto fromElements =
+      dyn_cast<waveamdmachine::TupleFromElementsOp>(use->getOwner());
+  return fromElements && plannedValues.contains(fromElements.getTuple());
+}
+
+static FailureOr<SmallVector<OpOperand *>>
+collectLDSReliefUses(Value value, const RegAllocTransformFailure &failureRecord,
+                     const RematReliefContext &context,
+                     const DenseSet<Value> &plannedValues) {
+  SmallVector<OpOperand *> uses;
+  for (OpOperand &use : value.getUses()) {
+    Operation *user = use.getOwner();
+    if (isRegAllocTransformTempOp(user))
+      continue;
+    if (isStructuralLoopCarryUse(user)) {
+      uses.clear();
+      return uses;
+    }
+    std::optional<unsigned> position = getRematOpPosition(user, context);
+    if (!position)
+      return failure();
+    if (*position == failureRecord.position) {
+      uses.clear();
+      return uses;
+    }
+    if (*position > failureRecord.position &&
+        !isInternalPlannedTupleFromElementsUse(&use, plannedValues))
+      uses.push_back(&use);
+  }
+  llvm::stable_sort(uses, [&](OpOperand *lhs, OpOperand *rhs) {
+    return context.positions.lookup(lhs->getOwner()) <
+           context.positions.lookup(rhs->getOwner());
+  });
+  return uses;
+}
+
+static std::optional<unsigned> getUnsignedIntegerAttr(Operation *op,
+                                                      StringRef name) {
+  if (!op)
+    return std::nullopt;
+  auto attr = op->getAttrOfType<IntegerAttr>(name);
+  if (!attr)
+    return std::nullopt;
+  int64_t value = attr.getInt();
+  if (value < 0 ||
+      static_cast<uint64_t>(value) > std::numeric_limits<unsigned>::max())
+    return std::nullopt;
+  return static_cast<unsigned>(value);
+}
+
+static Attribute findAncestorAttr(Operation *op, StringRef name) {
+  for (Operation *cur = op; cur; cur = cur->getParentOp())
+    if (Attribute attr = cur->getAttr(name))
+      return attr;
+  return {};
+}
+
+static FailureOr<unsigned> getLDSTransformTargetWaves(func::FuncOp func) {
+  Attribute attr = findAncestorAttr(func, "waveamdmachine.target_waves");
+  if (!attr)
+    return 0;
+  auto intAttr = dyn_cast<IntegerAttr>(attr);
+  if (!intAttr)
+    return func.emitError("regalloc transform LDS relief target_waves must be "
+                          "an integer attribute");
+  int64_t value = intAttr.getInt();
+  if (value <= 0)
+    return func.emitError(
+        "regalloc transform LDS relief target_waves must be positive");
+  if (static_cast<uint64_t>(value) > std::numeric_limits<unsigned>::max())
+    return func.emitError(
+        "regalloc transform LDS relief target_waves exceeds supported range");
+  return static_cast<unsigned>(value);
+}
+
+static FailureOr<wave::regalloc::RegisterBudgets>
+getLDSTransformBudgets(func::FuncOp func) {
+  FailureOr<unsigned> targetWaves = getLDSTransformTargetWaves(func);
+  if (failed(targetWaves))
+    return failure();
+  wave::regalloc::RegisterBudgets budgets;
+  budgets.targetWaves = *targetWaves;
+  return budgets;
+}
+
+static bool
+isLDSReliefCandidateSet(const wave::RegAllocTransformAliasSet &set,
+                        ArrayRef<wave::RegAllocTransformValue> values,
+                        unsigned position) {
+  return set.regClass == waveamdmachine::RegClass::VGPR &&
+         set.start < position && position < set.end &&
+         !hasFixedRegAllocValue(set, values);
+}
+
+static bool
+isLDSValueLiveAcrossFailure(const wave::RegAllocTransformValue &stateValue,
+                            unsigned position) {
+  return stateValue.start < position && position < stateValue.end;
+}
+
+static void addPlannedLDSValues(ArrayRef<ResolvedRegAllocValue> values,
+                                unsigned position,
+                                DenseSet<Value> &plannedValues) {
+  for (ResolvedRegAllocValue resolved : values)
+    if (isLDSValueLiveAcrossFailure(*resolved.second, position))
+      plannedValues.insert(resolved.first);
+}
+
+static unsigned getCommittedLDSSpillBytes(func::FuncOp func) {
+  return getUnsignedIntegerAttr(func.getOperation(),
+                                wave::regalloc::kLDSSpillBytesAttr)
+      .value_or(0);
+}
+
+static std::optional<SmallVector<wave::regalloc::LDSSpillPlan, 4>>
+getLDSPlansForValue(func::FuncOp func, wave::regalloc::RegisterBudgets budgets,
+                    waveamdmachine::RegType type, unsigned extraReservedBytes) {
+  if (type.getWidth() == 0)
+    return std::nullopt;
+  SmallVector<wave::regalloc::LDSSpillPlan, 4> plans;
+  plans.reserve(type.getWidth());
+  unsigned reserved = getCommittedLDSSpillBytes(func) + extraReservedBytes;
+  for ([[maybe_unused]] unsigned index :
+       llvm::seq<unsigned>(0, type.getWidth())) {
+    wave::regalloc::LDSSpillPlan plan = wave::regalloc::planLDSSpillSlot(
+        func, budgets, /*valueBytes=*/4, reserved);
+    if (plan.status != wave::regalloc::LDSSpillPlanStatus::Available)
+      return std::nullopt;
+    reserved += plan.slotBytes;
+    plans.push_back(plan);
+  }
+  return plans;
+}
+
+static unsigned getLDSSlotBytes(ArrayRef<wave::regalloc::LDSSpillPlan> plans) {
+  unsigned total = 0;
+  for (wave::regalloc::LDSSpillPlan plan : plans)
+    total += plan.slotBytes;
+  return total;
+}
+
+static bool canFoldSlotBaseIntoDSOffset(unsigned slotBase) {
+  std::pair<int64_t, int64_t> range = waveamdmachine::instOffsetRange(
+      waveamdmachine::DsStoreB32Op::getAddressFieldSpec());
+  return slotBase >= static_cast<uint64_t>(range.first) &&
+         slotBase <= static_cast<uint64_t>(range.second);
+}
+
+static unsigned getLDSAddressOpsPerAccess(wave::regalloc::LDSSpillPlan plan) {
+  return canFoldSlotBaseIntoDSOffset(plan.slotBase) ? 1 : 2;
+}
+
+static unsigned
+getLDSAccessOpCount(ArrayRef<wave::regalloc::LDSSpillPlan> plans) {
+  unsigned total = 0;
+  for (wave::regalloc::LDSSpillPlan plan : plans)
+    total += 1 + getLDSAddressOpsPerAccess(plan);
+  return total;
+}
+
+static Operation *getValueAnchorOp(Value value) {
+  if (Operation *def = value.getDefiningOp())
+    return def;
+  auto arg = cast<BlockArgument>(value);
+  return arg.getOwner()->getParentOp();
+}
+
+static int64_t getLDSReliefCost(Value value,
+                                ArrayRef<wave::regalloc::LDSSpillPlan> plans,
+                                ArrayRef<OpOperand *> uses) {
+  unsigned accessOps = getLDSAccessOpCount(plans);
+  int64_t cost =
+      accessOps * getRematReliefLoopCostScale(getValueAnchorOp(value));
+  for (OpOperand *use : uses)
+    cost += accessOps * getRematReliefLoopCostScale(use->getOwner());
+  return cost + uses.size();
+}
+
+static FailureOr<std::optional<LDSReliefSlot>> buildLDSReliefSlot(
+    func::FuncOp func, Value value,
+    const wave::RegAllocTransformValue &stateValue,
+    const RegAllocTransformFailure &failureRecord,
+    const RematReliefContext &context, wave::regalloc::RegisterBudgets budgets,
+    const DenseSet<Value> &plannedValues, unsigned extraReservedBytes) {
+  if (!isLDSValueLiveAcrossFailure(stateValue, failureRecord.position) ||
+      stateValue.fixed || isRegAllocTransformTempValue(value))
+    return std::optional<LDSReliefSlot>();
+  auto type = dyn_cast<waveamdmachine::RegType>(value.getType());
+  if (!type || type.getRegClass() != waveamdmachine::RegClass::VGPR ||
+      type.getWidth() == 0)
+    return std::optional<LDSReliefSlot>();
+  FailureOr<SmallVector<OpOperand *>> uses =
+      collectLDSReliefUses(value, failureRecord, context, plannedValues);
+  if (failed(uses))
+    return failure();
+  if (uses->empty())
+    return std::optional<LDSReliefSlot>();
+  std::optional<SmallVector<wave::regalloc::LDSSpillPlan, 4>> plans =
+      getLDSPlansForValue(func, budgets, type, extraReservedBytes);
+  if (!plans)
+    return std::optional<LDSReliefSlot>();
+  LDSReliefSlot slot;
+  slot.uses = std::move(*uses);
+  slot.plans = std::move(*plans);
+  slot.value = value;
+  slot.type = type;
+  slot.stateValue = &stateValue;
+  slot.useCount = slot.uses.size();
+  slot.cost = getLDSReliefCost(value, slot.plans, slot.uses);
+  return std::optional<LDSReliefSlot>(std::move(slot));
+}
+
+static FailureOr<bool> addLDSReliefSlot(
+    func::FuncOp func, ResolvedRegAllocValue resolved,
+    const RegAllocTransformFailure &failureRecord,
+    const RematReliefContext &context, wave::regalloc::RegisterBudgets budgets,
+    const DenseSet<Value> &plannedValues, LDSReliefCandidate &candidate) {
+  const wave::RegAllocTransformValue &stateValue = *resolved.second;
+  if (!isLDSValueLiveAcrossFailure(stateValue, failureRecord.position))
+    return true;
+  FailureOr<std::optional<LDSReliefSlot>> slot = buildLDSReliefSlot(
+      func, resolved.first, stateValue, failureRecord, context, budgets,
+      plannedValues, candidate.reservedBytes);
+  if (failed(slot))
+    return failure();
+  if (!*slot)
+    return false;
+  candidate.cost += (*slot)->cost;
+  candidate.reservedBytes += getLDSSlotBytes((*slot)->plans);
+  candidate.slots.push_back(std::move(**slot));
+  return true;
+}
+
+static void sortLDSReliefSlots(MutableArrayRef<LDSReliefSlot> slots) {
+  llvm::stable_sort(slots,
+                    [](const LDSReliefSlot &lhs, const LDSReliefSlot &rhs) {
+                      return lhs.stateValue->id < rhs.stateValue->id;
+                    });
+}
+
+static FailureOr<std::optional<LDSReliefCandidate>>
+buildLDSReliefCandidate(func::FuncOp func, unsigned setId,
+                        const RegAllocTransformFailure &failureRecord,
+                        ArrayRef<wave::RegAllocTransformAliasSet> sets,
+                        ArrayRef<wave::RegAllocTransformValue> values,
+                        const RematReliefContext &context,
+                        wave::regalloc::RegisterBudgets budgets) {
+  const wave::RegAllocTransformAliasSet *set =
+      findRegAllocTransformSet(sets, setId);
+  if (!set || !isLDSReliefCandidateSet(*set, values, failureRecord.position))
+    return std::optional<LDSReliefCandidate>();
+  FailureOr<SmallVector<ResolvedRegAllocValue>> resolvedValues =
+      resolveSetValues(func, *set, values);
+  if (failed(resolvedValues))
+    return failure();
+
+  DenseSet<Value> plannedValues;
+  addPlannedLDSValues(*resolvedValues, failureRecord.position, plannedValues);
+  LDSReliefCandidate candidate;
+  candidate.set = set;
+  for (ResolvedRegAllocValue resolved : *resolvedValues) {
+    FailureOr<bool> added =
+        addLDSReliefSlot(func, resolved, failureRecord, context, budgets,
+                         plannedValues, candidate);
+    if (failed(added))
+      return failure();
+    if (!*added)
+      return std::optional<LDSReliefCandidate>();
+  }
+  if (candidate.slots.empty())
+    return std::optional<LDSReliefCandidate>();
+  sortLDSReliefSlots(candidate.slots);
+  return std::optional<LDSReliefCandidate>(std::move(candidate));
+}
+
+static bool
+isBetterLDSReliefCandidate(const LDSReliefCandidate &candidate,
+                           const std::optional<LDSReliefCandidate> &best) {
+  if (!best)
+    return true;
+  if (candidate.cost != best->cost)
+    return candidate.cost < best->cost;
+  return candidate.set->id < best->set->id;
+}
+
+static FailureOr<std::optional<LDSReliefCandidate>>
+selectLDSReliefCandidate(func::FuncOp func,
+                         const RegAllocTransformFailure &failureRecord,
+                         ArrayRef<wave::RegAllocTransformAliasSet> sets,
+                         ArrayRef<wave::RegAllocTransformValue> values,
+                         const RematReliefContext &context,
+                         wave::regalloc::RegisterBudgets budgets) {
+  std::optional<LDSReliefCandidate> best;
+  for (unsigned setId : collectVGPRReliefCandidateIds(failureRecord)) {
+    FailureOr<std::optional<LDSReliefCandidate>> candidate =
+        buildLDSReliefCandidate(func, setId, failureRecord, sets, values,
+                                context, budgets);
+    if (failed(candidate))
+      return failure();
+    if (!*candidate)
+      continue;
+    if (isBetterLDSReliefCandidate(**candidate, best))
+      best = std::move(**candidate);
+  }
+  return best;
+}
+
+static Value createLDSImm(OpBuilder &builder, Location loc, int64_t value) {
+  return waveamdmachine::ImmOp::create(
+      builder, loc, waveamdmachine::ImmType::get(builder.getContext()),
+      static_cast<uint64_t>(value));
+}
+
+static waveamdmachine::RegType getVirtualVGPR1(MLIRContext *ctx) {
+  return waveamdmachine::RegType::get(ctx, waveamdmachine::RegClass::VGPR,
+                                      /*width=*/1, /*index=*/-1);
+}
+
+static waveamdmachine::RegType getWorkitemIdType(MLIRContext *ctx) {
+  return waveamdmachine::RegType::get(ctx, waveamdmachine::RegClass::VGPR,
+                                      /*width=*/1, /*index=*/0);
+}
+
+static waveamdmachine::VWorkitemIdXOp getFixedWorkitemIdX(Operation &op) {
+  auto workitem = dyn_cast<waveamdmachine::VWorkitemIdXOp>(&op);
+  if (!workitem)
+    return {};
+  waveamdmachine::RegType type =
+      cast<waveamdmachine::RegType>(workitem.getType());
+  if (type.getIndex() != 0)
+    return {};
+  return workitem;
+}
+
+static bool opUsesValue(Operation *op, Value value) {
+  bool found = false;
+  op->walk([&](Operation *nested) {
+    if (llvm::is_contained(nested->getOperands(), value)) {
+      found = true;
+      return WalkResult::interrupt();
+    }
+    return WalkResult::advance();
+  });
+  return found;
+}
+
+static bool valueHasUseAtOrAfter(Value value, Block *block,
+                                 Block::iterator stop) {
+  for (auto it = stop; it != block->end(); ++it)
+    if (opUsesValue(&*it, value))
+      return true;
+  return false;
+}
+
+static Value findLiveWorkitemIdBefore(Block *block, Block::iterator stop) {
+  for (auto it = block->begin(); it != stop; ++it) {
+    waveamdmachine::VWorkitemIdXOp workitem = getFixedWorkitemIdX(*it);
+    if (workitem && valueHasUseAtOrAfter(workitem.getResult(), block, stop))
+      return workitem.getResult();
+  }
+  return {};
+}
+
+static Value moveWorkitemIdBefore(Block *block, Block::iterator stop,
+                                  OpBuilder &builder) {
+  for (auto it = stop; it != block->end(); ++it) {
+    waveamdmachine::VWorkitemIdXOp workitem = getFixedWorkitemIdX(*it);
+    if (!workitem)
+      continue;
+    workitem->moveBefore(block, stop);
+    builder.setInsertionPointAfter(workitem);
+    return workitem.getResult();
+  }
+  return {};
+}
+
+static Value findAvailableWorkitemId(OpBuilder &builder) {
+  Block *block = builder.getInsertionBlock();
+  if (!block)
+    return {};
+  Block::iterator stop = builder.getInsertionPoint();
+  if (Value workitem = findLiveWorkitemIdBefore(block, stop))
+    return workitem;
+  if (Value workitem = moveWorkitemIdBefore(block, stop, builder))
+    return workitem;
+  while (block) {
+    Operation *parent = block->getParentOp();
+    if (!parent)
+      return {};
+    block = parent->getBlock();
+    if (!block)
+      return {};
+    stop = parent->getIterator();
+    if (Value workitem = findLiveWorkitemIdBefore(block, stop))
+      return workitem;
+  }
+  return {};
+}
+
+static Value getOrCreateWorkitemId(OpBuilder &builder, Location loc) {
+  if (Value workitem = findAvailableWorkitemId(builder))
+    return workitem;
+  return waveamdmachine::VWorkitemIdXOp::create(
+             builder, loc, getWorkitemIdType(builder.getContext()))
+      .getResult();
+}
+
+static FailureOr<std::pair<Value, int64_t>>
+materializeLDSAddress(OpBuilder &builder, Location loc,
+                      wave::regalloc::LDSSpillPlan plan) {
+  MLIRContext *ctx = builder.getContext();
+  Value workitem = getOrCreateWorkitemId(builder, loc);
+  waveamdmachine::VLshlrevB32Op addr = waveamdmachine::VLshlrevB32Op::create(
+      builder, loc, getVirtualVGPR1(ctx), workitem,
+      createLDSImm(builder, loc, llvm::Log2_32(plan.valueBytes)));
+  addr->setAttr(wave::regalloc::kRegAllocTempAttr, builder.getUnitAttr());
+  if (canFoldSlotBaseIntoDSOffset(plan.slotBase))
+    return std::make_pair(addr.getResult(),
+                          static_cast<int64_t>(plan.slotBase));
+  waveamdmachine::VAddU32Op fullAddr = waveamdmachine::VAddU32Op::create(
+      builder, loc, getVirtualVGPR1(ctx), addr.getResult(),
+      createLDSImm(builder, loc, plan.slotBase));
+  fullAddr->setAttr(wave::regalloc::kRegAllocTempAttr, builder.getUnitAttr());
+  return std::make_pair(fullAddr.getResult(), int64_t{0});
+}
+
+static FailureOr<Value> storeLDSScalarValue(OpBuilder &builder, Location loc,
+                                            Value value, Value token,
+                                            wave::regalloc::LDSSpillPlan plan) {
+  FailureOr<std::pair<Value, int64_t>> addr =
+      materializeLDSAddress(builder, loc, plan);
+  if (failed(addr))
+    return failure();
+  Type tokenType = waveamdmachine::MemTokenType::get(builder.getContext());
+  waveamdmachine::DsStoreB32Op store = waveamdmachine::DsStoreB32Op::create(
+      builder, loc, tokenType, addr->first, value, token, addr->second);
+  store->setAttr(wave::regalloc::kRegAllocTempAttr, builder.getUnitAttr());
+  return store.getToken();
+}
+
+static FailureOr<Value> storeLDSValue(OpBuilder &builder,
+                                      const LDSReliefSlot &slot, Value token) {
+  wave::regalloc::setInsertionPointForMemorySpillStore(slot.value, builder);
+  unsigned width = slot.type.getWidth();
+  if (width == 1)
+    return storeLDSScalarValue(builder, slot.value.getLoc(), slot.value, token,
+                               slot.plans.front());
+
+  SmallVector<Value> elements = wave::regalloc::splitMemorySpillValue(
+      slot.value, builder, slot.value.getLoc());
+  SmallVector<Value> tokens;
+  tokens.reserve(elements.size());
+  for (auto [index, element] : llvm::enumerate(elements)) {
+    FailureOr<Value> stored = storeLDSScalarValue(
+        builder, slot.value.getLoc(), element, token, slot.plans[index]);
+    if (failed(stored))
+      return failure();
+    tokens.push_back(*stored);
+  }
+  Type tokenType = waveamdmachine::MemTokenType::get(builder.getContext());
+  return wave::regalloc::joinMemorySpillTokens(tokenType, tokens, builder,
+                                               slot.value.getLoc());
+}
+
+static FailureOr<wave::regalloc::MemorySpillLoadResult>
+loadLDSScalarValue(OpBuilder &builder, Location loc, Type type, Value token,
+                   wave::regalloc::LDSSpillPlan plan) {
+  FailureOr<std::pair<Value, int64_t>> addr =
+      materializeLDSAddress(builder, loc, plan);
+  if (failed(addr))
+    return failure();
+  Type tokenType = waveamdmachine::MemTokenType::get(builder.getContext());
+  waveamdmachine::DsLoadB32Op load = waveamdmachine::DsLoadB32Op::create(
+      builder, loc, type, tokenType, addr->first, token, addr->second);
+  load->setAttr(wave::regalloc::kRegAllocTempAttr, builder.getUnitAttr());
+  return wave::regalloc::MemorySpillLoadResult{load.getResult(),
+                                               load.getToken()};
+}
+
+static FailureOr<wave::regalloc::MemorySpillLoadResult>
+loadLDSValue(OpBuilder &builder, Location loc, Type type, Value token,
+             ArrayRef<wave::regalloc::LDSSpillPlan> plans) {
+  unsigned width = cast<waveamdmachine::RegType>(type).getWidth();
+  if (width == 1)
+    return loadLDSScalarValue(builder, loc, type, token, plans.front());
+
+  SmallVector<Type> elementTypes =
+      wave::regalloc::getMemorySpillScalarRegTypes(type);
+  SmallVector<Value> elements;
+  SmallVector<Value> tokens;
+  elements.reserve(elementTypes.size());
+  tokens.reserve(elementTypes.size());
+  for (auto [index, elementType] : llvm::enumerate(elementTypes)) {
+    FailureOr<wave::regalloc::MemorySpillLoadResult> load =
+        loadLDSScalarValue(builder, loc, elementType, token, plans[index]);
+    if (failed(load))
+      return failure();
+    elements.push_back(load->value);
+    tokens.push_back(load->token);
+  }
+  Type tokenType = waveamdmachine::MemTokenType::get(builder.getContext());
+  return wave::regalloc::MemorySpillLoadResult{
+      wave::regalloc::joinMemorySpillValue(type, elements, builder, loc),
+      wave::regalloc::joinMemorySpillTokens(tokenType, tokens, builder, loc)};
+}
+
+static Value getLDSStoreDependency(Value value) {
+  Operation *def = value.getDefiningOp();
+  if (!def)
+    return {};
+  return wave::regalloc::getMemoryIssuerToken(def);
+}
+
+static FailureOr<LDSStoredSlot> materializeLDSStore(OpBuilder &builder,
+                                                    const LDSReliefSlot &slot) {
+  FailureOr<Value> token =
+      storeLDSValue(builder, slot, getLDSStoreDependency(slot.value));
+  if (failed(token))
+    return failure();
+  return LDSStoredSlot{&slot, *token};
+}
+
+static LogicalResult
+replaceLDSReliefUses(OpBuilder &builder, const LDSStoredSlot &stored,
+                     const DenseSet<Value> &plannedValues) {
+  const LDSReliefSlot &slot = *stored.slot;
+  for (OpOperand *use : slot.uses) {
+    if (use->get() != slot.value)
+      continue;
+    if (isInternalPlannedTupleFromElementsUse(use, plannedValues))
+      continue;
+    Operation *user = use->getOwner();
+    builder.setInsertionPoint(user);
+    FailureOr<wave::regalloc::MemorySpillLoadResult> loaded = loadLDSValue(
+        builder, user->getLoc(), slot.type, stored.token, slot.plans);
+    if (failed(loaded))
+      return failure();
+    use->set(loaded->value);
+  }
+  return success();
+}
+
+static void reserveLDSSpillBytes(func::FuncOp func, OpBuilder &builder,
+                                 unsigned bytes) {
+  unsigned reserved = getCommittedLDSSpillBytes(func);
+  func->setAttr(wave::regalloc::kLDSSpillBytesAttr,
+                builder.getI64IntegerAttr(reserved + bytes));
+}
+
+static LogicalResult materializeLDSRelief(OpBuilder &builder, func::FuncOp func,
+                                          const LDSReliefCandidate &candidate) {
+  DenseSet<Value> plannedValues;
+  for (const LDSReliefSlot &slot : candidate.slots)
+    plannedValues.insert(slot.value);
+
+  SmallVector<LDSStoredSlot> storedSlots;
+  storedSlots.reserve(candidate.slots.size());
+  for (const LDSReliefSlot &slot : candidate.slots) {
+    FailureOr<LDSStoredSlot> stored = materializeLDSStore(builder, slot);
+    if (failed(stored))
+      return failure();
+    storedSlots.push_back(*stored);
+  }
+  for (const LDSStoredSlot &stored : storedSlots)
+    if (failed(replaceLDSReliefUses(builder, stored, plannedValues)))
+      return failure();
+  reserveLDSSpillBytes(func, builder, candidate.reservedBytes);
+  return success();
+}
+
 static LogicalResult refreshFuncTypeFromBody(func::FuncOp func) {
   SmallVector<Type> inputs(func.getBody().front().getArgumentTypes());
   SmallVector<Type> outputs;
@@ -2379,6 +2988,59 @@ static LogicalResult runRegAllocRematRelief(func::FuncOp func) {
   return success();
 }
 
+static FailureOr<std::optional<LDSReliefCandidate>>
+selectLDSReliefCandidateFromState(
+    func::FuncOp func, const RegAllocTransformFailure &failureRecord) {
+  DictionaryAttr state = func->getAttrOfType<DictionaryAttr>(
+      wave::getRegAllocTransformStateAttrName());
+  FailureOr<SmallVector<wave::RegAllocTransformValue>> values =
+      wave::parseRegAllocTransformValues(state, func.getOperation());
+  if (failed(values))
+    return failure();
+  FailureOr<SmallVector<wave::RegAllocTransformAliasSet>> sets =
+      wave::parseRegAllocTransformAliasSets(state, *values,
+                                            func.getOperation());
+  if (failed(sets))
+    return failure();
+  FailureOr<SmallVector<ResolvedRegAllocValue>> resolvedValues =
+      resolveRegAllocStateValues(func, *values);
+  if (failed(resolvedValues))
+    return failure();
+  FailureOr<wave::regalloc::RegisterBudgets> budgets =
+      getLDSTransformBudgets(func);
+  if (failed(budgets))
+    return failure();
+
+  RematReliefContext context = buildRematReliefContext(func, *resolvedValues);
+  return selectLDSReliefCandidate(func, failureRecord, *sets, *values, context,
+                                  *budgets);
+}
+
+static LogicalResult runRegAllocLDSRelief(func::FuncOp func) {
+  FailureOr<std::optional<RegAllocTransformFailure>> failureRecord =
+      parseRegAllocTransformFailure(func);
+  if (failed(failureRecord))
+    return failure();
+  if (!*failureRecord)
+    return success();
+  if (!isAGPRRelievableFailure(**failureRecord))
+    return success();
+
+  FailureOr<std::optional<LDSReliefCandidate>> candidate =
+      selectLDSReliefCandidateFromState(func, **failureRecord);
+  if (failed(candidate))
+    return failure();
+  if (!*candidate)
+    return success();
+
+  OpBuilder builder(func.getContext());
+  if (failed(materializeLDSRelief(builder, func, **candidate)))
+    return failure();
+  func->removeAttr(wave::getRegAllocTransformAssignmentsAttrName());
+  func->removeAttr(wave::getRegAllocTransformStateAttrName());
+  return success();
+}
+
 } // namespace
 
 LogicalResult wave::buildRegAllocTransformAliasState(Operation *target,
@@ -2424,6 +3086,17 @@ LogicalResult wave::runRegAllocTransformRematRelief(Operation *target,
   WalkResult walk = target->walk([&](func::FuncOp func) {
     return failed(runRegAllocRematRelief(func)) ? WalkResult::interrupt()
                                                 : WalkResult::advance();
+  });
+  return failure(walk.wasInterrupted());
+}
+
+LogicalResult wave::runRegAllocTransformLDSRelief(Operation *target,
+                                                  Builder &builder) {
+  if (func::FuncOp func = dyn_cast<func::FuncOp>(target))
+    return runRegAllocLDSRelief(func);
+  WalkResult walk = target->walk([&](func::FuncOp func) {
+    return failed(runRegAllocLDSRelief(func)) ? WalkResult::interrupt()
+                                              : WalkResult::advance();
   });
   return failure(walk.wasInterrupted());
 }

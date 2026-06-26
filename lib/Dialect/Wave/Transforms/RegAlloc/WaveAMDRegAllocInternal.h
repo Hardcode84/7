@@ -2213,9 +2213,14 @@ void recordPlannedPressureRelief(
     std::unique_ptr<wave::WaveAMDPressureReliefPlan> plan);
 
 StringRef getLDSSpillPlanStatusName(LDSSpillPlanStatus status);
+void getExistingLDSBytes(func::FuncOp func, unsigned &fixedBytes,
+                         unsigned &dynamicBytes, unsigned reservedSpillBytes);
 LDSSpillPlan planLDSSpillSlot(func::FuncOp func, RegisterBudgets budgets,
                               unsigned valueBytes,
                               unsigned reservedSpillBytes = 0);
+LDSSpillPlan planLDSSpillSlot(func::FuncOp func, RegisterBudgets budgets,
+                              unsigned valueBytes, unsigned reservedSpillBytes,
+                              unsigned fixedLDS, unsigned dynamicLDS);
 StringRef getScratchSpillPlanStatusName(ScratchSpillPlanStatus status);
 ScratchSpillPlan planScratchSpillSlot(func::FuncOp func, unsigned valueBytes,
                                       unsigned reservedSpillBytes = 0);
