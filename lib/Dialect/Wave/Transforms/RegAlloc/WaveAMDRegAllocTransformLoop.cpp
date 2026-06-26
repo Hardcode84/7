@@ -11,6 +11,7 @@
 #include "WaveAMDRegAllocTransformState.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachine.h"
+#include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
@@ -52,6 +53,107 @@ struct RegAllocAliasSet {
   SmallVector<unsigned> members;
   unsigned id = 0;
 };
+
+static bool isSGPR(waveamdmachine::RegType type) {
+  return type.getRegClass() == waveamdmachine::RegClass::SGPR;
+}
+
+static bool isVGPR(waveamdmachine::RegType type) {
+  return type.getRegClass() == waveamdmachine::RegClass::VGPR;
+}
+
+static bool isAGPR(waveamdmachine::RegType type) {
+  return type.getRegClass() == waveamdmachine::RegClass::AGPR;
+}
+
+static waveamdmachine::RegType
+getUnassignedRegType(waveamdmachine::RegType type) {
+  return waveamdmachine::RegType::get(type.getContext(), type.getRegClass(),
+                                      type.getWidth(), /*index=*/-1);
+}
+
+static FailureOr<Value>
+cloneImmediateTupleMove(OpBuilder &builder, Value value,
+                        waveamdmachine::RegType resultType) {
+  auto mov = value.getDefiningOp<waveamdmachine::VMovB32TupleOp>();
+  if (!mov || !mov.getSource().getDefiningOp<waveamdmachine::ImmOp>())
+    return failure();
+  Operation *clone = builder.clone(*mov);
+  clone->getResult(0).setType(resultType);
+  return clone->getResult(0);
+}
+
+static FailureOr<Value> cloneAGPRDuplicate(OpBuilder &builder, Value value,
+                                           waveamdmachine::RegType resultType) {
+  Operation *def = value.getDefiningOp();
+  if (!isa_and_nonnull<waveamdmachine::UninitOp,
+                       waveamdmachine::VAccvgprWriteB32TupleOp>(def))
+    return failure();
+  Operation *clone = builder.clone(*def);
+  clone->getResult(0).setType(resultType);
+  return clone->getResult(0);
+}
+
+static Value copyVGPRDuplicate(OpBuilder &builder, Location loc, Value value,
+                               waveamdmachine::RegType resultType,
+                               waveamdmachine::RegType sourceType) {
+  auto copy =
+      waveamdmachine::VMovB32TupleOp::create(builder, loc, resultType, value);
+  copy->setAttr("registers", builder.getI64IntegerAttr(sourceType.getWidth()));
+  return copy.getResult();
+}
+
+static Value copySGPRDuplicate(OpBuilder &builder, Location loc, Value value,
+                               waveamdmachine::RegType resultType,
+                               waveamdmachine::RegType sourceType) {
+  auto copy =
+      waveamdmachine::SMovB32TupleOp::create(builder, loc, resultType, value);
+  copy->setAttr("registers", builder.getI64IntegerAttr(sourceType.getWidth()));
+  return copy.getResult();
+}
+
+static FailureOr<Value> duplicateRegValue(OpBuilder &builder, Location loc,
+                                          Value value) {
+  waveamdmachine::RegType type = cast<waveamdmachine::RegType>(value.getType());
+  waveamdmachine::RegType resultType = getUnassignedRegType(type);
+  FailureOr<Value> immClone =
+      cloneImmediateTupleMove(builder, value, resultType);
+  if (succeeded(immClone))
+    return *immClone;
+  if (isAGPR(type)) {
+    FailureOr<Value> agprClone = cloneAGPRDuplicate(builder, value, resultType);
+    if (succeeded(agprClone))
+      return *agprClone;
+    return emitError(loc) << "regalloc transform cannot duplicate AGPR value";
+  }
+  if (isVGPR(type))
+    return copyVGPRDuplicate(builder, loc, value, resultType, type);
+  if (isSGPR(type))
+    return copySGPRDuplicate(builder, loc, value, resultType, type);
+  return emitError(loc, "regalloc transform cannot duplicate register value");
+}
+
+static LogicalResult splitDuplicateLoopInits(func::FuncOp func) {
+  SmallVector<waveamdmachine::UniformLoopOp> loops;
+  func.walk([&](waveamdmachine::UniformLoopOp loop) { loops.push_back(loop); });
+  OpBuilder builder(func.getContext());
+  for (waveamdmachine::UniformLoopOp loop : loops) {
+    DenseSet<Value> seen;
+    builder.setInsertionPoint(loop);
+    for (auto [index, init] : llvm::enumerate(loop.getInits())) {
+      if (!wave::getRegAllocTransformTrackedRegType(init))
+        continue;
+      if (seen.insert(init).second)
+        continue;
+      FailureOr<Value> duplicate =
+          duplicateRegValue(builder, loop.getLoc(), init);
+      if (failed(duplicate))
+        return failure();
+      loop.getInitsMutable()[index].assign(*duplicate);
+    }
+  }
+  return success();
+}
 
 class RegAllocAliasStateBuilder {
 public:
@@ -793,6 +895,8 @@ private:
 
 static LogicalResult setRegAllocTransformState(func::FuncOp func,
                                                Builder &builder) {
+  if (failed(splitDuplicateLoopInits(func)))
+    return failure();
   RegAllocAliasStateBuilder stateBuilder(func, builder);
   FailureOr<DictionaryAttr> state = stateBuilder.build();
   if (failed(state))
