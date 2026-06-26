@@ -236,6 +236,45 @@ private:
     values[it->second].end = std::max(values[it->second].end, position);
   }
 
+  bool isValueDefinedInside(Operation *scope, Value value) {
+    if (Operation *def = value.getDefiningOp())
+      return def == scope || scope->isAncestor(def);
+    auto arg = cast<BlockArgument>(value);
+    Operation *owner = arg.getOwner()->getParentOp();
+    return owner && (owner == scope || scope->isAncestor(owner));
+  }
+
+  void collectExternalLoopBodyUse(Value operand, Operation *user) {
+    if (!valueIds.contains(operand))
+      return;
+    for (Operation *scope = user->getParentOp(); scope;
+         scope = scope->getParentOp()) {
+      auto loop = dyn_cast<waveamdmachine::UniformLoopOp>(scope);
+      if (!loop || isValueDefinedInside(scope, operand))
+        continue;
+      externalLoopUses[scope].insert(operand);
+    }
+  }
+
+  unsigned getLoopExitPosition(waveamdmachine::UniformLoopOp loop) {
+    if (loop.getBody().empty())
+      return positions.lookup(loop.getOperation());
+    Operation *terminator = loop.getBody().front().getTerminator();
+    auto it = positions.find(terminator);
+    if (it != positions.end())
+      return it->second;
+    return positions.lookup(loop.getOperation());
+  }
+
+  void extendExternalLoopUses() {
+    for (auto &entry : externalLoopUses) {
+      auto loop = cast<waveamdmachine::UniformLoopOp>(entry.first);
+      unsigned exit = getLoopExitPosition(loop);
+      for (Value value : entry.second)
+        extendValue(value, exit);
+    }
+  }
+
   void addAliasEdge(Value lhs, Value rhs, int64_t delta) {
     auto lhsIt = valueIds.find(lhs);
     auto rhsIt = valueIds.find(rhs);
@@ -326,12 +365,15 @@ private:
 
   void collectUsesAndAliases() {
     for (RegAllocAliasOp &record : ops) {
-      for (Value operand : record.op->getOperands())
+      for (Value operand : record.op->getOperands()) {
         extendValue(operand, record.position);
+        collectExternalLoopBodyUse(operand, record.op);
+      }
       collectTupleAliases(record.op);
       collectMMAAliases(record.op);
       collectRegionAliases(record.op);
     }
+    extendExternalLoopUses();
   }
 
   LogicalResult addAliasAdjacencyEdge(RegAllocAliasEdge edge,
@@ -520,6 +562,7 @@ private:
   SmallVector<RegAllocAliasValue> values;
   SmallVector<RegAllocAliasEdge> edges;
   SmallVector<RegAllocAliasSet> aliasSets;
+  DenseMap<Operation *, DenseSet<Value>> externalLoopUses;
   DenseMap<Operation *, unsigned> positions;
   DenseMap<Value, unsigned> valueIds;
   func::FuncOp func;

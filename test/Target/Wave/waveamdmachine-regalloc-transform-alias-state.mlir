@@ -63,5 +63,34 @@ module attributes {transform.with_named_sequence} {
       } -> !waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>
       return
     }
+
+    // CHECK-LABEL: func.func @loop_invariant_body_use_alias_state(
+    // CHECK-SAME: [[INV:%[^:]+]]: !waveamdmachine.reg<vgpr, 1>
+    // CHECK-SAME: waveamdmachine.regalloc_transform_state =
+    // CHECK-SAME: debug = {alias_edges = 3 : i64, alias_sets = 3 : i64, ops = 5 : i64, values = 6 : i64}
+    // CHECK-SAME: values = [{class = "vgpr", end = 3 : i64, id = 0 : i64
+    // CHECK: [[USE:%.*]] = waveamdmachine.v_mov_b32_tuple [[INV]] {registers = 1 : i64}
+    // SCAN-LABEL: func.func @loop_invariant_body_use_alias_state(
+    // SCAN-SAME: [[INV:%[^:]+]]: !waveamdmachine.reg<vgpr, 1, [[INV_BASE:[0-9]+]]>
+    // SCAN-SAME: waveamdmachine.regalloc_assignments
+    // SCAN-SAME: stage = "linear-scan-success"
+    // SCAN: [[USE:%.*]] = waveamdmachine.v_mov_b32_tuple [[INV]] {registers = 1 : i64} : (!waveamdmachine.reg<vgpr, 1, [[INV_BASE]]>) -> !waveamdmachine.reg<vgpr, 1
+    func.func @loop_invariant_body_use_alias_state(
+        %invariant: !waveamdmachine.reg<vgpr, 1>,
+        %carry: !waveamdmachine.reg<vgpr, 1>,
+        %cond: !waveamdmachine.reg<scc, 1>) {
+      %loop = waveamdmachine.uniform_loop if %cond
+          : !waveamdmachine.reg<scc, 1>
+          carries(%carry : !waveamdmachine.reg<vgpr, 1>) {
+      ^bb0(%acc: !waveamdmachine.reg<vgpr, 1>):
+        %use = waveamdmachine.v_mov_b32_tuple %invariant {registers = 1 : i64}
+            : (!waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
+        %next = waveamdmachine.v_mov_b32_tuple %acc {registers = 1 : i64}
+            : (!waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
+        waveamdmachine.continue_if %cond : !waveamdmachine.reg<scc, 1>
+            carries(%next : !waveamdmachine.reg<vgpr, 1>)
+      } -> !waveamdmachine.reg<vgpr, 1>
+      return
+    }
   }
 }
