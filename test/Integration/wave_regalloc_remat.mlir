@@ -1,6 +1,6 @@
 // RUN: wave-opt --waveamd-reg-alloc --waveamd-resource-info %s | FileCheck %s
 // RUN: wave-opt --waveamd-reg-alloc --waveamd-resource-info %s \
-// RUN:   | wave-translate --wave-to-amdgpu-asm - \
+// RUN:   | env WAVE_PIPELINES_DIR=%S/../Target/Wave/Inputs/emit-only-pipeline wave-translate --wave-to-amdgpu-asm - \
 // RUN:   | llvm-mc -triple=amdgcn-amd-amdhsa -mcpu=gfx950 -filetype=obj -o /dev/null
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {

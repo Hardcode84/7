@@ -73,5 +73,53 @@ module attributes {transform.with_named_sequence} {
       %fresh = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1>
       return %fresh : !waveamdmachine.reg<vgpr, 1>
     }
+
+    // CHECK-LABEL: func.func @wide_sgpr_aligns_after_single
+    // CHECK-SAME: !waveamdmachine.reg<sgpr, 1, 0>
+    // CHECK-SAME: !waveamdmachine.reg<sgpr, 2, 2>
+    func.func @wide_sgpr_aligns_after_single()
+        -> (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<sgpr, 2>) {
+      %one = waveamdmachine.uninit : !waveamdmachine.reg<sgpr, 1>
+      %wide = waveamdmachine.uninit : !waveamdmachine.reg<sgpr, 2>
+      return %one, %wide
+          : !waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<sgpr, 2>
+    }
+
+    // CHECK-LABEL: func.func @implicit_sload_base_reserves_sgprs
+    // CHECK-SAME: wave.kernel
+    // CHECK-SAME: waveamdmachine.regalloc_assignments
+    // CHECK-SAME: assignments = [{base = 2 : i64, class = "sgpr"
+    // CHECK-SAME: {base = 0 : i64, class = "sgpr"
+    // CHECK-SAME: stage = "linear-scan-success"
+    // CHECK: waveamdmachine.s_load_b64 {{.*}}, "s[0:1]" : (!waveamdmachine.imm) -> !waveamdmachine.reg<sgpr, 2, 2>
+    // CHECK: waveamdmachine.uninit : !waveamdmachine.reg<sgpr, 1, 0>
+    func.func @implicit_sload_base_reserves_sgprs()
+        -> !waveamdmachine.reg<sgpr, 1> attributes {wave.kernel} {
+      %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+      %loaded = waveamdmachine.s_load_b64 %zero, "s[0:1]"
+          : (!waveamdmachine.imm) -> !waveamdmachine.reg<sgpr, 2>
+      %parts:2 = waveamdmachine.tuple_to_elements %loaded
+          : (!waveamdmachine.reg<sgpr, 2>)
+            -> (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<sgpr, 1>)
+      %fresh = waveamdmachine.uninit : !waveamdmachine.reg<sgpr, 1>
+      return %fresh : !waveamdmachine.reg<sgpr, 1>
+    }
+
+    // CHECK-LABEL: func.func @implicit_sload_avoids_future_workgroup_id
+    // CHECK-SAME: wave.kernel
+    // CHECK: waveamdmachine.s_load_b64 {{.*}}, "s[0:1]" : (!waveamdmachine.imm) -> !waveamdmachine.reg<sgpr, 2, 4>
+    // CHECK: waveamdmachine.s_workgroup_id_x : !waveamdmachine.reg<sgpr, 1, 2>
+    func.func @implicit_sload_avoids_future_workgroup_id()
+        -> (!waveamdmachine.reg<sgpr, 2>, !waveamdmachine.reg<sgpr, 1, 2>)
+        attributes {wave.kernel} {
+      %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+      %loaded = waveamdmachine.s_load_b64 %zero, "s[0:1]"
+          : (!waveamdmachine.imm) -> !waveamdmachine.reg<sgpr, 2>
+      %workgroup = waveamdmachine.s_workgroup_id_x
+          : !waveamdmachine.reg<sgpr, 1, 2>
+      return %loaded, %workgroup
+          : !waveamdmachine.reg<sgpr, 2>,
+            !waveamdmachine.reg<sgpr, 1, 2>
+    }
   }
 }

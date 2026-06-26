@@ -1,18 +1,24 @@
 add_mlir_dialect_library(MLIRWaveDialect
   PARTIAL_SOURCES_INTENDED
   Wave.cpp
+  WaveAMDABI.cpp
   WaveMemoryAddress.cpp
   WaveSymbols.cpp
   WaveTransformOps.cpp
+  ../Transforms/WaveAMDHardwareResources.cpp
   ../Transforms/RegAlloc/WaveAMDRegAllocLDSPlanning.cpp
+  ../Transforms/RegAlloc/WaveAMDRegAllocPrep.cpp
   ../Transforms/RegAlloc/WaveAMDRegAllocScratchPlanning.cpp
   ../Transforms/RegAlloc/WaveAMDRegAllocTransformLoop.cpp
   ../Transforms/RegAlloc/WaveAMDRegAllocTransformState.cpp
+  ../Transforms/RegAlloc/WaveAMDRegisterLimits.cpp
 
   ADDITIONAL_HEADER_DIRS
   ${MLIR_MAIN_INCLUDE_DIR}/mlir/Dialect/Wave
 
   DEPENDS
+  MLIRWaveAMDAttributesIncGen
+  MLIRWaveAMDOpsIncGen
   MLIRWaveAttributesIncGen
   MLIRWaveEnumsIncGen
   MLIRWaveOpsIncGen
@@ -37,6 +43,7 @@ add_mlir_dialect_library(MLIRWaveDialect
   MLIRTransformDialect
   MLIRTransformDialectInterfaces
   MLIRWaveAMDMachineCostModel
+  MLIRWaveAMDMachineDialect
   WaveIXSimpl
   )
 
@@ -49,7 +56,6 @@ target_include_directories(obj.MLIRWaveDialect
 add_mlir_dialect_library(MLIRWaveAMDDialect
   PARTIAL_SOURCES_INTENDED
   WaveAMD.cpp
-  WaveAMDABI.cpp
 
   ADDITIONAL_HEADER_DIRS
   ${MLIR_MAIN_INCLUDE_DIR}/mlir/Dialect/Wave

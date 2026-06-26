@@ -1,6 +1,11 @@
 // RUN: wave-opt %s --pass-pipeline='builtin.module(transform-preload-library{transform-library-paths=%wave_pipelines},transform-interpreter{entry-point=waveamd_regalloc_transform_loop})' | FileCheck %s
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
+  // CHECK-LABEL: func.func private @regalloc_transform_loop_decl
+  // CHECK-NOT: waveamdmachine.regalloc_transform_state
+  func.func private @regalloc_transform_loop_decl(!waveamdmachine.reg<vgpr, 1>)
+      -> !waveamdmachine.reg<vgpr, 1>
+
   // CHECK-LABEL: func.func @regalloc_transform_loop_mwe
   // CHECK-SAME: !waveamdmachine.reg<vgpr, 1, 0>
   // CHECK-SAME: waveamdmachine.regalloc_assignments
@@ -16,15 +21,15 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
   // CHECK-LABEL: func.func @regalloc_transform_loop_aliases
   // CHECK-SAME: !waveamdmachine.reg<vgpr, 2, 0>
-  // CHECK-SAME: !waveamdmachine.reg<vgpr, 4, 2>
-  // CHECK-SAME: !waveamdmachine.reg<vgpr, 4, 6>
-  // CHECK-SAME: !waveamdmachine.reg<vgpr, 4, 10>
+  // CHECK-SAME: !waveamdmachine.reg<vgpr, 4, 4>
+  // CHECK-SAME: !waveamdmachine.reg<vgpr, 4, 8>
+  // CHECK-SAME: !waveamdmachine.reg<vgpr, 4, 12>
   // CHECK-SAME: waveamdmachine.regalloc_assignments
   // CHECK-SAME: waveamdmachine.regalloc_transform_state =
   // CHECK-SAME: assignments = [{base = 0 : i64, class = "vgpr"
-  // CHECK-SAME: {base = 2 : i64, class = "vgpr"
-  // CHECK-SAME: {base = 6 : i64, class = "vgpr"
-  // CHECK-SAME: {base = 10 : i64, class = "vgpr"
+  // CHECK-SAME: {base = 4 : i64, class = "vgpr"
+  // CHECK-SAME: {base = 8 : i64, class = "vgpr"
+  // CHECK-SAME: {base = 12 : i64, class = "vgpr"
   // CHECK-SAME: debug = {alias_edges = 5 : i64, alias_sets = 4 : i64, ops = 4 : i64, values = 8 : i64}
   // CHECK-SAME: name = "waveamdmachine.mfma_f32_16x16x32_f16"
   // CHECK-SAME: stage = "linear-scan-success"
@@ -48,7 +53,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
   // CHECK-LABEL: func.func @regalloc_transform_loop_shared_mfma_acc
   // CHECK-SAME: waveamdmachine.regalloc_transform_state =
-  // CHECK-SAME: debug = {alias_edges = 1 : i64, alias_sets = 6 : i64, ops = 3 : i64, values = 7 : i64}
+  // CHECK-SAME: debug = {alias_edges = 2 : i64, alias_sets = 7 : i64, ops = 5 : i64, values = 9 : i64}
   // CHECK-SAME: name = "waveamdmachine.mfma_f32_16x16x32_f16"
   // CHECK-SAME: stage = "linear-scan-success"
   func.func @regalloc_transform_loop_shared_mfma_acc(
@@ -69,13 +74,13 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
   // CHECK-LABEL: func.func @regalloc_transform_loop_last_use_mfma_acc
   // CHECK-SAME: waveamdmachine.regalloc_assignments
   // CHECK-SAME: waveamdmachine.regalloc_transform_state =
-  // CHECK-SAME: debug = {alias_edges = 5 : i64, alias_sets = 3 : i64, ops = 3 : i64, values = 8 : i64}
+  // CHECK-SAME: debug = {alias_edges = 5 : i64, alias_sets = 4 : i64, ops = 4 : i64, values = 9 : i64}
   // CHECK-SAME: stage = "linear-scan-success"
   func.func @regalloc_transform_loop_last_use_mfma_acc(
       %a: !waveamdmachine.reg<vgpr, 4>,
       %b: !waveamdmachine.reg<vgpr, 4>,
       %acc: !waveamdmachine.reg<vgpr, 4>)
-      attributes {waveamdmachine.vgpr_count_max = 12 : i64} {
+      attributes {waveamdmachine.vgpr_count_max = 16 : i64} {
     %parts:4 = waveamdmachine.tuple_to_elements %acc
         : (!waveamdmachine.reg<vgpr, 4>)
         -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,

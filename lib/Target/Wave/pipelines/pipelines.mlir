@@ -100,19 +100,9 @@ module attributes {transform.with_named_sequence} {
     transform.yield %rscc : !transform.any_op
   }
 
-  transform.named_sequence @waveamd_backend_finish(
+  transform.named_sequence @waveamd_backend_post_regalloc(
       %root: !transform.any_op {transform.consumed}) -> !transform.any_op {
-    %rclr = transform.apply_registered_pass "waveamd-clear-regalloc-assignments" to %root
-        : (!transform.any_op) -> !transform.any_op
-    %r4 = transform.apply_registered_pass "waveamd-preserve-hw-regs" to %rclr
-        : (!transform.any_op) -> !transform.any_op
-    %rc = transform.apply_registered_pass "canonicalize" to %r4
-        : (!transform.any_op) -> !transform.any_op
-    %rcs = transform.apply_registered_pass "cse" to %rc
-        : (!transform.any_op) -> !transform.any_op
-    %r5 = transform.apply_registered_pass "waveamd-reg-alloc" to %rcs
-        : (!transform.any_op) -> !transform.any_op
-    %rd = transform.apply_registered_pass "waveamd-decompose-mem-tuples" to %r5
+    %rd = transform.apply_registered_pass "waveamd-decompose-mem-tuples" to %root
         : (!transform.any_op) -> !transform.any_op
     %rpz = transform.apply_registered_pass "waveamd-pack-vgpr-zero-moves" to %rd
         : (!transform.any_op) -> !transform.any_op
@@ -128,6 +118,47 @@ module attributes {transform.with_named_sequence} {
     %r9 = transform.apply_registered_pass "waveamd-metadata" to %rv
         : (!transform.any_op) -> !transform.any_op
     transform.yield %r9 : !transform.any_op
+  }
+
+  transform.named_sequence @waveamd_backend_finish_legacy_regalloc(
+      %root: !transform.any_op {transform.consumed}) -> !transform.any_op {
+    %rclr = transform.apply_registered_pass "waveamd-clear-regalloc-assignments" to %root
+        : (!transform.any_op) -> !transform.any_op
+    %r4 = transform.apply_registered_pass "waveamd-preserve-hw-regs" to %rclr
+        : (!transform.any_op) -> !transform.any_op
+    %rc = transform.apply_registered_pass "canonicalize" to %r4
+        : (!transform.any_op) -> !transform.any_op
+    %rcs = transform.apply_registered_pass "cse" to %rc
+        : (!transform.any_op) -> !transform.any_op
+    %r5 = transform.apply_registered_pass "waveamd-reg-alloc" to %rcs
+        : (!transform.any_op) -> !transform.any_op
+    %r9 = transform.include @waveamd_backend_post_regalloc failures(propagate) (%r5)
+        : (!transform.any_op) -> !transform.any_op
+    transform.yield %r9 : !transform.any_op
+  }
+
+  transform.named_sequence @waveamd_backend_finish_transform_regalloc(
+      %root: !transform.any_op {transform.consumed}) -> !transform.any_op {
+    %rclr = transform.apply_registered_pass "waveamd-clear-regalloc-assignments" to %root
+        : (!transform.any_op) -> !transform.any_op
+    %r4 = transform.apply_registered_pass "waveamd-preserve-hw-regs" to %rclr
+        : (!transform.any_op) -> !transform.any_op
+    %rc = transform.apply_registered_pass "canonicalize" to %r4
+        : (!transform.any_op) -> !transform.any_op
+    %rcs = transform.apply_registered_pass "cse" to %rc
+        : (!transform.any_op) -> !transform.any_op
+    %r5 = transform.include @waveamd_regalloc_transform_loop failures(propagate) (%rcs)
+        : (!transform.any_op) -> !transform.any_op
+    %r9 = transform.include @waveamd_backend_post_regalloc failures(propagate) (%r5)
+        : (!transform.any_op) -> !transform.any_op
+    transform.yield %r9 : !transform.any_op
+  }
+
+  transform.named_sequence @waveamd_backend_finish(
+      %root: !transform.any_op {transform.consumed}) -> !transform.any_op {
+    %r = transform.include @waveamd_backend_finish_legacy_regalloc failures(propagate) (%root)
+        : (!transform.any_op) -> !transform.any_op
+    transform.yield %r : !transform.any_op
   }
 
   transform.named_sequence @waveamd_regalloc_transform_loop(

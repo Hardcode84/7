@@ -61,6 +61,22 @@
 // PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
 // PIPELINE-NEXT: transform.apply_registered_pass "waveamd-elide-scc-bool-roundtrip"
 // PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
+// PIPELINE: transform.named_sequence @waveamd_backend_post_regalloc
+// PIPELINE: transform.apply_registered_pass "waveamd-decompose-mem-tuples"
+// PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
+// PIPELINE-NEXT: transform.apply_registered_pass "waveamd-pack-vgpr-zero-moves"
+// PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
+// PIPELINE-NEXT: // Preserve structured exec_if until waits see real control flow.
+// PIPELINE-NEXT: transform.apply_registered_pass "waveamd-insert-ticket-waits"
+// PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
+// PIPELINE-NEXT: transform.apply_registered_pass "waveamd-insert-hazard-waits"
+// PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
+// PIPELINE-NEXT: transform.apply_registered_pass "waveamd-resource-info"
+// PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
+// PIPELINE-NEXT: transform.apply_registered_pass "waveamd-verify-machine-operands"
+// PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
+// PIPELINE-NEXT: transform.apply_registered_pass "waveamd-metadata"
+// PIPELINE: transform.named_sequence @waveamd_backend_finish_legacy_regalloc
 // PIPELINE: transform.apply_registered_pass "waveamd-clear-regalloc-assignments"
 // PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
 // PIPELINE-NEXT: transform.apply_registered_pass "waveamd-preserve-hw-regs"
@@ -71,18 +87,16 @@
 // PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
 // PIPELINE-NEXT: transform.apply_registered_pass "waveamd-reg-alloc" to {{.*}}
 // PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
-// PIPELINE-NEXT: transform.apply_registered_pass "waveamd-decompose-mem-tuples"
-// PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
-// PIPELINE-NEXT: transform.apply_registered_pass "waveamd-pack-vgpr-zero-moves"
-// PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
-// PIPELINE-NEXT: // Preserve structured exec_if until waits see real control flow.
-// PIPELINE-NEXT: transform.apply_registered_pass "waveamd-insert-ticket-waits"
-// PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
-// PIPELINE: transform.apply_registered_pass "waveamd-resource-info"
-// PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
-// PIPELINE-NEXT: transform.apply_registered_pass "waveamd-verify-machine-operands"
-// PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
-// PIPELINE-NEXT: transform.apply_registered_pass "waveamd-metadata"
+// PIPELINE-NEXT: transform.include @waveamd_backend_post_regalloc
+// PIPELINE: transform.named_sequence @waveamd_backend_finish_transform_regalloc
+// PIPELINE: transform.apply_registered_pass "waveamd-clear-regalloc-assignments"
+// PIPELINE: transform.apply_registered_pass "waveamd-preserve-hw-regs"
+// PIPELINE: transform.apply_registered_pass "canonicalize"
+// PIPELINE: transform.apply_registered_pass "cse"
+// PIPELINE: transform.include @waveamd_regalloc_transform_loop
+// PIPELINE: transform.include @waveamd_backend_post_regalloc
+// PIPELINE: transform.named_sequence @waveamd_backend_finish
+// PIPELINE: transform.include @waveamd_backend_finish_legacy_regalloc
 // PIPELINE: transform.named_sequence @waveamd_regalloc_transform_loop
 // PIPELINE: wave.transform.regalloc_loop from
 // PIPELINE-NEXT: body = @waveamd_regalloc_transform_iteration

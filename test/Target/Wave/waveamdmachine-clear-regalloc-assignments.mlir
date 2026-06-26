@@ -20,6 +20,24 @@ func.func @clear_stale_assignments()
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
+// CHECK-LABEL: func.func @clear_transform_loop_state
+// CHECK-NOT: waveamdmachine.regalloc_transform_state
+func.func @clear_transform_loop_state()
+    attributes {waveamdmachine.regalloc_transform_state = {stage = "linear-scan-success"}} {
+  %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+  // CHECK: [[VALUE:%.*]] = waveamdmachine.v_mov_b32_tuple
+  // CHECK-SAME: -> !waveamdmachine.reg<vgpr, 1>
+  %value = waveamdmachine.v_mov_b32_tuple %zero {registers = 1 : i64}
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1, 7>
+  return
+}
+
+}
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
+
 // CHECK-LABEL: func.func @clear_lds_spill_state
 // CHECK-SAME: waveamdmachine.lds_spill_bytes = 4 : i64
 func.func @clear_lds_spill_state()

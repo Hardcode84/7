@@ -11,6 +11,7 @@
 #include "../WaveAMDHardwareResources.h"
 #include "WaveAMDRegAllocInternal.h"
 #include "WaveAMDRegAllocPrep.h"
+#include "WaveAMDRegAllocTransformState.h"
 #include "WaveAMDRegLiveIntervals.h"
 #include "WaveAMDRegPressureRelief.h"
 #include "WaveAMDRegisterLimits.h"
@@ -534,7 +535,9 @@ static bool hasProviderRegAllocState(func::FuncOp func) {
 }
 
 static bool shouldClearRegAllocAssignments(func::FuncOp func) {
-  return func->hasAttr(kAssignmentsAttr) || hasProviderRegAllocState(func);
+  return func->hasAttr(kAssignmentsAttr) ||
+         func->hasAttr(wave::getRegAllocTransformStateAttrName()) ||
+         hasProviderRegAllocState(func);
 }
 
 static LogicalResult clearRegAllocAssignments(func::FuncOp func,
@@ -550,6 +553,7 @@ static LogicalResult clearRegAllocAssignments(func::FuncOp func,
     return WalkResult::advance();
   });
   func->removeAttr(kAssignmentsAttr);
+  wave::clearRegAllocTransformState(func);
   return success(!walk.wasInterrupted());
 }
 

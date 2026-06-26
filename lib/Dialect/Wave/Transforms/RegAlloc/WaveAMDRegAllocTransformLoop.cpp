@@ -9,6 +9,7 @@
 #include "WaveAMDRegAllocTransformLoop.h"
 
 #include "WaveAMDRegAllocInternal.h"
+#include "WaveAMDRegAllocPrep.h"
 #include "WaveAMDRegAllocTransformState.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachine.h"
@@ -824,6 +825,7 @@ template <typename PlanT> struct MemoryReliefSlot {
   Value value;
   waveamdmachine::RegType type;
   const wave::RegAllocTransformValue *stateValue = nullptr;
+  std::optional<wave::regalloc::MemorySpillLoopCarrySlot> loopCarry;
   int64_t cost = 0;
   unsigned useCount = 0;
 };
@@ -1343,6 +1345,142 @@ static void collectRegAllocOpPositions(Region &region,
         collectRegAllocOpPositions(nested, ops);
     }
   }
+}
+
+using ReservedLaneUses = SmallVector<std::optional<unsigned>, 8>;
+
+static void noteReservedLaneUse(ReservedLaneUses &lastUses, unsigned lane,
+                                unsigned position) {
+  if (lane >= lastUses.size())
+    return;
+  std::optional<unsigned> &lastUse = lastUses[lane];
+  lastUse = lastUse ? std::max(*lastUse, position) : position;
+}
+
+static void noteReservedSpanUse(ReservedLaneUses &lastUses, unsigned begin,
+                                unsigned width, unsigned position) {
+  for (unsigned lane : llvm::seq<unsigned>(begin, begin + width))
+    noteReservedLaneUse(lastUses, lane, position);
+}
+
+static std::optional<std::pair<unsigned, unsigned>>
+parseSGPRSpan(StringRef text) {
+  text = text.trim();
+  if (!text.consume_front("s"))
+    return std::nullopt;
+  if (text.consume_front("[")) {
+    StringRef beginText;
+    StringRef endText;
+    std::tie(beginText, text) = text.split(':');
+    std::tie(endText, text) = text.split(']');
+    if (beginText.empty() || endText.empty() || !text.empty())
+      return std::nullopt;
+    unsigned begin = 0;
+    unsigned end = 0;
+    if (beginText.getAsInteger(10, begin) || endText.getAsInteger(10, end) ||
+        end < begin)
+      return std::nullopt;
+    return std::make_pair(begin, end - begin + 1);
+  }
+  unsigned reg = 0;
+  if (text.getAsInteger(10, reg))
+    return std::nullopt;
+  return std::make_pair(reg, 1);
+}
+
+static std::optional<StringRef> getSLoadBase(Operation *op) {
+  if (auto load = dyn_cast<waveamdmachine::SLoadB32Op>(op))
+    return load.getBase();
+  if (auto load = dyn_cast<waveamdmachine::SLoadB64Op>(op))
+    return load.getBase();
+  if (auto load = dyn_cast<waveamdmachine::SLoadB128Op>(op))
+    return load.getBase();
+  return std::nullopt;
+}
+
+static unsigned
+getOperationEnd(Operation *op, const DenseMap<Operation *, unsigned> &positions,
+                DenseMap<Operation *, unsigned> &endCache) {
+  auto cached = endCache.find(op);
+  if (cached != endCache.end())
+    return cached->second;
+  unsigned end = positions.lookup(op);
+  op->walk([&](Operation *nested) {
+    auto it = positions.find(nested);
+    if (it != positions.end())
+      end = std::max(end, it->second);
+  });
+  endCache[op] = end;
+  return end;
+}
+
+static unsigned
+getImplicitABIUseEnd(Operation *op,
+                     const DenseMap<Operation *, unsigned> &positions,
+                     DenseMap<Operation *, unsigned> &endCache) {
+  unsigned end = positions.lookup(op);
+  for (Operation *parent = op->getParentOp(); parent;
+       parent = parent->getParentOp())
+    if (isa<waveamdmachine::UniformLoopOp>(parent))
+      end = std::max(end, getOperationEnd(parent, positions, endCache));
+  return end;
+}
+
+static void noteImplicitSGPRABIUse(
+    Operation *op, const DenseMap<Operation *, unsigned> &positions,
+    DenseMap<Operation *, unsigned> &endCache,
+    const wave::WaveAMDKernelEntryRegs &regs, ReservedLaneUses &sgprLastUses) {
+  std::optional<StringRef> base = getSLoadBase(op);
+  bool isPreload = isa<waveamdmachine::KernargPreloadOp>(op);
+  if (!base && !isPreload)
+    return;
+  unsigned end = getImplicitABIUseEnd(op, positions, endCache);
+  if (base) {
+    if (std::optional<std::pair<unsigned, unsigned>> span =
+            parseSGPRSpan(*base))
+      noteReservedSpanUse(sgprLastUses, span->first, span->second, end);
+  }
+  if (isPreload)
+    noteReservedSpanUse(sgprLastUses, regs.kernargSegmentPtrSGPR,
+                        regs.kernargSegmentPtrWidth, end);
+}
+
+static std::optional<unsigned>
+getKernargPreloadBase(waveamdmachine::KernargPreloadOp op,
+                      waveamdmachine::RegType type,
+                      const wave::WaveAMDKernelEntryRegs &regs) {
+  if (type.getRegClass() != waveamdmachine::RegClass::SGPR)
+    return std::nullopt;
+  uint64_t dwordOffset = op.getDwordOffset();
+  if (dwordOffset < regs.kernargPreloadOffsetDwords)
+    return std::nullopt;
+  uint64_t preloadOffset = dwordOffset - regs.kernargPreloadOffsetDwords;
+  if (preloadOffset + static_cast<uint64_t>(type.getWidth()) >
+      regs.kernargPreloadDwords)
+    return std::nullopt;
+  return regs.kernargSegmentPtrWidth + static_cast<unsigned>(preloadOffset);
+}
+
+static std::optional<unsigned>
+getEntryRegFixedBase(Value value, const wave::WaveAMDKernelEntryRegs &regs) {
+  Operation *def = value.getDefiningOp();
+  if (!def)
+    return std::nullopt;
+  auto type = cast<waveamdmachine::RegType>(value.getType());
+  if (type.getRegClass() == waveamdmachine::RegClass::VGPR &&
+      isa<waveamdmachine::VWorkitemIdXOp>(def))
+    return regs.workitemIdXVGPR;
+  if (type.getRegClass() != waveamdmachine::RegClass::SGPR)
+    return std::nullopt;
+  if (isa<waveamdmachine::SWorkgroupIdXOp>(def))
+    return regs.workgroupIdSGPR(0);
+  if (isa<waveamdmachine::SWorkgroupIdYOp>(def))
+    return regs.workgroupIdSGPR(1);
+  if (isa<waveamdmachine::SWorkgroupIdZOp>(def))
+    return regs.workgroupIdSGPR(2);
+  if (auto preload = dyn_cast<waveamdmachine::KernargPreloadOp>(def))
+    return getKernargPreloadBase(preload, type, regs);
+  return std::nullopt;
 }
 
 static RematReliefContext
@@ -1984,6 +2122,16 @@ static int64_t getLDSReliefCost(Value value,
   return cost + uses.size();
 }
 
+static int64_t getLDSLoopCarryReliefCost(
+    Value value, ArrayRef<wave::regalloc::LDSSpillPlan> plans,
+    wave::regalloc::MemorySpillLoopCarrySlot loopCarry, unsigned useCount) {
+  unsigned accessOps = getLDSAccessOpCount(plans);
+  int64_t cost =
+      accessOps * getRematReliefLoopCostScale(getValueAnchorOp(value));
+  cost += accessOps * getRematReliefLoopCostScale(loopCarry.loop) * useCount;
+  return cost + useCount;
+}
+
 template <typename Traits>
 static FailureOr<std::optional<typename Traits::Slot>>
 buildMemoryReliefSlot(func::FuncOp func, Value value,
@@ -2019,6 +2167,117 @@ buildMemoryReliefSlot(func::FuncOp func, Value value,
   slot.useCount = slot.uses.size();
   slot.cost = Traits::getCost(value, slot.plan, type, slot.uses);
   return std::optional<typename Traits::Slot>(std::move(slot));
+}
+
+static std::optional<wave::regalloc::MemorySpillLoopCarrySlot>
+getMemoryReliefLoopCarrySlot(ArrayRef<ResolvedRegAllocValue> values) {
+  std::optional<wave::regalloc::MemorySpillLoopCarrySlot> slot;
+  for (ResolvedRegAllocValue resolved : values)
+    if (failed(wave::regalloc::mergeLoopCarrySlot(resolved.first, slot)))
+      return std::nullopt;
+  return slot;
+}
+
+static const wave::RegAllocTransformValue *
+findMemoryReliefStateValue(ArrayRef<ResolvedRegAllocValue> values,
+                           Value value) {
+  for (ResolvedRegAllocValue resolved : values)
+    if (resolved.first == value)
+      return resolved.second;
+  return nullptr;
+}
+
+static bool
+canStoreLoopCarryBeforeFailure(wave::regalloc::MemorySpillLoopCarrySlot slot,
+                               Value init,
+                               const RegAllocTransformFailure &failureRecord,
+                               const RematReliefContext &context) {
+  OpOperand *loopUse = &slot.loop.getInitsMutable()[slot.index];
+  Operation *storeAnchor =
+      wave::regalloc::getLoopCarryInitStoreDiagOp(init, loopUse, slot.loop);
+  std::optional<unsigned> storePosition =
+      getRematOpPosition(storeAnchor, context);
+  return storePosition && *storePosition < failureRecord.position;
+}
+
+static bool canMaterializeMemoryLoopCarryRelief(
+    wave::regalloc::MemorySpillLoopCarrySlot slot, Value init,
+    const RegAllocTransformFailure &failureRecord,
+    const RematReliefContext &context) {
+  return canStoreLoopCarryBeforeFailure(slot, init, failureRecord, context) &&
+         wave::regalloc::hasLocalLoopCarryUses(slot) &&
+         wave::regalloc::canRewriteExtraLoopInitUses(slot);
+}
+
+static bool isMemoryLoopCarryReliefStateValue(
+    const wave::RegAllocTransformAliasSet &set,
+    const wave::RegAllocTransformValue *stateValue,
+    const RegAllocTransformFailure &failureRecord, Value init) {
+  if (!stateValue ||
+      !isMemoryValueLiveAcrossFailure(*stateValue, failureRecord.position))
+    return false;
+  return stateValue->offset == 0 && stateValue->width == set.width &&
+         !stateValue->fixed && !isRegAllocTransformTempValue(init);
+}
+
+static std::optional<waveamdmachine::RegType>
+getMemoryLoopCarryReliefRegType(const wave::RegAllocTransformAliasSet &set,
+                                Value init) {
+  auto type = dyn_cast<waveamdmachine::RegType>(init.getType());
+  if (!type || type.getRegClass() != waveamdmachine::RegClass::VGPR ||
+      type.getWidth() != set.width || type.getWidth() == 0)
+    return std::nullopt;
+  return type;
+}
+
+template <typename Traits>
+static FailureOr<std::optional<typename Traits::Candidate>>
+buildMemoryLoopCarryReliefCandidate(
+    func::FuncOp func, const wave::RegAllocTransformAliasSet &set,
+    ArrayRef<ResolvedRegAllocValue> resolvedValues,
+    const RegAllocTransformFailure &failureRecord,
+    const RematReliefContext &context,
+    const typename Traits::PlanningState &planning,
+    unsigned extraReservedBytes) {
+  std::optional<wave::regalloc::MemorySpillLoopCarrySlot> loopCarry =
+      getMemoryReliefLoopCarrySlot(resolvedValues);
+  if (!loopCarry)
+    return std::optional<typename Traits::Candidate>();
+
+  Value init = loopCarry->loop.getInits()[loopCarry->index];
+  const wave::RegAllocTransformValue *stateValue =
+      findMemoryReliefStateValue(resolvedValues, init);
+  if (!isMemoryLoopCarryReliefStateValue(set, stateValue, failureRecord, init))
+    return std::optional<typename Traits::Candidate>();
+  std::optional<waveamdmachine::RegType> type =
+      getMemoryLoopCarryReliefRegType(set, init);
+  if (!type)
+    return std::optional<typename Traits::Candidate>();
+  if (!canMaterializeMemoryLoopCarryRelief(*loopCarry, init, failureRecord,
+                                           context))
+    return std::optional<typename Traits::Candidate>();
+
+  std::optional<typename Traits::Plan> plan =
+      Traits::getPlanForValue(func, planning, *type, extraReservedBytes);
+  if (!plan)
+    return std::optional<typename Traits::Candidate>();
+
+  typename Traits::Slot slot;
+  slot.plan = std::move(*plan);
+  slot.value = init;
+  slot.type = *type;
+  slot.stateValue = stateValue;
+  slot.loopCarry = *loopCarry;
+  slot.useCount = wave::regalloc::getLoopCarryUseCount(*loopCarry);
+  slot.cost = Traits::getLoopCarryCost(init, slot.plan, *type, *loopCarry,
+                                       slot.useCount);
+
+  typename Traits::Candidate candidate;
+  candidate.set = &set;
+  candidate.reservedBytes = Traits::getSlotBytes(slot.plan);
+  candidate.cost = slot.cost;
+  candidate.slots.push_back(std::move(slot));
+  return std::optional<typename Traits::Candidate>(std::move(candidate));
 }
 
 template <typename Traits>
@@ -2070,6 +2329,15 @@ buildMemoryReliefCandidate(func::FuncOp func, unsigned setId,
   if (failed(resolvedValues))
     return failure();
 
+  FailureOr<std::optional<typename Traits::Candidate>> loopCarryCandidate =
+      buildMemoryLoopCarryReliefCandidate<Traits>(
+          func, *set, *resolvedValues, failureRecord, context, planning,
+          /*extraReservedBytes=*/0);
+  if (failed(loopCarryCandidate))
+    return failure();
+  if (*loopCarryCandidate)
+    return loopCarryCandidate;
+
   DenseSet<Value> plannedValues;
   addPlannedMemoryReliefValues(*resolvedValues, failureRecord.position,
                                plannedValues);
@@ -2101,6 +2369,91 @@ isBetterMemoryReliefCandidate(const CandidateT &candidate,
   return candidate.set->id < best->set->id;
 }
 
+template <typename CandidateT>
+static bool isMemoryLoopCarryReliefCandidate(const CandidateT &candidate) {
+  return !candidate.slots.empty() && candidate.slots.front().loopCarry;
+}
+
+template <typename CandidateT>
+static bool hasMemoryLoopCarrySlotIndex(const CandidateT &candidate,
+                                        unsigned index) {
+  return llvm::any_of(candidate.slots, [index](const auto &slot) {
+    return slot.loopCarry && slot.loopCarry->index == index;
+  });
+}
+
+template <typename CandidateT>
+static void appendMemoryLoopCarryReliefCandidate(CandidateT &candidate,
+                                                 CandidateT next) {
+  candidate.cost += next.cost;
+  candidate.reservedBytes += next.reservedBytes;
+  candidate.slots.append(std::make_move_iterator(next.slots.begin()),
+                         std::make_move_iterator(next.slots.end()));
+}
+
+template <typename Traits>
+static FailureOr<std::optional<typename Traits::Candidate>>
+buildExtraMemoryLoopCarryReliefCandidate(
+    func::FuncOp func, unsigned setId, const typename Traits::Candidate &base,
+    waveamdmachine::UniformLoopOp loop,
+    const RegAllocTransformFailure &failureRecord,
+    ArrayRef<wave::RegAllocTransformAliasSet> sets,
+    ArrayRef<wave::RegAllocTransformValue> values,
+    const RematReliefContext &context,
+    const typename Traits::PlanningState &planning) {
+  if (setId == base.set->id)
+    return std::optional<typename Traits::Candidate>();
+  const wave::RegAllocTransformAliasSet *set =
+      findRegAllocTransformSet(sets, setId);
+  if (!set || !isMemoryReliefCandidateSet(*set, values, failureRecord.position))
+    return std::optional<typename Traits::Candidate>();
+  FailureOr<SmallVector<ResolvedRegAllocValue>> resolvedValues =
+      resolveSetValues(func, *set, values);
+  if (failed(resolvedValues))
+    return failure();
+  FailureOr<std::optional<typename Traits::Candidate>> next =
+      buildMemoryLoopCarryReliefCandidate<Traits>(func, *set, *resolvedValues,
+                                                  failureRecord, context,
+                                                  planning, base.reservedBytes);
+  if (failed(next))
+    return failure();
+  if (!*next || !isMemoryLoopCarryReliefCandidate(**next))
+    return std::optional<typename Traits::Candidate>();
+  const typename Traits::Slot &slot = (*next)->slots.front();
+  if (slot.loopCarry->loop != loop ||
+      hasMemoryLoopCarrySlotIndex(base, slot.loopCarry->index))
+    return std::optional<typename Traits::Candidate>();
+  return std::optional<typename Traits::Candidate>(std::move(**next));
+}
+
+template <typename Traits>
+static FailureOr<typename Traits::Candidate>
+expandMemoryLoopCarryReliefCandidate(
+    func::FuncOp func, typename Traits::Candidate candidate,
+    ArrayRef<unsigned> candidateIds,
+    const RegAllocTransformFailure &failureRecord,
+    ArrayRef<wave::RegAllocTransformAliasSet> sets,
+    ArrayRef<wave::RegAllocTransformValue> values,
+    const RematReliefContext &context,
+    const typename Traits::PlanningState &planning) {
+  assert(isMemoryLoopCarryReliefCandidate(candidate) &&
+         "expected loop-carry memory relief candidate");
+  waveamdmachine::UniformLoopOp loop = candidate.slots.front().loopCarry->loop;
+  for (unsigned setId : candidateIds) {
+    FailureOr<std::optional<typename Traits::Candidate>> next =
+        buildExtraMemoryLoopCarryReliefCandidate<Traits>(
+            func, setId, candidate, loop, failureRecord, sets, values, context,
+            planning);
+    if (failed(next))
+      return failure();
+    if (!*next)
+      continue;
+    appendMemoryLoopCarryReliefCandidate(candidate, std::move(**next));
+  }
+  sortMemoryReliefSlots(candidate.slots);
+  return candidate;
+}
+
 template <typename Traits>
 static FailureOr<std::optional<typename Traits::Candidate>>
 selectMemoryReliefCandidate(func::FuncOp func,
@@ -2110,7 +2463,9 @@ selectMemoryReliefCandidate(func::FuncOp func,
                             const RematReliefContext &context,
                             const typename Traits::PlanningState &planning) {
   std::optional<typename Traits::Candidate> best;
-  for (unsigned setId : collectVGPRReliefCandidateIds(failureRecord)) {
+  SmallVector<unsigned> candidateIds =
+      collectVGPRReliefCandidateIds(failureRecord);
+  for (unsigned setId : candidateIds) {
     FailureOr<std::optional<typename Traits::Candidate>> candidate =
         buildMemoryReliefCandidate<Traits>(func, setId, failureRecord, sets,
                                            values, context, planning);
@@ -2118,6 +2473,16 @@ selectMemoryReliefCandidate(func::FuncOp func,
       return failure();
     if (!*candidate)
       continue;
+    if (isMemoryLoopCarryReliefCandidate(**candidate)) {
+      FailureOr<typename Traits::Candidate> expanded =
+          expandMemoryLoopCarryReliefCandidate<Traits>(
+              func, std::move(**candidate), candidateIds, failureRecord, sets,
+              values, context, planning);
+      if (failed(expanded))
+        return failure();
+      *candidate =
+          std::optional<typename Traits::Candidate>(std::move(*expanded));
+    }
     if (isBetterMemoryReliefCandidate(**candidate, best))
       best = std::move(**candidate);
   }
@@ -2144,6 +2509,13 @@ struct LDSMemoryReliefTraits {
   static int64_t getCost(Value value, const Plan &plan, waveamdmachine::RegType,
                          ArrayRef<OpOperand *> uses) {
     return getLDSReliefCost(value, plan, uses);
+  }
+
+  static int64_t
+  getLoopCarryCost(Value value, const Plan &plan, waveamdmachine::RegType,
+                   wave::regalloc::MemorySpillLoopCarrySlot loopCarry,
+                   unsigned useCount) {
+    return getLDSLoopCarryReliefCost(value, plan, loopCarry, useCount);
   }
 };
 
@@ -2280,28 +2652,34 @@ static FailureOr<Value> storeLDSScalarValue(OpBuilder &builder, Location loc,
   return store.getToken();
 }
 
-static FailureOr<Value> storeLDSValue(OpBuilder &builder,
-                                      const LDSReliefSlot &slot, Value token) {
-  wave::regalloc::setInsertionPointForMemorySpillStore(slot.value, builder);
-  unsigned width = slot.type.getWidth();
+static FailureOr<Value>
+storeLDSValueAt(OpBuilder &builder, Location loc, Value value,
+                waveamdmachine::RegType type, Value token,
+                ArrayRef<wave::regalloc::LDSSpillPlan> plans) {
+  unsigned width = type.getWidth();
   if (width == 1)
-    return storeLDSScalarValue(builder, slot.value.getLoc(), slot.value, token,
-                               slot.plan.front());
+    return storeLDSScalarValue(builder, loc, value, token, plans.front());
 
-  SmallVector<Value> elements = wave::regalloc::splitMemorySpillValue(
-      slot.value, builder, slot.value.getLoc());
+  SmallVector<Value> elements =
+      wave::regalloc::splitMemorySpillValue(value, builder, loc);
   SmallVector<Value> tokens;
   tokens.reserve(elements.size());
   for (auto [index, element] : llvm::enumerate(elements)) {
-    FailureOr<Value> stored = storeLDSScalarValue(
-        builder, slot.value.getLoc(), element, token, slot.plan[index]);
+    FailureOr<Value> stored =
+        storeLDSScalarValue(builder, loc, element, token, plans[index]);
     if (failed(stored))
       return failure();
     tokens.push_back(*stored);
   }
   Type tokenType = waveamdmachine::MemTokenType::get(builder.getContext());
-  return wave::regalloc::joinMemorySpillTokens(tokenType, tokens, builder,
-                                               slot.value.getLoc());
+  return wave::regalloc::joinMemorySpillTokens(tokenType, tokens, builder, loc);
+}
+
+static FailureOr<Value> storeLDSValue(OpBuilder &builder,
+                                      const LDSReliefSlot &slot, Value token) {
+  wave::regalloc::setInsertionPointForMemorySpillStore(slot.value, builder);
+  return storeLDSValueAt(builder, slot.value.getLoc(), slot.value, slot.type,
+                         token, slot.plan);
 }
 
 static FailureOr<wave::regalloc::MemorySpillLoadResult>
@@ -2368,11 +2746,341 @@ replaceMemoryReliefUses(OpBuilder &builder,
   return success();
 }
 
+template <typename SlotT, typename StoreFn, typename LoadFn>
+class TransformMemoryLoopCarryMaterializer {
+public:
+  TransformMemoryLoopCarryMaterializer(OpBuilder &builder,
+                                       ArrayRef<const SlotT *> slots,
+                                       StoreFn storeFn, LoadFn loadFn)
+      : slots(slots), builder(builder), storeFn(storeFn), loadFn(loadFn) {}
+
+  LogicalResult run() {
+    if (slots.empty())
+      return success();
+    SmallVector<const SlotT *, 8> sorted(slots.begin(), slots.end());
+    llvm::stable_sort(sorted, [](const SlotT *lhs, const SlotT *rhs) {
+      return lhs->loopCarry->index < rhs->loopCarry->index;
+    });
+    slots = sorted;
+
+    waveamdmachine::UniformLoopOp loop = slots.front()->loopCarry->loop;
+    for (const SlotT *slot : slots)
+      assert(slot->loopCarry->loop == loop && "expected one loop group");
+
+    SmallVector<Value, 8> initTokens;
+    if (failed(materializeInitStores(loop, initTokens)))
+      return failure();
+    for (auto [index, slot] : llvm::enumerate(slots))
+      if (failed(rewriteExtraLoopInitUses(loop, *slot->loopCarry,
+                                          initTokens[index])))
+        return failure();
+
+    FailureOr<waveamdmachine::UniformLoopOp> newLoop =
+        cloneLoopWithoutCarries(loop, initTokens);
+    if (failed(newLoop))
+      return failure();
+    if (failed(replaceLoopResults(loop, *newLoop)))
+      return failure();
+    loop.erase();
+    return success();
+  }
+
+private:
+  bool isSpilledIndex(unsigned index) const {
+    return llvm::any_of(slots, [index](const SlotT *slot) {
+      return slot->loopCarry->index == index;
+    });
+  }
+
+  std::optional<unsigned> getSpillOrdinal(unsigned index) const {
+    for (auto [ordinal, slot] : llvm::enumerate(slots))
+      if (slot->loopCarry->index == index)
+        return ordinal;
+    return std::nullopt;
+  }
+
+  static Value getInitStoreToken(Value init) {
+    if (Operation *def = init.getDefiningOp())
+      return wave::regalloc::getMemoryIssuerToken(def);
+    return {};
+  }
+
+  void setInsertionPointForInitStore(Value init, OpOperand *loopUse,
+                                     waveamdmachine::UniformLoopOp loop) const {
+    Operation *def = init.getDefiningOp();
+    Operation *firstPreheaderUse =
+        wave::regalloc::getLoopCarryFirstPreheaderUse(init, loopUse, loop);
+    if (firstPreheaderUse && (!def || def->getBlock() != loop->getBlock() ||
+                              def->isBeforeInBlock(firstPreheaderUse))) {
+      builder.setInsertionPoint(firstPreheaderUse);
+      return;
+    }
+    if (!def || def->getBlock() != loop->getBlock() ||
+        !def->isBeforeInBlock(loop)) {
+      builder.setInsertionPoint(loop);
+      return;
+    }
+    builder.setInsertionPointAfter(def);
+  }
+
+  LogicalResult
+  materializeInitStores(waveamdmachine::UniformLoopOp loop,
+                        SmallVectorImpl<Value> &initTokens) const {
+    for (const SlotT *slot : slots) {
+      Value initToken;
+      if (failed(materializeInitStore(loop, *slot, initToken)))
+        return failure();
+      initTokens.push_back(initToken);
+    }
+    return success();
+  }
+
+  LogicalResult materializeInitStore(waveamdmachine::UniformLoopOp loop,
+                                     const SlotT &slot,
+                                     Value &initToken) const {
+    unsigned index = slot.loopCarry->index;
+    Value init = loop.getInits()[index];
+    OpOperand *loopUse = &loop.getInitsMutable()[index];
+    setInsertionPointForInitStore(init, loopUse, loop);
+    FailureOr<Value> stored =
+        storeFn(init, getInitStoreToken(init), slot, loop.getLoc());
+    if (failed(stored))
+      return failure();
+    initToken = *stored;
+    return success();
+  }
+
+  LogicalResult
+  rewriteExtraLoopInitUses(waveamdmachine::UniformLoopOp loop,
+                           wave::regalloc::MemorySpillLoopCarrySlot carry,
+                           Value initToken) const {
+    OpOperand *loopUse = &loop.getInitsMutable()[carry.index];
+    Value init = loopUse->get();
+    SmallVector<OpOperand *> uses;
+    for (OpOperand &use : init.getUses()) {
+      if (&use == loopUse || isRegAllocTransformTempOp(use.getOwner()))
+        continue;
+      uses.push_back(&use);
+    }
+
+    const SlotT &slot = *slots[*getSpillOrdinal(carry.index)];
+    for (OpOperand *use : uses) {
+      if (!wave::regalloc::canRewriteExtraLoopInitUse(*use, loopUse, loop))
+        return failure();
+      Operation *user = use->getOwner();
+      builder.setInsertionPoint(user);
+      FailureOr<wave::regalloc::MemorySpillLoadResult> loaded =
+          loadFn(user->getLoc(), slot.type, initToken, slot.plan);
+      if (failed(loaded))
+        return failure();
+      use->set(loaded->value);
+    }
+    return success();
+  }
+
+  FailureOr<waveamdmachine::UniformLoopOp>
+  cloneLoopWithoutCarries(waveamdmachine::UniformLoopOp loop,
+                          ArrayRef<Value> initTokens) const {
+    Type tokenType = waveamdmachine::MemTokenType::get(builder.getContext());
+    SmallVector<Type> resultTypes;
+    SmallVector<Value> inits;
+    for (unsigned index : llvm::seq<unsigned>(0, loop.getInits().size())) {
+      if (isSpilledIndex(index))
+        continue;
+      resultTypes.push_back(loop.getResult(index).getType());
+      inits.push_back(loop.getInits()[index]);
+    }
+    for (Value initToken : initTokens) {
+      resultTypes.push_back(tokenType);
+      inits.push_back(initToken);
+    }
+
+    builder.setInsertionPoint(loop);
+    waveamdmachine::UniformLoopOp newLoop =
+        waveamdmachine::UniformLoopOp::create(
+            builder, loop.getLoc(), resultTypes, loop.getEntryCond(), inits);
+    if (failed(cloneLoopBody(loop, newLoop))) {
+      newLoop.erase();
+      return failure();
+    }
+    return newLoop;
+  }
+
+  LogicalResult cloneLoopBody(waveamdmachine::UniformLoopOp oldLoop,
+                              waveamdmachine::UniformLoopOp newLoop) const {
+    Block &oldBody = oldLoop.getBody().front();
+    Block *newBody = new Block;
+    newLoop.getBody().push_back(newBody);
+    for (Value init : newLoop.getInits())
+      newBody->addArgument(init.getType(), oldLoop.getLoc());
+
+    IRMapping mapper;
+    unsigned newArgIndex = 0;
+    for (unsigned index : llvm::seq<unsigned>(0, oldLoop.getInits().size())) {
+      if (isSpilledIndex(index))
+        continue;
+      mapper.map(oldBody.getArgument(index),
+                 newBody->getArgument(newArgIndex++));
+    }
+    SmallVector<Value, 8> tokens;
+    for ([[maybe_unused]] const SlotT *slot : slots)
+      tokens.push_back(newBody->getArgument(newArgIndex++));
+    return cloneLoopBodyOps(oldLoop, newBody, tokens, mapper);
+  }
+
+  LogicalResult cloneLoopBodyOps(waveamdmachine::UniformLoopOp oldLoop,
+                                 Block *newBody, SmallVectorImpl<Value> &tokens,
+                                 IRMapping &mapper) const {
+    Block &oldBody = oldLoop.getBody().front();
+    builder.setInsertionPointToEnd(newBody);
+    for (Operation &op : oldBody.without_terminator()) {
+      for (const SlotT *slot : slots) {
+        BlockArgument oldArg = oldBody.getArgument(slot->loopCarry->index);
+        if (!opUsesValue(&op, oldArg))
+          continue;
+        FailureOr<Value> mapped =
+            getMappedValue(oldLoop, oldArg, tokens, mapper, op.getLoc());
+        if (failed(mapped))
+          return failure();
+      }
+      builder.clone(op, mapper);
+    }
+    return cloneLoopTerminator(oldLoop, tokens, mapper);
+  }
+
+  std::optional<unsigned>
+  getSpillOrdinalForValue(waveamdmachine::UniformLoopOp loop,
+                          Value value) const {
+    BlockArgument arg = dyn_cast<BlockArgument>(value);
+    if (!arg || arg.getOwner() != &loop.getBody().front())
+      return std::nullopt;
+    return getSpillOrdinal(arg.getArgNumber());
+  }
+
+  FailureOr<Value> getMappedValue(waveamdmachine::UniformLoopOp loop,
+                                  Value value, SmallVectorImpl<Value> &tokens,
+                                  IRMapping &mapper, Location loc) const {
+    if (Value mapped = mapper.lookupOrNull(value))
+      return mapped;
+    std::optional<unsigned> ordinal = getSpillOrdinalForValue(loop, value);
+    if (!ordinal)
+      return mapper.lookupOrDefault(value);
+    const SlotT &slot = *slots[*ordinal];
+    FailureOr<wave::regalloc::MemorySpillLoadResult> loaded =
+        loadFn(loc, slot.type, tokens[*ordinal], slot.plan);
+    if (failed(loaded))
+      return failure();
+    tokens[*ordinal] = loaded->token;
+    mapper.map(value, loaded->value);
+    return loaded->value;
+  }
+
+  LogicalResult cloneLoopTerminator(waveamdmachine::UniformLoopOp loop,
+                                    SmallVectorImpl<Value> &tokens,
+                                    IRMapping &mapper) const {
+    waveamdmachine::ContinueIfOp oldTerm = cast<waveamdmachine::ContinueIfOp>(
+        loop.getBody().front().getTerminator());
+
+    SmallVector<Value> carries;
+    for (unsigned index : llvm::seq<unsigned>(0, oldTerm.getCarries().size())) {
+      Value oldCarry = oldTerm.getCarries()[index];
+      if (std::optional<unsigned> ordinal = getSpillOrdinal(index)) {
+        if (failed(storeTerminatorCarry(loop, oldCarry, *ordinal, tokens,
+                                        mapper, oldTerm.getLoc())))
+          return failure();
+        continue;
+      }
+      FailureOr<Value> mapped =
+          getMappedValue(loop, oldCarry, tokens, mapper, oldTerm.getLoc());
+      if (failed(mapped))
+        return failure();
+      carries.push_back(*mapped);
+    }
+    carries.append(tokens.begin(), tokens.end());
+    waveamdmachine::ContinueIfOp::create(
+        builder, oldTerm.getLoc(), mapper.lookupOrDefault(oldTerm.getCond()),
+        carries);
+    return success();
+  }
+
+  LogicalResult storeTerminatorCarry(waveamdmachine::UniformLoopOp loop,
+                                     Value oldCarry, unsigned ordinal,
+                                     SmallVectorImpl<Value> &tokens,
+                                     IRMapping &mapper, Location loc) const {
+    const SlotT &slot = *slots[ordinal];
+    BlockArgument oldArg =
+        loop.getBody().front().getArgument(slot.loopCarry->index);
+    if (oldCarry == oldArg)
+      return success();
+    FailureOr<Value> mapped =
+        getMappedValue(loop, oldCarry, tokens, mapper, loc);
+    if (failed(mapped))
+      return failure();
+    FailureOr<Value> stored = storeFn(*mapped, tokens[ordinal], slot, loc);
+    if (failed(stored))
+      return failure();
+    tokens[ordinal] = *stored;
+    return success();
+  }
+
+  LogicalResult
+  replaceLoopResults(waveamdmachine::UniformLoopOp oldLoop,
+                     waveamdmachine::UniformLoopOp newLoop) const {
+    builder.setInsertionPointAfter(newLoop);
+    unsigned newResultIndex = 0;
+    for (unsigned index : llvm::seq<unsigned>(0, oldLoop.getResults().size())) {
+      if (isSpilledIndex(index))
+        continue;
+      oldLoop.getResult(index).replaceAllUsesWith(
+          newLoop.getResult(newResultIndex++));
+    }
+    for (const SlotT *slot : slots) {
+      Value token = newLoop.getResult(newResultIndex++);
+      Value oldResult = oldLoop.getResult(slot->loopCarry->index);
+      if (oldResult.use_empty())
+        continue;
+      FailureOr<wave::regalloc::MemorySpillLoadResult> loaded =
+          loadFn(oldLoop.getLoc(), slot->type, token, slot->plan);
+      if (failed(loaded))
+        return failure();
+      oldResult.replaceAllUsesWith(loaded->value);
+    }
+    return success();
+  }
+
+  ArrayRef<const SlotT *> slots;
+  OpBuilder &builder;
+  StoreFn storeFn;
+  LoadFn loadFn;
+};
+
+template <typename SlotT, typename StoreFn, typename LoadFn>
+static LogicalResult
+materializeMemoryLoopCarryRelief(OpBuilder &builder, ArrayRef<SlotT> slots,
+                                 StoreFn storeFn, LoadFn loadFn) {
+  SmallVector<const SlotT *, 8> slotPtrs;
+  slotPtrs.reserve(slots.size());
+  for (const SlotT &slot : slots)
+    slotPtrs.push_back(&slot);
+  return TransformMemoryLoopCarryMaterializer<SlotT, StoreFn, LoadFn>(
+             builder, slotPtrs, storeFn, loadFn)
+      .run();
+}
+
 template <typename SlotT, typename CandidateT, typename StoreFn,
-          typename LoadFn, typename ReserveFn>
+          typename LoadFn, typename ReserveFn, typename LoopStoreFn>
 static LogicalResult
 materializeMemoryRelief(OpBuilder &builder, const CandidateT &candidate,
-                        StoreFn storeFn, LoadFn loadFn, ReserveFn reserveFn) {
+                        StoreFn storeFn, LoadFn loadFn, ReserveFn reserveFn,
+                        LoopStoreFn loopStoreFn) {
+  if (!candidate.slots.empty() && candidate.slots.front().loopCarry) {
+    if (failed(materializeMemoryLoopCarryRelief(
+            builder, ArrayRef<SlotT>(candidate.slots), loopStoreFn, loadFn)))
+      return failure();
+    reserveFn(candidate.reservedBytes);
+    return success();
+  }
+
   DenseSet<Value> plannedValues;
   for (const SlotT &slot : candidate.slots)
     plannedValues.insert(slot.value);
@@ -2414,8 +3122,12 @@ static LogicalResult materializeLDSRelief(OpBuilder &builder, func::FuncOp func,
   auto reserve = [&](unsigned bytes) {
     reserveLDSSpillBytes(func, builder, bytes);
   };
+  auto loopStore = [&](Value value, Value token, const LDSReliefSlot &slot,
+                       Location loc) -> FailureOr<Value> {
+    return storeLDSValueAt(builder, loc, value, slot.type, token, slot.plan);
+  };
   return materializeMemoryRelief<LDSReliefSlot>(builder, candidate, store, load,
-                                                reserve);
+                                                reserve, loopStore);
 }
 
 static unsigned getCommittedScratchSpillBytes(func::FuncOp func) {
@@ -2480,6 +3192,17 @@ static int64_t getScratchReliefCost(Value value,
   return cost + uses.size();
 }
 
+static int64_t getScratchLoopCarryReliefCost(
+    Value value, wave::regalloc::ScratchSpillPlan plan,
+    waveamdmachine::RegType type,
+    wave::regalloc::MemorySpillLoopCarrySlot loopCarry, unsigned useCount) {
+  unsigned accessOps = getScratchAccessOpCount(plan, type.getWidth());
+  int64_t cost =
+      accessOps * getRematReliefLoopCostScale(getValueAnchorOp(value));
+  cost += accessOps * getRematReliefLoopCostScale(loopCarry.loop) * useCount;
+  return cost + useCount;
+}
+
 struct ScratchMemoryReliefTraits {
   using Plan = wave::regalloc::ScratchSpillPlan;
   using Slot = ScratchReliefSlot;
@@ -2498,6 +3221,14 @@ struct ScratchMemoryReliefTraits {
   static int64_t getCost(Value value, Plan plan, waveamdmachine::RegType type,
                          ArrayRef<OpOperand *> uses) {
     return getScratchReliefCost(value, plan, type, uses);
+  }
+
+  static int64_t
+  getLoopCarryCost(Value value, Plan plan, waveamdmachine::RegType type,
+                   wave::regalloc::MemorySpillLoopCarrySlot loopCarry,
+                   unsigned useCount) {
+    return getScratchLoopCarryReliefCost(value, plan, type, loopCarry,
+                                         useCount);
   }
 };
 
@@ -2587,34 +3318,44 @@ static void recordScratchVGPRSpillSave(func::FuncOp func, OpBuilder &builder,
                 builder.getI64IntegerAttr(spilledVGPRs + dwords));
 }
 
+static FailureOr<Value>
+storeScratchValueAt(OpBuilder &builder, func::FuncOp func, Location loc,
+                    Value value, waveamdmachine::RegType type, Value token,
+                    wave::regalloc::ScratchSpillPlan plan);
+
 static FailureOr<Value> storeScratchValue(OpBuilder &builder, func::FuncOp func,
                                           const ScratchReliefSlot &slot,
                                           Value token) {
   wave::regalloc::setInsertionPointForMemorySpillStore(slot.value, builder);
-  unsigned width = slot.type.getWidth();
+  return storeScratchValueAt(builder, func, slot.value.getLoc(), slot.value,
+                             slot.type, token, slot.plan);
+}
+
+static FailureOr<Value>
+storeScratchValueAt(OpBuilder &builder, func::FuncOp func, Location loc,
+                    Value value, waveamdmachine::RegType type, Value token,
+                    wave::regalloc::ScratchSpillPlan plan) {
+  unsigned width = type.getWidth();
   recordScratchVGPRSpillSave(func, builder, width);
   if (width == 1)
-    return storeScratchScalarValue(builder, slot.value.getLoc(), slot.value,
-                                   token, slot.plan);
-  if (scratchTupleFitsImmediate(slot.plan.slotBase, width))
-    return storeScratchTupleValue(builder, slot.value.getLoc(), slot.value,
-                                  token, slot.plan);
+    return storeScratchScalarValue(builder, loc, value, token, plan);
+  if (scratchTupleFitsImmediate(plan.slotBase, width))
+    return storeScratchTupleValue(builder, loc, value, token, plan);
 
-  SmallVector<Value> elements = wave::regalloc::splitMemorySpillValue(
-      slot.value, builder, slot.value.getLoc());
+  SmallVector<Value> elements =
+      wave::regalloc::splitMemorySpillValue(value, builder, loc);
   SmallVector<Value> tokens;
   tokens.reserve(elements.size());
   for (auto [index, element] : llvm::enumerate(elements)) {
     FailureOr<Value> stored = storeScratchScalarValue(
-        builder, slot.value.getLoc(), element, token,
-        slot.plan.slotBase + static_cast<unsigned>(index) * 4);
+        builder, loc, element, token,
+        plan.slotBase + static_cast<unsigned>(index) * 4);
     if (failed(stored))
       return failure();
     tokens.push_back(*stored);
   }
   Type tokenType = waveamdmachine::MemTokenType::get(builder.getContext());
-  return wave::regalloc::joinMemorySpillTokens(tokenType, tokens, builder,
-                                               slot.value.getLoc());
+  return wave::regalloc::joinMemorySpillTokens(tokenType, tokens, builder, loc);
 }
 
 static FailureOr<wave::regalloc::MemorySpillLoadResult>
@@ -2720,11 +3461,18 @@ materializeScratchRelief(OpBuilder &builder, func::FuncOp func,
   auto reserve = [&](unsigned bytes) {
     reserveScratchSpillBytes(func, builder, bytes);
   };
+  auto loopStore = [&](Value value, Value token, const ScratchReliefSlot &slot,
+                       Location loc) -> FailureOr<Value> {
+    return storeScratchValueAt(builder, func, loc, value, slot.type, token,
+                               slot.plan);
+  };
   return materializeMemoryRelief<ScratchReliefSlot>(builder, candidate, store,
-                                                    load, reserve);
+                                                    load, reserve, loopStore);
 }
 
 static LogicalResult refreshFuncTypeFromBody(func::FuncOp func) {
+  if (func.isDeclaration())
+    return success();
   SmallVector<Type> inputs(func.getBody().front().getArgumentTypes());
   SmallVector<Type> outputs;
   bool haveReturn = false;
@@ -2809,6 +3557,9 @@ private:
     if (failed(computeFixedBases()))
       return failure();
     collectFixedReservations();
+    if (failed(collectEntryABIReservations()))
+      return failure();
+    collectImplicitABIReservations();
     return success();
   }
 
@@ -2843,6 +3594,54 @@ private:
       if (*set.fixedBase + set.width <= budget.limit)
         fixedReservations.push_back({set.regClass, set.id, *set.fixedBase,
                                      set.width, set.start, set.end});
+    }
+  }
+
+  LogicalResult collectEntryABIReservations() {
+    wave::WaveAMDKernelEntryRegs regs = wave::getWaveAMDKernelEntryRegs(func);
+    if (regs.reservedSGPRs == 0 && regs.reservedVGPRs == 0)
+      return success();
+
+    FailureOr<SmallVector<ResolvedRegAllocValue>> resolvedValues =
+        resolveRegAllocStateValues(func, values);
+    if (failed(resolvedValues))
+      return failure();
+
+    for (auto [payloadValue, stateValue] : *resolvedValues) {
+      if (!stateValue->fixed)
+        continue;
+      Value value = payloadValue;
+      std::optional<unsigned> base = getEntryRegFixedBase(value, regs);
+      if (!base)
+        continue;
+      unsigned setId = sets.size() + fixedReservations.size();
+      fixedReservations.push_back({stateValue->regClass, setId, *base,
+                                   stateValue->width, /*start=*/0,
+                                   stateValue->end});
+    }
+    return success();
+  }
+
+  void collectImplicitABIReservations() {
+    wave::WaveAMDKernelEntryRegs regs = wave::getWaveAMDKernelEntryRegs(func);
+    ReservedLaneUses sgprLastUses(regs.reservedSGPRs);
+    if (sgprLastUses.empty())
+      return;
+
+    DenseMap<Operation *, unsigned> positions;
+    collectRegAllocOpPositions(func.getBody(), positions);
+    DenseMap<Operation *, unsigned> endCache;
+    for (auto &entry : positions)
+      noteImplicitSGPRABIUse(entry.first, positions, endCache, regs,
+                             sgprLastUses);
+
+    for (auto [lane, lastUse] : llvm::enumerate(sgprLastUses)) {
+      if (!lastUse)
+        continue;
+      unsigned setId = sets.size() + fixedReservations.size();
+      fixedReservations.push_back({waveamdmachine::RegClass::SGPR, setId,
+                                   static_cast<unsigned>(lane),
+                                   /*width=*/1, /*start=*/0, *lastUse});
     }
   }
 
@@ -2914,7 +3713,8 @@ private:
   findFreeBase(const wave::RegAllocTransformAliasSet &set, unsigned limit) {
     if (set.width > limit)
       return std::nullopt;
-    for (unsigned base = 0; base <= limit - set.width; ++base)
+    unsigned align = std::max<unsigned>(1, llvm::PowerOf2Ceil(set.width));
+    for (unsigned base = 0; base <= limit - set.width; base += align)
       if (!conflictsWithActive(set, base) &&
           !conflictsWithFixedReservation(set, base))
         return base;
@@ -3262,6 +4062,12 @@ private:
 
 static LogicalResult setRegAllocTransformState(func::FuncOp func,
                                                Builder &builder) {
+  if (func.isDeclaration()) {
+    func->removeAttr(wave::getRegAllocTransformStateAttrName());
+    return success();
+  }
+  if (failed(wave::prepareWaveAMDRegAllocIR(func)))
+    return failure();
   if (failed(splitDuplicateLoopInits(func)))
     return failure();
   RegAllocAliasStateBuilder stateBuilder(func, builder);
@@ -3274,6 +4080,8 @@ static LogicalResult setRegAllocTransformState(func::FuncOp func,
 
 static LogicalResult runRegAllocLinearScan(func::FuncOp func,
                                            Builder &builder) {
+  if (func.isDeclaration())
+    return success();
   RegAllocLinearScanner scanner(func, builder);
   return scanner.run();
 }

@@ -2,7 +2,7 @@
 // RUN: wave-opt --waveamd-reg-alloc='vgpr-limit=4 agpr-limit=0' \
 // RUN:   --waveamd-decompose-mem-tuples --waveamd-insert-ticket-waits \
 // RUN:   --waveamd-insert-hazard-waits --waveamd-resource-info %s \
-// RUN:   | wave-translate --wave-to-amdgpu-asm - \
+// RUN:   | env WAVE_PIPELINES_DIR=%S/../Target/Wave/Inputs/emit-only-pipeline wave-translate --wave-to-amdgpu-asm - \
 // RUN:   | llvm-mc -triple=amdgcn-amd-amdhsa -mcpu=gfx90a -filetype=obj -o /dev/null
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx90a"} {

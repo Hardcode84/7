@@ -76,6 +76,146 @@ def included_sequences(ir, named_sequence) -> list[str]:
     return out
 
 
+def require_pass_order(label: str, passes: list[str], names: list[str], message: str):
+    try:
+        positions = [passes.index(name) for name in names]
+    except ValueError as err:
+        require(label, False, f"missing pass: {err}")
+    require(label, positions == sorted(positions), message)
+
+
+def require_sequence(ir, parsed, label: str, name: str):
+    sequence = find_named_sequence(ir, parsed, name)
+    require(label, sequence is not None, f"missing {name}")
+    return sequence
+
+
+def check_backend_entry(label: str, ir, entry) -> None:
+    includes = included_sequences(ir, entry)
+    require(label, "waveamd_backend_lower" in includes, "no lower include")
+    require(label, "waveamd_backend_finish" in includes, "no finish include")
+    entry_passes = applied_passes(ir, entry)
+    require(label, "waveamd-reg-alloc" not in entry_passes, "entry spells regalloc")
+    require(
+        label,
+        "waveamd-insert-hazard-waits" not in entry_passes,
+        "entry spells hazard waits",
+    )
+
+
+def check_backend_lower(label: str, lower_passes: list[str]) -> None:
+    try:
+        fused = lower_passes.index("waveamd-form-fused-int")
+        cross_lane = lower_passes.index("waveamd-cross-lane-peepholes")
+        cleanup = lower_passes.index("waveamd-machine-cleanup")
+        cleanup_canon = lower_passes.index("canonicalize", cleanup)
+        cleanup_cse = lower_passes.index("cse", cleanup_canon)
+        cleanup_licm = lower_passes.index("loop-invariant-code-motion", cleanup_cse)
+        cleanup_final_cse = lower_passes.index("cse", cleanup_licm)
+    except ValueError as err:
+        require(label, False, f"missing lower pass: {err}")
+    require(
+        label,
+        fused
+        < cross_lane
+        < cleanup
+        < cleanup_canon
+        < cleanup_cse
+        < cleanup_licm
+        < cleanup_final_cse,
+        "cleanup pass order drifted",
+    )
+
+
+def check_default_finish(label: str, ir, finish) -> None:
+    finish_includes = included_sequences(ir, finish)
+    require(
+        label,
+        "waveamd_backend_finish_legacy_regalloc" in finish_includes,
+        "default finish does not use legacy regalloc",
+    )
+    require(
+        label,
+        "waveamd_backend_finish_transform_regalloc" not in finish_includes,
+        "default finish uses transform regalloc",
+    )
+
+
+def check_transform_finish(label: str, ir, transform_finish) -> None:
+    transform_finish_passes = applied_passes(ir, transform_finish)
+    require_pass_order(
+        label,
+        transform_finish_passes,
+        [
+            "waveamd-clear-regalloc-assignments",
+            "waveamd-preserve-hw-regs",
+            "canonicalize",
+            "cse",
+        ],
+        "transform finish cleanup order drifted",
+    )
+    require(
+        label,
+        "waveamd-reg-alloc" not in transform_finish_passes,
+        "transform finish spells legacy regalloc",
+    )
+    transform_finish_includes = included_sequences(ir, transform_finish)
+    require(
+        label,
+        "waveamd_regalloc_transform_loop" in transform_finish_includes,
+        "transform finish does not include regalloc loop",
+    )
+    require(
+        label,
+        "waveamd_backend_post_regalloc" in transform_finish_includes,
+        "transform finish skips post-regalloc tail",
+    )
+    require(
+        label,
+        transform_finish_includes.index("waveamd_regalloc_transform_loop")
+        < transform_finish_includes.index("waveamd_backend_post_regalloc"),
+        "transform finish include order drifted",
+    )
+
+
+def check_legacy_finish(label: str, ir, legacy_finish) -> None:
+    legacy_finish_passes = applied_passes(ir, legacy_finish)
+    require_pass_order(
+        label,
+        legacy_finish_passes,
+        [
+            "waveamd-clear-regalloc-assignments",
+            "waveamd-preserve-hw-regs",
+            "canonicalize",
+            "cse",
+            "waveamd-reg-alloc",
+        ],
+        "legacy finish pass order drifted",
+    )
+    require(
+        label,
+        "waveamd_backend_post_regalloc" in included_sequences(ir, legacy_finish),
+        "legacy finish skips post-regalloc tail",
+    )
+
+
+def check_post_regalloc(label: str, post_passes: list[str]) -> None:
+    require_pass_order(
+        label,
+        post_passes,
+        [
+            "waveamd-decompose-mem-tuples",
+            "waveamd-pack-vgpr-zero-moves",
+            "waveamd-insert-ticket-waits",
+            "waveamd-insert-hazard-waits",
+            "waveamd-resource-info",
+            "waveamd-verify-machine-operands",
+            "waveamd-metadata",
+        ],
+        "post-regalloc pass order drifted",
+    )
+
+
 def check_calibration_entry(label: str, module) -> None:
     text = module.pipeline_text(
         BUILD_DIR,
@@ -86,76 +226,23 @@ def check_calibration_entry(label: str, module) -> None:
     with ir.Context() as ctx:
         register_dialects(ctx)
         parsed = ir.Module.parse(text)
-        entry = find_named_sequence(ir, parsed, "__transform_main")
-        lower = find_named_sequence(ir, parsed, "waveamd_backend_lower")
-        finish = find_named_sequence(ir, parsed, "waveamd_backend_finish")
-        require(label, entry is not None, "missing __transform_main")
-        require(label, lower is not None, "missing backend lower")
-        require(label, finish is not None, "missing backend finish")
-        includes = included_sequences(ir, entry)
-        require(label, "waveamd_backend_lower" in includes, "no lower include")
-        require(label, "waveamd_backend_finish" in includes, "no finish include")
-        entry_passes = applied_passes(ir, entry)
-        require(label, "waveamd-reg-alloc" not in entry_passes, "entry spells regalloc")
-        require(
-            label,
-            "waveamd-insert-hazard-waits" not in entry_passes,
-            "entry spells hazard waits",
+        entry = require_sequence(ir, parsed, label, "__transform_main")
+        lower = require_sequence(ir, parsed, label, "waveamd_backend_lower")
+        finish = require_sequence(ir, parsed, label, "waveamd_backend_finish")
+        transform_finish = require_sequence(
+            ir, parsed, label, "waveamd_backend_finish_transform_regalloc"
         )
-        lower_passes = applied_passes(ir, lower)
-        try:
-            fused = lower_passes.index("waveamd-form-fused-int")
-            cross_lane = lower_passes.index("waveamd-cross-lane-peepholes")
-            cleanup = lower_passes.index("waveamd-machine-cleanup")
-            cleanup_canon = lower_passes.index("canonicalize", cleanup)
-            cleanup_cse = lower_passes.index("cse", cleanup_canon)
-            cleanup_licm = lower_passes.index("loop-invariant-code-motion", cleanup_cse)
-            cleanup_final_cse = lower_passes.index("cse", cleanup_licm)
-        except ValueError as err:
-            require(label, False, f"missing lower pass: {err}")
-        require(
-            label,
-            fused
-            < cross_lane
-            < cleanup
-            < cleanup_canon
-            < cleanup_cse
-            < cleanup_licm
-            < cleanup_final_cse,
-            "cleanup pass order drifted",
+        legacy_finish = require_sequence(
+            ir, parsed, label, "waveamd_backend_finish_legacy_regalloc"
         )
-
-        finish_passes = applied_passes(ir, finish)
-        try:
-            ticket = finish_passes.index("waveamd-insert-ticket-waits")
-            regalloc = finish_passes.index("waveamd-reg-alloc")
-            hazard = finish_passes.index("waveamd-insert-hazard-waits")
-            pack_zero = finish_passes.index("waveamd-pack-vgpr-zero-moves")
-            preserve = finish_passes.index("waveamd-preserve-hw-regs")
-            pre_regalloc_canon = finish_passes.index("canonicalize", preserve)
-            pre_regalloc_cse = finish_passes.index("cse", pre_regalloc_canon)
-        except ValueError as err:
-            require(label, False, f"missing finish pass: {err}")
-        require(
-            label,
-            preserve < pre_regalloc_canon < pre_regalloc_cse < regalloc,
-            "pre-regalloc cleanup pass order drifted",
-        )
-        decompose_after_regalloc = [
-            index
-            for index, name in enumerate(finish_passes)
-            if name == "waveamd-decompose-mem-tuples" and regalloc < index < hazard
-        ]
-        require(
-            label,
-            bool(decompose_after_regalloc),
-            "no post-regalloc tuple decomposition",
-        )
-        require(
-            label,
-            regalloc < decompose_after_regalloc[0] < pack_zero < ticket < hazard,
-            "finish pass order drifted",
-        )
+        post = require_sequence(ir, parsed, label, "waveamd_backend_post_regalloc")
+        require_sequence(ir, parsed, label, "waveamd_regalloc_transform_loop")
+        check_backend_entry(label, ir, entry)
+        check_backend_lower(label, applied_passes(ir, lower))
+        check_default_finish(label, ir, finish)
+        check_transform_finish(label, ir, transform_finish)
+        check_legacy_finish(label, ir, legacy_finish)
+        check_post_regalloc(label, applied_passes(ir, post))
     print(f"{label}: ok")
 
 

@@ -105,8 +105,8 @@ createSubtargetInfo(Operation *op, StringRef consumer) {
 
   static llvm::once_flag initializeBackendOnce;
   llvm::call_once(initializeBackendOnce, []() {
-    llvm::InitializeAllTargetInfos();
-    llvm::InitializeAllTargetMCs();
+    LLVMInitializeAMDGPUTargetInfo();
+    LLVMInitializeAMDGPUTargetMC();
   });
 
   llvm::Triple triple(target->triple);

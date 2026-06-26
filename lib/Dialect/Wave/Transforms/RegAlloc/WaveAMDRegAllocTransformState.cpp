@@ -466,6 +466,8 @@ void clearRegAllocTransformState(Operation *target) {
 
 static FailureOr<RegAllocTransformLoopDecision>
 getFuncRegAllocTransformLoopDecision(func::FuncOp func) {
+  if (func.isDeclaration())
+    return RegAllocTransformLoopDecision::Done;
   DictionaryAttr state =
       func->getAttrOfType<DictionaryAttr>(kRegAllocTransformStateAttr);
   if (!state)

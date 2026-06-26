@@ -1,12 +1,11 @@
 add_mlir_dialect_library(MLIRWaveTransforms
+  PARTIAL_SOURCES_INTENDED
   RegAlloc/WaveAMDRegAlloc.cpp
   RegAlloc/WaveAMDRegAllocBankPromotion.cpp
   RegAlloc/WaveAMDRegAllocLDS.cpp
-  RegAlloc/WaveAMDRegAllocPrep.cpp
   RegAlloc/WaveAMDRegAllocRemat.cpp
   RegAlloc/WaveAMDRegAllocScratch.cpp
   RegAlloc/WaveAMDRegAllocVerification.cpp
-  RegAlloc/WaveAMDRegisterLimits.cpp
   RegAlloc/WaveAMDRegLiveIntervals.cpp
   RegAlloc/WaveAMDRegPressureRelief.cpp
   RegAlloc/WaveAMDResourceInfo.cpp
@@ -17,7 +16,6 @@ add_mlir_dialect_library(MLIRWaveTransforms
   WaveAMDElideSCCBoolRoundtrip.cpp
   WaveAMDExecIfUtils.cpp
   WaveAMDFormFusedInt.cpp
-  WaveAMDHardwareResources.cpp
   WaveAMDHazardWaits.cpp
   WaveAMDMachine.cpp
   WaveAMDMachineCleanup.cpp
