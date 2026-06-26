@@ -800,15 +800,21 @@ struct RematReliefContext {
   DenseMap<Value, const wave::RegAllocTransformValue *> values;
 };
 
-struct RematReliefCandidate {
+struct RematReliefSlot {
   SmallVector<OpOperand *> uses;
   Value value;
   Operation *rebuildOp = nullptr;
-  const wave::RegAllocTransformAliasSet *set = nullptr;
   const wave::RegAllocTransformValue *stateValue = nullptr;
   int64_t cost = 0;
   unsigned opCount = 0;
   unsigned rebuildPosition = 0;
+};
+
+struct RematReliefCandidate {
+  SmallVector<RematReliefSlot> slots;
+  SmallVector<Value> rematValues;
+  const wave::RegAllocTransformAliasSet *set = nullptr;
+  int64_t cost = 0;
 };
 
 static FailureOr<SmallVector<ResolvedRegAllocValue>>
@@ -1390,8 +1396,16 @@ static bool isStateValueLiveAt(Value value, unsigned position,
   return stateValue.start <= position && position <= stateValue.end;
 }
 
+static bool mustRematValue(Value value,
+                           const DenseSet<Value> *forcedRematValues) {
+  return forcedRematValues && forcedRematValues->contains(value);
+}
+
 static bool canUseOriginalRematLeaf(Value value, Operation *user,
-                                    const RematReliefContext &context) {
+                                    const RematReliefContext &context,
+                                    const DenseSet<Value> *forcedRematValues) {
+  if (mustRematValue(value, forcedRematValues))
+    return false;
   if (!valueIsAvailableAt(value, user))
     return false;
   if (!isTrackedRegValue(value))
@@ -1402,58 +1416,67 @@ static bool canUseOriginalRematLeaf(Value value, Operation *user,
 
 static bool canRematerializeValueAt(Value value, Operation *user,
                                     const RematReliefContext &context,
-                                    DenseSet<Value> &visiting);
+                                    DenseSet<Value> &visiting,
+                                    const DenseSet<Value> *forcedRematValues);
 
-static bool canRematerializeOperandAt(Value operand, Operation *user,
-                                      const RematReliefContext &context,
-                                      DenseSet<Value> &visiting) {
-  if (canUseOriginalRematLeaf(operand, user, context))
+static bool canRematerializeOperandAt(
+    Value operand, Operation *user, const RematReliefContext &context,
+    DenseSet<Value> &visiting, const DenseSet<Value> *forcedRematValues) {
+  if (canUseOriginalRematLeaf(operand, user, context, forcedRematValues))
     return true;
   if (!isTrackedRegValue(operand) || isAnchoredRematSource(operand))
     return false;
-  return canRematerializeValueAt(operand, user, context, visiting);
+  return canRematerializeValueAt(operand, user, context, visiting,
+                                 forcedRematValues);
 }
 
 static bool canRematerializeValueAt(Value value, Operation *user,
                                     const RematReliefContext &context,
-                                    DenseSet<Value> &visiting) {
+                                    DenseSet<Value> &visiting,
+                                    const DenseSet<Value> *forcedRematValues) {
   Operation *def = value.getDefiningOp();
   if (!isRematRootValue(value) || !valueIsAvailableAt(value, user))
     return false;
   if (!visiting.insert(value).second)
     return false;
   bool ok = llvm::all_of(def->getOperands(), [&](Value operand) {
-    return canRematerializeOperandAt(operand, user, context, visiting);
+    return canRematerializeOperandAt(operand, user, context, visiting,
+                                     forcedRematValues);
   });
   visiting.erase(value);
   return ok;
 }
 
 static bool canRematerializeValueAt(Value value, Operation *user,
-                                    const RematReliefContext &context) {
+                                    const RematReliefContext &context,
+                                    const DenseSet<Value> *forcedRematValues) {
   DenseSet<Value> visiting;
-  return canRematerializeValueAt(value, user, context, visiting);
+  return canRematerializeValueAt(value, user, context, visiting,
+                                 forcedRematValues);
 }
 
 static unsigned getRematOpCountAt(Value value, Operation *user,
                                   const RematReliefContext &context,
-                                  DenseSet<Value> &counted) {
+                                  DenseSet<Value> &counted,
+                                  const DenseSet<Value> *forcedRematValues) {
   if (!counted.insert(value).second)
     return 0;
   unsigned count = 1;
   Operation *def = value.getDefiningOp();
   for (Value operand : def->getOperands()) {
-    if (canUseOriginalRematLeaf(operand, user, context))
+    if (canUseOriginalRematLeaf(operand, user, context, forcedRematValues))
       continue;
-    count += getRematOpCountAt(operand, user, context, counted);
+    count +=
+        getRematOpCountAt(operand, user, context, counted, forcedRematValues);
   }
   return count;
 }
 
 static unsigned getRematOpCountAt(Value value, Operation *user,
-                                  const RematReliefContext &context) {
+                                  const RematReliefContext &context,
+                                  const DenseSet<Value> *forcedRematValues) {
   DenseSet<Value> counted;
-  return getRematOpCountAt(value, user, context, counted);
+  return getRematOpCountAt(value, user, context, counted, forcedRematValues);
 }
 
 static int64_t getRematReliefLoopCostScale(Operation *op) {
@@ -1476,6 +1499,10 @@ collectRematPostFailureUses(Value value,
         getRematOpPosition(use.getOwner(), context);
     if (!position)
       return failure();
+    if (*position == failureRecord.position) {
+      uses.clear();
+      return uses;
+    }
     if (*position > failureRecord.position)
       uses.push_back(&use);
   }
@@ -1502,48 +1529,83 @@ static bool isRematCandidateSet(const wave::RegAllocTransformAliasSet &set,
          !hasFixedRegAllocValue(set, values);
 }
 
-static FailureOr<std::optional<RematReliefCandidate>>
-buildRematReliefValueCandidate(Value value,
-                               const wave::RegAllocTransformValue &stateValue,
-                               const wave::RegAllocTransformAliasSet &set,
-                               const RegAllocTransformFailure &failureRecord,
-                               const RematReliefContext &context) {
+static bool
+isRematValueLiveAcrossFailure(const wave::RegAllocTransformValue &stateValue,
+                              unsigned position) {
+  return stateValue.start < position && position < stateValue.end;
+}
+
+static FailureOr<std::optional<RematReliefSlot>>
+buildRematReliefSlot(Value value,
+                     const wave::RegAllocTransformValue &stateValue,
+                     const RegAllocTransformFailure &failureRecord,
+                     const RematReliefContext &context,
+                     const DenseSet<Value> &forcedRematValues) {
   if (stateValue.start >= failureRecord.position ||
       failureRecord.position >= stateValue.end || stateValue.fixed ||
       !isRematRootValue(value))
-    return std::optional<RematReliefCandidate>();
+    return std::optional<RematReliefSlot>();
   FailureOr<SmallVector<OpOperand *>> uses =
       collectRematPostFailureUses(value, failureRecord, context);
   if (failed(uses))
     return failure();
   if (uses->empty())
-    return std::optional<RematReliefCandidate>();
+    return std::optional<RematReliefSlot>();
   Operation *rebuildOp = uses->front()->getOwner();
-  if (!canRematerializeValueAt(value, rebuildOp, context))
-    return std::optional<RematReliefCandidate>();
-  unsigned opCount = getRematOpCountAt(value, rebuildOp, context);
+  if (!canRematerializeValueAt(value, rebuildOp, context, &forcedRematValues))
+    return std::optional<RematReliefSlot>();
+  unsigned opCount =
+      getRematOpCountAt(value, rebuildOp, context, &forcedRematValues);
   int64_t cost =
       opCount * getRematReliefLoopCostScale(rebuildOp) + uses->size();
-  RematReliefCandidate candidate;
-  candidate.uses = std::move(*uses);
-  candidate.value = value;
-  candidate.rebuildOp = rebuildOp;
-  candidate.set = &set;
-  candidate.stateValue = &stateValue;
-  candidate.cost = cost;
-  candidate.opCount = opCount;
-  candidate.rebuildPosition = context.positions.lookup(rebuildOp);
-  return std::optional<RematReliefCandidate>(std::move(candidate));
+  RematReliefSlot slot;
+  slot.uses = std::move(*uses);
+  slot.value = value;
+  slot.rebuildOp = rebuildOp;
+  slot.stateValue = &stateValue;
+  slot.cost = cost;
+  slot.opCount = opCount;
+  slot.rebuildPosition = context.positions.lookup(rebuildOp);
+  return std::optional<RematReliefSlot>(std::move(slot));
 }
 
-static bool
-isBetterRematValueCandidate(const RematReliefCandidate &candidate,
-                            const std::optional<RematReliefCandidate> &best) {
-  if (!best)
+static void sortRematReliefSlots(MutableArrayRef<RematReliefSlot> slots) {
+  llvm::stable_sort(slots,
+                    [](const RematReliefSlot &lhs, const RematReliefSlot &rhs) {
+                      return std::tie(lhs.rebuildPosition, lhs.stateValue->id) <
+                             std::tie(rhs.rebuildPosition, rhs.stateValue->id);
+                    });
+}
+
+static void addForcedRematValues(ArrayRef<ResolvedRegAllocValue> values,
+                                 unsigned position,
+                                 SmallVectorImpl<Value> &rematValues,
+                                 DenseSet<Value> &forcedRematValues) {
+  for (ResolvedRegAllocValue resolved : values) {
+    if (!isRematValueLiveAcrossFailure(*resolved.second, position))
+      continue;
+    rematValues.push_back(resolved.first);
+    forcedRematValues.insert(resolved.first);
+  }
+}
+
+static FailureOr<bool>
+addRematReliefSlot(Value value, const wave::RegAllocTransformValue &stateValue,
+                   const RegAllocTransformFailure &failureRecord,
+                   const RematReliefContext &context,
+                   const DenseSet<Value> &forcedRematValues,
+                   RematReliefCandidate &candidate) {
+  if (!isRematValueLiveAcrossFailure(stateValue, failureRecord.position))
     return true;
-  if (candidate.cost != best->cost)
-    return candidate.cost < best->cost;
-  return candidate.stateValue->id < best->stateValue->id;
+  FailureOr<std::optional<RematReliefSlot>> slot = buildRematReliefSlot(
+      value, stateValue, failureRecord, context, forcedRematValues);
+  if (failed(slot))
+    return failure();
+  if (!*slot)
+    return false;
+  candidate.cost += (*slot)->cost;
+  candidate.slots.push_back(std::move(**slot));
+  return true;
 }
 
 static FailureOr<std::optional<RematReliefCandidate>>
@@ -1556,23 +1618,29 @@ buildRematReliefCandidate(func::FuncOp func, unsigned setId,
       findRegAllocTransformSet(sets, setId);
   if (!set || !isRematCandidateSet(*set, values, failureRecord.position))
     return std::optional<RematReliefCandidate>();
-  std::optional<RematReliefCandidate> best;
-  for (unsigned valueId : set->members) {
-    const wave::RegAllocTransformValue &stateValue = values[valueId];
-    FailureOr<Value> value = resolveRegAllocStateValue(func, stateValue);
-    if (failed(value))
+  FailureOr<SmallVector<ResolvedRegAllocValue>> resolvedValues =
+      resolveSetValues(func, *set, values);
+  if (failed(resolvedValues))
+    return failure();
+
+  RematReliefCandidate candidate;
+  DenseSet<Value> forcedRematValues;
+  candidate.set = set;
+  addForcedRematValues(*resolvedValues, failureRecord.position,
+                       candidate.rematValues, forcedRematValues);
+  for (ResolvedRegAllocValue resolved : *resolvedValues) {
+    FailureOr<bool> added =
+        addRematReliefSlot(resolved.first, *resolved.second, failureRecord,
+                           context, forcedRematValues, candidate);
+    if (failed(added))
       return failure();
-    FailureOr<std::optional<RematReliefCandidate>> candidate =
-        buildRematReliefValueCandidate(*value, stateValue, *set, failureRecord,
-                                       context);
-    if (failed(candidate))
-      return failure();
-    if (!*candidate)
-      continue;
-    if (isBetterRematValueCandidate(**candidate, best))
-      best = std::move(**candidate);
+    if (!*added)
+      return std::optional<RematReliefCandidate>();
   }
-  return best;
+  if (candidate.slots.empty())
+    return std::optional<RematReliefCandidate>();
+  sortRematReliefSlots(candidate.slots);
+  return std::optional<RematReliefCandidate>(std::move(candidate));
 }
 
 static bool
@@ -1609,7 +1677,8 @@ selectRematReliefCandidate(func::FuncOp func,
 static FailureOr<Value>
 materializeRematValueAt(OpBuilder &builder, Value value, Operation *user,
                         const RematReliefContext &context,
-                        DenseMap<Value, Value> &cache) {
+                        DenseMap<Value, Value> &cache,
+                        const DenseSet<Value> &forcedRematValues) {
   auto cached = cache.find(value);
   if (cached != cache.end())
     return cached->second;
@@ -1620,9 +1689,9 @@ materializeRematValueAt(OpBuilder &builder, Value value, Operation *user,
   IRMapping mapping;
   for (Value operand : def->getOperands()) {
     Value mapped = operand;
-    if (!canUseOriginalRematLeaf(operand, user, context)) {
-      FailureOr<Value> rematOperand =
-          materializeRematValueAt(builder, operand, user, context, cache);
+    if (!canUseOriginalRematLeaf(operand, user, context, &forcedRematValues)) {
+      FailureOr<Value> rematOperand = materializeRematValueAt(
+          builder, operand, user, context, cache, forcedRematValues);
       if (failed(rematOperand))
         return failure();
       mapped = *rematOperand;
@@ -1637,18 +1706,35 @@ materializeRematValueAt(OpBuilder &builder, Value value, Operation *user,
   return result;
 }
 
+static LogicalResult materializeRematReliefSlot(
+    OpBuilder &builder, const RematReliefSlot &slot,
+    const RematReliefContext &context, const DenseSet<Value> &forcedRematValues,
+    SmallVectorImpl<std::pair<const RematReliefSlot *, Value>> &rebuiltSlots) {
+  builder.setInsertionPoint(slot.rebuildOp);
+  DenseMap<Value, Value> cache;
+  FailureOr<Value> rebuilt = materializeRematValueAt(
+      builder, slot.value, slot.rebuildOp, context, cache, forcedRematValues);
+  if (failed(rebuilt))
+    return failure();
+  rebuiltSlots.push_back({&slot, *rebuilt});
+  return success();
+}
+
 static LogicalResult
 materializeRematRelief(OpBuilder &builder,
                        const RematReliefCandidate &candidate,
                        const RematReliefContext &context) {
-  builder.setInsertionPoint(candidate.rebuildOp);
-  DenseMap<Value, Value> cache;
-  FailureOr<Value> rebuilt = materializeRematValueAt(
-      builder, candidate.value, candidate.rebuildOp, context, cache);
-  if (failed(rebuilt))
-    return failure();
-  for (OpOperand *use : candidate.uses)
-    use->set(*rebuilt);
+  DenseSet<Value> forcedRematValues(candidate.rematValues.begin(),
+                                    candidate.rematValues.end());
+  SmallVector<std::pair<const RematReliefSlot *, Value>> rebuiltSlots;
+  rebuiltSlots.reserve(candidate.slots.size());
+  for (const RematReliefSlot &slot : candidate.slots)
+    if (failed(materializeRematReliefSlot(builder, slot, context,
+                                          forcedRematValues, rebuiltSlots)))
+      return failure();
+  for (auto [slot, rebuilt] : rebuiltSlots)
+    for (OpOperand *use : slot->uses)
+      use->set(rebuilt);
   return success();
 }
 
