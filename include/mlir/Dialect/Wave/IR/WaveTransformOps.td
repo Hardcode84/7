@@ -126,6 +126,22 @@ def Wave_TransformBindParamOp
   }];
 }
 
+def Wave_TransformRegAllocLoopOp
+    : Op<Wave_Dialect, "transform.regalloc_loop", [
+        DeclareOpInterfaceMethods<MemoryEffectsOpInterface>,
+        DeclareOpInterfaceMethods<TransformOpInterface>]> {
+  let summary = "Run the WaveAMD regalloc transform-loop scaffold";
+  let description = [{
+    Stamps function-level regalloc transform state and returns the same payload
+    handle. Pipeline-fed MWE for allocator-loop entry.
+  }];
+  let arguments = (ins TransformHandleTypeInterface:$target);
+  let results = (outs TransformHandleTypeInterface:$result);
+  let assemblyFormat = [{
+    `from` $target attr-dict `:` functional-type($target, $result)
+  }];
+}
+
 // Runs dense-dataflow PressureAnalysis on each payload op
 // (func.func or builtin.module) and yields totalCycles as a
 // `!transform.param<i64>`. The arch is read from the enclosing

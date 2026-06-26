@@ -395,12 +395,13 @@ def import_mlir_bindings(build_dir: Path):
     sys.path.insert(0, str(package_path))
     try:
         from mlir import ir
+        from mlir._mlir_libs._waveDialectsNanobind import register_dialects
         from mlir.dialects import transform
     except ModuleNotFoundError as err:
         raise SystemExit(
             f"MLIR Python bindings missing under {package_path}: {err}"
         ) from err
-    return ir, transform
+    return ir, transform, register_dialects
 
 
 def erase_default_entry(ir, module) -> None:
@@ -467,8 +468,9 @@ def pipeline_text(
     schedule_options: dict[str, bool | int | str],
     report_options: dict[str, bool | int | str],
 ) -> str:
-    ir, transform = import_mlir_bindings(build_dir)
+    ir, transform, register_dialects = import_mlir_bindings(build_dir)
     with ir.Context() as ctx, ir.Location.unknown(ctx):
+        register_dialects(ctx)
         module = ir.Module.parse(read_backend_pipeline(build_dir))
         erase_default_entry(ir, module)
         append_calibration_entry(

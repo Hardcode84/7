@@ -82,8 +82,9 @@ def check_calibration_entry(label: str, module) -> None:
         schedule_options={"apply-schedule": True, "pressure-aware-selection": True},
         report_options={"print-candidates": True},
     )
-    ir, _ = module.import_mlir_bindings(BUILD_DIR)
-    with ir.Context():
+    ir, _, register_dialects = module.import_mlir_bindings(BUILD_DIR)
+    with ir.Context() as ctx:
+        register_dialects(ctx)
         parsed = ir.Module.parse(text)
         entry = find_named_sequence(ir, parsed, "__transform_main")
         lower = find_named_sequence(ir, parsed, "waveamd_backend_lower")

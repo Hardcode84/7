@@ -130,6 +130,13 @@ module attributes {transform.with_named_sequence} {
     transform.yield %r9 : !transform.any_op
   }
 
+  transform.named_sequence @waveamd_regalloc_transform_loop(
+      %root: !transform.any_op {transform.consumed}) -> !transform.any_op {
+    %r0 = wave.transform.regalloc_loop from %root
+        : (!transform.any_op) -> !transform.any_op
+    transform.yield %r0 : !transform.any_op
+  }
+
   transform.named_sequence @waveamd_backend_unscheduled(
       %root: !transform.any_op {transform.consumed}) -> !transform.any_op {
     %r0 = transform.include @waveamd_backend_lower failures(propagate) (%root)

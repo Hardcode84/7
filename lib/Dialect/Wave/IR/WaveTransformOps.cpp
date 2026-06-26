@@ -65,6 +65,53 @@ void wave::TransformGetIntAttrOp::getEffects(
 }
 
 //===----------------------------------------------------------------------===//
+// wave.transform.regalloc_loop
+//===----------------------------------------------------------------------===//
+
+namespace {
+
+static constexpr StringLiteral kRegAllocTransformStateAttr =
+    "waveamdmachine.regalloc_transform_state";
+
+static void stampRegAllocTransformState(func::FuncOp func, Builder &builder) {
+  SmallVector<NamedAttribute> entries;
+  entries.emplace_back(builder.getStringAttr("iteration"),
+                       builder.getI64IntegerAttr(0));
+  entries.emplace_back(builder.getStringAttr("stage"),
+                       builder.getStringAttr("outer-loop"));
+  func->setAttr(kRegAllocTransformStateAttr,
+                builder.getDictionaryAttr(entries));
+}
+
+} // namespace
+
+DiagnosedSilenceableFailure
+wave::TransformRegAllocLoopOp::apply(transform::TransformRewriter &rewriter,
+                                     transform::TransformResults &results,
+                                     transform::TransformState &state) {
+  Builder builder(getContext());
+  SmallVector<Operation *> targets;
+  for (Operation *target : state.getPayloadOps(getTarget())) {
+    targets.push_back(target);
+    if (func::FuncOp func = dyn_cast<func::FuncOp>(target)) {
+      stampRegAllocTransformState(func, builder);
+      continue;
+    }
+    target->walk(
+        [&](func::FuncOp func) { stampRegAllocTransformState(func, builder); });
+  }
+  results.set(cast<OpResult>(getResult()), targets);
+  return DiagnosedSilenceableFailure::success();
+}
+
+void wave::TransformRegAllocLoopOp::getEffects(
+    SmallVectorImpl<MemoryEffects::EffectInstance> &effects) {
+  transform::consumesHandle(getTargetMutable(), effects);
+  transform::producesHandle(getOperation()->getOpResults(), effects);
+  transform::modifiesPayload(effects);
+}
+
+//===----------------------------------------------------------------------===//
 // wave.transform.estimate_cycles + wave.transform.pressure_report
 //===----------------------------------------------------------------------===//
 

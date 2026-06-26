@@ -3200,6 +3200,7 @@ static LogicalResult runWaveAMDMachinePipeline(ModuleOp module,
   registerCSEPass();
   registerLoopInvariantCodeMotionPass();
   ctx->getOrLoadDialect<transform::TransformDialect>();
+  ctx->getOrLoadDialect<wave::WaveDialect>();
 
   std::string resolved;
   StringRef path = pipelineFile;

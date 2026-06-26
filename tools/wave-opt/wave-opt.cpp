@@ -6,6 +6,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "mlir/Dialect/Transform/IR/TransformDialect.h"
 #include "mlir/IR/DialectRegistry.h"
 #include "mlir/InitAllDialects.h"
 #include "mlir/InitAllExtensions.h"
@@ -28,6 +29,11 @@ int main(int argc, char **argv) {
   registry.insert<mlir::wave::WaveDialect, mlir::waveamd::WaveAMDDialect,
                   mlir::wavemeta::WaveMetaDialect,
                   mlir::waveamdmachine::WaveAMDMachineDialect>();
+  registry.addExtension(
+      +[](mlir::MLIRContext *ctx, mlir::transform::TransformDialect *dialect) {
+        (void)dialect;
+        ctx->getOrLoadDialect<mlir::wave::WaveDialect>();
+      });
   mlir::wave::registerWavePasses();
   mlir::wave::registerConvertWaveToLLVMInterface(registry);
 
