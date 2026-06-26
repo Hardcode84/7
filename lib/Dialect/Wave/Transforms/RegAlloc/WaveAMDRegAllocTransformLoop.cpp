@@ -1045,9 +1045,20 @@ findRegAllocTransformSet(ArrayRef<wave::RegAllocTransformAliasSet> sets,
   return nullptr;
 }
 
-static bool setIntersectsPosition(const wave::RegAllocTransformAliasSet &set,
-                                  unsigned position) {
-  return set.start <= position && position <= set.end;
+static bool setCanRelieveAtPosition(const wave::RegAllocTransformAliasSet &set,
+                                    unsigned position) {
+  return set.start < position && position <= set.end;
+}
+
+static bool
+liveValuesCanRelieveAtPosition(ArrayRef<ResolvedRegAllocValue> resolvedValues,
+                               unsigned position) {
+  return llvm::all_of(resolvedValues, [position](ResolvedRegAllocValue value) {
+    const wave::RegAllocTransformValue &stateValue = *value.second;
+    if (position < stateValue.start || stateValue.end < position)
+      return true;
+    return stateValue.start < position;
+  });
 }
 
 static bool
@@ -1082,7 +1093,8 @@ isAGPRReliefEligibleSet(const wave::RegAllocTransformAliasSet &set,
                         ArrayRef<ResolvedRegAllocValue> resolvedValues,
                         unsigned position) {
   if (set.regClass != waveamdmachine::RegClass::VGPR ||
-      !setIntersectsPosition(set, position) ||
+      !setCanRelieveAtPosition(set, position) ||
+      !liveValuesCanRelieveAtPosition(resolvedValues, position) ||
       hasFixedRegAllocValue(set, values))
     return false;
   return llvm::none_of(resolvedValues, [](ResolvedRegAllocValue resolved) {

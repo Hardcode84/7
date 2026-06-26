@@ -21,20 +21,37 @@ module attributes {transform.with_named_sequence} {
   }
 
   module @payload_module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
+    // CHECK-LABEL: func.func @agpr_relief_skips_entry_failure(
+    // CHECK-SAME: waveamdmachine.regalloc_transform_state =
+    // CHECK-SAME: position = 0 : i64
+    // CHECK-SAME: stage = "linear-scan-failure"
+    // CHECK-NOT: waveamdmachine.v_accvgpr_write_b32_tuple
+    // CHECK: return
+    func.func @agpr_relief_skips_entry_failure(
+        %a: !waveamdmachine.reg<vgpr, 1>,
+        %b: !waveamdmachine.reg<vgpr, 1>)
+        -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        attributes {waveamdmachine.vgpr_count_max = 1 : i64,
+                    waveamdmachine.agpr_count_max = 4 : i64} {
+      return %a, %b
+          : !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>
+    }
+
     // CHECK-LABEL: func.func @agpr_relief_promotes_overlap(
-    // CHECK-SAME: [[LONG:%[^:]+]]: !waveamdmachine.reg<vgpr, 1>
+    // CHECK-SAME: [[HOT:%[^:]+]]: !waveamdmachine.reg<vgpr, 1>
     // CHECK-NOT: waveamdmachine.regalloc_transform_state
-    // CHECK: [[AG:%.*]] = waveamdmachine.v_accvgpr_write_b32_tuple [[LONG]]
+    // CHECK: [[AG:%.*]] = waveamdmachine.v_accvgpr_write_b32_tuple [[HOT]]
     // CHECK: [[READ:%.*]] = waveamdmachine.v_accvgpr_read_b32_tuple [[AG]]
-    // CHECK: return [[READ]]
+    // CHECK: waveamdmachine.global_store_b32 [[READ]]
     func.func @agpr_relief_promotes_overlap(
-        %long: !waveamdmachine.reg<vgpr, 1>,
         %hot: !waveamdmachine.reg<vgpr, 1>)
         -> !waveamdmachine.reg<vgpr, 1>
         attributes {waveamdmachine.vgpr_count_max = 1 : i64,
                     waveamdmachine.agpr_count_max = 4 : i64} {
       %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
       %one = waveamdmachine.imm 1 : !waveamdmachine.imm
+      %long = waveamdmachine.v_mov_b32_tuple %zero {registers = 1 : i64}
+          : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
       %base = waveamdmachine.uninit : !waveamdmachine.reg<sgpr, 2>
       %cond = waveamdmachine.s_cmp_lt_i32 %zero, %one
           : (!waveamdmachine.imm, !waveamdmachine.imm)
