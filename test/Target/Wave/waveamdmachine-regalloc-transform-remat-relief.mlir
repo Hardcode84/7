@@ -125,13 +125,19 @@ module attributes {transform.with_named_sequence} {
           : !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>
     }
 
-    // CHECK-LABEL: func.func @remat_relief_rejects_use_at_failure(
-    // CHECK-SAME: waveamdmachine.regalloc_transform_state =
-    // CHECK-SAME: stage = "linear-scan-failure"
+    // CHECK-LABEL: func.func @remat_relief_rebuilds_undominated_use_groups(
+    // CHECK-NOT: waveamdmachine.regalloc_transform_state
+    // CHECK: [[ZERO:%.*]] = waveamdmachine.imm 0
+    // CHECK: [[ONE:%.*]] = waveamdmachine.imm 1
     // CHECK: waveamdmachine.uniform_loop
-    // CHECK-NOT: waveamdmachine.regalloc_remat_temp
+    // CHECK: [[LOOP_SEED:%.*]] = waveamdmachine.v_mov_b32_tuple [[ZERO]] {{.*waveamdmachine.regalloc_remat_temp}}
+    // CHECK-NEXT: [[LOOP_ROOT:%.*]] = waveamdmachine.v_add_u32 [[LOOP_SEED]], [[ONE]] {waveamdmachine.regalloc_remat_temp}
+    // CHECK-NEXT: waveamdmachine.v_add_u32 [[LOOP_ROOT]]
+    // CHECK: [[EXIT_SEED:%.*]] = waveamdmachine.v_mov_b32_tuple [[ZERO]] {{.*waveamdmachine.regalloc_remat_temp}}
+    // CHECK-NEXT: [[EXIT_ROOT:%.*]] = waveamdmachine.v_add_u32 [[EXIT_SEED]], [[ONE]] {waveamdmachine.regalloc_remat_temp}
+    // CHECK-NEXT: waveamdmachine.v_add_u32 [[EXIT_ROOT]], [[ZERO]]
     // CHECK: return
-    func.func @remat_relief_rejects_use_at_failure()
+    func.func @remat_relief_rebuilds_undominated_use_groups()
         -> !waveamdmachine.reg<vgpr, 1>
         attributes {waveamdmachine.vgpr_count_max = 2 : i64,
                     waveamdmachine.agpr_count_max = 0 : i64} {
@@ -156,6 +162,50 @@ module attributes {transform.with_named_sequence} {
           : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.imm)
             -> !waveamdmachine.reg<vgpr, 1>
       return %use : !waveamdmachine.reg<vgpr, 1>
+    }
+
+    // CHECK-LABEL: func.func @remat_relief_rebuilds_address_used_at_load_failure(
+    // CHECK-NOT: waveamdmachine.regalloc_transform_state
+    // CHECK: [[ONE:%.*]] = waveamdmachine.imm 1
+    // CHECK: [[TID:%.*]] = waveamdmachine.v_workitem_id_x
+    // CHECK: waveamdmachine.uniform_loop
+    // CHECK: [[MID:%.*]] = waveamdmachine.v_and_b32 [[TID]], [[ONE]] {waveamdmachine.regalloc_remat_temp}
+    // CHECK-NEXT: [[ADDR:%.*]] = waveamdmachine.v_lshrrev_b32 [[MID]], [[ONE]] {waveamdmachine.regalloc_remat_temp}
+    // CHECK-NEXT: waveamdmachine.ds_read_tr_b64_b16 [[ADDR]]
+    // CHECK: return
+    func.func @remat_relief_rebuilds_address_used_at_load_failure(
+        %long: !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+        attributes {waveamdmachine.vgpr_count_max = 3 : i64,
+                    waveamdmachine.agpr_count_max = 0 : i64} {
+      %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+      %one = waveamdmachine.imm 1 : !waveamdmachine.imm
+      %tid = waveamdmachine.v_workitem_id_x
+          : !waveamdmachine.reg<vgpr, 1, 0>
+      %mid = waveamdmachine.v_and_b32 %tid, %one
+          : (!waveamdmachine.reg<vgpr, 1, 0>, !waveamdmachine.imm)
+            -> !waveamdmachine.reg<vgpr, 1>
+      %addr = waveamdmachine.v_lshrrev_b32 %mid, %one
+          : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.imm)
+            -> !waveamdmachine.reg<vgpr, 1>
+      %cond = waveamdmachine.s_cmp_lt_i32 %zero, %one
+          : (!waveamdmachine.imm, !waveamdmachine.imm)
+            -> !waveamdmachine.reg<scc, 1>
+      waveamdmachine.uniform_loop if %cond : !waveamdmachine.reg<scc, 1> {
+        %ld, %tok = waveamdmachine.ds_read_tr_b64_b16 %addr offset 0
+            : (!waveamdmachine.reg<vgpr, 1>)
+              -> (!waveamdmachine.reg<vgpr, 2>,
+                  !waveamdmachine.mem.token)
+        %parts:2 = waveamdmachine.tuple_to_elements %ld
+            : (!waveamdmachine.reg<vgpr, 2>)
+              -> (!waveamdmachine.reg<vgpr, 1>,
+                  !waveamdmachine.reg<vgpr, 1>)
+        %sum = waveamdmachine.v_add_u32 %parts#0, %long
+            : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+              -> !waveamdmachine.reg<vgpr, 1>
+        waveamdmachine.continue_if %cond : !waveamdmachine.reg<scc, 1>
+      }
+      return %long : !waveamdmachine.reg<vgpr, 1>
     }
 
     // CHECK-LABEL: func.func @remat_relief_rematerializes_tuple_alias_set(
