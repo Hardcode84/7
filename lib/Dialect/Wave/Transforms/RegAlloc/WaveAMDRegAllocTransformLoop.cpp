@@ -353,12 +353,15 @@ private:
     if (loop.getBody().empty())
       return;
     Block &body = loop.getBody().front();
+    unsigned loopExit = getLoopExitPosition(loop);
     DenseSet<Value> seenInits;
     for (auto [init, arg, result] : llvm::zip_equal(
              loop.getInits(), body.getArguments(), loop.getResults())) {
       addAliasEdge(arg, result, 0);
-      if (seenInits.insert(init).second)
+      if (seenInits.insert(init).second) {
         addAliasEdge(init, arg, 0);
+        extendValue(init, loopExit);
+      }
     }
     auto cont = dyn_cast<waveamdmachine::ContinueIfOp>(body.getTerminator());
     if (!cont)

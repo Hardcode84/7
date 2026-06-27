@@ -93,6 +93,38 @@ module attributes {transform.with_named_sequence} {
       return
     }
 
+    // SCAN-LABEL: func.func @loop_carry_no_hole_reuse(
+    // SCAN-SAME: [[INIT:%[^:]+]]: !waveamdmachine.reg<sgpr, 1, 0>
+    // SCAN-SAME: waveamdmachine.regalloc_assignments
+    // SCAN-SAME: stage = "linear-scan-success"
+    // SCAN: waveamdmachine.uniform_loop
+    // SCAN-SAME: carries([[INIT]] : !waveamdmachine.reg<sgpr, 1, 0>)
+    // SCAN: ^bb0([[IV:%[^:]+]]: !waveamdmachine.reg<sgpr, 1, 0>):
+    // SCAN: waveamdmachine.s_mov_b32_value {{.*}} : (!waveamdmachine.imm) -> !waveamdmachine.reg<sgpr, 1, 1>
+    func.func @loop_carry_no_hole_reuse(
+        %init: !waveamdmachine.reg<sgpr, 1>,
+        %cond: !waveamdmachine.reg<scc, 1>) {
+      %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+      %loop = waveamdmachine.uniform_loop if %cond
+          : !waveamdmachine.reg<scc, 1>
+          carries(%init : !waveamdmachine.reg<sgpr, 1>) {
+      ^bb0(%iv: !waveamdmachine.reg<sgpr, 1>):
+        %early = waveamdmachine.s_cmp_lt_i32 %iv, %zero
+            : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.imm)
+            -> !waveamdmachine.reg<scc, 1>
+        %tmp = waveamdmachine.s_mov_b32_value %zero
+            : (!waveamdmachine.imm) -> !waveamdmachine.reg<sgpr, 1>
+        %use_tmp = waveamdmachine.s_cmp_lt_i32 %tmp, %zero
+            : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.imm)
+            -> !waveamdmachine.reg<scc, 1>
+        %next = waveamdmachine.s_mov_b32_value %zero
+            : (!waveamdmachine.imm) -> !waveamdmachine.reg<sgpr, 1>
+        waveamdmachine.continue_if %cond : !waveamdmachine.reg<scc, 1>
+            carries(%next : !waveamdmachine.reg<sgpr, 1>)
+      } -> !waveamdmachine.reg<sgpr, 1>
+      return
+    }
+
     // CHECK-LABEL: func.func @loop_invariant_mfma_acc_alias_state(
     // CHECK-SAME: waveamdmachine.regalloc_transform_state =
     // CHECK-SAME: debug = {alias_edges = 3 : i64, alias_sets = 5 : i64, ops = 5 : i64, values = 8 : i64}
