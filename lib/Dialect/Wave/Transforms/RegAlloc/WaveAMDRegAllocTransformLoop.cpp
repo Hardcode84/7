@@ -885,7 +885,6 @@ template <typename PlanT> struct MemoryReliefSlot {
   const wave::RegAllocTransformValue *stateValue = nullptr;
   std::optional<wave::regalloc::MemorySpillLoopCarrySlot> loopCarry;
   int64_t cost = 0;
-  unsigned useCount = 0;
 };
 
 template <typename SlotT> struct MemoryReliefCandidate {
@@ -2082,14 +2081,32 @@ static unsigned getRematOpCountAt(Value value, Operation *user,
   return getRematOpCountAt(value, user, context, counted, forcedRematValues);
 }
 
+static int64_t getLoopCostScale(unsigned depth) {
+  if (depth == 0)
+    return 1;
+  return int64_t{1} << std::min<unsigned>(depth * 4, 20);
+}
+
 static int64_t getRematReliefLoopCostScale(Operation *op) {
   unsigned depth = 0;
   for (Operation *cur = op; cur; cur = cur->getParentOp())
     if (isa<waveamdmachine::UniformLoopOp>(cur))
       ++depth;
-  if (depth == 0)
-    return 1;
-  return int64_t{1} << std::min<unsigned>(depth * 4, 20);
+  return getLoopCostScale(depth);
+}
+
+static int64_t getParentLoopCostScale(Operation *op) {
+  unsigned depth = 0;
+  for (Operation *cur = op->getParentOp(); cur; cur = cur->getParentOp())
+    if (isa<waveamdmachine::UniformLoopOp>(cur))
+      ++depth;
+  return getLoopCostScale(depth);
+}
+
+static int64_t getMemoryBridgeCostScale(Operation *anchor, bool beforeAnchor) {
+  if (beforeAnchor && isa<waveamdmachine::UniformLoopOp>(anchor))
+    return getParentLoopCostScale(anchor);
+  return getRematReliefLoopCostScale(anchor);
 }
 
 static FailureOr<SmallVector<OpOperand *>>
@@ -2692,6 +2709,81 @@ static Operation *getValueAnchorOp(Value value) {
   return arg.getOwner()->getParentOp();
 }
 
+static int64_t getMemoryLoopCarryInitStoreCost(
+    Value init, wave::regalloc::MemorySpillLoopCarrySlot loopCarry,
+    unsigned accessOps) {
+  OpOperand *loopUse = &loopCarry.loop.getInitsMutable()[loopCarry.index];
+  Operation *anchor = wave::regalloc::getLoopCarryInitStoreDiagOp(
+      init, loopUse, loopCarry.loop);
+  return accessOps * getMemoryBridgeCostScale(
+                         anchor, anchor == loopCarry.loop.getOperation());
+}
+
+static int64_t getMemoryLoopCarryExtraInitUseCost(
+    Value init, wave::regalloc::MemorySpillLoopCarrySlot loopCarry,
+    unsigned accessOps) {
+  OpOperand *loopUse = &loopCarry.loop.getInitsMutable()[loopCarry.index];
+  int64_t cost = 0;
+  for (OpOperand &use : init.getUses()) {
+    Operation *user = use.getOwner();
+    if (&use == loopUse || isRegAllocTransformTempOp(user))
+      continue;
+    if (!wave::regalloc::canRewriteExtraLoopInitUse(use, loopUse,
+                                                    loopCarry.loop))
+      continue;
+    cost += accessOps * getMemoryBridgeCostScale(user, /*beforeAnchor=*/true);
+  }
+  return cost;
+}
+
+static int64_t getMemoryLoopCarryBodyUseCost(
+    wave::regalloc::MemorySpillLoopCarrySlot loopCarry, unsigned accessOps) {
+  Block &body = loopCarry.loop.getBody().front();
+  BlockArgument arg = body.getArgument(loopCarry.index);
+  llvm::SmallDenseSet<Operation *, 8> users;
+  int64_t cost = 0;
+  for (OpOperand &use : arg.getUses()) {
+    if (isa<waveamdmachine::ContinueIfOp>(use.getOwner()))
+      continue;
+    Operation *anchor =
+        wave::regalloc::getAncestorInBlock(use.getOwner(), &body);
+    if (!anchor || !users.insert(anchor).second)
+      continue;
+    cost += accessOps * getMemoryBridgeCostScale(anchor, /*beforeAnchor=*/true);
+  }
+  return cost;
+}
+
+static int64_t getMemoryLoopCarryTerminatorStoreCost(
+    wave::regalloc::MemorySpillLoopCarrySlot loopCarry, unsigned accessOps) {
+  Block &body = loopCarry.loop.getBody().front();
+  auto term = cast<waveamdmachine::ContinueIfOp>(body.getTerminator());
+  BlockArgument arg = body.getArgument(loopCarry.index);
+  if (term.getCarries()[loopCarry.index] == arg)
+    return 0;
+  return accessOps *
+         getMemoryBridgeCostScale(term.getOperation(), /*beforeAnchor=*/true);
+}
+
+static int64_t getMemoryLoopCarryResultUseCost(
+    wave::regalloc::MemorySpillLoopCarrySlot loopCarry, unsigned accessOps) {
+  if (loopCarry.loop.getResult(loopCarry.index).use_empty())
+    return 0;
+  return accessOps * getParentLoopCostScale(loopCarry.loop.getOperation());
+}
+
+static int64_t
+getMemoryLoopCarryReliefCost(Value init,
+                             wave::regalloc::MemorySpillLoopCarrySlot loopCarry,
+                             unsigned accessOps) {
+  int64_t cost = getMemoryLoopCarryInitStoreCost(init, loopCarry, accessOps);
+  cost += getMemoryLoopCarryExtraInitUseCost(init, loopCarry, accessOps);
+  cost += getMemoryLoopCarryBodyUseCost(loopCarry, accessOps);
+  cost += getMemoryLoopCarryTerminatorStoreCost(loopCarry, accessOps);
+  cost += getMemoryLoopCarryResultUseCost(loopCarry, accessOps);
+  return cost;
+}
+
 static int64_t getLDSReliefCost(Value value,
                                 ArrayRef<wave::regalloc::LDSSpillPlan> plans,
                                 ArrayRef<OpOperand *> uses) {
@@ -2700,17 +2792,15 @@ static int64_t getLDSReliefCost(Value value,
       accessOps * getRematReliefLoopCostScale(getValueAnchorOp(value));
   for (OpOperand *use : uses)
     cost += accessOps * getRematReliefLoopCostScale(use->getOwner());
-  return cost + uses.size();
+  return cost;
 }
 
-static int64_t getLDSLoopCarryReliefCost(
-    Value value, ArrayRef<wave::regalloc::LDSSpillPlan> plans,
-    wave::regalloc::MemorySpillLoopCarrySlot loopCarry, unsigned useCount) {
+static int64_t
+getLDSLoopCarryReliefCost(Value value,
+                          ArrayRef<wave::regalloc::LDSSpillPlan> plans,
+                          wave::regalloc::MemorySpillLoopCarrySlot loopCarry) {
   unsigned accessOps = getLDSAccessOpCount(plans);
-  int64_t cost =
-      accessOps * getRematReliefLoopCostScale(getValueAnchorOp(value));
-  cost += accessOps * getRematReliefLoopCostScale(loopCarry.loop) * useCount;
-  return cost + useCount;
+  return getMemoryLoopCarryReliefCost(value, loopCarry, accessOps);
 }
 
 template <typename Traits>
@@ -2745,7 +2835,6 @@ buildMemoryReliefSlot(func::FuncOp func, Value value,
   slot.value = value;
   slot.type = type;
   slot.stateValue = &stateValue;
-  slot.useCount = slot.uses.size();
   slot.cost = Traits::getCost(value, slot.plan, type, slot.uses);
   return std::optional<typename Traits::Slot>(std::move(slot));
 }
@@ -2849,9 +2938,7 @@ buildMemoryLoopCarryReliefCandidate(
   slot.type = *type;
   slot.stateValue = stateValue;
   slot.loopCarry = *loopCarry;
-  slot.useCount = wave::regalloc::getLoopCarryUseCount(*loopCarry);
-  slot.cost = Traits::getLoopCarryCost(init, slot.plan, *type, *loopCarry,
-                                       slot.useCount);
+  slot.cost = Traits::getLoopCarryCost(init, slot.plan, *type, *loopCarry);
 
   typename Traits::Candidate candidate;
   candidate.set = &set;
@@ -3094,9 +3181,8 @@ struct LDSMemoryReliefTraits {
 
   static int64_t
   getLoopCarryCost(Value value, const Plan &plan, waveamdmachine::RegType,
-                   wave::regalloc::MemorySpillLoopCarrySlot loopCarry,
-                   unsigned useCount) {
-    return getLDSLoopCarryReliefCost(value, plan, loopCarry, useCount);
+                   wave::regalloc::MemorySpillLoopCarrySlot loopCarry) {
+    return getLDSLoopCarryReliefCost(value, plan, loopCarry);
   }
 };
 
@@ -3773,18 +3859,15 @@ static int64_t getScratchReliefCost(Value value,
       accessOps * getRematReliefLoopCostScale(getValueAnchorOp(value));
   for (OpOperand *use : uses)
     cost += accessOps * getRematReliefLoopCostScale(use->getOwner());
-  return cost + uses.size();
+  return cost;
 }
 
 static int64_t getScratchLoopCarryReliefCost(
     Value value, wave::regalloc::ScratchSpillPlan plan,
     waveamdmachine::RegType type,
-    wave::regalloc::MemorySpillLoopCarrySlot loopCarry, unsigned useCount) {
+    wave::regalloc::MemorySpillLoopCarrySlot loopCarry) {
   unsigned accessOps = getScratchAccessOpCount(plan, type.getWidth());
-  int64_t cost =
-      accessOps * getRematReliefLoopCostScale(getValueAnchorOp(value));
-  cost += accessOps * getRematReliefLoopCostScale(loopCarry.loop) * useCount;
-  return cost + useCount;
+  return getMemoryLoopCarryReliefCost(value, loopCarry, accessOps);
 }
 
 struct ScratchMemoryReliefTraits {
@@ -3809,10 +3892,8 @@ struct ScratchMemoryReliefTraits {
 
   static int64_t
   getLoopCarryCost(Value value, Plan plan, waveamdmachine::RegType type,
-                   wave::regalloc::MemorySpillLoopCarrySlot loopCarry,
-                   unsigned useCount) {
-    return getScratchLoopCarryReliefCost(value, plan, type, loopCarry,
-                                         useCount);
+                   wave::regalloc::MemorySpillLoopCarrySlot loopCarry) {
+    return getScratchLoopCarryReliefCost(value, plan, type, loopCarry);
   }
 };
 
