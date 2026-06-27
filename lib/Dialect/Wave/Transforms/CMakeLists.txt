@@ -1,10 +1,6 @@
 add_mlir_dialect_library(MLIRWaveTransforms
   PARTIAL_SOURCES_INTENDED
-  RegAlloc/WaveAMDRegAlloc.cpp
-  RegAlloc/WaveAMDRegAllocBankPromotion.cpp
-  RegAlloc/WaveAMDRegAllocLDS.cpp
-  RegAlloc/WaveAMDRegAllocRemat.cpp
-  RegAlloc/WaveAMDRegAllocScratch.cpp
+  RegAlloc/WaveAMDClearRegAllocAssignments.cpp
   RegAlloc/WaveAMDRegAllocVerification.cpp
   RegAlloc/WaveAMDRegLiveIntervals.cpp
   RegAlloc/WaveAMDRegPressureRelief.cpp

@@ -140,7 +140,7 @@ mapRematerializedOperand(OpBuilder &builder, Location loc, Value operand,
     return operand;
   DenseSet<Value> visiting;
   if (!canRematerializeDuplicateRegValue(operand, visiting))
-    return emitError(loc) << "waveamd-reg-alloc cannot rematerialize operand "
+    return emitError(loc) << "waveamd regalloc cannot rematerialize operand "
                              "while duplicating register value";
   return rematerializeDuplicateRegValue(builder, loc, operand, cache);
 }
@@ -152,7 +152,7 @@ rematerializeDuplicateRegValue(OpBuilder &builder, Location loc, Value v,
     return cached;
   Operation *def = v.getDefiningOp();
   if (!def)
-    return emitError(loc) << "waveamd-reg-alloc cannot rematerialize block "
+    return emitError(loc) << "waveamd regalloc cannot rematerialize block "
                              "argument while duplicating register value";
 
   IRMapping mapper;
@@ -248,7 +248,7 @@ static FailureOr<Value> duplicateRegValue(OpBuilder &builder, Location loc,
     FailureOr<Value> agprClone = cloneAGPRDuplicate(builder, v, resultType);
     if (succeeded(agprClone))
       return *agprClone;
-    return emitError(loc) << "waveamd-reg-alloc cannot duplicate AGPR value "
+    return emitError(loc) << "waveamd regalloc cannot duplicate AGPR value "
                              "before register allocation";
   }
 

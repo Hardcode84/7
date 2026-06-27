@@ -65,6 +65,36 @@ module attributes {transform.with_named_sequence} {
       return %long : !waveamdmachine.reg<vgpr, 1>
     }
 
+    // CHECK-LABEL: func.func @agpr_relief_promotes_loop_carry(
+    // CHECK-NOT: waveamdmachine.regalloc_transform_state
+    // CHECK: [[INIT:%.*]] = waveamdmachine.v_mov_b32_tuple
+    // CHECK: [[AG:%.*]] = waveamdmachine.v_accvgpr_write_b32_tuple [[INIT]]
+    // CHECK-NOT: waveamdmachine.v_accvgpr_read_b32_tuple [[AG]]
+    // CHECK: waveamdmachine.uniform_loop {{.*}} carries([[AG]] : !waveamdmachine.reg<agpr, 4>)
+    // CHECK: ^bb0([[CARRY:%[^:]+]]: !waveamdmachine.reg<agpr, 4>):
+    // CHECK: waveamdmachine.continue_if {{.*}} carries([[CARRY]] : !waveamdmachine.reg<agpr, 4>)
+    func.func @agpr_relief_promotes_loop_carry()
+        -> !waveamdmachine.reg<vgpr, 4>
+        attributes {waveamdmachine.vgpr_count_max = 4 : i64,
+                    waveamdmachine.agpr_count_max = 16 : i64} {
+      %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+      %four = waveamdmachine.imm 4 : !waveamdmachine.imm
+      %carry_init = waveamdmachine.v_mov_b32_tuple %zero {registers = 4 : i64}
+          : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 4>
+      %long = waveamdmachine.v_mov_b32_tuple %zero {registers = 4 : i64}
+          : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 4>
+      %cond = waveamdmachine.s_cmp_lt_i32 %zero, %four
+          : (!waveamdmachine.imm, !waveamdmachine.imm)
+            -> !waveamdmachine.reg<scc, 1>
+      %loop = waveamdmachine.uniform_loop if %cond : !waveamdmachine.reg<scc, 1>
+          carries(%carry_init : !waveamdmachine.reg<vgpr, 4>) {
+      ^bb0(%carry: !waveamdmachine.reg<vgpr, 4>):
+        waveamdmachine.continue_if %cond : !waveamdmachine.reg<scc, 1>
+            carries(%carry : !waveamdmachine.reg<vgpr, 4>)
+      } -> !waveamdmachine.reg<vgpr, 4>
+      return %long : !waveamdmachine.reg<vgpr, 4>
+    }
+
     // CHECK-LABEL: func.func @agpr_relief_respects_capacity(
     // CHECK-NOT: waveamdmachine.v_accvgpr_write_b32_tuple
     // CHECK-SAME: waveamdmachine.regalloc_transform_state =
@@ -91,6 +121,22 @@ module attributes {transform.with_named_sequence} {
         attributes {waveamdmachine.agpr_count_max = 1 : i64} {
       return %a, %b
           : !waveamdmachine.reg<agpr, 1>, !waveamdmachine.reg<agpr, 1>
+    }
+
+    // CHECK-LABEL: func.func @agpr_relief_skips_combined_pressure(
+    // CHECK-NOT: waveamdmachine.v_accvgpr_write_b32_tuple
+    // CHECK-SAME: waveamdmachine.regalloc_transform_state =
+    // CHECK-SAME: class = "vgpr_agpr"
+    // CHECK-SAME: stage = "linear-scan-failure"
+    func.func @agpr_relief_skips_combined_pressure(
+        %agpr: !waveamdmachine.reg<agpr, 120>,
+        %vgpr: !waveamdmachine.reg<vgpr, 120>)
+        -> (!waveamdmachine.reg<agpr, 120>,
+            !waveamdmachine.reg<vgpr, 120>)
+        attributes {waveamdmachine.target_waves = 4 : i64} {
+      return %agpr, %vgpr
+          : !waveamdmachine.reg<agpr, 120>,
+            !waveamdmachine.reg<vgpr, 120>
     }
   }
 }

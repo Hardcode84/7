@@ -95,7 +95,7 @@ static ScratchSpillPlan buildScratchSpillPlan(func::FuncOp func,
                   reservedSpillBytes, valueBytes);
 
   FailureOr<waveamdmachine::AMDGPUTarget> target =
-      waveamdmachine::getAMDGPUTarget(func, "waveamd-reg-alloc scratch "
+      waveamdmachine::getAMDGPUTarget(func, "waveamd regalloc scratch "
                                             "planning");
   if (failed(target))
     return reject(ScratchSpillPlanStatus::UnsupportedTarget, existingBytes,

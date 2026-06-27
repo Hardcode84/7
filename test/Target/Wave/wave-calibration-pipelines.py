@@ -95,7 +95,6 @@ def check_backend_entry(label: str, ir, entry) -> None:
     require(label, "waveamd_backend_lower" in includes, "no lower include")
     require(label, "waveamd_backend_finish" in includes, "no finish include")
     entry_passes = applied_passes(ir, entry)
-    require(label, "waveamd-reg-alloc" not in entry_passes, "entry spells regalloc")
     require(
         label,
         "waveamd-insert-hazard-waits" not in entry_passes,
@@ -131,13 +130,8 @@ def check_default_finish(label: str, ir, finish) -> None:
     finish_includes = included_sequences(ir, finish)
     require(
         label,
-        "waveamd_backend_finish_legacy_regalloc" in finish_includes,
-        "default finish does not use legacy regalloc",
-    )
-    require(
-        label,
-        "waveamd_backend_finish_transform_regalloc" not in finish_includes,
-        "default finish uses transform regalloc",
+        "waveamd_backend_finish_transform_regalloc" in finish_includes,
+        "default finish does not use transform regalloc",
     )
 
 
@@ -153,11 +147,6 @@ def check_transform_finish(label: str, ir, transform_finish) -> None:
             "cse",
         ],
         "transform finish cleanup order drifted",
-    )
-    require(
-        label,
-        "waveamd-reg-alloc" not in transform_finish_passes,
-        "transform finish spells legacy regalloc",
     )
     transform_finish_includes = included_sequences(ir, transform_finish)
     require(
@@ -175,27 +164,6 @@ def check_transform_finish(label: str, ir, transform_finish) -> None:
         transform_finish_includes.index("waveamd_regalloc_transform_loop")
         < transform_finish_includes.index("waveamd_backend_post_regalloc"),
         "transform finish include order drifted",
-    )
-
-
-def check_legacy_finish(label: str, ir, legacy_finish) -> None:
-    legacy_finish_passes = applied_passes(ir, legacy_finish)
-    require_pass_order(
-        label,
-        legacy_finish_passes,
-        [
-            "waveamd-clear-regalloc-assignments",
-            "waveamd-preserve-hw-regs",
-            "canonicalize",
-            "cse",
-            "waveamd-reg-alloc",
-        ],
-        "legacy finish pass order drifted",
-    )
-    require(
-        label,
-        "waveamd_backend_post_regalloc" in included_sequences(ir, legacy_finish),
-        "legacy finish skips post-regalloc tail",
     )
 
 
@@ -232,16 +200,12 @@ def check_calibration_entry(label: str, module) -> None:
         transform_finish = require_sequence(
             ir, parsed, label, "waveamd_backend_finish_transform_regalloc"
         )
-        legacy_finish = require_sequence(
-            ir, parsed, label, "waveamd_backend_finish_legacy_regalloc"
-        )
         post = require_sequence(ir, parsed, label, "waveamd_backend_post_regalloc")
         require_sequence(ir, parsed, label, "waveamd_regalloc_transform_loop")
         check_backend_entry(label, ir, entry)
         check_backend_lower(label, applied_passes(ir, lower))
         check_default_finish(label, ir, finish)
         check_transform_finish(label, ir, transform_finish)
-        check_legacy_finish(label, ir, legacy_finish)
         check_post_regalloc(label, applied_passes(ir, post))
     print(f"{label}: ok")
 

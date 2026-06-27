@@ -1416,11 +1416,11 @@ retypeLoadedMemorySpillSplit(waveamdmachine::TupleToElementsOp split,
     auto elementType = dyn_cast<waveamdmachine::RegType>(element.getType());
     if (!elementType || elementType.getRegClass() != loadedType.getRegClass())
       return split.emitError()
-             << "waveamd-reg-alloc cannot replace mismatched split spill";
+             << "waveamd regalloc cannot replace mismatched split spill";
     unsigned width = static_cast<unsigned>(elementType.getWidth());
     if (offset + width > static_cast<unsigned>(loadedType.getWidth()))
       return split.emitError()
-             << "waveamd-reg-alloc cannot replace mismatched split spill";
+             << "waveamd regalloc cannot replace mismatched split spill";
     int64_t index = -1;
     if (loadedType.getIndex() >= 0)
       index = loadedType.getIndex() + offset;
@@ -1430,7 +1430,7 @@ retypeLoadedMemorySpillSplit(waveamdmachine::TupleToElementsOp split,
   }
   if (offset != static_cast<unsigned>(loadedType.getWidth()))
     return split.emitError()
-           << "waveamd-reg-alloc cannot replace mismatched split spill";
+           << "waveamd regalloc cannot replace mismatched split spill";
   for (auto [element, elementType] :
        llvm::zip(split.getElements(), elementTypes))
     element.setType(elementType);
@@ -1463,7 +1463,7 @@ static FailureOr<Value> materializeMemorySpillValueStoreToken(
   Operation *diagOp = getMemorySpillValueDiagOp(value);
   if (!diagOp)
     return mlir::emitError(value.getLoc())
-           << "waveamd-reg-alloc cannot materialize " << providerName
+           << "waveamd regalloc cannot materialize " << providerName
            << " for value";
   setInsertionPointForMemorySpillStore(value, builder);
   FailureOr<wave::WaveAMDPressureReliefTempAssignment> valueAssignment =
@@ -1526,7 +1526,7 @@ static LogicalResult materializeMemorySpillValue(
     if (hasOnlyRegAllocTempUses(value))
       return success();
     return mlir::emitError(value.getLoc())
-           << "waveamd-reg-alloc cannot materialize " << providerName
+           << "waveamd regalloc cannot materialize " << providerName
            << " for value";
   }
 
@@ -1695,7 +1695,7 @@ struct MemorySpillLoopCarryMaterializer {
       Operation *user = use->getOwner();
       if (!canRewriteExtraLoopInitUse(*use, loopUse, loop))
         return mlir::emitError(init.getLoc())
-               << "waveamd-reg-alloc cannot materialize " << provider
+               << "waveamd regalloc cannot materialize " << provider
                << " spill for loop init use outside loop preheader";
       builder.setInsertionPoint(user);
       FailureOr<MemorySpillLoadResult> load =
@@ -2190,29 +2190,6 @@ struct ScratchSpillPlan {
   bool usesFlatScratch = false;
   ScratchSpillPlanStatus status = ScratchSpillPlanStatus::NotKernel;
 };
-
-std::unique_ptr<wave::WaveAMDPressureReliefProvider>
-createBankPromotionProvider(ArrayRef<IntervalGroup *> groups,
-                            IntervalGroup *request, unsigned position,
-                            RegisterBudgets budgets, Inventory &inventory);
-std::unique_ptr<wave::WaveAMDPressureReliefProvider>
-createRematerializeProvider(ArrayRef<IntervalGroup *> groups,
-                            IntervalGroup *request, unsigned position,
-                            Inventory &inventory);
-std::unique_ptr<wave::WaveAMDPressureReliefProvider>
-createLDSSpillProvider(func::FuncOp func, ArrayRef<IntervalGroup *> groups,
-                       IntervalGroup *request, unsigned position,
-                       RegisterBudgets budgets, Inventory &inventory);
-std::unique_ptr<wave::WaveAMDPressureReliefProvider>
-createScratchSpillProvider(func::FuncOp func, ArrayRef<IntervalGroup *> groups,
-                           IntervalGroup *request, unsigned position,
-                           Inventory &inventory);
-unsigned getPlannedProviderBytes(Inventory &inventory, StringRef provider);
-void addPlannedProviderBytes(Inventory &inventory, StringRef provider,
-                             unsigned bytes);
-void recordPlannedPressureRelief(
-    Inventory &inventory,
-    std::unique_ptr<wave::WaveAMDPressureReliefPlan> plan);
 
 StringRef getLDSSpillPlanStatusName(LDSSpillPlanStatus status);
 void getExistingLDSBytes(func::FuncOp func, unsigned &fixedBytes,

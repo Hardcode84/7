@@ -1,4 +1,4 @@
-// RUN: wave-opt --waveamd-reg-alloc --waveamd-insert-hazard-waits %s | FileCheck %s
+// RUN: wave-opt %s --pass-pipeline='builtin.module(transform-preload-library{transform-library-paths=%wave_pipelines},transform-interpreter{entry-point=waveamd_regalloc_transform_loop},waveamd-insert-hazard-waits)' | FileCheck %s
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
@@ -7,7 +7,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // the new VALU copy gets the drained-LGKM mitigation.
 // CHECK-LABEL: func.func @regalloc_inserted_valu_copy_after_wait
 // CHECK: waveamdmachine.s_load_b32
-// CHECK: waveamdmachine.s_waitcnt
+// CHECK: waveamdmachine.s_waitcnt lgkmcnt(0)
 // CHECK-NEXT: waveamdmachine.imm 1
 // CHECK-NEXT: waveamdmachine.s_delay_alu
 // CHECK-NEXT: waveamdmachine.v_mov_b32_tuple

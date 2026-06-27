@@ -1,5 +1,5 @@
 // RUN: wave-opt --waveamd-to-machine --canonicalize --cse %s | FileCheck %s
-// RUN: wave-opt --waveamd-to-machine --canonicalize --cse --waveamd-abi-lowering --waveamd-reg-alloc --waveamd-insert-hazard-waits --waveamd-resource-info --waveamd-metadata %s | FileCheck %s --check-prefix=PIPE
+// RUN: wave-opt %s --pass-pipeline='builtin.module(waveamd-to-machine,canonicalize,cse,waveamd-abi-lowering,transform-preload-library{transform-library-paths=%wave_pipelines},transform-interpreter{entry-point=waveamd_regalloc_transform_loop},waveamd-insert-hazard-waits,waveamd-resource-info,waveamd-metadata)' | FileCheck %s --check-prefix=PIPE
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 

@@ -1,10 +1,8 @@
 // RUN: wave-opt --waveamd-to-machine --split-input-file %s | FileCheck %s
 // RUN: wave-opt --waveamd-to-machine --split-input-file %s | wave-opt --split-input-file | FileCheck %s
-// RUN: wave-opt --waveamd-to-machine --waveamd-abi-lowering \
-// RUN:   --waveamd-preserve-hw-regs --waveamd-reg-alloc \
-// RUN:   --waveamd-decompose-mem-tuples --waveamd-insert-ticket-waits \
-// RUN:   --waveamd-insert-hazard-waits \
-// RUN:   --split-input-file %s | FileCheck %s --check-prefix=REGALLOC
+// RUN: wave-opt --split-input-file %s \
+// RUN:   --pass-pipeline='builtin.module(waveamd-to-machine,waveamd-abi-lowering,waveamd-preserve-hw-regs,transform-preload-library{transform-library-paths=%wave_pipelines},transform-interpreter{entry-point=waveamd_regalloc_transform_loop},waveamd-decompose-mem-tuples,waveamd-insert-ticket-waits,waveamd-insert-hazard-waits)' \
+// RUN:   | FileCheck %s --check-prefix=REGALLOC
 // RUN: wave-opt --waveamd-to-machine --split-input-file %s | wave-translate --wave-to-amdgpu-asm --split-input-file - | FileCheck %s --check-prefix=ASM
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {

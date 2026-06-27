@@ -1,7 +1,7 @@
 // RUN: wave-opt --waveamd-to-machine --verify-diagnostics --split-input-file %s | FileCheck %s --check-prefix=SELECT
 // RUN: wave-opt --waveamd-to-machine --waveamd-abi-lowering --waveamd-insert-ticket-waits --split-input-file %s | FileCheck %s --check-prefix=WAIT
-// RUN: wave-opt --waveamd-to-machine --waveamd-abi-lowering --waveamd-preserve-hw-regs --waveamd-reg-alloc --waveamd-decompose-mem-tuples --waveamd-insert-ticket-waits --waveamd-insert-hazard-waits --split-input-file %s | wave-translate --wave-to-amdgpu-asm --split-input-file - | FileCheck %s --check-prefix=ASM
-// RUN: wave-opt --waveamd-to-machine --waveamd-abi-lowering --waveamd-preserve-hw-regs --waveamd-reg-alloc --waveamd-decompose-mem-tuples --waveamd-insert-ticket-waits --waveamd-insert-hazard-waits --split-input-file %s | wave-translate --wave-to-amdgpu-asm --split-input-file - | llvm-mc -triple=amdgcn-amd-amdhsa -mcpu=gfx1100 -filetype=obj -o /dev/null
+// RUN: wave-opt --split-input-file %s --pass-pipeline='builtin.module(waveamd-to-machine,waveamd-abi-lowering,waveamd-preserve-hw-regs,transform-preload-library{transform-library-paths=%wave_pipelines},transform-interpreter{entry-point=waveamd_regalloc_transform_loop},waveamd-decompose-mem-tuples,waveamd-insert-ticket-waits,waveamd-insert-hazard-waits)' | wave-translate --wave-to-amdgpu-asm --split-input-file - | FileCheck %s --check-prefix=ASM
+// RUN: wave-opt --split-input-file %s --pass-pipeline='builtin.module(waveamd-to-machine,waveamd-abi-lowering,waveamd-preserve-hw-regs,transform-preload-library{transform-library-paths=%wave_pipelines},transform-interpreter{entry-point=waveamd_regalloc_transform_loop},waveamd-decompose-mem-tuples,waveamd-insert-ticket-waits,waveamd-insert-hazard-waits)' | wave-translate --wave-to-amdgpu-asm --split-input-file - | llvm-mc -triple=amdgcn-amd-amdhsa -mcpu=gfx1100 -filetype=obj -o /dev/null
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 

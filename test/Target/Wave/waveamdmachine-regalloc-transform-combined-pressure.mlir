@@ -71,5 +71,19 @@ module attributes {transform.with_named_sequence} {
       %vgpr = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 120>
       return
     }
+
+    // CHECK-LABEL: func.func @target_waves_keeps_vgpr_addressable_limit
+    // CHECK-NOT: waveamdmachine.regalloc_assignments
+    // CHECK-SAME: failure = {budget_mode = "default", class = "vgpr"
+    // CHECK-SAME: limit = 256 : i64
+    // CHECK-SAME: pressure = 257 : i64
+    // CHECK-SAME: reason = "pressure"
+    // CHECK-SAME: request = 257 : i64
+    // CHECK-SAME: stage = "linear-scan-failure"
+    func.func @target_waves_keeps_vgpr_addressable_limit()
+        attributes {waveamdmachine.target_waves = 1 : i64} {
+      %wide = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 257>
+      return
+    }
   }
 }

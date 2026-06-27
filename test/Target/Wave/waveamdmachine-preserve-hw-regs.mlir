@@ -1,5 +1,5 @@
 // RUN: wave-opt --waveamd-preserve-hw-regs -split-input-file %s | FileCheck %s
-// RUN: wave-opt --waveamd-preserve-hw-regs --waveamd-reg-alloc -split-input-file %s >/dev/null
+// RUN: wave-opt --split-input-file %s --pass-pipeline='builtin.module(waveamd-preserve-hw-regs,transform-preload-library{transform-library-paths=%wave_pipelines},transform-interpreter{entry-point=waveamd_regalloc_transform_loop})' >/dev/null
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 

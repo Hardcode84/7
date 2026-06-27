@@ -70,6 +70,21 @@ static Operation *diagOpForValue(Value value, func::FuncOp func) {
   return func;
 }
 
+static bool isFixedHardwareRead(Value value) {
+  Operation *def = value.getDefiningOp();
+  return isa_and_nonnull<
+      waveamdmachine::SWorkgroupIdXOp, waveamdmachine::SWorkgroupIdYOp,
+      waveamdmachine::SWorkgroupIdZOp, waveamdmachine::VWorkitemIdXOp>(def);
+}
+
+static bool areEquivalentFixedHardwareReads(Value lhs, Value rhs) {
+  if (!isFixedHardwareRead(lhs) || !isFixedHardwareRead(rhs))
+    return false;
+  if (lhs.getType() != rhs.getType())
+    return false;
+  return lhs.getDefiningOp()->getName() == rhs.getDefiningOp()->getName();
+}
+
 static LogicalResult verifyValueAllocated(Value value, func::FuncOp func,
                                           StringRef consumer) {
   auto type = dyn_cast<waveamdmachine::RegType>(value.getType());
@@ -504,7 +519,11 @@ verifyReservedRanges(func::FuncOp func, ArrayRef<PhysicalLiveRange> ranges,
 
 static bool canSharePhysicalRange(const PhysicalLiveRange &lhs,
                                   const PhysicalLiveRange &rhs) {
-  return lhs.intervalIndex == rhs.intervalIndex;
+  if (lhs.intervalIndex == rhs.intervalIndex)
+    return true;
+  if (lhs.physStart != rhs.physStart || lhs.physEnd != rhs.physEnd)
+    return false;
+  return areEquivalentFixedHardwareReads(lhs.value, rhs.value);
 }
 
 static LogicalResult

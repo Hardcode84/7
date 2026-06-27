@@ -1,11 +1,11 @@
 // RUN: wave-opt --waveamd-to-machine %s | FileCheck %s --check-prefix=SELECT
 // RUN: wave-opt --waveamd-to-machine %s | wave-opt | FileCheck %s --check-prefix=SELECT
 // RUN: wave-opt --waveamd-to-machine --waveamd-abi-lowering %s | FileCheck %s --check-prefix=ABI
-// RUN: wave-opt --waveamd-to-machine --waveamd-abi-lowering --waveamd-preserve-hw-regs --waveamd-reg-alloc --waveamd-decompose-mem-tuples --waveamd-insert-ticket-waits %s | FileCheck %s --check-prefix=TICKET
-// RUN: wave-opt --waveamd-to-machine --waveamd-abi-lowering --waveamd-preserve-hw-regs --waveamd-reg-alloc --waveamd-decompose-mem-tuples --waveamd-insert-ticket-waits --waveamd-insert-hazard-waits %s | FileCheck %s --check-prefix=HAZARD
-// RUN: wave-opt --waveamd-to-machine --waveamd-abi-lowering --waveamd-preserve-hw-regs --waveamd-reg-alloc %s | FileCheck %s --check-prefix=REGALLOC
-// RUN: wave-opt --waveamd-to-machine --waveamd-abi-lowering --waveamd-preserve-hw-regs --waveamd-reg-alloc --waveamd-decompose-mem-tuples --waveamd-insert-ticket-waits --waveamd-insert-hazard-waits --waveamd-resource-info %s | FileCheck %s --check-prefix=RESOURCE
-// RUN: wave-opt --waveamd-to-machine --waveamd-abi-lowering --waveamd-preserve-hw-regs --waveamd-reg-alloc --waveamd-decompose-mem-tuples --waveamd-insert-ticket-waits --waveamd-insert-hazard-waits --waveamd-resource-info --waveamd-metadata %s | FileCheck %s --check-prefix=METADATA
+// RUN: wave-opt %s --pass-pipeline='builtin.module(waveamd-to-machine,waveamd-abi-lowering,waveamd-preserve-hw-regs,transform-preload-library{transform-library-paths=%wave_pipelines},transform-interpreter{entry-point=waveamd_regalloc_transform_loop},waveamd-decompose-mem-tuples,waveamd-insert-ticket-waits)' | FileCheck %s --check-prefix=TICKET
+// RUN: wave-opt %s --pass-pipeline='builtin.module(waveamd-to-machine,waveamd-abi-lowering,waveamd-preserve-hw-regs,transform-preload-library{transform-library-paths=%wave_pipelines},transform-interpreter{entry-point=waveamd_regalloc_transform_loop},waveamd-decompose-mem-tuples,waveamd-insert-ticket-waits,waveamd-insert-hazard-waits)' | FileCheck %s --check-prefix=HAZARD
+// RUN: wave-opt %s --pass-pipeline='builtin.module(waveamd-to-machine,waveamd-abi-lowering,waveamd-preserve-hw-regs,transform-preload-library{transform-library-paths=%wave_pipelines},transform-interpreter{entry-point=waveamd_regalloc_transform_loop})' | FileCheck %s --check-prefix=REGALLOC
+// RUN: wave-opt %s --pass-pipeline='builtin.module(waveamd-to-machine,waveamd-abi-lowering,waveamd-preserve-hw-regs,transform-preload-library{transform-library-paths=%wave_pipelines},transform-interpreter{entry-point=waveamd_regalloc_transform_loop},waveamd-decompose-mem-tuples,waveamd-insert-ticket-waits,waveamd-insert-hazard-waits,waveamd-resource-info)' | FileCheck %s --check-prefix=RESOURCE
+// RUN: wave-opt %s --pass-pipeline='builtin.module(waveamd-to-machine,waveamd-abi-lowering,waveamd-preserve-hw-regs,transform-preload-library{transform-library-paths=%wave_pipelines},transform-interpreter{entry-point=waveamd_regalloc_transform_loop},waveamd-decompose-mem-tuples,waveamd-insert-ticket-waits,waveamd-insert-hazard-waits,waveamd-resource-info,waveamd-metadata)' | FileCheck %s --check-prefix=METADATA
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 

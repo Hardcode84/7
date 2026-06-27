@@ -68,7 +68,7 @@ static unsigned getLDSAttr(func::FuncOp func, StringRef machineName,
 static FailureOr<std::unique_ptr<llvm::MCSubtargetInfo>>
 createSubtargetInfo(Operation *op) {
   FailureOr<waveamdmachine::AMDGPUTarget> target =
-      waveamdmachine::getAMDGPUTarget(op, "waveamd-reg-alloc LDS planning");
+      waveamdmachine::getAMDGPUTarget(op, "waveamd regalloc LDS planning");
   if (failed(target))
     return failure();
 
@@ -97,7 +97,7 @@ static std::optional<LDSTargetInfo> getLDSTargetInfo(func::FuncOp func) {
   FailureOr<std::unique_ptr<llvm::MCSubtargetInfo>> sti =
       createSubtargetInfo(func);
   FailureOr<unsigned> wavefrontSize = waveamdmachine::getAMDGPUWavefrontSize(
-      func, "waveamd-reg-alloc LDS planning");
+      func, "waveamd regalloc LDS planning");
   if (failed(sti) || failed(wavefrontSize))
     return std::nullopt;
 

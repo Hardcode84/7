@@ -321,7 +321,7 @@ def WaveAMDPreserveHardwareRegs
   let description = [{
     Inserts save/reload code when SCC, VCC, or M0 values are live across a
     clobber of the same singleton hardware resource. Unsupported cases are
-    left for `waveamd-reg-alloc` to reject as the final correctness gate.
+    left for post-regalloc consumers to reject as the final correctness gate.
   }];
   let dependentDialects = [
     "func::FuncDialect",
@@ -455,62 +455,12 @@ def WaveAMDMachineScheduleReport
   ];
 }
 
-def WaveAMDRegAlloc
-    : Pass<"waveamd-reg-alloc", "ModuleOp"> {
-  let summary = "Allocate WaveAMDMachine virtual registers to physical registers";
-  let description = [{
-    Flattens WaveAMDMachine operations, builds scalar live intervals, merges
-    tuple/control-flow/MFMA aliases, and assigns physical SGPR, VGPR, and AGPR
-    registers. Successful allocation preserves fixed physical values,
-    ABI-reserved entry registers, tuple aliases, uniform-loop carry storage,
-    MFMA accumulator aliases, and singleton SCC/VCC/M0 resources.
-
-    Default mode fails if no legal assignment exists. With
-    `mark-overflow=true`, overflowed functions get
-    `waveamdmachine.regalloc_overflowed = 1 : i64`, the module gets
-    `waveamdmachine.regalloc_overflowed_count = N : i64`, and pressure detail
-    is emitted through MLIR optimization remarks when enabled. Overflowed
-    functions are diagnostics only; production post-regalloc consumers reject
-    or skip them.
-
-    `waveamdmachine.target_waves` narrows SGPR and VGPR budgets and enforces
-    target VGPR-family accounting across VGPRs/AGPRs. `vgpr-limit` /
-    `sgpr-limit` / `agpr-limit` can only shrink those caps.
-
-    Register pressure relief is provider-based. Bank promotion moves storage
-    in order SGPR -> VGPR -> AGPR and inserts explicit bridge ops for
-    producer/consumer bank mismatches. VGPR memory pressure can also use LDS
-    spills or scratch spills when target, workgroup, and value-shape
-    constraints make the spill legal.
-
-    Regalloc emits optimization remarks under `waveamdmachine-regalloc` for
-    summaries, intervals, LDS and scratch spill plans, and pressure failures.
-  }];
-  let dependentDialects = [
-    "func::FuncDialect",
-    "waveamdmachine::WaveAMDMachineDialect"
-  ];
-  let options = [
-    Option<"markOverflow", "mark-overflow", "bool", /*default=*/"false",
-           "Annotate overflowed funcs instead of failing the pass.">,
-    Option<"vgprLimitOverride", "vgpr-limit", "int", /*default=*/"-1",
-           "Cap VGPRs below the subtarget default; -1 means no cap.">,
-    Option<"sgprLimitOverride", "sgpr-limit", "int", /*default=*/"-1",
-           "Cap SGPRs below the subtarget default; -1 means no cap.">,
-    Option<"agprLimitOverride", "agpr-limit", "int", /*default=*/"-1",
-           "Cap AGPRs below the subtarget default; -1 means no cap.">,
-    Option<"debugProbes", "debug-probes", "bool", /*default=*/"false",
-           "Attach allocation probe counters to functions.">
-  ];
-}
-
 def WaveAMDClearRegAllocAssignments
     : Pass<"waveamd-clear-regalloc-assignments", "ModuleOp"> {
   let summary = "Clear stale WaveAMDMachine physical register assignments";
   let description = [{
-    Clears physical register indices that were written by an earlier
-    `waveamd-reg-alloc` run. ABI and user-pinned fixed registers are left
-    intact.
+    Clears physical register indices written by earlier regalloc state. ABI and
+    user-pinned fixed registers are left intact.
   }];
   let dependentDialects = [
     "waveamdmachine::WaveAMDMachineDialect"

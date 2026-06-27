@@ -137,7 +137,7 @@ ensureInterval(Value value, unsigned pos,
     return failure();
   if (!wave::isWaveAMDSGPR(rt) && !wave::isWaveAMDVGPR(rt) &&
       !wave::isWaveAMDAGPR(rt))
-    return errOp->emitError("waveamd-reg-alloc supports only SGPR, VGPR, and "
+    return errOp->emitError("waveamd regalloc supports only SGPR, VGPR, and "
                             "AGPR register classes");
   if (rt.getIndex() >= 0 && !includeAllocated)
     return failure();

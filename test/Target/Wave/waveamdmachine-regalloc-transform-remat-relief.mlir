@@ -27,8 +27,6 @@ module attributes {transform.with_named_sequence} {
     // CHECK-NOT: waveamdmachine.regalloc_transform_state
     // CHECK: [[ZERO:%.*]] = waveamdmachine.imm 0
     // CHECK: [[ONE:%.*]] = waveamdmachine.imm 1
-    // CHECK: [[SEED:%.*]] = waveamdmachine.v_mov_b32_tuple [[ZERO]]
-    // CHECK: [[ROOT:%.*]] = waveamdmachine.v_add_u32 [[SEED]], [[ONE]]
     // CHECK: waveamdmachine.uniform_loop
     // CHECK: [[RESEED:%.*]] = waveamdmachine.v_mov_b32_tuple [[ZERO]]
     // CHECK-NEXT: [[REROOT:%.*]] = waveamdmachine.v_add_u32 [[RESEED]], [[ONE]]
@@ -63,6 +61,68 @@ module attributes {transform.with_named_sequence} {
           : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.imm)
             -> !waveamdmachine.reg<vgpr, 1>
       return %use1 : !waveamdmachine.reg<vgpr, 1>
+    }
+
+    // CHECK-LABEL: func.func @remat_relief_rebuilds_failed_request(
+    // CHECK-NOT: waveamdmachine.regalloc_transform_state
+    // CHECK-SAME: [[LONG:%[^:]+]]: !waveamdmachine.reg<vgpr, 1>
+    // CHECK-SAME: [[DIE:%[^:]+]]: !waveamdmachine.reg<vgpr, 1>
+    // CHECK: waveamdmachine.v_add_u32 [[DIE]]
+    // CHECK-NEXT: [[ROOT:%.*]] = waveamdmachine.v_mov_b32_tuple {{.*}} {registers = 1 : i64, waveamdmachine.regalloc_remat_temp}
+    // CHECK-NEXT: [[USE:%.*]] = waveamdmachine.v_add_u32 [[ROOT]]
+    // CHECK: return [[LONG]], [[USE]]
+    func.func @remat_relief_rebuilds_failed_request(
+        %long: !waveamdmachine.reg<vgpr, 1>,
+        %dies: !waveamdmachine.reg<vgpr, 1>)
+        -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        attributes {waveamdmachine.vgpr_count_max = 2 : i64,
+                    waveamdmachine.agpr_count_max = 0 : i64} {
+      %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+      %root = waveamdmachine.v_mov_b32_tuple %zero {registers = 1 : i64}
+          : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
+      %drop = waveamdmachine.v_add_u32 %dies, %zero
+          : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.imm)
+            -> !waveamdmachine.reg<vgpr, 1>
+      %use = waveamdmachine.v_add_u32 %root, %zero
+          : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.imm)
+            -> !waveamdmachine.reg<vgpr, 1>
+      return %long, %use
+          : !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>
+    }
+
+    // CHECK-LABEL: func.func @remat_relief_rebuilds_scalar_operand(
+    // CHECK-NOT: waveamdmachine.regalloc_transform_state
+    // CHECK: [[SG:%[^:]+]]: !waveamdmachine.reg<sgpr, 1>
+    // CHECK: [[ONE:%.*]] = waveamdmachine.imm 1
+    // CHECK: [[SUM:%.*]], %{{.*}} = waveamdmachine.s_add_i32 [[SG]], [[ONE]] {waveamdmachine.regalloc_remat_temp}
+    // CHECK-NEXT: [[ADDR:%.*]] = waveamdmachine.v_add_u32 [[SUM]], [[ONE]] {waveamdmachine.regalloc_remat_temp}
+    // CHECK-NEXT: [[USE:%.*]] = waveamdmachine.v_add_u32 [[ADDR]], [[ONE]]
+    // CHECK: return {{.*}}, [[USE]]
+    func.func @remat_relief_rebuilds_scalar_operand(
+        %long: !waveamdmachine.reg<vgpr, 1>,
+        %dies: !waveamdmachine.reg<vgpr, 1>,
+        %sg: !waveamdmachine.reg<sgpr, 1>)
+        -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        attributes {waveamdmachine.vgpr_count_max = 2 : i64,
+                    waveamdmachine.agpr_count_max = 0 : i64} {
+      %one = waveamdmachine.imm 1 : !waveamdmachine.imm
+      %sum, %scc = waveamdmachine.s_add_i32 %sg, %one
+          : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.imm)
+            -> (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<scc, 1>)
+      %addr = waveamdmachine.v_add_u32 %sum, %one
+          : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.imm)
+            -> !waveamdmachine.reg<vgpr, 1>
+      %drop = waveamdmachine.v_add_u32 %dies, %one
+          : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.imm)
+            -> !waveamdmachine.reg<vgpr, 1>
+      %use = waveamdmachine.v_add_u32 %addr, %one
+          : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.imm)
+            -> !waveamdmachine.reg<vgpr, 1>
+      %keep, %scc2 = waveamdmachine.s_add_i32 %sg, %one
+          : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.imm)
+            -> (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<scc, 1>)
+      return %long, %use
+          : !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>
     }
 
     // CHECK-LABEL: func.func @remat_relief_rejects_use_at_failure(
@@ -102,9 +162,6 @@ module attributes {transform.with_named_sequence} {
     // CHECK-NOT: waveamdmachine.regalloc_transform_state
     // CHECK: [[ZERO:%.*]] = waveamdmachine.imm 0
     // CHECK: [[ONE:%.*]] = waveamdmachine.imm 1
-    // CHECK: [[SEED:%.*]] = waveamdmachine.v_mov_b32_tuple [[ZERO]]
-    // CHECK-NEXT: [[ROOT:%.*]] = waveamdmachine.v_add_u32 [[SEED]], [[ONE]]
-    // CHECK-NEXT: [[TUPLE:%.*]] = waveamdmachine.tuple_from_elements [[ROOT]]
     // CHECK: waveamdmachine.uniform_loop
     // CHECK: [[RESEED0:%.*]] = waveamdmachine.v_mov_b32_tuple [[ZERO]]
     // CHECK-NEXT: [[REROOT0:%.*]] = waveamdmachine.v_add_u32 [[RESEED0]], [[ONE]]

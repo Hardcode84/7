@@ -5,7 +5,7 @@
 // RUN: wave-opt %s --waveamd-machine-schedule-report='print-candidates=1' | FileCheck %s --check-prefix=NOAPPLY
 // RUN: wave-opt %s --waveamd-machine-schedule='apply-schedule=1 max-region-ops=3' 2>&1 | FileCheck %s --check-prefixes=NOAPPLY,SCHEDREGIONCAP
 // RUN: wave-opt %s --waveamd-machine-schedule='apply-schedule=1 beam-search=1 max-beam-work=1000' 2>&1 | FileCheck %s --check-prefix=SCHEDBEAMCAP
-// RUN: wave-opt %s --waveamd-machine-schedule='apply-schedule=1' --waveamd-insert-ticket-waits --waveamd-reg-alloc --waveamd-insert-hazard-waits | FileCheck %s --check-prefix=PIPE
+// RUN: wave-opt %s --pass-pipeline='builtin.module(waveamd-machine-schedule{apply-schedule=1},waveamd-insert-ticket-waits,transform-preload-library{transform-library-paths=%wave_pipelines},transform-interpreter{entry-point=waveamd_regalloc_transform_loop},waveamd-insert-hazard-waits)' | FileCheck %s --check-prefix=PIPE
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 func.func @candidate_lower(%off: !waveamdmachine.reg<vgpr, 1>,
