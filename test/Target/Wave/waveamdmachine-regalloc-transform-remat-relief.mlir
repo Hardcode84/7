@@ -205,14 +205,14 @@ module attributes {transform.with_named_sequence} {
       return %use1 : !waveamdmachine.reg<vgpr, 1>
     }
 
-    // CHECK-LABEL: func.func @remat_relief_keeps_anchored_workitem(
+    // CHECK-LABEL: func.func @remat_relief_rejects_unfixed_anchored_workitem(
     // CHECK-SAME: waveamdmachine.regalloc_transform_state =
     // CHECK-SAME: stage = "linear-scan-failure"
     // CHECK: waveamdmachine.v_workitem_id_x
     // CHECK: waveamdmachine.uniform_loop
     // CHECK-NOT: waveamdmachine.regalloc_remat_temp
     // CHECK: return
-    func.func @remat_relief_keeps_anchored_workitem()
+    func.func @remat_relief_rejects_unfixed_anchored_workitem()
         -> !waveamdmachine.reg<vgpr, 1>
         attributes {waveamdmachine.vgpr_count_max = 3 : i64,
                     waveamdmachine.agpr_count_max = 0 : i64} {
@@ -237,6 +237,135 @@ module attributes {transform.with_named_sequence} {
           : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.imm)
             -> !waveamdmachine.reg<vgpr, 1>
       return %use : !waveamdmachine.reg<vgpr, 1>
+    }
+
+    // CHECK-LABEL: func.func @remat_relief_rejects_equal_pressure_fixed_workitem(
+    // CHECK-SAME: waveamdmachine.regalloc_transform_state =
+    // CHECK-SAME: stage = "linear-scan-failure"
+    // CHECK: waveamdmachine.v_workitem_id_x
+    // CHECK: waveamdmachine.uniform_loop
+    // CHECK-NOT: waveamdmachine.regalloc_remat_temp
+    // CHECK: return
+    func.func @remat_relief_rejects_equal_pressure_fixed_workitem()
+        -> !waveamdmachine.reg<vgpr, 1>
+        attributes {waveamdmachine.vgpr_count_max = 3 : i64,
+                    waveamdmachine.agpr_count_max = 0 : i64} {
+      %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+      %one = waveamdmachine.imm 1 : !waveamdmachine.imm
+      %tid = waveamdmachine.v_workitem_id_x
+          : !waveamdmachine.reg<vgpr, 1, 0>
+      %addr = waveamdmachine.v_lshrrev_b32 %tid, %one
+          : (!waveamdmachine.reg<vgpr, 1, 0>, !waveamdmachine.imm)
+            -> !waveamdmachine.reg<vgpr, 1>
+      %cond = waveamdmachine.s_cmp_lt_i32 %zero, %one
+          : (!waveamdmachine.imm, !waveamdmachine.imm)
+            -> !waveamdmachine.reg<scc, 1>
+      waveamdmachine.uniform_loop if %cond : !waveamdmachine.reg<scc, 1> {
+        %a = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1>
+        %b = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1>
+        %sum = waveamdmachine.v_add_u32 %a, %b
+            : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+              -> !waveamdmachine.reg<vgpr, 1>
+        waveamdmachine.continue_if %cond : !waveamdmachine.reg<scc, 1>
+      }
+      %use = waveamdmachine.v_add_u32 %addr, %zero
+          : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.imm)
+            -> !waveamdmachine.reg<vgpr, 1>
+      return %use : !waveamdmachine.reg<vgpr, 1>
+    }
+
+    // CHECK-LABEL: func.func @remat_relief_rejects_equal_pressure_sgpr_leaf(
+    // CHECK-SAME: waveamdmachine.regalloc_transform_state =
+    // CHECK-SAME: stage = "linear-scan-failure"
+    // CHECK: waveamdmachine.uniform_loop
+    // CHECK-NOT: waveamdmachine.regalloc_remat_temp
+    // CHECK: return
+    func.func @remat_relief_rejects_equal_pressure_sgpr_leaf(
+        %sg: !waveamdmachine.reg<sgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+        attributes {waveamdmachine.vgpr_count_max = 3 : i64,
+                    waveamdmachine.agpr_count_max = 0 : i64} {
+      %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+      %one = waveamdmachine.imm 1 : !waveamdmachine.imm
+      %root = waveamdmachine.v_add_u32 %sg, %one
+          : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.imm)
+            -> !waveamdmachine.reg<vgpr, 1>
+      %cond = waveamdmachine.s_cmp_lt_i32 %zero, %one
+          : (!waveamdmachine.imm, !waveamdmachine.imm)
+            -> !waveamdmachine.reg<scc, 1>
+      waveamdmachine.uniform_loop if %cond : !waveamdmachine.reg<scc, 1> {
+        %a = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1>
+        %b = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1>
+        %sum = waveamdmachine.v_add_u32 %a, %b
+            : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+              -> !waveamdmachine.reg<vgpr, 1>
+        waveamdmachine.continue_if %cond : !waveamdmachine.reg<scc, 1>
+      }
+      %use = waveamdmachine.v_add_u32 %root, %zero
+          : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.imm)
+            -> !waveamdmachine.reg<vgpr, 1>
+      return %use : !waveamdmachine.reg<vgpr, 1>
+    }
+
+    // CHECK-LABEL: func.func @remat_relief_extends_sgpr_leaf_for_wide_root(
+    // CHECK-NOT: waveamdmachine.regalloc_transform_state
+    // CHECK: [[SG:%[^:]+]]: !waveamdmachine.reg<sgpr, 1>
+    // CHECK: waveamdmachine.uniform_loop
+    // CHECK: [[WIDE:%.*]] = waveamdmachine.v_mov_b32_tuple [[SG]] {registers = 2 : i64, waveamdmachine.regalloc_remat_temp}
+    // CHECK: return [[WIDE]]
+    func.func @remat_relief_extends_sgpr_leaf_for_wide_root(
+        %sg: !waveamdmachine.reg<sgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 2>
+        attributes {waveamdmachine.vgpr_count_max = 4 : i64,
+                    waveamdmachine.agpr_count_max = 0 : i64} {
+      %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+      %one = waveamdmachine.imm 1 : !waveamdmachine.imm
+      %wide = waveamdmachine.v_mov_b32_tuple %sg {registers = 2 : i64}
+          : (!waveamdmachine.reg<sgpr, 1>)
+            -> !waveamdmachine.reg<vgpr, 2>
+      %cond = waveamdmachine.s_cmp_lt_i32 %zero, %one
+          : (!waveamdmachine.imm, !waveamdmachine.imm)
+            -> !waveamdmachine.reg<scc, 1>
+      waveamdmachine.uniform_loop if %cond : !waveamdmachine.reg<scc, 1> {
+        %a = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1>
+        %b = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1>
+        %sum = waveamdmachine.v_add_u32 %a, %b
+            : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+              -> !waveamdmachine.reg<vgpr, 1>
+        waveamdmachine.continue_if %cond : !waveamdmachine.reg<scc, 1>
+      }
+      return %wide : !waveamdmachine.reg<vgpr, 2>
+    }
+
+    // CHECK-LABEL: func.func @remat_relief_extends_fixed_workitem_for_wide_root(
+    // CHECK-NOT: waveamdmachine.regalloc_transform_state
+    // CHECK: [[TID:%.*]] = waveamdmachine.v_workitem_id_x : !waveamdmachine.reg<vgpr, 1, 0>
+    // CHECK: waveamdmachine.uniform_loop
+    // CHECK: [[WIDE:%.*]] = waveamdmachine.v_mov_b32_tuple [[TID]] {registers = 2 : i64, waveamdmachine.regalloc_remat_temp}
+    // CHECK: return [[WIDE]]
+    func.func @remat_relief_extends_fixed_workitem_for_wide_root()
+        -> !waveamdmachine.reg<vgpr, 2>
+        attributes {waveamdmachine.vgpr_count_max = 4 : i64,
+                    waveamdmachine.agpr_count_max = 0 : i64} {
+      %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+      %one = waveamdmachine.imm 1 : !waveamdmachine.imm
+      %tid = waveamdmachine.v_workitem_id_x
+          : !waveamdmachine.reg<vgpr, 1, 0>
+      %wide = waveamdmachine.v_mov_b32_tuple %tid {registers = 2 : i64}
+          : (!waveamdmachine.reg<vgpr, 1, 0>)
+            -> !waveamdmachine.reg<vgpr, 2>
+      %cond = waveamdmachine.s_cmp_lt_i32 %zero, %one
+          : (!waveamdmachine.imm, !waveamdmachine.imm)
+            -> !waveamdmachine.reg<scc, 1>
+      waveamdmachine.uniform_loop if %cond : !waveamdmachine.reg<scc, 1> {
+        %a = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1>
+        %b = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1>
+        %sum = waveamdmachine.v_add_u32 %a, %b
+            : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+              -> !waveamdmachine.reg<vgpr, 1>
+        waveamdmachine.continue_if %cond : !waveamdmachine.reg<scc, 1>
+      }
+      return %wide : !waveamdmachine.reg<vgpr, 2>
     }
   }
 }

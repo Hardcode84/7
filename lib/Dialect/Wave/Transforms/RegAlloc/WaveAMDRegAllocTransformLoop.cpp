@@ -21,6 +21,7 @@
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/Support/MathExtras.h"
+#include <array>
 #include <limits>
 #include <optional>
 
@@ -624,6 +625,35 @@ static bool isVGPRFamilyClass(waveamdmachine::RegClass regClass) {
          regClass == waveamdmachine::RegClass::AGPR;
 }
 
+static constexpr unsigned kRegClassCount = 5;
+
+using RegClassPressure = std::array<int64_t, kRegClassCount>;
+
+static constexpr std::array<waveamdmachine::RegClass, kRegClassCount>
+    kRegClasses = {
+        waveamdmachine::RegClass::SGPR, waveamdmachine::RegClass::VGPR,
+        waveamdmachine::RegClass::AGPR, waveamdmachine::RegClass::SCC,
+        waveamdmachine::RegClass::VCC};
+
+static unsigned getRegClassIndex(waveamdmachine::RegClass regClass) {
+  return static_cast<unsigned>(regClass);
+}
+
+static void addRegClassPressure(RegClassPressure &pressure,
+                                waveamdmachine::RegClass regClass,
+                                int64_t dwords) {
+  unsigned index = getRegClassIndex(regClass);
+  assert(index < pressure.size() && "unknown register class");
+  pressure[index] += dwords;
+}
+
+static int64_t getTotalPressure(RegClassPressure pressure) {
+  int64_t total = 0;
+  for (int64_t dwords : pressure)
+    total += dwords;
+  return total;
+}
+
 static unsigned getCombinedVGPRFamilyPressure(unsigned agprFootprint,
                                               unsigned vgprFootprint) {
   return agprFootprint + llvm::alignTo(vgprFootprint, 4);
@@ -831,6 +861,7 @@ struct RematReliefContext {
 
 struct RematReliefSlot {
   SmallVector<OpOperand *> uses;
+  SmallVector<Value> extendedLeaves;
   Value value;
   Operation *rebuildOp = nullptr;
   const wave::RegAllocTransformValue *stateValue = nullptr;
@@ -1955,45 +1986,72 @@ static bool canUseOriginalRematLeaf(Value value, Operation *user,
   return position && isStateValueLiveAt(value, *position, context);
 }
 
-static bool canRematerializeValueAt(Value value, Operation *user,
-                                    const RematReliefContext &context,
-                                    DenseSet<Value> &visiting,
-                                    const DenseSet<Value> *forcedRematValues);
-
-static bool canRematerializeOperandAt(
-    Value operand, Operation *user, const RematReliefContext &context,
-    DenseSet<Value> &visiting, const DenseSet<Value> *forcedRematValues) {
-  if (canUseOriginalRematLeaf(operand, user, context, forcedRematValues))
-    return true;
-  if (!isTrackedRegValue(operand) || isAnchoredRematSource(operand))
-    return false;
-  return canRematerializeValueAt(operand, user, context, visiting,
-                                 forcedRematValues);
+static bool
+canExtendOriginalRematLeaf(Value value, Operation *user,
+                           const RematReliefContext &context,
+                           const DenseSet<Value> *forcedRematValues) {
+  return !mustRematValue(value, forcedRematValues) &&
+         isTrackedRegValue(value) && context.values.contains(value) &&
+         valueIsAvailableAt(value, user);
 }
 
-static bool canRematerializeValueAt(Value value, Operation *user,
-                                    const RematReliefContext &context,
-                                    DenseSet<Value> &visiting,
-                                    const DenseSet<Value> *forcedRematValues) {
+static bool collectExtendedRematLeaves(Value value, Operation *user,
+                                       const RematReliefContext &context,
+                                       DenseSet<Value> &visiting,
+                                       const DenseSet<Value> *forcedRematValues,
+                                       DenseSet<Value> &extendedLeaves);
+
+static bool collectExtendedRematOperandLeaves(
+    Value operand, Operation *user, const RematReliefContext &context,
+    DenseSet<Value> &visiting, const DenseSet<Value> *forcedRematValues,
+    DenseSet<Value> &extendedLeaves) {
+  if (canUseOriginalRematLeaf(operand, user, context, forcedRematValues))
+    return true;
+  DenseSet<Value> rematLeaves = extendedLeaves;
+  if (collectExtendedRematLeaves(operand, user, context, visiting,
+                                 forcedRematValues, rematLeaves)) {
+    extendedLeaves = std::move(rematLeaves);
+    return true;
+  }
+  if (canExtendOriginalRematLeaf(operand, user, context, forcedRematValues)) {
+    extendedLeaves.insert(operand);
+    return true;
+  }
+  return false;
+}
+
+static bool collectExtendedRematLeaves(Value value, Operation *user,
+                                       const RematReliefContext &context,
+                                       DenseSet<Value> &visiting,
+                                       const DenseSet<Value> *forcedRematValues,
+                                       DenseSet<Value> &extendedLeaves) {
   Operation *def = value.getDefiningOp();
   if (!isRematRootValue(value) || !valueIsAvailableAt(value, user))
     return false;
   if (!visiting.insert(value).second)
     return false;
   bool ok = llvm::all_of(def->getOperands(), [&](Value operand) {
-    return canRematerializeOperandAt(operand, user, context, visiting,
-                                     forcedRematValues);
+    return collectExtendedRematOperandLeaves(operand, user, context, visiting,
+                                             forcedRematValues, extendedLeaves);
   });
   visiting.erase(value);
   return ok;
 }
 
-static bool canRematerializeValueAt(Value value, Operation *user,
-                                    const RematReliefContext &context,
-                                    const DenseSet<Value> *forcedRematValues) {
+static FailureOr<SmallVector<Value>>
+collectExtendedRematLeaves(Value value, Operation *user,
+                           const RematReliefContext &context,
+                           const DenseSet<Value> *forcedRematValues) {
   DenseSet<Value> visiting;
-  return canRematerializeValueAt(value, user, context, visiting,
-                                 forcedRematValues);
+  DenseSet<Value> extendedLeaves;
+  if (!collectExtendedRematLeaves(value, user, context, visiting,
+                                  forcedRematValues, extendedLeaves))
+    return failure();
+  SmallVector<Value> leaves(extendedLeaves.begin(), extendedLeaves.end());
+  llvm::sort(leaves, [&](Value lhs, Value rhs) {
+    return context.values.lookup(lhs)->id < context.values.lookup(rhs)->id;
+  });
+  return leaves;
 }
 
 static unsigned getRematOpCountAt(Value value, Operation *user,
@@ -2007,8 +2065,11 @@ static unsigned getRematOpCountAt(Value value, Operation *user,
   for (Value operand : def->getOperands()) {
     if (canUseOriginalRematLeaf(operand, user, context, forcedRematValues))
       continue;
-    count +=
-        getRematOpCountAt(operand, user, context, counted, forcedRematValues);
+    FailureOr<SmallVector<Value>> extendedLeaves =
+        collectExtendedRematLeaves(operand, user, context, forcedRematValues);
+    if (succeeded(extendedLeaves))
+      count +=
+          getRematOpCountAt(operand, user, context, counted, forcedRematValues);
   }
   return count;
 }
@@ -2094,6 +2155,107 @@ canRematValueRelieveFailure(const wave::RegAllocTransformValue &stateValue,
   return isRematValueLiveAcrossFailure(stateValue, position);
 }
 
+static bool
+aliasSetLiveAtPosition(const wave::RegAllocTransformAliasSet &set,
+                       ArrayRef<wave::RegAllocTransformValue> values,
+                       unsigned position) {
+  return llvm::any_of(set.members, [&](unsigned valueId) {
+    const wave::RegAllocTransformValue &value = values[valueId];
+    return value.start <= position && position <= value.end;
+  });
+}
+
+static RegClassPressure
+getRegClassPressureAtPosition(ArrayRef<wave::RegAllocTransformAliasSet> sets,
+                              ArrayRef<wave::RegAllocTransformValue> values,
+                              unsigned position) {
+  RegClassPressure pressure = {};
+  for (const wave::RegAllocTransformAliasSet &set : sets)
+    if (aliasSetLiveAtPosition(set, values, position))
+      addRegClassPressure(pressure, set.regClass, set.width);
+  return pressure;
+}
+
+static bool
+extendedLeafAddsPressureAtFailure(Value leaf, const RematReliefSlot &slot,
+                                  const RegAllocTransformFailure &failureRecord,
+                                  const RematReliefContext &context) {
+  auto it = context.values.find(leaf);
+  if (it == context.values.end())
+    return false;
+  const wave::RegAllocTransformValue &stateValue = *it->second;
+  unsigned position = failureRecord.position;
+  if (stateValue.start > position || slot.rebuildPosition < position)
+    return false;
+  return !isStateValueLiveAt(leaf, position, context);
+}
+
+static RegClassPressure
+getRematExtendedLeafPressure(const RematReliefCandidate &candidate,
+                             const RegAllocTransformFailure &failureRecord,
+                             ArrayRef<wave::RegAllocTransformAliasSet> sets,
+                             const RematReliefContext &context) {
+  RegClassPressure pressure = {};
+  DenseSet<unsigned> countedSets;
+  for (const RematReliefSlot &slot : candidate.slots) {
+    for (Value leaf : slot.extendedLeaves) {
+      auto it = context.values.find(leaf);
+      if (it == context.values.end())
+        continue;
+      const wave::RegAllocTransformValue &stateValue = *it->second;
+      if (!extendedLeafAddsPressureAtFailure(leaf, slot, failureRecord,
+                                             context) ||
+          !countedSets.insert(stateValue.set).second)
+        continue;
+      const wave::RegAllocTransformAliasSet *set =
+          findRegAllocTransformSet(sets, stateValue.set);
+      addRegClassPressure(pressure, stateValue.regClass,
+                          set ? set->width : stateValue.width);
+    }
+  }
+  return pressure;
+}
+
+static RegClassPressure
+getRematRemovedPressure(const RematReliefCandidate &candidate) {
+  RegClassPressure pressure = {};
+  addRegClassPressure(pressure, candidate.set->regClass, candidate.set->width);
+  return pressure;
+}
+
+static bool pressureFitsRegClassBudgets(func::FuncOp func,
+                                        RegClassPressure pressure) {
+  for (waveamdmachine::RegClass regClass : kRegClasses) {
+    int64_t dwords = pressure[getRegClassIndex(regClass)];
+    if (dwords < 0)
+      return false;
+    wave::RegAllocTransformBudget budget =
+        wave::getRegAllocTransformBudget(func, regClass);
+    if (static_cast<uint64_t>(dwords) > budget.limit)
+      return false;
+  }
+  return true;
+}
+
+static bool rematCandidateReducesFailurePressure(
+    func::FuncOp func, const RematReliefCandidate &candidate,
+    const RegAllocTransformFailure &failureRecord,
+    ArrayRef<wave::RegAllocTransformAliasSet> sets,
+    ArrayRef<wave::RegAllocTransformValue> values,
+    const RematReliefContext &context) {
+  RegClassPressure added =
+      getRematExtendedLeafPressure(candidate, failureRecord, sets, context);
+  RegClassPressure removed = getRematRemovedPressure(candidate);
+  if (getTotalPressure(removed) <= getTotalPressure(added))
+    return false;
+  RegClassPressure pressure =
+      getRegClassPressureAtPosition(sets, values, failureRecord.position);
+  for (waveamdmachine::RegClass regClass : kRegClasses)
+    pressure[getRegClassIndex(regClass)] +=
+        added[getRegClassIndex(regClass)] - removed[getRegClassIndex(regClass)];
+  return pressureFitsRegClassBudgets(func, pressure);
+}
+
 static FailureOr<std::optional<RematReliefSlot>>
 buildRematReliefSlot(Value value,
                      const wave::RegAllocTransformValue &stateValue,
@@ -2110,7 +2272,9 @@ buildRematReliefSlot(Value value,
   if (uses->empty())
     return std::optional<RematReliefSlot>();
   Operation *rebuildOp = uses->front()->getOwner();
-  if (!canRematerializeValueAt(value, rebuildOp, context, &forcedRematValues))
+  FailureOr<SmallVector<Value>> extendedLeaves =
+      collectExtendedRematLeaves(value, rebuildOp, context, &forcedRematValues);
+  if (failed(extendedLeaves))
     return std::optional<RematReliefSlot>();
   unsigned opCount =
       getRematOpCountAt(value, rebuildOp, context, &forcedRematValues);
@@ -2118,6 +2282,7 @@ buildRematReliefSlot(Value value,
       opCount * getRematReliefLoopCostScale(rebuildOp) + uses->size();
   RematReliefSlot slot;
   slot.uses = std::move(*uses);
+  slot.extendedLeaves = std::move(*extendedLeaves);
   slot.value = value;
   slot.rebuildOp = rebuildOp;
   slot.stateValue = &stateValue;
@@ -2226,6 +2391,9 @@ buildRematReliefCandidate(func::FuncOp func, unsigned setId,
   if (candidate.slots.empty())
     return std::optional<RematReliefCandidate>();
   sortRematReliefSlots(candidate.slots);
+  if (!rematCandidateReducesFailurePressure(func, candidate, failureRecord,
+                                            sets, values, context))
+    return std::optional<RematReliefCandidate>();
   return std::optional<RematReliefCandidate>(std::move(candidate));
 }
 
@@ -2276,11 +2444,20 @@ materializeRematValueAt(OpBuilder &builder, Value value, Operation *user,
   for (Value operand : def->getOperands()) {
     Value mapped = operand;
     if (!canUseOriginalRematLeaf(operand, user, context, &forcedRematValues)) {
-      FailureOr<Value> rematOperand = materializeRematValueAt(
-          builder, operand, user, context, cache, forcedRematValues);
-      if (failed(rematOperand))
+      FailureOr<SmallVector<Value>> extendedLeaves = collectExtendedRematLeaves(
+          operand, user, context, &forcedRematValues);
+      if (succeeded(extendedLeaves)) {
+        FailureOr<Value> rematOperand = materializeRematValueAt(
+            builder, operand, user, context, cache, forcedRematValues);
+        if (failed(rematOperand))
+          return failure();
+        mapped = *rematOperand;
+      } else if (canExtendOriginalRematLeaf(operand, user, context,
+                                            &forcedRematValues)) {
+        mapped = operand;
+      } else {
         return failure();
-      mapped = *rematOperand;
+      }
     }
     mapping.map(operand, mapped);
   }
