@@ -1,5 +1,6 @@
 // RUN: wave-opt %s | FileCheck %s
 // RUN: wave-opt %s | wave-opt | FileCheck %s
+// RUN: wave-opt --canonicalize %s | FileCheck %s --check-prefix=CANON
 
 // Pure SSA renames between a VGPR tuple and its per-slot scalar VGPRs.
 // The selector / decomposition pass builds these around scalar memory
@@ -7,6 +8,28 @@
 // block at `tuple_phys + slot`. Asm emit then skips them entirely.
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
+
+// CANON-LABEL: func.func @fold_single_from
+// CANON-SAME: %[[X:.*]]: !waveamdmachine.reg<vgpr, 4>
+// CANON-NOT: waveamdmachine.tuple_from_elements
+// CANON: return %[[X]]
+func.func @fold_single_from(%x: !waveamdmachine.reg<vgpr, 4>)
+    -> !waveamdmachine.reg<vgpr, 4> {
+  %tuple = waveamdmachine.tuple_from_elements %x
+      : (!waveamdmachine.reg<vgpr, 4>) -> !waveamdmachine.reg<vgpr, 4>
+  return %tuple : !waveamdmachine.reg<vgpr, 4>
+}
+
+// CANON-LABEL: func.func @fold_single_to
+// CANON-SAME: %[[X:.*]]: !waveamdmachine.reg<vgpr, 4>
+// CANON-NOT: waveamdmachine.tuple_to_elements
+// CANON: return %[[X]]
+func.func @fold_single_to(%x: !waveamdmachine.reg<vgpr, 4>)
+    -> !waveamdmachine.reg<vgpr, 4> {
+  %elem = waveamdmachine.tuple_to_elements %x
+      : (!waveamdmachine.reg<vgpr, 4>) -> !waveamdmachine.reg<vgpr, 4>
+  return %elem : !waveamdmachine.reg<vgpr, 4>
+}
 
 // CHECK-LABEL: func.func @round_trip_tuple_elements
 // CHECK: %[[T:.+]] = waveamdmachine.v_mov_b32_tuple

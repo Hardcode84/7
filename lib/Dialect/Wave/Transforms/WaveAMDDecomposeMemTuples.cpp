@@ -244,18 +244,21 @@ static Operation *createScratchStoreChunk(OpBuilder &builder, Location loc,
       builder, loc, tokenType, vaddr, value, saddr, dep, instOffset);
 }
 
-// Gather chunked load results into the original tuple's shape via
-// `tuple_from_elements` (mixed-width pieces allowed) and join the
-// per-chunk tokens into the single token the caller expected.
 static void finalizeLoadDecomposition(Operation *op, Value tupleResult,
                                       Value tokenResult,
                                       ArrayRef<Value> elements,
                                       ArrayRef<Value> tokens) {
   OpBuilder builder(op);
   Type tokenType = memTokenType(op->getContext());
-  auto tupleFromElements = waveamdmachine::TupleFromElementsOp::create(
-      builder, op->getLoc(), tupleResult.getType(), elements);
-  tupleResult.replaceAllUsesWith(tupleFromElements.getTuple());
+  Value replacement;
+  if (elements.size() == 1 &&
+      elements.front().getType() == tupleResult.getType())
+    replacement = elements.front();
+  else
+    replacement = waveamdmachine::TupleFromElementsOp::create(
+                      builder, op->getLoc(), tupleResult.getType(), elements)
+                      .getTuple();
+  tupleResult.replaceAllUsesWith(replacement);
   if (tokenResult) {
     auto tokenJoin = waveamdmachine::TokenJoinOp::create(builder, op->getLoc(),
                                                          tokenType, tokens);
@@ -289,6 +292,8 @@ static SmallVector<Value> splitTupleByPlan(OpBuilder &builder, Operation *op,
     elementTypes.push_back(getChunkType(ctx, tuple.getType(), w, offset));
     offset += w;
   }
+  if (elementTypes.size() == 1 && elementTypes.front() == tuple.getType())
+    return {tuple};
   auto split = waveamdmachine::TupleToElementsOp::create(builder, op->getLoc(),
                                                          elementTypes, tuple);
   return SmallVector<Value>(split.getElements().begin(),

@@ -3,15 +3,12 @@
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
-// Width-4 tuple load decomposes to ONE `global_load_b128`. The
-// gather is now a single-element `tuple_from_elements`; downstream
-// canonicalisation can drop it once tuple_to_elements/from_elements
-// no-op folding lands.
+// Width-4 tuple load decomposes to one `global_load_b128`.
 //
 // CHECK-LABEL: func.func @global_load_tuple_decompose
 // CHECK: %[[V:.+]], %[[TOK:.+]] = waveamdmachine.global_load_b128
 // CHECK-NOT: waveamdmachine.global_load_b32
-// CHECK: %{{.+}} = waveamdmachine.tuple_from_elements %[[V]]
+// CHECK-NOT: waveamdmachine.tuple_from_elements
 // CHECK: %{{.+}} = waveamdmachine.token_join %[[TOK]]
 // CHECK-NOT: waveamdmachine.global_load_tuple_b32
 func.func @global_load_tuple_decompose(%off: !waveamdmachine.reg<vgpr, 1>,
@@ -26,10 +23,10 @@ func.func @global_load_tuple_decompose(%off: !waveamdmachine.reg<vgpr, 1>,
 // Width-4 buffer load -> single b128.
 //
 // CHECK-LABEL: func.func @buffer_load_tuple_decompose
-// CHECK: waveamdmachine.buffer_load_b128
+// CHECK: %{{.+}}, %[[TOK:.+]] = waveamdmachine.buffer_load_b128
 // CHECK-NOT: waveamdmachine.buffer_load_b32
-// CHECK: waveamdmachine.tuple_from_elements
-// CHECK: waveamdmachine.token_join
+// CHECK-NOT: waveamdmachine.tuple_from_elements
+// CHECK: waveamdmachine.token_join %[[TOK]]
 func.func @buffer_load_tuple_decompose(%off: !waveamdmachine.reg<vgpr, 1>,
                                         %desc: !waveamdmachine.reg<sgpr, 4>,
                                         %so: !waveamdmachine.imm)
@@ -43,10 +40,10 @@ func.func @buffer_load_tuple_decompose(%off: !waveamdmachine.reg<vgpr, 1>,
 // Width-4 DS load -> single b128.
 //
 // CHECK-LABEL: func.func @ds_load_tuple_decompose
-// CHECK: waveamdmachine.ds_load_b128
+// CHECK: %{{.+}}, %[[TOK:.+]] = waveamdmachine.ds_load_b128
 // CHECK-NOT: waveamdmachine.ds_load_b32
-// CHECK: waveamdmachine.tuple_from_elements
-// CHECK: waveamdmachine.token_join
+// CHECK-NOT: waveamdmachine.tuple_from_elements
+// CHECK: waveamdmachine.token_join %[[TOK]]
 func.func @ds_load_tuple_decompose(%addr: !waveamdmachine.reg<vgpr, 1>)
     -> (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.mem.token) {
   %t, %tok = waveamdmachine.ds_load_tuple_b32 %addr
@@ -58,8 +55,8 @@ func.func @ds_load_tuple_decompose(%addr: !waveamdmachine.reg<vgpr, 1>)
 // Width-4 stores collapse to one fused op each.
 //
 // CHECK-LABEL: func.func @global_store_tuple_decompose
-// CHECK: %[[E:.+]] = waveamdmachine.tuple_to_elements
-// CHECK: %[[T:.+]] = waveamdmachine.global_store_b128 %{{.*}}, %[[E]],
+// CHECK-NOT: waveamdmachine.tuple_to_elements
+// CHECK: %[[T:.+]] = waveamdmachine.global_store_b128
 // CHECK-NOT: waveamdmachine.global_store_b32
 // CHECK: waveamdmachine.token_join %[[T]]
 func.func @global_store_tuple_decompose(%off: !waveamdmachine.reg<vgpr, 1>,
@@ -73,7 +70,7 @@ func.func @global_store_tuple_decompose(%off: !waveamdmachine.reg<vgpr, 1>,
 }
 
 // CHECK-LABEL: func.func @buffer_store_tuple_decompose
-// CHECK: waveamdmachine.tuple_to_elements
+// CHECK-NOT: waveamdmachine.tuple_to_elements
 // CHECK: waveamdmachine.buffer_store_b128
 // CHECK-NOT: waveamdmachine.buffer_store_b32
 // CHECK: waveamdmachine.token_join
@@ -89,7 +86,7 @@ func.func @buffer_store_tuple_decompose(%off: !waveamdmachine.reg<vgpr, 1>,
 }
 
 // CHECK-LABEL: func.func @ds_store_tuple_decompose
-// CHECK: waveamdmachine.tuple_to_elements
+// CHECK-NOT: waveamdmachine.tuple_to_elements
 // CHECK: waveamdmachine.ds_store_b128
 // CHECK-NOT: waveamdmachine.ds_store_b32
 // CHECK: waveamdmachine.token_join

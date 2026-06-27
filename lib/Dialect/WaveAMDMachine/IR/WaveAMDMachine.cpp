@@ -531,9 +531,25 @@ LogicalResult TupleToElementsOp::verify() {
                              getElements());
 }
 
+LogicalResult TupleToElementsOp::fold(FoldAdaptor,
+                                      SmallVectorImpl<OpFoldResult> &results) {
+  if (getElements().size() != 1 ||
+      getElements().front().getType() != getTuple().getType())
+    return failure();
+  results.push_back(getTuple());
+  return success();
+}
+
 LogicalResult TupleFromElementsOp::verify() {
   return verifyTupleElements(*this, cast<RegType>(getTuple().getType()),
                              getElements());
+}
+
+OpFoldResult TupleFromElementsOp::fold(FoldAdaptor) {
+  if (getElements().size() == 1 &&
+      getElements().front().getType() == getTuple().getType())
+    return getElements().front();
+  return {};
 }
 
 using VerifyRegWidthFn = LogicalResult (*)(Operation *, Value, int64_t,

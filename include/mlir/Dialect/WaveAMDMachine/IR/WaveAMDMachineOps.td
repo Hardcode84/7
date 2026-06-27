@@ -664,6 +664,7 @@ def WaveAMDMachine_TupleToElementsOp
   let assemblyFormat =
       "$tuple attr-dict `:` functional-type(operands, results)";
   let hasVerifier = 1;
+  let hasFolder = 1;
 }
 
 def WaveAMDMachine_TupleFromElementsOp
@@ -677,6 +678,7 @@ def WaveAMDMachine_TupleFromElementsOp
   let assemblyFormat =
       "$elements attr-dict `:` functional-type(operands, results)";
   let hasVerifier = 1;
+  let hasFolder = 1;
 }
 def WaveAMDMachine_VAddU32Op
     : WaveAMDMachine_BinaryU32Result<"v_add_u32">,
