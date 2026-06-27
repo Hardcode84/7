@@ -198,7 +198,7 @@ module attributes {transform.with_named_sequence} {
             -> (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.mem.token)
       %a = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1>
       %b = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1>
-      %sum = waveamdmachine.v_add_u32 %a, %b
+      %sum = waveamdmachine.v_or_b32 %a, %b
           : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
             -> !waveamdmachine.reg<vgpr, 1>
       %parts:2 = waveamdmachine.tuple_to_elements %spill

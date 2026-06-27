@@ -1940,7 +1940,8 @@ static bool isCheapRematRoot(Operation *op) {
       waveamdmachine::VAdd3U32Op, waveamdmachine::VAndB32Op,
       waveamdmachine::VMulLoU32Op, waveamdmachine::VAddLshlU32Op,
       waveamdmachine::VXorB32Op, waveamdmachine::VAndOrB32Op,
-      waveamdmachine::TupleFromElementsOp>(op);
+      waveamdmachine::TupleFromElementsOp, waveamdmachine::TupleToElementsOp>(
+      op);
 }
 
 static bool isRematRootValue(Value value) {
