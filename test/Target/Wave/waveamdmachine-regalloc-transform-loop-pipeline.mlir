@@ -91,6 +91,84 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
     return
   }
 
+  // CHECK-LABEL: func.func @regalloc_transform_loop_rejects_wmma_input_reuse
+  // CHECK-NOT: waveamdmachine.regalloc_assignments
+  // CHECK-SAME: limit = 24 : i64
+  // CHECK-SAME: pressure = 32 : i64
+  // CHECK-SAME: stage = "linear-scan-failure"
+  func.func @regalloc_transform_loop_rejects_wmma_input_reuse(
+      %a: !waveamdmachine.reg<vgpr, 8>,
+      %b: !waveamdmachine.reg<vgpr, 8>,
+      %acc: !waveamdmachine.reg<vgpr, 8>)
+      attributes {waveamdmachine.vgpr_count_max = 24 : i64} {
+    %wmma = waveamdmachine.wmma_f32_16x16x16_f16 %a, %b, %acc
+        : (!waveamdmachine.reg<vgpr, 8>, !waveamdmachine.reg<vgpr, 8>,
+           !waveamdmachine.reg<vgpr, 8>) -> !waveamdmachine.reg<vgpr, 8>
+    return
+  }
+
+  // CHECK-LABEL: func.func @regalloc_transform_loop_reuses_killed_alu_input
+  // CHECK-SAME: waveamdmachine.regalloc_assignments
+  // CHECK-SAME: stage = "linear-scan-success"
+  // CHECK: [[ZERO:%.*]] = waveamdmachine.imm 0
+  // CHECK: [[SEED:%.*]] = waveamdmachine.v_mov_b32_tuple [[ZERO]]
+  // CHECK-SAME: -> !waveamdmachine.reg<vgpr, 1, 0>
+  // CHECK-NEXT: [[SUM:%.*]] = waveamdmachine.v_add_u32 [[SEED]], [[ZERO]]
+  // CHECK-SAME: -> !waveamdmachine.reg<vgpr, 1, 0>
+  // CHECK: return [[SUM]]
+  func.func @regalloc_transform_loop_reuses_killed_alu_input()
+      -> !waveamdmachine.reg<vgpr, 1>
+      attributes {waveamdmachine.vgpr_count_max = 1 : i64} {
+    %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+    %seed = waveamdmachine.v_mov_b32_tuple %zero {registers = 1 : i64}
+        : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
+    %sum = waveamdmachine.v_add_u32 %seed, %zero
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.imm)
+          -> !waveamdmachine.reg<vgpr, 1>
+    return %sum : !waveamdmachine.reg<vgpr, 1>
+  }
+
+  // CHECK-LABEL: func.func @regalloc_transform_loop_reuses_killed_scc_input
+  // CHECK-SAME: waveamdmachine.regalloc_assignments
+  // CHECK-SAME: stage = "linear-scan-success"
+  // CHECK: [[ONE:%.*]] = waveamdmachine.imm 1
+  // CHECK: [[SEED:%.*]] = waveamdmachine.uninit
+  // CHECK-SAME: : !waveamdmachine.reg<sgpr, 1, 0>
+  // CHECK-NEXT: [[SUM:%.*]], %{{.*}} = waveamdmachine.s_add_i32 [[SEED]], [[ONE]]
+  // CHECK-SAME: -> (!waveamdmachine.reg<sgpr, 1, 0>, !waveamdmachine.reg<scc, 1>)
+  // CHECK: return [[SUM]]
+  func.func @regalloc_transform_loop_reuses_killed_scc_input()
+      -> !waveamdmachine.reg<sgpr, 1>
+      attributes {waveamdmachine.sgpr_count_max = 1 : i64} {
+    %one = waveamdmachine.imm 1 : !waveamdmachine.imm
+    %seed = waveamdmachine.uninit : !waveamdmachine.reg<sgpr, 1>
+    %sum, %scc = waveamdmachine.s_add_i32 %seed, %one
+        : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.imm)
+          -> (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<scc, 1>)
+    return %sum : !waveamdmachine.reg<sgpr, 1>
+  }
+
+  // CHECK-LABEL: func.func @regalloc_transform_loop_reuses_killed_vcc_input
+  // CHECK-SAME: waveamdmachine.regalloc_assignments
+  // CHECK-SAME: stage = "linear-scan-success"
+  // CHECK: [[ZERO:%.*]] = waveamdmachine.imm 0
+  // CHECK: [[SEED:%.*]] = waveamdmachine.v_mov_b32_tuple [[ZERO]]
+  // CHECK-SAME: -> !waveamdmachine.reg<vgpr, 1, 0>
+  // CHECK-NEXT: [[SUM:%.*]], %{{.*}} = waveamdmachine.v_add_u32_vcc [[SEED]], [[ZERO]]
+  // CHECK-SAME: -> (!waveamdmachine.reg<vgpr, 1, 0>, !waveamdmachine.reg<vcc, 1>)
+  // CHECK: return [[SUM]]
+  func.func @regalloc_transform_loop_reuses_killed_vcc_input()
+      -> !waveamdmachine.reg<vgpr, 1>
+      attributes {waveamdmachine.vgpr_count_max = 1 : i64} {
+    %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+    %seed = waveamdmachine.v_mov_b32_tuple %zero {registers = 1 : i64}
+        : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
+    %sum, %vcc = waveamdmachine.v_add_u32_vcc %seed, %zero
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.imm)
+          -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vcc, 1>)
+    return %sum : !waveamdmachine.reg<vgpr, 1>
+  }
+
   // CHECK-LABEL: func.func @regalloc_transform_loop_failure
   // CHECK-NOT: waveamdmachine.regalloc_assignments
   // CHECK-SAME: waveamdmachine.regalloc_transform_state =

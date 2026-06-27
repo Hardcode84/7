@@ -71,10 +71,10 @@ module attributes {transform.with_named_sequence} {
     }
 
     // DIRECT-LABEL: func.func @scratch_relief_existing_machine_private(
-    // DIRECT-SAME: waveamdmachine.private_segment_fixed_size = 24 : i64
-    // DIRECT-SAME: waveamdmachine.scratch_spill_bytes = 8 : i64
-    // DIRECT: waveamdmachine.scratch_store_tuple_b32 {{.*}} offset 16
-    // DIRECT: waveamdmachine.scratch_load_tuple_b32 {{.*}} offset 16
+    // DIRECT-SAME: waveamdmachine.private_segment_fixed_size = 16 : i64
+    // DIRECT-SAME: waveamdmachine.regalloc_assignments
+    // DIRECT-NOT: waveamdmachine.scratch_store_tuple_b32
+    // DIRECT-NOT: waveamdmachine.scratch_load_tuple_b32
     func.func @scratch_relief_existing_machine_private()
         attributes {wave.kernel, wave.workgroup_size = array<i32: 64, 1, 1>,
                     waveamdmachine.lds_size = 1048576 : i64,

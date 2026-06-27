@@ -12,7 +12,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
   // CHECK: return
   func.func @regalloc_transform_loop_remat_rebuilds_after_pressure()
       -> !waveamdmachine.reg<vgpr, 1>
-      attributes {waveamdmachine.vgpr_count_max = 3 : i64,
+      attributes {waveamdmachine.vgpr_count_max = 2 : i64,
                   waveamdmachine.agpr_count_max = 0 : i64} {
     %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
     %one = waveamdmachine.imm 1 : !waveamdmachine.imm
@@ -47,13 +47,13 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
   // CHECK-SAME: stage = "linear-scan-success"
   // CHECK-NOT: scratch_spill_bytes
   // CHECK: [[TID:%.*]] = waveamdmachine.v_workitem_id_x : !waveamdmachine.reg<vgpr, 1, 0>
-  // CHECK: waveamdmachine.uniform_loop
   // CHECK: [[WIDE:%.*]] = waveamdmachine.v_mov_b32_tuple [[TID]]
-  // CHECK-SAME: {registers = 2 : i64, waveamdmachine.regalloc_remat_temp}
+  // CHECK-SAME: {registers = 2 : i64}
+  // CHECK: waveamdmachine.uniform_loop
   // CHECK: return [[WIDE]]
   func.func @regalloc_transform_loop_remat_extends_fixed_workitem_for_wide_root()
       -> !waveamdmachine.reg<vgpr, 2>
-      attributes {waveamdmachine.vgpr_count_max = 4 : i64,
+      attributes {waveamdmachine.vgpr_count_max = 5 : i64,
                   waveamdmachine.agpr_count_max = 0 : i64} {
     %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
     %one = waveamdmachine.imm 1 : !waveamdmachine.imm

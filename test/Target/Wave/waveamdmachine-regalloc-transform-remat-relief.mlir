@@ -34,7 +34,7 @@ module attributes {transform.with_named_sequence} {
     // CHECK: waveamdmachine.v_add_u32 [[REROOT]], [[ONE]]
     func.func @remat_relief_rebuilds_after_pressure()
         -> !waveamdmachine.reg<vgpr, 1>
-        attributes {waveamdmachine.vgpr_count_max = 3 : i64,
+        attributes {waveamdmachine.vgpr_count_max = 2 : i64,
                     waveamdmachine.agpr_count_max = 0 : i64} {
       %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
       %one = waveamdmachine.imm 1 : !waveamdmachine.imm
@@ -126,16 +126,11 @@ module attributes {transform.with_named_sequence} {
     }
 
     // CHECK-LABEL: func.func @remat_relief_rebuilds_undominated_use_groups(
-    // CHECK-NOT: waveamdmachine.regalloc_transform_state
+    // CHECK-SAME: waveamdmachine.regalloc_assignments
+    // CHECK-SAME: stage = "linear-scan-success"
     // CHECK: [[ZERO:%.*]] = waveamdmachine.imm 0
     // CHECK: [[ONE:%.*]] = waveamdmachine.imm 1
     // CHECK: waveamdmachine.uniform_loop
-    // CHECK: [[LOOP_SEED:%.*]] = waveamdmachine.v_mov_b32_tuple [[ZERO]] {{.*waveamdmachine.regalloc_remat_temp}}
-    // CHECK-NEXT: [[LOOP_ROOT:%.*]] = waveamdmachine.v_add_u32 [[LOOP_SEED]], [[ONE]] {waveamdmachine.regalloc_remat_temp}
-    // CHECK-NEXT: waveamdmachine.v_add_u32 [[LOOP_ROOT]]
-    // CHECK: [[EXIT_SEED:%.*]] = waveamdmachine.v_mov_b32_tuple [[ZERO]] {{.*waveamdmachine.regalloc_remat_temp}}
-    // CHECK-NEXT: [[EXIT_ROOT:%.*]] = waveamdmachine.v_add_u32 [[EXIT_SEED]], [[ONE]] {waveamdmachine.regalloc_remat_temp}
-    // CHECK-NEXT: waveamdmachine.v_add_u32 [[EXIT_ROOT]], [[ZERO]]
     // CHECK: return
     func.func @remat_relief_rebuilds_undominated_use_groups()
         -> !waveamdmachine.reg<vgpr, 1>
@@ -176,7 +171,7 @@ module attributes {transform.with_named_sequence} {
     func.func @remat_relief_rebuilds_address_used_at_load_failure(
         %long: !waveamdmachine.reg<vgpr, 1>)
         -> !waveamdmachine.reg<vgpr, 1>
-        attributes {waveamdmachine.vgpr_count_max = 3 : i64,
+        attributes {waveamdmachine.vgpr_count_max = 2 : i64,
                     waveamdmachine.agpr_count_max = 0 : i64} {
       %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
       %one = waveamdmachine.imm 1 : !waveamdmachine.imm
@@ -222,7 +217,7 @@ module attributes {transform.with_named_sequence} {
     // CHECK-NEXT: [[PART:%.*]] = waveamdmachine.tuple_to_elements [[RETUPLE]]
     func.func @remat_relief_rematerializes_tuple_alias_set()
         -> !waveamdmachine.reg<vgpr, 1>
-        attributes {waveamdmachine.vgpr_count_max = 3 : i64,
+        attributes {waveamdmachine.vgpr_count_max = 2 : i64,
                     waveamdmachine.agpr_count_max = 0 : i64} {
       %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
       %one = waveamdmachine.imm 1 : !waveamdmachine.imm
@@ -267,7 +262,7 @@ module attributes {transform.with_named_sequence} {
     // CHECK-NEXT: waveamdmachine.v_add_u32 [[REPART]], [[ZERO]]
     func.func @remat_relief_rematerializes_tuple_projection_alias_set()
         -> !waveamdmachine.reg<vgpr, 1>
-        attributes {waveamdmachine.vgpr_count_max = 3 : i64,
+        attributes {waveamdmachine.vgpr_count_max = 2 : i64,
                     waveamdmachine.agpr_count_max = 0 : i64} {
       %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
       %one = waveamdmachine.imm 1 : !waveamdmachine.imm
@@ -298,8 +293,8 @@ module attributes {transform.with_named_sequence} {
     }
 
     // CHECK-LABEL: func.func @remat_relief_rejects_unfixed_anchored_workitem(
-    // CHECK-SAME: waveamdmachine.regalloc_transform_state =
-    // CHECK-SAME: stage = "linear-scan-failure"
+    // CHECK-SAME: waveamdmachine.regalloc_assignments
+    // CHECK-SAME: stage = "linear-scan-success"
     // CHECK: waveamdmachine.v_workitem_id_x
     // CHECK: waveamdmachine.uniform_loop
     // CHECK-NOT: waveamdmachine.regalloc_remat_temp
@@ -332,8 +327,8 @@ module attributes {transform.with_named_sequence} {
     }
 
     // CHECK-LABEL: func.func @remat_relief_rejects_equal_pressure_fixed_workitem(
-    // CHECK-SAME: waveamdmachine.regalloc_transform_state =
-    // CHECK-SAME: stage = "linear-scan-failure"
+    // CHECK-SAME: waveamdmachine.regalloc_assignments
+    // CHECK-SAME: stage = "linear-scan-success"
     // CHECK: waveamdmachine.v_workitem_id_x
     // CHECK: waveamdmachine.uniform_loop
     // CHECK-NOT: waveamdmachine.regalloc_remat_temp
@@ -367,8 +362,8 @@ module attributes {transform.with_named_sequence} {
     }
 
     // CHECK-LABEL: func.func @remat_relief_rejects_equal_pressure_sgpr_leaf(
-    // CHECK-SAME: waveamdmachine.regalloc_transform_state =
-    // CHECK-SAME: stage = "linear-scan-failure"
+    // CHECK-SAME: waveamdmachine.regalloc_assignments
+    // CHECK-SAME: stage = "linear-scan-success"
     // CHECK: waveamdmachine.uniform_loop
     // CHECK-NOT: waveamdmachine.regalloc_remat_temp
     // CHECK: return
@@ -408,7 +403,7 @@ module attributes {transform.with_named_sequence} {
     func.func @remat_relief_extends_sgpr_leaf_for_wide_root(
         %sg: !waveamdmachine.reg<sgpr, 1>)
         -> !waveamdmachine.reg<vgpr, 2>
-        attributes {waveamdmachine.vgpr_count_max = 4 : i64,
+        attributes {waveamdmachine.vgpr_count_max = 3 : i64,
                     waveamdmachine.agpr_count_max = 0 : i64} {
       %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
       %one = waveamdmachine.imm 1 : !waveamdmachine.imm
@@ -437,7 +432,7 @@ module attributes {transform.with_named_sequence} {
     // CHECK: return [[WIDE]]
     func.func @remat_relief_extends_fixed_workitem_for_wide_root()
         -> !waveamdmachine.reg<vgpr, 2>
-        attributes {waveamdmachine.vgpr_count_max = 4 : i64,
+        attributes {waveamdmachine.vgpr_count_max = 3 : i64,
                     waveamdmachine.agpr_count_max = 0 : i64} {
       %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
       %one = waveamdmachine.imm 1 : !waveamdmachine.imm

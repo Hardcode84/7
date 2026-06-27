@@ -235,15 +235,10 @@ module attributes {transform.with_named_sequence} {
 
     // CHECK-LABEL: func.func @lds_relief_machine_lds_multi_slot_offsets(
     // CHECK-SAME: waveamdmachine.lds_size = 2304 : i64
-    // CHECK-SAME: waveamdmachine.lds_spill_bytes = 512 : i64
-    // CHECK: waveamdmachine.ds_store_b32
-    // CHECK-SAME: offset 2304
-    // CHECK: waveamdmachine.ds_store_b32
-    // CHECK-SAME: offset 2560
-    // CHECK: waveamdmachine.ds_load_b32
-    // CHECK-SAME: offset 2304
-    // CHECK: waveamdmachine.ds_load_b32
-    // CHECK-SAME: offset 2560
+    // CHECK-SAME: waveamdmachine.regalloc_assignments
+    // CHECK-NOT: waveamdmachine.lds_spill_bytes
+    // CHECK-NOT: waveamdmachine.ds_store_b32
+    // CHECK-NOT: waveamdmachine.ds_load_b32
     func.func @lds_relief_machine_lds_multi_slot_offsets()
         attributes {wave.kernel, wave.workgroup_size = array<i32: 64, 1, 1>,
                     waveamdmachine.lds_size = 2304 : i64,

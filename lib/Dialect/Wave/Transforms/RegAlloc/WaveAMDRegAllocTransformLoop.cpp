@@ -29,6 +29,8 @@ using namespace mlir;
 
 namespace {
 
+namespace waveTraits = ::mlir::OpTrait::waveamdmachine;
+
 struct RegAllocAliasValue {
   SmallVector<int64_t> path;
   waveamdmachine::RegType type;
@@ -85,6 +87,43 @@ static bool areEquivalentFixedHardwareReads(Value lhs, Value rhs) {
   if (lhs.getType() != rhs.getType())
     return false;
   return lhs.getDefiningOp()->getName() == rhs.getDefiningOp()->getName();
+}
+
+static bool hasNoMemoryEffects(Operation *op) {
+  MemoryEffectOpInterface effects = dyn_cast<MemoryEffectOpInterface>(op);
+  if (!effects)
+    return false;
+  SmallVector<MemoryEffects::EffectInstance> instances;
+  effects.getEffects(instances);
+  return instances.empty();
+}
+
+static bool hasSingleTrackedGPRResult(Operation *op) {
+  bool found = false;
+  for (Value result : op->getResults()) {
+    if (!wave::getRegAllocTransformTrackedRegType(result))
+      continue;
+    if (found)
+      return false;
+    found = true;
+  }
+  return found;
+}
+
+static bool canReuseKilledOperandForResult(Operation *op) {
+  if (!op || op->getNumRegions() != 0)
+    return false;
+  if (!hasSingleTrackedGPRResult(op))
+    return false;
+  if (!hasNoMemoryEffects(op))
+    return false;
+  if (op->hasTrait<waveTraits::NoMachineInst>() ||
+      isa<waveamdmachine::MMAOpInterface>(op) ||
+      op->hasTrait<waveTraits::MFMAOp>() ||
+      op->hasTrait<waveTraits::WritesExecOp>())
+    return false;
+  return op->hasTrait<waveTraits::VALUOp>() ||
+         op->hasTrait<waveTraits::SALUOp>();
 }
 
 static waveamdmachine::RegType
@@ -4294,6 +4333,8 @@ private:
     if (failed(parsedSets))
       return failure();
     sets = std::move(*parsedSets);
+    if (failed(collectResolvedValues()))
+      return failure();
     FailureOr<std::optional<wave::RegAllocTransformBudget>> familyBudget =
         wave::getRegAllocTransformVGPRFamilyBudget(func);
     if (failed(familyBudget))
@@ -4307,6 +4348,19 @@ private:
     if (failed(collectEntryABIReservations()))
       return failure();
     collectImplicitABIReservations();
+    return success();
+  }
+
+  LogicalResult collectResolvedValues() {
+    FailureOr<SmallVector<ResolvedRegAllocValue>> resolvedValues =
+        resolveRegAllocStateValues(func, values);
+    if (failed(resolvedValues))
+      return failure();
+    payloadValues.resize(values.size());
+    for (auto [payloadValue, stateValue] : *resolvedValues) {
+      payloadValues[stateValue->id] = payloadValue;
+      valueLookup[payloadValue] = stateValue;
+    }
     return success();
   }
 
@@ -4445,6 +4499,8 @@ private:
     if (set.fixedBase)
       return allocateFixedSet(set, budget);
     std::optional<unsigned> base = findFreeBase(set, budget.limit);
+    if (!base)
+      base = findReusableInputBase(set, budget.limit);
     if (!base) {
       recordPressureFailure(set, budget, getFixedReservationOverlaps(set));
       return success();
@@ -4484,10 +4540,127 @@ private:
     return std::nullopt;
   }
 
+  static bool isAlignedBase(unsigned base, unsigned width) {
+    unsigned align = std::max<unsigned>(1, llvm::PowerOf2Ceil(width));
+    return base % align == 0;
+  }
+
+  const wave::RegAllocTransformValue *
+  getSingleResultValue(const wave::RegAllocTransformAliasSet &set) {
+    if (set.members.size() != 1)
+      return nullptr;
+    const wave::RegAllocTransformValue &value = values[set.members.front()];
+    if (value.kind != wave::RegAllocTransformValueKind::OpResult ||
+        value.start != set.start || value.offset != 0 ||
+        value.width != set.width)
+      return nullptr;
+    return &value;
+  }
+
+  const wave::RegAllocTransformAssignment *getActiveAssignment(unsigned setId) {
+    for (const wave::RegAllocTransformAssignment &assigned : active)
+      if (assigned.set == setId)
+        return &assigned;
+    return nullptr;
+  }
+
+  std::optional<unsigned>
+  findReusableInputBase(const wave::RegAllocTransformAliasSet &set,
+                        unsigned limit) {
+    const wave::RegAllocTransformValue *resultValue = getSingleResultValue(set);
+    if (!resultValue || resultValue->id >= payloadValues.size() ||
+        set.width > limit)
+      return std::nullopt;
+    Operation *def = payloadValues[resultValue->id].getDefiningOp();
+    if (!canReuseKilledOperandForResult(def))
+      return std::nullopt;
+
+    std::optional<unsigned> bestBase;
+    for (OpOperand &operand : def->getOpOperands()) {
+      auto it = valueLookup.find(operand.get());
+      if (it == valueLookup.end())
+        continue;
+      std::optional<unsigned> base =
+          getReusableOperandBase(set, *it->second, limit);
+      if (!base)
+        continue;
+      if (!bestBase || *base < *bestBase)
+        bestBase = *base;
+    }
+    return bestBase;
+  }
+
+  bool
+  reusableOperandMatchesSet(const wave::RegAllocTransformAliasSet &set,
+                            const wave::RegAllocTransformValue &sourceValue) {
+    return sourceValue.set != set.id && sourceValue.regClass == set.regClass &&
+           sourceValue.width == set.width;
+  }
+
+  bool
+  reusableOperandCoversResult(const wave::RegAllocTransformAliasSet &set,
+                              const wave::RegAllocTransformAliasSet &sourceSet,
+                              const wave::RegAllocTransformValue &sourceValue) {
+    return sourceSet.end == set.start &&
+           sourceValue.offset + set.width <= sourceSet.width;
+  }
+
+  bool reusableBaseIsAvailable(
+      const wave::RegAllocTransformAliasSet &set,
+      const wave::RegAllocTransformAliasSet &sourceSet,
+      const wave::RegAllocTransformAssignment &sourceAssignment, unsigned base,
+      unsigned limit) {
+    if (base + set.width > limit)
+      return false;
+    if (!isAlignedBase(base, set.width))
+      return false;
+    if (conflictsWithActiveIgnoring(set, base, sourceSet.id))
+      return false;
+    return !conflictsWithFixedReservationIgnoring(set, base, sourceAssignment);
+  }
+
+  std::optional<unsigned>
+  getReusableOperandBase(const wave::RegAllocTransformAliasSet &set,
+                         const wave::RegAllocTransformValue &sourceValue,
+                         unsigned limit) {
+    if (!reusableOperandMatchesSet(set, sourceValue))
+      return std::nullopt;
+    const wave::RegAllocTransformAliasSet *sourceSet =
+        getSetById(sourceValue.set);
+    if (!sourceSet)
+      return std::nullopt;
+    const wave::RegAllocTransformAssignment *sourceAssignment =
+        getActiveAssignment(sourceSet->id);
+    if (!sourceAssignment)
+      return std::nullopt;
+    if (!reusableOperandCoversResult(set, *sourceSet, sourceValue))
+      return std::nullopt;
+
+    unsigned base = sourceAssignment->base + sourceValue.offset;
+    if (!reusableBaseIsAvailable(set, *sourceSet, *sourceAssignment, base,
+                                 limit))
+      return std::nullopt;
+    return base;
+  }
+
   bool conflictsWithActive(const wave::RegAllocTransformAliasSet &set,
                            unsigned base) {
     return llvm::any_of(
         active, [&](const wave::RegAllocTransformAssignment &assigned) {
+          if (assigned.regClass != set.regClass ||
+              !assignedRangesOverlap(assigned, base, set.width) ||
+              !setsHaveLiveOverlap(set, assigned))
+            return false;
+          return !canShareFixedHardwareRead(set, assigned, base);
+        });
+  }
+
+  bool conflictsWithActiveIgnoring(const wave::RegAllocTransformAliasSet &set,
+                                   unsigned base, unsigned ignoredSetId) {
+    return llvm::any_of(
+        active, [&](const wave::RegAllocTransformAssignment &assigned) {
+          if (assigned.set == ignoredSetId)
+            return false;
           if (assigned.regClass != set.regClass ||
               !assignedRangesOverlap(assigned, base, set.width) ||
               !setsHaveLiveOverlap(set, assigned))
@@ -4558,6 +4731,31 @@ private:
     return llvm::any_of(
         fixedReservations,
         [&](const wave::RegAllocTransformAssignment &reserved) {
+          return reserved.regClass == set.regClass &&
+                 setOverlapsRange(set, reserved.start, reserved.end) &&
+                 assignedRangesOverlap(reserved, base, set.width);
+        });
+  }
+
+  bool reservationCoveredByIgnoredSource(
+      const wave::RegAllocTransformAssignment &reserved,
+      const wave::RegAllocTransformAssignment &ignored) {
+    return reserved.regClass == ignored.regClass &&
+           reserved.base <= ignored.base &&
+           ignored.base + ignored.width <= reserved.base + reserved.width &&
+           reserved.end == ignored.end;
+  }
+
+  bool conflictsWithFixedReservationIgnoring(
+      const wave::RegAllocTransformAliasSet &set, unsigned base,
+      const wave::RegAllocTransformAssignment &ignored) {
+    return llvm::any_of(
+        fixedReservations,
+        [&](const wave::RegAllocTransformAssignment &reserved) {
+          if ((reserved.set == ignored.set ||
+               reservationCoveredByIgnoredSource(reserved, ignored)) &&
+              assignedRangesOverlap(reserved, base, set.width))
+            return false;
           return reserved.regClass == set.regClass &&
                  setOverlapsRange(set, reserved.start, reserved.end) &&
                  assignedRangesOverlap(reserved, base, set.width);
@@ -4875,9 +5073,11 @@ private:
 
   SmallVector<wave::RegAllocTransformValue> values;
   SmallVector<wave::RegAllocTransformAliasSet> sets;
+  SmallVector<Value> payloadValues;
   SmallVector<wave::RegAllocTransformAssignment> fixedReservations;
   SmallVector<wave::RegAllocTransformAssignment> active;
   SmallVector<wave::RegAllocTransformAssignment> assignments;
+  DenseMap<Value, const wave::RegAllocTransformValue *> valueLookup;
   DenseMap<unsigned, Value> fixedHardwareReadValues;
   std::optional<wave::RegAllocTransformBudget> vgprFamilyBudget;
   std::optional<RegAllocScanFailure> scanFailure;
