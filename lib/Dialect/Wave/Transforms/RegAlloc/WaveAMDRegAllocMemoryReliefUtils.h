@@ -16,6 +16,7 @@
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachine.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/IRMapping.h"
+#include "llvm/ADT/BitVector.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
@@ -84,18 +85,6 @@ static bool isRegAllocTransformTempOp(Operation *op) {
 
 static bool isRegAllocTransformTempValue(Value value) {
   return isRegAllocTransformTempOp(value.getDefiningOp());
-}
-
-static bool opUsesValue(Operation *op, Value value) {
-  bool found = false;
-  op->walk([&](Operation *nested) {
-    if (llvm::is_contained(nested->getOperands(), value)) {
-      found = true;
-      return WalkResult::interrupt();
-    }
-    return WalkResult::advance();
-  });
-  return found;
 }
 
 static bool
@@ -728,20 +717,20 @@ public:
   TransformMemoryLoopCarryMaterializer(OpBuilder &builder,
                                        ArrayRef<const SlotT *> slots,
                                        StoreFn storeFn, LoadFn loadFn)
-      : slots(slots), builder(builder), storeFn(storeFn), loadFn(loadFn) {}
+      : slots(slots.begin(), slots.end()), builder(builder), storeFn(storeFn),
+        loadFn(loadFn) {}
 
   LogicalResult run() {
     if (slots.empty())
       return success();
-    SmallVector<const SlotT *, 8> sorted(slots.begin(), slots.end());
-    llvm::stable_sort(sorted, [](const SlotT *lhs, const SlotT *rhs) {
+    llvm::stable_sort(slots, [](const SlotT *lhs, const SlotT *rhs) {
       return lhs->loopCarry->index < rhs->loopCarry->index;
     });
-    slots = sorted;
 
     waveamdmachine::UniformLoopOp loop = slots.front()->loopCarry->loop;
     for (const SlotT *slot : slots)
       assert(slot->loopCarry->loop == loop && "expected one loop group");
+    buildLoopCarryIndexes(loop);
 
     SmallVector<Value, 8> initTokens;
     if (failed(materializeInitStores(loop, initTokens)))
@@ -762,17 +751,28 @@ public:
   }
 
 private:
+  void buildLoopCarryIndexes(waveamdmachine::UniformLoopOp loop) {
+    spilledIndices.resize(loop.getInits().size());
+    ordinalByIndex.clear();
+    for (auto [ordinal, slot] : llvm::enumerate(slots)) {
+      unsigned index = slot->loopCarry->index;
+      assert(index < spilledIndices.size() && "spilled carry index in bounds");
+      assert(!spilledIndices.test(index) && "spilled carry index is unique");
+      spilledIndices.set(index);
+      ordinalByIndex.insert({index, ordinal});
+    }
+  }
+
   bool isSpilledIndex(unsigned index) const {
-    return llvm::any_of(slots, [index](const SlotT *slot) {
-      return slot->loopCarry->index == index;
-    });
+    return index < spilledIndices.size() && spilledIndices.test(index);
   }
 
   std::optional<unsigned> getSpillOrdinal(unsigned index) const {
-    for (auto [ordinal, slot] : llvm::enumerate(slots))
-      if (slot->loopCarry->index == index)
-        return ordinal;
-    return std::nullopt;
+    llvm::SmallDenseMap<unsigned, unsigned, 8>::const_iterator it =
+        ordinalByIndex.find(index);
+    if (it == ordinalByIndex.end())
+      return std::nullopt;
+    return it->second;
   }
 
   static Value getInitStoreToken(Value init) {
@@ -908,23 +908,37 @@ private:
                                  IRMapping &mapper) const {
     Block &oldBody = oldLoop.getBody().front();
     builder.setInsertionPointToEnd(newBody);
+    llvm::BitVector usedOrdinals(slots.size());
     for (Operation &op : oldBody.without_terminator()) {
-      SmallVector<Value, 4> mappedCarries;
-      for (const SlotT *slot : slots) {
-        BlockArgument oldArg = oldBody.getArgument(slot->loopCarry->index);
-        if (!opUsesValue(&op, oldArg))
-          continue;
+      usedOrdinals.reset();
+      collectUsedSpillOrdinals(&op, oldBody, usedOrdinals);
+      for (unsigned ordinal : usedOrdinals.set_bits()) {
+        BlockArgument oldArg =
+            oldBody.getArgument(slots[ordinal]->loopCarry->index);
         FailureOr<Value> mapped =
             getMappedValue(oldLoop, oldArg, tokens, mapper, op.getLoc());
         if (failed(mapped))
           return failure();
-        mappedCarries.push_back(oldArg);
       }
       builder.clone(op, mapper);
-      for (Value carry : mappedCarries)
-        mapper.erase(carry);
+      for (unsigned ordinal : usedOrdinals.set_bits())
+        mapper.erase(oldBody.getArgument(slots[ordinal]->loopCarry->index));
     }
     return cloneLoopTerminator(oldLoop, tokens, mapper);
+  }
+
+  void collectUsedSpillOrdinals(Operation *op, Block &body,
+                                llvm::BitVector &usedOrdinals) const {
+    op->walk([&](Operation *nested) {
+      for (Value operand : nested->getOperands()) {
+        BlockArgument arg = dyn_cast<BlockArgument>(operand);
+        if (!arg || arg.getOwner() != &body)
+          continue;
+        if (std::optional<unsigned> ordinal =
+                getSpillOrdinal(arg.getArgNumber()))
+          usedOrdinals.set(*ordinal);
+      }
+    });
   }
 
   std::optional<unsigned>
@@ -1027,7 +1041,9 @@ private:
     return success();
   }
 
-  ArrayRef<const SlotT *> slots;
+  SmallVector<const SlotT *, 8> slots;
+  llvm::BitVector spilledIndices;
+  llvm::SmallDenseMap<unsigned, unsigned, 8> ordinalByIndex;
   OpBuilder &builder;
   StoreFn storeFn;
   LoadFn loadFn;
