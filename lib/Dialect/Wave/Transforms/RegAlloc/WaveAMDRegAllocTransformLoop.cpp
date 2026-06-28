@@ -33,6 +33,7 @@ namespace waveTraits = ::mlir::OpTrait::waveamdmachine;
 
 struct RegAllocAliasValue {
   SmallVector<int64_t> path;
+  SmallVector<wave::RegAllocTransformLiveRange, 2> ranges;
   waveamdmachine::RegType type;
   unsigned id = 0;
   unsigned start = 0;
@@ -245,6 +246,7 @@ private:
     record.id = values.size();
     record.start = start;
     record.end = start;
+    record.ranges.push_back({start, start});
     record.blockArgument = blockArgument;
     record.number = number;
     record.opId = opId;
@@ -293,7 +295,16 @@ private:
     auto it = valueIds.find(value);
     if (it == valueIds.end())
       return;
-    values[it->second].end = std::max(values[it->second].end, position);
+    RegAllocAliasValue &record = values[it->second];
+    record.end = std::max(record.end, position);
+    if (record.ranges.empty() || position < record.ranges.back().start) {
+      record.ranges.push_back({position, position});
+      llvm::stable_sort(record.ranges, [](auto lhs, auto rhs) {
+        return std::tie(lhs.start, lhs.end) < std::tie(rhs.start, rhs.end);
+      });
+      return;
+    }
+    record.ranges.back().end = std::max(record.ranges.back().end, position);
   }
 
   bool isValueDefinedInside(Operation *scope, Value value) {
@@ -393,15 +404,12 @@ private:
     if (loop.getBody().empty())
       return;
     Block &body = loop.getBody().front();
-    unsigned loopExit = getLoopExitPosition(loop);
     DenseSet<Value> seenInits;
     for (auto [init, arg, result] : llvm::zip_equal(
              loop.getInits(), body.getArguments(), loop.getResults())) {
       addAliasEdge(arg, result, 0);
-      if (seenInits.insert(init).second) {
+      if (seenInits.insert(init).second)
         addAliasEdge(init, arg, 0);
-        extendValue(init, loopExit);
-      }
     }
     auto cont = dyn_cast<waveamdmachine::ContinueIfOp>(body.getTerminator());
     if (!cont)
@@ -533,6 +541,21 @@ private:
     return builder.getDictionaryAttr(attrs);
   }
 
+  DictionaryAttr buildLiveRangeAttr(wave::RegAllocTransformLiveRange range) {
+    SmallVector<NamedAttribute> attrs;
+    attrs.emplace_back(builder.getStringAttr("end"), getI64(range.end));
+    attrs.emplace_back(builder.getStringAttr("start"), getI64(range.start));
+    return getDictionary(attrs);
+  }
+
+  ArrayAttr
+  buildLiveRangeArrayAttr(ArrayRef<wave::RegAllocTransformLiveRange> ranges) {
+    SmallVector<Attribute> attrs;
+    for (wave::RegAllocTransformLiveRange range : ranges)
+      attrs.push_back(buildLiveRangeAttr(range));
+    return builder.getArrayAttr(attrs);
+  }
+
   DictionaryAttr buildOpAttr(const RegAllocAliasOp &record) {
     SmallVector<NamedAttribute> attrs;
     attrs.emplace_back(builder.getStringAttr("id"), getI64(record.id));
@@ -563,6 +586,8 @@ private:
     if (!record.blockArgument)
       attrs.emplace_back(builder.getStringAttr("op"), getI64(record.opId));
     attrs.emplace_back(builder.getStringAttr("path"), getI64Array(record.path));
+    attrs.emplace_back(builder.getStringAttr("ranges"),
+                       buildLiveRangeArrayAttr(record.ranges));
     attrs.emplace_back(builder.getStringAttr("set"), getI64(record.aliasSet));
     attrs.emplace_back(builder.getStringAttr("start"), getI64(record.start));
     attrs.emplace_back(builder.getStringAttr("width"),
@@ -657,6 +682,81 @@ assignedRangesOverlap(const wave::RegAllocTransformAssignment &assignment,
 static bool liveRangesOverlap(unsigned lhsStart, unsigned lhsEnd,
                               unsigned rhsStart, unsigned rhsEnd) {
   return lhsStart <= rhsEnd && rhsStart <= lhsEnd;
+}
+
+static bool liveRangesOverlap(const wave::RegAllocTransformLiveRange &lhs,
+                              const wave::RegAllocTransformLiveRange &rhs) {
+  return liveRangesOverlap(lhs.start, lhs.end, rhs.start, rhs.end);
+}
+
+static bool valueLiveAtPosition(const wave::RegAllocTransformValue &value,
+                                unsigned position) {
+  return llvm::any_of(value.ranges,
+                      [&](wave::RegAllocTransformLiveRange range) {
+                        return range.start <= position && position <= range.end;
+                      });
+}
+
+static bool valueLiveBeforeAtPosition(const wave::RegAllocTransformValue &value,
+                                      unsigned position) {
+  return llvm::any_of(value.ranges,
+                      [&](wave::RegAllocTransformLiveRange range) {
+                        return range.start < position && position <= range.end;
+                      });
+}
+
+static bool valueLiveAcrossPosition(const wave::RegAllocTransformValue &value,
+                                    unsigned position) {
+  return llvm::any_of(value.ranges,
+                      [&](wave::RegAllocTransformLiveRange range) {
+                        return range.start < position && position < range.end;
+                      });
+}
+
+static bool valueOverlapsRange(const wave::RegAllocTransformValue &value,
+                               unsigned start, unsigned end) {
+  return llvm::any_of(
+      value.ranges, [&](wave::RegAllocTransformLiveRange range) {
+        return liveRangesOverlap(range.start, range.end, start, end);
+      });
+}
+
+static bool valueRangesOverlap(const wave::RegAllocTransformValue &lhs,
+                               const wave::RegAllocTransformValue &rhs) {
+  for (wave::RegAllocTransformLiveRange lhsRange : lhs.ranges)
+    for (wave::RegAllocTransformLiveRange rhsRange : rhs.ranges)
+      if (liveRangesOverlap(lhsRange, rhsRange))
+        return true;
+  return false;
+}
+
+static bool valueRangeEndsAt(const wave::RegAllocTransformValue &value,
+                             unsigned position) {
+  return llvm::any_of(value.ranges,
+                      [&](wave::RegAllocTransformLiveRange range) {
+                        return range.end == position;
+                      });
+}
+
+static SmallVector<wave::RegAllocTransformLiveRange, 4>
+collectAliasSetLiveRanges(const wave::RegAllocTransformAliasSet &set,
+                          ArrayRef<wave::RegAllocTransformValue> values) {
+  SmallVector<wave::RegAllocTransformLiveRange, 4> ranges;
+  for (unsigned valueId : set.members)
+    ranges.append(values[valueId].ranges.begin(), values[valueId].ranges.end());
+  llvm::stable_sort(ranges, [](auto lhs, auto rhs) {
+    return std::tie(lhs.start, lhs.end) < std::tie(rhs.start, rhs.end);
+  });
+
+  SmallVector<wave::RegAllocTransformLiveRange, 4> coalesced;
+  for (wave::RegAllocTransformLiveRange range : ranges) {
+    if (coalesced.empty() || range.start > coalesced.back().end) {
+      coalesced.push_back(range);
+      continue;
+    }
+    coalesced.back().end = std::max(coalesced.back().end, range.end);
+  }
+  return coalesced;
 }
 
 static bool isVGPRFamilyClass(waveamdmachine::RegClass regClass) {
@@ -1182,6 +1282,16 @@ static bool lessAGPRReliefInterval(const AGPRReliefInterval &lhs,
   return std::tie(lhs.start, lhs.id) < std::tie(rhs.start, rhs.id);
 }
 
+static void
+addAGPRReliefIntervals(SmallVectorImpl<AGPRReliefInterval> &intervals,
+                       const wave::RegAllocTransformAliasSet &set,
+                       ArrayRef<wave::RegAllocTransformValue> values,
+                       std::optional<unsigned> fixedBase) {
+  for (wave::RegAllocTransformLiveRange range :
+       collectAliasSetLiveRanges(set, values))
+    intervals.push_back({fixedBase, set.id, range.start, range.end, set.width});
+}
+
 static bool canAllocateAGPRReliefCandidate(
     func::FuncOp func, const wave::RegAllocTransformAliasSet &candidate,
     ArrayRef<wave::RegAllocTransformAliasSet> sets,
@@ -1192,11 +1302,10 @@ static bool canAllocateAGPRReliefCandidate(
   for (const wave::RegAllocTransformAliasSet &set : sets) {
     if (set.regClass != waveamdmachine::RegClass::AGPR)
       continue;
-    intervals.push_back({getRegAllocTransformFixedBase(set, values), set.id,
-                         set.start, set.end, set.width});
+    addAGPRReliefIntervals(intervals, set, values,
+                           getRegAllocTransformFixedBase(set, values));
   }
-  intervals.push_back({std::nullopt, candidate.id, candidate.start,
-                       candidate.end, candidate.width});
+  addAGPRReliefIntervals(intervals, candidate, values, std::nullopt);
   llvm::stable_sort(intervals, lessAGPRReliefInterval);
   return canAllocateAGPRReliefIntervals(intervals, candidate.id, budget.limit,
                                         agprFootprint);
@@ -1270,9 +1379,13 @@ findRegAllocTransformSet(ArrayRef<wave::RegAllocTransformAliasSet> sets,
   return nullptr;
 }
 
-static bool setCanRelieveAtPosition(const wave::RegAllocTransformAliasSet &set,
-                                    unsigned position) {
-  return set.start < position && position <= set.end;
+static bool
+setCanRelieveAtPosition(const wave::RegAllocTransformAliasSet &set,
+                        ArrayRef<wave::RegAllocTransformValue> values,
+                        unsigned position) {
+  return llvm::any_of(set.members, [&](unsigned valueId) {
+    return valueLiveBeforeAtPosition(values[valueId], position);
+  });
 }
 
 static bool
@@ -1280,9 +1393,9 @@ liveValuesCanRelieveAtPosition(ArrayRef<ResolvedRegAllocValue> resolvedValues,
                                unsigned position) {
   return llvm::all_of(resolvedValues, [position](ResolvedRegAllocValue value) {
     const wave::RegAllocTransformValue &stateValue = *value.second;
-    if (position < stateValue.start || stateValue.end < position)
+    if (!valueLiveAtPosition(stateValue, position))
       return true;
-    return stateValue.start < position;
+    return valueLiveBeforeAtPosition(stateValue, position);
   });
 }
 
@@ -1348,15 +1461,21 @@ static bool isMFMAAccumulatorUse(waveamdmachine::MMAOpInterface mfma,
   return &use == &mfma.getAccMutable();
 }
 
-static bool canDefineAGPR(Value value) {
+static bool canDefineAGPR(Value value, const DenseSet<Value> &groupValues) {
   if (auto arg = dyn_cast<BlockArgument>(value))
     return isa_and_nonnull<waveamdmachine::UniformLoopOp>(
         arg.getOwner()->getParentOp());
   Operation *def = value.getDefiningOp();
   if (!def)
     return false;
-  return isa<waveamdmachine::UninitOp, waveamdmachine::UniformLoopOp>(def) ||
-         isa<waveamdmachine::MMAOpInterface>(def);
+  if (isa<waveamdmachine::UninitOp, waveamdmachine::UniformLoopOp>(def))
+    return true;
+  auto mma = dyn_cast<waveamdmachine::MMAOpInterface>(def);
+  if (!mma)
+    return false;
+  Value acc = mma.getAcc();
+  return hasRegAllocTransformClass(acc, waveamdmachine::RegClass::AGPR) ||
+         groupValues.contains(acc);
 }
 
 static bool isTupleAliasOp(Operation *op) {
@@ -1415,7 +1534,7 @@ isAGPRReliefEligibleSet(const wave::RegAllocTransformAliasSet &set,
                         ArrayRef<ResolvedRegAllocValue> resolvedValues,
                         unsigned position) {
   if (set.regClass != waveamdmachine::RegClass::VGPR ||
-      !setCanRelieveAtPosition(set, position) ||
+      !setCanRelieveAtPosition(set, values, position) ||
       !liveValuesCanRelieveAtPosition(resolvedValues, position) ||
       hasFixedRegAllocValue(set, values))
     return false;
@@ -1455,7 +1574,7 @@ getAGPRReliefBridgeCost(ArrayRef<ResolvedRegAllocValue> values,
   AGPRReliefBridgeCost cost;
   for (const ResolvedRegAllocValue &value : values) {
     Operation *def = value.first.getDefiningOp();
-    if (def && !canDefineAGPR(value.first) &&
+    if (def && !canDefineAGPR(value.first, groupValues) &&
         !canRebankTupleAliasOp(def, groupValues))
       cost.add(def);
     for (OpOperand &use : value.first.getUses()) {
@@ -1476,7 +1595,7 @@ getAGPRReliefLiveDwords(const wave::RegAllocTransformAliasSet &set,
   unsigned count = 0;
   for (unsigned valueId : set.members) {
     const wave::RegAllocTransformValue &value = values[valueId];
-    if (position < value.start || value.end < position)
+    if (!valueLiveAtPosition(value, position))
       continue;
     unsigned begin = static_cast<unsigned>(value.offset);
     if (begin >= set.width)
@@ -1675,7 +1794,7 @@ static Value getAGPRReliefReplacement(OpBuilder &builder, Value value,
       replacements[value] = value;
       return value;
     }
-  if (canDefineAGPR(value)) {
+  if (canDefineAGPR(value, groupValues)) {
     setRegAllocTransformClass(value, waveamdmachine::RegClass::AGPR);
     replacements[value] = value;
     return value;
@@ -2004,7 +2123,7 @@ static bool isStateValueLiveAt(Value value, unsigned position,
   if (it == context.values.end())
     return false;
   const wave::RegAllocTransformValue &stateValue = *it->second;
-  return stateValue.start <= position && position <= stateValue.end;
+  return valueLiveAtPosition(stateValue, position);
 }
 
 static bool mustRematValue(Value value,
@@ -2021,7 +2140,7 @@ isRematValueLiveAtFailure(Value value,
     return false;
   const wave::RegAllocTransformValue &stateValue = *it->second;
   unsigned position = failureRecord.position;
-  return stateValue.start < position && position < stateValue.end;
+  return valueLiveAcrossPosition(stateValue, position);
 }
 
 static bool
@@ -2221,10 +2340,17 @@ static bool isRematCandidateSet(const wave::RegAllocTransformAliasSet &set,
                                 ArrayRef<wave::RegAllocTransformValue> values,
                                 const RegAllocTransformFailure &failureRecord) {
   unsigned position = failureRecord.position;
-  return set.regClass == waveamdmachine::RegClass::VGPR &&
-         (set.start < position ||
-          (set.id == failureRecord.set && set.start == position)) &&
-         position < set.end && !hasFixedRegAllocValue(set, values);
+  if (set.regClass != waveamdmachine::RegClass::VGPR ||
+      hasFixedRegAllocValue(set, values))
+    return false;
+  return llvm::any_of(set.members, [&](unsigned valueId) {
+    const wave::RegAllocTransformValue &value = values[valueId];
+    if (set.id == failureRecord.set)
+      return llvm::any_of(value.ranges, [&](auto range) {
+        return range.start <= position && position < range.end;
+      });
+    return valueLiveAcrossPosition(value, position);
+  });
 }
 
 static bool
@@ -2237,7 +2363,7 @@ hasStructuralLoopCarryUse(ArrayRef<ResolvedRegAllocValue> resolvedValues) {
 static bool
 isRematValueLiveAcrossFailure(const wave::RegAllocTransformValue &stateValue,
                               unsigned position) {
-  return stateValue.start < position && position < stateValue.end;
+  return valueLiveAcrossPosition(stateValue, position);
 }
 
 static bool
@@ -2245,7 +2371,9 @@ canRematValueRelieveFailure(const wave::RegAllocTransformValue &stateValue,
                             const RegAllocTransformFailure &failureRecord) {
   unsigned position = failureRecord.position;
   if (stateValue.set == failureRecord.set)
-    return stateValue.start <= position && position < stateValue.end;
+    return llvm::any_of(stateValue.ranges, [&](auto range) {
+      return range.start <= position && position < range.end;
+    });
   return isRematValueLiveAcrossFailure(stateValue, position);
 }
 
@@ -2254,8 +2382,7 @@ aliasSetLiveAtPosition(const wave::RegAllocTransformAliasSet &set,
                        ArrayRef<wave::RegAllocTransformValue> values,
                        unsigned position) {
   return llvm::any_of(set.members, [&](unsigned valueId) {
-    const wave::RegAllocTransformValue &value = values[valueId];
-    return value.start <= position && position <= value.end;
+    return valueLiveAtPosition(values[valueId], position);
   });
 }
 
@@ -2739,14 +2866,18 @@ isMemoryReliefCandidateSet(const wave::RegAllocTransformAliasSet &set,
                            ArrayRef<wave::RegAllocTransformValue> values,
                            unsigned position) {
   return set.regClass == waveamdmachine::RegClass::VGPR &&
-         set.start < position && position < set.end &&
+         llvm::any_of(set.members,
+                      [&](unsigned valueId) {
+                        return valueLiveAcrossPosition(values[valueId],
+                                                       position);
+                      }) &&
          !hasFixedRegAllocValue(set, values);
 }
 
 static bool
 isMemoryValueLiveAcrossFailure(const wave::RegAllocTransformValue &stateValue,
                                unsigned position) {
-  return stateValue.start < position && position < stateValue.end;
+  return valueLiveAcrossPosition(stateValue, position);
 }
 
 static void addPlannedMemoryReliefValues(ArrayRef<ResolvedRegAllocValue> values,
@@ -3000,10 +3131,8 @@ static bool canMaterializeMemoryLoopCarryRelief(
 
 static bool isMemoryLoopCarryReliefStateValue(
     const wave::RegAllocTransformAliasSet &set,
-    const wave::RegAllocTransformValue *stateValue,
-    const RegAllocTransformFailure &failureRecord, Value init) {
-  if (!stateValue ||
-      !isMemoryValueLiveAcrossFailure(*stateValue, failureRecord.position))
+    const wave::RegAllocTransformValue *stateValue, Value init) {
+  if (!stateValue)
     return false;
   return stateValue->offset == 0 && stateValue->width == set.width &&
          !stateValue->fixed && !isRegAllocTransformTempValue(init);
@@ -3036,7 +3165,7 @@ buildMemoryLoopCarryReliefCandidate(
   Value init = loopCarry->loop.getInits()[loopCarry->index];
   const wave::RegAllocTransformValue *stateValue =
       findMemoryReliefStateValue(resolvedValues, init);
-  if (!isMemoryLoopCarryReliefStateValue(set, stateValue, failureRecord, init))
+  if (!isMemoryLoopCarryReliefStateValue(set, stateValue, init))
     return std::optional<typename Traits::Candidate>();
   std::optional<waveamdmachine::RegType> type =
       getMemoryLoopCarryReliefRegType(set, init);
@@ -4601,7 +4730,7 @@ private:
   reusableOperandCoversResult(const wave::RegAllocTransformAliasSet &set,
                               const wave::RegAllocTransformAliasSet &sourceSet,
                               const wave::RegAllocTransformValue &sourceValue) {
-    return sourceSet.end == set.start &&
+    return valueRangeEndsAt(sourceValue, set.start) &&
            sourceValue.offset + set.width <= sourceSet.width;
   }
 
@@ -4674,8 +4803,7 @@ private:
     if (!set)
       return true;
     return llvm::any_of(set->members, [&](unsigned valueId) {
-      const wave::RegAllocTransformValue &value = values[valueId];
-      return value.start <= position && position <= value.end;
+      return valueLiveAtPosition(values[valueId], position);
     });
   }
 
@@ -4695,8 +4823,7 @@ private:
       const wave::RegAllocTransformValue &lhsValue = values[lhsValueId];
       for (unsigned rhsValueId : rhsSet->members) {
         const wave::RegAllocTransformValue &rhsValue = values[rhsValueId];
-        if (liveRangesOverlap(lhsValue.start, lhsValue.end, rhsValue.start,
-                              rhsValue.end))
+        if (valueRangesOverlap(lhsValue, rhsValue))
           return true;
       }
     }
@@ -4706,8 +4833,7 @@ private:
   bool setOverlapsRange(const wave::RegAllocTransformAliasSet &set,
                         unsigned start, unsigned end) {
     return llvm::any_of(set.members, [&](unsigned valueId) {
-      const wave::RegAllocTransformValue &value = values[valueId];
-      return liveRangesOverlap(value.start, value.end, start, end);
+      return valueOverlapsRange(values[valueId], start, end);
     });
   }
 

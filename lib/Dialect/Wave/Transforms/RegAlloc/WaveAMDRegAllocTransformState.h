@@ -26,11 +26,17 @@ enum class RegAllocTransformLoopDecision { Done, Restart, Stalled };
 
 enum class RegAllocTransformValueKind { BlockArgument, OpResult };
 
+struct RegAllocTransformLiveRange {
+  unsigned start = 0;
+  unsigned end = 0;
+};
+
 std::optional<waveamdmachine::RegType>
 getRegAllocTransformTrackedRegType(Value value);
 
 struct RegAllocTransformValue {
   SmallVector<int64_t> path;
+  SmallVector<RegAllocTransformLiveRange, 2> ranges;
   waveamdmachine::RegClass regClass;
   RegAllocTransformValueKind kind = RegAllocTransformValueKind::OpResult;
   std::optional<unsigned> fixed;

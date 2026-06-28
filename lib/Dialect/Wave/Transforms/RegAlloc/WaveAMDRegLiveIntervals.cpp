@@ -487,13 +487,6 @@ private:
     return success();
   }
 
-  void extendCarriesToLoopEnd(waveamdmachine::UniformLoopOp loop,
-                              unsigned endPos) {
-    // Carry intervals cover the loop op, not just the body.
-    for (Value init : loop.getInits())
-      extendInterval(init, endPos);
-  }
-
   void extendExternalLoopUses(waveamdmachine::UniformLoopOp loop,
                               unsigned endPos) {
     loop.getBody().walk([&](Operation *op) {
@@ -515,7 +508,6 @@ private:
     if (failed(coalesceLoopBackEdgeCarries(loop)))
       return failure();
     unsigned loopEnd = cursor - 1;
-    extendCarriesToLoopEnd(loop, loopEnd);
     extendExternalLoopUses(loop, loopEnd);
     return success();
   }

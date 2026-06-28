@@ -93,15 +93,18 @@ module attributes {transform.with_named_sequence} {
       return
     }
 
-    // SCAN-LABEL: func.func @loop_carry_no_hole_reuse(
+    // CHECK-LABEL: func.func @loop_carry_hole_reuse(
+    // CHECK-SAME: waveamdmachine.regalloc_transform_state =
+    // CHECK-SAME: ranges = [{end = 1 : i64, start = 0 : i64}], set = 0 : i64, start = 0 : i64
+    // SCAN-LABEL: func.func @loop_carry_hole_reuse(
     // SCAN-SAME: [[INIT:%[^:]+]]: !waveamdmachine.reg<sgpr, 1, 0>
     // SCAN-SAME: waveamdmachine.regalloc_assignments
     // SCAN-SAME: stage = "linear-scan-success"
     // SCAN: waveamdmachine.uniform_loop
     // SCAN-SAME: carries([[INIT]] : !waveamdmachine.reg<sgpr, 1, 0>)
     // SCAN: ^bb0([[IV:%[^:]+]]: !waveamdmachine.reg<sgpr, 1, 0>):
-    // SCAN: waveamdmachine.s_mov_b32_value {{.*}} : (!waveamdmachine.imm) -> !waveamdmachine.reg<sgpr, 1, 1>
-    func.func @loop_carry_no_hole_reuse(
+    // SCAN: waveamdmachine.s_mov_b32_value {{.*}} : (!waveamdmachine.imm) -> !waveamdmachine.reg<sgpr, 1, 0>
+    func.func @loop_carry_hole_reuse(
         %init: !waveamdmachine.reg<sgpr, 1>,
         %cond: !waveamdmachine.reg<scc, 1>) {
       %zero = waveamdmachine.imm 0 : !waveamdmachine.imm

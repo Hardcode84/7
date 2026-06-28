@@ -95,6 +95,48 @@ parseI64ArrayAttr(DictionaryAttr dict, StringRef name, Operation *diagOp) {
   return values;
 }
 
+static FailureOr<RegAllocTransformLiveRange> parseLiveRange(Attribute attr,
+                                                            Operation *diagOp) {
+  DictionaryAttr dict = dyn_cast<DictionaryAttr>(attr);
+  if (!dict)
+    return diagOp->emitError("regalloc state range is not a dictionary");
+  FailureOr<unsigned> start =
+      getRegAllocTransformUnsignedAttr(dict, "start", diagOp);
+  FailureOr<unsigned> end =
+      getRegAllocTransformUnsignedAttr(dict, "end", diagOp);
+  if (failed(start) || failed(end))
+    return failure();
+  if (*end < *start)
+    return diagOp->emitError("regalloc state range end precedes start");
+  return RegAllocTransformLiveRange{*start, *end};
+}
+
+static FailureOr<SmallVector<RegAllocTransformLiveRange, 2>>
+parseLiveRanges(DictionaryAttr dict, unsigned start, unsigned end,
+                Operation *diagOp) {
+  ArrayAttr rangeAttrs = dict.getAs<ArrayAttr>("ranges");
+  if (!rangeAttrs)
+    return SmallVector<RegAllocTransformLiveRange, 2>{
+        RegAllocTransformLiveRange{start, end}};
+  if (rangeAttrs.empty())
+    return diagOp->emitError("regalloc state value has empty ranges");
+
+  SmallVector<RegAllocTransformLiveRange, 2> ranges;
+  ranges.reserve(rangeAttrs.size());
+  for (Attribute attr : rangeAttrs) {
+    FailureOr<RegAllocTransformLiveRange> range = parseLiveRange(attr, diagOp);
+    if (failed(range))
+      return failure();
+    if (!ranges.empty() && range->start <= ranges.back().end)
+      return diagOp->emitError(
+          "regalloc state value ranges must be ordered and disjoint");
+    ranges.push_back(*range);
+  }
+  if (ranges.front().start != start || ranges.back().end != end)
+    return diagOp->emitError("regalloc state value range envelope mismatch");
+  return ranges;
+}
+
 static FailureOr<RegAllocTransformValueKind> parseValueKind(DictionaryAttr dict,
                                                             Operation *diagOp) {
   StringAttr attr = dict.getAs<StringAttr>("kind");
@@ -166,9 +208,14 @@ static FailureOr<RegAllocTransformValue> parseValue(DictionaryAttr dict,
     return failure();
   if (path->empty())
     return diagOp->emitError("regalloc state value has empty path");
+  FailureOr<SmallVector<RegAllocTransformLiveRange, 2>> ranges =
+      parseLiveRanges(dict, unsignedAttrs->start, unsignedAttrs->end, diagOp);
+  if (failed(ranges))
+    return failure();
 
   RegAllocTransformValue value;
   value.path = std::move(*path);
+  value.ranges = std::move(*ranges);
   value.regClass = *regClass;
   value.kind = *kind;
   value.id = unsignedAttrs->id;

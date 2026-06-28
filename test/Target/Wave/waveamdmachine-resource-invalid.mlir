@@ -66,6 +66,36 @@ func.func @duplicate_fixed_loop_carry_slots() {
 
 // -----
 
+func.func @loop_carry_hole_reuse_ok() {
+  %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+  %one = waveamdmachine.imm 1 : !waveamdmachine.imm
+  %init = waveamdmachine.s_mov_b32_value %zero
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<sgpr, 1, 5>
+  %cond = waveamdmachine.s_cmp_lt_i32 %init, %init
+      : (!waveamdmachine.reg<sgpr, 1, 5>, !waveamdmachine.reg<sgpr, 1, 5>)
+        -> !waveamdmachine.reg<scc, 1>
+  %result = waveamdmachine.uniform_loop if %cond : !waveamdmachine.reg<scc, 1>
+      carries(%init : !waveamdmachine.reg<sgpr, 1, 5>) {
+  ^bb0(%iv: !waveamdmachine.reg<sgpr, 1, 5>):
+    %early:2 = waveamdmachine.s_add_i32 %iv, %one
+        : (!waveamdmachine.reg<sgpr, 1, 5>, !waveamdmachine.imm)
+          -> (!waveamdmachine.reg<sgpr, 1, 6>, !waveamdmachine.reg<scc, 1>)
+    %tmp = waveamdmachine.s_mov_b32_value %zero
+        : (!waveamdmachine.imm) -> !waveamdmachine.reg<sgpr, 1, 5>
+    %tmp_use:2 = waveamdmachine.s_add_i32 %tmp, %one
+        : (!waveamdmachine.reg<sgpr, 1, 5>, !waveamdmachine.imm)
+          -> (!waveamdmachine.reg<sgpr, 1, 7>, !waveamdmachine.reg<scc, 1>)
+    %next:2 = waveamdmachine.s_add_i32 %early#0, %one
+        : (!waveamdmachine.reg<sgpr, 1, 6>, !waveamdmachine.imm)
+          -> (!waveamdmachine.reg<sgpr, 1, 5>, !waveamdmachine.reg<scc, 1>)
+    waveamdmachine.continue_if %cond : !waveamdmachine.reg<scc, 1>
+        carries(%next#0 : !waveamdmachine.reg<sgpr, 1, 5>)
+  } -> !waveamdmachine.reg<sgpr, 1, 5>
+  return
+}
+
+// -----
+
 // expected-error @below {{waveamd-resource-info found interfering VGPR register live ranges}}
 func.func @interfering_vgprs() {
   %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
