@@ -28,31 +28,34 @@ def normalize_asm(text: str) -> str:
     return "\n".join(lines) + "\n"
 
 
-def generate_asm(build_dir: Path, generated_out: Path) -> str:
+def generate_asm(build_dir: Path, generated_out: Path, emit_mlir: Path | None) -> str:
+    cmd = [
+        sys.executable,
+        str(CALIBRATOR),
+        "--chip=gfx950",
+        f"--build-dir={build_dir}",
+        "--example=tensilelite-subtile",
+        "--m=4096",
+        "--n=4096",
+        "--k=8192",
+        "--bm=4",
+        "--bn=2",
+        "--wave-m-tiles=4",
+        "--wave-n-tiles=8",
+        "--wave-k-tiles=2",
+        "--target-waves=2",
+        "--input-type=mxfp4",
+        "--output-type=f16",
+        "--matrix-intrinsic=mfma_gfx950",
+        "--scale-input=tensilelite",
+        "--variants=baseline",
+        "--skip-hw",
+        f"--emit-asm={generated_out}",
+    ]
+    if emit_mlir is not None:
+        cmd.append(f"--emit-mlir={emit_mlir}")
     proc = subprocess.run(
-        [
-            sys.executable,
-            str(CALIBRATOR),
-            "--chip=gfx950",
-            f"--build-dir={build_dir}",
-            "--example=tensilelite-subtile",
-            "--m=4096",
-            "--n=4096",
-            "--k=8192",
-            "--bm=4",
-            "--bn=2",
-            "--wave-m-tiles=4",
-            "--wave-n-tiles=8",
-            "--wave-k-tiles=2",
-            "--target-waves=2",
-            "--input-type=mxfp4",
-            "--output-type=f16",
-            "--matrix-intrinsic=mfma_gfx950",
-            "--scale-input=tensilelite",
-            "--variants=baseline",
-            "--skip-hw",
-            f"--emit-asm={generated_out}",
-        ],
+        cmd,
         capture_output=True,
         text=True,
         check=False,
@@ -60,6 +63,8 @@ def generate_asm(build_dir: Path, generated_out: Path) -> str:
     if proc.returncode == 0:
         if not generated_out.exists():
             raise SystemExit(f"calibrator did not write {generated_out}")
+        if emit_mlir is not None and not emit_mlir.exists():
+            raise SystemExit(f"calibrator did not write {emit_mlir}")
         return generated_out.read_text(encoding="utf-8")
     if proc.stdout:
         sys.stdout.write(proc.stdout)
@@ -90,11 +95,12 @@ def print_diff(
 def check_asm(
     build_dir: Path,
     generated_out: Path | None = None,
+    emit_mlir: Path | None = None,
     max_diff_lines: int = 200,
 ) -> None:
     with tempfile.TemporaryDirectory() as td:
         out = generated_out or Path(td) / f"{NAME}.s"
-        generated = normalize_asm(generate_asm(build_dir, out))
+        generated = normalize_asm(generate_asm(build_dir, out, emit_mlir))
         golden = normalize_asm(GOLDEN.read_text(encoding="utf-8"))
 
         if generated == golden:
@@ -117,10 +123,11 @@ def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--build-dir", type=Path, default=REPO_ROOT / "build")
     parser.add_argument("--generated-out", type=Path)
+    parser.add_argument("--emit-mlir", type=Path)
     parser.add_argument("--max-diff-lines", type=int, default=200)
     args = parser.parse_args(argv)
 
-    check_asm(args.build_dir, args.generated_out, args.max_diff_lines)
+    check_asm(args.build_dir, args.generated_out, args.emit_mlir, args.max_diff_lines)
     return 0
 
 

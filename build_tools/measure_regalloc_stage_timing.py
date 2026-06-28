@@ -47,9 +47,10 @@ class TimingTool:
 @dataclass(frozen=True)
 class PerfGoldenInput:
     name: str
-    source: Path
+    script: Path
+    source: Path | None
     golden: Path
-    isolate_kernel: Callable[[Path], Path]
+    isolate_kernel: Callable[[Path], Path] | None
     normalize_asm: Callable[[str], str]
 
 
@@ -70,18 +71,19 @@ def rel(path: Path) -> str:
 
 def load_perf_golden(path: Path) -> PerfGoldenInput:
     data: dict[str, Any] = runpy.run_path(str(path))
-    missing = [
-        name
-        for name in ["NAME", "SOURCE", "GOLDEN", "isolate_kernel", "normalize_asm"]
-        if name not in data
-    ]
+    missing = [name for name in ["NAME", "GOLDEN", "normalize_asm"] if name not in data]
     if missing:
         raise SystemExit(f"{rel(path)}: missing {', '.join(missing)}")
+    source = data.get("SOURCE")
+    isolate_kernel = data.get("isolate_kernel")
+    if (source is None) != (isolate_kernel is None):
+        raise SystemExit(f"{rel(path)}: SOURCE and isolate_kernel must appear together")
     return PerfGoldenInput(
         name=str(data["NAME"]),
-        source=Path(data["SOURCE"]),
+        script=path,
+        source=Path(source) if source is not None else None,
         golden=Path(data["GOLDEN"]),
-        isolate_kernel=data["isolate_kernel"],
+        isolate_kernel=isolate_kernel,
         normalize_asm=data["normalize_asm"],
     )
 
@@ -136,6 +138,40 @@ def parse_timing(text: str, timing_path: Path) -> dict[str, float]:
     return timings
 
 
+def prepare_source(
+    perf_golden: PerfGoldenInput, build_dir: Path, output_dir: Path
+) -> Path:
+    if perf_golden.source is not None and perf_golden.isolate_kernel is not None:
+        return perf_golden.isolate_kernel(output_dir)
+
+    source = output_dir / f"{perf_golden.name}.mlir"
+    asm = output_dir / f"{perf_golden.name}.bootstrap.s"
+    stdout_path = output_dir / f"{perf_golden.name}.emit.stdout.txt"
+    stderr_path = output_dir / f"{perf_golden.name}.emit.stderr.txt"
+    proc = subprocess.run(
+        [
+            sys.executable,
+            str(perf_golden.script),
+            f"--build-dir={build_dir}",
+            f"--generated-out={asm}",
+            f"--emit-mlir={source}",
+            "--max-diff-lines=0",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    stdout_path.write_text(proc.stdout, encoding="utf-8")
+    stderr_path.write_text(proc.stderr, encoding="utf-8")
+    if proc.returncode != 0:
+        raise SystemExit(
+            f"{rel(perf_golden.script)}: --emit-mlir failed; see {stderr_path}"
+        )
+    if not source.exists():
+        raise SystemExit(f"{rel(perf_golden.script)}: did not write {source}")
+    return source
+
+
 def run_translate(
     tool: TimingTool,
     source: Path,
@@ -173,6 +209,7 @@ def run_translate(
 
 def measure(
     perf_golden: PerfGoldenInput,
+    source: Path,
     tools: list[TimingTool],
     build_dir: Path,
     runs: int,
@@ -183,7 +220,6 @@ def measure(
     pipeline_dir = build_dir / "share/wave-mlir/pipelines"
     if not pipeline_dir.exists():
         raise SystemExit(f"pipeline dir missing: {rel(pipeline_dir)}")
-    source = perf_golden.isolate_kernel(output_dir)
     golden = perf_golden.normalize_asm(perf_golden.golden.read_text(encoding="utf-8"))
     samples: list[TimingSample] = []
 
@@ -296,7 +332,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         "--perf-golden-test",
         type=Path,
         default=DEFAULT_PERF_GOLDEN,
-        help="PerfGolden helper providing SOURCE/GOLDEN/isolate_kernel",
+        help="PerfGolden helper; generated helpers must support --emit-mlir",
     )
     parser.add_argument("--build-dir", type=Path, default=REPO_ROOT / "build")
     parser.add_argument(
@@ -340,8 +376,10 @@ def run(args: argparse.Namespace) -> int:
     succeeded = False
 
     try:
+        source = prepare_source(perf_golden, build_dir, output_dir)
         samples = measure(
             perf_golden,
+            source,
             tools,
             build_dir,
             args.runs,
@@ -352,7 +390,7 @@ def run(args: argparse.Namespace) -> int:
         if args.samples_csv:
             write_samples_csv(samples, args.samples_csv)
         print(f"perf_golden={perf_golden.name}")
-        print(f"source={rel(perf_golden.source)}")
+        print(f"source={rel(source)}")
         print(f"golden={rel(perf_golden.golden)}")
         if args.keep_temps or args.output_dir is not None:
             print(f"output_dir={output_dir}")

@@ -46,7 +46,9 @@ def isolate_kernel(tmp: Path) -> Path:
     return source
 
 
-def generate_asm(build_dir: Path, generated_out: Path, tmp: Path) -> str:
+def generate_asm(
+    build_dir: Path, generated_out: Path, tmp: Path, emit_mlir: Path | None
+) -> str:
     wave_translate = build_dir / "bin/wave-translate"
     if not wave_translate.exists():
         raise SystemExit(f"required tool missing: {wave_translate}")
@@ -57,6 +59,9 @@ def generate_asm(build_dir: Path, generated_out: Path, tmp: Path) -> str:
     env = os.environ.copy()
     env["WAVE_PIPELINES_DIR"] = str(pipeline_dir)
     source = isolate_kernel(tmp)
+    if emit_mlir is not None:
+        emit_mlir.parent.mkdir(parents=True, exist_ok=True)
+        emit_mlir.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
     proc = subprocess.run(
         [str(wave_translate), "--wave-to-amdgpu-asm", str(source)],
         capture_output=True,
@@ -96,12 +101,13 @@ def print_diff(
 def check_asm(
     build_dir: Path,
     generated_out: Path | None = None,
+    emit_mlir: Path | None = None,
     max_diff_lines: int = 200,
 ) -> None:
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
         out = generated_out or tmp / f"{NAME}.s"
-        generated = normalize_asm(generate_asm(build_dir, out, tmp))
+        generated = normalize_asm(generate_asm(build_dir, out, tmp, emit_mlir))
         golden = normalize_asm(GOLDEN.read_text(encoding="utf-8"))
 
         if generated == golden:
@@ -124,10 +130,11 @@ def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--build-dir", type=Path, default=REPO_ROOT / "build")
     parser.add_argument("--generated-out", type=Path)
+    parser.add_argument("--emit-mlir", type=Path)
     parser.add_argument("--max-diff-lines", type=int, default=200)
     args = parser.parse_args(argv)
 
-    check_asm(args.build_dir, args.generated_out, args.max_diff_lines)
+    check_asm(args.build_dir, args.generated_out, args.emit_mlir, args.max_diff_lines)
     return 0
 
 

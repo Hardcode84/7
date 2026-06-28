@@ -1006,6 +1006,7 @@ def add_tool_args(ap: argparse.ArgumentParser) -> None:
     ap.add_argument("--skip-hw", action="store_true")
     ap.add_argument("--no-check", action="store_true")
     ap.add_argument("--emit-asm", type=Path)
+    ap.add_argument("--emit-mlir", type=Path)
     ap.add_argument("--keep-tmp", action="store_true")
     ap.add_argument(
         "--build-dir",
@@ -1142,6 +1143,9 @@ def main() -> int:
     try:
         source = tmp / "matmul_kernel.mlir"
         source.write_text(generate_kernel_module(args, chip))
+        if args.emit_mlir is not None:
+            args.emit_mlir.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(source, args.emit_mlir)
         runner = None if args.skip_hw else compile_runner(args, tmp)
         print(
             f"chip: {chip}\n"
