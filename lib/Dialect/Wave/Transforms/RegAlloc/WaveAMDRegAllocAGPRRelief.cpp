@@ -443,20 +443,36 @@ static bool isBetterAGPRReliefScore(AGPRReliefScore lhs, AGPRReliefScore rhs) {
   return lhs.end > rhs.end;
 }
 
+static FailureOr<SmallVector<ResolvedRegAllocValue>>
+getResolvedAGPRReliefSetValues(func::FuncOp func,
+                               const wave::RegAllocTransformAliasSet &set,
+                               ArrayRef<ResolvedRegAllocValue> resolvedValues) {
+  SmallVector<ResolvedRegAllocValue> setValues;
+  setValues.reserve(set.members.size());
+  for (unsigned valueId : set.members) {
+    if (valueId >= resolvedValues.size() ||
+        resolvedValues[valueId].second->id != valueId)
+      return func.emitError("regalloc state member value id is invalid");
+    setValues.push_back(resolvedValues[valueId]);
+  }
+  return setValues;
+}
+
 static FailureOr<std::optional<AGPRReliefCandidate>>
 buildAGPRReliefCandidate(func::FuncOp func, unsigned setId,
                          const RegAllocTransformFailure &failureRecord,
                          ArrayRef<wave::RegAllocTransformAliasSet> sets,
-                         ArrayRef<wave::RegAllocTransformValue> values) {
+                         ArrayRef<wave::RegAllocTransformValue> values,
+                         ArrayRef<ResolvedRegAllocValue> resolvedValues) {
   const wave::RegAllocTransformAliasSet *set =
       findRegAllocTransformSet(sets, setId);
   if (!set)
     return std::optional<AGPRReliefCandidate>();
-  FailureOr<SmallVector<ResolvedRegAllocValue>> resolvedValues =
-      resolveSetValues(func, *set, values);
-  if (failed(resolvedValues))
+  FailureOr<SmallVector<ResolvedRegAllocValue>> setValues =
+      getResolvedAGPRReliefSetValues(func, *set, resolvedValues);
+  if (failed(setValues))
     return failure();
-  if (!isAGPRReliefEligibleSet(*set, values, *resolvedValues,
+  if (!isAGPRReliefEligibleSet(*set, values, *setValues,
                                failureRecord.position))
     return std::optional<AGPRReliefCandidate>();
   unsigned agprFootprint = 0;
@@ -471,7 +487,7 @@ buildAGPRReliefCandidate(func::FuncOp func, unsigned setId,
 
   AGPRReliefCandidate candidate;
   candidate.set = set;
-  candidate.values = std::move(*resolvedValues);
+  candidate.values = std::move(*setValues);
   candidate.score = getAGPRReliefScore(*set, values, candidate.values,
                                        failureRecord.position);
   return std::optional<AGPRReliefCandidate>(std::move(candidate));
@@ -481,11 +497,13 @@ static FailureOr<std::optional<AGPRReliefCandidate>>
 selectAGPRReliefCandidate(func::FuncOp func,
                           const RegAllocTransformFailure &failureRecord,
                           ArrayRef<wave::RegAllocTransformAliasSet> sets,
-                          ArrayRef<wave::RegAllocTransformValue> values) {
+                          ArrayRef<wave::RegAllocTransformValue> values,
+                          ArrayRef<ResolvedRegAllocValue> resolvedValues) {
   std::optional<AGPRReliefCandidate> best;
   for (unsigned setId : collectVGPRReliefCandidateIds(failureRecord)) {
     FailureOr<std::optional<AGPRReliefCandidate>> candidate =
-        buildAGPRReliefCandidate(func, setId, failureRecord, sets, values);
+        buildAGPRReliefCandidate(func, setId, failureRecord, sets, values,
+                                 resolvedValues);
     if (failed(candidate))
       return failure();
     if (!*candidate)
@@ -646,7 +664,12 @@ selectAGPRReliefCandidateFromFunc(
                                             func.getOperation());
   if (failed(sets))
     return failure();
-  return selectAGPRReliefCandidate(func, failureRecord, *sets, *values);
+  FailureOr<SmallVector<ResolvedRegAllocValue>> resolvedValues =
+      resolveRegAllocStateValues(func, *values);
+  if (failed(resolvedValues))
+    return failure();
+  return selectAGPRReliefCandidate(func, failureRecord, *sets, *values,
+                                   *resolvedValues);
 }
 
 static FailureOr<bool> shouldSkipAGPRRelief(func::FuncOp func) {
