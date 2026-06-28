@@ -98,6 +98,23 @@ func.func @bad_gfx9_vmul_immediates()
 
 // -----
 
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
+
+func.func @bad_gfx9_vmul_literal_result_alias(
+    %value: !waveamdmachine.reg<vgpr, 1, 0>)
+    -> !waveamdmachine.reg<vgpr, 1, 0> {
+  %literal = waveamdmachine.imm 384 : !waveamdmachine.imm
+  // expected-error @below {{v_mul_lo_u32 cannot materialize immediate into aliased result}}
+  %out = waveamdmachine.v_mul_lo_u32 %literal, %value
+      : (!waveamdmachine.imm, !waveamdmachine.reg<vgpr, 1, 0>)
+        -> !waveamdmachine.reg<vgpr, 1, 0>
+  return %out : !waveamdmachine.reg<vgpr, 1, 0>
+}
+
+}
+
+// -----
+
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
 func.func @bad_gfx11_unique_literals(%lane: !waveamdmachine.reg<vgpr, 1, 0>)

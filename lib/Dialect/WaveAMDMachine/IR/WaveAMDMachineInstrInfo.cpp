@@ -92,6 +92,20 @@ mlir::waveamdmachine::getConstantBusLimit(const llvm::AMDGPU::IsaVersion &isa) {
   return isa.Major >= 10 ? 2 : 1;
 }
 
+static bool isGfx8Or9(const llvm::AMDGPU::IsaVersion &isa) {
+  return isa.Major == 8 || isa.Major == 9;
+}
+
+static bool hasAnyMachineImm(Value lhs, Value rhs) {
+  return mlir::waveamdmachine::isMachineImm(lhs) ||
+         mlir::waveamdmachine::isMachineImm(rhs);
+}
+
+static bool hasTwoMachineImms(Value lhs, Value rhs) {
+  return mlir::waveamdmachine::isMachineImm(lhs) &&
+         mlir::waveamdmachine::isMachineImm(rhs);
+}
+
 bool mlir::waveamdmachine::sameConstantBusUse(
     Value lhs, Value rhs, SamePhysicalRegFn samePhysicalReg) {
   if (isSGPRValue(lhs) && isSGPRValue(rhs))
@@ -208,12 +222,13 @@ LogicalResult mlir::waveamdmachine::requireVMulU32OperandLegality(
     StringRef targetChip, SamePhysicalRegFn samePhysicalReg) {
   Value lhs = op->getOperand(0);
   Value rhs = op->getOperand(1);
-  if ((isa.Major == 8 || isa.Major == 9) && isMachineImm(lhs) &&
-      isMachineImm(rhs))
+  if (isGfx8Or9(isa) && hasTwoMachineImms(lhs, rhs))
     return op->emitError(mnemonic) << " cannot materialize two immediates";
-  if ((isa.Major == 8 || isa.Major == 9) &&
-      (isMachineImm(lhs) || isMachineImm(rhs))) {
+  if (isGfx8Or9(isa) && hasAnyMachineImm(lhs, rhs)) {
     Value regValue = isMachineImm(lhs) ? rhs : lhs;
+    if (samePhysicalReg(op->getResult(0), regValue))
+      return op->emitError(mnemonic)
+             << " cannot materialize immediate into aliased result";
     return requireConstantBus(op, mnemonic, {op->getResult(0), regValue}, isa,
                               targetChip, samePhysicalReg);
   }

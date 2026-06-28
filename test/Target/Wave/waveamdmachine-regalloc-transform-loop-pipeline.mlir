@@ -1,6 +1,6 @@
 // RUN: wave-opt %s --pass-pipeline='builtin.module(transform-preload-library{transform-library-paths=%wave_pipelines},transform-interpreter{entry-point=waveamd_regalloc_transform_loop})' | FileCheck %s
 
-module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
   // CHECK-LABEL: func.func private @regalloc_transform_loop_decl
   // CHECK-NOT: waveamdmachine.regalloc_transform_state
   func.func private @regalloc_transform_loop_decl(!waveamdmachine.reg<vgpr, 1>)
@@ -147,6 +147,34 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
         : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.imm)
           -> !waveamdmachine.reg<vgpr, 1>
     return %sum : !waveamdmachine.reg<vgpr, 1>
+  }
+
+  // CHECK-LABEL: func.func @regalloc_transform_loop_rejects_vmul_literal_input_reuse
+  // CHECK-SAME: waveamdmachine.regalloc_assignments
+  // CHECK-SAME: stage = "linear-scan-success"
+  // CHECK: [[ZERO:%.*]] = waveamdmachine.imm 0
+  // CHECK: [[LITERAL:%.*]] = waveamdmachine.imm 384
+  // CHECK: [[SEED:%.*]] = waveamdmachine.v_mov_b32_tuple [[ZERO]]
+  // CHECK-SAME: -> !waveamdmachine.reg<vgpr, 1, 0>
+  // CHECK-NEXT: [[SUM:%.*]] = waveamdmachine.v_add_u32 [[SEED]], [[ZERO]]
+  // CHECK-SAME: -> !waveamdmachine.reg<vgpr, 1, 0>
+  // CHECK-NEXT: [[MUL:%.*]] = waveamdmachine.v_mul_lo_u32 [[LITERAL]], [[SUM]]
+  // CHECK-SAME: -> !waveamdmachine.reg<vgpr, 1, 1>
+  // CHECK: return [[MUL]]
+  func.func @regalloc_transform_loop_rejects_vmul_literal_input_reuse()
+      -> !waveamdmachine.reg<vgpr, 1>
+      attributes {waveamdmachine.vgpr_count_max = 2 : i64} {
+    %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+    %literal = waveamdmachine.imm 384 : !waveamdmachine.imm
+    %seed = waveamdmachine.v_mov_b32_tuple %zero {registers = 1 : i64}
+        : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
+    %sum = waveamdmachine.v_add_u32 %seed, %zero
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.imm)
+          -> !waveamdmachine.reg<vgpr, 1>
+    %mul = waveamdmachine.v_mul_lo_u32 %literal, %sum
+        : (!waveamdmachine.imm, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+    return %mul : !waveamdmachine.reg<vgpr, 1>
   }
 
   // CHECK-LABEL: func.func @regalloc_transform_loop_reuses_killed_scc_input

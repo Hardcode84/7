@@ -8,6 +8,7 @@
 
 #include "WaveAMDRegAllocTransformUtils.h"
 
+#include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineTarget.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
 #include "llvm/ADT/DenseSet.h"
@@ -119,12 +120,40 @@ static bool canReuseKilledMFMAAccumulatorForResult(Operation *op,
          &operand == &mma.getAccMutable();
 }
 
+static bool isGfx8Or9Target(Operation *op) {
+  ModuleOp mod = waveamdmachine::findAMDGPUTargetModule(op);
+  if (!mod)
+    return false;
+  StringAttr targetAttr =
+      mod->getAttrOfType<StringAttr>("waveamdmachine.target");
+  if (!targetAttr)
+    return false;
+  std::optional<waveamdmachine::AMDGPUTarget> target =
+      waveamdmachine::parseAMDGPUTargetAttr(targetAttr.getValue());
+  if (!target)
+    return false;
+  llvm::AMDGPU::IsaVersion isa = llvm::AMDGPU::getIsaVersion(target->chip);
+  return isa.Major == 8 || isa.Major == 9;
+}
+
+static bool hasVMulU32MachineImm(Operation *op) {
+  if (!isGfx8Or9Target(op))
+    return false;
+  if (!isa<waveamdmachine::VMulLoU32Op, waveamdmachine::VMulHiU32Op>(op))
+    return false;
+  return llvm::any_of(op->getOperands(), [](Value operand) {
+    return operand.getDefiningOp<waveamdmachine::ImmOp>();
+  });
+}
+
 static bool isGenericKilledOperandReuseRejected(Operation *op) {
   if (op->hasTrait<waveTraits::NoMachineInst>())
     return true;
   if (isa<waveamdmachine::MMAOpInterface>(op))
     return true;
   if (op->hasTrait<waveTraits::MFMAOp>())
+    return true;
+  if (hasVMulU32MachineImm(op))
     return true;
   return op->hasTrait<waveTraits::WritesExecOp>();
 }
