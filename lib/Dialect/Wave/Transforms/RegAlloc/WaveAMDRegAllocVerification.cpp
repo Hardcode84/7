@@ -8,6 +8,7 @@
 
 #include "mlir/Dialect/Wave/Transforms/WaveAMDRegAllocVerification.h"
 
+#include "WaveAMDRegAllocTransformUtils.h"
 #include "WaveAMDRegLiveIntervals.h"
 #include "WaveAMDRegisterLimits.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -205,6 +206,50 @@ static bool physicalRangesOverlap(const PhysicalLiveRange &lhs,
 static bool physicalRangesOverlap(const FixedCarryRange &lhs,
                                   const FixedCarryRange &rhs) {
   return lhs.physStart < rhs.physEnd && rhs.physStart < lhs.physEnd;
+}
+
+static bool haveSamePhysicalRange(const PhysicalLiveRange &lhs,
+                                  const PhysicalLiveRange &rhs) {
+  return lhs.physStart == rhs.physStart && lhs.physEnd == rhs.physEnd;
+}
+
+static bool overlapsReservedRange(const PhysicalLiveRange &range,
+                                  const ReservedLiveRange &reservedRange) {
+  return liveRangesOverlap(range, reservedRange) &&
+         physicalRangesOverlap(range, reservedRange);
+}
+
+static Operation *
+getResultDefAtStart(const PhysicalLiveRange &range,
+                    const DenseMap<Operation *, unsigned> &positions) {
+  Operation *op = range.value.getDefiningOp();
+  if (!op)
+    return nullptr;
+  auto it = positions.find(op);
+  if (it == positions.end() || it->second != range.start)
+    return nullptr;
+  if (!llvm::is_contained(op->getResults(), range.value))
+    return nullptr;
+  return op;
+}
+
+static bool hasReusableOperand(Operation *op, Value value) {
+  for (OpOperand &operand : op->getOpOperands())
+    if (operand.get() == value)
+      return wave::regalloc_detail::canReuseKilledOperandForResult(op, operand);
+  return false;
+}
+
+static bool
+isDestructiveOperandBoundary(const PhysicalLiveRange &sourceRange,
+                             const PhysicalLiveRange &resultRange,
+                             const DenseMap<Operation *, unsigned> &positions) {
+  if (!haveSamePhysicalRange(sourceRange, resultRange))
+    return false;
+  if (sourceRange.end != resultRange.start)
+    return false;
+  Operation *op = getResultDefAtStart(resultRange, positions);
+  return op && hasReusableOperand(op, sourceRange.value);
 }
 
 static std::optional<FixedCarryRange>
@@ -484,20 +529,47 @@ static void collectReservedRanges(
   }
 }
 
+static bool needsReservedRangeCheck(const PhysicalLiveRange &range,
+                                    unsigned reserved,
+                                    const wave::WaveAMDKernelEntryRegs &regs) {
+  if (reserved == 0 || range.physStart >= reserved)
+    return false;
+  return !isAllowedReservedValue(range.value, regs);
+}
+
+static bool
+hasDestructiveReservedBoundary(const PhysicalLiveRange &range,
+                               const ReservedLiveRange &reservedRange,
+                               ArrayRef<PhysicalLiveRange> ranges,
+                               const DenseMap<Operation *, unsigned> &positions,
+                               const wave::WaveAMDKernelEntryRegs &regs) {
+  return llvm::any_of(ranges, [&](const PhysicalLiveRange &source) {
+    if (!isAllowedReservedValue(source.value, regs))
+      return false;
+    if (!overlapsReservedRange(source, reservedRange))
+      return false;
+    return isDestructiveOperandBoundary(source, range, positions);
+  });
+}
+
 static LogicalResult verifyNotInReservedRange(
     func::FuncOp func, const PhysicalLiveRange &range, StringRef consumer,
-    StringRef regClass, ArrayRef<ReservedLiveRange> reservedRanges,
-    unsigned reserved, const wave::WaveAMDKernelEntryRegs &regs) {
-  if (reserved == 0 || range.physStart >= reserved)
+    StringRef regClass, ArrayRef<PhysicalLiveRange> ranges,
+    ArrayRef<ReservedLiveRange> reservedRanges,
+    const DenseMap<Operation *, unsigned> &positions, unsigned reserved,
+    const wave::WaveAMDKernelEntryRegs &regs) {
+  if (!needsReservedRangeCheck(range, reserved, regs))
     return success();
-  if (isAllowedReservedValue(range.value, regs))
-    return success();
-  for (const ReservedLiveRange &reservedRange : reservedRanges)
-    if (liveRangesOverlap(range, reservedRange) &&
-        physicalRangesOverlap(range, reservedRange))
-      return diagOpForValue(range.value, func)->emitError()
-             << consumer << " found " << regClass
-             << " value allocated in reserved kernel ABI registers";
+  for (const ReservedLiveRange &reservedRange : reservedRanges) {
+    if (!overlapsReservedRange(range, reservedRange))
+      continue;
+    if (hasDestructiveReservedBoundary(range, reservedRange, ranges, positions,
+                                       regs))
+      continue;
+    return diagOpForValue(range.value, func)->emitError()
+           << consumer << " found " << regClass
+           << " value allocated in reserved kernel ABI registers";
+  }
   return success();
 }
 
@@ -511,65 +583,35 @@ verifyReservedRanges(func::FuncOp func, ArrayRef<PhysicalLiveRange> ranges,
   collectReservedRanges(ranges, orderedOps, positions, regClass, reserved, regs,
                         reservedRanges);
   for (const PhysicalLiveRange &range : ranges)
-    if (failed(verifyNotInReservedRange(func, range, consumer, regClass,
-                                        reservedRanges, reserved, regs)))
+    if (failed(verifyNotInReservedRange(func, range, consumer, regClass, ranges,
+                                        reservedRanges, positions, reserved,
+                                        regs)))
       return failure();
   return success();
-}
-
-static bool intervalValueEndsAt(const wave::WaveAMDLiveInterval &interval,
-                                Value value, unsigned position) {
-  for (auto [member, end] : llvm::zip(interval.values, interval.valueEnds))
-    if (member == value)
-      return end == position;
-  return false;
-}
-
-static bool
-isMFMAAccResultBoundary(const PhysicalLiveRange &accStorageRange,
-                        const PhysicalLiveRange &resultRange,
-                        ArrayRef<wave::WaveAMDLiveInterval> intervals,
-                        const DenseMap<Operation *, unsigned> &positions) {
-  if (accStorageRange.physStart != resultRange.physStart ||
-      accStorageRange.physEnd != resultRange.physEnd)
-    return false;
-  Operation *op = resultRange.value.getDefiningOp();
-  auto mfma = dyn_cast_if_present<waveamdmachine::MMAOpInterface>(op);
-  if (!mfma || !op->hasTrait<OpTrait::waveamdmachine::MFMAOp>())
-    return false;
-  auto it = positions.find(op);
-  if (it == positions.end() || it->second != resultRange.start ||
-      mfma.getAccResult() != resultRange.value ||
-      accStorageRange.intervalIndex >= intervals.size())
-    return false;
-  return intervalValueEndsAt(intervals[accStorageRange.intervalIndex],
-                             mfma.getAcc(), resultRange.start);
 }
 
 static bool
 canSharePhysicalRange(const PhysicalLiveRange &lhs,
                       const PhysicalLiveRange &rhs,
-                      ArrayRef<wave::WaveAMDLiveInterval> intervals,
                       const DenseMap<Operation *, unsigned> &positions) {
   if (lhs.intervalIndex == rhs.intervalIndex)
     return true;
-  if (lhs.physStart != rhs.physStart || lhs.physEnd != rhs.physEnd)
+  if (!haveSamePhysicalRange(lhs, rhs))
     return false;
-  if (isMFMAAccResultBoundary(lhs, rhs, intervals, positions) ||
-      isMFMAAccResultBoundary(rhs, lhs, intervals, positions))
+  if (isDestructiveOperandBoundary(lhs, rhs, positions) ||
+      isDestructiveOperandBoundary(rhs, lhs, positions))
     return true;
   return areEquivalentFixedHardwareReads(lhs.value, rhs.value);
 }
 
 static LogicalResult
 verifyNoRangeInterference(func::FuncOp func, ArrayRef<PhysicalLiveRange> ranges,
-                          ArrayRef<wave::WaveAMDLiveInterval> intervals,
                           const DenseMap<Operation *, unsigned> &positions,
                           StringRef consumer, StringRef regClass) {
   for (auto [index, lhs] : llvm::enumerate(ranges)) {
     for (const PhysicalLiveRange &rhs :
          ArrayRef(ranges).drop_front(index + 1)) {
-      if (canSharePhysicalRange(lhs, rhs, intervals, positions))
+      if (canSharePhysicalRange(lhs, rhs, positions))
         continue;
       if (!liveRangesOverlap(lhs, rhs) || !physicalRangesOverlap(lhs, rhs))
         continue;
@@ -610,8 +652,7 @@ verifyNoInterference(func::FuncOp func,
   if (failed(verifyReservedRanges(func, ranges, orderedOps, positions, consumer,
                                   regClass, reserved, regs)))
     return failure();
-  return verifyNoRangeInterference(func, ranges, intervals, positions, consumer,
-                                   regClass);
+  return verifyNoRangeInterference(func, ranges, positions, consumer, regClass);
 }
 
 } // namespace

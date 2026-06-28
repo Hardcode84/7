@@ -9,6 +9,7 @@
 #include "WaveAMDRegAllocTransformUtils.h"
 
 #include "mlir/IR/BuiltinAttributes.h"
+#include "mlir/Interfaces/SideEffectInterfaces.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/Support/MathExtras.h"
@@ -17,6 +18,8 @@
 using namespace mlir;
 
 namespace mlir::wave::regalloc_detail {
+
+namespace waveTraits = ::mlir::OpTrait::waveamdmachine;
 
 bool liveRangesOverlap(unsigned lhsStart, unsigned lhsEnd, unsigned rhsStart,
                        unsigned rhsEnd) {
@@ -86,6 +89,64 @@ int64_t getTotalPressure(RegClassPressure pressure) {
 unsigned getCombinedVGPRFamilyPressure(unsigned agprFootprint,
                                        unsigned vgprFootprint) {
   return agprFootprint + llvm::alignTo(vgprFootprint, 4);
+}
+
+static bool hasNoMemoryEffects(Operation *op) {
+  MemoryEffectOpInterface effects = dyn_cast<MemoryEffectOpInterface>(op);
+  if (!effects)
+    return false;
+  SmallVector<MemoryEffects::EffectInstance> instances;
+  effects.getEffects(instances);
+  return instances.empty();
+}
+
+static bool hasSingleTrackedGPRResult(Operation *op) {
+  bool found = false;
+  for (Value result : op->getResults()) {
+    if (!wave::getRegAllocTransformTrackedRegType(result))
+      continue;
+    if (found)
+      return false;
+    found = true;
+  }
+  return found;
+}
+
+static bool canReuseKilledMFMAAccumulatorForResult(Operation *op,
+                                                   OpOperand &operand) {
+  auto mma = dyn_cast_if_present<waveamdmachine::MMAOpInterface>(op);
+  return mma && op->hasTrait<waveTraits::MFMAOp>() &&
+         &operand == &mma.getAccMutable();
+}
+
+static bool isGenericKilledOperandReuseRejected(Operation *op) {
+  if (op->hasTrait<waveTraits::NoMachineInst>())
+    return true;
+  if (isa<waveamdmachine::MMAOpInterface>(op))
+    return true;
+  if (op->hasTrait<waveTraits::MFMAOp>())
+    return true;
+  return op->hasTrait<waveTraits::WritesExecOp>();
+}
+
+static bool isGenericKilledOperandReuseAccepted(Operation *op) {
+  if (op->hasTrait<waveTraits::VALUOp>())
+    return true;
+  return op->hasTrait<waveTraits::SALUOp>();
+}
+
+bool canReuseKilledOperandForResult(Operation *op, OpOperand &operand) {
+  if (!op || op->getNumRegions() != 0)
+    return false;
+  if (!hasSingleTrackedGPRResult(op))
+    return false;
+  if (!hasNoMemoryEffects(op))
+    return false;
+  if (canReuseKilledMFMAAccumulatorForResult(op, operand))
+    return true;
+  if (isGenericKilledOperandReuseRejected(op))
+    return false;
+  return isGenericKilledOperandReuseAccepted(op);
 }
 
 static Block *getBlockAt(Region &region, int64_t index) {

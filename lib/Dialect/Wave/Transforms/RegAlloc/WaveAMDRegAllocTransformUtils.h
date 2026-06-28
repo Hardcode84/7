@@ -120,6 +120,7 @@ bool isStateValueLiveAt(Value value, unsigned position,
 int64_t getRematReliefLoopCostScale(Operation *op);
 int64_t getParentLoopCostScale(Operation *op);
 int64_t getMemoryBridgeCostScale(Operation *anchor, bool beforeAnchor);
+bool canReuseKilledOperandForResult(Operation *op, OpOperand &operand);
 
 std::optional<unsigned> getUnsignedIntegerAttr(Operation *op, StringRef name);
 Attribute findAncestorAttr(Operation *op, StringRef name);

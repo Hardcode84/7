@@ -1,6 +1,7 @@
 // RUN: wave-opt %s --pass-pipeline='builtin.module(transform-interpreter{entry-point=build_alias_state})' | FileCheck %s
 // RUN: wave-opt %s --pass-pipeline='builtin.module(transform-interpreter{entry-point=build_alias_state_no_mfma_coalesce})' | FileCheck %s --check-prefix=NO-MFMA-COALESCE
 // RUN: wave-opt %s --pass-pipeline='builtin.module(transform-interpreter{entry-point=linear_scan})' | FileCheck %s --check-prefix=SCAN
+// RUN: wave-opt %s --pass-pipeline='builtin.module(transform-interpreter{entry-point=linear_scan_no_mfma_coalesce})' | FileCheck %s --check-prefix=SCAN-NO-MFMA-COALESCE
 
 module attributes {transform.with_named_sequence} {
   transform.named_sequence @match_func(
@@ -33,6 +34,18 @@ module attributes {transform.with_named_sequence} {
     %func = transform.collect_matching @match_func in %root
         : (!transform.any_op) -> !transform.any_op
     %r0 = wave.transform.regalloc_build_alias_state from %func
+        : (!transform.any_op) -> !transform.any_op
+    %r1 = wave.transform.regalloc_linear_scan from %r0
+        : (!transform.any_op) -> !transform.any_op
+    transform.yield
+  }
+
+  transform.named_sequence @linear_scan_no_mfma_coalesce(
+      %root: !transform.any_op {transform.readonly}) {
+    %func = transform.collect_matching @match_func in %root
+        : (!transform.any_op) -> !transform.any_op
+    %r0 = wave.transform.regalloc_build_alias_state from %func
+        {coalesce_mfma_acc_result = false}
         : (!transform.any_op) -> !transform.any_op
     %r1 = wave.transform.regalloc_linear_scan from %r0
         : (!transform.any_op) -> !transform.any_op
@@ -107,6 +120,7 @@ module attributes {transform.with_named_sequence} {
     // CHECK-LABEL: func.func @loop_carry_hole_reuse(
     // CHECK-SAME: waveamdmachine.regalloc_transform_state =
     // CHECK-SAME: ranges = [{end = 1 : i64, start = 0 : i64}], set = 0 : i64, start = 0 : i64
+    // CHECK-SAME: ranges = [{end = 6 : i64, start = 6 : i64}], set = 0 : i64, start = 6 : i64
     // SCAN-LABEL: func.func @loop_carry_hole_reuse(
     // SCAN-SAME: [[INIT:%[^:]+]]: !waveamdmachine.reg<sgpr, 1, 0>
     // SCAN-SAME: waveamdmachine.regalloc_assignments
@@ -147,6 +161,24 @@ module attributes {transform.with_named_sequence} {
     // NO-MFMA-COALESCE-SAME: waveamdmachine.regalloc_transform_state =
     // NO-MFMA-COALESCE-SAME: debug = {alias_edges = 0 : i64, alias_sets = 4 : i64, ops = 2 : i64, values = 4 : i64}
     func.func @mfma_acc_result_coalescing_flag(
+        %a: !waveamdmachine.reg<vgpr, 4>,
+        %b: !waveamdmachine.reg<vgpr, 4>,
+        %acc: !waveamdmachine.reg<vgpr, 4>)
+        -> !waveamdmachine.reg<vgpr, 4> {
+      %mfma = waveamdmachine.mfma_f32_16x16x32_f16 %a, %b, %acc
+          : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
+             !waveamdmachine.reg<vgpr, 4>) -> !waveamdmachine.reg<vgpr, 4>
+      return %mfma : !waveamdmachine.reg<vgpr, 4>
+    }
+
+    // SCAN-NO-MFMA-COALESCE-LABEL: func.func @mfma_destructive_reuse_without_alias(
+    // SCAN-NO-MFMA-COALESCE-SAME: [[A:%[^:]+]]: !waveamdmachine.reg<vgpr, 4, [[A_BASE:[0-9]+]]>, [[B:%[^:]+]]: !waveamdmachine.reg<vgpr, 4, [[B_BASE:[0-9]+]]>, [[ACC:%[^:]+]]: !waveamdmachine.reg<vgpr, 4, [[ACC_BASE:[0-9]+]]>
+    // SCAN-NO-MFMA-COALESCE-SAME: waveamdmachine.regalloc_assignments
+    // SCAN-NO-MFMA-COALESCE-SAME: stage = "linear-scan-success"
+    // SCAN-NO-MFMA-COALESCE: waveamdmachine.mfma_f32_16x16x32_f16
+    // SCAN-NO-MFMA-COALESCE-SAME: [[ACC]]
+    // SCAN-NO-MFMA-COALESCE-SAME: -> !waveamdmachine.reg<vgpr, 4, [[ACC_BASE]]>
+    func.func @mfma_destructive_reuse_without_alias(
         %a: !waveamdmachine.reg<vgpr, 4>,
         %b: !waveamdmachine.reg<vgpr, 4>,
         %acc: !waveamdmachine.reg<vgpr, 4>)

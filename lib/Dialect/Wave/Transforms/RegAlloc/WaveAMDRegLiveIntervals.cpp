@@ -435,7 +435,27 @@ private:
       if (failed(coalesce(init, body.getArgument(i), pos, result.intervals,
                           loop, *initSlot)))
         return failure();
-      if (failed(coalesce(init, loop.getResult(i), pos, result.intervals, loop,
+    }
+    return success();
+  }
+
+  LogicalResult coalesceLoopExitResults(waveamdmachine::UniformLoopOp loop,
+                                        unsigned pos) {
+    for (auto [i, init, resultValue] :
+         llvm::enumerate(loop.getInits(), loop.getResults())) {
+      auto rt = wave::getTrackedWaveAMDRegType(init);
+      if (!rt)
+        continue;
+      auto [bucket, table] = intervalsFor(*rt, result.intervals);
+      if (!table->contains(init))
+        continue;
+      (void)ensureInterval(resultValue, pos, result.intervals, loop,
+                           includeAllocated);
+      FailureOr<unsigned> initSlot =
+          getIntervalSlotOffset(init, (*bucket)[table->lookup(init)], loop);
+      if (failed(initSlot))
+        return failure();
+      if (failed(coalesce(init, resultValue, pos, result.intervals, loop,
                           *initSlot)))
         return failure();
     }
@@ -529,6 +549,8 @@ private:
     if (failed(coalesceLoopBackEdgeCarries(loop)))
       return failure();
     unsigned loopEnd = cursor - 1;
+    if (failed(coalesceLoopExitResults(loop, loopEnd)))
+      return failure();
     extendExternalLoopUses(loop, loopEnd);
     return success();
   }
@@ -730,11 +752,13 @@ private:
       unsigned pos = cursor++;
       result.positions[op] = pos;
       result.orderedOps.push_back(op);
-      for (Value value : op->getResults()) {
-        // failure() here means "not a tracked register", not error.
-        (void)ensureInterval(value, pos, result.intervals, op,
-                             includeAllocated);
-      }
+      bool deferResults = isa<waveamdmachine::UniformLoopOp>(op);
+      if (!deferResults)
+        for (Value value : op->getResults()) {
+          // failure() here means "not a tracked register", not error.
+          (void)ensureInterval(value, pos, result.intervals, op,
+                               includeAllocated);
+        }
       if (!tupleRenameHandlesOperandUses(op))
         for (Value operand : op->getOperands())
           extendInterval(operand, pos);

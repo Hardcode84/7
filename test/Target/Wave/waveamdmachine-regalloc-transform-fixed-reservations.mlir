@@ -62,7 +62,7 @@ module attributes {transform.with_named_sequence} {
     // CHECK-SAME: waveamdmachine.regalloc_assignments
     // CHECK-SAME: stage = "linear-scan-success"
     // CHECK: [[FIXED:%.*]] = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1, 0>
-    // CHECK: waveamdmachine.v_mov_b32_tuple [[FIXED]] {registers = 1 : i64} : (!waveamdmachine.reg<vgpr, 1, 0>) -> !waveamdmachine.reg<vgpr, 1, 1>
+    // CHECK: waveamdmachine.v_mov_b32_tuple [[FIXED]] {registers = 1 : i64} : (!waveamdmachine.reg<vgpr, 1, 0>) -> !waveamdmachine.reg<vgpr, 1, 0>
     // CHECK: [[FRESH:%.*]] = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1, 0>
     // CHECK: return [[FRESH]]
     func.func @nonfixed_reuses_expired_fixed()

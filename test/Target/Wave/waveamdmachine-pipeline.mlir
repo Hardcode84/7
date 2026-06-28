@@ -55,7 +55,7 @@ func.func @where_test(%limit: i32) -> i32 {
 // REGALLOC: waveamdmachine.v_add_u32{{.*}} -> !waveamdmachine.reg<vgpr, 1, 1>
 // RESOURCE-LABEL: func.func @kernel_test
 // RESOURCE-SAME: waveamdmachine.sgpr_count = 6 : i64
-// RESOURCE-SAME: waveamdmachine.vgpr_count = 3 : i64
+// RESOURCE-SAME: waveamdmachine.vgpr_count = 2 : i64
 // METADATA: module attributes {{{.*}}waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"{{.*}}}
 // METADATA-LABEL: func.func @kernel_test
 // METADATA-SAME: waveamdmachine.metadata

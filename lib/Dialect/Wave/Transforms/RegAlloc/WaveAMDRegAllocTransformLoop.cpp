@@ -17,7 +17,6 @@
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/IRMapping.h"
-#include "mlir/Interfaces/SideEffectInterfaces.h"
 #include "llvm/ADT/BitVector.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
@@ -31,8 +30,6 @@
 using namespace mlir;
 
 namespace {
-
-namespace waveTraits = ::mlir::OpTrait::waveamdmachine;
 
 struct RegAllocAliasValue {
   SmallVector<int64_t> path;
@@ -91,64 +88,6 @@ static bool areEquivalentFixedHardwareReads(Value lhs, Value rhs) {
   if (lhs.getType() != rhs.getType())
     return false;
   return lhs.getDefiningOp()->getName() == rhs.getDefiningOp()->getName();
-}
-
-static bool hasNoMemoryEffects(Operation *op) {
-  MemoryEffectOpInterface effects = dyn_cast<MemoryEffectOpInterface>(op);
-  if (!effects)
-    return false;
-  SmallVector<MemoryEffects::EffectInstance> instances;
-  effects.getEffects(instances);
-  return instances.empty();
-}
-
-static bool hasSingleTrackedGPRResult(Operation *op) {
-  bool found = false;
-  for (Value result : op->getResults()) {
-    if (!wave::getRegAllocTransformTrackedRegType(result))
-      continue;
-    if (found)
-      return false;
-    found = true;
-  }
-  return found;
-}
-
-static bool canReuseKilledMFMAAccumulatorForResult(Operation *op,
-                                                   OpOperand &operand) {
-  auto mma = dyn_cast_if_present<waveamdmachine::MMAOpInterface>(op);
-  return mma && op->hasTrait<waveTraits::MFMAOp>() &&
-         &operand == &mma.getAccMutable();
-}
-
-static bool isGenericKilledOperandReuseRejected(Operation *op) {
-  if (op->hasTrait<waveTraits::NoMachineInst>())
-    return true;
-  if (isa<waveamdmachine::MMAOpInterface>(op))
-    return true;
-  if (op->hasTrait<waveTraits::MFMAOp>())
-    return true;
-  return op->hasTrait<waveTraits::WritesExecOp>();
-}
-
-static bool isGenericKilledOperandReuseAccepted(Operation *op) {
-  if (op->hasTrait<waveTraits::VALUOp>())
-    return true;
-  return op->hasTrait<waveTraits::SALUOp>();
-}
-
-static bool canReuseKilledOperandForResult(Operation *op, OpOperand &operand) {
-  if (!op || op->getNumRegions() != 0)
-    return false;
-  if (!hasSingleTrackedGPRResult(op))
-    return false;
-  if (!hasNoMemoryEffects(op))
-    return false;
-  if (canReuseKilledMFMAAccumulatorForResult(op, operand))
-    return true;
-  if (isGenericKilledOperandReuseRejected(op))
-    return false;
-  return isGenericKilledOperandReuseAccepted(op);
 }
 
 static waveamdmachine::RegType
@@ -309,8 +248,11 @@ private:
           nestedPath.push_back(regionIndex);
           collectRegion(nested, nestedPath);
         }
+        unsigned resultStart = record.position;
+        if (isa<waveamdmachine::UniformLoopOp>(op))
+          resultStart = ops.back().position;
         for (OpResult result : op.getResults())
-          registerValue(result, record.position, opPath,
+          registerValue(result, resultStart, opPath,
                         /*blockArgument=*/false, result.getResultNumber(),
                         record.id);
       }
@@ -772,6 +714,26 @@ liveRangeListsOverlap(ArrayRef<wave::RegAllocTransformLiveRange> lhs,
   return false;
 }
 
+static bool
+liveRangeListsOverlapAfter(ArrayRef<wave::RegAllocTransformLiveRange> lhs,
+                           ArrayRef<wave::RegAllocTransformLiveRange> rhs,
+                           unsigned position) {
+  unsigned lhsIndex = 0;
+  unsigned rhsIndex = 0;
+  while (lhsIndex < lhs.size() && rhsIndex < rhs.size()) {
+    wave::RegAllocTransformLiveRange lhsRange = lhs[lhsIndex];
+    wave::RegAllocTransformLiveRange rhsRange = rhs[rhsIndex];
+    if (liveRangesOverlap(lhsRange, rhsRange) &&
+        std::min(lhsRange.end, rhsRange.end) > position)
+      return true;
+    if (lhsRange.end < rhsRange.start)
+      ++lhsIndex;
+    else
+      ++rhsIndex;
+  }
+  return false;
+}
+
 static bool valueRangeEndsAt(const wave::RegAllocTransformValue &value,
                              unsigned position) {
   return llvm::any_of(value.ranges,
@@ -1195,6 +1157,11 @@ private:
     }
   };
 
+  struct ReusableInputBase {
+    unsigned base = 0;
+    unsigned sourceSet = 0;
+  };
+
   LogicalResult parseState() {
     state = func->getAttrOfType<DictionaryAttr>(
         wave::getRegAllocTransformStateAttrName());
@@ -1381,8 +1348,10 @@ private:
     if (set.fixedBase)
       return allocateFixedSet(set, budget);
     std::optional<unsigned> base = findFreeBase(set, budget.limit);
-    if (!base)
-      base = findReusableInputBase(set, budget.limit);
+    std::optional<ReusableInputBase> reusableBase =
+        findReusableInputBase(set, budget.limit);
+    if (reusableBase && (!base || reusableBase->base < *base))
+      base = reusableBase->base;
     if (!base) {
       recordPressureFailure(set, budget, getFixedReservationOverlaps(set));
       return success();
@@ -1399,8 +1368,13 @@ private:
 
   LogicalResult allocateFixedSet(const wave::RegAllocTransformAliasSet &set,
                                  wave::RegAllocTransformBudget budget) {
-    if (*set.fixedBase + set.width > budget.limit ||
-        conflictsWithActive(set, *set.fixedBase)) {
+    bool conflict = conflictsWithActive(set, *set.fixedBase);
+    if (conflict) {
+      std::optional<ReusableInputBase> reusableBase =
+          findReusableInputBase(set, budget.limit);
+      conflict = !reusableBase || reusableBase->base != *set.fixedBase;
+    }
+    if (*set.fixedBase + set.width > budget.limit || conflict) {
       recordPressureFailure(set, budget);
       return success();
     }
@@ -1443,7 +1417,7 @@ private:
     return active.lookup(setId, assignments);
   }
 
-  std::optional<unsigned>
+  std::optional<ReusableInputBase>
   findReusableInputBase(const wave::RegAllocTransformAliasSet &set,
                         unsigned limit) {
     const wave::RegAllocTransformValue *resultValue = getSingleResultValue(set);
@@ -1452,18 +1426,18 @@ private:
       return std::nullopt;
     Operation *def = payloadValues[resultValue->id].getDefiningOp();
 
-    std::optional<unsigned> bestBase;
+    std::optional<ReusableInputBase> bestBase;
     for (OpOperand &operand : def->getOpOperands()) {
-      if (!canReuseKilledOperandForResult(def, operand))
+      if (!wave::regalloc_detail::canReuseKilledOperandForResult(def, operand))
         continue;
       auto it = valueLookup.find(operand.get());
       if (it == valueLookup.end())
         continue;
-      std::optional<unsigned> base =
+      std::optional<ReusableInputBase> base =
           getReusableOperandBase(set, *it->second, limit);
       if (!base)
         continue;
-      if (!bestBase || *base < *bestBase)
+      if (!bestBase || base->base < bestBase->base)
         bestBase = *base;
     }
     return bestBase;
@@ -1481,7 +1455,25 @@ private:
                               const wave::RegAllocTransformAliasSet &sourceSet,
                               const wave::RegAllocTransformValue &sourceValue) {
     return valueRangeEndsAt(sourceValue, set.start) &&
-           sourceValue.offset + set.width <= sourceSet.width;
+           sourceValue.offset + set.width <= sourceSet.width &&
+           sourceSubrangeDiesAtBoundary(set, sourceSet, sourceValue);
+  }
+
+  bool sourceSubrangeDiesAtBoundary(
+      const wave::RegAllocTransformAliasSet &set,
+      const wave::RegAllocTransformAliasSet &sourceSet,
+      const wave::RegAllocTransformValue &sourceValue) {
+    int64_t begin = sourceValue.offset;
+    int64_t end = begin + static_cast<int64_t>(set.width);
+    for (unsigned memberId : sourceSet.members) {
+      const wave::RegAllocTransformValue &member = values[memberId];
+      int64_t memberEnd = member.offset + static_cast<int64_t>(member.width);
+      if (end <= member.offset || memberEnd <= begin)
+        continue;
+      if (liveRangeListsOverlapAfter(member.ranges, set.ranges, set.start))
+        return false;
+    }
+    return true;
   }
 
   bool reusableBaseIsAvailable(
@@ -1498,7 +1490,7 @@ private:
     return !conflictsWithFixedReservationIgnoring(set, base, sourceAssignment);
   }
 
-  std::optional<unsigned>
+  std::optional<ReusableInputBase>
   getReusableOperandBase(const wave::RegAllocTransformAliasSet &set,
                          const wave::RegAllocTransformValue &sourceValue,
                          unsigned limit) {
@@ -1519,7 +1511,7 @@ private:
     if (!reusableBaseIsAvailable(set, *sourceSet, *sourceAssignment, base,
                                  limit))
       return std::nullopt;
-    return base;
+    return ReusableInputBase{base, sourceSet->id};
   }
 
   bool conflictsWithActive(const wave::RegAllocTransformAliasSet &set,
