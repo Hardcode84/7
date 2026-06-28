@@ -111,6 +111,11 @@ static FailureOr<RegAllocTransformLiveRange> parseLiveRange(Attribute attr,
   return RegAllocTransformLiveRange{*start, *end};
 }
 
+static bool lessLiveRange(RegAllocTransformLiveRange lhs,
+                          RegAllocTransformLiveRange rhs) {
+  return std::tie(lhs.start, lhs.end) < std::tie(rhs.start, rhs.end);
+}
+
 static FailureOr<SmallVector<RegAllocTransformLiveRange, 2>>
 parseLiveRanges(DictionaryAttr dict, unsigned start, unsigned end,
                 Operation *diagOp) {
@@ -127,11 +132,12 @@ parseLiveRanges(DictionaryAttr dict, unsigned start, unsigned end,
     FailureOr<RegAllocTransformLiveRange> range = parseLiveRange(attr, diagOp);
     if (failed(range))
       return failure();
-    if (!ranges.empty() && range->start <= ranges.back().end)
-      return diagOp->emitError(
-          "regalloc state value ranges must be ordered and disjoint");
     ranges.push_back(*range);
   }
+  llvm::stable_sort(ranges, lessLiveRange);
+  for (auto [index, range] : llvm::enumerate(ArrayRef(ranges).drop_front()))
+    if (range.start <= ranges[index].end)
+      return diagOp->emitError("regalloc state value ranges must be disjoint");
   if (ranges.front().start != start || ranges.back().end != end)
     return diagOp->emitError("regalloc state value range envelope mismatch");
   return ranges;

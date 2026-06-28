@@ -296,15 +296,24 @@ private:
     if (it == valueIds.end())
       return;
     RegAllocAliasValue &record = values[it->second];
+    record.start = std::min(record.start, position);
     record.end = std::max(record.end, position);
-    if (record.ranges.empty() || position < record.ranges.back().start) {
+    if (record.ranges.empty()) {
       record.ranges.push_back({position, position});
-      llvm::stable_sort(record.ranges, [](auto lhs, auto rhs) {
-        return std::tie(lhs.start, lhs.end) < std::tie(rhs.start, rhs.end);
-      });
       return;
     }
-    record.ranges.back().end = std::max(record.ranges.back().end, position);
+    if (position >= record.ranges.back().start) {
+      record.ranges.back().end = std::max(record.ranges.back().end, position);
+      return;
+    }
+    auto pos = llvm::lower_bound(
+        record.ranges, position,
+        [](wave::RegAllocTransformLiveRange range, unsigned position) {
+          return range.end < position;
+        });
+    if (pos != record.ranges.end() && pos->start <= position)
+      return;
+    record.ranges.insert(pos, {position, position});
   }
 
   bool isValueDefinedInside(Operation *scope, Value value) {

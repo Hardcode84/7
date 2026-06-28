@@ -77,27 +77,37 @@ bool valueRangeEndsAt(const wave::RegAllocTransformValue &value,
                       });
 }
 
+static void insertAliasSetLiveRange(
+    SmallVectorImpl<wave::RegAllocTransformLiveRange> &ranges,
+    wave::RegAllocTransformLiveRange range) {
+  auto it =
+      llvm::lower_bound(ranges, range.start,
+                        [](wave::RegAllocTransformLiveRange existing,
+                           unsigned start) { return existing.end < start; });
+  if (it == ranges.end() || range.end < it->start) {
+    ranges.insert(it, range);
+    return;
+  }
+  it->start = std::min(it->start, range.start);
+  it->end = std::max(it->end, range.end);
+  auto next = it;
+  ++next;
+  while (next != ranges.end() && next->start <= it->end) {
+    it->end = std::max(it->end, next->end);
+    next = ranges.erase(next);
+  }
+}
+
 SmallVector<wave::RegAllocTransformLiveRange, 4>
 collectAliasSetLiveRanges(const wave::RegAllocTransformAliasSet &set,
                           ArrayRef<wave::RegAllocTransformValue> values) {
   SmallVector<wave::RegAllocTransformLiveRange, 4> ranges;
   for (unsigned valueId : set.members) {
     const wave::RegAllocTransformValue &value = values[valueId];
-    ranges.append(value.ranges.begin(), value.ranges.end());
+    for (wave::RegAllocTransformLiveRange range : value.ranges)
+      insertAliasSetLiveRange(ranges, range);
   }
-  llvm::stable_sort(ranges, [](auto lhs, auto rhs) {
-    return std::tie(lhs.start, lhs.end) < std::tie(rhs.start, rhs.end);
-  });
-
-  SmallVector<wave::RegAllocTransformLiveRange, 4> coalesced;
-  for (wave::RegAllocTransformLiveRange range : ranges) {
-    if (coalesced.empty() || range.start > coalesced.back().end) {
-      coalesced.push_back(range);
-      continue;
-    }
-    coalesced.back().end = std::max(coalesced.back().end, range.end);
-  }
-  return coalesced;
+  return ranges;
 }
 
 bool isVGPRFamilyClass(waveamdmachine::RegClass regClass) {
