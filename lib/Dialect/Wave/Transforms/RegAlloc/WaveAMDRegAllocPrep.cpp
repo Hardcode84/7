@@ -364,27 +364,20 @@ static bool valueIsDefinedInside(Operation *root, Value value) {
   return false;
 }
 
-static bool hasUseAfter(BlockArgument arg, Operation *op,
-                        const DenseMap<Operation *, unsigned> &order) {
-  auto posIt = order.find(op);
-  if (posIt == order.end())
-    return true;
-  unsigned pos = posIt->second;
+static bool hasUseAfter(BlockArgument arg, Operation *op) {
   Block &body = *arg.getOwner();
   for (OpOperand &use : arg.getUses()) {
     Operation *user = topLevelBodyOp(body, use.getOwner());
     if (!user || isa<waveamdmachine::ContinueIfOp>(user))
       continue;
-    auto it = order.find(user);
-    if (it != order.end() && it->second > pos)
+    if (op->isBeforeInBlock(user))
       return true;
   }
   return false;
 }
 
 static bool needsBackedgeCopy(waveamdmachine::UniformLoopOp loop, unsigned i,
-                              Value carry,
-                              const DenseMap<Operation *, unsigned> &order) {
+                              Value carry) {
   Block &body = loop.getBody().front();
   Value init = loop.getInits()[i];
   BlockArgument arg = body.getArgument(i);
@@ -396,7 +389,7 @@ static bool needsBackedgeCopy(waveamdmachine::UniformLoopOp loop, unsigned i,
   Operation *top = topLevelBodyOp(body, def);
   if (!top)
     return true;
-  return hasUseAfter(arg, top, order);
+  return hasUseAfter(arg, top);
 }
 
 static LogicalResult materializeLoopBackedgeCopies(func::FuncOp func) {
@@ -406,17 +399,15 @@ static LogicalResult materializeLoopBackedgeCopies(func::FuncOp func) {
   for (waveamdmachine::UniformLoopOp loop : loops) {
     Block &body = loop.getBody().front();
     auto term = cast<waveamdmachine::ContinueIfOp>(body.getTerminator());
-    DenseMap<Operation *, unsigned> order;
-    unsigned index = 0;
-    for (Operation &op : body.without_terminator())
-      order[&op] = index++;
-    builder.setInsertionPoint(term);
+    SmallVector<std::pair<unsigned, Value>> copies;
     for (auto [i, carry] : llvm::enumerate(term.getCarries())) {
       if (!trackedRegType(carry))
         continue;
-      // Late defs can stay coalesced; early defs need tail copy.
-      if (!needsBackedgeCopy(loop, i, carry, order))
-        continue;
+      if (needsBackedgeCopy(loop, i, carry))
+        copies.push_back({i, carry});
+    }
+    builder.setInsertionPoint(term);
+    for (auto [i, carry] : copies) {
       FailureOr<Value> dup = duplicateRegValue(builder, term.getLoc(), carry);
       if (failed(dup))
         return failure();
