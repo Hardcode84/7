@@ -132,6 +132,9 @@ Same rule covers docstrings, commit bodies, and PR descriptions. Wit is welcome,
   `python build_tools/regenerate_perf_goldens.py --build-dir build`; it runs
   each helper with `--generated-out`, updates `test/PerfGolden/Inputs/`, then
   reruns the PerfGolden lit filter.
+- Measure regalloc stage timing for the default perf golden with
+  `python build_tools/measure_regalloc_stage_timing.py --runs 5 --warmups 1`.
+  For A/B, pass repeated `--tool label=/path/to/wave-translate` arguments.
 - ASM drift is a review stop, not a failure proof. Benchmark old and new
   assembly on the same hardware before updating a golden.
 - New generated golden file types need REUSE coverage. Python helpers must
