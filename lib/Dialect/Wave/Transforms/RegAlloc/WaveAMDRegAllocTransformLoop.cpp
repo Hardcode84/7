@@ -1149,6 +1149,8 @@ private:
     if (failed(parsedSets))
       return failure();
     sets = std::move(*parsedSets);
+    if (failed(buildSetIndex()))
+      return failure();
     if (failed(collectResolvedValues()))
       return failure();
     FailureOr<std::optional<wave::RegAllocTransformBudget>> familyBudget =
@@ -1164,6 +1166,17 @@ private:
     if (failed(collectEntryABIReservations()))
       return failure();
     collectImplicitABIReservations();
+    return success();
+  }
+
+  LogicalResult buildSetIndex() {
+    setIndexById.clear();
+    for (auto [index, set] : llvm::enumerate(sets)) {
+      auto inserted =
+          setIndexById.insert({set.id, static_cast<unsigned>(index)});
+      if (!inserted.second)
+        return func.emitError("regalloc state has duplicate alias set id");
+    }
     return success();
   }
 
@@ -1479,10 +1492,11 @@ private:
   }
 
   const wave::RegAllocTransformAliasSet *getSetById(unsigned setId) {
-    for (const wave::RegAllocTransformAliasSet &set : sets)
-      if (set.id == setId)
-        return &set;
-    return nullptr;
+    auto it = setIndexById.find(setId);
+    if (it == setIndexById.end())
+      return nullptr;
+    assert(it->second < sets.size() && "alias set index out of range");
+    return &sets[it->second];
   }
 
   bool setsHaveLiveOverlap(const wave::RegAllocTransformAliasSet &lhs,
@@ -1638,8 +1652,10 @@ private:
                      unsigned base) {
     wave::RegAllocTransformAssignment assigned{
         set.regClass, set.id, base, set.width, set.start, set.end};
+    unsigned assignmentIndex = assignments.size();
     assignments.push_back(assigned);
-    active.add(assignments.size() - 1, assignments);
+    assignmentIndexBySet[set.id] = assignmentIndex;
+    active.add(assignmentIndex, assignments);
   }
 
   unsigned getPressureAtFailure(
@@ -1729,15 +1745,11 @@ private:
   }
 
   FailureOr<SmallVector<PendingRegAllocAssignment>> buildPendingAssignments() {
-    DenseMap<unsigned, const wave::RegAllocTransformAssignment *> bySet;
-    for (const wave::RegAllocTransformAssignment &assignment : assignments)
-      bySet[assignment.set] = &assignment;
-
     SmallVector<PendingRegAllocAssignment> pendingAssignments;
     pendingAssignments.reserve(values.size());
     for (const wave::RegAllocTransformValue &value : values) {
       const wave::RegAllocTransformAssignment *assignment =
-          bySet.lookup(value.set);
+          getAssignmentBySet(value.set);
       if (!assignment)
         return func.emitError("regalloc assignment map is incomplete");
       Value payloadValue = payloadValues[value.id];
@@ -1747,6 +1759,15 @@ private:
                                 assignment->base + value.offset)});
     }
     return pendingAssignments;
+  }
+
+  const wave::RegAllocTransformAssignment *
+  getAssignmentBySet(unsigned setId) const {
+    auto it = assignmentIndexBySet.find(setId);
+    if (it == assignmentIndexBySet.end())
+      return nullptr;
+    assert(it->second < assignments.size() && "assignment index out of range");
+    return &assignments[it->second];
   }
 
   LogicalResult
@@ -1870,6 +1891,8 @@ private:
   ActiveAssignments active;
   SmallVector<wave::RegAllocTransformAssignment> assignments;
   DenseMap<Value, const wave::RegAllocTransformValue *> valueLookup;
+  DenseMap<unsigned, unsigned> setIndexById;
+  DenseMap<unsigned, unsigned> assignmentIndexBySet;
   DenseMap<unsigned, Value> fixedHardwareReadValues;
   std::optional<wave::RegAllocTransformBudget> vgprFamilyBudget;
   std::optional<RegAllocScanFailure> scanFailure;
