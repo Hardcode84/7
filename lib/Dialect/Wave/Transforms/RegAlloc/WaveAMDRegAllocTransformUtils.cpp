@@ -282,28 +282,80 @@ void collectRegAllocValues(Region &region, SmallVectorImpl<Value> &values) {
   }
 }
 
+static LogicalResult checkRegAllocStateValueKey(
+    const wave::RegAllocTransformValue &stateValue, ArrayRef<int64_t> path,
+    wave::RegAllocTransformValueKind kind, unsigned number, Operation *diagOp) {
+  if (stateValue.kind != kind || stateValue.number != number ||
+      !llvm::equal(stateValue.path, path))
+    return diagOp->emitError(
+        "regalloc state value identity no longer matches IR");
+  return success();
+}
+
+static LogicalResult appendResolvedRegAllocValue(
+    Value payloadValue, ArrayRef<int64_t> path,
+    wave::RegAllocTransformValueKind kind, unsigned number,
+    ArrayRef<wave::RegAllocTransformValue> values,
+    SmallVectorImpl<ResolvedRegAllocValue> &resolved, Operation *diagOp) {
+  if (!wave::getRegAllocTransformTrackedRegType(payloadValue))
+    return success();
+  if (resolved.size() >= values.size())
+    return diagOp->emitError("regalloc state value count no longer matches IR");
+
+  const wave::RegAllocTransformValue &stateValue = values[resolved.size()];
+  if (failed(
+          checkRegAllocStateValueKey(stateValue, path, kind, number, diagOp)) ||
+      failed(checkResolvedRegAllocValue(payloadValue, stateValue, diagOp)))
+    return failure();
+  resolved.push_back({payloadValue, &stateValue});
+  return success();
+}
+
+static LogicalResult
+collectResolvedRegAllocValues(Region &region, ArrayRef<int64_t> regionPath,
+                              ArrayRef<wave::RegAllocTransformValue> values,
+                              SmallVectorImpl<ResolvedRegAllocValue> &resolved,
+                              Operation *diagOp) {
+  for (auto [blockIndex, block] : llvm::enumerate(region)) {
+    SmallVector<int64_t> blockPath(regionPath);
+    blockPath.push_back(blockIndex);
+    for (BlockArgument arg : block.getArguments())
+      if (failed(appendResolvedRegAllocValue(
+              arg, blockPath, wave::RegAllocTransformValueKind::BlockArgument,
+              arg.getArgNumber(), values, resolved, diagOp)))
+        return failure();
+    for (auto [opIndex, op] : llvm::enumerate(block)) {
+      SmallVector<int64_t> opPath(blockPath);
+      opPath.push_back(opIndex);
+      for (auto [regionIndex, nested] : llvm::enumerate(op.getRegions())) {
+        SmallVector<int64_t> nestedPath(opPath);
+        nestedPath.push_back(regionIndex);
+        if (failed(collectResolvedRegAllocValues(nested, nestedPath, values,
+                                                 resolved, diagOp)))
+          return failure();
+      }
+      for (OpResult result : op.getResults())
+        if (failed(appendResolvedRegAllocValue(
+                result, opPath, wave::RegAllocTransformValueKind::OpResult,
+                result.getResultNumber(), values, resolved, diagOp)))
+          return failure();
+    }
+  }
+  return success();
+}
+
 FailureOr<SmallVector<ResolvedRegAllocValue>>
 resolveRegAllocStateValues(func::FuncOp func,
                            ArrayRef<wave::RegAllocTransformValue> values) {
-  SmallVector<Value> payloadValues;
-  collectRegAllocValues(func.getBody(), payloadValues);
-  if (payloadValues.size() != values.size())
-    return func.emitError("regalloc state value count no longer matches IR");
-
-  DenseSet<Value> unmatched(payloadValues.begin(), payloadValues.end());
   SmallVector<ResolvedRegAllocValue> resolvedValues;
   resolvedValues.reserve(values.size());
-  for (const wave::RegAllocTransformValue &value : values) {
-    FailureOr<Value> payloadValue = resolveRegAllocStateValue(func, value);
-    if (failed(payloadValue))
-      return failure();
-    auto unmatchedIt = unmatched.find(*payloadValue);
-    if (unmatchedIt == unmatched.end())
-      return failRegAllocStateIdentity<SmallVector<ResolvedRegAllocValue>>(
-          func.getOperation());
-    unmatched.erase(unmatchedIt);
-    resolvedValues.push_back({*payloadValue, &value});
-  }
+  SmallVector<int64_t> rootPath{0};
+  if (failed(collectResolvedRegAllocValues(func.getBody(), rootPath, values,
+                                           resolvedValues,
+                                           func.getOperation())))
+    return failure();
+  if (resolvedValues.size() != values.size())
+    return func.emitError("regalloc state value count no longer matches IR");
   return resolvedValues;
 }
 
