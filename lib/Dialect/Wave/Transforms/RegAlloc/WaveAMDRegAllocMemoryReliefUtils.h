@@ -689,6 +689,26 @@ selectMemoryReliefCandidateFromState(
       func, failureRecord, *setIndex, valueIndex, *values, context, planning);
 }
 
+static Operation *getMemoryReliefLoadInsertionPoint(Operation *user) {
+  Operation *insert = user;
+  for (Value operand : user->getOperands()) {
+    if (!isa<waveamdmachine::M0Type>(operand.getType()))
+      continue;
+    Operation *def = operand.getDefiningOp();
+    if (!def || def->getBlock() != user->getBlock() ||
+        !def->isBeforeInBlock(user))
+      continue;
+    if (insert == user || def->isBeforeInBlock(insert))
+      insert = def;
+  }
+  return insert;
+}
+
+static void setInsertionPointForMemoryReliefLoad(OpBuilder &builder,
+                                                 Operation *user) {
+  builder.setInsertionPoint(getMemoryReliefLoadInsertionPoint(user));
+}
+
 template <typename SlotT, typename LoadFn>
 static LogicalResult
 replaceMemoryReliefUses(OpBuilder &builder,
@@ -701,7 +721,7 @@ replaceMemoryReliefUses(OpBuilder &builder,
     if (isInternalPlannedTupleFromElementsUse(use, plannedValues))
       continue;
     Operation *user = use->getOwner();
-    builder.setInsertionPoint(user);
+    setInsertionPointForMemoryReliefLoad(builder, user);
     FailureOr<wave::regalloc::MemorySpillLoadResult> loaded =
         loadFn(user->getLoc(), slot.type, stored.token, slot.plan);
     if (failed(loaded))
@@ -844,7 +864,7 @@ private:
       if (!wave::regalloc::canRewriteExtraLoopInitUse(*use, loopUse, loop))
         return failure();
       Operation *user = use->getOwner();
-      builder.setInsertionPoint(user);
+      setInsertionPointForMemoryReliefLoad(builder, user);
       FailureOr<wave::regalloc::MemorySpillLoadResult> loaded =
           loadFn(user->getLoc(), slot.type, initToken, slot.plan);
       if (failed(loaded))

@@ -132,7 +132,9 @@ module attributes {transform.with_named_sequence} {
         : (!transform.any_op) -> !transform.any_op
     %r5 = transform.include @waveamd_regalloc_transform_loop failures(propagate) (%rcs)
         : (!transform.any_op) -> !transform.any_op
-    %r9 = transform.include @waveamd_backend_post_regalloc failures(propagate) (%r5)
+    %r6 = transform.apply_registered_pass "waveamd-preserve-hw-regs" to %r5
+        : (!transform.any_op) -> !transform.any_op
+    %r9 = transform.include @waveamd_backend_post_regalloc failures(propagate) (%r6)
         : (!transform.any_op) -> !transform.any_op
     transform.yield %r9 : !transform.any_op
   }

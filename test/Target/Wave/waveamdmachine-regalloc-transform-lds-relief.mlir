@@ -67,6 +67,53 @@ module attributes {transform.with_named_sequence} {
       return
     }
 
+    // CHECK-LABEL: func.func @lds_relief_reloads_before_m0_user_setup(
+    // CHECK-SAME: waveamdmachine.lds_spill_bytes = 256 : i64
+    // CHECK: [[BASE:%.*]], {{%.*}} = waveamdmachine.s_lshl_b32
+    // CHECK: [[DST:%.*]] = waveamdmachine.uninit : !waveamdmachine.reg<sgpr, 1>
+    // CHECK: [[SPILL:%.*]], [[SPILLTOK:%.*]] = waveamdmachine.global_load_b32
+    // CHECK: [[STORE_M0:%.*]] = waveamdmachine.s_mov_m0 [[BASE]]
+    // CHECK: [[STORE:%.*]] = waveamdmachine.ds_store_addtid_b32 [[STORE_M0]], [[SPILL]] after [[SPILLTOK]]
+    // CHECK: [[RELOAD_M0:%.*]] = waveamdmachine.s_mov_m0 [[BASE]]
+    // CHECK: [[RELOAD:%.*]], {{%.*}} = waveamdmachine.ds_load_addtid_b32 [[RELOAD_M0]] after [[STORE]]
+    // CHECK: [[DMA_M0:%.*]] = waveamdmachine.s_mov_m0 [[DST]]
+    // CHECK-NEXT: waveamdmachine.buffer_load_lds_b32 [[RELOAD]], {{%.*}}, {{%.*}}, [[DMA_M0]]
+    func.func @lds_relief_reloads_before_m0_user_setup()
+        attributes {wave.kernel, wave.workgroup_size = array<i32: 64, 1, 1>,
+                    waveamdmachine.vgpr_count_max = 3 : i64,
+                    waveamdmachine.agpr_count_max = 0 : i64} {
+      %base = waveamdmachine.uninit : !waveamdmachine.reg<sgpr, 2>
+      %desc = waveamdmachine.uninit : !waveamdmachine.reg<sgpr, 4>
+      %dst = waveamdmachine.uninit : !waveamdmachine.reg<sgpr, 1>
+      %off = waveamdmachine.v_workitem_id_x : !waveamdmachine.reg<vgpr, 1, 0>
+      %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+      %tok0 = waveamdmachine.token : !waveamdmachine.mem.token
+      %spill, %tok1 = waveamdmachine.global_load_b32 %off, %base after %tok0
+          : (!waveamdmachine.reg<vgpr, 1, 0>, !waveamdmachine.reg<sgpr, 2>,
+             !waveamdmachine.mem.token)
+            -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+      %a, %tok2 = waveamdmachine.global_load_b32 %off, %base after %tok1
+          : (!waveamdmachine.reg<vgpr, 1, 0>, !waveamdmachine.reg<sgpr, 2>,
+             !waveamdmachine.mem.token)
+            -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+      %b, %tok3 = waveamdmachine.global_load_b32 %off, %base after %tok2
+          : (!waveamdmachine.reg<vgpr, 1, 0>, !waveamdmachine.reg<sgpr, 2>,
+             !waveamdmachine.mem.token)
+            -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+      %sum = waveamdmachine.v_add_u32 %a, %b
+          : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+            -> !waveamdmachine.reg<vgpr, 1>
+      %m0 = waveamdmachine.s_mov_m0 %dst
+          : (!waveamdmachine.reg<sgpr, 1>) -> !waveamdmachine.m0
+      %dma = waveamdmachine.buffer_load_lds_b32 %spill, %desc, %zero, %m0
+          after %tok3
+          : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 4>,
+             !waveamdmachine.imm, !waveamdmachine.m0,
+             !waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+      waveamdmachine.s_endpgm
+      return
+    }
+
     // CHECK-LABEL: func.func @lds_relief_prefers_outside_loop_bridges(
     // CHECK-SAME: waveamdmachine.lds_spill_bytes = 256 : i64
     // CHECK: [[OFF:%.*]] = waveamdmachine.v_workitem_id_x

@@ -747,6 +747,8 @@ v9_beyond_hotloop:
 		ds_read_addtid_b32 v1 offset:4096
 		s_waitcnt lgkmcnt(0)
 		v_add_u32_e32 v6, s58, v1
+		s_mov_b32 m0, s42
+		s_nop 0
 		buffer_load_dwordx4 v6, s[24:27], 0 offen lds
 		s_mov_b32 m0, s14
 		s_nop 0
@@ -822,6 +824,8 @@ v9_beyond_hotloop:
 		ds_read_addtid_b32 v1 offset:4096
 		s_waitcnt lgkmcnt(0)
 		v_add_u32_e32 v6, s58, v1
+		s_mov_b32 m0, s44
+		s_nop 0
 		buffer_load_dwordx4 v6, s[24:27], 0 offen lds
 		s_add_i32 s58, s11, s55
 		v_mfma_f32_16x16x32_f16 v[96:99], v[248:251], v[208:211], v[96:99]
@@ -979,6 +983,8 @@ v9_beyond_hotloop:
 		ds_read_addtid_b32 v1 offset:2048
 		s_waitcnt lgkmcnt(0)
 		v_add_u32_e32 v6, s11, v1
+		s_mov_b32 m0, s45
+		s_nop 0
 		buffer_load_dwordx4 v6, s[20:23], 0 offen lds
 		s_mov_b32 m0, s46
 		s_add_i32 s11, s48, s56
@@ -987,6 +993,8 @@ v9_beyond_hotloop:
 		ds_read_addtid_b32 v1 offset:2048
 		s_waitcnt lgkmcnt(0)
 		v_add_u32_e32 v6, s11, v1
+		s_mov_b32 m0, s46
+		s_nop 0
 		buffer_load_dwordx4 v6, s[20:23], 0 offen lds
 		s_mov_b32 m0, s15
 		s_add_i32 s11, s49, s56
@@ -995,6 +1003,8 @@ v9_beyond_hotloop:
 		ds_read_addtid_b32 v1 offset:2048
 		s_waitcnt lgkmcnt(0)
 		v_add_u32_e32 v6, s11, v1
+		s_mov_b32 m0, s15
+		s_nop 0
 		buffer_load_dwordx4 v6, s[20:23], 0 offen lds
 		s_mov_b32 m0, s34
 		s_add_i32 s11, s4, s56
@@ -1003,6 +1013,8 @@ v9_beyond_hotloop:
 		ds_read_addtid_b32 v1 offset:2048
 		s_waitcnt lgkmcnt(0)
 		v_add_u32_e32 v6, s11, v1
+		s_mov_b32 m0, s34
+		s_nop 0
 		buffer_load_dwordx4 v6, s[20:23], 0 offen lds
 		s_mov_b32 m0, s5
 		s_add_i32 s11, s50, s57
@@ -1011,6 +1023,8 @@ v9_beyond_hotloop:
 		ds_read_addtid_b32 v1 offset:4096
 		s_waitcnt lgkmcnt(0)
 		v_add_u32_e32 v6, s11, v1
+		s_mov_b32 m0, s5
+		s_nop 0
 		buffer_load_dwordx4 v6, s[24:27], 0 offen lds
 		s_mov_b32 s11, 0
 		scratch_load_dword v248, off, s11 offset:48
@@ -1106,6 +1120,8 @@ v9_beyond_hotloop:
 		ds_read_addtid_b32 v1 offset:4096
 		s_waitcnt lgkmcnt(0)
 		v_add_u32_e32 v6, s11, v1
+		s_mov_b32 m0, s51
+		s_nop 0
 		buffer_load_dwordx4 v6, s[24:27], 0 offen lds
 		v_mfma_f32_16x16x32_f16 v[160:163], v[244:247], v[208:211], v[160:163]
 		v_mfma_f32_16x16x32_f16 v[164:167], v[196:199], v[212:215], v[164:167]
