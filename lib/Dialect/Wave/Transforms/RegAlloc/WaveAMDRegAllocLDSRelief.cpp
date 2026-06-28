@@ -72,11 +72,12 @@ getLDSReliefPlanningState(func::FuncOp func,
   state.committedBytes = getCommittedLDSSpillBytes(func);
   wave::regalloc::getExistingLDSBytes(func, state.fixedLDS, state.dynamicLDS,
                                       state.committedBytes);
+  state.ldsPlanning = wave::regalloc::getLDSSpillPlanningInfo(func, budgets);
   return state;
 }
 
 static std::optional<SmallVector<wave::regalloc::LDSSpillPlan, 4>>
-getLDSPlansForValue(func::FuncOp func, const LDSReliefPlanningState &planning,
+getLDSPlansForValue(const LDSReliefPlanningState &planning,
                     waveamdmachine::RegType type, unsigned extraReservedBytes) {
   if (type.getWidth() == 0)
     return std::nullopt;
@@ -86,7 +87,7 @@ getLDSPlansForValue(func::FuncOp func, const LDSReliefPlanningState &planning,
   for ([[maybe_unused]] unsigned index :
        llvm::seq<unsigned>(0, type.getWidth())) {
     wave::regalloc::LDSSpillPlan plan = wave::regalloc::planLDSSpillSlot(
-        func, planning.budgets, /*valueBytes=*/4, reserved, planning.fixedLDS,
+        planning.ldsPlanning, /*valueBytes=*/4, reserved, planning.fixedLDS,
         planning.dynamicLDS);
     if (plan.status != wave::regalloc::LDSSpillPlanStatus::Available)
       return std::nullopt;
@@ -151,7 +152,7 @@ struct LDSMemoryReliefTraits {
                                              const PlanningState &planning,
                                              waveamdmachine::RegType type,
                                              unsigned extraReservedBytes) {
-    return getLDSPlansForValue(func, planning, type, extraReservedBytes);
+    return getLDSPlansForValue(planning, type, extraReservedBytes);
   }
 
   static unsigned getSlotBytes(const Plan &plan) {

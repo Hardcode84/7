@@ -57,6 +57,7 @@ struct MemoryReliefValueIndex {
 
 struct LDSReliefPlanningState {
   wave::regalloc::RegisterBudgets budgets;
+  wave::regalloc::LDSSpillPlanningInfo ldsPlanning;
   unsigned committedBytes = 0;
   unsigned fixedLDS = 0;
   unsigned dynamicLDS = 0;

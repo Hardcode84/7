@@ -2173,6 +2173,16 @@ struct LDSSpillPlan {
   LDSSpillPlanStatus status = LDSSpillPlanStatus::NotKernel;
 };
 
+struct LDSSpillPlanningInfo {
+  uint64_t limitBytes = 0;
+  unsigned localMemorySize = 0;
+  unsigned addressableLocalMemorySize = 0;
+  unsigned wavefrontSize = 0;
+  unsigned eusPerCU = 0;
+  unsigned wavesPerWorkgroup = 0;
+  LDSSpillPlanStatus status = LDSSpillPlanStatus::InsufficientLDS;
+};
+
 enum class ScratchSpillPlanStatus : uint8_t {
   Available,
   NotKernel,
@@ -2194,6 +2204,11 @@ struct ScratchSpillPlan {
 StringRef getLDSSpillPlanStatusName(LDSSpillPlanStatus status);
 void getExistingLDSBytes(func::FuncOp func, unsigned &fixedBytes,
                          unsigned &dynamicBytes, unsigned reservedSpillBytes);
+LDSSpillPlanningInfo getLDSSpillPlanningInfo(func::FuncOp func,
+                                             RegisterBudgets budgets);
+LDSSpillPlan planLDSSpillSlot(const LDSSpillPlanningInfo &planning,
+                              unsigned valueBytes, unsigned reservedSpillBytes,
+                              unsigned fixedLDS, unsigned dynamicLDS);
 LDSSpillPlan planLDSSpillSlot(func::FuncOp func, RegisterBudgets budgets,
                               unsigned valueBytes,
                               unsigned reservedSpillBytes = 0);
