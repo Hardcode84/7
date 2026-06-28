@@ -61,6 +61,23 @@ def WaveAMDMachine_OperandLegalityOpInterface
   ];
 }
 
+def WaveAMDMachine_KilledOperandReuseOpInterface
+    : OpInterface<"KilledOperandReuseOpInterface"> {
+  let cppNamespace = "::mlir::waveamdmachine";
+  let description = [{
+    Target-specific destructive reuse legality for killed register operands.
+  }];
+  let methods = [
+    InterfaceMethod<
+      [{Whether this op may write its result into the killed operand.}],
+      "bool",
+      "canReuseKilledOperandForResult",
+      (ins "const ::llvm::AMDGPU::IsaVersion &":$isa,
+           "::mlir::OpOperand &":$operand)
+    >,
+  ];
+}
+
 def WaveAMDMachine_M0WriteHazardOpInterface
     : OpInterface<"M0WriteHazardOpInterface"> {
   let cppNamespace = "::mlir::waveamdmachine";

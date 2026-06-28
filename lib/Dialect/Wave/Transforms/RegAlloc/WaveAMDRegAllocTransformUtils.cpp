@@ -20,8 +20,6 @@ using namespace mlir;
 
 namespace mlir::wave::regalloc_detail {
 
-namespace waveTraits = ::mlir::OpTrait::waveamdmachine;
-
 bool liveRangesOverlap(unsigned lhsStart, unsigned lhsEnd, unsigned rhsStart,
                        unsigned rhsEnd) {
   return lhsStart <= rhsEnd && rhsStart <= lhsEnd;
@@ -113,57 +111,6 @@ static bool hasSingleTrackedGPRResult(Operation *op) {
   return found;
 }
 
-static bool canReuseKilledMFMAAccumulatorForResult(Operation *op,
-                                                   OpOperand &operand) {
-  auto mma = dyn_cast_if_present<waveamdmachine::MMAOpInterface>(op);
-  return mma && op->hasTrait<waveTraits::MFMAOp>() &&
-         &operand == &mma.getAccMutable();
-}
-
-static bool isGfx8Or9Target(Operation *op) {
-  ModuleOp mod = waveamdmachine::findAMDGPUTargetModule(op);
-  if (!mod)
-    return false;
-  StringAttr targetAttr =
-      mod->getAttrOfType<StringAttr>("waveamdmachine.target");
-  if (!targetAttr)
-    return false;
-  std::optional<waveamdmachine::AMDGPUTarget> target =
-      waveamdmachine::parseAMDGPUTargetAttr(targetAttr.getValue());
-  if (!target)
-    return false;
-  llvm::AMDGPU::IsaVersion isa = llvm::AMDGPU::getIsaVersion(target->chip);
-  return isa.Major == 8 || isa.Major == 9;
-}
-
-static bool hasVMulU32MachineImm(Operation *op) {
-  if (!isGfx8Or9Target(op))
-    return false;
-  if (!isa<waveamdmachine::VMulLoU32Op, waveamdmachine::VMulHiU32Op>(op))
-    return false;
-  return llvm::any_of(op->getOperands(), [](Value operand) {
-    return operand.getDefiningOp<waveamdmachine::ImmOp>();
-  });
-}
-
-static bool isGenericKilledOperandReuseRejected(Operation *op) {
-  if (op->hasTrait<waveTraits::NoMachineInst>())
-    return true;
-  if (isa<waveamdmachine::MMAOpInterface>(op))
-    return true;
-  if (op->hasTrait<waveTraits::MFMAOp>())
-    return true;
-  if (hasVMulU32MachineImm(op))
-    return true;
-  return op->hasTrait<waveTraits::WritesExecOp>();
-}
-
-static bool isGenericKilledOperandReuseAccepted(Operation *op) {
-  if (op->hasTrait<waveTraits::VALUOp>())
-    return true;
-  return op->hasTrait<waveTraits::SALUOp>();
-}
-
 bool canReuseKilledOperandForResult(Operation *op, OpOperand &operand) {
   if (!op || op->getNumRegions() != 0)
     return false;
@@ -171,11 +118,16 @@ bool canReuseKilledOperandForResult(Operation *op, OpOperand &operand) {
     return false;
   if (!hasNoMemoryEffects(op))
     return false;
-  if (canReuseKilledMFMAAccumulatorForResult(op, operand))
-    return true;
-  if (isGenericKilledOperandReuseRejected(op))
+  waveamdmachine::KilledOperandReuseOpInterface reuse =
+      dyn_cast<waveamdmachine::KilledOperandReuseOpInterface>(op);
+  if (!reuse)
     return false;
-  return isGenericKilledOperandReuseAccepted(op);
+  FailureOr<llvm::AMDGPU::IsaVersion> isa =
+      waveamdmachine::getAMDGPUTargetIsaVersion(
+          op, "waveamd regalloc killed operand reuse");
+  if (failed(isa))
+    return false;
+  return reuse.canReuseKilledOperandForResult(*isa, operand);
 }
 
 static Block *getBlockAt(Region &region, int64_t index) {

@@ -39,6 +39,19 @@ defvar WaveAMDMachine_AGPRTarget =
     "isa.Minor == 4 || (isa.Minor == 5 && isa.Stepping == 0))";
 defvar WaveAMDMachine_Gfx8To13 =
     "isa.Major >= 8 && isa.Major <= 13";
+defvar WaveAMDMachine_DefaultKilledOperandReuse =
+    "(this->getOperation()->hasTrait<" #
+    "::mlir::OpTrait::waveamdmachine::VALUOp>() || " #
+    "this->getOperation()->hasTrait<" #
+    "::mlir::OpTrait::waveamdmachine::SALUOp>()) && " #
+    "!this->getOperation()->hasTrait<" #
+    "::mlir::OpTrait::waveamdmachine::NoMachineInst>() && " #
+    "!this->getOperation()->hasTrait<" #
+    "::mlir::OpTrait::waveamdmachine::WritesExecOp>() && " #
+    "!this->getOperation()->hasTrait<" #
+    "::mlir::OpTrait::waveamdmachine::MFMAOp>() && " #
+    "!::llvm::isa<::mlir::waveamdmachine::MMAOpInterface>(" #
+    "this->getOperation())";
 
 // Every WaveAMDMachine op gets a static `isSupportedOnIsa(IsaVersion)`
 // classifier. The default is "supported everywhere"; gated ops
@@ -54,7 +67,8 @@ defvar WaveAMDMachine_Gfx8To13 =
 class WaveAMDMachine_Op<string mnemonic, list<Trait> traits = []> :
     Op<WaveAMDMachine_Dialect, mnemonic,
        !listconcat(traits, [WaveAMDMachine_WaitcntInfoOpInterface,
-                            WaveAMDMachine_OperandLegalityOpInterface])> {
+                            WaveAMDMachine_OperandLegalityOpInterface,
+                            WaveAMDMachine_KilledOperandReuseOpInterface])> {
   string archPredicate = "true";
   string waitcntCounter = "None";
   string waitcntEvent = "None";
@@ -63,6 +77,8 @@ class WaveAMDMachine_Op<string mnemonic, list<Trait> traits = []> :
   string operandConstantBusMask = "0";
   string operandAnyVGPRMask = "0";
   string operandVGPRValueMask = "0";
+  string killedOperandReusePredicate =
+      WaveAMDMachine_DefaultKilledOperandReuse;
 
   let extraClassDeclaration = [{
     static bool isSupportedOnIsa(const ::llvm::AMDGPU::IsaVersion &isa) {
@@ -81,6 +97,13 @@ class WaveAMDMachine_Op<string mnemonic, list<Trait> traits = []> :
       return {static_cast<uint32_t>(}] # operandConstantBusMask # [{),
               static_cast<uint32_t>(}] # operandAnyVGPRMask # [{),
               static_cast<uint32_t>(}] # operandVGPRValueMask # [{)};
+    }
+
+    bool canReuseKilledOperandForResult(
+        const ::llvm::AMDGPU::IsaVersion &isa, ::mlir::OpOperand &operand) {
+      (void)isa;
+      (void)operand;
+      return }] # killedOperandReusePredicate # [{;
     }
   }];
 }
@@ -108,6 +131,10 @@ class WaveAMDMachine_OperandLegality<string constantBusMask = "0",
   string operandConstantBusMask = constantBusMask;
   string operandAnyVGPRMask = anyVGPRMask;
   string operandVGPRValueMask = vgprValueMask;
+}
+
+class WaveAMDMachine_KilledOperandReuse<string predicate> {
+  string killedOperandReusePredicate = predicate;
 }
 
 class WaveAMDMachine_VOP2AnyVGPRLegality
@@ -421,7 +448,9 @@ class WaveAMDMachine_MfmaResult<string mnemonic>
                                WaveAMDMachine_AVGPROrImm,
                                WaveAMDMachine_AVGPR,
                                [WaveAMDMachine_VALU, WaveAMDMachine_MFMA,
-                                WaveAMDMachine_ReadsExec]>;
+                                WaveAMDMachine_ReadsExec]> {
+  let killedOperandReusePredicate = "&operand == &this->getAccMutable()";
+}
 
 class WaveAMDMachine_TernaryIntResult<string mnemonic>
     : WaveAMDMachine_Op<mnemonic, [WaveAMDMachine_VALU, Pure]> {
@@ -711,9 +740,23 @@ def WaveAMDMachine_VAshrrevI32Op
     : WaveAMDMachine_BinaryU32Result<"v_ashrrev_i32">,
       WaveAMDMachine_VOP2ValueVGPRLegality;
 def WaveAMDMachine_VMulLoU32Op
-    : WaveAMDMachine_BinaryU32Result<"v_mul_lo_u32">;
+    : WaveAMDMachine_BinaryU32Result<"v_mul_lo_u32">,
+      WaveAMDMachine_KilledOperandReuse<
+          WaveAMDMachine_DefaultKilledOperandReuse # " && " #
+          "((isa.Major != 8 && isa.Major != 9) || " #
+          "(!::mlir::waveamdmachine::isMachineImm(" #
+          "this->getOperation()->getOperand(0)) && " #
+          "!::mlir::waveamdmachine::isMachineImm(" #
+          "this->getOperation()->getOperand(1))))">;
 def WaveAMDMachine_VMulHiU32Op
-    : WaveAMDMachine_BinaryU32Result<"v_mul_hi_u32">;
+    : WaveAMDMachine_BinaryU32Result<"v_mul_hi_u32">,
+      WaveAMDMachine_KilledOperandReuse<
+          WaveAMDMachine_DefaultKilledOperandReuse # " && " #
+          "((isa.Major != 8 && isa.Major != 9) || " #
+          "(!::mlir::waveamdmachine::isMachineImm(" #
+          "this->getOperation()->getOperand(0)) && " #
+          "!::mlir::waveamdmachine::isMachineImm(" #
+          "this->getOperation()->getOperand(1))))">;
 def WaveAMDMachine_VFfbhU32Op
     : WaveAMDMachine_UnaryResult<"v_ffbh_u32", WaveAMDMachine_Reg1OrImm,
                                  WaveAMDMachine_VGPR1,
