@@ -327,22 +327,19 @@ canRematValueRelieveFailure(const wave::RegAllocTransformValue &stateValue,
   return isRematValueLiveAcrossFailure(stateValue, position);
 }
 
-static bool
-aliasSetLiveAtPosition(const wave::RegAllocTransformAliasSet &set,
-                       ArrayRef<wave::RegAllocTransformValue> values,
-                       unsigned position) {
-  return llvm::any_of(set.members, [&](unsigned valueId) {
-    return valueLiveAtPosition(values[valueId], position);
+static bool aliasSetLiveAtPosition(const wave::RegAllocTransformAliasSet &set,
+                                   unsigned position) {
+  return llvm::any_of(set.ranges, [&](wave::RegAllocTransformLiveRange range) {
+    return range.start <= position && position <= range.end;
   });
 }
 
 static RegClassPressure
 getRegClassPressureAtPosition(ArrayRef<wave::RegAllocTransformAliasSet> sets,
-                              ArrayRef<wave::RegAllocTransformValue> values,
                               unsigned position) {
   RegClassPressure pressure = {};
   for (const wave::RegAllocTransformAliasSet &set : sets)
-    if (aliasSetLiveAtPosition(set, values, position))
+    if (aliasSetLiveAtPosition(set, position))
       addRegClassPressure(pressure, set.regClass, set.width);
   return pressure;
 }
@@ -420,7 +417,7 @@ static bool rematCandidateReducesFailurePressure(
   if (getTotalPressure(removed) <= getTotalPressure(added))
     return false;
   RegClassPressure pressure =
-      getRegClassPressureAtPosition(sets, values, failureRecord.position);
+      getRegClassPressureAtPosition(sets, failureRecord.position);
   for (waveamdmachine::RegClass regClass : kRegClasses)
     pressure[getRegClassIndex(regClass)] +=
         added[getRegClassIndex(regClass)] - removed[getRegClassIndex(regClass)];

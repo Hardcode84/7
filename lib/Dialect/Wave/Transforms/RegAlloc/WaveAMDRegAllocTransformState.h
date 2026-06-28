@@ -59,6 +59,7 @@ struct RegAllocTransformAliasMember {
 
 struct RegAllocTransformAliasSet {
   SmallVector<unsigned> members;
+  SmallVector<RegAllocTransformLiveRange, 4> ranges;
   waveamdmachine::RegClass regClass;
   std::optional<unsigned> fixedBase;
   unsigned id = 0;

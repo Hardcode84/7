@@ -699,28 +699,40 @@ static bool liveRangesOverlap(const wave::RegAllocTransformLiveRange &lhs,
   return liveRangesOverlap(lhs.start, lhs.end, rhs.start, rhs.end);
 }
 
-static bool valueLiveAtPosition(const wave::RegAllocTransformValue &value,
-                                unsigned position) {
-  return llvm::any_of(value.ranges,
-                      [&](wave::RegAllocTransformLiveRange range) {
-                        return range.start <= position && position <= range.end;
-                      });
+static bool
+liveRangesContainPosition(ArrayRef<wave::RegAllocTransformLiveRange> ranges,
+                          unsigned position) {
+  auto it =
+      llvm::lower_bound(ranges, position,
+                        [](wave::RegAllocTransformLiveRange range,
+                           unsigned position) { return range.end < position; });
+  return it != ranges.end() && it->start <= position;
 }
 
-static bool valueOverlapsRange(const wave::RegAllocTransformValue &value,
-                               unsigned start, unsigned end) {
-  return llvm::any_of(
-      value.ranges, [&](wave::RegAllocTransformLiveRange range) {
-        return liveRangesOverlap(range.start, range.end, start, end);
-      });
+static bool
+liveRangesOverlapRange(ArrayRef<wave::RegAllocTransformLiveRange> ranges,
+                       unsigned start, unsigned end) {
+  auto it = llvm::lower_bound(ranges, start,
+                              [](wave::RegAllocTransformLiveRange range,
+                                 unsigned start) { return range.end < start; });
+  return it != ranges.end() && it->start <= end;
 }
 
-static bool valueRangesOverlap(const wave::RegAllocTransformValue &lhs,
-                               const wave::RegAllocTransformValue &rhs) {
-  for (wave::RegAllocTransformLiveRange lhsRange : lhs.ranges)
-    for (wave::RegAllocTransformLiveRange rhsRange : rhs.ranges)
-      if (liveRangesOverlap(lhsRange, rhsRange))
-        return true;
+static bool
+liveRangeListsOverlap(ArrayRef<wave::RegAllocTransformLiveRange> lhs,
+                      ArrayRef<wave::RegAllocTransformLiveRange> rhs) {
+  unsigned lhsIndex = 0;
+  unsigned rhsIndex = 0;
+  while (lhsIndex < lhs.size() && rhsIndex < rhs.size()) {
+    wave::RegAllocTransformLiveRange lhsRange = lhs[lhsIndex];
+    wave::RegAllocTransformLiveRange rhsRange = rhs[rhsIndex];
+    if (liveRangesOverlap(lhsRange, rhsRange))
+      return true;
+    if (lhsRange.end < rhsRange.start)
+      ++lhsIndex;
+    else
+      ++rhsIndex;
+  }
   return false;
 }
 
@@ -730,6 +742,22 @@ static bool valueRangeEndsAt(const wave::RegAllocTransformValue &value,
                       [&](wave::RegAllocTransformLiveRange range) {
                         return range.end == position;
                       });
+}
+
+static bool aliasSetLiveAtPosition(const wave::RegAllocTransformAliasSet &set,
+                                   unsigned position) {
+  return liveRangesContainPosition(set.ranges, position);
+}
+
+static bool aliasSetOverlapsRange(const wave::RegAllocTransformAliasSet &set,
+                                  unsigned start, unsigned end) {
+  return liveRangesOverlapRange(set.ranges, start, end);
+}
+
+static bool
+aliasSetsHaveLiveOverlap(const wave::RegAllocTransformAliasSet &lhs,
+                         const wave::RegAllocTransformAliasSet &rhs) {
+  return liveRangeListsOverlap(lhs.ranges, rhs.ranges);
 }
 
 static bool isVGPRFamilyClass(waveamdmachine::RegClass regClass) {
@@ -1447,9 +1475,7 @@ private:
     const wave::RegAllocTransformAliasSet *set = getSetById(setId);
     if (!set)
       return true;
-    return llvm::any_of(set->members, [&](unsigned valueId) {
-      return valueLiveAtPosition(values[valueId], position);
-    });
+    return aliasSetLiveAtPosition(*set, position);
   }
 
   const wave::RegAllocTransformAliasSet *getSetById(unsigned setId) {
@@ -1464,22 +1490,12 @@ private:
     const wave::RegAllocTransformAliasSet *rhsSet = getSetById(rhs.set);
     if (!rhsSet)
       return setOverlapsRange(lhs, rhs.start, rhs.end);
-    for (unsigned lhsValueId : lhs.members) {
-      const wave::RegAllocTransformValue &lhsValue = values[lhsValueId];
-      for (unsigned rhsValueId : rhsSet->members) {
-        const wave::RegAllocTransformValue &rhsValue = values[rhsValueId];
-        if (valueRangesOverlap(lhsValue, rhsValue))
-          return true;
-      }
-    }
-    return false;
+    return aliasSetsHaveLiveOverlap(lhs, *rhsSet);
   }
 
   bool setOverlapsRange(const wave::RegAllocTransformAliasSet &set,
                         unsigned start, unsigned end) {
-    return llvm::any_of(set.members, [&](unsigned valueId) {
-      return valueOverlapsRange(values[valueId], start, end);
-    });
+    return aliasSetOverlapsRange(set, start, end);
   }
 
   bool

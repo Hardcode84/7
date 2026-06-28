@@ -66,16 +66,8 @@ bool valueLiveBeforeAtPosition(const wave::RegAllocTransformValue &value,
                                unsigned position);
 bool valueLiveAcrossPosition(const wave::RegAllocTransformValue &value,
                              unsigned position);
-bool valueOverlapsRange(const wave::RegAllocTransformValue &value,
-                        unsigned start, unsigned end);
-bool valueRangesOverlap(const wave::RegAllocTransformValue &lhs,
-                        const wave::RegAllocTransformValue &rhs);
 bool valueRangeEndsAt(const wave::RegAllocTransformValue &value,
                       unsigned position);
-SmallVector<wave::RegAllocTransformLiveRange, 4>
-collectAliasSetLiveRanges(const wave::RegAllocTransformAliasSet &set,
-                          ArrayRef<wave::RegAllocTransformValue> values);
-
 bool isVGPRFamilyClass(waveamdmachine::RegClass regClass);
 unsigned getRegClassIndex(waveamdmachine::RegClass regClass);
 void addRegClassPressure(RegClassPressure &pressure,

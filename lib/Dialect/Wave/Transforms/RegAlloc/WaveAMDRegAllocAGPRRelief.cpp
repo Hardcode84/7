@@ -122,10 +122,8 @@ static bool lessAGPRReliefInterval(const AGPRReliefInterval &lhs,
 static void
 addAGPRReliefIntervals(SmallVectorImpl<AGPRReliefInterval> &intervals,
                        const wave::RegAllocTransformAliasSet &set,
-                       ArrayRef<wave::RegAllocTransformValue> values,
                        std::optional<unsigned> fixedBase) {
-  for (wave::RegAllocTransformLiveRange range :
-       collectAliasSetLiveRanges(set, values))
+  for (wave::RegAllocTransformLiveRange range : set.ranges)
     intervals.push_back({fixedBase, set.id, range.start, range.end, set.width});
 }
 
@@ -139,10 +137,10 @@ static bool canAllocateAGPRReliefCandidate(
   for (const wave::RegAllocTransformAliasSet &set : sets) {
     if (set.regClass != waveamdmachine::RegClass::AGPR)
       continue;
-    addAGPRReliefIntervals(intervals, set, values,
+    addAGPRReliefIntervals(intervals, set,
                            getRegAllocTransformFixedBase(set, values));
   }
-  addAGPRReliefIntervals(intervals, candidate, values, std::nullopt);
+  addAGPRReliefIntervals(intervals, candidate, std::nullopt);
   llvm::stable_sort(intervals, lessAGPRReliefInterval);
   return canAllocateAGPRReliefIntervals(intervals, candidate.id, budget.limit,
                                         agprFootprint);

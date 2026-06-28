@@ -283,6 +283,34 @@ static LogicalResult parseAliasMembers(DictionaryAttr dict,
   return success();
 }
 
+static void
+insertAliasSetLiveRange(SmallVectorImpl<RegAllocTransformLiveRange> &ranges,
+                        RegAllocTransformLiveRange range) {
+  auto it =
+      llvm::lower_bound(ranges, range.start,
+                        [](RegAllocTransformLiveRange existing,
+                           unsigned start) { return existing.end < start; });
+  if (it == ranges.end() || range.end < it->start) {
+    ranges.insert(it, range);
+    return;
+  }
+  it->start = std::min(it->start, range.start);
+  it->end = std::max(it->end, range.end);
+  auto next = it;
+  ++next;
+  while (next != ranges.end() && next->start <= it->end) {
+    it->end = std::max(it->end, next->end);
+    next = ranges.erase(next);
+  }
+}
+
+static void collectAliasSetLiveRanges(RegAllocTransformAliasSet &set,
+                                      ArrayRef<RegAllocTransformValue> values) {
+  for (unsigned valueId : set.members)
+    for (RegAllocTransformLiveRange range : values[valueId].ranges)
+      insertAliasSetLiveRange(set.ranges, range);
+}
+
 static FailureOr<RegAllocTransformAliasSet>
 parseAliasSet(DictionaryAttr dict, ArrayRef<RegAllocTransformValue> values,
               Operation *diagOp) {
@@ -299,6 +327,7 @@ parseAliasSet(DictionaryAttr dict, ArrayRef<RegAllocTransformValue> values,
   set.width = *width;
   if (failed(parseAliasMembers(dict, values, diagOp, set)))
     return failure();
+  collectAliasSetLiveRanges(set, values);
   return set;
 }
 

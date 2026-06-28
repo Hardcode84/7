@@ -52,62 +52,12 @@ bool valueLiveAcrossPosition(const wave::RegAllocTransformValue &value,
                       });
 }
 
-bool valueOverlapsRange(const wave::RegAllocTransformValue &value,
-                        unsigned start, unsigned end) {
-  return llvm::any_of(
-      value.ranges, [&](wave::RegAllocTransformLiveRange range) {
-        return liveRangesOverlap(range.start, range.end, start, end);
-      });
-}
-
-bool valueRangesOverlap(const wave::RegAllocTransformValue &lhs,
-                        const wave::RegAllocTransformValue &rhs) {
-  for (wave::RegAllocTransformLiveRange lhsRange : lhs.ranges)
-    for (wave::RegAllocTransformLiveRange rhsRange : rhs.ranges)
-      if (liveRangesOverlap(lhsRange, rhsRange))
-        return true;
-  return false;
-}
-
 bool valueRangeEndsAt(const wave::RegAllocTransformValue &value,
                       unsigned position) {
   return llvm::any_of(value.ranges,
                       [position](wave::RegAllocTransformLiveRange range) {
                         return range.end == position;
                       });
-}
-
-static void insertAliasSetLiveRange(
-    SmallVectorImpl<wave::RegAllocTransformLiveRange> &ranges,
-    wave::RegAllocTransformLiveRange range) {
-  auto it =
-      llvm::lower_bound(ranges, range.start,
-                        [](wave::RegAllocTransformLiveRange existing,
-                           unsigned start) { return existing.end < start; });
-  if (it == ranges.end() || range.end < it->start) {
-    ranges.insert(it, range);
-    return;
-  }
-  it->start = std::min(it->start, range.start);
-  it->end = std::max(it->end, range.end);
-  auto next = it;
-  ++next;
-  while (next != ranges.end() && next->start <= it->end) {
-    it->end = std::max(it->end, next->end);
-    next = ranges.erase(next);
-  }
-}
-
-SmallVector<wave::RegAllocTransformLiveRange, 4>
-collectAliasSetLiveRanges(const wave::RegAllocTransformAliasSet &set,
-                          ArrayRef<wave::RegAllocTransformValue> values) {
-  SmallVector<wave::RegAllocTransformLiveRange, 4> ranges;
-  for (unsigned valueId : set.members) {
-    const wave::RegAllocTransformValue &value = values[valueId];
-    for (wave::RegAllocTransformLiveRange range : value.ranges)
-      insertAliasSetLiveRange(ranges, range);
-  }
-  return ranges;
 }
 
 bool isVGPRFamilyClass(waveamdmachine::RegClass regClass) {
