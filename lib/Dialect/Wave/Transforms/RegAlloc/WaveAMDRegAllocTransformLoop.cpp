@@ -17,10 +17,12 @@
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/IRMapping.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
+#include "llvm/ADT/BitVector.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/Support/MathExtras.h"
+#include <algorithm>
 #include <array>
 #include <limits>
 #include <optional>
@@ -484,12 +486,10 @@ private:
       values[member].offset = offsets[member] - minOffset;
   }
 
-  LogicalResult enqueueAliasNeighbor(unsigned current, unsigned next,
-                                     int64_t delta,
-                                     SmallVectorImpl<unsigned> &worklist,
-                                     SmallVectorImpl<bool> &visited,
-                                     SmallVectorImpl<int64_t> &offsets,
-                                     unsigned setId) {
+  LogicalResult
+  enqueueAliasNeighbor(unsigned current, unsigned next, int64_t delta,
+                       SmallVectorImpl<unsigned> &worklist, BitVector &visited,
+                       SmallVectorImpl<int64_t> &offsets, unsigned setId) {
     int64_t nextOffset = offsets[current] + delta;
     if (visited[next]) {
       if (offsets[next] != nextOffset)
@@ -504,7 +504,7 @@ private:
   }
 
   LogicalResult visitAliasSet(unsigned root, const AliasAdjacency &adjacency,
-                              SmallVectorImpl<bool> &visited,
+                              BitVector &visited,
                               SmallVectorImpl<int64_t> &offsets) {
     unsigned setId = aliasSets.size();
     RegAllocAliasSet set;
@@ -531,7 +531,7 @@ private:
     if (failed(buildAliasAdjacency(adjacency)))
       return failure();
 
-    SmallVector<bool> visited(values.size(), false);
+    BitVector visited(values.size());
     SmallVector<int64_t> offsets(values.size(), 0);
     for (unsigned root : llvm::seq<unsigned>(0, values.size()))
       if (!visited[root] &&
@@ -1155,6 +1155,131 @@ public:
   }
 
 private:
+  struct ActiveAssignments {
+    SmallVector<unsigned> ordered;
+    SmallVector<unsigned> byEnd;
+    std::array<SmallVector<unsigned>, kRegClassCount> byClass;
+    BitVector live;
+    DenseMap<unsigned, unsigned> bySet;
+    unsigned stale = 0;
+
+    static bool
+    endHeapCompare(ArrayRef<wave::RegAllocTransformAssignment> assignments,
+                   unsigned lhs, unsigned rhs) {
+      const wave::RegAllocTransformAssignment &lhsAssignment = assignments[lhs];
+      const wave::RegAllocTransformAssignment &rhsAssignment = assignments[rhs];
+      return std::tie(lhsAssignment.end, lhsAssignment.set) >
+             std::tie(rhsAssignment.end, rhsAssignment.set);
+    }
+
+    static unsigned getRegClassIndex(waveamdmachine::RegClass regClass) {
+      unsigned index = static_cast<unsigned>(regClass);
+      assert(index < kRegClassCount && "unknown register class");
+      return index;
+    }
+
+    bool isLive(unsigned assignmentIndex) const {
+      return assignmentIndex < live.size() && live[assignmentIndex];
+    }
+
+    void add(unsigned assignmentIndex,
+             ArrayRef<wave::RegAllocTransformAssignment> assignments) {
+      const wave::RegAllocTransformAssignment &assignment =
+          assignments[assignmentIndex];
+      ordered.push_back(assignmentIndex);
+      byClass[getRegClassIndex(assignment.regClass)].push_back(assignmentIndex);
+      if (assignmentIndex >= live.size())
+        live.resize(assignmentIndex + 1, false);
+      live.set(assignmentIndex);
+      bySet[assignment.set] = assignmentIndex;
+      byEnd.push_back(assignmentIndex);
+      std::push_heap(byEnd.begin(), byEnd.end(),
+                     [&](unsigned lhs, unsigned rhs) {
+                       return endHeapCompare(assignments, lhs, rhs);
+                     });
+    }
+
+    void expire(unsigned position,
+                ArrayRef<wave::RegAllocTransformAssignment> assignments) {
+      while (!byEnd.empty()) {
+        unsigned assignmentIndex = byEnd.front();
+        const wave::RegAllocTransformAssignment &assignment =
+            assignments[assignmentIndex];
+        if (assignment.end >= position)
+          break;
+        std::pop_heap(byEnd.begin(), byEnd.end(),
+                      [&](unsigned lhs, unsigned rhs) {
+                        return endHeapCompare(assignments, lhs, rhs);
+                      });
+        assignmentIndex = byEnd.pop_back_val();
+        auto it = bySet.find(assignments[assignmentIndex].set);
+        if (it == bySet.end() || it->second != assignmentIndex)
+          continue;
+        bySet.erase(it);
+        live.reset(assignmentIndex);
+        ++stale;
+      }
+      if (stale > bySet.size())
+        compact(assignments);
+    }
+
+    void compact(ArrayRef<wave::RegAllocTransformAssignment> assignments) {
+      eraseInactive(ordered, assignments);
+      for (SmallVector<unsigned> &classAssignments : byClass)
+        eraseInactive(classAssignments, assignments);
+      stale = 0;
+    }
+
+    void eraseInactive(
+        SmallVectorImpl<unsigned> &indices,
+        ArrayRef<wave::RegAllocTransformAssignment> assignments) const {
+      llvm::erase_if(indices, [&](unsigned assignmentIndex) {
+        return !isLive(assignmentIndex);
+      });
+    }
+
+    const wave::RegAllocTransformAssignment *
+    lookup(unsigned setId,
+           ArrayRef<wave::RegAllocTransformAssignment> assignments) const {
+      auto it = bySet.find(setId);
+      if (it == bySet.end())
+        return nullptr;
+      return &assignments[it->second];
+    }
+
+    bool contains(unsigned setId) const { return bySet.contains(setId); }
+
+    template <typename Fn>
+    void forOrdered(ArrayRef<wave::RegAllocTransformAssignment> assignments,
+                    Fn &&fn) const {
+      for (unsigned assignmentIndex : ordered)
+        if (isLive(assignmentIndex))
+          fn(assignments[assignmentIndex]);
+    }
+
+    template <typename Fn>
+    void forRegClass(waveamdmachine::RegClass regClass,
+                     ArrayRef<wave::RegAllocTransformAssignment> assignments,
+                     Fn &&fn) const {
+      for (unsigned assignmentIndex : byClass[getRegClassIndex(regClass)])
+        if (isLive(assignmentIndex))
+          fn(assignments[assignmentIndex]);
+    }
+
+    template <typename Predicate>
+    bool anyRegClass(waveamdmachine::RegClass regClass,
+                     ArrayRef<wave::RegAllocTransformAssignment> assignments,
+                     Predicate &&predicate) const {
+      for (unsigned assignmentIndex : byClass[getRegClassIndex(regClass)]) {
+        if (!isLive(assignmentIndex))
+          continue;
+        if (predicate(assignments[assignmentIndex]))
+          return true;
+      }
+      return false;
+    }
+  };
+
   LogicalResult parseState() {
     state = func->getAttrOfType<DictionaryAttr>(
         wave::getRegAllocTransformStateAttrName());
@@ -1328,10 +1453,7 @@ private:
   }
 
   void expireInactive(unsigned position) {
-    llvm::erase_if(
-        active, [position](const wave::RegAllocTransformAssignment &assigned) {
-          return assigned.end < position;
-        });
+    active.expire(position, assignments);
   }
 
   LogicalResult allocateSet(const wave::RegAllocTransformAliasSet &set) {
@@ -1398,10 +1520,7 @@ private:
   }
 
   const wave::RegAllocTransformAssignment *getActiveAssignment(unsigned setId) {
-    for (const wave::RegAllocTransformAssignment &assigned : active)
-      if (assigned.set == setId)
-        return &assigned;
-    return nullptr;
+    return active.lookup(setId, assignments);
   }
 
   std::optional<unsigned>
@@ -1485,10 +1604,10 @@ private:
 
   bool conflictsWithActive(const wave::RegAllocTransformAliasSet &set,
                            unsigned base) {
-    return llvm::any_of(
-        active, [&](const wave::RegAllocTransformAssignment &assigned) {
-          if (assigned.regClass != set.regClass ||
-              !assignedRangesOverlap(assigned, base, set.width) ||
+    return active.anyRegClass(
+        set.regClass, assignments,
+        [&](const wave::RegAllocTransformAssignment &assigned) {
+          if (!assignedRangesOverlap(assigned, base, set.width) ||
               !setsHaveLiveOverlap(set, assigned))
             return false;
           return !canShareFixedHardwareRead(set, assigned, base);
@@ -1497,12 +1616,12 @@ private:
 
   bool conflictsWithActiveIgnoring(const wave::RegAllocTransformAliasSet &set,
                                    unsigned base, unsigned ignoredSetId) {
-    return llvm::any_of(
-        active, [&](const wave::RegAllocTransformAssignment &assigned) {
+    return active.anyRegClass(
+        set.regClass, assignments,
+        [&](const wave::RegAllocTransformAssignment &assigned) {
           if (assigned.set == ignoredSetId)
             return false;
-          if (assigned.regClass != set.regClass ||
-              !assignedRangesOverlap(assigned, base, set.width) ||
+          if (!assignedRangesOverlap(assigned, base, set.width) ||
               !setsHaveLiveOverlap(set, assigned))
             return false;
           return !canShareFixedHardwareRead(set, assigned, base);
@@ -1599,12 +1718,7 @@ private:
         });
   }
 
-  bool hasActiveAssignment(unsigned setId) {
-    return llvm::any_of(
-        active, [setId](const wave::RegAllocTransformAssignment &assigned) {
-          return assigned.set == setId;
-        });
-  }
+  bool hasActiveAssignment(unsigned setId) { return active.contains(setId); }
 
   SmallVector<wave::RegAllocTransformAssignment>
   getFixedReservationOverlaps(const wave::RegAllocTransformAliasSet &set) {
@@ -1636,18 +1750,29 @@ private:
       return false;
     unsigned agprFootprint = 0;
     unsigned vgprFootprint = 0;
-    for (const wave::RegAllocTransformAssignment &assigned : active)
-      if (isVGPRFamilyClass(assigned.regClass) &&
-          setLiveAtPosition(assigned.set, set.start))
-        addFamilyFootprint(assigned.regClass, assigned.base, assigned.width,
-                           agprFootprint, vgprFootprint);
+    auto addActiveFootprint =
+        [&](const wave::RegAllocTransformAssignment &assigned) {
+          if (!setLiveAtPosition(assigned.set, set.start))
+            return;
+          addFamilyFootprint(assigned.regClass, assigned.base, assigned.width,
+                             agprFootprint, vgprFootprint);
+        };
+    active.forRegClass(waveamdmachine::RegClass::AGPR, assignments,
+                       addActiveFootprint);
+    active.forRegClass(waveamdmachine::RegClass::VGPR, assignments,
+                       addActiveFootprint);
     addFamilyFootprint(set.regClass, base, set.width, agprFootprint,
                        vgprFootprint);
     unsigned pressure =
         getCombinedVGPRFamilyPressure(agprFootprint, vgprFootprint);
     if (pressure <= vgprFamilyBudget->limit)
       return false;
-    recordCombinedPressureFailure(set, pressure, active);
+    SmallVector<wave::RegAllocTransformAssignment> overlaps;
+    active.forOrdered(assignments,
+                      [&](const wave::RegAllocTransformAssignment &assigned) {
+                        overlaps.push_back(assigned);
+                      });
+    recordCombinedPressureFailure(set, pressure, overlaps);
     return true;
   }
 
@@ -1683,17 +1808,19 @@ private:
     wave::RegAllocTransformAssignment assigned{
         set.regClass, set.id, base, set.width, set.start, set.end};
     assignments.push_back(assigned);
-    active.push_back(assigned);
+    active.add(assignments.size() - 1, assignments);
   }
 
   unsigned getPressureAtFailure(
       const wave::RegAllocTransformAliasSet &set,
       ArrayRef<wave::RegAllocTransformAssignment> fixedOverlaps) {
     unsigned pressure = set.width;
-    for (const wave::RegAllocTransformAssignment &assigned : active)
-      if (assigned.regClass == set.regClass &&
-          setLiveAtPosition(assigned.set, set.start))
-        pressure += assigned.width;
+    active.forRegClass(set.regClass, assignments,
+                       [&](const wave::RegAllocTransformAssignment &assigned) {
+                         if (!setLiveAtPosition(assigned.set, set.start))
+                           return;
+                         pressure += assigned.width;
+                       });
     for (const wave::RegAllocTransformAssignment &reserved : fixedOverlaps)
       pressure += reserved.width;
     return pressure;
@@ -1712,10 +1839,12 @@ private:
     failed.pressure = getPressureAtFailure(set, fixedOverlaps);
     failed.limit = budget.limit;
     failed.request = set.width;
-    for (const wave::RegAllocTransformAssignment &assigned : active)
-      if (assigned.regClass == set.regClass &&
-          setLiveAtPosition(assigned.set, set.start))
-        failed.overlaps.push_back(assigned);
+    active.forRegClass(set.regClass, assignments,
+                       [&](const wave::RegAllocTransformAssignment &assigned) {
+                         if (!setLiveAtPosition(assigned.set, set.start))
+                           return;
+                         failed.overlaps.push_back(assigned);
+                       });
     failed.overlaps.append(fixedOverlaps.begin(), fixedOverlaps.end());
     scanFailure = std::move(failed);
   }
@@ -1912,7 +2041,7 @@ private:
   SmallVector<wave::RegAllocTransformAliasSet> sets;
   SmallVector<Value> payloadValues;
   SmallVector<wave::RegAllocTransformAssignment> fixedReservations;
-  SmallVector<wave::RegAllocTransformAssignment> active;
+  ActiveAssignments active;
   SmallVector<wave::RegAllocTransformAssignment> assignments;
   DenseMap<Value, const wave::RegAllocTransformValue *> valueLookup;
   DenseMap<unsigned, Value> fixedHardwareReadValues;
