@@ -31,6 +31,7 @@
 #include "mlir/IR/OwningOpRef.h"
 #include "mlir/IR/SymbolTable.h"
 #include "mlir/IR/Threading.h"
+#include "mlir/Support/Timing.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
@@ -152,6 +153,23 @@ classifyRegAllocLoopTargets(ArrayRef<Operation *> targets) {
   return decision;
 }
 
+struct RegAllocStageTiming {
+  RegAllocStageTiming() {
+    applyDefaultTimingManagerCLOptions(manager);
+    rootScope = manager.getRootScope();
+    regAllocScope = rootScope.nest("wave_regalloc_transform_stages");
+  }
+
+  DefaultTimingManager manager;
+  TimingScope rootScope;
+  TimingScope regAllocScope;
+};
+
+static TimingScope getRegAllocStageTimingScope(StringRef name) {
+  static RegAllocStageTiming timing;
+  return timing.regAllocScope.nest(name);
+}
+
 static DiagnosedSilenceableFailure
 runRegAllocLoopBody(wave::TransformRegAllocLoopOp op,
                     transform::TransformResults &results,
@@ -229,6 +247,8 @@ void wave::TransformRegAllocLoopOp::getEffects(
 DiagnosedSilenceableFailure wave::TransformRegAllocBuildAliasStateOp::apply(
     transform::TransformRewriter &rewriter,
     transform::TransformResults &results, transform::TransformState &state) {
+  TimingScope timing =
+      getRegAllocStageTimingScope("regalloc_build_alias_state");
   SmallVector<Operation *> targets;
   Builder builder(getContext());
   for (Operation *target : state.getPayloadOps(getTarget())) {
@@ -250,6 +270,7 @@ void wave::TransformRegAllocBuildAliasStateOp::getEffects(
 DiagnosedSilenceableFailure wave::TransformRegAllocLinearScanOp::apply(
     transform::TransformRewriter &rewriter,
     transform::TransformResults &results, transform::TransformState &state) {
+  TimingScope timing = getRegAllocStageTimingScope("regalloc_linear_scan");
   SmallVector<Operation *> targets;
   Builder builder(getContext());
   for (Operation *target : state.getPayloadOps(getTarget())) {
@@ -271,6 +292,7 @@ void wave::TransformRegAllocLinearScanOp::getEffects(
 DiagnosedSilenceableFailure wave::TransformRegAllocAGPRReliefOp::apply(
     transform::TransformRewriter &rewriter,
     transform::TransformResults &results, transform::TransformState &state) {
+  TimingScope timing = getRegAllocStageTimingScope("regalloc_agpr_relief");
   SmallVector<Operation *> targets;
   Builder builder(getContext());
   for (Operation *target : state.getPayloadOps(getTarget())) {
@@ -292,6 +314,7 @@ void wave::TransformRegAllocAGPRReliefOp::getEffects(
 DiagnosedSilenceableFailure wave::TransformRegAllocRematReliefOp::apply(
     transform::TransformRewriter &rewriter,
     transform::TransformResults &results, transform::TransformState &state) {
+  TimingScope timing = getRegAllocStageTimingScope("regalloc_remat_relief");
   SmallVector<Operation *> targets;
   Builder builder(getContext());
   for (Operation *target : state.getPayloadOps(getTarget())) {
@@ -313,6 +336,7 @@ void wave::TransformRegAllocRematReliefOp::getEffects(
 DiagnosedSilenceableFailure wave::TransformRegAllocLDSReliefOp::apply(
     transform::TransformRewriter &rewriter,
     transform::TransformResults &results, transform::TransformState &state) {
+  TimingScope timing = getRegAllocStageTimingScope("regalloc_lds_relief");
   SmallVector<Operation *> targets;
   Builder builder(getContext());
   for (Operation *target : state.getPayloadOps(getTarget())) {
@@ -334,6 +358,7 @@ void wave::TransformRegAllocLDSReliefOp::getEffects(
 DiagnosedSilenceableFailure wave::TransformRegAllocScratchReliefOp::apply(
     transform::TransformRewriter &rewriter,
     transform::TransformResults &results, transform::TransformState &state) {
+  TimingScope timing = getRegAllocStageTimingScope("regalloc_scratch_relief");
   SmallVector<Operation *> targets;
   Builder builder(getContext());
   for (Operation *target : state.getPayloadOps(getTarget())) {
