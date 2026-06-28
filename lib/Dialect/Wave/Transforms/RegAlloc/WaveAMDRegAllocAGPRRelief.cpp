@@ -54,6 +54,11 @@ struct AGPRReliefInterval {
   unsigned width = 0;
 };
 
+struct AGPRReliefFitState {
+  SmallVector<AGPRReliefInterval> intervals;
+  wave::RegAllocTransformBudget budget;
+};
+
 static bool
 assignedRangesOverlap(const wave::RegAllocTransformAssignment &assignment,
                       unsigned base, unsigned width) {
@@ -80,48 +85,68 @@ findFreeAGPRBase(const AGPRReliefInterval &interval,
   return std::nullopt;
 }
 
+static bool lessAGPRReliefInterval(const AGPRReliefInterval &lhs,
+                                   const AGPRReliefInterval &rhs) {
+  return std::tie(lhs.start, lhs.id) < std::tie(rhs.start, rhs.id);
+}
+
+static bool assignAGPRReliefInterval(
+    const AGPRReliefInterval &interval,
+    SmallVectorImpl<wave::RegAllocTransformAssignment> &active,
+    unsigned candidateId, unsigned limit, unsigned &footprint,
+    bool &allocatedCandidate) {
+  llvm::erase_if(active,
+                 [&](const wave::RegAllocTransformAssignment &assigned) {
+                   return assigned.end < interval.start;
+                 });
+  if (interval.fixedBase) {
+    if (*interval.fixedBase + interval.width > limit)
+      return false;
+    if (llvm::any_of(active,
+                     [&](const wave::RegAllocTransformAssignment &assigned) {
+                       return assignedRangesOverlap(
+                           assigned, *interval.fixedBase, interval.width);
+                     }))
+      return false;
+    active.push_back({waveamdmachine::RegClass::AGPR, interval.id,
+                      *interval.fixedBase, interval.width, interval.start,
+                      interval.end});
+    footprint = std::max(footprint, *interval.fixedBase + interval.width);
+    allocatedCandidate |= interval.id == candidateId;
+    return true;
+  }
+  std::optional<unsigned> base = findFreeAGPRBase(interval, active, limit);
+  if (!base)
+    return false;
+  active.push_back({waveamdmachine::RegClass::AGPR, interval.id, *base,
+                    interval.width, interval.start, interval.end});
+  footprint = std::max(footprint, *base + interval.width);
+  allocatedCandidate |= interval.id == candidateId;
+  return true;
+}
+
 static bool
 canAllocateAGPRReliefIntervals(ArrayRef<AGPRReliefInterval> intervals,
+                               ArrayRef<AGPRReliefInterval> overlayIntervals,
                                unsigned candidateId, unsigned limit,
                                unsigned &footprint) {
   SmallVector<wave::RegAllocTransformAssignment> active;
   bool allocatedCandidate = false;
   footprint = 0;
-  for (const AGPRReliefInterval &interval : intervals) {
-    llvm::erase_if(active,
-                   [&](const wave::RegAllocTransformAssignment &assigned) {
-                     return assigned.end < interval.start;
-                   });
-    if (interval.fixedBase) {
-      if (*interval.fixedBase + interval.width > limit)
-        return false;
-      if (llvm::any_of(active,
-                       [&](const wave::RegAllocTransformAssignment &assigned) {
-                         return assignedRangesOverlap(
-                             assigned, *interval.fixedBase, interval.width);
-                       }))
-        return false;
-      active.push_back({waveamdmachine::RegClass::AGPR, interval.id,
-                        *interval.fixedBase, interval.width, interval.start,
-                        interval.end});
-      footprint = std::max(footprint, *interval.fixedBase + interval.width);
-      allocatedCandidate |= interval.id == candidateId;
-      continue;
-    }
-    std::optional<unsigned> base = findFreeAGPRBase(interval, active, limit);
-    if (!base)
+  size_t index = 0;
+  size_t overlayIndex = 0;
+  while (index < intervals.size() || overlayIndex < overlayIntervals.size()) {
+    bool useOverlay = index == intervals.size() ||
+                      (overlayIndex < overlayIntervals.size() &&
+                       lessAGPRReliefInterval(overlayIntervals[overlayIndex],
+                                              intervals[index]));
+    const AGPRReliefInterval &interval =
+        useOverlay ? overlayIntervals[overlayIndex++] : intervals[index++];
+    if (!assignAGPRReliefInterval(interval, active, candidateId, limit,
+                                  footprint, allocatedCandidate))
       return false;
-    active.push_back({waveamdmachine::RegClass::AGPR, interval.id, *base,
-                      interval.width, interval.start, interval.end});
-    footprint = std::max(footprint, *base + interval.width);
-    allocatedCandidate |= interval.id == candidateId;
   }
   return allocatedCandidate;
-}
-
-static bool lessAGPRReliefInterval(const AGPRReliefInterval &lhs,
-                                   const AGPRReliefInterval &rhs) {
-  return std::tie(lhs.start, lhs.id) < std::tie(rhs.start, rhs.id);
 }
 
 static void
@@ -132,22 +157,31 @@ addAGPRReliefIntervals(SmallVectorImpl<AGPRReliefInterval> &intervals,
     intervals.push_back({fixedBase, set.id, range.start, range.end, set.width});
 }
 
-static bool canAllocateAGPRReliefCandidate(
-    func::FuncOp func, const wave::RegAllocTransformAliasSet &candidate,
-    ArrayRef<wave::RegAllocTransformAliasSet> sets,
-    ArrayRef<wave::RegAllocTransformValue> values, unsigned &agprFootprint) {
-  wave::RegAllocTransformBudget budget =
+static AGPRReliefFitState
+buildAGPRReliefFitState(func::FuncOp func,
+                        ArrayRef<wave::RegAllocTransformAliasSet> sets,
+                        ArrayRef<wave::RegAllocTransformValue> values) {
+  AGPRReliefFitState state;
+  state.budget =
       wave::getRegAllocTransformBudget(func, waveamdmachine::RegClass::AGPR);
-  SmallVector<AGPRReliefInterval> intervals;
   for (const wave::RegAllocTransformAliasSet &set : sets) {
     if (set.regClass != waveamdmachine::RegClass::AGPR)
       continue;
-    addAGPRReliefIntervals(intervals, set,
+    addAGPRReliefIntervals(state.intervals, set,
                            getRegAllocTransformFixedBase(set, values));
   }
-  addAGPRReliefIntervals(intervals, candidate, std::nullopt);
-  llvm::stable_sort(intervals, lessAGPRReliefInterval);
-  return canAllocateAGPRReliefIntervals(intervals, candidate.id, budget.limit,
+  llvm::stable_sort(state.intervals, lessAGPRReliefInterval);
+  return state;
+}
+
+static bool
+canAllocateAGPRReliefCandidate(const wave::RegAllocTransformAliasSet &candidate,
+                               const AGPRReliefFitState &fitState,
+                               unsigned &agprFootprint) {
+  SmallVector<AGPRReliefInterval, 4> overlayIntervals;
+  addAGPRReliefIntervals(overlayIntervals, candidate, std::nullopt);
+  return canAllocateAGPRReliefIntervals(fitState.intervals, overlayIntervals,
+                                        candidate.id, fitState.budget.limit,
                                         agprFootprint);
 }
 
@@ -481,6 +515,7 @@ static FailureOr<std::optional<AGPRReliefCandidate>>
 buildAGPRReliefCandidate(func::FuncOp func, unsigned setId,
                          const RegAllocTransformFailure &failureRecord,
                          const AGPRReliefSetIndex &setIndex,
+                         const AGPRReliefFitState &fitState,
                          ArrayRef<wave::RegAllocTransformAliasSet> sets,
                          ArrayRef<wave::RegAllocTransformValue> values,
                          ArrayRef<ResolvedRegAllocValue> resolvedValues) {
@@ -495,7 +530,7 @@ buildAGPRReliefCandidate(func::FuncOp func, unsigned setId,
                                failureRecord.position))
     return std::optional<AGPRReliefCandidate>();
   unsigned agprFootprint = 0;
-  if (!canAllocateAGPRReliefCandidate(func, *set, sets, values, agprFootprint))
+  if (!canAllocateAGPRReliefCandidate(*set, fitState, agprFootprint))
     return std::optional<AGPRReliefCandidate>();
   FailureOr<bool> respectsFamilyBudget = respectsCombinedVGPRFamilyBudget(
       func, *set, failureRecord, sets, agprFootprint);
@@ -512,18 +547,17 @@ buildAGPRReliefCandidate(func::FuncOp func, unsigned setId,
   return std::optional<AGPRReliefCandidate>(std::move(candidate));
 }
 
-static FailureOr<std::optional<AGPRReliefCandidate>>
-selectAGPRReliefCandidate(func::FuncOp func,
-                          const RegAllocTransformFailure &failureRecord,
-                          const AGPRReliefSetIndex &setIndex,
-                          ArrayRef<wave::RegAllocTransformAliasSet> sets,
-                          ArrayRef<wave::RegAllocTransformValue> values,
-                          ArrayRef<ResolvedRegAllocValue> resolvedValues) {
+static FailureOr<std::optional<AGPRReliefCandidate>> selectAGPRReliefCandidate(
+    func::FuncOp func, const RegAllocTransformFailure &failureRecord,
+    const AGPRReliefSetIndex &setIndex, const AGPRReliefFitState &fitState,
+    ArrayRef<wave::RegAllocTransformAliasSet> sets,
+    ArrayRef<wave::RegAllocTransformValue> values,
+    ArrayRef<ResolvedRegAllocValue> resolvedValues) {
   std::optional<AGPRReliefCandidate> best;
   for (unsigned setId : collectVGPRReliefCandidateIds(failureRecord)) {
     FailureOr<std::optional<AGPRReliefCandidate>> candidate =
-        buildAGPRReliefCandidate(func, setId, failureRecord, setIndex, sets,
-                                 values, resolvedValues);
+        buildAGPRReliefCandidate(func, setId, failureRecord, setIndex, fitState,
+                                 sets, values, resolvedValues);
     if (failed(candidate))
       return failure();
     if (!*candidate)
@@ -687,12 +721,13 @@ selectAGPRReliefCandidateFromFunc(
   FailureOr<AGPRReliefSetIndex> setIndex = buildAGPRReliefSetIndex(func, *sets);
   if (failed(setIndex))
     return failure();
+  AGPRReliefFitState fitState = buildAGPRReliefFitState(func, *sets, *values);
   FailureOr<SmallVector<ResolvedRegAllocValue>> resolvedValues =
       resolveRegAllocStateValues(func, *values);
   if (failed(resolvedValues))
     return failure();
-  return selectAGPRReliefCandidate(func, failureRecord, *setIndex, *sets,
-                                   *values, *resolvedValues);
+  return selectAGPRReliefCandidate(func, failureRecord, *setIndex, fitState,
+                                   *sets, *values, *resolvedValues);
 }
 
 static FailureOr<bool> shouldSkipAGPRRelief(func::FuncOp func) {
