@@ -55,6 +55,10 @@ struct MemoryReliefValueIndex {
   ArrayRef<ResolvedRegAllocValue> valuesById;
 };
 
+struct MemoryReliefSetEligibilityCache {
+  llvm::SmallDenseMap<unsigned, bool, 1024> candidateBySetId;
+};
+
 struct LDSReliefPlanningState {
   wave::regalloc::RegisterBudgets budgets;
   wave::regalloc::LDSSpillPlanningInfo ldsPlanning;
@@ -133,16 +137,36 @@ static FailureOr<SmallVector<OpOperand *>> collectMemoryReliefUses(
 }
 
 static bool
+computeMemoryReliefCandidateSet(const wave::RegAllocTransformAliasSet &set,
+                                ArrayRef<wave::RegAllocTransformValue> values,
+                                unsigned position) {
+  if (set.regClass != waveamdmachine::RegClass::VGPR)
+    return false;
+
+  bool liveAcrossFailure = false;
+  for (unsigned valueId : set.members) {
+    const wave::RegAllocTransformValue &value = values[valueId];
+    if (value.fixed)
+      return false;
+    if (!liveAcrossFailure)
+      liveAcrossFailure = valueLiveAcrossPosition(value, position);
+  }
+  return liveAcrossFailure;
+}
+
+static bool
 isMemoryReliefCandidateSet(const wave::RegAllocTransformAliasSet &set,
                            ArrayRef<wave::RegAllocTransformValue> values,
-                           unsigned position) {
-  return set.regClass == waveamdmachine::RegClass::VGPR &&
-         llvm::any_of(set.members,
-                      [&](unsigned valueId) {
-                        return valueLiveAcrossPosition(values[valueId],
-                                                       position);
-                      }) &&
-         !hasFixedRegAllocValue(set, values);
+                           unsigned position,
+                           MemoryReliefSetEligibilityCache &cache) {
+  llvm::SmallDenseMap<unsigned, bool, 1024>::iterator cached =
+      cache.candidateBySetId.find(set.id);
+  if (cached != cache.candidateBySetId.end())
+    return cached->second;
+
+  bool candidate = computeMemoryReliefCandidateSet(set, values, position);
+  cache.candidateBySetId.insert({set.id, candidate});
+  return candidate;
 }
 
 static bool
@@ -462,12 +486,14 @@ buildMemoryReliefCandidate(func::FuncOp func, unsigned setId,
                            const RegAllocTransformFailure &failureRecord,
                            const MemoryReliefSetIndex &setIndex,
                            const MemoryReliefValueIndex &valueIndex,
+                           MemoryReliefSetEligibilityCache &eligibilityCache,
                            ArrayRef<wave::RegAllocTransformValue> values,
                            const RematReliefContext &context,
                            const typename Traits::PlanningState &planning) {
   const wave::RegAllocTransformAliasSet *set =
       findMemoryReliefSet(setIndex, setId);
-  if (!set || !isMemoryReliefCandidateSet(*set, values, failureRecord.position))
+  if (!set || !isMemoryReliefCandidateSet(*set, values, failureRecord.position,
+                                          eligibilityCache))
     return std::optional<typename Traits::Candidate>();
   FailureOr<SmallVector<ResolvedRegAllocValue>> resolvedValues =
       getMemoryReliefSetValues(func, *set, valueIndex);
@@ -544,6 +570,7 @@ buildExtraMemoryLoopCarryReliefCandidate(
     const RegAllocTransformFailure &failureRecord,
     const MemoryReliefSetIndex &setIndex,
     const MemoryReliefValueIndex &valueIndex,
+    MemoryReliefSetEligibilityCache &eligibilityCache,
     ArrayRef<wave::RegAllocTransformValue> values,
     const RematReliefContext &context,
     const typename Traits::PlanningState &planning) {
@@ -551,7 +578,8 @@ buildExtraMemoryLoopCarryReliefCandidate(
     return std::optional<typename Traits::Candidate>();
   const wave::RegAllocTransformAliasSet *set =
       findMemoryReliefSet(setIndex, setId);
-  if (!set || !isMemoryReliefCandidateSet(*set, values, failureRecord.position))
+  if (!set || !isMemoryReliefCandidateSet(*set, values, failureRecord.position,
+                                          eligibilityCache))
     return std::optional<typename Traits::Candidate>();
   FailureOr<SmallVector<ResolvedRegAllocValue>> resolvedValues =
       getMemoryReliefSetValues(func, *set, valueIndex);
@@ -580,6 +608,7 @@ expandMemoryLoopCarryReliefCandidate(
     const RegAllocTransformFailure &failureRecord,
     const MemoryReliefSetIndex &setIndex,
     const MemoryReliefValueIndex &valueIndex,
+    MemoryReliefSetEligibilityCache &eligibilityCache,
     ArrayRef<wave::RegAllocTransformValue> values,
     const RematReliefContext &context,
     const typename Traits::PlanningState &planning) {
@@ -590,7 +619,7 @@ expandMemoryLoopCarryReliefCandidate(
     FailureOr<std::optional<typename Traits::Candidate>> next =
         buildExtraMemoryLoopCarryReliefCandidate<Traits>(
             func, setId, candidate, loop, failureRecord, setIndex, valueIndex,
-            values, context, planning);
+            eligibilityCache, values, context, planning);
     if (failed(next))
       return failure();
     if (!*next)
@@ -613,11 +642,12 @@ selectMemoryReliefCandidate(func::FuncOp func,
   std::optional<typename Traits::Candidate> best;
   SmallVector<unsigned> candidateIds =
       collectVGPRReliefCandidateIds(failureRecord);
+  MemoryReliefSetEligibilityCache eligibilityCache;
   for (unsigned setId : candidateIds) {
     FailureOr<std::optional<typename Traits::Candidate>> candidate =
         buildMemoryReliefCandidate<Traits>(func, setId, failureRecord, setIndex,
-                                           valueIndex, values, context,
-                                           planning);
+                                           valueIndex, eligibilityCache, values,
+                                           context, planning);
     if (failed(candidate))
       return failure();
     if (!*candidate)
@@ -626,7 +656,8 @@ selectMemoryReliefCandidate(func::FuncOp func,
       FailureOr<typename Traits::Candidate> expanded =
           expandMemoryLoopCarryReliefCandidate<Traits>(
               func, std::move(**candidate), candidateIds, failureRecord,
-              setIndex, valueIndex, values, context, planning);
+              setIndex, valueIndex, eligibilityCache, values, context,
+              planning);
       if (failed(expanded))
         return failure();
       *candidate =
