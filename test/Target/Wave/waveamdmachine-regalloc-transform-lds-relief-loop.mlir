@@ -2,12 +2,12 @@
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
   // CHECK-LABEL: func.func @regalloc_transform_loop_lds_spills_post_failure_use(
-  // CHECK-SAME: waveamdmachine.lds_spill_bytes = 1024 : i64
+  // CHECK-SAME: waveamdmachine.lds_spill_bytes = 256 : i64
   // CHECK-SAME: waveamdmachine.regalloc_assignments
   // CHECK-SAME: waveamdmachine.regalloc_transform_state =
   // CHECK-SAME: stage = "linear-scan-success"
-  // CHECK: waveamdmachine.ds_store_b32
-  // CHECK: waveamdmachine.ds_load_b32
+  // CHECK: waveamdmachine.ds_store_addtid_b32
+  // CHECK: waveamdmachine.ds_load_addtid_b32
   // CHECK: waveamdmachine.s_endpgm
   func.func @regalloc_transform_loop_lds_spills_post_failure_use()
       attributes {wave.kernel, wave.workgroup_size = array<i32: 64, 1, 1>,

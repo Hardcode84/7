@@ -10,6 +10,7 @@
 
 #include "Utils/AMDGPUBaseInfo.h"
 #include "mlir/Dialect/Wave/IR/Wave.h"
+#include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachine.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineTarget.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "llvm/ADT/STLExtras.h"
@@ -28,6 +29,14 @@ using namespace mlir;
 using namespace mlir::wave::regalloc;
 
 namespace {
+
+static uint64_t getLDSAddTidOffsetWindowBytes() {
+  std::pair<int64_t, int64_t> range = waveamdmachine::instOffsetRange(
+      waveamdmachine::DsStoreAddTidB32Op::getAddressFieldSpec());
+  if (range.first < 0 || range.second < range.first)
+    return 0;
+  return static_cast<uint64_t>(range.second - range.first) + 1;
+}
 
 struct LDSTargetInfo {
   unsigned localMemorySize = 0;
@@ -328,6 +337,10 @@ LDSSpillPlan mlir::wave::regalloc::planLDSSpillSlot(
   uint64_t waveStride =
       static_cast<uint64_t>(planning.wavefrontSize) * valueBytes;
   uint64_t slotBytes = waveStride * planning.wavesPerWorkgroup;
+  uint64_t offsetWindowBytes = getLDSAddTidOffsetWindowBytes();
+  if (static_cast<uint64_t>(reservedSpillBytes) + slotBytes > offsetWindowBytes)
+    return reject(LDSSpillPlanStatus::UnsupportedSlotBase, fixedLDS, dynamicLDS,
+                  reservedSpillBytes, valueBytes);
   if (usedBytes + slotBytes > planning.limitBytes)
     return reject(LDSSpillPlanStatus::InsufficientLDS, fixedLDS, dynamicLDS,
                   reservedSpillBytes, valueBytes);

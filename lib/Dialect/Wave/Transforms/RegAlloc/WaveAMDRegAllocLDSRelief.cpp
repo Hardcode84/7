@@ -30,6 +30,9 @@ using namespace mlir::wave::regalloc_detail;
 
 namespace {
 
+static constexpr llvm::StringLiteral kLDSAddTidBaseAttr =
+    "waveamdmachine.lds_addtid_base_bytes";
+
 static FailureOr<unsigned> getLDSTransformTargetWaves(func::FuncOp func) {
   Attribute attr = findAncestorAttr(func, "waveamdmachine.target_waves");
   if (!attr)
@@ -104,23 +107,9 @@ static unsigned getLDSSlotBytes(ArrayRef<wave::regalloc::LDSSpillPlan> plans) {
   return total;
 }
 
-static bool canFoldSlotBaseIntoDSOffset(unsigned slotBase) {
-  std::pair<int64_t, int64_t> range = waveamdmachine::instOffsetRange(
-      waveamdmachine::DsStoreB32Op::getAddressFieldSpec());
-  return slotBase >= static_cast<uint64_t>(range.first) &&
-         slotBase <= static_cast<uint64_t>(range.second);
-}
-
-static unsigned getLDSAddressOpsPerAccess(wave::regalloc::LDSSpillPlan plan) {
-  return canFoldSlotBaseIntoDSOffset(plan.slotBase) ? 1 : 2;
-}
-
 static unsigned
 getLDSAccessOpCount(ArrayRef<wave::regalloc::LDSSpillPlan> plans) {
-  unsigned total = 0;
-  for (wave::regalloc::LDSSpillPlan plan : plans)
-    total += 1 + getLDSAddressOpsPerAccess(plan);
-  return total;
+  return plans.size() * 2;
 }
 
 static int64_t getLDSReliefCost(Value value,
@@ -177,8 +166,22 @@ static Value createLDSImm(OpBuilder &builder, Location loc, int64_t value) {
       static_cast<uint64_t>(value));
 }
 
-static waveamdmachine::RegType getVirtualVGPR1(MLIRContext *ctx) {
-  return waveamdmachine::RegType::get(ctx, waveamdmachine::RegClass::VGPR,
+static void markRegAllocTemp(Operation *op, OpBuilder &builder) {
+  op->setAttr(wave::regalloc::kRegAllocTempAttr, builder.getUnitAttr());
+}
+
+static void markLDSAddTidBase(Operation *op, OpBuilder &builder,
+                              unsigned ldsBaseBytes) {
+  op->setAttr(kLDSAddTidBaseAttr, builder.getI64IntegerAttr(ldsBaseBytes));
+}
+
+static waveamdmachine::RegType getVirtualSGPR1(MLIRContext *ctx) {
+  return waveamdmachine::RegType::get(ctx, waveamdmachine::RegClass::SGPR,
+                                      /*width=*/1, /*index=*/-1);
+}
+
+static waveamdmachine::RegType getSCCType(MLIRContext *ctx) {
+  return waveamdmachine::RegType::get(ctx, waveamdmachine::RegClass::SCC,
                                       /*width=*/1, /*index=*/-1);
 }
 
@@ -271,54 +274,129 @@ static Value getOrCreateWorkitemId(OpBuilder &builder, Location loc) {
       .getResult();
 }
 
-static FailureOr<std::pair<Value, int64_t>>
-materializeLDSAddress(OpBuilder &builder, Location loc,
-                      wave::regalloc::LDSSpillPlan plan) {
-  MLIRContext *ctx = builder.getContext();
-  Value workitem = getOrCreateWorkitemId(builder, loc);
-  waveamdmachine::VLshlrevB32Op addr = waveamdmachine::VLshlrevB32Op::create(
-      builder, loc, getVirtualVGPR1(ctx), workitem,
-      createLDSImm(builder, loc, llvm::Log2_32(plan.valueBytes)));
-  addr->setAttr(wave::regalloc::kRegAllocTempAttr, builder.getUnitAttr());
-  if (canFoldSlotBaseIntoDSOffset(plan.slotBase))
-    return std::make_pair(addr.getResult(),
-                          static_cast<int64_t>(plan.slotBase));
-  waveamdmachine::VAddU32Op fullAddr = waveamdmachine::VAddU32Op::create(
-      builder, loc, getVirtualVGPR1(ctx), addr.getResult(),
-      createLDSImm(builder, loc, plan.slotBase));
-  fullAddr->setAttr(wave::regalloc::kRegAllocTempAttr, builder.getUnitAttr());
-  return std::make_pair(fullAddr.getResult(), int64_t{0});
+struct LDSAddTidContext {
+  Value waveBaseBytes;
+};
+
+static Value findLDSAddTidBase(func::FuncOp func, unsigned ldsBaseBytes) {
+  Block &entry = func.getBody().front();
+  for (Operation &op : entry) {
+    std::optional<unsigned> attr =
+        getUnsignedIntegerAttr(&op, kLDSAddTidBaseAttr);
+    if (attr && *attr == ldsBaseBytes && op.getNumResults() != 0)
+      return op.getResult(0);
+  }
+  return {};
 }
 
-static FailureOr<Value> storeLDSScalarValue(OpBuilder &builder, Location loc,
-                                            Value value, Value token,
-                                            wave::regalloc::LDSSpillPlan plan) {
-  FailureOr<std::pair<Value, int64_t>> addr =
-      materializeLDSAddress(builder, loc, plan);
-  if (failed(addr))
+static FailureOr<unsigned>
+getLDSBaseBytes(func::FuncOp func, const LDSReliefCandidate &candidate) {
+  std::optional<unsigned> baseBytes;
+  for (const LDSReliefSlot &slot : candidate.slots) {
+    for (wave::regalloc::LDSSpillPlan plan : slot.plan) {
+      unsigned planBase = plan.existingFixedBytes + plan.existingDynamicBytes;
+      if (!baseBytes) {
+        baseBytes = planBase;
+        continue;
+      }
+      if (*baseBytes != planBase)
+        return func.emitError("LDS relief candidate has mixed base offsets");
+    }
+  }
+  if (!baseBytes)
+    return func.emitError("LDS relief candidate has no spill plan");
+  return *baseBytes;
+}
+
+static LDSAddTidContext materializeLDSAddTidContext(OpBuilder &builder,
+                                                    func::FuncOp func,
+                                                    unsigned ldsBaseBytes) {
+  if (Value existing = findLDSAddTidBase(func, ldsBaseBytes))
+    return LDSAddTidContext{existing};
+
+  MLIRContext *ctx = builder.getContext();
+  Location loc = func.getLoc();
+  OpBuilder::InsertionGuard guard(builder);
+  Block &entry = func.getBody().front();
+  builder.setInsertionPointToStart(&entry);
+
+  Value workitem = getOrCreateWorkitemId(builder, loc);
+  waveamdmachine::VReadfirstlaneB32Op firstLane =
+      waveamdmachine::VReadfirstlaneB32Op::create(
+          builder, loc, getVirtualSGPR1(ctx), workitem);
+  markRegAllocTemp(firstLane, builder);
+
+  waveamdmachine::SLshlB32Op waveOffset = waveamdmachine::SLshlB32Op::create(
+      builder, loc, getVirtualSGPR1(ctx), getSCCType(ctx),
+      firstLane.getResult(), createLDSImm(builder, loc, llvm::Log2_32(4)));
+  markRegAllocTemp(waveOffset, builder);
+
+  Value waveBase = waveOffset.getResult();
+  if (ldsBaseBytes != 0) {
+    waveamdmachine::SAddI32Op fullBase = waveamdmachine::SAddI32Op::create(
+        builder, loc, getVirtualSGPR1(ctx), getSCCType(ctx), waveBase,
+        createLDSImm(builder, loc, ldsBaseBytes));
+    markRegAllocTemp(fullBase, builder);
+    waveBase = fullBase.getResult();
+    markLDSAddTidBase(fullBase, builder, ldsBaseBytes);
+  } else {
+    markLDSAddTidBase(waveOffset, builder, ldsBaseBytes);
+  }
+  return LDSAddTidContext{waveBase};
+}
+
+static FailureOr<int64_t>
+getLDSAddTidOffset(wave::regalloc::LDSSpillPlan plan) {
+  std::pair<int64_t, int64_t> range = waveamdmachine::instOffsetRange(
+      waveamdmachine::DsStoreAddTidB32Op::getAddressFieldSpec());
+  int64_t offset = static_cast<int64_t>(plan.reservedSpillBytes);
+  if (offset < range.first || offset > range.second)
     return failure();
+  return offset;
+}
+
+static Value materializeLDSM0(OpBuilder &builder, Location loc,
+                              const LDSAddTidContext &context) {
+  waveamdmachine::SMovM0Op mov = waveamdmachine::SMovM0Op::create(
+      builder, loc, waveamdmachine::M0Type::get(builder.getContext()),
+      context.waveBaseBytes);
+  markRegAllocTemp(mov, builder);
+  return mov.getResult();
+}
+
+static FailureOr<Value> storeLDSScalarValue(OpBuilder &builder,
+                                            const LDSAddTidContext &context,
+                                            Location loc, Value value,
+                                            Value token,
+                                            wave::regalloc::LDSSpillPlan plan) {
+  FailureOr<int64_t> offset = getLDSAddTidOffset(plan);
+  if (failed(offset))
+    return failure();
+  Value m0 = materializeLDSM0(builder, loc, context);
   Type tokenType = waveamdmachine::MemTokenType::get(builder.getContext());
-  waveamdmachine::DsStoreB32Op store = waveamdmachine::DsStoreB32Op::create(
-      builder, loc, tokenType, addr->first, value, token, addr->second);
-  store->setAttr(wave::regalloc::kRegAllocTempAttr, builder.getUnitAttr());
+  waveamdmachine::DsStoreAddTidB32Op store =
+      waveamdmachine::DsStoreAddTidB32Op::create(builder, loc, tokenType, m0,
+                                                 value, token, *offset);
+  markRegAllocTemp(store, builder);
   return store.getToken();
 }
 
 static FailureOr<Value>
-storeLDSValueAt(OpBuilder &builder, Location loc, Value value,
-                waveamdmachine::RegType type, Value token,
-                ArrayRef<wave::regalloc::LDSSpillPlan> plans) {
+storeLDSValueAt(OpBuilder &builder, const LDSAddTidContext &context,
+                Location loc, Value value, waveamdmachine::RegType type,
+                Value token, ArrayRef<wave::regalloc::LDSSpillPlan> plans) {
   unsigned width = type.getWidth();
   if (width == 1)
-    return storeLDSScalarValue(builder, loc, value, token, plans.front());
+    return storeLDSScalarValue(builder, context, loc, value, token,
+                               plans.front());
 
   SmallVector<Value> elements =
       wave::regalloc::splitMemorySpillValue(value, builder, loc);
   SmallVector<Value> tokens;
   tokens.reserve(elements.size());
   for (auto [index, element] : llvm::enumerate(elements)) {
-    FailureOr<Value> stored =
-        storeLDSScalarValue(builder, loc, element, token, plans[index]);
+    FailureOr<Value> stored = storeLDSScalarValue(builder, context, loc,
+                                                  element, token, plans[index]);
     if (failed(stored))
       return failure();
     tokens.push_back(*stored);
@@ -328,33 +406,38 @@ storeLDSValueAt(OpBuilder &builder, Location loc, Value value,
 }
 
 static FailureOr<Value> storeLDSValue(OpBuilder &builder,
+                                      const LDSAddTidContext &context,
                                       const LDSReliefSlot &slot, Value token) {
   wave::regalloc::setInsertionPointForMemorySpillStore(slot.value, builder);
-  return storeLDSValueAt(builder, slot.value.getLoc(), slot.value, slot.type,
-                         token, slot.plan);
+  return storeLDSValueAt(builder, context, slot.value.getLoc(), slot.value,
+                         slot.type, token, slot.plan);
 }
 
 static FailureOr<wave::regalloc::MemorySpillLoadResult>
-loadLDSScalarValue(OpBuilder &builder, Location loc, Type type, Value token,
+loadLDSScalarValue(OpBuilder &builder, const LDSAddTidContext &context,
+                   Location loc, Type type, Value token,
                    wave::regalloc::LDSSpillPlan plan) {
-  FailureOr<std::pair<Value, int64_t>> addr =
-      materializeLDSAddress(builder, loc, plan);
-  if (failed(addr))
+  FailureOr<int64_t> offset = getLDSAddTidOffset(plan);
+  if (failed(offset))
     return failure();
+  Value m0 = materializeLDSM0(builder, loc, context);
   Type tokenType = waveamdmachine::MemTokenType::get(builder.getContext());
-  waveamdmachine::DsLoadB32Op load = waveamdmachine::DsLoadB32Op::create(
-      builder, loc, type, tokenType, addr->first, token, addr->second);
-  load->setAttr(wave::regalloc::kRegAllocTempAttr, builder.getUnitAttr());
+  waveamdmachine::DsLoadAddTidB32Op load =
+      waveamdmachine::DsLoadAddTidB32Op::create(builder, loc, type, tokenType,
+                                                m0, token, *offset);
+  markRegAllocTemp(load, builder);
   return wave::regalloc::MemorySpillLoadResult{load.getResult(),
                                                load.getToken()};
 }
 
 static FailureOr<wave::regalloc::MemorySpillLoadResult>
-loadLDSValue(OpBuilder &builder, Location loc, Type type, Value token,
+loadLDSValue(OpBuilder &builder, const LDSAddTidContext &context, Location loc,
+             Type type, Value token,
              ArrayRef<wave::regalloc::LDSSpillPlan> plans) {
   unsigned width = cast<waveamdmachine::RegType>(type).getWidth();
   if (width == 1)
-    return loadLDSScalarValue(builder, loc, type, token, plans.front());
+    return loadLDSScalarValue(builder, context, loc, type, token,
+                              plans.front());
 
   SmallVector<Type> elementTypes =
       wave::regalloc::getMemorySpillScalarRegTypes(type);
@@ -363,8 +446,8 @@ loadLDSValue(OpBuilder &builder, Location loc, Type type, Value token,
   elements.reserve(elementTypes.size());
   tokens.reserve(elementTypes.size());
   for (auto [index, elementType] : llvm::enumerate(elementTypes)) {
-    FailureOr<wave::regalloc::MemorySpillLoadResult> load =
-        loadLDSScalarValue(builder, loc, elementType, token, plans[index]);
+    FailureOr<wave::regalloc::MemorySpillLoadResult> load = loadLDSScalarValue(
+        builder, context, loc, elementType, token, plans[index]);
     if (failed(load))
       return failure();
     elements.push_back(load->value);
@@ -385,20 +468,26 @@ static void reserveLDSSpillBytes(func::FuncOp func, OpBuilder &builder,
 
 static LogicalResult materializeLDSRelief(OpBuilder &builder, func::FuncOp func,
                                           const LDSReliefCandidate &candidate) {
+  FailureOr<unsigned> ldsBaseBytes = getLDSBaseBytes(func, candidate);
+  if (failed(ldsBaseBytes))
+    return failure();
+  LDSAddTidContext context =
+      materializeLDSAddTidContext(builder, func, *ldsBaseBytes);
   auto store = [&](const LDSReliefSlot &slot, Value token) {
-    return storeLDSValue(builder, slot, token);
+    return storeLDSValue(builder, context, slot, token);
   };
   auto load = [&](Location loc, Type type, Value token,
                   const LDSReliefPlan &plan)
       -> FailureOr<wave::regalloc::MemorySpillLoadResult> {
-    return loadLDSValue(builder, loc, type, token, plan);
+    return loadLDSValue(builder, context, loc, type, token, plan);
   };
   auto reserve = [&](unsigned bytes) {
     reserveLDSSpillBytes(func, builder, bytes);
   };
   auto loopStore = [&](Value value, Value token, const LDSReliefSlot &slot,
                        Location loc) -> FailureOr<Value> {
-    return storeLDSValueAt(builder, loc, value, slot.type, token, slot.plan);
+    return storeLDSValueAt(builder, context, loc, value, slot.type, token,
+                           slot.plan);
   };
   return materializeMemoryRelief<LDSReliefSlot>(builder, candidate, store, load,
                                                 reserve, loopStore);

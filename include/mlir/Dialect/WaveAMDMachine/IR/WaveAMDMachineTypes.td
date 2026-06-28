@@ -72,8 +72,8 @@ def WaveAMDMachine_M0Type : WaveAMDMachine_Type<"M0", "m0"> {
   let summary = "AMDGPU M0 state";
   let description = [{
     A `!waveamdmachine.m0` value makes writes to the AMDGPU M0 register visible
-    in WaveAMDMachine IR. LDS DMA instructions consume it for their destination
-    base address.
+    in WaveAMDMachine IR. LDS DMA and addtid DS instructions consume it for
+    LDS base address state.
   }];
 }
 

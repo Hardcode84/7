@@ -29,11 +29,14 @@ module attributes {transform.with_named_sequence} {
     // CHECK-SAME: waveamdmachine.lds_spill_bytes = 256 : i64
     // CHECK-NOT: waveamdmachine.regalloc_transform_state
     // CHECK: [[OFF:%.*]] = waveamdmachine.v_workitem_id_x
+    // CHECK: [[LANE:%.*]] = waveamdmachine.v_readfirstlane_b32 [[OFF]]
+    // CHECK: [[SHIFT:%.*]] = waveamdmachine.imm 2
+    // CHECK: [[BASE:%.*]], {{%.*}} = waveamdmachine.s_lshl_b32 [[LANE]], [[SHIFT]]
     // CHECK: [[SPILL:%.*]], [[SPILLTOK:%.*]] = waveamdmachine.global_load_b32 [[OFF]]
-    // CHECK: [[ADDR:%.*]] = waveamdmachine.v_lshlrev_b32 [[OFF]]
-    // CHECK: [[STORE:%.*]] = waveamdmachine.ds_store_b32 [[ADDR]], [[SPILL]] after [[SPILLTOK]]
-    // CHECK: [[RELOAD_ADDR:%.*]] = waveamdmachine.v_lshlrev_b32
-    // CHECK: [[RELOAD:%.*]], {{%.*}} = waveamdmachine.ds_load_b32 [[RELOAD_ADDR]] after [[STORE]]
+    // CHECK: [[M0:%.*]] = waveamdmachine.s_mov_m0 [[BASE]]
+    // CHECK: [[STORE:%.*]] = waveamdmachine.ds_store_addtid_b32 [[M0]], [[SPILL]] after [[SPILLTOK]]
+    // CHECK: [[RELOAD_M0:%.*]] = waveamdmachine.s_mov_m0 [[BASE]]
+    // CHECK: [[RELOAD:%.*]], {{%.*}} = waveamdmachine.ds_load_addtid_b32 [[RELOAD_M0]] after [[STORE]]
     // CHECK: waveamdmachine.v_add_u32 [[RELOAD]],
     func.func @lds_relief_spills_post_failure_use()
         attributes {wave.kernel, wave.workgroup_size = array<i32: 64, 1, 1>,
@@ -67,15 +70,18 @@ module attributes {transform.with_named_sequence} {
     // CHECK-LABEL: func.func @lds_relief_prefers_outside_loop_bridges(
     // CHECK-SAME: waveamdmachine.lds_spill_bytes = 256 : i64
     // CHECK: [[OFF:%.*]] = waveamdmachine.v_workitem_id_x
+    // CHECK: [[LANE:%.*]] = waveamdmachine.v_readfirstlane_b32 [[OFF]]
+    // CHECK: [[SHIFT:%.*]] = waveamdmachine.imm 2
+    // CHECK: [[BASE:%.*]], {{%.*}} = waveamdmachine.s_lshl_b32 [[LANE]], [[SHIFT]]
     // CHECK: [[CARRY:%.*]], [[CARRYTOK:%.*]] = waveamdmachine.global_load_b32 [[OFF]]
-    // CHECK: [[ADDR:%.*]] = waveamdmachine.v_lshlrev_b32 [[OFF]]
-    // CHECK-NEXT: [[STORE:%.*]] = waveamdmachine.ds_store_b32 [[ADDR]], [[CARRY]] after [[CARRYTOK]]
+    // CHECK: [[M0:%.*]] = waveamdmachine.s_mov_m0 [[BASE]]
+    // CHECK-NEXT: [[STORE:%.*]] = waveamdmachine.ds_store_addtid_b32 [[M0]], [[CARRY]] after [[CARRYTOK]]
     // CHECK: [[LOOP:%.*]] = waveamdmachine.uniform_loop
     // CHECK-SAME: carries([[STORE]] : !waveamdmachine.mem.token)
     // CHECK: waveamdmachine.continue_if
     // CHECK-SAME: carries({{%.*}} : !waveamdmachine.mem.token)
-    // CHECK: [[RELOAD_ADDR:%.*]] = waveamdmachine.v_lshlrev_b32
-    // CHECK-NEXT: [[RELOAD:%.*]], {{%.*}} = waveamdmachine.ds_load_b32 [[RELOAD_ADDR]] after [[LOOP]]
+    // CHECK: [[RELOAD_M0:%.*]] = waveamdmachine.s_mov_m0 [[BASE]]
+    // CHECK-NEXT: [[RELOAD:%.*]], {{%.*}} = waveamdmachine.ds_load_addtid_b32 [[RELOAD_M0]] after [[LOOP]]
     // CHECK: waveamdmachine.v_add_u32 [[RELOAD]],
     func.func @lds_relief_prefers_outside_loop_bridges()
         attributes {wave.kernel, wave.workgroup_size = array<i32: 64, 1, 1>,
@@ -127,10 +133,15 @@ module attributes {transform.with_named_sequence} {
     // CHECK-LABEL: func.func @lds_relief_accounts_dynamic_lds(
     // CHECK-SAME: wave.dynamic_lds_size = 1024 : i64
     // CHECK-SAME: waveamdmachine.lds_spill_bytes = 256 : i64
-    // CHECK: [[STORE:%.*]] = waveamdmachine.ds_store_b32
-    // CHECK-SAME: offset 1024
-    // CHECK: waveamdmachine.ds_load_b32 {{.*}} after [[STORE]]
-    // CHECK-SAME: offset 1024
+    // CHECK: [[BASE:%.*]], {{%.*}} = waveamdmachine.s_lshl_b32
+    // CHECK: [[DYN:%.*]] = waveamdmachine.imm 1024
+    // CHECK: [[FULL:%.*]], {{%.*}} = waveamdmachine.s_add_i32 [[BASE]], [[DYN]]
+    // CHECK: [[STORE_M0:%.*]] = waveamdmachine.s_mov_m0 [[FULL]]
+    // CHECK: [[STORE:%.*]] = waveamdmachine.ds_store_addtid_b32 [[STORE_M0]],
+    // CHECK-NOT: offset 1024
+    // CHECK: [[LOAD_M0:%.*]] = waveamdmachine.s_mov_m0 [[FULL]]
+    // CHECK: waveamdmachine.ds_load_addtid_b32 [[LOAD_M0]] after [[STORE]]
+    // CHECK-NOT: offset 1024
     func.func @lds_relief_accounts_dynamic_lds()
         attributes {wave.kernel, wave.workgroup_size = array<i32: 64, 1, 1>,
                     wave.dynamic_lds_size = 1024 : i64,
@@ -163,8 +174,8 @@ module attributes {transform.with_named_sequence} {
 
     // CHECK-LABEL: func.func @lds_relief_accounts_multiple_waves(
     // CHECK-SAME: waveamdmachine.lds_spill_bytes = 512 : i64
-    // CHECK: waveamdmachine.ds_store_b32
-    // CHECK: waveamdmachine.ds_load_b32
+    // CHECK: waveamdmachine.ds_store_addtid_b32
+    // CHECK: waveamdmachine.ds_load_addtid_b32
     func.func @lds_relief_accounts_multiple_waves()
         attributes {wave.kernel, wave.workgroup_size = array<i32: 128, 1, 1>,
                     waveamdmachine.vgpr_count_max = 3 : i64,
@@ -198,10 +209,15 @@ module attributes {transform.with_named_sequence} {
     // CHECK-SAME: wave.dynamic_lds_size = 512 : i64
     // CHECK-SAME: wave.lds_size = 2048 : i64
     // CHECK-SAME: waveamdmachine.lds_spill_bytes = 256 : i64
-    // CHECK: [[STORE:%.*]] = waveamdmachine.ds_store_b32
-    // CHECK-SAME: offset 2560
-    // CHECK: waveamdmachine.ds_load_b32 {{.*}} after [[STORE]]
-    // CHECK-SAME: offset 2560
+    // CHECK: [[BASE:%.*]], {{%.*}} = waveamdmachine.s_lshl_b32
+    // CHECK: [[LDS:%.*]] = waveamdmachine.imm 2560
+    // CHECK: [[FULL:%.*]], {{%.*}} = waveamdmachine.s_add_i32 [[BASE]], [[LDS]]
+    // CHECK: [[STORE_M0:%.*]] = waveamdmachine.s_mov_m0 [[FULL]]
+    // CHECK: [[STORE:%.*]] = waveamdmachine.ds_store_addtid_b32 [[STORE_M0]],
+    // CHECK-NOT: offset 2560
+    // CHECK: [[LOAD_M0:%.*]] = waveamdmachine.s_mov_m0 [[FULL]]
+    // CHECK: waveamdmachine.ds_load_addtid_b32 [[LOAD_M0]] after [[STORE]]
+    // CHECK-NOT: offset 2560
     func.func @lds_relief_after_fixed_and_dynamic_lds()
         attributes {wave.kernel, wave.workgroup_size = array<i32: 64, 1, 1>,
                     wave.lds_size = 2048 : i64,
@@ -237,8 +253,8 @@ module attributes {transform.with_named_sequence} {
     // CHECK-SAME: waveamdmachine.lds_size = 2304 : i64
     // CHECK-SAME: waveamdmachine.regalloc_assignments
     // CHECK-NOT: waveamdmachine.lds_spill_bytes
-    // CHECK-NOT: waveamdmachine.ds_store_b32
-    // CHECK-NOT: waveamdmachine.ds_load_b32
+    // CHECK-NOT: waveamdmachine.ds_store_addtid_b32
+    // CHECK-NOT: waveamdmachine.ds_load_addtid_b32
     func.func @lds_relief_machine_lds_multi_slot_offsets()
         attributes {wave.kernel, wave.workgroup_size = array<i32: 64, 1, 1>,
                     waveamdmachine.lds_size = 2304 : i64,

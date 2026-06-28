@@ -167,7 +167,9 @@
   X(bufferLoadLdsB32, BUFFER_LOAD_DWORD_LDS_OFFEN_vi,                          \
     BUFFER_LOAD_DWORD_LDS_OFFEN_gfx10)                                         \
   X(dsReadB32, DS_READ_B32_vi_gfx9, DS_READ_B32_gfx11)                         \
+  X(dsReadAddTidB32, DS_READ_ADDTID_B32_vi, DS_READ_ADDTID_B32_gfx11)           \
   X(dsSwizzleB32, DS_SWIZZLE_B32_vi, DS_SWIZZLE_B32_gfx11)                     \
   X(dsPermuteB32, DS_PERMUTE_B32_vi, DS_PERMUTE_B32_gfx11)                     \
   X(dsBpermuteB32, DS_BPERMUTE_B32_vi, DS_BPERMUTE_B32_gfx11)                  \
-  X(dsWriteB32, DS_WRITE_B32_vi_gfx9, DS_WRITE_B32_gfx11)
+  X(dsWriteB32, DS_WRITE_B32_vi_gfx9, DS_WRITE_B32_gfx11)                      \
+  X(dsWriteAddTidB32, DS_WRITE_ADDTID_B32_vi, DS_WRITE_ADDTID_B32_gfx11)

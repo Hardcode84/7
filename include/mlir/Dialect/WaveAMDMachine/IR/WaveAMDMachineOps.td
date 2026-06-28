@@ -2200,6 +2200,21 @@ def WaveAMDMachine_DsLoadB32Op
   }];
 }
 
+def WaveAMDMachine_DsLoadAddTidB32Op
+    : WaveAMDMachine_DsMemoryOp<"ds_load_addtid_b32", [WaveAMDMachine_LDSLoad]>,
+      WaveAMDMachine_LDSInfo<"1"> {
+  let summary = "LDS 32-bit addtid load";
+  let arguments = (ins WaveAMDMachine_M0:$m0,
+                       Optional<WaveAMDMachine_MemToken>:$dependency,
+                       DefaultValuedAttr<I64Attr, "0">:$offset);
+  let results = (outs WaveAMDMachine_VGPR1:$result,
+                      Optional<WaveAMDMachine_MemToken>:$token);
+  let assemblyFormat = [{
+    $m0 (`after` $dependency^)? (`offset` $offset^)?
+    attr-dict `:` functional-type(operands, results)
+  }];
+}
+
 def WaveAMDMachine_DsLoadTupleB32Op
     : WaveAMDMachine_DsMemoryOp<"ds_load_tuple_b32", [WaveAMDMachine_LDSLoad, WaveAMDMachine_TupleMemory]>,
       WaveAMDMachine_LDSTupleLoadInfo {
@@ -2245,6 +2260,20 @@ def WaveAMDMachine_DsStoreB32Op
   let results = (outs Optional<WaveAMDMachine_MemToken>:$token);
   let assemblyFormat = [{
     $addr `,` $value (`after` $dependency^)? (`offset` $offset^)?
+    attr-dict `:` functional-type(operands, results)
+  }];
+}
+
+def WaveAMDMachine_DsStoreAddTidB32Op
+    : WaveAMDMachine_DsMemoryOp<"ds_store_addtid_b32", [WaveAMDMachine_LDSStore]>,
+      WaveAMDMachine_LDSInfo<"1"> {
+  let summary = "LDS 32-bit addtid store";
+  let arguments = (ins WaveAMDMachine_M0:$m0, WaveAMDMachine_VGPR1:$value,
+                       Optional<WaveAMDMachine_MemToken>:$dependency,
+                       DefaultValuedAttr<I64Attr, "0">:$offset);
+  let results = (outs Optional<WaveAMDMachine_MemToken>:$token);
+  let assemblyFormat = [{
+    $m0 `,` $value (`after` $dependency^)? (`offset` $offset^)?
     attr-dict `:` functional-type(operands, results)
   }];
 }
