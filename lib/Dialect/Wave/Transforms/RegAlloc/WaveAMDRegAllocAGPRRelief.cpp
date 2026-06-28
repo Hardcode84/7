@@ -41,6 +41,11 @@ struct AGPRReliefCandidate {
   AGPRReliefScore score;
 };
 
+struct AGPRReliefSetGroup {
+  SmallVector<const wave::RegAllocTransformAliasSet *, 4> sets;
+  const wave::RegAllocTransformAliasSet *primary = nullptr;
+};
+
 struct AGPRReliefSetIndex {
   llvm::SmallDenseMap<unsigned, const wave::RegAllocTransformAliasSet *, 1024>
       setsById;
@@ -92,9 +97,8 @@ static bool lessAGPRReliefInterval(const AGPRReliefInterval &lhs,
 
 static bool assignAGPRReliefInterval(
     const AGPRReliefInterval &interval,
-    SmallVectorImpl<wave::RegAllocTransformAssignment> &active,
-    unsigned candidateId, unsigned limit, unsigned &footprint,
-    bool &allocatedCandidate) {
+    SmallVectorImpl<wave::RegAllocTransformAssignment> &active, unsigned limit,
+    unsigned &footprint) {
   llvm::erase_if(active,
                  [&](const wave::RegAllocTransformAssignment &assigned) {
                    return assigned.end < interval.start;
@@ -112,7 +116,6 @@ static bool assignAGPRReliefInterval(
                       *interval.fixedBase, interval.width, interval.start,
                       interval.end});
     footprint = std::max(footprint, *interval.fixedBase + interval.width);
-    allocatedCandidate |= interval.id == candidateId;
     return true;
   }
   std::optional<unsigned> base = findFreeAGPRBase(interval, active, limit);
@@ -121,17 +124,14 @@ static bool assignAGPRReliefInterval(
   active.push_back({waveamdmachine::RegClass::AGPR, interval.id, *base,
                     interval.width, interval.start, interval.end});
   footprint = std::max(footprint, *base + interval.width);
-  allocatedCandidate |= interval.id == candidateId;
   return true;
 }
 
 static bool
 canAllocateAGPRReliefIntervals(ArrayRef<AGPRReliefInterval> intervals,
                                ArrayRef<AGPRReliefInterval> overlayIntervals,
-                               unsigned candidateId, unsigned limit,
-                               unsigned &footprint) {
+                               unsigned limit, unsigned &footprint) {
   SmallVector<wave::RegAllocTransformAssignment> active;
-  bool allocatedCandidate = false;
   footprint = 0;
   size_t index = 0;
   size_t overlayIndex = 0;
@@ -142,11 +142,10 @@ canAllocateAGPRReliefIntervals(ArrayRef<AGPRReliefInterval> intervals,
                                               intervals[index]));
     const AGPRReliefInterval &interval =
         useOverlay ? overlayIntervals[overlayIndex++] : intervals[index++];
-    if (!assignAGPRReliefInterval(interval, active, candidateId, limit,
-                                  footprint, allocatedCandidate))
+    if (!assignAGPRReliefInterval(interval, active, limit, footprint))
       return false;
   }
-  return allocatedCandidate;
+  return !overlayIntervals.empty();
 }
 
 static void
@@ -174,24 +173,33 @@ buildAGPRReliefFitState(func::FuncOp func,
   return state;
 }
 
-static bool
-canAllocateAGPRReliefCandidate(const wave::RegAllocTransformAliasSet &candidate,
-                               const AGPRReliefFitState &fitState,
-                               unsigned &agprFootprint) {
-  SmallVector<AGPRReliefInterval, 4> overlayIntervals;
-  addAGPRReliefIntervals(overlayIntervals, candidate, std::nullopt);
+static bool canAllocateAGPRReliefCandidate(const AGPRReliefSetGroup &candidate,
+                                           const AGPRReliefFitState &fitState,
+                                           unsigned &agprFootprint) {
+  SmallVector<AGPRReliefInterval, 8> overlayIntervals;
+  for (const wave::RegAllocTransformAliasSet *set : candidate.sets)
+    addAGPRReliefIntervals(overlayIntervals, *set, std::nullopt);
+  llvm::stable_sort(overlayIntervals, lessAGPRReliefInterval);
   return canAllocateAGPRReliefIntervals(fitState.intervals, overlayIntervals,
-                                        candidate.id, fitState.budget.limit,
-                                        agprFootprint);
+                                        fitState.budget.limit, agprFootprint);
 }
 
-static unsigned getVGPRFootprintAfterRemovingSet(
+static bool
+containsAGPRReliefSet(ArrayRef<const wave::RegAllocTransformAliasSet *> sets,
+                      unsigned setId) {
+  return llvm::any_of(sets,
+                      [setId](const wave::RegAllocTransformAliasSet *set) {
+                        return set->id == setId;
+                      });
+}
+
+static unsigned getVGPRFootprintAfterRemovingSets(
     ArrayRef<wave::RegAllocTransformAssignment> assignments,
-    std::optional<unsigned> removedSet) {
+    ArrayRef<const wave::RegAllocTransformAliasSet *> removedSets) {
   unsigned footprint = 0;
   for (const wave::RegAllocTransformAssignment &assignment : assignments) {
     if (assignment.regClass != waveamdmachine::RegClass::VGPR ||
-        (removedSet && assignment.set == *removedSet))
+        containsAGPRReliefSet(removedSets, assignment.set))
       continue;
     footprint = std::max(footprint, assignment.base + assignment.width);
   }
@@ -209,9 +217,9 @@ findFailureOverlap(const RegAllocTransformFailure &failureRecord,
 }
 
 static FailureOr<bool> respectsCombinedVGPRFamilyBudget(
-    func::FuncOp func, const wave::RegAllocTransformAliasSet &candidate,
+    func::FuncOp func, const AGPRReliefSetGroup &candidate,
     const RegAllocTransformFailure &failureRecord,
-    ArrayRef<wave::RegAllocTransformAliasSet> sets, unsigned agprFootprint) {
+    const AGPRReliefSetIndex &setIndex, unsigned agprFootprint) {
   FailureOr<std::optional<wave::RegAllocTransformBudget>> familyBudget =
       wave::getRegAllocTransformVGPRFamilyBudget(func);
   if (failed(familyBudget))
@@ -219,24 +227,20 @@ static FailureOr<bool> respectsCombinedVGPRFamilyBudget(
   if (!*familyBudget)
     return true;
 
-  unsigned vgprFootprint = getVGPRFootprintAfterRemovingSet(
-      failureRecord.overlaps, /*removedSet=*/std::nullopt);
-  if (candidate.id != failureRecord.set) {
+  unsigned vgprFootprint =
+      getVGPRFootprintAfterRemovingSets(failureRecord.overlaps, candidate.sets);
+  if (!containsAGPRReliefSet(candidate.sets, failureRecord.set)) {
     const wave::RegAllocTransformAssignment *moved =
-        findFailureOverlap(failureRecord, candidate.id);
+        findFailureOverlap(failureRecord, candidate.primary->id);
     if (!moved)
       return false;
-    const wave::RegAllocTransformAliasSet *request = nullptr;
-    for (const wave::RegAllocTransformAliasSet &set : sets)
-      if (set.id == failureRecord.set) {
-        request = &set;
-        break;
-      }
+    const wave::RegAllocTransformAliasSet *request =
+        setIndex.setsById.lookup(failureRecord.set);
     if (!request || request->width > moved->width)
       return false;
-    vgprFootprint = std::max(
-        getVGPRFootprintAfterRemovingSet(failureRecord.overlaps, candidate.id),
-        moved->base + request->width);
+    vgprFootprint = std::max(getVGPRFootprintAfterRemovingSets(
+                                 failureRecord.overlaps, candidate.sets),
+                             moved->base + request->width);
   }
 
   unsigned pressure =
@@ -345,7 +349,9 @@ static bool canConsumeAGPRAfterRelief(OpOperand &use,
     if (isMFMAInputUse(mfma, use))
       return true;
     if (isMFMAAccumulatorUse(mfma, use) &&
-        isReliefGroupValue(mfma.getAccResult(), groupValues))
+        (hasRegAllocTransformClass(mfma.getAccResult(),
+                                   waveamdmachine::RegClass::AGPR) ||
+         isReliefGroupValue(mfma.getAccResult(), groupValues)))
       return true;
   }
   if (isStructuralLoopCarryUse(user))
@@ -453,7 +459,7 @@ static int64_t getAGPRReliefPrimaryCost(AGPRReliefScore score) {
 }
 
 static AGPRReliefScore
-getAGPRReliefScore(const wave::RegAllocTransformAliasSet &set,
+getAGPRReliefScore(const AGPRReliefSetGroup &group,
                    ArrayRef<wave::RegAllocTransformValue> values,
                    ArrayRef<ResolvedRegAllocValue> resolvedValues,
                    unsigned position) {
@@ -462,8 +468,14 @@ getAGPRReliefScore(const wave::RegAllocTransformAliasSet &set,
     groupValues.insert(value.first);
   AGPRReliefBridgeCost bridgeCost =
       getAGPRReliefBridgeCost(resolvedValues, groupValues);
-  return {getAGPRReliefLiveDwords(set, values, position), bridgeCost.cost,
-          bridgeCost.count, bridgeCost.loopCost, getAGPRReliefEnd(set, values)};
+  unsigned liveDwords = 0;
+  unsigned end = 0;
+  for (const wave::RegAllocTransformAliasSet *set : group.sets) {
+    liveDwords += getAGPRReliefLiveDwords(*set, values, position);
+    end = std::max(end, getAGPRReliefEnd(*set, values));
+  }
+  return {liveDwords, bridgeCost.cost, bridgeCost.count, bridgeCost.loopCost,
+          end};
 }
 
 static bool isBetterAGPRReliefScore(AGPRReliefScore lhs, AGPRReliefScore rhs) {
@@ -511,6 +523,104 @@ buildAGPRReliefSetIndex(func::FuncOp func,
   return std::move(index);
 }
 
+static DenseMap<Value, unsigned>
+buildAGPRReliefValueIndex(ArrayRef<ResolvedRegAllocValue> resolvedValues) {
+  DenseMap<Value, unsigned> index;
+  index.reserve(resolvedValues.size());
+  for (auto [valueId, resolved] : llvm::enumerate(resolvedValues))
+    index[resolved.first] = valueId;
+  return index;
+}
+
+static std::optional<unsigned>
+lookupAGPRReliefSetId(Value value, const DenseMap<Value, unsigned> &valueIndex,
+                      ArrayRef<wave::RegAllocTransformValue> values) {
+  auto it = valueIndex.find(value);
+  if (it == valueIndex.end() || it->second >= values.size())
+    return std::nullopt;
+  return values[it->second].set;
+}
+
+static void
+addAGPRReliefPartnerSet(Value value, const AGPRReliefSetIndex &setIndex,
+                        const DenseMap<Value, unsigned> &valueIndex,
+                        ArrayRef<wave::RegAllocTransformValue> values,
+                        DenseSet<unsigned> &seen,
+                        SmallVectorImpl<unsigned> &worklist) {
+  std::optional<unsigned> setId =
+      lookupAGPRReliefSetId(value, valueIndex, values);
+  if (!setId)
+    return;
+  const wave::RegAllocTransformAliasSet *set = setIndex.setsById.lookup(*setId);
+  if (!set || set->regClass != waveamdmachine::RegClass::VGPR)
+    return;
+  if (seen.insert(set->id).second)
+    worklist.push_back(set->id);
+}
+
+static void collectMFMAAGPRReliefPartnerSets(
+    Value value, const AGPRReliefSetIndex &setIndex,
+    const DenseMap<Value, unsigned> &valueIndex,
+    ArrayRef<wave::RegAllocTransformValue> values, DenseSet<unsigned> &seen,
+    SmallVectorImpl<unsigned> &worklist) {
+  if (Operation *def = value.getDefiningOp()) {
+    auto mfma = dyn_cast<waveamdmachine::MMAOpInterface>(def);
+    if (mfma && def->hasTrait<OpTrait::waveamdmachine::MFMAOp>() &&
+        mfma.getAccResult() == value)
+      addAGPRReliefPartnerSet(mfma.getAcc(), setIndex, valueIndex, values, seen,
+                              worklist);
+  }
+  for (OpOperand &use : value.getUses()) {
+    auto mfma = dyn_cast<waveamdmachine::MMAOpInterface>(use.getOwner());
+    if (!mfma || !use.getOwner()->hasTrait<OpTrait::waveamdmachine::MFMAOp>() ||
+        !isMFMAAccumulatorUse(mfma, use))
+      continue;
+    addAGPRReliefPartnerSet(mfma.getAccResult(), setIndex, valueIndex, values,
+                            seen, worklist);
+  }
+}
+
+static AGPRReliefSetGroup
+buildAGPRReliefSetGroup(const wave::RegAllocTransformAliasSet &primary,
+                        const AGPRReliefSetIndex &setIndex,
+                        ArrayRef<wave::RegAllocTransformAliasSet> sets,
+                        ArrayRef<wave::RegAllocTransformValue> values,
+                        ArrayRef<ResolvedRegAllocValue> resolvedValues,
+                        const DenseMap<Value, unsigned> &valueIndex) {
+  DenseSet<unsigned> seen;
+  SmallVector<unsigned, 4> worklist;
+  seen.insert(primary.id);
+  worklist.push_back(primary.id);
+  for (unsigned cursor = 0; cursor < worklist.size(); ++cursor) {
+    const wave::RegAllocTransformAliasSet *set =
+        setIndex.setsById.lookup(worklist[cursor]);
+    if (!set)
+      continue;
+    for (unsigned valueId : set->members)
+      collectMFMAAGPRReliefPartnerSets(resolvedValues[valueId].first, setIndex,
+                                       valueIndex, values, seen, worklist);
+  }
+
+  AGPRReliefSetGroup group;
+  group.primary = &primary;
+  for (const wave::RegAllocTransformAliasSet &set : sets)
+    if (seen.contains(set.id))
+      group.sets.push_back(&set);
+  return group;
+}
+
+static bool
+isAGPRReliefCompatibleSet(const wave::RegAllocTransformAliasSet &set,
+                          ArrayRef<wave::RegAllocTransformValue> values,
+                          ArrayRef<ResolvedRegAllocValue> resolvedValues) {
+  if (set.regClass != waveamdmachine::RegClass::VGPR ||
+      hasFixedRegAllocValue(set, values))
+    return false;
+  return llvm::none_of(resolvedValues, [](ResolvedRegAllocValue resolved) {
+    return isRegAllocTransformBridgeRelated(resolved.first);
+  });
+}
+
 static FailureOr<std::optional<AGPRReliefCandidate>>
 buildAGPRReliefCandidate(func::FuncOp func, unsigned setId,
                          const RegAllocTransformFailure &failureRecord,
@@ -518,32 +628,46 @@ buildAGPRReliefCandidate(func::FuncOp func, unsigned setId,
                          const AGPRReliefFitState &fitState,
                          ArrayRef<wave::RegAllocTransformAliasSet> sets,
                          ArrayRef<wave::RegAllocTransformValue> values,
-                         ArrayRef<ResolvedRegAllocValue> resolvedValues) {
+                         ArrayRef<ResolvedRegAllocValue> resolvedValues,
+                         const DenseMap<Value, unsigned> &valueIndex) {
   const wave::RegAllocTransformAliasSet *set = setIndex.setsById.lookup(setId);
   if (!set)
     return std::optional<AGPRReliefCandidate>();
-  FailureOr<SmallVector<ResolvedRegAllocValue>> setValues =
-      getResolvedAGPRReliefSetValues(func, *set, resolvedValues);
-  if (failed(setValues))
-    return failure();
-  if (!isAGPRReliefEligibleSet(*set, values, *setValues,
-                               failureRecord.position))
+  AGPRReliefSetGroup group = buildAGPRReliefSetGroup(
+      *set, setIndex, sets, values, resolvedValues, valueIndex);
+  SmallVector<ResolvedRegAllocValue> groupValues;
+  for (const wave::RegAllocTransformAliasSet *groupSet : group.sets) {
+    FailureOr<SmallVector<ResolvedRegAllocValue>> setValues =
+        getResolvedAGPRReliefSetValues(func, *groupSet, resolvedValues);
+    if (failed(setValues))
+      return failure();
+    bool eligible =
+        groupSet == group.primary
+            ? isAGPRReliefEligibleSet(*groupSet, values, *setValues,
+                                      failureRecord.position)
+            : isAGPRReliefCompatibleSet(*groupSet, values, *setValues);
+    if (!eligible)
+      return std::optional<AGPRReliefCandidate>();
+    groupValues.append(setValues->begin(), setValues->end());
+  }
+  if (groupValues.empty())
     return std::optional<AGPRReliefCandidate>();
   unsigned agprFootprint = 0;
-  if (!canAllocateAGPRReliefCandidate(*set, fitState, agprFootprint))
+  if (!canAllocateAGPRReliefCandidate(group, fitState, agprFootprint))
     return std::optional<AGPRReliefCandidate>();
   FailureOr<bool> respectsFamilyBudget = respectsCombinedVGPRFamilyBudget(
-      func, *set, failureRecord, sets, agprFootprint);
+      func, group, failureRecord, setIndex, agprFootprint);
   if (failed(respectsFamilyBudget))
     return failure();
   if (!*respectsFamilyBudget)
     return std::optional<AGPRReliefCandidate>();
 
+  AGPRReliefScore score =
+      getAGPRReliefScore(group, values, groupValues, failureRecord.position);
   AGPRReliefCandidate candidate;
   candidate.set = set;
-  candidate.values = std::move(*setValues);
-  candidate.score = getAGPRReliefScore(*set, values, candidate.values,
-                                       failureRecord.position);
+  candidate.values = std::move(groupValues);
+  candidate.score = score;
   return std::optional<AGPRReliefCandidate>(std::move(candidate));
 }
 
@@ -552,12 +676,13 @@ static FailureOr<std::optional<AGPRReliefCandidate>> selectAGPRReliefCandidate(
     const AGPRReliefSetIndex &setIndex, const AGPRReliefFitState &fitState,
     ArrayRef<wave::RegAllocTransformAliasSet> sets,
     ArrayRef<wave::RegAllocTransformValue> values,
-    ArrayRef<ResolvedRegAllocValue> resolvedValues) {
+    ArrayRef<ResolvedRegAllocValue> resolvedValues,
+    const DenseMap<Value, unsigned> &valueIndex) {
   std::optional<AGPRReliefCandidate> best;
   for (unsigned setId : collectVGPRReliefCandidateIds(failureRecord)) {
     FailureOr<std::optional<AGPRReliefCandidate>> candidate =
         buildAGPRReliefCandidate(func, setId, failureRecord, setIndex, fitState,
-                                 sets, values, resolvedValues);
+                                 sets, values, resolvedValues, valueIndex);
     if (failed(candidate))
       return failure();
     if (!*candidate)
@@ -651,7 +776,9 @@ static bool rewriteAGPRReliefMFMAUse(OpOperand &use, Value agpr,
     return true;
   }
   if (!isMFMAAccumulatorUse(mfma, use) ||
-      !isReliefGroupValue(mfma.getAccResult(), groupValues))
+      (!hasRegAllocTransformClass(mfma.getAccResult(),
+                                  waveamdmachine::RegClass::AGPR) &&
+       !isReliefGroupValue(mfma.getAccResult(), groupValues)))
     return false;
   setRegAllocTransformClass(mfma.getAccResult(),
                             waveamdmachine::RegClass::AGPR);
@@ -726,8 +853,10 @@ selectAGPRReliefCandidateFromFunc(
       resolveRegAllocStateValues(func, *values);
   if (failed(resolvedValues))
     return failure();
+  DenseMap<Value, unsigned> valueIndex =
+      buildAGPRReliefValueIndex(*resolvedValues);
   return selectAGPRReliefCandidate(func, failureRecord, *setIndex, fitState,
-                                   *sets, *values, *resolvedValues);
+                                   *sets, *values, *resolvedValues, valueIndex);
 }
 
 static FailureOr<bool> shouldSkipAGPRRelief(func::FuncOp func) {

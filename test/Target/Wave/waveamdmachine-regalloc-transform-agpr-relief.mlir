@@ -1,4 +1,5 @@
-// RUN: wave-opt %s --pass-pipeline='builtin.module(transform-interpreter{entry-point=agpr_relief})' | FileCheck %s
+// RUN: wave-opt %s --pass-pipeline='builtin.module(transform-interpreter{entry-point=agpr_relief})' | FileCheck %s --check-prefix=CHECK
+// RUN: wave-opt %s --pass-pipeline='builtin.module(transform-interpreter{entry-point=agpr_relief_direct})' | FileCheck %s --check-prefix=DIRECT
 
 module attributes {transform.with_named_sequence} {
   transform.named_sequence @match_func(
@@ -16,6 +17,15 @@ module attributes {transform.with_named_sequence} {
     %r1 = wave.transform.regalloc_linear_scan from %r0
         : (!transform.any_op) -> !transform.any_op
     %r2 = wave.transform.regalloc_agpr_relief from %r1
+        : (!transform.any_op) -> !transform.any_op
+    transform.yield
+  }
+
+  transform.named_sequence @agpr_relief_direct(
+      %root: !transform.any_op {transform.readonly}) {
+    %func = transform.collect_matching @match_func in %root
+        : (!transform.any_op) -> !transform.any_op
+    %r0 = wave.transform.regalloc_agpr_relief from %func
         : (!transform.any_op) -> !transform.any_op
     transform.yield
   }
@@ -63,6 +73,75 @@ module attributes {transform.with_named_sequence} {
         waveamdmachine.continue_if %cond : !waveamdmachine.reg<scc, 1>
       }
       return %long : !waveamdmachine.reg<vgpr, 1>
+    }
+
+    // DIRECT-LABEL: func.func @agpr_relief_direct_promotes_mfma_acc_result_group(
+    // DIRECT-NOT: waveamdmachine.regalloc_transform_state
+    // DIRECT: [[A:%.*]] = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 4, 0>
+    // DIRECT: [[B:%.*]] = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 4, 4>
+    // DIRECT: [[ACC:%.*]] = waveamdmachine.uninit : !waveamdmachine.reg<agpr, 4>
+    // DIRECT-NOT: waveamdmachine.v_accvgpr_read_b32_tuple [[ACC]]
+    // DIRECT: [[MFMA:%.*]] = waveamdmachine.mfma_f32_16x16x32_f16 [[A]], [[B]], [[ACC]]
+    // DIRECT-SAME: (!waveamdmachine.reg<vgpr, 4, 0>, !waveamdmachine.reg<vgpr, 4, 4>, !waveamdmachine.reg<agpr, 4>) -> !waveamdmachine.reg<agpr, 4>
+    // DIRECT: [[MFMA_READ:%.*]] = waveamdmachine.v_accvgpr_read_b32_tuple [[MFMA]]
+    // DIRECT: return [[MFMA_READ]]
+    func.func @agpr_relief_direct_promotes_mfma_acc_result_group()
+        -> !waveamdmachine.reg<vgpr, 4>
+        attributes {waveamdmachine.vgpr_count_max = 12 : i64,
+                    waveamdmachine.agpr_count_max = 16 : i64,
+                    waveamdmachine.regalloc_transform_state = {
+          alias_sets = [
+            {class = "vgpr", id = 0 : i64,
+             members = [{value = 0 : i64}], width = 4 : i64},
+            {class = "vgpr", id = 1 : i64,
+             members = [{value = 1 : i64}], width = 4 : i64},
+            {class = "vgpr", id = 2 : i64,
+             members = [{value = 2 : i64}], width = 4 : i64},
+            {class = "vgpr", id = 3 : i64,
+             members = [{value = 3 : i64}], width = 4 : i64}
+          ],
+          failure = {
+            class = "vgpr",
+            overlaps = [
+              {base = 0 : i64, class = "vgpr", end = 3 : i64, set = 0 : i64,
+               start = 0 : i64, width = 4 : i64},
+              {base = 4 : i64, class = "vgpr", end = 3 : i64, set = 1 : i64,
+               start = 1 : i64, width = 4 : i64},
+              {base = 8 : i64, class = "vgpr", end = 3 : i64, set = 2 : i64,
+               start = 2 : i64, width = 4 : i64}
+            ],
+            position = 3 : i64,
+            reason = "pressure",
+            set = 3 : i64
+          },
+          stage = "linear-scan-failure",
+          values = [
+            {class = "vgpr", end = 3 : i64, fixed = 0 : i64, id = 0 : i64,
+             kind = "op_result", number = 0 : i64, offset = 0 : i64,
+             path = [0, 0, 0], set = 0 : i64, start = 0 : i64,
+             width = 4 : i64},
+            {class = "vgpr", end = 3 : i64, fixed = 4 : i64, id = 1 : i64,
+             kind = "op_result", number = 0 : i64, offset = 0 : i64,
+             path = [0, 0, 1], set = 1 : i64, start = 1 : i64,
+             width = 4 : i64},
+            {class = "vgpr", end = 3 : i64, id = 2 : i64,
+             kind = "op_result", number = 0 : i64, offset = 0 : i64,
+             path = [0, 0, 2], set = 2 : i64, start = 2 : i64,
+             width = 4 : i64},
+            {class = "vgpr", end = 4 : i64, id = 3 : i64,
+             kind = "op_result", number = 0 : i64, offset = 0 : i64,
+             path = [0, 0, 3], set = 3 : i64, start = 3 : i64,
+             width = 4 : i64}
+          ]
+        }} {
+      %a = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 4, 0>
+      %b = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 4, 4>
+      %acc = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 4>
+      %mfma = waveamdmachine.mfma_f32_16x16x32_f16 %a, %b, %acc
+          : (!waveamdmachine.reg<vgpr, 4, 0>,
+             !waveamdmachine.reg<vgpr, 4, 4>,
+             !waveamdmachine.reg<vgpr, 4>) -> !waveamdmachine.reg<vgpr, 4>
+      return %mfma : !waveamdmachine.reg<vgpr, 4>
     }
 
     // CHECK-LABEL: func.func @agpr_relief_skips_vgpr_bank_budget(
