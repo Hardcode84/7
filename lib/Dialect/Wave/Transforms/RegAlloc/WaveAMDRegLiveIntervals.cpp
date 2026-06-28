@@ -258,6 +258,14 @@ static bool shouldCoalesceMFMAAccResult(func::FuncOp func) {
   return !attr || attr.getValue();
 }
 
+static bool intervalValueEndsAt(const wave::WaveAMDLiveInterval &interval,
+                                Value value, unsigned position) {
+  for (auto [member, end] : llvm::zip(interval.values, interval.valueEnds))
+    if (member == value)
+      return end == position;
+  return false;
+}
+
 struct MFMAAccumulatorAlias {
   Value acc;
   Value result;
@@ -273,8 +281,6 @@ getMFMAAccumulatorAlias(Operation &op) {
   if (!mma)
     return std::nullopt;
   Value acc = mma.getAcc();
-  if (!llvm::hasSingleElement(acc.getUses()))
-    return std::nullopt;
   Value resultValue = mma.getAccResult();
   std::optional<waveamdmachine::RegType> rt =
       wave::getTrackedWaveAMDRegType(acc);
@@ -287,6 +293,11 @@ getMFMAAccumulatorAlias(Operation &op) {
     return std::nullopt;
   return MFMAAccumulatorAlias{acc, resultValue, *rt};
 }
+
+struct PendingMFMAAccumulatorAlias {
+  Operation *op = nullptr;
+  unsigned position = 0;
+};
 
 class LiveIntervalBuilder {
 public:
@@ -308,6 +319,8 @@ public:
       return failure();
     if (hasOrderOverride && !usedOrderOverride)
       return func.emitError("live interval order override block not visited");
+    if (failed(coalesceMFMAAccumulatorOps()))
+      return failure();
     return std::move(result);
   }
 
@@ -666,21 +679,34 @@ private:
     return success();
   }
 
+  void recordMFMAAccumulatorOp(Operation &op, unsigned pos) {
+    if (coalesceMFMAAccResult && op.hasTrait<OpTrait::waveamdmachine::MFMAOp>())
+      pendingMFMAAccumulatorAliases.push_back({&op, pos});
+  }
+
   LogicalResult coalesceMFMAAccumulatorOp(Operation &op, unsigned pos) {
-    if (!coalesceMFMAAccResult)
-      return success();
     std::optional<MFMAAccumulatorAlias> alias = getMFMAAccumulatorAlias(op);
     if (!alias)
       return success();
     auto [bucket, table] = intervalsFor(alias->type, result.intervals);
-    if (!table->contains(alias->acc))
+    auto accIt = table->find(alias->acc);
+    if (accIt == table->end())
       return success();
-    FailureOr<unsigned> accSlot = getIntervalSlotOffset(
-        alias->acc, (*bucket)[table->lookup(alias->acc)], &op);
+    if (!intervalValueEndsAt((*bucket)[accIt->second], alias->acc, pos))
+      return success();
+    FailureOr<unsigned> accSlot =
+        getIntervalSlotOffset(alias->acc, (*bucket)[accIt->second], &op);
     if (failed(accSlot))
       return failure();
     return coalesce(alias->acc, alias->result, pos, result.intervals, &op,
                     *accSlot);
+  }
+
+  LogicalResult coalesceMFMAAccumulatorOps() {
+    for (PendingMFMAAccumulatorAlias pending : pendingMFMAAccumulatorAliases)
+      if (failed(coalesceMFMAAccumulatorOp(*pending.op, pending.position)))
+        return failure();
+    return success();
   }
 
   bool tupleRenameHandlesOperandUses(Operation *op) {
@@ -712,8 +738,7 @@ private:
       if (!tupleRenameHandlesOperandUses(op))
         for (Value operand : op->getOperands())
           extendInterval(operand, pos);
-      if (failed(coalesceMFMAAccumulatorOp(*op, pos)))
-        return failure();
+      recordMFMAAccumulatorOp(*op, pos);
       if (failed(coalesceTupleElementOps(*op, pos)))
         return failure();
       if (failed(processNestedRegions(op, pos)))
@@ -737,6 +762,7 @@ private:
   }
 
   wave::WaveAMDLiveIntervalBuildResult result;
+  SmallVector<PendingMFMAAccumulatorAlias, 16> pendingMFMAAccumulatorAliases;
   wave::WaveAMDLiveIntervalOrderOverride orderOverride;
   unsigned cursor = 0;
   bool includeAllocated = false;

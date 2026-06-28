@@ -342,6 +342,20 @@ private:
     record.ranges.insert(pos, {position, position});
   }
 
+  bool valueRangeEndsAt(Value value, unsigned position) {
+    auto it = valueIds.find(value);
+    if (it == valueIds.end())
+      return false;
+    const RegAllocAliasValue &record = values[it->second];
+    auto pos = llvm::lower_bound(
+        record.ranges, position,
+        [](wave::RegAllocTransformLiveRange range, unsigned position) {
+          return range.end < position;
+        });
+    return pos != record.ranges.end() && pos->start <= position &&
+           pos->end == position;
+  }
+
   bool isValueDefinedInside(Operation *scope, Value value) {
     if (Operation *def = value.getDefiningOp())
       return def == scope || scope->isAncestor(def);
@@ -401,27 +415,13 @@ private:
       collect(fromElements.getTuple(), fromElements.getElements());
   }
 
-  bool hasUseAfter(Operation *op, Value value) {
-    unsigned position = positions.lookup(op);
-    auto externalIt = externalLoopUseEnds.find(value);
-    if (externalIt != externalLoopUseEnds.end() &&
-        externalIt->second > position)
-      return true;
-    for (OpOperand &use : value.getUses()) {
-      auto it = positions.find(use.getOwner());
-      if (it == positions.end() || it->second > position)
-        return true;
-    }
-    return false;
-  }
-
   void collectMMAAliases(Operation *op) {
     if (!coalesceMFMAAccResult)
       return;
     auto mma = dyn_cast<waveamdmachine::MMAOpInterface>(op);
     if (!mma || !op->hasTrait<OpTrait::waveamdmachine::MFMAOp>())
       return;
-    if (hasUseAfter(op, mma.getAcc()))
+    if (!valueRangeEndsAt(mma.getAcc(), positions.lookup(op)))
       return;
     addAliasEdge(mma.getAcc(), mma.getAccResult(), 0);
   }
@@ -472,17 +472,27 @@ private:
     }
   }
 
-  void collectUsesAndAliases() {
+  void collectUses() {
     for (RegAllocAliasOp &record : ops) {
       for (Value operand : record.op->getOperands()) {
         extendValue(operand, record.position);
         collectExternalLoopBodyUse(operand, record.op);
       }
+    }
+    extendExternalLoopUses();
+  }
+
+  void collectAliases() {
+    for (RegAllocAliasOp &record : ops) {
       collectTupleAliases(record.op);
       collectMMAAliases(record.op);
       collectRegionAliases(record.op);
     }
-    extendExternalLoopUses();
+  }
+
+  void collectUsesAndAliases() {
+    collectUses();
+    collectAliases();
   }
 
   LogicalResult addAliasAdjacencyEdge(RegAllocAliasEdge edge,

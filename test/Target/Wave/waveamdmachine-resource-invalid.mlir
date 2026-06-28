@@ -111,6 +111,36 @@ func.func @mfma_acc_result_boundary_reuse_ok(
 // -----
 
 // expected-error @below {{waveamd-resource-info found interfering VGPR register live ranges}}
+func.func @mfma_loop_external_acc_result_overlap_rejected(
+    %a: !waveamdmachine.reg<vgpr, 4, 0>,
+    %b: !waveamdmachine.reg<vgpr, 4, 4>,
+    %carry: !waveamdmachine.reg<vgpr, 4, 12>,
+    %cond: !waveamdmachine.reg<scc, 1>) {
+  %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+  // expected-note @below {{lhs phys=[8, 12) live=[1, 5]}}
+  %acc = waveamdmachine.v_mov_b32_tuple %zero {registers = 4 : i64}
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 4, 8>
+  %loop = waveamdmachine.uniform_loop if %cond : !waveamdmachine.reg<scc, 1>
+      carries(%carry : !waveamdmachine.reg<vgpr, 4, 12>) {
+  ^bb0(%iv: !waveamdmachine.reg<vgpr, 4, 12>):
+    // expected-note @below {{rhs phys=[8, 12) live=[3, 3]}}
+    %r = waveamdmachine.mfma_f32_16x16x32_f16 %a, %b, %acc
+        : (!waveamdmachine.reg<vgpr, 4, 0>,
+           !waveamdmachine.reg<vgpr, 4, 4>,
+           !waveamdmachine.reg<vgpr, 4, 8>)
+        -> !waveamdmachine.reg<vgpr, 4, 8>
+    %next = waveamdmachine.v_mov_b32_tuple %iv {registers = 4 : i64}
+        : (!waveamdmachine.reg<vgpr, 4, 12>)
+          -> !waveamdmachine.reg<vgpr, 4, 12>
+    waveamdmachine.continue_if %cond : !waveamdmachine.reg<scc, 1>
+        carries(%next : !waveamdmachine.reg<vgpr, 4, 12>)
+  } -> !waveamdmachine.reg<vgpr, 4, 12>
+  return
+}
+
+// -----
+
+// expected-error @below {{waveamd-resource-info found interfering VGPR register live ranges}}
 func.func @interfering_vgprs() {
   %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
   // expected-note @below {{lhs phys=[0, 1) live=[1, 3]}}
