@@ -96,6 +96,20 @@ func.func @loop_carry_hole_reuse_ok() {
 
 // -----
 
+func.func @mfma_acc_result_boundary_reuse_ok(
+    %a: !waveamdmachine.reg<vgpr, 4, 0>,
+    %b: !waveamdmachine.reg<vgpr, 4, 4>,
+    %acc: !waveamdmachine.reg<vgpr, 4, 8>) {
+  %r = waveamdmachine.mfma_f32_16x16x32_f16 %a, %b, %acc
+      : (!waveamdmachine.reg<vgpr, 4, 0>,
+         !waveamdmachine.reg<vgpr, 4, 4>,
+         !waveamdmachine.reg<vgpr, 4, 8>)
+      -> !waveamdmachine.reg<vgpr, 4, 8>
+  return
+}
+
+// -----
+
 // expected-error @below {{waveamd-resource-info found interfering VGPR register live ranges}}
 func.func @interfering_vgprs() {
   %zero = waveamdmachine.imm 0 : !waveamdmachine.imm

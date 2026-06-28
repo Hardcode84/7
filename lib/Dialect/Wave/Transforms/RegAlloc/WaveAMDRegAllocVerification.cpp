@@ -517,22 +517,59 @@ verifyReservedRanges(func::FuncOp func, ArrayRef<PhysicalLiveRange> ranges,
   return success();
 }
 
-static bool canSharePhysicalRange(const PhysicalLiveRange &lhs,
-                                  const PhysicalLiveRange &rhs) {
+static bool intervalValueEndsAt(const wave::WaveAMDLiveInterval &interval,
+                                Value value, unsigned position) {
+  for (auto [member, end] : llvm::zip(interval.values, interval.valueEnds))
+    if (member == value)
+      return end == position;
+  return false;
+}
+
+static bool
+isMFMAAccResultBoundary(const PhysicalLiveRange &accStorageRange,
+                        const PhysicalLiveRange &resultRange,
+                        ArrayRef<wave::WaveAMDLiveInterval> intervals,
+                        const DenseMap<Operation *, unsigned> &positions) {
+  if (accStorageRange.physStart != resultRange.physStart ||
+      accStorageRange.physEnd != resultRange.physEnd)
+    return false;
+  Operation *op = resultRange.value.getDefiningOp();
+  auto mfma = dyn_cast_if_present<waveamdmachine::MMAOpInterface>(op);
+  if (!mfma || !op->hasTrait<OpTrait::waveamdmachine::MFMAOp>())
+    return false;
+  auto it = positions.find(op);
+  if (it == positions.end() || it->second != resultRange.start ||
+      mfma.getAccResult() != resultRange.value ||
+      accStorageRange.intervalIndex >= intervals.size())
+    return false;
+  return intervalValueEndsAt(intervals[accStorageRange.intervalIndex],
+                             mfma.getAcc(), resultRange.start);
+}
+
+static bool
+canSharePhysicalRange(const PhysicalLiveRange &lhs,
+                      const PhysicalLiveRange &rhs,
+                      ArrayRef<wave::WaveAMDLiveInterval> intervals,
+                      const DenseMap<Operation *, unsigned> &positions) {
   if (lhs.intervalIndex == rhs.intervalIndex)
     return true;
   if (lhs.physStart != rhs.physStart || lhs.physEnd != rhs.physEnd)
     return false;
+  if (isMFMAAccResultBoundary(lhs, rhs, intervals, positions) ||
+      isMFMAAccResultBoundary(rhs, lhs, intervals, positions))
+    return true;
   return areEquivalentFixedHardwareReads(lhs.value, rhs.value);
 }
 
 static LogicalResult
 verifyNoRangeInterference(func::FuncOp func, ArrayRef<PhysicalLiveRange> ranges,
+                          ArrayRef<wave::WaveAMDLiveInterval> intervals,
+                          const DenseMap<Operation *, unsigned> &positions,
                           StringRef consumer, StringRef regClass) {
   for (auto [index, lhs] : llvm::enumerate(ranges)) {
     for (const PhysicalLiveRange &rhs :
          ArrayRef(ranges).drop_front(index + 1)) {
-      if (canSharePhysicalRange(lhs, rhs))
+      if (canSharePhysicalRange(lhs, rhs, intervals, positions))
         continue;
       if (!liveRangesOverlap(lhs, rhs) || !physicalRangesOverlap(lhs, rhs))
         continue;
@@ -573,7 +610,8 @@ verifyNoInterference(func::FuncOp func,
   if (failed(verifyReservedRanges(func, ranges, orderedOps, positions, consumer,
                                   regClass, reserved, regs)))
     return failure();
-  return verifyNoRangeInterference(func, ranges, consumer, regClass);
+  return verifyNoRangeInterference(func, ranges, intervals, positions, consumer,
+                                   regClass);
 }
 
 } // namespace

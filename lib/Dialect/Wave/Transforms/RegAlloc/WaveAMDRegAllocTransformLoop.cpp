@@ -114,20 +114,41 @@ static bool hasSingleTrackedGPRResult(Operation *op) {
   return found;
 }
 
-static bool canReuseKilledOperandForResult(Operation *op) {
+static bool canReuseKilledMFMAAccumulatorForResult(Operation *op,
+                                                   OpOperand &operand) {
+  auto mma = dyn_cast_if_present<waveamdmachine::MMAOpInterface>(op);
+  return mma && op->hasTrait<waveTraits::MFMAOp>() &&
+         &operand == &mma.getAccMutable();
+}
+
+static bool isGenericKilledOperandReuseRejected(Operation *op) {
+  if (op->hasTrait<waveTraits::NoMachineInst>())
+    return true;
+  if (isa<waveamdmachine::MMAOpInterface>(op))
+    return true;
+  if (op->hasTrait<waveTraits::MFMAOp>())
+    return true;
+  return op->hasTrait<waveTraits::WritesExecOp>();
+}
+
+static bool isGenericKilledOperandReuseAccepted(Operation *op) {
+  if (op->hasTrait<waveTraits::VALUOp>())
+    return true;
+  return op->hasTrait<waveTraits::SALUOp>();
+}
+
+static bool canReuseKilledOperandForResult(Operation *op, OpOperand &operand) {
   if (!op || op->getNumRegions() != 0)
     return false;
   if (!hasSingleTrackedGPRResult(op))
     return false;
   if (!hasNoMemoryEffects(op))
     return false;
-  if (op->hasTrait<waveTraits::NoMachineInst>() ||
-      isa<waveamdmachine::MMAOpInterface>(op) ||
-      op->hasTrait<waveTraits::MFMAOp>() ||
-      op->hasTrait<waveTraits::WritesExecOp>())
+  if (canReuseKilledMFMAAccumulatorForResult(op, operand))
+    return true;
+  if (isGenericKilledOperandReuseRejected(op))
     return false;
-  return op->hasTrait<waveTraits::VALUOp>() ||
-         op->hasTrait<waveTraits::SALUOp>();
+  return isGenericKilledOperandReuseAccepted(op);
 }
 
 static waveamdmachine::RegType
@@ -1415,11 +1436,11 @@ private:
         set.width > limit)
       return std::nullopt;
     Operation *def = payloadValues[resultValue->id].getDefiningOp();
-    if (!canReuseKilledOperandForResult(def))
-      return std::nullopt;
 
     std::optional<unsigned> bestBase;
     for (OpOperand &operand : def->getOpOperands()) {
+      if (!canReuseKilledOperandForResult(def, operand))
+        continue;
       auto it = valueLookup.find(operand.get());
       if (it == valueLookup.end())
         continue;

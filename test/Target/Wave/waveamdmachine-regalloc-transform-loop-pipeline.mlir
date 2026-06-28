@@ -91,6 +91,27 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
     return
   }
 
+  // CHECK-LABEL: func.func @regalloc_transform_loop_reuses_killed_mfma_acc
+  // CHECK-SAME: !waveamdmachine.reg<vgpr, 4, 0>
+  // CHECK-SAME: !waveamdmachine.reg<vgpr, 4, 4>
+  // CHECK-SAME: !waveamdmachine.reg<vgpr, 4, 8>
+  // CHECK-SAME: waveamdmachine.regalloc_assignments
+  // CHECK-SAME: stage = "linear-scan-success"
+  // CHECK: [[MFMA:%.*]] = waveamdmachine.mfma_f32_16x16x32_f16
+  // CHECK-SAME: -> !waveamdmachine.reg<vgpr, 4, 8>
+  // CHECK: return [[MFMA]]
+  func.func @regalloc_transform_loop_reuses_killed_mfma_acc(
+      %a: !waveamdmachine.reg<vgpr, 4>,
+      %b: !waveamdmachine.reg<vgpr, 4>,
+      %acc: !waveamdmachine.reg<vgpr, 4>)
+      -> !waveamdmachine.reg<vgpr, 4>
+      attributes {waveamdmachine.vgpr_count_max = 12 : i64} {
+    %mfma = waveamdmachine.mfma_f32_16x16x32_f16 %a, %b, %acc
+        : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
+           !waveamdmachine.reg<vgpr, 4>) -> !waveamdmachine.reg<vgpr, 4>
+    return %mfma : !waveamdmachine.reg<vgpr, 4>
+  }
+
   // CHECK-LABEL: func.func @regalloc_transform_loop_rejects_wmma_input_reuse
   // CHECK-NOT: waveamdmachine.regalloc_assignments
   // CHECK-SAME: limit = 24 : i64
