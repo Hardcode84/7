@@ -128,6 +128,10 @@ Same rule covers docstrings, commit bodies, and PR descriptions. Wit is welcome,
 - Run goldens when ASM can drift: `build/bin/llvm-lit -sv build/test
   --filter='PerfGolden'`. For helper-level repro, use
   `python -m pytest -q test/PerfGolden`.
+- Regenerate checked-in ASM with
+  `python build_tools/regenerate_perf_goldens.py --build-dir build`; it runs
+  each helper with `--generated-out`, updates `test/PerfGolden/Inputs/`, then
+  reruns the PerfGolden lit filter.
 - ASM drift is a review stop, not a failure proof. Benchmark old and new
   assembly on the same hardware before updating a golden.
 - New generated golden file types need REUSE coverage. Python helpers must
