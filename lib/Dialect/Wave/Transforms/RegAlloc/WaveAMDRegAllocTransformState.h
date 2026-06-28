@@ -110,6 +110,9 @@ RegAllocTransformBudget
 getRegAllocTransformBudget(func::FuncOp func,
                            waveamdmachine::RegClass regClass);
 
+unsigned
+getRegAllocTransformDefaultBudgetLimit(waveamdmachine::RegClass regClass);
+
 FailureOr<std::optional<RegAllocTransformBudget>>
 getRegAllocTransformVGPRFamilyBudget(func::FuncOp func);
 

@@ -651,7 +651,25 @@ selectAGPRReliefCandidateFromFunc(
   return selectAGPRReliefCandidate(func, failureRecord, *sets, *values);
 }
 
+static FailureOr<bool> shouldSkipAGPRRelief(func::FuncOp func) {
+  FailureOr<std::optional<wave::RegAllocTransformBudget>> familyBudget =
+      wave::getRegAllocTransformVGPRFamilyBudget(func);
+  if (failed(familyBudget))
+    return failure();
+  if (!*familyBudget)
+    return false;
+  unsigned vgprLimit = wave::getRegAllocTransformDefaultBudgetLimit(
+      waveamdmachine::RegClass::VGPR);
+  return (*familyBudget)->limit <= vgprLimit;
+}
+
 static LogicalResult runRegAllocAGPRRelief(func::FuncOp func) {
+  FailureOr<bool> skip = shouldSkipAGPRRelief(func);
+  if (failed(skip))
+    return failure();
+  if (*skip)
+    return success();
+
   FailureOr<std::optional<RegAllocTransformFailure>> failureRecord =
       parseRegAllocTransformFailure(func);
   if (failed(failureRecord))

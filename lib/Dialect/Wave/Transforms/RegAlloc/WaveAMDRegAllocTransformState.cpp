@@ -393,7 +393,8 @@ static StringRef getRegClassBudgetAttr(waveamdmachine::RegClass regClass) {
   llvm_unreachable("unknown register class");
 }
 
-static unsigned getDefaultRegClassLimit(waveamdmachine::RegClass regClass) {
+unsigned
+getRegAllocTransformDefaultBudgetLimit(waveamdmachine::RegClass regClass) {
   switch (regClass) {
   case waveamdmachine::RegClass::SGPR:
     return 128;
@@ -476,7 +477,7 @@ getRegAllocTransformBudget(func::FuncOp func,
   Operation *parent = func->getParentOp();
   if (std::optional<unsigned> limit = getUnsignedIntegerAttr(parent, attrName))
     return {*limit, "module_attr"};
-  return {getDefaultRegClassLimit(regClass), "default"};
+  return {getRegAllocTransformDefaultBudgetLimit(regClass), "default"};
 }
 
 FailureOr<std::optional<RegAllocTransformBudget>>

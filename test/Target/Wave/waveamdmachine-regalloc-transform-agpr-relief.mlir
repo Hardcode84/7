@@ -65,6 +65,35 @@ module attributes {transform.with_named_sequence} {
       return %long : !waveamdmachine.reg<vgpr, 1>
     }
 
+    // CHECK-LABEL: func.func @agpr_relief_skips_vgpr_bank_budget(
+    // CHECK-SAME: waveamdmachine.regalloc_transform_state =
+    // CHECK-SAME: class = "vgpr"
+    // CHECK-SAME: stage = "linear-scan-failure"
+    // CHECK-NOT: waveamdmachine.v_accvgpr_write_b32_tuple
+    // CHECK: return
+    func.func @agpr_relief_skips_vgpr_bank_budget(
+        %hot: !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+        attributes {waveamdmachine.vgpr_count_max = 1 : i64,
+                    waveamdmachine.agpr_count_max = 4 : i64,
+                    waveamdmachine.target_waves = 2 : i64} {
+      %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+      %one = waveamdmachine.imm 1 : !waveamdmachine.imm
+      %long = waveamdmachine.v_mov_b32_tuple %zero {registers = 1 : i64}
+          : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
+      %base = waveamdmachine.uninit : !waveamdmachine.reg<sgpr, 2>
+      %cond = waveamdmachine.s_cmp_lt_i32 %zero, %one
+          : (!waveamdmachine.imm, !waveamdmachine.imm)
+            -> !waveamdmachine.reg<scc, 1>
+      waveamdmachine.uniform_loop if %cond : !waveamdmachine.reg<scc, 1> {
+        %token = waveamdmachine.global_store_b32 %hot, %zero, %base
+            : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.imm,
+               !waveamdmachine.reg<sgpr, 2>) -> !waveamdmachine.mem.token
+        waveamdmachine.continue_if %cond : !waveamdmachine.reg<scc, 1>
+      }
+      return %long : !waveamdmachine.reg<vgpr, 1>
+    }
+
     // CHECK-LABEL: func.func @agpr_relief_promotes_loop_carry(
     // CHECK-NOT: waveamdmachine.regalloc_transform_state
     // CHECK: [[INIT:%.*]] = waveamdmachine.v_mov_b32_tuple
