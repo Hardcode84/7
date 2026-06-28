@@ -157,7 +157,9 @@ def Wave_TransformRegAllocBuildAliasStateOp
     returns the same payload handle. Later allocator transforms consume the
     state attribute.
   }];
-  let arguments = (ins TransformHandleTypeInterface:$target);
+  let arguments = (ins TransformHandleTypeInterface:$target,
+                       DefaultValuedAttr<BoolAttr, "true">:
+                           $coalesce_mfma_acc_result);
   let results = (outs TransformHandleTypeInterface:$result);
   let assemblyFormat = [{
     `from` $target attr-dict `:` functional-type($target, $result)

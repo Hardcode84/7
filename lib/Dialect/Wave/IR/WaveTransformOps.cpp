@@ -253,7 +253,8 @@ DiagnosedSilenceableFailure wave::TransformRegAllocBuildAliasStateOp::apply(
   Builder builder(getContext());
   for (Operation *target : state.getPayloadOps(getTarget())) {
     targets.push_back(target);
-    if (failed(wave::buildRegAllocTransformAliasState(target, builder)))
+    if (failed(wave::buildRegAllocTransformAliasState(
+            target, builder, getCoalesceMfmaAccResult())))
       return emitDefiniteFailure() << "failed to build regalloc alias state";
   }
   results.set(cast<OpResult>(getResult()), targets);

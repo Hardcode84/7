@@ -242,8 +242,10 @@ static LogicalResult splitDuplicateLoopInits(func::FuncOp func) {
 
 class RegAllocAliasStateBuilder {
 public:
-  RegAllocAliasStateBuilder(func::FuncOp func, Builder &builder)
-      : func(func), builder(builder) {}
+  RegAllocAliasStateBuilder(func::FuncOp func, Builder &builder,
+                            bool coalesceMFMAAccResult)
+      : func(func), builder(builder),
+        coalesceMFMAAccResult(coalesceMFMAAccResult) {}
 
   FailureOr<DictionaryAttr> build() {
     collectRegion(func.getBody(), {0});
@@ -414,6 +416,8 @@ private:
   }
 
   void collectMMAAliases(Operation *op) {
+    if (!coalesceMFMAAccResult)
+      return;
     auto mma = dyn_cast<waveamdmachine::MMAOpInterface>(op);
     if (!mma || !op->hasTrait<OpTrait::waveamdmachine::MFMAOp>())
       return;
@@ -687,6 +691,7 @@ private:
   DenseMap<Value, unsigned> valueIds;
   func::FuncOp func;
   Builder &builder;
+  bool coalesceMFMAAccResult = true;
 };
 
 struct RegAllocScanFailure {
@@ -1947,17 +1952,30 @@ private:
   Builder &builder;
 };
 
+static void setMFMAAccumulatorCoalescingFlag(func::FuncOp func,
+                                             Builder &builder,
+                                             bool coalesceMFMAAccResult) {
+  if (coalesceMFMAAccResult) {
+    func->removeAttr(wave::regalloc::kRegAllocCoalesceMFMAAccResultAttr);
+    return;
+  }
+  func->setAttr(wave::regalloc::kRegAllocCoalesceMFMAAccResultAttr,
+                builder.getBoolAttr(false));
+}
+
 static LogicalResult setRegAllocTransformState(func::FuncOp func,
-                                               Builder &builder) {
+                                               Builder &builder,
+                                               bool coalesceMFMAAccResult) {
   if (func.isDeclaration()) {
     func->removeAttr(wave::getRegAllocTransformStateAttrName());
     return success();
   }
+  setMFMAAccumulatorCoalescingFlag(func, builder, coalesceMFMAAccResult);
   if (failed(wave::prepareWaveAMDRegAllocIR(func)))
     return failure();
   if (failed(splitDuplicateLoopInits(func)))
     return failure();
-  RegAllocAliasStateBuilder stateBuilder(func, builder);
+  RegAllocAliasStateBuilder stateBuilder(func, builder, coalesceMFMAAccResult);
   FailureOr<DictionaryAttr> state = stateBuilder.build();
   if (failed(state))
     return failure();
@@ -1975,13 +1993,15 @@ static LogicalResult runRegAllocLinearScan(func::FuncOp func,
 
 } // namespace
 
-LogicalResult wave::buildRegAllocTransformAliasState(Operation *target,
-                                                     Builder &builder) {
+LogicalResult
+wave::buildRegAllocTransformAliasState(Operation *target, Builder &builder,
+                                       bool coalesceMFMAAccResult) {
   clearRegAllocTransformState(target);
   if (func::FuncOp func = dyn_cast<func::FuncOp>(target))
-    return setRegAllocTransformState(func, builder);
+    return setRegAllocTransformState(func, builder, coalesceMFMAAccResult);
   WalkResult walk = target->walk([&](func::FuncOp func) {
-    return failed(setRegAllocTransformState(func, builder))
+    return failed(
+               setRegAllocTransformState(func, builder, coalesceMFMAAccResult))
                ? WalkResult::interrupt()
                : WalkResult::advance();
   });

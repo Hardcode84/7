@@ -15,8 +15,9 @@
 
 namespace mlir::wave {
 
-LogicalResult buildRegAllocTransformAliasState(Operation *target,
-                                               Builder &builder);
+LogicalResult
+buildRegAllocTransformAliasState(Operation *target, Builder &builder,
+                                 bool coalesceMFMAAccResult = true);
 
 LogicalResult runRegAllocTransformLinearScan(Operation *target,
                                              Builder &builder);

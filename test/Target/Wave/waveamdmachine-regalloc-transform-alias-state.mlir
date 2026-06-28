@@ -1,4 +1,5 @@
 // RUN: wave-opt %s --pass-pipeline='builtin.module(transform-interpreter{entry-point=build_alias_state})' | FileCheck %s
+// RUN: wave-opt %s --pass-pipeline='builtin.module(transform-interpreter{entry-point=build_alias_state_no_mfma_coalesce})' | FileCheck %s --check-prefix=NO-MFMA-COALESCE
 // RUN: wave-opt %s --pass-pipeline='builtin.module(transform-interpreter{entry-point=linear_scan})' | FileCheck %s --check-prefix=SCAN
 
 module attributes {transform.with_named_sequence} {
@@ -13,6 +14,16 @@ module attributes {transform.with_named_sequence} {
     %func = transform.collect_matching @match_func in %root
         : (!transform.any_op) -> !transform.any_op
     %r = wave.transform.regalloc_build_alias_state from %func
+        : (!transform.any_op) -> !transform.any_op
+    transform.yield
+  }
+
+  transform.named_sequence @build_alias_state_no_mfma_coalesce(
+      %root: !transform.any_op {transform.readonly}) {
+    %func = transform.collect_matching @match_func in %root
+        : (!transform.any_op) -> !transform.any_op
+    %r = wave.transform.regalloc_build_alias_state from %func
+        {coalesce_mfma_acc_result = false}
         : (!transform.any_op) -> !transform.any_op
     transform.yield
   }
@@ -126,6 +137,24 @@ module attributes {transform.with_named_sequence} {
             carries(%next : !waveamdmachine.reg<sgpr, 1>)
       } -> !waveamdmachine.reg<sgpr, 1>
       return
+    }
+
+    // CHECK-LABEL: func.func @mfma_acc_result_coalescing_flag(
+    // CHECK-SAME: waveamdmachine.regalloc_transform_state =
+    // CHECK-SAME: debug = {alias_edges = 1 : i64, alias_sets = 3 : i64, ops = 2 : i64, values = 4 : i64}
+    // NO-MFMA-COALESCE-LABEL: func.func @mfma_acc_result_coalescing_flag(
+    // NO-MFMA-COALESCE-SAME: waveamdmachine.regalloc_coalesce_mfma_acc_result = false
+    // NO-MFMA-COALESCE-SAME: waveamdmachine.regalloc_transform_state =
+    // NO-MFMA-COALESCE-SAME: debug = {alias_edges = 0 : i64, alias_sets = 4 : i64, ops = 2 : i64, values = 4 : i64}
+    func.func @mfma_acc_result_coalescing_flag(
+        %a: !waveamdmachine.reg<vgpr, 4>,
+        %b: !waveamdmachine.reg<vgpr, 4>,
+        %acc: !waveamdmachine.reg<vgpr, 4>)
+        -> !waveamdmachine.reg<vgpr, 4> {
+      %mfma = waveamdmachine.mfma_f32_16x16x32_f16 %a, %b, %acc
+          : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
+             !waveamdmachine.reg<vgpr, 4>) -> !waveamdmachine.reg<vgpr, 4>
+      return %mfma : !waveamdmachine.reg<vgpr, 4>
     }
 
     // CHECK-LABEL: func.func @loop_invariant_mfma_acc_alias_state(

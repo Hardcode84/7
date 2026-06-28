@@ -8,6 +8,7 @@
 
 #include "WaveAMDRegLiveIntervals.h"
 
+#include "WaveAMDRegAllocInternal.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "llvm/ADT/BitVector.h"
 #include "llvm/ADT/DenseSet.h"
@@ -251,6 +252,12 @@ static bool valueIsDefinedInside(Operation *root, Value value) {
   return false;
 }
 
+static bool shouldCoalesceMFMAAccResult(func::FuncOp func) {
+  BoolAttr attr = func->getAttrOfType<BoolAttr>(
+      wave::regalloc::kRegAllocCoalesceMFMAAccResultAttr);
+  return !attr || attr.getValue();
+}
+
 struct MFMAAccumulatorAlias {
   Value acc;
   Value result;
@@ -296,6 +303,7 @@ public:
   FailureOr<wave::WaveAMDLiveIntervalBuildResult> build(func::FuncOp func) {
     if (func.isExternal())
       return std::move(result);
+    coalesceMFMAAccResult = shouldCoalesceMFMAAccResult(func);
     if (failed(walkRegion(func.getBody())))
       return failure();
     if (hasOrderOverride && !usedOrderOverride)
@@ -659,6 +667,8 @@ private:
   }
 
   LogicalResult coalesceMFMAAccumulatorOp(Operation &op, unsigned pos) {
+    if (!coalesceMFMAAccResult)
+      return success();
     std::optional<MFMAAccumulatorAlias> alias = getMFMAAccumulatorAlias(op);
     if (!alias)
       return success();
@@ -732,6 +742,7 @@ private:
   bool includeAllocated = false;
   bool hasOrderOverride = false;
   bool usedOrderOverride = false;
+  bool coalesceMFMAAccResult = true;
 };
 
 } // namespace

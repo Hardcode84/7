@@ -53,6 +53,8 @@ inline constexpr llvm::StringLiteral kVGPRSpillCountAttr =
     "waveamdmachine.vgpr_spill_count";
 inline constexpr llvm::StringLiteral kRegAllocRemarkCategory =
     "waveamdmachine-regalloc";
+inline constexpr llvm::StringLiteral kRegAllocCoalesceMFMAAccResultAttr =
+    "waveamdmachine.regalloc_coalesce_mfma_acc_result";
 
 struct IntervalGroup;
 
