@@ -51,6 +51,10 @@ struct MemoryReliefSetIndex {
       setsById;
 };
 
+struct MemoryReliefValueIndex {
+  ArrayRef<ResolvedRegAllocValue> valuesById;
+};
+
 struct LDSReliefPlanningState {
   wave::regalloc::RegisterBudgets budgets;
   unsigned committedBytes = 0;
@@ -430,11 +434,33 @@ findMemoryReliefSet(const MemoryReliefSetIndex &index, unsigned setId) {
   return index.setsById.lookup(setId);
 }
 
+static FailureOr<SmallVector<ResolvedRegAllocValue>>
+getMemoryReliefSetValues(func::FuncOp func,
+                         const wave::RegAllocTransformAliasSet &set,
+                         const MemoryReliefValueIndex &valueIndex) {
+  SmallVector<ResolvedRegAllocValue> values;
+  values.reserve(set.members.size());
+  for (unsigned valueId : set.members) {
+    if (valueId >= valueIndex.valuesById.size()) {
+      func.emitError("regalloc state member value id is invalid");
+      return failure();
+    }
+    ResolvedRegAllocValue resolved = valueIndex.valuesById[valueId];
+    if (!resolved.second || resolved.second->id != valueId) {
+      func.emitError("regalloc state value identity no longer matches IR");
+      return failure();
+    }
+    values.push_back(resolved);
+  }
+  return values;
+}
+
 template <typename Traits>
 static FailureOr<std::optional<typename Traits::Candidate>>
 buildMemoryReliefCandidate(func::FuncOp func, unsigned setId,
                            const RegAllocTransformFailure &failureRecord,
                            const MemoryReliefSetIndex &setIndex,
+                           const MemoryReliefValueIndex &valueIndex,
                            ArrayRef<wave::RegAllocTransformValue> values,
                            const RematReliefContext &context,
                            const typename Traits::PlanningState &planning) {
@@ -443,7 +469,7 @@ buildMemoryReliefCandidate(func::FuncOp func, unsigned setId,
   if (!set || !isMemoryReliefCandidateSet(*set, values, failureRecord.position))
     return std::optional<typename Traits::Candidate>();
   FailureOr<SmallVector<ResolvedRegAllocValue>> resolvedValues =
-      resolveSetValues(func, *set, values);
+      getMemoryReliefSetValues(func, *set, valueIndex);
   if (failed(resolvedValues))
     return failure();
 
@@ -516,6 +542,7 @@ buildExtraMemoryLoopCarryReliefCandidate(
     waveamdmachine::UniformLoopOp loop,
     const RegAllocTransformFailure &failureRecord,
     const MemoryReliefSetIndex &setIndex,
+    const MemoryReliefValueIndex &valueIndex,
     ArrayRef<wave::RegAllocTransformValue> values,
     const RematReliefContext &context,
     const typename Traits::PlanningState &planning) {
@@ -526,7 +553,7 @@ buildExtraMemoryLoopCarryReliefCandidate(
   if (!set || !isMemoryReliefCandidateSet(*set, values, failureRecord.position))
     return std::optional<typename Traits::Candidate>();
   FailureOr<SmallVector<ResolvedRegAllocValue>> resolvedValues =
-      resolveSetValues(func, *set, values);
+      getMemoryReliefSetValues(func, *set, valueIndex);
   if (failed(resolvedValues))
     return failure();
   FailureOr<std::optional<typename Traits::Candidate>> next =
@@ -551,6 +578,7 @@ expandMemoryLoopCarryReliefCandidate(
     ArrayRef<unsigned> candidateIds,
     const RegAllocTransformFailure &failureRecord,
     const MemoryReliefSetIndex &setIndex,
+    const MemoryReliefValueIndex &valueIndex,
     ArrayRef<wave::RegAllocTransformValue> values,
     const RematReliefContext &context,
     const typename Traits::PlanningState &planning) {
@@ -560,8 +588,8 @@ expandMemoryLoopCarryReliefCandidate(
   for (unsigned setId : candidateIds) {
     FailureOr<std::optional<typename Traits::Candidate>> next =
         buildExtraMemoryLoopCarryReliefCandidate<Traits>(
-            func, setId, candidate, loop, failureRecord, setIndex, values,
-            context, planning);
+            func, setId, candidate, loop, failureRecord, setIndex, valueIndex,
+            values, context, planning);
     if (failed(next))
       return failure();
     if (!*next)
@@ -577,6 +605,7 @@ static FailureOr<std::optional<typename Traits::Candidate>>
 selectMemoryReliefCandidate(func::FuncOp func,
                             const RegAllocTransformFailure &failureRecord,
                             const MemoryReliefSetIndex &setIndex,
+                            const MemoryReliefValueIndex &valueIndex,
                             ArrayRef<wave::RegAllocTransformValue> values,
                             const RematReliefContext &context,
                             const typename Traits::PlanningState &planning) {
@@ -586,7 +615,8 @@ selectMemoryReliefCandidate(func::FuncOp func,
   for (unsigned setId : candidateIds) {
     FailureOr<std::optional<typename Traits::Candidate>> candidate =
         buildMemoryReliefCandidate<Traits>(func, setId, failureRecord, setIndex,
-                                           values, context, planning);
+                                           valueIndex, values, context,
+                                           planning);
     if (failed(candidate))
       return failure();
     if (!*candidate)
@@ -595,7 +625,7 @@ selectMemoryReliefCandidate(func::FuncOp func,
       FailureOr<typename Traits::Candidate> expanded =
           expandMemoryLoopCarryReliefCandidate<Traits>(
               func, std::move(**candidate), candidateIds, failureRecord,
-              setIndex, values, context, planning);
+              setIndex, valueIndex, values, context, planning);
       if (failed(expanded))
         return failure();
       *candidate =
@@ -631,10 +661,11 @@ selectMemoryReliefCandidateFromState(
       resolveRegAllocStateValues(func, *values);
   if (failed(resolvedValues))
     return failure();
+  MemoryReliefValueIndex valueIndex{*resolvedValues};
 
   RematReliefContext context = buildRematReliefContext(func, *resolvedValues);
-  return selectMemoryReliefCandidate<Traits>(func, failureRecord, *setIndex,
-                                             *values, context, planning);
+  return selectMemoryReliefCandidate<Traits>(
+      func, failureRecord, *setIndex, valueIndex, *values, context, planning);
 }
 
 template <typename SlotT, typename LoadFn>
