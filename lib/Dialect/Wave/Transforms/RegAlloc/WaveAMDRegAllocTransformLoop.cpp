@@ -773,6 +773,12 @@ static constexpr std::array<waveamdmachine::RegClass, kRegClassCount>
         waveamdmachine::RegClass::AGPR, waveamdmachine::RegClass::SCC,
         waveamdmachine::RegClass::VCC};
 
+static unsigned getRegClassIndex(waveamdmachine::RegClass regClass) {
+  unsigned index = static_cast<unsigned>(regClass);
+  assert(index < kRegClassCount && "unknown register class");
+  return index;
+}
+
 static unsigned getCombinedVGPRFamilyPressure(unsigned agprFootprint,
                                               unsigned vgprFootprint) {
   return agprFootprint + llvm::alignTo(vgprFootprint, 4);
@@ -1023,12 +1029,6 @@ private:
              std::tie(rhsAssignment.end, rhsAssignment.set);
     }
 
-    static unsigned getRegClassIndex(waveamdmachine::RegClass regClass) {
-      unsigned index = static_cast<unsigned>(regClass);
-      assert(index < kRegClassCount && "unknown register class");
-      return index;
-    }
-
     bool isLive(unsigned assignmentIndex) const {
       return assignmentIndex < live.size() && live[assignmentIndex];
     }
@@ -1127,6 +1127,34 @@ private:
         if (predicate(assignments[assignmentIndex]))
           return true;
       }
+      return false;
+    }
+  };
+
+  struct FixedReservations {
+    SmallVector<wave::RegAllocTransformAssignment> reservations;
+    std::array<SmallVector<unsigned>, kRegClassCount> byClass;
+
+    unsigned size() const { return reservations.size(); }
+
+    void push_back(wave::RegAllocTransformAssignment reservation) {
+      unsigned index = reservations.size();
+      reservations.push_back(reservation);
+      byClass[getRegClassIndex(reservation.regClass)].push_back(index);
+    }
+
+    template <typename Fn>
+    void forRegClass(waveamdmachine::RegClass regClass, Fn &&fn) const {
+      for (unsigned index : byClass[getRegClassIndex(regClass)])
+        fn(reservations[index]);
+    }
+
+    template <typename Predicate>
+    bool anyRegClass(waveamdmachine::RegClass regClass,
+                     Predicate &&predicate) const {
+      for (unsigned index : byClass[getRegClassIndex(regClass)])
+        if (predicate(reservations[index]))
+          return true;
       return false;
     }
   };
@@ -1529,12 +1557,11 @@ private:
 
   bool conflictsWithFixedReservation(const wave::RegAllocTransformAliasSet &set,
                                      unsigned base) {
-    return llvm::any_of(
-        fixedReservations,
-        [&](const wave::RegAllocTransformAssignment &reserved) {
-          return reserved.regClass == set.regClass &&
-                 setOverlapsRange(set, reserved.start, reserved.end) &&
-                 assignedRangesOverlap(reserved, base, set.width);
+    return fixedReservations.anyRegClass(
+        set.regClass, [&](const wave::RegAllocTransformAssignment &reserved) {
+          if (!assignedRangesOverlap(reserved, base, set.width))
+            return false;
+          return setOverlapsRange(set, reserved.start, reserved.end);
         });
   }
 
@@ -1550,16 +1577,15 @@ private:
   bool conflictsWithFixedReservationIgnoring(
       const wave::RegAllocTransformAliasSet &set, unsigned base,
       const wave::RegAllocTransformAssignment &ignored) {
-    return llvm::any_of(
-        fixedReservations,
-        [&](const wave::RegAllocTransformAssignment &reserved) {
-          if ((reserved.set == ignored.set ||
-               reservationCoveredByIgnoredSource(reserved, ignored)) &&
-              assignedRangesOverlap(reserved, base, set.width))
+    return fixedReservations.anyRegClass(
+        set.regClass, [&](const wave::RegAllocTransformAssignment &reserved) {
+          bool overlaps = assignedRangesOverlap(reserved, base, set.width);
+          if (!overlaps)
             return false;
-          return reserved.regClass == set.regClass &&
-                 setOverlapsRange(set, reserved.start, reserved.end) &&
-                 assignedRangesOverlap(reserved, base, set.width);
+          if (reserved.set == ignored.set ||
+              reservationCoveredByIgnoredSource(reserved, ignored))
+            return false;
+          return setOverlapsRange(set, reserved.start, reserved.end);
         });
   }
 
@@ -1568,14 +1594,13 @@ private:
   SmallVector<wave::RegAllocTransformAssignment>
   getFixedReservationOverlaps(const wave::RegAllocTransformAliasSet &set) {
     SmallVector<wave::RegAllocTransformAssignment> overlaps;
-    for (const wave::RegAllocTransformAssignment &reserved :
-         fixedReservations) {
-      if (reserved.set == set.id || reserved.regClass != set.regClass ||
-          hasActiveAssignment(reserved.set))
-        continue;
-      if (setOverlapsRange(set, reserved.start, reserved.end))
-        overlaps.push_back(reserved);
-    }
+    fixedReservations.forRegClass(
+        set.regClass, [&](const wave::RegAllocTransformAssignment &reserved) {
+          if (reserved.set == set.id || hasActiveAssignment(reserved.set))
+            return;
+          if (setOverlapsRange(set, reserved.start, reserved.end))
+            overlaps.push_back(reserved);
+        });
     return overlaps;
   }
 
@@ -1887,7 +1912,7 @@ private:
   SmallVector<wave::RegAllocTransformValue> values;
   SmallVector<wave::RegAllocTransformAliasSet> sets;
   SmallVector<Value> payloadValues;
-  SmallVector<wave::RegAllocTransformAssignment> fixedReservations;
+  FixedReservations fixedReservations;
   ActiveAssignments active;
   SmallVector<wave::RegAllocTransformAssignment> assignments;
   DenseMap<Value, const wave::RegAllocTransformValue *> valueLookup;
