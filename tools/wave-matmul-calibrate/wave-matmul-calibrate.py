@@ -24,8 +24,10 @@ TENSILELITE_EXAMPLE = REPO_ROOT / "examples/wave/tensilelite_mxfp4_subtile.py"
 RUNNER_SRC = REPO_ROOT / "tools/wave-matmul-calibrate/wave-matmul-calibrate-runner.cpp"
 KERNEL_NAME = "wmma_f16_matmul_tiled"
 V9_GOLDEN_NAME = "v9_4096.original.wave"
+V9_TRANSPOSED_GOLDEN_NAME = "v9_4096.transposed.wave"
 V9_GOLDEN_KERNEL_NAME = "v9_beyond_hotloop"
-V9_GOLDEN_SOURCE = REPO_ROOT / "test/PerfGolden/Inputs" / f"{V9_GOLDEN_NAME}.mlir"
+V9_GOLDEN_INPUT_DIR = REPO_ROOT / "test/PerfGolden/Inputs"
+V9_GOLDEN_SOURCE = V9_GOLDEN_INPUT_DIR / f"{V9_GOLDEN_NAME}.mlir"
 STATIC_LDS_LIMIT = 64 * 1024
 DEFAULT_SIM_TRIP_COUNT = 32
 
@@ -124,6 +126,27 @@ KERNEL_PROFILES: dict[str, dict[str, ProfileValue]] = {
     },
     "v9-4096-original-wave": {
         "example": "v9-perf-golden",
+        "v9_golden_name": V9_GOLDEN_NAME,
+        "m": 4096,
+        "n": 4096,
+        "k": 4096,
+        "bm": 4,
+        "bn": 2,
+        "wave_m_tiles": 4,
+        "wave_n_tiles": 8,
+        "wave_k_tiles": 2,
+        "target_waves": 2,
+        "use_buffer": True,
+        "use_dma_lds": True,
+        "matrix_intrinsic": "mfma_gfx950",
+        "input_type": "f16",
+        "output_type": "f16",
+        "cta_swizzle_xcds": 8,
+        "cta_group_m": 4,
+    },
+    "v9-4096-transposed-wave": {
+        "example": "v9-perf-golden",
+        "v9_golden_name": V9_TRANSPOSED_GOLDEN_NAME,
         "m": 4096,
         "n": 4096,
         "k": 4096,
@@ -320,11 +343,17 @@ def build_example_args(args: argparse.Namespace, chip: str) -> list[str]:
     return build_matmul_example_args(args, chip)
 
 
-def isolate_v9_golden_module(chip: str) -> str:
-    text = V9_GOLDEN_SOURCE.read_text()
+def v9_golden_source(args: argparse.Namespace) -> Path:
+    name = getattr(args, "v9_golden_name", V9_GOLDEN_NAME)
+    return V9_GOLDEN_INPUT_DIR / f"{name}.mlir"
+
+
+def isolate_v9_golden_module(args: argparse.Namespace, chip: str) -> str:
+    source = v9_golden_source(args)
+    text = source.read_text()
     match = re.search(rf"(func\.func @{V9_GOLDEN_KERNEL_NAME}.*?\n    \}})", text, re.S)
     if not match:
-        sys.exit(f"could not isolate {V9_GOLDEN_KERNEL_NAME} from {V9_GOLDEN_SOURCE}")
+        sys.exit(f"could not isolate {V9_GOLDEN_KERNEL_NAME} from {source}")
     kernel = re.sub(r"^    ", "  ", match.group(1).lstrip(), flags=re.M)
     target = f"amdgcn-amd-amdhsa--{chip}"
     return (
@@ -335,7 +364,7 @@ def isolate_v9_golden_module(chip: str) -> str:
 
 def generate_kernel_module(args: argparse.Namespace, chip: str) -> str:
     if is_v9_perf_golden(args):
-        return isolate_v9_golden_module(chip)
+        return isolate_v9_golden_module(args, chip)
 
     env = os.environ.copy()
     package_path = args.build_dir / "python_packages/wave_mlir"

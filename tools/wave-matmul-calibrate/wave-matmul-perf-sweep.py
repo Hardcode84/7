@@ -88,14 +88,24 @@ KERNELS = {
         default_k_values=(V9_K,),
         sweep_k=False,
     ),
+    "v9-transposed": KernelSpec(
+        key="v9-transposed",
+        label="v9-transposed",
+        profile="v9-4096-transposed-wave",
+        variants="baseline",
+        default_k_values=(V9_K,),
+        sweep_k=False,
+    ),
 }
 
 KERNEL_ALIASES = {
-    "all": ("f16", "mxfp4", "v9"),
+    "all": ("f16", "mxfp4", "v9", "v9-transposed"),
     "mxfp": ("mxfp4",),
     "mxfp4": ("mxfp4",),
     "f16": ("f16",),
     "v9": ("v9",),
+    "v9-original": ("v9",),
+    "v9-transposed": ("v9-transposed",),
 }
 
 
@@ -286,15 +296,15 @@ def print_summary(results: list[RunResult]) -> None:
     if not results:
         return
     print("\nsummary:")
-    print("kernel  M     N     K      variant    us        TFLOP/s   check")
-    print("------  ----  ----  -----  ---------  --------  --------  -------")
+    print("kernel          M     N     K      variant    us        TFLOP/s   check")
+    print("--------------  ----  ----  -----  ---------  --------  --------  -------")
     for result in results:
         spec = result.spec
         micros = f"{result.micros:.3f}" if result.micros is not None else "-"
         tflops = f"{result.tflops:.2f}" if result.tflops is not None else "-"
         check = result.check or ("failed" if result.returncode != 0 else "-")
         print(
-            f"{spec.kernel.label:<6}  {spec.m:<4}  {spec.n:<4}  {spec.k:<5}  "
+            f"{spec.kernel.label:<14}  {spec.m:<4}  {spec.n:<4}  {spec.k:<5}  "
             f"{spec.variants:<9}  {micros:>8}  {tflops:>8}  {check}"
         )
 
@@ -351,7 +361,7 @@ def build_argparser() -> argparse.ArgumentParser:
         "--kernels",
         type=parse_kernel_csv,
         default=parse_kernel_csv("all"),
-        help="comma-separated f16,mxfp4,v9,all; mxfp aliases mxfp4",
+        help=("comma-separated f16,mxfp4,v9,v9-transposed,all; " "mxfp aliases mxfp4"),
     )
     parser.add_argument("--m", type=int, default=4096)
     parser.add_argument("--n", type=int, default=4096)
@@ -361,7 +371,7 @@ def build_argparser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "comma-separated K override for f16/mxfp4; defaults match "
-            "docs/Gfx950MatmulProfiles.md; v9 always uses K=4096"
+            "docs/Gfx950MatmulProfiles.md; v9 variants always use K=4096"
         ),
     )
     parser.add_argument(
@@ -381,7 +391,7 @@ def build_argparser() -> argparse.ArgumentParser:
         default="",
         help=(
             "override variants for every kernel; defaults are scheduled "
-            "f16/mxfp4, baseline v9"
+            "f16/mxfp4, baseline v9 variants"
         ),
     )
     parser.add_argument(
@@ -418,10 +428,10 @@ def validate_args(args: argparse.Namespace) -> None:
             raise SystemExit(f"--{name.replace('_', '-')} must be positive")
     if args.sim_trip_count < -1:
         raise SystemExit("--sim-trip-count must be >= -1")
-    if "v9" in {kernel.key for kernel in args.kernels} and (
+    if any(kernel.key.startswith("v9") for kernel in args.kernels) and (
         args.m % 256 != 0 or args.n % 256 != 0
     ):
-        raise SystemExit("v9 requires --m/--n multiples of 256")
+        raise SystemExit("v9 variants require --m/--n multiples of 256")
 
 
 def main(argv: list[str]) -> int:

@@ -16,6 +16,7 @@
 # CHECK: matmul_f16_dma_buffer_count: ok
 # CHECK: matmul_dma_sim_trip_count: ok
 # CHECK: matmul_v9_perf_golden_profile: ok
+# CHECK: matmul_v9_transposed_perf_golden_profile: ok
 # CHECK: calibration_scheduler_region_cap: ok
 # CHECK: matmul_pingpong_removed: ok
 
@@ -843,11 +844,13 @@ def check_matmul_dma_sim_trip_count(matmul) -> None:
     print("matmul_dma_sim_trip_count: ok")
 
 
-def make_v9_perf_golden_args(matmul) -> argparse.Namespace:
+def make_v9_perf_golden_args(
+    matmul, profile: str = "v9-4096-original-wave"
+) -> argparse.Namespace:
     return matmul.parse_args(
         [
             "--chip=gfx950",
-            "--kernel-profile=v9-4096-original-wave",
+            f"--kernel-profile={profile}",
             "--skip-hw",
             "--no-check",
         ]
@@ -977,6 +980,29 @@ def check_matmul_v9_perf_golden_profile(matmul) -> None:
     print("matmul_v9_perf_golden_profile: ok")
 
 
+def check_matmul_v9_transposed_perf_golden_profile(matmul) -> None:
+    args = make_v9_perf_golden_args(matmul, "v9-4096-transposed-wave")
+    require(
+        "matmul_v9_transposed_perf_golden_profile",
+        args.example == "v9-perf-golden",
+        "profile should select v9 golden IR",
+    )
+    require(
+        "matmul_v9_transposed_perf_golden_profile",
+        args.v9_golden_name == matmul.V9_TRANSPOSED_GOLDEN_NAME,
+        "profile should select transposed v9 source",
+    )
+    require(
+        "matmul_v9_transposed_perf_golden_profile",
+        matmul.v9_golden_source(args).name == "v9_4096.transposed.wave.mlir",
+        "bad transposed v9 source path",
+    )
+    check_v9_profile_shape(matmul, args)
+    check_v9_profile_counts(matmul, args)
+    check_v9_source_isolation(matmul, args)
+    print("matmul_v9_transposed_perf_golden_profile: ok")
+
+
 def check_calibration_scheduler_region_cap(matmul, fa) -> None:
     matmul_args = matmul.parse_args(["--chip=gfx950", "--skip-hw"])
     matmul_variant = matmul.VARIANTS["scheduled"]
@@ -1036,6 +1062,7 @@ def main() -> int:
     check_matmul_f16_dma_buffer_count(matmul)
     check_matmul_dma_sim_trip_count(matmul)
     check_matmul_v9_perf_golden_profile(matmul)
+    check_matmul_v9_transposed_perf_golden_profile(matmul)
     check_calibration_scheduler_region_cap(matmul, fa)
     try:
         matmul.parse_variants("pingpong")
