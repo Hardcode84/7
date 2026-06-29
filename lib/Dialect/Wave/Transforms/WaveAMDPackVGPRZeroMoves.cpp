@@ -57,6 +57,38 @@ static bool canPack(waveamdmachine::VMovB32TupleOp op) {
   return true;
 }
 
+static bool isPackableScalarZeroMove(waveamdmachine::VMovB32TupleOp op) {
+  auto resultType = dyn_cast<waveamdmachine::RegType>(op.getResult().getType());
+  return resultType &&
+         resultType.getRegClass() == waveamdmachine::RegClass::VGPR &&
+         resultType.getWidth() == 1 && resultType.getIndex() >= 0 &&
+         isZeroImm(op.getSource()) && op.getResult().hasOneUse();
+}
+
+static bool areAdjacentBefore(Operation *first, Operation *second,
+                              Operation *anchor) {
+  return first->getBlock() == anchor->getBlock() &&
+         second->getBlock() == anchor->getBlock() &&
+         first->getNextNode() == second && first->isBeforeInBlock(anchor);
+}
+
+static waveamdmachine::VMovB32TupleOp getPackableScalarZeroMove(Value value) {
+  auto move = value.getDefiningOp<waveamdmachine::VMovB32TupleOp>();
+  if (!move || !isPackableScalarZeroMove(move))
+    return {};
+  return move;
+}
+
+static bool canPackPair(waveamdmachine::VMovB32TupleOp first,
+                        waveamdmachine::VMovB32TupleOp second,
+                        waveamdmachine::TupleFromElementsOp tuple) {
+  auto firstType = cast<waveamdmachine::RegType>(first.getResult().getType());
+  auto secondType = cast<waveamdmachine::RegType>(second.getResult().getType());
+  return firstType.getIndex() % 2 == 0 &&
+         secondType.getIndex() == firstType.getIndex() + 1 &&
+         areAdjacentBefore(first, second, tuple);
+}
+
 static waveamdmachine::VMovB32TupleOp
 createB32Move(OpBuilder &builder, Location loc, Type type, Value zero) {
   auto move = waveamdmachine::VMovB32TupleOp::create(builder, loc, type, zero);
@@ -99,6 +131,55 @@ static void packMove(waveamdmachine::VMovB32TupleOp op) {
   op.erase();
 }
 
+static Value createB64Move(OpBuilder &builder,
+                           waveamdmachine::VMovB32TupleOp first,
+                           waveamdmachine::RegType firstType) {
+  builder.setInsertionPoint(first);
+  auto pairType = waveamdmachine::RegType::get(first.getContext(),
+                                               waveamdmachine::RegClass::VGPR,
+                                               2, firstType.getIndex());
+  return waveamdmachine::VMovB64TupleOp::create(builder, first.getLoc(),
+                                                pairType, first.getSource())
+      .getResult();
+}
+
+static bool packTupleElements(waveamdmachine::TupleFromElementsOp tuple) {
+  OpBuilder builder(tuple.getContext());
+  SmallVector<Value, 16> elements;
+  SmallVector<waveamdmachine::VMovB32TupleOp, 16> movesToErase;
+  ValueRange oldElements = tuple.getElements();
+
+  for (unsigned i = 0, e = oldElements.size(); i != e;) {
+    waveamdmachine::VMovB32TupleOp first =
+        getPackableScalarZeroMove(oldElements[i]);
+    waveamdmachine::VMovB32TupleOp second =
+        i + 1 == e ? waveamdmachine::VMovB32TupleOp()
+                   : getPackableScalarZeroMove(oldElements[i + 1]);
+    if (!first || !second || !canPackPair(first, second, tuple)) {
+      elements.push_back(oldElements[i++]);
+      continue;
+    }
+
+    auto firstType = cast<waveamdmachine::RegType>(first.getResult().getType());
+    elements.push_back(createB64Move(builder, first, firstType));
+    movesToErase.push_back(first);
+    movesToErase.push_back(second);
+    i += 2;
+  }
+
+  if (movesToErase.empty())
+    return false;
+
+  builder.setInsertionPoint(tuple);
+  auto replacement = waveamdmachine::TupleFromElementsOp::create(
+      builder, tuple.getLoc(), tuple.getTuple().getType(), elements);
+  tuple.getTuple().replaceAllUsesWith(replacement.getTuple());
+  tuple.erase();
+  for (waveamdmachine::VMovB32TupleOp move : llvm::reverse(movesToErase))
+    move.erase();
+  return true;
+}
+
 struct WaveAMDPackVGPRZeroMovesPass
     : public wave::impl::WaveAMDPackVGPRZeroMovesBase<
           WaveAMDPackVGPRZeroMovesPass> {
@@ -117,6 +198,12 @@ struct WaveAMDPackVGPRZeroMovesPass
     });
     for (waveamdmachine::VMovB32TupleOp op : moves)
       packMove(op);
+
+    SmallVector<waveamdmachine::TupleFromElementsOp> tuples;
+    root->walk(
+        [&](waveamdmachine::TupleFromElementsOp op) { tuples.push_back(op); });
+    for (waveamdmachine::TupleFromElementsOp op : tuples)
+      packTupleElements(op);
   }
 };
 
