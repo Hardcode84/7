@@ -2977,28 +2977,54 @@ static int64_t adjustedScheduleCycles(const EvaluatedCandidate &candidate) {
   return cycles + candidate.metrics.counterBurstCycles;
 }
 
-static bool counterBurstEligible(const EvaluatedCandidate &candidate,
+static bool hasLowerCounterBurst(const EvaluatedCandidate &candidate,
                                  const EvaluatedCandidate &original) {
-  if (candidate.name == "original" || original.metrics.counterBurstCycles == 0)
-    return true;
-  if (isBarrierPipelineName(candidate.name))
-    return true;
-  if (candidate.metrics.counterBurstCycles <
-      original.metrics.counterBurstCycles)
-    return isCounterBurstPlacementCandidate(candidate) ||
-           candidate.metrics.originalCycleDelta < 0;
-  if (candidate.metrics.counterBurstCycles ==
-          original.metrics.counterBurstCycles &&
-      candidate.metrics.originalCycleDelta < 0)
-    return true;
+  return candidate.metrics.counterBurstCycles <
+         original.metrics.counterBurstCycles;
+}
+
+static bool hasSameCounterBurst(const EvaluatedCandidate &candidate,
+                                const EvaluatedCandidate &original) {
+  return candidate.metrics.counterBurstCycles ==
+         original.metrics.counterBurstCycles;
+}
+
+static bool lowerCounterBurstEligible(const EvaluatedCandidate &candidate,
+                                      bool isPlacement) {
+  return isPlacement || candidate.metrics.originalCycleDelta < 0;
+}
+
+static bool sameCounterBurstRawEligible(const EvaluatedCandidate &candidate,
+                                        bool isPlacement) {
+  return !isPlacement && candidate.metrics.originalCycleDelta < 0;
+}
+
+static bool
+sameCounterBurstAdjustedEligible(const EvaluatedCandidate &candidate,
+                                 const EvaluatedCandidate &original) {
   int64_t neutralMinGain =
       std::max<int64_t>(1, original.metrics.counterBurstCycles / 8);
   int64_t adjustedCycleDelta =
       adjustedScheduleCycles(candidate) - adjustedScheduleCycles(original);
-  return isCounterBurstPlacementCandidate(candidate) &&
-         candidate.metrics.counterBurstCycles ==
-             original.metrics.counterBurstCycles &&
-         adjustedCycleDelta <= -neutralMinGain;
+  return adjustedCycleDelta <= -neutralMinGain;
+}
+
+static bool counterBurstEligible(const EvaluatedCandidate &candidate,
+                                 const EvaluatedCandidate &original) {
+  if (candidate.name == "original" || original.metrics.counterBurstCycles == 0)
+    return true;
+  bool isPlacement = isCounterBurstPlacementCandidate(candidate);
+  if (isBarrierPipelineName(candidate.name))
+    return true;
+  if (hasLowerCounterBurst(candidate, original))
+    return lowerCounterBurstEligible(candidate, isPlacement);
+  if (!hasSameCounterBurst(candidate, original))
+    return false;
+  if (sameCounterBurstRawEligible(candidate, isPlacement))
+    return true;
+  if (!isPlacement)
+    return false;
+  return sameCounterBurstAdjustedEligible(candidate, original);
 }
 
 static bool
