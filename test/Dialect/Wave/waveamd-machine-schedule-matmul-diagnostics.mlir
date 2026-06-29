@@ -191,4 +191,4 @@ func.func @late_dma_overlap_candidate(%a: !waveamdmachine.reg<vgpr, 4>,
 
 // DIAG-NOT: name=lds_dma_place
 // DIAG: waveamd-machine-schedule-report candidate func=late_dma_overlap_candidate region=0 name=issue_window cycles=172 delta=-76
-// DIAG: waveamd-machine-schedule-report selected func=late_dma_overlap_candidate region=0 name=original original_cycles=248 selected_cycles=248 delta=0 selected_counter_burst_cycles=40 action=keep
+// DIAG: waveamd-machine-schedule-report selected func=late_dma_overlap_candidate region=0 name=issue_window original_cycles=248 selected_cycles=172 delta=-76 selected_counter_burst_cycles=40 action=keep

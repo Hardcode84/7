@@ -2985,6 +2985,11 @@ static bool counterBurstEligible(const EvaluatedCandidate &candidate,
     return true;
   if (candidate.metrics.counterBurstCycles <
       original.metrics.counterBurstCycles)
+    return isCounterBurstPlacementCandidate(candidate) ||
+           candidate.metrics.originalCycleDelta < 0;
+  if (candidate.metrics.counterBurstCycles ==
+          original.metrics.counterBurstCycles &&
+      candidate.metrics.originalCycleDelta < 0)
     return true;
   int64_t neutralMinGain =
       std::max<int64_t>(1, original.metrics.counterBurstCycles / 8);
