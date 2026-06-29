@@ -451,8 +451,8 @@ wmma_f16_matmul_tiled:
 		v_addc_co_u32_e64 v107, vcc, v109, v105, vcc
 		v_add_co_u32_e64 v108, vcc, v106, v102
 		v_addc_co_u32_e64 v109, vcc, v107, v103, vcc
-		v_mov_b32_e32 v8, 0x80000
-		v_add_co_u32_e64 v106, vcc, v84, v8
+		v_mov_b32_e32 v4, 0x80000
+		v_add_co_u32_e64 v106, vcc, v84, v4
 		v_addc_co_u32_e64 v107, vcc, v85, 0, vcc
 		v_add_co_u32_e64 v110, vcc, v106, v96
 		v_addc_co_u32_e64 v111, vcc, v107, v97, vcc
@@ -460,8 +460,8 @@ wmma_f16_matmul_tiled:
 		v_addc_co_u32_e64 v107, vcc, v111, v105, vcc
 		v_add_co_u32_e64 v110, vcc, v106, v102
 		v_addc_co_u32_e64 v111, vcc, v107, v103, vcc
-		v_mov_b32_e32 v10, 0xc0000
-		v_add_co_u32_e64 v106, vcc, v84, v10
+		v_mov_b32_e32 v8, 0xc0000
+		v_add_co_u32_e64 v106, vcc, v84, v8
 		v_addc_co_u32_e64 v107, vcc, v85, 0, vcc
 		v_add_co_u32_e64 v112, vcc, v106, v96
 		v_addc_co_u32_e64 v113, vcc, v107, v97, vcc
@@ -469,50 +469,50 @@ wmma_f16_matmul_tiled:
 		v_addc_co_u32_e64 v107, vcc, v113, v105, vcc
 		v_add_co_u32_e64 v112, vcc, v106, v102
 		v_addc_co_u32_e64 v113, vcc, v107, v103, vcc
-		v_mov_b32_e32 v106, 64
-		v_add_co_u32_e64 v114, vcc, v84, v106
-		v_addc_co_u32_e64 v115, vcc, v85, 0, vcc
-		v_add_co_u32_e64 v116, vcc, v114, v96
-		v_addc_co_u32_e64 v117, vcc, v115, v97, vcc
-		v_add_co_u32_e64 v114, vcc, v116, v104
-		v_addc_co_u32_e64 v115, vcc, v117, v105, vcc
-		v_add_co_u32_e64 v116, vcc, v114, v102
-		v_addc_co_u32_e64 v117, vcc, v115, v103, vcc
-		v_mov_b32_e32 v107, 0x40040
-		v_add_co_u32_e64 v114, vcc, v84, v107
-		v_addc_co_u32_e64 v115, vcc, v85, 0, vcc
-		v_add_co_u32_e64 v118, vcc, v114, v96
-		v_addc_co_u32_e64 v119, vcc, v115, v97, vcc
-		v_add_co_u32_e64 v114, vcc, v118, v104
-		v_addc_co_u32_e64 v115, vcc, v119, v105, vcc
-		v_add_co_u32_e64 v118, vcc, v114, v102
-		v_addc_co_u32_e64 v119, vcc, v115, v103, vcc
-		v_mov_b32_e32 v114, 0x80040
-		v_add_co_u32_e64 v120, vcc, v84, v114
-		v_addc_co_u32_e64 v121, vcc, v85, 0, vcc
-		v_add_co_u32_e64 v122, vcc, v120, v96
-		v_addc_co_u32_e64 v123, vcc, v121, v97, vcc
-		v_add_co_u32_e64 v120, vcc, v122, v104
-		v_addc_co_u32_e64 v121, vcc, v123, v105, vcc
-		v_add_co_u32_e64 v122, vcc, v120, v102
-		v_addc_co_u32_e64 v123, vcc, v121, v103, vcc
-		v_mov_b32_e32 v115, 0xc0040
-		v_add_co_u32_e64 v120, vcc, v84, v115
-		v_addc_co_u32_e64 v121, vcc, v85, 0, vcc
-		v_add_co_u32_e64 v124, vcc, v120, v96
-		v_addc_co_u32_e64 v125, vcc, v121, v97, vcc
-		v_add_co_u32_e64 v120, vcc, v124, v104
-		v_addc_co_u32_e64 v121, vcc, v125, v105, vcc
-		v_add_co_u32_e64 v124, vcc, v120, v102
-		v_addc_co_u32_e64 v125, vcc, v121, v103, vcc
-		v_mov_b32_e32 v120, s14
-		v_mov_b32_e32 v121, 0
-		v_mul_lo_u32 v126, v6, v120
-		v_mul_hi_u32 v127, v6, v120
-		v_mul_lo_u32 v128, v6, v121
-		v_add_u32_e32 v127, v127, v128
-		v_mul_lo_u32 v128, v7, v120
-		v_add_u32_e32 v127, v127, v128
+		v_mov_b32_e32 v10, 64
+		v_add_co_u32_e64 v106, vcc, v84, v10
+		v_addc_co_u32_e64 v107, vcc, v85, 0, vcc
+		v_add_co_u32_e64 v114, vcc, v106, v96
+		v_addc_co_u32_e64 v115, vcc, v107, v97, vcc
+		v_add_co_u32_e64 v106, vcc, v114, v104
+		v_addc_co_u32_e64 v107, vcc, v115, v105, vcc
+		v_add_co_u32_e64 v114, vcc, v106, v102
+		v_addc_co_u32_e64 v115, vcc, v107, v103, vcc
+		v_mov_b32_e32 v106, 0x40040
+		v_add_co_u32_e64 v116, vcc, v84, v106
+		v_addc_co_u32_e64 v117, vcc, v85, 0, vcc
+		v_add_co_u32_e64 v118, vcc, v116, v96
+		v_addc_co_u32_e64 v119, vcc, v117, v97, vcc
+		v_add_co_u32_e64 v116, vcc, v118, v104
+		v_addc_co_u32_e64 v117, vcc, v119, v105, vcc
+		v_add_co_u32_e64 v118, vcc, v116, v102
+		v_addc_co_u32_e64 v119, vcc, v117, v103, vcc
+		v_mov_b32_e32 v107, 0x80040
+		v_add_co_u32_e64 v116, vcc, v84, v107
+		v_addc_co_u32_e64 v117, vcc, v85, 0, vcc
+		v_add_co_u32_e64 v120, vcc, v116, v96
+		v_addc_co_u32_e64 v121, vcc, v117, v97, vcc
+		v_add_co_u32_e64 v116, vcc, v120, v104
+		v_addc_co_u32_e64 v117, vcc, v121, v105, vcc
+		v_add_co_u32_e64 v120, vcc, v116, v102
+		v_addc_co_u32_e64 v121, vcc, v117, v103, vcc
+		v_mov_b32_e32 v116, 0xc0040
+		v_add_co_u32_e64 v122, vcc, v84, v116
+		v_addc_co_u32_e64 v123, vcc, v85, 0, vcc
+		v_add_co_u32_e64 v124, vcc, v122, v96
+		v_addc_co_u32_e64 v125, vcc, v123, v97, vcc
+		v_add_co_u32_e64 v122, vcc, v124, v104
+		v_addc_co_u32_e64 v123, vcc, v125, v105, vcc
+		v_add_co_u32_e64 v124, vcc, v122, v102
+		v_addc_co_u32_e64 v125, vcc, v123, v103, vcc
+		v_mov_b32_e32 v122, s14
+		v_mov_b32_e32 v123, 0
+		v_mul_lo_u32 v126, v6, v122
+		v_mul_hi_u32 v127, v6, v122
+		v_mul_lo_u32 v117, v6, v123
+		v_add_u32_e32 v127, v127, v117
+		v_mul_lo_u32 v117, v7, v122
+		v_add_u32_e32 v127, v127, v117
 		v_add_co_u32_e64 v6, vcc, v126, v96
 		v_addc_co_u32_e64 v7, vcc, v127, v97, vcc
 		v_add_co_u32_e64 v128, vcc, v6, v104
@@ -527,7 +527,7 @@ wmma_f16_matmul_tiled:
 		v_addc_co_u32_e64 v129, vcc, v131, v105, vcc
 		v_add_co_u32_e64 v130, vcc, v128, v102
 		v_addc_co_u32_e64 v131, vcc, v129, v103, vcc
-		v_add_co_u32_e64 v128, vcc, v126, v8
+		v_add_co_u32_e64 v128, vcc, v126, v4
 		v_addc_co_u32_e64 v129, vcc, v127, 0, vcc
 		v_add_co_u32_e64 v132, vcc, v128, v96
 		v_addc_co_u32_e64 v133, vcc, v129, v97, vcc
@@ -535,7 +535,7 @@ wmma_f16_matmul_tiled:
 		v_addc_co_u32_e64 v129, vcc, v133, v105, vcc
 		v_add_co_u32_e64 v132, vcc, v128, v102
 		v_addc_co_u32_e64 v133, vcc, v129, v103, vcc
-		v_add_co_u32_e64 v128, vcc, v126, v10
+		v_add_co_u32_e64 v128, vcc, v126, v8
 		v_addc_co_u32_e64 v129, vcc, v127, 0, vcc
 		v_add_co_u32_e64 v134, vcc, v128, v96
 		v_addc_co_u32_e64 v135, vcc, v129, v97, vcc
@@ -543,7 +543,7 @@ wmma_f16_matmul_tiled:
 		v_addc_co_u32_e64 v129, vcc, v135, v105, vcc
 		v_add_co_u32_e64 v134, vcc, v128, v102
 		v_addc_co_u32_e64 v135, vcc, v129, v103, vcc
-		v_add_co_u32_e64 v128, vcc, v126, v106
+		v_add_co_u32_e64 v128, vcc, v126, v10
 		v_addc_co_u32_e64 v129, vcc, v127, 0, vcc
 		v_add_co_u32_e64 v136, vcc, v128, v96
 		v_addc_co_u32_e64 v137, vcc, v129, v97, vcc
@@ -551,6 +551,14 @@ wmma_f16_matmul_tiled:
 		v_addc_co_u32_e64 v129, vcc, v137, v105, vcc
 		v_add_co_u32_e64 v136, vcc, v128, v102
 		v_addc_co_u32_e64 v137, vcc, v129, v103, vcc
+		v_add_co_u32_e64 v128, vcc, v126, v106
+		v_addc_co_u32_e64 v129, vcc, v127, 0, vcc
+		v_add_co_u32_e64 v138, vcc, v128, v96
+		v_addc_co_u32_e64 v139, vcc, v129, v97, vcc
+		v_add_co_u32_e64 v128, vcc, v138, v104
+		v_addc_co_u32_e64 v129, vcc, v139, v105, vcc
+		v_add_co_u32_e64 v138, vcc, v128, v102
+		v_addc_co_u32_e64 v139, vcc, v129, v103, vcc
 		v_add_co_u32_e64 v128, vcc, v126, v107
 		v_addc_co_u32_e64 v129, vcc, v127, 0, vcc
 		v_add_co_u32_e64 v106, vcc, v128, v96
@@ -559,57 +567,49 @@ wmma_f16_matmul_tiled:
 		v_addc_co_u32_e64 v129, vcc, v107, v105, vcc
 		v_add_co_u32_e64 v106, vcc, v128, v102
 		v_addc_co_u32_e64 v107, vcc, v129, v103, vcc
-		v_add_co_u32_e64 v128, vcc, v126, v114
+		v_add_co_u32_e64 v128, vcc, v126, v116
 		v_addc_co_u32_e64 v129, vcc, v127, 0, vcc
-		v_add_co_u32_e64 v138, vcc, v128, v96
-		v_addc_co_u32_e64 v139, vcc, v129, v97, vcc
-		v_add_co_u32_e64 v128, vcc, v138, v104
-		v_addc_co_u32_e64 v129, vcc, v139, v105, vcc
-		v_add_co_u32_e64 v138, vcc, v128, v102
-		v_addc_co_u32_e64 v139, vcc, v129, v103, vcc
-		v_add_co_u32_e64 v128, vcc, v126, v115
-		v_addc_co_u32_e64 v129, vcc, v127, 0, vcc
-		v_add_co_u32_e64 v114, vcc, v128, v96
-		v_addc_co_u32_e64 v115, vcc, v129, v97, vcc
-		v_add_co_u32_e64 v128, vcc, v114, v104
-		v_addc_co_u32_e64 v129, vcc, v115, v105, vcc
-		v_add_co_u32_e64 v114, vcc, v128, v102
-		v_addc_co_u32_e64 v115, vcc, v129, v103, vcc
-		v_mul_lo_u32 v128, v94, v120
-		v_mul_hi_u32 v129, v94, v120
-		v_mul_lo_u32 v2, v94, v121
+		v_add_co_u32_e64 v116, vcc, v128, v96
+		v_addc_co_u32_e64 v117, vcc, v129, v97, vcc
+		v_add_co_u32_e64 v128, vcc, v116, v104
+		v_addc_co_u32_e64 v129, vcc, v117, v105, vcc
+		v_add_co_u32_e64 v116, vcc, v128, v102
+		v_addc_co_u32_e64 v117, vcc, v129, v103, vcc
+		v_mul_lo_u32 v128, v94, v122
+		v_mul_hi_u32 v129, v94, v122
+		v_mul_lo_u32 v2, v94, v123
 		v_add_u32_e32 v129, v129, v2
-		v_mul_lo_u32 v2, v95, v120
+		v_mul_lo_u32 v2, v95, v122
 		v_add_u32_e32 v129, v129, v2
 		v_add_co_u32_e64 v94, vcc, v84, v128
 		v_addc_co_u32_e64 v95, vcc, v85, v129, vcc
-		v_lshrrev_b64 v[120:121], 7, v[90:91]
+		v_lshrrev_b64 v[122:123], 7, v[90:91]
 		s_mov_b32 s62, 0x400
 		s_mov_b32 s63, 0
 		v_mov_b32_e32 v90, s62
 		v_mov_b32_e32 v91, s63
-		v_mul_lo_u32 v140, v90, v120
-		v_mul_hi_u32 v141, v90, v120
-		v_mul_lo_u32 v2, v90, v121
+		v_mul_lo_u32 v140, v90, v122
+		v_mul_hi_u32 v141, v90, v122
+		v_mul_lo_u32 v2, v90, v123
 		v_add_u32_e32 v141, v141, v2
-		v_mul_lo_u32 v2, v91, v120
+		v_mul_lo_u32 v2, v91, v122
 		v_add_u32_e32 v141, v141, v2
-		v_add_co_u32_e64 v120, vcc, v94, v140
-		v_addc_co_u32_e64 v121, vcc, v95, v141, vcc
+		v_add_co_u32_e64 v122, vcc, v94, v140
+		v_addc_co_u32_e64 v123, vcc, v95, v141, vcc
 		v_mul_lo_u32 v142, v98, v100
 		v_mul_hi_u32 v143, v98, v100
 		v_mul_lo_u32 v2, v98, v101
 		v_add_u32_e32 v143, v143, v2
 		v_mul_lo_u32 v2, v99, v100
 		v_add_u32_e32 v143, v143, v2
-		v_add_co_u32_e64 v98, vcc, v120, v142
-		v_addc_co_u32_e64 v99, vcc, v121, v143, vcc
+		v_add_co_u32_e64 v98, vcc, v122, v142
+		v_addc_co_u32_e64 v99, vcc, v123, v143, vcc
 		s_mov_b32 s62, 0x800
 		s_mov_b32 s63, 0
 		v_mov_b32_e32 v100, s62
 		v_mov_b32_e32 v101, s63
-		v_add_co_u32_e64 v120, vcc, v94, v142
-		v_addc_co_u32_e64 v121, vcc, v95, v143, vcc
+		v_add_co_u32_e64 v122, vcc, v94, v142
+		v_addc_co_u32_e64 v123, vcc, v95, v143, vcc
 		v_mov_b32_e32 v2, 1
 		v_and_b32_e32 v94, v92, v2
 		v_and_b32_e32 v95, v93, v5
@@ -619,8 +619,8 @@ wmma_f16_matmul_tiled:
 		v_add_u32_e32 v5, v5, v2
 		v_mul_lo_u32 v2, v91, v94
 		v_add_u32_e32 v5, v5, v2
-		v_add_co_u32_e64 v90, vcc, v120, v4
-		v_addc_co_u32_e64 v91, vcc, v121, v5, vcc
+		v_add_co_u32_e64 v90, vcc, v122, v4
+		v_addc_co_u32_e64 v91, vcc, v123, v5, vcc
 		v_mov_b32_e32 v2, 0x80
 		v_add_co_u32_e64 v92, vcc, v84, v2
 		v_addc_co_u32_e64 v93, vcc, v85, 0, vcc
@@ -669,42 +669,42 @@ wmma_f16_matmul_tiled:
 		v_mov_b32_e32 v92, 0xc0080
 		v_add_co_u32_e64 v94, vcc, v84, v92
 		v_addc_co_u32_e64 v95, vcc, v85, 0, vcc
-		v_add_co_u32_e64 v120, vcc, v94, v96
-		v_addc_co_u32_e64 v121, vcc, v95, v97, vcc
-		v_add_co_u32_e64 v94, vcc, v120, v104
-		v_addc_co_u32_e64 v95, vcc, v121, v105, vcc
-		v_add_co_u32_e64 v120, vcc, v94, v102
-		v_addc_co_u32_e64 v121, vcc, v95, v103, vcc
+		v_add_co_u32_e64 v122, vcc, v94, v96
+		v_addc_co_u32_e64 v123, vcc, v95, v97, vcc
+		v_add_co_u32_e64 v94, vcc, v122, v104
+		v_addc_co_u32_e64 v95, vcc, v123, v105, vcc
+		v_add_co_u32_e64 v122, vcc, v94, v102
+		v_addc_co_u32_e64 v123, vcc, v95, v103, vcc
 		s_mov_b32 m0, s15
 		s_nop 0
-		ds_write_addtid_b32 v120 offset:8192
+		ds_write_addtid_b32 v122 offset:8192
 		s_mov_b32 m0, s15
 		s_nop 0
-		ds_write_addtid_b32 v121 offset:9216
+		ds_write_addtid_b32 v123 offset:9216
 		v_mov_b32_e32 v93, 0xc0
 		v_add_co_u32_e64 v94, vcc, v84, v93
 		v_addc_co_u32_e64 v95, vcc, v85, 0, vcc
-		v_add_co_u32_e64 v120, vcc, v94, v96
-		v_addc_co_u32_e64 v121, vcc, v95, v97, vcc
-		v_add_co_u32_e64 v94, vcc, v120, v104
-		v_addc_co_u32_e64 v95, vcc, v121, v105, vcc
-		v_add_co_u32_e64 v120, vcc, v94, v102
-		v_addc_co_u32_e64 v121, vcc, v95, v103, vcc
+		v_add_co_u32_e64 v122, vcc, v94, v96
+		v_addc_co_u32_e64 v123, vcc, v95, v97, vcc
+		v_add_co_u32_e64 v94, vcc, v122, v104
+		v_addc_co_u32_e64 v95, vcc, v123, v105, vcc
+		v_add_co_u32_e64 v122, vcc, v94, v102
+		v_addc_co_u32_e64 v123, vcc, v95, v103, vcc
 		s_mov_b32 m0, s15
 		s_nop 0
-		ds_write_addtid_b32 v120 offset:10240
+		ds_write_addtid_b32 v122 offset:10240
 		s_mov_b32 m0, s15
 		s_nop 0
-		ds_write_addtid_b32 v121 offset:11264
+		ds_write_addtid_b32 v123 offset:11264
 		v_mov_b32_e32 v94, 0x400c0
-		v_add_co_u32_e64 v120, vcc, v84, v94
-		v_addc_co_u32_e64 v121, vcc, v85, 0, vcc
-		v_add_co_u32_e64 v144, vcc, v120, v96
-		v_addc_co_u32_e64 v145, vcc, v121, v97, vcc
-		v_add_co_u32_e64 v120, vcc, v144, v104
-		v_addc_co_u32_e64 v121, vcc, v145, v105, vcc
-		v_add_co_u32_e64 v144, vcc, v120, v102
-		v_addc_co_u32_e64 v145, vcc, v121, v103, vcc
+		v_add_co_u32_e64 v122, vcc, v84, v94
+		v_addc_co_u32_e64 v123, vcc, v85, 0, vcc
+		v_add_co_u32_e64 v144, vcc, v122, v96
+		v_addc_co_u32_e64 v145, vcc, v123, v97, vcc
+		v_add_co_u32_e64 v122, vcc, v144, v104
+		v_addc_co_u32_e64 v123, vcc, v145, v105, vcc
+		v_add_co_u32_e64 v144, vcc, v122, v102
+		v_addc_co_u32_e64 v145, vcc, v123, v103, vcc
 		s_mov_b32 m0, s15
 		s_nop 0
 		ds_write_addtid_b32 v144 offset:12288
@@ -712,22 +712,22 @@ wmma_f16_matmul_tiled:
 		s_nop 0
 		ds_write_addtid_b32 v145 offset:13312
 		v_mov_b32_e32 v95, 0x800c0
-		v_add_co_u32_e64 v120, vcc, v84, v95
-		v_addc_co_u32_e64 v121, vcc, v85, 0, vcc
-		v_add_co_u32_e64 v144, vcc, v120, v96
-		v_addc_co_u32_e64 v145, vcc, v121, v97, vcc
-		v_add_co_u32_e64 v120, vcc, v144, v104
-		v_addc_co_u32_e64 v121, vcc, v145, v105, vcc
-		v_add_co_u32_e64 v144, vcc, v120, v102
-		v_addc_co_u32_e64 v145, vcc, v121, v103, vcc
+		v_add_co_u32_e64 v122, vcc, v84, v95
+		v_addc_co_u32_e64 v123, vcc, v85, 0, vcc
+		v_add_co_u32_e64 v144, vcc, v122, v96
+		v_addc_co_u32_e64 v145, vcc, v123, v97, vcc
+		v_add_co_u32_e64 v122, vcc, v144, v104
+		v_addc_co_u32_e64 v123, vcc, v145, v105, vcc
+		v_add_co_u32_e64 v144, vcc, v122, v102
+		v_addc_co_u32_e64 v145, vcc, v123, v103, vcc
 		s_mov_b32 m0, s15
 		s_nop 0
 		ds_write_addtid_b32 v144 offset:14336
 		s_mov_b32 m0, s15
 		s_nop 0
 		ds_write_addtid_b32 v145 offset:15360
-		v_mov_b32_e32 v120, 0xc00c0
-		v_add_co_u32_e64 v144, vcc, v84, v120
+		v_mov_b32_e32 v122, 0xc00c0
+		v_add_co_u32_e64 v144, vcc, v84, v122
 		v_addc_co_u32_e64 v145, vcc, v85, 0, vcc
 		v_add_co_u32_e64 v146, vcc, v144, v96
 		v_addc_co_u32_e64 v147, vcc, v145, v97, vcc
@@ -824,12 +824,12 @@ wmma_f16_matmul_tiled:
 		v_addc_co_u32_e64 v93, vcc, v95, v105, vcc
 		v_add_co_u32_e64 v94, vcc, v92, v102
 		v_addc_co_u32_e64 v95, vcc, v93, v103, vcc
-		v_add_co_u32_e64 v92, vcc, v126, v120
+		v_add_co_u32_e64 v92, vcc, v126, v122
 		v_addc_co_u32_e64 v93, vcc, v127, 0, vcc
-		v_add_co_u32_e64 v120, vcc, v92, v96
-		v_addc_co_u32_e64 v121, vcc, v93, v97, vcc
-		v_add_co_u32_e64 v92, vcc, v120, v104
-		v_addc_co_u32_e64 v93, vcc, v121, v105, vcc
+		v_add_co_u32_e64 v122, vcc, v92, v96
+		v_addc_co_u32_e64 v123, vcc, v93, v97, vcc
+		v_add_co_u32_e64 v92, vcc, v122, v104
+		v_addc_co_u32_e64 v93, vcc, v123, v105, vcc
 		v_add_co_u32_e64 v96, vcc, v92, v102
 		v_addc_co_u32_e64 v97, vcc, v93, v103, vcc
 		v_mov_b32_e32 v2, 0x800
@@ -1244,14 +1244,14 @@ wmma_f16_matmul_tiled:
 		ds_write_addtid_b32 v104 offset:1024
 		v_add_co_u32_e64 v104, vcc, v110, v92
 		v_addc_co_u32_e64 v105, vcc, v111, v93, vcc
-		v_add_co_u32_e64 v120, vcc, v112, v92
-		v_addc_co_u32_e64 v121, vcc, v113, v93, vcc
-		v_add_co_u32_e64 v126, vcc, v116, v92
-		v_addc_co_u32_e64 v127, vcc, v117, v93, vcc
+		v_add_co_u32_e64 v122, vcc, v112, v92
+		v_addc_co_u32_e64 v123, vcc, v113, v93, vcc
+		v_add_co_u32_e64 v126, vcc, v114, v92
+		v_addc_co_u32_e64 v127, vcc, v115, v93, vcc
 		v_add_co_u32_e64 v128, vcc, v118, v92
 		v_addc_co_u32_e64 v129, vcc, v119, v93, vcc
-		v_add_co_u32_e64 v140, vcc, v122, v92
-		v_addc_co_u32_e64 v141, vcc, v123, v93, vcc
+		v_add_co_u32_e64 v140, vcc, v120, v92
+		v_addc_co_u32_e64 v141, vcc, v121, v93, vcc
 		v_add_co_u32_e64 v142, vcc, v124, v92
 		v_addc_co_u32_e64 v143, vcc, v125, v93, vcc
 		v_add_co_u32_e64 v144, vcc, v6, v92
@@ -1264,12 +1264,12 @@ wmma_f16_matmul_tiled:
 		v_addc_co_u32_e64 v151, vcc, v135, v93, vcc
 		v_add_co_u32_e64 v152, vcc, v136, v92
 		v_addc_co_u32_e64 v153, vcc, v137, v93, vcc
-		v_add_co_u32_e64 v154, vcc, v106, v92
-		v_addc_co_u32_e64 v155, vcc, v107, v93, vcc
-		v_add_co_u32_e64 v156, vcc, v138, v92
-		v_addc_co_u32_e64 v157, vcc, v139, v93, vcc
-		v_add_co_u32_e64 v158, vcc, v114, v92
-		v_addc_co_u32_e64 v159, vcc, v115, v93, vcc
+		v_add_co_u32_e64 v154, vcc, v138, v92
+		v_addc_co_u32_e64 v155, vcc, v139, v93, vcc
+		v_add_co_u32_e64 v156, vcc, v106, v92
+		v_addc_co_u32_e64 v157, vcc, v107, v93, vcc
+		v_add_co_u32_e64 v158, vcc, v116, v92
+		v_addc_co_u32_e64 v159, vcc, v117, v93, vcc
 		v_mul_lo_u32 v160, v100, v4
 		v_mul_hi_u32 v161, v100, v4
 		v_mul_lo_u32 v2, v100, v5
@@ -1316,18 +1316,18 @@ wmma_f16_matmul_tiled:
 		s_and_b32 s63, s61, 1
 		s_lshl_b32 s63, s63, 16
 		v_and_b32_e32 v2, 15, v0
-		v_lshlrev_b32_e32 v8, 6, v2
-		v_add_u32_e32 v8, s63, v8
-		v_lshrrev_b32_e32 v10, 6, v0
-		v_and_b32_e32 v10, 1, v10
-		v_lshlrev_b32_e32 v10, 13, v10
-		v_and_b32_e32 v16, 63, v0
-		v_lshrrev_b32_e32 v16, 4, v16
+		v_lshlrev_b32_e32 v5, 6, v2
+		v_add_u32_e32 v5, s63, v5
+		v_lshrrev_b32_e32 v8, 6, v0
+		v_and_b32_e32 v8, 1, v8
+		v_lshlrev_b32_e32 v8, 13, v8
+		v_and_b32_e32 v10, 63, v0
+		v_lshrrev_b32_e32 v10, 4, v10
 		v_lshrrev_b32_e32 v2, 1, v2
 		v_and_b32_e32 v2, 3, v2
-		v_xor_b32_e32 v2, v16, v2
+		v_xor_b32_e32 v2, v10, v2
 		v_lshlrev_b32_e32 v2, 4, v2
-		v_add3_u32 v2, v8, v10, v2
+		v_add3_u32 v2, v5, v8, v2
 		ds_read_b128 v[216:219], v2 offset:54272
 		v_mfma_scale_f32_16x16x128_f8f6f4 a[56:59], v[20:23], v[72:75], a[56:59], v13, v83 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4
 		ds_read_b128 v[220:223], v2 offset:55296
@@ -1337,19 +1337,19 @@ wmma_f16_matmul_tiled:
 		s_mov_b32 m0, s15
 		s_waitcnt lgkmcnt(1)
 		s_nop 0
-		ds_read_addtid_b32 v8
+		ds_read_addtid_b32 v5
 		s_mov_b32 m0, s28
 		s_waitcnt lgkmcnt(0)
 		s_nop 0
-		buffer_load_dwordx4 v8, s[20:23], 0 offen lds
+		buffer_load_dwordx4 v5, s[20:23], 0 offen lds
 		v_mfma_scale_f32_16x16x128_f8f6f4 a[68:71], v[24:27], v[52:55], a[68:71], v14, v12 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4
 		s_mov_b32 m0, s15
 		s_nop 0
-		ds_read_addtid_b32 v8 offset:1024
+		ds_read_addtid_b32 v5 offset:1024
 		s_mov_b32 m0, s29
 		s_waitcnt lgkmcnt(0)
 		s_nop 0
-		buffer_load_dwordx4 v8, s[20:23], 0 offen lds
+		buffer_load_dwordx4 v5, s[20:23], 0 offen lds
 		v_mfma_scale_f32_16x16x128_f8f6f4 a[72:75], v[24:27], v[56:59], a[72:75], v14, v81 op_sel_hi:[0,0,0] cbsz:4 blgp:4
 		s_mov_b32 m0, s30
 		s_nop 0
@@ -1357,7 +1357,7 @@ wmma_f16_matmul_tiled:
 		v_mfma_scale_f32_16x16x128_f8f6f4 a[76:79], v[24:27], v[60:63], a[76:79], v14, v81 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4
 		s_mov_b32 m0, s31
 		s_nop 0
-		buffer_load_dwordx4 v120, s[20:23], 0 offen lds
+		buffer_load_dwordx4 v122, s[20:23], 0 offen lds
 		v_mfma_scale_f32_16x16x128_f8f6f4 a[80:83], v[24:27], v[64:67], a[80:83], v14, v82 op_sel_hi:[0,0,0] cbsz:4 blgp:4
 		s_mov_b32 m0, s32
 		s_nop 0
@@ -1538,8 +1538,8 @@ wmma_f16_matmul_tiled:
 		v_and_b32_e32 v5, 1, v5
 		v_lshlrev_b32_e32 v5, 10, v5
 		v_add3_u32 v32, s62, v4, v5
-		ds_read_b32 v120, v32 offset:2048
-		ds_read_b32 v121, v32 offset:2304
+		ds_read_b32 v122, v32 offset:2048
+		ds_read_b32 v123, v32 offset:2304
 		ds_read_b32 v126, v32 offset:2560
 		ds_read_b32 v127, v32 offset:2816
 		v_mfma_scale_f32_16x16x128_f8f6f4 a[204:207], v[40:43], v[60:63], a[204:207], v80, v81 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4
@@ -2133,8 +2133,8 @@ wmma_f16_matmul_tiled:
 		v_mov_b32_e32 v14, v10
 		v_mov_b32_e32 v15, v104
 		v_mov_b32_e32 v80, v105
-		v_mov_b32_e32 v12, v120
-		v_mov_b32_e32 v81, v121
+		v_mov_b32_e32 v12, v122
+		v_mov_b32_e32 v81, v123
 		v_mov_b32_e32 v82, v126
 		v_mov_b32_e32 v83, v127
 		s_cbranch_scc1 .Lwmma_f16_matmul_tiled.loop_head_0

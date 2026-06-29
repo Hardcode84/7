@@ -371,10 +371,10 @@ wmma_f16_matmul_tiled:
 		v_mov_b32_e32 v93, 0
 		v_mul_lo_u32 v100, v68, v92
 		v_mul_hi_u32 v101, v68, v92
-		v_mul_lo_u32 v12, v68, v93
-		v_add_u32_e32 v101, v101, v12
-		v_mul_lo_u32 v12, v69, v92
-		v_add_u32_e32 v101, v101, v12
+		v_mul_lo_u32 v10, v68, v93
+		v_add_u32_e32 v101, v101, v10
+		v_mul_lo_u32 v10, v69, v92
+		v_add_u32_e32 v101, v101, v10
 		v_add_co_u32_e64 v68, vcc, v100, v82
 		v_addc_co_u32_e64 v69, vcc, v101, v83, vcc
 		v_add_co_u32_e64 v102, vcc, v68, v90

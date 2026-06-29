@@ -1016,6 +1016,7 @@ def WaveAMDMachine_MfmaScaleF32_16x16x128_F4F4Op
   let assemblyFormat = "$a `,` $b `,` $acc `,` $a_scale `,` $b_scale attr-dict `:` functional-type(operands, results)";
   let hasVerifier = 1;
   let archPredicate = WaveAMDMachine_Gfx950;
+  let killedOperandReusePredicate = "&operand == &this->getAccMutable()";
 }
 
 def WaveAMDMachine_SMovB32Op : WaveAMDMachine_UnaryNoResult<"s_mov_b32",

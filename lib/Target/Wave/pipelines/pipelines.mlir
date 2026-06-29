@@ -157,6 +157,7 @@ module attributes {transform.with_named_sequence} {
   transform.named_sequence @waveamd_regalloc_transform_iteration(
       %root: !transform.any_op {transform.consumed}) -> !transform.any_op {
     %r0 = wave.transform.regalloc_build_alias_state from %root
+        {coalesce_mfma_acc_result = true}
         : (!transform.any_op) -> !transform.any_op
     %r1 = wave.transform.regalloc_linear_scan from %r0
         : (!transform.any_op) -> !transform.any_op

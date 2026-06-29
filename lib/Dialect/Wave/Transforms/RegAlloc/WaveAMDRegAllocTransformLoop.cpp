@@ -714,26 +714,6 @@ liveRangeListsOverlap(ArrayRef<wave::RegAllocTransformLiveRange> lhs,
   return false;
 }
 
-static bool
-liveRangeListsOverlapAfter(ArrayRef<wave::RegAllocTransformLiveRange> lhs,
-                           ArrayRef<wave::RegAllocTransformLiveRange> rhs,
-                           unsigned position) {
-  unsigned lhsIndex = 0;
-  unsigned rhsIndex = 0;
-  while (lhsIndex < lhs.size() && rhsIndex < rhs.size()) {
-    wave::RegAllocTransformLiveRange lhsRange = lhs[lhsIndex];
-    wave::RegAllocTransformLiveRange rhsRange = rhs[rhsIndex];
-    if (liveRangesOverlap(lhsRange, rhsRange) &&
-        std::min(lhsRange.end, rhsRange.end) > position)
-      return true;
-    if (lhsRange.end < rhsRange.start)
-      ++lhsIndex;
-    else
-      ++rhsIndex;
-  }
-  return false;
-}
-
 static bool valueRangeEndsAt(const wave::RegAllocTransformValue &value,
                              unsigned position) {
   return llvm::any_of(value.ranges,
@@ -750,12 +730,6 @@ static bool aliasSetLiveAtPosition(const wave::RegAllocTransformAliasSet &set,
 static bool aliasSetOverlapsRange(const wave::RegAllocTransformAliasSet &set,
                                   unsigned start, unsigned end) {
   return liveRangesOverlapRange(set.ranges, start, end);
-}
-
-static bool
-aliasSetsHaveLiveOverlap(const wave::RegAllocTransformAliasSet &lhs,
-                         const wave::RegAllocTransformAliasSet &rhs) {
-  return liveRangeListsOverlap(lhs.ranges, rhs.ranges);
 }
 
 static bool isVGPRFamilyClass(waveamdmachine::RegClass regClass) {
@@ -1470,10 +1444,54 @@ private:
       int64_t memberEnd = member.offset + static_cast<int64_t>(member.width);
       if (end <= member.offset || memberEnd <= begin)
         continue;
-      if (liveRangeListsOverlapAfter(member.ranges, set.ranges, set.start))
+      if (memberBlocksReusableResult(set, member))
         return false;
     }
     return true;
+  }
+
+  bool memberBlocksReusableResult(const wave::RegAllocTransformAliasSet &set,
+                                  const wave::RegAllocTransformValue &member) {
+    unsigned memberIndex = 0;
+    unsigned setIndex = 0;
+    while (memberIndex < member.ranges.size() && setIndex < set.ranges.size()) {
+      wave::RegAllocTransformLiveRange memberRange = member.ranges[memberIndex];
+      wave::RegAllocTransformLiveRange setRange = set.ranges[setIndex];
+      if (liveRangesOverlap(memberRange, setRange) &&
+          std::min(memberRange.end, setRange.end) > set.start) {
+        unsigned overlapStart = std::max(memberRange.start, setRange.start);
+        unsigned overlapEnd = std::min(memberRange.end, setRange.end);
+        if (overlapStart != set.end || overlapEnd != set.end ||
+            !isDestructiveResultContinuation(set, member))
+          return true;
+      }
+      if (memberRange.end < setRange.start)
+        ++memberIndex;
+      else
+        ++setIndex;
+    }
+    return false;
+  }
+
+  bool
+  isDestructiveResultContinuation(const wave::RegAllocTransformAliasSet &set,
+                                  const wave::RegAllocTransformValue &member) {
+    const wave::RegAllocTransformValue *resultValue = getSingleResultValue(set);
+    if (!resultValue || resultValue->id >= payloadValues.size() ||
+        member.id >= payloadValues.size() ||
+        member.kind != wave::RegAllocTransformValueKind::OpResult ||
+        member.start != set.end)
+      return false;
+    Value result = payloadValues[resultValue->id];
+    Value continuation = payloadValues[member.id];
+    Operation *def = continuation.getDefiningOp();
+    if (!def || !llvm::is_contained(def->getResults(), continuation))
+      return false;
+    for (OpOperand &operand : def->getOpOperands())
+      if (operand.get() == result)
+        return wave::regalloc_detail::canReuseKilledOperandForResult(def,
+                                                                     operand);
+    return false;
   }
 
   bool reusableBaseIsAvailable(
@@ -1487,7 +1505,9 @@ private:
       return false;
     if (conflictsWithActiveIgnoring(set, base, sourceSet.id))
       return false;
-    return !conflictsWithFixedReservationIgnoring(set, base, sourceAssignment);
+    if (conflictsWithFixedReservationIgnoring(set, base, sourceAssignment))
+      return false;
+    return true;
   }
 
   std::optional<ReusableInputBase>
@@ -1520,7 +1540,7 @@ private:
         set.regClass, assignments,
         [&](const wave::RegAllocTransformAssignment &assigned) {
           if (!assignedRangesOverlap(assigned, base, set.width) ||
-              !setsHaveLiveOverlap(set, assigned))
+              !activeAssignmentConflicts(set, assigned, base))
             return false;
           return !canShareFixedHardwareRead(set, assigned, base);
         });
@@ -1534,7 +1554,7 @@ private:
           if (assigned.set == ignoredSetId)
             return false;
           if (!assignedRangesOverlap(assigned, base, set.width) ||
-              !setsHaveLiveOverlap(set, assigned))
+              !activeAssignmentConflicts(set, assigned, base))
             return false;
           return !canShareFixedHardwareRead(set, assigned, base);
         });
@@ -1555,12 +1575,53 @@ private:
     return &sets[it->second];
   }
 
-  bool setsHaveLiveOverlap(const wave::RegAllocTransformAliasSet &lhs,
-                           const wave::RegAllocTransformAssignment &rhs) {
-    const wave::RegAllocTransformAliasSet *rhsSet = getSetById(rhs.set);
-    if (!rhsSet)
-      return setOverlapsRange(lhs, rhs.start, rhs.end);
-    return aliasSetsHaveLiveOverlap(lhs, *rhsSet);
+  bool
+  activeAssignmentConflicts(const wave::RegAllocTransformAliasSet &set,
+                            const wave::RegAllocTransformAssignment &assigned,
+                            unsigned base) {
+    const wave::RegAllocTransformAliasSet *assignedSet =
+        getSetById(assigned.set);
+    if (!assignedSet)
+      return setOverlapsRange(set, assigned.start, assigned.end);
+
+    int64_t setBegin = base;
+    int64_t setEnd = setBegin + static_cast<int64_t>(set.width);
+    for (unsigned memberId : assignedSet->members) {
+      const wave::RegAllocTransformValue &member = values[memberId];
+      int64_t memberBegin = assigned.base + member.offset;
+      int64_t memberEnd = memberBegin + static_cast<int64_t>(member.width);
+      if (setEnd <= memberBegin || memberEnd <= setBegin)
+        continue;
+      if (!liveRangeListsOverlap(member.ranges, set.ranges))
+        continue;
+      if (!memberOverlapIsDestructiveContinuation(set, member))
+        return true;
+    }
+    return false;
+  }
+
+  bool memberOverlapIsDestructiveContinuation(
+      const wave::RegAllocTransformAliasSet &set,
+      const wave::RegAllocTransformValue &member) {
+    bool sawOverlap = false;
+    unsigned memberIndex = 0;
+    unsigned setIndex = 0;
+    while (memberIndex < member.ranges.size() && setIndex < set.ranges.size()) {
+      wave::RegAllocTransformLiveRange memberRange = member.ranges[memberIndex];
+      wave::RegAllocTransformLiveRange setRange = set.ranges[setIndex];
+      if (liveRangesOverlap(memberRange, setRange)) {
+        sawOverlap = true;
+        unsigned overlapStart = std::max(memberRange.start, setRange.start);
+        unsigned overlapEnd = std::min(memberRange.end, setRange.end);
+        if (overlapStart != set.end || overlapEnd != set.end)
+          return false;
+      }
+      if (memberRange.end < setRange.start)
+        ++memberIndex;
+      else
+        ++setIndex;
+    }
+    return sawOverlap && isDestructiveResultContinuation(set, member);
   }
 
   bool setOverlapsRange(const wave::RegAllocTransformAliasSet &set,

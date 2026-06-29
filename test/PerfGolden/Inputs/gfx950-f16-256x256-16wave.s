@@ -180,10 +180,10 @@ wmma_f16_matmul_tiled:
 		ds_read_b128 v[36:39], v5 offset:17408
 		ds_read_b128 v[40:43], v5 offset:18432
 		ds_read_b128 v[44:47], v5 offset:19456
-		s_add_i32 s3, s1, 0x8000
-		s_and_b32 s1, s3, 0x1ffff
-		s_add_i32 s3, s2, 0x8000
-		s_and_b32 s2, s3, 0x1ffff
+		s_add_i32 s1, s1, 0x8000
+		s_and_b32 s1, s1, 0x1ffff
+		s_add_i32 s2, s2, 0x8000
+		s_and_b32 s2, s2, 0x1ffff
 		s_cmp_lt_i32 s0, 0xfe
 		s_cbranch_scc1 .Lwmma_f16_matmul_tiled.loop_head_0
 .Lwmma_f16_matmul_tiled.loop_exit_0:
