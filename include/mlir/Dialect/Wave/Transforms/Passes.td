@@ -343,6 +343,9 @@ def WaveAMDMachineSchedule
     barriers, priority changes, region-bearing ops, and unsupported
     side-effecting ops. `uniform_loop` and `exec_if` bodies are scanned as
     nested local regions, but region ops are never part of an outer region.
+    Functions may override search caps with integer attributes
+    `waveamdmachine.schedule_max_region_ops` and
+    `waveamdmachine.schedule_max_beam_work`; `-1` disables that cap.
   }];
   let dependentDialects = [
     "func::FuncDialect",
@@ -398,6 +401,9 @@ def WaveAMDMachineScheduleReport
 
     Reports that need pressure clone the function before regalloc preparation,
     so the input IR is not rewritten.
+    Functions may override search caps with integer attributes
+    `waveamdmachine.schedule_max_region_ops` and
+    `waveamdmachine.schedule_max_beam_work`; `-1` disables that cap.
   }];
   let dependentDialects = [
     "func::FuncDialect",

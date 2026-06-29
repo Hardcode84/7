@@ -147,6 +147,9 @@ void printOpClasses(ScheduleRegion region, ArchResolution archResolution,
 void printDependences(ScheduleRegion region, const DependenceGraph &graph);
 bool exceedsScheduleRegionLimit(ScheduleRegion region,
                                 ScheduleSearchLimits limits);
+LogicalResult
+applyFunctionScheduleSearchLimitOverrides(func::FuncOp func,
+                                          ScheduleSearchLimits &limits);
 void printScheduleRegionLimitSkip(ScheduleRegion region,
                                   ScheduleSearchLimits limits);
 void emitScheduleRegionLimitRemark(ScheduleRegion region,

@@ -905,27 +905,37 @@ struct WaveAMDMachineSchedulePass
                                       /*emitDiagnostics=*/false,
                                       /*emitRemarks=*/true};
     WalkResult walkResult = root->walk([&](func::FuncOp func) {
-      ArchResolution archResolution = resolveArch(func);
-      if (failed(
-              validateScheduleCalibration(func, archResolution, modelConfig)))
-        return WalkResult::interrupt();
-      waveamdmachine::EventSimConfig funcModelConfig = modelConfig;
-      if (failed(finalizeScheduleModel(func, archResolution, funcModelConfig)))
-        return WalkResult::interrupt();
-      RegisterPressureBudgets pressureBudgets;
-      if (failed(configureSchedulePressureBudgets(
-              func, archResolution, pressureAwareSelection, pressureVgprBudget,
-              pressureSgprBudget, pressureCriticalVgprBudget,
-              pressureCriticalSgprBudget, pressureTargetWavesOverride,
-              pressureBudgets)))
-        return WalkResult::interrupt();
-      if (failed(processFunction(func, archResolution, funcModelConfig,
-                                 pressureBudgets, searchLimits)))
-        return WalkResult::interrupt();
-      return WalkResult::advance();
+      return processWalkFunction(func, modelConfig, searchLimits);
     });
     if (walkResult.wasInterrupted())
       return signalPassFailure();
+  }
+
+  WalkResult
+  processWalkFunction(func::FuncOp func,
+                      const waveamdmachine::EventSimConfig &modelConfig,
+                      ScheduleSearchLimits searchLimits) {
+    ArchResolution archResolution = resolveArch(func);
+    if (failed(validateScheduleCalibration(func, archResolution, modelConfig)))
+      return WalkResult::interrupt();
+    waveamdmachine::EventSimConfig funcModelConfig = modelConfig;
+    if (failed(finalizeScheduleModel(func, archResolution, funcModelConfig)))
+      return WalkResult::interrupt();
+    RegisterPressureBudgets pressureBudgets;
+    if (failed(configureSchedulePressureBudgets(
+            func, archResolution, pressureAwareSelection, pressureVgprBudget,
+            pressureSgprBudget, pressureCriticalVgprBudget,
+            pressureCriticalSgprBudget, pressureTargetWavesOverride,
+            pressureBudgets)))
+      return WalkResult::interrupt();
+    ScheduleSearchLimits funcSearchLimits = searchLimits;
+    if (failed(
+            applyFunctionScheduleSearchLimitOverrides(func, funcSearchLimits)))
+      return WalkResult::interrupt();
+    if (failed(processFunction(func, archResolution, funcModelConfig,
+                               pressureBudgets, funcSearchLimits)))
+      return WalkResult::interrupt();
+    return WalkResult::advance();
   }
 
   LogicalResult

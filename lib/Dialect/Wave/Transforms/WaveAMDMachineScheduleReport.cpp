@@ -121,6 +121,10 @@ struct WaveAMDMachineScheduleReportPass
     ArchResolution archResolution = resolveArch(func);
     if (failed(validateScheduleCalibration(func, archResolution, modelConfig)))
       return WalkResult::interrupt();
+    ScheduleSearchLimits funcSearchLimits = searchLimits;
+    if (failed(
+            applyFunctionScheduleSearchLimitOverrides(func, funcSearchLimits)))
+      return WalkResult::interrupt();
     waveamdmachine::EventSimConfig funcModelConfig = modelConfig;
     if (failed(finalizeScheduleModel(func, archResolution, funcModelConfig)))
       return WalkResult::interrupt();
@@ -136,7 +140,7 @@ struct WaveAMDMachineScheduleReportPass
                                pressureBudgets, controls.candidate,
                                scoreFuncName, controls.emitScores,
                                controls.emitCandidates, controls.emitClasses,
-                               controls.prepareForPressure, searchLimits)))
+                               controls.prepareForPressure, funcSearchLimits)))
       return WalkResult::interrupt();
     return WalkResult::advance();
   }

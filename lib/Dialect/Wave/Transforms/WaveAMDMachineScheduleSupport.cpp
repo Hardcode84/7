@@ -222,6 +222,40 @@ bool exceedsScheduleRegionLimit(ScheduleRegion region,
          region.opCount > static_cast<unsigned>(limits.maxRegionOps);
 }
 
+static LogicalResult readScheduleLimitAttr(func::FuncOp func,
+                                           StringRef attrName, int64_t &limit) {
+  Attribute attr = func->getAttr(attrName);
+  if (!attr)
+    return success();
+  auto intAttr = dyn_cast<IntegerAttr>(attr);
+  if (!intAttr)
+    return func.emitError() << attrName << " must be an integer attribute";
+  int64_t value = intAttr.getInt();
+  if (value < -1)
+    return func.emitError() << attrName << " must be -1 or non-negative";
+  limit = value;
+  return success();
+}
+
+LogicalResult
+applyFunctionScheduleSearchLimitOverrides(func::FuncOp func,
+                                          ScheduleSearchLimits &limits) {
+  int64_t maxBeamWork = limits.maxBeamWork;
+  int64_t maxRegionOps = limits.maxRegionOps;
+  if (failed(readScheduleLimitAttr(
+          func, "waveamdmachine.schedule_max_beam_work", maxBeamWork)))
+    return failure();
+  if (failed(readScheduleLimitAttr(
+          func, "waveamdmachine.schedule_max_region_ops", maxRegionOps)))
+    return failure();
+  if (maxRegionOps > std::numeric_limits<int>::max())
+    return func.emitError()
+           << "waveamdmachine.schedule_max_region_ops is too large";
+  limits.maxBeamWork = maxBeamWork;
+  limits.maxRegionOps = static_cast<int>(maxRegionOps);
+  return success();
+}
+
 void printScheduleRegionLimitSkip(ScheduleRegion region,
                                   ScheduleSearchLimits limits) {
   llvm::errs() << kDiagPrefix << " skipped func=" << region.func.getSymName()
