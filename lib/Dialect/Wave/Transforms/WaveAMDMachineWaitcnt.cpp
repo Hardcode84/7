@@ -606,10 +606,23 @@ static void observeExistingWaitcnt(Operation *op, WaitState &state,
     lat::dropDrained(state.tokens, Counter::Vscnt, wait.getVscnt());
 }
 
+static void
+clampSaturatedCounterFields(WaitRequirement &req,
+                            const llvm::AMDGPU::IsaVersion &isaVer) {
+  unsigned vmMax = llvm::AMDGPU::getVmcntBitMask(isaVer);
+  unsigned lgMax = llvm::AMDGPU::getLgkmcntBitMask(isaVer);
+  if (req.vmcnt && vmMax > 0 && *req.vmcnt >= vmMax)
+    req.vmcnt = vmMax - 1;
+  if (req.lgkmcnt && lgMax > 0 && *req.lgkmcnt >= lgMax)
+    req.lgkmcnt = lgMax - 1;
+}
+
 // `emit` is a no-op during analysis, the s_waitcnt emitter during rewrite.
 template <typename EmitFn>
-static void applyDrain(Operation *op, WaitState &state, EmitFn emit) {
+static void applyDrain(Operation *op, WaitState &state,
+                       const llvm::AMDGPU::IsaVersion &isaVer, EmitFn emit) {
   WaitRequirement req = computeRequirement(op, state);
+  clampSaturatedCounterFields(req, isaVer);
   emit(op, req);
   lat::applyWait(state.tokens, req);
 }
@@ -625,16 +638,16 @@ static void runTransfer(Operation *op, WaitState &state,
       observeExistingWaitcnt(op, state, isaVer);
       return;
     }
-    applyDrain(op, state, emit);
+    applyDrain(op, state, isaVer, emit);
     return;
   case OpKind::Issuer:
-    applyDrain(op, state, emit);
+    applyDrain(op, state, isaVer, emit);
     recordIssue(op, state);
     return;
   case OpKind::Barrier:
     // Drain ahead of the fence AND seed result tokens so downstream
     // loads of the same arena depend on it.
-    applyDrain(op, state, emit);
+    applyDrain(op, state, isaVer, emit);
     deriveResultTokens(op, state);
     return;
   case OpKind::TokenOp:
@@ -643,7 +656,7 @@ static void runTransfer(Operation *op, WaitState &state,
   case OpKind::Wait:
   case OpKind::Endpgm:
   case OpKind::Generic:
-    applyDrain(op, state, emit);
+    applyDrain(op, state, isaVer, emit);
     return;
   }
 }

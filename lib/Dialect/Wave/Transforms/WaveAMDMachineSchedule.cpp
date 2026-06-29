@@ -620,6 +620,26 @@ static unsigned countClass(ArrayRef<unsigned> classes, unsigned mask) {
       classes, [mask](unsigned cls) { return hasPipelineClass(cls, mask); });
 }
 
+static unsigned maxClassLatency(ArrayRef<unsigned> classes,
+                                ArrayRef<NodeMetrics> metrics, unsigned mask) {
+  int latency = 0;
+  for (auto [index, cls] : llvm::enumerate(classes))
+    if (hasPipelineClass(cls, mask))
+      latency = std::max(latency, metrics[index].latency);
+  return static_cast<unsigned>(latency);
+}
+
+static unsigned computeDsReadSeed(ArrayRef<unsigned> classes,
+                                  ArrayRef<NodeMetrics> metrics,
+                                  const waveamdmachine::ArchData &arch) {
+  unsigned dsReads = countClass(classes, BPCDSRead);
+  if (dsReads == 0)
+    return 0;
+  unsigned seed = std::max(waveamdmachine::getEventSimCmaIssueCapacity(arch),
+                           maxClassLatency(classes, metrics, BPCDSRead));
+  return std::min(dsReads, seed);
+}
+
 static unsigned computeMfmaChunk(unsigned mfmaCount, unsigned memoryCount) {
   if (mfmaCount == 0)
     return 0;
@@ -669,7 +689,8 @@ appendDmaDescriptors(SmallVectorImpl<BarrierPipelineDescriptor> &descriptors,
 
 static void appendDsReadMfmaDescriptor(
     SmallVectorImpl<BarrierPipelineDescriptor> &descriptors,
-    ArrayRef<unsigned> classes, const waveamdmachine::ArchData &arch) {
+    ArrayRef<unsigned> classes, ArrayRef<NodeMetrics> metrics,
+    const waveamdmachine::ArchData &arch) {
   unsigned dsReads = countClass(classes, BPCDSRead);
   unsigned mfmas = countClass(classes, BPCMFMA);
   if (dsReads == 0 || mfmas == 0)
@@ -678,8 +699,7 @@ static void appendDsReadMfmaDescriptor(
   BarrierPipelineDescriptor descriptor;
   descriptor.name = "barrier_pipeline_ds_read_mfma";
   appendStage(descriptor.stages, BPCBarrier, 1);
-  unsigned seed =
-      std::min(dsReads, waveamdmachine::getEventSimCmaIssueCapacity(arch));
+  unsigned seed = computeDsReadSeed(classes, metrics, arch);
   appendStage(descriptor.stages, BPCDSRead, seed);
   unsigned remainingDs = dsReads - seed;
   unsigned pairs = std::max(remainingDs, mfmas);
@@ -692,7 +712,9 @@ static void appendDsReadMfmaDescriptor(
 
 static void appendWriteReadMfmaDescriptor(
     SmallVectorImpl<BarrierPipelineDescriptor> &descriptors,
-    ArrayRef<unsigned> classes, const waveamdmachine::ArchData &arch) {
+    ArrayRef<unsigned> classes, ArrayRef<NodeMetrics> metrics,
+    const waveamdmachine::ArchData &arch) {
+  unsigned dsReads = countClass(classes, BPCDSRead);
   unsigned dsWrites = countClass(classes, BPCDSWrite);
   unsigned vmemReads = countClass(classes, BPCVMemRead);
   unsigned mfmas = countClass(classes, BPCMFMA);
@@ -704,6 +726,21 @@ static void appendWriteReadMfmaDescriptor(
   appendStage(descriptor.stages, BPCBarrier, 1);
   unsigned burst =
       std::max(1u, waveamdmachine::getEventSimCmaIssueCapacity(arch));
+  if (dsReads != 0) {
+    appendStage(descriptor.stages, BPCDSWrite, dsWrites);
+    appendStage(descriptor.stages, BPCVMemRead, vmemReads);
+    unsigned seed = computeDsReadSeed(classes, metrics, arch);
+    appendStage(descriptor.stages, BPCDSRead, seed);
+    unsigned remainingDs = dsReads - seed;
+    unsigned pairs = std::max(remainingDs, mfmas);
+    for (unsigned index = 0; index < pairs; ++index) {
+      appendStage(descriptor.stages, BPCMFMA, 1);
+      appendStage(descriptor.stages, BPCDSRead, 1);
+    }
+    descriptors.push_back(std::move(descriptor));
+    return;
+  }
+
   unsigned vmemBursts = (vmemReads + burst - 1) / burst;
   unsigned pairs = std::max({dsWrites, vmemBursts, mfmas});
   for (unsigned index = 0; index < pairs; ++index) {
@@ -716,13 +753,14 @@ static void appendWriteReadMfmaDescriptor(
 
 static SmallVector<BarrierPipelineDescriptor, 4>
 buildBarrierPipelineDescriptors(ArrayRef<unsigned> classes,
+                                ArrayRef<NodeMetrics> metrics,
                                 const waveamdmachine::ArchData &arch,
                                 bool enableMemoryPipelines) {
   SmallVector<BarrierPipelineDescriptor, 4> descriptors;
   appendDmaDescriptors(descriptors, classes);
   if (enableMemoryPipelines) {
-    appendDsReadMfmaDescriptor(descriptors, classes, arch);
-    appendWriteReadMfmaDescriptor(descriptors, classes, arch);
+    appendDsReadMfmaDescriptor(descriptors, classes, metrics, arch);
+    appendWriteReadMfmaDescriptor(descriptors, classes, metrics, arch);
   }
   return descriptors;
 }
@@ -984,7 +1022,8 @@ static SmallVector<OrderCandidate, 4> buildBarrierPipelineCandidates(
   candidates.push_back({getIdentityOrder(region.ops.size()), "original"});
   addLdsDmaAnchorCandidates(candidates, region, classes);
   for (const BarrierPipelineDescriptor &descriptor :
-       buildBarrierPipelineDescriptors(classes, arch, enableMemoryPipelines)) {
+       buildBarrierPipelineDescriptors(classes, metrics, arch,
+                                       enableMemoryPipelines)) {
     OrderCandidate candidate;
     candidate.name = descriptor.name.str();
     if (!buildBarrierPipelineOrder(tables, noInst, classes, descriptor,

@@ -108,8 +108,7 @@
 
 // MXFP4-4W-SCALE-ASM-LABEL: wmma_f16_matmul_tiled:
 // MXFP4-4W-SCALE-ASM: .Lwmma_f16_matmul_tiled.loop_head_0:
-// MXFP4-4W-SCALE-ASM: s_waitcnt lgkmcnt(0)
-// MXFP4-4W-SCALE-ASM-NEXT: s_barrier
+// MXFP4-4W-SCALE-ASM: s_barrier
 // MXFP4-4W-SCALE-ASM: ds_read_b64_tr_b8
 // MXFP4-4W-SCALE-ASM-NOT: s_barrier
 // MXFP4-4W-SCALE-ASM: ds_read_b64_tr_b8 {{.*}} offset:2560

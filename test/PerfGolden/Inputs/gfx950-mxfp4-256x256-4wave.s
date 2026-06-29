@@ -704,7 +704,7 @@ wmma_f16_matmul_tiled:
 		s_cbranch_scc0 .Lwmma_f16_matmul_tiled.loop_exit_0
 .Lwmma_f16_matmul_tiled.loop_head_0:
 		s_lshl_b32 s39, s42, 7
-		s_waitcnt lgkmcnt(0)
+		s_waitcnt lgkmcnt(14)
 		s_barrier
 		s_and_b32 s41, s42, 1
 		s_lshl_b32 s41, s41, 13
@@ -1033,7 +1033,7 @@ wmma_f16_matmul_tiled:
 		s_cmp_lt_i32 s42, 30
 		s_cbranch_scc1 .Lwmma_f16_matmul_tiled.loop_head_0
 .Lwmma_f16_matmul_tiled.loop_exit_0:
-		s_waitcnt lgkmcnt(0)
+		s_waitcnt lgkmcnt(14)
 		s_barrier
 		v_add_u32_e32 v3, v14, v5
 		ds_read_b64_tr_b8 v[12:13], v3
@@ -1876,41 +1876,24 @@ wmma_f16_matmul_tiled:
 		ds_read_b128 v[120:123], v0 offset:31232
 		ds_read_b128 v[124:127], v0 offset:31744
 		ds_read_b128 v[128:131], v0 offset:32256
-		s_waitcnt vmcnt(63) expcnt(7) lgkmcnt(15)
+		s_waitcnt lgkmcnt(14)
 		buffer_store_dwordx4 v[4:7], v0, s[12:15], 0 offen offset:2048
-		s_waitcnt lgkmcnt(14)
 		buffer_store_dwordx4 v[8:11], v0, s[12:15], 0 offen offset:2560
-		s_waitcnt lgkmcnt(13)
 		buffer_store_dwordx4 v[12:15], v0, s[12:15], 0 offen offset:3072
-		s_waitcnt lgkmcnt(12)
 		buffer_store_dwordx4 v[16:19], v0, s[12:15], 0 offen offset:3584
-		s_waitcnt lgkmcnt(11)
 		buffer_store_dwordx4 v[20:23], v0, s[12:15], s0 offen offset:2048
-		s_waitcnt lgkmcnt(10)
 		buffer_store_dwordx4 v[24:27], v0, s[12:15], s0 offen offset:2560
-		s_waitcnt lgkmcnt(9)
 		buffer_store_dwordx4 v[28:31], v0, s[12:15], s0 offen offset:3072
-		s_waitcnt lgkmcnt(8)
 		buffer_store_dwordx4 v[32:35], v0, s[12:15], s0 offen offset:3584
-		s_waitcnt lgkmcnt(7)
 		buffer_store_dwordx4 v[36:39], v0, s[12:15], s1 offen offset:2048
-		s_waitcnt lgkmcnt(6)
 		buffer_store_dwordx4 v[40:43], v0, s[12:15], s1 offen offset:2560
-		s_waitcnt lgkmcnt(5)
 		buffer_store_dwordx4 v[44:47], v0, s[12:15], s1 offen offset:3072
-		s_waitcnt lgkmcnt(4)
 		buffer_store_dwordx4 v[48:51], v0, s[12:15], s1 offen offset:3584
-		s_waitcnt lgkmcnt(3)
 		buffer_store_dwordx4 v[52:55], v0, s[12:15], s4 offen offset:2048
-		s_waitcnt lgkmcnt(2)
 		buffer_store_dwordx4 v[56:59], v0, s[12:15], s4 offen offset:2560
-		s_waitcnt lgkmcnt(1)
 		buffer_store_dwordx4 v[60:63], v0, s[12:15], s4 offen offset:3072
-		s_waitcnt lgkmcnt(0)
 		buffer_store_dwordx4 v[64:67], v0, s[12:15], s4 offen offset:3584
-		s_waitcnt vmcnt(63) expcnt(7) lgkmcnt(15)
 		buffer_store_dwordx4 v[68:71], v0, s[12:15], s5 offen offset:2048
-		s_waitcnt lgkmcnt(14)
 		buffer_store_dwordx4 v[72:75], v0, s[12:15], s5 offen offset:2560
 		s_waitcnt lgkmcnt(13)
 		buffer_store_dwordx4 v[76:79], v0, s[12:15], s5 offen offset:3072

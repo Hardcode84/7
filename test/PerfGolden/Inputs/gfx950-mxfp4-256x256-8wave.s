@@ -714,13 +714,13 @@ wmma_f16_matmul_tiled:
 		v_add3_u32 v117, s62, v2, v6
 		ds_read_b64_tr_b8 v[246:247], v117 offset:2048
 		ds_read_b64_tr_b8 v[248:249], v117 offset:2560
-		s_waitcnt lgkmcnt(1)
-		v_mfma_scale_f32_16x16x128_f8f6f4 v[12:15], v[16:19], v[48:51], v[12:15], v118, v246 op_sel_hi:[0,0,0] cbsz:4 blgp:4
 		ds_read_b64_tr_b8 v[250:251], v117 offset:6144
-		v_mfma_scale_f32_16x16x128_f8f6f4 v[120:123], v[16:19], v[52:55], v[120:123], v118, v246 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4
+		s_waitcnt lgkmcnt(2)
+		v_mfma_scale_f32_16x16x128_f8f6f4 v[12:15], v[16:19], v[48:51], v[12:15], v118, v246 op_sel_hi:[0,0,0] cbsz:4 blgp:4
 		ds_read_b64_tr_b8 v[252:253], v117 offset:6656
 		s_waitcnt lgkmcnt(0)
 		s_barrier
+		v_mfma_scale_f32_16x16x128_f8f6f4 v[120:123], v[16:19], v[52:55], v[120:123], v118, v246 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4
 		v_mfma_scale_f32_16x16x128_f8f6f4 v[124:127], v[16:19], v[56:59], v[124:127], v118, v246 op_sel_hi:[0,1,0] cbsz:4 blgp:4
 		v_mfma_scale_f32_16x16x128_f8f6f4 v[128:131], v[16:19], v[60:63], v[128:131], v118, v246 op_sel:[0,1,0] op_sel_hi:[0,1,0] cbsz:4 blgp:4
 		v_mfma_scale_f32_16x16x128_f8f6f4 v[148:151], v[20:23], v[48:51], v[148:151], v118, v246 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4

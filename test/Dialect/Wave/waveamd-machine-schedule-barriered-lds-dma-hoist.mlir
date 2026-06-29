@@ -236,10 +236,11 @@ func.func @barriered_ds_tuple_mfma(
 // APPLY: [[LD1:%.*]], [[T1:%.*]] = waveamdmachine.ds_load_b64 {{.*}} after [[T0]]
 // APPLY: [[LD2:%.*]], [[T2:%.*]] = waveamdmachine.ds_load_b64 {{.*}} after [[T1]]
 // APPLY: [[LD3:%.*]], [[T3:%.*]] = waveamdmachine.ds_load_b64 {{.*}} after [[T2]]
+// APPLY: [[LD4:%.*]], [[T4:%.*]] = waveamdmachine.ds_load_b64 {{.*}} after [[T3]]
 // APPLY-NOT: waveamdmachine.ds_load_b64
 // APPLY: [[LHS0:%.*]] = waveamdmachine.tuple_from_elements [[LD0]], [[LD1]]
 // APPLY: [[C1:%.*]] = waveamdmachine.mfma_f32_16x16x32_f16 [[LHS0]]
-// APPLY: [[LD4:%.*]], [[T4:%.*]] = waveamdmachine.ds_load_b64 {{.*}} after [[T3]]
+// APPLY: [[LD5:%.*]], {{%.*}} = waveamdmachine.ds_load_b64 {{.*}} after [[T4]]
 
 // -----
 
@@ -299,10 +300,11 @@ func.func @wait_barrier_post_ds_tuple_mfma(
 // APPLY: [[LD1:%.*]], [[T1:%.*]] = waveamdmachine.ds_load_b64 {{.*}} after [[T0]]
 // APPLY: [[LD2:%.*]], [[T2:%.*]] = waveamdmachine.ds_load_b64 {{.*}} after [[T1]]
 // APPLY: [[LD3:%.*]], [[T3:%.*]] = waveamdmachine.ds_load_b64 {{.*}} after [[T2]]
+// APPLY: [[LD4:%.*]], [[T4:%.*]] = waveamdmachine.ds_load_b64 {{.*}} after [[T3]]
 // APPLY-NOT: waveamdmachine.ds_load_b64
 // APPLY: [[LHS0:%.*]] = waveamdmachine.tuple_from_elements [[LD0]], [[LD1]]
 // APPLY: [[C1:%.*]] = waveamdmachine.mfma_f32_16x16x32_f16 [[LHS0]]
-// APPLY: [[LD4:%.*]], [[T4:%.*]] = waveamdmachine.ds_load_b64 {{.*}} after [[T3]]
+// APPLY: [[LD5:%.*]], {{%.*}} = waveamdmachine.ds_load_b64 {{.*}} after [[T4]]
 
 // NOHOIST-LABEL: func.func @wait_barrier_post_ds_tuple_mfma
 // NOHOIST: waveamdmachine.wait

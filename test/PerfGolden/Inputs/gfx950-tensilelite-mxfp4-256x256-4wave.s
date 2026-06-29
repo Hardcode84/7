@@ -1320,7 +1320,7 @@ wmma_f16_matmul_tiled:
 		ds_read_b128 v[224:227], v2 offset:56320
 		s_mov_b32 m0, s15
 		v_mfma_scale_f32_16x16x128_f8f6f4 a[64:67], v[24:27], v[48:51], a[64:67], v14, v12 op_sel_hi:[0,0,0] cbsz:4 blgp:4
-		s_waitcnt lgkmcnt(1)
+		s_waitcnt lgkmcnt(14)
 		ds_read_addtid_b32 v5
 		s_mov_b32 m0, s28
 		s_waitcnt lgkmcnt(0)
