@@ -19,6 +19,7 @@
 #include "mlir/Dialect/Wave/Transforms/Passes.h"
 
 #include "RegAlloc/WaveAMDRegAllocPrep.h"
+#include "WaveAMDHardwareResources.h"
 #include "WaveAMDMachineScheduleInternal.h"
 #include "WaveAMDMachineScheduleSupport.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -183,6 +184,36 @@ static bool isMemoryPipelineClass(unsigned classes) {
   return hasPipelineClass(classes, memoryMask);
 }
 
+static bool hasResource(ArrayRef<wave::HardwareResourceKind> resources,
+                        wave::HardwareResourceKind resource) {
+  return llvm::is_contained(resources, resource);
+}
+
+static bool resourceEffectsConflict(Operation *candidate, Operation *crossed) {
+  wave::HardwareResourceEffects candidateEffects =
+      wave::getHardwareResourceEffects(candidate);
+  wave::HardwareResourceEffects crossedEffects =
+      wave::getHardwareResourceEffects(crossed);
+  for (wave::HardwareResourceKind resource : candidateEffects.reads)
+    if (hasResource(crossedEffects.writes, resource))
+      return true;
+  for (wave::HardwareResourceKind resource : candidateEffects.writes)
+    if (hasResource(crossedEffects.reads, resource) ||
+        hasResource(crossedEffects.writes, resource))
+      return true;
+  return false;
+}
+
+static bool hasMemTokenOperandOrResult(Operation *op) {
+  for (Value operand : op->getOperands())
+    if (isa<waveamdmachine::MemTokenType>(operand.getType()))
+      return true;
+  for (Value result : op->getResults())
+    if (isa<waveamdmachine::MemTokenType>(result.getType()))
+      return true;
+  return false;
+}
+
 static bool collectBarrierPipelineWindow(func::FuncOp func,
                                          waveamdmachine::SBarrierOp barrier,
                                          ScheduleSearchLimits limits,
@@ -268,6 +299,105 @@ static bool allClusterOpsReachLdsDma(const ScheduleRegion &region,
   }
 
   return needed.size() == clusterSet.size();
+}
+
+static bool isWaitBarrierHoistCandidate(Operation *op) {
+  if (waveamdmachine::isLdsDmaIssuer(op))
+    return false;
+  if (!isPotentialLdsDmaProducer(op))
+    return false;
+  return !hasMemTokenOperandOrResult(op);
+}
+
+static bool operandsAvailableBefore(Operation *op, Operation *insertBefore) {
+  for (Value operand : op->getOperands()) {
+    Operation *def = operand.getDefiningOp();
+    if (!def || def->getBlock() != op->getBlock())
+      continue;
+    if (!def->isBeforeInBlock(insertBefore))
+      return false;
+  }
+  return true;
+}
+
+static bool canMoveBefore(Operation *op, Operation *insertBefore) {
+  if (op->getBlock() != insertBefore->getBlock())
+    return false;
+  if (!insertBefore->isBeforeInBlock(op))
+    return false;
+  for (Operation *crossed = insertBefore; crossed != op;
+       crossed = crossed->getNextNode()) {
+    if (resourceEffectsConflict(op, crossed))
+      return false;
+  }
+  return true;
+}
+
+static bool
+collectLeadingLdsDmaProducerPrefix(waveamdmachine::SBarrierOp barrier,
+                                   SmallVectorImpl<Operation *> &prefix,
+                                   Operation *&ldsDma) {
+  ldsDma = nullptr;
+  for (Operation *op = barrier->getNextNode();
+       op && !isBarrierPipelineHardBoundary(op); op = op->getNextNode()) {
+    if (waveamdmachine::isLdsDmaIssuer(op)) {
+      ldsDma = op;
+      return !prefix.empty();
+    }
+    if (!isWaitBarrierHoistCandidate(op))
+      return false;
+    prefix.push_back(op);
+  }
+  return false;
+}
+
+static void
+collectProducerSlice(Operation *op,
+                     const llvm::SmallPtrSetImpl<Operation *> &scope,
+                     llvm::SmallPtrSetImpl<Operation *> &needed) {
+  for (Value operand : op->getOperands()) {
+    Operation *def = operand.getDefiningOp();
+    if (!def || !scope.contains(def))
+      continue;
+    if (!needed.insert(def).second)
+      continue;
+    collectProducerSlice(def, scope, needed);
+  }
+}
+
+static bool tryWaitBarrierLdsDmaPrefixHoist(waveamdmachine::SBarrierOp barrier,
+                                            ScheduleSearchLimits limits) {
+  auto wait = dyn_cast_or_null<waveamdmachine::WaitOp>(barrier->getPrevNode());
+  if (!wait)
+    return false;
+
+  SmallVector<Operation *, 16> prefix;
+  Operation *ldsDma = nullptr;
+  if (!collectLeadingLdsDmaProducerPrefix(barrier, prefix, ldsDma))
+    return false;
+  unsigned windowOps = static_cast<unsigned>(prefix.size() + 3);
+  if (limits.maxRegionOps >= 0 &&
+      windowOps > static_cast<unsigned>(limits.maxRegionOps))
+    return false;
+
+  llvm::SmallPtrSet<Operation *, 16> prefixSet;
+  for (Operation *op : prefix)
+    prefixSet.insert(op);
+  llvm::SmallPtrSet<Operation *, 16> needed;
+  collectProducerSlice(ldsDma, prefixSet, needed);
+
+  bool changed = false;
+  for (Operation *op : prefix) {
+    if (!needed.contains(op))
+      continue;
+    if (!operandsAvailableBefore(op, wait))
+      continue;
+    if (!canMoveBefore(op, wait))
+      continue;
+    op->moveBefore(wait);
+    changed = true;
+  }
+  return changed;
 }
 
 struct LdsDmaAnchorWindow {
@@ -865,10 +995,13 @@ static void processBarrierPipelineSchedules(
   func.walk(
       [&](waveamdmachine::SBarrierOp barrier) { barriers.push_back(barrier); });
 
-  for (waveamdmachine::SBarrierOp barrier : barriers)
-    tryBarrierPipelineSchedule(func, barrier, archResolution, modelConfig,
-                               pressureBudgets, pressureEvaluation,
-                               pressureContext, searchLimits);
+  for (waveamdmachine::SBarrierOp barrier : barriers) {
+    bool scheduled = tryBarrierPipelineSchedule(
+        func, barrier, archResolution, modelConfig, pressureBudgets,
+        pressureEvaluation, pressureContext, searchLimits);
+    if (!scheduled)
+      tryWaitBarrierLdsDmaPrefixHoist(barrier, searchLimits);
+  }
 }
 
 static PressureEvaluation

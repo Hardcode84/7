@@ -564,12 +564,12 @@ v9_beyond_hotloop:
 		v_mfma_f32_16x16x32_f16 v[148:151], v[84:87], v[60:63], v[148:151]
 		v_mfma_f32_16x16x32_f16 v[152:155], v[88:91], v[56:59], v[152:155]
 		v_mfma_f32_16x16x32_f16 v[152:155], v[92:95], v[60:63], v[152:155]
-		s_waitcnt vmcnt(8)
-		s_barrier
 		s_mov_b32 m0, s17
 		s_lshl_b32 s52, s0, 1
 		s_add_i32 s53, s20, s52
 		v_add_u32_e32 v27, s53, v3
+		s_waitcnt vmcnt(8)
+		s_barrier
 		buffer_load_dwordx4 v27, s[24:27], 0 offen lds
 		s_mov_b32 m0, s2
 		s_add_i32 s53, s21, s52
@@ -651,12 +651,11 @@ v9_beyond_hotloop:
 		v_mfma_f32_16x16x32_f16 v[208:211], v[84:87], v[60:63], v[208:211]
 		v_mfma_f32_16x16x32_f16 v[212:215], v[88:91], v[60:63], v[212:215]
 		v_mfma_f32_16x16x32_f16 v[216:219], v[92:95], v[60:63], v[216:219]
-		s_waitcnt vmcnt(8)
-		s_barrier
 		s_add_i32 s54, s35, s53
 		v_add_u32_e32 v27, s54, v1
 		s_mov_b32 m0, s34
-		s_nop 0
+		s_waitcnt vmcnt(8)
+		s_barrier
 		buffer_load_dwordx4 v27, s[36:39], 0 offen lds
 		ds_read_b128 v[32:35], v25 offset:33760
 		s_add_i32 s54, s5, s53
@@ -728,11 +727,11 @@ v9_beyond_hotloop:
 		v_mfma_f32_16x16x32_f16 v[144:147], v[84:87], v[76:79], v[144:147]
 		v_mfma_f32_16x16x32_f16 v[148:151], v[88:91], v[76:79], v[148:151]
 		v_mfma_f32_16x16x32_f16 v[152:155], v[92:95], v[76:79], v[152:155]
-		s_waitcnt vmcnt(8)
-		s_barrier
 		s_mov_b32 m0, s41
 		s_add_i32 s54, s42, s52
 		v_add_u32_e32 v27, s54, v3
+		s_waitcnt vmcnt(8)
+		s_barrier
 		buffer_load_dwordx4 v27, s[24:27], 0 offen lds
 		s_mov_b32 m0, s43
 		s_add_i32 s54, s3, s52
@@ -813,12 +812,11 @@ v9_beyond_hotloop:
 		v_mfma_f32_16x16x32_f16 v[208:211], v[84:87], v[76:79], v[208:211]
 		v_mfma_f32_16x16x32_f16 v[212:215], v[88:91], v[76:79], v[212:215]
 		v_mfma_f32_16x16x32_f16 v[216:219], v[92:95], v[76:79], v[216:219]
-		s_waitcnt vmcnt(8)
-		s_barrier
 		s_add_i32 s52, s19, s53
 		v_add_u32_e32 v27, s52, v1
 		s_mov_b32 m0, s50
-		s_nop 0
+		s_waitcnt vmcnt(8)
+		s_barrier
 		buffer_load_dwordx4 v27, s[36:39], 0 offen lds
 		s_add_i32 s52, s47, s53
 		v_add_u32_e32 v27, s52, v1

@@ -47,6 +47,55 @@ func.func @barriered_lds_dma_hoist(
 // -----
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
+func.func @wait_barrier_lds_dma_prefix_hoist(
+    %idx: !waveamdmachine.reg<sgpr, 1>,
+    %base_off: !waveamdmachine.reg<sgpr, 1>,
+    %lane: !waveamdmachine.reg<vgpr, 1>,
+    %rsrc: !waveamdmachine.reg<sgpr, 4>,
+    %dst: !waveamdmachine.reg<sgpr, 1>,
+    %tok: !waveamdmachine.mem.token) {
+  %one = waveamdmachine.imm 1 : !waveamdmachine.imm
+  %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+  waveamdmachine.wait %tok : (!waveamdmachine.mem.token) -> ()
+  %btok = waveamdmachine.s_barrier %tok
+      : (!waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+  %m0 = waveamdmachine.s_mov_m0 %dst
+      : (!waveamdmachine.reg<sgpr, 1>) -> !waveamdmachine.m0
+  %shl, %scc0 = waveamdmachine.s_lshl_b32 %idx, %one
+      : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.imm)
+        -> (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<scc, 1>)
+  %sum, %scc1 = waveamdmachine.s_add_i32 %base_off, %shl
+      : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<sgpr, 1>)
+        -> (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<scc, 1>)
+  %vo = waveamdmachine.v_add_u32 %sum, %lane
+      : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %ld = waveamdmachine.buffer_load_lds_b128 %vo, %rsrc, %zero, %m0 after %btok
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 4>,
+         !waveamdmachine.imm, !waveamdmachine.m0, !waveamdmachine.mem.token)
+        -> !waveamdmachine.mem.token
+  return
+}
+}
+
+// APPLY-LABEL: func.func @wait_barrier_lds_dma_prefix_hoist
+// APPLY: [[M0:%.*]] = waveamdmachine.s_mov_m0
+// APPLY-NEXT: [[SHL:%.*]], {{%.*}} = waveamdmachine.s_lshl_b32
+// APPLY-NEXT: [[SUM:%.*]], {{%.*}} = waveamdmachine.s_add_i32
+// APPLY-NEXT: [[VO:%.*]] = waveamdmachine.v_add_u32 [[SUM]]
+// APPLY-NEXT: waveamdmachine.wait
+// APPLY-NEXT: [[BTOK:%.*]] = waveamdmachine.s_barrier
+// APPLY-NEXT: [[LD:%.*]] = waveamdmachine.buffer_load_lds_b128 [[VO]], {{.*}}, [[M0]] after [[BTOK]]
+
+// NOHOIST-LABEL: func.func @wait_barrier_lds_dma_prefix_hoist
+// NOHOIST: waveamdmachine.wait
+// NOHOIST-NEXT: [[BTOK:%.*]] = waveamdmachine.s_barrier
+// NOHOIST-NEXT: [[M0:%.*]] = waveamdmachine.s_mov_m0
+// NOHOIST-NEXT: [[SHL:%.*]], {{%.*}} = waveamdmachine.s_lshl_b32
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 func.func @barriered_lds_dma_nonproducer_prefix(
     %a: !waveamdmachine.reg<vgpr, 4>,
     %b: !waveamdmachine.reg<vgpr, 4>,
