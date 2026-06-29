@@ -139,10 +139,9 @@ wmma_f16_matmul_tiled:
 		v_mov_b64_e32 v[106:107], 0
 		s_cbranch_scc0 .Lwmma_f16_matmul_tiled.loop_exit_0
 .Lwmma_f16_matmul_tiled.loop_head_0:
-		s_lshl_b32 s3, s0, 6
 		s_mov_b32 m0, s1
+		s_lshl_b32 s3, s0, 6
 		s_waitcnt lgkmcnt(0)
-		s_nop 0
 		buffer_load_dwordx4 v12, s[12:15], s3 offen lds
 		v_mfma_f32_16x16x32_f16 v[8:11], v[16:19], v[32:35], v[8:11]
 		v_mfma_f32_16x16x32_f16 v[48:51], v[16:19], v[36:39], v[48:51]
@@ -150,9 +149,8 @@ wmma_f16_matmul_tiled:
 		v_mfma_f32_16x16x32_f16 v[56:59], v[16:19], v[44:47], v[56:59]
 		v_mfma_f32_16x16x32_f16 v[60:63], v[20:23], v[32:35], v[60:63]
 		v_mfma_f32_16x16x32_f16 v[64:67], v[20:23], v[36:39], v[64:67]
-		v_mfma_f32_16x16x32_f16 v[68:71], v[20:23], v[40:43], v[68:71]
 		s_mov_b32 m0, s2
-		s_nop 0
+		v_mfma_f32_16x16x32_f16 v[68:71], v[20:23], v[40:43], v[68:71]
 		buffer_load_dwordx4 v4, s[16:19], s3 offen lds
 		v_mfma_f32_16x16x32_f16 v[72:75], v[20:23], v[44:47], v[72:75]
 		v_mfma_f32_16x16x32_f16 v[76:79], v[24:27], v[32:35], v[76:79]

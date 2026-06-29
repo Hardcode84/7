@@ -1305,6 +1305,79 @@ func.func @m0_no_delay_when_gap_saturated(
   return
 }
 
+// CHECK-LABEL: func.func @m0_move_hoisted_to_fill_gap
+// CHECK: waveamdmachine.s_mov_m0
+// CHECK-NEXT: waveamdmachine.v_add_u32
+// CHECK-NEXT: waveamdmachine.buffer_load_lds_b128
+func.func @m0_move_hoisted_to_fill_gap(
+    %off: !waveamdmachine.reg<vgpr, 1, 0>,
+    %s: !waveamdmachine.reg<sgpr, 1, 0>,
+    %desc: !waveamdmachine.reg<sgpr, 4, 4>,
+    %soff: !waveamdmachine.reg<sgpr, 1, 8>,
+    %dst: !waveamdmachine.reg<sgpr, 1, 9>,
+    %dep: !waveamdmachine.mem.token) {
+  %vaddr = waveamdmachine.v_add_u32 %off, %s
+      : (!waveamdmachine.reg<vgpr, 1, 0>, !waveamdmachine.reg<sgpr, 1, 0>)
+      -> !waveamdmachine.reg<vgpr, 1, 1>
+  %m0 = waveamdmachine.s_mov_m0 %dst
+      : (!waveamdmachine.reg<sgpr, 1, 9>) -> !waveamdmachine.m0
+  %tok = waveamdmachine.buffer_load_lds_b128 %vaddr, %desc, %soff, %m0 after %dep
+      : (!waveamdmachine.reg<vgpr, 1, 1>, !waveamdmachine.reg<sgpr, 4, 4>,
+         !waveamdmachine.reg<sgpr, 1, 8>, !waveamdmachine.m0,
+         !waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+  return
+}
+
+// CHECK-LABEL: func.func @m0_move_not_hoisted_over_source_def
+// CHECK: waveamdmachine.s_add_i32
+// CHECK-NEXT: waveamdmachine.s_mov_m0
+// CHECK-NEXT: waveamdmachine.imm 0
+// CHECK-NEXT: waveamdmachine.s_nop
+// CHECK-NEXT: waveamdmachine.global_load_lds_b128
+func.func @m0_move_not_hoisted_over_source_def(
+    %off: !waveamdmachine.reg<vgpr, 1>,
+    %base: !waveamdmachine.reg<sgpr, 2>,
+    %x: !waveamdmachine.reg<sgpr, 1>,
+    %dep: !waveamdmachine.mem.token) {
+  %dst, %scc = waveamdmachine.s_add_i32 %x, %x
+      : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<sgpr, 1>)
+      -> (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<scc, 1>)
+  %m0 = waveamdmachine.s_mov_m0 %dst
+      : (!waveamdmachine.reg<sgpr, 1>) -> !waveamdmachine.m0
+  %tok = waveamdmachine.global_load_lds_b128 %off, %base, %m0 after %dep
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 2>,
+         !waveamdmachine.m0, !waveamdmachine.mem.token)
+      -> !waveamdmachine.mem.token
+  return
+}
+
+// CHECK-LABEL: func.func @m0_move_not_hoisted_over_m0_consumer
+// CHECK: waveamdmachine.ds_store_addtid_b32
+// CHECK-NEXT: waveamdmachine.s_mov_m0
+// CHECK-NEXT: waveamdmachine.imm 0
+// CHECK-NEXT: waveamdmachine.s_nop
+// CHECK-NEXT: waveamdmachine.global_load_lds_b128
+func.func @m0_move_not_hoisted_over_m0_consumer(
+    %off: !waveamdmachine.reg<vgpr, 1>,
+    %base: !waveamdmachine.reg<sgpr, 2>,
+    %dst0: !waveamdmachine.reg<sgpr, 1>,
+    %dst1: !waveamdmachine.reg<sgpr, 1>,
+    %data: !waveamdmachine.reg<vgpr, 1>,
+    %dep: !waveamdmachine.mem.token) {
+  %m0a = waveamdmachine.s_mov_m0 %dst0
+      : (!waveamdmachine.reg<sgpr, 1>) -> !waveamdmachine.m0
+  %tok0 = waveamdmachine.ds_store_addtid_b32 %m0a, %data after %dep offset 16
+      : (!waveamdmachine.m0, !waveamdmachine.reg<vgpr, 1>,
+         !waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+  %m0b = waveamdmachine.s_mov_m0 %dst1
+      : (!waveamdmachine.reg<sgpr, 1>) -> !waveamdmachine.m0
+  %tok1 = waveamdmachine.global_load_lds_b128 %off, %base, %m0b after %tok0
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 2>,
+         !waveamdmachine.m0, !waveamdmachine.mem.token)
+      -> !waveamdmachine.mem.token
+  return
+}
+
 // Pseudo-ops (`imm` etc., trait `NoMachineInst`) between the
 // producer and consumer do NOT count toward the gap; the mitigation
 // still fires.

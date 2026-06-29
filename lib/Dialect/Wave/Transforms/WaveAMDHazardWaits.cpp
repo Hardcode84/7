@@ -1372,6 +1372,72 @@ private:
     return true;
   }
 
+  static bool isM0Consumer(Operation *op) {
+    return llvm::any_of(op->getOperands(), [](Value operand) {
+      return isa<waveamdmachine::M0Type>(operand.getType());
+    });
+  }
+
+  static bool isM0HoistSearchBoundary(Operation *op) {
+    return isLgkmFillerSearchBoundary(op) || isM0Consumer(op);
+  }
+
+  static Operation *getSingleUseM0Consumer(waveamdmachine::SMovM0Op mov) {
+    if (!mov.getResult().hasOneUse())
+      return nullptr;
+    Operation *consumer = *mov.getResult().user_begin();
+    if (consumer->getBlock() != mov->getBlock())
+      return nullptr;
+    if (!mov->isBeforeInBlock(consumer))
+      return nullptr;
+    return consumer;
+  }
+
+  static unsigned countMachineOpsBetween(Operation *begin, Operation *end) {
+    unsigned count = 0;
+    for (Operation *op = begin->getNextNode(); op && op != end;
+         op = op->getNextNode())
+      if (!emitsNoMachineInst(*op))
+        ++count;
+    return count;
+  }
+
+  static bool hoistOneM0Move(waveamdmachine::SMovM0Op mov,
+                             const HazardConfig &cfg) {
+    Operation *consumer = getSingleUseM0Consumer(mov);
+    if (!consumer)
+      return false;
+
+    unsigned gap = countMachineOpsBetween(mov, consumer);
+    if (gap >= cfg.m0PipelineDelay)
+      return false;
+
+    unsigned movedSlots = 0;
+    unsigned missingSlots = cfg.m0PipelineDelay - gap;
+    for (Operation *insertBefore = mov->getPrevNode(); insertBefore;
+         insertBefore = insertBefore->getPrevNode()) {
+      if (isM0HoistSearchBoundary(insertBefore))
+        break;
+      if (!canMoveBefore(mov, insertBefore))
+        break;
+      if (!emitsNoMachineInst(*insertBefore))
+        ++movedSlots;
+      if (movedSlots < missingSlots)
+        continue;
+      mov->moveBefore(insertBefore);
+      return true;
+    }
+    return false;
+  }
+
+  static void hoistM0MovesToFillPipelineGaps(func::FuncOp func,
+                                             const HazardConfig &cfg) {
+    SmallVector<waveamdmachine::SMovM0Op> moves;
+    func.walk([&](waveamdmachine::SMovM0Op mov) { moves.push_back(mov); });
+    for (waveamdmachine::SMovM0Op mov : moves)
+      (void)hoistOneM0Move(mov, cfg);
+  }
+
   static Operation *findMovableLgkmFiller(Operation *target) {
     for (Operation *candidate = target->getNextNode(); candidate;
          candidate = candidate->getNextNode()) {
@@ -1459,6 +1525,7 @@ private:
 
     (void)contractTokenOnlyBarrierDrains(func, cfg);
     fillLgkmValuGaps(func, cfg);
+    hoistM0MovesToFillPipelineGaps(func, cfg);
 
     DataFlowSolver solver;
     loadBaselineAnalyses(solver);
