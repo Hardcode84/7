@@ -73,6 +73,16 @@ func.func @read_first_splat(%value: i32) -> i32 {
   return %first : i32
 }
 
+// CHECK-LABEL: func.func @single_input_join
+// CHECK: %[[TOK:.*]] = wave.token : !wave.mem.token
+// CHECK-NOT: wave.join
+// CHECK: return %[[TOK]] : !wave.mem.token
+func.func @single_input_join() -> !wave.mem.token {
+  %tok = wave.token : !wave.mem.token
+  %joined = wave.join %tok : !wave.mem.token -> !wave.mem.token
+  return %joined : !wave.mem.token
+}
+
 // CHECK-LABEL: func.func @binary_scalar_constant_fold
 // CHECK-NOT: wave.binary
 // CHECK-DAG: %[[C7:.*]] = wave.constant 7 : i32

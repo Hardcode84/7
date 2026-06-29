@@ -427,6 +427,7 @@ def Wave_JoinOp : Wave_Op<"join", [Pure]> {
   let arguments = (ins Variadic<Wave_MemToken>:$dependencies);
   let results = (outs Wave_MemToken:$result);
   let assemblyFormat = "$dependencies attr-dict `:` type($dependencies) `->` qualified(type($result))";
+  let hasFolder = 1;
 }
 
 def Wave_WaitOp : Wave_Op<"wait", []> {

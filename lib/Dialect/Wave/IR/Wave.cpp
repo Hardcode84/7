@@ -2044,6 +2044,12 @@ LogicalResult BallotOp::verify() {
   return success();
 }
 
+OpFoldResult JoinOp::fold(FoldAdaptor) {
+  if (getDependencies().size() == 1)
+    return getDependencies().front();
+  return {};
+}
+
 LogicalResult ReadFirstOp::verify() {
   auto simdType = cast<SimdType>(getSource().getType());
   if (simdType.getElementType() != getResult().getType())
@@ -2139,7 +2145,8 @@ void WorkitemIdOp::inferResultRanges(ArrayRef<ConstantIntRanges>,
   unsigned bits = simdTy.getElementType().getIntOrFloatBitWidth();
   APInt lo(bits, 0, /*isSigned=*/true);
   int64_t upper = std::numeric_limits<int32_t>::max();
-  if (std::optional<int32_t> dim = getKnownWorkgroupDim(getOperation(), getAxis()))
+  if (std::optional<int32_t> dim =
+          getKnownWorkgroupDim(getOperation(), getAxis()))
     upper = int64_t{*dim - 1};
   APInt hi(bits, upper, /*isSigned=*/true);
   setRange(getResult(), ConstantIntRanges::fromSigned(lo, hi));
