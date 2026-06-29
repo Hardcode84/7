@@ -320,6 +320,14 @@ static bool isReliefGroupValue(Value value,
   return groupValues.contains(value);
 }
 
+static bool
+isAGPRReliefReplacement(Value value,
+                        const DenseMap<Value, Value> &replacements) {
+  return llvm::any_of(replacements, [value](const auto &entry) {
+    return entry.second == value;
+  });
+}
+
 static bool canRebankTupleAliasOp(Operation *op,
                                   const DenseSet<Value> &groupValues) {
   if (!isTupleAliasOp(op))
@@ -331,6 +339,20 @@ static bool canRebankTupleAliasOp(Operation *op,
   return llvm::all_of(op->getResults(), [&](Value value) {
     return isReliefGroupValue(value, groupValues);
   });
+}
+
+static bool canRebankTupleAliasOp(Operation *op,
+                                  const DenseSet<Value> &groupValues,
+                                  const DenseMap<Value, Value> &replacements) {
+  if (!isTupleAliasOp(op))
+    return false;
+  auto canRebankValue = [&](Value value) {
+    return isReliefGroupValue(value, groupValues) ||
+           isAGPRReliefReplacement(value, replacements);
+  };
+  if (!llvm::all_of(op->getOperands(), canRebankValue))
+    return false;
+  return llvm::all_of(op->getResults(), canRebankValue);
 }
 
 static void rebankTupleAliasResults(Operation *op,
@@ -740,7 +762,7 @@ static Value getAGPRReliefReplacement(OpBuilder &builder, Value value,
     return value;
   }
   if (Operation *def = value.getDefiningOp())
-    if (canRebankTupleAliasOp(def, groupValues)) {
+    if (canRebankTupleAliasOp(def, groupValues, replacements)) {
       setRegAllocTransformClass(value, waveamdmachine::RegClass::AGPR);
       rebankTupleAliasResults(def, waveamdmachine::RegClass::AGPR);
       replacements[value] = value;
@@ -756,10 +778,12 @@ static Value getAGPRReliefReplacement(OpBuilder &builder, Value value,
   return replacement;
 }
 
-static bool rewriteAGPRReliefAliasUse(OpOperand &use, Value agpr,
-                                      const DenseSet<Value> &groupValues) {
+static bool
+rewriteAGPRReliefAliasUse(OpOperand &use, Value agpr,
+                          const DenseSet<Value> &groupValues,
+                          const DenseMap<Value, Value> &replacements) {
   Operation *user = use.getOwner();
-  if (!canRebankTupleAliasOp(user, groupValues))
+  if (!canRebankTupleAliasOp(user, groupValues, replacements))
     return false;
   use.set(agpr);
   rebankTupleAliasResults(user, waveamdmachine::RegClass::AGPR);
@@ -787,8 +811,9 @@ static bool rewriteAGPRReliefMFMAUse(OpOperand &use, Value agpr,
 }
 
 static void rewriteAGPRReliefUse(OpBuilder &builder, OpOperand &use, Value agpr,
-                                 const DenseSet<Value> &groupValues) {
-  if (rewriteAGPRReliefAliasUse(use, agpr, groupValues))
+                                 const DenseSet<Value> &groupValues,
+                                 const DenseMap<Value, Value> &replacements) {
+  if (rewriteAGPRReliefAliasUse(use, agpr, groupValues, replacements))
     return;
   if (rewriteAGPRReliefMFMAUse(use, agpr, groupValues))
     return;
@@ -810,7 +835,7 @@ static void materializeAGPRReliefValue(OpBuilder &builder, Value value,
       uses.push_back(&use);
   for (OpOperand *use : uses)
     if (use->get() == value)
-      rewriteAGPRReliefUse(builder, *use, agpr, groupValues);
+      rewriteAGPRReliefUse(builder, *use, agpr, groupValues, replacements);
 }
 
 static void materializeAGPRRelief(OpBuilder &builder,

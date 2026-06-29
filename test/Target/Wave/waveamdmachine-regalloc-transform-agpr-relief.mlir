@@ -144,6 +144,87 @@ module attributes {transform.with_named_sequence} {
       return %mfma : !waveamdmachine.reg<vgpr, 4>
     }
 
+    // DIRECT-LABEL: func.func @agpr_relief_rebanks_tuple_from_elements_replacements(
+    // DIRECT: [[AG0:%.*]] = waveamdmachine.v_accvgpr_write_b32_tuple
+    // DIRECT: [[AG1:%.*]] = waveamdmachine.v_accvgpr_write_b32_tuple
+    // DIRECT: [[AG2:%.*]] = waveamdmachine.v_accvgpr_write_b32_tuple
+    // DIRECT: [[AG3:%.*]] = waveamdmachine.v_accvgpr_write_b32_tuple
+    // DIRECT-NOT: waveamdmachine.v_accvgpr_read_b32_tuple [[AG0]]
+    // DIRECT: [[TUPLE:%.*]] = waveamdmachine.tuple_from_elements [[AG0]], [[AG1]], [[AG2]], [[AG3]]
+    // DIRECT-SAME: (!waveamdmachine.reg<agpr, 1>, !waveamdmachine.reg<agpr, 1>, !waveamdmachine.reg<agpr, 1>, !waveamdmachine.reg<agpr, 1>) -> !waveamdmachine.reg<agpr, 4>
+    // DIRECT: [[READ:%.*]] = waveamdmachine.v_accvgpr_read_b32_tuple [[TUPLE]]
+    // DIRECT: return [[READ]]
+    func.func @agpr_relief_rebanks_tuple_from_elements_replacements()
+        -> !waveamdmachine.reg<vgpr, 4>
+        attributes {waveamdmachine.vgpr_count_max = 4 : i64,
+                    waveamdmachine.agpr_count_max = 16 : i64,
+                    waveamdmachine.regalloc_transform_state = {
+          alias_sets = [
+            {class = "vgpr", id = 0 : i64,
+             members = [
+               {end = 6 : i64, offset = 0 : i64, start = 1 : i64,
+                value = 0 : i64, width = 1 : i64},
+               {end = 6 : i64, offset = 1 : i64, start = 2 : i64,
+                value = 1 : i64, width = 1 : i64},
+               {end = 6 : i64, offset = 2 : i64, start = 3 : i64,
+                value = 2 : i64, width = 1 : i64},
+               {end = 6 : i64, offset = 3 : i64, start = 4 : i64,
+                value = 3 : i64, width = 1 : i64},
+               {end = 6 : i64, offset = 0 : i64, start = 5 : i64,
+                value = 4 : i64, width = 4 : i64}
+             ],
+             width = 4 : i64}
+          ],
+          failure = {
+            class = "vgpr",
+            overlaps = [
+              {base = 0 : i64, class = "vgpr", end = 6 : i64, set = 0 : i64,
+               start = 1 : i64, width = 4 : i64}
+            ],
+            position = 6 : i64,
+            reason = "pressure",
+            set = 0 : i64
+          },
+          stage = "linear-scan-failure",
+          values = [
+            {class = "vgpr", end = 6 : i64, id = 0 : i64,
+             kind = "op_result", number = 0 : i64, offset = 0 : i64,
+             path = [0, 0, 1], ranges = [{end = 6 : i64, start = 1 : i64}],
+             set = 0 : i64, start = 1 : i64, width = 1 : i64},
+            {class = "vgpr", end = 6 : i64, id = 1 : i64,
+             kind = "op_result", number = 0 : i64, offset = 1 : i64,
+             path = [0, 0, 2], ranges = [{end = 6 : i64, start = 2 : i64}],
+             set = 0 : i64, start = 2 : i64, width = 1 : i64},
+            {class = "vgpr", end = 6 : i64, id = 2 : i64,
+             kind = "op_result", number = 0 : i64, offset = 2 : i64,
+             path = [0, 0, 3], ranges = [{end = 6 : i64, start = 3 : i64}],
+             set = 0 : i64, start = 3 : i64, width = 1 : i64},
+            {class = "vgpr", end = 6 : i64, id = 3 : i64,
+             kind = "op_result", number = 0 : i64, offset = 3 : i64,
+             path = [0, 0, 4], ranges = [{end = 6 : i64, start = 4 : i64}],
+             set = 0 : i64, start = 4 : i64, width = 1 : i64},
+            {class = "vgpr", end = 6 : i64, id = 4 : i64,
+             kind = "op_result", number = 0 : i64, offset = 0 : i64,
+             path = [0, 0, 5], ranges = [{end = 6 : i64, start = 5 : i64}],
+             set = 0 : i64, start = 5 : i64, width = 4 : i64}
+          ]
+        }} {
+      %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+      %e0 = waveamdmachine.v_mov_b32_tuple %zero {registers = 1 : i64}
+          : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
+      %e1 = waveamdmachine.v_mov_b32_tuple %zero {registers = 1 : i64}
+          : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
+      %e2 = waveamdmachine.v_mov_b32_tuple %zero {registers = 1 : i64}
+          : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
+      %e3 = waveamdmachine.v_mov_b32_tuple %zero {registers = 1 : i64}
+          : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
+      %tuple = waveamdmachine.tuple_from_elements %e0, %e1, %e2, %e3
+          : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+             !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+            -> !waveamdmachine.reg<vgpr, 4>
+      return %tuple : !waveamdmachine.reg<vgpr, 4>
+    }
+
     // CHECK-LABEL: func.func @agpr_relief_skips_vgpr_bank_budget(
     // CHECK-SAME: waveamdmachine.regalloc_transform_state =
     // CHECK-SAME: class = "vgpr"
