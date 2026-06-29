@@ -155,6 +155,16 @@ cmake --build build --target wave-opt wave-translate WavePythonModules -j $(npro
 - `wave-matmul-calibrate` invokes `build/bin/wave-translate`; rebuilding only
   `wave-opt` can leave stale HSACO/ISA generation and invalidate TFLOP
   comparisons.
+- Prefer `tools/wave-matmul-calibrate/wave-matmul-perf-sweep.py` for gfx950
+  f16, MXFP4, and v9 perf sweeps. It rebuilds the calibration tools unless
+  `--skip-rebuild`, uses random inputs unless `--all-ones`, reports TFLOP/s,
+  and can write CSV with `--csv`.
+- Sweep defaults cross-reference `docs/Gfx950MatmulProfiles.md`: f16 K values
+  are `512,1024,2048,3072,4096,8192,16384`; MXFP4 K values are
+  `1024,2048,3072,4096,8192,16384,32768`; v9 is fixed at `K=4096`.
+  `--k-values` overrides f16/MXFP4 only.
+- Perf sweeps default to `--no-check`; use `--check` for smaller smoke shapes.
+  Use `--dry-run --skip-rebuild` to inspect the command matrix.
 
 ## Language and MLIR Guidelines
 
