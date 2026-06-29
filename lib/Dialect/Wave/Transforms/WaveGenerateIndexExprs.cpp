@@ -1514,24 +1514,6 @@ createGeneratedIndexExprBuilder(WaveDialect &dialect, DataFlowSolver &solver,
                               /*requireI32RootRange=*/false);
 }
 
-static FailureOr<std::optional<SymbolicOffset>>
-buildGeneratedIndexExprValue(WaveDialect &dialect, DataFlowSolver &solver,
-                             Value value, bool allowRootLeaf,
-                             bool allowI64Integers = false) {
-  SymbolicValueBuilder builder =
-      createGeneratedIndexExprBuilder(dialect, solver, allowI64Integers);
-  return allowRootLeaf ? builder.buildAllowingRootLeaf(value)
-                       : builder.build(value);
-}
-
-static bool hasGeneratedIndexExprRoot(WaveDialect &dialect,
-                                      DataFlowSolver &solver, Value value,
-                                      bool allowI64Integers = false) {
-  SymbolicValueBuilder builder =
-      createGeneratedIndexExprBuilder(dialect, solver, allowI64Integers);
-  return builder.canExpand(value);
-}
-
 static FailureOr<bool> rewritePtrAdd(PatternRewriter &rewriter, PtrAddOp op,
                                      WaveDialect &dialect,
                                      DataFlowSolver &solver) {
@@ -1554,85 +1536,6 @@ static FailureOr<bool> rewritePtrAdd(PatternRewriter &rewriter, PtrAddOp op,
   rewriter.modifyOpInPlace(
       op, [&] { op.getOffsetMutable().assign(index.getResult()); });
   return true;
-}
-
-static Value materializeCmpIndexOperand(PatternRewriter &rewriter, Location loc,
-                                        MLIRContext *ctx,
-                                        const SymbolicOffset &offset,
-                                        int64_t laneWidth) {
-  IndexExprOp index = createIndexExpr(rewriter, loc, ctx, offset);
-  Value value = index.getResult();
-
-  if (auto simdType = dyn_cast<SimdType>(value.getType())) {
-    if (!simdType.getElementType().isIndex() ||
-        simdType.getWidth() != laneWidth)
-      return {};
-    return value;
-  }
-
-  if (!value.getType().isIndex())
-    return {};
-
-  Type simdIndexType = SimdType::get(ctx, value.getType(), laneWidth);
-  return SplatOp::create(rewriter, loc, simdIndexType, value).getResult();
-}
-
-struct CmpIndexOperandOffsets {
-  SymbolicOffset lhs;
-  SymbolicOffset rhs;
-};
-
-struct CmpIndexOperands {
-  Value lhs;
-  Value rhs;
-};
-
-static SimdType getCmpIndexOperandType(CmpIOp op) {
-  auto lhsType = dyn_cast<SimdType>(op.getLhs().getType());
-  auto rhsType = dyn_cast<SimdType>(op.getRhs().getType());
-  if (!lhsType || lhsType != rhsType || lhsType.getElementType().isIndex())
-    return {};
-  return lhsType;
-}
-
-static FailureOr<std::optional<CmpIndexOperandOffsets>>
-buildCmpIndexOperandOffsets(CmpIOp op, WaveDialect &dialect,
-                            DataFlowSolver &solver) {
-  bool lhsHasRoot = hasGeneratedIndexExprRoot(dialect, solver, op.getLhs());
-  bool rhsHasRoot = hasGeneratedIndexExprRoot(dialect, solver, op.getRhs());
-  if (!lhsHasRoot && !rhsHasRoot)
-    return std::optional<CmpIndexOperandOffsets>{};
-
-  FailureOr<std::optional<SymbolicOffset>> lhs =
-      buildGeneratedIndexExprValue(dialect, solver, op.getLhs(),
-                                   /*allowRootLeaf=*/!lhsHasRoot);
-  FailureOr<std::optional<SymbolicOffset>> rhs =
-      buildGeneratedIndexExprValue(dialect, solver, op.getRhs(),
-                                   /*allowRootLeaf=*/!rhsHasRoot);
-  if (failed(lhs) || failed(rhs)) {
-    op.emitError("failed to generate wave.index_expr cmp operand");
-    return failure();
-  }
-  if (!*lhs || !*rhs)
-    return std::optional<CmpIndexOperandOffsets>{};
-  return std::optional<CmpIndexOperandOffsets>{
-      CmpIndexOperandOffsets{**lhs, **rhs}};
-}
-
-static std::optional<CmpIndexOperands>
-materializeCmpIndexOperands(PatternRewriter &rewriter, CmpIOp op,
-                            const CmpIndexOperandOffsets &offsets,
-                            SimdType operandType) {
-  rewriter.setInsertionPoint(op);
-  Value newLhs =
-      materializeCmpIndexOperand(rewriter, op.getLoc(), op.getContext(),
-                                 offsets.lhs, operandType.getWidth());
-  Value newRhs =
-      materializeCmpIndexOperand(rewriter, op.getLoc(), op.getContext(),
-                                 offsets.rhs, operandType.getWidth());
-  if (!newLhs || !newRhs || newLhs.getType() != newRhs.getType())
-    return std::nullopt;
-  return CmpIndexOperands{newLhs, newRhs};
 }
 
 struct IntegerizedMask {
@@ -1682,32 +1585,6 @@ static FailureOr<bool> rewriteIntegerizedMaskAndCmp(PatternRewriter &rewriter,
   Value combined = SelectOp::create(rewriter, op.getLoc(), op.getType(),
                                     lhs->mask, rhs->mask, falseMask);
   rewriter.replaceOp(op, combined);
-  return true;
-}
-
-static FailureOr<bool> rewriteCmp(PatternRewriter &rewriter, CmpIOp op,
-                                  WaveDialect &dialect,
-                                  DataFlowSolver &solver) {
-  SimdType operandType = getCmpIndexOperandType(op);
-  if (!operandType)
-    return false;
-
-  FailureOr<std::optional<CmpIndexOperandOffsets>> offsets =
-      buildCmpIndexOperandOffsets(op, dialect, solver);
-  if (failed(offsets))
-    return failure();
-  if (!*offsets)
-    return false;
-
-  std::optional<CmpIndexOperands> operands =
-      materializeCmpIndexOperands(rewriter, op, **offsets, operandType);
-  if (!operands)
-    return false;
-
-  CmpIOp replacement =
-      CmpIOp::create(rewriter, op.getLoc(), op.getType(), op.getPredicate(),
-                     operands->lhs, operands->rhs);
-  rewriter.replaceOp(op, replacement.getResult());
   return true;
 }
 
@@ -1886,19 +1763,11 @@ struct GenerateIndexExprBindingPattern : OpRewritePattern<IndexExprOp> {
 };
 
 struct GenerateCmpIndexExprPattern : OpRewritePattern<CmpIOp> {
-  GenerateCmpIndexExprPattern(MLIRContext *context, bool &hadFailure,
-                              DataFlowSolver &solver)
-      : OpRewritePattern(context), solver(solver), hadFailure(hadFailure) {}
+  GenerateCmpIndexExprPattern(MLIRContext *context, bool &hadFailure)
+      : OpRewritePattern(context), hadFailure(hadFailure) {}
 
   LogicalResult matchAndRewrite(CmpIOp op,
                                 PatternRewriter &rewriter) const override {
-    WaveDialect *dialect = op->getContext()->getLoadedDialect<WaveDialect>();
-    if (!dialect) {
-      op.emitError("Wave dialect is not loaded");
-      hadFailure = true;
-      return failure();
-    }
-
     FailureOr<bool> maskRewrite = rewriteIntegerizedMaskAndCmp(rewriter, op);
     if (failed(maskRewrite)) {
       hadFailure = true;
@@ -1906,16 +1775,9 @@ struct GenerateCmpIndexExprPattern : OpRewritePattern<CmpIOp> {
     }
     if (*maskRewrite)
       return success();
-
-    FailureOr<bool> rewritten = rewriteCmp(rewriter, op, *dialect, solver);
-    if (failed(rewritten)) {
-      hadFailure = true;
-      return failure();
-    }
-    return success(*rewritten);
+    return failure();
   }
 
-  DataFlowSolver &solver;
   bool &hadFailure;
 };
 
@@ -1935,8 +1797,10 @@ struct WaveGenerateIndexExprsPass
 
     bool failed = false;
     RewritePatternSet patterns(&getContext());
-    patterns.add<GenerateCmpIndexExprPattern, GenerateIndexExprBindingPattern,
-                 GeneratePtrAddIndexExprPattern>(&getContext(), failed, solver);
+    patterns.add<GenerateCmpIndexExprPattern>(&getContext(), failed);
+    patterns
+        .add<GenerateIndexExprBindingPattern, GeneratePtrAddIndexExprPattern>(
+            &getContext(), failed, solver);
     if (mlir::failed(
             applyPatternsGreedily(getOperation(), std::move(patterns))) ||
         failed)

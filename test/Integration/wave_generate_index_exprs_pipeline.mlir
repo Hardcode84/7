@@ -161,9 +161,9 @@ func.func @rewrite_assumed_buffer_offset_after_normalize(
 
 // -----
 
-// CHECK-LABEL: func.func @rewrite_cmp_operands_after_index_generation
+// CHECK-LABEL: func.func @keep_cmp_operands_after_index_generation
 // CHECK-SAME: (%{{.*}}: !wave.ptr<#wave.global>, %[[IDX_RAW:.*]]: !wave.simd<i32, 32>, %[[LIMIT_RAW:.*]]: i32)
-func.func @rewrite_cmp_operands_after_index_generation(
+func.func @keep_cmp_operands_after_index_generation(
     %out: !wave.ptr<#wave.global, f16>, %idx_raw: !wave.simd<i32, 32>,
     %limit_raw: i32) -> !wave.mask<32>
     attributes {wave.kernel} {
@@ -180,17 +180,20 @@ func.func @rewrite_cmp_operands_after_index_generation(
   %s2 = wave.splat %c2 : i32 -> !wave.simd<i32, 32>
   %s4 = wave.splat %c4 : i32 -> !wave.simd<i32, 32>
   %s64 = wave.splat %c64 : i32 -> !wave.simd<i32, 32>
+  // CHECK: %[[SLIMIT:.*]] = wave.splat %[[LIMIT]] : i32 -> !wave.simd<i32, 32>
   %slimit = wave.splat %limit : i32 -> !wave.simd<i32, 32>
+  // CHECK: %[[HI:.*]] = wave.binary divui %[[IDX]], %{{.*}} : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
   %hi = wave.binary divui %idx, %s2
       : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  // CHECK: %[[LO:.*]] = wave.binary remui %[[IDX]], %{{.*}} : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
   %lo = wave.binary remui %idx, %s64
       : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  // CHECK: %[[SCALED_HI:.*]] = wave.binary muli %[[HI]], %{{.*}} overflow<nsw> : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
   %scaled_hi = wave.binary muli %hi, %s4 overflow<nsw>
       : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  // CHECK: %[[OFFSET:.*]] = wave.binary addi %[[LO]], %[[SCALED_HI]] overflow<nsw> : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
   %offset = wave.binary addi %lo, %scaled_hi overflow<nsw>
       : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
-  // CHECK-NOT: wave.binary divui
-  // CHECK-NOT: wave.binary remui
   // CHECK: wave.index_expr <"2*raw0 + 8*floor(1/2*raw0)"> {{.*}} ["raw0"](%[[IDX]]) : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
   %ptr = wave.ptr_add %out, %offset
       : !wave.ptr<#wave.global, f16>, !wave.simd<i32, 32>
@@ -199,10 +202,7 @@ func.func @rewrite_cmp_operands_after_index_generation(
   %token = wave.store %val -> %ptr
       : (!wave.simd<f16, 32>, !wave.simd<!wave.ptr<#wave.global, f16>, 32>)
       -> !wave.mem.token
-  // CHECK: %[[CMP_LHS:.*]] = wave.index_expr <"raw0 + 4*floor(1/2*raw0)"> {{.*}} ["raw0"](%[[IDX]]) : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
-  // CHECK: %[[CMP_RHS_INDEX:.*]] = wave.index_expr <"raw0"> {{.*}} ["raw0"](%[[LIMIT]]) : (i32) -> index
-  // CHECK: %[[CMP_RHS:.*]] = wave.splat %[[CMP_RHS_INDEX]] : index -> !wave.simd<index, 32>
-  // CHECK: %[[MASK:.*]] = wave.cmpi slt %[[CMP_LHS]], %[[CMP_RHS]] : !wave.simd<index, 32>, !wave.simd<index, 32> -> !wave.mask<32>
+  // CHECK: %[[MASK:.*]] = wave.cmpi slt %[[OFFSET]], %[[SLIMIT]] : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.mask<32>
   %mask = wave.cmpi slt %offset, %slimit
       : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.mask<32>
   // CHECK: return %[[MASK]] : !wave.mask<32>

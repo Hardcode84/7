@@ -13,6 +13,7 @@
 #include "Utils/AMDGPUBaseInfo.h"
 #include "lld/Common/Driver.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/GPU/IR/GPUDialect.h"
 #include "mlir/Dialect/Transform/IR/TransformDialect.h"
 #include "mlir/Dialect/Transform/Transforms/TransformInterpreterUtils.h"
 #include "mlir/Dialect/Wave/IR/Wave.h"
@@ -238,7 +239,19 @@ public:
     os << "\t.text\n";
     os << "\t.amdgcn_target \"" << targetTriple << "--" << targetChip << "\"\n";
     os << "\t.amdhsa_code_object_version 6\n";
+    SmallVector<func::FuncOp> funcs;
     for (func::FuncOp func : module.getOps<func::FuncOp>()) {
+      if (!func.isExternal())
+        funcs.push_back(func);
+    }
+    module.walk([&](gpu::GPUModuleOp gpuModule) {
+      for (func::FuncOp func : gpuModule.getOps<func::FuncOp>()) {
+        if (!func.isExternal() &&
+            func->hasAttr(wave::WaveDialect::getKernelAttrName()))
+          funcs.push_back(func);
+      }
+    });
+    for (func::FuncOp func : funcs) {
       if (failed(emitFunction(func)))
         return failure();
     }

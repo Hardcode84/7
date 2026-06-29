@@ -382,6 +382,24 @@ func.func @ptr_add_assumed_select_offset(
 
 // -----
 
+// CHECK-LABEL: func.func @standalone_i32_cmp_arithmetic_stays_i32
+// CHECK-SAME: (%[[IDX:.*]]: !wave.simd<i32, 32>, %[[LIMIT:.*]]: !wave.simd<i32, 32>)
+func.func @standalone_i32_cmp_arithmetic_stays_i32(
+    %idx: !wave.simd<i32, 32>, %limit: !wave.simd<i32, 32>)
+    -> !wave.mask<32> {
+  %c1 = arith.constant 1 : i32
+  %s1 = wave.splat %c1 : i32 -> !wave.simd<i32, 32>
+  // CHECK: [[SUM:%.*]] = wave.binary addi %[[IDX]], %{{.*}} : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  %sum = wave.binary addi %idx, %s1
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  // CHECK: wave.cmpi slt [[SUM]], %[[LIMIT]] : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.mask<32>
+  %mask = wave.cmpi slt %sum, %limit
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.mask<32>
+  return %mask : !wave.mask<32>
+}
+
+// -----
+
 // CHECK-LABEL: func.func @index_expr_assumed_select_binding_expands
 // CHECK-SAME: (%[[IDX:.*]]: !wave.simd<i32, 32>, %[[LIMIT:.*]]: !wave.simd<i32, 32>)
 func.func @index_expr_assumed_select_binding_expands(

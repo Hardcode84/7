@@ -10,6 +10,7 @@
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/GPU/IR/GPUDialect.h"
 #include "mlir/Dialect/UB/IR/UBOps.h"
 #include "mlir/Dialect/Wave/IR/Wave.h"
 #include "mlir/Dialect/Wave/IR/WaveAMD.h"
@@ -34,9 +35,9 @@ void mlir::wave::registerWaveToAMDGPUTranslation() {
         return wave::translateWaveToAMDGPU(op, output);
       },
       [](DialectRegistry &registry) {
-        registry.insert<arith::ArithDialect, func::FuncDialect, ub::UBDialect,
-                        waveamd::WaveAMDDialect, wave::WaveDialect,
-                        wavemeta::WaveMetaDialect,
+        registry.insert<arith::ArithDialect, func::FuncDialect, gpu::GPUDialect,
+                        ub::UBDialect, waveamd::WaveAMDDialect,
+                        wave::WaveDialect, wavemeta::WaveMetaDialect,
                         waveamdmachine::WaveAMDMachineDialect>();
       });
 }
