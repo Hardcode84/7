@@ -15,6 +15,7 @@
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachine.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineInstrInfo.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineTarget.h"
+#include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineTraits.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 #include "llvm/ADT/SmallVector.h"
@@ -22,6 +23,7 @@
 
 #include <array>
 #include <cstdint>
+#include <optional>
 
 namespace mlir::wave {
 #define GEN_PASS_DEF_WAVEAMDFORMFUSEDINT
@@ -34,6 +36,10 @@ using namespace mlir::wave;
 using namespace mlir::waveamdmachine;
 
 namespace {
+
+namespace traits = ::mlir::OpTrait::waveamdmachine;
+
+static constexpr char kLocalBaseAttr[] = "waveamdmachine.local_base";
 
 template <typename OpTy>
 static bool canCreateTernary(ArrayRef<Value> operands,
@@ -190,6 +196,198 @@ static LogicalResult tryFuseScalarAdd(PatternRewriter &rewriter, VAddU32Op op,
   return failure();
 }
 
+static bool isScalarAddBaseHardBoundary(Operation *op) {
+  if (!isa<WaveAMDMachineDialect>(op->getDialect()))
+    return true;
+  if (op->hasTrait<OpTrait::IsTerminator>())
+    return true;
+  if (op->getNumRegions() != 0)
+    return true;
+  if (op->hasTrait<traits::WaitcntOp>())
+    return true;
+  if (op->hasTrait<traits::WritesExecOp>())
+    return true;
+  return isa<LabelOp, SBarrierOp, SSetprioOp, SCBranchExeczOp, SCBranchScc0Op,
+             SCBranchScc1Op, SAndSaveexecB32Op, SAndn2ExecB32Op,
+             SAndSaveexecB64Op, SAndn2ExecB64Op, SMovExecLoOp, SMovExecB64Op,
+             SEndpgmOp, SSetpcB64Op>(op);
+}
+
+struct ScalarAddBaseCandidate {
+  VAddU32Op outer;
+  SAddI32Op scalarAdd;
+  Value commonScalar;
+  Value commonVector;
+  Value varyingScalar;
+};
+
+static std::optional<ScalarAddBaseCandidate>
+matchScalarAddBaseCandidate(VAddU32Op op, Value expectedCommonScalar,
+                            Value expectedCommonVector,
+                            const llvm::AMDGPU::IsaVersion &isa) {
+  auto tryMatchSide =
+      [&](Value maybeScalarSum,
+          Value vector) -> std::optional<ScalarAddBaseCandidate> {
+    if (expectedCommonVector && vector != expectedCommonVector)
+      return std::nullopt;
+    if (!isVGPRValue(vector))
+      return std::nullopt;
+
+    SAddI32Op inner = matchDeadSCCSAddProducer(maybeScalarSum, op);
+    if (!inner)
+      return std::nullopt;
+
+    std::array<Value, 3> ternaryOperands = {inner.getLhs(), inner.getRhs(),
+                                            vector};
+    if (canCreateTernary<VAdd3U32Op>(ternaryOperands, isa))
+      return std::nullopt;
+
+    auto tryCommonScalar =
+        [&](Value commonScalar,
+            Value varyingScalar) -> std::optional<ScalarAddBaseCandidate> {
+      if (expectedCommonScalar && commonScalar != expectedCommonScalar)
+        return std::nullopt;
+      return ScalarAddBaseCandidate{op, inner, commonScalar, vector,
+                                    varyingScalar};
+    };
+
+    if (std::optional<ScalarAddBaseCandidate> candidate =
+            tryCommonScalar(inner.getLhs(), inner.getRhs()))
+      return candidate;
+    return tryCommonScalar(inner.getRhs(), inner.getLhs());
+  };
+
+  if (std::optional<ScalarAddBaseCandidate> candidate =
+          tryMatchSide(op.getLhs(), op.getRhs()))
+    return candidate;
+  return tryMatchSide(op.getRhs(), op.getLhs());
+}
+
+static SmallVector<ScalarAddBaseCandidate, 2>
+matchScalarAddBaseRootCandidates(VAddU32Op op,
+                                 const llvm::AMDGPU::IsaVersion &isa) {
+  SmallVector<ScalarAddBaseCandidate, 2> candidates;
+  auto appendSide = [&](Value maybeScalarSum, Value vector) {
+    if (!isVGPRValue(vector))
+      return;
+
+    SAddI32Op inner = matchDeadSCCSAddProducer(maybeScalarSum, op);
+    if (!inner)
+      return;
+
+    std::array<Value, 3> ternaryOperands = {inner.getLhs(), inner.getRhs(),
+                                            vector};
+    if (canCreateTernary<VAdd3U32Op>(ternaryOperands, isa))
+      return;
+
+    candidates.push_back(ScalarAddBaseCandidate{op, inner, inner.getLhs(),
+                                                vector, inner.getRhs()});
+    if (inner.getLhs() != inner.getRhs())
+      candidates.push_back(ScalarAddBaseCandidate{op, inner, inner.getRhs(),
+                                                  vector, inner.getLhs()});
+  };
+
+  appendSide(op.getLhs(), op.getRhs());
+  appendSide(op.getRhs(), op.getLhs());
+  return candidates;
+}
+
+static bool
+isScalarAddBaseCandidateProducer(Operation *op,
+                                 const ScalarAddBaseCandidate &root,
+                                 const llvm::AMDGPU::IsaVersion &isa) {
+  auto inner = dyn_cast<SAddI32Op>(op);
+  if (!inner)
+    return false;
+  if (!inner.getResult().hasOneUse() || !inner.getScc().use_empty())
+    return false;
+
+  Operation *user = *inner.getResult().user_begin();
+  if (user->getBlock() != op->getBlock())
+    return false;
+  auto add = dyn_cast<VAddU32Op>(user);
+  if (!add)
+    return false;
+  return matchScalarAddBaseCandidate(add, root.commonScalar, root.commonVector,
+                                     isa)
+      .has_value();
+}
+
+static SmallVector<ScalarAddBaseCandidate, 4>
+collectScalarAddBaseRun(const ScalarAddBaseCandidate &root,
+                        const llvm::AMDGPU::IsaVersion &isa) {
+  // Bounds new VGPR base lifetime; legality is SSA, not proximity.
+  constexpr unsigned maxInterCandidateOps = 4;
+
+  SmallVector<ScalarAddBaseCandidate, 4> candidates;
+  candidates.push_back(root);
+
+  unsigned gap = 0;
+  for (Operation *cur = root.outer->getNextNode(); cur;
+       cur = cur->getNextNode()) {
+    if (isScalarAddBaseHardBoundary(cur))
+      break;
+    if (cur->hasTrait<OpTrait::waveamdmachine::NoMachineInst>())
+      continue;
+
+    if (auto add = dyn_cast<VAddU32Op>(cur)) {
+      std::optional<ScalarAddBaseCandidate> candidate =
+          matchScalarAddBaseCandidate(add, root.commonScalar, root.commonVector,
+                                      isa);
+      if (candidate) {
+        candidates.push_back(*candidate);
+        gap = 0;
+        continue;
+      }
+    }
+
+    if (isScalarAddBaseCandidateProducer(cur, root, isa))
+      continue;
+
+    ++gap;
+    if (gap > maxInterCandidateOps)
+      break;
+  }
+
+  return candidates;
+}
+
+static LogicalResult tryFactorScalarAddBase(PatternRewriter &rewriter,
+                                            VAddU32Op op,
+                                            const llvm::AMDGPU::IsaVersion &isa,
+                                            uint64_t &nextLocalBaseId) {
+  SmallVector<ScalarAddBaseCandidate, 2> roots =
+      matchScalarAddBaseRootCandidates(op, isa);
+  for (const ScalarAddBaseCandidate &root : roots) {
+    SmallVector<ScalarAddBaseCandidate, 4> candidates =
+        collectScalarAddBaseRun(root, isa);
+    if (candidates.size() < 3)
+      continue;
+
+    rewriter.setInsertionPoint(candidates.front().outer);
+    VAddU32Op base =
+        VAddU32Op::create(rewriter, candidates.front().outer.getLoc(),
+                          candidates.front().outer.getResult().getType(),
+                          root.commonScalar, root.commonVector);
+    base->setAttr(kLocalBaseAttr,
+                  rewriter.getI64IntegerAttr(nextLocalBaseId++));
+
+    for (ScalarAddBaseCandidate &candidate : candidates) {
+      rewriter.setInsertionPoint(candidate.outer);
+      VAddU32Op replacement =
+          VAddU32Op::create(rewriter, candidate.outer.getLoc(),
+                            candidate.outer.getResult().getType(),
+                            candidate.varyingScalar, base.getResult());
+      replacement->setAttrs(candidate.outer->getAttrs());
+      rewriter.replaceOp(candidate.outer, replacement.getResult());
+      rewriter.eraseOp(candidate.scalarAdd);
+    }
+    return success();
+  }
+
+  return failure();
+}
+
 static Value getSingleShiftAddend(VLshlrevB32Op op, VAddU32Op add) {
   bool lhsShift = add.getLhs() == op.getResult();
   bool rhsShift = add.getRhs() == op.getResult();
@@ -284,6 +482,20 @@ struct Mad24FusionPattern : public OpRewritePattern<VAddU32Op> {
 
   llvm::AMDGPU::IsaVersion isa;
   DataFlowSolver &solver;
+};
+
+struct ScalarAddBaseFactorPattern : public OpRewritePattern<VAddU32Op> {
+  ScalarAddBaseFactorPattern(MLIRContext *context,
+                             const llvm::AMDGPU::IsaVersion &isa)
+      : OpRewritePattern<VAddU32Op>(context), isa(isa) {}
+
+  LogicalResult matchAndRewrite(VAddU32Op op,
+                                PatternRewriter &rewriter) const override {
+    return tryFactorScalarAddBase(rewriter, op, isa, nextLocalBaseId);
+  }
+
+  llvm::AMDGPU::IsaVersion isa;
+  mutable uint64_t nextLocalBaseId = 0;
 };
 
 struct AddFusionPattern : public OpRewritePattern<VAddU32Op> {
@@ -393,6 +605,7 @@ static LogicalResult runOnFunc(func::FuncOp func) {
 
   patterns.add<Mad24FusionPattern>(func.getContext(), *isa, solver);
   patterns.add<M0AddFusionPattern>(func.getContext());
+  patterns.add<ScalarAddBaseFactorPattern>(func.getContext(), *isa);
   patterns.add<AddFusionPattern, LshlFusionPattern, OrFusionPattern>(
       func.getContext(), *isa);
   DataFlowListener listener(solver);

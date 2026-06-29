@@ -448,3 +448,129 @@ func.func @mad_gfx9_literal_reject(%a: !waveamdmachine.reg<vgpr, 1>)
 }
 
 }
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
+
+// CHECK-LABEL: func.func @scalar_add_base_factor
+// CHECK-NOT: waveamdmachine.s_add_i32
+// CHECK: [[BASE:%.*]] = waveamdmachine.v_add_u32 %{{.*}}, %{{.*}} {waveamdmachine.local_base = 0 : i64} : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
+// CHECK-NOT: waveamdmachine.s_add_i32
+// CHECK: [[ADDR0:%.*]] = waveamdmachine.v_add_u32 %{{.*}}, [[BASE]]
+// CHECK-NOT: waveamdmachine.s_add_i32
+// CHECK: [[ADDR1:%.*]] = waveamdmachine.v_add_u32 %{{.*}}, [[BASE]]
+// CHECK-NOT: waveamdmachine.s_add_i32
+// CHECK: [[ADDR2:%.*]] = waveamdmachine.v_add_u32 %{{.*}}, [[BASE]]
+// CHECK-NOT: waveamdmachine.s_add_i32
+// CHECK: return [[ADDR0]], [[ADDR1]], [[ADDR2]]
+func.func @scalar_add_base_factor(%off0: !waveamdmachine.reg<sgpr, 1>,
+                                  %off1: !waveamdmachine.reg<sgpr, 1>,
+                                  %off2: !waveamdmachine.reg<sgpr, 1>,
+                                  %scale: !waveamdmachine.reg<sgpr, 1>,
+                                  %lane: !waveamdmachine.reg<vgpr, 1>,
+                                  %m0src: !waveamdmachine.reg<sgpr, 1>)
+    -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+        !waveamdmachine.reg<vgpr, 1>) {
+  %sum0, %scc0 = waveamdmachine.s_add_i32 %off0, %scale
+      : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<sgpr, 1>)
+          -> (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<scc, 1>)
+  %addr0 = waveamdmachine.v_add_u32 %sum0, %lane
+      : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+  %m0 = waveamdmachine.s_mov_m0 %m0src
+      : (!waveamdmachine.reg<sgpr, 1>) -> !waveamdmachine.m0
+  %sum1, %scc1 = waveamdmachine.s_add_i32 %off1, %scale
+      : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<sgpr, 1>)
+          -> (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<scc, 1>)
+  %addr1 = waveamdmachine.v_add_u32 %sum1, %lane
+      : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+  %m1 = waveamdmachine.s_mov_m0 %m0src
+      : (!waveamdmachine.reg<sgpr, 1>) -> !waveamdmachine.m0
+  %sum2, %scc2 = waveamdmachine.s_add_i32 %off2, %scale
+      : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<sgpr, 1>)
+          -> (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<scc, 1>)
+  %addr2 = waveamdmachine.v_add_u32 %sum2, %lane
+      : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+  return %addr0, %addr1, %addr2 : !waveamdmachine.reg<vgpr, 1>,
+                                  !waveamdmachine.reg<vgpr, 1>,
+                                  !waveamdmachine.reg<vgpr, 1>
+}
+
+// CHECK-LABEL: func.func @scalar_add_base_factor_exec_boundary_reject
+// CHECK-NOT: waveamdmachine.local_base
+// CHECK: waveamdmachine.s_add_i32
+// CHECK: waveamdmachine.v_add_u32
+// CHECK: waveamdmachine.s_andn2_exec_b32
+// CHECK-NOT: waveamdmachine.local_base
+// CHECK: waveamdmachine.s_add_i32
+// CHECK: waveamdmachine.v_add_u32
+// CHECK: waveamdmachine.s_add_i32
+// CHECK: waveamdmachine.v_add_u32
+// CHECK-NOT: waveamdmachine.local_base
+// CHECK: return
+func.func @scalar_add_base_factor_exec_boundary_reject(
+    %off0: !waveamdmachine.reg<sgpr, 1>,
+    %off1: !waveamdmachine.reg<sgpr, 1>,
+    %off2: !waveamdmachine.reg<sgpr, 1>,
+    %scale: !waveamdmachine.reg<sgpr, 1>,
+    %lane: !waveamdmachine.reg<vgpr, 1>,
+    %exec0: !waveamdmachine.reg<sgpr, 1>,
+    %exec1: !waveamdmachine.reg<sgpr, 1>)
+    -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+        !waveamdmachine.reg<vgpr, 1>) {
+  %sum0, %scc0 = waveamdmachine.s_add_i32 %off0, %scale
+      : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<sgpr, 1>)
+          -> (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<scc, 1>)
+  %addr0 = waveamdmachine.v_add_u32 %sum0, %lane
+      : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+  %scc_exec = waveamdmachine.s_andn2_exec_b32 %exec0, %exec1
+      : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<sgpr, 1>)
+          -> !waveamdmachine.reg<scc, 1>
+  %sum1, %scc1 = waveamdmachine.s_add_i32 %off1, %scale
+      : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<sgpr, 1>)
+          -> (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<scc, 1>)
+  %addr1 = waveamdmachine.v_add_u32 %sum1, %lane
+      : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+  %sum2, %scc2 = waveamdmachine.s_add_i32 %off2, %scale
+      : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<sgpr, 1>)
+          -> (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<scc, 1>)
+  %addr2 = waveamdmachine.v_add_u32 %sum2, %lane
+      : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+  return %addr0, %addr1, %addr2 : !waveamdmachine.reg<vgpr, 1>,
+                                  !waveamdmachine.reg<vgpr, 1>,
+                                  !waveamdmachine.reg<vgpr, 1>
+}
+
+// CHECK-LABEL: func.func @scalar_add_base_factor_two_uses_reject
+// CHECK-NOT: waveamdmachine.v_add3_u32
+// CHECK: waveamdmachine.s_add_i32
+// CHECK: waveamdmachine.s_add_i32
+func.func @scalar_add_base_factor_two_uses_reject(
+    %off0: !waveamdmachine.reg<sgpr, 1>,
+    %off1: !waveamdmachine.reg<sgpr, 1>,
+    %scale: !waveamdmachine.reg<sgpr, 1>,
+    %lane: !waveamdmachine.reg<vgpr, 1>)
+    -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>) {
+  %sum0, %scc0 = waveamdmachine.s_add_i32 %off0, %scale
+      : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<sgpr, 1>)
+          -> (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<scc, 1>)
+  %addr0 = waveamdmachine.v_add_u32 %sum0, %lane
+      : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+  %sum1, %scc1 = waveamdmachine.s_add_i32 %off1, %scale
+      : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<sgpr, 1>)
+          -> (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<scc, 1>)
+  %addr1 = waveamdmachine.v_add_u32 %sum1, %lane
+      : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+  return %addr0, %addr1 : !waveamdmachine.reg<vgpr, 1>,
+                          !waveamdmachine.reg<vgpr, 1>
+}
+
+}
