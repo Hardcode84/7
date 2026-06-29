@@ -37,6 +37,104 @@ func.func @hoist_exec_if_local_addr(%cond: !waveamdmachine.reg<sgpr, 1>,
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 
+// CHECK-LABEL: func.func @scale_loop_shifted_carry(
+// CHECK-SAME: [[COND:%[^:]+]]: !waveamdmachine.reg<scc, 1>
+// CHECK-SAME: [[INIT:%[^:]+]]: !waveamdmachine.reg<sgpr, 1>
+// CHECK-SAME: [[BASE:%[^:]+]]: !waveamdmachine.reg<sgpr, 1>
+// CHECK: [[SHIFT:%.*]] = waveamdmachine.imm 1
+// CHECK: [[SCALED_INIT:%.*]], %{{.*}} = waveamdmachine.s_lshl_b32 [[INIT]], [[SHIFT]]
+// CHECK: [[STEP:%.*]] = waveamdmachine.imm 256
+// CHECK: waveamdmachine.uniform_loop carries([[SCALED_INIT]] : !waveamdmachine.reg<sgpr, 1>)
+// CHECK: ^bb0([[CARRY:%.*]]: !waveamdmachine.reg<sgpr, 1>):
+// CHECK-NOT: waveamdmachine.s_lshl_b32
+// CHECK: waveamdmachine.s_add_i32 [[BASE]], [[CARRY]]
+// CHECK: [[MID:%.*]], %{{.*}} = waveamdmachine.s_add_i32 [[CARRY]], [[STEP]]
+// CHECK-NOT: waveamdmachine.s_lshl_b32
+// CHECK: waveamdmachine.s_add_i32 [[BASE]], [[MID]]
+// CHECK: [[NEXT:%.*]], %{{.*}} = waveamdmachine.s_add_i32 [[MID]], [[STEP]]
+// CHECK: waveamdmachine.continue_if [[COND]] : !waveamdmachine.reg<scc, 1> carries([[NEXT]] : !waveamdmachine.reg<sgpr, 1>)
+func.func @scale_loop_shifted_carry(%cond: !waveamdmachine.reg<scc, 1>,
+                                    %init: !waveamdmachine.reg<sgpr, 1>,
+                                    %base: !waveamdmachine.reg<sgpr, 1>) {
+  %one = waveamdmachine.imm 1 : !waveamdmachine.imm
+  %step = waveamdmachine.imm 128 : !waveamdmachine.imm
+  %loop = waveamdmachine.uniform_loop carries(%init : !waveamdmachine.reg<sgpr, 1>) {
+  ^bb0(%iv: !waveamdmachine.reg<sgpr, 1>):
+    %scaled0, %scc0 = waveamdmachine.s_lshl_b32 %iv, %one
+        : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.imm)
+            -> (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<scc, 1>)
+    %addr0, %scc1 = waveamdmachine.s_add_i32 %base, %scaled0
+        : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<sgpr, 1>)
+            -> (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<scc, 1>)
+    waveamdmachine.s_mov_b32 "s80", %addr0
+        : (!waveamdmachine.reg<sgpr, 1>) -> ()
+    %mid, %scc2 = waveamdmachine.s_add_i32 %iv, %step
+        : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.imm)
+            -> (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<scc, 1>)
+    %scaled1, %scc3 = waveamdmachine.s_lshl_b32 %mid, %one
+        : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.imm)
+            -> (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<scc, 1>)
+    %addr1, %scc4 = waveamdmachine.s_add_i32 %base, %scaled1
+        : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<sgpr, 1>)
+            -> (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<scc, 1>)
+    waveamdmachine.s_mov_b32 "s81", %addr1
+        : (!waveamdmachine.reg<sgpr, 1>) -> ()
+    %next, %scc5 = waveamdmachine.s_add_i32 %mid, %step
+        : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.imm)
+            -> (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<scc, 1>)
+    waveamdmachine.continue_if %cond : !waveamdmachine.reg<scc, 1>
+        carries(%next : !waveamdmachine.reg<sgpr, 1>)
+  } -> !waveamdmachine.reg<sgpr, 1>
+  return
+}
+
+}
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
+
+// CHECK-LABEL: func.func @keep_shifted_carry_with_result_use(
+// CHECK-SAME: [[COND:%[^:]+]]: !waveamdmachine.reg<scc, 1>
+// CHECK-SAME: [[INIT:%[^:]+]]: !waveamdmachine.reg<sgpr, 1>
+// CHECK: [[LOOP:%.*]] = waveamdmachine.uniform_loop carries([[INIT]] : !waveamdmachine.reg<sgpr, 1>)
+// CHECK: ^bb0([[IV:%.*]]: !waveamdmachine.reg<sgpr, 1>):
+// CHECK: waveamdmachine.s_lshl_b32 [[IV]],
+// CHECK: waveamdmachine.continue_if [[COND]]
+// CHECK: waveamdmachine.s_add_i32 [[LOOP]], {{.*}} : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.imm)
+func.func @keep_shifted_carry_with_result_use(%cond: !waveamdmachine.reg<scc, 1>,
+                                              %init: !waveamdmachine.reg<sgpr, 1>,
+                                              %base: !waveamdmachine.reg<sgpr, 1>) {
+  %one = waveamdmachine.imm 1 : !waveamdmachine.imm
+  %step = waveamdmachine.imm 128 : !waveamdmachine.imm
+  %loop = waveamdmachine.uniform_loop carries(%init : !waveamdmachine.reg<sgpr, 1>) {
+  ^bb0(%iv: !waveamdmachine.reg<sgpr, 1>):
+    %scaled, %scc0 = waveamdmachine.s_lshl_b32 %iv, %one
+        : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.imm)
+            -> (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<scc, 1>)
+    %addr, %scc1 = waveamdmachine.s_add_i32 %base, %scaled
+        : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<sgpr, 1>)
+            -> (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<scc, 1>)
+    %next, %scc2 = waveamdmachine.s_add_i32 %iv, %step
+        : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.imm)
+            -> (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<scc, 1>)
+    waveamdmachine.continue_if %cond : !waveamdmachine.reg<scc, 1>
+        carries(%next : !waveamdmachine.reg<sgpr, 1>)
+  } -> !waveamdmachine.reg<sgpr, 1>
+  %use, %scc3 = waveamdmachine.s_add_i32 %loop, %step
+      : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.imm)
+          -> (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<scc, 1>)
+  waveamdmachine.s_mov_b32 "s82", %use
+      : (!waveamdmachine.reg<sgpr, 1>) -> ()
+  return
+}
+
+}
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
+
 // CHECK-LABEL: func.func @keep_yielded_value(
 // CHECK-SAME: [[COND:%[^:]+]]: !waveamdmachine.reg<sgpr, 1>
 // CHECK-SAME: [[X:%[^:]+]]: !waveamdmachine.reg<vgpr, 1>
