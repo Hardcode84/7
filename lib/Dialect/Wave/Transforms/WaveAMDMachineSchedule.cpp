@@ -712,9 +712,7 @@ static void appendDsReadMfmaDescriptor(
 
 static void appendWriteReadMfmaDescriptor(
     SmallVectorImpl<BarrierPipelineDescriptor> &descriptors,
-    ArrayRef<unsigned> classes, ArrayRef<NodeMetrics> metrics,
-    const waveamdmachine::ArchData &arch) {
-  unsigned dsReads = countClass(classes, BPCDSRead);
+    ArrayRef<unsigned> classes, const waveamdmachine::ArchData &arch) {
   unsigned dsWrites = countClass(classes, BPCDSWrite);
   unsigned vmemReads = countClass(classes, BPCVMemRead);
   unsigned mfmas = countClass(classes, BPCMFMA);
@@ -726,21 +724,6 @@ static void appendWriteReadMfmaDescriptor(
   appendStage(descriptor.stages, BPCBarrier, 1);
   unsigned burst =
       std::max(1u, waveamdmachine::getEventSimCmaIssueCapacity(arch));
-  if (dsReads != 0) {
-    appendStage(descriptor.stages, BPCDSWrite, dsWrites);
-    appendStage(descriptor.stages, BPCVMemRead, vmemReads);
-    unsigned seed = computeDsReadSeed(classes, metrics, arch);
-    appendStage(descriptor.stages, BPCDSRead, seed);
-    unsigned remainingDs = dsReads - seed;
-    unsigned pairs = std::max(remainingDs, mfmas);
-    for (unsigned index = 0; index < pairs; ++index) {
-      appendStage(descriptor.stages, BPCMFMA, 1);
-      appendStage(descriptor.stages, BPCDSRead, 1);
-    }
-    descriptors.push_back(std::move(descriptor));
-    return;
-  }
-
   unsigned vmemBursts = (vmemReads + burst - 1) / burst;
   unsigned pairs = std::max({dsWrites, vmemBursts, mfmas});
   for (unsigned index = 0; index < pairs; ++index) {
@@ -760,7 +743,7 @@ buildBarrierPipelineDescriptors(ArrayRef<unsigned> classes,
   appendDmaDescriptors(descriptors, classes);
   if (enableMemoryPipelines) {
     appendDsReadMfmaDescriptor(descriptors, classes, metrics, arch);
-    appendWriteReadMfmaDescriptor(descriptors, classes, metrics, arch);
+    appendWriteReadMfmaDescriptor(descriptors, classes, arch);
   }
   return descriptors;
 }
