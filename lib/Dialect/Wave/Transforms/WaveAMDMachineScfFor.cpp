@@ -499,6 +499,39 @@ static Value createLoopNextIv(WaveAMDMachineSelector &S, Location loc, Value iv,
       .getResult();
 }
 
+static std::optional<ConstantIntRanges>
+getLoopBoundRange(WaveAMDMachineSelector &S, Value value) {
+  const dataflow::IntegerValueRangeLattice *lattice =
+      S.rangeSolver.lookupState<dataflow::IntegerValueRangeLattice>(value);
+  if (!lattice)
+    return std::nullopt;
+  IntegerValueRange ivr = lattice->getValue();
+  if (ivr.isUninitialized())
+    return std::nullopt;
+  ConstantIntRanges range = ivr.getValue();
+  unsigned w = range.smin().getBitWidth();
+  if (w == 0 || w > 64)
+    return std::nullopt;
+  return range;
+}
+
+static bool rangeProvesLoopEntry(WaveAMDMachineSelector &S, scf::ForOp op) {
+  if (op.getUnsignedCmp())
+    return false;
+  std::optional<ConstantIntRanges> lower =
+      getLoopBoundRange(S, op.getLowerBound());
+  std::optional<ConstantIntRanges> upper =
+      getLoopBoundRange(S, op.getUpperBound());
+  return lower && upper && lower->smax().slt(upper->smin());
+}
+
+static bool canSkipLoopEntryCheck(WaveAMDMachineSelector &S, scf::ForOp op) {
+  if (op->hasAttr("wave.nonzero_trip"))
+    return true;
+  std::optional<APInt> tripCount = op.getStaticTripCount();
+  return (tripCount && !tripCount->isZero()) || rangeProvesLoopEntry(S, op);
+}
+
 } // namespace
 
 // Wide bounds force wide IV carry; otherwise IV wraps before wide compare.
@@ -525,7 +558,7 @@ LogicalResult selectScfFor(WaveAMDMachineSelector &S, scf::ForOp op) {
     inits.push_back(group.base);
 
   Value entryCond;
-  if (!op->hasAttr("wave.nonzero_trip"))
+  if (!canSkipLoopEntryCheck(S, op))
     entryCond = createLoopLtCmp(S, loc, lower, upper);
 
   Operation *loop = buildUniformLoopOp(S, loc, entryCond, inits);

@@ -376,16 +376,15 @@ v9_beyond_hotloop:
 		ds_read_b64_tr_b16 v[94:95], v26 offset:3232
 		ds_read_b64_tr_b16 v[96:97], v26 offset:10624
 		ds_read_b64_tr_b16 v[98:99], v26 offset:11680
-		s_mov_b32 s50, 0x80
 		v_mov_b32_e32 v100, v16
 		v_mov_b32_e32 v101, v17
 		v_mov_b32_e32 v102, v18
 		v_mov_b32_e32 v103, v19
+		s_mov_b32 s50, 0x80
 		s_lshl_b32 s51, s50, 1
 		s_lshl_b32 s50, s11, 1
-		s_lshl_b32 s2, s2, 1
 		s_mov_b32 s11, 0
-		s_cmp_lt_i32 0, 62
+		s_lshl_b32 s2, s2, 1
 		v_mov_b64_e32 v[16:17], 0
 		v_mov_b64_e32 v[18:19], 0
 		v_mov_b64_e32 v[104:105], 0
@@ -448,7 +447,6 @@ v9_beyond_hotloop:
 		v_mov_b64_e32 v[218:219], 0
 		v_mov_b64_e32 v[220:221], 0
 		v_mov_b64_e32 v[222:223], 0
-		s_cbranch_scc0 .Lv9_beyond_hotloop.loop_exit_0
 .Lv9_beyond_hotloop.loop_head_0:
 		s_waitcnt lgkmcnt(14)
 		v_mfma_f32_16x16x32_f16 v[16:19], v[68:71], v[36:39], v[16:19]
