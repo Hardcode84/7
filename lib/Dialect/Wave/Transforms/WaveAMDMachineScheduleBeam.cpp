@@ -103,6 +103,7 @@ struct ReadyChoice {
   unsigned node = 0;
   unsigned discrepancy = 0;
   unsigned guidePosition = 0;
+  bool noInst = false;
 };
 
 struct BeamResult {
@@ -396,7 +397,8 @@ static ReadyChoice scoreReadyChoice(
     const RegisterPressureBudgets &budgets, const BeamSearchConfig &config) {
   ReadyChoice choice;
   choice.node = node;
-  choice.discrepancy = node == nextGuide ? 0 : 1;
+  choice.noInst = metrics[node].noInst;
+  choice.discrepancy = node == nextGuide || choice.noInst ? 0 : 1;
   choice.guidePosition = guidePositions[node];
   if (isPressureSearchEnabled(budgets)) {
     PressurePreview pressure =
@@ -431,6 +433,8 @@ static ReadyChoice scoreReadyChoice(
 
 static bool isBetterReadyChoice(const ReadyChoice &lhs,
                                 const ReadyChoice &rhs) {
+  if (lhs.noInst != rhs.noInst)
+    return lhs.noInst;
   if (lhs.hardExcess != rhs.hardExcess)
     return lhs.hardExcess < rhs.hardExcess;
   if (lhs.criticalExcess != rhs.criticalExcess)
@@ -453,10 +457,15 @@ static SmallVector<ReadyChoice, 8> getReadyChoices(
     const RegisterPressureBudgets &budgets, const BeamSearchConfig &config) {
   SmallVector<ReadyChoice, 8> choices;
   unsigned nextGuide = getNextGuideNode(state, guide);
-  for (unsigned node : state.ready)
+  bool hasReadyNoInst = llvm::any_of(
+      state.ready, [&](unsigned node) { return metrics[node].noInst; });
+  for (unsigned node : state.ready) {
+    if (hasReadyNoInst && !metrics[node].noInst)
+      continue;
     choices.push_back(scoreReadyChoice(node, state, tables, metrics, nextGuide,
                                        guidePositions, pressureModel, budgets,
                                        config));
+  }
   llvm::sort(choices, isBetterReadyChoice);
   if (choices.size() > config.branchLimit)
     choices.resize(config.branchLimit);
@@ -542,6 +551,8 @@ static bool isBetterBeamChild(const BeamChild &lhs, const BeamChild &rhs,
                               ArrayRef<BeamState> parents,
                               const RegisterPressureBudgets &budgets,
                               const BeamSearchConfig &config) {
+  if (lhs.choice.noInst != rhs.choice.noInst)
+    return lhs.choice.noInst;
   if (isPressureSearchEnabled(budgets)) {
     if (lhs.choice.hardExcess != rhs.choice.hardExcess)
       return lhs.choice.hardExcess < rhs.choice.hardExcess;

@@ -26,7 +26,8 @@ func.func @candidate_lower(%off: !waveamdmachine.reg<vgpr, 1>,
 // DIAG: waveamd-machine-schedule-report candidate func=candidate_lower region=0 name=critical_path cycles=85 delta=-1 issued_ops=3 max_vgpr=3 max_sgpr=0 order=0,2,1,3
 // NOBEAM-NOT: name=beam_0
 // DIAG: waveamd-machine-schedule-report selected func=candidate_lower region=0 name=critical_path original_cycles=86 selected_cycles=85 delta=-1 action=keep order=0,2,1,3
-// BEAM: waveamd-machine-schedule-report candidate func=candidate_lower region=0 name=beam_0 cycles=86 delta=0 issued_ops=3 max_vgpr=3 max_sgpr=0 order=1,0,2,3
+// BEAM-NOT: name=beam_0
+// BEAM: waveamd-machine-schedule-report selected func=candidate_lower region=0 name=critical_path
 // REGIONCAP: waveamd-machine-schedule-report skipped func=candidate_lower region=0 reason=max_region_ops ops=4 instruction_ops=3 limit=3
 // BEAMCAP: waveamd-machine-schedule-report skipped func=candidate_lower region=0 reason=max_beam_work estimated_work=1536 limit=1000
 // BEAMCAP-NOT: name=beam_0

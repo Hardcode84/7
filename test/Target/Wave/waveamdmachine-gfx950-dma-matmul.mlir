@@ -165,7 +165,7 @@
 // MXFP4-PERF-ASM-NEXT: v_mfma_scale_f32_16x16x128_f8f6f4
 
 // ASMPIPE-LABEL: wmma_f16_matmul_tiled:
-// ASMPIPE: s_waitcnt vmcnt(8)
+// ASMPIPE: s_waitcnt vmcnt(0)
 // ASMPIPE-NEXT: s_barrier
 
 // ASMBF16-LABEL: wmma_f16_matmul_tiled:
@@ -217,9 +217,9 @@
 // ASMMXFP4-DMA-K2-COUNT-4: buffer_load_dwordx4 {{.*}} lds
 // ASMMXFP4-DMA-K2: ds_read_b64_tr_b8 {{v\[[0-9]+:[0-9]+\]}}, {{v[0-9]+}} offset:4096
 // ASMMXFP4-DMA-K2: ds_read_b64_tr_b8 {{v\[[0-9]+:[0-9]+\]}}, {{v[0-9]+}} offset:4608
+// ASMMXFP4-DMA-K2: v_mfma_scale_f32_16x16x128_f8f6f4
 // ASMMXFP4-DMA-K2: ds_read_b64_tr_b8 {{v\[[0-9]+:[0-9]+\]}}, {{v[0-9]+}} offset:5120
 // ASMMXFP4-DMA-K2: ds_read_b64_tr_b8 {{v\[[0-9]+:[0-9]+\]}}, {{v[0-9]+}} offset:5632
-// ASMMXFP4-DMA-K2: v_mfma_scale_f32_16x16x128_f8f6f4
 // ASMMXFP4-DMA-K2: v_mfma_scale_f32_16x16x128_f8f6f4
 // ASMMXFP4-DMA-K2: .amdhsa_group_segment_fixed_size 8192
 

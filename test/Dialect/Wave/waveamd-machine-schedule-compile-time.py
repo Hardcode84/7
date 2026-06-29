@@ -225,11 +225,10 @@ def check_lazy_hard_cap_issue_window_tie() -> None:
         "lazy_hard_cap_issue_window_tie",
         text,
         r"waveamdmachine\.mfma_f32_16x16x32_f16 %arg0, %arg1, %arg3[^\n]*\n"
+        r"\s*%[0-9]+:4 = waveamdmachine\.tuple_to_elements %[0-9]+[^\n]*\n"
         r"\s*%[0-9]+ = waveamdmachine\.mfma_f32_16x16x32_f16 "
         r"%arg0, %arg1, %arg2[^\n]*\n"
-        r"\s*%[0-9]+:4 = waveamdmachine\.tuple_to_elements %[0-9]+[^\n]*\n"
         r"\s*%[0-9]+ = waveamdmachine\.v_add_u32 %[0-9]+#0, %[0-9]+#1[^\n]*\n"
-        r"\s*%[0-9]+ = waveamdmachine\.imm 8[^\n]*\n"
         r"\s*%[A-Za-z0-9_]+, %[A-Za-z0-9_]+ = waveamdmachine\.s_add_i32",
     )
     require(
@@ -251,7 +250,7 @@ def main() -> int:
     require(
         "matmul_pressure_disabled",
         text,
-        r"sim_cycles waves=2 simds=2 start_delay=0: 9922",
+        r"sim_cycles waves=2 simds=2 start_delay=0: 10354",
     )
     reject("matmul_pressure_disabled", text, r"waveamd-machine-schedule-report")
 
@@ -269,7 +268,7 @@ def main() -> int:
     require(
         "matmul_hard_cap_beam_report",
         text,
-        r"selected func=wmma_f16_matmul_tiled region=1 name=critical_path",
+        r"selected func=wmma_f16_matmul_tiled region=2 name=local_issue",
     )
     require("matmul_hard_cap_beam_report", text, r"vgpr_hard_excess=0")
     reject("matmul_hard_cap_beam_report", text, r"pressure_fallback")
@@ -290,7 +289,7 @@ def main() -> int:
     require(
         "fa_seq32_d16_u4_beam_report",
         text,
-        r"selected func=flash_attention_f32 region=0 name=critical_path",
+        r"selected func=flash_attention_f32 region=2 name=critical_path",
     )
     require(
         "fa_seq32_d16_u4_beam_report",
@@ -307,7 +306,7 @@ def main() -> int:
     require(
         "fa_seq32_d16_u4_beam_report",
         text,
-        r"sim_cycles waves=1 simds=1 start_delay=0: 30211",
+        r"sim_cycles waves=1 simds=1 start_delay=0: 30784",
     )
     reject("fa_seq32_d16_u4_beam_report", text, r"pressure_fallback")
 

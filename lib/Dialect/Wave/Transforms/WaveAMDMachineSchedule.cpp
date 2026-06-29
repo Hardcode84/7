@@ -122,7 +122,6 @@ enum BarrierPipelineClass : unsigned {
 
 struct BarrierPipelineWindow {
   ScheduleRegion region;
-  bool insideUniformLoop = false;
 };
 
 struct BarrierPipelineStage {
@@ -232,21 +231,18 @@ static bool collectBarrierPipelineWindow(func::FuncOp func,
        op && !isBarrierPipelineHardBoundary(op); op = op->getNextNode())
     right.push_back(op);
 
-  if (left.empty() || right.empty())
+  if (right.empty())
     return false;
 
   ScheduleRegion region;
   region.func = func;
-  region.first = left.front();
+  region.first = left.empty() ? barrier.getOperation() : left.front();
   region.last = right.back();
   region.opCount = static_cast<unsigned>(left.size() + 1 + right.size());
   region.ops.append(left.begin(), left.end());
   region.ops.push_back(barrier);
   region.ops.append(right.begin(), right.end());
   window.region = std::move(region);
-  window.insideUniformLoop =
-      isa<waveamdmachine::UniformLoopOp>(barrier->getBlock()->getParentOp());
-
   return !exceedsScheduleRegionLimit(window.region, limits);
 }
 
@@ -755,6 +751,40 @@ findReadyStageMatch(ArrayRef<unsigned> ready, const BarrierPipelineStage &stage,
   return std::nullopt;
 }
 
+static bool reachesUnscheduledStageMatchThroughNoInst(
+    unsigned node, const GraphTables &tables, const BarrierPipelineStage &stage,
+    ArrayRef<unsigned> classes, const llvm::BitVector &scheduled,
+    const llvm::BitVector &noInst, llvm::BitVector &visited) {
+  if (!visited.test(node))
+    visited.set(node);
+  for (unsigned succ : tables.successors[node]) {
+    if (scheduled.test(succ))
+      continue;
+    if (stageMatches(succ, stage, classes))
+      return true;
+    if (noInst[succ] && !visited.test(succ) &&
+        reachesUnscheduledStageMatchThroughNoInst(succ, tables, stage, classes,
+                                                  scheduled, noInst, visited))
+      return true;
+  }
+  return false;
+}
+
+static std::optional<unsigned> findReadyNoInstStageDependency(
+    ArrayRef<unsigned> ready, const GraphTables &tables,
+    const BarrierPipelineStage &stage, ArrayRef<unsigned> classes,
+    const llvm::BitVector &scheduled, const llvm::BitVector &noInst) {
+  for (auto [readyIndex, node] : llvm::enumerate(ready)) {
+    if (!noInst[node])
+      continue;
+    llvm::BitVector visited(classes.size());
+    if (reachesUnscheduledStageMatchThroughNoInst(node, tables, stage, classes,
+                                                  scheduled, noInst, visited))
+      return static_cast<unsigned>(readyIndex);
+  }
+  return std::nullopt;
+}
+
 static void scheduleReadyNode(unsigned readyIndex, const GraphTables &tables,
                               SmallVectorImpl<unsigned> &pending,
                               SmallVectorImpl<unsigned> &ready,
@@ -773,7 +803,34 @@ static void scheduleReadyNode(unsigned readyIndex, const GraphTables &tables,
   llvm::sort(ready);
 }
 
+static bool tryScheduleBarrierPipelineStage(
+    const GraphTables &tables, const llvm::BitVector &noInst,
+    ArrayRef<unsigned> classes, const BarrierPipelineStage &stage,
+    SmallVectorImpl<unsigned> &pending, SmallVectorImpl<unsigned> &ready,
+    llvm::BitVector &scheduled, SmallVectorImpl<unsigned> &order,
+    unsigned &stageMatchesEmitted) {
+  if (std::optional<unsigned> readyIndex =
+          findReadyStageMatch(ready, stage, classes)) {
+    scheduleReadyNode(*readyIndex, tables, pending, ready, scheduled, order);
+    ++stageMatchesEmitted;
+    return true;
+  }
+
+  if (!hasUnscheduledStageMatch(stage, classes, scheduled))
+    return false;
+
+  if (std::optional<unsigned> readyIndex = findReadyNoInstStageDependency(
+          ready, tables, stage, classes, scheduled, noInst)) {
+    scheduleReadyNode(*readyIndex, tables, pending, ready, scheduled, order);
+    return true;
+  }
+
+  scheduleReadyNode(/*readyIndex=*/0, tables, pending, ready, scheduled, order);
+  return true;
+}
+
 static bool buildBarrierPipelineOrder(const GraphTables &tables,
+                                      const llvm::BitVector &noInst,
                                       ArrayRef<unsigned> classes,
                                       const BarrierPipelineDescriptor &desc,
                                       SmallVectorImpl<unsigned> &order) {
@@ -799,18 +856,9 @@ static bool buildBarrierPipelineOrder(const GraphTables &tables,
         continue;
       }
 
-      if (std::optional<unsigned> readyIndex =
-              findReadyStageMatch(ready, stage, classes)) {
-        scheduleReadyNode(*readyIndex, tables, pending, ready, scheduled,
-                          order);
-        ++stageMatchesEmitted;
-        scheduledNode = true;
-        break;
-      }
-
-      if (hasUnscheduledStageMatch(stage, classes, scheduled)) {
-        scheduleReadyNode(/*readyIndex=*/0, tables, pending, ready, scheduled,
-                          order);
+      if (tryScheduleBarrierPipelineStage(tables, noInst, classes, stage,
+                                          pending, ready, scheduled, order,
+                                          stageMatchesEmitted)) {
         scheduledNode = true;
         break;
       }
@@ -918,11 +966,14 @@ static SmallVector<OrderCandidate, 4> buildBarrierPipelineCandidates(
 
   SmallVector<unsigned, 16> classes;
   classes.reserve(region.ops.size());
+  llvm::BitVector noInst(region.ops.size());
   bool sawMfma = false;
   bool sawMemory = false;
   for (auto [index, op] : llvm::enumerate(region.ops)) {
     unsigned cls = classifyBarrierPipelineOp(op, metrics[index]);
     classes.push_back(cls);
+    if (op->hasTrait<traits::NoMachineInst>())
+      noInst.set(static_cast<unsigned>(index));
     sawMfma |= hasPipelineClass(cls, BPCMFMA);
     sawMemory |= isMemoryPipelineClass(cls);
   }
@@ -936,7 +987,7 @@ static SmallVector<OrderCandidate, 4> buildBarrierPipelineCandidates(
        buildBarrierPipelineDescriptors(classes, arch, enableMemoryPipelines)) {
     OrderCandidate candidate;
     candidate.name = descriptor.name.str();
-    if (!buildBarrierPipelineOrder(tables, classes, descriptor,
+    if (!buildBarrierPipelineOrder(tables, noInst, classes, descriptor,
                                    candidate.order))
       continue;
     appendUniqueCandidate(candidates, std::move(candidate));
@@ -962,9 +1013,9 @@ tryBarrierPipelineSchedule(func::FuncOp func,
     return false;
 
   DependenceGraph graph = buildDependenceGraph(window.region);
-  SmallVector<OrderCandidate, 4> candidates =
-      buildBarrierPipelineCandidates(window.region, graph, *archResolution.arch,
-                                     modelConfig, window.insideUniformLoop);
+  SmallVector<OrderCandidate, 4> candidates = buildBarrierPipelineCandidates(
+      window.region, graph, *archResolution.arch, modelConfig,
+      /*enableMemoryPipelines=*/true);
   if (candidates.size() <= 1)
     return false;
 

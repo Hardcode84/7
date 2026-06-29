@@ -1630,6 +1630,7 @@ computeNodeMetrics(const ScheduleRegion &region, const GraphTables &tables,
   SmallVector<NodeMetrics, 16> metrics(region.ops.size());
   for (auto [index, op] : llvm::enumerate(region.ops)) {
     waveamdmachine::SchedClass cls = waveamdmachine::classifyOp(op);
+    metrics[index].noInst = cls == waveamdmachine::SchedClass::NoInst;
     metrics[index].latency = getModelLatency(arch, cls, modelConfig);
     metrics[index].fu = waveamdmachine::funit(arch, cls);
     if (waveamdmachine::hasMemoryValueLatency(op))
@@ -1683,6 +1684,8 @@ static bool isBetterReadyNode(SchedulePolicy policy, unsigned lhs, unsigned rhs,
                               ArrayRef<NodeMetrics> metrics) {
   const NodeMetrics &l = metrics[lhs];
   const NodeMetrics &r = metrics[rhs];
+  if (l.noInst != r.noInst)
+    return l.noInst;
   auto betterByCommon = [&]() {
     if (l.criticalPath != r.criticalPath)
       return l.criticalPath > r.criticalPath;
@@ -1788,6 +1791,8 @@ static int issueWindowScore(const NodeMetrics &metrics,
 static bool isBetterIssueReadyNode(unsigned lhs, unsigned rhs,
                                    ArrayRef<NodeMetrics> metrics,
                                    const IssueWindowState &state) {
+  if (metrics[lhs].noInst != metrics[rhs].noInst)
+    return metrics[lhs].noInst;
   int lhsScore = issueWindowScore(metrics[lhs], state);
   int rhsScore = issueWindowScore(metrics[rhs], state);
   if (lhsScore != rhsScore)
@@ -2537,6 +2542,8 @@ makeLocalIssueChoice(unsigned node, const GraphTables &tables,
 static bool isBetterLocalIssueChoice(const LocalIssueChoice &lhs,
                                      const LocalIssueChoice &rhs,
                                      ArrayRef<NodeMetrics> metrics) {
+  if (metrics[lhs.node].noInst != metrics[rhs.node].noInst)
+    return metrics[lhs.node].noInst;
   if (lhs.preview.issueCycle != rhs.preview.issueCycle)
     return lhs.preview.issueCycle < rhs.preview.issueCycle;
   if (lhs.preview.hazardWait != rhs.preview.hazardWait)
@@ -2883,6 +2890,11 @@ static bool isBarrierPipelineName(StringRef name) {
   return name.starts_with("barrier_pipeline_");
 }
 
+static bool isBarrierMemoryPipelineName(StringRef name) {
+  return name == "barrier_pipeline_ds_read_mfma" ||
+         name == "barrier_pipeline_write_read_mfma";
+}
+
 static bool isCmaDmaPlacementCandidate(const EvaluatedCandidate &candidate) {
   return isCmaDmaPlacementName(candidate.name);
 }
@@ -2930,6 +2942,8 @@ comparePressureViability(const EvaluatedCandidate &candidate,
 
 static int resourceTiePriority(const EvaluatedCandidate &candidate) {
   StringRef name(candidate.name);
+  if (isBarrierMemoryPipelineName(name))
+    return 3;
   if (isCmaDmaPlacementName(name))
     return 2;
   if (isBarrierPipelineName(name))
@@ -2965,6 +2979,8 @@ static int64_t adjustedScheduleCycles(const EvaluatedCandidate &candidate) {
 static bool counterBurstEligible(const EvaluatedCandidate &candidate,
                                  const EvaluatedCandidate &original) {
   if (candidate.name == "original" || original.metrics.counterBurstCycles == 0)
+    return true;
+  if (isBarrierPipelineName(candidate.name))
     return true;
   if (candidate.metrics.counterBurstCycles <
       original.metrics.counterBurstCycles)

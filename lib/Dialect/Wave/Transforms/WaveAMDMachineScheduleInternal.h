@@ -32,6 +32,7 @@ struct NodeMetrics {
   unsigned issueCount = 0;
   unsigned issueSlots = 0;
   unsigned cmaIssueCount = 0;
+  bool noInst = false;
   bool memory = false;
   bool reachesMemory = false;
   bool cmaIssue = false;

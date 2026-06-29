@@ -176,6 +176,149 @@ func.func @barriered_ds_read_mfma(
 // -----
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
+func.func @barriered_ds_tuple_mfma(
+    %b: !waveamdmachine.reg<vgpr, 4>,
+    %acc: !waveamdmachine.reg<vgpr, 4>,
+    %addr: !waveamdmachine.reg<vgpr, 1>,
+    %cond: !waveamdmachine.reg<scc, 1>,
+    %tok: !waveamdmachine.mem.token) {
+  waveamdmachine.uniform_loop if %cond : !waveamdmachine.reg<scc, 1> {
+    %guard = waveamdmachine.v_add_u32 %addr, %addr
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+    %btok = waveamdmachine.s_barrier %tok
+        : (!waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+    %ld0, %t0 = waveamdmachine.ds_load_b64 %addr after %btok
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+          -> (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.mem.token)
+    %ld1, %t1 = waveamdmachine.ds_load_b64 %addr after %t0 offset 64
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+          -> (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.mem.token)
+    %ld2, %t2 = waveamdmachine.ds_load_b64 %addr after %t1 offset 128
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+          -> (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.mem.token)
+    %ld3, %t3 = waveamdmachine.ds_load_b64 %addr after %t2 offset 192
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+          -> (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.mem.token)
+    %ld4, %t4 = waveamdmachine.ds_load_b64 %addr after %t3 offset 256
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+          -> (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.mem.token)
+    %ld5, %t5 = waveamdmachine.ds_load_b64 %addr after %t4 offset 320
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+          -> (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.mem.token)
+    %lhs0 = waveamdmachine.tuple_from_elements %ld0, %ld1
+        : (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vgpr, 2>)
+          -> !waveamdmachine.reg<vgpr, 4>
+    %lhs1 = waveamdmachine.tuple_from_elements %ld2, %ld3
+        : (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vgpr, 2>)
+          -> !waveamdmachine.reg<vgpr, 4>
+    %lhs2 = waveamdmachine.tuple_from_elements %ld4, %ld5
+        : (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vgpr, 2>)
+          -> !waveamdmachine.reg<vgpr, 4>
+    %c1 = waveamdmachine.mfma_f32_16x16x32_f16 %lhs0, %b, %acc
+        : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
+           !waveamdmachine.reg<vgpr, 4>) -> !waveamdmachine.reg<vgpr, 4>
+    %c2 = waveamdmachine.mfma_f32_16x16x32_f16 %lhs1, %b, %c1
+        : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
+           !waveamdmachine.reg<vgpr, 4>) -> !waveamdmachine.reg<vgpr, 4>
+    %c3 = waveamdmachine.mfma_f32_16x16x32_f16 %lhs2, %b, %c2
+        : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
+           !waveamdmachine.reg<vgpr, 4>) -> !waveamdmachine.reg<vgpr, 4>
+    waveamdmachine.continue_if %cond : !waveamdmachine.reg<scc, 1>
+  }
+  return
+}
+}
+
+// APPLY-LABEL: func.func @barriered_ds_tuple_mfma
+// APPLY: [[BTOK:%.*]] = waveamdmachine.s_barrier
+// APPLY: [[LD0:%.*]], [[T0:%.*]] = waveamdmachine.ds_load_b64 {{.*}} after [[BTOK]]
+// APPLY: [[LD1:%.*]], [[T1:%.*]] = waveamdmachine.ds_load_b64 {{.*}} after [[T0]]
+// APPLY: [[LD2:%.*]], [[T2:%.*]] = waveamdmachine.ds_load_b64 {{.*}} after [[T1]]
+// APPLY: [[LD3:%.*]], [[T3:%.*]] = waveamdmachine.ds_load_b64 {{.*}} after [[T2]]
+// APPLY-NOT: waveamdmachine.ds_load_b64
+// APPLY: [[LHS0:%.*]] = waveamdmachine.tuple_from_elements [[LD0]], [[LD1]]
+// APPLY: [[C1:%.*]] = waveamdmachine.mfma_f32_16x16x32_f16 [[LHS0]]
+// APPLY: [[LD4:%.*]], [[T4:%.*]] = waveamdmachine.ds_load_b64 {{.*}} after [[T3]]
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
+func.func @wait_barrier_post_ds_tuple_mfma(
+    %b: !waveamdmachine.reg<vgpr, 4>,
+    %acc: !waveamdmachine.reg<vgpr, 4>,
+    %addr: !waveamdmachine.reg<vgpr, 1>,
+    %tok: !waveamdmachine.mem.token) {
+  waveamdmachine.wait %tok : (!waveamdmachine.mem.token) -> ()
+  %btok = waveamdmachine.s_barrier %tok
+      : (!waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+  %ld0, %t0 = waveamdmachine.ds_load_b64 %addr after %btok
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+        -> (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.mem.token)
+  %ld1, %t1 = waveamdmachine.ds_load_b64 %addr after %t0 offset 64
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+        -> (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.mem.token)
+  %ld2, %t2 = waveamdmachine.ds_load_b64 %addr after %t1 offset 128
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+        -> (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.mem.token)
+  %ld3, %t3 = waveamdmachine.ds_load_b64 %addr after %t2 offset 192
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+        -> (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.mem.token)
+  %ld4, %t4 = waveamdmachine.ds_load_b64 %addr after %t3 offset 256
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+        -> (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.mem.token)
+  %ld5, %t5 = waveamdmachine.ds_load_b64 %addr after %t4 offset 320
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+        -> (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.mem.token)
+  %lhs0 = waveamdmachine.tuple_from_elements %ld0, %ld1
+      : (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vgpr, 2>)
+        -> !waveamdmachine.reg<vgpr, 4>
+  %lhs1 = waveamdmachine.tuple_from_elements %ld2, %ld3
+      : (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vgpr, 2>)
+        -> !waveamdmachine.reg<vgpr, 4>
+  %lhs2 = waveamdmachine.tuple_from_elements %ld4, %ld5
+      : (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vgpr, 2>)
+        -> !waveamdmachine.reg<vgpr, 4>
+  %c1 = waveamdmachine.mfma_f32_16x16x32_f16 %lhs0, %b, %acc
+      : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
+         !waveamdmachine.reg<vgpr, 4>) -> !waveamdmachine.reg<vgpr, 4>
+  %c2 = waveamdmachine.mfma_f32_16x16x32_f16 %lhs1, %b, %c1
+      : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
+         !waveamdmachine.reg<vgpr, 4>) -> !waveamdmachine.reg<vgpr, 4>
+  %c3 = waveamdmachine.mfma_f32_16x16x32_f16 %lhs2, %b, %c2
+      : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
+         !waveamdmachine.reg<vgpr, 4>) -> !waveamdmachine.reg<vgpr, 4>
+  return
+}
+}
+
+// APPLY-LABEL: func.func @wait_barrier_post_ds_tuple_mfma
+// APPLY: waveamdmachine.wait
+// APPLY-NEXT: [[BTOK:%.*]] = waveamdmachine.s_barrier
+// APPLY: [[LD0:%.*]], [[T0:%.*]] = waveamdmachine.ds_load_b64 {{.*}} after [[BTOK]]
+// APPLY: [[LD1:%.*]], [[T1:%.*]] = waveamdmachine.ds_load_b64 {{.*}} after [[T0]]
+// APPLY: [[LD2:%.*]], [[T2:%.*]] = waveamdmachine.ds_load_b64 {{.*}} after [[T1]]
+// APPLY: [[LD3:%.*]], [[T3:%.*]] = waveamdmachine.ds_load_b64 {{.*}} after [[T2]]
+// APPLY-NOT: waveamdmachine.ds_load_b64
+// APPLY: [[LHS0:%.*]] = waveamdmachine.tuple_from_elements [[LD0]], [[LD1]]
+// APPLY: [[C1:%.*]] = waveamdmachine.mfma_f32_16x16x32_f16 [[LHS0]]
+// APPLY: [[LD4:%.*]], [[T4:%.*]] = waveamdmachine.ds_load_b64 {{.*}} after [[T3]]
+
+// NOHOIST-LABEL: func.func @wait_barrier_post_ds_tuple_mfma
+// NOHOIST: waveamdmachine.wait
+// NOHOIST-NEXT: [[BTOK:%.*]] = waveamdmachine.s_barrier
+// NOHOIST: [[LD0:%.*]], [[T0:%.*]] = waveamdmachine.ds_load_b64 {{.*}} after [[BTOK]]
+// NOHOIST: [[LD1:%.*]], [[T1:%.*]] = waveamdmachine.ds_load_b64 {{.*}} after [[T0]]
+// NOHOIST: [[LD2:%.*]], [[T2:%.*]] = waveamdmachine.ds_load_b64 {{.*}} after [[T1]]
+// NOHOIST: [[LD3:%.*]], [[T3:%.*]] = waveamdmachine.ds_load_b64 {{.*}} after [[T2]]
+// NOHOIST: [[LD4:%.*]], [[T4:%.*]] = waveamdmachine.ds_load_b64 {{.*}} after [[T3]]
+// NOHOIST: [[LD5:%.*]], {{%.*}} = waveamdmachine.ds_load_b64 {{.*}} after [[T4]]
+// NOHOIST: [[LHS0:%.*]] = waveamdmachine.tuple_from_elements [[LD0]], [[LD1]]
+// NOHOIST: [[C1:%.*]] = waveamdmachine.mfma_f32_16x16x32_f16 [[LHS0]]
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 func.func @barriered_loop_carried_memory_consumer(
     %lhs_init: !waveamdmachine.reg<vgpr, 4>,
     %rhs_init: !waveamdmachine.reg<vgpr, 4>,

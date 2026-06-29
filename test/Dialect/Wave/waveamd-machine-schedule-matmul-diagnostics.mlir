@@ -35,7 +35,7 @@ func.func @matmul_loop_candidate(%off: !waveamdmachine.reg<vgpr, 1>,
 
 // DIAG: waveamd-machine-schedule-report candidate func=matmul_loop_candidate region=1 name=original cycles=86 delta=0 issued_ops=6 max_vgpr=11 max_sgpr=1 order=0,1,2,3,4,5,6
 // DIAG: waveamd-machine-schedule-report candidate func=matmul_loop_candidate region=1 name=local_issue cycles=85 delta=-1
-// DIAG: waveamd-machine-schedule-report selected func=matmul_loop_candidate region=1 name=critical_path original_cycles=86 selected_cycles=85 delta=-1 action=keep
+// DIAG: waveamd-machine-schedule-report selected func=matmul_loop_candidate region=1 name=issue_window original_cycles=86 selected_cycles=85 delta=-1 action=keep
 
 // -----
 
@@ -190,5 +190,5 @@ func.func @late_dma_overlap_candidate(%a: !waveamdmachine.reg<vgpr, 4>,
 }
 
 // DIAG-NOT: name=lds_dma_place
-// DIAG: waveamd-machine-schedule-report candidate func=late_dma_overlap_candidate region=0 name=local_issue cycles=172 delta=-76
+// DIAG: waveamd-machine-schedule-report candidate func=late_dma_overlap_candidate region=0 name=issue_window cycles=172 delta=-76
 // DIAG: waveamd-machine-schedule-report selected func=late_dma_overlap_candidate region=0 name=original original_cycles=248 selected_cycles=248 delta=0 selected_counter_burst_cycles=40 action=keep
