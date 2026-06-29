@@ -15,6 +15,7 @@
 # CHECK: matmul_dynamic_lds_forwarding: ok
 # CHECK: matmul_f16_dma_buffer_count: ok
 # CHECK: matmul_dma_sim_trip_count: ok
+# CHECK: matmul_v9_perf_golden_profile: ok
 # CHECK: calibration_scheduler_region_cap: ok
 # CHECK: matmul_pingpong_removed: ok
 
@@ -842,6 +843,140 @@ def check_matmul_dma_sim_trip_count(matmul) -> None:
     print("matmul_dma_sim_trip_count: ok")
 
 
+def make_v9_perf_golden_args(matmul) -> argparse.Namespace:
+    return matmul.parse_args(
+        [
+            "--chip=gfx950",
+            "--kernel-profile=v9-4096-original-wave",
+            "--skip-hw",
+            "--no-check",
+        ]
+    )
+
+
+def check_v9_profile_shape(matmul, args: argparse.Namespace) -> None:
+    require(
+        "matmul_v9_perf_golden_profile",
+        args.example == "v9-perf-golden",
+        "profile should select v9 golden IR",
+    )
+    require(
+        "matmul_v9_perf_golden_profile",
+        args.m == 4096 and args.n == 4096 and args.k == 4096,
+        "bad v9 default shape",
+    )
+    require(
+        "matmul_v9_perf_golden_profile",
+        args.bm == 4
+        and args.bn == 2
+        and args.wave_m_tiles == 4
+        and args.wave_n_tiles == 8
+        and args.wave_k_tiles == 2,
+        "bad v9 tile shape",
+    )
+    require(
+        "matmul_v9_perf_golden_profile",
+        matmul.kernel_name(args) == "v9_beyond_hotloop",
+        "bad v9 kernel symbol",
+    )
+    require(
+        "matmul_v9_perf_golden_profile",
+        matmul.kernel_abi(args) == "v9-golden",
+        "bad v9 kernel ABI",
+    )
+
+
+def check_v9_profile_counts(matmul, args: argparse.Namespace) -> None:
+    require(
+        "matmul_v9_perf_golden_profile",
+        matmul.compute_dynamic_lds_bytes(args) == 0,
+        "v9 golden has static LDS",
+    )
+    require(
+        "matmul_v9_perf_golden_profile",
+        matmul.compute_kernel_arg_trip_count(args) == 0,
+        "v9 golden should not expose generated-matmul trip arg",
+    )
+    require(
+        "matmul_v9_perf_golden_profile",
+        matmul.compute_sim_loop_trip_count(args) == 31,
+        "v9 golden should report step-2 loop body count",
+    )
+    require(
+        "matmul_v9_perf_golden_profile",
+        matmul.compute_report_trip_count(args) == 31,
+        "v9 golden report count should use natural loop count",
+    )
+
+
+def check_v9_source_isolation(matmul, args: argparse.Namespace) -> None:
+    source = matmul.generate_kernel_module(args, "gfx950")
+    require(
+        "matmul_v9_perf_golden_profile",
+        "func.func @v9_beyond_hotloop" in source
+        and "gpu.module @kernels" not in source,
+        "v9 source should be isolated for wave-translate",
+    )
+
+
+def check_v9_runner_forwarding(matmul, args: argparse.Namespace) -> None:
+    captured: list[list[str]] = []
+    old_run = matmul.run
+    try:
+
+        def fake_run(cmd, env=None):
+            captured.append(cmd)
+            return "per_launch_cycles_wallclock: 1\nper_launch_us: 1.0\n"
+
+        matmul.run = fake_run
+        matmul.run_hw(Path("runner"), Path("kernel.hsaco"), args, "/tmp")
+    finally:
+        matmul.run = old_run
+    require("matmul_v9_perf_golden_profile", bool(captured), "runner not called")
+    cmd = captured[0]
+    require(
+        "matmul_v9_perf_golden_profile",
+        "--kernel-abi" in cmd and cmd[cmd.index("--kernel-abi") + 1] == "v9-golden",
+        "runner should receive v9 ABI",
+    )
+    require(
+        "matmul_v9_perf_golden_profile",
+        cmd[-1] == "v9_beyond_hotloop",
+        "runner should launch v9 symbol",
+    )
+    require(
+        "matmul_v9_perf_golden_profile",
+        "--dynamic-lds" in cmd and cmd[cmd.index("--dynamic-lds") + 1] == "0",
+        "v9 runner should not request dynamic LDS",
+    )
+
+
+def check_v9_validation(matmul, args: argparse.Namespace) -> None:
+    bad_k_values = vars(args).copy()
+    bad_k_values["k"] = 8192
+    bad_k = argparse.Namespace(**bad_k_values)
+    try:
+        matmul.validate_args(bad_k)
+    except SystemExit:
+        pass
+    else:
+        require(
+            "matmul_v9_perf_golden_profile",
+            False,
+            "v9 golden should reject non-frozen K",
+        )
+
+
+def check_matmul_v9_perf_golden_profile(matmul) -> None:
+    args = make_v9_perf_golden_args(matmul)
+    check_v9_profile_shape(matmul, args)
+    check_v9_profile_counts(matmul, args)
+    check_v9_source_isolation(matmul, args)
+    check_v9_runner_forwarding(matmul, args)
+    check_v9_validation(matmul, args)
+    print("matmul_v9_perf_golden_profile: ok")
+
+
 def check_calibration_scheduler_region_cap(matmul, fa) -> None:
     matmul_args = matmul.parse_args(["--chip=gfx950", "--skip-hw"])
     matmul_variant = matmul.VARIANTS["scheduled"]
@@ -900,6 +1035,7 @@ def main() -> int:
     check_matmul_dynamic_lds_forwarding(matmul)
     check_matmul_f16_dma_buffer_count(matmul)
     check_matmul_dma_sim_trip_count(matmul)
+    check_matmul_v9_perf_golden_profile(matmul)
     check_calibration_scheduler_region_cap(matmul, fa)
     try:
         matmul.parse_variants("pingpong")

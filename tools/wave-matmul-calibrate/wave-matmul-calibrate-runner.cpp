@@ -22,6 +22,7 @@ namespace {
 
 enum class CType { F32, F16 };
 enum class InputType { F16, BF16, MXFP4 };
+enum class KernelABI { Matmul, V9Golden };
 enum class ScaleLayout { Canonical, TensileLite };
 
 struct Args {
@@ -38,6 +39,7 @@ struct Args {
   int waveSize = 32;
   InputType inputType = InputType::F16;
   CType cType = CType::F32;
+  KernelABI kernelABI = KernelABI::Matmul;
   int iters = 1000;
   int warmupIters = 10;
   int dynamicLdsBytes = 0;
@@ -68,6 +70,7 @@ static void usage() {
       "  --wave-size N          lanes per wave (default 32)\n"
       "  --input-type f16|bf16|mxfp4  input element type (default f16)\n"
       "  --c-type f32|f16       output element type (default f32)\n"
+      "  --kernel-abi matmul|v9-golden  kernel argument ABI (default matmul)\n"
       "  --dynamic-lds N        dynamic LDS bytes (default 0)\n"
       "  --iters N              launch iterations (default 1000)\n"
       "  --warmup N             warmup launches (default 10)\n"
@@ -142,6 +145,17 @@ static void setScaleLayout(Args &a, const char *v) {
   }
   die("bad --scale-layout; expected canonical or tensilelite");
 }
+static void setKernelABI(Args &a, const char *v) {
+  if (std::strcmp(v, "matmul") == 0) {
+    a.kernelABI = KernelABI::Matmul;
+    return;
+  }
+  if (std::strcmp(v, "v9-golden") == 0) {
+    a.kernelABI = KernelABI::V9Golden;
+    return;
+  }
+  die("bad --kernel-abi; expected matmul or v9-golden");
+}
 static void setIters(Args &a, const char *v) { a.iters = parseInt(v); }
 static void setWarmup(Args &a, const char *v) { a.warmupIters = parseInt(v); }
 static void setSeed(Args &a, const char *v) { a.seed = parseInt(v); }
@@ -161,6 +175,7 @@ static constexpr FlagHandler kFlags[] = {
     {"--wave-size", setWaveSize},
     {"--input-type", setInputType},
     {"--c-type", setCType},
+    {"--kernel-abi", setKernelABI},
     {"--scale-layout", setScaleLayout},
     {"--dynamic-lds", setDynamicLds},
     {"--iters", setIters},
@@ -225,6 +240,26 @@ static void requirePositive(int v, const char *what) {
     die(what);
 }
 
+static bool hasV9GoldenTileShape(const Args &a) {
+  return a.bm == 4 && a.bn == 2 && a.waveMTiles == 4 && a.waveNTiles == 8 &&
+         a.waveKTiles == 2;
+}
+
+static void validateV9GoldenArgs(const Args &a) {
+  if (a.kernelABI != KernelABI::V9Golden)
+    return;
+  if (a.inputType != InputType::F16)
+    die("v9 golden ABI requires f16 input");
+  if (a.cType != CType::F16)
+    die("v9 golden ABI requires f16 output");
+  if (a.waveSize != 64)
+    die("v9 golden ABI requires wave-size 64");
+  if (a.k != 4096)
+    die("v9 golden ABI is frozen for k=4096");
+  if (!hasV9GoldenTileShape(a))
+    die("v9 golden ABI requires the v9 256x256x64 tile shape");
+}
+
 static void validateArgs(const Args &a) {
   requirePositive(a.m, "m must be positive");
   requirePositive(a.n, "n must be positive");
@@ -242,6 +277,7 @@ static void validateArgs(const Args &a) {
   if (a.scaleLayout == ScaleLayout::TensileLite &&
       a.inputType != InputType::MXFP4)
     die("tensilelite scale layout requires MXFP4 input");
+  validateV9GoldenArgs(a);
 }
 
 static Args parseArgs(int argc, char **argv) {
@@ -425,6 +461,38 @@ static void validateOutput(int elements, const Args &a,
               worstIdx);
 }
 
+template <typename ReadFn>
+static void validateRowMajorOutput(int elements, const Args &a,
+                                   const HostInputs &inputs, ReadFn readValue) {
+  if (elements != a.m * a.n)
+    die("row-major output check expects dense MxN output");
+  double worst = 0.0;
+  int worstIdx = 0;
+  for (int m = 0; m < a.m; ++m) {
+    for (int n = 0; n < a.n; ++n) {
+      int index = m * a.n + n;
+      double got = static_cast<double>(readValue(index));
+      double exp =
+          roundExpectedOutput(computeExpectedElement(inputs, a, m, n), a.cType);
+      double diff = std::fabs(got - exp);
+      if (diff > worst) {
+        worst = diff;
+        worstIdx = index;
+      }
+      double limit = 1.0e-2 + 1.0e-3 * std::fabs(exp);
+      if (diff > limit) {
+        std::fprintf(stderr,
+                     "output_check: failed m=%d n=%d expected=%.6f "
+                     "got=%.6f abs_diff=%.6f tolerance=%.6f\n",
+                     m, n, exp, got, diff, limit);
+        std::exit(1);
+      }
+    }
+  }
+  std::printf("output_check: passed max_abs_diff=%.6f index=%d\n", worst,
+              worstIdx);
+}
+
 static const char *getCTypeName(CType type) {
   return type == CType::F16 ? "f16" : "f32";
 }
@@ -439,6 +507,10 @@ static const char *getInputTypeName(InputType type) {
     return "mxfp4";
   }
   die("unknown input type");
+}
+
+static const char *getKernelABIName(KernelABI abi) {
+  return abi == KernelABI::V9Golden ? "v9-golden" : "matmul";
 }
 
 static const char *getScaleLayoutName(ScaleLayout layout) {
@@ -458,6 +530,10 @@ static uint16_t oneBits(InputType type) {
 }
 
 static bool isMXFP4(InputType type) { return type == InputType::MXFP4; }
+
+static bool isV9Golden(const Args &a) {
+  return a.kernelABI == KernelABI::V9Golden;
+}
 
 static int mmaKTile(const Args &a) {
   if (isMXFP4(a.inputType))
@@ -649,10 +725,24 @@ struct HostInputs {
   std::vector<uint8_t> bKernelScale;
 };
 
+static int inputRows(const Args &a, bool isA) {
+  if (isA)
+    return a.m;
+  return isV9Golden(a) ? a.k : a.n;
+}
+
+static int inputCols(const Args &a, bool isA) {
+  if (isA)
+    return a.k;
+  return isV9Golden(a) ? a.n : a.k;
+}
+
 static HostInputs makeHostInputs(const Args &a) {
   HostInputs inputs;
-  inputs.a = makeInputBytes(a.m, a.k, a.inputType, a.seed, 0, a.allOnes);
-  inputs.b = makeInputBytes(a.n, a.k, a.inputType, a.seed, 1, a.allOnes);
+  inputs.a = makeInputBytes(inputRows(a, true), inputCols(a, true), a.inputType,
+                            a.seed, 0, a.allOnes);
+  inputs.b = makeInputBytes(inputRows(a, false), inputCols(a, false),
+                            a.inputType, a.seed, 1, a.allOnes);
   if (isMXFP4(a.inputType)) {
     inputs.aScale = makeMXFP4ScaleBytes(a.m, a.k, a.seed, 2, a.allOnes);
     inputs.bScale = makeMXFP4ScaleBytes(a.n, a.k, a.seed, 3, a.allOnes);
@@ -689,7 +779,9 @@ static float readInputElement(const HostInputs &inputs, const Args &a, bool isA,
                               int row, int kIndex) {
   int rows = isA ? a.m : a.n;
   const std::vector<uint8_t> &bytes = isA ? inputs.a : inputs.b;
-  size_t element = static_cast<size_t>(row) * a.k + kIndex;
+  size_t element = !isA && isV9Golden(a)
+                       ? static_cast<size_t>(kIndex) * a.n + row
+                       : static_cast<size_t>(row) * a.k + kIndex;
   if (!isMXFP4(a.inputType))
     return readDenseInput(bytes, element, a.inputType);
 
@@ -770,6 +862,11 @@ static void copyAndCheckOutput(void *deviceC, size_t cBytes, int cElements,
     std::vector<uint16_t> hostC(cElements);
     checkHip(hipMemcpy(hostC.data(), deviceC, cBytes, hipMemcpyDeviceToHost),
              "hipMemcpy C");
+    if (isV9Golden(a)) {
+      validateRowMajorOutput(cElements, a, inputs,
+                             [&](int i) { return halfToFloat(hostC[i]); });
+      return;
+    }
     validateOutput(cElements, a, inputs,
                    [&](int i) { return halfToFloat(hostC[i]); });
     return;
@@ -777,6 +874,11 @@ static void copyAndCheckOutput(void *deviceC, size_t cBytes, int cElements,
   std::vector<float> hostC(cElements);
   checkHip(hipMemcpy(hostC.data(), deviceC, cBytes, hipMemcpyDeviceToHost),
            "hipMemcpy C");
+  if (isV9Golden(a)) {
+    validateRowMajorOutput(cElements, a, inputs,
+                           [&](int i) { return hostC[i]; });
+    return;
+  }
   validateOutput(cElements, a, inputs, [&](int i) { return hostC[i]; });
 }
 
@@ -787,10 +889,14 @@ int main(int argc, char **argv) {
 
   int blocksX = divExact(a.m, 16 * a.bm * a.waveMTiles, "bad M blocking");
   int blocksY = divExact(a.n, 16 * a.bn * a.waveNTiles, "bad N blocking");
+  int gridX = isV9Golden(a) ? blocksX * blocksY : blocksX;
+  int gridY = isV9Golden(a) ? 1 : blocksY;
   int blockThreads = a.bm * a.bn * a.waveSize;
   int virtualKSteps =
       divExact(a.k, mmaKTile(a) * a.waveKTiles, "bad K blocking");
   int tripCount = std::max(virtualKSteps - 1, 0);
+  int displayTripCount =
+      isV9Golden(a) ? std::max((virtualKSteps - 2) / 2, 0) : tripCount;
 
   hipDeviceProp_t props;
   checkHip(hipGetDeviceProperties(&props, 0), "hipGetDeviceProperties");
@@ -804,16 +910,24 @@ int main(int argc, char **argv) {
 
   HostInputs inputs = makeHostInputs(a);
   DeviceBuffers buffers = prepareDeviceBuffers(a, inputs);
+  int strideAM = a.k;
+  int strideBK = a.n;
+  int strideCM = a.n;
   std::array<void *, 4> kernelArgs = {&buffers.deviceA, &buffers.deviceB,
                                       &buffers.deviceC, &tripCount};
   std::array<void *, 6> mxfp4KernelArgs = {
       &buffers.deviceA,      &buffers.deviceB,      &buffers.deviceC,
       &buffers.deviceAScale, &buffers.deviceBScale, &tripCount};
-  void **activeKernelArgs =
-      isMXFP4(a.inputType) ? mxfp4KernelArgs.data() : kernelArgs.data();
+  std::array<void *, 8> v9KernelArgs = {
+      &buffers.deviceA, &buffers.deviceB, &buffers.deviceC, &a.m, &a.n,
+      &strideAM,        &strideBK,        &strideCM};
+  void **activeKernelArgs = v9KernelArgs.data();
+  if (!isV9Golden(a))
+    activeKernelArgs =
+        isMXFP4(a.inputType) ? mxfp4KernelArgs.data() : kernelArgs.data();
 
   for (int i = 0; i < a.warmupIters; ++i)
-    checkHip(hipModuleLaunchKernel(kfn, blocksX, blocksY, 1, blockThreads, 1, 1,
+    checkHip(hipModuleLaunchKernel(kfn, gridX, gridY, 1, blockThreads, 1, 1,
                                    a.dynamicLdsBytes, nullptr, activeKernelArgs,
                                    nullptr),
              "warmup launch");
@@ -824,7 +938,7 @@ int main(int argc, char **argv) {
   checkHip(hipEventCreate(&stop), "event create stop");
   checkHip(hipEventRecord(start, nullptr), "event record start");
   for (int i = 0; i < a.iters; ++i)
-    checkHip(hipModuleLaunchKernel(kfn, blocksX, blocksY, 1, blockThreads, 1, 1,
+    checkHip(hipModuleLaunchKernel(kfn, gridX, gridY, 1, blockThreads, 1, 1,
                                    a.dynamicLdsBytes, nullptr, activeKernelArgs,
                                    nullptr),
              "timed launch");
@@ -841,14 +955,15 @@ int main(int argc, char **argv) {
   std::printf("kernel: %s\n", a.kernel);
   std::printf("shape: m=%d n=%d k=%d bm=%d bn=%d wave_m_tiles=%d "
               "wave_n_tiles=%d wave_k_tiles=%d wave_size=%d input_type=%s "
-              "c_type=%s scale_layout=%s input_mode=%s\n",
+              "c_type=%s kernel_abi=%s scale_layout=%s input_mode=%s\n",
               a.m, a.n, a.k, a.bm, a.bn, a.waveMTiles, a.waveNTiles,
               a.waveKTiles, a.waveSize, getInputTypeName(a.inputType),
-              getCTypeName(a.cType), getScaleLayoutName(a.scaleLayout),
+              getCTypeName(a.cType), getKernelABIName(a.kernelABI),
+              getScaleLayoutName(a.scaleLayout),
               a.allOnes ? "all-ones" : "random");
-  std::printf("grid: %d,%d,1 block: %d,1,1 waves_per_workgroup=%d\n", blocksX,
-              blocksY, blockThreads, a.bm * a.bn);
-  std::printf("loop_trip_count: %d\n", tripCount);
+  std::printf("grid: %d,%d,1 block: %d,1,1 waves_per_workgroup=%d\n", gridX,
+              gridY, blockThreads, a.bm * a.bn);
+  std::printf("loop_trip_count: %d\n", displayTripCount);
   std::printf("iters: %d\n", a.iters);
   std::printf("total_ms: %.3f\n", elapsedMs);
   std::printf("per_launch_us: %.3f\n", perLaunchUs);

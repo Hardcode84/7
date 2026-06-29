@@ -23,6 +23,9 @@ EXAMPLE = REPO_ROOT / "examples/wave/wmma_matmul_tiled.py"
 TENSILELITE_EXAMPLE = REPO_ROOT / "examples/wave/tensilelite_mxfp4_subtile.py"
 RUNNER_SRC = REPO_ROOT / "tools/wave-matmul-calibrate/wave-matmul-calibrate-runner.cpp"
 KERNEL_NAME = "wmma_f16_matmul_tiled"
+V9_GOLDEN_NAME = "v9_4096.original.wave"
+V9_GOLDEN_KERNEL_NAME = "v9_beyond_hotloop"
+V9_GOLDEN_SOURCE = REPO_ROOT / "test/PerfGolden/Inputs" / f"{V9_GOLDEN_NAME}.mlir"
 STATIC_LDS_LIMIT = 64 * 1024
 DEFAULT_SIM_TRIP_COUNT = 32
 
@@ -119,6 +122,25 @@ KERNEL_PROFILES: dict[str, dict[str, ProfileValue]] = {
         "cta_swizzle_xcds": 8,
         "cta_group_m": 4,
     },
+    "v9-4096-original-wave": {
+        "example": "v9-perf-golden",
+        "m": 4096,
+        "n": 4096,
+        "k": 4096,
+        "bm": 4,
+        "bn": 2,
+        "wave_m_tiles": 4,
+        "wave_n_tiles": 8,
+        "wave_k_tiles": 2,
+        "target_waves": 2,
+        "use_buffer": True,
+        "use_dma_lds": True,
+        "matrix_intrinsic": "mfma_gfx950",
+        "input_type": "f16",
+        "output_type": "f16",
+        "cta_swizzle_xcds": 8,
+        "cta_group_m": 4,
+    },
 }
 
 
@@ -203,6 +225,18 @@ def selected_example(args: argparse.Namespace) -> str:
     return getattr(args, "example", "matmul")
 
 
+def is_v9_perf_golden(args: argparse.Namespace) -> bool:
+    return selected_example(args) == "v9-perf-golden"
+
+
+def kernel_name(args: argparse.Namespace) -> str:
+    return V9_GOLDEN_KERNEL_NAME if is_v9_perf_golden(args) else KERNEL_NAME
+
+
+def kernel_abi(args: argparse.Namespace) -> str:
+    return "v9-golden" if is_v9_perf_golden(args) else "matmul"
+
+
 def selected_scale_input(args: argparse.Namespace) -> str:
     return getattr(args, "scale_input", "canonical")
 
@@ -281,10 +315,28 @@ def build_matmul_example_args(args: argparse.Namespace, chip: str) -> list[str]:
 def build_example_args(args: argparse.Namespace, chip: str) -> list[str]:
     if selected_example(args) == "tensilelite-subtile":
         return build_tensilelite_example_args(args, chip)
+    if is_v9_perf_golden(args):
+        sys.exit("--example=v9-perf-golden uses checked-in IR, not a generator")
     return build_matmul_example_args(args, chip)
 
 
+def isolate_v9_golden_module(chip: str) -> str:
+    text = V9_GOLDEN_SOURCE.read_text()
+    match = re.search(rf"(func\.func @{V9_GOLDEN_KERNEL_NAME}.*?\n    \}})", text, re.S)
+    if not match:
+        sys.exit(f"could not isolate {V9_GOLDEN_KERNEL_NAME} from {V9_GOLDEN_SOURCE}")
+    kernel = re.sub(r"^    ", "  ", match.group(1).lstrip(), flags=re.M)
+    target = f"amdgcn-amd-amdhsa--{chip}"
+    return (
+        f'module attributes {{waveamdmachine.target = "{target}"}} '
+        f"{{\n{kernel}\n}}\n"
+    )
+
+
 def generate_kernel_module(args: argparse.Namespace, chip: str) -> str:
+    if is_v9_perf_golden(args):
+        return isolate_v9_golden_module(chip)
+
     env = os.environ.copy()
     package_path = args.build_dir / "python_packages/wave_mlir"
     env["PYTHONPATH"] = (
@@ -596,12 +648,22 @@ def compute_virtual_k_steps(args: argparse.Namespace) -> int:
 
 
 def compute_kernel_arg_trip_count(args: argparse.Namespace) -> int:
+    if is_v9_perf_golden(args):
+        return 0
     virtual_k_steps = compute_virtual_k_steps(args)
     return max(virtual_k_steps - 1, 0)
 
 
+def kernel_arg_trip_count_text(args: argparse.Namespace) -> str:
+    if is_v9_perf_golden(args):
+        return "n/a"
+    return str(compute_kernel_arg_trip_count(args))
+
+
 def compute_sim_loop_trip_count(args: argparse.Namespace) -> int:
     virtual_k_steps = compute_virtual_k_steps(args)
+    if is_v9_perf_golden(args):
+        return max((virtual_k_steps - 2) // 2, 0)
     if (
         selected_example(args) == "tensilelite-subtile"
         and selected_scale_input(args) == "tensilelite"
@@ -710,6 +772,8 @@ def compute_lds_bytes(args: argparse.Namespace) -> int:
 
 
 def compute_dynamic_lds_bytes(args: argparse.Namespace) -> int:
+    if is_v9_perf_golden(args):
+        return 0
     lds_bytes = compute_lds_bytes(args)
     return lds_bytes if lds_bytes >= STATIC_LDS_LIMIT else 0
 
@@ -724,7 +788,7 @@ def run_sim_reports(
         text = run(
             [
                 str(wave_sim),
-                f"--func={KERNEL_NAME}",
+                f"--func={kernel_name(args)}",
                 f"--waves={waves}",
                 f"--simds={simds}",
                 f"--start-delay={delay}",
@@ -792,6 +856,8 @@ def run_hw(
         args.input_type,
         "--c-type",
         args.output_type,
+        "--kernel-abi",
+        kernel_abi(args),
         "--dynamic-lds",
         str(compute_dynamic_lds_bytes(args)),
         "--iters",
@@ -807,7 +873,7 @@ def run_hw(
         cmd.append("--all-ones")
     if args.no_check:
         cmd.append("--no-check")
-    cmd += [str(hsaco), KERNEL_NAME]
+    cmd += [str(hsaco), kernel_name(args)]
     stdout = run(cmd, env=env)
     sys.stdout.write(stdout)
     return parse_hw(stdout, check_output=not args.no_check)
@@ -916,7 +982,7 @@ def add_kernel_shape_args(ap: argparse.ArgumentParser) -> None:
     ap.add_argument("--chip", default="", help="gfx target; default from rocminfo")
     ap.add_argument(
         "--example",
-        choices=("matmul", "tensilelite-subtile"),
+        choices=("matmul", "tensilelite-subtile", "v9-perf-golden"),
         default="matmul",
         help="kernel generator to benchmark",
     )
@@ -1102,12 +1168,50 @@ def _validate_tensilelite_example_args(args: argparse.Namespace) -> None:
         )
 
 
+def _validate_v9_perf_golden_args(args: argparse.Namespace) -> None:
+    _require_arg(args.chip == "gfx950", "--example=v9-perf-golden requires gfx950")
+    _require_arg(
+        args.input_type == "f16",
+        "--example=v9-perf-golden requires --input-type=f16",
+    )
+    _require_arg(
+        args.output_type == "f16",
+        "--example=v9-perf-golden requires --output-type=f16",
+    )
+    _require_arg(
+        selected_matrix_intrinsic(args) == "mfma_gfx950",
+        "--example=v9-perf-golden requires gfx950 MFMA",
+    )
+    _require_arg(args.k == 4096, "--example=v9-perf-golden is frozen for --k=4096")
+    _require_arg(
+        args.m % 256 == 0 and args.n % 256 == 0,
+        "--example=v9-perf-golden requires M/N multiples of 256",
+    )
+    _require_arg(
+        (
+            args.bm == 4
+            and args.bn == 2
+            and args.wave_m_tiles == 4
+            and args.wave_n_tiles == 8
+            and args.wave_k_tiles == 2
+        ),
+        "--example=v9-perf-golden requires the v9 256x256x64 tile shape",
+    )
+    _require_arg(
+        args.cta_swizzle_xcds == 8 and args.cta_group_m == 4,
+        "--example=v9-perf-golden requires NUM_XCDS=8 and GROUP_SIZE_M=4",
+    )
+
+
 def validate_example_args(args: argparse.Namespace) -> None:
     if selected_example(args) == "matmul":
         _require_arg(
             selected_scale_input(args) == "canonical",
             "--scale-input=tensilelite requires --example=tensilelite-subtile",
         )
+        return
+    if is_v9_perf_golden(args):
+        _validate_v9_perf_golden_args(args)
         return
     _validate_tensilelite_example_args(args)
 
@@ -1157,11 +1261,12 @@ def main() -> int:
             f"mxfp4_scale_path={args.mxfp4_scale_path} "
             f"example={selected_example(args)} "
             f"scale_input={selected_scale_input(args)} "
+            f"kernel_abi={kernel_abi(args)} "
             f"seed={args.seed} input_mode="
             f"{'all-ones' if args.all_ones else 'random'}\n"
             f"cta_swizzle_xcds={args.cta_swizzle_xcds} "
             f"cta_group_m={args.cta_group_m}\n"
-            f"kernel_arg_trip_count: {compute_kernel_arg_trip_count(args)}\n"
+            f"kernel_arg_trip_count: {kernel_arg_trip_count_text(args)}\n"
             f"sim_loop_trip_count: {compute_sim_loop_trip_count(args)}\n"
             f"sim_report_trip_count: {compute_report_trip_count(args)}"
         )
