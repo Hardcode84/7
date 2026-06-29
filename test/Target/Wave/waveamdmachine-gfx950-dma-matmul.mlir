@@ -148,7 +148,7 @@
 
 // MXFP4-PERF-ASM-LABEL: wmma_f16_matmul_tiled:
 // MXFP4-PERF-ASM-DAG: v_lshlrev_b32_e32 v{{[0-9]+}}, 12, v{{[0-9]+}}
-// MXFP4-PERF-ASM-DAG: v_lshlrev_b32_e32 v{{[0-9]+}}, 12, v{{[0-9]+}}
+// MXFP4-PERF-ASM-DAG: v_lshl_add_u32 v{{[0-9]+}}, v{{[0-9]+}}, 12, s{{[0-9]+}}
 // MXFP4-PERF-ASM: .Lwmma_f16_matmul_tiled.loop_head_0:
 // MXFP4-PERF-ASM: s_waitcnt vmcnt(8)
 // MXFP4-PERF-ASM-NEXT: s_barrier

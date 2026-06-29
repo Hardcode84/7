@@ -17,6 +17,7 @@
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineTarget.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
+#include "llvm/ADT/SmallVector.h"
 #include "llvm/TargetParser/TargetParser.h"
 
 #include <array>
@@ -189,6 +190,52 @@ static LogicalResult tryFuseScalarAdd(PatternRewriter &rewriter, VAddU32Op op,
   return failure();
 }
 
+static Value getSingleShiftAddend(VLshlrevB32Op op, VAddU32Op add) {
+  bool lhsShift = add.getLhs() == op.getResult();
+  bool rhsShift = add.getRhs() == op.getResult();
+  if (lhsShift == rhsShift)
+    return Value();
+  return lhsShift ? add.getRhs() : add.getLhs();
+}
+
+static LogicalResult
+tryFuseShiftAddFanout(PatternRewriter &rewriter, VLshlrevB32Op op,
+                      const llvm::AMDGPU::IsaVersion &isa) {
+  if (op.getResult().hasOneUse())
+    return failure();
+
+  SmallVector<VAddU32Op, 4> users;
+  for (Operation *user : op.getResult().getUsers()) {
+    auto add = dyn_cast<VAddU32Op>(user);
+    if (!add || add->getBlock() != op->getBlock())
+      return failure();
+
+    Value addend = getSingleShiftAddend(op, add);
+    if (!addend)
+      return failure();
+
+    std::array<Value, 3> operands = {op.getLhs(), op.getRhs(), addend};
+    if (!canCreateTernary<VLshlAddU32Op>(operands, isa))
+      return failure();
+    users.push_back(add);
+  }
+
+  if (users.size() < 2)
+    return failure();
+
+  for (VAddU32Op add : users) {
+    Value addend = getSingleShiftAddend(op, add);
+    rewriter.setInsertionPoint(add);
+    auto fused =
+        VLshlAddU32Op::create(rewriter, add.getLoc(), add.getResult().getType(),
+                              op.getLhs(), op.getRhs(), addend);
+    fused->setAttrs(add->getAttrs());
+    rewriter.replaceOp(add, fused.getResult());
+  }
+  rewriter.eraseOp(op);
+  return success();
+}
+
 class DataFlowListener : public RewriterBase::Listener {
 public:
   DataFlowListener(DataFlowSolver &solver) : solver(solver) {}
@@ -288,10 +335,12 @@ struct LshlFusionPattern : public OpRewritePattern<VLshlrevB32Op> {
   LogicalResult matchAndRewrite(VLshlrevB32Op op,
                                 PatternRewriter &rewriter) const override {
     VAddU32Op inner = matchSingleUseProducer<VAddU32Op>(op.getLhs(), op);
-    if (!inner)
-      return failure();
-    return tryReplaceTernary<VAddLshlU32Op>(rewriter, op, inner, inner.getLhs(),
-                                            inner.getRhs(), op.getRhs(), isa);
+    if (inner)
+      return tryReplaceTernary<VAddLshlU32Op>(rewriter, op, inner,
+                                              inner.getLhs(), inner.getRhs(),
+                                              op.getRhs(), isa);
+
+    return tryFuseShiftAddFanout(rewriter, op, isa);
   }
 
   llvm::AMDGPU::IsaVersion isa;

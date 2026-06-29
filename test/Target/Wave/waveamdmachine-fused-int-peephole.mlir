@@ -34,6 +34,34 @@ func.func @shift_add(%a: !waveamdmachine.reg<vgpr, 1>,
   return %out : !waveamdmachine.reg<vgpr, 1>
 }
 
+// CHECK-LABEL: func.func @shift_add_multi_use
+// CHECK-NOT: waveamdmachine.v_lshlrev_b32
+// CHECK-NOT: waveamdmachine.v_add_u32
+// CHECK: [[OUT0:%.*]] = waveamdmachine.v_lshl_add_u32
+// CHECK-NOT: waveamdmachine.v_lshlrev_b32
+// CHECK-NOT: waveamdmachine.v_add_u32
+// CHECK: [[OUT1:%.*]] = waveamdmachine.v_lshl_add_u32
+// CHECK-NOT: waveamdmachine.v_lshlrev_b32
+// CHECK-NOT: waveamdmachine.v_add_u32
+// CHECK: return [[OUT0]], [[OUT1]]
+func.func @shift_add_multi_use(%a: !waveamdmachine.reg<vgpr, 1>,
+                               %b: !waveamdmachine.reg<vgpr, 1>,
+                               %c: !waveamdmachine.reg<vgpr, 1>)
+    -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>) {
+  %one = waveamdmachine.imm 1 : !waveamdmachine.imm
+  %shifted = waveamdmachine.v_lshlrev_b32 %a, %one
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.imm)
+          -> !waveamdmachine.reg<vgpr, 1>
+  %out0 = waveamdmachine.v_add_u32 %shifted, %b
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+  %out1 = waveamdmachine.v_add_u32 %c, %shifted
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+  return %out0, %out1 : !waveamdmachine.reg<vgpr, 1>,
+                        !waveamdmachine.reg<vgpr, 1>
+}
+
 // CHECK-LABEL: func.func @add_shift
 // CHECK-NOT: waveamdmachine.v_add_u32
 // CHECK: [[OUT:%.*]] = waveamdmachine.v_add_lshl_u32
@@ -182,6 +210,51 @@ func.func @multi_use(%a: !waveamdmachine.reg<vgpr, 1>,
           -> !waveamdmachine.reg<vgpr, 1>
   return %abc, %abd : !waveamdmachine.reg<vgpr, 1>,
                       !waveamdmachine.reg<vgpr, 1>
+}
+
+// CHECK-LABEL: func.func @shift_add_multi_use_mixed_reject
+// CHECK: [[SHIFTED:%.*]] = waveamdmachine.v_lshlrev_b32
+// CHECK: [[ADD:%.*]] = waveamdmachine.v_add_u32 [[SHIFTED]]
+// CHECK: [[OR:%.*]] = waveamdmachine.v_or_b32 [[SHIFTED]]
+// CHECK: return [[ADD]], [[OR]]
+func.func @shift_add_multi_use_mixed_reject(%a: !waveamdmachine.reg<vgpr, 1>,
+                                            %b: !waveamdmachine.reg<vgpr, 1>,
+                                            %c: !waveamdmachine.reg<vgpr, 1>)
+    -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>) {
+  %one = waveamdmachine.imm 1 : !waveamdmachine.imm
+  %shifted = waveamdmachine.v_lshlrev_b32 %a, %one
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.imm)
+          -> !waveamdmachine.reg<vgpr, 1>
+  %out0 = waveamdmachine.v_add_u32 %shifted, %b
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+  %out1 = waveamdmachine.v_or_b32 %shifted, %c
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+  return %out0, %out1 : !waveamdmachine.reg<vgpr, 1>,
+                        !waveamdmachine.reg<vgpr, 1>
+}
+
+// CHECK-LABEL: func.func @shift_add_multi_use_same_add_reject
+// CHECK: [[SHIFTED:%.*]] = waveamdmachine.v_lshlrev_b32
+// CHECK: [[ADD:%.*]] = waveamdmachine.v_add_u32 [[SHIFTED]], [[SHIFTED]]
+// CHECK: waveamdmachine.v_add_u32 [[SHIFTED]]
+// CHECK: return [[ADD]],
+func.func @shift_add_multi_use_same_add_reject(%a: !waveamdmachine.reg<vgpr, 1>,
+                                               %b: !waveamdmachine.reg<vgpr, 1>)
+    -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>) {
+  %one = waveamdmachine.imm 1 : !waveamdmachine.imm
+  %shifted = waveamdmachine.v_lshlrev_b32 %a, %one
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.imm)
+          -> !waveamdmachine.reg<vgpr, 1>
+  %out0 = waveamdmachine.v_add_u32 %shifted, %shifted
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+  %out1 = waveamdmachine.v_add_u32 %shifted, %b
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+  return %out0, %out1 : !waveamdmachine.reg<vgpr, 1>,
+                        !waveamdmachine.reg<vgpr, 1>
 }
 
 // CHECK-LABEL: func.func @scalar_stays_scalar

@@ -33,9 +33,10 @@ Match inside one block. No cross-block matching, no region boundary crossing,
 no general reassociation.
 
 Match from a fixed whitelist of known-pure machine ops. Every erased op must
-have one data result, have no flag/token/result state to preserve, and be
-single-use by the matched consumer. Reject any candidate that would delete a
-value with non-matched users.
+have one data result and no flag/token/result state to preserve. Most erased
+producers are single-use; fanout forms must replace every producer user before
+erasing it. Reject any candidate that would delete a value with non-matched
+users.
 
 Commutative operands may be swapped only for that instruction. Do not rebuild
 larger expression trees to make a pattern fit.
@@ -71,7 +72,7 @@ Match machine integer semantics, not source-language intent.
 | Source chain | Replacement | Extra conditions |
 | --- | --- | --- |
 | `v_add_u32(v_add_u32(x, y), z)` | `v_add3_u32 x, y, z` | Inner add single-use, no carry/VCC form. |
-| `v_add_u32(v_lshlrev_b32(x, k), z)` | `v_lshl_add_u32 x, k, z` | Shift result single-use; shift operand order follows WaveAMDMachine `v_lshlrev_b32` semantics. |
+| `v_add_u32(v_lshlrev_b32(x, k), z)` | `v_lshl_add_u32 x, k, z` | Shift result single-use, or every shift result use is a fusable add and there are at least two uses; shift operand order follows WaveAMDMachine `v_lshlrev_b32` semantics. |
 | `v_lshlrev_b32(v_add_u32(x, y), k)` | `v_add_lshl_u32 x, y, k` | Add result single-use, no carry/VCC form. |
 | `v_or_b32(v_and_b32(x, y), z)` | `v_and_or_b32 x, y, z` | Bitwise only. |
 | `v_or_b32(v_or_b32(x, y), z)` | `v_or3_b32 x, y, z` | Existing nested OR edge only. |
@@ -84,16 +85,19 @@ result still satisfies constant-bus and copy rules.
 
 ## Profitability
 
-For current fixed `2 -> 1` patterns, single-use is the issue-count proof. The
-inner op has exactly one fusable consumer, the outer op is replaced by one fused
-op, and no new copies/materializations/pack/extract ops are inserted.
+For current fixed `2 -> 1` patterns, single-use is the usual issue-count proof.
+The inner op has exactly one fusable consumer, the outer op is replaced by one
+fused op, and no new copies/materializations/pack/extract ops are inserted.
+For the shift-add fanout form, every shift user must be replaced and the shared
+shift must be erased; mixed-user fanout is rejected.
 
 Recompute or query local register pressure before committing a rewrite. Reject
 if peak VGPR or SGPR pressure increases, or if the match extends live ranges
 enough to exceed an explicit multi-wave/register budget. Until exact pressure
 queries are wired into the pass, use the conservative form: only accept matches
-whose deleted producer is single-use and whose operands are already live at the
-consumer or are immediates/block arguments.
+whose deleted producer is single-use or fully replaced by one fanout rewrite, and
+whose operands are already live at the consumer or are immediates/block
+arguments.
 
 Do not trade scalar-pipe work for VALU work unless the old chain already had to
 produce a VGPR and the replacement reduces VALU issue count.
