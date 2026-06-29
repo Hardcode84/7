@@ -132,6 +132,7 @@ struct BarrierPipelineStage {
 struct BarrierPipelineDescriptor {
   SmallVector<BarrierPipelineStage, 16> stages;
   StringRef name;
+  bool preserveDsReadWriterOrder = false;
 };
 
 static bool hasPipelineClass(unsigned classes, unsigned mask) {
@@ -712,7 +713,9 @@ static void appendDsReadMfmaDescriptor(
 
 static void appendWriteReadMfmaDescriptor(
     SmallVectorImpl<BarrierPipelineDescriptor> &descriptors,
-    ArrayRef<unsigned> classes, const waveamdmachine::ArchData &arch) {
+    ArrayRef<unsigned> classes, ArrayRef<NodeMetrics> metrics,
+    const waveamdmachine::ArchData &arch) {
+  unsigned dsReads = countClass(classes, BPCDSRead);
   unsigned dsWrites = countClass(classes, BPCDSWrite);
   unsigned vmemReads = countClass(classes, BPCVMemRead);
   unsigned mfmas = countClass(classes, BPCMFMA);
@@ -724,6 +727,23 @@ static void appendWriteReadMfmaDescriptor(
   appendStage(descriptor.stages, BPCBarrier, 1);
   unsigned burst =
       std::max(1u, waveamdmachine::getEventSimCmaIssueCapacity(arch));
+  if (dsReads != 0) {
+    descriptor.name = "barrier_pipeline_write_read_ds_mfma";
+    descriptor.preserveDsReadWriterOrder = true;
+    appendStage(descriptor.stages, BPCDSWrite, dsWrites);
+    appendStage(descriptor.stages, BPCVMemRead, vmemReads);
+    unsigned seed = computeDsReadSeed(classes, metrics, arch);
+    appendStage(descriptor.stages, BPCDSRead, seed);
+    unsigned remainingDs = dsReads - seed;
+    unsigned pairs = std::max(remainingDs, mfmas);
+    for (unsigned index = 0; index < pairs; ++index) {
+      appendStage(descriptor.stages, BPCMFMA, 1);
+      appendStage(descriptor.stages, BPCDSRead, 1);
+    }
+    descriptors.push_back(std::move(descriptor));
+    return;
+  }
+
   unsigned vmemBursts = (vmemReads + burst - 1) / burst;
   unsigned pairs = std::max({dsWrites, vmemBursts, mfmas});
   for (unsigned index = 0; index < pairs; ++index) {
@@ -743,7 +763,7 @@ buildBarrierPipelineDescriptors(ArrayRef<unsigned> classes,
   appendDmaDescriptors(descriptors, classes);
   if (enableMemoryPipelines) {
     appendDsReadMfmaDescriptor(descriptors, classes, metrics, arch);
-    appendWriteReadMfmaDescriptor(descriptors, classes, arch);
+    appendWriteReadMfmaDescriptor(descriptors, classes, metrics, arch);
   }
   return descriptors;
 }
@@ -895,6 +915,34 @@ static bool buildBarrierPipelineOrder(const GraphTables &tables,
   return true;
 }
 
+static bool isDsReadWriterClass(unsigned cls) {
+  return hasPipelineClass(cls, BPCDSWrite | BPCLdsDma | BPCVMemRead);
+}
+
+static bool isDsReadClass(unsigned cls) {
+  return hasPipelineClass(cls, BPCDSRead);
+}
+
+static bool isDsReadWriterPair(unsigned lhsClass, unsigned rhsClass) {
+  return (isDsReadClass(lhsClass) && isDsReadWriterClass(rhsClass)) ||
+         (isDsReadWriterClass(lhsClass) && isDsReadClass(rhsClass));
+}
+
+static bool preservesDsReadWriterOrder(ArrayRef<unsigned> order,
+                                       ArrayRef<unsigned> classes) {
+  SmallVector<unsigned, 16> position(classes.size());
+  for (auto [ordinal, node] : llvm::enumerate(order))
+    position[node] = static_cast<unsigned>(ordinal);
+
+  for (auto [lhs, lhsClass] : llvm::enumerate(classes))
+    for (unsigned rhs = static_cast<unsigned>(lhs) + 1; rhs < classes.size();
+         ++rhs)
+      if (isDsReadWriterPair(lhsClass, classes[rhs]) &&
+          position[lhs] > position[rhs])
+        return false;
+  return true;
+}
+
 static bool appendUniqueCandidate(SmallVectorImpl<OrderCandidate> &candidates,
                                   OrderCandidate candidate) {
   if (candidate.order.empty())
@@ -1011,6 +1059,9 @@ static SmallVector<OrderCandidate, 4> buildBarrierPipelineCandidates(
     candidate.name = descriptor.name.str();
     if (!buildBarrierPipelineOrder(tables, noInst, classes, descriptor,
                                    candidate.order))
+      continue;
+    if (descriptor.preserveDsReadWriterOrder &&
+        !preservesDsReadWriterOrder(candidate.order, classes))
       continue;
     appendUniqueCandidate(candidates, std::move(candidate));
   }

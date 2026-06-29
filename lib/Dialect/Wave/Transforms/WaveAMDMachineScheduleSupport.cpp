@@ -2892,7 +2892,8 @@ static bool isBarrierPipelineName(StringRef name) {
 
 static bool isBarrierMemoryPipelineName(StringRef name) {
   return name == "barrier_pipeline_ds_read_mfma" ||
-         name == "barrier_pipeline_write_read_mfma";
+         name == "barrier_pipeline_write_read_mfma" ||
+         name == "barrier_pipeline_write_read_ds_mfma";
 }
 
 static bool isCmaDmaPlacementCandidate(const EvaluatedCandidate &candidate) {
