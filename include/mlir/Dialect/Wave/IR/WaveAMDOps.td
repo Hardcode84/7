@@ -114,6 +114,7 @@ def WaveAMD_MmaScaleOp : WaveAMD_Op<"mma_scale", [Pure]> {
                        DefaultValuedAttr<ConfinedAttr<I64Attr, [IntMinValue<0>, IntMaxValue<3>]>, "0">:$scale_idx_b);
   let results = (outs WaveAMD_Fragment:$result);
   let assemblyFormat = "$kind $a `,` $a_scale `,` $b `,` $b_scale `,` $acc attr-dict `:` qualified(type($a)) `,` qualified(type($a_scale)) `,` qualified(type($b)) `,` qualified(type($b_scale)) `,` qualified(type($acc)) `->` qualified(type($result))";
+  let hasCanonicalizer = 1;
   let hasVerifier = 1;
 }
 

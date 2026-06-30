@@ -8,8 +8,11 @@
 
 #include "mlir/Dialect/Wave/IR/WaveAMD.h"
 
+#include "mlir/Dialect/Wave/IR/Wave.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/DialectImplementation.h"
+#include "mlir/IR/PatternMatch.h"
+#include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/TypeSwitch.h"
 
 using namespace mlir;
@@ -239,16 +242,22 @@ static bool isScaleI32Wave64(Type type) {
   wave::SimdType simd = dyn_cast<wave::SimdType>(type);
   return simd && simd.getWidth() == 64 && simd.getElementType().isInteger(32);
 }
-static bool isScaleI8TransposeWave64(Type type) {
+static std::optional<int64_t> getI8ScaleVectorLength(Type type) {
   wave::SimdType simd = dyn_cast<wave::SimdType>(type);
   if (!simd || simd.getWidth() != 64)
-    return false;
+    return std::nullopt;
   VectorType vecType = dyn_cast<VectorType>(simd.getElementType());
-  return vecType && vecType.getRank() == 1 && vecType.getNumElements() == 8 &&
-         vecType.getElementType().isInteger(8);
+  if (!vecType || vecType.getRank() != 1 || vecType.isScalable() ||
+      !vecType.getElementType().isInteger(8))
+    return std::nullopt;
+  return vecType.getNumElements();
+}
+static bool isScaleI8VectorWave64(Type type, int64_t elements) {
+  return getI8ScaleVectorLength(type) == elements;
 }
 static bool isMmaScaleType(Type type) {
-  return isScaleI32Wave64(type) || isScaleI8TransposeWave64(type);
+  return isScaleI32Wave64(type) || isScaleI8VectorWave64(type, 4) ||
+         isScaleI8VectorWave64(type, 8);
 }
 
 static constexpr WmmaShape kWmmaShapes[] = {
@@ -346,10 +355,12 @@ static LogicalResult verifyMmaScaleFragments(MmaScaleOp op) {
 
 static LogicalResult verifyMmaScaleTypes(MmaScaleOp op) {
   if (!isMmaScaleType(op.getAScale().getType()))
-    return op.emitOpError("A scale must be !wave.simd<i32, 64> or "
+    return op.emitOpError("A scale must be !wave.simd<i32, 64>, "
+                          "!wave.simd<vector<4xi8>, 64>, or "
                           "!wave.simd<vector<8xi8>, 64>");
   if (!isMmaScaleType(op.getBScale().getType()))
-    return op.emitOpError("B scale must be !wave.simd<i32, 64> or "
+    return op.emitOpError("B scale must be !wave.simd<i32, 64>, "
+                          "!wave.simd<vector<4xi8>, 64>, or "
                           "!wave.simd<vector<8xi8>, 64>");
   return success();
 }
@@ -362,6 +373,169 @@ LogicalResult MmaScaleOp::verify() {
   if (failed(verifyMmaScaleTypes(*this)))
     return failure();
   return success();
+}
+
+namespace {
+struct MmaScaleOperandRewrite {
+  Value scale;
+  int64_t scaleIdx;
+};
+
+struct MmaScalePackExtract {
+  wave::PackOp pack;
+  wave::ExtractOp extract;
+};
+
+struct MmaScaleExtractSource {
+  wave::PackOp pack;
+  Value source;
+  int64_t sourceIndex;
+  int64_t wordBase;
+};
+
+static bool isExtractFrom(Value value, Value source, int64_t index) {
+  wave::ExtractOp extract = value.getDefiningOp<wave::ExtractOp>();
+  return extract && extract.getSource() == source &&
+         static_cast<int64_t>(extract.getIndex()) == index;
+}
+
+static bool isCanonicalUpperDwordPack(wave::PackOp pack, Value source,
+                                      int64_t wordBase) {
+  if (wordBase == 0 || pack.getInputs().size() != 8)
+    return false;
+  for (int64_t index : llvm::seq<int64_t>(0, 4))
+    if (!isExtractFrom(pack.getInputs()[index], source, wordBase + index))
+      return false;
+  for (int64_t index : llvm::seq<int64_t>(0, 4))
+    if (!isExtractFrom(pack.getInputs()[4 + index], source, index))
+      return false;
+  return true;
+}
+
+static Value createDwordScalePack(PatternRewriter &rewriter, Location loc,
+                                  wave::PackOp sourcePack, Value source,
+                                  int64_t wordBase) {
+  Type extractType = sourcePack.getInputs().front().getType();
+  SmallVector<Value, 8> inputs;
+  inputs.reserve(8);
+  for (int64_t index : llvm::seq<int64_t>(wordBase, wordBase + 4)) {
+    wave::ExtractOp extract = wave::ExtractOp::create(
+        rewriter, loc, extractType, source, rewriter.getI64IntegerAttr(index));
+    inputs.push_back(extract.getResult());
+  }
+  for (int64_t index : llvm::seq<int64_t>(0, wordBase)) {
+    wave::ExtractOp extract = wave::ExtractOp::create(
+        rewriter, loc, extractType, source, rewriter.getI64IntegerAttr(index));
+    inputs.push_back(extract.getResult());
+  }
+  return wave::PackOp::create(rewriter, loc, sourcePack.getResult().getType(),
+                              inputs)
+      .getResult();
+}
+
+static FailureOr<MmaScalePackExtract> getSelectedPackExtract(Value scale,
+                                                             int64_t scaleIdx) {
+  wave::PackOp pack = scale.getDefiningOp<wave::PackOp>();
+  if (!pack)
+    return failure();
+  if (!isScaleI8VectorWave64(pack.getResult().getType(), 8))
+    return failure();
+  if (scaleIdx < 0)
+    return failure();
+  if (scaleIdx >= static_cast<int64_t>(pack.getInputs().size()))
+    return failure();
+
+  wave::ExtractOp selected = pack.getInputs()[static_cast<unsigned>(scaleIdx)]
+                                 .getDefiningOp<wave::ExtractOp>();
+  if (!selected)
+    return failure();
+  return MmaScalePackExtract{pack, selected};
+}
+
+static std::optional<int64_t> getSupportedI8ScaleSourceLength(Type type) {
+  std::optional<int64_t> elements = getI8ScaleVectorLength(type);
+  if (!elements)
+    return std::nullopt;
+  if (*elements != 4 && *elements != 8)
+    return std::nullopt;
+  return elements;
+}
+
+static FailureOr<MmaScaleExtractSource>
+matchRepackedMmaScaleSource(Value scale, int64_t scaleIdx) {
+  FailureOr<MmaScalePackExtract> selected =
+      getSelectedPackExtract(scale, scaleIdx);
+  if (failed(selected))
+    return failure();
+
+  Value source = selected->extract.getSource();
+  std::optional<int64_t> sourceElements =
+      getSupportedI8ScaleSourceLength(source.getType());
+  if (!sourceElements)
+    return failure();
+
+  int64_t sourceIndex = static_cast<int64_t>(selected->extract.getIndex());
+  if (sourceIndex >= *sourceElements)
+    return failure();
+  int64_t wordBase = sourceIndex & ~int64_t{3};
+  if (wordBase + 3 >= *sourceElements)
+    return failure();
+  return MmaScaleExtractSource{selected->pack, source, sourceIndex, wordBase};
+}
+
+static FailureOr<MmaScaleOperandRewrite>
+matchRepackedMmaScaleOperand(PatternRewriter &rewriter, Location loc,
+                             Value scale, int64_t scaleIdx) {
+  FailureOr<MmaScaleExtractSource> matched =
+      matchRepackedMmaScaleSource(scale, scaleIdx);
+  if (failed(matched))
+    return failure();
+
+  int64_t newScaleIdx = matched->sourceIndex - matched->wordBase;
+  if (matched->wordBase == 0)
+    return MmaScaleOperandRewrite{matched->source, newScaleIdx};
+  if (isCanonicalUpperDwordPack(matched->pack, matched->source,
+                                matched->wordBase))
+    return failure();
+
+  Value wordScale = createDwordScalePack(rewriter, loc, matched->pack,
+                                         matched->source, matched->wordBase);
+  return MmaScaleOperandRewrite{wordScale, newScaleIdx};
+}
+
+struct MmaScaleRepackCanonicalizer : OpRewritePattern<MmaScaleOp> {
+  using OpRewritePattern<MmaScaleOp>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(MmaScaleOp op,
+                                PatternRewriter &rewriter) const override {
+    rewriter.setInsertionPoint(op);
+    FailureOr<MmaScaleOperandRewrite> aScale = matchRepackedMmaScaleOperand(
+        rewriter, op.getLoc(), op.getAScale(), op.getScaleIdxA());
+    FailureOr<MmaScaleOperandRewrite> bScale = matchRepackedMmaScaleOperand(
+        rewriter, op.getLoc(), op.getBScale(), op.getScaleIdxB());
+    if (failed(aScale) && failed(bScale))
+      return failure();
+
+    rewriter.modifyOpInPlace(op, [&] {
+      if (succeeded(aScale)) {
+        op->setOperand(1, aScale->scale);
+        op->setAttr("scale_idx_a",
+                    rewriter.getI64IntegerAttr(aScale->scaleIdx));
+      }
+      if (succeeded(bScale)) {
+        op->setOperand(3, bScale->scale);
+        op->setAttr("scale_idx_b",
+                    rewriter.getI64IntegerAttr(bScale->scaleIdx));
+      }
+    });
+    return success();
+  }
+};
+} // namespace
+
+void MmaScaleOp::getCanonicalizationPatterns(RewritePatternSet &patterns,
+                                             MLIRContext *context) {
+  patterns.add<MmaScaleRepackCanonicalizer>(context);
 }
 
 LogicalResult DmaLoadLdsOp::verify() {

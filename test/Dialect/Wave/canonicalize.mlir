@@ -239,3 +239,75 @@ func.func @index_expr_scalarizes_to_splat(%lane: !wave.simd<i32, 32>)
       : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
   return %off : !wave.simd<index, 32>
 }
+
+// CHECK-LABEL: func.func @mma_scale_repack_from_dword
+// CHECK-NOT: wave.pack
+// CHECK: waveamd.mma_scale "mfma.scale.f32.16x16x128.f4.f4" %{{[A-Za-z0-9_]+}}, %[[SCALE:[A-Za-z0-9_]+]], %{{[A-Za-z0-9_]+}}, %[[SCALE]], %{{[A-Za-z0-9_]+}} {scale_idx_a = 2 : i64, scale_idx_b = 3 : i64}
+func.func @mma_scale_repack_from_dword(
+    %a: !waveamd.fragment<0, i8, 16, 16, 64, 4>,
+    %b: !waveamd.fragment<1, i8, 16, 16, 64, 4>,
+    %acc: !waveamd.fragment<2, f32, 16, 16, 64, 4>,
+    %src: !wave.simd<vector<4xi8>, 64>,
+    %z: !wave.simd<i8, 64>) -> !waveamd.fragment<2, f32, 16, 16, 64, 4> {
+  %a_scale = wave.extract %src[2]
+      : !wave.simd<vector<4xi8>, 64> -> !wave.simd<i8, 64>
+  %b_scale = wave.extract %src[3]
+      : !wave.simd<vector<4xi8>, 64> -> !wave.simd<i8, 64>
+  %a_pack = wave.pack %a_scale, %z, %z, %z, %z, %z, %z, %z
+      : !wave.simd<i8, 64>, !wave.simd<i8, 64>,
+        !wave.simd<i8, 64>, !wave.simd<i8, 64>,
+        !wave.simd<i8, 64>, !wave.simd<i8, 64>,
+        !wave.simd<i8, 64>, !wave.simd<i8, 64>
+      -> !wave.simd<vector<8xi8>, 64>
+  %b_pack = wave.pack %z, %z, %b_scale, %z, %z, %z, %z, %z
+      : !wave.simd<i8, 64>, !wave.simd<i8, 64>,
+        !wave.simd<i8, 64>, !wave.simd<i8, 64>,
+        !wave.simd<i8, 64>, !wave.simd<i8, 64>,
+        !wave.simd<i8, 64>, !wave.simd<i8, 64>
+      -> !wave.simd<vector<8xi8>, 64>
+  %result = waveamd.mma_scale "mfma.scale.f32.16x16x128.f4.f4"
+      %a, %a_pack, %b, %b_pack, %acc {scale_idx_b = 2 : i64}
+      : !waveamd.fragment<0, i8, 16, 16, 64, 4>,
+        !wave.simd<vector<8xi8>, 64>,
+        !waveamd.fragment<1, i8, 16, 16, 64, 4>,
+        !wave.simd<vector<8xi8>, 64>,
+        !waveamd.fragment<2, f32, 16, 16, 64, 4>
+      -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
+  return %result : !waveamd.fragment<2, f32, 16, 16, 64, 4>
+}
+
+// CHECK-LABEL: func.func @mma_scale_repack_from_upper_dword
+// CHECK-DAG: %[[E4:[A-Za-z0-9_]+]] = wave.extract %[[SRC:[A-Za-z0-9_]+]][4]
+// CHECK-DAG: %[[E5:[A-Za-z0-9_]+]] = wave.extract %[[SRC]][5]
+// CHECK-DAG: %[[E6:[A-Za-z0-9_]+]] = wave.extract %[[SRC]][6]
+// CHECK-DAG: %[[E7:[A-Za-z0-9_]+]] = wave.extract %[[SRC]][7]
+// CHECK-DAG: %[[E0:[A-Za-z0-9_]+]] = wave.extract %[[SRC]][0]
+// CHECK-DAG: %[[E1:[A-Za-z0-9_]+]] = wave.extract %[[SRC]][1]
+// CHECK-DAG: %[[E2:[A-Za-z0-9_]+]] = wave.extract %[[SRC]][2]
+// CHECK-DAG: %[[E3:[A-Za-z0-9_]+]] = wave.extract %[[SRC]][3]
+// CHECK: %[[UPPER:[A-Za-z0-9_]+]] = wave.pack %[[E4]], %[[E5]], %[[E6]], %[[E7]], %[[E0]], %[[E1]], %[[E2]], %[[E3]]
+// CHECK: waveamd.mma_scale "mfma.scale.f32.16x16x128.f4.f4" %{{[A-Za-z0-9_]+}}, %[[UPPER]], %{{[A-Za-z0-9_]+}}, %[[SRC]], %{{[A-Za-z0-9_]+}} {scale_idx_a = 1 : i64}
+func.func @mma_scale_repack_from_upper_dword(
+    %a: !waveamd.fragment<0, i8, 16, 16, 64, 4>,
+    %b: !waveamd.fragment<1, i8, 16, 16, 64, 4>,
+    %acc: !waveamd.fragment<2, f32, 16, 16, 64, 4>,
+    %src: !wave.simd<vector<8xi8>, 64>,
+    %z: !wave.simd<i8, 64>) -> !waveamd.fragment<2, f32, 16, 16, 64, 4> {
+  %a_scale = wave.extract %src[5]
+      : !wave.simd<vector<8xi8>, 64> -> !wave.simd<i8, 64>
+  %a_pack = wave.pack %a_scale, %z, %z, %z, %z, %z, %z, %z
+      : !wave.simd<i8, 64>, !wave.simd<i8, 64>,
+        !wave.simd<i8, 64>, !wave.simd<i8, 64>,
+        !wave.simd<i8, 64>, !wave.simd<i8, 64>,
+        !wave.simd<i8, 64>, !wave.simd<i8, 64>
+      -> !wave.simd<vector<8xi8>, 64>
+  %result = waveamd.mma_scale "mfma.scale.f32.16x16x128.f4.f4"
+      %a, %a_pack, %b, %src, %acc
+      : !waveamd.fragment<0, i8, 16, 16, 64, 4>,
+        !wave.simd<vector<8xi8>, 64>,
+        !waveamd.fragment<1, i8, 16, 16, 64, 4>,
+        !wave.simd<vector<8xi8>, 64>,
+        !waveamd.fragment<2, f32, 16, 16, 64, 4>
+      -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
+  return %result : !waveamd.fragment<2, f32, 16, 16, 64, 4>
+}
