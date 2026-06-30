@@ -2238,15 +2238,21 @@ buildSlicedCmaDmaPlacementOrder(const SlicedCmaDmaPlacementWindow &window,
   appendIndexRange(window.cmaEnd, opCount, order);
 }
 
-static SmallVector<unsigned, 1>
+static SmallVector<unsigned, 4>
 sampleSlicedCmaDmaPrefixes(unsigned sliceCount, unsigned cmaIssues,
                            unsigned cmaCapacity) {
-  SmallVector<unsigned, 1> prefixes;
+  SmallVector<unsigned, 4> prefixes;
   if (sliceCount < 2 || cmaIssues == 0)
     return prefixes;
   unsigned denom = std::max(1u, 2 * cmaCapacity);
   unsigned prefix = (sliceCount + denom - 1) / denom;
-  prefixes.push_back(std::clamp(prefix, 1u, sliceCount - 1));
+  auto appendUniquePrefix = [&](unsigned value) {
+    value = std::min(value, sliceCount - 1);
+    if (!llvm::is_contained(prefixes, value))
+      prefixes.push_back(value);
+  };
+  appendUniquePrefix(0);
+  appendUniquePrefix(prefix);
   return prefixes;
 }
 
@@ -2891,6 +2897,14 @@ static bool isCmaDmaPlacementName(StringRef name) {
   return name.starts_with("cma_dma_place_");
 }
 
+static bool isSlicedCmaDmaPlacementName(StringRef name) {
+  return name.starts_with("cma_dma_place_sliced_p");
+}
+
+static bool isZeroPrefixSlicedCmaDmaPlacementName(StringRef name) {
+  return name.starts_with("cma_dma_place_sliced_p0_");
+}
+
 static bool isBarrierPipelineName(StringRef name) {
   return name.starts_with("barrier_pipeline_");
 }
@@ -2969,9 +2983,12 @@ compareResourceTie(const EvaluatedCandidate &candidate,
   return std::nullopt;
 }
 
+static int64_t rawScheduleCycles(const EvaluatedCandidate &candidate) {
+  return candidate.metrics.score.cycles + candidate.metrics.hazardWaitCycles;
+}
+
 static int64_t adjustedScheduleCycles(const EvaluatedCandidate &candidate) {
-  return candidate.metrics.score.cycles + candidate.metrics.hazardWaitCycles +
-         candidate.metrics.counterBurstCycles;
+  return rawScheduleCycles(candidate) + candidate.metrics.counterBurstCycles;
 }
 
 static bool hasLowerCounterBurst(const EvaluatedCandidate &candidate,
@@ -3052,6 +3069,23 @@ compareCounterNeutralPlacement(const EvaluatedCandidate &candidate,
   return std::nullopt;
 }
 
+static std::optional<bool>
+compareSlicedCmaDmaRawTie(const EvaluatedCandidate &candidate,
+                          const EvaluatedCandidate &best) {
+  StringRef candidateName(candidate.name);
+  StringRef bestName(best.name);
+  if (!isSlicedCmaDmaPlacementName(candidateName) ||
+      !isSlicedCmaDmaPlacementName(bestName))
+    return std::nullopt;
+  if (rawScheduleCycles(candidate) != rawScheduleCycles(best))
+    return std::nullopt;
+  bool candidateZero = isZeroPrefixSlicedCmaDmaPlacementName(candidateName);
+  bool bestZero = isZeroPrefixSlicedCmaDmaPlacementName(bestName);
+  if (candidateZero != bestZero)
+    return !candidateZero;
+  return std::nullopt;
+}
+
 static bool
 isBetterScheduleCandidate(const EvaluatedCandidate &candidate,
                           const EvaluatedCandidate &best,
@@ -3065,6 +3099,8 @@ isBetterScheduleCandidate(const EvaluatedCandidate &candidate,
     return *better;
   if (std::optional<bool> better =
           compareCounterNeutralPlacement(candidate, best, original))
+    return *better;
+  if (std::optional<bool> better = compareSlicedCmaDmaRawTie(candidate, best))
     return *better;
   int64_t candidateCycles = adjustedScheduleCycles(candidate);
   int64_t bestCycles = adjustedScheduleCycles(best);

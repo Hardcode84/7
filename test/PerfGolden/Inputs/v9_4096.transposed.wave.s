@@ -493,10 +493,6 @@ v9_beyond_hotloop:
 		s_mov_b32 m0, s30
 		v_add_u32_e32 v27, s31, v27
 		buffer_load_dwordx4 v27, s[16:19], 0 offen lds
-		s_mov_b32 m0, s32
-		s_add_i32 s52, s33, s51
-		v_add_u32_e32 v27, s52, v4
-		buffer_load_dwordx4 v27, s[20:23], 0 offen lds
 		s_waitcnt lgkmcnt(7)
 		v_mfma_f32_16x16x32_f16 v[156:159], v[64:67], v[32:35], v[156:159]
 		s_waitcnt lgkmcnt(6)
@@ -516,14 +512,14 @@ v9_beyond_hotloop:
 		v_mfma_f32_16x16x32_f16 v[172:175], v[64:67], v[40:43], v[172:175]
 		v_mfma_f32_16x16x32_f16 v[172:175], v[68:71], v[44:47], v[172:175]
 		v_mfma_f32_16x16x32_f16 v[176:179], v[72:75], v[40:43], v[176:179]
+		s_mov_b32 m0, s32
+		s_add_i32 s52, s33, s51
+		v_add_u32_e32 v27, s52, v4
+		buffer_load_dwordx4 v27, s[20:23], 0 offen lds
 		v_mfma_f32_16x16x32_f16 v[176:179], v[76:79], v[44:47], v[176:179]
 		v_mfma_f32_16x16x32_f16 v[180:183], v[80:83], v[40:43], v[180:183]
 		v_mfma_f32_16x16x32_f16 v[180:183], v[84:87], v[44:47], v[180:183]
 		v_mfma_f32_16x16x32_f16 v[184:187], v[88:91], v[40:43], v[184:187]
-		s_mov_b32 m0, s34
-		s_add_i32 s52, s36, s51
-		v_add_u32_e32 v27, s52, v4
-		buffer_load_dwordx4 v27, s[20:23], 0 offen lds
 		v_mfma_f32_16x16x32_f16 v[184:187], v[92:95], v[44:47], v[184:187]
 		v_mfma_f32_16x16x32_f16 v[188:191], v[64:67], v[48:51], v[188:191]
 		v_mfma_f32_16x16x32_f16 v[188:191], v[68:71], v[52:55], v[188:191]
@@ -531,6 +527,10 @@ v9_beyond_hotloop:
 		v_mfma_f32_16x16x32_f16 v[192:195], v[76:79], v[52:55], v[192:195]
 		v_mfma_f32_16x16x32_f16 v[196:199], v[80:83], v[48:51], v[196:199]
 		v_mfma_f32_16x16x32_f16 v[196:199], v[84:87], v[52:55], v[196:199]
+		s_mov_b32 m0, s34
+		s_add_i32 s52, s36, s51
+		v_add_u32_e32 v27, s52, v4
+		buffer_load_dwordx4 v27, s[20:23], 0 offen lds
 		v_mfma_f32_16x16x32_f16 v[200:203], v[88:91], v[48:51], v[200:203]
 		v_mfma_f32_16x16x32_f16 v[200:203], v[92:95], v[52:55], v[200:203]
 		v_mfma_f32_16x16x32_f16 v[204:207], v[64:67], v[56:59], v[204:207]
@@ -631,10 +631,6 @@ v9_beyond_hotloop:
 		s_mov_b32 m0, s45
 		v_add_u32_e32 v27, s4, v27
 		buffer_load_dwordx4 v27, s[16:19], 0 offen lds
-		s_mov_b32 m0, s13
-		s_add_i32 s52, s15, s51
-		v_add_u32_e32 v27, s52, v4
-		buffer_load_dwordx4 v27, s[20:23], 0 offen lds
 		s_waitcnt lgkmcnt(7)
 		v_mfma_f32_16x16x32_f16 v[156:159], v[64:67], v[32:35], v[156:159]
 		s_waitcnt lgkmcnt(6)
@@ -654,14 +650,14 @@ v9_beyond_hotloop:
 		v_mfma_f32_16x16x32_f16 v[172:175], v[64:67], v[40:43], v[172:175]
 		v_mfma_f32_16x16x32_f16 v[172:175], v[68:71], v[44:47], v[172:175]
 		v_mfma_f32_16x16x32_f16 v[176:179], v[72:75], v[40:43], v[176:179]
+		s_mov_b32 m0, s13
+		s_add_i32 s52, s15, s51
+		v_add_u32_e32 v27, s52, v4
+		buffer_load_dwordx4 v27, s[20:23], 0 offen lds
 		v_mfma_f32_16x16x32_f16 v[176:179], v[76:79], v[44:47], v[176:179]
 		v_mfma_f32_16x16x32_f16 v[180:183], v[80:83], v[40:43], v[180:183]
 		v_mfma_f32_16x16x32_f16 v[180:183], v[84:87], v[44:47], v[180:183]
 		v_mfma_f32_16x16x32_f16 v[184:187], v[88:91], v[40:43], v[184:187]
-		s_mov_b32 m0, s46
-		s_add_i32 s52, s35, s51
-		v_add_u32_e32 v27, s52, v4
-		buffer_load_dwordx4 v27, s[20:23], 0 offen lds
 		v_mfma_f32_16x16x32_f16 v[184:187], v[92:95], v[44:47], v[184:187]
 		v_mfma_f32_16x16x32_f16 v[188:191], v[64:67], v[48:51], v[188:191]
 		v_mfma_f32_16x16x32_f16 v[188:191], v[68:71], v[52:55], v[188:191]
@@ -669,6 +665,10 @@ v9_beyond_hotloop:
 		v_mfma_f32_16x16x32_f16 v[192:195], v[76:79], v[52:55], v[192:195]
 		v_mfma_f32_16x16x32_f16 v[196:199], v[80:83], v[48:51], v[196:199]
 		v_mfma_f32_16x16x32_f16 v[196:199], v[84:87], v[52:55], v[196:199]
+		s_mov_b32 m0, s46
+		s_add_i32 s52, s35, s51
+		v_add_u32_e32 v27, s52, v4
+		buffer_load_dwordx4 v27, s[20:23], 0 offen lds
 		v_mfma_f32_16x16x32_f16 v[200:203], v[88:91], v[48:51], v[200:203]
 		v_mfma_f32_16x16x32_f16 v[200:203], v[92:95], v[52:55], v[200:203]
 		v_mfma_f32_16x16x32_f16 v[204:207], v[64:67], v[56:59], v[204:207]

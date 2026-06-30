@@ -82,13 +82,18 @@ def scale_lds_dma_stagger_mlir(dma_count: int, mfma_count: int, func_name: str) 
     return "\n".join(lines)
 
 
-def discovered_order_sequence(text: str, dma_count: int, mfma_count: int) -> list[str]:
-    match = re.search(r"name=cma_dma_place_sliced_[^ ]+.* order=([0-9,]+)", text)
-    if not match:
-        return []
-    order = [int(piece) for piece in match.group(1).split(",")]
+def discovered_order_sequences(
+    text: str, dma_count: int, mfma_count: int
+) -> dict[int, list[str]]:
     cats = ["other"] + ["dma"] * dma_count + ["join"] + ["mfma"] * mfma_count
-    return [cats[index] for index in order if cats[index] != "other"]
+    sequences = {}
+    for match in re.finditer(
+        r"name=cma_dma_place_sliced_p([0-9]+)_[^ ]+.* order=([0-9,]+)", text
+    ):
+        prefix = int(match.group(1))
+        order = [int(piece) for piece in match.group(2).split(",")]
+        sequences[prefix] = [cats[index] for index in order if cats[index] != "other"]
+    return sequences
 
 
 def require(label: str, condition: bool, message: str) -> None:
@@ -100,7 +105,13 @@ def require(label: str, condition: bool, message: str) -> None:
 def check_small_scale_lds_dma() -> None:
     label = "scale_lds_dma_discovery"
     text = run_schedule_report(scale_lds_dma_stagger_mlir(12, 64, label))
-    seq = discovered_order_sequence(text, 12, 64)
+    sequences = discovered_order_sequences(text, 12, 64)
+    require(label, 0 in sequences, "missing zero-prefix DMA candidate")
+    require(label, 2 in sequences, "missing heuristic-prefix DMA candidate")
+    require(
+        label, sequences[0][0] == "mfma", "zero-prefix candidate should start compute"
+    )
+    seq = sequences[2]
     require(label, seq.count("dma") == 12, f"expected 12 DMA ops, got {seq}")
     require(label, seq.count("mfma") == 64, "missing scale MFMA ops")
     require(label, seq.count("join") == 1, "missing token join")
@@ -124,7 +135,10 @@ def check_small_scale_lds_dma() -> None:
 def check_large_scale_lds_dma() -> None:
     label = "large_scale_lds_dma_discovery"
     text = run_schedule_report(scale_lds_dma_stagger_mlir(32, 64, label))
-    seq = discovered_order_sequence(text, 32, 64)
+    sequences = discovered_order_sequences(text, 32, 64)
+    require(label, 0 in sequences, "missing zero-prefix DMA candidate")
+    require(label, 4 in sequences, "missing heuristic-prefix DMA candidate")
+    seq = sequences[4]
     require(label, seq.count("dma") == 32, f"expected 32 DMA ops, got {seq}")
     require(label, seq.count("mfma") == 64, "missing scale MFMA ops")
     require(label, seq.count("join") == 1, "missing token join")
