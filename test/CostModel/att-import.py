@@ -3,6 +3,7 @@
 # RUN: %PYTHON %S/../../tools/wave-att-import/wave-att-import.py --att-dir %S/Inputs/att-sample --objdump %S/Inputs/att-wmma-objdump.txt --summary | FileCheck %s --check-prefix=WMMA
 # RUN: %PYTHON %S/../../tools/wave-att-import/wave-att-import.py --att-dir %S/Inputs/att-sample --objdump %S/Inputs/att-objdump.txt --windows | FileCheck %s --check-prefix=WIN
 # RUN: %PYTHON %S/../../tools/wave-att-import/wave-att-import.py --att-dir %S/Inputs/att-sample --objdump %S/Inputs/att-objdump.txt --windows --counter-latency WriteSMEM=10 | FileCheck %s --check-prefix=WIN-CNT
+# RUN: %PYTHON %S/../../tools/wave-att-import/wave-att-import.py --att-dir %S/Inputs/att-sample --objdump %S/Inputs/att-ds-objdump.txt --windows | FileCheck %s --check-prefix=DS
 # RUN: %PYTHON %S/../../tools/wave-att-import/wave-att-import.py --att-dir %S/Inputs/att-sample --objdump %S/Inputs/att-objdump.txt --summary --trip-count 0 | FileCheck %s --check-prefix=POS
 # RUN: %PYTHON %S/../../tools/wave-att-import/wave-att-import.py --att-dir %S/Inputs/att-sample --objdump %S/Inputs/att-objdump.txt --summary --trip-count 0 --window-summary | FileCheck %s --check-prefix=SUM
 
@@ -28,6 +29,8 @@
 # WIN: 0x1608,5640,s_waitcnt lgkmcnt(0),unknown,lgkm,0,1,1,0x1600,0x1600,WriteSMEM,20,19,20,19,2,30.0,29.0,1,31.0,30.0
 
 # WIN-CNT: 0x1608,5640,s_waitcnt lgkmcnt(0),unknown,lgkm,0,1,1,0x1600,0x1600,WriteSMEM,20,19,10,9,2,30.0,29.0,1,31.0,30.0
+
+# DS: 0x3008,12296,s_waitcnt lgkmcnt(0),unknown,lgkm,0,1,1,0x3000,0x3000,WriteLDS,20,19,20,19
 
 # POS: wave_resolved: 4
 # POS: wave_code_resolved: 2

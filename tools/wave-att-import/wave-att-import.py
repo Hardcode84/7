@@ -45,7 +45,7 @@ PREFIX_CLASSES = (
     ("s_load", "WriteSMEM"),
     (("buffer_load", "global_load", "flat_load"), "WriteVMEM"),
     (("buffer_store", "global_store", "flat_store"), "WriteVMEM"),
-    (("ds_load", "ds_store"), "WriteLDS"),
+    (("ds_load", "ds_store", "ds_read", "ds_write"), "WriteLDS"),
     ("v_wmma", "Write32Bit"),
     ("s_cbranch", "WriteBranch"),
     ("s_", "WriteSALU"),
@@ -207,7 +207,7 @@ def classify_mnemonic(mnemonic: str) -> str:
 
 def producer_counter(inst: StaticInst) -> str | None:
     mnemonic = inst.mnemonic
-    if mnemonic.startswith(("s_load", "ds_load", "ds_store")):
+    if mnemonic.startswith(("s_load", "ds_load", "ds_store", "ds_read", "ds_write")):
         return "lgkm"
     if mnemonic.startswith(("buffer_load", "global_load", "flat_load")):
         return "vmem"
