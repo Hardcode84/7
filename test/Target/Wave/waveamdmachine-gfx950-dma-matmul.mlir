@@ -138,6 +138,8 @@
 // PROFILEMXFP4-DMA-OVERLAP: wave.token
 // PROFILEMXFP4-DMA-OVERLAP: wave.yield
 // PROFILEMXFP4-DMA-OVERLAP: scf.for {{%.*}} = {{%.*}} to [[ONE]] step [[ONE]]
+// PROFILEMXFP4-DMA-OVERLAP: [[SCALE_READY:%.*]] = wave.join {{%.*}}, {{%.*}} : !wave.mem.token, !wave.mem.token -> !wave.mem.token
+// PROFILEMXFP4-DMA-OVERLAP: wave.barrier [[SCALE_READY]]
 // PROFILEMXFP4-DMA-OVERLAP: waveamd.mma_scale "mfma.scale.f32.16x16x128.f4.f4"
 // PROFILEMXFP4-DMA-OVERLAP: waveamd.dma_load_lds
 // PROFILEMXFP4-DMA-OVERLAP: wave.join
@@ -149,18 +151,17 @@
 // MXFP4-PERF-ASM-DAG: v_lshlrev_b32_e32 v{{[0-9]+}}, 12, v{{[0-9]+}}
 // MXFP4-PERF-ASM-DAG: v_lshl_add_u32 v{{[0-9]+}}, v{{[0-9]+}}, 12, s{{[0-9]+}}
 // MXFP4-PERF-ASM: .Lwmma_f16_matmul_tiled.loop_head_0:
+// MXFP4-PERF-ASM: s_lshl_b32 s{{[0-9]+}}, [[LOOP_STEP:s[0-9]+]], 7
 // MXFP4-PERF-ASM: s_waitcnt vmcnt(8)
 // MXFP4-PERF-ASM-NEXT: s_barrier
-// MXFP4-PERF-ASM: s_lshl_b32 s{{[0-9]+}}, [[LOOP_STEP:s[0-9]+]], 7
 // MXFP4-PERF-ASM-NOT: s_waitcnt vmcnt
 // MXFP4-PERF-ASM-NOT: s_and_saveexec
 // MXFP4-PERF-ASM-NOT: s_cbranch_execz
 // MXFP4-PERF-ASM: ds_read_b64_tr_b8
 // MXFP4-PERF-ASM: ds_read_b64_tr_b8 {{.*}} offset:4096
 // MXFP4-PERF-ASM: ds_read_b64_tr_b8 {{.*}} offset:6656
-// MXFP4-PERF-ASM: s_waitcnt lgkmcnt(3)
-// MXFP4-PERF-ASM-NEXT: v_mfma_scale_f32_16x16x128_f8f6f4
-// MXFP4-PERF-ASM: s_waitcnt lgkmcnt(1)
+// MXFP4-PERF-ASM: s_waitcnt lgkmcnt(0)
+// MXFP4-PERF-ASM-NEXT: s_barrier
 // MXFP4-PERF-ASM-NEXT: v_mfma_scale_f32_16x16x128_f8f6f4
 
 // ASMPIPE-LABEL: wmma_f16_matmul_tiled:
@@ -216,9 +217,11 @@
 // ASMMXFP4-DMA-K2-COUNT-4: buffer_load_dwordx4 {{.*}} lds
 // ASMMXFP4-DMA-K2: ds_read_b64_tr_b8 {{v\[[0-9]+:[0-9]+\]}}, {{v[0-9]+}} offset:4096
 // ASMMXFP4-DMA-K2: ds_read_b64_tr_b8 {{v\[[0-9]+:[0-9]+\]}}, {{v[0-9]+}} offset:4608
-// ASMMXFP4-DMA-K2: v_mfma_scale_f32_16x16x128_f8f6f4
 // ASMMXFP4-DMA-K2: ds_read_b64_tr_b8 {{v\[[0-9]+:[0-9]+\]}}, {{v[0-9]+}} offset:5120
 // ASMMXFP4-DMA-K2: ds_read_b64_tr_b8 {{v\[[0-9]+:[0-9]+\]}}, {{v[0-9]+}} offset:5632
+// ASMMXFP4-DMA-K2: s_waitcnt lgkmcnt(2)
+// ASMMXFP4-DMA-K2-NEXT: v_mfma_scale_f32_16x16x128_f8f6f4
+// ASMMXFP4-DMA-K2: s_waitcnt lgkmcnt(0)
 // ASMMXFP4-DMA-K2: v_mfma_scale_f32_16x16x128_f8f6f4
 // ASMMXFP4-DMA-K2: .amdhsa_group_segment_fixed_size 8192
 

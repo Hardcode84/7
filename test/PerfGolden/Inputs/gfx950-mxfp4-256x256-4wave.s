@@ -677,7 +677,7 @@ wmma_f16_matmul_tiled:
 		v_accvgpr_write_b32 a175, v247
 .Lwmma_f16_matmul_tiled.loop_head_0:
 		s_lshl_b32 s40, s42, 7
-		s_waitcnt lgkmcnt(14)
+		s_waitcnt lgkmcnt(0)
 		s_barrier
 		s_and_b32 s41, s42, 1
 		s_lshl_b32 s41, s41, 13
@@ -1002,6 +1002,7 @@ wmma_f16_matmul_tiled:
 		s_cmp_lt_i32 s42, 30
 		s_cbranch_scc1 .Lwmma_f16_matmul_tiled.loop_head_0
 .Lwmma_f16_matmul_tiled.loop_exit_0:
+		s_waitcnt lgkmcnt(0)
 		s_barrier
 		v_add_u32_e32 v3, v14, v5
 		ds_read_b64_tr_b8 v[12:13], v3
@@ -1184,6 +1185,7 @@ wmma_f16_matmul_tiled:
 		ds_read_b128 v[128:131], v2 offset:54272
 		ds_read_b128 v[132:135], v2 offset:55296
 		ds_read_b128 v[136:139], v2 offset:56320
+		s_waitcnt lgkmcnt(0)
 		s_barrier
 		ds_read_b64_tr_b8 v[140:141], v3 offset:8192
 		ds_read_b64_tr_b8 v[142:143], v3 offset:8704

@@ -3125,6 +3125,8 @@ def _emit_mxfp4_mma_grid(
     scale_ready_token: dsl.Value | None,
 ) -> tuple[dsl.Value, ...]:
     if scale_ready_token is not None:
+        if scale_after is not None:
+            scale_ready_token = _join_tokens(bld, [scale_ready_token, scale_after])
         scale_sets, token = _read_mxfp4_scale_batch(
             bld, cfg, coords, scale_step, scale_lds_offset, scale_ready_token
         )
@@ -3634,10 +3636,12 @@ def _emit_dma_step(
         if _use_mxfp4_regional_scale_read_step(cfg):
             n_mid = cfg.wave_n_tiles // 2
             scale_offset = _scale_buffer_offset(bld, cfg, scale_step)
-            scale_ready_token = state.scale_token
+            scale_ready_token = _join_tokens(
+                bld, [state.scale_token, state.reuse_token]
+            )
             barrier_before_scale_read = True
             if _use_mxfp4_shared_scale_barrier(cfg):
-                scale_ready_token = bld.barrier(state.scale_token)
+                scale_ready_token = bld.barrier(scale_ready_token)
                 barrier_before_scale_read = False
             left_scale_sets, left_scale_token = _read_mxfp4_scale_batch_region(
                 bld,
@@ -3760,13 +3764,16 @@ def _emit_dma_step(
             if new_next_scale_token is None:
                 raise ValueError("MXFP4 next scale token was not produced")
         else:
+            scale_ready_token = _join_tokens(
+                bld, [state.scale_token, state.reuse_token]
+            )
             scale_sets, scale_reuse_token = _read_mxfp4_scale_batch(
                 bld,
                 cfg,
                 coords,
                 scale_step,
                 _scale_buffer_offset(bld, cfg, scale_step),
-                state.scale_token,
+                scale_ready_token,
             )
             scale_tokens.append(scale_reuse_token)
             if _use_mxfp4_regional_dma_step(cfg):
@@ -4006,8 +4013,11 @@ def _store_final_mxfp4_tiles_split(
     scale_lds_offset: dsl.Value | int,
 ) -> None:
     assert state.scale_token is not None
+    scale_ready_token = state.scale_token
+    if state.reuse_token is not None:
+        scale_ready_token = _join_tokens(bld, [scale_ready_token, state.reuse_token])
     scale_sets, scale_token = _read_mxfp4_scale_batch(
-        bld, cfg, coords, scale_step, scale_lds_offset, state.scale_token
+        bld, cfg, coords, scale_step, scale_lds_offset, scale_ready_token
     )
     right_scale_sets = scale_sets
     n_mid = cfg.wave_n_tiles // 2
