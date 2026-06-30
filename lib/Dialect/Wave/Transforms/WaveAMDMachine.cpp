@@ -4214,6 +4214,69 @@ trySelectWordAlignedExtractPack(WaveAMDMachineSelector &S, PackOp op,
   return std::optional<SmallVector<Value>>(std::move(words));
 }
 
+template <typename InputRange>
+static SmallVector<Value>
+packScalarInputsIntoWords(WaveAMDMachineSelector &S, Location loc,
+                          InputRange inputs, unsigned inputCount,
+                          unsigned elementBits, unsigned registers,
+                          Operation *user) {
+  Type vgprType =
+      getRegType(S.builder.getContext(), waveamdmachine::RegClass::VGPR);
+  SmallVector<Value> words(registers);
+  for (auto [index, input] : llvm::enumerate(inputs)) {
+    if (index == inputCount)
+      break;
+    unsigned bitOffset = index * elementBits;
+    unsigned wordIndex = bitOffset / 32;
+    unsigned wordShift = bitOffset % 32;
+    assert(wordIndex < words.size() && "packed input exceeds result words");
+    Value value = S.ensureVGPRForVSrc1(loc, S.expect(input, user));
+    value = maskLowBits(S, loc, value, elementBits);
+    if (wordShift)
+      value = waveamdmachine::VLshlrevB32Op::create(
+          S.builder, loc, vgprType, value,
+          createImm(S.builder, loc, wordShift));
+    if (!words[wordIndex]) {
+      words[wordIndex] = value;
+      continue;
+    }
+    words[wordIndex] = waveamdmachine::VOrB32Op::create(
+        S.builder, loc, vgprType, words[wordIndex], value);
+  }
+  return words;
+}
+
+static bool isI8TransposeScalePack(PackOp op) {
+  auto simdType = dyn_cast<SimdType>(op.getResult().getType());
+  if (!simdType || simdType.getWidth() != 64)
+    return false;
+  auto vecType = dyn_cast<VectorType>(simdType.getElementType());
+  return vecType && vecType.getRank() == 1 && !vecType.isScalable() &&
+         vecType.getNumElements() == 8 &&
+         vecType.getElementType().isInteger(8) && op.getInputs().size() == 8;
+}
+
+static bool isMmaScaleScaleUse(OpOperand &use) {
+  if (!isa<waveamd::MmaScaleOp>(use.getOwner()))
+    return false;
+  unsigned operandNumber = use.getOperandNumber();
+  return operandNumber == 1 || operandNumber == 3;
+}
+
+static bool canPackMmaScaleLowDword(WaveAMDMachineSelector &S, PackOp op) {
+  if (!isI8TransposeScalePack(op) || op.getResult().use_empty())
+    return false;
+  for (OpOperand &use : op.getResult().getUses())
+    if (!isMmaScaleScaleUse(use))
+      return false;
+  for (Value input : llvm::drop_begin(op.getInputs(), 4)) {
+    auto it = S.values.find(input);
+    if (it == S.values.end() || !isLocalZero(S, it->second))
+      return false;
+  }
+  return true;
+}
+
 LogicalResult WaveAMDMachineSelector::selectPack(PackOp op) {
   FailureOr<MemoryPayloadShape> shape =
       getSimdVectorPayloadShape(op, op.getResult().getType(), "pack");
@@ -4231,25 +4294,16 @@ LogicalResult WaveAMDMachineSelector::selectPack(PackOp op) {
     return success();
   }
 
-  Type vgprType = getRegType(op.getContext(), waveamdmachine::RegClass::VGPR);
-  SmallVector<Value> words(shape->registers);
-  for (auto [index, input] : llvm::enumerate(op.getInputs())) {
-    unsigned bitOffset = index * shape->elementBits;
-    unsigned wordIndex = bitOffset / 32;
-    unsigned wordShift = bitOffset % 32;
-    Value value = ensureVGPRForVSrc1(loc, expect(input, op));
-    value = maskLowBits(*this, loc, value, shape->elementBits);
-    if (wordShift)
-      value = waveamdmachine::VLshlrevB32Op::create(
-          builder, loc, vgprType, value, createImm(builder, loc, wordShift));
-    if (!words[wordIndex]) {
-      words[wordIndex] = value;
-      continue;
-    }
-    words[wordIndex] = waveamdmachine::VOrB32Op::create(
-        builder, loc, vgprType, words[wordIndex], value);
+  if (canPackMmaScaleLowDword(*this, op)) {
+    values[op.getResult()] = packScalarInputsIntoWords(
+        *this, loc, op.getInputs(), 4, shape->elementBits, 1, op)[0];
+    eraseIfTopLevel(op);
+    return success();
   }
 
+  SmallVector<Value> words = packScalarInputsIntoWords(
+      *this, loc, op.getInputs(), op.getInputs().size(), shape->elementBits,
+      shape->registers, op);
   if (words.size() == 1) {
     values[op.getResult()] = words.front();
   } else {
@@ -6748,6 +6802,8 @@ LogicalResult WaveAMDMachineSelector::selectMmaScale(waveamd::MmaScaleOp op) {
         cast<waveamdmachine::RegType>(raw.getType());
     if (rawType.getRegClass() != waveamdmachine::RegClass::VGPR)
       return ensureVGPRForVSrc1(op.getLoc(), raw);
+    if (rawType.getWidth() == 1)
+      return raw;
     if (Value element = splitScaleElements.lookup(raw))
       return element;
     Type vgpr1 = getRegType(op.getContext(), waveamdmachine::RegClass::VGPR);
