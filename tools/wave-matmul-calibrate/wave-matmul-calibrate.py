@@ -26,6 +26,8 @@ KERNEL_NAME = "wmma_f16_matmul_tiled"
 V9_GOLDEN_NAME = "v9_4096.original.wave"
 V9_TRANSPOSED_GOLDEN_NAME = "v9_4096.transposed.wave"
 V9_GOLDEN_KERNEL_NAME = "v9_beyond_hotloop"
+TLX_MXFP_GOLDEN_NAME = "tlx_a4w4_mxfp_k16k_after_bridge.wave"
+TLX_MXFP_GOLDEN_KERNEL_NAME = "_a4w4_kernel"
 V9_GOLDEN_INPUT_DIR = REPO_ROOT / "test/PerfGolden/Inputs"
 V9_GOLDEN_SOURCE = V9_GOLDEN_INPUT_DIR / f"{V9_GOLDEN_NAME}.mlir"
 STATIC_LDS_LIMIT = 64 * 1024
@@ -164,6 +166,27 @@ KERNEL_PROFILES: dict[str, dict[str, ProfileValue]] = {
         "cta_swizzle_xcds": 8,
         "cta_group_m": 4,
     },
+    "tlx-a4w4-mxfp-k16k-after-bridge-wave": {
+        "example": "tlx-mxfp-perf-golden",
+        "tlx_mxfp_golden_name": TLX_MXFP_GOLDEN_NAME,
+        "m": 4096,
+        "n": 4096,
+        "k": 16384,
+        "bm": 2,
+        "bn": 2,
+        "wave_m_tiles": 8,
+        "wave_n_tiles": 8,
+        "wave_k_tiles": 2,
+        "target_waves": 1,
+        "use_buffer": True,
+        "use_dma_lds": True,
+        "matrix_intrinsic": "mfma_gfx950",
+        "input_type": "mxfp4",
+        "output_type": "bf16",
+        "mxfp4_scale_path": "regs",
+        "cta_swizzle_xcds": 8,
+        "cta_group_m": 4,
+    },
 }
 
 
@@ -252,12 +275,28 @@ def is_v9_perf_golden(args: argparse.Namespace) -> bool:
     return selected_example(args) == "v9-perf-golden"
 
 
+def is_tlx_mxfp_perf_golden(args: argparse.Namespace) -> bool:
+    return selected_example(args) == "tlx-mxfp-perf-golden"
+
+
+def is_checked_in_perf_golden(args: argparse.Namespace) -> bool:
+    return is_v9_perf_golden(args) or is_tlx_mxfp_perf_golden(args)
+
+
 def kernel_name(args: argparse.Namespace) -> str:
-    return V9_GOLDEN_KERNEL_NAME if is_v9_perf_golden(args) else KERNEL_NAME
+    if is_v9_perf_golden(args):
+        return V9_GOLDEN_KERNEL_NAME
+    if is_tlx_mxfp_perf_golden(args):
+        return TLX_MXFP_GOLDEN_KERNEL_NAME
+    return KERNEL_NAME
 
 
 def kernel_abi(args: argparse.Namespace) -> str:
-    return "v9-golden" if is_v9_perf_golden(args) else "matmul"
+    if is_v9_perf_golden(args):
+        return "v9-golden"
+    if is_tlx_mxfp_perf_golden(args):
+        return "tlx-mxfp"
+    return "matmul"
 
 
 def selected_scale_input(args: argparse.Namespace) -> str:
@@ -338,13 +377,18 @@ def build_matmul_example_args(args: argparse.Namespace, chip: str) -> list[str]:
 def build_example_args(args: argparse.Namespace, chip: str) -> list[str]:
     if selected_example(args) == "tensilelite-subtile":
         return build_tensilelite_example_args(args, chip)
-    if is_v9_perf_golden(args):
-        sys.exit("--example=v9-perf-golden uses checked-in IR, not a generator")
+    if is_checked_in_perf_golden(args):
+        sys.exit(f"--example={selected_example(args)} uses checked-in IR")
     return build_matmul_example_args(args, chip)
 
 
 def v9_golden_source(args: argparse.Namespace) -> Path:
     name = getattr(args, "v9_golden_name", V9_GOLDEN_NAME)
+    return V9_GOLDEN_INPUT_DIR / f"{name}.mlir"
+
+
+def tlx_mxfp_golden_source(args: argparse.Namespace) -> Path:
+    name = getattr(args, "tlx_mxfp_golden_name", TLX_MXFP_GOLDEN_NAME)
     return V9_GOLDEN_INPUT_DIR / f"{name}.mlir"
 
 
@@ -362,9 +406,27 @@ def isolate_v9_golden_module(args: argparse.Namespace, chip: str) -> str:
     )
 
 
+def isolate_tlx_mxfp_golden_module(args: argparse.Namespace, chip: str) -> str:
+    source = tlx_mxfp_golden_source(args)
+    text = source.read_text()
+    match = re.search(
+        rf"(func\.func @{TLX_MXFP_GOLDEN_KERNEL_NAME}.*?\n    \}})", text, re.S
+    )
+    if not match:
+        sys.exit(f"could not isolate {TLX_MXFP_GOLDEN_KERNEL_NAME} from {source}")
+    kernel = re.sub(r"^    ", "  ", match.group(1).lstrip(), flags=re.M)
+    target = f"amdgcn-amd-amdhsa--{chip}"
+    return (
+        f'module attributes {{waveamdmachine.target = "{target}"}} '
+        f"{{\n{kernel}\n}}\n"
+    )
+
+
 def generate_kernel_module(args: argparse.Namespace, chip: str) -> str:
     if is_v9_perf_golden(args):
         return isolate_v9_golden_module(args, chip)
+    if is_tlx_mxfp_perf_golden(args):
+        return isolate_tlx_mxfp_golden_module(args, chip)
 
     env = os.environ.copy()
     package_path = args.build_dir / "python_packages/wave_mlir"
@@ -677,21 +739,21 @@ def compute_virtual_k_steps(args: argparse.Namespace) -> int:
 
 
 def compute_kernel_arg_trip_count(args: argparse.Namespace) -> int:
-    if is_v9_perf_golden(args):
+    if is_checked_in_perf_golden(args):
         return 0
     virtual_k_steps = compute_virtual_k_steps(args)
     return max(virtual_k_steps - 1, 0)
 
 
 def kernel_arg_trip_count_text(args: argparse.Namespace) -> str:
-    if is_v9_perf_golden(args):
+    if is_checked_in_perf_golden(args):
         return "n/a"
     return str(compute_kernel_arg_trip_count(args))
 
 
 def compute_sim_loop_trip_count(args: argparse.Namespace) -> int:
     virtual_k_steps = compute_virtual_k_steps(args)
-    if is_v9_perf_golden(args):
+    if is_checked_in_perf_golden(args):
         return max((virtual_k_steps - 2) // 2, 0)
     if (
         selected_example(args) == "tensilelite-subtile"
@@ -801,7 +863,7 @@ def compute_lds_bytes(args: argparse.Namespace) -> int:
 
 
 def compute_dynamic_lds_bytes(args: argparse.Namespace) -> int:
-    if is_v9_perf_golden(args):
+    if is_checked_in_perf_golden(args):
         return 0
     lds_bytes = compute_lds_bytes(args)
     return lds_bytes if lds_bytes >= STATIC_LDS_LIMIT else 0
@@ -1011,7 +1073,12 @@ def add_kernel_shape_args(ap: argparse.ArgumentParser) -> None:
     ap.add_argument("--chip", default="", help="gfx target; default from rocminfo")
     ap.add_argument(
         "--example",
-        choices=("matmul", "tensilelite-subtile", "v9-perf-golden"),
+        choices=(
+            "matmul",
+            "tensilelite-subtile",
+            "v9-perf-golden",
+            "tlx-mxfp-perf-golden",
+        ),
         default="matmul",
         help="kernel generator to benchmark",
     )
@@ -1042,7 +1109,7 @@ def add_kernel_shape_args(ap: argparse.ArgumentParser) -> None:
         choices=("auto", "wmma", "mfma", "mfma_gfx950"),
         default="auto",
     )
-    ap.add_argument("--output-type", choices=("f32", "f16"), default="f32")
+    ap.add_argument("--output-type", choices=("f32", "f16", "bf16"), default="f32")
     ap.add_argument("--input-type", choices=("f16", "bf16", "mxfp4"), default="f16")
     ap.add_argument("--mxfp4-scale-path", choices=("dma", "regs"), default="dma")
     ap.add_argument(
@@ -1232,15 +1299,63 @@ def _validate_v9_perf_golden_args(args: argparse.Namespace) -> None:
     )
 
 
+def _validate_tlx_mxfp_perf_golden_args(args: argparse.Namespace) -> None:
+    _require_arg(
+        args.chip == "gfx950",
+        "--example=tlx-mxfp-perf-golden requires gfx950",
+    )
+    _require_arg(
+        args.input_type == "mxfp4",
+        "--example=tlx-mxfp-perf-golden requires --input-type=mxfp4",
+    )
+    _require_arg(
+        args.output_type == "bf16",
+        "--example=tlx-mxfp-perf-golden requires --output-type=bf16",
+    )
+    _require_arg(
+        selected_matrix_intrinsic(args) == "mfma_gfx950",
+        "--example=tlx-mxfp-perf-golden requires gfx950 MFMA",
+    )
+    _require_arg(
+        args.k == 16384,
+        "--example=tlx-mxfp-perf-golden is frozen for --k=16384",
+    )
+    _require_arg(
+        args.m % 256 == 0 and args.n % 256 == 0,
+        "--example=tlx-mxfp-perf-golden requires M/N multiples of 256",
+    )
+    _require_arg(
+        (
+            args.bm == 2
+            and args.bn == 2
+            and args.wave_m_tiles == 8
+            and args.wave_n_tiles == 8
+            and args.wave_k_tiles == 2
+        ),
+        "--example=tlx-mxfp-perf-golden requires the TLX 256x256x256 tile shape",
+    )
+    _require_arg(
+        args.cta_swizzle_xcds == 8 and args.cta_group_m == 4,
+        "--example=tlx-mxfp-perf-golden requires NUM_XCDS=8 and GROUP_SIZE_M=4",
+    )
+
+
 def validate_example_args(args: argparse.Namespace) -> None:
     if selected_example(args) == "matmul":
         _require_arg(
             selected_scale_input(args) == "canonical",
             "--scale-input=tensilelite requires --example=tensilelite-subtile",
         )
+        _require_arg(
+            args.output_type != "bf16",
+            "--output-type=bf16 requires --example=tlx-mxfp-perf-golden",
+        )
         return
     if is_v9_perf_golden(args):
         _validate_v9_perf_golden_args(args)
+        return
+    if is_tlx_mxfp_perf_golden(args):
+        _validate_tlx_mxfp_perf_golden_args(args)
         return
     _validate_tensilelite_example_args(args)
 
