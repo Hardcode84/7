@@ -535,6 +535,13 @@ static void eraseDeadRematDefs(ArrayRef<RematReliefSlot> slots) {
     eraseDeadRematProducerTree(def, seen);
 }
 
+static unsigned countRematReliefDwords(const RematReliefCandidate &candidate) {
+  unsigned dwords = 0;
+  for (const RematReliefSlot &slot : candidate.slots)
+    dwords += slot.stateValue->width;
+  return dwords;
+}
+
 static FailureOr<bool>
 addRematReliefSlotsForSet(ArrayRef<ResolvedRegAllocValue> resolvedValues,
                           const RegAllocTransformFailure &failureRecord,
@@ -713,6 +720,18 @@ materializeRematRelief(OpBuilder &builder,
   return success();
 }
 
+static LogicalResult
+materializeSelectedRematRelief(OpBuilder &builder, func::FuncOp func,
+                               const RematReliefCandidate &candidate,
+                               const RegAllocTransformFailure &failureRecord,
+                               const RematReliefContext &context) {
+  if (failed(
+          materializeRematRelief(builder, candidate, failureRecord, context)))
+    return failure();
+  return wave::addRegAllocTransformProviderMetadata(
+      func, builder, "remat", countRematReliefDwords(candidate));
+}
+
 static LogicalResult runRegAllocRematRelief(func::FuncOp func) {
   FailureOr<std::optional<RegAllocTransformFailure>> failureRecord =
       parseRegAllocTransformFailure(func);
@@ -749,8 +768,8 @@ static LogicalResult runRegAllocRematRelief(func::FuncOp func) {
     return success();
 
   OpBuilder builder(func.getContext());
-  if (failed(materializeRematRelief(builder, **candidate, **failureRecord,
-                                    context)))
+  if (failed(materializeSelectedRematRelief(builder, func, **candidate,
+                                            **failureRecord, context)))
     return failure();
   func->removeAttr(wave::getRegAllocTransformAssignmentsAttrName());
   func->removeAttr(wave::getRegAllocTransformStateAttrName());

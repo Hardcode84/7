@@ -3,6 +3,11 @@
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
   // CHECK-LABEL: func.func @regalloc_transform_loop_lds_spills_post_failure_use(
   // CHECK-SAME: waveamdmachine.lds_spill_bytes = 256 : i64
+  // CHECK-SAME: waveamdmachine.metadata = [{name = "wave.regalloc.iterations", value = 2 : i64}
+  // CHECK-SAME: {name = "wave.regalloc.agpr.dwords", value = 0 : i64}
+  // CHECK-SAME: {name = "wave.regalloc.remat.dwords", value = 0 : i64}
+  // CHECK-SAME: {name = "wave.regalloc.lds.dwords", value = 1 : i64}
+  // CHECK-SAME: {name = "wave.regalloc.scratch.dwords", value = 0 : i64}
   // CHECK-SAME: waveamdmachine.regalloc_assignments
   // CHECK-SAME: waveamdmachine.regalloc_transform_state =
   // CHECK-SAME: stage = "linear-scan-success"

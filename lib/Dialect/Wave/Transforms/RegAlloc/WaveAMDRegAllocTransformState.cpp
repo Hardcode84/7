@@ -12,6 +12,7 @@
 #include "mlir/IR/BuiltinOps.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/Support/MathExtras.h"
+#include <array>
 #include <limits>
 
 using namespace mlir;
@@ -25,6 +26,16 @@ static constexpr StringLiteral kRegAllocAssignmentsAttr =
 static constexpr StringLiteral kRegAllocStageSuccess = "linear-scan-success";
 static constexpr StringLiteral kRegAllocStageFailure = "linear-scan-failure";
 static constexpr StringLiteral kTargetWavesAttr = "waveamdmachine.target_waves";
+static constexpr StringLiteral kRegAllocMetadataIterations =
+    "wave.regalloc.iterations";
+static constexpr StringLiteral kRegAllocMetadataAGPR =
+    "wave.regalloc.agpr.dwords";
+static constexpr StringLiteral kRegAllocMetadataRemat =
+    "wave.regalloc.remat.dwords";
+static constexpr StringLiteral kRegAllocMetadataLDS =
+    "wave.regalloc.lds.dwords";
+static constexpr StringLiteral kRegAllocMetadataScratch =
+    "wave.regalloc.scratch.dwords";
 
 StringRef getRegAllocTransformStateAttrName() {
   return kRegAllocTransformStateAttr;
@@ -636,6 +647,151 @@ LogicalResult setRegAllocTransformLoopIteration(Operation *target,
   WalkResult walk = target->walk([&](func::FuncOp func) {
     return failed(
                setFuncRegAllocTransformLoopIteration(func, builder, iteration))
+               ? WalkResult::interrupt()
+               : WalkResult::advance();
+  });
+  return failure(walk.wasInterrupted());
+}
+
+static ArrayRef<StringRef> getRegAllocMetadataNames() {
+  static const std::array<StringRef, 5> names = {
+      kRegAllocMetadataIterations, kRegAllocMetadataAGPR,
+      kRegAllocMetadataRemat, kRegAllocMetadataLDS, kRegAllocMetadataScratch};
+  return names;
+}
+
+static StringRef getRegAllocProviderMetadataName(StringRef provider) {
+  if (provider == "agpr")
+    return kRegAllocMetadataAGPR;
+  if (provider == "remat")
+    return kRegAllocMetadataRemat;
+  if (provider == "lds")
+    return kRegAllocMetadataLDS;
+  if (provider == "scratch")
+    return kRegAllocMetadataScratch;
+  return {};
+}
+
+static FailureOr<std::optional<Attribute>>
+getKernelMetadataEntry(Operation *op, StringRef name) {
+  FailureOr<SmallVector<waveamdmachine::KernelMetadataEntry>> entries =
+      waveamdmachine::getKernelMetadataEntries(op);
+  if (failed(entries))
+    return failure();
+  for (const waveamdmachine::KernelMetadataEntry &entry : *entries)
+    if (entry.name.getValue() == name)
+      return std::optional<Attribute>(entry.value);
+  return std::optional<Attribute>();
+}
+
+static FailureOr<int64_t> getRegAllocMetadataCounter(func::FuncOp func,
+                                                     StringRef name) {
+  FailureOr<std::optional<Attribute>> attr = getKernelMetadataEntry(func, name);
+  if (failed(attr))
+    return failure();
+  if (!*attr)
+    return 0;
+  auto intAttr = dyn_cast<IntegerAttr>(**attr);
+  if (!intAttr)
+    return func.emitError("regalloc metadata entry `")
+           << name << "` must be an integer";
+  int64_t value = intAttr.getInt();
+  if (value < 0)
+    return func.emitError("regalloc metadata entry `")
+           << name << "` must be non-negative";
+  return value;
+}
+
+static LogicalResult clearFuncRegAllocMetadata(func::FuncOp func,
+                                               Builder &builder) {
+  if (func.isDeclaration())
+    return success();
+  return waveamdmachine::removeKernelMetadataEntries(
+      func, builder, getRegAllocMetadataNames());
+}
+
+LogicalResult clearRegAllocTransformMetadata(Operation *target,
+                                             Builder &builder) {
+  if (auto func = dyn_cast<func::FuncOp>(target))
+    return clearFuncRegAllocMetadata(func, builder);
+  WalkResult walk = target->walk([&](func::FuncOp func) {
+    return failed(clearFuncRegAllocMetadata(func, builder))
+               ? WalkResult::interrupt()
+               : WalkResult::advance();
+  });
+  return failure(walk.wasInterrupted());
+}
+
+static LogicalResult setRegAllocMetadataCounter(func::FuncOp func,
+                                                Builder &builder,
+                                                StringRef name, int64_t value) {
+  return waveamdmachine::setKernelMetadataEntry(
+      func, builder, name, builder.getI64IntegerAttr(value));
+}
+
+struct RegAllocMetadataCounter {
+  StringRef name;
+  int64_t value = 0;
+};
+
+static LogicalResult
+setRegAllocMetadataCounters(func::FuncOp func, Builder &builder,
+                            ArrayRef<RegAllocMetadataCounter> counters) {
+  for (RegAllocMetadataCounter counter : counters)
+    if (failed(setRegAllocMetadataCounter(func, builder, counter.name,
+                                          counter.value)))
+      return failure();
+  return success();
+}
+
+LogicalResult addRegAllocTransformProviderMetadata(func::FuncOp func,
+                                                   Builder &builder,
+                                                   StringRef provider,
+                                                   int64_t dwords) {
+  StringRef name = getRegAllocProviderMetadataName(provider);
+  if (name.empty())
+    return func.emitError("unknown regalloc metadata provider `")
+           << provider << "`";
+  FailureOr<int64_t> current = getRegAllocMetadataCounter(func, name);
+  if (failed(current))
+    return failure();
+  return setRegAllocMetadataCounter(func, builder, name, *current + dwords);
+}
+
+static LogicalResult finalizeFuncRegAllocMetadata(func::FuncOp func,
+                                                  Builder &builder,
+                                                  int64_t iterations) {
+  if (func.isDeclaration())
+    return success();
+  FailureOr<int64_t> agpr =
+      getRegAllocMetadataCounter(func, kRegAllocMetadataAGPR);
+  FailureOr<int64_t> remat =
+      getRegAllocMetadataCounter(func, kRegAllocMetadataRemat);
+  FailureOr<int64_t> lds =
+      getRegAllocMetadataCounter(func, kRegAllocMetadataLDS);
+  FailureOr<int64_t> scratch =
+      getRegAllocMetadataCounter(func, kRegAllocMetadataScratch);
+  if (failed(agpr) || failed(remat) || failed(lds) || failed(scratch))
+    return failure();
+  if (failed(clearFuncRegAllocMetadata(func, builder)))
+    return failure();
+  std::array<RegAllocMetadataCounter, 5> counters = {{
+      {kRegAllocMetadataIterations, iterations},
+      {kRegAllocMetadataAGPR, *agpr},
+      {kRegAllocMetadataRemat, *remat},
+      {kRegAllocMetadataLDS, *lds},
+      {kRegAllocMetadataScratch, *scratch},
+  }};
+  return setRegAllocMetadataCounters(func, builder, counters);
+}
+
+LogicalResult finalizeRegAllocTransformMetadata(Operation *target,
+                                                Builder &builder,
+                                                int64_t iterations) {
+  if (auto func = dyn_cast<func::FuncOp>(target))
+    return finalizeFuncRegAllocMetadata(func, builder, iterations);
+  WalkResult walk = target->walk([&](func::FuncOp func) {
+    return failed(finalizeFuncRegAllocMetadata(func, builder, iterations))
                ? WalkResult::interrupt()
                : WalkResult::advance();
   });

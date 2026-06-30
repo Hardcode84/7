@@ -32,6 +32,7 @@
 #include "mlir/IR/OwningOpRef.h"
 #include "mlir/Target/LLVM/ROCDL/Utils.h"
 #include "mlir/Transforms/Passes.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/TypeSwitch.h"
@@ -121,9 +122,15 @@ struct KernelArgInfo {
   bool isGlobalBuffer = false;
 };
 
+struct KernelMetadataEntryInfo {
+  std::string name;
+  std::string value;
+};
+
 struct KernelInfo {
   std::string name;
   SmallVector<KernelArgInfo> args;
+  SmallVector<KernelMetadataEntryInfo> metadataEntries;
   unsigned kernargSize = 0;
   unsigned sgprCount = 0;
   unsigned vgprCount = 0;
@@ -134,6 +141,90 @@ struct KernelInfo {
   unsigned fixedLdsSize = 0;
   unsigned privateSegmentFixedSize = 0;
 };
+
+static bool isMetadataKeyChar(char c) {
+  return ('a' <= c && c <= 'z') || ('A' <= c && c <= 'Z') ||
+         ('0' <= c && c <= '9') || c == '_' || c == '-' || c == '.';
+}
+
+static LogicalResult validateMetadataKey(Operation *diagOp, StringRef name) {
+  if (name.empty())
+    return diagOp->emitError("waveamdmachine.metadata entry name is empty");
+  if (name.starts_with("."))
+    return diagOp->emitError("waveamdmachine.metadata entry `")
+           << name << "` uses reserved HSA metadata key namespace";
+  if (llvm::all_of(name, isMetadataKeyChar))
+    return success();
+  return diagOp->emitError("waveamdmachine.metadata entry `")
+         << name << "` has unsupported YAML key characters";
+}
+
+static LogicalResult printMetadataString(Operation *diagOp, StringRef value,
+                                         raw_ostream &os) {
+  os << '"';
+  for (char c : value) {
+    switch (c) {
+    case '"':
+    case '\\':
+      os << '\\' << c;
+      break;
+    case '\n':
+    case '\r':
+    case '\t':
+      return diagOp->emitError(
+          "waveamdmachine.metadata string values cannot contain control "
+          "characters");
+    default:
+      os << c;
+      break;
+    }
+  }
+  os << '"';
+  return success();
+}
+
+static LogicalResult printMetadataValue(Operation *diagOp, Attribute attr,
+                                        raw_ostream &os) {
+  if (auto boolAttr = dyn_cast<BoolAttr>(attr)) {
+    os << (boolAttr.getValue() ? "true" : "false");
+    return success();
+  }
+  if (auto intAttr = dyn_cast<IntegerAttr>(attr)) {
+    os << intAttr.getInt();
+    return success();
+  }
+  if (auto stringAttr = dyn_cast<StringAttr>(attr))
+    return printMetadataString(diagOp, stringAttr.getValue(), os);
+  return diagOp->emitError()
+         << "waveamdmachine.metadata entry values must be integer, bool, or "
+            "string attributes";
+}
+
+static FailureOr<SmallVector<KernelMetadataEntryInfo>>
+collectKernelMetadataEntries(func::FuncOp func) {
+  FailureOr<SmallVector<waveamdmachine::KernelMetadataEntry>> entries =
+      waveamdmachine::getKernelMetadataEntries(func);
+  if (failed(entries))
+    return failure();
+
+  SmallVector<KernelMetadataEntryInfo> out;
+  DenseSet<StringRef> seen;
+  out.reserve(entries->size());
+  for (const waveamdmachine::KernelMetadataEntry &entry : *entries) {
+    StringRef name = entry.name.getValue();
+    if (failed(validateMetadataKey(func, name)))
+      return failure();
+    if (!seen.insert(name).second)
+      return func.emitError("duplicate waveamdmachine.metadata entry `")
+             << name << "`";
+    std::string value;
+    llvm::raw_string_ostream valueOS(value);
+    if (failed(printMetadataValue(func, entry.value, valueOS)))
+      return failure();
+    out.push_back({name.str(), valueOS.str()});
+  }
+  return out;
+}
 
 struct KernelRegisterUsage {
   unsigned vgprCount = 0;
@@ -255,8 +346,7 @@ public:
       if (failed(emitFunction(func)))
         return failure();
     }
-    emitMetadata();
-    return success();
+    return emitMetadata();
   }
 
 private:
@@ -978,9 +1068,14 @@ private:
                                           slot.offset, slot.size,
                                           slot.isGlobalBuffer});
       }
+      FailureOr<SmallVector<KernelMetadataEntryInfo>> metadataEntries =
+          collectKernelMetadataEntries(func);
+      if (failed(metadataEntries))
+        return failure();
+      info.metadataEntries = std::move(*metadataEntries);
+      kernels.push_back(std::move(info));
       if (failed(emitKernelDescriptor(func)))
         return failure();
-      kernels.push_back(info);
     }
     return success();
   }
@@ -1315,9 +1410,9 @@ private:
     return success();
   }
 
-  void emitMetadata() {
+  LogicalResult emitMetadata() {
     if (kernels.empty())
-      return;
+      return success();
 
     os << "\t.amdgpu_metadata\n";
     os << "---\n";
@@ -1364,6 +1459,8 @@ private:
       os << "    .vgpr_spill_count: " << kernel.vgprSpillCount << "\n";
       os << "    .wavefront_size: " << wavefrontSize << "\n";
       os << "    .workgroup_processor_mode: 1\n";
+      for (const KernelMetadataEntryInfo &entry : kernel.metadataEntries)
+        os << "    " << entry.name << ": " << entry.value << "\n";
     }
     os << "amdhsa.target:   " << targetTriple << "--" << targetChip << "\n";
     os << "amdhsa.version:\n";
@@ -1371,6 +1468,7 @@ private:
     os << "  - 2\n";
     os << "...\n";
     os << "\t.end_amdgpu_metadata\n";
+    return success();
   }
 
   unsigned getPhys(Value value) const {

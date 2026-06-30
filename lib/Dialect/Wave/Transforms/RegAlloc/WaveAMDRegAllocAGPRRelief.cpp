@@ -39,6 +39,7 @@ struct AGPRReliefCandidate {
   SmallVector<ResolvedRegAllocValue> values;
   const wave::RegAllocTransformAliasSet *set = nullptr;
   AGPRReliefScore score;
+  unsigned promotedDwords = 0;
 };
 
 struct AGPRReliefSetGroup {
@@ -500,6 +501,13 @@ getAGPRReliefScore(const AGPRReliefSetGroup &group,
           end};
 }
 
+static unsigned getAGPRReliefPromotedDwords(const AGPRReliefSetGroup &group) {
+  unsigned dwords = 0;
+  for (const wave::RegAllocTransformAliasSet *set : group.sets)
+    dwords += set->width;
+  return dwords;
+}
+
 static bool isBetterAGPRReliefScore(AGPRReliefScore lhs, AGPRReliefScore rhs) {
   int64_t lhsCost = getAGPRReliefPrimaryCost(lhs);
   int64_t rhsCost = getAGPRReliefPrimaryCost(rhs);
@@ -690,6 +698,7 @@ buildAGPRReliefCandidate(func::FuncOp func, unsigned setId,
   candidate.set = set;
   candidate.values = std::move(groupValues);
   candidate.score = score;
+  candidate.promotedDwords = getAGPRReliefPromotedDwords(group);
   return std::optional<AGPRReliefCandidate>(std::move(candidate));
 }
 
@@ -848,6 +857,10 @@ static void materializeAGPRRelief(OpBuilder &builder,
     materializeAGPRReliefValue(builder, value.first, groupValues, replacements);
 }
 
+static unsigned countAGPRReliefDwords(const AGPRReliefCandidate &candidate) {
+  return candidate.promotedDwords;
+}
+
 static FailureOr<std::optional<AGPRReliefCandidate>>
 selectAGPRReliefCandidateFromFunc(
     func::FuncOp func, const RegAllocTransformFailure &failureRecord) {
@@ -923,6 +936,9 @@ static LogicalResult runRegAllocAGPRRelief(func::FuncOp func) {
 
   OpBuilder builder(func.getContext());
   materializeAGPRRelief(builder, **candidate);
+  if (failed(wave::addRegAllocTransformProviderMetadata(
+          func, builder, "agpr", countAGPRReliefDwords(**candidate))))
+    return failure();
   func->removeAttr(wave::getRegAllocTransformAssignmentsAttrName());
   func->removeAttr(wave::getRegAllocTransformStateAttrName());
   return success();

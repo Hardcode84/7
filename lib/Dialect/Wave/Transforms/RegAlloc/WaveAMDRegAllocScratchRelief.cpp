@@ -364,6 +364,14 @@ materializeScratchRelief(OpBuilder &builder, func::FuncOp func,
                                                     load, reserve, loopStore);
 }
 
+static unsigned
+countScratchReliefDwords(const ScratchReliefCandidate &candidate) {
+  unsigned dwords = 0;
+  for (const ScratchReliefSlot &slot : candidate.slots)
+    dwords += slot.type.getWidth();
+  return dwords;
+}
+
 static LogicalResult runRegAllocScratchRelief(func::FuncOp func) {
   FailureOr<std::optional<RegAllocTransformFailure>> failureRecord =
       parseRegAllocTransformFailure(func);
@@ -385,6 +393,9 @@ static LogicalResult runRegAllocScratchRelief(func::FuncOp func) {
 
   OpBuilder builder(func.getContext());
   if (failed(materializeScratchRelief(builder, func, **candidate)))
+    return failure();
+  if (failed(wave::addRegAllocTransformProviderMetadata(
+          func, builder, "scratch", countScratchReliefDwords(**candidate))))
     return failure();
   func->removeAttr(wave::getRegAllocTransformAssignmentsAttrName());
   func->removeAttr(wave::getRegAllocTransformStateAttrName());

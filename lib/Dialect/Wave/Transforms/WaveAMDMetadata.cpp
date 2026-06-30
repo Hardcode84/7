@@ -32,6 +32,31 @@ static ModuleOp findTargetModule(Operation *op) {
   return module;
 }
 
+static bool hasKernelMetadataInputs(func::FuncOp func) {
+  return func->hasAttr("waveamdmachine.kernarg_size") &&
+         func->hasAttr("waveamdmachine.sgpr_count") &&
+         func->hasAttr("waveamdmachine.vgpr_count");
+}
+
+static LogicalResult initializeKernelMetadata(func::FuncOp func,
+                                              Builder &builder) {
+  if (failed(wave::failIfWaveAMDRegAllocOverflowed(func, "waveamd-metadata")))
+    return failure();
+  if (!hasKernelMetadataInputs(func)) {
+    func.emitError("waveamd-metadata requires ABI and resource attributes "
+                   "on kernels");
+    return failure();
+  }
+  if (failed(waveamdmachine::getKernelMetadataEntries(func)))
+    return failure();
+  Attribute metadata =
+      func->getAttr(waveamdmachine::getKernelMetadataAttrName());
+  if (!metadata || isa<UnitAttr>(metadata))
+    func->setAttr(waveamdmachine::getKernelMetadataAttrName(),
+                  builder.getArrayAttr({}));
+  return success();
+}
+
 struct WaveAMDMetadataPass
     : public wave::impl::WaveAMDMetadataBase<WaveAMDMetadataPass> {
   void runOnOperation() override {
@@ -47,19 +72,9 @@ struct WaveAMDMetadataPass
       if (f->hasAttr(wave::WaveDialect::getKernelAttrName()))
         kernels.push_back(f);
     });
-    for (func::FuncOp func : kernels) {
-      if (failed(
-              wave::failIfWaveAMDRegAllocOverflowed(func, "waveamd-metadata")))
+    for (func::FuncOp func : kernels)
+      if (failed(initializeKernelMetadata(func, builder)))
         return signalPassFailure();
-      if (!func->hasAttr("waveamdmachine.kernarg_size") ||
-          !func->hasAttr("waveamdmachine.sgpr_count") ||
-          !func->hasAttr("waveamdmachine.vgpr_count")) {
-        func.emitError("waveamd-metadata requires ABI and resource attributes "
-                       "on kernels");
-        return signalPassFailure();
-      }
-      func->setAttr("waveamdmachine.metadata", builder.getUnitAttr());
-    }
   }
 };
 

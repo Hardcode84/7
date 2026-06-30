@@ -8,6 +8,11 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 
   // CHECK-LABEL: func.func @regalloc_transform_loop_mwe
   // CHECK-SAME: !waveamdmachine.reg<vgpr, 1, 0>
+  // CHECK-SAME: waveamdmachine.metadata = [{name = "wave.regalloc.iterations", value = 1 : i64}
+  // CHECK-SAME: {name = "wave.regalloc.agpr.dwords", value = 0 : i64}
+  // CHECK-SAME: {name = "wave.regalloc.remat.dwords", value = 0 : i64}
+  // CHECK-SAME: {name = "wave.regalloc.lds.dwords", value = 0 : i64}
+  // CHECK-SAME: {name = "wave.regalloc.scratch.dwords", value = 0 : i64}
   // CHECK-SAME: waveamdmachine.regalloc_assignments
   // CHECK-SAME: waveamdmachine.regalloc_transform_state =
   // CHECK-SAME: assignments = [{base = 0 : i64, class = "vgpr"

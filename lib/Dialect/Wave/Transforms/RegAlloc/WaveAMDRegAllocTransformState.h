@@ -126,6 +126,18 @@ LogicalResult setRegAllocTransformLoopIteration(Operation *target,
                                                 Builder &builder,
                                                 int64_t iteration);
 
+LogicalResult clearRegAllocTransformMetadata(Operation *target,
+                                             Builder &builder);
+
+LogicalResult finalizeRegAllocTransformMetadata(Operation *target,
+                                                Builder &builder,
+                                                int64_t iterations);
+
+LogicalResult addRegAllocTransformProviderMetadata(func::FuncOp func,
+                                                   Builder &builder,
+                                                   StringRef provider,
+                                                   int64_t dwords);
+
 } // namespace mlir::wave
 
 #endif // MLIR_DIALECT_WAVE_TRANSFORMS_WAVEAMDREGALLOCTRANSFORMSTATE_H

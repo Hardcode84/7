@@ -22,6 +22,109 @@
 using namespace mlir;
 using namespace mlir::waveamdmachine;
 
+static constexpr StringLiteral kKernelMetadataAttr = "waveamdmachine.metadata";
+static constexpr StringLiteral kKernelMetadataEntryName = "name";
+static constexpr StringLiteral kKernelMetadataEntryValue = "value";
+
+StringRef mlir::waveamdmachine::getKernelMetadataAttrName() {
+  return kKernelMetadataAttr;
+}
+
+static FailureOr<KernelMetadataEntry> parseKernelMetadataEntry(Attribute attr,
+                                                               Operation *op) {
+  auto dict = dyn_cast<DictionaryAttr>(attr);
+  if (!dict)
+    return op->emitError() << kKernelMetadataAttr
+                           << " entries must be dictionaries";
+  auto name = dict.getAs<StringAttr>(kKernelMetadataEntryName);
+  if (!name || name.getValue().empty())
+    return op->emitError() << kKernelMetadataAttr
+                           << " entries need non-empty string `"
+                           << kKernelMetadataEntryName << "`";
+  Attribute value = dict.get(kKernelMetadataEntryValue);
+  if (!value)
+    return op->emitError() << kKernelMetadataAttr << " entry `"
+                           << name.getValue() << "` needs `"
+                           << kKernelMetadataEntryValue << "`";
+  return KernelMetadataEntry{name, value};
+}
+
+FailureOr<SmallVector<KernelMetadataEntry>>
+mlir::waveamdmachine::getKernelMetadataEntries(Operation *op) {
+  Attribute attr = op->getAttr(kKernelMetadataAttr);
+  SmallVector<KernelMetadataEntry> entries;
+  if (!attr || isa<UnitAttr>(attr))
+    return entries;
+  auto array = dyn_cast<ArrayAttr>(attr);
+  if (!array)
+    return op->emitError() << kKernelMetadataAttr
+                           << " must be unit or an array";
+  entries.reserve(array.size());
+  for (Attribute entryAttr : array) {
+    FailureOr<KernelMetadataEntry> entry =
+        parseKernelMetadataEntry(entryAttr, op);
+    if (failed(entry))
+      return failure();
+    entries.push_back(*entry);
+  }
+  return entries;
+}
+
+static DictionaryAttr
+getKernelMetadataEntryAttr(Builder &builder, StringRef name, Attribute value) {
+  return builder.getDictionaryAttr({
+      builder.getNamedAttr(kKernelMetadataEntryName,
+                           builder.getStringAttr(name)),
+      builder.getNamedAttr(kKernelMetadataEntryValue, value),
+  });
+}
+
+LogicalResult mlir::waveamdmachine::setKernelMetadataEntry(Operation *op,
+                                                           Builder &builder,
+                                                           StringRef name,
+                                                           Attribute value) {
+  FailureOr<SmallVector<KernelMetadataEntry>> entries =
+      getKernelMetadataEntries(op);
+  if (failed(entries))
+    return failure();
+
+  SmallVector<Attribute> newEntries;
+  bool replaced = false;
+  for (const KernelMetadataEntry &entry : *entries) {
+    if (entry.name.getValue() == name) {
+      if (!replaced) {
+        newEntries.push_back(getKernelMetadataEntryAttr(builder, name, value));
+        replaced = true;
+      }
+      continue;
+    }
+    newEntries.push_back(getKernelMetadataEntryAttr(
+        builder, entry.name.getValue(), entry.value));
+  }
+  if (!replaced)
+    newEntries.push_back(getKernelMetadataEntryAttr(builder, name, value));
+  op->setAttr(kKernelMetadataAttr, builder.getArrayAttr(newEntries));
+  return success();
+}
+
+LogicalResult mlir::waveamdmachine::removeKernelMetadataEntries(
+    Operation *op, Builder &builder, ArrayRef<StringRef> names) {
+  FailureOr<SmallVector<KernelMetadataEntry>> entries =
+      getKernelMetadataEntries(op);
+  if (failed(entries))
+    return failure();
+
+  SmallVector<Attribute> kept;
+  for (const KernelMetadataEntry &entry : *entries) {
+    if (llvm::is_contained(names, entry.name.getValue()))
+      continue;
+    kept.push_back(getKernelMetadataEntryAttr(builder, entry.name.getValue(),
+                                              entry.value));
+  }
+  op->setAttr(kKernelMetadataAttr, builder.getArrayAttr(kept));
+  return success();
+}
+
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineInterfaces.cpp.inc"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineOpsDialect.cpp.inc"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineOpsEnums.cpp.inc"

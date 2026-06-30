@@ -170,6 +170,24 @@ static TimingScope getRegAllocStageTimingScope(StringRef name) {
   return timing.regAllocScope.nest(name);
 }
 
+static LogicalResult clearRegAllocLoopMetadata(ArrayRef<Operation *> targets,
+                                               Builder &builder) {
+  for (Operation *target : targets)
+    if (failed(wave::clearRegAllocTransformMetadata(target, builder)))
+      return failure();
+  return success();
+}
+
+static LogicalResult finalizeRegAllocLoopMetadata(ArrayRef<Operation *> targets,
+                                                  Builder &builder,
+                                                  int64_t iterations) {
+  for (Operation *target : targets)
+    if (failed(wave::finalizeRegAllocTransformMetadata(target, builder,
+                                                       iterations)))
+      return failure();
+  return success();
+}
+
 static DiagnosedSilenceableFailure
 runRegAllocLoopBody(wave::TransformRegAllocLoopOp op,
                     transform::TransformResults &results,
@@ -187,6 +205,9 @@ runRegAllocLoopBody(wave::TransformRegAllocLoopOp op,
     current.push_back(target);
 
   Builder builder(op.getContext());
+  if (failed(clearRegAllocLoopMetadata(current, builder)))
+    return op.emitDefiniteFailure()
+           << "failed to clear regalloc transform metadata";
   int64_t maxIterations = op.getMaxIterations();
   for (int64_t iteration = 0; iteration < maxIterations; ++iteration) {
     SmallVector<Operation *> yielded;
@@ -205,6 +226,9 @@ runRegAllocLoopBody(wave::TransformRegAllocLoopOp op,
              << "failed to read regalloc transform loop state";
 
     if (*decision != wave::RegAllocTransformLoopDecision::Restart) {
+      if (failed(finalizeRegAllocLoopMetadata(yielded, builder, iteration + 1)))
+        return op.emitDefiniteFailure()
+               << "failed to finalize regalloc transform metadata";
       results.set(cast<OpResult>(op.getResult()), yielded);
       return DiagnosedSilenceableFailure::success();
     }

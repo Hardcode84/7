@@ -2255,6 +2255,11 @@ amdhsa.kernels:
     .vgpr_spill_count: 126
     .wavefront_size: 64
     .workgroup_processor_mode: 1
+    wave.regalloc.iterations: 82
+    wave.regalloc.agpr.dwords: 0
+    wave.regalloc.remat.dwords: 21
+    wave.regalloc.lds.dwords: 12
+    wave.regalloc.scratch.dwords: 126
 amdhsa.target:   amdgcn-amd-amdhsa--gfx950
 amdhsa.version:
   - 1

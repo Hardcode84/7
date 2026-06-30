@@ -493,6 +493,13 @@ static LogicalResult materializeLDSRelief(OpBuilder &builder, func::FuncOp func,
                                                 reserve, loopStore);
 }
 
+static unsigned countLDSReliefDwords(const LDSReliefCandidate &candidate) {
+  unsigned dwords = 0;
+  for (const LDSReliefSlot &slot : candidate.slots)
+    dwords += slot.type.getWidth();
+  return dwords;
+}
+
 static LogicalResult runRegAllocLDSRelief(func::FuncOp func) {
   FailureOr<std::optional<RegAllocTransformFailure>> failureRecord =
       parseRegAllocTransformFailure(func);
@@ -518,6 +525,9 @@ static LogicalResult runRegAllocLDSRelief(func::FuncOp func) {
 
   OpBuilder builder(func.getContext());
   if (failed(materializeLDSRelief(builder, func, **candidate)))
+    return failure();
+  if (failed(wave::addRegAllocTransformProviderMetadata(
+          func, builder, "lds", countLDSReliefDwords(**candidate))))
     return failure();
   func->removeAttr(wave::getRegAllocTransformAssignmentsAttrName());
   func->removeAttr(wave::getRegAllocTransformStateAttrName());
