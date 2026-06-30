@@ -850,6 +850,7 @@ class FunctionBuilder:
         self,
         expr: ixsimpl.Expr,
         bindings: Mapping[ixsimpl.Expr, Value] | None = None,
+        assumptions: Sequence[ixsimpl.Expr] | None = None,
         result_type: Type | None = None,
     ) -> Value:
         """Build a `wave.index_expr` from a symbolic expression.
@@ -886,9 +887,16 @@ class FunctionBuilder:
         expr_attr = ExprAttr.get_from_node_ptr(
             _ixsimpl_node_ptr(expr), context=_current_context()
         )
+        assumptions_attr = None
+        if assumptions is not None:
+            assumptions_attr = ArrayAttr.get([_pred_attr(pred) for pred in assumptions])
         names_attr = ArrayAttr.get([StringAttr.get(n) for n in filtered])
         return wave.IndexExprOp(
-            result_type, expr_attr, names_attr, list(filtered.values())
+            result_type,
+            expr_attr,
+            names_attr,
+            list(filtered.values()),
+            assumptions=assumptions_attr,
         ).result
 
     def ptr_add(

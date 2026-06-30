@@ -76,6 +76,52 @@ static Operation *buildSharedStore(WaveAMDMachineSelector &S, StoreOp op,
       S.builder, op.getLoc(), tokenType, addr, value, dep, offset);
 }
 
+static FailureOr<sym::ExprHandle>
+appendAddressExpr(WaveAMDMachineSelector &S, sym::ExprHandle lhs,
+                  sym::ExprHandle rhs, ArrayRef<sym::PredHandle> assumptions) {
+  if (!lhs)
+    return rhs;
+  if (!rhs)
+    return lhs;
+  FailureOr<sym::ExprHandle> expr =
+      sym::composeExprBinary(S.symbolStore(), lhs, sym::ExprBinaryOp::Add, rhs);
+  if (failed(expr))
+    return failure();
+  FailureOr<sym::ExprHandle> simplified =
+      sym::simplifyExpr(S.symbolStore(), *expr, assumptions);
+  return succeeded(simplified) ? *simplified : *expr;
+}
+
+static LogicalResult foldBufferAddressFields(WaveAMDMachineSelector &S,
+                                             AddressPlan &plan) {
+  FailureOr<sym::ExprHandle> voffset = appendAddressExpr(
+      S, plan.voffsetExpr, plan.soffsetExpr, plan.assumptions);
+  if (failed(voffset))
+    return failure();
+  voffset = appendAddressExpr(S, *voffset, plan.fullAddressRemainderExpr,
+                              plan.assumptions);
+  if (failed(voffset))
+    return failure();
+  if (plan.instOffset != 0) {
+    FailureOr<sym::ExprHandle> instOffset =
+        sym::composeExprInt(S.symbolStore(), plan.instOffset);
+    if (failed(instOffset))
+      return failure();
+    voffset = appendAddressExpr(S, *voffset, *instOffset, plan.assumptions);
+    if (failed(voffset))
+      return failure();
+  }
+  if (!S.slotFitsU32(*voffset, plan.assumptions))
+    return success();
+  plan.voffsetExpr = *voffset;
+  plan.voffsetNeedsWide = needsWideAddressMaterialization(*voffset, plan);
+  plan.instOffset = 0;
+  plan.soffsetExpr = {};
+  plan.soffsetNeedsWide = false;
+  plan.fullAddressRemainderExpr = {};
+  return success();
+}
+
 LogicalResult selectSharedStore(WaveAMDMachineSelector &S, StoreOp op,
                                 Value base, const PointerOffset &offset,
                                 unsigned registers, bool useB8Op,
@@ -241,6 +287,9 @@ static LogicalResult selectGlobalOrBufferStore(
   FailureOr<AddressPlan> plan = planMemoryAddress(S, op, offset, spec);
   if (failed(plan))
     return failure();
+  if (isBuffer && plan->fullAddressRemainderExpr)
+    if (failed(foldBufferAddressFields(S, *plan)))
+      return failure();
   if (plan->fullAddressRemainderExpr && isBuffer)
     return emitBufferAddressFieldError(op.getOperation());
   if (plan->fullAddressRemainderExpr)
@@ -479,6 +528,9 @@ static LogicalResult selectGlobalOrBufferLoad(
   FailureOr<AddressPlan> plan = planMemoryAddress(S, op, offset, spec);
   if (failed(plan))
     return failure();
+  if (isBuffer && plan->fullAddressRemainderExpr)
+    if (failed(foldBufferAddressFields(S, *plan)))
+      return failure();
   if (plan->fullAddressRemainderExpr && isBuffer)
     return emitBufferAddressFieldError(op.getOperation());
   if (plan->fullAddressRemainderExpr)

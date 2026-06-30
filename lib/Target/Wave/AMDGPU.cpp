@@ -472,6 +472,9 @@ private:
   bool supportsCvtPkF16F32() const {
     return waveamdmachine::supportsCvtPkF16F32Inst(isaVersion);
   }
+  bool supportsCvtPkBF16F32() const {
+    return waveamdmachine::supportsCvtPkBF16F32Inst(isaVersion);
+  }
   bool supportsPackedF16() const {
     return isaVersion.Major == 9 || isaVersion.Major == 11;
   }
@@ -486,6 +489,13 @@ private:
     if (isaVersion.Major == 12 && isaVersion.Minor == 5)
       return llvm::AMDGPU::V_CVT_PK_F16_F32_e64_gfx1250;
     return llvm::AMDGPU::V_CVT_PK_F16_F32_gfx9;
+  }
+  unsigned vCvtPkBF16F32() const {
+    if (isaVersion.Major == 13)
+      return llvm::AMDGPU::V_CVT_PK_BF16_F32_e64_gfx13;
+    if (isaVersion.Major == 12 && isaVersion.Minor == 5)
+      return llvm::AMDGPU::V_CVT_PK_BF16_F32_e64_gfx1250;
+    return llvm::AMDGPU::V_CVT_PK_BF16_F32_vi;
   }
   unsigned vPkAddF16() const {
     if (isGfx8Or9())
@@ -2434,6 +2444,11 @@ private:
       if (!supportsCvtPkF16F32())
         return op.emitError("v_cvt_pk_f16_f32 requires cvt-pk-f16-f32-inst");
       return emitPackedCvtVOP3(vCvtPkF16F32(), op);
+    }
+    if (isa<waveamdmachine::VCvtPkBF16F32Op>(op)) {
+      if (!supportsCvtPkBF16F32())
+        return op.emitError("v_cvt_pk_bf16_f32 requires bf16-cvt-insts");
+      return emitPackedCvtVOP3(vCvtPkBF16F32(), op);
     }
     if (isa<waveamdmachine::VPkAddF16Op, waveamdmachine::VPkMulF16Op>(op)) {
       if (!supportsPackedF16())

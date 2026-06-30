@@ -96,6 +96,11 @@ bool mlir::waveamdmachine::supportsCvtPkF16F32Inst(
   return isGfx950(isa) || isGfx125x(isa) || isa.Major == 13;
 }
 
+bool mlir::waveamdmachine::supportsCvtPkBF16F32Inst(
+    const llvm::AMDGPU::IsaVersion &isa) {
+  return isGfx950(isa) || isGfx125x(isa) || isa.Major == 13;
+}
+
 std::optional<unsigned>
 mlir::waveamdmachine::getAMDGPUDefaultWavefrontSize(StringRef chip) {
   llvm::AMDGPU::IsaVersion isa = llvm::AMDGPU::getIsaVersion(chip);

@@ -110,6 +110,10 @@ static std::optional<unsigned> getSimdPackedF16Length(Type type) {
   return getSimdPow2VectorLength(type, Float16Type::get(type.getContext()));
 }
 
+static std::optional<unsigned> getSimdPackedBF16Length(Type type) {
+  return getSimdPow2VectorLength(type, BFloat16Type::get(type.getContext()));
+}
+
 static std::optional<unsigned> getSimdPackedF32Length(Type type) {
   return getSimdPow2VectorLength(type, Float32Type::get(type.getContext()));
 }
@@ -770,20 +774,23 @@ struct I64RangeBounds {
   std::optional<int64_t> upper;
 };
 
-static sym::ExprHandle canonicalAddressExpr(WaveAMDMachineSelector &S,
-                                            sym::ExprHandle value) {
+static sym::ExprHandle
+canonicalAddressExpr(WaveAMDMachineSelector &S, sym::ExprHandle value,
+                     ArrayRef<sym::PredHandle> assumptions = {}) {
   FailureOr<sym::ExprHandle> expanded = sym::expandExpr(S.symbolStore(), value);
   if (succeeded(expanded))
     value = *expanded;
   FailureOr<sym::ExprHandle> simplified =
-      sym::simplifyExpr(S.symbolStore(), value);
+      assumptions.empty()
+          ? sym::simplifyExpr(S.symbolStore(), value)
+          : sym::simplifyExpr(S.symbolStore(), value, assumptions);
   return succeeded(simplified) ? *simplified : value;
 }
 
-static std::optional<int64_t> offsetFromTarget(WaveAMDMachineSelector &S,
-                                               sym::ExprHandle target,
-                                               sym::ExprHandle lhs,
-                                               sym::ExprHandle rhs) {
+static std::optional<int64_t>
+offsetFromTarget(WaveAMDMachineSelector &S, sym::ExprHandle target,
+                 sym::ExprHandle lhs, sym::ExprHandle rhs,
+                 ArrayRef<sym::PredHandle> assumptions) {
   FailureOr<sym::ExprHandle> negRhs = sym::composeExprNeg(S.symbolStore(), rhs);
   if (failed(negRhs))
     return std::nullopt;
@@ -795,12 +802,13 @@ static std::optional<int64_t> offsetFromTarget(WaveAMDMachineSelector &S,
       sym::composeExprNeg(S.symbolStore(), target);
   if (failed(negTarget))
     return std::nullopt;
-  FailureOr<sym::ExprHandle> delta =
-      sym::composeExprBinary(S.symbolStore(), canonicalAddressExpr(S, *diff),
-                             sym::ExprBinaryOp::Add, *negTarget);
+  FailureOr<sym::ExprHandle> delta = sym::composeExprBinary(
+      S.symbolStore(), canonicalAddressExpr(S, *diff, assumptions),
+      sym::ExprBinaryOp::Add, *negTarget);
   if (failed(delta))
     return std::nullopt;
-  return sym::getIntegerLiteralValue(canonicalAddressExpr(S, *delta));
+  return sym::getIntegerLiteralValue(
+      canonicalAddressExpr(S, *delta, assumptions));
 }
 
 static void tightenLower(I64RangeBounds &bounds, int64_t bound) {
@@ -839,18 +847,19 @@ static void applyCmpBound(sym::PredCmpOp op, int64_t bound,
 
 static void collectTargetRange(WaveAMDMachineSelector &S,
                                sym::ExprHandle target, sym::PredHandle pred,
+                               ArrayRef<sym::PredHandle> assumptions,
                                I64RangeBounds &bounds) {
   sym::PredView view(pred);
   if (view.getKind() == sym::PredKind::And) {
     for (uint32_t i = 0, e = view.getLogicArgCount(); i != e; ++i)
-      collectTargetRange(S, target, view.getLogicArg(i), bounds);
+      collectTargetRange(S, target, view.getLogicArg(i), assumptions, bounds);
     return;
   }
   if (view.getKind() != sym::PredKind::Cmp)
     return;
   std::optional<sym::PredCmpOp> op = view.getCmpOp();
-  std::optional<int64_t> offset =
-      offsetFromTarget(S, target, view.getCmpLhs(), view.getCmpRhs());
+  std::optional<int64_t> offset = offsetFromTarget(
+      S, target, view.getCmpLhs(), view.getCmpRhs(), assumptions);
   if (!op || !offset)
     return;
   std::optional<int64_t> bound = llvm::checkedSub(int64_t{0}, *offset);
@@ -861,9 +870,9 @@ static void collectTargetRange(WaveAMDMachineSelector &S,
 static bool provenRangeFitsU32(WaveAMDMachineSelector &S, sym::ExprHandle expr,
                                ArrayRef<sym::PredHandle> assumptions) {
   I64RangeBounds bounds;
-  sym::ExprHandle target = canonicalAddressExpr(S, expr);
+  sym::ExprHandle target = canonicalAddressExpr(S, expr, assumptions);
   for (sym::PredHandle pred : assumptions)
-    collectTargetRange(S, target, pred, bounds);
+    collectTargetRange(S, target, pred, assumptions, bounds);
   constexpr int64_t u32Max = (int64_t{1} << 32) - 1;
   return bounds.lower && bounds.upper && *bounds.lower >= 0 &&
          *bounds.upper <= u32Max;
@@ -4360,6 +4369,18 @@ static FailureOr<unsigned> getPackedF32ToF16VectorLength(CastOp op) {
   return *sourceLength;
 }
 
+static FailureOr<unsigned> getPackedF32ToBF16VectorLength(CastOp op) {
+  std::optional<unsigned> sourceLength =
+      getSimdPackedF32Length(op.getSource().getType());
+  std::optional<unsigned> resultLength =
+      getSimdPackedBF16Length(op.getResult().getType());
+  if (!sourceLength || !resultLength || *sourceLength != *resultLength)
+    return op.emitError("packed f32 to bf16 lowering requires matching "
+                        "!wave.simd<vector<2^nxf32>, W> to "
+                        "!wave.simd<vector<2^nxbf16>, W>");
+  return *sourceLength;
+}
+
 static FailureOr<unsigned> getPackedF16ToF32VectorLength(CastOp op) {
   std::optional<unsigned> sourceLength =
       getSimdPackedF16Length(op.getSource().getType());
@@ -4389,6 +4410,24 @@ static Value emitPackedF32ToF16Cvt(WaveAMDMachineSelector &S, Location loc,
     Value hi = index + 1 < vectorLength ? sourceWords[index + 1]
                                         : createUninitVGPR1(S, loc);
     Value word = CvtOp::create(S.builder, loc, vgprType, sourceWords[index], hi)
+                     .getResult();
+    resultWords.push_back(word);
+  }
+  return joinVGPRWords(S, loc, resultWords);
+}
+
+static Value emitPackedF32ToBF16Cvt(WaveAMDMachineSelector &S, Location loc,
+                                    ArrayRef<Value> sourceWords,
+                                    unsigned vectorLength) {
+  Type vgprType =
+      getRegType(S.builder.getContext(), waveamdmachine::RegClass::VGPR);
+  SmallVector<Value> resultWords;
+  resultWords.reserve(getPackedF16WordCount(vectorLength));
+  for (unsigned index = 0; index < vectorLength; index += 2) {
+    Value hi = index + 1 < vectorLength ? sourceWords[index + 1]
+                                        : createUninitVGPR1(S, loc);
+    Value word = waveamdmachine::VCvtPkBF16F32Op::create(
+                     S.builder, loc, vgprType, sourceWords[index], hi)
                      .getResult();
     resultWords.push_back(word);
   }
@@ -4457,6 +4496,35 @@ static LogicalResult selectPackedF32ToF16Cast(WaveAMDMachineSelector &S,
   return success();
 }
 
+static LogicalResult selectPackedF32ToBF16Cast(WaveAMDMachineSelector &S,
+                                               CastOp op,
+                                               CastRounding rounding) {
+  if (rounding != CastRounding::RNE)
+    return op.emitError(
+        "packed f32 to bf16 lowering supports only rne rounding");
+
+  FailureOr<llvm::AMDGPU::IsaVersion> isa =
+      getTargetIsaVersion(op, "packed f32 to bf16 lowering");
+  if (failed(isa))
+    return failure();
+  if (!waveamdmachine::VCvtPkBF16F32Op::isSupportedOnIsa(*isa))
+    return op.emitError("v_cvt_pk_bf16_f32 unsupported on target");
+
+  FailureOr<unsigned> vectorLength = getPackedF32ToBF16VectorLength(op);
+  if (failed(vectorLength))
+    return failure();
+  FailureOr<SmallVector<Value>> sourceWords = splitVGPRMaterializedWords(
+      S, op.getOperation(), S.expect(op.getSource(), op), *vectorLength,
+      "source");
+  if (failed(sourceWords))
+    return failure();
+
+  S.values[op.getResult()] =
+      emitPackedF32ToBF16Cvt(S, op.getLoc(), *sourceWords, *vectorLength);
+  S.eraseIfTopLevel(op);
+  return success();
+}
+
 static LogicalResult selectPackedF16ToF32Cast(WaveAMDMachineSelector &S,
                                               CastOp op,
                                               CastRounding rounding) {
@@ -4517,8 +4585,28 @@ static LogicalResult selectScalarFpConvert(WaveAMDMachineSelector &S, CastOp op,
     return success();
   }
   return op.emitError(
-      "WaveAMDMachine fpconvert lowering supports only f32/f16 SIMD or "
-      "vector<2^nxf32> to vector<2^nxf16> SIMD");
+      "WaveAMDMachine fpconvert lowering supports only f32/f16 SIMD, "
+      "vector<2^nxf32> to vector<2^nxf16> SIMD, or vector<2^nxf32> to "
+      "vector<2^nxbf16> SIMD");
+}
+
+static std::optional<LogicalResult>
+selectPackedFpConvert(WaveAMDMachineSelector &S, CastOp op,
+                      CastRounding rounding) {
+  Type f16Type = Float16Type::get(op.getContext());
+  Type bf16Type = BFloat16Type::get(op.getContext());
+  Type f32Type = Float32Type::get(op.getContext());
+
+  if (isSimdVectorElement(op.getSource().getType(), f32Type) &&
+      isSimdVectorElement(op.getResult().getType(), f16Type))
+    return selectPackedF32ToF16Cast(S, op, rounding);
+  if (isSimdVectorElement(op.getSource().getType(), f32Type) &&
+      isSimdVectorElement(op.getResult().getType(), bf16Type))
+    return selectPackedF32ToBF16Cast(S, op, rounding);
+  if (isSimdVectorElement(op.getSource().getType(), f16Type) &&
+      isSimdVectorElement(op.getResult().getType(), f32Type))
+    return selectPackedF16ToF32Cast(S, op, rounding);
+  return std::nullopt;
 }
 
 LogicalResult WaveAMDMachineSelector::selectCast(CastOp op) {
@@ -4535,15 +4623,10 @@ LogicalResult WaveAMDMachineSelector::selectCast(CastOp op) {
   Type sourceElement = sourceType.getElementType();
   Type resultElement = resultType.getElementType();
   CastRounding rounding = getFpConvertRounding(op);
-  Type f16Type = Float16Type::get(op.getContext());
-  Type f32Type = Float32Type::get(op.getContext());
-
-  if (isSimdVectorElement(op.getSource().getType(), f32Type) &&
-      isSimdVectorElement(op.getResult().getType(), f16Type))
-    return selectPackedF32ToF16Cast(*this, op, rounding);
-  if (isSimdVectorElement(op.getSource().getType(), f16Type) &&
-      isSimdVectorElement(op.getResult().getType(), f32Type))
-    return selectPackedF16ToF32Cast(*this, op, rounding);
+  std::optional<LogicalResult> packed =
+      selectPackedFpConvert(*this, op, rounding);
+  if (packed)
+    return *packed;
   return selectScalarFpConvert(*this, op, sourceElement, resultElement,
                                rounding);
 }

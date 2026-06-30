@@ -45,6 +45,8 @@ bool supportsAGPRs(const llvm::AMDGPU::IsaVersion &isa);
 
 bool supportsCvtPkF16F32Inst(const llvm::AMDGPU::IsaVersion &isa);
 
+bool supportsCvtPkBF16F32Inst(const llvm::AMDGPU::IsaVersion &isa);
+
 std::optional<unsigned> getAMDGPUDefaultWavefrontSize(llvm::StringRef chip);
 
 FailureOr<unsigned> getAMDGPUDefaultWavefrontSize(Operation *op,

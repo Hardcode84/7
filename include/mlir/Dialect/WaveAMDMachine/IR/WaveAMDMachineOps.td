@@ -848,6 +848,14 @@ def WaveAMDMachine_VCvtPkF16F32Op
   let archPredicate =
       "::mlir::waveamdmachine::supportsCvtPkF16F32Inst(isa)";
 }
+def WaveAMDMachine_VCvtPkBF16F32Op
+    : WaveAMDMachine_BinaryResult<"v_cvt_pk_bf16_f32",
+                               WaveAMDMachine_VGPR1,
+                               WaveAMDMachine_VGPR1,
+                               [WaveAMDMachine_VALU]> {
+  let archPredicate =
+      "::mlir::waveamdmachine::supportsCvtPkBF16F32Inst(isa)";
+}
 def WaveAMDMachine_VPkAddF16Op
     : WaveAMDMachine_PackedBinaryResult<"v_pk_add_f16">;
 def WaveAMDMachine_VPkMulF16Op

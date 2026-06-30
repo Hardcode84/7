@@ -95,10 +95,11 @@ SchedClass classifyOp(Operation *op) {
             VLshlrevB64Op, VLshrrevB64Op, VAshrrevI64Op>(
           [](auto) { return SchedClass::Write64Bit; })
       .Case<VCvtF16F32Op, VCvtF32F16Op, VCvtF32U32Op, VCvtU32F32Op,
-            VCvtPkRtzF16F32Op, VCvtPkF16F32Op, VPkAddF16Op, VPkMulF16Op,
-            VPkFmaF16Op, VAdd3U32Op, VLshlAddU32Op, VAddLshlU32Op,
-            VAndOrB32Op, VOr3B32Op, VXadU32Op, VMadI32I24Op, VMadU32U24Op,
-            VFfbhU32Op, VFfblB32Op, VMulHiU32Op, VAshrrevI32Op>(
+            VCvtPkRtzF16F32Op, VCvtPkF16F32Op, VCvtPkBF16F32Op,
+            VPkAddF16Op, VPkMulF16Op, VPkFmaF16Op, VAdd3U32Op,
+            VLshlAddU32Op, VAddLshlU32Op, VAndOrB32Op, VOr3B32Op,
+            VXadU32Op, VMadI32I24Op, VMadU32U24Op, VFfbhU32Op, VFfblB32Op,
+            VMulHiU32Op, VAshrrevI32Op>(
           [](auto) { return SchedClass::Write32Bit; })
       .Case<VExpF32Op, VRcpF32Op, VRcpIFlagF32Op>(
           [](auto) { return SchedClass::WriteTrans32; })
