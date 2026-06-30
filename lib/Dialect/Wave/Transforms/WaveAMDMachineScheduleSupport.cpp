@@ -630,6 +630,11 @@ static bool isNonDmaCmaIssueOp(Operation *op) {
          waveamdmachine::getEventSimCmaIssueCount(op, cls, issueCount) > 0;
 }
 
+static bool isCounterBurstProducer(Operation *op) {
+  return waveamdmachine::isLdsDmaIssuer(op) ||
+         op->hasTrait<traits::LDSLoadOp>();
+}
+
 static int64_t
 computeCounterBurstCycles(ArrayRef<Operation *> ops,
                           const waveamdmachine::ArchData &arch,
@@ -637,11 +642,11 @@ computeCounterBurstCycles(ArrayRef<Operation *> ops,
   int64_t current = 0;
   int64_t worst = 0;
   bool sawCma = false;
-  bool sawLdsDma = false;
+  bool sawCounterBurstProducer = false;
   unsigned capacity = waveamdmachine::getEventSimCmaIssueCapacity(arch);
   for (Operation *op : ops) {
-    if (waveamdmachine::isLdsDmaIssuer(op)) {
-      sawLdsDma = true;
+    if (isCounterBurstProducer(op)) {
+      sawCounterBurstProducer = true;
       int latency = waveamdmachine::getMemoryCounterLatency(
           arch, op, config.counterLatencies, config.calibration);
       int64_t clamped = std::max(latency, 0);
@@ -660,7 +665,7 @@ computeCounterBurstCycles(ArrayRef<Operation *> ops,
     }
   }
   worst = std::max(worst, current);
-  if (!sawCma || !sawLdsDma)
+  if (!sawCma || !sawCounterBurstProducer)
     return 0;
   return worst;
 }

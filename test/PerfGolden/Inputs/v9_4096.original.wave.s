@@ -570,6 +570,11 @@ v9_beyond_hotloop:
 		v_mfma_f32_16x16x32_f16 v[220:223], v[96:99], v[64:67], v[220:223]
 		s_waitcnt vmcnt(8)
 		s_barrier
+		ds_read_b128 v[36:39], v25 offset:33760
+		ds_read_b128 v[40:43], v25 offset:42208
+		ds_read_b128 v[44:47], v25 offset:50656
+		ds_read_b128 v[48:51], v25 offset:59104
+		ds_read_b64_tr_b16 v[52:53], v26 offset:18848
 		s_add_i32 s52, s37, s50
 		s_mov_b32 m0, s36
 		v_add_u32_e32 v27, s52, v1
@@ -578,11 +583,6 @@ v9_beyond_hotloop:
 		s_mov_b32 m0, s38
 		v_add_u32_e32 v27, s52, v1
 		buffer_load_dwordx4 v27, s[20:23], 0 offen lds
-		ds_read_b128 v[36:39], v25 offset:33760
-		ds_read_b128 v[40:43], v25 offset:42208
-		ds_read_b128 v[44:47], v25 offset:50656
-		ds_read_b128 v[48:51], v25 offset:59104
-		ds_read_b64_tr_b16 v[52:53], v26 offset:18848
 		ds_read_b64_tr_b16 v[54:55], v26 offset:19904
 		s_waitcnt lgkmcnt(0)
 		v_mfma_f32_16x16x32_f16 v[16:19], v[52:55], v[36:39], v[16:19]

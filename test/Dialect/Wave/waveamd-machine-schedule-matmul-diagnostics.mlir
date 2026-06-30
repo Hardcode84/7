@@ -64,6 +64,32 @@ func.func @issue_window_candidate(%a: !waveamdmachine.reg<vgpr, 4>,
 // -----
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
+func.func @ds_read_burst_counter(%a: !waveamdmachine.reg<vgpr, 4>,
+                                 %b: !waveamdmachine.reg<vgpr, 4>,
+                                 %acc: !waveamdmachine.reg<vgpr, 4>,
+                                 %addr: !waveamdmachine.reg<vgpr, 1>,
+                                 %tok: !waveamdmachine.mem.token) {
+  %ld0, %t0 = waveamdmachine.ds_load_b128 %addr after %tok
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+        -> (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.mem.token)
+  %ld1, %t1 = waveamdmachine.ds_load_b128 %addr after %t0 offset 4096
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+        -> (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.mem.token)
+  %r0 = waveamdmachine.mfma_f32_16x16x32_f16 %ld0, %b, %acc
+      : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
+         !waveamdmachine.reg<vgpr, 4>) -> !waveamdmachine.reg<vgpr, 4>
+  %r1 = waveamdmachine.mfma_f32_16x16x32_f16 %ld1, %a, %r0
+      : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
+         !waveamdmachine.reg<vgpr, 4>) -> !waveamdmachine.reg<vgpr, 4>
+  return
+}
+}
+
+// DIAG: waveamd-machine-schedule-report candidate func=ds_read_burst_counter region=0 name=original cycles={{[0-9]+}} delta=0 issued_ops={{[0-9]+}} counter_burst_cycles={{[1-9][0-9]*}}
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 func.func @cma_dma_place_candidate(%a: !waveamdmachine.reg<vgpr, 4>,
                                    %b: !waveamdmachine.reg<vgpr, 4>,
                                    %acc0: !waveamdmachine.reg<vgpr, 4>,
