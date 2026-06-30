@@ -2969,17 +2969,9 @@ compareResourceTie(const EvaluatedCandidate &candidate,
   return std::nullopt;
 }
 
-static bool usesCounterBurstSelection(const EvaluatedCandidate &candidate) {
-  return candidate.name == "original" ||
-         isCounterBurstPlacementCandidate(candidate);
-}
-
 static int64_t adjustedScheduleCycles(const EvaluatedCandidate &candidate) {
-  int64_t cycles =
-      candidate.metrics.score.cycles + candidate.metrics.hazardWaitCycles;
-  if (!usesCounterBurstSelection(candidate))
-    return cycles;
-  return cycles + candidate.metrics.counterBurstCycles;
+  return candidate.metrics.score.cycles + candidate.metrics.hazardWaitCycles +
+         candidate.metrics.counterBurstCycles;
 }
 
 static bool hasLowerCounterBurst(const EvaluatedCandidate &candidate,
