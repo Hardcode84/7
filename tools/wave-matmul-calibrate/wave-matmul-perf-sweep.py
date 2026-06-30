@@ -84,7 +84,7 @@ KERNELS = {
         key="v9",
         label="v9",
         profile="v9-4096-original-wave",
-        variants="baseline",
+        variants="scheduled",
         default_k_values=(V9_K,),
         sweep_k=False,
     ),
@@ -92,7 +92,7 @@ KERNELS = {
         key="v9-transposed",
         label="v9-transposed",
         profile="v9-4096-transposed-wave",
-        variants="baseline",
+        variants="scheduled",
         default_k_values=(V9_K,),
         sweep_k=False,
     ),
@@ -391,7 +391,7 @@ def build_argparser() -> argparse.ArgumentParser:
         default="",
         help=(
             "override variants for every kernel; defaults are scheduled "
-            "f16/mxfp4, baseline v9 variants"
+            "f16/mxfp4/v9 variants"
         ),
     )
     parser.add_argument(

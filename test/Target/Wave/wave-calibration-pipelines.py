@@ -17,6 +17,7 @@
 # CHECK: matmul_dma_sim_trip_count: ok
 # CHECK: matmul_v9_perf_golden_profile: ok
 # CHECK: matmul_v9_transposed_perf_golden_profile: ok
+# CHECK: matmul_perf_sweep_v9_defaults: ok
 # CHECK: calibration_scheduler_region_cap: ok
 # CHECK: matmul_pingpong_removed: ok
 
@@ -1003,6 +1004,20 @@ def check_matmul_v9_transposed_perf_golden_profile(matmul) -> None:
     print("matmul_v9_transposed_perf_golden_profile: ok")
 
 
+def check_matmul_perf_sweep_v9_defaults(perf_sweep) -> None:
+    require(
+        "matmul_perf_sweep_v9_defaults",
+        perf_sweep.KERNELS["v9"].variants == "scheduled",
+        "v9 sweep should time scheduled golden",
+    )
+    require(
+        "matmul_perf_sweep_v9_defaults",
+        perf_sweep.KERNELS["v9-transposed"].variants == "scheduled",
+        "transposed v9 sweep should time scheduled golden",
+    )
+    print("matmul_perf_sweep_v9_defaults: ok")
+
+
 def check_calibration_scheduler_region_cap(matmul, fa) -> None:
     matmul_args = matmul.parse_args(["--chip=gfx950", "--skip-hw"])
     matmul_variant = matmul.VARIANTS["scheduled"]
@@ -1047,6 +1062,10 @@ def main() -> int:
         "wave_fa_calibrate",
         REPO_ROOT / "tools/wave-fa-calibrate/wave-fa-calibrate.py",
     )
+    perf_sweep = load_module(
+        "wave_matmul_perf_sweep",
+        REPO_ROOT / "tools/wave-matmul-calibrate/wave-matmul-perf-sweep.py",
+    )
     check_calibration_entry("matmul_pipeline", matmul)
     check_calibration_entry("fa_pipeline", fa)
     check_matmul_wave_size(matmul)
@@ -1063,6 +1082,7 @@ def main() -> int:
     check_matmul_dma_sim_trip_count(matmul)
     check_matmul_v9_perf_golden_profile(matmul)
     check_matmul_v9_transposed_perf_golden_profile(matmul)
+    check_matmul_perf_sweep_v9_defaults(perf_sweep)
     check_calibration_scheduler_region_cap(matmul, fa)
     try:
         matmul.parse_variants("pingpong")
