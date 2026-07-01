@@ -51,6 +51,38 @@ func.func @pack_extract_rebuild_i16(%v: !wave.simd<vector<2xi16>, 32>)
   return %p : !wave.simd<vector<2xi16>, 32>
 }
 
+// CHECK-LABEL: func.func @pack_extract_slice_low_i8
+// CHECK-SAME: (%[[V:.*]]: !wave.simd<vector<8xi8>, 64>)
+// CHECK-NOT: -> !wave.simd<i8, 64>
+// CHECK-NOT: wave.pack
+// CHECK: %[[SLICE:.*]] = wave.extract %[[V]][0] : !wave.simd<vector<8xi8>, 64> -> !wave.simd<vector<4xi8>, 64>
+// CHECK: return %[[SLICE]] : !wave.simd<vector<4xi8>, 64>
+func.func @pack_extract_slice_low_i8(%v: !wave.simd<vector<8xi8>, 64>)
+    -> !wave.simd<vector<4xi8>, 64> {
+  %a = wave.extract %v[0] : !wave.simd<vector<8xi8>, 64> -> !wave.simd<i8, 64>
+  %b = wave.extract %v[1] : !wave.simd<vector<8xi8>, 64> -> !wave.simd<i8, 64>
+  %c = wave.extract %v[2] : !wave.simd<vector<8xi8>, 64> -> !wave.simd<i8, 64>
+  %d = wave.extract %v[3] : !wave.simd<vector<8xi8>, 64> -> !wave.simd<i8, 64>
+  %p = wave.pack %a, %b, %c, %d : !wave.simd<i8, 64>, !wave.simd<i8, 64>, !wave.simd<i8, 64>, !wave.simd<i8, 64> -> !wave.simd<vector<4xi8>, 64>
+  return %p : !wave.simd<vector<4xi8>, 64>
+}
+
+// CHECK-LABEL: func.func @pack_extract_slice_high_i8
+// CHECK-SAME: (%[[V:.*]]: !wave.simd<vector<8xi8>, 64>)
+// CHECK-NOT: -> !wave.simd<i8, 64>
+// CHECK-NOT: wave.pack
+// CHECK: %[[SLICE:.*]] = wave.extract %[[V]][4] : !wave.simd<vector<8xi8>, 64> -> !wave.simd<vector<4xi8>, 64>
+// CHECK: return %[[SLICE]] : !wave.simd<vector<4xi8>, 64>
+func.func @pack_extract_slice_high_i8(%v: !wave.simd<vector<8xi8>, 64>)
+    -> !wave.simd<vector<4xi8>, 64> {
+  %a = wave.extract %v[4] : !wave.simd<vector<8xi8>, 64> -> !wave.simd<i8, 64>
+  %b = wave.extract %v[5] : !wave.simd<vector<8xi8>, 64> -> !wave.simd<i8, 64>
+  %c = wave.extract %v[6] : !wave.simd<vector<8xi8>, 64> -> !wave.simd<i8, 64>
+  %d = wave.extract %v[7] : !wave.simd<vector<8xi8>, 64> -> !wave.simd<i8, 64>
+  %p = wave.pack %a, %b, %c, %d : !wave.simd<i8, 64>, !wave.simd<i8, 64>, !wave.simd<i8, 64>, !wave.simd<i8, 64> -> !wave.simd<vector<4xi8>, 64>
+  return %p : !wave.simd<vector<4xi8>, 64>
+}
+
 // CHECK-LABEL: func.func @pack_extract_swapped_stays
 // CHECK: wave.extract
 // CHECK: wave.extract

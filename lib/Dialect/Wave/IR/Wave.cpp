@@ -1245,6 +1245,101 @@ OpFoldResult PackOp::fold(FoldAdaptor) {
   return {};
 }
 
+namespace {
+struct PackExtractSliceMatch {
+  Value source;
+  uint64_t startIndex;
+};
+
+static LogicalResult verifyPackExtractSlicePayload(OperandRange inputs,
+                                                   VectorType resultVector) {
+  if (inputs.empty())
+    return failure();
+  if (resultVector.getNumElements() != static_cast<int64_t>(inputs.size()))
+    return failure();
+  if (getWavePayloadElementCount(inputs.front().getType()) != 1)
+    return failure();
+  if (getWavePayloadElementType(inputs.front().getType()) !=
+      resultVector.getElementType())
+    return failure();
+  return success();
+}
+
+static FailureOr<PackExtractSliceMatch> matchPackFirstExtract(PackOp op) {
+  ExtractOp firstExtract = op.getInputs().front().getDefiningOp<ExtractOp>();
+  if (!firstExtract)
+    return failure();
+
+  Value source = firstExtract.getSource();
+  uint64_t startIndex = firstExtract.getIndex();
+  if (source.getType() == op.getResult().getType() && startIndex == 0)
+    return failure();
+
+  return PackExtractSliceMatch{source, startIndex};
+}
+
+static LogicalResult verifyPackExtractSliceBounds(Value source,
+                                                  uint64_t startIndex,
+                                                  VectorType resultVector) {
+  VectorType sourceVector = getWaveVectorPayloadType(source.getType());
+  uint64_t resultElementCount =
+      static_cast<uint64_t>(resultVector.getNumElements());
+  uint64_t sourceElementCount =
+      static_cast<uint64_t>(sourceVector.getNumElements());
+  if (startIndex + resultElementCount > sourceElementCount)
+    return failure();
+  return success();
+}
+
+static LogicalResult verifyPackExtractSliceInputs(OperandRange inputs,
+                                                  Value source,
+                                                  uint64_t startIndex) {
+  for (auto [offset, input] : llvm::enumerate(inputs)) {
+    ExtractOp extract = input.getDefiningOp<ExtractOp>();
+    if (!extract || extract.getSource() != source)
+      return failure();
+    if (extract.getIndex() != startIndex + static_cast<uint64_t>(offset))
+      return failure();
+  }
+  return success();
+}
+
+struct PackContiguousExtractsToSlice : OpRewritePattern<PackOp> {
+  using OpRewritePattern::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(PackOp op,
+                                PatternRewriter &rewriter) const override {
+    OperandRange inputs = op.getInputs();
+    VectorType resultVector =
+        getWaveVectorPayloadType(op.getResult().getType());
+    if (failed(verifyPackExtractSlicePayload(inputs, resultVector)))
+      return failure();
+
+    FailureOr<PackExtractSliceMatch> match = matchPackFirstExtract(op);
+    if (failed(match))
+      return failure();
+
+    if (failed(verifyPackExtractSliceBounds(match->source, match->startIndex,
+                                            resultVector)))
+      return failure();
+    if (failed(verifyPackExtractSliceInputs(inputs, match->source,
+                                            match->startIndex)))
+      return failure();
+
+    ExtractOp slice = ExtractOp::create(
+        rewriter, op.getLoc(), op.getResult().getType(), match->source,
+        rewriter.getI64IntegerAttr(static_cast<int64_t>(match->startIndex)));
+    rewriter.replaceOp(op, slice.getResult());
+    return success();
+  }
+};
+} // namespace
+
+void PackOp::getCanonicalizationPatterns(RewritePatternSet &patterns,
+                                         MLIRContext *context) {
+  patterns.add<PackContiguousExtractsToSlice>(context);
+}
+
 static FailureOr<Type>
 getExtractResultPayloadType(ExtractOp op, std::optional<int64_t> simdWidth) {
   Type resultType = op.getResult().getType();

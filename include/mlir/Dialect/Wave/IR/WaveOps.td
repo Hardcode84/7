@@ -250,6 +250,7 @@ def Wave_PackOp : Wave_Op<"pack", [Pure, SameTypeOperands]> {
   let assemblyFormat = [{
     $inputs attr-dict `:` type($inputs) `->` type($result)
   }];
+  let hasCanonicalizer = 1;
   let hasFolder = 1;
   let hasVerifier = 1;
 }
