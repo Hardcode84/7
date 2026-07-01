@@ -234,6 +234,18 @@ static bool packTupleElements(waveamdmachine::TupleFromElementsOp tuple,
   return true;
 }
 
+static void eraseDeadScalarB32Moves(Operation *root) {
+  SmallVector<waveamdmachine::VMovB32TupleOp, 16> deadMoves;
+  root->walk([&](waveamdmachine::VMovB32TupleOp op) {
+    auto resultType =
+        dyn_cast<waveamdmachine::RegType>(op.getResult().getType());
+    if (resultType && resultType.getWidth() == 1 && op->use_empty())
+      deadMoves.push_back(op);
+  });
+  for (waveamdmachine::VMovB32TupleOp op : llvm::reverse(deadMoves))
+    op.erase();
+}
+
 struct WaveAMDPackVGPRZeroMovesPass
     : public wave::impl::WaveAMDPackVGPRZeroMovesBase<
           WaveAMDPackVGPRZeroMovesPass> {
@@ -264,6 +276,7 @@ struct WaveAMDPackVGPRZeroMovesPass
       for (waveamdmachine::TupleFromElementsOp op : tuples)
         packTupleElements(op, dom);
     }
+    eraseDeadScalarB32Moves(root);
   }
 };
 

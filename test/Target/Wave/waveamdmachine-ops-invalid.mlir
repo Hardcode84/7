@@ -208,6 +208,25 @@ func.func @bad_accvgpr_read_width(%source: !waveamdmachine.reg<agpr, 2>) {
 
 // -----
 
+func.func @bad_accvgpr_write_width(%source: !waveamdmachine.reg<vgpr, 2>) {
+  // expected-error @below {{source and result widths must match}}
+  %r = waveamdmachine.v_accvgpr_write_b32_tuple %source
+      : (!waveamdmachine.reg<vgpr, 2>) -> !waveamdmachine.reg<agpr, 1>
+  return
+}
+
+// -----
+
+func.func @bad_accvgpr_write_non_inline_imm() {
+  %literal = waveamdmachine.imm 65 : !waveamdmachine.imm
+  // expected-error @below {{immediate source must be an inline 32-bit constant}}
+  %r = waveamdmachine.v_accvgpr_write_b32_tuple %literal
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<agpr, 1>
+  return
+}
+
+// -----
+
 func.func @tuple_to_elements_wrong_count(%t: !waveamdmachine.reg<vgpr, 8>) {
   // expected-error @below {{element widths sum (4) must match tuple register width (8)}}
   %e:4 = waveamdmachine.tuple_to_elements %t

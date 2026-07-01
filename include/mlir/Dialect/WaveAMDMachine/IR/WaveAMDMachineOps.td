@@ -691,9 +691,9 @@ def WaveAMDMachine_VAccvgprReadB32TupleOp
 
 def WaveAMDMachine_VAccvgprWriteB32TupleOp
     : WaveAMDMachine_UnaryResult<"v_accvgpr_write_b32_tuple",
-                                 WaveAMDMachine_VGPR, WaveAMDMachine_AGPR,
+                                 WaveAMDMachine_VGPROrImm, WaveAMDMachine_AGPR,
                                  [WaveAMDMachine_VALU, Pure]> {
-  let summary = "copy a VGPR tuple into AGPRs";
+  let summary = "copy a VGPR tuple or inline immediate into AGPRs";
   let archPredicate = WaveAMDMachine_AGPRTarget;
   let hasVerifier = 1;
 }

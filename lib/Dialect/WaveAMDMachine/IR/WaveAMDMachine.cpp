@@ -9,6 +9,7 @@
 
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachine.h"
 
+#include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineInstrInfo.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/DialectImplementation.h"
 #include "mlir/Interfaces/ControlFlowInterfaces.h"
@@ -604,8 +605,13 @@ LogicalResult VAccvgprReadB32TupleOp::verify() {
 }
 
 LogicalResult VAccvgprWriteB32TupleOp::verify() {
-  auto sourceType = cast<RegType>(getSource().getType());
-  auto resultType = cast<RegType>(getResult().getType());
+  RegType resultType = cast<RegType>(getResult().getType());
+  if (isa<ImmType>(getSource().getType())) {
+    if (!isInlineImm32(getSource()))
+      return emitOpError("immediate source must be an inline 32-bit constant");
+    return success();
+  }
+  RegType sourceType = cast<RegType>(getSource().getType());
   if (sourceType.getWidth() != resultType.getWidth())
     return emitOpError("source and result widths must match");
   return success();

@@ -2349,7 +2349,7 @@ private:
       Value src = op.getOperand(0);
       for (unsigned i : llvm::seq<unsigned>(0, regType.getWidth()))
         if (failed(emitMC(vAccvgprWriteB32(), {toMCAGPRComponent(result(), i),
-                                               toMCVGPRComponent(src, i)})))
+                                               toMCB32Component(src, i)})))
           return failure();
       return success();
     }

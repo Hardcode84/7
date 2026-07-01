@@ -145,10 +145,11 @@ module attributes {transform.with_named_sequence} {
     }
 
     // DIRECT-LABEL: func.func @agpr_relief_rebanks_tuple_from_elements_replacements(
-    // DIRECT: [[AG0:%.*]] = waveamdmachine.v_accvgpr_write_b32_tuple
-    // DIRECT: [[AG1:%.*]] = waveamdmachine.v_accvgpr_write_b32_tuple
-    // DIRECT: [[AG2:%.*]] = waveamdmachine.v_accvgpr_write_b32_tuple
-    // DIRECT: [[AG3:%.*]] = waveamdmachine.v_accvgpr_write_b32_tuple
+    // DIRECT: [[ZERO:%.*]] = waveamdmachine.imm 0
+    // DIRECT: [[AG0:%.*]] = waveamdmachine.v_accvgpr_write_b32_tuple [[ZERO]]
+    // DIRECT: [[AG1:%.*]] = waveamdmachine.v_accvgpr_write_b32_tuple [[ZERO]]
+    // DIRECT: [[AG2:%.*]] = waveamdmachine.v_accvgpr_write_b32_tuple [[ZERO]]
+    // DIRECT: [[AG3:%.*]] = waveamdmachine.v_accvgpr_write_b32_tuple [[ZERO]]
     // DIRECT-NOT: waveamdmachine.v_accvgpr_read_b32_tuple [[AG0]]
     // DIRECT: [[TUPLE:%.*]] = waveamdmachine.tuple_from_elements [[AG0]], [[AG1]], [[AG2]], [[AG3]]
     // DIRECT-SAME: (!waveamdmachine.reg<agpr, 1>, !waveamdmachine.reg<agpr, 1>, !waveamdmachine.reg<agpr, 1>, !waveamdmachine.reg<agpr, 1>) -> !waveamdmachine.reg<agpr, 4>
@@ -256,8 +257,9 @@ module attributes {transform.with_named_sequence} {
 
     // CHECK-LABEL: func.func @agpr_relief_promotes_loop_carry(
     // CHECK-NOT: waveamdmachine.regalloc_transform_state
+    // CHECK: [[ZERO:%.*]] = waveamdmachine.imm 0
     // CHECK: [[INIT:%.*]] = waveamdmachine.v_mov_b32_tuple
-    // CHECK: [[AG:%.*]] = waveamdmachine.v_accvgpr_write_b32_tuple [[INIT]]
+    // CHECK: [[AG:%.*]] = waveamdmachine.v_accvgpr_write_b32_tuple [[ZERO]]
     // CHECK-NOT: waveamdmachine.v_accvgpr_read_b32_tuple [[AG]]
     // CHECK: waveamdmachine.uniform_loop {{.*}} carries([[AG]] : !waveamdmachine.reg<agpr, 4>)
     // CHECK: ^bb0([[CARRY:%[^:]+]]: !waveamdmachine.reg<agpr, 4>):

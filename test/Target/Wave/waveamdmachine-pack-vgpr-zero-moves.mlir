@@ -170,6 +170,18 @@ func.func @nonzero_tuple_stays_b32() {
   return
 }
 
+// PACK-LABEL: func.func @dead_scalar_zero_move_before_agpr_write
+// PACK-NOT: waveamdmachine.v_mov_b32_tuple
+// PACK: waveamdmachine.v_accvgpr_write_b32_tuple
+func.func @dead_scalar_zero_move_before_agpr_write() {
+  %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+  %dead = waveamdmachine.v_mov_b32_tuple %zero
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1, 32>
+  %agpr = waveamdmachine.v_accvgpr_write_b32_tuple %zero
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<agpr, 1, 0>
+  return
+}
+
 // PACK-LABEL: func.func @b64_result_feeds_hazards
 // PACK: waveamdmachine.v_mov_b64_tuple
 // WAITS-LABEL: func.func @b64_result_feeds_hazards

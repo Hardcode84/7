@@ -11,6 +11,7 @@
 #include "WaveAMDRegAllocTransformUtils.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachine.h"
+#include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineInstrInfo.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/IRMapping.h"
@@ -733,6 +734,16 @@ getRegAllocTransformClassType(Value value, waveamdmachine::RegClass regClass) {
                                       type.getWidth(), /*index=*/-1);
 }
 
+static Value getAGPRReliefWriteSource(Value value) {
+  auto mov = value.getDefiningOp<waveamdmachine::VMovB32TupleOp>();
+  if (!mov)
+    return value;
+  Value source = mov.getSource();
+  if (waveamdmachine::isInlineImm32(source))
+    return source;
+  return value;
+}
+
 static waveamdmachine::VAccvgprWriteB32TupleOp
 createAGPRReliefWrite(OpBuilder &builder, Value value) {
   if (Operation *def = value.getDefiningOp()) {
@@ -743,8 +754,9 @@ createAGPRReliefWrite(OpBuilder &builder, Value value) {
   }
   auto agprType =
       getRegAllocTransformClassType(value, waveamdmachine::RegClass::AGPR);
+  Value source = getAGPRReliefWriteSource(value);
   auto write = waveamdmachine::VAccvgprWriteB32TupleOp::create(
-      builder, value.getLoc(), agprType, value);
+      builder, value.getLoc(), agprType, source);
   write->setAttr("waveamdmachine.regalloc_debug_temp", builder.getUnitAttr());
   return write;
 }
