@@ -74,7 +74,7 @@ module attributes {transform.with_named_sequence} {
 
     // CHECK-LABEL: func.func @target_waves_keeps_vgpr_addressable_limit
     // CHECK-NOT: waveamdmachine.regalloc_assignments
-    // CHECK-SAME: failure = {budget_mode = "default", class = "vgpr"
+    // CHECK-SAME: failure = {budget_mode = "target_addressable", class = "vgpr"
     // CHECK-SAME: limit = 256 : i64
     // CHECK-SAME: pressure = 257 : i64
     // CHECK-SAME: reason = "pressure"

@@ -8,6 +8,7 @@
 
 #include "WaveAMDRegAllocTransformState.h"
 
+#include "WaveAMDRegisterLimits.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineTarget.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "llvm/ADT/STLExtras.h"
@@ -439,6 +440,28 @@ static StringRef getRegClassBudgetAttr(waveamdmachine::RegClass regClass) {
   llvm_unreachable("unknown register class");
 }
 
+static std::optional<unsigned>
+getTargetAddressableBudget(func::FuncOp func,
+                           waveamdmachine::RegClass regClass) {
+  if (!waveamdmachine::findAMDGPUTargetModule(func))
+    return std::nullopt;
+  FailureOr<WaveAMDRegisterLimits> limits = getWaveAMDRegisterLimits(func);
+  if (failed(limits))
+    return std::nullopt;
+  switch (regClass) {
+  case waveamdmachine::RegClass::SGPR:
+    return limits->addressableSGPRs;
+  case waveamdmachine::RegClass::VGPR:
+    return limits->addressableVGPRs;
+  case waveamdmachine::RegClass::AGPR:
+    return limits->addressableAGPRs;
+  case waveamdmachine::RegClass::SCC:
+  case waveamdmachine::RegClass::VCC:
+    return std::nullopt;
+  }
+  llvm_unreachable("unknown register class");
+}
+
 unsigned
 getRegAllocTransformDefaultBudgetLimit(waveamdmachine::RegClass regClass) {
   switch (regClass) {
@@ -523,6 +546,9 @@ getRegAllocTransformBudget(func::FuncOp func,
   Operation *parent = func->getParentOp();
   if (std::optional<unsigned> limit = getUnsignedIntegerAttr(parent, attrName))
     return {*limit, "module_attr"};
+  if (std::optional<unsigned> limit =
+          getTargetAddressableBudget(func, regClass))
+    return {*limit, "target_addressable"};
   return {getRegAllocTransformDefaultBudgetLimit(regClass), "default"};
 }
 

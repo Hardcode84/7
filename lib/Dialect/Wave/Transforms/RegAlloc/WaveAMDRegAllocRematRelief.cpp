@@ -47,7 +47,7 @@ struct RematReliefCandidate {
 };
 
 static bool isRematRelievableFailureClass(StringRef className) {
-  return className == "vgpr" || className == "vgpr_agpr";
+  return className == "sgpr" || className == "vgpr" || className == "vgpr_agpr";
 }
 
 static bool isRematRelievableFailureReason(StringRef reason) {
@@ -82,17 +82,17 @@ static bool isAnchoredRematSource(Value value) {
 
 static bool isCheapRematRoot(Operation *op) {
   return isa_and_nonnull<
-      waveamdmachine::SAddI32Op, waveamdmachine::SLshlB32Op,
-      waveamdmachine::SLshrB32Op, waveamdmachine::SAndB32Op,
-      waveamdmachine::SOrB32Op, waveamdmachine::SXorB32Op,
-      waveamdmachine::UninitOp, waveamdmachine::VMovB32TupleOp,
-      waveamdmachine::VLshrrevB32Op, waveamdmachine::VLshlrevB32Op,
-      waveamdmachine::VLshlAddU32Op, waveamdmachine::VAddU32Op,
-      waveamdmachine::VAdd3U32Op, waveamdmachine::VAndB32Op,
-      waveamdmachine::VMulLoU32Op, waveamdmachine::VAddLshlU32Op,
-      waveamdmachine::VXorB32Op, waveamdmachine::VAndOrB32Op,
-      waveamdmachine::TupleFromElementsOp, waveamdmachine::TupleToElementsOp>(
-      op);
+      waveamdmachine::SAddI32Op, waveamdmachine::SMulI32Op,
+      waveamdmachine::SLshlB32Op, waveamdmachine::SLshrB32Op,
+      waveamdmachine::SAndB32Op, waveamdmachine::SOrB32Op,
+      waveamdmachine::SXorB32Op, waveamdmachine::UninitOp,
+      waveamdmachine::VMovB32TupleOp, waveamdmachine::VLshrrevB32Op,
+      waveamdmachine::VLshlrevB32Op, waveamdmachine::VLshlAddU32Op,
+      waveamdmachine::VAddU32Op, waveamdmachine::VAdd3U32Op,
+      waveamdmachine::VAndB32Op, waveamdmachine::VMulLoU32Op,
+      waveamdmachine::VAddLshlU32Op, waveamdmachine::VXorB32Op,
+      waveamdmachine::VAndOrB32Op, waveamdmachine::TupleFromElementsOp,
+      waveamdmachine::TupleToElementsOp>(op);
 }
 
 static bool isRematRootValue(Value value) {
@@ -285,11 +285,20 @@ collectRematPostFailureUseGroups(Value value,
   return groups;
 }
 
+static bool isRematCandidateRegClass(waveamdmachine::RegClass regClass,
+                                     StringRef failureClassName) {
+  if (failureClassName == "sgpr")
+    return regClass == waveamdmachine::RegClass::SGPR;
+  if (failureClassName == "vgpr" || failureClassName == "vgpr_agpr")
+    return regClass == waveamdmachine::RegClass::VGPR;
+  return false;
+}
+
 static bool isRematCandidateSet(const wave::RegAllocTransformAliasSet &set,
                                 ArrayRef<wave::RegAllocTransformValue> values,
                                 const RegAllocTransformFailure &failureRecord) {
   unsigned position = failureRecord.position;
-  if (set.regClass != waveamdmachine::RegClass::VGPR ||
+  if (!isRematCandidateRegClass(set.regClass, failureRecord.className) ||
       hasFixedRegAllocValue(set, values))
     return false;
   return llvm::any_of(set.members, [&](unsigned valueId) {
@@ -300,6 +309,21 @@ static bool isRematCandidateSet(const wave::RegAllocTransformAliasSet &set,
       });
     return valueLiveAcrossPosition(value, position);
   });
+}
+
+static SmallVector<unsigned>
+collectRematReliefCandidateIds(const RegAllocTransformFailure &failure) {
+  SmallVector<unsigned> ids;
+  DenseSet<unsigned> seen;
+  auto add = [&](unsigned id) {
+    if (seen.insert(id).second)
+      ids.push_back(id);
+  };
+  add(failure.set);
+  for (const wave::RegAllocTransformAssignment &overlap : failure.overlaps)
+    if (isRematCandidateRegClass(overlap.regClass, failure.className))
+      add(overlap.set);
+  return ids;
 }
 
 static bool
@@ -626,7 +650,7 @@ selectRematReliefCandidate(func::FuncOp func,
                            ArrayRef<wave::RegAllocTransformValue> values,
                            const RematReliefContext &context) {
   std::optional<RematReliefCandidate> best;
-  for (unsigned setId : collectVGPRReliefCandidateIds(failureRecord)) {
+  for (unsigned setId : collectRematReliefCandidateIds(failureRecord)) {
     FailureOr<std::optional<RematReliefCandidate>> candidate =
         buildRematReliefCandidate(func, setId, failureRecord, sets, values,
                                   context);

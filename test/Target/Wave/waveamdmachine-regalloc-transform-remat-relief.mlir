@@ -454,5 +454,63 @@ module attributes {transform.with_named_sequence} {
       }
       return %wide : !waveamdmachine.reg<vgpr, 2>
     }
+
+    // CHECK-LABEL: func.func @remat_relief_rebuilds_sgpr_scaled_address(
+    // CHECK-NOT: waveamdmachine.regalloc_transform_state
+    // CHECK-SAME: [[STRIDE:%[^:]+]]: !waveamdmachine.reg<sgpr, 1>
+    // CHECK: [[ONE:%.*]] = waveamdmachine.imm 1
+    // CHECK: [[TWO:%.*]] = waveamdmachine.imm 2
+    // CHECK: waveamdmachine.uniform_loop
+    // CHECK: [[PROD:%.*]] = waveamdmachine.s_mul_i32 [[STRIDE]], [[TWO]] {waveamdmachine.regalloc_remat_temp}
+    // CHECK-NEXT: [[ADDR:%.*]], %{{.*}} = waveamdmachine.s_add_i32 [[PROD]], [[ONE]] {waveamdmachine.regalloc_remat_temp}
+    // CHECK-NEXT: [[USE:%.*]], %{{.*}} = waveamdmachine.s_add_i32 [[ADDR]], [[ONE]]
+    // CHECK: return [[STRIDE]], [[USE]]
+    func.func @remat_relief_rebuilds_sgpr_scaled_address(
+        %stride: !waveamdmachine.reg<sgpr, 1>)
+        -> (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<sgpr, 1>)
+        attributes {waveamdmachine.sgpr_count_max = 2 : i64,
+                    waveamdmachine.vgpr_count_max = 4 : i64,
+                    waveamdmachine.agpr_count_max = 0 : i64} {
+      %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+      %one = waveamdmachine.imm 1 : !waveamdmachine.imm
+      %two = waveamdmachine.imm 2 : !waveamdmachine.imm
+      %prod = waveamdmachine.s_mul_i32 %stride, %two
+          : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.imm)
+            -> !waveamdmachine.reg<sgpr, 1>
+      %addr, %scc0 = waveamdmachine.s_add_i32 %prod, %one
+          : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.imm)
+            -> (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<scc, 1>)
+      %cond = waveamdmachine.s_cmp_lt_i32 %zero, %one
+          : (!waveamdmachine.imm, !waveamdmachine.imm)
+            -> !waveamdmachine.reg<scc, 1>
+      waveamdmachine.uniform_loop if %cond : !waveamdmachine.reg<scc, 1> {
+        %a = waveamdmachine.uninit : !waveamdmachine.reg<sgpr, 1>
+        %b = waveamdmachine.uninit : !waveamdmachine.reg<sgpr, 1>
+        %sum, %scc1 = waveamdmachine.s_add_i32 %a, %b
+            : (!waveamdmachine.reg<sgpr, 1>,
+               !waveamdmachine.reg<sgpr, 1>)
+              -> (!waveamdmachine.reg<sgpr, 1>,
+                  !waveamdmachine.reg<scc, 1>)
+        waveamdmachine.continue_if %cond : !waveamdmachine.reg<scc, 1>
+      }
+      %use, %scc2 = waveamdmachine.s_add_i32 %addr, %one
+          : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.imm)
+            -> (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<scc, 1>)
+      return %stride, %use
+          : !waveamdmachine.reg<sgpr, 1>,
+            !waveamdmachine.reg<sgpr, 1>
+    }
+
+    // CHECK-LABEL: func.func @remat_relief_rejects_unaddressable_default_sgpr(
+    // CHECK-SAME: waveamdmachine.regalloc_transform_state
+    // CHECK-SAME: budget_mode = "target_addressable"
+    // CHECK-SAME: stage = "linear-scan-failure"
+    func.func @remat_relief_rejects_unaddressable_default_sgpr()
+        -> !waveamdmachine.reg<sgpr, 1, 120> {
+      %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+      %fixed = waveamdmachine.s_mov_b32_value %zero
+          : (!waveamdmachine.imm) -> !waveamdmachine.reg<sgpr, 1, 120>
+      return %fixed : !waveamdmachine.reg<sgpr, 1, 120>
+    }
   }
 }
