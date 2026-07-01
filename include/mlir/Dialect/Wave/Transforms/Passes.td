@@ -43,6 +43,22 @@ def WaveFormPackedMath : Pass<"wave-form-packed-math"> {
   ];
 }
 
+def WaveDelayLoopCarriedPacks : Pass<"wave-delay-loop-carried-packs"> {
+  let summary = "Delay loop-carried sub-dword packs until their first use";
+  let description = [{
+    Splits selected `scf.for` loop-carried `wave.pack` values into scalar
+    sub-dword loop carries, then recreates the pack in the loop body and after
+    the loop. This moves repacking off the back-edge for byte/half-byte scale
+    load patterns whose yielded pack operands are memory-read results.
+  }];
+  let dependentDialects = [
+    "func::FuncDialect",
+    "scf::SCFDialect",
+    "wave::WaveDialect",
+    "waveamd::WaveAMDDialect"
+  ];
+}
+
 def WaveCoalesceMemory : Pass<"wave-coalesce-memory"> {
   let summary = "Coalesce adjacent Wave memory ops into vector payloads";
   let description = [{
