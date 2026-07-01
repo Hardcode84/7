@@ -18,6 +18,7 @@
 # CHECK: matmul_v9_perf_golden_profile: ok
 # CHECK: matmul_v9_transposed_perf_golden_profile: ok
 # CHECK: matmul_tlx_mxfp_perf_golden_profile: ok
+# CHECK: matmul_tlx_mxfp_4096_perf_golden_profile: ok
 # CHECK: matmul_perf_sweep_v9_defaults: ok
 # CHECK: calibration_scheduler_region_cap: ok
 # CHECK: matmul_pingpong_removed: ok
@@ -1158,6 +1159,32 @@ def check_matmul_tlx_mxfp_perf_golden_profile(matmul) -> None:
     print("matmul_tlx_mxfp_perf_golden_profile: ok")
 
 
+def check_matmul_tlx_mxfp_4096_perf_golden_profile(matmul) -> None:
+    args = matmul.parse_args(
+        [
+            "--chip=gfx950",
+            "--kernel-profile=tlx-a4w4-mxfp-4096x4096x16384-after-bridge-wave",
+            "--skip-hw",
+            "--no-check",
+        ]
+    )
+    check_tlx_mxfp_profile_shape(matmul, args)
+    check_tlx_mxfp_profile_counts(matmul, args)
+    require(
+        "matmul_tlx_mxfp_4096_perf_golden_profile",
+        matmul.tlx_mxfp_golden_source(args).name
+        == "a4w4_mxfp_4096x4096x16384.after_bridge.wave.mlir",
+        "bad TLX MXFP 4096 source path",
+    )
+    source = matmul.generate_kernel_module(args, "gfx950")
+    require(
+        "matmul_tlx_mxfp_4096_perf_golden_profile",
+        "func.func @_a4w4_kernel" in source and "gpu.module @kernels" not in source,
+        "TLX MXFP 4096 source should be isolated for wave-translate",
+    )
+    print("matmul_tlx_mxfp_4096_perf_golden_profile: ok")
+
+
 def check_matmul_perf_sweep_v9_defaults(perf_sweep) -> None:
     require(
         "matmul_perf_sweep_v9_defaults",
@@ -1237,6 +1264,7 @@ def main() -> int:
     check_matmul_v9_perf_golden_profile(matmul)
     check_matmul_v9_transposed_perf_golden_profile(matmul)
     check_matmul_tlx_mxfp_perf_golden_profile(matmul)
+    check_matmul_tlx_mxfp_4096_perf_golden_profile(matmul)
     check_matmul_perf_sweep_v9_defaults(perf_sweep)
     check_calibration_scheduler_region_cap(matmul, fa)
     try:

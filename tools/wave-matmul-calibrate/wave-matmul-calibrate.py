@@ -27,6 +27,7 @@ V9_GOLDEN_NAME = "v9_4096.original.wave"
 V9_TRANSPOSED_GOLDEN_NAME = "v9_4096.transposed.wave"
 V9_GOLDEN_KERNEL_NAME = "v9_beyond_hotloop"
 TLX_MXFP_GOLDEN_NAME = "tlx_a4w4_mxfp_k16k_after_bridge.wave"
+TLX_MXFP_4096_GOLDEN_NAME = "a4w4_mxfp_4096x4096x16384.after_bridge.wave"
 TLX_MXFP_GOLDEN_KERNEL_NAME = "_a4w4_kernel"
 V9_GOLDEN_INPUT_DIR = REPO_ROOT / "test/PerfGolden/Inputs"
 V9_GOLDEN_SOURCE = V9_GOLDEN_INPUT_DIR / f"{V9_GOLDEN_NAME}.mlir"
@@ -169,6 +170,27 @@ KERNEL_PROFILES: dict[str, dict[str, ProfileValue]] = {
     "tlx-a4w4-mxfp-k16k-after-bridge-wave": {
         "example": "tlx-mxfp-perf-golden",
         "tlx_mxfp_golden_name": TLX_MXFP_GOLDEN_NAME,
+        "m": 4096,
+        "n": 4096,
+        "k": 16384,
+        "bm": 2,
+        "bn": 2,
+        "wave_m_tiles": 8,
+        "wave_n_tiles": 8,
+        "wave_k_tiles": 2,
+        "target_waves": 1,
+        "use_buffer": True,
+        "use_dma_lds": True,
+        "matrix_intrinsic": "mfma_gfx950",
+        "input_type": "mxfp4",
+        "output_type": "bf16",
+        "mxfp4_scale_path": "regs",
+        "cta_swizzle_xcds": 8,
+        "cta_group_m": 4,
+    },
+    "tlx-a4w4-mxfp-4096x4096x16384-after-bridge-wave": {
+        "example": "tlx-mxfp-perf-golden",
+        "tlx_mxfp_golden_name": TLX_MXFP_4096_GOLDEN_NAME,
         "m": 4096,
         "n": 4096,
         "k": 16384,
