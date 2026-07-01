@@ -75,6 +75,13 @@ def WaveAMDMachine_KilledOperandReuseOpInterface
       (ins "const ::llvm::AMDGPU::IsaVersion &":$isa,
            "::mlir::OpOperand &":$operand)
     >,
+    InterfaceMethod<
+      [{Whether this op must write its result into the killed operand.}],
+      "bool",
+      "requiresKilledOperandReuseForResult",
+      (ins "const ::llvm::AMDGPU::IsaVersion &":$isa,
+           "::mlir::OpOperand &":$operand)
+    >,
   ];
 }
 

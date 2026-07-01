@@ -10,7 +10,6 @@
 
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineTarget.h"
 #include "mlir/IR/BuiltinAttributes.h"
-#include "mlir/Interfaces/SideEffectInterfaces.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/Support/MathExtras.h"
@@ -90,15 +89,6 @@ unsigned getCombinedVGPRFamilyPressure(unsigned agprFootprint,
   return agprFootprint + llvm::alignTo(vgprFootprint, 4);
 }
 
-static bool hasNoMemoryEffects(Operation *op) {
-  MemoryEffectOpInterface effects = dyn_cast<MemoryEffectOpInterface>(op);
-  if (!effects)
-    return false;
-  SmallVector<MemoryEffects::EffectInstance> instances;
-  effects.getEffects(instances);
-  return instances.empty();
-}
-
 static bool hasSingleTrackedGPRResult(Operation *op) {
   bool found = false;
   for (Value result : op->getResults()) {
@@ -116,8 +106,6 @@ bool canReuseKilledOperandForResult(Operation *op, OpOperand &operand) {
     return false;
   if (!hasSingleTrackedGPRResult(op))
     return false;
-  if (!hasNoMemoryEffects(op))
-    return false;
   waveamdmachine::KilledOperandReuseOpInterface reuse =
       dyn_cast<waveamdmachine::KilledOperandReuseOpInterface>(op);
   if (!reuse)
@@ -128,6 +116,19 @@ bool canReuseKilledOperandForResult(Operation *op, OpOperand &operand) {
   if (failed(isa))
     return false;
   return reuse.canReuseKilledOperandForResult(*isa, operand);
+}
+
+bool requiresKilledOperandReuseForResult(Operation *op, OpOperand &operand) {
+  if (!canReuseKilledOperandForResult(op, operand))
+    return false;
+  waveamdmachine::KilledOperandReuseOpInterface reuse =
+      cast<waveamdmachine::KilledOperandReuseOpInterface>(op);
+  FailureOr<llvm::AMDGPU::IsaVersion> isa =
+      waveamdmachine::getAMDGPUTargetIsaVersion(
+          op, "waveamd regalloc required killed operand reuse");
+  if (failed(isa))
+    return false;
+  return reuse.requiresKilledOperandReuseForResult(*isa, operand);
 }
 
 static Block *getBlockAt(Region &region, int64_t index) {

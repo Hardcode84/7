@@ -346,6 +346,50 @@ func.func @vscnt_dedupe(%off: !waveamdmachine.reg<vgpr, 1>, %val: !waveamdmachin
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 
+// CHECK-LABEL: func.func @d16_hi_preserved_d16_low_does_not_wait
+// CHECK: waveamdmachine.buffer_load_u8_d16
+// CHECK-NEXT: waveamdmachine.buffer_load_u8_d16_hi
+func.func @d16_hi_preserved_d16_low_does_not_wait(
+    %offset: !waveamdmachine.reg<vgpr, 1>,
+    %desc: !waveamdmachine.reg<sgpr, 4>) {
+  %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+  %lo, %lo_tok = waveamdmachine.buffer_load_u8_d16 %offset, %desc, %zero
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 4>,
+         !waveamdmachine.imm)
+        -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+  %hi, %hi_tok = waveamdmachine.buffer_load_u8_d16_hi
+      %offset, %lo, %desc, %zero
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+         !waveamdmachine.reg<sgpr, 4>, !waveamdmachine.imm)
+        -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+  return
+}
+
+// CHECK-LABEL: func.func @d16_hi_preserved_lds_waits
+// CHECK: waveamdmachine.ds_load_b32
+// CHECK-NEXT: waveamdmachine.s_waitcnt lgkmcnt(0)
+// CHECK-NEXT: waveamdmachine.buffer_load_u8_d16_hi
+func.func @d16_hi_preserved_lds_waits(
+    %addr: !waveamdmachine.reg<vgpr, 1>,
+    %offset: !waveamdmachine.reg<vgpr, 1>,
+    %desc: !waveamdmachine.reg<sgpr, 4>) {
+  %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+  %preserved = waveamdmachine.ds_load_b32 %addr
+      : (!waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
+  %hi, %hi_tok = waveamdmachine.buffer_load_u8_d16_hi
+      %offset, %preserved, %desc, %zero
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+         !waveamdmachine.reg<sgpr, 4>, !waveamdmachine.imm)
+        -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+  return
+}
+
+}
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
+
 // CHECK-LABEL: func.func @saturated_lgkmcnt_requirement_is_clamped
 // CHECK: waveamdmachine.ds_swizzle_b32
 // CHECK: waveamdmachine.s_waitcnt lgkmcnt(14)

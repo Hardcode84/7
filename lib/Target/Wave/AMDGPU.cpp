@@ -700,6 +700,22 @@ private:
     return gfx11Opcode(llvm::AMDGPU::BUFFER_LOAD_UBYTE_OFFEN_gfx11);
   }
 
+  unsigned bufferLoadU8D16() const {
+    if (isGfx90APlus())
+      return llvm::AMDGPU::BUFFER_LOAD_UBYTE_D16_OFFEN_gfx90a;
+    if (isGfx8Or9())
+      return llvm::AMDGPU::BUFFER_LOAD_UBYTE_D16_OFFEN_vi;
+    return gfx11Opcode(llvm::AMDGPU::BUFFER_LOAD_UBYTE_D16_OFFEN_gfx11);
+  }
+
+  unsigned bufferLoadU8D16Hi() const {
+    if (isGfx90APlus())
+      return llvm::AMDGPU::BUFFER_LOAD_UBYTE_D16_HI_OFFEN_gfx90a;
+    if (isGfx8Or9())
+      return llvm::AMDGPU::BUFFER_LOAD_UBYTE_D16_HI_OFFEN_vi;
+    return gfx11Opcode(llvm::AMDGPU::BUFFER_LOAD_UBYTE_D16_HI_OFFEN_gfx11);
+  }
+
   unsigned bufferLoadI8() const {
     if (isGfx90APlus())
       return llvm::AMDGPU::BUFFER_LOAD_SBYTE_OFFEN_gfx90a;
@@ -1824,6 +1840,19 @@ private:
     return emitMC(opcode,
                   {toMCOperand(op.getResult(0)), toMCOperand(op.getOperand(0)),
                    toMCOperand(op.getOperand(1)), toMCOperand(op.getOperand(2)),
+                   llvm::MCOperand::createImm(instOffset),
+                   llvm::MCOperand::createImm(0)});
+  }
+
+  LogicalResult emitBufferLoadD16Hi(Operation &op, unsigned opcode) {
+    if (failed(rejectNonZeroLiteralSoffset(op, op.getOperand(3))))
+      return failure();
+    if (!waveamdmachine::isSamePhysicalReg(op.getResult(0), op.getOperand(1)))
+      return op.emitError("D16 high load result must reuse preserved operand");
+    int64_t instOffset = getIntAttr(&op, "inst_offset", 0);
+    return emitMC(opcode,
+                  {toMCOperand(op.getResult(0)), toMCOperand(op.getOperand(0)),
+                   toMCOperand(op.getOperand(2)), toMCOperand(op.getOperand(3)),
                    llvm::MCOperand::createImm(instOffset),
                    llvm::MCOperand::createImm(0)});
   }
@@ -3194,6 +3223,10 @@ private:
       return emitBufferStore(op, bufferStoreB96());
     if (isa<waveamdmachine::BufferStoreB128Op>(op))
       return emitBufferStore(op, bufferStoreB128());
+    if (isa<waveamdmachine::BufferLoadU8D16Op>(op))
+      return emitBufferLoad(op, bufferLoadU8D16());
+    if (isa<waveamdmachine::BufferLoadU8D16HiOp>(op))
+      return emitBufferLoadD16Hi(op, bufferLoadU8D16Hi());
     if (isa<waveamdmachine::BufferLoadU8Op>(op))
       return emitBufferLoad(op, bufferLoadU8());
     if (isa<waveamdmachine::BufferLoadI8Op>(op))

@@ -342,6 +342,33 @@ private:
     edges.push_back({lhsIt->second, rhsIt->second, delta});
   }
 
+  Value getSingleTrackedResult(Operation *op) {
+    Value tracked;
+    for (Value result : op->getResults()) {
+      if (!valueIds.contains(result))
+        continue;
+      if (tracked)
+        return {};
+      tracked = result;
+    }
+    return tracked;
+  }
+
+  void collectRequiredKilledOperandAliases(Operation *op) {
+    Value result = getSingleTrackedResult(op);
+    if (!result)
+      return;
+    unsigned position = positions.lookup(op);
+    for (OpOperand &operand : op->getOpOperands()) {
+      if (!wave::regalloc_detail::requiresKilledOperandReuseForResult(op,
+                                                                      operand))
+        continue;
+      if (!valueRangeEndsAt(operand.get(), position))
+        continue;
+      addAliasEdge(operand.get(), result, 0);
+    }
+  }
+
   void collectTupleAliases(Operation *op) {
     auto collect = [&](Value tuple, ValueRange elements) {
       int64_t offset = 0;
@@ -428,6 +455,7 @@ private:
     for (RegAllocAliasOp &record : ops) {
       collectTupleAliases(record.op);
       collectMMAAliases(record.op);
+      collectRequiredKilledOperandAliases(record.op);
       collectRegionAliases(record.op);
     }
   }

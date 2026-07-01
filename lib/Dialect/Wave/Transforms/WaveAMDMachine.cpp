@@ -4350,6 +4350,165 @@ packScalarInputsIntoWords(WaveAMDMachineSelector &S, Location loc,
   return words;
 }
 
+static bool isScalarI8Simd(Value value) {
+  SimdType simdType = dyn_cast<SimdType>(value.getType());
+  return simdType && simdType.getElementType().isInteger(8);
+}
+
+static bool hasOnlyPackUse(Value value, PackOp op) {
+  if (!value.hasOneUse())
+    return false;
+  return value.use_begin()->getOwner() == op;
+}
+
+static std::optional<waveamdmachine::BufferLoadU8Op>
+matchPackOnlyBufferLoadU8(WaveAMDMachineSelector &S, PackOp op, Value input) {
+  if (!isScalarI8Simd(input) || !hasOnlyPackUse(input, op))
+    return std::nullopt;
+  LoadOp sourceLoad = input.getDefiningOp<LoadOp>();
+  if (!sourceLoad || !sourceLoad.getToken().use_empty())
+    return std::nullopt;
+  Value selected = S.expect(input, op);
+  waveamdmachine::BufferLoadU8Op machineLoad =
+      selected.getDefiningOp<waveamdmachine::BufferLoadU8Op>();
+  if (!machineLoad || !selected.use_empty())
+    return std::nullopt;
+  Value token = machineLoad.getToken();
+  if (token && !token.use_empty())
+    return std::nullopt;
+  return machineLoad;
+}
+
+static bool isBeforeInSameBlock(Operation *lhs, Operation *rhs) {
+  return lhs->getBlock() == rhs->getBlock() && lhs->isBeforeInBlock(rhs);
+}
+
+static bool
+canCreateD16BytePairAtLoadSites(waveamdmachine::BufferLoadU8Op low,
+                                waveamdmachine::BufferLoadU8Op high) {
+  return isBeforeInSameBlock(low.getOperation(), high.getOperation());
+}
+
+static Value createD16ByteLoadAtLoadSite(WaveAMDMachineSelector &S,
+                                         waveamdmachine::BufferLoadU8Op load) {
+  OpBuilder::InsertionGuard guard(S.builder);
+  S.builder.setInsertionPoint(load);
+  Type resultType = load.getResult().getType();
+  Value token = load.getToken();
+  Type tokenType = token ? token.getType() : Type{};
+  waveamdmachine::BufferLoadU8D16Op d16Load =
+      waveamdmachine::BufferLoadU8D16Op::create(
+          S.builder, load.getLoc(), resultType, tokenType, load.getOffset(),
+          load.getDescriptor(), load.getSoffset(), load.getDependency(),
+          load.getInstOffset());
+  return d16Load.getResult();
+}
+
+static Value createD16ByteLoadHiAtLoadSite(WaveAMDMachineSelector &S,
+                                           waveamdmachine::BufferLoadU8Op load,
+                                           Value preserved) {
+  OpBuilder::InsertionGuard guard(S.builder);
+  S.builder.setInsertionPoint(load);
+  Type resultType = load.getResult().getType();
+  Value token = load.getToken();
+  Type tokenType = token ? token.getType() : Type{};
+  waveamdmachine::BufferLoadU8D16HiOp d16Load =
+      waveamdmachine::BufferLoadU8D16HiOp::create(
+          S.builder, load.getLoc(), resultType, tokenType, load.getOffset(),
+          preserved, load.getDescriptor(), load.getSoffset(),
+          load.getDependency(), load.getInstOffset());
+  return d16Load.getResult();
+}
+
+static Value createD16BytePairAtLoadSites(WaveAMDMachineSelector &S,
+                                          waveamdmachine::BufferLoadU8Op low,
+                                          waveamdmachine::BufferLoadU8Op high) {
+  Value lo = createD16ByteLoadAtLoadSite(S, low);
+  return createD16ByteLoadHiAtLoadSite(S, high, lo);
+}
+
+static bool isD16ByteLoadPackShape(ValueRange inputs,
+                                   const MemoryPayloadShape &shape) {
+  return shape.elementBits == 8 && inputs.size() == shape.registers * 4;
+}
+
+static FailureOr<bool> isD16ByteLoadPackSupported(PackOp op) {
+  FailureOr<llvm::AMDGPU::IsaVersion> isa =
+      getTargetIsaVersion(op, "D16 byte load pack lowering");
+  if (failed(isa))
+    return failure();
+  return waveamdmachine::BufferLoadU8D16Op::isSupportedOnIsa(*isa) &&
+         waveamdmachine::BufferLoadU8D16HiOp::isSupportedOnIsa(*isa);
+}
+
+static std::optional<SmallVector<waveamdmachine::BufferLoadU8Op>>
+collectD16ByteLoadPackInputs(WaveAMDMachineSelector &S, PackOp op) {
+  SmallVector<waveamdmachine::BufferLoadU8Op> loads;
+  loads.reserve(op.getInputs().size());
+  for (Value input : op.getInputs()) {
+    std::optional<waveamdmachine::BufferLoadU8Op> load =
+        matchPackOnlyBufferLoadU8(S, op, input);
+    if (!load)
+      return std::nullopt;
+    loads.push_back(*load);
+  }
+  return loads;
+}
+
+static bool
+canCreateD16ByteLoadPackPairs(ArrayRef<waveamdmachine::BufferLoadU8Op> loads) {
+  for (unsigned index = 0; index < loads.size(); index += 4)
+    if (!canCreateD16BytePairAtLoadSites(loads[index], loads[index + 2]) ||
+        !canCreateD16BytePairAtLoadSites(loads[index + 1], loads[index + 3]))
+      return false;
+  return true;
+}
+
+static SmallVector<Value>
+createD16ByteLoadPackWords(WaveAMDMachineSelector &S, Location loc,
+                           ArrayRef<waveamdmachine::BufferLoadU8Op> loads,
+                           const MemoryPayloadShape &shape) {
+  SmallVector<Value> words;
+  words.reserve(shape.registers);
+  for (unsigned index = 0; index < loads.size(); index += 4) {
+    Value even =
+        createD16BytePairAtLoadSites(S, loads[index], loads[index + 2]);
+    Value odd =
+        createD16BytePairAtLoadSites(S, loads[index + 1], loads[index + 3]);
+    words.push_back(orWord(S, loc, even, shiftWordLeft(S, loc, odd, 8)));
+  }
+  return words;
+}
+
+static void
+eraseD16ByteLoadPackSources(ArrayRef<waveamdmachine::BufferLoadU8Op> loads) {
+  for (waveamdmachine::BufferLoadU8Op load : loads)
+    load.erase();
+}
+
+static FailureOr<std::optional<SmallVector<Value>>>
+trySelectD16ByteLoadPack(WaveAMDMachineSelector &S, PackOp op,
+                         const MemoryPayloadShape &shape) {
+  ValueRange inputs = op.getInputs();
+  if (!isD16ByteLoadPackShape(inputs, shape))
+    return std::optional<SmallVector<Value>>();
+  FailureOr<bool> supported = isD16ByteLoadPackSupported(op);
+  if (failed(supported))
+    return failure();
+  if (!*supported)
+    return std::optional<SmallVector<Value>>();
+
+  std::optional<SmallVector<waveamdmachine::BufferLoadU8Op>> loads =
+      collectD16ByteLoadPackInputs(S, op);
+  if (!loads || !canCreateD16ByteLoadPackPairs(*loads))
+    return std::optional<SmallVector<Value>>();
+
+  SmallVector<Value> words =
+      createD16ByteLoadPackWords(S, op.getLoc(), *loads, shape);
+  eraseD16ByteLoadPackSources(*loads);
+  return std::optional<SmallVector<Value>>(std::move(words));
+}
+
 static bool isI8TransposeScalePack(PackOp op) {
   auto simdType = dyn_cast<SimdType>(op.getResult().getType());
   if (!simdType || simdType.getWidth() != 64)
@@ -4404,6 +4563,16 @@ LogicalResult WaveAMDMachineSelector::selectPack(PackOp op) {
     return failure();
   if (*chunkWords) {
     values[op.getResult()] = joinVGPRWords(*this, loc, **chunkWords);
+    eraseIfTopLevel(op);
+    return success();
+  }
+
+  FailureOr<std::optional<SmallVector<Value>>> d16LoadWords =
+      trySelectD16ByteLoadPack(*this, op, *shape);
+  if (failed(d16LoadWords))
+    return failure();
+  if (*d16LoadWords) {
+    values[op.getResult()] = joinVGPRWords(*this, loc, **d16LoadWords);
     eraseIfTopLevel(op);
     return success();
   }

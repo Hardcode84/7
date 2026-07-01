@@ -549,6 +549,13 @@ static WaitRequirement computeControlFlowRequirement(Operation *op,
   return req;
 }
 
+static bool isD16LowPreservedOperand(OpOperand &operand) {
+  auto load = dyn_cast<waveamdmachine::BufferLoadU8D16HiOp>(operand.getOwner());
+  if (!load || &operand != &load.getPreservedMutable())
+    return false;
+  return load.getPreserved().getDefiningOp<waveamdmachine::BufferLoadU8D16Op>();
+}
+
 static WaitRequirement computeRequirement(Operation *op,
                                           const WaitState &state) {
   if (isControlFlowOp(op))
@@ -563,8 +570,11 @@ static WaitRequirement computeRequirement(Operation *op,
     }
     return req;
   }
-  for (Value operand : op->getOperands())
-    requireValue(req, operand, state);
+  for (OpOperand &operand : op->getOpOperands()) {
+    if (isD16LowPreservedOperand(operand))
+      continue;
+    requireValue(req, operand.get(), state);
+  }
   return req;
 }
 

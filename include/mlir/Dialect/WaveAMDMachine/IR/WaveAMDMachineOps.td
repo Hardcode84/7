@@ -79,6 +79,7 @@ class WaveAMDMachine_Op<string mnemonic, list<Trait> traits = []> :
   string operandVGPRValueMask = "0";
   string killedOperandReusePredicate =
       WaveAMDMachine_DefaultKilledOperandReuse;
+  string requiredKilledOperandReusePredicate = "false";
 
   let extraClassDeclaration = [{
     static bool isSupportedOnIsa(const ::llvm::AMDGPU::IsaVersion &isa) {
@@ -104,6 +105,13 @@ class WaveAMDMachine_Op<string mnemonic, list<Trait> traits = []> :
       (void)isa;
       (void)operand;
       return }] # killedOperandReusePredicate # [{;
+    }
+
+    bool requiresKilledOperandReuseForResult(
+        const ::llvm::AMDGPU::IsaVersion &isa, ::mlir::OpOperand &operand) {
+      (void)isa;
+      (void)operand;
+      return }] # requiredKilledOperandReusePredicate # [{;
     }
   }];
 }
@@ -135,6 +143,11 @@ class WaveAMDMachine_OperandLegality<string constantBusMask = "0",
 
 class WaveAMDMachine_KilledOperandReuse<string predicate> {
   string killedOperandReusePredicate = predicate;
+}
+
+class WaveAMDMachine_RequiredKilledOperandReuse<string predicate> {
+  string killedOperandReusePredicate = predicate;
+  string requiredKilledOperandReusePredicate = predicate;
 }
 
 class WaveAMDMachine_VOP2AnyVGPRLegality
@@ -1832,6 +1845,46 @@ def WaveAMDMachine_BufferLoadU8Op
                       Optional<WaveAMDMachine_MemToken>:$token);
   let assemblyFormat = [{
     $offset `,` $descriptor `,` $soffset
+    (`after` $dependency^)? (`offset` $inst_offset^)?
+    attr-dict `:` functional-type(operands, results)
+  }];
+}
+
+def WaveAMDMachine_BufferLoadU8D16Op
+    : WaveAMDMachine_BufferMemoryOp<"buffer_load_u8_d16", [WaveAMDMachine_VMEMLoad, MemoryEffects<[MemRead]>]>,
+      WaveAMDMachine_VMEMLoadInfo {
+  let summary = "buffer unsigned 8-bit D16 low-half load";
+  let archPredicate = "isa.Major == 9 || isa.Major == 11";
+  let arguments = (ins WaveAMDMachine_VGPR1:$offset, WaveAMDMachine_SGPR4:$descriptor,
+                       WaveAMDMachine_SGPR1OrImm:$soffset,
+                       Optional<WaveAMDMachine_MemToken>:$dependency,
+                       DefaultValuedAttr<I64Attr, "0">:$inst_offset);
+  let results = (outs WaveAMDMachine_VGPR1:$result,
+                      Optional<WaveAMDMachine_MemToken>:$token);
+  let assemblyFormat = [{
+    $offset `,` $descriptor `,` $soffset
+    (`after` $dependency^)? (`offset` $inst_offset^)?
+    attr-dict `:` functional-type(operands, results)
+  }];
+}
+
+def WaveAMDMachine_BufferLoadU8D16HiOp
+    : WaveAMDMachine_BufferMemoryOp<"buffer_load_u8_d16_hi", [WaveAMDMachine_VMEMLoad, MemoryEffects<[MemRead]>]>,
+      WaveAMDMachine_VMEMLoadInfo {
+  let summary = "buffer unsigned 8-bit D16 high-half load";
+  let archPredicate = "isa.Major == 9 || isa.Major == 11";
+  let killedOperandReusePredicate = "&operand == &this->getPreservedMutable()";
+  let requiredKilledOperandReusePredicate =
+      "&operand == &this->getPreservedMutable()";
+  let arguments = (ins WaveAMDMachine_VGPR1:$offset, WaveAMDMachine_VGPR1:$preserved,
+                       WaveAMDMachine_SGPR4:$descriptor,
+                       WaveAMDMachine_SGPR1OrImm:$soffset,
+                       Optional<WaveAMDMachine_MemToken>:$dependency,
+                       DefaultValuedAttr<I64Attr, "0">:$inst_offset);
+  let results = (outs WaveAMDMachine_VGPR1:$result,
+                      Optional<WaveAMDMachine_MemToken>:$token);
+  let assemblyFormat = [{
+    $offset `,` $preserved `,` $descriptor `,` $soffset
     (`after` $dependency^)? (`offset` $inst_offset^)?
     attr-dict `:` functional-type(operands, results)
   }];
