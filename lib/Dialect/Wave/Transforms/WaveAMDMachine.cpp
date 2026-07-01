@@ -4104,6 +4104,33 @@ static Value maskLowBits(WaveAMDMachineSelector &S, Location loc, Value value,
                                            mask);
 }
 
+static Value orWord(WaveAMDMachineSelector &S, Location loc, Value lhs,
+                    Value rhs) {
+  Type vgprType =
+      getRegType(S.builder.getContext(), waveamdmachine::RegClass::VGPR);
+  return waveamdmachine::VOrB32Op::create(S.builder, loc, vgprType, lhs, rhs);
+}
+
+static Value shiftWordLeft(WaveAMDMachineSelector &S, Location loc, Value value,
+                           unsigned bits) {
+  if (bits == 0)
+    return value;
+  Type vgprType =
+      getRegType(S.builder.getContext(), waveamdmachine::RegClass::VGPR);
+  return waveamdmachine::VLshlrevB32Op::create(S.builder, loc, vgprType, value,
+                                               createImm(S.builder, loc, bits));
+}
+
+static Value shiftWordRight(WaveAMDMachineSelector &S, Location loc,
+                            Value value, unsigned bits) {
+  if (bits == 0)
+    return value;
+  Type vgprType =
+      getRegType(S.builder.getContext(), waveamdmachine::RegClass::VGPR);
+  return waveamdmachine::VLshrrevB32Op::create(S.builder, loc, vgprType, value,
+                                               createImm(S.builder, loc, bits));
+}
+
 struct WordAlignedExtractPackWord {
   Value source;
   unsigned sourceWordIndex;
@@ -4214,6 +4241,83 @@ trySelectWordAlignedExtractPack(WaveAMDMachineSelector &S, PackOp op,
   return std::optional<SmallVector<Value>>(std::move(words));
 }
 
+static Value extractBitsToWord(WaveAMDMachineSelector &S, Location loc,
+                               ArrayRef<Value> sourceWords,
+                               unsigned sourceBitOffset, unsigned bits) {
+  assert(bits > 0 && bits <= 32 && "extract word chunk must fit in a dword");
+  unsigned sourceWordIndex = sourceBitOffset / 32;
+  unsigned sourceWordShift = sourceBitOffset % 32;
+  assert(sourceWordIndex < sourceWords.size() &&
+         "source bit offset out of bounds");
+  Value word =
+      shiftWordRight(S, loc, sourceWords[sourceWordIndex], sourceWordShift);
+  unsigned lowBits = std::min(bits, 32 - sourceWordShift);
+  word = maskLowBits(S, loc, word, lowBits);
+  if (lowBits == bits)
+    return word;
+
+  assert(sourceWordIndex + 1 < sourceWords.size() &&
+         "cross-word extract missing high word");
+  Value high =
+      maskLowBits(S, loc, sourceWords[sourceWordIndex + 1], bits - lowBits);
+  high = shiftWordLeft(S, loc, high, lowBits);
+  return orWord(S, loc, word, high);
+}
+
+static SmallVector<Value> extractPayloadWords(WaveAMDMachineSelector &S,
+                                              Location loc,
+                                              ArrayRef<Value> sourceWords,
+                                              unsigned sourceBitOffset,
+                                              unsigned payloadBits) {
+  SmallVector<Value> resultWords;
+  for (unsigned bit = 0; bit < payloadBits; bit += 32) {
+    unsigned bits = std::min(32u, payloadBits - bit);
+    resultWords.push_back(
+        extractBitsToWord(S, loc, sourceWords, sourceBitOffset + bit, bits));
+  }
+  return resultWords;
+}
+
+static FailureOr<std::optional<SmallVector<Value>>>
+trySelectVectorChunkPack(WaveAMDMachineSelector &S, PackOp op,
+                         const MemoryPayloadShape &shape) {
+  ValueRange inputs = op.getInputs();
+  std::optional<MemoryPayloadShape> inputShape =
+      getSimdVectorPayloadShapeNoDiag(inputs.front().getType());
+  if (!inputShape)
+    return std::optional<SmallVector<Value>>();
+  if (inputShape->elementBits != shape.elementBits)
+    return op.emitError("pack input chunk element bits must match result");
+  if (inputShape->payloadBits * inputs.size() != shape.payloadBits)
+    return op.emitError("pack input chunk bits must match result");
+
+  Location loc = op.getLoc();
+  SmallVector<Value> words(shape.registers);
+  for (auto [inputIndex, input] : llvm::enumerate(inputs)) {
+    FailureOr<SmallVector<Value>> inputWords = splitVGPRMaterializedWords(
+        S, op, S.expect(input, op), inputShape->registers, "pack chunk input");
+    if (failed(inputWords))
+      return failure();
+    unsigned baseBit = inputIndex * inputShape->payloadBits;
+    for (unsigned bit = 0; bit < inputShape->payloadBits; bit += 32) {
+      unsigned bits = std::min(32u, inputShape->payloadBits - bit);
+      unsigned resultBit = baseBit + bit;
+      unsigned resultWordIndex = resultBit / 32;
+      unsigned resultWordShift = resultBit % 32;
+      assert(resultWordIndex < words.size() &&
+             "pack chunk exceeds result words");
+      Value word = maskLowBits(S, loc, (*inputWords)[bit / 32], bits);
+      word = shiftWordLeft(S, loc, word, resultWordShift);
+      if (!words[resultWordIndex]) {
+        words[resultWordIndex] = word;
+        continue;
+      }
+      words[resultWordIndex] = orWord(S, loc, words[resultWordIndex], word);
+    }
+  }
+  return std::optional<SmallVector<Value>>(std::move(words));
+}
+
 template <typename InputRange>
 static SmallVector<Value>
 packScalarInputsIntoWords(WaveAMDMachineSelector &S, Location loc,
@@ -4294,6 +4398,16 @@ LogicalResult WaveAMDMachineSelector::selectPack(PackOp op) {
     return success();
   }
 
+  FailureOr<std::optional<SmallVector<Value>>> chunkWords =
+      trySelectVectorChunkPack(*this, op, *shape);
+  if (failed(chunkWords))
+    return failure();
+  if (*chunkWords) {
+    values[op.getResult()] = joinVGPRWords(*this, loc, **chunkWords);
+    eraseIfTopLevel(op);
+    return success();
+  }
+
   if (canPackMmaScaleLowDword(*this, op)) {
     values[op.getResult()] = packScalarInputsIntoWords(
         *this, loc, op.getInputs(), 4, shape->elementBits, 1, op)[0];
@@ -4328,6 +4442,27 @@ LogicalResult WaveAMDMachineSelector::selectExtract(ExtractOp op) {
     return failure();
 
   Location loc = op.getLoc();
+  if (std::optional<VectorType> resultVec =
+          getSimdVectorTypeNoDiag(op.getResult().getType())) {
+    FailureOr<MemoryPayloadShape> resultShape = getSimdVectorPayloadShape(
+        op, op.getResult().getType(), "extract result");
+    if (failed(resultShape))
+      return failure();
+    if (resultShape->elementBits != shape->elementBits)
+      return op.emitError("extract result element bits must match source");
+    Value source = expect(op.getSource(), op);
+    FailureOr<SmallVector<Value>> sourceWords = splitVGPRMaterializedWords(
+        *this, op, source, shape->registers, "extract source");
+    if (failed(sourceWords))
+      return failure();
+    unsigned bitOffset = op.getIndex() * shape->elementBits;
+    SmallVector<Value> resultWords = extractPayloadWords(
+        *this, loc, *sourceWords, bitOffset, resultShape->payloadBits);
+    values[op.getResult()] = joinVGPRWords(*this, loc, resultWords);
+    eraseIfTopLevel(op);
+    return success();
+  }
+
   Type vgprType = getRegType(op.getContext(), waveamdmachine::RegClass::VGPR);
   Value word = expect(op.getSource(), op);
   unsigned bitOffset = op.getIndex() * shape->elementBits;

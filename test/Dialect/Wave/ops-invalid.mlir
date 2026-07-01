@@ -545,8 +545,24 @@ func.func @pack_scalar_result_not_vector(%a: f16, %b: f16) {
 // -----
 
 func.func @pack_result_length_mismatch(%a: f16, %b: f16) {
-  // expected-error @+1 {{input count must match result vector length}}
+  // expected-error @+1 {{input element count must match result vector length}}
   %r = wave.pack %a, %b : f16, f16 -> vector<3xf16>
+  return
+}
+
+// -----
+
+func.func @pack_vector_chunk_result_length_mismatch(%a: vector<2xi8>, %b: vector<2xi8>) {
+  // expected-error @+1 {{input element count must match result vector length}}
+  %r = wave.pack %a, %b : vector<2xi8>, vector<2xi8> -> vector<5xi8>
+  return
+}
+
+// -----
+
+func.func @pack_vector_chunk_rank_mismatch(%a: vector<1x2xi8>, %b: vector<1x2xi8>) {
+  // expected-error @+1 {{input vector chunks must be 1-D}}
+  %r = wave.pack %a, %b : vector<1x2xi8>, vector<1x2xi8> -> vector<4xi8>
   return
 }
 
@@ -616,6 +632,22 @@ func.func @extract_out_of_bounds(%a: vector<2xf16>) {
 
 // -----
 
+func.func @extract_slice_out_of_bounds(%a: vector<4xi8>) {
+  // expected-error @+1 {{slice must be in source vector bounds}}
+  %r = wave.extract %a[3] : vector<4xi8> -> vector<2xi8>
+  return
+}
+
+// -----
+
+func.func @extract_slice_rank_mismatch(%a: vector<4xi8>) {
+  // expected-error @+1 {{result vector slice must be 1-D}}
+  %r = wave.extract %a[1] : vector<4xi8> -> vector<1x2xi8>
+  return
+}
+
+// -----
+
 func.func @extract_negative_index(%a: vector<2xf16>) {
   // expected-error @+1 {{attribute 'index' failed to satisfy constraint}}
   %r = wave.extract %a[-1] : vector<2xf16> -> f16
@@ -649,8 +681,16 @@ func.func @extract_simd_result_required(%a: !wave.simd<vector<2xf16>, 32>) {
 // -----
 
 func.func @extract_simd_result_element_mismatch(%a: !wave.simd<vector<2xf16>, 32>) {
-  // expected-error @+1 {{result element type must match source vector element}}
+  // expected-error @+1 {{result type must match source vector element}}
   %r = wave.extract %a[1] : !wave.simd<vector<2xf16>, 32> -> !wave.simd<i16, 32>
+  return
+}
+
+// -----
+
+func.func @extract_simd_slice_element_mismatch(%a: !wave.simd<vector<4xi8>, 32>) {
+  // expected-error @+1 {{result vector element type must match source vector element}}
+  %r = wave.extract %a[1] : !wave.simd<vector<4xi8>, 32> -> !wave.simd<vector<2xi16>, 32>
   return
 }
 

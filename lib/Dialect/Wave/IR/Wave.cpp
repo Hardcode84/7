@@ -1151,42 +1151,89 @@ static VectorType getWaveVectorPayloadType(Type type) {
   return cast<VectorType>(type);
 }
 
+static Type getWavePayloadType(Type type) {
+  if (SimdType simdType = dyn_cast<SimdType>(type))
+    return simdType.getElementType();
+  return type;
+}
+
+static Type getWavePayloadElementType(Type type) {
+  type = getWavePayloadType(type);
+  if (VectorType vectorType = dyn_cast<VectorType>(type))
+    return vectorType.getElementType();
+  return type;
+}
+
+static int64_t getWavePayloadElementCount(Type type) {
+  type = getWavePayloadType(type);
+  if (VectorType vectorType = dyn_cast<VectorType>(type))
+    return vectorType.getNumElements();
+  return 1;
+}
+
+static LogicalResult verifyPackInputVector(PackOp op, Type inputType) {
+  if (VectorType inputVector =
+          dyn_cast<VectorType>(getWavePayloadType(inputType)))
+    if (inputVector.getRank() != 1)
+      return op.emitOpError("input vector chunks must be 1-D");
+  return success();
+}
+
+static LogicalResult verifyPackSimdResult(PackOp op,
+                                          std::optional<int64_t> inputWidth) {
+  Type resultType = op.getResult().getType();
+  if (SimdType resultSimd = dyn_cast<SimdType>(resultType)) {
+    if (!inputWidth)
+      return op.emitOpError("result must not be SIMD when inputs are scalar");
+    if (resultSimd.getWidth() != *inputWidth)
+      return op.emitOpError("result SIMD width must match inputs");
+    return success();
+  }
+  if (inputWidth)
+    return op.emitOpError("result must be SIMD when inputs are SIMD");
+  return success();
+}
+
+static LogicalResult verifyPackPayload(PackOp op, Type inputElementType,
+                                       int64_t inputElementCount) {
+  VectorType vectorType = getWaveVectorPayloadType(op.getResult().getType());
+  if (vectorType.getElementType() != inputElementType)
+    return op.emitOpError("result vector element type must match inputs");
+  if (vectorType.getNumElements() !=
+      inputElementCount * static_cast<int64_t>(op.getInputs().size()))
+    return op.emitOpError(
+        "input element count must match result vector length");
+  return success();
+}
+
 LogicalResult PackOp::verify() {
   OperandRange inputs = getInputs();
   if (inputs.empty())
     return emitOpError("requires at least one input");
 
   Type inputType = inputs.front().getType();
-  Type inputElementType = inputType;
+  Type inputElementType = getWavePayloadElementType(inputType);
+  int64_t inputElementCount = getWavePayloadElementCount(inputType);
   std::optional<int64_t> inputSimdWidth;
   if (SimdType inputSimd = dyn_cast<SimdType>(inputType)) {
-    inputElementType = inputSimd.getElementType();
     inputSimdWidth = inputSimd.getWidth();
   }
-
-  Type resultType = getResult().getType();
-  if (SimdType resultSimd = dyn_cast<SimdType>(resultType)) {
-    if (!inputSimdWidth)
-      return emitOpError("result must not be SIMD when inputs are scalar");
-    if (resultSimd.getWidth() != *inputSimdWidth)
-      return emitOpError("result SIMD width must match inputs");
-  } else if (inputSimdWidth) {
-    return emitOpError("result must be SIMD when inputs are SIMD");
-  }
-
-  VectorType vectorType = getWaveVectorPayloadType(resultType);
-  if (vectorType.getElementType() != inputElementType)
-    return emitOpError("result vector element type must match inputs");
-  if (static_cast<size_t>(vectorType.getNumElements()) != inputs.size())
-    return emitOpError("input count must match result vector length");
-  return success();
+  if (failed(verifyPackInputVector(*this, inputType)))
+    return failure();
+  if (failed(verifyPackSimdResult(*this, inputSimdWidth)))
+    return failure();
+  return verifyPackPayload(*this, inputElementType, inputElementCount);
 }
 
 OpFoldResult PackOp::fold(FoldAdaptor) {
   Value source;
+  int64_t inputElementCount =
+      getWavePayloadElementCount(getInputs().front().getType());
   for (auto [index, input] : llvm::enumerate(getInputs())) {
     ExtractOp extract = input.getDefiningOp<ExtractOp>();
-    if (!extract || extract.getIndex() != index)
+    uint64_t expectedIndex =
+        static_cast<uint64_t>(index) * static_cast<uint64_t>(inputElementCount);
+    if (!extract || extract.getIndex() != expectedIndex)
       return {};
     if (!source)
       source = extract.getSource();
@@ -1196,6 +1243,34 @@ OpFoldResult PackOp::fold(FoldAdaptor) {
   if (source && source.getType() == getResult().getType())
     return source;
   return {};
+}
+
+static FailureOr<Type>
+getExtractResultPayloadType(ExtractOp op, std::optional<int64_t> simdWidth) {
+  Type resultType = op.getResult().getType();
+  if (!simdWidth)
+    return resultType;
+
+  SimdType resultSimd = dyn_cast<SimdType>(resultType);
+  if (!resultSimd)
+    return op.emitOpError("result must be SIMD when source is SIMD");
+  if (resultSimd.getWidth() != *simdWidth)
+    return op.emitOpError("result SIMD width must match source");
+  return resultSimd.getElementType();
+}
+
+static LogicalResult verifyExtractVectorResult(ExtractOp op,
+                                               VectorType sourceVector,
+                                               VectorType resultVector,
+                                               int64_t index) {
+  if (resultVector.getRank() != 1)
+    return op.emitOpError("result vector slice must be 1-D");
+  if (resultVector.getElementType() != sourceVector.getElementType())
+    return op.emitOpError(
+        "result vector element type must match source vector element");
+  if (index + resultVector.getNumElements() > sourceVector.getNumElements())
+    return op.emitOpError("slice must be in source vector bounds");
+  return success();
 }
 
 LogicalResult ExtractOp::verify() {
@@ -1210,19 +1285,15 @@ LogicalResult ExtractOp::verify() {
   if (index >= vectorType.getNumElements())
     return emitOpError("index must be in source vector bounds");
 
-  Type resultType = getResult().getType();
-  if (simdWidth) {
-    SimdType resultSimd = dyn_cast<SimdType>(resultType);
-    if (!resultSimd)
-      return emitOpError("result must be SIMD when source is SIMD");
-    if (resultSimd.getWidth() != *simdWidth)
-      return emitOpError("result SIMD width must match source");
-    if (resultSimd.getElementType() != vectorType.getElementType())
-      return emitOpError(
-          "result element type must match source vector element");
-    return success();
-  }
-  if (resultType != vectorType.getElementType())
+  FailureOr<Type> resultPayloadType =
+      getExtractResultPayloadType(*this, simdWidth);
+  if (failed(resultPayloadType))
+    return failure();
+
+  if (VectorType resultVector = dyn_cast<VectorType>(*resultPayloadType))
+    return verifyExtractVectorResult(*this, vectorType, resultVector, index);
+
+  if (*resultPayloadType != vectorType.getElementType())
     return emitOpError("result type must match source vector element");
   return success();
 }
@@ -1232,9 +1303,17 @@ OpFoldResult ExtractOp::fold(FoldAdaptor) {
   if (!pack)
     return {};
   uint64_t index = getIndex();
-  if (index >= pack.getInputs().size())
+  int64_t inputElementCount =
+      getWavePayloadElementCount(pack.getInputs().front().getType());
+  if (index % inputElementCount != 0)
     return {};
-  return pack.getInputs()[index];
+  uint64_t inputIndex = index / inputElementCount;
+  if (inputIndex >= pack.getInputs().size())
+    return {};
+  Value input = pack.getInputs()[inputIndex];
+  if (input.getType() != getResult().getType())
+    return {};
+  return input;
 }
 
 static bool isWavePackedF16Type(Type type) {

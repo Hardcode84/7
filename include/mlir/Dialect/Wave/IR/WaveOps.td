@@ -244,7 +244,7 @@ def Wave_SelectOp : Wave_Op<"select", [
 }
 
 def Wave_PackOp : Wave_Op<"pack", [Pure, SameTypeOperands]> {
-  let summary = "pack values into a vector";
+  let summary = "pack values or subvectors into a vector";
   let arguments = (ins Variadic<AnyType>:$inputs);
   let results = (outs Wave_1DVectorOrSimdOf1DVector:$result);
   let assemblyFormat = [{
@@ -255,7 +255,7 @@ def Wave_PackOp : Wave_Op<"pack", [Pure, SameTypeOperands]> {
 }
 
 def Wave_ExtractOp : Wave_Op<"extract", [Pure]> {
-  let summary = "extract one element from a vector";
+  let summary = "extract one element or subvector from a vector";
   let arguments = (ins Wave_1DVectorOrSimdOf1DVector:$source,
                        ConfinedAttr<I64Attr, [IntNonNegative]>:$index);
   let results = (outs AnyType:$result);

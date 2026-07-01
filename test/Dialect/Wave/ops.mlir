@@ -269,12 +269,16 @@ func.func @wave_packed_cast_ops(%vf32: !wave.simd<vector<2xf32>, 32>,
 }
 
 // CHECK-LABEL: func.func @wave_pack_extract_ops
-// CHECK-SAME: ([[A:%.*]]: f16, [[B:%.*]]: f16, [[C:%.*]]: f16, [[VA:%.*]]: !wave.simd<f16, 32>, [[VB:%.*]]: !wave.simd<f16, 32>)
+// CHECK-SAME: ([[A:%.*]]: f16, [[B:%.*]]: f16, [[C:%.*]]: f16, [[VA:%.*]]: !wave.simd<f16, 32>, [[VB:%.*]]: !wave.simd<f16, 32>, [[V8:%.*]]: !wave.simd<vector<8xi8>, 32>, [[V4A:%.*]]: !wave.simd<vector<4xi8>, 32>, [[V4B:%.*]]: !wave.simd<vector<4xi8>, 32>)
 func.func @wave_pack_extract_ops(%a: f16, %b: f16, %c: f16,
                                  %va: !wave.simd<f16, 32>,
-                                 %vb: !wave.simd<f16, 32>)
+                                 %vb: !wave.simd<f16, 32>,
+                                 %v8: !wave.simd<vector<8xi8>, 32>,
+                                 %v4a: !wave.simd<vector<4xi8>, 32>,
+                                 %v4b: !wave.simd<vector<4xi8>, 32>)
     -> (vector<3xf16>, f16, !wave.simd<vector<2xf16>, 32>,
-        !wave.simd<f16, 32>) {
+        !wave.simd<f16, 32>, !wave.simd<vector<4xi8>, 32>,
+        !wave.simd<vector<8xi8>, 32>) {
   // CHECK: [[PACK:%.*]] = wave.pack [[A]], [[B]], [[C]] : f16, f16, f16 -> vector<3xf16>
   %pack = wave.pack %a, %b, %c : f16, f16, f16 -> vector<3xf16>
   // CHECK: [[EXTRACT:%.*]] = wave.extract [[PACK]][2] : vector<3xf16> -> f16
@@ -283,9 +287,14 @@ func.func @wave_pack_extract_ops(%a: f16, %b: f16, %c: f16,
   %vpack = wave.pack %va, %vb : !wave.simd<f16, 32>, !wave.simd<f16, 32> -> !wave.simd<vector<2xf16>, 32>
   // CHECK: [[VEXTRACT:%.*]] = wave.extract [[VPACK]][1] : !wave.simd<vector<2xf16>, 32> -> !wave.simd<f16, 32>
   %vextract = wave.extract %vpack[1] : !wave.simd<vector<2xf16>, 32> -> !wave.simd<f16, 32>
-  func.return %pack, %extract, %vpack, %vextract
+  // CHECK: [[SLICE:%.*]] = wave.extract [[V8]][4] : !wave.simd<vector<8xi8>, 32> -> !wave.simd<vector<4xi8>, 32>
+  %slice = wave.extract %v8[4] : !wave.simd<vector<8xi8>, 32> -> !wave.simd<vector<4xi8>, 32>
+  // CHECK: [[VPACKED:%.*]] = wave.pack [[V4A]], [[V4B]] : !wave.simd<vector<4xi8>, 32>, !wave.simd<vector<4xi8>, 32> -> !wave.simd<vector<8xi8>, 32>
+  %vpacked = wave.pack %v4a, %v4b : !wave.simd<vector<4xi8>, 32>, !wave.simd<vector<4xi8>, 32> -> !wave.simd<vector<8xi8>, 32>
+  func.return %pack, %extract, %vpack, %vextract, %slice, %vpacked
       : vector<3xf16>, f16, !wave.simd<vector<2xf16>, 32>,
-        !wave.simd<f16, 32>
+        !wave.simd<f16, 32>, !wave.simd<vector<4xi8>, 32>,
+        !wave.simd<vector<8xi8>, 32>
 }
 
 // CHECK-LABEL: func.func @wave_assume
