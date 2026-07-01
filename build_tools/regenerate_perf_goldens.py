@@ -11,6 +11,7 @@ import runpy
 import shutil
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -24,6 +25,19 @@ class GoldenTest:
     path: Path
     name: str
     golden: Path
+
+
+@dataclass(frozen=True)
+class HelperRun:
+    generated: Path
+    returncode: int
+    stdout: str
+    stderr: str
+
+    def accepted(self) -> bool:
+        if self.returncode == 0:
+            return True
+        return "ASM DRIFT DETECTED" in self.stdout and self.generated.exists()
 
 
 def rel(path: Path) -> str:
@@ -59,7 +73,7 @@ def run_helper(
     build_dir: Path,
     generated: Path,
     max_diff_lines: int,
-) -> None:
+) -> HelperRun:
     cmd = [
         sys.executable,
         str(test.path),
@@ -71,15 +85,7 @@ def run_helper(
         str(max_diff_lines),
     ]
     proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
-    if proc.returncode == 0:
-        return
-    if "ASM DRIFT DETECTED" in proc.stdout and generated.exists():
-        return
-    if proc.stdout:
-        sys.stdout.write(proc.stdout)
-    if proc.stderr:
-        sys.stderr.write(proc.stderr)
-    raise SystemExit(proc.returncode)
+    return HelperRun(generated, proc.returncode, proc.stdout, proc.stderr)
 
 
 def copy_generated(test: GoldenTest, generated: Path) -> bool:
@@ -93,6 +99,16 @@ def copy_generated(test: GoldenTest, generated: Path) -> bool:
     return True
 
 
+def generated_outputs(tests: list[GoldenTest], output_dir: Path) -> list[Path]:
+    outputs = [output_dir / test.golden.name for test in tests]
+    seen: set[Path] = set()
+    for output in outputs:
+        if output in seen:
+            raise SystemExit(f"duplicate generated asm output: {rel(output)}")
+        seen.add(output)
+    return outputs
+
+
 def regenerate(
     tests: list[GoldenTest],
     build_dir: Path,
@@ -100,14 +116,30 @@ def regenerate(
     max_diff_lines: int,
 ) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
-    for index, test in enumerate(tests, start=1):
-        generated = output_dir / test.golden.name
+    outputs = generated_outputs(tests, output_dir)
+    with ThreadPoolExecutor(max_workers=len(tests)) as executor:
+        futures = [
+            executor.submit(run_helper, test, build_dir, generated, max_diff_lines)
+            for test, generated in zip(tests, outputs, strict=True)
+        ]
+        results = [future.result() for future in futures]
+
+    failed = False
+    for index, (test, result) in enumerate(zip(tests, results, strict=True), start=1):
         print(f"[{index}/{len(tests)}] {test.name}", flush=True)
-        run_helper(test, build_dir, generated, max_diff_lines)
-        if copy_generated(test, generated):
+        if not result.accepted():
+            if result.stdout:
+                sys.stdout.write(result.stdout)
+            if result.stderr:
+                sys.stderr.write(result.stderr)
+            failed = True
+            continue
+        if copy_generated(test, result.generated):
             print(f"  updated {rel(test.golden)}", flush=True)
         else:
             print(f"  unchanged {rel(test.golden)}", flush=True)
+    if failed:
+        raise SystemExit(1)
 
 
 def run_lit(build_dir: Path) -> None:
