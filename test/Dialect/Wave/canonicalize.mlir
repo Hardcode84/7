@@ -94,6 +94,45 @@ func.func @pack_extract_swapped_stays(%v: vector<2xf16>) -> vector<2xf16> {
   return %p : vector<2xf16>
 }
 
+// CHECK-LABEL: func.func @pack_loop_carried_i8
+// CHECK-SAME: (%[[LB:.*]]: i32, %[[UB:.*]]: i32, %[[STEP:.*]]: i32
+// CHECK-SAME: %[[A0:.*]]: !wave.simd<i8, 64>, %[[A1:.*]]: !wave.simd<i8, 64>, %[[A2:.*]]: !wave.simd<i8, 64>, %[[A3:.*]]: !wave.simd<i8, 64>, %[[KEEP:.*]]: !wave.simd<i8, 64>)
+// CHECK: %[[INIT:.*]] = wave.pack %[[A0]], %[[A1]], %[[A2]], %[[A3]] : !wave.simd<i8, 64>, !wave.simd<i8, 64>, !wave.simd<i8, 64>, !wave.simd<i8, 64> -> !wave.simd<vector<4xi8>, 64>
+// CHECK: %[[LOOP:.*]] = scf.for %{{.*}} = %[[LB]] to %[[UB]] step %[[STEP]] iter_args(%[[PACK_ARG:.*]] = %[[INIT]]) -> (!wave.simd<vector<4xi8>, 64>)
+// CHECK: %[[E0:.*]] = wave.extract %[[PACK_ARG]][0] : !wave.simd<vector<4xi8>, 64> -> !wave.simd<i8, 64>
+// CHECK: %[[E1:.*]] = wave.extract %[[PACK_ARG]][1] : !wave.simd<vector<4xi8>, 64> -> !wave.simd<i8, 64>
+// CHECK: %[[E2:.*]] = wave.extract %[[PACK_ARG]][2] : !wave.simd<vector<4xi8>, 64> -> !wave.simd<i8, 64>
+// CHECK: %[[E3:.*]] = wave.extract %[[PACK_ARG]][3] : !wave.simd<vector<4xi8>, 64> -> !wave.simd<i8, 64>
+// CHECK: %[[YIELD_PACK:.*]] = wave.pack %[[E1]], %[[E2]], %[[E3]], %[[E0]] : !wave.simd<i8, 64>, !wave.simd<i8, 64>, !wave.simd<i8, 64>, !wave.simd<i8, 64> -> !wave.simd<vector<4xi8>, 64>
+// CHECK: scf.yield %[[YIELD_PACK]] : !wave.simd<vector<4xi8>, 64>
+// CHECK: %[[SIDE_IN:.*]] = wave.extract %[[LOOP]][2] : !wave.simd<vector<4xi8>, 64> -> !wave.simd<i8, 64>
+// CHECK: %[[SIDE:.*]] = wave.binary addi %[[SIDE_IN]], %[[KEEP]] : !wave.simd<i8, 64>, !wave.simd<i8, 64> -> !wave.simd<i8, 64>
+// CHECK-NOT: wave.pack %[[LOOP]]
+// CHECK: return %[[LOOP]], %[[SIDE]] : !wave.simd<vector<4xi8>, 64>, !wave.simd<i8, 64>
+func.func @pack_loop_carried_i8(%lb: i32, %ub: i32, %step: i32,
+                                %a0: !wave.simd<i8, 64>,
+                                %a1: !wave.simd<i8, 64>,
+                                %a2: !wave.simd<i8, 64>,
+                                %a3: !wave.simd<i8, 64>,
+                                %keep: !wave.simd<i8, 64>)
+    -> (!wave.simd<vector<4xi8>, 64>, !wave.simd<i8, 64>) {
+  %r:5 = scf.for %i = %lb to %ub step %step
+      iter_args(%x0 = %a0, %x1 = %a1, %x2 = %a2, %x3 = %a3,
+                %carry = %keep)
+      -> (!wave.simd<i8, 64>, !wave.simd<i8, 64>, !wave.simd<i8, 64>,
+          !wave.simd<i8, 64>, !wave.simd<i8, 64>)  : i32 {
+    scf.yield %x1, %x2, %x3, %x0, %carry : !wave.simd<i8, 64>,
+        !wave.simd<i8, 64>, !wave.simd<i8, 64>, !wave.simd<i8, 64>,
+        !wave.simd<i8, 64>
+  }
+  %side = wave.binary addi %r#2, %r#4 : !wave.simd<i8, 64>,
+      !wave.simd<i8, 64> -> !wave.simd<i8, 64>
+  %p = wave.pack %r#0, %r#1, %r#2, %r#3 : !wave.simd<i8, 64>,
+      !wave.simd<i8, 64>, !wave.simd<i8, 64>, !wave.simd<i8, 64> ->
+      !wave.simd<vector<4xi8>, 64>
+  return %p, %side : !wave.simd<vector<4xi8>, 64>, !wave.simd<i8, 64>
+}
+
 // CHECK-LABEL: func.func @read_first_splat
 // CHECK-SAME: (%[[VALUE:.*]]: i32)
 // CHECK-NOT: wave.splat

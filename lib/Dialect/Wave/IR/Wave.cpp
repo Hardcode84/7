@@ -17,6 +17,7 @@
 #include "mlir/Dialect/Utils/StaticValueUtils.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/DialectImplementation.h"
+#include "mlir/IR/IRMapping.h"
 #include "mlir/IR/Matchers.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Interfaces/Utils/InferIntRangeCommon.h"
@@ -1251,6 +1252,20 @@ struct PackExtractSliceMatch {
   uint64_t startIndex;
 };
 
+struct PackLoopResultMatch {
+  scf::ForOp loop;
+  unsigned startIndex;
+};
+
+struct PackedLoopReplacement {
+  SmallVector<Value> replacements;
+  Value packedResult;
+};
+
+static unsigned getPackInputCount(PackOp op) {
+  return static_cast<unsigned>(op.getInputs().size());
+}
+
 static LogicalResult verifyPackExtractSlicePayload(OperandRange inputs,
                                                    VectorType resultVector) {
   if (inputs.empty())
@@ -1263,6 +1278,94 @@ static LogicalResult verifyPackExtractSlicePayload(OperandRange inputs,
       resultVector.getElementType())
     return failure();
   return success();
+}
+
+static LogicalResult verifyPackScalarPayload(PackOp op) {
+  OperandRange inputs = op.getInputs();
+  if (inputs.size() < 2)
+    return failure();
+  VectorType resultVector = getWaveVectorPayloadType(op.getResult().getType());
+  if (resultVector.getNumElements() != static_cast<int64_t>(inputs.size()))
+    return failure();
+  if (getWavePayloadElementCount(inputs.front().getType()) != 1)
+    return failure();
+  if (getWavePayloadElementType(inputs.front().getType()) !=
+      resultVector.getElementType())
+    return failure();
+  return success();
+}
+
+static FailureOr<PackLoopResultMatch> matchFirstPackLoopResult(PackOp op) {
+  OpResult firstResult = dyn_cast<OpResult>(op.getInputs().front());
+  if (!firstResult)
+    return failure();
+  scf::ForOp loop = dyn_cast<scf::ForOp>(firstResult.getOwner());
+  if (!loop || loop->getBlock() != op->getBlock() || !loop->isBeforeInBlock(op))
+    return failure();
+  return PackLoopResultMatch{loop, firstResult.getResultNumber()};
+}
+
+static LogicalResult verifyPackLoopResultSlice(PackOp op,
+                                               PackLoopResultMatch match) {
+  unsigned inputCount = getPackInputCount(op);
+  if (match.startIndex + inputCount > match.loop->getNumResults())
+    return failure();
+
+  for (auto [offset, input] : llvm::enumerate(op.getInputs())) {
+    OpResult result = dyn_cast<OpResult>(input);
+    if (!result || result.getOwner() != match.loop)
+      return failure();
+    if (result.getResultNumber() != match.startIndex + offset)
+      return failure();
+  }
+  return success();
+}
+
+static FailureOr<PackLoopResultMatch> matchPackLoopResults(PackOp op) {
+  if (failed(verifyPackScalarPayload(op)))
+    return failure();
+
+  FailureOr<PackLoopResultMatch> match = matchFirstPackLoopResult(op);
+  if (failed(match))
+    return failure();
+  if (failed(verifyPackLoopResultSlice(op, *match)))
+    return failure();
+  return *match;
+}
+
+static void copyScfForAttrs(scf::ForOp src, scf::ForOp dst) {
+  for (NamedAttribute attr : src->getAttrs())
+    dst->setAttr(attr.getName(), attr.getValue());
+}
+
+static void appendValues(ValueRange values, unsigned start, unsigned count,
+                         SmallVectorImpl<Value> &out) {
+  for (unsigned index : llvm::seq(start, start + count))
+    out.push_back(values[index]);
+}
+
+static SmallVector<Value> buildPackedLoopInitArgs(PatternRewriter &rewriter,
+                                                  PackOp op,
+                                                  PackLoopResultMatch match) {
+  scf::ForOp loop = match.loop;
+  unsigned inputCount = getPackInputCount(op);
+  ValueRange oldInitArgs = loop.getInitArgs();
+  SmallVector<Value> newInitArgs;
+  newInitArgs.reserve(oldInitArgs.size() - inputCount + 1);
+  for (unsigned index = 0; index < oldInitArgs.size(); ++index) {
+    if (index != match.startIndex) {
+      newInitArgs.push_back(oldInitArgs[index]);
+      continue;
+    }
+    SmallVector<Value> packedInputs;
+    appendValues(oldInitArgs, index, inputCount, packedInputs);
+    Value packed =
+        PackOp::create(rewriter, op.getLoc(), op.getType(), packedInputs)
+            .getResult();
+    newInitArgs.push_back(packed);
+    index += inputCount - 1;
+  }
+  return newInitArgs;
 }
 
 static FailureOr<PackExtractSliceMatch> matchPackFirstExtract(PackOp op) {
@@ -1304,6 +1407,93 @@ static LogicalResult verifyPackExtractSliceInputs(OperandRange inputs,
   return success();
 }
 
+static void mapPackedLoopArgs(PatternRewriter &rewriter, PackOp op,
+                              PackLoopResultMatch match, scf::ForOp newLoop,
+                              IRMapping &map) {
+  scf::ForOp oldLoop = match.loop;
+  unsigned inputCount = getPackInputCount(op);
+  map.map(oldLoop.getInductionVar(), newLoop.getInductionVar());
+
+  unsigned newIndex = 0;
+  for (unsigned oldIndex = 0; oldIndex < oldLoop->getNumResults(); ++oldIndex) {
+    if (oldIndex != match.startIndex) {
+      map.map(oldLoop.getRegionIterArgs()[oldIndex],
+              newLoop.getRegionIterArgs()[newIndex++]);
+      continue;
+    }
+
+    Value packedArg = newLoop.getRegionIterArgs()[newIndex++];
+    for (unsigned offset : llvm::seq(inputCount)) {
+      Value oldArg = oldLoop.getRegionIterArgs()[oldIndex + offset];
+      Value extracted = ExtractOp::create(
+          rewriter, op.getLoc(), oldArg.getType(), packedArg,
+          rewriter.getI64IntegerAttr(static_cast<int64_t>(offset)));
+      map.map(oldArg, extracted);
+    }
+    oldIndex += inputCount - 1;
+  }
+}
+
+static void clonePackedLoopBody(PatternRewriter &rewriter, PackOp op,
+                                PackLoopResultMatch match, scf::ForOp newLoop) {
+  Block &oldBody = *match.loop.getBody();
+  IRMapping map;
+  rewriter.setInsertionPointToStart(newLoop.getBody());
+  mapPackedLoopArgs(rewriter, op, match, newLoop, map);
+
+  for (Operation &bodyOp : oldBody.without_terminator())
+    rewriter.clone(bodyOp, map);
+
+  scf::YieldOp oldYield = cast<scf::YieldOp>(oldBody.getTerminator());
+  SmallVector<Value> newYieldOperands;
+  unsigned inputCount = getPackInputCount(op);
+  for (unsigned index = 0; index < oldYield.getNumOperands(); ++index) {
+    if (index != match.startIndex) {
+      newYieldOperands.push_back(
+          map.lookupOrDefault(oldYield.getOperand(index)));
+      continue;
+    }
+    SmallVector<Value> packedInputs;
+    for (unsigned offset : llvm::seq(inputCount))
+      packedInputs.push_back(
+          map.lookupOrDefault(oldYield.getOperand(index + offset)));
+    Value packed =
+        PackOp::create(rewriter, oldYield.getLoc(), op.getType(), packedInputs)
+            .getResult();
+    newYieldOperands.push_back(packed);
+    index += inputCount - 1;
+  }
+  scf::YieldOp::create(rewriter, oldYield.getLoc(), newYieldOperands);
+}
+
+static PackedLoopReplacement
+buildPackedLoopReplacements(PatternRewriter &rewriter, PackOp op,
+                            PackLoopResultMatch match, scf::ForOp newLoop) {
+  unsigned inputCount = getPackInputCount(op);
+  PackedLoopReplacement replacement;
+  replacement.replacements.reserve(match.loop->getNumResults());
+  unsigned newIndex = 0;
+  for (unsigned oldIndex = 0; oldIndex < match.loop->getNumResults();
+       ++oldIndex) {
+    if (oldIndex != match.startIndex) {
+      replacement.replacements.push_back(newLoop.getResult(newIndex++));
+      continue;
+    }
+
+    Value packedResult = newLoop.getResult(newIndex++);
+    replacement.packedResult = packedResult;
+    for (unsigned offset : llvm::seq(inputCount)) {
+      Value oldResult = match.loop.getResult(oldIndex + offset);
+      Value extracted = ExtractOp::create(
+          rewriter, op.getLoc(), oldResult.getType(), packedResult,
+          rewriter.getI64IntegerAttr(static_cast<int64_t>(offset)));
+      replacement.replacements.push_back(extracted);
+    }
+    oldIndex += inputCount - 1;
+  }
+  return replacement;
+}
+
 struct PackContiguousExtractsToSlice : OpRewritePattern<PackOp> {
   using OpRewritePattern::OpRewritePattern;
 
@@ -1333,11 +1523,39 @@ struct PackContiguousExtractsToSlice : OpRewritePattern<PackOp> {
     return success();
   }
 };
+
+struct PackLoopResultsToLoopCarry : OpRewritePattern<PackOp> {
+  using OpRewritePattern::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(PackOp op,
+                                PatternRewriter &rewriter) const override {
+    FailureOr<PackLoopResultMatch> match = matchPackLoopResults(op);
+    if (failed(match))
+      return failure();
+
+    rewriter.setInsertionPoint(match->loop);
+    SmallVector<Value> newInitArgs =
+        buildPackedLoopInitArgs(rewriter, op, *match);
+    scf::ForOp newLoop = scf::ForOp::create(
+        rewriter, match->loop.getLoc(), match->loop.getLowerBound(),
+        match->loop.getUpperBound(), match->loop.getStep(), newInitArgs);
+    copyScfForAttrs(match->loop, newLoop);
+    clonePackedLoopBody(rewriter, op, *match, newLoop);
+
+    rewriter.setInsertionPointAfter(newLoop);
+    PackedLoopReplacement replacement =
+        buildPackedLoopReplacements(rewriter, op, *match, newLoop);
+    rewriter.replaceOp(match->loop, replacement.replacements);
+    rewriter.replaceOp(op, replacement.packedResult);
+    return success();
+  }
+};
 } // namespace
 
 void PackOp::getCanonicalizationPatterns(RewritePatternSet &patterns,
                                          MLIRContext *context) {
-  patterns.add<PackContiguousExtractsToSlice>(context);
+  patterns.add<PackContiguousExtractsToSlice, PackLoopResultsToLoopCarry>(
+      context);
 }
 
 static FailureOr<Type>
