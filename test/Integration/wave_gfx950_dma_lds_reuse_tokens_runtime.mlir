@@ -1,8 +1,8 @@
 // REQUIRES: host-supports-amdgpu-gfx950, wave-python-bindings, host-has-hip-runtime, host-has-hipcc
 //
-// RUN: %python %S/../../tools/wave-matmul-calibrate/wave-matmul-calibrate.py --chip=%chip --kernel-profile=gfx950-f16-256x256-16wave --m=1024 --n=512 --k=512 --cta-swizzle-xcds=1 --cta-group-m=1 --variants=scheduled --iters=2 --warmup=1 --repeats=1 \
+// RUN: %python %S/../../tools/wave-matmul-calibrate/wave-matmul-calibrate.py --chip=%chip --build-dir=%wave_obj_root --kernel-profile=gfx950-f16-256x256-16wave --m=1024 --n=512 --k=512 --cta-swizzle-xcds=1 --cta-group-m=1 --variants=scheduled --iters=2 --warmup=1 --repeats=1 \
 // RUN:   | FileCheck %s --check-prefix=F16
-// RUN: %python %S/../../tools/wave-matmul-calibrate/wave-matmul-calibrate.py --chip=%chip --kernel-profile=gfx950-mxfp4-256x256-8wave --m=1024 --n=512 --k=768 --cta-swizzle-xcds=1 --cta-group-m=1 --variants=scheduled --iters=2 --warmup=1 --repeats=1 \
+// RUN: %python %S/../../tools/wave-matmul-calibrate/wave-matmul-calibrate.py --chip=%chip --build-dir=%wave_obj_root --kernel-profile=gfx950-mxfp4-256x256-8wave --m=1024 --n=512 --k=768 --cta-swizzle-xcds=1 --cta-group-m=1 --variants=scheduled --iters=2 --warmup=1 --repeats=1 \
 // RUN:   | FileCheck %s --check-prefix=MXFP4
 //
 // F16: input_mode=random
