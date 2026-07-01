@@ -37,3 +37,20 @@ func.func @odd_source(%src: !waveamdmachine.reg<sgpr, 2, 1>) {
 }
 
 }
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
+
+func.func @non_adjacent_element_source(
+    %lo: !waveamdmachine.reg<vgpr, 1, 100>,
+    %hi: !waveamdmachine.reg<vgpr, 1, 102>) {
+  // expected-error @below {{source elements must be adjacent}}
+  %wide = waveamdmachine.v_mov_b64_from_elements %lo, %hi
+      : (!waveamdmachine.reg<vgpr, 1, 100>,
+         !waveamdmachine.reg<vgpr, 1, 102>)
+        -> !waveamdmachine.reg<vgpr, 2, 8>
+  return
+}
+
+}

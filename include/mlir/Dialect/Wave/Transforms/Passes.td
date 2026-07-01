@@ -216,11 +216,13 @@ def WaveAMDDecomposeMemTuples
 
 def WaveAMDPackVGPRZeroMoves
     : Pass<"waveamd-pack-vgpr-zero-moves"> {
-  let summary = "Pack post-regalloc VGPR zero fills into v_mov_b64 chunks";
+  let summary = "Pack post-regalloc VGPR moves into v_mov_b64 chunks";
   let description = [{
     Rewrites allocated `v_mov_b32_tuple` zero fills into aligned
-    `v_mov_b64_tuple` chunks plus scalar head/tail moves. Intended placement is
-    after register allocation and before ticket-wait / hazard-wait insertion.
+    `v_mov_b64_tuple` chunks plus scalar head/tail moves, and packs adjacent
+    scalar VGPR copies with contiguous source and destination pairs. Intended
+    placement is after register allocation and before ticket-wait / hazard-wait
+    insertion.
   }];
   let dependentDialects = [
     "waveamdmachine::WaveAMDMachineDialect"

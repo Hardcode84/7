@@ -334,6 +334,20 @@ LogicalResult VMovB64TupleOp::verify() {
   return verifyAllocatedPairAlignment(*this, sourceType, "source");
 }
 
+LogicalResult VMovB64FromElementsOp::verify() {
+  auto resultType = cast<RegType>(getResult().getType());
+  if (failed(verifyAllocatedPairAlignment(*this, resultType, "result")))
+    return failure();
+  auto loType = cast<RegType>(getSourceLo().getType());
+  auto hiType = cast<RegType>(getSourceHi().getType());
+  if (failed(verifyAllocatedPairAlignment(*this, loType, "source")))
+    return failure();
+  if (loType.getIndex() >= 0 && hiType.getIndex() >= 0 &&
+      hiType.getIndex() != loType.getIndex() + 1)
+    return emitOpError("source elements must be adjacent");
+  return success();
+}
+
 static bool isExecIfMergeRegClass(RegClass regClass) {
   return regClass == RegClass::VGPR || regClass == RegClass::SGPR;
 }

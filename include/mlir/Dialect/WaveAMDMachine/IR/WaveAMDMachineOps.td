@@ -641,6 +641,19 @@ def WaveAMDMachine_VMovB64TupleOp
   let hasVerifier = 1;
 }
 
+def WaveAMDMachine_VMovB64FromElementsOp
+    : WaveAMDMachine_Op<"v_mov_b64_from_elements",
+                        [WaveAMDMachine_VALU, Pure]> {
+  let summary = "copy adjacent scalar VGPRs with v_mov_b64";
+  let arguments = (ins WaveAMDMachine_VGPR1:$source_lo,
+                       WaveAMDMachine_VGPR1:$source_hi);
+  let results = (outs WaveAMDMachine_VGPR2:$result);
+  let archPredicate = WaveAMDMachine_VMovB64Target;
+  let assemblyFormat =
+      "$source_lo `,` $source_hi attr-dict `:` functional-type(operands, results)";
+  let hasVerifier = 1;
+}
+
 def WaveAMDMachine_VCndmaskB32TupleOp
     : WaveAMDMachine_Op<"v_cndmask_b32_tuple",
                         [WaveAMDMachine_VALU, Pure]> {

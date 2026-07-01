@@ -60,11 +60,92 @@ func.func @scalar_zero_tuple_elements() {
   return
 }
 
+// PACK-LABEL: func.func @distinct_scalar_zero_tuple_elements
+// PACK: %[[PAIR:.+]] = waveamdmachine.v_mov_b64_tuple
+// PACK-SAME: -> !waveamdmachine.reg<vgpr, 2, 24>
+// PACK: waveamdmachine.tuple_from_elements %[[PAIR]]
+// PACK-SAME: -> !waveamdmachine.reg<vgpr, 2, 24>
+func.func @distinct_scalar_zero_tuple_elements() {
+  %zero0 = waveamdmachine.imm 0 : !waveamdmachine.imm
+  %zero1 = waveamdmachine.imm 0 : !waveamdmachine.imm
+  %a = waveamdmachine.v_mov_b32_tuple %zero0
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1, 24>
+  %b = waveamdmachine.v_mov_b32_tuple %zero1
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1, 25>
+  %wide = waveamdmachine.tuple_from_elements %a, %b
+      : (!waveamdmachine.reg<vgpr, 1, 24>,
+         !waveamdmachine.reg<vgpr, 1, 25>)
+      -> !waveamdmachine.reg<vgpr, 2, 24>
+  return
+}
+
+// PACK-LABEL: func.func @scalar_reg_tuple_elements(
+// PACK: %[[SRC0:.+]]:4 = waveamdmachine.tuple_to_elements
+// PACK: %[[SRC1:.+]]:4 = waveamdmachine.tuple_to_elements
+// PACK: %[[PAIR0:.+]] = waveamdmachine.v_mov_b64_from_elements %[[SRC0]]#2, %[[SRC0]]#3
+// PACK-SAME: -> !waveamdmachine.reg<vgpr, 2, 0>
+// PACK: %[[PAIR1:.+]] = waveamdmachine.v_mov_b64_from_elements %[[SRC1]]#2, %[[SRC1]]#3
+// PACK-SAME: -> !waveamdmachine.reg<vgpr, 2, 2>
+// PACK: waveamdmachine.tuple_from_elements %[[PAIR0]], %[[PAIR1]]
+// PACK-SAME: -> !waveamdmachine.reg<vgpr, 4, 0>
+func.func @scalar_reg_tuple_elements(
+    %src0: !waveamdmachine.reg<vgpr, 4, 100>,
+    %src1: !waveamdmachine.reg<vgpr, 4, 104>) {
+  %parts0:4 = waveamdmachine.tuple_to_elements %src0
+      : (!waveamdmachine.reg<vgpr, 4, 100>) ->
+        (!waveamdmachine.reg<vgpr, 1, 100>,
+         !waveamdmachine.reg<vgpr, 1, 101>,
+         !waveamdmachine.reg<vgpr, 1, 102>,
+         !waveamdmachine.reg<vgpr, 1, 103>)
+  %parts1:4 = waveamdmachine.tuple_to_elements %src1
+      : (!waveamdmachine.reg<vgpr, 4, 104>) ->
+        (!waveamdmachine.reg<vgpr, 1, 104>,
+         !waveamdmachine.reg<vgpr, 1, 105>,
+         !waveamdmachine.reg<vgpr, 1, 106>,
+         !waveamdmachine.reg<vgpr, 1, 107>)
+  %a = waveamdmachine.v_mov_b32_tuple %parts0#2
+      : (!waveamdmachine.reg<vgpr, 1, 102>) -> !waveamdmachine.reg<vgpr, 1, 0>
+  %b = waveamdmachine.v_mov_b32_tuple %parts0#3
+      : (!waveamdmachine.reg<vgpr, 1, 103>) -> !waveamdmachine.reg<vgpr, 1, 1>
+  %c = waveamdmachine.v_mov_b32_tuple %parts1#2
+      : (!waveamdmachine.reg<vgpr, 1, 106>) -> !waveamdmachine.reg<vgpr, 1, 2>
+  %d = waveamdmachine.v_mov_b32_tuple %parts1#3
+      : (!waveamdmachine.reg<vgpr, 1, 107>) -> !waveamdmachine.reg<vgpr, 1, 3>
+  %wide = waveamdmachine.tuple_from_elements %a, %b, %c, %d
+      : (!waveamdmachine.reg<vgpr, 1, 0>,
+         !waveamdmachine.reg<vgpr, 1, 1>,
+         !waveamdmachine.reg<vgpr, 1, 2>,
+         !waveamdmachine.reg<vgpr, 1, 3>)
+      -> !waveamdmachine.reg<vgpr, 4, 0>
+  return
+}
+
+// PACK-LABEL: func.func @odd_source_reg_pair_stays_b32(
+// PACK: waveamdmachine.v_mov_b32_tuple
+// PACK: waveamdmachine.v_mov_b32_tuple
+// PACK-NOT: waveamdmachine.v_mov_b64
+func.func @odd_source_reg_pair_stays_b32(
+    %src: !waveamdmachine.reg<vgpr, 2, 103>) {
+  %parts:2 = waveamdmachine.tuple_to_elements %src
+      : (!waveamdmachine.reg<vgpr, 2, 103>) ->
+        (!waveamdmachine.reg<vgpr, 1, 103>,
+         !waveamdmachine.reg<vgpr, 1, 104>)
+  %a = waveamdmachine.v_mov_b32_tuple %parts#0
+      : (!waveamdmachine.reg<vgpr, 1, 103>) -> !waveamdmachine.reg<vgpr, 1, 0>
+  %b = waveamdmachine.v_mov_b32_tuple %parts#1
+      : (!waveamdmachine.reg<vgpr, 1, 104>) -> !waveamdmachine.reg<vgpr, 1, 1>
+  %wide = waveamdmachine.tuple_from_elements %a, %b
+      : (!waveamdmachine.reg<vgpr, 1, 0>,
+         !waveamdmachine.reg<vgpr, 1, 1>)
+      -> !waveamdmachine.reg<vgpr, 2, 0>
+  return
+}
+
 // PACK-LABEL: func.func @non_adjacent_scalar_zero_tuple_elements(
 // PACK: waveamdmachine.v_mov_b32_tuple
 // PACK: waveamdmachine.imm 1
 // PACK: waveamdmachine.v_mov_b32_tuple
-// PACK-NOT: waveamdmachine.v_mov_b64_tuple
+// PACK-NOT: waveamdmachine.v_mov_b64
 func.func @non_adjacent_scalar_zero_tuple_elements() {
   %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
   %a = waveamdmachine.v_mov_b32_tuple %zero
@@ -81,7 +162,7 @@ func.func @non_adjacent_scalar_zero_tuple_elements() {
 
 // PACK-LABEL: func.func @nonzero_tuple_stays_b32
 // PACK: waveamdmachine.v_mov_b32_tuple
-// PACK-NOT: waveamdmachine.v_mov_b64_tuple
+// PACK-NOT: waveamdmachine.v_mov_b64
 func.func @nonzero_tuple_stays_b32() {
   %one = waveamdmachine.imm 1 : !waveamdmachine.imm
   %wide = waveamdmachine.v_mov_b32_tuple %one {registers = 4 : i64}
@@ -116,7 +197,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
 // PACK-LABEL: func.func @unsupported_target_stays_b32
 // PACK: waveamdmachine.v_mov_b32_tuple
-// PACK-NOT: waveamdmachine.v_mov_b64_tuple
+// PACK-NOT: waveamdmachine.v_mov_b64
 func.func @unsupported_target_stays_b32() {
   %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
   %wide = waveamdmachine.v_mov_b32_tuple %zero {registers = 4 : i64}

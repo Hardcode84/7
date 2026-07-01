@@ -1630,6 +1630,14 @@ private:
     return llvm::MCOperand::createReg(mcVGPRReg(getPhys(value) + component, 1));
   }
 
+  llvm::MCOperand toMCVGPRPairFromLo(Value value) const {
+    auto regType = cast<waveamdmachine::RegType>(value.getType());
+    if (regType.getRegClass() != waveamdmachine::RegClass::VGPR ||
+        regType.getWidth() != 1)
+      llvm_unreachable("expected scalar VGPR pair base");
+    return llvm::MCOperand::createReg(mcVGPRReg(getPhys(value), 2));
+  }
+
   llvm::MCOperand toMCVGPRLo16(Value value) const {
     waveamdmachine::RegType regType =
         cast<waveamdmachine::RegType>(value.getType());
@@ -2257,6 +2265,12 @@ private:
         return op.emitError("v_mov_b64_tuple unsupported on target");
       return emitMC(vMovB64(),
                     {toMCOperand(result()), toMCOperand(op.getOperand(0))});
+    }
+    if (auto move = dyn_cast<waveamdmachine::VMovB64FromElementsOp>(op)) {
+      if (!waveamdmachine::VMovB64FromElementsOp::isSupportedOnIsa(isaVersion))
+        return op.emitError("v_mov_b64_from_elements unsupported on target");
+      return emitMC(vMovB64(), {toMCOperand(result()),
+                                toMCVGPRPairFromLo(move.getSourceLo())});
     }
     if (isa<waveamdmachine::VCndmaskB32TupleOp>(op)) {
       waveamdmachine::RegType regType =

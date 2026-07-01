@@ -8,12 +8,15 @@
 
 #include "mlir/Dialect/Wave/Transforms/Passes.h"
 
+#include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachine.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineTarget.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
+#include "mlir/IR/Dominance.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/TargetParser/TargetParser.h"
+#include <optional>
 
 namespace mlir::wave {
 #define GEN_PASS_DEF_WAVEAMDPACKVGPRZEROMOVES
@@ -57,12 +60,23 @@ static bool canPack(waveamdmachine::VMovB32TupleOp op) {
   return true;
 }
 
-static bool isPackableScalarZeroMove(waveamdmachine::VMovB32TupleOp op) {
+static std::optional<unsigned> getAllocatedScalarVGPRIndex(Value value) {
+  auto type = dyn_cast<waveamdmachine::RegType>(value.getType());
+  if (!type || type.getRegClass() != waveamdmachine::RegClass::VGPR ||
+      type.getWidth() != 1 || type.getIndex() < 0)
+    return std::nullopt;
+  return static_cast<unsigned>(type.getIndex());
+}
+
+static bool isPackableScalarMove(waveamdmachine::VMovB32TupleOp op) {
   auto resultType = dyn_cast<waveamdmachine::RegType>(op.getResult().getType());
-  return resultType &&
-         resultType.getRegClass() == waveamdmachine::RegClass::VGPR &&
-         resultType.getWidth() == 1 && resultType.getIndex() >= 0 &&
-         isZeroImm(op.getSource()) && op.getResult().hasOneUse();
+  if (!resultType ||
+      resultType.getRegClass() != waveamdmachine::RegClass::VGPR ||
+      resultType.getWidth() != 1 || resultType.getIndex() < 0 ||
+      !op.getResult().hasOneUse())
+    return false;
+  return isZeroImm(op.getSource()) ||
+         getAllocatedScalarVGPRIndex(op.getSource()).has_value();
 }
 
 static bool areAdjacentBefore(Operation *first, Operation *second,
@@ -72,21 +86,54 @@ static bool areAdjacentBefore(Operation *first, Operation *second,
          first->getNextNode() == second && first->isBeforeInBlock(anchor);
 }
 
-static waveamdmachine::VMovB32TupleOp getPackableScalarZeroMove(Value value) {
+static waveamdmachine::VMovB32TupleOp getPackableScalarMove(Value value) {
   auto move = value.getDefiningOp<waveamdmachine::VMovB32TupleOp>();
-  if (!move || !isPackableScalarZeroMove(move))
+  if (!move || !isPackableScalarMove(move))
     return {};
   return move;
 }
 
+static bool hasZeroSources(waveamdmachine::VMovB32TupleOp first,
+                           waveamdmachine::VMovB32TupleOp second) {
+  return isZeroImm(first.getSource()) && isZeroImm(second.getSource());
+}
+
+static bool hasContiguousVGPRSourcePair(waveamdmachine::VMovB32TupleOp first,
+                                        waveamdmachine::VMovB32TupleOp second) {
+  std::optional<unsigned> firstIndex =
+      getAllocatedScalarVGPRIndex(first.getSource());
+  std::optional<unsigned> secondIndex =
+      getAllocatedScalarVGPRIndex(second.getSource());
+  return firstIndex && secondIndex && *firstIndex % 2 == 0 &&
+         *secondIndex == *firstIndex + 1;
+}
+
+static bool valueDominates(Value value, Operation *op, DominanceInfo &dom) {
+  if (auto arg = dyn_cast<BlockArgument>(value))
+    return dom.dominates(arg.getOwner(), op->getBlock());
+  Operation *def = value.getDefiningOp();
+  return def && dom.dominates(def, op);
+}
+
+static bool sourcesDominatePack(waveamdmachine::VMovB32TupleOp first,
+                                waveamdmachine::VMovB32TupleOp second,
+                                DominanceInfo &dom) {
+  return valueDominates(first.getSource(), first, dom) &&
+         valueDominates(second.getSource(), first, dom);
+}
+
 static bool canPackPair(waveamdmachine::VMovB32TupleOp first,
                         waveamdmachine::VMovB32TupleOp second,
-                        waveamdmachine::TupleFromElementsOp tuple) {
+                        waveamdmachine::TupleFromElementsOp tuple,
+                        DominanceInfo &dom) {
   auto firstType = cast<waveamdmachine::RegType>(first.getResult().getType());
   auto secondType = cast<waveamdmachine::RegType>(second.getResult().getType());
   return firstType.getIndex() % 2 == 0 &&
          secondType.getIndex() == firstType.getIndex() + 1 &&
-         areAdjacentBefore(first, second, tuple);
+         areAdjacentBefore(first, second, tuple) &&
+         sourcesDominatePack(first, second, dom) &&
+         (hasZeroSources(first, second) ||
+          hasContiguousVGPRSourcePair(first, second));
 }
 
 static waveamdmachine::VMovB32TupleOp
@@ -133,17 +180,24 @@ static void packMove(waveamdmachine::VMovB32TupleOp op) {
 
 static Value createB64Move(OpBuilder &builder,
                            waveamdmachine::VMovB32TupleOp first,
+                           waveamdmachine::VMovB32TupleOp second,
                            waveamdmachine::RegType firstType) {
   builder.setInsertionPoint(first);
   auto pairType = waveamdmachine::RegType::get(first.getContext(),
                                                waveamdmachine::RegClass::VGPR,
                                                2, firstType.getIndex());
-  return waveamdmachine::VMovB64TupleOp::create(builder, first.getLoc(),
-                                                pairType, first.getSource())
+  if (hasZeroSources(first, second))
+    return waveamdmachine::VMovB64TupleOp::create(builder, first.getLoc(),
+                                                  pairType, first.getSource())
+        .getResult();
+  return waveamdmachine::VMovB64FromElementsOp::create(
+             builder, first.getLoc(), pairType, first.getSource(),
+             second.getSource())
       .getResult();
 }
 
-static bool packTupleElements(waveamdmachine::TupleFromElementsOp tuple) {
+static bool packTupleElements(waveamdmachine::TupleFromElementsOp tuple,
+                              DominanceInfo &dom) {
   OpBuilder builder(tuple.getContext());
   SmallVector<Value, 16> elements;
   SmallVector<waveamdmachine::VMovB32TupleOp, 16> movesToErase;
@@ -151,17 +205,17 @@ static bool packTupleElements(waveamdmachine::TupleFromElementsOp tuple) {
 
   for (unsigned i = 0, e = oldElements.size(); i != e;) {
     waveamdmachine::VMovB32TupleOp first =
-        getPackableScalarZeroMove(oldElements[i]);
+        getPackableScalarMove(oldElements[i]);
     waveamdmachine::VMovB32TupleOp second =
         i + 1 == e ? waveamdmachine::VMovB32TupleOp()
-                   : getPackableScalarZeroMove(oldElements[i + 1]);
-    if (!first || !second || !canPackPair(first, second, tuple)) {
+                   : getPackableScalarMove(oldElements[i + 1]);
+    if (!first || !second || !canPackPair(first, second, tuple, dom)) {
       elements.push_back(oldElements[i++]);
       continue;
     }
 
     auto firstType = cast<waveamdmachine::RegType>(first.getResult().getType());
-    elements.push_back(createB64Move(builder, first, firstType));
+    elements.push_back(createB64Move(builder, first, second, firstType));
     movesToErase.push_back(first);
     movesToErase.push_back(second);
     i += 2;
@@ -199,11 +253,17 @@ struct WaveAMDPackVGPRZeroMovesPass
     for (waveamdmachine::VMovB32TupleOp op : moves)
       packMove(op);
 
-    SmallVector<waveamdmachine::TupleFromElementsOp> tuples;
-    root->walk(
-        [&](waveamdmachine::TupleFromElementsOp op) { tuples.push_back(op); });
-    for (waveamdmachine::TupleFromElementsOp op : tuples)
-      packTupleElements(op);
+    SmallVector<func::FuncOp> funcs;
+    root->walk([&](func::FuncOp func) { funcs.push_back(func); });
+    for (func::FuncOp func : funcs) {
+      DominanceInfo dom(func);
+      SmallVector<waveamdmachine::TupleFromElementsOp> tuples;
+      func.walk([&](waveamdmachine::TupleFromElementsOp op) {
+        tuples.push_back(op);
+      });
+      for (waveamdmachine::TupleFromElementsOp op : tuples)
+        packTupleElements(op, dom);
+    }
   }
 };
 
