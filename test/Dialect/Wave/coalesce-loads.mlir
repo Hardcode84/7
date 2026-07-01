@@ -120,6 +120,62 @@ func.func @symbolic_delta_and_token_rewrite(%in: !wave.ptr<#wave.global, f32>,
 
 // -----
 
+// CHECK-LABEL: func.func @same_dependency_join_tokens
+// CHECK-SAME: ([[IN:%.*]]: !wave.ptr<#wave.global, f16>)
+func.func @same_dependency_join_tokens(%in: !wave.ptr<#wave.global, f16>)
+    -> (!wave.simd<f16, 32>, !wave.simd<f16, 32>)
+    attributes {wave.kernel} {
+  %c1 = arith.constant 1 : i32
+  %p1 = wave.ptr_add %in, %c1
+      : !wave.ptr<#wave.global, f16>, i32 -> !wave.ptr<#wave.global, f16>
+  %root = wave.token : !wave.mem.token
+  // CHECK: [[ROOT:%.*]] = wave.token
+  // CHECK: [[LOAD:%.*]], [[TOK:%.*]] = wave.load [[IN]] after [[ROOT]] : (!wave.ptr<#wave.global, f16>, !wave.mem.token) -> (!wave.simd<vector<2xf16>, 32>, !wave.mem.token)
+  // CHECK: [[V0:%.*]] = wave.extract [[LOAD]][0]
+  // CHECK: [[V1:%.*]] = wave.extract [[LOAD]][1]
+  // CHECK: wave.join [[TOK]], [[TOK]]
+  // CHECK: return [[V0]], [[V1]]
+  %v0, %t0 = wave.load %in after %root
+      : (!wave.ptr<#wave.global, f16>, !wave.mem.token)
+      -> (!wave.simd<f16, 32>, !wave.mem.token)
+  %v1, %t1 = wave.load %p1 after %root
+      : (!wave.ptr<#wave.global, f16>, !wave.mem.token)
+      -> (!wave.simd<f16, 32>, !wave.mem.token)
+  %joined = wave.join %t0, %t1
+      : !wave.mem.token, !wave.mem.token -> !wave.mem.token
+  wave.wait %joined : !wave.mem.token
+  return %v0, %v1 : !wave.simd<f16, 32>, !wave.simd<f16, 32>
+}
+
+// -----
+
+// CHECK-LABEL: func.func @same_dependency_split_join_stays
+// CHECK-NOT: vector<2xf16>
+// CHECK: wave.load
+// CHECK: wave.load
+// CHECK: wave.join
+// CHECK: wave.join
+func.func @same_dependency_split_join_stays(%in: !wave.ptr<#wave.global, f16>)
+    -> (!wave.simd<f16, 32>, !wave.simd<f16, 32>)
+    attributes {wave.kernel} {
+  %c1 = arith.constant 1 : i32
+  %p1 = wave.ptr_add %in, %c1
+      : !wave.ptr<#wave.global, f16>, i32 -> !wave.ptr<#wave.global, f16>
+  %root = wave.token : !wave.mem.token
+  %v0, %t0 = wave.load %in after %root
+      : (!wave.ptr<#wave.global, f16>, !wave.mem.token)
+      -> (!wave.simd<f16, 32>, !wave.mem.token)
+  %v1, %t1 = wave.load %p1 after %root
+      : (!wave.ptr<#wave.global, f16>, !wave.mem.token)
+      -> (!wave.simd<f16, 32>, !wave.mem.token)
+  %j0 = wave.join %t0 : !wave.mem.token -> !wave.mem.token
+  %j1 = wave.join %t1 : !wave.mem.token -> !wave.mem.token
+  wave.wait %j0, %j1 : !wave.mem.token, !wave.mem.token
+  return %v0, %v1 : !wave.simd<f16, 32>, !wave.simd<f16, 32>
+}
+
+// -----
+
 // CHECK-LABEL: func.func @bf16_pair
 // CHECK-SAME: ([[IN:%.*]]: !wave.ptr<#wave.global, bf16>)
 func.func @bf16_pair(%in: !wave.ptr<#wave.global, bf16>)

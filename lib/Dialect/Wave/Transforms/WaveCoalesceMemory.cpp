@@ -111,6 +111,51 @@ static bool tokenUsedOnlyBy(Value token, Operation *op) {
          getMemoryDependency(op) == token;
 }
 
+static JoinOp getOnlyJoinUser(Value token) {
+  if (!token.hasOneUse())
+    return {};
+  return dyn_cast<JoinOp>(token.use_begin()->getOwner());
+}
+
+static std::optional<JoinOp> getCommonJoinUser(const MemoryGroup &group) {
+  JoinOp join;
+  for (Operation *op : group.ops) {
+    JoinOp tokenJoin = getOnlyJoinUser(getMemoryToken(op));
+    if (!tokenJoin)
+      return std::nullopt;
+    if (!join) {
+      join = tokenJoin;
+      continue;
+    }
+    if (join != tokenJoin)
+      return std::nullopt;
+  }
+  if (join->getBlock() != group.firstOp->getBlock())
+    return std::nullopt;
+  if (!group.lastOp->isBeforeInBlock(join))
+    return std::nullopt;
+  return join;
+}
+
+static bool tokensUsedOnlyBySameJoin(const MemoryGroup &lhs,
+                                     const MemoryGroup &rhs) {
+  if (getMemoryDependency(lhs.firstOp) != getMemoryDependency(rhs.firstOp))
+    return false;
+
+  std::optional<JoinOp> lhsJoin = getCommonJoinUser(lhs);
+  if (!lhsJoin)
+    return false;
+  std::optional<JoinOp> rhsJoin = getCommonJoinUser(rhs);
+  return rhsJoin && *lhsJoin == *rhsJoin;
+}
+
+static bool tokensMergeable(const MemoryGroup &before,
+                            const MemoryGroup &after) {
+  if (tokenUsedOnlyBy(getMemoryToken(before.lastOp), after.firstOp))
+    return true;
+  return tokensUsedOnlyBySameJoin(before, after);
+}
+
 static bool valueAvailableBefore(Value value, Operation *op) {
   Operation *def = value.getDefiningOp();
   if (!def)
@@ -252,8 +297,7 @@ tryMergeGroups(WaveDialect &dialect, const MemoryGroup &lhs,
       getTokenOrderedGroups(lhs, rhs);
   if (!ordered)
     return std::optional<MemoryGroup>{};
-  if (!tokenUsedOnlyBy(getMemoryToken(ordered->first->lastOp),
-                       ordered->second->firstOp))
+  if (!tokensMergeable(*ordered->first, *ordered->second))
     return std::optional<MemoryGroup>{};
 
   FailureOr<std::optional<AddressOrderedGroups>> addressOrdered =
@@ -333,6 +377,12 @@ static Type getPackedType(MLIRContext *ctx, const MemoryGroup &group) {
   return SimdType::get(ctx, vectorType, group.simdWidth);
 }
 
+static void replaceGroupTokens(IRRewriter &rewriter, const MemoryGroup &group,
+                               Value token) {
+  for (Operation *op : group.ops)
+    rewriter.replaceAllUsesWith(getMemoryToken(op), token);
+}
+
 static void rewriteStoreGroup(IRRewriter &rewriter, MemoryGroup &group) {
   StoreOp last = cast<StoreOp>(group.lastOp);
   MLIRContext *ctx = last->getContext();
@@ -343,7 +393,7 @@ static void rewriteStoreGroup(IRRewriter &rewriter, MemoryGroup &group) {
   StoreOp store = StoreOp::create(
       rewriter, last.getLoc(), last.getToken().getType(), pack.getResult(),
       group.accessPtr, getMemoryDependency(group.firstOp));
-  rewriter.replaceAllUsesWith(last.getToken(), store.getToken());
+  replaceGroupTokens(rewriter, group, store.getToken());
   for (Operation *op : llvm::reverse(group.ops))
     rewriter.eraseOp(op);
 }
@@ -364,7 +414,7 @@ static void rewriteLoadGroup(IRRewriter &rewriter, MemoryGroup &group) {
         rewriter.getI64IntegerAttr(static_cast<int64_t>(idx)));
     rewriter.replaceAllUsesWith(oldValue, extracted);
   }
-  rewriter.replaceAllUsesWith(getMemoryToken(group.lastOp), load.getToken());
+  replaceGroupTokens(rewriter, group, load.getToken());
   for (Operation *op : llvm::reverse(group.ops))
     rewriter.eraseOp(op);
 }
