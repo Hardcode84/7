@@ -335,12 +335,17 @@ def WaveAMDMachineCleanup
 
 def WaveAMDHoistBufferRsrc
     : Pass<"waveamd-hoist-buffer-rsrc"> {
-  let summary = "Hoist invariant buffer descriptor dwords out of machine loops";
+  let summary = "Hoist invariant tuple-like dwords out of machine loops";
   let description = [{
     Rewrites loop-local `waveamdmachine.make_buffer_rsrc` ops into a hoisted
     descriptor initializer plus `waveamdmachine.update_buffer_rsrc_base` in the
     loop. The update keeps descriptor range/flags live across iterations and
     rewrites only base dwords.
+
+    Also promotes loop-local `waveamdmachine.tuple_from_elements` ops when some
+    tuple slots are loop-carried and some are invariant. The pass hoists an
+    initializer tuple and carries it through the loop, using
+    `waveamdmachine.update_tuple` for the loop-carried slots.
   }];
   let dependentDialects = [
     "func::FuncDialect",
