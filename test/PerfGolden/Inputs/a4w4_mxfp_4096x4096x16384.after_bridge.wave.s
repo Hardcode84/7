@@ -1250,11 +1250,9 @@ _a4w4_kernel:
 		s_waitcnt lgkmcnt(0)
 		s_barrier
 		ds_read_b64_tr_b8 v[74:75], v45 offset:5952
-		s_add_u32 s44, s2, s19
-		s_addc_u32 s45, s3, 0
+		s_add_u32 s52, s2, s19
+		s_addc_u32 s53, s3, 0
 		s_mov_b32 m0, s22
-		s_mov_b32 s52, s44
-		s_mov_b32 s53, s45
 		buffer_load_dwordx4 v9, s[52:55], 0 offen lds
 		s_mov_b32 m0, s28
 		s_nop 0
@@ -1277,11 +1275,9 @@ _a4w4_kernel:
 		s_mov_b32 m0, s39
 		s_nop 0
 		buffer_load_dwordx4 v30, s[52:55], 0 offen lds
-		s_add_u32 s44, s4, s13
-		s_addc_u32 s45, s5, 0
+		s_add_u32 s56, s4, s13
+		s_addc_u32 s57, s5, 0
 		s_mov_b32 m0, s40
-		s_mov_b32 s56, s44
-		s_mov_b32 s57, s45
 		buffer_load_dwordx4 v33, s[56:59], 0 offen lds
 		s_mov_b32 m0, s42
 		s_nop 0
@@ -1292,10 +1288,8 @@ _a4w4_kernel:
 		s_mov_b32 m0, s50
 		s_nop 0
 		buffer_load_dwordx4 v39, s[56:59], 0 offen lds
-		s_add_u32 s44, s8, s20
-		s_addc_u32 s45, s9, 0
-		s_mov_b32 s72, s44
-		s_mov_b32 s73, s45
+		s_add_u32 s72, s8, s20
+		s_addc_u32 s73, s9, 0
 		buffer_load_ubyte v63, v40, s[72:75], 0 offen
 		buffer_load_ubyte v73, v50, s[72:75], 0 offen
 		buffer_load_ubyte v221, v52, s[72:75], 0 offen
@@ -1304,10 +1298,8 @@ _a4w4_kernel:
 		buffer_load_ubyte v248, v58, s[72:75], 0 offen
 		buffer_load_ubyte v249, v60, s[72:75], 0 offen
 		buffer_load_ubyte v250, v47, s[72:75], 0 offen
-		s_add_u32 s44, s10, s41
-		s_addc_u32 s45, s11, 0
-		s_mov_b32 s76, s44
-		s_mov_b32 s77, s45
+		s_add_u32 s76, s10, s41
+		s_addc_u32 s77, s11, 0
 		buffer_load_ubyte v251, v68, s[76:79], 0 offen
 		buffer_load_ubyte v252, v71, s[76:79], 0 offen
 		buffer_load_ubyte v253, v72, s[76:79], 0 offen

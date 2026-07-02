@@ -9,6 +9,7 @@
 #include "WaveAMDRegLiveIntervals.h"
 
 #include "WaveAMDRegAllocInternal.h"
+#include "WaveAMDRegAllocTransformUtils.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "llvm/ADT/BitVector.h"
 #include "llvm/ADT/DenseSet.h"
@@ -701,6 +702,71 @@ private:
     return success();
   }
 
+  Value getSingleTrackedResult(Operation &op) {
+    Value tracked;
+    for (Value value : op.getResults()) {
+      if (!wave::getTrackedWaveAMDRegType(value))
+        continue;
+      if (tracked)
+        return {};
+      tracked = value;
+    }
+    return tracked;
+  }
+
+  bool hasInterval(Value value, waveamdmachine::RegType type) {
+    auto [bucket, table] = intervalsFor(type, result.intervals);
+    (void)bucket;
+    return table->contains(value);
+  }
+
+  bool intervalEndsAt(Value value, waveamdmachine::RegType type, unsigned pos) {
+    auto [bucket, table] = intervalsFor(type, result.intervals);
+    auto it = table->find(value);
+    return it != table->end() &&
+           intervalValueEndsAt((*bucket)[it->second], value, pos);
+  }
+
+  LogicalResult
+  coalesceRequiredKilledOperandInput(Operation &op, Value resultValue,
+                                     waveamdmachine::RegType resultType,
+                                     OpOperand &operand, unsigned pos) {
+    if (!wave::regalloc_detail::requiresKilledOperandReuseForResult(&op,
+                                                                    operand))
+      return success();
+    Value source = operand.get();
+    auto sourceType = wave::getTrackedWaveAMDRegType(source);
+    if (!sourceType || sourceType->getRegClass() != resultType.getRegClass())
+      return success();
+    if (!intervalEndsAt(source, *sourceType, pos))
+      return success();
+    return coalesce(resultValue, source, pos, result.intervals, &op);
+  }
+
+  bool hasAMDGPUTarget(Operation &op) {
+    for (Operation *cur = &op; cur; cur = cur->getParentOp())
+      if (cur->hasAttr("waveamdmachine.target"))
+        return true;
+    return false;
+  }
+
+  LogicalResult coalesceRequiredKilledOperandInputs(Operation &op,
+                                                    unsigned pos) {
+    if (!hasAMDGPUTarget(op))
+      return success();
+    Value resultValue = getSingleTrackedResult(op);
+    if (!resultValue)
+      return success();
+    auto resultType = wave::getTrackedWaveAMDRegType(resultValue);
+    if (!resultType || !hasInterval(resultValue, *resultType))
+      return success();
+    for (OpOperand &operand : op.getOpOperands())
+      if (failed(coalesceRequiredKilledOperandInput(op, resultValue,
+                                                    *resultType, operand, pos)))
+        return failure();
+    return success();
+  }
+
   void recordMFMAAccumulatorOp(Operation &op, unsigned pos) {
     if (coalesceMFMAAccResult && op.hasTrait<OpTrait::waveamdmachine::MFMAOp>())
       pendingMFMAAccumulatorAliases.push_back({&op, pos});
@@ -764,6 +830,8 @@ private:
           extendInterval(operand, pos);
       recordMFMAAccumulatorOp(*op, pos);
       if (failed(coalesceTupleElementOps(*op, pos)))
+        return failure();
+      if (failed(coalesceRequiredKilledOperandInputs(*op, pos)))
         return failure();
       if (failed(processNestedRegions(op, pos)))
         return failure();

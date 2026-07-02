@@ -11,6 +11,10 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // ASM: .Lbuffer_rsrc_hoist_codegen.loop_head_0:
 // ASM-NOT: s_mov_b32 s54
 // ASM-NOT: s_mov_b32 s55
+// ASM: s_add_u32 s52,
+// ASM-NEXT: s_addc_u32 s53,
+// ASM-NOT: s_mov_b32 s52
+// ASM-NOT: s_mov_b32 s53
 // ASM: buffer_load_b32 v1, v0, s[52:55], 0 offen
 func.func @buffer_rsrc_hoist_codegen() attributes {wave.kernel} {
   %range = waveamdmachine.imm 128 : !waveamdmachine.imm
@@ -31,10 +35,10 @@ func.func @buffer_rsrc_hoist_codegen() attributes {wave.kernel} {
     %cur_base, %base_scc = waveamdmachine.s_add_u64_u32 %base, %off
         : (!waveamdmachine.reg<sgpr, 2, 44>,
            !waveamdmachine.reg<sgpr, 1, 48>)
-          -> (!waveamdmachine.reg<sgpr, 2, 50>,
+          -> (!waveamdmachine.reg<sgpr, 2>,
               !waveamdmachine.reg<scc, 1>)
     %desc = waveamdmachine.make_buffer_rsrc %cur_base, %range
-        : (!waveamdmachine.reg<sgpr, 2, 50>, !waveamdmachine.imm)
+        : (!waveamdmachine.reg<sgpr, 2>, !waveamdmachine.imm)
           -> !waveamdmachine.reg<sgpr, 4, 52>
     %value, %tok1 = waveamdmachine.buffer_load_b32 %vaddr, %desc, %zero after %dep
         : (!waveamdmachine.reg<vgpr, 1, 0>,
