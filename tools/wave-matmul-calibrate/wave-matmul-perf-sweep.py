@@ -7,9 +7,11 @@
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import csv
 import os
 import re
+import shutil
 import subprocess
 import sys
 from collections.abc import Sequence
@@ -18,7 +20,9 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CALIBRATOR = REPO_ROOT / "tools/wave-matmul-calibrate/wave-matmul-calibrate.py"
+RUNNER_SRC = REPO_ROOT / "tools/wave-matmul-calibrate/wave-matmul-calibrate-runner.cpp"
 DEFAULT_BUILD = REPO_ROOT / "build"
+DEFAULT_ARTIFACT_NAME = "wave-matmul-perf-sweep-artifacts"
 F16_DOC_K_VALUES = (512, 1024, 2048, 3072, 4096, 8192, 16384)
 MXFP4_DOC_K_VALUES = (1024, 2048, 3072, 4096, 8192, 16384, 32768)
 DEFAULT_ITERS = 200
@@ -61,6 +65,15 @@ class RunResult:
             return None
         flops = 2 * self.spec.m * self.spec.n * self.spec.k
         return flops / self.micros * 1.0e-6
+
+
+@dataclass(frozen=True)
+class PreparedRun:
+    index: int
+    spec: RunSpec
+    hsaco: Path
+    compile_command: list[str]
+    run_command: list[str]
 
 
 KERNELS = {
@@ -187,6 +200,23 @@ def run_command(
     )
 
 
+def run_command_silent(
+    cmd: list[str],
+    *,
+    env: dict[str, str],
+    dry_run: bool,
+) -> subprocess.CompletedProcess[str]:
+    if dry_run:
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+    return subprocess.run(
+        cmd,
+        text=True,
+        capture_output=True,
+        env=env,
+        check=False,
+    )
+
+
 def rebuild_tools(args: argparse.Namespace, env: dict[str, str]) -> None:
     if args.skip_rebuild:
         return
@@ -204,6 +234,23 @@ def rebuild_tools(args: argparse.Namespace, env: dict[str, str]) -> None:
     proc = run_command(cmd, env=env, dry_run=args.dry_run, capture=False)
     if proc.returncode != 0:
         raise SystemExit(proc.returncode)
+
+
+def resolved_hipcc(args: argparse.Namespace) -> str:
+    return args.hipcc or os.environ.get("HIPCC", "/opt/rocm/bin/hipcc")
+
+
+def compile_runner(args: argparse.Namespace, env: dict[str, str]) -> Path:
+    runner = args.artifact_dir / "wave-matmul-calibrate-runner"
+    hipcc = resolved_hipcc(args)
+    if not args.dry_run and not Path(hipcc).exists() and shutil.which(hipcc) is None:
+        raise SystemExit(f"hipcc not found: {hipcc}")
+    cmd = [hipcc, "-O2", str(RUNNER_SRC), "-o", str(runner)]
+    runner.parent.mkdir(parents=True, exist_ok=True)
+    proc = run_command(cmd, env=env, dry_run=args.dry_run, capture=False)
+    if proc.returncode != 0:
+        raise SystemExit(proc.returncode)
+    return runner
 
 
 def build_run_specs(args: argparse.Namespace) -> list[RunSpec]:
@@ -225,6 +272,22 @@ def parse_variant_csv(text: str) -> list[str]:
     if not variants:
         raise SystemExit("empty variant list")
     return variants
+
+
+def safe_stem(text: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_.-]+", "_", text)
+
+
+def artifact_stem(index: int, spec: RunSpec) -> str:
+    parts = [
+        f"{index:03d}",
+        spec.kernel.key,
+        f"m{spec.m}",
+        f"n{spec.n}",
+        f"k{spec.k}",
+        spec.variants,
+    ]
+    return safe_stem("-".join(parts))
 
 
 def calibrator_command(args: argparse.Namespace, spec: RunSpec) -> list[str]:
@@ -260,8 +323,29 @@ def calibrator_command(args: argparse.Namespace, spec: RunSpec) -> list[str]:
         cmd.append("--no-check")
     if args.all_ones:
         cmd.append("--all-ones")
+    if args.rocm_lib:
+        cmd.extend(["--rocm-lib", args.rocm_lib])
     cmd.extend(args.extra_calibrator_arg)
     return cmd
+
+
+def prepare_runs(
+    args: argparse.Namespace, specs: list[RunSpec], runner: Path
+) -> list[PreparedRun]:
+    prepared: list[PreparedRun] = []
+    for index, spec in enumerate(specs):
+        hsaco = args.artifact_dir / f"{artifact_stem(index, spec)}.hsaco"
+        base = calibrator_command(args, spec)
+        compile_cmd = [*base, "--emit-hsaco", str(hsaco)]
+        run_cmd = [
+            *base,
+            "--run-hsaco",
+            str(hsaco),
+            "--runner",
+            str(runner),
+        ]
+        prepared.append(PreparedRun(index, spec, hsaco, compile_cmd, run_cmd))
+    return prepared
 
 
 def parse_result(
@@ -281,15 +365,89 @@ def parse_result(
     )
 
 
-def run_sweep(args: argparse.Namespace, env: dict[str, str]) -> list[RunResult]:
+def run_compile_jobs(
+    args: argparse.Namespace, env: dict[str, str], prepared: list[PreparedRun]
+) -> dict[int, subprocess.CompletedProcess[str]]:
+    completed: dict[int, subprocess.CompletedProcess[str]] = {}
+    jobs = min(args.compile_jobs or args.build_jobs, len(prepared))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as executor:
+        futures = {
+            executor.submit(
+                run_command_silent,
+                item.compile_command,
+                env=env,
+                dry_run=False,
+            ): item
+            for item in prepared
+        }
+        for future in concurrent.futures.as_completed(futures):
+            item = futures[future]
+            proc = future.result()
+            completed[item.index] = proc
+            if proc.returncode == 0:
+                print(f"compiled: {rel(item.hsaco)}", flush=True)
+            else:
+                print_compile_failure(item, proc)
+    return completed
+
+
+def print_compile_failure(
+    item: PreparedRun, proc: subprocess.CompletedProcess[str]
+) -> None:
+    print(f"compile failed: {rel(item.hsaco)}", file=sys.stderr)
+    if proc.stdout:
+        sys.stdout.write(proc.stdout)
+    if proc.stderr:
+        sys.stderr.write(proc.stderr)
+
+
+def partition_compile_results(
+    prepared: list[PreparedRun],
+    completed: dict[int, subprocess.CompletedProcess[str]],
+) -> tuple[list[PreparedRun], list[RunResult]]:
+    failures: list[RunResult] = []
+    ok: list[PreparedRun] = []
+    for item in prepared:
+        proc = completed[item.index]
+        if proc.returncode == 0:
+            ok.append(item)
+        else:
+            failures.append(parse_result(item.spec, item.compile_command, proc))
+    return ok, failures
+
+
+def compile_hsacos(
+    args: argparse.Namespace, env: dict[str, str], prepared: list[PreparedRun]
+) -> tuple[list[PreparedRun], list[RunResult]]:
+    if not prepared:
+        return [], []
+    jobs = min(args.compile_jobs or args.build_jobs, len(prepared))
+    print(f"\ncompile phase: {len(prepared)} HSACO(s), jobs={jobs}", flush=True)
+    for item in prepared:
+        print(f"$ {shell_join(item.compile_command)}", flush=True)
+    if args.dry_run:
+        return prepared, []
+
+    ok, failures = partition_compile_results(
+        prepared, run_compile_jobs(args, env, prepared)
+    )
+    if failures and not args.keep_going:
+        raise SystemExit(failures[0].returncode)
+    return ok, failures
+
+
+def run_sweep(
+    args: argparse.Namespace, env: dict[str, str], prepared: list[PreparedRun]
+) -> list[RunResult]:
     results: list[RunResult] = []
-    for spec in build_run_specs(args):
+    for item in prepared:
+        spec = item.spec
         print(
             f"\n=== {spec.kernel.label} m={spec.m} n={spec.n} k={spec.k} "
             f"variants={spec.variants} ===",
             flush=True,
         )
-        cmd = calibrator_command(args, spec)
+        cmd = item.run_command
         proc = run_command(cmd, env=env, dry_run=args.dry_run, capture=True)
         if proc.stdout:
             sys.stdout.write(proc.stdout)
@@ -422,6 +580,28 @@ def build_argparser() -> argparse.ArgumentParser:
         default=max(1, os.cpu_count() or 1),
     )
     parser.add_argument(
+        "--compile-jobs",
+        type=int,
+        default=0,
+        help="parallel HSACO compile jobs; default follows --build-jobs",
+    )
+    parser.add_argument(
+        "--artifact-dir",
+        type=Path,
+        default=None,
+        help="directory for precompiled sweep HSACOs and the runner",
+    )
+    parser.add_argument(
+        "--hipcc",
+        default=os.environ.get("HIPCC"),
+        help="HIP compiler for the shared benchmark runner",
+    )
+    parser.add_argument(
+        "--rocm-lib",
+        default=os.environ.get("ROCM_LIB"),
+        help="ROCm library path passed to wave-matmul-calibrate.py",
+    )
+    parser.add_argument(
         "--hip-visible-devices",
         help="set HIP_VISIBLE_DEVICES for all benchmark runs",
     )
@@ -439,6 +619,8 @@ def validate_args(args: argparse.Namespace) -> None:
     for name in ("m", "n", "iters", "warmup", "repeats", "build_jobs"):
         if getattr(args, name) <= 0:
             raise SystemExit(f"--{name.replace('_', '-')} must be positive")
+    if args.compile_jobs < 0:
+        raise SystemExit("--compile-jobs must be non-negative")
     if args.sim_trip_count < -1:
         raise SystemExit("--sim-trip-count must be >= -1")
     if any(kernel.key.startswith("v9") for kernel in args.kernels) and (
@@ -450,12 +632,18 @@ def validate_args(args: argparse.Namespace) -> None:
 def main(argv: list[str]) -> int:
     args = build_argparser().parse_args(argv)
     validate_args(args)
+    if args.artifact_dir is None:
+        args.artifact_dir = args.build_dir / DEFAULT_ARTIFACT_NAME
     env = os.environ.copy()
     if args.hip_visible_devices is not None:
         env["HIP_VISIBLE_DEVICES"] = args.hip_visible_devices
 
     rebuild_tools(args, env)
-    results = run_sweep(args, env)
+    specs = build_run_specs(args)
+    runner = compile_runner(args, env)
+    prepared = prepare_runs(args, specs, runner)
+    runnable, compile_failures = compile_hsacos(args, env, prepared)
+    results = [*compile_failures, *run_sweep(args, env, runnable)]
     print_summary(results)
     if args.csv is not None and not args.dry_run:
         write_csv(args.csv, results)

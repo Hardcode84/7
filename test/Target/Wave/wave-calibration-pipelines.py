@@ -20,6 +20,7 @@
 # CHECK: matmul_tlx_mxfp_perf_golden_profile: ok
 # CHECK: matmul_tlx_mxfp_4096_perf_golden_profile: ok
 # CHECK: matmul_perf_sweep_v9_defaults: ok
+# CHECK: matmul_perf_sweep_precompile_plan: ok
 # CHECK: calibration_scheduler_region_cap: ok
 # CHECK: matmul_pingpong_removed: ok
 
@@ -1199,6 +1200,40 @@ def check_matmul_perf_sweep_v9_defaults(perf_sweep) -> None:
     print("matmul_perf_sweep_v9_defaults: ok")
 
 
+def check_matmul_perf_sweep_precompile_plan(perf_sweep) -> None:
+    args = perf_sweep.build_argparser().parse_args(
+        [
+            "--kernels=v9",
+            "--skip-rebuild",
+            "--dry-run",
+            "--artifact-dir=/tmp/wave-sweep-artifacts",
+        ]
+    )
+    perf_sweep.validate_args(args)
+    specs = perf_sweep.build_run_specs(args)
+    prepared = perf_sweep.prepare_runs(
+        args, specs, Path("/tmp/wave-sweep-artifacts/runner")
+    )
+    require(
+        "matmul_perf_sweep_precompile_plan",
+        len(prepared) == 1,
+        "v9 dry-run should prepare one command pair",
+    )
+    compile_cmd = prepared[0].compile_command
+    run_cmd = prepared[0].run_command
+    require(
+        "matmul_perf_sweep_precompile_plan",
+        "--emit-hsaco" in compile_cmd and "--run-hsaco" not in compile_cmd,
+        "compile command should emit HSACO only",
+    )
+    require(
+        "matmul_perf_sweep_precompile_plan",
+        "--run-hsaco" in run_cmd and "--runner" in run_cmd,
+        "run command should consume precompiled HSACO through a runner",
+    )
+    print("matmul_perf_sweep_precompile_plan: ok")
+
+
 def check_calibration_scheduler_region_cap(matmul, fa) -> None:
     matmul_args = matmul.parse_args(["--chip=gfx950", "--skip-hw"])
     matmul_variant = matmul.VARIANTS["scheduled"]
@@ -1266,6 +1301,7 @@ def main() -> int:
     check_matmul_tlx_mxfp_perf_golden_profile(matmul)
     check_matmul_tlx_mxfp_4096_perf_golden_profile(matmul)
     check_matmul_perf_sweep_v9_defaults(perf_sweep)
+    check_matmul_perf_sweep_precompile_plan(perf_sweep)
     check_calibration_scheduler_region_cap(matmul, fa)
     try:
         matmul.parse_variants("pingpong")

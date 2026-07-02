@@ -919,6 +919,11 @@ def run_sim_reports(
 
 
 def compile_runner(args: argparse.Namespace, tmp: Path) -> Path:
+    runner = getattr(args, "runner", None)
+    if runner is not None:
+        if not runner.exists():
+            sys.exit(f"runner not found: {runner}")
+        return runner
     hipcc = args.hipcc
     if not Path(hipcc).exists() and shutil.which(hipcc) is None:
         sys.exit(f"hipcc not found: {hipcc}")
@@ -1009,12 +1014,30 @@ def run_hw_repeats(
 def run_variant(
     variant: Variant,
     args: argparse.Namespace,
-    source: Path,
+    source: Path | None,
     runner: Path | None,
     tmp: Path,
     emit_asm: Path | None = None,
+    emit_hsaco: Path | None = None,
 ) -> VariantResult:
+    run_hsaco = getattr(args, "run_hsaco", None)
+    if run_hsaco is not None:
+        if runner is None:
+            sys.exit("--run-hsaco requires hardware timing")
+        hw_cycles, hw_us, hw_check = run_hw_repeats(runner, run_hsaco, args)
+        return VariantResult(variant.name, {}, hw_cycles, hw_us, hw_check)
+    if source is None:
+        sys.exit("internal error: source missing for compile path")
     pipeline = write_pipeline(tmp, variant, args)
+    if emit_hsaco is not None:
+        hsaco = lower_hsaco(args.build_dir, source, pipeline, tmp, variant.name)
+        emit_hsaco.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(hsaco, emit_hsaco)
+        if emit_asm is not None:
+            asm = tmp / variant.name / f"{variant.name}.s"
+            emit_asm.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(asm, emit_asm)
+        return VariantResult(variant.name, {}, [], [], None)
     if runner is None and emit_asm is not None:
         asm = lower_asm(args.build_dir, source, pipeline, tmp, variant.name)
         emit_asm.parent.mkdir(parents=True, exist_ok=True)
@@ -1190,8 +1213,11 @@ def add_tool_args(ap: argparse.ArgumentParser) -> None:
     ap.add_argument("--skip-hw", action="store_true")
     ap.add_argument("--no-check", action="store_true")
     ap.add_argument("--emit-asm", type=Path)
+    ap.add_argument("--emit-hsaco", type=Path)
+    ap.add_argument("--run-hsaco", type=Path)
     ap.add_argument("--emit-mlir", type=Path)
     ap.add_argument("--keep-tmp", action="store_true")
+    ap.add_argument("--runner", type=Path)
     ap.add_argument(
         "--build-dir",
         type=Path,
@@ -1382,6 +1408,36 @@ def validate_example_args(args: argparse.Namespace) -> None:
     _validate_tensilelite_example_args(args)
 
 
+def validate_tool_output_args(args: argparse.Namespace) -> None:
+    emit_asm = getattr(args, "emit_asm", None)
+    emit_hsaco = getattr(args, "emit_hsaco", None)
+    run_hsaco = getattr(args, "run_hsaco", None)
+    has_tool_output = (
+        emit_asm is not None or emit_hsaco is not None or run_hsaco is not None
+    )
+    if has_tool_output and len(args.variants) != 1:
+        sys.exit("--emit-asm/--emit-hsaco/--run-hsaco require one --variants entry")
+    validate_run_hsaco_args(args, emit_asm, emit_hsaco, run_hsaco)
+
+
+def validate_run_hsaco_args(
+    args: argparse.Namespace,
+    emit_asm: Path | None,
+    emit_hsaco: Path | None,
+    run_hsaco: Path | None,
+) -> None:
+    if run_hsaco is None:
+        return
+    if args.skip_hw:
+        sys.exit("--run-hsaco cannot be combined with --skip-hw")
+    if emit_asm is not None or emit_hsaco is not None:
+        sys.exit("--run-hsaco cannot be combined with --emit-asm/--emit-hsaco")
+    if getattr(args, "emit_mlir", None) is not None:
+        sys.exit("--run-hsaco cannot be combined with --emit-mlir")
+    if not run_hsaco.exists():
+        sys.exit(f"HSACO not found: {run_hsaco}")
+
+
 def validate_args(args: argparse.Namespace) -> None:
     if args.repeats <= 0:
         sys.exit("--repeats must be positive")
@@ -1395,59 +1451,84 @@ def validate_args(args: argparse.Namespace) -> None:
         sys.exit("--sim-trip-count must be >= -1")
     if args.calibration_file is not None and not args.calibration_file.exists():
         sys.exit(f"--calibration-file does not exist: {args.calibration_file}")
-    if getattr(args, "emit_asm", None) is not None and len(args.variants) != 1:
-        sys.exit("--emit-asm requires exactly one --variants entry")
+    validate_tool_output_args(args)
     validate_example_args(args)
     validate_mxfp4_args(args)
     validate_pressure_budget_args(args)
+
+
+def prepare_source(args: argparse.Namespace, chip: str, tmp: Path) -> Path | None:
+    if args.run_hsaco is not None:
+        return None
+    source = tmp / "matmul_kernel.mlir"
+    source.write_text(generate_kernel_module(args, chip))
+    if args.emit_mlir is not None:
+        args.emit_mlir.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, args.emit_mlir)
+    return source
+
+
+def prepare_runner(args: argparse.Namespace, tmp: Path) -> Path | None:
+    if args.skip_hw or args.emit_hsaco is not None:
+        return None
+    return compile_runner(args, tmp)
+
+
+def print_header(args: argparse.Namespace, chip: str) -> None:
+    print(
+        f"chip: {chip}\n"
+        f"shape: m={args.m} n={args.n} k={args.k} bm={args.bm} bn={args.bn} "
+        f"wave_m_tiles={args.wave_m_tiles} wave_n_tiles={args.wave_n_tiles} "
+        f"wave_k_tiles={args.wave_k_tiles} "
+        f"target_waves={effective_target_waves(args)} "
+        f"input_type={args.input_type} output_type={args.output_type} "
+        f"mxfp4_scale_path={args.mxfp4_scale_path} "
+        f"example={selected_example(args)} "
+        f"scale_input={selected_scale_input(args)} "
+        f"kernel_abi={kernel_abi(args)} "
+        f"seed={args.seed} input_mode="
+        f"{'all-ones' if args.all_ones else 'random'}\n"
+        f"cta_swizzle_xcds={args.cta_swizzle_xcds} "
+        f"cta_group_m={args.cta_group_m}\n"
+        f"kernel_arg_trip_count: {kernel_arg_trip_count_text(args)}\n"
+        f"sim_loop_trip_count: {compute_sim_loop_trip_count(args)}\n"
+        f"sim_report_trip_count: {compute_report_trip_count(args)}"
+    )
+
+
+def run_variants(
+    args: argparse.Namespace,
+    source: Path | None,
+    runner: Path | None,
+    tmp: Path,
+) -> list[VariantResult]:
+    results: list[VariantResult] = []
+    for variant in args.variants:
+        result = run_variant(
+            variant,
+            args,
+            source,
+            runner,
+            tmp,
+            emit_asm=args.emit_asm,
+            emit_hsaco=args.emit_hsaco,
+        )
+        print_result(result)
+        results.append(result)
+    return results
 
 
 def main() -> int:
     args = parse_args(sys.argv[1:])
     chip = resolve_chip(args)
     validate_args(args)
-    variants = args.variants
-
     tmp_ctx = None if args.keep_tmp else tempfile.TemporaryDirectory()
     tmp = Path(tempfile.mkdtemp() if args.keep_tmp else tmp_ctx.name)
     try:
-        source = tmp / "matmul_kernel.mlir"
-        source.write_text(generate_kernel_module(args, chip))
-        if args.emit_mlir is not None:
-            args.emit_mlir.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(source, args.emit_mlir)
-        runner = None if args.skip_hw else compile_runner(args, tmp)
-        print(
-            f"chip: {chip}\n"
-            f"shape: m={args.m} n={args.n} k={args.k} bm={args.bm} bn={args.bn} "
-            f"wave_m_tiles={args.wave_m_tiles} wave_n_tiles={args.wave_n_tiles} "
-            f"wave_k_tiles={args.wave_k_tiles} "
-            f"target_waves={effective_target_waves(args)} "
-            f"input_type={args.input_type} output_type={args.output_type} "
-            f"mxfp4_scale_path={args.mxfp4_scale_path} "
-            f"example={selected_example(args)} "
-            f"scale_input={selected_scale_input(args)} "
-            f"kernel_abi={kernel_abi(args)} "
-            f"seed={args.seed} input_mode="
-            f"{'all-ones' if args.all_ones else 'random'}\n"
-            f"cta_swizzle_xcds={args.cta_swizzle_xcds} "
-            f"cta_group_m={args.cta_group_m}\n"
-            f"kernel_arg_trip_count: {kernel_arg_trip_count_text(args)}\n"
-            f"sim_loop_trip_count: {compute_sim_loop_trip_count(args)}\n"
-            f"sim_report_trip_count: {compute_report_trip_count(args)}"
-        )
-        results: list[VariantResult] = []
-        for variant in variants:
-            result = run_variant(
-                variant,
-                args,
-                source,
-                runner,
-                tmp,
-                emit_asm=args.emit_asm,
-            )
-            print_result(result)
-            results.append(result)
+        source = prepare_source(args, chip, tmp)
+        runner = prepare_runner(args, tmp)
+        print_header(args, chip)
+        results = run_variants(args, source, runner, tmp)
         print_delta(results)
         if args.keep_tmp:
             print(f"tmp: {tmp}")
