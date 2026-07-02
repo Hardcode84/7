@@ -892,7 +892,6 @@ _a4w4_kernel:
 		v_lshlrev_b32_e32 v51, 7, v13
 		v_add3_u32 v45, v45, v51, v63
 		v_add3_u32 v45, v45, v53, v222
-		s_waitcnt lgkmcnt(0)
 		ds_read_b64_tr_b8 v[74:75], v45 offset:5952
 		s_mov_b32 s20, 16
 		v_lshlrev_b32_e32 v51, 2, v0
@@ -1415,7 +1414,6 @@ _a4w4_kernel:
 		s_barrier
 		ds_read_b64_tr_b8 v[74:75], v22 offset:3904
 		ds_read_b64_tr_b8 v[216:217], v22 offset:4032
-		s_waitcnt lgkmcnt(0)
 		ds_read_b64_tr_b8 v[100:101], v45 offset:5952
 		s_mov_b32 m0, s61
 		s_nop 0
@@ -1693,7 +1691,6 @@ _a4w4_kernel:
 		s_barrier
 		ds_read_b64_tr_b8 v[64:65], v22 offset:3904
 		ds_read_b64_tr_b8 v[66:67], v22 offset:4032
-		s_waitcnt lgkmcnt(0)
 		ds_read_b64_tr_b8 v[74:75], v45 offset:5952
 		s_mov_b32 m0, s1
 		s_nop 0
@@ -1916,7 +1913,6 @@ _a4w4_kernel:
 		s_barrier
 		ds_read_b64_tr_b8 v[14:15], v22 offset:3904
 		ds_read_b64_tr_b8 v[46:47], v22 offset:4032
-		s_waitcnt lgkmcnt(0)
 		ds_read_b64_tr_b8 v[48:49], v45 offset:5952
 		s_waitcnt lgkmcnt(0)
 		v_mfma_scale_f32_16x16x128_f8f6f4 v[4:7], v[104:107], v[24:27], v[4:7], v48, v14 op_sel_hi:[0,0,0] cbsz:4 blgp:4

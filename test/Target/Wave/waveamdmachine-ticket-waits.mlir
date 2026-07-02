@@ -143,6 +143,38 @@ func.func @gfx950_ds_byte_and_transpose_are_lgkm_issuers(%x: !waveamdmachine.reg
   return
 }
 
+// CHECK-LABEL: func.func @gfx950_joined_lds_read_token_does_not_wait_before_read
+// CHECK: waveamdmachine.ds_read_tr_b64_b8
+// CHECK-NEXT: waveamdmachine.ds_read_tr_b64_b8
+// CHECK-NEXT: waveamdmachine.token_join
+// CHECK-NOT: waveamdmachine.s_waitcnt
+// CHECK: waveamdmachine.ds_read_tr_b64_b8
+// CHECK-NEXT: waveamdmachine.tuple_to_elements
+// CHECK-NEXT: waveamdmachine.s_waitcnt lgkmcnt(2)
+// CHECK-NEXT: waveamdmachine.v_add_u32
+func.func @gfx950_joined_lds_read_token_does_not_wait_before_read(%x: !waveamdmachine.reg<vgpr, 1>) {
+  %root = waveamdmachine.token : !waveamdmachine.mem.token
+  %a, %at = waveamdmachine.ds_read_tr_b64_b8 %x after %root
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+        -> (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.mem.token)
+  %b, %bt = waveamdmachine.ds_read_tr_b64_b8 %x after %root offset 128
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+        -> (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.mem.token)
+  %joined = waveamdmachine.token_join %at, %bt
+      : (!waveamdmachine.mem.token, !waveamdmachine.mem.token)
+        -> !waveamdmachine.mem.token
+  %c, %ct = waveamdmachine.ds_read_tr_b64_b8 %x after %joined offset 256
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+        -> (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.mem.token)
+  %lo, %hi = waveamdmachine.tuple_to_elements %a
+      : (!waveamdmachine.reg<vgpr, 2>)
+        -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+  %sum = waveamdmachine.v_add_u32 %x, %lo
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  return
+}
+
 }
 
 // -----

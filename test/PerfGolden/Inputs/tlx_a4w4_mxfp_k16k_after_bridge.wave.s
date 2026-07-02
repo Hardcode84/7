@@ -785,7 +785,6 @@ _a4w4_kernel:
 		v_add_u32_e32 v244, v65, v204
 		v_add3_u32 v244, v244, v41, v206
 		v_add3_u32 v244, v244, v207, v208
-		s_waitcnt lgkmcnt(0)
 		ds_read_u8 v245, v244 offset:2048
 		v_add3_u32 v65, v65, v206, v207
 		v_add3_u32 v65, v65, v208, v210
@@ -1074,6 +1073,7 @@ _a4w4_kernel:
 		v_mov_b64_e32 v[252:253], 0
 		v_mov_b64_e32 v[254:255], 0
 .L_a4w4_kernel.loop_head_0:
+		s_waitcnt lgkmcnt(14)
 		v_and_b32_e32 v209, 0xff, v209
 		v_and_b32_e32 v211, 0xff, v211
 		v_lshlrev_b32_e32 v211, 8, v211
@@ -1096,17 +1096,23 @@ _a4w4_kernel:
 		v_and_b32_e32 v219, 0xff, v233
 		v_lshlrev_b32_e32 v219, 8, v219
 		v_or_b32_e32 v217, v217, v219
+		s_waitcnt lgkmcnt(13)
 		v_and_b32_e32 v219, 0xff, v236
 		v_lshlrev_b32_e32 v219, 16, v219
+		s_waitcnt lgkmcnt(12)
 		v_and_b32_e32 v223, 0xff, v237
 		v_lshlrev_b32_e32 v223, 24, v223
 		v_or3_b32 v217, v217, v219, v223
+		s_waitcnt lgkmcnt(11)
 		v_and_b32_e32 v219, 0xff, v240
+		s_waitcnt lgkmcnt(10)
 		v_and_b32_e32 v223, 0xff, v241
 		v_lshlrev_b32_e32 v223, 8, v223
 		v_or_b32_e32 v219, v219, v223
+		s_waitcnt lgkmcnt(9)
 		v_and_b32_e32 v223, 0xff, v242
 		v_lshlrev_b32_e32 v223, 16, v223
+		s_waitcnt lgkmcnt(8)
 		v_and_b32_e32 v224, 0xff, v243
 		v_lshlrev_b32_e32 v224, 24, v224
 		v_or3_b32 v219, v219, v223, v224
@@ -1448,7 +1454,6 @@ _a4w4_kernel:
 		ds_read_u8 v209, v238
 		ds_read_u8 v211, v213
 		ds_read_u8 v214, v68
-		s_waitcnt lgkmcnt(0)
 		ds_read_u8 v217, v244 offset:2048
 		ds_read_u8 v218, v65 offset:2048
 		ds_read_u8 v219, v210 offset:2048
@@ -1488,6 +1493,7 @@ _a4w4_kernel:
 		buffer_load_ubyte v55, v74, s[68:71], 0 offen
 		buffer_load_ubyte v74, v77, s[68:71], 0 offen
 		buffer_load_ubyte v77, v237, s[68:71], 0 offen
+		s_waitcnt lgkmcnt(14)
 		v_and_b32_e32 v72, 0xff, v72
 		v_and_b32_e32 v80, 0xff, v80
 		v_lshlrev_b32_e32 v80, 8, v80
@@ -1510,17 +1516,23 @@ _a4w4_kernel:
 		v_and_b32_e32 v80, 0xff, v98
 		v_lshlrev_b32_e32 v80, 8, v80
 		v_or_b32_e32 v72, v72, v80
+		s_waitcnt lgkmcnt(13)
 		v_and_b32_e32 v80, 0xff, v99
 		v_lshlrev_b32_e32 v80, 16, v80
+		s_waitcnt lgkmcnt(12)
 		v_and_b32_e32 v83, 0xff, v101
 		v_lshlrev_b32_e32 v83, 24, v83
 		v_or3_b32 v241, v72, v80, v83
+		s_waitcnt lgkmcnt(11)
 		v_and_b32_e32 v72, 0xff, v206
+		s_waitcnt lgkmcnt(10)
 		v_and_b32_e32 v80, 0xff, v209
 		v_lshlrev_b32_e32 v80, 8, v80
 		v_or_b32_e32 v72, v72, v80
+		s_waitcnt lgkmcnt(9)
 		v_and_b32_e32 v80, 0xff, v211
 		v_lshlrev_b32_e32 v80, 16, v80
+		s_waitcnt lgkmcnt(8)
 		v_and_b32_e32 v83, 0xff, v214
 		v_lshlrev_b32_e32 v83, 24, v83
 		v_or3_b32 v206, v72, v80, v83
@@ -1872,7 +1884,6 @@ _a4w4_kernel:
 		ds_read_u8 v241, v238
 		ds_read_u8 v242, v213
 		ds_read_u8 v243, v68
-		s_waitcnt lgkmcnt(0)
 		ds_read_u8 v245, v244 offset:2048
 		ds_read_u8 v206, v65 offset:2048
 		ds_read_u8 v214, v210 offset:2048
@@ -1920,6 +1931,7 @@ _a4w4_kernel:
 		s_cmp_lt_i32 s97, 62
 		s_cbranch_scc1 .L_a4w4_kernel.loop_head_0
 .L_a4w4_kernel.loop_exit_0:
+		s_waitcnt lgkmcnt(14)
 		v_and_b32_e32 v25, 0xff, v209
 		v_and_b32_e32 v27, 0xff, v211
 		v_lshlrev_b32_e32 v27, 8, v27
@@ -1942,17 +1954,23 @@ _a4w4_kernel:
 		v_and_b32_e32 v30, 0xff, v233
 		v_lshlrev_b32_e32 v30, 8, v30
 		v_or_b32_e32 v28, v28, v30
+		s_waitcnt lgkmcnt(13)
 		v_and_b32_e32 v30, 0xff, v236
 		v_lshlrev_b32_e32 v30, 16, v30
+		s_waitcnt lgkmcnt(12)
 		v_and_b32_e32 v31, 0xff, v237
 		v_lshlrev_b32_e32 v31, 24, v31
 		v_or3_b32 v28, v28, v30, v31
+		s_waitcnt lgkmcnt(11)
 		v_and_b32_e32 v30, 0xff, v240
+		s_waitcnt lgkmcnt(10)
 		v_and_b32_e32 v31, 0xff, v241
 		v_lshlrev_b32_e32 v31, 8, v31
 		v_or_b32_e32 v30, v30, v31
+		s_waitcnt lgkmcnt(9)
 		v_and_b32_e32 v31, 0xff, v242
 		v_lshlrev_b32_e32 v31, 16, v31
+		s_waitcnt lgkmcnt(8)
 		v_and_b32_e32 v33, 0xff, v243
 		v_lshlrev_b32_e32 v33, 24, v33
 		v_or3_b32 v30, v30, v31, v33
@@ -2216,7 +2234,6 @@ _a4w4_kernel:
 		ds_read_u8 v44, v238
 		ds_read_u8 v45, v213
 		ds_read_u8 v47, v68
-		s_waitcnt lgkmcnt(0)
 		ds_read_u8 v49, v244 offset:2048
 		ds_read_u8 v50, v65 offset:2048
 		ds_read_u8 v51, v210 offset:2048
@@ -2225,6 +2242,7 @@ _a4w4_kernel:
 		ds_read_u8 v67, v220 offset:2048
 		ds_read_u8 v68, v212 offset:2048
 		ds_read_u8 v69, v207 offset:2048
+		s_waitcnt lgkmcnt(14)
 		v_and_b32_e32 v25, 0xff, v25
 		v_and_b32_e32 v27, 0xff, v27
 		v_lshlrev_b32_e32 v27, 8, v27
@@ -2247,17 +2265,23 @@ _a4w4_kernel:
 		v_and_b32_e32 v30, 0xff, v39
 		v_lshlrev_b32_e32 v30, 8, v30
 		v_or_b32_e32 v28, v28, v30
+		s_waitcnt lgkmcnt(13)
 		v_and_b32_e32 v30, 0xff, v40
 		v_lshlrev_b32_e32 v30, 16, v30
+		s_waitcnt lgkmcnt(12)
 		v_and_b32_e32 v31, 0xff, v42
 		v_lshlrev_b32_e32 v31, 24, v31
 		v_or3_b32 v28, v28, v30, v31
+		s_waitcnt lgkmcnt(11)
 		v_and_b32_e32 v30, 0xff, v43
+		s_waitcnt lgkmcnt(10)
 		v_and_b32_e32 v31, 0xff, v44
 		v_lshlrev_b32_e32 v31, 8, v31
 		v_or_b32_e32 v30, v30, v31
+		s_waitcnt lgkmcnt(9)
 		v_and_b32_e32 v31, 0xff, v45
 		v_lshlrev_b32_e32 v31, 16, v31
+		s_waitcnt lgkmcnt(8)
 		v_and_b32_e32 v33, 0xff, v47
 		v_lshlrev_b32_e32 v33, 24, v33
 		v_or3_b32 v30, v30, v31, v33

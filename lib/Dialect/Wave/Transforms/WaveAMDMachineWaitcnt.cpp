@@ -88,6 +88,7 @@ struct Token {
   unsigned events;
   unsigned position;
   bool outOfOrder;
+  bool writesMemory;
 
   bool isUnknown() const { return !id; }
 };
@@ -144,7 +145,7 @@ struct WaitState {
       return false;
     for (auto [a, b] : llvm::zip(tokens, rhs.tokens))
       if (!sameKey(a, b) || a.events != b.events || a.position != b.position ||
-          a.outOfOrder != b.outOfOrder)
+          a.outOfOrder != b.outOfOrder || a.writesMemory != b.writesMemory)
         return false;
     return true;
   }
@@ -192,6 +193,7 @@ struct TokenAggregate {
   std::optional<unsigned> position;
   unsigned events = 0;
   bool outOfOrder = false;
+  bool writesMemory = false;
 };
 
 static void mergeInto(TokenAggregate &agg, const Token &token) {
@@ -199,6 +201,7 @@ static void mergeInto(TokenAggregate &agg, const Token &token) {
     agg.position = token.position;
   agg.events |= token.events;
   agg.outOfOrder |= token.outOfOrder;
+  agg.writesMemory |= token.writesMemory;
 }
 
 // On (counter, id) collision: MIN position, OR event constraints.
@@ -221,6 +224,10 @@ static bool insertOrMin(SmallVectorImpl<Token> &tokens, Token tok) {
       it->outOfOrder = true;
       changed = true;
     }
+    if (tok.writesMemory && !it->writesMemory) {
+      it->writesMemory = true;
+      changed = true;
+    }
     return changed;
   }
   tokens.insert(it, tok);
@@ -235,7 +242,8 @@ static bool insertOrReplace(SmallVectorImpl<Token> &tokens, Token tok) {
   });
   if (it != tokens.end() && sameKey(*it, tok)) {
     if (it->events != tok.events || it->position != tok.position ||
-        it->outOfOrder != tok.outOfOrder) {
+        it->outOfOrder != tok.outOfOrder ||
+        it->writesMemory != tok.writesMemory) {
       *it = tok;
       return true;
     }
@@ -283,7 +291,7 @@ static void applyWait(SmallVectorImpl<Token> &tokens,
 }
 
 static const Token *find(ArrayRef<Token> tokens, Counter counter, Value id) {
-  Token key{id, counter, 0, 0, false};
+  Token key{id, counter, 0, 0, false, false};
   auto it = llvm::lower_bound(tokens, key, [](const Token &a, const Token &b) {
     return sortKey(a, b);
   });
@@ -320,7 +328,8 @@ static void collapseEscaping(WaitState &state, Block *target,
     if (escaping[i].position)
       insertOrMin(state.tokens,
                   Token{Value(), static_cast<Counter>(i), escaping[i].events,
-                        *escaping[i].position, escaping[i].outOfOrder});
+                        *escaping[i].position, escaping[i].outOfOrder,
+                        escaping[i].writesMemory});
   }
 }
 
@@ -328,18 +337,19 @@ static void collapseEscaping(WaitState &state, Block *target,
 // tagged result. No tagged result -> one anonymous (nullptr) entry so
 // `s_endpgm`'s vscnt drain can find untokenized stores.
 static bool issue(WaitState &state, Counter counter, unsigned count,
-                  unsigned events, bool outOfOrder, ValueRange tagged) {
+                  unsigned events, bool outOfOrder, bool writesMemory,
+                  ValueRange tagged) {
   if (count == 0)
     count = 1;
   bumpCounter(state.tokens, counter, count);
   bool changed = false;
   if (tagged.empty()) {
-    changed |= insertOrReplace(state.tokens,
-                               Token{Value(), counter, events, 0, outOfOrder});
+    changed |= insertOrReplace(state.tokens, Token{Value(), counter, events, 0,
+                                                   outOfOrder, writesMemory});
   } else {
     for (Value v : tagged)
-      changed |= insertOrReplace(state.tokens,
-                                 Token{v, counter, events, 0, outOfOrder});
+      changed |= insertOrReplace(
+          state.tokens, Token{v, counter, events, 0, outOfOrder, writesMemory});
   }
   return changed;
 }
@@ -359,7 +369,8 @@ static SmallVector<Token, 3> mergeSources(ArrayRef<Token> tokens,
   for (unsigned i = 0; i < kNumCounters; ++i) {
     if (merged[i].position)
       out.push_back(Token{result, static_cast<Counter>(i), merged[i].events,
-                          *merged[i].position, merged[i].outOfOrder});
+                          *merged[i].position, merged[i].outOfOrder,
+                          merged[i].writesMemory});
   }
   return out;
 }
@@ -399,6 +410,16 @@ static waveamdmachine::WaitcntInfo getWaitcntInfo(Operation *op) {
 
 static bool isMemoryIssuer(Operation *op) {
   return getWaitcntInfo(op).isIssuer();
+}
+
+static bool isMemoryWriteIssuer(Operation *op) {
+  return op->hasTrait<OpTrait::waveamdmachine::LDSStoreOp>() ||
+         op->hasTrait<OpTrait::waveamdmachine::LDSDmaOp>() ||
+         op->hasTrait<OpTrait::waveamdmachine::VMEMStoreOp>();
+}
+
+static bool isReadOnlyIssuer(Operation *op) {
+  return isMemoryIssuer(op) && !isMemoryWriteIssuer(op);
 }
 
 static bool isTupleMemoryOp(Operation *op) {
@@ -503,6 +524,20 @@ static void requireValue(WaitRequirement &req, Value value,
   }
 }
 
+static void requireIssuerToken(WaitRequirement &req, Value value,
+                               const WaitState &state, Operation *issuer) {
+  if (!isReadOnlyIssuer(issuer)) {
+    requireValue(req, value, state);
+    return;
+  }
+  for (unsigned ci = 0; ci < kNumCounters; ++ci) {
+    Counter c = static_cast<Counter>(ci);
+    const Token *t = lat::find(state.tokens, c, value);
+    if (t && t->writesMemory)
+      req.requireDrain(c, waitPosition(state, *t));
+  }
+}
+
 static bool hasSameAllocatedReg(Value lhs, Value rhs) {
   waveamdmachine::RegType lhsType =
       dyn_cast<waveamdmachine::RegType>(lhs.getType());
@@ -570,9 +605,15 @@ static WaitRequirement computeRequirement(Operation *op,
     }
     return req;
   }
+  bool issuer = isMemoryIssuer(op);
   for (OpOperand &operand : op->getOpOperands()) {
     if (isD16LowPreservedOperand(operand))
       continue;
+    // Issuer `after` tokens order issue. Completion waits stay explicit.
+    if (issuer && isa<waveamdmachine::MemTokenType>(operand.get().getType())) {
+      requireIssuerToken(req, operand.get(), state, op);
+      continue;
+    }
     requireValue(req, operand.get(), state);
   }
   return req;
@@ -586,7 +627,7 @@ static void recordIssue(Operation *op, WaitState &state) {
   SmallVector<Value, 2> results;
   collectIssuerResults(op, results);
   lat::issue(state, *counter, info.issueCount, eventMask(info.event),
-             info.outOfOrder, results);
+             info.outOfOrder, isMemoryWriteIssuer(op), results);
 }
 
 // Each result inherits per-counter MIN over operands. Used by s_barrier,
@@ -830,7 +871,8 @@ private:
       for (unsigned ci = 0; ci < kNumCounters; ++ci) {
         Counter c = static_cast<Counter>(ci);
         if (const Token *t = lat::find(state.tokens, c, op))
-          added.push_back(Token{dst, c, t->events, t->position, t->outOfOrder});
+          added.push_back(Token{dst, c, t->events, t->position, t->outOfOrder,
+                                t->writesMemory});
       }
     }
     for (const Token &t : added)
