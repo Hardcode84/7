@@ -354,6 +354,33 @@ def _index_expr_result_type(width: int) -> Type:
     return simd_type(index_type(), width)
 
 
+def _index_expr_bindings(
+    expr: ixsimpl.Expr, bindings: Mapping[ixsimpl.Expr, Value] | None
+) -> dict[str, Value]:
+    binding_map = {key.sym_name: value for key, value in (bindings or {}).items()}
+    free_names = {symbol.sym_name for symbol in expr.free_symbols}
+    unknown = free_names - binding_map.keys()
+    if unknown:
+        raise ValueError(f"free symbols missing from bindings: {sorted(unknown)}")
+    return {name: binding_map[name] for name in binding_map if name in free_names}
+
+
+def _index_expr_result_type_from_bindings(
+    bindings: Mapping[str, Value], result_type: Type | None
+) -> Type:
+    if result_type is not None:
+        return result_type
+    return _index_expr_result_type(_binding_lane_width(bindings.values()))
+
+
+def _index_expr_assumptions_attr(
+    assumptions: Sequence[ixsimpl.Expr] | None,
+) -> ArrayAttr | None:
+    if assumptions is None:
+        return None
+    return ArrayAttr.get([_pred_attr(pred) for pred in assumptions])
+
+
 # ---------------------------------------------------------------------------
 # `index` operator-overload sugar
 # ---------------------------------------------------------------------------
@@ -872,31 +899,18 @@ class FunctionBuilder:
         `!wave.simd<index, W>`, otherwise the result is builtin
         `index`.
         """
-        binding_map: dict[str, Value] = {}
-        for key, value in (bindings or {}).items():
-            binding_map[key.sym_name] = value
-        free_names = {s.sym_name for s in expr.free_symbols}
-        unknown = free_names - binding_map.keys()
-        if unknown:
-            raise ValueError(f"free symbols missing from bindings: {sorted(unknown)}")
-        filtered = {n: binding_map[n] for n in binding_map if n in free_names}
-        if result_type is None:
-            result_type = _index_expr_result_type(
-                _binding_lane_width(filtered.values())
-            )
+        filtered = _index_expr_bindings(expr, bindings)
+        result_type = _index_expr_result_type_from_bindings(filtered, result_type)
         expr_attr = ExprAttr.get_from_node_ptr(
             _ixsimpl_node_ptr(expr), context=_current_context()
         )
-        assumptions_attr = None
-        if assumptions is not None:
-            assumptions_attr = ArrayAttr.get([_pred_attr(pred) for pred in assumptions])
         names_attr = ArrayAttr.get([StringAttr.get(n) for n in filtered])
         return wave.IndexExprOp(
             result_type,
             expr_attr,
             names_attr,
             list(filtered.values()),
-            assumptions=assumptions_attr,
+            assumptions=_index_expr_assumptions_attr(assumptions),
         ).result
 
     def ptr_add(
