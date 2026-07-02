@@ -821,10 +821,6 @@ _a4w4_kernel:
 		v_lshl_add_u32 v69, v69, 3, v250
 		s_mov_b32 s98, s95
 		s_mov_b32 s99, s96
-		v_mov_b32_e32 v4, v4
-		v_mov_b32_e32 v5, v5
-		v_mov_b32_e32 v6, v6
-		v_mov_b32_e32 v7, v7
 		v_accvgpr_write_b32 a0, v4
 		v_accvgpr_write_b32 a1, v5
 		v_accvgpr_write_b32 a2, v6

@@ -900,10 +900,6 @@ _a4w4_kernel:
 		v_lshlrev_b32_e32 v53, 3, v0
 		v_add_u32_e32 v53, 0x20000, v53
 		s_mov_b32 s41, s20
-		v_mov_b32_e32 v4, v4
-		v_mov_b32_e32 v5, v5
-		v_mov_b32_e32 v6, v6
-		v_mov_b32_e32 v7, v7
 		v_accvgpr_write_b32 a4, v4
 		v_accvgpr_write_b32 a5, v5
 		v_accvgpr_write_b32 a6, v6

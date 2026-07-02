@@ -49,4 +49,29 @@ func.func @pack_vgpr_copy_codegen(
   return
 }
 
+// ASM-LABEL: same_phys_vgpr_copy_codegen:
+// ASM-NOT: v_mov_b32_e32 v4, v4
+// ASM-NOT: v_mov_b32_e32 v5, v5
+// ASM-NOT: v_mov_b32_e32 v6, v6
+// ASM-NOT: v_mov_b32_e32 v7, v7
+// ASM: v_accvgpr_write_b32 a4, v4
+// ASM: v_accvgpr_write_b32 a5, v5
+// ASM: v_accvgpr_write_b32 a6, v6
+// ASM: v_accvgpr_write_b32 a7, v7
+func.func @same_phys_vgpr_copy_codegen(
+    %addr: !waveamdmachine.reg<vgpr, 2, 0>,
+    %src: !waveamdmachine.reg<vgpr, 4, 4>) {
+  %copy = waveamdmachine.v_mov_b32_tuple %src {registers = 4 : i64}
+      : (!waveamdmachine.reg<vgpr, 4, 4>) -> !waveamdmachine.reg<vgpr, 4, 4>
+  %acc = waveamdmachine.v_accvgpr_write_b32_tuple %copy
+      : (!waveamdmachine.reg<vgpr, 4, 4>) -> !waveamdmachine.reg<agpr, 4, 4>
+  %read = waveamdmachine.v_accvgpr_read_b32_tuple %acc
+      : (!waveamdmachine.reg<agpr, 4, 4>) -> !waveamdmachine.reg<vgpr, 4, 8>
+  %tok = waveamdmachine.global_store_b128_addr64 %addr, %read
+      : (!waveamdmachine.reg<vgpr, 2, 0>, !waveamdmachine.reg<vgpr, 4, 8>)
+        -> !waveamdmachine.mem.token
+  waveamdmachine.s_endpgm
+  return
+}
+
 }

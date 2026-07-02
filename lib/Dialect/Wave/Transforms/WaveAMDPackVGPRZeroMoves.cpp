@@ -10,6 +10,7 @@
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachine.h"
+#include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineInstrInfo.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineTarget.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
@@ -58,6 +59,26 @@ static bool canPack(waveamdmachine::VMovB32TupleOp op) {
   if (base % 2 != 0 && width == 2)
     return false;
   return true;
+}
+
+static bool isRedundantAllocatedVGPRMove(waveamdmachine::VMovB32TupleOp op) {
+  auto resultType = dyn_cast<waveamdmachine::RegType>(op.getResult().getType());
+  return resultType &&
+         resultType.getRegClass() == waveamdmachine::RegClass::VGPR &&
+         resultType.getIndex() >= 0 &&
+         waveamdmachine::isSamePhysicalReg(op.getResult(), op.getSource());
+}
+
+static void eraseRedundantAllocatedVGPRMoves(Operation *root) {
+  SmallVector<waveamdmachine::VMovB32TupleOp, 16> moves;
+  root->walk([&](waveamdmachine::VMovB32TupleOp op) {
+    if (isRedundantAllocatedVGPRMove(op))
+      moves.push_back(op);
+  });
+  for (waveamdmachine::VMovB32TupleOp op : moves) {
+    op.getResult().replaceAllUsesWith(op.getSource());
+    op.erase();
+  }
 }
 
 static std::optional<unsigned> getAllocatedScalarVGPRIndex(Value value) {
@@ -254,6 +275,7 @@ struct WaveAMDPackVGPRZeroMovesPass
     FailureOr<llvm::AMDGPU::IsaVersion> isaVersion = getIsaVersion(root);
     if (failed(isaVersion))
       return signalPassFailure();
+    eraseRedundantAllocatedVGPRMoves(root);
     if (!waveamdmachine::VMovB64TupleOp::isSupportedOnIsa(*isaVersion))
       return;
 
