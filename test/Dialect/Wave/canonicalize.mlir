@@ -1,5 +1,13 @@
 // RUN: wave-opt %s --canonicalize | FileCheck %s
 
+// CHECK-LABEL: func.func @dead_alloc
+// CHECK-NOT: wave.alloc
+// CHECK: return
+func.func @dead_alloc() {
+  %alloc = wave.alloc() {align = 16 : i64, bytesize = 128 : i64} : !wave.ptr<#wave.shared, i8>
+  return
+}
+
 // CHECK-LABEL: func.func @extract_pack_f16
 // CHECK-SAME: (%[[A:.*]]: f16, %[[B:.*]]: f16)
 // CHECK-NOT: wave.pack

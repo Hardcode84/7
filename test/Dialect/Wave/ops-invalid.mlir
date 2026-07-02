@@ -766,6 +766,30 @@ func.func @lds_base_wrong_address_space() {
 
 // -----
 
+func.func @alloc_wrong_address_space() {
+  // expected-error @+1 {{result pointer must live in the shared address space}}
+  %p = wave.alloc() {align = 4 : i64, bytesize = 16 : i64} : !wave.ptr<#wave.global, i32>
+  return
+}
+
+// -----
+
+func.func @alloc_zero_bytesize() {
+  // expected-error @+1 {{bytesize must be positive}}
+  %p = wave.alloc() {align = 4 : i64, bytesize = 0 : i64} : !wave.ptr<#wave.shared, i32>
+  return
+}
+
+// -----
+
+func.func @alloc_bad_align() {
+  // expected-error @+1 {{align must be a positive power of two}}
+  %p = wave.alloc() {align = 3 : i64, bytesize = 16 : i64} : !wave.ptr<#wave.shared, i32>
+  return
+}
+
+// -----
+
 func.func @read_first_element_mismatch(%v: !wave.simd<i32, 32>) {
   // expected-error @+1 {{result type must match SIMD element type}}
   %r = wave.read_first %v : !wave.simd<i32, 32> -> i64

@@ -455,6 +455,19 @@ def Wave_SharedMemoryBaseOp : Wave_Op<"shared_memory_base", [Pure]> {
   let hasVerifier = 1;
 }
 
+def Wave_AllocOp : Wave_Op<"alloc"> {
+  let summary = "allocate workgroup-local memory";
+  let description = [{
+    Produces a wave-uniform pointer to a fixed-size workgroup-local allocation.
+  }];
+
+  let arguments = (ins I64Attr:$bytesize, I64Attr:$align);
+  let results = (outs Res<Wave_Ptr, "",
+                          [MemAlloc<DefaultResource, 0, FullEffect>]>:$result);
+  let assemblyFormat = "`(` `)` attr-dict `:` qualified(type($result))";
+  let hasVerifier = 1;
+}
+
 def Wave_BarrierOp : Wave_Op<"barrier", [MemoryEffects<[MemWrite, MemRead]>]> {
   let summary = "workgroup-wide barrier";
   let description = [{

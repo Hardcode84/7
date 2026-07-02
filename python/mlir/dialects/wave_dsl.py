@@ -975,6 +975,16 @@ class FunctionBuilder:
         ty = ptr_type(element_type or i32(), shared_address_space())
         return wave.SharedMemoryBaseOp(ty, offset=offset).result
 
+    def workgroup_alloc(
+        self,
+        bytesize: int,
+        align: int,
+        element_type: Type | None = None,
+    ) -> Value:
+        """Emit ``wave.alloc``."""
+        ty = ptr_type(element_type or i32(), shared_address_space())
+        return wave.AllocOp(ty, bytesize=bytesize, align=align).result
+
     def barrier(self, *dependencies: Value) -> Value:
         """Emit a workgroup-wide barrier sequenced after ``dependencies``."""
         return wave.BarrierOp(mem_token_type(), list(dependencies)).token

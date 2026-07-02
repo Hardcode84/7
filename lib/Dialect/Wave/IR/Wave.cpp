@@ -2733,6 +2733,19 @@ LogicalResult SharedMemoryBaseOp::verify() {
   return success();
 }
 
+LogicalResult AllocOp::verify() {
+  auto ptrType = cast<PtrType>(getResult().getType());
+  if (!isa<SharedAddressSpaceAttr>(ptrType.getAddressSpace()))
+    return emitOpError("result pointer must live in the shared address space");
+  if (getBytesizeAttr().getInt() <= 0)
+    return emitOpError("bytesize must be positive");
+
+  int64_t align = getAlignAttr().getInt();
+  if (align <= 0 || !llvm::isPowerOf2_64(static_cast<uint64_t>(align)))
+    return emitOpError("align must be a positive power of two");
+  return success();
+}
+
 LogicalResult PtrAddOp::verify() {
   auto emit = [this](const Twine &msg) { return emitOpError(msg); };
   auto base = verifyPtrAddBase(getBase().getType(), emit);

@@ -12,6 +12,13 @@ func.func @wave_constants() -> (i32, !wave.simd<i32, 32>, !wave.mask<32>) {
   return %scalar, %simd, %mask : i32, !wave.simd<i32, 32>, !wave.mask<32>
 }
 
+// CHECK-LABEL: func.func @wave_alloc
+func.func @wave_alloc() {
+  // CHECK: wave.alloc() {align = 16 : i64, bytesize = 128 : i64} : !wave.ptr<#wave.shared, i8>
+  %alloc = wave.alloc() {align = 16 : i64, bytesize = 128 : i64} : !wave.ptr<#wave.shared, i8>
+  return
+}
+
 // CHECK-LABEL: func.func @wave_ops
 func.func @wave_ops(%pred: i1, %value: i32, %out: !wave.ptr<#wave.global, i32>) -> i32 {
   // CHECK: wave.lane_id : !wave.simd<i32, 32>

@@ -313,7 +313,8 @@ populatePointerOffsetNormalizationPatterns(RewritePatternSet &patterns,
                                            const TypeConverter &converter) {
   MLIRContext *ctx = patterns.getContext();
   patterns.add<NormalizePtrAddOp, ConvertWhereOp,
-               ConvertNoRegionOp<SharedMemoryBaseOp>, ConvertNoRegionOp<LoadOp>,
+               ConvertNoRegionOp<SharedMemoryBaseOp>,
+               ConvertNoRegionOp<AllocOp>, ConvertNoRegionOp<LoadOp>,
                ConvertNoRegionOp<StoreOp>, ConvertNoRegionOp<SplatOp>,
                ConvertNoRegionOp<YieldOp>, ConvertNoRegionOp<ReadFirstOp>,
                ConvertNoRegionOp<PtrCastOp>, ConvertNoRegionOp<SelectOp>,
