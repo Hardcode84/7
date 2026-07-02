@@ -388,6 +388,371 @@ static LogicalResult tryFactorScalarAddBase(PatternRewriter &rewriter,
   return failure();
 }
 
+struct AddChainCandidate {
+  SmallVector<Operation *, 4> ops;
+  SmallVector<Value, 8> leaves;
+  Operation *root = nullptr;
+};
+
+struct AddExpression {
+  Operation *lastOp = nullptr;
+  Value result;
+};
+
+static bool isAddOp(Operation *op) {
+  return op && isa<VAddU32Op, VAdd3U32Op>(op);
+}
+
+static Value getAddResult(Operation *op) { return op->getResult(0); }
+
+static bool hasSameBlockAddUser(Operation *op) {
+  for (Operation *user : getAddResult(op).getUsers())
+    if (isAddOp(user) && user->getBlock() == op->getBlock())
+      return true;
+  return false;
+}
+
+static bool isGeneratedAddBase(Operation *op) {
+  return op->hasAttr(kLocalBaseAttr);
+}
+
+static bool isAddChainProducer(Operation *op) {
+  return isAddOp(op) && hasSameBlockAddUser(op);
+}
+
+static bool flattenAddOperand(Value value, Operation *consumer,
+                              AddChainCandidate &candidate) {
+  Operation *def = value.getDefiningOp();
+  if (!isAddOp(def) || def->getBlock() != consumer->getBlock() ||
+      isGeneratedAddBase(def) || !getAddResult(def).hasOneUse()) {
+    candidate.leaves.push_back(value);
+    return true;
+  }
+
+  for (Value operand : def->getOperands())
+    if (!flattenAddOperand(operand, def, candidate))
+      return false;
+  candidate.ops.push_back(def);
+  return true;
+}
+
+static std::optional<AddChainCandidate> matchAddChainCandidate(Operation *op) {
+  if (!isAddOp(op) || isGeneratedAddBase(op) || hasSameBlockAddUser(op))
+    return std::nullopt;
+
+  AddChainCandidate candidate;
+  candidate.root = op;
+  for (Value operand : op->getOperands())
+    if (!flattenAddOperand(operand, op, candidate))
+      return std::nullopt;
+  candidate.ops.push_back(op);
+  return candidate;
+}
+
+static bool consumeValue(SmallVectorImpl<Value> &values, Value needle) {
+  for (auto it = values.begin(), e = values.end(); it != e; ++it) {
+    if (*it != needle)
+      continue;
+    values.erase(it);
+    return true;
+  }
+  return false;
+}
+
+static SmallVector<Value, 8> intersectValues(ArrayRef<Value> lhs,
+                                             ArrayRef<Value> rhs) {
+  SmallVector<Value, 8> available(rhs.begin(), rhs.end());
+  SmallVector<Value, 8> result;
+  for (Value value : lhs)
+    if (consumeValue(available, value))
+      result.push_back(value);
+  return result;
+}
+
+static SmallVector<Value, 8> subtractValues(ArrayRef<Value> values,
+                                            ArrayRef<Value> remove) {
+  SmallVector<Value, 8> remaining(remove.begin(), remove.end());
+  SmallVector<Value, 8> result;
+  for (Value value : values) {
+    if (consumeValue(remaining, value))
+      continue;
+    result.push_back(value);
+  }
+  return result;
+}
+
+static SmallVector<Value, 8> orderAddLeaves(ArrayRef<Value> values) {
+  SmallVector<Value, 8> ordered;
+  for (Value value : values)
+    if (isVGPRValue(value))
+      ordered.push_back(value);
+  for (Value value : values)
+    if (!isVGPRValue(value))
+      ordered.push_back(value);
+  return ordered;
+}
+
+static bool canCreateVAddU32(Value lhs, Value rhs,
+                             const llvm::AMDGPU::IsaVersion &isa) {
+  std::array<Value, 2> operands = {lhs, rhs};
+  return hasAnyVGPROperand(lhs, rhs) &&
+         canUseConstantBus(operands, isa, [](Value, Value) { return false; });
+}
+
+static FailureOr<unsigned>
+estimateAddExpressionCost(ArrayRef<Value> leaves,
+                          const llvm::AMDGPU::IsaVersion &isa) {
+  SmallVector<Value, 8> ordered = orderAddLeaves(leaves);
+  if (ordered.empty())
+    return failure();
+  if (ordered.size() == 1)
+    return 0;
+  if (!isVGPRValue(ordered.front()))
+    return failure();
+
+  unsigned cost = 0;
+  Value acc = ordered.front();
+  unsigned index = 1;
+  while (index < ordered.size()) {
+    if (index + 1 < ordered.size()) {
+      std::array<Value, 3> operands = {acc, ordered[index], ordered[index + 1]};
+      if (canCreateTernary<VAdd3U32Op>(operands, isa)) {
+        ++cost;
+        index += 2;
+        continue;
+      }
+    }
+    if (!canCreateVAddU32(acc, ordered[index], isa))
+      return failure();
+    ++cost;
+    ++index;
+  }
+  return cost;
+}
+
+static void noteBuiltAddOp(PatternRewriter &rewriter, AddExpression &built,
+                           Operation *op, std::optional<uint64_t> localBaseId) {
+  built.lastOp = op;
+  if (localBaseId)
+    op->setAttr(kLocalBaseAttr, rewriter.getI64IntegerAttr(*localBaseId));
+}
+
+static FailureOr<Value> tryBuildAdd3Step(PatternRewriter &rewriter,
+                                         Location loc, Type resultType,
+                                         AddExpression &built, Value acc,
+                                         Value lhs, Value rhs,
+                                         const llvm::AMDGPU::IsaVersion &isa,
+                                         std::optional<uint64_t> localBaseId) {
+  std::array<Value, 3> operands = {acc, lhs, rhs};
+  if (!canCreateTernary<VAdd3U32Op>(operands, isa))
+    return failure();
+  VAdd3U32Op add = VAdd3U32Op::create(rewriter, loc, resultType, operands[0],
+                                      operands[1], operands[2]);
+  noteBuiltAddOp(rewriter, built, add, localBaseId);
+  return add.getResult();
+}
+
+static FailureOr<Value> buildAddStep(PatternRewriter &rewriter, Location loc,
+                                     Type resultType, AddExpression &built,
+                                     ArrayRef<Value> ordered, Value acc,
+                                     unsigned &index,
+                                     const llvm::AMDGPU::IsaVersion &isa,
+                                     std::optional<uint64_t> localBaseId) {
+  if (index + 1 < ordered.size()) {
+    FailureOr<Value> add3 =
+        tryBuildAdd3Step(rewriter, loc, resultType, built, acc, ordered[index],
+                         ordered[index + 1], isa, localBaseId);
+    if (succeeded(add3)) {
+      index += 2;
+      return add3;
+    }
+  }
+
+  if (!canCreateVAddU32(acc, ordered[index], isa))
+    return failure();
+  VAddU32Op add =
+      VAddU32Op::create(rewriter, loc, resultType, acc, ordered[index]);
+  noteBuiltAddOp(rewriter, built, add, localBaseId);
+  ++index;
+  return add.getResult();
+}
+
+static FailureOr<AddExpression>
+buildAddExpression(PatternRewriter &rewriter, Location loc, Type resultType,
+                   ArrayRef<Value> leaves, const llvm::AMDGPU::IsaVersion &isa,
+                   std::optional<uint64_t> localBaseId = std::nullopt,
+                   DictionaryAttr finalAttrs = nullptr) {
+  SmallVector<Value, 8> ordered = orderAddLeaves(leaves);
+  if (ordered.empty())
+    return failure();
+  if (ordered.size() == 1)
+    return AddExpression{nullptr, ordered.front()};
+  if (!isVGPRValue(ordered.front()))
+    return failure();
+
+  AddExpression built;
+  Value acc = ordered.front();
+  unsigned index = 1;
+  while (index < ordered.size()) {
+    FailureOr<Value> next = buildAddStep(rewriter, loc, resultType, built,
+                                         ordered, acc, index, isa, localBaseId);
+    if (failed(next))
+      return failure();
+    acc = *next;
+  }
+  if (built.lastOp && finalAttrs)
+    built.lastOp->setAttrs(finalAttrs);
+  built.result = acc;
+  return built;
+}
+
+static SmallVector<AddChainCandidate, 4>
+collectAddChainRun(const AddChainCandidate &root,
+                   SmallVectorImpl<Value> &common) {
+  constexpr unsigned maxInterCandidateOps = 4;
+
+  SmallVector<AddChainCandidate, 4> candidates;
+  candidates.push_back(root);
+
+  unsigned gap = 0;
+  for (Operation *cur = root.root->getNextNode(); cur;
+       cur = cur->getNextNode()) {
+    if (isScalarAddBaseHardBoundary(cur))
+      break;
+    if (cur->hasTrait<OpTrait::waveamdmachine::NoMachineInst>())
+      continue;
+    if (isAddChainProducer(cur))
+      continue;
+
+    if (std::optional<AddChainCandidate> candidate =
+            matchAddChainCandidate(cur)) {
+      SmallVector<Value, 8> nextCommon =
+          intersectValues(common, candidate->leaves);
+      if (nextCommon.size() >= 2) {
+        common = std::move(nextCommon);
+        candidates.push_back(std::move(*candidate));
+        gap = 0;
+        continue;
+      }
+    }
+
+    ++gap;
+    if (gap > maxInterCandidateOps)
+      break;
+  }
+  return candidates;
+}
+
+static unsigned sumAddChainCost(ArrayRef<AddChainCandidate> candidates) {
+  unsigned cost = 0;
+  for (const AddChainCandidate &candidate : candidates)
+    cost += candidate.ops.size();
+  return cost;
+}
+
+static FailureOr<unsigned>
+estimateFactoredAddCost(ArrayRef<AddChainCandidate> candidates,
+                        ArrayRef<Value> common,
+                        const llvm::AMDGPU::IsaVersion &isa) {
+  FailureOr<unsigned> commonCost = estimateAddExpressionCost(common, isa);
+  if (failed(commonCost))
+    return failure();
+
+  unsigned cost = *commonCost;
+  Value baseProxy = orderAddLeaves(common).front();
+  for (const AddChainCandidate &candidate : candidates) {
+    SmallVector<Value, 8> rebuildLeaves =
+        subtractValues(candidate.leaves, common);
+    rebuildLeaves.push_back(baseProxy);
+    FailureOr<unsigned> rebuildCost =
+        estimateAddExpressionCost(rebuildLeaves, isa);
+    if (failed(rebuildCost))
+      return failure();
+    cost += *rebuildCost;
+  }
+  return cost;
+}
+
+static std::optional<SmallVector<Value, 8>>
+chooseCommonAddends(ArrayRef<AddChainCandidate> candidates,
+                    ArrayRef<Value> common,
+                    const llvm::AMDGPU::IsaVersion &isa) {
+  if (candidates.size() < 3)
+    return std::nullopt;
+
+  SmallVector<Value, 8> orderedCommon = orderAddLeaves(common);
+  if (orderedCommon.size() < 2 || !isVGPRValue(orderedCommon.front()))
+    return std::nullopt;
+
+  unsigned oldCost = sumAddChainCost(candidates);
+  unsigned bestCost = oldCost;
+  unsigned bestCount = 0;
+  for (unsigned count = 2; count <= orderedCommon.size(); ++count) {
+    ArrayRef<Value> prefix(orderedCommon.data(), count);
+    FailureOr<unsigned> newCost =
+        estimateFactoredAddCost(candidates, prefix, isa);
+    if (failed(newCost) || *newCost >= bestCost)
+      continue;
+    bestCost = *newCost;
+    bestCount = count;
+  }
+  if (bestCount == 0)
+    return std::nullopt;
+  return SmallVector<Value, 8>(orderedCommon.begin(),
+                               orderedCommon.begin() + bestCount);
+}
+
+static void eraseAddChain(PatternRewriter &rewriter,
+                          const AddChainCandidate &candidate) {
+  for (Operation *op : llvm::reverse(candidate.ops)) {
+    if (op == candidate.root)
+      continue;
+    if (op->use_empty())
+      rewriter.eraseOp(op);
+  }
+}
+
+static LogicalResult tryFactorAddChain(PatternRewriter &rewriter, Operation *op,
+                                       const llvm::AMDGPU::IsaVersion &isa,
+                                       uint64_t &nextLocalBaseId) {
+  std::optional<AddChainCandidate> root = matchAddChainCandidate(op);
+  if (!root)
+    return failure();
+
+  SmallVector<Value, 8> common = root->leaves;
+  SmallVector<AddChainCandidate, 4> candidates =
+      collectAddChainRun(*root, common);
+  std::optional<SmallVector<Value, 8>> selectedCommon =
+      chooseCommonAddends(candidates, common, isa);
+  if (!selectedCommon)
+    return failure();
+
+  uint64_t localBaseId = nextLocalBaseId++;
+  rewriter.setInsertionPoint(candidates.front().root);
+  FailureOr<AddExpression> base =
+      buildAddExpression(rewriter, candidates.front().root->getLoc(),
+                         getAddResult(candidates.front().root).getType(),
+                         *selectedCommon, isa, localBaseId);
+  if (failed(base))
+    return failure();
+
+  for (AddChainCandidate &candidate : candidates) {
+    SmallVector<Value, 8> rebuildLeaves =
+        subtractValues(candidate.leaves, *selectedCommon);
+    rebuildLeaves.push_back(base->result);
+    rewriter.setInsertionPoint(candidate.root);
+    FailureOr<AddExpression> replacement = buildAddExpression(
+        rewriter, candidate.root->getLoc(),
+        getAddResult(candidate.root).getType(), rebuildLeaves, isa,
+        std::nullopt, candidate.root->getAttrDictionary());
+    if (failed(replacement))
+      return failure();
+    rewriter.replaceOp(candidate.root, replacement->result);
+    eraseAddChain(rewriter, candidate);
+  }
+  return success();
+}
+
 static Value getSingleShiftAddend(VLshlrevB32Op op, VAddU32Op add) {
   bool lhsShift = add.getLhs() == op.getResult();
   bool rhsShift = add.getRhs() == op.getResult();
@@ -498,6 +863,21 @@ struct ScalarAddBaseFactorPattern : public OpRewritePattern<VAddU32Op> {
   mutable uint64_t nextLocalBaseId = 0;
 };
 
+template <typename OpTy>
+struct AddChainFactorPattern : public OpRewritePattern<OpTy> {
+  AddChainFactorPattern(MLIRContext *context,
+                        const llvm::AMDGPU::IsaVersion &isa)
+      : OpRewritePattern<OpTy>(context), isa(isa) {}
+
+  LogicalResult matchAndRewrite(OpTy op,
+                                PatternRewriter &rewriter) const override {
+    return tryFactorAddChain(rewriter, op.getOperation(), isa, nextLocalBaseId);
+  }
+
+  llvm::AMDGPU::IsaVersion isa;
+  mutable uint64_t nextLocalBaseId = 0;
+};
+
 struct AddFusionPattern : public OpRewritePattern<VAddU32Op> {
   AddFusionPattern(MLIRContext *context, const llvm::AMDGPU::IsaVersion &isa)
       : OpRewritePattern<VAddU32Op>(context), isa(isa) {}
@@ -579,7 +959,7 @@ struct OrFusionPattern : public OpRewritePattern<VOrB32Op> {
 static bool hasFusedIntCandidate(func::FuncOp func) {
   bool found = false;
   WalkResult result = func.walk([&](Operation *op) {
-    if (!isa<VAddU32Op, VLshlrevB32Op, VOrB32Op, SMovM0Op>(op))
+    if (!isa<VAddU32Op, VAdd3U32Op, VLshlrevB32Op, VOrB32Op, SMovM0Op>(op))
       return WalkResult::advance();
     found = true;
     return WalkResult::interrupt();
@@ -606,6 +986,9 @@ static LogicalResult runOnFunc(func::FuncOp func) {
   patterns.add<Mad24FusionPattern>(func.getContext(), *isa, solver);
   patterns.add<M0AddFusionPattern>(func.getContext());
   patterns.add<ScalarAddBaseFactorPattern>(func.getContext(), *isa);
+  patterns
+      .add<AddChainFactorPattern<VAddU32Op>, AddChainFactorPattern<VAdd3U32Op>>(
+          func.getContext(), *isa);
   patterns.add<AddFusionPattern, LshlFusionPattern, OrFusionPattern>(
       func.getContext(), *isa);
   DataFlowListener listener(solver);

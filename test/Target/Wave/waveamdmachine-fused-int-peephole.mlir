@@ -573,4 +573,193 @@ func.func @scalar_add_base_factor_two_uses_reject(
                           !waveamdmachine.reg<vgpr, 1>
 }
 
+// CHECK-LABEL: func.func @v_add3_common_tail_factor
+// CHECK: [[BASE0:%.*]] = waveamdmachine.v_add3_u32 %{{.*}}, %{{.*}}, %{{.*}} {waveamdmachine.local_base = 0 : i64}
+// CHECK: [[BASE1:%.*]] = waveamdmachine.v_add3_u32 [[BASE0]], %{{.*}}, %{{.*}} {waveamdmachine.local_base = 0 : i64}
+// CHECK: [[BASE2:%.*]] = waveamdmachine.v_add3_u32 [[BASE1]], %{{.*}}, %{{.*}} {waveamdmachine.local_base = 0 : i64}
+// CHECK: [[OUT0:%.*]] = waveamdmachine.v_add3_u32 %{{.*}}, [[BASE2]], %{{.*}}
+// CHECK: [[OUT1:%.*]] = waveamdmachine.v_add3_u32 %{{.*}}, [[BASE2]], %{{.*}}
+// CHECK: [[OUT2:%.*]] = waveamdmachine.v_add3_u32 %{{.*}}, [[BASE2]], %{{.*}}
+// CHECK-NOT: waveamdmachine.v_add3_u32
+// CHECK: return [[OUT0]], [[OUT1]], [[OUT2]]
+func.func @v_add3_common_tail_factor(
+    %seed0: !waveamdmachine.reg<sgpr, 1>,
+    %seed1: !waveamdmachine.reg<sgpr, 1>,
+    %seed2: !waveamdmachine.reg<sgpr, 1>,
+    %v0: !waveamdmachine.reg<vgpr, 1>,
+    %v1: !waveamdmachine.reg<vgpr, 1>,
+    %v2: !waveamdmachine.reg<vgpr, 1>,
+    %v3: !waveamdmachine.reg<vgpr, 1>,
+    %v4: !waveamdmachine.reg<vgpr, 1>,
+    %v5: !waveamdmachine.reg<vgpr, 1>,
+    %v6: !waveamdmachine.reg<vgpr, 1>,
+    %v7: !waveamdmachine.reg<vgpr, 1>)
+    -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+        !waveamdmachine.reg<vgpr, 1>) {
+  %a0 = waveamdmachine.v_add3_u32 %seed0, %v0, %v1
+      : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+         !waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
+  %a1 = waveamdmachine.v_add3_u32 %a0, %v2, %v3
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+         !waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
+  %a2 = waveamdmachine.v_add3_u32 %a1, %v4, %v5
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+         !waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
+  %out0 = waveamdmachine.v_add3_u32 %a2, %v6, %v7
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+         !waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
+  %b0 = waveamdmachine.v_add3_u32 %seed1, %v0, %v1
+      : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+         !waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
+  %b1 = waveamdmachine.v_add3_u32 %b0, %v2, %v3
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+         !waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
+  %b2 = waveamdmachine.v_add3_u32 %b1, %v4, %v5
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+         !waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
+  %out1 = waveamdmachine.v_add3_u32 %b2, %v6, %v7
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+         !waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
+  %c0 = waveamdmachine.v_add3_u32 %seed2, %v0, %v1
+      : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+         !waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
+  %c1 = waveamdmachine.v_add3_u32 %c0, %v2, %v3
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+         !waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
+  %c2 = waveamdmachine.v_add3_u32 %c1, %v4, %v5
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+         !waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
+  %out2 = waveamdmachine.v_add3_u32 %c2, %v6, %v7
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+         !waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
+  return %out0, %out1, %out2 : !waveamdmachine.reg<vgpr, 1>,
+                               !waveamdmachine.reg<vgpr, 1>,
+                               !waveamdmachine.reg<vgpr, 1>
+}
+
+// CHECK-LABEL: func.func @mixed_add_chain_commutative_factor
+// CHECK: [[BASE:%.*]] = waveamdmachine.v_add3_u32 %{{.*}}, %{{.*}}, %{{.*}} {waveamdmachine.local_base = 0 : i64}
+// CHECK: [[OUT0:%.*]] = waveamdmachine.v_add3_u32 %{{.*}}, [[BASE]], %{{.*}}
+// CHECK: [[OUT1:%.*]] = waveamdmachine.v_add3_u32 %{{.*}}, [[BASE]], %{{.*}}
+// CHECK: [[OUT2:%.*]] = waveamdmachine.v_add3_u32 %{{.*}}, [[BASE]], %{{.*}}
+// CHECK-NOT: waveamdmachine.v_add
+// CHECK: return [[OUT0]], [[OUT1]], [[OUT2]]
+func.func @mixed_add_chain_commutative_factor(
+    %seed0: !waveamdmachine.reg<sgpr, 1>,
+    %seed1: !waveamdmachine.reg<sgpr, 1>,
+    %seed2: !waveamdmachine.reg<sgpr, 1>,
+    %v0: !waveamdmachine.reg<vgpr, 1>,
+    %v1: !waveamdmachine.reg<vgpr, 1>,
+    %v2: !waveamdmachine.reg<vgpr, 1>,
+    %v3: !waveamdmachine.reg<vgpr, 1>)
+    -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+        !waveamdmachine.reg<vgpr, 1>) {
+  %a0 = waveamdmachine.v_add_u32 %seed0, %v0
+      : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+  %a1 = waveamdmachine.v_add3_u32 %a0, %v1, %v2
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+         !waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
+  %out0 = waveamdmachine.v_add_u32 %a1, %v3
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+  %b0 = waveamdmachine.v_add3_u32 %v2, %seed1, %v1
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 1>,
+         !waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
+  %b1 = waveamdmachine.v_add_u32 %v0, %b0
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+  %out1 = waveamdmachine.v_add_u32 %v3, %b1
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+  %c0 = waveamdmachine.v_add_u32 %v3, %seed2
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+  %c1 = waveamdmachine.v_add3_u32 %v1, %c0, %v0
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+         !waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
+  %out2 = waveamdmachine.v_add_u32 %v2, %c1
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+  return %out0, %out1, %out2 : !waveamdmachine.reg<vgpr, 1>,
+                               !waveamdmachine.reg<vgpr, 1>,
+                               !waveamdmachine.reg<vgpr, 1>
+}
+
+// CHECK-LABEL: func.func @v_add3_common_tail_two_uses_reject
+// CHECK-NOT: waveamdmachine.local_base
+// CHECK: waveamdmachine.v_add3_u32
+// CHECK: waveamdmachine.v_add3_u32
+// CHECK: waveamdmachine.v_add3_u32
+// CHECK: waveamdmachine.v_add3_u32
+// CHECK-NOT: waveamdmachine.local_base
+// CHECK: return
+func.func @v_add3_common_tail_two_uses_reject(
+    %seed0: !waveamdmachine.reg<sgpr, 1>,
+    %seed1: !waveamdmachine.reg<sgpr, 1>,
+    %v0: !waveamdmachine.reg<vgpr, 1>,
+    %v1: !waveamdmachine.reg<vgpr, 1>,
+    %v2: !waveamdmachine.reg<vgpr, 1>,
+    %v3: !waveamdmachine.reg<vgpr, 1>)
+    -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>) {
+  %a0 = waveamdmachine.v_add3_u32 %seed0, %v0, %v1
+      : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+         !waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
+  %out0 = waveamdmachine.v_add3_u32 %a0, %v2, %v3
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+         !waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
+  %b0 = waveamdmachine.v_add3_u32 %seed1, %v0, %v1
+      : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+         !waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
+  %out1 = waveamdmachine.v_add3_u32 %b0, %v2, %v3
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+         !waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
+  return %out0, %out1 : !waveamdmachine.reg<vgpr, 1>,
+                        !waveamdmachine.reg<vgpr, 1>
+}
+
+// CHECK-LABEL: func.func @v_add3_common_tail_exec_boundary_reject
+// CHECK-NOT: waveamdmachine.local_base
+// CHECK: waveamdmachine.v_add3_u32
+// CHECK: waveamdmachine.s_andn2_exec_b32
+// CHECK-NOT: waveamdmachine.local_base
+// CHECK: return
+func.func @v_add3_common_tail_exec_boundary_reject(
+    %seed0: !waveamdmachine.reg<sgpr, 1>,
+    %seed1: !waveamdmachine.reg<sgpr, 1>,
+    %seed2: !waveamdmachine.reg<sgpr, 1>,
+    %v0: !waveamdmachine.reg<vgpr, 1>,
+    %v1: !waveamdmachine.reg<vgpr, 1>,
+    %v2: !waveamdmachine.reg<vgpr, 1>,
+    %v3: !waveamdmachine.reg<vgpr, 1>,
+    %exec0: !waveamdmachine.reg<sgpr, 1>,
+    %exec1: !waveamdmachine.reg<sgpr, 1>)
+    -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+        !waveamdmachine.reg<vgpr, 1>) {
+  %a0 = waveamdmachine.v_add3_u32 %seed0, %v0, %v1
+      : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+         !waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
+  %out0 = waveamdmachine.v_add3_u32 %a0, %v2, %v3
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+         !waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
+  %scc_exec = waveamdmachine.s_andn2_exec_b32 %exec0, %exec1
+      : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<sgpr, 1>)
+          -> !waveamdmachine.reg<scc, 1>
+  %b0 = waveamdmachine.v_add3_u32 %seed1, %v0, %v1
+      : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+         !waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
+  %out1 = waveamdmachine.v_add3_u32 %b0, %v2, %v3
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+         !waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
+  %c0 = waveamdmachine.v_add3_u32 %seed2, %v0, %v1
+      : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+         !waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
+  %out2 = waveamdmachine.v_add3_u32 %c0, %v2, %v3
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+         !waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
+  return %out0, %out1, %out2 : !waveamdmachine.reg<vgpr, 1>,
+                               !waveamdmachine.reg<vgpr, 1>,
+                               !waveamdmachine.reg<vgpr, 1>
+}
+
 }
