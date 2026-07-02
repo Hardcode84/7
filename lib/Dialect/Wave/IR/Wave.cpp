@@ -2436,10 +2436,56 @@ LogicalResult BallotOp::verify() {
   return success();
 }
 
+namespace {
+struct CanonicalizeJoinOp : OpRewritePattern<JoinOp> {
+  using OpRewritePattern<JoinOp>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(JoinOp op,
+                                PatternRewriter &rewriter) const override {
+    SmallVector<Value> dependencies;
+    llvm::SmallDenseSet<Value, 8> seen;
+    bool changed = false;
+    for (Value dependency : op.getDependencies()) {
+      if (dependency.getDefiningOp<TokenOp>()) {
+        changed = true;
+        continue;
+      }
+      if (!seen.insert(dependency).second) {
+        changed = true;
+        continue;
+      }
+      dependencies.push_back(dependency);
+    }
+
+    if (!changed && !dependencies.empty())
+      return failure();
+    if (dependencies.empty()) {
+      TokenOp token =
+          TokenOp::create(rewriter, op.getLoc(), op.getResult().getType());
+      rewriter.replaceOp(op, token.getResult());
+      return success();
+    }
+    if (dependencies.size() == 1) {
+      rewriter.replaceOp(op, dependencies.front());
+      return success();
+    }
+
+    rewriter.modifyOpInPlace(
+        op, [&] { op.getDependenciesMutable().assign(dependencies); });
+    return success();
+  }
+};
+} // namespace
+
 OpFoldResult JoinOp::fold(FoldAdaptor) {
   if (getDependencies().size() == 1)
     return getDependencies().front();
   return {};
+}
+
+void JoinOp::getCanonicalizationPatterns(RewritePatternSet &patterns,
+                                         MLIRContext *context) {
+  patterns.add<CanonicalizeJoinOp>(context);
 }
 
 LogicalResult ReadFirstOp::verify() {

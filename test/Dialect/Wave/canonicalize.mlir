@@ -162,6 +162,53 @@ func.func @single_input_join() -> !wave.mem.token {
   return %joined : !wave.mem.token
 }
 
+// CHECK-LABEL: func.func @join_drops_dummy_and_duplicates
+// CHECK-SAME: (%[[A:.*]]: !wave.mem.token, %[[B:.*]]: !wave.mem.token)
+// CHECK-NOT: wave.token
+// CHECK: %[[JOIN:.*]] = wave.join %[[A]], %[[B]] : !wave.mem.token, !wave.mem.token -> !wave.mem.token
+// CHECK: return %[[JOIN]] : !wave.mem.token
+func.func @join_drops_dummy_and_duplicates(%a: !wave.mem.token,
+                                           %b: !wave.mem.token)
+    -> !wave.mem.token {
+  %dummy0 = wave.token : !wave.mem.token
+  %dummy1 = wave.token : !wave.mem.token
+  %joined = wave.join %dummy0, %a, %b, %a, %dummy1, %b
+      : !wave.mem.token, !wave.mem.token, !wave.mem.token, !wave.mem.token,
+        !wave.mem.token, !wave.mem.token -> !wave.mem.token
+  return %joined : !wave.mem.token
+}
+
+// CHECK-LABEL: func.func @duplicate_input_join
+// CHECK-SAME: (%[[TOK:.*]]: !wave.mem.token)
+// CHECK-NOT: wave.join
+// CHECK: return %[[TOK]] : !wave.mem.token
+func.func @duplicate_input_join(%tok: !wave.mem.token) -> !wave.mem.token {
+  %joined = wave.join %tok, %tok
+      : !wave.mem.token, !wave.mem.token -> !wave.mem.token
+  return %joined : !wave.mem.token
+}
+
+// CHECK-LABEL: func.func @dummy_only_join
+// CHECK: %[[TOK:.*]] = wave.token : !wave.mem.token
+// CHECK-NOT: wave.join
+// CHECK: return %[[TOK]] : !wave.mem.token
+func.func @dummy_only_join() -> !wave.mem.token {
+  %dummy0 = wave.token : !wave.mem.token
+  %dummy1 = wave.token : !wave.mem.token
+  %joined = wave.join %dummy0, %dummy1
+      : !wave.mem.token, !wave.mem.token -> !wave.mem.token
+  return %joined : !wave.mem.token
+}
+
+// CHECK-LABEL: func.func @empty_join
+// CHECK: %[[TOK:.*]] = wave.token : !wave.mem.token
+// CHECK-NOT: wave.join
+// CHECK: return %[[TOK]] : !wave.mem.token
+func.func @empty_join() -> !wave.mem.token {
+  %joined = "wave.join"() : () -> !wave.mem.token
+  return %joined : !wave.mem.token
+}
+
 // CHECK-LABEL: func.func @binary_scalar_constant_fold
 // CHECK-NOT: wave.binary
 // CHECK-DAG: %[[C7:.*]] = wave.constant 7 : i32
