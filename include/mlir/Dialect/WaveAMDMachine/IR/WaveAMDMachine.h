@@ -30,6 +30,8 @@
 // Generated op classes expose `isSupportedOnIsa(IsaVersion)`.
 #include "llvm/TargetParser/AMDGPUTargetParser.h"
 
+#include <cstdint>
+
 namespace mlir::waveamdmachine {
 
 struct KernelMetadataEntry {

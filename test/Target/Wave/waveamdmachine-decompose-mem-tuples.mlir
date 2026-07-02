@@ -52,6 +52,22 @@ func.func @ds_load_tuple_decompose(%addr: !waveamdmachine.reg<vgpr, 1>)
   return %t, %tok : !waveamdmachine.reg<vgpr, 4>, !waveamdmachine.mem.token
 }
 
+// CHECK-LABEL: func.func @ds_load_tuple_agpr_decompose
+// CHECK: %[[V0:.+]], %[[T0:.+]] = waveamdmachine.ds_load_b128 %{{.*}}{{ *:}}
+// CHECK-SAME: -> (!waveamdmachine.reg<agpr, 4>, !waveamdmachine.mem.token)
+// CHECK: %[[V1:.+]], %[[T1:.+]] = waveamdmachine.ds_load_b128 %{{.*}} offset 16
+// CHECK-SAME: -> (!waveamdmachine.reg<agpr, 4>, !waveamdmachine.mem.token)
+// CHECK: %{{.+}} = waveamdmachine.tuple_from_elements %[[V0]], %[[V1]]
+// CHECK-SAME: -> !waveamdmachine.reg<agpr, 8>
+// CHECK: waveamdmachine.token_join %[[T0]], %[[T1]]
+func.func @ds_load_tuple_agpr_decompose(%addr: !waveamdmachine.reg<vgpr, 1>)
+    -> (!waveamdmachine.reg<agpr, 8>, !waveamdmachine.mem.token) {
+  %t, %tok = waveamdmachine.ds_load_tuple_b32 %addr
+      : (!waveamdmachine.reg<vgpr, 1>)
+        -> (!waveamdmachine.reg<agpr, 8>, !waveamdmachine.mem.token)
+  return %t, %tok : !waveamdmachine.reg<agpr, 8>, !waveamdmachine.mem.token
+}
+
 // Width-4 stores collapse to one fused op each.
 //
 // CHECK-LABEL: func.func @global_store_tuple_decompose
@@ -95,6 +111,23 @@ func.func @ds_store_tuple_decompose(%addr: !waveamdmachine.reg<vgpr, 1>,
     -> !waveamdmachine.mem.token {
   %tok = waveamdmachine.ds_store_tuple_b32 %addr, %val
       : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 4>)
+        -> !waveamdmachine.mem.token
+  return %tok : !waveamdmachine.mem.token
+}
+
+// CHECK-LABEL: func.func @ds_store_tuple_agpr_decompose
+// CHECK: %[[E:.+]]:2 = waveamdmachine.tuple_to_elements
+// CHECK-SAME: -> (!waveamdmachine.reg<agpr, 4>, !waveamdmachine.reg<agpr, 4>)
+// CHECK: %[[T0:.+]] = waveamdmachine.ds_store_b128 %{{.*}}, %[[E]]#0{{.*}}{{ *:}}
+// CHECK-SAME: !waveamdmachine.reg<agpr, 4>
+// CHECK: %[[T1:.+]] = waveamdmachine.ds_store_b128 %{{.*}}, %[[E]]#1{{.*}} offset 16
+// CHECK-SAME: !waveamdmachine.reg<agpr, 4>
+// CHECK: waveamdmachine.token_join %[[T0]], %[[T1]]
+func.func @ds_store_tuple_agpr_decompose(%addr: !waveamdmachine.reg<vgpr, 1>,
+                                          %val: !waveamdmachine.reg<agpr, 8>)
+    -> !waveamdmachine.mem.token {
+  %tok = waveamdmachine.ds_store_tuple_b32 %addr, %val
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<agpr, 8>)
         -> !waveamdmachine.mem.token
   return %tok : !waveamdmachine.mem.token
 }

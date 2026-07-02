@@ -61,6 +61,30 @@ def WaveAMDMachine_OperandLegalityOpInterface
   ];
 }
 
+def WaveAMDMachine_AGPRBankingOpInterface
+    : OpInterface<"AGPRBankingOpInterface"> {
+  let cppNamespace = "::mlir::waveamdmachine";
+  let description = [{
+    Machine operand/result banking slots that can legally use AGPRs.
+  }];
+  let methods = [
+    InterfaceMethod<
+      [{Whether this operand can be AGPR-backed.}],
+      "bool",
+      "isOperandAGPRValid",
+      (ins "const ::llvm::AMDGPU::IsaVersion &":$isa,
+           "::mlir::OpOperand &":$operand)
+    >,
+    InterfaceMethod<
+      [{Whether this result can be AGPR-backed.}],
+      "bool",
+      "isResultAGPRValid",
+      (ins "const ::llvm::AMDGPU::IsaVersion &":$isa,
+           "::mlir::OpResult":$result)
+    >,
+  ];
+}
+
 def WaveAMDMachine_KilledOperandReuseOpInterface
     : OpInterface<"KilledOperandReuseOpInterface"> {
   let cppNamespace = "::mlir::waveamdmachine";

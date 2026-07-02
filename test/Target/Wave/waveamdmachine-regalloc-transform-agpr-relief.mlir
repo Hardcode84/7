@@ -144,6 +144,105 @@ module attributes {transform.with_named_sequence} {
       return %mfma : !waveamdmachine.reg<vgpr, 4>
     }
 
+    // DIRECT-LABEL: func.func @agpr_relief_direct_ds_store_operand(
+    // DIRECT: [[ZERO:%.*]] = waveamdmachine.imm 0
+    // DIRECT: [[AG:%.*]] = waveamdmachine.v_accvgpr_write_b32_tuple [[ZERO]]
+    // DIRECT-NOT: waveamdmachine.v_accvgpr_read_b32_tuple [[AG]]
+    // DIRECT: waveamdmachine.ds_store_b32 {{%.*}}, [[AG]]
+    // DIRECT-SAME: !waveamdmachine.reg<agpr, 1>
+    func.func @agpr_relief_direct_ds_store_operand()
+        attributes {waveamdmachine.vgpr_count_max = 1 : i64,
+                    waveamdmachine.agpr_count_max = 4 : i64,
+                    waveamdmachine.regalloc_transform_state = {
+          alias_sets = [
+            {class = "vgpr", id = 0 : i64,
+             members = [{value = 0 : i64}], width = 1 : i64},
+            {class = "vgpr", id = 1 : i64,
+             members = [{value = 1 : i64}], width = 1 : i64}
+          ],
+          failure = {
+            class = "vgpr",
+            overlaps = [
+              {base = 0 : i64, class = "vgpr", end = 4 : i64, set = 0 : i64,
+               start = 0 : i64, width = 1 : i64},
+              {base = 0 : i64, class = "vgpr", end = 4 : i64, set = 1 : i64,
+               start = 2 : i64, width = 1 : i64}
+            ],
+            position = 4 : i64,
+            reason = "pressure",
+            set = 1 : i64
+          },
+          stage = "linear-scan-failure",
+          values = [
+            {class = "vgpr", end = 4 : i64, fixed = 0 : i64, id = 0 : i64,
+             kind = "op_result", number = 0 : i64, offset = 0 : i64,
+             path = [0, 0, 0], set = 0 : i64, start = 0 : i64,
+             width = 1 : i64},
+            {class = "vgpr", end = 4 : i64, id = 1 : i64,
+             kind = "op_result", number = 0 : i64, offset = 0 : i64,
+             path = [0, 0, 2], set = 1 : i64, start = 2 : i64,
+             width = 1 : i64}
+          ]
+        }} {
+      %addr = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1, 0>
+      %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+      %value = waveamdmachine.v_mov_b32_tuple %zero {registers = 1 : i64}
+          : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
+      %dep = waveamdmachine.token : !waveamdmachine.mem.token
+      %store = waveamdmachine.ds_store_b32 %addr, %value after %dep
+          : (!waveamdmachine.reg<vgpr, 1, 0>, !waveamdmachine.reg<vgpr, 1>,
+             !waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+      return
+    }
+
+    // DIRECT-LABEL: func.func @agpr_relief_direct_ds_load_result(
+    // DIRECT: [[LOAD:%.*]], {{%.*}} = waveamdmachine.ds_load_b32
+    // DIRECT-SAME: -> (!waveamdmachine.reg<agpr, 1>, !waveamdmachine.mem.token)
+    // DIRECT: [[READ:%.*]] = waveamdmachine.v_accvgpr_read_b32_tuple [[LOAD]]
+    // DIRECT: return [[READ]]
+    func.func @agpr_relief_direct_ds_load_result()
+        -> !waveamdmachine.reg<vgpr, 1>
+        attributes {waveamdmachine.vgpr_count_max = 1 : i64,
+                    waveamdmachine.agpr_count_max = 4 : i64,
+                    waveamdmachine.regalloc_transform_state = {
+          alias_sets = [
+            {class = "vgpr", id = 0 : i64,
+             members = [{value = 0 : i64}], width = 1 : i64},
+            {class = "vgpr", id = 1 : i64,
+             members = [{value = 1 : i64}], width = 1 : i64}
+          ],
+          failure = {
+            class = "vgpr",
+            overlaps = [
+              {base = 0 : i64, class = "vgpr", end = 2 : i64, set = 0 : i64,
+               start = 0 : i64, width = 1 : i64},
+              {base = 0 : i64, class = "vgpr", end = 3 : i64, set = 1 : i64,
+               start = 2 : i64, width = 1 : i64}
+            ],
+            position = 3 : i64,
+            reason = "pressure",
+            set = 1 : i64
+          },
+          stage = "linear-scan-failure",
+          values = [
+            {class = "vgpr", end = 2 : i64, fixed = 0 : i64, id = 0 : i64,
+             kind = "op_result", number = 0 : i64, offset = 0 : i64,
+             path = [0, 0, 0], set = 0 : i64, start = 0 : i64,
+             width = 1 : i64},
+            {class = "vgpr", end = 3 : i64, id = 1 : i64,
+             kind = "op_result", number = 0 : i64, offset = 0 : i64,
+             path = [0, 0, 2], set = 1 : i64, start = 2 : i64,
+             width = 1 : i64}
+          ]
+        }} {
+      %addr = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1, 0>
+      %dep = waveamdmachine.token : !waveamdmachine.mem.token
+      %load, %tok = waveamdmachine.ds_load_b32 %addr after %dep
+          : (!waveamdmachine.reg<vgpr, 1, 0>, !waveamdmachine.mem.token)
+            -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+      return %load : !waveamdmachine.reg<vgpr, 1>
+    }
+
     // DIRECT-LABEL: func.func @agpr_relief_rebanks_tuple_from_elements_replacements(
     // DIRECT: [[ZERO:%.*]] = waveamdmachine.imm 0
     // DIRECT: [[AG0:%.*]] = waveamdmachine.v_accvgpr_write_b32_tuple [[ZERO]]
@@ -328,6 +427,60 @@ module attributes {transform.with_named_sequence} {
       return %agpr, %vgpr
           : !waveamdmachine.reg<agpr, 120>,
             !waveamdmachine.reg<vgpr, 120>
+    }
+  }
+
+  module @gfx908_payload_module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx908"} {
+    // DIRECT-LABEL: func.func @agpr_relief_direct_ds_no_direct_on_gfx908()
+    // DIRECT: [[LOAD:%.*]], {{%.*}} = waveamdmachine.ds_load_b32
+    // DIRECT-SAME: -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+    // DIRECT: [[AG:%.*]] = waveamdmachine.v_accvgpr_write_b32_tuple [[LOAD]]
+    // DIRECT: [[READ:%.*]] = waveamdmachine.v_accvgpr_read_b32_tuple [[AG]]
+    // DIRECT: waveamdmachine.ds_store_b32 {{%.*}}, [[READ]]
+    // DIRECT-SAME: !waveamdmachine.reg<vgpr, 1>
+    func.func @agpr_relief_direct_ds_no_direct_on_gfx908()
+        attributes {waveamdmachine.vgpr_count_max = 1 : i64,
+                    waveamdmachine.agpr_count_max = 4 : i64,
+                    waveamdmachine.regalloc_transform_state = {
+          alias_sets = [
+            {class = "vgpr", id = 0 : i64,
+             members = [{value = 0 : i64}], width = 1 : i64},
+            {class = "vgpr", id = 1 : i64,
+             members = [{value = 1 : i64}], width = 1 : i64}
+          ],
+          failure = {
+            class = "vgpr",
+            overlaps = [
+              {base = 0 : i64, class = "vgpr", end = 3 : i64, set = 0 : i64,
+               start = 0 : i64, width = 1 : i64},
+              {base = 0 : i64, class = "vgpr", end = 3 : i64, set = 1 : i64,
+               start = 2 : i64, width = 1 : i64}
+            ],
+            position = 3 : i64,
+            reason = "pressure",
+            set = 1 : i64
+          },
+          stage = "linear-scan-failure",
+          values = [
+            {class = "vgpr", end = 3 : i64, fixed = 0 : i64, id = 0 : i64,
+             kind = "op_result", number = 0 : i64, offset = 0 : i64,
+             path = [0, 0, 0], set = 0 : i64, start = 0 : i64,
+             width = 1 : i64},
+            {class = "vgpr", end = 3 : i64, id = 1 : i64,
+             kind = "op_result", number = 0 : i64, offset = 0 : i64,
+             path = [0, 0, 2], set = 1 : i64, start = 2 : i64,
+             width = 1 : i64}
+          ]
+        }} {
+      %addr = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1, 0>
+      %dep = waveamdmachine.token : !waveamdmachine.mem.token
+      %load, %tok = waveamdmachine.ds_load_b32 %addr after %dep
+          : (!waveamdmachine.reg<vgpr, 1, 0>, !waveamdmachine.mem.token)
+            -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+      %store = waveamdmachine.ds_store_b32 %addr, %load after %tok
+          : (!waveamdmachine.reg<vgpr, 1, 0>, !waveamdmachine.reg<vgpr, 1>,
+             !waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+      return
     }
   }
 }

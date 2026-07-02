@@ -43,6 +43,11 @@ struct AGPRReliefCandidate {
   unsigned promotedDwords = 0;
 };
 
+struct AGPRReliefSelection {
+  AGPRReliefCandidate candidate;
+  llvm::AMDGPU::IsaVersion isa;
+};
+
 struct AGPRReliefSetGroup {
   SmallVector<const wave::RegAllocTransformAliasSet *, 4> sets;
   const wave::RegAllocTransformAliasSet *primary = nullptr;
@@ -295,7 +300,27 @@ static bool isMFMAAccumulatorUse(waveamdmachine::MMAOpInterface mfma,
   return &use == &mfma.getAccMutable();
 }
 
-static bool canDefineAGPR(Value value, const DenseSet<Value> &groupValues) {
+static bool
+canDefineAGPRThroughInterface(Value value,
+                              const llvm::AMDGPU::IsaVersion &isaVersion) {
+  auto result = dyn_cast<OpResult>(value);
+  if (!result)
+    return false;
+  auto banking =
+      dyn_cast<waveamdmachine::AGPRBankingOpInterface>(result.getOwner());
+  return banking && banking.isResultAGPRValid(isaVersion, result);
+}
+
+static bool
+canConsumeAGPRThroughInterface(OpOperand &use,
+                               const llvm::AMDGPU::IsaVersion &isaVersion) {
+  auto banking =
+      dyn_cast<waveamdmachine::AGPRBankingOpInterface>(use.getOwner());
+  return banking && banking.isOperandAGPRValid(isaVersion, use);
+}
+
+static bool canDefineAGPR(Value value, const DenseSet<Value> &groupValues,
+                          const llvm::AMDGPU::IsaVersion &isaVersion) {
   if (auto arg = dyn_cast<BlockArgument>(value))
     return isa_and_nonnull<waveamdmachine::UniformLoopOp>(
         arg.getOwner()->getParentOp());
@@ -303,6 +328,8 @@ static bool canDefineAGPR(Value value, const DenseSet<Value> &groupValues) {
   if (!def)
     return false;
   if (isa<waveamdmachine::UninitOp, waveamdmachine::UniformLoopOp>(def))
+    return true;
+  if (canDefineAGPRThroughInterface(value, isaVersion))
     return true;
   auto mma = dyn_cast<waveamdmachine::MMAOpInterface>(def);
   if (!mma)
@@ -365,8 +392,9 @@ static void rebankTupleAliasResults(Operation *op,
     setRegAllocTransformClass(result, regClass);
 }
 
-static bool canConsumeAGPRAfterRelief(OpOperand &use,
-                                      const DenseSet<Value> &groupValues) {
+static bool
+canConsumeAGPRAfterRelief(OpOperand &use, const DenseSet<Value> &groupValues,
+                          const llvm::AMDGPU::IsaVersion &isaVersion) {
   Operation *user = use.getOwner();
   if (waveamdmachine::MMAOpInterface mfma =
           dyn_cast<waveamdmachine::MMAOpInterface>(user)) {
@@ -381,6 +409,8 @@ static bool canConsumeAGPRAfterRelief(OpOperand &use,
   if (isStructuralLoopCarryUse(user))
     return true;
   if (canRebankTupleAliasOp(user, groupValues))
+    return true;
+  if (canConsumeAGPRThroughInterface(use, isaVersion))
     return true;
   auto read = dyn_cast<waveamdmachine::VAccvgprReadB32TupleOp>(user);
   return read && use.getOperandNumber() == 0;
@@ -428,17 +458,18 @@ struct AGPRReliefBridgeCost {
 
 static AGPRReliefBridgeCost
 getAGPRReliefBridgeCost(ArrayRef<ResolvedRegAllocValue> values,
-                        const DenseSet<Value> &groupValues) {
+                        const DenseSet<Value> &groupValues,
+                        const llvm::AMDGPU::IsaVersion &isaVersion) {
   AGPRReliefBridgeCost cost;
   for (const ResolvedRegAllocValue &value : values) {
     Operation *def = value.first.getDefiningOp();
-    if (def && !canDefineAGPR(value.first, groupValues) &&
+    if (def && !canDefineAGPR(value.first, groupValues, isaVersion) &&
         !canRebankTupleAliasOp(def, groupValues))
       cost.add(def);
     for (OpOperand &use : value.first.getUses()) {
       if (isa<waveamdmachine::VAccvgprWriteB32TupleOp>(use.getOwner()))
         continue;
-      if (!canConsumeAGPRAfterRelief(use, groupValues))
+      if (!canConsumeAGPRAfterRelief(use, groupValues, isaVersion))
         cost.add(use.getOwner());
     }
   }
@@ -486,12 +517,13 @@ static AGPRReliefScore
 getAGPRReliefScore(const AGPRReliefSetGroup &group,
                    ArrayRef<wave::RegAllocTransformValue> values,
                    ArrayRef<ResolvedRegAllocValue> resolvedValues,
-                   unsigned position) {
+                   unsigned position,
+                   const llvm::AMDGPU::IsaVersion &isaVersion) {
   DenseSet<Value> groupValues;
   for (const ResolvedRegAllocValue &value : resolvedValues)
     groupValues.insert(value.first);
   AGPRReliefBridgeCost bridgeCost =
-      getAGPRReliefBridgeCost(resolvedValues, groupValues);
+      getAGPRReliefBridgeCost(resolvedValues, groupValues, isaVersion);
   unsigned liveDwords = 0;
   unsigned end = 0;
   for (const wave::RegAllocTransformAliasSet *set : group.sets) {
@@ -660,7 +692,8 @@ buildAGPRReliefCandidate(func::FuncOp func, unsigned setId,
                          ArrayRef<wave::RegAllocTransformAliasSet> sets,
                          ArrayRef<wave::RegAllocTransformValue> values,
                          ArrayRef<ResolvedRegAllocValue> resolvedValues,
-                         const DenseMap<Value, unsigned> &valueIndex) {
+                         const DenseMap<Value, unsigned> &valueIndex,
+                         const llvm::AMDGPU::IsaVersion &isaVersion) {
   const wave::RegAllocTransformAliasSet *set = setIndex.setsById.lookup(setId);
   if (!set)
     return std::optional<AGPRReliefCandidate>();
@@ -693,8 +726,8 @@ buildAGPRReliefCandidate(func::FuncOp func, unsigned setId,
   if (!*respectsFamilyBudget)
     return std::optional<AGPRReliefCandidate>();
 
-  AGPRReliefScore score =
-      getAGPRReliefScore(group, values, groupValues, failureRecord.position);
+  AGPRReliefScore score = getAGPRReliefScore(
+      group, values, groupValues, failureRecord.position, isaVersion);
   AGPRReliefCandidate candidate;
   candidate.set = set;
   candidate.values = std::move(groupValues);
@@ -709,12 +742,14 @@ static FailureOr<std::optional<AGPRReliefCandidate>> selectAGPRReliefCandidate(
     ArrayRef<wave::RegAllocTransformAliasSet> sets,
     ArrayRef<wave::RegAllocTransformValue> values,
     ArrayRef<ResolvedRegAllocValue> resolvedValues,
-    const DenseMap<Value, unsigned> &valueIndex) {
+    const DenseMap<Value, unsigned> &valueIndex,
+    const llvm::AMDGPU::IsaVersion &isaVersion) {
   std::optional<AGPRReliefCandidate> best;
   for (unsigned setId : collectVGPRReliefCandidateIds(failureRecord)) {
     FailureOr<std::optional<AGPRReliefCandidate>> candidate =
         buildAGPRReliefCandidate(func, setId, failureRecord, setIndex, fitState,
-                                 sets, values, resolvedValues, valueIndex);
+                                 sets, values, resolvedValues, valueIndex,
+                                 isaVersion);
     if (failed(candidate))
       return failure();
     if (!*candidate)
@@ -772,9 +807,11 @@ static Value createAGPRReliefRead(OpBuilder &builder, Value agpr,
   return read.getResult();
 }
 
-static Value getAGPRReliefReplacement(OpBuilder &builder, Value value,
-                                      const DenseSet<Value> &groupValues,
-                                      DenseMap<Value, Value> &replacements) {
+static Value
+getAGPRReliefReplacement(OpBuilder &builder, Value value,
+                         const DenseSet<Value> &groupValues,
+                         DenseMap<Value, Value> &replacements,
+                         const llvm::AMDGPU::IsaVersion &isaVersion) {
   if (Value replacement = replacements.lookup(value))
     return replacement;
   if (hasRegAllocTransformClass(value, waveamdmachine::RegClass::AGPR)) {
@@ -789,7 +826,7 @@ static Value getAGPRReliefReplacement(OpBuilder &builder, Value value,
       replacements[value] = value;
       return value;
     }
-  if (canDefineAGPR(value, groupValues)) {
+  if (canDefineAGPR(value, groupValues, isaVersion)) {
     setRegAllocTransformClass(value, waveamdmachine::RegClass::AGPR);
     replacements[value] = value;
     return value;
@@ -833,7 +870,8 @@ static bool rewriteAGPRReliefMFMAUse(OpOperand &use, Value agpr,
 
 static void rewriteAGPRReliefUse(OpBuilder &builder, OpOperand &use, Value agpr,
                                  const DenseSet<Value> &groupValues,
-                                 const DenseMap<Value, Value> &replacements) {
+                                 const DenseMap<Value, Value> &replacements,
+                                 const llvm::AMDGPU::IsaVersion &isaVersion) {
   if (rewriteAGPRReliefAliasUse(use, agpr, groupValues, replacements))
     return;
   if (rewriteAGPRReliefMFMAUse(use, agpr, groupValues))
@@ -842,47 +880,56 @@ static void rewriteAGPRReliefUse(OpBuilder &builder, OpOperand &use, Value agpr,
     use.set(agpr);
     return;
   }
+  if (canConsumeAGPRThroughInterface(use, isaVersion)) {
+    use.set(agpr);
+    return;
+  }
   use.set(createAGPRReliefRead(builder, agpr, use));
 }
 
-static void materializeAGPRReliefValue(OpBuilder &builder, Value value,
-                                       const DenseSet<Value> &groupValues,
-                                       DenseMap<Value, Value> &replacements) {
-  Value agpr =
-      getAGPRReliefReplacement(builder, value, groupValues, replacements);
+static void
+materializeAGPRReliefValue(OpBuilder &builder, Value value,
+                           const DenseSet<Value> &groupValues,
+                           DenseMap<Value, Value> &replacements,
+                           const llvm::AMDGPU::IsaVersion &isaVersion) {
+  Value agpr = getAGPRReliefReplacement(builder, value, groupValues,
+                                        replacements, isaVersion);
   SmallVector<OpOperand *> uses;
   for (OpOperand &use : value.getUses())
     if (agpr == value || use.getOwner() != agpr.getDefiningOp())
       uses.push_back(&use);
   for (OpOperand *use : uses)
     if (use->get() == value)
-      rewriteAGPRReliefUse(builder, *use, agpr, groupValues, replacements);
+      rewriteAGPRReliefUse(builder, *use, agpr, groupValues, replacements,
+                           isaVersion);
 }
 
 static void materializeAGPRRelief(OpBuilder &builder,
-                                  const AGPRReliefCandidate &candidate) {
+                                  const AGPRReliefCandidate &candidate,
+                                  const llvm::AMDGPU::IsaVersion &isaVersion) {
   DenseSet<Value> groupValues;
   DenseMap<Value, Value> replacements;
   for (const ResolvedRegAllocValue &value : candidate.values)
     groupValues.insert(value.first);
   for (const ResolvedRegAllocValue &value : candidate.values)
-    materializeAGPRReliefValue(builder, value.first, groupValues, replacements);
+    materializeAGPRReliefValue(builder, value.first, groupValues, replacements,
+                               isaVersion);
 }
 
 static unsigned countAGPRReliefDwords(const AGPRReliefCandidate &candidate) {
   return candidate.promotedDwords;
 }
 
-static FailureOr<std::optional<AGPRReliefCandidate>>
+static FailureOr<std::optional<AGPRReliefSelection>>
 selectAGPRReliefCandidateFromFunc(
     func::FuncOp func, const RegAllocTransformFailure &failureRecord) {
-  FailureOr<llvm::AMDGPU::IsaVersion> isa =
+  FailureOr<llvm::AMDGPU::IsaVersion> isaVersion =
       waveamdmachine::getAMDGPUTargetIsaVersion(
           func, "regalloc transform AGPR relief");
-  if (failed(isa))
+  if (failed(isaVersion))
     return failure();
-  if (!waveamdmachine::supportsAGPRs(*isa))
-    return std::optional<AGPRReliefCandidate>();
+  if (!waveamdmachine::supportsAGPRs(*isaVersion))
+    return std::optional<AGPRReliefSelection>();
 
   DictionaryAttr state = func->getAttrOfType<DictionaryAttr>(
       wave::getRegAllocTransformStateAttrName());
@@ -905,8 +952,16 @@ selectAGPRReliefCandidateFromFunc(
     return failure();
   DenseMap<Value, unsigned> valueIndex =
       buildAGPRReliefValueIndex(*resolvedValues);
-  return selectAGPRReliefCandidate(func, failureRecord, *setIndex, fitState,
-                                   *sets, *values, *resolvedValues, valueIndex);
+  FailureOr<std::optional<AGPRReliefCandidate>> candidate =
+      selectAGPRReliefCandidate(func, failureRecord, *setIndex, fitState, *sets,
+                                *values, *resolvedValues, valueIndex,
+                                *isaVersion);
+  if (failed(candidate))
+    return failure();
+  if (!*candidate)
+    return std::optional<AGPRReliefSelection>();
+  return std::optional<AGPRReliefSelection>(
+      AGPRReliefSelection{std::move(**candidate), *isaVersion});
 }
 
 static FailureOr<bool> shouldSkipAGPRRelief(func::FuncOp func) {
@@ -939,17 +994,18 @@ static LogicalResult runRegAllocAGPRRelief(func::FuncOp func) {
   if ((*failureRecord)->className == "vgpr_agpr")
     return success();
 
-  FailureOr<std::optional<AGPRReliefCandidate>> candidate =
+  FailureOr<std::optional<AGPRReliefSelection>> selection =
       selectAGPRReliefCandidateFromFunc(func, **failureRecord);
-  if (failed(candidate))
+  if (failed(selection))
     return failure();
-  if (!*candidate)
+  if (!*selection)
     return success();
 
   OpBuilder builder(func.getContext());
-  materializeAGPRRelief(builder, **candidate);
+  const AGPRReliefCandidate &candidate = (*selection)->candidate;
+  materializeAGPRRelief(builder, candidate, (*selection)->isa);
   if (failed(wave::addRegAllocTransformProviderMetadata(
-          func, builder, "agpr", countAGPRReliefDwords(**candidate))))
+          func, builder, "agpr", countAGPRReliefDwords(candidate))))
     return failure();
   func->removeAttr(wave::getRegAllocTransformAssignmentsAttrName());
   func->removeAttr(wave::getRegAllocTransformStateAttrName());

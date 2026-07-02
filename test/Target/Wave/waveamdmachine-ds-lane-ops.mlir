@@ -43,4 +43,27 @@ func.func @ds_lane_ops() attributes {wave.kernel} {
   return
 }
 
+// ROUNDTRIP-LABEL: func.func @ds_agpr_load_store
+// ROUNDTRIP: waveamdmachine.ds_load_b128
+// ROUNDTRIP-SAME: -> (!waveamdmachine.reg<agpr, 4, 0>, !waveamdmachine.mem.token)
+// ROUNDTRIP: waveamdmachine.ds_store_b128
+// ROUNDTRIP-SAME: !waveamdmachine.reg<agpr, 4, 0>
+
+// ASM-LABEL: ds_agpr_load_store:
+// ASM: ds_read_b128 a[0:3], v0
+// ASM: ds_write_b128 v0, a[0:3] offset:16
+func.func @ds_agpr_load_store() attributes {wave.kernel} {
+  %addr = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1, 0>
+  %token = waveamdmachine.token : !waveamdmachine.mem.token
+  %loaded, %tok0 = waveamdmachine.ds_load_b128 %addr after %token
+      : (!waveamdmachine.reg<vgpr, 1, 0>, !waveamdmachine.mem.token)
+        -> (!waveamdmachine.reg<agpr, 4, 0>, !waveamdmachine.mem.token)
+  %tok1 = waveamdmachine.ds_store_b128 %addr, %loaded after %tok0 offset 16
+      : (!waveamdmachine.reg<vgpr, 1, 0>,
+         !waveamdmachine.reg<agpr, 4, 0>, !waveamdmachine.mem.token)
+        -> !waveamdmachine.mem.token
+  waveamdmachine.s_endpgm
+  return
+}
+
 }

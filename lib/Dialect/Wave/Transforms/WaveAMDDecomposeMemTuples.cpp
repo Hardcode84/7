@@ -36,14 +36,18 @@ static waveamdmachine::RegType vgprNType(MLIRContext *ctx, unsigned width) {
 }
 
 static waveamdmachine::RegType getChunkType(MLIRContext *ctx, Type tupleType,
+                                            waveamdmachine::RegClass regClass,
                                             unsigned width, unsigned offset) {
   int64_t index = -1;
   waveamdmachine::RegType regType =
       dyn_cast<waveamdmachine::RegType>(tupleType);
   if (regType && regType.getIndex() >= 0)
     index = regType.getIndex() + offset;
-  return waveamdmachine::RegType::get(ctx, waveamdmachine::RegClass::VGPR,
-                                      width, index);
+  return waveamdmachine::RegType::get(ctx, regClass, width, index);
+}
+
+static waveamdmachine::RegClass getRegClass(Type type) {
+  return cast<waveamdmachine::RegType>(type).getRegClass();
 }
 
 static waveamdmachine::MemTokenType memTokenType(MLIRContext *ctx) {
@@ -187,22 +191,22 @@ static Operation *createBufferStoreChunk(OpBuilder &builder, Location loc,
 }
 
 static Operation *createDsLoadChunk(OpBuilder &builder, Location loc,
-                                    unsigned width, Type tokenType, Value addr,
-                                    Value dep, int64_t instOffset) {
-  Type rt = vgprNType(builder.getContext(), width);
+                                    unsigned width, Type resultType,
+                                    Type tokenType, Value addr, Value dep,
+                                    int64_t instOffset) {
   switch (width) {
   case 1:
-    return waveamdmachine::DsLoadB32Op::create(builder, loc, rt, tokenType,
-                                               addr, dep, instOffset);
+    return waveamdmachine::DsLoadB32Op::create(
+        builder, loc, resultType, tokenType, addr, dep, instOffset);
   case 2:
-    return waveamdmachine::DsLoadB64Op::create(builder, loc, rt, tokenType,
-                                               addr, dep, instOffset);
+    return waveamdmachine::DsLoadB64Op::create(
+        builder, loc, resultType, tokenType, addr, dep, instOffset);
   case 3:
-    return waveamdmachine::DsLoadB96Op::create(builder, loc, rt, tokenType,
-                                               addr, dep, instOffset);
+    return waveamdmachine::DsLoadB96Op::create(
+        builder, loc, resultType, tokenType, addr, dep, instOffset);
   case 4:
-    return waveamdmachine::DsLoadB128Op::create(builder, loc, rt, tokenType,
-                                                addr, dep, instOffset);
+    return waveamdmachine::DsLoadB128Op::create(
+        builder, loc, resultType, tokenType, addr, dep, instOffset);
   }
   llvm_unreachable("unsupported ds load chunk width");
 }
@@ -282,14 +286,15 @@ static void finalizeStoreDecomposition(Operation *op, Value tokenResult,
 // chunk, widened to the chunk's width) so the per-chunk stores can
 // consume them.
 static SmallVector<Value> splitTupleByPlan(OpBuilder &builder, Operation *op,
-                                           Value tuple,
-                                           ArrayRef<unsigned> plan) {
+                                           Value tuple, ArrayRef<unsigned> plan,
+                                           waveamdmachine::RegClass regClass) {
   MLIRContext *ctx = op->getContext();
   SmallVector<Type> elementTypes;
   elementTypes.reserve(plan.size());
   unsigned offset = 0;
   for (unsigned w : plan) {
-    elementTypes.push_back(getChunkType(ctx, tuple.getType(), w, offset));
+    elementTypes.push_back(
+        getChunkType(ctx, tuple.getType(), regClass, w, offset));
     offset += w;
   }
   if (elementTypes.size() == 1 && elementTypes.front() == tuple.getType())
@@ -384,13 +389,18 @@ static LogicalResult decomposeDsLoad(waveamdmachine::DsLoadTupleB32Op op,
   elements.reserve(plan.size());
   tokens.reserve(plan.size());
   int64_t cumByteOffset = 0;
+  unsigned cumDwordOffset = 0;
+  waveamdmachine::RegClass resultClass = getRegClass(op.getResult().getType());
   for (unsigned w : plan) {
+    Type chunkType = getChunkType(op.getContext(), op.getResult().getType(),
+                                  resultClass, w, cumDwordOffset);
     Operation *chunk =
-        createDsLoadChunk(builder, op.getLoc(), w, tokenType, op.getAddr(), dep,
-                          baseOffset + cumByteOffset);
+        createDsLoadChunk(builder, op.getLoc(), w, chunkType, tokenType,
+                          op.getAddr(), dep, baseOffset + cumByteOffset);
     elements.push_back(chunk->getResult(0));
     tokens.push_back(chunk->getResult(1));
     cumByteOffset += static_cast<int64_t>(w) * 4;
+    cumDwordOffset += w;
   }
   Value tokenResult = op.getToken();
   finalizeLoadDecomposition(op, op.getResult(), tokenResult, elements, tokens);
@@ -410,8 +420,8 @@ decomposeScratchLoad(waveamdmachine::ScratchLoadTupleB32Op op) {
   elements.reserve(width);
   tokens.reserve(width);
   for (unsigned index : llvm::seq(width)) {
-    Type chunkType =
-        getChunkType(op.getContext(), op.getResult().getType(), 1, index);
+    Type chunkType = getChunkType(op.getContext(), op.getResult().getType(),
+                                  waveamdmachine::RegClass::VGPR, 1, index);
     Operation *chunk = createScratchLoadChunk(
         builder, op.getLoc(), chunkType, tokenType, op.getVaddr(),
         op.getSaddr(), dep, baseInstOffset + static_cast<int64_t>(index) * 4);
@@ -435,8 +445,8 @@ decomposeGlobalStore(waveamdmachine::GlobalStoreTupleB32Op op,
         waveamdmachine::GlobalStoreB96Op, waveamdmachine::GlobalStoreB128Op>(
         w, isa);
   });
-  SmallVector<Value> elements =
-      splitTupleByPlan(builder, op, op.getValue(), plan);
+  SmallVector<Value> elements = splitTupleByPlan(
+      builder, op, op.getValue(), plan, waveamdmachine::RegClass::VGPR);
   Type tokenType = memTokenType(op.getContext());
   int64_t baseInstOffset = op.getInstOffset();
   Value dep = op.getDependency();
@@ -467,8 +477,8 @@ decomposeBufferStore(waveamdmachine::BufferStoreTupleB32Op op,
         waveamdmachine::BufferStoreB96Op, waveamdmachine::BufferStoreB128Op>(
         w, isa);
   });
-  SmallVector<Value> elements =
-      splitTupleByPlan(builder, op, op.getValue(), plan);
+  SmallVector<Value> elements = splitTupleByPlan(
+      builder, op, op.getValue(), plan, waveamdmachine::RegClass::VGPR);
   Type tokenType = memTokenType(op.getContext());
   int64_t baseInstOffset = op.getInstOffset();
   Value dep = op.getDependency();
@@ -498,8 +508,8 @@ static LogicalResult decomposeDsStore(waveamdmachine::DsStoreTupleB32Op op,
         waveamdmachine::DsStoreB32Op, waveamdmachine::DsStoreB64Op,
         waveamdmachine::DsStoreB96Op, waveamdmachine::DsStoreB128Op>(w, isa);
   });
-  SmallVector<Value> elements =
-      splitTupleByPlan(builder, op, op.getValue(), plan);
+  SmallVector<Value> elements = splitTupleByPlan(
+      builder, op, op.getValue(), plan, getRegClass(op.getValue().getType()));
   Type tokenType = memTokenType(op.getContext());
   int64_t baseOffset = op.getOffset();
   Value dep = op.getDependency();
@@ -524,8 +534,8 @@ decomposeScratchStore(waveamdmachine::ScratchStoreTupleB32Op op) {
   unsigned width =
       cast<waveamdmachine::RegType>(op.getValue().getType()).getWidth();
   SmallVector<unsigned> plan(width, 1);
-  SmallVector<Value> elements =
-      splitTupleByPlan(builder, op, op.getValue(), plan);
+  SmallVector<Value> elements = splitTupleByPlan(
+      builder, op, op.getValue(), plan, waveamdmachine::RegClass::VGPR);
   Type tokenType = memTokenType(op.getContext());
   int64_t baseInstOffset = op.getInstOffset();
   Value dep = op.getDependency();

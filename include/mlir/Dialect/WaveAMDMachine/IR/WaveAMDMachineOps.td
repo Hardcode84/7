@@ -37,6 +37,9 @@ defvar WaveAMDMachine_AGPRTarget =
     "isa.Major == 9 && ((isa.Minor == 0 && " #
     "(isa.Stepping == 8 || isa.Stepping == 10)) || " #
     "isa.Minor == 4 || (isa.Minor == 5 && isa.Stepping == 0))";
+defvar WaveAMDMachine_DsAGPRTarget =
+    "isa.Major == 9 && ((isa.Minor == 0 && isa.Stepping == 10) || " #
+    "isa.Minor == 4 || (isa.Minor == 5 && isa.Stepping == 0))";
 defvar WaveAMDMachine_Gfx8To13 =
     "isa.Major >= 8 && isa.Major <= 13";
 defvar WaveAMDMachine_DefaultKilledOperandReuse =
@@ -68,6 +71,7 @@ class WaveAMDMachine_Op<string mnemonic, list<Trait> traits = []> :
     Op<WaveAMDMachine_Dialect, mnemonic,
        !listconcat(traits, [WaveAMDMachine_WaitcntInfoOpInterface,
                             WaveAMDMachine_OperandLegalityOpInterface,
+                            WaveAMDMachine_AGPRBankingOpInterface,
                             WaveAMDMachine_KilledOperandReuseOpInterface])> {
   string archPredicate = "true";
   string waitcntCounter = "None";
@@ -77,6 +81,9 @@ class WaveAMDMachine_Op<string mnemonic, list<Trait> traits = []> :
   string operandConstantBusMask = "0";
   string operandAnyVGPRMask = "0";
   string operandVGPRValueMask = "0";
+  string agprOperandMask = "0";
+  string agprResultMask = "0";
+  string agprPredicate = "true";
   string killedOperandReusePredicate =
       WaveAMDMachine_DefaultKilledOperandReuse;
   string requiredKilledOperandReusePredicate = "false";
@@ -98,6 +105,30 @@ class WaveAMDMachine_Op<string mnemonic, list<Trait> traits = []> :
       return {static_cast<uint32_t>(}] # operandConstantBusMask # [{),
               static_cast<uint32_t>(}] # operandAnyVGPRMask # [{),
               static_cast<uint32_t>(}] # operandVGPRValueMask # [{)};
+    }
+
+    bool isOperandAGPRValid(const ::llvm::AMDGPU::IsaVersion &isa,
+                            ::mlir::OpOperand &operand) {
+      (void)isa;
+      if (!(}] # agprPredicate # [{))
+        return false;
+      unsigned operandNumber = operand.getOperandNumber();
+      if (operandNumber >= 64)
+        return false;
+      return (static_cast<uint64_t>(}] # agprOperandMask # [{) &
+              (uint64_t{1} << operandNumber)) != 0;
+    }
+
+    bool isResultAGPRValid(const ::llvm::AMDGPU::IsaVersion &isa,
+                           ::mlir::OpResult result) {
+      (void)isa;
+      if (!(}] # agprPredicate # [{))
+        return false;
+      unsigned resultNumber = result.getResultNumber();
+      if (resultNumber >= 64)
+        return false;
+      return (static_cast<uint64_t>(}] # agprResultMask # [{) &
+              (uint64_t{1} << resultNumber)) != 0;
     }
 
     bool canReuseKilledOperandForResult(
@@ -139,6 +170,14 @@ class WaveAMDMachine_OperandLegality<string constantBusMask = "0",
   string operandConstantBusMask = constantBusMask;
   string operandAnyVGPRMask = anyVGPRMask;
   string operandVGPRValueMask = vgprValueMask;
+}
+
+class WaveAMDMachine_AGPRBanking<string operandMask = "0",
+                                 string resultMask = "0",
+                                 string predicate = "true"> {
+  string agprOperandMask = operandMask;
+  string agprResultMask = resultMask;
+  string agprPredicate = predicate;
 }
 
 class WaveAMDMachine_KilledOperandReuse<string predicate> {
@@ -265,6 +304,34 @@ def WaveAMDMachine_AVGPR
                  "(::llvm::cast<::mlir::waveamdmachine::RegType>($_self).getRegClass() == ::mlir::waveamdmachine::RegClass::VGPR || "
                  "::llvm::cast<::mlir::waveamdmachine::RegType>($_self).getRegClass() == ::mlir::waveamdmachine::RegClass::AGPR)">,
            "WaveAMDMachine VGPR or AGPR register">;
+
+def WaveAMDMachine_AVGPR1
+    : Type<CPred<"::llvm::isa<::mlir::waveamdmachine::RegType>($_self) && "
+                 "(::llvm::cast<::mlir::waveamdmachine::RegType>($_self).getRegClass() == ::mlir::waveamdmachine::RegClass::VGPR || "
+                 "::llvm::cast<::mlir::waveamdmachine::RegType>($_self).getRegClass() == ::mlir::waveamdmachine::RegClass::AGPR) && "
+                 "::llvm::cast<::mlir::waveamdmachine::RegType>($_self).getWidth() == 1">,
+           "WaveAMDMachine scalar VGPR or AGPR register">;
+
+def WaveAMDMachine_AVGPR2
+    : Type<CPred<"::llvm::isa<::mlir::waveamdmachine::RegType>($_self) && "
+                 "(::llvm::cast<::mlir::waveamdmachine::RegType>($_self).getRegClass() == ::mlir::waveamdmachine::RegClass::VGPR || "
+                 "::llvm::cast<::mlir::waveamdmachine::RegType>($_self).getRegClass() == ::mlir::waveamdmachine::RegClass::AGPR) && "
+                 "::llvm::cast<::mlir::waveamdmachine::RegType>($_self).getWidth() == 2">,
+           "WaveAMDMachine VGPR or AGPR pair register">;
+
+def WaveAMDMachine_AVGPR3
+    : Type<CPred<"::llvm::isa<::mlir::waveamdmachine::RegType>($_self) && "
+                 "(::llvm::cast<::mlir::waveamdmachine::RegType>($_self).getRegClass() == ::mlir::waveamdmachine::RegClass::VGPR || "
+                 "::llvm::cast<::mlir::waveamdmachine::RegType>($_self).getRegClass() == ::mlir::waveamdmachine::RegClass::AGPR) && "
+                 "::llvm::cast<::mlir::waveamdmachine::RegType>($_self).getWidth() == 3">,
+           "WaveAMDMachine VGPR or AGPR triple register">;
+
+def WaveAMDMachine_AVGPR4
+    : Type<CPred<"::llvm::isa<::mlir::waveamdmachine::RegType>($_self) && "
+                 "(::llvm::cast<::mlir::waveamdmachine::RegType>($_self).getRegClass() == ::mlir::waveamdmachine::RegClass::VGPR || "
+                 "::llvm::cast<::mlir::waveamdmachine::RegType>($_self).getRegClass() == ::mlir::waveamdmachine::RegClass::AGPR) && "
+                 "::llvm::cast<::mlir::waveamdmachine::RegType>($_self).getWidth() == 4">,
+           "WaveAMDMachine VGPR or AGPR quad register">;
 
 def WaveAMDMachine_VGPROrImm
     : Type<CPred<"(::llvm::isa<::mlir::waveamdmachine::RegType>($_self) && "
@@ -2269,15 +2336,16 @@ def WaveAMDMachine_ScratchStoreTupleB32Op
 // hardware instruction. Both kinds drain through `lgkmcnt`.
 def WaveAMDMachine_DsLoadU8Op
     : WaveAMDMachine_DsMemoryOp<"ds_load_u8", [WaveAMDMachine_LDSLoad]>,
-      WaveAMDMachine_LDSInfo<"1"> {
+      WaveAMDMachine_LDSInfo<"1">,
+      WaveAMDMachine_AGPRBanking<"0", "0x1", WaveAMDMachine_DsAGPRTarget> {
   let summary = "LDS unsigned 8-bit load";
   let description = [{
-    Zero-extends the loaded byte into the result VGPR.
+    Zero-extends the loaded byte into the result register.
   }];
   let arguments = (ins WaveAMDMachine_VGPR1:$addr,
                        Optional<WaveAMDMachine_MemToken>:$dependency,
                        DefaultValuedAttr<I64Attr, "0">:$offset);
-  let results = (outs WaveAMDMachine_VGPR1:$result,
+  let results = (outs WaveAMDMachine_AVGPR1:$result,
                       Optional<WaveAMDMachine_MemToken>:$token);
   let assemblyFormat = [{
     $addr (`after` $dependency^)? (`offset` $offset^)?
@@ -2287,15 +2355,16 @@ def WaveAMDMachine_DsLoadU8Op
 
 def WaveAMDMachine_DsLoadI8Op
     : WaveAMDMachine_DsMemoryOp<"ds_load_i8", [WaveAMDMachine_LDSLoad]>,
-      WaveAMDMachine_LDSInfo<"1"> {
+      WaveAMDMachine_LDSInfo<"1">,
+      WaveAMDMachine_AGPRBanking<"0", "0x1", WaveAMDMachine_DsAGPRTarget> {
   let summary = "LDS signed 8-bit load";
   let description = [{
-    Sign-extends the loaded byte into the result VGPR.
+    Sign-extends the loaded byte into the result register.
   }];
   let arguments = (ins WaveAMDMachine_VGPR1:$addr,
                        Optional<WaveAMDMachine_MemToken>:$dependency,
                        DefaultValuedAttr<I64Attr, "0">:$offset);
-  let results = (outs WaveAMDMachine_VGPR1:$result,
+  let results = (outs WaveAMDMachine_AVGPR1:$result,
                       Optional<WaveAMDMachine_MemToken>:$token);
   let assemblyFormat = [{
     $addr (`after` $dependency^)? (`offset` $offset^)?
@@ -2305,12 +2374,13 @@ def WaveAMDMachine_DsLoadI8Op
 
 def WaveAMDMachine_DsLoadB16Op
     : WaveAMDMachine_DsMemoryOp<"ds_load_b16", [WaveAMDMachine_LDSLoad]>,
-      WaveAMDMachine_LDSInfo<"1"> {
+      WaveAMDMachine_LDSInfo<"1">,
+      WaveAMDMachine_AGPRBanking<"0", "0x1", WaveAMDMachine_DsAGPRTarget> {
   let summary = "LDS 16-bit load";
   let arguments = (ins WaveAMDMachine_VGPR1:$addr,
                        Optional<WaveAMDMachine_MemToken>:$dependency,
                        DefaultValuedAttr<I64Attr, "0">:$offset);
-  let results = (outs WaveAMDMachine_VGPR1:$result,
+  let results = (outs WaveAMDMachine_AVGPR1:$result,
                       Optional<WaveAMDMachine_MemToken>:$token);
   let assemblyFormat = [{
     $addr (`after` $dependency^)? (`offset` $offset^)?
@@ -2320,12 +2390,13 @@ def WaveAMDMachine_DsLoadB16Op
 
 def WaveAMDMachine_DsLoadB32Op
     : WaveAMDMachine_DsMemoryOp<"ds_load_b32", [WaveAMDMachine_LDSLoad]>,
-      WaveAMDMachine_LDSInfo<"1"> {
+      WaveAMDMachine_LDSInfo<"1">,
+      WaveAMDMachine_AGPRBanking<"0", "0x1", WaveAMDMachine_DsAGPRTarget> {
   let summary = "LDS 32-bit load";
   let arguments = (ins WaveAMDMachine_VGPR1:$addr,
                        Optional<WaveAMDMachine_MemToken>:$dependency,
                        DefaultValuedAttr<I64Attr, "0">:$offset);
-  let results = (outs WaveAMDMachine_VGPR1:$result,
+  let results = (outs WaveAMDMachine_AVGPR1:$result,
                       Optional<WaveAMDMachine_MemToken>:$token);
   let assemblyFormat = [{
     $addr (`after` $dependency^)? (`offset` $offset^)?
@@ -2335,12 +2406,13 @@ def WaveAMDMachine_DsLoadB32Op
 
 def WaveAMDMachine_DsLoadAddTidB32Op
     : WaveAMDMachine_DsMemoryOp<"ds_load_addtid_b32", [WaveAMDMachine_LDSLoad]>,
-      WaveAMDMachine_LDSInfo<"1"> {
+      WaveAMDMachine_LDSInfo<"1">,
+      WaveAMDMachine_AGPRBanking<"0", "0x1", WaveAMDMachine_DsAGPRTarget> {
   let summary = "LDS 32-bit addtid load";
   let arguments = (ins WaveAMDMachine_M0:$m0,
                        Optional<WaveAMDMachine_MemToken>:$dependency,
                        DefaultValuedAttr<I64Attr, "0">:$offset);
-  let results = (outs WaveAMDMachine_VGPR1:$result,
+  let results = (outs WaveAMDMachine_AVGPR1:$result,
                       Optional<WaveAMDMachine_MemToken>:$token);
   let assemblyFormat = [{
     $m0 (`after` $dependency^)? (`offset` $offset^)?
@@ -2350,18 +2422,19 @@ def WaveAMDMachine_DsLoadAddTidB32Op
 
 def WaveAMDMachine_DsLoadTupleB32Op
     : WaveAMDMachine_DsMemoryOp<"ds_load_tuple_b32", [WaveAMDMachine_LDSLoad, WaveAMDMachine_TupleMemory]>,
-      WaveAMDMachine_LDSTupleLoadInfo {
-  let summary = "LDS load of N consecutive 32-bit values into a VGPR tuple";
+      WaveAMDMachine_LDSTupleLoadInfo,
+      WaveAMDMachine_AGPRBanking<"0", "0x1", WaveAMDMachine_DsAGPRTarget> {
+  let summary = "LDS load of N consecutive 32-bit values into a register tuple";
   let description = [{
     Loads `N` consecutive dwords from LDS at `addr + offset + i*4` for
-    `i` in `[0, N)` into the `N` components of a single VGPR tuple
-    result of width `N`. Waitcnt issue count matches the b32/b64/b96/b128
+    `i` in `[0, N)` into the `N` components of a single register tuple
+    result. Waitcnt issue count matches the b32/b64/b96/b128
     chunks produced by `waveamd-decompose-mem-tuples`.
   }];
   let arguments = (ins WaveAMDMachine_VGPR1:$addr,
                        Optional<WaveAMDMachine_MemToken>:$dependency,
                        DefaultValuedAttr<I64Attr, "0">:$offset);
-  let results = (outs WaveAMDMachine_VGPR:$result,
+  let results = (outs WaveAMDMachine_AVGPR:$result,
                       Optional<WaveAMDMachine_MemToken>:$token);
   let assemblyFormat = [{
     $addr (`after` $dependency^)? (`offset` $offset^)?
@@ -2371,9 +2444,10 @@ def WaveAMDMachine_DsLoadTupleB32Op
 
 def WaveAMDMachine_DsStoreB16Op
     : WaveAMDMachine_DsMemoryOp<"ds_store_b16", [WaveAMDMachine_LDSStore]>,
-      WaveAMDMachine_LDSInfo<"1"> {
+      WaveAMDMachine_LDSInfo<"1">,
+      WaveAMDMachine_AGPRBanking<"0x2", "0", WaveAMDMachine_DsAGPRTarget> {
   let summary = "LDS 16-bit store";
-  let arguments = (ins WaveAMDMachine_VGPR1:$addr, WaveAMDMachine_VGPR1:$value,
+  let arguments = (ins WaveAMDMachine_VGPR1:$addr, WaveAMDMachine_AVGPR1:$value,
                        Optional<WaveAMDMachine_MemToken>:$dependency,
                        DefaultValuedAttr<I64Attr, "0">:$offset);
   let results = (outs Optional<WaveAMDMachine_MemToken>:$token);
@@ -2385,9 +2459,10 @@ def WaveAMDMachine_DsStoreB16Op
 
 def WaveAMDMachine_DsStoreB32Op
     : WaveAMDMachine_DsMemoryOp<"ds_store_b32", [WaveAMDMachine_LDSStore]>,
-      WaveAMDMachine_LDSInfo<"1"> {
+      WaveAMDMachine_LDSInfo<"1">,
+      WaveAMDMachine_AGPRBanking<"0x2", "0", WaveAMDMachine_DsAGPRTarget> {
   let summary = "LDS 32-bit store";
-  let arguments = (ins WaveAMDMachine_VGPR1:$addr, WaveAMDMachine_VGPR1:$value,
+  let arguments = (ins WaveAMDMachine_VGPR1:$addr, WaveAMDMachine_AVGPR1:$value,
                        Optional<WaveAMDMachine_MemToken>:$dependency,
                        DefaultValuedAttr<I64Attr, "0">:$offset);
   let results = (outs Optional<WaveAMDMachine_MemToken>:$token);
@@ -2399,9 +2474,10 @@ def WaveAMDMachine_DsStoreB32Op
 
 def WaveAMDMachine_DsStoreAddTidB32Op
     : WaveAMDMachine_DsMemoryOp<"ds_store_addtid_b32", [WaveAMDMachine_LDSStore]>,
-      WaveAMDMachine_LDSInfo<"1"> {
+      WaveAMDMachine_LDSInfo<"1">,
+      WaveAMDMachine_AGPRBanking<"0x2", "0", WaveAMDMachine_DsAGPRTarget> {
   let summary = "LDS 32-bit addtid store";
-  let arguments = (ins WaveAMDMachine_M0:$m0, WaveAMDMachine_VGPR1:$value,
+  let arguments = (ins WaveAMDMachine_M0:$m0, WaveAMDMachine_AVGPR1:$value,
                        Optional<WaveAMDMachine_MemToken>:$dependency,
                        DefaultValuedAttr<I64Attr, "0">:$offset);
   let results = (outs Optional<WaveAMDMachine_MemToken>:$token);
@@ -2413,9 +2489,10 @@ def WaveAMDMachine_DsStoreAddTidB32Op
 
 def WaveAMDMachine_DsStoreB8Op
     : WaveAMDMachine_DsMemoryOp<"ds_store_b8", [WaveAMDMachine_LDSStore]>,
-      WaveAMDMachine_LDSInfo<"1"> {
+      WaveAMDMachine_LDSInfo<"1">,
+      WaveAMDMachine_AGPRBanking<"0x2", "0", WaveAMDMachine_DsAGPRTarget> {
   let summary = "LDS 8-bit store";
-  let arguments = (ins WaveAMDMachine_VGPR1:$addr, WaveAMDMachine_VGPR1:$value,
+  let arguments = (ins WaveAMDMachine_VGPR1:$addr, WaveAMDMachine_AVGPR1:$value,
                        Optional<WaveAMDMachine_MemToken>:$dependency,
                        DefaultValuedAttr<I64Attr, "0">:$offset);
   let results = (outs Optional<WaveAMDMachine_MemToken>:$token);
@@ -2427,12 +2504,13 @@ def WaveAMDMachine_DsStoreB8Op
 
 def WaveAMDMachine_DsLoadB64Op
     : WaveAMDMachine_DsMemoryOp<"ds_load_b64", [WaveAMDMachine_LDSLoad]>,
-      WaveAMDMachine_LDSInfo<"1"> {
+      WaveAMDMachine_LDSInfo<"1">,
+      WaveAMDMachine_AGPRBanking<"0", "0x1", WaveAMDMachine_DsAGPRTarget> {
   let summary = "LDS 64-bit load";
   let arguments = (ins WaveAMDMachine_VGPR1:$addr,
                        Optional<WaveAMDMachine_MemToken>:$dependency,
                        DefaultValuedAttr<I64Attr, "0">:$offset);
-  let results = (outs WaveAMDMachine_VGPR2:$result,
+  let results = (outs WaveAMDMachine_AVGPR2:$result,
                       Optional<WaveAMDMachine_MemToken>:$token);
   let assemblyFormat = [{
     $addr (`after` $dependency^)? (`offset` $offset^)?
@@ -2443,12 +2521,13 @@ def WaveAMDMachine_DsLoadB64Op
 def WaveAMDMachine_DsReadTrB64B4Op
     : WaveAMDMachine_DsMemoryOp<"ds_read_tr_b64_b4",
                                 [WaveAMDMachine_LDSLoad]>,
-      WaveAMDMachine_LDSInfo<"1"> {
+      WaveAMDMachine_LDSInfo<"1">,
+      WaveAMDMachine_AGPRBanking<"0", "0x1", WaveAMDMachine_DsAGPRTarget> {
   let summary = "gfx950 LDS 64-bit transposed read over 4 lanes";
   let arguments = (ins WaveAMDMachine_VGPR1:$addr,
                        Optional<WaveAMDMachine_MemToken>:$dependency,
                        DefaultValuedAttr<I64Attr, "0">:$offset);
-  let results = (outs WaveAMDMachine_VGPR2:$result,
+  let results = (outs WaveAMDMachine_AVGPR2:$result,
                       Optional<WaveAMDMachine_MemToken>:$token);
   let assemblyFormat = [{
     $addr (`after` $dependency^)? (`offset` $offset^)?
@@ -2460,12 +2539,13 @@ def WaveAMDMachine_DsReadTrB64B4Op
 def WaveAMDMachine_DsReadTrB64B8Op
     : WaveAMDMachine_DsMemoryOp<"ds_read_tr_b64_b8",
                                 [WaveAMDMachine_LDSLoad]>,
-      WaveAMDMachine_LDSInfo<"1"> {
+      WaveAMDMachine_LDSInfo<"1">,
+      WaveAMDMachine_AGPRBanking<"0", "0x1", WaveAMDMachine_DsAGPRTarget> {
   let summary = "gfx950 LDS 64-bit transposed read over 8 lanes";
   let arguments = (ins WaveAMDMachine_VGPR1:$addr,
                        Optional<WaveAMDMachine_MemToken>:$dependency,
                        DefaultValuedAttr<I64Attr, "0">:$offset);
-  let results = (outs WaveAMDMachine_VGPR2:$result,
+  let results = (outs WaveAMDMachine_AVGPR2:$result,
                       Optional<WaveAMDMachine_MemToken>:$token);
   let assemblyFormat = [{
     $addr (`after` $dependency^)? (`offset` $offset^)?
@@ -2477,12 +2557,13 @@ def WaveAMDMachine_DsReadTrB64B8Op
 def WaveAMDMachine_DsReadTrB96B6Op
     : WaveAMDMachine_DsMemoryOp<"ds_read_tr_b96_b6",
                                 [WaveAMDMachine_LDSLoad]>,
-      WaveAMDMachine_LDSInfo<"1"> {
+      WaveAMDMachine_LDSInfo<"1">,
+      WaveAMDMachine_AGPRBanking<"0", "0x1", WaveAMDMachine_DsAGPRTarget> {
   let summary = "gfx950 LDS 96-bit transposed read over 6 lanes";
   let arguments = (ins WaveAMDMachine_VGPR1:$addr,
                        Optional<WaveAMDMachine_MemToken>:$dependency,
                        DefaultValuedAttr<I64Attr, "0">:$offset);
-  let results = (outs WaveAMDMachine_VGPR3:$result,
+  let results = (outs WaveAMDMachine_AVGPR3:$result,
                       Optional<WaveAMDMachine_MemToken>:$token);
   let assemblyFormat = [{
     $addr (`after` $dependency^)? (`offset` $offset^)?
@@ -2494,12 +2575,13 @@ def WaveAMDMachine_DsReadTrB96B6Op
 def WaveAMDMachine_DsReadTrB64B16Op
     : WaveAMDMachine_DsMemoryOp<"ds_read_tr_b64_b16",
                                 [WaveAMDMachine_LDSLoad]>,
-      WaveAMDMachine_LDSInfo<"1"> {
+      WaveAMDMachine_LDSInfo<"1">,
+      WaveAMDMachine_AGPRBanking<"0", "0x1", WaveAMDMachine_DsAGPRTarget> {
   let summary = "gfx950 LDS 64-bit transposed read over 16-bit lanes";
   let arguments = (ins WaveAMDMachine_VGPR1:$addr,
                        Optional<WaveAMDMachine_MemToken>:$dependency,
                        DefaultValuedAttr<I64Attr, "0">:$offset);
-  let results = (outs WaveAMDMachine_VGPR2:$result,
+  let results = (outs WaveAMDMachine_AVGPR2:$result,
                       Optional<WaveAMDMachine_MemToken>:$token);
   let assemblyFormat = [{
     $addr (`after` $dependency^)? (`offset` $offset^)?
@@ -2510,12 +2592,13 @@ def WaveAMDMachine_DsReadTrB64B16Op
 
 def WaveAMDMachine_DsLoadB96Op
     : WaveAMDMachine_DsMemoryOp<"ds_load_b96", [WaveAMDMachine_LDSLoad]>,
-      WaveAMDMachine_LDSInfo<"1"> {
+      WaveAMDMachine_LDSInfo<"1">,
+      WaveAMDMachine_AGPRBanking<"0", "0x1", WaveAMDMachine_DsAGPRTarget> {
   let summary = "LDS 96-bit load";
   let arguments = (ins WaveAMDMachine_VGPR1:$addr,
                        Optional<WaveAMDMachine_MemToken>:$dependency,
                        DefaultValuedAttr<I64Attr, "0">:$offset);
-  let results = (outs WaveAMDMachine_VGPR3:$result,
+  let results = (outs WaveAMDMachine_AVGPR3:$result,
                       Optional<WaveAMDMachine_MemToken>:$token);
   let assemblyFormat = [{
     $addr (`after` $dependency^)? (`offset` $offset^)?
@@ -2525,12 +2608,13 @@ def WaveAMDMachine_DsLoadB96Op
 
 def WaveAMDMachine_DsLoadB128Op
     : WaveAMDMachine_DsMemoryOp<"ds_load_b128", [WaveAMDMachine_LDSLoad]>,
-      WaveAMDMachine_LDSInfo<"1"> {
+      WaveAMDMachine_LDSInfo<"1">,
+      WaveAMDMachine_AGPRBanking<"0", "0x1", WaveAMDMachine_DsAGPRTarget> {
   let summary = "LDS 128-bit load";
   let arguments = (ins WaveAMDMachine_VGPR1:$addr,
                        Optional<WaveAMDMachine_MemToken>:$dependency,
                        DefaultValuedAttr<I64Attr, "0">:$offset);
-  let results = (outs WaveAMDMachine_VGPR4:$result,
+  let results = (outs WaveAMDMachine_AVGPR4:$result,
                       Optional<WaveAMDMachine_MemToken>:$token);
   let assemblyFormat = [{
     $addr (`after` $dependency^)? (`offset` $offset^)?
@@ -2540,9 +2624,10 @@ def WaveAMDMachine_DsLoadB128Op
 
 def WaveAMDMachine_DsStoreB64Op
     : WaveAMDMachine_DsMemoryOp<"ds_store_b64", [WaveAMDMachine_LDSStore]>,
-      WaveAMDMachine_LDSInfo<"1"> {
+      WaveAMDMachine_LDSInfo<"1">,
+      WaveAMDMachine_AGPRBanking<"0x2", "0", WaveAMDMachine_DsAGPRTarget> {
   let summary = "LDS 64-bit store";
-  let arguments = (ins WaveAMDMachine_VGPR1:$addr, WaveAMDMachine_VGPR2:$value,
+  let arguments = (ins WaveAMDMachine_VGPR1:$addr, WaveAMDMachine_AVGPR2:$value,
                        Optional<WaveAMDMachine_MemToken>:$dependency,
                        DefaultValuedAttr<I64Attr, "0">:$offset);
   let results = (outs Optional<WaveAMDMachine_MemToken>:$token);
@@ -2554,9 +2639,10 @@ def WaveAMDMachine_DsStoreB64Op
 
 def WaveAMDMachine_DsStoreB96Op
     : WaveAMDMachine_DsMemoryOp<"ds_store_b96", [WaveAMDMachine_LDSStore]>,
-      WaveAMDMachine_LDSInfo<"1"> {
+      WaveAMDMachine_LDSInfo<"1">,
+      WaveAMDMachine_AGPRBanking<"0x2", "0", WaveAMDMachine_DsAGPRTarget> {
   let summary = "LDS 96-bit store";
-  let arguments = (ins WaveAMDMachine_VGPR1:$addr, WaveAMDMachine_VGPR3:$value,
+  let arguments = (ins WaveAMDMachine_VGPR1:$addr, WaveAMDMachine_AVGPR3:$value,
                        Optional<WaveAMDMachine_MemToken>:$dependency,
                        DefaultValuedAttr<I64Attr, "0">:$offset);
   let results = (outs Optional<WaveAMDMachine_MemToken>:$token);
@@ -2568,9 +2654,10 @@ def WaveAMDMachine_DsStoreB96Op
 
 def WaveAMDMachine_DsStoreB128Op
     : WaveAMDMachine_DsMemoryOp<"ds_store_b128", [WaveAMDMachine_LDSStore]>,
-      WaveAMDMachine_LDSInfo<"1"> {
+      WaveAMDMachine_LDSInfo<"1">,
+      WaveAMDMachine_AGPRBanking<"0x2", "0", WaveAMDMachine_DsAGPRTarget> {
   let summary = "LDS 128-bit store";
-  let arguments = (ins WaveAMDMachine_VGPR1:$addr, WaveAMDMachine_VGPR4:$value,
+  let arguments = (ins WaveAMDMachine_VGPR1:$addr, WaveAMDMachine_AVGPR4:$value,
                        Optional<WaveAMDMachine_MemToken>:$dependency,
                        DefaultValuedAttr<I64Attr, "0">:$offset);
   let results = (outs Optional<WaveAMDMachine_MemToken>:$token);
@@ -2582,15 +2669,16 @@ def WaveAMDMachine_DsStoreB128Op
 
 def WaveAMDMachine_DsStoreTupleB32Op
     : WaveAMDMachine_DsMemoryOp<"ds_store_tuple_b32", [WaveAMDMachine_LDSStore, WaveAMDMachine_TupleMemory]>,
-      WaveAMDMachine_LDSTupleStoreInfo {
-  let summary = "LDS store of a VGPR tuple as N consecutive 32-bit values";
+      WaveAMDMachine_LDSTupleStoreInfo,
+      WaveAMDMachine_AGPRBanking<"0x2", "0", WaveAMDMachine_DsAGPRTarget> {
+  let summary = "LDS store of a register tuple as N consecutive 32-bit values";
   let description = [{
-    Stores the `N` components of the `value` VGPR tuple to LDS at
+    Stores the `N` components of the `value` register tuple to LDS at
     `addr + offset + i*4` for `i` in `[0, N)`. Waitcnt issue count
     matches the b32/b64/b96/b128 chunks produced by
     `waveamd-decompose-mem-tuples`.
   }];
-  let arguments = (ins WaveAMDMachine_VGPR1:$addr, WaveAMDMachine_VGPR:$value,
+  let arguments = (ins WaveAMDMachine_VGPR1:$addr, WaveAMDMachine_AVGPR:$value,
                        Optional<WaveAMDMachine_MemToken>:$dependency,
                        DefaultValuedAttr<I64Attr, "0">:$offset);
   let results = (outs Optional<WaveAMDMachine_MemToken>:$token);
