@@ -21,6 +21,7 @@ include "mlir/IR/OpBase.td"
 include "mlir/Interfaces/ControlFlowInterfaces.td"
 include "mlir/Interfaces/InferIntRangeInterface.td"
 include "mlir/Interfaces/SideEffectInterfaces.td"
+include "mlir/Interfaces/ViewLikeInterface.td"
 
 class Wave_Op<string mnemonic, list<Trait> traits = []> :
     Op<Wave_Dialect, mnemonic, traits>;
@@ -216,12 +217,15 @@ def Wave_CastOp : Wave_Op<"cast", [Pure]> {
   let hasVerifier = 1;
 }
 
-def Wave_PtrCastOp : Wave_Op<"ptr_cast", [Pure]> {
+def Wave_PtrCastOp : Wave_Op<"ptr_cast", [Pure, ViewLikeOpInterface]> {
   let summary = "reinterpret a Wave pointer element type";
   let arguments = (ins AnyType:$source);
   let results = (outs AnyType:$result);
   let assemblyFormat = "$source attr-dict `:` type($source) `->` type($result)";
   let hasVerifier = 1;
+  let extraClassDeclaration = [{
+    Value getViewSource() { return getSource(); }
+  }];
 }
 
 def Wave_SelectOp : Wave_Op<"select", [
@@ -486,12 +490,15 @@ def Wave_BarrierOp : Wave_Op<"barrier", [MemoryEffects<[MemWrite, MemRead]>]> {
   let assemblyFormat = "($dependencies^)? attr-dict `:` functional-type(operands, results)";
 }
 
-def Wave_PtrAddOp : Wave_Op<"ptr_add", [Pure]> {
+def Wave_PtrAddOp : Wave_Op<"ptr_add", [Pure, ViewLikeOpInterface]> {
   let summary = "add an element offset to a Wave pointer";
   let arguments = (ins AnyType:$base, AnyType:$offset);
   let results = (outs AnyType:$result);
   let assemblyFormat = "$base `,` $offset attr-dict `:` type($base) `,` type($offset) `->` type($result)";
   let hasVerifier = 1;
+  let extraClassDeclaration = [{
+    Value getViewSource() { return getBase(); }
+  }];
 }
 
 def Wave_IndexExprOp : Wave_Op<"index_expr", [Pure,

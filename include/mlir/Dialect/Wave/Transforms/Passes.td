@@ -115,6 +115,20 @@ def WaveNormalizePointerOffsets : Pass<"wave-normalize-pointer-offsets"> {
   ];
 }
 
+def WaveResolveAllocs : Pass<"wave-resolve-allocs"> {
+  let summary = "Resolve Wave allocations to shared memory base offsets";
+  let description = [{
+    Computes allocation live intervals, assigns non-overlapping byte offsets,
+    rewrites `wave.alloc` to `wave.shared_memory_base`, and updates fixed
+    function-level `wave.lds_size` to cover the assigned storage.
+  }];
+  let dependentDialects = [
+    "func::FuncDialect",
+    "scf::SCFDialect",
+    "wave::WaveDialect"
+  ];
+}
+
 def WaveSimplifyIndexExprs : Pass<"wave-simplify-index-exprs"> {
   let summary = "Simplify Wave index expressions with integer range facts";
   let description = [{

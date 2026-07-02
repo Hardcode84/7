@@ -66,7 +66,9 @@ module attributes {transform.with_named_sequence} {
         : (!transform.any_op) -> !transform.any_op
     %rdlp = transform.apply_registered_pass "wave-delay-loop-carried-packs" to %rdivcs
         : (!transform.any_op) -> !transform.any_op
-    %r0 = transform.apply_registered_pass "waveamd-to-machine" to %rdlp
+    %ralloc = transform.apply_registered_pass "wave-resolve-allocs" to %rdlp
+        : (!transform.any_op) -> !transform.any_op
+    %r0 = transform.apply_registered_pass "waveamd-to-machine" to %ralloc
         : (!transform.any_op) -> !transform.any_op
     // Fold duplicate imm / v_mov constant materializations selection
     // emits per address add, before reg-alloc.

@@ -47,6 +47,7 @@ add_mlir_dialect_library(MLIRWaveDialect
   MLIRSideEffectInterfaces
   MLIRTransformDialect
   MLIRTransformDialectInterfaces
+  MLIRViewLikeInterface
   MLIRWaveAMDMachineCostModel
   MLIRWaveAMDMachineDialect
   WaveIXSimpl
