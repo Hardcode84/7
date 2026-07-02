@@ -359,8 +359,16 @@ struct BytePackMatch {
   SmallPtrSet<Operation *, 8> opSet;
 };
 
+enum class ByteTraceSourceKind { RawLoad, D16Low, D16High };
+
+struct ByteTraceSource {
+  ByteTraceSourceKind kind;
+  BufferLoadU8Op load;
+  Value value;
+};
+
 struct ByteTrace {
-  SmallVector<BufferLoadU8Op, 2> loads;
+  SmallVector<ByteTraceSource, 2> sources;
   bool hasConstant = false;
   bool hasNonZeroConstant = false;
   bool hasTransparentUse = false;
@@ -409,6 +417,9 @@ static bool hasOnlyAllowedUses(Value value, const ByteTraceContext &ctx) {
     if (ctx.transparentUses.contains(&use))
       continue;
     if (ctx.packOps.contains(use.getOwner()))
+      continue;
+    auto d16Hi = dyn_cast<BufferLoadU8D16HiOp>(use.getOwner());
+    if (d16Hi && &d16Hi.getPreservedMutable() == &use)
       continue;
     return false;
   }
@@ -480,7 +491,17 @@ static LogicalResult collectByteTrace(Value value, ByteTraceContext &ctx,
   LogicalResult result = failure();
   if (BufferLoadU8Op load = value.getDefiningOp<BufferLoadU8Op>()) {
     if (hasOnlyAllowedUses(value, ctx)) {
-      trace.loads.push_back(load);
+      trace.sources.push_back({ByteTraceSourceKind::RawLoad, load, value});
+      result = success();
+    }
+  } else if (value.getDefiningOp<BufferLoadU8D16Op>()) {
+    if (hasOnlyAllowedUses(value, ctx)) {
+      trace.sources.push_back({ByteTraceSourceKind::D16Low, {}, value});
+      result = success();
+    }
+  } else if (value.getDefiningOp<BufferLoadU8D16HiOp>()) {
+    if (hasOnlyAllowedUses(value, ctx)) {
+      trace.sources.push_back({ByteTraceSourceKind::D16High, {}, value});
       result = success();
     }
   } else if (OpResult opResult = dyn_cast<OpResult>(value)) {
@@ -613,11 +634,11 @@ static std::optional<BytePackMatch> matchBytePack(Operation *root) {
 }
 
 static bool tracesCanPair(const ByteTrace &low, const ByteTrace &high) {
-  if (high.loads.empty())
+  if (high.sources.empty())
     return true;
-  if (low.loads.empty())
+  if (low.sources.empty())
     return true;
-  return low.loads.size() == high.loads.size();
+  return low.sources.size() == high.sources.size();
 }
 
 static Value createZeroVGPR(OpBuilder &builder, Operation *insertPoint,
@@ -677,6 +698,42 @@ static Value createD16Hi(OpBuilder &builder, BufferLoadU8Op load,
   return d16.getResult();
 }
 
+static FailureOr<Value> getOrCreateD16Low(OpBuilder &builder,
+                                          const ByteTraceSource &source,
+                                          D16RewriteState &state) {
+  switch (source.kind) {
+  case ByteTraceSourceKind::RawLoad:
+    return createD16Low(builder, source.load, state);
+  case ByteTraceSourceKind::D16Low:
+    return source.value;
+  case ByteTraceSourceKind::D16High:
+    return failure();
+  }
+  llvm_unreachable("unknown byte trace source kind");
+}
+
+static bool d16HighIncludesLow(Value high, Value low) {
+  auto d16Hi = high.getDefiningOp<BufferLoadU8D16HiOp>();
+  return d16Hi && d16Hi.getPreserved() == low;
+}
+
+static FailureOr<Value> getOrCreateD16High(OpBuilder &builder,
+                                           const ByteTraceSource &source,
+                                           Value preserved,
+                                           D16RewriteState &state,
+                                           bool &includesLow) {
+  switch (source.kind) {
+  case ByteTraceSourceKind::RawLoad:
+    return createD16Hi(builder, source.load, preserved, state);
+  case ByteTraceSourceKind::D16Low:
+    return failure();
+  case ByteTraceSourceKind::D16High:
+    includesLow &= d16HighIncludesLow(source.value, preserved);
+    return source.value;
+  }
+  llvm_unreachable("unknown byte trace source kind");
+}
+
 static FailureOr<bool> rewriteTracePairLoads(OpBuilder &builder,
                                              const ByteTrace &low,
                                              const ByteTrace &high,
@@ -685,23 +742,32 @@ static FailureOr<bool> rewriteTracePairLoads(OpBuilder &builder,
     return failure();
 
   SmallVector<Value, 2> lowD16s;
-  lowD16s.reserve(low.loads.size());
-  for (BufferLoadU8Op load : low.loads)
-    lowD16s.push_back(createD16Low(builder, load, state));
+  lowD16s.reserve(low.sources.size());
+  for (const ByteTraceSource &source : low.sources) {
+    FailureOr<Value> lowD16 = getOrCreateD16Low(builder, source, state);
+    if (failed(lowD16))
+      return failure();
+    lowD16s.push_back(*lowD16);
+  }
 
-  bool highIncludesLow = !high.loads.empty();
-  for (unsigned index : llvm::seq<unsigned>(0, high.loads.size())) {
-    BufferLoadU8Op load = high.loads[index];
+  bool highIncludesLow = !high.sources.empty();
+  for (auto [index, source] : llvm::enumerate(high.sources)) {
+    Operation *insertPoint = source.value.getDefiningOp();
+    if (!insertPoint)
+      return failure();
     Value preserved;
     if (state.preservesUnusedBits && index < lowD16s.size() &&
-        valueAvailableBefore(lowD16s[index], load.getOperation()))
+        (source.kind != ByteTraceSourceKind::RawLoad ||
+         valueAvailableBefore(lowD16s[index], insertPoint)))
       preserved = lowD16s[index];
     else {
-      preserved = createZeroVGPR(builder, load.getOperation(),
-                                 load.getResult().getType());
+      preserved = createZeroVGPR(builder, insertPoint, source.value.getType());
       highIncludesLow = false;
     }
-    createD16Hi(builder, load, preserved, state);
+    FailureOr<Value> highD16 =
+        getOrCreateD16High(builder, source, preserved, state, highIncludesLow);
+    if (failed(highD16))
+      return failure();
   }
   if (highIncludesLow && high.hasConstant && low.hasNonZeroConstant)
     highIncludesLow = false;
@@ -749,7 +815,7 @@ static Value createPairValue(OpBuilder &builder, Operation *root,
   Location loc = root->getLoc();
   Value low = getReplacement(state, lowLane.source);
   Value high = getReplacement(state, highLane.source);
-  if (highTrace.loads.empty())
+  if (highTrace.sources.empty())
     high = createShiftLeft(builder, loc, high, 16, resultType);
   else if (highIncludesLow)
     return high;
@@ -796,9 +862,9 @@ static LogicalResult collectBytePackTraces(BytePackMatch &match,
 }
 
 static bool canRewriteBytePackTraces(const std::array<ByteTrace, 4> &traces) {
-  if (traces[2].hasNonZeroConstant && !traces[2].loads.empty())
+  if (traces[2].hasNonZeroConstant && !traces[2].sources.empty())
     return false;
-  if (traces[3].hasNonZeroConstant && !traces[3].loads.empty())
+  if (traces[3].hasNonZeroConstant && !traces[3].sources.empty())
     return false;
   return tracesCanPair(traces[0], traces[2]) &&
          tracesCanPair(traces[1], traces[3]);
