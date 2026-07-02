@@ -800,8 +800,10 @@ _a4w4_kernel:
 		v_lshl_add_u32 v111, v111, 3, v122
 		ds_read_u8 v122, v111 offset:2048
 		s_mov_b32 s95, 0x100
-		s_mov_b32 s96, 16
-		s_mov_b32 s97, 0
+		s_mov_b32 s96, s95
+		s_mov_b32 s95, 16
+		s_mov_b32 s97, s95
+		s_mov_b32 s95, 0
 		v_add_u32_e32 v0, 0x20000, v0
 		v_add_u32_e32 v154, 0x20000, v32
 		v_add3_u32 v154, v154, v66, v67
@@ -817,8 +819,8 @@ _a4w4_kernel:
 		v_add3_u32 v156, v32, v66, v67
 		v_add3_u32 v157, v32, v66, v67
 		v_add3_u32 v158, v32, v66, v67
-		s_mov_b32 s98, s95
-		s_mov_b32 s99, s96
+		s_mov_b32 s98, s96
+		s_mov_b32 s99, s97
 		v_accvgpr_write_b32 a96, v4
 		v_accvgpr_write_b32 a97, v5
 		v_accvgpr_write_b32 a98, v6
@@ -1187,35 +1189,35 @@ _a4w4_kernel:
 		ds_read_u8 v118, v124 offset:2048
 		ds_read_u8 v122, v116 offset:2048
 		ds_read_u8 v127, v111 offset:2048
-		s_add_i32 s100, s22, s95
+		s_add_i32 s100, s22, s96
 		s_mov_b32 m0, s2
 		v_add3_u32 v128, s100, v25, v27
 		buffer_load_dwordx4 v128, s[24:27], 0 offen lds
-		s_add_i32 s100, s28, s95
+		s_add_i32 s100, s28, s96
 		s_mov_b32 m0, s29
 		v_add3_u32 v128, s100, v25, v27
 		buffer_load_dwordx4 v128, s[24:27], 0 offen lds
-		s_add_i32 s100, s31, s95
+		s_add_i32 s100, s31, s96
 		s_mov_b32 m0, s32
 		v_add3_u32 v128, s100, v25, v27
 		buffer_load_dwordx4 v128, s[24:27], 0 offen lds
-		s_add_i32 s100, s34, s95
+		s_add_i32 s100, s34, s96
 		s_mov_b32 m0, s35
 		v_add3_u32 v128, s100, v25, v27
 		buffer_load_dwordx4 v128, s[24:27], 0 offen lds
-		s_add_i32 s100, s37, s95
+		s_add_i32 s100, s37, s96
 		s_mov_b32 m0, s38
 		v_add3_u32 v128, s100, v25, v27
 		buffer_load_dwordx4 v128, s[24:27], 0 offen lds
-		s_add_i32 s100, s40, s95
+		s_add_i32 s100, s40, s96
 		s_mov_b32 m0, s41
 		v_add3_u32 v128, s100, v25, v27
 		buffer_load_dwordx4 v128, s[24:27], 0 offen lds
-		s_add_i32 s100, s43, s95
+		s_add_i32 s100, s43, s96
 		s_mov_b32 m0, s44
 		v_add3_u32 v128, s100, v25, v27
 		buffer_load_dwordx4 v128, s[24:27], 0 offen lds
-		s_add_i32 s100, s45, s95
+		s_add_i32 s100, s45, s96
 		s_mov_b32 m0, s46
 		v_add3_u32 v128, s100, v25, v27
 		buffer_load_dwordx4 v128, s[24:27], 0 offen lds
@@ -1235,7 +1237,7 @@ _a4w4_kernel:
 		s_mov_b32 m0, s59
 		v_add3_u32 v128, s100, v28, v27
 		buffer_load_dwordx4 v128, s[48:51], 0 offen lds
-		s_add_i32 s100, s64, s96
+		s_add_i32 s100, s64, s97
 		v_add3_u32 v128, s100, v31, v33
 		v_add3_u32 v128, v128, v37, v40
 		v_add3_u32 v128, v128, v43, v45
@@ -1604,35 +1606,35 @@ _a4w4_kernel:
 		ds_read_u8 v115, v124 offset:2048
 		ds_read_u8 v118, v116 offset:2048
 		ds_read_u8 v121, v111 offset:2048
-		s_add_i32 s100, s19, s95
+		s_add_i32 s100, s19, s96
 		s_mov_b32 m0, s81
 		v_add3_u32 v72, s100, v25, v27
 		buffer_load_dwordx4 v72, s[24:27], 0 offen lds
-		s_add_i32 s100, s23, s95
+		s_add_i32 s100, s23, s96
 		s_mov_b32 m0, s82
 		v_add3_u32 v72, s100, v25, v27
 		buffer_load_dwordx4 v72, s[24:27], 0 offen lds
-		s_add_i32 s100, s30, s95
+		s_add_i32 s100, s30, s96
 		s_mov_b32 m0, s83
 		v_add3_u32 v72, s100, v25, v27
 		buffer_load_dwordx4 v72, s[24:27], 0 offen lds
-		s_add_i32 s100, s33, s95
+		s_add_i32 s100, s33, s96
 		s_mov_b32 m0, s84
 		v_add3_u32 v72, s100, v25, v27
 		buffer_load_dwordx4 v72, s[24:27], 0 offen lds
-		s_add_i32 s100, s36, s95
+		s_add_i32 s100, s36, s96
 		s_mov_b32 m0, s85
 		v_add3_u32 v72, s100, v25, v27
 		buffer_load_dwordx4 v72, s[24:27], 0 offen lds
-		s_add_i32 s100, s39, s95
+		s_add_i32 s100, s39, s96
 		s_mov_b32 m0, s86
 		v_add3_u32 v72, s100, v25, v27
 		buffer_load_dwordx4 v72, s[24:27], 0 offen lds
-		s_add_i32 s100, s42, s95
+		s_add_i32 s100, s42, s96
 		s_mov_b32 m0, s87
 		v_add3_u32 v72, s100, v25, v27
 		buffer_load_dwordx4 v72, s[24:27], 0 offen lds
-		s_add_i32 s100, s3, s95
+		s_add_i32 s100, s3, s96
 		s_mov_b32 m0, s14
 		v_add3_u32 v72, s100, v25, v27
 		buffer_load_dwordx4 v72, s[24:27], 0 offen lds
@@ -1652,7 +1654,7 @@ _a4w4_kernel:
 		s_mov_b32 m0, s91
 		v_add3_u32 v72, s100, v28, v27
 		buffer_load_dwordx4 v72, s[48:51], 0 offen lds
-		s_add_i32 s100, s8, s96
+		s_add_i32 s100, s8, s97
 		v_add3_u32 v72, s100, v30, v36
 		v_add3_u32 v72, v72, v39, v42
 		v_add3_u32 v72, v72, v44, v32
@@ -1861,12 +1863,12 @@ _a4w4_kernel:
 		buffer_load_ubyte v98, v103, s[68:71], 0 offen
 		buffer_load_ubyte v103, v104, s[68:71], 0 offen
 		buffer_load_ubyte v104, v159, s[68:71], 0 offen
-		s_add_i32 s95, s95, 0x100
+		s_add_i32 s96, s96, 0x100
 		s_add_i32 s98, s98, 0x100
-		s_add_i32 s96, s96, 16
+		s_add_i32 s97, s97, 16
 		s_add_i32 s99, s99, 16
-		s_add_i32 s97, s97, 2
-		s_cmp_lt_i32 s97, 62
+		s_add_i32 s95, s95, 2
+		s_cmp_lt_i32 s95, 62
 		s_cbranch_scc1 .L_a4w4_kernel.loop_head_0
 .L_a4w4_kernel.loop_exit_0:
 		s_waitcnt lgkmcnt(14)

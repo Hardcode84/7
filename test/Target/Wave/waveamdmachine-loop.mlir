@@ -81,6 +81,49 @@ func.func @loop_range_nonzero_trip(%lo_raw: i32, %hi_raw: i32)
   return
 }
 
+// Invariant body use cannot share the loop carry init.
+// SELECT-LABEL: func.func @loop_carry_init_distinct_from_invariant_use
+// SELECT: %[[STEP:.+]] = waveamdmachine.arg {{.*}} : !waveamdmachine.reg<sgpr, 1>
+// SELECT: %[[COPY:.+]] = waveamdmachine.copy_tuple %[[STEP]] : (!waveamdmachine.reg<sgpr, 1>) -> !waveamdmachine.reg<sgpr, 1>
+// SELECT: waveamdmachine.uniform_loop carries({{.*}}, %[[COPY]]
+// SELECT: waveamdmachine.s_add_i32 {{.*}}, %[[STEP]]
+
+// ASM-LABEL: loop_carry_init_distinct_from_invariant_use:
+// ASM: s_load_b32 s[[STEP:[0-9]+]], s[0:1], 0x0
+// ASM: s_waitcnt lgkmcnt(0)
+// ASM: s_mov_b32 s[[CARRY:[0-9]+]], s[[STEP]]
+// ASM: .Lloop_carry_init_distinct_from_invariant_use.loop_head_0:
+// ASM: s_add_i32 s[[CARRY]], s[[CARRY]], s[[STEP]]
+func.func @loop_carry_init_distinct_from_invariant_use(%step_raw: i32)
+    attributes {wave.kernel} {
+  %lo = arith.constant 0 : i32
+  %hi = arith.constant 4 : i32
+  %one = arith.constant 1 : i32
+  %step = wave.assume %step_raw as "x" [#wave.pred<"x >= 1">, #wave.pred<"x <= 16">] : i32
+  %res = scf.for %i = %lo to %hi step %one iter_args(%base = %step) -> (i32) : i32 {
+    %next = wave.binary addi %base, %step : i32, i32 -> i32
+    scf.yield %next : i32
+  }
+  return
+}
+
+// SELECT-LABEL: func.func @loop_i64_carry_init_distinct_from_invariant_use
+// SELECT: %[[STEP:.+]] = waveamdmachine.arg {{.*}} : !waveamdmachine.reg<sgpr, 2>
+// SELECT: %[[COPY:.+]] = waveamdmachine.copy_tuple %[[STEP]] : (!waveamdmachine.reg<sgpr, 2>) -> !waveamdmachine.reg<sgpr, 2>
+// SELECT: waveamdmachine.uniform_loop carries({{.*}}, %[[COPY]]
+// SELECT: waveamdmachine.s_add_u64 {{.*}}, %[[STEP]]
+func.func @loop_i64_carry_init_distinct_from_invariant_use(%step: i64)
+    attributes {wave.kernel} {
+  %lo = arith.constant 0 : i32
+  %hi = arith.constant 4 : i32
+  %one = arith.constant 1 : i32
+  %res = scf.for %i = %lo to %hi step %one iter_args(%base = %step) -> (i64) : i32 {
+    %next = wave.binary addi %base, %step : i64, i64 -> i64
+    scf.yield %next : i64
+  }
+  return
+}
+
 // Index upper bounds may materialize as SGPR2 values. The IV must widen too.
 // SELECT-LABEL: func.func @loop_index_expr_upper_sgpr2
 // SELECT: %[[HI:.+]] = waveamdmachine.arg {{.*}} : !waveamdmachine.reg<sgpr, 2>

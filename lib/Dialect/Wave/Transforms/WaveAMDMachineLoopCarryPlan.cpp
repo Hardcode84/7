@@ -672,14 +672,42 @@ static bool needsWideImmediateCarry(WaveAMDMachineSelector &S, Value initArg,
   return false;
 }
 
+static bool hasNonInitUseInLoopBody(scf::ForOp op, Value value) {
+  for (OpOperand &use : value.getUses()) {
+    Operation *user = use.getOwner();
+    if (user == op.getOperation())
+      continue;
+    if (op.getBodyRegion().isAncestor(user->getParentRegion()))
+      return true;
+  }
+  return false;
+}
+
+static Value copyDistinctLoopCarry(WaveAMDMachineSelector &S, Location loc,
+                                   Value carry) {
+  waveamdmachine::RegType regType =
+      dyn_cast<waveamdmachine::RegType>(carry.getType());
+  if (!regType)
+    return carry;
+  if (regType.getRegClass() != waveamdmachine::RegClass::SGPR &&
+      regType.getRegClass() != waveamdmachine::RegClass::VGPR)
+    return carry;
+  Type resultType = getRegType(S.builder.getContext(), regType.getRegClass(),
+                               regType.getWidth());
+  return waveamdmachine::CopyTupleOp::create(S.builder, loc, resultType, carry)
+      .getResult();
+}
+
 static Value materializeWMCarryInit(WaveAMDMachineSelector &S, scf::ForOp op,
                                     Value initArg, Value yielded) {
   Value carry = S.expect(initArg, op);
-  if (!isa<waveamdmachine::ImmType>(carry.getType()))
-    return carry;
   if (needsWideImmediateCarry(S, initArg, yielded))
-    return ensureSGPR2(S, op.getLoc(), carry);
-  return S.materializeSGPR1(op.getLoc(), carry);
+    carry = ensureSGPR2(S, op.getLoc(), carry);
+  else if (isa<waveamdmachine::ImmType>(carry.getType()))
+    carry = S.materializeSGPR1(op.getLoc(), carry);
+  if (hasNonInitUseInLoopBody(op, initArg))
+    return copyDistinctLoopCarry(S, op.getLoc(), carry);
+  return carry;
 }
 
 static LogicalResult
