@@ -77,8 +77,8 @@ SchedClass classifyOp(Operation *op) {
       // Structural pseudos: emit no real instruction. Region terminators
       // only carry structured-control operands; actual branches come from
       // codegen lowering, not from this op directly.
-      .Case<LabelOp, MakeBufferRsrcOp, AfterOp, ContinueIfOp, YieldOp,
-            UniformIfOp, UniformLoopOp>(
+      .Case<LabelOp, AfterOp, ContinueIfOp, YieldOp, UniformIfOp,
+            UniformLoopOp>(
           [](auto) { return SchedClass::NoInst; })
       // Barrier.
       .Case<SBarrierOp>(
@@ -123,8 +123,7 @@ SchedClass classifyOp(Operation *op) {
             SMovExecB64Op, SMovExecLoOp, SMovM0Op, SMovVccB32Op, SMulI32Op,
             SMulHiU32Op, SMulU64Op, SNopOp, SFf1I32B32Op, SFf1I32B64Op,
             SFlbitI32B32Op, SFlbitI32B64Op, SOrB32Op, SReadVccB32Op,
-            SSetprioOp, SGetregShaderCyclesOp, SXorB32Op, SXorB64Op,
-            UpdateBufferRsrcBaseOp>(
+            SSetprioOp, SGetregShaderCyclesOp, SXorB32Op, SXorB64Op>(
           [](auto) { return SchedClass::WriteSALU; })
       .Default(fallbackClassify);
   // clang-format on

@@ -1,7 +1,7 @@
 // RUN: wave-opt %s | FileCheck %s
 // RUN: wave-opt %s | wave-opt | FileCheck %s
-// RUN: wave-translate --wave-to-amdgpu-asm %s | FileCheck %s --check-prefix=ASM
-// RUN: wave-translate --wave-to-amdgpu-asm %s | llvm-mc -triple=amdgcn-amd-amdhsa -mcpu=gfx1100 -filetype=obj -o /dev/null
+// RUN: wave-opt --waveamd-buffer-rsrc-to-tuples %s | wave-translate --wave-to-amdgpu-asm - | FileCheck %s --check-prefix=ASM
+// RUN: wave-opt --waveamd-buffer-rsrc-to-tuples %s | wave-translate --wave-to-amdgpu-asm - | llvm-mc -triple=amdgcn-amd-amdhsa -mcpu=gfx1100 -filetype=obj -o /dev/null
 
 // `waveamdmachine.buffer_store_tuple_b32` is the single op that covers
 // an N-dword tuple store on the buffer path. Backend start decomposes

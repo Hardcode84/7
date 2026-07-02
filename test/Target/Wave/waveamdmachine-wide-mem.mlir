@@ -1,7 +1,7 @@
 // RUN: wave-opt %s | FileCheck %s
 // RUN: wave-opt %s | wave-opt | FileCheck %s
-// RUN: wave-translate --wave-to-amdgpu-asm %s | FileCheck %s --check-prefix=ASM11
-// RUN: wave-translate --wave-to-amdgpu-asm %s | llvm-mc -triple=amdgcn-amd-amdhsa -mcpu=gfx1100 -filetype=obj -o /dev/null
+// RUN: wave-opt --waveamd-buffer-rsrc-to-tuples %s | wave-translate --wave-to-amdgpu-asm - | FileCheck %s --check-prefix=ASM11
+// RUN: wave-opt --waveamd-buffer-rsrc-to-tuples %s | wave-translate --wave-to-amdgpu-asm - | llvm-mc -triple=amdgcn-amd-amdhsa -mcpu=gfx1100 -filetype=obj -o /dev/null
 
 // New width-parameterised mem ops. Asm emit dispatches the right MC
 // opcode per ISA: gfx11 prints the `_b{64,96,128}` syntax, gfx9

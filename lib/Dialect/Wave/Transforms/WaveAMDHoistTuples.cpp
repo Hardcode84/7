@@ -1,4 +1,4 @@
-//===- WaveAMDHoistBufferRsrc.cpp - hoist buffer SRDs -------*- C++ -*-===//
+//===- WaveAMDHoistTuples.cpp - hoist machine tuples --------*- C++ -*-===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
 // See https://llvm.org/LICENSE.txt for license information.
@@ -19,7 +19,7 @@
 #include "llvm/ADT/SmallVector.h"
 
 namespace mlir::wave {
-#define GEN_PASS_DEF_WAVEAMDHOISTBUFFERRSRC
+#define GEN_PASS_DEF_WAVEAMDHOISTTUPLES
 #include "mlir/Dialect/Wave/Transforms/Passes.h.inc"
 } // namespace mlir::wave
 
@@ -69,7 +69,7 @@ private:
   void collectCandidates() {
     Block &body = loop.getBody().front();
     for (Operation &op : body.without_terminator())
-      if (isa<MakeBufferRsrcOp, TupleFromElementsOp>(op))
+      if (isa<TupleFromElementsOp>(op))
         candidates.push_back({&op});
   }
 
@@ -84,20 +84,9 @@ private:
   }
 
   bool isValidCandidate(LoopCarryCandidate &candidate) {
-    if (auto make = dyn_cast<MakeBufferRsrcOp>(candidate.op))
-      return isValidBufferRsrcCandidate(make);
     if (auto tuple = dyn_cast<TupleFromElementsOp>(candidate.op))
       return isValidTupleCandidate(candidate, tuple);
     return false;
-  }
-
-  bool isValidBufferRsrcCandidate(MakeBufferRsrcOp make) {
-    DenseSet<Operation *> baseSeen;
-    DenseSet<Operation *> rangeSeen;
-    return canMaterializeBeforeLoop(make.getBase(),
-                                    /*allowLoopBodyArgs=*/true, baseSeen) &&
-           canMaterializeBeforeLoop(make.getRange(),
-                                    /*allowLoopBodyArgs=*/false, rangeSeen);
   }
 
   FailureOr<bool> needsLoopUpdate(Value value) {
@@ -155,24 +144,9 @@ private:
 
   FailureOr<Value> materializeInitValue(LoopCarryCandidate &candidate,
                                         IRMapping &mapper) {
-    if (auto make = dyn_cast<MakeBufferRsrcOp>(candidate.op))
-      return materializeInitBufferRsrc(make, mapper);
     if (auto tuple = dyn_cast<TupleFromElementsOp>(candidate.op))
       return materializeInitTuple(tuple, mapper);
     return failure();
-  }
-
-  FailureOr<Value> materializeInitBufferRsrc(MakeBufferRsrcOp make,
-                                             IRMapping &mapper) {
-    FailureOr<Value> base = materializeBeforeLoop(make.getBase(), mapper);
-    if (failed(base))
-      return failure();
-    FailureOr<Value> range = materializeBeforeLoop(make.getRange(), mapper);
-    if (failed(range))
-      return failure();
-    auto init = MakeBufferRsrcOp::create(
-        rewriter, make.getLoc(), make.getDescriptor().getType(), *base, *range);
-    return init.getDescriptor();
   }
 
   FailureOr<Value> materializeInitTuple(TupleFromElementsOp tuple,
@@ -325,21 +299,9 @@ private:
 
   FailureOr<Value> materializeLoopUpdate(LoopCarryCandidate &candidate,
                                          Value current, IRMapping &mapper) {
-    if (auto make = dyn_cast<MakeBufferRsrcOp>(candidate.op))
-      return materializeBufferRsrcUpdate(make, current, mapper);
     if (auto tuple = dyn_cast<TupleFromElementsOp>(candidate.op))
       return materializeTupleUpdate(candidate, tuple, current, mapper);
     return failure();
-  }
-
-  Value materializeBufferRsrcUpdate(MakeBufferRsrcOp make, Value descriptor,
-                                    IRMapping &mapper) {
-    Value base = mapper.lookupOrDefault(make.getBase());
-    auto update = UpdateBufferRsrcBaseOp::create(rewriter, make.getLoc(),
-                                                 make.getDescriptor().getType(),
-                                                 descriptor, base);
-    mapper.map(make.getDescriptor(), update.getResult());
-    return update.getResult();
   }
 
   Value materializeTupleUpdate(LoopCarryCandidate &candidate,
@@ -360,9 +322,8 @@ private:
   IRRewriter &rewriter;
 };
 
-struct WaveAMDHoistBufferRsrcPass
-    : public wave::impl::WaveAMDHoistBufferRsrcBase<
-          WaveAMDHoistBufferRsrcPass> {
+struct WaveAMDHoistTuplesPass
+    : public wave::impl::WaveAMDHoistTuplesBase<WaveAMDHoistTuplesPass> {
   void runOnOperation() override {
     IRRewriter rewriter(&getContext());
     bool failedPass = false;

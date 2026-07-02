@@ -1682,12 +1682,6 @@ def WaveAMDMachine_UpdateBufferRsrcBaseOp
                        WaveAMDMachine_SGPR2:$base);
   let results = (outs WaveAMDMachine_SGPR4:$result);
   let assemblyFormat = "$descriptor `,` $base attr-dict `:` functional-type(operands, results)";
-  let killedOperandReusePredicate =
-      "&operand == &this->getDescriptorMutable() || "
-      "&operand == &this->getBaseMutable()";
-  let requiredKilledOperandReusePredicate =
-      "&operand == &this->getDescriptorMutable() || "
-      "&operand == &this->getBaseMutable()";
 }
 
 def WaveAMDMachine_GlobalStoreB8Op

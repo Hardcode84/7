@@ -3191,53 +3191,11 @@ private:
       return op.emitError(
           "tuple-mem op reached asm emit; waveamd-decompose-mem-tuples "
           "must run before wave-to-amdgpu-asm");
-    if (isa<waveamdmachine::MakeBufferRsrcOp>(op)) {
-      constexpr uint32_t gfx11Format32Float = 22;
-      constexpr uint32_t defaultRsrcFlags =
-          (gfx11Format32Float << 12) | (1u << 24) | (3u << 28);
-      if (failed(emitMC(sMovB32(), {toMCSGPRComponent(result(), 0),
-                                    toMCSGPRComponent(op.getOperand(0), 0)})) ||
-          failed(emitMC(sMovB32(), {toMCSGPRComponent(result(), 1),
-                                    toMCSGPRComponent(op.getOperand(0), 1)})) ||
-          failed(emitMC(sMovB32(), {toMCSGPRComponent(result(), 2),
-                                    toMCOperand(op.getOperand(1))})) ||
-          failed(emitMC(sMovB32(),
-                        {toMCSGPRComponent(result(), 3),
-                         llvm::MCOperand::createImm(defaultRsrcFlags)})))
-        return failure();
-      return success();
-    }
-    if (auto update = dyn_cast<waveamdmachine::UpdateBufferRsrcBaseOp>(op)) {
-      auto sameSGPR = [&](Value lhs, unsigned lhsComponent, Value rhs,
-                          unsigned rhsComponent) {
-        return getPhys(lhs) + lhsComponent == getPhys(rhs) + rhsComponent;
-      };
-      auto emitSGPRCopy = [&](Value dst, unsigned dstComponent, Value src,
-                              unsigned srcComponent) {
-        if (sameSGPR(dst, dstComponent, src, srcComponent))
-          return success();
-        return emitMC(sMovB32(), {toMCSGPRComponent(dst, dstComponent),
-                                  toMCSGPRComponent(src, srcComponent)});
-      };
-
-      Value res = update.getResult();
-      Value desc = update.getDescriptor();
-      Value base = update.getBase();
-      bool sameDescriptor = getPhys(res) == getPhys(desc);
-      if (failed(emitSGPRCopy(res, 0, base, 0)) ||
-          failed(emitSGPRCopy(res, 1, base, 1)))
-        return failure();
-      if (!sameDescriptor && (failed(emitSGPRCopy(res, 2, desc, 2)) ||
-                              failed(emitSGPRCopy(res, 3, desc, 3))))
-        return failure();
-      return success();
-    }
     // MUBUF OFFEN variants (BUFFER_{LOAD,STORE}_DWORD_OFFEN) take the
     // operands in the order vdata/vdst, vaddr, srsrc, soffset, offset,
-    // cpol. The SGPR descriptor (`srsrc`) is the 4-tuple from
-    // `make_buffer_rsrc`, the per-lane VGPR offset is fed through
-    // `vaddr` with the `offen` flag, and `soffset` is a hard-zero
-    // immediate; `cpol` is the unset cache-policy.
+    // cpol. The SGPR descriptor (`srsrc`) is an SGPR4 tuple, the per-lane
+    // VGPR offset is fed through `vaddr` with the `offen` flag, and `soffset`
+    // is a hard-zero immediate; `cpol` is the unset cache-policy.
     // MUBUF OFFEN operand layout (MC):
     //   STORE: vdata, vaddr, srsrc, soffset, offset, cpol
     //   LOAD : vdst, vaddr, srsrc, soffset, offset, cpol

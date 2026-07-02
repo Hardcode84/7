@@ -1,4 +1,4 @@
-// RUN: wave-opt --waveamd-hoist-buffer-rsrc %s | FileCheck %s
+// RUN: wave-opt --waveamd-buffer-rsrc-to-tuples --waveamd-hoist-tuples %s | FileCheck %s
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
@@ -6,12 +6,15 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // CHECK-SAME:    %[[BASE0:[^:]+]]: !waveamdmachine.reg<sgpr, 2>
 // CHECK-SAME:    %[[OFF0:[^:]+]]: !waveamdmachine.reg<sgpr, 1>
 // CHECK: %[[INIT_BASE:.*]], %{{.*}} = waveamdmachine.s_add_u64_u32 %[[BASE0]], %[[OFF0]]
-// CHECK: %[[INIT_DESC:.*]] = waveamdmachine.make_buffer_rsrc %[[INIT_BASE]]
+// CHECK: %[[INIT_RANGE:.*]] = waveamdmachine.s_mov_b32_tuple
+// CHECK: %[[INIT_FLAGS_IMM:.*]] = waveamdmachine.imm 822173696
+// CHECK: %[[INIT_FLAGS:.*]] = waveamdmachine.s_mov_b32_tuple %[[INIT_FLAGS_IMM]]
+// CHECK: %[[INIT_DESC:.*]] = waveamdmachine.tuple_from_elements %[[INIT_BASE]], %[[INIT_RANGE]], %[[INIT_FLAGS]]
 // CHECK: %[[LOOP:.*]]:3 = waveamdmachine.uniform_loop
 // CHECK-SAME: carries(%[[OFF0]], {{%.*}}, %[[INIT_DESC]] :
 // CHECK: ^bb0(%[[OFF:.*]]: !waveamdmachine.reg<sgpr, 1>, %[[DEP:.*]]: !waveamdmachine.mem.token, %[[DESC_IN:.*]]: !waveamdmachine.reg<sgpr, 4>):
 // CHECK: %[[BASE:.*]], %{{.*}} = waveamdmachine.s_add_u64_u32 %[[BASE0]], %[[OFF]]
-// CHECK-NEXT: %[[DESC:.*]] = waveamdmachine.update_buffer_rsrc_base %[[DESC_IN]], %[[BASE]]
+// CHECK: %[[DESC:.*]] = waveamdmachine.update_tuple %[[DESC_IN]], %[[BASE]] {offsets = [0]}
 // CHECK-NEXT: waveamdmachine.buffer_load_lds_b128 {{.*}}, %[[DESC]]
 // CHECK: waveamdmachine.continue_if {{.*}} : !waveamdmachine.reg<scc, 1>
 // CHECK-SAME: carries({{%.*}}, {{%.*}}, %[[DESC]] :
@@ -115,8 +118,8 @@ func.func @hoist_loop_tuple_from_elements(
 
 // CHECK-LABEL: func.func @skip_loop_variant_range(
 // CHECK: waveamdmachine.uniform_loop
-// CHECK: waveamdmachine.make_buffer_rsrc
-// CHECK-NOT: waveamdmachine.update_buffer_rsrc_base
+// CHECK: waveamdmachine.tuple_from_elements
+// CHECK-NOT: waveamdmachine.update_tuple
 // CHECK: return
 func.func @skip_loop_variant_range(
     %base: !waveamdmachine.reg<sgpr, 2>,

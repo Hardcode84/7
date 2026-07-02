@@ -1,6 +1,8 @@
-// RUN: wave-translate --wave-to-amdgpu-asm %s \
+// RUN: wave-opt --waveamd-buffer-rsrc-to-tuples --waveamd-hoist-tuples %s \
+// RUN:   | wave-translate --wave-to-amdgpu-asm - \
 // RUN:   | FileCheck %s --check-prefix=ASM
-// RUN: wave-translate --wave-to-amdgpu-asm %s \
+// RUN: wave-opt --waveamd-buffer-rsrc-to-tuples --waveamd-hoist-tuples %s \
+// RUN:   | wave-translate --wave-to-amdgpu-asm - \
 // RUN:   | llvm-mc -triple=amdgcn-amd-amdhsa -mcpu=gfx1100 -filetype=obj -o /dev/null
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
@@ -11,10 +13,10 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // ASM: .Lbuffer_rsrc_hoist_codegen.loop_head_0:
 // ASM-NOT: s_mov_b32 s54
 // ASM-NOT: s_mov_b32 s55
-// ASM: s_add_u32 s52,
-// ASM-NEXT: s_addc_u32 s53,
-// ASM-NOT: s_mov_b32 s52
-// ASM-NOT: s_mov_b32 s53
+// ASM: s_add_u32 {{s[0-9]+}}, s44, s48
+// ASM-NEXT: s_addc_u32 {{s[0-9]+}}, s45, 0
+// ASM-NOT: s_mov_b32 s54
+// ASM-NOT: s_mov_b32 s55
 // ASM: buffer_load_b32 v1, v0, s[52:55], 0 offen
 func.func @buffer_rsrc_hoist_codegen() attributes {wave.kernel} {
   %range = waveamdmachine.imm 128 : !waveamdmachine.imm

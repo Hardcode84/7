@@ -1,8 +1,8 @@
 // RUN: wave-opt --waveamd-to-machine %s | FileCheck %s --check-prefix=SELECT
 // RUN: wave-opt --waveamd-to-machine %s | wave-opt | FileCheck %s --check-prefix=SELECT
-// RUN: wave-opt %s --pass-pipeline='builtin.module(waveamd-to-machine,waveamd-abi-lowering,transform-preload-library{transform-library-paths=%wave_pipelines},transform-interpreter{entry-point=waveamd_regalloc_transform_loop})' | FileCheck %s --check-prefix=PIPELINE
-// RUN: wave-opt --waveamd-to-machine %s | wave-translate --wave-to-amdgpu-asm - | FileCheck %s --check-prefix=ASM
-// RUN: wave-opt --waveamd-to-machine %s | wave-translate --wave-to-amdgpu-asm - | llvm-mc -triple=amdgcn-amd-amdhsa -mcpu=gfx1100 -filetype=obj -o /dev/null
+// RUN: wave-opt %s --pass-pipeline='builtin.module(waveamd-to-machine,waveamd-buffer-rsrc-to-tuples,waveamd-abi-lowering,transform-preload-library{transform-library-paths=%wave_pipelines},transform-interpreter{entry-point=waveamd_regalloc_transform_loop})' | FileCheck %s --check-prefix=PIPELINE
+// RUN: wave-opt --waveamd-to-machine --waveamd-buffer-rsrc-to-tuples %s | wave-translate --wave-to-amdgpu-asm - | FileCheck %s --check-prefix=ASM
+// RUN: wave-opt --waveamd-to-machine --waveamd-buffer-rsrc-to-tuples %s | wave-translate --wave-to-amdgpu-asm - | llvm-mc -triple=amdgcn-amd-amdhsa -mcpu=gfx1100 -filetype=obj -o /dev/null
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
@@ -13,7 +13,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
 // PIPELINE-LABEL: func.func @buffer_store_kernel
 // PIPELINE: waveamdmachine.s_load_b64
-// PIPELINE: waveamdmachine.make_buffer_rsrc
+// PIPELINE: waveamdmachine.tuple_from_elements
 // PIPELINE: {{^ *}}%{{.*}} = waveamdmachine.buffer_store_b32
 // PIPELINE-SAME: !waveamdmachine.reg<sgpr, 4,
 

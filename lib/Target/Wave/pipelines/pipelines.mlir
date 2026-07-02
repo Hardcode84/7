@@ -80,12 +80,14 @@ module attributes {transform.with_named_sequence} {
         : (!transform.any_op) -> !transform.any_op
     %rc = transform.apply_registered_pass "cse" to %rk
         : (!transform.any_op) -> !transform.any_op
+    %rrsrc = transform.apply_registered_pass "waveamd-buffer-rsrc-to-tuples" to %rc
+        : (!transform.any_op) -> !transform.any_op
     // Hoist loop-invariant body ops out of waveamdmachine.uniform_loop.
-    %rl = transform.apply_registered_pass "loop-invariant-code-motion" to %rc
+    %rl = transform.apply_registered_pass "loop-invariant-code-motion" to %rrsrc
         : (!transform.any_op) -> !transform.any_op
-    %rrsrc = transform.apply_registered_pass "waveamd-hoist-buffer-rsrc" to %rl
+    %rth = transform.apply_registered_pass "waveamd-hoist-tuples" to %rl
         : (!transform.any_op) -> !transform.any_op
-    %r1 = transform.apply_registered_pass "waveamd-abi-lowering" to %rrsrc
+    %r1 = transform.apply_registered_pass "waveamd-abi-lowering" to %rth
         : (!transform.any_op) -> !transform.any_op
     %r2 = transform.apply_registered_pass "waveamd-decompose-mem-tuples" to %r1
         : (!transform.any_op) -> !transform.any_op

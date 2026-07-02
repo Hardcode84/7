@@ -333,19 +333,29 @@ def WaveAMDMachineCleanup
   ];
 }
 
-def WaveAMDHoistBufferRsrc
-    : Pass<"waveamd-hoist-buffer-rsrc"> {
+def WaveAMDHoistTuples
+    : Pass<"waveamd-hoist-tuples"> {
   let summary = "Hoist invariant tuple-like dwords out of machine loops";
   let description = [{
-    Rewrites loop-local `waveamdmachine.make_buffer_rsrc` ops into a hoisted
-    descriptor initializer plus `waveamdmachine.update_buffer_rsrc_base` in the
-    loop. The update keeps descriptor range/flags live across iterations and
-    rewrites only base dwords.
-
-    Also promotes loop-local `waveamdmachine.tuple_from_elements` ops when some
-    tuple slots are loop-carried and some are invariant. The pass hoists an
+    Promotes loop-local `waveamdmachine.tuple_from_elements` ops when some tuple
+    slots are loop-carried and some are invariant. The pass hoists an
     initializer tuple and carries it through the loop, using
     `waveamdmachine.update_tuple` for the loop-carried slots.
+  }];
+  let dependentDialects = [
+    "func::FuncDialect",
+    "waveamdmachine::WaveAMDMachineDialect"
+  ];
+}
+
+def WaveAMDBufferRsrcToTuples
+    : Pass<"waveamd-buffer-rsrc-to-tuples"> {
+  let summary = "Convert buffer descriptor pseudo ops to tuple aliases";
+  let description = [{
+    Converts `waveamdmachine.make_buffer_rsrc` into SGPR tuple construction and
+    `waveamdmachine.update_buffer_rsrc_base` into `waveamdmachine.update_tuple`.
+    Selection still emits descriptor-shaped pseudo ops; later passes only see
+    generic tuple manipulation.
   }];
   let dependentDialects = [
     "func::FuncDialect",

@@ -20,26 +20,26 @@ wmma_f16_matmul_tiled:
 		v_readfirstlane_b32 s15, v0
 		s_lshl_b32 s15, s15, 2
 		s_add_i32 s15, s15, 0x22000
-		s_mov_b32 s16, s6
-		s_mov_b32 s17, s7
 		s_mov_b32 s18, 0x7fffffff
 		s_mov_b32 s19, 0x31016000
+		s_mov_b32 s16, s6
+		s_mov_b32 s17, s7
+		s_mov_b32 s22, 0x1000000
 		s_mov_b32 s20, s2
 		s_mov_b32 s21, s3
-		s_mov_b32 s22, 0x1000000
-		s_mov_b32 s23, 0x31016000
+		s_mov_b32 s23, s19
 		s_mov_b32 s0, s4
 		s_mov_b32 s1, s5
-		s_mov_b32 s2, 0x1000000
-		s_mov_b32 s3, 0x31016000
+		s_mov_b32 s2, s22
+		s_mov_b32 s3, s19
 		s_mov_b32 s4, s8
 		s_mov_b32 s5, s9
-		s_mov_b32 s6, 0x1000000
-		s_mov_b32 s7, 0x31016000
+		s_mov_b32 s6, s22
+		s_mov_b32 s7, s19
 		s_mov_b32 s24, s10
 		s_mov_b32 s25, s11
-		s_mov_b32 s26, 0x1000000
-		s_mov_b32 s27, 0x31016000
+		s_mov_b32 s26, s22
+		s_mov_b32 s27, s19
 		v_mov_b64_e32 v[4:5], 0
 		v_mov_b64_e32 v[6:7], 0
 		v_readfirstlane_b32 s8, v0

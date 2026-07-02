@@ -7,9 +7,14 @@ func.func @bad_buffer_load_literal_soffset(%in: !wave.ptr<#wave.global, i32>)
   %base = waveamdmachine.arg {index = 0 : i64, pointer = true}
       : !waveamdmachine.reg<sgpr, 2>
   %range = waveamdmachine.imm 4096 : !waveamdmachine.imm
-  %desc = waveamdmachine.make_buffer_rsrc %base, %range
-      : (!waveamdmachine.reg<sgpr, 2>, !waveamdmachine.imm)
-      -> !waveamdmachine.reg<sgpr, 4>
+  %range_sgpr = waveamdmachine.s_mov_b32_tuple %range
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<sgpr, 1>
+  %flags_imm = waveamdmachine.imm 822173696 : !waveamdmachine.imm
+  %flags = waveamdmachine.s_mov_b32_tuple %flags_imm
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<sgpr, 1>
+  %desc = waveamdmachine.tuple_from_elements %base, %range_sgpr, %flags
+      : (!waveamdmachine.reg<sgpr, 2>, !waveamdmachine.reg<sgpr, 1>,
+         !waveamdmachine.reg<sgpr, 1>) -> !waveamdmachine.reg<sgpr, 4>
   %off = waveamdmachine.v_mbcnt_lo : !waveamdmachine.reg<vgpr, 1>
   %soffset = waveamdmachine.imm 2048 : !waveamdmachine.imm
   // expected-error @below {{buffer nonzero literal soffset must be SGPR}}
@@ -40,9 +45,14 @@ func.func @bad_buffer_load_b8_literal_soffset(%in: !wave.ptr<#wave.global, i32>)
   %base = waveamdmachine.arg {index = 0 : i64, pointer = true}
       : !waveamdmachine.reg<sgpr, 2>
   %range = waveamdmachine.imm 4096 : !waveamdmachine.imm
-  %desc = waveamdmachine.make_buffer_rsrc %base, %range
-      : (!waveamdmachine.reg<sgpr, 2>, !waveamdmachine.imm)
-      -> !waveamdmachine.reg<sgpr, 4>
+  %range_sgpr = waveamdmachine.s_mov_b32_tuple %range
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<sgpr, 1>
+  %flags_imm = waveamdmachine.imm 822173696 : !waveamdmachine.imm
+  %flags = waveamdmachine.s_mov_b32_tuple %flags_imm
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<sgpr, 1>
+  %desc = waveamdmachine.tuple_from_elements %base, %range_sgpr, %flags
+      : (!waveamdmachine.reg<sgpr, 2>, !waveamdmachine.reg<sgpr, 1>,
+         !waveamdmachine.reg<sgpr, 1>) -> !waveamdmachine.reg<sgpr, 4>
   %off = waveamdmachine.v_mbcnt_lo : !waveamdmachine.reg<vgpr, 1>
   %soffset = waveamdmachine.imm 2048 : !waveamdmachine.imm
   // expected-error @below {{buffer nonzero literal soffset must be SGPR}}
@@ -73,9 +83,14 @@ func.func @bad_buffer_store_b8_literal_soffset(%out: !wave.ptr<#wave.global, i32
   %base = waveamdmachine.arg {index = 0 : i64, pointer = true}
       : !waveamdmachine.reg<sgpr, 2>
   %range = waveamdmachine.imm 4096 : !waveamdmachine.imm
-  %desc = waveamdmachine.make_buffer_rsrc %base, %range
-      : (!waveamdmachine.reg<sgpr, 2>, !waveamdmachine.imm)
-      -> !waveamdmachine.reg<sgpr, 4>
+  %range_sgpr = waveamdmachine.s_mov_b32_tuple %range
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<sgpr, 1>
+  %flags_imm = waveamdmachine.imm 822173696 : !waveamdmachine.imm
+  %flags = waveamdmachine.s_mov_b32_tuple %flags_imm
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<sgpr, 1>
+  %desc = waveamdmachine.tuple_from_elements %base, %range_sgpr, %flags
+      : (!waveamdmachine.reg<sgpr, 2>, !waveamdmachine.reg<sgpr, 1>,
+         !waveamdmachine.reg<sgpr, 1>) -> !waveamdmachine.reg<sgpr, 4>
   %off = waveamdmachine.v_mbcnt_lo : !waveamdmachine.reg<vgpr, 1>
   %soffset = waveamdmachine.imm 2048 : !waveamdmachine.imm
   // expected-error @below {{buffer nonzero literal soffset must be SGPR}}
@@ -98,9 +113,14 @@ func.func @bad_buffer_store_literal_soffset(%out: !wave.ptr<#wave.global, i32>)
   %base = waveamdmachine.arg {index = 0 : i64, pointer = true}
       : !waveamdmachine.reg<sgpr, 2>
   %range = waveamdmachine.imm 4096 : !waveamdmachine.imm
-  %desc = waveamdmachine.make_buffer_rsrc %base, %range
-      : (!waveamdmachine.reg<sgpr, 2>, !waveamdmachine.imm)
-      -> !waveamdmachine.reg<sgpr, 4>
+  %range_sgpr = waveamdmachine.s_mov_b32_tuple %range
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<sgpr, 1>
+  %flags_imm = waveamdmachine.imm 822173696 : !waveamdmachine.imm
+  %flags = waveamdmachine.s_mov_b32_tuple %flags_imm
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<sgpr, 1>
+  %desc = waveamdmachine.tuple_from_elements %base, %range_sgpr, %flags
+      : (!waveamdmachine.reg<sgpr, 2>, !waveamdmachine.reg<sgpr, 1>,
+         !waveamdmachine.reg<sgpr, 1>) -> !waveamdmachine.reg<sgpr, 4>
   %off = waveamdmachine.v_mbcnt_lo : !waveamdmachine.reg<vgpr, 1>
   %soffset = waveamdmachine.imm 2048 : !waveamdmachine.imm
   // expected-error @below {{buffer nonzero literal soffset must be SGPR}}
@@ -123,9 +143,14 @@ func.func @bad_buffer_lds_literal_soffset(%in: !wave.ptr<#wave.global, i32>)
   %base = waveamdmachine.arg {index = 0 : i64, pointer = true}
       : !waveamdmachine.reg<sgpr, 2>
   %range = waveamdmachine.imm 4096 : !waveamdmachine.imm
-  %desc = waveamdmachine.make_buffer_rsrc %base, %range
-      : (!waveamdmachine.reg<sgpr, 2>, !waveamdmachine.imm)
-      -> !waveamdmachine.reg<sgpr, 4>
+  %range_sgpr = waveamdmachine.s_mov_b32_tuple %range
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<sgpr, 1>
+  %flags_imm = waveamdmachine.imm 822173696 : !waveamdmachine.imm
+  %flags = waveamdmachine.s_mov_b32_tuple %flags_imm
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<sgpr, 1>
+  %desc = waveamdmachine.tuple_from_elements %base, %range_sgpr, %flags
+      : (!waveamdmachine.reg<sgpr, 2>, !waveamdmachine.reg<sgpr, 1>,
+         !waveamdmachine.reg<sgpr, 1>) -> !waveamdmachine.reg<sgpr, 4>
   %off = waveamdmachine.v_mbcnt_lo : !waveamdmachine.reg<vgpr, 1>
   %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
   %m0src = waveamdmachine.s_mov_b32_value %zero

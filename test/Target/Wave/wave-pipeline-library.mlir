@@ -53,6 +53,7 @@
 // PIPELINE-NEXT: transform.apply_registered_pass "wave-delay-loop-carried-packs"
 // PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
 // PIPELINE-NEXT: transform.apply_registered_pass "waveamd-to-machine"
+// PIPELINE: transform.apply_registered_pass "waveamd-buffer-rsrc-to-tuples"
 // PIPELINE: transform.apply_registered_pass "waveamd-form-fused-int"
 // PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
 // PIPELINE-NEXT: transform.apply_registered_pass "waveamd-cross-lane-peepholes"

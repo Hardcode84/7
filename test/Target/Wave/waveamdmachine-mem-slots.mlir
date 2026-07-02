@@ -1,7 +1,7 @@
 // RUN: wave-opt %s | FileCheck %s
 // RUN: wave-opt %s | wave-opt | FileCheck %s
-// RUN: wave-translate --wave-to-amdgpu-asm %s | FileCheck %s --check-prefix=ASM
-// RUN: wave-translate --wave-to-amdgpu-asm %s | llvm-mc -triple=amdgcn-amd-amdhsa -mcpu=gfx1100 -filetype=obj -o /dev/null
+// RUN: wave-opt --waveamd-buffer-rsrc-to-tuples %s | wave-translate --wave-to-amdgpu-asm - | FileCheck %s --check-prefix=ASM
+// RUN: wave-opt --waveamd-buffer-rsrc-to-tuples %s | wave-translate --wave-to-amdgpu-asm - | llvm-mc -triple=amdgcn-amd-amdhsa -mcpu=gfx1100 -filetype=obj -o /dev/null
 
 // The MUBUF / GLOBAL memory ops expose explicit address fields:
 //   * Global ops: a `inst_offset` I64 attr (folds into the 13-bit
