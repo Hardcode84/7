@@ -80,6 +80,14 @@ KERNELS = {
         default_k_values=MXFP4_DOC_K_VALUES,
         sweep_k=True,
     ),
+    "mxfp4-4wave": KernelSpec(
+        key="mxfp4-4wave",
+        label="mxfp4-4wave",
+        profile="gfx950-mxfp4-256x256-4wave",
+        variants="scheduled",
+        default_k_values=MXFP4_DOC_K_VALUES,
+        sweep_k=True,
+    ),
     "v9": KernelSpec(
         key="v9",
         label="v9",
@@ -99,9 +107,11 @@ KERNELS = {
 }
 
 KERNEL_ALIASES = {
-    "all": ("f16", "mxfp4", "v9", "v9-transposed"),
+    "all": ("f16", "mxfp4", "mxfp4-4wave", "v9", "v9-transposed"),
     "mxfp": ("mxfp4",),
     "mxfp4": ("mxfp4",),
+    "mxfp4-8wave": ("mxfp4",),
+    "mxfp4-4wave": ("mxfp4-4wave",),
     "f16": ("f16",),
     "v9": ("v9",),
     "v9-original": ("v9",),
@@ -361,7 +371,10 @@ def build_argparser() -> argparse.ArgumentParser:
         "--kernels",
         type=parse_kernel_csv,
         default=parse_kernel_csv("all"),
-        help=("comma-separated f16,mxfp4,v9,v9-transposed,all; " "mxfp aliases mxfp4"),
+        help=(
+            "comma-separated f16,mxfp4,mxfp4-4wave,v9,v9-transposed,all; "
+            "mxfp/mxfp4-8wave alias mxfp4"
+        ),
     )
     parser.add_argument("--m", type=int, default=4096)
     parser.add_argument("--n", type=int, default=4096)
@@ -370,7 +383,7 @@ def build_argparser() -> argparse.ArgumentParser:
         type=parse_int_csv,
         default=None,
         help=(
-            "comma-separated K override for f16/mxfp4; defaults match "
+            "comma-separated K override for f16/MXFP4 sweep kernels; defaults match "
             "docs/Gfx950MatmulProfiles.md; v9 variants always use K=4096"
         ),
     )
