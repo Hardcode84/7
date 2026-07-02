@@ -115,6 +115,21 @@ def WaveNormalizePointerOffsets : Pass<"wave-normalize-pointer-offsets"> {
   ];
 }
 
+def WaveCleanupAllocs : Pass<"wave-cleanup-allocs"> {
+  let summary = "Remove writes to unread Wave allocations";
+  let description = [{
+    Follows allocation pointer aliases through views and region branch edges.
+    If an allocation has no reads and no unknown pointer escapes, removes
+    writes to that allocation and repairs memory-token users.
+  }];
+  let dependentDialects = [
+    "func::FuncDialect",
+    "scf::SCFDialect",
+    "wave::WaveDialect",
+    "waveamd::WaveAMDDialect"
+  ];
+}
+
 def WaveResolveAllocs : Pass<"wave-resolve-allocs"> {
   let summary = "Resolve Wave allocations to shared memory base offsets";
   let description = [{

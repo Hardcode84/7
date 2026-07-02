@@ -532,7 +532,7 @@ def Wave_IndexExprOp : Wave_Op<"index_expr", [Pure,
   let hasCanonicalizer = 1;
 }
 
-def Wave_StoreOp : Wave_Op<"store", [MemoryEffects<[MemWrite]>]> {
+def Wave_StoreOp : Wave_Op<"store"> {
   let summary = "store a lane-varying SIMD value to memory";
   let description = [{
     Stores a value to a `!wave.ptr<space, T>` or lane-varying
@@ -540,14 +540,14 @@ def Wave_StoreOp : Wave_Op<"store", [MemoryEffects<[MemWrite]>]> {
   }];
 
   let arguments = (ins Wave_Simd:$value,
-                       AnyType:$ptr,
+                       Arg<AnyType, "", [MemWrite]>:$ptr,
                        Optional<Wave_MemToken>:$dependency);
   let results = (outs Wave_MemToken:$token);
   let assemblyFormat = "$value `->` $ptr (`after` $dependency^)? attr-dict `:` functional-type(operands, results)";
   let hasVerifier = 1;
 }
 
-def Wave_LoadOp : Wave_Op<"load", [MemoryEffects<[MemRead]>]> {
+def Wave_LoadOp : Wave_Op<"load"> {
   let summary = "load a lane-varying SIMD value from memory";
   let description = [{
     Each active lane loads from the address derived from `$ptr`:
@@ -570,7 +570,7 @@ def Wave_LoadOp : Wave_Op<"load", [MemoryEffects<[MemRead]>]> {
     a happens-before constraint.
   }];
 
-  let arguments = (ins AnyType:$ptr,
+  let arguments = (ins Arg<AnyType, "", [MemRead]>:$ptr,
                        Optional<Wave_MemToken>:$dependency);
   let results = (outs Wave_Simd:$value, Wave_MemToken:$token);
   let assemblyFormat = "$ptr (`after` $dependency^)? attr-dict `:` functional-type(operands, results)";

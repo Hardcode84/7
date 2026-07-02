@@ -118,7 +118,7 @@ def WaveAMD_MmaScaleOp : WaveAMD_Op<"mma_scale", [Pure]> {
   let hasVerifier = 1;
 }
 
-def WaveAMD_DmaLoadLdsOp : WaveAMD_Op<"dma_load_lds", [MemoryEffects<[MemRead, MemWrite]>]> {
+def WaveAMD_DmaLoadLdsOp : WaveAMD_Op<"dma_load_lds"> {
   let summary = "DMA one dword from global or buffer memory into LDS";
   let description = [{
     Starts a global/buffer to LDS transfer. The source pointer may be lane
@@ -127,8 +127,8 @@ def WaveAMD_DmaLoadLdsOp : WaveAMD_Op<"dma_load_lds", [MemoryEffects<[MemRead, M
     4*lane_id` for the dword form. The input token models source memory
     ordering; the result token models both the read and the LDS write.
   }];
-  let arguments = (ins AnyType:$source,
-                       Wave_Ptr:$dest,
+  let arguments = (ins Arg<AnyType, "", [MemRead]>:$source,
+                       Arg<Wave_Ptr, "", [MemWrite]>:$dest,
                        Wave_MemToken:$dependency,
                        I64Attr:$bytes,
                        DefaultValuedAttr<I64Attr, "0">:$aux,
@@ -141,9 +141,9 @@ def WaveAMD_DmaLoadLdsOp : WaveAMD_Op<"dma_load_lds", [MemoryEffects<[MemRead, M
   let hasVerifier = 1;
 }
 
-def WaveAMD_TransposeLoadOp : WaveAMD_Op<"transpose_load", [MemoryEffects<[MemRead]>]> {
+def WaveAMD_TransposeLoadOp : WaveAMD_Op<"transpose_load"> {
   let summary = "gfx950 LDS transpose load";
-  let arguments = (ins Wave_PtrOrSimdPtr:$source,
+  let arguments = (ins Arg<Wave_PtrOrSimdPtr, "", [MemRead]>:$source,
                        Optional<Wave_MemToken>:$dependency);
   let results = (outs Wave_SimdOf1DVector:$value,
                       Wave_MemToken:$token);
