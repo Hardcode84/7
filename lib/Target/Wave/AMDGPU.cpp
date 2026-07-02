@@ -3205,6 +3205,31 @@ private:
         return failure();
       return success();
     }
+    if (auto update = dyn_cast<waveamdmachine::UpdateBufferRsrcBaseOp>(op)) {
+      auto sameSGPR = [&](Value lhs, unsigned lhsComponent, Value rhs,
+                          unsigned rhsComponent) {
+        return getPhys(lhs) + lhsComponent == getPhys(rhs) + rhsComponent;
+      };
+      auto emitSGPRCopy = [&](Value dst, unsigned dstComponent, Value src,
+                              unsigned srcComponent) {
+        if (sameSGPR(dst, dstComponent, src, srcComponent))
+          return success();
+        return emitMC(sMovB32(), {toMCSGPRComponent(dst, dstComponent),
+                                  toMCSGPRComponent(src, srcComponent)});
+      };
+
+      Value res = update.getResult();
+      Value desc = update.getDescriptor();
+      Value base = update.getBase();
+      bool sameDescriptor = getPhys(res) == getPhys(desc);
+      if (failed(emitSGPRCopy(res, 0, base, 0)) ||
+          failed(emitSGPRCopy(res, 1, base, 1)))
+        return failure();
+      if (!sameDescriptor && (failed(emitSGPRCopy(res, 2, desc, 2)) ||
+                              failed(emitSGPRCopy(res, 3, desc, 3))))
+        return failure();
+      return success();
+    }
     // MUBUF OFFEN variants (BUFFER_{LOAD,STORE}_DWORD_OFFEN) take the
     // operands in the order vdata/vdst, vaddr, srsrc, soffset, offset,
     // cpol. The SGPR descriptor (`srsrc`) is the 4-tuple from

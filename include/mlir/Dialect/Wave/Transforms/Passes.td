@@ -304,6 +304,21 @@ def WaveAMDMachineCleanup
   ];
 }
 
+def WaveAMDHoistBufferRsrc
+    : Pass<"waveamd-hoist-buffer-rsrc"> {
+  let summary = "Hoist invariant buffer descriptor dwords out of machine loops";
+  let description = [{
+    Rewrites loop-local `waveamdmachine.make_buffer_rsrc` ops into a hoisted
+    descriptor initializer plus `waveamdmachine.update_buffer_rsrc_base` in the
+    loop. The update keeps descriptor range/flags live across iterations and
+    rewrites only base dwords.
+  }];
+  let dependentDialects = [
+    "func::FuncDialect",
+    "waveamdmachine::WaveAMDMachineDialect"
+  ];
+}
+
 def WaveAMDNarrowWideInt
     : Pass<"waveamd-narrow-wide-int"> {
   let summary = "Narrow proven 32-bit addends in wide WaveAMDMachine ops";

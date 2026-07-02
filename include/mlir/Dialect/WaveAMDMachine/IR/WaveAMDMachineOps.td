@@ -1583,6 +1583,18 @@ def WaveAMDMachine_MakeBufferRsrcOp
   let assemblyFormat = "$base `,` $range attr-dict `:` functional-type(operands, results)";
 }
 
+def WaveAMDMachine_UpdateBufferRsrcBaseOp
+    : WaveAMDMachine_Op<"update_buffer_rsrc_base", [WaveAMDMachine_SALU, Pure]> {
+  let summary = "replace the base dwords of an AMD buffer descriptor";
+  let arguments = (ins WaveAMDMachine_SGPR4:$descriptor,
+                       WaveAMDMachine_SGPR2:$base);
+  let results = (outs WaveAMDMachine_SGPR4:$result);
+  let assemblyFormat = "$descriptor `,` $base attr-dict `:` functional-type(operands, results)";
+  let killedOperandReusePredicate = "&operand == &this->getDescriptorMutable()";
+  let requiredKilledOperandReusePredicate =
+      "&operand == &this->getDescriptorMutable()";
+}
+
 def WaveAMDMachine_GlobalStoreB8Op
     : WaveAMDMachine_GlobalMemoryOp<"global_store_b8", [WaveAMDMachine_VMEMStore, MemoryEffects<[MemWrite]>]>,
       WaveAMDMachine_VMEMStoreInfo {

@@ -50,4 +50,37 @@ func.func @buffer_slots(%arg0: !wave.ptr<#wave.global, i32>) attributes {wave.ke
   return
 }
 
+// ASM-LABEL: update_buffer_rsrc_base_alias:
+// ASM: s_mov_b32 s52, s44
+// ASM-NEXT: s_mov_b32 s53, s45
+// ASM-NEXT: s_mov_b32 s54, 0x80
+// ASM-NEXT: s_mov_b32 s55, 0x31016000
+// ASM-NEXT: s_mov_b32 s52, s48
+// ASM-NEXT: s_mov_b32 s53, s49
+// ASM-NEXT: buffer_load_b32 v1, v0, s[52:55], 0 offen
+// ASM: buffer_store_b32 v1, v0, s[52:55], 0 offen
+func.func @update_buffer_rsrc_base_alias() attributes {wave.kernel} {
+  %old_base = waveamdmachine.uninit : !waveamdmachine.reg<sgpr, 2, 44>
+  %new_base = waveamdmachine.uninit : !waveamdmachine.reg<sgpr, 2, 48>
+  %off = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1, 0>
+  %range = waveamdmachine.imm 128 : !waveamdmachine.imm
+  %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+  %desc0 = waveamdmachine.make_buffer_rsrc %old_base, %range
+      : (!waveamdmachine.reg<sgpr, 2, 44>, !waveamdmachine.imm)
+        -> !waveamdmachine.reg<sgpr, 4, 52>
+  %desc1 = waveamdmachine.update_buffer_rsrc_base %desc0, %new_base
+      : (!waveamdmachine.reg<sgpr, 4, 52>, !waveamdmachine.reg<sgpr, 2, 48>)
+        -> !waveamdmachine.reg<sgpr, 4, 52>
+  %value, %tok = waveamdmachine.buffer_load_b32 %off, %desc1, %zero
+      : (!waveamdmachine.reg<vgpr, 1, 0>, !waveamdmachine.reg<sgpr, 4, 52>,
+         !waveamdmachine.imm)
+        -> (!waveamdmachine.reg<vgpr, 1, 1>, !waveamdmachine.mem.token)
+  %st = waveamdmachine.buffer_store_b32 %off, %value, %desc1, %zero after %tok
+      : (!waveamdmachine.reg<vgpr, 1, 0>, !waveamdmachine.reg<vgpr, 1, 1>,
+         !waveamdmachine.reg<sgpr, 4, 52>, !waveamdmachine.imm,
+         !waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+  waveamdmachine.s_endpgm
+  return
+}
+
 }

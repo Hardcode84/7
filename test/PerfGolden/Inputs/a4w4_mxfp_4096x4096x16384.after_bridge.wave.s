@@ -899,6 +899,30 @@ _a4w4_kernel:
 		v_add_u32_e32 v51, 0x20000, v51
 		v_lshlrev_b32_e32 v53, 3, v0
 		v_add_u32_e32 v53, 0x20000, v53
+		s_add_u32 s44, s2, s19
+		s_addc_u32 s45, s3, 0
+		s_mov_b32 s52, s44
+		s_mov_b32 s53, s45
+		s_mov_b32 s54, 0x7fffffff
+		s_mov_b32 s55, 0x31016000
+		s_add_u32 s44, s4, s13
+		s_addc_u32 s45, s5, 0
+		s_mov_b32 s56, s44
+		s_mov_b32 s57, s45
+		s_mov_b32 s58, 0x7fffffff
+		s_mov_b32 s59, 0x31016000
+		s_add_u32 s44, s8, s20
+		s_addc_u32 s45, s9, 0
+		s_mov_b32 s72, s44
+		s_mov_b32 s73, s45
+		s_mov_b32 s74, 0x7fffffff
+		s_mov_b32 s75, 0x31016000
+		s_add_u32 s44, s10, s20
+		s_addc_u32 s45, s11, 0
+		s_mov_b32 s76, s44
+		s_mov_b32 s77, s45
+		s_mov_b32 s78, 0x7fffffff
+		s_mov_b32 s79, 0x31016000
 		s_mov_b32 s41, s20
 		v_accvgpr_write_b32 a4, v4
 		v_accvgpr_write_b32 a5, v5
@@ -1231,8 +1255,6 @@ _a4w4_kernel:
 		s_mov_b32 m0, s22
 		s_mov_b32 s52, s44
 		s_mov_b32 s53, s45
-		s_mov_b32 s54, 0x7fffffff
-		s_mov_b32 s55, 0x31016000
 		buffer_load_dwordx4 v9, s[52:55], 0 offen lds
 		s_mov_b32 m0, s28
 		s_nop 0
@@ -1260,8 +1282,6 @@ _a4w4_kernel:
 		s_mov_b32 m0, s40
 		s_mov_b32 s56, s44
 		s_mov_b32 s57, s45
-		s_mov_b32 s58, 0x7fffffff
-		s_mov_b32 s59, 0x31016000
 		buffer_load_dwordx4 v33, s[56:59], 0 offen lds
 		s_mov_b32 m0, s42
 		s_nop 0
@@ -1276,8 +1296,6 @@ _a4w4_kernel:
 		s_addc_u32 s45, s9, 0
 		s_mov_b32 s72, s44
 		s_mov_b32 s73, s45
-		s_mov_b32 s74, 0x7fffffff
-		s_mov_b32 s75, 0x31016000
 		buffer_load_ubyte v63, v40, s[72:75], 0 offen
 		buffer_load_ubyte v73, v50, s[72:75], 0 offen
 		buffer_load_ubyte v221, v52, s[72:75], 0 offen
@@ -1290,8 +1308,6 @@ _a4w4_kernel:
 		s_addc_u32 s45, s11, 0
 		s_mov_b32 s76, s44
 		s_mov_b32 s77, s45
-		s_mov_b32 s78, 0x7fffffff
-		s_mov_b32 s79, 0x31016000
 		buffer_load_ubyte v251, v68, s[76:79], 0 offen
 		buffer_load_ubyte v252, v71, s[76:79], 0 offen
 		buffer_load_ubyte v253, v72, s[76:79], 0 offen

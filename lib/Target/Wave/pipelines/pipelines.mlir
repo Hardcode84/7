@@ -77,7 +77,9 @@ module attributes {transform.with_named_sequence} {
     // Hoist loop-invariant body ops out of waveamdmachine.uniform_loop.
     %rl = transform.apply_registered_pass "loop-invariant-code-motion" to %rc
         : (!transform.any_op) -> !transform.any_op
-    %r1 = transform.apply_registered_pass "waveamd-abi-lowering" to %rl
+    %rrsrc = transform.apply_registered_pass "waveamd-hoist-buffer-rsrc" to %rl
+        : (!transform.any_op) -> !transform.any_op
+    %r1 = transform.apply_registered_pass "waveamd-abi-lowering" to %rrsrc
         : (!transform.any_op) -> !transform.any_op
     %r2 = transform.apply_registered_pass "waveamd-decompose-mem-tuples" to %r1
         : (!transform.any_op) -> !transform.any_op
