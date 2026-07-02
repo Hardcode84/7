@@ -392,6 +392,21 @@ def WaveAMDPreserveHardwareRegs
   ];
 }
 
+def WaveAMDMMAReusePreschedule
+    : Pass<"waveamd-mma-reuse-preschedule"> {
+  let summary = "Pre-schedule contiguous MMA runs for operand reuse";
+  let description = [{
+    Reorders contiguous same-block MMA operation runs before model scheduling.
+    The first MMA in each run stays fixed. Each later position chooses the
+    ready remaining MMA with the most distinct register SSA operands reused
+    from the previously chosen MMA, using original order as the tie-breaker.
+  }];
+  let dependentDialects = [
+    "func::FuncDialect",
+    "waveamdmachine::WaveAMDMachineDialect"
+  ];
+}
+
 def WaveAMDMachineSchedule
     : Pass<"waveamd-machine-schedule"> {
   let summary = "Apply model-based local WaveAMDMachine scheduling";

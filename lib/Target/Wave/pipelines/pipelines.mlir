@@ -195,11 +195,13 @@ module attributes {transform.with_named_sequence} {
       %root: !transform.any_op {transform.consumed}) -> !transform.any_op {
     %r0 = transform.include @waveamd_backend_lower failures(propagate) (%root)
         : (!transform.any_op) -> !transform.any_op
+    %rpre = transform.apply_registered_pass "waveamd-mma-reuse-preschedule"
+        to %r0 : (!transform.any_op) -> !transform.any_op
     %rs = transform.apply_registered_pass "waveamd-machine-schedule" with
         options = { "apply-schedule" = true,
                     "pressure-aware-selection" = true,
                     "max-region-ops" = 512 }
-        to %r0 : (!transform.any_op) -> !transform.any_op
+        to %rpre : (!transform.any_op) -> !transform.any_op
     %r1 = transform.include @waveamd_backend_finish failures(propagate) (%rs)
         : (!transform.any_op) -> !transform.any_op
     transform.yield %r1 : !transform.any_op

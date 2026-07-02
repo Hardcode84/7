@@ -228,7 +228,7 @@
 // ASMMXFP4-SCALEPACK-LABEL: wmma_f16_matmul_tiled:
 // ASMMXFP4-SCALEPACK-COUNT-3: ds_read_b64_tr_b8
 // ASMMXFP4-SCALEPACK-COUNT-32: v_mfma_scale_f32_16x16x128_f8f6f4
-// ASMMXFP4-SCALEPACK: op_sel:[1,1,0] op_sel_hi:[1,1,0]
+// ASMMXFP4-SCALEPACK: op_sel:[1,0,0] op_sel_hi:[1,1,0]
 
 // ASMMXFP4-EPILOGUE-LABEL: wmma_f16_matmul_tiled:
 // ASMMXFP4-EPILOGUE: v_mfma_scale_f32_16x16x128_f8f6f4
