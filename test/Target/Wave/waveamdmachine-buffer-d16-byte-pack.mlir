@@ -15,10 +15,9 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 // CLEANUP: %[[EVEN_HI:.*]], %{{.*}} = waveamdmachine.buffer_load_u8_d16_hi {{.*}}, %[[ZERO0]],
 // CLEANUP: %[[ZERO1:.*]] = waveamdmachine.v_mov_b32_tuple
 // CLEANUP: %[[ODD_HI:.*]], %{{.*}} = waveamdmachine.buffer_load_u8_d16_hi {{.*}}, %[[ZERO1]],
-// CLEANUP: %[[EVEN:.*]] = waveamdmachine.v_or_b32 %[[EVEN_LO]], %[[EVEN_HI]]
 // CLEANUP: %[[ODD:.*]] = waveamdmachine.v_or_b32 %[[ODD_LO]], %[[ODD_HI]]
 // CLEANUP: %[[SHIFTED:.*]] = waveamdmachine.v_lshlrev_b32 %[[ODD]]
-// CLEANUP: waveamdmachine.v_or_b32 %[[EVEN]], %[[SHIFTED]]
+// CLEANUP: waveamdmachine.v_or3_b32 %[[EVEN_LO]], %[[EVEN_HI]], %[[SHIFTED]]
 func.func @buffer_i8_pack_d16(%in: !wave.ptr<#wave.global, i8>,
                               %out: !wave.ptr<#wave.global, i8>)
     attributes {wave.kernel} {

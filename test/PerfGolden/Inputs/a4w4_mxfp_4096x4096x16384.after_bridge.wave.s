@@ -1222,12 +1222,10 @@ _a4w4_kernel:
 		ds_read_b128 v[208:211], v83 offset:36288
 		ds_read_b128 v[212:215], v83 offset:36480
 		ds_read_b128 v[216:219], v83 offset:36544
-		s_waitcnt vmcnt(33)
-		v_or_b32_e32 v63, v87, v89
 		s_waitcnt vmcnt(32)
-		v_or_b32_e32 v73, v88, v90
-		v_lshlrev_b32_e32 v73, 8, v73
-		v_or_b32_e32 v63, v63, v73
+		v_or_b32_e32 v63, v88, v90
+		v_lshlrev_b32_e32 v63, 8, v63
+		v_or3_b32 v63, v87, v89, v63
 		ds_write_b32 v51, v63 offset:5952
 		s_waitcnt lgkmcnt(0)
 		s_barrier
@@ -1393,27 +1391,21 @@ _a4w4_kernel:
 		ds_read_b128 v[204:207], v83 offset:19424
 		ds_read_b128 v[208:211], v83 offset:19616
 		ds_read_b128 v[212:215], v83 offset:19680
-		s_waitcnt vmcnt(41)
-		v_or_b32_e32 v42, v42, v100
 		s_waitcnt vmcnt(40)
 		v_or_b32_e32 v74, v98, v101
 		v_lshlrev_b32_e32 v74, 8, v74
-		v_or_b32_e32 v88, v42, v74
-		s_waitcnt vmcnt(37)
-		v_or_b32_e32 v42, v108, v110
+		v_or3_b32 v88, v42, v100, v74
 		s_waitcnt vmcnt(36)
-		v_or_b32_e32 v74, v109, v111
-		v_lshlrev_b32_e32 v74, 8, v74
-		v_or_b32_e32 v89, v42, v74
+		v_or_b32_e32 v42, v109, v111
+		v_lshlrev_b32_e32 v42, 8, v42
+		v_or3_b32 v89, v108, v110, v42
 		ds_write_b64 v53, v[88:89] offset:3904
 		s_waitcnt lgkmcnt(0)
 		s_barrier
-		s_waitcnt vmcnt(33)
-		v_or_b32_e32 v42, v116, v118
 		s_waitcnt vmcnt(32)
-		v_or_b32_e32 v74, v117, v119
-		v_lshlrev_b32_e32 v74, 8, v74
-		v_or_b32_e32 v42, v42, v74
+		v_or_b32_e32 v42, v117, v119
+		v_lshlrev_b32_e32 v42, 8, v42
+		v_or3_b32 v42, v116, v118, v42
 		ds_write_b32 v51, v42 offset:5952
 		s_waitcnt lgkmcnt(0)
 		s_barrier
@@ -1514,12 +1506,10 @@ _a4w4_kernel:
 		ds_read_b128 v[204:207], v83 offset:53152
 		ds_read_b128 v[208:211], v83 offset:53344
 		ds_read_b128 v[212:215], v83 offset:53408
-		s_waitcnt vmcnt(33)
-		v_or_b32_e32 v36, v36, v70
 		s_waitcnt vmcnt(32)
 		v_or_b32_e32 v42, v69, v80
 		v_lshlrev_b32_e32 v42, 8, v42
-		v_or_b32_e32 v36, v36, v42
+		v_or3_b32 v36, v36, v70, v42
 		ds_write_b32 v51, v36 offset:5952
 		s_waitcnt lgkmcnt(0)
 		s_barrier
@@ -1727,36 +1717,26 @@ _a4w4_kernel:
 		s_cmp_lt_i32 s21, 62
 		s_cbranch_scc1 .L_a4w4_kernel.loop_head_0
 .L_a4w4_kernel.loop_exit_0:
-		s_waitcnt vmcnt(33)
-		v_or_b32_e32 v2, v87, v89
 		s_waitcnt vmcnt(32)
-		v_or_b32_e32 v8, v88, v90
-		v_lshlrev_b32_e32 v8, 8, v8
-		v_or_b32_e32 v2, v2, v8
-		s_waitcnt vmcnt(17)
-		v_or_b32_e32 v8, v42, v100
+		v_or_b32_e32 v2, v88, v90
+		v_lshlrev_b32_e32 v2, 8, v2
+		v_or3_b32 v2, v87, v89, v2
 		s_waitcnt vmcnt(16)
-		v_or_b32_e32 v9, v98, v101
-		v_lshlrev_b32_e32 v9, 8, v9
-		v_or_b32_e32 v14, v8, v9
-		s_waitcnt vmcnt(13)
-		v_or_b32_e32 v8, v108, v110
+		v_or_b32_e32 v8, v98, v101
+		v_lshlrev_b32_e32 v8, 8, v8
+		v_or3_b32 v14, v42, v100, v8
 		s_waitcnt vmcnt(12)
-		v_or_b32_e32 v9, v109, v111
-		v_lshlrev_b32_e32 v9, 8, v9
-		v_or_b32_e32 v15, v8, v9
-		s_waitcnt vmcnt(9)
-		v_or_b32_e32 v8, v116, v118
+		v_or_b32_e32 v8, v109, v111
+		v_lshlrev_b32_e32 v8, 8, v8
+		v_or3_b32 v15, v108, v110, v8
 		s_waitcnt vmcnt(8)
-		v_or_b32_e32 v9, v117, v119
-		v_lshlrev_b32_e32 v9, 8, v9
-		v_or_b32_e32 v8, v8, v9
-		s_waitcnt vmcnt(1)
-		v_or_b32_e32 v9, v36, v70
+		v_or_b32_e32 v8, v117, v119
+		v_lshlrev_b32_e32 v8, 8, v8
+		v_or3_b32 v8, v116, v118, v8
 		s_waitcnt vmcnt(0)
-		v_or_b32_e32 v10, v69, v80
-		v_lshlrev_b32_e32 v10, 8, v10
-		v_or_b32_e32 v9, v9, v10
+		v_or_b32_e32 v9, v69, v80
+		v_lshlrev_b32_e32 v9, 8, v9
+		v_or3_b32 v9, v36, v70, v9
 		s_waitcnt lgkmcnt(0)
 		v_mfma_scale_f32_16x16x128_f8f6f4 v[4:7], v[124:127], v[128:131], v[4:7], v74, v64 op_sel_hi:[0,0,0] cbsz:4 blgp:4
 		v_mfma_scale_f32_16x16x128_f8f6f4 v[4:7], v[192:195], v[132:135], v[4:7], v74, v64 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4

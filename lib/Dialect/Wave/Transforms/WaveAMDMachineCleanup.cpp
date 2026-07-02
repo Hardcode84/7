@@ -433,6 +433,16 @@ static ContinueIfOp getLoopTerminator(UniformLoopOp loop) {
 static LogicalResult collectByteTrace(Value value, ByteTraceContext &ctx,
                                       ByteTrace &trace);
 
+static LogicalResult appendTraceSource(Value value, ByteTraceSourceKind kind,
+                                       BufferLoadU8Op load,
+                                       ByteTraceContext &ctx,
+                                       ByteTrace &trace) {
+  if (!hasOnlyAllowedUses(value, ctx))
+    return failure();
+  trace.sources.push_back({kind, load, value});
+  return success();
+}
+
 static LogicalResult collectLoopResultTrace(UniformLoopOp loop, unsigned index,
                                             ByteTraceContext &ctx,
                                             ByteTrace &trace) {
@@ -476,6 +486,29 @@ static LogicalResult collectLoopArgTrace(BlockArgument arg,
   return collectByteTrace(term.getCarries()[index], ctx, trace);
 }
 
+static LogicalResult collectNonConstantByteTrace(Value value,
+                                                 ByteTraceContext &ctx,
+                                                 ByteTrace &trace) {
+  if (BufferLoadU8Op load = value.getDefiningOp<BufferLoadU8Op>()) {
+    return appendTraceSource(value, ByteTraceSourceKind::RawLoad, load, ctx,
+                             trace);
+  }
+  if (value.getDefiningOp<BufferLoadU8D16Op>())
+    return appendTraceSource(value, ByteTraceSourceKind::D16Low, {}, ctx,
+                             trace);
+  if (value.getDefiningOp<BufferLoadU8D16HiOp>())
+    return appendTraceSource(value, ByteTraceSourceKind::D16High, {}, ctx,
+                             trace);
+  if (OpResult opResult = dyn_cast<OpResult>(value)) {
+    if (auto loop = dyn_cast<UniformLoopOp>(opResult.getOwner()))
+      return collectLoopResultTrace(loop, opResult.getResultNumber(), ctx,
+                                    trace);
+  }
+  if (BlockArgument arg = dyn_cast<BlockArgument>(value))
+    return collectLoopArgTrace(arg, ctx, trace);
+  return failure();
+}
+
 static LogicalResult collectByteTrace(Value value, ByteTraceContext &ctx,
                                       ByteTrace &trace) {
   uint64_t imm = 0;
@@ -488,29 +521,7 @@ static LogicalResult collectByteTrace(Value value, ByteTraceContext &ctx,
   if (!ctx.visiting.insert(value).second)
     return failure();
 
-  LogicalResult result = failure();
-  if (BufferLoadU8Op load = value.getDefiningOp<BufferLoadU8Op>()) {
-    if (hasOnlyAllowedUses(value, ctx)) {
-      trace.sources.push_back({ByteTraceSourceKind::RawLoad, load, value});
-      result = success();
-    }
-  } else if (value.getDefiningOp<BufferLoadU8D16Op>()) {
-    if (hasOnlyAllowedUses(value, ctx)) {
-      trace.sources.push_back({ByteTraceSourceKind::D16Low, {}, value});
-      result = success();
-    }
-  } else if (value.getDefiningOp<BufferLoadU8D16HiOp>()) {
-    if (hasOnlyAllowedUses(value, ctx)) {
-      trace.sources.push_back({ByteTraceSourceKind::D16High, {}, value});
-      result = success();
-    }
-  } else if (OpResult opResult = dyn_cast<OpResult>(value)) {
-    if (auto loop = dyn_cast<UniformLoopOp>(opResult.getOwner()))
-      result =
-          collectLoopResultTrace(loop, opResult.getResultNumber(), ctx, trace);
-  } else if (BlockArgument arg = dyn_cast<BlockArgument>(value)) {
-    result = collectLoopArgTrace(arg, ctx, trace);
-  }
+  LogicalResult result = collectNonConstantByteTrace(value, ctx, trace);
 
   ctx.visiting.erase(value);
   return result;
@@ -522,32 +533,71 @@ static bool canFoldPackOp(Operation *op, Operation *root, Value result) {
   return true;
 }
 
-static bool collectOrTerms(Value value, Operation *root, BytePackMatch &match,
-                           SmallVectorImpl<Value> &terms) {
-  Operation *def = value.getDefiningOp();
-  if (!def) {
-    terms.push_back(value);
-    return true;
-  }
+static std::optional<unsigned> getBytePackShift(VLshlrevB32Op shl) {
+  std::optional<int64_t> amount = getImmValue(shl.getRhs());
+  if (!amount || (*amount != 8 && *amount != 16 && *amount != 24))
+    return std::nullopt;
+  return static_cast<unsigned>(*amount);
+}
 
+static bool collectPackLanes(Value value, Operation *root, unsigned baseShift,
+                             BytePackMatch &match,
+                             SmallVectorImpl<BytePackLane> &lanes);
+
+static bool collectPackLanesFromOr(Operation *def, Operation *root,
+                                   unsigned baseShift, BytePackMatch &match,
+                                   SmallVectorImpl<BytePackLane> &lanes) {
   if (auto orOp = dyn_cast<VOrB32Op>(def)) {
     if (!canFoldPackOp(def, root, orOp.getResult()))
       return false;
     addPackOp(match, def);
-    return collectOrTerms(orOp.getLhs(), root, match, terms) &&
-           collectOrTerms(orOp.getRhs(), root, match, terms);
+    return collectPackLanes(orOp.getLhs(), root, baseShift, match, lanes) &&
+           collectPackLanes(orOp.getRhs(), root, baseShift, match, lanes);
   }
 
   if (auto or3Op = dyn_cast<VOr3B32Op>(def)) {
     if (!canFoldPackOp(def, root, or3Op.getResult()))
       return false;
     addPackOp(match, def);
-    return collectOrTerms(or3Op.getA(), root, match, terms) &&
-           collectOrTerms(or3Op.getB(), root, match, terms) &&
-           collectOrTerms(or3Op.getC(), root, match, terms);
+    return collectPackLanes(or3Op.getA(), root, baseShift, match, lanes) &&
+           collectPackLanes(or3Op.getB(), root, baseShift, match, lanes) &&
+           collectPackLanes(or3Op.getC(), root, baseShift, match, lanes);
+  }
+  return false;
+}
+
+static bool collectPackLanesFromShift(VLshlrevB32Op shl, Operation *root,
+                                      unsigned baseShift, BytePackMatch &match,
+                                      SmallVectorImpl<BytePackLane> &lanes) {
+  if (!canFoldPackOp(shl, root, shl.getResult()))
+    return false;
+  std::optional<unsigned> amount = getBytePackShift(shl);
+  if (!amount)
+    return false;
+  unsigned shift = baseShift + *amount;
+  if (shift > 24)
+    return false;
+  addPackOp(match, shl);
+  return collectPackLanes(shl.getLhs(), root, shift, match, lanes);
+}
+
+static bool collectPackLanes(Value value, Operation *root, unsigned baseShift,
+                             BytePackMatch &match,
+                             SmallVectorImpl<BytePackLane> &lanes) {
+  Operation *def = value.getDefiningOp();
+  if (!def) {
+    lanes.push_back({value, baseShift});
+    return true;
   }
 
-  terms.push_back(value);
+  if (isa<VOrB32Op, VOr3B32Op>(def))
+    return collectPackLanesFromOr(def, root, baseShift, match, lanes);
+
+  if (auto shl = dyn_cast<VLshlrevB32Op>(def)) {
+    return collectPackLanesFromShift(shl, root, baseShift, match, lanes);
+  }
+
+  lanes.push_back({value, baseShift});
   return true;
 }
 
@@ -570,25 +620,32 @@ static bool matchMaskedByte(Value value, Value &source, BytePackMatch &match) {
   return false;
 }
 
-static bool matchBytePackTerm(Value term, BytePackLane &lane,
+static bool matchBytePackTerm(BytePackLane term, BytePackLane &lane,
                               BytePackMatch &match) {
-  unsigned shift = 0;
-  Value byte = term;
-  if (auto shl = term.getDefiningOp<VLshlrevB32Op>()) {
-    if (!shl.getResult().hasOneUse())
-      return false;
-    std::optional<int64_t> amount = getImmValue(shl.getRhs());
-    if (!amount || (*amount != 8 && *amount != 16 && *amount != 24))
-      return false;
-    shift = static_cast<unsigned>(*amount);
-    byte = shl.getLhs();
-    addPackOp(match, shl);
+  Value source;
+  if (matchMaskedByte(term.source, source, match)) {
+    lane = {source, term.shift};
+    return true;
   }
 
-  Value source;
-  if (!matchMaskedByte(byte, source, match))
+  ByteTraceContext ctx;
+  ctx.packOps = match.opSet;
+  ByteTrace trace;
+  if (failed(collectByteTrace(term.source, ctx, trace)))
     return false;
-  lane = {source, shift};
+
+  std::optional<unsigned> sourceShift;
+  for (const ByteTraceSource &traceSource : trace.sources) {
+    if (traceSource.kind == ByteTraceSourceKind::RawLoad)
+      return false;
+    unsigned shift = traceSource.kind == ByteTraceSourceKind::D16High ? 16 : 0;
+    if (sourceShift && *sourceShift != shift)
+      return false;
+    sourceShift = shift;
+  }
+  if (!sourceShift || term.shift + *sourceShift > 24)
+    return false;
+  lane = {term.source, term.shift + *sourceShift};
   return true;
 }
 
@@ -602,9 +659,10 @@ static std::optional<unsigned> getBytePackLaneIndex(BytePackLane lane,
   return index;
 }
 
-static bool collectBytePackLanes(ArrayRef<Value> terms, BytePackMatch &match) {
+static bool collectBytePackLanes(ArrayRef<BytePackLane> terms,
+                                 BytePackMatch &match) {
   std::array<bool, 4> seen = {};
-  for (Value term : terms) {
+  for (BytePackLane term : terms) {
     BytePackLane lane;
     if (!matchBytePackTerm(term, lane, match))
       return false;
@@ -623,8 +681,8 @@ static std::optional<BytePackMatch> matchBytePack(Operation *root) {
     return std::nullopt;
 
   BytePackMatch match;
-  SmallVector<Value, 4> terms;
-  if (!collectOrTerms(root->getResult(0), root, match, terms) ||
+  SmallVector<BytePackLane, 4> terms;
+  if (!collectPackLanes(root->getResult(0), root, 0, match, terms) ||
       terms.size() != 4)
     return std::nullopt;
 
@@ -717,11 +775,9 @@ static bool d16HighIncludesLow(Value high, Value low) {
   return d16Hi && d16Hi.getPreserved() == low;
 }
 
-static FailureOr<Value> getOrCreateD16High(OpBuilder &builder,
-                                           const ByteTraceSource &source,
-                                           Value preserved,
-                                           D16RewriteState &state,
-                                           bool &includesLow) {
+static FailureOr<Value>
+getOrCreateD16High(OpBuilder &builder, const ByteTraceSource &source,
+                   Value preserved, D16RewriteState &state, bool &includesLow) {
   switch (source.kind) {
   case ByteTraceSourceKind::RawLoad:
     return createD16Hi(builder, source.load, preserved, state);
@@ -734,6 +790,61 @@ static FailureOr<Value> getOrCreateD16High(OpBuilder &builder,
   llvm_unreachable("unknown byte trace source kind");
 }
 
+static LogicalResult collectLowD16s(OpBuilder &builder, const ByteTrace &low,
+                                    D16RewriteState &state,
+                                    SmallVectorImpl<Value> &lowD16s) {
+  lowD16s.reserve(low.sources.size());
+  for (const ByteTraceSource &source : low.sources) {
+    FailureOr<Value> lowD16 = getOrCreateD16Low(builder, source, state);
+    if (failed(lowD16))
+      return failure();
+    lowD16s.push_back(*lowD16);
+  }
+  return success();
+}
+
+static bool updateExistingD16High(const ByteTraceSource &source,
+                                  ArrayRef<Value> lowD16s, unsigned index) {
+  return index < lowD16s.size() &&
+         d16HighIncludesLow(source.value, lowD16s[index]);
+}
+
+static FailureOr<Value>
+getD16HighPreserved(OpBuilder &builder, const ByteTraceSource &source,
+                    ArrayRef<Value> lowD16s, unsigned index,
+                    D16RewriteState &state, bool &highIncludesLow) {
+  Operation *insertPoint = source.value.getDefiningOp();
+  if (!insertPoint)
+    return failure();
+  if (state.preservesUnusedBits && index < lowD16s.size() &&
+      valueAvailableBefore(lowD16s[index], insertPoint))
+    return lowD16s[index];
+  highIncludesLow = false;
+  return createZeroVGPR(builder, insertPoint, source.value.getType());
+}
+
+static LogicalResult
+rewriteHighTraceSource(OpBuilder &builder, const ByteTraceSource &source,
+                       ArrayRef<Value> lowD16s, unsigned index,
+                       D16RewriteState &state, bool &highIncludesLow) {
+  if (source.kind == ByteTraceSourceKind::D16High) {
+    highIncludesLow &= updateExistingD16High(source, lowD16s, index);
+    return success();
+  }
+  if (source.kind != ByteTraceSourceKind::RawLoad)
+    return failure();
+
+  FailureOr<Value> preserved = getD16HighPreserved(
+      builder, source, lowD16s, index, state, highIncludesLow);
+  if (failed(preserved))
+    return failure();
+  FailureOr<Value> highD16 =
+      getOrCreateD16High(builder, source, *preserved, state, highIncludesLow);
+  if (failed(highD16))
+    return failure();
+  return success();
+}
+
 static FailureOr<bool> rewriteTracePairLoads(OpBuilder &builder,
                                              const ByteTrace &low,
                                              const ByteTrace &high,
@@ -742,33 +853,15 @@ static FailureOr<bool> rewriteTracePairLoads(OpBuilder &builder,
     return failure();
 
   SmallVector<Value, 2> lowD16s;
-  lowD16s.reserve(low.sources.size());
-  for (const ByteTraceSource &source : low.sources) {
-    FailureOr<Value> lowD16 = getOrCreateD16Low(builder, source, state);
-    if (failed(lowD16))
-      return failure();
-    lowD16s.push_back(*lowD16);
-  }
+  if (failed(collectLowD16s(builder, low, state, lowD16s)))
+    return failure();
 
   bool highIncludesLow = !high.sources.empty();
-  for (auto [index, source] : llvm::enumerate(high.sources)) {
-    Operation *insertPoint = source.value.getDefiningOp();
-    if (!insertPoint)
+  for (auto [index, source] : llvm::enumerate(high.sources))
+    if (failed(rewriteHighTraceSource(builder, source, lowD16s, index, state,
+                                      highIncludesLow)))
       return failure();
-    Value preserved;
-    if (state.preservesUnusedBits && index < lowD16s.size() &&
-        (source.kind != ByteTraceSourceKind::RawLoad ||
-         valueAvailableBefore(lowD16s[index], insertPoint)))
-      preserved = lowD16s[index];
-    else {
-      preserved = createZeroVGPR(builder, insertPoint, source.value.getType());
-      highIncludesLow = false;
-    }
-    FailureOr<Value> highD16 =
-        getOrCreateD16High(builder, source, preserved, state, highIncludesLow);
-    if (failed(highD16))
-      return failure();
-  }
+
   if (highIncludesLow && high.hasConstant && low.hasNonZeroConstant)
     highIncludesLow = false;
   return highIncludesLow;
@@ -798,6 +891,23 @@ static Value createOr(OpBuilder &builder, Location loc, Value lhs, Value rhs,
   if (getU32Imm(lhs, lhsImm) && getU32Imm(rhs, rhsImm))
     return createImm(builder, loc, lhsImm | rhsImm);
   return VOrB32Op::create(builder, loc, resultType, lhs, rhs).getResult();
+}
+
+static Value createOr3(OpBuilder &builder, Location loc, Value a, Value b,
+                       Value c, Type resultType) {
+  if (isZeroImm(a))
+    return createOr(builder, loc, b, c, resultType);
+  if (isZeroImm(b))
+    return createOr(builder, loc, a, c, resultType);
+  if (isZeroImm(c))
+    return createOr(builder, loc, a, b, resultType);
+
+  uint64_t aImm = 0;
+  uint64_t bImm = 0;
+  uint64_t cImm = 0;
+  if (getU32Imm(a, aImm) && getU32Imm(b, bImm) && getU32Imm(c, cImm))
+    return createImm(builder, loc, aImm | bImm | cImm);
+  return VOr3B32Op::create(builder, loc, resultType, a, b, c).getResult();
 }
 
 static Value ensureVGPR(OpBuilder &builder, Location loc, Value value,
@@ -840,6 +950,11 @@ static bool eraseDeadPackOps(BytePackMatch &match) {
     }
   }
   return changed;
+}
+
+static bool hasByteMaskPackOp(const BytePackMatch &match) {
+  return llvm::any_of(match.ops,
+                      [](Operation *op) { return op && isa<VAndB32Op>(op); });
 }
 
 static void eraseDeadOldLoads(D16RewriteState &state) {
@@ -892,14 +1007,21 @@ static void replaceBytePackRoot(OpBuilder &builder, Operation *root,
   builder.setInsertionPoint(root);
   Type resultType = root->getResult(0).getType();
   Location loc = root->getLoc();
-  Value even =
-      createPairValue(builder, root, match.lanes[0], traces[0], match.lanes[2],
-                      traces[2], highIncludesLow[0], state);
   Value odd =
       createPairValue(builder, root, match.lanes[1], traces[1], match.lanes[3],
                       traces[3], highIncludesLow[1], state);
   odd = createShiftLeft(builder, loc, odd, 8, resultType);
-  Value word = createOr(builder, loc, even, odd, resultType);
+  Value word;
+  if (!highIncludesLow[0] && !traces[2].sources.empty()) {
+    Value low = getReplacement(state, match.lanes[0].source);
+    Value high = getReplacement(state, match.lanes[2].source);
+    word = createOr3(builder, loc, low, high, odd, resultType);
+  } else {
+    Value even =
+        createPairValue(builder, root, match.lanes[0], traces[0],
+                        match.lanes[2], traces[2], highIncludesLow[0], state);
+    word = createOr(builder, loc, even, odd, resultType);
+  }
   word = ensureVGPR(builder, loc, word, resultType);
   root->getResult(0).replaceAllUsesWith(word);
   eraseDeadPackOps(match);
@@ -923,6 +1045,9 @@ static FailureOr<bool> rewriteBytePack(Operation *root,
   FailureOr<std::array<bool, 2>> highIncludesLow =
       rewriteBytePackLoads(builder, traces, state);
   if (failed(highIncludesLow))
+    return false;
+  if (isa<VOr3B32Op>(root) && state.replacements.empty() &&
+      !(*highIncludesLow)[0] && !hasByteMaskPackOp(*match))
     return false;
 
   replaceBytePackRoot(builder, root, *match, traces, *highIncludesLow, state);
