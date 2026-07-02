@@ -426,6 +426,10 @@ static bool isTupleMemoryOp(Operation *op) {
   return op->hasTrait<OpTrait::waveamdmachine::TupleMemoryOp>();
 }
 
+static bool isMemToken(Value value) {
+  return isa<waveamdmachine::MemTokenType>(value.getType());
+}
+
 // Operand reads here are branch arguments, not value uses; framework
 // hooks remap tokens to successors instead.
 static bool isControlFlowOp(Operation *op) {
@@ -610,7 +614,7 @@ static WaitRequirement computeRequirement(Operation *op,
     if (isD16LowPreservedOperand(operand))
       continue;
     // Issuer `after` tokens order issue. Completion waits stay explicit.
-    if (issuer && isa<waveamdmachine::MemTokenType>(operand.get().getType())) {
+    if (issuer && isMemToken(operand.get())) {
       requireIssuerToken(req, operand.get(), state, op);
       continue;
     }
@@ -628,6 +632,28 @@ static void recordIssue(Operation *op, WaitState &state) {
   collectIssuerResults(op, results);
   lat::issue(state, *counter, info.issueCount, eventMask(info.event),
              info.outOfOrder, isMemoryWriteIssuer(op), results);
+}
+
+static void deriveIssuerDependencyTokens(Operation *op, WaitState &state) {
+  if (!isReadOnlyIssuer(op))
+    return;
+
+  SmallVector<Value, 2> dependencies;
+  for (Value operand : op->getOperands()) {
+    if (isMemToken(operand))
+      dependencies.push_back(operand);
+  }
+  if (dependencies.empty())
+    return;
+
+  for (Value result : op->getResults()) {
+    if (!isMemToken(result))
+      continue;
+    SmallVector<Token, 3> derived =
+        lat::mergeSources(state.tokens, dependencies, result);
+    for (Token t : derived)
+      lat::insertOrMin(state.tokens, t);
+  }
 }
 
 // Each result inherits per-counter MIN over operands. Used by s_barrier,
@@ -694,6 +720,7 @@ static void runTransfer(Operation *op, WaitState &state,
   case OpKind::Issuer:
     applyDrain(op, state, isaVer, emit);
     recordIssue(op, state);
+    deriveIssuerDependencyTokens(op, state);
     return;
   case OpKind::Barrier:
     // Drain ahead of the fence AND seed result tokens so downstream

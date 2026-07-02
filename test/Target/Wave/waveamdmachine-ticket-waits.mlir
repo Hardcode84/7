@@ -175,6 +175,25 @@ func.func @gfx950_joined_lds_read_token_does_not_wait_before_read(%x: !waveamdma
   return
 }
 
+// CHECK-LABEL: func.func @read_only_issuer_token_preserves_cross_counter_dep
+// CHECK: waveamdmachine.ds_load_b32
+// CHECK-NEXT: waveamdmachine.global_load_b32
+// CHECK-NEXT: waveamdmachine.s_waitcnt vmcnt(0) lgkmcnt(0)
+// CHECK-NEXT: waveamdmachine.wait
+func.func @read_only_issuer_token_preserves_cross_counter_dep(
+    %off: !waveamdmachine.reg<vgpr, 1>,
+    %base: !waveamdmachine.reg<sgpr, 2>) {
+  %lds, %lds_tok = waveamdmachine.ds_load_b32 %off
+      : (!waveamdmachine.reg<vgpr, 1>)
+        -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+  %global, %global_tok = waveamdmachine.global_load_b32 %off, %base after %lds_tok
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 2>,
+         !waveamdmachine.mem.token)
+        -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+  waveamdmachine.wait %global_tok : (!waveamdmachine.mem.token) -> ()
+  return
+}
+
 }
 
 // -----
