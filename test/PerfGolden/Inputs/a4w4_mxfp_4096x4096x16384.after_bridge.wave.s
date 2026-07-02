@@ -2099,61 +2099,59 @@ _a4w4_kernel:
 		v_accvgpr_read_b32 v10, a103
 		v_cvt_pk_bf16_f32 v183, v2, v10
 		v_lshlrev_b32_e32 v0, 4, v0
-		v_add_u32_e32 v0, 0x20000, v0
-		ds_write_b128 v0, v[52:55] offset:6976
-		ds_write_b128 v0, v[120:123] offset:11072
-		ds_write_b128 v0, v[4:7] offset:15168
-		ds_write_b128 v0, v[132:135] offset:19264
+		ds_write_b128 v0, v[52:55]
+		ds_write_b128 v0, v[120:123] offset:4096
+		ds_write_b128 v0, v[4:7] offset:8192
+		ds_write_b128 v0, v[132:135] offset:12288
 		s_waitcnt lgkmcnt(0)
 		s_barrier
-		v_accvgpr_read_b32 v2, a0
-		v_lshlrev_b32_e32 v2, 4, v2
-		v_add_u32_e32 v2, 0x20000, v2
-		v_lshl_add_u32 v2, v18, 9, v2
+		v_lshlrev_b32_e32 v2, 9, v18
+		v_accvgpr_read_b32 v4, a0
+		v_lshl_add_u32 v2, v4, 4, v2
 		v_lshl_add_u32 v2, v16, 13, v2
 		v_lshlrev_b32_e32 v4, 12, v20
 		v_accvgpr_read_b32 v5, a1
 		v_add3_u32 v2, v2, v4, v5
-		ds_read_b128 v[4:7], v2 offset:6976
-		ds_read_b128 v[52:55], v2 offset:7232
-		ds_read_b128 v[120:123], v2 offset:9024
-		ds_read_b128 v[132:135], v2 offset:9280
+		ds_read_b128 v[4:7], v2
+		ds_read_b128 v[52:55], v2 offset:256
+		ds_read_b128 v[120:123], v2 offset:2048
+		ds_read_b128 v[132:135], v2 offset:2304
 		s_waitcnt lgkmcnt(0)
 		s_barrier
-		ds_write_b128 v0, v[136:139] offset:6976
-		ds_write_b128 v0, v[140:143] offset:11072
-		ds_write_b128 v0, v[144:147] offset:15168
-		ds_write_b128 v0, v[148:151] offset:19264
+		ds_write_b128 v0, v[136:139]
+		ds_write_b128 v0, v[140:143] offset:4096
+		ds_write_b128 v0, v[144:147] offset:8192
+		ds_write_b128 v0, v[148:151] offset:12288
 		s_waitcnt lgkmcnt(0)
 		s_barrier
-		ds_read_b128 v[136:139], v2 offset:6976
-		ds_read_b128 v[140:143], v2 offset:7232
-		ds_read_b128 v[144:147], v2 offset:9024
-		ds_read_b128 v[148:151], v2 offset:9280
+		ds_read_b128 v[136:139], v2
+		ds_read_b128 v[140:143], v2 offset:256
+		ds_read_b128 v[144:147], v2 offset:2048
+		ds_read_b128 v[148:151], v2 offset:2304
 		s_waitcnt lgkmcnt(0)
 		s_barrier
-		ds_write_b128 v0, v[152:155] offset:6976
-		ds_write_b128 v0, v[156:159] offset:11072
-		ds_write_b128 v0, v[160:163] offset:15168
-		ds_write_b128 v0, v[164:167] offset:19264
+		ds_write_b128 v0, v[152:155]
+		ds_write_b128 v0, v[156:159] offset:4096
+		ds_write_b128 v0, v[160:163] offset:8192
+		ds_write_b128 v0, v[164:167] offset:12288
 		s_waitcnt lgkmcnt(0)
 		s_barrier
-		ds_read_b128 v[152:155], v2 offset:6976
-		ds_read_b128 v[156:159], v2 offset:7232
-		ds_read_b128 v[160:163], v2 offset:9024
-		ds_read_b128 v[164:167], v2 offset:9280
+		ds_read_b128 v[152:155], v2
+		ds_read_b128 v[156:159], v2 offset:256
+		ds_read_b128 v[160:163], v2 offset:2048
+		ds_read_b128 v[164:167], v2 offset:2304
 		s_waitcnt lgkmcnt(0)
 		s_barrier
-		ds_write_b128 v0, v[168:171] offset:6976
-		ds_write_b128 v0, v[172:175] offset:11072
-		ds_write_b128 v0, v[176:179] offset:15168
-		ds_write_b128 v0, v[180:183] offset:19264
+		ds_write_b128 v0, v[168:171]
+		ds_write_b128 v0, v[172:175] offset:4096
+		ds_write_b128 v0, v[176:179] offset:8192
+		ds_write_b128 v0, v[180:183] offset:12288
 		s_waitcnt lgkmcnt(0)
 		s_barrier
-		ds_read_b128 v[168:171], v2 offset:6976
-		ds_read_b128 v[172:175], v2 offset:7232
-		ds_read_b128 v[176:179], v2 offset:9024
-		ds_read_b128 v[180:183], v2 offset:9280
+		ds_read_b128 v[168:171], v2
+		ds_read_b128 v[172:175], v2 offset:256
+		ds_read_b128 v[176:179], v2 offset:2048
+		ds_read_b128 v[180:183], v2 offset:2304
 		s_waitcnt lgkmcnt(0)
 		s_barrier
 		s_lshl_b32 s1, s1, 1
@@ -2633,52 +2631,52 @@ _a4w4_kernel:
 		v_accvgpr_read_b32 v3, a230
 		v_accvgpr_read_b32 v8, a231
 		v_cvt_pk_bf16_f32 v91, v3, v8
-		ds_write_b128 v0, v[24:27] offset:6976
-		ds_write_b128 v0, v[28:31] offset:11072
-		ds_write_b128 v0, v[32:35] offset:15168
-		ds_write_b128 v0, v[36:39] offset:19264
+		ds_write_b128 v0, v[24:27]
+		ds_write_b128 v0, v[28:31] offset:4096
+		ds_write_b128 v0, v[32:35] offset:8192
+		ds_write_b128 v0, v[36:39] offset:12288
 		s_waitcnt lgkmcnt(0)
 		s_barrier
-		ds_read_b128 v[24:27], v2 offset:6976
-		ds_read_b128 v[28:31], v2 offset:7232
-		ds_read_b128 v[32:35], v2 offset:9024
-		ds_read_b128 v[36:39], v2 offset:9280
+		ds_read_b128 v[24:27], v2
+		ds_read_b128 v[28:31], v2 offset:256
+		ds_read_b128 v[32:35], v2 offset:2048
+		ds_read_b128 v[36:39], v2 offset:2304
 		s_waitcnt lgkmcnt(0)
 		s_barrier
-		ds_write_b128 v0, v[40:43] offset:6976
-		ds_write_b128 v0, v[48:51] offset:11072
-		ds_write_b128 v0, v[52:55] offset:15168
-		ds_write_b128 v0, v[56:59] offset:19264
+		ds_write_b128 v0, v[40:43]
+		ds_write_b128 v0, v[48:51] offset:4096
+		ds_write_b128 v0, v[52:55] offset:8192
+		ds_write_b128 v0, v[56:59] offset:12288
 		s_waitcnt lgkmcnt(0)
 		s_barrier
-		ds_read_b128 v[40:43], v2 offset:6976
-		ds_read_b128 v[48:51], v2 offset:7232
-		ds_read_b128 v[52:55], v2 offset:9024
-		ds_read_b128 v[56:59], v2 offset:9280
+		ds_read_b128 v[40:43], v2
+		ds_read_b128 v[48:51], v2 offset:256
+		ds_read_b128 v[52:55], v2 offset:2048
+		ds_read_b128 v[56:59], v2 offset:2304
 		s_waitcnt lgkmcnt(0)
 		s_barrier
-		ds_write_b128 v0, v[60:63] offset:6976
-		ds_write_b128 v0, v[64:67] offset:11072
-		ds_write_b128 v0, v[68:71] offset:15168
-		ds_write_b128 v0, v[72:75] offset:19264
+		ds_write_b128 v0, v[60:63]
+		ds_write_b128 v0, v[64:67] offset:4096
+		ds_write_b128 v0, v[68:71] offset:8192
+		ds_write_b128 v0, v[72:75] offset:12288
 		s_waitcnt lgkmcnt(0)
 		s_barrier
-		ds_read_b128 v[60:63], v2 offset:6976
-		ds_read_b128 v[64:67], v2 offset:7232
-		ds_read_b128 v[68:71], v2 offset:9024
-		ds_read_b128 v[72:75], v2 offset:9280
+		ds_read_b128 v[60:63], v2
+		ds_read_b128 v[64:67], v2 offset:256
+		ds_read_b128 v[68:71], v2 offset:2048
+		ds_read_b128 v[72:75], v2 offset:2304
 		s_waitcnt lgkmcnt(0)
 		s_barrier
-		ds_write_b128 v0, v[76:79] offset:6976
-		ds_write_b128 v0, v[80:83] offset:11072
-		ds_write_b128 v0, v[84:87] offset:15168
-		ds_write_b128 v0, v[88:91] offset:19264
+		ds_write_b128 v0, v[76:79]
+		ds_write_b128 v0, v[80:83] offset:4096
+		ds_write_b128 v0, v[84:87] offset:8192
+		ds_write_b128 v0, v[88:91] offset:12288
 		s_waitcnt lgkmcnt(0)
 		s_barrier
-		ds_read_b128 v[76:79], v2 offset:6976
-		ds_read_b128 v[80:83], v2 offset:7232
-		ds_read_b128 v[84:87], v2 offset:9024
-		ds_read_b128 v[88:91], v2 offset:9280
+		ds_read_b128 v[76:79], v2
+		ds_read_b128 v[80:83], v2 offset:256
+		ds_read_b128 v[84:87], v2 offset:2048
+		ds_read_b128 v[88:91], v2 offset:2304
 		s_waitcnt lgkmcnt(0)
 		s_barrier
 		v_mov_b64_e32 v[92:93], v[24:25]
@@ -2777,7 +2775,7 @@ _a4w4_kernel:
 	.section	.rodata,"a",@progbits
 	.p2align	6, 0x0
 	.amdhsa_kernel _a4w4_kernel
-		.amdhsa_group_segment_fixed_size 154432
+		.amdhsa_group_segment_fixed_size 138048
 		.amdhsa_private_segment_fixed_size 0
 		.amdhsa_kernarg_size 72
 		.amdhsa_user_sgpr_count 16
@@ -2870,7 +2868,7 @@ amdhsa.kernels:
         .offset:         64
         .size:           4
         .value_kind:     by_value
-    .group_segment_fixed_size: 154432
+    .group_segment_fixed_size: 138048
     .kernarg_segment_align: 8
     .kernarg_segment_size: 72
     .max_flat_workgroup_size: 256
