@@ -156,7 +156,7 @@ func.func @mfma_gfx950_mxfp4_transposed_scale_kernel(%out: !wave.ptr<#wave.globa
       : i32 -> !waveamd.fragment<1, i8, 16, 16, 64, 4>
   %acc = waveamd.fragment_fill %zero
       : i32 -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
-  %lds = wave.lds_base : !wave.ptr<#wave.shared, i8>
+  %lds = wave.shared_memory_base : !wave.ptr<#wave.shared, i8>
   %lane = wave.lane_id : !wave.simd<i32, 64>
   %scale_ptr = wave.ptr_add %lds, %lane
       : !wave.ptr<#wave.shared, i8>, !wave.simd<i32, 64>

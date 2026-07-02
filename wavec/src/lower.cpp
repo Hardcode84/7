@@ -1059,7 +1059,8 @@ static bool lowerWaitCall(LowerCtx &lc, const Expr *e, MlirValue *out) {
   return true;
 }
 
-static bool lowerLdsBaseCall(LowerCtx &lc, const Expr *e, MlirValue *out) {
+static bool lowerSharedMemoryBaseCall(LowerCtx &lc, const Expr *e,
+                                      MlirValue *out) {
   const ExprCall &call = e->as.call;
   SourceSpan span = exprSpan(e);
   MlirType elem = mlirIntegerTypeGet(lc.ctx, 32);
@@ -1067,14 +1068,14 @@ static bool lowerLdsBaseCall(LowerCtx &lc, const Expr *e, MlirValue *out) {
   if (call.garg_count == 1 && call.gargs[0].kind == GARG_TYPE) {
     elem = lowerType(lc, call.gargs[0].type);
     if (mlirTypeIsNull(elem)) {
-      fail(lc, span, "lowering: unsupported lds_base element type");
+      fail(lc, span, "lowering: unsupported shared_memory_base element type");
       return false;
     }
   }
   if (call.arg_count == 1) {
     const Expr *a = call.args[0];
     if (a->kind != EXPR_INT_LIT) {
-      fail(lc, span, "lowering: lds_base offset must be a constant");
+      fail(lc, span, "lowering: shared_memory_base offset must be a constant");
       return false;
     }
     off = (int64_t)a->as.int_lit.value;
@@ -1083,7 +1084,7 @@ static bool lowerLdsBaseCall(LowerCtx &lc, const Expr *e, MlirValue *out) {
       mlirWavePtrTypeGet(elem, mlirWaveSharedAddressSpaceAttrGet(lc.ctx));
   MlirAttribute offAttr =
       mlirIntegerAttrGet(mlirIntegerTypeGet(lc.ctx, 64), off);
-  MlirOperation op = buildOp(lc, "wave.lds_base", {}, {ptrTy},
+  MlirOperation op = buildOp(lc, "wave.shared_memory_base", {}, {ptrTy},
                              {namedAttr(lc, "offset", offAttr)});
   *out = op0(op);
   return true;
@@ -1209,7 +1210,7 @@ static const LowerCallEntry kLowerCalls[] = {
     {"barrier", lowerBarrierCall},
     {"join", lowerJoinCall},
     {"wait", lowerWaitCall},
-    {"lds_base", lowerLdsBaseCall},
+    {"shared_memory_base", lowerSharedMemoryBaseCall},
     {"index_cast", lowerIndexCastCall},
     {"cast", lowerCastCall},
     {"fragment_fill", lowerFragmentFillCall},

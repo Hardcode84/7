@@ -45,11 +45,11 @@ simd  mask  vector  fragment  shared
 ```
 
 Builtins (`lane_id`, `subgroup_id`, `wave_id_in_grid`, `workgroup_id`,
-`workitem_id`, `load`, `store`, `barrier`, `wait`, `join`, `lds_base`,
+`workitem_id`, `load`, `store`, `barrier`, `wait`, `join`, `shared_memory_base`,
 `index_cast`, `cast`, `read_first`, `fragment_unpack`, and the explicit
 `mma_*` names) are **predeclared identifiers**, not reserved words; sema
 resolves them. Generic builtins (take `<...>`): `lane_id<W>`, `cast<T>`,
-`lds_base<T>`, `fragment_fill<T>`, `fragment_pack<T>`. The empty-token seed
+`shared_memory_base<T>`, `fragment_fill<T>`, `fragment_pack<T>`. The empty-token seed
 is spelled `token()` -- the `token` type used as a nullary constructor (see
 Grammar).
 
@@ -162,7 +162,7 @@ and the postfix `call_tail` bind tighter than any binary operator.
 2. **`<` is type-args or less-than, by the preceding token.** `<` opens a
    type/generic argument list only after a type keyword (`simd`, `mask`,
    `vector`, `fragment`) or a predeclared generic builtin (`lane_id`,
-   `workgroup_id`, `workitem_id`, `cast`, `lds_base`, `fragment_fill`,
+   `workgroup_id`, `workitem_id`, `cast`, `shared_memory_base`, `fragment_fill`,
    `fragment_pack`).
    Everywhere else `<` is the comparison
    operator. The trigger set is fixed and known to the parser, so one token
@@ -218,7 +218,7 @@ mask<32> active = i < n;                   // rule 2: 'i < n' is compare, not ge
 for index k in 0..K step BK { ... }        // rule 3: '0..K'; iv_type restricts the IV
 auto [v, t1] = load(p after t);            // rule 4 + rule 5
 store(scratch, x + i after t);             // value-first; args [scratch, x+i], dep t
-shared half *lds = lds_base<half>(0);      // 'shared' qualifier; lds_base<T> generic (rule 2)
+shared half *lds = shared_memory_base<half>(0);      // 'shared' qualifier; shared_memory_base<T> generic (rule 2)
 simd<float,32> f = cast<float>(xv);        // rule 2: cast<...> generic
 token z = token();                         // token() seed: reserved type as nullary ctor
 fragment<2,float,16,16,32,8> acc = fragment_fill<fragment<2,float,16,16,32,8>>(0);
@@ -231,7 +231,7 @@ fragment<2,float,16,16,32,8> acc = fragment_fill<fragment<2,float,16,16,32,8>>(0
   prefers destructuring, so it is omitted here.
 - Arrays / subscript `[]` (outside destructuring), structs, member access.
 - General templates/generics beyond the fixed type constructors and the
-  generic builtins (`lane_id`/`cast`/`lds_base`/`fragment_fill`/
+  generic builtins (`lane_id`/`cast`/`shared_memory_base`/`fragment_fill`/
   `fragment_pack`).
 - No raw pointer deref/address-of (`*p`, `&x`) and no `a[i]` subscript:
   pointers are read/written only via `load`/`store`.

@@ -349,10 +349,10 @@ func.func @uniform_loop_two_vmem(%off: !waveamdmachine.reg<vgpr, 1>, %base: !wav
 func.func @uniform_loop_carried_dma_token_barrier(
     %off: !waveamdmachine.reg<vgpr, 1>,
     %base: !waveamdmachine.reg<sgpr, 2>,
-    %lds_base: !waveamdmachine.reg<sgpr, 1>,
+    %shared_base: !waveamdmachine.reg<sgpr, 1>,
     %ec: !waveamdmachine.reg<scc, 1>) {
   %root = waveamdmachine.token : !waveamdmachine.mem.token
-  %m0 = waveamdmachine.s_mov_m0 %lds_base
+  %m0 = waveamdmachine.s_mov_m0 %shared_base
       : (!waveamdmachine.reg<sgpr, 1>) -> !waveamdmachine.m0
   %init = waveamdmachine.global_load_lds_b128 %off, %base, %m0 after %root
       : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 2>,
@@ -363,7 +363,7 @@ func.func @uniform_loop_carried_dma_token_barrier(
   ^bb0(%tok: !waveamdmachine.mem.token):
     %ready = waveamdmachine.s_barrier %tok
         : (!waveamdmachine.mem.token) -> !waveamdmachine.mem.token
-    %next_m0 = waveamdmachine.s_mov_m0 %lds_base
+    %next_m0 = waveamdmachine.s_mov_m0 %shared_base
         : (!waveamdmachine.reg<sgpr, 1>) -> !waveamdmachine.m0
     %next = waveamdmachine.global_load_lds_b128 %off, %base, %next_m0 after %ready
         : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 2>,

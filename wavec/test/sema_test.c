@@ -598,7 +598,7 @@ static void test_accept_for_carry(void) {
   arena_destroy(&a);
 }
 
-/* LDS round-trip with explicit tokens: lds_base, store->barrier->load
+/* LDS round-trip with explicit tokens: shared_memory_base, store->barrier->load
  * after, destructuring not needed. Exercises shared pointers + tokens. */
 static void test_accept_lds_roundtrip(void) {
   Arena a = arena_create(1u << 19);
@@ -614,11 +614,11 @@ static void test_accept_lds_roundtrip(void) {
   attrs[0] = attr(&a, "amdgpu_wave_size", 1, 32);
   attrs[1] = attr(&a, "amdgpu_lds_size", 1, 4096);
 
-  /* shared half *lds_a = lds_base<half>(0); */
+  /* shared half *lds_a = shared_memory_base<half>(0); */
   ar = expr_arr(&a, 1);
   ar[0] = e_int(&a, 0);
   body[0] = s_decl(&a, ty_ptr(&a, SCALAR_HALF, 1), "lds_a",
-                   e_call(&a, "lds_base",
+                   e_call(&a, "shared_memory_base",
                           garg_type_arr(&a, ty_scalar(&a, SCALAR_HALF)), 1, ar,
                           1, NULL));
   /* token g0 = store(load(gA + off_a), lds_a); */

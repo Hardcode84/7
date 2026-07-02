@@ -158,7 +158,7 @@ func.func @shared_dma_wide_iv_stride_pow2(
   %src = wave.ptr_add %in, %wi
       : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 64>
       -> !wave.simd<!wave.ptr<#wave.global, i32>, 64>
-  %lds = wave.lds_base : !wave.ptr<#wave.shared, i32>
+  %lds = wave.shared_memory_base : !wave.ptr<#wave.shared, i32>
   %res = scf.for %i = %c0 to %ub step %c1
       iter_args(%dst = %lds) -> (!wave.ptr<#wave.shared, i32>) {
     %tok0 = wave.token : !wave.mem.token
@@ -194,7 +194,7 @@ func.func @shared_dma_wide_iv_stride_mul(%in: !wave.ptr<#wave.global, i32>)
   %src = wave.ptr_add %in, %wi
       : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 64>
       -> !wave.simd<!wave.ptr<#wave.global, i32>, 64>
-  %lds = wave.lds_base : !wave.ptr<#wave.shared, i32>
+  %lds = wave.shared_memory_base : !wave.ptr<#wave.shared, i32>
   %res = scf.for %i = %c0 to %ub step %c1
       iter_args(%dst = %lds) -> (!wave.ptr<#wave.shared, i32>) {
     %tok0 = wave.token : !wave.mem.token

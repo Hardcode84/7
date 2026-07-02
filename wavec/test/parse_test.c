@@ -16,8 +16,8 @@
  *   - a where/otherwise;
  *   - a for-with-carry (range `0..K step 64`, destructuring `auto [v,t1]`,
  *     the `after` dependency token, reassignment carries);
- *   - the LDS token snippet (`shared half *`, `lds_base<half>`, nested
- *     `store(load(...), ...)`, `load(... after bar)`);
+ *   - the LDS token snippet (`shared half *`, `shared_memory_base<half>`,
+ * nested `store(load(...), ...)`, `load(... after bar)`);
  *   - destructuring + an `after` clause;
  *   - the `token()` seed.
  * Plus the required robustness checks:
@@ -398,8 +398,8 @@ static void test_for_carry(void) {
 
 static void test_lds(void) {
   const char *src = "kernel [[amdgpu_lds_size(4096)]] void k() {\n"
-                    "  shared half *lds_a = lds_base<half>(0);\n"
-                    "  shared half *lds_b = lds_base<half>(2048);\n"
+                    "  shared half *lds_a = shared_memory_base<half>(0);\n"
+                    "  shared half *lds_b = shared_memory_base<half>(2048);\n"
                     "  token g0 = store(load(gA + off_a), lds_a);\n"
                     "  token bar = barrier(g0);\n"
                     "  simd<half,32> a = load(lds_a after bar);\n"
@@ -411,7 +411,7 @@ static void test_lds(void) {
                          "    (block\n"
                          "      (decl (type (shared (ptr half))) \"lds_a\"\n"
                          "        (call\n"
-                         "          (ident \"lds_base\")\n"
+                         "          (ident \"shared_memory_base\")\n"
                          "          (gargs (gtype half))\n"
                          "          (args\n"
                          "            (int 0)\n"
@@ -419,7 +419,7 @@ static void test_lds(void) {
                          "      )\n"
                          "      (decl (type (shared (ptr half))) \"lds_b\"\n"
                          "        (call\n"
-                         "          (ident \"lds_base\")\n"
+                         "          (ident \"shared_memory_base\")\n"
                          "          (gargs (gtype half))\n"
                          "          (args\n"
                          "            (int 2048)\n"

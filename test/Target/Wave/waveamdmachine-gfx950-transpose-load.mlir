@@ -14,7 +14,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 // ASM: s_endpgm
 func.func @transpose_load_i8_i4()
     attributes {wave.kernel, waveamdmachine.lds_size = 256 : i64} {
-  %lds = wave.lds_base : !wave.ptr<#wave.shared, i8>
+  %lds = wave.shared_memory_base : !wave.ptr<#wave.shared, i8>
   %lane = wave.lane_id : !wave.simd<i32, 64>
   %ptr = wave.ptr_add %lds, %lane
       : !wave.ptr<#wave.shared, i8>, !wave.simd<i32, 64>
@@ -41,21 +41,21 @@ func.func @transpose_load_i8_i4()
 func.func @transpose_load_b16_datatypes()
     attributes {wave.kernel, waveamdmachine.lds_size = 256 : i64} {
   %lane = wave.lane_id : !wave.simd<i32, 64>
-  %lds_i16 = wave.lds_base : !wave.ptr<#wave.shared, i16>
+  %lds_i16 = wave.shared_memory_base : !wave.ptr<#wave.shared, i16>
   %ptr_i16 = wave.ptr_add %lds_i16, %lane
       : !wave.ptr<#wave.shared, i16>, !wave.simd<i32, 64>
       -> !wave.simd<!wave.ptr<#wave.shared, i16>, 64>
   %i16, %tok_i16 = waveamd.transpose_load %ptr_i16
       : (!wave.simd<!wave.ptr<#wave.shared, i16>, 64>)
         -> (!wave.simd<vector<4xi16>, 64>, !wave.mem.token)
-  %lds_f16 = wave.lds_base : !wave.ptr<#wave.shared, f16>
+  %lds_f16 = wave.shared_memory_base : !wave.ptr<#wave.shared, f16>
   %ptr_f16 = wave.ptr_add %lds_f16, %lane
       : !wave.ptr<#wave.shared, f16>, !wave.simd<i32, 64>
       -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
   %f16, %tok_f16 = waveamd.transpose_load %ptr_f16 after %tok_i16
       : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token)
         -> (!wave.simd<vector<4xf16>, 64>, !wave.mem.token)
-  %lds_bf16 = wave.lds_base : !wave.ptr<#wave.shared, bf16>
+  %lds_bf16 = wave.shared_memory_base : !wave.ptr<#wave.shared, bf16>
   %ptr_bf16 = wave.ptr_add %lds_bf16, %lane
       : !wave.ptr<#wave.shared, bf16>, !wave.simd<i32, 64>
       -> !wave.simd<!wave.ptr<#wave.shared, bf16>, 64>
@@ -75,7 +75,7 @@ func.func @transpose_load_b16_datatypes()
 func.func @transpose_load_b16_pack_words(%out: !wave.ptr<#wave.global, f16>)
     attributes {wave.kernel, waveamdmachine.lds_size = 256 : i64} {
   %lane = wave.lane_id : !wave.simd<i32, 64>
-  %lds = wave.lds_base : !wave.ptr<#wave.shared, f16>
+  %lds = wave.shared_memory_base : !wave.ptr<#wave.shared, f16>
   %ptr0 = wave.ptr_add %lds, %lane
       : !wave.ptr<#wave.shared, f16>, !wave.simd<i32, 64>
       -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
@@ -130,7 +130,7 @@ func.func @transpose_load_b16_pack_words(%out: !wave.ptr<#wave.global, f16>)
 func.func @transpose_load_b96_b6()
     attributes {wave.kernel, waveamdmachine.lds_size = 256 : i64} {
   %lane = wave.lane_id : !wave.simd<i32, 64>
-  %lds = wave.lds_base : !wave.ptr<#wave.shared, i32>
+  %lds = wave.shared_memory_base : !wave.ptr<#wave.shared, i32>
   %ptr = wave.ptr_add %lds, %lane
       : !wave.ptr<#wave.shared, i32>, !wave.simd<i32, 64>
       -> !wave.simd<!wave.ptr<#wave.shared, i32>, 64>
@@ -154,7 +154,7 @@ func.func @transpose_load_b96_b6()
 // ASM: s_endpgm
 func.func @transpose_load_offsets()
     attributes {wave.kernel, waveamdmachine.lds_size = 256 : i64} {
-  %lds = wave.lds_base : !wave.ptr<#wave.shared>
+  %lds = wave.shared_memory_base : !wave.ptr<#wave.shared>
   %lane = wave.lane_id : !wave.simd<i32, 64>
   %off8 = wave.index_expr <"16 + lid"> ["lid"](%lane)
       : (!wave.simd<i32, 64>) -> !wave.simd<index, 64>
@@ -200,7 +200,7 @@ func.func @transpose_load_offsets()
 // ASM: s_endpgm
 func.func @transpose_load_large_const_offset()
     attributes {wave.kernel, waveamdmachine.lds_size = 262144 : i64} {
-  %lds = wave.lds_base : !wave.ptr<#wave.shared>
+  %lds = wave.shared_memory_base : !wave.ptr<#wave.shared>
   %lane = wave.lane_id : !wave.simd<i32, 64>
   %off = wave.index_expr <"133120 + lid"> ["lid"](%lane)
       : (!wave.simd<i32, 64>) -> !wave.simd<index, 64>
@@ -221,7 +221,7 @@ func.func @transpose_load_large_const_offset()
 // ASM: s_endpgm
 func.func @transpose_load_opaque_index_expr()
     attributes {wave.kernel, waveamdmachine.lds_size = 256 : i64} {
-  %lds = wave.lds_base : !wave.ptr<#wave.shared>
+  %lds = wave.shared_memory_base : !wave.ptr<#wave.shared>
   %lane = wave.lane_id : !wave.simd<i32, 64>
   %off = wave.index_expr <"lid"> ["lid"](%lane)
       : (!wave.simd<i32, 64>) -> !wave.simd<index, 64>
@@ -244,7 +244,7 @@ func.func @transpose_load_opaque_index_expr()
 // ASM: s_endpgm
 func.func @generic_i8_shared_load_store()
     attributes {wave.kernel, waveamdmachine.lds_size = 256 : i64} {
-  %lds = wave.lds_base : !wave.ptr<#wave.shared, i8>
+  %lds = wave.shared_memory_base : !wave.ptr<#wave.shared, i8>
   %lane = wave.lane_id : !wave.simd<i32, 64>
   %ptr = wave.ptr_add %lds, %lane
       : !wave.ptr<#wave.shared, i8>, !wave.simd<i32, 64>

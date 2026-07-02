@@ -224,7 +224,7 @@ func.func @unsupported_scaled_mfma_gfx950_target(%x: i32) {
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx942"} {
 func.func @unsupported_transpose_load_gfx950_target()
     attributes {wave.kernel, waveamdmachine.lds_size = 256 : i64} {
-  %lds = wave.lds_base : !wave.ptr<#wave.shared, i8>
+  %lds = wave.shared_memory_base : !wave.ptr<#wave.shared, i8>
   %lane = wave.lane_id : !wave.simd<i32, 64>
   %ptr = wave.ptr_add %lds, %lane
       : !wave.ptr<#wave.shared, i8>, !wave.simd<i32, 64>
@@ -497,7 +497,7 @@ func.func @buffer_dma_lds_unbounded_source_offset_needs_range(
   %src = wave.ptr_add %buf, %off
       : !wave.ptr<#waveamd.buffer, i32>, !wave.simd<index, 64>
       -> !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>
-  %lds = wave.lds_base : !wave.ptr<#wave.shared, i32>
+  %lds = wave.shared_memory_base : !wave.ptr<#wave.shared, i32>
   %tok0 = wave.token : !wave.mem.token
   // expected-error @below {{buffer memory op offset must fit proven unsigned 32-bit}}
   %tok = waveamd.dma_load_lds %src -> %lds after %tok0 {bytes = 16 : i64}
@@ -520,7 +520,7 @@ func.func @global_dma_lds_addr64_fallback_rejects_aux(
   %src = wave.ptr_add %in, %off
       : !wave.ptr<#wave.global, i32>, !wave.simd<index, 64>
       -> !wave.simd<!wave.ptr<#wave.global, i32>, 64>
-  %lds = wave.lds_base : !wave.ptr<#wave.shared, i32>
+  %lds = wave.shared_memory_base : !wave.ptr<#wave.shared, i32>
   %tok0 = wave.token : !wave.mem.token
   // expected-error @below {{addr64 DMA LDS fallback does not support nonzero aux}}
   %tok = waveamd.dma_load_lds %src -> %lds after %tok0 {aux = 1 : i64, bytes = 16 : i64}

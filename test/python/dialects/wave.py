@@ -234,7 +234,7 @@ def test_waveamd_dma_load_lds():
             (src_base,) = f.args
             lane = f.lane_id()
             src = f.ptr_add(src_base, lane, w.simd_ptr_type(w.i32()))
-            lds = f.lds_base()
+            lds = f.shared_memory_base()
             dep = f.token()
             f.dma_load_lds(src, lds, after=dep)
         # CHECK: waveamd.dma_load_lds
@@ -248,26 +248,26 @@ def test_waveamd_transpose_load():
     with w.module() as m:
         with m.function("transpose_load_kernel", [], kernel=True) as f:
             lane = f.lane_id(width=64)
-            lds = f.lds_base(w.i8())
+            lds = f.shared_memory_base(w.i8())
             ptr = f.ptr_add(
                 lds, lane, w.simd_ptr_type(w.i8(), w.shared_address_space(), 64)
             )
             f.transpose_load(ptr)
-            lds_i16 = f.lds_base(w.i16())
+            lds_i16 = f.shared_memory_base(w.i16())
             ptr_i16 = f.ptr_add(
                 lds_i16,
                 lane,
                 w.simd_ptr_type(w.i16(), w.shared_address_space(), 64),
             )
             f.transpose_load(ptr_i16, w.simd_type(w.vector_type(4, w.i16()), width=64))
-            lds_f16 = f.lds_base(w.f16())
+            lds_f16 = f.shared_memory_base(w.f16())
             ptr_f16 = f.ptr_add(
                 lds_f16,
                 lane,
                 w.simd_ptr_type(w.f16(), w.shared_address_space(), 64),
             )
             f.transpose_load(ptr_f16, w.simd_type(w.vector_type(4, w.f16()), width=64))
-            lds_bf16 = f.lds_base(w.bf16())
+            lds_bf16 = f.shared_memory_base(w.bf16())
             ptr_bf16 = f.ptr_add(
                 lds_bf16,
                 lane,

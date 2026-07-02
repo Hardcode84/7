@@ -1221,9 +1221,9 @@ static TypeRef *type_index_cast(Checker *c, Expr *e) {
   return NULL;
 }
 
-static TypeRef *lds_base_type_arg(Checker *c, Expr *e) {
+static TypeRef *shared_memory_base_type_arg(Checker *c, Expr *e) {
   if (e->as.call.garg_count != 1) {
-    err(c, e->span, "lds_base<T> takes exactly one type argument");
+    err(c, e->span, "shared_memory_base<T> takes exactly one type argument");
     return NULL;
   }
   TypeRef *t = garg_type(c, e, 0);
@@ -1231,21 +1231,24 @@ static TypeRef *lds_base_type_arg(Checker *c, Expr *e) {
     return NULL;
   if ((t->kind != TYPE_SCALAR && t->kind != TYPE_VECTOR) ||
       (t->kind == TYPE_SCALAR && !sk_is_numeric(t->scalar))) {
-    err(c, e->span, "lds_base<T>: T must be a numeric scalar or vector type");
+    err(c, e->span,
+        "shared_memory_base<T>: T must be a numeric scalar or vector type");
     return NULL;
   }
   return t;
 }
 
-static int check_lds_base_offset(Checker *c, Expr *e) {
+static int check_shared_memory_base_offset(Checker *c, Expr *e) {
   if (e->as.call.arg_count > 1) {
-    err(c, e->span, "lds_base takes at most one (compile-time) offset");
+    err(c, e->span,
+        "shared_memory_base takes at most one (compile-time) offset");
     return 0;
   }
   if (e->as.call.arg_count == 1) {
     Expr *a = e->as.call.args[0];
     if (a->kind != EXPR_INT_LIT) {
-      err(c, a->span, "lds_base offset must be a compile-time integer");
+      err(c, a->span,
+          "shared_memory_base offset must be a compile-time integer");
       return 0;
     }
     a->sema_type = scalar_type(c, SCALAR_INT64);
@@ -1254,17 +1257,17 @@ static int check_lds_base_offset(Checker *c, Expr *e) {
 }
 
 /*
- * lds_base<T>([K]): a uniform shared T* into the kernel LDS arena. The
- * optional K is a compile-time byte offset (int literal, default 0).
+ * shared_memory_base<T>([K]): uniform shared T* into kernel shared memory.
+ * Optional K is a compile-time byte offset (int literal, default 0).
  */
-static TypeRef *type_lds_base(Checker *c, Expr *e) {
-  TypeRef *t = lds_base_type_arg(c, e);
+static TypeRef *type_shared_memory_base(Checker *c, Expr *e) {
+  TypeRef *t = shared_memory_base_type_arg(c, e);
   if (t == NULL)
     return NULL;
-  if (!check_lds_base_offset(c, e))
+  if (!check_shared_memory_base_offset(c, e))
     return NULL;
   if (e->as.call.has_dep) {
-    err(c, e->span, "lds_base does not take an 'after' dependency");
+    err(c, e->span, "shared_memory_base does not take an 'after' dependency");
     return NULL;
   }
   return ptr_type(c, t, /*is_shared=*/1);
@@ -1757,10 +1760,10 @@ static TypeRef *type_wait(Checker *c, Expr *e) {
   return void_marker(c);
 }
 
-static TypeRef *type_lds_base_checked(Checker *c, Expr *e) {
-  if (!no_dep(c, e, "lds_base"))
+static TypeRef *type_shared_memory_base_checked(Checker *c, Expr *e) {
+  if (!no_dep(c, e, "shared_memory_base"))
     return NULL;
-  return type_lds_base(c, e);
+  return type_shared_memory_base(c, e);
 }
 
 static TypeRef *type_index_cast_checked(Checker *c, Expr *e) {
@@ -1794,7 +1797,7 @@ static const BuiltinEntry kBuiltins[] = {
     {"barrier", type_barrier},
     {"join", type_join},
     {"wait", type_wait},
-    {"lds_base", type_lds_base_checked},
+    {"shared_memory_base", type_shared_memory_base_checked},
     {"index_cast", type_index_cast_checked},
     {"cast", type_cast_checked},
     {"fragment_fill", type_fragment_fill},

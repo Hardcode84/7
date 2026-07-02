@@ -178,7 +178,7 @@ What the v1 frontend lowers end-to-end (each verified through `wave-opt`):
 | `load(p [after t])` (value, or `auto [v,t]` destructure) | `wave.load` -> (simd, token); scalar and vector payloads | yes |
 | `store(v, p [after t])` | `wave.store` (value-first `$v -> $p`) -> token; scalar and vector payloads | yes |
 | `barrier(t...)` / `join(t...)` / `wait(t...)` / `token()` | `wave.barrier` / `join` / `wait` / `token` | yes |
-| `lds_base<T>([K])` | `wave.lds_base {offset=K}` : `shared T*` | yes |
+| `shared_memory_base<T>([K])` | `wave.shared_memory_base {offset=K}` : `shared T*` | yes |
 | `index_cast(x)` | `arith.index_cast` / `arith.index_castui` | yes |
 | `cast<T>(x)` (fp<->fp, int<->int, int<->fp) with verifier policies; pointer reinterpret within same address space | `wave.cast {kind[, policy]}` / `wave.ptr_cast` | yes |
 | `fragment_fill<T>(bits)` / `fragment_pack<T>(regs)` / `fragment_unpack(frag)` | `waveamd.fragment_fill` / `waveamd.fragment_pack` / `waveamd.fragment_unpack` | yes |

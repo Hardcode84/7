@@ -327,7 +327,8 @@ static void test_attribute_brackets(void) {
 
 /* Builtins are predeclared identifiers, NOT reserved words. */
 static void test_builtins_are_idents(void) {
-  EXPECT("builtins", "lane_id load store barrier wait join lds_base cast",
+  EXPECT("builtins",
+         "lane_id load store barrier wait join shared_memory_base cast",
          TOK_IDENT, TOK_IDENT, TOK_IDENT, TOK_IDENT, TOK_IDENT, TOK_IDENT,
          TOK_IDENT, TOK_IDENT);
   /* index_cast and wave_id_in_grid and workgroup_id are idents too. */

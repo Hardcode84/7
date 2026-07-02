@@ -358,7 +358,7 @@ func.func @global_addr64_rational_mod_lhs(%out: !wave.ptr<#wave.global, i32>,
 func.func @shared_rational_mod_floor_full_address(%x: i32)
     attributes {wave.kernel, wave.lds_size = 4096 : i64} {
   %lane = wave.lane_id : !wave.simd<i32, 32>
-  %lds = wave.lds_base : !wave.ptr<#wave.shared, i32>
+  %lds = wave.shared_memory_base : !wave.ptr<#wave.shared, i32>
   %off = wave.index_expr <"3 + 520*floor(1/512*Mod(8*x, 1024)) + 264*Mod(lid, 2)">
       ["lid", "x"](%lane, %x)
       : (!wave.simd<i32, 32>, i32) -> !wave.simd<index, 32>
@@ -386,7 +386,7 @@ func.func @shared_rational_mod_floor_full_address(%x: i32)
 func.func @shared_integer_rational_mod_term()
     attributes {wave.kernel, wave.lds_size = 4096 : i64} {
   %lane = wave.lane_id : !wave.simd<i32, 32>
-  %lds = wave.lds_base : !wave.ptr<#wave.shared, i32>
+  %lds = wave.shared_memory_base : !wave.ptr<#wave.shared, i32>
   %off = wave.index_expr <"1/2*Mod(8*lid, 32) + 264*Mod(floor(1/4*lid), 2)">
       ["lid"](%lane) : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
   %ptrs = wave.ptr_add %lds, %off
@@ -409,7 +409,7 @@ func.func @shared_wide_mod_floor_full_address(%x_raw: i64)
     attributes {wave.kernel, wave.lds_size = 8192 : i64} {
   %lane = wave.lane_id : !wave.simd<i32, 32>
   %x = wave.assume %x_raw as "x" [#wave.pred<"x >= 0">] : i64
-  %lds = wave.lds_base : !wave.ptr<#wave.shared, i8>
+  %lds = wave.shared_memory_base : !wave.ptr<#wave.shared, i8>
   %off = wave.index_expr <"Mod(floor(1/4294967296*x), 4096) + lid">
       ["lid", "x"](%lane, %x)
       : (!wave.simd<i32, 32>, i64) -> !wave.simd<index, 32>
@@ -431,7 +431,7 @@ func.func @shared_wide_mod_floor_full_address(%x_raw: i64)
 func.func @shared_nested_index_expr_producer_range()
     attributes {wave.kernel, wave.lds_size = 4096 : i64} {
   %lane = wave.lane_id : !wave.simd<i32, 32>
-  %lds = wave.lds_base : !wave.ptr<#wave.shared, i32>
+  %lds = wave.shared_memory_base : !wave.ptr<#wave.shared, i32>
   %dim0 = wave.index_expr <"floor(1/2*lane)"> assuming [#wave.pred<"lane >= 0 & -31 + lane <= 0">] ["lane"](%lane)
       : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
   %off = wave.index_expr <"floor(1/4*dim0)"> assuming [#wave.pred<"-272 + dim0 >= 0 & -2281701631 + dim0 <= 0">] ["dim0"](%dim0)

@@ -230,7 +230,7 @@ func.func @sched_lds_load_timed(%out: !wave.ptr<i32, #wave.global>,
   %buffer = waveamd.make_buffer %out, %range
       : !wave.ptr<i32, #wave.global>, i32 -> !wave.ptr<i32, #waveamd.buffer>
   %lane = wave.lane_id : !wave.simd<i32, 32>
-  %lds = wave.lds_base : !wave.ptr<i32, #wave.shared>
+  %lds = wave.shared_memory_base : !wave.ptr<i32, #wave.shared>
   %lds_ptrs = wave.ptr_add %lds, %lane
       : !wave.ptr<i32, #wave.shared>, !wave.simd<i32, 32>
         -> !wave.simd<!wave.ptr<i32, #wave.shared>, 32>

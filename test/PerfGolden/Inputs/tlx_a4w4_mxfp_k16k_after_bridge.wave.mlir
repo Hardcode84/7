@@ -113,7 +113,7 @@ module attributes {gpu.container_module, tlx_wave.new_converter = true, tlx_wave
       %90 = wave.binary addi %89, %87 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
       %91 = wave.binary muli %arg8, %c128_i32 overflow<nsw> : i32, i32 -> i32
       %92 = wave.binary muli %arg11, %c128_i32 overflow<nsw> : i32, i32 -> i32
-      %93 = wave.lds_base : !wave.ptr<#wave.shared, i8>
+      %93 = wave.shared_memory_base : !wave.ptr<#wave.shared, i8>
       %94 = waveamd.make_buffer %arg0, %c2147483647_i32 : !wave.ptr<#wave.global, i8>, i32 -> !wave.ptr<#waveamd.buffer, i8>
       %95 = wave.ptr_cast %93 : !wave.ptr<#wave.shared, i8> -> !wave.ptr<#wave.shared, i32>
       %96 = wave.read_first %51 : !wave.simd<i32, 64> -> i32
@@ -169,7 +169,7 @@ module attributes {gpu.container_module, tlx_wave.new_converter = true, tlx_wave
       %146 = wave.ptr_add %95, %145 : !wave.ptr<#wave.shared, i32>, i32 -> !wave.ptr<#wave.shared, i32>
       %147 = waveamd.dma_load_lds %144 -> %146 after %98 {bytes = 16 : i64} : (!wave.simd<!wave.ptr<#waveamd.buffer, i8>, 64>, !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
       %148 = wave.join %105, %111, %117, %123, %129, %135, %141, %147 : !wave.mem.token, !wave.mem.token, !wave.mem.token, !wave.mem.token, !wave.mem.token, !wave.mem.token, !wave.mem.token, !wave.mem.token -> !wave.mem.token
-      %149 = wave.lds_base {offset = 65536 : i64} : !wave.ptr<#wave.shared, i8>
+      %149 = wave.shared_memory_base {offset = 65536 : i64} : !wave.ptr<#wave.shared, i8>
       %150 = waveamd.make_buffer %arg1, %c2147483647_i32 : !wave.ptr<#wave.global, i8>, i32 -> !wave.ptr<#waveamd.buffer, i8>
       %151 = wave.ptr_cast %149 : !wave.ptr<#wave.shared, i8> -> !wave.ptr<#wave.shared, i32>
       %152 = wave.index_expr <"s0*s1 + s0*floor(1/8*wi) + Mod(16*wi, 128)"> assuming [#wave.pred<"s0*s1 + s0*floor(1/8*wi) + Mod(16*wi, 128) >= 0">, #wave.pred<"-2147483632 + s0*s1 + s0*floor(1/8*wi) + Mod(16*wi, 128) <= 0">] ["wi", "s0", "s1"](%51, %arg8, %88) : (!wave.simd<i32, 64>, i32, i32) -> !wave.simd<index, 64>
@@ -204,7 +204,7 @@ module attributes {gpu.container_module, tlx_wave.new_converter = true, tlx_wave
       %180 = wave.ptr_add %177, %179 : !wave.ptr<#waveamd.buffer, i8>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#waveamd.buffer, i8>, 64>
       %value_0, %token_1 = wave.load %180 : (!wave.simd<!wave.ptr<#waveamd.buffer, i8>, 64>) -> (!wave.simd<vector<4xi8>, 64>, !wave.mem.token)
       %181 = wave.join %148, %172 : !wave.mem.token, !wave.mem.token -> !wave.mem.token
-      %182 = wave.lds_base {offset = 98304 : i64} : !wave.ptr<#wave.shared, i8>
+      %182 = wave.shared_memory_base {offset = 98304 : i64} : !wave.ptr<#wave.shared, i8>
       %183 = wave.ptr_cast %182 : !wave.ptr<#wave.shared, i8> -> !wave.ptr<#wave.shared, i32>
       %184 = wave.index_expr <"s1 + s0*s2 + s0*floor(1/8*wi) + Mod(16*wi, 128)"> assuming [#wave.pred<"s1 + s0*s2 + s0*floor(1/8*wi) + Mod(16*wi, 128) >= 0">, #wave.pred<"-2147483632 + s1 + s0*s2 + s0*floor(1/8*wi) + Mod(16*wi, 128) <= 0">] ["wi", "s0", "s1", "s2"](%51, %arg8, %91, %88) : (!wave.simd<i32, 64>, i32, i32, i32) -> !wave.simd<index, 64>
       %185 = wave.assume %184 as "x" [#wave.pred<"x >= 0">, #wave.pred<"-2147483632 + x <= 0">] : !wave.simd<index, 64>
@@ -243,7 +243,7 @@ module attributes {gpu.container_module, tlx_wave.new_converter = true, tlx_wave
       %215 = wave.assume %208 as "x" [#wave.pred<"x >= 0">, #wave.pred<"-2147483647 + x <= 0">] : !wave.simd<index, 64>
       %216 = wave.ptr_add %177, %215 : !wave.ptr<#waveamd.buffer, i8>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#waveamd.buffer, i8>, 64>
       %value_8, %token_9 = wave.load %216 : (!wave.simd<!wave.ptr<#waveamd.buffer, i8>, 64>) -> (!wave.simd<i8, 64>, !wave.mem.token)
-      %217 = wave.lds_base {offset = 32768 : i64} : !wave.ptr<#wave.shared, i8>
+      %217 = wave.shared_memory_base {offset = 32768 : i64} : !wave.ptr<#wave.shared, i8>
       %218 = wave.ptr_cast %217 : !wave.ptr<#wave.shared, i8> -> !wave.ptr<#wave.shared, i32>
       %219 = wave.index_expr <"128 + s0*s1 + s0*floor(1/8*wi) + Mod(16*wi, 128)"> assuming [#wave.pred<"128 + s0*s1 + s0*floor(1/8*wi) + Mod(16*wi, 128) >= 0">, #wave.pred<"-2147483504 + s0*s1 + s0*floor(1/8*wi) + Mod(16*wi, 128) <= 0">] ["wi", "s0", "s1"](%51, %arg7, %50) : (!wave.simd<i32, 64>, i32, i32) -> !wave.simd<index, 64>
       %220 = wave.assume %219 as "x" [#wave.pred<"x >= 0">, #wave.pred<"-2147483632 + x <= 0">] : !wave.simd<index, 64>
@@ -286,7 +286,7 @@ module attributes {gpu.container_module, tlx_wave.new_converter = true, tlx_wave
       %257 = wave.ptr_add %218, %145 : !wave.ptr<#wave.shared, i32>, i32 -> !wave.ptr<#wave.shared, i32>
       %258 = waveamd.dma_load_lds %256 -> %257 after %98 {bytes = 16 : i64} : (!wave.simd<!wave.ptr<#waveamd.buffer, i8>, 64>, !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
       %259 = wave.join %223, %228, %233, %238, %243, %248, %253, %258 : !wave.mem.token, !wave.mem.token, !wave.mem.token, !wave.mem.token, !wave.mem.token, !wave.mem.token, !wave.mem.token, !wave.mem.token -> !wave.mem.token
-      %260 = wave.lds_base {offset = 81920 : i64} : !wave.ptr<#wave.shared, i8>
+      %260 = wave.shared_memory_base {offset = 81920 : i64} : !wave.ptr<#wave.shared, i8>
       %261 = wave.ptr_cast %260 : !wave.ptr<#wave.shared, i8> -> !wave.ptr<#wave.shared, i32>
       %262 = wave.index_expr <"128 + s0*s1 + s0*floor(1/8*wi) + Mod(16*wi, 128)"> assuming [#wave.pred<"128 + s0*s1 + s0*floor(1/8*wi) + Mod(16*wi, 128) >= 0">, #wave.pred<"-2147483504 + s0*s1 + s0*floor(1/8*wi) + Mod(16*wi, 128) <= 0">] ["wi", "s0", "s1"](%51, %arg8, %88) : (!wave.simd<i32, 64>, i32, i32) -> !wave.simd<index, 64>
       %263 = wave.assume %262 as "x" [#wave.pred<"x >= 0">, #wave.pred<"-2147483632 + x <= 0">] : !wave.simd<index, 64>
@@ -358,7 +358,7 @@ module attributes {gpu.container_module, tlx_wave.new_converter = true, tlx_wave
       %318 = wave.ptr_add %177, %317 : !wave.ptr<#waveamd.buffer, i8>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#waveamd.buffer, i8>, 64>
       %value_32, %token_33 = wave.load %318 : (!wave.simd<!wave.ptr<#waveamd.buffer, i8>, 64>) -> (!wave.simd<i8, 64>, !wave.mem.token)
       %319 = wave.join %259, %282 : !wave.mem.token, !wave.mem.token -> !wave.mem.token
-      %320 = wave.lds_base {offset = 114688 : i64} : !wave.ptr<#wave.shared, i8>
+      %320 = wave.shared_memory_base {offset = 114688 : i64} : !wave.ptr<#wave.shared, i8>
       %321 = wave.ptr_cast %320 : !wave.ptr<#wave.shared, i8> -> !wave.ptr<#wave.shared, i32>
       %322 = wave.index_expr <"128 + s1 + s0*s2 + s0*floor(1/8*wi) + Mod(16*wi, 128)"> assuming [#wave.pred<"128 + s1 + s0*s2 + s0*floor(1/8*wi) + Mod(16*wi, 128) >= 0">, #wave.pred<"-2147483504 + s1 + s0*s2 + s0*floor(1/8*wi) + Mod(16*wi, 128) <= 0">] ["wi", "s0", "s1", "s2"](%51, %arg8, %91, %88) : (!wave.simd<i32, 64>, i32, i32, i32) -> !wave.simd<index, 64>
       %323 = wave.assume %322 as "x" [#wave.pred<"x >= 0">, #wave.pred<"-2147483632 + x <= 0">] : !wave.simd<index, 64>
@@ -471,7 +471,7 @@ module attributes {gpu.container_module, tlx_wave.new_converter = true, tlx_wave
       %402 = wave.index_expr <"12352 + 16*floor(1/16*Mod(wi, 64)) + 2048*Mod(floor(1/64*wi), 2) + 128*Mod(Mod(wi, 64), 16)"> ["wi"](%51) : (!wave.simd<i32, 64>) -> !wave.simd<index, 64>
       %403 = wave.ptr_add %149, %402 : !wave.ptr<#wave.shared, i8>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, i8>, 64>
       %value_88, %token_89 = wave.load %403 : (!wave.simd<!wave.ptr<#wave.shared, i8>, 64>) -> (!wave.simd<vector<16xi8>, 64>, !wave.mem.token)
-      %404 = wave.lds_base {offset = 131072 : i64} : !wave.ptr<#wave.shared, i8>
+      %404 = wave.shared_memory_base {offset = 131072 : i64} : !wave.ptr<#wave.shared, i8>
       %405 = wave.binary remui %51, %9 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
       %406 = wave.binary divui %51, %9 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
       %407 = wave.binary remui %406, %9 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
@@ -504,7 +504,7 @@ module attributes {gpu.container_module, tlx_wave.new_converter = true, tlx_wave
       %434 = wave.ptr_add %404, %433 : !wave.ptr<#wave.shared, i8>, !wave.simd<i32, 64> -> !wave.simd<!wave.ptr<#wave.shared, i8>, 64>
       %435 = wave.store %value -> %434 after %98 : (!wave.simd<vector<8xi8>, 64>, !wave.simd<!wave.ptr<#wave.shared, i8>, 64>, !wave.mem.token) -> !wave.mem.token
       %436 = wave.barrier %435 : (!wave.mem.token) -> !wave.mem.token
-      %437 = wave.lds_base {offset = 133120 : i64} : !wave.ptr<#wave.shared, i8>
+      %437 = wave.shared_memory_base {offset = 133120 : i64} : !wave.ptr<#wave.shared, i8>
       %438 = wave.binary muli %411, %9 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
       %439 = wave.binary xori %407, %438 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
       %440 = wave.binary muli %415, %8 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
@@ -2514,7 +2514,7 @@ module attributes {gpu.container_module, tlx_wave.new_converter = true, tlx_wave
       %1238 = wave.cast fpconvert %1137 : !wave.simd<vector<4xf32>, 64> -> !wave.simd<vector<4xbf16>, 64>
       %1239 = wave.cast fpconvert %1140 : !wave.simd<vector<4xf32>, 64> -> !wave.simd<vector<4xbf16>, 64>
       %1240 = wave.cast fpconvert %1143 : !wave.simd<vector<4xf32>, 64> -> !wave.simd<vector<4xbf16>, 64>
-      %1241 = wave.lds_base {offset = 134144 : i64} : !wave.ptr<#wave.shared, bf16>
+      %1241 = wave.shared_memory_base {offset = 134144 : i64} : !wave.ptr<#wave.shared, bf16>
       %1242 = wave.binary muli %51, %10 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
       %1243 = wave.ptr_add %1241, %1242 : !wave.ptr<#wave.shared, bf16>, !wave.simd<i32, 64> -> !wave.simd<!wave.ptr<#wave.shared, bf16>, 64>
       %1244 = wave.extract %1209[0] : !wave.simd<vector<4xbf16>, 64> -> !wave.simd<bf16, 64>

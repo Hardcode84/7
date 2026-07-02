@@ -2724,7 +2724,7 @@ verifyPtrAddResult(Type resultType, Type pointerType, int64_t simdWidth,
   return success();
 }
 
-LogicalResult LdsBaseOp::verify() {
+LogicalResult SharedMemoryBaseOp::verify() {
   // ODS pins the result to `Wave_Ptr`; only the address space needs a
   // runtime check.
   auto ptrType = cast<PtrType>(getResult().getType());

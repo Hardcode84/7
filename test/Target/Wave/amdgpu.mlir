@@ -209,7 +209,7 @@ func.func @wave_lds_echo(%out: !wave.ptr<#wave.global, i32>)
   // CHECK: v_mbcnt_lo_u32_b32 [[LANE:v[0-9]+]], -1, 0
   %lane = wave.lane_id : !wave.simd<i32, 32>
   // CHECK: v_lshlrev_b32_e32 [[BYTE:v[0-9]+]], 2, [[LANE]]
-  %lds = wave.lds_base : !wave.ptr<#wave.shared, i32>
+  %lds = wave.shared_memory_base : !wave.ptr<#wave.shared, i32>
   %lds_ptrs = wave.ptr_add %lds, %lane : !wave.ptr<#wave.shared, i32>, !wave.simd<i32, 32> -> !wave.simd<!wave.ptr<#wave.shared, i32>, 32>
   // CHECK: ds_store_b32 [[BYTE]], [[LANE]]
   %store_token = wave.store %lane -> %lds_ptrs : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.shared, i32>, 32>) -> !wave.mem.token
@@ -237,7 +237,7 @@ func.func @wave_lds_tuple_echo(%in: !wave.ptr<#wave.global, i32>,
   // CHECK: global_load_b128
   // CHECK: global_load_b128
   %v, %tok = wave.load %ip : (!wave.simd<!wave.ptr<#wave.global, i32>, 32>) -> (!wave.simd<vector<8xi32>, 32>, !wave.mem.token)
-  %lds = wave.lds_base : !wave.ptr<#wave.shared, i32>
+  %lds = wave.shared_memory_base : !wave.ptr<#wave.shared, i32>
   %lds_ptrs = wave.ptr_add %lds, %lane : !wave.ptr<#wave.shared, i32>, !wave.simd<i32, 32> -> !wave.simd<!wave.ptr<#wave.shared, i32>, 32>
   // CHECK: ds_store_b128 {{v[0-9]+}}, {{v\[[0-9]+:[0-9]+\]}}
   // CHECK: ds_store_b128 {{v[0-9]+}}, {{v\[[0-9]+:[0-9]+\]}} offset:16
@@ -306,7 +306,7 @@ func.func @wave_two_tuple_loads_overlap(%a_in: !wave.ptr<#wave.global, i32>,
   %lane = wave.lane_id : !wave.simd<i32, 32>
   %ap = wave.ptr_add %a_in, %lane : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 32> -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
   %bp = wave.ptr_add %b_in, %lane : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 32> -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
-  %lds = wave.lds_base : !wave.ptr<#wave.shared, i32>
+  %lds = wave.shared_memory_base : !wave.ptr<#wave.shared, i32>
   %slot_a = wave.ptr_add %lds, %lane : !wave.ptr<#wave.shared, i32>, !wave.simd<i32, 32> -> !wave.simd<!wave.ptr<#wave.shared, i32>, 32>
   %c256 = arith.constant 256 : i32
   %c256v = wave.splat %c256 : i32 -> !wave.simd<i32, 32>

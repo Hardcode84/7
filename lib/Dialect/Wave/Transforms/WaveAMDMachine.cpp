@@ -2926,7 +2926,8 @@ LogicalResult WaveAMDMachineSelector::selectOperation(Operation *op) {
       .Case<WhereOp>([&](auto o) { return selectWhere(o); })
       .Case<StoreOp>([&](auto o) { return selectStore(*this, o); })
       .Case<LoadOp>([&](auto o) { return selectLoad(*this, o); })
-      .Case<LdsBaseOp>([&](auto o) { return selectLdsBase(o); })
+      .Case<SharedMemoryBaseOp>(
+          [&](auto o) { return selectSharedMemoryBase(o); })
       .Case<BarrierOp>([&](auto o) { return selectBarrier(o); })
       .Case<waveamd::FragmentFillOp>(
           [&](auto o) { return selectFragmentFill(o); })
@@ -6860,7 +6861,8 @@ WaveAMDMachineSelector::selectFragmentUnpack(waveamd::FragmentUnpackOp op) {
   return success();
 }
 
-LogicalResult WaveAMDMachineSelector::selectLdsBase(LdsBaseOp op) {
+LogicalResult
+WaveAMDMachineSelector::selectSharedMemoryBase(SharedMemoryBaseOp op) {
   Value baseValue = createImm(builder, op.getLoc(), 0);
   pointerBases[op.getResult()] = baseValue;
   PointerOffset offset;

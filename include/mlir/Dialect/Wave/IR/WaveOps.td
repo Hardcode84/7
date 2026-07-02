@@ -437,16 +437,16 @@ def Wave_WaitOp : Wave_Op<"wait", []> {
   let assemblyFormat = "$dependencies attr-dict `:` type($dependencies)";
 }
 
-def Wave_LdsBaseOp : Wave_Op<"lds_base", [Pure]> {
-  let summary = "base pointer to the kernel's workgroup-local LDS arena";
+def Wave_SharedMemoryBaseOp : Wave_Op<"shared_memory_base", [Pure]> {
+  let summary = "base pointer to the kernel's workgroup-local shared memory";
   let description = [{
-    Returns a wave-uniform pointer to the start of the workgroup-local LDS
-    arena reserved for this kernel. The pointer addresses element type
+    Returns a wave-uniform pointer to the start of workgroup-local shared
+    memory reserved for this kernel. The pointer addresses element type
     `T` at the offset given by the optional `offset` attribute (in bytes
-    from the start of the arena, default 0).
+    from the start of shared memory, default 0).
 
-    `wave.lds_size` reserves fixed descriptor LDS bytes. Optional
-    `wave.dynamic_lds_size` reserves launch-provided LDS bytes.
+    `wave.lds_size` reserves fixed descriptor shared-memory bytes. Optional
+    `wave.dynamic_lds_size` reserves launch-provided shared-memory bytes.
   }];
 
   let arguments = (ins DefaultValuedAttr<I64Attr, "0">:$offset);

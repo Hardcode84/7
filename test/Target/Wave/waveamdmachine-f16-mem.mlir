@@ -24,7 +24,7 @@ func.func @f16_global_shared(%in: !wave.ptr<#wave.global, f16>,
   %v, %tok = wave.load %ip
       : (!wave.simd<!wave.ptr<#wave.global, f16>, 32>)
       -> (!wave.simd<f16, 32>, !wave.mem.token)
-  %lds = wave.lds_base : !wave.ptr<#wave.shared, f16>
+  %lds = wave.shared_memory_base : !wave.ptr<#wave.shared, f16>
   %lp = wave.ptr_add %lds, %lane
       : !wave.ptr<#wave.shared, f16>, !wave.simd<i32, 32>
       -> !wave.simd<!wave.ptr<#wave.shared, f16>, 32>

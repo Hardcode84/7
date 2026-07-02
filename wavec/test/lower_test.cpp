@@ -266,7 +266,7 @@ Expr *floatLit(double v, TypeRef *semaTy) {
   return e;
 }
 
-// call with one TYPE generic arg (cast<T>, lds_base<T>).
+// call with one TYPE generic arg (cast<T>, shared_memory_base<T>).
 Expr *callTy(const char *callee, TypeRef *garg, Expr **args, size_t nargs,
              TypeRef *semaTy) {
   Expr *e = mkExpr(EXPR_CALL, semaTy);
@@ -576,10 +576,11 @@ Program *buildLdsRoundtrip() {
   Expr *gl =
       binary(TOK_PLUS, ident("g", fptr), ident("lane", simdI32), simdFPtr);
   Stmt *sGptr = declStmt(simdFPtr, "gptr", gl);
-  // lds = lds_base<float>();
-  Stmt *sLds = declStmt(sharedFptr, "lds",
-                        callTy("lds_base", scalarType(SCALAR_FLOAT, 0, 0),
-                               nullptr, 0, sharedFptr));
+  // lds = shared_memory_base<float>();
+  Stmt *sLds =
+      declStmt(sharedFptr, "lds",
+               callTy("shared_memory_base", scalarType(SCALAR_FLOAT, 0, 0),
+                      nullptr, 0, sharedFptr));
   Expr *ll = binary(TOK_PLUS, ident("lds", sharedFptr), ident("lane", simdI32),
                     simdSharedPtr);
   Stmt *sLptr = declStmt(simdSharedPtr, "lptr", ll);

@@ -1035,7 +1035,7 @@ def _emit_lds_staging(
     reg_simd_type = dsl.simd_type(
         dsl.vector_type(cfg.mma.ab_registers, dsl.i32()), width=cfg.mma.wave_size
     )
-    lds = bld.lds_base()
+    lds = bld.shared_memory_base()
     wi = dsl.sym("wi")
     lane = dsl.mod(wi, cfg.mma.wave_size)
     wave_id = dsl.floor(wi / cfg.mma.wave_size)
@@ -1544,10 +1544,10 @@ def _mxfp4_scale_layout(
     )
 
 
-def _scale_lds_base(
+def _scale_shared_memory_base(
     bld: dsl.FunctionBuilder, cfg: _MatmulConfig, lds_offset: dsl.Value | int
 ) -> dsl.Value:
-    lds = bld.lds_base(dsl.i8(), offset=cfg.data_lds_bytes)
+    lds = bld.shared_memory_base(dsl.i8(), offset=cfg.data_lds_bytes)
     if isinstance(lds_offset, int):
         if lds_offset == 0:
             return lds
@@ -1632,7 +1632,7 @@ def _stage_mxfp4_scale_tiles_wave_regs_after_dep(
     load_type = dsl.simd_type(
         dsl.vector_type(load_width, dsl.i8()), width=cfg.mma.wave_size
     )
-    lds = _scale_lds_base(bld, cfg, lds_offset)
+    lds = _scale_shared_memory_base(bld, cfg, lds_offset)
     lane_mask = 0 if packed_dword else (12 if row_sliced else 15)
     lane_mod16 = bld.binary(
         dsl.BinaryKind.AndI,
@@ -1698,11 +1698,11 @@ def _append_mxfp4_scale_reg_load(
     loaded: list[tuple[dsl.Value, dsl.Value, dsl.Value]],
     global_base: dsl.Value,
     global_off: dsl.Value,
-    lds_base: dsl.Value,
+    shared_memory_base: dsl.Value,
     lds_off: dsl.Value,
 ) -> None:
     raw, load_token = bld.load(bld.ptr_add(global_base, global_off), load_type)
-    loaded.append((raw, bld.ptr_add(lds_base, lds_off), load_token))
+    loaded.append((raw, bld.ptr_add(shared_memory_base, lds_off), load_token))
 
 
 def _stage_mxfp4_scale_tiles_regs_cta_after_dep(
@@ -1721,7 +1721,7 @@ def _stage_mxfp4_scale_tiles_regs_cta_after_dep(
     load_type = dsl.simd_type(
         dsl.vector_type(load_width, dsl.i8()), width=cfg.mma.wave_size
     )
-    lds = _scale_lds_base(bld, cfg, lds_offset)
+    lds = _scale_shared_memory_base(bld, cfg, lds_offset)
     with bld.where(
         _mxfp4_a_scale_regs_cta_mask(bld, cfg, coords),
         [dsl.mem_token_type()],
@@ -1972,7 +1972,7 @@ def _defer_mxfp4_scale_batch_regs_cta_after_dep(
 
     a_tiles_per_wave = _mxfp4_scale_tiles_per_wave(cfg.wave_m_tiles)
     lds_simd_type = dsl.simd_type(
-        _scale_lds_base(bld, cfg, scale_lds_offset).type, cfg.mma.wave_size
+        _scale_shared_memory_base(bld, cfg, scale_lds_offset).type, cfg.mma.wave_size
     )
     load_entry_types = (
         load_type,
@@ -1994,7 +1994,7 @@ def _defer_mxfp4_scale_batch_regs_cta_after_dep(
                 coords,
                 layout,
                 load_type,
-                _scale_lds_base(bld, cfg, offset),
+                _scale_shared_memory_base(bld, cfg, offset),
                 dep,
                 [],
                 row_sliced=True,
@@ -2019,7 +2019,7 @@ def _defer_mxfp4_scale_batch_regs_cta_after_dep(
                 coords,
                 layout,
                 load_type,
-                _scale_lds_base(bld, cfg, offset),
+                _scale_shared_memory_base(bld, cfg, offset),
                 dep,
                 [],
                 row_sliced=True,
@@ -2092,7 +2092,7 @@ def _stage_mxfp4_scale_batch_regs_cta_after_dep(
                 coords,
                 layout,
                 load_type,
-                _scale_lds_base(bld, cfg, offset),
+                _scale_shared_memory_base(bld, cfg, offset),
                 dep,
                 a_tokens,
                 row_sliced,
@@ -2116,7 +2116,7 @@ def _stage_mxfp4_scale_batch_regs_cta_after_dep(
                 coords,
                 layout,
                 load_type,
-                _scale_lds_base(bld, cfg, offset),
+                _scale_shared_memory_base(bld, cfg, offset),
                 dep,
                 b_tokens,
                 row_sliced,
@@ -2269,7 +2269,7 @@ def _mxfp4_scale_dma_plan(
         step_sym = dsl.sym("dma_scale_step")
         bindings[step_sym] = step
         scale_k = step_sym * (cfg.mma.k_tile // 32) + dma_scale_group
-    lds = bld.lds_base(dsl.i32(), offset=cfg.data_lds_bytes)
+    lds = bld.shared_memory_base(dsl.i32(), offset=cfg.data_lds_bytes)
     return _Mxfp4ScaleDmaPlan(
         bindings=bindings,
         first_bindings=first_bindings,
@@ -2528,7 +2528,7 @@ def _read_mxfp4_scale_tile(
     *,
     lds_offset: dsl.Value | int = 0,
 ) -> tuple[dsl.Value, dsl.Value]:
-    lds = _scale_lds_base(bld, cfg, lds_offset)
+    lds = _scale_shared_memory_base(bld, cfg, lds_offset)
     load_type = dsl.simd_type(dsl.vector_type(8, dsl.i8()), width=cfg.mma.wave_size)
     read_off = bld.index_expr(tile * 512 + layout.lane * 8, bindings=layout.bindings)
     value: dsl.Value
@@ -2758,7 +2758,7 @@ def _stage_mxfp4_scale_batch_delayed_b_lw(
     dep = bld.barrier(scale_after)
     raw_step = _mxfp4_raw_k_step(bld, cfg, scale_step, 0)
     layout = _mxfp4_scale_layout(cfg, coords, raw_step)
-    lds = _scale_lds_base(bld, cfg, scale_lds_offset)
+    lds = _scale_shared_memory_base(bld, cfg, scale_lds_offset)
     load_type = dsl.simd_type(dsl.vector_type(4, dsl.i8()), width=cfg.mma.wave_size)
     with bld.where(
         _mxfp4_a_scale_regs_cta_mask(bld, cfg, coords),
@@ -4074,7 +4074,7 @@ def _store_acc_tiles_lds_coalesced(
     n_begin: int,
     n_end: int,
 ) -> None:
-    lds = bld.lds_base(dsl.f16())
+    lds = bld.shared_memory_base(dsl.f16())
     wi = dsl.sym("__wave_dsl_epilogue_wi")
     bindings = {wi: coords.wi}
     lane = dsl.mod(wi, cfg.mma.wave_size)

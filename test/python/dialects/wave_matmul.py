@@ -239,7 +239,7 @@ print(static_bld.module)
 # CHECK-SAME: !wave.ptr<#wave.global, i8>
 # CHECK: %{{.*}}, %{{.*}} = wave.load
 # CHECK-SAME: !wave.ptr<#wave.global, i8>
-# CHECK: wave.lds_base
+# CHECK: wave.shared_memory_base
 # CHECK-SAME: !wave.ptr<#wave.shared, i8>
 # CHECK: wave.load
 # CHECK-SAME: -> (!wave.simd<vector<16xi8>, 64>, !wave.mem.token)

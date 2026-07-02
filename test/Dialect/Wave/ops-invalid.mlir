@@ -760,7 +760,7 @@ func.func @select_mask_result_width_mismatch(%m: !wave.mask<64>,
 
 func.func @lds_base_wrong_address_space() {
   // expected-error @+1 {{result pointer must live in the shared address space}}
-  %p = wave.lds_base : !wave.ptr<#wave.global, i32>
+  %p = wave.shared_memory_base : !wave.ptr<#wave.global, i32>
   return
 }
 

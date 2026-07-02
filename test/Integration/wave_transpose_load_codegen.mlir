@@ -12,7 +12,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 // ASM: s_endpgm
 func.func @transpose_load_b96_b6_offset()
     attributes {wave.kernel, waveamdmachine.lds_size = 256 : i64} {
-  %lds = wave.lds_base : !wave.ptr<#wave.shared>
+  %lds = wave.shared_memory_base : !wave.ptr<#wave.shared>
   %lane = wave.lane_id : !wave.simd<i32, 64>
   %offset = wave.index_expr <"48 + lid"> ["lid"](%lane)
       : (!wave.simd<i32, 64>) -> !wave.simd<index, 64>

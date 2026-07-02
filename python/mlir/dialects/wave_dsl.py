@@ -945,21 +945,21 @@ class FunctionBuilder:
     def join(self, *tokens: Value) -> Value:
         return wave.JoinOp(mem_token_type(), list(tokens)).result
 
-    def lds_base(
+    def shared_memory_base(
         self,
         element_type: Type | None = None,
         *,
         offset: int = 0,
     ) -> Value:
-        """Return a pointer to the start of the workgroup's LDS arena.
+        """Return a pointer to the start of workgroup shared memory.
 
         ``element_type`` defaults to ``i32``; the byte offset into the
-        arena (``offset``) defaults to 0. Combine with ``ptr_add`` to
+        memory (``offset``) defaults to 0. Combine with ``ptr_add`` to
         materialize per-lane addresses, or with a uniform offset to
-        partition the arena.
+        partition shared memory.
         """
         ty = ptr_type(element_type or i32(), shared_address_space())
-        return wave.LdsBaseOp(ty, offset=offset).result
+        return wave.SharedMemoryBaseOp(ty, offset=offset).result
 
     def barrier(self, *dependencies: Value) -> Value:
         """Emit a workgroup-wide barrier sequenced after ``dependencies``."""

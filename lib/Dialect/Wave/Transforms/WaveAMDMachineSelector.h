@@ -352,7 +352,7 @@ public:
   LogicalResult selectWait(WaitOp op);
   LogicalResult selectWhere(WhereOp op);
   LogicalResult selectRegion(Region &region);
-  LogicalResult selectLdsBase(LdsBaseOp op);
+  LogicalResult selectSharedMemoryBase(SharedMemoryBaseOp op);
   LogicalResult selectBarrier(BarrierOp op);
   LogicalResult selectFragmentFill(waveamd::FragmentFillOp op);
   LogicalResult selectFragmentPack(waveamd::FragmentPackOp op);

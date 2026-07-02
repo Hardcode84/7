@@ -389,7 +389,7 @@ def _data_ptrs(
     b_base: dsl.Value,
     step: dsl.Value,
 ) -> DataPtrs:
-    lds = bld.lds_base(dsl.i32())
+    lds = bld.shared_memory_base(dsl.i32())
     wi = dsl.sym("wi")
     wi_first = dsl.sym("wi_first")
     wg_m = dsl.sym("wg_m")
@@ -535,8 +535,8 @@ def _stage_canonical_scales(
     b_scale: dsl.Value,
     step: dsl.Value,
 ) -> list[dsl.Value]:
-    lds_a = bld.lds_base(dsl.i8(), offset=cfg.scale_a_lds_base)
-    lds_b = bld.lds_base(dsl.i8(), offset=cfg.scale_b_lds_base)
+    lds_a = bld.shared_memory_base(dsl.i8(), offset=cfg.scale_a_lds_base)
+    lds_b = bld.shared_memory_base(dsl.i8(), offset=cfg.scale_b_lds_base)
     wi = dsl.sym("wi")
     wg_m = dsl.sym("wg_m")
     wg_n = dsl.sym("wg_n")
@@ -649,7 +649,7 @@ def _tensilelite_scale_dma_requests(
     b_scale: dsl.Value,
     step: dsl.Value,
 ) -> list[DmaRequest]:
-    lds = bld.lds_base(dsl.i32(), offset=cfg.scale_lds_base)
+    lds = bld.shared_memory_base(dsl.i32(), offset=cfg.scale_lds_base)
     wi = dsl.sym("wi")
     wi_first = dsl.sym("wi_first")
     wg_m = dsl.sym("wg_m")
@@ -753,7 +753,7 @@ def _read_scale_groups(
     step: dsl.Value,
     ready: dsl.Value,
 ) -> tuple[list[dsl.Value], list[dsl.Value], list[dsl.Value]]:
-    lds = bld.lds_base(dsl.i32(), offset=cfg.scale_lds_base)
+    lds = bld.shared_memory_base(dsl.i32(), offset=cfg.scale_lds_base)
     wi = dsl.sym("wi")
     step_sym = dsl.sym("step_scale_read")
     bindings = {wi: coords.wi, step_sym: step}

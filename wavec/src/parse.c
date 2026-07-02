@@ -443,7 +443,7 @@ static int binop_prec(TokenKind k) {
 /* IDENT-spelled generic builtins; type constructors are keyword-led. */
 static int ident_is_generic_builtin(ParseContext *ctx, const Token *t) {
   static const char *const names[] = {
-      "lane_id",       "cast",         "lds_base",   "fragment_fill",
+      "lane_id",       "cast",         "shared_memory_base", "fragment_fill",
       "fragment_pack", "workgroup_id", "workitem_id"};
   size_t i;
   size_t n = sizeof(names) / sizeof(names[0]);

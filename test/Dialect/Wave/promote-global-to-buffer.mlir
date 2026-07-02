@@ -134,7 +134,7 @@ func.func @promote_dma_load_lds(
     %in: !wave.ptr<#wave.global, i32>)
     attributes {wave.kernel, waveamdmachine.lds_size = 128 : i64} {
   %tok0 = wave.token : !wave.mem.token
-  %lds = wave.lds_base : !wave.ptr<#wave.shared, i32>
+  %lds = wave.shared_memory_base : !wave.ptr<#wave.shared, i32>
   %lane = wave.lane_id : !wave.simd<i32, 32>
   %src = wave.ptr_add %in, %lane
       : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 32>

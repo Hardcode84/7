@@ -73,7 +73,7 @@ func.func @lds_echo_kernel(%out: !wave.ptr<#wave.global, i32>)
     attributes {wave.kernel, wave.lds_size = 256 : i64} {
   %wi_raw = wave.workitem_id 0 : !wave.simd<i32, 64>
   %wi = wave.assume %wi_raw as "x" [#wave.pred<"x >= 0">, #wave.pred<"x <= 63">] : !wave.simd<i32, 64>
-  %lds = wave.lds_base : !wave.ptr<#wave.shared, i32>
+  %lds = wave.shared_memory_base : !wave.ptr<#wave.shared, i32>
   %lds_ptrs = wave.ptr_add %lds, %wi
       : !wave.ptr<#wave.shared, i32>, !wave.simd<i32, 64>
       -> !wave.simd<!wave.ptr<#wave.shared, i32>, 64>

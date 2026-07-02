@@ -20,7 +20,7 @@ gpu.module @kernels {
     %vlast = wave.splat %last : i32 -> !wave.simd<i32, @W@>
 
     %lane = wave.lane_id : !wave.simd<i32, @W@>
-    %lds = wave.lds_base : !wave.ptr<#wave.shared, i32>
+    %lds = wave.shared_memory_base : !wave.ptr<#wave.shared, i32>
 
     // Write: LDS[lane] = lane.
     %store_ptrs = wave.ptr_add %lds, %lane

@@ -32,7 +32,7 @@ func.func @zero_fill_marked_buffer(%in: !wave.ptr<#wave.global, i32>,
   %src = wave.ptr_add %buf, %lane
       : !wave.ptr<#waveamd.buffer, i32>, !wave.simd<i32, 32>
       -> !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 32>
-  %lds = wave.lds_base : !wave.ptr<#wave.shared, i32>
+  %lds = wave.shared_memory_base : !wave.ptr<#wave.shared, i32>
   %tok0 = wave.token : !wave.mem.token
   %tok = wave.where %active {
     %tok1 = waveamd.dma_load_lds %src -> %lds after %tok0
@@ -69,7 +69,7 @@ func.func @keep_unmarked_dma(%in: !wave.ptr<#wave.global, i32>,
   %src = wave.ptr_add %buf, %lane
       : !wave.ptr<#waveamd.buffer, i32>, !wave.simd<i32, 32>
       -> !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 32>
-  %lds = wave.lds_base : !wave.ptr<#wave.shared, i32>
+  %lds = wave.shared_memory_base : !wave.ptr<#wave.shared, i32>
   %tok0 = wave.token : !wave.mem.token
   %tok = wave.where %active {
     %tok1 = waveamd.dma_load_lds %src -> %lds after %tok0 {bytes = 16 : i64}
@@ -101,7 +101,7 @@ func.func @keep_global_source(%in: !wave.ptr<#wave.global, i32>,
   %src = wave.ptr_add %in, %lane
       : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 32>
       -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
-  %lds = wave.lds_base : !wave.ptr<#wave.shared, i32>
+  %lds = wave.shared_memory_base : !wave.ptr<#wave.shared, i32>
   %tok0 = wave.token : !wave.mem.token
   %tok = wave.where %active {
     %tok1 = waveamd.dma_load_lds %src -> %lds after %tok0
@@ -143,7 +143,7 @@ func.func @keep_non_dma_side_effect(%in: !wave.ptr<#wave.global, i32>,
   %dst = wave.ptr_add %out, %lane
       : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 32>
       -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
-  %lds = wave.lds_base : !wave.ptr<#wave.shared, i32>
+  %lds = wave.shared_memory_base : !wave.ptr<#wave.shared, i32>
   %tok0 = wave.token : !wave.mem.token
   wave.where %active {
     %tok1 = waveamd.dma_load_lds %src -> %lds after %tok0

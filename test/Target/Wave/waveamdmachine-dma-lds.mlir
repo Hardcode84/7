@@ -20,7 +20,7 @@ func.func @global_dma_lds(%in: !wave.ptr<#wave.global, i32>)
   %src = wave.ptr_add %in, %wi
       : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 64>
       -> !wave.simd<!wave.ptr<#wave.global, i32>, 64>
-  %lds = wave.lds_base : !wave.ptr<#wave.shared, i32>
+  %lds = wave.shared_memory_base : !wave.ptr<#wave.shared, i32>
   %tok0 = wave.token : !wave.mem.token
   %tok = waveamd.dma_load_lds %src -> %lds after %tok0 {bytes = 4 : i64}
       : (!wave.simd<!wave.ptr<#wave.global, i32>, 64>,
@@ -43,7 +43,7 @@ func.func @global_dma_lds_b128(%in: !wave.ptr<#wave.global, i32>)
   %src = wave.ptr_add %in, %wi
       : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 64>
       -> !wave.simd<!wave.ptr<#wave.global, i32>, 64>
-  %lds = wave.lds_base : !wave.ptr<#wave.shared, i32>
+  %lds = wave.shared_memory_base : !wave.ptr<#wave.shared, i32>
   %tok0 = wave.token : !wave.mem.token
   %tok = waveamd.dma_load_lds %src -> %lds after %tok0 {bytes = 16 : i64}
       : (!wave.simd<!wave.ptr<#wave.global, i32>, 64>,
@@ -66,7 +66,7 @@ func.func @global_dma_lds_uniform_mul_dest(%in: !wave.ptr<#wave.global, i32>)
   %src = wave.ptr_add %in, %wi
       : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 64>
       -> !wave.simd<!wave.ptr<#wave.global, i32>, 64>
-  %lds = wave.lds_base : !wave.ptr<#wave.shared, i32>
+  %lds = wave.shared_memory_base : !wave.ptr<#wave.shared, i32>
   %first = wave.read_first %wi : !wave.simd<i32, 64> -> i32
   %off = wave.index_expr <"512*floor(1/64*wi_first)"> ["wi_first"](%first)
       : (i32) -> index
@@ -97,7 +97,7 @@ func.func @global_dma_lds_uniform_dest_add(%in: !wave.ptr<#wave.global, i32>)
   %src = wave.ptr_add %in, %wi
       : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 64>
       -> !wave.simd<!wave.ptr<#wave.global, i32>, 64>
-  %lds = wave.lds_base : !wave.ptr<#wave.shared, i32>
+  %lds = wave.shared_memory_base : !wave.ptr<#wave.shared, i32>
   %first = wave.read_first %wi : !wave.simd<i32, 64> -> i32
   %off = wave.index_expr <"256 + 512*floor(1/64*wi_first)"> ["wi_first"](%first)
       : (i32) -> index
@@ -131,7 +131,7 @@ func.func @global_dma_lds_wide_uniform_dest_m0(
       : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 64>
       -> !wave.simd<!wave.ptr<#wave.global, i32>, 64>
   %x = wave.assume %x_raw as "x" [#wave.pred<"x >= 0">, #wave.pred<"x <= 1099511627775">] : i64
-  %lds = wave.lds_base : !wave.ptr<#wave.shared, i32>
+  %lds = wave.shared_memory_base : !wave.ptr<#wave.shared, i32>
   %off = wave.index_expr <"floor(1/8*x)"> ["x"](%x) : (i64) -> index
   %dst = wave.ptr_add %lds, %off
       : !wave.ptr<#wave.shared, i32>, index -> !wave.ptr<#wave.shared, i32>
@@ -165,7 +165,7 @@ func.func @global_dma_lds_i64_fit_dest_m0(
       -> !wave.simd<!wave.ptr<#wave.global, i32>, 64>
   %x = wave.assume %x_raw as "x" [#wave.pred<"x >= 0">, #wave.pred<"x <= 127">] : i64
   %off = wave.index_expr <"x"> ["x"](%x) : (i64) -> index
-  %lds = wave.lds_base : !wave.ptr<#wave.shared, i32>
+  %lds = wave.shared_memory_base : !wave.ptr<#wave.shared, i32>
   %dst = wave.ptr_add %lds, %off
       : !wave.ptr<#wave.shared, i32>, index -> !wave.ptr<#wave.shared, i32>
   %tok0 = wave.token : !wave.mem.token
@@ -198,7 +198,7 @@ func.func @global_dma_lds_uniform_dest_split_remainder_m0(
       -> !wave.simd<!wave.ptr<#wave.global, i32>, 64>
   %a = wave.assume %a_raw as "a" [#wave.pred<"a >= 0">, #wave.pred<"a <= 1073741823">] : i64
   %b = wave.assume %b_raw as "b" [#wave.pred<"b >= 0">, #wave.pred<"b <= 1073741823">] : i64
-  %lds = wave.lds_base : !wave.ptr<#wave.shared, i32>
+  %lds = wave.shared_memory_base : !wave.ptr<#wave.shared, i32>
   %off = wave.index_expr <"a + b"> ["a", "b"](%a, %b) : (i64, i64) -> index
   %dst = wave.ptr_add %lds, %off
       : !wave.ptr<#wave.shared, i32>, index -> !wave.ptr<#wave.shared, i32>
@@ -230,7 +230,7 @@ func.func @global_dma_lds_wide_source_base_adjust(
   %src = wave.ptr_add %in, %src_off
       : !wave.ptr<#wave.global, i32>, !wave.simd<index, 64>
       -> !wave.simd<!wave.ptr<#wave.global, i32>, 64>
-  %lds = wave.lds_base : !wave.ptr<#wave.shared, i32>
+  %lds = wave.shared_memory_base : !wave.ptr<#wave.shared, i32>
   %tok0 = wave.token : !wave.mem.token
   %tok = waveamd.dma_load_lds %src -> %lds after %tok0 {bytes = 16 : i64}
       : (!wave.simd<!wave.ptr<#wave.global, i32>, 64>,
@@ -257,7 +257,7 @@ func.func @global_dma_lds_addr64_fallback(
   %src = wave.ptr_add %in, %off
       : !wave.ptr<#wave.global, i32>, !wave.simd<index, 64>
       -> !wave.simd<!wave.ptr<#wave.global, i32>, 64>
-  %lds = wave.lds_base : !wave.ptr<#wave.shared, i32>
+  %lds = wave.shared_memory_base : !wave.ptr<#wave.shared, i32>
   %tok0 = wave.token : !wave.mem.token
   %tok = waveamd.dma_load_lds %src -> %lds after %tok0 {bytes = 16 : i64}
       : (!wave.simd<!wave.ptr<#wave.global, i32>, 64>,
@@ -282,7 +282,7 @@ func.func @global_dma_lds_source_const_offset(%in: !wave.ptr<#wave.global, i32>)
   %src = wave.ptr_add %in, %src_off
       : !wave.ptr<#wave.global, i32>, !wave.simd<index, 64>
       -> !wave.simd<!wave.ptr<#wave.global, i32>, 64>
-  %lds = wave.lds_base : !wave.ptr<#wave.shared, i32>
+  %lds = wave.shared_memory_base : !wave.ptr<#wave.shared, i32>
   %tok0 = wave.token : !wave.mem.token
   %tok = waveamd.dma_load_lds %src -> %lds after %tok0 {bytes = 16 : i64}
       : (!wave.simd<!wave.ptr<#wave.global, i32>, 64>,
@@ -308,7 +308,7 @@ func.func @buffer_dma_lds(%in: !wave.ptr<#wave.global, i32>)
   %src = wave.ptr_add %buffer, %wi
       : !wave.ptr<#waveamd.buffer, i32>, !wave.simd<i32, 64>
       -> !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>
-  %lds = wave.lds_base : !wave.ptr<#wave.shared, i32>
+  %lds = wave.shared_memory_base : !wave.ptr<#wave.shared, i32>
   %tok0 = wave.token : !wave.mem.token
   %tok = waveamd.dma_load_lds %src -> %lds after %tok0 {bytes = 4 : i64}
       : (!wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>,
@@ -334,7 +334,7 @@ func.func @buffer_dma_lds_b128(%in: !wave.ptr<#wave.global, i32>)
   %src = wave.ptr_add %buffer, %wi
       : !wave.ptr<#waveamd.buffer, i32>, !wave.simd<i32, 64>
       -> !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>
-  %lds = wave.lds_base : !wave.ptr<#wave.shared, i32>
+  %lds = wave.shared_memory_base : !wave.ptr<#wave.shared, i32>
   %tok0 = wave.token : !wave.mem.token
   %tok = waveamd.dma_load_lds %src -> %lds after %tok0 {bytes = 16 : i64}
       : (!wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>,
@@ -366,7 +366,7 @@ func.func @buffer_dma_lds_bounded_source_soffset(
   %src = wave.ptr_add %buffer, %off
       : !wave.ptr<#waveamd.buffer, i32>, !wave.simd<index, 64>
       -> !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>
-  %lds = wave.lds_base : !wave.ptr<#wave.shared, i32>
+  %lds = wave.shared_memory_base : !wave.ptr<#wave.shared, i32>
   %tok0 = wave.token : !wave.mem.token
   %tok = waveamd.dma_load_lds %src -> %lds after %tok0 {bytes = 16 : i64}
       : (!wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>,
@@ -412,7 +412,7 @@ func.func @buffer_dma_lds_lane_terms_before_uniform(
   %src = wave.ptr_add %buffer, %off
       : !wave.ptr<#waveamd.buffer, i32>, !wave.simd<index, 64>
       -> !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>
-  %lds = wave.lds_base : !wave.ptr<#wave.shared, i32>
+  %lds = wave.shared_memory_base : !wave.ptr<#wave.shared, i32>
   %tok0 = wave.token : !wave.mem.token
   %tok = waveamd.dma_load_lds %src -> %lds after %tok0 {bytes = 16 : i64}
       : (!wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>,
@@ -442,7 +442,7 @@ func.func @buffer_dma_lds_source_const_soffset(
   %src = wave.ptr_add %buffer, %off
       : !wave.ptr<#waveamd.buffer, i32>, !wave.simd<index, 64>
       -> !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>
-  %lds = wave.lds_base : !wave.ptr<#wave.shared, i32>
+  %lds = wave.shared_memory_base : !wave.ptr<#wave.shared, i32>
   %tok0 = wave.token : !wave.mem.token
   %tok = waveamd.dma_load_lds %src -> %lds after %tok0 {bytes = 16 : i64}
       : (!wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>,
@@ -472,7 +472,7 @@ func.func @buffer_dma_lds_composed_source_assumption(
   %src = wave.ptr_add %buffer, %off
       : !wave.ptr<#waveamd.buffer, i8>, !wave.simd<index, 64>
       -> !wave.simd<!wave.ptr<#waveamd.buffer, i8>, 64>
-  %lds = wave.lds_base : !wave.ptr<#wave.shared, i32>
+  %lds = wave.shared_memory_base : !wave.ptr<#wave.shared, i32>
   %tok0 = wave.token : !wave.mem.token
   %tok = waveamd.dma_load_lds %src -> %lds after %tok0 {bytes = 16 : i64}
       : (!wave.simd<!wave.ptr<#waveamd.buffer, i8>, 64>,
