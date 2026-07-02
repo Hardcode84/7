@@ -23,8 +23,9 @@
 namespace mlir::waveamdmachine {
 
 struct AMDGPUTarget {
-  llvm::StringRef triple;
-  llvm::StringRef chip;
+  std::string triple;
+  std::string chip;
+  std::string features;
 };
 
 std::optional<AMDGPUTarget> parseAMDGPUTargetAttr(llvm::StringRef value);
@@ -54,6 +55,9 @@ FailureOr<unsigned> getAMDGPUDefaultWavefrontSize(Operation *op,
 
 FailureOr<unsigned> getAMDGPUWavefrontSize(Operation *op,
                                            llvm::StringRef consumer);
+
+FailureOr<bool> getAMDGPUD16PreservesUnusedBits(Operation *op,
+                                                llvm::StringRef consumer);
 
 FailureOr<std::string> getAMDGPUAssemblerFeatures(Operation *op,
                                                   llvm::StringRef features,

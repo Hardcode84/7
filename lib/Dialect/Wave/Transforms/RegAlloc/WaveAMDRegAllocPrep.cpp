@@ -10,6 +10,7 @@
 
 #include "../WaveAMDHardwareResources.h"
 #include "WaveAMDRegAllocInternal.h"
+#include "WaveAMDRegAllocTransformUtils.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachine.h"
 #include "mlir/IR/Builders.h"
@@ -339,6 +340,37 @@ static LogicalResult splitDuplicateMFMAAccumulatorInputs(func::FuncOp func) {
     if (failed(dup))
       return failure();
     op.setAcc(*dup);
+  }
+  return success();
+}
+
+static LogicalResult splitRequiredKilledOperandInputs(func::FuncOp func) {
+  SmallVector<std::pair<Operation *, unsigned>> operands;
+  func.walk([&](Operation *op) {
+    for (OpOperand &operand : op->getOpOperands()) {
+      if (!wave::regalloc_detail::requiresKilledOperandReuseForResult(op,
+                                                                      operand))
+        continue;
+      if (llvm::hasSingleElement(operand.get().getUses()))
+        continue;
+      operands.push_back({op, operand.getOperandNumber()});
+    }
+  });
+
+  OpBuilder builder(func.getContext());
+  for (auto [op, operandNumber] : operands) {
+    OpOperand &operand = op->getOpOperand(operandNumber);
+    Value value = operand.get();
+    if (llvm::hasSingleElement(value.getUses()))
+      continue;
+    if (!copyableRegType(value))
+      return op->emitError("required killed operand reuse has non-copyable "
+                           "multi-use operand");
+    builder.setInsertionPoint(op);
+    FailureOr<Value> dup = duplicateRegValue(builder, op->getLoc(), value);
+    if (failed(dup))
+      return failure();
+    operand.assign(*dup);
   }
   return success();
 }
@@ -683,6 +715,8 @@ LogicalResult mlir::wave::prepareWaveAMDRegAllocIR(func::FuncOp func) {
   if (failed(splitDuplicateLoopInits(func)))
     return failure();
   if (failed(splitDuplicateMFMAAccumulatorInputs(func)))
+    return failure();
+  if (failed(splitRequiredKilledOperandInputs(func)))
     return failure();
   return splitTupleElementSharing(func);
 }

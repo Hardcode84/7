@@ -9,6 +9,8 @@
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineTarget.h"
 
 #include "llvm/ADT/SmallString.h"
+#include "llvm/ADT/StringSet.h"
+#include "llvm/ADT/Twine.h"
 #include "llvm/TargetParser/Triple.h"
 
 using namespace mlir;
@@ -16,19 +18,67 @@ using namespace mlir::waveamdmachine;
 
 static constexpr char kWavefrontSizeAttr[] = "waveamdmachine.wavefront_size";
 
-std::optional<AMDGPUTarget>
-mlir::waveamdmachine::parseAMDGPUTargetAttr(StringRef value) {
+static bool isValidTargetIDFeature(StringRef feature) {
+  return feature == "sramecc+" || feature == "sramecc-" ||
+         feature == "xnack+" || feature == "xnack-";
+}
+
+static bool parseTargetIDFeatures(StringRef features) {
+  if (features.empty() || features.ends_with(":"))
+    return false;
+
+  llvm::StringSet<> seen;
+  while (!features.empty()) {
+    auto [feature, rest] = features.split(':');
+    if (feature.empty() || !isValidTargetIDFeature(feature))
+      return false;
+    StringRef name = feature.drop_back();
+    if (!seen.insert(name).second)
+      return false;
+    features = rest;
+  }
+  return true;
+}
+
+struct TargetParts {
+  StringRef triple;
+  StringRef chipAndFeatures;
+};
+
+static std::optional<TargetParts> splitTargetParts(StringRef value) {
   size_t first = value.find("--");
   if (first == StringRef::npos || first == 0 || first + 2 == value.size())
     return std::nullopt;
   if (value.find("--", first + 2) != StringRef::npos)
     return std::nullopt;
+  return TargetParts{value.take_front(first), value.drop_front(first + 2)};
+}
 
-  StringRef triple = value.take_front(first);
-  StringRef chip = value.drop_front(first + 2);
-  if (llvm::Triple(triple).getArch() != llvm::Triple::amdgcn)
+static bool splitChipAndFeatures(StringRef chipAndFeatures, StringRef &chip,
+                                 StringRef &features) {
+  auto split = chipAndFeatures.split(':');
+  chip = split.first;
+  features = split.second;
+  if (chip.empty())
+    return false;
+  if (chipAndFeatures.contains(':') && features.empty())
+    return false;
+  return features.empty() || parseTargetIDFeatures(features);
+}
+
+std::optional<AMDGPUTarget>
+mlir::waveamdmachine::parseAMDGPUTargetAttr(StringRef value) {
+  std::optional<TargetParts> parts = splitTargetParts(value);
+  if (!parts)
     return std::nullopt;
-  return AMDGPUTarget{triple, chip};
+
+  StringRef chip;
+  StringRef features;
+  if (!splitChipAndFeatures(parts->chipAndFeatures, chip, features))
+    return std::nullopt;
+  if (llvm::Triple(parts->triple).getArch() != llvm::Triple::amdgcn)
+    return std::nullopt;
+  return AMDGPUTarget{parts->triple.str(), chip.str(), features.str()};
 }
 
 FailureOr<AMDGPUTarget> mlir::waveamdmachine::parseAMDGPUTargetAttr(
@@ -37,7 +87,8 @@ FailureOr<AMDGPUTarget> mlir::waveamdmachine::parseAMDGPUTargetAttr(
   if (target)
     return *target;
   emitError() << "malformed waveamdmachine.target `" << value
-              << "`; expected `<amdgcn-triple>--<chip>`";
+              << "`; expected `<amdgcn-triple>--<chip>[:sramecc(+|-)]"
+                 "[:xnack(+|-)]`";
   return failure();
 }
 
@@ -187,6 +238,54 @@ static void appendTargetFeature(SmallString<128> &features, StringRef feature) {
   features.append(feature);
 }
 
+static std::optional<bool> getTargetIDFeature(AMDGPUTarget target,
+                                              StringRef name) {
+  StringRef features = target.features;
+  while (!features.empty()) {
+    auto [feature, rest] = features.split(':');
+    if (feature.drop_back() == name)
+      return feature.ends_with("+");
+    features = rest;
+  }
+  return std::nullopt;
+}
+
+static void appendTargetIDFeatures(SmallString<128> &resolved,
+                                   AMDGPUTarget target) {
+  StringRef features = target.features;
+  while (!features.empty()) {
+    auto [feature, rest] = features.split(':');
+    char sign = feature.back();
+    appendTargetFeature(resolved,
+                        Twine(sign).concat(feature.drop_back()).str());
+    features = rest;
+  }
+}
+
+FailureOr<bool>
+mlir::waveamdmachine::getAMDGPUD16PreservesUnusedBits(Operation *op,
+                                                      StringRef consumer) {
+  FailureOr<AMDGPUTarget> target = getAMDGPUTarget(op, consumer);
+  if (failed(target))
+    return failure();
+
+  llvm::AMDGPU::IsaVersion isa = llvm::AMDGPU::getIsaVersion(target->chip);
+  if (isa.Major == 0)
+    return findAMDGPUTargetModule(op).emitError("unsupported AMDGPU target: ")
+           << target->triple << "--" << target->chip;
+  if (isa.Major < 9)
+    return false;
+
+  llvm::AMDGPU::GPUKind kind = llvm::AMDGPU::parseArchAMDGCN(target->chip);
+  bool supportsSRAMECC =
+      llvm::AMDGPU::getArchAttrAMDGCN(kind) & llvm::AMDGPU::FEATURE_SRAMECC;
+  if (!supportsSRAMECC)
+    return true;
+  if (std::optional<bool> sramecc = getTargetIDFeature(*target, "sramecc"))
+    return !*sramecc;
+  return false;
+}
+
 FailureOr<std::string> mlir::waveamdmachine::getAMDGPUAssemblerFeatures(
     Operation *op, StringRef features, StringRef consumer) {
   FailureOr<AMDGPUTarget> target = getAMDGPUTarget(op, consumer);
@@ -199,6 +298,7 @@ FailureOr<std::string> mlir::waveamdmachine::getAMDGPUAssemblerFeatures(
     return failure();
 
   SmallString<128> resolved(features);
+  appendTargetIDFeatures(resolved, *target);
   if (isa.Major >= 10) {
     appendTargetFeature(resolved,
                         *width == 32 ? "-wavefrontsize64" : "-wavefrontsize32");

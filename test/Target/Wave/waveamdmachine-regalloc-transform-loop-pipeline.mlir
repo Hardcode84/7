@@ -223,6 +223,43 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
     return %sum : !waveamdmachine.reg<vgpr, 1>
   }
 
+  // CHECK-LABEL: func.func @regalloc_transform_loop_splits_shared_required_killed_input
+  // CHECK-SAME: waveamdmachine.regalloc_assignments
+  // CHECK-SAME: stage = "linear-scan-success"
+  // CHECK: [[ZERO:%.*]] = waveamdmachine.imm 0
+  // CHECK: [[SEED:%.*]] = waveamdmachine.v_mov_b32_tuple [[ZERO]]
+  // CHECK-SAME: -> !waveamdmachine.reg<vgpr, 1, [[SEED_REG:[0-9]+]]>
+  // CHECK: [[SPLIT:%.*]] = waveamdmachine.v_mov_b32_tuple [[ZERO]]
+  // CHECK-SAME: -> !waveamdmachine.reg<vgpr, 1, [[SPLIT_REG:[0-9]+]]>
+  // CHECK-NEXT: [[HI0:%.*]], %{{.*}} = waveamdmachine.buffer_load_u8_d16_hi {{.*}}, [[SPLIT]],
+  // CHECK-SAME: -> (!waveamdmachine.reg<vgpr, 1, [[SPLIT_REG]]>, !waveamdmachine.mem.token)
+  // CHECK-NEXT: [[HI1:%.*]], %{{.*}} = waveamdmachine.buffer_load_u8_d16_hi {{.*}}, [[SEED]],
+  // CHECK-SAME: -> (!waveamdmachine.reg<vgpr, 1, [[SEED_REG]]>, !waveamdmachine.mem.token)
+  // CHECK: waveamdmachine.v_or_b32 [[HI0]], [[HI1]]
+  func.func @regalloc_transform_loop_splits_shared_required_killed_input(
+      %off0: !waveamdmachine.reg<vgpr, 1>,
+      %off1: !waveamdmachine.reg<vgpr, 1>,
+      %desc: !waveamdmachine.reg<sgpr, 4>)
+      attributes {waveamdmachine.vgpr_count_max = 6 : i64} {
+    %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+    %seed = waveamdmachine.v_mov_b32_tuple %zero {registers = 1 : i64}
+        : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
+    %hi0, %tok0 = waveamdmachine.buffer_load_u8_d16_hi
+        %off0, %seed, %desc, %zero
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+           !waveamdmachine.reg<sgpr, 4>, !waveamdmachine.imm)
+        -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+    %hi1, %tok1 = waveamdmachine.buffer_load_u8_d16_hi
+        %off1, %seed, %desc, %zero offset 1
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+           !waveamdmachine.reg<sgpr, 4>, !waveamdmachine.imm)
+        -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+    %packed = waveamdmachine.v_or_b32 %hi0, %hi1
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+    return
+  }
+
   // CHECK-LABEL: func.func @regalloc_transform_loop_failure
   // CHECK-NOT: waveamdmachine.regalloc_assignments
   // CHECK-SAME: waveamdmachine.regalloc_transform_state =

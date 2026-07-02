@@ -35,6 +35,80 @@ func.func @hoist_exec_if_local_addr(%cond: !waveamdmachine.reg<sgpr, 1>,
 
 // -----
 
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950:sramecc-"} {
+
+// CHECK-LABEL: func.func @d16_byte_pack_preserves_low_sramecc_off(
+// CHECK: [[LOW0:%.*]], %{{.*}} = waveamdmachine.buffer_load_u8_d16
+// CHECK: [[LOW1:%.*]], %{{.*}} = waveamdmachine.buffer_load_u8_d16
+// CHECK-NOT: waveamdmachine.v_mov_b32_tuple
+// CHECK: [[PAIR0:%.*]], %{{.*}} = waveamdmachine.buffer_load_u8_d16_hi {{.*}}, [[LOW0]],
+// CHECK: [[PAIR1:%.*]], %{{.*}} = waveamdmachine.buffer_load_u8_d16_hi {{.*}}, [[LOW1]],
+// CHECK: [[SHIFTED:%.*]] = waveamdmachine.v_lshlrev_b32 [[PAIR1]]
+// CHECK: waveamdmachine.v_or_b32 [[PAIR0]], [[SHIFTED]]
+func.func @d16_byte_pack_preserves_low_sramecc_off(
+    %off0: !waveamdmachine.reg<vgpr, 1>,
+    %off1: !waveamdmachine.reg<vgpr, 1>,
+    %off2: !waveamdmachine.reg<vgpr, 1>,
+    %off3: !waveamdmachine.reg<vgpr, 1>,
+    %desc: !waveamdmachine.reg<sgpr, 4>) -> !waveamdmachine.reg<vgpr, 1> {
+  %soff = waveamdmachine.imm 0 : !waveamdmachine.imm
+  %mask = waveamdmachine.imm 255 : !waveamdmachine.imm
+  %s8 = waveamdmachine.imm 8 : !waveamdmachine.imm
+  %s16 = waveamdmachine.imm 16 : !waveamdmachine.imm
+  %s24 = waveamdmachine.imm 24 : !waveamdmachine.imm
+  %b0, %t0 = waveamdmachine.buffer_load_u8 %off0, %desc, %soff
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 4>,
+         !waveamdmachine.imm)
+      -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+  %b1, %t1 = waveamdmachine.buffer_load_u8 %off1, %desc, %soff
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 4>,
+         !waveamdmachine.imm)
+      -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+  %b2, %t2 = waveamdmachine.buffer_load_u8 %off2, %desc, %soff
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 4>,
+         !waveamdmachine.imm)
+      -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+  %b3, %t3 = waveamdmachine.buffer_load_u8 %off3, %desc, %soff
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 4>,
+         !waveamdmachine.imm)
+      -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+  %m0 = waveamdmachine.v_and_b32 %b0, %mask
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.imm)
+      -> !waveamdmachine.reg<vgpr, 1>
+  %m1 = waveamdmachine.v_and_b32 %b1, %mask
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.imm)
+      -> !waveamdmachine.reg<vgpr, 1>
+  %m2 = waveamdmachine.v_and_b32 %b2, %mask
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.imm)
+      -> !waveamdmachine.reg<vgpr, 1>
+  %m3 = waveamdmachine.v_and_b32 %b3, %mask
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.imm)
+      -> !waveamdmachine.reg<vgpr, 1>
+  %sh1 = waveamdmachine.v_lshlrev_b32 %m1, %s8
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.imm)
+      -> !waveamdmachine.reg<vgpr, 1>
+  %sh2 = waveamdmachine.v_lshlrev_b32 %m2, %s16
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.imm)
+      -> !waveamdmachine.reg<vgpr, 1>
+  %sh3 = waveamdmachine.v_lshlrev_b32 %m3, %s24
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.imm)
+      -> !waveamdmachine.reg<vgpr, 1>
+  %or0 = waveamdmachine.v_or_b32 %m0, %sh1
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+      -> !waveamdmachine.reg<vgpr, 1>
+  %or1 = waveamdmachine.v_or_b32 %or0, %sh2
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+      -> !waveamdmachine.reg<vgpr, 1>
+  %or2 = waveamdmachine.v_or_b32 %or1, %sh3
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+      -> !waveamdmachine.reg<vgpr, 1>
+  return %or2 : !waveamdmachine.reg<vgpr, 1>
+}
+
+}
+
+// -----
+
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 
 // CHECK-LABEL: func.func @scale_loop_shifted_carry(

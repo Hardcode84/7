@@ -684,10 +684,16 @@ static bool emitHsacoOutput(FrontendResult &result,
         if (failed(target))
           return false;
 
+        FailureOr<std::string> resolvedFeatures =
+            waveamdmachine::getAMDGPUAssemblerFeatures(
+                module.getOperation(), options.targetFeatures, "wavec");
+        if (failed(resolvedFeatures))
+          return false;
+
         SmallVector<char, 0> hsaco;
-        if (failed(wave::assembleWaveAMDGPUKernels(
-                module, target->triple, target->chip, options.targetFeatures,
-                hsaco)))
+        if (failed(wave::assembleWaveAMDGPUKernels(module, target->triple,
+                                                   target->chip,
+                                                   *resolvedFeatures, hsaco)))
           return false;
         return writeOutput(options, llvm::StringRef(hsaco.data(), hsaco.size()),
                            /*binary=*/true);

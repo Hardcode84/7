@@ -1,14 +1,24 @@
 // RUN: wave-opt --waveamd-to-machine --canonicalize --cse %s | FileCheck %s --check-prefix=SELECT
+// RUN: wave-opt --waveamd-to-machine --canonicalize --cse --waveamd-machine-cleanup %s | FileCheck %s --check-prefix=CLEANUP
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 
 // SELECT-LABEL: func.func @buffer_i8_pack_d16
-// SELECT: %[[EVEN_LO:.*]], %{{.*}} = waveamdmachine.buffer_load_u8_d16
-// SELECT: %[[ODD_LO:.*]], %{{.*}} = waveamdmachine.buffer_load_u8_d16
-// SELECT: %[[EVEN:.*]], %{{.*}} = waveamdmachine.buffer_load_u8_d16_hi {{.*}}, %[[EVEN_LO]],
-// SELECT: %[[ODD:.*]], %{{.*}} = waveamdmachine.buffer_load_u8_d16_hi {{.*}}, %[[ODD_LO]],
-// SELECT: %[[SHIFTED:.*]] = waveamdmachine.v_lshlrev_b32 %[[ODD]]
-// SELECT: waveamdmachine.v_or_b32 %[[EVEN]], %[[SHIFTED]]
+// SELECT-NOT: waveamdmachine.buffer_load_u8_d16
+// SELECT: waveamdmachine.v_and_b32
+// SELECT: waveamdmachine.v_or_b32
+// SELECT-NOT: waveamdmachine.buffer_load_u8_d16
+// CLEANUP-LABEL: func.func @buffer_i8_pack_d16
+// CLEANUP: %[[EVEN_LO:.*]], %{{.*}} = waveamdmachine.buffer_load_u8_d16
+// CLEANUP: %[[ODD_LO:.*]], %{{.*}} = waveamdmachine.buffer_load_u8_d16
+// CLEANUP: %[[ZERO0:.*]] = waveamdmachine.v_mov_b32_tuple
+// CLEANUP: %[[EVEN_HI:.*]], %{{.*}} = waveamdmachine.buffer_load_u8_d16_hi {{.*}}, %[[ZERO0]],
+// CLEANUP: %[[ZERO1:.*]] = waveamdmachine.v_mov_b32_tuple
+// CLEANUP: %[[ODD_HI:.*]], %{{.*}} = waveamdmachine.buffer_load_u8_d16_hi {{.*}}, %[[ZERO1]],
+// CLEANUP: %[[EVEN:.*]] = waveamdmachine.v_or_b32 %[[EVEN_LO]], %[[EVEN_HI]]
+// CLEANUP: %[[ODD:.*]] = waveamdmachine.v_or_b32 %[[ODD_LO]], %[[ODD_HI]]
+// CLEANUP: %[[SHIFTED:.*]] = waveamdmachine.v_lshlrev_b32 %[[ODD]]
+// CLEANUP: waveamdmachine.v_or_b32 %[[EVEN]], %[[SHIFTED]]
 func.func @buffer_i8_pack_d16(%in: !wave.ptr<#wave.global, i8>,
                               %out: !wave.ptr<#wave.global, i8>)
     attributes {wave.kernel} {
@@ -72,6 +82,13 @@ func.func @buffer_i8_pack_d16(%in: !wave.ptr<#wave.global, i8>,
 // SELECT: waveamdmachine.v_and_b32
 // SELECT-NOT: waveamdmachine.buffer_load_u8_d16
 // SELECT: waveamdmachine.v_or_b32
+// CLEANUP-LABEL: func.func @buffer_i8_pack_shared_load_keeps_scalar
+// CLEANUP-NOT: waveamdmachine.buffer_load_u8_d16
+// CLEANUP: waveamdmachine.buffer_load_u8
+// CLEANUP-NOT: waveamdmachine.buffer_load_u8_d16
+// CLEANUP: waveamdmachine.v_and_b32
+// CLEANUP-NOT: waveamdmachine.buffer_load_u8_d16
+// CLEANUP: waveamdmachine.v_or_b32
 func.func @buffer_i8_pack_shared_load_keeps_scalar(
     %in: !wave.ptr<#wave.global, i8>, %out: !wave.ptr<#wave.global, i8>)
     attributes {wave.kernel} {

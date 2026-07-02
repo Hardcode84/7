@@ -328,7 +328,7 @@ public:
       return failure();
 
     os << "\t.text\n";
-    os << "\t.amdgcn_target \"" << targetTriple << "--" << targetChip << "\"\n";
+    os << "\t.amdgcn_target \"" << getTargetID() << "\"\n";
     os << "\t.amdhsa_code_object_version 6\n";
     SmallVector<func::FuncOp> funcs;
     for (func::FuncOp func : module.getOps<func::FuncOp>()) {
@@ -362,6 +362,7 @@ private:
   AMDGPUOpcodeSet opcodes;
   std::string targetTriple = kDefaultTargetTriple.str();
   std::string targetChip = kDefaultTargetChip.str();
+  std::string targetFeatures;
   unsigned wavefrontSize = 32;
   unsigned indent = 1;
   // Per-function structured-control state.
@@ -396,8 +397,9 @@ private:
               targetAttr.getValue(), [&]() { return module.emitError(); });
       if (failed(target))
         return failure();
-      targetTriple = target->triple.str();
-      targetChip = target->chip.str();
+      targetTriple = target->triple;
+      targetChip = target->chip;
+      targetFeatures = target->features;
     }
 
     llvm::Triple triple(targetTriple);
@@ -1478,13 +1480,19 @@ private:
       for (const KernelMetadataEntryInfo &entry : kernel.metadataEntries)
         os << "    " << entry.name << ": " << entry.value << "\n";
     }
-    os << "amdhsa.target:   " << targetTriple << "--" << targetChip << "\n";
+    os << "amdhsa.target:   " << getTargetID() << "\n";
     os << "amdhsa.version:\n";
     os << "  - 1\n";
     os << "  - 2\n";
     os << "...\n";
     os << "\t.end_amdgpu_metadata\n";
     return success();
+  }
+
+  std::string getTargetID() const {
+    if (targetFeatures.empty())
+      return targetTriple + "--" + targetChip;
+    return targetTriple + "--" + targetChip + ":" + targetFeatures;
   }
 
   unsigned getPhys(Value value) const {
