@@ -120,6 +120,66 @@ func.func @scalar_reg_tuple_elements(
   return
 }
 
+// PACK-LABEL: func.func @copy_tuple_materializes_before_pack(
+// PACK: %[[SRC:.+]]:4 = waveamdmachine.tuple_to_elements
+// PACK: %[[PAIR:.+]] = waveamdmachine.v_mov_b64_from_elements %[[SRC]]#0, %[[SRC]]#1
+// PACK-SAME: -> !waveamdmachine.reg<vgpr, 2, 0>
+// PACK: waveamdmachine.tuple_from_elements %[[PAIR]]
+// PACK-SAME: -> !waveamdmachine.reg<vgpr, 2, 0>
+// PACK-NOT: waveamdmachine.copy_tuple
+func.func @copy_tuple_materializes_before_pack(
+    %src: !waveamdmachine.reg<vgpr, 4, 100>) {
+  %parts:4 = waveamdmachine.tuple_to_elements %src
+      : (!waveamdmachine.reg<vgpr, 4, 100>) ->
+        (!waveamdmachine.reg<vgpr, 1, 100>,
+         !waveamdmachine.reg<vgpr, 1, 101>,
+         !waveamdmachine.reg<vgpr, 1, 102>,
+         !waveamdmachine.reg<vgpr, 1, 103>)
+  %a = waveamdmachine.copy_tuple %parts#0
+      : (!waveamdmachine.reg<vgpr, 1, 100>) -> !waveamdmachine.reg<vgpr, 1, 0>
+  %b = waveamdmachine.copy_tuple %parts#1
+      : (!waveamdmachine.reg<vgpr, 1, 101>) -> !waveamdmachine.reg<vgpr, 1, 1>
+  %wide = waveamdmachine.tuple_from_elements %a, %b
+      : (!waveamdmachine.reg<vgpr, 1, 0>,
+         !waveamdmachine.reg<vgpr, 1, 1>)
+      -> !waveamdmachine.reg<vgpr, 2, 0>
+  return
+}
+
+// PACK-LABEL: func.func @copy_tuple_forwards_into_agpr_write(
+// PACK-SAME: %[[SRC:.*]]: !waveamdmachine.reg<vgpr, 4, 4>
+// PACK-NOT: waveamdmachine.v_mov_b32_tuple
+// PACK-NOT: waveamdmachine.copy_tuple
+// PACK: waveamdmachine.v_accvgpr_write_b32_tuple %[[SRC]]
+// PACK-SAME: (!waveamdmachine.reg<vgpr, 4, 4>) -> !waveamdmachine.reg<agpr, 4, 100>
+func.func @copy_tuple_forwards_into_agpr_write(
+    %src: !waveamdmachine.reg<vgpr, 4, 4>) {
+  %copy = waveamdmachine.copy_tuple %src
+      : (!waveamdmachine.reg<vgpr, 4, 4>) -> !waveamdmachine.reg<vgpr, 4, 128>
+  %acc = waveamdmachine.v_accvgpr_write_b32_tuple %copy
+      : (!waveamdmachine.reg<vgpr, 4, 128>) -> !waveamdmachine.reg<agpr, 4, 100>
+  return
+}
+
+// PACK-LABEL: func.func @copy_tuple_agpr_write_keeps_copy_before_source_clobber(
+// PACK-SAME: %[[SRC:.*]]: !waveamdmachine.reg<vgpr, 4, 4>
+// PACK: %[[COPY:.+]] = waveamdmachine.v_mov_b32_tuple %[[SRC]]
+// PACK-SAME: -> !waveamdmachine.reg<vgpr, 4, 128>
+// PACK: waveamdmachine.v_mov_b32_tuple
+// PACK-SAME: -> !waveamdmachine.reg<vgpr, 4, 4>
+// PACK: waveamdmachine.v_accvgpr_write_b32_tuple %[[COPY]]
+func.func @copy_tuple_agpr_write_keeps_copy_before_source_clobber(
+    %src: !waveamdmachine.reg<vgpr, 4, 4>,
+    %other: !waveamdmachine.reg<vgpr, 4, 16>) {
+  %copy = waveamdmachine.copy_tuple %src
+      : (!waveamdmachine.reg<vgpr, 4, 4>) -> !waveamdmachine.reg<vgpr, 4, 128>
+  %clobber = waveamdmachine.v_mov_b32_tuple %other {registers = 4 : i64}
+      : (!waveamdmachine.reg<vgpr, 4, 16>) -> !waveamdmachine.reg<vgpr, 4, 4>
+  %acc = waveamdmachine.v_accvgpr_write_b32_tuple %copy
+      : (!waveamdmachine.reg<vgpr, 4, 128>) -> !waveamdmachine.reg<agpr, 4, 100>
+  return
+}
+
 // PACK-LABEL: func.func @odd_source_reg_pair_stays_b32(
 // PACK: waveamdmachine.v_mov_b32_tuple
 // PACK: waveamdmachine.v_mov_b32_tuple

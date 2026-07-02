@@ -268,6 +268,121 @@ func.func @tuple_from_elements_mixed_class(%a: !waveamdmachine.reg<vgpr, 2>,
 
 // -----
 
+func.func @copy_tuple_mixed_class(%src: !waveamdmachine.reg<sgpr, 2>) {
+  // expected-error @below {{source register class must match result}}
+  %r = waveamdmachine.copy_tuple %src
+      : (!waveamdmachine.reg<sgpr, 2>) -> !waveamdmachine.reg<vgpr, 2>
+  return
+}
+
+// -----
+
+func.func @copy_tuple_width(%src: !waveamdmachine.reg<vgpr, 2>) {
+  // expected-error @below {{source width must match result width}}
+  %r = waveamdmachine.copy_tuple %src
+      : (!waveamdmachine.reg<vgpr, 2>) -> !waveamdmachine.reg<vgpr, 1>
+  return
+}
+
+// -----
+
+func.func @copy_tuple_agpr(%src: !waveamdmachine.reg<agpr, 2>) {
+  // expected-error @below {{supports only SGPR and VGPR copies}}
+  %r = waveamdmachine.copy_tuple %src
+      : (!waveamdmachine.reg<agpr, 2>) -> !waveamdmachine.reg<agpr, 2>
+  return
+}
+
+// -----
+
+func.func @update_tuple_base_class(%base: !waveamdmachine.reg<vgpr, 4>) {
+  // expected-error @below {{base register class must match result}}
+  "waveamdmachine.update_tuple"(%base) {offsets = []}
+      : (!waveamdmachine.reg<vgpr, 4>) -> !waveamdmachine.reg<sgpr, 4>
+  return
+}
+
+// -----
+
+func.func @update_tuple_base_width(%base: !waveamdmachine.reg<vgpr, 4>) {
+  // expected-error @below {{base width must match result width}}
+  "waveamdmachine.update_tuple"(%base) {offsets = []}
+      : (!waveamdmachine.reg<vgpr, 4>) -> !waveamdmachine.reg<vgpr, 2>
+  return
+}
+
+// -----
+
+func.func @update_tuple_offset_count(%base: !waveamdmachine.reg<vgpr, 4>,
+                                     %a: !waveamdmachine.reg<vgpr, 1>,
+                                     %b: !waveamdmachine.reg<vgpr, 1>) {
+  // expected-error @below {{offset count must match update count}}
+  %r = waveamdmachine.update_tuple %base, %a, %b {offsets = [0 : i64]}
+      : (!waveamdmachine.reg<vgpr, 4>,
+         !waveamdmachine.reg<vgpr, 1>,
+         !waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 4>
+  return
+}
+
+// -----
+
+func.func @update_tuple_non_integer_offset(%base: !waveamdmachine.reg<vgpr, 4>,
+                                           %a: !waveamdmachine.reg<vgpr, 1>) {
+  // expected-error @below {{offsets must be integer attributes}}
+  "waveamdmachine.update_tuple"(%base, %a) {offsets = ["x"]}
+      : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 1>)
+      -> !waveamdmachine.reg<vgpr, 4>
+  return
+}
+
+// -----
+
+func.func @update_tuple_negative_offset(%base: !waveamdmachine.reg<vgpr, 4>,
+                                        %a: !waveamdmachine.reg<vgpr, 1>) {
+  // expected-error @below {{offsets must be non-negative}}
+  %r = waveamdmachine.update_tuple %base, %a {offsets = [-1 : i64]}
+      : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 1>)
+      -> !waveamdmachine.reg<vgpr, 4>
+  return
+}
+
+// -----
+
+func.func @update_tuple_overlapping(%base: !waveamdmachine.reg<vgpr, 4>,
+                                    %a: !waveamdmachine.reg<vgpr, 2>,
+                                    %b: !waveamdmachine.reg<vgpr, 2>) {
+  // expected-error @below {{offsets must be sorted and non-overlapping}}
+  %r = waveamdmachine.update_tuple %base, %a, %b {offsets = [1 : i64, 2 : i64]}
+      : (!waveamdmachine.reg<vgpr, 4>,
+         !waveamdmachine.reg<vgpr, 2>,
+         !waveamdmachine.reg<vgpr, 2>) -> !waveamdmachine.reg<vgpr, 4>
+  return
+}
+
+// -----
+
+func.func @update_tuple_update_class(%base: !waveamdmachine.reg<vgpr, 4>,
+                                     %a: !waveamdmachine.reg<sgpr, 1>) {
+  // expected-error @below {{update register class must match base}}
+  %r = waveamdmachine.update_tuple %base, %a {offsets = [0 : i64]}
+      : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<sgpr, 1>)
+      -> !waveamdmachine.reg<vgpr, 4>
+  return
+}
+
+// -----
+
+func.func @update_tuple_exceeds_width(%base: !waveamdmachine.reg<vgpr, 4>,
+                                      %a: !waveamdmachine.reg<vgpr, 2>) {
+  // expected-error @below {{update exceeds tuple width}}
+  %r = waveamdmachine.update_tuple %base, %a {offsets = [3 : i64]}
+      : (!waveamdmachine.reg<vgpr, 4>,
+         !waveamdmachine.reg<vgpr, 2>) -> !waveamdmachine.reg<vgpr, 4>
+  return
+}
+
+// -----
+
 // Memory-token result group is optional, not variadic.
 func.func @memop_two_tokens(%off: !waveamdmachine.reg<vgpr, 1>,
                             %base: !waveamdmachine.reg<sgpr, 2>) {

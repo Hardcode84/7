@@ -57,14 +57,14 @@ module attributes {transform.with_named_sequence} {
     // CHECK-SAME: [[INIT:%[^:]+]]: !waveamdmachine.reg<vgpr, 4>
     // CHECK-SAME: waveamdmachine.regalloc_transform_state =
     // CHECK-SAME: debug = {alias_edges = 6 : i64, alias_sets = 2 : i64, ops = 6 : i64, values = 8 : i64}
-    // CHECK: [[DUP:%.*]] = waveamdmachine.v_mov_b32_tuple [[INIT]] {registers = 4 : i64}
+    // CHECK: [[DUP:%.*]] = waveamdmachine.copy_tuple [[INIT]]
     // CHECK: waveamdmachine.uniform_loop
     // CHECK-SAME: carries([[INIT]], [[DUP]] : !waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>)
     // SCAN-LABEL: func.func @duplicate_loop_inits_alias_state(
     // SCAN-SAME: [[INIT:%[^:]+]]: !waveamdmachine.reg<vgpr, 4, [[INIT_BASE:[0-9]+]]>
     // SCAN-SAME: waveamdmachine.regalloc_assignments
     // SCAN-SAME: stage = "linear-scan-success"
-    // SCAN: [[DUP:%.*]] = waveamdmachine.v_mov_b32_tuple [[INIT]] {registers = 4 : i64} : (!waveamdmachine.reg<vgpr, 4, [[INIT_BASE]]>) -> !waveamdmachine.reg<vgpr, 4, [[DUP_BASE:[0-9]+]]>
+    // SCAN: [[DUP:%.*]] = waveamdmachine.copy_tuple [[INIT]] : (!waveamdmachine.reg<vgpr, 4, [[INIT_BASE]]>) -> !waveamdmachine.reg<vgpr, 4, [[DUP_BASE:[0-9]+]]>
     // SCAN: waveamdmachine.uniform_loop
     // SCAN-SAME: carries([[INIT]], [[DUP]] : !waveamdmachine.reg<vgpr, 4, [[INIT_BASE]]>, !waveamdmachine.reg<vgpr, 4, [[DUP_BASE]]>)
     // SCAN: ^bb0([[ACC0:%[^:]+]]: !waveamdmachine.reg<vgpr, 4, [[INIT_BASE]]>, [[ACC1:%[^:]+]]: !waveamdmachine.reg<vgpr, 4, [[DUP_BASE]]>):
@@ -86,6 +86,28 @@ module attributes {transform.with_named_sequence} {
                     !waveamdmachine.reg<vgpr, 4>)
       } -> !waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>
       return
+    }
+
+    // CHECK-LABEL: func.func @update_tuple_alias_state(
+    // CHECK-SAME: waveamdmachine.regalloc_transform_state =
+    // CHECK-SAME: debug = {alias_edges = 3 : i64
+    // SCAN-LABEL: func.func @update_tuple_alias_state(
+    // SCAN-SAME: [[BASE:%[^:]+]]: !waveamdmachine.reg<vgpr, 4, [[#BASE_REG:]]>
+    // SCAN-SAME: [[LO:%[^:]+]]: !waveamdmachine.reg<vgpr, 1, [[#BASE_REG]]>
+    // SCAN-SAME: [[HI:%[^:]+]]: !waveamdmachine.reg<vgpr, 2, [[#BASE_REG+2]]>
+    // SCAN-SAME: waveamdmachine.regalloc_assignments
+    // SCAN: [[UPDATED:%.*]] = waveamdmachine.update_tuple [[BASE]], [[LO]], [[HI]]
+    // SCAN-SAME: offsets = [0, 2]
+    // SCAN-SAME: -> !waveamdmachine.reg<vgpr, 4, [[#BASE_REG]]>
+    func.func @update_tuple_alias_state(
+        %base: !waveamdmachine.reg<vgpr, 4>,
+        %lo: !waveamdmachine.reg<vgpr, 1>,
+        %hi: !waveamdmachine.reg<vgpr, 2>) -> !waveamdmachine.reg<vgpr, 4> {
+      %updated = waveamdmachine.update_tuple %base, %lo, %hi
+          {offsets = [0 : i64, 2 : i64]}
+          : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 1>,
+             !waveamdmachine.reg<vgpr, 2>) -> !waveamdmachine.reg<vgpr, 4>
+      return %updated : !waveamdmachine.reg<vgpr, 4>
     }
 
     // CHECK-LABEL: func.func @loop_invariant_body_use_alias_state(

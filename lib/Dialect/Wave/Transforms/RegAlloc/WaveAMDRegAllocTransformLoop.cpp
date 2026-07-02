@@ -118,22 +118,10 @@ static FailureOr<Value> cloneAGPRDuplicate(OpBuilder &builder, Value value,
   return clone->getResult(0);
 }
 
-static Value copyVGPRDuplicate(OpBuilder &builder, Location loc, Value value,
-                               waveamdmachine::RegType resultType,
-                               waveamdmachine::RegType sourceType) {
-  auto copy =
-      waveamdmachine::VMovB32TupleOp::create(builder, loc, resultType, value);
-  copy->setAttr("registers", builder.getI64IntegerAttr(sourceType.getWidth()));
-  return copy.getResult();
-}
-
-static Value copySGPRDuplicate(OpBuilder &builder, Location loc, Value value,
-                               waveamdmachine::RegType resultType,
-                               waveamdmachine::RegType sourceType) {
-  auto copy =
-      waveamdmachine::SMovB32TupleOp::create(builder, loc, resultType, value);
-  copy->setAttr("registers", builder.getI64IntegerAttr(sourceType.getWidth()));
-  return copy.getResult();
+static Value copyRegDuplicate(OpBuilder &builder, Location loc, Value value,
+                              waveamdmachine::RegType resultType) {
+  return waveamdmachine::CopyTupleOp::create(builder, loc, resultType, value)
+      .getResult();
 }
 
 static FailureOr<Value> duplicateRegValue(OpBuilder &builder, Location loc,
@@ -150,10 +138,8 @@ static FailureOr<Value> duplicateRegValue(OpBuilder &builder, Location loc,
       return *agprClone;
     return emitError(loc) << "regalloc transform cannot duplicate AGPR value";
   }
-  if (isVGPR(type))
-    return copyVGPRDuplicate(builder, loc, value, resultType, type);
-  if (isSGPR(type))
-    return copySGPRDuplicate(builder, loc, value, resultType, type);
+  if (isVGPR(type) || isSGPR(type))
+    return copyRegDuplicate(builder, loc, value, resultType);
   return emitError(loc, "regalloc transform cannot duplicate register value");
 }
 
@@ -382,6 +368,13 @@ private:
       collect(toElements.getTuple(), toElements.getElements());
     if (auto fromElements = dyn_cast<waveamdmachine::TupleFromElementsOp>(op))
       collect(fromElements.getTuple(), fromElements.getElements());
+    if (auto update = dyn_cast<waveamdmachine::UpdateTupleOp>(op)) {
+      addAliasEdge(update.getResult(), update.getBase(), 0);
+      for (auto [value, offset] :
+           llvm::zip_equal(update.getUpdates(), update.getOffsets()))
+        addAliasEdge(update.getResult(), value,
+                     cast<IntegerAttr>(offset).getInt());
+    }
   }
 
   void collectMMAAliases(Operation *op) {

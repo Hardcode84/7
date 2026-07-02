@@ -673,32 +673,54 @@ private:
     return walkNestedRegions(op);
   }
 
-  LogicalResult coalesceTupleElementOps(Operation &op, unsigned pos) {
+  template <typename TupleElementOp>
+  LogicalResult coalesceTupleElements(TupleElementOp top, unsigned pos) {
     // Tuple is primary; elements get cumulative dword offsets.
-    auto coalesceTupleElements = [&](auto top) -> LogicalResult {
-      Value tuple = top.getTuple();
-      extendInterval(tuple, pos);
-      auto rt = wave::getTrackedWaveAMDRegType(tuple);
-      if (rt) {
-        auto [bucket, table] = intervalsFor(*rt, result.intervals);
-        // Pinned tuples have no interval; elements derive tuple index + offset.
-        if (!table->contains(tuple))
-          return success();
-      }
-      unsigned cumOffset = 0;
-      for (Value element : top.getElements()) {
-        if (failed(coalesce(tuple, element, pos, result.intervals, top,
-                            cumOffset)))
-          return failure();
-        cumOffset +=
-            cast<waveamdmachine::RegType>(element.getType()).getWidth();
-      }
-      return success();
-    };
+    Value tuple = top.getTuple();
+    extendInterval(tuple, pos);
+    auto rt = wave::getTrackedWaveAMDRegType(tuple);
+    if (rt) {
+      auto [bucket, table] = intervalsFor(*rt, result.intervals);
+      // Pinned tuples have no interval; elements derive tuple index + offset.
+      if (!table->contains(tuple))
+        return success();
+    }
+    unsigned cumOffset = 0;
+    for (Value element : top.getElements()) {
+      if (failed(
+              coalesce(tuple, element, pos, result.intervals, top, cumOffset)))
+        return failure();
+      cumOffset += cast<waveamdmachine::RegType>(element.getType()).getWidth();
+    }
+    return success();
+  }
+
+  LogicalResult coalesceUpdateTupleOp(waveamdmachine::UpdateTupleOp update,
+                                      unsigned pos) {
+    Value resultTuple = update.getResult();
+    Value baseTuple = update.getBase();
+    extendInterval(baseTuple, pos);
+    if (failed(
+            coalesce(resultTuple, baseTuple, pos, result.intervals, update, 0)))
+      return failure();
+    for (auto [value, offset] :
+         llvm::zip_equal(update.getUpdates(), update.getOffsets())) {
+      unsigned slotOffset =
+          static_cast<unsigned>(cast<IntegerAttr>(offset).getInt());
+      if (failed(coalesce(resultTuple, value, pos, result.intervals, update,
+                          slotOffset)))
+        return failure();
+    }
+    return success();
+  }
+
+  LogicalResult coalesceTupleElementOps(Operation &op, unsigned pos) {
     if (auto toElems = dyn_cast<waveamdmachine::TupleToElementsOp>(op))
-      return coalesceTupleElements(toElems);
+      return coalesceTupleElements(toElems, pos);
     if (auto fromElems = dyn_cast<waveamdmachine::TupleFromElementsOp>(op))
-      return coalesceTupleElements(fromElems);
+      return coalesceTupleElements(fromElems, pos);
+    if (auto update = dyn_cast<waveamdmachine::UpdateTupleOp>(op))
+      return coalesceUpdateTupleOp(update, pos);
     return success();
   }
 

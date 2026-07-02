@@ -2178,7 +2178,7 @@ private:
     waveamdmachine::RegType dstType =
         dyn_cast<waveamdmachine::RegType>(dst.getType());
     if (!dstType)
-      return op->emitError("exec_if result copy requires a register result");
+      return op->emitError("copy requires a register result");
     if (dstType.getRegClass() == waveamdmachine::RegClass::VGPR) {
       for (unsigned i : llvm::seq<unsigned>(0, dstType.getWidth()))
         if (failed(emitMC(vMovB32(), {toMCVGPRComponent(dst, i),
@@ -2193,7 +2193,7 @@ private:
           return failure();
       return success();
     }
-    return op->emitError("exec_if result copy supports only SGPR/VGPR results");
+    return op->emitError("copy supports only SGPR/VGPR results");
   }
 
   LogicalResult emitYieldCopies(waveamdmachine::ExecIfOp execIf,
@@ -2287,6 +2287,8 @@ private:
       return emitMC(
           llvm::AMDGPU::S_GETREG_B32_gfx11,
           {toMCOperand(result()), llvm::MCOperand::createImm(0xF81D)});
+    if (auto copy = dyn_cast<waveamdmachine::CopyTupleOp>(op))
+      return emitCopy(copy.getResult(), copy.getSource(), copy.getOperation());
     if (isa<waveamdmachine::VMovB32TupleOp>(op)) {
       auto regType = cast<waveamdmachine::RegType>(result().getType());
       Value src = op.getOperand(0);

@@ -233,6 +233,7 @@ def WaveAMDMachine_LDSDma : NativeOpTrait<"waveamdmachine::LDSDmaOp">;
 def WaveAMDMachine_VMEMLoad : NativeOpTrait<"waveamdmachine::VMEMLoadOp">;
 def WaveAMDMachine_VMEMStore : NativeOpTrait<"waveamdmachine::VMEMStoreOp">;
 def WaveAMDMachine_TupleMemory : NativeOpTrait<"waveamdmachine::TupleMemoryOp">;
+def WaveAMDMachine_TupleAlias : NativeOpTrait<"waveamdmachine::TupleAliasOp">;
 def WaveAMDMachine_Waitcnt : NativeOpTrait<"waveamdmachine::WaitcntOp">;
 def WaveAMDMachine_TokenTrait : NativeOpTrait<"waveamdmachine::TokenOp">;
 def WaveAMDMachine_TokenJoinTrait : NativeOpTrait<"waveamdmachine::TokenJoinOp">;
@@ -778,6 +779,7 @@ def WaveAMDMachine_VAccvgprWriteB32TupleOp
 def WaveAMDMachine_TupleToElementsOp
     : WaveAMDMachine_Op<"tuple_to_elements",
                        [Pure, WaveAMDMachine_TokenJoinTrait,
+                        WaveAMDMachine_TupleAlias,
                         WaveAMDMachine_NoMachineInst,
                         WaveAMDMachine_NoAsmEmission]> {
   let summary = "split a GPR tuple into mixed-width GPR pieces";
@@ -792,6 +794,7 @@ def WaveAMDMachine_TupleToElementsOp
 def WaveAMDMachine_TupleFromElementsOp
     : WaveAMDMachine_Op<"tuple_from_elements",
                      [Pure, WaveAMDMachine_TokenJoinTrait,
+                      WaveAMDMachine_TupleAlias,
                       WaveAMDMachine_NoMachineInst,
                       WaveAMDMachine_NoAsmEmission]> {
   let summary = "concatenate mixed-width GPR pieces into a GPR tuple";
@@ -801,6 +804,28 @@ def WaveAMDMachine_TupleFromElementsOp
       "$elements attr-dict `:` functional-type(operands, results)";
   let hasVerifier = 1;
   let hasFolder = 1;
+}
+
+def WaveAMDMachine_CopyTupleOp
+    : WaveAMDMachine_UnaryResult<"copy_tuple", WaveAMDMachine_GPR,
+                                 WaveAMDMachine_GPR, [Pure]> {
+  let summary = "copy a SGPR/VGPR tuple after register allocation";
+  let hasVerifier = 1;
+}
+
+def WaveAMDMachine_UpdateTupleOp
+    : WaveAMDMachine_Op<"update_tuple",
+                        [Pure, WaveAMDMachine_TupleAlias,
+                         WaveAMDMachine_NoMachineInst,
+                         WaveAMDMachine_NoAsmEmission]> {
+  let summary = "replace selected tuple slots while preserving tuple base";
+  let arguments = (ins WaveAMDMachine_GPR:$base,
+                       Variadic<WaveAMDMachine_GPR>:$updates,
+                       ArrayAttr:$offsets);
+  let results = (outs WaveAMDMachine_GPR:$result);
+  let assemblyFormat =
+      "$base `,` $updates attr-dict `:` functional-type(operands, results)";
+  let hasVerifier = 1;
 }
 def WaveAMDMachine_VAddU32Op
     : WaveAMDMachine_BinaryU32Result<"v_add_u32">,

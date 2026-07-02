@@ -17,6 +17,7 @@
 #include "mlir/IR/Dominance.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/TargetParser/TargetParser.h"
+#include <iterator>
 #include <optional>
 
 namespace mlir::wave {
@@ -36,6 +37,108 @@ static FailureOr<llvm::AMDGPU::IsaVersion> getIsaVersion(Operation *root) {
 static bool isZeroImm(Value value) {
   auto imm = value.getDefiningOp<waveamdmachine::ImmOp>();
   return imm && imm.getValue() == 0;
+}
+
+static bool isAssignedSamePhysicalReg(Value lhs, Value rhs) {
+  auto lhsType = dyn_cast<waveamdmachine::RegType>(lhs.getType());
+  return lhsType && lhsType.getIndex() >= 0 &&
+         waveamdmachine::isSamePhysicalReg(lhs, rhs);
+}
+
+static bool assignedRegRangesOverlap(Value lhs, Value rhs) {
+  auto lhsType = dyn_cast<waveamdmachine::RegType>(lhs.getType());
+  auto rhsType = dyn_cast<waveamdmachine::RegType>(rhs.getType());
+  if (!lhsType || !rhsType || lhsType.getIndex() < 0 ||
+      rhsType.getIndex() < 0 || lhsType.getRegClass() != rhsType.getRegClass())
+    return false;
+  int64_t lhsStart = lhsType.getIndex();
+  int64_t rhsStart = rhsType.getIndex();
+  return lhsStart < rhsStart + rhsType.getWidth() &&
+         rhsStart < lhsStart + lhsType.getWidth();
+}
+
+static bool opMayClobberAssignedReg(Operation *op, Value value) {
+  if (op->hasTrait<OpTrait::waveamdmachine::NoMachineInst>())
+    return false;
+  if (op->getNumRegions() != 0)
+    return true;
+  return llvm::any_of(op->getResults(), [&](Value result) {
+    return assignedRegRangesOverlap(value, result);
+  });
+}
+
+static Operation *createConcreteMove(OpBuilder &builder,
+                                     waveamdmachine::CopyTupleOp copy) {
+  Location loc = copy.getLoc();
+  Value source = copy.getSource();
+  auto resultType = cast<waveamdmachine::RegType>(copy.getResult().getType());
+  if (resultType.getRegClass() == waveamdmachine::RegClass::VGPR) {
+    auto move = waveamdmachine::VMovB32TupleOp::create(builder, loc, resultType,
+                                                       source);
+    move->setAttr("registers",
+                  builder.getI64IntegerAttr(resultType.getWidth()));
+    return move;
+  }
+  if (resultType.getRegClass() == waveamdmachine::RegClass::SGPR) {
+    auto move = waveamdmachine::SMovB32TupleOp::create(builder, loc, resultType,
+                                                       source);
+    move->setAttr("registers",
+                  builder.getI64IntegerAttr(resultType.getWidth()));
+    return move;
+  }
+  return nullptr;
+}
+
+static bool hasNoInterveningClobber(waveamdmachine::CopyTupleOp copy,
+                                    Operation *user) {
+  Block *block = copy->getBlock();
+  if (!block || block != user->getBlock())
+    return false;
+  for (auto it = std::next(copy->getIterator()); it != block->end(); ++it) {
+    Operation *between = &*it;
+    if (between == user)
+      return true;
+    if (opMayClobberAssignedReg(between, copy.getSource()))
+      return false;
+  }
+  return false;
+}
+
+static bool canForwardCopyIntoOnlyUser(waveamdmachine::CopyTupleOp copy) {
+  Value result = copy.getResult();
+  if (!result.hasOneUse())
+    return false;
+  auto sourceType =
+      dyn_cast<waveamdmachine::RegType>(copy.getSource().getType());
+  if (!sourceType || sourceType.getIndex() < 0)
+    return false;
+  Operation *user = result.use_begin()->getOwner();
+  auto write = dyn_cast<waveamdmachine::VAccvgprWriteB32TupleOp>(user);
+  return write && write.getSource() == result &&
+         hasNoInterveningClobber(copy, user);
+}
+
+static LogicalResult materializeCopyTuples(Operation *root) {
+  SmallVector<waveamdmachine::CopyTupleOp, 16> copies;
+  root->walk([&](waveamdmachine::CopyTupleOp op) { copies.push_back(op); });
+  OpBuilder builder(root->getContext());
+  for (waveamdmachine::CopyTupleOp copy : copies) {
+    if (isAssignedSamePhysicalReg(copy.getResult(), copy.getSource()) ||
+        canForwardCopyIntoOnlyUser(copy)) {
+      copy.getResult().replaceAllUsesWith(copy.getSource());
+      copy.erase();
+      continue;
+    }
+
+    builder.setInsertionPoint(copy);
+    Operation *move = createConcreteMove(builder, copy);
+    if (!move)
+      return copy.emitError(
+          "copy_tuple cannot materialize this register class");
+    copy.getResult().replaceAllUsesWith(move->getResult(0));
+    copy.erase();
+  }
+  return success();
 }
 
 static waveamdmachine::RegType getChunkType(MLIRContext *ctx,
@@ -274,6 +377,8 @@ struct WaveAMDPackVGPRZeroMovesPass
     Operation *root = getOperation();
     FailureOr<llvm::AMDGPU::IsaVersion> isaVersion = getIsaVersion(root);
     if (failed(isaVersion))
+      return signalPassFailure();
+    if (failed(materializeCopyTuples(root)))
       return signalPassFailure();
     eraseRedundantAllocatedVGPRMoves(root);
     if (!waveamdmachine::VMovB64TupleOp::isSupportedOnIsa(*isaVersion))

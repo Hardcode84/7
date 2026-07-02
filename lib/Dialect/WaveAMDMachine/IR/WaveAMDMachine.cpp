@@ -668,11 +668,89 @@ LogicalResult TupleFromElementsOp::verify() {
                              getElements());
 }
 
+static TupleToElementsOp getExactRoundTripSplit(Value element, unsigned index,
+                                                size_t resultCount) {
+  auto result = dyn_cast<OpResult>(element);
+  if (!result || result.getResultNumber() != index)
+    return {};
+  auto split = dyn_cast_or_null<TupleToElementsOp>(result.getOwner());
+  if (!split || split->getNumResults() != resultCount)
+    return {};
+  return split;
+}
+
+static Value getExactRoundTripSource(ValueRange elements) {
+  Value sourceTuple;
+  for (auto [i, element] : llvm::enumerate(elements)) {
+    TupleToElementsOp split =
+        getExactRoundTripSplit(element, i, elements.size());
+    if (!split)
+      return {};
+    if (!sourceTuple) {
+      sourceTuple = split.getTuple();
+      continue;
+    }
+    if (sourceTuple != split.getTuple())
+      return {};
+  }
+  return sourceTuple;
+}
+
 OpFoldResult TupleFromElementsOp::fold(FoldAdaptor) {
   if (getElements().size() == 1 &&
       getElements().front().getType() == getTuple().getType())
     return getElements().front();
+  Value sourceTuple = getExactRoundTripSource(getElements());
+  if (sourceTuple && sourceTuple.getType() == getTuple().getType())
+    return sourceTuple;
   return {};
+}
+
+LogicalResult CopyTupleOp::verify() {
+  auto sourceType = cast<RegType>(getSource().getType());
+  auto resultType = cast<RegType>(getResult().getType());
+  if (sourceType.getRegClass() != resultType.getRegClass())
+    return emitOpError("source register class must match result");
+  if (sourceType.getWidth() != resultType.getWidth())
+    return emitOpError("source width must match result width");
+  RegClass regClass = resultType.getRegClass();
+  if (regClass != RegClass::SGPR && regClass != RegClass::VGPR)
+    return emitOpError("supports only SGPR and VGPR copies");
+  return success();
+}
+
+LogicalResult UpdateTupleOp::verify() {
+  auto baseType = cast<RegType>(getBase().getType());
+  auto resultType = cast<RegType>(getResult().getType());
+  if (baseType.getRegClass() != resultType.getRegClass())
+    return emitOpError("base register class must match result");
+  if (baseType.getWidth() != resultType.getWidth())
+    return emitOpError("base width must match result width");
+
+  ArrayAttr offsets = getOffsets();
+  if (offsets.size() != getUpdates().size())
+    return emitOpError("offset count must match update count");
+
+  int64_t lastEnd = 0;
+  for (auto [offsetAttr, update] : llvm::zip_equal(offsets, getUpdates())) {
+    auto offsetInt = dyn_cast<IntegerAttr>(offsetAttr);
+    if (!offsetInt)
+      return emitOpError("offsets must be integer attributes");
+    int64_t offset = offsetInt.getInt();
+    if (offset < 0)
+      return emitOpError("offsets must be non-negative");
+    if (offset < lastEnd)
+      return emitOpError("offsets must be sorted and non-overlapping");
+
+    auto updateType = cast<RegType>(update.getType());
+    if (updateType.getRegClass() != baseType.getRegClass())
+      return emitOpError("update register class must match base");
+    int64_t end = offset + updateType.getWidth();
+    if (end > baseType.getWidth())
+      return emitOpError("update exceeds tuple width");
+    lastEnd = end;
+  }
+  return success();
 }
 
 using VerifyRegWidthFn = LogicalResult (*)(Operation *, Value, int64_t,

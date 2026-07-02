@@ -1008,6 +1008,44 @@ static bool propagateTupleAliasTypes(Value tuple, ElementsT elements) {
   return setRegTypeIfUnallocated(tuple, tupleType.getRegClass(), width, *base);
 }
 
+static bool propagateSameTupleAliasTypes(Value lhs, Value rhs) {
+  auto lhsType = dyn_cast<waveamdmachine::RegType>(lhs.getType());
+  auto rhsType = dyn_cast<waveamdmachine::RegType>(rhs.getType());
+  if (!lhsType || !rhsType || lhsType.getRegClass() != rhsType.getRegClass() ||
+      lhsType.getWidth() != rhsType.getWidth())
+    return false;
+  if (lhsType.getIndex() >= 0)
+    return setRegTypeIfUnallocated(rhs, lhsType.getRegClass(),
+                                   static_cast<unsigned>(lhsType.getWidth()),
+                                   lhsType.getIndex());
+  if (rhsType.getIndex() >= 0)
+    return setRegTypeIfUnallocated(lhs, rhsType.getRegClass(),
+                                   static_cast<unsigned>(rhsType.getWidth()),
+                                   rhsType.getIndex());
+  return false;
+}
+
+static bool
+propagateUpdateTupleAliasTypes(waveamdmachine::UpdateTupleOp update) {
+  bool changed =
+      propagateSameTupleAliasTypes(update.getResult(), update.getBase());
+  auto resultType =
+      dyn_cast<waveamdmachine::RegType>(update.getResult().getType());
+  if (!resultType || resultType.getIndex() < 0)
+    return changed;
+  for (auto [value, offset] :
+       llvm::zip_equal(update.getUpdates(), update.getOffsets())) {
+    auto valueType = dyn_cast<waveamdmachine::RegType>(value.getType());
+    if (!valueType)
+      continue;
+    changed |= setRegTypeIfUnallocated(
+        value, resultType.getRegClass(),
+        static_cast<unsigned>(valueType.getWidth()),
+        resultType.getIndex() + cast<IntegerAttr>(offset).getInt());
+  }
+  return changed;
+}
+
 inline bool isInternalTupleFromElementsUse(
     OpOperand *use, const llvm::SmallDenseSet<Value, 8> &plannedValues) {
   auto fromElements =
@@ -1025,6 +1063,8 @@ inline bool propagateTupleAliasesForValue(Value value) {
   if (auto toElements = dyn_cast<waveamdmachine::TupleToElementsOp>(def))
     return propagateTupleAliasTypes(toElements.getTuple(),
                                     toElements.getElements());
+  if (auto update = dyn_cast<waveamdmachine::UpdateTupleOp>(def))
+    return propagateUpdateTupleAliasTypes(update);
   return false;
 }
 
@@ -2043,6 +2083,7 @@ inline Value joinMemorySpillTokens(Type tokenType, ArrayRef<Value> tokens,
 inline bool isMemorySpillSuppressedVGPRExpr(Operation *op) {
   return isa_and_nonnull<
       waveamdmachine::VWorkitemIdXOp, waveamdmachine::VMovB32TupleOp,
+      waveamdmachine::CopyTupleOp, waveamdmachine::UpdateTupleOp,
       waveamdmachine::VLshrrevB32Op, waveamdmachine::VLshlrevB32Op,
       waveamdmachine::VLshlAddU32Op, waveamdmachine::VAddU32Op,
       waveamdmachine::VAdd3U32Op, waveamdmachine::VAndB32Op,

@@ -210,22 +210,10 @@ static FailureOr<Value> cloneAGPRDuplicate(OpBuilder &builder, Value v,
   return clone->getResult(0);
 }
 
-static Value copyVGPRDuplicate(OpBuilder &builder, Location loc, Value v,
-                               waveamdmachine::RegType resultType,
-                               waveamdmachine::RegType sourceType) {
-  auto copy =
-      waveamdmachine::VMovB32TupleOp::create(builder, loc, resultType, v);
-  copy->setAttr("registers", builder.getI64IntegerAttr(sourceType.getWidth()));
-  return copy.getResult();
-}
-
-static Value copySGPRDuplicate(OpBuilder &builder, Location loc, Value v,
-                               waveamdmachine::RegType resultType,
-                               waveamdmachine::RegType sourceType) {
-  auto copy =
-      waveamdmachine::SMovB32TupleOp::create(builder, loc, resultType, v);
-  copy->setAttr("registers", builder.getI64IntegerAttr(sourceType.getWidth()));
-  return copy.getResult();
+static Value copyRegDuplicate(OpBuilder &builder, Location loc, Value v,
+                              waveamdmachine::RegType resultType) {
+  return waveamdmachine::CopyTupleOp::create(builder, loc, resultType, v)
+      .getResult();
 }
 
 static FailureOr<Value> duplicateRegValue(OpBuilder &builder, Location loc,
@@ -253,10 +241,8 @@ static FailureOr<Value> duplicateRegValue(OpBuilder &builder, Location loc,
                              "before register allocation";
   }
 
-  if (isVGPR(rt))
-    return copyVGPRDuplicate(builder, loc, v, resultType, rt);
-  if (isSGPR(rt))
-    return copySGPRDuplicate(builder, loc, v, resultType, rt);
+  if (isVGPR(rt) || isSGPR(rt))
+    return copyRegDuplicate(builder, loc, v, resultType);
   return emitError(loc, "duplicateRegValue: unsupported register class/width");
 }
 

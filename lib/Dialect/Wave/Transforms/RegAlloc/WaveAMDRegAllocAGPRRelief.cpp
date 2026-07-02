@@ -340,8 +340,7 @@ static bool canDefineAGPR(Value value, const DenseSet<Value> &groupValues,
 }
 
 static bool isTupleAliasOp(Operation *op) {
-  return isa_and_nonnull<waveamdmachine::TupleToElementsOp,
-                         waveamdmachine::TupleFromElementsOp>(op);
+  return op && op->hasTrait<OpTrait::waveamdmachine::TupleAliasOp>();
 }
 
 static bool isReliefGroupValue(Value value,

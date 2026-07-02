@@ -472,6 +472,12 @@ static unsigned getCounterMask(waveamdmachine::MemoryCounterKind kind) {
   llvm_unreachable("unknown memory counter kind");
 }
 
+static bool isCounterMaskPassthrough(Operation *op) {
+  return op->hasTrait<traits::TupleAliasOp>() ||
+         isa<waveamdmachine::CopyTupleOp>(op) ||
+         op->hasTrait<traits::TokenJoinOp>();
+}
+
 static unsigned getValueCounterMask(Value value,
                                     llvm::SmallPtrSetImpl<Operation *> &seen) {
   Operation *def = value.getDefiningOp();
@@ -484,9 +490,7 @@ static unsigned getValueCounterMask(Value value,
   if (mask != 0)
     return mask;
 
-  if (isa<waveamdmachine::TupleFromElementsOp,
-          waveamdmachine::TupleToElementsOp>(def) ||
-      def->hasTrait<traits::TokenJoinOp>()) {
+  if (isCounterMaskPassthrough(def)) {
     for (Value operand : def->getOperands())
       mask |= getValueCounterMask(operand, seen);
   }
@@ -524,9 +528,7 @@ getLoopCarriedCounterMask(Value value,
     return 0;
 
   unsigned mask = 0;
-  if (isa<waveamdmachine::TupleFromElementsOp,
-          waveamdmachine::TupleToElementsOp>(def) ||
-      def->hasTrait<traits::TokenJoinOp>()) {
+  if (isCounterMaskPassthrough(def)) {
     for (Value operand : def->getOperands())
       mask |= getLoopCarriedCounterMask(operand, carryMasks, seen);
   }

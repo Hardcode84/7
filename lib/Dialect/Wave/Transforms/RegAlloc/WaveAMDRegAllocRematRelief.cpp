@@ -82,17 +82,17 @@ static bool isAnchoredRematSource(Value value) {
 
 static bool isCheapRematRoot(Operation *op) {
   return isa_and_nonnull<
-      waveamdmachine::SAddI32Op, waveamdmachine::SMulI32Op,
-      waveamdmachine::SLshlB32Op, waveamdmachine::SLshrB32Op,
-      waveamdmachine::SAndB32Op, waveamdmachine::SOrB32Op,
-      waveamdmachine::SXorB32Op, waveamdmachine::UninitOp,
-      waveamdmachine::VMovB32TupleOp, waveamdmachine::VLshrrevB32Op,
-      waveamdmachine::VLshlrevB32Op, waveamdmachine::VLshlAddU32Op,
-      waveamdmachine::VAddU32Op, waveamdmachine::VAdd3U32Op,
-      waveamdmachine::VAndB32Op, waveamdmachine::VMulLoU32Op,
-      waveamdmachine::VAddLshlU32Op, waveamdmachine::VXorB32Op,
-      waveamdmachine::VAndOrB32Op, waveamdmachine::TupleFromElementsOp,
-      waveamdmachine::TupleToElementsOp>(op);
+             waveamdmachine::SAddI32Op, waveamdmachine::SMulI32Op,
+             waveamdmachine::SLshlB32Op, waveamdmachine::SLshrB32Op,
+             waveamdmachine::SAndB32Op, waveamdmachine::SOrB32Op,
+             waveamdmachine::SXorB32Op, waveamdmachine::UninitOp,
+             waveamdmachine::VMovB32TupleOp, waveamdmachine::CopyTupleOp,
+             waveamdmachine::VLshrrevB32Op, waveamdmachine::VLshlrevB32Op,
+             waveamdmachine::VLshlAddU32Op, waveamdmachine::VAddU32Op,
+             waveamdmachine::VAdd3U32Op, waveamdmachine::VAndB32Op,
+             waveamdmachine::VMulLoU32Op, waveamdmachine::VAddLshlU32Op,
+             waveamdmachine::VXorB32Op, waveamdmachine::VAndOrB32Op>(op) ||
+         (op && op->hasTrait<OpTrait::waveamdmachine::TupleAliasOp>());
 }
 
 static bool isRematRootValue(Value value) {
