@@ -1727,71 +1727,36 @@ _a4w4_kernel:
 		s_cmp_lt_i32 s21, 62
 		s_cbranch_scc1 .L_a4w4_kernel.loop_head_0
 .L_a4w4_kernel.loop_exit_0:
-		s_waitcnt vmcnt(35)
-		v_and_b32_e32 v2, 0xff, v87
-		s_waitcnt vmcnt(34)
-		v_and_b32_e32 v8, 0xff, v88
+		s_waitcnt vmcnt(33)
+		v_or_b32_e32 v2, v87, v89
+		s_waitcnt vmcnt(32)
+		v_or_b32_e32 v8, v88, v90
 		v_lshlrev_b32_e32 v8, 8, v8
 		v_or_b32_e32 v2, v2, v8
-		s_waitcnt vmcnt(33)
-		v_and_b32_e32 v8, 0xff, v89
-		v_lshlrev_b32_e32 v8, 16, v8
-		s_waitcnt vmcnt(32)
-		v_and_b32_e32 v9, 0xff, v90
-		v_lshlrev_b32_e32 v9, 24, v9
-		v_or3_b32 v2, v2, v8, v9
-		s_waitcnt vmcnt(19)
-		v_and_b32_e32 v8, 0xff, v42
-		s_waitcnt vmcnt(18)
-		v_and_b32_e32 v9, 0xff, v98
-		v_lshlrev_b32_e32 v9, 8, v9
-		v_or_b32_e32 v8, v8, v9
 		s_waitcnt vmcnt(17)
-		v_and_b32_e32 v9, 0xff, v100
-		v_lshlrev_b32_e32 v9, 16, v9
+		v_or_b32_e32 v8, v42, v100
 		s_waitcnt vmcnt(16)
-		v_and_b32_e32 v10, 0xff, v101
-		v_lshlrev_b32_e32 v10, 24, v10
-		v_or3_b32 v14, v8, v9, v10
-		s_waitcnt vmcnt(15)
-		v_and_b32_e32 v8, 0xff, v108
-		s_waitcnt vmcnt(14)
-		v_and_b32_e32 v9, 0xff, v109
+		v_or_b32_e32 v9, v98, v101
 		v_lshlrev_b32_e32 v9, 8, v9
-		v_or_b32_e32 v8, v8, v9
+		v_or_b32_e32 v14, v8, v9
 		s_waitcnt vmcnt(13)
-		v_and_b32_e32 v9, 0xff, v110
-		v_lshlrev_b32_e32 v9, 16, v9
+		v_or_b32_e32 v8, v108, v110
 		s_waitcnt vmcnt(12)
-		v_and_b32_e32 v10, 0xff, v111
-		v_lshlrev_b32_e32 v10, 24, v10
-		v_or3_b32 v15, v8, v9, v10
-		s_waitcnt vmcnt(11)
-		v_and_b32_e32 v8, 0xff, v116
-		s_waitcnt vmcnt(10)
-		v_and_b32_e32 v9, 0xff, v117
+		v_or_b32_e32 v9, v109, v111
+		v_lshlrev_b32_e32 v9, 8, v9
+		v_or_b32_e32 v15, v8, v9
+		s_waitcnt vmcnt(9)
+		v_or_b32_e32 v8, v116, v118
+		s_waitcnt vmcnt(8)
+		v_or_b32_e32 v9, v117, v119
 		v_lshlrev_b32_e32 v9, 8, v9
 		v_or_b32_e32 v8, v8, v9
-		s_waitcnt vmcnt(9)
-		v_and_b32_e32 v9, 0xff, v118
-		v_lshlrev_b32_e32 v9, 16, v9
-		s_waitcnt vmcnt(8)
-		v_and_b32_e32 v10, 0xff, v119
-		v_lshlrev_b32_e32 v10, 24, v10
-		v_or3_b32 v8, v8, v9, v10
-		s_waitcnt vmcnt(3)
-		v_and_b32_e32 v9, 0xff, v36
-		s_waitcnt vmcnt(2)
-		v_and_b32_e32 v10, 0xff, v69
+		s_waitcnt vmcnt(1)
+		v_or_b32_e32 v9, v36, v70
+		s_waitcnt vmcnt(0)
+		v_or_b32_e32 v10, v69, v80
 		v_lshlrev_b32_e32 v10, 8, v10
 		v_or_b32_e32 v9, v9, v10
-		s_waitcnt vmcnt(1)
-		v_and_b32_e32 v10, 0xff, v70
-		v_lshlrev_b32_e32 v10, 16, v10
-		s_waitcnt vmcnt(0)
-		v_and_b32_e32 v12, 0xff, v80
-		v_lshlrev_b32_e32 v12, 24, v12
-		v_or3_b32 v9, v9, v10, v12
 		s_waitcnt lgkmcnt(0)
 		v_mfma_scale_f32_16x16x128_f8f6f4 v[4:7], v[124:127], v[128:131], v[4:7], v74, v64 op_sel_hi:[0,0,0] cbsz:4 blgp:4
 		v_mfma_scale_f32_16x16x128_f8f6f4 v[4:7], v[192:195], v[132:135], v[4:7], v74, v64 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4
