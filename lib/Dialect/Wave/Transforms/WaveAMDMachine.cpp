@@ -7227,12 +7227,62 @@ static FailureOr<Value> materializeDmaFallbackLdsStore(
       .getResult(0);
 }
 
+static bool isZeroImm(WaveAMDMachineSelector &S, Value value) {
+  std::optional<int64_t> imm = S.getImmediateValue(value);
+  return imm && *imm == 0;
+}
+
+static Value createDmaM0Move(WaveAMDMachineSelector &S, Location loc,
+                             Value source) {
+  Value m0Src = S.materializeSGPR1(loc, source);
+  return Value{waveamdmachine::SMovM0Op::create(
+      S.builder, loc, waveamdmachine::M0Type::get(S.builder.getContext()),
+      m0Src)};
+}
+
+static Value createDmaM0Add(WaveAMDMachineSelector &S, Location loc, Value lhs,
+                            Value rhs) {
+  if (Value folded = S.foldImmAdd(loc, lhs, rhs))
+    return createDmaM0Move(S, loc, folded);
+  if (isImm(lhs) && !isImm(rhs))
+    std::swap(lhs, rhs);
+  lhs = S.materializeSGPR1(loc, lhs);
+  rhs = S.ensureSGPR1(loc, rhs);
+  return waveamdmachine::SAddM0I32Op::create(
+             S.builder, loc,
+             waveamdmachine::M0Type::get(S.builder.getContext()),
+             getSCCType(S.builder.getContext()), lhs, rhs)
+      .getM0();
+}
+
+static Value materializeDmaM0Parts(WaveAMDMachineSelector &S, Location loc,
+                                   ArrayRef<Value> parts) {
+  SmallVector<Value, 4> nonZeroParts;
+  for (Value part : parts)
+    if (!isZeroImm(S, part))
+      nonZeroParts.push_back(part);
+  if (nonZeroParts.empty()) {
+    Value zero = parts.empty() ? createImm(S.builder, loc, 0) : parts.front();
+    return createDmaM0Move(S, loc, zero);
+  }
+  if (nonZeroParts.size() == 1)
+    return createDmaM0Move(S, loc, nonZeroParts.front());
+
+  Value rhs = nonZeroParts.pop_back_val();
+  Value acc = nonZeroParts.front();
+  for (Value part : llvm::drop_begin(nonZeroParts))
+    acc = S.addUniformBytes(loc, acc, part);
+  return createDmaM0Add(S, loc, acc, rhs);
+}
+
 static FailureOr<Value> materializeDmaM0FieldPlan(WaveAMDMachineSelector &S,
                                                   waveamd::DmaLoadLdsOp op,
                                                   Value dstBase,
                                                   const AddressPlan &plan) {
   AddressPlanBindings bindings = materializeAddressPlanBindings(S, op, plan);
-  Value dstAddr = dstBase;
+  SmallVector<Value, 4> parts;
+  if (dstBase)
+    parts.push_back(dstBase);
   Location loc = op.getLoc();
   auto appendExpr = [&](sym::ExprHandle expr, bool useWide) -> LogicalResult {
     if (!expr)
@@ -7242,7 +7292,7 @@ static FailureOr<Value> materializeDmaM0FieldPlan(WaveAMDMachineSelector &S,
         /*symbolsAreUniform=*/true);
     if (failed(value))
       return failure();
-    dstAddr = S.addUniformBytes(loc, dstAddr, S.ensureSGPR1(loc, *value));
+    parts.push_back(S.ensureSGPR1(loc, *value));
     return success();
   };
   bool remainderNeedsWide =
@@ -7251,12 +7301,8 @@ static FailureOr<Value> materializeDmaM0FieldPlan(WaveAMDMachineSelector &S,
       failed(appendExpr(plan.fullAddressRemainderExpr, remainderNeedsWide)))
     return failure();
   if (plan.instOffset != 0)
-    dstAddr = S.addUniformBytes(loc, dstAddr,
-                                createImm(S.builder, loc, plan.instOffset));
-  Value m0Src = S.materializeSGPR1(op.getLoc(), dstAddr);
-  return Value{waveamdmachine::SMovM0Op::create(
-      S.builder, op.getLoc(), waveamdmachine::M0Type::get(op.getContext()),
-      m0Src)};
+    parts.push_back(createImm(S.builder, loc, plan.instOffset));
+  return materializeDmaM0Parts(S, loc, parts);
 }
 
 static FailureOr<Value> materializeDmaM0(WaveAMDMachineSelector &S,
