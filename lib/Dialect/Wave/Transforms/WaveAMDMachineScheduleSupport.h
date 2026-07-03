@@ -107,6 +107,21 @@ enum class PressureEvaluation {
   LazyHardCap,
 };
 
+enum class CandidateKind {
+  Other,
+  Original,
+  CriticalPath,
+  MemoryEarly,
+  IssueWindow,
+  LocalIssue,
+  CmaDmaPlacement,
+  SlicedCmaDmaPlacement,
+  ZeroPrefixSlicedCmaDmaPlacement,
+  BarrierPipeline,
+  BarrierMemoryPipeline,
+  BarrierPressureSlack,
+};
+
 struct CandidateRequest {
   SmallVector<unsigned, 16> order;
   StringRef fallbackReason;
@@ -118,6 +133,7 @@ struct EvaluatedCandidate {
   SmallVector<unsigned, 16> order;
   CandidateMetrics metrics;
   std::string name;
+  CandidateKind kind = CandidateKind::Other;
 };
 
 struct ScheduleDecision {

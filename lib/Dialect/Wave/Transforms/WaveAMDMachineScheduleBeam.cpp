@@ -809,7 +809,8 @@ void addGuidedBeamCandidates(SmallVectorImpl<OrderCandidate> &candidates,
     if (emitted >= kDefaultBeamSearchConfig.candidateLimit ||
         emitted >= std::size(kBeamNames))
       break;
-    candidates.push_back({result.order, kBeamNames[emitted].str()});
+    candidates.push_back(
+        {result.order, kBeamNames[emitted].str(), CandidateKind::Other});
     ++emitted;
   }
 }

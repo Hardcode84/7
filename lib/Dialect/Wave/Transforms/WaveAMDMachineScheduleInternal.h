@@ -51,6 +51,7 @@ enum class SchedulePolicy {
 struct OrderCandidate {
   SmallVector<unsigned, 16> order;
   std::string name;
+  CandidateKind kind = CandidateKind::Other;
 };
 
 GraphTables buildGraphTables(const ScheduleRegion &region,

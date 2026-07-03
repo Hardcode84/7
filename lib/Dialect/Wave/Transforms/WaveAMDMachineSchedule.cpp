@@ -132,6 +132,7 @@ struct BarrierPipelineStage {
 struct BarrierPipelineDescriptor {
   SmallVector<BarrierPipelineStage, 16> stages;
   StringRef name;
+  CandidateKind kind = CandidateKind::BarrierPipeline;
   bool preserveDsReadWriterOrder = false;
 };
 
@@ -675,10 +676,11 @@ static void appendStage(SmallVectorImpl<BarrierPipelineStage> &stages,
 
 static void appendMfmaMemoryDescriptor(
     SmallVectorImpl<BarrierPipelineDescriptor> &descriptors, StringRef name,
-    unsigned memoryMask, unsigned mfmaLead, unsigned memoryCount,
-    unsigned mfmaCount) {
+    CandidateKind kind, unsigned memoryMask, unsigned mfmaLead,
+    unsigned memoryCount, unsigned mfmaCount) {
   BarrierPipelineDescriptor descriptor;
   descriptor.name = name;
+  descriptor.kind = kind;
   appendStage(descriptor.stages, BPCBarrier, 1);
   appendStage(descriptor.stages, BPCMFMA, mfmaLead);
   appendStage(descriptor.stages, memoryMask, memoryCount);
@@ -695,14 +697,16 @@ appendDmaDescriptors(SmallVectorImpl<BarrierPipelineDescriptor> &descriptors,
     return;
 
   appendMfmaMemoryDescriptor(descriptors, "barrier_pipeline_mfma_lds_dma",
-                             BPCLdsDmaProducer, mfmaCount, producerCount,
-                             mfmaCount);
+                             CandidateKind::BarrierPipeline, BPCLdsDmaProducer,
+                             mfmaCount, producerCount, mfmaCount);
   appendMfmaMemoryDescriptor(
-      descriptors, "barrier_pipeline_mfma_lds_dma_split", BPCLdsDmaProducer,
+      descriptors, "barrier_pipeline_mfma_lds_dma_split",
+      CandidateKind::BarrierPipeline, BPCLdsDmaProducer,
       computeMfmaChunk(mfmaCount, countClass(classes, BPCLdsDma)),
       producerCount, mfmaCount);
   appendMfmaMemoryDescriptor(descriptors, "barrier_pipeline_lds_dma_mfma",
-                             BPCLdsDmaProducer, 0, producerCount, mfmaCount);
+                             CandidateKind::BarrierPipeline, BPCLdsDmaProducer,
+                             0, producerCount, mfmaCount);
 }
 
 static void appendDsReadMfmaDescriptor(
@@ -716,6 +720,7 @@ static void appendDsReadMfmaDescriptor(
 
   BarrierPipelineDescriptor descriptor;
   descriptor.name = "barrier_pipeline_ds_read_mfma";
+  descriptor.kind = CandidateKind::BarrierMemoryPipeline;
   appendStage(descriptor.stages, BPCBarrier, 1);
   unsigned seed = computeDsReadSeed(classes, metrics, arch);
   appendStage(descriptor.stages, BPCDSRead, seed);
@@ -741,6 +746,7 @@ static void appendWriteReadMfmaDescriptor(
 
   BarrierPipelineDescriptor descriptor;
   descriptor.name = "barrier_pipeline_write_read_mfma";
+  descriptor.kind = CandidateKind::BarrierMemoryPipeline;
   appendStage(descriptor.stages, BPCBarrier, 1);
   unsigned burst =
       std::max(1u, waveamdmachine::getEventSimCmaIssueCapacity(arch));
@@ -1023,12 +1029,14 @@ addLdsDmaAnchorCandidates(SmallVectorImpl<OrderCandidate> &candidates,
 
     OrderCandidate hoist;
     hoist.name = "barrier_pipeline_lds_dma_anchor_" + std::to_string(anchor);
+    hoist.kind = CandidateKind::BarrierPipeline;
     buildLdsDmaAnchorOrder(*window, region.ops.size(), anchor, hoist.order);
     appendUniqueCandidate(candidates, std::move(hoist));
 
     OrderCandidate split;
     split.name =
         "barrier_pipeline_lds_dma_post_compute_" + std::to_string(anchor);
+    split.kind = CandidateKind::BarrierPipeline;
     buildPostBarrierComputeOrder(*window, region.ops.size(), anchor,
                                  split.order);
     appendUniqueCandidate(candidates, std::move(split));
@@ -1036,6 +1044,7 @@ addLdsDmaAnchorCandidates(SmallVectorImpl<OrderCandidate> &candidates,
 
   OrderCandidate allCompute;
   allCompute.name = "barrier_pipeline_lds_dma_post_compute_all";
+  allCompute.kind = CandidateKind::BarrierPipeline;
   buildPostBarrierComputeOrder(*window, region.ops.size(), computeSize,
                                allCompute.order);
   appendUniqueCandidate(candidates, std::move(allCompute));
@@ -1107,6 +1116,7 @@ static void addBarrierDsReadPrefetchCandidate(
 
   OrderCandidate candidate;
   candidate.name = "barrier_pipeline_ds_read_prefetch";
+  candidate.kind = CandidateKind::BarrierPressureSlack;
   buildBarrierDsReadPrefetchOrder(*barrier, prefetched, classes.size(),
                                   candidate.order);
   appendUniqueCandidate(candidates, std::move(candidate));
@@ -1305,6 +1315,7 @@ addBarrierDsWriteHoistCandidate(SmallVectorImpl<OrderCandidate> &candidates,
 
     OrderCandidate candidate;
     candidate.name = "barrier_pipeline_ds_write_hoist";
+    candidate.kind = CandidateKind::BarrierPressureSlack;
     buildBarrierDsWriteHoistOrder(producerSlice, *burstBegin, *store,
                                   region.ops.size(), candidate.order);
     appendUniqueCandidate(candidates, std::move(candidate));
@@ -1337,7 +1348,8 @@ static SmallVector<OrderCandidate, 4> buildBarrierPipelineCandidates(
     return {};
 
   SmallVector<OrderCandidate, 4> candidates;
-  candidates.push_back({getIdentityOrder(region.ops.size()), "original"});
+  candidates.push_back({getIdentityOrder(region.ops.size()), "original",
+                        CandidateKind::Original});
   addBarrierDsWriteHoistCandidate(candidates, region, classes);
   if (!sawMfma)
     return candidates;
@@ -1349,6 +1361,7 @@ static SmallVector<OrderCandidate, 4> buildBarrierPipelineCandidates(
                                        enableMemoryPipelines)) {
     OrderCandidate candidate;
     candidate.name = descriptor.name.str();
+    candidate.kind = descriptor.kind;
     if (!buildBarrierPipelineOrder(tables, noInst, classes, descriptor,
                                    candidate.order))
       continue;

@@ -2625,11 +2625,13 @@ bool sameOrder(ArrayRef<unsigned> lhs, ArrayRef<unsigned> rhs) {
 }
 
 static void addPolicyCandidate(SmallVectorImpl<OrderCandidate> &candidates,
-                               StringRef name, const GraphTables &tables,
+                               StringRef name, CandidateKind kind,
+                               const GraphTables &tables,
                                ArrayRef<NodeMetrics> metrics,
                                SchedulePolicy policy) {
   OrderCandidate candidate;
   candidate.name = name.str();
+  candidate.kind = kind;
   if (!buildListOrder(tables, metrics, policy, candidate.order))
     return;
   for (const OrderCandidate &existing : candidates)
@@ -2653,6 +2655,7 @@ addCmaDmaPlacementCandidates(SmallVectorImpl<OrderCandidate> &candidates,
       OrderCandidate candidate;
       candidate.name =
           "cma_dma_place_" + std::to_string(window.cmaLeadCounts[index]);
+      candidate.kind = CandidateKind::CmaDmaPlacement;
       buildCmaDmaPlacementOrder(window, insertPos, metrics.size(),
                                 candidate.order);
       if (candidate.order.size() != metrics.size())
@@ -2699,6 +2702,9 @@ static void addSlicedCmaDmaPlacementCandidates(
       candidate.name = "cma_dma_place_sliced_p" + std::to_string(prefix) +
                        "_d" + std::to_string(window.slices.size()) + "_c" +
                        std::to_string(cmaIssues);
+      candidate.kind = prefix == 0
+                           ? CandidateKind::ZeroPrefixSlicedCmaDmaPlacement
+                           : CandidateKind::SlicedCmaDmaPlacement;
       buildSlicedCmaDmaPlacementOrder(window, prefix, metrics.size(),
                                       candidate.order);
       appendUniqueCandidate(candidates, std::move(candidate), metrics.size());
@@ -2715,6 +2721,7 @@ static void addIssueWindowCandidate(SmallVectorImpl<OrderCandidate> &candidates,
 
   OrderCandidate candidate;
   candidate.name = "issue_window";
+  candidate.kind = CandidateKind::IssueWindow;
   if (!buildIssueWindowOrder(tables, metrics, candidate.order))
     return;
   for (const OrderCandidate &existing : candidates)
@@ -2735,6 +2742,7 @@ addLocalIssueCandidate(SmallVectorImpl<OrderCandidate> &candidates,
 
   OrderCandidate candidate;
   candidate.name = "local_issue";
+  candidate.kind = CandidateKind::LocalIssue;
   if (!buildLocalIssueOrder(region, tables, metrics, arch, modelConfig,
                             candidate.order))
     return;
@@ -2794,16 +2802,17 @@ buildScheduleCandidates(const ScheduleRegion &region,
   SmallVector<OrderCandidate, 4> candidates;
   OrderCandidate original;
   original.name = "original";
+  original.kind = CandidateKind::Original;
   original.order = getOriginalOrder(region);
   candidates.push_back(std::move(original));
 
   GraphTables tables = buildGraphTables(region, graph);
   SmallVector<NodeMetrics, 16> metrics =
       computeNodeMetrics(region, tables, arch, modelConfig);
-  addPolicyCandidate(candidates, "critical_path", tables, metrics,
-                     SchedulePolicy::CriticalPath);
-  addPolicyCandidate(candidates, "memory_early", tables, metrics,
-                     SchedulePolicy::MemoryEarly);
+  addPolicyCandidate(candidates, "critical_path", CandidateKind::CriticalPath,
+                     tables, metrics, SchedulePolicy::CriticalPath);
+  addPolicyCandidate(candidates, "memory_early", CandidateKind::MemoryEarly,
+                     tables, metrics, SchedulePolicy::MemoryEarly);
   addIssueWindowCandidate(candidates, tables, metrics);
   addLocalIssueCandidate(candidates, region, tables, metrics, arch,
                          modelConfig);
@@ -2875,7 +2884,7 @@ static bool computeCandidatePressure(
 
 static bool usesIssueWindowTie(const EvaluatedCandidate &candidate) {
   static constexpr unsigned kMinIssueWindowTieOps = 128;
-  return candidate.name == "issue_window" &&
+  return candidate.kind == CandidateKind::IssueWindow &&
          (candidate.metrics.originalCycleDelta < 0 ||
           candidate.order.size() >= kMinIssueWindowTieOps);
 }
@@ -2893,43 +2902,36 @@ compareCriticalPressure(const EvaluatedCandidate &candidate,
   return std::nullopt;
 }
 
-static bool isCmaDmaPlacementName(StringRef name) {
-  return name.starts_with("cma_dma_place_");
+static bool isCmaDmaPlacementKind(CandidateKind kind) {
+  return kind == CandidateKind::CmaDmaPlacement ||
+         kind == CandidateKind::SlicedCmaDmaPlacement ||
+         kind == CandidateKind::ZeroPrefixSlicedCmaDmaPlacement;
 }
 
-static bool isSlicedCmaDmaPlacementName(StringRef name) {
-  return name.starts_with("cma_dma_place_sliced_p");
+static bool isSlicedCmaDmaPlacementKind(CandidateKind kind) {
+  return kind == CandidateKind::SlicedCmaDmaPlacement ||
+         kind == CandidateKind::ZeroPrefixSlicedCmaDmaPlacement;
 }
 
-static bool isZeroPrefixSlicedCmaDmaPlacementName(StringRef name) {
-  return name.starts_with("cma_dma_place_sliced_p0_");
+static bool isBarrierPipelineKind(CandidateKind kind) {
+  return kind == CandidateKind::BarrierPipeline ||
+         kind == CandidateKind::BarrierMemoryPipeline ||
+         kind == CandidateKind::BarrierPressureSlack;
 }
 
-static bool isBarrierPipelineName(StringRef name) {
-  return name.starts_with("barrier_pipeline_");
-}
-
-static bool isBarrierMemoryPipelineName(StringRef name) {
-  return name == "barrier_pipeline_ds_read_mfma" ||
-         name == "barrier_pipeline_write_read_mfma" ||
-         name == "barrier_pipeline_write_read_ds_mfma" ||
-         name == "barrier_pipeline_ds_read_prefetch" ||
-         name == "barrier_pipeline_ds_write_hoist";
-}
-
-static bool isBarrierPressureSlackName(StringRef name) {
-  return name == "barrier_pipeline_ds_read_prefetch" ||
-         name == "barrier_pipeline_ds_write_hoist";
+static bool isBarrierMemoryPipelineKind(CandidateKind kind) {
+  return kind == CandidateKind::BarrierMemoryPipeline ||
+         kind == CandidateKind::BarrierPressureSlack;
 }
 
 static bool isCmaDmaPlacementCandidate(const EvaluatedCandidate &candidate) {
-  return isCmaDmaPlacementName(candidate.name);
+  return isCmaDmaPlacementKind(candidate.kind);
 }
 
 static bool
 isCounterBurstPlacementCandidate(const EvaluatedCandidate &candidate) {
   return isCmaDmaPlacementCandidate(candidate) ||
-         isBarrierPipelineName(candidate.name);
+         isBarrierPipelineKind(candidate.kind);
 }
 
 static bool comparableOverflowCandidate(const EvaluatedCandidate &candidate,
@@ -2964,8 +2966,8 @@ comparePressureViability(const EvaluatedCandidate &candidate,
     return candidateViable;
   if (!candidateViable) {
     static constexpr int64_t kBarrierPressureSlack = 16;
-    bool candidateSlack = isBarrierPressureSlackName(candidate.name);
-    bool bestSlack = isBarrierPressureSlackName(best.name);
+    bool candidateSlack = candidate.kind == CandidateKind::BarrierPressureSlack;
+    bool bestSlack = best.kind == CandidateKind::BarrierPressureSlack;
     if (candidateSlack != bestSlack && candidate.metrics.pressure.supported &&
         best.metrics.pressure.supported) {
       const EvaluatedCandidate &slack = candidateSlack ? candidate : best;
@@ -2985,12 +2987,11 @@ comparePressureViability(const EvaluatedCandidate &candidate,
 }
 
 static int resourceTiePriority(const EvaluatedCandidate &candidate) {
-  StringRef name(candidate.name);
-  if (isBarrierMemoryPipelineName(name))
+  if (isBarrierMemoryPipelineKind(candidate.kind))
     return 3;
-  if (isCmaDmaPlacementName(name))
+  if (isCmaDmaPlacementCandidate(candidate))
     return 2;
-  if (isBarrierPipelineName(name))
+  if (isBarrierPipelineKind(candidate.kind))
     return 1;
   if (usesIssueWindowTie(candidate))
     return 1;
@@ -3049,10 +3050,11 @@ sameCounterBurstAdjustedEligible(const EvaluatedCandidate &candidate,
 
 static bool counterBurstEligible(const EvaluatedCandidate &candidate,
                                  const EvaluatedCandidate &original) {
-  if (candidate.name == "original" || original.metrics.counterBurstCycles == 0)
+  if (candidate.kind == CandidateKind::Original ||
+      original.metrics.counterBurstCycles == 0)
     return true;
   bool isPlacement = isCounterBurstPlacementCandidate(candidate);
-  if (isBarrierPipelineName(candidate.name))
+  if (isBarrierPipelineKind(candidate.kind))
     return true;
   if (hasLowerCounterBurst(candidate, original))
     return lowerCounterBurstEligible(candidate, isPlacement);
@@ -3096,15 +3098,14 @@ compareCounterNeutralPlacement(const EvaluatedCandidate &candidate,
 static std::optional<bool>
 compareSlicedCmaDmaRawTie(const EvaluatedCandidate &candidate,
                           const EvaluatedCandidate &best) {
-  StringRef candidateName(candidate.name);
-  StringRef bestName(best.name);
-  if (!isSlicedCmaDmaPlacementName(candidateName) ||
-      !isSlicedCmaDmaPlacementName(bestName))
+  if (!isSlicedCmaDmaPlacementKind(candidate.kind) ||
+      !isSlicedCmaDmaPlacementKind(best.kind))
     return std::nullopt;
   if (rawScheduleCycles(candidate) != rawScheduleCycles(best))
     return std::nullopt;
-  bool candidateZero = isZeroPrefixSlicedCmaDmaPlacementName(candidateName);
-  bool bestZero = isZeroPrefixSlicedCmaDmaPlacementName(bestName);
+  bool candidateZero =
+      candidate.kind == CandidateKind::ZeroPrefixSlicedCmaDmaPlacement;
+  bool bestZero = best.kind == CandidateKind::ZeroPrefixSlicedCmaDmaPlacement;
   if (candidateZero != bestZero)
     return !candidateZero;
   return std::nullopt;
@@ -3329,14 +3330,14 @@ static void appendEvaluatedCandidates(
     CandidateMetrics metrics = evaluateOrderCandidate(
         region, graph, candidate, archResolution, modelConfig, budgets,
         pressureEvaluation, safePressureUpperBound, pressureRegionContext);
-    if (!originalCycles && candidate.name == "original" &&
+    if (!originalCycles && candidate.kind == CandidateKind::Original &&
         metrics.score.supported)
       originalCycles = metrics.score.cycles;
     if (originalCycles && metrics.score.supported)
       metrics.originalCycleDelta = metrics.score.cycles - *originalCycles;
     metrics.orderDisplacement = computeOrderDisplacement(candidate.order);
     decision.candidates.push_back(
-        {candidate.order, std::move(metrics), candidate.name});
+        {candidate.order, std::move(metrics), candidate.name, candidate.kind});
   }
 }
 
@@ -3353,7 +3354,7 @@ ScheduleDecision evaluateScheduleCandidates(
     decision.candidates.push_back(
         {getOriginalOrder(region),
          makeUnsupportedCandidateMetrics(archResolution.fallbackReason),
-         "original"});
+         "original", CandidateKind::Original});
     return decision;
   }
 
@@ -3391,7 +3392,7 @@ ScheduleDecision evaluateScheduleOrderCandidates(
     decision.candidates.push_back(
         {getOriginalOrder(region),
          makeUnsupportedCandidateMetrics(archResolution.fallbackReason),
-         "original"});
+         "original", CandidateKind::Original});
     return decision;
   }
 
