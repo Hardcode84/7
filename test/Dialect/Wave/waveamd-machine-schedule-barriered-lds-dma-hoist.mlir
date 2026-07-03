@@ -321,6 +321,73 @@ func.func @wait_barrier_post_ds_tuple_mfma(
 // -----
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
+func.func @barriered_ds_read_prefetch_second_barrier(
+    %a: !waveamdmachine.reg<vgpr, 4>,
+    %b: !waveamdmachine.reg<vgpr, 4>,
+    %acc: !waveamdmachine.reg<vgpr, 4>,
+    %addr0: !waveamdmachine.reg<vgpr, 1>,
+    %addr1: !waveamdmachine.reg<vgpr, 1>,
+    %scale: !waveamdmachine.reg<vgpr, 1>,
+    %tok0: !waveamdmachine.mem.token,
+    %tok1: !waveamdmachine.mem.token) {
+  %first = waveamdmachine.s_barrier %tok0
+      : (!waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+  %store = waveamdmachine.ds_store_b32 %addr1, %scale after %tok1 offset 5952
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+         !waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+  %second = waveamdmachine.s_barrier %store
+      : (!waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+  %ld0, %t0 = waveamdmachine.ds_read_tr_b64_b8 %addr0 after %first offset 3904
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+        -> (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.mem.token)
+  %ld1, %t1 = waveamdmachine.ds_read_tr_b64_b8 %addr0 after %first offset 4032
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+        -> (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.mem.token)
+  %join = waveamdmachine.token_join %t0, %t1
+      : (!waveamdmachine.mem.token, !waveamdmachine.mem.token)
+        -> !waveamdmachine.mem.token
+  %ld2, %t2 = waveamdmachine.ds_read_tr_b64_b8 %addr1 after %second offset 5952
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+        -> (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.mem.token)
+  %s0:2 = waveamdmachine.tuple_to_elements %ld0
+      : (!waveamdmachine.reg<vgpr, 2>)
+        -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+  %s2:2 = waveamdmachine.tuple_to_elements %ld2
+      : (!waveamdmachine.reg<vgpr, 2>)
+        -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+  %c0 = waveamdmachine.mfma_scale_f32_16x16x128_f4_f4
+      %a, %b, %acc, %s2#0, %s0#0
+      : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
+         !waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 1>,
+         !waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 4>
+  %c1 = waveamdmachine.mfma_scale_f32_16x16x128_f4_f4
+      %a, %b, %c0, %s2#0, %s0#0
+      : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
+         !waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 1>,
+         !waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 4>
+  return
+}
+}
+
+// APPLY-LABEL: func.func @barriered_ds_read_prefetch_second_barrier
+// APPLY: [[FIRST:%.*]] = waveamdmachine.s_barrier
+// APPLY-NEXT: [[STORE:%.*]] = waveamdmachine.ds_store_b32
+// APPLY-NEXT: [[LD0:%.*]], [[T0:%.*]] = waveamdmachine.ds_read_tr_b64_b8 {{.*}} after [[FIRST]] offset 3904
+// APPLY-NEXT: [[LD1:%.*]], [[T1:%.*]] = waveamdmachine.ds_read_tr_b64_b8 {{.*}} after [[FIRST]] offset 4032
+// APPLY-NEXT: [[SECOND:%.*]] = waveamdmachine.s_barrier [[STORE]]
+// APPLY: [[LD2:%.*]], [[T2:%.*]] = waveamdmachine.ds_read_tr_b64_b8 {{.*}} after [[SECOND]] offset 5952
+
+// NOHOIST-LABEL: func.func @barriered_ds_read_prefetch_second_barrier
+// NOHOIST: [[FIRST:%.*]] = waveamdmachine.s_barrier
+// NOHOIST-NEXT: [[STORE:%.*]] = waveamdmachine.ds_store_b32
+// NOHOIST-NEXT: [[SECOND:%.*]] = waveamdmachine.s_barrier [[STORE]]
+// NOHOIST-NEXT: [[LD0:%.*]], [[T0:%.*]] = waveamdmachine.ds_read_tr_b64_b8 {{.*}} after [[FIRST]] offset 3904
+// NOHOIST-NEXT: [[LD1:%.*]], [[T1:%.*]] = waveamdmachine.ds_read_tr_b64_b8 {{.*}} after [[FIRST]] offset 4032
+// NOHOIST: [[LD2:%.*]], [[T2:%.*]] = waveamdmachine.ds_read_tr_b64_b8 {{.*}} after [[SECOND]] offset 5952
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 func.func @barriered_loop_carried_memory_consumer(
     %lhs_init: !waveamdmachine.reg<vgpr, 4>,
     %rhs_init: !waveamdmachine.reg<vgpr, 4>,

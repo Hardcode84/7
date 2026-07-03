@@ -2912,7 +2912,12 @@ static bool isBarrierPipelineName(StringRef name) {
 static bool isBarrierMemoryPipelineName(StringRef name) {
   return name == "barrier_pipeline_ds_read_mfma" ||
          name == "barrier_pipeline_write_read_mfma" ||
-         name == "barrier_pipeline_write_read_ds_mfma";
+         name == "barrier_pipeline_write_read_ds_mfma" ||
+         name == "barrier_pipeline_ds_read_prefetch";
+}
+
+static bool isBarrierDsReadPrefetchName(StringRef name) {
+  return name == "barrier_pipeline_ds_read_prefetch";
 }
 
 static bool isCmaDmaPlacementCandidate(const EvaluatedCandidate &candidate) {
@@ -2955,8 +2960,27 @@ comparePressureViability(const EvaluatedCandidate &candidate,
   bool bestViable = isPressureViable(best, budgets);
   if (candidateViable != bestViable)
     return candidateViable;
-  if (!candidateViable)
+  if (!candidateViable) {
+    static constexpr int64_t kPrefetchPressureSlack = 16;
+    bool candidatePrefetch = isBarrierDsReadPrefetchName(candidate.name);
+    bool bestPrefetch = isBarrierDsReadPrefetchName(best.name);
+    if (candidatePrefetch != bestPrefetch &&
+        candidate.metrics.pressure.supported &&
+        best.metrics.pressure.supported) {
+      const EvaluatedCandidate &prefetch = candidatePrefetch ? candidate : best;
+      const EvaluatedCandidate &other = candidatePrefetch ? best : candidate;
+      bool prefetchTooHigh =
+          getHardExcess(prefetch.metrics.pressure) >
+              getHardExcess(other.metrics.pressure) + kPrefetchPressureSlack ||
+          getCriticalExcess(prefetch.metrics.pressure) >
+              getCriticalExcess(other.metrics.pressure) +
+                  kPrefetchPressureSlack;
+      if (prefetchTooHigh)
+        return !candidatePrefetch;
+      return std::nullopt;
+    }
     return compareEqualOverflow(candidate, best);
+  }
   return std::nullopt;
 }
 

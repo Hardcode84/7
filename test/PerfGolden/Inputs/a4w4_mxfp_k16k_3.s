@@ -959,10 +959,10 @@ _a4w4_kernel:
 		s_barrier
 		s_waitcnt vmcnt(16)
 		ds_write_b32 v58, v57 offset:5952
-		s_waitcnt lgkmcnt(0)
-		s_barrier
 		ds_read_b64_tr_b8 v[50:51], v53 offset:3904
 		ds_read_b64_tr_b8 v[70:71], v53 offset:4032
+		s_waitcnt lgkmcnt(2)
+		s_barrier
 		ds_read_b64_tr_b8 v[56:57], v15 offset:5952
 		s_add_i32 m0, s18, 0x18b80
 		s_nop 0

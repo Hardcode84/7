@@ -1026,6 +1026,77 @@ addLdsDmaAnchorCandidates(SmallVectorImpl<OrderCandidate> &candidates,
   appendUniqueCandidate(candidates, std::move(allCompute));
 }
 
+static bool hasClassInRange(ArrayRef<unsigned> classes, unsigned begin,
+                            unsigned end, unsigned mask) {
+  for (unsigned index = begin; index < end; ++index)
+    if (hasPipelineClass(classes[index], mask))
+      return true;
+  return false;
+}
+
+static void buildBarrierDsReadPrefetchOrder(unsigned barrier,
+                                            ArrayRef<unsigned> prefetched,
+                                            unsigned regionSize,
+                                            SmallVectorImpl<unsigned> &order) {
+  appendIndexRange(order, 0, barrier);
+  order.append(prefetched.begin(), prefetched.end());
+  order.push_back(barrier);
+  for (unsigned index = barrier + 1; index < regionSize; ++index)
+    if (!llvm::is_contained(prefetched, index))
+      order.push_back(index);
+}
+
+static bool canPrefetchBeforeBarrier(unsigned node, unsigned barrier,
+                                     const DependenceGraph &graph,
+                                     ArrayRef<unsigned> prefetched) {
+  for (const ScheduleEdge &edge : graph.edges) {
+    if (edge.recurrence || edge.dst != node)
+      continue;
+    if (edge.src < barrier || llvm::is_contained(prefetched, edge.src))
+      continue;
+    return false;
+  }
+  return true;
+}
+
+static bool hasBarrierDsReadPrefetchShape(ArrayRef<unsigned> classes,
+                                          unsigned barrier) {
+  if (barrier == 0 || barrier + 1 >= classes.size())
+    return false;
+  if (!hasClassInRange(classes, 0, barrier, BPCDSWrite | BPCVMemRead))
+    return false;
+  return hasClassInRange(classes, barrier + 1, classes.size(), BPCMFMA);
+}
+
+static void addBarrierDsReadPrefetchCandidate(
+    SmallVectorImpl<OrderCandidate> &candidates, ArrayRef<unsigned> classes,
+    const DependenceGraph &graph, const waveamdmachine::ArchData &arch) {
+  std::optional<unsigned> barrier = findSingleBarrierClass(classes);
+  if (!barrier || !hasBarrierDsReadPrefetchShape(classes, *barrier))
+    return;
+
+  unsigned burst =
+      std::max(1u, waveamdmachine::getEventSimCmaIssueCapacity(arch));
+  SmallVector<unsigned, 4> prefetched;
+  for (unsigned index = *barrier + 1; index < classes.size(); ++index) {
+    if (!hasPipelineClass(classes[index], BPCDSRead))
+      continue;
+    if (!canPrefetchBeforeBarrier(index, *barrier, graph, prefetched))
+      continue;
+    prefetched.push_back(index);
+    if (prefetched.size() >= burst)
+      break;
+  }
+  if (prefetched.empty())
+    return;
+
+  OrderCandidate candidate;
+  candidate.name = "barrier_pipeline_ds_read_prefetch";
+  buildBarrierDsReadPrefetchOrder(*barrier, prefetched, classes.size(),
+                                  candidate.order);
+  appendUniqueCandidate(candidates, std::move(candidate));
+}
+
 static SmallVector<OrderCandidate, 4> buildBarrierPipelineCandidates(
     const ScheduleRegion &region, const DependenceGraph &graph,
     const waveamdmachine::ArchData &arch,
@@ -1054,6 +1125,7 @@ static SmallVector<OrderCandidate, 4> buildBarrierPipelineCandidates(
   SmallVector<OrderCandidate, 4> candidates;
   candidates.push_back({getIdentityOrder(region.ops.size()), "original"});
   addLdsDmaAnchorCandidates(candidates, region, classes);
+  addBarrierDsReadPrefetchCandidate(candidates, classes, graph, arch);
   for (const BarrierPipelineDescriptor &descriptor :
        buildBarrierPipelineDescriptors(classes, metrics, arch,
                                        enableMemoryPipelines)) {
