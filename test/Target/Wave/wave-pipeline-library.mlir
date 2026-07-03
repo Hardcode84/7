@@ -87,11 +87,16 @@
 // PIPELINE-NEXT: transform.apply_registered_pass "waveamd-metadata"
 // PIPELINE: transform.named_sequence @waveamd_backend_finish_transform_regalloc
 // PIPELINE: transform.apply_registered_pass "waveamd-clear-regalloc-assignments"
-// PIPELINE: transform.apply_registered_pass "waveamd-preserve-hw-regs"
-// PIPELINE: transform.apply_registered_pass "canonicalize"
-// PIPELINE: transform.apply_registered_pass "cse"
-// PIPELINE: transform.include @waveamd_regalloc_transform_loop
-// PIPELINE: transform.include @waveamd_backend_post_regalloc
+// PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
+// PIPELINE-NEXT: transform.apply_registered_pass "waveamd-preserve-hw-regs"
+// PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
+// PIPELINE-NEXT: transform.apply_registered_pass "canonicalize"
+// PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
+// PIPELINE-NEXT: transform.apply_registered_pass "cse"
+// PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
+// PIPELINE-NEXT: transform.include @waveamd_regalloc_transform_loop
+// PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
+// PIPELINE-NEXT: transform.include @waveamd_backend_post_regalloc
 // PIPELINE: transform.named_sequence @waveamd_backend_finish
 // PIPELINE: transform.include @waveamd_backend_finish_transform_regalloc
 // PIPELINE: transform.named_sequence @waveamd_regalloc_transform_loop
