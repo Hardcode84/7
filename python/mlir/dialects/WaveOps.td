@@ -10,5 +10,6 @@
 #define PYTHON_BINDINGS_WAVE_OPS
 
 include "mlir/Dialect/Wave/IR/WaveOps.td"
+include "mlir/Dialect/Wave/IR/WaveTransformOps.td"
 
 #endif

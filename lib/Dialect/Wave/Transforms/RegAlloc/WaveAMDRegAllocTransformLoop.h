@@ -28,6 +28,9 @@ LogicalResult runRegAllocTransformAGPRRelief(Operation *target,
 LogicalResult runRegAllocTransformRematRelief(Operation *target,
                                               Builder &builder);
 
+LogicalResult runRegAllocTransformSGPRToVGPRRelief(Operation *target,
+                                                   Builder &builder);
+
 LogicalResult runRegAllocTransformLDSRelief(Operation *target,
                                             Builder &builder);
 

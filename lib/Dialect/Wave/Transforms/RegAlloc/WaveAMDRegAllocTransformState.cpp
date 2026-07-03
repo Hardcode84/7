@@ -33,6 +33,8 @@ static constexpr StringLiteral kRegAllocMetadataAGPR =
     "wave.regalloc.agpr.dwords";
 static constexpr StringLiteral kRegAllocMetadataRemat =
     "wave.regalloc.remat.dwords";
+static constexpr StringLiteral kRegAllocMetadataSGPRToVGPR =
+    "wave.regalloc.sgpr_to_vgpr.dwords";
 static constexpr StringLiteral kRegAllocMetadataLDS =
     "wave.regalloc.lds.dwords";
 static constexpr StringLiteral kRegAllocMetadataScratch =
@@ -680,9 +682,10 @@ LogicalResult setRegAllocTransformLoopIteration(Operation *target,
 }
 
 static ArrayRef<StringRef> getRegAllocMetadataNames() {
-  static const std::array<StringRef, 5> names = {
+  static const std::array<StringRef, 6> names = {
       kRegAllocMetadataIterations, kRegAllocMetadataAGPR,
-      kRegAllocMetadataRemat, kRegAllocMetadataLDS, kRegAllocMetadataScratch};
+      kRegAllocMetadataRemat,      kRegAllocMetadataSGPRToVGPR,
+      kRegAllocMetadataLDS,        kRegAllocMetadataScratch};
   return names;
 }
 
@@ -691,6 +694,8 @@ static StringRef getRegAllocProviderMetadataName(StringRef provider) {
     return kRegAllocMetadataAGPR;
   if (provider == "remat")
     return kRegAllocMetadataRemat;
+  if (provider == "sgpr_to_vgpr")
+    return kRegAllocMetadataSGPRToVGPR;
   if (provider == "lds")
     return kRegAllocMetadataLDS;
   if (provider == "scratch")
@@ -793,18 +798,22 @@ static LogicalResult finalizeFuncRegAllocMetadata(func::FuncOp func,
       getRegAllocMetadataCounter(func, kRegAllocMetadataAGPR);
   FailureOr<int64_t> remat =
       getRegAllocMetadataCounter(func, kRegAllocMetadataRemat);
+  FailureOr<int64_t> sgprToVGPR =
+      getRegAllocMetadataCounter(func, kRegAllocMetadataSGPRToVGPR);
   FailureOr<int64_t> lds =
       getRegAllocMetadataCounter(func, kRegAllocMetadataLDS);
   FailureOr<int64_t> scratch =
       getRegAllocMetadataCounter(func, kRegAllocMetadataScratch);
-  if (failed(agpr) || failed(remat) || failed(lds) || failed(scratch))
+  if (failed(agpr) || failed(remat) || failed(sgprToVGPR) || failed(lds) ||
+      failed(scratch))
     return failure();
   if (failed(clearFuncRegAllocMetadata(func, builder)))
     return failure();
-  std::array<RegAllocMetadataCounter, 5> counters = {{
+  std::array<RegAllocMetadataCounter, 6> counters = {{
       {kRegAllocMetadataIterations, iterations},
       {kRegAllocMetadataAGPR, *agpr},
       {kRegAllocMetadataRemat, *remat},
+      {kRegAllocMetadataSGPRToVGPR, *sgprToVGPR},
       {kRegAllocMetadataLDS, *lds},
       {kRegAllocMetadataScratch, *scratch},
   }};

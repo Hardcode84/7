@@ -222,6 +222,25 @@ def Wave_TransformRegAllocRematReliefOp
   }];
 }
 
+def Wave_TransformRegAllocSGPRToVGPRReliefOp
+    : Op<Wave_Dialect, "transform.regalloc_sgpr_to_vgpr_relief", [
+        DeclareOpInterfaceMethods<MemoryEffectsOpInterface>,
+        DeclareOpInterfaceMethods<TransformOpInterface>]> {
+  let summary = "Rewrite one SGPR pressure candidate through VGPR storage";
+  let description = [{
+    Consumes a linear-scan SGPR pressure failure state. If an overlapping SGPR
+    alias set can be promoted, rewrites that set through VGPR storage, inserts
+    scalar read bridges for remaining SGPR-only uses, and clears regalloc state
+    so the outer regalloc loop restarts. If no candidate is legal, leaves the
+    failure state unchanged.
+  }];
+  let arguments = (ins TransformHandleTypeInterface:$target);
+  let results = (outs TransformHandleTypeInterface:$result);
+  let assemblyFormat = [{
+    `from` $target attr-dict `:` functional-type($target, $result)
+  }];
+}
+
 def Wave_TransformRegAllocLDSReliefOp
     : Op<Wave_Dialect, "transform.regalloc_lds_relief", [
         DeclareOpInterfaceMethods<MemoryEffectsOpInterface>,

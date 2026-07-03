@@ -2723,6 +2723,7 @@ amdhsa.kernels:
     wave.regalloc.iterations: 100
     wave.regalloc.agpr.dwords: 390
     wave.regalloc.remat.dwords: 0
+    wave.regalloc.sgpr_to_vgpr.dwords: 0
     wave.regalloc.lds.dwords: 0
     wave.regalloc.scratch.dwords: 0
 amdhsa.target:   amdgcn-amd-amdhsa--gfx950

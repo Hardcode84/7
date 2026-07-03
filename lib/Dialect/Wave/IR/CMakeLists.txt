@@ -12,6 +12,7 @@ add_mlir_dialect_library(MLIRWaveDialect
   ../Transforms/RegAlloc/WaveAMDRegAllocAGPRRelief.cpp
   ../Transforms/RegAlloc/WaveAMDRegAllocLDSRelief.cpp
   ../Transforms/RegAlloc/WaveAMDRegAllocRematRelief.cpp
+  ../Transforms/RegAlloc/WaveAMDRegAllocSGPRToVGPRRelief.cpp
   ../Transforms/RegAlloc/WaveAMDRegAllocScratchRelief.cpp
   ../Transforms/RegAlloc/WaveAMDRegAllocTransformLoop.cpp
   ../Transforms/RegAlloc/WaveAMDRegAllocTransformState.cpp

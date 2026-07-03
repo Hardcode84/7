@@ -358,6 +358,30 @@ void wave::TransformRegAllocRematReliefOp::getEffects(
   transform::modifiesPayload(effects);
 }
 
+DiagnosedSilenceableFailure wave::TransformRegAllocSGPRToVGPRReliefOp::apply(
+    transform::TransformRewriter &rewriter,
+    transform::TransformResults &results, transform::TransformState &state) {
+  TimingScope timing =
+      getRegAllocStageTimingScope("regalloc_sgpr_to_vgpr_relief");
+  SmallVector<Operation *> targets;
+  Builder builder(getContext());
+  for (Operation *target : state.getPayloadOps(getTarget())) {
+    targets.push_back(target);
+    if (failed(wave::runRegAllocTransformSGPRToVGPRRelief(target, builder)))
+      return emitDefiniteFailure()
+             << "failed to run regalloc SGPR to VGPR relief";
+  }
+  results.set(cast<OpResult>(getResult()), targets);
+  return DiagnosedSilenceableFailure::success();
+}
+
+void wave::TransformRegAllocSGPRToVGPRReliefOp::getEffects(
+    SmallVectorImpl<MemoryEffects::EffectInstance> &effects) {
+  transform::consumesHandle(getTargetMutable(), effects);
+  transform::producesHandle(getOperation()->getOpResults(), effects);
+  transform::modifiesPayload(effects);
+}
+
 DiagnosedSilenceableFailure wave::TransformRegAllocLDSReliefOp::apply(
     transform::TransformRewriter &rewriter,
     transform::TransformResults &results, transform::TransformState &state) {

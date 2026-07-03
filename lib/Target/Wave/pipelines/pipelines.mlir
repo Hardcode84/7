@@ -175,11 +175,13 @@ module attributes {transform.with_named_sequence} {
         : (!transform.any_op) -> !transform.any_op
     %r3 = wave.transform.regalloc_remat_relief from %r2
         : (!transform.any_op) -> !transform.any_op
-    %r4 = wave.transform.regalloc_lds_relief from %r3
+    %r4 = wave.transform.regalloc_sgpr_to_vgpr_relief from %r3
         : (!transform.any_op) -> !transform.any_op
-    %r5 = wave.transform.regalloc_scratch_relief from %r4
+    %r5 = wave.transform.regalloc_lds_relief from %r4
         : (!transform.any_op) -> !transform.any_op
-    transform.yield %r5 : !transform.any_op
+    %r6 = wave.transform.regalloc_scratch_relief from %r5
+        : (!transform.any_op) -> !transform.any_op
+    transform.yield %r6 : !transform.any_op
   }
 
   transform.named_sequence @waveamd_backend_unscheduled(
