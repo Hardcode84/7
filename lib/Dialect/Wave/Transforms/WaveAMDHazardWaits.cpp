@@ -38,6 +38,7 @@
 #include <optional>
 
 namespace mlir::wave {
+#define GEN_PASS_DEF_WAVEAMDHAZARDREPAIR
 #define GEN_PASS_DEF_WAVEAMDHAZARDWAITS
 #include "mlir/Dialect/Wave/Transforms/Passes.h.inc"
 } // namespace mlir::wave
@@ -132,9 +133,10 @@ static void insertNoops(OpBuilder &builder, Location loc, unsigned count,
 }
 
 static FailureOr<std::unique_ptr<llvm::MCSubtargetInfo>>
-createSubtargetInfo(Operation *op) {
+createSubtargetInfo(Operation *op,
+                    StringRef passName = "waveamd-insert-hazard-waits") {
   FailureOr<waveamdmachine::AMDGPUTarget> target =
-      waveamdmachine::getAMDGPUTarget(op, "waveamd-insert-hazard-waits");
+      waveamdmachine::getAMDGPUTarget(op, passName);
   if (failed(target))
     return failure();
 
@@ -217,6 +219,33 @@ struct HazardConfig {
   unsigned valuWriteExecMfmaLatency;
   unsigned transForwardingWaitStates;
 };
+
+static HazardConfig makeHazardConfig(const llvm::MCSubtargetInfo &sti) {
+  llvm::AMDGPU::IsaVersion isaVersion =
+      llvm::AMDGPU::getIsaVersion(sti.getCPU());
+  return HazardConfig{
+      /*hasDelayAlu=*/llvm::AMDGPU::isGFX11Plus(sti),
+      /*lgkmWaitNeedsValuGap=*/!isCDNA4Family(isaVersion),
+      /*hasTransForwardingHazard=*/
+      isCDNA3Family(isaVersion) || isCDNA4Family(isaVersion),
+      /*isaVersion=*/isaVersion,
+      /*defaultLgkmcnt=*/
+      llvm::AMDGPU::decodeLgkmcnt(isaVersion,
+                                  llvm::AMDGPU::getWaitcntBitMask(isaVersion)),
+      /*valuDep1=*/
+      amdgpu_compat::SDelayAlu::encode(
+          amdgpu_compat::SDelayAlu::DelayType::VALU, 1),
+      /*m0PipelineDelay=*/1,
+      /*valuWriteVGPRMfmaLatency=*/getValuWriteVGPRMfmaLatency(),
+      /*valuWriteVGPRReadlaneLatency=*/
+      getValuWriteVGPRReadlaneLatency(isaVersion),
+      /*valuWriteSGPRValuReadLatency=*/
+      getValuWriteSGPRValuReadLatency(isaVersion),
+      /*valuWriteSGPRVmemReadLatency=*/getValuWriteSGPRVmemReadLatency(),
+      /*valuWriteExecMfmaLatency=*/getValuWriteExecMfmaLatency(isaVersion),
+      /*transForwardingWaitStates=*/1,
+  };
+}
 
 // Insert `count` `s_nop`s right before `op`.
 static void insertSNopMitigation(Operation &op, unsigned count, OpBuilder &b,
@@ -1002,6 +1031,202 @@ static bool needsValuMitigation(Operation *op, const HazardState &state) {
   return state.lgkmToValu && op->hasTrait<OpTrait::waveamdmachine::VALUOp>();
 }
 
+using HazardWaitMap = DenseMap<Operation *, unsigned>;
+
+static unsigned getRequiredMitigation(Operation *op, HazardState &state,
+                                      const HazardConfig &cfg) {
+  unsigned count = 0;
+  unsigned wait = std::max(getRequiredSsaWait(op, state),
+                           getRequiredPhysicalWait(op, state, cfg));
+  if (wait) {
+    count += wait;
+    advanceHazards(state, wait);
+  }
+  if (needsValuMitigation(op, state)) {
+    ++count;
+    advanceHazards(state);
+  }
+  return count;
+}
+
+static HazardWaitMap computeBlockHazardWaits(Block &block,
+                                             const HazardConfig &cfg) {
+  HazardState state;
+  HazardWaitMap waits;
+  for (Operation &op : block) {
+    unsigned wait = getRequiredMitigation(&op, state, cfg);
+    if (wait)
+      waits[&op] = wait;
+    transferHazards(&op, state, cfg);
+  }
+  return waits;
+}
+
+static bool touchesBlockedSingletonReg(Operation *op) {
+  if (llvm::any_of(op->getOperands(), [](Value value) {
+        return wave::getHardwareResourceForValue(value).has_value();
+      }))
+    return true;
+  return llvm::any_of(op->getResults(), [](Value value) {
+    std::optional<wave::HardwareResourceKind> kind =
+        wave::getHardwareResourceForValue(value);
+    if (!kind)
+      return false;
+    return *kind != wave::HardwareResourceKind::SCC || !value.use_empty();
+  });
+}
+
+static bool isRepairCandidate(Operation *op) {
+  if (emitsNoMachineInst(*op) || !isPure(op) || isMFMA(op))
+    return false;
+  if (!op->hasTrait<OpTrait::waveamdmachine::VALUOp>() &&
+      !op->hasTrait<OpTrait::waveamdmachine::SALUOp>())
+    return false;
+  return !touchesBlockedSingletonReg(op);
+}
+
+static bool operandsAvailableBefore(Operation *candidate,
+                                    Operation *insertBefore) {
+  for (Value operand : candidate->getOperands()) {
+    Operation *def = operand.getDefiningOp();
+    if (!def || def->getBlock() != candidate->getBlock())
+      continue;
+    if (!def->isBeforeInBlock(insertBefore))
+      return false;
+  }
+  return true;
+}
+
+static Operation *getAncestorInBlock(Operation *op, Block *block) {
+  for (Operation *ancestor = op; ancestor; ancestor = ancestor->getParentOp())
+    if (ancestor->getBlock() == block)
+      return ancestor;
+  return nullptr;
+}
+
+static bool resultsRemainAvailableBefore(Operation *candidate,
+                                         Operation *insertBefore) {
+  for (Value result : candidate->getResults()) {
+    for (Operation *user : result.getUsers()) {
+      Operation *ancestor = getAncestorInBlock(user, candidate->getBlock());
+      if (!ancestor)
+        continue;
+      if (ancestor->isBeforeInBlock(insertBefore))
+        return false;
+    }
+  }
+  return true;
+}
+
+static bool hazardsDoNotWorsen(const HazardWaitMap &oldWaits,
+                               const HazardWaitMap &newWaits) {
+  for (auto [op, wait] : newWaits)
+    if (wait > oldWaits.lookup(op))
+      return false;
+  return true;
+}
+
+static unsigned sumHazardWaits(const HazardWaitMap &waits) {
+  unsigned total = 0;
+  for (const auto &entry : waits)
+    total += entry.second;
+  return total;
+}
+
+static bool hasCloserHazard(Operation *candidate, Operation *target,
+                            const HazardWaitMap &waits) {
+  if (target->isBeforeInBlock(candidate)) {
+    for (Operation *op = candidate->getPrevNode(); op && op != target;
+         op = op->getPrevNode())
+      if (waits.lookup(op))
+        return true;
+    return false;
+  }
+  for (Operation *op = candidate->getNextNode(); op && op != target;
+       op = op->getNextNode())
+    if (waits.lookup(op))
+      return true;
+  return false;
+}
+
+static void restoreCandidatePosition(Operation *candidate,
+                                     Operation *restoreBefore,
+                                     Operation *restoreAfter, Block *block) {
+  if (restoreBefore)
+    candidate->moveBefore(restoreBefore);
+  else if (restoreAfter)
+    candidate->moveAfter(restoreAfter);
+  else
+    candidate->moveBefore(block, block->end());
+}
+
+static bool tryMoveRepairCandidate(Operation *candidate, Operation *target,
+                                   const HazardWaitMap &oldWaits,
+                                   const HazardConfig &cfg) {
+  if (candidate->getBlock() != target->getBlock())
+    return false;
+  if (candidate == target)
+    return false;
+  if (hasCloserHazard(candidate, target, oldWaits))
+    return false;
+  if (!operandsAvailableBefore(candidate, target))
+    return false;
+  if (!resultsRemainAvailableBefore(candidate, target))
+    return false;
+
+  Block *block = candidate->getBlock();
+  Operation *restoreBefore = candidate->getNextNode();
+  Operation *restoreAfter = candidate->getPrevNode();
+  unsigned oldTargetWait = oldWaits.lookup(target);
+  candidate->moveBefore(target);
+
+  HazardWaitMap newWaits = computeBlockHazardWaits(*block, cfg);
+  bool accept = newWaits.lookup(target) < oldTargetWait &&
+                newWaits.lookup(candidate) == 0 &&
+                hazardsDoNotWorsen(oldWaits, newWaits);
+  if (!accept)
+    restoreCandidatePosition(candidate, restoreBefore, restoreAfter, block);
+  return accept;
+}
+
+static bool repairBlock(Block &block, const HazardConfig &cfg) {
+  bool changed = false;
+  unsigned moves = 0;
+  unsigned maxMoves = sumHazardWaits(computeBlockHazardWaits(block, cfg));
+  bool progress = true;
+  while (progress) {
+    progress = false;
+    SmallVector<Operation *, 16> candidates;
+    SmallVector<Operation *, 16> ops;
+    for (Operation &op : block) {
+      if (isRepairCandidate(&op))
+        candidates.push_back(&op);
+      ops.push_back(&op);
+    }
+
+    HazardWaitMap waits = computeBlockHazardWaits(block, cfg);
+    for (Operation *op : ops) {
+      if (!waits.lookup(op))
+        continue;
+      for (Operation *candidate : candidates) {
+        if (!tryMoveRepairCandidate(candidate, op, waits, cfg))
+          continue;
+        changed = true;
+        progress = true;
+        if (++moves > maxMoves) {
+          block.getParentOp()->emitWarning(
+              "waveamd-hazard-repair did not converge");
+          return changed;
+        }
+        break;
+      }
+      if (progress)
+        break;
+    }
+  }
+  return changed;
+}
+
 class HazardAnalysis : public DenseForwardDataFlowAnalysis<HazardLattice> {
 public:
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(HazardAnalysis)
@@ -1067,6 +1292,20 @@ public:
   const HazardConfig &cfg;
 };
 
+struct WaveAMDHazardRepairPass
+    : public wave::impl::WaveAMDHazardRepairBase<WaveAMDHazardRepairPass> {
+  void runOnOperation() override {
+    Operation *root = getOperation();
+    FailureOr<std::unique_ptr<llvm::MCSubtargetInfo>> sti =
+        createSubtargetInfo(root, "waveamd-hazard-repair");
+    if (failed(sti))
+      return signalPassFailure();
+
+    HazardConfig cfg = makeHazardConfig(**sti);
+    root->walk([&](Block *block) { (void)repairBlock(*block, cfg); });
+  }
+};
+
 struct WaveAMDHazardWaitsPass
     : public wave::impl::WaveAMDHazardWaitsBase<WaveAMDHazardWaitsPass> {
   void runOnOperation() override {
@@ -1076,30 +1315,7 @@ struct WaveAMDHazardWaitsPass
         createSubtargetInfo(root);
     if (failed(sti))
       return signalPassFailure();
-    llvm::AMDGPU::IsaVersion isaVersion =
-        llvm::AMDGPU::getIsaVersion((*sti)->getCPU());
-    HazardConfig cfg{
-        /*hasDelayAlu=*/llvm::AMDGPU::isGFX11Plus(**sti),
-        /*lgkmWaitNeedsValuGap=*/!isCDNA4Family(isaVersion),
-        /*hasTransForwardingHazard=*/
-        isCDNA3Family(isaVersion) || isCDNA4Family(isaVersion),
-        /*isaVersion=*/isaVersion,
-        /*defaultLgkmcnt=*/
-        llvm::AMDGPU::decodeLgkmcnt(
-            isaVersion, llvm::AMDGPU::getWaitcntBitMask(isaVersion)),
-        /*valuDep1=*/
-        amdgpu_compat::SDelayAlu::encode(
-            amdgpu_compat::SDelayAlu::DelayType::VALU, 1),
-        /*m0PipelineDelay=*/1,
-        /*valuWriteVGPRMfmaLatency=*/getValuWriteVGPRMfmaLatency(),
-        /*valuWriteVGPRReadlaneLatency=*/
-        getValuWriteVGPRReadlaneLatency(isaVersion),
-        /*valuWriteSGPRValuReadLatency=*/
-        getValuWriteSGPRValuReadLatency(isaVersion),
-        /*valuWriteSGPRVmemReadLatency=*/getValuWriteSGPRVmemReadLatency(),
-        /*valuWriteExecMfmaLatency=*/getValuWriteExecMfmaLatency(isaVersion),
-        /*transForwardingWaitStates=*/1,
-    };
+    HazardConfig cfg = makeHazardConfig(**sti);
     SmallVector<func::FuncOp> kernels;
     root->walk([&](func::FuncOp f) {
       if (!f.isExternal())

@@ -841,10 +841,9 @@ _a4w4_kernel:
 		s_nop 0
 		buffer_load_dwordx4 v25, s[24:27], 0 offen lds
 		s_add_i32 m0, s18, 0x7380
-		s_nop 0
-		buffer_load_dwordx4 v23, s[24:27], 0 offen lds
 		s_add_u32 s28, s4, s15
 		s_addc_u32 s29, s5, 0
+		buffer_load_dwordx4 v23, s[24:27], 0 offen lds
 		s_add_i32 m0, s18, 0x107c0
 		s_nop 0
 		buffer_load_dwordx4 v30, s[28:31], 0 offen lds
@@ -852,16 +851,14 @@ _a4w4_kernel:
 		s_nop 0
 		buffer_load_dwordx4 v33, s[28:31], 0 offen lds
 		s_add_i32 m0, s18, 0x128c0
-		s_nop 0
-		buffer_load_dwordx4 v34, s[28:31], 0 offen lds
-		s_add_i32 m0, s18, 0x13940
-		s_nop 0
-		buffer_load_dwordx4 v32, s[28:31], 0 offen lds
-		s_add_u32 s36, s8, s19
-		s_addc_u32 s37, s9, 0
-		buffer_load_dwordx2 v[74:75], v48, s[36:39], 0 offen
 		s_add_u32 s40, s10, s20
 		s_addc_u32 s41, s11, 0
+		buffer_load_dwordx4 v34, s[28:31], 0 offen lds
+		s_add_i32 m0, s18, 0x13940
+		s_add_u32 s36, s8, s19
+		s_addc_u32 s37, s9, 0
+		buffer_load_dwordx4 v32, s[28:31], 0 offen lds
+		buffer_load_dwordx2 v[74:75], v48, s[36:39], 0 offen
 		buffer_load_dword v49, v52, s[40:43], 0 offen
 		s_waitcnt lgkmcnt(0)
 		v_mfma_scale_f32_16x16x128_f8f6f4 v[196:199], a[64:67], a[0:3], v[196:199], v50, v70 op_sel_hi:[0,0,0] cbsz:4 blgp:4
@@ -1091,7 +1088,7 @@ _a4w4_kernel:
 		s_nop 0
 		buffer_load_dwordx4 v12, s[28:31], 0 offen lds
 		s_add_i32 m0, s18, 0x17b20
-		s_nop 0
+		s_add_i32 s1, s1, 2
 		buffer_load_dwordx4 v9, s[28:31], 0 offen lds
 		buffer_load_dwordx2 v[60:61], v29, s[36:39], 0 offen
 		buffer_load_dword v57, v31, s[40:43], 0 offen
@@ -1198,23 +1195,18 @@ _a4w4_kernel:
 		ds_read_b64_tr_b8 v[72:73], v53 offset:4032
 		ds_read_b64_tr_b8 v[50:51], v15 offset:5952
 		s_add_i32 m0, s18, 0x1cd60
-		s_nop 0
+		s_add_i32 s20, s20, s17
 		buffer_load_dwordx4 v46, s[28:31], 0 offen lds
 		s_add_i32 m0, s18, 0x1dde0
-		s_nop 0
+		s_add_i32 s19, s19, s14
 		buffer_load_dwordx4 v27, s[28:31], 0 offen lds
 		s_add_i32 m0, s18, 0x1ee60
-		s_nop 0
+		s_add_i32 s15, s15, 0x100
 		buffer_load_dwordx4 v28, s[28:31], 0 offen lds
 		s_add_i32 m0, s18, 0x1fee0
-		s_nop 0
+		s_add_i32 s0, s0, 0x100
 		buffer_load_dwordx4 v26, s[28:31], 0 offen lds
 		buffer_load_dword v62, v47, s[40:43], 0 offen
-		s_add_i32 s0, s0, 0x100
-		s_add_i32 s15, s15, 0x100
-		s_add_i32 s19, s19, s14
-		s_add_i32 s20, s20, s17
-		s_add_i32 s1, s1, 2
 		s_cmp_lt_i32 s1, 62
 		s_cbranch_scc1 .L_a4w4_kernel.loop_head_0
 .L_a4w4_kernel.loop_exit_0:

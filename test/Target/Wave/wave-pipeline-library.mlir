@@ -122,6 +122,8 @@
 // PIPELINE: transform.named_sequence @waveamd_backend
 // PIPELINE: transform.apply_registered_pass "waveamd-mma-reuse-preschedule"
 // PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
+// PIPELINE-NEXT: transform.apply_registered_pass "waveamd-hazard-repair"
+// PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
 // PIPELINE-NEXT: transform.apply_registered_pass "waveamd-machine-schedule"
 // PIPELINE-NEXT: options = { "apply-schedule" = true,
 // PIPELINE-NEXT: "pressure-aware-selection" = true,

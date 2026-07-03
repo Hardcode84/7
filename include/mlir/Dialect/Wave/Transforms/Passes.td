@@ -244,6 +244,20 @@ def WaveAMDHazardWaits
   ];
 }
 
+def WaveAMDHazardRepair
+    : Pass<"waveamd-hazard-repair"> {
+  let summary = "Move VALU/SALU fillers into local hazard gaps";
+  let description = [{
+    Runs before model scheduling. Scans each block and moves pure VALU/SALU ops
+    into hazard gaps when SSA dominance holds and the move does not introduce a
+    new or larger hazard elsewhere in the block. Fillers with singleton
+    operands or live singleton results are left in place.
+  }];
+  let dependentDialects = [
+    "waveamdmachine::WaveAMDMachineDialect"
+  ];
+}
+
 def WaveAMDDecomposeMemTuples
     : Pass<"waveamd-decompose-mem-tuples"> {
   let summary = "Decompose tuple memory ops into wide chunk memory ops";
